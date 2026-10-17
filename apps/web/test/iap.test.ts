@@ -65,6 +65,16 @@ describe("verifyIapJwt", () => {
     await expect401(verifyIapJwt(signJwt(attacker), TEST_AUDIENCE, deps));
   });
 
+  it("rejects a header that is not ES256 (alg none, HS256, RS256) before looking at the keys", async () => {
+    const { deps } = fakeDeps([key]);
+    const [, payload, signature] = signJwt(key).split(".");
+    for (const alg of ["none", "HS256", "RS256"]) {
+      const header = Buffer.from(JSON.stringify({ alg, typ: "JWT", kid: key.kid })).toString("base64url");
+      await expect401(verifyIapJwt(`${header}.${payload}.${alg === "none" ? "" : signature}`, TEST_AUDIENCE, deps));
+    }
+    expect(deps.calls).toBe(0);
+  });
+
   it("rejects a token without email, and one without sub", async () => {
     const { deps } = fakeDeps([key]);
     await expect401(verifyIapJwt(signJwt(key, { email: undefined }), TEST_AUDIENCE, deps));

@@ -141,6 +141,13 @@ describe("admin flow", () => {
     expect(await body(res)).toEqual({ error: "You cannot remove the last admin." });
   });
 
+  it("DELETE of an unknown email is 204 (no-op)", async () => {
+    as(ADMIN);
+    const res = await DELETE(new Request(url, { method: "DELETE" }), ctx("ghost@opptra.com"));
+    expect(res.status).toBe(204);
+    expect((await db.select().from(users)).map((u) => u.email).sort()).toEqual([OPERATOR, ADMIN].sort());
+  });
+
   it("PATCH of an unknown email is 404 Person not found and creates nothing", async () => {
     as(ADMIN);
     const res = await PATCH(json("PATCH", { role: "operator" }), ctx("ghost@opptra.com"));
