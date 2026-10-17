@@ -1,6 +1,7 @@
-// Cloud Run job entry (catalog-migrate): apply migrations, then exit. 03 adds the SEED_ADMIN_EMAIL seed here.
+// Cloud Run job entry (catalog-migrate): apply migrations, seed the first admin (spec 03), then exit.
 import { closeDb, getDb } from "@catalog/core/db/client";
 import { resolveMigrationsFolder, runMigrations } from "@catalog/core/db/migrate";
+import { seedAdmin } from "@catalog/core/people";
 import { defaultMigrationsDir } from "./runtime";
 
 async function main(): Promise<void> {
@@ -9,6 +10,9 @@ async function main(): Promise<void> {
   console.log(`migrate: applying migrations from ${folder}`);
   await runMigrations(getDb(), folder);
   console.log("migrate: migrations applied");
+  const adminEmail = process.env.SEED_ADMIN_EMAIL?.trim() || "sujan@opptra.com";
+  const inserted = await seedAdmin(getDb(), adminEmail);
+  console.log(`migrate: admin ${adminEmail.toLowerCase()} ${inserted ? "seeded" : "already present (left unchanged)"}`);
 }
 
 main()

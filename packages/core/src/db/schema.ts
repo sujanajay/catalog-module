@@ -36,6 +36,7 @@ import {
   POLICY_SOURCES,
   PRODUCT_TYPES,
   QA_MODES,
+  ROLES,
   UPLOAD_KINDS,
   type BatchCost,
   type BatchCounts,
@@ -43,6 +44,7 @@ import {
   type ChannelId,
   type OutputFlag,
   type ProductType,
+  type Role,
 } from "../catalog/types";
 
 // ---------------------------------------------------------------------------
@@ -124,6 +126,22 @@ function enumCheck(table: string, column: string, col: AnyPgColumn, values: read
 // ---------------------------------------------------------------------------
 // Tables
 // ---------------------------------------------------------------------------
+
+/**
+ * People and their roles (spec 03). Emails are stored lowercased (people.ts lowercases every input).
+ * The migrate job seeds the first admin; any other verified account gets a viewer row on first sign-in.
+ */
+export const users = pgTable(
+  "users",
+  {
+    email: text("email").primaryKey(),
+    role: text("role", { enum: ROLES }).$type<Role>().notNull(),
+    addedBy: text("added_by").notNull(),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (t) => [enumCheck("users", "role", t.role, ROLES)],
+);
 
 export const brandMaster = pgTable(
   "brand_master",
@@ -548,6 +566,7 @@ export const spendDays = pgTable(
 // Row types
 // ---------------------------------------------------------------------------
 
+export type UserRow = typeof users.$inferSelect;
 export type BrandMasterRow = typeof brandMaster.$inferSelect;
 export type SkuMapRow = typeof skuMap.$inferSelect;
 export type ModelPolicyRow = typeof modelPolicy.$inferSelect;
