@@ -35,9 +35,16 @@ configuration. Access is by Google sign-in with three roles (admin, operator, vi
   Python `services/matting`). Code from the earlier app is lifted and adapted, never imported as a package.
 - Same GCP project `image-links-agent`, `asia-south1`; shared resources (`ila-pg`, `ila-vpc`, Artifact
   Registry `apps`, bucket `image-links-agent-assets`, secret `openrouter-api-key`) are reused, never deleted.
-- Google sign-in (Auth.js, Google provider) with roles `admin | operator | viewer`. `sujan@opptra.com` is
-  seeded as admin; every other verified `@opptra.com` account becomes a viewer on first sign-in; admins
-  promote people in the People modal. No IAP.
+- Google sign-in through Cloud Run IAP (`gcloud run deploy --iap`, Google-managed OAuth client, so no
+  console step and no OAuth client of ours) with `domain:opptra.com` granted `roles/iap.httpsResourceAccessor`;
+  the app verifies the IAP JWT and applies roles `admin | operator | viewer` from its `users` table.
+  `sujan@opptra.com` is seeded as admin; every other `@opptra.com` account becomes a viewer on first
+  sign-in; admins promote people in the People modal. The owner adds the operator (Naaz) himself.
+- Closed by the owner: Styli rejections carry no size-versus-softness information; the rule is to follow
+  the Styli guideline sheet (no Styli-only `MAX_UPSCALE`; `sr_pass` stays an optional bake-off
+  experiment). Licence: any open-weight model may be used for this internal tool regardless of
+  non-commercial terms, so NC models (`bria-rmbg` and others) are full candidates and may become
+  policy defaults; the licence table stays as a record.
 - Product identity and overwrite: the product (brand + style+colour identifier) owns its public images.
   Opptra SKU ids are attributes, never part of a link. A re-upload overwrites in place and deletes the
   shots the new upload no longer has. Batches are events; product state is the truth. Marketplaces keep
@@ -395,8 +402,9 @@ Rules for all sources:
 
 Throughput: 20 CPU instances at 6 s give 12,000 images per hour (4,800 at 15 s); one L4 at 0.4 s gives
 9,000 per hour, three give 27,000. Every model's licence is recorded in `services/matting/README.md` and
-in the bake-off report; every NC slot has a permissive fallback measured in the same bake-off, so an NC
-choice is a quality choice with a recorded alternative, never a dependency (licence posture in spec 08).
+in the bake-off report as a record. The owner has decided that any open-weight model may be used for
+this internal tool regardless of non-commercial terms, so NC models are full candidates and may be policy
+defaults; the winner is chosen on quality alone (spec 08 section 4.10).
 
 Send size per model (`SEND_LONG_SIDE_PX`, read from `/healthz` `inputSize`): 1024 for every rembg
 built-in (rembg resizes BiRefNet and RMBG sessions to 1024 internally, so a larger send buys nothing),
@@ -456,10 +464,15 @@ flood-fill fallback with flag `fallback_matte` and status `needs_attention` inst
 
 ## Roles and access (defined in spec 03)
 
-- Sign-in: Auth.js (`next-auth@beta`) Google provider with `hd: "opptra.com"`; the `signIn` callback
-  accepts only `email_verified === true`, `hd === "opptra.com"` and an `@opptra.com` address. JWT session,
-  no adapter. `apps/web/middleware.ts` redirects anyone not signed in to `/signin`. Env `AUTH_SECRET`,
-  `AUTH_GOOGLE_ID`, `AUTH_GOOGLE_SECRET`, `AUTH_TRUST_HOST=true`, `AUTH_URL`, `ALLOWED_HOSTED_DOMAIN`.
+- Sign-in: Cloud Run IAP on `catalog-web` (`--iap`, private service, Google-managed OAuth client; the
+  IAP service agent holds `roles/run.invoker`, `domain:opptra.com` holds `roles/iap.httpsResourceAccessor`,
+  all granted by `bootstrap.sh` and `deploy.sh`, no console step). Google's own sign-in page; accounts
+  outside Opptra get IAP's "You don't have access" page. The app verifies the `x-goog-iap-jwt-assertion`
+  JWT (`google-auth-library`, issuer `https://cloud.google.com/iap`, audience
+  `/projects/<project-number>/locations/asia-south1/services/catalog-web`) in `apps/web/lib/iap.ts`
+  and checks the email ends in `@opptra.com`; the plain email header is never trusted. No sign-in page,
+  no middleware, no auth cookie or secret of ours. "Sign out" goes to `/?gcp-iap-mode=CLEAR_LOGIN_COOKIE`.
+  Env `IAP_AUDIENCE`, `ALLOWED_HOSTED_DOMAIN`; local dev `SKIP_IAP=1` with `DEV_USER_EMAIL`.
 - Table `users(email pk, role admin|operator|viewer, added_by, created_at, updated_at)`. Seed
   `sujan@opptra.com` as `admin` (`added_by = "seed"`, `SEED_ADMIN_EMAIL`). First sign-in of any other
   verified `@opptra.com` account inserts `viewer` (`added_by = "sign-in"`). Removing a person deletes the
@@ -572,7 +585,7 @@ Test tiers (spec 00 defines them; each spec names which apply; all run before me
    Docker against the real sets; outputs under `catalog-test/`; compliance must pass 100%; the overwrite
    contract is asserted (same URLs, new generation, 404 on a removed link, `change` values, events).
 4. Human-like browser (Playwright on the deployed `WEB_URL`): `apps/web/test/human/login.ts` opens the
-   site headed, the tester signs in with Google once and the session is saved with
+   site headed, the tester signs in on Google's IAP page once and the session is saved with
    `context.storageState({ path: ".playwright/auth-state.json" })`; `catalog.human.spec.ts` uses that
    state with `recordVideo`. Script: create a batch for USPA with a zip and a pasted Supabase link list,
    tick Noon and Styli, start, wait, open "Needs attention", "Use as is" on one photo, "Remove this photo"
@@ -692,7 +705,7 @@ channels; outputs with a matching `render_key` skipped; publish per product; mat
 `--max-concurrent-dispatches=20 --max-attempts=5 --min-backoff=10s`. esbuild entries `index`, `migrate`,
 `catalog-local`, `catalog-smoke`, `catalog-eval`, `catalog-load`, `catalog-recheck`, `catalog-qa-check`.
 
-Web (`apps/web`, Next.js 15, React 19, Auth.js): pages `/signin`, `/catalog`, `/catalog/new`,
+Web (`apps/web`, Next.js 15, React 19, behind IAP): pages `/catalog`, `/catalog/new`,
 `/catalog/[id]`, `/catalog/brands/[slug]`, `/catalog/products/[brand]/[key]`; API under `/api/catalog/*`
 (batches, uploads, links, ingest, detected, preview, start, export, attention, outputs decision and
 replacement, sku-map, eval-labels, brand products and export, product aliases and delete) and `/api/people`;
@@ -703,13 +716,15 @@ Infra (`infra/bootstrap.sh`, `infra/deploy.sh`, idempotent, `export CLOUDSDK_COR
 reused shared resources `ila-vpc`, `ila-subnet`, Cloud SQL `ila-pg` (db-f1-micro, private IP), Artifact
 Registry `apps`, bucket `image-links-agent-assets`, secret `openrouter-api-key`; the earlier `ila-web` and
 `ila-worker` services are left alone. New: database `catalog` and user `catalog_app` (secret
-`catalog-db-password`); secrets `catalog-auth-secret`, `catalog-google-client-id`,
-`catalog-google-client-secret` (containers by the script, the Google ones filled by the human after creating
-the OAuth client; nothing printed); public bucket with uniform access, `allUsers` -> `roles/storage.objectViewer`,
+`catalog-db-password`); IAP: API enabled, IAP service agent created, `roles/run.invoker` for the agent at
+project level (no OAuth client, brand or auth secret; nothing printed); public bucket with uniform access,
+`allUsers` -> `roles/storage.objectViewer`,
 versioning; queue `catalog`; service accounts `catalog-web@`, `catalog-worker@`, `catalog-matting@`;
 Scheduler jobs `catalog-sync-master` (nightly) and `catalog-sweep` (every 30 minutes, builder constant);
 APIs Sheets, Drive, BigQuery, Scheduler plus the Cloud Run, Tasks, SQL, Secret Manager, Artifact Registry
-and Cloud Build set. Cloud Run: `catalog-web` (public ingress, the app enforces sign-in), `catalog-worker`
+and Cloud Build set. Cloud Run: `catalog-web` (private, `--iap`; `deploy.sh` grants `domain:opptra.com`
+`roles/iap.httpsResourceAccessor` at resource level, or at project level with a WARN if denied, and sets
+`IAP_AUDIENCE`), `catalog-worker`
 (private), `catalog-matting` (private, asia-south1, `--cpu=4 --concurrency=1 --min-instances=0
 --max-instances=20 --timeout=300`, 16 GiB or lazy-load with an LRU of two sessions; the builder decides
 and records it in the README), `catalog-matting-gpu` (private, asia-southeast1, `--gpu=1
@@ -762,8 +777,8 @@ always-on resources.
 
 - All specs merged and deployed; an operator can run a batch for any brand from the UI without help; the
   human-like browser test passes on the deployed URL and its recording is in the hand-over.
-- Google sign-in works for `@opptra.com`; the admin has added the operator's account as `operator` in the
-  People modal; viewers see everything and can change nothing.
+- Google sign-in works for `@opptra.com` with no console step; the owner (admin) has added the operator
+  (Naaz) as `operator` in the People modal himself; viewers see everything and can change nothing.
 - Every output in the links sheet is verified live and compliant; every batch shown as Ready has "Links
   verified" and "Independent re-check" complete; a filled product list is delivered whenever a workbook
   was uploaded; nothing is dropped silently; the report lists every exception, every removed link and
@@ -786,7 +801,8 @@ always-on resources.
 - No deletion outside a product's own prefix on the batch's channels and `catalog-test/`; no deletion of
   raw, exports or `eval/`.
 - No model names or technical settings in the operator UI.
-- No IAP; access is Google sign-in with roles.
+- No sign-in library, OAuth client or auth cookie of ours; access is Google sign-in through Cloud Run IAP,
+  roles come from the `users` table.
 - No photo-shoot, template, gallery or prompt features from the earlier app.
 
 ## Open points (defaults apply; none block)
@@ -805,6 +821,9 @@ always-on resources.
    `roles/storage.objectAdmin` on the public bucket for `catalog-worker@` only.
 6. Whether `catalog-worker@` can read what the operator shared with `catalog-web@`; spec 04 settles how
    one shared address is enough, with a documented fallback if not.
-7. Whether Styli rejected the earlier footwear set for size or for softness (a question to the operator,
-   recorded in the spec 08 and 09 reports). If Styli accepts a 2.9x Lanczos resize of a clean 800 px
-   source, `MAX_UPSCALE` is raised for Styli only and the `sr_pass` experiment is dropped.
+7. Whether `roles/iap.httpsResourceAccessor` can be granted at the `catalog-web` resource level with the
+   operator's roles; fallback is the project-level grant for `domain:opptra.com` (spec 03), which also
+   opens the earlier `ila-web` to every Opptra account and is noted in `docs/solutions/catalog-iap.md`.
+
+Closed by the owner (recorded in the decisions log): the Styli size-versus-softness question (follow the
+guideline sheet; no Styli-only `MAX_UPSCALE`) and the licence posture (NC models are full candidates).

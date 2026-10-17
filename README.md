@@ -50,15 +50,16 @@ applies.
   `image-links-agent-public` holds the links.
 - The earlier `ila-web` and `ila-worker` Cloud Run services are not touched. The new services are
   `catalog-web`, `catalog-worker` and `catalog-matting`.
-- Sign-in is Google sign-in inside the app (Auth.js) for `@opptra.com` accounts, with roles
-  admin, operator and viewer. There is no IAP.
+- Sign-in is Google sign-in through Cloud Run IAP (Google-managed OAuth client, every
+  `@opptra.com` account admitted, no console step); the app verifies the IAP JWT and applies roles
+  admin, operator and viewer from its own `users` table.
 - The operator's gcloud default project is a different one; every script pins
   `CLOUDSDK_CORE_PROJECT=image-links-agent` and never changes global gcloud config.
 
 ## Repository layout (planned)
 
 ```
-apps/web/           Next.js 15 app: sign-in, wizard, batch, product and brand pages, People modal
+apps/web/           Next.js 15 app behind IAP: wizard, batch, product and brand pages, People modal
 apps/worker/        Node 20 worker: ingest, matte, render, QA, publish, finalize, sync, sweep
 packages/core/      shared code: channels, naming, storage, schema, tasks, sheet writers
 services/matting/   Python matting service (catalog-matting)

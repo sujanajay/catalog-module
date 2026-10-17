@@ -576,11 +576,13 @@ Reached from the brand name on the batch list and batch page.
 - Cost card "Cost so far": "INR <x> per style across all batches · agency reference INR 60 per style".
 - A list "Batches" of this brand's batches with the same columns and pills as the batch list.
 
-### Sign-in page `/signin`
+### Sign-in page `/signin` (superseded by IAP, not built)
 
-Centred card: logo "Opptra", heading "Catalog images", one button "Sign in with Google". After a
-Google account outside opptra.com is used, the card shows the sentence "Use your @opptra.com Google
-account." above the button. Nothing else on the page.
+The prototype shows a centred card: logo "Opptra", heading "Catalog images", one button "Sign in
+with Google", and after a Google account outside opptra.com is used, the sentence "Use your
+@opptra.com Google account." above the button. Spec 03 puts Google's own IAP sign-in page in front
+of the app instead, so this card is not built; the sentence survives as the app's 403 text for a
+non-Opptra identity. See 03 "UI".
 
 ### 403 for viewers
 

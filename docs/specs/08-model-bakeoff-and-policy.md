@@ -65,8 +65,8 @@ In scope
   at the end if none meets the gates.
 - `model_policy` rows per (brand, category) with `matte_target`, applied at batch start by 07's
   `resolvePolicy`; re-evaluation triggers.
-- Licence registry per model in `services/matting/README.md` and in the bake-off report, and the
-  licence posture paragraph for the owner's decision (section 4.10).
+- Licence registry per model in `services/matting/README.md` and in the bake-off report (section
+  4.10; a record, not a decision input: the owner has closed the licence question).
 - Cloud Run job `catalog-eval` to run the CLI where the OpenRouter secret and Cloud SQL are
   reachable.
 - The rule and its test: no model name reaches the operator.
@@ -225,10 +225,11 @@ Refinement experiments (hard cases only, through `experiment`):
   then x4plus, then SwinIR-L real-world x4, each downscaled with Lanczos to the exact factor
   needed. Outputs carry flag `upscaled` (attention required) and are judged with the added
   question "are logos, text and fabric texture unchanged from the original". The owner decides per
-  channel from the contact sheet. The default path keeps Lanczos only and `MAX_UPSCALE = 1.5`.
-  Open question to the operator, recorded here and in 09's final report: did Styli reject the
-  earlier set for size or for softness? If Styli accepts a 2.9x Lanczos of a clean 800 px source,
-  `MAX_UPSCALE` is raised for Styli only and the experiment is dropped.
+  channel from the contact sheet. The default path keeps Lanczos only and `MAX_UPSCALE = 1.5` for
+  every channel. Closed by the owner: Styli's rejections of the earlier set carry no information on
+  size versus softness; the rule is simply to follow the Styli guideline sheet (`channels.ts`), so
+  there is no Styli-only `MAX_UPSCALE` and nothing to ask the operator. The experiment stays
+  optional: it runs when `MATTING_GPU_URL` is set and is skipped with "not run" otherwise.
 - Low priority, only if time allows after the above: a depth map (Depth Anything V2 Small or
   DA3-SMALL, both Apache-2.0) to shape the synthesised contact shadow; IC-Light applied to the
   shadow layer alone with a colour-delta guard on the product pixels. Neither touches the default
@@ -236,8 +237,8 @@ Refinement experiments (hard cases only, through `experiment`):
 
 Dropped, with reasons: MODNet and MatteFormer (superseded by the BiRefNet family), SAM 3 (SAM
 License terms, see section 4.10), IC-Light V2 (no downloadable weights), SUPIR and SeedVR2
-(generative restorers; product pixels must not change), 4x-UltraSharp (non-commercial variant and
-no advantage over Real-ESRGAN or SwinIR).
+(generative restorers; product pixels must not change), 4x-UltraSharp (no advantage over
+Real-ESRGAN or SwinIR; its licence is not the reason, see section 4.10).
 
 Where each candidate runs: the CPU service `catalog-matting` lists the rembg built-ins
 (`MATTE_MODELS` default `birefnet-general,birefnet-general-lite,birefnet-hrsod,bria-rmbg`) plus
@@ -402,7 +403,14 @@ Licence per candidate, recorded in `services/matting/README.md` and in the bake-
 | SwinIR | Apache-2.0 |
 | SeedVR2 (dropped, generative) | Apache-2.0 |
 
-Licence posture (for the owner's decision)
+Owner's decision (closed): for this internal tool any open-weight model may be used regardless of
+non-commercial terms. NC models (`bria-rmbg`, `rmbg-1.4`, the NC Depth Anything variants and any
+other) are full candidates, are ranked on quality alone and may be written to `model_policy` as
+defaults. No candidate is excluded, down-weighted or flagged for its licence, and no licence review
+step remains in the build order, test plan, done criteria or report. The paragraph below is kept as
+a record of the posture that was considered.
+
+Licence posture (record only)
 
 CC BY-NC 4.0 (RMBG-2.0, Depth Anything V2 Base/Large, DA3 Large/Giant, 4x-UltraSharp's NC-SA
 variant) permits copying, adapting and using the work for any purpose that is not "primarily intended
@@ -417,11 +425,11 @@ License is not non-commercial; its restrictions are ITAR, military, sanctions an
 Meta's right to change terms and an indemnity. Apache-2.0, MIT and BSD-3 (BiRefNet, BEN2 base,
 InSPyReNet, ViTMatte, SAM 2, Depth Anything Small, Real-ESRGAN, SwinIR, SeedVR2) carry no such
 restriction; the research note's point that BiRefNet's weights were trained on academic datasets
-whose terms are unsettled applies to those too. For the owner's decision: every NC slot in this
-review has a permissive fallback measured in the same bake-off (BiRefNet general or HR-matting for
-RMBG-2.0; DA3-SMALL for DA3-LARGE; Real-ESRGAN or SwinIR for UltraSharp), so choosing the NC model is
-a quality choice with a recorded alternative, not a dependency. Nothing here blocks a candidate; the
-licence is recorded per model in `services/matting/README.md` and in the bake-off report.
+whose terms are unsettled applies to those too. Every NC slot in this review has a permissive
+alternative measured in the same bake-off (BiRefNet general or HR-matting for RMBG-2.0; DA3-SMALL
+for DA3-LARGE; Real-ESRGAN or SwinIR for UltraSharp), so the report can always name one. Nothing
+here blocks a candidate; the licence is recorded per model in `services/matting/README.md` and in
+the bake-off report.
 
 ## 5. Build order (subagent workstreams)
 
@@ -480,8 +488,7 @@ Tier 3 real data, the bake-off itself (the manager runs it; the PR carries the r
 1. `assemble` for every set in section 4.2; print the manifest counts per brand and tag.
 2. Human labels: the operator labels the Styli and Noon views of the USPA, Anta and hard-cases
    sets through the attention screen in eval mode (07); Sujan labels the rest. `labels export`
-   writes the CSVs. The operator is also asked the Styli size-versus-softness question (section
-   4.4) and the answer is recorded in the report.
+   writes the CSVs.
 3. `run` once per primary candidate on every set, once per secondary candidate on the hard-cases
    set and one apparel set, through all nine channels (`qaMode per_output`), on the deployed
    `catalog-worker`, `catalog-matting` and `catalog-matting-gpu`; a candidate that W0 could not load
@@ -493,8 +500,7 @@ Tier 3 real data, the bake-off itself (the manager runs it; the PR carries the r
 5. `experiment trimap` and `experiment box_prompt` on the hard-cases run of the winner;
    `experiment sr_pass` on one footwear set and the Styli-rejected set.
 6. `contact-sheet` per run for a human look at every flagged output.
-7. `score`, `policy write --dry-run`, review (including the owner's licence decision where an NC
-   model won), `policy write`, `report`.
+7. `score`, `policy write --dry-run`, review of the ranking, `policy write`, `report`.
 8. Cleanup: eval batch objects under `catalog-test/` deleted by the CLI through
    `deleteTestObjects`; `eval/` kept.
 Compliance must be 100% on every run; anything else is a 05 bug and stops the bake-off.
@@ -523,9 +529,8 @@ CI gate: `pnpm lint && pnpm typecheck && pnpm test`.
 - Both matting services list their ids with `inputSize` and `target`, or the report says which
   custom id could not be loaded and why; GPU-only candidates are either measured or "not run: no
   GPU service".
-- The owner has the licence posture paragraph and the per-model table, and any NC winner is
-  recorded as a quality choice with its permissive alternative named.
-- The Styli size-versus-softness answer is recorded, or the question is listed as open for 09.
+- The report carries the per-model licence table as a record; winners are chosen on quality alone
+  (owner's decision, section 4.10).
 - Brands waiting for sample images are listed in the report and in the manager's message.
 
 ## 8. Merge, deploy, report
@@ -534,6 +539,5 @@ Per `00-execution-protocol.md`: PR from `feat/catalog-08-model-bakeoff-and-polic
 and simplify, merge, `bash infra/deploy.sh` (adds the `catalog-eval` job and both rebuilt matting
 images), per-brand smoke, learnings (matting quality findings go to
 `docs/solutions/catalog-matting-quality.md`), then the single report with the bake-off summary
-table, the policy rows written, candidates not run, the experiment outcomes, the licence decision
-asked of the owner, the Styli question, pending pairs, brands waiting for sample images, and
-"Ready for the next spec: 09 Scale, guardrails and hand-over".
+table, the policy rows written, candidates not run, the experiment outcomes, pending pairs, brands
+waiting for sample images, and "Ready for the next spec: 09 Scale, guardrails and hand-over".
