@@ -40,10 +40,23 @@ first and falls back to project level with a WARN line.
 - deploy.sh writes the narrowed CORS file to a temp path and passes it through `cygpath -m` so both
   node and gcloud (Windows programs) can open it.
 
+## Cloud Run reserves /healthz
+Symptom (spec 02 deploy, 2026-10-17): `GET $WORKER_URL/healthz` with a valid identity token returned
+404 with Google's own HTML page (`Error 404 (Not Found)!!1`), and `gcloud logging read` showed no
+request for that path on the `catalog-worker` revision. Cause: Cloud Run's Google Front End reserves
+`/healthz` and answers it before the container. Unit tests and local runs do not catch it. Fix: every
+health route on Cloud Run (worker, web, matting) is `/health`. Verify after a deploy with
+`curl -H "Authorization: Bearer $(gcloud auth print-identity-token)" "$WORKER_URL/health"` (200 with
+`{ ok, version, routes }`; 403 without the token).
+
 ## Node 22, not Node 20
 Spec 02 says Node 20; the images (`node:22-slim`), esbuild `target: node22`, `engines.node >=22` and
 CI use Node 22 instead (approved by the owner on 2026-10-17: Node 20 is end of life). `undici`
 (used by `safeFetch` to pin the checked address) needs Node 22.19 or newer.
+The current Google Cloud client libraries also declare `engines.node >=22`
+(`@google-cloud/storage` 8.x, `@google-cloud/bigquery` 9.x, `@google-cloud/tasks` 7.x,
+`google-auth-library` 11.x, `google-gax` 6.x), so a Node 20 image is not an option for any service
+that uses them.
 
 ## DB_HOST is the private IP
 deploy.sh reads the address of type `PRIVATE` from `gcloud sql instances describe ila-pg`
