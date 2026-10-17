@@ -66,7 +66,8 @@ and reports (section 10).
   main checkout with
   `git worktree add -b feat/catalog-<nn>-<slug> "C:\Users\Sujan AH\Desktop\catalog-module-wt\<nn>-<slug>" main`.
 - Builder worktrees (one per workstream that touches different files than the others): branch
-  `feat/catalog-<nn>-<slug>/<workstream>` from the feature branch, path
+  `feat/catalog-<nn>-<slug>--<workstream>` from the feature branch (two dashes, not a slash: git
+  cannot hold a branch `X` and a branch `X/sub` at the same time), path
   `C:\Users\Sujan AH\Desktop\catalog-module-wt\<nn>-<slug>-<workstream>`. Workstreams that touch
   the same files run one after the other in the feature worktree instead.
 - Builders commit on their branch with conventional messages. The integration subagent merges them

@@ -43,8 +43,10 @@ an org policy or BigQuery rights in another project).
   headers and body from stdin (`curl -K -`). Never pass a secret as a gcloud flag: gcloud writes every
   flag value to its debug log (`%APPDATA%\gcloud\logs\<date>\*.log`, "Running [...] with arguments"),
   and a flag is visible in the process list. The first bootstrap run (2026-10-17) still used
-  `gcloud sql users create --password`, so that day's log holds the `catalog_app` password; delete
-  that log file (and the earlier app's 2026-10-02 log, which holds `ila_app`'s). If the secret exists
+  `gcloud sql users create --password`, so that day's log held the `catalog_app` password. That
+  password was rotated the same day: secret `catalog-db-password` version 2 holds the current value,
+  so the logged value is dead. Still delete that log file (and the earlier app's 2026-10-02 log, which
+  holds `ila_app`'s), and disable version 1 of the secret once nothing reads it. If the secret exists
   but the user does not, a new secret version is added and the user is created. If the user exists
   but the secret does not, the script stops rather than resetting the password.
 - An expired gcloud login makes `add-iam-policy-binding` print a reauth error; re-run
