@@ -1,5 +1,5 @@
 {
-  "id": "28a6bd8b-2ed5-4124-80d0-3e0f6b2e7526",
+  "id": "468566df-b895-43ff-936b-34d5b0d7ade6",
   "prevId": "00000000-0000-0000-0000-000000000000",
   "version": "7",
   "dialect": "postgresql",
@@ -1508,6 +1508,33 @@
             },
             {
               "expression": "product_key",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "catalog_products_brand_test_path_uq": {
+          "name": "catalog_products_brand_test_path_uq",
+          "columns": [
+            {
+              "expression": "brand_slug",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "is_test",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "path_key",
               "isExpression": false,
               "asc": true,
               "nulls": "last"

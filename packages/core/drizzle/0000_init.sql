@@ -316,6 +316,7 @@ CREATE UNIQUE INDEX "catalog_product_aliases_brand_test_key_uq" ON "catalog_prod
 CREATE INDEX "catalog_product_aliases_product_id_idx" ON "catalog_product_aliases" USING btree ("product_id");--> statement-breakpoint
 CREATE INDEX "catalog_product_events_product_id_idx" ON "catalog_product_events" USING btree ("product_id");--> statement-breakpoint
 CREATE UNIQUE INDEX "catalog_products_brand_test_key_uq" ON "catalog_products" USING btree ("brand_slug","is_test","product_key");--> statement-breakpoint
+CREATE UNIQUE INDEX "catalog_products_brand_test_path_uq" ON "catalog_products" USING btree ("brand_slug","is_test","path_key");--> statement-breakpoint
 CREATE INDEX "catalog_products_lock_batch_id_idx" ON "catalog_products" USING btree ("lock_batch_id");--> statement-breakpoint
 CREATE INDEX "catalog_source_images_product_id_idx" ON "catalog_source_images" USING btree ("product_id");--> statement-breakpoint
 CREATE UNIQUE INDEX "catalog_source_images_product_n_sha_batch_uq" ON "catalog_source_images" USING btree ("product_id","n","sha256","batch_id");--> statement-breakpoint

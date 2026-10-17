@@ -277,6 +277,8 @@ export const catalogProducts = pgTable(
   },
   (t) => [
     uniqueIndex("catalog_products_brand_test_key_uq").on(t.brandSlug, t.isTest, t.productKey),
+    // Two products never share public paths (path_key is the public path segment).
+    uniqueIndex("catalog_products_brand_test_path_uq").on(t.brandSlug, t.isTest, t.pathKey),
     index("catalog_products_lock_batch_id_idx").on(t.lockBatchId),
   ],
 );

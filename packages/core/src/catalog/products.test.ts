@@ -40,6 +40,19 @@ describe("findOrCreateProduct", () => {
     expect((await events(first.product.id)).map((e) => e.kind)).toEqual(["created"]);
   });
 
+  it("refuses an identifier whose path would be empty or shared with another product", async () => {
+    await findOrCreateProduct(db, { brandSlug: "uspa", isTest: false, identifier: "PATH1", skus: null, actor });
+    await expect(findOrCreateProduct(db, { brandSlug: "uspa", isTest: false, identifier: "PATH(1)", skus: null, actor })).rejects.toThrow(
+      '"PATH(1)" would share image links with PATH1.',
+    );
+    await expect(findOrCreateProduct(db, { brandSlug: "uspa", isTest: false, identifier: "日本", skus: null, actor })).rejects.toThrow(
+      /no plain letters or digits/,
+    );
+    await expect(findOrCreateProduct(db, { brandSlug: "uspa", isTest: false, identifier: "..", skus: null, actor })).rejects.toThrow(
+      /no plain letters or digits/,
+    );
+  });
+
   it("keeps test and real products and brands apart", async () => {
     const real = await findOrCreateProduct(db, { brandSlug: "uspa", isTest: false, identifier: "SEP-1", skus: null, actor });
     const test = await findOrCreateProduct(db, { brandSlug: "uspa", isTest: true, identifier: "SEP-1", skus: null, actor });

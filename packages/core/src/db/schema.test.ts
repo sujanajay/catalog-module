@@ -35,6 +35,7 @@ const TABLES = [
 const INDEXES = [
   "sku_map_brand_slug_idx", "sku_map_option_key_idx", "sku_map_ean_idx", "model_policy_brand_category_uq",
   "catalog_batches_brand_slug_idx", "catalog_uploads_batch_id_idx", "catalog_products_brand_test_key_uq",
+  "catalog_products_brand_test_path_uq",
   "catalog_product_aliases_brand_test_key_uq", "catalog_product_events_product_id_idx",
   "catalog_source_images_product_id_idx", "catalog_source_images_product_n_sha_batch_uq",
   "catalog_outputs_batch_id_idx", "catalog_outputs_product_id_idx", "catalog_outputs_live_uq",
@@ -89,6 +90,8 @@ describe("0000_init.sql", () => {
     const values = { brandSlug: "uspa", isTest: false, productKey: "DUP1", pathKey: "DUP1", identifier: "DUP1" };
     const [p] = await db.insert(catalogProducts).values(values).returning();
     await expect(db.insert(catalogProducts).values(values)).rejects.toThrow();
+    // Another product key on the same path_key would share public paths.
+    await expect(db.insert(catalogProducts).values({ ...values, productKey: "DUP(1)" })).rejects.toThrow();
     await db.insert(catalogProducts).values({ ...values, isTest: true });
 
     const alias = { brandSlug: "uspa", isTest: false, aliasKey: "DUP1", productId: p!.id, kind: "identifier" as const };

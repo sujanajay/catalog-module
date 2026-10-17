@@ -69,7 +69,9 @@ async function ensureAlias(db: Conn, product: CatalogProduct, aliasKey: string, 
  * Finds the product for an identifier, or creates it.
  * (1) normalizeKey(identifier) is an alias of the brand -> that product; (2) the resolved
  * option_id normalised is an alias -> that product (and the identifier becomes an alias of it);
- * (3) otherwise a new product with its own key as the first alias and a `created` event.
+ * (3) otherwise a new product with its own key as the first alias and a `created` event. A new
+ * identifier whose path_key is empty or already used by another product of the brand is refused
+ * with an operator sentence, so two products never share public paths.
  * In every case the resolved option_id and each opptra_sku become aliases if not yet present, and
  * new SKU ids are merged into opptra_sku_ids with a `sku_ids_added` event. Insert races are
  * resolved by the unique index: on conflict the row is re-read and isNew is false.
@@ -93,13 +95,24 @@ export async function findOrCreateProduct(
       if (product) await ensureAlias(tx, product, productKey, "identifier");
     }
     if (!product) {
+      const pathKey = sanitizeSegment(identifier);
+      if (!/[A-Za-z0-9]/.test(pathKey)) {
+        throw new Error(`"${identifier}" cannot be used in an image link: it has no plain letters or digits. Rename the files using A-Z, 0-9, "-" or "_".`);
+      }
+      const [samePath] = await tx
+        .select({ identifier: catalogProducts.identifier })
+        .from(catalogProducts)
+        .where(and(eq(catalogProducts.brandSlug, brandSlug), eq(catalogProducts.isTest, isTest), eq(catalogProducts.pathKey, pathKey)));
+      if (samePath) {
+        throw new Error(`"${identifier}" would share image links with ${samePath.identifier}. Rename one of them so they differ in letters or digits.`);
+      }
       const [created] = await tx
         .insert(catalogProducts)
         .values({
           brandSlug,
           isTest,
           productKey,
-          pathKey: sanitizeSegment(identifier),
+          pathKey,
           identifier,
           optionIdStyleColor: skus?.optionIdStyleColor ?? null,
           opptraSkuIds: skuIds,
