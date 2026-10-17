@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { PeopleError } from "@catalog/core/people";
 import { z } from "zod";
 import { badRequest, errorResponse, ForbiddenError, handle, HttpError, notFound, readJson, unauthorized } from "../lib/errors";
 
@@ -54,5 +55,13 @@ describe("web errors", () => {
     expect(await res403.json()).toEqual({
       error: "You can view this but not change it. Ask an admin for the operator role.",
     });
+  });
+
+  it("turns PeopleError from packages/core into a 400 with its sentence", async () => {
+    const res = await handle(async () => {
+      throw new PeopleError("You cannot remove the last admin.");
+    });
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({ error: "You cannot remove the last admin." });
   });
 });
