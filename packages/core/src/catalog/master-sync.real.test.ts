@@ -23,10 +23,11 @@ const HL_RAW_ROWS = 335;
 
 const IAM_HELP =
   "The ADC account cannot read the warehouse. Grant it (as an opptra-datawarehouse admin):\n" +
-  "  gcloud projects add-iam-policy-binding opptra-datawarehouse --member=user:<you> --role=roles/bigquery.jobUser\n" +
-  "  bq add-iam-policy-binding --member=user:<you> --role=roles/bigquery.dataViewer opptra-datawarehouse:raw_gcc_dimensions\n" +
-  "  bq add-iam-policy-binding --member=user:<you> --role=roles/bigquery.dataViewer opptra-datawarehouse:dimensions\n" +
-  "  bq add-iam-policy-binding --member=user:<you> --role=roles/bigquery.dataViewer opptra-datawarehouse:fact_gcc\n" +
+  "  gcloud projects add-iam-policy-binding opptra-datawarehouse --member=user:<you> --role=roles/bigquery.jobUser --condition=None\n" +
+  // 'bq add-iam-policy-binding' does not support datasets; dataset access uses the GRANT statement.
+  "  bq query --project_id=image-links-agent --location=asia-south1 --nouse_legacy_sql 'GRANT `roles/bigquery.dataViewer` ON SCHEMA `opptra-datawarehouse`.raw_gcc_dimensions TO \"user:<you>\"'\n" +
+  "  bq query --project_id=image-links-agent --location=asia-south1 --nouse_legacy_sql 'GRANT `roles/bigquery.dataViewer` ON SCHEMA `opptra-datawarehouse`.dimensions TO \"user:<you>\"'\n" +
+  "  bq query --project_id=image-links-agent --location=asia-south1 --nouse_legacy_sql 'GRANT `roles/bigquery.dataViewer` ON SCHEMA `opptra-datawarehouse`.fact_gcc TO \"user:<you>\"'\n" +
   "then re-run `gcloud auth application-default login`.";
 
 describe.skipIf(!REAL)("master sync against the real warehouse", () => {

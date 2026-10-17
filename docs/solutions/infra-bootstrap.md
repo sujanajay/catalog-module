@@ -64,6 +64,17 @@ an org policy or BigQuery rights in another project).
   policy name and exits 2; an org policy admin must allow `allUsers` for this project (or this
   bucket), then re-run. `constraints/storage.publicAccessPrevention` is not enforced.
 - **BigQuery in `opptra-datawarehouse`.** Granting `roles/bigquery.jobUser` there needs IAM rights in
-  that project, and dataset access uses the `bq` CLI, which failed in Git Bash on the operator machine
-  (`python3.11: command not found`). When either step cannot run, the script prints the exact
-  commands and exits 2; run them in a shell where `bq version` works, then re-run the script.
+  that project. When a grant cannot be applied, the script prints the exact commands and exits 2;
+  an admin of that project runs them, then re-runs the script.
+
+## BigQuery dataset grants
+- `bq add-iam-policy-binding` does not support datasets (tables and views only). Dataset access is
+  granted with the DCL statement
+  ``GRANT `roles/bigquery.dataViewer` ON SCHEMA `opptra-datawarehouse`.<dataset> TO "serviceAccount:..."``, run with `bq query --project_id=image-links-agent
+  --location=asia-south1 --nouse_legacy_sql`. The query job runs in this project; the statement needs
+  `bigquery.datasets.update` on the target dataset. The check reads `bq show --format=prettyjson`,
+  where the grant appears as a `READER` access entry.
+- In Git Bash on Windows the `bq` launcher can pick a python it cannot start
+  (`python3.11: command not found`). The script then sets `CLOUDSDK_BQ_PYTHON` to the Cloud SDK's
+  bundled `platform/bundledpython/python.exe`, for `bq` only and only in its own shell; gcloud config is
+  never changed.

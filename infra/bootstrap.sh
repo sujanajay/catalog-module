@@ -391,15 +391,34 @@ done
 
 # --- 9. BigQuery (cross-project, read only) -------------------------------------------------
 BQ_MEMBER=serviceAccount:$WORKER
+BQ_LOCATION=asia-south1
+# Dataset grants use the GRANT DCL statement ('bq add-iam-policy-binding' does not support
+# datasets). The query job runs in $PROJECT, so it needs no job rights on $BQ_PROJECT.
+bq_grant_sql() { # dataset
+  local bt='`'
+  printf 'GRANT %sroles/bigquery.dataViewer%s ON SCHEMA %s%s%s.%s TO "%s"' \
+    "$bt" "$bt" "$bt" "$BQ_PROJECT" "$bt" "$1" "$BQ_MEMBER"
+}
+# Commands for the grants that could not be applied from here (printed at the end).
+BQ_TODO=()
 bq_print_commands() {
-  needs_human "BigQuery access for $WORKER on $BQ_PROJECT could not be granted from here. Run these in a shell where 'bq version' works, then re-run this script:"
-  needs_human "  gcloud projects add-iam-policy-binding $BQ_PROJECT --member=$BQ_MEMBER --role=roles/bigquery.jobUser --condition=None"
-  for ds in "${BQ_DATASETS[@]}"; do
-    needs_human "  bq add-iam-policy-binding --member=$BQ_MEMBER --role=roles/bigquery.dataViewer $BQ_PROJECT:$ds"
-  done
+  needs_human "BigQuery access for $WORKER on $BQ_PROJECT could not be granted from here. Someone with admin rights on $BQ_PROJECT runs these (bash), then re-runs this script:"
+  local c
+  for c in "${BQ_TODO[@]}"; do needs_human "  $c"; done
 }
 
-BQ_OK=1
+# Git Bash on Windows: the bq launcher can pick a python it cannot start ("python3.11: command not
+# found"). Fall back to the Cloud SDK's bundled python for bq only, in this shell; gcloud config is
+# not touched.
+if ! bq version >/dev/null 2>&1 && [ -z "${CLOUDSDK_BQ_PYTHON:-}" ] && BQ_BIN=$(command -v bq); then
+  BUNDLED_PY="$(dirname "$BQ_BIN")/../platform/bundledpython/python.exe"
+  if [ -x "$BUNDLED_PY" ] && CLOUDSDK_BQ_PYTHON="$BUNDLED_PY" bq version >/dev/null 2>&1; then
+    export CLOUDSDK_BQ_PYTHON="$BUNDLED_PY"
+    log "bq: using the Cloud SDK bundled python"
+  fi
+fi
+
+BQ_JOBUSER_CMD="gcloud projects add-iam-policy-binding $BQ_PROJECT --member=$BQ_MEMBER --role=roles/bigquery.jobUser --condition=None"
 if BQ_POLICY=$(gcv projects get-iam-policy "$BQ_PROJECT" --flatten='bindings[].members' \
     --format='csv[no-heading](bindings.role,bindings.members)' 2>/dev/null); then
   if grep -qxF "roles/bigquery.jobUser,$BQ_MEMBER" <<<"$BQ_POLICY"; then
@@ -407,10 +426,10 @@ if BQ_POLICY=$(gcv projects get-iam-policy "$BQ_PROJECT" --flatten='bindings[].m
   else
     create "project binding on $BQ_PROJECT: roles/bigquery.jobUser -> $BQ_MEMBER"
     gcloud projects add-iam-policy-binding "$BQ_PROJECT" --member="$BQ_MEMBER" \
-      --role=roles/bigquery.jobUser --condition=None >/dev/null 2>&1 || BQ_OK=0
+      --role=roles/bigquery.jobUser --condition=None >/dev/null 2>&1 || BQ_TODO+=("$BQ_JOBUSER_CMD")
   fi
 else
-  BQ_OK=0
+  BQ_TODO+=("$BQ_JOBUSER_CMD")
 fi
 
 # Dataset access: dataViewer appears as READER in the dataset's access list.
@@ -424,20 +443,25 @@ dataset_has_reader() { # dataset
     process.exit(hit ? 0 : 1);
   ' "$WORKER"
 }
-if [ "$BQ_OK" = 1 ] && bq version >/dev/null 2>&1; then
-  for ds in "${BQ_DATASETS[@]}"; do
-    if dataset_has_reader "$ds"; then
-      skip "dataset access $BQ_PROJECT:$ds: roles/bigquery.dataViewer -> $BQ_MEMBER"
-    else
-      create "dataset access $BQ_PROJECT:$ds: roles/bigquery.dataViewer -> $BQ_MEMBER"
-      bq add-iam-policy-binding --member="$BQ_MEMBER" --role=roles/bigquery.dataViewer \
-        "$BQ_PROJECT:$ds" >/dev/null 2>&1 || { BQ_OK=0; break; }
+BQ_CLI_OK=0
+bq version >/dev/null 2>&1 && BQ_CLI_OK=1
+[ "$BQ_CLI_OK" = 1 ] || warn "bq does not start in this shell; dataset grants not checked"
+for ds in "${BQ_DATASETS[@]}"; do
+  grant_cmd="bq query --project_id=$PROJECT --location=$BQ_LOCATION --nouse_legacy_sql '$(bq_grant_sql "$ds")'"
+  if [ "$BQ_CLI_OK" = 0 ]; then
+    BQ_TODO+=("$grant_cmd")
+  elif dataset_has_reader "$ds"; then
+    skip "dataset access $BQ_PROJECT:$ds: roles/bigquery.dataViewer -> $BQ_MEMBER"
+  else
+    create "dataset access $BQ_PROJECT:$ds: roles/bigquery.dataViewer -> $BQ_MEMBER"
+    if ! out=$(bq query --project_id="$PROJECT" --location="$BQ_LOCATION" --nouse_legacy_sql \
+        "$(bq_grant_sql "$ds")" 2>&1); then
+      printf '%s\n' "$out" | tr -d '\r' | tail -3 >&2
+      BQ_TODO+=("$grant_cmd")
     fi
-  done
-else
-  BQ_OK=0
-fi
-[ "$BQ_OK" = 1 ] || bq_print_commands
+  fi
+done
+[ "${#BQ_TODO[@]}" = 0 ] || bq_print_commands
 
 # --- 10. Cloud Scheduler -------------------------------------------------------------------
 ensure_scheduler_job() { # name route cron
