@@ -1,6 +1,6 @@
 import type { Readable } from "node:stream";
-import { Storage } from "@google-cloud/storage";
-import { assertTestPrefix, assertWithinProduct, TEST_PREFIX } from "@catalog/core/catalog/naming";
+import { Storage, type CopyResponse } from "@google-cloud/storage";
+import { assertTestPrefix, assertWithinProduct, productPrefix } from "@catalog/core/catalog/naming";
 
 /**
  * GCS helpers for the private bucket (BUCKET, default image-links-agent-assets) and the public
@@ -163,13 +163,26 @@ function isNotFound(err: unknown): boolean {
   return httpStatusOf(err) === 404;
 }
 
-/** Refuse a public write outside catalog/ or catalog-test/ (the product-level check is assertWithinProduct). */
-function assertPublicRoot(objectPath: string): void {
-  const ok =
-    (objectPath.startsWith("catalog/") || objectPath.startsWith(TEST_PREFIX)) &&
-    !objectPath.split("/").some((s) => s === "" || s === "." || s === "..");
-  if (!ok) throw new Error(`Refusing to write ${objectPath}: public objects live only under catalog/ or ${TEST_PREFIX}.`);
+/**
+ * Product guard for a copy to the public bucket. The source must be a staged image in BUCKET,
+ * `<root>/<brand>/<batchId>/staging/<pathKey>/<channel>/<file>`, and the target must be the same
+ * product's `<root>/<brand>/<pathKey>/<channel>/<file>`; assertWithinProduct checks the target
+ * against the product prefix taken from the staging path.
+ */
+function assertStagedForTarget(src: { bucket: string; path: string }, objectPath: string): void {
+  const [root, brand, , stage, pathKey, channel, name, ...extra] = src.path.split("/");
+  if (src.bucket !== getBucketName() || stage !== "staging" || !name || extra.length || (root !== "catalog" && root !== "catalog-test")) {
+    throw new Error(`Refusing to write ${objectPath}: only staged images under catalog/ or catalog-test/ in the private bucket are published.`);
+  }
+  const prefix = productPrefix(brand!, pathKey!, root === "catalog-test");
+  assertWithinProduct(objectPath, prefix);
+  if (objectPath !== `${prefix}${channel}/${name}`) {
+    throw new Error(`Refusing to write ${objectPath}: it is not the public path of the staged image ${src.path}.`);
+  }
 }
+
+/** Clock skew allowed when deciding whether an object was created by this call. */
+const CREATED_SKEW_MS = 60_000;
 
 // --- Private bucket: lifted base -------------------------------------------
 
@@ -288,20 +301,31 @@ export async function stageCopyToPublic(
   objectPath: string,
   { ifGenerationMatch }: GenerationPrecondition,
 ): Promise<{ generation: string; crc32c: string }> {
-  assertPublicRoot(objectPath);
   const src = parseGsUri(stagingGsUri);
+  assertStagedForTarget(src, objectPath);
   const storage = getStorage();
+  const srcFile = storage.bucket(src.bucket).file(src.path);
   const dest = storage.bucket(getPublicBucketName()).file(objectPath);
-  const [copied, apiResponse] = await withStorageRetry(objectPath, () =>
-    storage
-      .bucket(src.bucket)
-      .file(src.path)
-      .copy(dest, {
+  const startedAt = Date.now();
+  let copied: CopyResponse[0];
+  let apiResponse: CopyResponse[1];
+  try {
+    [copied, apiResponse] = await withStorageRetry<CopyResponse>(objectPath, () =>
+      srcFile.copy(dest, {
         preconditionOpts: { ifGenerationMatch },
         contentType: "image/jpeg",
         cacheControl: PUBLIC_CACHE_CONTROL,
       }),
-  );
+    );
+  } catch (err) {
+    // A retried copy (ours or the client's) gets 412 when an earlier attempt succeeded but its
+    // answer was lost. If the live object is this staged image, created during this call, it is ours.
+    if (err instanceof GenerationMismatchError) {
+      const landed = await copyAlreadyLanded(srcFile, dest, startedAt);
+      if (landed) return landed;
+    }
+    throw err;
+  }
   // The rewrite response carries the new object resource; the returned File's metadata may not be
   // refreshed by the client, so it is the fallback, and a metadata read is the last resort.
   const resource = (apiResponse as { resource?: { generation?: unknown; crc32c?: unknown } } | undefined)?.resource;
@@ -316,6 +340,21 @@ export async function stageCopyToPublic(
     throw new Error(`Copy to ${objectPath} returned no generation or crc32c`);
   }
   return { generation: String(generation), crc32c };
+}
+
+type GcsFile = ReturnType<ReturnType<StorageLike["bucket"]>["file"]>;
+
+/** The live object's generation when it holds the staged bytes and was created since `since`; else null. */
+async function copyAlreadyLanded(srcFile: GcsFile, dest: GcsFile, since: number): Promise<{ generation: string; crc32c: string } | null> {
+  try {
+    const [[s], [d]] = await Promise.all([srcFile.getMetadata(), dest.getMetadata()]);
+    const created = Date.parse(String(d.timeCreated ?? ""));
+    const same = typeof d.crc32c === "string" && d.crc32c === s.crc32c && String(d.size) === String(s.size);
+    if (!same || d.generation === undefined || !(created >= since - CREATED_SKEW_MS)) return null;
+    return { generation: String(d.generation), crc32c: d.crc32c as string };
+  } catch {
+    return null;
+  }
 }
 
 /**

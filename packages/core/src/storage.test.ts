@@ -237,6 +237,43 @@ describe("GCS operations (fake client)", () => {
       await expect(stageCopyToPublic(staging, "catalog/uspa/../x.jpg", { ifGenerationMatch: 0 })).rejects.toThrow(/Refusing/);
       expect(copy).not.toHaveBeenCalled();
     });
+
+    it("refuses a target that is not the staged image's own product path", async () => {
+      for (const other of [
+        "catalog/uspa/ABC124/noon/ABC124_2.jpg", // another product
+        "catalog/uspa/ABC123/namshi/ABC123_2.jpg", // another channel
+        "catalog/uspa/ABC123/noon/ABC123_3.jpg", // another shot
+        "catalog-test/uspa/ABC123/noon/ABC123_2.jpg", // another root
+        "catalog/uspa/exports/ABC123_2.jpg",
+      ]) {
+        await expect(stageCopyToPublic(staging, other, { ifGenerationMatch: 0 })).rejects.toThrow(/Refusing/);
+      }
+      // The source must be a staged image in the private bucket.
+      for (const src of [
+        "gs://image-links-agent-public/catalog/uspa/ABC123/noon/ABC123_2.jpg",
+        "gs://image-links-agent-assets/catalog/uspa/b1/raw/ABC123/noon/ABC123_2.jpg",
+        "gs://other-bucket/catalog/uspa/b1/staging/ABC123/noon/ABC123_2.jpg",
+      ]) {
+        await expect(stageCopyToPublic(src, target, { ifGenerationMatch: 0 })).rejects.toThrow(/Refusing/);
+      }
+      expect(copy).not.toHaveBeenCalled();
+    });
+
+    it("treats a 412 after a lost answer as success when the live object is this staged image", async () => {
+      copy.mockRejectedValueOnce(apiError("ECONNRESET")).mockRejectedValueOnce(apiError(412, "conditionNotMet"));
+      getMetadata
+        .mockResolvedValueOnce([{ crc32c: "same==", size: "10" }])
+        .mockResolvedValueOnce([{ crc32c: "same==", size: "10", generation: "99", timeCreated: new Date().toISOString() }]);
+      expect(await stageCopyToPublic(staging, target, { ifGenerationMatch: 0 })).toEqual({ generation: "99", crc32c: "same==" });
+    });
+
+    it("keeps GenerationMismatchError when the live object holds other bytes", async () => {
+      copy.mockRejectedValueOnce(apiError(412, "conditionNotMet"));
+      getMetadata
+        .mockResolvedValueOnce([{ crc32c: "mine==", size: "10" }])
+        .mockResolvedValueOnce([{ crc32c: "theirs==", size: "10", generation: "99", timeCreated: new Date().toISOString() }]);
+      await expect(stageCopyToPublic(staging, target, { ifGenerationMatch: 0 })).rejects.toBeInstanceOf(GenerationMismatchError);
+    });
   });
 
   describe("deletePublicObject", () => {
