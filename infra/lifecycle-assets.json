@@ -1,0 +1,8 @@
+{
+  "rule": [
+    {
+      "action": { "type": "Delete" },
+      "condition": { "matchesPrefix": ["catalog/", "catalog-test/"], "daysSinceCustomTime": 180 }
+    }
+  ]
+}
