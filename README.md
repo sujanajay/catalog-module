@@ -56,7 +56,22 @@ applies.
 - The operator's gcloud default project is a different one; every script pins
   `CLOUDSDK_CORE_PROJECT=image-links-agent` and never changes global gcloud config.
 
-## Repository layout (planned)
+## Running tests
+
+Node 22 and pnpm 9. From the repository root:
+
+```
+pnpm install --frozen-lockfile
+pnpm lint
+pnpm typecheck
+pnpm test
+```
+
+`pnpm test` runs the unit and PGlite integration tests (no database server needed). Real-data
+tests run only with the flag: `REAL_DATA=1 pnpm test:real` (PowerShell:
+`$env:REAL_DATA = "1"; pnpm test:real`). One package only: `pnpm vitest run packages/core`.
+
+## Repository layout
 
 ```
 apps/web/           Next.js 15 app behind IAP: wizard, batch, product and brand pages, People modal

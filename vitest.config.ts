@@ -1,0 +1,12 @@
+import { defineConfig } from "vitest/config";
+
+export default defineConfig({
+  test: {
+    include: ["{apps,packages}/*/src/**/*.test.ts", "{apps,packages}/*/test/**/*.test.ts"],
+    exclude: ["**/node_modules/**", "**/*.real.test.ts", "**/*.human.spec.ts", ".claude/**"],
+    environment: "node",
+    // PGlite (in-process Postgres) takes several seconds to start when test files run in parallel.
+    testTimeout: 30_000,
+    hookTimeout: 30_000,
+  },
+});

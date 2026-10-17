@@ -1,0 +1,28 @@
+{
+  "name": "catalog-module",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@9.15.0",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "lint": "eslint .",
+    "typecheck": "pnpm -r --if-present typecheck",
+    "test": "vitest run",
+    "test:real": "vitest run --config vitest.real.config.ts",
+    "build": "pnpm -r --if-present build",
+    "catalog:smoke": "node -e \"if(!require('fs').existsSync('apps/worker/dist/catalog-smoke.js')){console.error('catalog-smoke: not built yet');process.exit(1)}\" && node apps/worker/dist/catalog-smoke.js",
+    "catalog:eval": "node -e \"if(!require('fs').existsSync('apps/worker/dist/catalog-eval.js')){console.error('catalog-eval: not built yet');process.exit(1)}\" && node apps/worker/dist/catalog-eval.js",
+    "catalog:load": "node -e \"if(!require('fs').existsSync('apps/worker/dist/catalog-load.js')){console.error('catalog-load: not built yet');process.exit(1)}\" && node apps/worker/dist/catalog-load.js",
+    "catalog:recheck": "node -e \"if(!require('fs').existsSync('apps/worker/dist/catalog-recheck.js')){console.error('catalog-recheck: not built yet');process.exit(1)}\" && node apps/worker/dist/catalog-recheck.js"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@types/node": "^22.20.5",
+    "eslint": "^10.13.0",
+    "typescript": "~5.9.3",
+    "typescript-eslint": "^8.71.2",
+    "vitest": "^5.0.5"
+  }
+}
