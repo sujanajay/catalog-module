@@ -7,18 +7,9 @@
 // click outside it.
 
 import { useEffect, useId, useRef, useState } from "react";
-import {
-  backToRoleToast,
-  PREVIEW_LABEL,
-  PREVIEW_ON_TOAST,
-  showPeopleMenuItem,
-  SIGN_OUT_URL,
-  userButtonLabel,
-  type Role,
-} from "@/lib/people-copy";
+import { PREVIEW_LABEL, showPeopleMenuItem, SIGN_OUT_URL, userButtonLabel, type Role } from "@/lib/people-copy";
 import PeopleModal from "./PeopleModal";
-import { useToast } from "./Toast";
-import { useViewerPreview } from "./ViewerPreview";
+import { usePreviewToggle, useViewerPreview } from "./ViewerPreview";
 
 export interface UserMenuProps {
   email: string;
@@ -28,8 +19,8 @@ export interface UserMenuProps {
 export default function UserMenu({ email, role }: UserMenuProps) {
   const [open, setOpen] = useState(false);
   const [peopleOpen, setPeopleOpen] = useState(false);
-  const { previewing, setPreviewing } = useViewerPreview();
-  const toast = useToast();
+  const { previewing } = useViewerPreview();
+  const togglePreview = usePreviewToggle(role);
   const wrapRef = useRef<HTMLDivElement>(null);
   const menuId = useId();
 
@@ -84,8 +75,7 @@ export default function UserMenu({ email, role }: UserMenuProps) {
             aria-checked={previewing}
             onClick={() => {
               setOpen(false);
-              setPreviewing(!previewing);
-              toast(previewing ? backToRoleToast(role) : PREVIEW_ON_TOAST);
+              togglePreview(!previewing);
             }}
           >
             {PREVIEW_LABEL}

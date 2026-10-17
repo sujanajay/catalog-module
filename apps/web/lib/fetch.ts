@@ -2,9 +2,9 @@
 // The page's fetch helper (spec 03, "Expired IAP session during fetch calls"). IAP answers 401 instead
 // of a redirect to Google's sign-in page when a request carries X-Requested-With: XMLHttpRequest, so
 // every call from the page sends that header. On a 401 the helper throws SessionEndedError and tells
-// <SessionEndedToast /> (rendered once in the layout) to show "Your session ended. Reload to sign in
-// again." with a Reload button.
-import { createElement, useSyncExternalStore } from "react";
+// <SessionEndedToast /> (components/SessionEndedToast.tsx, rendered once in the layout) to show "Your
+// session ended. Reload to sign in again." with a Reload button.
+import { useSyncExternalStore } from "react";
 
 export const SESSION_ENDED_MESSAGE = "Your session ended. Reload to sign in again.";
 
@@ -41,19 +41,11 @@ function subscribe(listener: () => void): () => void {
   return () => listeners.delete(listener);
 }
 
-/** Shows the session-ended toast with a Reload button after any apiFetch got a 401; otherwise nothing. */
-export function SessionEndedToast() {
-  const ended = useSyncExternalStore(
+/** True once any apiFetch got a 401 (the IAP session ended); stays true until the page reloads. */
+export function useSessionEnded(): boolean {
+  return useSyncExternalStore(
     subscribe,
     () => sessionEnded,
     () => false,
-  );
-  if (!ended) return null;
-  return createElement(
-    "div",
-    { className: "toast", role: "alert" },
-    SESSION_ENDED_MESSAGE,
-    " ",
-    createElement("button", { type: "button", onClick: () => window.location.reload() }, "Reload"),
   );
 }

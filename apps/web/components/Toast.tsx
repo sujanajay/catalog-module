@@ -18,10 +18,13 @@ export interface ToastOptions {
   sticky?: boolean;
 }
 
-/** The toast itself, without state. `ToastProvider` renders it; other code may reuse it directly. */
-export function Toast({ message, action }: { message: string; action?: ToastAction }) {
+/**
+ * The toast itself, without state. `ToastProvider` renders it; other code may reuse it directly.
+ * `role="alert"` (announced at once) is for a toast the person must act on, such as a session ending.
+ */
+export function Toast({ message, action, role = "status" }: { message: string; action?: ToastAction; role?: "status" | "alert" }) {
   return (
-    <div className="toast" role="status" aria-live="polite">
+    <div className="toast" role={role} aria-live={role === "alert" ? "assertive" : "polite"}>
       <span>{message}</span>
       {action ? (
         <button type="button" onClick={action.onClick}>

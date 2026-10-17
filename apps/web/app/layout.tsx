@@ -1,11 +1,11 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 import type { ReactNode } from "react";
+import SessionEndedToast from "@/components/SessionEndedToast";
 import { ToastProvider } from "@/components/Toast";
 import UserMenu from "@/components/UserMenu";
 import { ViewerPreviewProvider } from "@/components/ViewerPreview";
 import { HttpError } from "@/lib/errors";
-import { SessionEndedToast } from "@/lib/fetch";
 import { currentUser, type CurrentUser } from "@/lib/user";
 import { fontVariables } from "./fonts";
 import "./globals.css";

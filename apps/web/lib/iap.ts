@@ -7,7 +7,7 @@ import { unauthorized } from "./errors";
 
 export const IAP_JWT_HEADER = "x-goog-iap-jwt-assertion";
 export const IAP_ISSUER = "https://cloud.google.com/iap";
-/** Builder constant: re-fetch the keys hourly, or at once when a token names an unknown key id. */
+/** Re-fetch the keys hourly, or sooner when a token names an unknown key id (see below). */
 export const IAP_KEYS_TTL_MS = 60 * 60 * 1000;
 /**
  * An unknown key id triggers at most one refresh per this interval, so a stream of tokens with made-up

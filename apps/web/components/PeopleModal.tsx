@@ -11,7 +11,6 @@ import {
   ADD_PLACEHOLDER,
   ADD_ROLE_ORDER,
   addedToast,
-  backToRoleToast,
   canManagePeople,
   errorSentence,
   FALLBACK_ERROR,
@@ -21,7 +20,6 @@ import {
   PEOPLE_TITLE,
   PREVIEW_HELP,
   PREVIEW_LABEL,
-  PREVIEW_ON_TOAST,
   roleLabel,
   ROW_ROLE_ORDER,
   upsertRow,
@@ -30,22 +28,18 @@ import {
 } from "@/lib/people-copy";
 import { apiFetch, SessionEndedError } from "@/lib/fetch";
 import { useToast } from "./Toast";
-import { useViewerPreview } from "./ViewerPreview";
-
-/** The single place this modal talks to the server (apiFetch adds X-Requested-With). */
-function request(path: string, init: RequestInit = {}): Promise<Response> {
-  const headers = new Headers(init.headers);
-  if (init.body !== undefined) headers.set("Content-Type", "application/json");
-  return apiFetch(path, { ...init, headers, cache: "no-store" });
-}
+import { usePreviewToggle, useViewerPreview } from "./ViewerPreview";
 
 /** `error: null`: the failure is already on screen (the session-ended toast), so show nothing more. */
 type Result<T> = { ok: true; data: T } | { ok: false; error: string | null };
 
-async function send<T>(path: string, init?: RequestInit): Promise<Result<T>> {
+/** The single place this modal talks to the server (apiFetch adds X-Requested-With). */
+async function send<T>(path: string, init: RequestInit = {}): Promise<Result<T>> {
+  const headers = new Headers(init.headers);
+  if (init.body !== undefined) headers.set("Content-Type", "application/json");
   let res: Response;
   try {
-    res = await request(path, init);
+    res = await apiFetch(path, { ...init, headers, cache: "no-store" });
   } catch (err) {
     return { ok: false, error: err instanceof SessionEndedError ? null : FALLBACK_ERROR };
   }
@@ -70,7 +64,8 @@ export interface PeopleModalProps {
 export default function PeopleModal({ currentEmail, currentRole, onClose }: PeopleModalProps) {
   const toast = useToast();
   const router = useRouter();
-  const { previewing, setPreviewing } = useViewerPreview();
+  const { previewing } = useViewerPreview();
+  const togglePreview = usePreviewToggle(currentRole);
   const [people, setPeople] = useState<PersonRow[] | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [newEmail, setNewEmail] = useState("");
@@ -103,28 +98,31 @@ export default function PeopleModal({ currentEmail, currentRole, onClose }: Peop
     return () => document.removeEventListener("keydown", onKey);
   }, [onClose]);
 
-  async function changeRole(email: string, role: Role) {
-    setBusy(email);
-    const r = await send<PersonRow>(personPath(email), { method: "PATCH", body: JSON.stringify({ role }) });
+  /**
+   * One change: marks `busyKey` busy while it runs (every control is disabled meanwhile) and toasts the
+   * server's sentence on failure. Returns the response data on success, else undefined.
+   */
+  async function run<T>(busyKey: string, path: string, init: RequestInit): Promise<{ data: T } | undefined> {
+    setBusy(busyKey);
+    const r = await send<T>(path, init);
     setBusy(null);
-    if (!r.ok) {
-      // The select is controlled by `people`, so it shows the saved role again.
-      if (r.error) toast(r.error);
-      return;
-    }
+    if (r.ok) return { data: r.data };
+    if (r.error) toast(r.error);
+    return undefined;
+  }
+
+  async function changeRole(email: string, role: Role) {
+    // On failure the select, controlled by `people`, shows the saved role again.
+    const r = await run<PersonRow>(email, personPath(email), { method: "PATCH", body: JSON.stringify({ role }) });
+    if (!r) return;
     setPeople((list) => upsertRow(list ?? [], { email: r.data.email, role: r.data.role }));
     // Your own role changed: re-render the server layout so the user menu shows the new role.
     if (r.data.email === me) router.refresh();
   }
 
   async function remove(email: string) {
-    setBusy(email);
-    const r = await send<void>(personPath(email), { method: "DELETE" });
-    setBusy(null);
-    if (!r.ok) {
-      if (r.error) toast(r.error);
-      return;
-    }
+    const r = await run<void>(email, personPath(email), { method: "DELETE" });
+    if (!r) return;
     setPeople((list) => (list ?? []).filter((p) => p.email !== email));
   }
 
@@ -132,21 +130,11 @@ export default function PeopleModal({ currentEmail, currentRole, onClose }: Peop
     e.preventDefault();
     const email = newEmail.trim();
     if (!email) return;
-    setBusy("add");
-    const r = await send<PersonRow>("/api/people", { method: "POST", body: JSON.stringify({ email, role: newRole }) });
-    setBusy(null);
-    if (!r.ok) {
-      if (r.error) toast(r.error);
-      return;
-    }
+    const r = await run<PersonRow>("add", "/api/people", { method: "POST", body: JSON.stringify({ email, role: newRole }) });
+    if (!r) return;
     setPeople((list) => upsertRow(list ?? [], { email: r.data.email, role: r.data.role }));
     setNewEmail("");
     toast(addedToast(r.data.email, r.data.role));
-  }
-
-  function togglePreview(on: boolean) {
-    setPreviewing(on);
-    toast(on ? PREVIEW_ON_TOAST : backToRoleToast(currentRole));
   }
 
   return (
