@@ -1,4 +1,5 @@
-// Tier 2: the generated migrations on a fresh PGlite database. 0001_users.sql is covered in people.test.ts.
+// Tier 2: every generated migration (0000_init.sql, then 0001_users.sql) on a fresh PGlite database.
+// The users table's columns, role check and migration order are tested in people.test.ts.
 import { sql } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { Db } from "./client";
@@ -44,7 +45,7 @@ const INDEXES = [
   "catalog_eval_judgements_output_model_uq", "brand_master_slug_unique",
 ];
 
-describe("0000_init.sql", () => {
+describe("generated migrations", () => {
   it("creates every table", async () => {
     const found = (await rows<{ table_name: string }>(
       sql`select table_name from information_schema.tables where table_schema = 'public'`,
