@@ -1,0 +1,21 @@
+# Builds the images from the repo root. Invoked by infra/deploy.sh:
+#   gcloud builds submit --config cloudbuild.yaml --substitutions=_AR=...,_TAG=... .
+# Spec 05 adds the matting step and image.
+steps:
+  - id: worker
+    name: gcr.io/cloud-builders/docker
+    env: ["DOCKER_BUILDKIT=1"]
+    args: ["build", "-f", "apps/worker/Dockerfile", "-t", "${_AR}/worker:${_TAG}", "."]
+    waitFor: ["-"]
+  - id: web
+    name: gcr.io/cloud-builders/docker
+    env: ["DOCKER_BUILDKIT=1"]
+    args: ["build", "-f", "apps/web/Dockerfile", "-t", "${_AR}/web:${_TAG}", "."]
+    waitFor: ["-"]
+images:
+  - "${_AR}/worker:${_TAG}"
+  - "${_AR}/web:${_TAG}"
+options:
+  machineType: E2_HIGHCPU_8
+  logging: CLOUD_LOGGING_ONLY
+timeout: 1800s

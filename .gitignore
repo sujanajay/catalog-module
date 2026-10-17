@@ -33,3 +33,7 @@ test-results/
 .claude/settings.local.json
 .claude/worktrees/
 .worktrees/
+
+# build and test output (spec 02)
+smoke-output/
+next-env.d.ts

@@ -1,0 +1,17 @@
+# Upload context for `gcloud builds submit` (Cloud Build). Keep it small.
+.git
+.gitignore
+.claude
+**/node_modules
+**/.next
+**/dist
+**/*.tsbuildinfo
+coverage
+playwright-report
+test-results
+smoke-output
+.playwright
+# Local secrets never leave the machine (with a .gcloudignore present, .gitignore is not applied).
+.env
+.env.*
+!.env.example

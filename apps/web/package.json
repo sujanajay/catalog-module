@@ -1,0 +1,27 @@
+{
+  "name": "@catalog/web",
+  "version": "0.0.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@catalog/core": "workspace:*",
+    "@google-cloud/storage": "^8.4.0",
+    "@google-cloud/tasks": "^7.3.0",
+    "google-auth-library": "^11.3.1",
+    "next": "~15.5.28",
+    "pg": "^8.23.1",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.5",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0"
+  }
+}
