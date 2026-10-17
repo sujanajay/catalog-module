@@ -18,6 +18,7 @@ import {
   requireAllowedEmail,
   roleFor,
   seedAdmin,
+  setRole,
   upsertPerson,
 } from "./people";
 
@@ -264,5 +265,22 @@ describe("people rules", () => {
     expect(await getPerson(db, "naaz@opptra.com")).toBeNull();
     expect(await roleFor(db, "naaz@opptra.com")).toBe("viewer");
     expect(await getPerson(db, "naaz@opptra.com")).toMatchObject({ role: "viewer", addedBy: "sign-in" });
+  });
+
+  it("setRole changes the role of an existing person, keeps added_by and moves updated_at", async () => {
+    const added = await upsertPerson(db, { email: "naaz@opptra.com", role: "viewer", addedBy: ADMIN });
+    await new Promise((r) => setTimeout(r, 5));
+    const changed = await setRole(db, "Naaz@opptra.com", "operator");
+    expect(changed).toMatchObject({ email: "naaz@opptra.com", role: "operator", addedBy: ADMIN, createdAt: added.createdAt });
+    expect(changed!.updatedAt.getTime()).toBeGreaterThan(added.updatedAt.getTime());
+    expect(await setRole(db, "nobody@opptra.com", "operator")).toBeNull();
+    expect(await getPerson(db, "nobody@opptra.com")).toBeNull();
+  });
+
+  it("setRole refuses to demote the last admin", async () => {
+    const err = await peopleError(setRole(db, ADMIN, "viewer"));
+    expect(err.status).toBe(400);
+    expect(err.message).toBe("You cannot remove the last admin.");
+    expect((await setRole(db, ADMIN, "admin"))?.role).toBe("admin");
   });
 });

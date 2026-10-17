@@ -3,7 +3,9 @@
 // cached, so a change in the People modal applies at once). requireRole(): ForbiddenError below min.
 import { headers } from "next/headers";
 import type { Role } from "@catalog/core/catalog/types";
+import { roleFor } from "@catalog/core/people";
 import { allowedEmail } from "./auth-rules";
+import { db } from "./db";
 import { ForbiddenError, HttpError, unauthorized } from "./errors";
 import { IAP_JWT_HEADER, verifyIapJwt, type IapDeps } from "./iap";
 
@@ -15,11 +17,8 @@ export type RoleLookup = (email: string) => Promise<Role>;
 const DEFAULT_DOMAIN = "opptra.com";
 const DEFAULT_DEV_EMAIL = "sujan@opptra.com";
 
-// TODO(03-B): replace with roleFor from @catalog/core/people, i.e.
-//   import { roleFor } from "@catalog/core/people"; import { db } from "./db";
-//   const defaultRoleLookup: RoleLookup = (email) => roleFor(db(), email);
-// Until then: the seed admin (SEED_ADMIN_EMAIL default) is admin, everyone else viewer.
-const defaultRoleLookup: RoleLookup = async (email) => (email === "sujan@opptra.com" ? "admin" : "viewer");
+/** Production lookup: the users table, with the auto-viewer rule (packages/core/src/people.ts). */
+const defaultRoleLookup: RoleLookup = (email) => roleFor(db(), email);
 
 let roleLookup: RoleLookup = defaultRoleLookup;
 let iapDeps: IapDeps | undefined;

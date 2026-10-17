@@ -1,3 +1,4 @@
+import { PeopleError } from "@catalog/core/people";
 import { ZodError } from "zod";
 
 /** A user-facing error with an HTTP status. Business logic throws these; routes turn them into JSON. */
@@ -29,6 +30,8 @@ export const unauthorized = () => new HttpError(401, SIGN_IN_MESSAGE);
 
 export function errorResponse(err: unknown): Response {
   if (err instanceof HttpError) return Response.json({ error: err.message }, { status: err.status });
+  // packages/core cannot import HttpError; its people rules throw PeopleError (status 400) instead.
+  if (err instanceof PeopleError) return Response.json({ error: err.message }, { status: err.status });
   if (err instanceof ZodError) {
     const msg = err.issues.map((i) => `${i.path.join(".") || "body"}: ${i.message}`).join("; ");
     return Response.json({ error: msg, issues: err.issues }, { status: 400 });
@@ -37,7 +40,7 @@ export function errorResponse(err: unknown): Response {
   return Response.json({ error: err instanceof Error ? err.message : "Internal error" }, { status: 500 });
 }
 
-/** Wrap a route handler body so thrown HttpError / ZodError become JSON responses. */
+/** Wrap a route handler body so thrown HttpError / PeopleError / ZodError become JSON responses. */
 export async function handle(fn: () => Promise<Response>): Promise<Response> {
   try {
     return await fn();

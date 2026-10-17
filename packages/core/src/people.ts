@@ -107,6 +107,24 @@ export async function upsertPerson(
 }
 
 /**
+ * Change the role of an existing person (PATCH in the People modal). added_by is kept, since it
+ * records who added the person; updated_at moves. Returns null when the email has no row, so the
+ * caller can answer 404 without a separate lookup racing a delete. Refuses the demotion of the last
+ * admin (PeopleError 400).
+ */
+export async function setRole(db: Db, email: string, role: Role): Promise<Person | null> {
+  const e = normalizeEmail(email);
+  return db.transaction(async (tx) => {
+    if (role !== "admin") {
+      const admins = await lockAdmins(tx);
+      if (admins.length === 1 && admins[0] === e) throw new PeopleError(LAST_ADMIN_MESSAGE);
+    }
+    const [row] = await tx.update(users).set({ role, updatedAt: sql`now()` }).where(eq(users.email, e)).returning();
+    return row ? toPerson(row) : null;
+  });
+}
+
+/**
  * Delete a person's row; they are a viewer again on their next request (auto-viewer rule). An unknown
  * email is a no-op. Refuses to remove the last admin (PeopleError 400).
  */
