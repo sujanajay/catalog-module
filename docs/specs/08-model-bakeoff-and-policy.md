@@ -22,7 +22,7 @@ Contracts from earlier specs used here, not redefined:
   `deleteTestObjects` (02).
 - `catalog-local` manifests (defined in 04).
 - `MattingClient.health()`, the two services `catalog-matting` (CPU, asia-south1) and
-  `catalog-matting-gpu` (one L4, asia-southeast1, optional), `/healthz` listing
+  `catalog-matting-gpu` (one L4, asia-southeast1, optional), `/health` listing
   `models: [{ id, inputSize: number | "native", target: "cpu" | "gpu" }]` and `default`, the
   worker's rule "send a model to the service that lists it, preferring gpu", `MATTING_URL`,
   `MATTING_GPU_URL`, `MATTE_MODELS`, the session registry in `services/matting/app.py`, the shadow
@@ -352,7 +352,7 @@ from 06's cost reporting). The JSON twin carries the same data for 09.
   flag. `catalog:eval score --live` reports, per (brand, category), the false-flag rate from
   `catalog_outputs.decision = "use_as_is"` on judge-flagged outputs and the judged count since the
   policy row was written, so drift is visible without a new golden set.
-- A new id in either service's `/healthz` (read through `MattingClient.health()`), a target change
+- A new id in either service's `/health` (read through `MattingClient.health()`), a target change
   for an id, or a changed judge list in `CATALOG_QA_CANDIDATES` is a re-evaluation trigger:
   `score` prints "candidates changed since the policy row was written" with the row's `updated_at`.
 
@@ -443,7 +443,7 @@ Worktrees follow 00 section 3: `C:\Users\Sujan AH\Desktop\catalog-module-wt\08-m
   `transparent-background`; `rmbg-1.4`; `remove(data, session=..., only_mask=True)` returns the
   mask for every id as for the built-ins. ONNX export steps, `inputSize`, `target` and licence per
   model recorded in `services/matting/README.md`; both Dockerfile targets and `app.py` changed;
-  pytest cases for `/matte` with each new id and for `/healthz` listing `inputSize` and `target`.
+  pytest cases for `/matte` with each new id and for `/health` listing `inputSize` and `target`.
   Both images are rebuilt and deployed by the manager before tier 3.
 - W1 golden set (`...-assemble`): `manifest.ts`, `assemble.ts`, the `assemble` and `labels export`
   commands, BigQuery `image_url` source through 02's client, unit tests with fixtures.
@@ -462,7 +462,7 @@ W0 to W4 are independent; the integration subagent merges, then the manager runs
 
 ## 6. Test plan
 
-Python (W0): `/healthz` on the CPU image lists the built-ins plus the 1024 px and native custom
+Python (W0): `/health` on the CPU image lists the built-ins plus the 1024 px and native custom
 ids with `inputSize` and `target`; the GPU image lists all ids including the two 2048 px ones;
 `/matte?model=<id>` for each new id returns a mask of the received size on the synthetic
 product-on-white image; an unknown id returns 400 with the 05 sentence; no `remove()` call relies

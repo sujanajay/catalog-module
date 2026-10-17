@@ -23,7 +23,7 @@ Contracts from earlier specs used here and not redefined:
   `checkCaps`; the storage retry rule (every write, copy, delete and verify GET retries on 429, 5xx
   and network errors up to 3 times with exponential backoff, 1 s, 2 s, 4 s, builder constants); the
   tables in CONTRACTS section 10; the routes `/tasks/catalog/sync-master` and
-  `/tasks/catalog/sweep`; `/healthz`.
+  `/tasks/catalog/sweep`; `/health`.
 - Defined in 03: `currentUser`, `requireRole`, `ForbiddenError` and its sentence "You can view
   this but not change it. Ask an admin for the operator role."; `ROLES`; the People modal;
   `apps/web/test/human/login.ts` and `.playwright/auth-state.json`.
@@ -34,7 +34,7 @@ Contracts from earlier specs used here and not redefined:
   preview data.
 - Defined in 05: `prepare` (which converts HEIC and HEIF through `MattingClient.convert` before
   decoding), `planProduct`, `renderAllChannels`, `checkOutput`, `MattingClient`, `matteFor`, the
-  per-model send size from `/healthz`, the breaker and the flood-fill fallback, `MATTING_URL` and
+  per-model send size from `/health`, the breaker and the flood-fill fallback, `MATTING_URL` and
   `MATTING_GPU_URL`, `catalog-local`.
 
 ## 1. Goal
@@ -84,7 +84,7 @@ Out of scope (later specs)
   update". Until 07, a product with a problem photo keeps its previous live images (or has none)
   and shows `pending_attention` in the sheet.
 - Model policy rows and the bake-off (08). Until 07 ships `resolvePolicy`, the worker uses the
-  `default` model reported by `catalog-matting` `/healthz` and stores it in
+  `default` model reported by `catalog-matting` `/health` and stores it in
   `catalog_batches.options.policy` with `source = "default"` (section 5.2).
 - Load test, tuning, hand-over docs (09).
 
@@ -136,7 +136,7 @@ Add
 
 Change
 - `apps/worker/src/index.ts`: register `chunk`, `publish` and `finalize` in the route table; wire
-  catalog deps; `/healthz` lists `routes`.
+  catalog deps; `/health` lists `routes`.
 - `apps/web/app/page.tsx`: redirect to `/catalog`. `apps/web/app/layout.tsx`: nav "Opptra" logo,
   "Catalog images", user button "<email> · <Role> ▾" (03).
 - `infra/deploy.sh`: section 7.
@@ -278,11 +278,11 @@ No new secrets. Everything else used here was added by 02 to 05.
 ### 4.6 Matting client use
 
 The worker uses 05's `MattingClient` and `matteFor` unchanged: `POST <service>/matte?model=<id>`
-with the image at the model's send size (from the service's `/healthz` `inputSize`), PNG matte back
+with the image at the model's send size (from the service's `/health` `inputSize`), PNG matte back
 with `x-model`, `x-ms`; `POST <service>/convert` for HEIC and HEIF sources inside `prepare()`; OIDC
 token for the service's audience; timeout `MATTING_TIMEOUT_MS`; the breaker inside the client
 (5.4). The worker reads `MATTING_URL` (CPU service) and `MATTING_GPU_URL` (GPU service, optional;
-both defined in 05) and picks the matting service by model id: each service's `/healthz` lists
+both defined in 05) and picks the matting service by model id: each service's `/health` lists
 `models: [{ id, inputSize, target }]`, and the worker sends a model to the service that lists it,
 preferring `gpu`; when `MATTING_GPU_URL` is unset every model runs on the CPU service. The model
 id passed is `options.policy.matteModel` (5.2). `catalog-worker@` has a project-level
@@ -364,7 +364,7 @@ matting service): the first chunk that runs calls `deps.resolvePolicy(brandSlug,
 the batch's forced product type (or `"*"` for "Detect automatically") and stores the result once as
 the batch-level policy with a compare-and-set `UPDATE ... WHERE options->'policy' IS NULL`. In this
 spec `resolvePolicy` is a placeholder returning `{ matteModel: <the default from
-catalog-matting /healthz>, qaModel: CATALOG_QA_DEFAULT_MODEL or "", threshold: 75, floor: 60,
+catalog-matting /health>, qaModel: CATALOG_QA_DEFAULT_MODEL or "", threshold: 75, floor: 60,
 qaMode: "per_source", qaSampleRate: 1, source: "default" }`; 07 replaces it and adds per-product
 resolution by the detected product type (the matte model actually used is on
 `catalog_source_images.matte_model`, and `renderKey` takes the policy that was applied to that
@@ -853,7 +853,7 @@ with versioning and lifecycle, `infra/cors.json`, the scheduler jobs `catalog-sy
 - Runs the per-brand smoke (section 9, tier 5) before `gcloud builds submit`; stops on a non-zero
   exit so a failing smoke blocks the deploy.
 - Prints `WEB_URL`, `WORKER_URL`, `MATTING_URL` at the end.
-`/healthz` on the worker returns `{ ok, version, routes }` with the six task routes; on matting
+`/health` on the worker returns `{ ok, version, routes }` with the six task routes; on matting
 the version, loaded models and the default (05). `bash infra/deploy.sh` twice: the second run
 changes nothing.
 
@@ -875,7 +875,7 @@ coding). Worktrees `C:\Users\Sujan AH\Desktop\catalog-module-wt\06-<workstream>`
   tabs, attention shell, sheet preview, details, "Not refreshed" line; product page and brand page
   with their routes (attention, export, products search, brand export, aliases, product delete);
   home redirect and nav.
-- W4 infra (`06-infra`): `deploy.sh`, worker `/healthz` routes, `.gitignore`, `playwright.config.ts`.
+- W4 infra (`06-infra`): `deploy.sh`, worker `/health` routes, `.gitignore`, `playwright.config.ts`.
 - W5 tests (`06-tests`, starts after W1 to W4 merge on the feature branch): `catalog-smoke.ts`,
   the tier 3 real-data case, `catalog.human.spec.ts`.
 W1 to W4 are independent. W2 and W3 share `apps/web/lib/catalog/*`: W2 owns `batches.ts`,
@@ -981,7 +981,7 @@ CI gate on the PR: `pnpm lint && pnpm typecheck && pnpm test`.
 
 ## 10. Done criteria
 
-- All six worker routes live behind OIDC; `/healthz` on worker and matting show versions and the
+- All six worker routes live behind OIDC; `/health` on worker and matting show versions and the
   worker lists its routes.
 - A batch created in the deployed UI for a real brand with a zip and a pasted link list, two
   channels ticked, finishes with every non-skipped output `verified`, `is_live` with the recorded

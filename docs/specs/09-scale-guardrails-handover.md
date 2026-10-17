@@ -206,7 +206,7 @@ procedure the manager can follow within the 30-day window of noncurrent versions
 | `MATTING_BREAKER_FAILURES` | env (05) | 5 | false opens in matting_slow |
 | `MATTING_BREAKER_COOLDOWN_MS` | env (05) | 60000 | recovery too slow or too eager in matting_recovers |
 | `MATTING_TIMEOUT_MS` | env (05) | 60000 | p95 `matte_ms` shows healthy calls being cut off |
-| matting send size per model | `/healthz` `inputSize` (05) | 1024 for rembg built-ins, 2048 for the HR models, native for the dynamic models | never changed here; a different send size is a different candidate for 08 |
+| matting send size per model | `/health` `inputSize` (05) | 1024 for rembg built-ins, 2048 for the HR models, native for the dynamic models | never changed here; a different send size is a different candidate for 08 |
 
 Final values are written into `deploy.sh` and listed in `docs/plans/catalog-load-report.md` with
 the measurement that justified each change. Cost rules stay: min-instances 0 everywhere,

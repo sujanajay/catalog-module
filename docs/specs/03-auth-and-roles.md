@@ -243,7 +243,7 @@ admin with "You cannot remove the last admin." (400); `removePerson` of an unkno
 ### Route table with required roles
 
 Every request to the service has already passed IAP, so every route has a signed-in `@opptra.com`
-user; the role per row is the minimum. There is no public route: `/healthz` of the web is reachable
+user; the role per row is the minimum. There is no public route: `/health` of the web is reachable
 only by a signed-in person (Cloud Run's own health probes do not pass through IAP). This spec
 implements the `/` and `/api/people*` rows and the helper every other row uses; the other rows are
 implemented by the spec in brackets.
@@ -420,7 +420,7 @@ Tier 4 (human-like, Playwright on the deployed URL; `apps/web/test/human/`):
   Google account gets IAP's "You don't have access" page; an `@opptra.com` account signs in and sees
   "<email> · Viewer" (or Admin for the seed); the admin opens People, adds and removes a person,
   toggles the preview, signs out and is asked to sign in again.
-- A viewer's direct `POST /api/people` returns 403 with the exact sentence; the worker's `/healthz`
+- A viewer's direct `POST /api/people` returns 403 with the exact sentence; the worker's `/health`
   and OIDC behaviour are unchanged.
 - `.playwright/auth-state.json` exists on the integrator's machine after `login.ts`; `auth.human.spec.ts`
   passes against the deployed URL.

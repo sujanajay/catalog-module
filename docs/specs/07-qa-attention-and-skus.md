@@ -196,7 +196,7 @@ Columns: `matte_model` = first matte, `qa_model` = first judge, `threshold` 75, 
 `qa_mode` `per_source`, `qa_sample_rate` 1, `matte_model_second` = second matte, `shadow_mode`
 (`preserve_only | preserve_else_synthesise`), `qa_model_second` = second judge (columns defined in
 02; `ResolvedPolicy` carries them as `matteModelSecond`, `shadowMode`, `qaModelSecond`). The send size is not stored: 05 reads it per model from the matting
-service's `/healthz`. The second matte model is used when the first is not listed by any matting
+service's `/health`. The second matte model is used when the first is not listed by any matting
 service; the second judge when the first returns `qa_unavailable` twice in a row for a batch. When a
 model in the row is not listed by `MattingClient.health()` on either service, the worker falls back
 to the service's `default`, sets `counts.policyFallback = true` and logs it; nothing is shown to the

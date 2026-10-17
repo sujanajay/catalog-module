@@ -392,7 +392,7 @@ Rules for all sources:
 
 | Job | Candidates tested | Runs where | Licence / cost |
 |---|---|---|---|
-| Product matting, primary (every golden set) | `birefnet-general`, `birefnet-general-lite`, `bria-rmbg` (RMBG-2.0, rembg built-in), `birefnet-hr-matting` (BiRefNet HR-matting at 2048, custom ONNX), `birefnet-dynamic-matting` (native resolution rounded to a multiple of 32), `ben2-base` (BEN2 base through rembg's `ben_custom` session with our ONNX export; the id is ours), `inspyrenet-base` (InSPyReNet, `transparent-background` package) | `catalog-matting` (Cloud Run CPU, asia-south1: Python 3.12, FastAPI, onnxruntime CPU, 4 vCPU, 16 GiB or lazy-load with an LRU of two sessions, concurrency 1, min 0, max 20) and `catalog-matting-gpu` (asia-southeast1, one NVIDIA L4, zonal redundancy off, 4 vCPU / 16 GiB, concurrency 1, min 0, max 3); the worker picks the service by model id from each `/healthz` (`models: [{ id, inputSize, target }]`), preferring gpu; both measured in tier 3 (`x-ms`, both columns in the report) | MIT for the BiRefNet family, BEN2 base and InSPyReNet; CC BY-NC 4.0 for RMBG-2.0 (a permissive fallback is measured in the same bake-off). CPU: 4 to 8 s per image for general-lite, 10 to 20 s for general (tier 3); 24,000 sources about USD 23 (lite at 6 s) to USD 58 (general at 15 s); HR-matting at 2048 on CPU about 400 hours and USD 230, far past the 2-hour target. L4: general about 0.4 s, 2.7 hours, USD 3; HR-matting about 1.6 s, 11 hours, USD 13 |
+| Product matting, primary (every golden set) | `birefnet-general`, `birefnet-general-lite`, `bria-rmbg` (RMBG-2.0, rembg built-in), `birefnet-hr-matting` (BiRefNet HR-matting at 2048, custom ONNX), `birefnet-dynamic-matting` (native resolution rounded to a multiple of 32), `ben2-base` (BEN2 base through rembg's `ben_custom` session with our ONNX export; the id is ours), `inspyrenet-base` (InSPyReNet, `transparent-background` package) | `catalog-matting` (Cloud Run CPU, asia-south1: Python 3.12, FastAPI, onnxruntime CPU, 4 vCPU, 16 GiB or lazy-load with an LRU of two sessions, concurrency 1, min 0, max 20) and `catalog-matting-gpu` (asia-southeast1, one NVIDIA L4, zonal redundancy off, 4 vCPU / 16 GiB, concurrency 1, min 0, max 3); the worker picks the service by model id from each `/health` (`models: [{ id, inputSize, target }]`), preferring gpu; both measured in tier 3 (`x-ms`, both columns in the report) | MIT for the BiRefNet family, BEN2 base and InSPyReNet; CC BY-NC 4.0 for RMBG-2.0 (a permissive fallback is measured in the same bake-off). CPU: 4 to 8 s per image for general-lite, 10 to 20 s for general (tier 3); 24,000 sources about USD 23 (lite at 6 s) to USD 58 (general at 15 s); HR-matting at 2048 on CPU about 400 hours and USD 230, far past the 2-hour target. L4: general about 0.4 s, 2.7 hours, USD 3; HR-matting about 1.6 s, 11 hours, USD 13 |
 | Product matting, secondary (hard-cases set and one apparel set) | `birefnet-hr` (BiRefNet HR general), `birefnet-hrsod`, `rmbg-1.4` (fast CPU floor) | same | MIT; NC for RMBG-1.4 |
 | Matting refinement experiments (hard cases only, spec 08) | ViTMatte-small trimap refinement (trimap = winner mask eroded and dilated 8 to 16 px at 1536; measured by the human edge-flag rate); SAM 2.1 box prompt for `mixed_product` and `collage` cases (box from the winner mask's largest component or from the judge; compares `different_product` recall). Dropped: MODNet, MatteFormer, SAM 3, IC-Light V2, SUPIR, SeedVR2, 4x-UltraSharp | GPU service | MIT (ViTMatte, SAM 2) |
 | Output QA judge and product-type classifier | `google/gemini-2.5-flash-lite` (default, `CATALOG_QA_DEFAULT_MODEL`), `anthropic/claude-haiku-5.5` (second judge), `google/gemini-2.5-flash`, `google/gemini-3.5-flash-lite`, `qwen/qwen3-vl-30b-a3b-instruct`, `qwen/qwen3-vl-8b-instruct` (the six of `CATALOG_QA_CANDIDATES`); `google/gemini-3-flash-preview` and `openai/gpt-5.4-mini` only if none meets the gates | `catalog-worker` via `callLlmJson` (`packages/core/src/llm/llm.ts`, OpenRouter); the classifier uses the cheapest judge | API; about USD 0.0004 (Flash-Lite, Haiku 5.5, Qwen 30B-A3B) to 0.0013 (2.5 Flash, 3.5 Flash-Lite) per check; `EVAL_BUDGET_USD` estimates use per-model OpenRouter prices, not one constant; self-hosting a judge is not worth it |
@@ -406,7 +406,7 @@ in the bake-off report as a record. The owner has decided that any open-weight m
 this internal tool regardless of non-commercial terms, so NC models are full candidates and may be policy
 defaults; the winner is chosen on quality alone (spec 08 section 4.10).
 
-Send size per model (`SEND_LONG_SIDE_PX`, read from `/healthz` `inputSize`): 1024 for every rembg
+Send size per model (`SEND_LONG_SIDE_PX`, read from `/health` `inputSize`): 1024 for every rembg
 built-in (rembg resizes BiRefNet and RMBG sessions to 1024 internally, so a larger send buys nothing),
 2048 for `birefnet-hr-matting` and `birefnet-hr`, native (rounded to a multiple of 32, 256 to 2304) for
 the dynamic models; the matte is upscaled to source size with a sigma 1 blur. Every `remove()` call
@@ -453,7 +453,7 @@ targets `cpu` and `gpu`; `cloudbuild.yaml` builds images `matting` and `matting-
 (multipart image, `model` query) returns a PNG alpha matte at the resolution it received plus headers
 `x-model`, `x-ms`; `POST /convert` (multipart `file`) turns a HEIC/HEIF file into `image/png` at source
 resolution with EXIF orientation applied, headers `x-ms`, `x-input-format` (`pillow-heif`; pytest covers
-it on a small HEIC fixture); `GET /healthz` lists `models: [{ id, inputSize: number | "native", target:
+it on a small HEIC fixture); `GET /health` lists `models: [{ id, inputSize: number | "native", target:
 "cpu" | "gpu" }]` and `default`. Both run as `catalog-matting@` with OIDC (audiences `MATTING_URL` for
 CPU and `MATTING_GPU_URL` for GPU, caller `catalog-worker@`). `MATTING_GPU_URL` is optional: when unset
 every model runs on CPU and 2048 px candidates are reported "not run: no GPU service". The worker sends
@@ -636,7 +636,7 @@ Guardrails built into the product:
 - Every error state is a sentence with an action; no silent drops; the report lists everything that did
   not ship, every removed link and every channel not refreshed.
 - CI gate on every PR (`.github/workflows/ci.yml`): `pnpm lint && pnpm typecheck && pnpm test`;
-  `infra/bootstrap.sh` idempotent on a second run; `GET /healthz` on worker and matting report versions
+  `infra/bootstrap.sh` idempotent on a second run; `GET /health` on worker and matting report versions
   and routes.
 
 ## Brand master and Opptra SKU id mapping
@@ -694,7 +694,7 @@ per path). Private objects stay under their batch (`infra/lifecycle-assets.json`
 never removed); `staging/` deleted after 30 days; `exports/` kept. `catalog-test/` mirrors both layouts
 and is the only prefix tests may delete. `infra/cors.json` allows browser PUTs on the assets bucket.
 
-Worker (`apps/worker`, Node 20, esbuild): route table in `server.ts` with `GET /healthz` and the six task
+Worker (`apps/worker`, Node 20, esbuild): route table in `server.ts` with `GET /health` and the six task
 routes `/tasks/catalog/{sync-master,sweep,ingest,chunk,publish,finalize}` (`TaskRoute` in
 `packages/core/src/tasks.ts`; `enqueueTask(route, body, { delaySec?, taskId? })`; OIDC; `HandleResult`:
 200 done, 503 retry, 500 unexpected). Chunks (`catalog_chunks`) of whole products, about

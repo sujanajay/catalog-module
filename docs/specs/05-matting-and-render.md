@@ -22,7 +22,7 @@ are taken away. Compliance: a code check that the finished JPEG meets the channe
 ## Scope and non-scope
 
 In scope: `services/matting/` (Dockerfile with `cpu` and `gpu` targets, FastAPI app, models baked
-in, `/matte`, `/convert`, `/healthz`), the two Cloud Run services `catalog-matting` (asia-south1) and
+in, `/matte`, `/convert`, `/health`), the two Cloud Run services `catalog-matting` (asia-south1) and
 `catalog-matting-gpu` (asia-southeast1), `packages/core/src/catalog/render.ts` and its helpers,
 `shadow.ts` with the shadow decision rule, `compliance.ts`, the matting client with a circuit breaker
 and per-model service choice, `catalog-local render` and `--upload`, infra for both services.
@@ -37,11 +37,11 @@ caller's decision: `renderSource` returns bytes.
 
 ```
 services/matting/Dockerfile                     NEW  two targets: cpu (python:3.12-slim, onnxruntime CPU) and gpu (CUDA base, onnxruntime-gpu)
-services/matting/app.py                         NEW  FastAPI: POST /matte, POST /convert, GET /healthz
+services/matting/app.py                         NEW  FastAPI: POST /matte, POST /convert, GET /health
 services/matting/requirements-cpu.txt           NEW  rembg[cpu,cli], fastapi, uvicorn[standard], python-multipart, pillow, pillow-heif, numpy
 services/matting/requirements-gpu.txt           NEW  rembg[gpu,cli] (onnxruntime-gpu), the same web and image packages
 services/matting/README.md                      NEW  build and run locally; model list with licence per model; memory choice; the convert endpoint
-services/matting/tests/test_app.py              NEW  pytest: healthz shape, matte on a synthetic image, convert on a small HEIC fixture, bad input
+services/matting/tests/test_app.py              NEW  pytest: health shape, matte on a synthetic image, convert on a small HEIC fixture, bad input
 services/matting/tests/fixtures/small.heic      NEW  a tiny HEIC file for the convert test
 cloudbuild.yaml                                 CHANGE images "matting" (target cpu) and "matting-gpu" (target gpu) from services/matting/Dockerfile
 infra/bootstrap.sh                              CHANGE ensure_sa catalog-matting (02 may already have it; check-then-create), nothing else
@@ -249,12 +249,12 @@ export interface ModelInfo { id: string; inputSize: number | "native"; target: "
 export interface MattingClientOptions { services: MattingService[]; fetch?: typeof fetch; idToken?: (audience: string) => Promise<string>; model?: string; timeoutMs?: number }
 export class MattingClient {
   constructor(opts: MattingClientOptions);          // services from MATTING_URL (cpu) and, when set, MATTING_GPU_URL (gpu)
-  /** Picks the service that lists `model` in its /healthz (gpu preferred), sends a PNG downscaled to that model's inputSize on the long side, returns the matte upscaled to (width, height) with a 1 px blur. */
+  /** Picks the service that lists `model` in its /health (gpu preferred), sends a PNG downscaled to that model's inputSize on the long side, returns the matte upscaled to (width, height) with a 1 px blur. */
   matte(prepared: Prepared, model?: string): Promise<Matte>;
   /** POST /convert on the CPU service: HEIC/HEIF bytes in, PNG at source resolution out (orientation applied). Not behind the breaker: a failure throws and the source is marked unsupported with its sentence. */
   convert(buf: Buffer): Promise<Buffer>;
   readonly breaker: { state: "closed" | "open" | "half-open"; failures: number; openedAt: number | null };   // one breaker per service
-  /** Merged view of every service's /healthz, cached for HEALTH_TTL_MS (builder constant). `default` is the CPU service's default model. */
+  /** Merged view of every service's /health, cached for HEALTH_TTL_MS (builder constant). `default` is the CPU service's default model. */
   health(): Promise<{ ok: boolean; models: ModelInfo[]; default: string; versions: Record<"cpu" | "gpu", string | null> }>;
   /** The long side to send for a model: its inputSize, or for "native" the source long side rounded to a multiple of 32 and clamped to 256..2304. */
   sendLongSide(model: string, source: Size): number;
@@ -269,13 +269,13 @@ export async function matteFor(prepared: Prepared, client: MattingClient | null,
 ```
 
 Send size per model (this replaces any fixed 1536 px rule): the client reads `inputSize` from
-`/healthz`. It is 1024 for every rembg built-in (rembg resizes the BiRefNet and RMBG sessions to 1024
+`/health`. It is 1024 for every rembg built-in (rembg resizes the BiRefNet and RMBG sessions to 1024
 internally, so a larger send buys nothing), 2048 for `birefnet-hr-matting` and `birefnet-hr` (08's
 custom sessions), and `native` for the dynamic models, which means the source long side rounded to a
 multiple of 32 and clamped to 256..2304. The matte comes back at the sent size and is upscaled to
 the source size (below). `Matte.sentLongSide` and `Matte.target` are recorded for the report.
 
-Which service: the worker sends a model to the service whose `/healthz` lists it, preferring `gpu`
+Which service: the worker sends a model to the service whose `/health` lists it, preferring `gpu`
 when both do. When `MATTING_GPU_URL` is unset every model runs on the CPU service and any model only
 the GPU image carries is reported "not run: no GPU service" (08's harness reads this). The worker
 refuses to matte when `MATTING_URL` is unset (a clear startup error, not a silent fallback).
@@ -394,7 +394,7 @@ model. Therefore:
   `ZhengPeng7/BiRefNet_HR-matting`, id `birefnet-hr-matting`, 2048), BiRefNet dynamic-matting (id
   `birefnet-dynamic-matting`, native size), BiRefNet HR general (id `birefnet-hr`), and BEN2 base,
   where `ben2-base` is our id for a rembg `ben_custom` session pointed at our ONNX export by
-  `model_path`. `/healthz` lists whatever is loaded so 08's harness can tell.
+  `model_path`. `/health` lists whatever is loaded so 08's harness can tell.
 - Licences are recorded per model in `services/matting/README.md` (BiRefNet family and BEN2 base
   MIT; RMBG-2.0 CC BY-NC 4.0, gated on Hugging Face with the ONNX hosted by rembg) and repeated in
   08's bake-off report as a record. The owner has closed the licence question (08 section 4.10):
@@ -424,7 +424,7 @@ sessions, records the choice and the numbers in the README, and `deploy.sh` carr
   source resolution (RGB, or RGBA when the file has alpha); response `image/png` with headers
   `x-ms: <int milliseconds>`, `x-input-format: <heic|heif>`; a file Pillow cannot open -> 400
   `{"error": "not a HEIC or HEIF file"}`.
-- `GET /healthz`: `{"ok": true, "models": [{"id": "<id>", "inputSize": 1024 | 2048 | "native",
+- `GET /health`: `{"ok": true, "models": [{"id": "<id>", "inputSize": 1024 | 2048 | "native",
   "target": "cpu" | "gpu"}], "default": "<id>", "version": GIT_SHA}`.
 - No batching, no persistence, no logging of image bytes.
 
@@ -449,7 +449,7 @@ service account `catalog-matting@image-links-agent.iam.gserviceaccount.com` for 
 `catalog-worker@` already holds `roles/run.invoker` at project level, which covers both services. No
 GCE VM anywhere. `cloudbuild.yaml` gets two steps, `matting` (`--target cpu`, image
 `${_AR}/matting:${_TAG}`) and `matting-gpu` (`--target gpu`, image `${_AR}/matting-gpu:${_TAG}`),
-both from `services/matting/Dockerfile` with `--build-arg GIT_SHA=${_TAG}` so `/healthz` reports the
+both from `services/matting/Dockerfile` with `--build-arg GIT_SHA=${_TAG}` so `/health` reports the
 git short SHA.
 
 Expected speed and cost, measured in tier 3 and written in the report: CPU about 4 to 8 s per image
@@ -482,8 +482,8 @@ paths without touching the public bucket. `--limit` is for development loops onl
 | `MATTING_URL` | none (worker refuses to matte without it; local `http://localhost:8080`) | worker, catalog-local |
 | `MATTING_GPU_URL` | unset (optional; every model runs on CPU when unset) | worker, catalog-local |
 | `MATTE_MODELS` | `birefnet-general,birefnet-general-lite,birefnet-hrsod,bria-rmbg` | matting |
-| `DEFAULT_MATTE_MODEL` | `birefnet-general` | matting only; the worker takes `default` from `/healthz` or a `model_policy` row (07) |
-| `MATTE_TARGET` | `cpu` (set to `gpu` in the gpu image) | matting; reported in `/healthz` |
+| `DEFAULT_MATTE_MODEL` | `birefnet-general` | matting only; the worker takes `default` from `/health` or a `model_policy` row (07) |
+| `MATTE_TARGET` | `cpu` (set to `gpu` in the gpu image) | matting; reported in `/health` |
 | `MATTING_BREAKER_FAILURES` | `5` | worker (`BREAKER_FAILURES`) |
 | `MATTING_BREAKER_COOLDOWN_MS` | `60000` | worker (`BREAKER_COOLDOWN_MS`) |
 | `MATTING_TIMEOUT_MS` | `60000` | worker (`MATTING_TIMEOUT_MS`) |
@@ -495,7 +495,7 @@ Image constants, tuned in 08 on the golden set: `ALPHA_BBOX_THRESHOLD`, `BG_UNIF
 side as written above), `SHADOW_MIN_DARKNESS` (0.04), `SHADOW_MAX_DARKNESS` (0.6),
 `SHADOW_SYNTH_INTENSITY_GREY` (0.25), `SHADOW_SYNTH_INTENSITY_WHITE` (0.15), the synthesised shadow
 presets (softness, intensity, spread, direction, pose), `MAX_INPUT_BYTES` (40 MB, matching 04's fetch
-cap), `HEALTH_TTL_MS`. The send size is not a constant: it comes from `/healthz` per model.
+cap), `HEALTH_TTL_MS`. The send size is not a constant: it comes from `/health` per model.
 Operational constants, tuned in 09 under fault injection and load: `BREAKER_FAILURES`,
 `BREAKER_COOLDOWN_MS`, `MATTING_TIMEOUT_MS`, service `--concurrency`, the CPU service's memory
 choice. Each lives in one place with a comment, and `BG_TOLERANCE` is derived by a unit test that encodes a flat
@@ -553,7 +553,7 @@ Tier 1 (unit, vitest, sharp-generated images; deterministic byte-for-byte on rep
 - `passthrough`: an already compliant JPEG is re-encoded only (flag present, pixels unchanged
   within `BG_TOLERANCE`).
 - `BG_TOLERANCE` derivation test as described.
-- `matte.ts`: two fake servers with different `/healthz` model lists; a model listed by both goes to
+- `matte.ts`: two fake servers with different `/health` model lists; a model listed by both goes to
   the gpu one; a model listed only by cpu goes there; a model listed by neither throws a clear error;
   `sendLongSide` gives 1024 for a built-in, 2048 for an HR id, and for `native` the rounded and
   clamped source side (checks at 300 px, 1000 px, 5000 px); the request body's long side equals
@@ -568,7 +568,7 @@ Tier 1 (unit, vitest, sharp-generated images; deterministic byte-for-byte on rep
 Tier 2: not applicable (no DB in this spec); the worker integration is in 06.
 
 Python (`services/matting/tests/test_app.py`, run in the builder worktree and in the Docker build):
-- `/healthz` returns the shape above with the four models, each with `inputSize` 1024 and the
+- `/health` returns the shape above with the four models, each with `inputSize` 1024 and the
   image's `target`, plus `default` and `version`; `/matte` on a synthetic 256 px product-on-white PNG
   returns a PNG of the same size with mask values 0 at the corners and 255 at the centre, headers
   present; a test asserts (by inspecting the call) that `remove()` received an explicit `session`;
@@ -612,10 +612,10 @@ Tier 5 is not yet available; the smoke script arrives in 06.
 
 - Both images build (`cpu` and `gpu` targets); the CPU image passes pytest, runs locally and on Cloud
   Run as `catalog-matting` with min-instances 0; `catalog-matting-gpu` is deployed in asia-southeast1
-  (or the quota request is recorded); `/healthz` on each lists its models with `inputSize` and
+  (or the quota request is recorded); `/health` on each lists its models with `inputSize` and
   `target`; `/convert` turns a HEIC into a PNG; the worker can call both with OIDC as
   `catalog-worker@` (verified once from the deployed worker's logs or a Cloud Run job).
-- Every `remove()` call passes an explicit session; the send size comes from `/healthz` per model.
+- Every `remove()` call passes an explicit session; the send size comes from `/health` per model.
 - `renderSource` + `checkOutput` produce 100% compliant outputs on both real sets for all nine
   channels, with the flags described, Styli skips applied, the shadow decision rule applied with its
   flags, and the contact sheets were viewed.
