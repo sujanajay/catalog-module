@@ -1,4 +1,5 @@
-import { describe, expect, it } from "vitest";
+import dns from "node:dns";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { assertSafeUrl, isPrivateIp, safeFetch, UnsafeUrlError } from "./safe-url";
 
 const PUBLIC_IP = "34.120.10.10";
@@ -63,10 +64,38 @@ describe("assertSafeUrl", () => {
     expect(isPrivateIp("100.64.0.1")).toBe(true);
     expect(isPrivateIp("::ffff:a9fe:a9fe")).toBe(true);
     expect(isPrivateIp("64:ff9b::a00:1")).toBe(true);
+    // 6to4, Teredo and local-use NAT64 forms of 169.254.169.254
+    expect(isPrivateIp("2002:a9fe:a9fe::")).toBe(true);
+    expect(isPrivateIp("2001:0:4136:e378:8000:63bf:5601:5601")).toBe(true);
+    expect(isPrivateIp("64:ff9b:1::a9fe:a9fe")).toBe(true);
+  });
+
+  it("keeps the query string (which can carry an access token) out of error messages", () => {
+    expect(() => assertSafeUrl("http://example.com/x.jpg?sig=SECRET")).toThrow(/Only https links can be used: http:\/\/example\.com\/x\.jpg$/);
   });
 });
 
 describe("safeFetch", () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  it("checks the address again at connect time (DNS rebinding)", async () => {
+    // The pre-check sees a public address; the lookup made while connecting answers loopback.
+    vi.spyOn(dns, "lookup").mockImplementation(((_host: string, opts: dns.LookupOptions, cb: (...a: unknown[]) => void) => {
+      if (opts?.all) cb(null, [{ address: "127.0.0.1", family: 4 }]);
+      else cb(null, "127.0.0.1", 4);
+    }) as unknown as typeof dns.lookup);
+    await expect(safeFetch("https://rebind.example.com/x", { lookup: async () => [PUBLIC_IP] })).rejects.toBeInstanceOf(
+      UnsafeUrlError,
+    );
+  });
+
+  it("names the link without its query string when the download fails", async () => {
+    const f = fakeFetch({ "https://c.example.com/x.jpg?sig=SECRET": { status: 403 } });
+    const err = await safeFetch("https://c.example.com/x.jpg?sig=SECRET", { fetch: f, lookup }).catch((e: Error) => e);
+    expect(String(err)).toMatch(/c\.example\.com\/x\.jpg: the server answered 403/);
+    expect(String(err)).not.toContain("SECRET");
+  });
+
   it("follows two redirects, re-checking each hop, and returns the body", async () => {
     const f = fakeFetch({
       "https://a.example.com/start": { status: 302, headers: { location: "https://b.example.com/next" } },
