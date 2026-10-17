@@ -24,7 +24,7 @@ export function Toast({ message, action }: { message: string; action?: ToastActi
     <div className="toast" role="status" aria-live="polite">
       <span>{message}</span>
       {action ? (
-        <button type="button" className="toast-action" onClick={action.onClick}>
+        <button type="button" onClick={action.onClick}>
           {action.label}
         </button>
       ) : null}

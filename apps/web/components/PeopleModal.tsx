@@ -28,28 +28,26 @@ import {
   type PersonRow,
   type Role,
 } from "@/lib/people-copy";
+import { apiFetch, SessionEndedError } from "@/lib/fetch";
 import { useToast } from "./Toast";
 import { useViewerPreview } from "./ViewerPreview";
 
-/**
- * The single place this modal talks to the server. Phase 2 of spec 03 swaps it for `apiFetch` from
- * `lib/fetch.ts` (same header, plus the "Your session ended" handling on a 401).
- */
+/** The single place this modal talks to the server (apiFetch adds X-Requested-With). */
 function request(path: string, init: RequestInit = {}): Promise<Response> {
   const headers = new Headers(init.headers);
-  headers.set("X-Requested-With", "XMLHttpRequest");
   if (init.body !== undefined) headers.set("Content-Type", "application/json");
-  return fetch(path, { ...init, headers, cache: "no-store" });
+  return apiFetch(path, { ...init, headers, cache: "no-store" });
 }
 
-type Result<T> = { ok: true; data: T } | { ok: false; error: string };
+/** `error: null`: the failure is already on screen (the session-ended toast), so show nothing more. */
+type Result<T> = { ok: true; data: T } | { ok: false; error: string | null };
 
 async function send<T>(path: string, init?: RequestInit): Promise<Result<T>> {
   let res: Response;
   try {
     res = await request(path, init);
-  } catch {
-    return { ok: false, error: FALLBACK_ERROR };
+  } catch (err) {
+    return { ok: false, error: err instanceof SessionEndedError ? null : FALLBACK_ERROR };
   }
   if (!res.ok) {
     const body: unknown = await res.json().catch(() => null);
@@ -89,7 +87,7 @@ export default function PeopleModal({ currentEmail, currentRole, onClose }: Peop
     void send<{ people: PersonRow[] }>("/api/people").then((r) => {
       if (!live) return;
       if (r.ok) setPeople(r.data.people.map(({ email, role }) => ({ email, role })));
-      else toast(r.error);
+      else if (r.error) toast(r.error);
     });
     return () => {
       live = false;
@@ -111,7 +109,7 @@ export default function PeopleModal({ currentEmail, currentRole, onClose }: Peop
     setBusy(null);
     if (!r.ok) {
       // The select is controlled by `people`, so it shows the saved role again.
-      toast(r.error);
+      if (r.error) toast(r.error);
       return;
     }
     setPeople((list) => upsertRow(list ?? [], { email: r.data.email, role: r.data.role }));
@@ -124,7 +122,7 @@ export default function PeopleModal({ currentEmail, currentRole, onClose }: Peop
     const r = await send<void>(personPath(email), { method: "DELETE" });
     setBusy(null);
     if (!r.ok) {
-      toast(r.error);
+      if (r.error) toast(r.error);
       return;
     }
     setPeople((list) => (list ?? []).filter((p) => p.email !== email));
@@ -138,7 +136,7 @@ export default function PeopleModal({ currentEmail, currentRole, onClose }: Peop
     const r = await send<PersonRow>("/api/people", { method: "POST", body: JSON.stringify({ email, role: newRole }) });
     setBusy(null);
     if (!r.ok) {
-      toast(r.error);
+      if (r.error) toast(r.error);
       return;
     }
     setPeople((list) => upsertRow(list ?? [], { email: r.data.email, role: r.data.role }));

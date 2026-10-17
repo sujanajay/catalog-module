@@ -198,8 +198,10 @@ a {
 .menu a:hover {
   background: var(--soft);
 }
-.menu [aria-checked="true"]::before {
-  content: "\2713  ";
+.menu [role="menuitemcheckbox"][aria-checked="true"]::before {
+  content: "\2713";
+  display: inline-block;
+  width: 1.3em;
 }
 
 /* ---- page column ---- */
@@ -429,7 +431,8 @@ table {
   align-items: center;
   max-width: calc(100vw - 32px);
 }
-.toast-action {
+/* Any button in a toast, including the Reload button of the session-ended toast (lib/fetch.ts). */
+.toast button {
   font: inherit;
   font-weight: 600;
   color: #fff;
@@ -439,7 +442,7 @@ table {
   padding: 4px 12px;
   cursor: pointer;
 }
-.toast-action:hover {
+.toast button:hover {
   background: var(--orange-h);
 }
 

@@ -1,16 +1,16 @@
 "use client";
 
 // User button in the top bar (spec 03 "UI"): "<email> · <Role> ▾", or "<email> · Viewer (preview) ▾"
-// while previewing. Menu: "People" (admins only, hidden while previewing) and "Sign out", which goes to
-// IAP's URL that clears its session cookie. The menu closes on any click outside it.
-//
-// While previewing, the People item (where the switch lives) is hidden, so the menu also offers the
-// checked "Preview as viewer" item to turn the preview off again.
+// while previewing. Menu: "People" (admins only, hidden while previewing); "Preview as viewer", a
+// checkable item offered to every role per the permission matrix (the People modal keeps its own
+// switch); "Sign out", which goes to IAP's URL that clears its session cookie. The menu closes on any
+// click outside it.
 
 import { useEffect, useId, useRef, useState } from "react";
 import {
   backToRoleToast,
   PREVIEW_LABEL,
+  PREVIEW_ON_TOAST,
   showPeopleMenuItem,
   SIGN_OUT_URL,
   userButtonLabel,
@@ -78,20 +78,18 @@ export default function UserMenu({ email, role }: UserMenuProps) {
               People
             </button>
           ) : null}
-          {previewing ? (
-            <button
-              type="button"
-              role="menuitemcheckbox"
-              aria-checked="true"
-              onClick={() => {
-                setOpen(false);
-                setPreviewing(false);
-                toast(backToRoleToast(role));
-              }}
-            >
-              {PREVIEW_LABEL}
-            </button>
-          ) : null}
+          <button
+            type="button"
+            role="menuitemcheckbox"
+            aria-checked={previewing}
+            onClick={() => {
+              setOpen(false);
+              setPreviewing(!previewing);
+              toast(previewing ? backToRoleToast(role) : PREVIEW_ON_TOAST);
+            }}
+          >
+            {PREVIEW_LABEL}
+          </button>
           <a role="menuitem" href={SIGN_OUT_URL}>
             Sign out
           </a>

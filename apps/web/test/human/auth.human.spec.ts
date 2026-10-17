@@ -78,9 +78,13 @@ test.describe("admin", () => {
       await userButton.click();
       await expect(page.getByRole("menuitem", { name: "Sign out" })).toBeVisible();
       await expect(page.getByRole("menuitem", { name: "People" })).toHaveCount(0);
+      await expect(page.getByRole("menuitemcheckbox", { name: "Preview as viewer" })).toHaveAttribute(
+        "aria-checked",
+        "true",
+      );
     });
 
-    await test.step("turns the preview off again", async () => {
+    await test.step("turns the preview off again from the user menu", async () => {
       await page.getByRole("menuitemcheckbox", { name: "Preview as viewer" }).click();
       await expect(toast).toHaveText("Back to Admin.");
       await expect(userButton).toHaveText(/ · Admin ▾$/);
