@@ -124,11 +124,16 @@ IAP_RESOURCE=(--resource-type=cloud-run --service=catalog-web --region="$REGION"
 IAP_PROJECT_WARN="WARN: $IAP_ROLE for $IAP_MEMBER is granted at project level; this also lets every Opptra account open the earlier ila-web. See docs/solutions/catalog-iap.md."
 IAP_POLICY=$(gcv iap web get-iam-policy "${IAP_RESOURCE[@]}" --flatten='bindings[].members' \
   --format='csv[no-heading](bindings.role,bindings.members)' 2>/dev/null || true)
-PROJECT_POLICY=$(gcv projects get-iam-policy "$PROJECT" --flatten='bindings[].members' \
-  --format='csv[no-heading](bindings.role,bindings.members)')
+# Read only when the resource-level check misses (the common re-run skips this gcloud call).
+project_has_iap_binding() {
+  local policy
+  policy=$(gcv projects get-iam-policy "$PROJECT" --flatten='bindings[].members' \
+    --format='csv[no-heading](bindings.role,bindings.members)') || exit 1
+  grep -qxF "$IAP_ROLE,$IAP_MEMBER" <<<"$policy"
+}
 if grep -qxF "$IAP_ROLE,$IAP_MEMBER" <<<"$IAP_POLICY"; then
   echo "==> IAP access: SKIP ($IAP_MEMBER holds $IAP_ROLE on catalog-web)"
-elif grep -qxF "$IAP_ROLE,$IAP_MEMBER" <<<"$PROJECT_POLICY"; then
+elif project_has_iap_binding; then
   echo "==> IAP access: SKIP ($IAP_MEMBER holds $IAP_ROLE at project level from an earlier run)"
   echo "$IAP_PROJECT_WARN" >&2
 else
