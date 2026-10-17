@@ -46,3 +46,13 @@ await closeDb();
 The nightly sync upserts `brand_master` by slug. A manual row whose slug now appears in the
 warehouse is switched to `source = 'warehouse'`, takes the warehouse's name and line, and keeps
 its id, so nothing that already points at the brand changes. Brands are never deleted by the sync.
+
+## Warehouse mapping notes (master sync)
+
+- `sku_map` holds one row per distinct, non-blank warehouse code (`product_code` for softline, `sku`
+  for hardline). The raw masters have a few blank and repeated codes, so the row count is slightly
+  below the raw 16,612 + 335 rows the spec quotes; the last row of a repeated code wins and the sync
+  logs a warning with the count. The tier 3 test asserts every distinct code is present.
+- Hardline marketplace ids are mapped onto the `channel_ids` keys (confirmed by the owner on
+  2026-10-17): `noon_uae_ksa_marketplace_sku` -> `noon_ae`, `noon_uae_ksa_retail_sku` -> `noon_sa`,
+  `trendyol_uae_ksa_id` -> `trendyol`, `styli_ksa_id` -> `styli_sku`.

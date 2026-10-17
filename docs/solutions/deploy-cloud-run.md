@@ -40,6 +40,16 @@ first and falls back to project level with a WARN line.
 - deploy.sh writes the narrowed CORS file to a temp path and passes it through `cygpath -m` so both
   node and gcloud (Windows programs) can open it.
 
+## Node 22, not Node 20
+Spec 02 says Node 20; the images (`node:22-slim`), esbuild `target: node22`, `engines.node >=22` and
+CI use Node 22 instead (approved by the owner on 2026-10-17: Node 20 is end of life). `undici`
+(used by `safeFetch` to pin the checked address) needs Node 22.19 or newer.
+
+## DB_HOST is the private IP
+deploy.sh reads the address of type `PRIVATE` from `gcloud sql instances describe ila-pg`
+(`ipAddresses.filter("type:PRIVATE")`), not `ipAddresses[0]`: with a public IP enabled the first
+entry is the public one, which the services cannot reach with `--vpc-egress=private-ranges-only`.
+
 ## Rollback
 deploy.sh tags images with the git short SHA. To roll back, check out the previous commit and run
 `SKIP_BUILD=1 bash infra/deploy.sh`.

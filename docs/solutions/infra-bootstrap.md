@@ -35,10 +35,18 @@ an org policy or BigQuery rights in another project).
   a folder in the middle of the name. Rules for `/uploads/`, `/derived/` and `/staging/` under
   `catalog/<brand>/<batch>/` therefore cannot be written as conditions; `lifecycle-assets.json` only
   carries the `daysSinceCustomTime: 180` rule (superseded raw, whose `customTime` the publish step sets).
-- DB password: generated with `openssl rand`, piped to `gcloud secrets create --data-file=-` and
-  passed to `gcloud sql users create --password`; never echoed or written to disk. If the secret
-  exists but the user does not, a new secret version is added and the user is created. If the user
-  exists but the secret does not, the script stops rather than resetting the password.
+  Consequence: batch uploads, derived mattes and staging JPEGs in the private bucket are never removed
+  automatically (the spec's 180-day and 30-day rules are not applied). Storage grows with every batch
+  until a later spec adds a sweep-based cleanup or moves scratch data under a prefix a rule can match.
+- DB password: generated with `openssl rand`, piped to `gcloud secrets create --data-file=-`, and
+  the SQL user is created through the Cloud SQL Admin API (`users.insert`) with curl reading its token,
+  headers and body from stdin (`curl -K -`). Never pass a secret as a gcloud flag: gcloud writes every
+  flag value to its debug log (`%APPDATA%\gcloud\logs\<date>\*.log`, "Running [...] with arguments"),
+  and a flag is visible in the process list. The first bootstrap run (2026-10-17) still used
+  `gcloud sql users create --password`, so that day's log holds the `catalog_app` password; delete
+  that log file (and the earlier app's 2026-10-02 log, which holds `ila_app`'s). If the secret exists
+  but the user does not, a new secret version is added and the user is created. If the user exists
+  but the secret does not, the script stops rather than resetting the password.
 - An expired gcloud login makes `add-iam-policy-binding` print a reauth error; re-run
   `gcloud auth login` and verify with `gcloud projects get-iam-policy`.
 
@@ -48,6 +56,12 @@ an org policy or BigQuery rights in another project).
   (`roles/secretmanager.secretAccessor` on `catalog-db-password`, and on `openrouter-api-key` for the
   worker) are tried at resource level and fall back to project level with a WARN line. Secrets are
   bound per secret because this project also holds other apps' secrets.
+- **Secret access fell back to project level (2026-10-17).** `gcloud secrets add-iam-policy-binding`
+  on `catalog-db-password` was denied (the operator lacks `secretmanager.secrets.setIamPolicy`), so
+  `catalog-web@` and `catalog-worker@` hold `roles/secretmanager.secretAccessor` at project level.
+  Both can therefore read every secret in the project, including `openrouter-api-key` and the earlier
+  app's secrets (the worker's `openrouter-api-key` binding is SKIP for that reason). To narrow it, an
+  admin with Secret Manager IAM rights grants the role per secret and removes the project binding.
 - Bucket bindings are never widened to project level: that would give `catalog-web@` write access to
   the public bucket. A denial prints the exact command and the script exits 2.
 - `catalog-worker@` gets `roles/storage.objectUser` on the public bucket (overwrite and scoped delete
