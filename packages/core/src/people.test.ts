@@ -130,6 +130,12 @@ describe("seedAdmin", () => {
     await seedAdmin(db, "  Sujan@Opptra.com ");
     expect((await userRows()).map((r) => r.email)).toEqual([ADMIN]);
   });
+
+  it("refuses an address outside the allowed domain and inserts nothing", async () => {
+    await expect(seedAdmin(db, "sujan@gmail.com")).rejects.toThrow("Only @opptra.com addresses can be added.");
+    await expect(seedAdmin(db, "not-an-email")).rejects.toBeInstanceOf(PeopleError);
+    expect(await userRows()).toEqual([]);
+  });
 });
 
 describe("roleFor", () => {

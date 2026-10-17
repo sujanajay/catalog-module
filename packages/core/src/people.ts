@@ -155,11 +155,13 @@ export async function roleFor(db: Db, email: string): Promise<Role> {
 
 /**
  * Seed the first admin (migrate job, after the migrations). Idempotent: an existing row is left as
- * it is, so a later role change by an admin survives a redeploy. Returns true when a row was inserted.
+ * it is, so a later role change by an admin survives a redeploy. A removed seed admin has no row, so
+ * the next deploy seeds them again (spec 03 prescribes ON CONFLICT DO NOTHING). The address must be
+ * of the allowed domain, so a typo cannot create an admin who can never sign in. Returns true when a
+ * row was inserted.
  */
-export async function seedAdmin(db: Db, email: string): Promise<boolean> {
-  const e = normalizeEmail(email);
-  if (!e.includes("@")) throw new Error("seedAdmin: SEED_ADMIN_EMAIL is not an email address");
+export async function seedAdmin(db: Db, email: string, allowedDomain: string = allowedDomainFromEnv()): Promise<boolean> {
+  const e = requireAllowedEmail(email, allowedDomain);
   const rows = await db
     .insert(users)
     .values({ email: e, role: "admin", addedBy: SEED_ADDED_BY })
