@@ -8,10 +8,12 @@ import { brandSlug } from "./naming";
 
 export interface BrandOption { slug: string; name: string; line: "softline" | "hardline"; source: "warehouse" | "manual" }
 
+const brandOptionColumns = { slug: brandMaster.slug, name: brandMaster.name, line: brandMaster.line, source: brandMaster.source };
+
 /** Every brand, grouped by line (softline first), sorted by name. */
 export async function listBrandOptions(db: Db): Promise<BrandOption[]> {
   return db
-    .select({ slug: brandMaster.slug, name: brandMaster.name, line: brandMaster.line, source: brandMaster.source })
+    .select(brandOptionColumns)
     .from(brandMaster)
     .orderBy(
       sql`CASE WHEN ${brandMaster.line} = 'softline' THEN 0 ELSE 1 END`,
@@ -41,7 +43,7 @@ export async function addManualBrand(
     console.log(JSON.stringify({ severity: "INFO", message: "manual brand added", slug, createdBy: input.createdBy }));
   }
   const [row] = await db
-    .select({ slug: brandMaster.slug, name: brandMaster.name, line: brandMaster.line, source: brandMaster.source })
+    .select(brandOptionColumns)
     .from(brandMaster)
     .where(eq(brandMaster.slug, slug));
   if (!row) throw new Error(`Brand ${slug} could not be read back after insert.`);

@@ -1,6 +1,6 @@
 // Channel table (spec 02, "Channel table"): the marketplace image rules sheet, encoded exactly.
 // Nothing is pre-ticked and no channel defaults are stored; the groups only order the wizard cards.
-import type { ChannelId } from "./types";
+import { CHANNEL_IDS, type ChannelId } from "./types";
 
 export interface Size {
   w: number;
@@ -179,17 +179,8 @@ export const CHANNELS: Record<ChannelId, ChannelSpec> = {
 };
 
 /** The row order of the rules sheet. */
-export const CHANNEL_ORDER: ChannelId[] = [
-  "noon",
-  "namshi",
-  "trendyol",
-  "styli",
-  "centrepoint",
-  "sixthstreet",
-  "vogacloset",
-  "amazon",
-  "shein",
-];
+/** The channel table's row order (the order of CHANNEL_IDS). */
+export const CHANNEL_ORDER: ChannelId[] = [...CHANNEL_IDS];
 
 export function channel(id: ChannelId): ChannelSpec {
   const spec = CHANNELS[id];

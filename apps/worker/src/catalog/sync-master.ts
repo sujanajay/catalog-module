@@ -3,6 +3,7 @@
 // thrown and the server answers 500.
 import { BigQuerySyncError, syncMaster, type BigQueryLike } from "@catalog/core/catalog/master-sync";
 import type { Db } from "@catalog/core/db/client";
+import type { HandleResult } from "../server";
 
 export interface SyncMasterDeps {
   db: Db;
@@ -10,8 +11,8 @@ export interface SyncMasterDeps {
   env?: NodeJS.ProcessEnv;
 }
 
-/** Same shape as HandleResult in server.ts: 200 done, 503 retry, 500 unexpected. */
-export interface SyncMasterResult { httpStatus: number; outcome: string }
+/** 200 done, 503 retry (BigQuery error), 500 unexpected. */
+export type SyncMasterResult = HandleResult;
 
 export async function handleSyncMaster(deps: SyncMasterDeps, _body: Record<string, unknown>): Promise<SyncMasterResult> {
   try {

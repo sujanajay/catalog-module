@@ -21,9 +21,7 @@ export const TASK_ROUTES = [
   "/tasks/catalog/finalize",
 ] as const;
 
-export type TaskRoute =
-  | "/tasks/catalog/sync-master" | "/tasks/catalog/sweep" | "/tasks/catalog/ingest"
-  | "/tasks/catalog/chunk" | "/tasks/catalog/publish" | "/tasks/catalog/finalize";
+export type TaskRoute = (typeof TASK_ROUTES)[number];
 
 /** Minimal surface of `CloudTasksClient` we use - lets tests pass a fake. */
 export type TasksClientLike = Pick<CloudTasksClient, "createTask">;

@@ -3,7 +3,7 @@
 // the caller (chosen by model_policy); there is no default model and no model env var here.
 import { chatCompletion, type ChatCompletionResponse } from "./openrouter";
 import type { OpenRouterDeps } from "./types";
-import { refsToImageParts, sumUsage } from "./util";
+import { readCost, refsToImageParts, sumUsage, type ImageRef } from "./util";
 
 /**
  * Output cap for LLM calls. Generous on purpose: reasoning tokens count against max_tokens, and a
@@ -11,10 +11,7 @@ import { refsToImageParts, sumUsage } from "./util";
  */
 export const LLM_MAX_TOKENS = 4000;
 
-export interface LlmImage {
-  mime: string;
-  data: Buffer;
-}
+export type LlmImage = ImageRef;
 
 export type LlmContentPart = { type: "text"; text: string } | { type: "image_url"; image_url: { url: string } };
 
@@ -85,7 +82,7 @@ export async function callLlm(messages: LlmMessage[], opts: LlmCallOptions, deps
   if (opts.maxTokens !== undefined) body.max_tokens = opts.maxTokens;
   const res = await chatCompletion<ChatCompletionResponse>(body, deps);
   const usage = (res.usage ?? {}) as Record<string, unknown>;
-  const cost = typeof usage.cost === "number" && Number.isFinite(usage.cost) ? usage.cost : 0;
+  const cost = readCost(usage) ?? 0;
   const text = responseText(res);
   if (!text.trim()) {
     const reason = res.choices?.[0]?.finish_reason ?? res.error?.message ?? "no content";
@@ -144,13 +141,8 @@ export async function callLlmJson<T = Record<string, unknown>>(
 
 export function combine<T>(results: LlmResult[], value: T): LlmJsonResult<T> {
   const last = results[results.length - 1]!;
-  return {
-    value,
-    text: last.text,
-    usage: results.length === 1 ? last.usage : sumUsage(results.map((r) => r.usage)),
-    costUsd: results.reduce((s, r) => s + r.costUsd, 0),
-    calls: results.length,
-  };
+  const { usage, costUsd } = addCosts(results);
+  return { value, text: last.text, usage, costUsd, calls: results.length };
 }
 
 /** Sum the cost and usage of several results. */

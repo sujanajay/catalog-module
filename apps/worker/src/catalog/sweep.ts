@@ -2,6 +2,7 @@
 // for SWEEP_STALE_MS is marked failed and its product locks are released. Idempotent: a second run
 // finds nothing, because the swept batches are no longer in an active status.
 import { sql } from "drizzle-orm";
+import type { BatchStatus } from "@catalog/core/catalog/types";
 import type { Db } from "@catalog/core/db/client";
 import type { HandleResult } from "../server";
 
@@ -9,7 +10,7 @@ import type { HandleResult } from "../server";
 export const SWEEP_STALE_MS = 2 * 60 * 60 * 1000;
 
 /** Batch statuses that mean "work in flight". */
-export const SWEEPABLE_STATUSES = ["ingesting", "matting", "rendering", "qa", "publishing"] as const;
+export const SWEEPABLE_STATUSES = ["ingesting", "matting", "rendering", "qa", "publishing"] as const satisfies readonly BatchStatus[];
 
 export const SWEEP_ERROR = "No progress for 2 hours. Start the batch again.";
 
