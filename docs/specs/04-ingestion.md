@@ -775,7 +775,7 @@ Tiers 4 and 5 are not required by this spec.
   busy products; the preview has no SKU KPI and no SKU warning.
 - Tier 1 and 2 green in CI; tier 3 green on the integrator's machine with cleanup confirmed (the test
   logs `deleted <n> objects under catalog-test/<run-id>/` and a final `listObjects` is empty).
-- `handleIngestTask` registered on `/tasks/catalog/ingest`; the deployed worker's `/healthz` lists it.
+- `handleIngestTask` registered on `/tasks/catalog/ingest`; the deployed worker's `/health` lists it.
 - The CLI collect mode works on a folder, a zip and a links xlsx.
 - `pnpm lint && pnpm typecheck && pnpm test` green; CI green.
 

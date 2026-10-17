@@ -54,8 +54,8 @@ const post = (path: string, headers: Record<string, string> = {}, body: unknown 
   });
 
 describe("worker HTTP", () => {
-  it("GET /healthz lists the routes without auth", async () => {
-    const res = await fetch(`${base}/healthz`);
+  it("GET /health lists the routes without auth", async () => {
+    const res = await fetch(`${base}/health`);
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({
       ok: true,
@@ -65,7 +65,7 @@ describe("worker HTTP", () => {
     expect(verifyIdToken).not.toHaveBeenCalled();
   });
 
-  it("405 for anything but POST outside /healthz", async () => {
+  it("405 for anything but POST outside /health", async () => {
     expect((await fetch(`${base}/tasks/catalog/sweep`)).status).toBe(405);
     expect((await fetch(`${base}/nope`)).status).toBe(405);
     expect((await fetch(`${base}/tasks/catalog/sweep`, { method: "PUT" })).status).toBe(405);

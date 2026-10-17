@@ -63,7 +63,7 @@ function logError(message: string, fields: Record<string, unknown>): void {
 
 export async function handleRequest(deps: ServerDeps, req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
   const { pathname } = new URL(req.url ?? "/", "http://localhost");
-  if (pathname === "/healthz" && (req.method === "GET" || req.method === "HEAD")) {
+  if (pathname === "/health" && (req.method === "GET" || req.method === "HEAD")) {
     return send(res, 200, { ok: true, version: deps.version, routes: Object.keys(deps.routes) });
   }
   if (req.method !== "POST") return send(res, 405, { error: "method not allowed" });

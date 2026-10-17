@@ -1,4 +1,4 @@
-// catalog-worker HTTP entry: /healthz plus the task routes (spec 02 "Worker server").
+// catalog-worker HTTP entry: /health plus the task routes (spec 02 "Worker server").
 import { OAuth2Client } from "google-auth-library";
 import { createBigQuery, type BigQueryLike } from "@catalog/core/catalog/master-sync";
 import { releaseLocks } from "@catalog/core/catalog/products";
@@ -19,7 +19,7 @@ if (auth.skip) {
   console.error("WORKER_URL and WORKER_SA_EMAIL must be set; task routes return 500 until they are.");
 }
 
-// One BigQuery client per process, created on first query so /healthz never needs BigQuery. A failed
+// One BigQuery client per process, created on first query so /health never needs BigQuery. A failed
 // start is not cached, and it fails inside syncMaster's query, so the route answers 503 and the
 // scheduler retries.
 let bigQuery: Promise<BigQueryLike> | undefined;
@@ -34,8 +34,8 @@ const lazyBigQuery: BigQueryLike = {
 };
 
 const routes: ServerDeps["routes"] = {
-  // Order matters: /healthz lists ["/tasks/catalog/sync-master", "/tasks/catalog/sweep"].
-  // The DB handle is taken lazily inside each handler so /healthz works before the DB is reachable.
+  // Order matters: /health lists ["/tasks/catalog/sync-master", "/tasks/catalog/sweep"].
+  // The DB handle is taken lazily inside each handler so /health works before the DB is reachable.
   "/tasks/catalog/sync-master": (body) => handleSyncMaster({ db: getDb(), bq: lazyBigQuery, env: process.env }, body),
   "/tasks/catalog/sweep": (body) => handleSweep({ db: getDb(), releaseLocks }, body),
 };

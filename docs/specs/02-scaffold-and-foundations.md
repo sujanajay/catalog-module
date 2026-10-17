@@ -33,7 +33,7 @@ for the QA judge and the product-type classifier (07).
 ## Scope and non-scope
 
 In scope: the repo scaffold; the lift list; libraries in `packages/core`; schema and migration
-`0000_init.sql`; the worker server with `/healthz`, `/tasks/catalog/sync-master` and
+`0000_init.sql`; the worker server with `/health`, `/tasks/catalog/sync-master` and
 `/tasks/catalog/sweep`; `infra/bootstrap.sh` and `infra/deploy.sh`; the `test:real` harness; CI.
 
 Out of scope: Google sign-in and roles (03, which also adds the `users` table in its own migration
@@ -636,13 +636,14 @@ export interface ServerDeps {
 }
 ```
 
-`handleRequest`: `GET /healthz` returns `{ ok: true, version, routes: Object.keys(deps.routes) }`
+`handleRequest`: `GET /health` returns `{ ok: true, version, routes: Object.keys(deps.routes) }`
 without auth; every other path must be a `POST` (405 otherwise), must pass `authorize()` from the
 lifted `auth.ts` (401 or 403), must be in `routes` (404 otherwise) and must carry a JSON object body
 (400 otherwise). The handler's `HandleResult` is sent as `{ outcome }` with its status. Unexpected
-throws are logged as structured JSON (`severity: "ERROR"`) and answered 500. This worker `/healthz`
-contract does not change later; the matting services' own `/healthz` (05) is a different endpoint
+throws are logged as structured JSON (`severity: "ERROR"`) and answered 500. This worker `/health`
+contract does not change later; the matting services' own `/health` (05) is a different endpoint
 that lists `models: [{ id, inputSize, target: "cpu" | "gpu" }]` and `default`.
+The path is `/health`, not `/healthz`: Cloud Run reserves `/healthz` (its front end answers 404 and the request never reaches the container).
 
 Handlers in this spec (`apps/worker/src/catalog/`):
 - `sync-master.ts`: `handleSyncMaster(deps, body)` runs `syncMaster` and returns
@@ -931,7 +932,7 @@ Tier 1 (unit, vitest, fakes only):
 - `llm/`: `chatCompletion` redacts the key in errors and retries once on 429; `callLlm` throws when
   no model is given; `parseJsonLoose` cases lifted.
 - `spend.ts`: `dailyCapFromEnv` defaults and invalid values; `checkCaps` reasons.
-- `server.ts`: `/healthz` lists routes; 405, 401/403, 404, 400 paths; dispatch to the right handler;
+- `server.ts`: `/health` lists routes; 405, 401/403, 404, 400 paths; dispatch to the right handler;
   `retryCount` passed through.
 - `sku-mapping.ts`: each method hits in order on a PGlite-seeded `sku_map`; several sizes sorted;
   `unresolved` when nothing matches; manual map wins only after the others miss.
@@ -980,7 +981,7 @@ outputs pasted in the PR. Tier 4 and 5 do not apply yet (nothing an operator can
   lifecycle, the assets lifecycle and CORS, the queue, the three service accounts, the IAM bindings
   (or printed the exact commands), and the two scheduler jobs; a second run is all SKIP.
 - `deploy.sh` built the two images, ran `catalog-migrate`, deployed `catalog-worker` (private) and
-  `catalog-web` (private, placeholder page); `GET ${WORKER_URL}/healthz` through an identity
+  `catalog-web` (private, placeholder page); `GET ${WORKER_URL}/health` through an identity
   token returns `{ ok, version, routes: ["/tasks/catalog/sync-master", "/tasks/catalog/sweep"] }`;
   one manual `gcloud scheduler jobs run catalog-sync-master` followed by `SELECT count(*) FROM sku_map`
   shows rows.
@@ -989,7 +990,7 @@ outputs pasted in the PR. Tier 4 and 5 do not apply yet (nothing an operator can
 ## Merge, deploy, report
 
 Follow `00-execution-protocol.md`. One PR from `feat/catalog-02-scaffold-and-foundations` with the
-test output, the two bootstrap runs and the `/healthz` response. Deploy with `infra/deploy.sh`. The
+test output, the two bootstrap runs and the `/health` response. Deploy with `infra/deploy.sh`. The
 report lists what shipped, the test evidence, anything excluded and why, and confirms that 03 needs
 no manual step from the human (IAP uses the Google-managed OAuth client). It ends with "Ready for the
 next spec: 03 Auth and roles".
