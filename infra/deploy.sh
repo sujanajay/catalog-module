@@ -133,8 +133,15 @@ elif grep -qxF "$IAP_ROLE,$IAP_MEMBER" <<<"$PROJECT_POLICY"; then
   echo "$IAP_PROJECT_WARN" >&2
 else
   echo "==> IAP access: CREATE $IAP_ROLE -> $IAP_MEMBER on catalog-web"
-  if ! gcloud iap web add-iam-policy-binding "${IAP_RESOURCE[@]}" --quiet \
-      --member="$IAP_MEMBER" --role="$IAP_ROLE" --condition=None >/dev/null; then
+  # Only a permission denial falls back to the wider project-level grant; any other failure (network,
+  # quota, a bad flag) stops the deploy instead of silently widening access to ila-web.
+  if ! IAP_ERR=$(gcloud iap web add-iam-policy-binding "${IAP_RESOURCE[@]}" --quiet \
+      --member="$IAP_MEMBER" --role="$IAP_ROLE" --condition=None 2>&1 >/dev/null); then
+    if ! grep -qiE 'PERMISSION_DENIED|does not have .*permission|permission denied' <<<"$IAP_ERR"; then
+      echo "$IAP_ERR" >&2
+      echo "ERROR: the resource-level IAP binding failed for a reason other than a permission denial" >&2
+      exit 1
+    fi
     echo "==> IAP access: resource-level binding denied; CREATE at project level instead"
     gcloud projects add-iam-policy-binding "$PROJECT" --quiet --condition=None \
       --member="$IAP_MEMBER" --role="$IAP_ROLE" >/dev/null
