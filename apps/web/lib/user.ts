@@ -1,9 +1,11 @@
 // Who is calling, and what may they do (spec 03, "The IAP identity in the app").
 // currentUser(): IAP JWT -> allowedEmail -> role lookup, on every call (nothing about the role is
-// cached, so a change in the People modal applies at once). requireRole(): ForbiddenError below min.
+// cached across requests, so a change in the People modal applies at once). requireRole():
+// ForbiddenError below min.
 import { headers } from "next/headers";
-import type { Role } from "@catalog/core/catalog/types";
-import { roleFor } from "@catalog/core/people";
+import { cache } from "react";
+import { ROLES, type Role } from "@catalog/core/catalog/types";
+import { allowedDomainFromEnv, roleFor } from "@catalog/core/people";
 import { allowedEmail } from "./auth-rules";
 import { db } from "./db";
 import { ForbiddenError, HttpError, unauthorized } from "./errors";
@@ -14,7 +16,6 @@ export type CurrentUser = { email: string; role: Role };
 /** Looks up (and, per the auto-viewer rule, creates) the role of a verified email. */
 export type RoleLookup = (email: string) => Promise<Role>;
 
-const DEFAULT_DOMAIN = "opptra.com";
 const DEFAULT_DEV_EMAIL = "sujan@opptra.com";
 
 /** Production lookup: the users table, with the auto-viewer rule (packages/core/src/people.ts). */
@@ -72,24 +73,30 @@ async function verifiedEmail(source?: Headers | Request): Promise<string> {
   return (await verifyIapJwt(token, audience, iapDeps)).email;
 }
 
+async function resolveUser(source?: Headers | Request): Promise<CurrentUser> {
+  const email = await verifiedEmail(source);
+  const domain = allowedDomainFromEnv();
+  if (!allowedEmail(email, domain)) throw new HttpError(403, `Use your @${domain} Google account.`);
+  return { email, role: await roleLookup(email) };
+}
+
+// One check per server render: the root layout and the page both call currentUser() for the same
+// request. React's cache() is scoped to a single request, so a role change still applies on the next.
+const currentUserOfRender = cache(() => resolveUser());
+
 /**
  * The signed-in person. Reads the IAP JWT from `source` (request.headers or the Request in route
  * handlers) or, when omitted, from `await headers()` (server components and server actions).
  * Throws HttpError 401 "Sign in to continue." without a valid JWT, and HttpError 403 when the verified
  * email is outside ALLOWED_HOSTED_DOMAIN (default opptra.com).
  */
-export async function currentUser(source?: Headers | Request): Promise<CurrentUser> {
-  const email = await verifiedEmail(source);
-  const domain = process.env.ALLOWED_HOSTED_DOMAIN || DEFAULT_DOMAIN;
-  if (!allowedEmail(email, domain)) throw new HttpError(403, `Use your @${domain} Google account.`);
-  return { email, role: await roleLookup(email) };
+export function currentUser(source?: Headers | Request): Promise<CurrentUser> {
+  return source ? resolveUser(source) : currentUserOfRender();
 }
 
-const RANK: Record<Role, number> = { viewer: 0, operator: 1, admin: 2 };
-
-/** admin > operator > viewer; true when `role` is `min` or higher. */
+/** admin > operator > viewer (ROLES lists them highest first); true when `role` is `min` or higher. */
 export function atLeast(role: Role, min: Role): boolean {
-  return RANK[role] >= RANK[min];
+  return ROLES.indexOf(role) <= ROLES.indexOf(min);
 }
 
 /** currentUser(), then ForbiddenError (HTTP 403) when the role is below `min`. */

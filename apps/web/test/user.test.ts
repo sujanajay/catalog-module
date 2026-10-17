@@ -108,6 +108,11 @@ describe("currentUser", () => {
     expect(lookup).not.toHaveBeenCalled();
   });
 
+  it("reads ALLOWED_HOSTED_DOMAIN like the People rules do (trimmed, any case)", async () => {
+    vi.stubEnv("ALLOWED_HOSTED_DOMAIN", " Opptra.com\n");
+    expect(await currentUser(withJwt())).toEqual({ email: "someone@opptra.com", role: "viewer" });
+  });
+
   it("SKIP_IAP=1 outside production -> DEV_USER_EMAIL (default sujan@opptra.com)", async () => {
     vi.stubEnv("SKIP_IAP", "1");
     roles.set("sujan@opptra.com", "admin");
