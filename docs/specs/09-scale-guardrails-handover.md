@@ -48,7 +48,8 @@ In scope
 - Independent URL re-check by live generation: CLI and sheet-level modes over the library 06 built.
 - The recording of the human-like run as a GIF.
 - `docs/SPEC.md` as-built pass, `docs/solutions/` learnings, README catalog section.
-- The operator's access: the admin adds her Google account as `operator` in the People modal.
+- The operator's access: the owner adds Naaz as `operator` in the People modal himself (not a
+  blocker for this spec).
 - The hand-over note in plain language.
 
 Out of scope
@@ -298,12 +299,11 @@ columns under old names; the docs name `rohan_master_sheet_hl` while code uses
 
 ### 4.8 The operator's access and the hand-over note
 
-Access. The admin (sujan@opptra.com) opens the People modal, enters the operator's @opptra.com
-Google account, picks Operator and presses "Add person" (03). Her account is not in this repo;
-the manager takes it from the human's instruction when this spec is opened. If it is missing, the
-manager stops at this step and the report names it as the one thing needed ("the operator's
-@opptra.com Google account for the People modal"), per the protocol's blocking rule. Verified by
-her signing in and seeing "New batch", or by the admin using "Preview as viewer" and then
+Access. The owner (sujan@opptra.com, the seeded admin) adds the operator, Naaz, himself from the
+People page: he enters her @opptra.com Google account, picks Operator and presses "Add person" (03).
+Her account is not in this repo and the manager does not need it; this step is not a blocker and
+the report simply reminds the owner of it. Nothing else is needed for her to sign in: IAP admits
+every Opptra account (03). Verified by her signing in and seeing "New batch", or by the owner
 checking her row says Operator.
 
 Hand-over note: `docs/handover/catalog-for-the-operator.md`, plain language, no jargon, written for
@@ -311,7 +311,7 @@ someone who will use the tool unsupervised once the supervised period with Sujan
 in this order:
 1. What the tool does (one paragraph): you upload product photos once; it makes the right size for
    each marketplace and gives you a sheet of links.
-2. How to sign in: open the link, press "Sign in with Google", use your @opptra.com account. If you
+2. How to sign in: open the link; Google asks you to sign in; use your @opptra.com account. If you
    only see view access (no "New batch" button and the message "You can view this but not change
    it. Ask an admin for the operator role."), ask Sujan to make you an operator; nothing else is
    needed.
@@ -421,8 +421,9 @@ CI gate: `pnpm lint && pnpm typecheck && pnpm test`.
   re-upload steps.
 - `docs/SPEC.md`, README, `docs/solutions/`, `docs/plans/catalog-load-report.md`,
   `docs/handover/catalog-for-the-operator.md` are in `main`.
-- The operator can sign in with her @opptra.com Google account and has the operator role; the
-  hand-over note exists and names no model, worker or bucket.
+- The operator can sign in with her @opptra.com Google account (IAP, no step needed) and the owner
+  has given her the operator role from the People page; the hand-over note exists and names no
+  model, worker or bucket.
 - The `?v=` open point is answered in `docs/SPEC.md` and the hand-over note.
 - The programme's definition of done holds: all specs merged and deployed; the operator can run a
   batch for any brand without help; the human-like test passes with its GIF; every sheet link
@@ -438,7 +439,6 @@ against 2 hours, the re-upload pass figures, the fault matrix including the rest
 re-check result over every sheet, the GIF, the docs links, the two warehouse inconsistencies (the
 v2 sales procedure reading Noon HL columns under old names; docs naming `rohan_master_sheet_hl`
 while code uses `sku_master_sheet_hl`), any brands still waiting for sample images, the `?v=`
-answer, the open question to the operator from 08 (did Styli reject the earlier set for size or
-for softness; if size alone, `MAX_UPSCALE` is raised for Styli only and the upscaler experiment is
-dropped) with her answer if it arrived, confirmation that the operator holds the operator role (or
-the missing account as the one open item), and "programme complete; no next spec".
+answer, a note of the two questions the owner closed (Styli: follow the guideline sheet, no
+Styli-only `MAX_UPSCALE`; licence: NC models are full candidates), a reminder that the owner adds
+Naaz as Operator from the People page himself, and "programme complete; no next spec".

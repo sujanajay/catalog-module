@@ -397,8 +397,8 @@ model. Therefore:
   `model_path`. `/healthz` lists whatever is loaded so 08's harness can tell.
 - Licences are recorded per model in `services/matting/README.md` (BiRefNet family and BEN2 base
   MIT; RMBG-2.0 CC BY-NC 4.0, gated on Hugging Face with the ONNX hosted by rembg) and repeated in
-  08's bake-off report; the owner's decision on non-commercial models is 08's, and every such slot
-  has a permissive alternative measured in the same bake-off.
+  08's bake-off report as a record. The owner has closed the licence question (08 section 4.10):
+  non-commercial models are full candidates for this internal tool and may be policy defaults.
 - Model ids appear in this engineering text, in `model_policy` and in logs only; never in UI copy.
 
 Memory: the CPU service runs with 16 GiB so all four sessions stay loaded, or with lazy loading and

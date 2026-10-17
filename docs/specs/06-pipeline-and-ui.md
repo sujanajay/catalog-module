@@ -146,7 +146,7 @@ Change
 Do not touch: `packages/core/src/catalog/channels.ts`, `naming.ts`, `render.ts`, `compliance.ts`,
 `matte.ts`, the ingest adapters, `schema.ts` and the migrations, `server.ts` (other than
 registering routes through its table), `services/matting/`, `cloudbuild.yaml`, `bootstrap.sh`,
-`apps/web/auth.ts`, `middleware.ts`, `lib/user.ts`. If a column or helper turns out to be missing,
+`apps/web/lib/iap.ts`, `lib/auth-rules.ts`, `lib/user.ts`. If a column or helper turns out to be missing,
 the manager stops and reports it as a contract change (00); nothing is added silently.
 
 ## 4. Contracts
@@ -823,8 +823,9 @@ changes a link." Empty search: "No products of <brand> match <q>."
 
 ### 6.6 Sign-in and roles: who sees what
 
-`/signin` (03) is the only public page. Every `/catalog` page requires a signed-in `@opptra.com`
-user (03 middleware). Viewer: list, batch pages, sheet preview, attention tab (read-only),
+There is no public page: IAP in front of `catalog-web` (03) sends everyone to Google's sign-in and
+admits only `@opptra.com` accounts, and every page and route calls `currentUser()` or `requireRole()`
+(03), which verifies the IAP JWT. Viewer: list, batch pages, sheet preview, attention tab (read-only),
 downloads, product and brand pages. Operator: everything a viewer sees plus "New batch", the wizard,
 Start, Start again, the attention buttons (07), Add SKU ids (07), Add alias, Remove product, brand
 export. Admin: operator plus the People modal. Buttons are absent, not greyed, for roles that lack
@@ -846,8 +847,8 @@ with versioning and lifecycle, `infra/cors.json`, the scheduler jobs `catalog-sy
   --timeout=900`; env adds `CATALOG_CHUNK_IMAGES` and, when set in the operator's environment,
   `COMPUTE_USD_PER_VCPU_SECOND`; `MATTING_URL`, `MATTING_GPU_URL` (when the GPU service is
   deployed, 05), `WORKER_URL`, `WORKER_SA_EMAIL` as before.
-- `catalog-web`: `--allow-unauthenticated` (the app enforces sign-in), `AUTH_URL = WEB_URL`,
-  `SHARE_SA_EMAIL`.
+- `catalog-web`: private with `--iap` and the `domain:opptra.com` grant as in 03 (never
+  `--allow-unauthenticated`), `IAP_AUDIENCE`, `ALLOWED_HOSTED_DOMAIN`, `SHARE_SA_EMAIL`.
 - `catalog-matting`: unchanged from 05.
 - Runs the per-brand smoke (section 9, tier 5) before `gcloud builds submit`; stops on a non-zero
   exit so a failing smoke blocks the deploy.
@@ -860,7 +861,7 @@ changes nothing.
 
 Each workstream gets this file, `docs/SPEC.md`, the 02 to 05 exports it needs, and its file list.
 Before touching Playwright, `@google-cloud/storage` copy and delete preconditions, Next.js route
-handlers or Auth.js `auth()` in route handlers, the subagent reads the current docs through
+handlers or `currentUser()` in route handlers (03's IAP JWT check), the subagent reads the current docs through
 Context7 (the call shapes in 5.5 and 9 are confirmed in current docs; builders re-confirm before
 coding). Worktrees `C:\Users\Sujan AH\Desktop\catalog-module-wt\06-<workstream>`.
 
@@ -941,7 +942,7 @@ read only.
 Tier 4 human-like browser test (Playwright, deployed URL, the tester is an admin). Call shapes
 confirmed in current docs; builders re-confirm before coding:
 - 03's `apps/web/test/human/login.ts`: `chromium.launch({ headless: false, channel: "chrome" })`,
-  open `WEB_URL`, the tester signs in with Google, then
+  open `WEB_URL`, the tester signs in on Google's IAP page, then
   `await context.storageState({ path: ".playwright/auth-state.json" })`. Gitignored, never printed.
 - `catalog.human.spec.ts`: `browser.newContext({ storageState: ".playwright/auth-state.json",
   recordVideo: { dir: ".playwright/videos" } })`, `test.setTimeout(...)` sized for a real run,

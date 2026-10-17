@@ -27,7 +27,7 @@ There is nothing else to land on.
 
 | Role | Who | Reads | Does |
 |---|---|---|---|
-| Human | the product owner (also the admin) | the final report | says "execute", approves the UI prototype (spec 01), creates what only a person can create (Google OAuth client, secret versions, Google shares), grants access when the report asks |
+| Human | the product owner (also the admin) | the final report | says "execute", approves the UI prototype (spec 01), creates what only a person can create (secret versions such as the OpenRouter key, Google shares), grants access when the report asks, adds operators in the People modal |
 | Manager | the main session | the spec, `docs/SPEC.md`, `CLAUDE.md`, this file | worktree, task board, delegation, commits, PR, merge, deploy, smoke, report |
 | Builder subagent | one per workstream named in the spec | its briefing (section 4) | builds one workstream in its own worktree, runs tiers 1 and 2, returns a summary plus test output |
 | Integration subagent | one per spec | the spec, the builders' summaries | merges workstreams on the feature branch, runs every tier the spec names, fixes failures (at most three attempts per failure) |
@@ -48,8 +48,8 @@ never touch `main`, never call OpenRouter live, never create or change GCP resou
       call exports `CLOUDSDK_CORE_PROJECT=image-links-agent`; the global gcloud config is never
       changed, because the operator's default project is a different one.
 - [ ] For specs with a tier 3 test: Docker Desktop is running.
-- [ ] For specs that deploy `catalog-web` (03 and later): the secrets `catalog-google-client-id`
-      and `catalog-google-client-secret` have a version. Only the human can add it (section 11).
+- [ ] For specs that deploy `catalog-web` (03 and later): `iap.googleapis.com` is enabled and the
+      IAP service agent exists (both ensured by `infra/bootstrap.sh`; no human step).
 - [ ] For specs with a tier 4 test: the tester is signed in to the deployed URL with a Google
       account that has the operator or admin role; `apps/web/test/human/login.ts` saved
       `.playwright/auth-state.json`.
@@ -126,7 +126,7 @@ Rules:
 - Tier 4: `apps/web/test/human/login.ts` opens `WEB_URL` in a headed browser; the tester signs in
   with Google; the script saves `context.storageState({ path: ".playwright/auth-state.json" })`.
   `catalog.human.spec.ts` uses that state with `recordVideo`. The saved state expires with the
-  session; re-run `login.ts` when the test is redirected to `/signin`. The video is turned into a
+  session; re-run `login.ts` when the test is redirected to Google's sign-in page. The video is turned into a
   GIF for the hand-over (spec 09 collects it). The Chrome extension may be used for exploratory
   runs; it never replaces the recorded run.
 - Tier 5 blocks deploy: `infra/deploy.sh` runs `pnpm catalog:smoke` before `gcloud builds submit`
@@ -243,17 +243,17 @@ Ready for the next spec: <nn+1> <title>.
 Spec 09 ends with `Programme complete; no next spec.` instead of the last line.
 
 If something blocks: replace the last line with `Blocked: <exact thing needed>` and list what the
-human must do (for example create the Google OAuth client and add the secret versions, grant a
-role, share a Google Sheet, provide a data set). Nothing else is asked.
+human must do (for example add a secret version, grant a role, share a Google Sheet, provide a
+data set). Nothing else is asked.
 
 ## 11. Blocking rules (stop and report instead of guessing)
 
 - A gate still fails after three fix attempts.
 - Access is missing: a GCP permission, a BigQuery dataset, a Google Sheet or Drive folder share,
   a data set path that does not exist.
-- A Google OAuth client or a secret version that only the human can create (the first version of
-  `catalog-google-client-id` and `catalog-google-client-secret`; bootstrap creates the empty
-  secret containers and never the values).
+- A secret version that only the human can create (for example the OpenRouter key; bootstrap
+  creates containers and never the values). Sign-in needs none: IAP uses the Google-managed OAuth
+  client (03).
 - An infra step would delete or overwrite a GCP resource, or would change the operator's global
   gcloud config.
 - A spec contract cannot be met without changing a contract from 02 or 03 (02 defines the shared

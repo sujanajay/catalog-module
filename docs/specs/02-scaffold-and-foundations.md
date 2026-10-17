@@ -117,7 +117,7 @@ current major with Context7 before writing code against it.
   `pg`, `@google-cloud/storage`, `@google-cloud/tasks`, `@google-cloud/bigquery`, `sharp`. Dev:
   `esbuild`, `drizzle-orm` (types). Scripts `build` (`node build.mjs`), `start`, `typecheck`.
 - `apps/web/package.json` (`@catalog/web`): `next` 15, `react` 19, `react-dom` 19,
-  `next-auth@beta` (used from 03), `@catalog/core`, `pg`, `@google-cloud/storage`,
+  `google-auth-library` (IAP JWT verification, used from 03), `@catalog/core`, `pg`, `@google-cloud/storage`,
   `@google-cloud/tasks`, `zod`. Dev: `@types/react`, `@types/react-dom`, `@types/node`.
   Scripts `dev`, `build`, `start`, `typecheck`.
 
@@ -171,9 +171,10 @@ then edited as the third column says. Tests that come with a lifted file are lif
 | `apps/web/components/ui.tsx`, `AutoRefresh.tsx` | same | Keep `Badge`, `usd`, `when`, `AutoRefresh`; delete `Score` (QA scores of the shoot app). |
 | `docs/solutions/deploy-cloud-run.md`, `docs/solutions/infra-bootstrap.md` | `docs/solutions/` | Copied as reference learnings (Cloud Run IAM at project level, Windows path notes); names inside updated to `catalog-*`. |
 
-Not lifted: `apps/web/lib/user.ts` (it reads the IAP header `x-goog-authenticated-user-email`; 03
-replaces it with Auth.js); everything about shoots, templates, gallery, prompts, image engines,
-the old `brands` table and its `db/seed.ts`.
+Not lifted as is: `apps/web/lib/user.ts` (it trusts the plain IAP header
+`x-goog-authenticated-user-email`; 03 rewrites it to verify the signed IAP JWT and to look up the
+role); everything about shoots, templates, gallery, prompts, image engines, the old `brands` table
+and its `db/seed.ts`.
 
 ## Part 2: Foundations
 
@@ -786,12 +787,13 @@ repo `apps`, private bucket `gs://image-links-agent-assets`, secret `openrouter-
    with a password generated in memory (`openssl rand -base64 24`), stored as secret
    `catalog-db-password` (`--data-file=-`) and passed to `sql users create`; never echoed, logged or
    written to disk. If the user exists but the secret does not, stop with an error rather than reset.
-3. Auth secrets: `catalog-auth-secret` with one version generated in memory (`openssl rand -base64 32`,
-   never printed); `catalog-google-client-id` and `catalog-google-client-secret` created as empty
-   containers (`gcloud secrets create ... --replication-policy=automatic` with no version). The script
-   prints: "Add the Google OAuth client id and secret with: printf %s '<value>' | gcloud secrets
-   versions add catalog-google-client-id --data-file=-" (and the same for the secret) and continues.
-   03 describes the OAuth client the human creates.
+3. IAP (sign-in for `catalog-web`, 03): enable `iap.googleapis.com` and
+   `cloudresourcemanager.googleapis.com` (step 1 list); `gcloud beta services identity create
+   --service=iap.googleapis.com` (idempotent); `project_binding` of
+   `serviceAccount:service-<project-number>@gcp-sa-iap.iam.gserviceaccount.com` to `roles/run.invoker`
+   (already present from the earlier app, so SKIP). No OAuth client, brand or auth secret is created;
+   IAP uses the Google-managed client. The `domain:opptra.com` access grant needs the service to
+   exist and lives in `deploy.sh` (03).
 4. Public bucket `gs://image-links-agent-public`: create with `--location=asia-south1
    --uniform-bucket-level-access` (no public access prevention); `add-iam-policy-binding
    --member=allUsers --role=roles/storage.objectViewer`; `gcloud storage buckets update --versioning`;
@@ -851,17 +853,19 @@ deterministic `https://catalog-<svc>-<project-number>.asia-south1.run.app` forms
 2. Build: `gcloud builds submit --config cloudbuild.yaml --substitutions=_AR=...,_TAG=...` (two images
    here, three from 05).
 3. `ENV_VARS` as in the env table (`DB_HOST` from `gcloud sql instances describe ila-pg`); secrets
-   `DB_PASSWORD=catalog-db-password:latest` for all; the web adds the Auth secrets in 03; the worker
-   adds `OPENROUTER_API_KEY` in 07. `--network=ila-vpc --subnet=ila-subnet --vpc-egress=private-ranges-only`.
+   `DB_PASSWORD=catalog-db-password:latest` for all; the web adds `IAP_AUDIENCE` and
+   `ALLOWED_HOSTED_DOMAIN` in 03 (no auth secrets); the worker adds `OPENROUTER_API_KEY` in 07. `--network=ila-vpc --subnet=ila-subnet --vpc-egress=private-ranges-only`.
 4. `catalog-migrate` job: `gcloud run jobs deploy catalog-migrate --image=$AR/worker:$TAG --command=node
    --args=dist/migrate.js --service-account=catalog-worker@... --max-retries=0 --task-timeout=600`,
    then `jobs execute --wait`.
 5. `catalog-worker`: private (`auth_flag` pattern: `--no-allow-unauthenticated` on first create,
    `--invoker-iam-check` afterwards), `--cpu=2 --memory=2Gi --concurrency=2 --min-instances=0
    --max-instances=10 --timeout=900`, `DB_POOL_MAX=2`.
-6. `catalog-web`: `--allow-unauthenticated` because the app enforces Google sign-in on every page and
-   route (03); `--cpu=1 --memory=1Gi --min-instances=0 --max-instances=3 --timeout=300`,
-   `DB_POOL_MAX=3`. No IAP.
+6. `catalog-web`: private like the worker (`auth_flag` pattern) and `--iap` from 03 on (in this spec
+   the placeholder page is deployed private without `--iap`, reachable only through an identity
+   token; 03 adds `--iap`, `IAP_AUDIENCE` and the `domain:opptra.com` grant); `--cpu=1 --memory=1Gi
+   --min-instances=0 --max-instances=3 --timeout=300`, `DB_POOL_MAX=3`. Never
+   `--allow-unauthenticated`.
 7. `catalog-matting` (CPU, asia-south1) and `catalog-matting-gpu` (L4, asia-southeast1): from 05
    (CPU `--cpu=4 --memory=16Gi --concurrency=1 --min-instances=0 --max-instances=20 --timeout=300`;
    GPU `--cpu=4 --memory=16Gi --gpu=1 --gpu-type=nvidia-l4 --no-gpu-zonal-redundancy --concurrency=1
@@ -971,12 +975,12 @@ outputs pasted in the PR. Tier 4 and 5 do not apply yet (nothing an operator can
 - `0000_init.sql` generated and applied by `createTestDb()`; the partial unique index and the alias
   unique index exist.
 - `REAL_DATA=1 pnpm test:real` passes the master-sync real test on the integrator's machine.
-- `bootstrap.sh` created the database and user, the three Auth secret containers (with the printed
-  instruction for the two Google ones), the public bucket with `allUsers` read, versioning and
+- `bootstrap.sh` created the database and user, enabled the IAP API, ensured the IAP service agent
+  and its `roles/run.invoker` binding (SKIP expected), the public bucket with `allUsers` read, versioning and
   lifecycle, the assets lifecycle and CORS, the queue, the three service accounts, the IAM bindings
   (or printed the exact commands), and the two scheduler jobs; a second run is all SKIP.
 - `deploy.sh` built the two images, ran `catalog-migrate`, deployed `catalog-worker` (private) and
-  `catalog-web` (public ingress, placeholder page); `GET ${WORKER_URL}/healthz` through an identity
+  `catalog-web` (private, placeholder page); `GET ${WORKER_URL}/healthz` through an identity
   token returns `{ ok, version, routes: ["/tasks/catalog/sync-master", "/tasks/catalog/sweep"] }`;
   one manual `gcloud scheduler jobs run catalog-sync-master` followed by `SELECT count(*) FROM sku_map`
   shows rows.
@@ -986,6 +990,6 @@ outputs pasted in the PR. Tier 4 and 5 do not apply yet (nothing an operator can
 
 Follow `00-execution-protocol.md`. One PR from `feat/catalog-02-scaffold-and-foundations` with the
 test output, the two bootstrap runs and the `/healthz` response. Deploy with `infra/deploy.sh`. The
-report lists what shipped, the test evidence, anything excluded and why, and that the human must add
-the two Google secret versions before 03 can be deployed. It ends with "Ready for the next spec: 03
-Auth and roles".
+report lists what shipped, the test evidence, anything excluded and why, and confirms that 03 needs
+no manual step from the human (IAP uses the Google-managed OAuth client). It ends with "Ready for the
+next spec: 03 Auth and roles".
