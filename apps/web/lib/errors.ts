@@ -11,8 +11,21 @@ export class HttpError extends Error {
   }
 }
 
+export const SIGN_IN_MESSAGE = "Sign in to continue.";
+export const FORBIDDEN_MESSAGE = "You can view this but not change it. Ask an admin for the operator role.";
+
+/** HTTP 403: the signed-in person's role is below what the action needs (spec 03, requireRole). */
+export class ForbiddenError extends HttpError {
+  constructor(message: string = FORBIDDEN_MESSAGE) {
+    super(403, message);
+    this.name = "ForbiddenError";
+  }
+}
+
 export const notFound = (what: string) => new HttpError(404, `${what} not found`);
 export const badRequest = (msg: string) => new HttpError(400, msg);
+/** HTTP 401: no valid IAP identity on the request (missing, invalid or expired JWT). */
+export const unauthorized = () => new HttpError(401, SIGN_IN_MESSAGE);
 
 export function errorResponse(err: unknown): Response {
   if (err instanceof HttpError) return Response.json({ error: err.message }, { status: err.status });
