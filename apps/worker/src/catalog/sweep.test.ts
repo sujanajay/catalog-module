@@ -2,37 +2,13 @@ import { randomUUID } from "node:crypto";
 import { sql } from "drizzle-orm";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Db } from "@catalog/core/db/client";
+import { releaseLocks } from "@catalog/core/catalog/products";
 import { createTestDb } from "@catalog/core/db/testing";
 import { handleSweep, SWEEP_ERROR, type ReleaseLocks } from "./sweep";
 
-/**
- * Tier 2 (PGlite). Uses the real migration when it already creates the catalog tables; until
- * workstream C's 0000_init.sql is merged, it creates a minimal stand-in for the columns the sweep
- * reads and writes (names and types as in spec 02 "Database").
- */
-const FALLBACK_DDL = [
-  sql`CREATE TABLE catalog_batches (
-    id uuid PRIMARY KEY, brand_slug text NOT NULL, brand_name text NOT NULL, name text NOT NULL,
-    status text NOT NULL DEFAULT 'draft', is_test boolean NOT NULL DEFAULT false, product_type text NOT NULL DEFAULT 'auto',
-    channels jsonb NOT NULL, options jsonb NOT NULL, counts jsonb NOT NULL, cost jsonb NOT NULL,
-    error text, created_by text NOT NULL, created_at timestamptz NOT NULL DEFAULT now(),
-    started_at timestamptz, finished_at timestamptz, updated_at timestamptz NOT NULL DEFAULT now())`,
-  sql`CREATE TABLE catalog_chunks (
-    id uuid PRIMARY KEY, batch_id uuid NOT NULL REFERENCES catalog_batches(id) ON DELETE CASCADE, "index" integer NOT NULL,
-    stage text NOT NULL, product_ids jsonb NOT NULL, status text NOT NULL DEFAULT 'queued',
-    started_at timestamptz, finished_at timestamptz, created_at timestamptz NOT NULL DEFAULT now())`,
-  sql`CREATE TABLE catalog_products (
-    id uuid PRIMARY KEY, brand_slug text NOT NULL, is_test boolean NOT NULL, product_key text NOT NULL,
-    path_key text NOT NULL, identifier text NOT NULL, lock_batch_id uuid REFERENCES catalog_batches(id),
-    created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now())`,
-];
-
+/** Tier 2 (PGlite): the real 0000_init.sql migration (via createTestDb) and the real releaseLocks. */
 type Row = Record<string, unknown>;
 const rows = async (db: Db, q: ReturnType<typeof sql>) => ((await db.execute(q)) as unknown as { rows: Row[] }).rows;
-
-/** Test stand-in with the contract of `releaseLocks` from products.ts (workstream C). */
-const releaseLocks: ReleaseLocks = async (db, batchId) =>
-  (await rows(db, sql`UPDATE catalog_products SET lock_batch_id = NULL WHERE lock_batch_id = ${batchId} RETURNING id`)).length;
 
 const NOW = new Date("2026-10-17T12:00:00Z");
 const hoursAgo = (h: number) => new Date(NOW.getTime() - h * 3600_000).toISOString();
@@ -76,8 +52,6 @@ async function locked(id: string): Promise<number> {
 
 beforeEach(async () => {
   ({ db, close } = await createTestDb());
-  const exists = await rows(db, sql`SELECT to_regclass('public.catalog_batches') AS t`);
-  if (exists[0]?.t === null) for (const stmt of FALLBACK_DDL) await db.execute(stmt);
 });
 
 afterEach(async () => {

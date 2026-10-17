@@ -1,8 +1,11 @@
 // catalog-worker HTTP entry: /healthz plus the task routes (spec 02 "Worker server").
 import { OAuth2Client } from "google-auth-library";
+import { createBigQuery, type BigQueryLike } from "@catalog/core/catalog/master-sync";
+import { releaseLocks } from "@catalog/core/catalog/products";
 import { closeDb, getDb } from "@catalog/core/db/client";
 import { authConfigFromEnv } from "./auth";
-import { handleSweep, type ReleaseLocks } from "./catalog/sweep";
+import { handleSweep } from "./catalog/sweep";
+import { handleSyncMaster } from "./catalog/sync-master";
 import { defaultMigrationsDir } from "./runtime";
 import { createServer, type ServerDeps } from "./server";
 
@@ -16,18 +19,15 @@ if (auth.skip) {
   console.error("WORKER_URL and WORKER_SA_EMAIL must be set; task routes return 500 until they are.");
 }
 
-// INTEGRATION (spec 02 workstream C): replace this stub with
-//   import { releaseLocks } from "@catalog/core/catalog/products";
-// and delete it. Until then a sweep that finds a stale batch rolls back and answers 500.
-const releaseLocks: ReleaseLocks = () =>
-  Promise.reject(new Error("releaseLocks is not wired yet (spec 02 workstream C products.ts)"));
+// One BigQuery client per process, created on first use so /healthz never needs BigQuery.
+let bigQuery: Promise<BigQueryLike> | undefined;
+const getBigQuery = (): Promise<BigQueryLike> => (bigQuery ??= createBigQuery(process.env));
 
 const routes: ServerDeps["routes"] = {
-  // INTEGRATION (spec 02 workstream C): add the sync-master route here, built by C in ./catalog/sync-master:
-  //   import { handleSyncMaster } from "./catalog/sync-master";
-  //   "/tasks/catalog/sync-master": (body) => handleSyncMaster(<deps: getDb(), BigQuery client, env>, body),
-  // Keep it first so /healthz lists ["/tasks/catalog/sync-master", "/tasks/catalog/sweep"].
+  // Order matters: /healthz lists ["/tasks/catalog/sync-master", "/tasks/catalog/sweep"].
   // The DB handle is taken lazily inside each handler so /healthz works before the DB is reachable.
+  "/tasks/catalog/sync-master": async (body) =>
+    handleSyncMaster({ db: getDb(), bq: await getBigQuery(), env: process.env }, body),
   "/tasks/catalog/sweep": (body) => handleSweep({ db: getDb(), releaseLocks }, body),
 };
 
