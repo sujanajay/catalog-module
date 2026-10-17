@@ -209,6 +209,9 @@ describe("fillProductListWorkbook", () => {
     expect(ws.getCell("A7").value).toBe("8905701361431");
     expect(notes.getCell("A1").value).toBe("keep me");
     expect(notes.getCell("C4").value).toBe(42);
+    // a sheet with no matching rows is left alone
+    expect(notes.columnCount).toBe(3);
+    expect(notes.getCell(1, 4).value).toBeNull();
 
     // appended header on the header row, right of the last column
     const status = colOf(ws, "link_status", 2);

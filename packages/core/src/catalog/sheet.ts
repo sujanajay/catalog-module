@@ -45,7 +45,7 @@ function rowLinks(row: SheetRow, ch: ChannelId): (string | null)[] {
 export function sheetColumns(spec: SheetSpec): { fixed: string[]; perChannel: Record<ChannelId, number>; tail: string[] } {
   const perChannel = Object.fromEntries(CHANNEL_IDS.map((c) => [c, 0])) as Record<ChannelId, number>;
   for (const ch of spec.channels) {
-    perChannel[ch] = Math.max(1, ...spec.rows.map((r) => rowLinks(r, ch).length));
+    perChannel[ch] = spec.rows.reduce((most, r) => Math.max(most, rowLinks(r, ch).length), 1);
   }
   return { fixed: [...FIXED], perChannel, tail: [...TAIL] };
 }
@@ -106,7 +106,7 @@ function buildGrid(spec: SheetSpec): Grid {
 }
 
 function columnWidth(values: string[], link: boolean): number {
-  const longest = Math.max(0, ...values.map((v) => v.length));
+  const longest = values.reduce((most, v) => Math.max(most, v.length), 0);
   return Math.min(MAX_WIDTH, link ? Math.max(MIN_LINK_WIDTH, longest) : longest);
 }
 
@@ -213,7 +213,7 @@ function matchKeys(value: string): string[] {
 
 /**
  * The operator's product list workbook with the links appended (spec 02). Every sheet, column and
- * value is kept. On each sheet that has a header row, `link_status` and per channel
+ * value is kept. On each sheet that has a header row and at least one matching row, `link_status` and per channel
  * `<Channel> Image 1..N` are appended to the right of the last used column; each row is matched on
  * column `matchColumn` (0-based, as in 04's column detection) by `normalizeKey` of the identifier
  * or `option_id_style_color`, then by its size-level forms, so every per-size row of a colourway
@@ -239,7 +239,15 @@ export async function fillProductListWorkbook(original: Buffer, spec: SheetSpec,
   const wb = new ExcelJS.Workbook();
   await wb.xlsx.load(Buffer.from(original) as unknown as Parameters<typeof wb.xlsx.load>[0]);
 
-  let first: { ws: ExcelJS.Worksheet; start: number } | null = null;
+  type Target = { ws: ExcelJS.Worksheet; headerRow: number; start: number };
+  let first: Target | null = null;
+  const writeHeader = ({ ws, headerRow, start }: Target) => {
+    ["link_status", ...linkColumns.map(({ c }) => c.flat)].forEach((h, k) => {
+      const cell = ws.getCell(headerRow, start + k);
+      cell.value = h;
+      cell.font = { bold: true };
+    });
+  };
   const writeRow = (ws: ExcelJS.Worksheet, r: number, start: number, cells: string[] | null, status: string) => {
     ws.getCell(r, start).value = status;
     if (!cells) return;
@@ -252,33 +260,38 @@ export async function fillProductListWorkbook(original: Buffer, spec: SheetSpec,
     });
   };
 
+  // A sheet gets the columns only when at least one of its rows matches a product, so a notes or
+  // valid-values tab is left as it was. The not_in_sheet rows go to the first filled sheet (or the
+  // first sheet with a header row when nothing matched anywhere).
+  let fallback: Target | null = null;
   for (const ws of wb.worksheets) {
     const headerRow = findHeaderRow(ws);
     if (headerRow === null) continue;
-    const start = ws.columnCount + 1;
-    const headers = ["link_status", ...linkColumns.map(({ c }) => c.flat)];
-    headers.forEach((h, k) => {
-      const cell = ws.getCell(headerRow, start + k);
-      cell.value = h;
-      cell.font = { bold: true };
-    });
-    const lastRow = ws.rowCount;
-    for (let r = headerRow + 1; r <= lastRow; r++) {
+    const target: Target = { ws, headerRow, start: ws.columnCount + 1 };
+    fallback ??= target;
+    const rows: { r: number; hit: Grid["rows"][number] | undefined }[] = [];
+    for (let r = headerRow + 1; r <= ws.rowCount; r++) {
       const value = cellText(ws.getCell(r, matchColumn + 1).value).trim();
       if (!value) continue;
-      const hit = matchKeys(value)
-        .map((k) => byKey.get(k))
-        .find(Boolean);
-      if (hit) matched.add(hit.row);
-      writeRow(ws, r, start, hit ? hit.cells : null, hit ? hit.cells[statusIndex]! : "missing_images");
+      rows.push({ r, hit: matchKeys(value).map((k) => byKey.get(k)).find(Boolean) });
     }
-    first ??= { ws, start };
+    if (!rows.some((x) => x.hit)) continue;
+    writeHeader(target);
+    for (const { r, hit } of rows) {
+      if (hit) matched.add(hit.row);
+      writeRow(ws, r, target.start, hit ? hit.cells : null, hit ? hit.cells[statusIndex]! : "missing_images");
+    }
+    first ??= target;
   }
 
+  const notInSheet = grid.rows.filter((r) => r.row.status === "not_in_sheet" && !matched.has(r.row));
+  if (!first && fallback && notInSheet.length) {
+    first = fallback;
+    writeHeader(first);
+  }
   if (first) {
     const { ws, start } = first;
-    for (const r of grid.rows) {
-      if (r.row.status !== "not_in_sheet" || matched.has(r.row)) continue;
+    for (const r of notInSheet) {
       const rowNumber = ws.rowCount + 1;
       const idCell = ws.getCell(rowNumber, matchColumn + 1);
       idCell.value = r.row.identifier;
