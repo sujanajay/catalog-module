@@ -41,13 +41,21 @@ export function normalizeEmail(email: string): string {
   return email.trim().toLowerCase();
 }
 
+/**
+ * True when the lowercase `email` has exactly one "@", a non-empty local part, and exactly the
+ * lowercase `domain` after the "@" (so "x@opptra.com.evil.com" is refused). The one domain rule shared
+ * by the People functions and the web's sign-in guard (apps/web/lib/auth-rules.ts).
+ */
+export function isEmailOfDomain(email: string, domain: string): boolean {
+  const at = email.indexOf("@");
+  return at > 0 && at === email.lastIndexOf("@") && email.slice(at + 1) === domain;
+}
+
 /** Normalised email of the allowed domain (one "@", non-empty local part), else PeopleError 400. */
 export function requireAllowedEmail(email: string, allowedDomain: string = allowedDomainFromEnv()): string {
   const domain = allowedDomain.trim().toLowerCase();
   const e = normalizeEmail(email);
-  const at = e.indexOf("@");
-  const ok = at > 0 && at === e.lastIndexOf("@") && e.slice(at + 1) === domain;
-  if (!ok) throw new PeopleError(onlyDomainMessage(domain));
+  if (!isEmailOfDomain(e, domain)) throw new PeopleError(onlyDomainMessage(domain));
   return e;
 }
 
@@ -58,10 +66,13 @@ function toPerson(row: UserRow): Person {
   return { email: row.email, role: row.role, addedBy: row.addedBy, createdAt: row.createdAt, updatedAt: row.updatedAt };
 }
 
-/** Admin emails, row-locked until the transaction ends. */
-async function lockAdmins(tx: Tx): Promise<string[]> {
-  const rows = await tx.select({ email: users.email }).from(users).where(eq(users.role, "admin")).for("update");
-  return rows.map((r) => r.email);
+/**
+ * Locks the admin rows until the transaction ends, then refuses (PeopleError 400) when `email` is the
+ * only admin. The lock makes two admins demoting each other at the same moment wait for each other.
+ */
+async function assertNotLastAdmin(tx: Tx, email: string): Promise<void> {
+  const admins = await tx.select({ email: users.email }).from(users).where(eq(users.role, "admin")).for("update");
+  if (admins.length === 1 && admins[0]!.email === email) throw new PeopleError(LAST_ADMIN_MESSAGE);
 }
 
 const ROLE_RANK = sql`CASE ${users.role} WHEN 'admin' THEN 0 WHEN 'operator' THEN 1 ELSE 2 END`;
@@ -90,10 +101,7 @@ export async function upsertPerson(
 ): Promise<Person> {
   const email = requireAllowedEmail(input.email, allowedDomain);
   return db.transaction(async (tx) => {
-    if (input.role !== "admin") {
-      const admins = await lockAdmins(tx);
-      if (admins.length === 1 && admins[0] === email) throw new PeopleError(LAST_ADMIN_MESSAGE);
-    }
+    if (input.role !== "admin") await assertNotLastAdmin(tx, email);
     const [row] = await tx
       .insert(users)
       .values({ email, role: input.role, addedBy: input.addedBy })
@@ -115,10 +123,7 @@ export async function upsertPerson(
 export async function setRole(db: Db, email: string, role: Role): Promise<Person | null> {
   const e = normalizeEmail(email);
   return db.transaction(async (tx) => {
-    if (role !== "admin") {
-      const admins = await lockAdmins(tx);
-      if (admins.length === 1 && admins[0] === e) throw new PeopleError(LAST_ADMIN_MESSAGE);
-    }
+    if (role !== "admin") await assertNotLastAdmin(tx, e);
     const [row] = await tx.update(users).set({ role, updatedAt: sql`now()` }).where(eq(users.email, e)).returning();
     return row ? toPerson(row) : null;
   });
@@ -131,8 +136,7 @@ export async function setRole(db: Db, email: string, role: Role): Promise<Person
 export async function removePerson(db: Db, email: string): Promise<void> {
   const e = normalizeEmail(email);
   await db.transaction(async (tx) => {
-    const admins = await lockAdmins(tx);
-    if (admins.length === 1 && admins[0] === e) throw new PeopleError(LAST_ADMIN_MESSAGE);
+    await assertNotLastAdmin(tx, e);
     await tx.delete(users).where(eq(users.email, e));
   });
 }
