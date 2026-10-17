@@ -8,5 +8,5 @@
 docs
 infra
 **/*.log
-.env
-.env.*
+**/.env
+**/.env.*

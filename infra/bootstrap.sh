@@ -82,6 +82,7 @@ json_key_matches() {
 
 command -v node >/dev/null || die "node is required (used to compare JSON configs)"
 command -v openssl >/dev/null || die "openssl is required (Git for Windows ships it)"
+command -v curl >/dev/null || die "curl is required (Git for Windows ships it)"
 
 PN=$(gcv projects describe "$PROJECT" --format='value(projectNumber)')
 [ -n "$PN" ] || die "cannot read project $PROJECT; run gcloud auth login"
@@ -137,8 +138,8 @@ else
   gcloud sql databases create "$DB_NAME" --instance="$SQL_INSTANCE" --project="$PROJECT" >/dev/null
 fi
 
-# The password is generated in memory, piped into Secret Manager on stdin and passed to
-# `sql users create`; it is never echoed, logged or written to disk.
+# The password is generated in memory, piped into Secret Manager on stdin and sent to the Cloud SQL
+# Admin API on curl's stdin; it is never echoed, logged, written to disk or put on a command line.
 SECRET_EXISTS=0
 gcloud secrets describe "$DB_SECRET" --project="$PROJECT" >/dev/null 2>&1 && SECRET_EXISTS=1
 USER_EXISTS=0
@@ -161,9 +162,19 @@ else
       --replication-policy=automatic --data-file=- >/dev/null
   fi
   create "SQL user $DB_USER on $SQL_INSTANCE"
-  gcloud sql users create "$DB_USER" --instance="$SQL_INSTANCE" --project="$PROJECT" \
-    --password="$DBPASS" >/dev/null
-  unset DBPASS
+  # Not `gcloud sql users create --password=...`: gcloud writes every flag value to its debug log
+  # on disk, and a flag is visible in the process list. curl reads its token, headers and body from
+  # stdin (-K -) instead, so the password is never on a command line or in a log.
+  TOKEN=$(gcv auth print-access-token)
+  OP=$(printf 'header = "Authorization: Bearer %s"\nheader = "Content-Type: application/json"\ndata = "{\\"name\\": \\"%s\\", \\"password\\": \\"%s\\"}"\n' \
+      "$TOKEN" "$DB_USER" "$DBPASS" \
+    | curl -sS --fail -X POST -K - \
+      "https://sqladmin.googleapis.com/sql/v1beta4/projects/$PROJECT/instances/$SQL_INSTANCE/users" \
+    | node -e 'process.stdout.write(JSON.parse(require("fs").readFileSync(0, "utf8")).name || "")') \
+    || die "could not create SQL user $DB_USER (Cloud SQL Admin API users.insert failed)"
+  unset DBPASS TOKEN
+  [ -n "$OP" ] || die "Cloud SQL did not return an operation for creating $DB_USER"
+  gcloud sql operations wait "$OP" --project="$PROJECT" >/dev/null
 fi
 
 # --- IAM helpers ---------------------------------------------------------------------

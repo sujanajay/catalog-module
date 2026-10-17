@@ -5,6 +5,7 @@
 **/*.log
 .git
 .claude
-.env*
+**/.env
+**/.env.*
 docs
 infra

@@ -25,9 +25,10 @@ WORKER_SA=catalog-worker@$PROJECT.iam.gserviceaccount.com
 WORKER_URL=https://catalog-worker-$PN.$REGION.run.app
 WEB_URL=https://catalog-web-$PN.$REGION.run.app
 ASSETS_BUCKET=gs://image-links-agent-assets
-DB_HOST=$(gcv sql instances describe ila-pg --format='value(ipAddresses[0].ipAddress)')
+# The private IP: services reach it through ila-vpc with --vpc-egress=private-ranges-only.
+DB_HOST=$(gcv sql instances describe ila-pg --format='value(ipAddresses.filter("type:PRIVATE").extract(ipAddress).flatten())')
 
-[ -n "$DB_HOST" ] || { echo "ila-pg has no IP; run infra/bootstrap.sh first" >&2; exit 1; }
+[ -n "$DB_HOST" ] || { echo "ila-pg has no private IP; run infra/bootstrap.sh first" >&2; exit 1; }
 gcloud secrets describe catalog-db-password >/dev/null 2>&1 || { echo "secret catalog-db-password missing; run infra/bootstrap.sh first" >&2; exit 1; }
 if [ -n "$(git status --porcelain --untracked-files=no)" ]; then
   echo "WARNING: uncommitted changes; the image tag $TAG will not match the working tree" >&2

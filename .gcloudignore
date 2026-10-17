@@ -11,3 +11,7 @@ playwright-report
 test-results
 smoke-output
 .playwright
+# Local secrets never leave the machine (with a .gcloudignore present, .gitignore is not applied).
+.env
+.env.*
+!.env.example
