@@ -1,0 +1,127 @@
+import { describe, expect, it } from "vitest";
+import { assertSafeUrl, isPrivateIp, safeFetch, UnsafeUrlError } from "./safe-url";
+
+const PUBLIC_IP = "34.120.10.10";
+const DNS: Record<string, string[]> = {
+  "a.example.com": [PUBLIC_IP],
+  "b.example.com": [PUBLIC_IP],
+  "c.example.com": [PUBLIC_IP],
+  "evil.example.com": ["10.0.0.5"],
+  "mixed.example.com": [PUBLIC_IP, "127.0.0.1"],
+};
+const lookup = async (host: string) => {
+  const found = DNS[host];
+  if (!found) throw new Error(`ENOTFOUND ${host}`);
+  return found;
+};
+
+type Reply = { status: number; headers?: Record<string, string>; body?: Uint8Array<ArrayBuffer> | string };
+function fakeFetch(routes: Record<string, Reply>) {
+  const calls: { url: string; redirect: RequestRedirect | undefined }[] = [];
+  const fn = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input);
+    calls.push({ url, redirect: init?.redirect });
+    const r = routes[url];
+    if (!r) throw new Error(`fakeFetch: no route for ${url}`);
+    return new Response(r.body ?? null, { status: r.status, headers: r.headers });
+  }) as typeof fetch;
+  return Object.assign(fn, { calls });
+}
+
+describe("assertSafeUrl", () => {
+  it("accepts public https links", () => {
+    expect(assertSafeUrl("https://storage.googleapis.com/b/x.jpg").hostname).toBe("storage.googleapis.com");
+    expect(assertSafeUrl(`https://${PUBLIC_IP}/x.jpg`).hostname).toBe(PUBLIC_IP);
+  });
+
+  it.each([
+    "http://example.com/x.jpg",
+    "ftp://example.com/x.jpg",
+    "file:///etc/passwd",
+    "not a url",
+    "https://user:pw@example.com/x.jpg",
+    "https://localhost/x",
+    "https://foo.localhost/x",
+    "https://metadata.google.internal/computeMetadata/v1/",
+    "https://169.254.169.254/latest/meta-data",
+    "https://127.0.0.1/x",
+    "https://0x7f.0.0.1/x",
+    "https://10.1.2.3/x",
+    "https://172.20.0.1/x",
+    "https://192.168.1.1/x",
+    "https://[::1]/x",
+    "https://[fe80::1]/x",
+    "https://[fd00:ec2::254]/x",
+    "https://[::ffff:127.0.0.1]/x",
+  ])("refuses %s", (raw) => {
+    expect(() => assertSafeUrl(raw)).toThrow(UnsafeUrlError);
+  });
+
+  it("classifies addresses", () => {
+    expect(isPrivateIp("8.8.8.8")).toBe(false);
+    expect(isPrivateIp("2606:4700::1111")).toBe(false);
+    expect(isPrivateIp("100.64.0.1")).toBe(true);
+    expect(isPrivateIp("::ffff:a9fe:a9fe")).toBe(true);
+    expect(isPrivateIp("64:ff9b::a00:1")).toBe(true);
+  });
+});
+
+describe("safeFetch", () => {
+  it("follows two redirects, re-checking each hop, and returns the body", async () => {
+    const f = fakeFetch({
+      "https://a.example.com/start": { status: 302, headers: { location: "https://b.example.com/next" } },
+      "https://b.example.com/next": { status: 301, headers: { location: "/final.jpg" } },
+      "https://b.example.com/final.jpg": { status: 200, headers: { "content-type": "image/jpeg; charset=binary" }, body: "JPEGDATA" },
+    });
+    const r = await safeFetch("https://a.example.com/start", { fetch: f, lookup });
+    expect(r.buf.toString()).toBe("JPEGDATA");
+    expect(r.mime).toBe("image/jpeg");
+    expect(r.finalUrl).toBe("https://b.example.com/final.jpg");
+    expect(r.status).toBe(200);
+    expect(f.calls).toHaveLength(3);
+    expect(f.calls.every((c) => c.redirect === "manual")).toBe(true);
+  });
+
+  it("rejects a redirect to a private IP without fetching it", async () => {
+    const f = fakeFetch({
+      "https://a.example.com/start": { status: 302, headers: { location: "https://169.254.169.254/latest/meta-data" } },
+    });
+    await expect(safeFetch("https://a.example.com/start", { fetch: f, lookup })).rejects.toBeInstanceOf(UnsafeUrlError);
+    expect(f.calls).toHaveLength(1);
+  });
+
+  it("rejects a redirect to a host name that resolves to a private address", async () => {
+    const f = fakeFetch({
+      "https://a.example.com/start": { status: 307, headers: { location: "https://evil.example.com/x" } },
+    });
+    await expect(safeFetch("https://a.example.com/start", { fetch: f, lookup })).rejects.toBeInstanceOf(UnsafeUrlError);
+    await expect(safeFetch("https://mixed.example.com/x", { fetch: f, lookup })).rejects.toBeInstanceOf(UnsafeUrlError);
+    expect(f.calls).toHaveLength(1);
+  });
+
+  it("stops at maxBytes while streaming", async () => {
+    const f = fakeFetch({ "https://a.example.com/big": { status: 200, body: new Uint8Array(2048) } });
+    await expect(safeFetch("https://a.example.com/big", { fetch: f, lookup, maxBytes: 1000 })).rejects.toThrow(/larger than/);
+    const ok = await safeFetch("https://a.example.com/big", { fetch: f, lookup, maxBytes: 4096 });
+    expect(ok.buf.length).toBe(2048);
+  });
+
+  it("refuses an oversized declared content-length before reading", async () => {
+    const f = fakeFetch({ "https://a.example.com/big": { status: 200, headers: { "content-length": "999999" }, body: "x" } });
+    await expect(safeFetch("https://a.example.com/big", { fetch: f, lookup, maxBytes: 10 })).rejects.toThrow(/larger than/);
+  });
+
+  it("stops after maxRedirects", async () => {
+    const f = fakeFetch({
+      "https://a.example.com/1": { status: 302, headers: { location: "https://a.example.com/2" } },
+      "https://a.example.com/2": { status: 302, headers: { location: "https://a.example.com/1" } },
+    });
+    await expect(safeFetch("https://a.example.com/1", { fetch: f, lookup, maxRedirects: 3 })).rejects.toThrow(/more than 3 times/);
+    expect(f.calls).toHaveLength(4);
+  });
+
+  it("throws a plain error on a non-2xx answer", async () => {
+    const f = fakeFetch({ "https://c.example.com/missing.jpg": { status: 404, body: "not found" } });
+    await expect(safeFetch("https://c.example.com/missing.jpg", { fetch: f, lookup })).rejects.toThrow(/answered 404/);
+  });
+});
