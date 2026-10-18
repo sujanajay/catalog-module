@@ -18,6 +18,7 @@ import {
 import { normalizeKey, sanitizeSegment } from "../naming";
 import { resolveSkus } from "../sku-mapping";
 import type { BatchStatus } from "../types";
+import { sameProductMessage } from "./group";
 import type { GroupingResult, OverwritePreview, SourceItem } from "./types";
 
 export interface ProductMatch { identifier: string; productId: string | null; pathKey: string; isNew: boolean; matchedBy: "alias" | "option_key" | null }
@@ -132,7 +133,7 @@ export async function buildOverwritePreview(
     if (ids.length < 2) continue;
     const [first, ...others] = [...ids].sort(byText);
     for (const other of others) duplicates.push({ a: first!, b: other });
-    const sentence = `${ids.slice().sort(byText).join(" and ")} are the same product. Keep one.`;
+    const sentence = sameProductMessage(ids.slice().sort(byText));
     for (const id of ids) {
       for (const item of grouped.products.get(id) ?? []) grouped.rejected.push({ item, reason: sentence });
       grouped.products.delete(id);

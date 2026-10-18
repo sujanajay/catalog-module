@@ -34,12 +34,15 @@ import { resolveSkus, type ResolveResult } from "../sku-mapping";
 import type { BatchCounts, BatchOptions, ChangeKind, ChannelId, LinkStatus, OutputFlag, UploadKind } from "../types";
 import { driveFolderAdapter } from "./drive-folder";
 import { googleSheetAdapter, sheetCopyUri } from "./google-sheet";
-import { groupItems, isDuplicateReject, originalOf, previewRows, shotFlags, warningSentences, type ItemDimensions } from "./group";
+import {
+  baseName, byText, distinct, fmt, groupItems, isDuplicateReject, isSameProductReject, originalOf, previewRows, sameProductMessage, shotFlags,
+  warningSentences, type ItemDimensions,
+} from "./group";
 import { checkImage, classifyImageReject, corruptMessage, imageFlags } from "./image-check";
 import { linksSheetAdapter, readLinksSheetUpload, normalizeHeader } from "./links-sheet";
-import { completeUploads } from "./local-files";
+import { completeUploads, mapLimit } from "./local-files";
 import { buildOverwritePreview, matchProducts } from "./overwrite-preview";
-import { linkStatuses, matchProductList, missingIdentifier, productListDetected, readProductList, type ProductListRow } from "./product-list";
+import { linkStatuses, matchProductList, missingIdentifier, productListDetected, readProductList, sizeBases, type ProductListRow } from "./product-list";
 import type { Adapter, CollectInput, Detected, GroupingResult, IngestDeps, OverwritePreview, Preview, SourceItem } from "./types";
 import { fetchSourceUrl, urlListAdapter } from "./url-list";
 import { collectRejectReason, openZipReader, tooLargeMessage, zipAdapter, ZIP_ENTRY_MAX_BYTES } from "./zip";
@@ -74,29 +77,23 @@ const ITEM_CONCURRENCY = 8;
 /** Raw copies at once in the batch-wide step. */
 const COPY_CONCURRENCY = 16;
 /** Grouping table rows buildPreview returns (06 shows "Showing <n> of <total>"). */
-export const PREVIEW_ROW_LIMIT = 100;
+const PREVIEW_ROW_LIMIT = 100;
 /** Bytes file-type needs to recognise every format. */
 const SNIFF_BYTES = 4100;
 
 const INGEST_ROUTE = "/tasks/catalog/ingest" as const;
 const FILE_KINDS: UploadKind[] = ["zip", "image", "drive_folder"];
 
-const fmt = (n: number) => n.toLocaleString("en-US");
-const distinct = (xs: string[]) => [...new Set(xs)];
-const baseName = (item: SourceItem) => item.originalName.split(/[\\/]/).pop() || item.originalName;
-const collator = new Intl.Collator("en", { numeric: true });
-const byText = (a: string, b: string) => collator.compare(a, b) || (a < b ? -1 : a > b ? 1 : 0);
-
 // --- Item results --------------------------------------------------------------------------
 
 /** What reading one item gave: where its bytes are and what they are, or the reject sentence. */
-export type ItemResult =
+type ItemResult =
   | { ok: true; sha256: string; uri: string; mime: string; ext: string; width: number | null; height: number | null; size: number; flags: OutputFlag[] }
   | { ok: false; reason: string };
 type OkResult = Extract<ItemResult, { ok: true }>;
 
 /** Stable key of an item's bytes, so a re-collected item finds its earlier result. */
-export function itemKey(item: SourceItem): string {
+function itemKey(item: SourceItem): string {
   const b = item.bytes;
   if (b.kind === "gcs") return `gcs:${b.gsUri}`;
   if (b.kind === "url") return `url:${b.url}`;
@@ -107,19 +104,6 @@ const workPrefix = (prefix: string) => `${prefix}/derived/_ingest`;
 const manifestPath = (prefix: string, uploadId: string) => `${workPrefix(prefix)}/${uploadId}/manifest.json`;
 const stagedPath = (prefix: string, uploadId: string, sha256: string, ext: string) => `${workPrefix(prefix)}/${uploadId}/${sha256}.${ext}`;
 const statePath = (prefix: string) => `${workPrefix(prefix)}/preview-state.json`;
-
-async function mapLimit<T, R>(items: readonly T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> {
-  const out = new Array<R>(items.length);
-  let next = 0;
-  const worker = async () => {
-    while (next < items.length) {
-      const i = next++;
-      out[i] = await fn(items[i]!);
-    }
-  };
-  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
-  return out;
-}
 
 async function readStream(stream: Readable, maxBytes: number): Promise<Buffer | null> {
   const chunks: Buffer[] = [];
@@ -452,11 +436,7 @@ function rowSkuIds(rows: ProductListRow[]): string[] {
 
 /** The keys a list row can be found by: its identifier and its size-level base. */
 function rowKeys(row: ProductListRow): string[] {
-  const s = row.identifier.trim();
-  const slash = s.indexOf("/");
-  const sep = Math.max(s.lastIndexOf("_"), s.lastIndexOf("-"));
-  const base = slash > 0 ? s.slice(0, slash) : sep > 0 ? s.slice(0, sep) : "";
-  return [normalizeKey(s), ...(base ? [normalizeKey(base)] : [])];
+  return [normalizeKey(row.identifier.trim()), ...sizeBases(row.identifier).map(normalizeKey)];
 }
 
 /**
@@ -513,8 +493,10 @@ function assemble(manifests: UploadManifest[], lists: ListInput[], options: Batc
     }
     const missingRows = new Map<string, ProductListRow[]>();
     for (const row of m.unmatchedRows) {
-      const id = missingIdentifier(row, m.sizeRowsMatched > 0, byMatchColumn);
-      missingRows.set(normalizeKey(id), [...(missingRows.get(normalizeKey(id)) ?? []), row]);
+      const key = normalizeKey(missingIdentifier(row, m.sizeRowsMatched > 0, byMatchColumn));
+      const rows = missingRows.get(key);
+      if (rows) rows.push(row);
+      else missingRows.set(key, [row]);
     }
     for (const [id, status] of statuses) {
       if (status !== "missing_images") continue;
@@ -579,8 +561,6 @@ interface PreviewState {
   topLevelFolders: string[];
 }
 
-const SAME_PRODUCT = / are the same product\. Keep one\.$/;
-
 /**
  * "1 BMP file and 1 PDF": what the rejects were, for the zero-photos sentence. Uploads that could
  * not be opened at all (a missing zip, a sheet never uploaded) add the fact from their error
@@ -613,7 +593,7 @@ function firstFact(error: string): string {
 }
 
 /** counts.failReason when the whole batch holds no photo: from the rejects and the uploads that failed. */
-export function noPhotosReason(rejected: GroupingResult["rejected"], uploadErrors: string[] = []): string {
+function noPhotosReason(rejected: GroupingResult["rejected"], uploadErrors: string[] = []): string {
   return `No photos were found in what you uploaded. ${whatWasFound(rejected, uploadErrors)}. Upload photos and start again.`;
 }
 
@@ -643,6 +623,13 @@ async function deleteUnusedProducts(db: Db, ids: string[]): Promise<void> {
       sql`NOT EXISTS (SELECT 1 FROM ${catalogOutputs} WHERE ${catalogOutputs.productId} = ${catalogProducts.id})`,
     ),
   );
+}
+
+/** Puts an item's bytes at the raw object `target` (unless they are already there); returns its gs:// URI. */
+async function placeRaw(storage: IngestDeps["storage"], bucket: string, target: string, r: OkResult): Promise<string> {
+  const uri = toGsUri(bucket, target);
+  if (r.uri === uri) return uri;
+  return storage.uploadBuffer(target, (await storage.downloadBuffer(r.uri)).buf, r.mime);
 }
 
 /** findOrCreateProduct's operator sentences (an empty or clashing path); anything else is rethrown. */
@@ -707,7 +694,7 @@ async function finishBatch(db: Db, deps: IngestDeps, batchId: string): Promise<{
       // both are left out, as buildOverwritePreview leaves out the ones it finds.
       const [x, y] = [other, id].sort(byText);
       duplicates.push({ a: x!, b: y! });
-      const sentence = `${x} and ${y} are the same product. Keep one.`;
+      const sentence = sameProductMessage([x!, y!]);
       refuse(id, sentence);
       const first = productOf.get(other);
       if (first) {
@@ -752,9 +739,7 @@ async function finishBatch(db: Db, deps: IngestDeps, batchId: string): Promise<{
       const r = a.resultOf(item);
       if (!r) return null;
       const product = productOf.get(id)!;
-      const target = rawPath(prefix, product.pathKey, n, r.ext);
-      let rawUri = toGsUri(bucket, target);
-      if (r.uri !== rawUri) rawUri = await deps.storage.uploadBuffer(target, (await deps.storage.downloadBuffer(r.uri)).buf, r.mime);
+      const rawUri = await placeRaw(deps.storage, bucket, rawPath(prefix, product.pathKey, n, r.ext), r);
       rawUriOf.set(item, rawUri);
       const flags = [...new Set([...r.flags, ...shotFlags(item)])];
       return {
@@ -785,7 +770,7 @@ async function finishBatch(db: Db, deps: IngestDeps, batchId: string): Promise<{
 
   const newCount = withPhotos.filter((id) => productOf.get(id)!.isNew).length;
   const existing = overwrite.existingProducts.filter((p) => productOf.has(p.identifier));
-  const rejects = grouped.rejected.filter((r) => !SAME_PRODUCT.test(r.reason));
+  const rejects = grouped.rejected.filter((r) => !isSameProductReject(r.reason));
   const counts: Partial<BatchCounts> = {
     products: withPhotos.length, sources: versions.length,
     skuResolved: [...withPhotos, ...missing].filter((id) => productOf.get(id)!.resolved || productOf.get(id)!.skuIds.length > 0).length,
@@ -857,14 +842,14 @@ export async function buildPreview(db: Db, batchId: string, deps: Pick<IngestDep
   const [photos] = await db.select({ n: count() }).from(catalogSourceImages).where(eq(catalogSourceImages.batchId, batch.id));
   const skus = new Map(state.skus);
   const thumb = (item: SourceItem) => rawUriOf.get(item) ?? null;
-  const extra = { missing: state.missing, dimensions };
+  const allRows = previewRows(grouped, skus, thumb, Number.MAX_SAFE_INTEGER, { missing: state.missing, dimensions });
   const channels: ChannelId[] = batch.channels;
   const photoCount = Number(photos?.n ?? 0);
   return {
     kpis: { products: grouped.products.size, photos: photoCount, channels: channels.length, outputs: photoCount * channels.length },
     warnings: warningSentences(grouped, state.list, channels, { brandName: batch.brandName, dimensions, topLevelFolders: state.topLevelFolders, byMatchColumn: state.byMatchColumn }),
-    rows: previewRows(grouped, skus, thumb, opts.limit ?? PREVIEW_ROW_LIMIT, extra),
-    totalRows: previewRows(grouped, skus, thumb, Number.MAX_SAFE_INTEGER, extra).length,
+    rows: allRows.slice(0, Math.max(0, opts.limit ?? PREVIEW_ROW_LIMIT)),
+    totalRows: allRows.length,
     overwrite,
   };
 }
@@ -915,9 +900,7 @@ export async function collectOffline(input: {
       const r = a.resultOf(item);
       if (!r) continue;
       const n = item.n ?? i + 1;
-      const target = rawPath(prefix, pathKey, n, r.ext);
-      let uri = toGsUri(bucket, target);
-      if (r.uri !== uri) uri = await deps.storage.uploadBuffer(target, (await deps.storage.downloadBuffer(r.uri)).buf, r.mime);
+      const uri = await placeRaw(deps.storage, bucket, rawPath(prefix, pathKey, n, r.ext), r);
       shots.push({ n, uri, sha256: r.sha256, width: r.width, height: r.height, flags: [...new Set([...r.flags, ...shotFlags(item)])] });
     }
     return { identifier, skus: a.listSkuIds.get(identifier) ?? [], shots };

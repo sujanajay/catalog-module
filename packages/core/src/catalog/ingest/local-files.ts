@@ -12,7 +12,8 @@ export interface PlannedUpload { relativePath: string; objectPath: string; putUr
 /** Parallel signing and HEAD requests per call; keeps a 3,000-file folder well under API rate limits. */
 const PARALLEL = 16;
 
-async function mapLimit<T, R>(items: readonly T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> {
+/** `fn` over `items` with at most `limit` running at once; results in input order. */
+export async function mapLimit<T, R>(items: readonly T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> {
   const out = new Array<R>(items.length);
   let next = 0;
   const worker = async () => {

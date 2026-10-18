@@ -19,7 +19,7 @@ import { collectDriveFolderOnWeb } from "@catalog/core/catalog/ingest/drive-fold
 import { collectGoogleSheetOnWeb, googleClients } from "@catalog/core/catalog/ingest/google-sheet";
 import { collectOffline } from "@catalog/core/catalog/ingest/index";
 import type { Detected, IngestDeps } from "@catalog/core/catalog/ingest/types";
-import { sanitizeSegment } from "@catalog/core/catalog/naming";
+import { brandSlug } from "@catalog/core/catalog/naming";
 import { IDENTIFIER_MODES, type IdentifierMode, type UploadKind } from "@catalog/core/catalog/types";
 import type { CatalogUpload } from "@catalog/core/db/schema";
 import { pinnedFetch } from "@catalog/core/safe-url";
@@ -114,7 +114,7 @@ export interface CollectArgs { brand: string; from: string; productList?: string
 /** Writes the shots and <out>/manifest.json; returns the manifest. */
 export async function collectToManifest(args: CollectArgs, log: (line: string) => void = (l) => console.error(l)) {
   const out = path.resolve(args.out);
-  const brand = sanitizeSegment(args.brand).toLowerCase();
+  const brand = brandSlug(args.brand);
   const mounts: Record<string, string> = { [OUT_BUCKET]: out };
   const storage = localStorage(mounts);
   // index.ts names our own objects by BUCKET; here that is the output folder.
@@ -138,12 +138,11 @@ export async function collectToManifest(args: CollectArgs, log: (line: string) =
     const abs = path.resolve(from);
     const s = await stat(abs).catch(() => null);
     if (!s) throw new Error(`${from} does not exist.`);
+    // The parent folder is the mount, so a folder upload's gs:// prefix names the folder itself.
+    mounts.src = path.dirname(abs);
     if (s.isDirectory()) {
-      // The folder's parent is the mount, so the upload's gs:// prefix names the folder itself.
-      mounts.src = path.dirname(abs);
       uploads.push(uploadRow("image", path.basename(abs), `gs://src/${path.basename(abs)}/`));
     } else {
-      mounts.src = path.dirname(abs);
       const name = path.basename(abs);
       const kind: UploadKind | null = /\.zip$/i.test(name) ? "zip" : /\.(xlsx|xlsm|csv)$/i.test(name) ? "sheet" : /\.txt$/i.test(name) ? "url_list" : null;
       if (!kind) throw new Error(`${name} is not a folder, a zip, a links sheet (xlsx or csv) or a list of links (txt).`);
@@ -198,12 +197,12 @@ export async function main(argv: string[]): Promise<number> {
     console.error(`${(err as Error).message}\n${USAGE}`);
     return 2;
   }
-  const mode2 = (values["identifier-mode"] ?? "filename") as IdentifierMode;
-  if (!values.brand || !values.from || !values.out || !IDENTIFIER_MODES.includes(mode2)) {
+  const identifierMode = (values["identifier-mode"] ?? "filename") as IdentifierMode;
+  if (!values.brand || !values.from || !values.out || !IDENTIFIER_MODES.includes(identifierMode)) {
     console.error(USAGE);
     return 2;
   }
-  const { manifest } = await collectToManifest({ brand: values.brand, from: values.from, productList: values["product-list"], identifierMode: mode2, out: values.out });
+  const { manifest } = await collectToManifest({ brand: values.brand, from: values.from, productList: values["product-list"], identifierMode, out: values.out });
   const shots = manifest.products.reduce((s, p) => s + p.shots.length, 0);
   console.log(`${manifest.products.length.toLocaleString("en-US")} products, ${shots.toLocaleString("en-US")} shots, ${manifest.rejected.length.toLocaleString("en-US")} files not used.`);
   for (const w of manifest.warnings) console.log(w.detail ? `${w.headline} ${w.detail}` : w.headline);

@@ -40,9 +40,18 @@ export function isDuplicateReject(reason: string): boolean {
 
 const SAME_PRODUCT_REJECT = / are the same product\. Keep one\.$/;
 
+/** "<a> and <b> are the same product. Keep one." for identifiers of one product, in the order given. */
+export function sameProductMessage(identifiers: string[]): string {
+  return `${identifiers.join(" and ")} are the same product. Keep one.`;
+}
+/** True for the reject of two spellings of one product (see sameProductMessage). */
+export function isSameProductReject(reason: string): boolean {
+  return SAME_PRODUCT_REJECT.test(reason);
+}
+
 /** Readable photos left out only because of their names (duplicate or missing shot numbers, two spellings). */
 function leftOutForItsName(reason: string): boolean {
-  return isDuplicateReject(reason) || SAME_PRODUCT_REJECT.test(reason);
+  return isDuplicateReject(reason) || isSameProductReject(reason);
 }
 
 /** Flags of a grouped shot for its version row (`numbering_gap` when its product had a gap). */
@@ -53,9 +62,11 @@ export function shotFlags(item: SourceItem): OutputFlag[] {
 // --- Identifiers ---------------------------------------------------------------
 
 const collator = new Intl.Collator("en", { numeric: true, sensitivity: "variant" });
-const byText = (a: string, b: string) => collator.compare(a, b) || (a < b ? -1 : a > b ? 1 : 0);
+/** Natural text order ("P2" before "P10"), ties broken by code units so the order is total. */
+export const byText = (a: string, b: string) => collator.compare(a, b) || (a < b ? -1 : a > b ? 1 : 0);
 
-const baseName = (item: SourceItem) => item.originalName.split(/[\\/]/).pop() || item.originalName;
+/** The file name of an item, without its folders. */
+export const baseName = (item: SourceItem) => item.originalName.split(/[\\/]/).pop() || item.originalName;
 
 /** File names for a sentence: base names, or the relative paths when two base names are the same. */
 function namesOf(items: SourceItem[]): string[] {
@@ -230,7 +241,7 @@ function dimsOf(item: SourceItem, dims: ItemDimensions | undefined): { width: nu
   return { width: d?.width || null, height: d?.height || null };
 }
 
-const distinct = (xs: string[]) => [...new Set(xs)];
+export const distinct = (xs: string[]) => [...new Set(xs)];
 
 /**
  * The step 4 grouping table, sorted by identifier, first `limit` rows:
@@ -282,7 +293,7 @@ export function previewRows(
 
 // --- Warning sentences --------------------------------------------------------------
 
-const fmt = (n: number) => n.toLocaleString("en-US");
+export const fmt = (n: number) => n.toLocaleString("en-US");
 
 /**
  * Product list matching for the warnings, through product-list.ts's matchProductList (exact, shape

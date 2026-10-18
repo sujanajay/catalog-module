@@ -102,7 +102,7 @@ const SHAPE = /[_-](rect|square)$/i;
 const SHOT_SUFFIX = /[_-]\d{1,3}$/;
 
 /** The size-level forms of a list key: before the first "/", else without the last "_" or "-" segment (02's product_code rule). */
-function sizeBases(key: string): string[] {
+export function sizeBases(key: string): string[] {
   const s = key.trim();
   const slash = s.indexOf("/");
   if (slash > 0) return [s.slice(0, slash)];
