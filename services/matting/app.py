@@ -41,35 +41,33 @@ def load_sessions():
     for name in MODELS:
         if not (model_home / "models" / name / f"{name}.onnx").is_file():
             raise RuntimeError(f"baked model missing: {name}; rebuild the image, runtime downloads are disabled")
+    return {DEFAULT_MODEL: create_session(DEFAULT_MODEL)}
+
+
+def create_session(model):
     providers = ["CUDAExecutionProvider", "CPUExecutionProvider"] if TARGET == "gpu" else ["CPUExecutionProvider"]
-    sessions = {}
-    for name in ([DEFAULT_MODEL] if TARGET == "cpu" else MODELS):
-        options = ort.SessionOptions()
-        options.intra_op_num_threads = 4
-        if TARGET == "cpu":
-            options.enable_cpu_mem_arena = False
-            options.enable_mem_pattern = False
-        session = new_session(name, sess_opts=options, providers=providers)
-        actual = session.inner_session.get_providers()
-        if TARGET == "gpu" and "CUDAExecutionProvider" not in actual:
-            raise RuntimeError(f"{name}: CUDAExecutionProvider unavailable; refusing CPU-labelled-as-GPU service")
-        sessions[name] = session
-        status = Path("/proc/self/status")
-        memory = [line for line in status.read_text().splitlines() if line.startswith(("VmRSS:", "VmHWM:"))] if status.exists() else []
-        logger.info("session_ready model=%s target=%s providers=%s memory=%s", name, TARGET, actual, memory)
-    return sessions
+    options = ort.SessionOptions()
+    options.intra_op_num_threads = 4
+    if TARGET == "cpu":
+        options.enable_cpu_mem_arena = False
+        options.enable_mem_pattern = False
+    session = new_session(model, sess_opts=options, providers=providers)
+    actual = session.inner_session.get_providers()
+    if TARGET == "gpu" and "CUDAExecutionProvider" not in actual:
+        raise RuntimeError(f"{model}: CUDAExecutionProvider unavailable; refusing CPU-labelled-as-GPU service")
+    status = Path("/proc/self/status")
+    memory = [line for line in status.read_text().splitlines() if line.startswith(("VmRSS:", "VmHWM:"))] if status.exists() else []
+    logger.info("session_ready model=%s target=%s providers=%s memory=%s", model, TARGET, actual, memory)
+    return session
 
 
 def session_for(model):
-    # Evict before allocating the replacement; callers hold INFERENCE_LOCK through inference.
+    # Release the old session and its retained workspace before loading another model.
+    # Callers hold INFERENCE_LOCK through selection and inference on either target.
     if model not in SESSIONS:
         SESSIONS.clear()
         gc.collect()
-        options = ort.SessionOptions()
-        options.intra_op_num_threads = 4
-        options.enable_cpu_mem_arena = False
-        options.enable_mem_pattern = False
-        SESSIONS[model] = new_session(model, sess_opts=options, providers=["CPUExecutionProvider"])
+        SESSIONS[model] = create_session(model)
     return SESSIONS[model]
 
 
