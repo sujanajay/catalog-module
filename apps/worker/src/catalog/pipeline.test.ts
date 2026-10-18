@@ -260,3 +260,25 @@ it("does not refresh progress when a finalize attempt is busy or only drops its 
   expect((await handleFinalizeTask(w.deps,{batchId:s.batch.id})).outcome).toBe("retry");
   expect((await db.select().from(catalogBatches).where(eq(catalogBatches.id,s.batch.id)))[0]!.updatedAt).toEqual(startedAt);
 },60_000);
+it("stops an expired owner before it requests another matte while its replacement is still working",async()=>{
+  const w=world(),s=await seed(w,"stop-expired-compute",{shots:["one","two"]});
+  let now=w.deps.now();w.deps.now=()=>now;
+  let releaseOld!:()=>void,releaseNew!:()=>void,enteredOld!:()=>void,enteredNew!:()=>void;
+  const oldPause=new Promise<void>(resolve=>{releaseOld=resolve;}),newPause=new Promise<void>(resolve=>{releaseNew=resolve;});
+  const oldStarted=new Promise<void>(resolve=>{enteredOld=resolve;}),newStarted=new Promise<void>(resolve=>{enteredNew=resolve;});
+  const matte=w.deps.matteFor;let calls=0;
+  w.deps.matteFor=vi.fn<CatalogDeps["matteFor"]>(async(...args)=>{
+    calls++;
+    if(calls===1){enteredOld();await oldPause;}
+    else if(calls===3){enteredNew();await newPause;}
+    return matte(...args);
+  });
+  const old=handleChunkTask(w.deps,{chunkId:s.chunk.id});await oldStarted;
+  now=new Date(+now+1_000_000);
+  const replacement=handleChunkTask(w.deps,{chunkId:s.chunk.id});await newStarted;
+  releaseOld();
+  try {
+    expect((await old).httpStatus).toBe(503);
+    expect(w.deps.matteFor).toHaveBeenCalledTimes(3);
+  } finally {releaseNew();await replacement;}
+},60_000);

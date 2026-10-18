@@ -18,10 +18,10 @@ export async function handleChunkTask(deps: CatalogDeps, body: Record<string,unk
   const started = deps.now(), claim = randomUUID(); let mattingMs = 0, renderMs = 0;
   const ownsClaim = () => and(eq(catalogChunks.id,chunk!.id),eq(catalogChunks.taskName,claim),eq(catalogChunks.stage,chunk!.stage),eq(catalogChunks.status,"running"));
   // Ownership changes lock this same row. Keep compute/downloads outside these small write sections.
-  async function underClaim<T>(write:(db:CatalogDeps["db"])=>Promise<T>):Promise<T|undefined> {
+  async function underClaim<T>(write:(db:CatalogDeps["db"])=>Promise<T>):Promise<T> {
     return deps.db.transaction(async tx=>{
       const [owner]=await tx.select({id:catalogChunks.id}).from(catalogChunks).where(ownsClaim()).for("update");
-      if(!owner) return undefined;
+      if(!owner) throw new Error("Chunk ownership changed.");
       return write(tx as unknown as CatalogDeps["db"]);
     });
   }
