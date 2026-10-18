@@ -127,6 +127,9 @@ importers:
       file-type:
         specifier: ^22.2.0
         version: 22.2.0
+      google-auth-library:
+        specifier: ^11.3.1
+        version: 11.3.1
       googleapis:
         specifier: ^186.0.0
         version: 186.0.0

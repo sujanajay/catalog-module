@@ -19,11 +19,15 @@ import { collectDriveFolderOnWeb } from "@catalog/core/catalog/ingest/drive-fold
 import { collectGoogleSheetOnWeb, googleClients } from "@catalog/core/catalog/ingest/google-sheet";
 import { collectOffline } from "@catalog/core/catalog/ingest/index";
 import type { Detected, IngestDeps } from "@catalog/core/catalog/ingest/types";
-import { brandSlug } from "@catalog/core/catalog/naming";
-import { IDENTIFIER_MODES, type IdentifierMode, type UploadKind } from "@catalog/core/catalog/types";
+import { assertTestPrefix, brandSlug } from "@catalog/core/catalog/naming";
+import { CHANNEL_IDS, IDENTIFIER_MODES, PRODUCT_TYPES, type ChannelId, type ProductType, type IdentifierMode, type UploadKind } from "@catalog/core/catalog/types";
+import { channel } from "@catalog/core/catalog/channels";
+import { MattingClient, matteFor } from "@catalog/core/catalog/matte";
+import { bbox, planProduct, prepare, renderSource, UnsupportedSourceError, type Matte, type Prepared, type RenderOutput } from "@catalog/core/catalog/render";
+import { contactSheet } from "@catalog/core/catalog/contact-sheet";
 import type { CatalogUpload } from "@catalog/core/db/schema";
 import { pinnedFetch } from "@catalog/core/safe-url";
-import { mimeFromPath, parseGsUri } from "@catalog/core/storage";
+import { getBucketName, mimeFromPath, parseGsUri, uploadBuffer } from "@catalog/core/storage";
 
 const USAGE =
   "Usage: node dist/catalog-local.js collect --brand <slug> --from <folder|file.zip|links.xlsx|links.csv|urls.txt|Google Sheet or Drive folder link> " +
@@ -181,8 +185,96 @@ export async function collectToManifest(args: CollectArgs, log: (line: string) =
   return { manifest, missing: result.missing, detected: uploads.map((u) => u.detected as Detected | null) };
 }
 
+export interface RenderArgs {
+  manifest: string; channels: ChannelId[]; out: string; matting?: string; mattingGpu?: string;
+  model?: string; productType?: ProductType; limit?: number; upload?: string;
+}
+type Manifest = Awaited<ReturnType<typeof collectToManifest>>["manifest"];
+type ReportOutput = Omit<RenderOutput, "jpeg"> & {
+  identifier: string; n: number; channel: ChannelId; path?: string; uploaded?: string;
+  matte: Pick<Matte, "model" | "target" | "sentLongSide" | "ms"> | null;
+};
+
+/** Fail closed before rendering or touching storage. uploadBuffer always uses BUCKET. */
+export function validateRenderUpload(uri: string): string {
+  const { bucket, path: prefix } = parseGsUri(uri);
+  assertTestPrefix(prefix);
+  if (bucket !== "image-links-agent-assets" || getBucketName() !== bucket) throw new Error("Render uploads require BUCKET=image-links-agent-assets and that same private bucket in --upload.");
+  if (!prefix.endsWith("/") || prefix === "catalog-test/" || prefix.split("/").some((s) => s === "." || s === "..")) throw new Error("--upload must name a unique run folder under catalog-test/ and end with /.");
+  return prefix;
+}
+
+export async function renderToReport(args: RenderArgs) {
+  const uploadPrefix = args.upload ? validateRenderUpload(args.upload) : null;
+  if (!args.channels.length || args.channels.some((c) => !CHANNEL_IDS.includes(c))) throw new Error("Choose at least one valid channel.");
+  if (args.limit !== undefined && (!Number.isInteger(args.limit) || args.limit <= 0)) throw new Error("--limit must be a positive whole number.");
+  const manifest = JSON.parse(await readFile(args.manifest, "utf8")) as Manifest;
+  const out = path.resolve(args.out), outputs: ReportOutput[] = [], contacts: { label: string; jpeg: Buffer }[] = [];
+  const client = new MattingClient({ services: [{ baseUrl: args.matting ?? process.env.MATTING_URL ?? "http://localhost:8080", target: "cpu" }, ...(args.mattingGpu ?? process.env.MATTING_GPU_URL ? [{ baseUrl: (args.mattingGpu ?? process.env.MATTING_GPU_URL)!, target: "gpu" as const }] : [])] });
+  let processed = 0, renderMs = 0, renderCount = 0;
+  const matteTimes: Record<"cpu" | "gpu", number[]> = { cpu: [], gpu: [] };
+  await mkdir(out, { recursive: true });
+  for (const product of manifest.products) {
+    const shots: { n: number; prepared: Prepared; matte: Matte }[] = [];
+    for (const shot of product.shots) {
+      if (args.limit !== undefined && processed >= args.limit) break;
+      processed++;
+      let prepared: Prepared | undefined;
+      try {
+        prepared = await prepare(await readFile(shot.path), path.basename(shot.path), (buf) => client.convert(buf));
+        const matte = await matteFor(prepared, client, args.model);
+        if (matte.target) matteTimes[matte.target].push(matte.ms);
+        shots.push({ n: shot.n, prepared, matte });
+      } catch (err) {
+        for (const c of args.channels) outputs.push({ identifier: product.identifier, n: shot.n, channel: c, status: "failed", plan: { w: 0, h: 0, lowResolution: false, safeBox: { x: 0, y: 0, w: 0, h: 0 }, scale: 0, placedX: 0, placedY: 0, detailShot: false }, bytes: 0, quality: 0, flags: err instanceof UnsupportedSourceError ? ["unsupported"] : prepared?.flags ?? [], notes: [err instanceof Error ? err.message : String(err)], attention: null, compliance: { ok: false, failures: ["source"] }, matte: null });
+      }
+    }
+    for (const c of args.channels) {
+      const spec = channel(c);
+      const geometry = shots.flatMap((s) => { const box = bbox(s.matte.alpha, s.prepared.width, s.prepared.height); return box ? [{ box, source: { w: s.prepared.width, h: s.prepared.height } }] : []; });
+      const uniformScale = spec.uniformScaleDefault && geometry.length ? planProduct(spec, geometry).uniformScale : undefined;
+      for (const shot of shots) {
+        // Identifiers are kept in report labels; filesystem components cannot escape out.
+        const name = `${encodeURIComponent(product.identifier).replace(/\./g, "%2E")}_${shot.n}.jpg`;
+        const relative = `${c}/${name}`;
+        const start = performance.now();
+        const result = await renderSource({ prepared: shot.prepared, matte: shot.matte, channel: c, shotNumber: shot.n, productType: args.productType ?? "other", uniformScale, identifier: product.identifier, publicObjectPath: relative });
+        renderMs += performance.now() - start; renderCount++;
+        const { jpeg, ...rest } = result;
+        const row: ReportOutput = { ...rest, identifier: product.identifier, n: shot.n, channel: c, matte: { model: shot.matte.model, target: shot.matte.target, sentLongSide: shot.matte.sentLongSide, ms: shot.matte.ms } };
+        if (jpeg && result.status === "ok") {
+          await mkdir(path.join(out, c), { recursive: true });
+          row.path = path.join(out, c, name); await writeFile(row.path, jpeg);
+          if (contacts.length < 90) contacts.push({ label: `${product.identifier} ${shot.n} ${c}`, jpeg });
+          if (uploadPrefix) row.uploaded = await uploadBuffer(`${uploadPrefix}${relative}`, jpeg, "image/jpeg");
+        }
+        outputs.push(row);
+      }
+    }
+  }
+  const avg = (xs: number[]) => xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : null;
+  const flagsByKind: Record<string, number> = {};
+  for (const row of outputs) for (const flag of row.flags) flagsByKind[flag] = (flagsByKind[flag] ?? 0) + 1;
+  const report = { outputs, contactSheet: { samples: contacts.length, policy: "First 90 successful outputs in manifest product, selected channel, shot order." }, summary: { outputs: outputs.length, compliant: outputs.filter((o) => o.status === "ok" && o.compliance.ok).length, skipped: outputs.filter((o) => o.status === "skipped").length, failed: outputs.filter((o) => o.status === "failed").length, flagsByKind, msMatteAvgByTarget: { cpu: avg(matteTimes.cpu), gpu: avg(matteTimes.gpu) }, msRenderAvg: renderCount ? renderMs / renderCount : null } };
+  await writeFile(path.join(out, "report.json"), JSON.stringify(report, null, 2));
+  if (contacts.length) await writeFile(path.join(out, "contact-sheet.jpg"), await contactSheet(contacts, 6));
+  return report;
+}
+
 export async function main(argv: string[]): Promise<number> {
   const [mode, ...rest] = argv;
+  if (mode === "render") {
+    let values;
+    try {
+      ({ values } = parseArgs({ args: rest, options: Object.fromEntries(["manifest", "channels", "out", "matting", "matting-gpu", "model", "product-type", "limit", "upload"].map((key) => [key, { type: "string" as const }])) }));
+      const channels = String(values.channels ?? "").split(",") as ChannelId[];
+      const productType = (values["product-type"] ?? "other") as ProductType;
+      if (!values.manifest || !values.out || channels.some((c) => !CHANNEL_IDS.includes(c)) || !PRODUCT_TYPES.includes(productType)) throw new Error("Missing or invalid render options.");
+      const report = await renderToReport({ manifest: String(values.manifest), channels: [...new Set(channels)], out: String(values.out), matting: values.matting as string | undefined, mattingGpu: values["matting-gpu"] as string | undefined, model: values.model as string | undefined, productType, limit: values.limit === undefined ? undefined : Number(values.limit), upload: values.upload as string | undefined });
+      console.log(JSON.stringify(report.summary));
+      return report.summary.failed ? 1 : 0;
+    } catch (err) { console.error(`${err instanceof Error ? err.message : String(err)}\n${USAGE}\nRender: render --manifest <manifest.json> --channels <comma-separated channels> --out <dir>`); return 2; }
+  }
   if (mode !== "collect") {
     console.error(USAGE);
     return 2;
