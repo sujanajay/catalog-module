@@ -1,0 +1,20 @@
+.catalog-wizard .steps{display:flex;gap:8px;flex-wrap:wrap;margin:0 0 22px;padding:0;list-style:none;counter-reset:s}
+.catalog-wizard .steps li{counter-increment:s;display:flex;align-items:center;gap:8px;color:var(--muted);font-weight:500}
+.catalog-wizard .steps li::before{content:counter(s);display:inline-grid;place-items:center;width:26px;height:26px;border-radius:50%;border:2px solid var(--grey-l);font-size:13px}
+.catalog-wizard .steps li.on{color:var(--fg)}.catalog-wizard .steps li.on::before{background:var(--orange);border-color:var(--orange);color:#fff}
+.catalog-wizard .steps li.done::before{background:var(--navy);border-color:var(--navy);color:#fff;content:"✓"}
+.catalog-wizard .grid2{display:grid;grid-template-columns:1fr 1fr;gap:18px}
+.catalog-wizard .stack{display:grid;gap:18px}.catalog-wizard label{display:block;margin-top:14px}
+.catalog-wizard .opt{display:flex;gap:9px;align-items:flex-start;padding:10px;border:1px solid var(--line);border-radius:6px}
+.catalog-wizard .opt small{display:block;color:var(--muted)}.catalog-wizard .chan{display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:12px}
+.catalog-wizard .drop{border:2px dashed var(--grey-l);padding:26px;text-align:center;border-radius:8px}
+.catalog-wizard .drop input{max-width:100%}.catalog-wizard .sa{padding:12px;background:var(--yellow);border-radius:8px;margin:12px 0}
+.catalog-wizard .drop-select{width:100%;padding:0;background:transparent;border:0;color:inherit;font:inherit;cursor:pointer;text-align:center}
+.catalog-wizard .f{font-weight:600;margin-bottom:6px}.catalog-wizard .f:first-child{margin-top:0}
+.catalog-wizard .actions{display:flex;justify-content:space-between;gap:12px;margin-top:24px}
+.catalog-wizard .kpis{display:grid;grid-template-columns:repeat(4,1fr);gap:12px}.catalog-wizard .kpis strong{display:block;font-size:26px;color:var(--fg)}
+.catalog-wizard .thumb{width:54px;height:64px;object-fit:contain}.catalog-wizard .examples img{width:44px;height:48px;object-fit:contain}
+.catalog-wizard progress{width:100%;accent-color:var(--orange)}.catalog-wizard .upload-list{padding-left:20px}
+.catalog-wizard th,.catalog-wizard td{padding:10px;border-bottom:1px solid var(--line);text-align:left}
+.catalog-wizard .warning{padding:14px;background:var(--yellow);border:1px solid var(--line);border-radius:8px}
+@media(max-width:760px){.catalog-wizard .grid2{grid-template-columns:1fr}.catalog-wizard .kpis{grid-template-columns:repeat(2,1fr)}}
