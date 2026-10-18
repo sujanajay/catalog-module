@@ -20,10 +20,11 @@ steps:
       - "${_AR}/web:${_TAG}"
       - -e
       - |
+        process.exitCode = 1;
         (async () => {
           const { createRequire } = require('node:module');
           const webRequire = createRequire('/app/apps/web/server.js');
-          webRequire('./.next/server/app/api/catalog/batches/[id]/start/route.js');
+          await webRequire('./.next/server/app/api/catalog/batches/[id]/start/route.js');
           const unzipper = webRequire('unzipper');
           const zip = Buffer.from('UEsDBBQAAAAAAAAAIVCvhZUoBQAAAAUAAAAJAAAAY2hlY2sudHh0cmVhZHlQSwECFAAUAAAAAAAAACFQr4WVKAUAAAAFAAAACQAAAAAAAAAAAAAAgAEAAAAAY2hlY2sudHh0UEsFBgAAAAABAAEANwAAACwAAAAAAA==', 'base64');
           const { files } = await unzipper.Open.buffer(zip);
@@ -31,6 +32,7 @@ steps:
             throw new Error('The standalone archive reader failed its package check.');
           }
           console.log('Standalone Start route and archive reader loaded successfully.');
+          process.exitCode = 0;
         })().catch((error) => {
           console.error(String(error.stack ?? error).split('\n').slice(0, 6).join('\n').slice(0, 3000));
           process.exitCode = 1;
