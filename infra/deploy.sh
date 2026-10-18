@@ -54,8 +54,12 @@ fi
 # --- 1. Smoke gate (tier 5, from 06 on) --------------------------------------------
 # Runs before the build; a failing smoke (any failed_compliance) stops the deploy.
 echo "==> smoke"
-pnpm --filter @catalog/worker build
-pnpm catalog:smoke
+if [ "${CATALOG_REMOTE_SMOKE:-0}" = 1 ]; then
+  bash infra/catalog-smoke-linux.sh
+else
+  pnpm --filter @catalog/worker build
+  pnpm catalog:smoke
+fi
 
 # --- 2. Build ------------------------------------------------------------------------
 echo "==> build $TAG"
