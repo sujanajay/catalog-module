@@ -168,6 +168,12 @@ keeps upscaling <= 1.5x; below that, the min canvas with a `low_resolution` flag
 flags, and the constant `STYLI_SKIP_LOW_RESOLUTION = true` (an agreement with Styli, always applied,
 not an operator option) excludes such images from the sheet with a note.
 
+Spec 05 clarifications approved by the owner: adaptive canvases retain the target aspect and meet
+both listed minimum dimensions, even when the minimum has a different aspect (Trendyol's effective
+minimum is 600x900). The channel table stays unchanged. Fixed canvases retain exact dimensions,
+including Styli's 3123 px height. Background compliance checks exposed border background and all
+required margins; foreground is allowed at zero-margin edges under the full-canvas fit rule.
+
 Constants: `JPEG_QUALITY_START = 90`, `JPEG_QUALITY_MIN = 70`, `JPEG_QUALITY_STEP = 5` (builder
 constant), `MAX_OUTPUT_BYTES = 2_000_000`, `MAX_UPSCALE = 1.5`, `DETAIL_SHOT_BBOX_FRACTION = 0.85`,
 `MIN_SOURCE_LONG_SIDE_PX = 500`, `STYLI_MIN_SOURCE_HEIGHT_PX = 1482`, `CHANNEL_RULES_VERSION` (bumped on
