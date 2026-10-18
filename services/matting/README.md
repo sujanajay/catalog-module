@@ -100,6 +100,11 @@ measurements, not the required 100-photo benchmark. Actual L4 inference and memo
 datasets and image-size measurements remain pending. No actual inference measurements are claimed
 by mocked tests.
 
+The client timeout defaults to 180,000 ms, retaining environment and per-client overrides. This
+provides headroom above the measured 64,094 ms CPU readiness delay while staying below the
+300-second Cloud Run request timeout. The measurement identifies a startup headroom gap in the
+former 60,000 ms default; it does not establish a deployed Cloud Run failure.
+
 `infra/deploy.sh` deploys CPU in asia-south1 and GPU in asia-southeast1 before updating worker URLs.
 Both are private under `catalog-matting@`; worker already has project-level run.invoker from
 bootstrap. Region-aware checks retain the existing private-service IAM pattern. Only GPU quota

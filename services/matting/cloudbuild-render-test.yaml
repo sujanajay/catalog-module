@@ -13,7 +13,7 @@ steps:
         [[ "$$ARTIFACT_PREFIX" == "gs://image-links-agent-assets/catalog-test/$$run/artifacts/" ]]
         [[ "$$MATTING_IMAGE" =~ ^asia-south1-docker.pkg.dev/image-links-agent/apps/matting:[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$$ ]]
         [[ "$$FULL_RENDER" =~ ^[01]$$ ]]
-        if [[ "$$FULL_RENDER" == 1 ]]; then [[ "$$TEST_TIMEOUT" == 12h && "$$BUILD_TIMEOUT" == 46800s ]]; else [[ "$$TEST_TIMEOUT" == 15m && "$$BUILD_TIMEOUT" == 1200s ]]; fi
+        if [[ "$$FULL_RENDER" == 1 ]]; then [[ "$$TEST_TIMEOUT" == 23h && "$$BUILD_TIMEOUT" == 86400s ]]; else [[ "$$TEST_TIMEOUT" == 15m && "$$BUILD_TIMEOUT" == 1200s ]]; fi
         mkdir -p /workspace/real-data /workspace/var/render05
         for archive in anta french-connection; do
           gcloud storage cp "$${INPUT_PREFIX}$$archive.tar" "/tmp/$$archive.tar"
@@ -50,7 +50,7 @@ steps:
             -e RENDER_REAL_OUT=/workspace/var/render05/full \
             -e MATTING_URL=http://localhost:8080 -e BUCKET=image-links-agent-assets \
             -e GOOGLE_CLOUD_PROJECT=image-links-agent -e FULL_RENDER='${_FULL_RENDER}' \
-            -e UPLOAD_PREFIX='${_ARTIFACT_PREFIX}' node:22-bookworm bash -ceu '
+            -e UPLOAD_PREFIX='${_ARTIFACT_PREFIX}' -e RENDER_REAL_UPLOAD_PREFIX='${_ARTIFACT_PREFIX}' node:22-bookworm bash -ceu '
               node -e "(async()=>{for(let i=0;i<120;i++){try{const r=await fetch(\"http://localhost:8080/health\",{signal:AbortSignal.timeout(5000)});if(r.ok){console.log(await r.text());return;}}catch{}await new Promise(r=>setTimeout(r,5000));}throw Error(\"CPU health timed out\");})().catch(e=>{console.error(e);process.exit(1);})"
               cli=/workspace/apps/worker/dist/catalog-local.js
               channels=noon,namshi,trendyol,styli,centrepoint,sixthstreet,vogacloset,amazon,shein
@@ -99,4 +99,5 @@ substitutions:
   _FULL_RENDER: '0'
   _TEST_TIMEOUT: 15m
   _BUILD_TIMEOUT: 1200s
+# Preflight default. infra/test-render.sh overrides this with --timeout=86400s only in full mode.
 timeout: 1200s

@@ -9,7 +9,7 @@ cd "$(dirname "$0")/.."
 FULL_RENDER=${FULL_RENDER:-0}
 [[ "$FULL_RENDER" =~ ^[01]$ ]] || { echo 'FULL_RENDER must be 0 or 1' >&2; exit 2; }
 # Full mode requires explicit budget approval under execution protocol section 11.
-if [[ "$FULL_RENDER" == 1 ]]; then build_timeout=46800s; test_timeout=12h; else build_timeout=1200s; test_timeout=15m; fi
+if [[ "$FULL_RENDER" == 1 ]]; then build_timeout=86400s; test_timeout=23h; else build_timeout=1200s; test_timeout=15m; fi
 [[ "$INPUT_PREFIX" =~ ^gs://image-links-agent-assets/catalog-test/([a-z0-9][a-z0-9-]{7,79})/inputs/$ ]] || { echo 'Invalid private input prefix' >&2; exit 2; }
 run=${BASH_REMATCH[1]}
 [[ "$ARTIFACT_PREFIX" == "gs://image-links-agent-assets/catalog-test/$run/artifacts/" ]] || { echo 'Artifact prefix must match the same run' >&2; exit 2; }

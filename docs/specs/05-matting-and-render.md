@@ -202,10 +202,15 @@ Any change to the maths in this file that alters output bytes must bump `CHANNEL
       only the connected component of the dark region that touches the bbox bottom is kept, so stray
       gradients and vignettes are dropped. The layer is a 1-channel image `255 - round(255 * d)`,
       scaled and placed with the product, composited with `blend: "multiply"` over the background
-      before the product goes on `over`; pixels above `ALPHA_BBOX_THRESHOLD` are excluded so the
-      measured product is never darkened. Negligible antialiased tails at or below that threshold
-      retain the contact shadow: excluding every nonzero alpha created a visible gap in the real
-      Anta preflight. Opaque product colors and required margins remain unchanged.
+      before the product goes on `over`. First qualify the shadow using only the connected
+      background component at or below `ALPHA_BBOX_THRESHOLD`; partial product pixels must never
+      create a preserved shadow on their own. After qualification, extend that component into
+      connected partial-alpha pixels, without bridging into other background components. Exclude
+      opaque alpha-255 pixels from measurement and the projected shadow. Original foreground RGB
+      and alpha are unchanged: normal `over` compositing lets the verified background shadow show
+      through a partial edge, while opaque product colors remain exact. Hard exclusion at alpha 0
+      and then 10 both left a visible bright fringe in the real Anta preflight. Required margins
+      remain unchanged.
    3. Synthesise: when rule 2 does not hold, the product type is `footwear`, `bag_accessory` or
       `other` (and `auto`, treated as `other`) and the pose is upright (bbox taller than wide, or
       footwear): a deterministic contact shadow from the alpha mask: keep the bottom 20% of mask
@@ -273,7 +278,7 @@ export class MattingClient {
 /** Breaker and timeout constants, read once from env with these defaults; 09 tunes them under fault injection. */
 export const BREAKER_FAILURES = Number(process.env.MATTING_BREAKER_FAILURES ?? 5);        // consecutive failures that open the breaker
 export const BREAKER_COOLDOWN_MS = Number(process.env.MATTING_BREAKER_COOLDOWN_MS ?? 60_000); // open -> half-open after this
-export const MATTING_TIMEOUT_MS = Number(process.env.MATTING_TIMEOUT_MS ?? 60_000);          // per call; a timeout counts as a failure
+export const MATTING_TIMEOUT_MS = Number(process.env.MATTING_TIMEOUT_MS ?? 180_000);         // per call; a timeout counts as a failure
 export function alphaFromPng(png: Buffer): Promise<{ alpha: Buffer; width: number; height: number }>;
 export function floodFillMatte(prepared: Prepared): Matte;   // source "floodfill"
 export async function matteFor(prepared: Prepared, client: MattingClient | null, model?: string): Promise<Matte>;
@@ -508,7 +513,7 @@ paths without touching the public bucket. `--limit` is for development loops onl
 | `MATTE_TARGET` | `cpu` (set to `gpu` in the gpu image) | matting; reported in `/health` |
 | `MATTING_BREAKER_FAILURES` | `5` | worker (`BREAKER_FAILURES`) |
 | `MATTING_BREAKER_COOLDOWN_MS` | `60000` | worker (`BREAKER_COOLDOWN_MS`) |
-| `MATTING_TIMEOUT_MS` | `60000` | worker (`MATTING_TIMEOUT_MS`) |
+| `MATTING_TIMEOUT_MS` | `180000` | worker (`MATTING_TIMEOUT_MS`) |
 
 ### Builder constants (not in the sheet; set once, named, tested)
 

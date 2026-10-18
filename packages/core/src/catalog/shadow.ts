@@ -43,20 +43,27 @@ export function preservedDarkness(p: Prepared, matte: Matte, box: BBox, type: Pr
   const darkness = Buffer.alloc(p.width * p.height), seen = new Uint8Array(darkness.length), queue = new Int32Array(darkness.length);
   for (let y = y0; y < y1; y++) for (let x = x0; x < x1; x++) {
     const i = y * p.width + x;
-    if (matte.alpha[i]! > ALPHA_BBOX_THRESHOLD) continue;
+    if (matte.alpha[i] === 255) continue;
     const d = Math.min(SHADOW_MAX_DARKNESS, Math.max(0, (bg - luma(p.rgb[i * 3]!, p.rgb[i * 3 + 1]!, p.rgb[i * 3 + 2]!)) / bg));
     // Sub-JPEG-level noise must not connect a vignette to a real contact shadow.
     if (d > 0.01) darkness[i] = Math.round(d * 255);
   }
   let tail = 0;
   const contactY = Math.min(p.height - 1, box.y + box.h);
-  for (let y = Math.max(y0, contactY - 1); y <= Math.min(y1 - 1, contactY + 1); y++) for (let x = box.x; x < box.x + box.w; x++) { const i = y * p.width + x; if (darkness[i] && !seen[i]) { seen[i] = 1; queue[tail++] = i; } }
+  for (let y = Math.max(y0, contactY - 1); y <= Math.min(y1 - 1, contactY + 1); y++) for (let x = box.x; x < box.x + box.w; x++) { const i = y * p.width + x; if (darkness[i] && matte.alpha[i]! <= ALPHA_BBOX_THRESHOLD && !seen[i]) { seen[i] = 1; queue[tail++] = i; } }
   let sum = 0;
   for (let head = 0; head < tail; head++) {
     const i = queue[head]!, x = i % p.width, y = Math.floor(i / p.width); sum += darkness[i]! / 255;
-    for (const next of [x > x0 ? i - 1 : -1, x + 1 < x1 ? i + 1 : -1, y > y0 ? i - p.width : -1, y + 1 < y1 ? i + p.width : -1]) if (next >= 0 && darkness[next] && !seen[next]) { seen[next] = 1; queue[tail++] = next; }
+    for (const next of [x > x0 ? i - 1 : -1, x + 1 < x1 ? i + 1 : -1, y > y0 ? i - p.width : -1, y + 1 < y1 ? i + p.width : -1]) if (next >= 0 && darkness[next] && matte.alpha[next]! <= ALPHA_BBOX_THRESHOLD && !seen[next]) { seen[next] = 1; queue[tail++] = next; }
   }
   if (!tail || sum / tail <= SHADOW_MIN_DARKNESS) return null;
+  // Qualify real background shadow first, without counting partially transparent product.
+  // Then let that verified shadow continue underneath the partial edge. Original foreground
+  // RGB is still composited over it unchanged. Never bridge into another background component.
+  for (let head = 0; head < tail; head++) {
+    const i = queue[head]!, x = i % p.width, y = Math.floor(i / p.width);
+    for (const next of [x > x0 ? i - 1 : -1, x + 1 < x1 ? i + 1 : -1, y > y0 ? i - p.width : -1, y + 1 < y1 ? i + p.width : -1]) if (next >= 0 && darkness[next] && matte.alpha[next]! > ALPHA_BBOX_THRESHOLD && matte.alpha[next]! < 255 && !seen[next]) { seen[next] = 1; queue[tail++] = next; }
+  }
   for (let i = 0; i < darkness.length; i++) if (!seen[i]) darkness[i] = 0;
   return darkness;
 }
@@ -89,7 +96,7 @@ export async function shadowLayer(p: Prepared, matte: Matte, box: BBox, plan: Ca
   const grey = Buffer.alloc(plan.w * plan.h);
   for (let y = 0; y < plan.h; y++) for (let x = 0; x < plan.w; x++) {
     const inside = x >= Math.max(band.x, safe.x) && x < Math.min(plan.w - band.x, safe.x + safe.w) && y >= Math.max(band.y, safe.y) && y < Math.min(plan.h - band.y, safe.y + safe.h);
-    const isProduct = (foregroundMask?.[y * plan.w + x] ?? 0) > ALPHA_BBOX_THRESHOLD;
+    const isProduct = foregroundMask?.[y * plan.w + x] === 255;
     grey[y * plan.w + x] = inside && !isProduct ? 255 - projected[y * plan.w + x]! : 255;
   }
   return { layer: await sharp(grey, { raw: { width: plan.w, height: plan.h, channels: 1 } }).png().toBuffer(), flags };

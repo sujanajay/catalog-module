@@ -12,7 +12,8 @@ export interface MattingClientOptions {
 }
 export const BREAKER_FAILURES = Number(process.env.MATTING_BREAKER_FAILURES ?? 5);
 export const BREAKER_COOLDOWN_MS = Number(process.env.MATTING_BREAKER_COOLDOWN_MS ?? 60_000);
-export const MATTING_TIMEOUT_MS = Number(process.env.MATTING_TIMEOUT_MS ?? 60_000);
+// Allow measured 64-second CPU readiness plus startup headroom, below Cloud Run's 300 seconds.
+export const MATTING_TIMEOUT_MS = Number(process.env.MATTING_TIMEOUT_MS ?? 180_000);
 // Discovery is refreshed once a minute, independently for each service.
 export const HEALTH_TTL_MS = 60_000;
 export const FLOODFILL_TOLERANCE = 24;

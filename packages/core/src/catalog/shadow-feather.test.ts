@@ -15,7 +15,7 @@ function featheredSole(): { prepared: Prepared; matte: Matte; box: BBox; plan: C
   // The right sole sits lower, keeping the antialiased left contact edge inside the bbox.
   for (let y = 75; y < 80; y++) for (let x = 60; x < 95; x++) { paint(x, y, 20); alpha[y * width + x] = 255; }
   for (let x = 30; x < 46; x++) { alpha[75 * width + x] = 8; alpha[76 * width + x] = 2; }
-  // Above the established silhouette threshold, both source and destination must stay protected.
+  // Partial edges must retain the background shadow; only opaque pixels fully exclude it.
   alpha[75 * width + 50] = 11;
   alpha[76 * width + 50] = 128;
   const box = { x: 25, y: 20, w: 70, h: 60 };
@@ -30,18 +30,18 @@ function featheredSole(): { prepared: Prepared; matte: Matte; box: BBox; plan: C
 describe("preserved shadow at a feathered product edge", () => {
   it("invalidates cached renders when the silhouette-shadow rules change", () => {
     const identity = { sourceSha256: "same-source", channel: "noon" as const, policyId: "same-policy", policyUpdatedAt: "2026-10-18T00:00:00Z", n: 2 };
-    const before = renderKeyInputs({ ...identity, rulesVersion: "1" });
+    const before = renderKeyInputs({ ...identity, rulesVersion: "2" });
     const current = renderKeyInputs({ ...identity, rulesVersion: CHANNEL_RULES_VERSION });
     expect(current).toBe(`same-source|noon|${CHANNEL_RULES_VERSION}|same-policy+2026-10-18T00:00:00Z|2`);
     expect(current).not.toBe(before);
   });
 
-  it("keeps native shadow connected through negligible alpha tails without measuring product pixels", () => {
+  it("keeps native shadow connected through negligible alpha tails without measuring opaque product pixels", () => {
     const { prepared, matte, box } = featheredSole();
     const darkness = preservedDarkness(prepared, matte, box, "footwear");
     expect(darkness, "The real contact shadow must be preserved, not replaced by synthesis").not.toBeNull();
     for (const y of [75, 76, 77]) expect(darkness![y * prepared.width + 35], `Native shadow must continue through contact row ${y}`).toBe(153);
-    for (let i = 0; i < matte.alpha.length; i++) if (matte.alpha[i]! > 10) expect(darkness![i], `Measured product pixel ${i} must not become shadow`).toBe(0);
+    for (let i = 0; i < matte.alpha.length; i++) if (matte.alpha[i] === 255) expect(darkness![i], `Opaque product pixel ${i} must not become shadow`).toBe(0);
   });
 
   it("keeps the projected contact edge dark, opaque product pixels unchanged, and margins clean", async () => {
@@ -52,7 +52,7 @@ describe("preserved shadow at a feathered product edge", () => {
     const grey = await sharp(shadow.layer!).toColourspace("b-w").raw().toBuffer();
     expect(grey.length).toBe(plan.w * plan.h);
     for (const y of [75, 76, 77]) expect(grey[y * plan.w + 35], `Projected contact row ${y} must retain the native shadow`).toBe(102);
-    for (let i = 0; i < matte.alpha.length; i++) if (matte.alpha[i]! > 10) expect(grey[i], `Product pixel ${i} must have a neutral shadow layer`).toBe(255);
+    for (let i = 0; i < matte.alpha.length; i++) if (matte.alpha[i] === 255) expect(grey[i], `Opaque product pixel ${i} must have a neutral shadow layer`).toBe(255);
     for (let y = 0; y < plan.h; y++) for (let x = 0; x < plan.w; x++) if (x < 10 || x >= 110 || y < 10 || y >= 110) expect(grey[y * plan.w + x]).toBe(255);
 
     const rgba = Buffer.alloc(plan.w * plan.h * 4);

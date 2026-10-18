@@ -22,6 +22,12 @@ const DATA = process.env.REAL_DATA_DIR ?? "C:/Users/Sujan AH/Desktop/opptra-imag
 const ROOT = fileURLToPath(new URL("../../../../", import.meta.url));
 const CLI = fileURLToPath(new URL("../../../../apps/worker/dist/catalog-local.js", import.meta.url));
 const RUN = `render-05-${randomUUID()}`;
+const UPLOAD_ROOT = process.env.RENDER_REAL_UPLOAD_PREFIX ?? `gs://image-links-agent-assets/catalog-test/${RUN}/`;
+// Cleanup only removes the per-product-type leaf appended below, never this root.
+// Require a unique run name and plain folder segments; reject broad roots and traversal.
+if (!/^gs:\/\/image-links-agent-assets\/catalog-test\/[a-z0-9][a-z0-9-]{7,79}\/(?:[A-Za-z0-9][A-Za-z0-9_-]*\/)*$/.test(UPLOAD_ROOT)) {
+  throw new Error("RENDER_REAL_UPLOAD_PREFIX must name a unique private run folder under catalog-test/ and end with /.");
+}
 const OUT = path.resolve(process.env.RENDER_REAL_OUT ?? path.join(ROOT, "var", RUN));
 const CPU = process.env.MATTING_URL ?? "http://localhost:8080";
 const GPU = process.env.MATTING_GPU_URL;
@@ -114,7 +120,7 @@ async function verifyReport(report: Report, manifest: Manifest, sourceCount: num
 }
 
 async function verifyUpload(manifest: string, out: string, type: ProductType): Promise<void> {
-  const prefix = `gs://image-links-agent-assets/catalog-test/${RUN}/${type}/`;
+  const prefix = `${UPLOAD_ROOT}full-upload/${type}/`;
   try {
     await cli([...renderArgs(manifest, out, type), "--limit", "2", "--upload", prefix]);
     const report = await readJson<Report>(path.join(out, "report.json"));
