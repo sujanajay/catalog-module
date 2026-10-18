@@ -65,7 +65,19 @@ export class MattingClient {
     const url = new URL(s.baseUrl);
     const local = url.protocol === "http:" && ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname);
     const headers = new Headers(init.headers);
-    if (!local) headers.set("Authorization", `Bearer ${await this.token(s.baseUrl)}`);
+    if (!local) {
+      signal.throwIfAborted();
+      let onAbort!: () => void;
+      const aborted = new Promise<never>((_, reject) => {
+        onAbort = () => reject(signal.reason);
+        signal.addEventListener("abort", onAbort, { once: true });
+      });
+      try {
+        const token = await Promise.race([this.token(s.baseUrl), aborted]);
+        signal.throwIfAborted();
+        headers.set("Authorization", `Bearer ${token}`);
+      } finally { signal.removeEventListener("abort", onAbort); }
+    }
     const response = await this.request(`${s.baseUrl}${endpoint}`, { ...init, headers, signal });
     if (!response.ok) {
       if (response.status >= 500 || response.status === 429) throw new UnavailableError(`Background removal service returned ${response.status}.`);
