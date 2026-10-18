@@ -222,7 +222,6 @@ async function listUpload(input: CollectInput): Promise<Omit<UploadManifest, "ve
     return { items: [], warnings: [], productList: true, detected: { ...detected, ...chosen } };
   };
 
-  // Google Sheet bytes remain a csv copy, even when the operator reads it as a product list.
   if (upload.kind === "product_list" || (chosen.columnsChosen && prior?.kind === "product_list")) return asProductList();
   if (upload.kind === "sheet" || upload.kind === "google_sheet") {
     const src = await sheetSource(input);

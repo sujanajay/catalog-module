@@ -15,7 +15,6 @@ export async function detectedBatch(id: string) {
   await queryBatch(id);
   const detected = await buildDetectedStep2(db(), id, { storage });
   const uploads = await db().select().from(catalogUploads).where(eq(catalogUploads.batchId, id));
-  // Per-sheet choices are needed when sheets have different headers.
   const batch = await queryBatch(id);
   return { ...detected, totalProducts: batch.counts.products, unreadable: uploads.flatMap((u) => (u.detected as unknown as Detected | null)?.rejected ?? []), sheets: detected.sheets.map((sheet) => ({ ...sheet, columns: (uploads.find((u) => u.id === sheet.uploadId)?.detected as unknown as Detected | null)?.columns ?? [] })) };
 }
@@ -39,7 +38,6 @@ export async function patchDetected(id: string, value: unknown) {
     return { upload, detected, identifier, images };
   });
   if (patches.length === 1) options.sheetColumns = { identifier: patches[0]!.identifier, images: patches[0]!.images };
-  // Multiple sheets carry independent selections in upload.detected.
   if (patches.length > 1) options.sheetColumns = null;
   await db().transaction(async (tx) => {
     await draftForUpdate(tx, id);

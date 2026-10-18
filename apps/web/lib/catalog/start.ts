@@ -15,7 +15,6 @@ export async function startBatch(id: string, value: unknown, _actor: string) {
   if (typeof previewAt !== "string" || !Number.isFinite(Date.parse(previewAt))) throw badRequest(STALE_PREVIEW);
   const batch = await queryBatch(id);
   if (batch.status === "failed" && batch.counts.failReason?.startsWith("No photos were found")) throw badRequest(batch.counts.failReason);
-  // Repeating Start after a lost response resumes any tasks that were not enqueued.
   if (["matting", "rendering", "publishing"].includes(batch.status)) {
     const queued = await db().select().from(catalogChunks).where(and(eq(catalogChunks.batchId, id), eq(catalogChunks.status, "queued")));
     for (const chunk of queued) await enqueueTask("/tasks/catalog/chunk", { chunkId: chunk.id }, { taskId: `chunk-${chunk.id}-${chunk.stage}` });

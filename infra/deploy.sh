@@ -6,7 +6,6 @@
 # Usage (Git Bash, from the repo root): bash infra/deploy.sh
 # Env overrides: SKIP_BUILD=1 (reuse the images tagged with the current commit; also the rollback
 # path: check out an older commit and run SKIP_BUILD=1 bash infra/deploy.sh).
-# CATALOG_PREVIEW=1 is set by deploy-preview.sh for the unmerged UI review.
 set -euo pipefail
 
 PROJECT=image-links-agent
@@ -253,7 +252,6 @@ else
   fi
 fi
 
-# --- Assets bucket CORS: retain existing sites and admit both catalog endpoints ---------
 CURRENT_CORS=$(gcv storage buckets describe "$ASSETS_BUCKET" --format='json(cors_config)')
 if node -e '
   const cur = (JSON.parse(require("fs").readFileSync(0, "utf8").trim() || "null") ?? {}).cors_config ?? [];

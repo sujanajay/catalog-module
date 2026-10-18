@@ -17,7 +17,6 @@ export async function assertDraft(id: string): Promise<CatalogBatch> {
   return batch;
 }
 type Transaction = Parameters<Parameters<Db["transaction"]>[0]>[0];
-/** Serialize draft edits with Start, so an in-flight upload cannot change a running batch. */
 export async function draftForUpdate(tx: Transaction, id: string): Promise<CatalogBatch> {
   const [batch] = await tx.select().from(catalogBatches).where(eq(catalogBatches.id, id)).for("update");
   if (!batch) throw new HttpError(404, "This batch does not exist. Open the batch list and choose another.");
@@ -84,7 +83,6 @@ export async function patchBatch(id: string, value: unknown) {
   const patch: Partial<typeof catalogBatches.$inferInsert> = { updatedAt: new Date() };
   if (input.name !== undefined) {
     if (typeof input.name !== "string" || !input.name.trim()) throw badRequest("Enter a batch name and try again.");
-    // The namespace is fixed at creation, because uploaded object paths already use it.
     if (input.name.startsWith("catalog-test") !== batch.isTest) throw badRequest("Make a new batch to change whether this is a test batch.");
     patch.name = input.name.trim();
   }

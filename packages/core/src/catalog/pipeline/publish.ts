@@ -38,7 +38,6 @@ export async function releaseLocks(db: Db, batchId: string): Promise<number> {
 }
 export async function publishProduct(deps: PublishDeps, batchId: string, productId: string): Promise<{ outcome: string }> {
   return deps.db.transaction(async tx => {
-    // Serialize duplicate deliveries for this product, including their storage operations.
     const [product] = await tx.select().from(catalogProducts).where(eq(catalogProducts.id,productId)).for("update");
     if (!product || product.lockBatchId !== batchId) return { outcome: "not_locked" };
     const [batch] = await tx.select().from(catalogBatches).where(eq(catalogBatches.id,batchId));
@@ -76,8 +75,6 @@ export async function publishProduct(deps: PublishDeps, batchId: string, product
         if (!o.stagingUri || o.bytes === null || !o.crc32c) throw new Error("The staged image is missing. Start this product again.");
         const head = await deps.storage.headObject(storage.toGsUri(deps.storage.getPublicBucketName(),copy.objectPath));
         const previous = live.find(output => output.channel === o.channel && output.n === o.n);
-        // Equal JPEG bytes can come from a changed source. Reuse only this render or a copy
-        // that already advanced the public generation before a previous DB transaction failed.
         const canReuse = previous?.renderKey === o.renderKey || Number(head.generation) !== copy.ifGenerationMatch;
         let written = canReuse && head.exists && head.crc32c === o.crc32c && head.size === o.bytes && head.generation ? { generation:head.generation,crc32c:head.crc32c } : await deps.storage.stageCopyToPublic(o.stagingUri,copy.objectPath,{ifGenerationMatch:copy.ifGenerationMatch});
         let verified = await verifyPublic(o.publicUrl,{size:o.bytes,generation:written.generation,fetch:deps.fetch,sleep:deps.sleep});

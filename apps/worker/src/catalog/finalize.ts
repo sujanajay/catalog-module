@@ -11,7 +11,6 @@ export async function handleFinalizeTask(deps:CatalogDeps,body:Record<string,unk
   if(typeof body.batchId!=="string") return {httpStatus:400,outcome:"batchId is required"};
   const batchId = body.batchId;
   try {
-    // Hold one row lock so simultaneous finalizers never reuse an export version.
     const outcome = await deps.db.transaction(async tx=> {
       const [batch] = await tx.select().from(catalogBatches).where(eq(catalogBatches.id,batchId)).for("update");
       if(!batch) return "not_found";

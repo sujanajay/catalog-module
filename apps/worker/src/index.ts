@@ -43,7 +43,6 @@ const lazyBigQuery: BigQueryLike = {
 const ingestDeps = workerIngestDeps();
 
 const routes: ServerDeps["routes"] = {
-  // /health lists all six registered task routes in this order.
   // The DB handle is taken lazily inside each handler so /health works before the DB is reachable.
   "/tasks/catalog/sync-master": (body) => handleSyncMaster({ db: getDb(), bq: lazyBigQuery, env: process.env }, body),
   "/tasks/catalog/sweep": (body) => handleSweep({ db: getDb(), releaseLocks }, body),

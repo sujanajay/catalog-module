@@ -41,7 +41,6 @@ export async function removeProduct(id: string, confirm: string, actor: string, 
     }
     const live=await tx.select().from(catalogOutputs).where(and(eq(catalogOutputs.productId,id),eq(catalogOutputs.isLive,true)));
     const prefix=productPrefix(product.brandSlug,product.pathKey,product.isTest);
-    // Validate the whole set before the first storage mutation.
     for(const output of live) {
       assertWithinProduct(output.objectPath,prefix);
       if(output.generation===null) throw new HttpError(409,"A live image has no recorded generation. Ask the technical team to check this product before removing it.");
@@ -51,7 +50,6 @@ export async function removeProduct(id: string, confirm: string, actor: string, 
       await tx.update(catalogOutputs).set({isLive:false,supersededAt:new Date(),status:"skipped",reason:`Removed by ${actor}`}).where(eq(catalogOutputs.id,output.id));
     }
     await tx.insert(catalogProductEvents).values({productId:id,kind:"removed",actor,details:{channels:[...new Set(live.map(o=>o.channel))],shots:live.map(o=>o.n)}});
-    // Hard removal also removes dependent history; immutable batch export files remain available.
     await tx.delete(catalogOutputs).where(eq(catalogOutputs.productId,id));
     await tx.delete(catalogProducts).where(eq(catalogProducts.id,id));
   });

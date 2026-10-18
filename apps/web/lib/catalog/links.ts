@@ -13,8 +13,10 @@ import { assertDraft, draftForUpdate } from "./batches";
 export async function addLinks(id: string, value: unknown) {
   await assertDraft(id);
   const text = (value as { text?: unknown })?.text;
-  if (typeof text !== "string" || !detectPastedText(text)) throw badRequest(NOTHING_TO_CHECK);
-  const kind = detectPastedText(text)!.kind;
+  if (typeof text !== "string") throw badRequest(NOTHING_TO_CHECK);
+  const detected = detectPastedText(text);
+  if (!detected) throw badRequest(NOTHING_TO_CHECK);
+  const kind = detected.kind;
   const deps = kind === "url_list" ? { fetch: pinnedFetch } : { ...await googleClients(), fetch: pinnedFetch };
   const result = await checkLinkAccess(text, deps);
   const access = accessStatus(result);

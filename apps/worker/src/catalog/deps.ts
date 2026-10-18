@@ -23,14 +23,12 @@ export function workerCatalogDeps(db: Db): CatalogDeps {
       return {matteModel:health.default,qaModel:process.env.CATALOG_QA_DEFAULT_MODEL ?? "",threshold:75,floor:60,qaMode:"per_source",qaSampleRate:1,source:"default"};
     }};
 }
-/** Atomically claim the one pending finalize task. Clear the flag if enqueue fails. */
 export async function enqueueFinalize(deps: Pick<CatalogDeps,"db"|"enqueue">, batchId:string, delaySec?:number): Promise<void> {
   const rows = await deps.db.update(catalogBatches).set({counts:sql`jsonb_set(${catalogBatches.counts}, '{finalizePending}', 'true')`}).where(and(eq(catalogBatches.id,batchId),sql`NOT coalesce((${catalogBatches.counts}->>'finalizePending')::boolean,false)`)).returning({id:catalogBatches.id});
   if (!rows.length) return;
   try { await deps.enqueue("/tasks/catalog/finalize",{batchId}, delaySec ? {delaySec}:{}); }
   catch(error) { await deps.db.update(catalogBatches).set({counts:sql`jsonb_set(${catalogBatches.counts}, '{finalizePending}', 'false')`}).where(eq(catalogBatches.id,batchId)); throw error; }
 }
-/** Publish progress while chunks finish, without replacing counters owned by ingest/finalize. */
 export async function refreshBatchProgress(db:Db,batchId:string):Promise<void> {
   const groups=await db.select({status:catalogOutputs.status,n:count()}).from(catalogOutputs).where(eq(catalogOutputs.batchId,batchId)).groupBy(catalogOutputs.status);
   const [held]=await db.select({n:count()}).from(catalogBatchProducts).where(and(eq(catalogBatchProducts.batchId,batchId),eq(catalogBatchProducts.change,"pending_attention")));

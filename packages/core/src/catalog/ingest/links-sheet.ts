@@ -326,8 +326,6 @@ export async function readLinksSheetUpload(input: CollectInput, source?: { gsUri
   const { buf } = await input.deps.storage.downloadBuffer(gsUri);
   const table = await readSheetTable(buf, source?.name ?? input.upload.name);
   if (source?.title) table.title = source.title;
-  // Step 2 can choose different columns for each sheet in the same batch. Keep the old batch
-  // default unless this upload has an explicit operator selection.
   const selected = input.upload.detected;
   const sheetColumns = selected?.columnsChosen === true && Number.isInteger(selected.identifierColumn) && Array.isArray(selected.urlColumns)
     ? { identifier: Number(selected.identifierColumn), images: selected.urlColumns as number[] }

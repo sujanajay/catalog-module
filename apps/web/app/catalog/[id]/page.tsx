@@ -2,7 +2,7 @@ import "@/components/catalog/pages.css";
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { channel } from "@catalog/core/catalog/channels";
-import { deriveBatchState } from "@catalog/core/catalog/pipeline/status";
+import { batchState } from "@/lib/catalog/batches";
 import { requireRole } from "@/lib/user";
 import { HttpError } from "@/lib/errors";
 import { batchDetails } from "@/lib/catalog/exports";
@@ -34,7 +34,7 @@ export default async function BatchPage({ params }: { params: Promise<{ id: stri
   const source = data.uploads.some(u => u.kind === "drive_folder") ? "Drive folder"
     : data.uploads.some(u => u.kind === "google_sheet") ? "Google Sheet"
     : data.uploads.some(u => u.kind === "zip") ? "zip" : "links";
-  const state = deriveBatchState({ status: batch.status, counts: batch.counts, source });
+  const state = batchState(batch, source);
   const downloads = (batch.sheetXlsxUri || batch.sheetCsvUri || data.filled) ? (
     <div className="dl">
       {batch.sheetXlsxUri && <a className="btn primary" href={`/api/catalog/batches/${id}/export?format=xlsx`}>Download links sheet (Excel)</a>}
