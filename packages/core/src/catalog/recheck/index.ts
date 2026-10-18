@@ -34,9 +34,25 @@ export async function recheckSheet(xlsx: Buffer, options: { fetch?: typeof fetch
       let reason = item.problem;
       if (!reason) try {
         const response = await (options.fetch ?? fetch)(item.url);
-        if (response.status !== 200) reason = `HTTP ${response.status}`;
-        else if (response.headers.get("content-type")?.split(";")[0]?.trim().toLowerCase() !== "image/jpeg") reason = "The link is not image/jpeg.";
-        else if (!Buffer.from(await response.arrayBuffer()).subarray(0,3).equals(Buffer.from([255,216,255]))) reason = "The link is not a JPEG.";
+        const reader = response.body?.getReader();
+        try {
+          if (response.status !== 200) reason = `HTTP ${response.status}`;
+          else if (response.headers.get("content-type")?.split(";")[0]?.trim().toLowerCase() !== "image/jpeg") reason = "The link is not image/jpeg.";
+          else {
+            const signature = new Uint8Array(3);
+            let count = 0;
+            while (reader && count < signature.length) {
+              const { done, value } = await reader.read();
+              if (done) break;
+              const prefix = value.subarray(0, signature.length - count);
+              signature.set(prefix, count);
+              count += prefix.length;
+            }
+            if (count !== 3 || signature[0] !== 255 || signature[1] !== 216 || signature[2] !== 255) reason = "The link is not a JPEG.";
+          }
+        } finally {
+          if (reader) try { await reader.cancel(); } finally { reader.releaseLock(); }
+        }
       } catch (error) { reason = error instanceof Error ? error.message : String(error); }
       if (reason) result.failures.push({ url: item.url, reason }); else result.ok++;
     }
