@@ -56,7 +56,12 @@ fi
 ENV_VARS="GCP_PROJECT=$PROJECT,REGION=$REGION,BUCKET=image-links-agent-assets,PUBLIC_BUCKET=image-links-agent-public"
 ENV_VARS+=",DB_HOST=$DB_HOST,DB_NAME=catalog,DB_USER=catalog_app"
 ENV_VARS+=",TASKS_QUEUE=catalog,WORKER_URL=$WORKER_URL,WORKER_SA_EMAIL=$WORKER_SA"
-WORKER_ENV="$ENV_VARS,DB_POOL_MAX=2,BQ_PROJECT=opptra-datawarehouse,BQ_LOCATION=asia-south1"
+# BQ_PROJECT is where the sync's query jobs run and its unqualified table and UDF names resolve.
+# image-links-agent is a temporary mirror of the warehouse masters (infra/bq-mirror.sh) until a
+# warehouse admin grants catalog-worker@ access to opptra-datawarehouse; then set this default back
+# to opptra-datawarehouse and redeploy. See docs/solutions/infra-bootstrap.md.
+BQ_PROJECT=${BQ_PROJECT:-image-links-agent}
+WORKER_ENV="$ENV_VARS,DB_POOL_MAX=2,BQ_PROJECT=$BQ_PROJECT,BQ_LOCATION=asia-south1"
 WEB_ENV="$ENV_VARS,DB_POOL_MAX=3,SHARE_SA_EMAIL=$WEB_SA"
 # 03: the web verifies the IAP JWT against this exact audience and accepts only this domain.
 IAP_AUDIENCE=/projects/$PN/locations/$REGION/services/catalog-web

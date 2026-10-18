@@ -40,7 +40,8 @@ DB_SECRET=catalog-db-password
 PUBLIC_BUCKET=gs://image-links-agent-public
 QUEUE=catalog
 BQ_PROJECT=opptra-datawarehouse
-BQ_DATASETS=(raw_gcc_dimensions dimensions fact_gcc)
+# The datasets the master sync reads (packages/core/src/catalog/master-sync.ts).
+BQ_DATASETS=(raw_gcc_dimensions fact_gcc)
 
 log()    { printf '[bootstrap] %s\n' "$*"; }
 skip()   { printf '[bootstrap] SKIP   %s\n' "$*"; }
@@ -404,7 +405,9 @@ done
 BQ_MEMBER=serviceAccount:$WORKER
 BQ_LOCATION=asia-south1
 # Dataset grants use the GRANT DCL statement ('bq add-iam-policy-binding' does not support
-# datasets). The query job runs in $PROJECT, so it needs no job rights on $BQ_PROJECT.
+# datasets). This script's own attempt runs the GRANT job in $PROJECT (the operator can create jobs
+# here). The printed command for the warehouse admin runs it in $BQ_PROJECT instead: an admin there
+# may have no role in $PROJECT, so a job in $PROJECT would fail for them.
 bq_grant_sql() { # dataset
   local bt='`'
   printf 'GRANT %sroles/bigquery.dataViewer%s ON SCHEMA %s%s%s.%s TO "%s"' \
@@ -458,7 +461,7 @@ BQ_CLI_OK=0
 bq version >/dev/null 2>&1 && BQ_CLI_OK=1
 [ "$BQ_CLI_OK" = 1 ] || warn "bq does not start in this shell; dataset grants not checked"
 for ds in "${BQ_DATASETS[@]}"; do
-  grant_cmd="bq query --project_id=$PROJECT --location=$BQ_LOCATION --nouse_legacy_sql '$(bq_grant_sql "$ds")'"
+  grant_cmd="bq query --project_id=$BQ_PROJECT --location=$BQ_LOCATION --nouse_legacy_sql '$(bq_grant_sql "$ds")'"
   if [ "$BQ_CLI_OK" = 0 ]; then
     BQ_TODO+=("$grant_cmd")
   elif dataset_has_reader "$ds"; then

@@ -86,11 +86,42 @@ an org policy or BigQuery rights in another project).
 ## BigQuery dataset grants
 - `bq add-iam-policy-binding` does not support datasets (tables and views only). Dataset access is
   granted with the DCL statement
-  ``GRANT `roles/bigquery.dataViewer` ON SCHEMA `opptra-datawarehouse`.<dataset> TO "serviceAccount:..."``, run with `bq query --project_id=image-links-agent
-  --location=asia-south1 --nouse_legacy_sql`. The query job runs in this project; the statement needs
-  `bigquery.datasets.update` on the target dataset. The check reads `bq show --format=prettyjson`,
-  where the grant appears as a `READER` access entry.
+  ``GRANT `roles/bigquery.dataViewer` ON SCHEMA `opptra-datawarehouse`.<dataset> TO "serviceAccount:..."``, run with `bq query
+  --location=asia-south1 --nouse_legacy_sql`. The statement needs `bigquery.datasets.update` on the
+  target dataset, plus the right to create a query job in the `--project_id` project. The script's own
+  attempt runs the job in `image-links-agent`; the commands it prints for the warehouse admin use
+  `--project_id=opptra-datawarehouse`, because an admin there may have no role in `image-links-agent`.
+  The check reads `bq show --format=prettyjson`, where the grant appears as a `READER` access entry.
+- Only the datasets the sync reads are granted: `raw_gcc_dimensions` and `fact_gcc` (the earlier
+  `dimensions` entry was dropped; nothing in the code reads it).
 - In Git Bash on Windows the `bq` launcher can pick a python it cannot start
   (`python3.11: command not found`). The script then sets `CLOUDSDK_BQ_PYTHON` to the Cloud SDK's
   bundled `platform/bundledpython/python.exe`, for `bq` only and only in its own shell; gcloud config is
   never changed.
+
+## Warehouse mirror (temporary)
+- **Why.** The nightly `catalog-sync-master` run failed with "User does not have bigquery.jobs.create
+  permission in project opptra-datawarehouse": `catalog-worker@` has no rights there, and the operator
+  (dataEditor, studioUser and viewer on the warehouse) can read it but cannot share it. Until a warehouse
+  admin grants access, the worker reads a copy in `image-links-agent`.
+- **What.** `infra/bq-mirror.sh` (run as the operator, from Git Bash in the repo root) creates
+  `image-links-agent:raw_gcc_dimensions` and `image-links-agent:fact_gcc` in `asia-south1` (same names
+  and location as the source), copies `raw_gcc_dimensions.master_sl` and
+  `raw_gcc_dimensions.sku_master_sheet_hl` with `CREATE OR REPLACE TABLE ... AS SELECT *`, and recreates
+  the SQL UDFs `fact_gcc.alias_gcc_brand` and `fact_gcc.family_of_gcc_brand` from their definitions
+  (`bq show --routine`), checking the copied body matches. Those four objects are everything the sync
+  SQL in `master-sync.ts` reads, and its names are unqualified, so they resolve against the job's
+  project: with `BQ_PROJECT=image-links-agent` (the default in `infra/deploy.sh` for now) the same SQL
+  reads the mirror. It also grants `catalog-worker@` `roles/bigquery.jobUser` on `image-links-agent`
+  (project level) and `roles/bigquery.dataViewer` on the two mirror datasets (GRANT DCL). It prints the
+  source and copy row counts and exits 1 if they differ.
+- **Refresh.** `bash infra/bq-mirror.sh`. Datasets and IAM print SKIP on a re-run; tables and UDFs are
+  replaced every run (UPDATE).
+- **Limitation.** The worker's data is only as fresh as the last run of `bq-mirror.sh`; the nightly
+  sync re-reads the same copy until someone re-runs it. Nothing refreshes it automatically.
+- **First run (2026-10-18).** master_sl 16612 rows, sku_master_sheet_hl 335 rows, counts matched; the
+  mirrored UDFs gave the same brand and line as the warehouse UDFs on every source row.
+- **Switch back.** (1) A warehouse admin runs the three commands `infra/bootstrap.sh` prints (jobUser
+  on `opptra-datawarehouse`, dataViewer on `raw_gcc_dimensions` and `fact_gcc`). (2) Set the
+  `BQ_PROJECT` default in `infra/deploy.sh` back to `opptra-datawarehouse`. (3) Run
+  `bash infra/deploy.sh`. (4) Optionally delete the mirror datasets later, only with the owner's OK.
