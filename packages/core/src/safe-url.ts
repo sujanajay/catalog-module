@@ -155,8 +155,11 @@ function checkedLookup(hostname: string, options: dns.LookupOptions, callback: L
 
 let pinnedAgent: Agent | undefined;
 
-/** fetch whose connections only go to the public addresses checkedLookup approved. */
-const pinnedFetch: typeof fetch = (input, init) => {
+/**
+ * fetch whose connections only go to the public addresses checkedLookup approved. safeFetch's
+ * default; exported so callers that inject a fetch (IngestDeps.fetch) pass this one in production.
+ */
+export const pinnedFetch: typeof fetch = (input, init) => {
   pinnedAgent ??= new Agent({ connect: { lookup: checkedLookup } });
   return undiciFetch(input as string, { ...(init as object), dispatcher: pinnedAgent }) as unknown as Promise<Response>;
 };

@@ -8,5 +8,7 @@ export default defineConfig({
     // PGlite (in-process Postgres) takes several seconds to start when test files run in parallel.
     testTimeout: 30_000,
     hookTimeout: 30_000,
+    // Each worker boots its own PGlite; one per CPU (the default) starves them on a busy machine, 4 matches a CI runner.
+    maxWorkers: 4,
   },
 });
