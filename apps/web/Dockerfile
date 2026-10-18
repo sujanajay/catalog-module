@@ -20,7 +20,8 @@ FROM deps AS build
 COPY tsconfig.base.json ./
 COPY packages/core packages/core
 COPY apps/web apps/web
-RUN pnpm --filter @catalog/web build
+COPY apps/worker apps/worker
+RUN NODE_OPTIONS=--max-old-space-size=4096 pnpm --filter @catalog/web build
 
 # ---- runtime ----
 FROM node:22-slim AS runtime
