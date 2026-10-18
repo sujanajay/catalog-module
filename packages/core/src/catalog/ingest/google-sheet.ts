@@ -150,7 +150,7 @@ export async function collectGoogleSheetOnWeb(input: CollectInput, db?: Db): Pro
 }
 
 /** The csv the web tier wrote: `upload.gcsUri`, else the first .csv under uploads/<uploadId>/. */
-async function sheetCopyUri(input: CollectInput): Promise<string> {
+export async function sheetCopyUri(input: CollectInput): Promise<string> {
   const { upload, deps, prefix } = input;
   if (upload.gcsUri) return upload.gcsUri;
   const listed = await deps.storage.listObjects(toGsUri(getBucketName(), `${prefix}/uploads/${upload.id}/`));

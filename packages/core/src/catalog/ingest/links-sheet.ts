@@ -8,6 +8,7 @@ import ExcelJS from "exceljs";
 import { parseCsv } from "../../csv";
 import { normalizeKey } from "../naming";
 import type { BatchOptions, UploadKind } from "../types";
+import { CANNOT_READ_IDENTIFIER, columnLetter, sheetColumnsSentence } from "./detect-step";
 import type { Adapter, CollectInput, Detected, SourceItem } from "./types";
 
 export interface SheetTable { title: string; header: string[]; rows: string[][] }
@@ -21,7 +22,8 @@ export interface ColumnDetection {
 /** A SourceItem read from a sheet row, with the row and column its URL came from (for the failure sentence). */
 export interface SheetSourceItem extends SourceItem { sheetRow: number; sheetHeader: string }
 
-export const CANNOT_READ_IDENTIFIER = "Could not tell which column holds the identifier.";
+// The column letter, the cannot-read sentence and the step 2 sentence have one copy, in detect-step.ts.
+export { CANNOT_READ_IDENTIFIER, columnLetter };
 
 /** Rows scanned for the header row; a header lower than this is not looked for. */
 const HEADER_SCAN_ROWS = 20;
@@ -62,42 +64,10 @@ export function cellUrls(cell: string | undefined): string[] {
   return (cell ?? "").split(/[,;]/).map((s) => s.trim()).filter((s) => URL_RE.test(s));
 }
 
-/** Spreadsheet column letter of a 0-based index (0 -> A, 26 -> AA). */
-export function columnLetter(index: number): string {
-  let s = "";
-  for (let n = index + 1; n > 0; n = Math.floor((n - 1) / 26)) s = String.fromCharCode(65 + ((n - 1) % 26)) + s;
-  return s;
-}
-
-/** "Product Image 1" + "Product Image 6" -> "Product Image 1 to 6": the last header loses the words it shares with the first. */
-function headerRange(first: string, last: string): string {
-  const a = first.trim().split(/\s+/);
-  const b = last.trim().split(/\s+/);
-  let k = 0;
-  while (k < a.length && k < b.length - 1 && a[k] === b[k]) k++;
-  return `${first.trim()} to ${b.slice(k).join(" ")}`;
-}
-
-function described(letter: string, header: string): string {
-  return header ? `column ${letter} (${header})` : `column ${letter}`;
-}
-
-/** The step 2 sentence for a detection (see detect-step.ts in spec 04). */
-export function columnsSentence(header: string[], d: Pick<ColumnDetection, "identifierColumn" | "styleColumn" | "colourColumn" | "urlColumns" | "cannotRead">): string {
-  if (d.cannotRead || d.identifierColumn < 0) return d.cannotRead ?? CANNOT_READ_IDENTIFIER;
-  if (d.styleColumn !== null && d.colourColumn !== null) {
-    return `Grouped by style and colour code (${header[d.styleColumn] ?? ""} + ${header[d.colourColumn] ?? ""})`;
-  }
-  const id = `We will use ${described(columnLetter(d.identifierColumn), header[d.identifierColumn] ?? "")} as the identifier`;
-  const urls = d.urlColumns;
-  if (urls.length === 0) return `${id}.`;
-  if (urls.length === 1) return `${id} and ${described(columnLetter(urls[0]!), header[urls[0]!] ?? "")} as photos.`;
-  const first = urls[0]!;
-  const last = urls[urls.length - 1]!;
-  const h1 = header[first] ?? "";
-  const h2 = header[last] ?? "";
-  const range = h1 && h2 ? ` (${headerRange(h1, h2)})` : "";
-  return `${id} and columns ${columnLetter(first)} to ${columnLetter(last)}${range} as photos.`;
+/** The step 2 sentence for a detection (detect-step.ts's sheetColumnsSentence on this sheet's header). */
+function columnsSentence(header: string[], d: Pick<ColumnDetection, "identifierColumn" | "styleColumn" | "colourColumn" | "urlColumns" | "cannotRead">): string {
+  const identifierHeader = d.identifierColumn >= 0 ? (header[d.identifierColumn] ?? "") : null;
+  return sheetColumnsSentence({ ...d, identifierHeader }, header);
 }
 
 // --- Reading ----------------------------------------------------------------

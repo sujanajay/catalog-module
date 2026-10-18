@@ -6,11 +6,10 @@
 import type { Readable } from "node:stream";
 import type { Db } from "../../db/client";
 import { DEFAULT_MAX_BYTES } from "../../safe-url";
-import { getBucketName, mimeFromPath, toGsUri } from "../../storage";
-import { parseShotName, sanitizeSegment } from "../naming";
+import { mimeFromPath } from "../../storage";
 import { FOLDER_NO_ACCESS, googleAccessError, saveWebCollection, type WebCollectResult } from "./google-sheet";
-import { extOf } from "./links-sheet";
-import type { Adapter, CollectInput, Detected, DriveLike, SourceItem } from "./types";
+import { completeUploads, uploadObjectPath } from "./local-files";
+import type { Adapter, CollectInput, Detected, DriveLike } from "./types";
 
 /**
  * Builder constant: the most a folder may hold for the web tier to copy it. At a sustained 10 MB/s
@@ -75,11 +74,6 @@ export async function listDriveFolder(drive: DriveLike, folderId: string): Promi
     } while (pageToken);
   }
   return out.sort((a, b) => (a.relativePath < b.relativePath ? -1 : a.relativePath > b.relativePath ? 1 : 0));
-}
-
-/** Object path for a copied file: every relative path segment sanitised as uploadPath does for a name. */
-export function driveObjectPath(prefix: string, uploadId: string, relativePath: string): string {
-  return `${prefix}/uploads/${uploadId}/${relativePath.split("/").map(sanitizeSegment).join("/")}`;
 }
 
 async function readCapped(stream: Readable, maxBytes: number, name: string): Promise<Buffer | string> {
@@ -152,7 +146,7 @@ export async function collectDriveFolderOnWeb(input: CollectInput, db?: Db): Pro
       const body = await readCapped(res.data, DRIVE_FILE_MAX_BYTES, e.relativePath);
       if (typeof body === "string") rejected.push({ name: e.relativePath, reason: body });
       else {
-        const objectPath = driveObjectPath(prefix, upload.id, e.relativePath);
+        const objectPath = uploadObjectPath(prefix, upload.id, e.relativePath);
         const uri = await deps.storage.uploadBuffer(objectPath, body, e.mimeType || mimeFromPath(e.name));
         prefixUri ??= uri.slice(0, uri.length - objectPath.length) + `${prefix}/uploads/${upload.id}/`;
         copied++;
@@ -171,36 +165,9 @@ export async function collectDriveFolderOnWeb(input: CollectInput, db?: Db): Pro
   return finish(detected, prefixUri);
 }
 
-/** gs:// prefix of the copied files: `upload.gcsUri` when the web tier set it, else built from BUCKET. */
-function uploadsPrefixUri(input: CollectInput): string {
-  const u = input.upload.gcsUri ?? toGsUri(getBucketName(), `${input.prefix}/uploads/${input.upload.id}/`);
-  return u.endsWith("/") ? u : `${u}/`;
-}
-
 /**
- * kind "drive_folder": worker side, the same items completeUploads (local-files.ts) builds for a
- * dropped folder: bytes {kind:"gcs"}, `parseShotName(baseName)`, the nearest parent folder and the
- * relative path in `originalName`. Dotfiles are skipped.
+ * kind "drive_folder": worker side, exactly what completeUploads (local-files.ts) builds for a
+ * dropped folder over the files the web tier copied: bytes {kind:"gcs"}, `parseShotName(baseName)`,
+ * the nearest parent folder and the relative path in `originalName`; junk paths are skipped.
  */
-export const driveFolderAdapter: Adapter = {
-  kind: "drive_folder",
-  async collect(input) {
-    const prefixUri = uploadsPrefixUri(input);
-    const objects = (await input.deps.storage.listObjects(prefixUri)).filter((u) => u.startsWith(prefixUri) && !u.endsWith("/")).sort();
-    const items: SourceItem[] = [];
-    for (const gsUri of objects) {
-      const relativePath = gsUri.slice(prefixUri.length);
-      const segments = relativePath.split("/");
-      const baseName = segments[segments.length - 1]!;
-      if (baseName.startsWith(".")) continue;
-      const parsed = parseShotName(baseName);
-      items.push({
-        identifier: parsed.identifier, n: parsed.n, suffix: parsed.suffix, originalName: relativePath,
-        folder: segments.length > 1 ? segments[segments.length - 2]! : null, sheetIdentifier: null,
-        ext: extOf(baseName), bytes: { kind: "gcs", gsUri }, uploadId: input.upload.id, origin: "drive_folder", warnings: [],
-      });
-    }
-    input.onProgress?.(items.length, items.length);
-    return items;
-  },
-};
+export const driveFolderAdapter: Adapter = { kind: "drive_folder", collect: completeUploads };

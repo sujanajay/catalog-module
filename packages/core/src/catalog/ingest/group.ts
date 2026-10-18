@@ -5,11 +5,11 @@ import { STYLI_MIN_SOURCE_HEIGHT_PX } from "../channels";
 import { normalizeKey, renumberShots } from "../naming";
 import type { BatchOptions, ChannelId, IdentifierMode, OutputFlag } from "../types";
 import { classifyImageReject } from "./image-check";
+import { matchProductList, missingIdentifier, type ProductListRow } from "./product-list";
 import type { GroupingResult, PreviewRow, SourceItem } from "./types";
 import { collectRejectReason } from "./zip";
 
-// replaced by import from ./product-list at integration
-export interface ProductListRow { identifier: string; ean: string | null; raw: Record<string, string> }
+export type { ProductListRow };
 
 /** Known width and height per item (from checkImage); keyed by the collected item. */
 export type ItemDimensions = Map<SourceItem, { width: number | null; height: number | null }>;
@@ -274,27 +274,27 @@ export function previewRows(
 // --- Warning sentences --------------------------------------------------------------
 
 const fmt = (n: number) => n.toLocaleString("en-US");
-const SHAPE = /[_-](rect|square)$/i;
 
 /**
- * Product list matching for the warnings: exact `normalizeKey`, and a row matching `ABC_rect` and
- * `ABC_square` by its base `ABC`. Kept behind this one function so integration can swap in
- * product-list.ts's `matchProductList` (size-level rows, token containment).
+ * Product list matching for the warnings, through product-list.ts's matchProductList (exact, shape
+ * suffix, size-level keys, token containment, match column): the list-only identifiers (named as
+ * linkStatuses names them), the identifiers with photos that no row matched (after token-containment
+ * renames) and the size-row sentence.
  */
-function matchList(list: ProductListRow[], identifiers: string[]): { listOnly: string[]; notInList: string[]; sizeRows: { rows: number; products: number } } {
-  const listKeys = new Set(list.map((r) => normalizeKey(r.identifier)));
-  const productKeys = new Set<string>();
-  for (const id of identifiers) productKeys.add(normalizeKey(id)).add(normalizeKey(id.replace(SHAPE, "")));
+function matchList(list: ProductListRow[], identifiers: string[], byMatchColumn: boolean): { listOnly: string[]; notInList: string[]; sizeSentence: string | null } {
+  const m = matchProductList(list, identifiers, { byMatchColumn });
+  const finals = identifiers.map((id) => m.renamed.get(id) ?? id);
+  const notInList = distinct(finals.filter((id) => !m.byIdentifier.has(id)));
+  const seen = new Set(finals.map(normalizeKey));
   const listOnly: string[] = [];
-  const seen = new Set<string>();
-  for (const r of list) {
-    const k = normalizeKey(r.identifier);
+  for (const row of m.unmatchedRows) {
+    const id = missingIdentifier(row, m.sizeRowsMatched > 0);
+    const k = normalizeKey(id);
     if (!k || seen.has(k)) continue;
     seen.add(k);
-    if (!productKeys.has(k)) listOnly.push(r.identifier);
+    listOnly.push(id);
   }
-  const notInList = identifiers.filter((id) => !listKeys.has(normalizeKey(id)) && !listKeys.has(normalizeKey(id.replace(SHAPE, ""))));
-  return { listOnly, notInList, sizeRows: { rows: 0, products: 0 } };
+  return { listOnly, notInList, sizeSentence: m.sizeSentence };
 }
 
 /** Headline = the first sentence, detail = the rest (the step 4 row: bold sentence, then the action). */
@@ -320,7 +320,8 @@ function readPhrase(reason: string): string | null {
  * product list (null without one). Optional `extra` (after the contract's parameters):
  * - `brandName` for the top-level folders sentence (default "this brand");
  * - `dimensions` for the Styli estimate (photos whose height is unknown are not counted);
- * - `topLevelFolders` from `Detected` (default: the first folder of every uploaded file's path).
+ * - `topLevelFolders` from `Detected` (default: the first folder of every uploaded file's path);
+ * - `byMatchColumn` when the product list's match column was chosen in step 2 (see matchProductList).
  * Batch-level sentences in `grouped.warnings` (for example the duplicate sheet rows sentence from
  * the links sheet adapter) follow, split into headline and detail.
  */
@@ -328,12 +329,12 @@ export function warningSentences(
   grouped: GroupingResult,
   list: ProductListRow[] | null,
   channels: ChannelId[],
-  extra: { brandName?: string; dimensions?: ItemDimensions; topLevelFolders?: string[] } = {},
+  extra: { brandName?: string; dimensions?: ItemDimensions; topLevelFolders?: string[]; byMatchColumn?: boolean } = {},
 ): { headline: string; detail: string }[] {
   const out: { headline: string; detail: string }[] = [];
   const withPhotos = distinct([...grouped.products.keys(), ...grouped.rejected.map((r) => r.item.identifier).filter(Boolean)]);
 
-  const match = list ? matchList(list, withPhotos) : null;
+  const match = list ? matchList(list, withPhotos, extra.byMatchColumn ?? false) : null;
   if (match?.listOnly.length) {
     out.push({
       headline: `${fmt(match.listOnly.length)} products have no photos.`,
@@ -383,9 +384,7 @@ export function warningSentences(
 
   for (const w of grouped.warnings) out.push(split(w));
 
-  if (match?.sizeRows.rows) {
-    out.push({ headline: `${fmt(match.sizeRows.rows)} size rows matched ${fmt(match.sizeRows.products)} products.`, detail: "" });
-  }
+  if (match?.sizeSentence) out.push({ headline: match.sizeSentence, detail: "" });
   return out;
 }
 

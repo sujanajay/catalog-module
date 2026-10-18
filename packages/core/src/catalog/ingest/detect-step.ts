@@ -18,7 +18,7 @@ const EXAMPLES = 3;
 const fmt = (n: number) => n.toLocaleString("en-US");
 const collator = new Intl.Collator("en", { numeric: true });
 
-// --- Pure helpers (links-sheet.ts's detectColumns reuses these at integration) ---
+// --- Pure helpers (the one copy; links-sheet.ts's detectColumns uses them and re-exports them) ---
 
 /** Spreadsheet column letter: 0 -> A, 25 -> Z, 26 -> AA, 701 -> ZZ, 702 -> AAA. */
 export function columnLetter(index: number): string {
@@ -50,22 +50,27 @@ export interface SheetColumnsInput {
   cannotRead?: string | null;
 }
 
+/** ` (<header>)`, or nothing when the header is blank (an unnamed column is named by its letter only). */
+const inParens = (header: string | null | undefined) => (header && header.trim() ? ` (${header.trim()})` : "");
+
 /**
  * The "Sheet columns" sentence: `We will use column B (Vendor Style Number) as the identifier and
  * columns H to M (Product Image 1 to 6) as photos.`; with a composite key `Grouped by style and
  * colour code (<style header> + <colour header>)`; the cannot-read sentence when no column was told.
+ * A blank header leaves its parentheses out (`columns C to D as photos.`).
  */
 export function sheetColumnsSentence(d: SheetColumnsInput, headers: string[]): string {
   const h = (i: number) => (headers[i] ?? "").trim();
   if (d.styleColumn !== null && d.colourColumn !== null) return `Grouped by style and colour code (${h(d.styleColumn)} + ${h(d.colourColumn)})`;
   if (d.identifierColumn < 0 || d.cannotRead) return d.cannotRead || CANNOT_READ_IDENTIFIER;
-  const id = `We will use column ${columnLetter(d.identifierColumn)} (${d.identifierHeader ?? h(d.identifierColumn)}) as the identifier`;
+  const id = `We will use column ${columnLetter(d.identifierColumn)}${inParens(d.identifierHeader ?? h(d.identifierColumn))} as the identifier`;
   const urls = [...d.urlColumns].sort((x, y) => x - y);
   if (!urls.length) return `${id}.`;
   const first = urls[0]!;
   const last = urls[urls.length - 1]!;
-  if (urls.length === 1) return `${id} and column ${columnLetter(first)} (${h(first)}) as photos.`;
-  return `${id} and columns ${columnLetter(first)} to ${columnLetter(last)} (${headerRange(h(first), h(last))}) as photos.`;
+  if (urls.length === 1) return `${id} and column ${columnLetter(first)}${inParens(h(first))} as photos.`;
+  const range = h(first) && h(last) ? inParens(headerRange(h(first), h(last))) : "";
+  return `${id} and columns ${columnLetter(first)} to ${columnLetter(last)}${range} as photos.`;
 }
 
 /** `<a> JPG, <b> PNG (transparent backgrounds kept), <c> HEIC (iPhone format, converted automatically), <d> other.` */

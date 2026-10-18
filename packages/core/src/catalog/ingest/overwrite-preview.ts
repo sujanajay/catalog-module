@@ -69,8 +69,10 @@ async function productsByAliasKeys(
  * Dry run of findOrCreateProduct (02): alias hit -> existing; resolveSkus option_key alias hit ->
  * existing; else new (productId null). Never writes. One match per identifier, in input order.
  * A new product's pathKey is the one findOrCreateProduct would give it (sanitizeSegment).
+ * `eans` (optional, after the contract's parameters): identifier -> the product list's EAN, passed
+ * to resolveSkus exactly as the ingest's real findOrCreateProduct call gets it.
  */
-export async function matchProducts(db: Db, batch: CatalogBatch, identifiers: string[]): Promise<ProductMatch[]> {
+export async function matchProducts(db: Db, batch: CatalogBatch, identifiers: string[], eans?: Map<string, string>): Promise<ProductMatch[]> {
   const { brandSlug, isTest } = batch;
   const trimmed = identifiers.map((id) => id.trim());
   const byKey = await productsByAliasKeys(db, brandSlug, isTest, trimmed.map((id) => normalizeKey(id)));
@@ -80,7 +82,7 @@ export async function matchProducts(db: Db, batch: CatalogBatch, identifiers: st
   for (const id of new Set(trimmed)) {
     const key = normalizeKey(id);
     if (!key || byKey.has(key)) continue;
-    const skus = await resolveSkus(db, { brandSlug, identifier: id });
+    const skus = await resolveSkus(db, { brandSlug, identifier: id, ean: eans?.get(id) ?? null });
     if (skus.optionIdStyleColor) optionKeyOf.set(id, normalizeKey(skus.optionIdStyleColor));
   }
   const byOption = await productsByAliasKeys(db, brandSlug, isTest, [...optionKeyOf.values()]);
