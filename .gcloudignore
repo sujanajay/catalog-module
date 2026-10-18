@@ -11,6 +11,12 @@ playwright-report
 test-results
 smoke-output
 .playwright
+# Local Python environments and real-data artifacts never enter build source staging.
+**/.venv*
+**/venv
+**/__pycache__
+**/.pytest_cache
+var
 # Local secrets never leave the machine (with a .gcloudignore present, .gitignore is not applied).
 .env
 .env.*
