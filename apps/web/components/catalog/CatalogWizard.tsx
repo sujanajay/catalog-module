@@ -22,6 +22,8 @@ export default function CatalogWizard({ brands, shareEmail, initialBrand = "" }:
   const [productType, setProductType] = useState<ProductType>("auto");
   const [id, setId] = useState<string | null>(null);
   const creating = useRef<Promise<string> | null>(null);
+  const [isCreating, setIsCreating] = useState(false);
+  const detectedRequest = useRef(0);
   const [channels, setChannels] = useState<ChannelId[]>([]);
   const [mode, setMode] = useState<IdentifierMode>("filename");
   const [precedence, setPrecedence] = useState<Precedence>("uploads_then_links");
@@ -39,15 +41,20 @@ export default function CatalogWizard({ brands, shareEmail, initialBrand = "" }:
   async function ensureBatch() {
     if (id) return id;
     if (!brandSlug) throw new Error("Choose a brand before adding files or links.");
-    if (!creating.current) creating.current = wizardApi<{id:string}>("/api/catalog/batches", "POST", { brandSlug, name, productType }).then((batch) => { setId(batch.id); return batch.id; }).catch((err) => { creating.current = null; throw err; });
+    if (!creating.current) {
+      setIsCreating(true);
+      creating.current = wizardApi<{id:string}>("/api/catalog/batches", "POST", { brandSlug, name, productType }).then((batch) => { setId(batch.id); return batch.id; }).catch((err) => { creating.current = null; throw err; }).finally(() => setIsCreating(false));
+    }
     return creating.current;
   }
   const onAdded = useCallback(() => {setHasInputs(true); setPreview(null);}, []);
   async function loadDetected(batchId: string, initialise = false) {
+    const request = ++detectedRequest.current;
     const batch = await wizardApi<{counts:{previewReady:boolean;failReason:string|null}}>(batchUrl(batchId));
+    const value = await wizardApi<WizardDetected>(batchUrl(batchId, "/detected"));
+    if (request !== detectedRequest.current) return value;
     setFailReason(batch.counts.failReason);
     setCollecting(!batch.counts.previewReady);
-    const value = await wizardApi<WizardDetected>(batchUrl(batchId, "/detected"));
     setDetected(value);
     if (initialise && batch.counts.previewReady) {
       detectedInitialised.current = true;
@@ -60,15 +67,19 @@ export default function CatalogWizard({ brands, shareEmail, initialBrand = "" }:
   useEffect(() => {
     if (!id || ![2,3,4].includes(step)) return;
     let active = true;
+    let polling = false;
     const poll = async () => {
+      if (polling) return;
+      polling = true;
       try {
         if(step === 4) {
           const value = await wizardApi<WizardPreview>(batchUrl(id,"/preview"));
           if(active) setPreview(value);
         } else {
+          const request = ++detectedRequest.current;
           const batch = await wizardApi<{counts:{previewReady:boolean;failReason:string|null}}>(batchUrl(id));
           const value = await wizardApi<WizardDetected>(batchUrl(id,"/detected"));
-          if(active) {
+          if(active && request === detectedRequest.current) {
             setCollecting(!batch.counts.previewReady);
             setFailReason(batch.counts.failReason);
             setDetected(value);
@@ -81,10 +92,11 @@ export default function CatalogWizard({ brands, shareEmail, initialBrand = "" }:
           }
         }
       } catch(err) {if(active) setError(err instanceof Error ? err.message : "This did not finish. Try again.");}
+      finally {polling=false;}
     };
     void poll();
     const timer = setInterval(() => void poll(), 2500);
-    return () => {active=false;clearInterval(timer);};
+    return () => {active=false;detectedRequest.current++;clearInterval(timer);};
   },[id,step]);
   async function continueStep() {
     setWorking(true);setError("");
@@ -111,7 +123,7 @@ export default function CatalogWizard({ brands, shareEmail, initialBrand = "" }:
   }
   const disabled = working || !!failReason || (step===1 && (!brandSlug || !hasInputs || uploadsBusy || linksBusy)) || (step===2 && (collecting || !detected || sheets.some((s)=>s.identifierColumn<0))) || (step===3 && (!channels.length || collecting)) || (step===4 && (!preview?.ready || !channels.length || !!preview.busy.length || !!preview.overwrite.sameProductPairs.length));
   return <div className="catalog-wizard"><h1>New batch</h1><ol className="steps" aria-label="Batch steps">{STEPS.map((title,i)=><li key={title} className={step===i+1?"on":step>i+1?"done":""} aria-current={step===i+1?"step":undefined}>{title}</li>)}</ol>
-    <div hidden={step!==1}><WizardStep1 brands={brands} brandSlug={brandSlug} name={name} productType={productType} locked={!!id} email={shareEmail} setBrand={setBrand} setName={setName} setProductType={setProductType} ensureBatch={ensureBatch} onUploadsBusy={setUploadsBusy} onLinksBusy={setLinksBusy} onAdded={onAdded}/></div>
+    <div hidden={step!==1}><WizardStep1 brands={brands} brandSlug={brandSlug} name={name} productType={productType} locked={!!id || isCreating} email={shareEmail} setBrand={(value)=>{if(!id && !creating.current)setBrand(value);}} setName={setName} setProductType={(value)=>{if(!id && !creating.current)setProductType(value);}} ensureBatch={ensureBatch} onUploadsBusy={setUploadsBusy} onLinksBusy={setLinksBusy} onAdded={onAdded}/></div>
     {step===2 && detected && id ? <><WizardStep2 detected={detected} mode={mode} precedence={precedence} sheets={sheets} setMode={setMode} setPrecedence={setPrecedence} setSheets={setSheets} email={shareEmail} id={id} onError={setError} onAccessChecked={async()=>{await loadDetected(id);}}/>{collecting?<p role="status">Collecting files. The grouping will appear here when the files are ready.</p>:null}</>:null}
     {step===3?<><WizardStep3 channels={channels} onChange={setChannels}/>{collecting?<p role="status">Collecting files. Continue when the grouping is ready.</p>:null}</>:null}
     {step===4?<WizardStep4 preview={preview}/>:null}
