@@ -1,4 +1,3 @@
-"""Executed in the CPU image as catalog-worker, without loading model sessions."""
 import io
 import json
 import os
@@ -87,7 +86,6 @@ def check(target, url, version):
     source.save(encoded, format="HEIF", quality=90)
     headers, body = upload(url + "/convert", token, encoded.getvalue(), "source.heic", "image/heic")
     converted = png(headers, body, size).convert("RGB")
-    # Sample well inside each region, with room for lossy HEIF compression.
     require(max(converted.getpixel((128, 96))) < 100
             and min(converted.getpixel((16, 16))) > 220, "HEIC conversion pixels differ")
     require(headers.get("x-input-format") in ("heic", "heif"), "missing HEIC conversion header")

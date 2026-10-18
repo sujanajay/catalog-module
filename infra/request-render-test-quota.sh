@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
-# One fixed eight-CPU quota request for the approved test pool; does not start a build.
 set -euo pipefail
 export CLOUDSDK_CORE_PROJECT=image-links-agent
 preference=catalog-test-render05-us-central1
@@ -31,8 +30,7 @@ if [[ -z "$existing" ]]; then
     --justification='One 8 CPU private test worker for a bounded catalog image verification run. No concurrent workers; scales to zero.' \
     --format='json(name,dimensions,quotaConfig,reconciling)'
 else
-  description=$existing
-  printf '%s' "$description" | node -e '
+  printf '%s' "$existing" | node -e '
     const fs = require("node:fs");
     const preference = JSON.parse(fs.readFileSync(0, "utf8"));
     const mismatches = [];
@@ -46,5 +44,5 @@ else
       process.exit(1);
     }
   '
-  printf '%s\n' "$description"
+  printf '%s\n' "$existing"
 fi
