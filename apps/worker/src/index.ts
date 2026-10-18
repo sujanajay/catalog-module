@@ -3,10 +3,8 @@ import { OAuth2Client } from "google-auth-library";
 import { createBigQuery, type BigQueryLike } from "@catalog/core/catalog/master-sync";
 import { releaseLocks } from "@catalog/core/catalog/products";
 import { closeDb, getDb } from "@catalog/core/db/client";
-import * as storage from "@catalog/core/storage";
-import { enqueueTask } from "@catalog/core/tasks";
 import { authConfigFromEnv } from "./auth";
-import { handleIngestTask } from "./catalog/ingest";
+import { handleIngestTask, workerIngestDeps } from "./catalog/ingest";
 import { handleSweep } from "./catalog/sweep";
 import { handleSyncMaster } from "./catalog/sync-master";
 import { defaultMigrationsDir } from "./runtime";
@@ -37,8 +35,8 @@ const lazyBigQuery: BigQueryLike = {
 };
 
 // Ingest reads and writes the private bucket (BUCKET) and fetches pasted links through safeFetch
-// (fetchSourceUrl), which checks every hop; the Google kinds were already copied by the web tier.
-const ingestDeps = { storage, fetch: globalThis.fetch, enqueue: enqueueTask };
+// (fetchSourceUrl) with the DNS-pinned fetch, which checks every hop.
+const ingestDeps = workerIngestDeps();
 
 const routes: ServerDeps["routes"] = {
   // Order matters: /health lists ["/tasks/catalog/sync-master", "/tasks/catalog/sweep", "/tasks/catalog/ingest"].

@@ -5,7 +5,9 @@
 import { runIngest } from "@catalog/core/catalog/ingest/index";
 import type { IngestDeps } from "@catalog/core/catalog/ingest/types";
 import type { Db } from "@catalog/core/db/client";
-import type { enqueueTask } from "@catalog/core/tasks";
+import { pinnedFetch } from "@catalog/core/safe-url";
+import * as storage from "@catalog/core/storage";
+import { enqueueTask } from "@catalog/core/tasks";
 import type { HandleResult } from "../server";
 
 export interface IngestTaskDeps {
@@ -13,6 +15,15 @@ export interface IngestTaskDeps {
   ingest: IngestDeps & { enqueue: typeof enqueueTask };
   /** Defaults to runIngest; tests pass a fake. */
   run?: typeof runIngest;
+}
+
+/**
+ * What the worker runs ingest with: the private bucket (BUCKET), Cloud Tasks for the continuation,
+ * and 02's DNS-pinned fetch, so a pasted link's connection only goes to the public address safeFetch
+ * checked (no DNS rebinding). The Google kinds were already copied by the web tier.
+ */
+export function workerIngestDeps(): IngestTaskDeps["ingest"] {
+  return { storage, fetch: pinnedFetch, enqueue: enqueueTask };
 }
 
 const isId = (v: unknown): v is string => typeof v === "string" && v.length > 0;

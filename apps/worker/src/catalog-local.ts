@@ -22,6 +22,7 @@ import type { Detected, IngestDeps } from "@catalog/core/catalog/ingest/types";
 import { sanitizeSegment } from "@catalog/core/catalog/naming";
 import { IDENTIFIER_MODES, type IdentifierMode, type UploadKind } from "@catalog/core/catalog/types";
 import type { CatalogUpload } from "@catalog/core/db/schema";
+import { pinnedFetch } from "@catalog/core/safe-url";
 import { mimeFromPath, parseGsUri } from "@catalog/core/storage";
 
 const USAGE =
@@ -96,6 +97,11 @@ export function localStorage(mounts: Record<string, string>): IngestDeps["storag
   };
 }
 
+/** The CLI's IngestDeps: local storage and 02's DNS-pinned fetch, as the worker uses for pasted links. */
+export function localIngestDeps(storage: IngestDeps["storage"]): IngestDeps {
+  return { storage, fetch: pinnedFetch };
+}
+
 function uploadRow(kind: UploadKind, name: string, gcsUri: string | null, sourceUrl: string | null = null): CatalogUpload {
   return {
     id: randomUUID(), batchId: "local", kind, name, relativePath: null, gcsUri, sourceUrl, sizeBytes: null, mime: null,
@@ -113,7 +119,7 @@ export async function collectToManifest(args: CollectArgs, log: (line: string) =
   const storage = localStorage(mounts);
   // index.ts names our own objects by BUCKET; here that is the output folder.
   process.env.BUCKET = OUT_BUCKET;
-  const deps: IngestDeps = { storage, fetch: globalThis.fetch };
+  const deps = localIngestDeps(storage);
   const prefix = brand;
   const options = { identifierMode: args.identifierMode, precedence: "uploads_then_links" as const, sheetColumns: null };
   const uploads: CatalogUpload[] = [];

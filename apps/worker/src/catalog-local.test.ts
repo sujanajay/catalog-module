@@ -4,7 +4,8 @@ import os from "node:os";
 import path from "node:path";
 import sharp from "sharp";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
-import { collectToManifest, main } from "./catalog-local";
+import { pinnedFetch } from "@catalog/core/safe-url";
+import { collectToManifest, localIngestDeps, localStorage, main } from "./catalog-local";
 
 let tmp: string;
 
@@ -60,5 +61,11 @@ describe("catalog-local collect", () => {
     expect(errors.mock.calls.every(([m]) => String(m).includes("Usage: node dist/catalog-local.js collect"))).toBe(true);
     errors.mockRestore();
     expect(existsSync(path.join(tmp, "manifest.json"))).toBe(false);
+  });
+
+  it("fetches pasted links with 02's DNS-pinned fetch", () => {
+    const deps = localIngestDeps(localStorage({ out: tmp }));
+    expect(deps.fetch).toBe(pinnedFetch);
+    expect(deps.fetch).not.toBe(globalThis.fetch);
   });
 });
