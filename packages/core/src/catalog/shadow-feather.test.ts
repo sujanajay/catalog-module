@@ -1,6 +1,8 @@
 import sharp from "sharp";
 import { describe, expect, it } from "vitest";
+import { CHANNEL_RULES_VERSION } from "./channels";
 import { preservedDarkness, shadowLayer } from "./shadow";
+import { renderKeyInputs } from "./render";
 import type { BBox, CanvasPlan, Matte, Prepared } from "./render";
 
 /** A stepped black sole with a real cast shadow and negligible antialiased mask tails. */
@@ -26,6 +28,14 @@ function featheredSole(): { prepared: Prepared; matte: Matte; box: BBox; plan: C
 }
 
 describe("preserved shadow at a feathered product edge", () => {
+  it("invalidates cached renders when the silhouette-shadow rules change", () => {
+    const identity = { sourceSha256: "same-source", channel: "noon" as const, policyId: "same-policy", policyUpdatedAt: "2026-10-18T00:00:00Z", n: 2 };
+    const before = renderKeyInputs({ ...identity, rulesVersion: "1" });
+    const current = renderKeyInputs({ ...identity, rulesVersion: CHANNEL_RULES_VERSION });
+    expect(current).toBe(`same-source|noon|${CHANNEL_RULES_VERSION}|same-policy+2026-10-18T00:00:00Z|2`);
+    expect(current).not.toBe(before);
+  });
+
   it("keeps native shadow connected through negligible alpha tails without measuring product pixels", () => {
     const { prepared, matte, box } = featheredSole();
     const darkness = preservedDarkness(prepared, matte, box, "footwear");
