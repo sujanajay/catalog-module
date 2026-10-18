@@ -55,6 +55,9 @@ for kind in smoke real cleanup; do
   if node --input-type=commonjs - "$tmp_dir/existing.json" "$tmp_dir/$kind.json" <<'NODE'
 const fs=require('node:fs');
 const [oldFile,newFile]=process.argv.slice(2),old=JSON.parse(fs.readFileSync(oldFile))[0],desired=JSON.parse(fs.readFileSync(newFile));
+for(const volume of old?.spec?.template?.spec?.template?.spec?.volumes??[]) {
+  if(volume.csi?.driver==='gcsfuse.run.googleapis.com') volume.csi.readOnly??=false;
+}
 function contains(a,b){if(Array.isArray(b))return Array.isArray(a)&&a.length===b.length&&b.every((v,i)=>contains(a[i],v));if(b&&typeof b==='object')return !!a&&Object.entries(b).every(([k,v])=>contains(a[k],v));return a===b;}
 process.exit(old&&contains(old.spec,desired.spec)?0:1);
 NODE
