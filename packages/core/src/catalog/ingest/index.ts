@@ -628,7 +628,11 @@ async function removeDraftRows(db: Db, batchId: string): Promise<void> {
     .where(and(eq(catalogBatchProducts.batchId, batchId), eq(catalogBatchProducts.change, "new")));
   await db.delete(catalogSourceImages).where(eq(catalogSourceImages.batchId, batchId));
   await db.delete(catalogBatchProducts).where(eq(catalogBatchProducts.batchId, batchId));
-  const ids = created.map((c) => c.productId);
+  await deleteUnusedProducts(db, created.map((c) => c.productId));
+}
+
+/** Deletes those of `ids` that nothing refers to (no lock, batch, version or output row). */
+async function deleteUnusedProducts(db: Db, ids: string[]): Promise<void> {
   if (!ids.length) return;
   await db.delete(catalogProducts).where(
     and(
@@ -673,9 +677,12 @@ async function finishBatch(db: Db, deps: IngestDeps, batchId: string): Promise<{
   const overwrite = await buildOverwritePreview(db, batch, grouped, matches, a.sha256ByItem);
   const duplicates = [...overwrite.duplicates];
 
-  // Products for what is left, then for the product list rows without photos.
+  // Products for what is left, then for the product list rows without photos. Each product's
+  // catalog_batch_products row is written as soon as the product is found or created, so a retry
+  // after a failure part-way through still knows (removeDraftRows) which products this batch created.
   const productOf = new Map<string, { id: string; pathKey: string; isNew: boolean; skuIds: string[]; resolved: boolean }>();
   const used = new Map<string, string>();
+  const givenUp = new Set<string>();
   const refuse = (id: string, reason: string) => {
     for (const item of grouped.products.get(id) ?? []) grouped.rejected.push({ item, reason });
     grouped.products.delete(id);
@@ -691,14 +698,24 @@ async function finishBatch(db: Db, deps: IngestDeps, batchId: string): Promise<{
       refuse(id, (err as Error).message);
       continue;
     }
+    const hasPhotos = grouped.products.has(id);
     const other = used.get(found.product.id);
     // A product list row that names a product already in the batch under another spelling adds nothing.
-    if (other !== undefined && !grouped.products.has(id)) continue;
+    if (other !== undefined && !hasPhotos) continue;
     if (other !== undefined) {
-      // Two identifiers that only became one product here (for example through the same option id).
+      // Two identifiers that only became one product here (for example through the same option id):
+      // both are left out, as buildOverwritePreview leaves out the ones it finds.
       const [x, y] = [other, id].sort(byText);
       duplicates.push({ a: x!, b: y! });
-      refuse(id, `${x} and ${y} are the same product. Keep one.`);
+      const sentence = `${x} and ${y} are the same product. Keep one.`;
+      refuse(id, sentence);
+      const first = productOf.get(other);
+      if (first) {
+        refuse(other, sentence);
+        productOf.delete(other);
+        await db.delete(catalogBatchProducts).where(and(eq(catalogBatchProducts.batchId, batch.id), eq(catalogBatchProducts.productId, first.id)));
+        if (first.isNew) givenUp.add(first.id);
+      }
       continue;
     }
     used.set(found.product.id, id);
@@ -706,21 +723,15 @@ async function finishBatch(db: Db, deps: IngestDeps, batchId: string): Promise<{
       id: found.product.id, pathKey: found.product.pathKey, isNew: found.isNew,
       skuIds: found.product.opptraSkuIds ?? [], resolved: skus.method !== "unresolved",
     });
+    const linkStatus: LinkStatus = hasPhotos ? (a.statuses.get(id) ?? "ok") : "missing_images";
+    const change: ChangeKind = found.isNew ? "new" : hasPhotos ? "updated" : "unchanged";
+    await db.insert(catalogBatchProducts).values({ batchId: batch.id, productId: found.product.id, linkStatus, change }).onConflictDoNothing();
   }
+  // A product this run created for a spelling it then left out is removed again.
+  await deleteUnusedProducts(db, [...givenUp]);
 
-  // catalog_batch_products for every product of the batch.
   const withPhotos = [...grouped.products.keys()].filter((id) => productOf.has(id));
   const missing = a.missing.filter((id) => productOf.has(id) && !grouped.products.has(id));
-  const rows = [
-    ...withPhotos.map((id) => ({ id, linkStatus: a.statuses.get(id) ?? ("ok" as LinkStatus), change: (productOf.get(id)!.isNew ? "new" : "updated") as ChangeKind })),
-    ...missing.map((id) => ({ id, linkStatus: "missing_images" as LinkStatus, change: (productOf.get(id)!.isNew ? "new" : "unchanged") as ChangeKind })),
-  ];
-  if (rows.length) {
-    await db
-      .insert(catalogBatchProducts)
-      .values(rows.map((r) => ({ batchId: batch.id, productId: productOf.get(r.id)!.id, linkStatus: r.linkStatus, change: r.change })))
-      .onConflictDoNothing();
-  }
 
   // Version rows: one per (product, n), not current, replacing the current row of that shot.
   const productIds = withPhotos.map((id) => productOf.get(id)!.id);

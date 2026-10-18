@@ -12,14 +12,22 @@ import {
   catalogProducts,
   catalogSourceImages,
   catalogUploads,
+  skuMap,
   type CatalogBatch,
 } from "../../db/schema";
 import { createTestDb } from "../../db/testing";
 import { batchPrefix, rawPath } from "../naming";
+import { findOrCreateProduct } from "../products";
 import type { ChannelId, IdentifierMode, UploadKind } from "../types";
 import { buildZip } from "../../../test-fixtures/catalog/ingest-a/builders";
 import { buildPreview, runIngest } from "./index";
 import type { IngestDeps } from "./types";
+
+// findOrCreateProduct keeps its real behaviour; one test makes a call fail part-way through.
+vi.mock(import("../products"), async (importOriginal) => {
+  const mod = await importOriginal();
+  return { ...mod, findOrCreateProduct: vi.fn(mod.findOrCreateProduct) };
+});
 
 const BUCKET = "test-assets";
 const HOST = "https://104.18.38.10"; // an IP literal: safeFetch needs no DNS lookup for it
@@ -258,6 +266,55 @@ describe("runIngest", () => {
     expect(Object.keys(manifest.results)).toHaveLength(6);
     expect((await batchRow(batch.id)).counts).toMatchObject({ collected: 6, collectTotal: 6, previewReady: true });
     expect(w.enqueued).toHaveLength(2);
+  });
+
+  it("a retry after the batch-wide step failed part-way still counts this batch's products as new", async () => {
+    const w = fakeWorld();
+    const batch = await newBatch("retry");
+    const uploadId = await folderUpload(w, batch, { "RT1_1.jpg": await jpeg(), "RT2_1.jpg": await jpeg() });
+    const { findOrCreateProduct: real } = await vi.importActual<typeof import("../products")>("../products");
+    let calls = 0;
+    vi.mocked(findOrCreateProduct).mockImplementation(async (...args) => {
+      if (++calls === 2) throw new Error("Connection terminated unexpectedly");
+      return real(...args);
+    });
+    try {
+      // RT1 is created, then the database drops: the claim is given back for the retry.
+      await expect(runIngest(db, deps(w), { batchId: batch.id, uploadId })).rejects.toThrow("Connection terminated unexpectedly");
+      expect((await batchRow(batch.id)).status).toBe("ingesting");
+    } finally {
+      vi.mocked(findOrCreateProduct).mockImplementation(real);
+    }
+
+    expect((await runIngest(db, deps(w), { batchId: batch.id, uploadId })).outcome).toBe("preview ready: 2 products, 2 photos");
+    expect((await batchRow(batch.id)).counts).toMatchObject({ newProducts: 2, existingProducts: 0 });
+    const changes = await db.select({ change: catalogBatchProducts.change }).from(catalogBatchProducts).where(eq(catalogBatchProducts.batchId, batch.id));
+    expect(changes.map((c) => c.change)).toEqual(["new", "new"]);
+    const preview = await buildPreview(db, batch.id, { storage: w.storage });
+    expect(preview.overwrite).toMatchObject({ newProducts: 2, existingProducts: [] });
+  });
+
+  it("two new spellings that only become one product when created are both left out", async () => {
+    const w = fakeWorld();
+    const batch = await newBatch("late spellings");
+    // The EAN file name resolves to the option id LATE OPT, which is also the other file's key.
+    await db.insert(skuMap).values({
+      opptraSku: "LATE_OPT_40", brand: "USPA", brandSlug: "uspa", line: "softline", source: "warehouse",
+      optionKey: "LATEOPT", optionIdStyleColor: "LATE OPT", ean: "8680000000099",
+    });
+    await folderUpload(w, batch, { "8680000000099_1.jpg": await jpeg(), "LATE-OPT_1.jpg": await jpeg(), "KEEPME_1.jpg": await jpeg() });
+    expect(await ingestAll(w, batch)).toEqual(["preview ready: 1 products, 1 photos"]);
+
+    expect(await linkStatusesOf(batch.id)).toEqual({ KEEPME: "ok" });
+    const keys = (await db.select({ pathKey: catalogProducts.pathKey }).from(catalogProducts).where(eq(catalogProducts.brandSlug, "uspa"))).map((p) => p.pathKey);
+    expect(keys).not.toContain("8680000000099");
+    const preview = await buildPreview(db, batch.id, { storage: w.storage });
+    expect(preview.overwrite.duplicates).toEqual([{ a: "8680000000099", b: "LATE-OPT" }]);
+    expect(preview.rows.map((r) => [r.identifier, r.notes])).toEqual([
+      ["8680000000099", ["8680000000099 and LATE-OPT are the same product. Keep one."]],
+      ["KEEPME", []],
+      ["LATE-OPT", ["8680000000099 and LATE-OPT are the same product. Keep one."]],
+    ]);
   });
 
   it("a product list adds missing_images and not_in_sheet rows", async () => {
