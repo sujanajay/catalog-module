@@ -1,5 +1,5 @@
 import { and, asc, desc, eq, inArray } from "drizzle-orm";
-import { catalogBatches, catalogOutputs, catalogProductAliases, catalogProductEvents, catalogProducts, catalogSourceImages } from "@catalog/core/db/schema";
+import { catalogBatches, catalogBatchProducts, catalogOutputs, catalogProductAliases, catalogProductEvents, catalogProducts, catalogSourceImages } from "@catalog/core/db/schema";
 import { assertWithinProduct, normalizeKey, productPrefix } from "@catalog/core/catalog/naming";
 import { addAlias } from "@catalog/core/catalog/products";
 import { channel } from "@catalog/core/catalog/channels";
@@ -62,8 +62,9 @@ export async function batchAttention(batchId: string, conn: Db = db(), sign = si
   const [batch] = await conn.select({ id: catalogBatches.id }).from(catalogBatches).where(eq(catalogBatches.id, batchId));
   if (!batch) throw new HttpError(404, "This batch was not found. Return to All batches.");
   const rows = await conn.select({ output: catalogOutputs, source: catalogSourceImages, identifier: catalogProducts.identifier }).from(catalogOutputs).innerJoin(catalogSourceImages, eq(catalogSourceImages.id, catalogOutputs.sourceImageId)).innerJoin(catalogProducts, eq(catalogProducts.id, catalogOutputs.productId)).where(and(eq(catalogOutputs.batchId, batchId), inArray(catalogOutputs.status, ["needs_attention", "failed"]))).orderBy(asc(catalogProducts.identifier), asc(catalogOutputs.n));
-  if (!rows.length) return [];
-  const ids = [...new Set(rows.map(r => r.output.productId))];
+  const held = await conn.select({productId:catalogBatchProducts.productId,identifier:catalogProducts.identifier,notes:catalogBatchProducts.notes}).from(catalogBatchProducts).innerJoin(catalogProducts,eq(catalogProducts.id,catalogBatchProducts.productId)).where(and(eq(catalogBatchProducts.batchId,batchId),eq(catalogBatchProducts.change,"pending_attention")));
+  const ids = [...new Set([...rows.map(r => r.output.productId),...held.map(p=>p.productId)])];
+  if (!ids.length) return [];
   const [live, sources] = await Promise.all([
     conn.select({ productId: catalogOutputs.productId, channel: catalogOutputs.channel, n: catalogOutputs.n }).from(catalogOutputs).where(and(inArray(catalogOutputs.productId, ids), eq(catalogOutputs.isLive, true))),
     conn.select({ productId: catalogSourceImages.productId, n: catalogSourceImages.n }).from(catalogSourceImages).where(and(inArray(catalogSourceImages.productId, ids), eq(catalogSourceImages.batchId, batchId))),
@@ -81,5 +82,8 @@ export async function batchAttention(batchId: string, conn: Db = db(), sign = si
     item.photos.push({ n: o.n, channel: o.channel, outputId: o.id, originalUrl: await sign(source.rawUri), outputUrl: o.stagingUri ? await sign(o.stagingUri) : null, why, whatToDo: reasons[0] || why, liveObjectExists: live.some(l => l.productId === o.productId && l.channel === o.channel && l.n === o.n) });
     grouped.set(o.productId, item);
   }
-  return [...grouped.values()];
+  for (const product of held) if (!grouped.has(product.productId)) {
+    grouped.set(product.productId,{productId:product.productId,identifier:product.identifier,totalShots:new Set(sources.filter(s=>s.productId===product.productId).map(s=>s.n)).size,problemLine:product.notes || "Some photos could not be processed. Start this product again.",photos:[]});
+  }
+  return [...grouped.values()].sort((a,b)=>a.identifier.localeCompare(b.identifier));
 }

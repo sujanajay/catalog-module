@@ -7,7 +7,7 @@ export default function AttentionProductCard({ item, canAct }: { item: Attention
     <article className="pc">
       <header>
         <b className="mono">{item.identifier}</b>
-        <span>{new Set(item.photos.map(p => p.n)).size} of {item.totalShots} photos need a decision</span>
+        <span>{item.photos.length ? `${new Set(item.photos.map(p => p.n)).size} of ${item.totalShots} photos need a decision` : `${item.totalShots} source ${item.totalShots === 1 ? "photo" : "photos"} - processing needs attention`}</span>
       </header>
       <p className="prob">{item.problemLine}</p>
       {item.photos.map(p => (

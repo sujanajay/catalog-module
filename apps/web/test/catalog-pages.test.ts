@@ -56,6 +56,12 @@ it("groups attention photos with signed private images and previous live availab
  const sign=vi.fn(async(uri:string)=>`signed:${uri}`);const items=await batchAttention(batchId,db,sign);
  expect(items).toMatchObject([{identifier:"ABC-123",totalShots:1,photos:[{n:1,liveObjectExists:true,originalUrl:"signed:gs://private/raw/1.jpg",outputUrl:"signed:gs://private/staging/1.jpg"}]}]);expect(JSON.stringify(items)).not.toContain("qaModel");
 });
+it("shows a held product even when processing failed before output planning", async () => {
+ await db.update(catalogBatchProducts).set({change:"pending_attention",notes:"Some photos could not be processed. Start this product again."}).where(eq(catalogBatchProducts.productId,productId));
+ const sign=vi.fn(async(uri:string)=>`signed:${uri}`);
+ expect(await batchAttention(batchId,db,sign)).toEqual([{productId,identifier:"ABC-123",totalShots:1,problemLine:"Some photos could not be processed. Start this product again.",photos:[]}]);
+ expect(sign).not.toHaveBeenCalled();
+});
 it("sheet preview retains previous links for held products and tail columns",async()=>{
  await output();await db.update(catalogBatchProducts).set({change:"pending_attention",notes:"Photo needs attention"}).where(eq(catalogBatchProducts.productId,productId));
  const sheet=await batchSheet(batchId,db);expect(sheet.rows[0]).toMatchObject({identifier:"ABC-123",status:"needs_attention",change:"pending_attention",notes:"Photo needs attention",links:{noon:["https://example.com/ABC-123_1.jpg"]}});
