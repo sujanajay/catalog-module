@@ -3,7 +3,10 @@ import { OAuth2Client } from "google-auth-library";
 import { createBigQuery, type BigQueryLike } from "@catalog/core/catalog/master-sync";
 import { releaseLocks } from "@catalog/core/catalog/products";
 import { closeDb, getDb } from "@catalog/core/db/client";
+import * as storage from "@catalog/core/storage";
+import { enqueueTask } from "@catalog/core/tasks";
 import { authConfigFromEnv } from "./auth";
+import { handleIngestTask } from "./catalog/ingest";
 import { handleSweep } from "./catalog/sweep";
 import { handleSyncMaster } from "./catalog/sync-master";
 import { defaultMigrationsDir } from "./runtime";
@@ -33,11 +36,16 @@ const lazyBigQuery: BigQueryLike = {
   },
 };
 
+// Ingest reads and writes the private bucket (BUCKET) and fetches pasted links through safeFetch
+// (fetchSourceUrl), which checks every hop; the Google kinds were already copied by the web tier.
+const ingestDeps = { storage, fetch: globalThis.fetch, enqueue: enqueueTask };
+
 const routes: ServerDeps["routes"] = {
-  // Order matters: /health lists ["/tasks/catalog/sync-master", "/tasks/catalog/sweep"].
+  // Order matters: /health lists ["/tasks/catalog/sync-master", "/tasks/catalog/sweep", "/tasks/catalog/ingest"].
   // The DB handle is taken lazily inside each handler so /health works before the DB is reachable.
   "/tasks/catalog/sync-master": (body) => handleSyncMaster({ db: getDb(), bq: lazyBigQuery, env: process.env }, body),
   "/tasks/catalog/sweep": (body) => handleSweep({ db: getDb(), releaseLocks }, body),
+  "/tasks/catalog/ingest": (body) => handleIngestTask({ db: getDb(), ingest: ingestDeps }, body),
 };
 
 const server = createServer({ auth, version: process.env.K_REVISION || "dev", routes });

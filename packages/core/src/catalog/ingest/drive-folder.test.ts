@@ -44,6 +44,10 @@ function fakeStorage() {
   const storage = {
     uploadBuffer: async (path: string, buf: Buffer, mime: string) => (objects.set(`gs://bucket/${path}`, { buf, mime }), `gs://bucket/${path}`),
     listObjects: async (prefix: string) => [...objects.keys()].filter((k) => k.startsWith(prefix)),
+    headObject: async (gsUri: string) => {
+      const o = objects.get(gsUri);
+      return { exists: !!o, size: o ? o.buf.length : null, contentType: o?.mime ?? null, generation: null, crc32c: null };
+    },
   } as unknown as IngestDeps["storage"];
   return { storage, objects };
 }

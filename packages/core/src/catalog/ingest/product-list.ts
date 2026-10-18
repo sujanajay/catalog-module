@@ -196,7 +196,7 @@ export function matchProductList(list: ProductListRow[], identifiers: string[], 
   }
   return {
     byIdentifier, renamed, sizeRowsMatched, productsMatchedBySize: bySize.size,
-    sizeSentence: sizeRowsMatched ? `${sizeRowsMatched} size rows matched ${bySize.size} products.` : null,
+    sizeSentence: sizeRowsMatched ? `${sizeRowsMatched.toLocaleString("en-US")} size rows matched ${bySize.size.toLocaleString("en-US")} products.` : null,
     groupedBy: tokenUsed ? MATCHED_INSIDE_FILE_NAMES : null, unmatchedRows, skuIds,
   };
 }
@@ -206,7 +206,7 @@ export function matchProductList(list: ProductListRow[], identifiers: string[], 
  * size-level (a key with "/", or a list where other rows matched by size), so the sizes of one
  * colourway become one missing product.
  */
-function missingIdentifier(row: ProductListRow, sizeLevel: boolean): string {
+export function missingIdentifier(row: ProductListRow, sizeLevel: boolean): string {
   if (row.identifier.includes("/") || sizeLevel) return sizeBases(row.identifier)[0] ?? row.identifier;
   return row.identifier;
 }
