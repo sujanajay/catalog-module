@@ -82,6 +82,7 @@ const INGEST_ROUTE = "/tasks/catalog/ingest" as const;
 const FILE_KINDS: UploadKind[] = ["zip", "image", "drive_folder"];
 
 const fmt = (n: number) => n.toLocaleString("en-US");
+const distinct = (xs: string[]) => [...new Set(xs)];
 const baseName = (item: SourceItem) => item.originalName.split(/[\\/]/).pop() || item.originalName;
 const collator = new Intl.Collator("en", { numeric: true });
 const byText = (a: string, b: string) => collator.compare(a, b) || (a < b ? -1 : a > b ? 1 : 0);
@@ -574,8 +575,12 @@ interface PreviewState {
 
 const SAME_PRODUCT = / are the same product\. Keep one\.$/;
 
-/** "1 BMP file and 1 PDF": what the rejects were, for the zero-photos sentence. */
-function whatWasFound(rejected: GroupingResult["rejected"]): string {
+/**
+ * "1 BMP file and 1 PDF": what the rejects were, for the zero-photos sentence. Uploads that could
+ * not be opened at all (a missing zip, a sheet never uploaded) add the fact from their error
+ * ("The zip Images.zip was not found in storage"), without its own action sentence.
+ */
+function whatWasFound(rejected: GroupingResult["rejected"], uploadErrors: string[] = []): string {
   // Unsupported image formats first, then files that are not images, corrupt files, the rest.
   const counts = new Map<string, { rank: number; k: number }>();
   const add = (what: string, rank: number) => counts.set(what, { rank, k: (counts.get(what)?.k ?? 0) + 1 });
@@ -589,12 +594,21 @@ function whatWasFound(rejected: GroupingResult["rejected"]): string {
   const parts = [...counts]
     .sort(([a, x], [b, y]) => x.rank - y.rank || byText(a, b))
     .map(([what, { k }]) => `${fmt(k)} ${what}${k === 1 ? "" : "s"}`);
-  if (!parts.length) return "The upload was empty";
-  return parts.length === 1 ? parts[0]! : `${parts.slice(0, -1).join(", ")} and ${parts[parts.length - 1]}`;
+  const facts = distinct(uploadErrors.map(firstFact).filter(Boolean));
+  if (!parts.length && !facts.length) return "The upload was empty";
+  const found = !parts.length ? [] : [parts.length === 1 ? parts[0]! : `${parts.slice(0, -1).join(", ")} and ${parts[parts.length - 1]}`];
+  return [...found, ...facts].join(". ");
 }
 
-export function noPhotosReason(rejected: GroupingResult["rejected"]): string {
-  return `No photos were found in what you uploaded. ${whatWasFound(rejected)}. Upload photos and start again.`;
+/** The first sentence of an error, without its full stop ("The zip a.zip was not found in storage"). */
+function firstFact(error: string): string {
+  const m = /^(.+?)[.!?](?:\s|$)/s.exec(error.trim());
+  return (m ? m[1]! : error.trim().replace(/[.!?]+$/, "")).trim();
+}
+
+/** counts.failReason when the whole batch holds no photo: from the rejects and the uploads that failed. */
+export function noPhotosReason(rejected: GroupingResult["rejected"], uploadErrors: string[] = []): string {
+  return `No photos were found in what you uploaded. ${whatWasFound(rejected, uploadErrors)}. Upload photos and start again.`;
 }
 
 /**
@@ -767,7 +781,8 @@ async function finishBatch(db: Db, deps: IngestDeps, batchId: string): Promise<{
   };
   const waitingForColumn = uploads.some((u) => (u.detected as Detected | null)?.cannotRead);
   if (!versions.length && !waitingForColumn) {
-    const failReason = noPhotosReason(grouped.rejected);
+    const uploadErrors = uploads.filter((u) => u.status === "failed" && u.error).map((u) => u.error!);
+    const failReason = noPhotosReason(grouped.rejected, uploadErrors);
     await patchCounts(db, batch.id, { ...counts, failReason }, { status: "failed" });
     return { progress: { done: 0, total: 0, phase: "done" }, outcome: "failed: no photos" };
   }

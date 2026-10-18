@@ -255,6 +255,28 @@ describe("runIngest", () => {
     expect(await sourcesOf(batch.id)).toEqual([]);
   });
 
+  it("builds the failReason from the upload errors when every upload failed (a missing zip)", async () => {
+    const w = fakeWorld();
+    const batch = await newBatch("missing zip");
+    await newUpload(batch, "zip", "Images.zip", `gs://${BUCKET}/${prefixOf(batch)}/uploads/z/Images.zip`);
+    expect(await ingestAll(w, batch)).toEqual(["failed: no photos"]);
+    const [u] = await db.select().from(catalogUploads).where(eq(catalogUploads.batchId, batch.id));
+    expect(u).toMatchObject({ status: "failed", error: "The zip Images.zip was not found in storage. Add it again." });
+    const b = await batchRow(batch.id);
+    expect(b.status).toBe("failed");
+    expect(b.counts.failReason).toBe("No photos were found in what you uploaded. The zip Images.zip was not found in storage. Upload photos and start again.");
+
+    // With a reject from another upload, both are named.
+    const w2 = fakeWorld();
+    const mixed = await newBatch("missing zip and a bmp");
+    await newUpload(mixed, "zip", "Images.zip", `gs://${BUCKET}/${prefixOf(mixed)}/uploads/z/Images.zip`);
+    await folderUpload(w2, mixed, { "scan.bmp": bmp() });
+    await ingestAll(w2, mixed);
+    expect((await batchRow(mixed.id)).counts.failReason).toBe(
+      "No photos were found in what you uploaded. 1 BMP file. The zip Images.zip was not found in storage. Upload photos and start again.",
+    );
+  });
+
   it("reads links sheets and zips: duplicate rows warned, a failed link reported by row, nested zips rejected", async () => {
     const w = fakeWorld();
     const batch = await newBatch("sheet and zip");
