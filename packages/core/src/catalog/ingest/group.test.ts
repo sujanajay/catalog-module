@@ -128,8 +128,9 @@ describe("groupItems", () => {
       LINKONLY: [[1, "LINKONLY-1.jpg"]],
       P: [[1, "P_1.jpg"], [2, "P_2.jpg"], [3, "P-3.jpg"]],
     });
-    expect(run("links_only")).toEqual({ LINKONLY: [[1, "LINKONLY-1.jpg"]], P: [[1, "P-2.jpg"], [2, "P-3.jpg"]] });
-    expect(run("uploads_only")).toEqual({ FILEONLY: [[1, "FILEONLY_1.jpg"]], P: [[1, "P_1.jpg"], [2, "P_2.jpg"]] });
+    // Precedence decides only for P, which both kinds have; FILEONLY and LINKONLY are kept in every mode.
+    expect(run("links_only")).toEqual({ FILEONLY: [[1, "FILEONLY_1.jpg"]], LINKONLY: [[1, "LINKONLY-1.jpg"]], P: [[1, "P-2.jpg"], [2, "P-3.jpg"]] });
+    expect(run("uploads_only")).toEqual({ FILEONLY: [[1, "FILEONLY_1.jpg"]], LINKONLY: [[1, "LINKONLY-1.jpg"]], P: [[1, "P_1.jpg"], [2, "P_2.jpg"]] });
   });
 
   it("rejects only the product with two files for one shot, with the exact sentence", () => {

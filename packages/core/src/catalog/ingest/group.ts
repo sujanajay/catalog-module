@@ -127,9 +127,11 @@ const byNameThenUpload = (a: Entry, b: Entry) => byText(a.item.originalName, b.i
  * In every mode a link item joins an uploaded product with the same `normalizeKey`, so precedence
  * applies across the two kinds; two uploaded spellings stay apart (the overwrite preview rejects them).
  *
- * When uploaded files and links both exist, `options.precedence` decides: `uploads_only` and
- * `links_only` keep one kind, `uploads_then_links` keeps every uploaded shot and fills the other
- * shot numbers from links. Shots are sorted by their file-name number and renumbered 1..k.
+ * When a product has both uploaded files and links, `options.precedence` decides: `uploads_only`
+ * and `links_only` keep one kind, `uploads_then_links` keeps every uploaded shot and fills the other
+ * shot numbers from links. A product only one kind has keeps it under every precedence (the step 2
+ * card asks "Which wins when both have the same product?"). Shots are sorted by their file-name
+ * number and renumbered 1..k.
  *
  * `unreadable` (optional, after the contract's parameters): items that failed `checkImage`, with
  * their reject sentence. They are rejected under their product's identifier instead of grouped.
@@ -163,16 +165,16 @@ export function groupItems(items: SourceItem[], options: BatchOptions, unreadabl
     return s && s.size === 1 ? { ...e, id: [...s][0]! } : e;
   });
 
-  const bothKinds = entries.some((e) => e.link) && entries.some((e) => !e.link);
   const byId = new Map<string, Entry[]>();
   for (const e of entries) byId.set(e.id, [...(byId.get(e.id) ?? []), e]);
 
   const products = new Map<string, SourceItem[]>();
   for (const id of [...byId.keys()].sort(byText)) {
     let list = byId.get(id)!.sort(byNameThenUpload);
-    if (bothKinds) {
-      const uploads = list.filter((e) => !e.link);
-      const links = list.filter((e) => e.link);
+    const uploads = list.filter((e) => !e.link);
+    const links = list.filter((e) => e.link);
+    // Precedence only decides for a product that both kinds have; a product only one kind has keeps it.
+    if (uploads.length && links.length) {
       if (options.precedence === "uploads_only") list = uploads;
       else if (options.precedence === "links_only") list = links;
       else {
