@@ -1,0 +1,9 @@
+import { expect, it, vi } from "vitest";
+import { verifyPublic } from "./verify";
+const jpeg=Buffer.from([255,216,255,1]);
+function response(patch:Record<string,string>={},status=200,bytes=jpeg) { return new Response(new Uint8Array(bytes),{status,headers:{"content-type":"image/jpeg; charset=binary","content-length":"4","x-goog-generation":"12",...patch}}); }
+it("accepts the media type suffix and correct generation",async()=>expect(await verifyPublic("https://example.com/a.jpg",{size:4,generation:12,fetch:vi.fn(async()=>response())})).toEqual({ok:true}));
+it.each<{name:string;patch:Record<string,string>}>([{name:"type",patch:{"content-type":"image/png"}},{name:"size",patch:{"content-length":"5"}},{name:"generation",patch:{"x-goog-generation":"11"}}])("rejects wrong $name",async({patch})=>expect((await verifyPublic("https://example.com/a.jpg",{size:4,generation:12,fetch:vi.fn(async()=>response(patch)),sleep:async()=>{}})).ok).toBe(false));
+it("rejects jpeg suffix without a request",async()=>{const request=vi.fn();expect((await verifyPublic("https://example.com/a.jpeg",{size:4,generation:12,fetch:request})).ok).toBe(false);expect(request).not.toHaveBeenCalled();});
+it("retries a stale generation and transient failures",async()=>{const request=vi.fn().mockResolvedValueOnce(response({},503)).mockResolvedValueOnce(response({"x-goog-generation":"11"})).mockResolvedValue(response());expect((await verifyPublic("https://example.com/a.jpg",{size:4,generation:12,fetch:request,sleep:async()=>{}})).ok).toBe(true);expect(request).toHaveBeenCalledTimes(3);});
+it("rejects wrong JPEG magic and HTTP failures",async()=>{for(const r of [response({},200,Buffer.from("text")),response({},404)]) expect((await verifyPublic("https://example.com/a.jpg",{size:4,generation:12,fetch:vi.fn(async()=>r)})).ok).toBe(false);});

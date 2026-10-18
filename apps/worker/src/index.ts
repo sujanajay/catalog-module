@@ -5,6 +5,10 @@ import { releaseLocks } from "@catalog/core/catalog/products";
 import { closeDb, getDb } from "@catalog/core/db/client";
 import { authConfigFromEnv } from "./auth";
 import { handleIngestTask, workerIngestDeps } from "./catalog/ingest";
+import { workerCatalogDeps } from "./catalog/deps";
+import { handleChunkTask } from "./catalog/chunk";
+import { handlePublishTask } from "./catalog/publish";
+import { handleFinalizeTask } from "./catalog/finalize";
 import { handleSweep } from "./catalog/sweep";
 import { handleSyncMaster } from "./catalog/sync-master";
 import { defaultMigrationsDir } from "./runtime";
@@ -39,11 +43,14 @@ const lazyBigQuery: BigQueryLike = {
 const ingestDeps = workerIngestDeps();
 
 const routes: ServerDeps["routes"] = {
-  // Order matters: /health lists ["/tasks/catalog/sync-master", "/tasks/catalog/sweep", "/tasks/catalog/ingest"].
+  // /health lists all six registered task routes in this order.
   // The DB handle is taken lazily inside each handler so /health works before the DB is reachable.
   "/tasks/catalog/sync-master": (body) => handleSyncMaster({ db: getDb(), bq: lazyBigQuery, env: process.env }, body),
   "/tasks/catalog/sweep": (body) => handleSweep({ db: getDb(), releaseLocks }, body),
   "/tasks/catalog/ingest": (body) => handleIngestTask({ db: getDb(), ingest: ingestDeps }, body),
+  "/tasks/catalog/chunk": (body, opts) => handleChunkTask(workerCatalogDeps(getDb()), body, opts),
+  "/tasks/catalog/publish": (body) => handlePublishTask(workerCatalogDeps(getDb()), body),
+  "/tasks/catalog/finalize": (body) => handleFinalizeTask(workerCatalogDeps(getDb()), body),
 };
 
 const server = createServer({ auth, version: process.env.K_REVISION || "dev", routes });

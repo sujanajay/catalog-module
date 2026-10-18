@@ -187,11 +187,11 @@ const CREATED_SKEW_MS = 60_000;
 // --- Private bucket: lifted base -------------------------------------------
 
 /** Upload to `BUCKET` at `path`; returns the gs:// URI. */
-export async function uploadBuffer(path: string, buf: Buffer, mime: string): Promise<string> {
+export async function uploadBuffer(path: string, buf: Buffer, mime: string, options: { cacheControl?: string } = {}): Promise<string> {
   const bucket = getBucketName();
   const objectPath = path.replace(/^\/+/, "");
   await withStorageRetry(objectPath, () =>
-    getStorage().bucket(bucket).file(objectPath).save(buf, { contentType: mime, resumable: false }),
+      getStorage().bucket(bucket).file(objectPath).save(buf, { contentType: mime, resumable: false, ...(options.cacheControl === undefined ? {} : { metadata: { cacheControl: options.cacheControl } }) }),
   );
   return toGsUri(bucket, objectPath);
 }
