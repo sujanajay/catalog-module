@@ -80,6 +80,44 @@ describe("matting client", () => {
     await new MattingClient({ services: [{ baseUrl: "https://cpu.example", target: "cpu" }, { baseUrl: "https://gpu.example", target: "gpu" }], fetch: fakeFetch, idToken: async (a) => { audiences.push(a); return "fake"; } }).health();
     expect(audiences.sort()).toEqual(["https://cpu.example", "https://gpu.example"]);
   });
+  it("finishes healthy CPU discovery when GPU token acquisition never resolves", async () => {
+    const request = vi.fn<typeof fetch>(async () => Response.json({ ok: true, models: [{ id: "general", inputSize: 64, target: "cpu" }], default: "general", version: "cpu" }));
+    const client = new MattingClient({
+      services: [{ baseUrl: "https://cpu.example", target: "cpu" }, { baseUrl: "https://gpu.example", target: "gpu" }],
+      timeoutMs: 10, fetch: request,
+      idToken: async (audience) => audience.includes("gpu") ? new Promise<string>(() => {}) : "cpu-token",
+    });
+    let watchdog: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const result = await Promise.race([client.health(), new Promise<"pending">((resolve) => { watchdog = setTimeout(() => resolve("pending"), 200); })]);
+      expect(result).toMatchObject({ ok: true, default: "general", versions: { cpu: "cpu", gpu: null } });
+      expect(client.breakers.gpu).toMatchObject({ failures: 1, state: "closed" });
+      expect(client.breaker.failures).toBe(0);
+      expect(request).toHaveBeenCalledTimes(1);
+      expect(String(request.mock.calls[0]![0])).toBe("https://cpu.example/health");
+      expect(new Headers(request.mock.calls[0]![1]?.headers).get("authorization")).toBe("Bearer cpu-token");
+    } finally { clearTimeout(watchdog); }
+  });
+  it("rejects expired conversion authentication and never sends a late token", async () => {
+    let releaseToken!: (value: string) => void;
+    const request = vi.fn<typeof fetch>();
+    const client = new MattingClient({
+      services: [{ baseUrl: "https://cpu.example", target: "cpu" }], timeoutMs: 10, fetch: request,
+      idToken: () => new Promise<string>((resolve) => { releaseToken = resolve; }),
+    });
+    let watchdog: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const result = await Promise.race([
+        client.convert(Buffer.from("heic")).then(() => "sent", (error: unknown) => error),
+        new Promise<"pending">((resolve) => { watchdog = setTimeout(() => resolve("pending"), 200); }),
+      ]);
+      expect(result).toMatchObject({ name: "TimeoutError" });
+      releaseToken("late-token");
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(request).not.toHaveBeenCalled();
+      expect(client.breaker.failures).toBe(0);
+    } finally { clearTimeout(watchdog); }
+  });
   it("refuses a worker client without a CPU URL", () => expect(() => new MattingClient({ services: [] })).toThrow("MATTING_URL"));
   it("falls back when CPU discovery is unavailable even while GPU health is available", async () => {
     const request = vi.fn<typeof fetch>(async (url) => String(url).includes("cpu") ? new Response(null, { status: 503 }) : Response.json({ ok: true, models: [{ id: "general", inputSize: 64, target: "gpu" }], default: "general", version: "test" }));
