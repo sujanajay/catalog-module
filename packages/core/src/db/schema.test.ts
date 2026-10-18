@@ -1,4 +1,5 @@
-// Tier 2: the generated 0000_init.sql on a fresh PGlite database.
+// Tier 2: every generated migration (0000_init.sql, then 0001_users.sql) on a fresh PGlite database.
+// The users table's columns, role check and migration order are tested in people.test.ts.
 import { sql } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { Db } from "./client";
@@ -30,6 +31,7 @@ const TABLES = [
   "brand_master", "sku_map", "model_policy", "catalog_batches", "catalog_uploads", "catalog_products",
   "catalog_batch_products", "catalog_product_aliases", "catalog_product_events", "catalog_source_images",
   "catalog_outputs", "catalog_chunks", "catalog_eval_labels", "catalog_eval_judgements", "spend_days",
+  "users", // 0001_users.sql (spec 03)
 ];
 
 const INDEXES = [
@@ -43,13 +45,12 @@ const INDEXES = [
   "catalog_eval_judgements_output_model_uq", "brand_master_slug_unique",
 ];
 
-describe("0000_init.sql", () => {
-  it("creates every table and no users table", async () => {
+describe("generated migrations", () => {
+  it("creates every table", async () => {
     const found = (await rows<{ table_name: string }>(
       sql`select table_name from information_schema.tables where table_schema = 'public'`,
     )).map((r) => r.table_name);
     expect(found.sort()).toEqual([...TABLES].sort());
-    expect(found).not.toContain("users");
   });
 
   it("creates every index, the live index being partial", async () => {

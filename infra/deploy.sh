@@ -58,8 +58,13 @@ ENV_VARS+=",DB_HOST=$DB_HOST,DB_NAME=catalog,DB_USER=catalog_app"
 ENV_VARS+=",TASKS_QUEUE=catalog,WORKER_URL=$WORKER_URL,WORKER_SA_EMAIL=$WORKER_SA"
 WORKER_ENV="$ENV_VARS,DB_POOL_MAX=2,BQ_PROJECT=opptra-datawarehouse,BQ_LOCATION=asia-south1"
 WEB_ENV="$ENV_VARS,DB_POOL_MAX=3,SHARE_SA_EMAIL=$WEB_SA"
-# 03 adds IAP_AUDIENCE and ALLOWED_HOSTED_DOMAIN to the web; 05 adds MATTING_URL (and MATTING_GPU_URL)
-# to the worker; 07 adds OPENROUTER_API_KEY=openrouter-api-key:latest to the worker's secrets.
+# 03: the web verifies the IAP JWT against this exact audience and accepts only this domain.
+IAP_AUDIENCE=/projects/$PN/locations/$REGION/services/catalog-web
+WEB_ENV+=",IAP_AUDIENCE=$IAP_AUDIENCE,ALLOWED_HOSTED_DOMAIN=opptra.com"
+# The migrate job seeds this person as the first admin (idempotent; never undoes a later role change).
+MIGRATE_ENV="$WORKER_ENV,SEED_ADMIN_EMAIL=${SEED_ADMIN_EMAIL:-sujan@opptra.com}"
+# 05 adds MATTING_URL (and MATTING_GPU_URL) to the worker; 07 adds
+# OPENROUTER_API_KEY=openrouter-api-key:latest to the worker's secrets.
 SECRETS=DB_PASSWORD=catalog-db-password:latest
 NET=(--region="$REGION" --network=ila-vpc --subnet=ila-subnet --vpc-egress=private-ranges-only)
 
@@ -67,7 +72,7 @@ NET=(--region="$REGION" --network=ila-vpc --subnet=ila-subnet --vpc-egress=priva
 echo "==> migrate"
 gcloud run jobs deploy catalog-migrate --quiet --image="$AR/worker:$TAG" --command=node --args=dist/migrate.js \
   --service-account="$WORKER_SA" --max-retries=0 --task-timeout=600 "${NET[@]}" \
-  --set-secrets="$SECRETS" --set-env-vars="$WORKER_ENV"
+  --set-secrets="$SECRETS" --set-env-vars="$MIGRATE_ENV"
 gcloud run jobs execute catalog-migrate --region="$REGION" --wait
 
 # --no-allow-unauthenticated re-sets service IAM on every deploy; pass it only when creating the
@@ -89,13 +94,65 @@ gcloud run deploy catalog-worker --quiet --image="$AR/worker:$TAG" --service-acc
   --set-secrets="$SECRETS" --set-env-vars="$WORKER_ENV"
 
 # --- 6. Web --------------------------------------------------------------------------
-# Private, reachable only with an identity token until 03 adds --iap, IAP_AUDIENCE and the
-# domain:opptra.com grant. Never --allow-unauthenticated.
+# Private (only IAP's service agent may invoke it; never --allow-unauthenticated) and behind IAP with
+# the Google-managed OAuth client: no OAuth client, consent screen or secret of ours.
+# MSYS2_ARG_CONV_EXCL: Git Bash would rewrite the "/projects/..." audience inside --set-env-vars into a
+# Windows path (C:/.../Git/projects/...). Excluding only that flag keeps the conversion the gcloud
+# launcher itself needs (MSYS_NO_PATHCONV=1 would break it).
 echo "==> web"
+MSYS2_ARG_CONV_EXCL='--set-env-vars=' \
 gcloud run deploy catalog-web --quiet --image="$AR/web:$TAG" --service-account="$WEB_SA" \
-  "$(auth_flag catalog-web)" --cpu=1 --memory=1Gi \
+  "$(auth_flag catalog-web)" --iap --cpu=1 --memory=1Gi \
   --min-instances=0 --max-instances=3 --timeout=300 "${NET[@]}" \
   --set-secrets="$SECRETS" --set-env-vars="$WEB_ENV"
+
+IAP_ENABLED=$(gcv run services describe catalog-web --region="$REGION" \
+  --format='value(metadata.annotations."run.googleapis.com/iap-enabled")')
+if [ "$IAP_ENABLED" = true ]; then
+  echo "==> IAP on catalog-web: enabled"
+else
+  echo "ERROR: catalog-web has run.googleapis.com/iap-enabled='$IAP_ENABLED', expected true" >&2
+  exit 1
+fi
+
+# Who may sign in: every account of the Opptra Workspace domain. Resource level first
+# (check-then-create); if the operator's roles deny it, project level with a WARN.
+# See docs/solutions/catalog-iap.md.
+IAP_MEMBER=domain:opptra.com
+IAP_ROLE=roles/iap.httpsResourceAccessor
+IAP_RESOURCE=(--resource-type=cloud-run --service=catalog-web --region="$REGION")
+IAP_PROJECT_WARN="WARN: $IAP_ROLE for $IAP_MEMBER is granted at project level; this also lets every Opptra account open the earlier ila-web. See docs/solutions/catalog-iap.md."
+IAP_POLICY=$(gcv iap web get-iam-policy "${IAP_RESOURCE[@]}" --flatten='bindings[].members' \
+  --format='csv[no-heading](bindings.role,bindings.members)' 2>/dev/null || true)
+# Read only when the resource-level check misses (the common re-run skips this gcloud call).
+project_has_iap_binding() {
+  local policy
+  policy=$(gcv projects get-iam-policy "$PROJECT" --flatten='bindings[].members' \
+    --format='csv[no-heading](bindings.role,bindings.members)') || exit 1
+  grep -qxF "$IAP_ROLE,$IAP_MEMBER" <<<"$policy"
+}
+if grep -qxF "$IAP_ROLE,$IAP_MEMBER" <<<"$IAP_POLICY"; then
+  echo "==> IAP access: SKIP ($IAP_MEMBER holds $IAP_ROLE on catalog-web)"
+elif project_has_iap_binding; then
+  echo "==> IAP access: SKIP ($IAP_MEMBER holds $IAP_ROLE at project level from an earlier run)"
+  echo "$IAP_PROJECT_WARN" >&2
+else
+  echo "==> IAP access: CREATE $IAP_ROLE -> $IAP_MEMBER on catalog-web"
+  # Only a permission denial falls back to the wider project-level grant; any other failure (network,
+  # quota, a bad flag) stops the deploy instead of silently widening access to ila-web.
+  if ! IAP_ERR=$(gcloud iap web add-iam-policy-binding "${IAP_RESOURCE[@]}" --quiet \
+      --member="$IAP_MEMBER" --role="$IAP_ROLE" --condition=None 2>&1 >/dev/null); then
+    if ! grep -qiE 'PERMISSION_DENIED|does not have .*permission|permission denied' <<<"$IAP_ERR"; then
+      echo "$IAP_ERR" >&2
+      echo "ERROR: the resource-level IAP binding failed for a reason other than a permission denial" >&2
+      exit 1
+    fi
+    echo "==> IAP access: resource-level binding denied; CREATE at project level instead"
+    gcloud projects add-iam-policy-binding "$PROJECT" --quiet --condition=None \
+      --member="$IAP_MEMBER" --role="$IAP_ROLE" >/dev/null
+    echo "$IAP_PROJECT_WARN" >&2
+  fi
+fi
 
 # --- 7. Matting services: added by 05 ------------------------------------------------
 
