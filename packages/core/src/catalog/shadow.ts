@@ -2,6 +2,8 @@ import sharp from "sharp";
 import type { BBox, CanvasPlan, Matte, Prepared } from "./render";
 import type { OutputFlag, ProductType } from "./types";
 
+// Shared with bbox: alpha at or below this level is negligible edge antialiasing.
+export const ALPHA_BBOX_THRESHOLD = 10;
 export const BG_UNIFORM_STDEV = 8;
 export const SHADOW_MIN_DARKNESS = 0.04;
 export const SHADOW_MAX_DARKNESS = 0.6;
@@ -41,7 +43,7 @@ export function preservedDarkness(p: Prepared, matte: Matte, box: BBox, type: Pr
   const darkness = Buffer.alloc(p.width * p.height), seen = new Uint8Array(darkness.length), queue = new Int32Array(darkness.length);
   for (let y = y0; y < y1; y++) for (let x = x0; x < x1; x++) {
     const i = y * p.width + x;
-    if (matte.alpha[i] !== 0) continue;
+    if (matte.alpha[i]! > ALPHA_BBOX_THRESHOLD) continue;
     const d = Math.min(SHADOW_MAX_DARKNESS, Math.max(0, (bg - luma(p.rgb[i * 3]!, p.rgb[i * 3 + 1]!, p.rgb[i * 3 + 2]!)) / bg));
     // Sub-JPEG-level noise must not connect a vignette to a real contact shadow.
     if (d > 0.01) darkness[i] = Math.round(d * 255);
@@ -87,7 +89,8 @@ export async function shadowLayer(p: Prepared, matte: Matte, box: BBox, plan: Ca
   const grey = Buffer.alloc(plan.w * plan.h);
   for (let y = 0; y < plan.h; y++) for (let x = 0; x < plan.w; x++) {
     const inside = x >= Math.max(band.x, safe.x) && x < Math.min(plan.w - band.x, safe.x + safe.w) && y >= Math.max(band.y, safe.y) && y < Math.min(plan.h - band.y, safe.y + safe.h);
-    grey[y * plan.w + x] = inside && !foregroundMask?.[y * plan.w + x] ? 255 - projected[y * plan.w + x]! : 255;
+    const isProduct = (foregroundMask?.[y * plan.w + x] ?? 0) > ALPHA_BBOX_THRESHOLD;
+    grey[y * plan.w + x] = inside && !isProduct ? 255 - projected[y * plan.w + x]! : 255;
   }
   return { layer: await sharp(grey, { raw: { width: plan.w, height: plan.h, channels: 1 } }).png().toBuffer(), flags };
 }

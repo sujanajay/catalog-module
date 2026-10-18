@@ -2,7 +2,7 @@ import sharp from "sharp";
 import { fileTypeFromBuffer } from "file-type";
 import { backgroundFor, channel, DETAIL_SHOT_BBOX_FRACTION, JPEG_QUALITY_MIN, JPEG_QUALITY_START, JPEG_QUALITY_STEP, MAX_OUTPUT_BYTES, MAX_UPSCALE, MIN_SOURCE_LONG_SIDE_PX, STYLI_SKIP_LOW_RESOLUTION, type ChannelSpec, type Size } from "./channels";
 import type { ChannelId, OutputFlag, ProductType } from "./types";
-import { analyseBackground, borderPixels, shadowLayer } from "./shadow";
+import { ALPHA_BBOX_THRESHOLD, analyseBackground, borderPixels, shadowLayer } from "./shadow";
 import { BG_TOLERANCE, checkOutput } from "./compliance";
 
 export interface Prepared { width: number; height: number; rgb: Buffer; alphaSource: Buffer | null; background: { uniform: boolean; color: [number, number, number]; stdev: number }; flags: OutputFlag[]; sourceMime: string }
@@ -13,8 +13,7 @@ export interface RenderInput { prepared: Prepared; matte: Matte; channel: Channe
 export interface RenderOutput { jpeg: Buffer | null; status: "ok" | "skipped" | "failed"; plan: CanvasPlan; quality: number; bytes: number; flags: OutputFlag[]; notes: string[]; attention: { why: string; what: string } | null; compliance: { ok: boolean; failures: string[] } }
 export interface RenderKeyInputs { sourceSha256: string; channel: ChannelId; rulesVersion: string; policyId: string; policyUpdatedAt: string; n: number }
 
-// Alpha below this level is antialiasing rather than the measured product silhouette.
-export const ALPHA_BBOX_THRESHOLD = 10;
+export { ALPHA_BBOX_THRESHOLD } from "./shadow";
 export class UnsupportedSourceError extends Error { readonly flags: OutputFlag[] = ["unsupported"]; }
 
 export async function prepare(buf: Buffer, originalName: string, convert: (buf: Buffer) => Promise<Buffer>): Promise<Prepared> {

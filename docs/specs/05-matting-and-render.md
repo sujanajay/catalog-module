@@ -191,7 +191,8 @@ Any change to the maths in this file that alters output bytes must bump `CHANNEL
       shot; else no shadow and flag `no_shadow_source`.
    2. Preserve (first choice, pixel-safe): when `prepared.background.uniform` and the darkness matte
       in the shadow band has a mean darkness above `SHADOW_MIN_DARKNESS` (builder constant, start
-      0.04) and the dark region touches the bbox bottom. Darkness per pixel with alpha < 128 is
+      0.04) and the dark region touches the bbox bottom. Darkness per pixel with alpha at or below
+      `ALPHA_BBOX_THRESHOLD` (10, the same measured silhouette threshold used by bbox) is
       `d = max(0, (L_bg - L_px) / L_bg)` with `L` the luma (0.2126 R + 0.7152 G + 0.0722 B) and
       `L_bg` the background luma; zero outside the band. Shadow band: `footwear`, `bag_accessory`
       and `other` -> from the bbox bottom minus 10% of bbox height to the bbox bottom plus 25% of
@@ -201,8 +202,10 @@ Any change to the maths in this file that alters output bytes must bump `CHANNEL
       only the connected component of the dark region that touches the bbox bottom is kept, so stray
       gradients and vignettes are dropped. The layer is a 1-channel image `255 - round(255 * d)`,
       scaled and placed with the product, composited with `blend: "multiply"` over the background
-      before the product goes on `over`; pixels with alpha > 0 are excluded so the product is never
-      darkened.
+      before the product goes on `over`; pixels above `ALPHA_BBOX_THRESHOLD` are excluded so the
+      measured product is never darkened. Negligible antialiased tails at or below that threshold
+      retain the contact shadow: excluding every nonzero alpha created a visible gap in the real
+      Anta preflight. Opaque product colors and required margins remain unchanged.
    3. Synthesise: when rule 2 does not hold, the product type is `footwear`, `bag_accessory` or
       `other` (and `auto`, treated as `other`) and the pose is upright (bbox taller than wide, or
       footwear): a deterministic contact shadow from the alpha mask: keep the bottom 20% of mask
