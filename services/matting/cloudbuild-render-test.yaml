@@ -1,0 +1,90 @@
+# Spec 05 test only. Inputs are private TARs preserving the source folder paths.
+# No deploy, IAM changes, secrets, public writes, or cloud resource deletion.
+steps:
+  - id: inputs
+    name: gcr.io/google.com/cloudsdktool/google-cloud-cli:stable
+    entrypoint: bash
+    env: ['INPUT_PREFIX=${_INPUT_PREFIX}', 'ARTIFACT_PREFIX=${_ARTIFACT_PREFIX}', 'MATTING_IMAGE=${_MATTING_IMAGE}']
+    args:
+      - -ceu
+      - |
+        [[ "$$INPUT_PREFIX" =~ ^gs://image-links-agent-assets/catalog-test/([a-z0-9][a-z0-9-]{7,79})/inputs/$$ ]]
+        run=$${BASH_REMATCH[1]}
+        [[ "$$ARTIFACT_PREFIX" == "gs://image-links-agent-assets/catalog-test/$$run/artifacts/" ]]
+        [[ "$$MATTING_IMAGE" =~ ^asia-south1-docker.pkg.dev/image-links-agent/apps/matting:[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$$ ]]
+        mkdir -p /workspace/real-data /workspace/var/render05
+        for archive in anta french-connection; do
+          gcloud storage cp "$${INPUT_PREFIX}$$archive.tar" "/tmp/$$archive.tar"
+          tar -xf "/tmp/$$archive.tar" -C /workspace/real-data
+        done
+        test -d /workspace/real-data/new_resources_4/Images
+        test -d '/workspace/real-data/new_resources_3/French Connection Final'
+  - id: build-cli
+    name: node:22-bookworm
+    entrypoint: bash
+    args:
+      - -ceu
+      - |
+        corepack enable
+        corepack prepare pnpm@9.15.0 --activate
+        pnpm install --frozen-lockfile
+        pnpm --filter @catalog/worker build
+  - id: real-render
+    name: gcr.io/cloud-builders/docker
+    entrypoint: bash
+    args:
+      - -ceu
+      - |
+        echo 1 > /workspace/var/render05/test-exit-code
+        set +e
+        (
+          set -e
+          docker pull '${_MATTING_IMAGE}'
+          docker run -d --name matting-cpu --network cloudbuild --memory=16g --cpus=4 '${_MATTING_IMAGE}'
+          timeout --signal=TERM --kill-after=60s 23h docker run --name render-tests \
+            --network container:matting-cpu --memory=12g --cpus=12 \
+            -v /workspace:/workspace -w /workspace \
+            -e REAL_DATA=1 -e REAL_DATA_DIR=/workspace/real-data \
+            -e RENDER_REAL_OUT=/workspace/var/render05/full \
+            -e MATTING_URL=http://localhost:8080 -e BUCKET=image-links-agent-assets \
+            -e GOOGLE_CLOUD_PROJECT=image-links-agent node:22-bookworm bash -ceu '
+              node -e "(async()=>{for(let i=0;i<120;i++){try{const r=await fetch(\"http://localhost:8080/health\",{signal:AbortSignal.timeout(5000)});if(r.ok){console.log(await r.text());return;}}catch{}await new Promise(r=>setTimeout(r,5000));}throw Error(\"CPU health timed out\");})().catch(e=>{console.error(e);process.exit(1);})"
+              cli=/workspace/apps/worker/dist/catalog-local.js
+              channels=noon,namshi,trendyol,styli,centrepoint,sixthstreet,vogacloset,amazon,shein
+              for brand in anta french-connection; do
+                if [[ "$$brand" == anta ]]; then source=/workspace/real-data/new_resources_4/Images; type=footwear; else source="/workspace/real-data/new_resources_3/French Connection Final"; type=apparel_model; fi
+                out=/workspace/var/render05/preflight/$$brand
+                node "$$cli" collect --brand "$$brand" --from "$$source" --identifier-mode filename --out "$$out/collect"
+                node "$$cli" render --manifest "$$out/collect/manifest.json" --channels "$$channels" --matting http://localhost:8080 --model birefnet-general-lite --product-type "$$type" --limit 2 --out "$$out/render"
+                node -e "const r=JSON.parse(require(\"fs\").readFileSync(process.argv[1]));if(r.summary.outputs!==18||r.summary.compliant!==16||r.summary.skipped!==2||r.summary.failed!==0||r.outputs.some(o=>o.flags.includes(\"fallback_matte\")))throw Error(\"Real preflight failed\");console.log(JSON.stringify(r.summary));" "$$out/render/report.json"
+              done
+              node node_modules/vitest/vitest.mjs run --config vitest.real.config.ts packages/core/src/catalog/render.real.test.ts --maxWorkers=1 --reporter=verbose
+            '
+        ) > /workspace/var/render05/test.log 2>&1
+        result=$$?
+        echo "$$result" > /workspace/var/render05/test-exit-code
+        docker stop --time 30 render-tests >/dev/null 2>&1
+        docker logs matting-cpu > /workspace/var/render05/matting.log 2>&1
+        docker stats --no-stream matting-cpu > /workspace/var/render05/matting-stats.txt 2>&1
+        docker inspect matting-cpu --format '{{json .State}}' > /workspace/var/render05/matting-state.json 2>&1
+        docker stop --time 30 matting-cpu >/dev/null 2>&1
+        cat /workspace/var/render05/test.log
+        exit 0
+  - id: preserve-artifacts
+    name: gcr.io/google.com/cloudsdktool/google-cloud-cli:stable
+    entrypoint: bash
+    args:
+      - -ceu
+      - |
+        tar -czf /workspace/render05-artifacts.tar.gz -C /workspace/var render05
+        gcloud storage cp /workspace/render05-artifacts.tar.gz '${_ARTIFACT_PREFIX}render05-artifacts.tar.gz'
+        echo 'Private archive: ${_ARTIFACT_PREFIX}render05-artifacts.tar.gz'
+  - id: test-result
+    name: ubuntu:24.04
+    entrypoint: bash
+    args: ['-ceu', 'exit "$$(cat /workspace/var/render05/test-exit-code)"']
+options:
+  machineType: E2_HIGHCPU_32
+  diskSizeGb: 100
+  logging: CLOUD_LOGGING_ONLY
+timeout: 86400s
