@@ -1,10 +1,12 @@
 """Byte-in, mask/PNG-out service. Cloud Run supplies authentication at its edge."""
 import io
+import gc
 import logging
 import os
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
+from threading import Lock
 
 import onnxruntime as ort
 from fastapi import FastAPI, UploadFile
@@ -27,6 +29,7 @@ DEFAULT_MODEL = os.getenv("DEFAULT_MATTE_MODEL", "birefnet-general")
 TARGET = os.getenv("MATTE_TARGET", "cpu")
 MAX_INPUT_BYTES = int(os.getenv("MAX_INPUT_BYTES", "40000000"))
 SESSIONS = {}
+INFERENCE_LOCK = Lock()
 
 
 def load_sessions():
@@ -40,9 +43,12 @@ def load_sessions():
             raise RuntimeError(f"baked model missing: {name}; rebuild the image, runtime downloads are disabled")
     providers = ["CUDAExecutionProvider", "CPUExecutionProvider"] if TARGET == "gpu" else ["CPUExecutionProvider"]
     sessions = {}
-    for name in MODELS:
+    for name in ([DEFAULT_MODEL] if TARGET == "cpu" else MODELS):
         options = ort.SessionOptions()
         options.intra_op_num_threads = 4
+        if TARGET == "cpu":
+            options.enable_cpu_mem_arena = False
+            options.enable_mem_pattern = False
         session = new_session(name, sess_opts=options, providers=providers)
         actual = session.inner_session.get_providers()
         if TARGET == "gpu" and "CUDAExecutionProvider" not in actual:
@@ -52,6 +58,19 @@ def load_sessions():
         memory = [line for line in status.read_text().splitlines() if line.startswith(("VmRSS:", "VmHWM:"))] if status.exists() else []
         logger.info("session_ready model=%s target=%s providers=%s memory=%s", name, TARGET, actual, memory)
     return sessions
+
+
+def session_for(model):
+    # Evict before allocating the replacement; callers hold INFERENCE_LOCK through inference.
+    if model not in SESSIONS:
+        SESSIONS.clear()
+        gc.collect()
+        options = ort.SessionOptions()
+        options.intra_op_num_threads = 4
+        options.enable_cpu_mem_arena = False
+        options.enable_mem_pattern = False
+        SESSIONS[model] = new_session(model, sess_opts=options, providers=["CPUExecutionProvider"])
+    return SESSIONS[model]
 
 
 @asynccontextmanager
@@ -82,13 +101,13 @@ def read_upload(file):
 
 @app.get("/health")
 def health():
-    return {"ok": True, "models": [{"id": name, "inputSize": INPUT_SIZES[name], "target": TARGET} for name in SESSIONS], "default": DEFAULT_MODEL, "version": os.getenv("GIT_SHA", "dev")}
+    return {"ok": True, "models": [{"id": name, "inputSize": INPUT_SIZES[name], "target": TARGET} for name in MODELS], "default": DEFAULT_MODEL, "version": os.getenv("GIT_SHA", "dev")}
 
 
 @app.post("/matte")
 def matte(file: UploadFile, model: str = DEFAULT_MODEL):
-    if model not in SESSIONS:
-        return JSONResponse({"error": f"unknown model {model}", "models": list(SESSIONS)}, status_code=400)
+    if model not in MODELS:
+        return JSONResponse({"error": f"unknown model {model}", "models": list(MODELS)}, status_code=400)
     started = time.perf_counter()
     data, error = read_upload(file)
     if error is not None:
@@ -101,7 +120,11 @@ def matte(file: UploadFile, model: str = DEFAULT_MODEL):
     except (UnidentifiedImageError, OSError, ValueError, Image.DecompressionBombError):
         return JSONResponse({"error": "not a PNG or JPEG file"}, status_code=400)
     try:
-        mask = remove(image, session=SESSIONS[model], only_mask=True).convert("L")
+        with INFERENCE_LOCK:
+            mask = remove(image, session=session_for(model), only_mask=True).convert("L")
+            status = Path("/proc/self/status")
+            memory = [line for line in status.read_text().splitlines() if line.startswith(("VmRSS:", "VmHWM:"))] if status.exists() else []
+            logger.info("inference_complete model=%s target=%s memory=%s", model, TARGET, memory)
         if mask.size != image.size:
             mask = mask.resize(image.size, Image.Resampling.LANCZOS)
         return png_response(mask, started, {"x-model": model, "x-input-size": f"{image.width}x{image.height}"})

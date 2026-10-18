@@ -417,14 +417,17 @@ model. Therefore:
   non-commercial models are full candidates for this internal tool and may be policy defaults.
 - Model ids appear in this engineering text, in `model_policy` and in logs only; never in UI copy.
 
-Memory: the CPU service runs with 16 GiB so all four sessions stay loaded, or with lazy loading and
-an LRU of two sessions at 8 GiB. The builder decides from the measured resident size of the four
-sessions, records the choice and the numbers in the README, and `deploy.sh` carries the matching
-`--memory`.
+Memory: actual build `2c0b868c-a590-4e8a-b187-e288f89ef079` showed that four eager sessions
+used 4,622,376 KiB while idle, but consecutive general/lite inference exceeded 16 GiB. CPU therefore
+keeps one resident session, evicts it before a model switch, disables CPU arena and memory-pattern
+retention, and serializes loading and inference. All four baked models remain advertised. CPU
+stays at 16 GiB pending measured peak memory from general/lite/general switching. GPU keeps four
+eager sessions. The README records measurements and `deploy.sh` carries the matching `--memory`.
 
 `app.py`:
 - On start: `SESSIONS = { name: new_session(name, sess_opts) for name in MATTE_MODELS.split(",") }`
-  (or the lazy LRU of two) with `sess_opts.intra_op_num_threads = 4`; env `MATTE_MODELS` default
+  (CPU instead preloads only the default and replaces its single resident session on demand)
+  with `sess_opts.intra_op_num_threads = 4`; env `MATTE_MODELS` default
   `birefnet-general,birefnet-general-lite,birefnet-hrsod,bria-rmbg`, `DEFAULT_MATTE_MODEL` default
   `birefnet-general`, `MATTE_TARGET` `cpu | gpu` (set by the image); `INPUT_SIZES` maps each id to
   its `inputSize` (1024 for the four built-ins; 08 adds 2048 and `native` entries); `from pillow_heif
@@ -448,7 +451,7 @@ Deploy (`infra/deploy.sh`, owned by this spec; 06 only adds worker env vars), bo
 same `auth_flag` pattern the web and worker use (OIDC callers only), no secrets, no VPC flags,
 service account `catalog-matting@image-links-agent.iam.gserviceaccount.com` for both:
 - `gcloud run deploy catalog-matting --image=$AR/matting:$TAG --region=asia-south1 --cpu=4
-  --memory=16Gi (or 8Gi with the lazy LRU) --concurrency=1 --min-instances=0 --max-instances=20
+  --memory=16Gi --concurrency=1 --min-instances=0 --max-instances=20
   --timeout=300`.
 - `gcloud run deploy catalog-matting-gpu --image=$AR/matting-gpu:$TAG --region=asia-southeast1
   --gpu=1 --gpu-type=nvidia-l4 --no-gpu-zonal-redundancy --cpu=4 --memory=16Gi --concurrency=1

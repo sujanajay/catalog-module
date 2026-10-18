@@ -2,6 +2,9 @@
 import importlib
 import io
 import sys
+import time
+import weakref
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -48,8 +51,11 @@ def test_health_and_explicit_sessions(service):
     assert health["default"] == "birefnet-general"
     assert len(health["models"]) == 4
     assert all(m["inputSize"] == 1024 and m["target"] == "cpu" for m in health["models"])
-    assert create.call_count == 4
+    assert create.call_count == 1
+    assert list(service[1].SESSIONS) == ["birefnet-general"]
     assert all(call.kwargs["sess_opts"].intra_op_num_threads == 4 for call in create.call_args_list)
+    assert all(call.kwargs["sess_opts"].enable_cpu_mem_arena is False for call in create.call_args_list)
+    assert all(call.kwargs["sess_opts"].enable_mem_pattern is False for call in create.call_args_list)
 
 
 @pytest.mark.parametrize("fmt", ["PNG", "JPEG"])
@@ -68,6 +74,55 @@ def test_matte_preserves_received_dimensions(service, fmt):
     assert mask.getpixel((16, 12)) == 255
     assert remove.call_args.kwargs["only_mask"] is True
     assert "session" in remove.call_args.kwargs
+
+
+def test_cpu_releases_previous_session_before_loading_next(service):
+    client, module, create, remove = service
+    module.SESSIONS.clear()
+    refs = []
+
+    class Session:
+        inner_session = SimpleNamespace(get_providers=lambda: ["CPUExecutionProvider"])
+
+    def factory(*args, **kwargs):
+        assert all(ref() is None for ref in refs), "old session retained while loading replacement"
+        session = Session()
+        refs.append(weakref.ref(session))
+        return session
+
+    create.side_effect = factory
+    create.reset_mock()
+    for name in ["birefnet-general", "birefnet-general", "birefnet-general-lite", "birefnet-hrsod", "bria-rmbg", "birefnet-general"]:
+        response = client.post(f"/matte?model={name}", files={"file": ("source.png", image_bytes())})
+        assert response.status_code == 200
+        assert list(module.SESSIONS) == [name]
+        assert len(client.get("/health").json()["models"]) == 4
+        remove.reset_mock()
+    assert create.call_count == 5
+
+
+def test_inference_and_session_switch_are_serialized(service):
+    client, _, _, remove = service
+    active = 0
+    peak = 0
+
+    def infer(image, **kwargs):
+        nonlocal active, peak
+        active += 1
+        peak = max(peak, active)
+        time.sleep(0.03)
+        active -= 1
+        return ImageOps.invert(image.convert("L"))
+
+    remove.side_effect = infer
+
+    def request(index):
+        model = "birefnet-general" if index % 2 else "birefnet-general-lite"
+        return client.post(f"/matte?model={model}", files={"file": ("source.png", image_bytes())}).status_code
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        assert list(pool.map(request, range(8))) == [200] * 8
+    assert peak == 1
 
 
 def test_unknown_model(service):

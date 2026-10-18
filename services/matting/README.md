@@ -62,7 +62,7 @@ Build and test remotely using Git Bash, from the committed repository root:
 bash infra/test-matting.sh
 ```
 
-This submits `services/matting/cloudbuild-test.yaml`: CPU build, a CPU container with four sessions,
+This submits `services/matting/cloudbuild-test.yaml`: CPU build, a CPU container advertising four models with one resident session,
 real inference/conversion smoke, GPU build, then per-commit image pushes. No deployment occurs.
 E2_HIGHCPU_32 supplies enough RAM for the 16 GiB container and exists only for the build. GPU images
 can build without a GPU; actual CUDA inference requires an L4 and is a separate post-merge check.
@@ -70,12 +70,22 @@ The normal `cloudbuild.yaml` also builds both images.
 
 ## Memory, startup and deployment
 
-Current deployment is conservatively 16 GiB, four eager sessions, intra-op threads 4, concurrency 1,
+Current deployment is conservatively 16 GiB, one resident CPU session, intra-op threads 4, concurrency 1,
 CPU 4 vCPU/max 20, GPU L4/4 vCPU/16 GiB/max 3, both min instances 0 and timeout 300s. GPU uses
 instance-based billing (`--no-cpu-throttling`) as Cloud Run requires. An 8 GiB/two-session LRU
-configuration is not implemented without measurements demonstrating it is needed.
+configuration is not assumed to fit without measurements.
 
-Measurement procedure: Cloud Build starts CPU with all four models, captures `session_ready`
+Build `2c0b868c-a590-4e8a-b187-e288f89ef079` measured four eager sessions at
+4,622,376 KiB resident and startup 15,239 ms. Real general inference completed in 13,130 ms;
+the subsequent lite inference killed the 16 GiB container (`OOMKilled=true`). Idle resident
+memory did not predict retained inference workspace. CPU now preloads only the default model,
+keeps one resident session, disables ONNX CPU arena and memory-pattern retention, and serializes
+selection, loading and inference. It releases the previous session before allocating its replacement.
+Health still advertises all four baked models. GPU retains four eager sessions.
+This changes the spec's initial four-eager or two-session alternatives based on the actual memory
+failure. Keep CPU at 16 GiB until the general/lite/general smoke establishes peak and stability.
+
+Measurement procedure: Cloud Build switches CPU general/lite/general while all four models remain supported, captures `session_ready`
 logs with actual providers and process resident/high-water KiB, captures `sessions_ready startup_ms`,
 then executes the real smoke and `docker stats --no-stream`. The smoke prints version,
 wait-to-health milliseconds and per-model `x-ms`. Record these numbers in the execution report

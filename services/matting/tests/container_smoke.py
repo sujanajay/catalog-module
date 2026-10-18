@@ -32,7 +32,7 @@ with httpx.Client(base_url="http://127.0.0.1:8080", timeout=300) as client:
     ImageDraw.Draw(image).ellipse((96, 64, 416, 448), fill=(32, 70, 180))
     source = io.BytesIO()
     image.save(source, format="PNG")
-    for model in ("birefnet-general", "birefnet-general-lite"):
+    for model in ("birefnet-general", "birefnet-general-lite", "birefnet-general"):
         response = client.post("/matte", params={"model": model}, files={"file": ("synthetic.png", source.getvalue(), "image/png")})
         response.raise_for_status()
         mask = Image.open(io.BytesIO(response.content))
