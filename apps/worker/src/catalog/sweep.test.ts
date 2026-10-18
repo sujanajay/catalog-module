@@ -75,7 +75,7 @@ describe("handleSweep (PGlite)", () => {
     const draft = await insertBatch("draft", 48);
     const done = await insertBatch("done", 48);
 
-    const r = await handleSweep({ db, releaseLocks, now: () => NOW }, {});
+    const r = await handleSweep({ db, enqueue:vi.fn(async()=>"task"), releaseLocks, now: () => NOW }, {});
     expect(r).toEqual({ httpStatus: 200, outcome: "swept:1" });
 
     expect(await batch(stale)).toEqual({ status: "failed", error: SWEEP_ERROR });
@@ -90,7 +90,7 @@ describe("handleSweep (PGlite)", () => {
     expect(JSON.parse(String(warn.mock.calls[0]![0]))).toMatchObject({ severity: "WARNING", batchId: stale, releasedProducts: 3 });
 
     // Idempotent: a second run finds nothing.
-    expect(await handleSweep({ db, releaseLocks, now: () => NOW }, {})).toEqual({ httpStatus: 200, outcome: "swept:0" });
+    expect(await handleSweep({ db, enqueue:vi.fn(async()=>"task"), releaseLocks, now: () => NOW }, {})).toEqual({ httpStatus: 200, outcome: "swept:0" });
     expect(warn).toHaveBeenCalledTimes(1);
   });
 
@@ -98,7 +98,7 @@ describe("handleSweep (PGlite)", () => {
     vi.spyOn(console, "warn").mockImplementation(() => undefined);
     const old = await insertBatch("ingesting", 3);
     const recent = await insertBatch("ingesting", 1);
-    expect(await handleSweep({ db, releaseLocks, now: () => NOW }, {})).toEqual({ httpStatus: 200, outcome: "swept:1" });
+    expect(await handleSweep({ db, enqueue:vi.fn(async()=>"task"), releaseLocks, now: () => NOW }, {})).toEqual({ httpStatus: 200, outcome: "swept:1" });
     expect((await batch(old)).status).toBe("failed");
     expect((await batch(recent)).status).toBe("ingesting");
   });
@@ -107,8 +107,24 @@ describe("handleSweep (PGlite)", () => {
     const stale = await insertBatch("publishing", 5);
     await insertLockedProducts(stale, 1);
     const failing: ReleaseLocks = () => Promise.reject(new Error("locks unavailable"));
-    await expect(handleSweep({ db, releaseLocks: failing, now: () => NOW }, {})).rejects.toThrow("locks unavailable");
+    await expect(handleSweep({ db, enqueue:vi.fn(async()=>"task"), releaseLocks: failing, now: () => NOW }, {})).rejects.toThrow("locks unavailable");
     expect((await batch(stale)).status).toBe("publishing");
     expect(await locked(stale)).toBe(1);
   });
+});
+
+it("does not count recovery enqueue intents as progress beyond the stale deadline",async()=>{
+  vi.spyOn(console,"warn").mockImplementation(()=>undefined);
+  const pending=await insertBatch("publishing",3);
+  await db.execute(sql`UPDATE catalog_batches SET counts='{"finalizePending":true,"finalizeEnqueuedAt":0}'::jsonb WHERE id=${pending}`);
+  const enqueue=vi.fn(async()=>"task");
+  expect(await handleSweep({db,releaseLocks,enqueue,now:()=>NOW},{})).toEqual({httpStatus:200,outcome:"swept:1"});
+  expect(enqueue).toHaveBeenCalledWith("/tasks/catalog/finalize",{batchId:pending},{});
+  expect((await batch(pending)).status).toBe("failed");
+  const abandoned=await insertBatch("rendering",1);
+  await insertChunk(abandoned,0,0.5,null);
+  await handleSweep({db,releaseLocks,enqueue,now:()=>NOW},{});
+  expect((await batch(abandoned)).status).toBe("rendering");
+  expect(await handleSweep({db,releaseLocks,enqueue,now:()=>new Date(+NOW+2*3600_000)},{})).toEqual({httpStatus:200,outcome:"swept:1"});
+  expect((await batch(abandoned)).status).toBe("failed");
 });

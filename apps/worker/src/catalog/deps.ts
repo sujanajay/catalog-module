@@ -5,7 +5,7 @@ import { MattingClient, matteFor } from "@catalog/core/catalog/matte";
 import { prepare, renderAllChannels } from "@catalog/core/catalog/render";
 import type { ResolvedPolicy } from "@catalog/core/catalog/types";
 import * as storage from "@catalog/core/storage";
-import { enqueueTask } from "@catalog/core/tasks";
+import { DISPATCH_DEADLINE_SEC, enqueueTask } from "@catalog/core/tasks";
 export interface CatalogDeps {
   db: Db; storage: typeof storage; matting: MattingClient; enqueue: typeof enqueueTask;
   fetch: typeof fetch; now: () => Date; log: (message: string, fields?: Record<string,unknown>) => void;
@@ -23,11 +23,18 @@ export function workerCatalogDeps(db: Db): CatalogDeps {
       return {matteModel:health.default,qaModel:process.env.CATALOG_QA_DEFAULT_MODEL ?? "",threshold:75,floor:60,qaMode:"per_source",qaSampleRate:1,source:"default"};
     }};
 }
-export async function enqueueFinalize(deps: Pick<CatalogDeps,"db"|"enqueue">, batchId:string, delaySec?:number): Promise<void> {
-  const rows = await deps.db.update(catalogBatches).set({counts:sql`jsonb_set(${catalogBatches.counts}, '{finalizePending}', 'true')`}).where(and(eq(catalogBatches.id,batchId),sql`NOT coalesce((${catalogBatches.counts}->>'finalizePending')::boolean,false)`)).returning({id:catalogBatches.id});
+// Keep execution ownership through the Cloud Tasks deadline, plus a short termination grace.
+export const CATALOG_TASK_LEASE_MS=(DISPATCH_DEADLINE_SEC+60)*1000;
+export const FINALIZE_ENQUEUE_LEASE_MS = 120_000;
+export function finalizeEnqueueExpired(now:number) {
+  return sql`CASE WHEN coalesce(${catalogBatches.counts}->>'finalizeEnqueuedAt','') ~ '^[0-9]+$' THEN (${catalogBatches.counts}->>'finalizeEnqueuedAt')::numeric <= ${now-FINALIZE_ENQUEUE_LEASE_MS} ELSE true END`;
+}
+export async function enqueueFinalize(deps: Pick<CatalogDeps,"db"|"enqueue"> & Partial<Pick<CatalogDeps,"now">>, batchId:string, delaySec?:number): Promise<void> {
+  const now=+(deps.now?.() ?? new Date());
+  const rows = await deps.db.update(catalogBatches).set({updatedAt:sql`${catalogBatches.updatedAt}`,counts:sql`${catalogBatches.counts} || jsonb_build_object('finalizePending',true,'finalizeEnqueuedAt',${now}::numeric)`}).where(and(eq(catalogBatches.id,batchId),sql`(NOT coalesce((${catalogBatches.counts}->>'finalizePending')::boolean,false) OR ${finalizeEnqueueExpired(now)})`)).returning({id:catalogBatches.id});
   if (!rows.length) return;
   try { await deps.enqueue("/tasks/catalog/finalize",{batchId}, delaySec ? {delaySec}:{}); }
-  catch(error) { await deps.db.update(catalogBatches).set({counts:sql`jsonb_set(${catalogBatches.counts}, '{finalizePending}', 'false')`}).where(eq(catalogBatches.id,batchId)); throw error; }
+  catch(error) { await deps.db.update(catalogBatches).set({updatedAt:sql`${catalogBatches.updatedAt}`,counts:sql`jsonb_set(${catalogBatches.counts}, '{finalizePending}', 'false')`}).where(and(eq(catalogBatches.id,batchId),sql`${catalogBatches.counts}->>'finalizeEnqueuedAt' = ${String(now)}`)); throw error; }
 }
 export async function refreshBatchProgress(db:Db,batchId:string):Promise<void> {
   const groups=await db.select({status:catalogOutputs.status,n:count()}).from(catalogOutputs).where(eq(catalogOutputs.batchId,batchId)).groupBy(catalogOutputs.status);
