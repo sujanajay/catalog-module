@@ -13,7 +13,7 @@ steps:
         [[ "$$ARTIFACT_PREFIX" == "gs://image-links-agent-assets/catalog-test/$$run/artifacts/" ]]
         [[ "$$MATTING_IMAGE" =~ ^asia-south1-docker.pkg.dev/image-links-agent/apps/matting:[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$$ ]]
         [[ "$$FULL_RENDER" =~ ^[01]$$ ]]
-        if [[ "$$FULL_RENDER" == 1 ]]; then [[ "$$TEST_TIMEOUT" == 23h && "$$BUILD_TIMEOUT" == 86400s ]]; else [[ "$$TEST_TIMEOUT" == 15m && "$$BUILD_TIMEOUT" == 1200s ]]; fi
+        if [[ "$$FULL_RENDER" == 1 ]]; then [[ "$$TEST_TIMEOUT" == 12h && "$$BUILD_TIMEOUT" == 46800s ]]; else [[ "$$TEST_TIMEOUT" == 15m && "$$BUILD_TIMEOUT" == 1200s ]]; fi
         mkdir -p /workspace/real-data /workspace/var/render05
         for archive in anta french-connection; do
           gcloud storage cp "$${INPUT_PREFIX}$$archive.tar" "/tmp/$$archive.tar"
