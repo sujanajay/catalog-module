@@ -1,6 +1,4 @@
 #!/usr/bin/env bash
-# Build both images and verify real CPU inference in an ephemeral Cloud Build VM.
-# Does not deploy services. All published images carry the current commit tag.
 set -euo pipefail
 export CLOUDSDK_CORE_PROJECT=image-links-agent
 cd "$(dirname "$0")/.."

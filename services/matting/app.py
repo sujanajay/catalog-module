@@ -68,7 +68,6 @@ app = FastAPI(lifespan=lifespan)
 
 def png_response(image, started, headers):
     output = io.BytesIO()
-    # New pixels only, no source EXIF/profile metadata passes to the PNG.
     image.info.clear()
     image.save(output, format="PNG")
     return Response(output.getvalue(), media_type="image/png", headers={"x-ms": str(int((time.perf_counter() - started) * 1000)), **headers})

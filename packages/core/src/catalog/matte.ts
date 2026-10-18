@@ -20,6 +20,9 @@ export const FLOODFILL_TOLERANCE = 24;
 const SEED_TOLERANCE = BG_TOLERANCE;
 type Breaker = { state: "closed" | "open" | "half-open"; failures: number; openedAt: number | null };
 interface ServiceState extends MattingService { breaker: Breaker; models: ModelInfo[]; default: string; version: string | null; checkedAt: number }
+function modelSendLongSide(inputSize: ModelInfo["inputSize"], source: Size): number {
+  return inputSize === "native" ? Math.max(256, Math.min(2304, Math.round(Math.max(source.w, source.h) / 32) * 32)) : inputSize;
+}
 class UnavailableError extends Error {}
 export class UnknownMatteModelError extends Error {}
 
@@ -83,7 +86,7 @@ export class MattingClient {
   sendLongSide(model: string, source: Size): number {
     const info = [...this.states].sort((a, b) => Number(b.target === "gpu") - Number(a.target === "gpu")).flatMap((s) => s.models).find((m) => m.id === model);
     if (!info) throw new UnknownMatteModelError(`Unknown background removal model: ${model}.`);
-    return info.inputSize === "native" ? Math.max(256, Math.min(2304, Math.round(Math.max(source.w, source.h) / 32) * 32)) : info.inputSize;
+    return modelSendLongSide(info.inputSize, source);
   }
   async matte(prepared: Prepared, model?: string): Promise<Matte> {
     const h = await this.health();
@@ -97,7 +100,7 @@ export class MattingClient {
     for (const s of candidates) {
       if (!this.available(s)) continue;
       const info = s.models.find((m) => m.id === chosen)!;
-      const sentLongSide = info.inputSize === "native" ? Math.max(256, Math.min(2304, Math.round(Math.max(prepared.width, prepared.height) / 32) * 32)) : info.inputSize;
+      const sentLongSide = modelSendLongSide(info.inputSize, { w: prepared.width, h: prepared.height });
       const png = await sharp(prepared.rgb, { raw: { width: prepared.width, height: prepared.height, channels: 3 } }).resize(sentLongSide, sentLongSide, { fit: "inside", kernel: "lanczos3" }).png().toBuffer();
       const body = new FormData(); body.set("file", new Blob([new Uint8Array(png)], { type: "image/png" }), "source.png");
       try {

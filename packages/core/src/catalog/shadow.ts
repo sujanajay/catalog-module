@@ -64,7 +64,6 @@ export async function shadowLayer(p: Prepared, matte: Matte, box: BBox, plan: Ca
   const product = plan.productBox!;
   let projected: Buffer;
   if (darkness) {
-    // Transform the entire source shadow with exactly the product's scale and translation.
     const resizedW = Math.max(1, Math.round(p.width * plan.scale)), resizedH = Math.max(1, Math.round(p.height * plan.scale));
     const scaled = await sharp(darkness, { raw: { width: p.width, height: p.height, channels: 1 } }).resize(resizedW, resizedH).toColourspace("b-w").raw().toBuffer();
     projected = Buffer.alloc(plan.w * plan.h);
@@ -84,7 +83,6 @@ export async function shadowLayer(p: Prepared, matte: Matte, box: BBox, plan: Ca
     for (let y = 0; y < h; y++) for (let x = 0; x < product.w; x++) if (top + y >= 0 && top + y < plan.h) raw[(top + y) * plan.w + product.x + x] = Math.round(squash[y * product.w + x]! * intensity);
     projected = await sharp(raw, { raw: { width: plan.w, height: plan.h, channels: 1 } }).blur(sigma).toColourspace("b-w").raw().toBuffer();
   }
-  // The exposed border and mandatory margins stay clean for every channel.
   const band = borderBand(plan.w, plan.h), safe = plan.safeBox;
   const grey = Buffer.alloc(plan.w * plan.h);
   for (let y = 0; y < plan.h; y++) for (let x = 0; x < plan.w; x++) {

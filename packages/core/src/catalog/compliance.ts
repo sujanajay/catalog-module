@@ -32,7 +32,6 @@ export async function checkOutput(input: ComplianceInput): Promise<{ ok: boolean
       x0 = Math.min(x0, x); x1 = Math.max(x1, x); y1 = Math.max(y1, y);
       const inSafe = x >= safe.x && x < safe.x + safe.w && y >= safe.y && y < safe.y + safe.h;
       if (!inSafe) { outside = true; backgroundBad = true; }
-      // Zero-margin edges may contain foreground. Exposed parts of the band still must be clean.
       const product = plan.productBox;
       const foregroundAtEdge = input.foregroundMask?.length === w * h ? input.foregroundMask[y * w + x]! > 0 : product && x >= product.x && x < product.x + product.w && y >= product.y && y < product.y + product.h;
       const inBand = x < band.x || x >= w - band.x || y < band.y || y >= h - band.y;

@@ -1,11 +1,9 @@
-# Both targets are built from services/matting as their context.
 FROM python:3.12-slim AS cpu-deps
 ENV REMBG_HOME=/models U2NET_HOME=/models PIP_NO_CACHE_DIR=1 OMP_NUM_THREADS=4
 RUN apt-get update && apt-get install -y --no-install-recommends libgl1 libglib2.0-0 && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY requirements-cpu.txt .
 RUN pip install -r requirements-cpu.txt
-# Verify the installed CLI supports downloads, then bake every served model.
 RUN rembg d --help && rembg d birefnet-general birefnet-general-lite birefnet-hrsod bria-rmbg
 COPY app.py .
 

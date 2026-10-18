@@ -229,12 +229,11 @@ export async function renderToReport(args: RenderArgs) {
         for (const c of args.channels) outputs.push({ identifier: product.identifier, n: shot.n, channel: c, status: "failed", plan: { w: 0, h: 0, lowResolution: false, safeBox: { x: 0, y: 0, w: 0, h: 0 }, scale: 0, placedX: 0, placedY: 0, detailShot: false }, bytes: 0, quality: 0, flags: err instanceof UnsupportedSourceError ? ["unsupported"] : prepared?.flags ?? [], notes: [err instanceof Error ? err.message : String(err)], attention: null, compliance: { ok: false, failures: ["source"] }, matte: null });
       }
     }
+    const geometry = shots.flatMap((s) => { const box = bbox(s.matte.alpha, s.prepared.width, s.prepared.height); return box ? [{ box, source: { w: s.prepared.width, h: s.prepared.height } }] : []; });
     for (const c of args.channels) {
       const spec = channel(c);
-      const geometry = shots.flatMap((s) => { const box = bbox(s.matte.alpha, s.prepared.width, s.prepared.height); return box ? [{ box, source: { w: s.prepared.width, h: s.prepared.height } }] : []; });
       const uniformScale = spec.uniformScaleDefault && geometry.length ? planProduct(spec, geometry).uniformScale : undefined;
       for (const shot of shots) {
-        // Identifiers are kept in report labels; filesystem components cannot escape out.
         const name = `${encodeURIComponent(product.identifier).replace(/\./g, "%2E")}_${shot.n}.jpg`;
         const relative = `${c}/${name}`;
         const start = performance.now();

@@ -70,7 +70,6 @@ IAP_AUDIENCE=/projects/$PN/locations/$REGION/services/catalog-web
 WEB_ENV+=",IAP_AUDIENCE=$IAP_AUDIENCE,ALLOWED_HOSTED_DOMAIN=opptra.com"
 # The migrate job seeds this person as the first admin (idempotent; never undoes a later role change).
 MIGRATE_ENV="$WORKER_ENV,SEED_ADMIN_EMAIL=${SEED_ADMIN_EMAIL:-sujan@opptra.com}"
-# 07 adds OPENROUTER_API_KEY=openrouter-api-key:latest to the worker's secrets.
 SECRETS=DB_PASSWORD=catalog-db-password:latest
 NET=(--region="$REGION" --network=ila-vpc --subnet=ila-subnet --vpc-egress=private-ranges-only)
 
@@ -92,7 +91,6 @@ auth_flag() {
   fi
 }
 
-# --- Matting services: establish successful URLs before updating the worker -----------
 echo "==> matting CPU"
 gcloud run deploy catalog-matting --quiet --image="$AR/matting:$TAG" \
   --service-account="$MATTING_SA" --region="$REGION" "$(auth_flag catalog-matting "$REGION")" \
