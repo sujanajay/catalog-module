@@ -49,7 +49,8 @@ steps:
             -e REAL_DATA=1 -e REAL_DATA_DIR=/workspace/real-data \
             -e RENDER_REAL_OUT=/workspace/var/render05/full \
             -e MATTING_URL=http://localhost:8080 -e BUCKET=image-links-agent-assets \
-            -e GOOGLE_CLOUD_PROJECT=image-links-agent -e FULL_RENDER='${_FULL_RENDER}' node:22-bookworm bash -ceu '
+            -e GOOGLE_CLOUD_PROJECT=image-links-agent -e FULL_RENDER='${_FULL_RENDER}' \
+            -e UPLOAD_PREFIX='${_ARTIFACT_PREFIX}' node:22-bookworm bash -ceu '
               node -e "(async()=>{for(let i=0;i<120;i++){try{const r=await fetch(\"http://localhost:8080/health\",{signal:AbortSignal.timeout(5000)});if(r.ok){console.log(await r.text());return;}}catch{}await new Promise(r=>setTimeout(r,5000));}throw Error(\"CPU health timed out\");})().catch(e=>{console.error(e);process.exit(1);})"
               cli=/workspace/apps/worker/dist/catalog-local.js
               channels=noon,namshi,trendyol,styli,centrepoint,sixthstreet,vogacloset,amazon,shein
@@ -57,7 +58,7 @@ steps:
                 if [[ "$$brand" == anta ]]; then source=/workspace/real-data/new_resources_4/Images; type=footwear; else source="/workspace/real-data/new_resources_3/French Connection Final"; type=apparel_model; fi
                 out=/workspace/var/render05/preflight/$$brand
                 node "$$cli" collect --brand "$$brand" --from "$$source" --identifier-mode filename --out "$$out/collect"
-                node "$$cli" render --manifest "$$out/collect/manifest.json" --channels "$$channels" --matting http://localhost:8080 --model birefnet-general-lite --product-type "$$type" --limit 2 --out "$$out/render"
+                node "$$cli" render --manifest "$$out/collect/manifest.json" --channels "$$channels" --matting http://localhost:8080 --model birefnet-general-lite --product-type "$$type" --limit 2 --out "$$out/render" --upload "$${UPLOAD_PREFIX}preflight-outputs/$$brand/"
                 node -e "const r=JSON.parse(require(\"fs\").readFileSync(process.argv[1]));if(r.summary.outputs!==18||r.summary.compliant!==16||r.summary.skipped!==2||r.summary.failed!==0||r.outputs.some(o=>o.flags.includes(\"fallback_matte\")))throw Error(\"Real preflight failed\");console.log(JSON.stringify(r.summary));" "$$out/render/report.json"
               done
               node -e "const fs=require(\"fs\");const sets=[[\"anta\",630],[\"french-connection\",3280]];let ms=0;for(const [name,n]of sets){const r=JSON.parse(fs.readFileSync(\"/workspace/var/render05/preflight/\"+name+\"/render/report.json\"));ms+=n*((r.summary.msMatteAvgByTarget.cpu??0)+9*(r.summary.msRenderAvg??0));}const estimate={projectionOnly:true,sampledSourcesPerBrand:2,fullDatasetSeconds:ms/1000,estimatedBuildComputeUsd:ms/60000*0.0624,excluded:\"100-source general/lite benchmark, setup, collection, upload, variability\"};fs.writeFileSync(\"/workspace/var/render05/preflight-projection.json\",JSON.stringify(estimate,null,2));console.log(JSON.stringify(estimate));"
