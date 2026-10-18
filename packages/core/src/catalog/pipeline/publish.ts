@@ -68,6 +68,7 @@ export async function publishProduct(deps: PublishDeps, batchId: string, product
     const plan = planPublish({ ...product, channels:batch.channels, sources,outputs,live });
     const now = deps.now(), actor = batch.createdBy;
     let failure: string | null = null;
+    const landed = new Map<string, { channel: ChannelId; n: number; generation: string }>();
     const changes: { channel: ChannelId; n:number; oldGeneration:number|null; newGeneration:number; sha256:string }[] = [];
     for (const copy of plan.copies) {
       const o = copy.output;
@@ -77,9 +78,11 @@ export async function publishProduct(deps: PublishDeps, batchId: string, product
         const previous = live.find(output => output.channel === o.channel && output.n === o.n);
         const canReuse = previous?.renderKey === o.renderKey || Number(head.generation) !== copy.ifGenerationMatch;
         let written = canReuse && head.exists && head.crc32c === o.crc32c && head.size === o.bytes && head.generation ? { generation:head.generation,crc32c:head.crc32c } : await deps.storage.stageCopyToPublic(o.stagingUri,copy.objectPath,{ifGenerationMatch:copy.ifGenerationMatch});
+        if (Number(written.generation) !== copy.ifGenerationMatch) landed.set(o.id, {channel:o.channel,n:o.n,generation:String(written.generation)});
         let verified = await verifyPublic(o.publicUrl,{size:o.bytes,generation:written.generation,fetch:deps.fetch,sleep:deps.sleep});
         if (!verified.ok) {
           written = await deps.storage.stageCopyToPublic(o.stagingUri,copy.objectPath,{ifGenerationMatch:written.generation});
+          landed.set(o.id, {channel:o.channel,n:o.n,generation:String(written.generation)});
           verified = await verifyPublic(o.publicUrl,{size:o.bytes,generation:written.generation,fetch:deps.fetch,sleep:deps.sleep});
         }
         if (!verified.ok) throw new Error("Uploaded file could not be read back from the public link");
@@ -122,7 +125,9 @@ export async function publishProduct(deps: PublishDeps, batchId: string, product
       }
       for (const old of previousSources.filter(s=>!sources.some(n=>n.n===s.n))) { await deps.storage.setCustomTime(old.rawUri,now); await tx.update(catalogSourceImages).set({isCurrent:false,supersededAt:now}).where(eq(catalogSourceImages.id,old.id)); }
     }
-    const notes = [failure ? `Some images could not be published: ${failure}. Live images: ${changes.map(c=>`${c.channel} ${c.n}`).join(", ") || "previous images retained"}.` : "", removed.length ? `photos ${removed.map(o=>o.n).join(" and ")} removed in batch ${batch.name}` : "",...outputs.filter(o=>o.status === "skipped" && o.reason).map(o=>`${o.channel} img ${o.n}: ${o.reason}`)].filter(Boolean).join("; ");
+    const unverified = [...landed.values()].filter(copy => !changes.some(change => change.channel === copy.channel && change.n === copy.n));
+    const liveNotes = [changes.length ? `Verified live images: ${changes.map(c=>`${c.channel} ${c.n}`).join(", ")}.` : "", unverified.length ? `Public images replaced but unverified: ${unverified.map(c=>`${c.channel} img ${c.n} generation ${c.generation}`).join(", ")}.` : "", !changes.length && !landed.size ? "Live images: previous images retained." : ""].filter(Boolean).join(" ");
+    const notes = [failure ? `Some images could not be published: ${failure}. ${liveNotes}` : "", removed.length ? `photos ${removed.map(o=>o.n).join(" and ")} removed in batch ${batch.name}` : "",...outputs.filter(o=>o.status === "skipped" && o.reason).map(o=>`${o.channel} img ${o.n}: ${o.reason}`)].filter(Boolean).join("; ");
     await tx.update(catalogBatchProducts).set({change,notes}).where(where);
     await tx.update(catalogProducts).set({lastBatchId:batchId}).where(eq(catalogProducts.id,productId));
     return { outcome: failure ? "failed" : "published" };
