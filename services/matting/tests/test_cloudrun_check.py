@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 import urllib.error
 
-from PIL import Image
+from PIL import Image, ImageOps
 import pytest
 
 spec = importlib.util.spec_from_file_location("cloudrun_check", Path(__file__).with_name("cloudrun_check.py"))
@@ -14,8 +14,8 @@ probe = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(probe)
 
 
-@pytest.mark.parametrize("conversion", ["source", "white", "black", "inverted"])
-def test_convert_preserves_heic_content(monkeypatch, conversion, capsys):
+@pytest.mark.parametrize(("conversion", "matte"), [("source", "source"), ("white", "source"), ("black", "source"), ("inverted", "source"), ("source", "inverted")])
+def test_probe_preserves_foreground_and_background(monkeypatch, conversion, matte, capsys):
     url = "https://private-service.example"
 
     def request(endpoint, token=None):
@@ -38,12 +38,13 @@ def test_convert_preserves_heic_content(monkeypatch, conversion, capsys):
             if conversion in ("white", "black"):
                 response = Image.new("RGB", source.size, conversion)
             elif conversion == "inverted":
-                from PIL import ImageOps
                 response = ImageOps.invert(response)
             headers["x-input-format"] = "heic"
         else:
             response = Image.new("L", source.size)
             response.putpixel((128, 96), 255)
+            if matte == "inverted":
+                response = ImageOps.invert(response)
             headers["x-model"] = "birefnet-general"
             headers["x-input-size"] = "256x192"
         output = io.BytesIO()
@@ -53,9 +54,10 @@ def test_convert_preserves_heic_content(monkeypatch, conversion, capsys):
     monkeypatch.setattr(probe, "request", request)
     monkeypatch.setattr(probe, "identity_token", lambda audience: "offline-token")
     monkeypatch.setattr(probe, "upload", upload)
-    if conversion == "source":
+    if conversion == "source" and matte == "source":
         probe.check("cpu", url, "abc1234")
         assert json.loads(capsys.readouterr().out)["convert"] == "passed"
     else:
-        with pytest.raises(probe.CheckFailure, match="HEIC conversion pixels differ"):
+        message = "HEIC conversion pixels differ" if conversion != "source" else "mask foreground/background differ"
+        with pytest.raises(probe.CheckFailure, match=message):
             probe.check("cpu", url, "abc1234")

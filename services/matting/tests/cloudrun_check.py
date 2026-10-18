@@ -96,6 +96,7 @@ def check(target, url, version):
     headers, body = upload(url + "/matte?model=" + model, token, encoded.getvalue(), "source.png", "image/png")
     mask = png(headers, body, size)
     require(mask.mode == "L" and mask.getextrema()[0] < mask.getextrema()[1], "mask is not a varying grayscale image")
+    require(mask.getpixel((128, 96)) > 128 and mask.getpixel((16, 16)) < 128, "mask foreground/background differ")
     require(headers.get("x-model") == model and headers.get("x-input-size") == "256x192", "matte model/input headers differ")
     print(json.dumps({"target": target, "version": version, "models": sorted(MODELS), "oidc": "passed",
                       "unauthenticated": "rejected", "convert": "passed", "matte": "passed", "xMs": int(headers["x-ms"])}), flush=True)
