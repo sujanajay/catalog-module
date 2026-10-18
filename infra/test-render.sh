@@ -14,6 +14,6 @@ if [[ "$FULL_RENDER" == 1 ]]; then build_timeout=86400s; test_timeout=23h; else 
 run=${BASH_REMATCH[1]}
 [[ "$ARTIFACT_PREFIX" == "gs://image-links-agent-assets/catalog-test/$run/artifacts/" ]] || { echo 'Artifact prefix must match the same run' >&2; exit 2; }
 [[ "$MATTING_IMAGE" =~ ^asia-south1-docker.pkg.dev/image-links-agent/apps/matting:[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$ ]] || { echo 'Invalid private CPU image tag' >&2; exit 2; }
-gcloud builds submit --project=image-links-agent --region=asia-south1 --async \
+gcloud builds submit --project=image-links-agent --region=global --async \
   --config=services/matting/cloudbuild-render-test.yaml --timeout="$build_timeout" \
   --substitutions="_INPUT_PREFIX=$INPUT_PREFIX,_MATTING_IMAGE=$MATTING_IMAGE,_ARTIFACT_PREFIX=$ARTIFACT_PREFIX,_FULL_RENDER=$FULL_RENDER,_TEST_TIMEOUT=$test_timeout,_BUILD_TIMEOUT=$build_timeout" .
