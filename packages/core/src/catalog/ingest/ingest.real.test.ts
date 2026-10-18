@@ -16,6 +16,7 @@ import { afterAll, beforeAll, describe, expect, test } from "vitest";
 import type { Db } from "../../db/client";
 import { catalogBatches, catalogSourceImages, catalogUploads, type CatalogBatch, type CatalogUpload } from "../../db/schema";
 import { createTestDb } from "../../db/testing";
+import { pinnedFetch } from "../../safe-url";
 import * as storage from "../../storage";
 import { buildZip } from "../../../test-fixtures/catalog/ingest-a/builders";
 import { batchPrefix, parseShotName } from "../naming";
@@ -36,9 +37,10 @@ const CLI = fileURLToPath(new URL("../../../../../apps/worker/dist/catalog-local
 let db: Db;
 let close: () => Promise<void>;
 const fetches: string[] = [];
+/** The worker's fetch (02's DNS-pinned pinnedFetch), recording every request's method. */
 const recordingFetch: typeof fetch = async (input, init) => {
   fetches.push(`${init?.method ?? "GET"} ${String(input).split("?")[0]}`);
-  return fetch(input, init);
+  return pinnedFetch(input, init);
 };
 const deps: IngestDeps & { enqueue: never } = { storage, fetch: recordingFetch, enqueue: undefined as never };
 
@@ -73,6 +75,9 @@ async function ingest(batch: CatalogBatch): Promise<void> {
     }
   }
 }
+
+/** French Connection moves about 3 GB (two batches: upload, read, copy to raw/) and deletes about 13,000 objects one by one. */
+const FC_TIMEOUT_MS = 3 * 60 * 60_000;
 
 /** Deletes the batch's prefix and checks nothing is left. */
 async function cleanup(batch: CatalogBatch): Promise<void> {
@@ -160,10 +165,12 @@ describe.skipIf(!REAL)("ingest against the real bucket and image sets", () => {
       expect(preview2.overwrite.existingProducts).toHaveLength(preview1.kpis.products);
       expect(preview2.overwrite.existingProducts.every((p) => p.shotsToRemove.length === 0)).toBe(true);
     } finally {
-      await cleanup(first);
-      await cleanup(second);
+      // Both prefixes are cleaned even when the first cleanup fails.
+      const failures: unknown[] = [];
+      for (const batch of [first, second]) await cleanup(batch).catch((err: unknown) => failures.push(err));
+      expect(failures.map(String)).toEqual([]);
     }
-  });
+  }, FC_TIMEOUT_MS);
 
   test.skipIf(!existsSync(LINKS_DIR))("pasted Supabase links: the first 20 URLs of a delivery sheet, GET only", async () => {
     const sheets = (await readdir(LINKS_DIR)).filter((f) => /\.xlsx$/i.test(f)).sort();
