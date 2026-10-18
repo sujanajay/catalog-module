@@ -70,7 +70,7 @@ The normal `cloudbuild.yaml` also builds both images.
 
 ## Memory, startup and deployment
 
-Current deployment is conservatively 16 GiB, one resident CPU session, intra-op threads 4, concurrency 1,
+Current deployment is conservatively 16 GiB, one resident session per service, intra-op threads 4, concurrency 1,
 CPU 4 vCPU/max 20, GPU L4/4 vCPU/16 GiB/max 3, both min instances 0 and timeout 300s. GPU uses
 instance-based billing (`--no-cpu-throttling`) as Cloud Run requires. An 8 GiB/two-session LRU
 configuration is not assumed to fit without measurements.
@@ -81,9 +81,16 @@ the subsequent lite inference killed the 16 GiB container (`OOMKilled=true`). Id
 memory did not predict retained inference workspace. CPU now preloads only the default model,
 keeps one resident session, disables ONNX CPU arena and memory-pattern retention, and serializes
 selection, loading and inference. It releases the previous session before allocating its replacement.
-Health still advertises all four baked models. GPU retains four eager sessions.
-This changes the spec's initial four-eager or two-session alternatives based on the actual memory
-failure. Build `31868513-c828-4f71-848e-4934547b8a68` passed general/lite/general switching at
+Health still advertises all four baked models. GPU now uses the same single-resident-session policy.
+The deployed 100-photo benchmark `catalog-test-real-gktgl` subsequently exposed the same retention
+problem on GPU: 100 general requests completed (686.85 ms inference average), but the first lite
+request failed to allocate an 822,083,584-byte CUDA arena buffer. The client fell back to CPU and
+the benchmark correctly rejected that target. GPU now releases its previous session before loading
+a replacement and verifies CUDA on every newly loaded session. Actual post-fix GPU switching and
+the complete benchmark remain pending; mocked lifecycle tests do not establish GPU memory use.
+
+This changes the spec's initial four-eager or two-session alternatives based on actual memory
+failures. Build `31868513-c828-4f71-848e-4934547b8a68` passed general/lite/general switching at
 the same 16 GiB limit without an OOM kill: peak 8,052,648 KiB (7.68 GiB). Keep CPU at 16 GiB
 for headroom; this short smoke does not establish sustained or all-model peak memory.
 

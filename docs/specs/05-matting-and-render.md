@@ -429,12 +429,15 @@ Memory: actual build `2c0b868c-a590-4e8a-b187-e288f89ef079` showed that four eag
 used 4,622,376 KiB while idle, but consecutive general/lite inference exceeded 16 GiB. CPU therefore
 keeps one resident session, evicts it before a model switch, disables CPU arena and memory-pattern
 retention, and serializes loading and inference. All four baked models remain advertised. CPU
-stays at 16 GiB pending measured peak memory from general/lite/general switching. GPU keeps four
-eager sessions. The README records measurements and `deploy.sh` carries the matching `--memory`.
+stays at 16 GiB pending measured peak memory from general/lite/general switching. The deployed GPU
+benchmark later failed on its first lite request after 100 general requests: the CUDA arena could
+not allocate another 822,083,584 bytes. GPU therefore also keeps one resident session, releases it
+before loading a replacement, and verifies CUDA on every new session. Post-fix real GPU switching
+and the complete benchmark must pass before release. The README records measurements and `deploy.sh` carries the matching `--memory`.
 
 `app.py`:
 - On start: `SESSIONS = { name: new_session(name, sess_opts) for name in MATTE_MODELS.split(",") }`
-  (CPU instead preloads only the default and replaces its single resident session on demand)
+  (both targets instead preload only the default and replace their single resident session on demand)
   with `sess_opts.intra_op_num_threads = 4`; env `MATTE_MODELS` default
   `birefnet-general,birefnet-general-lite,birefnet-hrsod,bria-rmbg`, `DEFAULT_MATTE_MODEL` default
   `birefnet-general`, `MATTE_TARGET` `cpu | gpu` (set by the image); `INPUT_SIZES` maps each id to

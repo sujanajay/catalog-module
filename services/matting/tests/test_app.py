@@ -181,3 +181,38 @@ def test_missing_baked_model_fails_without_download(service, monkeypatch, tmp_pa
     with pytest.raises(RuntimeError, match="baked model missing"):
         module.load_sessions()
     create.assert_not_called()
+
+
+def test_gpu_releases_resident_workspace_before_model_switch(service, monkeypatch):
+    client, module, create, remove = service
+    monkeypatch.setattr(module, "TARGET", "gpu")
+    module.SESSIONS.clear()
+    refs = []
+
+    class Session:
+        inner_session = SimpleNamespace(get_providers=lambda: ["CUDAExecutionProvider", "CPUExecutionProvider"])
+
+    def factory(*args, **kwargs):
+        assert all(ref() is None for ref in refs), "previous GPU session still owns its workspace"
+        assert kwargs["providers"] == ["CUDAExecutionProvider", "CPUExecutionProvider"]
+        session = Session()
+        refs.append(weakref.ref(session))
+        return session
+
+    create.side_effect = factory
+    module.SESSIONS.update(module.load_sessions())
+    assert list(module.SESSIONS) == [module.DEFAULT_MODEL]
+    for name in ["birefnet-general", "birefnet-general-lite", "birefnet-general", "birefnet-hrsod", "bria-rmbg"]:
+        response = client.post(f"/matte?model={name}", files={"file": ("source.png", image_bytes())})
+        assert response.status_code == 200
+        assert list(module.SESSIONS) == [name]
+        assert len(client.get("/health").json()["models"]) == 4
+        remove.reset_mock()
+
+
+def test_gpu_rejects_cpu_only_replacement_session(service, monkeypatch):
+    client, module, _, _ = service
+    monkeypatch.setattr(module, "TARGET", "gpu")
+    response = client.post("/matte?model=birefnet-general-lite", files={"file": ("source.png", image_bytes())})
+    assert response.status_code == 500
+    assert not module.SESSIONS or "birefnet-general-lite" not in module.SESSIONS
