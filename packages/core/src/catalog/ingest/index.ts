@@ -367,24 +367,30 @@ export async function runIngest(
   }
 
   // Items still to read, from the cursor round to the start (a lost write is picked up again).
-  const doneBefore = doneCount(old);
-  const totalBefore = old?.items.length ?? 0;
   const total = manifest.items.length;
   const start = Math.min(Math.max(0, Number(body.cursor ?? 0) || 0), total);
   const order = [...Array(total).keys()].map((k) => (start + k) % Math.max(total, 1));
-  const pending = order.filter((i) => !manifest.results[itemKey(manifest.items[i]!)]);
-  const todo = pending.slice(0, deps.budgetItems ?? INGEST_BUDGET_ITEMS);
+  const unread = () => order.filter((i) => !manifest.results[itemKey(manifest.items[i]!)]);
+  const todo = unread().slice(0, deps.budgetItems ?? INGEST_BUDGET_ITEMS);
   const zips: ZipReaders = new Map();
   await mapLimit(todo, ITEM_CONCURRENCY, async (i) => {
     const item = manifest.items[i]!;
     manifest.results[itemKey(item)] = await readItem(item, deps, { prefix, uploadId: upload.id, zips });
   });
+  // Cloud Tasks delivers at least once, so another delivery of this upload may have saved while this
+  // one was reading: keep what it read, and count only what this save adds to the stored manifest.
+  const stored = await loadJson<UploadManifest>(deps, manifestPath(prefix, upload.id));
+  for (const item of manifest.items) {
+    const k = itemKey(item);
+    if (!manifest.results[k] && stored?.results[k]) manifest.results[k] = stored.results[k];
+  }
   await saveJson(deps, manifestPath(prefix, upload.id), manifest);
-  await bumpCollected(db, batch.id, doneCount(manifest) - doneBefore, total - totalBefore);
+  await bumpCollected(db, batch.id, doneCount(manifest) - doneCount(stored), total - (stored?.items.length ?? 0));
 
   const done = doneCount(manifest);
-  if (pending.length > todo.length) {
-    const cursor = String((todo[todo.length - 1]! + 1) % total);
+  const left = unread();
+  if (left.length) {
+    const cursor = String(left[0]);
     await deps.enqueue(INGEST_ROUTE, { batchId: batch.id, uploadId: upload.id, cursor });
     return { progress: { done, total, phase: "copying" }, outcome: `collected ${done} of ${total}; continuing at ${cursor}` };
   }

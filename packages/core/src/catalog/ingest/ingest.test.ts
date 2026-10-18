@@ -222,6 +222,44 @@ describe("runIngest", () => {
     expect(w.calls.customTime).toEqual([]);
   });
 
+  it("a late duplicate delivery keeps what the other deliveries read and counts nothing twice", async () => {
+    const w = fakeWorld();
+    const batch = await newBatch("duplicate delivery");
+    const files: Record<string, Buffer> = {};
+    for (let n = 1; n <= 6; n++) files[`D_${n}.jpg`] = await jpeg();
+    const uploadId = await folderUpload(w, batch, files);
+    await runIngest(db, deps(w, 2), { batchId: batch.id, uploadId });
+    const second = w.enqueued[0]!.body as { batchId: string; uploadId: string; cursor: string };
+
+    // Cloud Tasks delivers the second call twice. The late copy loads the manifest, then stalls
+    // reading its photos while the other copy and the third call finish the upload.
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    let stalled!: () => void;
+    const reached = new Promise<void>((r) => (stalled = r));
+    const slow: IngestDeps["storage"] = {
+      ...w.storage,
+      downloadBuffer: async (gsUri) => {
+        if (gsUri.endsWith(".jpg")) {
+          stalled();
+          await gate;
+        }
+        return w.storage.downloadBuffer(gsUri);
+      },
+    };
+    const late = runIngest(db, { ...deps(w, 2), storage: slow }, second);
+    await reached;
+    await runIngest(db, deps(w, 2), second);
+    expect((await runIngest(db, deps(w, 2), w.enqueued[1]!.body as never)).outcome).toBe("preview ready: 1 products, 6 photos");
+    release();
+    await late;
+
+    const manifest = JSON.parse(w.objects.get(`gs://${BUCKET}/${prefixOf(batch)}/derived/_ingest/${uploadId}/manifest.json`)!.buf.toString("utf8"));
+    expect(Object.keys(manifest.results)).toHaveLength(6);
+    expect((await batchRow(batch.id)).counts).toMatchObject({ collected: 6, collectTotal: 6, previewReady: true });
+    expect(w.enqueued).toHaveLength(2);
+  });
+
   it("a product list adds missing_images and not_in_sheet rows", async () => {
     const w = fakeWorld();
     const batch = await newBatch("with list");
