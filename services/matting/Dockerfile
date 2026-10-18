@@ -19,7 +19,7 @@ FROM cpu-deps AS cpu
 ARG GIT_SHA=dev
 ENV GIT_SHA=$GIT_SHA MATTE_TARGET=cpu
 COPY --from=cpu-tests /tests-passed /tests-passed
-RUN useradd -m app && chown -R app /app && chmod -R a-w /models
+RUN useradd -m app && chown -R app /app && chmod -R a+rX,a-w /models
 USER app
 EXPOSE 8080
 CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8080", "--workers", "1"]
@@ -46,7 +46,7 @@ FROM gpu-deps AS gpu
 ARG GIT_SHA=dev
 ENV GIT_SHA=$GIT_SHA MATTE_TARGET=gpu
 COPY --from=gpu-tests /tests-passed /tests-passed
-RUN useradd -m app && chown -R app /app && chmod -R a-w /models
+RUN useradd -m app && chown -R app /app && chmod -R a+rX,a-w /models
 USER app
 EXPOSE 8080
 CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8080", "--workers", "1"]
