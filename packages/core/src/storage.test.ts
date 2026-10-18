@@ -122,6 +122,11 @@ describe("GCS operations (fake client)", () => {
     expect(bucket).toHaveBeenCalledWith("other");
   });
 
+  it("uploadBuffer saves optional staging cache metadata without changing legacy defaults", async () => {
+    await uploadBuffer("catalog/uspa/b1/staging/A/noon/A_1.jpg", Buffer.from("x"), "image/jpeg", { cacheControl: PUBLIC_CACHE_CONTROL });
+    expect(save).toHaveBeenCalledWith(Buffer.from("x"), { contentType: "image/jpeg", resumable: false, metadata: { cacheControl: PUBLIC_CACHE_CONTROL } });
+  });
+
   it("signedUrl requests a v4 read url and clamps ttl to 7 days", async () => {
     const now = Date.now();
     expect(await signedUrl("gs://bkt/a.png", 30 * 86400)).toBe("https://signed.example/x");
