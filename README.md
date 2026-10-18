@@ -71,6 +71,40 @@ pnpm test
 tests run only with the flag: `REAL_DATA=1 pnpm test:real` (PowerShell:
 `$env:REAL_DATA = "1"; pnpm test:real`). One package only: `pnpm vitest run packages/core`.
 
+## Deployment and UI review
+
+From the repository root in Git Bash, `bash infra/deploy.sh` runs the per-brand smoke before
+building images or deploying. A failed smoke stops the deployment. Set `CATALOG_CHUNK_IMAGES`
+to change the default 25 source images per worker chunk. Set `COMPUTE_USD_PER_VCPU_SECOND`
+only when a measured compute price is available; otherwise compute cost remains unpriced.
+Existing images for the current commit are reused. `SKIP_BUILD=1 bash infra/deploy.sh` explicitly
+reuses them when rolling back from a checkout of an earlier commit. Cloud Run compares the
+service configuration, so a repeated deployment with identical images and settings should
+retain the same ready revision. Verify the revision names after both runs.
+
+Before merging spec 06, run `bash infra/deploy-preview.sh` from its feature checkout. This
+uses separate `catalog-web-preview` and `catalog-worker-preview` services and a
+`catalog-preview` task queue. It keeps the existing database schema and matting services.
+The web preview requires the same Opptra Google sign-in and roles as the main application;
+its IAP audience and worker task audience refer to the preview services. Minimum instances
+remain zero. The assets bucket allows signed browser uploads from both catalog addresses
+and retains other existing site origins. The script prints `WEB_URL`, `WORKER_URL` and
+`MATTING_URL`. Review acceptance batches must use the test namespace, never real product links.
+
+To record the browser acceptance run, use PowerShell in the repository root, with the address
+printed by the preview deployment:
+
+```powershell
+$env:WEB_URL = "https://catalog-web-preview-<project-number>.asia-south1.run.app"
+pnpm --filter @catalog/web human:login
+pnpm --filter @catalog/web human:test
+```
+
+The login command saves sign-in state in the ignored `apps/web/.playwright/` folder. The test
+configuration records every run in `apps/web/test-results/` and writes its HTML report to
+`apps/web/playwright-report/`. Re-run login if Google requests sign-in again. Spec 06 remains
+unmerged until the owner has reviewed the working UI.
+
 ## Repository layout
 
 ```

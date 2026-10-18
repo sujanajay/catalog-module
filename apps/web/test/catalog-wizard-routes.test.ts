@@ -38,6 +38,7 @@ beforeAll(async () => {
 });
 afterAll(async () => {setDbForTests(undefined);resetUserDeps();vi.unstubAllEnvs();await close();});
 beforeEach(() => {
+  vi.stubEnv("CATALOG_CHUNK_IMAGES", undefined);
   vi.clearAllMocks();vi.stubEnv("SKIP_IAP","1");vi.stubEnv("DEV_USER_EMAIL","operator@opptra.com");vi.stubEnv("BUCKET","test-assets");
   setUserDeps({roleLookup:async()=>"operator"});
   vi.mocked(storage.headObject).mockImplementation(async (uri) => {const o=objects.get(uri);return {exists:!!o,size:o?.buf.length??null,contentType:o?.mime??null,generation:o?"1":null,crc32c:null};});
@@ -69,6 +70,17 @@ async function collectBatch(id: string) {
 }
 
 describe("catalog wizard authorization and contracts",()=>{
+  it("uses the deployed chunk image setting when the operator starts a batch",async()=>{
+    vi.stubEnv("CATALOG_CHUNK_IMAGES","1");
+    const id=await newBatch();
+    await addPhoto(id,"CHUNK_A_1.heic");await addPhoto(id,"CHUNK_B_1.heic");
+    await collectBatch(id);await patch(request("PATCH",{channels:["noon"]}),ctx(id));
+    const shown=await (await preview(request("GET"),ctx(id))).json();
+    expect((await start(request("POST",{previewAt:shown.previewAt}),ctx(id))).status).toBe(200);
+    const chunks=await db.select().from(catalogChunks).where(eq(catalogChunks.batchId,id));
+    expect(chunks).toHaveLength(2);
+    expect(chunks.map((chunk)=>chunk.sourceImageIds?.length)).toEqual([1,1]);
+  });
   it("refuses every operator action for a viewer before reading bodies or touching storage",async()=>{
     setUserDeps({roleLookup:async()=>"viewer"});
     const id="00000000-0000-0000-0000-000000000001";
