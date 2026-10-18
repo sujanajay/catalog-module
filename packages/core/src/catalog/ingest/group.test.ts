@@ -11,7 +11,8 @@ import {
   type ItemDimensions,
   type ProductListRow,
 } from "./group";
-import { unsupportedMessage } from "./image-check";
+import { notImageMessage, unsupportedMessage } from "./image-check";
+import { linkStatuses } from "./product-list";
 import { sourceItemFromPath } from "./local-files";
 import type { GroupingResult, SourceItem } from "./types";
 import { nestedZipMessage } from "./zip";
@@ -272,6 +273,19 @@ describe("warningSentences", () => {
     const one = groupItems([file("Anta/A_1.jpg"), file("Anta/B_1.jpg"), file("C_1.jpg")], opts());
     expect(warningSentences(one, null, ["styli"])).toEqual([]);
     expect(warningSentences(one, null, ["noon"], { topLevelFolders: ["X", "Y"] })[0]!.detail).toContain("filed under this brand.");
+  });
+
+  it("keeps an identifier whose only files were rejected out of the not-in-list sentence and out of not_in_sheet", () => {
+    const pdf = file("notes.pdf");
+    const gp = groupItems([file("LISTED_1.jpg"), pdf], opts(), new Map([[pdf, notImageMessage("notes.pdf")]]));
+    const rows: ProductListRow[] = [{ identifier: "LISTED", ean: null, raw: {} }];
+    expect(warningSentences(gp, rows, ["noon"])).toEqual([
+      { headline: "1 files could not be read.", detail: "notes.pdf: is not an image. Fix them and use them in a new batch, or continue without them." },
+    ]);
+    expect([...linkStatuses(rows, gp)]).toEqual([["LISTED", "ok"]]);
+    // A product left out for its shot numbers still has photos, so it is named when not listed.
+    const gd = groupItems([file("LISTED_1.jpg"), file("DUP_1.jpg"), file("DUP-1.jpg")], opts());
+    expect(warningSentences(gd, rows, ["noon"]).map((w) => w.headline)).toContain("1 products have photos but are not in your product list: DUP.");
   });
 
   it("never lists HEIC files as unreadable", () => {

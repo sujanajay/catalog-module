@@ -38,6 +38,13 @@ export function isDuplicateReject(reason: string): boolean {
   return DUPLICATE_REJECT.test(reason) || NO_NUMBERS_REJECT.test(reason);
 }
 
+const SAME_PRODUCT_REJECT = / are the same product\. Keep one\.$/;
+
+/** Readable photos left out only because of their names (duplicate or missing shot numbers, two spellings). */
+function leftOutForItsName(reason: string): boolean {
+  return isDuplicateReject(reason) || SAME_PRODUCT_REJECT.test(reason);
+}
+
 /** Flags of a grouped shot for its version row (`numbering_gap` when its product had a gap). */
 export function shotFlags(item: SourceItem): OutputFlag[] {
   return item.warnings.some((w) => GAP_NOTE.test(w)) ? ["numbering_gap"] : [];
@@ -281,10 +288,10 @@ const fmt = (n: number) => n.toLocaleString("en-US");
  * linkStatuses names them), the identifiers with photos that no row matched (after token-containment
  * renames) and the size-row sentence.
  */
-function matchList(list: ProductListRow[], identifiers: string[], byMatchColumn: boolean): { listOnly: string[]; notInList: string[]; sizeSentence: string | null } {
+function matchList(list: ProductListRow[], identifiers: string[], withPhotos: Set<string>, byMatchColumn: boolean): { listOnly: string[]; notInList: string[]; sizeSentence: string | null } {
   const m = matchProductList(list, identifiers, { byMatchColumn });
   const finals = identifiers.map((id) => m.renamed.get(id) ?? id);
-  const notInList = distinct(finals.filter((id) => !m.byIdentifier.has(id)));
+  const notInList = distinct(identifiers.filter((id) => withPhotos.has(id)).map((id) => m.renamed.get(id) ?? id).filter((id) => !m.byIdentifier.has(id)));
   const seen = new Set(finals.map(normalizeKey));
   const listOnly: string[] = [];
   for (const row of m.unmatchedRows) {
@@ -332,9 +339,13 @@ export function warningSentences(
   extra: { brandName?: string; dimensions?: ItemDimensions; topLevelFolders?: string[]; byMatchColumn?: boolean } = {},
 ): { headline: string; detail: string }[] {
   const out: { headline: string; detail: string }[] = [];
-  const withPhotos = distinct([...grouped.products.keys(), ...grouped.rejected.map((r) => r.item.identifier).filter(Boolean)]);
+  // Every identifier seen, so a list row whose files were all unreadable is not also "no photos";
+  // only identifiers with readable photos can be "not in your product list" (an identifier whose
+  // files were all rejected, such as notes.pdf, belongs only in "files could not be read").
+  const seen = distinct([...grouped.products.keys(), ...grouped.rejected.map((r) => r.item.identifier).filter(Boolean)]);
+  const withPhotos = new Set([...grouped.products.keys(), ...grouped.rejected.filter((r) => r.item.identifier && leftOutForItsName(r.reason)).map((r) => r.item.identifier)]);
 
-  const match = list ? matchList(list, withPhotos, extra.byMatchColumn ?? false) : null;
+  const match = list ? matchList(list, seen, withPhotos, extra.byMatchColumn ?? false) : null;
   if (match?.listOnly.length) {
     out.push({
       headline: `${fmt(match.listOnly.length)} products have no photos.`,
