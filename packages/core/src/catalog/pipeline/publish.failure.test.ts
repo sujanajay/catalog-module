@@ -70,7 +70,8 @@ it("preserves previous live records and generation when a real storage generatio
   expect((await db.select().from(catalogOutputs).where(eq(catalogOutputs.id, s.output.id)))[0]).toMatchObject({ isLive: false, generation: null, status: "failed", reason: "Changed by another run. Start the batch again for this product." });
   const [pair] = await db.select().from(catalogBatchProducts).where(eq(catalogBatchProducts.batchId, s.batch.id));
   expect(pair!.notes).toContain("Changed by another run");
-  expect(pair!.notes).toContain("previous images retained");
+  expect(pair!.notes).not.toContain("previous images retained");
+  expect(pair!.notes).toContain("No replacements were verified");
   expect(pair!.notes).not.toContain("replaced but unverified");
   expect(await db.select().from(catalogProductEvents).where(eq(catalogProductEvents.batchId, s.batch.id))).toEqual([]);
 });
