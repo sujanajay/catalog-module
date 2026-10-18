@@ -123,6 +123,50 @@ describe("zipAdapter", () => {
     expect(() => reader.entryStream("nope.jpg")).toThrow("nope.jpg is not in the zip.");
   });
 
+  it("closes every range stream it opens, so no connection is left waiting (many entries at once)", async () => {
+    const { storage } = fakeRangeStorage({ [ZIP_URI]: archive });
+    const streams: Readable[] = [];
+    const tracked = {
+      ...storage,
+      // Small chunks, as a network response arrives, so a reader that stops pulling stalls it.
+      createRangeStream: (gsUri: string, start: number, end: number) => {
+        const slice = archive.subarray(start, end + 1);
+        const chunks = Array.from({ length: Math.ceil(slice.length / 64) }, (_, i) => slice.subarray(i * 64, (i + 1) * 64));
+        const s = Readable.from(chunks, { highWaterMark: 1 });
+        streams.push(s);
+        return s;
+      },
+    } as IngestDeps["storage"];
+    const reader = await openZipReader(tracked, ZIP_URI);
+    const paths = ["Anta/Shoes/ABC123_1.jpg", "Anta/Shoes/ABC123_2.jpg"];
+    const bufs = await Promise.all([...paths, ...paths].map((p) => readAll(reader.entryStream(p))));
+    expect(bufs.map((b) => b.length)).toEqual([1500, 800, 1500, 800]);
+    await new Promise((r) => setImmediate(r));
+    expect(streams.length).toBeGreaterThan(4);
+    // unzipper pulls only what it needs (entry reads are padded past the data); every range
+    // response must still be read to its end or closed, never left half read.
+    expect(streams.filter((s) => !s.destroyed && !s.readableEnded)).toEqual([]);
+  });
+
+  it("fails the entry stream when its range read fails, instead of an uncaught error", async () => {
+    const { storage } = fakeRangeStorage({ [ZIP_URI]: archive });
+    let failNext = false;
+    const flaky = {
+      ...storage,
+      createRangeStream: (gsUri: string, start: number, end: number) => {
+        if (!failNext) return storage.createRangeStream(gsUri, start, end);
+        return new Readable({
+          read() {
+            this.destroy(Object.assign(new Error("socket hang up"), { code: "ECONNRESET" }));
+          },
+        });
+      },
+    } as IngestDeps["storage"];
+    const reader = await openZipReader(flaky, ZIP_URI);
+    failNext = true;
+    await expect(readAll(reader.entryStream("Anta/Shoes/ABC123_1.jpg"))).rejects.toThrow("socket hang up");
+  });
+
   it("marks an entry over 40 MB with its sentence without reading it", async () => {
     // A stored entry claiming a huge size: only the central directory is ever read.
     const small = buildZip([{ path: "big_1.jpg", data: jpg(16) }]);
