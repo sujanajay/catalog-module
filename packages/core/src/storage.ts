@@ -385,19 +385,22 @@ export async function setCustomTime(gsUri: string, when: Date): Promise<void> {
 }
 
 /**
- * Delete every object under a `catalog-test/` prefix (either bucket); returns how many were deleted.
+ * Delete every current and noncurrent generation under a `catalog-test/` prefix (either bucket).
+ * Returns the number of deleted generations; bucket soft-delete policy is unchanged.
  * The only bulk delete in the codebase.
  */
 export async function deleteTestObjects(gsPrefixUri: string): Promise<number> {
   const { bucket, path } = parseGsUri(gsPrefixUri);
   assertTestPrefix(path);
   const b = getStorage().bucket(bucket);
-  const [files] = await b.getFiles({ prefix: path, autoPaginate: true });
+  const [files] = await b.getFiles({ prefix: path, autoPaginate: true, versions: true });
   let deleted = 0;
   for (const f of files) {
     assertTestPrefix(f.name);
+    const generation = f.metadata.generation;
+    if (generation === undefined) throw new Error("A versioned test-object listing did not include its generation.");
     try {
-      await withStorageRetry(f.name, () => b.file(f.name).delete());
+      await withStorageRetry(f.name, () => b.file(f.name, { generation }).delete());
       deleted++;
     } catch (err) {
       if (!isNotFound(err)) throw err;

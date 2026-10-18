@@ -15,6 +15,7 @@ await build({
     index: path.join(here, "src/index.ts"),
     migrate: path.join(here, "src/migrate.ts"),
     "catalog-local": path.join(here, "src/catalog-local.ts"),
+    "catalog-smoke": path.join(here, "src/catalog-smoke.ts"),
   },
   outdir: dist,
   bundle: true,

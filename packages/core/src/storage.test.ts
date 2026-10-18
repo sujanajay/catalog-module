@@ -313,6 +313,27 @@ describe("GCS operations (fake client)", () => {
   });
 
   describe("deleteTestObjects", () => {
+    it("removes current and noncurrent generations instead of only archiving the live object", async () => {
+      const name = "catalog-test/versioned-run/anta/ABC/noon/ABC_1.jpg";
+      const versions = new Set(["100", "101"]);
+      let current: string | undefined = "101";
+      const listVersions = vi.fn(async (options: { prefix: string; versions?: boolean }) => [[...versions]
+        .filter(generation => options.versions || generation === current)
+        .map(generation => ({ name, metadata: { generation } }))]);
+      const versionFile = vi.fn((_name: string, options?: { generation?: string }) => ({
+        delete: async () => {
+          if (options?.generation) versions.delete(options.generation);
+          else current = undefined; // GCS versioning archives the current object on an unscoped delete.
+        },
+      }));
+      setStorageClient({ bucket: () => ({ getFiles: listVersions, file: versionFile }) } as unknown as StorageLike);
+
+      const deleted = await deleteTestObjects("gs://image-links-agent-public/catalog-test/versioned-run/");
+      expect({ deleted, remainingGenerations: [...versions] }).toEqual({ deleted: 2, remainingGenerations: [] });
+      expect(listVersions).toHaveBeenCalledWith({ prefix: "catalog-test/versioned-run/", autoPaginate: true, versions: true });
+      expect(versionFile.mock.calls.map(call => call[1]?.generation)).toEqual(["100", "101"]);
+    });
+
     it("throws for a prefix outside catalog-test/ before listing", async () => {
       await expect(deleteTestObjects("gs://image-links-agent-public/catalog/uspa/")).rejects.toThrow(/catalog-test/);
       await expect(deleteTestObjects("gs://image-links-agent-assets/catalog-test/../catalog/")).rejects.toThrow(/catalog-test/);
@@ -320,11 +341,17 @@ describe("GCS operations (fake client)", () => {
       expect(del).not.toHaveBeenCalled();
     });
 
+    it("refuses a listing without a generation before an unscoped delete can archive live bytes", async () => {
+      getFiles.mockResolvedValueOnce([[{ name: "catalog-test/run1/a.jpg", metadata: {} }]]);
+      await expect(deleteTestObjects("gs://image-links-agent-public/catalog-test/run1/")).rejects.toThrow(/generation/);
+      expect(del).not.toHaveBeenCalled();
+    });
+
     it("deletes every object under the test prefix and counts them", async () => {
-      getFiles.mockResolvedValueOnce([[{ name: "catalog-test/run1/a.jpg" }, { name: "catalog-test/run1/b.jpg" }, { name: "catalog-test/run1/c.jpg" }]]);
+      getFiles.mockResolvedValueOnce([[{ name: "catalog-test/run1/a.jpg", metadata: { generation: "1" } }, { name: "catalog-test/run1/b.jpg", metadata: { generation: "2" } }, { name: "catalog-test/run1/c.jpg", metadata: { generation: "3" } }]]);
       del.mockResolvedValueOnce([{}]).mockRejectedValueOnce(apiError(404)).mockResolvedValueOnce([{}]);
       expect(await deleteTestObjects("gs://image-links-agent-public/catalog-test/run1/")).toBe(2);
-      expect(getFiles).toHaveBeenCalledWith({ prefix: "catalog-test/run1/", autoPaginate: true });
+      expect(getFiles).toHaveBeenCalledWith({ prefix: "catalog-test/run1/", autoPaginate: true, versions: true });
       expect(del).toHaveBeenCalledTimes(3);
     });
   });
