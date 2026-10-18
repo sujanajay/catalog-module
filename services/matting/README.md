@@ -83,15 +83,22 @@ keeps one resident session, disables ONNX CPU arena and memory-pattern retention
 selection, loading and inference. It releases the previous session before allocating its replacement.
 Health still advertises all four baked models. GPU retains four eager sessions.
 This changes the spec's initial four-eager or two-session alternatives based on the actual memory
-failure. Keep CPU at 16 GiB until the general/lite/general smoke establishes peak and stability.
+failure. Build `31868513-c828-4f71-848e-4934547b8a68` passed general/lite/general switching at
+the same 16 GiB limit without an OOM kill: peak 8,052,648 KiB (7.68 GiB). Keep CPU at 16 GiB
+for headroom; this short smoke does not establish sustained or all-model peak memory.
 
 Measurement procedure: Cloud Build switches CPU general/lite/general while all four models remain supported, captures `session_ready`
 logs with actual providers and process resident/high-water KiB, captures `sessions_ready startup_ms`,
 then executes the real smoke and `docker stats --no-stream`. The smoke prints version,
 wait-to-health milliseconds and per-model `x-ms`. Record these numbers in the execution report
 before accepting the final memory choice. App startup measures session loading; smoke wait includes
-container/process readiness. All-four memory, image sizes, startup and model timings: **pending
-Cloud Build**. No actual inference measurements are claimed by mocked tests.
+container/process readiness. The successful build measured session loading at 7,195 ms and
+wait-to-health at 64,094 ms. Synthetic general/lite/general requests took 25,509 / 13,925 / 19,279 ms
+(including model switching where needed); HEIC conversion took 3 ms. Both CPU and GPU image targets
+built, passed 13 Python tests each, and were published as tag `3d03413`. These are synthetic smoke
+measurements, not the required 100-photo benchmark. Actual L4 inference and memory, the full real
+datasets and image-size measurements remain pending. No actual inference measurements are claimed
+by mocked tests.
 
 `infra/deploy.sh` deploys CPU in asia-south1 and GPU in asia-southeast1 before updating worker URLs.
 Both are private under `catalog-matting@`; worker already has project-level run.invoker from
