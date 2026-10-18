@@ -204,9 +204,11 @@ export function matchProductList(list: ProductListRow[], identifiers: string[], 
 /**
  * The identifier a list-only product gets: the row's key, or its size-level base when the list is
  * size-level (a key with "/", or a list where other rows matched by size), so the sizes of one
- * colourway become one missing product.
+ * colourway become one missing product. With a match column chosen in step 2 the trailing `_<n>`
+ * is stripped, as the match itself strips it (`ZZZ_1` and `ZZZ_2` are the missing product `ZZZ`).
  */
-export function missingIdentifier(row: ProductListRow, sizeLevel: boolean): string {
+export function missingIdentifier(row: ProductListRow, sizeLevel: boolean, byMatchColumn = false): string {
+  if (byMatchColumn && SHOT_SUFFIX.test(row.identifier)) return row.identifier.replace(SHOT_SUFFIX, "");
   if (row.identifier.includes("/") || sizeLevel) return sizeBases(row.identifier)[0] ?? row.identifier;
   return row.identifier;
 }
@@ -215,23 +217,24 @@ export function missingIdentifier(row: ProductListRow, sizeLevel: boolean): stri
  * ok = in list and has images; missing_images = in list, no images; not_in_sheet = has images, not in
  * list. Keys are product identifiers after token-containment renames (see matchProductList.renamed);
  * shapes the upload does not contain are not reported missing. Without a product list every grouped
- * identifier is ok.
+ * identifier is ok. `opts.byMatchColumn` (optional, after the contract's parameters): the step 2
+ * match column was chosen, so the rules run in matchProductList's match-column order.
  */
-export function linkStatuses(list: ProductListRow[], grouped: GroupingResult): Map<string, LinkStatus> {
+export function linkStatuses(list: ProductListRow[], grouped: GroupingResult, opts: { byMatchColumn?: boolean } = {}): Map<string, LinkStatus> {
   const identifiers = [...grouped.products.keys()];
   const out = new Map<string, LinkStatus>();
   if (!list.length) {
     for (const id of identifiers) out.set(id, "ok");
     return out;
   }
-  const m = matchProductList(list, identifiers);
+  const m = matchProductList(list, identifiers, opts);
   for (const id of identifiers) {
     const final = m.renamed.get(id) ?? id;
     out.set(final, m.byIdentifier.has(final) ? "ok" : "not_in_sheet");
   }
   const seen = new Set([...out.keys()].map(normalizeKey));
   for (const row of m.unmatchedRows) {
-    const id = missingIdentifier(row, m.sizeRowsMatched > 0);
+    const id = missingIdentifier(row, m.sizeRowsMatched > 0, opts.byMatchColumn);
     const key = normalizeKey(id);
     if (seen.has(key)) continue;
     seen.add(key);

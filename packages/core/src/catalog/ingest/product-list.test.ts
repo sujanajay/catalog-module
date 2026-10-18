@@ -1,5 +1,6 @@
 import ExcelJS from "exceljs";
 import { describe, expect, it } from "vitest";
+import { warningSentences } from "./group";
 import { CANNOT_READ_IDENTIFIER } from "./links-sheet";
 import { MATCHED_INSIDE_FILE_NAMES, linkStatuses, matchProductList, productListDetected, readProductList } from "./product-list";
 import type { GroupingResult } from "./types";
@@ -105,6 +106,12 @@ describe("linkStatuses", () => {
     expect(m.sizeRowsMatched).toBe(0);
     expect(m.sizeSentence).toBeNull();
     expect(m.unmatchedRows.map((r) => r.identifier)).toEqual(["ZZZ_1"]);
+    // The statuses use the same match-column order and the missing product loses its _<n>, as the
+    // step 4 warning names it.
+    expect(linkStatuses(list, grouped("ABC123", "DEF456"), { byMatchColumn: true })).toEqual(new Map([["ABC123", "ok"], ["DEF456", "ok"], ["ZZZ", "missing_images"]]));
+    expect(warningSentences(grouped("ABC123", "DEF456"), list, [], { byMatchColumn: true })).toEqual([
+      { headline: "1 products have no photos.", detail: 'They are in your product list but no files matched: ZZZ. They will appear in the sheet as "missing images".' },
+    ]);
   });
 });
 

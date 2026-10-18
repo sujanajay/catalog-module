@@ -297,7 +297,7 @@ function matchList(list: ProductListRow[], identifiers: string[], withPhotos: Se
   const seen = new Set(finals.map(normalizeKey));
   const listOnly: string[] = [];
   for (const row of m.unmatchedRows) {
-    const id = missingIdentifier(row, m.sizeRowsMatched > 0);
+    const id = missingIdentifier(row, m.sizeRowsMatched > 0, byMatchColumn);
     const k = normalizeKey(id);
     if (!k || seen.has(k)) continue;
     seen.add(k);

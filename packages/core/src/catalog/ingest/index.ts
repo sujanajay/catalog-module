@@ -496,7 +496,7 @@ function assemble(manifests: UploadManifest[], lists: ListInput[], options: Batc
       }
       grouped.products = new Map([...renamed].sort(([a], [b]) => byText(a, b)));
     }
-    statuses = linkStatuses(list, grouped);
+    statuses = linkStatuses(list, grouped, { byMatchColumn });
     const eanByKey = new Map<string, string>();
     for (const row of list) if (row.ean) for (const k of rowKeys(row)) if (!eanByKey.has(k)) eanByKey.set(k, row.ean);
     for (const [id, rows] of m.byIdentifier) {
@@ -507,7 +507,7 @@ function assemble(manifests: UploadManifest[], lists: ListInput[], options: Batc
     }
     const missingRows = new Map<string, ProductListRow[]>();
     for (const row of m.unmatchedRows) {
-      const id = missingIdentifier(row, m.sizeRowsMatched > 0);
+      const id = missingIdentifier(row, m.sizeRowsMatched > 0, byMatchColumn);
       missingRows.set(normalizeKey(id), [...(missingRows.get(normalizeKey(id)) ?? []), row]);
     }
     for (const [id, status] of statuses) {
