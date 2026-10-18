@@ -5,10 +5,14 @@ import type { Db } from "../../db/client";
 import { catalogBatches, catalogBatchProducts, catalogChunks, catalogOutputs, catalogProductEvents, catalogProducts, catalogSourceImages, catalogUploads, type CatalogBatch } from "../../db/schema";
 import { channel, CHANNEL_ORDER } from "../channels";
 import type { SheetSpec } from "../sheet";
-import { CHANNEL_IDS, type ChannelId } from "../types";
+import { CHANNEL_IDS, type ChannelId, type LinkStatus, type ChangeKind, type SheetStatus } from "../types";
 import type { RecheckResult } from "../recheck/index";
 import { isDuplicateReject } from "../ingest/group";
 import type * as storage from "../../storage";
+export function batchSheetStatus(member: { linkStatus: LinkStatus; change: ChangeKind }): SheetStatus {
+  if (member.linkStatus === "missing_images") return "missing_images";
+  return member.change === "pending_attention" || member.change === "failed" ? "needs_attention" : member.linkStatus;
+}
 export interface NotRefreshedChannel { channel: ChannelId; lastBatchId: string; lastBatchName: string }
 export async function notRefreshedChannels(db:Db,batchId:string):Promise<NotRefreshedChannel[]> {
   const [batch] = await db.select().from(catalogBatches).where(eq(catalogBatches.id,batchId));
@@ -56,7 +60,7 @@ export async function buildReport(db:Db,batchId:string,extra:{recheck:RecheckRes
     const links:SheetSpec["rows"][number]["links"] = {};
     for (const output of live) { links[output.channel] ??= []; links[output.channel]![output.n-1]=output.publicUrl; }
     const times = live.flatMap(o=>o.publishedAt ? [+o.publishedAt]:[]);
-    return {brand:batch.brandName,identifier:product.identifier,optionIdStyleColor:product.optionIdStyleColor ?? "",opptraSkuIds:product.opptraSkuIds,links,status:pair.linkStatus === "missing_images" ? "missing_images":pair.change === "pending_attention" || pair.change === "failed" ? "needs_attention":pair.linkStatus,notes:[...new Set([pair.notes,...problems].filter(Boolean))].join("; "),change:pair.change,changedAt:times.length ? new Date(Math.max(...times)):null};
+    return {brand:batch.brandName,identifier:product.identifier,optionIdStyleColor:product.optionIdStyleColor ?? "",opptraSkuIds:product.opptraSkuIds,links,status:batchSheetStatus(pair),notes:[...new Set([pair.notes,...problems].filter(Boolean))].join("; "),change:pair.change,changedAt:times.length ? new Date(Math.max(...times)):null};
   });
   const selected = outputs.filter(o=>o.batchId===batchId), unchanged = pairs.reduce((n,{product})=>n+Math.max(0,sources.filter(s=>s.productId===product.id).length*batch.channels.length-selected.filter(o=>o.productId===product.id).length),0);
   const counts = {...batch.counts,verified:selected.filter(o=>o.status==="verified" && o.isLive).length+unchanged,needsAttention:selected.filter(o=>o.status==="needs_attention").length,attentionProducts:pairs.filter(p=>p.pair.change==="pending_attention").length,failed:selected.filter(o=>o.status==="failed").length,skipped:selected.filter(o=>o.status==="skipped").length,unchanged,recheckOk:extra.recheck.ok,recheckTotal:extra.recheck.total};

@@ -9,6 +9,9 @@ import { setDbForTests, type Db } from "../lib/db";
 import { resetUserDeps } from "../lib/user";
 import { addProductAlias, batchAttention, getProduct, removeProduct } from "../lib/catalog/products";
 import { searchBrandProducts } from "../lib/catalog/brands";
+import { writeLinksXlsx } from "@catalog/core/catalog/sheet";
+import { readSheetTable } from "@catalog/core/catalog/ingest/links-sheet";
+import { buildReport } from "@catalog/core/catalog/pipeline/report";
 import { batchDetails, batchExportUrl, batchSheet, exportBrand } from "../lib/catalog/exports";
 import { POST as aliasPost } from "../app/api/catalog/products/[id]/aliases/route";
 import { DELETE as productDelete } from "../app/api/catalog/products/[id]/route";
@@ -64,7 +67,7 @@ it("shows live marketplaces not refreshed before this batch has any finalized re
 });
 it("exports only the selected brand products and every live channel through existing writers",async()=>{
  await output();const uploadBuffer=vi.fn(async(path:string)=>`gs://private/${path}`);const signedUrl=vi.fn(async(uri:string)=>`signed:${uri}`);
- const result=await exportBrand("uspa",[productId],db,{uploadBuffer,signedUrl},new Date("2026-10-19T01:02:03Z"));expect(uploadBuffer).toHaveBeenCalledTimes(2);expect(uploadBuffer.mock.calls[0]![0]).toBe("catalog/uspa/exports/links-20261019-010203.xlsx");expect(result.url).toContain("signed:gs://private/");
+ const result=await exportBrand("uspa",[productId],db,{uploadBuffer,signedUrl},new Date("2026-10-19T01:02:03Z"));expect(uploadBuffer).toHaveBeenCalledTimes(2);expect(uploadBuffer.mock.calls[0]![0]).toMatch(/^catalog\/uspa\/exports\/[0-9a-f-]{36}\/links-20261019-010203.xlsx$/);expect(result.url).toContain("signed:gs://private/");
  await expect(exportBrand("other",[productId],db,{uploadBuffer,signedUrl})).rejects.toMatchObject({status:404});
 });
 it("signs the latest batch export for seven days and uses the specified missing-filled sentence",async()=>{
@@ -117,4 +120,50 @@ it("operator export and removal routes use real database rules and only fake sto
  const exported=await brandExport(request("POST",{productIds:[productId]}),{params:Promise.resolve({slug:"uspa"})});
  expect(exported.status).toBe(200);expect(await exported.json()).toEqual({url:"https://signed.example/links.xlsx"});expect(save).toHaveBeenCalledTimes(2);
  const removed=await productDelete(request("DELETE",{confirm:"ABC-123"}),context());expect(removed.status).toBe(204);expect(deleteObject).toHaveBeenCalledWith({ifGenerationMatch:7});expect(await db.select().from(catalogProducts)).toEqual([]);
+});
+
+
+it("keeps simultaneous brand selections in separate immutable XLSX and CSV objects",async()=>{
+ const {product:other}=await findOrCreateProduct(db,{brandSlug:"uspa",identifier:"OTHER",isTest:false,skus:null,actor});
+ await output();
+ const objects=new Map<string,Buffer>();
+ const uploadBuffer=vi.fn(async(path:string,buf:Buffer)=>{objects.set(`gs://private/${path}`,buf);return `gs://private/${path}`;});
+ const signedUrl=vi.fn(async(uri:string)=>uri);
+ const now=new Date("2026-10-19T01:02:03Z");
+ const [first,second]=await Promise.all([exportBrand("uspa",[productId],db,{uploadBuffer,signedUrl},now),exportBrand("uspa",[other.id],db,{uploadBuffer,signedUrl},now)]);
+ expect(first.url).not.toBe(second.url);
+ expect(objects.size).toBe(4);
+ for(const [result,identifier] of [[first,"ABC-123"],[second,"OTHER"]] as const){
+  const table=await readSheetTable(objects.get(result.url)!,"links.xlsx");
+  expect(table.rows[1]![1]).toBe(identifier);
+  expect(objects.get(result.url.replace(/xlsx$/,"csv"))!.toString()).toContain(identifier);
+  expect(result.url).toMatch(/\/links-20261019-010203.xlsx$/);
+ }
+});
+it("keeps a finalized batch preview equal to its saved download after a later publication",async()=>{
+ await output();
+ const initial=await batchSheet(batchId,db);
+ initial.rows[0]!.opptraSkuIds=["OLD-SKU","OLD-SKU-2"];
+ initial.rows[0]!.links.noon!.push(null,"https://example.com/old-third.jpg");
+ initial.rows[0]!.notes="Saved finalization note";
+ initial.rows[0]!.changedAt=new Date("2026-10-18T10:00:00Z");
+ const saved=await writeLinksXlsx(initial);
+ await db.update(catalogBatches).set({status:"done",sheetXlsxUri:"gs://private/old-links.xlsx"}).where(eq(catalogBatches.id,batchId));
+ const [later]=await db.insert(catalogBatches).values({name:"Later delivery",brandSlug:"uspa",brandName:"USPA",channels:["noon"],createdBy:actor}).returning();
+ await db.update(catalogOutputs).set({isLive:false});
+ await output({batchId:later!.id,publicUrl:"https://example.com/replacement.jpg",publishedAt:new Date("2026-10-19T10:00:00Z")});
+ const read=vi.fn(async()=>({buf:saved,mime:"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"}));
+ const details=await batchDetails(batchId,db,read);
+ expect(read).toHaveBeenCalledWith("gs://private/old-links.xlsx");
+ expect(details.sheet).toEqual(initial);
+});
+it("matches report statuses in the pre-finalization page for failed, held and missing products",async()=>{
+ await output();
+ for(const [change,linkStatus,expected] of [["failed","ok","needs_attention"],["pending_attention","ok","needs_attention"],["failed","missing_images","missing_images"]] as const){
+  await db.update(catalogBatchProducts).set({change,linkStatus}).where(eq(catalogBatchProducts.productId,productId));
+  const preview=await batchSheet(batchId,db);
+  const report=await buildReport(db,batchId,{recheck:{ok:0,total:0,failures:[]},exports:{xlsx:"x",csv:"c",report:"r",filledProductList:null,exportsMatch:true}});
+  expect(preview.rows[0]!.status).toBe(expected);
+  expect(preview.rows[0]!.status).toBe(report.sheet.rows[0]!.status);
+ }
 });
