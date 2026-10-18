@@ -13,7 +13,7 @@ steps:
         [[ "$$ARTIFACT_PREFIX" == "gs://image-links-agent-assets/catalog-test/$$run/artifacts/" ]]
         [[ "$$MATTING_IMAGE" =~ ^asia-south1-docker.pkg.dev/image-links-agent/apps/matting:[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$$ ]]
         [[ "$$FULL_RENDER" =~ ^[01]$$ ]]
-        if [[ "$$FULL_RENDER" == 1 ]]; then [[ "$$TEST_TIMEOUT" == 23h && "$$BUILD_TIMEOUT" == 86400s ]]; else [[ "$$TEST_TIMEOUT" == 15m && "$$BUILD_TIMEOUT" == 1200s ]]; fi
+        if [[ "$$FULL_RENDER" == 1 ]]; then [[ "$$TEST_TIMEOUT" == 20h && "$$BUILD_TIMEOUT" == 75600s ]]; else [[ "$$TEST_TIMEOUT" == 15m && "$$BUILD_TIMEOUT" == 1200s ]]; fi
         mkdir -p /workspace/real-data /workspace/var/render05
         for archive in anta french-connection; do
           gcloud storage cp "$${INPUT_PREFIX}$$archive.tar" "/tmp/$$archive.tar"
@@ -99,5 +99,5 @@ substitutions:
   _FULL_RENDER: '0'
   _TEST_TIMEOUT: 15m
   _BUILD_TIMEOUT: 1200s
-# Preflight default. infra/test-render.sh overrides this with --timeout=86400s only in full mode.
+# Preflight default. infra/test-render.sh overrides this with --timeout=75600s only in full mode.
 timeout: 1200s
