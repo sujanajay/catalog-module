@@ -12,6 +12,21 @@ if [[ -z "$existing" ]]; then
     --justification='One 8 CPU private test worker for a bounded catalog image verification run. No concurrent workers; scales to zero.' \
     --format='json(name,dimensions,quotaConfig,reconciling)'
 else
-  gcloud beta quotas preferences describe "$preference" --project=image-links-agent \
-    --format='json(name,dimensions,quotaConfig,reconciling)'
+  description=$(gcloud beta quotas preferences describe "$preference" --project=image-links-agent \
+    --format='json(name,service,quotaId,dimensions,quotaConfig,reconciling)')
+  printf '%s' "$description" | node -e '
+    const fs = require("node:fs");
+    const preference = JSON.parse(fs.readFileSync(0, "utf8"));
+    const mismatches = [];
+    if (preference.service !== "cloudbuild.googleapis.com") mismatches.push("service");
+    if (preference.quotaId !== "OngoingPrivatePoolBuildCPUsPerProjectPerRegionPerBuildOrigin") mismatches.push("quotaId");
+    if (![8, "8"].includes(preference.quotaConfig?.preferredValue)) mismatches.push("quotaConfig.preferredValue");
+    const dimensions = preference.dimensions ?? {};
+    if (dimensions.region !== "us-central1" || dimensions.build_origin !== "default" || Object.keys(dimensions).length !== 2) mismatches.push("dimensions");
+    if (mismatches.length) {
+      console.error("Existing quota preference differs from the fixed eight-CPU request: " + mismatches.join(", "));
+      process.exit(1);
+    }
+  '
+  printf '%s\n' "$description"
 fi
