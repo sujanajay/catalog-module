@@ -14,7 +14,8 @@ import { channel, backgroundFor } from "./channels";
 import { BG_TOLERANCE } from "./compliance";
 import { contactSheet } from "./contact-sheet";
 import { MattingClient } from "./matte";
-import { prepare, type RenderOutput } from "./render";
+import { bbox, prepare, renderSource, type RenderOutput } from "./render";
+import { ALPHA_BBOX_THRESHOLD, preservedDarkness, SHADOW_MIN_DARKNESS, shadowLayer } from "./shadow";
 import { CHANNEL_IDS, type ChannelId, type ProductType } from "./types";
 
 const REAL = process.env.REAL_DATA === "1";
@@ -188,4 +189,51 @@ describe.skipIf(!REAL)("real matting and all-channel rendering", () => {
     await writeFile(path.join(OUT, "benchmark.json"), JSON.stringify({ timings, gpu: GPU ? "measured" : "pending deployment or GPU quota" }, null, 2));
     if (!GPU) console.log("GPU benchmark pending: MATTING_GPU_URL is not set.");
   });
+
+  test("630 Anta sources: real footwear shadow decisions", { timeout: FULL_TIMEOUT }, async () => {
+    const { manifest } = await collect("anta-shadow-audit", sets[0]!.from);
+    const shots = manifest.products.flatMap((product) => product.shots.map((shot) => ({ ...shot, identifier: product.identifier })));
+    expect(shots).toHaveLength(630);
+    const target = GPU ? "gpu" : "cpu";
+    const client = new MattingClient({ services: [{ baseUrl: CPU, target: "cpu" }, ...(GPU ? [{ baseUrl: GPU, target: "gpu" as const }] : [])] });
+    expect((await client.health()).ok).toBe(true);
+    const rows: { identifier: string; n: number; preserved: boolean; sourceDarkness: number | null; layerMin: number }[] = [];
+    const contacts: { jpeg: Buffer; label: string }[] = [];
+    const samples = new Set(Array.from({ length: 12 }, (_, i) => Math.floor(i * shots.length / 12)));
+    for (const [index, shot] of shots.entries()) {
+      const prepared = await prepare(await readFile(shot.path), path.basename(shot.path), (buffer) => client.convert(buffer));
+      const matte = await client.matte(prepared, MODEL);
+      expect(matte.source).toBe("model");
+      expect(matte.target).toBe(target);
+      const box = bbox(matte.alpha, prepared.width, prepared.height);
+      expect(box).not.toBeNull();
+      const darkness = preservedDarkness(prepared, matte, box!, "footwear");
+      let sourceDarkness: number | null = null;
+      if (darkness) {
+        let sum = 0, pixels = 0;
+        for (let i = 0; i < darkness.length; i++) if (darkness[i] && matte.alpha[i]! <= ALPHA_BBOX_THRESHOLD) { sum += darkness[i]! / 255; pixels++; }
+        expect(pixels).toBeGreaterThan(0);
+        sourceDarkness = sum / pixels;
+        expect(sourceDarkness).toBeGreaterThan(SHADOW_MIN_DARKNESS);
+      }
+      const rendered = await renderSource({ prepared, matte, channel: "noon", shotNumber: shot.n, productType: "footwear" });
+      expect(rendered.status).toBe("ok");
+      expect(rendered.compliance.ok).toBe(true);
+      expect(rendered.flags.includes("shadow_synthesised")).toBe(!darkness);
+      expect(rendered.flags).not.toContain("no_shadow_source");
+      const shadow = await shadowLayer(prepared, matte, box!, rendered.plan, "footwear", backgroundFor("noon", shot.n));
+      expect(shadow.layer).not.toBeNull();
+      const layerMin = Math.min(...(await sharp(shadow.layer!).stats()).channels.map((item) => item.min));
+      expect(layerMin).toBeLessThan(255);
+      rows.push({ identifier: shot.identifier, n: shot.n, preserved: !!darkness, sourceDarkness, layerMin });
+      if (samples.has(index)) contacts.push({ jpeg: rendered.jpeg!, label: `${shot.identifier}_${shot.n}: ${darkness ? "preserved" : "synthesised"}` });
+      if (rows.length % 25 === 0) console.log(JSON.stringify({ shadowAuditProgress: rows.length, total: shots.length }));
+    }
+    const preserved = rows.filter((row) => row.preserved).length;
+    const summary = { target, model: MODEL, sources: rows.length, preserved, synthesised: rows.length - preserved };
+    await writeFile(path.join(OUT, "shadow-audit.json"), JSON.stringify({ summary, rows }, null, 2));
+    await writeFile(path.join(OUT, "shadow-audit-contact-sheet.jpg"), await contactSheet(contacts, 4));
+    console.log(JSON.stringify(summary));
+  });
+
 });
