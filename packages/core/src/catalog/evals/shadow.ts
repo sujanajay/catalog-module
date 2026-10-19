@@ -2,7 +2,7 @@
 // darker than the background. Where the product type allows one it must look like a contact shadow:
 // inside the spec 05 band, no straight hard edge, darkness falling off smoothly with distance from
 // the silhouette, never a slab. Where the product type forbids one, none may exist.
-import { dilate, distanceFrom, dropSpecks, inBox, longestRun, lumaAt, luma, shadowFeather, SPECK_PX } from "./image";
+import { dilate, distanceFrom, dropSpecks, longestRun, lumaAt, luma, shadowFeather, SPECK_PX } from "./image";
 import type { OutputContext } from "./context";
 import { judge, notRun, type CheckResult, type CheckSubject } from "./types";
 
