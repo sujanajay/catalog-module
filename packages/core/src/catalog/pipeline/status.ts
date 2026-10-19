@@ -12,12 +12,12 @@ export interface BatchState { state: "draft" | "collecting" | "processing" | "at
 export const COLLECT_STALL_MS = 10 * 60_000;
 export const COLLECT_STALLED_TEXT = "Collecting files stopped: nothing has moved for more than 10 minutes. Press Try again to hand the files to processing again.";
 /**
- * The processing total counts every photo and marketplace pair, while the wizard's "images will be made"
- * leaves out Styli skips and unchanged pairs; this clause names them so the two figures reconcile.
+ * The processing total is wizard step 4's "images will be made": it leaves out skipped pairs (too
+ * small for Styli, or removed) and unchanged pairs; this clause names them so nothing goes unmentioned.
  */
 function notMade(c: BatchCounts): string {
-  const parts = [c.skipped > 0 ? `${c.skipped} skipped` : "", c.unchanged > 0 ? `${c.unchanged} unchanged` : ""].filter(Boolean);
-  return parts.length ? `, including ${parts.join(" and ")}` : "";
+  const parts = [c.skipped > 0 ? `${c.skipped} skipped (too small for Styli or removed)` : "", c.unchanged > 0 ? `${c.unchanged} unchanged` : ""].filter(Boolean);
+  return parts.length ? `, not counting ${parts.join(" and ")}` : "";
 }
 export function deriveBatchState(input: { status: BatchStatus; counts: BatchCounts; source?: string; samples?: { at: Date; made: number }[]; now?: Date; updatedAt?: Date | string }): BatchState {
   const { status, counts: c } = input;
@@ -33,7 +33,9 @@ export function deriveBatchState(input: { status: BatchStatus; counts: BatchCoun
     const first = samples[0], last = samples.at(-1);
     const rate = first && last && +last.at > +first.at ? (last.made - first.made) / ((+last.at - +first.at) / 1000) : 0;
     const eta = rate > 0 ? Math.ceil(Math.max(0, c.outputs - made) / rate) : null;
-    return { ...result, state: "processing", pill: "Processing", listPill: `Processing ${made.toLocaleString("en")} of ${c.outputs.toLocaleString("en")}`, eta,...(status === "qa" ? {qualityLine:"Quality check running"}:{}), text: `${made} of ${c.outputs} ${plural(c.outputs, "image", "images")} made${notMade(c)}${eta === null ? "" : ` · about ${Math.ceil(eta / 60)} min left`}` };
+    // Skipped and unchanged pairs are not made, so they count on neither side: the figure is wizard step 4's "images will be made".
+    const planned = Math.max(0, c.outputs - c.skipped - c.unchanged), done = Math.min(planned, Math.max(0, made - c.skipped - c.unchanged));
+    return { ...result, state: "processing", pill: "Processing", made: done, total: planned, progress: planned ? Math.min(1, done / planned) : 0, listPill: `Processing ${done.toLocaleString("en")} of ${planned.toLocaleString("en")}`, eta,...(status === "qa" ? {qualityLine:"Quality check running"}:{}), text: `${done} of ${planned} ${plural(planned, "image", "images")} made${notMade(c)}${eta === null ? "" : ` · about ${Math.ceil(eta / 60)} min left`}` };
   }
   if (status === "done") {
     const capped = (c as BatchCounts & { qaCapped?: boolean }).qaCapped ? ` ${QA_CAP_BANNER}` : "";

@@ -23,7 +23,7 @@ import { assertTestPrefix, brandSlug } from "@catalog/core/catalog/naming";
 import { CHANNEL_IDS, IDENTIFIER_MODES, PRODUCT_TYPES, type ChannelId, type ProductType, type IdentifierMode, type UploadKind } from "@catalog/core/catalog/types";
 import { channel } from "@catalog/core/catalog/channels";
 import { MattingClient, matteFor } from "@catalog/core/catalog/matte";
-import { bbox, planProduct, prepare, renderSource, UnsupportedSourceError, type Matte, type Prepared, type RenderOutput } from "@catalog/core/catalog/render";
+import { planProduct, prepare, renderSource, shotGeometry, UnsupportedSourceError, type Matte, type Prepared, type RenderOutput } from "@catalog/core/catalog/render";
 import { contactSheet } from "@catalog/core/catalog/contact-sheet";
 import type { CatalogUpload } from "@catalog/core/db/schema";
 import { pinnedFetch } from "@catalog/core/safe-url";
@@ -229,15 +229,16 @@ export async function renderToReport(args: RenderArgs) {
         for (const c of args.channels) outputs.push({ identifier: product.identifier, n: shot.n, channel: c, status: "failed", plan: { w: 0, h: 0, lowResolution: false, safeBox: { x: 0, y: 0, w: 0, h: 0 }, scale: 0, placedX: 0, placedY: 0, detailShot: false }, bytes: 0, quality: 0, flags: err instanceof UnsupportedSourceError ? ["unsupported"] : prepared?.flags ?? [], notes: [err instanceof Error ? err.message : String(err)], attention: null, compliance: { ok: false, failures: ["source"] }, matte: null });
       }
     }
-    const geometry = shots.flatMap((s) => { const box = bbox(s.matte.alpha, s.prepared.width, s.prepared.height); return box ? [{ box, source: { w: s.prepared.width, h: s.prepared.height } }] : []; });
+    const geometry = shots.flatMap((s) => { const shot = shotGeometry(s.matte.alpha, s.prepared.width, s.prepared.height); return shot ? [shot] : []; });
     for (const c of args.channels) {
       const spec = channel(c);
-      const uniformScale = spec.uniformScaleDefault && geometry.length ? planProduct(spec, geometry).uniformScale : undefined;
+      const plan = geometry.length ? planProduct(spec, geometry) : undefined;
+      const uniformScale = spec.uniformScaleDefault ? plan?.uniformScale : undefined;
       for (const shot of shots) {
         const name = `${encodeURIComponent(product.identifier).replace(/\./g, "%2E")}_${shot.n}.jpg`;
         const relative = `${c}/${name}`;
         const start = performance.now();
-        const result = await renderSource({ prepared: shot.prepared, matte: shot.matte, channel: c, shotNumber: shot.n, productType: args.productType ?? "other", uniformScale, identifier: product.identifier, publicObjectPath: relative });
+        const result = await renderSource({ prepared: shot.prepared, matte: shot.matte, channel: c, shotNumber: shot.n, productType: args.productType ?? "other", uniformScale, canvas: plan?.canvas, identifier: product.identifier, publicObjectPath: relative });
         renderMs += performance.now() - start; renderCount++;
         const { jpeg, ...rest } = result;
         const row: ReportOutput = { ...rest, identifier: product.identifier, n: shot.n, channel: c, matte: { model: shot.matte.model, target: shot.matte.target, sentLongSide: shot.matte.sentLongSide, ms: shot.matte.ms } };

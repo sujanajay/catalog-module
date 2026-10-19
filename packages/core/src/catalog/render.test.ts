@@ -15,10 +15,11 @@ function fixture(width = 800, height = 800, box = { x: 200, y: 200, w: 400, h: 4
 }
 
 describe("render geometry", () => {
-  it("keeps the target aspect while satisfying both Trendyol minima", () => {
+  it("delivers Trendyol at exactly its accepted 1200x1800, flagging a small source as information", () => {
     const plan = planCanvas(CHANNELS.trendyol, { x: 0, y: 0, w: 100, h: 100 }, { w: 100, h: 100 }, {});
-    expect([plan.w, plan.h]).toEqual([600, 900]);
+    expect([plan.w, plan.h]).toEqual([1200, 1800]);
     expect(plan.lowResolution).toBe(true);
+    expect(plan.scale).toBe(12);
   });
   it("preserves the exact odd Styli height", () => {
     expect(planCanvas(CHANNELS.styli, { x: 0, y: 0, w: 2000, h: 2400 }, { w: 3000, h: 3000 }, {}).h).toBe(3123);

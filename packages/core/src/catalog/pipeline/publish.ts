@@ -3,7 +3,7 @@ import { and, eq, inArray, ne } from "drizzle-orm";
 import type { Db } from "../../db/client";
 import { catalogBatches, catalogBatchProducts, catalogOutputs, catalogProductEvents, catalogProducts, catalogSourceImages } from "../../db/schema";
 import * as storage from "../../storage";
-import { CHANNEL_RULES_VERSION } from "../channels";
+import { channel, CHANNEL_RULES_VERSION } from "../channels";
 import { assertWithinProduct, productPrefix, publicObjectPath } from "../naming";
 import { lockProducts } from "../products";
 import type { ChannelId, EventKind } from "../types";
@@ -14,6 +14,10 @@ export type Source = typeof catalogSourceImages.$inferSelect;
 export interface PublishDeps { db: Db; storage: Pick<typeof storage, "headObject" | "stageCopyToPublic" | "deletePublicObject" | "setCustomTime" | "getPublicBucketName">; fetch: typeof fetch; now: () => Date; sleep?: (ms:number) => Promise<void> }
 export function renderKey(input: { sourceSha256: string; channel: ChannelId; n: number; policyKey: string; rulesVersion?: string }): string {
   return createHash("sha256").update(`${input.sourceSha256}|${input.channel}|${input.rulesVersion ?? CHANNEL_RULES_VERSION}|${input.policyKey}|${input.n}`).digest("hex");
+}
+/** One output's sheet note, "<Channel label> img <n>: <reason>" (spec 06 5.6). The publish step and the report write the same words, so the report's de-duplication finds them. */
+export function outputNote(o: Pick<Output, "channel" | "n" | "reason" | "decision" | "decidedBy">): string {
+  return `${channel(o.channel).label} img ${o.n}: ${o.decision === "use_as_is" ? `kept as is by ${o.decidedBy}: ` : ""}${o.reason}`;
 }
 export interface PublishPlan { copies: { output: Output; objectPath: string; ifGenerationMatch: number }[]; deletes: { output: Output; objectPath: string; ifGenerationMatch: number }[]; kept: Output[] }
 export function planPublish(input: { brandSlug: string; pathKey: string; isTest: boolean; channels: ChannelId[]; sources: Pick<Source,"n">[]; outputs: Output[]; live: Output[] }): PublishPlan {
@@ -68,7 +72,7 @@ export async function publishProduct(deps: PublishDeps, batchId: string, product
     // publish that lands while the qa stage is still running must not copy unjudged images.
     const unjudged = (o: Output) => o.status === "staged" && o.decision === null && o.qaScores === null && !o.flags.includes("qa_sampled_out");
     if (missingPairs || pair?.flags.includes("duplicate_shot") || outputs.some(o => unjudged(o) || (!["staged","skipped","verified"].includes(o.status) && o.decision !== "use_as_is" && o.decision !== "remove" && o.decision !== "replaced"))) {
-      await tx.update(catalogBatchProducts).set({ change:"pending_attention", notes: [pair?.notes,missingPairs ? "Some photos could not be processed. Start this product again.":"",...outputs.filter(o => o.reason).map(o => `${o.channel} img ${o.n}: ${o.reason}`)].filter(Boolean).join("; ") }).where(where);
+      await tx.update(catalogBatchProducts).set({ change:"pending_attention", notes: [pair?.notes,missingPairs ? "Some photos could not be processed. Start this product again.":"",...outputs.filter(o => o.reason).map(outputNote)].filter(Boolean).join("; ") }).where(where);
       return { outcome:"held" };
     }
     const plan = planPublish({ ...product, channels:batch.channels, sources,outputs,live });
@@ -133,7 +137,7 @@ export async function publishProduct(deps: PublishDeps, batchId: string, product
     }
     const unverified = [...landed.values()].filter(copy => !changes.some(change => change.channel === copy.channel && change.n === copy.n));
     const liveNotes = [changes.length ? `Verified live images: ${changes.map(c=>`${c.channel} ${c.n}`).join(", ")}.` : "", unverified.length ? `Public images replaced but unverified: ${unverified.map(c=>`${c.channel} img ${c.n} generation ${c.generation}`).join(", ")}.` : "", !changes.length && !landed.size ? "No replacements were verified." : ""].filter(Boolean).join(" ");
-    const notes = [failure ? `Some images could not be published: ${failure}. ${liveNotes}` : "", removed.length ? `photos ${removed.map(o=>o.n).join(" and ")} removed in batch ${batch.name}` : "",...outputs.filter(o=>o.decision === "use_as_is" && o.reason).map(o=>`${o.channel} img ${o.n}: kept as is by ${o.decidedBy}: ${o.reason}`),...outputs.filter(o=>o.status === "skipped" && o.reason).map(o=>`${o.channel} img ${o.n}: ${o.reason}`)].filter(Boolean).join("; ");
+    const notes = [failure ? `Some images could not be published: ${failure}. ${liveNotes}` : "", removed.length ? `photos ${removed.map(o=>o.n).join(" and ")} removed in batch ${batch.name}` : "",...outputs.filter(o=>o.decision === "use_as_is" && o.reason).map(outputNote),...outputs.filter(o=>o.status === "skipped" && o.reason).map(outputNote)].filter(Boolean).join("; ");
     await tx.update(catalogBatchProducts).set({change,notes}).where(where);
     await tx.update(catalogProducts).set({lastBatchId:batchId}).where(eq(catalogProducts.id,productId));
     return { outcome: failure ? "failed" : "published" };

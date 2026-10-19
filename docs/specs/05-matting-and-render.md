@@ -185,6 +185,20 @@ Any change to the maths in this file that alters output bytes must bump `CHANNEL
    - planProduct: `uniformScale = min over shots of sFit(C_shot)` using each shot's own canvas; the
      caller passes it when `spec.uniformScaleDefault` is true (styli) and the shot is not a detail
      shot. There is no batch option for this; the channel table decides.
+   - One canvas per product and channel: planProduct also returns `canvas`, the largest canvas the
+     formula gives any of the product's shots on that channel (never above the target); every shot
+     of the product on that channel is rendered on it. `lowResolution` stays per shot.
+   - Trendyol: SPEC.md says accepted files are 1200x1800, so Trendyol is a fixed canvas: always
+     1200x1800, the product fitted even beyond 1.5x; `low_resolution` is then information only.
+   - Cut in source (`shotGeometry`): a side is cut when the product box edge lies within the white
+     border band (3% of the frame) and its outermost line, allowing for the matte's soft fade (1% of
+     the long side), holds a straight run of alpha >= 250 at least 25% of the box width (height for
+     the sides). The box is trimmed to that cut line, the cut side's margin becomes 0 and the
+     product is anchored to that canvas edge (bottom wins when top and bottom are both cut; centred
+     when left and right are both cut); other margins are unchanged. Flag `cut_in_source`
+     (information: sheet notes and report, never holds the product). Compliance accepts the flush
+     edge on the cut side only (`inside_safe_box`, `styli_anchor`, `noon_wide`). Headroom on
+     zero-margin channels stays 0: SPEC.md states no minimum headroom.
 5. Shadow decision rule (shadow.ts), evaluated per source after matting, in this order:
    1. `matte.source === "alpha_source"`: the file carries no shadow information. Synthesise (rule 3)
       only when the product type is one that synthesises and the channel allows a shadow on that

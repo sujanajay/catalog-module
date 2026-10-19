@@ -30,7 +30,7 @@ const SHEET: Row[] = [
     "660x900 (min) -> 1080x1480+, >=72 PPI, <=2 MB, 0.73 (3:4)"],
   ["namshi", "Namshi", "P1", [660, 900], [1080, 1480], [0.1, 0.1, 0, 0, "fraction"], "centre", undefined, 72, false, false,
     "= Noon rules"],
-  ["trendyol", "Trendyol", "P1", [600, 800], [1200, 1800], [0, 0, 0, 0, "fraction"], "centre", undefined, 96, false, false,
+  ["trendyol", "Trendyol", "P1", [600, 800], [1200, 1800], [0, 0, 0, 0, "fraction"], "centre", undefined, 96, true, false,
     "600x800 @72 (min) -> 1200x1800 @96, <=2 MB, 3:4, HTTPS, no spaces"],
   ["styli", "Styli", "P2", [2342, 3123], [2342, 3123], [450, 450, 150, 150, "px"], "bottom-centre", undefined, 300, true, true,
     "1200x1600 -> 2000x2667"],
@@ -66,7 +66,8 @@ describe("channel table", () => {
     expect(c.firstImageBackground).toBe(first);
     expect(c.dpi).toBe(dpi);
     expect(c.fixedCanvas).toBe(fixed);
-    expect(c.fixedCanvas).toBe(min[0] === target[0] && min[1] === target[1]);
+    // Fixed where min equals target, plus Trendyol: its accepted files are exactly 1200x1800 (SPEC.md).
+    expect(c.fixedCanvas).toBe((min[0] === target[0] && min[1] === target[1]) || id === "trendyol");
     expect(c.uniformScaleDefault).toBe(uniform);
     expect(c.sheetText).toBe(text);
   });

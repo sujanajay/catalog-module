@@ -12,8 +12,10 @@ it("uses singular copy for one product or link and plural otherwise",()=>{
   expect(done({outputs:2,verified:1,recheckOk:1,recheckTotal:1})).toMatchObject({pill:"1 link did not pass the independent re-check",listPill:"1 link needs a check"});
   expect(done({outputs:1,verified:1,recheckOk:1,recheckTotal:1}).text).toBe("All 1 image is live and passed every check. Nothing needs your attention.");
 });
-it("names skipped and unchanged pairs in the processing total so it reconciles with the wizard",()=>{
-  expect(deriveBatchState({status:"rendering",counts:{...EMPTY_BATCH_COUNTS,outputs:468,verified:100,skipped:52}}).text).toBe("152 of 468 images made, including 52 skipped");
+it("shows the batch page the same image count as wizard step 4 and names what it leaves out",()=>{
+  const state=deriveBatchState({status:"rendering",counts:{...EMPTY_BATCH_COUNTS,outputs:468,verified:100,skipped:52}});
+  expect(state).toMatchObject({made:100,total:416,listPill:"Processing 100 of 416",text:"100 of 416 images made, not counting 52 skipped (too small for Styli or removed)"});
+  expect(deriveBatchState({status:"rendering",counts:{...EMPTY_BATCH_COUNTS,outputs:20,verified:4,skipped:2,unchanged:8}}).text).toBe("4 of 10 images made, not counting 2 skipped (too small for Styli or removed) and 8 unchanged");
   expect(deriveBatchState({status:"rendering",counts:{...EMPTY_BATCH_COUNTS,outputs:10,verified:2}}).text).toBe("2 of 10 images made");
 });
 it("marks a collecting batch stalled after 10 minutes without progress, and only a collecting one",()=>{

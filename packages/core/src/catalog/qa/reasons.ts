@@ -32,6 +32,7 @@ export function flagDetails(flag: OutputFlag | "failed", ctx: ReasonContext = {}
     type_unknown:["We could not tell what kind of product this is, so the general treatment was used.","If the images look wrong, start a new batch with the product type chosen by hand."],
     no_shadow_source:["The original photo has no shadow that could be kept, so the product sits on the plain background without one.","Nothing to do; replace the photo if you want a shadow."],
     shadow_synthesised:["A shadow was added because the original photo had no shadow that could be kept.","Nothing to do."],
+    cut_in_source:["The original photo is already cut at the frame edge, so that edge sits flush with the edge of the image.","Nothing to do; ask the brand for an uncut photo if you want one."],
     passthrough:["The original already met this marketplace's rules, so it was only saved again in the right format.","Nothing to do."],
     alpha_source:["The original has a transparent background, so it was used as the cut-out directly.","Nothing to do."],
     qa_sampled_out:["This image was not selected for the quality-check sample.","Nothing to do."],
