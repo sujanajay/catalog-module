@@ -325,6 +325,9 @@ if [ "${CATALOG_PREVIEW:-0}" != 1 ]; then
   # Deployed here, never executed here: bash infra/catalog-scale-jobs.sh load | recheck ...
   SCALE_JOB_IMAGE="$AR/worker:$TAG" SCALE_JOB_ENV="$WORKER_ENV" SCALE_JOB_SECRETS="$SECRETS" \
     bash infra/catalog-scale-jobs.sh deploy
+  # 10: the output-quality eval suite (same image, OpenRouter key for the judge, LIVE_SMOKE only per
+  # execution). Deployed here, never executed here: bash infra/catalog-output-evals.sh run [--live]
+  EVALS_JOB_IMAGE="$AR/worker:$TAG" EVALS_JOB_ENV="$WORKER_ENV" EVALS_JOB_SECRETS="$JOB_SECRETS"     bash infra/catalog-output-evals.sh deploy
 else
   echo "==> jobs: SKIP (preview never changes the shared jobs)"
 fi
