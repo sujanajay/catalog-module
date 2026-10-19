@@ -24,6 +24,7 @@ import { deriveBatchState, QA_CAP_BANNER } from "@catalog/core/catalog/pipeline/
 import { strictestChannel } from "@catalog/core/catalog/qa/policy";
 import { findOrCreateProduct } from "@catalog/core/catalog/products";
 import { cannedQa } from "./qa-mock";
+import type { RepairOwnDefects } from "@catalog/core/catalog/qa/triage";
 vi.mock(import("@catalog/core/catalog/sheet"),async original=>{const module=await original();return {...module,compareXlsxCsv:vi.fn(module.compareXlsxCsv)};});
 let db:Db,close:()=>Promise<void>;
 // stageCopyToPublic reads the bucket names from the environment. Set directly (not vi.stubEnv) so the
@@ -355,17 +356,78 @@ it("spec07 renders into a queued QA delivery before publication",async()=>{
  expect(chunk).toMatchObject({stage:"qa",status:"queued"});
  expect(w.deps.enqueue).not.toHaveBeenCalledWith("/tasks/catalog/publish",expect.anything(),expect.anything());
 },60_000);
-it("spec07 per_source judges one output per source; a placement failure flags only the judged channel",async()=>{
- const w=world(),s=await seed(w,"qa-per-source",{channels:["noon","amazon"]});
- vi.mocked(w.deps.judgeOutput).mockImplementation(async input=>({scores:{complete_product:80,same_product:80,edge_quality:80,background_clean:80,no_text_or_watermark:80,orientation_ok:80,placement_ok:20,overall:500/7},verdict:"flag",reasons:["The product sits higher than the other angles."],isCollage:false,costUsd:0,calls:0,usage:{},model:input.model,flags:["placement"]}));
- for(let i=0;i<3;i++) expect((await handleChunkTask(w.deps,{chunkId:s.chunk.id})).httpStatus).toBe(200);
+const judgeScores=(extra:Partial<Record<string,number>>={})=>({complete_product:95,same_product:100,edge_quality:95,background_clean:95,no_text_or_watermark:95,orientation_ok:95,overall:95,...extra});
+type JudgePick={scores?:Record<string,number>;evidence?:Record<string,string>;flags?:string[]};
+const judgeWith=(pick:(input:Parameters<CatalogDeps["judgeOutput"]>[0])=>JudgePick):CatalogDeps["judgeOutput"]=>async input=>{
+ const chosen=pick(input);
+ return {scores:judgeScores(chosen.scores) as never,verdict:"pass",reasons:[],isCollage:false,costUsd:0,calls:1,usage:{},model:input.model,flags:(chosen.flags ?? []) as never,view:"side",evidence:chosen.evidence ?? {},wrongItem:{first:false,second:null,secondModel:null,confirmed:false}};
+};
+const judgePolicy={matteModel:"fixture",qaModel:"test/judge",qaModelSecond:"test/second",threshold:75,floor:60,qaMode:"per_source" as const,qaSampleRate:1,source:"default" as const};
+it("spec07 v2 placement never comes from the judge, and a photo flag applies to every channel",async()=>{
+ const w=world(),s=await seed(w,"qa-v2-placement",{channels:["noon","amazon"]});
+ vi.mocked(w.deps.resolvePolicy).mockResolvedValue(judgePolicy);
+ vi.mocked(w.deps.judgeOutput).mockImplementation(judgeWith(()=>({scores:{placement_ok:5},flags:["placement"]})));
+ expect((await run(w,s)).outcome).toBe("published");
  expect(w.deps.judgeOutput).toHaveBeenCalledTimes(1);
- const judged=strictestChannel(["noon","amazon"]),outputs=await db.select().from(catalogOutputs).where(eq(catalogOutputs.batchId,s.batch.id));
- const own=outputs.find(o=>o.channel===judged)!,copied=outputs.find(o=>o.channel!==judged)!;
- expect(vi.mocked(w.deps.judgeOutput).mock.calls[0]![0].channel).toBe(judged);
- expect(own.status).toBe("needs_attention");expect(own.flags).toContain("placement");expect(own.qaScores).toMatchObject({verdict:"flag",placement_ok:20});
- expect(copied.status).toBe("staged");expect(copied.flags).not.toContain("placement");expect(copied.qaScores).toMatchObject({verdict:"pass"});
- expect((await handlePublishTask(w.deps,{batchId:s.batch.id,productId:s.product.id})).outcome).toBe("held");
+ for(const o of await db.select().from(catalogOutputs).where(eq(catalogOutputs.batchId,s.batch.id))) {expect(o.flags).not.toContain("placement");expect(o.status).toBe("verified");}
+ const t=world(),text=await seed(t,"qa-v2-photo-flag",{channels:["noon","amazon"]});
+ vi.mocked(t.deps.resolvePolicy).mockResolvedValue(judgePolicy);
+ vi.mocked(t.deps.judgeOutput).mockImplementation(judgeWith(()=>({scores:{no_text_or_watermark:10},evidence:{text_or_watermark:"A price sticker sits on the box."}})));
+ expect((await run(t,text)).outcome).toBe("held");
+ expect(t.deps.judgeOutput).toHaveBeenCalledTimes(1);
+ const outputs=await db.select().from(catalogOutputs).where(eq(catalogOutputs.batchId,text.batch.id));
+ expect(outputs.map(o=>o.channel).sort()).toEqual(["amazon","noon"]);
+ for(const o of outputs) {expect(o.flags).toContain("text_or_watermark");expect(o).toMatchObject({status:"needs_attention",qaScores:{autoAction:"hold",holdCause:"photo_one",evidence:{text_or_watermark:{sentence:"A price sticker sits on the box.",model:"test/judge"}}}});}
+},60_000);
+it("spec07 v2 an output defect on one channel re-checks the photo's other channels and applies the strictest result",async()=>{
+ const w=world(),s=await seed(w,"qa-v2-recheck",{shots:["a","b","c","d"],channels:["noon","amazon"]});
+ vi.mocked(w.deps.resolvePolicy).mockResolvedValue(judgePolicy);
+ const judged=strictestChannel(["noon","amazon"]);
+ // The shadow block shows only to the judged channel's judge; the re-check of the other channel misses it.
+ vi.mocked(w.deps.judgeOutput).mockImplementation(judgeWith((input):JudgePick=>input.n===2 && input.channel===judged ? {scores:{background_clean:20},evidence:{leftover_background:"A grey block remains left of the shoe."}}:{}));
+ expect((await run(w,s)).outcome).toBe("published");
+ expect(vi.mocked(w.deps.judgeOutput).mock.calls.filter(call=>call[0].n===2).map(call=>call[0].channel).sort()).toEqual(["amazon","noon"]);
+ expect(vi.mocked(w.deps.judgeOutput).mock.calls.filter(call=>call[0].n!==2)).toHaveLength(3);
+ const second=await db.select().from(catalogOutputs).where(and(eq(catalogOutputs.batchId,s.batch.id),eq(catalogOutputs.n,2)));
+ for(const o of second) {
+  expect(o.flags).toContain("leftover_background");
+  expect(o).toMatchObject({status:"skipped",isLive:false,qaScores:{background_clean:20,autoAction:"drop",finalStatus:"skipped"}});
+  expect(o.reason).toBe("Some of the original background is still visible around the product. Left out automatically because this product has enough other good photos.");
+  expect((o.qaScores as {judgements:{role:string}[]}).judgements.map(j=>j.role).sort()).toEqual(["judge","recheck"]);
+ }
+},60_000);
+it("spec07 v2 drop-with-note and note-only flags keep the batch attention rate at 0, and the report says why",async()=>{
+ const w=world(),s=await seed(w,"qa-v2-notes",{shots:["a","b","c","d"]});
+ vi.mocked(w.deps.resolvePolicy).mockResolvedValue(judgePolicy);
+ vi.mocked(w.deps.judgeOutput).mockImplementation(judgeWith((input):JudgePick=>input.n===3 ? {scores:{edge_quality:40},evidence:{halo:"The heel edge shows a white fringe."}}:input.n===2 ? {scores:{complete_product:30},evidence:{complete_product:"The toe is cut off at the right edge of the photo."}}:{}));
+ expect((await run(w,s)).outcome).toBe("published");
+ const outputs=await db.select().from(catalogOutputs).where(eq(catalogOutputs.batchId,s.batch.id));
+ expect(outputs.find(o=>o.n===3)).toMatchObject({status:"skipped",qaScores:{autoAction:"drop"}});
+ expect(outputs.find(o=>o.n===2)).toMatchObject({status:"verified",isLive:true,qaScores:{autoAction:"note"},reason:"Part of the product or model looks cut at the frame edge in the original photo."});
+ expect(outputs.filter(o=>o.status==="needs_attention")).toHaveLength(0);
+ expect((await handleFinalizeTask(w.deps,{batchId:s.batch.id})).outcome).toBe("done");
+ const [batch]=await db.select().from(catalogBatches).where(eq(catalogBatches.id,s.batch.id));
+ expect(batch!.counts.attentionProducts).toBe(0);
+ const report=JSON.parse(w.objects.get(batch!.reportUri!)!.buf.toString());
+ expect(report.qa).toMatchObject({attentionRate:0,productsHeld:0,products:1,judgedOutputs:4,autoActions:{drop:1,note:1,hold:0,none:2}});
+ const entries=report.products[0].outputs as {n:number;qa:Record<string,unknown>}[];
+ const dropped=entries.find(e=>e.n===3)!.qa;
+ expect(dropped).toMatchObject({scores:{edge_quality:40},thresholds:{edge_quality:75,complete_product:60},evidence:{halo:{sentence:"The heel edge shows a white fringe.",model:"test/judge"}},model:"test/judge",autoAction:"drop",finalStatus:"skipped"});
+ expect(entries.every(e=>e.qa && "scores" in e.qa && "thresholds" in e.qa && "autoAction" in e.qa && "finalStatus" in e.qa)).toBe(true);
+ const sheet=(await workbookCsvSheets(w.objects.get(batch!.sheetXlsxUri!)!.buf))[0]!.csv;
+ expect(sheet).toContain("Noon img 3: The edge of the product looks rough");
+ expect(sheet).toContain("Noon img 2: Part of the product or model looks cut");
+},60_000);
+it("spec07 v2 the re-render extension point runs before triage and a repaired output is published",async()=>{
+ const w=world(),s=await seed(w,"qa-v2-repair");
+ vi.mocked(w.deps.resolvePolicy).mockResolvedValue(judgePolicy);
+ vi.mocked(w.deps.judgeOutput).mockImplementation(judgeWith(()=>({scores:{edge_quality:30}})));
+ w.deps.repairOwnDefects=vi.fn<RepairOwnDefects>(async candidates=>{
+  for(const c of candidates) await db.update(catalogOutputs).set({status:"staged",flags:[]}).where(eq(catalogOutputs.id,c.outputId));
+  return new Set(candidates.map(c=>c.outputId));
+ });
+ expect((await run(w,s)).outcome).toBe("published");
+ expect(w.deps.repairOwnDefects).toHaveBeenCalledWith([expect.objectContaining({n:1,channel:"noon",flags:expect.arrayContaining(["halo"])})]);
 },60_000);
 it("spec07 a spending cap hit before QA marks outputs qa_cap, completes the chunk and shows the banner",async()=>{
  const w=world(),s=await seed(w,"qa-cap");
