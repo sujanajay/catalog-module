@@ -151,6 +151,40 @@ that cannot see the other angles). The judge now works like this:
   opinion, `autoAction`, `holdCause`, `finalStatus`), and the batch carries `qa.attentionRate`
   (held products over products, target 0). Model ids stay out of operator copy.
 
+### 4.0a Judge views amendment (quality gate 2, 2026-10-20; supersedes conflicting lines above)
+
+Quality gate 2 held single briefs out of a 3-pack, size charts and a tights packshot as "different
+product", flagged leftover background on a clean render, gave one photo eight flags, and passed two
+close-ups whose product the cut-out had removed. The judge now works like this:
+
+- Same product (`wrong_item` false, stated in the prompt): a single item out of a multipack or set,
+  a packshot or flat photo against the product worn on a model or on legs, a size chart, care label,
+  measurement guide or infographic of the listing, a detail or close-up of any part, and exactly the
+  same design in another colour. `wrong_item` is true only for another category of product or a
+  clearly different design, and still needs the second judge (4.0).
+- `view` adds `chart` (size chart, measurement guide, care graphic, any mostly-text image). A chart
+  carries the flag `chart_image` only (no product check applies; scores read 100), asks no second
+  judge, and triage always leaves it out with the note "This photo is a size chart or a text-only
+  image, so it was left out of the marketplace images. Nothing to do." It is never held, whatever its
+  position; photo 1 is the lowest photo that is not a chart. The product-type classifier also returns
+  `chart: true` for such a photo: a property of that photo, never a product flag, so the caller must
+  not copy it to the other photos (the matte stage does not act on it yet).
+- New output dimension `product_intact` (image 2 still shows all of the product image 1 shows; a logo
+  or label alone is not the product), line `threshold`, flag `product_removed`. It is one of our own
+  defects (`JUDGED_DEFECT_FLAGS`, so `OWN_DEFECT_FLAGS`): it feeds `repairOwnDefects` and the ladder
+  (4.6a), then triage drops or holds it; never published with a note, never a direct hold. Stored
+  scores without it (older judgements, canned judges) read it as 100 (`scoreOf`).
+- `leftover_background` counts only when the first judge's evidence sentence says where the leftover
+  is and the second judge (`qaModelSecond`) also scores `background_clean` under its line; otherwise
+  `background_clean` is stored at the higher of the two scores, at least its line. One second call
+  answers both `wrong_item` and the leftover. Re-checks of other channels and ladder re-judges ask the
+  second judge for the leftover only (`wrongItemCheck: false`).
+- Only checks that actually failed raise flags: every judged score is required in the reply (a
+  partial reply is asked again once, naming the missing scores, then `qa_unavailable`), never read as
+  0. Flags and reasons are ordered worst first (`FLAG_SEVERITY` in `reasons.ts`); an attention card
+  lists its worst photo first, leads with its main problem and shows at most three problem sentences
+  per photo (`MAX_REASONS_PER_PHOTO`); the report keeps every flag and score.
+
 ### 4.1 Dimensions, thresholds, verdict, flags
 
 Dimensions (0 to 100 each, coerced and clamped by `normalizeScores`; a missing dimension becomes 0

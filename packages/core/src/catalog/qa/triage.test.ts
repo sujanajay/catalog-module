@@ -45,6 +45,24 @@ describe("QA triage: hard holds only", () => {
   const capped = out(3, ["qa_cap"]);
   expect(action([out(1), out(2), capped], capped)).toMatchObject({action:"hold",cause:"unchecked"});
  });
+ it("leaves a size chart out with a note whatever its position, and photo 1 is the first real photo", () => {
+  const chartLast = out(3, ["chart_image"]);
+  expect(action([out(1), out(2), chartLast], chartLast)).toMatchObject({action:"drop",flags:["chart_image"]});
+  // Photo 1 a chart, or the only other photo a chart: still left out, never held.
+  const chartFirst = out(1, ["chart_image"]), two = out(2, ["text_or_watermark"]), three = out(3);
+  const decisions = triageProduct([chartFirst, two, three]);
+  expect(decisions.get(chartFirst.id)).toMatchObject({action:"drop"});
+  // Photo 2 is now photo 1, so its problem holds as photo 1 would.
+  expect(decisions.get(two.id)).toMatchObject({action:"hold",cause:"photo_one"});
+  const lone = out(1, ["chart_image"]);
+  expect(action([lone], lone)).toMatchObject({action:"drop"});
+ });
+ it("product_removed is our own defect: after the re-render loop it is dropped or held, never published with a note", () => {
+  const removed = out(3, ["product_removed"]);
+  expect(action([out(1), out(2), removed], removed)).toMatchObject({action:"drop",flags:["product_removed"]});
+  const few = out(2, ["product_removed"]);
+  expect(action([out(1), few], few)).toMatchObject({action:"hold",cause:"not_publishable"});
+ });
  it("judges each channel on its own good photos and skips decided outputs", () => {
   const styli = out(2, ["failed_compliance"], {channel:"styli"}), decided = out(2, ["halo"], {decision:"use_as_is",status:"staged"});
   const outputs = [out(1, [], {channel:"styli"}), styli, out(3, [], {channel:"styli"}), out(4, [], {channel:"styli"}), out(1), decided];

@@ -4,7 +4,7 @@
 // passed is a false positive of the judge and fails on its own id; a photo-level flag must be the
 // same on every channel of that photo; placement is never the judge's call; every product leaves
 // the batch with a real product type and model photos never get a synthesised shadow.
-import { DIMENSION_FLAGS, QA_DIMENSIONS } from "../qa/judge";
+import { DIMENSION_FLAGS, QA_DIMENSIONS, scoreOf } from "../qa/judge";
 import type { ChannelId, OutputFlag } from "../types";
 import { judge, notRun, type CheckResult, type CheckSubject, type Expectation } from "./types";
 
@@ -117,7 +117,7 @@ export function checkAttention(input: AttentionInput): AttentionSummary {
     const product = input.products.find(p => p.identifier === o.identifier);
     if (product?.expect.attention) continue;
     const who: CheckSubject = { identifier: o.identifier, n: o.n, channel: o.channel };
-    const lowest = QA_DIMENSIONS.map(d => [d, Number(scores[d] ?? 0)] as const).sort((a, b) => a[1] - b[1])[0]!;
+    const lowest = QA_DIMENSIONS.map(d => [d, scoreOf(scores, d)] as const).sort((a, b) => a[1] - b[1])[0]!;
     const reasons = Array.isArray(scores.reasons) ? (scores.reasons as unknown[]).map(String).join(" ") : "";
     if (o.flags.includes("different_product") && o.n > 1 && !(product?.planted && product.planted.n === o.n)) results.push(judge(false, "attention.judge_false_same_product", A, who, `same_product ${Number(scores.same_product ?? 0)}`, `>= ${input.threshold}`, "score", `The judge said image ${o.n} does not match photo 1, but it is a sole, back, inside, detail or on-model view of the same golden product. ${reasons}`.trim()));
     if (input.deterministicPass.has(outputKey(o.identifier, o.channel, o.n)) && !(product?.planted && product.planted.n === o.n)) results.push(judge(false, "attention.judge_false_positive", A, who, `${lowest[0]} ${lowest[1]}`, `>= ${input.threshold}`, "lowest dimension", `The judge flagged an output every deterministic check passed (${lowest[0]} ${lowest[1]}). ${reasons}`.trim()));

@@ -47,7 +47,7 @@ function world() {
   const base=workerCatalogDeps(db);
   const deps:CatalogDeps={...base,sleep:async()=>{},fetch,now:()=>new Date("2026-01-01T00:00:00Z"),log:()=>{},enqueue:vi.fn(async()=>"task"),resolvePolicy:vi.fn<CatalogDeps["resolvePolicy"]>(async()=>({matteModel:"fixture",qaModel:"",threshold:75,floor:60,qaMode:"per_source",qaSampleRate:1,source:"default"})),
     storage:{...storage,getBucketName:()=>"assets",getPublicBucketName:()=>"public",uploadBuffer:upload,downloadBuffer:async uri=>{const o=objects.get(uri);if(!o)throw new Error(`No object ${uri}`);return {buf:o.buf,mime:o.mime};},headObject:async uri=>{const o=objects.get(uri);return o ? {exists:true,size:o.buf.length,contentType:o.mime,generation:o.generation,crc32c:o.crc32c}:{exists:false,size:null,contentType:null,generation:null,crc32c:null};},stageCopyToPublic:copy,deletePublicObject:remove,setCustomTime:vi.fn(async()=>{})},
-    judgeOutput:vi.fn<CatalogDeps["judgeOutput"]>(async(input)=>({scores:{complete_product:95,same_product:95,edge_quality:95,background_clean:95,no_text_or_watermark:95,orientation_ok:95,placement_ok:95,overall:95},verdict:"pass",reasons:[],isCollage:false,costUsd:0,calls:0,usage:{},model:input.model,flags:[]})),
+    judgeOutput:vi.fn<CatalogDeps["judgeOutput"]>(async(input)=>({scores:{complete_product:95,same_product:95,edge_quality:95,background_clean:95,no_text_or_watermark:95,orientation_ok:95,product_intact:95,placement_ok:95,overall:95},verdict:"pass",reasons:[],isCollage:false,costUsd:0,calls:0,usage:{},model:input.model,flags:[]})),
     classifyProductType:vi.fn<CatalogDeps["classifyProductType"]>(async()=>({type:"footwear",confidence:1,costUsd:0,calls:0,usage:{},flags:[]})),
     matting:{...base.matting,health:vi.fn(async()=>({ok:true,models:[{id:"fixture",inputSize:1024,target:"cpu"}],default:"fixture",versions:{cpu:null,gpu:null}})),convert:base.matting.convert.bind(base.matting)} as unknown as CatalogDeps["matting"],
     prepare:vi.fn(async(buf)=>({width:800,height:800,rgb:Buffer.alloc(800*800*3,buf[3] ?? 0),alphaSource:null,background:{uniform:true,color:[255,255,255] as [number,number,number],stdev:0},flags:[],sourceMime:"image/jpeg"})),
@@ -357,10 +357,10 @@ it("spec07 renders into a queued QA delivery before publication",async()=>{
  expect(w.deps.enqueue).not.toHaveBeenCalledWith("/tasks/catalog/publish",expect.anything(),expect.anything());
 },60_000);
 const judgeScores=(extra:Partial<Record<string,number>>={})=>({complete_product:95,same_product:100,edge_quality:95,background_clean:95,no_text_or_watermark:95,orientation_ok:95,overall:95,...extra});
-type JudgePick={scores?:Record<string,number>;evidence?:Record<string,string>;flags?:string[]};
+type JudgePick={scores?:Record<string,number>;evidence?:Record<string,string>;flags?:string[];view?:string};
 const judgeWith=(pick:(input:Parameters<CatalogDeps["judgeOutput"]>[0])=>JudgePick):CatalogDeps["judgeOutput"]=>async input=>{
  const chosen=pick(input);
- return {scores:judgeScores(chosen.scores) as never,verdict:"pass",reasons:[],isCollage:false,costUsd:0,calls:1,usage:{},model:input.model,flags:(chosen.flags ?? []) as never,view:"side",evidence:chosen.evidence ?? {},wrongItem:{first:false,second:null,secondModel:null,confirmed:false}};
+ return {scores:judgeScores(chosen.scores) as never,verdict:"pass",reasons:[],isCollage:false,costUsd:0,calls:1,usage:{},model:input.model,flags:(chosen.flags ?? []) as never,view:chosen.view ?? "side",evidence:chosen.evidence ?? {},wrongItem:{first:false,second:null,secondModel:null,confirmed:false}};
 };
 const judgePolicy={matteModel:"fixture",qaModel:"test/judge",qaModelSecond:"test/second",threshold:75,floor:60,qaMode:"per_source" as const,qaSampleRate:1,source:"default" as const};
 it("spec07 v2 placement never comes from the judge, and a photo flag applies to every channel",async()=>{
@@ -430,6 +430,46 @@ it("spec07 v2 the re-render extension point runs before triage and a repaired ou
  expect((await run(w,s)).outcome).toBe("published");
  expect(w.deps.repairOwnDefects).toHaveBeenCalledWith([expect.objectContaining({n:1,channel:"noon",flags:expect.arrayContaining(["halo"])})],expect.objectContaining({productId:s.product.id}));
 },60_000);
+it("judge views: a size chart is left out with its note and never held, even as photo 1",async()=>{
+ const w=world(),s=await seed(w,"qa-views-chart",{shots:["a","b","c"]});
+ vi.mocked(w.deps.resolvePolicy).mockResolvedValue(judgePolicy);
+ vi.mocked(w.deps.judgeOutput).mockImplementation(judgeWith((input):JudgePick=>input.n===3 ? {view:"chart",flags:["chart_image"]}:{}));
+ expect((await run(w,s)).outcome).toBe("published");
+ const chart=(await db.select().from(catalogOutputs).where(and(eq(catalogOutputs.batchId,s.batch.id),eq(catalogOutputs.n,3))))[0]!;
+ expect(chart).toMatchObject({status:"skipped",isLive:false,reason:"This photo is a size chart or a text-only image, so it was left out of the marketplace images. Nothing to do.",qaScores:{autoAction:"drop",view:"chart",evidence:{chart_image:{model:"test/judge"}}}});
+ expect(chart.flags).toContain("chart_image");expect(chart.flags).not.toContain("auto_dropped");
+ // A chart in first place is left out too; the next photo becomes photo 1 and nothing is held.
+ const t=world(),first=await seed(t,"qa-views-chart-first",{shots:["a","b"]});
+ vi.mocked(t.deps.resolvePolicy).mockResolvedValue(judgePolicy);
+ vi.mocked(t.deps.judgeOutput).mockImplementation(judgeWith((input):JudgePick=>input.n===1 ? {view:"chart",flags:["chart_image"],scores:{no_text_or_watermark:5}}:{}));
+ expect((await run(t,first)).outcome).toBe("published");
+ const outputs=await db.select().from(catalogOutputs).where(eq(catalogOutputs.batchId,first.batch.id));
+ expect(outputs.find(o=>o.n===1)).toMatchObject({status:"skipped",flags:expect.not.arrayContaining(["text_or_watermark"])});
+ expect(outputs.find(o=>o.n===2)).toMatchObject({status:"verified",isLive:true});
+ expect(outputs.filter(o=>o.status==="needs_attention")).toHaveLength(0);
+},60_000);
+it("judge views: product_removed goes to the re-render loop, never straight to a hold",async()=>{
+ const w=world(),s=await seed(w,"qa-views-removed");
+ vi.mocked(w.deps.resolvePolicy).mockResolvedValue(judgePolicy);
+ vi.mocked(w.deps.judgeOutput).mockImplementation(judgeWith(()=>({scores:{product_intact:10},evidence:{product_removed:"Only the gold logo is left; the orange leather around it is gone."}})));
+ w.deps.repairOwnDefects=vi.fn<RepairOwnDefects>(async candidates=>{
+  for(const c of candidates) await db.update(catalogOutputs).set({status:"staged",flags:[]}).where(eq(catalogOutputs.id,c.outputId));
+  return new Set(candidates.map(c=>c.outputId));
+ });
+ // Photo 1 with our own defect is re-made first; once the loop fixes it, it is published.
+ expect((await run(w,s)).outcome).toBe("published");
+ expect(w.deps.repairOwnDefects).toHaveBeenCalledWith([expect.objectContaining({n:1,flags:expect.arrayContaining(["product_removed"])})],expect.anything());
+ // Not fixed: photo 3 of four is left out with the drop note, the product still goes live.
+ const t=world(),many=await seed(t,"qa-views-removed-drop",{shots:["a","b","c","d"]});
+ vi.mocked(t.deps.resolvePolicy).mockResolvedValue(judgePolicy);
+ vi.mocked(t.deps.judgeOutput).mockImplementation(judgeWith((input):JudgePick=>input.n===3 ? {scores:{product_intact:10},evidence:{product_removed:"The fabric around the logo is gone."}}:{}));
+ t.deps.repairOwnDefects=vi.fn<RepairOwnDefects>(async()=>new Set<string>());
+ expect((await run(t,many)).outcome).toBe("published");
+ expect(t.deps.repairOwnDefects).toHaveBeenCalledWith([expect.objectContaining({n:3,flags:expect.arrayContaining(["product_removed"])})],expect.anything());
+ const removed=(await db.select().from(catalogOutputs).where(and(eq(catalogOutputs.batchId,many.batch.id),eq(catalogOutputs.n,3))))[0]!;
+ expect(removed).toMatchObject({status:"skipped",qaScores:{autoAction:"drop",product_intact:10,evidence:{product_removed:{sentence:"The fabric around the logo is gone."}}}});
+ expect(removed.flags).toEqual(expect.arrayContaining(["product_removed","auto_dropped"]));
+},60_000);
 it("spec07 a spending cap hit before QA marks outputs qa_cap, completes the chunk and shows the banner",async()=>{
  const w=world(),s=await seed(w,"qa-cap");
  for(let i=0;i<2;i++) await handleChunkTask(w.deps,{chunkId:s.chunk.id});
@@ -445,7 +485,7 @@ it("spec07 a spending cap hit before QA marks outputs qa_cap, completes the chun
  expect(deriveBatchState(batch!).text).toContain(QA_CAP_BANNER);
 },60_000);
 
-const flagHalo:CatalogDeps["judgeOutput"]=async input=>({scores:{complete_product:95,same_product:95,edge_quality:20,background_clean:20,no_text_or_watermark:95,orientation_ok:95,placement_ok:95,overall:(95*5+40)/7},verdict:"flag",reasons:[],isCollage:false,costUsd:0,calls:0,usage:{},model:input.model,flags:["halo"]});
+const flagHalo:CatalogDeps["judgeOutput"]=async input=>({scores:{complete_product:95,same_product:95,edge_quality:20,background_clean:20,no_text_or_watermark:95,orientation_ok:95,product_intact:95,placement_ok:95,overall:(95*5+40)/7},verdict:"flag",reasons:[],isCollage:false,costUsd:0,calls:0,usage:{},model:input.model,flags:["halo"]});
 it("spec07 a decision-triggered publish during the qa stage never copies unjudged staged outputs",async()=>{
  const w=world(),s=await seed(w,"qa-race");
  for(let i=0;i<2;i++) await handleChunkTask(w.deps,{chunkId:s.chunk.id});
@@ -514,7 +554,7 @@ it("spec07 a malformed judge reply retries once, then qa_unavailable; spend_days
 const openRouterReply=(content:string,cost:number|null=0.000139)=>({id:"gen-1760900000-abc",provider:"Google",model:"test/judge",object:"chat.completion",created:1760900000,
  choices:[{finish_reason:"stop",native_finish_reason:"STOP",index:0,message:{role:"assistant",content,refusal:null}}],
  usage:{prompt_tokens:2911,completion_tokens:160,total_tokens:3071,...(cost===null ? {}:{cost}),is_byok:false,prompt_tokens_details:{cached_tokens:0},completion_tokens_details:{reasoning_tokens:0}}});
-const passScores=JSON.stringify({complete_product:95,same_product:95,edge_quality:95,background_clean:95,no_text_or_watermark:95,orientation_ok:95,placement_ok:95,is_collage:false,reasons:[]});
+const passScores=JSON.stringify({complete_product:95,same_product:95,edge_quality:95,background_clean:95,no_text_or_watermark:95,orientation_ok:95,product_intact:95,placement_ok:95,is_collage:false,reasons:[]});
 async function judgeOnceLive(name:string,respond:()=>Promise<Response>) {
  const w=world(),s=await seed(w,name),log=vi.fn();
  vi.mocked(w.deps.resolvePolicy).mockResolvedValue({matteModel:"fixture",qaModel:"test/judge",threshold:75,floor:60,qaMode:"per_source",qaSampleRate:1,source:"default"});
