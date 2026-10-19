@@ -20,3 +20,13 @@ it("an independent reader waits out a cached previous generation within the publ
   expect((await verifyPublicSettled("https://example.com/a.jpg",{size:4,generation:12,fetch:wrongType,sleep,now:()=>clock})).ok).toBe(false);
   expect(wrongType).toHaveBeenCalledTimes(1);
 });
+it("publication reads the copied generation when the plain link keeps serving a cached older one",async()=>{
+  const plainStale=vi.fn(async(url:Parameters<typeof fetch>[0])=>String(url).includes("?generation=12") ? response():response({"x-goog-generation":"11"}));
+  expect(await verifyPublic("https://example.com/a.jpg",{size:4,generation:12,fetch:plainStale,sleep:async()=>{},pinnedFallback:true})).toEqual({ok:true});
+  expect(plainStale).toHaveBeenLastCalledWith("https://example.com/a.jpg?generation=12",expect.anything());
+  expect(await verifyPublic("https://example.com/a.jpg",{size:4,generation:12,fetch:plainStale,sleep:async()=>{}})).toEqual({ok:false,reason:"The public link returned a different generation."});
+  const missing=vi.fn(async(url:Parameters<typeof fetch>[0])=>String(url).includes("?generation=") ? response({},404):response({"x-goog-generation":"11"}));
+  expect(await verifyPublic("https://example.com/a.jpg",{size:4,generation:12,fetch:missing,sleep:async()=>{},pinnedFallback:true})).toEqual({ok:false,reason:"HTTP 404"});
+  const wrongBytes=vi.fn(async(url:Parameters<typeof fetch>[0])=>String(url).includes("?generation=") ? response({"content-length":"5"}):response({"x-goog-generation":"11"}));
+  expect((await verifyPublic("https://example.com/a.jpg",{size:4,generation:12,fetch:wrongBytes,sleep:async()=>{},pinnedFallback:true})).ok).toBe(false);
+});

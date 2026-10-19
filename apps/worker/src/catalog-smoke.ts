@@ -34,7 +34,8 @@ async function main() {
       // An overwritten link may serve its previous generation from cache for up to five minutes (SPEC).
       const result = await verifyPublicSettled(output.url,{size:output.bytes,generation:output.generation});
       assert(result.ok,`${output.objectPath}: ${!result.ok ? result.reason : ""}`);
-      const response = await fetch(output.url);
+      // Score the verified generation itself, never older bytes a cache may still hold.
+      const response = await fetch(`${output.url}?generation=${output.generation}`);
       assert.equal(response.status,200);
       const compliance = await checkOutput({jpeg:Buffer.from(await response.arrayBuffer()),channel:output.channel,shotNumber:output.n,plan:output.plan,identifier:output.identifier,n:output.n,publicObjectPath:output.objectPath});
       assert(compliance.ok,`${output.objectPath}: ${compliance.failures.join("; ")}`);

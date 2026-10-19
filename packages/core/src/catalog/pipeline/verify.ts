@@ -4,17 +4,26 @@ export const STALE_GENERATION = "The public link returned a different generation
 /** Public objects carry max-age=300 (SPEC: a re-upload shows within five minutes), plus a margin. */
 export const PUBLIC_CACHE_WINDOW_MS = 310_000;
 export type VerifyResult = { ok: true } | { ok: false; reason: string };
-export interface VerifyOptions { size: number; generation: number | string; fetch?: typeof fetch; sleep?: (ms: number) => Promise<void> }
+export interface VerifyOptions {
+  size: number; generation: number | string; fetch?: typeof fetch; sleep?: (ms: number) => Promise<void>;
+  /**
+   * Publication only: when the plain link keeps returning a cached older generation, read the copied
+   * generation itself (`?generation=`, not in the cache) with the same checks. A just-overwritten link
+   * the cache still holds serves the new bytes within the cache lifetime (SPEC: five minutes).
+   */
+  pinnedFallback?: boolean;
+}
 const sleepDefault = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms));
 /** A public read, independent of the authenticated storage client. */
 export async function verifyPublic(url: string, options: VerifyOptions): Promise<VerifyResult> {
   if (!new URL(url).pathname.endsWith(".jpg")) return { ok: false, reason: "The URL must end in .jpg." };
   const sleep = options.sleep ?? sleepDefault;
+  let target = url;
   for (let stale = 0; ; stale++) {
     let response: Response | undefined;
     for (let attempt = 0; ; attempt++) {
       try {
-        response = await (options.fetch ?? fetch)(url, { headers: { "Cache-Control": "no-cache" } });
+        response = await (options.fetch ?? fetch)(target, { headers: { "Cache-Control": "no-cache" } });
         if (response.status === 429 || response.status >= 500) throw Object.assign(new Error(`HTTP ${response.status}`), { status: response.status });
         break;
       } catch (error) {
@@ -25,7 +34,8 @@ export async function verifyPublic(url: string, options: VerifyOptions): Promise
     if (response.status !== 200) return { ok: false, reason: `HTTP ${response.status}` };
     if (response.headers.get("x-goog-generation") !== String(options.generation)) {
       await response.body?.cancel();
-      if (stale < VERIFY_RETRIES) { await sleep(250 * 2 ** stale); continue; }
+      if (target === url && stale < VERIFY_RETRIES) { await sleep(250 * 2 ** stale); continue; }
+      if (options.pinnedFallback && target === url) { target = `${url}?generation=${encodeURIComponent(String(options.generation))}`; continue; }
       return { ok: false, reason: STALE_GENERATION };
     }
     if (response.headers.get("content-type")?.split(";")[0]?.trim().toLowerCase() !== "image/jpeg") return { ok: false, reason: "The public link is not image/jpeg." };
