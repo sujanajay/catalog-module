@@ -11,6 +11,8 @@ RUN pnpm --filter @catalog/worker build
 RUN pnpm --filter @catalog/worker deploy --prod /out
 
 FROM node:22-slim AS runtime
+# Contact-sheet labels require font discovery and a real sans-serif font.
+RUN apt-get update && apt-get install -y --no-install-recommends fontconfig fonts-dejavu-core && rm -rf /var/lib/apt/lists/*
 ENV NODE_ENV=production PORT=8080
 WORKDIR /app
 COPY --from=build /out/package.json ./package.json
