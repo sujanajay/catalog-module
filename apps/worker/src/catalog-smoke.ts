@@ -10,7 +10,7 @@ import { inArray } from "drizzle-orm";
 import { cleanupTestBatches } from "@catalog/core/catalog/test-cleanup";
 import * as storage from "@catalog/core/storage";
 import { checkOutput } from "@catalog/core/catalog/compliance";
-import { verifyPublic } from "@catalog/core/catalog/pipeline/verify";
+import { verifyPublicSettled } from "@catalog/core/catalog/pipeline/verify";
 import { recheckSheet } from "@catalog/core/catalog/recheck/index";
 import { localFixture, sheetFixture } from "./catalog-real-fixtures";
 import { runRealFixture, type VerificationManifest } from "./catalog-real-run";
@@ -31,7 +31,8 @@ async function main() {
     assert(file,"Supply the independently saved verification manifest.");
     const manifest = JSON.parse(await readFile(file,"utf8")) as VerificationManifest;
     for (const output of manifest.outputs) {
-      const result = await verifyPublic(output.url,{size:output.bytes,generation:output.generation});
+      // An overwritten link may serve its previous generation from cache for up to five minutes (SPEC).
+      const result = await verifyPublicSettled(output.url,{size:output.bytes,generation:output.generation});
       assert(result.ok,`${output.objectPath}: ${!result.ok ? result.reason : ""}`);
       const response = await fetch(output.url);
       assert.equal(response.status,200);
