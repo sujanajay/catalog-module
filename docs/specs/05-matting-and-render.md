@@ -190,10 +190,19 @@ Any change to the maths in this file that alters output bytes must bump `CHANNEL
      of the product on that channel is rendered on it. `lowResolution` stays per shot.
    - Trendyol: SPEC.md says accepted files are 1200x1800, so Trendyol is a fixed canvas: always
      1200x1800, the product fitted even beyond 1.5x; `low_resolution` is then information only.
-   - Cut in source (`shotGeometry`): a side is cut when the product box edge lies within the white
-     border band (3% of the frame) and its outermost line, allowing for the matte's soft fade (1% of
-     the long side), holds a straight run of alpha >= 250 at least 25% of the box width (height for
-     the sides). The box is trimmed to that cut line, the cut side's margin becomes 0 and the
+   - Cut in source (`shotGeometry`, with the source pixels): first the pad band per side, the
+     outermost frame lines that are uniform and the colour of the outermost line (any colour: white,
+     light grey); a band deeper than the thin border (3% of the frame) counts only when it ends on
+     the real photo's edge (the photo background inside is another colour, or a thin side band shows
+     the photo's corner exactly there), up to 15% of the frame. The product must reach the band's
+     inner edge (allowing the matte's soft fade, 1% of the long side). Then two signals on the
+     outermost product line: a straight edge (positions whose silhouette starts on that line within
+     2 px and turns opaque, alpha >= 250, behind it; one run at least 2% of the side long) AND a
+     truncated silhouette (the edge holds at least 60% of the silhouette width 10 lines further in).
+     Without a photo edge the edge must also span 20% of the box side (the lowest flat shoe sole of
+     a standing model measures 10-17%). A foot or a rounded hem narrows towards its edge and fails;
+     two legs cut at the knee pass. When the judge saw the cut (07 `flush_cut`) the share is 40%
+     and a deep band of the photo's own colour counts too. The box is trimmed to the cut line, the cut side's margin becomes 0 and the
      product is anchored to that canvas edge (bottom wins when top and bottom are both cut; centred
      when left and right are both cut); other margins are unchanged. Flag `cut_in_source`
      (information: sheet notes and report, never holds the product). Compliance accepts the flush

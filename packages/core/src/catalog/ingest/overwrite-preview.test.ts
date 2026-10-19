@@ -14,6 +14,7 @@ import { createTestDb } from "../../db/testing";
 import { normalizeKey, sanitizeSegment } from "../naming";
 import type { BatchStatus, ChannelId } from "../types";
 import { buildOverwritePreview, matchProducts } from "./overwrite-preview";
+import { lockProducts } from "../products";
 import type { GroupingResult, SourceItem } from "./types";
 
 let db: Db;
@@ -227,17 +228,18 @@ describe("buildOverwritePreview", () => {
     expect(result.existingProducts).toEqual([]);
   });
 
-  it("busy: a product locked by another unfinished batch is listed with that batch's name", async () => {
+  it("busy: a product locked by another batch is listed with that batch's name, as Start refuses it", async () => {
     const holder = await newBatch("USPA week 41", { status: "matting" });
+    // A finished batch keeps its lock on a product held for a decision (quality gate 2: Start refused it).
     const finished = await newBatch("USPA week 40", { status: "done" });
     const batch = await newBatch("busy");
-    await seedProduct("BUSY1", { lockBatchId: holder.id });
-    await seedProduct("STALE1", { lockBatchId: finished.id });
-    await seedProduct("MINE1", { lockBatchId: batch.id });
-    await seedProduct("FREE1");
-    const { result } = await preview(batch, { BUSY1: [sha("b1")], STALE1: [sha("s1")], MINE1: [sha("x1")], FREE1: [sha("e1")] });
-    expect(result.busy).toEqual([{ identifier: "BUSY1", batchName: "USPA week 41" }]);
-    expect(result.existingProducts.map((p) => p.identifier)).toEqual(["BUSY1", "FREE1", "MINE1", "STALE1"]);
+    const ids = [await seedProduct("BUSY1", { lockBatchId: holder.id }), await seedProduct("HELD1", { lockBatchId: finished.id }), await seedProduct("MINE1", { lockBatchId: batch.id }), await seedProduct("FREE1")];
+    const { result } = await preview(batch, { BUSY1: [sha("b1")], HELD1: [sha("s1")], MINE1: [sha("x1")], FREE1: [sha("e1")] });
+    expect(result.busy).toEqual([{ identifier: "BUSY1", batchName: "USPA week 41" }, { identifier: "HELD1", batchName: "USPA week 40" }]);
+    expect(result.existingProducts.map((p) => p.identifier)).toEqual(["BUSY1", "FREE1", "HELD1", "MINE1"]);
+    // The same products Start's lock refuses.
+    const locked = await lockProducts(db, batch.id, ids);
+    expect(locked.ok ? [] : locked.busy.map((b) => b.identifier).sort()).toEqual(["BUSY1", "HELD1"]);
   });
 
   it("channels not selected in the batch do not count towards liveShots", async () => {

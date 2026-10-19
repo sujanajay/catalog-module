@@ -69,3 +69,18 @@ it("refuses an oversized SKU mapping sheet before reading it",async()=>{
  const r=await skuMapPost(new Request("http://localhost/api",{method:"POST",body:form}),{params:Promise.resolve({id:batchId})});
  expect(r.status).toBe(400);expect(await r.json()).toEqual({error:SKU_MAP_TOO_LARGE});
 });
+it("admin keeps a held photo of a finished batch with Use as is (quality gate 2: Centrepoint photo 2 of bd-162637307S-2)",async()=>{
+ // The gate-1 shape: the batch is done, the held product keeps its batch lock, photo 2 is held on Centrepoint only,
+ // made and staged on the other channels and skipped for Styli (too small).
+ await db.update(catalogBatches).set({status:"done",channels:["noon","centrepoint","styli"]}).where(eq(catalogBatches.id,batchId));
+ const [p]=await db.select().from(catalogProducts);await db.update(catalogProducts).set({lockBatchId:batchId}).where(eq(catalogProducts.id,p!.id));
+ const [s]=await db.insert(catalogSourceImages).values({batchId,productId:p!.id,n:2,sha256:"b",rawUri:"gs://private/two.jpg",originalName:"two.jpg",mime:"image/jpeg"}).returning();
+ const row=(channel:"noon"|"centrepoint"|"styli",status:"staged"|"needs_attention"|"skipped",flags:("low_resolution"|"shadow_synthesised"|"leftover_background"|"placement")[])=>({batchId,productId:p!.id,sourceImageId:s!.id,n:2,channel,canvasW:1080,canvasH:1480,scale:1,placedX:0,placedY:0,renderKey:`k-${channel}`,objectPath:`catalog-test/two-${channel}`,publicUrl:`https://public/two-${channel}`,stagingUri:`gs://private/two-${channel}`,status,flags});
+ const made=await db.insert(catalogOutputs).values([row("noon","staged",["shadow_synthesised"]),row("centrepoint","needs_attention",["low_resolution","shadow_synthesised","leftover_background","placement"]),row("styli","skipped",["low_resolution"])]).returning();
+ const held=made.find(o=>o.channel==="centrepoint")!;
+ const r=await decide(req({decision:"use_as_is"}),{params:Promise.resolve({id:held.id})});
+ expect(r.status).toBe(200);expect(await r.json()).toMatchObject({batchId,outputIds:[held.id]});
+ const after=await db.select().from(catalogOutputs).where(eq(catalogOutputs.sourceImageId,s!.id));
+ expect(after.find(o=>o.id===held.id)).toMatchObject({status:"staged",decision:"use_as_is",decidedBy:"a@opptra.com"});
+ expect(after.filter(o=>o.id!==held.id).map(o=>[o.channel,o.status,o.decision])).toEqual(expect.arrayContaining([["noon","staged",null],["styli","skipped",null]]));
+});

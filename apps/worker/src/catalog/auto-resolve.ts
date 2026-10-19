@@ -2,8 +2,8 @@ import sharp from "sharp";
 import { eq } from "drizzle-orm";
 import { catalogBatches, catalogOutputs, catalogProducts, catalogSourceImages } from "@catalog/core/db/schema";
 import { batchPrefix, stagingPath } from "@catalog/core/catalog/naming";
-import type { Matte, Prepared, RenderInput, RenderOutput } from "@catalog/core/catalog/render";
-import { autoActionsOf, JUDGED_CUT_MIN_RUN_FRACTION, LadderStopped, RENDER_FLAGS, runLadder, stepVariant, withAutoActions, type AutoAction, type LadderStep } from "@catalog/core/catalog/auto-resolve";
+import { shotGeometry, type Matte, type Prepared, type RenderInput, type RenderOutput } from "@catalog/core/catalog/render";
+import { autoActionsOf, LadderStopped, RENDER_FLAGS, runLadder, stepVariant, withAutoActions, type AutoAction, type LadderStep } from "@catalog/core/catalog/auto-resolve";
 import { strictestChannel } from "@catalog/core/catalog/qa/policy";
 import { heldInHand, passthroughMatte } from "@catalog/core/catalog/matte-guard";
 import type { ChannelId, OutputFlag, ResolvedPolicy } from "@catalog/core/catalog/types";
@@ -35,8 +35,8 @@ export interface ResolvePhotoInput {
   /** The render context the first render used (canvas, Styli's uniform scale); default: read back from the row. */
   contextFor?: (output: Output) => Partial<RenderInput>;
   prepared?: Prepared; matte?: Matte;
-  /** Keeps a flush cut placed by `flushCutPhoto` (the relaxed cut run fraction) in every step. */
-  cutMinRunFraction?: number;
+  /** Keeps a flush cut placed by `flushCutPhoto` (the judge-relaxed cut detector) in every step. */
+  judgedCut?: boolean;
 }
 export interface ResolveResult { winner: LadderStep | null; actions: AutoAction[]; fixed: Set<string> }
 
@@ -87,7 +87,7 @@ export async function resolvePhoto(deps: CatalogDeps, input: ResolvePhotoInput):
   const render = async (o: Output, step: LadderStep): Promise<RenderOutput> => {
     const variant = stepVariant(step), matte = variant.matte === "second" ? (await secondMatte())! : variant.matte === "passthrough" ? passthroughFor() : first;
     await underClaim(async()=>{});
-    return (await deps.renderAllChannels(p,matte,[o.channel],{shotNumber:source.n,productType:product.productType ?? "other",identifier:product.identifier,publicObjectPath:o.objectPath,...contextFor(o),synthesiseShadow:variant.synthesiseShadow,...(variant.fitScale !== 1 ? {fitScale:variant.fitScale}:{}),...(input.cutMinRunFraction ? {cutMinRunFraction:input.cutMinRunFraction}:{})}))[o.channel];
+    return (await deps.renderAllChannels(p,matte,[o.channel],{shotNumber:source.n,productType:product.productType ?? "other",identifier:product.identifier,publicObjectPath:o.objectPath,...contextFor(o),synthesiseShadow:variant.synthesiseShadow,...(variant.fitScale !== 1 ? {fitScale:variant.fitScale}:{}),...(input.judgedCut ? {judgedCut:true}:{})}))[o.channel];
   };
   const renders = new Map<string, RenderOutput>();
   // Assigned inside the step callback; the casts keep TypeScript from narrowing them to null.
@@ -151,27 +151,32 @@ async function writeRender(deps: CatalogDeps, input: Pick<ResolvePhotoInput,"bat
   return status !== "needs_attention";
 }
 
-export type FlushCutInput = Omit<ResolvePhotoInput,"failing"|"rejudge"|"trigger"|"cutMinRunFraction">;
+export type FlushCutInput = Omit<ResolvePhotoInput,"failing"|"rejudge"|"trigger"|"judgedCut">;
 /**
- * The judge saw the photo cut at its frame edge (`complete_product`) but the geometric detector found
- * no cut (its 25% run rule misses a knee-level cut). Re-render every channel of the photo with the
- * relaxed run fraction so the cut sits flush with the canvas edge. Applied only when the relaxed
- * detector finds the cut and every channel still meets its rules; the record says either way.
+ * The judge saw the photo cut at its frame edge (`judgeSawSourceCut`) on a side the cut detector did
+ * not place flush (a cut-out on the photo's own background colour, with no visible photo edge).
+ * Re-render every channel of the photo with the judge-relaxed detector (`judgedCut`) so the cut sits
+ * flush with the canvas edge. Applied only when the relaxed detector finds a cut side the first
+ * render did not have and every channel still meets its rules; the record says either way.
  */
 export async function flushCutPhoto(deps: CatalogDeps, input: FlushCutInput): Promise<AutoAction> {
   const trigger: OutputFlag[] = ["complete_product"], channels = input.outputs.map(o=>o.channel);
   const done = async (action: AutoAction) => { await recordActions(deps,input,input.outputs,[action]); return action; };
-  if (!input.outputs.length || input.outputs.some(o=>o.flags.includes("cut_in_source"))) return {step:"flush_cut",trigger,result:"skipped",channels,rejudged:false,detail:"cut already placed flush"};
+  if (!input.outputs.length) return {step:"flush_cut",trigger,result:"skipped",channels,rejudged:false,detail:"nothing to re-make"};
   const {source,product} = input;
   const p = input.prepared ?? await deps.prepare((await deps.storage.downloadBuffer(source.rawUri)).buf,source.originalName,b=>deps.matting.convert(b));
   const matte = input.matte ?? await storedMatte(deps,source,p,input.policy.matteModel);
   if (!matte) return done({step:"flush_cut",trigger,result:"skipped",channels,rejudged:false,detail:"no cut-out stored"});
+  // Only a side the first render did not already place flush is worth a re-render.
+  const sides = (judgedCut: boolean) => { const cut = shotGeometry(matte.alpha,p.width,p.height,{rgb:p.rgb,judgedCut})?.cut; return cut ? (["top","bottom","left","right"] as const).filter(side=>cut[side]):[]; };
+  const before = sides(false), after = sides(true);
+  if (!after.some(side=>!before.includes(side))) return done({step:"flush_cut",trigger,result:before.length ? "skipped":"failed",channels,rejudged:false,detail:before.length ? "cut already placed flush":"no cut edge found"});
   const contextFor = input.contextFor ?? rowContext, renders = new Map<string, RenderOutput>();
   // A product held in a hand does not rest on a floor: no synthesised contact shadow (matte-guard.ts).
   const shadowAllowed = input.shadowAllowed && !heldInHand(p,matte.alpha).held;
   for (const o of input.outputs) {
     await input.underClaim(async()=>{});
-    const r = (await deps.renderAllChannels(p,matte,[o.channel],{shotNumber:source.n,productType:product.productType ?? "other",identifier:product.identifier,publicObjectPath:o.objectPath,...contextFor(o),synthesiseShadow:shadowAllowed,cutMinRunFraction:JUDGED_CUT_MIN_RUN_FRACTION}))[o.channel];
+    const r = (await deps.renderAllChannels(p,matte,[o.channel],{shotNumber:source.n,productType:product.productType ?? "other",identifier:product.identifier,publicObjectPath:o.objectPath,...contextFor(o),synthesiseShadow:shadowAllowed,judgedCut:true}))[o.channel];
     if (!r.flags.includes("cut_in_source")) return done({step:"flush_cut",trigger,result:"failed",channels,rejudged:false,detail:"no cut edge found"});
     if (!ok(r)) return done({step:"flush_cut",trigger,result:"failed",channels,rejudged:false,detail:`${o.channel}: ${codes(r)}`});
     renders.set(o.id,r);

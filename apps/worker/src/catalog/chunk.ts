@@ -225,7 +225,7 @@ export async function handleChunkTask(deps: CatalogDeps, body: Record<string,unk
             await underClaim(async tx=>tx.update(catalogOutputs).set({status:"failed",reason:error instanceof Error ? error.message : String(error),updatedAt:deps.now()}).where(and(eq(catalogOutputs.sourceImageId,source.id),eq(catalogOutputs.batchId,batch.id),eq(catalogOutputs.status,"pending"))));
           }
         }
-        const geometry = prepared.flatMap(({p,matte})=>{const shot=shotGeometry(matte.alpha,p.width,p.height);return shot ? [shot]:[];});
+        const geometry = prepared.flatMap(({p,matte})=>{const shot=shotGeometry(matte.alpha,p.width,p.height,{rgb:p.rgb});return shot ? [shot]:[];});
         const productPlan = (c:keyof typeof CHANNELS) => geometry.length ? planProduct(CHANNELS[c],geometry):undefined;
         const uniformScale = productPlan("styli")?.uniformScale;
         for (const {source,p,matte} of prepared) {
