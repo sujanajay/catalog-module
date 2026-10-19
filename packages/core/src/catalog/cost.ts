@@ -1,6 +1,14 @@
 import type { BatchCost, QaMode } from "./types";
 export const QA_USD_PER_CHECK_ESTIMATE = 0.0013;
 export const COMPUTE_SECONDS_PER_OUTPUT_ESTIMATE = 1.5;
+/**
+ * Default for the estimate's compute part when COMPUTE_USD_PER_VCPU_SECOND is unset (infra/deploy.sh
+ * passes it to the worker only when the operator sets it). USD 0.000024 per vCPU-second is the
+ * Cloud Run list price for CPU under request-based billing (Tier 1 regions); 09 replaces it with
+ * the measured asia-south1 figure. Only the estimate uses this default: recorded compute spend
+ * stays 0 until the env var is set (06 4.5).
+ */
+export const DEFAULT_COMPUTE_USD_PER_VCPU_SECOND = 0.000024;
 function positive(value: string | undefined): number | null {
  const number = value?.trim() ? Number(value) : NaN;
  return Number.isFinite(number) && number > 0 ? number : null;
@@ -26,7 +34,7 @@ export function estimateCost(counts:EstimateCounts,env:NodeJS.ProcessEnv=process
  if (rate === null) return null;
  const images = Math.max(0,counts.outputs-(counts.styliSkips ?? 0)-(counts.unchangedPairs ?? 0));
  const qaChecks = (counts.qaMode === "per_output" ? images : counts.sources)*(counts.qaSampleRate ?? 1)+(counts.untypedProducts ?? 0);
- const computeRate = positive(env.COMPUTE_USD_PER_VCPU_SECOND) ?? 0;
+ const computeRate = positive(env.COMPUTE_USD_PER_VCPU_SECOND) ?? DEFAULT_COMPUTE_USD_PER_VCPU_SECOND;
  const usd = qaChecks*QA_USD_PER_CHECK_ESTIMATE+images*COMPUTE_SECONDS_PER_OUTPUT_ESTIMATE*2*computeRate;
  return {usd,inr:usd*rate,images,qaChecks};
 }

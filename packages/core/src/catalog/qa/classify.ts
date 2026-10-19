@@ -14,5 +14,5 @@ export async function classifyProductType(image: Buffer, deps: ClassifierDeps = 
   if (!value) return {type:"other" as const,confidence:0,...accounting,flags:["type_unknown"] as OutputFlag[]};
   const type = PRODUCT_TYPES.find(t => t !== "auto" && t === value.type) as Exclude<ProductType,"auto"> | undefined;
   const confidence = typeof value.confidence === "number" && Number.isFinite(value.confidence) ? Math.max(0,Math.min(1,value.confidence)) : 0;
-  return {type:type ?? "other",confidence,...accounting,flags:[] as OutputFlag[]};
+  return {type:type ?? "other",confidence,...accounting,flags:(value.transparent === true ? ["transparent"] : []) as OutputFlag[]};
 }

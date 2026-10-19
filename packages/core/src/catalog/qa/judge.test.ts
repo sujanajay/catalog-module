@@ -63,3 +63,8 @@ describe("product classifier",()=>{
  });
 });
 
+
+it("classifies transparent material explicitly for the specified engineering treatment",async()=>{
+ const result=await classifyProductType(await image(),{apiKey:"fake",model:"test",fetch:async()=>response({type:"other",confidence:.9,transparent:true})});
+ expect(result.flags).toContain("transparent");
+});

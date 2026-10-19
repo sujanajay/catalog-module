@@ -1,3 +1,5 @@
+import { costLine } from "../cost";
+import { QA_CAP_BANNER } from "./status";
 import { and, eq, inArray } from "drizzle-orm";
 import ExcelJS from "exceljs";
 import { buildCsv } from "../../csv";
@@ -56,21 +58,25 @@ export async function buildReport(db:Db,batchId:string,extra:{recheck:RecheckRes
   const chunks = await db.select().from(catalogChunks).where(eq(catalogChunks.batchId,batchId));
   const rows:SheetSpec["rows"] = pairs.map(({product,pair})=> {
     const live = outputs.filter(o=>o.productId===product.id && o.isLive && batch.channels.includes(o.channel));
-    const problems = outputs.filter(o=>o.productId===product.id && o.batchId===batchId && o.reason && ["skipped","failed","needs_attention"].includes(o.status)).map(o=>`${channel(o.channel).label} img ${o.n}: ${o.reason}`);
+    const problems = outputs.filter(o=>o.productId===product.id && o.batchId===batchId && o.reason && (["skipped","failed","needs_attention"].includes(o.status) || o.decision === "use_as_is")).map(o=>`${channel(o.channel).label} img ${o.n}: ${o.decision === "use_as_is" ? `kept as is by ${o.decidedBy}: `:""}${o.reason}`);
     const links:SheetSpec["rows"][number]["links"] = {};
     for (const output of live) { links[output.channel] ??= []; links[output.channel]![output.n-1]=output.publicUrl; }
     const times = live.flatMap(o=>o.publishedAt ? [+o.publishedAt]:[]);
     return {brand:batch.brandName,identifier:product.identifier,optionIdStyleColor:product.optionIdStyleColor ?? "",opptraSkuIds:product.opptraSkuIds,links,status:batchSheetStatus(pair),notes:[...new Set([pair.notes,...problems].filter(Boolean))].join("; "),change:pair.change,changedAt:times.length ? new Date(Math.max(...times)):null};
   });
   const selected = outputs.filter(o=>o.batchId===batchId), unchanged = pairs.reduce((n,{product})=>n+Math.max(0,sources.filter(s=>s.productId===product.id).length*batch.channels.length-selected.filter(o=>o.productId===product.id).length),0);
-  const counts = {...batch.counts,verified:selected.filter(o=>o.status==="verified" && o.isLive).length+unchanged,needsAttention:selected.filter(o=>o.status==="needs_attention").length,attentionProducts:pairs.filter(p=>p.pair.change==="pending_attention").length,failed:selected.filter(o=>o.status==="failed").length,skipped:selected.filter(o=>o.status==="skipped").length,unchanged,recheckOk:extra.recheck.ok,recheckTotal:extra.recheck.total};
-  const report = {batchId,brand:batch.brandName,channels:batch.channels,summary:{linksPlanned:counts.outputs-counts.skipped,linksVerified:counts.verified,linksSkipped:counts.skipped,productsHeld:counts.attentionProducts},counts,cost:batch.cost,
-    products:pairs.map(({product,pair})=>({identifier:product.identifier,pathKey:product.pathKey,linkStatus:pair.linkStatus,change:pair.change,changedAt:rows.find(r=>r.identifier===product.identifier)?.changedAt,optionIdStyleColor:product.optionIdStyleColor,opptraSkuIds:product.opptraSkuIds,sources:sources.filter(s=>s.productId===product.id).map(s=>({n:s.n,originalName:s.originalName,...(extra.ingest?.sourceOrigins?.[s.rawUri] ?? {origin:uploads.find(u=>u.id===s.uploadId)?.kind ?? "image",relativePath:s.originalName}),mime:s.mime,width:s.width,height:s.height,sha256:s.sha256,rawUri:s.rawUri,status:s.status})),outputs:outputs.filter(o=>o.productId===product.id && (o.batchId===batchId || o.isLive)).map(o=>({channel:o.channel,n:o.n,status:o.status,url:o.isLive ? o.publicUrl:null,generation:o.generation,flags:o.flags,reason:o.reason}))})),
+  const qaCap=selected.some(output=>output.flags.includes("qa_cap"));
+  // qaCapped is a jsonb-only key (not in BatchCounts) read by deriveBatchState for the 07 4.5 banner.
+  const counts = {...batch.counts,qaCapped:qaCap,verified:selected.filter(o=>o.status==="verified" && o.isLive).length+unchanged,needsAttention:selected.filter(o=>o.status==="needs_attention").length,attentionProducts:pairs.filter(p=>p.pair.change==="pending_attention").length,failed:selected.filter(o=>o.status==="failed").length,skipped:selected.filter(o=>o.status==="skipped").length,unchanged,recheckOk:extra.recheck.ok,recheckTotal:extra.recheck.total};
+  const line=costLine({cost:batch.cost,products:pairs.map(({pair,product})=>({change:pair.change,outputs:selected.filter(output=>output.productId===product.id && output.decision!=="replaced")}))});
+  const cost={...batch.cost,identifiers:line.identifiers,usdPerIdentifier:line.usdPerIdentifier,inrPerIdentifier:line.inrPerIdentifier};
+  const report = {batchId,brand:batch.brandName,channels:batch.channels,summary:{linksPlanned:counts.outputs-counts.skipped,linksVerified:counts.verified,linksSkipped:counts.skipped,productsHeld:counts.attentionProducts},counts,cost,...(qaCap ? {banner:QA_CAP_BANNER}:{}),
+    products:pairs.map(({product,pair})=>({identifier:product.identifier,pathKey:product.pathKey,linkStatus:pair.linkStatus,change:pair.change,changedAt:rows.find(r=>r.identifier===product.identifier)?.changedAt,optionIdStyleColor:product.optionIdStyleColor,opptraSkuIds:product.opptraSkuIds,sources:sources.filter(s=>s.productId===product.id).map(s=>({n:s.n,originalName:s.originalName,...(extra.ingest?.sourceOrigins?.[s.rawUri] ?? {origin:uploads.find(u=>u.id===s.uploadId)?.kind ?? "image",relativePath:s.originalName}),mime:s.mime,width:s.width,height:s.height,sha256:s.sha256,rawUri:s.rawUri,status:s.status,flags:s.flags})),outputs:outputs.filter(o=>o.productId===product.id && (o.batchId===batchId || o.isLive)).map(o=>({channel:o.channel,n:o.n,status:o.status,url:o.isLive ? o.publicUrl:null,generation:o.generation,flags:o.flags,reason:o.reason}))})),
     overwrites:events.filter(e=>["overwritten","shots_removed","reordered","channel_added"].includes(e.kind)).flatMap((e):Record<string,unknown>[]=> {
       const identifier=pairs.find(p=>p.product.id===e.productId)?.product.identifier;
       const changes=Array.isArray(e.details.changes) ? e.details.changes as Record<string,unknown>[]:[];
       return changes.length ? changes.map(c=>({identifier,kind:e.kind,channels:[c.channel],shots:[c.n],oldGeneration:c.oldGeneration,newGeneration:c.newGeneration,sha256:c.sha256})):[{identifier,kind:e.kind,channels:e.details.channels,shots:e.details.shots,oldGeneration:null,newGeneration:null,sha256:null}];
     }),notRefreshedChannels:await notRefreshedChannels(db,batchId),removedLinks:events.flatMap(e=>e.kind==="shots_removed" && Array.isArray(e.details.removedLinks) ? e.details.removedLinks.map((r:unknown)=>({identifier:pairs.find(p=>p.product.id===e.productId)?.product.identifier,...r as Record<string,unknown>})):[]),recheck:extra.recheck,exports:extra.exports,
     unsupportedFiles:extra.ingest?.unsupportedFiles ?? uploads.flatMap(u=>Array.isArray(u.detected?.rejected) ? u.detected.rejected:[]),duplicates:extra.ingest?.duplicates ?? pairs.filter(p=>p.pair.flags.includes("duplicate_shot")).map(p=>({identifier:p.product.identifier,reason:p.pair.notes})),unresolvedIdentifiers:pairs.filter(p=>!p.product.opptraSkuIds.length).map(p=>p.product.identifier),chunks:chunks.map(c=>({index:c.index,stage:c.stage,status:c.status,attempt:c.attempt,error:c.error}))};
-  return {sheet:{channels:CHANNEL_ORDER.filter(c=>batch.channels.includes(c)),rows},report,batch:{...batch,counts}};
+  return {sheet:{channels:CHANNEL_ORDER.filter(c=>batch.channels.includes(c)),rows},report,batch:{...batch,counts,cost}};
 }

@@ -18,7 +18,7 @@ export function renderKey(input: { sourceSha256: string; channel: ChannelId; n: 
 export interface PublishPlan { copies: { output: Output; objectPath: string; ifGenerationMatch: number }[]; deletes: { output: Output; objectPath: string; ifGenerationMatch: number }[]; kept: Output[] }
 export function planPublish(input: { brandSlug: string; pathKey: string; isTest: boolean; channels: ChannelId[]; sources: Pick<Source,"n">[]; outputs: Output[]; live: Output[] }): PublishPlan {
   const scope = productPrefix(input.brandSlug, input.pathKey, input.isTest), selected = input.live.filter(o => input.channels.includes(o.channel));
-  const copies = input.outputs.filter(o => o.status === "staged" || o.status === "verified" || o.decision === "use_as_is").filter(o => o.decision !== "remove").map(output => {
+  const copies = input.outputs.filter(o => o.status === "staged" || (o.status === "verified" && !o.isLive) || (o.decision === "use_as_is" && !o.isLive)).filter(o => o.decision !== "remove" && o.decision !== "replaced").map(output => {
     const objectPath = publicObjectPath(input.brandSlug, input.pathKey, output.channel, output.n, input.isTest);
     if (!input.channels.includes(output.channel)) throw new Error("Publication channel is outside this batch.");
     assertWithinProduct(objectPath, scope);
@@ -44,13 +44,15 @@ export async function publishProduct(deps: PublishDeps, batchId: string, product
     if (!batch) return { outcome: "not_found" };
     const where = and(eq(catalogBatchProducts.batchId,batchId),eq(catalogBatchProducts.productId,productId));
     const outputs = await tx.select().from(catalogOutputs).where(and(eq(catalogOutputs.batchId,batchId),eq(catalogOutputs.productId,productId)));
-    const sources = await tx.select().from(catalogSourceImages).where(and(eq(catalogSourceImages.batchId,batchId),eq(catalogSourceImages.productId,productId)));
+    const allSources = await tx.select().from(catalogSourceImages).where(and(eq(catalogSourceImages.batchId,batchId),eq(catalogSourceImages.productId,productId)));
+    const replacedIds=new Set(allSources.flatMap(source=>source.replacesId ? [source.replacesId]:[]));
+    const sources=allSources.filter(source=>!replacedIds.has(source.id));
     const all = await tx.select().from(catalogOutputs).where(eq(catalogOutputs.productId,productId));
     const live = all.filter(o => o.isLive);
     const [pair] = await tx.select().from(catalogBatchProducts).where(where);
     const missingPairs = sources.some(source=>batch.channels.some(channel=> {
       if(outputs.some(output=>output.sourceImageId===source.id && output.channel===channel)) return false;
-      const key = batch.options.policy ? renderKey({sourceSha256:source.sha256,channel,n:source.n,policyKey:`default|${batch.options.policy.matteModel}`}):null;
+      const key = batch.options.policy ? renderKey({sourceSha256:source.sha256,channel,n:source.n,policyKey:`default|${source.matteModel ?? batch.options.policy.matteModel}`}):null;
       return !key || !live.some(output=>output.channel===channel && output.n===source.n && output.renderKey===key);
     }));
     if (product.lastBatchId === batchId && outputs.every(o=>o.status === "verified" || o.status === "skipped")) {
@@ -61,7 +63,7 @@ export async function publishProduct(deps: PublishDeps, batchId: string, product
       }
       if (alreadyPublished) return {outcome:"published"};
     }
-    if (missingPairs || pair?.flags.includes("duplicate_shot") || outputs.some(o => !["staged","skipped","verified"].includes(o.status) && o.decision !== "use_as_is" && o.decision !== "remove")) {
+    if (missingPairs || pair?.flags.includes("duplicate_shot") || outputs.some(o => !["staged","skipped","verified"].includes(o.status) && o.decision !== "use_as_is" && o.decision !== "remove" && o.decision !== "replaced")) {
       await tx.update(catalogBatchProducts).set({ change:"pending_attention", notes: [pair?.notes,missingPairs ? "Some photos could not be processed. Start this product again.":"",...outputs.filter(o => o.reason).map(o => `${o.channel} img ${o.n}: ${o.reason}`)].filter(Boolean).join("; ") }).where(where);
       return { outcome:"held" };
     }
@@ -127,7 +129,7 @@ export async function publishProduct(deps: PublishDeps, batchId: string, product
     }
     const unverified = [...landed.values()].filter(copy => !changes.some(change => change.channel === copy.channel && change.n === copy.n));
     const liveNotes = [changes.length ? `Verified live images: ${changes.map(c=>`${c.channel} ${c.n}`).join(", ")}.` : "", unverified.length ? `Public images replaced but unverified: ${unverified.map(c=>`${c.channel} img ${c.n} generation ${c.generation}`).join(", ")}.` : "", !changes.length && !landed.size ? "No replacements were verified." : ""].filter(Boolean).join(" ");
-    const notes = [failure ? `Some images could not be published: ${failure}. ${liveNotes}` : "", removed.length ? `photos ${removed.map(o=>o.n).join(" and ")} removed in batch ${batch.name}` : "",...outputs.filter(o=>o.status === "skipped" && o.reason).map(o=>`${o.channel} img ${o.n}: ${o.reason}`)].filter(Boolean).join("; ");
+    const notes = [failure ? `Some images could not be published: ${failure}. ${liveNotes}` : "", removed.length ? `photos ${removed.map(o=>o.n).join(" and ")} removed in batch ${batch.name}` : "",...outputs.filter(o=>o.decision === "use_as_is" && o.reason).map(o=>`${o.channel} img ${o.n}: kept as is by ${o.decidedBy}: ${o.reason}`),...outputs.filter(o=>o.status === "skipped" && o.reason).map(o=>`${o.channel} img ${o.n}: ${o.reason}`)].filter(Boolean).join("; ");
     await tx.update(catalogBatchProducts).set({change,notes}).where(where);
     await tx.update(catalogProducts).set({lastBatchId:batchId}).where(eq(catalogProducts.id,productId));
     return { outcome: failure ? "failed" : "published" };

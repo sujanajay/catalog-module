@@ -58,7 +58,7 @@ async function main() {
     }
     await writeFile(path.join(out,"summary.json"),JSON.stringify({run,evidence,excluded},null,2));
     assert(evidence.length,"No actual brand has an available real image set. Smoke did not run.");
-    await writeFile(path.join(out,"report.html"),`<!doctype html><meta charset="utf-8"><title>Per-brand catalog smoke</title><h1>Per-brand catalog smoke</h1><ul>${evidence.map(e=>`<li><a href="${e.slug}/report.html">${e.brand}</a>: ${e.first.verified} verified, ${e.changed} changed, ${e.removed} removed; cleanup ${e.cleanup}</li>`).join("")}</ul><h2>Unavailable real sets</h2><pre>${JSON.stringify(excluded,null,2)}</pre>`);
+    await writeFile(path.join(out,"report.html"),`<!doctype html><meta charset="utf-8"><title>Per-brand catalog smoke</title><h1>Per-brand catalog smoke</h1><ul>${evidence.map(e=>`<li><a href="${e.slug}/report.html">${e.brand}</a>: ${e.first.verified} verified, ${e.changed} changed, ${e.removed} removed; cleanup ${e.cleanup}; quality check: ${e.qa}</li>`).join("")}</ul><h2>Unavailable real sets</h2><pre>${JSON.stringify(excluded,null,2)}</pre>`);
     console.info(JSON.stringify({run,out,evidence,excluded}));
   } finally {await closeDb();}
 }
