@@ -99,13 +99,31 @@ WORKER_ENV="$ENV_VARS,DB_POOL_MAX=2,BQ_PROJECT=$BQ_PROJECT,BQ_LOCATION=asia-sout
 if [ -n "${COMPUTE_USD_PER_VCPU_SECOND:-}" ]; then
   WORKER_ENV+=",COMPUTE_USD_PER_VCPU_SECOND=$COMPUTE_USD_PER_VCPU_SECOND"
 fi
+# 07: the QA judge and its spend caps. Override from the shell like BQ_PROJECT, e.g.
+# INR_PER_USD=84 bash infra/deploy.sh. CATALOG_QA_DEFAULT_MODEL is engineering config only; it is
+# never shown to the operator. It has no leading "/", so Git Bash leaves it alone.
+CATALOG_QA_DEFAULT_MODEL=${CATALOG_QA_DEFAULT_MODEL:-google/gemini-2.5-flash-lite}
+DAILY_SPEND_CAP_USD=${DAILY_SPEND_CAP_USD:-10}
+INR_PER_USD=${INR_PER_USD:-}
+[[ "$CATALOG_QA_DEFAULT_MODEL" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._:-]+$ ]] || { echo "CATALOG_QA_DEFAULT_MODEL must look like provider/model" >&2; exit 1; }
+[[ "$DAILY_SPEND_CAP_USD" =~ ^[0-9]+([.][0-9]+)?$ ]] || { echo "DAILY_SPEND_CAP_USD must be a non-negative number" >&2; exit 1; }
+[[ -z "$INR_PER_USD" || "$INR_PER_USD" =~ ^[0-9]+([.][0-9]+)?$ ]] || { echo "INR_PER_USD must be a number or unset" >&2; exit 1; }
+WORKER_ENV+=",CATALOG_QA_DEFAULT_MODEL=$CATALOG_QA_DEFAULT_MODEL,DAILY_SPEND_CAP_USD=$DAILY_SPEND_CAP_USD"
 WEB_ENV="$ENV_VARS,DB_POOL_MAX=3,SHARE_SA_EMAIL=$WEB_SA,CATALOG_CHUNK_IMAGES=$CHUNK_IMAGES"
+# INR_PER_USD is optional: unset, the cost line shows USD and the wizard shows no estimate (07 4.11).
+if [ -n "$INR_PER_USD" ]; then
+  WORKER_ENV+=",INR_PER_USD=$INR_PER_USD"
+  WEB_ENV+=",INR_PER_USD=$INR_PER_USD"
+fi
 # 03: the web verifies the IAP JWT against this exact audience and accepts only this domain.
 IAP_AUDIENCE=/projects/$PN/locations/$REGION/services/$WEB_SERVICE
 WEB_ENV+=",IAP_AUDIENCE=$IAP_AUDIENCE,ALLOWED_HOSTED_DOMAIN=opptra.com"
 # The migrate job seeds this person as the first admin (idempotent; never undoes a later role change).
 MIGRATE_ENV="$WORKER_ENV,SEED_ADMIN_EMAIL=${SEED_ADMIN_EMAIL:-sujan@opptra.com}"
 SECRETS=DB_PASSWORD=catalog-db-password:latest
+# The OpenRouter key is mounted from Secret Manager on the Cloud Run jobs only (catalog-qa-check,
+# and catalog-eval in 08), never on the services. Its value is never read or printed here.
+JOB_SECRETS="$SECRETS,OPENROUTER_API_KEY=openrouter-api-key:latest"
 NET=(--region="$REGION" --network=ila-vpc --subnet=ila-subnet --vpc-egress=private-ranges-only)
 
 # --- 4. Migrations -------------------------------------------------------------------
@@ -272,6 +290,17 @@ else
     }))));
   ' infra/cors.json "$CANONICAL_WEB_URL" "$WEB_URL" "$(cygpath -m "$CORS_FILE" 2>/dev/null || echo "$CORS_FILE")" <<<"$CURRENT_CORS"
   gcloud storage buckets update "$ASSETS_BUCKET" --cors-file="$(cygpath -m "$CORS_FILE" 2>/dev/null || echo "$CORS_FILE")" >/dev/null
+fi
+
+# --- 7. Jobs -------------------------------------------------------------------------
+# 07: the tier 3 live QA job. Deployed (check-then-create/update) but never executed here; run it
+# with "bash infra/catalog-qa-check.sh run" (sets LIVE_SMOKE=1 for that execution only).
+echo "==> jobs"
+if [ "${CATALOG_PREVIEW:-0}" != 1 ]; then
+  QA_JOB_IMAGE="$AR/worker:$TAG" QA_JOB_ENV="$WORKER_ENV" QA_JOB_SECRETS="$JOB_SECRETS" \
+    bash infra/catalog-qa-check.sh deploy
+else
+  echo "==> jobs: SKIP (preview never changes the shared jobs)"
 fi
 
 # --- 8. URLs ---------------------------------------------------------------------------
