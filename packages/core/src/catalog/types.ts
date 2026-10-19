@@ -61,6 +61,7 @@ export interface BatchOptions {
   policy?: ResolvedPolicy;                 // set at start (07); absent on draft
   qaCapUsd?: number | null;                // per-batch QA cap (07)
   evalSet?: string | null;                 // eval batches (08)
+  cleanedUp?: boolean;                     // test batch cleaned up while its spend still counts today; hidden from the list
 }
 
 export interface BatchCounts {

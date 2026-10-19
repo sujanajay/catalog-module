@@ -115,19 +115,22 @@ export async function runRealFixture(db: Db, fixture: RealFixture, out: string, 
     await saveHtml(evidence.report, fixture, snapshots, failure).catch(error => { failure ??= error; });
     try {
       if (batches.length) {
+        let kept: string[] = [];
         const owned=await db.select({brandSlug:catalogProducts.brandSlug,pathKey:catalogProducts.pathKey}).from(catalogProducts).innerJoin(catalogBatchProducts,eq(catalogProducts.id,catalogBatchProducts.productId)).where(inArray(catalogBatchProducts.batchId,batches.map(b=>b.id)));
         const reportPath = `catalog-test/smoke/${path.basename(path.dirname(out))}/${fixture.slug}/report.html`;
         assertTestPrefix(reportPath);
         try { await storage.uploadBuffer(reportPath, await readFile(evidence.report), "text/html"); }
         catch (error) { failure ??= error; }
         finally {
-          try { await cleanupTestBatches(db, storage, batches.map(b => b.id)); }
+          try { kept = (await cleanupTestBatches(db, storage, batches.map(b => b.id))).kept; }
           finally { await storage.deleteTestObjects(storage.toGsUri(storage.getBucketName(), reportPath)); }
         }
         for (const batch of batches) assert.deepEqual(await storage.listObjects(storage.toGsUri(storage.getBucketName(), `${batchPrefix(batch.brandSlug,batch.id,true)}/`)), []);
         for(const product of owned)assert.deepEqual(await storage.listObjects(storage.toGsUri(storage.getPublicBucketName(),productPrefix(product.brandSlug,product.pathKey,true))),[]);
         const ids = batches.map(b => b.id);
-        assert.equal((await db.select().from(catalogBatches).where(inArray(catalogBatches.id, ids))).length, 0);
+        // Batches that spent money today keep a hidden row so DAILY_SPEND_CAP_USD still counts it.
+        const left = await db.select().from(catalogBatches).where(inArray(catalogBatches.id, ids));
+        assert(left.every(b => kept.includes(b.id) && b.options.cleanedUp), "Cleanup left a test batch behind.");
       }
       evidence.cleanup = true;
     } catch (error) { failure ??= error; }
