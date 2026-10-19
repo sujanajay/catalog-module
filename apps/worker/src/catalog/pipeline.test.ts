@@ -1,3 +1,5 @@
+import sharp from "sharp";
+import {startReplacement,completeReplacement} from "@catalog/core/catalog/decisions";
 import { afterAll,beforeAll,expect,it,vi } from "vitest";
 import { and,eq,sql } from "drizzle-orm";
 import type { Db } from "@catalog/core/db/client";
@@ -30,6 +32,9 @@ function world() {
   const base=workerCatalogDeps(db);
   const deps:CatalogDeps={...base,fetch,now:()=>new Date("2026-01-01T00:00:00Z"),log:()=>{},enqueue:vi.fn(async()=>"task"),resolvePolicy:vi.fn<CatalogDeps["resolvePolicy"]>(async()=>({matteModel:"fixture",qaModel:"",threshold:75,floor:60,qaMode:"per_source",qaSampleRate:1,source:"default"})),
     storage:{...storage,getBucketName:()=>"assets",getPublicBucketName:()=>"public",uploadBuffer:upload,downloadBuffer:async uri=>{const o=objects.get(uri);if(!o)throw new Error(`No object ${uri}`);return {buf:o.buf,mime:o.mime};},headObject:async uri=>{const o=objects.get(uri);return o ? {exists:true,size:o.buf.length,contentType:o.mime,generation:o.generation,crc32c:o.crc32c}:{exists:false,size:null,contentType:null,generation:null,crc32c:null};},stageCopyToPublic:copy,deletePublicObject:remove,setCustomTime:vi.fn(async()=>{})},
+    judgeOutput:vi.fn<CatalogDeps["judgeOutput"]>(async(input)=>({scores:{complete_product:95,same_product:95,edge_quality:95,background_clean:95,no_text_or_watermark:95,orientation_ok:95,placement_ok:95,overall:95},verdict:"pass",reasons:[],isCollage:false,costUsd:0,calls:0,usage:{},model:input.model,flags:[]})),
+    classifyProductType:vi.fn<CatalogDeps["classifyProductType"]>(async()=>({type:"footwear",confidence:1,costUsd:0,calls:0,usage:{},flags:[]})),
+    matting:{...base.matting,health:vi.fn(async()=>({ok:true,models:[{id:"fixture",inputSize:1024,target:"cpu"}],default:"fixture",versions:{cpu:null,gpu:null}})),convert:base.matting.convert.bind(base.matting)} as unknown as CatalogDeps["matting"],
     prepare:vi.fn(async(buf)=>({width:800,height:800,rgb:Buffer.alloc(800*800*3,buf[3] ?? 0),alphaSource:null,background:{uniform:true,color:[255,255,255] as [number,number,number],stdev:0},flags:[],sourceMime:"image/jpeg"})),
     matteFor:vi.fn<CatalogDeps["matteFor"]>(async()=>({alpha:Buffer.alloc(800*800,255),width:800,height:800,model:"fixture",ms:12,source:"model",target:"cpu",sentLongSide:800})),
     renderAllChannels:vi.fn<CatalogDeps["renderAllChannels"]>(async(_p,_m,channels)=>Object.fromEntries(channels.map(channel=>[channel,{jpeg:Buffer.from([255,216,255,_p.rgb[0]!]),status:"ok",plan:{w:800,h:1000,lowResolution:false,safeBox:{x:0,y:0,w:800,h:1000},scale:1,placedX:0,placedY:0,detailShot:false},quality:90,bytes:4,flags:[],notes:[],attention:null,compliance:{ok:true,failures:[]}}])) as unknown as Awaited<ReturnType<CatalogDeps["renderAllChannels"]>>)};
@@ -44,7 +49,7 @@ async function seed(w:ReturnType<typeof world>,name:string,options:{productId?:s
   const [chunk]=await db.insert(catalogChunks).values({batchId:batch!.id,index:0,stage:"matte",productIds:[product.id]}).returning();
   return {batch:batch!,product,chunk:chunk!};
 }
-async function run(w:ReturnType<typeof world>,s:Awaited<ReturnType<typeof seed>>) {expect((await handleChunkTask(w.deps,{chunkId:s.chunk.id})).httpStatus).toBe(200);expect((await handleChunkTask(w.deps,{chunkId:s.chunk.id})).httpStatus).toBe(200);return handlePublishTask(w.deps,{batchId:s.batch.id,productId:s.product.id});}
+async function run(w:ReturnType<typeof world>,s:Awaited<ReturnType<typeof seed>>) {expect((await handleChunkTask(w.deps,{chunkId:s.chunk.id})).httpStatus).toBe(200);expect((await handleChunkTask(w.deps,{chunkId:s.chunk.id})).httpStatus).toBe(200);expect((await handleChunkTask(w.deps,{chunkId:s.chunk.id})).httpStatus).toBe(200);return handlePublishTask(w.deps,{batchId:s.batch.id,productId:s.product.id});}
 it("does not finalize initial new rows, publishes, checks exports, then increments export versions",async()=>{const w=world(),s=await seed(w,"first");expect((await handleFinalizeTask(w.deps,{batchId:s.batch.id})).outcome).toBe("not_ready");expect((await run(w,s)).outcome).toBe("published");expect((await handleFinalizeTask(w.deps,{batchId:s.batch.id})).outcome).toBe("done");const [batch]=await db.select().from(catalogBatches).where(eq(catalogBatches.id,s.batch.id));expect(batch!.counts).toMatchObject({latestExport:1,recheckOk:1,recheckTotal:1,verified:1});expect(deriveBatchState(batch!).state).toBe("ready");expect((await handleFinalizeTask(w.deps,{batchId:s.batch.id})).outcome).toBe("done");const [again]=await db.select().from(catalogBatches).where(eq(catalogBatches.id,s.batch.id));expect(again!.sheetXlsxUri).toContain("links-v2.xlsx");expect(w.copy).toHaveBeenCalledTimes(1);},60_000);
 it("redelivery repeats no finished matte, render or copy; identical reupload keeps generations",async()=>{const w=world(),s=await seed(w,"repeat");await run(w,s);await handleChunkTask(w.deps,{chunkId:s.chunk.id});await handlePublishTask(w.deps,{batchId:s.batch.id,productId:s.product.id});expect(w.deps.matteFor).toHaveBeenCalledTimes(1);expect(w.deps.renderAllChannels).toHaveBeenCalledTimes(1);expect(w.copy).toHaveBeenCalledTimes(1);const next=await seed(w,"repeat2",{productId:s.product.id});await run(w,next);expect(w.deps.matteFor).toHaveBeenCalledTimes(1);expect(w.deps.renderAllChannels).toHaveBeenCalledTimes(1);expect(w.copy).toHaveBeenCalledTimes(1);const [pair]=await db.select().from(catalogBatchProducts).where(eq(catalogBatchProducts.batchId,next.batch.id));expect(pair!.change).toBe("unchanged");},60_000);
 it("replaces a changed source even when its rendered JPEG bytes match the live image",async()=>{
@@ -71,6 +76,7 @@ it("reuses a completed public copy after the publication transaction rolls back"
   const next=await seed(w,"public-copy-crash-next",{productId:first.product.id,shots:["source-two"]});
   await handleChunkTask(w.deps,{chunkId:next.chunk.id});
   await handleChunkTask(w.deps,{chunkId:next.chunk.id});
+  await handleChunkTask(w.deps,{chunkId:next.chunk.id});
   vi.mocked(w.deps.storage.setCustomTime).mockRejectedValueOnce(new Error("Crash before DB commit"));
   expect((await handlePublishTask(w.deps,{batchId:next.batch.id,productId:next.product.id})).outcome).toBe("retry");
   const [rolledBack]=await db.select().from(catalogOutputs).where(eq(catalogOutputs.batchId,next.batch.id));
@@ -86,7 +92,7 @@ it("reuses a completed public copy after the publication transaction rolls back"
   expect((await handlePublishTask(w.deps,{batchId:next.batch.id,productId:next.product.id})).outcome).toBe("published");
   expect(w.copy).toHaveBeenCalledTimes(2);
 },60_000);
-it("holds undecided outputs with no public writes, then publishes once staged",async()=>{const w=world(),s=await seed(w,"held");await handleChunkTask(w.deps,{chunkId:s.chunk.id});await handleChunkTask(w.deps,{chunkId:s.chunk.id});await db.update(catalogOutputs).set({status:"needs_attention",reason:"Check the edge."}).where(eq(catalogOutputs.batchId,s.batch.id));expect((await handlePublishTask(w.deps,{batchId:s.batch.id,productId:s.product.id})).outcome).toBe("held");expect(w.copy).not.toHaveBeenCalled();expect((await handleFinalizeTask(w.deps,{batchId:s.batch.id})).outcome).toBe("done");expect((await db.select().from(catalogProducts).where(eq(catalogProducts.id,s.product.id)))[0]!.lockBatchId).toBe(s.batch.id);await db.update(catalogOutputs).set({status:"staged"}).where(eq(catalogOutputs.batchId,s.batch.id));expect((await handlePublishTask(w.deps,{batchId:s.batch.id,productId:s.product.id})).outcome).toBe("published");},60_000);
+it("holds undecided outputs with no public writes, then publishes once staged",async()=>{const w=world(),s=await seed(w,"held");await handleChunkTask(w.deps,{chunkId:s.chunk.id});await handleChunkTask(w.deps,{chunkId:s.chunk.id});await handleChunkTask(w.deps,{chunkId:s.chunk.id});await db.update(catalogOutputs).set({status:"needs_attention",reason:"Check the edge."}).where(eq(catalogOutputs.batchId,s.batch.id));expect((await handlePublishTask(w.deps,{batchId:s.batch.id,productId:s.product.id})).outcome).toBe("held");expect(w.copy).not.toHaveBeenCalled();expect((await handleFinalizeTask(w.deps,{batchId:s.batch.id})).outcome).toBe("done");expect((await db.select().from(catalogProducts).where(eq(catalogProducts.id,s.product.id)))[0]!.lockBatchId).toBe(s.batch.id);await db.update(catalogOutputs).set({status:"staged"}).where(eq(catalogOutputs.batchId,s.batch.id));expect((await handlePublishTask(w.deps,{batchId:s.batch.id,productId:s.product.id})).outcome).toBe("published");},60_000);
 it("replaces changed bytes and deletes removed shots only on selected channels",async()=>{const w=world(),s=await seed(w,"overwrite",{shots:["one","two"],channels:["noon","amazon"]});await run(w,s);const next=await seed(w,"overwrite2",{productId:s.product.id,shots:["changed"]});await run(w,next);expect(w.remove).toHaveBeenCalledTimes(1);expect(w.remove.mock.calls[0]![0]).toContain("/noon/");const [pair]=await db.select().from(catalogBatchProducts).where(eq(catalogBatchProducts.batchId,next.batch.id));expect(pair!.change).toBe("shots_removed");const events=await db.select().from(catalogProductEvents).where(eq(catalogProductEvents.batchId,next.batch.id));expect(events.map(e=>e.kind)).toEqual(expect.arrayContaining(["overwritten","shots_removed"]));const amazon=await db.select().from(catalogOutputs).where(and(eq(catalogOutputs.productId,s.product.id),eq(catalogOutputs.channel,"amazon"),eq(catalogOutputs.isLive,true)));expect(amazon).toHaveLength(2);},60_000);
 it("render keys include rules, policy, shot, channel and source",()=>{const input={sourceSha256:"one",channel:"noon" as const,n:1,policyKey:"default|fixture"};expect(new Set([renderKey(input),renderKey({...input,n:2}),renderKey({...input,channel:"amazon"}),renderKey({...input,policyKey:"other"}),renderKey({...input,rulesVersion:"next"}),renderKey({...input,sourceSha256:"two"})]).size).toBe(6);});
 it("holds a product if its chunk failed before it could create planned outputs",async()=>{const w=world(),s=await seed(w,"missing-output");await db.update(catalogChunks).set({status:"failed"}).where(eq(catalogChunks.id,s.chunk.id));expect((await handlePublishTask(w.deps,{batchId:s.batch.id,productId:s.product.id})).outcome).toBe("held");expect(w.copy).not.toHaveBeenCalled();},60_000);
@@ -110,7 +116,7 @@ it("serializes overlapping chunk deliveries before either can regress the stage"
   release();await firstDelivery;
   await handleChunkTask(w.deps,{chunkId:s.chunk.id});
   expect(duplicate.httpStatus).toBe(503);
-  expect((await db.select().from(catalogChunks).where(eq(catalogChunks.id,s.chunk.id)))[0]).toMatchObject({stage:"render",status:"done"});
+  expect((await db.select().from(catalogChunks).where(eq(catalogChunks.id,s.chunk.id)))[0]).toMatchObject({stage:"qa",status:"queued"});
   expect(w.deps.matteFor).toHaveBeenCalledTimes(1);
 },60_000);
 it("retries a temporary matte storage failure, then resumes without labelling the file corrupt",async()=>{
@@ -173,7 +179,7 @@ it("does not let an expired delayed matte delivery regress a later completed ren
   now=new Date(+now+1_000_000);
   await handleChunkTask(w.deps,{chunkId:s.chunk.id});await handleChunkTask(w.deps,{chunkId:s.chunk.id});
   release();expect((await delayed).httpStatus).toBe(503);
-  expect((await db.select().from(catalogChunks).where(eq(catalogChunks.id,s.chunk.id)))[0]).toMatchObject({stage:"render",status:"done"});
+  expect((await db.select().from(catalogChunks).where(eq(catalogChunks.id,s.chunk.id)))[0]).toMatchObject({stage:"qa",status:"queued"});
 },60_000);
 it("a stale finalizer cannot clear a newer owner's recoverable claim",async()=>{
   const w=world(),s=await seed(w,"finalize-new-owner");await run(w,s);
@@ -281,4 +287,41 @@ it("stops an expired owner before it requests another matte while its replacemen
     expect((await old).httpStatus).toBe(503);
     expect(w.deps.matteFor).toHaveBeenCalledTimes(3);
   } finally {releaseNew();await replacement;}
+},60_000);
+
+it("spec07 renders a replacement from its own private cache, processes only that source, and promotes one version",async()=>{
+ const w=world(),s=await seed(w,"replacement-chain",{shots:["first","second"],channels:["noon","amazon"]});
+ await run(w,s);
+ const before=await db.select().from(catalogOutputs).where(eq(catalogOutputs.batchId,s.batch.id));
+ const target=before.find(o=>o.n===1 && o.channel==="noon")!;
+ await db.update(catalogOutputs).set({status:"needs_attention",flags:["halo"]}).where(eq(catalogOutputs.id,target.id));
+ const original=(await db.select().from(catalogSourceImages).where(eq(catalogSourceImages.id,target.sourceImageId)))[0]!;
+ const originalBytes=Buffer.from(w.objects.get(original.rawUri)!.buf);
+ const bytes=await sharp({create:{width:800,height:800,channels:3,background:"red"}}).jpeg().toBuffer();
+ const replacementDeps={...w.deps,storage:{...w.deps.storage,signedPutUrl:vi.fn(async(p:string)=>p)}};
+ const start=await startReplacement(replacementDeps,{outputId:target.id,name:"replacement-chain_1.jpg",size:bytes.length,mime:"image/jpeg"});
+ const [upload]=await db.select().from(catalogUploads).where(eq(catalogUploads.id,start.uploadId));
+ await w.upload(storage.parseGsUri(upload!.gcsUri!).path,bytes,"image/jpeg");
+ const replacement=await completeReplacement(replacementDeps,{outputId:target.id,uploadId:start.uploadId,actor:"operator@opptra.com"});
+ const matteCalls=vi.mocked(w.deps.matteFor).mock.calls.length,renderCalls=vi.mocked(w.deps.renderAllChannels).mock.calls.length;
+ for(let i=0;i<3;i++) expect((await handleChunkTask(w.deps,{chunkId:replacement.chunkId})).httpStatus).toBe(200);
+ expect(w.deps.matteFor).toHaveBeenCalledTimes(matteCalls+1);
+ expect(w.deps.renderAllChannels).toHaveBeenCalledTimes(renderCalls+2);
+ expect((await handlePublishTask(w.deps,{batchId:s.batch.id,productId:s.product.id})).outcome).toBe("published");
+ const after=await db.select().from(catalogOutputs).where(eq(catalogOutputs.batchId,s.batch.id));
+ const fresh=after.filter(o=>o.sourceImageId===replacement.sourceImageId);
+ expect(fresh).toHaveLength(2);
+ expect(fresh.every(o=>o.isLive && o.generation!==before.find(old=>old.channel===o.channel && old.n===o.n)!.generation)).toBe(true);
+ expect(after.filter(o=>o.n===2).map(o=>o.generation)).toEqual(before.filter(o=>o.n===2).map(o=>o.generation));
+ const sources=await db.select().from(catalogSourceImages).where(eq(catalogSourceImages.productId,s.product.id));
+ expect(sources.filter(source=>source.n===1 && source.isCurrent).map(source=>source.id)).toEqual([replacement.sourceImageId]);
+ expect(sources.find(source=>source.id===replacement.sourceImageId)!.matteUri).not.toBe(original.matteUri);
+ expect(w.objects.get(original.rawUri)!.buf).toEqual(originalBytes);
+},60_000);
+it("spec07 renders into a queued QA delivery before publication",async()=>{
+ const w=world(),s=await seed(w,"qa-stage-order");
+ await handleChunkTask(w.deps,{chunkId:s.chunk.id});await handleChunkTask(w.deps,{chunkId:s.chunk.id});
+ const [chunk]=await db.select().from(catalogChunks).where(eq(catalogChunks.id,s.chunk.id));
+ expect(chunk).toMatchObject({stage:"qa",status:"queued"});
+ expect(w.deps.enqueue).not.toHaveBeenCalledWith("/tasks/catalog/publish",expect.anything(),expect.anything());
 },60_000);

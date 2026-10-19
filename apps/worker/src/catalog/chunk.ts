@@ -6,6 +6,8 @@ import { CHANNELS, STYLI_MIN_SOURCE_HEIGHT_PX, STYLI_SKIP_LOW_RESOLUTION } from 
 import { batchPrefix, derivedPath, publicObjectPath, publicUrl, stagingPath } from "@catalog/core/catalog/naming";
 import { bbox, planProduct, UnsupportedSourceError, type Matte } from "@catalog/core/catalog/render";
 import { renderKey } from "@catalog/core/catalog/pipeline/publish";
+import { catalogLlmDeps, CatalogQaCapError, runQaStage } from "./qa-stage";
+import { checkCatalogCaps } from "@catalog/core/catalog/qa/caps";
 import { flagReason } from "@catalog/core/catalog/types";
 import { recordCost } from "@catalog/core/spend";
 import type { HandleOptions, HandleResult } from "../server";
@@ -41,31 +43,62 @@ export async function handleChunkTask(deps: CatalogDeps, body: Record<string,unk
     }
     const prefix = batchPrefix(batch.brandSlug,batch.id,batch.isTest);
     for (const productId of chunk.productIds) {
+      await underClaim(async()=>{});
       const [product] = await deps.db.select().from(catalogProducts).where(eq(catalogProducts.id,productId));
       if (!product || product.lockBatchId !== batch.id) continue;
-      const sources = await deps.db.select().from(catalogSourceImages).where(and(eq(catalogSourceImages.productId,productId),eq(catalogSourceImages.batchId,batch.id))).orderBy(catalogSourceImages.n);
+      const allSources = await deps.db.select().from(catalogSourceImages).where(and(eq(catalogSourceImages.productId,productId),eq(catalogSourceImages.batchId,batch.id))).orderBy(catalogSourceImages.n);
+      const replaced=new Set(allSources.flatMap(source=>source.replacesId ? [source.replacesId]:[]));
+      const sources=allSources.filter(source=>!replaced.has(source.id) && (!chunk!.sourceImageIds?.length || chunk!.sourceImageIds.includes(source.id)));
+      const sourcePrefix=(source:typeof sources[number])=>source.replacesId ? `${prefix}/replacements-${source.id}`:prefix;
+      if(chunk.stage==="qa") {await runQaStage(deps,batch,sources,policy,underClaim);continue;}
+      if(chunk.stage==="matte" && !product.productType && sources.length) {
+       let type=batch.productType, flags:typeof sources[number]["flags"]=[];
+       if(type==="auto") {
+        try {
+         const cap=await checkCatalogCaps(deps.db,{batchId:batch.id,now:deps.now()});if(!cap.ok) throw new CatalogQaCapError(cap.reason);
+         const lowest=allSources.find(source=>!replaced.has(source.id))!;
+         const llm=catalogLlmDeps(deps,batch,underClaim);
+         const result=await deps.classifyProductType((await deps.storage.downloadBuffer(lowest.rawUri)).buf,{...llm,model:policy.qaModel});
+         llm.assertAvailable();
+         type=result.type;flags=result.flags;
+        } catch(error) {if(!(error instanceof CatalogQaCapError)) throw error;type="other";flags=["type_unknown"];}
+       }
+       await underClaim(async tx=>{await tx.update(catalogProducts).set({productType:type}).where(eq(catalogProducts.id,product.id));for(const source of sources) if(flags.length) await tx.update(catalogSourceImages).set({flags:[...new Set([...source.flags,...flags])]}).where(eq(catalogSourceImages.id,source.id));});
+       product.productType=type;for(const source of sources) source.flags=[...new Set([...source.flags,...flags])];
+      }
+      let productPolicy={...await deps.resolvePolicy(batch.brandSlug,product.productType ?? "other"),qaModel:policy.qaModel,qaModelSecond:policy.qaModelSecond};
+      if(product.productType==="other" && sources.some(source=>source.flags.includes("transparent"))) productPolicy={...productPolicy,matteModel:"birefnet-hr-matting"};
+      if(chunk.stage==="matte") {
+       await underClaim(async()=>{});
+       const health=await deps.matting.health();
+       const selected=[productPolicy.matteModel,productPolicy.matteModelSecond].find(id=>id && health.models.some(model=>model.id===id));
+       if(!selected) {if(!health.default) throw new Error("The cut-out service has not reported a default. Try again shortly.");productPolicy.matteModel=health.default;await underClaim(async tx=>tx.update(catalogBatches).set({counts:sql`${catalogBatches.counts} || '{"policyFallback":true}'::jsonb`}).where(eq(catalogBatches.id,batch.id)));deps.log("catalog matte policy fallback",{batchId:batch.id,productId});}
+       else productPolicy.matteModel=selected;
+       await underClaim(async tx=>{for(const source of sources) {source.matteModel=productPolicy.matteModel;await tx.update(catalogSourceImages).set({matteModel:productPolicy.matteModel}).where(eq(catalogSourceImages.id,source.id));}});
+      }
       if (chunk.stage === "matte") {
         const live = await deps.db.select().from(catalogOutputs).where(and(eq(catalogOutputs.productId,productId),eq(catalogOutputs.isLive,true)));
         for (const source of sources) {
           for (const channel of batch.channels) {
-            const key = renderKey({sourceSha256:source.sha256,channel,n:source.n,policyKey:`default|${policy.matteModel}`});
+            const key = renderKey({sourceSha256:source.sha256,channel,n:source.n,policyKey:`default|${productPolicy.matteModel}`});
             if (live.some(o=>o.channel===channel && o.n===source.n && o.renderKey===key)) continue;
             const [exists] = await deps.db.select({id:catalogOutputs.id}).from(catalogOutputs).where(and(eq(catalogOutputs.batchId,batch.id),eq(catalogOutputs.sourceImageId,source.id),eq(catalogOutputs.channel,channel)));
             if (exists) continue;
             const path = publicObjectPath(batch.brandSlug,product.pathKey,channel,source.n,batch.isTest), skip = channel === "styli" && STYLI_SKIP_LOW_RESOLUTION && (source.height ?? Infinity) < STYLI_MIN_SOURCE_HEIGHT_PX;
-            await underClaim(async tx=>tx.insert(catalogOutputs).values({batchId:batch.id,productId,sourceImageId:source.id,channel,n:source.n,canvasW:0,canvasH:0,scale:0,placedX:0,placedY:0,renderKey:key,objectPath:path,publicUrl:publicUrl(deps.storage.getPublicBucketName(),path),status:skip ? "skipped":"pending",flags:skip ? ["low_resolution"]:[],reason:skip ? "Skipped for Styli: the photo is smaller than Styli needs.":null}));
+            await underClaim(async tx=>tx.insert(catalogOutputs).values({batchId:batch.id,productId,sourceImageId:source.id,channel,n:source.n,canvasW:0,canvasH:0,scale:0,placedX:0,placedY:0,renderKey:key,objectPath:path,publicUrl:publicUrl(deps.storage.getPublicBucketName(),path),status:skip ? "skipped":"pending",flags:skip ? ["low_resolution"]:source.flags.filter(flag=>flag==="type_unknown" || flag==="transparent"),reason:skip ? "Skipped for Styli: the photo is smaller than Styli needs.":null}));
           }
           const pending = await deps.db.select().from(catalogOutputs).where(and(eq(catalogOutputs.sourceImageId,source.id),eq(catalogOutputs.batchId,batch.id),eq(catalogOutputs.status,"pending")));
           if (!pending.length || source.matteUri) continue;
           try {
-            const mattePath = derivedPath(prefix,product.pathKey,source.n,"matte"), gs = deps.storage.toGsUri(deps.storage.getBucketName(),mattePath), cached = await deps.storage.headObject(gs);
+            const mattePath = derivedPath(sourcePrefix(source),product.pathKey,source.n,"matte"), gs = deps.storage.toGsUri(deps.storage.getBucketName(),mattePath), cached = await deps.storage.headObject(gs);
             if (cached.exists) { await underClaim(async tx=>tx.update(catalogSourceImages).set({matteUri:gs,status:"matted"}).where(eq(catalogSourceImages.id,source.id))); continue; }
             const raw = await deps.storage.downloadBuffer(source.rawUri);
             let conversionFailure:unknown;
             let p:Awaited<ReturnType<CatalogDeps["prepare"]>>;
             try { p = await deps.prepare(raw.buf,source.originalName,async b=>{try{return await deps.matting.convert(b);}catch(error){conversionFailure=error;throw error;}}); }
             catch(error) { throw conversionFailure ?? error; }
-            const matte = await deps.matteFor(p,deps.matting,policy.matteModel); mattingMs += matte.ms;
+            await underClaim(async()=>{});
+            const matte = await deps.matteFor(p,deps.matting,productPolicy.matteModel); mattingMs += matte.ms;
             const fallback = matte.source === "floodfill", flags = [...new Set([...source.flags,...p.flags,...(fallback ? ["fallback_matte" as const]:[])])];
             await underClaim(async tx=>tx.update(catalogSourceImages).set({matteModel:matte.model,matteMs:matte.ms,width:p.width,height:p.height,flags}).where(eq(catalogSourceImages.id,source.id)));
             if (fallback) await underClaim(async tx=>tx.update(catalogOutputs).set({status:"needs_attention",flags:["fallback_matte"],reason:flagReason("fallback_matte"),updatedAt:deps.now()}).where(and(eq(catalogOutputs.sourceImageId,source.id),eq(catalogOutputs.batchId,batch.id),eq(catalogOutputs.status,"pending"))));
@@ -79,7 +112,7 @@ export async function handleChunkTask(deps: CatalogDeps, body: Record<string,unk
             await underClaim(async tx=>tx.update(catalogOutputs).set({status:"failed",reason:error,error,updatedAt:deps.now()}).where(and(eq(catalogOutputs.sourceImageId,source.id),eq(catalogOutputs.batchId,batch.id),eq(catalogOutputs.status,"pending"))));
           }
         }
-      } else {
+      } else if(chunk.stage==="render") {
         const prepared: { source: typeof sources[number]; p: Awaited<ReturnType<CatalogDeps["prepare"]>>; matte: Matte }[] = [];
         const uniformOutputs = await deps.db.select().from(catalogOutputs).where(and(eq(catalogOutputs.batchId,batch.id),eq(catalogOutputs.productId,productId),eq(catalogOutputs.channel,"styli"),eq(catalogOutputs.status,"pending")));
         for (const source of sources) {
@@ -94,7 +127,7 @@ export async function handleChunkTask(deps: CatalogDeps, body: Record<string,unk
           try {
             const p = await deps.prepare((await deps.storage.downloadBuffer(source.rawUri)).buf,source.originalName,b=>deps.matting.convert(b));
             const alpha = await sharp((await deps.storage.downloadBuffer(matteUri)).buf).toColourspace("b-w").raw().toBuffer();
-            prepared.push({source,p,matte:{alpha,width:p.width,height:p.height,model:source.matteModel ?? policy.matteModel,ms:source.matteMs ?? 0,source:source.flags.includes("alpha_source") ? "alpha_source":"model",target:null,sentLongSide:null}});
+            prepared.push({source,p,matte:{alpha,width:p.width,height:p.height,model:source.matteModel ?? productPolicy.matteModel,ms:source.matteMs ?? 0,source:source.flags.includes("alpha_source") ? "alpha_source":"model",target:null,sentLongSide:null}});
           } catch(error) {
             await underClaim(async tx=>tx.update(catalogOutputs).set({status:"failed",reason:error instanceof Error ? error.message : String(error),updatedAt:deps.now()}).where(and(eq(catalogOutputs.sourceImageId,source.id),eq(catalogOutputs.batchId,batch.id),eq(catalogOutputs.status,"pending"))));
           }
@@ -104,10 +137,10 @@ export async function handleChunkTask(deps: CatalogDeps, body: Record<string,unk
         for (const {source,p,matte} of prepared) {
           const outputs = await deps.db.select().from(catalogOutputs).where(and(eq(catalogOutputs.sourceImageId,source.id),eq(catalogOutputs.batchId,batch.id),eq(catalogOutputs.status,"pending")));
           for (const output of outputs) try {
-            const path = stagingPath(prefix,product.pathKey,output.channel,source.n), uri = deps.storage.toGsUri(deps.storage.getBucketName(),path), head = await deps.storage.headObject(uri);
+            const path = stagingPath(sourcePrefix(source),product.pathKey,output.channel,source.n), uri = deps.storage.toGsUri(deps.storage.getBucketName(),path), head = await deps.storage.headObject(uri);
             if (head.exists && output.bytes !== null && head.size===output.bytes) { await underClaim(async tx=>tx.update(catalogOutputs).set({stagingUri:uri,crc32c:head.crc32c,status:output.flags.some(f=>f==="small_source" || f==="failed_compliance") ? "needs_attention":"staged",updatedAt:deps.now()}).where(eq(catalogOutputs.id,output.id))); continue; }
             const renderStart = +deps.now();
-            const rendered = (await deps.renderAllChannels(p,matte,[output.channel],{shotNumber:source.n,productType:batch.productType,identifier:product.identifier,publicObjectPath:output.objectPath,...(output.channel==="styli" ? {uniformScale}:{})}))[output.channel];
+            const rendered = (await deps.renderAllChannels(p,matte,[output.channel],{shotNumber:source.n,productType:product.productType ?? "other",identifier:product.identifier,publicObjectPath:output.objectPath,...(output.channel==="styli" ? {uniformScale}:{})}))[output.channel];
             renderMs += +deps.now()-renderStart;
             const flags = [...new Set([...source.flags,...rendered.flags])], status = rendered.status==="skipped" ? "skipped":!rendered.compliance.ok || flags.includes("small_source") ? "needs_attention":rendered.jpeg ? "staged":"failed";
             const patch = {canvasW:rendered.plan.w,canvasH:rendered.plan.h,scale:rendered.plan.scale,placedX:rendered.plan.placedX,placedY:rendered.plan.placedY,bytes:rendered.bytes,quality:rendered.quality,flags,compliance:rendered.compliance,reason:rendered.notes.join("; ") || (flags.includes("small_source") ? flagReason("small_source"):null),updatedAt:deps.now()};
@@ -130,6 +163,12 @@ export async function handleChunkTask(deps: CatalogDeps, body: Record<string,unk
       if (!advanced.length) return {httpStatus:503,outcome:"claim_lost"};
       await deps.db.update(catalogBatches).set({status:"rendering"}).where(and(eq(catalogBatches.id,batch.id),eq(catalogBatches.status,"matting")));
       await deps.enqueue("/tasks/catalog/chunk",{chunkId:chunk.id},{taskId:`chunk-${chunk.id}-render`});
+    } else if(chunk.stage==="render") {
+      const advanced=await deps.db.update(catalogChunks).set({stage:"qa",status:"queued",taskName:null,finishedAt:deps.now()}).where(ownsClaim()).returning({id:catalogChunks.id});
+      if(!advanced.length) return {httpStatus:503,outcome:"claim_lost"};
+      const remaining=await deps.db.select().from(catalogChunks).where(eq(catalogChunks.batchId,batch.id));
+      if(remaining.every(row=>row.stage==="qa" || row.status==="done" || row.status==="failed")) await deps.db.update(catalogBatches).set({status:"qa"}).where(eq(catalogBatches.id,batch.id));
+      await deps.enqueue("/tasks/catalog/chunk",{chunkId:chunk.id},{taskId:`chunk-${chunk.id}-qa`});
     } else { const completed = await deps.db.update(catalogChunks).set({status:"done",taskName:null,finishedAt:deps.now()}).where(ownsClaim()).returning({id:catalogChunks.id}); if (!completed.length) return {httpStatus:503,outcome:"claim_lost"}; await finish(); }
     await refreshBatchProgress(deps.db,batch.id);
     return {httpStatus:200,outcome:"done"};

@@ -1,6 +1,10 @@
 import { and, count, eq, sql } from "drizzle-orm";
 import type { Db } from "@catalog/core/db/client";
 import { catalogBatches, catalogBatchProducts, catalogOutputs } from "@catalog/core/db/schema";
+import { ensureDefaultPolicies, resolvePolicy } from "@catalog/core/catalog/qa/policy";
+import { judgeOutput } from "@catalog/core/catalog/qa/judge";
+import { classifyProductType } from "@catalog/core/catalog/qa/classify";
+import type { ProductType } from "@catalog/core/catalog/types";
 import { MattingClient, matteFor } from "@catalog/core/catalog/matte";
 import { prepare, renderAllChannels } from "@catalog/core/catalog/render";
 import type { ResolvedPolicy } from "@catalog/core/catalog/types";
@@ -10,17 +14,20 @@ export interface CatalogDeps {
   db: Db; storage: typeof storage; matting: MattingClient; enqueue: typeof enqueueTask;
   fetch: typeof fetch; now: () => Date; log: (message: string, fields?: Record<string,unknown>) => void;
   resolvePolicy: (brandSlug:string,category:string) => Promise<ResolvedPolicy>;
+  judgeOutput: typeof judgeOutput; classifyProductType: typeof classifyProductType;
   prepare: typeof prepare; matteFor: typeof matteFor; renderAllChannels: typeof renderAllChannels;
 }
 let sharedMatting: MattingClient | undefined;
 export function workerCatalogDeps(db: Db): CatalogDeps {
   sharedMatting ??= new MattingClient({services:[{baseUrl:process.env.MATTING_URL ?? "http://localhost:8081",target:"cpu"},...(process.env.MATTING_GPU_URL ? [{baseUrl:process.env.MATTING_GPU_URL,target:"gpu" as const}]:[])]});
   const matting = sharedMatting;
-  return {db,storage,matting,enqueue:enqueueTask,fetch,now:()=>new Date(),log:(message,fields)=>console.info(JSON.stringify({message,...fields})),prepare,matteFor,renderAllChannels,
-    resolvePolicy:async()=> {
+  return {db,storage,matting,enqueue:enqueueTask,fetch,now:()=>new Date(),log:(message,fields)=>console.info(JSON.stringify({message,...fields})),prepare,matteFor,renderAllChannels,judgeOutput,classifyProductType,
+    resolvePolicy:async(brandSlug,category)=> {
       const health = await matting.health();
       if (!health.default) throw new Error("The cut-out service has not reported a default. Try again shortly.");
-      return {matteModel:health.default,qaModel:process.env.CATALOG_QA_DEFAULT_MODEL ?? "",threshold:75,floor:60,qaMode:"per_source",qaSampleRate:1,source:"default"};
+      await ensureDefaultPolicies(db,health);
+      const policy=await resolvePolicy(db,brandSlug,category as ProductType | "*");
+      return policy;
     }};
 }
 // Keep execution ownership through the Cloud Tasks deadline, plus a short termination grace.
@@ -40,6 +47,6 @@ export async function refreshBatchProgress(db:Db,batchId:string):Promise<void> {
   const groups=await db.select({status:catalogOutputs.status,n:count()}).from(catalogOutputs).where(eq(catalogOutputs.batchId,batchId)).groupBy(catalogOutputs.status);
   const [held]=await db.select({n:count()}).from(catalogBatchProducts).where(and(eq(catalogBatchProducts.batchId,batchId),eq(catalogBatchProducts.change,"pending_attention")));
   const total=(status:string)=>groups.find(g=>g.status===status)?.n ?? 0;
-  const patch={verified:total("verified"),needsAttention:total("needs_attention"),failed:total("failed"),skipped:total("skipped"),attentionProducts:held?.n ?? 0};
+  const patch={verified:total("verified"),needsAttention:total("needs_attention"),failed:total("failed"),skipped:total("skipped"),staged:total("staged"),attentionProducts:held?.n ?? 0};
   await db.update(catalogBatches).set({counts:sql`${catalogBatches.counts} || ${JSON.stringify(patch)}::jsonb`}).where(and(eq(catalogBatches.id,batchId),sql`${catalogBatches.status} <> 'done'`));
 }

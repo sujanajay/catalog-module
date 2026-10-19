@@ -77,7 +77,7 @@ export async function handleFinalizeTask(deps:CatalogDeps,body:Record<string,unk
       current.batch.counts=cleanCounts(current.batch.counts);current.report.counts=current.batch.counts;
       // Network work may outlive a decision or publication. Commit only the snapshot we checked.
       if(snapshotOf(current)!==snapshot) return "snapshot_changed";
-      await tx.update(catalogBatches).set({counts,status:"done",finishedAt:deps.now(),sheetXlsxUri:paths.xlsx,sheetCsvUri:paths.csv,reportUri:paths.report,error:null}).where(claimWhere);
+      await tx.update(catalogBatches).set({counts,cost:initial.batch.cost,status:"done",finishedAt:deps.now(),sheetXlsxUri:paths.xlsx,sheetCsvUri:paths.csv,reportUri:paths.report,error:null}).where(claimWhere);
       await releaseLocks(tx as unknown as CatalogDeps["db"],batchId);
       return "done";
     });

@@ -16,7 +16,7 @@ apparel_model: apparel worn on a model;
 apparel_flat: apparel laid flat or shown without a model;
 bag_accessory: a bag or accessory;
 other: anything else.
-Return only {"type":"footwear|apparel_model|apparel_flat|bag_accessory|other","confidence":0.0}, with confidence from 0 to 1.`;
+Return only {"type":"footwear|apparel_model|apparel_flat|bag_accessory|other","confidence":0.0,"transparent":false}, with confidence from 0 to 1. Set transparent true only when the product itself is glass, transparent packaging or transparent material.`;
 
 export function renderTemplate(template: string, vars: Record<string, string | number>): string {
   return template.replace(/<([a-zA-Z_]+)>/g, (token, key: string) => vars[key] === undefined ? token : String(vars[key]));
