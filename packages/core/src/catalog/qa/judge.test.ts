@@ -3,7 +3,7 @@ import sharp from "sharp";
 import { judgeOutput, normalizeScores, verdictFor, QA_DIMENSIONS } from "./judge";
 import { classifyProductType } from "./classify";
 import { CATALOG_QA_TEMPLATE, renderTemplate } from "./templates";
-import { QA_USD_PER_CHECK_ESTIMATE } from "../cost";
+import { QA_USD_PER_CHECK_FALLBACK } from "../cost";
 /** A non-streaming OpenRouter chat completion as it arrives in production (usage is always present). */
 const openRouterReply = (content: string) => ({id:"gen-1760900000-abc",provider:"Google",model:"test",object:"chat.completion",created:1760900000,
  choices:[{logprobs:null,finish_reason:"stop",native_finish_reason:"STOP",index:0,message:{role:"assistant",content,refusal:null,reasoning:null}}],
@@ -51,7 +51,7 @@ describe("catalog judge", () => {
  it("requires at least one numeric dimension and logs absent cost",async()=>{
   const bytes=await image(), log=vi.fn();
   const result=await judgeOutput({original:bytes,output:bytes,n:1,identifier:"A",channel:"noon",anchor:"centre",productType:"other",model:"test",threshold:75,floor:60},{apiKey:"fake",fetch:async()=>new Response(JSON.stringify({choices:[{message:{content:JSON.stringify({complete_product:80})}}]})),log});
-  expect(result.flags).not.toContain("qa_unavailable");expect(result.costUsd).toBe(QA_USD_PER_CHECK_ESTIMATE);
+  expect(result.flags).not.toContain("qa_unavailable");expect(result.costUsd).toBe(QA_USD_PER_CHECK_FALLBACK);
   expect(log).toHaveBeenCalledWith(expect.stringMatching(/usage\.cost absent; recorded the estimated price USD 0\.0013/));
  });
  it("reads the billed cost from OpenRouter's real response shape and does not log",async()=>{
@@ -67,7 +67,7 @@ describe("catalog judge", () => {
   const reply=openRouterReply(JSON.stringify(all(90)));
   delete (reply.usage as {cost?:number}).cost;
   const result=await judgeOutput({original:bytes,output:bytes,n:1,identifier:"A",channel:"noon",anchor:"centre",productType:"other",model:"test",threshold:75,floor:60},{apiKey:"fake",fetch:async()=>new Response(JSON.stringify(reply)),log});
-  expect(result.costUsd).toBe(QA_USD_PER_CHECK_ESTIMATE);
+  expect(result.costUsd).toBe(QA_USD_PER_CHECK_FALLBACK);
   expect(log).toHaveBeenCalledWith(expect.stringContaining("prompt tokens 2911, completion tokens 160"));
  });
  it("warns with the HTTP status before mapping an auth failure or a missing key to qa_unavailable",async()=>{
