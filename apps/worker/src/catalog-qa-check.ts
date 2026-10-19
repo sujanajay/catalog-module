@@ -72,6 +72,11 @@ async function main() {
   const live = liveQaEnabled(), run = `qa-check-${randomUUID()}`;
   const out = path.resolve(process.env.CATALOG_REAL_OUT ?? `var/catalog-test/qa-check/${run}`);
   const fcLimit = Number(process.env.QA_CHECK_FC_LIMIT ?? 200);
+  // Photos taken from the Anta set; unset means all of them. A small value (with QA_CHECK_FC_LIMIT)
+  // makes a cheap live probe after a deploy.
+  const antaLimit = process.env.QA_CHECK_ANTA_LIMIT?.trim() ? Number(process.env.QA_CHECK_ANTA_LIMIT) : Infinity;
+  assert(Number.isInteger(fcLimit) && fcLimit >= 0, "QA_CHECK_FC_LIMIT must be a whole number of photos.");
+  assert(antaLimit === Infinity || (Number.isInteger(antaLimit) && antaLimit >= 0), "QA_CHECK_ANTA_LIMIT must be a whole number of photos.");
   await mkdir(out, { recursive: true });
   const db = getDb(), batchIds: string[] = [];
   const base = workerCatalogDeps(db);
@@ -84,7 +89,7 @@ async function main() {
       const fixture = await localFixture(brand.slug, true, run);
       if (!fixture) continue;
       fixture.name = brand.name;
-      if (fixture.slug !== "anta") fixture.shots = fixture.shots.slice(0, fcLimit);
+      fixture.shots = fixture.shots.slice(0, fixture.slug === "anta" ? antaLimit : fcLimit);
       fixtures.push(fixture);
     }
     assert(fixtures.length, "No real Anta or French Connection set is available in REAL_DATA_DIR.");

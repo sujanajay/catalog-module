@@ -142,7 +142,8 @@ staged object (never the public one). Messages: system = rendered `CATALOG_QA_TE
 validate, { temperature: 0, maxTokens: LLM_MAX_TOKENS, model }, deps)` (OpenRouter chat
 completions with image parts and `usage.cost`; confirmed in current docs; builders re-confirm before
 coding). The validator requires at least one numeric dimension. `costUsd` is `usage.cost` when
-present, else 0 with a log line. A thrown `LlmResponseError` or `LlmJsonError` after the built-in
+present, else `QA_USD_PER_CHECK_ESTIMATE` with a log line (never 0 for a billed completion;
+`qaCallCost` in `cost.ts`). A thrown `LlmResponseError` or `LlmJsonError` after the built-in
 retry marks the output `needs_attention` with flag `qa_unavailable` and its sentence; it never
 fails the batch. Cost per check is about USD 0.0004 (Flash-Lite, Haiku 5.5, Qwen 30B-A3B) to
 0.0013 (2.5 Flash, 3.5 Flash-Lite).
@@ -222,7 +223,8 @@ export; the eval harness in 08 reads it from the database.
 ### 4.5 Spend and caps (`caps.ts`)
 
 Every judge and classifier call records `recordCost(db, { brandSlug, batchId, engine:
-"catalog_qa", costUsd })` and adds to `catalog_batches.cost.qaUsd` and `cost.qaCalls`. Compute stays
+"catalog_qa", costUsd })` and adds to `catalog_batches.cost.qaUsd`, `cost.qaCalls`,
+`cost.qaPromptTokens` and `cost.qaCompletionTokens` (from OpenRouter's `usage`). Compute stays
 on `catalog_compute` (06). `checkCatalogCaps(db, { batchId, env, now })` mirrors `checkCaps`: the
 daily cap is `DAILY_SPEND_CAP_USD` (default 10) over all engines and brands for the UTC day; the
 per-batch cap is `catalog_batches.options.qaCapUsd` (null = none). When a cap is hit, QA for the
@@ -394,9 +396,10 @@ operator labels the Styli and Noon sets through this screen; the product owner l
 whose `change` is not `unchanged` and that have at least one output not `skipped` (unchanged
 products cost nothing and are excluded from the denominator); `usdPerIdentifier = usd /
 identifiers`; `inrPerIdentifier = usdPerIdentifier * INR_PER_USD`. Display on the batch page card
-"Cost so far": "INR <x> per style so far · agency reference INR 60 per style" (two decimals). When
-`INR_PER_USD` is not set: "USD <x> per style so far (set INR_PER_USD to show rupees) · agency
-reference INR 60 per style". Finalize writes `cost.identifiers`, `cost.usdPerIdentifier`,
+"Cost so far": "INR <x> per style so far · INR <y> for this batch · agency reference INR 60 per
+style" (INR two decimals, USD four, so a sub-cent spend never reads 0.00; `inrAmount`, `usdAmount`). When
+`INR_PER_USD` is not set: "USD <x> per style so far · USD <y> for this batch · Cost in rupees is not
+configured yet · agency reference INR 60 per style". Finalize writes `cost.identifiers`, `cost.usdPerIdentifier`,
 `cost.inrPerIdentifier` into the batch and the report. The product page shows the lifetime sum
 across batches (06 page; data from `spend_days` by `batch_id`). The brand page shows the brand's
 total from `spend_days` by `brand_slug`.

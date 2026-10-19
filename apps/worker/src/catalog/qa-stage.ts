@@ -6,6 +6,7 @@ import { sampledForQa, strictestChannel } from "@catalog/core/catalog/qa/policy"
 import { flagDetails } from "@catalog/core/catalog/qa/reasons";
 import { QA_DIMENSIONS, DIMENSION_FLAGS, verdictFor } from "@catalog/core/catalog/qa/judge";
 import { recordCost } from "@catalog/core/spend";
+import { qaCallCost } from "@catalog/core/catalog/cost";
 import type { ResolvedPolicy, OutputFlag } from "@catalog/core/catalog/types";
 import type { CatalogDeps } from "./deps";
 
@@ -13,6 +14,21 @@ type Batch = typeof catalogBatches.$inferSelect;
 type Source = typeof catalogSourceImages.$inferSelect;
 export type UnderClaim = <T>(write:(db:CatalogDeps["db"])=>Promise<T>)=>Promise<T>;
 export class CatalogQaCapError extends Error {}
+/** The model id of a chat completion request; it is the first field of the JSON body. */
+function requestModel(init?:RequestInit):string | null {
+ return typeof init?.body==="string" ? /"model"\s*:\s*"([^"]{1,200})"/.exec(init.body.slice(0,500))?.[1] ?? null : null;
+}
+/** Why an attempt failed, for the warn line: auth, rate limit, server, timeout or network, plus OpenRouter's short message. */
+async function failureDetail(response:Response | undefined,failure:unknown):Promise<Record<string,unknown>> {
+ if(!response) {
+  const name=(failure as {name?:string} | null)?.name;
+  return {kind:name==="TimeoutError" || name==="AbortError" ? "timeout":"network",error:String((failure as Error | null)?.message ?? failure).slice(0,200)};
+ }
+ const kind=response.status===401 || response.status===403 ? "auth":response.status===402 ? "credit":response.status===429 ? "rate_limit":response.status>=500 ? "server":"request";
+ let error="";
+ try {const text=await response.clone().text();error=String((JSON.parse(text) as {error?:{message?:unknown}}).error?.message ?? text);}catch{/* No readable body. */}
+ return {kind,error:error.replace(/Bearer\s+\S+/g,"Bearer [REDACTED]").slice(0,200)};
+}
 /** Check the lease and cap before every HTTP attempt, including the JSON helper's retry. */
 export function catalogLlmDeps(deps:CatalogDeps,batch:Batch,underClaim:UnderClaim) {
  let stopped:unknown;
@@ -22,17 +38,26 @@ export function catalogLlmDeps(deps:CatalogDeps,batch:Batch,underClaim:UnderClai
    const cap=await checkCatalogCaps(deps.db,{batchId:batch.id,now:deps.now()});
    if(!cap.ok) throw new CatalogQaCapError(cap.reason);
   }catch(error){stopped=error;throw error;}
-  let response:Response | undefined;
+  let response:Response | undefined,failure:unknown;
+  const started=Date.now();
   try { response=await deps.fetch(url,init);return response; }
+  catch(error){failure=error;throw error;}
   finally {
-   let costUsd=0;
-   if(response?.ok) try {const body=await response.clone().json() as {usage?:{cost?:number}};costUsd=Math.max(0,Number(body.usage?.cost) || 0);}catch{/* Invalid replies still count as attempts. */}
+   // A failed or unanswered request is not billed; a successful one is priced from OpenRouter's
+   // usage.cost, or at the per-check estimate when that is missing (the judge logs that case).
+   let spent={costUsd:0,estimated:false,promptTokens:0,completionTokens:0};
+   if(response?.ok) {let body:unknown;try {body=await response.clone().json();}catch{/* Invalid replies still count as billed attempts. */}spent=qaCallCost(body);}
+   const {costUsd,promptTokens,completionTokens}=spent;
+   // One line per OpenRouter attempt: never the key, never the prompt or its images.
+   const fields={batchId:batch.id,model:requestModel(init),status:response?.status ?? 0,ms:Date.now()-started,costUsd,estimated:spent.estimated,promptTokens,completionTokens};
+   if(response?.ok) deps.log("catalog_qa call",fields);
+   else deps.log("catalog_qa call failed",{...fields,severity:"WARNING",...(await failureDetail(response,failure))});
    await deps.db.transaction(async tx=>{
     await recordCost(tx as unknown as CatalogDeps["db"],{brandSlug:batch.brandSlug,batchId:batch.id,engine:"catalog_qa",costUsd,day:deps.now()});
-    await tx.update(catalogBatches).set({cost:sql`${catalogBatches.cost} || jsonb_build_object('qaUsd',coalesce((${catalogBatches.cost}->>'qaUsd')::numeric,0)+${costUsd}::numeric,'qaCalls',coalesce((${catalogBatches.cost}->>'qaCalls')::numeric,0)+1)`}).where(eq(catalogBatches.id,batch.id));
+    await tx.update(catalogBatches).set({cost:sql`${catalogBatches.cost} || jsonb_build_object('qaUsd',coalesce((${catalogBatches.cost}->>'qaUsd')::numeric,0)+${costUsd}::numeric,'qaCalls',coalesce((${catalogBatches.cost}->>'qaCalls')::numeric,0)+1,'qaPromptTokens',coalesce((${catalogBatches.cost}->>'qaPromptTokens')::numeric,0)+${promptTokens}::numeric,'qaCompletionTokens',coalesce((${catalogBatches.cost}->>'qaCompletionTokens')::numeric,0)+${completionTokens}::numeric)`}).where(eq(catalogBatches.id,batch.id));
    });
   }
- },log:(message:string)=>deps.log(message)};
+ },log:(message:string,fields?:Record<string,unknown>)=>deps.log(message,{batchId:batch.id,...fields})};
 }
 export const qaCapReason = `${flagDetails("qa_cap").why} ${flagDetails("qa_cap").whatToDo}`;
 export async function runQaStage(deps:CatalogDeps,batch:Batch,sources:Source[],policy:ResolvedPolicy,underClaim:UnderClaim):Promise<void> {

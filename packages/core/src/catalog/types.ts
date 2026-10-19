@@ -76,6 +76,8 @@ export interface BatchCounts {
 export interface BatchCost {
   computeVcpuSeconds: number; mattingMs: number; renderMs: number; computeUsd: number;
   qaUsd: number; qaCalls: number; identifiers: number;
+  /** Token totals of the quality check and classifier calls, from OpenRouter's `usage` (07 4.5). */
+  qaPromptTokens?: number; qaCompletionTokens?: number;
   usdPerIdentifier: number | null; inrPerIdentifier: number | null;
 }
 

@@ -100,7 +100,7 @@ export default async function BatchPage({ params, searchParams }: { params: Prom
             </div>
             <div className="card">
               <h2>Cost so far</h2>
-              <CostLine line={{ usdPerIdentifier: cost.usdPerIdentifier, inrPerIdentifier: cost.inrPerIdentifier }} />
+              <CostLine line={{ usdPerIdentifier: cost.usdPerIdentifier, inrPerIdentifier: cost.inrPerIdentifier, usd: cost.usd, inr: cost.inr }} />
             </div>
           </div>
         }

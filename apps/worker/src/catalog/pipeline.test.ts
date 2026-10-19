@@ -2,7 +2,7 @@ import sharp from "sharp";
 import {startReplacement,completeReplacement,applyDecision,applySkuMap} from "@catalog/core/catalog/decisions";
 import { judgeOutput } from "@catalog/core/catalog/qa/judge";
 import { batchPrefix, publicObjectPath, stagingPath } from "@catalog/core/catalog/naming";
-import { afterAll,beforeAll,expect,it,vi } from "vitest";
+import { afterAll,beforeAll,describe,expect,it,vi } from "vitest";
 import { and,eq,sql } from "drizzle-orm";
 import type { Db } from "@catalog/core/db/client";
 import { createTestDb } from "@catalog/core/db/testing";
@@ -12,6 +12,8 @@ import { workerCatalogDeps,type CatalogDeps } from "./deps";
 import { UnsupportedSourceError } from "@catalog/core/catalog/render";
 import { handleSweep } from "./sweep";
 import { handleChunkTask } from "./chunk";
+import { catalogLlmDeps, CatalogQaCapError, type UnderClaim } from "./qa-stage";
+import { QA_USD_PER_CHECK_ESTIMATE } from "@catalog/core/catalog/cost";
 import { handlePublishTask } from "./publish";
 import { handleFinalizeTask } from "./finalize";
 import { renderKey } from "@catalog/core/catalog/pipeline/publish";
@@ -443,6 +445,89 @@ it("spec07 a malformed judge reply retries once, then qa_unavailable; spend_days
  expect(batch!.cost).toMatchObject({qaCalls:2});
  expect(Number(batch!.cost.qaUsd)).toBeCloseTo(0.004);
 },60_000);
+/** A non-streaming OpenRouter chat completion in its production shape; `cost` is dropped when null. */
+const openRouterReply=(content:string,cost:number|null=0.000139)=>({id:"gen-1760900000-abc",provider:"Google",model:"test/judge",object:"chat.completion",created:1760900000,
+ choices:[{finish_reason:"stop",native_finish_reason:"STOP",index:0,message:{role:"assistant",content,refusal:null}}],
+ usage:{prompt_tokens:2911,completion_tokens:160,total_tokens:3071,...(cost===null ? {}:{cost}),is_byok:false,prompt_tokens_details:{cached_tokens:0},completion_tokens_details:{reasoning_tokens:0}}});
+const passScores=JSON.stringify({complete_product:95,same_product:95,edge_quality:95,background_clean:95,no_text_or_watermark:95,orientation_ok:95,placement_ok:95,is_collage:false,reasons:[]});
+async function judgeOnceLive(name:string,respond:()=>Promise<Response>) {
+ const w=world(),s=await seed(w,name),log=vi.fn();
+ vi.mocked(w.deps.resolvePolicy).mockResolvedValue({matteModel:"fixture",qaModel:"test/judge",threshold:75,floor:60,qaMode:"per_source",qaSampleRate:1,source:"default"});
+ for(let i=0;i<2;i++) await handleChunkTask(w.deps,{chunkId:s.chunk.id});
+ const real=await sharp({create:{width:64,height:64,channels:3,background:"white"}}).jpeg().toBuffer();
+ for(const [uri,obj] of w.objects) if(uri.includes(s.batch.id)) w.objects.set(uri,{...obj,buf:real});
+ const publicFetch=w.deps.fetch;
+ const llm=vi.fn(respond);
+ w.deps.fetch=vi.fn<typeof globalThis.fetch>(async(url,init)=>String(url).startsWith("https://openrouter.ai/")?llm():publicFetch(url,init));
+ w.deps.judgeOutput=judgeOutput;w.deps.log=log;
+ vi.stubEnv("OPENROUTER_API_KEY","test-key");
+ try { expect((await handleChunkTask(w.deps,{chunkId:s.chunk.id})).httpStatus).toBe(200); } finally { vi.unstubAllEnvs(); }
+ expect(llm).toHaveBeenCalledTimes(1);
+ const spend=(await db.select().from(spendDays).where(and(eq(spendDays.batchId,s.batch.id),eq(spendDays.engine,"catalog_qa"))));
+ const [batch]=await db.select().from(catalogBatches).where(eq(catalogBatches.id,s.batch.id));
+ const [output]=await db.select().from(catalogOutputs).where(eq(catalogOutputs.batchId,s.batch.id));
+ return {spend,batch:batch!,log,output:output!};
+}
+const reply=(cost:number|null)=>async()=>new Response(JSON.stringify(openRouterReply(passScores,cost)));
+it("spec07 judge spend: OpenRouter's billed usage.cost and tokens reach spend_days and the batch cost, and the call is logged",async()=>{
+ const {spend,batch,log}=await judgeOnceLive("qa-spend-billed",reply(0.000139));
+ expect(log).toHaveBeenCalledWith("catalog_qa call",expect.objectContaining({batchId:batch.id,model:"test/judge",status:200,costUsd:0.000139,estimated:false,promptTokens:2911,completionTokens:160}));
+ expect(JSON.stringify(log.mock.calls)).not.toMatch(/test-key|base64/);
+ expect(spend).toHaveLength(1);
+ expect(spend[0]).toMatchObject({calls:1,brandSlug:"anta"});expect(Number(spend[0]!.costUsd)).toBeCloseTo(0.000139,9);
+ expect(batch.cost).toMatchObject({qaCalls:1,qaPromptTokens:2911,qaCompletionTokens:160});expect(Number(batch.cost.qaUsd)).toBeCloseTo(0.000139,9);
+ expect(log.mock.calls.filter(([message])=>/usage\.cost absent/.test(String(message)))).toHaveLength(0);
+},60_000);
+it("spec07 judge spend: a reply without usage.cost is recorded at the per-check estimate and logged, never 0",async()=>{
+ const {spend,batch,log}=await judgeOnceLive("qa-spend-estimated",reply(null));
+ expect(Number(spend[0]!.costUsd)).toBeCloseTo(QA_USD_PER_CHECK_ESTIMATE,9);
+ expect(Number(batch.cost.qaUsd)).toBeCloseTo(QA_USD_PER_CHECK_ESTIMATE,9);
+ expect(batch.cost).toMatchObject({qaCalls:1,qaPromptTokens:2911,qaCompletionTokens:160});
+ expect(log).toHaveBeenCalledWith(expect.stringMatching(/usage\.cost absent; recorded the estimated price/),{batchId:batch.id});
+},60_000);
+it("spec07 an auth failure is logged at warn with its status before it becomes qa_unavailable, and costs nothing",async()=>{
+ const {spend,batch,log,output}=await judgeOnceLive("qa-auth-failure",async()=>new Response(JSON.stringify({error:{message:"No auth credentials found",code:401}}),{status:401}));
+ expect(output.flags).toContain("qa_unavailable");
+ expect(log).toHaveBeenCalledWith("catalog_qa call failed",expect.objectContaining({severity:"WARNING",status:401,kind:"auth",error:"No auth credentials found",costUsd:0,batchId:batch.id}));
+ expect(log).toHaveBeenCalledWith("catalog_qa: quality check unavailable",expect.objectContaining({severity:"WARNING",status:401,kind:"auth",batchId:batch.id}));
+ expect(Number(spend[0]!.costUsd)).toBe(0);expect(spend[0]!.calls).toBe(1);
+ expect(JSON.stringify(log.mock.calls)).not.toContain("test-key");
+},60_000);
+it("spec07 a judge timeout is logged at warn before it becomes qa_unavailable",async()=>{
+ const {log,output}=await judgeOnceLive("qa-timeout",async()=>{throw new DOMException("The operation was aborted due to timeout","TimeoutError");});
+ expect(output.flags).toContain("qa_unavailable");
+ expect(log).toHaveBeenCalledWith("catalog_qa call failed",expect.objectContaining({severity:"WARNING",status:0,kind:"timeout"}));
+ expect(log).toHaveBeenCalledWith("catalog_qa: quality check unavailable",expect.objectContaining({severity:"WARNING",status:0,kind:"no_response"}));
+},60_000);
+describe("spec07 caps count the recorded judge spend",()=>{
+ const url="https://openrouter.ai/api/v1/chat/completions";
+ async function capWorld(name:string,options:Record<string,unknown>,day:string) {
+  const w=world();
+  w.deps.now=()=>new Date(day);
+  const upstream=vi.fn(async()=>new Response(JSON.stringify(openRouterReply(passScores))));
+  w.deps.fetch=upstream as unknown as typeof globalThis.fetch;
+  const [batch]=await db.insert(catalogBatches).values({brandSlug:"anta",brandName:"Anta",name,isTest:true,createdBy:"test@opptra.com",options:{...DEFAULT_BATCH_OPTIONS,...options}}).returning();
+  const underClaim=(async(write:(conn:Db)=>Promise<unknown>)=>write(db)) as UnderClaim;
+  return {llm:catalogLlmDeps(w.deps,batch!,underClaim),upstream,batch:batch!};
+ }
+ const recorded=async(batchId:string)=>(await db.select().from(spendDays).where(eq(spendDays.batchId,batchId))).reduce((sum,row)=>sum+Number(row.costUsd),0);
+ it("the batch QA cap refuses the call after the recorded spend reaches it",async()=>{
+  const {llm,upstream,batch}=await capWorld("qa-cap-recorded",{qaCapUsd:0.00025},"2031-05-05T10:00:00Z");
+  await llm.fetch(url,{method:"POST"});await llm.fetch(url,{method:"POST"});
+  expect(await recorded(batch.id)).toBeCloseTo(0.000278,9);
+  await expect(llm.fetch(url,{method:"POST"})).rejects.toBeInstanceOf(CatalogQaCapError);
+  expect(upstream).toHaveBeenCalledTimes(2);expect(()=>llm.assertAvailable()).toThrow(/Batch QA spend cap reached/);
+ });
+ it("the daily cap refuses the call after the day's recorded spend reaches DAILY_SPEND_CAP_USD",async()=>{
+  const {llm,upstream}=await capWorld("qa-daily-recorded",{},"2031-06-06T10:00:00Z");
+  vi.stubEnv("DAILY_SPEND_CAP_USD","0.00025");
+  try {
+   await llm.fetch(url,{method:"POST"});await llm.fetch(url,{method:"POST"});
+   await expect(llm.fetch(url,{method:"POST"})).rejects.toThrow(/Daily spend cap reached/);
+  } finally { vi.unstubAllEnvs(); }
+  expect(upstream).toHaveBeenCalledTimes(2);
+ });
+});
 it("spec07 SKU mapping adds ids and bumps the export to links-v<k+1>",async()=>{
  const w=world(),s=await seed(w,"sku-map");
  expect((await run(w,s)).outcome).toBe("published");
