@@ -6,9 +6,11 @@ import { planSignedUploads, mapLimit } from "@catalog/core/catalog/ingest/local-
 import { batchPrefix } from "@catalog/core/catalog/naming";
 import * as storage from "@catalog/core/storage";
 import { enqueueTask } from "@catalog/core/tasks";
+import { isTransientError } from "@catalog/core/retry";
 import { db } from "../db";
 import { badRequest, HttpError } from "../errors";
 import { assertDraft, draftForUpdate, queryBatch } from "./batches";
+import { HAND_OFF_FAILED, HAND_OFF_RETRY } from "./copy";
 import { collectGoogleLink } from "./links";
 
 export async function planUploads(id: string, value: unknown) {
@@ -46,6 +48,17 @@ export async function completeUpload(id: string, uploadId: string) {
   });
   return { uploaded: true };
 }
+/** Maps a failed hand-off to the operator's sentence. The raw library error is logged, never shown. */
+export function handOffError(err: unknown): HttpError {
+  return isTransientError(err) ? new HttpError(503, HAND_OFF_RETRY) : new HttpError(500, HAND_OFF_FAILED);
+}
+/**
+ * Hands every `uploaded` upload to the worker (one ingest task each) and marks the batch collecting.
+ * Also the "Try again" of a stalled collecting batch: an upload still `uploaded` is handed again
+ * (ingest is idempotent, so a second delivery only reads what was never read), and when every upload
+ * is already read but the batch-wide step never ran, one read upload is handed so its task runs it.
+ * Each call names its tasks `ingest-<uploadId>-<run>`, so enqueueTask's retries never duplicate one.
+ */
 export async function ingestBatch(id: string) {
   const batch = await queryBatch(id);
   if (!["draft", "ingesting"].includes(batch.status)) throw new HttpError(409, "This batch has already started. Make a new batch to add more photos.");
@@ -55,11 +68,27 @@ export async function ingestBatch(id: string) {
   for (const upload of all) {
     if ((upload.kind === "google_sheet" || upload.kind === "drive_folder") && upload.status === "uploaded" && !upload.gcsUri) await collectGoogleLink(batch, upload);
   }
-  const uploads = await db().select().from(catalogUploads).where(and(eq(catalogUploads.batchId, id), eq(catalogUploads.status, "uploaded")));
+  const current = await db().select().from(catalogUploads).where(eq(catalogUploads.batchId, id));
+  const uploads = current.filter((u) => u.status === "uploaded");
   if (!uploads.length && batch.counts.previewReady) return { collecting: false };
-  if (!uploads.length) throw badRequest("No files are ready. Check access to your links and try again.");
+  const targets = uploads.length ? uploads : current.filter((u) => u.status === "collected").slice(0, 1);
+  if (!targets.length) throw badRequest("No files are ready. Check access to your links and try again.");
   await db().update(catalogBatches).set({ status: "ingesting", counts: { ...batch.counts, previewReady: false }, updatedAt: new Date() }).where(eq(catalogBatches.id, id));
-  for (const upload of uploads) await enqueueTask("/tasks/catalog/ingest", { batchId: id, uploadId: upload.id });
+  const run = randomUUID();
+  let handed = 0;
+  try {
+    for (const upload of targets) {
+      await enqueueTask("/tasks/catalog/ingest", { batchId: id, uploadId: upload.id }, { taskId: `ingest-${upload.id}-${run}` });
+      handed++;
+    }
+  } catch (err) {
+    console.error(JSON.stringify({ severity: "ERROR", message: "ingest hand-off failed", batchId: id, handed, uploads: targets.length, code: (err as { code?: unknown } | null)?.code ?? null, error: err instanceof Error ? err.message : String(err) }));
+    // Nothing reached the queue: the batch goes back to draft, so Continue (PATCH, then /ingest) works
+    // again instead of answering 409. Once a task is queued its worker may already be collecting, so
+    // the batch stays collecting; the next /ingest (Continue or Try again) hands over the rest.
+    if (!handed && batch.status === "draft") await db().update(catalogBatches).set({ status: "draft" }).where(and(eq(catalogBatches.id, id), eq(catalogBatches.status, "ingesting")));
+    throw handOffError(err);
+  }
   return { collecting: true };
 }
 export async function regroupBatch(id: string) {

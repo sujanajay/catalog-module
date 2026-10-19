@@ -108,6 +108,36 @@ describe("enqueueTask", () => {
     );
   });
 
+  it("retries a named task after a transient reset and returns its name", async () => {
+    const sleep = vi.fn(async () => {});
+    const createTask = vi
+      .fn()
+      .mockRejectedValueOnce(Object.assign(new Error("14 UNAVAILABLE: read ECONNRESET"), { code: 14 }))
+      .mockResolvedValueOnce([{ name: `${QUEUE}/tasks/ingest-u1-r1` }]);
+    const client = { createTask } as unknown as TasksClientLike;
+    expect(await enqueueTask("/tasks/catalog/ingest", { batchId: "b1", uploadId: "u1" }, { env, client, taskId: "ingest-u1-r1", retry: { sleep } })).toBe(`${QUEUE}/tasks/ingest-u1-r1`);
+    expect(createTask).toHaveBeenCalledTimes(2);
+    // Every try sends the same task name, so the queue keeps one task whatever the network did.
+    expect(createTask.mock.calls.map(([req]) => (req as { task: BuiltTask }).task.name)).toEqual([`${QUEUE}/tasks/ingest-u1-r1`, `${QUEUE}/tasks/ingest-u1-r1`]);
+  });
+
+  it("counts ALREADY_EXISTS on a retry as success (the first try reached the queue but lost its reply)", async () => {
+    const createTask = vi
+      .fn()
+      .mockRejectedValueOnce(Object.assign(new Error("4 DEADLINE_EXCEEDED"), { code: 4 }))
+      .mockRejectedValueOnce(Object.assign(new Error("6 ALREADY_EXISTS"), { code: 6 }));
+    const client = { createTask } as unknown as TasksClientLike;
+    expect(await enqueueTask("/tasks/catalog/ingest", {}, { env, client, taskId: "ingest-u1-r1", retry: { sleep: async () => {} } })).toBe(`${QUEUE}/tasks/ingest-u1-r1`);
+    expect(createTask).toHaveBeenCalledTimes(2);
+  });
+
+  it("tries an unnamed task once, so a retry can never duplicate it", async () => {
+    const createTask = vi.fn().mockRejectedValue(Object.assign(new Error("14 UNAVAILABLE"), { code: 14 }));
+    const client = { createTask } as unknown as TasksClientLike;
+    await expect(enqueueTask("/tasks/catalog/finalize", {}, { env, client, retry: { sleep: async () => {} } })).rejects.toThrow(/UNAVAILABLE/);
+    expect(createTask).toHaveBeenCalledTimes(1);
+  });
+
   it("rethrows other createTask errors", async () => {
     const createTask = vi.fn().mockRejectedValue(Object.assign(new Error("7 PERMISSION_DENIED"), { code: 7 }));
     const client = { createTask } as unknown as TasksClientLike;

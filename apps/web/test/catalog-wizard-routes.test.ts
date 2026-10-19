@@ -18,6 +18,9 @@ import { GET as detected, PATCH as regroup } from "../app/api/catalog/batches/[i
 import { GET as preview } from "../app/api/catalog/batches/[id]/preview/route";
 import { POST as start } from "../app/api/catalog/batches/[id]/start/route";
 import { setDbForTests, type Db } from "../lib/db";
+import { handOffError } from "../lib/catalog/uploads";
+import { HAND_OFF_FAILED, HAND_OFF_RETRY } from "../lib/catalog/copy";
+import { COLLECT_STALLED_TEXT } from "@catalog/core/catalog/pipeline/status";
 import { resetUserDeps, setUserDeps } from "../lib/user";
 
 vi.mock("@catalog/core/tasks", () => ({ enqueueTask: vi.fn(async () => "test-task") }));
@@ -207,5 +210,71 @@ describe("catalog wizard authorization and contracts",()=>{
     expect(sheet.gcsUri).toMatch(/^gs:\/\/test-assets\/catalog-test\//);expect(sheet.status).toBe("uploaded");
     await runIngest(db,{storage,fetch:vi.fn(async()=>new Response(new Uint8Array(heicFixture(1200,1600)),{headers:{"content-type":"image/heic"}})),enqueue:enqueueTask},{batchId:id,uploadId:sheet.id});
     const shown=await (await preview(request("GET"),ctx(id))).json();expect(shown.groups.map((g:{identifier:string})=>g.identifier).sort()).toEqual(["ABC123","SHEET123"]);
+  });
+});
+
+describe("ingest hand-off failures and stalled collecting",()=>{
+  const reset=()=>Object.assign(new Error("14 UNAVAILABLE: read ECONNRESET"),{code:14,details:"read ECONNRESET"});
+  const statusOf=async(id:string)=>(await db.select().from(catalogBatches).where(eq(catalogBatches.id,id)))[0]!.status;
+  const ingestCalls=()=>vi.mocked(enqueueTask).mock.calls.filter(([route])=>route==="/tasks/catalog/ingest");
+  const age=async(id:string,minutes:number)=>db.update(catalogBatches).set({updatedAt:new Date(Date.now()-minutes*60_000)}).where(eq(catalogBatches.id,id));
+  it("maps transient and permanent hand-off errors to plain sentences, never the library text",()=>{
+    expect(handOffError(reset())).toMatchObject({status:503,message:HAND_OFF_RETRY});
+    expect(handOffError(Object.assign(new Error("4 DEADLINE_EXCEEDED"),{code:4}))).toMatchObject({status:503,message:HAND_OFF_RETRY});
+    expect(handOffError(Object.assign(new Error("7 PERMISSION_DENIED: cloudtasks.tasks.create"),{code:7}))).toMatchObject({status:500,message:HAND_OFF_FAILED});
+  });
+  it("gives the batch back its draft state when nothing reached the queue, so a second Continue works instead of 409",async()=>{
+    const logged=vi.spyOn(console,"error").mockImplementation(()=>{});
+    const id=await newBatch();const photo=await addPhoto(id);
+    expect((await patch(request("PATCH",{name:"catalog-test e2e b"}),ctx(id))).status).toBe(200);
+    vi.mocked(enqueueTask).mockRejectedValueOnce(reset());
+    const failed=await ingest(request("POST"),ctx(id));
+    expect(failed.status).toBe(503);
+    const text=await failed.text();expect(JSON.parse(text)).toEqual({error:HAND_OFF_RETRY});expect(text).not.toMatch(/UNAVAILABLE|ECONNRESET/);
+    expect(logged.mock.calls.flat().join(" ")).toContain("read ECONNRESET");
+    expect(await statusOf(id)).toBe("draft");
+    // The wizard's second Continue: PATCH then /ingest, both accepted now.
+    expect((await patch(request("PATCH",{name:"catalog-test e2e b"}),ctx(id))).status).toBe(200);
+    expect((await ingest(request("POST"),ctx(id))).status).toBe(200);
+    expect(await statusOf(id)).toBe("ingesting");
+    const ids=ingestCalls().map(([,body,opts])=>{expect(body).toEqual({batchId:id,uploadId:photo.id});return opts?.taskId;});
+    expect(ids).toHaveLength(2);
+    for(const taskId of ids) expect(taskId).toMatch(new RegExp(`^ingest-${photo.id}-[0-9a-f-]{36}$`));
+    expect(ids[0]).not.toBe(ids[1]);
+    logged.mockRestore();
+  });
+  it("keeps the batch collecting once part of the hand-off reached the queue, and the next /ingest hands over the rest",async()=>{
+    const logged=vi.spyOn(console,"error").mockImplementation(()=>{});
+    const id=await newBatch();const a=await addPhoto(id,"PART_A_1.heic");const b=await addPhoto(id,"PART_B_1.heic");
+    vi.mocked(enqueueTask).mockResolvedValueOnce("queued").mockRejectedValueOnce(reset());
+    expect((await ingest(request("POST"),ctx(id))).status).toBe(503);
+    expect(await statusOf(id)).toBe("ingesting");
+    expect((await ingest(request("POST"),ctx(id))).status).toBe(200);
+    expect(ingestCalls().slice(2).map(([,body])=>(body as {uploadId:string}).uploadId).sort()).toEqual([a.id,b.id].sort());
+    logged.mockRestore();
+  });
+  it("shows a collecting batch with no progress for 10 minutes as stalled, and Try again re-runs the hand-off",async()=>{
+    const id=await newBatch();const photo=await addPhoto(id);
+    expect((await ingest(request("POST"),ctx(id))).status).toBe(200);
+    expect((await (await get(request("GET"),ctx(id))).json()).state.stalled).toBeUndefined();
+    await age(id,15);
+    const stuck=(await (await get(request("GET"),ctx(id))).json()).state;
+    expect(stuck).toMatchObject({state:"collecting",stalled:true,text:COLLECT_STALLED_TEXT});
+    vi.mocked(enqueueTask).mockClear();
+    expect((await ingest(request("POST"),ctx(id))).status).toBe(200);
+    expect(ingestCalls().map(([,body])=>body)).toEqual([{batchId:id,uploadId:photo.id}]);
+    expect((await (await get(request("GET"),ctx(id))).json()).state.stalled).toBeUndefined();
+  });
+  it("Try again on a stalled batch whose files were all read hands one read upload over, so the grouping step runs",async()=>{
+    const id=await newBatch();const photo=await addPhoto(id);await collectBatch(id);
+    // The batch-wide step was lost: every upload is collected but the batch never left collecting.
+    const [row]=await db.select().from(catalogBatches).where(eq(catalogBatches.id,id));
+    await db.update(catalogBatches).set({status:"ingesting",counts:{...row!.counts,previewReady:false},updatedAt:new Date(Date.now()-15*60_000)}).where(eq(catalogBatches.id,id));
+    vi.mocked(enqueueTask).mockClear();
+    expect((await ingest(request("POST"),ctx(id))).status).toBe(200);
+    expect(ingestCalls().map(([,body])=>body)).toEqual([{batchId:id,uploadId:photo.id}]);
+    await runIngest(db,{storage,fetch:vi.fn(),enqueue:enqueueTask},{batchId:id,uploadId:photo.id});
+    const [after]=await db.select().from(catalogBatches).where(eq(catalogBatches.id,id));
+    expect(after!.status).toBe("draft");expect(after!.counts.previewReady).toBe(true);
   });
 });
