@@ -6,7 +6,7 @@ import { sampledForQa, strictestChannel } from "@catalog/core/catalog/qa/policy"
 import { autoActionNote, flagDetails } from "@catalog/core/catalog/qa/reasons";
 import { DIMENSION_FLAGS, OUTPUT_DIMENSIONS, PHOTO_DIMENSIONS, QA_DIMENSIONS, dimensionThresholds, failingDimensions, withOverall, type JudgeResult, type QaDimension } from "@catalog/core/catalog/qa/judge";
 import { HARD_HOLD_FLAGS, INFORMATION_FLAGS, problemFlags, triageProduct, type RepairOwnDefects } from "@catalog/core/catalog/qa/triage";
-import { autoActionsOf, JUDGED_CUT_MIN_RUN_FRACTION, OWN_DEFECT_FLAGS, ownDefects } from "@catalog/core/catalog/auto-resolve";
+import { autoActionsOf, judgeSawSourceCut, OWN_DEFECT_FLAGS, ownDefects } from "@catalog/core/catalog/auto-resolve";
 import { shadowSynthesisAllowed } from "@catalog/core/catalog/qa/policy";
 import { flushCutPhoto, resolvePhoto, stopOn } from "./auto-resolve";
 import { recordCost } from "@catalog/core/spend";
@@ -175,8 +175,8 @@ const JUDGE_TRIGGERS=new Set<OutputFlag>([...OWN_DEFECT_FLAGS].filter(flag=>flag
  * re-judge; reaching a cap ends the ladder and the photo keeps its flags for the triage.
  */
 export interface QaRepairContext { deps: CatalogDeps; batch: Batch; policy: ResolvedPolicy; productId: string; underClaim: UnderClaim }
-/** Outputs the re-render loop gets: our own defects, or a frame cut the judge saw and the detector missed. */
-export const repairable=(o:Output)=>o.decision===null && (o.status==="staged" || o.status==="needs_attention") && (o.flags.some(flag=>OWN_DEFECT_FLAGS.has(flag)) || (o.flags.includes("complete_product") && !o.flags.includes("cut_in_source")));
+/** Outputs the re-render loop gets: our own defects, or a frame cut the judge saw (flushCutPhoto decides whether a side is new). */
+export const repairable=(o:Output)=>o.decision===null && (o.status==="staged" || o.status==="needs_attention") && (o.flags.some(flag=>OWN_DEFECT_FLAGS.has(flag)) || judgeSawSourceCut(o.flags,o.qaScores));
 export const repairOwnDefects:RepairOwnDefects<QaRepairContext>=async(candidates,{deps,batch,policy,productId,underClaim})=>{
  const fixed=new Set<string>();
  const read=()=>deps.db.select().from(catalogOutputs).where(and(eq(catalogOutputs.batchId,batch.id),eq(catalogOutputs.productId,productId),isNull(catalogOutputs.decision),inArray(catalogOutputs.status,["staged","needs_attention"])));
@@ -189,8 +189,8 @@ export const repairOwnDefects:RepairOwnDefects<QaRepairContext>=async(candidates
   const photo=async()=>(await read()).filter(o=>o.sourceImageId===sourceId && !!o.stagingUri);
   const shadowAllowed=shadowSynthesisAllowed(product.productType,source.flags),statusFor=(flags:OutputFlag[])=>problemFlags(flags).length ? "needs_attention" as const:"staged" as const;
   let rows=await photo();
-  // The judge says the photo is cut at its frame edge and the 25% run rule found no cut: place the cut flush.
-  if(rows.some(o=>o.flags.includes("complete_product")) && !rows.some(o=>o.flags.includes("cut_in_source")) && !rows.some(o=>tried(o,"flush_cut"))) {
+  // The judge says the photo is cut at its frame edge: place any side the cut detector missed flush.
+  if(rows.some(o=>judgeSawSourceCut(o.flags,o.qaScores)) && !rows.some(o=>tried(o,"flush_cut"))) {
    await flushCutPhoto(deps,{batch,product,source,policy,underClaim,outputs:rows,shadowAllowed,statusFor});
    rows=await photo();
   }
@@ -211,7 +211,7 @@ export const repairOwnDefects:RepairOwnDefects<QaRepairContext>=async(candidates
    const flags=[...new Set<OutputFlag>([...result.flags,...(result.flags.includes("qa_unavailable") ? []:failingDimensions(result.scores,policy.threshold,policy.floor).map(d=>DIMENSION_FLAGS[d]))])];
    return {passed:!flags.some(flag=>JUDGE_TRIGGERS.has(flag) || flag==="qa_unavailable"),flags,scores:result.scores};
   });
-  const result=await resolvePhoto(deps,{batch,product,source,policy,underClaim,outputs:rows,failing,trigger:ownDefects(failing.flatMap(o=>o.flags)),shadowAllowed,statusFor,rejudge,...(flush ? {cutMinRunFraction:JUDGED_CUT_MIN_RUN_FRACTION}:{})});
+  const result=await resolvePhoto(deps,{batch,product,source,policy,underClaim,outputs:rows,failing,trigger:ownDefects(failing.flatMap(o=>o.flags)),shadowAllowed,statusFor,rejudge,...(flush ? {judgedCut:true}:{})});
   for(const id of result.fixed) fixed.add(id);
  }
  return fixed;

@@ -19,10 +19,13 @@ export type LadderStep = typeof LADDER_STEPS[number];
 /** Step (c): the product is fitted 5% smaller inside the same canvas. */
 export const SMALLER_FIT_SCALE = 0.95;
 /**
- * The cut detector's run fraction when the judge says the photo is cut at its frame edge but the
- * 25% rule found no cut (a knee-level cut through two legs measures about 22%).
+ * The judge saw the brand's photo cut at its own frame edge: the `complete_product` flag, or a
+ * `source_cut` dimension (true, or the flag of that name) when the judge reports one. The cut
+ * detector then re-runs relaxed (`judgedCut`, render.ts) to place the cut flush (`flush_cut`).
  */
-export const JUDGED_CUT_MIN_RUN_FRACTION = 0.1;
+export function judgeSawSourceCut(flags: readonly string[], qaScores?: Record<string, unknown> | null): boolean {
+  return flags.includes("complete_product") || flags.includes("source_cut") || qaScores?.source_cut === true;
+}
 
 /** How one step re-renders. A synthesised shadow is never needed to fix anything, so it stays off after step (a). */
 export interface StepVariant { synthesiseShadow: false; matte: "first" | "second"; fitScale: number }
