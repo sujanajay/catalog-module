@@ -1,5 +1,14 @@
 import type { BatchCounts, BatchStatus } from "../types";
 export const QA_CAP_BANNER = "The quality check stopped early because the spending limit was reached.";
+/**
+ * The images a batch will make, the same figure as "images will be made" on wizard step 4: outputs
+ * minus skipped (too small for Styli, or removed) minus pairs kept unchanged. The skipped part is
+ * stated in words next to it.
+ */
+export function plannedImages(c: BatchCounts): { planned: number; skippedText: string } {
+  const planned = Math.max(0, c.outputs - c.skipped - c.unchanged);
+  return { planned, skippedText: c.skipped ? ` (${c.skipped.toLocaleString("en")} skipped: too small for Styli or removed)` : "" };
+}
 export interface BatchState { state: "draft" | "collecting" | "processing" | "attention" | "ready" | "recheck_failed" | "failed"; pill: string; text: string; made: number; total: number; progress: number; eta: number | null; listPill: string; qualityLine?: string }
 export function deriveBatchState(input: { status: BatchStatus; counts: BatchCounts; source?: string; samples?: { at: Date; made: number }[]; now?: Date }): BatchState {
   const { status, counts: c } = input;
@@ -12,7 +21,9 @@ export function deriveBatchState(input: { status: BatchStatus; counts: BatchCoun
     const first = samples[0], last = samples.at(-1);
     const rate = first && last && +last.at > +first.at ? (last.made - first.made) / ((+last.at - +first.at) / 1000) : 0;
     const eta = rate > 0 ? Math.ceil(Math.max(0, c.outputs - made) / rate) : null;
-    return { ...result, state: "processing", pill: "Processing", listPill: `Processing ${made.toLocaleString("en")} of ${c.outputs.toLocaleString("en")}`, eta,...(status === "qa" ? {qualityLine:"Quality check running"}:{}), text: `${made} of ${c.outputs} images made${eta === null ? "" : ` · about ${Math.ceil(eta / 60)} min left`}` };
+    // Skipped and unchanged pairs are not made, so they count on neither side (same figure as step 4).
+    const { planned, skippedText } = plannedImages(c), done = Math.min(planned, Math.max(0, made - c.skipped - c.unchanged));
+    return { ...result, state: "processing", pill: "Processing", made: done, total: planned, progress: planned ? Math.min(1, done / planned) : 0, listPill: `Processing ${done.toLocaleString("en")} of ${planned.toLocaleString("en")}`, eta,...(status === "qa" ? {qualityLine:"Quality check running"}:{}), text: `${done} of ${planned} images made${skippedText}${eta === null ? "" : ` · about ${Math.ceil(eta / 60)} min left`}` };
   }
   if (status === "done") {
     const capped = (c as BatchCounts & { qaCapped?: boolean }).qaCapped ? ` ${QA_CAP_BANNER}` : "";
