@@ -9,7 +9,8 @@
 # Usage (Git Bash, from the repo root):
 #   bash infra/catalog-eval.sh deploy                  # called by infra/deploy.sh (Jobs step); needs
 #                                                      # EVAL_JOB_IMAGE, EVAL_JOB_ENV, EVAL_JOB_SECRETS
-#   bash infra/catalog-eval.sh exec <cli args...>      # one execution, no live judge calls
+#   bash infra/catalog-eval.sh exec <cli args...>      # one execution, no live judge calls, e.g.
+#   bash infra/catalog-eval.sh exec assemble --set anta --brand anta --sample 1 --seed 1
 #   EVAL_BUDGET_USD=2 bash infra/catalog-eval.sh exec --live judges --batch <id> --models <a,b>
 #                                                      # one execution with LIVE_SMOKE=1 (spends credit)
 # PowerShell equivalent (from the repo root):
@@ -62,6 +63,36 @@ deploy() {
     --set-secrets="$EVAL_JOB_SECRETS" --set-env-vars="$EVAL_JOB_ENV,REAL_DATA_DIR=/tmp/catalog-data,EVAL_INPUT_DIR=/catalog-input"
 }
 
+# Builds the --args value for "gcloud run jobs execute" from the CLI words.
+# gcloud treats --args as a set: it refuses any value that appears twice, both on the command line and
+# in a --flags-file list (UpdateAction in googlecloudsdk/calliope/arg_parsers.py), so
+# "--sample 1 --seed 1" failed with '"1" cannot be specified multiple times'. Each "--flag value"
+# pair is therefore folded into one "--flag=value" token (the CLI reads both forms, with the same
+# rule: a flag takes the next token unless it is missing or is itself a flag), which keeps every token
+# of a valid command line unique. gcloud list escaping (gcloud topic escaping): "^|^" makes "|" the
+# separator, so model lists such as "a,b" stay one argument.
+cli_args() {
+  local argv=("$@") tokens=() i=0 a next joined dup
+  while [ "$i" -lt "${#argv[@]}" ]; do
+    a=${argv[$i]}; next=${argv[$((i + 1))]-}
+    if [[ $a == --* && $a != *=* && $((i + 1)) -lt ${#argv[@]} && $next != --* ]]; then
+      tokens+=("$a=$next"); i=$((i + 2))
+    else
+      tokens+=("$a"); i=$((i + 1))
+    fi
+  done
+  for a in "${tokens[@]}"; do
+    case "$a" in *"|"*) echo "ERROR: an argument contains '|', which this script uses as the gcloud list separator: $a" >&2; return 1 ;; esac
+  done
+  dup=$(printf '%s\n' "${tokens[@]}" | sort | uniq -d | head -n 1)
+  if [ -n "$dup" ]; then
+    echo "ERROR: the argument $dup is given twice; gcloud run jobs execute cannot pass a repeated argument. Remove the repeat." >&2
+    return 1
+  fi
+  joined=$(printf '%s|' "${tokens[@]}")
+  printf '%s' "^|^${joined%|}"
+}
+
 exec_job() {
   job_exists || { echo "ERROR: $JOB does not exist yet; run bash infra/deploy.sh first" >&2; exit 1; }
   local env_flags=() live=0
@@ -76,10 +107,8 @@ exec_job() {
   if [ "${#updates[@]}" -gt 0 ]; then
     env_flags+=(--update-env-vars="$(IFS=,; echo "${updates[*]}")")
   fi
-  # gcloud list escaping (gcloud topic escaping): "^|^" makes "|" the separator, so model lists
-  # such as "a,b" stay one argument.
   local joined
-  joined=$(printf '%s|' "$@"); joined="^|^${joined%|}"
+  joined=$(cli_args "$@") || exit 2
   echo "==> $JOB: EXECUTE $* $([ "$live" = 1 ] && echo '(LIVE_SMOKE=1, live judge calls)')"
   MSYS2_ARG_CONV_EXCL='--args=' gcloud run jobs execute "$JOB" --region="$REGION" --args="$joined" "${env_flags[@]}" --wait
   echo "Logs: gcloud logging read 'resource.type=cloud_run_job AND resource.labels.job_name=$JOB' --limit=200 --freshness=1h"
