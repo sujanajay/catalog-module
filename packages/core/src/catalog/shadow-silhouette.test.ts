@@ -91,6 +91,10 @@ describe("photos cut off at the bottom of the frame", () => {
     expect(cutAtBottom(model({ legsTo: 600 }).matte)).toBe(true);
     // Cut at the knees, then padded with 10 px of white: a long straight edge just above the frame bottom.
     expect(cutAtBottom(model({ legsTo: 590 }).matte)).toBe(true);
+    // A flared dress hem ending 1.5% above a cut through the legs (the French Connection dress shot).
+    const dress = model({ legsTo: 590 }).matte;
+    for (let y = 400; y < 580; y++) for (let x = 100; x < 300; x++) dress.alpha[y * 400 + x] = 255;
+    expect(cutAtBottom(dress)).toBe(true);
   });
 
   it("does not mistake feet standing near the bottom, or a stray edge pixel, for a cut", () => {

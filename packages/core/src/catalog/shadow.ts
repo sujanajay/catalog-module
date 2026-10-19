@@ -22,12 +22,15 @@ export const SHADOW_PRESET = { softness: 0.025, spread: 0.12, direction: 0, pose
 // - at least CUT_EDGE_MIN_SHARE of one of its last two rows is solid product (alpha >= CUT_EDGE_ALPHA), or
 // - the silhouette ends within CUT_EDGE_GAP of the frame bottom (a photo cut, then padded with a thin
 //   strip) on an edge at least CUT_EDGE_WIDE_SHARE of the frame wide that is still at least
-//   CUT_EDGE_STRAIGHT_RATIO as wide CUT_EDGE_GAP higher up. A cut keeps its straight sides down to the
-//   edge; feet, soles and hems that stand near the bottom narrow sharply toward their lowest row.
+//   CUT_EDGE_STRAIGHT_RATIO as wide CUT_EDGE_LOOKBACK of the frame height higher up. A cut keeps its
+//   straight sides down to the edge; feet and soles standing near the bottom are narrow and round off
+//   toward their lowest row. Calibrated on the QA-gate French Connection and Anta sets: cut edges were
+//   26% to 98% of the width with ratios of 0.95 or more, standing feet at most 7% and 0.73.
 export const CUT_EDGE_ALPHA = 128;
 export const CUT_EDGE_MIN_SHARE = 0.02;
 export const CUT_EDGE_GAP = 0.02;
-export const CUT_EDGE_WIDE_SHARE = 0.05;
+export const CUT_EDGE_WIDE_SHARE = 0.1;
+export const CUT_EDGE_LOOKBACK = 0.01;
 export const CUT_EDGE_STRAIGHT_RATIO = 0.75;
 
 export function borderBand(width: number, height: number): { x: number; y: number } { return { x: Math.max(4, Math.ceil(width * 0.02)), y: Math.max(4, Math.ceil(height * 0.02)) }; }
@@ -123,9 +126,10 @@ export function cutAtBottom(matte: Matte): boolean {
   const gap = Math.max(2, Math.round(height * CUT_EDGE_GAP));
   let last = -1;
   for (let y = height - 1; y >= height - 1 - gap && y >= 0 && last < 0; y--) if (solidIn(y) > 0) last = y;
-  // The lowest solid row is antialiased; measure one row up, and again one gap higher.
-  if (last < gap + 1) return false;
-  const edge = solidIn(last - 1), above = solidIn(last - 1 - gap);
+  // The lowest solid row is antialiased; measure one row up, and again a little higher.
+  const back = Math.max(2, Math.round(height * CUT_EDGE_LOOKBACK));
+  if (last < back + 1) return false;
+  const edge = solidIn(last - 1), above = solidIn(last - 1 - back);
   return edge >= Math.ceil(width * CUT_EDGE_WIDE_SHARE) && edge >= above * CUT_EDGE_STRAIGHT_RATIO;
 }
 

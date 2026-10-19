@@ -188,8 +188,8 @@ Any change to the maths in this file that alters output bytes must bump `CHANNEL
 5. Shadow decision rule (shadow.ts), evaluated per source after matting, in this order:
    0. Cut at the bottom (`cutAtBottom`): the product runs into the last two rows of the source (at
       least `CUT_EDGE_MIN_SHARE` of a row solid), or ends within `CUT_EDGE_GAP` of the frame bottom on
-      an edge at least `CUT_EDGE_WIDE_SHARE` of the frame wide that keeps `CUT_EDGE_STRAIGHT_RATIO` of
-      its width one gap higher (a photo cut, then padded with a thin strip; feet and soles narrow toward
+      an edge at least `CUT_EDGE_WIDE_SHARE` (10%) of the frame wide that keeps `CUT_EDGE_STRAIGHT_RATIO`
+      (0.75) of its width `CUT_EDGE_LOOKBACK` (1% of the height) higher (a photo cut, then padded with a thin strip; feet and soles narrow toward
       the floor and do not match). No shadow of any kind; flags `complete_product` (an attention item in
       06, with 07's sentence) and `no_shadow_source`. A contact shadow under a cut product would float
       on a straight edge.
