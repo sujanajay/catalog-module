@@ -4,7 +4,7 @@ steps:
   - id: inputs
     name: gcr.io/google.com/cloudsdktool/google-cloud-cli:stable
     entrypoint: bash
-    env: ['INPUT_PREFIX=${_INPUT_PREFIX}', 'ARTIFACT_PREFIX=${_ARTIFACT_PREFIX}', 'MATTING_IMAGE=${_MATTING_IMAGE}', 'FULL_RENDER=${_FULL_RENDER}', 'TEST_TIMEOUT=${_TEST_TIMEOUT}', 'BUILD_TIMEOUT=${_BUILD_TIMEOUT}']
+    env: ['INPUT_PREFIX=${_INPUT_PREFIX}', 'ARTIFACT_PREFIX=${_ARTIFACT_PREFIX}', 'MATTING_IMAGE=${_MATTING_IMAGE}', 'FULL_RENDER=${_FULL_RENDER}', 'TEST_TIMEOUT=${_TEST_TIMEOUT}', 'BUILD_TIMEOUT=${_BUILD_TIMEOUT}', 'POOL_MODE=${_POOL_MODE}', 'RENDER_CPUS=${_RENDER_CPUS}', 'COMPUTE_RATE=${_COMPUTE_RATE}']
     args:
       - -ceu
       - |
@@ -13,7 +13,16 @@ steps:
         [[ "$$ARTIFACT_PREFIX" == "gs://image-links-agent-assets/catalog-test/$$run/artifacts/" ]]
         [[ "$$MATTING_IMAGE" =~ ^asia-south1-docker.pkg.dev/image-links-agent/apps/matting:[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$$ ]]
         [[ "$$FULL_RENDER" =~ ^[01]$$ ]]
-        if [[ "$$FULL_RENDER" == 1 ]]; then [[ "$$TEST_TIMEOUT" == 23h && "$$BUILD_TIMEOUT" == 86400s ]]; else [[ "$$TEST_TIMEOUT" == 15m && "$$BUILD_TIMEOUT" == 1200s ]]; fi
+        case "$$POOL_MODE:$$RENDER_CPUS:$$COMPUTE_RATE" in default:12:0.0624|private:4:0.024) ;; *) exit 2 ;; esac
+        if [[ "$$POOL_MODE" == private ]]; then
+          cpus=$$(getconf _NPROCESSORS_ONLN)
+          mem_kib=$$(awk '/^MemTotal:/ {print $$2}' /proc/meminfo)
+          echo "Private test host: $$cpus CPUs, $$mem_kib KiB RAM"
+          [[ "$$cpus" == 8 && "$$mem_kib" -ge 29000000 && "$$mem_kib" -le 34000000 ]]
+        fi
+        if [[ "$$FULL_RENDER" == 1 ]]; then
+          if [[ "$$POOL_MODE" == private ]]; then [[ "$$TEST_TIMEOUT" == 23h && "$$BUILD_TIMEOUT" == 86400s ]]; else [[ "$$TEST_TIMEOUT" == 20h && "$$BUILD_TIMEOUT" == 75600s ]]; fi
+        else [[ "$$TEST_TIMEOUT" == 15m && "$$BUILD_TIMEOUT" == 1200s ]]; fi
         mkdir -p /workspace/real-data /workspace/var/render05
         for archive in anta french-connection; do
           gcloud storage cp "$${INPUT_PREFIX}$$archive.tar" "/tmp/$$archive.tar"
@@ -44,7 +53,7 @@ steps:
           docker pull '${_MATTING_IMAGE}'
           docker run -d --name matting-cpu --network cloudbuild --memory=16g --cpus=4 '${_MATTING_IMAGE}'
           timeout --signal=TERM --kill-after=60s '${_TEST_TIMEOUT}' docker run --name render-tests \
-            --network container:matting-cpu --memory=12g --cpus=12 \
+            --network container:matting-cpu --memory=12g --cpus='${_RENDER_CPUS}' \
             -v /workspace:/workspace -w /workspace \
             -e REAL_DATA=1 -e REAL_DATA_DIR=/workspace/real-data \
             -e RENDER_REAL_OUT=/workspace/var/render05/full \
@@ -61,7 +70,7 @@ steps:
                 node "$$cli" render --manifest "$$out/collect/manifest.json" --channels "$$channels" --matting http://localhost:8080 --model birefnet-general-lite --product-type "$$type" --limit 2 --out "$$out/render" --upload "$${UPLOAD_PREFIX}preflight-outputs/$$brand/"
                 node -e "const r=JSON.parse(require(\"fs\").readFileSync(process.argv[1]));if(r.summary.outputs!==18||r.summary.compliant!==16||r.summary.skipped!==2||r.summary.failed!==0||r.outputs.some(o=>o.flags.includes(\"fallback_matte\")))throw Error(\"Real preflight failed\");console.log(JSON.stringify(r.summary));" "$$out/render/report.json"
               done
-              node -e "const fs=require(\"fs\");const sets=[[\"anta\",630],[\"french-connection\",3280]];let ms=0;for(const [name,n]of sets){const r=JSON.parse(fs.readFileSync(\"/workspace/var/render05/preflight/\"+name+\"/render/report.json\"));ms+=n*((r.summary.msMatteAvgByTarget.cpu??0)+9*(r.summary.msRenderAvg??0));}const estimate={projectionOnly:true,sampledSourcesPerBrand:2,fullDatasetSeconds:ms/1000,estimatedBuildComputeUsd:ms/60000*0.0624,excluded:\"100-source general/lite benchmark, setup, collection, upload, variability\"};fs.writeFileSync(\"/workspace/var/render05/preflight-projection.json\",JSON.stringify(estimate,null,2));console.log(JSON.stringify(estimate));"
+              node -e "const fs=require(\"fs\");const sets=[[\"anta\",630],[\"french-connection\",3280]];let ms=0;for(const [name,n]of sets){const r=JSON.parse(fs.readFileSync(\"/workspace/var/render05/preflight/\"+name+\"/render/report.json\"));ms+=n*((r.summary.msMatteAvgByTarget.cpu??0)+9*(r.summary.msRenderAvg??0));}const estimate={projectionOnly:true,sampledSourcesPerBrand:2,fullDatasetSeconds:ms/1000,estimatedBuildComputeUsd:ms/60000*${_COMPUTE_RATE},excluded:\"100-source general/lite benchmark, setup, collection, upload, variability\"};fs.writeFileSync(\"/workspace/var/render05/preflight-projection.json\",JSON.stringify(estimate,null,2));console.log(JSON.stringify(estimate));"
               if [[ "$$FULL_RENDER" == 1 ]]; then
                 node node_modules/vitest/vitest.mjs run --config vitest.real.config.ts packages/core/src/catalog/render.real.test.ts --maxWorkers=1 --reporter=verbose
               else
@@ -96,8 +105,11 @@ options:
   diskSizeGb: 100
   logging: CLOUD_LOGGING_ONLY
 substitutions:
+  _POOL_MODE: default
+  _RENDER_CPUS: '12'
+  _COMPUTE_RATE: '0.0624'
   _FULL_RENDER: '0'
   _TEST_TIMEOUT: 15m
   _BUILD_TIMEOUT: 1200s
-# Preflight default. infra/test-render.sh overrides this with --timeout=86400s only in full mode.
+# Preflight default. The wrapper bounds full mode to 21h default or 24h private pool.
 timeout: 1200s
