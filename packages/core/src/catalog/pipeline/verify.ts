@@ -1,8 +1,11 @@
 import { isRetryableStorageError, STORAGE_RETRIES, STORAGE_RETRY_BASE_MS } from "../../storage";
 export const VERIFY_RETRIES = 3;
 export const STALE_GENERATION = "The public link returned a different generation.";
-/** Public objects carry max-age=300 (SPEC: a re-upload shows within five minutes), plus a margin. */
-export const PUBLIC_CACHE_WINDOW_MS = 310_000;
+/**
+ * Public objects carry max-age=300 (SPEC: a re-upload shows within five minutes). Stale reads were seen
+ * at the edge of that lifetime, so readers that wait for a plain link allow twice it.
+ */
+export const PUBLIC_CACHE_WINDOW_MS = 600_000;
 export type VerifyResult = { ok: true } | { ok: false; reason: string };
 export interface VerifyOptions {
   size: number; generation: number | string; fetch?: typeof fetch; sleep?: (ms: number) => Promise<void>;
