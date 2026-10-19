@@ -170,7 +170,12 @@ export async function runRealFixture(db: Db, fixture: RealFixture, out: string, 
     for (const [index,plan] of chunks.entries()) {
       const [chunk] = await db.insert(catalogChunks).values({batchId:b.id,index,stage:"matte",productIds:plan.productIds}).returning();
       for (let stage=0;stage<3;stage++) {const result=await handleChunkTask(deps,{chunkId:chunk!.id}); assert.equal(result.httpStatus,200,`Chunk failed: ${result.outcome}`);}
-      for (const productId of plan.productIds) {const result=await handlePublishTask(deps,{batchId:b.id,productId}); assert.equal(result.outcome,"published",`Product was not published: ${result.outcome}`);}
+      for (const productId of plan.productIds) {
+        const result=await handlePublishTask(deps,{batchId:b.id,productId});
+        // Name each unpublished output's reason; cleanup deletes the rows before anyone can look.
+        if (result.outcome!=="published") {const rows=await db.select().from(catalogOutputs).where(and(eq(catalogOutputs.batchId,b.id),eq(catalogOutputs.productId,productId)));console.error(JSON.stringify({message:"smoke publish not published",outcome:result.outcome,outputs:rows.filter(o=>o.status!=="verified" && o.status!=="skipped").map(o=>({channel:o.channel,n:o.n,status:o.status,reason:o.reason}))}));}
+        assert.equal(result.outcome,"published",`Product was not published: ${result.outcome}`);
+      }
     }
     const result = await handleFinalizeTask(deps,{batchId:b.id}); assert.equal(result.outcome,"done",`Finalize failed: ${result.outcome}`);
     const [done] = await db.select().from(catalogBatches).where(eq(catalogBatches.id,b.id));
