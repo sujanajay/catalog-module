@@ -65,8 +65,10 @@ export async function handleChunkTask(deps: CatalogDeps, body: Record<string,unk
        await underClaim(async tx=>{await tx.update(catalogProducts).set({productType:type}).where(eq(catalogProducts.id,product.id));for(const source of sources) if(flags.length) await tx.update(catalogSourceImages).set({flags:[...new Set([...source.flags,...flags])]}).where(eq(catalogSourceImages.id,source.id));});
        product.productType=type;for(const source of sources) source.flags=[...new Set([...source.flags,...flags])];
       }
-      let productPolicy={...await deps.resolvePolicy(batch.brandSlug,product.productType ?? "other"),qaModel:policy.qaModel,qaModelSecond:policy.qaModelSecond};
-      if(product.productType==="other" && sources.some(source=>source.flags.includes("transparent"))) productPolicy={...productPolicy,matteModel:"birefnet-hr-matting"};
+      // 08: an eval batch runs exactly its forced policy (source manual), so each run measures one matte model.
+      const forced=!!batch.options.evalSet && batch.isTest && policy.source==="manual";
+      let productPolicy=forced ? {...policy} : {...await deps.resolvePolicy(batch.brandSlug,product.productType ?? "other"),qaModel:policy.qaModel,qaModelSecond:policy.qaModelSecond};
+      if(!forced && product.productType==="other" && sources.some(source=>source.flags.includes("transparent"))) productPolicy={...productPolicy,matteModel:"birefnet-hr-matting"};
       // Threshold, floor, mode and sampling follow the product's policy; the judge stays the batch's (4.4).
       if(chunk.stage==="qa") {await runQaStage(deps,batch,sources,productPolicy,underClaim);continue;}
       if(chunk.stage==="matte") {
