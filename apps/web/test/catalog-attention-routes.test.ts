@@ -11,6 +11,9 @@ import { POST as replacement } from "../app/api/catalog/outputs/[id]/replacement
 import { POST as replacementComplete } from "../app/api/catalog/outputs/[id]/replacement/complete/route";
 import { POST as skuMapPost } from "../app/api/catalog/batches/[id]/sku-map/route";
 vi.mock("@catalog/core/tasks",()=>({enqueueTask:vi.fn(async()=>"task")}));
+// Only the replacement route signs a URL here; no storage call leaves the test.
+vi.mock(import("@catalog/core/storage"),async original=>({...await original(),getBucketName:()=>"private",signedPutUrl:vi.fn(async()=>"https://signed.example/put")}));
+import { SKU_MAP_MAX_BYTES,SKU_MAP_TOO_LARGE } from "../lib/catalog/sku-map";
 let db:Db,close:()=>Promise<void>,id:string,batchId:string;
 beforeAll(async()=>{({db,close}=await createTestDb());setDbForTests(db);});afterAll(async()=>{setDbForTests(undefined);await close();});
 beforeEach(async()=>{
@@ -56,4 +59,13 @@ it("operator SKU mapping fills ids from a csv and lists unmatched rows",async()=
 });
 it("a malformed output id answers 400 instead of a database error",async()=>{
  const r=await decide(req({decision:"use_as_is"}),{params:Promise.resolve({id:"not-a-uuid"})});expect(r.status).toBe(400);
+});
+it("operator gets one signed PUT URL for a replacement photo",async()=>{
+ const r=await replacement(req({name:"SHOE_1.jpg",size:1000,mime:"image/jpeg"}),{params:Promise.resolve({id})});
+ expect(r.status).toBe(200);expect(await r.json()).toMatchObject({signedPutUrl:"https://signed.example/put",uploadId:expect.any(String)});
+});
+it("refuses an oversized SKU mapping sheet before reading it",async()=>{
+ const form=new FormData();form.append("file",new File([new Uint8Array(SKU_MAP_MAX_BYTES+1)],"map.csv",{type:"text/csv"}));
+ const r=await skuMapPost(new Request("http://localhost/api",{method:"POST",body:form}),{params:Promise.resolve({id:batchId})});
+ expect(r.status).toBe(400);expect(await r.json()).toEqual({error:SKU_MAP_TOO_LARGE});
 });

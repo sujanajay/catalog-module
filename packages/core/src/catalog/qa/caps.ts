@@ -22,7 +22,7 @@ export async function checkCatalogCaps(db: Db, input: { batchId: string; env?: N
   if (!batch) throw new Error("Batch not found.");
   const daily = dailyCapFromEnv(input.env ?? process.env);
   const today = await sumSpendForDay(db, utcDay(input.now ?? new Date()));
-  if (today >= daily) return { ok: false, reason: `Daily spend cap reached: ${usd(today)} of ${usd(daily)} used this UTC day. Raise DAILY_SPEND_CAP_USD or wait for the cap to reset at midnight UTC.` };
+  if (today >= daily) return { ok: false, reason: `Daily spend cap reached: ${usd(today)} of ${usd(daily)} used this UTC day. Raise the daily spending limit or wait for it to reset at midnight UTC.` };
   const cap = batchQaCap((batch.options as { qaCapUsd?: unknown }).qaCapUsd);
   if (cap !== null) {
     const spent = await sumSpendForBatch(db, input.batchId, "catalog_qa");
