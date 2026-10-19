@@ -3,6 +3,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import AttentionProductCard from "../components/catalog/AttentionProductCard";
 import CostLine from "../components/catalog/CostLine";
+import DetailsTab from "../components/catalog/DetailsTab";
 import BatchTabs, { attentionLabel, showAttentionTab } from "../components/catalog/BatchTabs";
 import BatchBanner from "../components/catalog/BatchBanner";
 import { EMPTY_BATCH_COUNTS } from "@catalog/core/db/schema";
@@ -47,12 +48,12 @@ describe("needs attention card", () => {
 describe("cost and SKU copy", () => {
   const text = (html: string) => html.replace(/<[^>]+>/g, "");
   it("renders the INR per style line, the USD fallback and the not-yet line", () => {
-    expect(text(renderToStaticMarkup(createElement(CostLine, { line: { usdPerIdentifier: 0.04, inrPerIdentifier: 3.8, usd: 0.4, inr: 38 } })))).toBe("INR 3.80 per style so far · INR 38.00 for this batch · agency reference INR 60 per style");
+    expect(text(renderToStaticMarkup(createElement(CostLine, { line: { usdPerIdentifier: 0.04, inrPerIdentifier: 3.8, usd: 0.4, inr: 38 } })))).toBe("USD 0.0400 (INR 3.80) per style so far · USD 0.4000 (INR 38.00) for this batch · agency reference INR 60 per style");
     expect(text(renderToStaticMarkup(createElement(CostLine, { line: { usdPerIdentifier: 0.04, inrPerIdentifier: null, usd: 0.4, inr: null } })))).toBe("USD 0.0400 per style so far · USD 0.4000 for this batch · Cost in rupees is not configured yet · agency reference INR 60 per style");
     expect(text(renderToStaticMarkup(createElement(CostLine, { line: { usdPerIdentifier: null, inrPerIdentifier: null, usd: 0, inr: null } })))).toContain("agency reference INR 60 per style");
     // A real judged batch costs a fraction of a cent per style; the line must not read 0.00.
     expect(text(renderToStaticMarkup(createElement(CostLine, { line: { usdPerIdentifier: 0.000603, inrPerIdentifier: null, usd: 0.0072398, inr: null } })))).toMatch(/^USD 0\.0006 per style so far · USD 0\.0072 for this batch/);
-    expect(text(renderToStaticMarkup(createElement(CostLine, { line: { usdPerIdentifier: 0.000603, inrPerIdentifier: 0.0507, usd: 0.0072398, inr: 0.6081 } })))).toMatch(/^INR 0\.05 per style so far · INR 0\.61 for this batch/);
+    expect(text(renderToStaticMarkup(createElement(CostLine, { line: { usdPerIdentifier: 0.000603, inrPerIdentifier: 0.0507, usd: 0.0072398, inr: 0.6081 } })))).toMatch(/^USD 0\.0006 \(INR 0\.05\) per style so far · USD 0\.0072 \(INR 0\.61\) for this batch/);
     for (const line of [{ usdPerIdentifier: 0.04, inrPerIdentifier: null, usd: 0.4, inr: null }, { usdPerIdentifier: null, inrPerIdentifier: null, usd: 0, inr: null }]) expect(renderToStaticMarkup(createElement(CostLine, { line }))).not.toMatch(/INR_PER_USD|set [A-Z_]+/);
   });
   it("words the wizard estimate and the SKU modal lines", () => {
@@ -109,5 +110,23 @@ describe("batch copy for the real state of the batch", () => {
     // Photo 1 is unchanged on Noon but new on Styli; photo 2 changed on Noon and is too small for Styli.
     expect(plannedImages(sources, ["noon", "styli"], live)).toEqual({ outputs: 2, sourcesToMake: 2 });
     expect(plannedImages([sources[0]!], ["noon"], live)).toEqual({ outputs: 0, sourcesToMake: 0 });
+  });
+});
+
+describe("Details tab link counts", () => {
+  const text = (html: string) => html.replace(/<[^>]+>/g, "").replace(/&#x27;/g, "'");
+  const details = (counts: Partial<typeof EMPTY_BATCH_COUNTS>) => text(renderToStaticMarkup(createElement(DetailsTab, { id: "b1", brand: "test_brand", isTest: true, counts: { ...EMPTY_BATCH_COUNTS, ...counts }, failures: [], recheckFailures: [], notRefreshedChannels: [], hasReport: true })));
+  it("counts this batch's delivered links on both lines and says the held and carried-over links apart (quality gate 2)", () => {
+    // B4: 376 planned, 40 held for a decision, 336 delivered; the sheet kept 40 earlier links of the held product.
+    const html = details({ outputs: 376, verified: 336, attentionProducts: 1, heldLinks: 40, recheckOk: 336, recheckTotal: 336, recheckCarriedOk: 40, recheckCarriedTotal: 40 });
+    expect(html).toContain("Links verified: 336 of 336");
+    expect(html).toContain("Independent re-check: 336 of 336 OK");
+    expect(html).toContain("Not counted above: 40 images of the product that needs your attention, published once you decide. Until then the sheet keeps 40 earlier links for it; the re-check found 40 of 40 OK.");
+    // B1: two new products held, nothing carried over.
+    const b1 = details({ outputs: 96, verified: 32, attentionProducts: 2, heldLinks: 64, recheckOk: 32, recheckTotal: 32 });
+    expect(b1).toContain("Links verified: 32 of 32");
+    expect(b1).toContain("Not counted above: 64 images of the products that need your attention, published once you decide.");
+    expect(b1).not.toContain("earlier");
+    expect(details({ outputs: 4, verified: 4, recheckOk: 4, recheckTotal: 4 })).not.toContain("Not counted above");
   });
 });

@@ -366,14 +366,14 @@ async function checkFolderCommand(flags: Record<string, string | string[] | true
       const p = await prepare(raw, file, async b => b), alpha = await sharp(await readFile(mattePath)).toColourspace("b-w").raw().toBuffer();
       shots.set(n, { p, alpha, raw }); photos++;
     }
-    const geometries = [...shots.values()].flatMap(({ p, alpha }) => { const g = shotGeometry(alpha, p.width, p.height); return g ? [g] : []; });
+    const geometries = [...shots.values()].flatMap(({ p, alpha }) => { const g = shotGeometry(alpha, p.width, p.height, { rgb: p.rgb }); return g ? [g] : []; });
     const uniformScale = geometries.length ? planProduct(CHANNELS.styli, geometries).uniformScale : undefined;
     for (const channel of await readdir(path.join(dir, "outputs", product))) {
       if (!(CHANNEL_IDS as readonly string[]).includes(channel)) continue;
       for (const file of await readdir(path.join(dir, "outputs", product, channel))) {
         const m = /_(\d+)\.jpg$/i.exec(file); if (!m) continue;
         const n = Number(m[1]), shot = shots.get(n); if (!shot) continue;
-        const geometry = shotGeometry(shot.alpha, shot.p.width, shot.p.height); if (!geometry) continue;
+        const geometry = shotGeometry(shot.alpha, shot.p.width, shot.p.height, { rgb: shot.p.rgb }); if (!geometry) continue;
         const productCanvas = geometries.length ? planProduct(CHANNELS[channel as ChannelId], geometries).canvas : undefined;
         const plan = planCanvas(CHANNELS[channel as ChannelId], geometry.box, geometry.source, { cut: geometry.cut, canvas: productCanvas, ...(channel === "styli" ? { uniformScale } : {}) });
         const jpeg = await readFile(path.join(dir, "outputs", product, channel, file));

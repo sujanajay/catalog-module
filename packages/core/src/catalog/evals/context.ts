@@ -34,7 +34,7 @@ export const SHADOW_TYPES = new Set(["footwear", "bag_accessory", "other", "auto
 
 export async function buildContext(subject: OutputSubject): Promise<OutputContext | null> {
   const spec = channel(subject.channel), canvas = await decodeRaster(subject.jpeg);
-  const geometry = shotGeometry(subject.alpha, subject.source.w, subject.source.h);
+  const geometry = shotGeometry(subject.alpha, subject.source.w, subject.source.h, { rgb: subject.source.rgb });
   if (!geometry) return null;
   const { box: sourceBox, cut } = geometry;
   const productBox = productBoxOf(subject.channel, subject.placement, sourceBox, cut);

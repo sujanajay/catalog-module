@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { and, eq, inArray, sql } from "drizzle-orm";
 import { catalogBatches, catalogBatchProducts, catalogChunks, catalogProducts, catalogSourceImages, catalogUploads } from "@catalog/core/db/schema";
 import { batchPrefix, exportPath, sanitizeSegment } from "@catalog/core/catalog/naming";
-import { buildReport, readIngestReport, workbookCsvSheets, type ExportPaths } from "@catalog/core/catalog/pipeline/report";
+import { buildReport, readIngestReport, splitRecheck, workbookCsvSheets, type ExportPaths } from "@catalog/core/catalog/pipeline/report";
 import { releaseLocks } from "@catalog/core/catalog/pipeline/publish";
 import { recheckSheet } from "@catalog/core/catalog/recheck/index";
 import { compareXlsxCsv, fillProductListWorkbook, writeLinksCsv, writeLinksXlsx } from "@catalog/core/catalog/sheet";
@@ -65,7 +65,9 @@ export async function handleFinalizeTask(deps:CatalogDeps,body:Record<string,unk
       paths.filledProductList={xlsx:uri,csv:csvUris};
     }
     const recheck=await recheckSheet((await deps.storage.downloadBuffer(paths.xlsx)).buf,{fetch:deps.fetch});
-    const counts={...initial.batch.counts,latestExport:k,finalizePending:false,recheckOk:recheck.ok,recheckTotal:recheck.total};
+    // Both Details lines count this batch's delivered links; the held products' earlier links are re-checked apart.
+    const split=splitRecheck(recheck,initial.carriedLinks);
+    const counts={...initial.batch.counts,latestExport:k,finalizePending:false,recheckOk:split.ok,recheckTotal:split.total,recheckCarriedOk:split.carriedOk,recheckCarriedTotal:split.carriedTotal};
     const report={...initial.report,counts,recheck,exports:paths};
     await deps.storage.uploadBuffer(deps.storage.parseGsUri(paths.report).path,Buffer.from(JSON.stringify(report)),"application/json");
     const outcome=await deps.db.transaction(async tx=>{

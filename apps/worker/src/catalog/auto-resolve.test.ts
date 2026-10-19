@@ -31,8 +31,12 @@ const rect = (rgb: Buffer, x0: number, y0: number, w: number, h: number, color: 
 const block = (color: RGB, w = 400, h = 700): Shot => ({ draw: rgb => rect(rgb, (W - w) >> 1, (H - h) >> 1, w, h, () => color) });
 /** Saturated 2 px red and blue checks: JPEG chroma ringing pushes past the margin at full fit (real render). */
 const checker: Shot = { draw: rgb => rect(rgb, 200, 50, 400, 700, (x, y) => (((x >> 1) + (y >> 1)) & 1 ? [255, 0, 0] : [0, 0, 255])) };
-/** A body cut at the knees by the frame: two legs, each 11% of the box width, reach the bottom edge. */
-const legs: Shot = { draw: rgb => { rect(rgb, 250, 200, 300, 400, () => PLAIN); rect(rgb, 250, 600, 33, 200, () => PLAIN); rect(rgb, 517, 600, 33, 200, () => PLAIN); } };
+/**
+ * A cut-out on the photo's own plain background, cut at the knees 40 px above the frame bottom: no photo edge shows,
+ * so only the judge can say the legs end at a cut. `hand` adds a hand cut by the left frame edge, which the detector
+ * places flush on its own.
+ */
+const legs = (hand = false): Shot => ({ draw: rgb => { rect(rgb, 250, 200, 300, 400, () => PLAIN); rect(rgb, 250, 600, 60, 160, () => PLAIN); rect(rgb, 490, 600, 60, 160, () => PLAIN); if (hand) rect(rgb, 0, 300, 250, 60, () => PLAIN); } });
 
 /** Product where the pixel differs from the plain source background; the first model leaves a 10 px rim on marked products. */
 function fakeMatte(rgb: Buffer, model: string): Matte {
@@ -179,13 +183,23 @@ describe("07 auto-resolve: re-render and re-judge before holding", () => {
     expect(s.held.map(p => p.photos.map(photo => photo.n))).toEqual([[1]]);
   }, 180_000);
 
-  it("a judge-seen cut at the knees the 25% rule missed is placed flush; it stays a note, never a hold", async () => {
-    const w = world({ photoScores: (n): Record<string, number> => (n === 2 ? { complete_product: 30 } : {}) }), s = await seed(w, "apparel_flat", [block(PLAIN), legs]);
+  it("a judge-seen cut at the knees with no photo edge is placed flush; it stays a note, never a hold", async () => {
+    const w = world({ photoScores: (n): Record<string, number> => (n === 2 ? { complete_product: 30 } : {}) }), s = await seed(w, "apparel_flat", [block(PLAIN), legs()]);
     const o = s.outputs.find(row => row.n === 2)!;
     expect(steps(autoActionsOf(o.compliance))).toEqual(["flush_cut:passed"]);
     expect(o.flags).toEqual(expect.arrayContaining(["complete_product", "cut_in_source"]));
     expect(o).toMatchObject({ status: "staged", compliance: { ok: true } });
+    // Flush: the legs reach the canvas bottom.
+    expect(o.placedY + Math.round((760 - 200) * o.scale)).toBeGreaterThanOrEqual(o.canvasH - 2);
     expect(s.held).toEqual([]);
+  }, 180_000);
+
+  it("a judge-seen cut still runs when another side of the photo was already placed flush", async () => {
+    const w = world({ photoScores: (n): Record<string, number> => (n === 2 ? { complete_product: 30 } : {}) }), s = await seed(w, "apparel_flat", [block(PLAIN), legs(true)]);
+    const o = s.outputs.find(row => row.n === 2)!;
+    expect(steps(autoActionsOf(o.compliance))).toEqual(["flush_cut:passed"]);
+    expect(o.flags).toContain("cut_in_source");
+    expect(o.placedY + Math.round((760 - 200) * o.scale)).toBeGreaterThanOrEqual(o.canvasH - 2);
   }, 180_000);
 
   it("a matte that fell back while the service was down is retried once the service answers", async () => {
