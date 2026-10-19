@@ -2,20 +2,19 @@ import sharp from "sharp";
 import { describe, expect, it } from "vitest";
 import { CHANNELS } from "./channels";
 import { bbox, planCanvas, renderSource, type CanvasPlan, type Matte, type Prepared } from "./render";
-import { analyseBackground, cutAtBottom, preservedDarkness, shadowLayer, SHADOW_BAND_ABOVE, SHADOW_PRESET } from "./shadow";
+import { analyseBackground, preservedDarkness, shadowLayer, SHADOW_BAND_ABOVE, SHADOW_PRESET } from "./shadow";
 
 // A standing model on white: a wide upper body, two trouser legs and two feet that stop 15 px above
 // the frame bottom (like the French Connection full-length shots).
-function model(opts: { legsTo?: number; height?: number } = {}): { prepared: Prepared; matte: Matte } {
-  const width = 400, height = opts.height ?? 600, rgb = Buffer.alloc(width * height * 3, 255), alpha = Buffer.alloc(width * height);
+function model(): { prepared: Prepared; matte: Matte } {
+  const width = 400, height = 600, rgb = Buffer.alloc(width * height * 3, 255), alpha = Buffer.alloc(width * height);
   const paint = (x0: number, x1: number, y0: number, y1: number, value: number) => {
     for (let y = y0; y < Math.min(height, y1); y++) for (let x = x0; x < x1; x++) { const i = y * width + x; rgb.fill(value, i * 3, i * 3 + 3); alpha[i] = 255; }
   };
   paint(40, 360, 40, 400, 200);
-  const legsTo = opts.legsTo ?? 560;
-  paint(150, 195, 400, legsTo, 20); paint(205, 250, 400, legsTo, 20);
+  paint(150, 195, 400, 560, 20); paint(205, 250, 400, 560, 20);
   // Feet whose soles round off toward the floor, 15 px above the frame bottom.
-  if (opts.legsTo === undefined) for (let y = 560; y < 585; y++) {
+  for (let y = 560; y < 585; y++) {
     const half = Math.round(16 * Math.sqrt(1 - ((y - 560) / 25) ** 2));
     paint(174 - half, 174 + half, y, y + 1, 60); paint(226 - half, 226 + half, y, y + 1, 60);
   }
@@ -83,35 +82,6 @@ describe("synthesised contact shadow follows the silhouette", () => {
       expect(output.compliance, channel).toEqual({ ok: true, failures: [] });
       expect(output.flags).toContain("shadow_synthesised");
     }
-  });
-});
-
-describe("photos cut off at the bottom of the frame", () => {
-  it("detects a product running into the last row, and a straight cut over a thin white strip", () => {
-    expect(cutAtBottom(model({ legsTo: 600 }).matte)).toBe(true);
-    // Cut at the knees, then padded with 10 px of white: a long straight edge just above the frame bottom.
-    expect(cutAtBottom(model({ legsTo: 590 }).matte)).toBe(true);
-    // A flared dress hem ending 1.5% above a cut through the legs (the French Connection dress shot).
-    const dress = model({ legsTo: 590 }).matte;
-    for (let y = 400; y < 580; y++) for (let x = 100; x < 300; x++) dress.alpha[y * 400 + x] = 255;
-    expect(cutAtBottom(dress)).toBe(true);
-  });
-
-  it("does not mistake feet standing near the bottom, or a stray edge pixel, for a cut", () => {
-    const { matte } = model();
-    expect(cutAtBottom(matte)).toBe(false);
-    matte.alpha[599 * 400 + 10] = 255; matte.alpha[599 * 400 + 11] = 200;
-    expect(cutAtBottom(matte)).toBe(false);
-  });
-
-  it("gets no shadow of either kind and is flagged complete_product", async () => {
-    const { prepared, matte } = model({ legsTo: 590 });
-    const box = bbox(matte.alpha, prepared.width, prepared.height)!, plan = planCanvas(CHANNELS.noon, box, { w: 400, h: 600 }, {});
-    for (const type of ["other", "footwear", "apparel_model"] as const) expect(await shadowLayer(prepared, matte, box, plan, type, "#E0E0E0")).toEqual({ layer: null, flags: ["complete_product", "no_shadow_source"] });
-    const output = await renderSource({ prepared, matte, channel: "noon", shotNumber: 2, productType: "other" });
-    expect(output.flags).toContain("complete_product");
-    expect(output.flags).not.toContain("shadow_synthesised");
-    expect(output.compliance.ok).toBe(true);
   });
 });
 

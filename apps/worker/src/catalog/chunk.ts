@@ -10,7 +10,6 @@ import { catalogLlmDeps, CatalogQaCapError, runQaStage } from "./qa-stage";
 import { checkCatalogCaps } from "@catalog/core/catalog/qa/caps";
 import { shadowSynthesisAllowed } from "@catalog/core/catalog/qa/policy";
 import { flagReason } from "@catalog/core/catalog/types";
-import { flagDetails } from "@catalog/core/catalog/qa/reasons";
 import { recordCost } from "@catalog/core/spend";
 import type { HandleOptions, HandleResult } from "../server";
 import { CATALOG_TASK_LEASE_MS, enqueueFinalize, refreshBatchProgress, type CatalogDeps } from "./deps";
@@ -152,12 +151,12 @@ export async function handleChunkTask(deps: CatalogDeps, body: Record<string,unk
           const outputs = await deps.db.select().from(catalogOutputs).where(and(eq(catalogOutputs.sourceImageId,source.id),eq(catalogOutputs.batchId,batch.id),eq(catalogOutputs.status,"pending")));
           for (const output of outputs) try {
             const path = stagingPath(prefix,product.pathKey,output.channel,source.n), uri = deps.storage.toGsUri(deps.storage.getBucketName(),path), head = await deps.storage.headObject(uri);
-            if (head.exists && output.bytes !== null && head.size===output.bytes) { await underClaim(async tx=>tx.update(catalogOutputs).set({stagingUri:uri,crc32c:head.crc32c,status:output.flags.some(f=>f==="small_source" || f==="failed_compliance" || f==="complete_product") ? "needs_attention":"staged",updatedAt:deps.now()}).where(eq(catalogOutputs.id,output.id))); continue; }
+            if (head.exists && output.bytes !== null && head.size===output.bytes) { await underClaim(async tx=>tx.update(catalogOutputs).set({stagingUri:uri,crc32c:head.crc32c,status:output.flags.some(f=>f==="small_source" || f==="failed_compliance") ? "needs_attention":"staged",updatedAt:deps.now()}).where(eq(catalogOutputs.id,output.id))); continue; }
             const renderStart = +deps.now();
             const rendered = (await deps.renderAllChannels(p,matte,[output.channel],{shotNumber:source.n,productType:product.productType ?? "other",synthesiseShadow:shadowSynthesisAllowed(product.productType,source.flags),identifier:product.identifier,publicObjectPath:output.objectPath,canvas:productPlan(output.channel)?.canvas,...(output.channel==="styli" ? {uniformScale}:{})}))[output.channel];
             renderMs += +deps.now()-renderStart;
-            const flags = [...new Set([...source.flags,...rendered.flags])], status = rendered.status==="skipped" ? "skipped":!rendered.compliance.ok || flags.includes("small_source") || flags.includes("complete_product") ? "needs_attention":rendered.jpeg ? "staged":"failed";
-            const patch = {canvasW:rendered.plan.w,canvasH:rendered.plan.h,scale:rendered.plan.scale,placedX:rendered.plan.placedX,placedY:rendered.plan.placedY,bytes:rendered.bytes,quality:rendered.quality,flags,compliance:rendered.compliance,reason:rendered.notes.join("; ") || (flags.includes("small_source") ? flagReason("small_source"):flags.includes("complete_product") ? flagDetails("complete_product",{n:source.n,k:batch.channels.length}).why:null),updatedAt:deps.now()};
+            const flags = [...new Set([...source.flags,...rendered.flags])], status = rendered.status==="skipped" ? "skipped":!rendered.compliance.ok || flags.includes("small_source") ? "needs_attention":rendered.jpeg ? "staged":"failed";
+            const patch = {canvasW:rendered.plan.w,canvasH:rendered.plan.h,scale:rendered.plan.scale,placedX:rendered.plan.placedX,placedY:rendered.plan.placedY,bytes:rendered.bytes,quality:rendered.quality,flags,compliance:rendered.compliance,reason:rendered.notes.join("; ") || (flags.includes("small_source") ? flagReason("small_source"):null),updatedAt:deps.now()};
             await underClaim(async tx=>tx.update(catalogOutputs).set(patch).where(eq(catalogOutputs.id,output.id)));
             if (rendered.jpeg) { const jpeg=rendered.jpeg; await underClaim(async()=>deps.storage.uploadBuffer(path,jpeg,"image/jpeg",{cacheControl:deps.storage.PUBLIC_CACHE_CONTROL})); }
             const staged = rendered.jpeg ? await deps.storage.headObject(uri):null;

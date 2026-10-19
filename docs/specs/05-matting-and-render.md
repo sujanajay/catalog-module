@@ -200,13 +200,6 @@ Any change to the maths in this file that alters output bytes must bump `CHANNEL
      edge on the cut side only (`inside_safe_box`, `styli_anchor`, `noon_wide`). Headroom on
      zero-margin channels stays 0: SPEC.md states no minimum headroom.
 5. Shadow decision rule (shadow.ts), evaluated per source after matting, in this order:
-   0. Cut at the bottom (`cutAtBottom`): the product runs into the last two rows of the source (at
-      least `CUT_EDGE_MIN_SHARE` of a row solid), or ends within `CUT_EDGE_GAP` of the frame bottom on
-      an edge at least `CUT_EDGE_WIDE_SHARE` (10%) of the frame wide that keeps `CUT_EDGE_STRAIGHT_RATIO`
-      (0.75) of its width `CUT_EDGE_LOOKBACK` (1% of the height) higher (a photo cut, then padded with a thin strip; feet and soles narrow toward
-      the floor and do not match). No shadow of any kind; flags `complete_product` (an attention item in
-      06, with 07's sentence) and `no_shadow_source`. A contact shadow under a cut product would float
-      on a straight edge.
    1. `matte.source === "alpha_source"`: the file carries no shadow information. Synthesise (rule 3)
       only when the product type is one that synthesises and the channel allows a shadow on that
       shot; else no shadow and flag `no_shadow_source`.

@@ -18,20 +18,6 @@ export const SHADOW_BAND_SIDE = 0.1;
 // fade is the feather, as a share of the canvas's smaller side, that takes every shadow smoothly to zero
 // before a required margin or the border band, so no shadow ever ends in a straight cut.
 export const SHADOW_PRESET = { softness: 0.025, spread: 0.12, direction: 0, pose: "contact", bottomFraction: 0.2, fade: 0.03 } as const;
-// A source is cut at the bottom of its frame (no shadow, flag complete_product) when either
-// - at least CUT_EDGE_MIN_SHARE of one of its last two rows is solid product (alpha >= CUT_EDGE_ALPHA), or
-// - the silhouette ends within CUT_EDGE_GAP of the frame bottom (a photo cut, then padded with a thin
-//   strip) on an edge at least CUT_EDGE_WIDE_SHARE of the frame wide that is still at least
-//   CUT_EDGE_STRAIGHT_RATIO as wide CUT_EDGE_LOOKBACK of the frame height higher up. A cut keeps its
-//   straight sides down to the edge; feet and soles standing near the bottom are narrow and round off
-//   toward their lowest row. Calibrated on the QA-gate French Connection and Anta sets: cut edges were
-//   26% to 98% of the width with ratios of 0.95 or more, standing feet at most 7% and 0.73.
-export const CUT_EDGE_ALPHA = 128;
-export const CUT_EDGE_MIN_SHARE = 0.02;
-export const CUT_EDGE_GAP = 0.02;
-export const CUT_EDGE_WIDE_SHARE = 0.1;
-export const CUT_EDGE_LOOKBACK = 0.01;
-export const CUT_EDGE_STRAIGHT_RATIO = 0.75;
 
 export function borderBand(width: number, height: number): { x: number; y: number } { return { x: Math.max(4, Math.ceil(width * 0.02)), y: Math.max(4, Math.ceil(height * 0.02)) }; }
 export function borderPixels(width: number, height: number): number[] {
@@ -114,25 +100,6 @@ function continueBeyondBand(p: Prepared, matte: Matte, box: BBox, band: { x0: nu
 
 function smoothstep(t: number): number { const s = Math.min(1, Math.max(0, t)); return s * s * (3 - 2 * s); }
 
-/** True when the product runs off the bottom of the source frame (a model cut at the knees, a hem cut off). */
-export function cutAtBottom(matte: Matte): boolean {
-  const { alpha, width, height } = matte, needed = Math.max(3, Math.ceil(width * CUT_EDGE_MIN_SHARE));
-  for (let y = Math.max(0, height - 2); y < height; y++) {
-    let solid = 0;
-    for (let x = 0; x < width; x++) if (alpha[y * width + x]! >= CUT_EDGE_ALPHA) solid++;
-    if (solid >= needed) return true;
-  }
-  const solidIn = (y: number) => { let n = 0; for (let x = 0; x < width; x++) if (alpha[y * width + x]! >= CUT_EDGE_ALPHA) n++; return n; };
-  const gap = Math.max(2, Math.round(height * CUT_EDGE_GAP));
-  let last = -1;
-  for (let y = height - 1; y >= height - 1 - gap && y >= 0 && last < 0; y--) if (solidIn(y) > 0) last = y;
-  // The lowest solid row is antialiased; measure one row up, and again a little higher.
-  const back = Math.max(2, Math.round(height * CUT_EDGE_LOOKBACK));
-  if (last < back + 1) return false;
-  const edge = solidIn(last - 1), above = solidIn(last - 1 - back);
-  return edge >= Math.ceil(width * CUT_EDGE_WIDE_SHARE) && edge >= above * CUT_EDGE_STRAIGHT_RATIO;
-}
-
 /** 1 deep inside [start, end), easing to 0 at both ends over `fade` pixels; 0 outside. */
 function ramp(length: number, start: number, end: number, fade: number): Float32Array {
   const out = new Float32Array(length);
@@ -179,8 +146,6 @@ function synthesisedDarkness(matte: Matte, box: BBox, plan: CanvasPlan, intensit
 }
 
 export async function shadowLayer(p: Prepared, matte: Matte, box: BBox, plan: CanvasPlan, type: ProductType, background: string, foregroundMask?: Buffer): Promise<{ layer: Buffer | null; flags: OutputFlag[] }> {
-  // A product cut by the bottom of its photo has no contact line; a shadow there floats on a straight edge.
-  if (cutAtBottom(matte)) return { layer: null, flags: ["complete_product", "no_shadow_source"] };
   const darkness = preservedDarkness(p, matte, box, type), product = plan.productBox!;
   let flags: OutputFlag[] = [], projected: Float32Array, frame = { x0: 0, y0: 0, x1: plan.w, y1: plan.h };
   if (darkness) {

@@ -430,10 +430,7 @@ and overwritten by the bake-off in spec 08):
 | bag_accessory | `birefnet-general` | `birefnet-hr-matting` | 1024 (2048 for the second) | preserve else synthesise (upright) | same |
 | other (hardline) | `bria-rmbg` | `birefnet-dynamic-matting` | 1024 or native | preserve else synthesise (upright); glass and transparent packaging routed to `birefnet-hr-matting` with flag `transparent` for attention | same |
 
-Shadow decision rule (per source after matting; spec 05): (0) a product cut by the bottom of its source
-photo (it runs into the last rows, or ends on a straight edge just above a thin strip) gets no shadow of
-any kind, flags `complete_product` and `no_shadow_source`, and goes to attention: a shadow there would
-float on a straight edge. (1) `alpha_source`: no shadow information;
+Shadow decision rule (per source after matting; spec 05): (1) `alpha_source`: no shadow information;
 synthesise only if the policy says synthesise and the channel allows a shadow, else none, flag
 `no_shadow_source`. (2) Uniform background with mean darkness in the shadow band above
 `SHADOW_MIN_DARKNESS` (builder constant, start 0.04) and touching the bbox bottom: preserve the original
