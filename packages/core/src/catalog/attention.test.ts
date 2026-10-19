@@ -1,0 +1,25 @@
+import { afterAll, beforeAll, expect, it } from "vitest";
+import { createTestDb } from "../db/testing";
+import { catalogBatches,catalogBatchProducts,catalogProducts,catalogSourceImages,catalogOutputs } from "../db/schema";
+import { listAttention } from "./attention";
+let db:Awaited<ReturnType<typeof createTestDb>>["db"],close:()=>Promise<void>;
+beforeAll(async()=>{({db,close}=await createTestDb());});afterAll(async()=>close());
+it("groups a shared shot once, keeps channel-only problems separate, and excludes decisions and held-only products",async()=>{
+ const [batch]=await db.insert(catalogBatches).values({brandSlug:"anta",brandName:"Anta",name:"catalog-test-attention",isTest:true,channels:["noon","styli"],createdBy:"a@opptra.com"}).returning();
+ const [p]=await db.insert(catalogProducts).values({brandSlug:"anta",identifier:"SHOE",productKey:"shoe",pathKey:"SHOE",isTest:true}).returning();
+ await db.insert(catalogBatchProducts).values({batchId:batch!.id,productId:p!.id,change:"pending_attention"});
+ const [source]=await db.insert(catalogSourceImages).values({batchId:batch!.id,productId:p!.id,n:1,sha256:"a",rawUri:"gs://private/one.jpg",originalName:"one.jpg",mime:"image/jpeg",width:1200,height:1600}).returning();
+ const base={batchId:batch!.id,productId:p!.id,sourceImageId:source!.id,n:1,canvasW:1080,canvasH:1480,scale:1,placedX:0,placedY:0,renderKey:"a",objectPath:"catalog-test/one",publicUrl:"https://public/one",stagingUri:"gs://private/made.jpg"};
+ await db.insert(catalogOutputs).values([{...base,channel:"noon",status:"needs_attention",flags:["halo","shadow_synthesised"]},{...base,channel:"styli",status:"needs_attention",flags:["halo"]}]);
+ let items=await listAttention(db,batch!.id,async uri=>"signed:"+uri);
+ expect(items).toHaveLength(1);expect(items[0]!.photos).toHaveLength(1);
+ expect(items[0]!.photos[0]).toMatchObject({originalUrl:"signed:gs://private/one.jpg",why:expect.stringContaining("halo"),whatToDo:expect.stringContaining("Compare")});
+ expect(items[0]!.problemLine).toBe("Photo 1 has a rough edge.");
+ expect(JSON.stringify(items)).not.toMatch(/qaModel|birefnet|google\//);
+ await db.delete(catalogOutputs);
+ await db.insert(catalogOutputs).values([{...base,channel:"noon",status:"needs_attention",flags:["failed_compliance"]},{...base,channel:"styli",status:"needs_attention",flags:["placement"]}]);
+ items=await listAttention(db,batch!.id,async uri=>uri);expect(items[0]!.photos).toHaveLength(2);
+ await db.delete(catalogOutputs);
+ await db.insert(catalogOutputs).values([{...base,channel:"noon",status:"needs_attention",decision:"use_as_is",flags:["halo"]},{...base,channel:"styli",status:"verified",flags:["low_resolution"]}]);
+ expect(await listAttention(db,batch!.id,async uri=>uri)).toEqual([]);
+});

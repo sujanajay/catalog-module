@@ -7,6 +7,8 @@ import { requireRole } from "@/lib/user";
 import { HttpError } from "@/lib/errors";
 import { batchDetails } from "@/lib/catalog/exports";
 import { batchAttention } from "@/lib/catalog/products";
+import { evalOutputs } from "@/lib/catalog/eval";
+import { batchCostLine } from "@/lib/catalog/cost";
 import AutoRefresh from "@/components/AutoRefresh";
 import { ActionOnly } from "@/components/ViewerPreview";
 import { when } from "@/components/ui";
@@ -17,8 +19,13 @@ import AttentionList from "@/components/catalog/AttentionList";
 import SheetPreview from "@/components/catalog/SheetPreview";
 import DetailsTab from "@/components/catalog/DetailsTab";
 import NotRefreshedLine from "@/components/catalog/NotRefreshedLine";
+import CostLine from "@/components/catalog/CostLine";
+import SkuMapModal from "@/components/catalog/SkuMapModal";
+import { EvalList } from "@/components/catalog/EvalLabelBar";
 
-export default async function BatchPage({ params }: { params: Promise<{ id: string }> }) {
+type EvalQuery = { page?: string; channel?: string; verdict?: string };
+
+export default async function BatchPage({ params, searchParams }: { params: Promise<{ id: string }>; searchParams: Promise<EvalQuery> }) {
   const user = await requireRole("viewer");
   const { id } = await params;
   let data;
@@ -29,8 +36,18 @@ export default async function BatchPage({ params }: { params: Promise<{ id: stri
     throw err;
   }
   const { batch } = data;
-  const attention = await batchAttention(id);
   const canAct = user.role !== "viewer";
+  // Eval batches (08) list every output for labelling instead of the problem photos (spec 07 4.10).
+  const query = await searchParams;
+  const evalFilters = { channel: query.channel ?? "", verdict: query.verdict ?? "" };
+  const evalMode = batch.isTest && !!batch.options.evalSet;
+  const [attention, evalPage, cost] = await Promise.all([
+    evalMode ? Promise.resolve([]) : batchAttention(id),
+    evalMode ? evalOutputs(id, { page: Number(query.page ?? 0) || 0, ...evalFilters }) : Promise.resolve(null),
+    batchCostLine(batch),
+  ]);
+  const channelLabels = batch.channels.map(c => channel(c).label);
+  const missingSkus = data.sheet.rows.filter(r => !r.opptraSkuIds.length).length;
   const source = data.uploads.some(u => u.kind === "drive_folder") ? "Drive folder"
     : data.uploads.some(u => u.kind === "google_sheet") ? "Google Sheet"
     : data.uploads.some(u => u.kind === "zip") ? "zip" : "links";
@@ -69,7 +86,9 @@ export default async function BatchPage({ params }: { params: Promise<{ id: stri
       <BatchKpis counts={batch.counts} />
       <AutoRefresh active={state.state === "collecting" || state.state === "processing"} />
       <BatchTabs
-        attentionCount={batch.counts.attentionProducts}
+        attentionCount={attention.length}
+        evalLabel={evalPage ? `Needs attention (${evalPage.total} images)` : undefined}
+        initialTab={evalMode && (query.page || query.channel || query.verdict) ? "attention" : undefined}
         overview={
           <div className="grid2">
             <div className="card">
@@ -80,20 +99,20 @@ export default async function BatchPage({ params }: { params: Promise<{ id: stri
             </div>
             <div className="card">
               <h2>Cost so far</h2>
-              <p>Cost per style arrives with the quality-check update</p>
+              <CostLine line={{ usdPerIdentifier: cost.usdPerIdentifier, inrPerIdentifier: cost.inrPerIdentifier }} />
             </div>
           </div>
         }
-        attention={<AttentionList items={attention} canAct={canAct} />}
+        attention={evalPage
+          ? <EvalList batchId={id} data={evalPage} channels={batch.channels} filters={evalFilters} canAct={canAct} />
+          : <AttentionList items={attention} canAct={canAct} channels={channelLabels} />}
         sheet={
           <>
             <SheetPreview sheet={data.sheet} />
             {downloads}
             {canAct && (
               <ActionOnly>
-                <span title="Available after the quality-check update">
-                  <button className="btn ghost" disabled title="Available after the quality-check update">Add SKU ids</button>
-                </span>
+                <SkuMapModal batchId={id} missing={missingSkus} sheetUri={batch.sheetXlsxUri} />
               </ActionOnly>
             )}
             <p className="help">Opptra SKU ids are filled in automatically when they exist.</p>
