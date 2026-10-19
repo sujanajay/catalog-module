@@ -20,7 +20,7 @@ export class CatalogDecisionError extends Error {
 const undecided = (output: Output) => output.decision === null && (output.status === "needs_attention" || output.status === "failed");
 const channelFlag = (flag: OutputFlag) => flag === "placement" || flag === "failed_compliance" || flag === "low_resolution";
 // Information flags never decide the scope (4.6); they ride along with the real problem.
-const informationFlags = new Set<OutputFlag>(["no_shadow_source", "shadow_synthesised", "passthrough", "alpha_source", "qa_sampled_out", "numbering_gap", "type_unknown"]);
+const informationFlags = new Set<OutputFlag>(["no_shadow_source", "shadow_synthesised", "passthrough", "alpha_source", "qa_sampled_out", "numbering_gap", "type_unknown", "cut_in_source"]);
 /** A shared photo issue affects undecided siblings; solely channel-specific flags stay local. */
 export function decisionScope(output: Output, candidates: readonly Output[]): Output[] {
   const problems = output.flags.filter(flag => !informationFlags.has(flag));
