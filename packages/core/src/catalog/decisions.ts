@@ -11,6 +11,7 @@ import { parseManualMapping } from "./sku-mapping";
 import { checkImage, imageFlags } from "./ingest/image-check";
 import { normalizeHeader } from "./ingest/links-sheet";
 import type { Decision, OutputFlag } from "./types";
+import { INFORMATION_FLAGS } from "./qa/triage";
 
 type Output = typeof catalogOutputs.$inferSelect;
 type Tx = Parameters<Parameters<Db["transaction"]>[0]>[0];
@@ -19,8 +20,9 @@ export class CatalogDecisionError extends Error {
 }
 const undecided = (output: Output) => output.decision === null && (output.status === "needs_attention" || output.status === "failed");
 const channelFlag = (flag: OutputFlag) => flag === "placement" || flag === "failed_compliance" || flag === "low_resolution";
-// Information flags never decide the scope (4.6); they ride along with the real problem.
-const informationFlags = new Set<OutputFlag>(["no_shadow_source", "shadow_synthesised", "passthrough", "alpha_source", "qa_sampled_out", "numbering_gap", "type_unknown"]);
+// Information flags never decide the scope (4.6); they ride along with the real problem. One shared
+// list with the attention model and the QA triage (qa/triage.ts), including low_resolution.
+const informationFlags = INFORMATION_FLAGS;
 /** A shared photo issue affects undecided siblings; solely channel-specific flags stay local. */
 export function decisionScope(output: Output, candidates: readonly Output[]): Output[] {
   const problems = output.flags.filter(flag => !informationFlags.has(flag));

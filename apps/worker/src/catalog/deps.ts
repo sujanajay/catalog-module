@@ -4,6 +4,7 @@ import { catalogBatches, catalogBatchProducts, catalogOutputs } from "@catalog/c
 import { ensureDefaultPolicies, resolvePolicy } from "@catalog/core/catalog/qa/policy";
 import { judgeOutput } from "@catalog/core/catalog/qa/judge";
 import { classifyProductType } from "@catalog/core/catalog/qa/classify";
+import type { RepairOwnDefects } from "@catalog/core/catalog/qa/triage";
 import type { ProductType } from "@catalog/core/catalog/types";
 import { MattingClient, matteFor } from "@catalog/core/catalog/matte";
 import { prepare, renderAllChannels } from "@catalog/core/catalog/render";
@@ -16,6 +17,8 @@ export interface CatalogDeps {
   resolvePolicy: (brandSlug:string,category:string) => Promise<ResolvedPolicy>;
   judgeOutput: typeof judgeOutput; classifyProductType: typeof classifyProductType;
   prepare: typeof prepare; matteFor: typeof matteFor; renderAllChannels: typeof renderAllChannels;
+  /** Extension point for the re-render-and-re-judge loop; absent means nothing is repaired (qa/triage.ts). */
+  repairOwnDefects?: RepairOwnDefects;
 }
 let sharedMatting: MattingClient | undefined;
 // Default rows are check-then-insert; once per process is enough.

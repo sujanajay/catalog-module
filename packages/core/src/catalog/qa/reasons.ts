@@ -52,3 +52,9 @@ export function problemLine(photos: readonly ProblemPhoto[]): string {
     return reason ? `${prefix}: ${reason[0]!.toLowerCase()}${reason.slice(1)}` : `${prefix} ${shortClause(photo.flag ?? photo.flags?.[0] ?? "failed",photo)}`;
   }).join("; ") + (photos.length ? "." : "");
 }
+/** The sheet and report note for an automatic action of the QA triage (07 4.1 v2). */
+export function autoActionNote(action: "note" | "drop", why: string): string {
+  return action === "drop"
+    ? `${why} Left out automatically because this product has enough other good photos.`
+    : `${why} Kept with this note because this product has too few other good photos.`;
+}

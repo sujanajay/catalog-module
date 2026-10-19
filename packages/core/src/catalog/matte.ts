@@ -10,7 +10,12 @@ export interface MattingClientOptions {
   services: MattingService[]; fetch?: typeof fetch; idToken?: (audience: string) => Promise<string>;
   model?: string; timeoutMs?: number; batchId?: string;
 }
-export const BREAKER_FAILURES = Number(process.env.MATTING_BREAKER_FAILURES ?? 5);
+/**
+ * The model ids the matting services serve: services/matting/app.py `INPUT_SIZES`, which is also
+ * the `MATTE_MODELS` default (a test keeps the two in step). Built-in policies name only these.
+ */
+export const DEPLOYED_MATTE_MODELS: readonly string[] = ["birefnet-general", "birefnet-general-lite", "birefnet-hrsod", "bria-rmbg"];
+export const BREAKER_FAILURES =Number(process.env.MATTING_BREAKER_FAILURES ?? 5);
 export const BREAKER_COOLDOWN_MS = Number(process.env.MATTING_BREAKER_COOLDOWN_MS ?? 60_000);
 // Allow measured 64-second CPU readiness plus startup headroom, below Cloud Run's 300 seconds.
 export const MATTING_TIMEOUT_MS = Number(process.env.MATTING_TIMEOUT_MS ?? 180_000);

@@ -108,6 +108,49 @@ No schema change. If a column is missing the manager stops and reports a contrac
 
 ## 4. Contracts
 
+### 4.0 Judge v2 amendment (supersedes the conflicting lines of 4.1, 4.2 and 4.4)
+
+Live batch b489e466 held two of 12 products wrongly or inconsistently: a sole view flagged
+`different_product` against the side view, and one real shadow-block defect held on Centrepoint
+only while six other channels passed (the mean of all scores, and `placement_ok` asked of a judge
+that cannot see the other angles). The judge now works like this:
+
+- Prompt (`CATALOG_QA_TEMPLATE`): image 1 is the source photo, image 2 the output rendered from it,
+  image 3 photo 1 of the same product id for reference; the product type is given. The judge names
+  the `view` first (front, side, back, sole, top, inside, detail, on-model, flat), is told that other
+  angles, soles, insides, close-ups and on-model shots of the same item are expected, and answers
+  `wrong_item` true only for a clearly different item (another category, or a colourway or design
+  no angle explains), false when unsure. It scores `complete_product`, `no_text_or_watermark`,
+  `orientation_ok` and `is_collage` on image 1 and `edge_quality`, `background_clean` on image 2
+  against image 1, with one `evidence` sentence per failing check. Placement is not asked; code
+  checks it exactly (05). Reply keys: `view`, `wrong_item`, the five scores, `is_collage`, `evidence`.
+- Verdict (`judge.ts`): every dimension against its own line from the policy, no mean
+  (`dimensionThresholds`: output dimensions use `threshold`, photo dimensions and `same_product`
+  use `floor`). `same_product` is 0 only when `wrong_item` is confirmed by `policy.qaModelSecond`
+  (asked only when the first judge says `wrong_item`); otherwise 100. `overall` is the weakest
+  dimension and informational only.
+- QA stage (`qa-stage.ts`): photo dimensions apply to every channel of the photo. When an output
+  dimension fails on the judged channel, the photo's other channels are re-checked and every channel
+  takes the strictest score, so one defect gives one consistent result.
+- Automatic actions (`qa/triage.ts` `triageProduct`). Hard holds: a different item confirmed by
+  both judges, a collage, a corrupt file, photo 1 with a problem, every photo of a channel with a
+  problem. Also held because no verdict exists or the image cannot go live: `qa_cap`,
+  `qa_unavailable`, and an image not made or failing the channel rules when it cannot be dropped.
+  Any other problem: dropped with a note (status `skipped`, reason ends "Left out automatically
+  because this product has enough other good photos.") when the photo is not photo 1 and at least
+  two good photos remain on that channel, else kept with a note (status `staged`, "Kept with this
+  note because this product has too few other good photos."). Note-only information flags since
+  v2: `complete_product` and `transparent`, besides `low_resolution` and the 4.6 list
+  (`INFORMATION_FLAGS`, shared by attention, decisions and triage). No flag was added.
+- Re-render extension point: `CatalogDeps.repairOwnDefects` (`RepairOwnDefects` in `qa/triage.ts`)
+  is called once per product after judging and before triage with every undecided output carrying
+  `halo` or `leftover_background`; it re-renders and re-judges, writes the rows, and the stage
+  re-reads them, so a fixed output counts as good. Absent, nothing is repaired.
+- Report: every judged output in `report-v<k>.json` carries `qa` (scores, thresholds, view, evidence
+  with the model that gave each sentence, every judgement including re-checks and the second
+  opinion, `autoAction`, `holdCause`, `finalStatus`), and the batch carries `qa.attentionRate`
+  (held products over products, target 0). Model ids stay out of operator copy.
+
 ### 4.1 Dimensions, thresholds, verdict, flags
 
 Dimensions (0 to 100 each, coerced and clamped by `normalizeScores`; a missing dimension becomes 0
