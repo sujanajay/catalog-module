@@ -43,6 +43,13 @@ it("limits channel-only decisions but mixed flags affect all undecided siblings"
   const mixed = await seed(["placement", "halo"]);
   expect(decisionScope(mixed.outputs[1]!, mixed.outputs)).toHaveLength(2);
 });
+it("ignores information flags when scoping a Styli-only placement removal", async () => {
+  const s = await seed(["placement", "shadow_synthesised"], ["needs_attention", "needs_attention"]);
+  await db.update(catalogOutputs).set({ flags: ["failed_compliance"] }).where(eq(catalogOutputs.id, s.outputs[0]!.id));
+  const result = await applyDecision(db, { outputId: s.outputs[1]!.id, decision: "remove", actor });
+  expect(result.outputIds).toEqual([s.outputs[1]!.id]);
+  expect((await db.select().from(catalogOutputs).where(eq(catalogOutputs.id, s.outputs[0]!.id)))[0]!).toMatchObject({ decision: null, status: "needs_attention" });
+});
 it("refuses use-as-is atomically when a scoped photo failed", async () => {
   const s = await seed(["halo"], ["needs_attention", "failed"]);
   await expect(applyDecision(db, { outputId: s.outputs[0]!.id, decision: "use_as_is", actor })).rejects.toMatchObject({ status: 400, message: "Nothing was made from this photo. Remove it or replace it." });
@@ -84,6 +91,11 @@ it("rejects another photo's replacement upload and an incomplete PUT", async () 
   vi.mocked(w.storage.headObject).mockResolvedValueOnce({ exists: false, size: null, contentType: null, generation: null, crc32c: null });
   await expect(completeReplacement(w.deps, { outputId: a.outputs[0]!.id, uploadId: upload.uploadId, actor })).rejects.toMatchObject({ status: 400 });
   expect(w.storage.uploadBuffer).not.toHaveBeenCalled();
+});
+it("refuses replacement names that are only dots or separators", async () => {
+  const a = await seed(), w = await storageWorld();
+  for (const name of ["..", "../..", " / "]) await expect(startReplacement(w.deps, { outputId: a.outputs[0]!.id, name, size: w.buf.length, mime: "image/jpeg" })).rejects.toMatchObject({ status: 400 });
+  expect(w.storage.signedPutUrl).not.toHaveBeenCalled();
 });
 it("adds normalized alias matches, semicolon ids and manual master mappings without rerendering", async () => {
   const s = await seed();

@@ -5,7 +5,7 @@ import { brandMaster, catalogBatches, catalogBatchProducts, catalogChunks, catal
 import type * as storage from "../storage";
 import { toGsUri } from "../storage";
 import { DEFAULT_MAX_BYTES } from "../safe-url";
-import { batchPrefix, normalizeKey, rawPath, uploadPath } from "./naming";
+import { batchPrefix, normalizeKey, rawPath, sanitizeSegment, uploadPath } from "./naming";
 import { recordEvent } from "./products";
 import { parseManualMapping } from "./sku-mapping";
 import { checkImage, imageFlags } from "./ingest/image-check";
@@ -19,9 +19,12 @@ export class CatalogDecisionError extends Error {
 }
 const undecided = (output: Output) => output.decision === null && (output.status === "needs_attention" || output.status === "failed");
 const channelFlag = (flag: OutputFlag) => flag === "placement" || flag === "failed_compliance" || flag === "low_resolution";
+// Information flags never decide the scope (4.6); they ride along with the real problem.
+const informationFlags = new Set<OutputFlag>(["no_shadow_source", "shadow_synthesised", "passthrough", "alpha_source", "qa_sampled_out", "numbering_gap", "type_unknown"]);
 /** A shared photo issue affects undecided siblings; solely channel-specific flags stay local. */
 export function decisionScope(output: Output, candidates: readonly Output[]): Output[] {
-  const local = output.flags.length > 0 && output.flags.every(channelFlag);
+  const problems = output.flags.filter(flag => !informationFlags.has(flag));
+  const local = output.status !== "failed" && problems.length > 0 && problems.every(channelFlag);
   return candidates.filter(candidate => undecided(candidate) && candidate.batchId === output.batchId && candidate.sourceImageId === output.sourceImageId && (!local || candidate.id === output.id));
 }
 async function readOutput(db: Db | Tx, id: string): Promise<Output> {
@@ -59,7 +62,7 @@ export interface ReplacementDeps {
   now?: () => Date;
 }
 export async function startReplacement(deps: ReplacementDeps, input: { outputId: string; name: string; size: number; mime: string }): Promise<{ uploadId: string; signedPutUrl: string }> {
-  if (!input.name.trim() || !Number.isSafeInteger(input.size) || input.size <= 0 || input.size > DEFAULT_MAX_BYTES || !input.mime.startsWith("image/")) throw new CatalogDecisionError(400, "Choose one image under 40 MB.");
+  if (!/[A-Za-z0-9]/.test(sanitizeSegment(input.name)) || !Number.isSafeInteger(input.size) || input.size <= 0 || input.size > DEFAULT_MAX_BYTES || !input.mime.startsWith("image/")) throw new CatalogDecisionError(400, "Choose one image under 40 MB.");
   const output = await readOutput(deps.db, input.outputId);
   if (!undecided(output)) throw new CatalogDecisionError(409, "Already decided.");
   const [batch] = await deps.db.select().from(catalogBatches).where(eq(catalogBatches.id, output.batchId));
