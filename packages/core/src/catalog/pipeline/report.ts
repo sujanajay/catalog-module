@@ -6,15 +6,28 @@ import ExcelJS from "exceljs";
 import { buildCsv } from "../../csv";
 import type { Db } from "../../db/client";
 import { catalogBatches, catalogBatchProducts, catalogChunks, catalogOutputs, catalogProductEvents, catalogProducts, catalogSourceImages, catalogUploads, type CatalogBatch } from "../../db/schema";
-import { channel, CHANNEL_ORDER } from "../channels";
+import { CHANNEL_ORDER } from "../channels";
 import type { SheetSpec } from "../sheet";
 import { CHANNEL_IDS, type ChannelId, type LinkStatus, type ChangeKind, type SheetStatus } from "../types";
+import { outputNote, type Output } from "./publish";
 import type { RecheckResult } from "../recheck/index";
 import { isDuplicateReject } from "../ingest/group";
 import type * as storage from "../../storage";
 export function batchSheetStatus(member: { linkStatus: LinkStatus; change: ChangeKind }): SheetStatus {
   if (member.linkStatus === "missing_images") return "missing_images";
   return member.change === "pending_attention" || member.change === "failed" ? "needs_attention" : member.linkStatus;
+}
+/** The sheet's notes cell: the product's stored notes, then every extra note not already in them (spec 06 5.6). */
+export function mergeNotes(stored: string | null, extra: readonly string[]): string {
+  const base = stored ?? "";
+  return [...new Set([base, ...extra.filter(note => note && !base.includes(note))].filter(Boolean))].join("; ");
+}
+/** "Photos 1 and 3: ..." for the shots of this batch flagged cut_in_source (information; never holds the product). */
+export function cutInSourceNote(outputs: readonly Pick<Output, "n" | "status" | "flags">[]): string {
+  const shots = [...new Set(outputs.filter(o => o.flags.includes("cut_in_source") && o.status !== "failed" && o.status !== "skipped").map(o => o.n))].sort((a, b) => a - b);
+  if (!shots.length) return "";
+  const list = shots.length > 1 ? `${shots.slice(0, -1).join(", ")} and ${shots.at(-1)}` : String(shots[0]);
+  return `${shots.length > 1 ? "Photos" : "Photo"} ${list}: already cut at the frame edge in the original photo; the cut edge sits flush with the edge of the image`;
 }
 export interface NotRefreshedChannel { channel: ChannelId; lastBatchId: string; lastBatchName: string }
 export async function notRefreshedChannels(db:Db,batchId:string):Promise<NotRefreshedChannel[]> {
@@ -47,7 +60,6 @@ export async function workbookCsvSheets(bytes:Buffer):Promise<{name:string;csv:s
     return {name:sheet.name,csv:buildCsv(rows[0] ?? [],rows.slice(1))};
   });
 }
-type Output = typeof catalogOutputs.$inferSelect;
 const autoActionOf = (o: Output) => (o.qaScores as { autoAction?: unknown } | null)?.autoAction;
 /** Share of the batch's products held for a person (0 to 1); the QA target is 0. */
 export function attentionRate(productsHeld: number, products: number): number {
@@ -77,11 +89,11 @@ export async function buildReport(db:Db,batchId:string,extra:{recheck:RecheckRes
   const chunks = await db.select().from(catalogChunks).where(eq(catalogChunks.batchId,batchId));
   const rows:SheetSpec["rows"] = pairs.map(({product,pair})=> {
     const live = outputs.filter(o=>o.productId===product.id && o.isLive && batch.channels.includes(o.channel));
-    const problems = outputs.filter(o=>o.productId===product.id && o.batchId===batchId && o.reason && (["skipped","failed","needs_attention"].includes(o.status) || o.decision === "use_as_is" || autoActionOf(o) === "note")).map(o=>`${channel(o.channel).label} img ${o.n}: ${o.decision === "use_as_is" ? `kept as is by ${o.decidedBy}: `:""}${o.reason}`);
+    const problems = outputs.filter(o=>o.productId===product.id && o.batchId===batchId && o.reason && (["skipped","failed","needs_attention"].includes(o.status) || o.decision === "use_as_is" || autoActionOf(o) === "note")).map(outputNote);
     const links:SheetSpec["rows"][number]["links"] = {};
     for (const output of live) { links[output.channel] ??= []; links[output.channel]![output.n-1]=output.publicUrl; }
     const times = live.flatMap(o=>o.publishedAt ? [+o.publishedAt]:[]);
-    return {brand:batch.brandName,identifier:product.identifier,optionIdStyleColor:product.optionIdStyleColor ?? "",opptraSkuIds:product.opptraSkuIds,links,status:batchSheetStatus(pair),notes:[...new Set([pair.notes,...problems].filter(Boolean))].join("; "),change:pair.change,changedAt:times.length ? new Date(Math.max(...times)):null};
+    return {brand:batch.brandName,identifier:product.identifier,optionIdStyleColor:product.optionIdStyleColor ?? "",opptraSkuIds:product.opptraSkuIds,links,status:batchSheetStatus(pair),notes:mergeNotes(pair.notes,[...problems,cutInSourceNote(outputs.filter(o=>o.productId===product.id && o.batchId===batchId))]),change:pair.change,changedAt:times.length ? new Date(Math.max(...times)):null};
   });
   const selected = outputs.filter(o=>o.batchId===batchId), unchanged = pairs.reduce((n,{product})=>n+Math.max(0,sources.filter(s=>s.productId===product.id).length*batch.channels.length-selected.filter(o=>o.productId===product.id).length),0);
   const qaCap=selected.some(output=>output.flags.includes("qa_cap"));

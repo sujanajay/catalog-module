@@ -8,7 +8,7 @@ import type { ChannelId, OutputFlag } from "../types";
  */
 export const INFORMATION_FLAGS: ReadonlySet<OutputFlag> = new Set<OutputFlag>([
   "low_resolution", "no_shadow_source", "shadow_synthesised", "passthrough", "alpha_source", "qa_sampled_out",
-  "numbering_gap", "type_unknown", "complete_product", "transparent",
+  "numbering_gap", "type_unknown", "cut_in_source", "complete_product", "transparent",
 ]);
 /** Always held for the operator: a different item confirmed by two judges, or several photos in one. */
 export const HARD_HOLD_FLAGS: ReadonlySet<OutputFlag> = new Set<OutputFlag>(["different_product", "collage"]);

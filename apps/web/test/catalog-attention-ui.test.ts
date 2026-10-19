@@ -44,10 +44,13 @@ describe("needs attention card", () => {
 describe("cost and SKU copy", () => {
   const text = (html: string) => html.replace(/<[^>]+>/g, "");
   it("renders the INR per style line, the USD fallback and the not-yet line", () => {
-    expect(text(renderToStaticMarkup(createElement(CostLine, { line: { usdPerIdentifier: 0.04, inrPerIdentifier: 3.8 } })))).toBe("INR 3.80 per style so far · agency reference INR 60 per style");
-    expect(text(renderToStaticMarkup(createElement(CostLine, { line: { usdPerIdentifier: 0.04, inrPerIdentifier: null } })))).toBe("USD 0.04 per style so far · Cost in rupees is not configured yet · agency reference INR 60 per style");
-    expect(text(renderToStaticMarkup(createElement(CostLine, { line: { usdPerIdentifier: null, inrPerIdentifier: null } })))).toContain("agency reference INR 60 per style");
-    for (const line of [{ usdPerIdentifier: 0.04, inrPerIdentifier: null }, { usdPerIdentifier: null, inrPerIdentifier: null }]) expect(renderToStaticMarkup(createElement(CostLine, { line }))).not.toMatch(/INR_PER_USD|set [A-Z_]+/);
+    expect(text(renderToStaticMarkup(createElement(CostLine, { line: { usdPerIdentifier: 0.04, inrPerIdentifier: 3.8, usd: 0.4, inr: 38 } })))).toBe("INR 3.80 per style so far · INR 38.00 for this batch · agency reference INR 60 per style");
+    expect(text(renderToStaticMarkup(createElement(CostLine, { line: { usdPerIdentifier: 0.04, inrPerIdentifier: null, usd: 0.4, inr: null } })))).toBe("USD 0.0400 per style so far · USD 0.4000 for this batch · Cost in rupees is not configured yet · agency reference INR 60 per style");
+    expect(text(renderToStaticMarkup(createElement(CostLine, { line: { usdPerIdentifier: null, inrPerIdentifier: null, usd: 0, inr: null } })))).toContain("agency reference INR 60 per style");
+    // A real judged batch costs a fraction of a cent per style; the line must not read 0.00.
+    expect(text(renderToStaticMarkup(createElement(CostLine, { line: { usdPerIdentifier: 0.000603, inrPerIdentifier: null, usd: 0.0072398, inr: null } })))).toMatch(/^USD 0\.0006 per style so far · USD 0\.0072 for this batch/);
+    expect(text(renderToStaticMarkup(createElement(CostLine, { line: { usdPerIdentifier: 0.000603, inrPerIdentifier: 0.0507, usd: 0.0072398, inr: 0.6081 } })))).toMatch(/^INR 0\.05 per style so far · INR 0\.61 for this batch/);
+    for (const line of [{ usdPerIdentifier: 0.04, inrPerIdentifier: null, usd: 0.4, inr: null }, { usdPerIdentifier: null, inrPerIdentifier: null, usd: 0, inr: null }]) expect(renderToStaticMarkup(createElement(CostLine, { line }))).not.toMatch(/INR_PER_USD|set [A-Z_]+/);
   });
   it("words the wizard estimate and the SKU modal lines", () => {
     expect(estimateText({ usd: 1, inr: 1234.5, images: 6569, qaChecks: 412 })).toBe("Estimated cost: about INR 1,234.50 (6,569 images, 412 quality checks)");

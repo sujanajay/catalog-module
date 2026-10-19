@@ -1,6 +1,6 @@
 import sharp from "sharp";
 import { backgroundFor, channel, MAX_OUTPUT_BYTES } from "./channels";
-import { effectiveMinimum, hexColor, safeBoxFor, type CanvasPlan } from "./render";
+import { effectiveMinimum, hexColor, NO_CUT, safeBoxFor, type CanvasPlan } from "./render";
 import { borderBand } from "./shadow";
 import type { ChannelId } from "./types";
 
@@ -23,13 +23,14 @@ export async function checkOutput(input: ComplianceInput): Promise<{ ok: boolean
     if (meta.density !== spec.dpi) fail("density", `The image must use ${spec.dpi} DPI.`);
     const { data } = await sharp(jpeg).removeAlpha().toColourspace("srgb").raw().toBuffer({ resolveWithObject: true });
     const source = plan.sourceBox, wide = source ? source.w > source.h : (plan.productBox?.w ?? 0) > (plan.productBox?.h ?? 0);
-    const safe = safeBoxFor(spec, { w, h }, wide), band = borderBand(w, h), color = hexColor(backgroundFor(spec.id, input.shotNumber));
-    let backgroundBad = false, outside = false, x0 = w, x1 = -1, y1 = -1;
+    // A side cut in the source sits flush with the canvas edge (margin 0 on that side only).
+    const cut = plan.cut ?? NO_CUT, safe = safeBoxFor(spec, { w, h }, wide, cut), band = borderBand(w, h), color = hexColor(backgroundFor(spec.id, input.shotNumber));
+    let backgroundBad = false, outside = false, x0 = w, x1 = -1, y0 = h, y1 = -1;
     for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
       const offset = (y * w + x) * 3;
       const delta = Math.max(Math.abs(data[offset]! - color[0]), Math.abs(data[offset + 1]! - color[1]), Math.abs(data[offset + 2]! - color[2]));
       if (delta <= BG_TOLERANCE) continue;
-      x0 = Math.min(x0, x); x1 = Math.max(x1, x); y1 = Math.max(y1, y);
+      x0 = Math.min(x0, x); x1 = Math.max(x1, x); y0 = Math.min(y0, y); y1 = Math.max(y1, y);
       const inSafe = x >= safe.x && x < safe.x + safe.w && y >= safe.y && y < safe.y + safe.h;
       if (!inSafe) { outside = true; backgroundBad = true; }
       const product = plan.productBox;
@@ -39,8 +40,10 @@ export async function checkOutput(input: ComplianceInput): Promise<{ ok: boolean
     }
     if (backgroundBad) fail("background", "The exposed background or margin has the wrong colour.");
     if (outside) fail("inside_safe_box", "The product or shadow reaches outside the required margins.");
-    if (spec.id === "styli" && (Math.abs(y1 + 1 - (h - 450)) > 1 || Math.abs((x0 + x1 + 1) / 2 - w / 2) > 1)) fail("styli_anchor", "The product must be centred on the Styli bottom guide.");
-    if (spec.id === "noon" && wide && (x0 < Math.ceil(w * 0.05) || x1 + 1 > Math.floor(w * 0.95))) fail("noon_wide", "Wide Noon shots need at least 5% side margins.");
+    const styliVertical = cut.bottom ? Math.abs(y1 + 1 - h) <= 1 : cut.top ? y0 <= 1 : Math.abs(y1 + 1 - (h - 450)) <= 1;
+    const styliHorizontal = cut.left && !cut.right ? x0 <= 1 : cut.right && !cut.left ? x1 + 1 >= w - 1 : Math.abs((x0 + x1 + 1) / 2 - w / 2) <= 1;
+    if (spec.id === "styli" && (!styliVertical || !styliHorizontal)) fail("styli_anchor", "The product must be centred on the Styli bottom guide.");
+    if (spec.id === "noon" && wide && ((!cut.left && x0 < Math.ceil(w * 0.05)) || (!cut.right && x1 + 1 > Math.floor(w * 0.95)))) fail("noon_wide", "Wide Noon shots need at least 5% side margins.");
   } catch { fail("format", "The encoded image cannot be decoded."); }
   return { ok: failures.length === 0, failures };
 }

@@ -2,7 +2,8 @@ import sharp from "sharp";
 import { callLlmJson, imageParts, textPart, LLM_MAX_TOKENS, LlmJsonError, LlmResponseError, type LlmMessage } from "../../llm/llm";
 import { OpenRouterError } from "../../llm/openrouter";
 import type { OpenRouterDeps } from "../../llm/types";
-import { readCost, sumUsage } from "../../llm/util";
+import { sumUsage } from "../../llm/util";
+import { qaCallCost } from "../cost";
 import { CHANNELS } from "../channels";
 import type { ChannelId, OutputFlag, ProductType } from "../types";
 import { CATALOG_QA_TEMPLATE, PRODUCT_TYPE_WORDS, renderTemplate } from "./templates";
@@ -23,7 +24,7 @@ export const PHOTO_DIMENSIONS = ["complete_product", "same_product", "no_text_or
 /** Dimensions that describe our rendered output (image 2 against image 1): judged per channel. */
 export const OUTPUT_DIMENSIONS = ["edge_quality", "background_clean"] as const satisfies readonly QaDimension[];
 export const DIMENSION_FLAGS: Record<QaDimension, OutputFlag> = {complete_product:"complete_product",same_product:"different_product",edge_quality:"halo",background_clean:"leftover_background",no_text_or_watermark:"text_or_watermark",orientation_ok:"orientation"};
-export interface CatalogLlmDeps extends OpenRouterDeps { log?: (message: string) => void }
+export interface CatalogLlmDeps extends OpenRouterDeps { log?: (message: string, fields?: Record<string, unknown>) => void }
 
 /**
  * Per-dimension pass lines from the resolved policy (no mean). Output dimensions use the policy
@@ -66,18 +67,19 @@ export function verdictFor(scores: QaScores, threshold = QA_DEFAULT_THRESHOLD, f
 /** Keep request accounting even when the JSON helper exhausts its retry and throws. */
 export async function callCatalogJson<T>(messages: LlmMessage[], validate: (obj: Record<string, unknown>) => T, model: string, deps: CatalogLlmDeps) {
   const usages: Record<string, unknown>[] = [];
-  let calls = 0;
+  let calls = 0, costUsd = 0;
   const request = deps.fetch ?? globalThis.fetch;
   const tracked: typeof fetch = async (url, init) => {
     calls++;
     const response = await request(url, init);
     if (response.ok) {
-      try {
-        const body = await response.clone().json() as {usage?: Record<string, unknown>};
-        const usage = body.usage ?? {};
-        usages.push(usage);
-        if (readCost(usage) === null) (deps.log ?? console.info)("catalog_qa: usage.cost absent; recorded cost 0 for this completion.");
-      } catch { /* The existing HTTP/JSON helper owns malformed response errors. */ }
+      let body: {usage?: Record<string, unknown>} | undefined;
+      try { body = await response.clone().json() as typeof body; } catch { /* The existing HTTP/JSON helper owns malformed response errors; the call is still priced. */ }
+      usages.push(body?.usage ?? {});
+      // Same reading as the worker's spend recording (qa-stage), so the returned cost matches spend_days.
+      const spent = qaCallCost(body);
+      costUsd += spent.costUsd;
+      if (spent.estimated) (deps.log ?? console.info)(`catalog_qa: usage.cost absent; recorded the estimated price USD ${spent.costUsd} for this completion (prompt tokens ${spent.promptTokens}, completion tokens ${spent.completionTokens}).`);
     }
     return response;
   };
@@ -86,9 +88,14 @@ export async function callCatalogJson<T>(messages: LlmMessage[], validate: (obj:
     value = (await callLlmJson(messages, validate, {temperature:0,maxTokens:LLM_MAX_TOKENS,model}, {...deps,fetch:tracked})).value;
   } catch (error) {
     if (!(error instanceof LlmResponseError || error instanceof LlmJsonError || error instanceof OpenRouterError)) throw error;
+    // Warn before the caller maps this to qa_unavailable, so a bad key, an auth failure or a timeout
+    // is visible in the logs. The OpenRouter message is already redacted; prompts are never logged.
+    const status = error instanceof OpenRouterError ? error.status : null;
+    const kind = error instanceof OpenRouterError ? (status === 401 || status === 403 ? "auth" : status === 0 ? (/API_KEY is not set/.test(error.message) ? "no_key" : "no_response") : "http") : error instanceof LlmJsonError ? "invalid_json" : "empty_reply";
+    (deps.log ?? console.warn)("catalog_qa: quality check unavailable", {severity:"WARNING", model, status, kind, calls, error:error.message.slice(0, 300)});
     value = null;
   }
-  return {value, usage:sumUsage(usages), costUsd:usages.reduce((sum, usage) => sum + Math.max(0, readCost(usage) ?? 0), 0), calls};
+  return {value, usage:sumUsage(usages), costUsd, calls};
 }
 
 /** Resize only the judge's transmitted copy, leaving source and staged bytes untouched. */
