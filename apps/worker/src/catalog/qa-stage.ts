@@ -5,7 +5,10 @@ import { checkCatalogCaps } from "@catalog/core/catalog/qa/caps";
 import { sampledForQa, strictestChannel } from "@catalog/core/catalog/qa/policy";
 import { autoActionNote, flagDetails } from "@catalog/core/catalog/qa/reasons";
 import { DIMENSION_FLAGS, OUTPUT_DIMENSIONS, PHOTO_DIMENSIONS, QA_DIMENSIONS, dimensionThresholds, failingDimensions, withOverall, type JudgeResult, type QaDimension } from "@catalog/core/catalog/qa/judge";
-import { HARD_HOLD_FLAGS, INFORMATION_FLAGS, OWN_DEFECT_FLAGS, noRepair, problemFlags, triageProduct } from "@catalog/core/catalog/qa/triage";
+import { HARD_HOLD_FLAGS, INFORMATION_FLAGS, problemFlags, triageProduct, type RepairOwnDefects } from "@catalog/core/catalog/qa/triage";
+import { autoActionsOf, JUDGED_CUT_MIN_RUN_FRACTION, OWN_DEFECT_FLAGS, ownDefects } from "@catalog/core/catalog/auto-resolve";
+import { shadowSynthesisAllowed } from "@catalog/core/catalog/qa/policy";
+import { flushCutPhoto, resolvePhoto, stopOn } from "./auto-resolve";
 import { recordCost } from "@catalog/core/spend";
 import { qaCallCost } from "@catalog/core/catalog/cost";
 import type { ResolvedPolicy, OutputFlag } from "@catalog/core/catalog/types";
@@ -159,8 +162,60 @@ export async function runQaStage(deps:CatalogDeps,batch:Batch,sources:Source[],p
    await underClaim(async tx=>{for(const row of group) await tx.update(catalogOutputs).set({status:"needs_attention",flags:[...new Set<OutputFlag>([...row.flags,"qa_cap"])],reason:qaCapReason,updatedAt:deps.now()}).where(eq(catalogOutputs.id,row.id));});
   }
  }
- for(const productId of new Set(sources.map(source=>source.productId))) await applyTriage(deps,batch,productId,underClaim);
+ for(const productId of new Set(sources.map(source=>source.productId))) await applyTriage(deps,batch,productId,underClaim,policy);
 }
+
+/** Judge flags the ladder resolves in the QA stage (code-checked placement fails compliance at render). */
+const JUDGE_TRIGGERS=new Set<OutputFlag>([...OWN_DEFECT_FLAGS].filter(flag=>flag!=="failed_compliance"));
+/**
+ * The production `repairOwnDefects` (07 auto-resolve), run before triage decides anything: a photo the judge found cut at its own frame edge
+ * that the cut detector missed is re-placed flush; a photo with our own defect (halo, leftover
+ * background) climbs the retry ladder (shadow off, second matte, 5% smaller fit) with one re-judge
+ * per step. The winner is applied to every channel of the photo. The judge cap rules apply to every
+ * re-judge; reaching a cap ends the ladder and the photo keeps its flags for the triage.
+ */
+export interface QaRepairContext { deps: CatalogDeps; batch: Batch; policy: ResolvedPolicy; productId: string; underClaim: UnderClaim }
+/** Outputs the re-render loop gets: our own defects, or a frame cut the judge saw and the detector missed. */
+export const repairable=(o:Output)=>o.decision===null && (o.status==="staged" || o.status==="needs_attention") && (o.flags.some(flag=>OWN_DEFECT_FLAGS.has(flag)) || (o.flags.includes("complete_product") && !o.flags.includes("cut_in_source")));
+export const repairOwnDefects:RepairOwnDefects<QaRepairContext>=async(candidates,{deps,batch,policy,productId,underClaim})=>{
+ const fixed=new Set<string>();
+ const read=()=>deps.db.select().from(catalogOutputs).where(and(eq(catalogOutputs.batchId,batch.id),eq(catalogOutputs.productId,productId),isNull(catalogOutputs.decision),inArray(catalogOutputs.status,["staged","needs_attention"])));
+ const [product]=await deps.db.select().from(catalogProducts).where(eq(catalogProducts.id,productId));
+ if(!product) return fixed;
+ const tried=(o:Output,step:string,result?:string)=>autoActionsOf(o.compliance).some(action=>action.step===step && (!result || action.result===result));
+ for(const sourceId of [...new Set(candidates.map(c=>c.sourceImageId))]) {
+  const [source]=await deps.db.select().from(catalogSourceImages).where(eq(catalogSourceImages.id,sourceId));
+  if(!source) continue;
+  const photo=async()=>(await read()).filter(o=>o.sourceImageId===sourceId && !!o.stagingUri);
+  const shadowAllowed=shadowSynthesisAllowed(product.productType,source.flags),statusFor=(flags:OutputFlag[])=>problemFlags(flags).length ? "needs_attention" as const:"staged" as const;
+  let rows=await photo();
+  // The judge says the photo is cut at its frame edge and the 25% run rule found no cut: place the cut flush.
+  if(rows.some(o=>o.flags.includes("complete_product")) && !rows.some(o=>o.flags.includes("cut_in_source")) && !rows.some(o=>tried(o,"flush_cut"))) {
+   await flushCutPhoto(deps,{batch,product,source,policy,underClaim,outputs:rows,shadowAllowed,statusFor});
+   rows=await photo();
+  }
+  const flush=rows.some(o=>tried(o,"flush_cut","passed"));
+  const failing=rows.filter(o=>o.flags.some(flag=>JUDGE_TRIGGERS.has(flag)) && !autoActionsOf(o.compliance).some(action=>action.trigger.some(flag=>JUDGE_TRIGGERS.has(flag))));
+  if(!failing.length) continue;
+  const rejudge=stopOn(error=>error instanceof CatalogQaCapError,async(row,jpeg)=>{
+   const cap=await checkCatalogCaps(deps.db,{batchId:batch.id,now:deps.now()});
+   if(!cap.ok) throw new CatalogQaCapError(cap.reason);
+   const [fresh]=await deps.db.select().from(catalogBatches).where(eq(catalogBatches.id,batch.id));
+   const state=fresh!.counts as Batch["counts"] & {qaUseSecond?:boolean};
+   const originals=await deps.db.select().from(catalogSourceImages).where(and(eq(catalogSourceImages.productId,productId),eq(catalogSourceImages.batchId,batch.id))).orderBy(catalogSourceImages.n);
+   const superseded=new Set(originals.flatMap(s=>s.replacesId ? [s.replacesId]:[])),shotOne=originals.find(s=>!superseded.has(s.id));
+   const llm=catalogLlmDeps(deps,batch,underClaim);
+   const result=await deps.judgeOutput({output:jpeg,original:(await deps.storage.downloadBuffer(source.rawUri)).buf,...(source.n>1 && shotOne ? {shotOne:(await deps.storage.downloadBuffer(shotOne.rawUri)).buf}:{}),channel:row.channel,anchor:row.channel==="styli" ? "bottom-centre":"centre",productType:product.productType ?? "other",identifier:product.identifier,n:source.n,model:state.qaUseSecond && policy.qaModelSecond ? policy.qaModelSecond:policy.qaModel,threshold:policy.threshold,floor:policy.floor},llm);
+   llm.assertAvailable();
+   // The verdict is read from the scores against the policy's lines, as the first judging did.
+   const flags=[...new Set<OutputFlag>([...result.flags,...(result.flags.includes("qa_unavailable") ? []:failingDimensions(result.scores,policy.threshold,policy.floor).map(d=>DIMENSION_FLAGS[d]))])];
+   return {passed:!flags.some(flag=>JUDGE_TRIGGERS.has(flag) || flag==="qa_unavailable"),flags,scores:result.scores};
+  });
+  const result=await resolvePhoto(deps,{batch,product,source,policy,underClaim,outputs:rows,failing,trigger:ownDefects(failing.flatMap(o=>o.flags)),shadowAllowed,statusFor,rejudge,...(flush ? {cutMinRunFraction:JUDGED_CUT_MIN_RUN_FRACTION}:{})});
+  for(const id of result.fixed) fixed.add(id);
+ }
+ return fixed;
+};
 
 /** Lead flag for the sentence: a hard hold first, then the first other problem, then a note-only flag. */
 function leadFlag(flags:readonly OutputFlag[]):OutputFlag|undefined {
@@ -169,15 +224,15 @@ function leadFlag(flags:readonly OutputFlag[]):OutputFlag|undefined {
 /**
  * Turns one product's QA problems into automatic actions (qa/triage.ts) and records them on each
  * judged output's `qa_scores` (`autoAction`, `holdCause`, `finalStatus`) for the report and evals.
- * Before deciding, the re-render loop (`deps.repairOwnDefects`) gets the outputs with our own defects.
+ * The re-render loop (`repairOwnDefects`) has already run, so a re-made output counts as a good photo.
  */
-export async function applyTriage(deps:CatalogDeps,batch:Batch,productId:string,underClaim:UnderClaim):Promise<void> {
+export async function applyTriage(deps:CatalogDeps,batch:Batch,productId:string,underClaim:UnderClaim,policy:ResolvedPolicy):Promise<void> {
  const read=()=>deps.db.select().from(catalogOutputs).where(and(eq(catalogOutputs.batchId,batch.id),eq(catalogOutputs.productId,productId)));
  let outputs=await read();
- const repairable=outputs.filter(o=>o.decision===null && (o.status==="staged" || o.status==="needs_attention") && o.flags.some(flag=>OWN_DEFECT_FLAGS.has(flag)));
- if(repairable.length && deps.repairOwnDefects) {
+ const candidates=outputs.filter(repairable);
+ if(candidates.length && deps.repairOwnDefects) {
   await underClaim(async()=>{});
-  await (deps.repairOwnDefects ?? noRepair)(repairable.map(o=>({outputId:o.id,sourceImageId:o.sourceImageId,channel:o.channel,n:o.n,flags:o.flags})));
+  await deps.repairOwnDefects(candidates.map(o=>({outputId:o.id,sourceImageId:o.sourceImageId,channel:o.channel,n:o.n,flags:o.flags})),{deps,batch,policy,productId,underClaim});
   outputs=await read();
  }
  const sources=await deps.db.select({id:catalogSourceImages.id,n:catalogSourceImages.n,replacesId:catalogSourceImages.replacesId}).from(catalogSourceImages).where(and(eq(catalogSourceImages.batchId,batch.id),eq(catalogSourceImages.productId,productId)));
@@ -197,7 +252,7 @@ export async function applyTriage(deps:CatalogDeps,batch:Batch,productId:string,
    if(decision.action==="hold") {
     if(!decision.cause || decision.cause==="unchecked") continue;
     patch={status:"needs_attention",flags:ordered,reason:scores && why ? why:o.reason ?? why};
-   } else if(decision.action==="drop") patch={status:"skipped",flags:ordered,reason:autoActionNote("drop",why ?? "")};
+   } else if(decision.action==="drop") patch={status:"skipped",flags:[...new Set<OutputFlag>([...ordered,"auto_dropped"])],reason:autoActionNote("drop",why ?? "")};
    else if(decision.action==="note") patch={status:"staged",flags:ordered,reason:autoActionNote("note",why ?? "")};
    else {
     // Nothing to decide: a judged note-only flag (the photo is cut at its own edge) still gets its sentence.

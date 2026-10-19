@@ -36,6 +36,7 @@ export function flagDetails(flag: OutputFlag | "failed", ctx: ReasonContext = {}
     passthrough:["The original already met this marketplace's rules, so it was only saved again in the right format.","Nothing to do."],
     alpha_source:["The original has a transparent background, so it was used as the cut-out directly.","Nothing to do."],
     qa_sampled_out:["This image was not selected for the quality-check sample.","Nothing to do."],
+    auto_dropped:["This photo was left out automatically: it could not be made cleanly and this product has enough other good photos.","Nothing to do; replace the photo if you want it back."],
   };
   const pair = pairs[flag];
   if (pair) return {why:pair[0],whatToDo:pair[1]};

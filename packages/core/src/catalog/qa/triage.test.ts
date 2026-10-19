@@ -31,9 +31,11 @@ describe("QA triage: hard holds only", () => {
   const lone = out(3, ["halo"]);
   expect(action([out(1), lone], lone, [{channel:"noon",n:2}])).toMatchObject({action:"drop"});
  });
- it("publishes with a note when only one other good photo remains, unless the image cannot be published", () => {
-  const bad = out(2, ["halo"]);
+ it("publishes with a note when only one other good photo remains, unless the image cannot be published or shows our own defect", () => {
+  const bad = out(2, ["text_or_watermark"]);
   expect(action([out(1), bad], bad)).toMatchObject({action:"note"});
+  // Our own defects left after the re-render loop are never published with a note.
+  for (const flag of ["halo", "leftover_background", "placement"] as const) { const own = out(2, [flag]); expect(action([out(1), own], own)).toMatchObject({action:"hold",cause:"not_publishable"}); }
   const rules = out(2, ["failed_compliance"]);
   expect(action([out(1), rules], rules)).toMatchObject({action:"hold",cause:"not_publishable"});
  });
