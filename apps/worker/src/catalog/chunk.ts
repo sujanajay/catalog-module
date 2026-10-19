@@ -49,7 +49,11 @@ export async function handleChunkTask(deps: CatalogDeps, body: Record<string,unk
       const allSources = await deps.db.select().from(catalogSourceImages).where(and(eq(catalogSourceImages.productId,productId),eq(catalogSourceImages.batchId,batch.id))).orderBy(catalogSourceImages.n);
       const replaced=new Set(allSources.flatMap(source=>source.replacesId ? [source.replacesId]:[]));
       const sources=allSources.filter(source=>!replaced.has(source.id) && (!chunk!.sourceImageIds?.length || chunk!.sourceImageIds.includes(source.id)));
-      const sourcePrefix=(source:typeof sources[number])=>source.replacesId ? `${prefix}/replacements-${source.id}`:prefix;
+      // Only an operator replacement (its raw copy sits under <batch>/replacements-<upload>/) needs its own
+      // derived/staging prefix. Ingest also sets replacesId on every redelivered shot of a later batch;
+      // those keep the batch prefix, the only staging layout stageCopyToPublic accepts.
+      const replacementRoot=deps.storage.toGsUri(deps.storage.getBucketName(),`${prefix}/replacements-`);
+      const sourcePrefix=(source:typeof sources[number])=>source.replacesId && source.rawUri.startsWith(replacementRoot) ? `${prefix}/replacements-${source.id}`:prefix;
       if(chunk.stage==="matte" && !product.productType && sources.length) {
        let type=batch.productType, flags:typeof sources[number]["flags"]=[];
        if(type==="auto") {
