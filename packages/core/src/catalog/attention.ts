@@ -35,9 +35,11 @@ export async function listAttention(db:Db,batchId:string,sign:(uri:string)=>Prom
   const flag=o.status==="failed"?"failed":problemFlags[0]??"qa_unavailable";
   const spec=channel(o.channel);
   const context={n:o.n,k:batch.channels.length,channel:spec.label,...(row.source.width!==null&&row.source.height!==null?{w:row.source.width,h:row.source.height}:{}),min:Math.max(spec.minCanvas.w,spec.minCanvas.h),failures:o.reason??"",...(o.status==="failed"&&o.error?{error:o.error}:{})};
-  const details=[flagDetails(flag,context),...flags.filter(f=>f!==flag).map(f=>flagDetails(f,context))];
+  // Why: the main problem first, then any other problem, then information notes on the same photo (4.6).
+  // What to do: one instruction, the main problem's; information flags never add guidance of their own.
+  const main=flagDetails(flag,context),others=[...problemFlags.filter(f=>f!==flag),...flags.filter(f=>information.has(f))].map(f=>flagDetails(f,context));
   const liveChannels=[...new Set(live.filter(l=>l.productId===o.productId&&l.n===o.n&&(siblings.length>1||!flags.every(local)||l.channel===o.channel)).map(l=>l.channel))];
-  const photo:AttentionPhoto={n:o.n,channel:o.channel,outputId:o.id,outputIds:siblings.map(r=>r.output.id),originalUrl:await sign(row.source.rawUri),outputUrl:o.stagingUri?await sign(o.stagingUri):null,why:details.map(d=>d.why).join(" "),whatToDo:details.map(d=>d.whatToDo).join(" "),liveObjectExists:liveChannels.length>0,liveChannels,failed:siblings.some(r=>r.output.status==="failed"),flags};
+  const photo:AttentionPhoto={n:o.n,channel:o.channel,outputId:o.id,outputIds:siblings.map(r=>r.output.id),originalUrl:await sign(row.source.rawUri),outputUrl:o.stagingUri?await sign(o.stagingUri):null,why:[main,...others].map(d=>d.why).join(" "),whatToDo:main.whatToDo,liveObjectExists:liveChannels.length>0,liveChannels,failed:siblings.some(r=>r.output.status==="failed"),flags};
   const product=products.get(o.productId)??{productId:o.productId,identifier:row.identifier,totalShots:new Set(sources.filter(s=>s.productId===o.productId).map(s=>s.n)).size,problemLine:"",photos:[]};
   product.photos.push(photo);products.set(o.productId,product);
  }

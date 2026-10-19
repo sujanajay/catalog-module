@@ -109,11 +109,14 @@ export async function exportBrand(slug: string, productIds: string[], conn: Db =
 export async function batchDetails(id: string, conn: Db = db(), read = downloadBuffer) {
   const [batch] = await conn.select().from(catalogBatches).where(eq(catalogBatches.id, id));
   if (!batch) throw new HttpError(404, "This batch was not found. Return to All batches.");
-  const [uploads, failures, sheet] = await Promise.all([
+  const [uploads, failures, sheet, kept] = await Promise.all([
     conn.select({ kind: catalogUploads.kind, detected: catalogUploads.detected }).from(catalogUploads).where(eq(catalogUploads.batchId, id)),
     conn.select({ n: catalogOutputs.n, originalName: catalogSourceImages.originalName, channel: catalogOutputs.channel, reason: catalogOutputs.reason, error: catalogOutputs.error }).from(catalogOutputs).innerJoin(catalogSourceImages, eq(catalogSourceImages.id,catalogOutputs.sourceImageId)).where(and(eq(catalogOutputs.batchId, id), eq(catalogOutputs.status, "failed"))),
     batchSheet(id, conn, read),
+    conn.select({ sourceImageId: catalogOutputs.sourceImageId }).from(catalogOutputs).where(and(eq(catalogOutputs.batchId, id), eq(catalogOutputs.decision, "use_as_is"))),
   ]);
+  // Photos an operator kept with "Use as is": the Ready line must not claim they passed every check.
+  const keptPhotos = new Set(kept.map((k) => k.sourceImageId)).size;
   let recheckFailures: { url: string; reason: string }[] = [];
   const notRefreshedChannels = await readNotRefreshedChannels(conn, id);
   let filled = false;
@@ -122,5 +125,5 @@ export async function batchDetails(id: string, conn: Db = db(), read = downloadB
     recheckFailures = report.recheck?.failures ?? [];
     filled = !!report.exports?.filledProductList;
   }
-  return { batch, sheet, failures, recheckFailures, notRefreshedChannels, filled, uploads };
+  return { batch, sheet, failures, recheckFailures, notRefreshedChannels, filled, uploads, keptPhotos };
 }

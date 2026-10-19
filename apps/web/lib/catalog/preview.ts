@@ -4,9 +4,9 @@ import { buildDetectedStep2 } from "@catalog/core/catalog/ingest/detect-step";
 import { buildPreview } from "@catalog/core/catalog/ingest/index";
 import type { Detected } from "@catalog/core/catalog/ingest/types";
 import { STYLI_MIN_SOURCE_HEIGHT_PX, STYLI_SKIP_LOW_RESOLUTION } from "@catalog/core/catalog/channels";
+import type { ChannelId } from "@catalog/core/catalog/types";
 import * as storage from "@catalog/core/storage";
 import { db } from "../db";
-import { renderKey } from "@catalog/core/catalog/pipeline/publish";
 import { badRequest } from "../errors";
 import { assertDraft, draftForUpdate, parseOptions, queryBatch } from "./batches";
 import { wizardEstimate } from "./cost";
@@ -49,6 +49,26 @@ export async function patchDetected(id: string, value: unknown) {
   await regroupBatch(id);
   return { collecting: true };
 }
+type PlannedSource = { productId: string; n: number; sha256: string; height: number | null };
+type LiveOutput = { productId: string; n: number; channel: ChannelId; sha256: string };
+/**
+ * Step 4's "images will be made" (spec 06): photos times channels, minus Styli skips, minus pairs whose
+ * live image was made from the same photo (same sha256), which the pipeline keeps as they are.
+ */
+export function plannedImages(sources: readonly PlannedSource[], channels: readonly ChannelId[], live: readonly LiveOutput[]): { outputs: number; sourcesToMake: number } {
+  let outputs = 0, sourcesToMake = 0;
+  for (const source of sources) {
+    let made = 0;
+    for (const channel of channels) {
+      if (channel === "styli" && STYLI_SKIP_LOW_RESOLUTION && source.height !== null && source.height < STYLI_MIN_SOURCE_HEIGHT_PX) continue;
+      if (live.some((o) => o.productId === source.productId && o.n === source.n && o.channel === channel && o.sha256 === source.sha256)) continue;
+      made++;
+    }
+    outputs += made;
+    if (made) sourcesToMake++;
+  }
+  return { outputs, sourcesToMake };
+}
 export async function previewBatch(id: string) {
   const batch = await queryBatch(id);
   const base = { ready: batch.counts.previewReady, previewAt: batch.updatedAt.toISOString(), counts: {...batch.counts, photos: batch.counts.sources, channels: batch.channels.length}, collected: batch.counts.collected, collectTotal: batch.counts.collectTotal, estimate: null as CostEstimate | null };
@@ -56,17 +76,11 @@ export async function previewBatch(id: string) {
   const [preview, detected] = await Promise.all([buildPreview(db(), id, { storage }, { limit: 50 }), buildDetectedStep2(db(), id, { storage })]);
   const sources = await db().select().from(catalogSourceImages).where(eq(catalogSourceImages.batchId, id));
   const productIds = [...new Set(sources.map((s) => s.productId))];
-  const live = productIds.length ? await db().select({ productId: catalogOutputs.productId, n: catalogOutputs.n, channel: catalogOutputs.channel, renderKey: catalogOutputs.renderKey }).from(catalogOutputs).where(and(inArray(catalogOutputs.productId, productIds), eq(catalogOutputs.isLive, true))) : [];
-  let outputs = 0;
-  for (const source of sources) for (const channel of batch.channels) {
-    if (channel === "styli" && STYLI_SKIP_LOW_RESOLUTION && source.height !== null && source.height < STYLI_MIN_SOURCE_HEIGHT_PX) continue;
-    const policy = batch.options.policy;
-    if (policy && live.some((o) => o.productId === source.productId && o.n === source.n && o.channel === channel && o.renderKey === renderKey({ sourceSha256: source.sha256, channel, n: source.n, policyKey: `${policy.source}|${policy.matteModel}` }))) continue;
-    outputs++;
-  }
+  const live = productIds.length ? await db().select({ productId: catalogOutputs.productId, n: catalogOutputs.n, channel: catalogOutputs.channel, sha256: catalogSourceImages.sha256 }).from(catalogOutputs).innerJoin(catalogSourceImages, eq(catalogSourceImages.id, catalogOutputs.sourceImageId)).where(and(inArray(catalogOutputs.productId, productIds), eq(catalogOutputs.isLive, true))) : [];
+  const { outputs, sourcesToMake } = plannedImages(sources, batch.channels, live);
   // One classifier call per product without a type when the batch type is "auto" (spec 07 4.3, 4.11).
   const untypedProducts = batch.productType !== "auto" || !productIds.length ? 0 : (await db().select({ productType: catalogProducts.productType }).from(catalogProducts).where(inArray(catalogProducts.id, productIds))).filter((p) => !p.productType).length;
-  const estimate = wizardEstimate({ outputs, sources: sources.length, untypedProducts, qaMode: batch.options.policy?.qaMode ?? "per_source", qaSampleRate: batch.options.policy?.qaSampleRate ?? 1 });
+  const estimate = wizardEstimate({ outputs, sources: sourcesToMake, untypedProducts, qaMode: batch.options.policy?.qaMode ?? "per_source", qaSampleRate: batch.options.policy?.qaSampleRate ?? 1 });
   const existing = new Set(preview.overwrite.existingProducts.map((p) => p.identifier));
   const groups = await Promise.all(preview.rows.map(async ({ firstShotUri, ...row }) => ({ ...row, firstPhotoUrl: firstShotUri ? await storage.signedUrl(firstShotUri, 900) : null, status: row.status === "duplicate shot" ? "two files for one shot" : row.status === "ok" && existing.has(row.identifier) ? "existing" : row.notes.some((n) => /not in sheet/i.test(n)) ? "not in sheet" : row.status })));
   return { ...base, estimate, groupedBy: detected.groupedBy, counts: { ...batch.counts, ...preview.kpis, outputs }, warnings: preview.warnings, groups, totalRows: preview.totalRows, overwrite: { newProducts: preview.overwrite.newProducts, existingProducts: preview.overwrite.existingProducts, renameHints: preview.overwrite.renameHints, sameProductPairs: preview.overwrite.duplicates }, busy: preview.overwrite.busy };
