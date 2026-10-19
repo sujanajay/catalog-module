@@ -20,6 +20,7 @@ import SheetPreview from "@/components/catalog/SheetPreview";
 import DetailsTab from "@/components/catalog/DetailsTab";
 import NotRefreshedLine from "@/components/catalog/NotRefreshedLine";
 import CostLine from "@/components/catalog/CostLine";
+import RetryCollectButton from "@/components/catalog/RetryCollectButton";
 import { plural } from "@/lib/catalog/copy";
 import SkuMapModal from "@/components/catalog/SkuMapModal";
 import { EvalList } from "@/components/catalog/EvalLabelBar";
@@ -81,8 +82,9 @@ export default async function BatchPage({ params, searchParams }: { params: Prom
         {canAct && batch.status === "failed" && (
           <ActionOnly><Link className="btn primary" href={`/catalog/new?brand=${encodeURIComponent(batch.brandSlug)}`}>Start again</Link></ActionOnly>
         )}
+        {canAct && state.stalled && <ActionOnly><RetryCollectButton batchId={id} /></ActionOnly>}
       </div>
-      <BatchBanner key={id} status={batch.status} counts={batch.counts} source={source} />
+      <BatchBanner key={id} status={batch.status} counts={batch.counts} source={source} updatedAt={new Date(batch.updatedAt).toISOString()} />
       <NotRefreshedLine items={data.notRefreshedChannels} />
       <BatchKpis counts={batch.counts} />
       <AutoRefresh active={state.state === "collecting" || state.state === "processing"} />

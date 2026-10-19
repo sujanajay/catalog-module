@@ -39,13 +39,13 @@ function rowLinks(row: SheetRow, ch: ChannelId): (string | null)[] {
 
 /**
  * Column layout: the four fixed columns, then per channel N image columns (N = the most shots that
- * channel has across the rows, at least 1 so a ticked channel always shows), then the four tail
- * columns. Channels not in `spec.channels` have 0.
+ * channel has across the rows, 0 when no row has an image for it, as in spec 06 5.6), then the four
+ * tail columns. Channels not in `spec.channels` have 0.
  */
 export function sheetColumns(spec: SheetSpec): { fixed: string[]; perChannel: Record<ChannelId, number>; tail: string[] } {
   const perChannel = Object.fromEntries(CHANNEL_IDS.map((c) => [c, 0])) as Record<ChannelId, number>;
   for (const ch of spec.channels) {
-    perChannel[ch] = spec.rows.reduce((most, r) => Math.max(most, rowLinks(r, ch).length), 1);
+    perChannel[ch] = spec.rows.reduce((most, r) => Math.max(most, rowLinks(r, ch).length), 0);
   }
   return { fixed: [...FIXED], perChannel, tail: [...TAIL] };
 }
@@ -86,6 +86,7 @@ function buildGrid(spec: SheetSpec): Grid {
   for (const ch of spec.channels) {
     const label = channel(ch).label;
     const count = layout.perChannel[ch];
+    if (count === 0) continue;
     channelSpans.push({ ch, label, start: columns.length, count });
     for (let i = 1; i <= count; i++) {
       columns.push({ top: label, sub: `Image ${i}`, flat: `${label} Image ${i}`, link: true, text: false });

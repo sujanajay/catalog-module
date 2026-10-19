@@ -4,7 +4,7 @@ import { and, eq, inArray, or, sql } from "drizzle-orm";
 import { catalogBatches, catalogChunks, catalogOutputs, catalogProducts, catalogSourceImages } from "@catalog/core/db/schema";
 import { CHANNELS, STYLI_MIN_SOURCE_HEIGHT_PX, STYLI_SKIP_LOW_RESOLUTION } from "@catalog/core/catalog/channels";
 import { batchPrefix, derivedPath, publicObjectPath, publicUrl, stagingPath } from "@catalog/core/catalog/naming";
-import { bbox, planProduct, UnsupportedSourceError, type Matte } from "@catalog/core/catalog/render";
+import { planProduct, shotGeometry, UnsupportedSourceError, type Matte } from "@catalog/core/catalog/render";
 import { renderKey } from "@catalog/core/catalog/pipeline/publish";
 import { catalogLlmDeps, CatalogQaCapError, runQaStage } from "./qa-stage";
 import { checkCatalogCaps } from "@catalog/core/catalog/qa/caps";
@@ -127,16 +127,16 @@ export async function handleChunkTask(deps: CatalogDeps, body: Record<string,unk
         }
       } else if(chunk.stage==="render") {
         const prepared: { source: typeof sources[number]; p: Awaited<ReturnType<CatalogDeps["prepare"]>>; matte: Matte }[] = [];
-        const uniformOutputs = await deps.db.select().from(catalogOutputs).where(and(eq(catalogOutputs.batchId,batch.id),eq(catalogOutputs.productId,productId),eq(catalogOutputs.channel,"styli"),eq(catalogOutputs.status,"pending")));
+        const productOutputs = await deps.db.select().from(catalogOutputs).where(and(eq(catalogOutputs.batchId,batch.id),eq(catalogOutputs.productId,productId),eq(catalogOutputs.status,"pending")));
         for (const source of sources) {
           const pending = await deps.db.select().from(catalogOutputs).where(and(eq(catalogOutputs.sourceImageId,source.id),eq(catalogOutputs.batchId,batch.id),eq(catalogOutputs.status,"pending")));
           let matteUri = source.matteUri;
-          // Unchanged angles still participate in Styli's product-wide placement plan.
-          if (!pending.length && uniformOutputs.length) {
+          // Unchanged angles still take part in the product-wide plan (one canvas per channel, Styli's uniform scale).
+          if (!pending.length && productOutputs.length) {
             const [old] = await deps.db.select().from(catalogSourceImages).where(and(eq(catalogSourceImages.productId,productId),eq(catalogSourceImages.sha256,source.sha256),eq(catalogSourceImages.isCurrent,true)));
             matteUri ??= old?.matteUri ?? null;
           }
-          if ((!pending.length && !uniformOutputs.length) || !matteUri) continue;
+          if ((!pending.length && !productOutputs.length) || !matteUri) continue;
           try {
             const p = await deps.prepare((await deps.storage.downloadBuffer(source.rawUri)).buf,source.originalName,b=>deps.matting.convert(b));
             const alpha = await sharp((await deps.storage.downloadBuffer(matteUri)).buf).toColourspace("b-w").raw().toBuffer();
@@ -145,15 +145,16 @@ export async function handleChunkTask(deps: CatalogDeps, body: Record<string,unk
             await underClaim(async tx=>tx.update(catalogOutputs).set({status:"failed",reason:error instanceof Error ? error.message : String(error),updatedAt:deps.now()}).where(and(eq(catalogOutputs.sourceImageId,source.id),eq(catalogOutputs.batchId,batch.id),eq(catalogOutputs.status,"pending"))));
           }
         }
-        const uniform = prepared.map(({p,matte})=>({box:bbox(matte.alpha,p.width,p.height)!,source:{w:p.width,h:p.height}})).filter(s=>s.box);
-        const uniformScale = uniform.length ? planProduct(CHANNELS.styli,uniform).uniformScale:undefined;
+        const geometry = prepared.flatMap(({p,matte})=>{const shot=shotGeometry(matte.alpha,p.width,p.height);return shot ? [shot]:[];});
+        const productPlan = (c:keyof typeof CHANNELS) => geometry.length ? planProduct(CHANNELS[c],geometry):undefined;
+        const uniformScale = productPlan("styli")?.uniformScale;
         for (const {source,p,matte} of prepared) {
           const outputs = await deps.db.select().from(catalogOutputs).where(and(eq(catalogOutputs.sourceImageId,source.id),eq(catalogOutputs.batchId,batch.id),eq(catalogOutputs.status,"pending")));
           for (const output of outputs) try {
             const path = stagingPath(prefix,product.pathKey,output.channel,source.n), uri = deps.storage.toGsUri(deps.storage.getBucketName(),path), head = await deps.storage.headObject(uri);
             if (head.exists && output.bytes !== null && head.size===output.bytes) { await underClaim(async tx=>tx.update(catalogOutputs).set({stagingUri:uri,crc32c:head.crc32c,status:output.flags.some(f=>f==="small_source" || f==="failed_compliance" || f==="complete_product") ? "needs_attention":"staged",updatedAt:deps.now()}).where(eq(catalogOutputs.id,output.id))); continue; }
             const renderStart = +deps.now();
-            const rendered = (await deps.renderAllChannels(p,matte,[output.channel],{shotNumber:source.n,productType:product.productType ?? "other",synthesiseShadow:shadowSynthesisAllowed(product.productType,source.flags),identifier:product.identifier,publicObjectPath:output.objectPath,...(output.channel==="styli" ? {uniformScale}:{})}))[output.channel];
+            const rendered = (await deps.renderAllChannels(p,matte,[output.channel],{shotNumber:source.n,productType:product.productType ?? "other",synthesiseShadow:shadowSynthesisAllowed(product.productType,source.flags),identifier:product.identifier,publicObjectPath:output.objectPath,canvas:productPlan(output.channel)?.canvas,...(output.channel==="styli" ? {uniformScale}:{})}))[output.channel];
             renderMs += +deps.now()-renderStart;
             const flags = [...new Set([...source.flags,...rendered.flags])], status = rendered.status==="skipped" ? "skipped":!rendered.compliance.ok || flags.includes("small_source") || flags.includes("complete_product") ? "needs_attention":rendered.jpeg ? "staged":"failed";
             const patch = {canvasW:rendered.plan.w,canvasH:rendered.plan.h,scale:rendered.plan.scale,placedX:rendered.plan.placedX,placedY:rendered.plan.placedY,bytes:rendered.bytes,quality:rendered.quality,flags,compliance:rendered.compliance,reason:rendered.notes.join("; ") || (flags.includes("small_source") ? flagReason("small_source"):flags.includes("complete_product") ? flagDetails("complete_product",{n:source.n,k:batch.channels.length}).why:null),updatedAt:deps.now()};

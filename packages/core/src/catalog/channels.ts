@@ -31,7 +31,12 @@ export interface ChannelSpec {
   /** "#FFFFFF" for amazon and shein: the first image is pure white. */
   firstImageBackground?: string;
   dpi: number;
-  /** True where min equals target (styli, centrepoint). */
+  /**
+   * True where every output is exactly the target canvas: styli and centrepoint (min equals target)
+   * and trendyol, whose accepted files are 1200x1800 (SPEC.md channel table). A fixed canvas scales
+   * the product to fit even beyond MAX_UPSCALE; `low_resolution` then stays an information flag
+   * (Styli alone skips such shots).
+   */
   fixedCanvas: boolean;
   /** True for styli. */
   uniformScaleDefault: boolean;
@@ -84,10 +89,10 @@ export const CHANNELS: Record<ChannelId, ChannelSpec> = {
     anchor: "centre",
     background: GREY,
     dpi: 96,
-    fixedCanvas: false,
+    fixedCanvas: true,
     uniformScaleDefault: false,
     sheetText: "600x800 @72 (min) -> 1200x1800 @96, <=2 MB, 3:4, HTTPS, no spaces",
-    notes: "Accepted files are 1200x1800.",
+    notes: "Accepted files are 1200x1800, so every Trendyol image is delivered at exactly 1200x1800.",
   },
   styli: {
     id: "styli",
