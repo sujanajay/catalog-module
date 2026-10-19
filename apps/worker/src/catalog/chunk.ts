@@ -50,10 +50,12 @@ export async function handleChunkTask(deps: CatalogDeps, body: Record<string,unk
       const replaced=new Set(allSources.flatMap(source=>source.replacesId ? [source.replacesId]:[]));
       const sources=allSources.filter(source=>!replaced.has(source.id) && (!chunk!.sourceImageIds?.length || chunk!.sourceImageIds.includes(source.id)));
       // Only an operator replacement (its raw copy sits under <batch>/replacements-<upload>/) needs its own
-      // derived/staging prefix. Ingest also sets replacesId on every redelivered shot of a later batch;
-      // those keep the batch prefix, the only staging layout stageCopyToPublic accepts.
+      // derived prefix, so the matte cache never serves the replaced photo's matte for the same shot.
+      // Ingest also sets replacesId on every redelivered shot of a later batch; those keep the batch prefix.
+      // Staging always uses <batch>/staging/, the only layout stageCopyToPublic accepts; a replacement's
+      // fresh output has no bytes yet, so it re-renders over the replaced shot's staged file.
       const replacementRoot=deps.storage.toGsUri(deps.storage.getBucketName(),`${prefix}/replacements-`);
-      const sourcePrefix=(source:typeof sources[number])=>source.replacesId && source.rawUri.startsWith(replacementRoot) ? `${prefix}/replacements-${source.id}`:prefix;
+      const derivedPrefix=(source:typeof sources[number])=>source.replacesId && source.rawUri.startsWith(replacementRoot) ? `${prefix}/replacements-${source.id}`:prefix;
       if(chunk.stage==="matte" && !product.productType && sources.length) {
        let type=batch.productType, flags:typeof sources[number]["flags"]=[];
        if(type==="auto") {
@@ -99,7 +101,7 @@ export async function handleChunkTask(deps: CatalogDeps, body: Record<string,unk
           const pending = await deps.db.select().from(catalogOutputs).where(and(eq(catalogOutputs.sourceImageId,source.id),eq(catalogOutputs.batchId,batch.id),eq(catalogOutputs.status,"pending")));
           if (!pending.length || source.matteUri) continue;
           try {
-            const mattePath = derivedPath(sourcePrefix(source),product.pathKey,source.n,"matte"), gs = deps.storage.toGsUri(deps.storage.getBucketName(),mattePath), cached = await deps.storage.headObject(gs);
+            const mattePath = derivedPath(derivedPrefix(source),product.pathKey,source.n,"matte"), gs = deps.storage.toGsUri(deps.storage.getBucketName(),mattePath), cached = await deps.storage.headObject(gs);
             if (cached.exists) { await underClaim(async tx=>tx.update(catalogSourceImages).set({matteUri:gs,status:"matted"}).where(eq(catalogSourceImages.id,source.id))); continue; }
             const raw = await deps.storage.downloadBuffer(source.rawUri);
             let conversionFailure:unknown;
@@ -146,7 +148,7 @@ export async function handleChunkTask(deps: CatalogDeps, body: Record<string,unk
         for (const {source,p,matte} of prepared) {
           const outputs = await deps.db.select().from(catalogOutputs).where(and(eq(catalogOutputs.sourceImageId,source.id),eq(catalogOutputs.batchId,batch.id),eq(catalogOutputs.status,"pending")));
           for (const output of outputs) try {
-            const path = stagingPath(sourcePrefix(source),product.pathKey,output.channel,source.n), uri = deps.storage.toGsUri(deps.storage.getBucketName(),path), head = await deps.storage.headObject(uri);
+            const path = stagingPath(prefix,product.pathKey,output.channel,source.n), uri = deps.storage.toGsUri(deps.storage.getBucketName(),path), head = await deps.storage.headObject(uri);
             if (head.exists && output.bytes !== null && head.size===output.bytes) { await underClaim(async tx=>tx.update(catalogOutputs).set({stagingUri:uri,crc32c:head.crc32c,status:output.flags.some(f=>f==="small_source" || f==="failed_compliance") ? "needs_attention":"staged",updatedAt:deps.now()}).where(eq(catalogOutputs.id,output.id))); continue; }
             const renderStart = +deps.now();
             const rendered = (await deps.renderAllChannels(p,matte,[output.channel],{shotNumber:source.n,productType:product.productType ?? "other",identifier:product.identifier,publicObjectPath:output.objectPath,...(output.channel==="styli" ? {uniformScale}:{})}))[output.channel];

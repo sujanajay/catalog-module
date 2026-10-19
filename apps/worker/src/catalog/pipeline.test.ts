@@ -22,14 +22,21 @@ import { deriveBatchState, QA_CAP_BANNER } from "@catalog/core/catalog/pipeline/
 import { strictestChannel } from "@catalog/core/catalog/qa/policy";
 vi.mock(import("@catalog/core/catalog/sheet"),async original=>{const module=await original();return {...module,compareXlsxCsv:vi.fn(module.compareXlsxCsv)};});
 let db:Db,close:()=>Promise<void>;
-beforeAll(async()=>{({db,close}=await createTestDb());},60_000);
-afterAll(async()=>{await close();});
+// stageCopyToPublic reads the bucket names from the environment. Set directly (not vi.stubEnv) so the
+// tests that call vi.unstubAllEnvs keep them.
+const bucketEnv={BUCKET:process.env.BUCKET,PUBLIC_BUCKET:process.env.PUBLIC_BUCKET};
+beforeAll(async()=>{process.env.BUCKET="assets";process.env.PUBLIC_BUCKET="public";({db,close}=await createTestDb());},60_000);
+afterAll(async()=>{storage.setStorageClient(undefined);for(const [key,value] of Object.entries(bucketEnv)) if(value===undefined) delete process.env[key]; else process.env[key]=value;await close();});
 const jpeg=Buffer.from([255,216,255,1]);
 function world() {
   const objects=new Map<string,{buf:Buffer;mime:string;generation:string;crc32c:string}>();
   let generation=100;
   const upload=async(path:string,buf:Buffer,mime:string)=>{const uri=`gs://assets/${path}`;objects.set(uri,{buf,mime,generation:String(++generation),crc32c:buf.toString("base64")});return uri;};
-  const copy=vi.fn(async(uri:string,path:string,condition:storage.GenerationPrecondition)=>{const obj=objects.get(uri)!;const target=`gs://public/${path}`,old=objects.get(target);if(String(condition.ifGenerationMatch)!==String(old?.generation ?? 0))throw new storage.GenerationMismatchError(path);const next={...obj,generation:String(++generation)};objects.set(target,next);return{generation:next.generation,crc32c:next.crc32c};});
+  // The copy runs through the real stageCopyToPublic, so its staging guard (assertStagedForTarget)
+  // checks every publish; only the GCS client underneath is an in-memory fake.
+  const client={bucket:(bucket:string)=>({file:(path:string)=>({uri:`gs://${bucket}/${path}`,copy:async(dest:{uri:string},options:{preconditionOpts:{ifGenerationMatch:number|string}})=>{const obj=objects.get(`gs://${bucket}/${path}`)!,old=objects.get(dest.uri);if(String(options.preconditionOpts.ifGenerationMatch)!==String(old?.generation ?? 0))throw Object.assign(new Error("Precondition failed"),{code:412});const next={...obj,generation:String(++generation)};objects.set(dest.uri,next);return [dest,{resource:{generation:next.generation,crc32c:next.crc32c}}];},getMetadata:async()=>{throw new Error("No metadata in the fake.");}})})};
+  storage.setStorageClient(client as unknown as storage.StorageLike);
+  const copy=vi.fn(storage.stageCopyToPublic);
   const remove=vi.fn(async(path:string)=>objects.delete(`gs://public/${path}`));
   const fetch=vi.fn<typeof globalThis.fetch>(async(url)=>{const path=new URL(String(url)).pathname.replace(/^\/public\//,"");const obj=objects.get(`gs://public/${path}`);return obj ? new Response(new Uint8Array(obj.buf),{headers:{"content-type":obj.mime,"content-length":String(obj.buf.length),"x-goog-generation":obj.generation}}):new Response(null,{status:404});});
   const base=workerCatalogDeps(db);
@@ -323,10 +330,13 @@ it("spec07 renders a replacement from its own private cache, processes only that
  for(let i=0;i<3;i++) expect((await handleChunkTask(w.deps,{chunkId:replacement.chunkId})).httpStatus).toBe(200);
  expect(w.deps.matteFor).toHaveBeenCalledTimes(matteCalls+1);
  expect(w.deps.renderAllChannels).toHaveBeenCalledTimes(renderCalls+2);
- expect((await handlePublishTask(w.deps,{batchId:s.batch.id,productId:s.product.id})).outcome).toBe("published");
+ // The publish copy goes through the real staging guard, which only accepts <batch>/staging/...
+ const publish=await handlePublishTask(w.deps,{batchId:s.batch.id,productId:s.product.id});
+ expect(publish.outcome,JSON.stringify((await db.select({reason:catalogOutputs.reason}).from(catalogOutputs).where(eq(catalogOutputs.sourceImageId,replacement.sourceImageId))).map(o=>o.reason))).toBe("published");
  const after=await db.select().from(catalogOutputs).where(eq(catalogOutputs.batchId,s.batch.id));
  const fresh=after.filter(o=>o.sourceImageId===replacement.sourceImageId);
  expect(fresh).toHaveLength(2);
+ expect(fresh.map(o=>o.stagingUri).sort()).toEqual(["amazon","noon"].map(channel=>storage.toGsUri("assets",stagingPath(batchPrefix("anta",s.batch.id,true),s.product.pathKey,channel as "noon"|"amazon",1))));
  expect(fresh.every(o=>o.isLive && o.generation!==before.find(old=>old.channel===o.channel && old.n===o.n)!.generation)).toBe(true);
  expect(after.filter(o=>o.n===2).map(o=>o.generation)).toEqual(before.filter(o=>o.n===2).map(o=>o.generation));
  const sources=await db.select().from(catalogSourceImages).where(eq(catalogSourceImages.productId,s.product.id));
