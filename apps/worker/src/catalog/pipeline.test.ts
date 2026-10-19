@@ -13,7 +13,7 @@ import { UnsupportedSourceError } from "@catalog/core/catalog/render";
 import { handleSweep } from "./sweep";
 import { handleChunkTask } from "./chunk";
 import { catalogLlmDeps, CatalogQaCapError, type UnderClaim } from "./qa-stage";
-import { QA_USD_PER_CHECK_ESTIMATE } from "@catalog/core/catalog/cost";
+import { QA_USD_PER_CHECK_FALLBACK } from "@catalog/core/catalog/cost";
 import { handlePublishTask } from "./publish";
 import { handleFinalizeTask } from "./finalize";
 import { renderKey } from "@catalog/core/catalog/pipeline/publish";
@@ -482,8 +482,8 @@ it("spec07 judge spend: OpenRouter's billed usage.cost and tokens reach spend_da
 },60_000);
 it("spec07 judge spend: a reply without usage.cost is recorded at the per-check estimate and logged, never 0",async()=>{
  const {spend,batch,log}=await judgeOnceLive("qa-spend-estimated",reply(null));
- expect(Number(spend[0]!.costUsd)).toBeCloseTo(QA_USD_PER_CHECK_ESTIMATE,9);
- expect(Number(batch.cost.qaUsd)).toBeCloseTo(QA_USD_PER_CHECK_ESTIMATE,9);
+ expect(Number(spend[0]!.costUsd)).toBeCloseTo(QA_USD_PER_CHECK_FALLBACK,9);
+ expect(Number(batch.cost.qaUsd)).toBeCloseTo(QA_USD_PER_CHECK_FALLBACK,9);
  expect(batch.cost).toMatchObject({qaCalls:1,qaPromptTokens:2911,qaCompletionTokens:160});
  expect(log).toHaveBeenCalledWith(expect.stringMatching(/usage\.cost absent; recorded the estimated price/),{batchId:batch.id});
 },60_000);
