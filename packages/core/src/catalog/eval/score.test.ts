@@ -28,6 +28,11 @@ describe("score: gates", () => {
     // The flagged output scores 80: only thresholds above 80 flag it.
     expect(scoreJudge("j", [judged("p", "j", 90), judged("f", "j", 80)], labels).sweptThreshold).toBe(81);
   });
+  it("a judge chosen at a swept threshold records the gates measured at that threshold, not at 75", () => {
+    const labels = humanLabels([label("p", "pass"), label("f", "flag")]);
+    const choice = chooseJudge([scoreJudge("j", [judged("p", "j", 90), judged("f", "j", 80)], labels)]);
+    expect(choice).toMatchObject({ threshold: 81, qaMode: "per_source", gates: { precision: 1, recall: 1, n_labelled: 2, met: true } });
+  });
   it("chooses the cheapest judge meeting both gates at 75", () => {
     const labels = humanLabels([label("p", "pass"), label("f", "flag")]);
     const rows = [judged("p", "cheap", 90, 0.0004), judged("f", "cheap", 50, 0.0004), judged("p", "dear", 90, 0.0013), judged("f", "dear", 50, 0.0013)];

@@ -13,7 +13,7 @@ import path from "node:path";
 import { promisify } from "node:util";
 import { and, eq, inArray, sql } from "drizzle-orm";
 import { closeDb, getDb, type Db } from "@catalog/core/db/client";
-import { brandMaster, catalogBatches, catalogChunks, catalogEvalJudgements, catalogEvalLabels, catalogOutputs, catalogProducts, catalogSourceImages, catalogUploads, DEFAULT_BATCH_OPTIONS, modelPolicy } from "@catalog/core/db/schema";
+import { brandMaster, catalogBatches, catalogChunks, catalogEvalJudgements, catalogEvalLabels, catalogOutputs, catalogProducts, catalogSourceImages, catalogUploads, DEFAULT_BATCH_OPTIONS, modelPolicy, spendDays } from "@catalog/core/db/schema";
 import { runIngest } from "@catalog/core/catalog/ingest/index";
 import { batchPrefix } from "@catalog/core/catalog/naming";
 import { lockProducts } from "@catalog/core/catalog/products";
@@ -30,6 +30,7 @@ import { reportHtml, reportJson, WAITING_BRANDS } from "@catalog/core/catalog/ev
 import { chooseService, forcedPolicy, MATTE_CANDIDATES, matteModelsFor, qaCandidates } from "@catalog/core/catalog/eval/run";
 import { pinnedFetch } from "@catalog/core/safe-url";
 import * as storage from "@catalog/core/storage";
+import { utcDay } from "@catalog/core/spend";
 import { buildZip } from "../../../packages/core/test-fixtures/catalog/ingest-a/builders";
 import { workerCatalogDeps, type CatalogDeps } from "./catalog/deps";
 import { handleChunkTask } from "./catalog/chunk";
@@ -86,11 +87,20 @@ async function ensureRealData(): Promise<string> {
   return root;
 }
 
-async function evalBatches(db: Db, ids: string[]) {
+async function evalBatches(db: Db, ids: string[], set?: string) {
   assert(ids.length && ids.every(id => /^[0-9a-f-]{36}$/.test(id)), "Supply eval batch UUIDs with --batches.");
   const rows = await db.select().from(catalogBatches).where(inArray(catalogBatches.id, ids));
   assert(rows.length === ids.length && rows.every(b => b.isTest && b.options.evalSet), "Every batch must be an eval test batch.");
+  assert(!set || rows.every(b => b.options.evalSet === set), `Every batch must belong to the eval set ${set}.`);
   return rows;
+}
+
+/** Cleanup deletes the batches' spend_days rows; keep today's live judge spend counting toward DAILY_SPEND_CAP_USD. */
+async function cleanupEval(db: Db, ids: string[]) {
+  await evalBatches(db, ids);
+  const today = await db.select({ costUsd: spendDays.costUsd }).from(spendDays).where(and(inArray(spendDays.batchId, ids), eq(spendDays.day, utcDay())));
+  assert(!today.some(r => Number(r.costUsd) > 0), "These eval batches spent money today (UTC); clean them up tomorrow so today's spend still counts toward DAILY_SPEND_CAP_USD.");
+  return cleanupTestBatches(db, storage, ids);
 }
 
 async function assemble(flags: Record<string, string | true>) {
@@ -211,7 +221,7 @@ async function seenCandidates(deps: CatalogDeps): Promise<PolicyCandidates> {
 
 async function scored(db: Db, flags: Record<string, string | true>) {
   const batchIds = list(need(flags, "batches"));
-  await evalBatches(db, batchIds);
+  await evalBatches(db, batchIds, need(flags, "set"));
   const rows = await loadEvalRows(db, batchIds);
   const deps = workerCatalogDeps(db);
   const seen = await seenCandidates(deps);
@@ -271,7 +281,7 @@ async function main() {
     else if (command === "score") await score(db, flags);
     else if (command === "policy write") await policyWrite(db, flags);
     else if (command === "report") await report(db, flags);
-    else if (command === "cleanup") { const ids = list(need(flags, "batches")); await evalBatches(db, ids); print({ cleanup: await cleanupTestBatches(db, storage, ids) }); }
+    else if (command === "cleanup") print({ cleanup: await cleanupEval(db, list(need(flags, "batches"))) });
     else { print(USAGE); process.exitCode = 2; }
   } finally { await closeDb(); }
 }

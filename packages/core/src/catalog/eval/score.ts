@@ -72,8 +72,10 @@ export interface JudgeScore {
   judgeModel: string; atDefault: GateMetrics;
   /** 75 when it qualifies, else the lowest qualifying threshold in 60..100, else null. */
   sweptThreshold: number | null;
-  /** Highest recall reached at precision >= 97% over the sweep, with its threshold. */
-  bestRecallAtPrecision: { threshold: number; recall: number } | null;
+  /** The metrics at `sweptThreshold` (what a policy row written at that threshold records). */
+  atSwept: GateMetrics | null;
+  /** Highest recall reached at precision >= 97% over the sweep, with its threshold and metrics. */
+  bestRecallAtPrecision: { threshold: number; recall: number; metrics: GateMetrics } | null;
   costPerCheck: number; msPerCheck: number;
 }
 export function scoreJudge(judgeModel: string, judgements: readonly EvalJudgementRow[], labels: Map<string, HumanLabel>): JudgeScore {
@@ -81,15 +83,16 @@ export function scoreJudge(judgeModel: string, judgements: readonly EvalJudgemen
   const at = (t: number) => gateMetrics(rows.map(j => ({ judge: verdictAt(j, t), human: labels.get(j.outputId)!.label })));
   const atDefault = at(QA_DEFAULT_THRESHOLD);
   let swept: number | null = atDefault.met ? QA_DEFAULT_THRESHOLD : null;
+  let atSwept: GateMetrics | null = atDefault.met ? atDefault : null;
   let best: JudgeScore["bestRecallAtPrecision"] = null;
   for (let t = QA_DEFAULT_FLOOR; t <= 100; t++) {
     const m = at(t);
-    if (swept === null && m.met) swept = t;
-    if (m.precision !== null && m.precision >= PRECISION_GATE && m.recall !== null && (!best || m.recall > best.recall)) best = { threshold: t, recall: m.recall };
+    if (swept === null && m.met) { swept = t; atSwept = m; }
+    if (m.precision !== null && m.precision >= PRECISION_GATE && m.recall !== null && (!best || m.recall > best.recall)) best = { threshold: t, recall: m.recall, metrics: m };
   }
   const all = judgements.filter(j => j.judgeModel === judgeModel);
   const mean = (xs: number[]) => xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : 0;
-  return { judgeModel, atDefault, sweptThreshold: swept, bestRecallAtPrecision: best, costPerCheck: mean(all.map(j => j.costUsd)), msPerCheck: mean(all.map(j => j.ms)) };
+  return { judgeModel, atDefault, sweptThreshold: swept, atSwept, bestRecallAtPrecision: best, costPerCheck: mean(all.map(j => j.costUsd)), msPerCheck: mean(all.map(j => j.ms)) };
 }
 
 export interface PolicyGates { precision: number | null; recall: number | null; n_labelled: number; met: boolean }
@@ -101,9 +104,9 @@ export function chooseJudge(scores: readonly JudgeScore[]): JudgeChoice | null {
   const atDefault = scores.filter(s => s.atDefault.met).sort((a, b) => a.costPerCheck - b.costPerCheck);
   if (atDefault[0]) return { qaModel: atDefault[0].judgeModel, threshold: QA_DEFAULT_THRESHOLD, qaMode: "per_source", gates: gates(atDefault[0].atDefault, true) };
   const swept = scores.filter(s => s.sweptThreshold !== null).sort((a, b) => a.sweptThreshold! - b.sweptThreshold! || a.costPerCheck - b.costPerCheck);
-  if (swept[0]) return { qaModel: swept[0].judgeModel, threshold: swept[0].sweptThreshold!, qaMode: "per_source", gates: gates(swept[0].atDefault, true) };
+  if (swept[0]) return { qaModel: swept[0].judgeModel, threshold: swept[0].sweptThreshold!, qaMode: "per_source", gates: gates(swept[0].atSwept!, true) };
   const fallback = [...scores].sort((a, b) => (b.bestRecallAtPrecision?.recall ?? -1) - (a.bestRecallAtPrecision?.recall ?? -1) || a.costPerCheck - b.costPerCheck)[0]!;
-  return { qaModel: fallback.judgeModel, threshold: fallback.bestRecallAtPrecision?.threshold ?? QA_DEFAULT_THRESHOLD, qaMode: "per_output", gates: gates(fallback.atDefault, false) };
+  return { qaModel: fallback.judgeModel, threshold: fallback.bestRecallAtPrecision?.threshold ?? QA_DEFAULT_THRESHOLD, qaMode: "per_output", gates: gates(fallback.bestRecallAtPrecision?.metrics ?? fallback.atDefault, false) };
 }
 
 export interface MatteScore {
