@@ -430,7 +430,10 @@ and overwritten by the bake-off in spec 08):
 | bag_accessory | `birefnet-general` | `birefnet-hr-matting` | 1024 (2048 for the second) | preserve else synthesise (upright) | same |
 | other (hardline) | `bria-rmbg` | `birefnet-dynamic-matting` | 1024 or native | preserve else synthesise (upright); glass and transparent packaging routed to `birefnet-hr-matting` with flag `transparent` for attention | same |
 
-Shadow decision rule (per source after matting; spec 05): (1) `alpha_source`: no shadow information;
+Shadow decision rule (per source after matting; spec 05): (0) a product cut by the bottom of its source
+photo (it runs into the last rows, or ends on a straight edge just above a thin strip) gets no shadow of
+any kind, flags `complete_product` and `no_shadow_source`, and goes to attention: a shadow there would
+float on a straight edge. (1) `alpha_source`: no shadow information;
 synthesise only if the policy says synthesise and the channel allows a shadow, else none, flag
 `no_shadow_source`. (2) Uniform background with mean darkness in the shadow band above
 `SHADOW_MIN_DARKNESS` (builder constant, start 0.04) and touching the bbox bottom: preserve the original
@@ -440,12 +443,15 @@ then extend it underneath connected partially transparent edges without joining 
 components. Opaque alpha-255 pixels exclude shadow; foreground RGB and alpha stay unchanged.
 This keeps a continuous contact shadow without introducing a bright fringe or treating a partial
 apparel edge as a native floor shadow. (3) Otherwise footwear, bag_accessory or other in an upright pose:
-synthesise a deterministic contact shadow from the alpha mask (bottom 20% of mask rows squashed to about
-12% of bbox height, blur proportional to bbox width, intensity `SHADOW_SYNTH_INTENSITY_GREY` 0.25 on grey
+synthesise a deterministic contact shadow from the silhouette (each column of the bottom 20% of mask rows
+weighted by how close it comes to the contact line, feathered sideways and given a soft vertical
+falloff about 12% of the product's smaller side deep, intensity `SHADOW_SYNTH_INTENSITY_GREY` 0.25 on grey
 and `SHADOW_SYNTH_INTENSITY_WHITE` 0.15 on white; parameters named so presets can change later), flag
 `shadow_synthesised` (info). (4) apparel_model and apparel_flat: never synthesise. (5) IC-Light is not in
 the default path; Depth Anything is a spec 08 experiment. Compliance's `background` check still enforces
-the border band, so a shadow reaching a margin fails by code.
+the border band, so a shadow reaching a margin fails by code. Every shadow, kept or made, eases to zero
+before required margins, the border band and the source frame, and a kept shadow fades out past its
+measuring band; no shadow ever ends on a straight cut.
 
 Bake-off (spec 08): every candidate runs on the golden set for every brand and category; outputs are
 scored by the compliance checks, by each QA judge and by human labels. The result is the `model_policy`
