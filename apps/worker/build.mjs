@@ -10,7 +10,6 @@ const dist = path.join(here, "dist");
 rmSync(dist, { recursive: true, force: true });
 
 await build({
-  // Later specs add catalog-load, catalog-recheck.
   entryPoints: {
     index: path.join(here, "src/index.ts"),
     migrate: path.join(here, "src/migrate.ts"),
@@ -18,6 +17,9 @@ await build({
     "catalog-smoke": path.join(here, "src/catalog-smoke.ts"),
     "catalog-qa-check": path.join(here, "src/catalog-qa-check.ts"),
     "catalog-eval": path.join(here, "src/catalog-eval.ts"),
+    "catalog-load": path.join(here, "src/catalog-load.ts"),
+    "catalog-recheck": path.join(here, "src/catalog-recheck.ts"),
+    "fault-proxy": path.join(here, "src/fault-proxy.ts"),
   },
   outdir: dist,
   bundle: true,
