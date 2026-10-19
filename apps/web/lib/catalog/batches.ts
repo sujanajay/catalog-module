@@ -1,4 +1,4 @@
-import { and, desc, eq } from "drizzle-orm";
+import { and, desc, eq, sql } from "drizzle-orm";
 import { brandMaster, catalogBatches, catalogUploads, type CatalogBatch } from "@catalog/core/db/schema";
 import { CHANNEL_IDS, IDENTIFIER_MODES, PRECEDENCES, PRODUCT_TYPES, type BatchOptions, type ChannelId, type ProductType } from "@catalog/core/catalog/types";
 import { db, type Db } from "../db";
@@ -32,7 +32,9 @@ export function batchState(batch: CatalogBatch, source?: string) {
   return deriveBatchState({ status: batch.status, counts: batch.counts, source });
 }
 export async function listBatches() {
-  const rows = await db().select({ batch: catalogBatches, brandLine: brandMaster.line }).from(catalogBatches).leftJoin(brandMaster, eq(catalogBatches.brandSlug, brandMaster.slug)).orderBy(desc(catalogBatches.createdAt));
+  const rows = await db().select({ batch: catalogBatches, brandLine: brandMaster.line }).from(catalogBatches).leftJoin(brandMaster, eq(catalogBatches.brandSlug, brandMaster.slug))
+    // A cleaned-up test batch keeps its row only so today's spend still counts; it is not a batch to open.
+    .where(sql`not coalesce((${catalogBatches.options}->>'cleanedUp')::boolean, false)`).orderBy(desc(catalogBatches.createdAt));
   return rows.map(({ batch, brandLine }) => ({ ...publicBatch(batch), brandLine, state: batchState(batch) }));
 }
 export async function getBatch(id: string) {
