@@ -1,6 +1,11 @@
 // Pure copy helpers shared by server pages and client components (no server imports here).
 import { RUPEES_NOT_CONFIGURED } from "@catalog/core/catalog/cost";
 
+/** The operator's sentence when the ingest hand-off to the worker queue failed for a transient reason. */
+export const HAND_OFF_RETRY = "The upload could not be handed to processing. Please try again.";
+/** The same failure when trying again will not help (for example a missing queue permission). */
+export const HAND_OFF_FAILED = "The upload could not be handed to processing. Email sujan@opptra.com if this keeps happening.";
+
 /** "Noon", "Noon and Styli", "Noon, Namshi, Trendyol and Styli" (spec 01 section 8). */
 export function listAnd(items: readonly string[]): string {
   if (items.length <= 1) return items[0] ?? "";

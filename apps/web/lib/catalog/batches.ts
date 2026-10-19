@@ -29,7 +29,7 @@ export function publicBatch(batch: CatalogBatch) {
   return { ...batch, options };
 }
 export function batchState(batch: CatalogBatch, source?: string) {
-  return deriveBatchState({ status: batch.status, counts: batch.counts, source });
+  return deriveBatchState({ status: batch.status, counts: batch.counts, source, updatedAt: batch.updatedAt });
 }
 export async function listBatches() {
   const rows = await db().select({ batch: catalogBatches, brandLine: brandMaster.line }).from(catalogBatches).leftJoin(brandMaster, eq(catalogBatches.brandSlug, brandMaster.slug))
