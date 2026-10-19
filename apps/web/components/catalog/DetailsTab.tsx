@@ -17,14 +17,17 @@ type DetailsProps = {
 };
 
 export default function DetailsTab({ id, brand, isTest, counts, failures, recheckFailures, notRefreshedChannels, hasReport }: DetailsProps) {
+  const held = counts.heldLinks ?? 0, carried = counts.recheckCarriedTotal ?? 0, carriedOk = counts.recheckCarriedOk ?? 0;
   return (
     <div className="card">
       <h2>For the technical team</h2>
       <p className="mono">
         batch {id} · raw files: gs://{process.env.BUCKET ?? "image-links-agent-assets"}/{batchPrefix(brand, id, isTest)}/raw/ · public links: https://storage.googleapis.com/{getPublicBucketName()}/{productPrefix(brand, "<pathKey>", isTest)}&lt;channel&gt;/ · {hasReport ? <a href={`/api/catalog/batches/${id}/export?format=report`}>report.json</a> : "report.json is not ready yet"}
       </p>
-      <p>Links verified: {counts.verified} of {counts.outputs - counts.skipped}</p>
+      {/* Both lines count this batch's delivered links; held and carried-over links are said apart (spec 06). */}
+      <p>Links verified: {counts.verified} of {counts.outputs - counts.skipped - held}</p>
       <p>Independent re-check: {counts.recheckOk ?? 0} of {counts.recheckTotal ?? 0} OK</p>
+      {held > 0 && <p>Not counted above: {held} {plural(held, "image", "images")} of the {plural(counts.attentionProducts, "product", "products")} that {plural(counts.attentionProducts, "needs", "need")} your attention, published once you decide.{carried > 0 ? ` Until then the sheet keeps ${carried} earlier ${plural(carried, "link", "links")} for ${plural(counts.attentionProducts, "it", "them")}; the re-check found ${carriedOk} of ${carried} OK.` : ""}</p>}
       {recheckFailures.length > 0 && (
         <ul>{recheckFailures.map(f => <li key={f.url}><a href={f.url}>{f.url}</a>: {f.reason}</li>)}</ul>
       )}

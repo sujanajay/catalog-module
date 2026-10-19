@@ -71,7 +71,11 @@ export interface BatchCounts {
   collected: number; collectTotal: number | null; previewReady: boolean; latestExport: number;
   failReason: string | null; finalizePending: boolean; policyFallback: boolean;
   newProducts: number; existingProducts: number; shotsToRemove: number;
-  recheckOk: number | null; recheckTotal: number | null;   // independent re-check written by finalize (06)
+  recheckOk: number | null; recheckTotal: number | null;   // independent re-check written by finalize (06): this batch's delivered links
+  /** Links of this batch held for a decision (held products); not delivered, so outside both Details counts. */
+  heldLinks?: number;
+  /** Earlier batches' live links the sheet keeps for held products, re-checked separately. */
+  recheckCarriedOk?: number | null; recheckCarriedTotal?: number | null;
 }
 export interface BatchCost {
   computeVcpuSeconds: number; mattingMs: number; renderMs: number; computeUsd: number;

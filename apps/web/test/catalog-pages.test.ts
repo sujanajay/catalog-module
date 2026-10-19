@@ -171,5 +171,7 @@ it("matches report statuses in the pre-finalization page for failed, held and mi
   const report=await buildReport(db,batchId,{recheck:{ok:0,total:0,failures:[]},exports:{xlsx:"x",csv:"c",report:"r",filledProductList:null,exportsMatch:true}});
   expect(preview.rows[0]!.status).toBe(expected);
   expect(preview.rows[0]!.status).toBe(report.sheet.rows[0]!.status);
+  // The report never says "ok" for a held product: its linkStatus is the sheet status.
+  expect((report.report.products as {linkStatus:string}[])[0]!.linkStatus).toBe(expected);
  }
 });
