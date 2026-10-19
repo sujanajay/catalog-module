@@ -13,7 +13,11 @@ uncommitted work spread over two branches. The owner wants the catalog module li
 reduced testing. All implementation, testing and fixing is done by Opus 5.5 subagents; the main
 session is the manager and only coordinates. Decisions of 2026-10-19: the run is full end to end,
 including merging PRs after CI is green and deploying with `infra/deploy.sh`; specs 05-07 go
-first, then specs 08 and 09 follow in the same run.
+first, then specs 08 and 09 follow in the same run. Further decisions of 2026-10-19: PRs are
+merged when CI is green and `infra/deploy.sh` deploys (unchanged); the smoke runs on the
+just-built image through the remote job; a dummy test brand `test_brand` is added; a quality gate
+on about 50 real photos runs after the 07 deploy, before e2e; the full 3,910-photo tier 3 run is
+restored as the last step.
 
 ## Execution plan
 
@@ -57,11 +61,17 @@ No deploy yet (06 deploys all services together).
 
 ### Step 2: spec 06 to main (rebase depends on step 1)
 Subagent "06-gates" (worktree on `feat/catalog-06-pipeline-and-ui`):
-- Reorder `infra/deploy.sh`: build images, run the remote smoke (`catalog-test-smoke` job on the
-  just-built worker image), then update services; any `failed_compliance` still blocks the
-  service update. Confirm the smoke reaches the deployed matting service, mocks OpenRouter, finds
-  its fixtures in `gs://image-links-agent-assets/catalog-test/smoke/`, and reports brands without
-  fixtures (Campus, Keds) as skipped, never as passed.
+- Reorder `infra/deploy.sh` (done): build images, migrate (the smoke needs the new schema and
+  the seeded test brand), run the remote smoke (`catalog-test-smoke` job on the just-built
+  worker image; `CATALOG_LOCAL_SMOKE=1` runs it in-process instead), then update matting, worker
+  and web; any `failed_compliance` still blocks the service update. The smoke reaches the
+  deployed matting service, makes no OpenRouter call, unpacks its fixtures from
+  `gs://image-links-agent-assets/catalog-test/render-05-1792340617303-555901/inputs/*.tar`, writes
+  evidence under `catalog-test/smoke/linux-<run>/`, and reports brands without fixtures as skipped.
+- Test brand (done): slug `test_brand`, "Test Brand", softline, source manual, seeded
+  idempotently at the end of the migrate job with 5 manual `sku_map` rows; every `test_brand`
+  batch is forced to `is_test = true`, so its objects only land under `catalog-test/` and it never
+  appears in real brand reports. The smoke runs it on the first Anta product with 3+ shots.
 - After PR #11 merges: `git merge main`, re-run the four gates, push.
 Manager: `gh pr ready 12`, CI, squash-merge; then from the main checkout `git pull`,
 `bash infra/bootstrap.sh` (expect all SKIP), `bash infra/deploy.sh` in the background, tracked
@@ -84,6 +94,12 @@ Then "07-integration": merge the three branches (`--no-ff`), merge `main` after 
 the four gates, fix (max 3 attempts), push, open the PR with the 00 section 8 template. Then
 "07-review": `/code-review` on the diff, fix bugs and contract violations only, re-run gates.
 Manager: CI, squash-merge, `bash infra/deploy.sh` (smoke gate included), record revisions.
+
+### Step 3b: quality gate (after the 07 deploy, before e2e)
+Subagent "quality-gate": a `test_brand` batch of about 50 real Anta and French Connection photos,
+all channels, on the deployed stack. Checks: anonymous GET 200 + JPEG, per-channel dimensions and
+margins, compliance 100%, sheet rows = objects, verified = re-check, and visual inspection of at
+least 10 rendered outputs. Any defect is fixed (fix PR, merge, redeploy) before e2e starts.
 
 ### Step 4: one round of end-to-end testing as a real user (after the 07 deploy)
 Subagent "e2e" with Playwright or the Chrome extension on `WEB_URL`, signed in as the owner.
@@ -108,20 +124,25 @@ to the default judge plus two candidates; write `model_policy` rows. 09: build `
 the fault proxy and load driver; load test at one tenth scale (270 options); hand-over note and
 GIF. Every reduction is logged under Assumptions in PROGRESS.md.
 
+### Step 6: full tier 3 run (last step)
+The full 3,910-photo real-data run on `test_brand`, as a Cloud Run job against the deployed stack.
+Report compliance % and defect count; cleanup under `catalog-test/` only. The run stops at
+`DAILY_SPEND_CAP_USD`; partial counts are reported as progress.
+
 ### Parallelism map
 ```
 t0  05-gates ------\                       07-worker ----\
     06-gates --------+                     07-web -------+--> 07-integration -> 07-review
                      |                     07-infra-tests/           |
-t1  merge #11 -> 06 merge main -> merge #12 -> deploy -----------> merge 07 -> deploy -> e2e
-t2                                                                             08 -> 09
+t1  merge #11 -> 06 merge main -> merge #12 -> deploy ------> merge 07 -> deploy -> quality gate -> e2e
+t2                                                                                      08 -> 09 -> full tier 3
 ```
 
 ### Verification (reduced, non-negotiable items kept)
 CI green on every PR; `infra/deploy.sh` completes with the smoke passing and `WEB_URL` printed;
 the six step-4 flows pass on the live URL with video or screenshots listed in PROGRESS.md;
-anonymous GET on a delivered link returns 200. Skipped on purpose: full 3,910-photo tier 3 runs,
-exhaustive edge cases, full-scale fault injection, the full bake-off matrix.
+anonymous GET on a delivered link returns 200; the quality gate passes with visual inspection.
+Skipped on purpose: exhaustive edge cases, full-scale fault injection, the full bake-off matrix.
 
 ### Known risks
 Org policy may still block anonymous reads in a way read-only checks did not show (step 4 item 3

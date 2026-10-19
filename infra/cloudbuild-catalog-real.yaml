@@ -1,0 +1,9 @@
+steps:
+  - name: gcr.io/cloud-builders/docker
+    env: ["DOCKER_BUILDKIT=1"]
+    args: ["build", "-f", "infra/Dockerfile.catalog-real", "-t", "${_AR}/catalog-real:${_TAG}", "."]
+images: ["${_AR}/catalog-real:${_TAG}"]
+options:
+  machineType: E2_HIGHCPU_8
+  logging: CLOUD_LOGGING_ONLY
+timeout: 1800s

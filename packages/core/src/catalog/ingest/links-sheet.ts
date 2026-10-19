@@ -326,7 +326,11 @@ export async function readLinksSheetUpload(input: CollectInput, source?: { gsUri
   const { buf } = await input.deps.storage.downloadBuffer(gsUri);
   const table = await readSheetTable(buf, source?.name ?? input.upload.name);
   if (source?.title) table.title = source.title;
-  return readLinksSheet(table, input.options, { uploadId: input.upload.id, origin: input.upload.kind });
+  const selected = input.upload.detected;
+  const sheetColumns = selected?.columnsChosen === true && Number.isInteger(selected.identifierColumn) && Array.isArray(selected.urlColumns)
+    ? { identifier: Number(selected.identifierColumn), images: selected.urlColumns as number[] }
+    : input.options.sheetColumns;
+  return readLinksSheet(table, { sheetColumns }, { uploadId: input.upload.id, origin: input.upload.kind });
 }
 
 /** kind "sheet": items with bytes {kind:"url"} and sheetIdentifier; honours options.sheetColumns. */

@@ -3,8 +3,8 @@
 // nightly master sync when the warehouse catches up.
 import { asc, eq, sql } from "drizzle-orm";
 import type { Db } from "../db/client";
-import { brandMaster } from "../db/schema";
-import { brandSlug } from "./naming";
+import { brandMaster, skuMap } from "../db/schema";
+import { brandSlug, normalizeKey } from "./naming";
 
 export interface BrandOption { slug: string; name: string; line: "softline" | "hardline"; source: "warehouse" | "manual" }
 
@@ -48,4 +48,38 @@ export async function addManualBrand(
     .where(eq(brandMaster.slug, slug));
   if (!row) throw new Error(`Brand ${slug} could not be read back after insert.`);
   return row;
+}
+
+/**
+ * The permanent dummy brand for testing (owner decision 2026-10-19). Every batch for it is a test
+ * batch (`is_test = true`), so its objects only land under catalog-test/ and it never appears in
+ * real brand reports.
+ */
+export const TEST_BRAND = { slug: "test_brand", name: "Test Brand", line: "softline" } as const;
+
+/** Five made-up softline SKUs (one size each) so the SKU mapping screens have rows to show. */
+export const TEST_BRAND_SKUS = [
+  { opptraSku: "TB100001_Black_OD_M", optionIdStyleColor: "TB100001_Black", color: "Black", size: "M" },
+  { opptraSku: "TB100002_White_OD_M", optionIdStyleColor: "TB100002_White", color: "White", size: "M" },
+  { opptraSku: "TB100003_Navy_OD_L", optionIdStyleColor: "TB100003_Navy", color: "Navy", size: "L" },
+  { opptraSku: "TB100004_Grey_OD_S", optionIdStyleColor: "TB100004_Grey", color: "Grey", size: "S" },
+  { opptraSku: "TB100005_Red_OD_M", optionIdStyleColor: "TB100005_Red", color: "Red", size: "M" },
+] as const;
+
+/** Idempotent seed of the test brand and its manual sku_map rows; run by the catalog-migrate job. */
+export async function seedTestBrand(db: Db): Promise<{ brand: BrandOption; skusAdded: number }> {
+  const brand = await addManualBrand(db, { name: TEST_BRAND.name, line: TEST_BRAND.line, createdBy: "catalog-migrate" });
+  const added = await db
+    .insert(skuMap)
+    .values(TEST_BRAND_SKUS.map((s) => ({
+      ...s,
+      brand: TEST_BRAND.name,
+      brandSlug: TEST_BRAND.slug,
+      line: TEST_BRAND.line,
+      optionKey: normalizeKey(s.optionIdStyleColor),
+      source: "manual" as const,
+    })))
+    .onConflictDoNothing({ target: skuMap.opptraSku })
+    .returning({ opptraSku: skuMap.opptraSku });
+  return { brand, skusAdded: added.length };
 }

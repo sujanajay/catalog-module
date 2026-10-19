@@ -212,22 +212,23 @@ async function sheetSource(input: CollectInput): Promise<{ gsUri: string; name: 
 async function listUpload(input: CollectInput): Promise<Omit<UploadManifest, "version" | "results">> {
   const { upload, deps, options } = input;
   const prior = (upload.detected as Detected | null) ?? null;
+  const chosen = upload.detected?.columnsChosen === true ? { columnsChosen: true } : {};
   const asProductList = async (): Promise<Omit<UploadManifest, "version" | "results">> => {
     const src = upload.kind === "product_list" ? { gsUri: upload.gcsUri ?? "", name: upload.name } : await sheetSource(input);
     if (!src.gsUri) throw new Error(`The product list ${upload.name} has not been uploaded yet. Add it again.`);
     const { buf } = await deps.storage.downloadBuffer(src.gsUri);
     const detected = await productListDetected(buf, src.name, await pickedColumns(buf, src.name, prior));
     if (upload.kind === "google_sheet" && prior?.message) detected.message = prior.message;
-    return { items: [], warnings: [], productList: true, detected };
+    return { items: [], warnings: [], productList: true, detected: { ...detected, ...chosen } };
   };
 
-  if (upload.kind === "product_list") return asProductList();
+  if (upload.kind === "product_list" || (chosen.columnsChosen && prior?.kind === "product_list")) return asProductList();
   if (upload.kind === "sheet" || upload.kind === "google_sheet") {
     const src = await sheetSource(input);
     const title = upload.kind === "google_sheet" && typeof prior?.title === "string" ? prior.title : undefined;
     const res = await readLinksSheetUpload(input, upload.kind === "google_sheet" ? { ...src, ...(title ? { title } : {}) } : undefined);
     if (res.detection.isProductList && res.detection.identifierColumn >= 0 && !options.sheetColumns) return asProductList();
-    const detected = { ...res.detected };
+    const detected = { ...res.detected, ...chosen };
     if (upload.kind === "google_sheet" && prior?.message) detected.message = prior.message;
     return { items: res.items, warnings: res.warnings, productList: false, detected };
   }

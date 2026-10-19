@@ -10,7 +10,9 @@ const nextConfig: NextConfig = {
   output: standalone ? "standalone" : undefined,
   outputFileTracingRoot: path.join(__dirname, "../.."),
   transpilePackages: ["@catalog/core"],
-  serverExternalPackages: ["pg", "@google-cloud/storage", "@google-cloud/tasks", "google-auth-library"],
+  // unzipper loads its optional S3 adapter lazily. Keep its actual Node package rather than
+  // bundling that unused adapter and requiring an AWS SDK for our GCS-only archive reader.
+  serverExternalPackages: ["pg", "@google-cloud/storage", "@google-cloud/tasks", "google-auth-library", "unzipper"],
   // @google-cloud/tasks and google-gax load client config and protos via dynamic paths that file
   // tracing cannot see; without these the standalone image fails on the first enqueue.
   outputFileTracingIncludes: {

@@ -1,0 +1,46 @@
+# Review deployments reuse 05's live matting services rather than rebuilding or replacing them.
+steps:
+  - id: worker
+    name: gcr.io/cloud-builders/docker
+    env: ["DOCKER_BUILDKIT=1"]
+    args: ["build", "-f", "apps/worker/Dockerfile", "-t", "${_AR}/worker:${_TAG}", "."]
+    waitFor: ["-"]
+  - id: web
+    name: gcr.io/cloud-builders/docker
+    env: ["DOCKER_BUILDKIT=1"]
+    args: ["build", "-f", "apps/web/Dockerfile", "-t", "${_AR}/web:${_TAG}", "."]
+    waitFor: ["-"]
+  - id: verify-web-runtime
+    name: gcr.io/cloud-builders/docker
+    waitFor: ["web"]
+    args:
+      - run
+      - --rm
+      - --entrypoint=node
+      - "${_AR}/web:${_TAG}"
+      - -e
+      - |
+        process.exitCode = 1;
+        (async () => {
+          const { createRequire } = require('node:module');
+          const webRequire = createRequire('/app/apps/web/server.js');
+          await webRequire('./.next/server/app/api/catalog/batches/[id]/start/route.js');
+          const unzipper = webRequire('unzipper');
+          const zip = Buffer.from('UEsDBBQAAAAAAAAAIVCvhZUoBQAAAAUAAAAJAAAAY2hlY2sudHh0cmVhZHlQSwECFAAUAAAAAAAAACFQr4WVKAUAAAAFAAAACQAAAAAAAAAAAAAAgAEAAAAAY2hlY2sudHh0UEsFBgAAAAABAAEANwAAACwAAAAAAA==', 'base64');
+          const { files } = await unzipper.Open.buffer(zip);
+          if (files.length !== 1 || files[0].path !== 'check.txt' || (await files[0].buffer()).toString() !== 'ready') {
+            throw new Error('The standalone archive reader failed its package check.');
+          }
+          console.log('Standalone Start route and archive reader loaded successfully.');
+          process.exitCode = 0;
+        })().catch((error) => {
+          console.error(String(error.stack ?? error).split('\n').slice(0, 6).join('\n').slice(0, 3000));
+          process.exitCode = 1;
+        });
+images:
+  - "${_AR}/worker:${_TAG}"
+  - "${_AR}/web:${_TAG}"
+options:
+  machineType: E2_HIGHCPU_8
+  logging: CLOUD_LOGGING_ONLY
+timeout: 1800s
