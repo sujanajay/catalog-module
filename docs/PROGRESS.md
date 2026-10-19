@@ -7,29 +7,55 @@ Status values: `todo`, `running`, `done`, `blocked`.
 
 | Item | Status | Assumptions | Known issues | Next step |
 |---|---|---|---|---|
-| 05 gates | todo | - | - | Subagent "05-gates": install, lint, typecheck, test on `feat/catalog-05-matting-and-render`; look for Codex's full-data evidence (max 10 minutes) |
-| 05 merge (PR #11) | todo | - | - | `gh pr ready 11`, wait for CI, squash-merge |
-| 06 gates | todo | - | - | Subagent "06-gates": merge `main` after PR #11 lands, re-run the four gates, push |
-| 06 smoke reorder in deploy.sh | todo | - | - | Reorder `infra/deploy.sh`: build images, remote smoke on the just-built worker image, then update services |
-| 06 merge (PR #12) | todo | - | - | `gh pr ready 12`, wait for CI, squash-merge |
-| 06 deploy | todo | - | - | From the main checkout: `git pull`, `bash infra/bootstrap.sh` (all SKIP), `bash infra/deploy.sh`; record `WEB_URL` and revisions below |
-| 07 worker | todo | - | - | Builder "07-worker": QA stage and publish gate, caps fix, `estimateCost` default, `ensureDefaultPolicies` health, `catalog-qa-check` entry |
-| 07 web | todo | - | - | Builder "07-web": five routes and libs, `AttentionList`, `ReplaceModal`, `SkuMapModal`, `EvalLabelBar`, `CostLine`, wired into the batch page |
-| 07 infra-tests | todo | - | - | Builder "07-infra-tests": deploy.sh env, `infra/catalog-qa-check.sh`, Playwright steps 7-10, no-model-name grep test |
-| 07 integration | todo | - | - | Merge the three builder branches (`--no-ff`), merge `main` after 06 lands, run the four gates, open the PR |
-| 07 review | todo | - | - | `/code-review` on the diff; fix bugs and contract violations only; re-run gates |
-| 07 merge | todo | - | - | Wait for CI, squash-merge |
-| 07 deploy | todo | - | - | `bash infra/deploy.sh` (smoke gate included); record revisions below |
-| e2e flow 1 sign-in | todo | - | - | Sign in through IAP lands on `/catalog`; viewer-only account is read-only |
-| e2e flow 2 core journey | todo | - | - | New batch, one brand, 3-5 real Anta photos, two channels, start, wait for the end state |
-| e2e flow 3 public links | todo | - | - | Two delivered URLs open with no credentials (200, JPEG); sheet downloads; re-check line shown |
-| e2e flow 4 overwrite | todo | - | - | Re-upload with one photo changed and one dropped; same links, new generations, removed link gone |
-| e2e flow 5 needs attention | todo | - | - | One held product; "Use as is" and "Remove this photo" both work |
-| e2e flow 6 cost line and cap | todo | - | - | INR cost line on the batch page; `DAILY_SPEND_CAP_USD` set in the deployed env |
-| 08 model bake-off and policy (reduced) | todo | - | - | `catalog-eval` and policy writer; reduced bake-off on Anta and French Connection; write `model_policy` rows |
-| 09 scale, guardrails, hand-over (reduced) | todo | - | - | `catalog-recheck`, fault proxy, load driver at one tenth scale (270 options), hand-over note and GIF |
+| 05 gates | done | spec-text changes accepted (list below) | Codex's full run: Cloud Build `1ac2bc2a` (us-central1) ended FAILURE at step 4; acceptance doc stale | Gates green: lint 0 errors, typecheck ok, vitest 51 files / 504 tests passed; no code changes needed |
+| 05 merge (PR #11) | done | - | local branch kept until the 05 worktrees are removed at the end | Merged 2026-10-19 14:01 UTC as `c1db9f0` |
+| 06 gates | done | merge conflicts: took main's `test-render.sh` and `cloudbuild-render-test.yaml`, kept the branch's `deploy.sh` | - | Merged main (`dee273c`); gates green: lint clean, typecheck ok, vitest 64 files / 603 tests; pushed |
+| 06 smoke reorder in deploy.sh | done | migrate runs before the smoke (the smoke needs the migrated schema and the seeded test brand); remote smoke is the default, `CATALOG_LOCAL_SMOKE=1` for the old in-process path; `CATALOG_REMOTE_SMOKE` removed | `catalog-test-smoke` job never executed yet; Campus/Keds run-or-skip depends on the french-connection.tar contents | Commit `c13ec42`: preflight, build, migrate, smoke on `worker:$TAG` (job repointed via `catalog-test-jobs.sh` with `CATALOG_TEST_JOBS=smoke`), then matting, worker, web; a failing smoke stops before any service update; brands without fixtures report "skipped" |
+| 06 test brand | done | SKUs prefixed `TB` (`TB100001_Black_OD_M` ...), type footwear; fixture reuses the Anta folder | - | Commit `e068620`: `TEST_BRAND` + `seedTestBrand` in `packages/core/src/catalog/brands.ts`, called from `apps/worker/src/migrate.ts`; `isTestBatch` rule in `apps/web/lib/catalog/batches.ts`; fixture branch; one unit test |
+| 06 merge (PR #12) | done | - | - | Merged 2026-10-19 as `47f90c4` (CI run 39266727889 green) |
+| 06 deploy | done | - | first run (14:15-14:37 UTC) stopped at the smoke step because the manager's uncommitted PROGRESS.md made the tree dirty (not a code problem); second run with a clean tree completed | Deployed `47f90c4` 2026-10-19 ~14:55 UTC: build SKIP (images existed), migrate SKIP (`catalog-migrate-kk4hh` had succeeded), remote smoke passed (evidence `gs://image-links-agent-assets/catalog-test/smoke/linux-fff823aa-551e-4a67-8801-ec6662a7aa65/smoke/`), IAP enabled, CORS SKIP; revisions `catalog-worker-00008-29r`, `catalog-web-00008-bwl`, `catalog-matting-00003-xbv` |
+| 07 worker | done | compute price default 0.000024 USD per vCPU-second (unconfirmed; 09 sets the measured value); non-judged channels keep the judge's raw scores; mocked classifier returns `other` | outputs flagged before QA are not judged (no QA scores); `catalog-qa-check` skips the hard-case set | Branch `--worker`: QA stage, publish gate (undecided output holds the product), cap banner, policy lookup, mocked judge in the smoke, `catalog-qa-check.ts` + esbuild entry; gates green: vitest 69 files / 636 tests |
+| 07 web | done | copy not in the spec: toast "Label saved.", eval tab label, eval lead and paging text; money shown with 2 decimals; replacement complete body `{ uploadId }` | brand and product page cost lines not built (batch page only); "Replacement in progress" not kept across reloads | Branch `--web` (`91f9cdf`): routes, AttentionList, ReplaceModal, SkuMapModal, EvalLabelBar, CostLine, wizard step 4 estimate, viewer read-only; gates green: vitest 72 files / 641 tests |
+| 07 infra-tests | done | job: 2 CPU, 4Gi, 3 h timeout, no retries, reads the smoke tarballs; `DAILY_SPEND_CAP_USD=10`, `CATALOG_QA_DEFAULT_MODEL` set, `INR_PER_USD` unset by default | key was mounted on jobs only; spec 07 section 3 also needs it on the worker (integration fixes this); Playwright steps 7-10 not yet run | Branch `--infra-tests` (`7d38eab`, `eee35ad`): deploy.sh env + jobs step, `infra/catalog-qa-check.sh` (deploy/run), Playwright steps 7-10 on `test_brand`, AST-based no-model-name test in `pnpm test`; gates green: vitest 70 files / 632 tests |
+| 07 integration | done | worker mounts the OpenRouter key per spec 07 section 3 (the LIVE_SMOKE rule applies to tests and jobs); main was merged with merge-base `87d1eb5` (the 06 tip whose tree equals main) because the squash merges confused the default ancestor; deploy.sh sections renumbered (Jobs 8, URLs 9) | - | PR #14 open (https://github.com/sujanajay/catalog-module/pull/14), CI green (run 39269175032); gates: vitest 73 files / 652 tests; `dist/catalog-qa-check.js` builds; one real conflict in `catalog-smoke.ts` resolved |
+| 07 review | done | the code-review skill reviewed the wrong target, so the diff was reviewed by hand with the same focus | if the judge model or key is missing the chunk error text can reach the UI after 5 retries (misconfigured deploy only); SKU `unmatched` list shows normalised keys; an SKU upsert can turn a warehouse row into `source = manual` (02 sync rewrites it) | Fixed: publish gate held unjudged staged outputs (`publish.ts`), decision scope ignored information flags so "Remove this photo" could touch other channels (`decisions.ts`), replacement name `..` refused, SKU upload capped at 10 MB, cap reason wording; spec-named tests added; gates: vitest 73 files / 661 tests; CI green (run 39272792779) |
+| 07 merge | done | - | - | Merged 2026-10-19 as `9f3a13b` (PR #14) |
+| 07 deploy | done | - | three smoke failures before success: redelivered shots staged under the replacement prefix (PR #17), stale public cache on the independent re-read (PR #20), stale public cache on the publish-side read-back (PR #21), cache wait widened to 600 s (PR #22) | Deployed `732f845` (specs 07, 08, 09 and PRs #17-#22) 2026-10-19 ~19:55 UTC: smoke passed (evidence `gs://image-links-agent-assets/catalog-test/smoke/linux-2f0e2079-74eb-457e-bcb9-21741649cf73/smoke/`); revisions `catalog-worker-00009-qjg`, `catalog-web-00009-lqn`, `catalog-matting-00004-qzh`; jobs created: `catalog-qa-check`, `catalog-eval`, `catalog-load`, `catalog-recheck` |
+| render-fixes deploy | done | - | - | Deployed `ea1cd79` 2026-10-20 ~21:40 UTC: smoke passed (evidence `gs://image-links-agent-assets/catalog-test/smoke/linux-b354bc00-acf2-4549-af02-c171be5e2c95/smoke/`); revisions `catalog-worker-00010-cp8`, `catalog-web-00010-f2h`, `catalog-matting-00005-xct`; jobs updated to the same image; next deploy will carry PRs #26, #30-#33 and the auto-resolve and eval PRs (bootstrap must run first for the signing grant) |
+| quality gate 2 and Drive-set batches | blocked | batches: Penti `db79c5de`, Vero Moda `987f1c22`, French Connection `5ec11173`, quality-gate-2 `dcf3441d` (11 products: bd-162637307S-2 still locked by the first gate's held product; "Use as is" on it was denied by a permission check); deployed code was `ea1cd79` (before PRs #32, #34, #35) | FAIL: (1) frame-filling close-ups lose the product in the cut-out step (Penti Z91D_4 lace trim only, Anta bd-152638122-2_5 logo only, FC bag Z02B2 shots 3-6 leather removed, hand-held bag notch, Penti size charts with holes); two went live because the judge passed them; (2) cut edges still float when the source has a white pad band (9 cases across all three brands); (3) judge false holds: multipack singles, packshot vs worn, size charts called "different product"; a clean Centrepoint render called "leftover background"; (4) 6 of 20 products held (30%, target 0); (5) "Links verified" and "Independent re-check" use different denominators; (6) bag shots vertically off-centre on Trendyol; (7) cost line INR only; (8) lock message appears only after Start | PASSED: counts exact on all four batches (32/48/32/336 new, Styli skipped, held explained); all 488 links anonymous 200 image/jpeg; 408 outputs pass canvas, aspect, dpi, 4:4:4, profile, size, corner colour, one canvas per product, Trendyol always 1200x1800; shadows fixed on every shoe (soft, no block, no straight edge); Vero Moda grey sources clean; flush cuts on the earlier FC cases; judge calls now logged (`catalog_qa call`, 105 calls, all 200, USD 0.0156). Fix streams: `fix/closeup-passthrough` merged as PR #39 (`packages/core/src/catalog/matte-guard.ts` estimates product pixels from the photo itself and rejects a matte dropping over 20% of any grid cell or 4% overall; ladder: second model, photo framed in a 20% white border with first then second model, then pass-through with the `matte_passthrough` information flag, no shadow, never held; 13 Penti size charts detected across 5,362 photos and left out with `chart_image`; hand-held items never get a contact shadow; all 7 vanished-product cases complete, 12 good photos byte-identical; a rejected photo can cost up to 4 extra matte calls), `fix/cut-detection-and-ui` merged as PR #38 (`padBands` + two-signal `shotGeometry` on source pixels: all nine floating cases flush, no false flags on shoes; both verification lines count delivered links with held and carried-over links stated separately; bag centring fixed by suppressing the synthesised shadow on any cut side; step 4 shows the lock with Start disabled; cost line "USD x (INR y)"; notes sorted by photo; the "Use as is" denial was the test agent's own browser permission, a route test replaying the exact request returns 200; left: `_01` shot labels show as `_1`), `fix/judge-views` merged as PR #37 (same-product rules for multipack singles, packshot vs worn, charts, details and colour variants; `view: chart` left out with `chart_image`, never held, photo 1 becomes the first non-chart photo; `product_intact` check producing `product_removed`, one of our own defects fed to the repair ladder; leftover_background needs a located evidence sentence and a second judge; partial replies re-asked once; flags ordered by severity; cards show the worst photo first with at most 3 sentences). Evidence in the session scratchpad `qa-gate-2/` |
+| final deploy (all fixes) | blocked | - | BLOCKED ON THE OWNER: `gcloud builds submit` failed with "Reauthentication failed. cannot prompt during non-interactive execution" (the operator's gcloud login expired); bootstrap had completed (CREATE `roles/iam.serviceAccountTokenCreator` on catalog-worker@ for itself) | Owner runs `gcloud auth login` in PowerShell, then the manager re-runs `bash infra/deploy.sh` from `108616a` (PRs #23-#39 and spec 10); then quality gate 3, eval runs, load, recheck |
+| quality gate (after 07 deploy) | blocked | 12 products (8 Anta, 4 French Connection), 52 photos, all 9 channels; grouping by file name before the last `_<number>` | FAIL on output quality: synthesised shadows render as rectangular grey blocks with hard straight edges (7 of 14 viewed images, 6 channels, all "verified"); photos cut off at the frame edge get a fake shadow and float mid-canvas and the judge does not flag the cut; cost line showed config text and step 4 "not available" (fixed in PR #23 `3b8185c`: `INR_PER_USD` defaults to 84 in deploy.sh, plain-words fallback copy, channel-correct placement reasons, plural copy; batch page now says "N of M images made, including K skipped"); minor: judge flagged a sole view as a different product, step 4 counts 416 images vs 468 on the batch page (Styli skips) | Everything else passed: batch `b489e466-75bc-414f-bc5b-e20e7698ad2b` reached "Needs attention (2 products)" in 8 min; "Links verified: 376 of 416" = "Independent re-check: 376 of 376 OK"; all 376 links anonymous GET 200 image/jpeg; canvas, dpi, corner colour, margins pass on 18 images across 8 channels; no model ids in the UI. Evidence in the session scratchpad (`qa-gate-shots/`, `qa-gate-output/`, `qa-gate-attn/`, `qa-gate-sheet/`). Fix streams: render (shadows, cut-off rule) and web/infra (cost line default and copy); then redeploy and re-run the gate once |
+| output-quality investigation (owner request 2026-10-20) | running | three public Drive folders downloaded to `var/drive-input/set1..3` (git-ignored); investigation first, fixes second, then a live batch of 2-3 products per set with outputs counted per platform and inspected. Decisions logged: marketplace exact sizes (Trendyol 1200x1800) are delivered exactly even beyond the 1.5x upscale cap; one canvas size per product per channel; a cut edge in the source is placed flush with the canvas edge on every channel and carries an information flag, not a hold; with no classification the safe default is no synthesised shadow | Render investigation (batch `b489e466`): output counts per platform are CORRECT (47 per non-Styli channel for 47 live photos, Styli skipped as all sources are under 1482 px, held product explains 416 vs 376); all 88 measured outputs pass size, dpi, sRGB, corner colour, Noon/Namshi margins, centring; the render crops NOTHING: the brand's photos arrive already cut (mid-jeans, head and shoulders) and the bottom margin leaves the cut line floating, which reads as "we cut the body"; bugs: sheet notes duplicated (channel id vs label), empty Styli column, batch page 468 vs step 4 416; channels.ts drifts from SPEC.md (Trendyol 1200x1800 not delivered, Namshi lacks the 5% side margin, Amazon/Shein square vs 3:4), mixed canvas sizes across a product's angles; a shadow was synthesised on model photos (spec forbids): ROOT CAUSE the wizard's "Detect automatically" stored the literal `auto` as the batch and product type, so the classifier never ran and the render treated every product as `other` (shadow when taller than wide); fixed in PR #24 (`auto` never stored, legacy `auto` products get classified, `shadowSynthesisAllowed` allows only footwear, bag_accessory and other, unknown type means no shadow plus `no_shadow_source` flag) | Fix streams: "fix/render-spec-and-cuts" merged as PR #27 (notes de-duplicated via `outputNote`, empty channel columns dropped, counts "N of M images made, not counting K skipped", Trendyol fixed 1200x1800 beyond the 1.5x cap with `low_resolution` as information, `CHANNEL_RULES_VERSION` 4 so products re-render on next upload, one canvas per product per channel via `planProduct`, `cut_in_source` information flag with flush placement and compliance accepting the flush side, no synthesised shadow on a cut bottom; Namshi already matched SPEC.md; Amazon/Shein kept square because SPEC.md contradicts itself (square 2000x2000 table vs "3:4 portrait" sheet text) and the OWNER SHOULD CONFIRM; cut detector threshold 25% opaque run, which misses a knee-level cut at 22% while 8% would false-flag full-length shots with shoes at 12%), "fix/product-type-shadow" merged as PR #24, "fix/shadow-render" merged as PR #29 (`ea1cd79`): three faults in shadow.ts (hard rectangular clip of the shadow layer to the safe box, synthesised shadow squashed across the full silhouette width into a band, kept source shadows cut at the measuring band) replaced by a silhouette-cast feathered shadow, a smooth fade to zero at margins and the photo edge, and kept shadows fading past the band; tests assert no neighbouring shadow pixels differ by more than 6 grey levels and no straight shadow edge longer than 5% of the width; `CHANNEL_RULES_VERSION` 5; before/after crops in the scratchpad `shadow-fix/`; Drive sets downloaded and verified against Drive's listing (4,680 files, `var/drive-input/`): set1 Penti 535 photos 800x1200, 113 products (flat lays, tight crops, lifestyle); set2 Vero Moda 865 photos mostly 800x1096, 202 products (light-grey background, full-length models, 28 single-shot products, 2 byte-identical products); set3 French Connection 3,280 photos 800x1200, 607 products (white cut-out backgrounds, models cropped mid-thigh, one .webp, 5 shot-number gaps, some duplicate shots); inventory CSV in the session scratchpad `drive-inventory/`; live batches of 2-3 products per set run after the next deploy |
+| e2e flow 1 sign-in | done | viewer read-only checked by code (no second account in Chrome): viewer routes `requireRole("viewer")`, action routes operator, New batch only for operators | "Preview as viewer" fixed in PR #26 | PASS: `/` redirects to `/catalog`, IAP accepted the admin account, People modal shows the Viewer role; screenshot `scratchpad/e2e/flow1-signin-people.jpg` |
+| e2e flow 2 core journey | done | - | - | PASS: batch `8af822a4-21ec-4336-b745-3e6c9cc404c1`, 2 products, 8 photos, Noon + Amazon, step 4 showed 2 products and 16 images, identifier mode "By file name before the last _number", Ready in about 1 min (outputs unchanged from the quality-gate batch); `flow2-ready.jpg` |
+| e2e flow 3 public links | done | - | - | PASS: two delivered links anonymous GET 200 image/jpeg; "Links verified: 16 of 16" = "Independent re-check: 16 of 16 OK"; sheet downloaded with 16 hyperlinks; `flow3-details-counts.jpg` |
+| e2e flow 4 overwrite | done | old versions stay fetchable by explicit `?generation=<old>` because bucket versioning keeps 30 days of previous versions (spec safety net); the plain link serves the new image and a removed link returns 404, which is the contract | BLOCKER found: batch `63409122` got POST /ingest 500 "14 UNAVAILABLE: read ECONNRESET", then PATCH 409 on retry, stuck at "Collecting files 0 of ?" with no recovery; ROOT CAUSE the Cloud Tasks `createTask` hand-off (the only gRPC client on the path, library 7.3.0 never retries CreateTask) failed on one reset connection after the batch was already marked collecting; fixed in PR #25 (retry helper `packages/core/src/retry.ts`, named ingest tasks so a retry never duplicates, batch returns to draft when nothing was queued, plain-words error copy, "Try again" button on a batch stalled 10 minutes; recover batch `63409122` after deploy by pressing Try again) | PASS on the re-run `706e67b4`: same URLs, changed shot got new generations on noon and amazon, removed shot 404 at once, untouched product unchanged, 14 of 14 verified and re-checked; `flow4-links-sheet.jpg`, `flow4-bug-econnreset.jpg`, generation listings in `scratchpad/e2e/gens-*.txt` |
+| e2e flow 5 needs attention | done | the held quality-gate batch keeps the product lock, so a new batch for the same product is refused after Start (message only after Start, Start stays enabled, draft left) | after the last decision the tab vanished and the view jumped to Overview (no Resolved card), KPIs stale until reload; notes duplicated; card copy mixed; all fixed (PR #26: tab stays while on it, viewer preview hides New batch, card copy per main problem, step 4 subtracts unchanged pairs by sha256, ready line after decisions, per-source copy; PR #27: notes de-duplicated); left: preview mode still shows the wizard at /catalog/new | PASS on `e19b20f9`: "Use as is" toast "Kept in the sheet" and new generations; "Remove this photo" asked "Remove anyway", toast "Removed. The sheet cell is empty with a note.", link 404, cell empty with note; 6 of 6 verified and re-checked; `flow5-attention-cards.jpg` |
+| e2e flow 6 cost line and cap | done | - | cost showed USD 0.00 after live judge calls: spend WAS recorded all along (finalize reports: batch `b489e466` 52 judge calls USD 0.0072; `706e67b4` 1 call; `e19b20f9` 2 calls; about USD 0.00014 per check), the cost line rounded to 2 decimals; fixed in PR #28 (per-call logging with status, model, tokens, USD; warn on auth failures and timeouts; 4-decimal USD and INR 2 decimals plus batch total; `QA_CHECK_ANTA_LIMIT` for a small live probe); compute spend was not counted because `COMPUTE_USD_PER_VCPU_SECOND` was unset (2023 vCPU-s, about USD 0.049, roughly 7x the judge spend); fixed in PR #31: deploy.sh default 0.0000265 USD per vCPU-second (asia-south1 Tier 1 request-based billing: 0.000024 CPU + 0.0000025 memory at 1 GiB per vCPU, read from cloud.google.com/run/pricing on 2026-10-20), step 4 estimate = checks x 0.0003 + images x 4.3 vCPU-s x price (USD 0.0689 estimated vs 0.0608 spent on the quality-gate batch), and a USD 0.0013 fallback per check when OpenRouter returns no cost so the cap is never under-counted; INR_PER_USD absent on the deployed env until the next deploy (PR #23 sets it) | PASS: cost line shown on the batch page; worker env has `DAILY_SPEND_CAP_USD=10`; secrets are references only; `flow6-cost-line.jpg`; GIF `scratchpad/e2e/catalog-e2e-2026-10-20.gif` (50-frame cap, flows 1-5 partly) |
+| 08 model bake-off and policy (reduced) | running | built-in cut-out models only (`birefnet-general`, `birefnet-general-lite`, `bria-rmbg`); custom sessions, trimap/box_prompt/sr_pass experiments, pending rows and tier 2 tests skipped; artifacts under `catalog-test/eval/<set>/`; `run` processes batches inside the job with the mocked judge; labeler disagreement counts as flagged; suggested 10 products per set on 2 channels | never run in the cloud yet (`--args` escaping and tar unpacking unproven); eval cleanup refuses same-day cleanup of batches that spent money (spend rows would be lost) | Merged 2026-10-19 as `811a612` (PR #15) after review (fixed: eval batch silently fell back to the default matte model; judge gates stored figures at the wrong threshold; score/policy/report accepted batches from another set; cleanup deleted today's spend rows); vitest 77 files / 677 tests; next: deploy with 09, then run the eval job live (commands in the PR body) |
+| 09 scale, guardrails, hand-over (reduced) | running | no full-scale load or fault injection; no scenario runner or restore drill; no sample contact sheet; SPEC.md pass, README, docs/solutions, load report and knob values not done; zips written straight to the signed-PUT object path; load job timeout 24 h | `catalog-qa-check.sh` mounts no evidence volume (job output lost); the deployed worker's QA stage makes live judge calls during the load, capped by `DAILY_SPEND_CAP_USD`; `DetailsTab` shows "Independent re-check: 0 of 0 OK" while counts are null | Merged 2026-10-19 as `4acc57e` (PR #16) after review (fixed: empty sheet reported OK, batch row count double-counted, dropped-shot 404 check never ran, hand-over note gaps; PGlite recheck test added); vitest 80 files / 693 tests; next: deploy, then `bash infra/catalog-scale-jobs.sh load 270` and recheck; fill the hand-over placeholders after e2e |
+| spec 10 output-quality evals | running | written by a Fable 5.1 subagent per the owner; golden set 90 products / 399 photos (Anta, French Connection, Penti, Vero Moda, derived small and cut cases, 3 planted wrong items); thresholds in docs/specs/10-output-quality-evals.md | first real run will calibrate folder-mode noise; white-on-white products carry little colour evidence for pixels_lost (bake-off consensus covers them); old evidence mattes show possible Anta sole losses to check on fresh mattes | Merged as PR #35: checkers (geometry, shadow, cutout, cut_edge, completeness incl. Amazon/Shein per shot, attention incl. planted and false-positive checks, overwrite, matte bake-off feeding the spec 08 policy writer), job `catalog-output-evals` deployed by deploy.sh, `infra/catalog-output-evals.sh upload / run / run --live / run --write-policy`; golden set uploaded 2026-10-20 to `gs://image-links-agent-assets/catalog-test/evals/golden/` (399 photos + manifest, 78 MiB; PR #36 fixed a planted-shot numbering collision and the script's missing BUCKET default); after the final deploy: `bash infra/catalog-output-evals.sh run`, `run --live`, `run --write-policy` |
+| full tier 3 run (3,910 photos) | todo | see Assumptions (tier 3 staged) | - | Real-data run on `test_brand` as a Cloud Run job against the deployed stack; compliance % and defect count; cleanup under `catalog-test/` only; stops at the spend cap |
 
 ## Assumptions (pre-filled 2026-10-19)
+
+- Owner decisions 2026-10-20 (second message): the output-quality evaluation suite is written by
+  Fable 5.1 subagents with an extremely high bar and a larger golden set (spec 10,
+  `docs/specs/10-output-quality-evals.md`); all other subagents stay on Opus 5.5. A product that
+  ends in "Needs attention" counts as our failure; target attention rate 0 on the golden sets.
+  The owner's "Amazon and Shein: 3 inputs, 1 output" observation was NOT reproduced (2026-10-20):
+  SPEC.md:160-161 and channels.ts:191-195 render every shot (shot 1 white, others grey); the live
+  batch has 3 Amazon and 3 Shein objects per French Connection product and 5 per Anta product,
+  all present as hyperlinks in the xlsx (no hidden columns) and on the product page; only a
+  product held for attention has no links on any channel. A batch id or screenshot from the
+  owner would let us trace the original observation.
+- Sheets are historical: after the e2e overwrite and remove flows, the quality-gate sheet's links
+  for bd-112621603-1 shots 2 and 5 are dead by design (a later batch replaced the product's state;
+  holders of earlier sheets are told, per 00 section 12.5).
+- Models in use (answer to the owner, 2026-10-20): background removal runs open-source models
+  (`birefnet-general`, `birefnet-general-lite`, `bria-rmbg`) on our own Cloud Run matting
+  services (CPU and one L4 GPU); the spec 07 judge and classifier call OpenRouter (default
+  `google/gemini-2.5-flash-lite`) with the key from Secret Manager; rendering is our own code.
 
 - Codex's spec-05 text changes are accepted without owner review: timeout 180 s, the canvas
   formula, the shadow alpha threshold, the compliance edge rule, and one resident model session.
@@ -39,19 +65,137 @@ Status values: `todo`, `running`, `done`, `blocked`.
   or is skipped.
 - Full 3,910-photo tier 3 runs are skipped.
 - The spec 07 WIP on branches `codex/spec07-web` and `codex/spec07-worker` was committed as-is and
-  may not compile.
+  may not compile. Renamed on 2026-10-19 to `feat/catalog-07-qa-attention-and-skus--worker` and
+  `--web`; a third builder branch `--infra-tests` was created from the feature branch.
+- Test brand (owner decision 2026-10-19, beyond spec 06): slug `test_brand`, name "Test Brand",
+  line softline, created by an idempotent seed at the end of the migrate job, with 5 manual
+  `sku_map` rows. Every batch for `test_brand` is forced to `is_test = true` so its objects only
+  ever land under `catalog-test/` and it never appears in real brand reports. Its smoke fixture
+  reuses the Anta source photos (the smoke reads brand photos from the anta.tar and
+  french-connection.tar unpacked from `catalog-test/render-05-1792340617303-555901/inputs/`, not
+  from per-brand GCS folders): first product group with 3 or more shots, expected
+  `bd-112545502R-2` (5 shots). Five copies of those photos were also staged at
+  `gs://image-links-agent-assets/catalog-test/smoke/test_brand/` for manual tests; harmless,
+  not read by the smoke.
+- Tier 3 staged (owner decision 2026-10-19): a quality gate on about 50 real photos after the 07
+  deploy, with visual inspection, then the full 3,910-photo run against the deployed stack as the
+  last step. The full run stops at `DAILY_SPEND_CAP_USD`; partial counts are reported as progress.
+- e2e flows run on the live URL as the owner's account through the Chrome extension or the saved
+  Playwright state; if sign-in state is unavailable to the agent, flow 1 is marked blocked with
+  the exact need and the rest continues where no sign-in is required.
+- Local merges between feature branches replace nothing: PRs are merged on GitHub when CI is green.
 
 ## Known issues
 
-- Codex's claimed Cloud Build verification id `1ac2bc2a` was not found.
-- Anonymous read on the public bucket is not yet proven by a real object (e2e flow 3 is the proof).
+- After PR #32 an automatically dropped photo leaves the previous batch's live image for that
+  shot live and in the sheet (by design for now: the earlier image was good).
+- OpenRouter live proof (2026-10-20): eval set `openrouter-proof-tb` (1 Test Brand footwear
+  product, 5 photos, Noon), batch `a081f65a-2654-48f0-843c-c12a24980b96`, execution
+  `catalog-eval-hf8n7`: 5 judge calls, USD 0.0007074 from OpenRouter's usage accounting, no auth
+  errors, key mounted from `openrouter-api-key:latest`, `LIVE_SMOKE` only on that execution.
+  Together with the finalize reports (worker judge calls recorded per batch) this proves the key
+  works in the worker's QA stage and the jobs. Defects found: `exec` rejects repeated identical
+  args; `contact-sheet` and `report` need `iam.serviceAccounts.signBlob` (bootstrap grant being
+  added); `run` for a brand missing from the master fails after assemble (orphan set
+  `catalog-test/eval/openrouter-proof/`). Fixed in PR #33: `--flag=value` tokens (gcloud refuses repeated values in any form), new `catalog-eval-cli.ts`; bootstrap grants `roles/iam.serviceAccountTokenCreator` to catalog-worker@ on itself (resource level, project-level fallback) and must be run before the next deploy; `assemble` checks the brand master first; `cleanup --set <s>` removes an orphan set folder.
+- After an ingest hand-off failure a batch returns to draft but the wizard cannot reopen an
+  existing draft (pre-existing); the list pill still says "Collecting files 0 of ?" for a
+  stalled batch; other routes can still show raw library errors to the operator.
+- OpenRouter in production (checked 2026-10-20): secret `openrouter-api-key` has one enabled
+  version, mounted as `OPENROUTER_API_KEY` on catalog-worker, catalog-qa-check and catalog-eval;
+  `catalog-worker@` holds `roles/secretmanager.secretAccessor` at project level. No judge call is
+  logged on success or failure, so there is no direct log proof; the judge flags on the live batch
+  can only come from parsed judge replies, so calls work. "USD 0.00 per style" is 2-decimal
+  rounding of about USD 0.0008 per check. Fixes folded into `fix/spend-recording`: per-call
+  logging (status, model, tokens, USD), warn on auth failures and timeouts, 4-decimal USD, an
+  Anta limit for a small live probe. Locally the key is read from `process.env.OPENROUTER_API_KEY`
+  (`packages/core/src/llm/openrouter.ts:41`); there is no .env loader.
+- Matting investigation (2026-10-20, 16 photos x 4 models, CPU and GPU, 48+ calls): all mattes are
+  clean and complete (laces, soles, hair, fingers, thin straps kept; no holes; CPU and GPU
+  identical; production mattes identical to the re-run). The product is NOT damaged by background
+  removal. The damage comes from the render: cropped sources placed with a gap under the crop line
+  (the white 8-15 px frame band hides that the photo is cut) and the shadow layer (preserved
+  shadows clipped flat at the top, synthesised shadows added under crop lines and clipped by the
+  margin). No new model or commercial API is needed. Side findings: every product in the live
+  batch was matted with `bria-rmbg` on GPU (type was `auto`, treated as `other`); `bria-rmbg` has
+  a non-commercial licence, and the owner confirmed (2026-10-20) it may be used (internal use,
+  permission granted), so it stays; the evals decide the model per product type and mixing
+  models by situation is fine. The `apparel_model` default `birefnet-hr-matting` is not deployed
+  and silently falls back; it is replaced by a deployed model (PR in progress on
+  `fix/judge-roles-and-verdicts`); other defaults unchanged until the evals pick winners. The worker's shrink-to-1024, upscale, blur(1) round trip
+  doubles the soft edge band (not visible at catalog size; optional cleanup).
+- Attention-zero review (batch `b489e466`, 2026-10-20): attention rate 2/12 (16.7%). Hold 1 was a
+  judge false positive (sole view flagged `different_product` against the side view; the prompt
+  ignores the view role and never uses `productType`). Hold 2 was our shadow-block defect flagged
+  on Centrepoint only while the same defect passed on 7 other channels (mean-of-scores verdict,
+  judge asked to score placement it cannot see). Judge scores are not written to logs or the
+  report (only `catalog_outputs.qa_scores`). Fix streams: `fix/judge-roles-and-verdicts` merged as PR #32 (role-aware
+  prompt, per-dimension thresholds, second opinion before any hold, photo flags applied to every
+  channel, hard holds only: confirmed wrong item, collage, photo 1 unusable, all photos unusable,
+  corrupt file; report writes scores, thresholds, evidence, actions); the re-render-and-re-judge
+  loop for our own defects (shadow off, second matte model, 5% smaller fit, then drop-with-note
+  when not photo 1) starts after the render PRs land. Metrics: attention rate and false-hold rate,
+  target 0 on the golden sets with 100% of planted wrong items caught.
+- CI check (owner question 2026-10-20): only 1 of the last 100 runs failed, the order-sensitive
+  `ingest/detect-step.test.ts` on PR #24's first attempt (PGlite records whole-millisecond
+  timestamps, so two uploads in the same millisecond sort by random id); green on rerun; main
+  green. Test-only fix merged as PR #30. Locally the file's PGlite setup can exceed its 10 s hook
+  timeout on cold runs (not seen in CI).
+- `model_policy.shadowMode` (`preserve_only`) is still not read by the render; the type rule gives
+  the same result today.
+- Anonymous read on the public bucket is now proven: 376 delivered links of the quality-gate batch
+  returned 200 image/jpeg with no credentials (2026-10-19).
+- The quality-gate input photos were copied to `var/qa-gate-input/` in the main checkout (git-ignored)
+  because the browser upload tool only accepts files under the checkout; safe to delete.
+- Final smoke (deploy of `732f845`, 17:51-18:02 UTC, about 10.5 min): french_connection passed
+  (1 product, 6 sources, 48 verified, compliance 100%, recheck 48/48; identical re-upload 0/0/0
+  work; pass 2: 7 changed, 7 removed, 41 live, compliance 100%, recheck 35/35) and test_brand
+  passed (1 product, 5 sources, 40 verified, compliance 100%, recheck 40/40; pass 2: 7 changed,
+  7 removed, 33 live, recheck 28/28); mocked judge; campus and keds skipped (no image set); 15
+  other brands skipped. Pass 2 leaves the amazon channel unrefreshed by design (untouched channel).
+- The smoke job env has only the DB secret (no OpenRouter key, no `CATALOG_QA_DEFAULT_MODEL`,
+  no `DAILY_SPEND_CAP_USD`); harmless because the smoke's judge is mocked. About 100
+  `MaxListenersExceededWarning` lines appear in every smoke run (noise).
+- Fixed in PR #18 (`d202805`): `cleanupTestBatches` keeps the batch row and its `spend_days` rows
+  when the batch spent money today (row set to `failed` with `options.cleanedUp`, hidden from the
+  batch list, removed by a later-day cleanup); nothing removes kept rows automatically;
+  `catalog-eval.ts` still has its own same-day refusal (now redundant).
+- 06 smoke (deploy of `47f90c4`, run `smoke-110213b7`): french-connection passed (1 product, 48
+  verified, compliance 100%, recheck 48/48; pass 2: 7 changed, 7 removed, compliance 100%),
+  test_brand passed (1 product, 40 verified, compliance 100%, recheck 40/40; pass 2: 7 changed, 7
+  removed), campus and keds skipped (no image set), 15 other brands skipped.
+- Anta is not in the brand master because the warehouse (`raw_gcc_dimensions.master_sl` and
+  `sku_master_sheet_hl`, source and mirror alike, mirror copied 2026-10-18) has no Anta rows at
+  all; the nightly sync `catalog-sync-master` runs fine (18 brands, 16670 SKUs). The go-live run
+  uses `test_brand` (real Anta photos). To add Anta as a real brand, run option 1 of
+  docs/solutions/manual-brand.md in Cloud SQL Studio (instance `ila-pg`, database `catalog`):
+  `INSERT INTO brand_master (name, slug, line, source) VALUES ('Anta', 'anta', 'softline', 'manual') ON CONFLICT (slug) DO NOTHING;`
+- Anonymous GET on the smoke's public objects returned 404 after the smoke's own cleanup, as
+  expected; the live proof comes from the quality gate and e2e flow 3.
+- Manager bookkeeping: PROGRESS.md is edited on branch `docs/go-live-progress` (worktree
+  `catalog-module-wt/docs-progress`) so the main checkout stays clean for deploy.sh; it is merged
+  through a docs PR at the end.
+
+- Codex's claimed Cloud Build verification `1ac2bc2a-f937-4cc5-bcb2-e9d9875bdec3` (us-central1)
+  ran 2026-10-18 19:48 to 2026-10-19 09:28 UTC and ended FAILURE (step 4 exited 1).
+  `docs/solutions/catalog-05-acceptance.md` still says "still running". Artifacts sit under
+  `catalog-test/render-05-1792340617303-555901/artifacts/` (not inspected). Accepted under reduced
+  testing; the quality gate and the full tier 3 run in this plan replace that evidence.
 - The BigQuery warehouse is still read through the mirror.
 - Codex's spend estimate is USD 91.92 of USD 100 for specs 05-07.
 
 ## Deployed state
 
-Latest known revisions (spec 04, 2026-10-18):
-
-- `catalog-worker`: `catalog-worker-00006-vk7`
-- `catalog-web`: `catalog-web-00006`
-- `WEB_URL`: to be filled after the 06 deploy.
+- `WEB_URL`: https://catalog-web-847405579637.asia-south1.run.app
+- `WORKER_URL`: https://catalog-worker-847405579637.asia-south1.run.app
+- `MATTING_URL`: https://catalog-matting-qtoctgoxqa-el.a.run.app (CPU, asia-south1)
+- `MATTING_GPU_URL`: https://catalog-matting-gpu-qtoctgoxqa-as.a.run.app (1 L4, asia-southeast1)
+- After the 06 deploy (`47f90c4`, 2026-10-19): `catalog-worker-00008-29r`, `catalog-web-00008-bwl`,
+  `catalog-matting-00003-xbv`.
+- After the final deploy (`732f845`, 2026-10-19, specs 07-09 and fixes): `catalog-worker-00009-qjg`,
+  `catalog-web-00009-lqn`, `catalog-matting-00004-qzh`; jobs `catalog-qa-check`, `catalog-eval`,
+  `catalog-load`, `catalog-recheck` on the same image.
+- After the render-fixes deploy (`ea1cd79`, 2026-10-20): `catalog-worker-00010-cp8`,
+  `catalog-web-00010-f2h`, `catalog-matting-00005-xct`; jobs on the same image.
+- IAP access for `domain:opptra.com` is granted at project level (WARN from deploy.sh; see
+  `docs/solutions/catalog-iap.md`).
