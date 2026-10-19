@@ -10,8 +10,12 @@
 #                                           # QA_JOB_ENV and QA_JOB_SECRETS from it
 #   bash infra/catalog-qa-check.sh run      # execute once with LIVE_SMOKE=1 and wait (costs OpenRouter
 #                                           # credit; the job enforces its own budget before each batch)
+#   QA_CHECK_ANTA_LIMIT=1 QA_CHECK_FC_LIMIT=1 bash infra/catalog-qa-check.sh run
+#                                           # small live probe: at most that many photos per brand
+#                                           # (Anta default all, French Connection default 200)
 # PowerShell equivalent of "run" (from the repo root):
 #   & "$env:LOCALAPPDATA\Programs\Git\bin\bash.exe" infra/catalog-qa-check.sh run
+#   $env:QA_CHECK_ANTA_LIMIT='1'; $env:QA_CHECK_FC_LIMIT='1'; & "$env:LOCALAPPDATA\Programs\Git\bin\bash.exe" infra/catalog-qa-check.sh run
 #
 # Inputs: the Anta and French Connection tarballs already in the assets bucket under catalog-test/
 # (the same read-only folder the catalog-test-smoke job mounts), unpacked to REAL_DATA_DIR.
@@ -68,8 +72,15 @@ deploy() {
 
 run() {
   job_exists || { echo "ERROR: $JOB does not exist yet; run bash infra/deploy.sh first" >&2; exit 1; }
-  echo "==> $JOB: EXECUTE with LIVE_SMOKE=1 (live judge calls, this execution only)"
-  gcloud run jobs execute "$JOB" --region="$REGION" --update-env-vars=LIVE_SMOKE=1 --wait
+  # Optional photo limits for this execution only (unset keeps the job's defaults).
+  local env_vars=LIVE_SMOKE=1 name
+  for name in QA_CHECK_ANTA_LIMIT QA_CHECK_FC_LIMIT; do
+    [ -n "${!name:-}" ] || continue
+    [[ "${!name}" =~ ^[0-9]+$ ]] || { echo "ERROR: $name must be a whole number of photos" >&2; exit 1; }
+    env_vars+=",$name=${!name}"
+  done
+  echo "==> $JOB: EXECUTE with $env_vars (live judge calls, this execution only)"
+  gcloud run jobs execute "$JOB" --region="$REGION" --update-env-vars="$env_vars" --wait
   echo "Evidence: gs://image-links-agent-assets/catalog-test/qa-check/"
 }
 
