@@ -10,7 +10,7 @@ export interface Matte { alpha: Buffer; width: number; height: number; model: st
 export interface BBox { x: number; y: number; w: number; h: number }
 export interface CanvasPlan { w: number; h: number; lowResolution: boolean; safeBox: BBox; scale: number; placedX: number; placedY: number; detailShot: boolean; sourceBox?: BBox; productBox?: BBox; cut?: CutEdges }
 /** `canvas`: the product's one canvas on this channel (planProduct), so every angle shares one size. */
-export interface RenderInput { prepared: Prepared; matte: Matte; channel: ChannelId; shotNumber: number; productType: ProductType; uniformScale?: number; canvas?: Size; identifier?: string; publicObjectPath?: string }
+export interface RenderInput { prepared: Prepared; matte: Matte; channel: ChannelId; shotNumber: number; productType: ProductType; uniformScale?: number; canvas?: Size; identifier?: string; publicObjectPath?: string; /** false forbids a synthesised shadow (05 rule 3); absent leaves the product-type rule. */ synthesiseShadow?: boolean }
 export interface RenderOutput { jpeg: Buffer | null; status: "ok" | "skipped" | "failed"; plan: CanvasPlan; quality: number; bytes: number; flags: OutputFlag[]; notes: string[]; attention: { why: string; what: string } | null; compliance: { ok: boolean; failures: string[] } }
 export interface RenderKeyInputs { sourceSha256: string; channel: ChannelId; rulesVersion: string; policyId: string; policyUpdatedAt: string; n: number }
 
@@ -183,7 +183,9 @@ export async function renderSource(input: RenderInput): Promise<RenderOutput> {
     const cutout = await sharp(rgba, { raw: { width: p.width, height: p.height, channels: 4 } }).extract({ left: box.x, top: box.y, width: box.w, height: box.h }).resize(product.w, product.h, { kernel: "lanczos3" }).png().toBuffer();
     const cutoutAlpha = await sharp(cutout).extractChannel(3).raw().toBuffer();
     for (let y = 0; y < product.h; y++) cutoutAlpha.copy(foregroundMask, (product.y + y) * plan.w + product.x, y * product.w, (y + 1) * product.w);
-    const shadow = await shadowLayer(p, matte, box, plan, input.productType, color, foregroundMask);
+    let shadow = await shadowLayer(p, matte, box, plan, input.productType, color, foregroundMask);
+    // Never a synthesised contact shadow along a bottom edge that was cut in the source: nothing stands there.
+    if ((input.synthesiseShadow === false || cut.bottom) && shadow.flags.includes("shadow_synthesised")) shadow = { layer: null, flags: ["no_shadow_source"] };
     result.flags.push(...shadow.flags);
     image = await sharp({ create: { width: plan.w, height: plan.h, channels: 3, background: color } }).composite([...(shadow.layer ? [{ input: shadow.layer, blend: "multiply" as const }] : []), { input: cutout, left: product.x, top: product.y, blend: "over" }]).png().toBuffer();
   }

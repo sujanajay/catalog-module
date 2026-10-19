@@ -24,8 +24,10 @@ describe("wizard visible state",()=>{
     expect(waiting).toContain("Collecting files 2 of 3");expect(waiting).not.toContain("will be overwritten");
     const ready=renderToStaticMarkup(createElement(WizardStep4,{preview}));
     expect(ready).toContain("ABC123: 5 photos live, 3 in this upload; _4 and _5 will be removed.");
-    expect(ready).toContain("ABC123/ABC123_1.heic");expect(ready).toContain("1200 x 1600");expect(ready).toContain("Estimated cost: not available");
-    expect(ready).not.toMatch(/model|policy/i);
+    expect(ready).toContain("ABC123/ABC123_1.heic");expect(ready).toContain("1200 x 1600");expect(ready).toContain("Estimated cost: not available. Cost in rupees is not configured yet.");
+    expect(ready).not.toMatch(/model|policy|INR_PER_USD/i);
+    const priced=renderToStaticMarkup(createElement(WizardStep4,{preview:{...preview,estimate:{usd:0.5,inr:42,images:416,qaChecks:104}}}));
+    expect(priced).toContain("Estimated cost: about INR 42.00 (416 images, 104 quality checks)");expect(priced).not.toContain("not available");
   });
   it("names busy products and duplicate spellings in the visible overwrite preview",()=>{
     const html=renderToStaticMarkup(createElement(OverwritePreview,{preview:{...preview,busy:[{identifier:"ABC123",batchName:"October photos"}],overwrite:{...preview.overwrite,sameProductPairs:[{a:"ABC-123",b:"ABC123"}]}}}));

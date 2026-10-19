@@ -84,3 +84,12 @@ describe("one canvas per product and channel", () => {
     expect([output.plan.w, output.plan.h]).toEqual([1080, 1480]);
   });
 });
+
+describe("shadow along a cut edge", () => {
+  it("never synthesises a contact shadow under a bottom edge cut in the source", async () => {
+    const output = await renderSource({ ...cutModel(), channel: "noon", shotNumber: 2, productType: "bag_accessory" });
+    expect(output.flags).toContain("cut_in_source");
+    expect(output.flags).not.toContain("shadow_synthesised");
+    expect(output.compliance.failures).toEqual([]);
+  });
+});
