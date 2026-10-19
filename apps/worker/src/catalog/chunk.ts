@@ -12,6 +12,7 @@ import { shadowSynthesisAllowed } from "@catalog/core/catalog/qa/policy";
 import { flagReason } from "@catalog/core/catalog/types";
 import { autoActionsOf, withAutoActions, type AutoAction } from "@catalog/core/catalog/auto-resolve";
 import { BREAKER_COOLDOWN_MS, MATTING_TIMEOUT_MS } from "@catalog/core/catalog/matte";
+import { detectTextImage, GUARD_PAD_FRACTION, heldInHand, resolveMatte } from "@catalog/core/catalog/matte-guard";
 import { DISPATCH_DEADLINE_SEC } from "@catalog/core/tasks";
 import { resolvePhoto } from "./auto-resolve";
 import { recordCost } from "@catalog/core/spend";
@@ -91,18 +92,27 @@ export async function handleChunkTask(deps: CatalogDeps, body: Record<string,unk
       const derivedPrefix=(source:typeof sources[number])=>source.replacesId && source.rawUri.startsWith(replacementRoot) ? `${prefix}/replacements-${source.id}`:prefix;
       if(chunk.stage==="matte" && (!product.productType || product.productType==="auto") && sources.length) {
        let type=batch.productType, flags:typeof sources[number]["flags"]=[];
+       const charts:string[]=[];
        if(type==="auto") {
         try {
          const cap=await checkCatalogCaps(deps.db,{batchId:batch.id,now:deps.now()});if(!cap.ok) throw new CatalogQaCapError(cap.reason);
          const lowest=allSources.find(source=>!replaced.has(source.id))!;
          const llm=catalogLlmDeps(deps,batch,underClaim);
-         const result=await deps.classifyProductType((await deps.storage.downloadBuffer(lowest.rawUri)).buf,llm);
+         let result=await deps.classifyProductType((await deps.storage.downloadBuffer(lowest.rawUri)).buf,llm);
          llm.assertAvailable();
+         // 07 4.0a: a size chart says nothing about the product type. It is a property of that photo only
+         // (never copied to the others); the next photo is classified for the type, once.
+         if(result.chart) {
+          charts.push(lowest.id);
+          const next=allSources.find(source=>!replaced.has(source.id) && source.id!==lowest.id);
+          if(next) {const again=await deps.classifyProductType((await deps.storage.downloadBuffer(next.rawUri)).buf,llm);llm.assertAvailable();if(again.chart) charts.push(next.id);else result=again;}
+         }
          type=result.type;flags=result.flags;
         } catch(error) {if(!(error instanceof CatalogQaCapError)) throw error;type="other";flags=["type_unknown"];}
        }
-       await underClaim(async tx=>{await tx.update(catalogProducts).set({productType:type}).where(eq(catalogProducts.id,product.id));for(const source of sources) if(flags.length) await tx.update(catalogSourceImages).set({flags:[...new Set([...source.flags,...flags])]}).where(eq(catalogSourceImages.id,source.id));});
-       product.productType=type;for(const source of sources) source.flags=[...new Set([...source.flags,...flags])];
+       const flagsFor=(source:typeof sources[number])=>[...new Set([...source.flags,...flags,...(charts.includes(source.id) ? ["chart_image" as const]:[])])];
+       await underClaim(async tx=>{await tx.update(catalogProducts).set({productType:type}).where(eq(catalogProducts.id,product.id));for(const source of sources) if(flags.length || charts.includes(source.id)) await tx.update(catalogSourceImages).set({flags:flagsFor(source)}).where(eq(catalogSourceImages.id,source.id));});
+       product.productType=type;for(const source of sources) source.flags=flagsFor(source);
       }
       // 08: an eval batch runs exactly its forced policy (source manual), so each run measures one matte model.
       const forced=!!batch.options.evalSet && batch.isTest && policy.source==="manual";
@@ -132,8 +142,8 @@ export async function handleChunkTask(deps: CatalogDeps, body: Record<string,unk
             if (live.some(o=>o.channel===channel && o.n===source.n && o.renderKey===key)) continue;
             const [exists] = await deps.db.select({id:catalogOutputs.id}).from(catalogOutputs).where(and(eq(catalogOutputs.batchId,batch.id),eq(catalogOutputs.sourceImageId,source.id),eq(catalogOutputs.channel,channel)));
             if (exists) continue;
-            const path = publicObjectPath(batch.brandSlug,product.pathKey,channel,source.n,batch.isTest), skip = channel === "styli" && STYLI_SKIP_LOW_RESOLUTION && (source.height ?? Infinity) < STYLI_MIN_SOURCE_HEIGHT_PX;
-            await underClaim(async tx=>tx.insert(catalogOutputs).values({batchId:batch.id,productId,sourceImageId:source.id,channel,n:source.n,canvasW:0,canvasH:0,scale:0,placedX:0,placedY:0,renderKey:key,objectPath:path,publicUrl:publicUrl(deps.storage.getPublicBucketName(),path),status:skip ? "skipped":"pending",flags:skip ? ["low_resolution"]:source.flags.filter(flag=>flag==="type_unknown" || flag==="transparent"),reason:skip ? "Skipped for Styli: the photo is smaller than Styli needs.":null}));
+            const path = publicObjectPath(batch.brandSlug,product.pathKey,channel,source.n,batch.isTest), chart = source.flags.includes("chart_image"), skip = !chart && channel === "styli" && STYLI_SKIP_LOW_RESOLUTION && (source.height ?? Infinity) < STYLI_MIN_SOURCE_HEIGHT_PX;
+            await underClaim(async tx=>tx.insert(catalogOutputs).values({batchId:batch.id,productId,sourceImageId:source.id,channel,n:source.n,canvasW:0,canvasH:0,scale:0,placedX:0,placedY:0,renderKey:key,objectPath:path,publicUrl:publicUrl(deps.storage.getPublicBucketName(),path),status:skip || chart ? "skipped":"pending",flags:chart ? ["chart_image"]:skip ? ["low_resolution"]:source.flags.filter(flag=>flag==="type_unknown" || flag==="transparent"),reason:chart ? flagReason("chart_image"):skip ? "Skipped for Styli: the photo is smaller than Styli needs.":null}));
           }
           const pending = await deps.db.select().from(catalogOutputs).where(and(eq(catalogOutputs.sourceImageId,source.id),eq(catalogOutputs.batchId,batch.id),eq(catalogOutputs.status,"pending")));
           if (!pending.length || source.matteUri) continue;
@@ -145,6 +155,16 @@ export async function handleChunkTask(deps: CatalogDeps, body: Record<string,unk
             let p:Awaited<ReturnType<CatalogDeps["prepare"]>>;
             try { p = await deps.prepare(raw.buf,source.originalName,async b=>{try{return await deps.matting.convert(b);}catch(error){conversionFailure=error;throw error;}}); }
             catch(error) { throw conversionFailure ?? error; }
+            // A size chart or text-only photo is not cut out: left out with its note (07 4.0a), never held.
+            const text = detectTextImage(p);
+            if (text.text) {
+              deps.log("catalog chart left out",{batchId:batch.id,sourceImageId:source.id,glyphs:text.glyphs,lines:text.lines});
+              await underClaim(async tx=>{
+                await tx.update(catalogSourceImages).set({width:p.width,height:p.height,status:"prepared",flags:[...new Set([...source.flags,"chart_image" as const])]}).where(eq(catalogSourceImages.id,source.id));
+                await tx.update(catalogOutputs).set({status:"skipped",flags:["chart_image"],reason:flagReason("chart_image"),updatedAt:deps.now()}).where(and(eq(catalogOutputs.sourceImageId,source.id),eq(catalogOutputs.batchId,batch.id),eq(catalogOutputs.status,"pending")));
+              });
+              continue;
+            }
             await underClaim(async()=>{});
             let matte = await deps.matteFor(p,deps.matting,productPolicy.matteModel); mattingMs += matte.ms;
             // 07 auto-resolve: the cut-out service was down. Retry once it responds, within this delivery's time budget, before holding.
@@ -154,9 +174,23 @@ export async function handleChunkTask(deps: CatalogDeps, body: Record<string,unk
               retry = retried.action; mattingMs += retried.matte?.ms ?? 0;
               if (retried.matte) matte = retried.matte;
             }
-            const fallback = matte.source === "floodfill", flags = [...new Set([...source.flags,...p.flags,...(fallback ? ["fallback_matte" as const]:[])])];
-            const record = retry;
-            if (record) await underClaim(async tx=>{for (const row of pending) await tx.update(catalogOutputs).set({compliance:withAutoActions(row.compliance,[record])}).where(eq(catalogOutputs.id,row.id));});
+            // Cut-out integrity (matte-guard.ts): a matte that removed the product is replaced by the
+            // second model, the padded frame, or the whole frame, before anything is rendered.
+            const deadline=+started+DISPATCH_DEADLINE_SEC*1000-MATTING_TIMEOUT_MS-MATTE_RETRY_MARGIN_MS, firstModel=matte.model;
+            const resolved = await resolveMatte({prepared:p,first:matte,handRule:product.productType!=="apparel_model" && product.productType!=="apparel_flat",attempt:async variant=>{
+              const model = variant==="padded_first" ? firstModel : productPolicy.matteModelSecond;
+              if (!model || (variant!=="padded_first" && model===firstModel) || +deps.now()>deadline) return null;
+              if (!(await deps.matting.health()).models.some(m=>m.id===model)) return null;
+              await underClaim(async()=>{});
+              const next = await deps.matteFor(p,deps.matting,model,variant==="second" ? {}:{padFraction:GUARD_PAD_FRACTION});
+              mattingMs += next.ms;
+              return next.source==="model" ? next:null;
+            }});
+            if (resolved.actions.length) deps.log("catalog matte guard",{batchId:batch.id,sourceImageId:source.id,steps:resolved.actions.map(a=>`${a.step}:${a.result}`),passthrough:resolved.passthrough});
+            matte = resolved.matte;
+            const fallback = matte.source === "floodfill", flags = [...new Set([...source.flags,...p.flags,...(fallback ? ["fallback_matte" as const]:[]),...(resolved.passthrough ? ["matte_passthrough" as const]:[])])];
+            const records = [...(retry ? [retry]:[]),...resolved.actions];
+            if (records.length) await underClaim(async tx=>{for (const row of pending) await tx.update(catalogOutputs).set({compliance:withAutoActions(row.compliance,records)}).where(eq(catalogOutputs.id,row.id));});
             await underClaim(async tx=>tx.update(catalogSourceImages).set({matteModel:matte.model,matteMs:matte.ms,width:p.width,height:p.height,flags}).where(eq(catalogSourceImages.id,source.id)));
             // The retry failed too: the outputs still render with the simple cut-out so the operator sees
             // something, and carry `fallback_matte` (render marks them needs_attention; triage decides).
@@ -196,11 +230,13 @@ export async function handleChunkTask(deps: CatalogDeps, body: Record<string,unk
         const uniformScale = productPlan("styli")?.uniformScale;
         for (const {source,p,matte} of prepared) {
           const outputs = await deps.db.select().from(catalogOutputs).where(and(eq(catalogOutputs.sourceImageId,source.id),eq(catalogOutputs.batchId,batch.id),eq(catalogOutputs.status,"pending")));
+          // 05 rule 3 plus: a product held in a hand does not rest on a floor, so it gets no contact shadow.
+          const shadowAllowed = shadowSynthesisAllowed(product.productType,source.flags) && !heldInHand(p,matte.alpha).held;
           for (const output of outputs) try {
             const path = stagingPath(prefix,product.pathKey,output.channel,source.n), uri = deps.storage.toGsUri(deps.storage.getBucketName(),path), head = await deps.storage.headObject(uri);
             if (head.exists && output.bytes !== null && head.size===output.bytes) { await underClaim(async tx=>tx.update(catalogOutputs).set({stagingUri:uri,crc32c:head.crc32c,status:output.flags.some(f=>f==="small_source" || f==="failed_compliance" || f==="fallback_matte") ? "needs_attention":"staged",updatedAt:deps.now()}).where(eq(catalogOutputs.id,output.id))); continue; }
             const renderStart = +deps.now();
-            const rendered = (await deps.renderAllChannels(p,matte,[output.channel],{shotNumber:source.n,productType:product.productType ?? "other",synthesiseShadow:shadowSynthesisAllowed(product.productType,source.flags),identifier:product.identifier,publicObjectPath:output.objectPath,canvas:productPlan(output.channel)?.canvas,...(output.channel==="styli" ? {uniformScale}:{})}))[output.channel];
+            const rendered = (await deps.renderAllChannels(p,matte,[output.channel],{shotNumber:source.n,productType:product.productType ?? "other",synthesiseShadow:shadowAllowed,identifier:product.identifier,publicObjectPath:output.objectPath,canvas:productPlan(output.channel)?.canvas,...(output.channel==="styli" ? {uniformScale}:{})}))[output.channel];
             renderMs += +deps.now()-renderStart;
             const flags = [...new Set([...source.flags,...rendered.flags])], status = rendered.status==="skipped" ? "skipped":!rendered.compliance.ok || flags.includes("small_source") || flags.includes("fallback_matte") ? "needs_attention":rendered.jpeg ? "staged":"failed";
             const patch = {canvasW:rendered.plan.w,canvasH:rendered.plan.h,scale:rendered.plan.scale,placedX:rendered.plan.placedX,placedY:rendered.plan.placedY,bytes:rendered.bytes,quality:rendered.quality,flags,compliance:{...rendered.compliance,auto_actions:autoActionsOf(output.compliance)},reason:rendered.notes.join("; ") || (flags.includes("small_source") ? flagReason("small_source"):null),updatedAt:deps.now()};
@@ -216,7 +252,7 @@ export async function handleChunkTask(deps: CatalogDeps, body: Record<string,unk
           const failing = photo.filter(row=>row.flags.includes("failed_compliance") && !autoActionsOf(row.compliance).some(action=>action.trigger.includes("failed_compliance")));
           if (failing.length) try {
             await resolvePhoto(deps,{batch,product,source,policy:productPolicy,underClaim,outputs:photo,failing,trigger:["failed_compliance"],prepared:p,matte,
-              shadowAllowed:shadowSynthesisAllowed(product.productType,source.flags),statusFor:flags=>flags.includes("small_source") || flags.includes("failed_compliance") || flags.includes("fallback_matte") ? "needs_attention":"staged",
+              shadowAllowed,statusFor:flags=>flags.includes("small_source") || flags.includes("failed_compliance") || flags.includes("fallback_matte") ? "needs_attention":"staged",
               contextFor:row=>({...(productPlan(row.channel) ? {canvas:productPlan(row.channel)!.canvas}:{}),...(row.channel==="styli" && uniformScale!==undefined ? {uniformScale}:{})})});
           } catch(error) {
             // The ladder only improves an image; the photo keeps its flags (and its decision path) when it breaks.

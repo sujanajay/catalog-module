@@ -54,6 +54,8 @@ export async function resolvePolicy(db: Db, brandSlug: string, category: Product
  */
 export function shadowSynthesisAllowed(productType: ProductType | null | undefined, flags: readonly OutputFlag[]): boolean {
  if (!productType || productType === "auto" || flags.includes("type_unknown")) return false;
+ // A close-up kept whole (matte-guard.ts pass-through) shows no object standing on a floor.
+ if (flags.includes("matte_passthrough")) return false;
  return productType === "footwear" || productType === "bag_accessory" || productType === "other";
 }
 export function strictestChannel(channels: readonly ChannelId[]): ChannelId {

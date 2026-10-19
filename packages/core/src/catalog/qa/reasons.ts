@@ -16,6 +16,7 @@ export function flagDetails(flag: OutputFlag | "failed", ctx: ReasonContext = {}
     different_product:["This photo does not match photo 1 of the same identifier.","If the file was named wrongly, remove it; the rest of the product is unaffected."],
     halo:["The edge of the product looks rough or shows a halo, often white on white.",'Compare the two images. The product itself is never redrawn; only the background changes. "Use as is" keeps it.'],
     product_removed:["Part of the product went missing when the background was removed.",`Compare the two images. We tried to make it again and could not keep the whole product. "Remove this photo" leaves it out; "Replace photo ${n}" swaps the photo.`],
+    matte_passthrough:["This photo is a close-up that fills the frame, so the whole photo was kept as it is instead of being cut out.","Nothing to do."],
     chart_image:["This photo is a size chart or a text-only image, so it was left out of the marketplace images.","Nothing to do."],
     leftover_background:["Some of the original background is still visible around the product.",`Compare the two images. "Use as is" keeps it; "Replace photo ${n}" swaps the photo.`],
     text_or_watermark:["The photo carries text, a watermark or a logo overlay. Marketplaces reject these.","Remove it, or replace it with a clean photo."],

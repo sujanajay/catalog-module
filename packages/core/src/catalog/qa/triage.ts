@@ -10,6 +10,7 @@ import { OWN_DEFECT_FLAGS } from "../auto-resolve";
 export const INFORMATION_FLAGS: ReadonlySet<OutputFlag> = new Set<OutputFlag>([
   "low_resolution", "no_shadow_source", "shadow_synthesised", "passthrough", "alpha_source", "qa_sampled_out",
   "numbering_gap", "type_unknown", "cut_in_source", "complete_product", "transparent", "auto_dropped",
+  "matte_passthrough",
 ]);
 /** Always held for the operator: a different item confirmed by two judges, or several photos in one. */
 export const HARD_HOLD_FLAGS: ReadonlySet<OutputFlag> = new Set<OutputFlag>(["different_product", "collage"]);

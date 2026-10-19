@@ -10,6 +10,7 @@ import { attentionRate } from "@catalog/core/catalog/pipeline/report";
 import { autoActionsOf, type AutoAction } from "@catalog/core/catalog/auto-resolve";
 import type { ChannelId, ProductType, ResolvedPolicy } from "@catalog/core/catalog/types";
 import type { Matte } from "@catalog/core/catalog/render";
+import { flagReason } from "@catalog/core/catalog/types";
 import { workerCatalogDeps, type CatalogDeps } from "./deps";
 import { handleChunkTask } from "./chunk";
 
@@ -207,4 +208,94 @@ describe("07 auto-resolve: re-render and re-judge before holding", () => {
     for (const o of s.outputs) { expect(o.status).toBe("staged"); for (const flag of own) expect(o.flags).not.toContain(flag); }
     expect(attentionRate(s.held.length, 1)).toBe(0);
   }, 240_000);
+});
+
+describe("cut-out integrity guard in the matte stage (matte-guard.ts)", () => {
+  const grain = (x: number, y: number) => (((x * 73856093) ^ (y * 19349663)) >>> 0) % 49 - 24;
+  const clamp = (v: number) => Math.max(0, Math.min(255, v));
+  const LOGO = { x: 350, y: 350, w: 100, h: 100 };
+  const inLogo = (x: number, y: number) => x >= LOGO.x && x < LOGO.x + LOGO.w && y >= LOGO.y && y < LOGO.y + LOGO.h;
+  /** Orange leather filling the frame with a gold logo: the French Connection bag close-up. */
+  const closeUp: Shot = { draw: rgb => rect(rgb, 0, 0, W, H, (x, y) => inLogo(x, y) ? [214, 180, 90] : [clamp(225 + grain(x, y)), clamp(110 + grain(x, y)), clamp(40 + grain(x, y))]) };
+  /** A white page with rows of dark glyphs and table lines: the Penti size chart. */
+  const sizeChart: Shot = { draw: rgb => rect(rgb, 0, 0, W, H, (x, y) => {
+    const row = Math.floor((y - 100) / 30), inTable = row >= 0 && row < 18 && x >= 80 && x < 720;
+    if (inTable && ((y - 100) % 30 === 0 || x % 213 === 80)) return [200, 200, 200];
+    if (inTable && (y - 100) % 30 >= 10 && (y - 100) % 30 < 20 && (x - 80) % 12 < 7) return [30, 30, 30];
+    return [255, 250, 250];
+  }) };
+  const logoOnly = (model: string): Matte => {
+    const alpha = Buffer.alloc(W * H);
+    for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) if (inLogo(x, y)) alpha[y * W + x] = 255;
+    return { alpha, width: W, height: H, model, ms: 5, source: "model", target: "cpu", sentLongSide: 1024 };
+  };
+  const whole = (model: string): Matte => ({ ...logoOnly(model), alpha: Buffer.alloc(W * H, 255) });
+
+  it("a close-up whose cut-out kept only the logo is re-matted on a padded frame before anything is rendered", async () => {
+    const w = world();
+    w.matteFor.mockImplementation(async (_p, _client, model, opts) => (opts?.padFraction && model === "second" ? whole : logoOnly)(model ?? "first"));
+    const s = await seed(w, "bag_accessory", [closeUp]);
+    const [o] = s.outputs;
+    expect(w.matteFor.mock.calls.map(call => `${call[2]}${call[3]?.padFraction ? " padded" : ""}`)).toEqual(["first", "second", "first padded", "second padded"]);
+    expect(steps(autoActionsOf(o!.compliance)).slice(0, 4)).toEqual(["matte_check:failed", "second_matte:failed", "padded_matte:failed", "padded_matte:passed"]);
+    expect(autoActionsOf(o!.compliance)[0]).toMatchObject({ trigger: ["product_removed"] });
+    expect(o!.flags).not.toContain("matte_passthrough");
+    const [source] = await db.select().from(catalogSourceImages).where(eq(catalogSourceImages.batchId, s.batch.id));
+    expect(source).toMatchObject({ matteModel: "second", status: "matted" });
+    expect(s.held).toEqual([]);
+  }, 180_000);
+
+  it("when no cut-out keeps the product the whole frame passes through: flagged for information, no shadow, never held", async () => {
+    const w = world();
+    w.matteFor.mockImplementation(async (_p, _client, model) => logoOnly(model ?? "first"));
+    const s = await seed(w, "bag_accessory", [closeUp], ["noon", "amazon"]);
+    for (const o of s.outputs) {
+      expect(steps(autoActionsOf(o.compliance)).slice(0, 5)).toEqual(["matte_check:failed", "second_matte:failed", "padded_matte:failed", "padded_matte:failed", "matte_passthrough:passed"]);
+      expect(o.flags).toContain("matte_passthrough");
+      expect(o.flags).not.toContain("shadow_synthesised");
+      expect(o.status).toBe("staged");
+    }
+    const [source] = await db.select().from(catalogSourceImages).where(eq(catalogSourceImages.batchId, s.batch.id));
+    const alpha = await sharp(w.objects.get(source!.matteUri!)!).toColourspace("b-w").raw().toBuffer();
+    expect(alpha.every(v => v === 255)).toBe(true);
+    expect(s.held).toEqual([]);
+  }, 180_000);
+
+  it("a size chart is not cut out: left out on every channel with its note, never held", async () => {
+    const w = world(), s = await seed(w, "apparel_flat", [block(PLAIN), sizeChart], ["noon", "amazon"]);
+    const chart = s.outputs.filter(o => o.n === 2);
+    expect(chart).toHaveLength(2);
+    for (const o of chart) expect(o).toMatchObject({ status: "skipped", flags: ["chart_image"], reason: flagReason("chart_image") });
+    // Only photo 1 was matted.
+    expect(w.matteFor).toHaveBeenCalledTimes(1);
+    expect(s.outputs.filter(o => o.n === 1).every(o => o.status === "staged")).toBe(true);
+    expect(s.held).toEqual([]);
+  }, 180_000);
+
+  it("a chart the classifier saw first is left out and the next photo decides the product type", async () => {
+    const w = world();
+    vi.mocked(w.deps.classifyProductType).mockResolvedValueOnce({ type: "other", confidence: 1, costUsd: 0, calls: 1, usage: {}, flags: [], chart: true }).mockResolvedValueOnce({ type: "footwear", confidence: 1, costUsd: 0, calls: 1, usage: {}, flags: [], chart: false });
+    const s = await seed(w, "auto", [block(PLAIN), block(PLAIN, 300, 500)]);
+    expect(w.deps.classifyProductType).toHaveBeenCalledTimes(2);
+    expect(s.outputs.find(o => o.n === 1)).toMatchObject({ status: "skipped", flags: ["chart_image"] });
+    expect(s.outputs.find(o => o.n === 2)!.status).toBe("staged");
+    const [product] = await db.select().from(catalogProducts).where(eq(catalogProducts.id, s.product.id));
+    expect(product!.productType).toBe("footwear");
+    const sources = await db.select().from(catalogSourceImages).where(eq(catalogSourceImages.batchId, s.batch.id)).orderBy(catalogSourceImages.n);
+    expect(sources.map(source => source.flags.includes("chart_image"))).toEqual([true, false]);
+  }, 180_000);
+
+  it("a judge-seen product_removed climbs to the same pass-through step and keeps the winner as the photo's matte", async () => {
+    let judged = 0;
+    const w = world({ photoScores: (n): Record<string, number> => (n === 2 && ++judged < 3 ? { product_intact: 30 } : {}) });
+    const s = await seed(w, "apparel_flat", [block(PLAIN), block(PLAIN)]);
+    const o = s.outputs.find(row => row.n === 2)!;
+    expect(steps(autoActionsOf(o.compliance))).toEqual(["shadow_off:skipped", "second_matte:failed", "matte_passthrough:passed", "apply:passed"]);
+    expect(o.flags).toContain("matte_passthrough");
+    expect(o.flags).not.toContain("product_removed");
+    expect(o.status).toBe("staged");
+    const [source] = await db.select().from(catalogSourceImages).where(and(eq(catalogSourceImages.batchId, s.batch.id), eq(catalogSourceImages.n, 2)));
+    expect(source!.matteUri).toMatch(/\.matte-whole\.png$/);
+    expect(source!.flags).toContain("matte_passthrough");
+  }, 180_000);
 });

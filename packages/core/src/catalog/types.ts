@@ -18,7 +18,7 @@ export const OUTPUT_FLAGS = [
   "orientation","placement",
   "qa_unavailable","qa_cap","qa_sampled_out","type_unknown",
   "shadow_synthesised","transparent","upscaled","cut_in_source","auto_dropped",
-  "product_removed","chart_image",
+  "product_removed","chart_image","matte_passthrough",
 ] as const;
 export const DECISIONS = ["use_as_is","remove","replaced"] as const;
 export const QA_MODES = ["per_source","per_output"] as const;
@@ -133,6 +133,8 @@ const REASONS: Partial<Record<OutputFlag, (ctx?: Ctx) => string>> = {
     "The original photo is already cut at the frame edge, so that edge sits flush with the edge of the image. Nothing to do; ask the brand for an uncut photo if you want one.",
   transparent: () =>
     "This product looks transparent or glass; the cut-out may need a look. Compare the two images. 'Use as is' keeps it.",
+  matte_passthrough: () =>
+    "This photo is a close-up that fills the frame, so the whole photo was kept as it is instead of being cut out. Nothing to do.",
   chart_image: () =>
     "This photo is a size chart or a text-only image, so it was left out of the marketplace images. Nothing to do.",
   auto_dropped: () =>
