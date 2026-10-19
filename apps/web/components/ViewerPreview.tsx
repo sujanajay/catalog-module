@@ -6,7 +6,7 @@
 // caller's real role on the server.
 
 import { createContext, useContext, useMemo, useSyncExternalStore, type ReactNode } from "react";
-import { backToRoleToast, PREVIEW_ON_TOAST, type Role } from "@/lib/people-copy";
+import { backToRoleToast, PREVIEW_ON_TOAST, type Role } from "../lib/people-copy";
 import { useToast } from "./Toast";
 
 const STORAGE_KEY = "catalog.viewerPreview";

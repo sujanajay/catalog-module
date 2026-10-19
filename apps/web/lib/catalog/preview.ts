@@ -1,5 +1,5 @@
 import { and, eq, inArray } from "drizzle-orm";
-import { catalogBatches, catalogOutputs, catalogSourceImages, catalogUploads } from "@catalog/core/db/schema";
+import { catalogBatches, catalogOutputs, catalogProducts, catalogSourceImages, catalogUploads } from "@catalog/core/db/schema";
 import { buildDetectedStep2 } from "@catalog/core/catalog/ingest/detect-step";
 import { buildPreview } from "@catalog/core/catalog/ingest/index";
 import type { Detected } from "@catalog/core/catalog/ingest/types";
@@ -9,6 +9,8 @@ import { db } from "../db";
 import { renderKey } from "@catalog/core/catalog/pipeline/publish";
 import { badRequest } from "../errors";
 import { assertDraft, draftForUpdate, parseOptions, queryBatch } from "./batches";
+import { wizardEstimate } from "./cost";
+import type { CostEstimate } from "./copy";
 import { regroupBatch } from "./uploads";
 
 export async function detectedBatch(id: string) {
@@ -49,7 +51,7 @@ export async function patchDetected(id: string, value: unknown) {
 }
 export async function previewBatch(id: string) {
   const batch = await queryBatch(id);
-  const base = { ready: batch.counts.previewReady, previewAt: batch.updatedAt.toISOString(), counts: {...batch.counts, photos: batch.counts.sources, channels: batch.channels.length}, collected: batch.counts.collected, collectTotal: batch.counts.collectTotal, estimate: null };
+  const base = { ready: batch.counts.previewReady, previewAt: batch.updatedAt.toISOString(), counts: {...batch.counts, photos: batch.counts.sources, channels: batch.channels.length}, collected: batch.counts.collected, collectTotal: batch.counts.collectTotal, estimate: null as CostEstimate | null };
   if (!base.ready) return { ...base, groupedBy: "", warnings: [], groups: [], totalRows: 0, overwrite: { newProducts: 0, existingProducts: [], renameHints: [], sameProductPairs: [] }, busy: [] };
   const [preview, detected] = await Promise.all([buildPreview(db(), id, { storage }, { limit: 50 }), buildDetectedStep2(db(), id, { storage })]);
   const sources = await db().select().from(catalogSourceImages).where(eq(catalogSourceImages.batchId, id));
@@ -62,9 +64,12 @@ export async function previewBatch(id: string) {
     if (policy && live.some((o) => o.productId === source.productId && o.n === source.n && o.channel === channel && o.renderKey === renderKey({ sourceSha256: source.sha256, channel, n: source.n, policyKey: `${policy.source}|${policy.matteModel}` }))) continue;
     outputs++;
   }
+  // One classifier call per product without a type when the batch type is "auto" (spec 07 4.3, 4.11).
+  const untypedProducts = batch.productType !== "auto" || !productIds.length ? 0 : (await db().select({ productType: catalogProducts.productType }).from(catalogProducts).where(inArray(catalogProducts.id, productIds))).filter((p) => !p.productType).length;
+  const estimate = wizardEstimate({ outputs, sources: sources.length, untypedProducts, qaMode: batch.options.policy?.qaMode ?? "per_source", qaSampleRate: batch.options.policy?.qaSampleRate ?? 1 });
   const existing = new Set(preview.overwrite.existingProducts.map((p) => p.identifier));
   const groups = await Promise.all(preview.rows.map(async ({ firstShotUri, ...row }) => ({ ...row, firstPhotoUrl: firstShotUri ? await storage.signedUrl(firstShotUri, 900) : null, status: row.status === "duplicate shot" ? "two files for one shot" : row.status === "ok" && existing.has(row.identifier) ? "existing" : row.notes.some((n) => /not in sheet/i.test(n)) ? "not in sheet" : row.status })));
-  return { ...base, groupedBy: detected.groupedBy, counts: { ...batch.counts, ...preview.kpis, outputs }, warnings: preview.warnings, groups, totalRows: preview.totalRows, overwrite: { newProducts: preview.overwrite.newProducts, existingProducts: preview.overwrite.existingProducts, renameHints: preview.overwrite.renameHints, sameProductPairs: preview.overwrite.duplicates }, busy: preview.overwrite.busy };
+  return { ...base, estimate, groupedBy: detected.groupedBy, counts: { ...batch.counts, ...preview.kpis, outputs }, warnings: preview.warnings, groups, totalRows: preview.totalRows, overwrite: { newProducts: preview.overwrite.newProducts, existingProducts: preview.overwrite.existingProducts, renameHints: preview.overwrite.renameHints, sameProductPairs: preview.overwrite.duplicates }, busy: preview.overwrite.busy };
 }
 export type WizardPreview = Awaited<ReturnType<typeof previewBatch>>;
 export type WizardDetected = Awaited<ReturnType<typeof detectedBatch>>;

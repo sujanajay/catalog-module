@@ -1,19 +1,34 @@
 "use client";
-import { useState, type KeyboardEvent, type ReactNode } from "react";
+import { createContext, useContext, useState, type KeyboardEvent, type ReactNode } from "react";
+
+// The attention list reports how many products still need a decision so the tab label counts down
+// as cards resolve (spec 07 4.7), without waiting for the next server render.
+const AttentionRemaining = createContext<(remaining: number) => void>(() => {});
+export function useAttentionRemaining(): (remaining: number) => void {
+  return useContext(AttentionRemaining);
+}
+
+export function attentionLabel(n: number): string {
+  return `Needs attention (${n} ${n === 1 ? "product" : "products"})`;
+}
 
 type TabsProps = {
   attentionCount: number;
+  /** Eval mode: the tab is always shown with this label (spec 07 4.10). */
+  evalLabel?: string;
+  initialTab?: string;
   overview: ReactNode;
   attention: ReactNode;
   sheet: ReactNode;
   details: ReactNode;
 };
 
-export default function BatchTabs({ attentionCount, overview, attention, sheet, details }: TabsProps) {
-  const [active, setActive] = useState("overview");
+export default function BatchTabs({ attentionCount, evalLabel, initialTab, overview, attention, sheet, details }: TabsProps) {
+  const [active, setActive] = useState(initialTab ?? "overview");
+  const [remaining, setRemaining] = useState<number | null>(null);
   const tabs = [
     { id: "overview", label: "Overview", body: overview },
-    ...(attentionCount ? [{ id: "attention", label: `Needs attention (${attentionCount} products)`, body: attention }] : []),
+    ...(evalLabel || attentionCount ? [{ id: "attention", label: evalLabel ?? attentionLabel(remaining ?? attentionCount), body: attention }] : []),
     { id: "sheet", label: "Links sheet", body: sheet },
     { id: "details", label: "Details", body: details },
   ];
@@ -33,7 +48,7 @@ export default function BatchTabs({ attentionCount, overview, attention, sheet, 
   }
 
   return (
-    <>
+    <AttentionRemaining value={setRemaining}>
       <div className="tabs" role="tablist" aria-label="Batch sections">
         {tabs.map((tab, index) => (
           <button key={tab.id} id={`tab-${tab.id}`} role="tab" aria-selected={selected === tab.id}
@@ -46,6 +61,6 @@ export default function BatchTabs({ attentionCount, overview, attention, sheet, 
         <section key={tab.id} id={`panel-${tab.id}`} role="tabpanel" tabIndex={0}
           aria-labelledby={`tab-${tab.id}`} hidden={selected !== tab.id}>{tab.body}</section>
       ))}
-    </>
+    </AttentionRemaining>
   );
 }

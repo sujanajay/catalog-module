@@ -23,11 +23,12 @@ import { workerCatalogDeps, type CatalogDeps } from "./catalog/deps";
 import { handleChunkTask } from "./catalog/chunk";
 import { handlePublishTask } from "./catalog/publish";
 import { handleFinalizeTask } from "./catalog/finalize";
+import { cannedQa } from "./catalog/qa-mock";
 import { changeOnePixel, type RealFixture, type RealShot } from "./catalog-real-fixtures";
 
 export interface VerifyRow { url: string; generation: number; bytes: number; channel: ChannelId; n: number; identifier: string; objectPath: string; plan: CanvasPlan }
 export interface VerificationManifest { outputs: VerifyRow[]; xlsx: string }
-export interface RunEvidence { slug: string; brand: string; source: string; batches: string[]; first: { products: number; sources: number; verified: number; skipped: number }; unchanged: { matte: number; render: number; copy: number }; changed: number; removed: number; report: string; cleanup: boolean }
+export interface RunEvidence { slug: string; brand: string; source: string; batches: string[]; first: { products: number; sources: number; verified: number; skipped: number }; unchanged: { matte: number; render: number; copy: number }; changed: number; removed: number; report: string; cleanup: boolean; qa: string }
 const execute = promisify(execFile);
 
 export async function runRealFixture(db: Db, fixture: RealFixture, out: string, cli: string): Promise<RunEvidence> {
@@ -37,11 +38,12 @@ export async function runRealFixture(db: Db, fixture: RealFixture, out: string, 
   const calls = { matte: 0, render: 0, copy: 0 };
   const base = workerCatalogDeps(db);
   // Observe the real operations without replacing their implementations.
-  const deps: CatalogDeps = { ...base, enqueue: async () => "local-real-run", log: (message, fields) => console.info(JSON.stringify({ message, ...fields })),
+  // The smoke never calls OpenRouter: the judge is mocked (07 tier 5); live checks run as catalog-qa-check.
+  const deps: CatalogDeps = { ...base, ...cannedQa, enqueue: async () => "local-real-run", log: (message, fields) => console.info(JSON.stringify({ message, ...fields })),
     matteFor: async (...args) => { calls.matte++; return base.matteFor(...args); },
     renderAllChannels: async (...args) => { calls.render++; const result = await base.renderAllChannels(...args); for (const channel of args[2]) plans.set(`${args[3]?.identifier}|${args[3]?.shotNumber}|${channel}`, result[channel].plan); return result; },
     storage: { ...storage, stageCopyToPublic: async (...args) => { calls.copy++; return storage.stageCopyToPublic(...args); } } };
-  const evidence: RunEvidence = { slug: fixture.slug, brand: fixture.name, source: fixture.source, batches: [], first: { products: 0, sources: 0, verified: 0, skipped: 0 }, unchanged: { matte: 0, render: 0, copy: 0 }, changed: 0, removed: 0, report: path.join(out, "report.html"), cleanup: false };
+  const evidence: RunEvidence = { slug: fixture.slug, brand: fixture.name, source: fixture.source, batches: [], first: { products: 0, sources: 0, verified: 0, skipped: 0 }, unchanged: { matte: 0, render: 0, copy: 0 }, changed: 0, removed: 0, report: path.join(out, "report.html"), cleanup: false, qa: "mocked judge (canned pass verdicts, flag qa_sampled_out)" };
   const snapshots: { label: string; rows: CatalogOutput[] }[] = [];
   let failure: unknown;
   try {
@@ -164,7 +166,7 @@ export async function runRealFixture(db: Db, fixture: RealFixture, out: string, 
     const chunks = planChunks(productIds.map(productId => ({productId,sourceCount:sources.filter(s => s.productId===productId).length})),25);
     for (const [index,plan] of chunks.entries()) {
       const [chunk] = await db.insert(catalogChunks).values({batchId:b.id,index,stage:"matte",productIds:plan.productIds}).returning();
-      for (let stage=0;stage<2;stage++) {const result=await handleChunkTask(deps,{chunkId:chunk!.id}); assert.equal(result.httpStatus,200,`Chunk failed: ${result.outcome}`);}
+      for (let stage=0;stage<3;stage++) {const result=await handleChunkTask(deps,{chunkId:chunk!.id}); assert.equal(result.httpStatus,200,`Chunk failed: ${result.outcome}`);}
       for (const productId of plan.productIds) {const result=await handlePublishTask(deps,{batchId:b.id,productId}); assert.equal(result.outcome,"published",`Product was not published: ${result.outcome}`);}
     }
     const result = await handleFinalizeTask(deps,{batchId:b.id}); assert.equal(result.outcome,"done",`Finalize failed: ${result.outcome}`);

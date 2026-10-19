@@ -60,7 +60,7 @@ async function main() {
     }
     await writeFile(path.join(out,"summary.json"),JSON.stringify({run,passed:evidence.map(e=>e.brand),evidence,skipped},null,2));
     assert(evidence.length,"No actual brand has an available real image set. Smoke did not run.");
-    await writeFile(path.join(out,"report.html"),`<!doctype html><meta charset="utf-8"><title>Per-brand catalog smoke</title><h1>Per-brand catalog smoke</h1><ul>${evidence.map(e=>`<li><a href="${e.slug}/report.html">${e.brand}</a>: passed, ${e.first.verified} verified, ${e.changed} changed, ${e.removed} removed; cleanup ${e.cleanup}</li>`).join("")}</ul><h2>Skipped (no real image set)</h2><ul>${skipped.map(s=>`<li>${s.brand}: skipped</li>`).join("")}</ul>`);
+    await writeFile(path.join(out,"report.html"),`<!doctype html><meta charset="utf-8"><title>Per-brand catalog smoke</title><h1>Per-brand catalog smoke</h1><ul>${evidence.map(e=>`<li><a href="${e.slug}/report.html">${e.brand}</a>: passed, ${e.first.verified} verified, ${e.changed} changed, ${e.removed} removed; cleanup ${e.cleanup}; quality check: ${e.qa}</li>`).join("")}</ul><h2>Skipped (no real image set)</h2><ul>${skipped.map(s=>`<li>${s.brand}: skipped</li>`).join("")}</ul>`);
     console.info(JSON.stringify({run,out,passed:evidence.map(e=>e.brand),skipped:skipped.map(s=>s.brand),evidence}));
   } finally {await closeDb();}
 }

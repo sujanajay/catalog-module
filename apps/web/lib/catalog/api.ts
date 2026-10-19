@@ -9,6 +9,13 @@ export function catalogRoute(req: Request, role: Role, run: (user: CurrentUser) 
     return Response.json(await run(user), { status });
   });
 }
+const UUID = /^[\da-f]{8}-[\da-f]{4}-[\da-f]{4}-[\da-f]{4}-[\da-f]{12}$/i;
+export type OutputContext = { params: Promise<{ id: string }> };
+export async function outputId(context: OutputContext) {
+  const params = await context.params;
+  if (!UUID.test(params.id)) throw badRequest("This photo link is incomplete. Reload the batch page and try again.");
+  return params.id;
+}
 export async function batchId(context: BatchContext) {
   const params = await context.params;
   if (!/^[\da-f]{8}-[\da-f]{4}-[\da-f]{4}-[\da-f]{4}-[\da-f]{12}$/i.test(params.id)) throw badRequest("This batch link is incomplete. Open the batch list and choose the batch again.");
