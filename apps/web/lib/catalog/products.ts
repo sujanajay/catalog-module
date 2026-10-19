@@ -1,11 +1,9 @@
 import { listAttention } from "@catalog/core/catalog/attention";
-import { and, asc, desc, eq, inArray } from "drizzle-orm";
+import { and, asc, desc, eq } from "drizzle-orm";
 import { catalogBatches, catalogOutputs, catalogProductAliases, catalogProductEvents, catalogProducts } from "@catalog/core/db/schema";
 import { assertWithinProduct, normalizeKey, productPrefix } from "@catalog/core/catalog/naming";
 import { addAlias } from "@catalog/core/catalog/products";
-import { channel } from "@catalog/core/catalog/channels";
 import { deletePublicObject, signedUrl } from "@catalog/core/storage";
-import { flagReason, type ChannelId } from "@catalog/core/catalog/types";
 import { db, type Db } from "../db";
 import { HttpError } from "../errors";
 

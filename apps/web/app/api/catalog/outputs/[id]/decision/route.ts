@@ -1,5 +1,15 @@
 import { z } from "zod";
 import { decidePhoto } from "../../../../../../lib/catalog/decisions";
-import { handle,readJson } from "../../../../../../lib/errors";
-import { requireRole } from "../../../../../../lib/user";
-export async function POST(req:Request,ctx:{params:Promise<{id:string}>}){return handle(async()=>{const user=await requireRole("operator",req);const body=z.object({decision:z.enum(["use_as_is","remove"])}).parse(await readJson(req));return Response.json(await decidePhoto((await ctx.params).id,body.decision,user.email));});}
+import { catalogRoute, outputId, type OutputContext } from "../../../../../../lib/catalog/api";
+import { readJson } from "../../../../../../lib/errors";
+
+const Body = z.object({ decision: z.enum(["use_as_is", "remove"]) });
+
+/** "Use as is" or "Remove this photo" (spec 07 4.7). Operator; the response lists the affected output ids. */
+export function POST(req: Request, context: OutputContext) {
+  return catalogRoute(req, "operator", async (user) => {
+    const id = await outputId(context);
+    const body = Body.parse(await readJson(req));
+    return decidePhoto(id, body.decision, user.email);
+  });
+}

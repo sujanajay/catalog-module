@@ -1,17 +1,20 @@
 import { afterAll,afterEach,beforeAll,beforeEach,expect,it,vi } from "vitest";
 import { eq } from "drizzle-orm";
 import { createTestDb } from "@catalog/core/db/testing";
-import { catalogBatches,catalogBatchProducts,catalogProducts,catalogSourceImages,catalogOutputs,catalogEvalLabels,users } from "@catalog/core/db/schema";
+import { brandMaster,catalogBatches,catalogBatchProducts,catalogProductAliases,catalogProducts,catalogSourceImages,catalogOutputs,catalogEvalLabels,skuMap,users } from "@catalog/core/db/schema";
 import { seedAdmin,upsertPerson } from "@catalog/core/people";
 import { setDbForTests,type Db } from "../lib/db";
 import { resetUserDeps } from "../lib/user";
 import { POST as decide } from "../app/api/catalog/outputs/[id]/decision/route";
 import { POST as label,GET as labels } from "../app/api/catalog/batches/[id]/eval-labels/route";
+import { POST as replacement } from "../app/api/catalog/outputs/[id]/replacement/route";
+import { POST as replacementComplete } from "../app/api/catalog/outputs/[id]/replacement/complete/route";
+import { POST as skuMapPost } from "../app/api/catalog/batches/[id]/sku-map/route";
 vi.mock("@catalog/core/tasks",()=>({enqueueTask:vi.fn(async()=>"task")}));
 let db:Db,close:()=>Promise<void>,id:string,batchId:string;
 beforeAll(async()=>{({db,close}=await createTestDb());setDbForTests(db);});afterAll(async()=>{setDbForTests(undefined);await close();});
 beforeEach(async()=>{
- resetUserDeps();await db.delete(catalogOutputs);await db.delete(catalogProducts);await db.delete(catalogBatches);await db.delete(users);
+ resetUserDeps();await db.delete(catalogOutputs);await db.delete(skuMap);await db.delete(catalogProducts);await db.delete(catalogBatches);await db.delete(users);
  await seedAdmin(db,"a@opptra.com");await upsertPerson(db,{email:"v@opptra.com",role:"viewer",addedBy:"a@opptra.com"});
  vi.stubEnv("SKIP_IAP","1");vi.stubEnv("DEV_USER_EMAIL","a@opptra.com");
  const [b]=await db.insert(catalogBatches).values({brandSlug:"anta",brandName:"Anta",name:"catalog-test-eval",isTest:true,options:{evalSet:"holdout",identifierMode:"filename",precedence:"uploads_then_links",sheetColumns:null,qaCapUsd:null},channels:["noon","styli"],createdBy:"a@opptra.com"}).returning();batchId=b!.id;
@@ -36,4 +39,21 @@ it("eval label records the numeric judge snapshot without changing image state o
  const [stored]=await db.select().from(catalogEvalLabels);expect(stored).toMatchObject({outputId:id,label:"flag",judgeVerdict:"flag",judgeScores:{overall:50,edge_quality:20}});
  const out=(await db.select().from(catalogOutputs).where(eq(catalogOutputs.id,id)))[0]!;expect(out.status).toBe("needs_attention");expect(out.decision).toBeNull();
  const result=await labels(new Request("http://localhost/api"),{params:Promise.resolve({id:batchId})});expect(result.status).toBe(200);expect(JSON.stringify(await result.json())).not.toContain("private/model");
+});
+const csv=(text:string)=>{const form=new FormData();form.append("file",new File([text],"map.csv",{type:"text/csv"}));return new Request("http://localhost/api",{method:"POST",body:form});};
+it("viewer gets the 403 sentence from the replacement and SKU routes",async()=>{
+ vi.stubEnv("DEV_USER_EMAIL","v@opptra.com");
+ for(const r of [await replacement(req({name:"SHOE_1.jpg",size:10,mime:"image/jpeg"}),{params:Promise.resolve({id})}),await replacementComplete(req({uploadId:crypto.randomUUID()}),{params:Promise.resolve({id})}),await skuMapPost(csv("identifier,opptra_sku_id\nSHOE,SKU1"),{params:Promise.resolve({id:batchId})})]){
+ expect(r.status).toBe(403);expect(await r.json()).toEqual({error:"You can view this but not change it. Ask an admin for the operator role."});}
+});
+it("operator SKU mapping fills ids from a csv and lists unmatched rows",async()=>{
+ await db.insert(brandMaster).values({name:"Anta",slug:"anta",line:"softline",source:"manual"}).onConflictDoNothing();
+ const [p]=await db.select().from(catalogProducts);await db.insert(catalogProductAliases).values({brandSlug:"anta",isTest:true,productId:p!.id,aliasKey:"SHOE",kind:"identifier"});
+ const r=await skuMapPost(csv("identifier,opptra_sku_id\nshoe,SKU1;SKU2\nNOPE,SKU3"),{params:Promise.resolve({id:batchId})});
+ expect(r.status).toBe(200);expect(await r.json()).toEqual({added:2,matched:1,unmatched:["NOPE"]});
+ expect((await db.select().from(catalogProducts))[0]!.opptraSkuIds).toEqual(["SKU1","SKU2"]);
+ expect((await db.select().from(skuMap)).map(row=>row.source)).toEqual(["manual","manual"]);
+});
+it("a malformed output id answers 400 instead of a database error",async()=>{
+ const r=await decide(req({decision:"use_as_is"}),{params:Promise.resolve({id:"not-a-uuid"})});expect(r.status).toBe(400);
 });
