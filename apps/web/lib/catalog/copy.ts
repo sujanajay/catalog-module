@@ -1,9 +1,15 @@
 // Pure copy helpers shared by server pages and client components (no server imports here).
+import { RUPEES_NOT_CONFIGURED } from "@catalog/core/catalog/cost";
 
 /** "Noon", "Noon and Styli", "Noon, Namshi, Trendyol and Styli" (spec 01 section 8). */
 export function listAnd(items: readonly string[]): string {
   if (items.length <= 1) return items[0] ?? "";
   return `${items.slice(0, -1).join(", ")} and ${items[items.length - 1]}`;
+}
+
+/** Picks the singular or plural phrase for a count: plural(1, "product needs", "products need"). */
+export function plural(n: number, one: string, many: string): string {
+  return n === 1 ? one : many;
 }
 
 /** Two decimals with thousands separators, for INR and USD figures. */
@@ -20,6 +26,6 @@ export interface CostEstimate { usd: number; inr: number; images: number; qaChec
 
 /** The wizard step 4 line (spec 07 4.11, spec 01 step 4). */
 export function estimateText(estimate: CostEstimate | null | undefined): string {
-  if (!estimate) return "Estimated cost: not available";
+  if (!estimate) return `Estimated cost: not available. ${RUPEES_NOT_CONFIGURED}.`;
   return `Estimated cost: about INR ${money(estimate.inr)} (${count(estimate.images)} images, ${count(estimate.qaChecks)} quality checks)`;
 }

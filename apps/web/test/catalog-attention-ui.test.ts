@@ -45,12 +45,13 @@ describe("cost and SKU copy", () => {
   const text = (html: string) => html.replace(/<[^>]+>/g, "");
   it("renders the INR per style line, the USD fallback and the not-yet line", () => {
     expect(text(renderToStaticMarkup(createElement(CostLine, { line: { usdPerIdentifier: 0.04, inrPerIdentifier: 3.8 } })))).toBe("INR 3.80 per style so far · agency reference INR 60 per style");
-    expect(text(renderToStaticMarkup(createElement(CostLine, { line: { usdPerIdentifier: 0.04, inrPerIdentifier: null } })))).toBe("USD 0.04 per style so far (set INR_PER_USD to show rupees) · agency reference INR 60 per style");
+    expect(text(renderToStaticMarkup(createElement(CostLine, { line: { usdPerIdentifier: 0.04, inrPerIdentifier: null } })))).toBe("USD 0.04 per style so far · Cost in rupees is not configured yet · agency reference INR 60 per style");
     expect(text(renderToStaticMarkup(createElement(CostLine, { line: { usdPerIdentifier: null, inrPerIdentifier: null } })))).toContain("agency reference INR 60 per style");
+    for (const line of [{ usdPerIdentifier: 0.04, inrPerIdentifier: null }, { usdPerIdentifier: null, inrPerIdentifier: null }]) expect(renderToStaticMarkup(createElement(CostLine, { line }))).not.toMatch(/INR_PER_USD|set [A-Z_]+/);
   });
   it("words the wizard estimate and the SKU modal lines", () => {
     expect(estimateText({ usd: 1, inr: 1234.5, images: 6569, qaChecks: 412 })).toBe("Estimated cost: about INR 1,234.50 (6,569 images, 412 quality checks)");
-    expect(estimateText(null)).toBe("Estimated cost: not available");
+    expect(estimateText(null)).toBe("Estimated cost: not available. Cost in rupees is not configured yet.");
     expect(skuAddedToast(2)).toBe("2 ids added. New links sheet ready.");
     expect(missingLine(3)).toBe("3 identifiers have no Opptra SKU id yet in this batch.");
     expect(unmatchedLine(["abc", "def"])).toBe("2 rows did not match any identifier in this batch: abc, def");

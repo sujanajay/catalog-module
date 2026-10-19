@@ -13,4 +13,13 @@ describe("operator reasons",()=>{
   expect(problemLine([{n:2,flag:"complete_product",reason:"The model's hand looks cut at the frame edge."}])).toBe("Photo 2: the model's hand looks cut at the frame edge.");
   expect(shortClause("halo")).toBe("has a rough edge");expect(problemLine([])).toBe("");
  });
+ it("words placement with each channel's own rule",()=>{
+  expect(flagDetails("placement",{n:2,channel:"Styli"}).why).toBe("On Styli the product does not sit at the bottom centre inside the guides like the other angles.");
+  const centrepoint=flagDetails("placement",{n:2,channel:"Centrepoint"});
+  expect(centrepoint.why).toBe("On Centrepoint the product does not sit in the centre of the image like the other angles.");
+  expect(JSON.stringify(centrepoint)).not.toMatch(/Styli|guides/);
+  for(const label of ["Noon","Namshi","Trendyol","6thStreet","VogaCloset","Amazon","Shein"]) expect(flagDetails("placement",{channel:label}).why).not.toMatch(/Styli|guides/);
+  expect(flagDetails("placement").why).toBe("On this marketplace the product does not sit in the same place as the other angles.");
+  expect(shortClause("placement",{channel:"Centrepoint"})).toBe("sits differently from the other angles on Centrepoint");
+ });
 });
