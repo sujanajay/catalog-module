@@ -168,6 +168,12 @@ keeps upscaling <= 1.5x; below that, the min canvas with a `low_resolution` flag
 flags, and the constant `STYLI_SKIP_LOW_RESOLUTION = true` (an agreement with Styli, always applied,
 not an operator option) excludes such images from the sheet with a note.
 
+Spec 05 clarifications approved by the owner: adaptive canvases retain the target aspect and meet
+both listed minimum dimensions, even when the minimum has a different aspect (Trendyol's effective
+minimum is 600x900). The channel table stays unchanged. Fixed canvases retain exact dimensions,
+including Styli's 3123 px height. Background compliance checks exposed border background and all
+required margins; foreground is allowed at zero-margin edges under the full-canvas fit rule.
+
 Constants: `JPEG_QUALITY_START = 90`, `JPEG_QUALITY_MIN = 70`, `JPEG_QUALITY_STEP = 5` (builder
 constant), `MAX_OUTPUT_BYTES = 2_000_000`, `MAX_UPSCALE = 1.5`, `DETAIL_SHOT_BBOX_FRACTION = 0.85`,
 `MIN_SOURCE_LONG_SIDE_PX = 500`, `STYLI_MIN_SOURCE_HEIGHT_PX = 1482`, `CHANNEL_RULES_VERSION` (bumped on
@@ -429,7 +435,11 @@ synthesise only if the policy says synthesise and the channel allows a shadow, e
 `no_shadow_source`. (2) Uniform background with mean darkness in the shadow band above
 `SHADOW_MIN_DARKNESS` (builder constant, start 0.04) and touching the bbox bottom: preserve the original
 shadow as a darkening matte, clamped to `SHADOW_MAX_DARKNESS` (start 0.6) and limited to the connected
-component touching the bbox bottom. (3) Otherwise footwear, bag_accessory or other in an upright pose:
+component touching the bbox bottom. Qualify that component using negligible-alpha background only,
+then extend it underneath connected partially transparent edges without joining unrelated background
+components. Opaque alpha-255 pixels exclude shadow; foreground RGB and alpha stay unchanged.
+This keeps a continuous contact shadow without introducing a bright fringe or treating a partial
+apparel edge as a native floor shadow. (3) Otherwise footwear, bag_accessory or other in an upright pose:
 synthesise a deterministic contact shadow from the alpha mask (bottom 20% of mask rows squashed to about
 12% of bbox height, blur proportional to bbox width, intensity `SHADOW_SYNTH_INTENSITY_GREY` 0.25 on grey
 and `SHADOW_SYNTH_INTENSITY_WHITE` 0.15 on white; parameters named so presets can change later), flag

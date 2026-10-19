@@ -1,0 +1,28 @@
+# Build/test only. No Cloud Run deployments, IAM changes, or production object writes.
+# Invoke from repo root through infra/test-matting.sh.
+steps:
+  - id: cpu
+    name: gcr.io/cloud-builders/docker
+    env: ["DOCKER_BUILDKIT=1"]
+    args: ["build", "--target", "cpu", "--build-arg", "GIT_SHA=${_TAG}", "-f", "services/matting/Dockerfile", "-t", "${_AR}/matting:${_TAG}", "services/matting"]
+  - id: cpu-real-smoke
+    name: gcr.io/cloud-builders/docker
+    entrypoint: bash
+    args:
+      - -ceu
+      - |
+        docker run -d --name matting-cpu --network cloudbuild --memory=16g --cpus=4 ${_AR}/matting:${_TAG}
+        trap 'docker logs matting-cpu; docker stats --no-stream matting-cpu; docker inspect matting-cpu --format "{{json .State}}"; docker stop matting-cpu >/dev/null' EXIT
+        docker run --rm --network container:matting-cpu --entrypoint python -v /workspace/services/matting/tests:/tests:ro ${_AR}/matting:${_TAG} /tests/container_smoke.py
+  - id: gpu
+    name: gcr.io/cloud-builders/docker
+    env: ["DOCKER_BUILDKIT=1"]
+    args: ["build", "--target", "gpu", "--build-arg", "GIT_SHA=${_TAG}", "-f", "services/matting/Dockerfile", "-t", "${_AR}/matting-gpu:${_TAG}", "services/matting"]
+images:
+  - "${_AR}/matting:${_TAG}"
+  - "${_AR}/matting-gpu:${_TAG}"
+options:
+  machineType: E2_HIGHCPU_32
+  diskSizeGb: 100
+  logging: CLOUD_LOGGING_ONLY
+timeout: 3600s

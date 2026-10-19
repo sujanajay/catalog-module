@@ -1,6 +1,5 @@
 # Builds the images from the repo root. Invoked by infra/deploy.sh:
 #   gcloud builds submit --config cloudbuild.yaml --substitutions=_AR=...,_TAG=... .
-# Spec 05 adds the matting step and image.
 steps:
   - id: worker
     name: gcr.io/cloud-builders/docker
@@ -12,10 +11,22 @@ steps:
     env: ["DOCKER_BUILDKIT=1"]
     args: ["build", "-f", "apps/web/Dockerfile", "-t", "${_AR}/web:${_TAG}", "."]
     waitFor: ["-"]
+  - id: matting
+    name: gcr.io/cloud-builders/docker
+    env: ["DOCKER_BUILDKIT=1"]
+    args: ["build", "--target", "cpu", "--build-arg", "GIT_SHA=${_TAG}", "-f", "services/matting/Dockerfile", "-t", "${_AR}/matting:${_TAG}", "services/matting"]
+    waitFor: ["-"]
+  - id: matting-gpu
+    name: gcr.io/cloud-builders/docker
+    env: ["DOCKER_BUILDKIT=1"]
+    args: ["build", "--target", "gpu", "--build-arg", "GIT_SHA=${_TAG}", "-f", "services/matting/Dockerfile", "-t", "${_AR}/matting-gpu:${_TAG}", "services/matting"]
+    waitFor: ["matting"]
 images:
   - "${_AR}/worker:${_TAG}"
   - "${_AR}/web:${_TAG}"
+  - "${_AR}/matting:${_TAG}"
+  - "${_AR}/matting-gpu:${_TAG}"
 options:
   machineType: E2_HIGHCPU_8
   logging: CLOUD_LOGGING_ONLY
-timeout: 1800s
+timeout: 3600s

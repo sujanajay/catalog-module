@@ -1,0 +1,8 @@
+rembg[cpu,cli]==2.0.85
+onnxruntime==1.23.2
+fastapi==0.128.8
+uvicorn[standard]==0.40.0
+python-multipart==0.0.21
+pillow==12.3.0
+pillow-heif==1.8.1
+numpy==2.5.4

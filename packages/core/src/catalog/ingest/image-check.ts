@@ -65,7 +65,7 @@ export async function checkImage(head: Buffer, fullOrNull: Buffer | null, name: 
   try {
     const meta = await sharp(bytes, { pages: 1, failOn: "warning" }).metadata();
     // metadata() reads only the header; decoding the pixels is what finds a truncated file.
-    if (fullOrNull) await sharp(fullOrNull, { pages: 1, failOn: "warning" }).stats();
+    if (fullOrNull) await sharp(fullOrNull, { pages: 1, failOn: "warning" }).raw().toBuffer();
     if (!meta.width || !meta.height) throw new Error("no dimensions");
     return {
       ok: true, mime: type.mime, ext: type.ext, width: meta.width, height: meta.height,

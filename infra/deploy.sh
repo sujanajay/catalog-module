@@ -10,6 +10,7 @@ set -euo pipefail
 
 PROJECT=image-links-agent
 REGION=asia-south1
+GPU_REGION=asia-southeast1
 # Pin this project for every gcloud call without touching global gcloud config.
 export CLOUDSDK_CORE_PROJECT=$PROJECT
 cd "$(dirname "$0")/.."
@@ -21,6 +22,7 @@ AR=$REGION-docker.pkg.dev/$PROJECT/apps
 PN=$(gcv projects describe "$PROJECT" --format='value(projectNumber)')
 WEB_SA=catalog-web@$PROJECT.iam.gserviceaccount.com
 WORKER_SA=catalog-worker@$PROJECT.iam.gserviceaccount.com
+MATTING_SA=catalog-matting@$PROJECT.iam.gserviceaccount.com
 # Deterministic Cloud Run URLs; WORKER_URL is both the Cloud Tasks target and the OIDC audience.
 WORKER_URL=https://catalog-worker-$PN.$REGION.run.app
 WEB_URL=https://catalog-web-$PN.$REGION.run.app
@@ -49,7 +51,7 @@ echo "==> build $TAG"
 if [ "${SKIP_BUILD:-0}" != 1 ]; then
   gcloud builds submit --config cloudbuild.yaml --substitutions="_AR=$AR,_TAG=$TAG" .
 else
-  echo "SKIP_BUILD=1: reusing $AR/worker:$TAG and $AR/web:$TAG"
+  echo "SKIP_BUILD=1: reusing worker, web, matting and matting-gpu images tagged $TAG"
 fi
 
 # --- 3. Environment ------------------------------------------------------------------
@@ -68,8 +70,6 @@ IAP_AUDIENCE=/projects/$PN/locations/$REGION/services/catalog-web
 WEB_ENV+=",IAP_AUDIENCE=$IAP_AUDIENCE,ALLOWED_HOSTED_DOMAIN=opptra.com"
 # The migrate job seeds this person as the first admin (idempotent; never undoes a later role change).
 MIGRATE_ENV="$WORKER_ENV,SEED_ADMIN_EMAIL=${SEED_ADMIN_EMAIL:-sujan@opptra.com}"
-# 05 adds MATTING_URL (and MATTING_GPU_URL) to the worker; 07 adds
-# OPENROUTER_API_KEY=openrouter-api-key:latest to the worker's secrets.
 SECRETS=DB_PASSWORD=catalog-db-password:latest
 NET=(--region="$REGION" --network=ila-vpc --subnet=ila-subnet --vpc-egress=private-ranges-only)
 
@@ -84,12 +84,40 @@ gcloud run jobs execute catalog-migrate --region="$REGION" --wait
 # service and --invoker-iam-check afterwards (keeps it private without touching IAM).
 # See docs/solutions/deploy-cloud-run.md.
 auth_flag() {
-  if gcloud run services describe "$1" --region="$REGION" --format='value(metadata.name)' >/dev/null 2>&1; then
+  if gcloud run services describe "$1" --region="${2:-$REGION}" --format='value(metadata.name)' >/dev/null 2>&1; then
     echo "--invoker-iam-check"
   else
     echo "--no-allow-unauthenticated"
   fi
 }
+
+echo "==> matting CPU"
+gcloud run deploy catalog-matting --quiet --image="$AR/matting:$TAG" \
+  --service-account="$MATTING_SA" --region="$REGION" "$(auth_flag catalog-matting "$REGION")" \
+  --cpu=4 --memory=16Gi --concurrency=1 --min-instances=0 --max-instances=20 --timeout=300
+MATTING_URL=$(gcv run services describe catalog-matting --region="$REGION" --format='value(status.url)')
+[ -n "$MATTING_URL" ] || { echo "ERROR: CPU matting service has no URL" >&2; exit 1; }
+WORKER_ENV+=",MATTING_URL=$MATTING_URL"
+
+echo "==> matting GPU"
+# A failed update can leave an older service running. Only this successful deployment supplies
+# its URL; --set-env-vars below replaces the worker environment, clearing any stale GPU URL.
+MATTING_GPU_URL=""
+if GPU_ERR=$(gcloud run deploy catalog-matting-gpu --quiet --image="$AR/matting-gpu:$TAG" \
+  --service-account="$MATTING_SA" --region="$GPU_REGION" "$(auth_flag catalog-matting-gpu "$GPU_REGION")" \
+  --gpu=1 --gpu-type=nvidia-l4 --no-gpu-zonal-redundancy --no-cpu-throttling \
+  --cpu=4 --memory=16Gi --concurrency=1 --min-instances=0 --max-instances=3 --timeout=300 2>&1); then
+  MATTING_GPU_URL=$(gcv run services describe catalog-matting-gpu --region="$GPU_REGION" --format='value(status.url)')
+  [ -n "$MATTING_GPU_URL" ] || { echo "ERROR: GPU matting service has no URL" >&2; exit 1; }
+  WORKER_ENV+=",MATTING_GPU_URL=$MATTING_GPU_URL"
+elif grep -qiE 'quota|RESOURCE_EXHAUSTED' <<<"$GPU_ERR"; then
+  printf '%s\n' "$GPU_ERR" >&2
+  echo "WARN: GPU quota refused; worker will use CPU. Request NVIDIA L4 (no zonal redundancy) quota in $GPU_REGION for project $PROJECT at https://console.cloud.google.com/iam-admin/quotas?project=$PROJECT" >&2
+else
+  printf '%s\n' "$GPU_ERR" >&2
+  echo "ERROR: GPU deployment failed for a reason other than quota; stopping" >&2
+  exit 1
+fi
 
 # --- 5. Worker -----------------------------------------------------------------------
 echo "==> worker"
@@ -159,8 +187,6 @@ else
   fi
 fi
 
-# --- 7. Matting services: added by 05 ------------------------------------------------
-
 # --- Assets bucket CORS: origin narrowed from "*" to the web URL after the first deploy ----
 CURRENT_CORS=$(gcv storage buckets describe "$ASSETS_BUCKET" --format='json(cors_config)')
 if node -e '
@@ -183,3 +209,5 @@ fi
 # --- 8. URLs ---------------------------------------------------------------------------
 echo "web:    $WEB_URL"
 echo "worker: $WORKER_URL"
+echo "matting: $MATTING_URL"
+echo "matting GPU: ${MATTING_GPU_URL:-not deployed (quota refused)}"

@@ -206,4 +206,4 @@ export const STYLI_MIN_SOURCE_HEIGHT_PX = 1482;
 /** Agreement with Styli; always applied (not a batch option). */
 export const STYLI_SKIP_LOW_RESOLUTION = true;
 /** Bumped on any rule change; part of render_key (06). */
-export const CHANNEL_RULES_VERSION = "1";
+export const CHANNEL_RULES_VERSION = "3";

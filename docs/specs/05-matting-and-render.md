@@ -93,6 +93,8 @@ export interface RenderInput {
   prepared: Prepared; matte: Matte; channel: ChannelId; shotNumber: number;
   productType: ProductType;                 // "auto" is treated as "other" here; 07 detects the real type per product
   uniformScale?: number;                    // per-product scale from planProduct; applied when the channel's uniformScaleDefault is true
+  identifier?: string;                      // compatible optional context for identifier-specific failure sentences
+  publicObjectPath?: string;                // compatible optional context for path compliance; callers use the naming helper
 }
 export interface RenderOutput {
   jpeg: Buffer | null;                      // null when status is "skipped" or "failed"
@@ -167,9 +169,13 @@ Any change to the maths in this file that alters output bytes must bump `CHANNEL
      `detailShot = true`; the product fills the safe box (`scale = sFit(C)`), uniform scale is not
      applied.
    - Fixed canvas (styli, centrepoint): `C = target`; `lowResolution = sFit(C) > MAX_UPSCALE (1.5)`.
-   - Otherwise adaptive: `sFit` grows linearly with `C` along the min -> target line (both share the
-     aspect), so `C = clamp(target * (1.5 / sFit(target)), min, target)`, rounded to even integers
-     that keep the sheet aspect (height from width); `lowResolution = sFit(min) > 1.5` (then `C = min`).
+   - Otherwise adaptive: keep the target aspect. The listed minimum and target do not always share
+     an aspect, so first find the smallest target-proportioned canvas meeting both minimum dimensions
+     (for example Trendyol becomes 600x900). Choose the largest canvas up to target whose fit scale
+     is at most 1.5; if the effective minimum already exceeds that scale, use it and set
+     `lowResolution`. Round adaptive dimensions to even pixels within the one-pixel aspect tolerance
+     without falling below either minimum. Fixed canvases retain their exact dimensions, including
+     Styli's 3123 px height. This correction was approved by the owner during spec 05 planning.
    - `scale = uniformScale ?? sFit(C)`, but never above `sFit(C)` (a uniform scale larger than the
      fit of this shot would crop, which is forbidden; in that case the shot uses `sFit(C)` and gets
      the note "Could not keep the same size as the other angles without cutting; fitted instead").
@@ -185,7 +191,8 @@ Any change to the maths in this file that alters output bytes must bump `CHANNEL
       shot; else no shadow and flag `no_shadow_source`.
    2. Preserve (first choice, pixel-safe): when `prepared.background.uniform` and the darkness matte
       in the shadow band has a mean darkness above `SHADOW_MIN_DARKNESS` (builder constant, start
-      0.04) and the dark region touches the bbox bottom. Darkness per pixel with alpha < 128 is
+      0.04) and the dark region touches the bbox bottom. Darkness per pixel with alpha at or below
+      `ALPHA_BBOX_THRESHOLD` (10, the same measured silhouette threshold used by bbox) is
       `d = max(0, (L_bg - L_px) / L_bg)` with `L` the luma (0.2126 R + 0.7152 G + 0.0722 B) and
       `L_bg` the background luma; zero outside the band. Shadow band: `footwear`, `bag_accessory`
       and `other` -> from the bbox bottom minus 10% of bbox height to the bbox bottom plus 25% of
@@ -195,8 +202,15 @@ Any change to the maths in this file that alters output bytes must bump `CHANNEL
       only the connected component of the dark region that touches the bbox bottom is kept, so stray
       gradients and vignettes are dropped. The layer is a 1-channel image `255 - round(255 * d)`,
       scaled and placed with the product, composited with `blend: "multiply"` over the background
-      before the product goes on `over`; pixels with alpha > 0 are excluded so the product is never
-      darkened.
+      before the product goes on `over`. First qualify the shadow using only the connected
+      background component at or below `ALPHA_BBOX_THRESHOLD`; partial product pixels must never
+      create a preserved shadow on their own. After qualification, extend that component into
+      connected partial-alpha pixels, without bridging into other background components. Exclude
+      opaque alpha-255 pixels from measurement and the projected shadow. Original foreground RGB
+      and alpha are unchanged: normal `over` compositing lets the verified background shadow show
+      through a partial edge, while opaque product colors remain exact. Hard exclusion at alpha 0
+      and then 10 both left a visible bright fringe in the real Anta preflight. Required margins
+      remain unchanged.
    3. Synthesise: when rule 2 does not hold, the product type is `footwear`, `bag_accessory` or
       `other` (and `auto`, treated as `other`) and the pose is upright (bbox taller than wide, or
       footwear): a deterministic contact shadow from the alpha mask: keep the bottom 20% of mask
@@ -211,8 +225,10 @@ Any change to the maths in this file that alters output bytes must bump `CHANNEL
    5. Relighting models are not in the default path (the available version regenerates foreground
       pixels, which is forbidden); 08 may test one on the shadow layer alone, behind a colour-delta
       guard.
-   Compliance's `background` check still enforces the border band, so a shadow that reaches a margin
-   fails by code, which also keeps Amazon and Shein shot 1 pure white at the edges.
+   Compliance's `background` check enforces exposed background in the border band and all required
+   margins. Foreground may touch an edge whose channel margin is zero; it is not a background
+   failure. Shadows may not contaminate required margins or exposed border background. This resolves
+   the conflict with the full-canvas fit rule and was approved by the owner during spec 05 planning.
 6. Composite: canvas `C` filled with `backgroundFor(channel, shotNumber)`; shadow multiply (if any);
    product RGBA = `rgb` with `matte.alpha` as alpha, cut to the bbox, resized by `scale` with
    lanczos3, placed at `(placedX, placedY)`, `blend: "over"`.
@@ -262,11 +278,18 @@ export class MattingClient {
 /** Breaker and timeout constants, read once from env with these defaults; 09 tunes them under fault injection. */
 export const BREAKER_FAILURES = Number(process.env.MATTING_BREAKER_FAILURES ?? 5);        // consecutive failures that open the breaker
 export const BREAKER_COOLDOWN_MS = Number(process.env.MATTING_BREAKER_COOLDOWN_MS ?? 60_000); // open -> half-open after this
-export const MATTING_TIMEOUT_MS = Number(process.env.MATTING_TIMEOUT_MS ?? 60_000);          // per call; a timeout counts as a failure
+export const MATTING_TIMEOUT_MS = Number(process.env.MATTING_TIMEOUT_MS ?? 180_000);         // per call; a timeout counts as a failure
 export function alphaFromPng(png: Buffer): Promise<{ alpha: Buffer; width: number; height: number }>;
 export function floodFillMatte(prepared: Prepared): Matte;   // source "floodfill"
 export async function matteFor(prepared: Prepared, client: MattingClient | null, model?: string): Promise<Matte>;
 ```
+
+Compatible implementation additions: `MattingClientOptions.batchId` optionally supplies the batch
+id for transition logs. `breaker` remains the CPU-service view; `breakers` exposes the separate
+CPU/GPU views. `CanvasPlan.sourceBox` and `productBox` optionally carry source and placed geometry.
+`checkOutput` accepts an optional foreground mask in canvas coordinates; `renderSource` supplies
+that mask so exposed background inside an irregular product's bounding rectangle is checked too.
+Existing required arguments and the shared contracts from specs 02 and 03 are unchanged.
 
 Send size per model (this replaces any fixed 1536 px rule): the client reads `inputSize` from
 `/health`. It is 1024 for every rembg built-in (rembg resizes the BiRefNet and RMBG sessions to 1024
@@ -326,9 +349,10 @@ Checks (each failure is a short code plus a sentence):
   and the aspect equals the target aspect within 1 px; for fixed channels `C === target`.
 - `density`: `metadata().density === spec.dpi`.
 - `bytes`: `<= MAX_OUTPUT_BYTES`.
-- `background`: the border band (same band as prepare) and, when margins exist, the whole margin
-  area equal `backgroundFor(channel, shotNumber)` within `BG_TOLERANCE` per channel; Amazon and Shein
-  shot 1 must be `#FFFFFF`.
+- `background`: exposed background in the border band (same band as prepare) and the whole required
+  margin area equal `backgroundFor(channel, shotNumber)` within `BG_TOLERANCE` per channel. Foreground
+  at zero-margin edges is allowed, consistent with the source-of-truth full-canvas fit rule. Amazon
+  and Shein shot 1 exposed background must be `#FFFFFF`.
 - `inside_safe_box`: no pixel differing from the background by more than `BG_TOLERANCE` lies outside
   the safe box (product never touches a margin; with margin 0 the product may touch the edge).
 - `styli_anchor`: for styli, the lowest non-background row is `3123 - 450` within 1 px and the
@@ -401,14 +425,20 @@ model. Therefore:
   non-commercial models are full candidates for this internal tool and may be policy defaults.
 - Model ids appear in this engineering text, in `model_policy` and in logs only; never in UI copy.
 
-Memory: the CPU service runs with 16 GiB so all four sessions stay loaded, or with lazy loading and
-an LRU of two sessions at 8 GiB. The builder decides from the measured resident size of the four
-sessions, records the choice and the numbers in the README, and `deploy.sh` carries the matching
-`--memory`.
+Memory: actual build `2c0b868c-a590-4e8a-b187-e288f89ef079` showed that four eager sessions
+used 4,622,376 KiB while idle, but consecutive general/lite inference exceeded 16 GiB. CPU therefore
+keeps one resident session, evicts it before a model switch, disables CPU arena and memory-pattern
+retention, and serializes loading and inference. All four baked models remain advertised. CPU
+stays at 16 GiB pending measured peak memory from general/lite/general switching. The deployed GPU
+benchmark later failed on its first lite request after 100 general requests: the CUDA arena could
+not allocate another 822,083,584 bytes. GPU therefore also keeps one resident session, releases it
+before loading a replacement, and verifies CUDA on every new session. Post-fix real GPU switching
+and the complete benchmark must pass before release. The README records measurements and `deploy.sh` carries the matching `--memory`.
 
 `app.py`:
 - On start: `SESSIONS = { name: new_session(name, sess_opts) for name in MATTE_MODELS.split(",") }`
-  (or the lazy LRU of two) with `sess_opts.intra_op_num_threads = 4`; env `MATTE_MODELS` default
+  (both targets instead preload only the default and replace their single resident session on demand)
+  with `sess_opts.intra_op_num_threads = 4`; env `MATTE_MODELS` default
   `birefnet-general,birefnet-general-lite,birefnet-hrsod,bria-rmbg`, `DEFAULT_MATTE_MODEL` default
   `birefnet-general`, `MATTE_TARGET` `cpu | gpu` (set by the image); `INPUT_SIZES` maps each id to
   its `inputSize` (1024 for the four built-ins; 08 adds 2048 and `native` entries); `from pillow_heif
@@ -432,7 +462,7 @@ Deploy (`infra/deploy.sh`, owned by this spec; 06 only adds worker env vars), bo
 same `auth_flag` pattern the web and worker use (OIDC callers only), no secrets, no VPC flags,
 service account `catalog-matting@image-links-agent.iam.gserviceaccount.com` for both:
 - `gcloud run deploy catalog-matting --image=$AR/matting:$TAG --region=asia-south1 --cpu=4
-  --memory=16Gi (or 8Gi with the lazy LRU) --concurrency=1 --min-instances=0 --max-instances=20
+  --memory=16Gi --concurrency=1 --min-instances=0 --max-instances=20
   --timeout=300`.
 - `gcloud run deploy catalog-matting-gpu --image=$AR/matting-gpu:$TAG --region=asia-southeast1
   --gpu=1 --gpu-type=nvidia-l4 --no-gpu-zonal-redundancy --cpu=4 --memory=16Gi --concurrency=1
@@ -486,7 +516,7 @@ paths without touching the public bucket. `--limit` is for development loops onl
 | `MATTE_TARGET` | `cpu` (set to `gpu` in the gpu image) | matting; reported in `/health` |
 | `MATTING_BREAKER_FAILURES` | `5` | worker (`BREAKER_FAILURES`) |
 | `MATTING_BREAKER_COOLDOWN_MS` | `60000` | worker (`BREAKER_COOLDOWN_MS`) |
-| `MATTING_TIMEOUT_MS` | `60000` | worker (`MATTING_TIMEOUT_MS`) |
+| `MATTING_TIMEOUT_MS` | `180000` | worker (`MATTING_TIMEOUT_MS`) |
 
 ### Builder constants (not in the sheet; set once, named, tested)
 
