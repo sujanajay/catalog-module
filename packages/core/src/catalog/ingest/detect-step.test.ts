@@ -39,10 +39,18 @@ async function batch(options: Partial<BatchOptions> = {}): Promise<string> {
   return b!.id;
 }
 
+/**
+ * PGlite's clock ticks in milliseconds, so two quick inserts can share created_at and the random
+ * id tie-break would shuffle them. Each upload gets its own strictly later created_at, so the
+ * step lists uploads in the order the test added them, as it does for real pastes.
+ */
+const T0 = Date.now();
+
 async function addUpload(batchId: string, kind: UploadKind, detected: Detected | null, over: { name?: string; sourceUrl?: string; error?: string } = {}): Promise<string> {
+  const n = ++seq;
   const [u] = await db.insert(catalogUploads).values({
-    batchId, kind, name: over.name ?? `${kind}-${++seq}`, status: "collected", detected: detected as Record<string, unknown> | null,
-    sourceUrl: over.sourceUrl ?? null, error: over.error ?? null,
+    batchId, kind, name: over.name ?? `${kind}-${n}`, status: "collected", detected: detected as Record<string, unknown> | null,
+    sourceUrl: over.sourceUrl ?? null, error: over.error ?? null, createdAt: new Date(T0 + n * 1000),
   }).returning();
   return u!.id;
 }
