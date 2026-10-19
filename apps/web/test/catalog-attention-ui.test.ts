@@ -3,11 +3,14 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import AttentionProductCard from "../components/catalog/AttentionProductCard";
 import CostLine from "../components/catalog/CostLine";
-import { attentionLabel } from "../components/catalog/BatchTabs";
+import BatchTabs, { attentionLabel, showAttentionTab } from "../components/catalog/BatchTabs";
+import BatchBanner from "../components/catalog/BatchBanner";
+import { EMPTY_BATCH_COUNTS } from "@catalog/core/db/schema";
+import { plannedImages } from "../lib/catalog/preview";
 import { missingLine, skuAddedToast, unmatchedLine } from "../components/catalog/SkuMapModal";
 import { ToastProvider } from "../components/Toast";
 import { ViewerPreviewProvider } from "../components/ViewerPreview";
-import { estimateText, listAnd } from "../lib/catalog/copy";
+import { batchSource, collectingText, estimateText, listAnd, readyText } from "../lib/catalog/copy";
 import type { AttentionProduct } from "../lib/catalog/products";
 
 const MODEL_WORDS = /gemini|claude|qwen|birefnet|rmbg|bria|inspyre|ben_custom|google\/|anthropic\//i;
@@ -44,10 +47,13 @@ describe("needs attention card", () => {
 describe("cost and SKU copy", () => {
   const text = (html: string) => html.replace(/<[^>]+>/g, "");
   it("renders the INR per style line, the USD fallback and the not-yet line", () => {
-    expect(text(renderToStaticMarkup(createElement(CostLine, { line: { usdPerIdentifier: 0.04, inrPerIdentifier: 3.8 } })))).toBe("INR 3.80 per style so far · agency reference INR 60 per style");
-    expect(text(renderToStaticMarkup(createElement(CostLine, { line: { usdPerIdentifier: 0.04, inrPerIdentifier: null } })))).toBe("USD 0.04 per style so far · Cost in rupees is not configured yet · agency reference INR 60 per style");
-    expect(text(renderToStaticMarkup(createElement(CostLine, { line: { usdPerIdentifier: null, inrPerIdentifier: null } })))).toContain("agency reference INR 60 per style");
-    for (const line of [{ usdPerIdentifier: 0.04, inrPerIdentifier: null }, { usdPerIdentifier: null, inrPerIdentifier: null }]) expect(renderToStaticMarkup(createElement(CostLine, { line }))).not.toMatch(/INR_PER_USD|set [A-Z_]+/);
+    expect(text(renderToStaticMarkup(createElement(CostLine, { line: { usdPerIdentifier: 0.04, inrPerIdentifier: 3.8, usd: 0.4, inr: 38 } })))).toBe("INR 3.80 per style so far · INR 38.00 for this batch · agency reference INR 60 per style");
+    expect(text(renderToStaticMarkup(createElement(CostLine, { line: { usdPerIdentifier: 0.04, inrPerIdentifier: null, usd: 0.4, inr: null } })))).toBe("USD 0.0400 per style so far · USD 0.4000 for this batch · Cost in rupees is not configured yet · agency reference INR 60 per style");
+    expect(text(renderToStaticMarkup(createElement(CostLine, { line: { usdPerIdentifier: null, inrPerIdentifier: null, usd: 0, inr: null } })))).toContain("agency reference INR 60 per style");
+    // A real judged batch costs a fraction of a cent per style; the line must not read 0.00.
+    expect(text(renderToStaticMarkup(createElement(CostLine, { line: { usdPerIdentifier: 0.000603, inrPerIdentifier: null, usd: 0.0072398, inr: null } })))).toMatch(/^USD 0\.0006 per style so far · USD 0\.0072 for this batch/);
+    expect(text(renderToStaticMarkup(createElement(CostLine, { line: { usdPerIdentifier: 0.000603, inrPerIdentifier: 0.0507, usd: 0.0072398, inr: 0.6081 } })))).toMatch(/^INR 0\.05 per style so far · INR 0\.61 for this batch/);
+    for (const line of [{ usdPerIdentifier: 0.04, inrPerIdentifier: null, usd: 0.4, inr: null }, { usdPerIdentifier: null, inrPerIdentifier: null, usd: 0, inr: null }]) expect(renderToStaticMarkup(createElement(CostLine, { line }))).not.toMatch(/INR_PER_USD|set [A-Z_]+/);
   });
   it("words the wizard estimate and the SKU modal lines", () => {
     expect(estimateText({ usd: 1, inr: 1234.5, images: 6569, qaChecks: 412 })).toBe("Estimated cost: about INR 1,234.50 (6,569 images, 412 quality checks)");
@@ -56,5 +62,52 @@ describe("cost and SKU copy", () => {
     expect(missingLine(3)).toBe("3 identifiers have no Opptra SKU id yet in this batch.");
     expect(unmatchedLine(["abc", "def"])).toBe("2 rows did not match any identifier in this batch: abc, def");
     expect(listAnd(["Noon", "Namshi", "Trendyol", "Styli"])).toBe("Noon, Namshi, Trendyol and Styli");
+  });
+});
+
+describe("attention tab after the last decision", () => {
+  const tabs = (attentionCount: number, initialTab?: string) => renderToStaticMarkup(createElement(BatchTabs, { attentionCount, initialTab, overview: "OVERVIEW", attention: "RESOLVED CARDS", sheet: "SHEET", details: "DETAILS" }));
+  it("stays while the operator is on it, so the resolved cards show, and goes once they leave at 0", () => {
+    expect(showAttentionTab({ evalMode: false, remaining: 0, active: "attention" })).toBe(true);
+    expect(showAttentionTab({ evalMode: false, remaining: 0, active: "overview" })).toBe(false);
+    expect(showAttentionTab({ evalMode: false, remaining: 1, active: "overview" })).toBe(true);
+    const onTab = tabs(0, "attention");
+    expect(onTab).toContain(">Needs attention (0 products)</button>");
+    expect(onTab).toMatch(/aria-selected="true"[^>]*>Needs attention/);
+    expect(onTab).not.toContain("hidden=\"\">RESOLVED CARDS");
+    expect(tabs(0)).not.toContain("Needs attention");
+  });
+});
+
+describe("batch copy for the real state of the batch", () => {
+  const text = (html: string) => html.replace(/<[^>]+>/g, "");
+  it("does not say every image passed every check when photos were kept with Use as is", () => {
+    expect(readyText(12, 0)).toBe("All 12 images are live and passed every check. Nothing needs your attention.");
+    expect(readyText(12, 1)).toBe("All 12 images are live. 1 photo was kept as is after a decision; everything else passed every check. Nothing needs your attention.");
+    const counts = { ...EMPTY_BATCH_COUNTS, outputs: 12, verified: 12, recheckOk: 12, recheckTotal: 12 };
+    expect(text(renderToStaticMarkup(createElement(BatchBanner, { status: "done", counts, keptPhotos: 2 })))).toBe("ReadyAll 12 images are live. 2 photos were kept as is after a decision; everything else passed every check. Nothing needs your attention.");
+    expect(text(renderToStaticMarkup(createElement(BatchBanner, { status: "done", counts })))).toContain("passed every check. Nothing needs your attention.");
+  });
+  it("names the actual source while collecting, never a Drive folder for local uploads", () => {
+    expect(batchSource(["image"])).toBe("upload");
+    expect(batchSource(["image", "product_list"])).toBe("upload");
+    expect(batchSource(["zip"])).toBe("zip");
+    expect(batchSource(["url_list"])).toBe("links");
+    expect(batchSource(["sheet", "image"])).toBe("links");
+    expect(batchSource(["google_sheet"])).toBe("Google Sheet");
+    expect(batchSource(["drive_folder", "zip"])).toBe("Drive folder");
+    const banner = text(renderToStaticMarkup(createElement(BatchBanner, { status: "ingesting", counts: { ...EMPTY_BATCH_COUNTS, collected: 3, collectTotal: 10 }, source: batchSource(["image"]) })));
+    expect(banner).toContain("3 of 10 files copied from your upload");
+    expect(collectingText("upload")).toBe("We check your uploaded files first. Processing starts automatically.");
+    for (const source of ["upload", "zip", "links", "Google Sheet"] as const) expect(collectingText(source)).not.toContain("Drive folder");
+    expect(collectingText("links")).toBe("We copy your files first so the batch does not depend on your links later. Processing starts automatically.");
+    expect(collectingText("Drive folder")).toBe("We copy your files first so the batch does not depend on the Drive folder later. Processing starts automatically.");
+  });
+  it("leaves out pairs whose live image was made from the same photo in the step 4 count", () => {
+    const sources = [{ productId: "p", n: 1, sha256: "same", height: 1600 }, { productId: "p", n: 2, sha256: "new", height: 800 }];
+    const live = [{ productId: "p", n: 1, channel: "noon" as const, sha256: "same" }, { productId: "p", n: 2, channel: "noon" as const, sha256: "old" }];
+    // Photo 1 is unchanged on Noon but new on Styli; photo 2 changed on Noon and is too small for Styli.
+    expect(plannedImages(sources, ["noon", "styli"], live)).toEqual({ outputs: 2, sourcesToMake: 2 });
+    expect(plannedImages([sources[0]!], ["noon"], live)).toEqual({ outputs: 0, sourcesToMake: 0 });
   });
 });

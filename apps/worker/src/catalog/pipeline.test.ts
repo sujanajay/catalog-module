@@ -2,7 +2,7 @@ import sharp from "sharp";
 import {startReplacement,completeReplacement,applyDecision,applySkuMap} from "@catalog/core/catalog/decisions";
 import { judgeOutput } from "@catalog/core/catalog/qa/judge";
 import { batchPrefix, publicObjectPath, stagingPath } from "@catalog/core/catalog/naming";
-import { afterAll,beforeAll,expect,it,vi } from "vitest";
+import { afterAll,beforeAll,describe,expect,it,vi } from "vitest";
 import { and,eq,sql } from "drizzle-orm";
 import type { Db } from "@catalog/core/db/client";
 import { createTestDb } from "@catalog/core/db/testing";
@@ -12,6 +12,8 @@ import { workerCatalogDeps,type CatalogDeps } from "./deps";
 import { UnsupportedSourceError } from "@catalog/core/catalog/render";
 import { handleSweep } from "./sweep";
 import { handleChunkTask } from "./chunk";
+import { catalogLlmDeps, CatalogQaCapError, type UnderClaim } from "./qa-stage";
+import { QA_USD_PER_CHECK_FALLBACK } from "@catalog/core/catalog/cost";
 import { handlePublishTask } from "./publish";
 import { handleFinalizeTask } from "./finalize";
 import { renderKey } from "@catalog/core/catalog/pipeline/publish";
@@ -20,6 +22,9 @@ import { workbookCsvSheets } from "@catalog/core/catalog/pipeline/report";
 import { cleanupTestBatch,cleanupTestBatches } from "@catalog/core/catalog/test-cleanup";
 import { deriveBatchState, QA_CAP_BANNER } from "@catalog/core/catalog/pipeline/status";
 import { strictestChannel } from "@catalog/core/catalog/qa/policy";
+import { findOrCreateProduct } from "@catalog/core/catalog/products";
+import { cannedQa } from "./qa-mock";
+import type { RepairOwnDefects } from "@catalog/core/catalog/qa/triage";
 vi.mock(import("@catalog/core/catalog/sheet"),async original=>{const module=await original();return {...module,compareXlsxCsv:vi.fn(module.compareXlsxCsv)};});
 let db:Db,close:()=>Promise<void>;
 // stageCopyToPublic reads the bucket names from the environment. Set directly (not vi.stubEnv) so the
@@ -351,17 +356,78 @@ it("spec07 renders into a queued QA delivery before publication",async()=>{
  expect(chunk).toMatchObject({stage:"qa",status:"queued"});
  expect(w.deps.enqueue).not.toHaveBeenCalledWith("/tasks/catalog/publish",expect.anything(),expect.anything());
 },60_000);
-it("spec07 per_source judges one output per source; a placement failure flags only the judged channel",async()=>{
- const w=world(),s=await seed(w,"qa-per-source",{channels:["noon","amazon"]});
- vi.mocked(w.deps.judgeOutput).mockImplementation(async input=>({scores:{complete_product:80,same_product:80,edge_quality:80,background_clean:80,no_text_or_watermark:80,orientation_ok:80,placement_ok:20,overall:500/7},verdict:"flag",reasons:["The product sits higher than the other angles."],isCollage:false,costUsd:0,calls:0,usage:{},model:input.model,flags:["placement"]}));
- for(let i=0;i<3;i++) expect((await handleChunkTask(w.deps,{chunkId:s.chunk.id})).httpStatus).toBe(200);
+const judgeScores=(extra:Partial<Record<string,number>>={})=>({complete_product:95,same_product:100,edge_quality:95,background_clean:95,no_text_or_watermark:95,orientation_ok:95,overall:95,...extra});
+type JudgePick={scores?:Record<string,number>;evidence?:Record<string,string>;flags?:string[]};
+const judgeWith=(pick:(input:Parameters<CatalogDeps["judgeOutput"]>[0])=>JudgePick):CatalogDeps["judgeOutput"]=>async input=>{
+ const chosen=pick(input);
+ return {scores:judgeScores(chosen.scores) as never,verdict:"pass",reasons:[],isCollage:false,costUsd:0,calls:1,usage:{},model:input.model,flags:(chosen.flags ?? []) as never,view:"side",evidence:chosen.evidence ?? {},wrongItem:{first:false,second:null,secondModel:null,confirmed:false}};
+};
+const judgePolicy={matteModel:"fixture",qaModel:"test/judge",qaModelSecond:"test/second",threshold:75,floor:60,qaMode:"per_source" as const,qaSampleRate:1,source:"default" as const};
+it("spec07 v2 placement never comes from the judge, and a photo flag applies to every channel",async()=>{
+ const w=world(),s=await seed(w,"qa-v2-placement",{channels:["noon","amazon"]});
+ vi.mocked(w.deps.resolvePolicy).mockResolvedValue(judgePolicy);
+ vi.mocked(w.deps.judgeOutput).mockImplementation(judgeWith(()=>({scores:{placement_ok:5},flags:["placement"]})));
+ expect((await run(w,s)).outcome).toBe("published");
  expect(w.deps.judgeOutput).toHaveBeenCalledTimes(1);
- const judged=strictestChannel(["noon","amazon"]),outputs=await db.select().from(catalogOutputs).where(eq(catalogOutputs.batchId,s.batch.id));
- const own=outputs.find(o=>o.channel===judged)!,copied=outputs.find(o=>o.channel!==judged)!;
- expect(vi.mocked(w.deps.judgeOutput).mock.calls[0]![0].channel).toBe(judged);
- expect(own.status).toBe("needs_attention");expect(own.flags).toContain("placement");expect(own.qaScores).toMatchObject({verdict:"flag",placement_ok:20});
- expect(copied.status).toBe("staged");expect(copied.flags).not.toContain("placement");expect(copied.qaScores).toMatchObject({verdict:"pass"});
- expect((await handlePublishTask(w.deps,{batchId:s.batch.id,productId:s.product.id})).outcome).toBe("held");
+ for(const o of await db.select().from(catalogOutputs).where(eq(catalogOutputs.batchId,s.batch.id))) {expect(o.flags).not.toContain("placement");expect(o.status).toBe("verified");}
+ const t=world(),text=await seed(t,"qa-v2-photo-flag",{channels:["noon","amazon"]});
+ vi.mocked(t.deps.resolvePolicy).mockResolvedValue(judgePolicy);
+ vi.mocked(t.deps.judgeOutput).mockImplementation(judgeWith(()=>({scores:{no_text_or_watermark:10},evidence:{text_or_watermark:"A price sticker sits on the box."}})));
+ expect((await run(t,text)).outcome).toBe("held");
+ expect(t.deps.judgeOutput).toHaveBeenCalledTimes(1);
+ const outputs=await db.select().from(catalogOutputs).where(eq(catalogOutputs.batchId,text.batch.id));
+ expect(outputs.map(o=>o.channel).sort()).toEqual(["amazon","noon"]);
+ for(const o of outputs) {expect(o.flags).toContain("text_or_watermark");expect(o).toMatchObject({status:"needs_attention",qaScores:{autoAction:"hold",holdCause:"photo_one",evidence:{text_or_watermark:{sentence:"A price sticker sits on the box.",model:"test/judge"}}}});}
+},60_000);
+it("spec07 v2 an output defect on one channel re-checks the photo's other channels and applies the strictest result",async()=>{
+ const w=world(),s=await seed(w,"qa-v2-recheck",{shots:["a","b","c","d"],channels:["noon","amazon"]});
+ vi.mocked(w.deps.resolvePolicy).mockResolvedValue(judgePolicy);
+ const judged=strictestChannel(["noon","amazon"]);
+ // The shadow block shows only to the judged channel's judge; the re-check of the other channel misses it.
+ vi.mocked(w.deps.judgeOutput).mockImplementation(judgeWith((input):JudgePick=>input.n===2 && input.channel===judged ? {scores:{background_clean:20},evidence:{leftover_background:"A grey block remains left of the shoe."}}:{}));
+ expect((await run(w,s)).outcome).toBe("published");
+ expect(vi.mocked(w.deps.judgeOutput).mock.calls.filter(call=>call[0].n===2).map(call=>call[0].channel).sort()).toEqual(["amazon","noon"]);
+ expect(vi.mocked(w.deps.judgeOutput).mock.calls.filter(call=>call[0].n!==2)).toHaveLength(3);
+ const second=await db.select().from(catalogOutputs).where(and(eq(catalogOutputs.batchId,s.batch.id),eq(catalogOutputs.n,2)));
+ for(const o of second) {
+  expect(o.flags).toContain("leftover_background");
+  expect(o).toMatchObject({status:"skipped",isLive:false,qaScores:{background_clean:20,autoAction:"drop",finalStatus:"skipped"}});
+  expect(o.reason).toBe("Some of the original background is still visible around the product. Left out automatically because this product has enough other good photos.");
+  expect((o.qaScores as {judgements:{role:string}[]}).judgements.map(j=>j.role).sort()).toEqual(["judge","recheck"]);
+ }
+},60_000);
+it("spec07 v2 drop-with-note and note-only flags keep the batch attention rate at 0, and the report says why",async()=>{
+ const w=world(),s=await seed(w,"qa-v2-notes",{shots:["a","b","c","d"]});
+ vi.mocked(w.deps.resolvePolicy).mockResolvedValue(judgePolicy);
+ vi.mocked(w.deps.judgeOutput).mockImplementation(judgeWith((input):JudgePick=>input.n===3 ? {scores:{edge_quality:40},evidence:{halo:"The heel edge shows a white fringe."}}:input.n===2 ? {scores:{complete_product:30},evidence:{complete_product:"The toe is cut off at the right edge of the photo."}}:{}));
+ expect((await run(w,s)).outcome).toBe("published");
+ const outputs=await db.select().from(catalogOutputs).where(eq(catalogOutputs.batchId,s.batch.id));
+ expect(outputs.find(o=>o.n===3)).toMatchObject({status:"skipped",qaScores:{autoAction:"drop"}});
+ expect(outputs.find(o=>o.n===2)).toMatchObject({status:"verified",isLive:true,qaScores:{autoAction:"note"},reason:"Part of the product or model looks cut at the frame edge in the original photo."});
+ expect(outputs.filter(o=>o.status==="needs_attention")).toHaveLength(0);
+ expect((await handleFinalizeTask(w.deps,{batchId:s.batch.id})).outcome).toBe("done");
+ const [batch]=await db.select().from(catalogBatches).where(eq(catalogBatches.id,s.batch.id));
+ expect(batch!.counts.attentionProducts).toBe(0);
+ const report=JSON.parse(w.objects.get(batch!.reportUri!)!.buf.toString());
+ expect(report.qa).toMatchObject({attentionRate:0,productsHeld:0,products:1,judgedOutputs:4,autoActions:{drop:1,note:1,hold:0,none:2}});
+ const entries=report.products[0].outputs as {n:number;qa:Record<string,unknown>}[];
+ const dropped=entries.find(e=>e.n===3)!.qa;
+ expect(dropped).toMatchObject({scores:{edge_quality:40},thresholds:{edge_quality:75,complete_product:60},evidence:{halo:{sentence:"The heel edge shows a white fringe.",model:"test/judge"}},model:"test/judge",autoAction:"drop",finalStatus:"skipped"});
+ expect(entries.every(e=>e.qa && "scores" in e.qa && "thresholds" in e.qa && "autoAction" in e.qa && "finalStatus" in e.qa)).toBe(true);
+ const sheet=(await workbookCsvSheets(w.objects.get(batch!.sheetXlsxUri!)!.buf))[0]!.csv;
+ expect(sheet).toContain("Noon img 3: The edge of the product looks rough");
+ expect(sheet).toContain("Noon img 2: Part of the product or model looks cut");
+},60_000);
+it("spec07 v2 the re-render extension point runs before triage and a repaired output is published",async()=>{
+ const w=world(),s=await seed(w,"qa-v2-repair");
+ vi.mocked(w.deps.resolvePolicy).mockResolvedValue(judgePolicy);
+ vi.mocked(w.deps.judgeOutput).mockImplementation(judgeWith(()=>({scores:{edge_quality:30}})));
+ w.deps.repairOwnDefects=vi.fn<RepairOwnDefects>(async candidates=>{
+  for(const c of candidates) await db.update(catalogOutputs).set({status:"staged",flags:[]}).where(eq(catalogOutputs.id,c.outputId));
+  return new Set(candidates.map(c=>c.outputId));
+ });
+ expect((await run(w,s)).outcome).toBe("published");
+ expect(w.deps.repairOwnDefects).toHaveBeenCalledWith([expect.objectContaining({n:1,channel:"noon",flags:expect.arrayContaining(["halo"])})]);
 },60_000);
 it("spec07 a spending cap hit before QA marks outputs qa_cap, completes the chunk and shows the banner",async()=>{
  const w=world(),s=await seed(w,"qa-cap");
@@ -443,6 +509,89 @@ it("spec07 a malformed judge reply retries once, then qa_unavailable; spend_days
  expect(batch!.cost).toMatchObject({qaCalls:2});
  expect(Number(batch!.cost.qaUsd)).toBeCloseTo(0.004);
 },60_000);
+/** A non-streaming OpenRouter chat completion in its production shape; `cost` is dropped when null. */
+const openRouterReply=(content:string,cost:number|null=0.000139)=>({id:"gen-1760900000-abc",provider:"Google",model:"test/judge",object:"chat.completion",created:1760900000,
+ choices:[{finish_reason:"stop",native_finish_reason:"STOP",index:0,message:{role:"assistant",content,refusal:null}}],
+ usage:{prompt_tokens:2911,completion_tokens:160,total_tokens:3071,...(cost===null ? {}:{cost}),is_byok:false,prompt_tokens_details:{cached_tokens:0},completion_tokens_details:{reasoning_tokens:0}}});
+const passScores=JSON.stringify({complete_product:95,same_product:95,edge_quality:95,background_clean:95,no_text_or_watermark:95,orientation_ok:95,placement_ok:95,is_collage:false,reasons:[]});
+async function judgeOnceLive(name:string,respond:()=>Promise<Response>) {
+ const w=world(),s=await seed(w,name),log=vi.fn();
+ vi.mocked(w.deps.resolvePolicy).mockResolvedValue({matteModel:"fixture",qaModel:"test/judge",threshold:75,floor:60,qaMode:"per_source",qaSampleRate:1,source:"default"});
+ for(let i=0;i<2;i++) await handleChunkTask(w.deps,{chunkId:s.chunk.id});
+ const real=await sharp({create:{width:64,height:64,channels:3,background:"white"}}).jpeg().toBuffer();
+ for(const [uri,obj] of w.objects) if(uri.includes(s.batch.id)) w.objects.set(uri,{...obj,buf:real});
+ const publicFetch=w.deps.fetch;
+ const llm=vi.fn(respond);
+ w.deps.fetch=vi.fn<typeof globalThis.fetch>(async(url,init)=>String(url).startsWith("https://openrouter.ai/")?llm():publicFetch(url,init));
+ w.deps.judgeOutput=judgeOutput;w.deps.log=log;
+ vi.stubEnv("OPENROUTER_API_KEY","test-key");
+ try { expect((await handleChunkTask(w.deps,{chunkId:s.chunk.id})).httpStatus).toBe(200); } finally { vi.unstubAllEnvs(); }
+ expect(llm).toHaveBeenCalledTimes(1);
+ const spend=(await db.select().from(spendDays).where(and(eq(spendDays.batchId,s.batch.id),eq(spendDays.engine,"catalog_qa"))));
+ const [batch]=await db.select().from(catalogBatches).where(eq(catalogBatches.id,s.batch.id));
+ const [output]=await db.select().from(catalogOutputs).where(eq(catalogOutputs.batchId,s.batch.id));
+ return {spend,batch:batch!,log,output:output!};
+}
+const reply=(cost:number|null)=>async()=>new Response(JSON.stringify(openRouterReply(passScores,cost)));
+it("spec07 judge spend: OpenRouter's billed usage.cost and tokens reach spend_days and the batch cost, and the call is logged",async()=>{
+ const {spend,batch,log}=await judgeOnceLive("qa-spend-billed",reply(0.000139));
+ expect(log).toHaveBeenCalledWith("catalog_qa call",expect.objectContaining({batchId:batch.id,model:"test/judge",status:200,costUsd:0.000139,estimated:false,promptTokens:2911,completionTokens:160}));
+ expect(JSON.stringify(log.mock.calls)).not.toMatch(/test-key|base64/);
+ expect(spend).toHaveLength(1);
+ expect(spend[0]).toMatchObject({calls:1,brandSlug:"anta"});expect(Number(spend[0]!.costUsd)).toBeCloseTo(0.000139,9);
+ expect(batch.cost).toMatchObject({qaCalls:1,qaPromptTokens:2911,qaCompletionTokens:160});expect(Number(batch.cost.qaUsd)).toBeCloseTo(0.000139,9);
+ expect(log.mock.calls.filter(([message])=>/usage\.cost absent/.test(String(message)))).toHaveLength(0);
+},60_000);
+it("spec07 judge spend: a reply without usage.cost is recorded at the per-check estimate and logged, never 0",async()=>{
+ const {spend,batch,log}=await judgeOnceLive("qa-spend-estimated",reply(null));
+ expect(Number(spend[0]!.costUsd)).toBeCloseTo(QA_USD_PER_CHECK_FALLBACK,9);
+ expect(Number(batch.cost.qaUsd)).toBeCloseTo(QA_USD_PER_CHECK_FALLBACK,9);
+ expect(batch.cost).toMatchObject({qaCalls:1,qaPromptTokens:2911,qaCompletionTokens:160});
+ expect(log).toHaveBeenCalledWith(expect.stringMatching(/usage\.cost absent; recorded the estimated price/),{batchId:batch.id});
+},60_000);
+it("spec07 an auth failure is logged at warn with its status before it becomes qa_unavailable, and costs nothing",async()=>{
+ const {spend,batch,log,output}=await judgeOnceLive("qa-auth-failure",async()=>new Response(JSON.stringify({error:{message:"No auth credentials found",code:401}}),{status:401}));
+ expect(output.flags).toContain("qa_unavailable");
+ expect(log).toHaveBeenCalledWith("catalog_qa call failed",expect.objectContaining({severity:"WARNING",status:401,kind:"auth",error:"No auth credentials found",costUsd:0,batchId:batch.id}));
+ expect(log).toHaveBeenCalledWith("catalog_qa: quality check unavailable",expect.objectContaining({severity:"WARNING",status:401,kind:"auth",batchId:batch.id}));
+ expect(Number(spend[0]!.costUsd)).toBe(0);expect(spend[0]!.calls).toBe(1);
+ expect(JSON.stringify(log.mock.calls)).not.toContain("test-key");
+},60_000);
+it("spec07 a judge timeout is logged at warn before it becomes qa_unavailable",async()=>{
+ const {log,output}=await judgeOnceLive("qa-timeout",async()=>{throw new DOMException("The operation was aborted due to timeout","TimeoutError");});
+ expect(output.flags).toContain("qa_unavailable");
+ expect(log).toHaveBeenCalledWith("catalog_qa call failed",expect.objectContaining({severity:"WARNING",status:0,kind:"timeout"}));
+ expect(log).toHaveBeenCalledWith("catalog_qa: quality check unavailable",expect.objectContaining({severity:"WARNING",status:0,kind:"no_response"}));
+},60_000);
+describe("spec07 caps count the recorded judge spend",()=>{
+ const url="https://openrouter.ai/api/v1/chat/completions";
+ async function capWorld(name:string,options:Record<string,unknown>,day:string) {
+  const w=world();
+  w.deps.now=()=>new Date(day);
+  const upstream=vi.fn(async()=>new Response(JSON.stringify(openRouterReply(passScores))));
+  w.deps.fetch=upstream as unknown as typeof globalThis.fetch;
+  const [batch]=await db.insert(catalogBatches).values({brandSlug:"anta",brandName:"Anta",name,isTest:true,createdBy:"test@opptra.com",options:{...DEFAULT_BATCH_OPTIONS,...options}}).returning();
+  const underClaim=(async(write:(conn:Db)=>Promise<unknown>)=>write(db)) as UnderClaim;
+  return {llm:catalogLlmDeps(w.deps,batch!,underClaim),upstream,batch:batch!};
+ }
+ const recorded=async(batchId:string)=>(await db.select().from(spendDays).where(eq(spendDays.batchId,batchId))).reduce((sum,row)=>sum+Number(row.costUsd),0);
+ it("the batch QA cap refuses the call after the recorded spend reaches it",async()=>{
+  const {llm,upstream,batch}=await capWorld("qa-cap-recorded",{qaCapUsd:0.00025},"2031-05-05T10:00:00Z");
+  await llm.fetch(url,{method:"POST"});await llm.fetch(url,{method:"POST"});
+  expect(await recorded(batch.id)).toBeCloseTo(0.000278,9);
+  await expect(llm.fetch(url,{method:"POST"})).rejects.toBeInstanceOf(CatalogQaCapError);
+  expect(upstream).toHaveBeenCalledTimes(2);expect(()=>llm.assertAvailable()).toThrow(/Batch QA spend cap reached/);
+ });
+ it("the daily cap refuses the call after the day's recorded spend reaches DAILY_SPEND_CAP_USD",async()=>{
+  const {llm,upstream}=await capWorld("qa-daily-recorded",{},"2031-06-06T10:00:00Z");
+  vi.stubEnv("DAILY_SPEND_CAP_USD","0.00025");
+  try {
+   await llm.fetch(url,{method:"POST"});await llm.fetch(url,{method:"POST"});
+   await expect(llm.fetch(url,{method:"POST"})).rejects.toThrow(/Daily spend cap reached/);
+  } finally { vi.unstubAllEnvs(); }
+  expect(upstream).toHaveBeenCalledTimes(2);
+ });
+});
 it("spec07 SKU mapping adds ids and bumps the export to links-v<k+1>",async()=>{
  const w=world(),s=await seed(w,"sku-map");
  expect((await run(w,s)).outcome).toBe("published");
@@ -477,3 +626,53 @@ it("spec08 an eval batch runs exactly its forced policy; a batch without evalSet
  expect(vi.mocked(w.deps.matteFor).mock.calls.map(c=>c[2])).not.toContain("not-listed");
  expect(vi.mocked(w.deps.matteFor).mock.calls.map(c=>c[2]).filter(m=>m==="fixture")).toHaveLength(1);
 },60_000);
+
+// 05 rule 3 and 07 4.3: the shadow decision follows the product's own classification, never the
+// batch's "auto" placeholder, the brand line or SKU rows. Unclassified products get no synthesised shadow.
+describe("shadow decision input",()=>{
+ async function renderStages(w:ReturnType<typeof world>,name:string,classify?:CatalogDeps["classifyProductType"]) {
+  const s=await seed(w,name);
+  if(classify) w.deps.classifyProductType=vi.fn(classify);
+  await handleChunkTask(w.deps,{chunkId:s.chunk.id});await handleChunkTask(w.deps,{chunkId:s.chunk.id});
+  const ctx=vi.mocked(w.deps.renderAllChannels).mock.calls.at(-1)![3];
+  const [product]=await db.select().from(catalogProducts).where(eq(catalogProducts.id,s.product.id));
+  const outputs=await db.select().from(catalogOutputs).where(eq(catalogOutputs.batchId,s.batch.id));
+  return {s,ctx,product:product!,outputs};
+ }
+ it("never stores the auto placeholder on a product, so the classifier still runs",async()=>{
+  const [batch]=await db.insert(catalogBatches).values({brandSlug:"test_brand",brandName:"Test Brand",name:"auto-ingest",isTest:true,createdBy:"test@opptra.com"}).returning();
+  expect(batch!.productType).toBe("auto");
+  const {product}=await findOrCreateProduct(db,{brandSlug:"test_brand",isTest:true,identifier:"FC-AUTO-1",skus:null,productType:batch!.productType,actor:"test@opptra.com"});
+  expect(product.productType).toBeNull();
+  const forced=await findOrCreateProduct(db,{brandSlug:"test_brand",isTest:true,identifier:"FC-FORCED-1",skus:null,productType:"apparel_model",actor:"test@opptra.com"});
+  expect(forced.product.productType).toBe("apparel_model");
+ },60_000);
+ it("classifies a product left as auto by an earlier ingest and renders an apparel_model photo with no synthesised shadow",async()=>{
+  const w=world(),s=await seed(w,"fc-legacy-auto");
+  await db.update(catalogProducts).set({productType:"auto"}).where(eq(catalogProducts.id,s.product.id));
+  w.deps.classifyProductType=vi.fn<CatalogDeps["classifyProductType"]>(async()=>({type:"apparel_model",confidence:.9,costUsd:0,calls:1,usage:{},flags:[]}));
+  await handleChunkTask(w.deps,{chunkId:s.chunk.id});await handleChunkTask(w.deps,{chunkId:s.chunk.id});
+  expect(w.deps.classifyProductType).toHaveBeenCalledTimes(1);
+  expect((await db.select().from(catalogProducts).where(eq(catalogProducts.id,s.product.id)))[0]!.productType).toBe("apparel_model");
+  expect(vi.mocked(w.deps.renderAllChannels).mock.calls.at(-1)![3]).toMatchObject({productType:"apparel_model",synthesiseShadow:false});
+ },60_000);
+ it("lets a footwear classification synthesise",async()=>{
+  const r=await renderStages(world(),"anta-footwear");
+  expect(r.product.productType).toBe("footwear");
+  expect(r.ctx).toMatchObject({productType:"footwear",synthesiseShadow:true});
+ },60_000);
+ it("forbids synthesis for an apparel_model classification",async()=>{
+  const r=await renderStages(world(),"fc-model",async()=>({type:"apparel_model",confidence:.9,costUsd:0,calls:1,usage:{},flags:[]}));
+  expect(r.ctx).toMatchObject({productType:"apparel_model",synthesiseShadow:false});
+ },60_000);
+ it("forbids synthesis and keeps type_unknown when the classification failed",async()=>{
+  const r=await renderStages(world(),"fc-failed",async()=>({type:"other",confidence:0,costUsd:0,calls:2,usage:{},flags:["type_unknown"]}));
+  expect(r.ctx).toMatchObject({productType:"other",synthesiseShadow:false});
+  expect(r.outputs.every(o=>o.flags.includes("type_unknown"))).toBe(true);
+ },60_000);
+ it("forbids synthesis on the mocked classifier path and flags type_unknown",async()=>{
+  const r=await renderStages(world(),"fc-mocked",cannedQa.classifyProductType);
+  expect(r.ctx).toMatchObject({synthesiseShadow:false});
+  expect(r.outputs.every(o=>o.flags.includes("type_unknown"))).toBe(true);
+ },60_000);
+});

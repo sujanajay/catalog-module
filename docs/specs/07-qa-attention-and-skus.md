@@ -108,6 +108,49 @@ No schema change. If a column is missing the manager stops and reports a contrac
 
 ## 4. Contracts
 
+### 4.0 Judge v2 amendment (supersedes the conflicting lines of 4.1, 4.2 and 4.4)
+
+Live batch b489e466 held two of 12 products wrongly or inconsistently: a sole view flagged
+`different_product` against the side view, and one real shadow-block defect held on Centrepoint
+only while six other channels passed (the mean of all scores, and `placement_ok` asked of a judge
+that cannot see the other angles). The judge now works like this:
+
+- Prompt (`CATALOG_QA_TEMPLATE`): image 1 is the source photo, image 2 the output rendered from it,
+  image 3 photo 1 of the same product id for reference; the product type is given. The judge names
+  the `view` first (front, side, back, sole, top, inside, detail, on-model, flat), is told that other
+  angles, soles, insides, close-ups and on-model shots of the same item are expected, and answers
+  `wrong_item` true only for a clearly different item (another category, or a colourway or design
+  no angle explains), false when unsure. It scores `complete_product`, `no_text_or_watermark`,
+  `orientation_ok` and `is_collage` on image 1 and `edge_quality`, `background_clean` on image 2
+  against image 1, with one `evidence` sentence per failing check. Placement is not asked; code
+  checks it exactly (05). Reply keys: `view`, `wrong_item`, the five scores, `is_collage`, `evidence`.
+- Verdict (`judge.ts`): every dimension against its own line from the policy, no mean
+  (`dimensionThresholds`: output dimensions use `threshold`, photo dimensions and `same_product`
+  use `floor`). `same_product` is 0 only when `wrong_item` is confirmed by `policy.qaModelSecond`
+  (asked only when the first judge says `wrong_item`); otherwise 100. `overall` is the weakest
+  dimension and informational only.
+- QA stage (`qa-stage.ts`): photo dimensions apply to every channel of the photo. When an output
+  dimension fails on the judged channel, the photo's other channels are re-checked and every channel
+  takes the strictest score, so one defect gives one consistent result.
+- Automatic actions (`qa/triage.ts` `triageProduct`). Hard holds: a different item confirmed by
+  both judges, a collage, a corrupt file, photo 1 with a problem, every photo of a channel with a
+  problem. Also held because no verdict exists or the image cannot go live: `qa_cap`,
+  `qa_unavailable`, and an image not made or failing the channel rules when it cannot be dropped.
+  Any other problem: dropped with a note (status `skipped`, reason ends "Left out automatically
+  because this product has enough other good photos.") when the photo is not photo 1 and at least
+  two good photos remain on that channel, else kept with a note (status `staged`, "Kept with this
+  note because this product has too few other good photos."). Note-only information flags since
+  v2: `complete_product` and `transparent`, besides `low_resolution` and the 4.6 list
+  (`INFORMATION_FLAGS`, shared by attention, decisions and triage). No flag was added.
+- Re-render extension point: `CatalogDeps.repairOwnDefects` (`RepairOwnDefects` in `qa/triage.ts`)
+  is called once per product after judging and before triage with every undecided output carrying
+  `halo` or `leftover_background`; it re-renders and re-judges, writes the rows, and the stage
+  re-reads them, so a fixed output counts as good. Absent, nothing is repaired.
+- Report: every judged output in `report-v<k>.json` carries `qa` (scores, thresholds, view, evidence
+  with the model that gave each sentence, every judgement including re-checks and the second
+  opinion, `autoAction`, `holdCause`, `finalStatus`), and the batch carries `qa.attentionRate`
+  (held products over products, target 0). Model ids stay out of operator copy.
+
 ### 4.1 Dimensions, thresholds, verdict, flags
 
 Dimensions (0 to 100 each, coerced and clamped by `normalizeScores`; a missing dimension becomes 0
@@ -142,7 +185,8 @@ staged object (never the public one). Messages: system = rendered `CATALOG_QA_TE
 validate, { temperature: 0, maxTokens: LLM_MAX_TOKENS, model }, deps)` (OpenRouter chat
 completions with image parts and `usage.cost`; confirmed in current docs; builders re-confirm before
 coding). The validator requires at least one numeric dimension. `costUsd` is `usage.cost` when
-present, else 0 with a log line. A thrown `LlmResponseError` or `LlmJsonError` after the built-in
+present, else `QA_USD_PER_CHECK_ESTIMATE` with a log line (never 0 for a billed completion;
+`qaCallCost` in `cost.ts`). A thrown `LlmResponseError` or `LlmJsonError` after the built-in
 retry marks the output `needs_attention` with flag `qa_unavailable` and its sentence; it never
 fails the batch. Cost per check is about USD 0.0004 (Flash-Lite, Haiku 5.5, Qwen 30B-A3B) to
 0.0013 (2.5 Flash, 3.5 Flash-Lite).
@@ -222,7 +266,8 @@ export; the eval harness in 08 reads it from the database.
 ### 4.5 Spend and caps (`caps.ts`)
 
 Every judge and classifier call records `recordCost(db, { brandSlug, batchId, engine:
-"catalog_qa", costUsd })` and adds to `catalog_batches.cost.qaUsd` and `cost.qaCalls`. Compute stays
+"catalog_qa", costUsd })` and adds to `catalog_batches.cost.qaUsd`, `cost.qaCalls`,
+`cost.qaPromptTokens` and `cost.qaCompletionTokens` (from OpenRouter's `usage`). Compute stays
 on `catalog_compute` (06). `checkCatalogCaps(db, { batchId, env, now })` mirrors `checkCaps`: the
 daily cap is `DAILY_SPEND_CAP_USD` (default 10) over all engines and brands for the UTC day; the
 per-batch cap is `catalog_batches.options.qaCapUsd` (null = none). When a cap is hit, QA for the
@@ -394,9 +439,10 @@ operator labels the Styli and Noon sets through this screen; the product owner l
 whose `change` is not `unchanged` and that have at least one output not `skipped` (unchanged
 products cost nothing and are excluded from the denominator); `usdPerIdentifier = usd /
 identifiers`; `inrPerIdentifier = usdPerIdentifier * INR_PER_USD`. Display on the batch page card
-"Cost so far": "INR <x> per style so far · agency reference INR 60 per style" (two decimals). When
-`INR_PER_USD` is not set: "USD <x> per style so far (set INR_PER_USD to show rupees) · agency
-reference INR 60 per style". Finalize writes `cost.identifiers`, `cost.usdPerIdentifier`,
+"Cost so far": "INR <x> per style so far · INR <y> for this batch · agency reference INR 60 per
+style" (INR two decimals, USD four, so a sub-cent spend never reads 0.00; `inrAmount`, `usdAmount`). When
+`INR_PER_USD` is not set: "USD <x> per style so far · USD <y> for this batch · Cost in rupees is not
+configured yet · agency reference INR 60 per style". Finalize writes `cost.identifiers`, `cost.usdPerIdentifier`,
 `cost.inrPerIdentifier` into the batch and the report. The product page shows the lifetime sum
 across batches (06 page; data from `spend_days` by `batch_id`). The brand page shows the brand's
 total from `spend_days` by `brand_slug`.

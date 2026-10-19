@@ -3,17 +3,21 @@ import { and, eq, inArray } from "drizzle-orm";
 import type { Db } from "../../db/client";
 import { modelPolicy } from "../../db/schema";
 import { CHANNELS, CHANNEL_ORDER } from "../channels";
-import type { ChannelId, ProductType, ResolvedPolicy } from "../types";
+import type { ChannelId, OutputFlag, ProductType, ResolvedPolicy } from "../types";
 import { QA_DEFAULT_FLOOR, QA_DEFAULT_THRESHOLD } from "./judge";
 import { CATALOG_QA_DEFAULT_MODEL } from "./classify";
 type Category = Exclude<ProductType,"auto">;
 const common = {qaModel:CATALOG_QA_DEFAULT_MODEL,qaModelSecond:"anthropic/claude-haiku-5.5",threshold:QA_DEFAULT_THRESHOLD,floor:QA_DEFAULT_FLOOR,qaMode:"per_source",qaSampleRate:1,source:"default"} as const;
+// Every first and second matte model is one the matting services serve (DEPLOYED_MATTE_MODELS in
+// matte.ts). The ids that were never deployed (birefnet-hr-matting, birefnet-dynamic-matting) are
+// replaced by birefnet-general, or birefnet-general-lite where birefnet-general is already first.
+// The eval suite (08) decides the final per-type defaults.
 export const DEFAULT_POLICIES: Record<Category,ResolvedPolicy> = {
  footwear:{...common,matteModel:"birefnet-general",matteModelSecond:"bria-rmbg",shadowMode:"preserve_else_synthesise"},
- apparel_model:{...common,matteModel:"birefnet-hr-matting",matteModelSecond:"birefnet-dynamic-matting",shadowMode:"preserve_only"},
+ apparel_model:{...common,matteModel:"birefnet-general",matteModelSecond:"birefnet-general-lite",shadowMode:"preserve_only"},
  apparel_flat:{...common,matteModel:"bria-rmbg",matteModelSecond:"birefnet-general",shadowMode:"preserve_only"},
- bag_accessory:{...common,matteModel:"birefnet-general",matteModelSecond:"birefnet-hr-matting",shadowMode:"preserve_else_synthesise"},
- other:{...common,matteModel:"bria-rmbg",matteModelSecond:"birefnet-dynamic-matting",shadowMode:"preserve_else_synthesise"},
+ bag_accessory:{...common,matteModel:"birefnet-general",matteModelSecond:"birefnet-general-lite",shadowMode:"preserve_else_synthesise"},
+ other:{...common,matteModel:"bria-rmbg",matteModelSecond:"birefnet-general",shadowMode:"preserve_else_synthesise"},
 };
 export interface PolicyHealth {models: readonly {id:string;target?:"cpu"|"gpu";inputSize?:number|"native"}[]; default:string}
 /**
@@ -39,6 +43,18 @@ export async function resolvePolicy(db: Db, brandSlug: string, category: Product
  const row = [[brandSlug,category],[brandSlug,"*"],["*",category],["*","*"]].map(([brand,cat]) => rows.find(r => r.brandSlug === brand && r.category === cat)).find(Boolean);
  if (!row) return {...DEFAULT_POLICIES[category === "*" || category === "auto" ? "other" : category]};
  return {matteModel:row.matteModel,qaModel:row.qaModel,threshold:row.threshold,floor:row.floor,qaMode:row.qaMode,qaSampleRate:row.qaSampleRate,source:row.source,...(row.matteTarget ? {matteTarget:row.matteTarget} : {}),...(row.matteModelSecond ? {matteModelSecond:row.matteModelSecond} : {}),...(row.shadowMode ? {shadowMode:row.shadowMode} : {}),...(row.qaModelSecond ? {qaModelSecond:row.qaModelSecond} : {})};
+}
+/**
+ * 05 rule 3 as the worker applies it: a synthesised shadow is allowed only for a product whose own
+ * classification (07 4.3, or the type the operator chose for the batch) is footwear, bag_accessory
+ * or other. Apparel on a model or laid flat never gets one. A product without a real classification
+ * (no type, the "auto" placeholder, or `type_unknown` after a failed, capped or mocked classifier)
+ * gets none either: a missing shadow is a smaller defect than a fake one. Brand line and SKU rows
+ * are not inputs.
+ */
+export function shadowSynthesisAllowed(productType: ProductType | null | undefined, flags: readonly OutputFlag[]): boolean {
+ if (!productType || productType === "auto" || flags.includes("type_unknown")) return false;
+ return productType === "footwear" || productType === "bag_accessory" || productType === "other";
 }
 export function strictestChannel(channels: readonly ChannelId[]): ChannelId {
  if (channels.includes("styli")) return "styli";

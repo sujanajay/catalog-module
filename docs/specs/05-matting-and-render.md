@@ -185,6 +185,20 @@ Any change to the maths in this file that alters output bytes must bump `CHANNEL
    - planProduct: `uniformScale = min over shots of sFit(C_shot)` using each shot's own canvas; the
      caller passes it when `spec.uniformScaleDefault` is true (styli) and the shot is not a detail
      shot. There is no batch option for this; the channel table decides.
+   - One canvas per product and channel: planProduct also returns `canvas`, the largest canvas the
+     formula gives any of the product's shots on that channel (never above the target); every shot
+     of the product on that channel is rendered on it. `lowResolution` stays per shot.
+   - Trendyol: SPEC.md says accepted files are 1200x1800, so Trendyol is a fixed canvas: always
+     1200x1800, the product fitted even beyond 1.5x; `low_resolution` is then information only.
+   - Cut in source (`shotGeometry`): a side is cut when the product box edge lies within the white
+     border band (3% of the frame) and its outermost line, allowing for the matte's soft fade (1% of
+     the long side), holds a straight run of alpha >= 250 at least 25% of the box width (height for
+     the sides). The box is trimmed to that cut line, the cut side's margin becomes 0 and the
+     product is anchored to that canvas edge (bottom wins when top and bottom are both cut; centred
+     when left and right are both cut); other margins are unchanged. Flag `cut_in_source`
+     (information: sheet notes and report, never holds the product). Compliance accepts the flush
+     edge on the cut side only (`inside_safe_box`, `styli_anchor`, `noon_wide`). Headroom on
+     zero-margin channels stays 0: SPEC.md states no minimum headroom.
 5. Shadow decision rule (shadow.ts), evaluated per source after matting, in this order:
    1. `matte.source === "alpha_source"`: the file carries no shadow information. Synthesise (rule 3)
       only when the product type is one that synthesises and the channel allows a shadow on that
@@ -202,7 +216,9 @@ Any change to the maths in this file that alters output bytes must bump `CHANNEL
       only the connected component of the dark region that touches the bbox bottom is kept, so stray
       gradients and vignettes are dropped. The layer is a 1-channel image `255 - round(255 * d)`,
       scaled and placed with the product, composited with `blend: "multiply"` over the background
-      before the product goes on `over`. First qualify the shadow using only the connected
+      before the product goes on `over`. For the footwear, bag and other band, the qualified component
+      continues past the band through connected background and fades to zero over 10% of bbox height,
+      so a real shadow never stops on the band's straight edge. First qualify the shadow using only the connected
       background component at or below `ALPHA_BBOX_THRESHOLD`; partial product pixels must never
       create a preserved shadow on their own. After qualification, extend that component into
       connected partial-alpha pixels, without bridging into other background components. Exclude
@@ -213,9 +229,12 @@ Any change to the maths in this file that alters output bytes must bump `CHANNEL
       remain unchanged.
    3. Synthesise: when rule 2 does not hold, the product type is `footwear`, `bag_accessory` or
       `other` (and `auto`, treated as `other`) and the pose is upright (bbox taller than wide, or
-      footwear): a deterministic contact shadow from the alpha mask: keep the bottom 20% of mask
-      rows, squash them to about 12% of bbox height at the contact line, blur with a sigma
-      proportional to bbox width (soft preset), multiply at `SHADOW_SYNTH_INTENSITY_GREY` (start
+      footwear): a deterministic contact shadow from the silhouette: each column of the bottom 20% of
+      mask rows is weighted by how close the silhouette comes to the contact line in it (alpha times
+      `(1 - gap / zone)^2`), so feet and soles cast it and hems hovering above the floor barely do;
+      the footprint is feathered sideways (sigma the larger of 2.5% of product width and half the
+      depth) and given a Gaussian vertical falloff around the contact line, depth about 12% of the
+      product's smaller side (soft preset); multiply at `SHADOW_SYNTH_INTENSITY_GREY` (start
       0.25) on grey canvases and `SHADOW_SYNTH_INTENSITY_WHITE` (start 0.15) on white. Parameters
       are named (softness, intensity, spread, direction, pose) so a hard or floating preset is a
       parameter change later. Flag `shadow_synthesised` (info). No model takes part; depth-based
@@ -225,6 +244,9 @@ Any change to the maths in this file that alters output bytes must bump `CHANNEL
    5. Relighting models are not in the default path (the available version regenerates foreground
       pixels, which is forbidden); 08 may test one on the shadow layer alone, behind a colour-delta
       guard.
+   Every shadow layer, kept or made, is multiplied by a smooth window (`SHADOW_PRESET.fade`, 3% of the
+   canvas's smaller side) that reaches zero at required margins, the border band and, for a kept
+   shadow, the projected source frame, so margins stay exact and no shadow ends on a straight cut.
    Compliance's `background` check enforces exposed background in the border band and all required
    margins. Foreground may touch an edge whose channel margin is zero; it is not a background
    failure. Shadows may not contaminate required margins or exposed border background. This resolves

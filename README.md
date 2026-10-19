@@ -75,8 +75,9 @@ tests run only with the flag: `REAL_DATA=1 pnpm test:real` (PowerShell:
 
 From the repository root in Git Bash, `bash infra/deploy.sh` runs the per-brand smoke before
 building images or deploying. A failed smoke stops the deployment. Set `CATALOG_CHUNK_IMAGES`
-to change the default 25 source images per worker chunk. Set `COMPUTE_USD_PER_VCPU_SECOND`
-only when a measured compute price is available; otherwise compute cost remains unpriced.
+to change the default 25 source images per worker chunk. `COMPUTE_USD_PER_VCPU_SECOND`
+defaults to the Cloud Run list price for the worker (see the comment in `infra/deploy.sh`); set it
+in the shell to override.
 Existing images for the current commit are reused. `SKIP_BUILD=1 bash infra/deploy.sh` explicitly
 reuses them when rolling back from a checkout of an earlier commit. Cloud Run compares the
 service configuration, so a repeated deployment with identical images and settings should

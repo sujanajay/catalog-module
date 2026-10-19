@@ -95,9 +95,17 @@ ENV_VARS+=",TASKS_QUEUE=$QUEUE,WORKER_URL=$WORKER_URL,WORKER_SA_EMAIL=$WORKER_SA
 # to opptra-datawarehouse and redeploy. See docs/solutions/infra-bootstrap.md.
 BQ_PROJECT=${BQ_PROJECT:-image-links-agent}
 WORKER_ENV="$ENV_VARS,DB_POOL_MAX=2,BQ_PROJECT=$BQ_PROJECT,BQ_LOCATION=asia-south1,CATALOG_CHUNK_IMAGES=$CHUNK_IMAGES"
-if [ -n "${COMPUTE_USD_PER_VCPU_SECOND:-}" ]; then
-  WORKER_ENV+=",COMPUTE_USD_PER_VCPU_SECOND=$COMPUTE_USD_PER_VCPU_SECOND"
-fi
+# Compute spend: the worker records cost.computeUsd = vCPU-seconds * COMPUTE_USD_PER_VCPU_SECOND
+# (spend is 0 when unset) and the wizard estimate prices compute with the same figure. Override
+# from the shell like INR_PER_USD. Keep it equal to DEFAULT_COMPUTE_USD_PER_VCPU_SECOND in
+# packages/core/src/catalog/cost.ts. Source: cloud.google.com/run/pricing, read 2026-10-20.
+# asia-south1 is Tier 1; the worker uses request-based billing (no --no-cpu-throttling), so CPU is
+# USD 0.000024 per vCPU-second and memory USD 0.0000025 per GiB-second. The worker shape is
+# --cpu=2 --memory=2Gi, 1 GiB per vCPU: 0.000024 + 1 * 0.0000025 = 0.0000265 per vCPU-second
+# (free tier and the per-request fee ignored). Re-check if the worker's shape or billing changes.
+COMPUTE_USD_PER_VCPU_SECOND=${COMPUTE_USD_PER_VCPU_SECOND:-0.0000265}
+[[ "$COMPUTE_USD_PER_VCPU_SECOND" =~ ^[0-9]+([.][0-9]+)?$ ]] || { echo "COMPUTE_USD_PER_VCPU_SECOND must be a number such as 0.0000265" >&2; exit 1; }
+WORKER_ENV+=",COMPUTE_USD_PER_VCPU_SECOND=$COMPUTE_USD_PER_VCPU_SECOND"
 # 07: the QA judge and its spend caps. Override from the shell like BQ_PROJECT, e.g.
 # INR_PER_USD=83.5 bash infra/deploy.sh. CATALOG_QA_DEFAULT_MODEL is engineering config only; it is
 # never shown to the operator. It has no leading "/", so Git Bash leaves it alone.
@@ -112,9 +120,10 @@ INR_PER_USD=${INR_PER_USD:-84}
 WORKER_ENV+=",CATALOG_QA_DEFAULT_MODEL=$CATALOG_QA_DEFAULT_MODEL,DAILY_SPEND_CAP_USD=$DAILY_SPEND_CAP_USD"
 WEB_ENV="$ENV_VARS,DB_POOL_MAX=3,SHARE_SA_EMAIL=$WEB_SA,CATALOG_CHUNK_IMAGES=$CHUNK_IMAGES"
 # INR_PER_USD reaches the web (cost line, wizard estimate), the worker (finalize) and, through
-# WORKER_ENV, the Cloud Run jobs (07 4.11).
+# WORKER_ENV, the Cloud Run jobs (07 4.11). COMPUTE_USD_PER_VCPU_SECOND reaches the worker and the
+# jobs through WORKER_ENV (above) and the web here, so the estimate and recorded spend agree.
 WORKER_ENV+=",INR_PER_USD=$INR_PER_USD"
-WEB_ENV+=",INR_PER_USD=$INR_PER_USD"
+WEB_ENV+=",INR_PER_USD=$INR_PER_USD,COMPUTE_USD_PER_VCPU_SECOND=$COMPUTE_USD_PER_VCPU_SECOND"
 # 03: the web verifies the IAP JWT against this exact audience and accepts only this domain.
 IAP_AUDIENCE=/projects/$PN/locations/$REGION/services/$WEB_SERVICE
 WEB_ENV+=",IAP_AUDIENCE=$IAP_AUDIENCE,ALLOWED_HOSTED_DOMAIN=opptra.com"

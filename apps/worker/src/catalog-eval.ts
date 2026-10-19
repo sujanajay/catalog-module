@@ -38,6 +38,7 @@ import { handlePublishTask } from "./catalog/publish";
 import { handleFinalizeTask } from "./catalog/finalize";
 import { cannedQa, liveQaEnabled } from "./catalog/qa-mock";
 import { dataRoot } from "./catalog-real-fixtures";
+import { assertBrandInMaster, cleanupEvalSet, parseArgs } from "./catalog-eval-cli";
 
 const USAGE = `Usage: catalog:eval <command>
   assemble --set <s> --brand <slug> [--folder <path>] [--category <type>] [--sample <n> --seed <k>]
@@ -49,7 +50,9 @@ const USAGE = `Usage: catalog:eval <command>
   score --set <s> --batches <ids> [--live]
   policy write --set <s> --batches <ids> [--dry-run]
   report --set <s> --batches <ids>
-  cleanup --batches <ids>`;
+  cleanup --batches <ids>
+  cleanup --set <s>                               (removes catalog-test/eval/<s>/ once the set has no eval batches)
+Flags take "--name value" or "--name=value".`;
 
 /** Real photo folders (relative to REAL_DATA_DIR) for the brands with real sets, and their category. */
 const REAL_FOLDERS: Record<string, { folder: string; category: EvalCategory }> = {
@@ -57,17 +60,6 @@ const REAL_FOLDERS: Record<string, { folder: string; category: EvalCategory }> =
   french_connection: { folder: "new_resources_3/French Connection Final", category: "apparel_model" },
 };
 
-function parseArgs(argv: string[]) {
-  const words: string[] = [], flags: Record<string, string | true> = {};
-  for (let i = 0; i < argv.length; i++) {
-    const a = argv[i]!;
-    if (!a.startsWith("--")) { words.push(a); continue; }
-    const next = argv[i + 1];
-    if (next === undefined || next.startsWith("--")) flags[a.slice(2)] = true;
-    else { flags[a.slice(2)] = next; i++; }
-  }
-  return { words, flags };
-}
 const list = (v: string | true | undefined) => typeof v === "string" ? v.split(",").map(s => s.trim()).filter(Boolean) : [];
 function need(flags: Record<string, string | true>, name: string): string {
   const v = flags[name];
@@ -103,8 +95,9 @@ async function cleanupEval(db: Db, ids: string[]) {
   return cleanupTestBatches(db, storage, ids);
 }
 
-async function assemble(flags: Record<string, string | true>) {
+async function assemble(db: Db, flags: Record<string, string | true>) {
   const set = need(flags, "set"), brand = need(flags, "brand");
+  await assertBrandInMaster(db, brand);
   if (flags.sheets || flags.master) print("not run: Supabase sheet and master image_url sources are deferred in this build; only local real photo folders are collected.");
   const known = REAL_FOLDERS[brand];
   const folderArg = typeof flags.folder === "string" ? flags.folder : known?.folder;
@@ -263,24 +256,34 @@ async function report(db: Db, flags: Record<string, string | true>) {
   const input = { set, runId: id, batchIds: rows.batches.map(b => b.id), scopes, notRun, cost: { usd: judgedUsd + batchUsd, products, inrPerUsd: Number.isFinite(inr) && inr > 0 ? inr : null }, policyRows: written.map(p => ({ brandSlug: p.brandSlug, category: p.category, outcome: "written" })), commands: [`catalog:eval ${process.argv.slice(2).join(" ")}`] };
   const html = await storage.uploadBuffer(reportPath(set, id, "html"), Buffer.from(reportHtml(input)), "text/html");
   const json = await storage.uploadBuffer(reportPath(set, id, "json"), Buffer.from(JSON.stringify(reportJson(input), null, 2)), "application/json");
-  print({ html, json, signedUrl: await storage.signedUrl(html), brandsWaitingForImages: WAITING_BRANDS });
+  // Both files are written before signing, so a signing failure never loses the report.
+  let signedUrl: string | null = null;
+  try { signedUrl = await storage.signedUrl(html); } catch (error) {
+    console.error(`The report is written, but no signed URL could be made: ${error instanceof Error ? error.message : String(error)}`);
+    process.exitCode = 1;
+  }
+  print({ html, json, signedUrl, brandsWaitingForImages: WAITING_BRANDS });
 }
 
 async function main() {
   const { words, flags } = parseArgs(process.argv.slice(2));
   const command = words.join(" ");
   if (!command || command === "help") { print(USAGE); return; }
-  if (command === "assemble") return assemble(flags);
   if (command === "experiment") { print(`not run: the ${String(flags.name ?? "")} experiment is deferred in this build${flags.name === "sr_pass" && !process.env.MATTING_GPU_URL ? " (and it needs MATTING_GPU_URL)" : ""}.`); return; }
   const db = getDb();
   try {
-    if (command === "run") await runEval(db, flags);
+    if (command === "assemble") await assemble(db, flags);
+    else if (command === "run") await runEval(db, flags);
     else if (command === "judges") await judges(db, flags);
     else if (command === "contact-sheet") await contactSheet(db, flags);
     else if (command === "labels export") await labelsExport(db, flags);
     else if (command === "score") await score(db, flags);
     else if (command === "policy write") await policyWrite(db, flags);
     else if (command === "report") await report(db, flags);
+    else if (command === "cleanup" && flags.set) {
+      assert(typeof flags.set === "string" && !flags.batches, "Pass either --set <s> or --batches <ids> to cleanup.");
+      print({ cleanup: await cleanupEvalSet(db, storage, flags.set) });
+    }
     else if (command === "cleanup") print({ cleanup: await cleanupEval(db, list(need(flags, "batches"))) });
     else { print(USAGE); process.exitCode = 2; }
   } finally { await closeDb(); }
