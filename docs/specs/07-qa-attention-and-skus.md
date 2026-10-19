@@ -350,9 +350,10 @@ Defects we produced are re-made by the pipeline before a product is ever held.
   otherwise it holds with the existing flag. Our own defects are never published with a note.
 - Source problems (`cut_in_source`, `small_source`, `text_or_watermark`, `orientation`) follow the
   triage: note-only or drop-with-note, held only for photo 1 or the last usable photo. When the judge
-  scores `complete_product` under its line and the cut detector found no cut, every channel is
-  re-rendered with the relaxed cut run fraction `JUDGED_CUT_MIN_RUN_FRACTION` (0.1; a knee-level cut
-  measures about 22%, under the 25% rule) so the cut sits flush; recorded as `flush_cut`.
+  saw the photo cut at its frame edge (`judgeSawSourceCut`: `complete_product` under its line, or a
+  `source_cut` report) and the judge-relaxed cut detector (`judgedCut`, 05) finds a side the first
+  render did not place flush, every channel is re-rendered with that detector (a cut-out on the
+  photo's own background colour shows no photo edge) so the cut sits flush; recorded as `flush_cut`.
 - Fallback matte: when the cut-out service fails, the matte stage waits for the breaker cool-down,
   polls the service's health and retries the model once while the delivery still has time for a full
   matting call (`matte_retry`). If the retry fails the photo still renders with the simple cut-out
@@ -473,8 +474,8 @@ operator labels the Styli and Noon sets through this screen; the product owner l
 whose `change` is not `unchanged` and that have at least one output not `skipped` (unchanged
 products cost nothing and are excluded from the denominator); `usdPerIdentifier = usd /
 identifiers`; `inrPerIdentifier = usdPerIdentifier * INR_PER_USD`. Display on the batch page card
-"Cost so far": "INR <x> per style so far · INR <y> for this batch · agency reference INR 60 per
-style" (INR two decimals, USD four, so a sub-cent spend never reads 0.00; `inrAmount`, `usdAmount`). When
+"Cost so far": "USD <x> (INR <x'>) per style so far · USD <y> (INR <y'>) for this batch · agency
+reference INR 60 per style" (USD four decimals, INR two, so a sub-cent spend never reads 0.00; `usdAmount`, `inrAmount`). When
 `INR_PER_USD` is not set: "USD <x> per style so far · USD <y> for this batch · Cost in rupees is not
 configured yet · agency reference INR 60 per style". Finalize writes `cost.identifiers`, `cost.usdPerIdentifier`,
 `cost.inrPerIdentifier` into the batch and the report. The product page shows the lifetime sum

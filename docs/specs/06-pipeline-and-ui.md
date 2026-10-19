@@ -736,7 +736,8 @@ Step 4 "Start" (polls `/preview`; while not ready a bar "Collecting files <x> of
   will be removed."; the rename hint "NEW-ID has the same photos as ABC123. If this is a rename, add
   an alias on the product page instead of uploading."; the busy line "<identifier> and <k> others
   are still being processed in batch <name>. Wait for it to finish or remove them from this
-  upload." (Start disabled while any product is busy); the duplicate-spelling line "ABC-123 and
+  upload." (Start disabled while any product is busy; busy uses Start's own lock rule, so a product a
+  finished batch still holds for a decision shows here on step 4, not only after pressing Start); the duplicate-spelling line "ABC-123 and
   ABC123 are the same product. Keep one." (Start disabled). There is no separate confirmation
   dialog; the operator sees this and presses Start.
 - Announcement line above the table, from 04's `groupedBy`: "Grouped by file name
@@ -790,8 +791,14 @@ Tabs: Overview, "Needs attention (N products)" (hidden when 0), Links sheet, Det
   gs://image-links-agent-assets/catalog/<brand>/<batchId>/raw/ · public links:
   https://storage.googleapis.com/image-links-agent-public/catalog/<brand>/<pathKey>/<channel>/ ·
   report.json" (the public path carries the product key, not the batch id; `catalog-test/` for
-  test batches); the two count lines "Links verified: <verified> of <planned>" and "Independent
-  re-check: <ok> of <total> OK" (with the failing URLs listed when they differ); the "Not refreshed"
+  test batches); the two count lines "Links verified: <verified> of <delivered>" and "Independent
+  re-check: <ok> of <total> OK" (with the failing URLs listed when they differ), both counting this
+  batch's delivered links (planned minus skipped minus `heldLinks`, the images of held products
+  waiting for a decision); when products are held, one line says the rest apart: "Not counted above:
+  <h> images of the product(s) that need(s) your attention, published once you decide. Until then
+  the sheet keeps <c> earlier links for it/them; the re-check found <ok> of <c> OK." (the second
+  sentence only when the sheet carries earlier links, `recheckCarriedOk`/`recheckCarriedTotal`;
+  quality gate 2 showed 336 of 376 against 376 of 376); the "Not refreshed"
   line; error block "<n> image(s) could not be made." then one
   sentence per failed output "<file> for <Channel>: <reason>. Replace it from the Needs attention
   tab." No model names anywhere.
