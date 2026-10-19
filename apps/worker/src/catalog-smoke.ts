@@ -49,17 +49,19 @@ async function main() {
   try {
     const brands=await db.select().from(brandMaster);
     assert(brands.length,"The real brand master is empty. Sync the warehouse before smoke.");
-    const evidence=[],excluded=[];
+    // A brand without a real image set is reported as skipped, never as passed.
+    const evidence=[],skipped=[];
     for(const brand of brands) {
       const fixture=await localFixture(brand.slug,false,run) ?? (brand.slug==="campus" || brand.slug==="keds" ? await sheetFixture(brand.slug,false,run):null);
-      if(!fixture){excluded.push({brand:brand.name,reason:"No real image set is available in REAL_DATA_DIR."});continue;}
+      if(!fixture){skipped.push({brand:brand.name,status:"skipped",reason:"No real image set is available in REAL_DATA_DIR."});console.info(`smoke: ${brand.name}: skipped (no real image set)`);continue;}
       fixture.name=brand.name;
       evidence.push(await runRealFixture(db,fixture,path.join(out,brand.slug),fileURLToPath(import.meta.url)));
+      console.info(`smoke: ${brand.name}: passed`);
     }
-    await writeFile(path.join(out,"summary.json"),JSON.stringify({run,evidence,excluded},null,2));
+    await writeFile(path.join(out,"summary.json"),JSON.stringify({run,passed:evidence.map(e=>e.brand),evidence,skipped},null,2));
     assert(evidence.length,"No actual brand has an available real image set. Smoke did not run.");
-    await writeFile(path.join(out,"report.html"),`<!doctype html><meta charset="utf-8"><title>Per-brand catalog smoke</title><h1>Per-brand catalog smoke</h1><ul>${evidence.map(e=>`<li><a href="${e.slug}/report.html">${e.brand}</a>: ${e.first.verified} verified, ${e.changed} changed, ${e.removed} removed; cleanup ${e.cleanup}</li>`).join("")}</ul><h2>Unavailable real sets</h2><pre>${JSON.stringify(excluded,null,2)}</pre>`);
-    console.info(JSON.stringify({run,out,evidence,excluded}));
+    await writeFile(path.join(out,"report.html"),`<!doctype html><meta charset="utf-8"><title>Per-brand catalog smoke</title><h1>Per-brand catalog smoke</h1><ul>${evidence.map(e=>`<li><a href="${e.slug}/report.html">${e.brand}</a>: passed, ${e.first.verified} verified, ${e.changed} changed, ${e.removed} removed; cleanup ${e.cleanup}</li>`).join("")}</ul><h2>Skipped (no real image set)</h2><ul>${skipped.map(s=>`<li>${s.brand}: skipped</li>`).join("")}</ul>`);
+    console.info(JSON.stringify({run,out,passed:evidence.map(e=>e.brand),skipped:skipped.map(s=>s.brand),evidence}));
   } finally {await closeDb();}
 }
 main().catch(error=>{console.error(error instanceof Error ? error.message:String(error));process.exitCode=1;});

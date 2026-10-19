@@ -1,11 +1,18 @@
 #!/usr/bin/env bash
-# Build the images on Cloud Build, run DB migrations as the catalog-migrate Cloud Run job, then
-# deploy catalog-worker and catalog-web (both private). Idempotent; re-run to ship a new commit.
+# Order: preflight checks, build the images on Cloud Build, run DB migrations as the catalog-migrate
+# Cloud Run job (additive; also seeds the first admin and the test brand test_brand), run the tier 5
+# per-brand smoke on the just-built worker image as the Cloud Run job catalog-test-smoke, then
+# deploy catalog-matting (CPU and GPU), catalog-worker and catalog-web (all private), IAP access,
+# CORS, and print the URLs. A failing smoke (any failed_compliance or overwrite assertion) stops the
+# script before any service is updated. Migrations run before the smoke because the new image's
+# smoke needs the migrated schema and the seeded test brand. Idempotent; re-run to ship a commit.
 # Run infra/bootstrap.sh first.
 #
 # Usage (Git Bash, from the repo root): bash infra/deploy.sh
 # Env overrides: SKIP_BUILD=1 (reuse the images tagged with the current commit; also the rollback
 # path: check out an older commit and run SKIP_BUILD=1 bash infra/deploy.sh).
+# CATALOG_LOCAL_SMOKE=1 runs the smoke in-process on this machine instead of the Cloud Run job
+# (needs database and GCS access and REAL_DATA_DIR).
 set -euo pipefail
 
 PROJECT=image-links-agent
@@ -48,16 +55,6 @@ gcloud secrets describe catalog-db-password >/dev/null 2>&1 || { echo "secret ca
 if [ -n "$(git status --porcelain)" ]; then
   echo "ERROR: commit source changes before deploying; image tag $TAG must identify the source being built" >&2
   exit 1
-fi
-
-# --- 1. Smoke gate (tier 5, from 06 on) --------------------------------------------
-# Runs before the build; a failing smoke (any failed_compliance) stops the deploy.
-echo "==> smoke"
-if [ "${CATALOG_REMOTE_SMOKE:-0}" = 1 ]; then
-  bash infra/catalog-smoke-linux.sh
-else
-  pnpm --filter @catalog/worker build
-  pnpm catalog:smoke
 fi
 
 # --- 2. Build ------------------------------------------------------------------------
@@ -129,6 +126,20 @@ else
   echo "==> migrate: SKIP (preview uses the existing schema)"
 fi
 
+# --- 5. Smoke gate (tier 5, from 06 on) --------------------------------------------
+# Runs on the just-built worker image before any service is updated; a non-zero exit stops the
+# deploy. The job never calls OpenRouter and writes only under catalog-test/.
+echo "==> smoke"
+if [ "${CATALOG_LOCAL_SMOKE:-0}" = 1 ]; then
+  pnpm --filter @catalog/worker build
+  pnpm catalog:smoke
+else
+  SMOKE_RUN=$(node -e 'console.log(require("crypto").randomUUID())')
+  CATALOG_TEST_RUN=$SMOKE_RUN CATALOG_TEST_JOBS=smoke bash infra/catalog-test-jobs.sh
+  bash infra/catalog-smoke-linux.sh
+  echo "==> smoke: passed (evidence: $ASSETS_BUCKET/catalog-test/smoke/linux-$SMOKE_RUN/smoke/)"
+fi
+
 # --no-allow-unauthenticated re-sets service IAM on every deploy; pass it only when creating the
 # service and --invoker-iam-check afterwards (keeps it private without touching IAM).
 # See docs/solutions/deploy-cloud-run.md.
@@ -175,7 +186,7 @@ else
   exit 1
 fi
 
-# --- 5. Worker -----------------------------------------------------------------------
+# --- 6. Worker -----------------------------------------------------------------------
 echo "==> worker"
 if [ "${CATALOG_PREVIEW:-0}" = 1 ]; then
   PREVIEW_QUEUES=$(gcv tasks queues list --location="$REGION" --filter="name:/$QUEUE" --format='value(name)')
@@ -191,7 +202,7 @@ gcloud run deploy "$WORKER_SERVICE" --quiet --image="$AR/worker:$TAG" --service-
   --min-instances=0 --max-instances=10 --timeout=900 "${NET[@]}" \
   --set-secrets="$SECRETS" --set-env-vars="$WORKER_ENV"
 
-# --- 6. Web --------------------------------------------------------------------------
+# --- 7. Web --------------------------------------------------------------------------
 # Private (only IAP's service agent may invoke it; never --allow-unauthenticated) and behind IAP with
 # the Google-managed OAuth client: no OAuth client, consent screen or secret of ours.
 # MSYS2_ARG_CONV_EXCL: Git Bash would rewrite the "/projects/..." audience inside --set-env-vars into a
