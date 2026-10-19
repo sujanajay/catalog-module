@@ -17,7 +17,7 @@ import { parseArgs } from "node:util";
 import { and, eq } from "drizzle-orm";
 import { closeDb, getDb } from "@catalog/core/db/client";
 import { catalogOutputs, catalogProducts } from "@catalog/core/db/schema";
-import { recheckCsv, recheckLinks, sheetProblems, summarize, type LinkResult, type SheetProblem } from "@catalog/core/catalog/recheck/check";
+import { recheckCsv, recheckLinks, sheetProblems, summarize, withNoLinks, type LinkResult, type SheetProblem } from "@catalog/core/catalog/recheck/check";
 import { readCsvLinks, readSheetLinks } from "@catalog/core/catalog/recheck/links";
 import { RECHECK_CONCURRENCY } from "@catalog/core/catalog/recheck/index";
 import { compareXlsxCsv } from "@catalog/core/catalog/sheet";
@@ -55,7 +55,8 @@ async function main() {
   const concurrency = Number(values.concurrency ?? RECHECK_CONCURRENCY);
   if (!Number.isInteger(concurrency) || concurrency < 1) throw new Error("--concurrency must be a positive integer.");
   try {
-    const { results, problems } = sheetFile ? await sheetMode(sheetFile, values.csv, concurrency) : batchId ? await recheckBatch(getDb(), batchId, { concurrency }) : await brandMode(brand!, concurrency);
+    const checked = sheetFile ? await sheetMode(sheetFile, values.csv, concurrency) : batchId ? await recheckBatch(getDb(), batchId, { concurrency }) : await brandMode(brand!, concurrency);
+    const results = checked.results, problems = withNoLinks(results, checked.problems);
     const summary = summarize(results, problems);
     const out = path.resolve(values.out ?? path.join(process.env.CATALOG_REAL_OUT ?? ".", `recheck-${stamp()}.csv`));
     await mkdir(path.dirname(out), { recursive: true });

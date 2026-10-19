@@ -38,6 +38,7 @@ describe("re-check classification", () => {
     const problems = sheetProblems(["ABC", "ABC"], 1);
     expect(problems.map(p => p.problem)).toEqual(["duplicate_row", "row_count"]);
     expect(summarize(results, problems)).toEqual({ ok: 1, total: 4, line: "1 of 4 links OK", passed: false });
+    expect(summarize([])).toEqual({ ok: 0, total: 1, line: "0 of 1 links OK", passed: false });
     expect(recheckCsv(results).split("\r\n")[0]).toContain("url,identifier,channel,n,status,http,bytes,width,height,generation,expected_generation,problem");
   });
 });

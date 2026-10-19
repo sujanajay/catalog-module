@@ -112,10 +112,22 @@ export function sheetProblems(identifiers: readonly string[], expectedRows?: num
 
 export interface RecheckSummary { ok: number; total: number; line: string; passed: boolean }
 
-/** Each sheet-level problem counts as one failed item, so "N of N" is only complete when everything holds. */
+/** A sheet with no link at all is a failure, never "0 of 0 OK". */
+export const NO_LINKS: SheetProblem = { problem: "no_links", detail: "The sheet has no links to check." };
+
+/**
+ * Each sheet-level problem counts as one failed item, so "N of N" is only complete when everything
+ * holds. With no link at all the `no_links` problem is counted, so an empty sheet never passes.
+ */
 export function summarize(results: readonly LinkResult[], problems: readonly SheetProblem[] = []): RecheckSummary {
-  const ok = results.filter(r => r.status === "ok").length, total = results.length + problems.length;
-  return { ok, total, line: `${ok} of ${total} links OK`, passed: ok === total };
+  const all = withNoLinks(results, problems);
+  const ok = results.filter(r => r.status === "ok").length, total = results.length + all.length;
+  return { ok, total, line: `${ok} of ${total} links OK`, passed: results.length > 0 && ok === total };
+}
+
+/** The sheet-level problems plus `no_links` when there is no link result. */
+export function withNoLinks(results: readonly LinkResult[], problems: readonly SheetProblem[]): SheetProblem[] {
+  return results.length || problems.some(p => p.problem === NO_LINKS.problem) ? [...problems] : [...problems, NO_LINKS];
 }
 
 export const RECHECK_CSV_COLUMNS = ["url", "identifier", "channel", "n", "status", "http", "bytes", "width", "height", "generation", "expected_generation", "problem"];

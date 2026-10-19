@@ -20,7 +20,7 @@ import { existsSync } from "node:fs";
 import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { parseArgs } from "node:util";
-import { and, eq, inArray, sql } from "drizzle-orm";
+import { and, eq, inArray, isNotNull, sql } from "drizzle-orm";
 import { closeDb, getDb, type Db } from "@catalog/core/db/client";
 import { brandMaster, catalogBatches, catalogBatchProducts, catalogChunks, catalogOutputs, catalogProductEvents, catalogProducts, catalogSourceImages, catalogUploads, DEFAULT_BATCH_OPTIONS, spendDays } from "@catalog/core/db/schema";
 import { channel } from "@catalog/core/catalog/channels";
@@ -188,7 +188,9 @@ async function checkReupload(db: Db, runA: string, reupload: string, plan: Reupl
   const pairs = await db.select({ product: catalogProducts, change: catalogBatchProducts.change }).from(catalogBatchProducts).innerJoin(catalogProducts, eq(catalogProducts.id, catalogBatchProducts.productId)).where(eq(catalogBatchProducts.batchId, reupload));
   const byIdentifier = new Map(pairs.map(p => [p.product.identifier, p]));
   const productIds = pairs.map(p => p.product.id);
-  const before = productIds.length ? await db.select().from(catalogOutputs).where(and(eq(catalogOutputs.batchId, runA), inArray(catalogOutputs.productId, productIds), eq(catalogOutputs.status, "verified"))) : [];
+  // Run A's published rows. Not filtered on status: the re-upload sets the dropped shot's row to
+  // `skipped`, and that row is the one whose link must now answer 404.
+  const before = productIds.length ? await db.select().from(catalogOutputs).where(and(eq(catalogOutputs.batchId, runA), inArray(catalogOutputs.productId, productIds), isNotNull(catalogOutputs.publishedAt))) : [];
   const live = productIds.length ? await db.select().from(catalogOutputs).where(and(inArray(catalogOutputs.productId, productIds), eq(catalogOutputs.isLive, true))) : [];
   const events = productIds.length ? await db.select().from(catalogProductEvents).where(and(eq(catalogProductEvents.batchId, reupload), inArray(catalogProductEvents.productId, productIds))) : [];
   const key = (productId: string, ch: string, n: number) => `${productId}#${ch}#${n}`;
@@ -213,11 +215,10 @@ async function checkReupload(db: Db, runA: string, reupload: string, plan: Reupl
       }
       const removed = beforeBy.get(key(pair.product.id, ch, dropped));
       if (liveBy.has(key(pair.product.id, ch, dropped))) problems.push(`${o.identifier} ${ch} ${dropped}: the dropped shot is still live.`);
-      if (removed) {
-        const response = await fetch(removed.publicUrl, { headers: { "Cache-Control": "no-cache" } });
-        await response.body?.cancel();
-        if (response.status === 404) gone++; else problems.push(`${o.identifier} ${ch} ${dropped}: the dropped link answers ${response.status}, expected 404.`);
-      }
+      if (!removed) { problems.push(`${o.identifier} ${ch} ${dropped}: no published Run A output for the dropped shot.`); continue; }
+      const response = await fetch(removed.publicUrl, { headers: { "Cache-Control": "no-cache" } });
+      await response.body?.cancel();
+      if (response.status === 404) gone++; else problems.push(`${o.identifier} ${ch} ${dropped}: the dropped link answers ${response.status}, expected 404.`);
     }
   }
   return { sampled: plan.options.length, droppedLinksGone: gone, problems };

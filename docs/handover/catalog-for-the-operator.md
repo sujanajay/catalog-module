@@ -42,7 +42,9 @@ uploading files. After you paste it, share the sheet or folder with the address 
 
 Press "New batch". The steps are:
 
-1. "Brand and files": choose the brand, then upload photos or a zip, or paste links.
+1. "Brand and files": choose the brand, then upload photos or a zip, or paste links. The brand
+   you choose here is the batch's brand. The tool does not prove that a folder belongs to that
+   brand, even when the photos look alike, so check it yourself.
 2. "Check what we found": see how many products and photos were found and how the products were
    told apart (for example "grouped by file name before the last _number").
 3. "Where will these images go?": tick the marketplaces you need.
@@ -107,7 +109,11 @@ On the batch page:
 
 Only download and share a sheet when the batch says "Ready to download" or "Needs attention".
 Before sharing, open the Details tab and read two numbers: "Links verified N of N" and
-"Independent re-check N of N OK". Both must be complete (the two numbers in each line equal).
+"Independent re-check N of N OK". Both must be complete: the two numbers in each line are equal
+and not 0. "0 of 0" means nothing was checked; do not share the sheet, call Sujan.
+
+Only report numbers once the batch has finished. While it says "Collecting" or "Processing", the
+counts are progress, not results.
 
 When you hand a sheet to someone, also tell them:
 
@@ -125,6 +131,11 @@ for that marketplace.
 
 Tell whoever holds an earlier sheet for that brand when a product was replaced, filed under another
 identifier, or had photos removed.
+
+Before a brand sends new photos for products it delivered before, download the current links from
+the brand page ("Download links for selected products") and give them to whoever holds the earlier
+sheet, so they can compare. Photos with the same file names are not always the same photos: the
+tool compares the pictures themselves and marks a product `unchanged` only when they are identical.
 
 ## 11. Photo order matters
 
@@ -152,6 +163,8 @@ product the agency charged. Products that did not change are not counted.
 - A batch shows "Could not start" twice.
 - A link in the sheet does not open.
 - A picture did not change after a re-upload.
+- You had to name or group photos in a new way to make a batch work. Tell Sujan the rule you
+  used, so it is written down for next time.
 
 ## 16. A recorded run
 
