@@ -18,16 +18,21 @@ export interface CatalogDeps {
   prepare: typeof prepare; matteFor: typeof matteFor; renderAllChannels: typeof renderAllChannels;
 }
 let sharedMatting: MattingClient | undefined;
+// Default rows are check-then-insert; once per process is enough.
+let defaultsEnsured = false;
 export function workerCatalogDeps(db: Db): CatalogDeps {
   sharedMatting ??= new MattingClient({services:[{baseUrl:process.env.MATTING_URL ?? "http://localhost:8081",target:"cpu"},...(process.env.MATTING_GPU_URL ? [{baseUrl:process.env.MATTING_GPU_URL,target:"gpu" as const}]:[])]});
   const matting = sharedMatting;
   return {db,storage,matting,enqueue:enqueueTask,fetch,now:()=>new Date(),log:(message,fields)=>console.info(JSON.stringify({message,...fields})),prepare,matteFor,renderAllChannels,judgeOutput,classifyProductType,
     resolvePolicy:async(brandSlug,category)=> {
-      const health = await matting.health();
-      if (!health.default) throw new Error("The cut-out service has not reported a default. Try again shortly.");
-      await ensureDefaultPolicies(db,health);
+      if (!defaultsEnsured) {
+        const health = await matting.health();
+        if (!health.default) throw new Error("The cut-out service has not reported a default. Try again shortly.");
+        await ensureDefaultPolicies(db,health); defaultsEnsured = true;
+      }
       const policy=await resolvePolicy(db,brandSlug,category as ProductType | "*");
-      return policy;
+      // 07 4.12: the operator's CATALOG_QA_DEFAULT_MODEL replaces the built-in first judge; measured rows win.
+      return policy.source === "default" && process.env.CATALOG_QA_DEFAULT_MODEL ? {...policy,qaModel:process.env.CATALOG_QA_DEFAULT_MODEL} : policy;
     }};
 }
 // Keep execution ownership through the Cloud Tasks deadline, plus a short termination grace.

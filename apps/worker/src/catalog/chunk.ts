@@ -50,7 +50,6 @@ export async function handleChunkTask(deps: CatalogDeps, body: Record<string,unk
       const replaced=new Set(allSources.flatMap(source=>source.replacesId ? [source.replacesId]:[]));
       const sources=allSources.filter(source=>!replaced.has(source.id) && (!chunk!.sourceImageIds?.length || chunk!.sourceImageIds.includes(source.id)));
       const sourcePrefix=(source:typeof sources[number])=>source.replacesId ? `${prefix}/replacements-${source.id}`:prefix;
-      if(chunk.stage==="qa") {await runQaStage(deps,batch,sources,policy,underClaim);continue;}
       if(chunk.stage==="matte" && !product.productType && sources.length) {
        let type=batch.productType, flags:typeof sources[number]["flags"]=[];
        if(type==="auto") {
@@ -58,7 +57,7 @@ export async function handleChunkTask(deps: CatalogDeps, body: Record<string,unk
          const cap=await checkCatalogCaps(deps.db,{batchId:batch.id,now:deps.now()});if(!cap.ok) throw new CatalogQaCapError(cap.reason);
          const lowest=allSources.find(source=>!replaced.has(source.id))!;
          const llm=catalogLlmDeps(deps,batch,underClaim);
-         const result=await deps.classifyProductType((await deps.storage.downloadBuffer(lowest.rawUri)).buf,{...llm,model:policy.qaModel});
+         const result=await deps.classifyProductType((await deps.storage.downloadBuffer(lowest.rawUri)).buf,llm);
          llm.assertAvailable();
          type=result.type;flags=result.flags;
         } catch(error) {if(!(error instanceof CatalogQaCapError)) throw error;type="other";flags=["type_unknown"];}
@@ -68,6 +67,8 @@ export async function handleChunkTask(deps: CatalogDeps, body: Record<string,unk
       }
       let productPolicy={...await deps.resolvePolicy(batch.brandSlug,product.productType ?? "other"),qaModel:policy.qaModel,qaModelSecond:policy.qaModelSecond};
       if(product.productType==="other" && sources.some(source=>source.flags.includes("transparent"))) productPolicy={...productPolicy,matteModel:"birefnet-hr-matting"};
+      // Threshold, floor, mode and sampling follow the product's policy; the judge stays the batch's (4.4).
+      if(chunk.stage==="qa") {await runQaStage(deps,batch,sources,productPolicy,underClaim);continue;}
       if(chunk.stage==="matte") {
        await underClaim(async()=>{});
        const health=await deps.matting.health();

@@ -16,7 +16,8 @@ import { renderKey } from "@catalog/core/catalog/pipeline/publish";
 import { compareXlsxCsv,writeLinksXlsx } from "@catalog/core/catalog/sheet";
 import { workbookCsvSheets } from "@catalog/core/catalog/pipeline/report";
 import { cleanupTestBatch,cleanupTestBatches } from "@catalog/core/catalog/test-cleanup";
-import { deriveBatchState } from "@catalog/core/catalog/pipeline/status";
+import { deriveBatchState, QA_CAP_BANNER } from "@catalog/core/catalog/pipeline/status";
+import { strictestChannel } from "@catalog/core/catalog/qa/policy";
 vi.mock(import("@catalog/core/catalog/sheet"),async original=>{const module=await original();return {...module,compareXlsxCsv:vi.fn(module.compareXlsxCsv)};});
 let db:Db,close:()=>Promise<void>;
 beforeAll(async()=>{({db,close}=await createTestDb());},60_000);
@@ -324,4 +325,30 @@ it("spec07 renders into a queued QA delivery before publication",async()=>{
  const [chunk]=await db.select().from(catalogChunks).where(eq(catalogChunks.id,s.chunk.id));
  expect(chunk).toMatchObject({stage:"qa",status:"queued"});
  expect(w.deps.enqueue).not.toHaveBeenCalledWith("/tasks/catalog/publish",expect.anything(),expect.anything());
+},60_000);
+it("spec07 per_source judges one output per source; a placement failure flags only the judged channel",async()=>{
+ const w=world(),s=await seed(w,"qa-per-source",{channels:["noon","amazon"]});
+ vi.mocked(w.deps.judgeOutput).mockImplementation(async input=>({scores:{complete_product:80,same_product:80,edge_quality:80,background_clean:80,no_text_or_watermark:80,orientation_ok:80,placement_ok:20,overall:500/7},verdict:"flag",reasons:["The product sits higher than the other angles."],isCollage:false,costUsd:0,calls:0,usage:{},model:input.model,flags:["placement"]}));
+ for(let i=0;i<3;i++) expect((await handleChunkTask(w.deps,{chunkId:s.chunk.id})).httpStatus).toBe(200);
+ expect(w.deps.judgeOutput).toHaveBeenCalledTimes(1);
+ const judged=strictestChannel(["noon","amazon"]),outputs=await db.select().from(catalogOutputs).where(eq(catalogOutputs.batchId,s.batch.id));
+ const own=outputs.find(o=>o.channel===judged)!,copied=outputs.find(o=>o.channel!==judged)!;
+ expect(vi.mocked(w.deps.judgeOutput).mock.calls[0]![0].channel).toBe(judged);
+ expect(own.status).toBe("needs_attention");expect(own.flags).toContain("placement");expect(own.qaScores).toMatchObject({verdict:"flag",placement_ok:20});
+ expect(copied.status).toBe("staged");expect(copied.flags).not.toContain("placement");expect(copied.qaScores).toMatchObject({verdict:"pass"});
+ expect((await handlePublishTask(w.deps,{batchId:s.batch.id,productId:s.product.id})).outcome).toBe("held");
+},60_000);
+it("spec07 a spending cap hit before QA marks outputs qa_cap, completes the chunk and shows the banner",async()=>{
+ const w=world(),s=await seed(w,"qa-cap");
+ for(let i=0;i<2;i++) await handleChunkTask(w.deps,{chunkId:s.chunk.id});
+ vi.stubEnv("DAILY_SPEND_CAP_USD","0");
+ try { expect((await handleChunkTask(w.deps,{chunkId:s.chunk.id})).httpStatus).toBe(200); } finally { vi.unstubAllEnvs(); }
+ expect(w.deps.judgeOutput).not.toHaveBeenCalled();
+ expect((await db.select().from(catalogChunks).where(eq(catalogChunks.id,s.chunk.id)))[0]!.status).toBe("done");
+ const [output]=await db.select().from(catalogOutputs).where(eq(catalogOutputs.batchId,s.batch.id));
+ expect(output).toMatchObject({status:"needs_attention",reason:"Quality check paused: the spending limit was reached. Look at this image yourself, or raise the limit and start a new batch."});expect(output!.flags).toContain("qa_cap");
+ expect((await handlePublishTask(w.deps,{batchId:s.batch.id,productId:s.product.id})).outcome).toBe("held");
+ expect((await handleFinalizeTask(w.deps,{batchId:s.batch.id})).outcome).toBe("done");
+ const [batch]=await db.select().from(catalogBatches).where(eq(catalogBatches.id,s.batch.id));
+ expect(deriveBatchState(batch!).text).toContain(QA_CAP_BANNER);
 },60_000);

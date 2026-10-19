@@ -73,7 +73,7 @@ export async function runQaStage(deps:CatalogDeps,batch:Batch,sources:Source[],p
      const lowest=QA_DIMENSIONS.filter(key=>key!=="placement_ok" || row.id===judged.id).sort((a,b)=>result.scores[a]-result.scores[b]).map(key=>DIMENSION_FLAGS[key]).find(flag=>flags.includes(flag));
      const issue=unavailable ? "qa_unavailable":lowest ?? (result.isCollage ? "collage":undefined);
      const stable=issue ? flagDetails(issue,{channel:CHANNELS[row.channel].label,n:row.n,k:batch.channels.length}).why:null;
-     await tx.update(catalogOutputs).set({qaScores:{...result.scores,verdict:flagged ? "flag":"pass",reasons:result.reasons.map(reason=>/birefnet|bria|gemini|haiku|qwen|openrouter|google\/|anthropic\//i.test(reason) ? stable ?? "Please compare the made image with the original photo.":reason)},qaModel:result.model,flags:[...new Set([...row.flags,...flags])],status:flagged ? "needs_attention":"staged",reason:flagged ? stable ?? row.reason:row.reason,updatedAt:deps.now()}).where(eq(catalogOutputs.id,row.id));
+     await tx.update(catalogOutputs).set({qaScores:{...result.scores,verdict:flagged ? "flag":"pass",reasons:result.reasons.map(reason=>/birefnet|bria|gemini|haiku|qwen|openrouter|google\/|anthropic\//i.test(reason) ? stable ?? "Please compare the made image with the original photo.":reason)},qaModel:result.model,flags:[...new Set([...row.flags,...(flagged ? flags:flags.filter(flag=>flag==="qa_sampled_out"))])],status:flagged ? "needs_attention":"staged",reason:flagged ? stable ?? row.reason:row.reason,updatedAt:deps.now()}).where(eq(catalogOutputs.id,row.id));
     }
    });
   } catch(error) {
