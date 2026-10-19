@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import sharp from "sharp";
-import { and, eq, inArray, or, sql } from "drizzle-orm";
+import { and, eq, inArray, isNull, or, sql } from "drizzle-orm";
 import { catalogBatches, catalogChunks, catalogOutputs, catalogProducts, catalogSourceImages } from "@catalog/core/db/schema";
 import { CHANNELS, STYLI_MIN_SOURCE_HEIGHT_PX, STYLI_SKIP_LOW_RESOLUTION } from "@catalog/core/catalog/channels";
 import { batchPrefix, derivedPath, publicObjectPath, publicUrl, stagingPath } from "@catalog/core/catalog/naming";
@@ -10,9 +10,19 @@ import { catalogLlmDeps, CatalogQaCapError, runQaStage } from "./qa-stage";
 import { checkCatalogCaps } from "@catalog/core/catalog/qa/caps";
 import { shadowSynthesisAllowed } from "@catalog/core/catalog/qa/policy";
 import { flagReason } from "@catalog/core/catalog/types";
+import { autoActionsOf, withAutoActions, type AutoAction } from "@catalog/core/catalog/auto-resolve";
+import { BREAKER_COOLDOWN_MS, MATTING_TIMEOUT_MS } from "@catalog/core/catalog/matte";
+import { DISPATCH_DEADLINE_SEC } from "@catalog/core/tasks";
+import { resolvePhoto } from "./auto-resolve";
 import { recordCost } from "@catalog/core/spend";
 import type { HandleOptions, HandleResult } from "../server";
 import { CATALOG_TASK_LEASE_MS, enqueueFinalize, refreshBatchProgress, type CatalogDeps } from "./deps";
+
+/** The first wait matches the matting breaker's cool-down, so the retry reaches a half-open service. */
+export const MATTE_RETRY_WAIT_MS = BREAKER_COOLDOWN_MS;
+export const MATTE_RETRY_POLL_MS = 15_000;
+/** Time kept back after a retry for the rest of the delivery's writes. */
+export const MATTE_RETRY_MARGIN_MS = 60_000;
 
 export async function handleChunkTask(deps: CatalogDeps, body: Record<string,unknown>, opts: HandleOptions = {}): Promise<HandleResult> {
   if (typeof body.chunkId !== "string") return {httpStatus:400,outcome:"chunkId is required"};
@@ -27,6 +37,28 @@ export async function handleChunkTask(deps: CatalogDeps, body: Record<string,unk
       if(!owner) throw new Error("Chunk ownership changed.");
       return write(tx as unknown as CatalogDeps["db"]);
     });
+  }
+  let matteRetryFailed = false;
+  /**
+   * One retry of a model cut-out after the service failed (the photo would otherwise be held with the
+   * simple method). Waits for the service's breaker cool-down, then polls its health; retries only
+   * while this delivery still has time for a full matting call, and not again after a retry failed.
+   */
+  async function retryMatte(p:Awaited<ReturnType<CatalogDeps["prepare"]>>,model:string):Promise<{matte:Matte|null;action:AutoAction}> {
+    const action=(result:AutoAction["result"],detail:string):AutoAction=>({step:"matte_retry",trigger:["fallback_matte"],result,channels:[],rejudged:false,detail});
+    const deadline=+started+DISPATCH_DEADLINE_SEC*1000-MATTING_TIMEOUT_MS-MATTE_RETRY_MARGIN_MS, sleep=deps.sleep ?? (ms=>new Promise<void>(resolve=>setTimeout(resolve,ms)));
+    if (matteRetryFailed) return {matte:null,action:action("skipped","an earlier retry in this run failed")};
+    let wait=MATTE_RETRY_WAIT_MS;
+    for (;;) {
+      if (+deps.now()+wait>deadline) return {matte:null,action:action("skipped","not enough time left in this run")};
+      await sleep(wait); await underClaim(async()=>{});
+      const health=await deps.matting.health();
+      if (health.ok && health.models.some(m=>m.id===model)) break;
+      wait=MATTE_RETRY_POLL_MS;
+    }
+    const matte=await deps.matteFor(p,deps.matting,model);
+    if (matte.source==="floodfill") { matteRetryFailed=true; return {matte:null,action:action("failed","the service failed again")}; }
+    return {matte,action:action("passed",matte.model)};
   }
   try {
     const [batch] = await deps.db.select().from(catalogBatches).where(eq(catalogBatches.id,chunk.batchId));
@@ -75,7 +107,11 @@ export async function handleChunkTask(deps: CatalogDeps, body: Record<string,unk
       // 08: an eval batch runs exactly its forced policy (source manual), so each run measures one matte model.
       const forced=!!batch.options.evalSet && batch.isTest && policy.source==="manual";
       let productPolicy=forced ? {...policy} : {...await deps.resolvePolicy(batch.brandSlug,product.productType ?? "other"),qaModel:policy.qaModel,qaModelSecond:policy.qaModelSecond};
-      if(!forced && product.productType==="other" && sources.some(source=>source.flags.includes("transparent"))) productPolicy={...productPolicy,matteModel:"birefnet-hr-matting"};
+      if(!forced && product.productType==="other" && sources.some(source=>source.flags.includes("transparent"))) {
+       // Transparent material gets the policy's second cut-out model (a deployed one); the first becomes the ladder's second choice.
+       const second=productPolicy.matteModelSecond;
+       if(second && second!==productPolicy.matteModel) productPolicy={...productPolicy,matteModel:second,matteModelSecond:productPolicy.matteModel};
+      }
       // Threshold, floor, mode and sampling follow the product's policy; the judge stays the batch's (4.4).
       if(chunk.stage==="qa") {await runQaStage(deps,batch,sources,productPolicy,underClaim);continue;}
       if(chunk.stage==="matte") {
@@ -110,10 +146,21 @@ export async function handleChunkTask(deps: CatalogDeps, body: Record<string,unk
             try { p = await deps.prepare(raw.buf,source.originalName,async b=>{try{return await deps.matting.convert(b);}catch(error){conversionFailure=error;throw error;}}); }
             catch(error) { throw conversionFailure ?? error; }
             await underClaim(async()=>{});
-            const matte = await deps.matteFor(p,deps.matting,productPolicy.matteModel); mattingMs += matte.ms;
+            let matte = await deps.matteFor(p,deps.matting,productPolicy.matteModel); mattingMs += matte.ms;
+            // 07 auto-resolve: the cut-out service was down. Retry once it responds, within this delivery's time budget, before holding.
+            let retry: AutoAction | null = null;
+            if (matte.source === "floodfill") {
+              const retried = await retryMatte(p,productPolicy.matteModel);
+              retry = retried.action; mattingMs += retried.matte?.ms ?? 0;
+              if (retried.matte) matte = retried.matte;
+            }
             const fallback = matte.source === "floodfill", flags = [...new Set([...source.flags,...p.flags,...(fallback ? ["fallback_matte" as const]:[])])];
+            const record = retry;
+            if (record) await underClaim(async tx=>{for (const row of pending) await tx.update(catalogOutputs).set({compliance:withAutoActions(row.compliance,[record])}).where(eq(catalogOutputs.id,row.id));});
             await underClaim(async tx=>tx.update(catalogSourceImages).set({matteModel:matte.model,matteMs:matte.ms,width:p.width,height:p.height,flags}).where(eq(catalogSourceImages.id,source.id)));
-            if (fallback) await underClaim(async tx=>tx.update(catalogOutputs).set({status:"needs_attention",flags:["fallback_matte"],reason:flagReason("fallback_matte"),updatedAt:deps.now()}).where(and(eq(catalogOutputs.sourceImageId,source.id),eq(catalogOutputs.batchId,batch.id),eq(catalogOutputs.status,"pending"))));
+            // The retry failed too: the outputs still render with the simple cut-out so the operator sees
+            // something, and carry `fallback_matte` (render marks them needs_attention; triage decides).
+            if (fallback) await underClaim(async tx=>{for (const row of pending) await tx.update(catalogOutputs).set({flags:[...new Set([...row.flags,"fallback_matte" as const])],reason:flagReason("fallback_matte"),updatedAt:deps.now()}).where(and(eq(catalogOutputs.id,row.id),eq(catalogOutputs.status,"pending")));});
             const png = await sharp(matte.alpha,{raw:{width:p.width,height:p.height,channels:1}}).png().toBuffer();
             await underClaim(async()=>deps.storage.uploadBuffer(mattePath,png,"image/png"));
             await underClaim(async tx=>tx.update(catalogSourceImages).set({matteUri:gs,status:"matted"}).where(eq(catalogSourceImages.id,source.id)));
@@ -151,17 +198,31 @@ export async function handleChunkTask(deps: CatalogDeps, body: Record<string,unk
           const outputs = await deps.db.select().from(catalogOutputs).where(and(eq(catalogOutputs.sourceImageId,source.id),eq(catalogOutputs.batchId,batch.id),eq(catalogOutputs.status,"pending")));
           for (const output of outputs) try {
             const path = stagingPath(prefix,product.pathKey,output.channel,source.n), uri = deps.storage.toGsUri(deps.storage.getBucketName(),path), head = await deps.storage.headObject(uri);
-            if (head.exists && output.bytes !== null && head.size===output.bytes) { await underClaim(async tx=>tx.update(catalogOutputs).set({stagingUri:uri,crc32c:head.crc32c,status:output.flags.some(f=>f==="small_source" || f==="failed_compliance") ? "needs_attention":"staged",updatedAt:deps.now()}).where(eq(catalogOutputs.id,output.id))); continue; }
+            if (head.exists && output.bytes !== null && head.size===output.bytes) { await underClaim(async tx=>tx.update(catalogOutputs).set({stagingUri:uri,crc32c:head.crc32c,status:output.flags.some(f=>f==="small_source" || f==="failed_compliance" || f==="fallback_matte") ? "needs_attention":"staged",updatedAt:deps.now()}).where(eq(catalogOutputs.id,output.id))); continue; }
             const renderStart = +deps.now();
             const rendered = (await deps.renderAllChannels(p,matte,[output.channel],{shotNumber:source.n,productType:product.productType ?? "other",synthesiseShadow:shadowSynthesisAllowed(product.productType,source.flags),identifier:product.identifier,publicObjectPath:output.objectPath,canvas:productPlan(output.channel)?.canvas,...(output.channel==="styli" ? {uniformScale}:{})}))[output.channel];
             renderMs += +deps.now()-renderStart;
-            const flags = [...new Set([...source.flags,...rendered.flags])], status = rendered.status==="skipped" ? "skipped":!rendered.compliance.ok || flags.includes("small_source") ? "needs_attention":rendered.jpeg ? "staged":"failed";
-            const patch = {canvasW:rendered.plan.w,canvasH:rendered.plan.h,scale:rendered.plan.scale,placedX:rendered.plan.placedX,placedY:rendered.plan.placedY,bytes:rendered.bytes,quality:rendered.quality,flags,compliance:rendered.compliance,reason:rendered.notes.join("; ") || (flags.includes("small_source") ? flagReason("small_source"):null),updatedAt:deps.now()};
+            const flags = [...new Set([...source.flags,...rendered.flags])], status = rendered.status==="skipped" ? "skipped":!rendered.compliance.ok || flags.includes("small_source") || flags.includes("fallback_matte") ? "needs_attention":rendered.jpeg ? "staged":"failed";
+            const patch = {canvasW:rendered.plan.w,canvasH:rendered.plan.h,scale:rendered.plan.scale,placedX:rendered.plan.placedX,placedY:rendered.plan.placedY,bytes:rendered.bytes,quality:rendered.quality,flags,compliance:{...rendered.compliance,auto_actions:autoActionsOf(output.compliance)},reason:rendered.notes.join("; ") || (flags.includes("small_source") ? flagReason("small_source"):null),updatedAt:deps.now()};
             await underClaim(async tx=>tx.update(catalogOutputs).set(patch).where(eq(catalogOutputs.id,output.id)));
             if (rendered.jpeg) { const jpeg=rendered.jpeg; await underClaim(async()=>deps.storage.uploadBuffer(path,jpeg,"image/jpeg",{cacheControl:deps.storage.PUBLIC_CACHE_CONTROL})); }
             const staged = rendered.jpeg ? await deps.storage.headObject(uri):null;
             await underClaim(async tx=>tx.update(catalogOutputs).set({status,stagingUri:rendered.jpeg ? uri:null,crc32c:staged?.crc32c ?? null,updatedAt:deps.now()}).where(eq(catalogOutputs.id,output.id)));
           } catch(error) { const reason = error instanceof Error ? error.message:String(error); await underClaim(async tx=>tx.update(catalogOutputs).set({status:"failed",error:reason,reason,updatedAt:deps.now()}).where(eq(catalogOutputs.id,output.id))); }
+          // 07 auto-resolve: a channel rule we broke (placement, margins, background) is re-made before
+          // anything is held: shadow off, second matte, 5% smaller fit, the winner on every channel.
+          const photo = await deps.db.select().from(catalogOutputs).where(and(eq(catalogOutputs.sourceImageId,source.id),eq(catalogOutputs.batchId,batch.id),isNull(catalogOutputs.decision),inArray(catalogOutputs.status,["staged","needs_attention"])));
+          // Once per photo: a redelivered chunk does not climb the ladder again.
+          const failing = photo.filter(row=>row.flags.includes("failed_compliance") && !autoActionsOf(row.compliance).some(action=>action.trigger.includes("failed_compliance")));
+          if (failing.length) try {
+            await resolvePhoto(deps,{batch,product,source,policy:productPolicy,underClaim,outputs:photo,failing,trigger:["failed_compliance"],prepared:p,matte,
+              shadowAllowed:shadowSynthesisAllowed(product.productType,source.flags),statusFor:flags=>flags.includes("small_source") || flags.includes("failed_compliance") || flags.includes("fallback_matte") ? "needs_attention":"staged",
+              contextFor:row=>({...(productPlan(row.channel) ? {canvas:productPlan(row.channel)!.canvas}:{}),...(row.channel==="styli" && uniformScale!==undefined ? {uniformScale}:{})})});
+          } catch(error) {
+            // The ladder only improves an image; the photo keeps its flags (and its decision path) when it breaks.
+            if (error instanceof Error && /ownership changed/.test(error.message)) throw error;
+            deps.log("catalog auto-resolve failed",{batchId:batch.id,sourceImageId:source.id,error:error instanceof Error ? error.message:String(error)});
+          }
         }
       }
     }

@@ -10,7 +10,9 @@ export interface Matte { alpha: Buffer; width: number; height: number; model: st
 export interface BBox { x: number; y: number; w: number; h: number }
 export interface CanvasPlan { w: number; h: number; lowResolution: boolean; safeBox: BBox; scale: number; placedX: number; placedY: number; detailShot: boolean; sourceBox?: BBox; productBox?: BBox; cut?: CutEdges }
 /** `canvas`: the product's one canvas on this channel (planProduct), so every angle shares one size. */
-export interface RenderInput { prepared: Prepared; matte: Matte; channel: ChannelId; shotNumber: number; productType: ProductType; uniformScale?: number; canvas?: Size; identifier?: string; publicObjectPath?: string; /** false forbids a synthesised shadow (05 rule 3); absent leaves the product-type rule. */ synthesiseShadow?: boolean }
+export interface RenderInput { prepared: Prepared; matte: Matte; channel: ChannelId; shotNumber: number; productType: ProductType; uniformScale?: number; canvas?: Size; identifier?: string; publicObjectPath?: string; /** false forbids a synthesised shadow (05 rule 3); absent leaves the product-type rule. */ synthesiseShadow?: boolean;
+  /** Below 1 shrinks the fitted product by this factor (the auto-resolve ladder's smaller fit); absent is 1. */ fitScale?: number;
+  /** Overrides CUT_EDGE_MIN_RUN_FRACTION for the cut detector (a judge-confirmed cut the 25% rule missed). */ cutMinRunFraction?: number }
 export interface RenderOutput { jpeg: Buffer | null; status: "ok" | "skipped" | "failed"; plan: CanvasPlan; quality: number; bytes: number; flags: OutputFlag[]; notes: string[]; attention: { why: string; what: string } | null; compliance: { ok: boolean; failures: string[] } }
 export interface RenderKeyInputs { sourceSha256: string; channel: ChannelId; rulesVersion: string; policyId: string; policyUpdatedAt: string; n: number }
 
@@ -64,17 +66,18 @@ export interface ShotGeometry { box: BBox; source: Size; cut: CutEdges }
  * cut mid-jeans, a head-and-shoulders crop). A side is cut when the product box edge lies within the
  * white border band (CUT_EDGE_BORDER_FRACTION of the frame) and its outermost line, allowing for the
  * matte's soft fade (CUT_EDGE_FRINGE_FRACTION), holds a straight run of opaque matte
- * (alpha >= CUT_EDGE_OPAQUE_ALPHA) at least CUT_EDGE_MIN_RUN_FRACTION of the box side.
+ * (alpha >= CUT_EDGE_OPAQUE_ALPHA) at least CUT_EDGE_MIN_RUN_FRACTION of the box side (or
+ * `opts.minRunFraction`, which the auto-resolve loop lowers when the judge saw a cut the rule missed).
  * The box is trimmed to that cut line, so the hard cut, not the matte's soft fade into the border
  * beyond it, meets the canvas edge. Nothing of the product inside the cut line is removed.
  */
-export function shotGeometry(alpha: Buffer, width: number, height: number): ShotGeometry | null {
+export function shotGeometry(alpha: Buffer, width: number, height: number, opts: { minRunFraction?: number | undefined } = {}): ShotGeometry | null {
   const tight = bbox(alpha, width, height);
   if (!tight) return null;
-  const box = { ...tight }, cut = { ...NO_CUT };
+  const box = { ...tight }, cut = { ...NO_CUT }, minRun = opts.minRunFraction ?? CUT_EDGE_MIN_RUN_FRACTION;
   const longestRun = (count: number, at: (i: number) => number) => { let best = 0, run = 0; for (let i = 0; i < count; i++) { run = at(i) >= CUT_EDGE_OPAQUE_ALPHA ? run + 1 : 0; if (run > best) best = run; } return best; };
-  const rowCut = (y: number) => longestRun(tight.w, i => alpha[y * width + tight.x + i]!) >= tight.w * CUT_EDGE_MIN_RUN_FRACTION;
-  const colCut = (x: number) => longestRun(tight.h, i => alpha[(tight.y + i) * width + x]!) >= tight.h * CUT_EDGE_MIN_RUN_FRACTION;
+  const rowCut = (y: number) => longestRun(tight.w, i => alpha[y * width + tight.x + i]!) >= tight.w * minRun;
+  const colCut = (x: number) => longestRun(tight.h, i => alpha[(tight.y + i) * width + x]!) >= tight.h * minRun;
   const band = (side: number) => Math.max(CUT_EDGE_BORDER_MIN_PX, Math.ceil(side * CUT_EDGE_BORDER_FRACTION));
   const fringe = Math.max(CUT_EDGE_FRINGE_MIN_PX, Math.ceil(Math.max(width, height) * CUT_EDGE_FRINGE_FRACTION));
   const lastY = tight.y + tight.h - 1, lastX = tight.x + tight.w - 1;
@@ -115,9 +118,10 @@ function proportionalCanvas(spec: ChannelSpec, fraction: number, roundUp: boolea
 
 /**
  * `opts.canvas` (planProduct) raises an adaptive canvas to the product's one canvas on this channel;
- * `opts.cut` places each cut side flush with the canvas edge (margin 0 there, other margins kept).
+ * `opts.cut` places each cut side flush with the canvas edge (margin 0 there, other margins kept);
+ * `opts.fitScale` (below 1) shrinks the product by that factor inside the same canvas.
  */
-export function planCanvas(spec: ChannelSpec, box: BBox, source: Size, opts: { uniformScale?: number | undefined; canvas?: Size | undefined; cut?: CutEdges | undefined }): CanvasPlan {
+export function planCanvas(spec: ChannelSpec, box: BBox, source: Size, opts: { uniformScale?: number | undefined; canvas?: Size | undefined; cut?: CutEdges | undefined; fitScale?: number | undefined }): CanvasPlan {
   const cut = opts.cut ?? NO_CUT, wide = box.w > box.h;
   const fit = (size: Size) => { const safe = safeBoxFor(spec, size, wide, cut); return Math.min(safe.w / box.w, safe.h / box.h); };
   const min = effectiveMinimum(spec), target = spec.targetCanvas;
@@ -132,7 +136,8 @@ export function planCanvas(spec: ChannelSpec, box: BBox, source: Size, opts: { u
   }
   const safeBox = safeBoxFor(spec, size, wide, cut);
   const detailShot = box.w / source.w > DETAIL_SHOT_BBOX_FRACTION || box.h / source.h > DETAIL_SHOT_BBOX_FRACTION;
-  const scale = Math.min(fit(size), spec.uniformScaleDefault && !detailShot ? opts.uniformScale ?? Infinity : Infinity);
+  // `fitScale` (below 1) shrinks the product inside the same canvas; anchoring and cut edges are unchanged.
+  const scale = Math.min(fit(size), spec.uniformScaleDefault && !detailShot ? opts.uniformScale ?? Infinity : Infinity) * Math.min(1, opts.fitScale ?? 1);
   const w = Math.max(1, Math.min(safeBox.w, Math.round(box.w * scale))), h = Math.max(1, Math.min(safeBox.h, Math.round(box.h * scale)));
   // A cut side is anchored to its canvas edge; with both opposite sides cut, the bottom wins vertically and the product stays centred horizontally.
   const placedX = safeBox.x + (cut.left && !cut.right ? 0 : cut.right && !cut.left ? safeBox.w - w : Math.round((safeBox.w - w) / 2));
@@ -155,8 +160,8 @@ export function planProduct(spec: ChannelSpec, shots: { box: BBox; source: Size;
 export async function renderSource(input: RenderInput): Promise<RenderOutput> {
   const { prepared: p, matte, shotNumber } = input, spec = channel(input.channel);
   if (matte.width !== p.width || matte.height !== p.height) throw new Error("Matte and source dimensions must match");
-  const geometry = shotGeometry(matte.alpha, p.width, p.height), box = geometry?.box ?? null, cut = geometry?.cut ?? NO_CUT;
-  const plan = planCanvas(spec, box ?? { x: 0, y: 0, w: p.width, h: p.height }, { w: p.width, h: p.height }, { uniformScale: input.uniformScale, canvas: input.canvas, cut });
+  const geometry = shotGeometry(matte.alpha, p.width, p.height, { minRunFraction: input.cutMinRunFraction }), box = geometry?.box ?? null, cut = geometry?.cut ?? NO_CUT;
+  const plan = planCanvas(spec, box ?? { x: 0, y: 0, w: p.width, h: p.height }, { w: p.width, h: p.height }, { uniformScale: input.uniformScale, canvas: input.canvas, cut, fitScale: input.fitScale });
   const result: RenderOutput = { jpeg: null, status: "failed", plan, quality: JPEG_QUALITY_START, bytes: 0, flags: [...p.flags], notes: [], attention: null, compliance: { ok: false, failures: [] } };
   if (!box) { result.notes.push("No product was found in this photo."); return result; }
   if (matte.source === "floodfill") result.flags.push("fallback_matte");
@@ -170,7 +175,7 @@ export async function renderSource(input: RenderInput): Promise<RenderOutput> {
   if (spec.uniformScaleDefault && !plan.detailShot && input.uniformScale !== undefined && input.uniformScale > plan.scale) result.notes.push("Could not keep the same size as the other angles without cutting; fitted instead");
   const color = backgroundFor(spec.id, shotNumber), product = plan.productBox!;
   const rgbColor = hexColor(color);
-  const passthrough = p.sourceMime === "image/jpeg" && !p.alphaSource && !anyCut(cut) && p.width === plan.w && p.height === plan.h && box.x >= plan.safeBox.x && box.y >= plan.safeBox.y && box.x + box.w <= plan.safeBox.x + plan.safeBox.w && box.y + box.h <= plan.safeBox.y + plan.safeBox.h && borderPixels(p.width, p.height).every(i => rgbColor.every((v, c) => Math.abs(p.rgb[i * 3 + c]! - v) <= BG_TOLERANCE));
+  const passthrough = p.sourceMime === "image/jpeg" && !p.alphaSource && !anyCut(cut) && (input.fitScale ?? 1) >= 1 && p.width === plan.w && p.height === plan.h && box.x >= plan.safeBox.x && box.y >= plan.safeBox.y && box.x + box.w <= plan.safeBox.x + plan.safeBox.w && box.y + box.h <= plan.safeBox.y + plan.safeBox.h && borderPixels(p.width, p.height).every(i => rgbColor.every((v, c) => Math.abs(p.rgb[i * 3 + c]! - v) <= BG_TOLERANCE));
   let image: Buffer;
   const foregroundMask = Buffer.alloc(plan.w * plan.h);
   if (passthrough) {

@@ -324,6 +324,40 @@ limit was reached"; `failed_compliance` "did not meet <Channel>'s rules". Clause
 "; " and the line ends with ".", giving the v2 lines "Photo 4 is too small for Styli; photo 5 could
 not be read." and "Photo 3 looks like a different product from the others."
 
+### 4.6a Automatic resolution before a hold (auto-resolve)
+
+Defects we produced are re-made by the pipeline before a product is ever held.
+- Triggers (`OWN_DEFECT_FLAGS`, `packages/core/src/catalog/auto-resolve.ts`): `halo` and
+  `leftover_background` (the judge's `edge_quality` and `background_clean` under their lines),
+  `failed_compliance` (a channel rule we broke, including placement: margins, Styli guide, Noon
+  side margins) and `placement`.
+- Ladder, per photo, in order, checked on the failing channels: (a) re-render with the synthesised
+  shadow off (skipped when none was added), (b) re-matte with the policy's `matteModelSecond` and
+  re-render (skipped when absent, equal to the first or not listed by the matting services), (c)
+  re-render with a 5% smaller fit (`SMALLER_FIT_SCALE`) in the same canvas. The shadow stays off
+  after (a). After each step the compliance guard runs again and, when the judge flagged the photo,
+  the strictest failing channel is re-judged once (the judge caps apply; a cap ends the ladder).
+- The first step that passes is applied to every channel of the photo (a channel the step would
+  break keeps its first image). A winning second matte becomes the photo's stored matte.
+- Where: compliance failures in the render stage (`chunk.ts`, before the judge sees the image);
+  judge flags in the QA stage through `CatalogDeps.repairOwnDefects` (`qa-stage.ts`), after judging
+  and before `triageProduct`.
+- Record: every step and its result is appended to `catalog_outputs.compliance.auto_actions`
+  (`step`, `trigger`, `result` passed | failed | skipped, `channels`, `rejudged`, `detail`) and
+  written to `report-v<k>.json` per output as `autoActions`. No schema change.
+- Ladder exhausted: triage drops the photo with the drop note and the information flag
+  `auto_dropped` when it is not photo 1 and at least two good photos remain on the channel;
+  otherwise it holds with the existing flag. Our own defects are never published with a note.
+- Source problems (`cut_in_source`, `small_source`, `text_or_watermark`, `orientation`) follow the
+  triage: note-only or drop-with-note, held only for photo 1 or the last usable photo. When the judge
+  scores `complete_product` under its line and the cut detector found no cut, every channel is
+  re-rendered with the relaxed cut run fraction `JUDGED_CUT_MIN_RUN_FRACTION` (0.1; a knee-level cut
+  measures about 22%, under the 25% rule) so the cut sits flush; recorded as `flush_cut`.
+- Fallback matte: when the cut-out service fails, the matte stage waits for the breaker cool-down,
+  polls the service's health and retries the model once while the delivery still has time for a full
+  matting call (`matte_retry`). If the retry fails the photo still renders with the simple cut-out
+  and carries `fallback_matte`, so the operator sees an image.
+
 ### 4.7 Attention model and decisions
 
 `listAttention(db, batchId)` returns 06's `AttentionProduct[]` for products of the batch with at

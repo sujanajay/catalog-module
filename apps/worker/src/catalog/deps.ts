@@ -5,6 +5,7 @@ import { ensureDefaultPolicies, resolvePolicy } from "@catalog/core/catalog/qa/p
 import { judgeOutput } from "@catalog/core/catalog/qa/judge";
 import { classifyProductType } from "@catalog/core/catalog/qa/classify";
 import type { RepairOwnDefects } from "@catalog/core/catalog/qa/triage";
+import { repairOwnDefects, type QaRepairContext } from "./qa-stage";
 import type { ProductType } from "@catalog/core/catalog/types";
 import { MattingClient, matteFor } from "@catalog/core/catalog/matte";
 import { prepare, renderAllChannels } from "@catalog/core/catalog/render";
@@ -17,8 +18,10 @@ export interface CatalogDeps {
   resolvePolicy: (brandSlug:string,category:string) => Promise<ResolvedPolicy>;
   judgeOutput: typeof judgeOutput; classifyProductType: typeof classifyProductType;
   prepare: typeof prepare; matteFor: typeof matteFor; renderAllChannels: typeof renderAllChannels;
-  /** Extension point for the re-render-and-re-judge loop; absent means nothing is repaired (qa/triage.ts). */
-  repairOwnDefects?: RepairOwnDefects;
+  /** Waits between cut-out retries (07 auto-resolve); absent uses a timer. Tests pass an instant one. */
+  sleep?: (ms: number) => Promise<void>;
+  /** The re-render-and-re-judge loop run before triage (qa/triage.ts); absent repairs nothing. */
+  repairOwnDefects?: RepairOwnDefects<QaRepairContext>;
 }
 let sharedMatting: MattingClient | undefined;
 // Default rows are check-then-insert; once per process is enough.
@@ -26,7 +29,7 @@ let defaultsEnsured = false;
 export function workerCatalogDeps(db: Db): CatalogDeps {
   sharedMatting ??= new MattingClient({services:[{baseUrl:process.env.MATTING_URL ?? "http://localhost:8081",target:"cpu"},...(process.env.MATTING_GPU_URL ? [{baseUrl:process.env.MATTING_GPU_URL,target:"gpu" as const}]:[])]});
   const matting = sharedMatting;
-  return {db,storage,matting,enqueue:enqueueTask,fetch,now:()=>new Date(),log:(message,fields)=>console.info(JSON.stringify({message,...fields})),prepare,matteFor,renderAllChannels,judgeOutput,classifyProductType,
+  return {db,storage,matting,enqueue:enqueueTask,fetch,now:()=>new Date(),log:(message,fields)=>console.info(JSON.stringify({message,...fields})),prepare,matteFor,renderAllChannels,judgeOutput,classifyProductType,repairOwnDefects,
     resolvePolicy:async(brandSlug,category)=> {
       if (!defaultsEnsured) {
         const health = await matting.health();
