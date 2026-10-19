@@ -3,6 +3,7 @@ import { channel } from "@catalog/core/catalog/channels";
 import { getPublicBucketName } from "@catalog/core/storage";
 import type { BatchCounts, ChannelId } from "@catalog/core/catalog/types";
 import NotRefreshedLine from "./NotRefreshedLine";
+import { plural } from "../../lib/catalog/copy";
 
 type DetailsProps = {
   id: string;
@@ -30,7 +31,7 @@ export default function DetailsTab({ id, brand, isTest, counts, failures, rechec
       <NotRefreshedLine items={notRefreshedChannels} />
       {failures.length > 0 && (
         <div role="alert">
-          <p>{failures.length} image(s) could not be made.</p>
+          <p>{failures.length} {plural(failures.length, "image", "images")} could not be made.</p>
           {failures.map((f, i) => (
             <p key={i}>{f.originalName} for {channel(f.channel).label}: {(f.reason ?? f.error ?? "Could not be made").replace(/[.]+$/, "")}. Replace it from the Needs attention tab.</p>
           ))}

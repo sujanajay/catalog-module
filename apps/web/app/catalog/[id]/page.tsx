@@ -20,6 +20,7 @@ import SheetPreview from "@/components/catalog/SheetPreview";
 import DetailsTab from "@/components/catalog/DetailsTab";
 import NotRefreshedLine from "@/components/catalog/NotRefreshedLine";
 import CostLine from "@/components/catalog/CostLine";
+import { plural } from "@/lib/catalog/copy";
 import SkuMapModal from "@/components/catalog/SkuMapModal";
 import { EvalList } from "@/components/catalog/EvalLabelBar";
 
@@ -62,7 +63,7 @@ export default async function BatchPage({ params, searchParams }: { params: Prom
   const next: Record<string, string> = {
     processing: "You can close this page; nothing stops.",
     collecting: "We copy your files first so the batch does not depend on the Drive folder later. Processing starts automatically.",
-    attention: `Open "Needs attention" for the ${batch.counts.attentionProducts} products with a problem.`,
+    attention: `Open "Needs attention" for the ${batch.counts.attentionProducts} ${plural(batch.counts.attentionProducts, "product", "products")} with a problem.`,
     ready: "Download the sheet and paste the links into the marketplace templates.",
     failed: "Nothing was processed and nothing was charged.",
   };
@@ -87,7 +88,7 @@ export default async function BatchPage({ params, searchParams }: { params: Prom
       <AutoRefresh active={state.state === "collecting" || state.state === "processing"} />
       <BatchTabs
         attentionCount={attention.length}
-        evalLabel={evalPage ? `Needs attention (${evalPage.total} images)` : undefined}
+        evalLabel={evalPage ? `Needs attention (${evalPage.total} ${plural(evalPage.total, "image", "images")})` : undefined}
         initialTab={evalMode && (query.page || query.channel || query.verdict) ? "attention" : undefined}
         overview={
           <div className="grid2">

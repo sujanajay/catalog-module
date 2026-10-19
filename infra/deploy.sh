@@ -99,21 +99,22 @@ if [ -n "${COMPUTE_USD_PER_VCPU_SECOND:-}" ]; then
   WORKER_ENV+=",COMPUTE_USD_PER_VCPU_SECOND=$COMPUTE_USD_PER_VCPU_SECOND"
 fi
 # 07: the QA judge and its spend caps. Override from the shell like BQ_PROJECT, e.g.
-# INR_PER_USD=84 bash infra/deploy.sh. CATALOG_QA_DEFAULT_MODEL is engineering config only; it is
+# INR_PER_USD=83.5 bash infra/deploy.sh. CATALOG_QA_DEFAULT_MODEL is engineering config only; it is
 # never shown to the operator. It has no leading "/", so Git Bash leaves it alone.
+# INR_PER_USD defaults to 84 (spec 07 4.11 states no rate) so the cost line and the wizard estimate
+# show rupees; update when the rate moves.
 CATALOG_QA_DEFAULT_MODEL=${CATALOG_QA_DEFAULT_MODEL:-google/gemini-2.5-flash-lite}
 DAILY_SPEND_CAP_USD=${DAILY_SPEND_CAP_USD:-10}
-INR_PER_USD=${INR_PER_USD:-}
+INR_PER_USD=${INR_PER_USD:-84}
 [[ "$CATALOG_QA_DEFAULT_MODEL" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._:-]+$ ]] || { echo "CATALOG_QA_DEFAULT_MODEL must look like provider/model" >&2; exit 1; }
 [[ "$DAILY_SPEND_CAP_USD" =~ ^[0-9]+([.][0-9]+)?$ ]] || { echo "DAILY_SPEND_CAP_USD must be a non-negative number" >&2; exit 1; }
-[[ -z "$INR_PER_USD" || "$INR_PER_USD" =~ ^[0-9]+([.][0-9]+)?$ ]] || { echo "INR_PER_USD must be a number or unset" >&2; exit 1; }
+[[ "$INR_PER_USD" =~ ^[0-9]+([.][0-9]+)?$ ]] || { echo "INR_PER_USD must be a number such as 84" >&2; exit 1; }
 WORKER_ENV+=",CATALOG_QA_DEFAULT_MODEL=$CATALOG_QA_DEFAULT_MODEL,DAILY_SPEND_CAP_USD=$DAILY_SPEND_CAP_USD"
 WEB_ENV="$ENV_VARS,DB_POOL_MAX=3,SHARE_SA_EMAIL=$WEB_SA,CATALOG_CHUNK_IMAGES=$CHUNK_IMAGES"
-# INR_PER_USD is optional: unset, the cost line shows USD and the wizard shows no estimate (07 4.11).
-if [ -n "$INR_PER_USD" ]; then
-  WORKER_ENV+=",INR_PER_USD=$INR_PER_USD"
-  WEB_ENV+=",INR_PER_USD=$INR_PER_USD"
-fi
+# INR_PER_USD reaches the web (cost line, wizard estimate), the worker (finalize) and, through
+# WORKER_ENV, the Cloud Run jobs (07 4.11).
+WORKER_ENV+=",INR_PER_USD=$INR_PER_USD"
+WEB_ENV+=",INR_PER_USD=$INR_PER_USD"
 # 03: the web verifies the IAP JWT against this exact audience and accepts only this domain.
 IAP_AUDIENCE=/projects/$PN/locations/$REGION/services/$WEB_SERVICE
 WEB_ENV+=",IAP_AUDIENCE=$IAP_AUDIENCE,ALLOWED_HOSTED_DOMAIN=opptra.com"

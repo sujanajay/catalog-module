@@ -1,3 +1,4 @@
+import { RUPEES_NOT_CONFIGURED } from "@catalog/core/catalog/cost";
 import { money } from "../../lib/catalog/copy";
 
 /** Only the figures of 07's costLine; no policy or model data reaches the page. */
@@ -11,7 +12,7 @@ export default function CostLine({ line }: { line: CostLineData }) {
     return <p className="cost-line"><strong className="cost-fig">INR {money(line.inrPerIdentifier)}</strong> per style so far · {REFERENCE}</p>;
   }
   if (line.usdPerIdentifier !== null) {
-    return <p className="cost-line"><strong className="cost-fig">USD {money(line.usdPerIdentifier)}</strong> per style so far (set INR_PER_USD to show rupees) · {REFERENCE}</p>;
+    return <p className="cost-line"><strong className="cost-fig">USD {money(line.usdPerIdentifier)}</strong> per style so far · {RUPEES_NOT_CONFIGURED} · {REFERENCE}</p>;
   }
   return <p className="cost-line">Cost per style is not available yet · {REFERENCE}</p>;
 }

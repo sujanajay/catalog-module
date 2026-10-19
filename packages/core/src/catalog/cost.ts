@@ -9,6 +9,8 @@ export const COMPUTE_SECONDS_PER_OUTPUT_ESTIMATE = 1.5;
  * stays 0 until the env var is set (06 4.5).
  */
 export const DEFAULT_COMPUTE_USD_PER_VCPU_SECOND = 0.000024;
+/** Operator copy when no rupee rate is configured; never names the env var (spec 07 4.11). */
+export const RUPEES_NOT_CONFIGURED = "Cost in rupees is not configured yet";
 function positive(value: string | undefined): number | null {
  const number = value?.trim() ? Number(value) : NaN;
  return Number.isFinite(number) && number > 0 ? number : null;
@@ -23,7 +25,7 @@ export function costLine(batch:CostBatch,env:NodeJS.ProcessEnv=process.env) {
  const usdPerIdentifier = identifiers > 0 ? usd/identifiers : null;
  const rate = positive(env.INR_PER_USD);
  const inrPerIdentifier = usdPerIdentifier !== null && rate !== null ? usdPerIdentifier*rate : null;
- const text = usdPerIdentifier === null ? "Cost per style is not available yet" : inrPerIdentifier === null ? `USD ${usdPerIdentifier.toFixed(2)} per style so far (set INR_PER_USD to show rupees)` : `INR ${inrPerIdentifier.toFixed(2)} per style so far`;
+ const text = usdPerIdentifier === null ? "Cost per style is not available yet" : inrPerIdentifier === null ? `USD ${usdPerIdentifier.toFixed(2)} per style so far · ${RUPEES_NOT_CONFIGURED}` : `INR ${inrPerIdentifier.toFixed(2)} per style so far`;
  return {usd,identifiers,usdPerIdentifier,inrPerIdentifier,text:`${text} · agency reference INR 60 per style`};
 }
 export interface EstimateCounts {

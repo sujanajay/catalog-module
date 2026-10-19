@@ -105,7 +105,7 @@ test("real wizard, downloadable JPEG links, identical delivery and changed/dropp
     await page.getByRole("button",{name:"Start processing",exact:true}).click();
     await expect(page).toHaveURL(/\/catalog\/[a-f0-9-]{36}$/);
     const id=new URL(page.url()).pathname.split("/").at(-1)!;ids.add(id);
-    await expect(page.getByRole("status").filter({hasText:/Ready|need your attention/})).toBeVisible({timeout:WAIT-10*60_000});
+    await expect(page.getByRole("status").filter({hasText:/Ready|needs? your attention/})).toBeVisible({timeout:WAIT-10*60_000});
     await page.getByRole("tab",{name:"Details",exact:true}).click();
     const verified=await page.getByText(/^Links verified: \d+ of \d+$/).textContent(),rechecked=await page.getByText(/^Independent re-check: \d+ of \d+ OK$/).textContent();
     const v=verified!.match(/(\d+) of (\d+)/)!,r=rechecked!.match(/(\d+) of (\d+)/)!;
@@ -164,7 +164,7 @@ test("needs attention actions, Opptra SKU ids and the updated links sheet",async
     await page.getByRole("button",{name:"Start processing",exact:true}).click();
     await expect(page).toHaveURL(/\/catalog\/[a-f0-9-]{36}$/);
     const batchUrl=new URL(page.url()).pathname,id=batchUrl.split("/").at(-1)!;ids.add(id);
-    await expect(page.getByRole("status").filter({hasText:/need your attention/})).toBeVisible({timeout:WAIT-10*60_000});
+    await expect(page.getByRole("status").filter({hasText:/needs? your attention/})).toBeVisible({timeout:WAIT-10*60_000});
 
     // Step 7: "Use as is" on the first photo; once the product has no undecided photo it resolves.
     const tab=page.getByRole("tab",{name:/^Needs attention \(\d+ products?\)$/});
