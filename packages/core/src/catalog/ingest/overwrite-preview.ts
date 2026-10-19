@@ -5,7 +5,7 @@
 // which existing products will be overwritten and which of their live shots will be removed, which
 // new identifiers look like a rename, which two spellings are one product, and which products are
 // still held by another batch.
-import { and, eq, inArray, notInArray } from "drizzle-orm";
+import { and, eq, inArray } from "drizzle-orm";
 import type { Db } from "../../db/client";
 import {
   catalogBatches,
@@ -17,14 +17,12 @@ import {
 } from "../../db/schema";
 import { normalizeKey, sanitizeSegment } from "../naming";
 import { resolveSkus } from "../sku-mapping";
-import type { BatchStatus } from "../types";
 import { sameProductMessage } from "./group";
 import type { GroupingResult, OverwritePreview, SourceItem } from "./types";
 
 export interface ProductMatch { identifier: string; productId: string | null; pathKey: string; isNew: boolean; matchedBy: "alias" | "option_key" | null }
 
 /** A batch in one of these states no longer holds its product locks. */
-const FINISHED_STATUSES: BatchStatus[] = ["done", "failed"];
 
 /** Values per IN (...) list, well below the Postgres limit of 65,535 bind parameters per query. */
 const IN_LIST_MAX = 1000;
@@ -171,7 +169,8 @@ export async function buildOverwritePreview(
     })
     .sort((x, y) => byText(x.identifier, y.identifier));
 
-  // busy: existing products locked by another batch that has not finished.
+  // busy: existing products locked by another batch, the same rule Start applies (lockProducts): a
+  // running batch, or a finished one that keeps its lock on a product held for a decision.
   const busy: OverwritePreview["busy"] = [];
   const identifierOfProduct = new Map(existing.map((m) => [m.productId, m.identifier]));
   for (const part of chunks([...identifierOfProduct.keys()])) {
@@ -179,7 +178,7 @@ export async function buildOverwritePreview(
       .select({ productId: catalogProducts.id, batchId: catalogBatches.id, batchName: catalogBatches.name })
       .from(catalogProducts)
       .innerJoin(catalogBatches, eq(catalogBatches.id, catalogProducts.lockBatchId))
-      .where(and(inArray(catalogProducts.id, part), notInArray(catalogBatches.status, FINISHED_STATUSES)));
+      .where(inArray(catalogProducts.id, part));
     for (const r of rows) {
       if (r.batchId === batch.id) continue;
       busy.push({ identifier: identifierOfProduct.get(r.productId)!, batchName: r.batchName });
