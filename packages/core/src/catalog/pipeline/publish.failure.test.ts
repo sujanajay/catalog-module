@@ -23,7 +23,7 @@ async function replacement(name: string) {
   const common = { productId: product!.id, channel: "noon" as const, n: 1, canvasW: 800, canvasH: 1000, scale: 1, placedX: 0, placedY: 0, bytes: 4, objectPath, publicUrl: `https://storage.googleapis.com/public/${objectPath}` };
   const [old, output] = await db.insert(catalogOutputs).values([
     { ...common, batchId: oldBatch!.id, sourceImageId: oldSource!.id, renderKey: "old", crc32c: "old-crc", generation: 20, isLive: true, status: "verified", publishedAt: new Date("2026-01-01T00:00:00Z") },
-    { ...common, batchId: batch!.id, sourceImageId: source!.id, renderKey: "new", crc32c: "new-crc", stagingUri: "gs://assets/staged.jpg", status: "staged" },
+    { ...common, batchId: batch!.id, sourceImageId: source!.id, renderKey: "new", crc32c: "new-crc", stagingUri: "gs://assets/staged.jpg", status: "staged", qaScores: { verdict: "pass" } },
   ]).returning();
   let generation = 20, race = false;
   const copy = vi.fn<PublishDeps["storage"]["stageCopyToPublic"]>(async (_uri, _path, condition) => {

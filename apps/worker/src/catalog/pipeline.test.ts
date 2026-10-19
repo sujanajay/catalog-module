@@ -1,10 +1,12 @@
 import sharp from "sharp";
-import {startReplacement,completeReplacement} from "@catalog/core/catalog/decisions";
+import {startReplacement,completeReplacement,applyDecision,applySkuMap} from "@catalog/core/catalog/decisions";
+import { judgeOutput } from "@catalog/core/catalog/qa/judge";
+import { publicObjectPath } from "@catalog/core/catalog/naming";
 import { afterAll,beforeAll,expect,it,vi } from "vitest";
 import { and,eq,sql } from "drizzle-orm";
 import type { Db } from "@catalog/core/db/client";
 import { createTestDb } from "@catalog/core/db/testing";
-import { catalogBatches,catalogBatchProducts,catalogChunks,catalogOutputs,catalogProducts,catalogProductEvents,catalogSourceImages,catalogUploads,EMPTY_BATCH_COUNTS } from "@catalog/core/db/schema";
+import { brandMaster,catalogBatches,catalogBatchProducts,catalogChunks,catalogOutputs,catalogProductAliases,catalogProducts,catalogProductEvents,catalogSourceImages,catalogUploads,EMPTY_BATCH_COUNTS,spendDays } from "@catalog/core/db/schema";
 import * as storage from "@catalog/core/storage";
 import { workerCatalogDeps,type CatalogDeps } from "./deps";
 import { UnsupportedSourceError } from "@catalog/core/catalog/render";
@@ -98,11 +100,11 @@ it("replaces changed bytes and deletes removed shots only on selected channels",
 it("render keys include rules, policy, shot, channel and source",()=>{const input={sourceSha256:"one",channel:"noon" as const,n:1,policyKey:"default|fixture"};expect(new Set([renderKey(input),renderKey({...input,n:2}),renderKey({...input,channel:"amazon"}),renderKey({...input,policyKey:"other"}),renderKey({...input,rulesVersion:"next"}),renderKey({...input,sourceSha256:"two"})]).size).toBe(6);});
 it("holds a product if its chunk failed before it could create planned outputs",async()=>{const w=world(),s=await seed(w,"missing-output");await db.update(catalogChunks).set({status:"failed"}).where(eq(catalogChunks.id,s.chunk.id));expect((await handlePublishTask(w.deps,{batchId:s.batch.id,productId:s.product.id})).outcome).toBe("held");expect(w.copy).not.toHaveBeenCalled();},60_000);
 it("isolates one render exception and holds fallback mattes",async()=>{const w=world(),s=await seed(w,"render-error",{channels:["noon","amazon"]});vi.mocked(w.deps.renderAllChannels).mockRejectedValueOnce(new Error("Could not make this photo."));await run(w,s);const outputs=await db.select().from(catalogOutputs).where(eq(catalogOutputs.batchId,s.batch.id));expect(outputs.map(o=>o.status)).toEqual(["failed","staged"]);expect(w.copy).not.toHaveBeenCalled();const fallback=await seed(w,"fallback");vi.mocked(w.deps.matteFor).mockResolvedValueOnce({alpha:Buffer.alloc(800*800,255),width:800,height:800,model:"floodfill",ms:0,source:"floodfill",target:null,sentLongSide:null});expect((await run(w,fallback)).outcome).toBe("held");const [output]=await db.select().from(catalogOutputs).where(eq(catalogOutputs.batchId,fallback.batch.id));expect(output!.flags).toContain("fallback_matte");expect(output!.reason).toContain("cut-out service was unavailable");},60_000);
-it("re-copies only once before recording a public verification failure",async()=>{const w=world(),s=await seed(w,"verify-failure");w.deps.fetch=vi.fn(async()=>new Response(new Uint8Array(jpeg),{headers:{"content-type":"text/plain","content-length":"4","x-goog-generation":"wrong"}}));await handleChunkTask(w.deps,{chunkId:s.chunk.id});await handleChunkTask(w.deps,{chunkId:s.chunk.id});const result=await handlePublishTask(w.deps,{batchId:s.batch.id,productId:s.product.id});expect(result.outcome).toBe("failed");expect(w.copy).toHaveBeenCalledTimes(2);const [output]=await db.select().from(catalogOutputs).where(eq(catalogOutputs.batchId,s.batch.id));expect(output!.reason).toBe("Uploaded file could not be read back from the public link");},60_000);
+it("re-copies only once before recording a public verification failure",async()=>{const w=world(),s=await seed(w,"verify-failure");w.deps.fetch=vi.fn(async()=>new Response(new Uint8Array(jpeg),{headers:{"content-type":"text/plain","content-length":"4","x-goog-generation":"wrong"}}));await handleChunkTask(w.deps,{chunkId:s.chunk.id});await handleChunkTask(w.deps,{chunkId:s.chunk.id});await handleChunkTask(w.deps,{chunkId:s.chunk.id});const result=await handlePublishTask(w.deps,{batchId:s.batch.id,productId:s.product.id});expect(result.outcome).toBe("failed");expect(w.copy).toHaveBeenCalledTimes(2);const [output]=await db.select().from(catalogOutputs).where(eq(catalogOutputs.batchId,s.batch.id));expect(output!.reason).toBe("Uploaded file could not be read back from the public link");},60_000);
 it("leaves the batch unfinished when xlsx and csv differ",async()=>{const w=world(),s=await seed(w,"mismatch");await run(w,s);vi.mocked(compareXlsxCsv).mockResolvedValueOnce({equal:false,differences:["Identifier differs."]});expect((await handleFinalizeTask(w.deps,{batchId:s.batch.id})).outcome).toBe("exports_mismatch");const [batch]=await db.select().from(catalogBatches).where(eq(catalogBatches.id,s.batch.id));expect(batch!.status).not.toBe("done");expect(batch!.error).toContain("Identifier differs.");},60_000);
 it("writes a filled product list, repeats links per size, preserves the upload and records CSV exports",async()=>{const w=world(),s=await seed(w,"filled");const original=await writeLinksXlsx({channels:["noon"],rows:[7,8].map(size=>({brand:"Anta",identifier:`filled/${size}`,optionIdStyleColor:"",opptraSkuIds:[],links:{},status:"ok",notes:`size ${size}`,change:"new",changedAt:null}))});const originalUri=await w.upload(`catalog-test/anta/${s.batch.id}/uploads/list.xlsx`,original,"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");await db.insert(catalogUploads).values({batchId:s.batch.id,kind:"product_list",name:"list.xlsx",gcsUri:originalUri,status:"collected",detected:{matchColumn:1}});await run(w,s);expect((await handleFinalizeTask(w.deps,{batchId:s.batch.id})).outcome).toBe("done");const [batch]=await db.select().from(catalogBatches).where(eq(catalogBatches.id,s.batch.id));const report=JSON.parse(w.objects.get(batch!.reportUri!)!.buf.toString());expect(report.exports.filledProductList.csv).toHaveLength(1);const filled=await workbookCsvSheets(w.objects.get(report.exports.filledProductList.xlsx)!.buf);expect(filled[0]!.csv).toContain("link_status");expect(filled[0]!.csv.match(/https:\/\/storage.googleapis.com/g)).toHaveLength(2);expect(w.objects.get(originalUri)!.buf).toEqual(original);},60_000);
 it("refuses production cleanup and cleans both passes only under test prefixes",async()=>{const w=world();const [production]=await db.insert(catalogBatches).values({brandSlug:"anta",brandName:"Anta",name:"production",createdBy:"test@opptra.com",isTest:false}).returning();const remove=vi.fn(async(uri:string)=>{expect(uri).toMatch(/^gs:\/\/(assets|public)\/catalog-test\//);return 1;});const deps={...w.deps.storage,deleteTestObjects:remove};await expect(cleanupTestBatch(db,deps,production!.id)).rejects.toThrow("catalog-test/");expect(remove).not.toHaveBeenCalled();const first=await seed(w,"cleanup");await run(w,first);const second=await seed(w,"cleanup2",{productId:first.product.id});await run(w,second);await expect(cleanupTestBatch(db,deps,first.batch.id)).rejects.toThrow("shared");await expect(cleanupTestBatches(db,deps,[first.batch.id,second.batch.id])).resolves.toEqual({objects:3});expect((await db.select().from(catalogProducts).where(eq(catalogProducts.id,first.product.id)))).toHaveLength(0);},60_000);
-it("recovers uploaded matte and staging caches after a crash before their final DB updates",async()=>{const w=world(),s=await seed(w,"crash");await handleChunkTask(w.deps,{chunkId:s.chunk.id});await db.update(catalogChunks).set({stage:"matte",status:"queued"}).where(eq(catalogChunks.id,s.chunk.id));await db.update(catalogSourceImages).set({matteUri:null}).where(eq(catalogSourceImages.batchId,s.batch.id));await handleChunkTask(w.deps,{chunkId:s.chunk.id});expect(w.deps.matteFor).toHaveBeenCalledTimes(1);await handleChunkTask(w.deps,{chunkId:s.chunk.id});await db.update(catalogChunks).set({stage:"render",status:"queued"}).where(eq(catalogChunks.id,s.chunk.id));await db.update(catalogOutputs).set({status:"pending",stagingUri:null}).where(eq(catalogOutputs.batchId,s.batch.id));await handleChunkTask(w.deps,{chunkId:s.chunk.id});expect(w.deps.renderAllChannels).toHaveBeenCalledTimes(1);expect((await handlePublishTask(w.deps,{batchId:s.batch.id,productId:s.product.id})).outcome).toBe("published");expect(w.copy).toHaveBeenCalledTimes(1);},60_000);
+it("recovers uploaded matte and staging caches after a crash before their final DB updates",async()=>{const w=world(),s=await seed(w,"crash");await handleChunkTask(w.deps,{chunkId:s.chunk.id});await db.update(catalogChunks).set({stage:"matte",status:"queued"}).where(eq(catalogChunks.id,s.chunk.id));await db.update(catalogSourceImages).set({matteUri:null}).where(eq(catalogSourceImages.batchId,s.batch.id));await handleChunkTask(w.deps,{chunkId:s.chunk.id});expect(w.deps.matteFor).toHaveBeenCalledTimes(1);await handleChunkTask(w.deps,{chunkId:s.chunk.id});await db.update(catalogChunks).set({stage:"render",status:"queued"}).where(eq(catalogChunks.id,s.chunk.id));await db.update(catalogOutputs).set({status:"pending",stagingUri:null}).where(eq(catalogOutputs.batchId,s.batch.id));await handleChunkTask(w.deps,{chunkId:s.chunk.id});expect(w.deps.renderAllChannels).toHaveBeenCalledTimes(1);await handleChunkTask(w.deps,{chunkId:s.chunk.id});expect((await handlePublishTask(w.deps,{batchId:s.batch.id,productId:s.product.id})).outcome).toBe("published");expect(w.copy).toHaveBeenCalledTimes(1);},60_000);
 
 it("serializes overlapping chunk deliveries before either can regress the stage",async()=>{
   const w=world(),s=await seed(w,"overlapping");
@@ -235,6 +237,7 @@ it("keeps verified output state when an expired render resumes after newer publi
   const old=handleChunkTask(w.deps,{chunkId:s.chunk.id});await started;
   now=new Date(+now+1_000_000);
   await handleChunkTask(w.deps,{chunkId:s.chunk.id});
+  await handleChunkTask(w.deps,{chunkId:s.chunk.id});
   expect((await handlePublishTask(w.deps,{batchId:s.batch.id,productId:s.product.id})).outcome).toBe("published");
   release();await old;
   expect((await db.select().from(catalogOutputs).where(eq(catalogOutputs.batchId,s.batch.id)))[0]).toMatchObject({status:"verified",isLive:true});
@@ -351,4 +354,85 @@ it("spec07 a spending cap hit before QA marks outputs qa_cap, completes the chun
  expect((await handleFinalizeTask(w.deps,{batchId:s.batch.id})).outcome).toBe("done");
  const [batch]=await db.select().from(catalogBatches).where(eq(catalogBatches.id,s.batch.id));
  expect(deriveBatchState(batch!).text).toContain(QA_CAP_BANNER);
+},60_000);
+
+const flagHalo:CatalogDeps["judgeOutput"]=async input=>({scores:{complete_product:95,same_product:95,edge_quality:20,background_clean:20,no_text_or_watermark:95,orientation_ok:95,placement_ok:95,overall:(95*5+40)/7},verdict:"flag",reasons:[],isCollage:false,costUsd:0,calls:0,usage:{},model:input.model,flags:["halo"]});
+it("spec07 a decision-triggered publish during the qa stage never copies unjudged staged outputs",async()=>{
+ const w=world(),s=await seed(w,"qa-race");
+ for(let i=0;i<2;i++) await handleChunkTask(w.deps,{chunkId:s.chunk.id});
+ const [output]=await db.select().from(catalogOutputs).where(eq(catalogOutputs.batchId,s.batch.id));
+ expect(output).toMatchObject({status:"staged",qaScores:null});
+ expect((await handlePublishTask(w.deps,{batchId:s.batch.id,productId:s.product.id})).outcome).toBe("held");
+ expect(w.copy).not.toHaveBeenCalled();
+ await handleChunkTask(w.deps,{chunkId:s.chunk.id});
+ expect((await handlePublishTask(w.deps,{batchId:s.batch.id,productId:s.product.id})).outcome).toBe("published");
+},60_000);
+it("spec07 use_as_is releases the publish gate and the product goes live on the next publish",async()=>{
+ const w=world(),s=await seed(w,"use-as-is");
+ vi.mocked(w.deps.judgeOutput).mockImplementation(flagHalo);
+ expect((await run(w,s)).outcome).toBe("held");
+ expect(w.copy).not.toHaveBeenCalled();
+ const [flagged]=await db.select().from(catalogOutputs).where(eq(catalogOutputs.batchId,s.batch.id));
+ expect(flagged).toMatchObject({status:"needs_attention"});
+ await applyDecision(db,{outputId:flagged!.id,decision:"use_as_is",actor:"operator@opptra.com"});
+ expect((await handlePublishTask(w.deps,{batchId:s.batch.id,productId:s.product.id})).outcome).toBe("published");
+ expect(w.copy).toHaveBeenCalledTimes(1);
+ expect((await db.select().from(catalogOutputs).where(eq(catalogOutputs.id,flagged!.id)))[0]).toMatchObject({isLive:true,decision:"use_as_is"});
+},60_000);
+it("spec07 remove on a live shot deletes only that product's object on the batch's channels",async()=>{
+ const w=world(),s=await seed(w,"remove-live",{shots:["one","two"],channels:["noon","amazon"]});
+ await run(w,s);
+ const other=await seed(w,"remove-other",{channels:["noon","amazon"]});
+ await run(w,other);
+ const next=await seed(w,"remove-live-2",{productId:s.product.id,shots:["changed","two"]});
+ vi.mocked(w.deps.judgeOutput).mockImplementation(flagHalo);
+ expect((await run(w,next)).outcome).toBe("held");
+ const [flagged]=await db.select().from(catalogOutputs).where(and(eq(catalogOutputs.batchId,next.batch.id),eq(catalogOutputs.n,1)));
+ expect(flagged).toMatchObject({status:"needs_attention",channel:"noon"});
+ w.remove.mockClear();
+ await applyDecision(db,{outputId:flagged!.id,decision:"remove",actor:"operator@opptra.com"});
+ expect((await handlePublishTask(w.deps,{batchId:next.batch.id,productId:s.product.id})).outcome).toBe("published");
+ expect(w.remove.mock.calls.map(call=>call[0])).toEqual([publicObjectPath("anta","remove-live","noon",1,true)]);
+ const live=await db.select().from(catalogOutputs).where(and(eq(catalogOutputs.productId,s.product.id),eq(catalogOutputs.isLive,true)));
+ expect(live.map(o=>`${o.channel}:${o.n}`).sort()).toEqual(["amazon:1","amazon:2","noon:2"]);
+ expect(await db.select().from(catalogOutputs).where(and(eq(catalogOutputs.productId,other.product.id),eq(catalogOutputs.isLive,true)))).toHaveLength(2);
+},60_000);
+it("spec07 a malformed judge reply retries once, then qa_unavailable; spend_days keeps catalog_qa and catalog_compute rows",async()=>{
+ const w=world(),s=await seed(w,"qa-malformed");
+ vi.mocked(w.deps.resolvePolicy).mockResolvedValue({matteModel:"fixture",qaModel:"test/judge",threshold:75,floor:60,qaMode:"per_source",qaSampleRate:1,source:"default"});
+ for(let i=0;i<2;i++) await handleChunkTask(w.deps,{chunkId:s.chunk.id});
+ const real=await sharp({create:{width:64,height:64,channels:3,background:"white"}}).jpeg().toBuffer();
+ for(const [uri,obj] of w.objects) if(uri.includes(s.batch.id)) w.objects.set(uri,{...obj,buf:real});
+ const publicFetch=w.deps.fetch;
+ const llm=vi.fn(async()=>new Response(JSON.stringify({choices:[{message:{content:"not JSON"}}],usage:{cost:0.002}})));
+ w.deps.fetch=vi.fn<typeof globalThis.fetch>(async(url,init)=>String(url).startsWith("https://openrouter.ai/")?llm():publicFetch(url,init));
+ w.deps.judgeOutput=judgeOutput;
+ vi.stubEnv("OPENROUTER_API_KEY","test-key");
+ try { expect((await handleChunkTask(w.deps,{chunkId:s.chunk.id})).httpStatus).toBe(200); } finally { vi.unstubAllEnvs(); }
+ expect(llm).toHaveBeenCalledTimes(2);
+ const [output]=await db.select().from(catalogOutputs).where(eq(catalogOutputs.batchId,s.batch.id));
+ expect(output).toMatchObject({status:"needs_attention",reason:"The quality check could not read this image."});
+ expect(output!.flags).toContain("qa_unavailable");
+ const spend=await db.select().from(spendDays).where(eq(spendDays.batchId,s.batch.id));
+ expect(spend.filter(row=>row.engine==="catalog_qa").reduce((sum,row)=>sum+Number(row.costUsd),0)).toBeCloseTo(0.004);
+ expect(spend.every(row=>row.brandSlug==="anta")).toBe(true);
+ expect(new Set(spend.map(row=>row.engine))).toEqual(new Set(["catalog_qa","catalog_compute"]));
+ const [batch]=await db.select().from(catalogBatches).where(eq(catalogBatches.id,s.batch.id));
+ expect(batch!.cost).toMatchObject({qaCalls:2});
+ expect(Number(batch!.cost.qaUsd)).toBeCloseTo(0.004);
+},60_000);
+it("spec07 SKU mapping adds ids and bumps the export to links-v<k+1>",async()=>{
+ const w=world(),s=await seed(w,"sku-map");
+ expect((await run(w,s)).outcome).toBe("published");
+ expect((await handleFinalizeTask(w.deps,{batchId:s.batch.id})).outcome).toBe("done");
+ const [first]=await db.select().from(catalogBatches).where(eq(catalogBatches.id,s.batch.id));
+ expect(first!.sheetXlsxUri).toContain("links-v1.xlsx");
+ await db.insert(brandMaster).values({name:"Anta",slug:"anta",line:"softline",source:"manual"}).onConflictDoNothing();
+ await db.insert(catalogProductAliases).values({brandSlug:"anta",isTest:true,productId:s.product.id,aliasKey:"SKUMAP",kind:"identifier"}).onConflictDoNothing();
+ expect(await applySkuMap(db,{batchId:s.batch.id,rows:[["identifier","opptra_sku_id"],["sku-map","OPP-1;OPP-2"],["nope","OPP-3"]],actor:"operator@opptra.com"})).toMatchObject({added:2,matched:1,unmatched:["NOPE"]});
+ expect((await handleFinalizeTask(w.deps,{batchId:s.batch.id})).outcome).toBe("done");
+ const [again]=await db.select().from(catalogBatches).where(eq(catalogBatches.id,s.batch.id));
+ expect(again!.sheetXlsxUri).toContain("links-v2.xlsx");
+ expect((await db.select().from(catalogProducts).where(eq(catalogProducts.id,s.product.id)))[0]!.opptraSkuIds).toEqual(["OPP-1","OPP-2"]);
+ expect(w.copy).toHaveBeenCalledTimes(1);
 },60_000);

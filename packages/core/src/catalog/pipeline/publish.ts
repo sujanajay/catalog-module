@@ -63,7 +63,11 @@ export async function publishProduct(deps: PublishDeps, batchId: string, product
       }
       if (alreadyPublished) return {outcome:"published"};
     }
-    if (missingPairs || pair?.flags.includes("duplicate_shot") || outputs.some(o => !["staged","skipped","verified"].includes(o.status) && o.decision !== "use_as_is" && o.decision !== "remove" && o.decision !== "replaced")) {
+    // 07 section 1 and 5: a staged output counts as decided only after the QA judge passed it (scores,
+    // or the information flag qa_sampled_out) or the operator chose "Use as is". A decision-triggered
+    // publish that lands while the qa stage is still running must not copy unjudged images.
+    const unjudged = (o: Output) => o.status === "staged" && o.decision === null && o.qaScores === null && !o.flags.includes("qa_sampled_out");
+    if (missingPairs || pair?.flags.includes("duplicate_shot") || outputs.some(o => unjudged(o) || (!["staged","skipped","verified"].includes(o.status) && o.decision !== "use_as_is" && o.decision !== "remove" && o.decision !== "replaced"))) {
       await tx.update(catalogBatchProducts).set({ change:"pending_attention", notes: [pair?.notes,missingPairs ? "Some photos could not be processed. Start this product again.":"",...outputs.filter(o => o.reason).map(o => `${o.channel} img ${o.n}: ${o.reason}`)].filter(Boolean).join("; ") }).where(where);
       return { outcome:"held" };
     }
