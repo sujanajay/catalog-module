@@ -65,14 +65,18 @@ export async function handleChunkTask(deps: CatalogDeps, body: Record<string,unk
        await underClaim(async tx=>{await tx.update(catalogProducts).set({productType:type}).where(eq(catalogProducts.id,product.id));for(const source of sources) if(flags.length) await tx.update(catalogSourceImages).set({flags:[...new Set([...source.flags,...flags])]}).where(eq(catalogSourceImages.id,source.id));});
        product.productType=type;for(const source of sources) source.flags=[...new Set([...source.flags,...flags])];
       }
-      let productPolicy={...await deps.resolvePolicy(batch.brandSlug,product.productType ?? "other"),qaModel:policy.qaModel,qaModelSecond:policy.qaModelSecond};
-      if(product.productType==="other" && sources.some(source=>source.flags.includes("transparent"))) productPolicy={...productPolicy,matteModel:"birefnet-hr-matting"};
+      // 08: an eval batch runs exactly its forced policy (source manual), so each run measures one matte model.
+      const forced=!!batch.options.evalSet && batch.isTest && policy.source==="manual";
+      let productPolicy=forced ? {...policy} : {...await deps.resolvePolicy(batch.brandSlug,product.productType ?? "other"),qaModel:policy.qaModel,qaModelSecond:policy.qaModelSecond};
+      if(!forced && product.productType==="other" && sources.some(source=>source.flags.includes("transparent"))) productPolicy={...productPolicy,matteModel:"birefnet-hr-matting"};
       // Threshold, floor, mode and sampling follow the product's policy; the judge stays the batch's (4.4).
       if(chunk.stage==="qa") {await runQaStage(deps,batch,sources,productPolicy,underClaim);continue;}
       if(chunk.stage==="matte") {
        await underClaim(async()=>{});
        const health=await deps.matting.health();
        const selected=[productPolicy.matteModel,productPolicy.matteModelSecond].find(id=>id && health.models.some(model=>model.id===id));
+       // 08: an eval run measures exactly one model; never let it silently measure the default instead.
+       if(!selected && forced) throw new Error("The eval matte model is not listed by the matting services.");
        if(!selected) {if(!health.default) throw new Error("The cut-out service has not reported a default. Try again shortly.");productPolicy.matteModel=health.default;await underClaim(async tx=>tx.update(catalogBatches).set({counts:sql`${catalogBatches.counts} || '{"policyFallback":true}'::jsonb`}).where(eq(catalogBatches.id,batch.id)));deps.log("catalog matte policy fallback",{batchId:batch.id,productId});}
        else productPolicy.matteModel=selected;
        await underClaim(async tx=>{for(const source of sources) {source.matteModel=productPolicy.matteModel;await tx.update(catalogSourceImages).set({matteModel:productPolicy.matteModel}).where(eq(catalogSourceImages.id,source.id));}});

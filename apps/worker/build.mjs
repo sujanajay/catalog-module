@@ -10,13 +10,13 @@ const dist = path.join(here, "dist");
 rmSync(dist, { recursive: true, force: true });
 
 await build({
-  // Spec 08 adds catalog-eval.
   entryPoints: {
     index: path.join(here, "src/index.ts"),
     migrate: path.join(here, "src/migrate.ts"),
     "catalog-local": path.join(here, "src/catalog-local.ts"),
     "catalog-smoke": path.join(here, "src/catalog-smoke.ts"),
     "catalog-qa-check": path.join(here, "src/catalog-qa-check.ts"),
+    "catalog-eval": path.join(here, "src/catalog-eval.ts"),
     "catalog-load": path.join(here, "src/catalog-load.ts"),
     "catalog-recheck": path.join(here, "src/catalog-recheck.ts"),
     "fault-proxy": path.join(here, "src/fault-proxy.ts"),
