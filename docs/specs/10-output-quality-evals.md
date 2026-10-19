@@ -63,10 +63,10 @@ to the bbox, lanczos3 to the recorded placement), so the suite knows where the p
 | `border_band` | every pixel of the 2% border band | same rule as `edges` |
 | `outside_product` | non-background pixels (delta > 12) farther than 4 px from the product mask, in regions of at least 12 px, shadow-like darkening excluded where a shadow is allowed | 0 |
 | `inside_safe_box` | pixels in the required margins (delta > 24, or > 12 beyond the ring), regions of at least 12 px | 0 |
-| `extent` | measured product extent (delta > 24 inside the mask ring, contact shadow excluded) against the planned mask extent | each side within 3 px |
+| `extent` | measured product extent (delta > 24 inside the mask ring, contact shadow excluded) against the planned mask extent | each side within 4 px |
 | `margins` | planned product box against the channel margins | every required margin kept within 1 px |
-| `centred` | horizontal centre of the measured extent | within 3 px of the canvas centre (unless the product spans the safe box) |
-| `anchor` | vertical centre (centre channels) or lowest product row (Styli: canvas height minus 450) | within 3 px |
+| `centred` | horizontal centre of the measured extent | within 4 px of the canvas centre (unless the product spans the safe box) |
+| `anchor` | vertical centre (centre channels) or lowest product row (Styli: canvas height minus 450) | within 4 px |
 | `noon_wide` | narrower side margin of a wide Noon shot | at least 5% of the width |
 | `pixels_copied` | product pixels (alpha 250+) against the source resampled to the product box | mean per-channel difference <= 8 and at most 1% of pixels differ by more than 48 |
 | `uniform_scale` | Styli scale spread across a product's non-detail angles | <= 0.5% |

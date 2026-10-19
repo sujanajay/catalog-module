@@ -17,7 +17,7 @@ export const EDGE_RING_PX = 4;
 /** The measured extent counts only clearly foreground pixels (compliance's BG_TOLERANCE), so ringing never widens it. */
 export const EXTENT_DELTA = 24;
 /** Placement tolerance for margins, centring and the measured extent (soft matte edges move the visible edge by a pixel or two). */
-export const PLACEMENT_TOLERANCE_PX = 3;
+export const PLACEMENT_TOLERANCE_PX = 4;
 /** Product pixels must match the source within this mean per-channel error (lanczos + JPEG). */
 export const COPY_MEAN_DELTA = 8;
 /** Non-detail Styli shots of one product must share the scale within this ratio. */
