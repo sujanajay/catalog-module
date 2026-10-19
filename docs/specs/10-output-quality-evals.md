@@ -74,22 +74,23 @@ to the bbox, lanczos3 to the recorded placement), so the suite knows where the p
 ## 5. Image checks: shadow (`shadow.*`)
 
 A shadow is any canvas pixel outside the product (and its 3 px ring) darker than the background by
-more than 8 luma, in regions of at least 12 px (ringing specks are not shadow). The spec 05 band is
-the product box extended 10% of its height above its bottom, 25% below and 10% of its width each side.
+more than 8 luma, in regions of at least 12 px (ringing specks are not shadow). The band is the spec
+05 band (the product box extended 10% of its height above its bottom, 25% below and 10% of its width
+each side) widened to the render's own synthesised feather (three sigmas of its horizontal blur,
+two depths below the contact line): silhouette plus feather.
 
 | Check | Applies to | Bar |
 |---|---|---|
 | `forbidden` | apparel on a model, flat lays (the owner's bar: a model photo gets no shadow at all) | 0 pixels darker than the background by more than 12 in regions of 24 px or more, and mean darkening of the band under the product <= 1.5 luma |
-| `footprint` | shadow-allowed types | every shadow pixel inside the band |
+| `footprint` | shadow-allowed types | every shadow pixel inside the band, within the render's feather of the product mask and in the lower half of the product (silhouette plus feather) |
 | `darkness` | shadow-allowed types | darkest shadow pixel <= 65% of the background luma (spec 05 clamp 0.6 plus JPEG) |
 | `hard_edge_horizontal`, `hard_edge_vertical` | shadow-allowed types | no run of adjacent-row (or column) steps larger than 16 luma longer than 5% of the product width (or height), never longer than 6 px below that |
 | `monotone` | shadow-allowed types | mean darkness per distance from the silhouette never rises by more than 2 luma per pixel nor by more than 4 in total, measured 5 to 48 px out |
 | `synthesised_on_model` | per output | no apparel-on-model output carries `shadow_synthesised` |
 
-Pinned finding (unit test `image-checks.test.ts`): the current render cuts a synthesised shadow off
-hard where the 2% border band or the Styli guide ends, so a product that fills a zero-margin canvas
-or sits on the Styli guide shows a straight line. The suite reports it; the render should fade the
-shadow out before the band instead.
+The render on `main` fades a synthesised shadow out before the border band; the unit test
+`image-checks.test.ts` keeps a tall product that fills a zero-margin canvas as a passing case so a
+future hard clip at the band is caught.
 
 ## 6. Image checks: cut-out integrity (`cutout.*`)
 
@@ -120,9 +121,9 @@ A source is cut on a side when at least 2% of that edge's pixels carry product (
 
 | Check | Bar |
 |---|---|
-| `flush_<side>` | the measured product (clearly foreground pixels inside the mask) ends within 1 px of the canvas edge on a zero-margin side, or within 1 px of the guide on a margin side |
+| `flush_<side>` | the measured product (clearly foreground pixels inside the mask) ends within 1 px of the canvas edge on the cut side (the render drops that side's margin, so a cut side is always flush) |
 | `no_line_<side>` | nothing beyond the cut side is drawn (regions of 12 px or more, delta > 12), and at most 1% of the silhouette's last 12 rows or columns before the cut are background (no gap, no floating line) |
-| `flagged` | the output carries the information flag for a cut source (`cut_source`; `source_cut` and `cut_at_edge` are accepted until the render fix lands) |
+| `flagged` | the output carries the information flag `cut_in_source` |
 | `not_held` | status is not `needs_attention` or `failed` |
 
 ## 8. Completeness (`completeness.*`)

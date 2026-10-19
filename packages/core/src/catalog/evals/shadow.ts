@@ -2,7 +2,7 @@
 // darker than the background. Where the product type allows one it must look like a contact shadow:
 // inside the spec 05 band, no straight hard edge, darkness falling off smoothly with distance from
 // the silhouette, never a slab. Where the product type forbids one, none may exist.
-import { dilate, distanceFrom, dropSpecks, inBox, longestRun, lumaAt, luma, SPECK_PX } from "./image";
+import { dilate, distanceFrom, dropSpecks, inBox, longestRun, lumaAt, luma, shadowFeather, SPECK_PX } from "./image";
 import type { OutputContext } from "./context";
 import { judge, notRun, type CheckResult, type CheckSubject } from "./types";
 
@@ -63,10 +63,12 @@ export function checkShadow(ctx: OutputContext): CheckResult[] {
 
   if (!count) { out.push(notRun("shadow.footprint", S, who, "No shadow on this output.")); return out; }
 
-  // Footprint: every shadow pixel inside the spec 05 band.
+  // Footprint: silhouette plus feather. A shadow pixel must sit within the render's feather of the
+  // product mask (so it follows overhangs and insets), in the lower half of the product, and inside the band.
+  const { radius } = shadowFeather(productBox), near = dilate(ctx.product, canvas.w, canvas.h, radius), lowerHalf = productBox.y + productBox.h / 2;
   let outsideBand = 0;
-  for (let y = 0; y < canvas.h; y++) for (let x = 0; x < canvas.w; x++) if (dark[y * canvas.w + x]! > 0 && !inBox(band, x, y)) outsideBand++;
-  out.push(judge(outsideBand === 0, "shadow.footprint", S, who, outsideBand, 0, "pixels outside the band", outsideBand ? `${outsideBand} shadow pixels lie outside the contact band under the product.` : "The shadow stays inside the contact band."));
+  for (let y = 0; y < canvas.h; y++) for (let x = 0; x < canvas.w; x++) { const i = y * canvas.w + x; if (dark[i]! > 0 && (y >= band.y + band.h || !near[i] || y < lowerHalf)) outsideBand++; }
+  out.push(judge(outsideBand === 0, "shadow.footprint", S, who, outsideBand, 0, "pixels outside silhouette plus feather", outsideBand ? `${outsideBand} shadow pixels lie outside the silhouette plus its feather under the product.` : "The shadow follows the silhouette within its feather."));
 
   // Slab guard.
   const darkest = max / bg;

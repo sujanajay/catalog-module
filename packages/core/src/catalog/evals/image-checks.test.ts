@@ -26,11 +26,8 @@ describe("image checks on what the real render makes", () => {
   it("passes every check for a flat-lay product on Styli (no shadow)", async () => {
     expect(failed(await runImageChecks(await syntheticSubject("styli", 1, "apparel_flat", WIDE)))).toEqual([]);
   }, 60_000);
-  // Pinned finding about the current render (spec 10 section 4): a synthesised shadow is cut off hard
-  // where the 2% border band ends. This test documents the defect the eval reports; it is updated when
-  // the render fades the shadow out instead.
-  it("reports the hard line where the border band cuts the shadow of a product that fills a zero-margin canvas", async () => {
-    expect(failed(await runImageChecks(await syntheticSubject("trendyol", 1, "footwear", { width: 2600, height: 2600, box: { x: 700, y: 500, w: 1200, h: 1600 } })))).toContain("shadow.hard_edge_horizontal");
+  it("passes for a tall product that fills a zero-margin canvas (the shadow fades before the border band)", async () => {
+    expect(failed(await runImageChecks(await syntheticSubject("trendyol", 1, "footwear", { width: 2600, height: 2600, box: { x: 700, y: 500, w: 1200, h: 1600 } })))).toEqual([]);
   }, 60_000);
   it("passes for a model photo with no shadow and skips the fringe check when backgrounds match", async () => {
     const results = await runImageChecks(await syntheticSubject("trendyol", 1, "apparel_model", { width: 2000, height: 3000, box: { x: 700, y: 300, w: 600, h: 2400 }, bg: [224, 224, 224] }));
@@ -96,6 +93,7 @@ describe("geometry failures", () => {
 });
 
 describe("shadow failures", () => {
+  const WIDE = { width: 2600, height: 2600, box: { x: 500, y: 700, w: 1600, h: 800 }, taper: true };
   it("fails forbidden when a model photo has any darkening under the product", async () => {
     const base = await syntheticSubject("trendyol", 1, "apparel_model", { width: 2000, height: 3000, box: { x: 300, y: 300, w: 1400, h: 1400 } });
     const p = base.placement, bg = canvasColor("trendyol", 1);
@@ -103,12 +101,14 @@ describe("shadow failures", () => {
     expect(ids(checkShadow(await ctxOf(shadowed)), "shadow.forbidden")[0]?.ok).toBe(false);
   }, 30_000);
   it("fails hard edges for a rectangular shadow block under footwear", async () => {
-    const base = await syntheticSubject("sixthstreet", 1, "footwear", { width: 2600, height: 2600, box: { x: 700, y: 900, w: 1200, h: 1000 } });
-    const p = base.placement, bg = canvasColor("sixthstreet", 1), bottom = p.placedY + Math.round(1060 * p.scale);
-    const block = await editOutput(base, r => paintRect(r, p.placedX + 100, bottom + 4, Math.round(1200 * p.scale) - 200, 40, [bg[0] - 90, bg[1] - 90, bg[2] - 90]));
-    const results = checkShadow(await ctxOf(block));
-    expect(failed(results)).toContain("shadow.hard_edge_horizontal");
-    expect(failed(results)).toContain("shadow.hard_edge_vertical");
+    // A wide product fits by width and leaves room under it (Centrepoint) or beside it in Noon's 5% side margin.
+    const base = await syntheticSubject("centrepoint", 1, "footwear", WIDE);
+    const p = base.placement, bg = canvasColor("centrepoint", 1), bottom = p.placedY + Math.round(860 * p.scale);
+    const block = await editOutput(base, r => paintRect(r, 100, bottom + 4, 2800, 40, [bg[0] - 90, bg[1] - 90, bg[2] - 90]));
+    expect(failed(checkShadow(await ctxOf(block)))).toContain("shadow.hard_edge_horizontal");
+    const noon = await syntheticSubject("noon", 1, "footwear", WIDE), nb = canvasColor("noon", 1), noonBottom = noon.placement.placedY + Math.round(860 * noon.placement.scale);
+    const tall = await editOutput(noon, r => paintRect(r, 10, noonBottom - 200, 30, 300, [nb[0] - 90, nb[1] - 90, nb[2] - 90]));
+    expect(failed(checkShadow(await ctxOf(tall)))).toContain("shadow.hard_edge_vertical");
   }, 30_000);
   it("fails darkness for a black slab and monotone when darkness rises away from the product", async () => {
     const base = await syntheticSubject("sixthstreet", 1, "footwear", { width: 2600, height: 2600, box: { x: 700, y: 900, w: 1200, h: 1000 } });
@@ -158,15 +158,16 @@ describe("cut-out failures", () => {
 });
 
 describe("cut sources", () => {
-  it("is flush on a zero-margin channel, on the guide with a margin, and needs its information flag", async () => {
+  it("is flush on the cut side on every channel and carries its information flag", async () => {
     const amazon = await syntheticSubject("amazon", 1, "apparel_model", { width: 1600, height: 2400, box: { x: 500, y: 300, w: 600, h: 1000 }, cutBottom: true });
     const results = checkCutEdge(await ctxOf(amazon));
     expect(ids(results, "cut_edge.flush_bottom")[0]?.ok).toBe(true);
     expect(ids(results, "cut_edge.no_line_bottom")[0]?.ok).toBe(true);
-    expect(ids(results, "cut_edge.flagged")[0]?.ok).toBe(false);
+    expect(amazon.flags).toContain(CUT_SOURCE_FLAGS[0]);
+    expect(ids(results, "cut_edge.flagged")[0]?.ok).toBe(true);
     expect(ids(results, "cut_edge.not_held")[0]?.ok).toBe(true);
-    const flagged = checkCutEdge(await ctxOf({ ...amazon, flags: [CUT_SOURCE_FLAGS[0] as never] }));
-    expect(ids(flagged, "cut_edge.flagged")[0]?.ok).toBe(true);
+    const unflagged = checkCutEdge(await ctxOf({ ...amazon, flags: [] }));
+    expect(ids(unflagged, "cut_edge.flagged")[0]?.ok).toBe(false);
     const held = checkCutEdge(await ctxOf({ ...amazon, status: "needs_attention" }));
     expect(ids(held, "cut_edge.not_held")[0]?.ok).toBe(false);
     const noon = await syntheticSubject("noon", 1, "apparel_model", { width: 1600, height: 2400, box: { x: 500, y: 300, w: 600, h: 1000 }, cutBottom: true });

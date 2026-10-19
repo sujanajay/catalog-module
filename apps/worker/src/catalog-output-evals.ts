@@ -23,7 +23,7 @@ import { PUBLIC_CACHE_WINDOW_MS } from "@catalog/core/catalog/pipeline/verify";
 import { readSheetLinks } from "@catalog/core/catalog/recheck/links";
 import { cleanupTestBatches } from "@catalog/core/catalog/test-cleanup";
 import { CHANNELS } from "@catalog/core/catalog/channels";
-import { bbox, planCanvas, planProduct, prepare, type Prepared } from "@catalog/core/catalog/render";
+import { bbox, planCanvas, planProduct, prepare, shotGeometry, type Prepared } from "@catalog/core/catalog/render";
 import { matteFor } from "@catalog/core/catalog/matte";
 import { QA_DEFAULT_THRESHOLD } from "@catalog/core/catalog/qa/judge";
 import { writePolicyRows } from "@catalog/core/catalog/eval/policy-writer";
@@ -366,15 +366,16 @@ async function checkFolderCommand(flags: Record<string, string | string[] | true
       const p = await prepare(raw, file, async b => b), alpha = await sharp(await readFile(mattePath)).toColourspace("b-w").raw().toBuffer();
       shots.set(n, { p, alpha, raw }); photos++;
     }
-    const styliShots = [...shots.values()].map(({ p, alpha }) => ({ box: bbox(alpha, p.width, p.height)!, source: { w: p.width, h: p.height } })).filter(s => s.box);
-    const uniformScale = styliShots.length ? planProduct(CHANNELS.styli, styliShots).uniformScale : undefined;
+    const geometries = [...shots.values()].flatMap(({ p, alpha }) => { const g = shotGeometry(alpha, p.width, p.height); return g ? [g] : []; });
+    const uniformScale = geometries.length ? planProduct(CHANNELS.styli, geometries).uniformScale : undefined;
     for (const channel of await readdir(path.join(dir, "outputs", product))) {
       if (!(CHANNEL_IDS as readonly string[]).includes(channel)) continue;
       for (const file of await readdir(path.join(dir, "outputs", product, channel))) {
         const m = /_(\d+)\.jpg$/i.exec(file); if (!m) continue;
         const n = Number(m[1]), shot = shots.get(n); if (!shot) continue;
-        const box = bbox(shot.alpha, shot.p.width, shot.p.height); if (!box) continue;
-        const plan = planCanvas(CHANNELS[channel as ChannelId], box, { w: shot.p.width, h: shot.p.height }, channel === "styli" ? { uniformScale } : {});
+        const geometry = shotGeometry(shot.alpha, shot.p.width, shot.p.height); if (!geometry) continue;
+        const productCanvas = geometries.length ? planProduct(CHANNELS[channel as ChannelId], geometries).canvas : undefined;
+        const plan = planCanvas(CHANNELS[channel as ChannelId], geometry.box, geometry.source, { cut: geometry.cut, canvas: productCanvas, ...(channel === "styli" ? { uniformScale } : {}) });
         const jpeg = await readFile(path.join(dir, "outputs", product, channel, file));
         const meta = await sharp(jpeg).metadata();
         if (meta.width !== plan.w || meta.height !== plan.h) { results.push({ id: "geometry.canvas", group: "geometry", subject: { identifier: product, n, channel: channel as ChannelId }, ok: false, status: "fail", measured: `${meta.width}x${meta.height}`, threshold: `${plan.w}x${plan.h}`, unit: "px", detail: "The output canvas differs from the plan the channel table gives for this source." }); continue; }

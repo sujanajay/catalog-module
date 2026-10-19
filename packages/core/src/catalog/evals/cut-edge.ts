@@ -7,8 +7,8 @@ import { EXTENT_DELTA } from "./geometry";
 import type { OutputContext } from "./context";
 import { judge, notRun, type CheckResult, type CheckSubject } from "./types";
 
-/** Information flag names accepted for a cut source. The render fix must set one of these; the first is the preferred name. */
-export const CUT_SOURCE_FLAGS: readonly string[] = ["cut_source", "source_cut", "cut_at_edge"];
+/** The information flag the render sets on a cut source (spec 05, `cut_in_source`). */
+export const CUT_SOURCE_FLAGS: readonly string[] = ["cut_in_source"];
 export const FLUSH_TOLERANCE_PX = 1;
 
 const E = "cut_edge" as const;
@@ -27,8 +27,8 @@ export function checkCutEdge(ctx: OutputContext): CheckResult[] {
   for (const side of ctx.cutSides) {
     const gap = Math.abs(measured[side] - limit[side]);
     const edge = { top: 0, bottom: canvas.h - 1, left: 0, right: canvas.w - 1 }[side];
-    const zeroMargin = limit[side] === edge;
-    out.push(judge(gap <= FLUSH_TOLERANCE_PX, `cut_edge.flush_${side}`, E, who, gap, FLUSH_TOLERANCE_PX, "px", zeroMargin ? `The product is cut at the source ${side}; on the canvas it ends ${gap} px from the ${side} edge (must be flush).` : `The product is cut at the source ${side}; on the canvas it ends ${gap} px from the ${side} guide (must sit on it).`));
+    const flush = limit[side] === edge;
+    out.push(judge(gap <= FLUSH_TOLERANCE_PX && flush, `cut_edge.flush_${side}`, E, who, Math.abs(measured[side] - edge), FLUSH_TOLERANCE_PX, "px", `The product is cut at the source ${side}; on the canvas it ends ${Math.abs(measured[side] - edge)} px from the ${side} edge (must be flush, with no margin on that side).`));
     // No floating line or shadow: the strip just beyond the cut side must be pure background.
     let worst = 0;
     const strip = 12, mask = new Uint8Array(canvas.w * canvas.h);

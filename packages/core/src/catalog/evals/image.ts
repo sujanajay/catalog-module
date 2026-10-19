@@ -2,7 +2,8 @@
 // checks are exact, repeatable and independent of the render code they test.
 import sharp from "sharp";
 import { channel } from "../channels";
-import { bbox, safeBoxFor, type BBox } from "../render";
+import { bbox, NO_CUT, safeBoxFor, type BBox, type CutEdges } from "../render";
+import { SHADOW_BAND_ABOVE, SHADOW_BAND_BELOW, SHADOW_BAND_SIDE, SHADOW_PRESET } from "../shadow";
 import type { ChannelId } from "../types";
 import type { OutputPlacement, Raster } from "./types";
 
@@ -36,8 +37,8 @@ export function borderMedian(r: Raster): [number, number, number] {
 }
 
 /** The product box the render used: the matte bbox scaled by the recorded scale, clamped to the safe box. */
-export function productBoxOf(id: ChannelId, placement: OutputPlacement, sourceBox: BBox): BBox {
-  const spec = channel(id), safe = safeBoxFor(spec, { w: placement.w, h: placement.h }, sourceBox.w > sourceBox.h);
+export function productBoxOf(id: ChannelId, placement: OutputPlacement, sourceBox: BBox, cut: CutEdges = NO_CUT): BBox {
+  const spec = channel(id), safe = safeBoxFor(spec, { w: placement.w, h: placement.h }, sourceBox.w > sourceBox.h, cut);
   const w = Math.max(1, Math.min(safe.w, Math.round(sourceBox.w * placement.scale)));
   const h = Math.max(1, Math.min(safe.h, Math.round(sourceBox.h * placement.scale)));
   return { x: placement.placedX, y: placement.placedY, w, h };
@@ -138,10 +139,22 @@ export function longestRun(values: ArrayLike<number>): number {
   return best;
 }
 
-/** Spec 05 shadow band on the canvas: 10% of the product height above its bottom, 25% below, 10% of its width each side. */
+/**
+ * Where a shadow may lie: the spec 05 band (10% of the product height above its bottom, 25% below,
+ * 10% of its width each side) widened to the render's own synthesised feather (three sigmas of its
+ * horizontal blur, two depths below the contact line), so "silhouette plus feather" is the bar.
+ */
+/** The render's synthesised feather for a product box: horizontal sigma and depth below the contact line. */
+export function shadowFeather(product: BBox): { sigmaX: number; depth: number; radius: number } {
+  const depth = Math.max(2, SHADOW_PRESET.spread * Math.min(product.w, product.h));
+  const sigmaX = Math.max(0.5, SHADOW_PRESET.softness * product.w, depth / 2);
+  return { sigmaX, depth, radius: Math.ceil(Math.max(3 * sigmaX, 2 * depth + 2)) };
+}
 export function shadowBand(product: BBox, canvas: { w: number; h: number }): BBox {
-  const x0 = Math.max(0, Math.floor(product.x - product.w * 0.1)), x1 = Math.min(canvas.w, Math.ceil(product.x + product.w * 1.1));
-  const y0 = Math.max(0, Math.floor(product.y + product.h * 0.9)), y1 = Math.min(canvas.h, Math.ceil(product.y + product.h * 1.25));
+  const { sigmaX, depth } = shadowFeather(product);
+  const side = Math.max(product.w * SHADOW_BAND_SIDE, 3 * sigmaX), below = Math.max(product.h * SHADOW_BAND_BELOW, 2 * depth + 2);
+  const x0 = Math.max(0, Math.floor(product.x - side)), x1 = Math.min(canvas.w, Math.ceil(product.x + product.w + side));
+  const y0 = Math.max(0, Math.floor(product.y + product.h * (1 - SHADOW_BAND_ABOVE))), y1 = Math.min(canvas.h, Math.ceil(product.y + product.h + below));
   return { x: x0, y: y0, w: Math.max(0, x1 - x0), h: Math.max(0, y1 - y0) };
 }
 export const inBox = (b: BBox, x: number, y: number) => x >= b.x && x < b.x + b.w && y >= b.y && y < b.y + b.h;
