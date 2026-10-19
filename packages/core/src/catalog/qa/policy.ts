@@ -3,7 +3,7 @@ import { and, eq, inArray } from "drizzle-orm";
 import type { Db } from "../../db/client";
 import { modelPolicy } from "../../db/schema";
 import { CHANNELS, CHANNEL_ORDER } from "../channels";
-import type { ChannelId, ProductType, ResolvedPolicy } from "../types";
+import type { ChannelId, OutputFlag, ProductType, ResolvedPolicy } from "../types";
 import { QA_DEFAULT_FLOOR, QA_DEFAULT_THRESHOLD } from "./judge";
 import { CATALOG_QA_DEFAULT_MODEL } from "./classify";
 type Category = Exclude<ProductType,"auto">;
@@ -39,6 +39,18 @@ export async function resolvePolicy(db: Db, brandSlug: string, category: Product
  const row = [[brandSlug,category],[brandSlug,"*"],["*",category],["*","*"]].map(([brand,cat]) => rows.find(r => r.brandSlug === brand && r.category === cat)).find(Boolean);
  if (!row) return {...DEFAULT_POLICIES[category === "*" || category === "auto" ? "other" : category]};
  return {matteModel:row.matteModel,qaModel:row.qaModel,threshold:row.threshold,floor:row.floor,qaMode:row.qaMode,qaSampleRate:row.qaSampleRate,source:row.source,...(row.matteTarget ? {matteTarget:row.matteTarget} : {}),...(row.matteModelSecond ? {matteModelSecond:row.matteModelSecond} : {}),...(row.shadowMode ? {shadowMode:row.shadowMode} : {}),...(row.qaModelSecond ? {qaModelSecond:row.qaModelSecond} : {})};
+}
+/**
+ * 05 rule 3 as the worker applies it: a synthesised shadow is allowed only for a product whose own
+ * classification (07 4.3, or the type the operator chose for the batch) is footwear, bag_accessory
+ * or other. Apparel on a model or laid flat never gets one. A product without a real classification
+ * (no type, the "auto" placeholder, or `type_unknown` after a failed, capped or mocked classifier)
+ * gets none either: a missing shadow is a smaller defect than a fake one. Brand line and SKU rows
+ * are not inputs.
+ */
+export function shadowSynthesisAllowed(productType: ProductType | null | undefined, flags: readonly OutputFlag[]): boolean {
+ if (!productType || productType === "auto" || flags.includes("type_unknown")) return false;
+ return productType === "footwear" || productType === "bag_accessory" || productType === "other";
 }
 export function strictestChannel(channels: readonly ChannelId[]): ChannelId {
  if (channels.includes("styli")) return "styli";

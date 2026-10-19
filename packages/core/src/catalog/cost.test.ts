@@ -7,7 +7,8 @@ describe("catalog cost",()=>{
   expect(costLine({cost,products},{INR_PER_USD:"80"})).toMatchObject({usd:3,identifiers:2,usdPerIdentifier:1.5,inrPerIdentifier:120,text:"INR 120.00 per style so far · agency reference INR 60 per style"});
  });
  it("has explicit USD fallback and no division by zero",()=>{
-  expect(costLine({cost:{...cost,identifiers:2}},{}).text).toBe("USD 1.50 per style so far (set INR_PER_USD to show rupees) · agency reference INR 60 per style");
+  expect(costLine({cost:{...cost,identifiers:2}},{}).text).toBe("USD 1.50 per style so far · Cost in rupees is not configured yet · agency reference INR 60 per style");
+  expect(costLine({cost:{...cost,identifiers:2}},{}).text).not.toContain("INR_PER_USD");
   expect(costLine({cost,products:[]},{INR_PER_USD:"80"})).toMatchObject({identifiers:0,usdPerIdentifier:null,inrPerIdentifier:null});
  });
  it("uses the documented default compute rate when COMPUTE_USD_PER_VCPU_SECOND is unset",()=>{

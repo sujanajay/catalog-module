@@ -2,7 +2,7 @@ import sharp from "sharp";
 import {startReplacement,completeReplacement,applyDecision,applySkuMap} from "@catalog/core/catalog/decisions";
 import { judgeOutput } from "@catalog/core/catalog/qa/judge";
 import { batchPrefix, publicObjectPath, stagingPath } from "@catalog/core/catalog/naming";
-import { afterAll,beforeAll,expect,it,vi } from "vitest";
+import { afterAll,beforeAll,describe,expect,it,vi } from "vitest";
 import { and,eq,sql } from "drizzle-orm";
 import type { Db } from "@catalog/core/db/client";
 import { createTestDb } from "@catalog/core/db/testing";
@@ -20,6 +20,8 @@ import { workbookCsvSheets } from "@catalog/core/catalog/pipeline/report";
 import { cleanupTestBatch,cleanupTestBatches } from "@catalog/core/catalog/test-cleanup";
 import { deriveBatchState, QA_CAP_BANNER } from "@catalog/core/catalog/pipeline/status";
 import { strictestChannel } from "@catalog/core/catalog/qa/policy";
+import { findOrCreateProduct } from "@catalog/core/catalog/products";
+import { cannedQa } from "./qa-mock";
 vi.mock(import("@catalog/core/catalog/sheet"),async original=>{const module=await original();return {...module,compareXlsxCsv:vi.fn(module.compareXlsxCsv)};});
 let db:Db,close:()=>Promise<void>;
 // stageCopyToPublic reads the bucket names from the environment. Set directly (not vi.stubEnv) so the
@@ -478,3 +480,53 @@ it("spec08 an eval batch runs exactly its forced policy; a batch without evalSet
  expect(vi.mocked(w.deps.matteFor).mock.calls.map(c=>c[2])).not.toContain("not-listed");
  expect(vi.mocked(w.deps.matteFor).mock.calls.map(c=>c[2]).filter(m=>m==="fixture")).toHaveLength(1);
 },60_000);
+
+// 05 rule 3 and 07 4.3: the shadow decision follows the product's own classification, never the
+// batch's "auto" placeholder, the brand line or SKU rows. Unclassified products get no synthesised shadow.
+describe("shadow decision input",()=>{
+ async function renderStages(w:ReturnType<typeof world>,name:string,classify?:CatalogDeps["classifyProductType"]) {
+  const s=await seed(w,name);
+  if(classify) w.deps.classifyProductType=vi.fn(classify);
+  await handleChunkTask(w.deps,{chunkId:s.chunk.id});await handleChunkTask(w.deps,{chunkId:s.chunk.id});
+  const ctx=vi.mocked(w.deps.renderAllChannels).mock.calls.at(-1)![3];
+  const [product]=await db.select().from(catalogProducts).where(eq(catalogProducts.id,s.product.id));
+  const outputs=await db.select().from(catalogOutputs).where(eq(catalogOutputs.batchId,s.batch.id));
+  return {s,ctx,product:product!,outputs};
+ }
+ it("never stores the auto placeholder on a product, so the classifier still runs",async()=>{
+  const [batch]=await db.insert(catalogBatches).values({brandSlug:"test_brand",brandName:"Test Brand",name:"auto-ingest",isTest:true,createdBy:"test@opptra.com"}).returning();
+  expect(batch!.productType).toBe("auto");
+  const {product}=await findOrCreateProduct(db,{brandSlug:"test_brand",isTest:true,identifier:"FC-AUTO-1",skus:null,productType:batch!.productType,actor:"test@opptra.com"});
+  expect(product.productType).toBeNull();
+  const forced=await findOrCreateProduct(db,{brandSlug:"test_brand",isTest:true,identifier:"FC-FORCED-1",skus:null,productType:"apparel_model",actor:"test@opptra.com"});
+  expect(forced.product.productType).toBe("apparel_model");
+ },60_000);
+ it("classifies a product left as auto by an earlier ingest and renders an apparel_model photo with no synthesised shadow",async()=>{
+  const w=world(),s=await seed(w,"fc-legacy-auto");
+  await db.update(catalogProducts).set({productType:"auto"}).where(eq(catalogProducts.id,s.product.id));
+  w.deps.classifyProductType=vi.fn<CatalogDeps["classifyProductType"]>(async()=>({type:"apparel_model",confidence:.9,costUsd:0,calls:1,usage:{},flags:[]}));
+  await handleChunkTask(w.deps,{chunkId:s.chunk.id});await handleChunkTask(w.deps,{chunkId:s.chunk.id});
+  expect(w.deps.classifyProductType).toHaveBeenCalledTimes(1);
+  expect((await db.select().from(catalogProducts).where(eq(catalogProducts.id,s.product.id)))[0]!.productType).toBe("apparel_model");
+  expect(vi.mocked(w.deps.renderAllChannels).mock.calls.at(-1)![3]).toMatchObject({productType:"apparel_model",synthesiseShadow:false});
+ },60_000);
+ it("lets a footwear classification synthesise",async()=>{
+  const r=await renderStages(world(),"anta-footwear");
+  expect(r.product.productType).toBe("footwear");
+  expect(r.ctx).toMatchObject({productType:"footwear",synthesiseShadow:true});
+ },60_000);
+ it("forbids synthesis for an apparel_model classification",async()=>{
+  const r=await renderStages(world(),"fc-model",async()=>({type:"apparel_model",confidence:.9,costUsd:0,calls:1,usage:{},flags:[]}));
+  expect(r.ctx).toMatchObject({productType:"apparel_model",synthesiseShadow:false});
+ },60_000);
+ it("forbids synthesis and keeps type_unknown when the classification failed",async()=>{
+  const r=await renderStages(world(),"fc-failed",async()=>({type:"other",confidence:0,costUsd:0,calls:2,usage:{},flags:["type_unknown"]}));
+  expect(r.ctx).toMatchObject({productType:"other",synthesiseShadow:false});
+  expect(r.outputs.every(o=>o.flags.includes("type_unknown"))).toBe(true);
+ },60_000);
+ it("forbids synthesis on the mocked classifier path and flags type_unknown",async()=>{
+  const r=await renderStages(world(),"fc-mocked",cannedQa.classifyProductType);
+  expect(r.ctx).toMatchObject({synthesiseShadow:false});
+  expect(r.outputs.every(o=>o.flags.includes("type_unknown"))).toBe(true);
+ },60_000);
+});

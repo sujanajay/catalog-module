@@ -2,7 +2,7 @@
 import { useState } from "react";
 import { channel } from "@catalog/core/catalog/channels";
 import type { AttentionPhoto, AttentionProduct } from "../../lib/catalog/products";
-import { listAnd } from "../../lib/catalog/copy";
+import { listAnd, plural } from "../../lib/catalog/copy";
 import { apiFetch, SessionEndedError } from "../../lib/fetch";
 import { ActionOnly } from "../ViewerPreview";
 import { useToast } from "../Toast";
@@ -94,7 +94,7 @@ export default function AttentionProductCard({ item, canAct, channels, stateOf =
     <article className="pc">
       <header>
         <b className="mono">{item.identifier}</b>
-        <span className="muted">{new Set(item.photos.map(p => p.n)).size} of {item.totalShots} photos need a decision</span>
+        <span className="muted">{new Set(item.photos.map(p => p.n)).size} of {item.totalShots} {plural(item.totalShots, "photo needs", "photos need")} a decision</span>
       </header>
       <p className="prob">{item.problemLine}</p>
       {item.photos.map(p => <PhotoRow key={p.outputId} item={item} photo={p} state={stateOf(p.outputId)} canAct={canAct} channels={channels} onDecided={onDecided} />)}

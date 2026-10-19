@@ -8,6 +8,7 @@ import { bbox, planProduct, UnsupportedSourceError, type Matte } from "@catalog/
 import { renderKey } from "@catalog/core/catalog/pipeline/publish";
 import { catalogLlmDeps, CatalogQaCapError, runQaStage } from "./qa-stage";
 import { checkCatalogCaps } from "@catalog/core/catalog/qa/caps";
+import { shadowSynthesisAllowed } from "@catalog/core/catalog/qa/policy";
 import { flagReason } from "@catalog/core/catalog/types";
 import { flagDetails } from "@catalog/core/catalog/qa/reasons";
 import { recordCost } from "@catalog/core/spend";
@@ -57,7 +58,7 @@ export async function handleChunkTask(deps: CatalogDeps, body: Record<string,unk
       // fresh output has no bytes yet, so it re-renders over the replaced shot's staged file.
       const replacementRoot=deps.storage.toGsUri(deps.storage.getBucketName(),`${prefix}/replacements-`);
       const derivedPrefix=(source:typeof sources[number])=>source.replacesId && source.rawUri.startsWith(replacementRoot) ? `${prefix}/replacements-${source.id}`:prefix;
-      if(chunk.stage==="matte" && !product.productType && sources.length) {
+      if(chunk.stage==="matte" && (!product.productType || product.productType==="auto") && sources.length) {
        let type=batch.productType, flags:typeof sources[number]["flags"]=[];
        if(type==="auto") {
         try {
@@ -152,7 +153,7 @@ export async function handleChunkTask(deps: CatalogDeps, body: Record<string,unk
             const path = stagingPath(prefix,product.pathKey,output.channel,source.n), uri = deps.storage.toGsUri(deps.storage.getBucketName(),path), head = await deps.storage.headObject(uri);
             if (head.exists && output.bytes !== null && head.size===output.bytes) { await underClaim(async tx=>tx.update(catalogOutputs).set({stagingUri:uri,crc32c:head.crc32c,status:output.flags.some(f=>f==="small_source" || f==="failed_compliance" || f==="complete_product") ? "needs_attention":"staged",updatedAt:deps.now()}).where(eq(catalogOutputs.id,output.id))); continue; }
             const renderStart = +deps.now();
-            const rendered = (await deps.renderAllChannels(p,matte,[output.channel],{shotNumber:source.n,productType:product.productType ?? "other",identifier:product.identifier,publicObjectPath:output.objectPath,...(output.channel==="styli" ? {uniformScale}:{})}))[output.channel];
+            const rendered = (await deps.renderAllChannels(p,matte,[output.channel],{shotNumber:source.n,productType:product.productType ?? "other",synthesiseShadow:shadowSynthesisAllowed(product.productType,source.flags),identifier:product.identifier,publicObjectPath:output.objectPath,...(output.channel==="styli" ? {uniformScale}:{})}))[output.channel];
             renderMs += +deps.now()-renderStart;
             const flags = [...new Set([...source.flags,...rendered.flags])], status = rendered.status==="skipped" ? "skipped":!rendered.compliance.ok || flags.includes("small_source") || flags.includes("complete_product") ? "needs_attention":rendered.jpeg ? "staged":"failed";
             const patch = {canvasW:rendered.plan.w,canvasH:rendered.plan.h,scale:rendered.plan.scale,placedX:rendered.plan.placedX,placedY:rendered.plan.placedY,bytes:rendered.bytes,quality:rendered.quality,flags,compliance:rendered.compliance,reason:rendered.notes.join("; ") || (flags.includes("small_source") ? flagReason("small_source"):flags.includes("complete_product") ? flagDetails("complete_product",{n:source.n,k:batch.channels.length}).why:null),updatedAt:deps.now()};

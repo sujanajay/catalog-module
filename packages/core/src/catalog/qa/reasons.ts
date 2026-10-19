@@ -1,6 +1,14 @@
 import { flagReason, type OutputFlag } from "../types";
+import { CHANNELS } from "../channels";
 export interface ReasonContext { n?: number; k?: number; channel?: string; w?: number; h?: number; min?: number; failures?: string; error?: string }
 export interface FlagDetails { why: string; whatToDo: string }
+/** The placement sentence in the channel's own rule (the channel table's `anchor`), in operator words. */
+function placementWhy(label: string | undefined): string {
+  const spec = Object.values(CHANNELS).find(c => c.label === label);
+  if (!spec) return "On this marketplace the product does not sit in the same place as the other angles.";
+  const rule = spec.anchor === "bottom-centre" ? "at the bottom centre inside the guides" : "in the centre of the image";
+  return `On ${spec.label} the product does not sit ${rule} like the other angles.`;
+}
 export function flagDetails(flag: OutputFlag | "failed", ctx: ReasonContext = {}): FlagDetails {
   const n = ctx.n ?? "N", k = ctx.k ?? "the selected", channel = ctx.channel ?? "This marketplace";
   const pairs: Partial<Record<OutputFlag | "failed", [string,string]>> = {
@@ -11,7 +19,7 @@ export function flagDetails(flag: OutputFlag | "failed", ctx: ReasonContext = {}
     text_or_watermark:["The photo carries text, a watermark or a logo overlay. Marketplaces reject these.","Remove it, or replace it with a clean photo."],
     collage:["This image combines several photos in one. Marketplaces reject these.","Remove it, or replace it with the single photos."],
     orientation:["The product looks rotated or upside down.","If the original is like this, replace it with a corrected photo."],
-    placement:[`On ${ctx.channel ?? "Styli"} the product does not sit at the bottom centre inside the guides like the other angles.`,`Check the other angles of this product. This affects ${ctx.channel ?? "Styli"} only; "Remove this photo" removes it for ${ctx.channel ?? "Styli"}, "Replace photo ${n}" swaps the photo.`],
+    placement:[placementWhy(ctx.channel),`Check the other angles of this product. This affects ${ctx.channel ?? "this marketplace"} only; "Remove this photo" removes it for ${ctx.channel ?? "this marketplace"}, "Replace photo ${n}" swaps the photo.`],
     low_resolution:[ctx.w !== undefined && ctx.h !== undefined ? `The original is ${ctx.w} x ${ctx.h}. ${channel} wants at least ${ctx.min ?? "the required"} px, so this one may look soft.` : `The original photo is smaller than ${channel} wants, so this one may look soft.`,"It will upload, but ask the brand for a larger photo if you can. The other marketplaces are fine with it."],
     small_source:[ctx.w !== undefined && ctx.h !== undefined ? `The original is only ${ctx.w} x ${ctx.h}, under 500 px on its long side.` : "The original is under 500 px on its long side.","It is too small to look good anywhere. Remove it or replace it with a larger photo."],
     failed:[ctx.error ?? "The file is corrupt and could not be decoded.","Nothing was made for any marketplace from this photo. Remove it or replace it."],
@@ -33,7 +41,7 @@ export function flagDetails(flag: OutputFlag | "failed", ctx: ReasonContext = {}
   return {why:flagReason(flag as OutputFlag),whatToDo:"Check the original photo and replace it if needed."};
 }
 export function shortClause(flag: OutputFlag | "failed", ctx: ReasonContext = {}): string {
-  const clauses: Partial<Record<OutputFlag | "failed",string>> = {complete_product:"looks cut at the frame edge",different_product:"looks like a different product from the others",failed:"could not be read",low_resolution:`is too small for ${ctx.channel ?? "this marketplace"}`,small_source:"is too small",text_or_watermark:"carries text or a watermark",collage:"combines several photos",halo:"has a rough edge",leftover_background:"still shows some background",orientation:"looks rotated",placement:`sits differently from the other angles on ${ctx.channel ?? "Styli"}`,fallback_matte:"was cut out with the simple method",transparent:"looks transparent or glass",qa_unavailable:"could not be checked",qa_cap:"was not checked because the spending limit was reached",failed_compliance:`did not meet ${ctx.channel ?? "this marketplace"}'s rules`};
+  const clauses: Partial<Record<OutputFlag | "failed",string>> = {complete_product:"looks cut at the frame edge",different_product:"looks like a different product from the others",failed:"could not be read",low_resolution:`is too small for ${ctx.channel ?? "this marketplace"}`,small_source:"is too small",text_or_watermark:"carries text or a watermark",collage:"combines several photos",halo:"has a rough edge",leftover_background:"still shows some background",orientation:"looks rotated",placement:`sits differently from the other angles on ${ctx.channel ?? "this marketplace"}`,fallback_matte:"was cut out with the simple method",transparent:"looks transparent or glass",qa_unavailable:"could not be checked",qa_cap:"was not checked because the spending limit was reached",failed_compliance:`did not meet ${ctx.channel ?? "this marketplace"}'s rules`};
   return clauses[flag] ?? "needs a look";
 }
 export interface ProblemPhoto { n: number; flag?: OutputFlag | "failed"; flags?: OutputFlag[]; reason?: string | null; channel?: string }
