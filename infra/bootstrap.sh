@@ -391,6 +391,8 @@ secret_binding "$OPENROUTER_SECRET" "serviceAccount:$WORKER" roles/secretmanager
 project_binding "serviceAccount:$WORKER" roles/run.invoker
 
 sa_binding "$WEB" "serviceAccount:$WEB" roles/iam.serviceAccountTokenCreator
+# The catalog-eval job (contact-sheet, report) runs as catalog-worker@ and signs URLs through signBlob.
+sa_binding "$WORKER" "serviceAccount:$WORKER" roles/iam.serviceAccountTokenCreator
 sa_binding "$WORKER" "serviceAccount:$WEB" roles/iam.serviceAccountUser
 sa_binding "$WORKER" "serviceAccount:$WORKER" roles/iam.serviceAccountUser
 # catalog-matting@ gets no bucket or database rights (it receives bytes and returns bytes).

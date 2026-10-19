@@ -9,7 +9,8 @@ import { assertTestPrefix, assertWithinProduct, productPrefix } from "@catalog/c
  *
  * Signed URLs (v4): on Cloud Run there is no key file, so the library signs through the IAM
  * Credentials `signBlob` API. The runtime service account needs
- * `roles/iam.serviceAccountTokenCreator` on itself for that to work (bootstrap grants it to catalog-web@).
+ * `roles/iam.serviceAccountTokenCreator` on itself for that to work (bootstrap grants it to catalog-web@
+ * and to catalog-worker@, which signs in the catalog-eval job).
  *
  * Public bucket rule: `stageCopyToPublic` and `deletePublicObject` are the only two functions that
  * write to the public bucket, and both run only in the worker.

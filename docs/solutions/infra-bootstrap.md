@@ -53,10 +53,13 @@ an org policy or BigQuery rights in another project).
   `gcloud auth login` and verify with `gcloud projects get-iam-policy`.
 
 ## IAM: resource level first, project level as fallback
-- Service-account bindings (`roles/iam.serviceAccountTokenCreator` for `catalog-web@` on itself,
+- Service-account bindings (`roles/iam.serviceAccountTokenCreator` for `catalog-web@` and for
+  `catalog-worker@` on themselves (the worker signs URLs in the `catalog-eval` job, 2026-10-20),
   `roles/iam.serviceAccountUser` on `catalog-worker@`) and secret bindings
   (`roles/secretmanager.secretAccessor` on `catalog-db-password`, and on `openrouter-api-key` for the
-  worker) are tried at resource level and fall back to project level with a WARN line. Secrets are
+  worker) are tried at resource level and fall back to project level with a WARN line. If the worker's
+  token creator binding falls back to project level, `catalog-worker@` can sign as every service
+  account in the project; an IAM admin narrows it to the resource level. Secrets are
   bound per secret because this project also holds other apps' secrets.
 - **Secret access fell back to project level (2026-10-17).** `gcloud secrets add-iam-policy-binding`
   on `catalog-db-password` was denied (the operator lacks `secretmanager.secrets.setIamPolicy`), so

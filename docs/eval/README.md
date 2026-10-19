@@ -7,7 +7,14 @@ Everything runs as the Cloud Run job `catalog-eval` (deployed by `infra/deploy.s
 `infra/catalog-eval.sh exec <cli args>` from the repo root in Git Bash. All artifacts stay under
 `gs://image-links-agent-assets/catalog-test/eval/<set>/`. Only `exec --live` sets `LIVE_SMOKE=1`.
 
-1. Assemble a golden set (real photos, sampled per product):
+Arguments: `gcloud run jobs execute --args` refuses any value that appears twice (also through
+`--flags-file`), so the script folds each `--flag value` pair into `--flag=value` before calling gcloud,
+and the CLI reads both forms. `exec assemble --set anta --brand anta --sample 1 --seed 1` is sent as
+`assemble|--set=anta|--brand=anta|--sample=1|--seed=1`. A flag given twice is refused before gcloud
+runs. `apps/worker/src/catalog-eval-sh.test.ts` checks this against a fake gcloud.
+
+1. Assemble a golden set (real photos, sampled per product). The brand must be in the brand master
+   (`run` needs it); assemble checks that first and writes nothing otherwise:
    `bash infra/catalog-eval.sh exec assemble --set anta --brand anta --sample 10 --seed 1`
    `bash infra/catalog-eval.sh exec assemble --set french-connection --brand french_connection --sample 10 --seed 1`
 2. Run one eval batch per matting candidate (`primary` = the primary list, or a model id):
@@ -16,10 +23,16 @@ Everything runs as the Cloud Run job `catalog-eval` (deployed by `infra/deploy.s
 3. Label: open each printed `/catalog/<batchId>` page; eval mode shows every output with Pass / Flag.
 4. Judge (live, costs credit; set the budget from the printed estimate):
    `EVAL_BUDGET_USD=2 bash infra/catalog-eval.sh exec --live judges --batch <id> --models google/gemini-2.5-flash-lite,anthropic/claude-haiku-5.5,qwen/qwen3-vl-30b-a3b-instruct`
-5. Look: `contact-sheet --batch <id>` prints a signed URL.
+5. Look: `contact-sheet --batch <id>` prints a signed URL. Signing needs
+   `roles/iam.serviceAccountTokenCreator` for `catalog-worker@` on itself (granted by
+   `infra/bootstrap.sh`). The originals and staged cut-outs are in the private bucket, so the sheet
+   needs signed URLs; published outputs already use their public URL. `report` writes its HTML and
+   JSON before signing, so a signing failure only loses the printed link (the job then exits 1).
 6. Score and write: `score --set anta --batches <ids>`, `policy write --set anta --batches <ids> --dry-run`,
    then without `--dry-run`, then `report --set anta --batches <ids>`.
 7. Clean up the eval batches (golden set sources stay): `cleanup --batches <ids>`.
+   To remove a whole set folder (`catalog-test/eval/<set>/`, for example one left behind when
+   `run` could not start), clean up its batches first, then `cleanup --set <set>`.
 
 Reading the report: per (brand, category) and judge it shows precision (judge passed and a human
 passed, over judge passed; gate 97%), recall (human flagged and the judge flagged, over human flagged;
