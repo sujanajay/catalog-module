@@ -3,7 +3,7 @@
 # Cloud Run job (additive; also seeds the first admin and the test brand test_brand), run the tier 5
 # per-brand smoke on the just-built worker image as the Cloud Run job catalog-test-smoke, then
 # deploy catalog-matting (CPU and GPU), catalog-worker and catalog-web (all private), IAP access,
-# CORS, the catalog-qa-check job (same worker image, deployed but not executed), and print the
+# CORS, the catalog-qa-check and catalog-eval jobs (same worker image, deployed, not executed), and print the
 # URLs. A failing smoke (any failed_compliance or overwrite assertion) stops the
 # script before any service is updated. Migrations run before the smoke because the new image's
 # smoke needs the migrated schema and the seeded test brand. Idempotent; re-run to ship a commit.
@@ -315,6 +315,10 @@ echo "==> jobs"
 if [ "${CATALOG_PREVIEW:-0}" != 1 ]; then
   QA_JOB_IMAGE="$AR/worker:$TAG" QA_JOB_ENV="$WORKER_ENV" QA_JOB_SECRETS="$JOB_SECRETS" \
     bash infra/catalog-qa-check.sh deploy
+  # 08: the bake-off CLI job (same image; WORKER_ENV carries MATTING_URL and MATTING_GPU_URL).
+  # Deployed, never executed here; run it with "bash infra/catalog-eval.sh exec ...".
+  EVAL_JOB_IMAGE="$AR/worker:$TAG" EVAL_JOB_ENV="$WORKER_ENV" EVAL_JOB_SECRETS="$JOB_SECRETS" \
+    bash infra/catalog-eval.sh deploy
 else
   echo "==> jobs: SKIP (preview never changes the shared jobs)"
 fi
