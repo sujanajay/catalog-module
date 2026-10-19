@@ -29,6 +29,7 @@ interface ServiceState extends MattingService { breaker: Breaker; models: ModelI
 function modelSendLongSide(inputSize: ModelInfo["inputSize"], source: Size): number {
   return inputSize === "native" ? Math.max(256, Math.min(2304, Math.round(Math.max(source.w, source.h) / 32) * 32)) : inputSize;
 }
+export interface MatteOptions { padFraction?: number }
 class UnavailableError extends Error {}
 export class UnknownMatteModelError extends Error {}
 
@@ -106,7 +107,13 @@ export class MattingClient {
     if (!info) throw new UnknownMatteModelError(`Unknown background removal model: ${model}.`);
     return modelSendLongSide(info.inputSize, source);
   }
-  async matte(prepared: Prepared, model?: string): Promise<Matte> {
+  /**
+   * `opts.padFraction` surrounds the photo with a white border of that share of its long side before
+   * sending, and crops the mask back: a frame-filling close-up then looks like a framed object, so a
+   * salient-object model keeps the whole surface instead of only the logo on it (the cut-out
+   * integrity ladder in matte-guard.ts).
+   */
+  async matte(prepared: Prepared, model?: string, opts: MatteOptions = {}): Promise<Matte> {
     const h = await this.health();
     const chosen = model ?? this.opts.model ?? h.default;
     if (!chosen) throw new UnavailableError("The CPU background removal service's default model is unavailable.");
@@ -118,13 +125,19 @@ export class MattingClient {
     for (const s of candidates) {
       if (!this.available(s)) continue;
       const info = s.models.find((m) => m.id === chosen)!;
-      const sentLongSide = modelSendLongSide(info.inputSize, { w: prepared.width, h: prepared.height });
-      const png = await sharp(prepared.rgb, { raw: { width: prepared.width, height: prepared.height, channels: 3 } }).resize(sentLongSide, sentLongSide, { fit: "inside", kernel: "lanczos3" }).png().toBuffer();
+      const pad = Math.round(Math.max(prepared.width, prepared.height) * Math.max(0, opts.padFraction ?? 0));
+      const framed = { w: prepared.width + 2 * pad, h: prepared.height + 2 * pad };
+      const sentLongSide = modelSendLongSide(info.inputSize, framed);
+      const raw = sharp(prepared.rgb, { raw: { width: prepared.width, height: prepared.height, channels: 3 } });
+      const source = pad ? sharp(await raw.extend({ top: pad, bottom: pad, left: pad, right: pad, background: { r: 255, g: 255, b: 255 } }).png().toBuffer()) : raw;
+      const png = await source.resize(sentLongSide, sentLongSide, { fit: "inside", kernel: "lanczos3" }).png().toBuffer();
       const body = new FormData(); body.set("file", new Blob([new Uint8Array(png)], { type: "image/png" }), "source.png");
       try {
         const response = await this.call(s, `/matte?model=${encodeURIComponent(chosen)}`, { method: "POST", body });
         const mask = await alphaFromPng(Buffer.from(await response.arrayBuffer()));
-        const alpha = await sharp(mask.alpha, { raw: { width: mask.width, height: mask.height, channels: 1 } }).resize(prepared.width, prepared.height, { fit: "fill", kernel: "lanczos3" }).blur(1).toColourspace("b-w").raw().toBuffer();
+        const upscaled = sharp(mask.alpha, { raw: { width: mask.width, height: mask.height, channels: 1 } }).resize(framed.w, framed.h, { fit: "fill", kernel: "lanczos3" });
+        const fitted = pad ? sharp(await upscaled.extract({ left: pad, top: pad, width: prepared.width, height: prepared.height }).toColourspace("b-w").raw().toBuffer(), { raw: { width: prepared.width, height: prepared.height, channels: 1 } }) : upscaled;
+        const alpha = await fitted.blur(1).toColourspace("b-w").raw().toBuffer();
         s.breaker.failures = 0; s.breaker.openedAt = null; this.transition(s, "closed");
         return { alpha, width: prepared.width, height: prepared.height, model: chosen, ms: Number(response.headers.get("x-ms") ?? 0), source: "model", target: s.target, sentLongSide };
       } catch (err) {
@@ -167,8 +180,8 @@ export function floodFillMatte(p: Prepared): Matte {
   return { alpha: blurred, width: w, height: h, model: "floodfill", ms: 0, source: "floodfill", target: null, sentLongSide: null };
 }
 
-export async function matteFor(prepared: Prepared, client: MattingClient | null, model?: string): Promise<Matte> {
+export async function matteFor(prepared: Prepared, client: MattingClient | null, model?: string, opts: MatteOptions = {}): Promise<Matte> {
   if (prepared.alphaSource) return { alpha: prepared.alphaSource, width: prepared.width, height: prepared.height, model: "alpha_source", ms: 0, source: "alpha_source", target: null, sentLongSide: null };
   if (!client) return floodFillMatte(prepared);
-  try { return await client.matte(prepared, model); } catch (err) { if (!(err instanceof UnavailableError)) throw err; return floodFillMatte(prepared); }
+  try { return await client.matte(prepared, model, opts); } catch (err) { if (!(err instanceof UnavailableError)) throw err; return floodFillMatte(prepared); }
 }

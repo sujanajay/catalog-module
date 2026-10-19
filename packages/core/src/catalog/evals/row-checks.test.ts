@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { checkAttention, flagRows } from "./attention";
-import { checkCompleteness, expectedOutcome, STYLI_SKIP_NOTE, type CompletenessInput, type OutputRow } from "./completeness";
+import { CHART_SKIP_NOTE, checkCompleteness, expectedOutcome, STYLI_SKIP_NOTE, type CompletenessInput, type OutputRow } from "./completeness";
 import { checkIdentical, checkOverwrite, type LiveRow } from "./overwrite";
 import { buildReport, reportHtml, summaryLine } from "./report";
 import { policyRowsFor, rankModels, scoreModels, winnersByScope, type MatteTrial } from "./matte-bakeoff";
@@ -50,6 +50,18 @@ describe("completeness", () => {
     const ids = failed(checkCompleteness(w));
     expect(ids).toContain("completeness.skip_allowed");
     expect(ids).toContain("completeness.sheet_cell");
+  });
+  it("accepts a size chart left out on every channel with its note, and fails it without the note", () => {
+    const w = completenessWorld();
+    for (const o of w.outputs.filter(row => row.n === 3)) Object.assign(o, { status: "skipped", isLive: false, reason: CHART_SKIP_NOTE, generation: null, bytes: null, crc32c: null, stagingUri: null });
+    for (const cell of w.sheet.filter(c => c.n === 3)) cell.url = null;
+    w.sheetNotes.set("A", `${w.sheetNotes.get("A")}; photo 3: ${CHART_SKIP_NOTE}`);
+    Object.assign(w.counts, { verified: 4, skipped: 5, recheckOk: 4, recheckTotal: 4 });
+    const results = checkCompleteness(w);
+    expect(failed(results)).toEqual([]);
+    expect(results.filter(r => r.id === "completeness.skip_allowed" && r.measured === `skipped: ${CHART_SKIP_NOTE}`)).toHaveLength(3);
+    w.sheetNotes.set("A", "");
+    expect(failed(checkCompleteness(w))).toContain("completeness.sheet_cell");
   });
 });
 

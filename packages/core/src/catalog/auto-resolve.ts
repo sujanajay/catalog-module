@@ -14,10 +14,10 @@ export const JUDGED_DEFECT_FLAGS: ReadonlySet<OutputFlag> = new Set<OutputFlag>(
 /** Every defect we produced: the judge's output flags, a failed channel rule and a placement failure. */
 export const OWN_DEFECT_FLAGS: ReadonlySet<OutputFlag> = new Set<OutputFlag>([...JUDGED_DEFECT_FLAGS, "failed_compliance", "placement"]);
 /** Flags the renderer sets; a re-render replaces them with its own. */
-export const RENDER_FLAGS: ReadonlySet<OutputFlag> = new Set<OutputFlag>(["low_resolution", "no_shadow_source", "shadow_synthesised", "passthrough", "fallback_matte", "failed_compliance", "cut_in_source", "alpha_source", "small_source"]);
+export const RENDER_FLAGS: ReadonlySet<OutputFlag> = new Set<OutputFlag>(["low_resolution", "no_shadow_source", "shadow_synthesised", "passthrough", "fallback_matte", "failed_compliance", "cut_in_source", "alpha_source", "small_source", "matte_passthrough"]);
 
-/** Ordered, bounded: at most these three steps per photo, and at most one re-judge per step. */
-export const LADDER_STEPS = ["shadow_off", "second_matte", "smaller_fit"] as const;
+/** Ordered, bounded: at most these steps per photo (three for any trigger but `product_removed`), and at most one re-judge per step. */
+export const LADDER_STEPS = ["shadow_off", "second_matte", "matte_passthrough", "smaller_fit"] as const;
 export type LadderStep = typeof LADDER_STEPS[number];
 /** Step (c): the product is fitted 5% smaller inside the same canvas. */
 export const SMALLER_FIT_SCALE = 0.95;
@@ -30,15 +30,23 @@ export function judgeSawSourceCut(flags: readonly string[], qaScores?: Record<st
   return flags.includes("complete_product") || flags.includes("source_cut") || qaScores?.source_cut === true;
 }
 
+/**
+ * The pass-through step (the whole frame kept, matte-guard.ts) only answers a cut-out that removed
+ * the product (`product_removed`); for any other trigger it is not taken and not recorded.
+ */
+export const stepApplies = (step: LadderStep, trigger: readonly OutputFlag[]): boolean => step !== "matte_passthrough" || trigger.includes("product_removed");
+
 /** How one step re-renders. A synthesised shadow is never needed to fix anything, so it stays off after step (a). */
-export interface StepVariant { synthesiseShadow: false; matte: "first" | "second"; fitScale: number }
+export interface StepVariant { synthesiseShadow: false; matte: "first" | "second" | "passthrough"; fitScale: number }
 export function stepVariant(step: LadderStep): StepVariant {
+  if (step === "matte_passthrough") return { synthesiseShadow: false, matte: "passthrough", fitScale: 1 };
   if (step === "second_matte") return { synthesiseShadow: false, matte: "second", fitScale: 1 };
   if (step === "smaller_fit") return { synthesiseShadow: false, matte: "first", fitScale: SMALLER_FIT_SCALE };
   return { synthesiseShadow: false, matte: "first", fitScale: 1 };
 }
 
-export type AutoActionKind = LadderStep | "flush_cut" | "matte_retry" | "apply";
+/** `matte_check` and `padded_matte` are the matte stage's integrity ladder (matte-guard.ts resolveMatte). */
+export type AutoActionKind = LadderStep | "flush_cut" | "matte_retry" | "apply" | "matte_check" | "padded_matte";
 /** One entry of an output's `auto_actions` list (kept in `catalog_outputs.compliance`, no schema change). */
 export interface AutoAction {
   step: AutoActionKind;
@@ -65,6 +73,7 @@ export class LadderStopped extends Error {}
 export async function runLadder(trigger: readonly OutputFlag[], channels: readonly ChannelId[], attempt: (step: LadderStep) => Promise<StepOutcome>): Promise<{ winner: LadderStep | null; actions: AutoAction[] }> {
   const actions: AutoAction[] = [];
   for (const step of LADDER_STEPS) {
+    if (!stepApplies(step, trigger)) continue;
     let outcome: StepOutcome;
     try { outcome = await attempt(step); }
     catch (error) {

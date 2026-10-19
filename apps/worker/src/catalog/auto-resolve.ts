@@ -5,6 +5,7 @@ import { batchPrefix, stagingPath } from "@catalog/core/catalog/naming";
 import { shotGeometry, type Matte, type Prepared, type RenderInput, type RenderOutput } from "@catalog/core/catalog/render";
 import { autoActionsOf, LadderStopped, RENDER_FLAGS, runLadder, stepVariant, withAutoActions, type AutoAction, type LadderStep } from "@catalog/core/catalog/auto-resolve";
 import { strictestChannel } from "@catalog/core/catalog/qa/policy";
+import { heldInHand, passthroughMatte } from "@catalog/core/catalog/matte-guard";
 import type { ChannelId, OutputFlag, ResolvedPolicy } from "@catalog/core/catalog/types";
 import type { CatalogDeps } from "./deps";
 
@@ -53,7 +54,8 @@ export async function storedMatte(deps: CatalogDeps, source: Source, p: Prepared
 
 /**
  * The retry ladder for one photo (07 auto-resolve): (a) synthesised shadow off, (b) the policy's
- * second matte model, (c) a 5% smaller fit. Each step re-renders the failing channels, re-runs the
+ * second matte model, (b2) only for `product_removed`: the whole frame kept (the pass-through matte
+ * of matte-guard.ts, flag `matte_passthrough`), (c) a 5% smaller fit. Each step re-renders the failing channels, re-runs the
  * compliance checks (the renderer's guard) and, when the judge flagged the photo, re-judges once.
  * The first step that passes is applied to every channel of the photo, so all marketplaces show the
  * same treatment; a channel the winning step would break keeps its first image. Every step and its
@@ -78,9 +80,12 @@ export async function resolvePhoto(deps: CatalogDeps, input: ResolvePhotoInput):
     second = matte.source === "model" ? matte : null;
     return second;
   };
+  // The whole frame kept (matte-guard.ts), the last answer to a cut-out that removed the product.
+  let passthrough: Matte | undefined;
+  const passthroughFor = () => passthrough ??= passthroughMatte(p);
   const contextFor = input.contextFor ?? rowContext;
   const render = async (o: Output, step: LadderStep): Promise<RenderOutput> => {
-    const variant = stepVariant(step), matte = variant.matte === "second" ? (await secondMatte())! : first;
+    const variant = stepVariant(step), matte = variant.matte === "second" ? (await secondMatte())! : variant.matte === "passthrough" ? passthroughFor() : first;
     await underClaim(async()=>{});
     return (await deps.renderAllChannels(p,matte,[o.channel],{shotNumber:source.n,productType:product.productType ?? "other",identifier:product.identifier,publicObjectPath:o.objectPath,...contextFor(o),synthesiseShadow:variant.synthesiseShadow,...(variant.fitScale !== 1 ? {fitScale:variant.fitScale}:{}),...(input.judgedCut ? {judgedCut:true}:{})}))[o.channel];
   };
@@ -106,13 +111,14 @@ export async function resolvePhoto(deps: CatalogDeps, input: ResolvePhotoInput):
   const applied = input.outputs.filter(o=>renders.has(o.id));
   const all: AutoAction[] = [...actions,{step:"apply",trigger:[...input.trigger],result:"passed",channels:applied.map(o=>o.channel),rejudged:false,detail:kept.length ? `${winner}; kept the first image on ${kept.join(",")}`:winner}];
   let sourceFlags = source.flags;
-  if (stepVariant(winner).matte === "second" && second && source.matteUri) {
+  const winning = stepVariant(winner).matte === "second" ? second : stepVariant(winner).matte === "passthrough" ? passthrough : undefined;
+  if (winning && source.matteUri) {
     // The winning cut-out becomes the photo's matte, so any later render of this shot uses it too.
-    const {path} = deps.storage.parseGsUri(source.matteUri), secondPath = path.replace(/\.matte\.png$/,"")+".matte2.png";
-    const png = await sharp(second.alpha,{raw:{width:p.width,height:p.height,channels:1}}).png().toBuffer();
-    const matte = second;
-    sourceFlags = source.flags.filter(f=>f!=="fallback_matte");
-    const uri = await underClaim(async()=>deps.storage.uploadBuffer(secondPath,png,"image/png"));
+    const {path} = deps.storage.parseGsUri(source.matteUri), suffix = winning === passthrough ? ".matte-whole.png" : ".matte2.png", nextPath = path.replace(/\.matte[^/]*\.png$/,"")+suffix;
+    const png = await sharp(winning.alpha,{raw:{width:p.width,height:p.height,channels:1}}).png().toBuffer();
+    const matte = winning;
+    sourceFlags = [...source.flags.filter(f=>f!=="fallback_matte" && f!=="matte_passthrough"),...(winning === passthrough ? ["matte_passthrough" as const]:[])];
+    const uri = await underClaim(async()=>deps.storage.uploadBuffer(nextPath,png,"image/png"));
     await underClaim(async tx=>tx.update(catalogSourceImages).set({matteUri:uri,matteModel:matte.model,matteMs:matte.ms,flags:sourceFlags}).where(eq(catalogSourceImages.id,source.id)));
   }
   const fixed = new Set<string>();
@@ -166,9 +172,11 @@ export async function flushCutPhoto(deps: CatalogDeps, input: FlushCutInput): Pr
   const before = sides(false), after = sides(true);
   if (!after.some(side=>!before.includes(side))) return done({step:"flush_cut",trigger,result:before.length ? "skipped":"failed",channels,rejudged:false,detail:before.length ? "cut already placed flush":"no cut edge found"});
   const contextFor = input.contextFor ?? rowContext, renders = new Map<string, RenderOutput>();
+  // A product held in a hand does not rest on a floor: no synthesised contact shadow (matte-guard.ts).
+  const shadowAllowed = input.shadowAllowed && !heldInHand(p,matte.alpha).held;
   for (const o of input.outputs) {
     await input.underClaim(async()=>{});
-    const r = (await deps.renderAllChannels(p,matte,[o.channel],{shotNumber:source.n,productType:product.productType ?? "other",identifier:product.identifier,publicObjectPath:o.objectPath,...contextFor(o),synthesiseShadow:input.shadowAllowed,judgedCut:true}))[o.channel];
+    const r = (await deps.renderAllChannels(p,matte,[o.channel],{shotNumber:source.n,productType:product.productType ?? "other",identifier:product.identifier,publicObjectPath:o.objectPath,...contextFor(o),synthesiseShadow:shadowAllowed,judgedCut:true}))[o.channel];
     if (!r.flags.includes("cut_in_source")) return done({step:"flush_cut",trigger,result:"failed",channels,rejudged:false,detail:"no cut edge found"});
     if (!ok(r)) return done({step:"flush_cut",trigger,result:"failed",channels,rejudged:false,detail:`${o.channel}: ${codes(r)}`});
     renders.set(o.id,r);

@@ -364,6 +364,52 @@ reason "Background removal was unavailable and this photo's background is not pl
 batch again later, or replace the photo." and no render; 06 turns it into an attention item with
 "Replace photo <n>".
 
+### Cut-out integrity guard (`matte-guard.ts`, added 2026-10-20)
+
+Quality gate 2 found close-ups that fill the frame (a leather bag, a knit polo, a lace trim on fabric)
+cut down to the logo, label or clasp on them: a salient-object model treats a frame-filling texture
+as background. The earlier investigation sampled only shoes and full-length models. The spec 10
+checker could not see it either: `cutout.pixels_lost` is "not run" when the source border is not
+uniform, which is exactly the close-up case. The worker therefore checks every model matte at run
+time, before anything is rendered.
+
+- Product estimate from the source alone. Uniform canvas strips (rows or columns that are 97% the
+  border colour, a photo pasted on a plain canvas) are trimmed. Background is every smooth region (5x5
+  range at most `SMOOTH_WINDOW_RANGE` 18) connected to the photo's own border band, plus smooth pixels
+  in the colours that region holds; so a studio wall, the floor and cast shadows are background even
+  when they differ from the canvas. Leather grain, knit, lace and embroidery are never smooth. When
+  under 10% of the photo's border band is smooth, the photo is frame-filling and everything inside the
+  strips is product. Product = the spec 10 colour estimate minus that background (grown 2 px).
+- Check (`checkMatteIntegrity`): share of the estimate's interior (3 px in) the matte drops (alpha at
+  most 10), per cell of a 6x6 grid and overall. Bars `GUARD_CELL_LOSS_MAX` 0.2 and
+  `GUARD_OVERALL_LOSS_MAX` 0.04: far above the spec 10 golden bars (1% and 0.3%), because this guard
+  only has to catch a matte that removes the product; measured on 82 real photos, destroyed close-ups
+  lose 60 to 95%, good mattes under 9% in their worst cell except two model close-ups (skin removed
+  inside a neckline, a wall corner the flood did not reach), which then take the ladder. Also rejected: a hand-held product whose
+  holding hand (skin reaching the border band, bordering the kept product, not the background colour)
+  was dropped over more than 2% of the kept product (`HAND_NOTCH_MAX_SHARE`; not applied to apparel,
+  where the skin is the model's).
+- Ladder when the first matte fails, first pass wins, each step in `compliance.auto_actions` with
+  trigger `product_removed`: `matte_check` (the failed first matte), (a) `second_matte` the policy's
+  second model, (b) `padded_matte` the photo framed in a white border of 20% of its long side
+  (`MattingClient.matte(p, model, { padFraction })`, mask cropped back) with the first, then the second
+  model, (c) `matte_passthrough` the whole frame: alpha 255 except background connected to the frame
+  edge, holes filled, components under 25% of the largest dropped, edge softened inward only. Model
+  steps are skipped when this delivery has no time left for a matting call; the pass-through always
+  completes. A pass-through adds the information flag `matte_passthrough` ("This photo is a close-up
+  that fills the frame, so the whole photo was kept as it is instead of being cut out. Nothing to
+  do."), never holds, gets no synthesised shadow, and is placed by the cut-in-source rules (sides that
+  reach the frame sit flush).
+- The judge's `product_removed` (07 4.0a) names the same failure after the render: its ladder (07
+  auto-resolve) adds the same pass-through step after the second matte, for that trigger only.
+- No synthesised contact shadow for a product held in a hand (`heldInHand`, kept or dropped hand):
+  it does not rest on a floor.
+- Size charts and text-only photos (07 4.0a, flag `chart_image`) are not cut out: a photo the
+  classifier calls a chart (the next photo then decides the product type), or that `detectTextImage`
+  finds (a light page, at least 60% plain, 60 or more dark glyph marks on 6 or more lines, nothing
+  larger than 6% of the frame), is left out on every channel with the `chart_image` note before any
+  matting. A sweep of 5,362 brand photos found the 13 Penti size charts and no product photo.
+
 ### Compliance (`compliance.ts`)
 
 ```ts

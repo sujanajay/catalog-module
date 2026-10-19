@@ -14,7 +14,7 @@ export async function runImageChecks(subject: OutputSubject): Promise<CheckResul
   return [...await checkGeometry(ctx), ...checkShadow(ctx), ...checkCutout(ctx), ...checkCutEdge(ctx)];
 }
 export { checkUniformScale } from "./geometry";
-export { checkCompleteness, expectedOutcome, STYLI_SKIP_NOTE } from "./completeness";
+export { CHART_SKIP_NOTE, checkCompleteness, expectedOutcome, STYLI_SKIP_NOTE } from "./completeness";
 export { checkAttention, flagRows, outputKey } from "./attention";
 export { checkIdentical, checkOverwrite } from "./overwrite";
 export { buildReport, reportHtml, summaryLine } from "./report";
