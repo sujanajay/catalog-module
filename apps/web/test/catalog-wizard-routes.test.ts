@@ -70,6 +70,15 @@ async function collectBatch(id: string) {
 }
 
 describe("catalog wizard authorization and contracts",()=>{
+  it("makes every test_brand batch a test batch whatever its name, so its objects stay under catalog-test/",async()=>{
+    await db.insert(brandMaster).values({slug:"test_brand",name:"Test Brand",line:"softline",source:"manual"}).onConflictDoNothing();
+    const response=await create(request("POST",{brandSlug:"test_brand",productType:"auto",name:"Spring shoes"}));expect(response.status).toBe(201);
+    const {id}=await response.json() as {id:string};
+    expect((await db.select().from(catalogBatches).where(eq(catalogBatches.id,id)))[0]!.isTest).toBe(true);
+    expect((await patch(request("PATCH",{name:"Spring shoes again"}),ctx(id))).status).toBe(200);
+    const planned=await upload(request("POST",{files:[{name:"ABC_1.heic",size:10,mime:"image/heic",relativePath:"ABC_1.heic"}]}),ctx(id));
+    expect(((await planned.json()) as {putUrl:string}[])[0]!.putUrl).toContain("catalog-test/test_brand/");
+  });
   it("uses the deployed chunk image setting when the operator starts a batch",async()=>{
     vi.stubEnv("CATALOG_CHUNK_IMAGES","1");
     const id=await newBatch();

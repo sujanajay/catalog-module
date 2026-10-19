@@ -23,12 +23,13 @@ async function files(dir: string, prefix = ""): Promise<string[]> {
 }
 
 export async function localFixture(slug: string, full: boolean, run: string): Promise<RealFixture | null> {
-  const anta = slug === "anta", fc = slug.replace(/_/g,"-") === "french-connection";
+  // test_brand (the permanent dummy brand) reuses the real Anta photos under its own slug.
+  const testBrand = slug === "test_brand", anta = slug === "anta" || testBrand, fc = slug.replace(/_/g,"-") === "french-connection";
   if (!anta && !fc) return null;
   const dir = path.join(dataRoot(), anta ? "new_resources_4/Images" : "new_resources_3/French Connection Final");
   if (!existsSync(dir)) return null;
   const all = await files(dir);
-  if (full && anta) assert.equal(all.length, 630, "The full Anta delivery must contain all 630 photos.");
+  if (full && anta && !testBrand) assert.equal(all.length, 630, "The full Anta delivery must contain all 630 photos.");
   const groups = new Map<string, string[]>();
   for (const file of all) {
     const key = parseShotName(path.basename(file)).identifier;
@@ -37,7 +38,7 @@ export async function localFixture(slug: string, full: boolean, run: string): Pr
   const group = [...groups.values()].find(g => g.length >= 3);
   assert(group, `${slug} needs a real product with at least three shots for overwrite checks.`);
   const selected = full ? all : group;
-  return { slug, name: anta ? "Anta" : "French Connection", type: anta ? "footwear" : "apparel_model", source: dir, urls: [],
+  return { slug, name: testBrand ? "Test Brand" : anta ? "Anta" : "French Connection", type: anta ? "footwear" : "apparel_model", source: dir, urls: [],
     shots: await Promise.all(selected.map(async file => ({ name: `${run}-${path.basename(file)}`, originalName:file, bytes: await readFile(path.join(dir, file)) }))) };
 }
 
