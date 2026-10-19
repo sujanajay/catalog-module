@@ -118,7 +118,7 @@ export async function resolvePhoto(deps: CatalogDeps, input: ResolvePhotoInput):
   const fixed = new Set<string>();
   for (const o of applied) {
     const done = verdict;
-    const qaScores = o.qaScores && done ? {...o.qaScores,...(done.scores ? {edge_quality:done.scores.edge_quality ?? o.qaScores.edge_quality,background_clean:done.scores.background_clean ?? o.qaScores.background_clean}:{}),rejudge:{step:winner,channel:judgedChannel,flags:done.flags}}:o.qaScores;
+    const qaScores = o.qaScores && done ? {...o.qaScores,...(done.scores ? {edge_quality:done.scores.edge_quality ?? o.qaScores.edge_quality,background_clean:done.scores.background_clean ?? o.qaScores.background_clean,product_intact:done.scores.product_intact ?? o.qaScores.product_intact}:{}),rejudge:{step:winner,channel:judgedChannel,flags:done.flags}}:o.qaScores;
     if (await writeRender(deps,input,o,renders.get(o.id)!,all,{sourceFlags,qaScores})) fixed.add(o.id);
   }
   await recordActions(deps,input,input.outputs.filter(o=>!renders.has(o.id)),all);

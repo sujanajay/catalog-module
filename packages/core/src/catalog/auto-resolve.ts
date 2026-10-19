@@ -6,8 +6,11 @@ import type { ChannelId, OutputFlag } from "./types";
  * runner and the `auto_actions` record); the worker supplies the rendering, storage and judge.
  */
 
-/** Judge flags that describe our own output (image 2 against image 1), not the brand's photo. */
-export const JUDGED_DEFECT_FLAGS: ReadonlySet<OutputFlag> = new Set<OutputFlag>(["halo", "leftover_background"]);
+/**
+ * Judge flags that describe our own output (image 2 against image 1), not the brand's photo:
+ * `product_removed` (the cut-out took away part of the product), `halo` and `leftover_background`.
+ */
+export const JUDGED_DEFECT_FLAGS: ReadonlySet<OutputFlag> = new Set<OutputFlag>(["product_removed", "halo", "leftover_background"]);
 /** Every defect we produced: the judge's output flags, a failed channel rule and a placement failure. */
 export const OWN_DEFECT_FLAGS: ReadonlySet<OutputFlag> = new Set<OutputFlag>([...JUDGED_DEFECT_FLAGS, "failed_compliance", "placement"]);
 /** Flags the renderer sets; a re-render replaces them with its own. */

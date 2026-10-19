@@ -1,6 +1,6 @@
 // Bake-off metrics, gates and winner selection (spec 08 sections 4.5 and 4.6). Pure functions over
 // rows loaded by load.ts; no database or network access here.
-import { QA_DEFAULT_FLOOR, QA_DEFAULT_THRESHOLD, QA_DIMENSIONS, verdictFor, type QaScores } from "../qa/judge";
+import { QA_DEFAULT_FLOOR, QA_DEFAULT_THRESHOLD, QA_DIMENSIONS, scoreOf, verdictFor, type QaScores } from "../qa/judge";
 import type { EvalLabel } from "../types";
 
 export const PRECISION_GATE = 0.97;
@@ -49,7 +49,8 @@ export function humanLabels(labels: readonly EvalLabelRow[]): Map<string, HumanL
 /** The judge's verdict at a swept threshold, recomputed from the stored scores (floor fixed at 60). */
 export function verdictAt(j: EvalJudgementRow, threshold: number, floor = QA_DEFAULT_FLOOR): EvalLabel {
   if (j.scores.unavailable === true || j.scores.is_collage === true) return "flag";
-  const scores = Object.fromEntries([...QA_DIMENSIONS, "overall"].map(k => [k, Number(j.scores[k] ?? 0)])) as QaScores;
+  // A judgement stored before a dimension existed reads it as passed (scoreOf), never as 0.
+  const scores = {...Object.fromEntries(QA_DIMENSIONS.map(d => [d, scoreOf(j.scores, d)])), overall: Number(j.scores.overall ?? 0)} as QaScores;
   return verdictFor(scores, threshold, floor);
 }
 
