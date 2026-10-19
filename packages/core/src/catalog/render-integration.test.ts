@@ -3,6 +3,8 @@ import { describe, expect, it } from "vitest";
 import { CHANNELS } from "./channels";
 import { bbox, planCanvas, prepare, renderSource, type Matte, type Prepared } from "./render";
 import { analyseBackground, preservedDarkness, shadowLayer, SHADOW_SYNTH_INTENSITY_GREY, SHADOW_SYNTH_INTENSITY_WHITE } from "./shadow";
+import { shadowSynthesisAllowed } from "./qa/policy";
+import type { OutputFlag, ProductType } from "./types";
 
 function source(): { prepared: Prepared; matte: Matte } {
   const width = 120, height = 160, rgb = Buffer.alloc(width * height * 3, 255), alpha = Buffer.alloc(width * height);
@@ -76,5 +78,27 @@ describe("renderer integration edge cases", () => {
     expect(output.plan.sourceBox).toEqual({ x: 40, y: 30, w: 40, h: 100 });
     expect(output.plan.productBox!.y).toBeGreaterThanOrEqual(output.plan.safeBox.y);
     expect(output.plan.productBox!.y + output.plan.productBox!.h).toBeLessThanOrEqual(output.plan.safeBox.y + output.plan.safeBox.h);
+  });
+
+  // The tall product on plain white with no cast shadow is the French Connection case: every
+  // synthesising type would add a contact shadow, so only the decision input keeps it off.
+  it.each<[string, ProductType | null, OutputFlag[], boolean]>([
+    ["an apparel_model classification", "apparel_model", [], false],
+    ["a footwear classification", "footwear", [], true],
+    ["a missing classification", null, [], false],
+    ["the auto placeholder", "auto", [], false],
+    ["a failed or mocked classification", "other", ["type_unknown"], false],
+  ])("renders %s with the shadow the classification allows", async (_label, productType, flags, synthesised) => {
+    const { prepared, matte } = source(), synthesiseShadow = shadowSynthesisAllowed(productType, flags);
+    expect(synthesiseShadow).toBe(synthesised);
+    const output = await renderSource({ prepared, matte, channel: "noon", shotNumber: 1, productType: productType ?? "other", synthesiseShadow });
+    expect(output.flags.includes("shadow_synthesised")).toBe(synthesised);
+    if (!synthesised) expect(output.flags).toContain("no_shadow_source");
+    expect(output.compliance).toEqual({ ok: true, failures: [] });
+  });
+
+  it("keeps the product-type rule when no decision input is given", async () => {
+    const { prepared, matte } = source();
+    expect((await renderSource({ prepared, matte, channel: "noon", shotNumber: 1, productType: "footwear" })).flags).toContain("shadow_synthesised");
   });
 });

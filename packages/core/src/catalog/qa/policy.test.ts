@@ -4,7 +4,7 @@ import { createTestDb } from "../../db/testing";
 import type { Db } from "../../db/client";
 import { catalogBatches, modelPolicy } from "../../db/schema";
 import { recordCost } from "../../spend";
-import { resolvePolicy, ensureDefaultPolicies, strictestChannel, sampledForQa, defaultPolicyFor } from "./policy";
+import { resolvePolicy, ensureDefaultPolicies, strictestChannel, sampledForQa, defaultPolicyFor, shadowSynthesisAllowed } from "./policy";
 import { checkCatalogCaps } from "./caps";
 let db:Db, close:()=>Promise<void>;
 beforeAll(async()=>{({db,close}=await createTestDb());});afterAll(async()=>close());
@@ -47,5 +47,19 @@ describe("catalog policies and caps",()=>{
   const hit=await checkCatalogCaps(db,{batchId:capped!.id,now,env:{}});
   expect(hit.ok).toBe(false);expect(!hit.ok && hit.reason).toContain("Batch QA spend cap");
   expect(await checkCatalogCaps(db,{batchId:open!.id,now,env:{}})).toEqual({ok:true});
+ });
+});
+describe("shadowSynthesisAllowed",()=>{
+ it("follows the product's own classification and defaults to no synthesised shadow",()=>{
+  expect(shadowSynthesisAllowed("footwear",[])).toBe(true);
+  expect(shadowSynthesisAllowed("bag_accessory",[])).toBe(true);
+  expect(shadowSynthesisAllowed("other",[])).toBe(true);
+  expect(shadowSynthesisAllowed("apparel_model",[])).toBe(false);
+  expect(shadowSynthesisAllowed("apparel_flat",[])).toBe(false);
+  expect(shadowSynthesisAllowed("auto",[])).toBe(false);
+  expect(shadowSynthesisAllowed(null,[])).toBe(false);
+  expect(shadowSynthesisAllowed(undefined,[])).toBe(false);
+  expect(shadowSynthesisAllowed("other",["type_unknown"])).toBe(false);
+  expect(shadowSynthesisAllowed("footwear",["type_unknown"])).toBe(false);
  });
 });
