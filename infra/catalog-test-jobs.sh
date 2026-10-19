@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Prepare bounded Linux acceptance jobs. Does not execute them or grant permissions.
 # First build this commit's worker and catalog-real images. Reuse CATALOG_TEST_RUN on reruns.
+# CATALOG_TEST_JOBS limits the jobs prepared (default "smoke real cleanup"); infra/deploy.sh passes
+# "smoke", which needs only the worker image.
 set -euo pipefail
 export CLOUDSDK_CORE_PROJECT=image-links-agent
 cd "$(dirname "$0")/.."
@@ -9,16 +11,22 @@ cd "$(dirname "$0")/.."
 TAG=$(git rev-parse --short HEAD)
 [ -z "$(git status --porcelain)" ] || { echo "Commit source changes before preparing or running commit-tagged verification jobs." >&2; exit 1; }
 AR=asia-south1-docker.pkg.dev/image-links-agent/apps
-for image in worker catalog-real; do
+JOBS=${CATALOG_TEST_JOBS:-smoke real cleanup}
+for kind in $JOBS; do
+  [[ "$kind" =~ ^(smoke|real|cleanup)$ ]] || { echo "CATALOG_TEST_JOBS may list only smoke, real and cleanup" >&2; exit 2; }
+done
+IMAGES=worker
+if [[ " $JOBS " == *" real "* ]]; then IMAGES="worker catalog-real"; fi
+for image in $IMAGES; do
   gcloud artifacts docker images describe "$AR/$image:$TAG" --quiet >/dev/null
 done
 tmp_dir=$(mktemp -d)
 trap 'rm -f -- "$tmp_dir/worker.json" "$tmp_dir/smoke.json" "$tmp_dir/real.json" "$tmp_dir/cleanup.json" "$tmp_dir/existing.json"; rmdir "$tmp_dir"' EXIT
 # Environment references only. Mounted DB credentials are never read locally.
 gcloud run services describe catalog-worker --region=asia-south1 --format=json > "$tmp_dir/worker.json"
-node --input-type=commonjs - "$tmp_dir" "$TAG" "$CATALOG_TEST_RUN" <<'NODE'
+node --input-type=commonjs - "$tmp_dir" "$TAG" "$CATALOG_TEST_RUN" $JOBS <<'NODE'
 const fs=require('node:fs'),assert=require('node:assert/strict');
-const [dir,tag,run]=process.argv.slice(2);
+const [dir,tag,run,...kinds]=process.argv.slice(2);
 const worker=JSON.parse(fs.readFileSync(`${dir}/worker.json`));
 const source=worker.spec.template.spec.containers[0].env;
 const names=['GCP_PROJECT','REGION','BUCKET','PUBLIC_BUCKET','DB_HOST','DB_NAME','DB_USER','MATTING_URL','MATTING_GPU_URL'];
@@ -31,7 +39,7 @@ env.push(password,{name:'DB_POOL_MAX',value:'2'});
 const bucket='image-links-agent-assets';
 const input='catalog-test/render-05-1792340617303-555901/inputs';
 const volume=(name,prefix,readOnly)=>({name,csi:{driver:'gcsfuse.run.googleapis.com',readOnly,volumeAttributes:{bucketName:bucket,mountOptions:`only-dir=${prefix},uid=1000,gid=1000`}}});
-for(const kind of ['smoke','real','cleanup']) {
+for(const kind of kinds) {
   const name=`catalog-test-${kind}`,test=kind!=='cleanup';
   const image=`asia-south1-docker.pkg.dev/image-links-agent/apps/${kind==='real'?'catalog-real':'worker'}:${tag}`;
   const command=test?['/bin/sh']:['node'];
@@ -48,7 +56,7 @@ for(const kind of ['smoke','real','cleanup']) {
   fs.writeFileSync(`${dir}/${kind}.json`,JSON.stringify(desired));
 }
 NODE
-for kind in smoke real cleanup; do
+for kind in $JOBS; do
   job=catalog-test-$kind
   # Successful list distinguishes a missing job from an inaccessible API.
   gcloud run jobs list --region=asia-south1 --filter="metadata.name=$job" --format=json > "$tmp_dir/existing.json"

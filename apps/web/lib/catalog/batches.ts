@@ -3,6 +3,7 @@ import { brandMaster, catalogBatches, catalogUploads, type CatalogBatch } from "
 import { CHANNEL_IDS, IDENTIFIER_MODES, PRECEDENCES, PRODUCT_TYPES, type BatchOptions, type ChannelId, type ProductType } from "@catalog/core/catalog/types";
 import { db, type Db } from "../db";
 import { deriveBatchState } from "@catalog/core/catalog/pipeline/status";
+import { TEST_BRAND } from "@catalog/core/catalog/brands";
 import { notRefreshedChannels } from "@catalog/core/catalog/pipeline/report";
 import { badRequest, HttpError } from "../errors";
 
@@ -40,6 +41,10 @@ export async function getBatch(id: string) {
   const source = uploads.some((u) => u.kind === "drive_folder") ? "Drive folder" : uploads.some((u) => u.kind === "google_sheet") ? "Google Sheet" : uploads.some((u) => u.kind === "zip") ? "zip" : uploads.some((u) => u.kind === "url_list") ? "links" : "upload";
   return { batch: publicBatch(batch), counts: batch.counts, cost: batch.cost, state: batchState(batch, source), uploads, notRefreshedChannels: await notRefreshedChannels(db(), id) };
 }
+/** A batch is a test batch when its name starts with catalog-test or its brand is the test brand. */
+export function isTestBatch(brandSlug: string, name: string): boolean {
+  return name.startsWith("catalog-test") || brandSlug === TEST_BRAND.slug;
+}
 function record(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw badRequest("Check the form and try again.");
   return value as Record<string, unknown>;
@@ -52,7 +57,7 @@ export async function createBatch(value: unknown, actor: string) {
   const [brand] = await db().select().from(brandMaster).where(eq(brandMaster.slug, input.brandSlug));
   if (!brand) throw badRequest("Choose a brand from the list. Email sujan@opptra.com if it is missing.");
   const name = (input.name as string | undefined)?.trim() || `${brand.name} photos`;
-  const [batch] = await db().insert(catalogBatches).values({ brandSlug: brand.slug, brandName: brand.name, name, productType: input.productType as ProductType, createdBy: actor, isTest: name.startsWith("catalog-test"), channels: [] }).returning({ id: catalogBatches.id });
+  const [batch] = await db().insert(catalogBatches).values({ brandSlug: brand.slug, brandName: brand.name, name, productType: input.productType as ProductType, createdBy: actor, isTest: isTestBatch(brand.slug, name), channels: [] }).returning({ id: catalogBatches.id });
   return batch!;
 }
 export function parseOptions(value: unknown, existing: BatchOptions): BatchOptions {
@@ -83,7 +88,7 @@ export async function patchBatch(id: string, value: unknown) {
   const patch: Partial<typeof catalogBatches.$inferInsert> = { updatedAt: new Date() };
   if (input.name !== undefined) {
     if (typeof input.name !== "string" || !input.name.trim()) throw badRequest("Enter a batch name and try again.");
-    if (input.name.startsWith("catalog-test") !== batch.isTest) throw badRequest("Make a new batch to change whether this is a test batch.");
+    if (isTestBatch(batch.brandSlug, input.name.trim()) !== batch.isTest) throw badRequest("Make a new batch to change whether this is a test batch.");
     patch.name = input.name.trim();
   }
   if (input.channels !== undefined) {
