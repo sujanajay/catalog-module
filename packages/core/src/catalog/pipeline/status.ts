@@ -1,4 +1,5 @@
 import type { BatchCounts, BatchStatus } from "../types";
+export const QA_CAP_BANNER = "The quality check stopped early because the spending limit was reached.";
 export interface BatchState { state: "draft" | "collecting" | "processing" | "attention" | "ready" | "recheck_failed" | "failed"; pill: string; text: string; made: number; total: number; progress: number; eta: number | null; listPill: string; qualityLine?: string }
 export function deriveBatchState(input: { status: BatchStatus; counts: BatchCounts; source?: string; samples?: { at: Date; made: number }[]; now?: Date }): BatchState {
   const { status, counts: c } = input;
@@ -14,7 +15,8 @@ export function deriveBatchState(input: { status: BatchStatus; counts: BatchCoun
     return { ...result, state: "processing", pill: "Processing", listPill: `Processing ${made.toLocaleString("en")} of ${c.outputs.toLocaleString("en")}`, eta,...(status === "qa" ? {qualityLine:"Quality check running"}:{}), text: `${made} of ${c.outputs} images made${eta === null ? "" : ` · about ${Math.ceil(eta / 60)} min left`}` };
   }
   if (status === "done") {
-    if (c.attentionProducts > 0) return { ...result, state: "attention", pill: `${c.attentionProducts} products need your attention`, listPill: `Needs attention (${c.attentionProducts} products)`, text: "Everything else is done and in the sheet. Decide now or download the sheet as it is; each decision updates the sheet." };
+    const capped = (c as BatchCounts & { qaCapped?: boolean }).qaCapped ? ` ${QA_CAP_BANNER}` : "";
+    if (c.attentionProducts > 0) return { ...result, state: "attention", pill: `${c.attentionProducts} products need your attention`, listPill: `Needs attention (${c.attentionProducts} products)`, text: `Everything else is done and in the sheet. Decide now or download the sheet as it is; each decision updates the sheet.${capped}` };
     const planned = c.outputs - c.skipped;
     if (c.verified === planned && c.recheckOk !== null && c.recheckTotal !== null && c.recheckOk === c.recheckTotal) return { ...result, state: "ready", pill: "Ready", listPill: "Ready to download", text: `All ${planned} images are live and passed every check. Nothing needs your attention.` };
     const bad = Math.max(planned - c.verified, (c.recheckTotal ?? planned) - (c.recheckOk ?? 0));

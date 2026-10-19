@@ -16,11 +16,22 @@ export const DEFAULT_POLICIES: Record<Category,ResolvedPolicy> = {
  other:{...common,matteModel:"bria-rmbg",matteModelSecond:"birefnet-dynamic-matting",shadowMode:"preserve_else_synthesise"},
 };
 export interface PolicyHealth {models: readonly {id:string;target?:"cpu"|"gpu";inputSize?:number|"native"}[]; default:string}
-/** Preserve preferred defaults in storage; the worker resolves actual availability per source. */
-export async function ensureDefaultPolicies(db: Db, _health?: PolicyHealth): Promise<void> {
- for (const [category,policy] of Object.entries(DEFAULT_POLICIES) as [Category,ResolvedPolicy][]) {
+/**
+ * The built-in row as the matting services can serve it: the first matte model when `/health` lists
+ * it, else the second, else the service default. Without a health listing the table is kept as is.
+ */
+export function defaultPolicyFor(category: Category, health?: PolicyHealth): ResolvedPolicy {
+ const policy = {...DEFAULT_POLICIES[category]};
+ if (!health?.models.length) return policy;
+ const listed = (id?: string) => !!id && health.models.some(m => m.id === id);
+ const matteModel = [policy.matteModel,policy.matteModelSecond].find(listed) ?? (health.default || policy.matteModel);
+ return {...policy,matteModel};
+}
+/** Check-then-insert one `source = "default"` row per category; never overwrites an existing row. */
+export async function ensureDefaultPolicies(db: Db, health?: PolicyHealth): Promise<void> {
+ for (const category of Object.keys(DEFAULT_POLICIES) as Category[]) {
   const [existing] = await db.select({id:modelPolicy.id}).from(modelPolicy).where(and(eq(modelPolicy.brandSlug,"*"),eq(modelPolicy.category,category))).limit(1);
-  if (!existing) await db.insert(modelPolicy).values({brandSlug:"*",category,...policy}).onConflictDoNothing({target:[modelPolicy.brandSlug,modelPolicy.category]});
+  if (!existing) await db.insert(modelPolicy).values({brandSlug:"*",category,...defaultPolicyFor(category,health)}).onConflictDoNothing({target:[modelPolicy.brandSlug,modelPolicy.category]});
  }
 }
 export async function resolvePolicy(db: Db, brandSlug: string, category: ProductType | "*"): Promise<ResolvedPolicy> {
