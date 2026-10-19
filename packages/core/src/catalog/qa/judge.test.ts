@@ -9,12 +9,14 @@ const openRouterReply = (content: string) => ({id:"gen-1760900000-abc",provider:
  choices:[{logprobs:null,finish_reason:"stop",native_finish_reason:"STOP",index:0,message:{role:"assistant",content,refusal:null,reasoning:null}}],
  usage:{prompt_tokens:2911,completion_tokens:160,total_tokens:3071,cost:0.000139,is_byok:false,prompt_tokens_details:{cached_tokens:0,audio_tokens:0},cost_details:{upstream_inference_cost:null,upstream_inference_prompt_cost:0.0002911,upstream_inference_completions_cost:0.000064},completion_tokens_details:{reasoning_tokens:0,image_tokens:0}}});
 /** The v2 reply with every scored check at `score`. */
-const all = (score: number) => Object.fromEntries(["complete_product", "edge_quality", "background_clean", "no_text_or_watermark", "orientation_ok"].map(d => [d, score]));
+const all = (score: number) => Object.fromEntries(["complete_product", "edge_quality", "background_clean", "no_text_or_watermark", "orientation_ok", "product_intact"].map(d => [d, score]));
 const reply = (extra: Record<string, unknown> = {}) => ({view:"front",wrong_item:false,...all(95),is_collage:false,evidence:{},...extra});
 const image = () => sharp({create:{width:2000,height:1000,channels:3,background:"white"}}).png().toBuffer();
 /** An OpenRouter chat completion in its real response shape (id, model, choices, usage.cost). */
 const response = (value: unknown, cost: number | undefined = .003, model = "test-judge") => new Response(JSON.stringify({id:"gen-1",object:"chat.completion",model,choices:[{index:0,finish_reason:"stop",message:{role:"assistant",content:typeof value === "string" ? value : JSON.stringify(value)}}],usage:{prompt_tokens:1200,completion_tokens:80,total_tokens:1280,...(cost === undefined ? {} : {cost})}}));
 const requestModel = (init?: RequestInit) => String(JSON.parse(String(init?.body)).model);
+/** Every request answered with the same reply in OpenRouter's full production shape. */
+const openRouterFetch = (value: unknown) => vi.fn<typeof fetch>(async () => new Response(JSON.stringify(openRouterReply(JSON.stringify(value)))));
 /** One mocked OpenRouter that answers per requested model. */
 const byModel = (answers: Record<string, unknown>) => vi.fn<typeof fetch>(async (_url, init) => response(answers[requestModel(init)], .001, requestModel(init)));
 async function input(extra: Partial<JudgeInput> = {}): Promise<JudgeInput> {
@@ -33,7 +35,7 @@ describe("catalog judge v2", () => {
  });
  it("judges each dimension against its own policy line and never averages", () => {
   const scores = (extra: Record<string, number>) => normalizeScores({...all(95),...extra}).scores;
-  expect(dimensionThresholds(75,60)).toEqual({complete_product:60,same_product:60,no_text_or_watermark:60,orientation_ok:60,edge_quality:75,background_clean:75});
+  expect(dimensionThresholds(75,60)).toEqual({complete_product:60,same_product:60,no_text_or_watermark:60,orientation_ok:60,edge_quality:75,background_clean:75,product_intact:75});
   expect(verdictFor(scores({edge_quality:74}),75,60)).toBe("flag");
   expect(verdictFor(scores({background_clean:76,edge_quality:76}),75,60)).toBe("pass");
   expect(verdictFor(scores({complete_product:61,orientation_ok:61,no_text_or_watermark:61}),75,60)).toBe("pass");
@@ -88,10 +90,11 @@ describe("catalog judge v2", () => {
   const result = await judgeOutput(await input(),{apiKey:"fake",fetch:byModel({"first/judge":reply({placement_ok:0,evidence:{placement_ok:"It sits too high."}})})});
   expect(result.flags).toEqual([]);expect(result.scores).not.toHaveProperty("placement_ok");
  });
- it("maps failing checks lowest first with one evidence sentence each, plus collage", async () => {
-  const result = await judgeOutput(await input({n:1,shotOne:undefined}),{apiKey:"fake",fetch:byModel({"first/judge":reply({background_clean:30,edge_quality:50,is_collage:true,evidence:{background_clean:"A grey block remains left of the shoe.",is_collage:"Two photos sit side by side."}})})});
-  expect(result.flags).toEqual(["leftover_background","halo","collage"]);
-  expect(result.reasons).toEqual(["A grey block remains left of the shoe.","The edge of the product looks rough or shows a halo, often white on white.","Two photos sit side by side."]);
+ it("maps failing checks worst first with one evidence sentence each, plus collage", async () => {
+  const flagged = reply({background_clean:30,edge_quality:50,is_collage:true,evidence:{background_clean:"A grey block remains left of the shoe.",is_collage:"Two photos sit side by side."}});
+  const result = await judgeOutput(await input({n:1,shotOne:undefined}),{apiKey:"fake",fetch:byModel({"first/judge":flagged,"second/judge":reply({background_clean:40})})});
+  expect(result.flags).toEqual(["collage","leftover_background","halo"]);
+  expect(result.reasons).toEqual(["Two photos sit side by side.","A grey block remains left of the shoe.","The edge of the product looks rough or shows a halo, often white on white."]);
   expect(result.thresholds).toMatchObject({edge_quality:75,complete_product:60});
  });
  it("retries invalid JSON once then returns qa_unavailable, retaining both request costs", async () => {
@@ -99,10 +102,15 @@ describe("catalog judge v2", () => {
   const result = await judgeOutput(await input({n:1,shotOne:undefined}),{apiKey:"fake",fetch:fetcher});
   expect(fetcher).toHaveBeenCalledTimes(2);expect(result).toMatchObject({verdict:"flag",flags:["qa_unavailable"],costUsd:.004,calls:2});
  });
- it("requires at least one numeric dimension and logs absent cost",async()=>{
+ it("asks again for missing scores instead of reading them as failed checks, and logs absent cost",async()=>{
   const bytes=await image(), log=vi.fn();
-  const result=await judgeOutput({original:bytes,output:bytes,n:1,identifier:"A",channel:"noon",anchor:"centre",productType:"other",model:"test",threshold:75,floor:60},{apiKey:"fake",fetch:async()=>new Response(JSON.stringify({choices:[{message:{content:JSON.stringify({complete_product:80})}}]})),log});
-  expect(result.flags).not.toContain("qa_unavailable");expect(result.costUsd).toBe(QA_USD_PER_CHECK_FALLBACK);
+  const replies=[{complete_product:80},all(90)];
+  const fetcher=vi.fn<typeof fetch>(async()=>new Response(JSON.stringify({choices:[{message:{content:JSON.stringify(replies.shift())}}]})));
+  const result=await judgeOutput({original:bytes,output:bytes,n:1,identifier:"A",channel:"noon",anchor:"centre",productType:"other",model:"test",threshold:75,floor:60},{apiKey:"fake",fetch:fetcher,log});
+  expect(fetcher).toHaveBeenCalledTimes(2);
+  // The retry names the missing scores; the partial first reply raised no flag.
+  expect(JSON.stringify(JSON.parse(String(fetcher.mock.calls[1]?.[1]?.body)).messages.at(-1))).toMatch(/Missing scores: edge_quality, background_clean, no_text_or_watermark, orientation_ok, product_intact/);
+  expect(result).toMatchObject({verdict:"pass",flags:[]});expect(result.costUsd).toBe(2*QA_USD_PER_CHECK_FALLBACK);
   expect(log).toHaveBeenCalledWith(expect.stringMatching(/usage\.cost absent; recorded the estimated price USD 0\.0013/));
  });
  it("reads the billed cost from OpenRouter's real response shape and does not log",async()=>{
@@ -136,7 +144,110 @@ describe("catalog judge v2", () => {
   expect(CATALOG_QA_TEMPLATE).toContain("sparkle or star icon");expect(renderTemplate("<anchor>: <identifier>",{anchor:"centre",identifier:"$&"})).toBe("centre: $&");
  });
 });
+/** Quality gate 2 (2026-10-20): the false holds and the missed cut-outs, replayed as judge replies. */
+describe("judge views amendment",()=>{
+ it("tells the judge which views are the same product and asks for product_intact on image 2", async () => {
+  const fetcher = byModel({"first/judge":reply()});
+  await judgeOutput(await input(),{apiKey:"fake",fetch:fetcher});
+  const system = JSON.parse(String(fetcher.mock.calls[0]?.[1]?.body)).messages[0].content as string;
+  expect(system).toMatch(/a single item out of a multipack or set shown in image 3/);
+  expect(system).toMatch(/a packshot or flat product photo against the same product worn on a model or on legs/);
+  expect(system).toMatch(/a size chart, care label, measurement guide or infographic of the listing/);
+  expect(system).toMatch(/a detail or close-up of any part of the product/);
+  expect(system).toMatch(/exactly the same design in another colour/);
+  expect(system).toMatch(/another category of product[\s\S]*clearly different design/);
+  expect(system).toMatch(/one of front, side, back, sole, top, inside, detail, on-model, flat, chart/);
+  expect(system).toMatch(/4\. Score image 2 against image 1[\s\S]*product_intact:[\s\S]*A logo or label on its own is not the product/);
+  expect(system).toMatch(/background_clean:[\s\S]*say where it is in image 2/);
+  expect(system).toContain(`"product_intact":100`);
+  expect(system).not.toContain(String.fromCharCode(0x2014));
+ });
+ it("a single brief out of a 3-pack is the same product: no flag and no second opinion", async () => {
+  // Penti Z01369261B0BCB88911B3Z photo 2: one black brief, image 3 the white, grey and black 3-pack.
+  const fetcher = byModel({"first/judge":reply({view:"flat"})});
+  const result = await judgeOutput(await input({n:2,productType:"apparel_flat"}),{apiKey:"fake",fetch:fetcher});
+  expect(result).toMatchObject({verdict:"pass",flags:[],view:"flat",wrongItem:{first:false,confirmed:false}});
+  expect(fetcher).toHaveBeenCalledTimes(1);
+ });
+ it("a packshot against the same tights worn on legs never becomes different_product when the second judge sees the same item", async () => {
+  // Vero Moda Z001E274B11C8109CF34DZ photo 2: tights on a leg form, photo 1 worn on legs.
+  const first = reply({view:"flat",wrong_item:true,evidence:{wrong_item:"Image 1 shows tights on a leg form, image 3 a model wearing tights."}});
+  const fetcher = byModel({"first/judge":first,"second/judge":reply({view:"flat"})});
+  const result = await judgeOutput(await input({n:2,productType:"apparel_model"}),{apiKey:"fake",fetch:fetcher});
+  expect(result.flags).toEqual([]);
+  expect(result).toMatchObject({verdict:"pass",scores:{same_product:100},wrongItem:{first:true,second:false,confirmed:false}});
+ });
+ it("a size chart is the chart view: one chart_image flag, no product checks and no second opinion", async () => {
+  // Penti Z01369261B0BCB88911B3Z photo 5 and Z10DE3448DD7CE2D2BF8FZ photo 3: the size chart.
+  const chart = reply({view:"chart",wrong_item:true,no_text_or_watermark:10,background_clean:20,product_intact:30,evidence:{wrong_item:"Image 1 is a size chart, not underwear.",background_clean:"Holes appear in the table at the top."}});
+  const fetcher = byModel({"first/judge":chart});
+  const result = await judgeOutput(await input({n:5}),{apiKey:"fake",fetch:fetcher});
+  expect(result).toMatchObject({verdict:"flag",flags:["chart_image"],view:"chart",wrongItem:{first:false,confirmed:false}});
+  expect(result.reasons).toEqual(["This photo is a size chart or a text-only image, so it was left out of the marketplace images."]);
+  expect(Object.values(result.scores).every(score => score === 100)).toBe(true);
+  expect(fetcher).toHaveBeenCalledTimes(1);
+ });
+ it("product_removed: a close-up whose fabric was cut away fails as our own defect", async () => {
+  // Anta bd-152638122-2 photo 5 and French Connection Z02B2EE44E3A08044B816Z photos 3 to 6.
+  const removed = reply({view:"detail",product_intact:5,edge_quality:60,evidence:{product_intact:"Only the embroidered logo is left; the grey fabric around it is gone.",edge_quality:"The letters have rough edges."}});
+  const result = await judgeOutput(await input({n:5}),{apiKey:"fake",fetch:openRouterFetch(removed)});
+  expect(result.flags).toEqual(["product_removed","halo"]);
+  expect(result.scores.product_intact).toBe(5);
+  expect(result.evidence?.product_removed).toBe("Only the embroidered logo is left; the grey fabric around it is gone.");
+  expect(result.reasons[0]).toBe("Only the embroidered logo is left; the grey fabric around it is gone.");
+ });
+ it("leftover_background needs a sentence that says where and a second judge that agrees", async () => {
+  // Anta bd-152637502S-3 photo 2 on Centrepoint: a clean render flagged with no leftover visible.
+  const vague = reply({background_clean:40,evidence:{background_clean:"The background is not clean."}});
+  let fetcher = byModel({"first/judge":vague});
+  let result = await judgeOutput(await input(),{apiKey:"fake",fetch:fetcher});
+  expect(result.flags).toEqual([]);expect(fetcher).toHaveBeenCalledTimes(1);
+  expect(result.leftover).toMatchObject({first:true,located:false,confirmed:false,second:null});
+  expect(result.scores.background_clean).toBeGreaterThanOrEqual(75);
+  const located = reply({background_clean:40,evidence:{background_clean:"A grey block remains to the left of the trousers."}});
+  fetcher = byModel({"first/judge":located,"second/judge":reply({background_clean:96})});
+  result = await judgeOutput(await input(),{apiKey:"fake",fetch:fetcher});
+  expect(fetcher.mock.calls.map(call=>requestModel(call[1]))).toEqual(["first/judge","second/judge"]);
+  expect(result).toMatchObject({verdict:"pass",flags:[],leftover:{first:true,located:true,second:false,secondModel:"second/judge",confirmed:false},scores:{background_clean:96}});
+  // Without a second judge a leftover never counts.
+  result = await judgeOutput(await input({secondModel:undefined}),{apiKey:"fake",fetch:byModel({"first/judge":located})});
+  expect(result.flags).toEqual([]);
+  fetcher = byModel({"first/judge":located,"second/judge":reply({background_clean:50})});
+  result = await judgeOutput(await input(),{apiKey:"fake",fetch:fetcher});
+  expect(result).toMatchObject({verdict:"flag",flags:["leftover_background"],leftover:{confirmed:true},scores:{background_clean:40}});
+  expect(result.evidence?.leftover_background).toBe("A grey block remains to the left of the trousers.");
+  // One second call answers both checks; a re-check of another channel never asks about wrong_item.
+  const both = reply({wrong_item:true,background_clean:40,evidence:{background_clean:"A grey block remains under the shoe.",wrong_item:"Another shoe."}});
+  fetcher = byModel({"first/judge":both,"second/judge":both});
+  result = await judgeOutput(await input(),{apiKey:"fake",fetch:fetcher});
+  expect(fetcher).toHaveBeenCalledTimes(2);expect(result.flags).toEqual(["different_product","leftover_background"]);
+  fetcher = byModel({"first/judge":reply({wrong_item:true})});
+  result = await judgeOutput(await input({wrongItemCheck:false}),{apiKey:"fake",fetch:fetcher});
+  expect(fetcher).toHaveBeenCalledTimes(1);expect(result.wrongItem).toMatchObject({first:false,confirmed:false});
+ });
+ it("a clean render gets no flag from one call", async () => {
+  const fetcher = openRouterFetch(reply(all(100)));
+  const result = await judgeOutput(await input(),{apiKey:"fake",fetch:fetcher});
+  expect(result).toMatchObject({verdict:"pass",flags:[],reasons:[],scores:{overall:100}});
+  expect(fetcher).toHaveBeenCalledTimes(1);
+ });
+ it("caps the flags at the checks that actually failed and orders them worst first", async () => {
+  // French Connection Z0F7B9F82E6080CB6BE80Z photo 2 got eight flags from one judge before v2. Now an
+  // unplaced leftover, an unconfirmed wrong item and checks inside their lines raise nothing.
+  const unhappy = reply({view:"on-model",wrong_item:true,complete_product:40,orientation_ok:70,no_text_or_watermark:65,edge_quality:70,background_clean:50,product_intact:80,
+   evidence:{complete_product:"The shirt is cut off at the bottom edge.",edge_quality:"The sleeve edge looks soft.",background_clean:"The background looks uneven.",wrong_item:"The shirt looks different."}});
+  const fetcher = byModel({"first/judge":unhappy,"second/judge":reply({view:"on-model"})});
+  const result = await judgeOutput(await input({n:2,productType:"apparel_model"}),{apiKey:"fake",fetch:fetcher});
+  expect(result.flags).toEqual(["halo","complete_product"]);
+  expect(result.reasons).toEqual(["The sleeve edge looks soft.","The shirt is cut off at the bottom edge."]);
+ });
+});
 describe("product classifier",()=>{
+ it("returns chart for a size chart without turning it into a product flag",async()=>{
+  const result=await classifyProductType(await image(),{apiKey:"fake",model:"test",fetch:async()=>response({type:"apparel_flat",confidence:.6,transparent:false,chart:true})});
+  expect(result).toMatchObject({type:"apparel_flat",chart:true,flags:[]});
+  expect((await classifyProductType(await image(),{apiKey:"fake",model:"test",fetch:async()=>response({type:"footwear",confidence:.9})})).chart).toBe(false);
+ });
  it("maps unknown labels to other and keeps real usage",async()=>{
   const result=await classifyProductType(await image(),{apiKey:"fake",model:"test",fetch:async()=>response({type:"unknown",confidence:1.7},.001)});
   expect(result).toMatchObject({type:"other",confidence:1,costUsd:.001,calls:1});

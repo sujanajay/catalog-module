@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import sharp from "sharp";
 import { describe, expect, it } from "vitest";
-import { autoTags, buildGolden, deriveBytes, goldenCounts, goldenSourcePath, parseGolden, readGoldenBytes, serializeGolden, sha256, type GoldenBuild } from "./golden";
+import { autoTags, buildGolden, deriveBytes, goldenCounts, goldenSourcePath, parseGolden, plantedShotNumber, readGoldenBytes, serializeGolden, sha256, type GoldenBuild } from "./golden";
 
 async function photo(width: number, height: number, product: [number, number, number], bg: [number, number, number] = [255, 255, 255], box = { left: Math.round(width * 0.3), top: Math.round(height * 0.2), width: Math.round(width * 0.4), height: Math.round(height * 0.6) }) {
   const overlay = await sharp({ create: { width: box.width, height: box.height, channels: 3, background: { r: product[0], g: product[1], b: product[2] } } }).png().toBuffer();
@@ -55,5 +55,27 @@ describe("golden manifest", () => {
     await expect(buildGolden({ ...build, plans: [{ root: "shoes", brand: "anta", category: "footwear", identifiers: ["NOPE"] }] }, async () => "")).rejects.toThrow(/not in shoes/);
     const tags = await autoTags(await photo(400, 400, [10, 10, 10]));
     expect(tags.tags).toEqual(expect.arrayContaining(["px500", "dark_product"]));
+  }, 60_000);
+
+  it("numbers a planted photo after the host's highest shot, so a gap never collides with a real shot", async () => {
+    expect(plantedShotNumber([{ n: 1 }, { n: 2 }])).toBe(3);
+    expect(plantedShotNumber([{ n: 1 }, { n: 2 }, { n: 3 }, { n: 4 }, { n: 5 }, { n: 7 }])).toBe(8);
+    const root = await mkdtemp(path.join(tmpdir(), "golden-gap-")), shoes = path.join(root, "shoes"), tops = path.join(root, "tops"), derived = path.join(root, "derived");
+    await Promise.all([mkdir(shoes), mkdir(tops), mkdir(derived)]);
+    await writeFile(path.join(shoes, "G1_1.jpg"), await photo(800, 800, [160, 30, 50]));
+    await writeFile(path.join(shoes, "G1_3.jpg"), await photo(800, 800, [30, 30, 30]));
+    await writeFile(path.join(tops, "T1_1.jpg"), await photo(800, 1200, [60, 90, 200], [230, 230, 230]));
+    const build: GoldenBuild = {
+      roots: { shoes, tops, derived }, seed: 3,
+      plans: [{ root: "shoes", brand: "anta", category: "footwear" }, { root: "tops", brand: "test_brand", category: "apparel_model" }],
+      overrides: {}, derive: [], plant: [{ into: "G1", from: "T1_1" }],
+    };
+    const manifest = await buildGolden(build, async name => name);
+    const planted = manifest.entries.filter(e => e.identifier === "G1-planted");
+    expect(planted.map(e => e.n)).toEqual([1, 3, 4]);
+    expect(planted.find(e => e.n === 3)!.sha256).toBe(manifest.entries.find(e => e.identifier === "G1" && e.n === 3)!.sha256);
+    expect(planted.find(e => e.n === 4)).toMatchObject({ planted: { from: "T1_1" } });
+    const paths = manifest.entries.map(goldenSourcePath);
+    expect(new Set(paths).size).toBe(paths.length);
   }, 60_000);
 });

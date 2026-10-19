@@ -13,6 +13,11 @@ export const INFORMATION_FLAGS: ReadonlySet<OutputFlag> = new Set<OutputFlag>([
 ]);
 /** Always held for the operator: a different item confirmed by two judges, or several photos in one. */
 export const HARD_HOLD_FLAGS: ReadonlySet<OutputFlag> = new Set<OutputFlag>(["different_product", "collage"]);
+/**
+ * Left out with a note, never held: a size chart or text-only image (the judge's `chart` view) is
+ * not a product photo for a marketplace, whatever its position or the other photos.
+ */
+export const LEFT_OUT_FLAGS: ReadonlySet<OutputFlag> = new Set<OutputFlag>(["chart_image"]);
 /** No verdict exists (the check could not run), so nothing is dropped or published unseen. */
 export const UNCHECKED_FLAGS: ReadonlySet<OutputFlag> = new Set<OutputFlag>(["qa_unavailable", "qa_cap"]);
 
@@ -34,10 +39,13 @@ export interface TriageDecision { action: AutoAction; cause?: HoldCause; flags: 
  * when it cannot be dropped. Any other problem is dropped with a note when the photo is not photo 1
  * and at least two good photos remain on that channel, else published with a note. Our own defects
  * (`OWN_DEFECT_FLAGS`, still there after the re-render loop) are dropped the same way or held, never noted.
+ * A size chart or text-only image (`LEFT_OUT_FLAGS`) is always left out with a note, never held, and
+ * photo 1 is the lowest photo that is not one.
  * `keptLive` lists (channel, n) pairs whose live image stays unchanged in this batch; they count as good.
  */
 export function triageProduct(outputs: readonly TriageOutput[], keptLive: readonly {channel: ChannelId; n: number}[] = []): Map<string, TriageDecision> {
-  const shots = [...new Set([...outputs.map(o => o.n), ...keptLive.map(k => k.n)])];
+  const leftOut = (o: TriageOutput) => o.flags.some(flag => LEFT_OUT_FLAGS.has(flag));
+  const shots = [...new Set([...outputs.filter(o => !leftOut(o)).map(o => o.n), ...keptLive.map(k => k.n)])];
   const photoOne = shots.length ? Math.min(...shots) : 1;
   const good = (o: TriageOutput) => o.decision === "use_as_is" || ((o.status === "staged" || o.status === "verified") && o.decision === null && !problemFlags(o.flags).length);
   const goodShots = (channel: ChannelId, except: number) => new Set([
@@ -50,6 +58,7 @@ export function triageProduct(outputs: readonly TriageOutput[], keptLive: readon
     const problems = problemFlags(o.flags);
     const hold = (cause: HoldCause) => result.set(o.id, {action:"hold",cause,flags:problems});
     if (o.status === "failed") { hold("corrupt"); continue; }
+    if (leftOut(o)) { result.set(o.id, {action:"drop",flags:problems}); continue; }
     if (!problems.length) { result.set(o.id, {action:o.status === "needs_attention" ? "hold" : "none",flags:[]}); continue; }
     if (problems.includes("different_product")) { hold("wrong_item"); continue; }
     if (problems.includes("collage")) { hold("collage"); continue; }
