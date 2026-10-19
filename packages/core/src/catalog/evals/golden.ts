@@ -142,10 +142,13 @@ export async function buildGolden(build: GoldenBuild, writeDerived: (name: strin
     if (!host.length || !foreign) throw new Error(`Planted case ${p.from} into ${p.into}: both must be in the golden set.`);
     const identifier = `${p.into}-planted`;
     for (const e of host) entries.push({ ...e, identifier, source: { ...e.source }, tags: [...new Set([...e.tags, "mixed_set" as const])], expect: PLANTED_EXPECTATION });
-    entries.push({ ...foreign, identifier, n: host.length + 1, brand: host[0]!.brand, category: host[0]!.category, source: { ...foreign.source }, tags: [...new Set([...foreign.tags, "mixed_set" as const])], expect: PLANTED_EXPECTATION, planted: { from: p.from } });
+    entries.push({ ...foreign, identifier, n: plantedShotNumber(host), brand: host[0]!.brand, category: host[0]!.category, source: { ...foreign.source }, tags: [...new Set([...foreign.tags, "mixed_set" as const])], expect: PLANTED_EXPECTATION, planted: { from: p.from } });
   }
   return { version: 1, seed: build.seed, roots: build.roots, entries };
 }
+
+/** The planted photo follows the host's highest shot number, so a gap in the host's numbering never makes it collide with a real shot. */
+export const plantedShotNumber = (host: readonly { n: number }[]) => Math.max(...host.map(e => e.n)) + 1;
 
 export function parseGolden(text: string): GoldenManifest {
   const raw = JSON.parse(text) as Partial<GoldenManifest>;
