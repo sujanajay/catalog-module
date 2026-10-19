@@ -588,9 +588,11 @@ Derived for display from status, counts and chunk states:
 - `collecting` when status `ingesting`: pill "Collecting files", "<collected> of <collectTotal>
   files copied from your <source>" (source = "Drive folder", "Google Sheet", "zip", "links").
 - `processing` when status in `matting|rendering|qa|publishing`: pill "Processing", bar, "<made>
-  of <counts.outputs> images made · about <eta> left" where made = verified + needsAttention +
-  failed + skipped + unchanged and eta comes from the rate over the last 5 minutes; the eta part
-  is shown only once a rate exists.
+  of <planned> images made, not counting <skipped> skipped (too small for Styli or removed) and
+  <unchanged> unchanged · about <eta> left" where planned = outputs - skipped - unchanged (the same
+  figure as wizard step 4's "images will be made"), made = verified + needsAttention + failed +
+  staged, the "not counting" parts are shown only when non-zero, and eta comes from the rate over
+  the last 5 minutes; the eta part is shown only once a rate exists.
 - `attention` when `done` and `counts.attentionProducts > 0`: pill "<n> products need your
   attention", "Everything else is done and in the sheet. Decide now or download the sheet as it
   is; each decision updates the sheet."

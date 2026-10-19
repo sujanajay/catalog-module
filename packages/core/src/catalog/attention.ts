@@ -7,7 +7,7 @@ import { strictestChannel } from "./qa/policy";
 import { flagDetails,problemLine } from "./qa/reasons";
 export interface AttentionPhoto { n:number;channel:ChannelId;outputId:string;outputIds:string[];originalUrl:string;outputUrl:string|null;why:string;whatToDo:string;liveObjectExists:boolean;liveChannels:ChannelId[];failed:boolean;flags:OutputFlag[] }
 export interface AttentionProduct { productId:string;identifier:string;totalShots:number;problemLine:string;photos:AttentionPhoto[] }
-const information = new Set<OutputFlag>(["low_resolution","no_shadow_source","shadow_synthesised","passthrough","alpha_source","qa_sampled_out","numbering_gap","type_unknown"]);
+const information = new Set<OutputFlag>(["low_resolution","no_shadow_source","shadow_synthesised","passthrough","alpha_source","qa_sampled_out","numbering_gap","type_unknown","cut_in_source"]);
 const local = (flag:OutputFlag)=>flag==="placement" || flag==="failed_compliance" || flag==="low_resolution";
 export async function listAttention(db:Db,batchId:string,sign:(uri:string)=>Promise<string>):Promise<AttentionProduct[]> {
  const [batch]=await db.select().from(catalogBatches).where(eq(catalogBatches.id,batchId));

@@ -1,4 +1,5 @@
 import { CloudTasksClient } from "@google-cloud/tasks";
+import { retryTransient, type RetryOptions } from "./retry";
 
 /**
  * Generic Cloud Tasks enqueue for the catalog worker.
@@ -7,6 +8,11 @@ import { CloudTasksClient } from "@google-cloud/tasks";
  * that POSTs the JSON body to `${WORKER_URL}${route}` with an OIDC token for WORKER_SA_EMAIL
  * (audience WORKER_URL). A `taskId` becomes the task name, so a re-enqueue of the same chunk or
  * publish is deduplicated by the queue.
+ *
+ * The client library marks CreateTask non-idempotent and so never retries it. A named task is
+ * idempotent (a repeat answers ALREADY_EXISTS, which counts as success), so a named createTask is
+ * retried here on transient failures (UNAVAILABLE, DEADLINE_EXCEEDED, connection resets, 429, 5xx):
+ * 5 tries with 1, 2, 4 and 8 s waits. An unnamed task is tried once, so a retry never duplicates it.
  *
  * Local dev (`TASKS_INLINE=1`): POSTs the same body straight to the worker, fire-and-forget,
  * so the caller (a web request) is not blocked on the task.
@@ -43,6 +49,7 @@ export interface EnqueueTaskOptions {
   taskId?: string;
   /** Overrides for tests. */
   env?: NodeJS.ProcessEnv;
+  retry?: RetryOptions;
   fetch?: typeof fetch;
   client?: TasksClientLike;
 }
@@ -157,13 +164,16 @@ export async function enqueueTask(route: TaskRoute, body: Record<string, unknown
 
   const cfg = tasksConfigFromEnv(env);
   const request = buildTaskRequest(route, body, cfg, opts);
-  try {
-    const [task] = await (opts.client ?? getTasksClient()).createTask(request as Parameters<TasksClientLike["createTask"]>[0]);
-    return task.name ?? "";
-  } catch (err) {
-    const code = (err as { code?: unknown } | null)?.code;
-    const name = (request.task as HttpTask).name;
-    if (code === GRPC_ALREADY_EXISTS && name) return name;
-    throw err;
-  }
+  const name = (request.task as HttpTask).name;
+  const create = async () => {
+    try {
+      const [task] = await (opts.client ?? getTasksClient()).createTask(request as Parameters<TasksClientLike["createTask"]>[0]);
+      return task.name ?? "";
+    } catch (err) {
+      // Also the answer to a retry whose earlier try reached the queue but lost its reply.
+      if ((err as { code?: unknown } | null)?.code === GRPC_ALREADY_EXISTS && name) return name;
+      throw err;
+    }
+  };
+  return name ? retryTransient(create, opts.retry) : create();
 }

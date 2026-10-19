@@ -243,3 +243,16 @@ describe("fillProductListWorkbook", () => {
     await expect(fillProductListWorkbook(await original(), spec(), -1)).rejects.toThrow(/matchColumn/);
   });
 });
+
+describe("a ticked channel with no images", () => {
+  it("gets no column, so no empty Styli Image 1 appears", async () => {
+    const s: SheetSpec = { channels: ["noon", "styli"], rows: [row("ABC123", { links: { noon: [U("ABC123", "noon", 1)] } })] };
+    expect(sheetColumns(s).perChannel.styli).toBe(0);
+    const csv = writeLinksCsv(s);
+    expect(csv).not.toContain("Styli Image");
+    const ws = await load(await writeLinksXlsx(s));
+    expect(text(ws.getCell("E1").value)).toBe("Noon");
+    expect(text(ws.getCell("F1").value)).toBe("status");
+    expect(await compareXlsxCsv(await writeLinksXlsx(s), csv)).toEqual({ equal: true, differences: [] });
+  });
+});
