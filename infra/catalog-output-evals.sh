@@ -64,7 +64,9 @@ deploy() {
 
 upload() {
   [ -f apps/worker/dist/catalog-output-evals.js ] || { echo "ERROR: build the worker first (pnpm --filter @catalog/worker build)" >&2; exit 1; }
-  echo "==> golden set: pin and copy the owner's photos under gs://$ASSETS_BUCKET/catalog-test/evals/golden/"
+  # The CLI reads the bucket from BUCKET, like the deployed services; default to the assets bucket.
+  export BUCKET=${BUCKET:-$ASSETS_BUCKET}
+  echo "==> golden set: pin and copy the owner's photos under gs://$BUCKET/catalog-test/evals/golden/"
   node apps/worker/dist/catalog-output-evals.js upload "$@"
 }
 
