@@ -84,6 +84,9 @@ export async function findOrCreateProduct(
   const productKey = normalizeKey(identifier);
   if (!productKey) throw new Error("The identifier is empty, so the product cannot be named.");
   const { brandSlug, isTest, skus, actor } = input;
+  // "auto" is the batch asking 07 to classify each product; it is never a product's type. Storing it
+  // would make the matte stage skip the classifier and 05 render the product as "other".
+  const productType = input.productType === "auto" ? undefined : input.productType;
   const optionKey = skus?.optionIdStyleColor ? normalizeKey(skus.optionIdStyleColor) : "";
   const skuIds = [...new Set(skus?.opptraSkuIds ?? [])].sort();
 
@@ -117,7 +120,7 @@ export async function findOrCreateProduct(
           optionIdStyleColor: skus?.optionIdStyleColor ?? null,
           opptraSkuIds: skuIds,
           skuMethod: skus?.method ?? null,
-          productType: input.productType ?? null,
+          productType: productType ?? null,
         })
         .onConflictDoNothing({ target: [catalogProducts.brandSlug, catalogProducts.isTest, catalogProducts.productKey] })
         .returning();
@@ -154,7 +157,7 @@ export async function findOrCreateProduct(
         if (!product.optionIdStyleColor && skus.optionIdStyleColor) patch.optionIdStyleColor = skus.optionIdStyleColor;
         if (added.length || !product.skuMethod) patch.skuMethod = skus.method;
       }
-      if (!product.productType && input.productType) patch.productType = input.productType;
+      if (!product.productType && productType) patch.productType = productType;
       if (Object.keys(patch).length) {
         const [updated] = await tx.update(catalogProducts).set(patch).where(eq(catalogProducts.id, product.id)).returning();
         if (updated) product = updated;

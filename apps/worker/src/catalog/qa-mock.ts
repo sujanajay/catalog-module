@@ -6,6 +6,7 @@ import type { CatalogDeps } from "./deps";
  */
 export const cannedQa: Pick<CatalogDeps,"judgeOutput"|"classifyProductType"> = {
   judgeOutput: async input => ({scores:{...Object.fromEntries(QA_DIMENSIONS.map(d=>[d,100])),overall:100} as QaScores,verdict:"pass",reasons:[],isCollage:false,usage:{},costUsd:0,calls:0,model:input.model,flags:["qa_sampled_out"]}),
-  classifyProductType: async () => ({type:"other",confidence:0,usage:{},costUsd:0,calls:0,flags:[]}),
+  // No photo was looked at, so the product carries type_unknown like a failed classification (07 4.3).
+  classifyProductType: async () => ({type:"other",confidence:0,usage:{},costUsd:0,calls:0,flags:["type_unknown"]}),
 };
 export const liveQaEnabled = (env: NodeJS.ProcessEnv = process.env) => env.LIVE_SMOKE === "1";
