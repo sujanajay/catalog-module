@@ -1,0 +1,41 @@
+{
+  "roots": {
+    "qa-gate": "C:/Users/Sujan AH/Desktop/catalog-module/var/qa-gate-input",
+    "penti": "C:/Users/Sujan AH/Desktop/catalog-module/var/drive-input/set1",
+    "vero-moda": "C:/Users/Sujan AH/Desktop/catalog-module/var/drive-input/set2",
+    "french-connection": "C:/Users/Sujan AH/Desktop/catalog-module/var/drive-input/set3",
+    "anta": "C:/Users/Sujan AH/Desktop/opptra-image-links/new_resources_4/Images",
+    "derived": "C:/Users/Sujan AH/Desktop/catalog-module/var/evals-golden/derived"
+  },
+  "seed": 10,
+  "plans": [
+    { "root": "qa-gate", "brand": "anta", "category": "footwear", "identifiers": ["bd-112545502R-2", "bd-112621603-1", "bd-112635512-4", "bd-122545519-5", "bd-122637713-1", "bd-152637502S-3", "bd-152638122-2", "bd-162637307S-2"] },
+    { "root": "qa-gate", "brand": "french_connection", "category": "apparel_model", "identifiers": ["Z018DB67F18ED22618F47Z", "Z023DBEC95DCF485E9E6EZ", "Z03E68A3989163039BCFEZ", "Z11AA1A12D2D1D52DF21DZ"] },
+    { "root": "anta", "brand": "anta", "category": "footwear", "sampleProducts": 8 },
+    { "root": "penti", "brand": "penti", "category": "apparel_model", "sampleProducts": 14, "identifiers": ["Z659062EFB3FB0720BF56Z"], "categoryRules": [{ "tag": "wide_product", "category": "apparel_flat" }] },
+    { "root": "vero-moda", "brand": "vero_moda", "category": "apparel_model", "sampleProducts": 14, "identifiers": ["Z001E274B11C8109CF34DZ", "Z0DA2A6E440944B7C839CZ", "Z1367E183A6F23A4A4ADFZ", "Z1F829A98730668CEDED8Z", "Z27C907CCC5461A7057B5Z", "ZA879DC4CE21DC00F08C3Z", "ZFEA925E26F8FACC3E40FZ"] },
+    { "root": "french-connection", "brand": "french_connection", "category": "apparel_model", "sampleProducts": 18, "identifiers": ["ZEE79259BBFD83FFA1DB0Z", "Z69DB976D2F2FA8990255Z", "Z2392E34E478442A647DBZ", "Z496A6D49F492382B0B59Z", "Z24C7404AA36DACC958B4Z", "ZB8B3C9012AE815065B7BZ", "Z011CB57531CA8FA0CBDDZ", "Z02B2EE44E3A08044B816Z", "Z0D5EC39FD878FEBE85B0Z"] }
+  ],
+  "overrides": {
+    "Z001E274B11C8109CF34DZ": { "tags": ["transparent", "thin_straps"] },
+    "Z0DA2A6E440944B7C839CZ": { "category": "bag_accessory", "tags": ["thin_straps", "reflective"] },
+    "Z1F829A98730668CEDED8Z": { "category": "bag_accessory", "tags": ["reflective"] },
+    "Z27C907CCC5461A7057B5Z": { "category": "bag_accessory", "tags": ["thin_straps"] },
+    "Z011CB57531CA8FA0CBDDZ": { "category": "other", "tags": ["hardline", "text_or_watermark"], "expect": { "attention": true, "flags": ["text_or_watermark"], "detector": "judge" } },
+    "Z02B2EE44E3A08044B816Z": { "category": "bag_accessory", "tags": ["reflective"] },
+    "Z0D5EC39FD878FEBE85B0Z": { "category": "other", "tags": ["hardline"] },
+    "bd-112545502R-2": { "tags": ["thin_straps"] },
+    "bd-162637307S-2": { "tags": ["white_on_white"] }
+  },
+  "derive": [
+    { "from": "bd-112621603-1_1", "op": "downscale_450", "brand": "anta", "category": "footwear" },
+    { "from": "Z023DBEC95DCF485E9E6EZ_1", "op": "downscale_450", "brand": "french_connection", "category": "apparel_model" },
+    { "from": "Z03E68A3989163039BCFEZ_1", "op": "cut_bottom_15", "brand": "french_connection", "category": "apparel_model" },
+    { "from": "Z11AA1A12D2D1D52DF21DZ_2", "op": "cut_bottom_15", "brand": "french_connection", "category": "apparel_model" }
+  ],
+  "plant": [
+    { "into": "bd-152638122-2", "from": "Z018DB67F18ED22618F47Z_1" },
+    { "into": "Z023DBEC95DCF485E9E6EZ", "from": "bd-122637713-1_3" },
+    { "into": "Z659062EFB3FB0720BF56Z", "from": "Z001E274B11C8109CF34DZ_1" }
+  ]
+}
