@@ -1,0 +1,28 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git push *)",
+      "Bash(gh pr create *)",
+      "Bash(gh pr merge *)",
+      "Bash(gh pr ready *)",
+      "Bash(gh pr checks *)",
+      "Bash(gh pr view *)",
+      "Bash(gh pr list *)",
+      "Bash(bash infra/deploy.sh)",
+      "Bash(SKIP_BUILD=1 bash infra/deploy.sh)",
+      "Bash(bash infra/bootstrap.sh)",
+      "Bash(git worktree *)",
+      "Bash(git merge *)",
+      "Bash(pnpm install *)",
+      "Bash(pnpm lint)",
+      "Bash(pnpm typecheck)",
+      "Bash(pnpm test)",
+      "Bash(gcloud run services list *)",
+      "Bash(gcloud run jobs list *)",
+      "Bash(gcloud run jobs executions *)",
+      "Bash(gcloud builds list *)",
+      "Bash(gcloud builds describe *)",
+      "Bash(gcloud storage ls *)"
+    ]
+  }
+}
