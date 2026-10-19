@@ -6,6 +6,7 @@ import { deriveBatchState } from "@catalog/core/catalog/pipeline/status";
 import { TEST_BRAND } from "@catalog/core/catalog/brands";
 import { notRefreshedChannels } from "@catalog/core/catalog/pipeline/report";
 import { badRequest, HttpError } from "../errors";
+import { batchSource } from "./copy";
 
 export async function queryBatch(id: string): Promise<CatalogBatch> {
   const [batch] = await db().select().from(catalogBatches).where(eq(catalogBatches.id, id));
@@ -40,7 +41,7 @@ export async function listBatches() {
 export async function getBatch(id: string) {
   const batch = await queryBatch(id);
   const uploads = await db().select().from(catalogUploads).where(eq(catalogUploads.batchId, id));
-  const source = uploads.some((u) => u.kind === "drive_folder") ? "Drive folder" : uploads.some((u) => u.kind === "google_sheet") ? "Google Sheet" : uploads.some((u) => u.kind === "zip") ? "zip" : uploads.some((u) => u.kind === "url_list") ? "links" : "upload";
+  const source = batchSource(uploads.map((u) => u.kind));
   return { batch: publicBatch(batch), counts: batch.counts, cost: batch.cost, state: batchState(batch, source), uploads, notRefreshedChannels: await notRefreshedChannels(db(), id) };
 }
 /** A batch is a test batch when its name starts with catalog-test or its brand is the test brand. */

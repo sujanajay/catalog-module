@@ -20,7 +20,7 @@ import SheetPreview from "@/components/catalog/SheetPreview";
 import DetailsTab from "@/components/catalog/DetailsTab";
 import NotRefreshedLine from "@/components/catalog/NotRefreshedLine";
 import CostLine from "@/components/catalog/CostLine";
-import { plural } from "@/lib/catalog/copy";
+import { batchSource, collectingText, plural } from "@/lib/catalog/copy";
 import SkuMapModal from "@/components/catalog/SkuMapModal";
 import { EvalList } from "@/components/catalog/EvalLabelBar";
 
@@ -49,9 +49,7 @@ export default async function BatchPage({ params, searchParams }: { params: Prom
   ]);
   const channelLabels = batch.channels.map(c => channel(c).label);
   const missingSkus = data.sheet.rows.filter(r => !r.opptraSkuIds.length).length;
-  const source = data.uploads.some(u => u.kind === "drive_folder") ? "Drive folder"
-    : data.uploads.some(u => u.kind === "google_sheet") ? "Google Sheet"
-    : data.uploads.some(u => u.kind === "zip") ? "zip" : "links";
+  const source = batchSource(data.uploads.map(u => u.kind));
   const state = batchState(batch, source);
   const downloads = (batch.sheetXlsxUri || batch.sheetCsvUri || data.filled) ? (
     <div className="dl">
@@ -62,7 +60,7 @@ export default async function BatchPage({ params, searchParams }: { params: Prom
   ) : null;
   const next: Record<string, string> = {
     processing: "You can close this page; nothing stops.",
-    collecting: "We copy your files first so the batch does not depend on the Drive folder later. Processing starts automatically.",
+    collecting: collectingText(source),
     attention: `Open "Needs attention" for the ${batch.counts.attentionProducts} ${plural(batch.counts.attentionProducts, "product", "products")} with a problem.`,
     ready: "Download the sheet and paste the links into the marketplace templates.",
     failed: "Nothing was processed and nothing was charged.",
@@ -82,7 +80,7 @@ export default async function BatchPage({ params, searchParams }: { params: Prom
           <ActionOnly><Link className="btn primary" href={`/catalog/new?brand=${encodeURIComponent(batch.brandSlug)}`}>Start again</Link></ActionOnly>
         )}
       </div>
-      <BatchBanner key={id} status={batch.status} counts={batch.counts} source={source} />
+      <BatchBanner key={id} status={batch.status} counts={batch.counts} source={source} keptPhotos={data.keptPhotos} />
       <NotRefreshedLine items={data.notRefreshedChannels} />
       <BatchKpis counts={batch.counts} />
       <AutoRefresh active={state.state === "collecting" || state.state === "processing"} />

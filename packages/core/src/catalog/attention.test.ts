@@ -23,3 +23,13 @@ it("groups a shared shot once, keeps channel-only problems separate, and exclude
  await db.insert(catalogOutputs).values([{...base,channel:"noon",status:"needs_attention",decision:"use_as_is",flags:["halo"]},{...base,channel:"styli",status:"verified",flags:["low_resolution"]}]);
  expect(await listAttention(db,batch!.id,async uri=>uri)).toEqual([]);
 });
+it("gives one what-to-do instruction per photo and never adds guidance for information notes",async()=>{
+ const [batch]=await db.insert(catalogBatches).values({brandSlug:"anta",brandName:"Anta",name:"catalog-test-attention-copy",isTest:true,channels:["noon"],createdBy:"a@opptra.com"}).returning();
+ const [p]=await db.insert(catalogProducts).values({brandSlug:"anta",identifier:"BOOT",productKey:"boot",pathKey:"BOOT",isTest:true}).returning();
+ const [source]=await db.insert(catalogSourceImages).values({batchId:batch!.id,productId:p!.id,n:2,sha256:"b",rawUri:"gs://private/boot.jpg",originalName:"BOOT_2.jpg",mime:"image/jpeg",width:1200,height:1600}).returning();
+ await db.insert(catalogOutputs).values({batchId:batch!.id,productId:p!.id,sourceImageId:source!.id,n:2,channel:"noon",canvasW:1080,canvasH:1480,scale:1,placedX:0,placedY:0,renderKey:"b",objectPath:"catalog-test/boot",publicUrl:"https://public/boot",status:"needs_attention",flags:["different_product","shadow_synthesised"]});
+ const [photo]=(await listAttention(db,batch!.id,async uri=>uri))[0]!.photos;
+ expect(photo!.whatToDo).toBe("If the file was named wrongly, remove it; the rest of the product is unaffected.");
+ expect(photo!.why).toBe("This photo does not match photo 1 of the same identifier. A shadow was added because the original photo had no shadow that could be kept.");
+ expect(photo!.whatToDo).not.toContain("Nothing to do");
+});
