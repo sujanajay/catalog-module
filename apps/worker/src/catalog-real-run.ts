@@ -15,6 +15,7 @@ import { lockProducts } from "@catalog/core/catalog/products";
 import { planChunks } from "@catalog/core/catalog/pipeline/plan-chunks";
 import { cleanupTestBatches } from "@catalog/core/catalog/test-cleanup";
 import { pinnedFetch } from "@catalog/core/safe-url";
+import { PUBLIC_CACHE_WINDOW_MS } from "@catalog/core/catalog/pipeline/verify";
 import * as storage from "@catalog/core/storage";
 import { CHANNEL_IDS, type ChannelId } from "@catalog/core/catalog/types";
 import type { CanvasPlan } from "@catalog/core/catalog/render";
@@ -207,8 +208,8 @@ export async function runRealFixture(db: Db, fixture: RealFixture, out: string, 
 
 const keyGeneration = (o: CatalogOutput) => `${o.objectPath}|${o.generation}`;
 async function removedGet(url: string): Promise<void> {
-  // Public cache lifetime is 300 seconds. Allow that window, then require a plain GET 404.
-  const deadline=Date.now()+310_000;
+  // Public cache lifetime is 300 seconds; allow the shared reader window, then require a plain GET 404.
+  const deadline=Date.now()+PUBLIC_CACHE_WINDOW_MS;
   for (;;) {
     const response=await fetch(url);await response.body?.cancel();
     if(response.status===404)return;

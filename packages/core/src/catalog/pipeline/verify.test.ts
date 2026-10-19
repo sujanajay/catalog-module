@@ -15,7 +15,7 @@ it("an independent reader waits out a cached previous generation within the publ
   expect(await verifyPublicSettled("https://example.com/a.jpg",{size:4,generation:12,fetch:request,sleep,now:()=>clock})).toEqual({ok:true});
   const stale=vi.fn(async()=>response({"x-goog-generation":"11"}));clock=0;
   expect(await verifyPublicSettled("https://example.com/a.jpg",{size:4,generation:12,fetch:stale,sleep,now:()=>clock})).toEqual({ok:false,reason:"The public link returned a different generation."});
-  expect(clock).toBeGreaterThanOrEqual(310_000);
+  expect(clock).toBeGreaterThanOrEqual(600_000);
   const wrongType=vi.fn(async()=>response({"content-type":"image/png"}));clock=0;
   expect((await verifyPublicSettled("https://example.com/a.jpg",{size:4,generation:12,fetch:wrongType,sleep,now:()=>clock})).ok).toBe(false);
   expect(wrongType).toHaveBeenCalledTimes(1);
