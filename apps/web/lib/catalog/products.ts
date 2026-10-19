@@ -1,5 +1,6 @@
+import { listAttention } from "@catalog/core/catalog/attention";
 import { and, asc, desc, eq, inArray } from "drizzle-orm";
-import { catalogBatches, catalogBatchProducts, catalogOutputs, catalogProductAliases, catalogProductEvents, catalogProducts, catalogSourceImages } from "@catalog/core/db/schema";
+import { catalogBatches, catalogOutputs, catalogProductAliases, catalogProductEvents, catalogProducts } from "@catalog/core/db/schema";
 import { assertWithinProduct, normalizeKey, productPrefix } from "@catalog/core/catalog/naming";
 import { addAlias } from "@catalog/core/catalog/products";
 import { channel } from "@catalog/core/catalog/channels";
@@ -55,35 +56,5 @@ export async function removeProduct(id: string, confirm: string, actor: string, 
   });
 }
 
-export interface AttentionPhoto { n: number; channel: ChannelId; outputId: string; originalUrl: string; outputUrl: string | null; why: string; whatToDo: string; liveObjectExists: boolean }
-export interface AttentionProduct { productId: string; identifier: string; totalShots: number; problemLine: string; photos: AttentionPhoto[] }
-
-export async function batchAttention(batchId: string, conn: Db = db(), sign = signedUrl): Promise<AttentionProduct[]> {
-  const [batch] = await conn.select({ id: catalogBatches.id }).from(catalogBatches).where(eq(catalogBatches.id, batchId));
-  if (!batch) throw new HttpError(404, "This batch was not found. Return to All batches.");
-  const rows = await conn.select({ output: catalogOutputs, source: catalogSourceImages, identifier: catalogProducts.identifier }).from(catalogOutputs).innerJoin(catalogSourceImages, eq(catalogSourceImages.id, catalogOutputs.sourceImageId)).innerJoin(catalogProducts, eq(catalogProducts.id, catalogOutputs.productId)).where(and(eq(catalogOutputs.batchId, batchId), inArray(catalogOutputs.status, ["needs_attention", "failed"]))).orderBy(asc(catalogProducts.identifier), asc(catalogOutputs.n));
-  const held = await conn.select({productId:catalogBatchProducts.productId,identifier:catalogProducts.identifier,notes:catalogBatchProducts.notes}).from(catalogBatchProducts).innerJoin(catalogProducts,eq(catalogProducts.id,catalogBatchProducts.productId)).where(and(eq(catalogBatchProducts.batchId,batchId),eq(catalogBatchProducts.change,"pending_attention")));
-  const ids = [...new Set([...rows.map(r => r.output.productId),...held.map(p=>p.productId)])];
-  if (!ids.length) return [];
-  const [live, sources] = await Promise.all([
-    conn.select({ productId: catalogOutputs.productId, channel: catalogOutputs.channel, n: catalogOutputs.n }).from(catalogOutputs).where(and(inArray(catalogOutputs.productId, ids), eq(catalogOutputs.isLive, true))),
-    conn.select({ productId: catalogSourceImages.productId, n: catalogSourceImages.n }).from(catalogSourceImages).where(and(inArray(catalogSourceImages.productId, ids), eq(catalogSourceImages.batchId, batchId))),
-  ]);
-  const grouped = new Map<string, AttentionProduct>();
-  for (const { output: o, source, identifier } of rows) {
-    const informationOnly = ["low_resolution", "no_shadow_source", "passthrough", "alpha_source", "numbering_gap", "shadow_synthesised"];
-    const reasons = o.flags.filter(f => !informationOnly.includes(f)).map(f => flagReason(f, {
-      channel: channel(o.channel).label,
-      ...(source.width !== null && source.height !== null ? { w: source.width, h: source.height } : {}),
-      failures: o.reason ?? "",
-    })).filter(Boolean);
-    const why = reasons[0] || o.reason || o.error || source.error || "This photo could not be made. Check the original and try again.";
-    const item = grouped.get(o.productId) ?? { productId: o.productId, identifier, totalShots: new Set(sources.filter(s => s.productId === o.productId).map(s => s.n)).size, problemLine: why, photos: [] };
-    item.photos.push({ n: o.n, channel: o.channel, outputId: o.id, originalUrl: await sign(source.rawUri), outputUrl: o.stagingUri ? await sign(o.stagingUri) : null, why, whatToDo: reasons[0] || why, liveObjectExists: live.some(l => l.productId === o.productId && l.channel === o.channel && l.n === o.n) });
-    grouped.set(o.productId, item);
-  }
-  for (const product of held) if (!grouped.has(product.productId)) {
-    grouped.set(product.productId,{productId:product.productId,identifier:product.identifier,totalShots:new Set(sources.filter(s=>s.productId===product.productId).map(s=>s.n)).size,problemLine:product.notes || "Some photos could not be processed. Start this product again.",photos:[]});
-  }
-  return [...grouped.values()].sort((a,b)=>a.identifier.localeCompare(b.identifier));
-}
+export type { AttentionPhoto,AttentionProduct } from "@catalog/core/catalog/attention";
+export async function batchAttention(batchId:string,conn:Db=db(),sign=signedUrl){const [batch]=await conn.select({id:catalogBatches.id}).from(catalogBatches).where(eq(catalogBatches.id,batchId));if(!batch)throw new HttpError(404,"This batch was not found. Return to All batches.");return listAttention(conn,batchId,sign);}
