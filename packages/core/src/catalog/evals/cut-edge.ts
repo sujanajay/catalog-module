@@ -16,6 +16,8 @@ export const FLUSH_TOLERANCE_PX = 1;
  * table (a square photo on the 2:3 Trendyol canvas).
  */
 export const MAX_TRIM_SHARE = 1 / 3;
+/** Slack on MAX_TRIM_SHARE (spec 05 CUT_FILL_TRIM_SLACK): a square full-bleed box is a pixel or two off square after the matte's soft edge. */
+export const TRIM_SLACK = 0.01;
 
 const E = "cut_edge" as const;
 
@@ -38,7 +40,7 @@ export function checkCutEdge(ctx: OutputContext): CheckResult[] {
       return [
         !a.cutSide && `${a.trimmed} px of the ${a.name} are trimmed although the photo is not cut at the ${a.sides}`,
         a.cutSide && !a.otherFilled && `${a.trimmed} px of the ${a.name} are trimmed without the other axis being cut on both ends and filling the canvas`,
-        share > MAX_TRIM_SHARE + 1 / a.length && `${(share * 100).toFixed(1)}% of the ${a.name} is trimmed (at most a third)`,
+        share > MAX_TRIM_SHARE + TRIM_SLACK + 1 / a.length && `${(share * 100).toFixed(1)}% of the ${a.name} is trimmed (at most a third)`,
       ].filter((p): p is string => typeof p === "string");
     });
     const worst = Math.max(...trimmed.map(a => a.trimmed / a.length));

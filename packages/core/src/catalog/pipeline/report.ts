@@ -7,7 +7,7 @@ import ExcelJS from "exceljs";
 import { buildCsv } from "../../csv";
 import type { Db } from "../../db/client";
 import { catalogBatches, catalogBatchProducts, catalogChunks, catalogOutputs, catalogProductEvents, catalogProducts, catalogSourceImages, catalogUploads, type CatalogBatch } from "../../db/schema";
-import { CHANNEL_ORDER } from "../channels";
+import { CHANNEL_ORDER, hasCutBandNote } from "../channels";
 import type { SheetSpec } from "../sheet";
 import { CHANNEL_IDS, type ChannelId, type LinkStatus, type ChangeKind, type SheetStatus } from "../types";
 import { outputNote, type Output } from "./publish";
@@ -34,9 +34,14 @@ export function mergeNotes(stored: string | null, extra: readonly string[]): str
   const base = stored ?? "";
   return sortNotesByPhoto([...new Set([base, ...extra.filter(note => note && !base.includes(note))].filter(Boolean))].join("; "));
 }
-/** "Photos 1 and 3: ..." for the shots of this batch flagged cut_in_source (information; never holds the product). */
-export function cutInSourceNote(outputs: readonly Pick<Output, "n" | "status" | "flags">[]): string {
-  const shots = [...new Set(outputs.filter(o => o.flags.includes("cut_in_source") && o.status !== "failed" && o.status !== "skipped").map(o => o.n))].sort((a, b) => a - b);
+/**
+ * "Photos 1 and 3: ..." for the shots of this batch flagged cut_in_source (information; never holds the product). A photo
+ * whose cut edge does not sit flush on some channel (its render note, hasCutBandNote) is left out: that channel's own
+ * note says so in the sheet instead.
+ */
+export function cutInSourceNote(outputs: readonly (Pick<Output, "n" | "status" | "flags"> & { reason?: string | null })[]): string {
+  const banded = new Set(outputs.filter(o => hasCutBandNote(o.reason)).map(o => o.n));
+  const shots = [...new Set(outputs.filter(o => o.flags.includes("cut_in_source") && o.status !== "failed" && o.status !== "skipped" && !banded.has(o.n)).map(o => o.n))].sort((a, b) => a - b);
   if (!shots.length) return "";
   const list = shots.length > 1 ? `${shots.slice(0, -1).join(", ")} and ${shots.at(-1)}` : String(shots[0]);
   return `${shots.length > 1 ? "Photos" : "Photo"} ${list}: already cut at the frame edge in the original photo; the cut edge sits flush with the edge of the image`;
@@ -119,7 +124,7 @@ export async function buildReport(db:Db,batchId:string,extra:{recheck:RecheckRes
   const chunks = await db.select().from(catalogChunks).where(eq(catalogChunks.batchId,batchId));
   const rows:SheetSpec["rows"] = pairs.map(({product,pair})=> {
     const live = outputs.filter(o=>o.productId===product.id && o.isLive && batch.channels.includes(o.channel));
-    const problems = outputs.filter(o=>o.productId===product.id && o.batchId===batchId && o.reason && (["skipped","failed","needs_attention"].includes(o.status) || o.decision === "use_as_is" || autoActionOf(o) === "note")).map(outputNote);
+    const problems = outputs.filter(o=>o.productId===product.id && o.batchId===batchId && o.reason && (["skipped","failed","needs_attention"].includes(o.status) || o.decision === "use_as_is" || autoActionOf(o) === "note" || hasCutBandNote(o.reason))).map(outputNote);
     const links:SheetSpec["rows"][number]["links"] = {};
     for (const output of live) { links[output.channel] ??= []; links[output.channel]![output.n-1]=output.publicUrl; }
     const times = live.flatMap(o=>o.publishedAt ? [+o.publishedAt]:[]);

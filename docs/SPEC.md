@@ -263,7 +263,10 @@ Rules for all sources:
   fill the safe box instead. One exception: a photo already cut in the source on both ends of one axis
   (top and bottom, or left and right) fills that axis so no band sits beside a cut edge; any overflow
   is trimmed off the other axis's already-cut sides only, never an uncut outline, and by at most a
-  third of the product box (spec 05 step 4).
+  third of the product box plus 1% slack for the matte's soft edge (spec 05 step 4). A trim never cuts
+  through a compact high-contrast feature that is whole in the source (a logo, text, a buckle): it stops
+  short of it and the rest comes off the opposite cut side; where that cannot fill the axis the product is
+  fitted and the sheet notes the band on that channel instead of claiming the cut edge sits flush.
 - Backgrounds: one alpha matte per source; output = product RGBA over the target colour; product pixels
   are copied, never regenerated. Shadows follow the decision rule under "Models and model policy":
   preserve the original shadow as a darkening matte when it can be measured on a uniform background;

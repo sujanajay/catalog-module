@@ -2,7 +2,7 @@ import sharp from "sharp";
 import { describe, expect, it } from "vitest";
 import { CHANNELS } from "./channels";
 import { checkOutput } from "./compliance";
-import { NO_CUT, planCanvas, planProduct, renderSource, shotGeometry, type Matte, type Prepared } from "./render";
+import { CUT_FILL_MAX_TRIM, CUT_FILL_TRIM_SLACK, detailFeatures, NO_CUT, planCanvas, planProduct, renderSource, shotGeometry, trimRoom, type Matte, type Prepared } from "./render";
 import { analyseBackground } from "./shadow";
 
 // A brand photo already cropped mid-body inside a thin white border: 800x1200, a 10 px border, the
@@ -258,5 +258,113 @@ describe("a product cut on both ends of an axis fills it", () => {
       expect(plan.sourceCrop, id).toEqual(box);
       expect(plan.scale, id).toBeCloseTo(Math.min(plan.safeBox.w / box.w, plan.safeBox.h / box.h), 12);
     }
+  });
+});
+
+describe("the Trendyol canvas on a square full-bleed close-up a pixel off square", () => {
+  const ALL = { top: true, bottom: true, left: true, right: true };
+  it("fills the 2:3 canvas when the matte's soft edge makes the box 797 x 796 (Anta bd-152638122-2 shot 5)", () => {
+    // 33.4% off the sides: just over a third, within CUT_FILL_TRIM_SLACK. Before the slack a 600 px band sat above the top cut.
+    const box = { x: 2, y: 2, w: 797, h: 796 }, plan = planCanvas(CHANNELS.trendyol, box, { w: 800, h: 800 }, { cut: ALL });
+    expect(plan.productBox).toEqual({ x: 0, y: 0, w: 1200, h: 1800 });
+    expect(plan.trimBlocked).toEqual([]);
+    expect(1 - plan.sourceCrop!.w / box.w).toBeGreaterThan(CUT_FILL_MAX_TRIM);
+    expect(1 - plan.sourceCrop!.w / box.w).toBeLessThanOrEqual(CUT_FILL_MAX_TRIM + CUT_FILL_TRIM_SLACK);
+  });
+  it("still fits a box that needs clearly more than a third, and says a band shows", async () => {
+    // 840 x 796 needs 36.8% off the sides on 2:3.
+    const box = { x: 0, y: 0, w: 840, h: 796 }, plan = planCanvas(CHANNELS.trendyol, box, { w: 840, h: 796 }, { cut: ALL });
+    expect(plan.sourceCrop).toEqual(box);
+    expect(plan.productBox!.y).toBeGreaterThan(0);
+    const output = await renderSource({ ...photoCut(840, 796, ALL), channel: "trendyol", shotNumber: 2, productType: "apparel_model" });
+    expect(output.notes.join(" ")).toContain("The original photo is cut at the top, but on Trendyol the product cannot reach that edge");
+  });
+});
+
+// An 800 x 800 (or 800 x `height`) close-up of dark fabric cut on all four sides (Anta bd-162637307S-2 shot 4), with soft
+// folds and fine grain, optionally a white outlined logo whose box is `logo`, or a long white stripe down the frame.
+function closeUp(opts: { height?: number; logo?: { x: number; y: number; w: number; h: number }; stripe?: boolean; cut?: Partial<Record<"top" | "bottom" | "left" | "right", boolean>> } = {}) {
+  const width = 800, height = opts.height ?? 800, rgb = Buffer.alloc(width * height * 3), alpha = Buffer.alloc(width * height, 255);
+  const cut = { top: true, bottom: true, left: true, right: true, ...opts.cut };
+  for (let y = 0; y < height; y++) for (let x = 0; x < width; x++) {
+    // A fold: a slow light gradient (no sharp edge); grain: +-4 levels.
+    const v = Math.round(35 + 25 * Math.sin((x + y) / 90) + ((x * 7 + y * 13) % 9) - 4);
+    rgb.set([v, v, v + 4], (y * width + x) * 3);
+  }
+  // An uncut top or bottom: the product ends on a wavy hem 60 px inside the frame, on white.
+  for (const side of ["top", "bottom"] as const) if (!cut[side]) for (let x = 0; x < width; x++) for (let d = 0; d < 60 + Math.round(15 * Math.sin(x / 70) ** 2); d++) { const y = side === "top" ? d : height - 1 - d, i = y * width + x; alpha[i] = 0; rgb.set([255, 255, 255], i * 3); }
+  const paint = (x: number, y: number) => rgb.set([235, 235, 235], (y * width + x) * 3);
+  if (opts.logo) {
+    const { x: lx, y: ly, w: lw, h: lh } = opts.logo;
+    for (let y = ly; y < ly + lh; y++) for (let x = lx; x < lx + lw; x++) if (x < lx + 4 || x >= lx + lw - 4 || y < ly + 4 || y >= ly + lh - 4 || Math.abs((x - lx) * lh - (y - ly) * lw) < 3 * lh) paint(x, y);
+  }
+  if (opts.stripe) for (let y = 0; y < height; y++) for (let x = 120; x < 132; x++) paint(x, y);
+  const prepared: Prepared = { width, height, rgb, alphaSource: null, background: analyseBackground(rgb, width, height), flags: [], sourceMime: "image/jpeg" };
+  const matte: Matte = { alpha, width, height, model: "synthetic", ms: 0, source: "model", target: "cpu", sentLongSide: null };
+  return { prepared, matte };
+}
+
+describe("a cut-fill trim never cuts through a logo", () => {
+  const LOGO = { x: 110, y: 470, w: 76, h: 120 };
+  it("finds a compact high-contrast logo and nothing in soft folds, fine grain or a stripe across the frame", () => {
+    const plain = closeUp(), box = { x: 0, y: 0, w: 800, h: 800 };
+    expect(detailFeatures(plain.prepared.rgb, plain.matte.alpha, 800, box)).toEqual([]);
+    const striped = closeUp({ stripe: true });
+    expect(detailFeatures(striped.prepared.rgb, striped.matte.alpha, 800, box)).toEqual([]);
+    const logo = closeUp({ logo: LOGO }), features = detailFeatures(logo.prepared.rgb, logo.matte.alpha, 800, box);
+    expect(features).toHaveLength(1);
+    const f = features[0]!;
+    expect(f.x).toBeLessThanOrEqual(LOGO.x);
+    expect(f.x + f.w).toBeGreaterThanOrEqual(LOGO.x + LOGO.w - 2);
+    // The trim off the left stops short of the logo; nothing limits the right.
+    const room = trimRoom(logo.prepared.rgb, logo.matte.alpha, 800, box);
+    expect(room.left).toBeLessThan(LOGO.x);
+    expect(room.right).toBeLessThan(800 - LOGO.x - LOGO.w);
+    expect(room.right).toBeGreaterThan(560);
+  });
+  it("ignores a logo the frame already cuts", () => {
+    const cutLogo = closeUp({ logo: { x: 0, y: 470, w: 76, h: 120 } }), box = { x: 0, y: 0, w: 800, h: 800 };
+    expect(trimRoom(cutLogo.prepared.rgb, cutLogo.matte.alpha, 800, box)).toEqual({ top: 800, bottom: 800, left: 800, right: 800 });
+  });
+  it.each(["noon", "namshi", "trendyol"] as const)("on %s takes the trim off the other cut side and stays flush on every side", async id => {
+    const source = closeUp({ logo: LOGO }), geometry = shotGeometry(source.matte.alpha, 800, 800, { rgb: source.prepared.rgb })!;
+    expect(geometry.cut).toEqual({ top: true, bottom: true, left: true, right: true });
+    const output = await renderSource({ ...source, channel: id, shotNumber: 2, productType: "apparel_model" });
+    expect(output.compliance.failures).toEqual([]);
+    expect(output.notes).toEqual([]);
+    expect(output.plan.productBox).toEqual({ x: 0, y: 0, w: output.plan.w, h: output.plan.h });
+    const crop = output.plan.sourceCrop!;
+    // The whole logo is drawn, and the left loses less than an even split would take.
+    expect(crop.x).toBeLessThan(LOGO.x);
+    expect(crop.x).toBeLessThanOrEqual(geometry.trimRoom!.left);
+    expect(crop.x).toBeLessThan((800 - crop.w) / 2);
+    expect([crop.y, crop.h]).toEqual([0, 800]);
+  });
+  it("fits instead, with a truthful note, when the only cut side to trim holds the logo (French Connection Z02B2 shot 4)", async () => {
+    // Uncut at the top (a hem), cut left, right and bottom; a logo near the bottom. A square canvas fills the width and would
+    // trim the bottom through the logo: it is fitted, the uncut top is never trimmed, and the note names the band.
+    const source = closeUp({ height: 1100, logo: { x: 300, y: 900, w: 120, h: 110 }, cut: { top: false } });
+    const geometry = shotGeometry(source.matte.alpha, 800, 1100, { rgb: source.prepared.rgb })!;
+    expect(geometry.cut).toEqual({ top: false, bottom: true, left: true, right: true });
+    for (const id of ["amazon", "centrepoint"] as const) {
+      const output = await renderSource({ ...source, channel: id, shotNumber: 2, productType: "bag_accessory" });
+      expect(output.compliance.failures, id).toEqual([]);
+      expect(output.plan.trimBlocked, id).toEqual(["bottom"]);
+      expect(output.plan.sourceCrop, id).toEqual(geometry.box);
+      expect(output.flags, id).toContain("cut_in_source");
+      expect(output.notes, id).toEqual([`The original photo is cut at the left and right, but on ${CHANNELS[id].label} filling those edges would cut through a logo or detail near the bottom edge, so a band shows there to keep it whole.`]);
+    }
+    // Without the logo the same photo fills the square canvas, trimming the bottom only.
+    const plain = closeUp({ height: 1100, cut: { top: false } }), output = await renderSource({ ...plain, channel: "amazon", shotNumber: 2, productType: "bag_accessory" });
+    expect(output.plan.trimBlocked).toEqual([]);
+    expect(output.plan.sourceCrop!.y).toBe(output.plan.sourceBox!.y);
+    expect(output.plan.sourceCrop!.h).toBeLessThan(output.plan.sourceBox!.h);
+  });
+  it("plans the product canvas with the same room (planProduct)", () => {
+    const source = closeUp({ height: 1100, logo: { x: 300, y: 900, w: 120, h: 110 }, cut: { top: false } });
+    const geometry = shotGeometry(source.matte.alpha, 800, 1100, { rgb: source.prepared.rgb })!;
+    expect(geometry.trimRoom!.bottom).toBeLessThan(1100 - 1010);
+    const own = planCanvas(CHANNELS.amazon, geometry.box, geometry.source, { cut: geometry.cut, trimRoom: geometry.trimRoom });
+    expect(planProduct(CHANNELS.amazon, [geometry]).canvas).toEqual({ w: own.w, h: own.h });
   });
 });

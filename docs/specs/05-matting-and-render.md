@@ -210,12 +210,20 @@ Any change to the maths in this file that alters output bytes must bump `CHANNEL
      ends of one axis (top and bottom, or left and right) fills that axis, so neither cut edge has a
      band beside it (`cutFillScale`): where that makes it overflow the other axis, the overflow comes
      off that axis's cut sides only (split evenly when both are cut, `cutFillCrop`), never off an
-     uncut outline, and by at most a third of the product box (`CUT_FILL_MAX_TRIM`, the widest
-     canvas mismatch: a square photo on the 2:3 Trendyol canvas). A full-bleed photo (cut on all
-     four sides) fills the safe box. Where the other axis has no cut side, or the trim would pass a
-     third, the product is fitted (bottom wins when top and bottom are both cut; centred when left
+     uncut outline, and by at most a third of the product box plus 1% (`CUT_FILL_MAX_TRIM`, the widest
+     canvas mismatch: a square photo on the 2:3 Trendyol canvas; `CUT_FILL_TRIM_SLACK`: the matte's
+     soft edge makes a square full-bleed box 797 x 796). A trim never cuts through a logo
+     (`trimRoom`): on a grid of 512 cells over the product box, luminance edges of at least 40 levels
+     inside the opaque matte join (2 cells) into clusters; a cluster that is compact (4% to 40% of the
+     box on each axis, at most 4:1), dense (edges in 15% of its box) and sharp (a quarter of its edges
+     60 levels or more) and is whole in the source (not within 2% of a box edge) is a logo, text or a
+     buckle (`detailFeatures`). A cut side's trim stops 2% of the box short of it and the rest comes
+     off the opposite cut side. A full-bleed photo (cut on all four sides) fills the safe box. Where
+     the other axis has no cut side, or the trim would pass a third, or the cut sides' room cannot
+     take it, the product is fitted (bottom wins when top and bottom are both cut; centred when left
      and right are both cut) and the output carries a note naming the cut side that does not reach
-     the edge. Flag `cut_in_source`
+     the edge (and the logo it keeps whole); the sheet's flush cut note leaves that photo out and
+     carries the channel note instead. Flag `cut_in_source`
      (information: sheet notes and report, never holds the product). Compliance accepts the flush
      edge on the cut side only (`inside_safe_box`, `styli_anchor`, `noon_wide`). Headroom on
      zero-margin channels stays 0: SPEC.md states no minimum headroom.
