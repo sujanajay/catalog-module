@@ -11,6 +11,7 @@ import { getBrand } from "./brands";
 import { channel } from "@catalog/core/catalog/channels";
 import { readSheetTable } from "@catalog/core/catalog/ingest/links-sheet";
 import { batchSheetStatus, notRefreshedChannels as readNotRefreshedChannels } from "@catalog/core/catalog/pipeline/report";
+import { withoutModelNames } from "./redact";
 
 export async function batchExportUrl(id: string, format: string, conn: Db = db(), storage = { signedUrl, downloadBuffer }) {
   const [batch] = await conn.select().from(catalogBatches).where(eq(catalogBatches.id, id));
@@ -18,7 +19,6 @@ export async function batchExportUrl(id: string, format: string, conn: Db = db()
   let uri: string | null;
   if (format === "xlsx") uri = batch.sheetXlsxUri;
   else if (format === "csv") uri = batch.sheetCsvUri;
-  else if (format === "report") uri = batch.reportUri;
   else if (format === "filled") {
     if (!batch.reportUri) throw new HttpError(404, "No product list was uploaded in this batch.");
     const { buf } = await storage.downloadBuffer(batch.reportUri);
@@ -28,6 +28,17 @@ export async function batchExportUrl(id: string, format: string, conn: Db = db()
   } else throw new HttpError(400, "Choose xlsx, csv, report or filled to download.");
   if (!uri) throw new HttpError(404, "The sheet is not ready yet. Wait for processing to finish.");
   return storage.signedUrl(uri, 7 * 86400);
+}
+
+/**
+ * The batch report as the operator downloads it (Details, report.json). It is served through the
+ * app rather than a signed link so model ids, which the stored report keeps for evals, are removed.
+ */
+export async function batchReport(id: string, conn: Db = db(), read = downloadBuffer): Promise<unknown> {
+  const [batch] = await conn.select({ reportUri: catalogBatches.reportUri }).from(catalogBatches).where(eq(catalogBatches.id, id));
+  if (!batch) throw new HttpError(404, "This batch was not found. Return to All batches.");
+  if (!batch.reportUri) throw new HttpError(404, "The sheet is not ready yet. Wait for processing to finish.");
+  return withoutModelNames(JSON.parse((await read(batch.reportUri)).buf.toString()));
 }
 
 export async function liveSheet(productIds: string[], channels: ChannelId[], conn: Db = db()): Promise<SheetSpec> {
@@ -122,7 +133,7 @@ export async function batchDetails(id: string, conn: Db = db(), read = downloadB
   let filled = false;
   if (batch.reportUri) {
     const report = JSON.parse((await read(batch.reportUri)).buf.toString());
-    recheckFailures = report.recheck?.failures ?? [];
+    recheckFailures = withoutModelNames(report.recheck?.failures ?? []);
     filled = !!report.exports?.filledProductList;
   }
   return { batch, sheet, failures, recheckFailures, notRefreshedChannels, filled, uploads, keptPhotos };
