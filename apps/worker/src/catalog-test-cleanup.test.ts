@@ -5,9 +5,10 @@ import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import { expect, test } from "vitest";
+import { gitBashPath } from "@catalog/core/git-bash";
 
 const execute=promisify(execFile);
-const bash=process.platform==="win32"?path.join(process.env.LOCALAPPDATA!,"Programs/Git/bin/bash.exe"):"bash";
+const bash=gitBashPath();
 const shellPath=(file:string)=>process.platform==="win32"?file.replace(/\\/g,"/").replace(/^([A-Za-z]):/,(_all,drive:string)=>`/${drive.toLowerCase()}`):file;
 
 test("browser cleanup executes only the fixed job with exact JSON args, propagates failure and removes its own flags file",async()=>{
