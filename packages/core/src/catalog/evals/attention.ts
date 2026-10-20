@@ -43,9 +43,9 @@ export interface AttentionSummary {
 }
 
 /** Flags that never hold a product (SPEC.md "Other flags" and the cut-source rule of spec 10 section 7): they ride along on a held output without being its reason. */
-export const INFORMATION_FLAGS: ReadonlySet<string> = new Set(["low_resolution", "no_shadow_source", "shadow_synthesised", "passthrough", "matte_passthrough", "alpha_source", "qa_sampled_out", "cut_in_source", "numbering_gap"]);
+export const INFORMATION_FLAGS: ReadonlySet<string> = new Set(["low_resolution", "no_shadow_source", "shadow_synthesised", "passthrough", "matte_passthrough", "alpha_source", "qa_sampled_out", "cut_in_source", "numbering_gap", "upscaled"]);
 /** Flags that legitimately differ between channels of one photo (spec 07 decision scope). */
-export const CHANNEL_SPECIFIC_FLAGS: ReadonlySet<string> = new Set(["placement", "failed_compliance", "low_resolution", "passthrough"]);
+export const CHANNEL_SPECIFIC_FLAGS: ReadonlySet<string> = new Set(["placement", "failed_compliance", "low_resolution", "passthrough", "upscaled"]);
 export const outputKey = (identifier: string, ch: ChannelId, n: number) => `${identifier}|${ch}|${n}`;
 const held = (o: AttentionOutputRow) => (o.status === "needs_attention" || o.status === "failed") && !o.decision;
 const problemFlags = (o: AttentionOutputRow) => o.flags.filter(f => !INFORMATION_FLAGS.has(f));
