@@ -260,7 +260,10 @@ Rules for all sources:
 - Fit, never crop: `scale = min(boxW/bboxW, boxH/bboxH)` into the safe box (canvas minus the sheet's
   margins, or the whole canvas); centre, or bottom-centre for Styli. Per-product uniform scale
   (`uniformScaleDefault` true for Styli) so angles line up; detail shots (bbox > 85% of the source frame)
-  fill the safe box instead.
+  fill the safe box instead. One exception: a photo already cut in the source on both ends of one axis
+  (top and bottom, or left and right) fills that axis so no band sits beside a cut edge; any overflow
+  is trimmed off the other axis's already-cut sides only, never an uncut outline, and by at most a
+  third of the product box (spec 05 step 4).
 - Backgrounds: one alpha matte per source; output = product RGBA over the target colour; product pixels
   are copied, never regenerated. Shadows follow the decision rule under "Models and model policy":
   preserve the original shadow as a darkening matte when it can be measured on a uniform background;

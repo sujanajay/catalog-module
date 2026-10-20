@@ -1,7 +1,7 @@
 // Builds the per-output context the image checkers share: the decoded canvas, the alpha the output
 // should carry (the matte projected the way the render projects it) and the boxes of spec 05.
 import { backgroundFor, channel, type ChannelSpec } from "../channels";
-import { hexColor, safeBoxFor, shotGeometry, type BBox, type CutEdges } from "../render";
+import { cutFillCrop, hexColor, safeBoxFor, shotGeometry, type BBox, type CutEdges } from "../render";
 import { decodeRaster, productBoxOf, projectAlpha, shadowBand, thresholdMask, type Mask } from "./image";
 import type { OutputSubject, Raster } from "./types";
 
@@ -15,6 +15,8 @@ export interface OutputContext {
   /** The canvas colour the sheet prescribes for this shot. */
   background: [number, number, number];
   sourceBox: BBox;
+  /** The part of `sourceBox` drawn (the render's cutFillCrop): smaller only where a product cut on both ends of an axis fills it. */
+  sourceCrop: BBox;
   productBox: BBox;
   safeBox: BBox;
   /** Spec 05 shadow band for this placement. */
@@ -38,10 +40,11 @@ export async function buildContext(subject: OutputSubject): Promise<OutputContex
   if (!geometry) return null;
   const { box: sourceBox, cut } = geometry;
   const productBox = productBoxOf(subject.channel, subject.placement, sourceBox, cut);
-  const expectedAlpha = await projectAlpha(subject.alpha, subject.source, sourceBox, productBox, canvas);
+  const safeBox = safeBoxFor(spec, canvas, sourceBox.w > sourceBox.h, cut), sourceCrop = cutFillCrop(sourceBox, subject.placement.scale, safeBox, cut);
+  const expectedAlpha = await projectAlpha(subject.alpha, subject.source, sourceCrop, productBox, canvas);
   return {
-    subject, spec, canvas, background: hexColor(backgroundFor(subject.channel, subject.n)), sourceBox, productBox,
-    safeBox: safeBoxFor(spec, canvas, sourceBox.w > sourceBox.h, cut), band: shadowBand(productBox, canvas), expectedAlpha,
+    subject, spec, canvas, background: hexColor(backgroundFor(subject.channel, subject.n)), sourceBox, sourceCrop, productBox,
+    safeBox, band: shadowBand(productBox, canvas), expectedAlpha,
     product: thresholdMask(expectedAlpha, ALPHA_EDGE), shadowAllowed: SHADOW_TYPES.has(subject.productType),
     cutSides: (["top", "bottom", "left", "right"] as const).filter(side => cut[side]), cut,
   };

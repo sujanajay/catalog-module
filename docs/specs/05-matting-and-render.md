@@ -203,8 +203,16 @@ Any change to the maths in this file that alters output bytes must bump `CHANNEL
      a standing model measures 10-17%). A foot or a rounded hem narrows towards its edge and fails;
      two legs cut at the knee pass. When the judge saw the cut (07 `flush_cut`) the share is 40%
      and a deep band of the photo's own colour counts too. The box is trimmed to the cut line, the cut side's margin becomes 0 and the
-     product is anchored to that canvas edge (bottom wins when top and bottom are both cut; centred
-     when left and right are both cut); other margins are unchanged. Flag `cut_in_source`
+     product is anchored to that canvas edge; other margins are unchanged. A product cut on both
+     ends of one axis (top and bottom, or left and right) fills that axis, so neither cut edge has a
+     band beside it (`cutFillScale`): where that makes it overflow the other axis, the overflow comes
+     off that axis's cut sides only (split evenly when both are cut, `cutFillCrop`), never off an
+     uncut outline, and by at most a third of the product box (`CUT_FILL_MAX_TRIM`, the widest
+     canvas mismatch: a square photo on the 2:3 Trendyol canvas). A full-bleed photo (cut on all
+     four sides) fills the safe box. Where the other axis has no cut side, or the trim would pass a
+     third, the product is fitted (bottom wins when top and bottom are both cut; centred when left
+     and right are both cut) and the output carries a note naming the cut side that does not reach
+     the edge. Flag `cut_in_source`
      (information: sheet notes and report, never holds the product). Compliance accepts the flush
      edge on the cut side only (`inside_safe_box`, `styli_anchor`, `noon_wide`). Headroom on
      zero-margin channels stays 0: SPEC.md states no minimum headroom.
