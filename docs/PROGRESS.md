@@ -87,6 +87,8 @@ Status values: `todo`, `running`, `done`, `blocked`.
 
 ## Known issues
 
+- Session hand-off 2026-10-21: the first manager session ran out of context; resume from
+  `docs/plans/2026-10-21-go-live-resume.md` (state, rules, deploy wrapper, next steps in order).
 - After PR #32 an automatically dropped photo leaves the previous batch's live image for that
   shot live and in the sheet (by design for now: the earlier image was good).
 - OpenRouter live proof (2026-10-20): eval set `openrouter-proof-tb` (1 Test Brand footwear
