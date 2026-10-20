@@ -9,6 +9,7 @@ import { repairOwnDefects, type QaRepairContext } from "./qa-stage";
 import type { ProductType } from "@catalog/core/catalog/types";
 import { MattingClient, matteFor } from "@catalog/core/catalog/matte";
 import { prepare, renderAllChannels } from "@catalog/core/catalog/render";
+import { createUpscaler, upscaleConfigFromEnv } from "@catalog/core/catalog/upscale";
 import type { ResolvedPolicy } from "@catalog/core/catalog/types";
 import * as storage from "@catalog/core/storage";
 import { DISPATCH_DEADLINE_SEC, enqueueTask } from "@catalog/core/tasks";
@@ -29,7 +30,11 @@ let defaultsEnsured = false;
 export function workerCatalogDeps(db: Db): CatalogDeps {
   sharedMatting ??= new MattingClient({services:[{baseUrl:process.env.MATTING_URL ?? "http://localhost:8081",target:"cpu"},...(process.env.MATTING_GPU_URL ? [{baseUrl:process.env.MATTING_GPU_URL,target:"gpu" as const}]:[])]});
   const matting = sharedMatting;
-  return {db,storage,matting,enqueue:enqueueTask,fetch,now:()=>new Date(),log:(message,fields)=>console.info(JSON.stringify({message,...fields})),prepare,matteFor,renderAllChannels,judgeOutput,classifyProductType,repairOwnDefects,
+  // Spec 11: UPSCALE_MODEL (unset: off) and UPSCALE_MIN_SCALE (default 1.5) reach every render of the worker, the
+  // auto-resolve ladder included; the upscaler uses the GPU matting service through the same client and breaker.
+  const upscaler = createUpscaler(matting,upscaleConfigFromEnv());
+  const render: typeof renderAllChannels = upscaler ? (p,m,channels,ctx)=>renderAllChannels(p,m,channels,{upscaler,...ctx}) : renderAllChannels;
+  return {db,storage,matting,enqueue:enqueueTask,fetch,now:()=>new Date(),log:(message,fields)=>console.info(JSON.stringify({message,...fields})),prepare,matteFor,renderAllChannels:render,judgeOutput,classifyProductType,repairOwnDefects,
     resolvePolicy:async(brandSlug,category)=> {
       if (!defaultsEnsured) {
         const health = await matting.health();

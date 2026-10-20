@@ -7,9 +7,9 @@ import ExcelJS from "exceljs";
 import { buildCsv } from "../../csv";
 import type { Db } from "../../db/client";
 import { catalogBatches, catalogBatchProducts, catalogChunks, catalogOutputs, catalogProductEvents, catalogProducts, catalogSourceImages, catalogUploads, type CatalogBatch } from "../../db/schema";
-import { CHANNEL_ORDER, hasCutBandNote } from "../channels";
+import { CHANNEL_ORDER, CHANNELS, hasCutBandNote } from "../channels";
 import type { SheetSpec } from "../sheet";
-import { CHANNEL_IDS, type ChannelId, type LinkStatus, type ChangeKind, type SheetStatus } from "../types";
+import { CHANNEL_IDS, UPSCALED_SENTENCE, type ChannelId, type LinkStatus, type ChangeKind, type SheetStatus } from "../types";
 import { outputNote, type Output } from "./publish";
 import type { RecheckResult } from "../recheck/index";
 import { isDuplicateReject } from "../ingest/group";
@@ -45,6 +45,18 @@ export function cutInSourceNote(outputs: readonly (Pick<Output, "n" | "status" |
   if (!shots.length) return "";
   const list = shots.length > 1 ? `${shots.slice(0, -1).join(", ")} and ${shots.at(-1)}` : String(shots[0]);
   return `${shots.length > 1 ? "Photos" : "Photo"} ${list}: already cut at the frame edge in the original photo; the cut edge sits flush with the edge of the image`;
+}
+/**
+ * Spec 11: "<Channel> img 1 and 2: Enlarged with a quality pass to meet this marketplace's size." per channel, for the
+ * outputs of this batch flagged `upscaled` (information; never holds the product). Model-free by construction.
+ */
+export function upscaledNotes(outputs: readonly Pick<Output, "n" | "status" | "flags" | "channel">[]): string[] {
+  return CHANNEL_ORDER.flatMap(c => {
+    const shots = [...new Set(outputs.filter(o => o.channel === c && o.flags.includes("upscaled") && o.status !== "failed" && o.status !== "skipped").map(o => o.n))].sort((a, b) => a - b);
+    if (!shots.length) return [];
+    const list = shots.length > 1 ? `${shots.slice(0, -1).join(", ")} and ${shots.at(-1)}` : String(shots[0]);
+    return [`${CHANNELS[c].label} img ${list}: ${UPSCALED_SENTENCE}`];
+  });
 }
 export interface NotRefreshedChannel { channel: ChannelId; lastBatchId: string; lastBatchName: string }
 export async function notRefreshedChannels(db:Db,batchId:string):Promise<NotRefreshedChannel[]> {
@@ -128,7 +140,7 @@ export async function buildReport(db:Db,batchId:string,extra:{recheck:RecheckRes
     const links:SheetSpec["rows"][number]["links"] = {};
     for (const output of live) { links[output.channel] ??= []; links[output.channel]![output.n-1]=output.publicUrl; }
     const times = live.flatMap(o=>o.publishedAt ? [+o.publishedAt]:[]);
-    return {brand:batch.brandName,identifier:product.identifier,optionIdStyleColor:product.optionIdStyleColor ?? "",opptraSkuIds:product.opptraSkuIds,links,status:batchSheetStatus(pair),notes:mergeNotes(pair.notes,[...problems,cutInSourceNote(outputs.filter(o=>o.productId===product.id && o.batchId===batchId))]),change:pair.change,changedAt:times.length ? new Date(Math.max(...times)):null};
+    return {brand:batch.brandName,identifier:product.identifier,optionIdStyleColor:product.optionIdStyleColor ?? "",opptraSkuIds:product.opptraSkuIds,links,status:batchSheetStatus(pair),notes:mergeNotes(pair.notes,[...problems,cutInSourceNote(outputs.filter(o=>o.productId===product.id && o.batchId===batchId)),...upscaledNotes(outputs.filter(o=>o.productId===product.id && o.batchId===batchId))]),change:pair.change,changedAt:times.length ? new Date(Math.max(...times)):null};
   });
   const selected = outputs.filter(o=>o.batchId===batchId), unchanged = pairs.reduce((n,{product})=>n+Math.max(0,sources.filter(s=>s.productId===product.id).length*batch.channels.length-selected.filter(o=>o.productId===product.id).length),0);
   const qaCap=selected.some(output=>output.flags.includes("qa_cap"));

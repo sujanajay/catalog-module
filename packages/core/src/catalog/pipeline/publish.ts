@@ -8,12 +8,32 @@ import { assertWithinProduct, productPrefix, publicObjectPath } from "../naming"
 import { lockProducts } from "../products";
 import type { ChannelId, EventKind } from "../types";
 import { verifyPublic } from "./verify";
+import { upscaleConfigFromEnv, upscalerKey } from "../upscale";
 export { lockProducts };
 export type Output = typeof catalogOutputs.$inferSelect;
 export type Source = typeof catalogSourceImages.$inferSelect;
 export interface PublishDeps { db: Db; storage: Pick<typeof storage, "headObject" | "stageCopyToPublic" | "deletePublicObject" | "setCustomTime" | "getPublicBucketName">; fetch: typeof fetch; now: () => Date; sleep?: (ms:number) => Promise<void> }
-export function renderKey(input: { sourceSha256: string; channel: ChannelId; n: number; policyKey: string; rulesVersion?: string }): string {
-  return createHash("sha256").update(`${input.sourceSha256}|${input.channel}|${input.rulesVersion ?? CHANNEL_RULES_VERSION}|${input.policyKey}|${input.n}`).digest("hex");
+/**
+ * `upscaler` (spec 11): the upscaler model id, only when it made the output. The plain key is unchanged, so the
+ * path without the upscaler keeps today's keys; an upscaled output's key is upscaledRenderKey of the plain one.
+ */
+export function renderKey(input: { sourceSha256: string; channel: ChannelId; n: number; policyKey: string; rulesVersion?: string; upscaler?: string | null }): string {
+  const plain = createHash("sha256").update(`${input.sourceSha256}|${input.channel}|${input.rulesVersion ?? CHANNEL_RULES_VERSION}|${input.policyKey}|${input.n}`).digest("hex");
+  return input.upscaler ? upscaledRenderKey(plain, input.upscaler) : plain;
+}
+/** The render_key of an output the upscaler made: the plain key with the upscaler id and UPSCALER_VERSION ("u:<id>:<version>"). */
+export function upscaledRenderKey(plainKey: string, model: string): string {
+  return createHash("sha256").update(`${plainKey}|${upscalerKey(model)}`).digest("hex");
+}
+/**
+ * The keys a live output may carry and still match this render: the plain key and, when UPSCALE_MODEL is
+ * set, the key of an output the upscaler made. Whether a render needs the upscaler is known only after its
+ * plan, so an output made on the plain path (no enlargement beyond the threshold, or a fallback) and one
+ * the upscaler made both count as unchanged.
+ */
+export function renderKeys(input: Omit<Parameters<typeof renderKey>[0], "upscaler">, upscaleModel: string | null = upscaleConfigFromEnv().model): string[] {
+  const plain = renderKey(input);
+  return [plain, ...(upscaleModel ? [upscaledRenderKey(plain, upscaleModel)] : [])];
 }
 /** One output's sheet note, "<Channel label> img <n>: <reason>" (spec 06 5.6). The publish step and the report write the same words, so the report's de-duplication finds them. */
 export function outputNote(o: Pick<Output, "channel" | "n" | "reason" | "decision" | "decidedBy">): string {
@@ -56,8 +76,8 @@ export async function publishProduct(deps: PublishDeps, batchId: string, product
     const [pair] = await tx.select().from(catalogBatchProducts).where(where);
     const missingPairs = sources.some(source=>batch.channels.some(channel=> {
       if(outputs.some(output=>output.sourceImageId===source.id && output.channel===channel)) return false;
-      const key = batch.options.policy ? renderKey({sourceSha256:source.sha256,channel,n:source.n,policyKey:`default|${source.matteModel ?? batch.options.policy.matteModel}`}):null;
-      return !key || !live.some(output=>output.channel===channel && output.n===source.n && output.renderKey===key);
+      const keys = batch.options.policy ? renderKeys({sourceSha256:source.sha256,channel,n:source.n,policyKey:`default|${source.matteModel ?? batch.options.policy.matteModel}`}):null;
+      return !keys || !live.some(output=>output.channel===channel && output.n===source.n && keys.includes(output.renderKey));
     }));
     if (product.lastBatchId === batchId && outputs.every(o=>o.status === "verified" || o.status === "skipped")) {
       let alreadyPublished = true;

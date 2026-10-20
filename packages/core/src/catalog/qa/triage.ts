@@ -5,12 +5,13 @@ import { busyBackgroundHold, OWN_DEFECT_FLAGS } from "../auto-resolve";
  * Information flags (07 4.6): they never hold the publish gate and never create an attention item on
  * their own. One list for the attention model, the decision scope and the triage below.
  * `complete_product` (the brand's photo is cut at its own frame edge; we never crop) and
- * `transparent` (a cut-out hint) are note-only since judge v2.
+ * `transparent` (a cut-out hint) are note-only since judge v2. `upscaled` (spec 11: the GPU upscaler made the
+ * colour of an enlargement beyond its threshold) is a sheet note only.
  */
 export const INFORMATION_FLAGS: ReadonlySet<OutputFlag> = new Set<OutputFlag>([
   "low_resolution", "no_shadow_source", "shadow_synthesised", "passthrough", "alpha_source", "qa_sampled_out",
   "numbering_gap", "type_unknown", "cut_in_source", "complete_product", "transparent", "auto_dropped",
-  "matte_passthrough",
+  "matte_passthrough", "upscaled",
 ]);
 /** Always held for the operator: a different item confirmed by two judges, or several photos in one. */
 export const HARD_HOLD_FLAGS: ReadonlySet<OutputFlag> = new Set<OutputFlag>(["different_product", "collage"]);

@@ -43,7 +43,16 @@ export interface EnlargeInput {
   width: number; height: number;
   /** The part of the photo to place. */ crop: CropBox;
   /** The placed product size on the canvas. */ to: Size;
+  /**
+   * Spec 11: the colour of `crop` already enlarged to `to` by the GPU upscaler (x2, then Lanczos3 to `to`), raw
+   * 3-channel RGB. It replaces the Lanczos3 enlargement of the full photo in step 2; the sharpening then runs on it
+   * with the residual Lanczos factor (enlargement / 2). Absent: the plain path.
+   */
+  upscaled?: Buffer;
 }
+
+/** The fixed factor of the upscale service (POST /upscale?scale=2); the residual Lanczos factor is the enlargement over this. */
+export const UPSCALE_SERVICE_FACTOR = 2;
 
 /**
  * The cut-out of `crop` resized to `to` as a PNG with alpha, the one place a product is resized for a canvas.
@@ -57,23 +66,31 @@ export interface EnlargeInput {
  *    that sits under transparent pixels. The difference goes on fully opaque pixels only: the partly transparent
  *    silhouette edge keeps its plain Lanczos colour, so no bright or dark rim appears on the new background.
  *
- * A later upscaler goes in step 2, in place of the Lanczos3 enlargement of the full photo, before the sharpening.
+ * With `upscaled` (spec 11), step 2 starts from the upscaler's colour instead of the Lanczos3 enlargement of the full
+ * photo: every pixel of the cut-out takes that colour, fully opaque pixels take it sharpened with the residual factor
+ * (enlargement / 2, so no sharpening once the x2 pass alone covers the enlargement), and the alpha stays the plain
+ * Lanczos3 alpha of step 1, byte for byte.
  */
 export async function enlargeCutout(input: EnlargeInput): Promise<Buffer> {
-  const { rgba, rgb, width, height, crop, to } = input;
+  const { rgba, rgb, width, height, crop, to, upscaled } = input;
   const region = { left: crop.x, top: crop.y, width: crop.w, height: crop.h };
   const resized = sharp(rgba, { raw: { width, height, channels: 4 } }).extract(region).resize(to.w, to.h, { kernel: "lanczos3" });
   const scale = enlargementOf(crop, to);
-  if (!(scale > 1)) return resized.png().toBuffer();
+  if (!upscaled && !(scale > 1)) return resized.png().toBuffer();
+  if (upscaled && upscaled.length !== to.w * to.h * 3) throw new Error("The upscaled colour does not match the product size.");
   const cutout = await resized.raw().toBuffer();
-  const plain = await sharp(rgb, { raw: { width, height, channels: 3 } }).extract(region).resize(to.w, to.h, { kernel: "lanczos3" }).raw().toBuffer();
-  const sharpened = await sharpenAfterEnlarge(plain, to, scale);
+  const base = upscaled ?? await sharp(rgb, { raw: { width, height, channels: 3 } }).extract(region).resize(to.w, to.h, { kernel: "lanczos3" }).raw().toBuffer();
+  const sharpened = await sharpenAfterEnlarge(base, to, upscaled ? scale / UPSCALE_SERVICE_FACTOR : scale);
   for (let i = 0, n = to.w * to.h; i < n; i++) {
     // Only fully opaque pixels: the silhouette edge (partly transparent) stays as Lanczos made it, so the
     // sharpening of the old background never shows as a rim on the new one.
-    if (cutout[i * 4 + 3] !== 255) continue;
+    if (cutout[i * 4 + 3] !== 255) {
+      if (upscaled) for (let c = 0; c < 3; c++) cutout[i * 4 + c] = upscaled[i * 3 + c]!;
+      continue;
+    }
     for (let c = 0; c < 3; c++) {
-      const delta = sharpened[i * 3 + c]! - plain[i * 3 + c]!;
+      if (upscaled) { cutout[i * 4 + c] = sharpened[i * 3 + c]!; continue; }
+      const delta = sharpened[i * 3 + c]! - base[i * 3 + c]!;
       if (delta) cutout[i * 4 + c] = Math.max(0, Math.min(255, cutout[i * 4 + c]! + delta));
     }
   }
