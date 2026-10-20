@@ -4,6 +4,7 @@ import { backgroundFor, channel, CUT_BAND_NOTE_START, DETAIL_SHOT_BBOX_FRACTION,
 import type { ChannelId, OutputFlag, ProductType } from "./types";
 import { ALPHA_BBOX_THRESHOLD, analyseBackground, borderPixels, shadowLayer } from "./shadow";
 import { BG_TOLERANCE, checkOutput } from "./compliance";
+import { enlargeCutout } from "./enhance";
 
 export interface Prepared { width: number; height: number; rgb: Buffer; alphaSource: Buffer | null; background: { uniform: boolean; color: [number, number, number]; stdev: number }; flags: OutputFlag[]; sourceMime: string }
 export interface Matte { alpha: Buffer; width: number; height: number; model: string; ms: number; source: "model" | "alpha_source" | "floodfill"; target: "cpu" | "gpu" | null; sentLongSide: number | null }
@@ -493,8 +494,13 @@ export async function renderSource(input: RenderInput): Promise<RenderOutput> {
   if (plan.lowResolution) {
     result.flags.push("low_resolution");
     if (spec.id === "styli" && STYLI_SKIP_LOW_RESOLUTION) { result.status = "skipped"; result.notes.push("Skipped for Styli: the photo is smaller than Styli needs."); return result; }
-    const min = spec.id === "trendyol" ? effectiveMinimum(spec) : spec.minCanvas;
-    result.attention = { why: `The original is ${p.width} x ${p.height}. ${spec.label} wants at least ${min.h > min.w ? min.h : min.w} px, so this one may look soft.`, what: "It will upload, but ask the brand for a larger photo if you can. The other marketplaces are fine with it." };
+    const min = spec.minCanvas, target = spec.targetCanvas;
+    // A fixed canvas above the channel's minimum (Trendyol: minimum 600 x 800, delivered at 1200 x 1800) is not a
+    // minimum the photo missed: say what the channel needs, what we deliver, and that the photo was enlarged.
+    const why = spec.fixedCanvas && (target.w > min.w || target.h > min.h)
+      ? `The original is ${p.width} x ${p.height}. ${spec.label}'s minimum is ${min.w} x ${min.h} and we deliver every ${spec.label} image at ${target.w} x ${target.h}, so this photo was enlarged and may look soft.`
+      : `The original is ${p.width} x ${p.height}. ${spec.label} wants at least ${min.h > min.w ? min.h : min.w} px, so this one may look soft.`;
+    result.attention = { why, what: "It will upload, but ask the brand for a larger photo if you can. The other marketplaces are fine with it." };
   }
   if (spec.uniformScaleDefault && !plan.detailShot && input.uniformScale !== undefined && input.uniformScale > plan.scale) result.notes.push("Could not keep the same size as the other angles without cutting; fitted instead");
   const color = backgroundFor(spec.id, shotNumber), product = plan.productBox!;
@@ -517,7 +523,8 @@ export async function renderSource(input: RenderInput): Promise<RenderOutput> {
     const rgba = Buffer.alloc(p.width * p.height * 4);
     for (let i = 0; i < matte.alpha.length; i++) { p.rgb.copy(rgba, i * 4, i * 3, i * 3 + 3); rgba[i * 4 + 3] = matte.alpha[i]!; }
     const crop = plan.sourceCrop ?? box;
-    const cutout = await sharp(rgba, { raw: { width: p.width, height: p.height, channels: 4 } }).extract({ left: crop.x, top: crop.y, width: crop.w, height: crop.h }).resize(product.w, product.h, { kernel: "lanczos3" }).png().toBuffer();
+    // Lanczos3, plus a conservative sharpen of the colour (never the alpha) when the product is enlarged (enhance.ts).
+    const cutout = await enlargeCutout({ rgba, rgb: p.rgb, width: p.width, height: p.height, crop, to: { w: product.w, h: product.h } });
     const cutoutAlpha = await sharp(cutout).extractChannel(3).raw().toBuffer();
     for (let y = 0; y < product.h; y++) cutoutAlpha.copy(foregroundMask, (product.y + y) * plan.w + product.x, y * product.w, (y + 1) * product.w);
     let shadow = await shadowLayer(p, matte, crop, plan, input.productType, color, foregroundMask);

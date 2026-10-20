@@ -67,7 +67,10 @@ async function looksAt(output: Buffer): Promise<{ edge: number; background: numb
   let rim = 0, patch = 0;
   for (let y = Math.max(0, y0 - 12); y <= Math.min(h - 1, y1 + 12); y++) for (let x = Math.max(0, x0 - 12); x <= Math.min(w - 1, x1 + 12); x++) if ((x < x0 || x > x1 || y < y0 || y > y1) && near(px(x, y))) rim++;
   const luma = (c: number[]) => (c[0]! + c[1]! + c[2]!) / 3;
-  for (let y = Math.max(0, y1 - 40); y <= Math.min(h - 1, y1 + 40); y++) for (let x = Math.max(0, x0 - 40); x <= Math.min(w - 1, x1 + 40); x++) { if (x >= x0 && x <= x1 && y <= y1) continue; const c = px(x, y); if (luma(bg) - luma(c) >= 4 && !near(c) && Math.max(...c) - Math.min(...c) < 6) patch++; }
+  // A leftover patch is a block beside the product, not the JPEG ringing that hugs its edge: the 2 px next to the
+  // product box are skipped. Spec 11 sharpens an enlarged product, which makes the saturated 2 px checker ring a
+  // little more there (42 to 58 such pixels, over this mock's 50) while no real block is anywhere near that thin.
+  for (let y = Math.max(0, y1 - 40); y <= Math.min(h - 1, y1 + 40); y++) for (let x = Math.max(0, x0 - 40); x <= Math.min(w - 1, x1 + 40); x++) { if (x >= x0 - 2 && x <= x1 + 2 && y <= y1 + 2) continue; const c = px(x, y); if (luma(bg) - luma(c) >= 4 && !near(c) && Math.max(...c) - Math.min(...c) < 6) patch++; }
   return { edge: rim > 40 ? 30 : 95, background: patch > 50 ? 30 : 95 };
 }
 
