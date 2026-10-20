@@ -95,6 +95,14 @@ export function autoActionsOf(compliance: unknown): AutoAction[] {
   const list = (compliance as { auto_actions?: unknown } | null | undefined)?.auto_actions;
   return Array.isArray(list) ? list as AutoAction[] : [];
 }
+/**
+ * The matte stage held this photo because its background is busy (matte-guard.ts `busyBackground`): its
+ * `matte_passthrough` step failed with the trigger `leftover_background`. The same flag the judge raises for
+ * a leftover background, but code-detected: a hard hold (triage), never re-made by the repair loop.
+ */
+export function busyBackgroundHold(compliance: unknown): boolean {
+  return autoActionsOf(compliance).some(a => a.step === "matte_passthrough" && a.result === "failed" && a.trigger.includes("leftover_background"));
+}
 /** `compliance` with more actions appended to its `auto_actions` list. */
 export function withAutoActions(compliance: Record<string, unknown> | null | undefined, actions: readonly AutoAction[]): Record<string, unknown> {
   return { ...(compliance ?? {}), auto_actions: [...autoActionsOf(compliance), ...actions] };

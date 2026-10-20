@@ -1,5 +1,5 @@
 import type { ChannelId, OutputFlag } from "../types";
-import { OWN_DEFECT_FLAGS } from "../auto-resolve";
+import { busyBackgroundHold, OWN_DEFECT_FLAGS } from "../auto-resolve";
 
 /**
  * Information flags (07 4.6): they never hold the publish gate and never create an attention item on
@@ -15,6 +15,13 @@ export const INFORMATION_FLAGS: ReadonlySet<OutputFlag> = new Set<OutputFlag>([
 /** Always held for the operator: a different item confirmed by two judges, or several photos in one. */
 export const HARD_HOLD_FLAGS: ReadonlySet<OutputFlag> = new Set<OutputFlag>(["different_product", "collage"]);
 /**
+ * Flags that make the render stage stage an output as `needs_attention` (held before the judge). At the render
+ * stage `leftover_background` can only come from the matte stage (a busy background, busyBackgroundHold); the
+ * judge raises it later, in the QA stage.
+ */
+export const RENDER_HOLD_FLAGS: ReadonlySet<OutputFlag> = new Set<OutputFlag>(["small_source", "fallback_matte", "leftover_background"]);
+export const holdsAtRender = (flags: readonly OutputFlag[]) => flags.some(flag => RENDER_HOLD_FLAGS.has(flag));
+/**
  * Left out with a note, never held: a size chart or text-only image (the judge's `chart` view) is
  * not a product photo for a marketplace, whatever its position or the other photos.
  */
@@ -25,16 +32,19 @@ export const UNCHECKED_FLAGS: ReadonlySet<OutputFlag> = new Set<OutputFlag>(["qa
 export const problemFlags = (flags: readonly OutputFlag[]) => flags.filter(flag => !INFORMATION_FLAGS.has(flag));
 
 export type AutoAction = "none" | "note" | "drop" | "hold";
-export type HoldCause = "wrong_item" | "collage" | "corrupt" | "unchecked" | "photo_one" | "every_photo" | "not_publishable";
+export type HoldCause = "wrong_item" | "collage" | "unusable" | "corrupt" | "unchecked" | "photo_one" | "every_photo" | "not_publishable";
 export interface TriageOutput {
   id: string; n: number; channel: ChannelId; status: string; flags: readonly OutputFlag[];
   decision: string | null; stagingUri: string | null;
+  /** The row's `compliance` (its `auto_actions` say whether the matte stage held it for a busy background). */
+  compliance?: unknown;
 }
 export interface TriageDecision { action: AutoAction; cause?: HoldCause; flags: OutputFlag[] }
 
 /**
  * Turns the problems of one product's outputs in this batch into automatic actions (07 4.1 v2).
- * Hard holds: a confirmed different item, a collage, a corrupt file (status `failed`), photo 1 with
+ * Hard holds: a confirmed different item, a collage, a photo whose background could not be removed
+ * (`leftover_background` from the matte stage, busyBackgroundHold), a corrupt file (status `failed`), photo 1 with
  * a problem, and every photo of a channel with a problem; plus the "no verdict" holds (`qa_cap`,
  * `qa_unavailable`) and an image that cannot be published (not made, or failing the channel rules)
  * when it cannot be dropped. Any other problem is dropped with a note when the photo is not photo 1
@@ -63,6 +73,8 @@ export function triageProduct(outputs: readonly TriageOutput[], keptLive: readon
     if (!problems.length) { result.set(o.id, {action:o.status === "needs_attention" ? "hold" : "none",flags:[]}); continue; }
     if (problems.includes("different_product")) { hold("wrong_item"); continue; }
     if (problems.includes("collage")) { hold("collage"); continue; }
+    // The background could not be removed (code-detected `leftover_background`, busyBackgroundHold): a hard hold.
+    if (problems.includes("leftover_background") && busyBackgroundHold(o.compliance)) { hold("unusable"); continue; }
     if (problems.some(flag => UNCHECKED_FLAGS.has(flag))) { hold("unchecked"); continue; }
     if (o.n === photoOne) { hold("photo_one"); continue; }
     const others = goodShots(o.channel, o.n);

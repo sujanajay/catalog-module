@@ -1,6 +1,6 @@
 import sharp from "sharp";
 import { fileTypeFromBuffer } from "file-type";
-import { backgroundFor, channel, DETAIL_SHOT_BBOX_FRACTION, JPEG_QUALITY_MIN, JPEG_QUALITY_START, JPEG_QUALITY_STEP, MAX_OUTPUT_BYTES, MAX_UPSCALE, MIN_SOURCE_LONG_SIDE_PX, STYLI_SKIP_LOW_RESOLUTION, type ChannelSpec, type Size } from "./channels";
+import { backgroundFor, channel, CUT_BAND_NOTE_START, DETAIL_SHOT_BBOX_FRACTION, JPEG_QUALITY_MIN, JPEG_QUALITY_START, JPEG_QUALITY_STEP, MAX_OUTPUT_BYTES, MAX_UPSCALE, MIN_SOURCE_LONG_SIDE_PX, STYLI_SKIP_LOW_RESOLUTION, type ChannelSpec, type Size } from "./channels";
 import type { ChannelId, OutputFlag, ProductType } from "./types";
 import { ALPHA_BBOX_THRESHOLD, analyseBackground, borderPixels, shadowLayer } from "./shadow";
 import { BG_TOLERANCE, checkOutput } from "./compliance";
@@ -9,7 +9,8 @@ export interface Prepared { width: number; height: number; rgb: Buffer; alphaSou
 export interface Matte { alpha: Buffer; width: number; height: number; model: string; ms: number; source: "model" | "alpha_source" | "floodfill"; target: "cpu" | "gpu" | null; sentLongSide: number | null }
 export interface BBox { x: number; y: number; w: number; h: number }
 export interface CanvasPlan { w: number; h: number; lowResolution: boolean; safeBox: BBox; scale: number; placedX: number; placedY: number; detailShot: boolean; sourceBox?: BBox; productBox?: BBox; cut?: CutEdges;
-  /** The part of `sourceBox` drawn: smaller only where a product cut on both ends of one axis fills it and the other axis is trimmed off its cut sides (cutFillScale). */ sourceCrop?: BBox }
+  /** The part of `sourceBox` drawn: smaller only where a product cut on both ends of one axis fills it and the other axis is trimmed off its cut sides (cutFill). */ sourceCrop?: BBox;
+  /** Cut sides whose trim would have cut through a logo, text or a buckle, so the product is fitted instead (cutFill). */ trimBlocked?: Side[] }
 /** `canvas`: the product's one canvas on this channel (planProduct), so every angle shares one size. */
 export interface RenderInput { prepared: Prepared; matte: Matte; channel: ChannelId; shotNumber: number; productType: ProductType; uniformScale?: number; canvas?: Size; identifier?: string; publicObjectPath?: string; /** false forbids a synthesised shadow (05 rule 3); absent leaves the product-type rule. */ synthesiseShadow?: boolean;
   /** Below 1 shrinks the fitted product by this factor (the auto-resolve ladder's smaller fit); absent is 1. */ fitScale?: number;
@@ -83,10 +84,24 @@ export const CUT_EDGE_MIN_SHARE = 0.2;
 /** The relaxed share when the judge saw a cut at the frame edge that the rule missed. */
 export const CUT_EDGE_JUDGED_RATIO = 0.4;
 
-type Side = "top" | "bottom" | "left" | "right";
+export type Side = "top" | "bottom" | "left" | "right";
 const SIDES: readonly Side[] = ["top", "bottom", "left", "right"];
 
-export interface ShotGeometry { box: BBox; source: Size; cut: CutEdges }
+export type TrimRoom = Record<Side, number>;
+export interface ShotGeometry { box: BBox; source: Size; cut: CutEdges;
+  /** Per side, how deep (source px from the box edge) a cut-fill trim may go before it reaches a logo, text or a buckle (trimRoom); absent without source pixels or a cut on both ends of an axis. */ trimRoom?: TrimRoom;
+  /** Cut sides a trim may never touch by rule (trimRules), whatever the source shows: their `trimRoom` is 0. */ trimProtected?: Side[] }
+/** The model name of the pass-through and whole-photo mattes (matte-guard.ts). */
+export const PASSTHROUGH_MODEL = "passthrough";
+/**
+ * Sides a cut-fill trim may never take, by rule. A pass-through or whole-photo matte keeps the photo's own frame, so
+ * nothing in it tells a product edge from a background edge and no side is trimmed (`noTrim`; the product is fitted
+ * with the band note). On a model photo (`apparel_model`) the top cut side holds the head or the face, so it is never
+ * trimmed (`protectTop`); the overflow comes off the bottom instead, or the product is fitted.
+ */
+export function trimRules(productType: ProductType | null | undefined, matte: Pick<Matte, "model">): { noTrim: boolean; protectTop: boolean } {
+  return { noTrim: matte.model === PASSTHROUGH_MODEL, protectTop: productType === "apparel_model" };
+}
 export interface ShotGeometryOptions {
   /** The source pixels (RGB, 3 bytes per pixel): finds the pad band around the real photo. Without them only the thin border counts. */
   rgb?: Buffer | undefined;
@@ -95,6 +110,10 @@ export interface ShotGeometryOptions {
    * a deep band of the photo's own background colour counts as a pad.
    */
   judgedCut?: boolean | undefined;
+  /** No cut side may be trimmed (trimRules: a pass-through or whole-photo matte). */
+  noTrim?: boolean | undefined;
+  /** The top cut side may not be trimmed (trimRules: a model photo's head). */
+  protectTop?: boolean | undefined;
 }
 
 /** Pixel index of position `i` along the frame line at depth `d` from `side`. */
@@ -225,7 +244,114 @@ export function shotGeometry(alpha: Buffer, width: number, height: number, opts:
   const framed = { ...cut };
   for (const side of deep) if (side === "top" || side === "bottom" ? framed.left || framed.right : framed.top || framed.bottom) detect(side, true);
   const box = { x: lines.left, y: lines.top, w: width - lines.left - lines.right, h: height - lines.top - lines.bottom };
-  return { box: box.w > 0 && box.h > 0 ? box : tight, source: { w: width, h: height }, cut };
+  const shot: ShotGeometry = { box: box.w > 0 && box.h > 0 ? box : tight, source: { w: width, h: height }, cut };
+  // Only a product cut on both ends of an axis is ever trimmed (cutFillScale): measure where a trim must stop.
+  if ((cut.top && cut.bottom) || (cut.left && cut.right)) {
+    const ruled: Side[] = opts.noTrim ? SIDES.filter(side => cut[side]) : opts.protectTop && cut.top ? ["top"] : [];
+    if (opts.rgb || ruled.length) {
+      const room = opts.rgb ? trimRoom(opts.rgb, alpha, width, shot.box) : { top: shot.box.h, bottom: shot.box.h, left: shot.box.w, right: shot.box.w };
+      for (const side of ruled) room[side] = 0;
+      shot.trimRoom = room;
+      if (ruled.length) shot.trimProtected = ruled;
+    }
+  }
+  return shot;
+}
+
+/** Where a cut-fill trim must stop (trimRoom): the product box is measured on a grid this many cells on its long side ... */
+export const TRIM_DETAIL_GRID_PX = 512;
+/** ... a strong edge is a luminance step (0-255) of at least this much across one cell (Sobel / 4), inside the opaque matte ... */
+export const TRIM_DETAIL_EDGE = 40;
+/** ... of a feature's edges at least TRIM_DETAIL_MIN_SHARP_SHARE are sharp, a step of at least this much (print, metal and stitched marks; fabric folds are soft) ... */
+export const TRIM_DETAIL_SHARP_EDGE = 60;
+export const TRIM_DETAIL_MIN_SHARP_SHARE = 0.25;
+/** ... strong edges this many cells apart join into one feature (the letters of a word, the outline of a logo) ... */
+export const TRIM_DETAIL_JOIN = 2;
+/** ... a feature is compact: at most this share of the product box on each axis (a seam or a zip across the side is not) ... */
+export const TRIM_DETAIL_MAX_EXTENT = 0.4;
+/** ... at least this share of the box's short side on both axes (smaller is a speck of texture) ... */
+export const TRIM_DETAIL_MIN_EXTENT = 0.04;
+/** ... no more than this many times longer than wide (a stripe or a seam is longer) ... */
+export const TRIM_DETAIL_MAX_ASPECT = 4;
+/** ... and dense: strong edges in at least this share of its bounding box (fabric grain and folds are not). */
+export const TRIM_DETAIL_MIN_DENSITY = 0.15;
+/** The trim stops this share of the box side short of the feature. */
+export const TRIM_DETAIL_GAP = 0.02;
+
+export interface DetailFeature { x: number; y: number; w: number; h: number; density: number; sharpShare: number }
+
+/**
+ * Compact high-contrast features of the product (a logo, text, a buckle): clusters of strong luminance edges inside
+ * the opaque matte, at most TRIM_DETAIL_MAX_EXTENT of the box on each axis, no longer than TRIM_DETAIL_MAX_ASPECT
+ * times their width, dense (TRIM_DETAIL_MIN_DENSITY) and with a quarter of their edges sharp
+ * (TRIM_DETAIL_SHARP_EDGE). Boxes are in source pixels. Smooth fabric and fine grain have no strong edges, folds and
+ * tone-on-tone prints no sharp ones; a stripe, a seam or a zip that runs across the box is not compact.
+ */
+export function detailFeatures(rgb: Buffer, alpha: Buffer, width: number, box: BBox): DetailFeature[] {
+  const cell = Math.max(1, Math.ceil(Math.max(box.w, box.h) / TRIM_DETAIL_GRID_PX)), gw = Math.floor(box.w / cell), gh = Math.floor(box.h / cell);
+  if (gw < 3 || gh < 3) return [];
+  const lum = new Float32Array(gw * gh), solid = new Uint8Array(gw * gh);
+  // Large photos are sampled at most 4 x 4 pixels per cell.
+  const step = Math.max(1, Math.floor(cell / 4));
+  for (let gy = 0; gy < gh; gy++) for (let gx = 0; gx < gw; gx++) {
+    let sum = 0, n = 0, opaque = 1;
+    for (let y = box.y + gy * cell; y < box.y + (gy + 1) * cell; y += step) for (let x = box.x + gx * cell; x < box.x + (gx + 1) * cell; x += step) {
+      const i = y * width + x;
+      if (alpha[i]! < CUT_EDGE_OPAQUE_ALPHA) opaque = 0;
+      sum += 0.299 * rgb[i * 3]! + 0.587 * rgb[i * 3 + 1]! + 0.114 * rgb[i * 3 + 2]!; n++;
+    }
+    lum[gy * gw + gx] = sum / n; solid[gy * gw + gx] = opaque;
+  }
+  // Strong edges, only where the whole 3x3 neighbourhood is product (never the outline against the background).
+  const strong = new Uint8Array(gw * gh), mag = new Float32Array(gw * gh), L = (x: number, y: number) => lum[y * gw + x]!;
+  for (let y = 1; y < gh - 1; y++) for (let x = 1; x < gw - 1; x++) {
+    let inside = 1;
+    for (let dy = -1; dy <= 1 && inside; dy++) for (let dx = -1; dx <= 1; dx++) if (!solid[(y + dy) * gw + x + dx]) { inside = 0; break; }
+    if (!inside) continue;
+    const sx = L(x + 1, y - 1) + 2 * L(x + 1, y) + L(x + 1, y + 1) - L(x - 1, y - 1) - 2 * L(x - 1, y) - L(x - 1, y + 1);
+    const sy = L(x - 1, y + 1) + 2 * L(x, y + 1) + L(x + 1, y + 1) - L(x - 1, y - 1) - 2 * L(x, y - 1) - L(x + 1, y - 1);
+    mag[y * gw + x] = Math.max(Math.abs(sx), Math.abs(sy)) / 4;
+    if (mag[y * gw + x]! >= TRIM_DETAIL_EDGE) strong[y * gw + x] = 1;
+  }
+  // Clusters: strong edges joined over TRIM_DETAIL_JOIN cells (8-connected flood fill on the joined map).
+  const seen = new Uint8Array(gw * gh), features: DetailFeature[] = [], stack: number[] = [];
+  const minW = TRIM_DETAIL_MIN_EXTENT * Math.min(gw, gh), r = TRIM_DETAIL_JOIN;
+  for (let start = 0; start < strong.length; start++) {
+    if (!strong[start] || seen[start]) continue;
+    let x0 = gw, y0 = gh, x1 = -1, y1 = -1, count = 0, sharp = 0;
+    seen[start] = 1; stack.push(start);
+    while (stack.length) {
+      const k = stack.pop()!, kx = k % gw, ky = (k - kx) / gw;
+      count++; if (mag[k]! >= TRIM_DETAIL_SHARP_EDGE) sharp++; x0 = Math.min(x0, kx); y0 = Math.min(y0, ky); x1 = Math.max(x1, kx); y1 = Math.max(y1, ky);
+      for (let y = Math.max(0, ky - r); y <= Math.min(gh - 1, ky + r); y++) for (let x = Math.max(0, kx - r); x <= Math.min(gw - 1, kx + r); x++) {
+        const j = y * gw + x;
+        if (strong[j] && !seen[j]) { seen[j] = 1; stack.push(j); }
+      }
+    }
+    const fw = x1 - x0 + 1, fh = y1 - y0 + 1, density = count / (fw * fh), sharpShare = sharp / count;
+    if (fw > TRIM_DETAIL_MAX_EXTENT * gw || fh > TRIM_DETAIL_MAX_EXTENT * gh || fw < minW || fh < minW || Math.max(fw / fh, fh / fw) > TRIM_DETAIL_MAX_ASPECT || density < TRIM_DETAIL_MIN_DENSITY || sharpShare < TRIM_DETAIL_MIN_SHARP_SHARE) continue;
+    features.push({ x: box.x + x0 * cell, y: box.y + y0 * cell, w: fw * cell, h: fh * cell, density: Math.round(density * 1000) / 1000, sharpShare: Math.round(sharpShare * 1000) / 1000 });
+  }
+  return features;
+}
+
+/**
+ * Per side, how deep (source px from the product box edge) a cut-fill trim may go: it stops TRIM_DETAIL_GAP of the
+ * box side short of the nearest compact feature (detailFeatures) that is whole in the source, so a logo, text or a
+ * buckle is never cut through. A feature within TRIM_DETAIL_GAP of a box edge is already cut by the frame and does
+ * not count. The full box side where nothing stands in the way.
+ */
+export function trimRoom(rgb: Buffer, alpha: Buffer, width: number, box: BBox): TrimRoom {
+  const room: TrimRoom = { top: box.h, bottom: box.h, left: box.w, right: box.w };
+  const gapY = Math.ceil(TRIM_DETAIL_GAP * box.h), gapX = Math.ceil(TRIM_DETAIL_GAP * box.w);
+  for (const f of detailFeatures(rgb, alpha, width, box)) {
+    if (f.y - box.y <= gapY || box.y + box.h - f.y - f.h <= gapY || f.x - box.x <= gapX || box.x + box.w - f.x - f.w <= gapX) continue;
+    room.top = Math.min(room.top, Math.max(0, f.y - box.y - gapY));
+    room.bottom = Math.min(room.bottom, Math.max(0, box.y + box.h - f.y - f.h - gapY));
+    room.left = Math.min(room.left, Math.max(0, f.x - box.x - gapX));
+    room.right = Math.min(room.right, Math.max(0, box.x + box.w - f.x - f.w - gapX));
+  }
+  return room;
 }
 
 /**
@@ -234,32 +360,56 @@ export function shotGeometry(alpha: Buffer, width: number, height: number, opts:
  * on the 2:3 Trendyol canvas, a 2:3 photo on a square canvas). Beyond it the product is fitted, never trimmed.
  */
 export const CUT_FILL_MAX_TRIM = 1 / 3;
+/**
+ * Slack on CUT_FILL_MAX_TRIM, as a share of the product box: the matte's soft edge makes a square full-bleed photo's
+ * box a pixel or two wider than tall (797 x 796), which needs 33.4% off the sides on the 2:3 Trendyol canvas.
+ */
+export const CUT_FILL_TRIM_SLACK = 0.01;
+
+/** The source px of `length` that do not fit in `room` at `scale` (0 when it fits). */
+const overflowOf = (length: number, scale: number, room: number) => length - Math.max(1, Math.min(length, Math.round(room / scale)));
+
+export interface CutFill { scale: number; /** Cut sides whose trim would cut through a logo, text or a buckle (trimRoom), so the product is fitted instead. */ blocked: Side[] }
 
 /**
  * The scale of a product in the safe box: fit, never crop (`min` of the two axes), except where the product is
  * cut in the source on both ends of one axis and fitting would leave a band beside those cut edges. It then
  * fills that axis, and the overflow on the other axis comes off that axis's cut sides only (never an uncut
- * outline), by at most CUT_FILL_MAX_TRIM. A full-bleed photo (cut on all four sides) fills the safe box.
+ * outline), by at most CUT_FILL_MAX_TRIM (plus CUT_FILL_TRIM_SLACK), and on each cut side no deeper than `room`
+ * allows (trimRoom: never through a logo, text or a buckle). A full-bleed photo (cut on all four sides) fills the
+ * safe box. `blocked` names the cut sides whose room alone stopped a fill.
  */
-export function cutFillScale(safe: Size, box: Size, cut: CutEdges): number {
+export function cutFill(safe: Size, box: Size, cut: CutEdges, room?: TrimRoom): CutFill {
   const sw = safe.w / box.w, sh = safe.h / box.h, contain = Math.min(sw, sh);
-  const fills = (fill: number, other: number, otherBox: number) => 1 - other / (otherBox * fill) <= CUT_FILL_MAX_TRIM + 1e-9;
-  if (cut.top && cut.bottom && (cut.left || cut.right) && sh > sw && fills(sh, safe.w, box.w)) return sh;
-  if (cut.left && cut.right && (cut.top || cut.bottom) && sw > sh && fills(sw, safe.h, box.h)) return sw;
-  return contain;
+  const attempt = (fill: number, other: number, otherBox: number, low: Side, high: Side): CutFill | null => {
+    const extra = overflowOf(otherBox, fill, other);
+    if (extra > otherBox * (CUT_FILL_MAX_TRIM + CUT_FILL_TRIM_SLACK)) return null;
+    const sides = [low, high].filter(side => cut[side]), available = sides.reduce((t, side) => t + (room ? room[side] : otherBox), 0);
+    return extra <= available ? { scale: fill, blocked: [] } : { scale: contain, blocked: sides.filter(side => room && room[side] < extra) };
+  };
+  const result = (cut.top && cut.bottom && (cut.left || cut.right) && sh > sw ? attempt(sh, safe.w, box.w, "left", "right") : null)
+    ?? (cut.left && cut.right && (cut.top || cut.bottom) && sw > sh ? attempt(sw, safe.h, box.h, "top", "bottom") : null);
+  return result ?? { scale: contain, blocked: [] };
 }
+export const cutFillScale = (safe: Size, box: Size, cut: CutEdges, room?: TrimRoom): number => cutFill(safe, box, cut, room).scale;
 
 /**
- * The part of `box` drawn at `scale` into `safe`: where the scaled product overflows an axis (cutFillScale), the
- * overflow comes off that axis's cut sides (split evenly when both are cut). Otherwise `box` itself.
+ * The part of `box` drawn at `scale` into `safe`: where the scaled product overflows an axis (cutFill), the
+ * overflow comes off that axis's cut sides: split evenly when both are cut, except that neither side goes deeper
+ * than its `room` (trimRoom), the rest coming off the other side. Otherwise `box` itself.
  */
-export function cutFillCrop(box: BBox, scale: number, safe: Size, cut: CutEdges): BBox {
-  const axis = (start: number, length: number, room: number, low: boolean, high: boolean): [number, number] => {
-    if (Math.round(length * scale) <= room || (!low && !high)) return [start, length];
-    const keep = Math.max(1, Math.min(length, Math.round(room / scale))), extra = length - keep;
-    return [start + (low && high ? Math.floor(extra / 2) : low ? extra : 0), keep];
+export function cutFillCrop(box: BBox, scale: number, safe: Size, cut: CutEdges, room?: TrimRoom): BBox {
+  const axis = (start: number, length: number, fit: number, low: Side, high: Side): [number, number] => {
+    if (Math.round(length * scale) <= fit || (!cut[low] && !cut[high])) return [start, length];
+    const extra = overflowOf(length, scale, fit);
+    let off = cut[low] && cut[high] ? Math.floor(extra / 2) : cut[low] ? extra : 0;
+    if (cut[low] && cut[high] && room) {
+      if (off > room[low]) off = room[low];
+      if (extra - off > room[high]) off = Math.min(extra, extra - room[high]);
+    }
+    return [start + off, length - extra];
   };
-  const [x, w] = axis(box.x, box.w, safe.w, cut.left, cut.right), [y, h] = axis(box.y, box.h, safe.h, cut.top, cut.bottom);
+  const [x, w] = axis(box.x, box.w, safe.w, "left", "right"), [y, h] = axis(box.y, box.h, safe.h, "top", "bottom");
   return { x, y, w, h };
 }
 
@@ -291,12 +441,13 @@ function proportionalCanvas(spec: ChannelSpec, fraction: number, roundUp: boolea
 /**
  * `opts.canvas` (planProduct) raises an adaptive canvas to the product's one canvas on this channel;
  * `opts.cut` places each cut side flush with the canvas edge (margin 0 there, other margins kept), and a
- * product cut on both ends of an axis fills that axis (cutFillScale, cutFillCrop);
+ * product cut on both ends of an axis fills that axis (cutFill, cutFillCrop), trimming no cut side deeper than
+ * `opts.trimRoom` allows (shotGeometry's trimRoom);
  * `opts.fitScale` (below 1) shrinks the product by that factor inside the same canvas.
  */
-export function planCanvas(spec: ChannelSpec, box: BBox, source: Size, opts: { uniformScale?: number | undefined; canvas?: Size | undefined; cut?: CutEdges | undefined; fitScale?: number | undefined }): CanvasPlan {
-  const cut = opts.cut ?? NO_CUT, wide = box.w > box.h;
-  const fit = (size: Size) => cutFillScale(safeBoxFor(spec, size, wide, cut), box, cut);
+export function planCanvas(spec: ChannelSpec, box: BBox, source: Size, opts: { uniformScale?: number | undefined; canvas?: Size | undefined; cut?: CutEdges | undefined; fitScale?: number | undefined; trimRoom?: TrimRoom | undefined }): CanvasPlan {
+  const cut = opts.cut ?? NO_CUT, wide = box.w > box.h, room = opts.trimRoom;
+  const fit = (size: Size) => cutFillScale(safeBoxFor(spec, size, wide, cut), box, cut, room);
   const min = effectiveMinimum(spec), target = spec.targetCanvas;
   const lowResolution = fit(min) > MAX_UPSCALE;
   let size = target;
@@ -315,7 +466,7 @@ export function planCanvas(spec: ChannelSpec, box: BBox, source: Size, opts: { u
   // A cut side is anchored to its canvas edge; with both opposite sides cut, the bottom wins vertically and the product stays centred horizontally.
   const placedX = safeBox.x + (cut.left && !cut.right ? 0 : cut.right && !cut.left ? safeBox.w - w : Math.round((safeBox.w - w) / 2));
   const placedY = safeBox.y + (cut.bottom || (!cut.top && spec.anchor === "bottom-centre") ? safeBox.h - h : cut.top ? 0 : Math.round((safeBox.h - h) / 2));
-  return { ...size, safeBox, lowResolution, scale, placedX, placedY, detailShot, sourceBox: box, productBox: { x: placedX, y: placedY, w, h }, cut: { ...cut }, sourceCrop: cutFillCrop(box, scale, safeBox, cut) };
+  return { ...size, safeBox, lowResolution, scale, placedX, placedY, detailShot, sourceBox: box, productBox: { x: placedX, y: placedY, w, h }, cut: { ...cut }, sourceCrop: cutFillCrop(box, scale, safeBox, cut, room), trimBlocked: cutFill(safeBox, box, cut, room).blocked };
 }
 
 /**
@@ -323,8 +474,8 @@ export function planCanvas(spec: ChannelSpec, box: BBox, source: Size, opts: { u
  * `uniformScaleDefault`) and `canvas`, the largest canvas the formula gives any of the product's
  * shots (never above the target), so every angle of a product shares one size on a channel.
  */
-export function planProduct(spec: ChannelSpec, shots: { box: BBox; source: Size; cut?: CutEdges }[]): { uniformScale: number; canvas: Size } {
-  const plans = shots.map(s => planCanvas(spec, s.box, s.source, { cut: s.cut }));
+export function planProduct(spec: ChannelSpec, shots: { box: BBox; source: Size; cut?: CutEdges; trimRoom?: TrimRoom }[]): { uniformScale: number; canvas: Size } {
+  const plans = shots.map(s => planCanvas(spec, s.box, s.source, { cut: s.cut, trimRoom: s.trimRoom }));
   const fits = plans.filter(p => !p.detailShot).map(p => p.scale);
   const canvas = plans.reduce<Size>((most, p) => (p.w > most.w ? { w: p.w, h: p.h } : most), { w: 0, h: 0 });
   return { uniformScale: fits.length ? Math.min(...fits) : 1, canvas: canvas.w ? canvas : spec.targetCanvas };
@@ -333,8 +484,8 @@ export function planProduct(spec: ChannelSpec, shots: { box: BBox; source: Size;
 export async function renderSource(input: RenderInput): Promise<RenderOutput> {
   const { prepared: p, matte, shotNumber } = input, spec = channel(input.channel);
   if (matte.width !== p.width || matte.height !== p.height) throw new Error("Matte and source dimensions must match");
-  const geometry = shotGeometry(matte.alpha, p.width, p.height, { rgb: p.rgb, judgedCut: input.judgedCut }), box = geometry?.box ?? null, cut = geometry?.cut ?? NO_CUT;
-  const plan = planCanvas(spec, box ?? { x: 0, y: 0, w: p.width, h: p.height }, { w: p.width, h: p.height }, { uniformScale: input.uniformScale, canvas: input.canvas, cut, fitScale: input.fitScale });
+  const geometry = shotGeometry(matte.alpha, p.width, p.height, { rgb: p.rgb, judgedCut: input.judgedCut, ...trimRules(input.productType, matte) }), box = geometry?.box ?? null, cut = geometry?.cut ?? NO_CUT;
+  const plan = planCanvas(spec, box ?? { x: 0, y: 0, w: p.width, h: p.height }, { w: p.width, h: p.height }, { uniformScale: input.uniformScale, canvas: input.canvas, cut, fitScale: input.fitScale, trimRoom: geometry?.trimRoom });
   const result: RenderOutput = { jpeg: null, status: "failed", plan, quality: JPEG_QUALITY_START, bytes: 0, flags: [...p.flags], notes: [], attention: null, compliance: { ok: false, failures: [] } };
   if (!box) { result.notes.push("No product was found in this photo."); return result; }
   if (matte.source === "floodfill") result.flags.push("fallback_matte");
@@ -349,7 +500,11 @@ export async function renderSource(input: RenderInput): Promise<RenderOutput> {
   const color = backgroundFor(spec.id, shotNumber), product = plan.productBox!;
   // The sheet says a cut edge sits flush with the edge of the image; name every cut side where it does not.
   const floating = SIDES.filter(side => cut[side] && (side === "top" ? product.y : side === "bottom" ? plan.h - product.y - product.h : side === "left" ? product.x : plan.w - product.x - product.w) > 1);
-  if (floating.length) result.notes.push(`The original photo is cut at the ${floating.join(" and ")}, but on ${spec.label} the product cannot reach that edge of the image without trimming more of it, so a band shows there.`);
+  // Only a logo, text or a buckle blocks a trim in the note's words; a side protected by rule (trimRules) gets the plain note.
+  const blocked = (plan.trimBlocked ?? []).filter(side => !geometry?.trimProtected?.includes(side));
+  if (floating.length) result.notes.push(blocked.length
+    ? `${CUT_BAND_NOTE_START}${floating.join(" and ")}, but on ${spec.label} filling ${floating.length > 1 ? "those edges" : "that edge"} would cut through a logo or detail near the ${blocked.join(" and ")} edge, so a band shows there to keep it whole.`
+    : `${CUT_BAND_NOTE_START}${floating.join(" and ")}, but on ${spec.label} the product cannot reach that edge of the image without trimming more of it, so a band shows there.`);
   const rgbColor = hexColor(color);
   const passthrough = p.sourceMime === "image/jpeg" && !p.alphaSource && !anyCut(cut) && (input.fitScale ?? 1) >= 1 && p.width === plan.w && p.height === plan.h && box.x >= plan.safeBox.x && box.y >= plan.safeBox.y && box.x + box.w <= plan.safeBox.x + plan.safeBox.w && box.y + box.h <= plan.safeBox.y + plan.safeBox.h && borderPixels(p.width, p.height).every(i => rgbColor.every((v, c) => Math.abs(p.rgb[i * 3 + c]! - v) <= BG_TOLERANCE));
   let image: Buffer;

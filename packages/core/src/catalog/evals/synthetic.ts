@@ -13,6 +13,8 @@ export interface SyntheticOptions {
   box?: { x: number; y: number; w: number; h: number };
   /** Source background colour. */
   bg?: [number, number, number];
+  /** Darken the source background by this many levels from the top row to the bottom row (a graded studio background). */
+  gradient?: number;
   /** Product colour. */
   color?: [number, number, number];
   /** A 3 px wide vertical strap above the body (thin structure). */
@@ -25,6 +27,14 @@ export interface SyntheticOptions {
   pad?: number;
   /** Narrow the bottom quarter of the body by 12% each side, like a sole under an upper, so a contact shadow stays under the product. */
   taper?: boolean;
+  /** A light outlined mark with a diagonal stroke on the product (a logo), in source pixels. */
+  logo?: { x: number; y: number; w: number; h: number };
+  /** A photographic contact shadow in the source: grey darkening under the product fading out over 40 rows (kept by the render). */
+  sourceShadow?: boolean;
+  /** A floor reflection in the source: 5 rows of the product colour faded towards the background under the product, outside the matte. */
+  reflection?: boolean;
+  /** A saturated lime sliver (8 rows) under the product that the matte drops: a lost sole part. */
+  sliver?: boolean;
 }
 
 /** Paints the source and the matte; the matte is exact (255 inside, 0 outside). */
@@ -38,10 +48,19 @@ export function syntheticSource(opts: SyntheticOptions = {}): { prepared: Prepar
   if (opts.cutRight) box.w = width - pad - box.x;
   if (opts.cutLeft) { box.w += box.x - pad; box.x = pad; }
   const rgb = Buffer.alloc(width * height * 3), alpha = Buffer.alloc(width * height);
-  for (let i = 0; i < width * height; i++) { rgb[i * 3] = bg[0]; rgb[i * 3 + 1] = bg[1]; rgb[i * 3 + 2] = bg[2]; }
+  for (let i = 0; i < width * height; i++) { const drop = opts.gradient ? Math.round(opts.gradient * Math.floor(i / width) / (height - 1)) : 0; rgb[i * 3] = bg[0] - drop; rgb[i * 3 + 1] = bg[1] - drop; rgb[i * 3 + 2] = bg[2] - drop; }
   const paint = (x: number, y: number, c: [number, number, number]) => { const i = y * width + x; rgb[i * 3] = c[0]; rgb[i * 3 + 1] = c[1]; rgb[i * 3 + 2] = c[2]; alpha[i] = 255; };
   const inset = opts.taper ? Math.round(box.w * 0.12) : 0, taperFrom = box.y + Math.round(box.h * 0.75);
   for (let y = box.y; y < box.y + box.h; y++) for (let x = box.x + (y >= taperFrom ? inset : 0); x < box.x + box.w - (y >= taperFrom ? inset : 0); x++) paint(x, y, [color[0] + ((x + y) % 7) * 3, color[1] + (x % 5) * 2, color[2] + (y % 3) * 4]);
+  if (opts.logo) {
+    const { x: lx, y: ly, w: lw, h: lh } = opts.logo;
+    for (let y = ly; y < ly + lh; y++) for (let x = lx; x < lx + lw; x++) if (x < lx + 4 || x >= lx + lw - 4 || y < ly + 4 || y >= ly + lh - 4 || Math.abs((x - lx) * lh - (y - ly) * lw) < 3 * lh) paint(x, y, [240, 240, 240]);
+  }
+  // Painted on the source only (never in the matte): what the cut-out step sees under the product.
+  const under = (rows: number, colorAt: (row: number) => [number, number, number]) => { for (let row = 0; row < rows; row++) { const y = box.y + box.h + row; if (y >= height) break; for (let x = box.x + inset; x < box.x + box.w - inset; x++) { const i = (y * width + x) * 3, c = colorAt(row); rgb[i] = c[0]; rgb[i + 1] = c[1]; rgb[i + 2] = c[2]; } } };
+  if (opts.sourceShadow) under(40, row => { const v = Math.round(bg[0] * (1 - 0.35 * (1 - row / 40) ** 2)); return [v, v, v]; });
+  if (opts.reflection) under(5, () => [193, 109, 122]);
+  if (opts.sliver) under(8, () => [180, 255, 60]);
   if (opts.strap ?? !opts.cutTop) { const sx = box.x + Math.floor(box.w / 2); for (let y = box.y - 60; y < box.y; y++) for (let x = sx - 1; x <= sx + 1; x++) paint(x, y, [40, 40, 60]); box.y -= 60; box.h += 60; }
   const prepared: Prepared = { width, height, rgb, alphaSource: null, background: analyseBackground(rgb, width, height), flags: [], sourceMime: "image/jpeg" };
   const matte: Matte = { alpha, width, height, model: "synthetic", ms: 0, source: "model", target: "cpu", sentLongSide: null };
@@ -55,7 +74,7 @@ export async function syntheticSubject(channel: ChannelId, n: number, productTyp
   return {
     identifier, n, channel, productType, source: { w: prepared.width, h: prepared.height, rgb: prepared.rgb }, sourceBackground: prepared.background, alpha: matte.alpha, jpeg: out.jpeg,
     placement: { w: out.plan.w, h: out.plan.h, scale: out.plan.scale, placedX: out.plan.placedX, placedY: out.plan.placedY },
-    flags: out.flags as OutputFlag[], status: "staged", expect: { attention: false, flags: [], detector: "code" },
+    flags: out.flags as OutputFlag[], status: "staged", reason: out.notes.join("; ") || null, expect: { attention: false, flags: [], detector: "code" },
   };
 }
 

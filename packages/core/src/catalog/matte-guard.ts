@@ -10,10 +10,10 @@
 // leather grain, knit and lace are not). Product estimate: the pixels that are clearly not the
 // background colour. Frame-filling: the border band holds (almost) no smooth background, so the
 // product runs off every side of the photo and the whole frame is product.
-import { components, delta, dilate, erode, type Mask } from "./evals/image";
-import { estimateForeground } from "./evals/cutout";
+import { components, delta, dilate, erode, thresholdMask, type Mask } from "./evals/image";
+import { estimateForeground, SHADOW_ZONE_CHROMA_MAX } from "./evals/cutout";
 import { borderBand } from "./shadow";
-import type { Matte, Prepared } from "./render";
+import { PASSTHROUGH_MODEL, type Matte, type Prepared } from "./render";
 import type { OutputFlag } from "./types";
 import type { AutoAction } from "./auto-resolve";
 
@@ -39,6 +39,17 @@ export const GUARD_CELL_MIN_PIXELS = 400;
  */
 export const GUARD_CELL_LOSS_MAX = 0.2;
 export const GUARD_OVERALL_LOSS_MAX = 0.04;
+/**
+ * A strongly coloured product pixel: its chroma (max minus min channel) is at least the most a cast
+ * shadow may carry in the estimate (spec 10 SHADOW_ZONE_CHROMA_MAX), so it is neither the white or grey
+ * backdrop nor the source's own shadow. When the matte drops it more than GUARD_COLOURED_KEPT_GAP_PX
+ * away from what it kept, it counts as lost even inside the GUARD_INTERIOR_PX edge band: a thin
+ * coloured part (a midsole sliver along a dark outsole, a piping) is all edge band, so the interior
+ * rule alone never sees it go. Measured on 129 real photos (258 first mattes): the most a good matte
+ * loses this way is 10.7% of a cell; the Anta sole view bd-112625546-12 shot 5 loses 41%.
+ */
+export const GUARD_COLOURED_CHROMA_MIN = SHADOW_ZONE_CHROMA_MAX;
+export const GUARD_COLOURED_KEPT_GAP_PX = 1;
 /** A hand dropped by the matte (skin touching the frame edge, next to the product) larger than this share of the kept product rejects the matte. */
 export const HAND_NOTCH_MAX_SHARE = 0.02;
 /** Skin must differ from the source background by this much (a beige wall is not a hand). */
@@ -47,6 +58,25 @@ export const SKIN_MIN_BACKGROUND_DELTA = 30;
 export const HAND_MIN_FRAME_SHARE = 0.002;
 /** Pass-through keeps every component at least this share of the largest one (a pair, not a speck). */
 export const PASSTHROUGH_KEEP_SHARE = 0.25;
+/**
+ * A kept background chunk: a connected region the matte keeps (alpha over 128) whose source pixels are the plain
+ * backdrop colour itself (within KEPT_BACKGROUND_DELTA per channel of the border colour, so a white or pale product
+ * part with any shading of its own does not count), that touches what the matte dropped (within
+ * KEPT_BACKGROUND_TOUCH_PX: it hangs off the silhouette, it is not a label inside it) and lies wholly in the lower half
+ * of the kept product (below a base, where a model mistakes the backdrop for a plinth or a reflection; a halo ring
+ * around the whole silhouette is the judge's `halo`, not this). It rejects the
+ * matte when it covers more than KEPT_BACKGROUND_FRAME_SHARE of the frame and more than KEPT_BACKGROUND_KEPT_SHARE of
+ * the kept product. Measured on 593 deployed mattes of the gate 3e, Anta and French Connection golden photos: the
+ * French Connection candle Z15276411CE85C2E728DEZ shot 4 (padded birefnet-general) keeps 2.0% of the frame and 4.2%
+ * of the product; next come a dark fabric close-up (bd-152637502S-3 shot 5: 1.2% of the frame, 1.2% of the product)
+ * and two size charts (left out before matting); every other matte keeps under 0.1% of the frame.
+ */
+export const KEPT_BACKGROUND_DELTA = 6;
+export const KEPT_BACKGROUND_TOUCH_PX = 4;
+export const KEPT_BACKGROUND_FRAME_SHARE = 0.003;
+export const KEPT_BACKGROUND_KEPT_SHARE = 0.02;
+/** A kept chunk counts only when its top row is at least this far down the kept product's height (0 top, 1 bottom). */
+export const KEPT_BACKGROUND_MIN_DEPTH = 0.5;
 
 export interface BorderBackground {
   /** Median colour of the smooth border pixels (all border pixels when none is smooth). */
@@ -190,27 +220,50 @@ const isSkin = (r: number, g: number, b: number) => r > 95 && g > 40 && b > 20 &
  * source to cut along: a jagged partial. The whole region is then product and must be kept.
  * Measured on 189 photos: without the skin condition a white product on a white backdrop, or a
  * beige cardigan on a light wall, joins the backdrop in one smooth region and would be rejected.
+ *
+ * The same holds for a plain garment panel (a smooth fabric beside a trim, running off the frame
+ * edge): a region the matte keeps at least SURFACE_KEPT_MIN of, whose kept part is not the source
+ * background colour and whose dropped part has the kept part's colour (mean within
+ * SURFACE_COLOUR_DELTA per channel), is one uniform surface too. A backdrop next to a product of
+ * another colour is cut along that colour edge, so its kept and dropped parts differ; a backdrop of
+ * the border colour never qualifies.
  */
 export const SURFACE_KEPT_MIN = 0.25;
 /** Share of the kept part, and of the dropped part, that must be skin. */
 export const SURFACE_SKIN_SHARE = 0.6;
 /** Only regions at least this share of the photo count (smaller ones are edge noise). */
 export const SURFACE_MIN_FRAME_SHARE = 0.01;
+/** A non-skin surface: the dropped part's mean colour is within this (per channel) of the kept part's. */
+export const SURFACE_COLOUR_DELTA = 24;
 
-/** The skin regions among the background candidates (inside any canvas strips) that this matte cuts through (see SURFACE_KEPT_MIN). */
+/** The skin regions and plain garment panels among the background candidates (inside any canvas strips) that this matte cuts through or keeps (see SURFACE_KEPT_MIN). */
 export function keptSurfaces(p: Pick<Prepared, "width" | "height" | "rgb">, alpha: Buffer, region: BackgroundRegion): Mask {
   const { width: w, height: h, rgb } = p, { x0, y0, x1, y1 } = region.rect, inner = new Uint8Array(w * h), out = new Uint8Array(w * h);
   if (region.frameFilling) return out;
   for (let y = y0; y <= y1; y++) for (let x = x0; x <= x1; x++) { const i = y * w + x; if (region.background[i]) inner[i] = 1; }
   const border = borderBackground(p).color, { labels, sizes } = components(inner, w, h), n = sizes.length;
   const kept = new Uint32Array(n), keptSkin = new Uint32Array(n), dropped = new Uint32Array(n), droppedSkin = new Uint32Array(n);
+  const keptSum = new Float64Array(n * 3), droppedSum = new Float64Array(n * 3);
   for (let i = 0; i < inner.length; i++) {
     const l = labels[i]!; if (!l) continue;
     const skin = delta(rgb, i, border) > SKIN_MIN_BACKGROUND_DELTA && isSkin(rgb[i * 3]!, rgb[i * 3 + 1]!, rgb[i * 3 + 2]!) ? 1 : 0;
-    if (alpha[i]! > 128) { kept[l]!++; keptSkin[l]! += skin; } else if (alpha[i]! <= GUARD_ALPHA_EDGE) { dropped[l]!++; droppedSkin[l]! += skin; }
+    if (alpha[i]! > 128) { kept[l]!++; keptSkin[l]! += skin; for (let c = 0; c < 3; c++) keptSum[l * 3 + c]! += rgb[i * 3 + c]!; }
+    else if (alpha[i]! <= GUARD_ALPHA_EDGE) { dropped[l]!++; droppedSkin[l]! += skin; for (let c = 0; c < 3; c++) droppedSum[l * 3 + c]! += rgb[i * 3 + c]!; }
   }
+  // A plain panel: the kept part is not the background colour and the dropped part (if any) has its colour.
+  const panel = (l: number) => {
+    const mean = (sum: Float64Array, count: number) => [0, 1, 2].map(c => sum[l * 3 + c]! / count);
+    const k = mean(keptSum, kept[l]!), far = Math.max(...k.map((v, c) => Math.abs(v - border[c]!))) > SKIN_MIN_BACKGROUND_DELTA;
+    if (!far || !dropped[l]) return far;
+    const d = mean(droppedSum, dropped[l]!);
+    return Math.max(...k.map((v, c) => Math.abs(v - d[c]!))) <= SURFACE_COLOUR_DELTA;
+  };
   const min = w * h * SURFACE_MIN_FRAME_SHARE, surface = new Uint8Array(n);
-  for (let l = 1; l < n; l++) surface[l] = sizes[l]! >= min && kept[l]! >= sizes[l]! * SURFACE_KEPT_MIN && keptSkin[l]! >= kept[l]! * SURFACE_SKIN_SHARE && droppedSkin[l]! >= dropped[l]! * SURFACE_SKIN_SHARE ? 1 : 0;
+  for (let l = 1; l < n; l++) {
+    if (sizes[l]! < min || kept[l]! < sizes[l]! * SURFACE_KEPT_MIN) continue;
+    const skin = keptSkin[l]! >= kept[l]! * SURFACE_SKIN_SHARE && droppedSkin[l]! >= dropped[l]! * SURFACE_SKIN_SHARE;
+    surface[l] = skin || panel(l) ? 1 : 0;
+  }
   for (let i = 0; i < inner.length; i++) if (surface[labels[i]!]) out[i] = 1;
   return out;
 }
@@ -248,19 +301,46 @@ export function heldInHand(p: Pick<Prepared, "width" | "height" | "rgb">, alpha:
   return { held, droppedShare: kept ? Math.round(lost / kept * 1e4) / 1e4 : 0 };
 }
 
+/**
+ * The largest kept background chunk (see KEPT_BACKGROUND_DELTA) as a share of the frame and of the kept product.
+ * A frame-filling photo has no backdrop to keep, so it reports 0.
+ */
+export function keptBackground(p: Pick<Prepared, "width" | "height" | "rgb">, alpha: Buffer, region: BackgroundRegion): { frameShare: number; keptShare: number } {
+  const none = { frameShare: 0, keptShare: 0 };
+  if (region.frameFilling) return none;
+  const { width: w, height: h, rgb } = p, color = borderBackground(p).color, chunk = new Uint8Array(w * h), dropped = new Uint8Array(w * h);
+  let kept = 0, y0 = h, y1 = -1;
+  for (let i = 0; i < chunk.length; i++) {
+    if (alpha[i]! <= GUARD_ALPHA_EDGE) { dropped[i] = 1; continue; }
+    if (alpha[i]! <= 128) continue;
+    const y = (i - (i % w)) / w; kept++; if (y < y0) y0 = y; if (y > y1) y1 = y;
+    if (delta(rgb, i, color) <= KEPT_BACKGROUND_DELTA) chunk[i] = 1;
+  }
+  if (!kept) return none;
+  const near = dilate(dropped, w, h, KEPT_BACKGROUND_TOUCH_PX), { labels, sizes } = components(chunk, w, h);
+  const touches = new Uint8Array(sizes.length), top = new Int32Array(sizes.length).fill(h);
+  for (let i = 0; i < chunk.length; i++) { const l = labels[i]!; if (!l) continue; if (near[i]) touches[l] = 1; const y = (i - (i % w)) / w; if (y < top[l]!) top[l] = y; }
+  let largest = 0;
+  for (let l = 1; l < sizes.length; l++) if (touches[l] && (top[l]! - y0) / Math.max(1, y1 - y0) >= KEPT_BACKGROUND_MIN_DEPTH) largest = Math.max(largest, sizes[l]!);
+  return { frameShare: largest / (w * h), keptShare: largest / kept };
+}
+
 export interface MatteIntegrity {
   ok: boolean;
   /** Share of estimated product pixels the matte drops, worst grid cell and overall. */
   worstCellLoss: number; overallLoss: number;
   /** The dropped part of a holding hand, as a share of the kept product (see heldInHand). */
   handShare: number;
+  /** The largest kept background chunk, as a share of the frame (see keptBackground). */
+  keptBackground: number;
   frameFilling: boolean; borderShare: number; estimatePixels: number;
   /** Short technical note for the auto_actions record and the logs; never shown to operators. */
   detail: string;
 }
 
 /**
- * Compares a matte with the product estimate. Rejects a matte that drops more than
+ * Compares a matte with the product estimate (its interior, plus any strongly coloured part the matte
+ * dropped, see GUARD_COLOURED_CHROMA_MIN). Rejects a matte that drops more than
  * GUARD_CELL_LOSS_MAX of any grid cell or GUARD_OVERALL_LOSS_MAX of the whole estimate, or a dropped
  * hand larger than HAND_NOTCH_MAX_SHARE (`handRule`, on unless the product is apparel: a model's own
  * skin is not a hand holding the product). A transparent source's own alpha is always accepted.
@@ -268,16 +348,23 @@ export interface MatteIntegrity {
 export function checkMatteIntegrity(p: Pick<Prepared, "width" | "height" | "rgb">, matte: Pick<Matte, "alpha" | "source">, opts: { handRule?: boolean; region?: BackgroundRegion } = {}): MatteIntegrity {
   const { width: w, height: h } = p, alpha = matte.alpha, region = opts.region ?? backgroundRegion(p);
   const base = { frameFilling: region.frameFilling, borderShare: Math.round(region.seedShare * 1000) / 1000 };
-  if (matte.source === "alpha_source") return { ok: true, worstCellLoss: 0, overallLoss: 0, handShare: 0, estimatePixels: 0, ...base, detail: "transparent source" };
+  if (matte.source === "alpha_source") return { ok: true, worstCellLoss: 0, overallLoss: 0, handShare: 0, keptBackground: 0, estimatePixels: 0, ...base, detail: "transparent source" };
   // Only the estimate's interior counts: a matte edge a few pixels inside the silhouette (fur, a soft
   // fabric edge) is a quality question for spec 10, not a lost product.
-  // Skin the matte cut through (keptSurfaces) is product: all of it counts.
+  // Skin or a plain garment panel the matte cut through (keptSurfaces) is product: all of it counts.
   const product = productEstimate(p, alpha, region), surfaces = keptSurfaces(p, alpha, region);
   for (let i = 0; i < product.length; i++) if (surfaces[i]) product[i] = 1;
   const estimate = erode(product, w, h, GUARD_INTERIOR_PX);
+  // A strongly coloured part the matte drops counts in full, edge band included (GUARD_COLOURED_CHROMA_MIN).
+  const keptNear = dilate(thresholdMask(alpha, GUARD_ALPHA_EDGE), w, h, GUARD_COLOURED_KEPT_GAP_PX), rgb = p.rgb;
+  for (let i = 0; i < estimate.length; i++) {
+    if (!product[i] || estimate[i] || keptNear[i]) continue;
+    const r = rgb[i * 3]!, g = rgb[i * 3 + 1]!, b = rgb[i * 3 + 2]!;
+    if (Math.max(r, g, b) - Math.min(r, g, b) >= GUARD_COLOURED_CHROMA_MIN) estimate[i] = 1;
+  }
   let x0 = w, y0 = h, x1 = -1, y1 = -1, count = 0;
   for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) if (estimate[y * w + x]) { count++; if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y; }
-  if (!count) return { ok: true, worstCellLoss: 0, overallLoss: 0, handShare: 0, estimatePixels: 0, ...base, detail: "no product estimate" };
+  if (!count) return { ok: true, worstCellLoss: 0, overallLoss: 0, handShare: 0, keptBackground: 0, estimatePixels: 0, ...base, detail: "no product estimate" };
   const cellW = (x1 - x0 + 1) / GUARD_GRID, cellH = (y1 - y0 + 1) / GUARD_GRID;
   const total = new Uint32Array(GUARD_GRID * GUARD_GRID), lost = new Uint32Array(GUARD_GRID * GUARD_GRID);
   let lostAll = 0;
@@ -289,25 +376,64 @@ export function checkMatteIntegrity(p: Pick<Prepared, "width" | "height" | "rgb"
   let worst = 0;
   for (let c = 0; c < total.length; c++) if (total[c]! >= GUARD_CELL_MIN_PIXELS) worst = Math.max(worst, lost[c]! / total[c]!);
   const overall = lostAll / count, hand = opts.handRule === false ? 0 : heldInHand(p, alpha).droppedShare;
-  const ok = worst <= GUARD_CELL_LOSS_MAX && overall <= GUARD_OVERALL_LOSS_MAX && hand <= HAND_NOTCH_MAX_SHARE;
+  const chunk = keptBackground(p, alpha, region), chunkKept = chunk.frameShare > KEPT_BACKGROUND_FRAME_SHARE && chunk.keptShare > KEPT_BACKGROUND_KEPT_SHARE;
+  const dropped = worst > GUARD_CELL_LOSS_MAX || overall > GUARD_OVERALL_LOSS_MAX || hand > HAND_NOTCH_MAX_SHARE, ok = !dropped && !chunkKept;
   const round = (v: number) => Math.round(v * 1e4) / 1e4;
-  return { ok, worstCellLoss: round(worst), overallLoss: round(overall), handShare: round(hand), estimatePixels: count, ...base,
-    detail: `${ok ? "kept" : "dropped product"}: worst cell ${(worst * 100).toFixed(1)}%, overall ${(overall * 100).toFixed(1)}%${hand ? `, hand ${(hand * 100).toFixed(1)}%` : ""}${region.frameFilling ? ", frame-filling" : ""}` };
+  return { ok, worstCellLoss: round(worst), overallLoss: round(overall), handShare: round(hand), keptBackground: round(chunk.frameShare), estimatePixels: count, ...base,
+    detail: `${dropped ? "dropped product" : chunkKept ? "kept background" : "kept"}: worst cell ${(worst * 100).toFixed(1)}%, overall ${(overall * 100).toFixed(1)}%${hand ? `, hand ${(hand * 100).toFixed(1)}%` : ""}${chunk.frameShare ? `, background chunk ${(chunk.frameShare * 100).toFixed(2)}% of the frame` : ""}${region.frameFilling ? ", frame-filling" : ""}` };
 }
 
 /**
- * The ladder's last resort: the whole frame is product. Alpha is 255 everywhere except the source
- * background connected to the frame edge (the uniform border band and white space around the
- * product), which becomes 0, except skin that one of the `tried` model mattes cut through (keptSurfaces). Enclosed background is filled (no holes) and components smaller than
- * PASSTHROUGH_KEEP_SHARE of the largest are dropped (no floating fragments); a frame-filling photo
- * keeps every pixel. The edge is softened inward only (sigma 1), which cannot open a hole and keeps
- * no source background; a frame edge stays fully opaque so the cut-in-source rule places it flush.
+ * What the pass-through recolours to the channel canvas. Two parts, both reached from the frame edge:
+ * (a) the border colour itself, pixel-exact: a flood from the smooth border-colour pixels (and the
+ * canvas strips) into every neighbouring pixel within BACKGROUND_CLUSTER_DELTA of the border colour,
+ * so it runs right up to the product's edge (no 5x5 smoothness window, so no rim of source white is
+ * left on the product) and stops at the first pixel of another colour or shade. A stricter step rule
+ * between neighbours was tried and left JPEG ringing along canvas strips as light lines (gate 3e
+ * photos). (b) A smooth backdrop of another colour (a studio wall, a floor) that covers at least
+ * SURFACE_MIN_FRAME_SHARE of the frame and that no matte kept as skin or a garment panel
+ * (keptSurfaces). A smaller smooth region of another colour at the frame edge (a light strap, a sliver
+ * of skin below it) cannot be told from product by the source alone, so it stays product: a few
+ * plain pixels kept cost less than a flat canvas patch cut into the product (gate 3d, Penti
+ * Z91D419FC9238E844BF77Z shot 4).
+ */
+export function passthroughBackground(p: Pick<Prepared, "width" | "height" | "rgb">, region: BackgroundRegion, surfaces: Mask): Mask {
+  const { width: w, height: h, rgb } = p, color = borderBackground(p).color, out = new Uint8Array(w * h), queue = new Int32Array(w * h);
+  const near = (i: number) => delta(rgb, i, color) <= BACKGROUND_CLUSTER_DELTA;
+  let head = 0, tail = 0;
+  for (let i = 0; i < out.length; i++) if (region.background[i] && !surfaces[i] && near(i)) { out[i] = 1; queue[tail++] = i; }
+  while (head < tail) {
+    const i = queue[head++]!, x = i % w, y = (i - x) / w;
+    for (const j of [x > 0 ? i - 1 : -1, x + 1 < w ? i + 1 : -1, y > 0 ? i - w : -1, y + 1 < h ? i + w : -1]) {
+      if (j >= 0 && !out[j] && !surfaces[j] && near(j)) { out[j] = 1; queue[tail++] = j; }
+    }
+  }
+  // Large smooth backdrops of another colour that no matte kept.
+  const { x0, y0, x1, y1 } = region.rect, inner = new Uint8Array(w * h);
+  for (let y = y0; y <= y1; y++) for (let x = x0; x <= x1; x++) { const i = y * w + x; if (region.background[i] && !surfaces[i]) inner[i] = 1; }
+  const { labels, sizes } = components(inner, w, h), min = w * h * SURFACE_MIN_FRAME_SHARE;
+  for (let i = 0; i < out.length; i++) if (labels[i] && sizes[labels[i]!]! >= min) out[i] = 1;
+  return out;
+}
+
+/**
+ * The ladder's last resort: the whole frame is product except the source background
+ * (passthroughBackground: the border colour reached from the frame edge, pixel-exact, and any large
+ * smooth backdrop no matte kept), which becomes 0. Skin or a plain garment panel that one of the
+ * `tried` model mattes cut through or kept (keptSurfaces) is always product. Enclosed background is
+ * filled (no holes) and components smaller than PASSTHROUGH_KEEP_SHARE of the largest are dropped (no
+ * floating fragments); a frame-filling photo keeps every pixel inside its canvas strips. The edge is
+ * softened inward only (sigma 1), which cannot open a hole and keeps no source background; a frame
+ * edge stays fully opaque so the cut-in-source rule places it flush.
  */
 export function passthroughMatte(p: Pick<Prepared, "width" | "height" | "rgb">, tried: Pick<Matte, "alpha">[] = []): Matte {
   const { width: w, height: h } = p, region = backgroundRegion(p), solid = new Uint8Array(w * h);
-  for (let i = 0; i < solid.length; i++) solid[i] = region.background[i] ? 0 : 1;
-  for (const m of tried) { const surfaces = keptSurfaces(p, m.alpha, region); for (let i = 0; i < solid.length; i++) if (surfaces[i]) solid[i] = 1; }
-  if (!region.frameFilling) {
+  if (region.frameFilling) for (let i = 0; i < solid.length; i++) solid[i] = region.background[i] ? 0 : 1;
+  else {
+    const surfaces = new Uint8Array(w * h);
+    for (const m of tried) { const kept = keptSurfaces(p, m.alpha, region); for (let i = 0; i < surfaces.length; i++) if (kept[i]) surfaces[i] = 1; }
+    const background = passthroughBackground(p, region, surfaces);
+    for (let i = 0; i < solid.length; i++) solid[i] = background[i] ? 0 : 1;
     // Keep the large product components only (no floating fragments).
     const { labels, sizes } = components(solid, w, h), largest = Math.max(0, ...sizes.slice(1));
     for (let i = 0; i < solid.length; i++) if (solid[i] && sizes[labels[i]!]! < largest * PASSTHROUGH_KEEP_SHARE) solid[i] = 0;
@@ -324,7 +450,41 @@ export function passthroughMatte(p: Pick<Prepared, "width" | "height" | "rgb">, 
     for (let i = 0; i < solid.length; i++) if (!outside[i]) solid[i] = 1;
   }
   const alpha = softenEdge(solid, w, h);
-  return { alpha, width: w, height: h, model: "passthrough", ms: 0, source: "model", target: null, sentLongSide: null };
+  return { alpha, width: w, height: h, model: PASSTHROUGH_MODEL, ms: 0, source: "model", target: null, sentLongSide: null };
+}
+
+/**
+ * A pass-through replaces a plain studio backdrop only. In the border band, the pixels it keeps as product
+ * although every model matte tried dropped them, and that are no skin or garment panel a matte cut through
+ * (keptSurfaces), are scenery (a court, a hedge, a net) that the recolour could not reach: above this share of
+ * the band the background is busy and the photo is held instead of published with a ragged cut-out. Measured:
+ * the French Connection tennis-court photo ZEE79259BBFD83FFA1DB0Z shot 5 keeps 33% of its band this way; every
+ * plain-backdrop pass-through of the gate and golden sets keeps 0%.
+ */
+export const BUSY_BORDER_MAX_SHARE = 0.05;
+
+/** Share of the border band that the pass-through `pass` keeps as scenery (see BUSY_BORDER_MAX_SHARE). */
+export function busyBorderShare(p: Pick<Prepared, "width" | "height" | "rgb">, pass: Pick<Matte, "alpha">, tried: readonly Pick<Matte, "alpha">[], region: BackgroundRegion = backgroundRegion(p)): number {
+  if (!tried.length) return 0;
+  const { width: w, height: h } = p, band = borderBand(w, h), surfaces = new Uint8Array(w * h);
+  for (const m of tried) { const kept = keptSurfaces(p, m.alpha, region); for (let i = 0; i < surfaces.length; i++) if (kept[i]) surfaces[i] = 1; }
+  let pixels = 0, scenery = 0;
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    if (x >= band.x && x < w - band.x && y >= band.y && y < h - band.y) continue;
+    const i = y * w + x; pixels++;
+    if (pass.alpha[i]! > 0 && !surfaces[i] && tried.every(m => m.alpha[i]! <= GUARD_ALPHA_EDGE)) scenery++;
+  }
+  return pixels ? scenery / pixels : 0;
+}
+
+/** True when a pass-through would leave scenery (busyBorderShare over BUSY_BORDER_MAX_SHARE); a frame-filling close-up never is. */
+export function isBusyBackground(p: Pick<Prepared, "width" | "height" | "rgb">, pass: Pick<Matte, "alpha">, tried: readonly Pick<Matte, "alpha">[], region: BackgroundRegion = backgroundRegion(p)): boolean {
+  return !region.frameFilling && busyBorderShare(p, pass, tried, region) > BUSY_BORDER_MAX_SHARE;
+}
+
+/** The whole photo as it is (every pixel opaque): what a busy-background photo shows while it waits for a person. */
+export function wholePhotoMatte(p: Pick<Prepared, "width" | "height">): Matte {
+  return { alpha: Buffer.alloc(p.width * p.height, 255), width: p.width, height: p.height, model: PASSTHROUGH_MODEL, ms: 0, source: "model", target: null, sentLongSide: null };
 }
 
 /** Separable sigma-1 Gaussian on a 0/1 mask (edge pixels replicated), as floodFillMatte does, but only inward: the background around the product stays fully clear, so no source background bleeds onto the canvas. */
@@ -408,6 +568,12 @@ export interface MatteResolution {
   matte: Matte;
   /** True when no model matte kept the product and the whole frame is used (flag `matte_passthrough`). */
   passthrough: boolean;
+  /**
+   * True when no model matte kept the product and the background is busy (busyBorderShare over
+   * BUSY_BORDER_MAX_SHARE): the matte is the whole photo as it is and the photo is held for a person
+   * (flag `leftover_background`, code-detected: see auto-resolve.ts busyBackgroundHold), never published on its own.
+   */
+  busyBackground: boolean;
   /** One record per step taken, for the outputs' `compliance.auto_actions`; empty when the first matte was kept. */
   actions: AutoAction[];
 }
@@ -416,19 +582,21 @@ export interface MatteResolution {
  * The cut-out integrity ladder, run on every model matte before anything is rendered: keep the first
  * matte when it passes checkMatteIntegrity; else (a) the policy's second model, (b) the photo framed
  * in a white border (GUARD_PAD_FRACTION) with the first, then the second model, (c) the pass-through
- * matte (the whole frame minus the plain background). The first matte that passes wins. The judge's
+ * matte (the whole frame minus the plain background). The first matte that passes wins. A pass-through
+ * replaces a plain backdrop only: on a busy background (busyBorderShare) the photo is kept whole and held
+ * (`busyBackground`). The judge's
  * `product_removed` names the same failure after the render, and its ladder ends in the same
  * pass-through step (auto-resolve.ts).
  */
 export async function resolveMatte(input: ResolveMatteInput): Promise<MatteResolution> {
   const { prepared: p, first } = input, actions: AutoAction[] = [], trigger: OutputFlag[] = ["product_removed"];
   const record = (step: AutoAction["step"], result: AutoAction["result"], detail: string) => actions.push({ step, trigger: [...trigger], result, channels: [], rejudged: false, detail });
-  if (first.source !== "model") return { matte: first, passthrough: false, actions };
-  // Every matte tried is kept: skin one of them cut through stays product in the pass-through.
+  if (first.source !== "model") return { matte: first, passthrough: false, busyBackground: false, actions };
+  // Every matte tried is kept: skin or a panel one of them cut through or kept stays product in the pass-through.
   const region = backgroundRegion(p), tried: Matte[] = [];
   const check = (m: Matte) => { tried.push(m); return checkMatteIntegrity(p, m, { handRule: input.handRule, region }); };
   const verdict = check(first);
-  if (verdict.ok) return { matte: first, passthrough: false, actions };
+  if (verdict.ok) return { matte: first, passthrough: false, busyBackground: false, actions };
   record("matte_check", "failed", `${first.model}: ${verdict.detail}`);
   const steps: [AutoAction["step"], MatteVariant][] = [["second_matte", "second"], ["padded_matte", "padded_first"], ["padded_matte", "padded_second"]];
   for (const [step, variant] of steps) {
@@ -436,8 +604,14 @@ export async function resolveMatte(input: ResolveMatteInput): Promise<MatteResol
     if (!matte) { record(step, "skipped", `${variant}: not available`); continue; }
     const result = check(matte);
     record(step, result.ok ? "passed" : "failed", `${matte.model}${variant === "second" ? "" : " padded"}: ${result.detail}`);
-    if (result.ok) return { matte, passthrough: false, actions };
+    if (result.ok) return { matte, passthrough: false, busyBackground: false, actions };
+  }
+  const pass = passthroughMatte(p, tried);
+  if (isBusyBackground(p, pass, tried, region)) {
+    // Trigger `leftover_background`: the code-detected hold (auto-resolve.ts busyBackgroundHold).
+    actions.push({ step: "matte_passthrough", trigger: ["product_removed", "leftover_background"], result: "failed", channels: [], rejudged: false, detail: `busy background: ${(busyBorderShare(p, pass, tried, region) * 100).toFixed(1)}% of the border band is scenery no cut-out kept; the whole photo is kept and held` });
+    return { matte: wholePhotoMatte(p), passthrough: false, busyBackground: true, actions };
   }
   record("matte_passthrough", "passed", "no cut-out kept the product; the whole frame is used");
-  return { matte: passthroughMatte(p, tried), passthrough: true, actions };
+  return { matte: pass, passthrough: true, busyBackground: false, actions };
 }

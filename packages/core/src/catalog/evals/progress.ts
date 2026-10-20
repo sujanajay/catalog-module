@@ -18,10 +18,30 @@ export const setId = (brand: string, category: string) => `${brand}.${category}`
 export const setsPrefix = (run: string) => `${EVALS_PREFIX}/${run}/sets/`;
 export const setRecordPath = (run: string, set: string) => `${setsPrefix(run)}${set}.json`;
 
+/**
+ * Evidence retention: the job's cleanup deletes every output when a set ends, so the full-size output of every image
+ * with a failing check is copied under the run before cleanup (at most EVIDENCE_CAP_PER_SET per set), and its path
+ * goes on the record's thumb row. Everything stays under catalog-test/.
+ */
+export const EVIDENCE_CAP_PER_SET = 200;
+export const evidencePrefix = (run: string, set: string) => `${EVALS_PREFIX}/${run}/evidence/${set}/`;
+export const evidencePath = (run: string, set: string, identifier: string, channel: string, n: number) => `${evidencePrefix(run, set)}${identifier}__${channel}__${n}.jpg`;
+/** Hands out at most `cap` evidence slots; `take` is synchronous so concurrent image checks never exceed the cap. */
+export class EvidenceBudget {
+  kept = 0;
+  skipped = 0;
+  constructor(readonly cap = EVIDENCE_CAP_PER_SET) {}
+  take(): boolean { if (this.kept < this.cap) { this.kept++; return true; } this.skipped++; return false; }
+}
+
 export interface SetRecord {
   set: string; brand: string; category: string;
   status: "done" | "failed";
-  /** The failure, in one line, when status is "failed"; the arrays below are then empty. */
+  /**
+   * The failure, in one line, when status is "failed". The arrays below are then empty, except when
+   * only the overwrite passes failed: the set keeps its first-pass checks and the overwrite checks
+   * are recorded as failed with the error.
+   */
   error: string | null;
   startedAt: string; finishedAt: string;
   photos: number; products: number;

@@ -158,3 +158,69 @@ export function shadowBand(product: BBox, canvas: { w: number; h: number }): BBo
   return { x: x0, y: y0, w: Math.max(0, x1 - x0), h: Math.max(0, y1 - y0) };
 }
 export const inBox = (b: BBox, x: number, y: number) => x >= b.x && x < b.x + b.w && y >= b.y && y < b.y + b.h;
+
+/**
+ * The source background as a function of the row: a flat colour (prepare's uniform border) or a smooth studio
+ * gradient (eval run 2, french_connection: a light grey graded top to bottom, which prepare calls "not uniform"
+ * and which left the matte-quality checks not run on 92% of the apparel outputs). The gradient is read from
+ * the per-row median of the 2% border band over the plain rows (per-row interquartile range of the band pixels
+ * under GRADED_ROW_SPREAD_MAX; a row the product crosses, or a texture with a steady median, is not plain), fitted
+ * linearly top to bottom. The fit is a background when at least GRADED_PLAIN_ROWS_MIN of the rows are plain (the
+ * product crossing the band on a cut side takes a few rows, never the fit) and the 95th percentile of the plain rows'
+ * residuals stays under GRADED_RESIDUAL_MAX levels. A busy border (a lifestyle photo, a full-bleed close-up) fits
+ * nothing and returns null, so those checks stay not run there.
+ */
+export const GRADED_RESIDUAL_MAX = 8;
+export const GRADED_ROW_SPREAD_MAX = 16;
+export const GRADED_PLAIN_ROWS_MIN = 0.95;
+export interface BackgroundModel {
+  kind: "uniform" | "graded";
+  /** 95th percentile of the per-row residual against the fit (0 for a uniform border). */
+  residual: number;
+  /** The colour at the frame's middle row (what a single colour would be). */
+  color: [number, number, number];
+  /** The background colour expected at source row `y`. */
+  at: (y: number) => [number, number, number];
+}
+const n95 = (n: number) => Math.floor(n * 0.95);
+export function backgroundModel(r: Raster, bg: { uniform: boolean; color: [number, number, number] }): BackgroundModel | null {
+  if (bg.uniform) return { kind: "uniform", residual: 0, color: bg.color, at: () => bg.color };
+  const bx = Math.max(4, Math.ceil(r.w * 0.02)), by = Math.max(4, Math.ceil(r.h * 0.02));
+  if (r.h < 8) return null;
+  const medians = new Float64Array(r.h * 3), spreads = new Float64Array(r.h), hist = [new Uint32Array(256), new Uint32Array(256), new Uint32Array(256)];
+  for (let y = 0; y < r.h; y++) {
+    for (const h of hist) h.fill(0);
+    let count = 0;
+    const inBand = y < by || y >= r.h - by;
+    for (let x = 0; x < r.w; x++) {
+      if (!inBand && x >= bx && x < r.w - bx) continue;
+      count++;
+      for (let c = 0; c < 3; c++) { const v = r.rgb[(y * r.w + x) * 3 + c]!; hist[c]![v] = hist[c]![v]! + 1; }
+    }
+    // Per channel: the row's quartiles and median from its histogram; the spread is the widest interquartile range.
+    for (let c = 0; c < 3; c++) {
+      let seen = 0, p25 = -1, median = -1, p75 = -1;
+      for (let v = 0; v < 256 && p75 < 0; v++) { seen += hist[c]![v]!; if (p25 < 0 && seen * 4 >= count) p25 = v; if (median < 0 && seen * 2 >= count) median = v; if (seen * 4 >= count * 3) p75 = v; }
+      medians[y * 3 + c] = median; spreads[y] = Math.max(spreads[y]!, p75 - p25);
+    }
+  }
+  const plain: number[] = [];
+  for (let y = 0; y < r.h; y++) if (spreads[y]! <= GRADED_ROW_SPREAD_MAX) plain.push(y);
+  if (plain.length < 2 || plain.length < r.h * GRADED_PLAIN_ROWS_MIN) return null;
+  // Least-squares line per channel over the plain rows (a row the product crosses never tilts the fit).
+  const n = r.h, m = plain.length, slope = [0, 0, 0], offset = [0, 0, 0];
+  let sumY = 0, sumYY = 0;
+  for (const y of plain) { sumY += y; sumYY += y * y; }
+  for (let c = 0; c < 3; c++) {
+    let sumV = 0, sumYV = 0;
+    for (const y of plain) { const v = medians[y * 3 + c]!; sumV += v; sumYV += y * v; }
+    const det = m * sumYY - sumY * sumY;
+    slope[c] = det ? (m * sumYV - sumY * sumV) / det : 0;
+    offset[c] = (sumV - slope[c]! * sumY) / m;
+  }
+  const at = (y: number): [number, number, number] => { const yy = Math.min(n - 1, Math.max(0, y)); return [0, 1, 2].map(c => Math.min(255, Math.max(0, Math.round(offset[c]! + slope[c]! * yy)))) as [number, number, number]; };
+  const residuals = plain.map(y => { const fit = at(y); return Math.max(...[0, 1, 2].map(c => Math.abs(medians[y * 3 + c]! - fit[c]!))); }).sort((a, b) => a - b);
+  const residual = residuals[Math.min(m - 1, n95(m))]!;
+  if (residual > GRADED_RESIDUAL_MAX) return null;
+  return { kind: "graded", residual, color: at(Math.floor(n / 2)), at };
+}

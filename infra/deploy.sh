@@ -269,9 +269,11 @@ echo "==> worker"
 # ingest tasks to a missing queue, and the main queue on preview (bootstrap.sh makes it otherwise).
 ENSURE_QUEUES="$QUEUE-ingest:$INGEST_MAX_DISPATCHES"
 [ "${CATALOG_PREVIEW:-0}" = 1 ] && ENSURE_QUEUES="$QUEUE:$TASKS_MAX_DISPATCHES $ENSURE_QUEUES"
-EXISTING_QUEUES=$(gcv tasks queues list --location="$REGION" --format='value(name)')
+# gcloud 589 prints short queue names from list while older releases print the full
+# projects/.../queues/<name>; compare basenames so both match (docs/solutions/gcloud-list-names.md).
+EXISTING_QUEUES=$(gcv tasks queues list --location="$REGION" --format='value(name)' | sed 's#.*/##')
 for Q in $ENSURE_QUEUES; do
-  if grep -qxF "projects/$PROJECT/locations/$REGION/queues/${Q%%:*}" <<<"$EXISTING_QUEUES"; then
+  if grep -qxF "${Q%%:*}" <<<"$EXISTING_QUEUES"; then
     # Idempotent: keep the parallelism within the worker's capacity (connection budget above).
     gcloud tasks queues update "${Q%%:*}" --location="$REGION" --max-concurrent-dispatches="${Q##*:}" >/dev/null
     echo "==> tasks queue ${Q%%:*}: exists, max-concurrent-dispatches ${Q##*:}"

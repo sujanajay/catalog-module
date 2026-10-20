@@ -78,6 +78,8 @@ A product waits for your decision only when:
 
 - a photo shows a different item from the product's other photos (checked twice);
 - a photo is a collage of several photos;
+- the background could not be removed from a photo (a busy scene, such as models on a tennis
+  court; the made picture shows the whole photo as it is, with its own background);
 - photo 1 cannot be used;
 - none of the photos can be used;
 - a file cannot be opened, or the quality check could not run (the last rows of the table below).
@@ -109,6 +111,7 @@ What the sentences on the card mean:
 | "Some of the original background is still visible around the product." | Compare the two pictures; keep or replace. |
 | "The photo carries text, a watermark or a logo overlay. Marketplaces reject these." | Remove it, or replace it with a clean photo. |
 | "This image combines several photos in one. Marketplaces reject these." | Remove it, or replace it with the single photos. |
+| "The background could not be removed from this photo. Use it as is, replace it, or remove it." | A lifestyle photo on a busy background. "Use as is" publishes the whole photo with its own background; otherwise replace it with a studio photo or remove it. |
 | "The product looks rotated or upside down." | Replace it with a corrected photo. |
 | "The original photo is smaller than ... wants, so this one may look soft." | It will upload; ask the brand for a larger photo if you can. |
 | "The original is only ... under 500 px on its long side." | Too small to look good anywhere. Remove or replace. |

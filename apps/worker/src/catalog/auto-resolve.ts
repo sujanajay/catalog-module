@@ -5,7 +5,7 @@ import { batchPrefix, stagingPath } from "@catalog/core/catalog/naming";
 import { shotGeometry, type Matte, type Prepared, type RenderInput, type RenderOutput } from "@catalog/core/catalog/render";
 import { autoActionsOf, LadderStopped, RENDER_FLAGS, runLadder, stepVariant, withAutoActions, type AutoAction, type LadderStep } from "@catalog/core/catalog/auto-resolve";
 import { strictestChannel } from "@catalog/core/catalog/qa/policy";
-import { heldInHand, passthroughMatte } from "@catalog/core/catalog/matte-guard";
+import { heldInHand, isBusyBackground, passthroughMatte } from "@catalog/core/catalog/matte-guard";
 import type { ChannelId, OutputFlag, ResolvedPolicy } from "@catalog/core/catalog/types";
 import type { CatalogDeps } from "./deps";
 
@@ -95,6 +95,8 @@ export async function resolvePhoto(deps: CatalogDeps, input: ResolvePhotoInput):
   const {winner,actions} = await runLadder(input.trigger,input.failing.map(o=>o.channel),async step=>{
     if (step === "shadow_off" && !input.failing.some(o=>o.flags.includes("shadow_synthesised"))) return {passed:false,skipped:true,detail:"no added shadow"};
     if (step === "second_matte" && !(await secondMatte())) return {passed:false,skipped:true,detail:"no second cut-out available"};
+    // A pass-through replaces a plain backdrop only; on a busy background it would leave scenery around the product.
+    if (step === "matte_passthrough" && isBusyBackground(p,passthroughFor(),[first,...(second ? [second]:[])])) return {passed:false,skipped:true,detail:"busy background"};
     renders.clear();
     for (const o of input.failing) renders.set(o.id,await render(o,step));
     const broken = input.failing.find(o=>!ok(renders.get(o.id)));

@@ -9,9 +9,10 @@ import { setDbForTests, type Db } from "../lib/db";
 import { resetUserDeps } from "../lib/user";
 import { addProductAlias, batchAttention, getProduct, removeProduct } from "../lib/catalog/products";
 import { searchBrandProducts } from "../lib/catalog/brands";
-import { writeLinksXlsx } from "@catalog/core/catalog/sheet";
+import { writeLinksCsv, writeLinksXlsx } from "@catalog/core/catalog/sheet";
 import { readSheetTable } from "@catalog/core/catalog/ingest/links-sheet";
 import { buildReport } from "@catalog/core/catalog/pipeline/report";
+import { DEFAULT_POLICIES } from "@catalog/core/catalog/qa/policy";
 import { batchDetails, batchExportUrl, batchSheet, exportBrand } from "../lib/catalog/exports";
 import { POST as aliasPost } from "../app/api/catalog/products/[id]/aliases/route";
 import { DELETE as productDelete } from "../app/api/catalog/products/[id]/route";
@@ -19,6 +20,7 @@ import { POST as brandExport } from "../app/api/catalog/brands/[slug]/export/rou
 import { GET as brandSearch } from "../app/api/catalog/brands/[slug]/products/route";
 import { GET as attentionGet } from "../app/api/catalog/batches/[id]/attention/route";
 import { GET as batchDownload } from "../app/api/catalog/batches/[id]/export/route";
+import { GET as batchGet } from "../app/api/catalog/batches/[id]/route";
 
 let db:Db;let close:()=>Promise<void>;let batchId:string;let productId:string;let sourceId:string;
 const actor="admin@opptra.com";
@@ -174,4 +176,43 @@ it("matches report statuses in the pre-finalization page for failed, held and mi
   // The report never says "ok" for a held product: its linkStatus is the sheet status.
   expect((report.report.products as {linkStatus:string}[])[0]!.linkStatus).toBe(expected);
  }
+});
+// Spec 07: no model or provider name in any export. The stored report keeps the ids for evals; every
+// operator download (report.json, links sheets, brand page selection) and the batch API carry none.
+const MODEL_NAMES=/birefnet|rmbg|bria|inspyre|ben_custom|esrgan|swinir|gemini|claude|qwen|llama|gpt-|openai\/|anthropic\/|google\//i;
+it("keeps model ids out of the report export, the links sheets, the brand download and the batch API",async()=>{
+ vi.stubEnv("DEV_USER_EMAIL","viewer@opptra.com");
+ const judge="google/gemini-2.5-flash-lite";
+ await db.update(catalogSourceImages).set({matteModel:"birefnet-general"}).where(eq(catalogSourceImages.id,sourceId));
+ const [policyBatch]=await db.select({options:catalogBatches.options}).from(catalogBatches).where(eq(catalogBatches.id,batchId));
+ await db.update(catalogBatches).set({options:{...policyBatch!.options,policy:{...DEFAULT_POLICIES.footwear,qaModel:judge,qaModelSecond:"anthropic/claude-haiku-4.5"}}}).where(eq(catalogBatches.id,batchId));
+ const wrongItem={first:true,second:false,secondModel:"qwen/qwen2.5-vl-72b-instruct",confirmed:false};
+ await output({qaModel:judge,qaScores:{overall:62,edge_quality:62,verdict:"flag",thresholds:{edge_quality:75},view:"packshot",evidence:{rough_edges:"The left strap edge is rough."},reasons:["The left strap edge is rough."],wrongItem,
+  judgements:[{role:"judge",model:judge,channel:"noon",scores:{overall:62},wrongItem},{role:"second",model:"openai/gpt-4o-mini:free",channel:"noon",scores:{overall:70}}],autoAction:"note"},
+  compliance:{auto_actions:[{step:"matte_check",detail:"birefnet-general: dropped product: worst cell 100.0%, overall 10.5%",result:"failed",trigger:["product_removed"],channels:[],rejudged:false},
+   {step:"padded_matte",detail:"bria-rmbg padded: dropped product: worst cell 100.0%, overall 29.6%",result:"failed",trigger:["product_removed"],channels:[],rejudged:false}]}});
+ const built=await buildReport(db,batchId,{recheck:{ok:0,total:1,failures:[{url:"https://example.com/ABC-123_1.jpg",reason:"birefnet-general output did not load"}]},exports:{xlsx:"gs://private/links-v1.xlsx",csv:"gs://private/links-v1.csv",report:"gs://private/report.json",filledProductList:null,exportsMatch:true}});
+ const stored=JSON.stringify(built.report);expect(stored).toMatch(MODEL_NAMES);// the stored report keeps the ids for evals
+ const objects=new Map<string,Buffer>([["gs://private/report.json",Buffer.from(stored)],["gs://private/links-v1.xlsx",await writeLinksXlsx(built.sheet)],["gs://private/links-v1.csv",Buffer.from(writeLinksCsv(built.sheet))]]);
+ const getSignedUrl=vi.fn(async()=>["https://signed.example/file"]);
+ setStorageClient({bucket:(b:string)=>({file:(name:string)=>({getSignedUrl,download:async()=>[objects.get(`gs://${b}/${name}`)],getMetadata:async()=>[{contentType:"application/json"}]})})} as unknown as StorageLike);
+ await db.update(catalogBatches).set({reportUri:"gs://private/report.json",sheetXlsxUri:"gs://private/links-v1.xlsx",sheetCsvUri:"gs://private/links-v1.csv"}).where(eq(catalogBatches.id,batchId));
+ const ctx={params:Promise.resolve({id:batchId})};
+ const response=await batchDownload(new Request(`http://localhost/api/catalog/batches/${batchId}/export?format=report`),ctx);
+ expect(response.status).toBe(200);const text=await response.text();
+ expect(text).not.toMatch(MODEL_NAMES);
+ const report=JSON.parse(text) as {products:{outputs:{qa:Record<string,unknown>&{judgements:Record<string,unknown>[]};autoActions:{detail:string}[]}[]}[];recheck:{failures:{reason:string}[]}};
+ const out=report.products[0]!.outputs[0]!;
+ expect(out.qa).toMatchObject({model:"quality check",overall:62,thresholds:{edge_quality:75},evidence:{rough_edges:"The left strap edge is rough."},wrongItem:{first:true,secondModel:"second opinion"},autoAction:"note"});
+ expect(out.qa.judgements.map(j=>j.model)).toEqual(["quality check","quality check"]);
+ expect(out.autoActions.map(a=>a.detail)).toEqual(["model A: dropped product: worst cell 100.0%, overall 10.5%","model B padded: dropped product: worst cell 100.0%, overall 29.6%"]);
+ expect(report.recheck.failures[0]!.reason).toBe("model A output did not load");
+ // Every other download and the batch API: sheets, brand page selection, details and the batch record.
+ for(const uri of ["gs://private/links-v1.xlsx","gs://private/links-v1.csv"]){const table=await readSheetTable(objects.get(uri)!,uri.endsWith("csv")?"links.csv":"links.xlsx");expect(JSON.stringify(table)).not.toMatch(MODEL_NAMES);}
+ const saved:Buffer[]=[];await exportBrand("uspa",[productId],db,{uploadBuffer:vi.fn(async(path:string,buf:Buffer)=>{saved.push(buf);return `gs://private/${path}`;}),signedUrl:vi.fn(async(uri:string)=>uri)});
+ expect(saved).toHaveLength(2);expect(JSON.stringify((await readSheetTable(saved[0]!,"links.xlsx")))+saved[1]!.toString()).not.toMatch(MODEL_NAMES);
+ const details=await batchDetails(batchId,db,async(uri:string)=>({buf:objects.get(uri)!,mime:"application/octet-stream"}));
+ expect(JSON.stringify(details.recheckFailures)).not.toMatch(MODEL_NAMES);
+ const batchApi=await batchGet(new Request(`http://localhost/api/catalog/batches/${batchId}`),ctx);expect(batchApi.status).toBe(200);expect(await batchApi.text()).not.toMatch(MODEL_NAMES);
+ const product=await getProduct("uspa","ABC-123",false,db);expect(JSON.stringify(product)).not.toMatch(MODEL_NAMES);
 });

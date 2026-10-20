@@ -6,6 +6,7 @@ import assert from 'node:assert/strict';
 import process from 'node:process';
 import console from 'node:console';
 import {spawnSync} from 'node:child_process';
+import {gitBashPath} from '../../packages/core/src/git-bash.ts';
 const target = process.env.POLICY_HELPER_UNDER_TEST || path.resolve(import.meta.dirname, '../allow-catalog-public-output.sh');
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'catalog-policy-proof-'));
 const baseline = {values:{allowedValues:['C00jf9i0v']}};
@@ -53,7 +54,7 @@ const cases = [
 ];
 try {
   const fakePath=path.join(dir,'gcloud.cjs');fs.writeFileSync(fakePath,fake);
-  const bash=process.env.CATALOG_BASH || (process.platform==='win32'?path.join(process.env.LOCALAPPDATA,'Programs/Git/bin/bash.exe'):'bash');
+  const bash=process.env.CATALOG_BASH || gitBashPath();
   for(const c of cases){
     const statePath=path.join(dir,c.label+'.json');fs.writeFileSync(statePath,JSON.stringify({name,baseline,calls:[],...c}));
     const r=spawnSync(bash,['-c','gcloud() { node "$MOCK" "$@"; }; export -f gcloud; bash "$TARGET"'],{env:{...process.env,MOCK:fakePath,MOCK_STATE:statePath,TARGET:target},encoding:'utf8',timeout:60000});
