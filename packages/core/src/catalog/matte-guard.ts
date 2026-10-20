@@ -182,6 +182,39 @@ export function productEstimate(p: Pick<Prepared, "width" | "height" | "rgb">, a
 
 const isSkin = (r: number, g: number, b: number) => r > 95 && g > 40 && b > 20 && r > g && r > b && r - Math.min(g, b) > 15 && r - g > 15 && r - g < 110 && b > 0.45 * g;
 
+/**
+ * A smooth region reached from the border is a background candidate (studio wall, floor), but in a
+ * close-up it can be the model's skin next to a trim or neckline. When a model matte keeps at least
+ * SURFACE_KEPT_MIN of such a region and both the kept and the dropped part are skin (skin colour, not
+ * the source background colour), the matte cut through one uniform skin surface with no edge in the
+ * source to cut along: a jagged partial. The whole region is then product and must be kept.
+ * Measured on 189 photos: without the skin condition a white product on a white backdrop, or a
+ * beige cardigan on a light wall, joins the backdrop in one smooth region and would be rejected.
+ */
+export const SURFACE_KEPT_MIN = 0.25;
+/** Share of the kept part, and of the dropped part, that must be skin. */
+export const SURFACE_SKIN_SHARE = 0.6;
+/** Only regions at least this share of the photo count (smaller ones are edge noise). */
+export const SURFACE_MIN_FRAME_SHARE = 0.01;
+
+/** The skin regions among the background candidates (inside any canvas strips) that this matte cuts through (see SURFACE_KEPT_MIN). */
+export function keptSurfaces(p: Pick<Prepared, "width" | "height" | "rgb">, alpha: Buffer, region: BackgroundRegion): Mask {
+  const { width: w, height: h, rgb } = p, { x0, y0, x1, y1 } = region.rect, inner = new Uint8Array(w * h), out = new Uint8Array(w * h);
+  if (region.frameFilling) return out;
+  for (let y = y0; y <= y1; y++) for (let x = x0; x <= x1; x++) { const i = y * w + x; if (region.background[i]) inner[i] = 1; }
+  const border = borderBackground(p).color, { labels, sizes } = components(inner, w, h), n = sizes.length;
+  const kept = new Uint32Array(n), keptSkin = new Uint32Array(n), dropped = new Uint32Array(n), droppedSkin = new Uint32Array(n);
+  for (let i = 0; i < inner.length; i++) {
+    const l = labels[i]!; if (!l) continue;
+    const skin = delta(rgb, i, border) > SKIN_MIN_BACKGROUND_DELTA && isSkin(rgb[i * 3]!, rgb[i * 3 + 1]!, rgb[i * 3 + 2]!) ? 1 : 0;
+    if (alpha[i]! > 128) { kept[l]!++; keptSkin[l]! += skin; } else if (alpha[i]! <= GUARD_ALPHA_EDGE) { dropped[l]!++; droppedSkin[l]! += skin; }
+  }
+  const min = w * h * SURFACE_MIN_FRAME_SHARE, surface = new Uint8Array(n);
+  for (let l = 1; l < n; l++) surface[l] = sizes[l]! >= min && kept[l]! >= sizes[l]! * SURFACE_KEPT_MIN && keptSkin[l]! >= kept[l]! * SURFACE_SKIN_SHARE && droppedSkin[l]! >= dropped[l]! * SURFACE_SKIN_SHARE ? 1 : 0;
+  for (let i = 0; i < inner.length; i++) if (surface[labels[i]!]) out[i] = 1;
+  return out;
+}
+
 export interface HeldInHand {
   /** A hand or arm (skin touching the frame edge) holds the product: it does not rest on a floor. */
   held: boolean;
@@ -232,13 +265,16 @@ export interface MatteIntegrity {
  * hand larger than HAND_NOTCH_MAX_SHARE (`handRule`, on unless the product is apparel: a model's own
  * skin is not a hand holding the product). A transparent source's own alpha is always accepted.
  */
-export function checkMatteIntegrity(p: Pick<Prepared, "width" | "height" | "rgb">, matte: Pick<Matte, "alpha" | "source">, opts: { handRule?: boolean } = {}): MatteIntegrity {
-  const { width: w, height: h } = p, alpha = matte.alpha, region = backgroundRegion(p);
+export function checkMatteIntegrity(p: Pick<Prepared, "width" | "height" | "rgb">, matte: Pick<Matte, "alpha" | "source">, opts: { handRule?: boolean; region?: BackgroundRegion } = {}): MatteIntegrity {
+  const { width: w, height: h } = p, alpha = matte.alpha, region = opts.region ?? backgroundRegion(p);
   const base = { frameFilling: region.frameFilling, borderShare: Math.round(region.seedShare * 1000) / 1000 };
   if (matte.source === "alpha_source") return { ok: true, worstCellLoss: 0, overallLoss: 0, handShare: 0, estimatePixels: 0, ...base, detail: "transparent source" };
   // Only the estimate's interior counts: a matte edge a few pixels inside the silhouette (fur, a soft
   // fabric edge) is a quality question for spec 10, not a lost product.
-  const estimate = erode(productEstimate(p, alpha, region), w, h, GUARD_INTERIOR_PX);
+  // Skin the matte cut through (keptSurfaces) is product: all of it counts.
+  const product = productEstimate(p, alpha, region), surfaces = keptSurfaces(p, alpha, region);
+  for (let i = 0; i < product.length; i++) if (surfaces[i]) product[i] = 1;
+  const estimate = erode(product, w, h, GUARD_INTERIOR_PX);
   let x0 = w, y0 = h, x1 = -1, y1 = -1, count = 0;
   for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) if (estimate[y * w + x]) { count++; if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y; }
   if (!count) return { ok: true, worstCellLoss: 0, overallLoss: 0, handShare: 0, estimatePixels: 0, ...base, detail: "no product estimate" };
@@ -262,14 +298,15 @@ export function checkMatteIntegrity(p: Pick<Prepared, "width" | "height" | "rgb"
 /**
  * The ladder's last resort: the whole frame is product. Alpha is 255 everywhere except the source
  * background connected to the frame edge (the uniform border band and white space around the
- * product), which becomes 0. Enclosed background is filled (no holes) and components smaller than
+ * product), which becomes 0, except skin that one of the `tried` model mattes cut through (keptSurfaces). Enclosed background is filled (no holes) and components smaller than
  * PASSTHROUGH_KEEP_SHARE of the largest are dropped (no floating fragments); a frame-filling photo
  * keeps every pixel. The edge is softened inward only (sigma 1), which cannot open a hole and keeps
  * no source background; a frame edge stays fully opaque so the cut-in-source rule places it flush.
  */
-export function passthroughMatte(p: Pick<Prepared, "width" | "height" | "rgb">): Matte {
+export function passthroughMatte(p: Pick<Prepared, "width" | "height" | "rgb">, tried: Pick<Matte, "alpha">[] = []): Matte {
   const { width: w, height: h } = p, region = backgroundRegion(p), solid = new Uint8Array(w * h);
   for (let i = 0; i < solid.length; i++) solid[i] = region.background[i] ? 0 : 1;
+  for (const m of tried) { const surfaces = keptSurfaces(p, m.alpha, region); for (let i = 0; i < solid.length; i++) if (surfaces[i]) solid[i] = 1; }
   if (!region.frameFilling) {
     // Keep the large product components only (no floating fragments).
     const { labels, sizes } = components(solid, w, h), largest = Math.max(0, ...sizes.slice(1));
@@ -387,7 +424,9 @@ export async function resolveMatte(input: ResolveMatteInput): Promise<MatteResol
   const { prepared: p, first } = input, actions: AutoAction[] = [], trigger: OutputFlag[] = ["product_removed"];
   const record = (step: AutoAction["step"], result: AutoAction["result"], detail: string) => actions.push({ step, trigger: [...trigger], result, channels: [], rejudged: false, detail });
   if (first.source !== "model") return { matte: first, passthrough: false, actions };
-  const check = (m: Matte) => checkMatteIntegrity(p, m, { handRule: input.handRule });
+  // Every matte tried is kept: skin one of them cut through stays product in the pass-through.
+  const region = backgroundRegion(p), tried: Matte[] = [];
+  const check = (m: Matte) => { tried.push(m); return checkMatteIntegrity(p, m, { handRule: input.handRule, region }); };
   const verdict = check(first);
   if (verdict.ok) return { matte: first, passthrough: false, actions };
   record("matte_check", "failed", `${first.model}: ${verdict.detail}`);
@@ -400,5 +439,5 @@ export async function resolveMatte(input: ResolveMatteInput): Promise<MatteResol
     if (result.ok) return { matte, passthrough: false, actions };
   }
   record("matte_passthrough", "passed", "no cut-out kept the product; the whole frame is used");
-  return { matte: passthroughMatte(p), passthrough: true, actions };
+  return { matte: passthroughMatte(p, tried), passthrough: true, actions };
 }
