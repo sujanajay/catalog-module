@@ -6,8 +6,10 @@ pool=catalog-test-render05
 region=us-central1
 resource="projects/image-links-agent/locations/$region/workerPools/$pool"
 # A failed list is an access/API error, not permission to try creation.
-existing=$(gcloud builds worker-pools list --project=image-links-agent --region="$region" --filter="name=$resource" --format='value(name)')
-if [[ -z "$existing" ]]; then
+# gcloud 589 prints short names from list and a full-name filter does not match, so list all
+# and compare basenames (docs/solutions/gcloud-list-names.md).
+existing=$(gcloud builds worker-pools list --project=image-links-agent --region="$region" --format='value(name)' | tr -d '\r' | sed 's#.*/##')
+if ! grep -qxF "$pool" <<<"$existing"; then
   gcloud builds worker-pools create "$pool" --project=image-links-agent --region="$region" \
     --worker-machine-type=e2-standard-8 --worker-disk-size=100GB
 fi
