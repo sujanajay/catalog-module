@@ -100,6 +100,28 @@ describe("enqueueTask", () => {
     expect(req.task.httpRequest.url).toBe(`${WORKER}/tasks/catalog/ingest`);
   });
 
+  it("sends ingest tasks to TASKS_INGEST_QUEUE when set and every other route to TASKS_QUEUE", async () => {
+    const { client, createTask } = fakeClient();
+    const split = { ...env, TASKS_INGEST_QUEUE: "catalog-ingest" };
+    await enqueueTask("/tasks/catalog/ingest", { batchId: "b1", uploadId: "u1" }, { env: split, client, taskId: "ingest-u1-r1" });
+    await enqueueTask("/tasks/catalog/chunk", { batchId: "b1" }, { env: split, client });
+    const reqs = createTask.mock.calls.map(([req]) => req as { parent: string; task: BuiltTask });
+    expect(reqs[0]!.parent).toBe("projects/image-links-agent/locations/asia-south1/queues/catalog-ingest");
+    expect(reqs[0]!.task.name).toBe("projects/image-links-agent/locations/asia-south1/queues/catalog-ingest/tasks/ingest-u1-r1");
+    expect(reqs[0]!.task.httpRequest.url).toBe(`${WORKER}/tasks/catalog/ingest`);
+    expect(reqs[1]!.parent).toBe(QUEUE);
+    // Same worker endpoint and OIDC identity on both queues.
+    expect(reqs[0]!.task.httpRequest.oidcToken).toEqual(reqs[1]!.task.httpRequest.oidcToken);
+  });
+
+  it("keeps ingest tasks on TASKS_QUEUE (or the default) when TASKS_INGEST_QUEUE is unset", async () => {
+    const { client, createTask } = fakeClient();
+    await enqueueTask("/tasks/catalog/ingest", { batchId: "b1" }, { env, client });
+    const { TASKS_QUEUE: _unused, ...noQueue } = env;
+    await enqueueTask("/tasks/catalog/ingest", { batchId: "b1" }, { env: noQueue, client });
+    expect(createTask.mock.calls.map(([req]) => (req as { parent: string }).parent)).toEqual([QUEUE, QUEUE]);
+  });
+
   it("treats ALREADY_EXISTS for a named task as deduplicated", async () => {
     const createTask = vi.fn().mockRejectedValue(Object.assign(new Error("6 ALREADY_EXISTS"), { code: 6 }));
     const client = { createTask } as unknown as TasksClientLike;
