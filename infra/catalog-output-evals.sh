@@ -13,6 +13,10 @@
 #   bash infra/catalog-output-evals.sh run [--live] [cli flags...]
 #                                                        # one execution; --live adds the live judge (spends credit)
 #   bash infra/catalog-output-evals.sh run --write-policy  # also writes the cut-out model winners to model_policy
+#   bash infra/catalog-output-evals.sh run --resume <run>  # continue a run that stopped: the run id is the first
+#                                                        # line of its job log ("Run id: evals-..."); sets already
+#                                                        # recorded under catalog-test/evals/<run>/sets/ are skipped
+#   bash infra/catalog-output-evals.sh run --sets anta.footwear,penti.apparel_flat   # only these brand.category sets
 # PowerShell equivalent (from the repo root):
 #   & "$env:LOCALAPPDATA\Programs\Git\bin\bash.exe" infra/catalog-output-evals.sh run
 # Secret values are never read or printed.
@@ -80,8 +84,9 @@ run() {
   joined=$(printf '%s|' run "$@"); joined="^|^${joined%|}"
   echo "==> $JOB: EXECUTE run $* $([ "$live" = 1 ] && echo '(LIVE_SMOKE=1, live judge calls)')"
   MSYS2_ARG_CONV_EXCL='--args=' gcloud run jobs execute "$JOB" --region="$REGION" --args="$joined" "${env_flags[@]}" --wait
-  echo "Report: gs://$ASSETS_BUCKET/catalog-test/evals/<run>/report.html; the summary line is in the job log:"
-  echo "  gcloud logging read 'resource.type=cloud_run_job AND resource.labels.job_name=$JOB AND textPayload:\"Output-quality eval\"' --limit=5 --freshness=6h"
+  echo "Report: gs://$ASSETS_BUCKET/catalog-test/evals/<run>/report.html; the run id and the summary line are in the job log:"
+  echo "  gcloud logging read 'resource.type=cloud_run_job AND resource.labels.job_name=$JOB AND (textPayload:\"Run id:\" OR textPayload:\"Output-quality eval\")' --limit=5 --freshness=6h"
+  echo "If the execution stopped early: bash infra/catalog-output-evals.sh run --resume <run id>"
 }
 
 case "${1:-}" in

@@ -3,6 +3,8 @@
 // golden set through the shipped pipeline handlers (real storage, matting and public reads, test
 // batches only), measures every output against the spec 10 bars, scores every deployed cut-out model
 // on the golden categories, and writes report.json and report.html under catalog-test/evals/<run>/.
+// Each (brand, category) set is recorded under catalog-test/evals/<run>/sets/ as soon as it finishes,
+// so `run --resume <run>` continues after a failure instead of starting over.
 // The judge is mocked unless LIVE_SMOKE=1 (set by the infra script for one execution). Model ids
 // appear in the JSON report and the console only, never in operator copy.
 import assert from "node:assert/strict";
@@ -12,7 +14,7 @@ import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import sharp from "sharp";
-import { and, eq, inArray } from "drizzle-orm";
+import { and, eq, inArray, like } from "drizzle-orm";
 import { closeDb, getDb, type Db } from "@catalog/core/db/client";
 import { catalogBatches, catalogBatchProducts, catalogChunks, catalogOutputs, catalogProductEvents, catalogProducts, catalogSourceImages, catalogUploads, DEFAULT_BATCH_OPTIONS, modelPolicy, type CatalogBatch, type CatalogOutput } from "@catalog/core/db/schema";
 import { runIngest } from "@catalog/core/catalog/ingest/index";
@@ -35,7 +37,8 @@ import { checkAttention, checkCompleteness, checkIdentical, checkOverwrite, chec
 import { checkMatte, consensusMetrics } from "@catalog/core/catalog/evals/cutout";
 import { sheetNotes } from "@catalog/core/catalog/evals/sheet-notes";
 import { buildGolden, GOLDEN_MANIFEST_PATH, goldenCounts, goldenSourcePath, parseGolden, readGoldenBytes, serializeGolden, sha256, type GoldenBuild, type GoldenEntry, type GoldenManifest } from "@catalog/core/catalog/evals/golden";
-import { policyRowsFor, winnersByScope, type MatteTrial } from "@catalog/core/catalog/evals/matte-bakeoff";
+import { policyRowsFor, winnersByScope } from "@catalog/core/catalog/evals/matte-bakeoff";
+import { EVALS_PREFIX, parseSetRecord, parseSetsFlag, RUN_ID_PATTERN, selectSets, serializeSetRecord, setId, setRecordPath, setsPrefix, withEvalRetry, type SetRecord } from "@catalog/core/catalog/evals/progress";
 import { buildReport, reportHtml, type ReportThumb } from "@catalog/core/catalog/evals/report";
 import { buildZip } from "../../../packages/core/test-fixtures/catalog/ingest-a/builders";
 import { workerCatalogDeps, type CatalogDeps } from "./catalog/deps";
@@ -48,10 +51,12 @@ import { changeOnePixel } from "./catalog-real-fixtures";
 const USAGE = `Usage: catalog:output-evals <command>
   build-golden [--build <golden-build.json>] [--out <golden-manifest.json>] [--root name=path ...]
   upload [--manifest <golden-manifest.json>] [--root name=path ...]      (copies the pinned photos under catalog-test/evals/golden/)
-  run [--limit <products>] [--brand <slug>] [--bakeoff-sample <n>] [--skip-bakeoff] [--skip-overwrite] [--write-policy]
+  run [--resume <run>] [--sets <brand.category,...>] [--limit <products>] [--brand <slug>] [--bakeoff-sample <n>] [--skip-bakeoff] [--skip-overwrite] [--write-policy]
+      (--resume continues a run from its recorded sets; --sets runs only the named sets, for example anta.footwear)
   check-folder --dir <root> --product-type <type> [--only <ids>] [--out <dir>]   (raw/, mattes/, outputs/<product>/<channel>/ layout; no GCP)`;
 const FIXTURES = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../packages/core/test-fixtures/catalog/evals");
-const EVALS_PREFIX = "catalog-test/evals";
+/** Every direct storage call of the eval path retries transient network errors (five attempts). */
+const gcs = withEvalRetry(storage);
 
 function parseArgs(argv: string[]) {
   const words: string[] = [], flags: Record<string, string | string[] | true> = {};
@@ -101,12 +106,12 @@ async function uploadCommand(flags: Record<string, string | string[] | true>) {
     const objectPath = goldenSourcePath(entry);
     assertTestPrefix(objectPath);
     const bytes = await readGoldenBytes(manifest, entry);
-    const head = await storage.headObject(storage.toGsUri(storage.getBucketName(), objectPath));
+    const head = await gcs.headObject(storage.toGsUri(storage.getBucketName(), objectPath));
     if (head.exists && head.size === bytes.length) { kept++; continue; }
-    await storage.uploadBuffer(objectPath, bytes, entry.mime);
+    await gcs.uploadBuffer(objectPath, bytes, entry.mime);
     uploaded++;
   }
-  await storage.uploadBuffer(GOLDEN_MANIFEST_PATH, Buffer.from(serializeGolden(manifest)), "application/json");
+  await gcs.uploadBuffer(GOLDEN_MANIFEST_PATH, Buffer.from(serializeGolden(manifest)), "application/json");
   print({ uploaded, kept, manifest: `gs://${storage.getBucketName()}/${GOLDEN_MANIFEST_PATH}`, ...goldenCounts(manifest) });
 }
 
@@ -114,12 +119,13 @@ interface Group { brand: string; brandName: string; category: Exclude<ProductTyp
 interface BatchRun { batch: CatalogBatch; group: Group; products: Map<string, { id: string; pathKey: string; productType: string | null; change: string | null }>; sources: (typeof catalogSourceImages.$inferSelect)[]; outputs: CatalogOutput[]; xlsx: Buffer; report: Record<string, unknown> }
 
 const BRAND_NAMES: Record<string, string> = { anta: "Anta", french_connection: "French Connection", penti: "Penti", vero_moda: "Vero Moda", test_brand: "Test Brand" };
+const batchName = (run: string, group: Group, label: string) => `catalog-test output-evals ${run} ${group.category} ${label}`;
 
 /** Runs one test batch through ingest, matte, render, qa, publish and finalize with the shipped handlers. */
 async function runBatch(db: Db, deps: CatalogDeps, run: string, group: Group, files: { path: string; data: Buffer }[], channels: ChannelId[], label: string): Promise<CatalogBatch> {
-  const [created] = await db.insert(catalogBatches).values({ brandSlug: group.brand, brandName: group.brandName, name: `catalog-test output-evals ${run} ${group.category} ${label}`, isTest: true, createdBy: "catalog-output-evals@opptra.com", productType: group.category, channels, options: { ...DEFAULT_BATCH_OPTIONS, qaCapUsd: null } }).returning();
+  const [created] = await db.insert(catalogBatches).values({ brandSlug: group.brand, brandName: group.brandName, name: batchName(run, group, label), isTest: true, createdBy: "catalog-output-evals@opptra.com", productType: group.category, channels, options: { ...DEFAULT_BATCH_OPTIONS, qaCapUsd: null } }).returning();
   const b = created!, prefix = batchPrefix(b.brandSlug, b.id, true);
-  const uri = await storage.uploadBuffer(`${prefix}/uploads/${randomUUID()}/photos.zip`, buildZip(files), "application/zip");
+  const uri = await gcs.uploadBuffer(`${prefix}/uploads/${randomUUID()}/photos.zip`, buildZip(files), "application/zip");
   const [upload] = await db.insert(catalogUploads).values({ batchId: b.id, kind: "zip", name: "photos.zip", gcsUri: uri, status: "uploaded" }).returning();
   const queue: Record<string, unknown>[] = [{ batchId: b.id, uploadId: upload!.id }];
   while (queue.length) {
@@ -146,7 +152,7 @@ async function collect(db: Db, batch: CatalogBatch, group: Group): Promise<Batch
   const products = new Map(pairs.map(({ pair, product }) => [product.id, { id: product.id, pathKey: product.pathKey, productType: product.productType, change: pair.change }]));
   const sources = await db.select().from(catalogSourceImages).where(eq(catalogSourceImages.batchId, batch.id));
   const outputs = await db.select().from(catalogOutputs).where(eq(catalogOutputs.batchId, batch.id));
-  const xlsx = (await storage.downloadBuffer(batch.sheetXlsxUri!)).buf, report = JSON.parse((await storage.downloadBuffer(batch.reportUri!)).buf.toString()) as Record<string, unknown>;
+  const xlsx = (await gcs.downloadBuffer(batch.sheetXlsxUri!)).buf, report = JSON.parse((await gcs.downloadBuffer(batch.reportUri!)).buf.toString()) as Record<string, unknown>;
   return { batch, group, products, sources, outputs, xlsx, report };
 }
 
@@ -158,145 +164,217 @@ async function mapLimit<T, R>(items: readonly T[], limit: number, fn: (item: T, 
   return out;
 }
 
+/** Contact-sheet size, so a set record stays small and the HTML report needs no original bytes. */
+const shrink = (bytes: Buffer): Promise<Buffer | null> => sharp(bytes).resize(240, 320, { fit: "inside", withoutEnlargement: true }).jpeg({ quality: 80 }).toBuffer().catch(() => null);
+
+/**
+ * Removes every test batch this run made for the set (both overwrite passes included) and checks
+ * that no public object of its products is left. Also called before a set runs, so a crashed earlier
+ * attempt of the same run never leaves locked products or stray objects behind.
+ */
+async function cleanupSetBatches(db: Db, run: string, group: Group): Promise<void> {
+  const rows = await db.select().from(catalogBatches).where(and(eq(catalogBatches.brandSlug, group.brand), eq(catalogBatches.isTest, true), like(catalogBatches.name, `${batchName(run, group, "")}%`)));
+  const batchIds = rows.filter(b => !b.options.cleanedUp).map(b => b.id);
+  if (!batchIds.length) return;
+  const owned = await db.select({ brandSlug: catalogProducts.brandSlug, pathKey: catalogProducts.pathKey }).from(catalogProducts).innerJoin(catalogBatchProducts, eq(catalogProducts.id, catalogBatchProducts.productId)).where(inArray(catalogBatchProducts.batchId, batchIds));
+  const cleanup = await cleanupTestBatches(db, storage, batchIds);
+  for (const product of owned) assert.deepEqual(await gcs.listObjects(storage.toGsUri(storage.getPublicBucketName(), productPrefix(product.brandSlug, product.pathKey, true))), [], `Cleanup left public objects for ${product.pathKey}.`);
+  console.info(JSON.stringify({ set: setId(group.brand, group.category), batches: batchIds.length, cleanup }));
+}
+
+interface RunContext {
+  db: Db; deps: CatalogDeps; run: string; channels: ChannelId[];
+  expectOf: Map<string, Expectation>; plantedOf: Map<string, { n: number; from: string }>;
+  work: { matte: number; render: number; copy: number };
+  /** Deployed cut-out models for the bake-off; empty with --skip-bakeoff. */
+  models: { id: string; target: "cpu" | "gpu" }[]; bakeoffSample: number;
+  skipOverwrite: boolean; overwriteDone: boolean;
+}
+
+/**
+ * One (brand, category) set end to end: its test batch, the completeness and image checks, the
+ * overwrite contract when it is the first eligible set, the bake-off trials, then cleanup. A failure
+ * anywhere makes a "failed" record (with the error, no results) instead of ending the run.
+ */
+async function runSet(ctx: RunContext, group: Group): Promise<SetRecord> {
+  const { db, deps, run, channels } = ctx, set = setId(group.brand, group.category), startedAt = new Date();
+  const record: SetRecord = { set, brand: group.brand, category: group.category, status: "done", error: null, startedAt: startedAt.toISOString(), finishedAt: startedAt.toISOString(), photos: group.entries.length, products: new Set(group.entries.map(e => e.identifier)).size, results: [], thumbs: [], deterministicPass: [], attentionRows: [], attentionProducts: [], trials: [], overwriteRan: false, batches: [] };
+  const strip = (identifier: string) => identifier.startsWith(`${run}-`) ? identifier.slice(run.length + 1) : identifier;
+  const deterministicPass = new Set<string>(), prepared = new Map<string, { p: Prepared; alpha: Buffer; entry: GoldenEntry }>();
+  try {
+    await cleanupSetBatches(db, run, group);
+    const files = await mapLimit(group.entries, 4, async e => ({ path: `${run}-${e.identifier}_${e.n}.${e.source.path.split(".").pop()!.toLowerCase()}`, data: (await gcs.downloadBuffer(storage.toGsUri(storage.getBucketName(), goldenSourcePath(e)))).buf }));
+    console.info(`evals: ${set}: ${files.length} photos, ${record.products} products`);
+    const batch = await runBatch(db, deps, run, group, files, channels, "first");
+    record.batches.push(batch.id);
+    const collected = await collect(db, batch, group);
+    const { products, sources, outputs, xlsx } = collected;
+    const identifierOf = (productId: string) => strip(products.get(productId)?.pathKey ?? "");
+
+    // Completeness over rows, public objects, staged files and the sheet.
+    const publicHeads = new Map<string, Awaited<ReturnType<typeof storage.headObject>>>(), stagingHeads = new Map<string, Awaited<ReturnType<typeof storage.headObject>>>();
+    await mapLimit(outputs, 8, async o => {
+      if (o.status !== "skipped") publicHeads.set(o.publicUrl, await gcs.headObject(storage.toGsUri(storage.getPublicBucketName(), o.objectPath)));
+      if (o.stagingUri) stagingHeads.set(o.stagingUri, await gcs.headObject(o.stagingUri));
+    });
+    const links = await readSheetLinks(xlsx), notes = await sheetNotes(xlsx);
+    record.results.push(...checkCompleteness({
+      channels, sources: sources.map(s => ({ identifier: identifierOf(s.productId), n: s.n, width: s.width, height: s.height })),
+      outputs: outputs.map(o => ({ identifier: identifierOf(o.productId), n: o.n, channel: o.channel, status: o.status, isLive: o.isLive, reason: o.reason, generation: o.generation, bytes: o.bytes, crc32c: o.crc32c, publicUrl: o.publicUrl, stagingUri: o.stagingUri })),
+      publicHeads, stagingHeads, sheet: links.links.map(l => ({ identifier: strip(l.identifier), channel: l.channel, n: l.n, url: l.url })),
+      sheetNotes: new Map([...notes].map(([id, note]) => [strip(id), note])), counts: { outputs: batch.counts.outputs, verified: batch.counts.verified, skipped: batch.counts.skipped, recheckOk: batch.counts.recheckOk, recheckTotal: batch.counts.recheckTotal },
+    }));
+
+    // Image checks on every made output.
+    const byProduct = new Map<string, { n: number; scale: number; detailShot: boolean }[]>();
+    await mapLimit(sources, 3, async source => {
+      const identifier = identifierOf(source.productId), entry = group.entries.find(e => e.identifier === identifier && e.n === source.n);
+      if (!entry || !source.matteUri) return;
+      const raw = (await gcs.downloadBuffer(source.rawUri)).buf;
+      const p = await prepare(raw, source.originalName, b => deps.matting.convert(b));
+      const alpha = await sharp((await gcs.downloadBuffer(source.matteUri)).buf).toColourspace("b-w").raw().toBuffer();
+      prepared.set(`${identifier}_${source.n}`, { p, alpha, entry });
+      const box = bbox(alpha, p.width, p.height);
+      for (const o of outputs.filter(o => o.sourceImageId === source.id && o.stagingUri)) {
+        const jpeg = (await gcs.downloadBuffer(o.stagingUri!)).buf;
+        const subject: OutputSubject = { identifier, n: source.n, channel: o.channel, productType: (products.get(source.productId)?.productType ?? group.category) as ProductType, source: { w: p.width, h: p.height, rgb: p.rgb }, sourceBackground: p.background, alpha, jpeg, placement: { w: o.canvasW, h: o.canvasH, scale: Number(o.scale), placedX: o.placedX, placedY: o.placedY }, flags: o.flags, status: o.status, expect: entry.expect };
+        const checks = await runImageChecks(subject);
+        record.results.push(...checks);
+        if (checks.every(c => c.ok)) deterministicPass.add(outputKey(identifier, o.channel, source.n));
+        if (checks.some(c => !c.ok)) record.thumbs.push({ identifier, n: source.n, channel: o.channel, original: await shrink(raw), output: await shrink(jpeg) });
+        if (o.channel === "styli" && box) byProduct.set(identifier, [...byProduct.get(identifier) ?? [], { n: source.n, scale: Number(o.scale), detailShot: box.w / p.width > 0.85 || box.h / p.height > 0.85 }]);
+      }
+    });
+    for (const [identifier, shots] of byProduct) record.results.push(checkUniformScale(identifier, shots));
+    record.deterministicPass = [...deterministicPass];
+
+    // Rows for the attention checks and the flag table.
+    for (const o of outputs) record.attentionRows.push({ identifier: identifierOf(o.productId), n: o.n, channel: o.channel, status: o.status, flags: o.flags, reason: o.reason, qaScores: o.qaScores, qaModel: o.qaModel, decision: o.decision, compliance: o.compliance as { ok: boolean; failures: string[] } | null });
+    for (const [, product] of products) { const identifier = strip(product.pathKey); record.attentionProducts.push({ identifier, change: product.change, productType: product.productType, expect: ctx.expectOf.get(identifier) ?? { attention: false, flags: [], detector: "code" }, planted: ctx.plantedOf.get(identifier) ?? null }); }
+
+    // Overwrite contract on the first set with a product of three or more shots.
+    if (!ctx.skipOverwrite && !ctx.overwriteDone && [...sources.reduce((m, s) => m.set(s.productId, (m.get(s.productId) ?? 0) + 1), new Map<string, number>()).values()].some(n => n >= 3)) {
+      record.results.push(...await overwritePasses(db, deps, run, collected, ctx.work, record.batches));
+      record.overwriteRan = true;
+      ctx.overwriteDone = true;
+    }
+
+    // Matting bake-off: every deployed model on a sample of this set's sources.
+    const keys = [...new Set(group.entries.filter(e => !e.planted).map(e => `${e.identifier}_${e.n}`))].filter(k => prepared.has(k)).slice(0, ctx.bakeoffSample);
+    // Every model mattes each sampled source; the metrics compare each matte with the source colours
+    // and with the majority of the other models, so models that all pass the bars still separate.
+    if (ctx.models.length) await mapLimit(keys, 3, async k => {
+      const { p, entry } = prepared.get(k)!, mattes: { model: string; target: "cpu" | "gpu"; ms: number; alpha: Buffer }[] = [];
+      await mapLimit(ctx.models, ctx.models.length, async m => {
+        try { const matte = await matteFor(p, deps.matting, m.id); mattes.push({ model: m.id, target: matte.target ?? m.target, ms: matte.ms, alpha: matte.alpha }); }
+        catch (error) { console.info(JSON.stringify({ message: "bakeoff matte failed", model: m.id, source: k, error: error instanceof Error ? error.message : String(error) })); }
+      });
+      for (const matte of mattes) {
+        const { results: r, metrics } = checkMatte({ identifier: entry.identifier, n: entry.n, source: { w: p.width, h: p.height, rgb: p.rgb }, sourceBackground: p.background, alpha: matte.alpha });
+        const consensus = consensusMetrics(matte.alpha, mattes.filter(o => o !== matte).map(o => o.alpha));
+        record.trials.push({ brand: group.brand, category: group.category, identifier: entry.identifier, n: entry.n, model: matte.model, target: matte.target, ms: matte.ms, results: r, metrics: { ...metrics, ...consensus }, tags: entry.tags });
+      }
+    });
+  } catch (error) {
+    failSet(record, error);
+  } finally {
+    try { await cleanupSetBatches(db, run, group); } catch (error) { failSet(record, error, "cleanup"); }
+  }
+  record.finishedAt = new Date().toISOString();
+  return record;
+}
+
+/** Marks the record failed and drops its partial results; the report lists the set with its error. */
+function failSet(record: SetRecord, error: unknown, stage?: string): void {
+  const message = `${stage ? `${stage}: ` : ""}${error instanceof Error ? error.message : String(error)}`;
+  console.error(`evals: ${record.set} failed: ${error instanceof Error ? error.stack ?? error.message : String(error)}`);
+  record.status = "failed";
+  record.error = record.error ? `${record.error}; ${message}` : message;
+  record.results = []; record.thumbs = []; record.deterministicPass = []; record.attentionRows = []; record.attentionProducts = []; record.trials = []; record.overwriteRan = false;
+}
+
 async function runCommand(db: Db, flags: Record<string, string | string[] | true>) {
-  const run = `evals-${runId()}`, started = new Date(), live = liveQaEnabled();
+  const resume = flags.resume === undefined ? undefined : str(flags.resume);
+  assert(flags.resume === undefined || (resume && RUN_ID_PATTERN.test(resume)), "--resume needs the run id printed at the start of the earlier run, for example evals-20261020013422-a1b2c3.");
+  const run = resume ?? `evals-${runId()}`, live = liveQaEnabled();
+  console.info(`Run id: ${run}${resume ? " (resumed)" : ""}. If this run stops early, continue it with: run --resume ${run}`);
   const out = path.resolve(process.env.CATALOG_REAL_OUT ?? `var/catalog-test/${run}`);
   await mkdir(out, { recursive: true });
-  const manifest = parseGolden((await storage.downloadBuffer(storage.toGsUri(storage.getBucketName(), GOLDEN_MANIFEST_PATH))).buf.toString("utf8"));
+  const manifest = parseGolden((await gcs.downloadBuffer(storage.toGsUri(storage.getBucketName(), GOLDEN_MANIFEST_PATH))).buf.toString("utf8"));
   const limit = flags.limit ? Number(flags.limit) : Infinity, brandFilter = str(flags.brand);
   const base = workerCatalogDeps(db), work = { matte: 0, render: 0, copy: 0 };
   const deps: CatalogDeps = { ...base, ...(live ? {} : cannedQa), enqueue: async () => "evals-inline", log: (message, fields) => console.info(JSON.stringify({ message, ...fields })),
     matteFor: async (...args) => { work.matte++; return base.matteFor(...args); }, renderAllChannels: async (...args) => { work.render++; return base.renderAllChannels(...args); },
     storage: { ...storage, stageCopyToPublic: async (...args) => { work.copy++; return storage.stageCopyToPublic(...args); } } };
-  const channels = [...CHANNEL_IDS], results: CheckResult[] = [], thumbs: ReportThumb[] = [], batchIds: string[] = [];
-  const strip = (identifier: string) => identifier.startsWith(`${run}-`) ? identifier.slice(run.length + 1) : identifier;
-  const expectOf = new Map<string, Expectation>(), plantedOf = new Map<string, { n: number; from: string }>(), tagsOf = new Map<string, string[]>();
-  for (const e of manifest.entries) { expectOf.set(e.identifier, e.expect); tagsOf.set(`${e.identifier}_${e.n}`, e.tags); if (e.planted) plantedOf.set(e.identifier, { n: e.n, from: e.planted.from }); }
-  // Groups: one test batch per (brand, category); the product type is forced so the shadow rule follows the golden category.
+  const expectOf = new Map<string, Expectation>(), plantedOf = new Map<string, { n: number; from: string }>();
+  for (const e of manifest.entries) { expectOf.set(e.identifier, e.expect); if (e.planted) plantedOf.set(e.identifier, { n: e.n, from: e.planted.from }); }
+  // Sets: one test batch per (brand, category); the product type is forced so the shadow rule follows the golden category.
   const groups = new Map<string, Group>();
   for (const e of manifest.entries) {
     if (brandFilter && e.brand !== brandFilter) continue;
-    const key = `${e.brand}|${e.category}`;
+    const key = setId(e.brand, e.category);
     groups.set(key, groups.get(key) ?? { brand: e.brand, brandName: BRAND_NAMES[e.brand] ?? e.brand, category: e.category, entries: [] });
     groups.get(key)!.entries.push(e);
   }
   if (Number.isFinite(limit)) for (const g of groups.values()) { const ids = [...new Set(g.entries.map(e => e.identifier))].slice(0, limit); g.entries = g.entries.filter(e => ids.includes(e.identifier)); }
-  const attentionRows: Parameters<typeof checkAttention>[0]["outputs"] = [], attentionProducts: Parameters<typeof checkAttention>[0]["products"] = [];
-  const deterministicPass = new Set<string>(), runs: BatchRun[] = [], prepared = new Map<string, { p: Prepared; alpha: Buffer; raw: Buffer; entry: GoldenEntry }>();
-  let failure: unknown;
-  try {
-    for (const group of groups.values()) {
-      const files = await Promise.all(group.entries.map(async e => ({ path: `${run}-${e.identifier}_${e.n}.${e.source.path.split(".").pop()!.toLowerCase()}`, data: (await storage.downloadBuffer(storage.toGsUri(storage.getBucketName(), goldenSourcePath(e)))).buf })));
-      console.info(`evals: ${group.brand} ${group.category}: ${files.length} photos, ${new Set(group.entries.map(e => e.identifier)).size} products`);
-      const batch = await runBatch(db, deps, run, group, files, channels, "first");
-      batchIds.push(batch.id);
-      const collected = await collect(db, batch, group);
-      runs.push(collected);
-      const { products, sources, outputs, xlsx, report } = collected;
-      const identifierOf = (productId: string) => strip([...products.entries()].find(([id]) => id === productId)?.[1].pathKey ?? "");
+  const all = [...groups.keys()];
 
-      // Completeness over rows, public objects, staged files and the sheet.
-      const publicHeads = new Map<string, Awaited<ReturnType<typeof storage.headObject>>>(), stagingHeads = new Map<string, Awaited<ReturnType<typeof storage.headObject>>>();
-      await mapLimit(outputs, 8, async o => {
-        if (o.status !== "skipped") publicHeads.set(o.publicUrl, await storage.headObject(storage.toGsUri(storage.getPublicBucketName(), o.objectPath)));
-        if (o.stagingUri) stagingHeads.set(o.stagingUri, await storage.headObject(o.stagingUri));
-      });
-      const links = await readSheetLinks(xlsx), notes = await sheetNotes(xlsx);
-      results.push(...checkCompleteness({
-        channels, sources: sources.map(s => ({ identifier: identifierOf(s.productId), n: s.n, width: s.width, height: s.height })),
-        outputs: outputs.map(o => ({ identifier: identifierOf(o.productId), n: o.n, channel: o.channel, status: o.status, isLive: o.isLive, reason: o.reason, generation: o.generation, bytes: o.bytes, crc32c: o.crc32c, publicUrl: o.publicUrl, stagingUri: o.stagingUri })),
-        publicHeads, stagingHeads, sheet: links.links.map(l => ({ identifier: strip(l.identifier), channel: l.channel, n: l.n, url: l.url })),
-        sheetNotes: new Map([...notes].map(([id, note]) => [strip(id), note])), counts: { outputs: batch.counts.outputs, verified: batch.counts.verified, skipped: batch.counts.skipped, recheckOk: batch.counts.recheckOk, recheckTotal: batch.counts.recheckTotal },
-      }));
-
-      // Image checks on every made output.
-      const byProduct = new Map<string, { n: number; scale: number; detailShot: boolean }[]>();
-      await mapLimit(sources, 3, async source => {
-        const identifier = identifierOf(source.productId), entry = group.entries.find(e => e.identifier === identifier && e.n === source.n);
-        if (!entry || !source.matteUri) return;
-        const raw = (await storage.downloadBuffer(source.rawUri)).buf;
-        const p = await prepare(raw, source.originalName, b => deps.matting.convert(b));
-        const alpha = await sharp((await storage.downloadBuffer(source.matteUri)).buf).toColourspace("b-w").raw().toBuffer();
-        prepared.set(`${identifier}_${source.n}`, { p, alpha, raw, entry });
-        const box = bbox(alpha, p.width, p.height);
-        for (const o of outputs.filter(o => o.sourceImageId === source.id && o.stagingUri)) {
-          const jpeg = (await storage.downloadBuffer(o.stagingUri!)).buf;
-          const subject: OutputSubject = { identifier, n: source.n, channel: o.channel, productType: (products.get(source.productId)?.productType ?? group.category) as ProductType, source: { w: p.width, h: p.height, rgb: p.rgb }, sourceBackground: p.background, alpha, jpeg, placement: { w: o.canvasW, h: o.canvasH, scale: Number(o.scale), placedX: o.placedX, placedY: o.placedY }, flags: o.flags, status: o.status, expect: entry.expect };
-          const checks = await runImageChecks(subject);
-          results.push(...checks);
-          if (checks.every(c => c.ok)) deterministicPass.add(outputKey(identifier, o.channel, source.n));
-          if (checks.some(c => !c.ok)) thumbs.push({ identifier, n: source.n, channel: o.channel, original: raw, output: jpeg });
-          if (o.channel === "styli" && box) byProduct.set(identifier, [...byProduct.get(identifier) ?? [], { n: source.n, scale: Number(o.scale), detailShot: box.w / p.width > 0.85 || box.h / p.height > 0.85 }]);
-        }
-      });
-      for (const [identifier, shots] of byProduct) results.push(checkUniformScale(identifier, shots));
-
-      // Rows for the attention checks and the flag table.
-      for (const o of outputs) attentionRows.push({ identifier: identifierOf(o.productId), n: o.n, channel: o.channel, status: o.status, flags: o.flags, reason: o.reason, qaScores: o.qaScores, qaModel: o.qaModel, decision: o.decision, compliance: o.compliance as { ok: boolean; failures: string[] } | null });
-      for (const [, product] of products) { const identifier = strip(product.pathKey); attentionProducts.push({ identifier, change: product.change, productType: product.productType, expect: expectOf.get(identifier) ?? { attention: false, flags: [], detector: "code" }, planted: plantedOf.get(identifier) ?? null }); }
-      void report;
-    }
-
-    // Overwrite contract on the first group with a product of three or more shots.
-    if (!flags["skip-overwrite"]) {
-      const target = runs.find(r => [...r.sources.reduce((m, s) => m.set(s.productId, (m.get(s.productId) ?? 0) + 1), new Map<string, number>()).values()].some(n => n >= 3));
-      if (target) results.push(...await overwritePasses(db, deps, run, target, work, batchIds));
-      else results.push({ id: "overwrite.same_links", group: "overwrite", subject: { identifier: "*", n: null, channel: null }, ok: true, status: "not_run", measured: null, threshold: null, unit: "", detail: "No golden product with three shots in this run." });
-    }
-
-    // Matting bake-off: every deployed model on a sample of each group's sources.
-    const trials: MatteTrial[] = [];
-    if (!flags["skip-bakeoff"]) {
-      const health = await deps.matting.health(), sample = Number(str(flags["bakeoff-sample"]) ?? 40);
-      const models = [...new Map(health.models.map(m => [m.id, m])).values()];
-      for (const group of groups.values()) {
-        const keys = [...new Set(group.entries.filter(e => !e.planted).map(e => `${e.identifier}_${e.n}`))].filter(k => prepared.has(k)).slice(0, sample);
-        // Every model mattes each sampled source; the metrics compare each matte with the source colours
-        // and with the majority of the other models, so models that all pass the bars still separate.
-        await mapLimit(keys, 3, async k => {
-          const { p, entry } = prepared.get(k)!, mattes: { model: string; target: "cpu" | "gpu"; ms: number; alpha: Buffer }[] = [];
-          await mapLimit(models, models.length, async m => {
-            try { const matte = await matteFor(p, deps.matting, m.id); mattes.push({ model: m.id, target: matte.target ?? m.target, ms: matte.ms, alpha: matte.alpha }); }
-            catch (error) { console.info(JSON.stringify({ message: "bakeoff matte failed", model: m.id, source: k, error: error instanceof Error ? error.message : String(error) })); }
-          });
-          for (const matte of mattes) {
-            const { results: r, metrics } = checkMatte({ identifier: entry.identifier, n: entry.n, source: { w: p.width, h: p.height, rgb: p.rgb }, sourceBackground: p.background, alpha: matte.alpha });
-            const consensus = consensusMetrics(matte.alpha, mattes.filter(o => o !== matte).map(o => o.alpha));
-            trials.push({ brand: group.brand, category: group.category, identifier: entry.identifier, n: entry.n, model: matte.model, target: matte.target, ms: matte.ms, results: r, metrics: { ...metrics, ...consensus }, tags: entry.tags });
-          }
-        });
-      }
-    }
-    const winners = winnersByScope(trials);
-    const existing = await db.select().from(modelPolicy);
-    const policyRows = policyRowsFor(winners, { batchIds, seen: { matte: trials.length ? [...new Map(trials.map(t => [`${t.model}|${t.target}`, { id: t.model, target: t.target }])).values()] : [], judges: qaCandidates() }, existing });
-    const written = policyRows.length ? await writePolicyRows(db, policyRows, flags["write-policy"] !== true) : [];
-
-    const attention = checkAttention({ products: attentionProducts, outputs: attentionRows, deterministicPass, liveJudge: live, threshold: QA_DEFAULT_THRESHOLD });
-    results.push(...attention.results);
-    const counts = goldenCounts(manifest);
-    const report = buildReport({ run, startedAt: started, finishedAt: new Date(), mode: live ? "live judge" : "mocked judge (LIVE_SMOKE is not 1)", golden: { products: counts.products, photos: counts.photos, brands: counts.brands, categories: counts.categories, tags: counts.tags }, results, attention, flags: flagRows(attentionRows, QA_DEFAULT_THRESHOLD), batches: batchIds, includeAll: true });
-    const full = { ...report, matteBakeoff: { trials: trials.length, winners, policyRows: written.map(w => ({ brand: w.row.brandSlug, category: w.row.category, matteModel: w.row.matteModel, outcome: flags["write-policy"] === true ? w.outcome : `dry run (${w.outcome})` })) } };
-    const html = await reportHtml(report, thumbs) + bakeoffHtml(winners, flags["write-policy"] === true);
-    await writeFile(path.join(out, "report.json"), JSON.stringify(full, null, 1));
-    await writeFile(path.join(out, "report.html"), html);
-    for (const [name, body, mime] of [["report.json", JSON.stringify(full), "application/json"], ["report.html", html, "text/html"]] as const) { const objectPath = `${EVALS_PREFIX}/${run}/${name}`; assertTestPrefix(objectPath); await storage.uploadBuffer(objectPath, Buffer.from(body), mime); }
-    console.info(report.summary.line);
-    console.info(`Report: gs://${storage.getBucketName()}/${EVALS_PREFIX}/${run}/report.html (also ${out})`);
-    for (const w of winners) console.info(`matte bake-off ${w.brand}/${w.category}: ${w.winner ? `${w.winner.model} (composite ${w.winner.composite.toFixed(4)}, fail rate ${(w.winner.failRate * 100).toFixed(0)}%)` : "no trials"}${w.runnerUp ? `, runner-up ${w.runnerUp.model}, margin ${w.margin}` : ""} over ${w.sources} sources`);
-    if (!report.summary.passedAll) process.exitCode = 1;
-  } catch (error) { failure = error; }
-  finally {
-    if (batchIds.length) {
-      try {
-        const owned = await db.select({ brandSlug: catalogProducts.brandSlug, pathKey: catalogProducts.pathKey }).from(catalogProducts).innerJoin(catalogBatchProducts, eq(catalogProducts.id, catalogBatchProducts.productId)).where(inArray(catalogBatchProducts.batchId, batchIds));
-        const cleanup = await cleanupTestBatches(db, storage, batchIds);
-        for (const product of owned) assert.deepEqual(await storage.listObjects(storage.toGsUri(storage.getPublicBucketName(), productPrefix(product.brandSlug, product.pathKey, true))), [], `Cleanup left public objects for ${product.pathKey}.`);
-        console.info(JSON.stringify({ cleanup }));
-      } catch (error) { failure ??= error; }
+  // Progress already recorded under this run id (a resume), then the sets left to run.
+  const stored = new Map<string, SetRecord>();
+  if (resume) {
+    for (const uri of await gcs.listObjects(storage.toGsUri(storage.getBucketName(), setsPrefix(run)))) {
+      if (!uri.endsWith(".json")) continue;
+      const record = parseSetRecord((await gcs.downloadBuffer(uri)).buf.toString("utf8"));
+      stored.set(record.set, record);
     }
   }
-  if (failure) throw failure;
+  const only = flags.sets === undefined ? undefined : parseSetsFlag(str(flags.sets) ?? "", all);
+  const { run: todo, skipped } = selectSets(all, stored, only);
+  console.info(`evals: ${todo.length} set(s) to run${todo.length ? ` (${todo.join(", ")})` : ""}${skipped.length ? `; ${skipped.length} already done in ${run} (${skipped.join(", ")})` : ""}`);
+  const models = flags["skip-bakeoff"] ? [] : [...new Map((await deps.matting.health()).models.map(m => [m.id, m])).values()].map(m => ({ id: m.id, target: m.target }));
+  const ctx: RunContext = { db, deps, run, channels: [...CHANNEL_IDS], expectOf, plantedOf, work, models, bakeoffSample: Number(str(flags["bakeoff-sample"]) ?? 40), skipOverwrite: flags["skip-overwrite"] === true, overwriteDone: [...stored.values()].some(r => r.status === "done" && r.overwriteRan) };
+  for (const id of todo) {
+    const record = await runSet(ctx, groups.get(id)!);
+    stored.set(id, record);
+    const objectPath = setRecordPath(run, id);
+    assertTestPrefix(objectPath);
+    await gcs.uploadBuffer(objectPath, Buffer.from(serializeSetRecord(record)), "application/json");
+    console.info(`evals: ${id}: ${record.status}${record.error ? ` (${record.error})` : ""}; ${record.results.length} checks recorded at gs://${storage.getBucketName()}/${objectPath}`);
+  }
+
+  // The report, from every record of the run (stored and new), in manifest order.
+  const order = (set: string) => (all.includes(set) ? all.indexOf(set) : Infinity);
+  const records = [...stored.values()].sort((a, b) => order(a.set) - order(b.set) || a.set.localeCompare(b.set));
+  const results = records.flatMap(r => r.results), thumbs = records.flatMap(r => r.thumbs), trials = records.flatMap(r => r.trials), batchIds = records.flatMap(r => r.batches);
+  const attentionRows = records.flatMap(r => r.attentionRows), attentionProducts = records.flatMap(r => r.attentionProducts), deterministicPass = new Set(records.flatMap(r => r.deterministicPass));
+  const failedSets = records.filter(r => r.status === "failed");
+  const winners = winnersByScope(trials);
+  const existing = await db.select().from(modelPolicy);
+  const policyRows = policyRowsFor(winners, { batchIds, seen: { matte: trials.length ? [...new Map(trials.map(t => [`${t.model}|${t.target}`, { id: t.model, target: t.target }])).values()] : [], judges: qaCandidates() }, existing });
+  const written = policyRows.length ? await writePolicyRows(db, policyRows, flags["write-policy"] !== true) : [];
+
+  const attention = checkAttention({ products: attentionProducts, outputs: attentionRows, deterministicPass, liveJudge: live, threshold: QA_DEFAULT_THRESHOLD });
+  results.push(...attention.results);
+  const counts = goldenCounts(manifest);
+  const startedAt = new Date(Math.min(Date.now(), ...records.map(r => Date.parse(r.startedAt))));
+  const report = buildReport({ run, startedAt, finishedAt: new Date(), mode: live ? "live judge" : "mocked judge (LIVE_SMOKE is not 1)", golden: { products: counts.products, photos: counts.photos, brands: counts.brands, categories: counts.categories, tags: counts.tags }, results, attention, flags: flagRows(attentionRows, QA_DEFAULT_THRESHOLD), batches: batchIds, includeAll: true });
+  const sets = records.map(r => ({ set: r.set, status: r.status, error: r.error, photos: r.photos, products: r.products, checks: r.results.length, overwriteRan: r.overwriteRan, startedAt: r.startedAt, finishedAt: r.finishedAt }));
+  const full = { ...report, sets, matteBakeoff: { trials: trials.length, winners, policyRows: written.map(w => ({ brand: w.row.brandSlug, category: w.row.category, matteModel: w.row.matteModel, outcome: flags["write-policy"] === true ? w.outcome : `dry run (${w.outcome})` })) } };
+  const html = await reportHtml(report, thumbs) + setsHtml(sets) + bakeoffHtml(winners, flags["write-policy"] === true);
+  await writeFile(path.join(out, "report.json"), JSON.stringify(full, null, 1));
+  await writeFile(path.join(out, "report.html"), html);
+  for (const [name, body, mime] of [["report.json", JSON.stringify(full), "application/json"], ["report.html", html, "text/html"]] as const) { const objectPath = `${EVALS_PREFIX}/${run}/${name}`; assertTestPrefix(objectPath); await gcs.uploadBuffer(objectPath, Buffer.from(body), mime); }
+  console.info(report.summary.line);
+  console.info(`Report: gs://${storage.getBucketName()}/${EVALS_PREFIX}/${run}/report.html (also ${out})`);
+  for (const w of winners) console.info(`matte bake-off ${w.brand}/${w.category}: ${w.winner ? `${w.winner.model} (composite ${w.winner.composite.toFixed(4)}, fail rate ${(w.winner.failRate * 100).toFixed(0)}%)` : "no trials"}${w.runnerUp ? `, runner-up ${w.runnerUp.model}, margin ${w.margin}` : ""} over ${w.sources} sources`);
+  if (failedSets.length) console.error(`evals: ${failedSets.length} set(s) failed (${failedSets.map(r => r.set).join(", ")}); re-run them with: run --resume ${run}`);
+  if (!report.summary.passedAll || failedSets.length) process.exitCode = 1;
+}
+
+function setsHtml(sets: { set: string; status: string; error: string | null; photos: number; products: number; checks: number; overwriteRan: boolean; startedAt: string; finishedAt: string }[]): string {
+  const esc = (v: unknown) => String(v ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]!);
+  const rows = sets.map(s => `<tr><td>${esc(s.set)}</td><td class="${s.status === "done" ? "ok" : "bad"}">${esc(s.status)}</td><td>${s.photos}</td><td>${s.products}</td><td>${s.checks}</td><td>${s.overwriteRan ? "yes" : ""}</td><td>${esc(s.startedAt)}</td><td>${esc(s.finishedAt)}</td><td>${esc(s.error ?? "")}</td></tr>`);
+  return `<h2>Sets (${sets.length})</h2><p>One test batch per brand and category. A failed set carries no checks; re-run it with <code>run --resume &lt;run&gt;</code>.</p><table><thead><tr><th>Set</th><th>Status</th><th>Photos</th><th>Products</th><th>Checks</th><th>Overwrite</th><th>Started</th><th>Finished</th><th>Error</th></tr></thead><tbody>${rows.join("") || "<tr><td colspan=9>No sets.</td></tr>"}</tbody></table>`;
 }
 
 function bakeoffHtml(winners: ReturnType<typeof winnersByScope>, written: boolean): string {
@@ -312,7 +390,7 @@ async function overwritePasses(db: Db, deps: CatalogDeps, run: string, first: Ba
   const identifierOf = (productId: string) => strip(first.products.get(productId)?.pathKey ?? "");
   const liveRows = async (productIds: string[]) => (await db.select().from(catalogOutputs).where(and(inArray(catalogOutputs.productId, productIds), eq(catalogOutputs.isLive, true)))).map(o => ({ identifier: identifierOf(o.productId), n: o.n, channel: o.channel, publicUrl: o.publicUrl, objectPath: o.objectPath, generation: o.generation }));
   const productIds = [...first.products.keys()], before = await liveRows(productIds);
-  const originals = await Promise.all(first.sources.map(async s => ({ source: s, bytes: (await storage.downloadBuffer(s.rawUri)).buf })));
+  const originals = await Promise.all(first.sources.map(async s => ({ source: s, bytes: (await gcs.downloadBuffer(s.rawUri)).buf })));
   const files = (edit?: { alteredId: string; removedId: string; selected: ChannelId[] }) => originals.filter(({ source }) => source.id !== edit?.removedId).map(({ source, bytes }) => ({ path: `${first.products.get(source.productId)!.pathKey}_${source.n}.${source.id === edit?.alteredId ? "png" : source.originalName.split(".").pop()}`, data: bytes, altered: source.id === edit?.alteredId }));
   const changes = async (batchId: string) => new Map((await db.select({ pair: catalogBatchProducts, product: catalogProducts }).from(catalogBatchProducts).innerJoin(catalogProducts, eq(catalogProducts.id, catalogBatchProducts.productId)).where(eq(catalogBatchProducts.batchId, batchId))).map(({ pair, product }) => [strip(product.pathKey), pair.change]));
   const events = async (batchId: string) => (await db.select().from(catalogProductEvents).where(eq(catalogProductEvents.batchId, batchId))).map(e => ({ identifier: identifierOf(e.productId), kind: e.kind }));
@@ -329,7 +407,7 @@ async function overwritePasses(db: Db, deps: CatalogDeps, run: string, first: Ba
   const delivery = await Promise.all(files({ alteredId: changed.id, removedId: removed.id, selected }).map(async f => ({ path: f.path, data: f.altered ? await changeOnePixel(f.data) : f.data })));
   const second = await runBatch(db, deps, run, first.group, delivery, selected, "changed");
   batchIds.push(second.id);
-  const after = await liveRows(productIds), report = JSON.parse((await storage.downloadBuffer(second.reportUri!)).buf.toString()) as { removedLinks: unknown[]; notRefreshedChannels: { channel: ChannelId }[] };
+  const after = await liveRows(productIds), report = JSON.parse((await gcs.downloadBuffer(second.reportUri!)).buf.toString()) as { removedLinks: unknown[]; notRefreshedChannels: { channel: ChannelId }[] };
   const removedGone = new Map<string, boolean>();
   for (const row of before.filter(r => r.identifier === identifierOf(removed.productId) && r.n === removed.n && selected.includes(r.channel))) removedGone.set(row.publicUrl, await gone(row.publicUrl));
   results.push(...checkOverwrite({ before, after, selected, altered: { identifier: identifierOf(changed.productId), n: changed.n }, removed: { identifier: identifierOf(removed.productId), n: removed.n }, changes: await changes(second.id), events: await events(second.id), removedGone, report: { removedLinks: report.removedLinks.length, notRefreshedChannels: report.notRefreshedChannels.map(c => c.channel) }, recheck: { ok: second.counts.recheckOk, total: second.counts.recheckTotal } }));
