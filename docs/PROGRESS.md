@@ -40,7 +40,7 @@ Status values: `todo`, `running`, `done`, `blocked`.
 
 ## Session 2 summary (2026-10-20 01:00 to 06:00 UTC) and hand-off to session 3
 
-- Resume from `docs/plans/2026-10-20-go-live-resume-2.md` (new machine; the prompt, prerequisites, state, rules and ordered next steps are there). This file stays the status log.
+- Resume from `docs/plans/2026-10-20-go-live-resume-2.md` (new machine; the prompt, prerequisites, state, rules and ordered next steps are there). This file stays the status log; PR #40 was merged on 2026-10-20 so it is on main, and session 3 continues it on branch docs/go-live-progress-3.
 - Done: final deploy of `108616a`; quality gate 3 (function PASS, look FAIL) and its three render fixes PRs #41-#43 deployed as `f3d30b1`; eval job hardening PR #44; load driver PR #45; retrospective PR #46; connection budget PR #47 deployed as `e04d7ed`; ingest queue and upload errors PR #48 (deploy `ingest` of `eb01c99`, see the row below and Deployed state).
 - Not done (session 3): quality gate 3c verdict on the current build; eval suite (mocked, live, write-policy) and its calibration; load 270 and recheck; hand-over note figures; PR #40 merge; final report.
 - Inputs and evidence for the new machine: `gs://image-links-agent-assets/catalog-test/handoff/2026-10-20/` holds `qa-gate-3c-input/` (96 photos, b1..b4), `qa-gate-input/` (52 photos) and `evidence/session2/` (gate 3 and 3b evidence, matte harness, deploy and job logs). The Drive sets are not needed for the remaining steps.

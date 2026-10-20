@@ -2,7 +2,7 @@
 
 Written 2026-10-20 by the second manager session, which the owner stopped so that a new laptop
 can take over. A fresh session bootstraps itself from this file plus `docs/PROGRESS.md` (the
-status source of truth, both on branch `docs/go-live-progress`, draft PR #40). Nothing below
+status source of truth; both are on `main` since PR #40 was merged on 2026-10-20). Nothing below
 needs the old machine: the code is on GitHub, the inputs and evidence are in the GCS bucket.
 The earlier file `docs/plans/2026-10-21-go-live-resume.md` is superseded.
 
@@ -19,12 +19,14 @@ exactly what to run and wait.
    Google Cloud CLI, Python 3), enable corepack and pnpm 9.15.0, then clone
    https://github.com/sujanajay/catalog-module into C:\Users\<me>\Desktop\catalog-module, check
    out the latest origin/main, run pnpm install --frozen-lockfile and pnpm lint, typecheck, test.
-   Add the docs branch as a worktree: git worktree add ..\catalog-module-wt\docs-progress
-   docs/go-live-progress. Export CLOUDSDK_CORE_PROJECT=image-links-agent for every gcloud call
-   and never change the global gcloud config.
-2. Read, in full, from that docs worktree: docs/plans/2026-10-20-go-live-resume-2.md and
-   docs/PROGRESS.md; and from the clone: CLAUDE.md, AGENTS.md,
-   docs/specs/00-execution-protocol.md, docs/plans/2026-10-19-expedited-go-live.md. The resume
+   Create a bookkeeping worktree on a new branch from main: git worktree add -b
+   docs/go-live-progress-3 ..\catalog-module-wt\docs-progress origin/main (PROGRESS.md is edited
+   and pushed there only; it is merged through a docs PR at the end). Export
+   CLOUDSDK_CORE_PROJECT=image-links-agent for every gcloud call and never change the global
+   gcloud config.
+2. Read, in full, from the clone: docs/plans/2026-10-20-go-live-resume-2.md, docs/PROGRESS.md,
+   CLAUDE.md, AGENTS.md, docs/specs/00-execution-protocol.md,
+   docs/plans/2026-10-19-expedited-go-live.md. The resume
    file is the source of truth for state, rules, prerequisites and the ordered next steps;
    PROGRESS.md is the status log you update and push after every item.
 3. Work exactly as the previous sessions did: you only coordinate; Opus 5.5 subagents build,
@@ -36,7 +38,7 @@ exactly what to run and wait.
    every assumption in PROGRESS.md; keep every checkout clean; writes only under catalog-test/;
    never delete GCP resources; never read secrets.
 4. Follow the resume file's "Next steps, in order" to the end: quality gate 3c, the eval suite
-   (mocked, live, write-policy), load and recheck, docs PR #40, cleanup, memory note. Post a
+   (mocked, live, write-policy), load and recheck, the docs PR, cleanup, memory note. Post a
    status update every 20 minutes with ScheduleWakeup and a push notification at each milestone.
    Fix every defect you find through fix PRs, redeploys and re-runs, no matter how many rounds it
    takes. Finish with the 00 section 10 report, the live URL, and
@@ -63,8 +65,8 @@ repo scripts (`infra/*.sh` need Git Bash; `bash.exe` is under `$env:ProgramFiles
 3. Repo: `git clone https://github.com/sujanajay/catalog-module.git` into
    `C:\Users\<me>\Desktop\catalog-module`; `pnpm install --frozen-lockfile`; `pnpm lint`,
    `pnpm typecheck`, `pnpm test` must pass on `origin/main`. Worktrees live beside the clone in
-   `C:\Users\<me>\Desktop\catalog-module-wt\`. Create the docs worktree:
-   `git worktree add "..\catalog-module-wt\docs-progress" docs/go-live-progress`.
+   `C:\Users\<me>\Desktop\catalog-module-wt\`. Create the bookkeeping worktree on a new branch:
+   `git worktree add -b docs/go-live-progress-3 "..\catalog-module-wt\docs-progress" origin/main`.
 4. Inputs: the gate photos are in the bucket. From the repo root (Git Bash):
    `gcloud storage cp -r gs://image-links-agent-assets/catalog-test/handoff/2026-10-20/qa-gate-3c-input var/`
    and the same for `qa-gate-input` (both land under the git-ignored `var/`). The Drive sets
@@ -113,8 +115,9 @@ repo scripts (`infra/*.sh` need Git Bash; `bash.exe` is under `$env:ProgramFiles
   fresh name suffix.
 - Open owner decisions (do not block on them, log them): Amazon/Shein canvas square vs 3:4;
   the retrospective's proposed AGENTS.md and protocol text; a real-photo regression set in CI.
-- PR #40 (this docs branch) is a draft; it is merged last, with an explicit squash subject and
-  body (its first commit carries a trailer that must not reach main).
+- PR #40 (the session 1 and 2 docs branch) was merged on 2026-10-20, so this file and
+  PROGRESS.md are on `main`. Session 3 keeps PROGRESS.md on its own branch
+  `docs/go-live-progress-3` and merges it through a docs PR at the end.
 
 ## Rules carried over (in addition to CLAUDE.md, AGENTS.md and 00)
 
@@ -135,8 +138,9 @@ repo scripts (`infra/*.sh` need Git Bash; `bash.exe` is under `$env:ProgramFiles
 - No co-author trailer in commits (the session reminder asks for one; CLAUDE.md forbids it).
   No em dashes. Conventional commits. Never force-push. Never delete GCP resources. Writes only
   under `catalog-test/`.
-- Bookkeeping (PROGRESS.md) lives on the docs branch worktree only; the main checkout and the
-  deploy worktree stay clean. Push the docs branch after every PROGRESS.md commit.
+- Bookkeeping (PROGRESS.md) lives on the docs worktree (branch `docs/go-live-progress-3`) only;
+  the main checkout and the deploy worktree stay clean. Push the docs branch after every
+  PROGRESS.md commit; open its PR early as a draft so the owner can follow it on GitHub.
 - Models are never shown in UI copy; chosen models are recorded in PROGRESS.md only.
 
 ## Deploy wrapper (pinned worktree, background)
@@ -212,8 +216,9 @@ names in the UI. The baseline evidence of gate 3 is in the handoff evidence fold
    PROGRESS.md and the hand-over note `docs/handover/catalog-for-the-operator.md` (eval and load
    figures).
 5. Optional judge probe.
-6. Docs: PROGRESS.md final rows and task board, session summary; `git merge origin/main` into
-   the docs branch; `gh pr ready 40`; CI;
-   `gh pr merge 40 --squash --delete-branch --subject "docs: go-live progress, learnings and operator hand-over" --body "<body without trailer>"`.
+6. Docs: PROGRESS.md final rows and task board, session summary, hand-over note figures;
+   `git merge origin/main` into the docs branch; `gh pr ready <n>`; CI;
+   `gh pr merge <n> --squash --delete-branch` with an explicit conventional subject and a body
+   without any co-author trailer.
 7. Memory note; final 00 section 10 report with the live URL and
    "Programme complete; no next spec."; push notification.

@@ -124,8 +124,7 @@ git pull
 ## 6. Start the run
 
 As of 2026-10-20 the programme is resumed, not started: specs 05 to 10 are merged and deployed,
-and the remaining steps are in docs/plans/2026-10-20-go-live-resume-2.md on branch
-docs/go-live-progress. That file holds the exact prompt to paste and the prerequisites the
+and the remaining steps are in docs/plans/2026-10-20-go-live-resume-2.md on main. That file holds the exact prompt to paste and the prerequisites the
 session installs itself (sections 1 to 4 above are then optional: the session does them).
 Run in any empty folder:
 
@@ -134,7 +133,7 @@ claude
 ```
 
 Then paste the prompt from the section "Prompt to start the new session with" of that file.
-To see where the run is at any moment, open docs/PROGRESS.md on that branch.
+To see where the run is at any moment, open docs/PROGRESS.md on main or on the session's docs branch.
 
 ## 7. What you may still need to do by hand
 
