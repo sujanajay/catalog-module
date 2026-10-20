@@ -158,7 +158,8 @@ export function padBands(rgb: Buffer, alpha: Buffer, width: number, height: numb
  * 1. The pad band (padBands): brands often place the real photo inside a uniform band of any colour.
  *    A side can be cut only where the product reaches the band's inner edge (the frame edge when
  *    there is no band), allowing the matte's soft fade (CUT_EDGE_FRINGE_FRACTION). A band the colour
- *    of the photo's own background counts only as the thin border (CUT_EDGE_BORDER_FRACTION).
+ *    of the photo's own background counts only as the thin border (CUT_EDGE_BORDER_FRACTION), unless the
+ *    product is cut at a perpendicular frame edge: the photo is then a crop and the band is its padding.
  * 2. Two signals on the first product line inside the band, stepping inwards through the fade: a
  *    straight edge (a run of opaque matte, alpha >= CUT_EDGE_OPAQUE_ALPHA, starting on that line
  *    within CUT_EDGE_JITTER_PX, at least CUT_EDGE_MIN_STRAIGHT_FRACTION of the side long) AND a
@@ -177,15 +178,19 @@ export function shotGeometry(alpha: Buffer, width: number, height: number, opts:
   // Depth of the product box edge from each frame edge; a cut side moves to its cut line.
   const pads = opts.rgb ? padBands(opts.rgb, alpha, width, height) : null;
   const lines: Record<Side, number> = { top: tight.y, bottom: height - tight.y - tight.h, left: tight.x, right: width - tight.x - tight.w };
-  for (const side of SIDES) {
+  // Sides whose band is deeper than the thin border and the colour of the photo's own background (no photo edge).
+  const deep: Side[] = [];
+  const detect = (side: Side, deepBand: boolean): void => {
     const horizontal = side === "top" || side === "bottom", across = horizontal ? height : width, outer = lines[side];
     const from = horizontal ? tight.x : tight.y, to = horizontal ? tight.x + tight.w : tight.y + tight.h;
     const thin = Math.max(CUT_EDGE_BORDER_MIN_PX, Math.ceil(across * CUT_EDGE_BORDER_FRACTION));
     const pad = pads?.[side] ?? { depth: Math.min(outer, thin), photoEdge: false };
     // A band deeper than the thin border is a pad only when it ends on the real photo's edge (padBands), or when the
-    // judge saw the cut: a cut-out on white with nothing but the product's own straight edge to show the photo ended.
-    if (pad.depth > thin && !((pad.photoEdge || opts.judgedCut) && pad.depth <= across * CUT_EDGE_PAD_MAX_FRACTION)) continue;
-    if (outer > pad.depth + fringe) continue;
+    // judge saw the cut, or (`deepBand`) when the product is cut on a perpendicular side: a cut-out on white with
+    // nothing but the product's own straight edge to show the photo ended.
+    if (pad.depth > across * CUT_EDGE_PAD_MAX_FRACTION) return;
+    if (pad.depth > thin && !pad.photoEdge && !opts.judgedCut && !deepBand) { deep.push(side); return; }
+    if (outer > pad.depth + fringe) return;
     const at = (d: number, i: number) => alpha[lineIndex(side, d, i, width, height)]!;
     const minStraight = Math.max(CUT_EDGE_MIN_STRAIGHT_PX, Math.ceil((horizontal ? width : height) * CUT_EDGE_MIN_STRAIGHT_FRACTION));
     const last = across - 1;
@@ -198,7 +203,7 @@ export function shotGeometry(alpha: Buffer, width: number, height: number, opts:
       if (Number.isFinite(half[i - from]!)) for (; d <= Math.min(half[i - from]! + fringe, last); d++) if (at(d, i) >= CUT_EDGE_OPAQUE_ALPHA) { solid[i - from] = d; break; }
     }
     const line = Math.min(...half);
-    if (!Number.isFinite(line) || line + CUT_EDGE_INSET_PX > last) continue;
+    if (!Number.isFinite(line) || line + CUT_EDGE_INSET_PX > last) return;
     // Signal 1: positions whose silhouette starts on the outermost line (within the jitter) and turns opaque behind it.
     let edge = 0, run = 0, longest = 0, silhouette = 0;
     const solids: number[] = [];
@@ -211,7 +216,14 @@ export function shotGeometry(alpha: Buffer, width: number, height: number, opts:
     // the edge must also span CUT_EDGE_MIN_SHARE of the product box there.
     const share = pad.photoEdge ? 0 : CUT_EDGE_MIN_SHARE * (to - from);
     if (longest >= minStraight && edge >= silhouette * ratio && edge >= share) { cut[side] = true; lines[side] = solids.sort((a, b) => a - b)[solids.length >> 1]!; }
-  }
+  };
+  for (const side of SIDES) detect(side, false);
+  // A product cut at a frame edge shows the photo is a crop: a deep band of the photo's own background colour on a
+  // perpendicular side is then the brand's padding around that crop (a model cut at the waist and thighs inside a
+  // white band, also cut at the left edge). Only a cut found by the rule above counts, never one found this way.
+  // The two signals and CUT_EDGE_MIN_SHARE still decide.
+  const framed = { ...cut };
+  for (const side of deep) if (side === "top" || side === "bottom" ? framed.left || framed.right : framed.top || framed.bottom) detect(side, true);
   const box = { x: lines.left, y: lines.top, w: width - lines.left - lines.right, h: height - lines.top - lines.bottom };
   return { box: box.w > 0 && box.h > 0 ? box : tight, source: { w: width, h: height }, cut };
 }
