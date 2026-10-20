@@ -10,8 +10,8 @@
 // leather grain, knit and lace are not). Product estimate: the pixels that are clearly not the
 // background colour. Frame-filling: the border band holds (almost) no smooth background, so the
 // product runs off every side of the photo and the whole frame is product.
-import { components, delta, dilate, erode, type Mask } from "./evals/image";
-import { estimateForeground } from "./evals/cutout";
+import { components, delta, dilate, erode, thresholdMask, type Mask } from "./evals/image";
+import { estimateForeground, SHADOW_ZONE_CHROMA_MAX } from "./evals/cutout";
 import { borderBand } from "./shadow";
 import type { Matte, Prepared } from "./render";
 import type { OutputFlag } from "./types";
@@ -39,6 +39,17 @@ export const GUARD_CELL_MIN_PIXELS = 400;
  */
 export const GUARD_CELL_LOSS_MAX = 0.2;
 export const GUARD_OVERALL_LOSS_MAX = 0.04;
+/**
+ * A strongly coloured product pixel: its chroma (max minus min channel) is at least the most a cast
+ * shadow may carry in the estimate (spec 10 SHADOW_ZONE_CHROMA_MAX), so it is neither the white or grey
+ * backdrop nor the source's own shadow. When the matte drops it more than GUARD_COLOURED_KEPT_GAP_PX
+ * away from what it kept, it counts as lost even inside the GUARD_INTERIOR_PX edge band: a thin
+ * coloured part (a midsole sliver along a dark outsole, a piping) is all edge band, so the interior
+ * rule alone never sees it go. Measured on 129 real photos (258 first mattes): the most a good matte
+ * loses this way is 10.7% of a cell; the Anta sole view bd-112625546-12 shot 5 loses 41%.
+ */
+export const GUARD_COLOURED_CHROMA_MIN = SHADOW_ZONE_CHROMA_MAX;
+export const GUARD_COLOURED_KEPT_GAP_PX = 1;
 /** A hand dropped by the matte (skin touching the frame edge, next to the product) larger than this share of the kept product rejects the matte. */
 export const HAND_NOTCH_MAX_SHARE = 0.02;
 /** Skin must differ from the source background by this much (a beige wall is not a hand). */
@@ -283,7 +294,8 @@ export interface MatteIntegrity {
 }
 
 /**
- * Compares a matte with the product estimate. Rejects a matte that drops more than
+ * Compares a matte with the product estimate (its interior, plus any strongly coloured part the matte
+ * dropped, see GUARD_COLOURED_CHROMA_MIN). Rejects a matte that drops more than
  * GUARD_CELL_LOSS_MAX of any grid cell or GUARD_OVERALL_LOSS_MAX of the whole estimate, or a dropped
  * hand larger than HAND_NOTCH_MAX_SHARE (`handRule`, on unless the product is apparel: a model's own
  * skin is not a hand holding the product). A transparent source's own alpha is always accepted.
@@ -298,6 +310,13 @@ export function checkMatteIntegrity(p: Pick<Prepared, "width" | "height" | "rgb"
   const product = productEstimate(p, alpha, region), surfaces = keptSurfaces(p, alpha, region);
   for (let i = 0; i < product.length; i++) if (surfaces[i]) product[i] = 1;
   const estimate = erode(product, w, h, GUARD_INTERIOR_PX);
+  // A strongly coloured part the matte drops counts in full, edge band included (GUARD_COLOURED_CHROMA_MIN).
+  const keptNear = dilate(thresholdMask(alpha, GUARD_ALPHA_EDGE), w, h, GUARD_COLOURED_KEPT_GAP_PX), rgb = p.rgb;
+  for (let i = 0; i < estimate.length; i++) {
+    if (!product[i] || estimate[i] || keptNear[i]) continue;
+    const r = rgb[i * 3]!, g = rgb[i * 3 + 1]!, b = rgb[i * 3 + 2]!;
+    if (Math.max(r, g, b) - Math.min(r, g, b) >= GUARD_COLOURED_CHROMA_MIN) estimate[i] = 1;
+  }
   let x0 = w, y0 = h, x1 = -1, y1 = -1, count = 0;
   for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) if (estimate[y * w + x]) { count++; if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y; }
   if (!count) return { ok: true, worstCellLoss: 0, overallLoss: 0, handShare: 0, estimatePixels: 0, ...base, detail: "no product estimate" };
