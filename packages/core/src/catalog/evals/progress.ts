@@ -21,7 +21,11 @@ export const setRecordPath = (run: string, set: string) => `${setsPrefix(run)}${
 export interface SetRecord {
   set: string; brand: string; category: string;
   status: "done" | "failed";
-  /** The failure, in one line, when status is "failed"; the arrays below are then empty. */
+  /**
+   * The failure, in one line, when status is "failed". The arrays below are then empty, except when
+   * only the overwrite passes failed: the set keeps its first-pass checks and the overwrite checks
+   * are recorded as failed with the error.
+   */
   error: string | null;
   startedAt: string; finishedAt: string;
   photos: number; products: number;

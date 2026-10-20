@@ -16,6 +16,6 @@ export async function runImageChecks(subject: OutputSubject): Promise<CheckResul
 export { checkUniformScale } from "./geometry";
 export { CHART_SKIP_NOTE, checkCompleteness, expectedOutcome, STYLI_SKIP_NOTE } from "./completeness";
 export { checkAttention, flagRows, outputKey } from "./attention";
-export { checkIdentical, checkOverwrite } from "./overwrite";
+export { assertLocked, checkIdentical, checkOverwrite, lockedProductsMessage, overwriteFailed, overwriteNotRun, planOverwrite } from "./overwrite";
 export { buildReport, reportHtml, summaryLine } from "./report";
 export * from "./types";
