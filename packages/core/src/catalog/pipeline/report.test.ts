@@ -9,6 +9,12 @@ it("keeps rejected images without DB rows in the final report",async()=>{
 });
 it("lists each note once although the publish step already stored it",()=>{const skipped=outputNote({channel:"styli",n:1,reason:"Skipped for Styli: the photo is smaller than Styli needs.",decision:null,decidedBy:null}),second=outputNote({channel:"styli",n:2,reason:"Skipped for Styli: the photo is smaller than Styli needs.",decision:null,decidedBy:null});expect(mergeNotes(`${skipped}; ${second}`,[skipped,second,""])).toBe(`${skipped}; ${second}`);expect(mergeNotes(null,[skipped,skipped])).toBe(skipped);});
 it("notes cut-in-source shots once per photo and never for failed or skipped outputs",()=>{const o=(n:number,status:"verified"|"skipped"|"failed",flags:("cut_in_source"|"low_resolution")[]=["cut_in_source"])=>({n,status,flags});expect(cutInSourceNote([o(3,"verified"),o(1,"verified"),o(1,"verified"),o(2,"skipped"),o(4,"failed"),o(5,"verified",["low_resolution"])])).toBe("Photos 1 and 3: already cut at the frame edge in the original photo; the cut edge sits flush with the edge of the image");expect(cutInSourceNote([o(2,"verified")])).toMatch(/^Photo 2: /);expect(cutInSourceNote([])).toBe("");});
+it("leaves a photo out of the flush cut note when its cut edge does not sit flush on some channel",()=>{
+  const band="The original photo is cut at the top, but on Trendyol the product cannot reach that edge of the image without trimming more of it, so a band shows there.";
+  const o=(n:number,reason:string|null=null)=>({n,status:"verified" as const,flags:["cut_in_source" as const],reason});
+  expect(cutInSourceNote([o(3),o(4),o(5),o(5,`Kept the original colours; ${band}`)])).toBe("Photos 3 and 4: already cut at the frame edge in the original photo; the cut edge sits flush with the edge of the image");
+  expect(cutInSourceNote([o(5,band)])).toBe("");
+});
 it("lists the sheet notes in photo order, keeping a continuation with its note",()=>{
   const notes="Styli img 7: Skipped for Styli: small.; Styli img 8: Skipped for Styli: small.; Styli img 1: Skipped for Styli: small.; Photos 2 and 3: already cut at the frame edge in the original photo; the cut edge sits flush with the edge of the image";
   expect(sortNotesByPhoto(notes)).toBe("Styli img 1: Skipped for Styli: small.; Photos 2 and 3: already cut at the frame edge in the original photo; the cut edge sits flush with the edge of the image; Styli img 7: Skipped for Styli: small.; Styli img 8: Skipped for Styli: small.");

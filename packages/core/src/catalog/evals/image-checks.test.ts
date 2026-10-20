@@ -199,6 +199,15 @@ describe("cut sources", () => {
     expect(ids(tooMuch, "cut_edge.trim")[0]?.ok).toBe(false);
     expect(ids(tooMuch, "cut_edge.trim")[0]?.detail).toContain("at most a third");
   }, 60_000);
+  it("reads an uneven split from the canvas when the render keeps a logo near one cut side whole", async () => {
+    // A square full-bleed close-up with a logo near the left: on Noon the render takes most of the side trim off the right.
+    const square = { width: 800, height: 800, box: { x: 100, y: 100, w: 600, h: 600 }, cutTop: true, cutBottom: true, cutLeft: true, cutRight: true, pad: 10, logo: { x: 120, y: 360, w: 76, h: 120 } };
+    const sub = await syntheticSubject("noon", 1, "apparel_model", square);
+    const ctx = await ctxOf(sub), extra = ctx.sourceBox.w - ctx.sourceCrop.w;
+    expect(extra).toBeGreaterThan(0);
+    expect(ctx.sourceCrop.x - ctx.sourceBox.x).toBeLessThan(Math.floor(extra / 2));
+    expect(failed(await runImageChecks(sub))).toEqual([]);
+  }, 60_000);
   it("fails flush when the render fits a photo cut top and bottom and leaves a band beside the top cut, and fails trim when a placement would trim the uncut sides instead", async () => {
     // Wider than 2:3 and cut only top and bottom: the render may not trim the uncut sides, so it fits by width and a band sits above the top cut.
     const sub = await syntheticSubject("trendyol", 1, "apparel_model", { width: 1000, height: 800, box: { x: 200, y: 100, w: 600, h: 600 }, cutTop: true, cutBottom: true });

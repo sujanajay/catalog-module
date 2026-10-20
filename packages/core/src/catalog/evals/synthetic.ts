@@ -25,6 +25,8 @@ export interface SyntheticOptions {
   pad?: number;
   /** Narrow the bottom quarter of the body by 12% each side, like a sole under an upper, so a contact shadow stays under the product. */
   taper?: boolean;
+  /** A light outlined mark with a diagonal stroke on the product (a logo), in source pixels. */
+  logo?: { x: number; y: number; w: number; h: number };
 }
 
 /** Paints the source and the matte; the matte is exact (255 inside, 0 outside). */
@@ -42,6 +44,10 @@ export function syntheticSource(opts: SyntheticOptions = {}): { prepared: Prepar
   const paint = (x: number, y: number, c: [number, number, number]) => { const i = y * width + x; rgb[i * 3] = c[0]; rgb[i * 3 + 1] = c[1]; rgb[i * 3 + 2] = c[2]; alpha[i] = 255; };
   const inset = opts.taper ? Math.round(box.w * 0.12) : 0, taperFrom = box.y + Math.round(box.h * 0.75);
   for (let y = box.y; y < box.y + box.h; y++) for (let x = box.x + (y >= taperFrom ? inset : 0); x < box.x + box.w - (y >= taperFrom ? inset : 0); x++) paint(x, y, [color[0] + ((x + y) % 7) * 3, color[1] + (x % 5) * 2, color[2] + (y % 3) * 4]);
+  if (opts.logo) {
+    const { x: lx, y: ly, w: lw, h: lh } = opts.logo;
+    for (let y = ly; y < ly + lh; y++) for (let x = lx; x < lx + lw; x++) if (x < lx + 4 || x >= lx + lw - 4 || y < ly + 4 || y >= ly + lh - 4 || Math.abs((x - lx) * lh - (y - ly) * lw) < 3 * lh) paint(x, y, [240, 240, 240]);
+  }
   if (opts.strap ?? !opts.cutTop) { const sx = box.x + Math.floor(box.w / 2); for (let y = box.y - 60; y < box.y; y++) for (let x = sx - 1; x <= sx + 1; x++) paint(x, y, [40, 40, 60]); box.y -= 60; box.h += 60; }
   const prepared: Prepared = { width, height, rgb, alphaSource: null, background: analyseBackground(rgb, width, height), flags: [], sourceMime: "image/jpeg" };
   const matte: Matte = { alpha, width, height, model: "synthetic", ms: 0, source: "model", target: "cpu", sentLongSide: null };
