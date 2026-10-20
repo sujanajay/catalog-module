@@ -35,7 +35,7 @@ for(const name of names.filter(n=>n!=='MATTING_GPU_URL')) assert(env.find(e=>e.n
 const password=source.find(e=>e.name==='DB_PASSWORD');
 assert.equal(password?.valueFrom?.secretKeyRef?.name,'catalog-db-password');
 assert(password.valueFrom.secretKeyRef.key,'Missing password secret version reference');
-env.push(password,{name:'DB_POOL_MAX',value:'2'});
+env.push(password,{name:'DB_POOL_MAX',value:'1'}); // job pool: docs/solutions/db-connection-budget.md
 const bucket='image-links-agent-assets';
 const input='catalog-test/render-05-1792340617303-555901/inputs';
 const volume=(name,prefix,readOnly)=>({name,csi:{driver:'gcsfuse.run.googleapis.com',readOnly,volumeAttributes:{bucketName:bucket,mountOptions:`only-dir=${prefix},uid=1000,gid=1000`}}});

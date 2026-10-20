@@ -94,7 +94,46 @@ ENV_VARS+=",TASKS_QUEUE=$QUEUE,WORKER_URL=$WORKER_URL,WORKER_SA_EMAIL=$WORKER_SA
 # warehouse admin grants catalog-worker@ access to opptra-datawarehouse; then set this default back
 # to opptra-datawarehouse and redeploy. See docs/solutions/infra-bootstrap.md.
 BQ_PROJECT=${BQ_PROJECT:-image-links-agent}
-WORKER_ENV="$ENV_VARS,DB_POOL_MAX=2,BQ_PROJECT=$BQ_PROJECT,BQ_LOCATION=asia-south1,CATALOG_CHUNK_IMAGES=$CHUNK_IMAGES"
+# --- Database connection budget (docs/solutions/db-connection-budget.md) ----------------------
+# ila-pg is a shared db-f1-micro with no max_connections flag: Postgres allows 25 connections, 3 of
+# them reserved for superusers (superuser_reserved_connections), so ordinary roles get 22. The
+# earlier ila-web and ila-worker apps use the same instance; we assume 4 for them when idle (their
+# pools are not ours to cap). That leaves 18 for the catalog, counted at the worst case (every
+# service at max instances, every pool full):
+#   worker 4 instances x pool 2 = 8   (concurrency 2, so one connection per in-flight task)
+#   web    3 instances x pool 2 = 6   (queries are short; extra requests wait for a pooled client)
+#   jobs   2 at a time x pool 1 = 2   (load, recheck, QA check, evals, migrate, smoke)
+#   total                       = 16, headroom 2 of 18.
+# 2026-10-20 incident: worker 10 x 2 + web 3 x 3 + jobs 2 x 2 = 33 > 18, every page failed.
+# The Tasks queue dispatches at most worker instances x concurrency = 8 at once so a large batch
+# queues tasks instead of hitting 429 "no available instance" and burning retry attempts.
+# Raise the budget only after a tier or max_connections change in a maintenance window, then
+# change DB_MAX_CONNECTIONS here; the check below refuses a shape that does not fit.
+DB_MAX_CONNECTIONS=25
+DB_RESERVED_CONNECTIONS=3
+ILA_DB_SHARE=4
+WORKER_MAX_INSTANCES=4
+WORKER_CONCURRENCY=2
+WORKER_DB_POOL_MAX=2
+WEB_MAX_INSTANCES=3
+WEB_DB_POOL_MAX=2
+MAX_CONCURRENT_JOBS=2
+JOB_DB_POOL_MAX=1
+TASKS_MAX_DISPATCHES=$((WORKER_MAX_INSTANCES * WORKER_CONCURRENCY))
+CATALOG_DB_LIMIT=$((DB_MAX_CONNECTIONS - DB_RESERVED_CONNECTIONS - ILA_DB_SHARE))
+CATALOG_DB_TOTAL=$((WORKER_MAX_INSTANCES * WORKER_DB_POOL_MAX + WEB_MAX_INSTANCES * WEB_DB_POOL_MAX + MAX_CONCURRENT_JOBS * JOB_DB_POOL_MAX))
+if [ "$CATALOG_DB_TOTAL" -gt "$CATALOG_DB_LIMIT" ]; then
+  echo "ERROR: catalog connections $CATALOG_DB_TOTAL exceed the budget $CATALOG_DB_LIMIT; see docs/solutions/db-connection-budget.md" >&2
+  exit 1
+fi
+echo "==> connection budget: catalog $CATALOG_DB_TOTAL of $CATALOG_DB_LIMIT"
+# Semicolons, not commas: the value travels inside --set-env-vars. The load driver re-checks it.
+DB_CONNECTION_BUDGET="max=$DB_MAX_CONNECTIONS;reserved=$DB_RESERVED_CONNECTIONS;ila=$ILA_DB_SHARE"
+DB_CONNECTION_BUDGET+=";worker=${WORKER_MAX_INSTANCES}x$WORKER_DB_POOL_MAX;web=${WEB_MAX_INSTANCES}x$WEB_DB_POOL_MAX;jobs=${MAX_CONCURRENT_JOBS}x$JOB_DB_POOL_MAX"
+WORKER_ENV="$ENV_VARS,DB_POOL_MAX=$WORKER_DB_POOL_MAX,BQ_PROJECT=$BQ_PROJECT,BQ_LOCATION=asia-south1,CATALOG_CHUNK_IMAGES=$CHUNK_IMAGES"
+WORKER_ENV+=",DB_CONNECTION_BUDGET=$DB_CONNECTION_BUDGET"
+# Jobs get the worker environment with the job pool size (budget above).
+job_env() { printf '%s' "${WORKER_ENV/DB_POOL_MAX=$WORKER_DB_POOL_MAX,/DB_POOL_MAX=$JOB_DB_POOL_MAX,}"; }
 # Compute spend: the worker records cost.computeUsd = vCPU-seconds * COMPUTE_USD_PER_VCPU_SECOND
 # (spend is 0 when unset) and the wizard estimate prices compute with the same figure. Override
 # from the shell like INR_PER_USD. Keep it equal to DEFAULT_COMPUTE_USD_PER_VCPU_SECOND in
@@ -118,7 +157,7 @@ INR_PER_USD=${INR_PER_USD:-84}
 [[ "$DAILY_SPEND_CAP_USD" =~ ^[0-9]+([.][0-9]+)?$ ]] || { echo "DAILY_SPEND_CAP_USD must be a non-negative number" >&2; exit 1; }
 [[ "$INR_PER_USD" =~ ^[0-9]+([.][0-9]+)?$ ]] || { echo "INR_PER_USD must be a number such as 84" >&2; exit 1; }
 WORKER_ENV+=",CATALOG_QA_DEFAULT_MODEL=$CATALOG_QA_DEFAULT_MODEL,DAILY_SPEND_CAP_USD=$DAILY_SPEND_CAP_USD"
-WEB_ENV="$ENV_VARS,DB_POOL_MAX=3,SHARE_SA_EMAIL=$WEB_SA,CATALOG_CHUNK_IMAGES=$CHUNK_IMAGES"
+WEB_ENV="$ENV_VARS,DB_POOL_MAX=$WEB_DB_POOL_MAX,SHARE_SA_EMAIL=$WEB_SA,CATALOG_CHUNK_IMAGES=$CHUNK_IMAGES"
 # INR_PER_USD reaches the web (cost line, wizard estimate), the worker (finalize) and, through
 # WORKER_ENV, the Cloud Run jobs (07 4.11). COMPUTE_USD_PER_VCPU_SECOND reaches the worker and the
 # jobs through WORKER_ENV (above) and the web here, so the estimate and recorded spend agree.
@@ -128,7 +167,7 @@ WEB_ENV+=",INR_PER_USD=$INR_PER_USD,COMPUTE_USD_PER_VCPU_SECOND=$COMPUTE_USD_PER
 IAP_AUDIENCE=/projects/$PN/locations/$REGION/services/$WEB_SERVICE
 WEB_ENV+=",IAP_AUDIENCE=$IAP_AUDIENCE,ALLOWED_HOSTED_DOMAIN=opptra.com"
 # The migrate job seeds this person as the first admin (idempotent; never undoes a later role change).
-MIGRATE_ENV="$WORKER_ENV,SEED_ADMIN_EMAIL=${SEED_ADMIN_EMAIL:-sujan@opptra.com}"
+MIGRATE_ENV="$(job_env),SEED_ADMIN_EMAIL=${SEED_ADMIN_EMAIL:-sujan@opptra.com}"
 SECRETS=DB_PASSWORD=catalog-db-password:latest
 # 07 sections 3 and 4.12: the OpenRouter key is mounted from Secret Manager on catalog-worker (the
 # qa stage runs inside the worker pipeline) and on the Cloud Run jobs (catalog-qa-check, and
@@ -228,13 +267,18 @@ if [ "${CATALOG_PREVIEW:-0}" = 1 ]; then
     echo "==> tasks queue $QUEUE: SKIP"
   else
     gcloud tasks queues create "$QUEUE" --location="$REGION" \
-      --max-concurrent-dispatches=20 --max-attempts=5 --min-backoff=10s >/dev/null
+      --max-concurrent-dispatches="$TASKS_MAX_DISPATCHES" --max-attempts=5 --min-backoff=10s >/dev/null
   fi
 fi
 gcloud run deploy "$WORKER_SERVICE" --quiet --image="$AR/worker:$TAG" --service-account="$WORKER_SA" \
-  "$(auth_flag "$WORKER_SERVICE")" --cpu=2 --memory=2Gi --concurrency=2 \
-  --min-instances=0 --max-instances=10 --timeout=900 "${NET[@]}" \
+  "$(auth_flag "$WORKER_SERVICE")" --cpu=2 --memory=2Gi --concurrency="$WORKER_CONCURRENCY" \
+  --min-instances=0 --max-instances="$WORKER_MAX_INSTANCES" --timeout=900 "${NET[@]}" \
   --set-secrets="$WORKER_SECRETS" --set-env-vars="$WORKER_ENV"
+if [ "${CATALOG_PREVIEW:-0}" != 1 ]; then
+  # Idempotent: keep the queue's parallelism equal to the worker's capacity (connection budget above).
+  gcloud tasks queues update "$QUEUE" --location="$REGION" --max-concurrent-dispatches="$TASKS_MAX_DISPATCHES" >/dev/null
+  echo "==> tasks queue $QUEUE: max-concurrent-dispatches $TASKS_MAX_DISPATCHES"
+fi
 
 # --- 7. Web --------------------------------------------------------------------------
 # Private (only IAP's service agent may invoke it; never --allow-unauthenticated) and behind IAP with
@@ -246,7 +290,7 @@ echo "==> web"
 MSYS2_ARG_CONV_EXCL='--set-env-vars=' \
 gcloud run deploy "$WEB_SERVICE" --quiet --image="$AR/web:$TAG" --service-account="$WEB_SA" \
   "$(auth_flag "$WEB_SERVICE")" --iap --cpu=1 --memory=1Gi \
-  --min-instances=0 --max-instances=3 --timeout=300 "${NET[@]}" \
+  --min-instances=0 --max-instances="$WEB_MAX_INSTANCES" --timeout=300 "${NET[@]}" \
   --set-secrets="$SECRETS" --set-env-vars="$WEB_ENV"
 
 IAP_ENABLED=$(gcv run services describe "$WEB_SERVICE" --region="$REGION" \
@@ -324,19 +368,19 @@ fi
 # with "bash infra/catalog-qa-check.sh run" (sets LIVE_SMOKE=1 for that execution only).
 echo "==> jobs"
 if [ "${CATALOG_PREVIEW:-0}" != 1 ]; then
-  QA_JOB_IMAGE="$AR/worker:$TAG" QA_JOB_ENV="$WORKER_ENV" QA_JOB_SECRETS="$JOB_SECRETS" \
+  QA_JOB_IMAGE="$AR/worker:$TAG" QA_JOB_ENV="$(job_env)" QA_JOB_SECRETS="$JOB_SECRETS" \
     bash infra/catalog-qa-check.sh deploy
   # 08: the bake-off CLI job (same image; WORKER_ENV carries MATTING_URL and MATTING_GPU_URL).
   # Deployed, never executed here; run it with "bash infra/catalog-eval.sh exec ...".
-  EVAL_JOB_IMAGE="$AR/worker:$TAG" EVAL_JOB_ENV="$WORKER_ENV" EVAL_JOB_SECRETS="$JOB_SECRETS" \
+  EVAL_JOB_IMAGE="$AR/worker:$TAG" EVAL_JOB_ENV="$(job_env)" EVAL_JOB_SECRETS="$JOB_SECRETS" \
     bash infra/catalog-eval.sh deploy
   # 09: the load driver and the independent re-check (DB secret only, never the OpenRouter key).
   # Deployed here, never executed here: bash infra/catalog-scale-jobs.sh load | recheck ...
-  SCALE_JOB_IMAGE="$AR/worker:$TAG" SCALE_JOB_ENV="$WORKER_ENV" SCALE_JOB_SECRETS="$SECRETS" \
+  SCALE_JOB_IMAGE="$AR/worker:$TAG" SCALE_JOB_ENV="$(job_env)" SCALE_JOB_SECRETS="$SECRETS" \
     bash infra/catalog-scale-jobs.sh deploy
   # 10: the output-quality eval suite (same image, OpenRouter key for the judge, LIVE_SMOKE only per
   # execution). Deployed here, never executed here: bash infra/catalog-output-evals.sh run [--live]
-  EVALS_JOB_IMAGE="$AR/worker:$TAG" EVALS_JOB_ENV="$WORKER_ENV" EVALS_JOB_SECRETS="$JOB_SECRETS"     bash infra/catalog-output-evals.sh deploy
+  EVALS_JOB_IMAGE="$AR/worker:$TAG" EVALS_JOB_ENV="$(job_env)" EVALS_JOB_SECRETS="$JOB_SECRETS"     bash infra/catalog-output-evals.sh deploy
 else
   echo "==> jobs: SKIP (preview never changes the shared jobs)"
 fi
