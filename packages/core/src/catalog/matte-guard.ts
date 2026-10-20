@@ -456,35 +456,97 @@ export function passthroughMatte(p: Pick<Prepared, "width" | "height" | "rgb">, 
 /**
  * A pass-through replaces a plain studio backdrop only. In the border band, the pixels it keeps as product
  * although every model matte tried dropped them, and that are no skin or garment panel a matte cut through
- * (keptSurfaces), are scenery (a court, a hedge, a net) that the recolour could not reach: above this share of
- * the band the background is busy and the photo is held instead of published with a ragged cut-out. Measured:
- * the French Connection tennis-court photo ZEE79259BBFD83FFA1DB0Z shot 5 keeps 33% of its band this way; every
- * plain-backdrop pass-through of the gate and golden sets keeps 0%.
+ * (keptSurfaces), are what the recolour could not reach. Above this share of the band they are read
+ * (busyBorderReading): when they look like scenery the background is busy and the photo is held instead of
+ * published with a ragged cut-out. Measured: the French Connection tennis-court photo ZEE79259BBFD83FFA1DB0Z
+ * shot 5 keeps 33% of its band this way; every plain-backdrop pass-through of the gate and golden sets keeps 0%.
  */
 export const BUSY_BORDER_MAX_SHARE = 0.05;
+/** An edge pixel: its luma differs from its neighbours by more than this per pixel (central difference, halved). */
+export const BUSY_EDGE_GRADIENT = 20;
+/** Tones: the fewest 16-level RGB colour buckets that hold this share of the pixels. */
+export const BUSY_TONES_COVER = 0.9;
+/**
+ * Scenery, told from the product by the band pixels themselves. A scene shows strong structure (a net, a
+ * racket, a hedge, people: edge density at least BUSY_EDGE_DENSITY_MIN, or at least BUSY_TONES_MIN tones), or a
+ * plain area in several tones (a wall and a table: edge density under BUSY_PLAIN_EDGE_MAX and at least
+ * BUSY_PLAIN_TONES_MIN tones). Anything else is one material or one plain colour: product every matte dropped,
+ * or a plain backdrop the pass-through keeps whole, never scenery. That is the fine grain of a frame-filling
+ * close-up whose mattes dropped the leather, knit or zip itself (its out-of-focus leather reads as smooth, so it
+ * misses FRAME_FILLING_BORDER_SHARE), or a plain one-colour dress behind a held bag. Measured on the gate 3f
+ * holds and the golden busy cases (edge density / tones): tennis court ZEE79259BBFD83FFA1DB0Z shot 5 0.51 / 55
+ * to 60 (busy); lifestyle candle Z011CB57531CA8FA0CBDDZ shot 1 0.00 to 0.01 / 11 to 31 (busy, plain in several
+ * tones); bag close-ups Z02B2EE44E3A08044B816Z shots 3 and 6 0.25 / 24 and 0.20 / 30 and Z5A0B7DE13FC67EDEAC9DZ
+ * shot 5 0.13 / 9 (one material); the bag held against a plain dress, Z02B2EE44E3A08044B816Z shot 1, 0.00 / 4
+ * (one plain colour).
+ */
+export const BUSY_EDGE_DENSITY_MIN = 0.4;
+export const BUSY_TONES_MIN = 45;
+export const BUSY_PLAIN_EDGE_MAX = 0.05;
+export const BUSY_PLAIN_TONES_MIN = 8;
 
-/** Share of the border band that the pass-through `pass` keeps as scenery (see BUSY_BORDER_MAX_SHARE). */
-export function busyBorderShare(p: Pick<Prepared, "width" | "height" | "rgb">, pass: Pick<Matte, "alpha">, tried: readonly Pick<Matte, "alpha">[], region: BackgroundRegion = backgroundRegion(p)): number {
-  if (!tried.length) return 0;
-  const { width: w, height: h } = p, band = borderBand(w, h), surfaces = new Uint8Array(w * h);
+export interface BusyBorderReading {
+  /** Share of the border band the pass-through keeps and every matte dropped (no skin, no garment panel). */
+  share: number;
+  /** Of those pixels: the share that are edges (BUSY_EDGE_GRADIENT), and their tones (BUSY_TONES_COVER). */
+  edgeDensity: number; tones: number;
+  /** True when those pixels look like scenery (BUSY_EDGE_DENSITY_MIN, BUSY_TONES_MIN, BUSY_PLAIN_*). */
+  scenery: boolean;
+}
+
+/** The border band pixels the pass-through `pass` keeps although every matte tried dropped them, and what they look like (see BUSY_EDGE_DENSITY_MIN). */
+export function busyBorderReading(p: Pick<Prepared, "width" | "height" | "rgb">, pass: Pick<Matte, "alpha">, tried: readonly Pick<Matte, "alpha">[], region: BackgroundRegion = backgroundRegion(p)): BusyBorderReading {
+  const none = { share: 0, edgeDensity: 0, tones: 0, scenery: false };
+  if (!tried.length) return none;
+  const { width: w, height: h, rgb } = p, band = borderBand(w, h), surfaces = new Uint8Array(w * h);
   for (const m of tried) { const kept = keptSurfaces(p, m.alpha, region); for (let i = 0; i < surfaces.length; i++) if (kept[i]) surfaces[i] = 1; }
-  let pixels = 0, scenery = 0;
+  const luma = (i: number) => 0.299 * rgb[i * 3]! + 0.587 * rgb[i * 3 + 1]! + 0.114 * rgb[i * 3 + 2]!;
+  const buckets = new Map<number, number>();
+  let pixels = 0, kept = 0, edges = 0;
   for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
     if (x >= band.x && x < w - band.x && y >= band.y && y < h - band.y) continue;
     const i = y * w + x; pixels++;
-    if (pass.alpha[i]! > 0 && !surfaces[i] && tried.every(m => m.alpha[i]! <= GUARD_ALPHA_EDGE)) scenery++;
+    if (!(pass.alpha[i]! > 0 && !surfaces[i] && tried.every(m => m.alpha[i]! <= GUARD_ALPHA_EDGE))) continue;
+    kept++;
+    const gx = luma(y * w + Math.min(w - 1, x + 1)) - luma(y * w + Math.max(0, x - 1)), gy = luma(Math.min(h - 1, y + 1) * w + x) - luma(Math.max(0, y - 1) * w + x);
+    if (Math.hypot(gx, gy) / 2 > BUSY_EDGE_GRADIENT) edges++;
+    const key = (rgb[i * 3]! >> 4) * 256 + (rgb[i * 3 + 1]! >> 4) * 16 + (rgb[i * 3 + 2]! >> 4);
+    buckets.set(key, (buckets.get(key) ?? 0) + 1);
   }
-  return pixels ? scenery / pixels : 0;
+  if (!kept) return none;
+  let tones = 0, covered = 0;
+  for (const count of [...buckets.values()].sort((a, b) => b - a)) { if (covered >= kept * BUSY_TONES_COVER) break; covered += count; tones++; }
+  const edgeDensity = edges / kept;
+  return { share: kept / pixels, edgeDensity, tones, scenery: readsAsScenery(edgeDensity, tones) };
 }
 
-/** True when a pass-through would leave scenery (busyBorderShare over BUSY_BORDER_MAX_SHARE); a frame-filling close-up never is. */
+/** Band pixels with this edge density and this many tones are scenery (see BUSY_EDGE_DENSITY_MIN); otherwise one material or one plain colour. */
+export function readsAsScenery(edgeDensity: number, tones: number): boolean {
+  return edgeDensity >= BUSY_EDGE_DENSITY_MIN || tones >= BUSY_TONES_MIN || (edgeDensity < BUSY_PLAIN_EDGE_MAX && tones >= BUSY_PLAIN_TONES_MIN);
+}
+
+/** Share of the border band that the pass-through `pass` keeps although every matte tried dropped it (see busyBorderReading). */
+export function busyBorderShare(p: Pick<Prepared, "width" | "height" | "rgb">, pass: Pick<Matte, "alpha">, tried: readonly Pick<Matte, "alpha">[], region: BackgroundRegion = backgroundRegion(p)): number {
+  return busyBorderReading(p, pass, tried, region).share;
+}
+
+/** True when a pass-through would leave scenery: over BUSY_BORDER_MAX_SHARE of the band, read as scenery (busyBorderReading); a frame-filling close-up never is. */
 export function isBusyBackground(p: Pick<Prepared, "width" | "height" | "rgb">, pass: Pick<Matte, "alpha">, tried: readonly Pick<Matte, "alpha">[], region: BackgroundRegion = backgroundRegion(p)): boolean {
-  return !region.frameFilling && busyBorderShare(p, pass, tried, region) > BUSY_BORDER_MAX_SHARE;
+  if (region.frameFilling) return false;
+  const reading = busyBorderReading(p, pass, tried, region);
+  return reading.share > BUSY_BORDER_MAX_SHARE && reading.scenery;
 }
 
-/** The whole photo as it is (every pixel opaque): what a busy-background photo shows while it waits for a person. */
-export function wholePhotoMatte(p: Pick<Prepared, "width" | "height">): Matte {
-  return { alpha: Buffer.alloc(p.width * p.height, 255), width: p.width, height: p.height, model: PASSTHROUGH_MODEL, ms: 0, source: "model", target: null, sentLongSide: null };
+/**
+ * The photo as it is (every pixel opaque) inside the uniform canvas strips a brand pasted it on (backgroundRegion
+ * `rect`); the strips are dropped as the pass-through drops them. It is what a busy-background photo shows while it
+ * waits for a person and what "Use as is" publishes: fitted on the channel canvas with the band note, never a white
+ * frame inside a grey canvas.
+ */
+export function wholePhotoMatte(p: Pick<Prepared, "width" | "height" | "rgb">, region: BackgroundRegion = backgroundRegion(p)): Matte {
+  const { width: w, height: h } = p, { x0, y0, x1, y1 } = region.rect, alpha = Buffer.alloc(w * h);
+  for (let y = y0; y <= y1; y++) alpha.fill(255, y * w + x0, y * w + x1 + 1);
+  return { alpha, width: w, height: h, model: PASSTHROUGH_MODEL, ms: 0, source: "model", target: null, sentLongSide: null };
 }
 
 /** Separable sigma-1 Gaussian on a 0/1 mask (edge pixels replicated), as floodFillMatte does, but only inward: the background around the product stays fully clear, so no source background bleeds onto the canvas. */
@@ -607,11 +669,14 @@ export async function resolveMatte(input: ResolveMatteInput): Promise<MatteResol
     if (result.ok) return { matte, passthrough: false, busyBackground: false, actions };
   }
   const pass = passthroughMatte(p, tried);
-  if (isBusyBackground(p, pass, tried, region)) {
+  // What the band pixels no cut-out kept look like (busyBorderReading), recorded so a hold can be read from the report.
+  const reading = region.frameFilling ? null : busyBorderReading(p, pass, tried, region);
+  const band = reading && reading.share > 0 ? `${(reading.share * 100).toFixed(1)}% of the border band no cut-out kept, edge density ${reading.edgeDensity.toFixed(2)}, ${reading.tones} tones` : "";
+  if (reading && reading.share > BUSY_BORDER_MAX_SHARE && reading.scenery) {
     // Trigger `leftover_background`: the code-detected hold (auto-resolve.ts busyBackgroundHold).
-    actions.push({ step: "matte_passthrough", trigger: ["product_removed", "leftover_background"], result: "failed", channels: [], rejudged: false, detail: `busy background: ${(busyBorderShare(p, pass, tried, region) * 100).toFixed(1)}% of the border band is scenery no cut-out kept; the whole photo is kept and held` });
-    return { matte: wholePhotoMatte(p), passthrough: false, busyBackground: true, actions };
+    actions.push({ step: "matte_passthrough", trigger: ["product_removed", "leftover_background"], result: "failed", channels: [], rejudged: false, detail: `busy background: ${band}, read as scenery; the whole photo is kept and held` });
+    return { matte: wholePhotoMatte(p, region), passthrough: false, busyBackground: true, actions };
   }
-  record("matte_passthrough", "passed", "no cut-out kept the product; the whole frame is used");
+  record("matte_passthrough", "passed", `no cut-out kept the product; the whole frame is used${band ? ` (${band}: one material or one plain colour, not scenery)` : ""}`);
   return { matte: pass, passthrough: true, busyBackground: false, actions };
 }

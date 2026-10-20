@@ -295,7 +295,8 @@ Rules for all sources:
 - Matte-detected: a photo on a busy background no cut-out kept (`leftover_background` found by code at the
   matte stage, not by the judge; a hard hold:
   "The background could not be removed from this photo. Use it as is, replace it, or remove it."; the
-  made picture is the whole photo as it is, never trimmed).
+  made picture is the whole photo as it is without the brand's canvas strips, never trimmed; a
+  frame-filling close-up whose cut-outs all dropped the product is not a busy background).
 - Other flags: `transparent` (attention: "This product looks transparent or glass; the cut-out may need
   a look."), `upscaled` (info, spec 11: "Enlarged with a quality pass to meet this marketplace's
   size."; never a hold),
