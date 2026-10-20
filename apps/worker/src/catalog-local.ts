@@ -23,7 +23,7 @@ import { assertTestPrefix, brandSlug } from "@catalog/core/catalog/naming";
 import { CHANNEL_IDS, IDENTIFIER_MODES, PRODUCT_TYPES, type ChannelId, type ProductType, type IdentifierMode, type UploadKind } from "@catalog/core/catalog/types";
 import { channel } from "@catalog/core/catalog/channels";
 import { MattingClient, matteFor } from "@catalog/core/catalog/matte";
-import { planProduct, prepare, renderSource, shotGeometry, UnsupportedSourceError, type Matte, type Prepared, type RenderOutput } from "@catalog/core/catalog/render";
+import { planProduct, prepare, renderSource, shotGeometry, trimRules, UnsupportedSourceError, type Matte, type Prepared, type RenderOutput } from "@catalog/core/catalog/render";
 import { contactSheet } from "@catalog/core/catalog/contact-sheet";
 import type { CatalogUpload } from "@catalog/core/db/schema";
 import { pinnedFetch } from "@catalog/core/safe-url";
@@ -229,7 +229,7 @@ export async function renderToReport(args: RenderArgs) {
         for (const c of args.channels) outputs.push({ identifier: product.identifier, n: shot.n, channel: c, status: "failed", plan: { w: 0, h: 0, lowResolution: false, safeBox: { x: 0, y: 0, w: 0, h: 0 }, scale: 0, placedX: 0, placedY: 0, detailShot: false }, bytes: 0, quality: 0, flags: err instanceof UnsupportedSourceError ? ["unsupported"] : prepared?.flags ?? [], notes: [err instanceof Error ? err.message : String(err)], attention: null, compliance: { ok: false, failures: ["source"] }, matte: null });
       }
     }
-    const geometry = shots.flatMap((s) => { const shot = shotGeometry(s.matte.alpha, s.prepared.width, s.prepared.height, { rgb: s.prepared.rgb }); return shot ? [shot] : []; });
+    const geometry = shots.flatMap((s) => { const shot = shotGeometry(s.matte.alpha, s.prepared.width, s.prepared.height, { rgb: s.prepared.rgb, ...trimRules(args.productType ?? "other", s.matte) }); return shot ? [shot] : []; });
     for (const c of args.channels) {
       const spec = channel(c);
       const plan = geometry.length ? planProduct(spec, geometry) : undefined;

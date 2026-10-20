@@ -1,6 +1,6 @@
 import { flagReason, type OutputFlag } from "../types";
 import { CHANNELS } from "../channels";
-export interface ReasonContext { n?: number; k?: number; channel?: string; w?: number; h?: number; min?: number; failures?: string; error?: string }
+export interface ReasonContext { /** The code-detected `leftover_background` (a busy background held at the matte stage, busyBackgroundHold). */ busy?: boolean; n?: number; k?: number; channel?: string; w?: number; h?: number; min?: number; failures?: string; error?: string }
 export interface FlagDetails { why: string; whatToDo: string }
 /** The placement sentence in the channel's own rule (the channel table's `anchor`), in operator words. */
 function placementWhy(label: string | undefined): string {
@@ -9,6 +9,8 @@ function placementWhy(label: string | undefined): string {
   const rule = spec.anchor === "bottom-centre" ? "at the bottom centre inside the guides" : "in the centre of the image";
   return `On ${spec.label} the product does not sit ${rule} like the other angles.`;
 }
+/** Card copy for the code-detected `leftover_background` (07 4.6). */
+export const BUSY_BACKGROUND_DETAILS: FlagDetails = { why: "The background could not be removed from this photo.", whatToDo: "Use it as is, replace it, or remove it." };
 export function flagDetails(flag: OutputFlag | "failed", ctx: ReasonContext = {}): FlagDetails {
   const n = ctx.n ?? "N", k = ctx.k ?? "the selected", channel = ctx.channel ?? "This marketplace";
   const pairs: Partial<Record<OutputFlag | "failed", [string,string]>> = {
@@ -41,6 +43,8 @@ export function flagDetails(flag: OutputFlag | "failed", ctx: ReasonContext = {}
     qa_sampled_out:["This image was not selected for the quality-check sample.","Nothing to do."],
     auto_dropped:["This photo was left out automatically: it could not be made cleanly and this product has enough other good photos.","Nothing to do; replace the photo if you want it back."],
   };
+  // The same flag found by the matte stage on a busy background: the photo itself could not be cut out.
+  if (flag === "leftover_background" && ctx.busy) return BUSY_BACKGROUND_DETAILS;
   const pair = pairs[flag];
   if (pair) return {why:pair[0],whatToDo:pair[1]};
   return {why:flagReason(flag as OutputFlag),whatToDo:"Check the original photo and replace it if needed."};

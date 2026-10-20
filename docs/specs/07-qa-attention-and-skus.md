@@ -133,7 +133,10 @@ that cannot see the other angles). The judge now works like this:
   dimension fails on the judged channel, the photo's other channels are re-checked and every channel
   takes the strictest score, so one defect gives one consistent result.
 - Automatic actions (`qa/triage.ts` `triageProduct`). Hard holds: a different item confirmed by
-  both judges, a collage, a corrupt file, photo 1 with a problem, every photo of a channel with a
+  both judges, a collage, a photo whose background could not be removed (`leftover_background`
+  found by code at the matte stage, `busyBackgroundHold`: 05 cut-out integrity guard, a busy scene no
+  cut-out kept, the photo unusable as made; hold cause `unusable`; the judge's own
+  `leftover_background` keeps its repair-then-drop path), a corrupt file, photo 1 with a problem, every photo of a channel with a
   problem. Also held because no verdict exists or the image cannot go live: `qa_cap`,
   `qa_unavailable`, and an image not made or failing the channel rules when it cannot be dropped.
   Any other problem: dropped with a note (status `skipped`, reason ends "Left out automatically
@@ -323,6 +326,7 @@ Each flag has a bold "why" sentence and a "what to do" line. `<k>` is the number
 | `leftover_background` | "Some of the original background is still visible around the product." | "Compare the two images. "Use as is" keeps it; "Replace photo <n>" swaps the photo." |
 | `text_or_watermark` | "The photo carries text, a watermark or a logo overlay. Marketplaces reject these." | "Remove it, or replace it with a clean photo." |
 | `collage` | "This image combines several photos in one. Marketplaces reject these." | "Remove it, or replace it with the single photos." |
+| `leftover_background`, code-detected (matte stage, busy background) | "The background could not be removed from this photo." | "Use it as is, replace it, or remove it." |
 | `orientation` | "The product looks rotated or upside down." | "If the original is like this, replace it with a corrected photo." |
 | `placement` | "On Styli the product does not sit at the bottom centre inside the guides like the other angles." | "Check the other angles of this product. This affects Styli only; "Remove this photo" removes it for Styli, "Replace photo <n>" swaps the photo." |
 | `low_resolution` (information) | "The original is <w> x <h>. <Channel> wants at least <min> px, so this one may look soft." | "It will upload, but ask the brand for a larger photo if you can. The other marketplaces are fine with it." |

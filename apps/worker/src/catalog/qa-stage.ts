@@ -6,7 +6,7 @@ import { sampledForQa, strictestChannel } from "@catalog/core/catalog/qa/policy"
 import { autoActionNote, bySeverity, flagDetails } from "@catalog/core/catalog/qa/reasons";
 import { CHART_VIEW, DIMENSION_FLAGS, OUTPUT_DIMENSIONS, PHOTO_DIMENSIONS, QA_DIMENSIONS, dimensionThresholds, failingDimensions, scoreOf, withOverall, type JudgeResult, type QaDimension } from "@catalog/core/catalog/qa/judge";
 import { HARD_HOLD_FLAGS, INFORMATION_FLAGS, LEFT_OUT_FLAGS, problemFlags, triageProduct, type RepairOwnDefects } from "@catalog/core/catalog/qa/triage";
-import { autoActionsOf, judgeSawSourceCut, OWN_DEFECT_FLAGS, ownDefects } from "@catalog/core/catalog/auto-resolve";
+import { autoActionsOf, busyBackgroundHold, judgeSawSourceCut, OWN_DEFECT_FLAGS, ownDefects } from "@catalog/core/catalog/auto-resolve";
 import { shadowSynthesisAllowed } from "@catalog/core/catalog/qa/policy";
 import { flushCutPhoto, resolvePhoto, stopOn } from "./auto-resolve";
 import { recordCost } from "@catalog/core/spend";
@@ -182,7 +182,8 @@ const JUDGE_TRIGGERS=new Set<OutputFlag>([...OWN_DEFECT_FLAGS].filter(flag=>flag
  */
 export interface QaRepairContext { deps: CatalogDeps; batch: Batch; policy: ResolvedPolicy; productId: string; underClaim: UnderClaim }
 /** Outputs the re-render loop gets: our own defects, or a frame cut the judge saw (flushCutPhoto decides whether a side is new). */
-export const repairable=(o:Output)=>o.decision===null && (o.status==="staged" || o.status==="needs_attention") && (o.flags.some(flag=>OWN_DEFECT_FLAGS.has(flag)) || judgeSawSourceCut(o.flags,o.qaScores));
+// A photo the matte stage held for a busy background (busyBackgroundHold) is a hard hold: nothing to re-make.
+export const repairable=(o:Output)=>o.decision===null && (o.status==="staged" || o.status==="needs_attention") && !busyBackgroundHold(o.compliance) && (o.flags.some(flag=>OWN_DEFECT_FLAGS.has(flag)) || judgeSawSourceCut(o.flags,o.qaScores));
 export const repairOwnDefects:RepairOwnDefects<QaRepairContext>=async(candidates,{deps,batch,policy,productId,underClaim})=>{
  const fixed=new Set<string>();
  const read=()=>deps.db.select().from(catalogOutputs).where(and(eq(catalogOutputs.batchId,batch.id),eq(catalogOutputs.productId,productId),isNull(catalogOutputs.decision),inArray(catalogOutputs.status,["staged","needs_attention"])));
@@ -254,7 +255,7 @@ export async function applyTriage(deps:CatalogDeps,batch:Batch,productId:string,
   for(const o of current) {
    const decision=decisions.get(o.id),scores=o.qaScores;
    if(!decision || o.status==="failed") continue;
-   const lead=leadFlag(o.flags),ctx={channel:CHANNELS[o.channel].label,n:o.n,k:batch.channels.length},why=lead ? flagDetails(lead,ctx).why:null;
+   const lead=leadFlag(o.flags),ctx={channel:CHANNELS[o.channel].label,n:o.n,k:batch.channels.length,busy:busyBackgroundHold(o.compliance)},why=lead ? flagDetails(lead,ctx).why:null;
    // Hard holds first, then the worst problem, so the card and the note cite the main problem.
    const ordered=[...new Set([...o.flags.filter(flag=>HARD_HOLD_FLAGS.has(flag)),...bySeverity(o.flags)])];
    const leftOut=o.flags.some(flag=>LEFT_OUT_FLAGS.has(flag));

@@ -7,7 +7,7 @@ import { catalogBatches, catalogChunks, catalogOutputs, catalogProducts, catalog
 import * as storage from "@catalog/core/storage";
 import { listAttention } from "@catalog/core/catalog/attention";
 import { attentionRate } from "@catalog/core/catalog/pipeline/report";
-import { autoActionsOf, type AutoAction } from "@catalog/core/catalog/auto-resolve";
+import { autoActionsOf, busyBackgroundHold, type AutoAction } from "@catalog/core/catalog/auto-resolve";
 import type { ChannelId, ProductType, ResolvedPolicy } from "@catalog/core/catalog/types";
 import type { Matte } from "@catalog/core/catalog/render";
 import { flagReason } from "@catalog/core/catalog/types";
@@ -282,6 +282,36 @@ describe("cut-out integrity guard in the matte stage (matte-guard.ts)", () => {
     const alpha = await sharp(w.objects.get(source!.matteUri!)!).toColourspace("b-w").raw().toBuffer();
     expect(alpha.every(v => v === 255)).toBe(true);
     expect(s.held).toEqual([]);
+  }, 180_000);
+
+  it("a photo on a busy background no cut-out keeps is held whole with its card sentence, never published (FC ZEE79259BBFD83FFA1DB0Z shot 5)", async () => {
+    // A hedge across the top of the frame and a textured racket on the court; every model keeps the dark model in the middle only.
+    const model = (x: number, y: number) => x >= 300 && x < 500 && y >= 200 && y < 800;
+    const scene: Shot = { draw: rgb => rect(rgb, 0, 0, W, H, (x, y) => model(x, y) ? [clamp(30 + grain(x, y)), clamp(30 + grain(x, y)), 34] : y < 120 || (x >= 560 && x < 640 && y >= 500 && y < 580) ? [clamp(70 + grain(x, y) * 2), clamp(110 + grain(x, y) * 2), clamp(50 + grain(x, y))] : [233, 124, 86]) };
+    const keepsModel = (name: string): Matte => { const alpha = Buffer.alloc(W * H); for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) if (model(x, y)) alpha[y * W + x] = 255; return { alpha, width: W, height: H, model: name, ms: 5, source: "model", target: "cpu", sentLongSide: 1024 }; };
+    const w = world();
+    w.matteFor.mockImplementation(async (p, _client, name) => p.rgb[0] === BG ? fakeMatte(p.rgb, name ?? "first") : keepsModel(name ?? "first"));
+    const s = await seed(w, "apparel_model", [block(PLAIN), scene], ["noon", "amazon"]);
+    const busy = s.outputs.filter(o => o.n === 2);
+    expect(busy).toHaveLength(2);
+    for (const o of busy) {
+      expect(steps(autoActionsOf(o.compliance)).slice(0, 5)).toEqual(["matte_check:failed", "second_matte:failed", "padded_matte:failed", "padded_matte:failed", "matte_passthrough:failed"]);
+      expect(o.flags).toContain("leftover_background");
+      expect(busyBackgroundHold(o.compliance)).toBe(true);
+      expect(o.flags).not.toContain("matte_passthrough");
+      expect(o).toMatchObject({ status: "needs_attention", reason: "The background could not be removed from this photo." });
+      expect(o.qaScores).toMatchObject({ autoAction: "hold", holdCause: "unusable" });
+      // The whole photo, fitted: never trimmed.
+      expect(o.canvasH).toBeGreaterThan(0);
+    }
+    const [source] = await db.select().from(catalogSourceImages).where(and(eq(catalogSourceImages.batchId, s.batch.id), eq(catalogSourceImages.n, 2)));
+    expect(source).toMatchObject({ matteModel: "passthrough" });
+    const alpha = await sharp(w.objects.get(source!.matteUri!)!).toColourspace("b-w").raw().toBuffer();
+    expect(alpha.every(v => v === 255)).toBe(true);
+    expect(s.held).toHaveLength(1);
+    expect(s.held[0]!.photos[0]).toMatchObject({ n: 2, whatToDo: "Use it as is, replace it, or remove it." });
+    expect(s.held[0]!.photos[0]!.why).toMatch(/^The background could not be removed from this photo\./);
+    expect(s.outputs.filter(o => o.n === 1).every(o => o.status === "staged")).toBe(true);
   }, 180_000);
 
   it("a size chart is not cut out: left out on every channel with its note, never held", async () => {

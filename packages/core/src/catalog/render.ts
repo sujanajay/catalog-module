@@ -89,7 +89,19 @@ const SIDES: readonly Side[] = ["top", "bottom", "left", "right"];
 
 export type TrimRoom = Record<Side, number>;
 export interface ShotGeometry { box: BBox; source: Size; cut: CutEdges;
-  /** Per side, how deep (source px from the box edge) a cut-fill trim may go before it reaches a logo, text or a buckle (trimRoom); absent without source pixels or a cut on both ends of an axis. */ trimRoom?: TrimRoom }
+  /** Per side, how deep (source px from the box edge) a cut-fill trim may go before it reaches a logo, text or a buckle (trimRoom); absent without source pixels or a cut on both ends of an axis. */ trimRoom?: TrimRoom;
+  /** Cut sides a trim may never touch by rule (trimRules), whatever the source shows: their `trimRoom` is 0. */ trimProtected?: Side[] }
+/** The model name of the pass-through and whole-photo mattes (matte-guard.ts). */
+export const PASSTHROUGH_MODEL = "passthrough";
+/**
+ * Sides a cut-fill trim may never take, by rule. A pass-through or whole-photo matte keeps the photo's own frame, so
+ * nothing in it tells a product edge from a background edge and no side is trimmed (`noTrim`; the product is fitted
+ * with the band note). On a model photo (`apparel_model`) the top cut side holds the head or the face, so it is never
+ * trimmed (`protectTop`); the overflow comes off the bottom instead, or the product is fitted.
+ */
+export function trimRules(productType: ProductType | null | undefined, matte: Pick<Matte, "model">): { noTrim: boolean; protectTop: boolean } {
+  return { noTrim: matte.model === PASSTHROUGH_MODEL, protectTop: productType === "apparel_model" };
+}
 export interface ShotGeometryOptions {
   /** The source pixels (RGB, 3 bytes per pixel): finds the pad band around the real photo. Without them only the thin border counts. */
   rgb?: Buffer | undefined;
@@ -98,6 +110,10 @@ export interface ShotGeometryOptions {
    * a deep band of the photo's own background colour counts as a pad.
    */
   judgedCut?: boolean | undefined;
+  /** No cut side may be trimmed (trimRules: a pass-through or whole-photo matte). */
+  noTrim?: boolean | undefined;
+  /** The top cut side may not be trimmed (trimRules: a model photo's head). */
+  protectTop?: boolean | undefined;
 }
 
 /** Pixel index of position `i` along the frame line at depth `d` from `side`. */
@@ -230,7 +246,15 @@ export function shotGeometry(alpha: Buffer, width: number, height: number, opts:
   const box = { x: lines.left, y: lines.top, w: width - lines.left - lines.right, h: height - lines.top - lines.bottom };
   const shot: ShotGeometry = { box: box.w > 0 && box.h > 0 ? box : tight, source: { w: width, h: height }, cut };
   // Only a product cut on both ends of an axis is ever trimmed (cutFillScale): measure where a trim must stop.
-  if (opts.rgb && ((cut.top && cut.bottom) || (cut.left && cut.right))) shot.trimRoom = trimRoom(opts.rgb, alpha, width, shot.box);
+  if ((cut.top && cut.bottom) || (cut.left && cut.right)) {
+    const ruled: Side[] = opts.noTrim ? SIDES.filter(side => cut[side]) : opts.protectTop && cut.top ? ["top"] : [];
+    if (opts.rgb || ruled.length) {
+      const room = opts.rgb ? trimRoom(opts.rgb, alpha, width, shot.box) : { top: shot.box.h, bottom: shot.box.h, left: shot.box.w, right: shot.box.w };
+      for (const side of ruled) room[side] = 0;
+      shot.trimRoom = room;
+      if (ruled.length) shot.trimProtected = ruled;
+    }
+  }
   return shot;
 }
 
@@ -460,7 +484,7 @@ export function planProduct(spec: ChannelSpec, shots: { box: BBox; source: Size;
 export async function renderSource(input: RenderInput): Promise<RenderOutput> {
   const { prepared: p, matte, shotNumber } = input, spec = channel(input.channel);
   if (matte.width !== p.width || matte.height !== p.height) throw new Error("Matte and source dimensions must match");
-  const geometry = shotGeometry(matte.alpha, p.width, p.height, { rgb: p.rgb, judgedCut: input.judgedCut }), box = geometry?.box ?? null, cut = geometry?.cut ?? NO_CUT;
+  const geometry = shotGeometry(matte.alpha, p.width, p.height, { rgb: p.rgb, judgedCut: input.judgedCut, ...trimRules(input.productType, matte) }), box = geometry?.box ?? null, cut = geometry?.cut ?? NO_CUT;
   const plan = planCanvas(spec, box ?? { x: 0, y: 0, w: p.width, h: p.height }, { w: p.width, h: p.height }, { uniformScale: input.uniformScale, canvas: input.canvas, cut, fitScale: input.fitScale, trimRoom: geometry?.trimRoom });
   const result: RenderOutput = { jpeg: null, status: "failed", plan, quality: JPEG_QUALITY_START, bytes: 0, flags: [...p.flags], notes: [], attention: null, compliance: { ok: false, failures: [] } };
   if (!box) { result.notes.push("No product was found in this photo."); return result; }
@@ -476,7 +500,8 @@ export async function renderSource(input: RenderInput): Promise<RenderOutput> {
   const color = backgroundFor(spec.id, shotNumber), product = plan.productBox!;
   // The sheet says a cut edge sits flush with the edge of the image; name every cut side where it does not.
   const floating = SIDES.filter(side => cut[side] && (side === "top" ? product.y : side === "bottom" ? plan.h - product.y - product.h : side === "left" ? product.x : plan.w - product.x - product.w) > 1);
-  const blocked = plan.trimBlocked ?? [];
+  // Only a logo, text or a buckle blocks a trim in the note's words; a side protected by rule (trimRules) gets the plain note.
+  const blocked = (plan.trimBlocked ?? []).filter(side => !geometry?.trimProtected?.includes(side));
   if (floating.length) result.notes.push(blocked.length
     ? `${CUT_BAND_NOTE_START}${floating.join(" and ")}, but on ${spec.label} filling ${floating.length > 1 ? "those edges" : "that edge"} would cut through a logo or detail near the ${blocked.join(" and ")} edge, so a band shows there to keep it whole.`
     : `${CUT_BAND_NOTE_START}${floating.join(" and ")}, but on ${spec.label} the product cannot reach that edge of the image without trimming more of it, so a band shows there.`);

@@ -283,6 +283,10 @@ Rules for all sources:
   parts (`complete_product`), `halo`, `leftover_background`, `orientation`, `placement`, part of the
   product removed by the cut-out (`product_removed`, re-made like the other defects we produce), and size
   charts or text-only images (`chart_image`, left out with a note, never held).
+- Matte-detected: a photo on a busy background no cut-out kept (`leftover_background` found by code at the
+  matte stage, not by the judge; a hard hold:
+  "The background could not be removed from this photo. Use it as is, replace it, or remove it."; the
+  made picture is the whole photo as it is, never trimmed).
 - Other flags: `transparent` (attention: "This product looks transparent or glass; the cut-out may need
   a look."), `upscaled` (attention, `sr_pass` experiment only: "This image was enlarged by an
   experimental step." with "Check logos, text and fabric texture against the original."),

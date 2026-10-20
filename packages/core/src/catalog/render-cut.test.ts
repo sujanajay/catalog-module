@@ -2,7 +2,7 @@ import sharp from "sharp";
 import { describe, expect, it } from "vitest";
 import { CHANNELS } from "./channels";
 import { checkOutput } from "./compliance";
-import { CUT_FILL_MAX_TRIM, CUT_FILL_TRIM_SLACK, detailFeatures, NO_CUT, planCanvas, planProduct, renderSource, shotGeometry, trimRoom, type Matte, type Prepared } from "./render";
+import { CUT_FILL_MAX_TRIM, CUT_FILL_TRIM_SLACK, detailFeatures, NO_CUT, PASSTHROUGH_MODEL, planCanvas, planProduct, renderSource, shotGeometry, trimRoom, trimRules, type Matte, type Prepared } from "./render";
 import { analyseBackground } from "./shadow";
 
 // A brand photo already cropped mid-body inside a thin white border: 800x1200, a 10 px border, the
@@ -364,6 +364,46 @@ describe("a cut-fill trim never cuts through a logo", () => {
     const source = closeUp({ height: 1100, logo: { x: 300, y: 900, w: 120, h: 110 }, cut: { top: false } });
     const geometry = shotGeometry(source.matte.alpha, 800, 1100, { rgb: source.prepared.rgb })!;
     expect(geometry.trimRoom!.bottom).toBeLessThan(1100 - 1010);
+    const own = planCanvas(CHANNELS.amazon, geometry.box, geometry.source, { cut: geometry.cut, trimRoom: geometry.trimRoom });
+    expect(planProduct(CHANNELS.amazon, [geometry]).canvas).toEqual({ w: own.w, h: own.h });
+  });
+});
+
+describe("a cut-fill trim never takes a head, and never trims a pass-through (French Connection ZEE79259BBFD83FFA1DB0Z shot 5, eval run 2)", () => {
+  // A 2:3 close-up cut on all four sides: on a square canvas filling the width needs a third of the height trimmed.
+  const tall = () => closeUp({ height: 1200 });
+  it("takes the whole trim off the bottom of a model photo; the top (the head) is never trimmed", async () => {
+    for (const id of ["centrepoint", "amazon", "shein"] as const) {
+      const output = await renderSource({ ...tall(), channel: id, shotNumber: 2, productType: "apparel_model" });
+      expect(output.compliance.failures, id).toEqual([]);
+      expect(output.plan.productBox, id).toEqual({ x: 0, y: 0, w: output.plan.w, h: output.plan.h });
+      expect(output.plan.sourceCrop!.y, id).toBe(0);
+      expect(output.plan.sourceCrop!.h, id).toBeLessThan(1200);
+      expect(output.notes, id).toEqual([]);
+    }
+    // Any other product type still splits the trim between the two cut sides.
+    const shoe = await renderSource({ ...tall(), channel: "centrepoint", shotNumber: 2, productType: "footwear" });
+    expect(shoe.plan.sourceCrop!.y).toBeGreaterThan(0);
+  });
+  it("fits a model photo when the bottom alone cannot take the trim (a logo low down), with the plain band note", async () => {
+    const source = closeUp({ height: 1200, logo: { x: 300, y: 1000, w: 120, h: 110 } });
+    const output = await renderSource({ ...source, channel: "centrepoint", shotNumber: 2, productType: "apparel_model" });
+    expect(output.plan.sourceCrop).toEqual(output.plan.sourceBox);
+    expect(output.notes).toEqual(["The original photo is cut at the left and right, but on Centrepoint filling those edges would cut through a logo or detail near the bottom edge, so a band shows there to keep it whole."]);
+  });
+  it("never trims a pass-through or whole-photo matte: it is fitted with the band note", async () => {
+    const source = tall(), matte: Matte = { ...source.matte, model: PASSTHROUGH_MODEL };
+    expect(trimRules("footwear", matte)).toEqual({ noTrim: true, protectTop: false });
+    const geometry = shotGeometry(matte.alpha, 800, 1200, { rgb: source.prepared.rgb, ...trimRules("footwear", matte) })!;
+    expect(geometry.trimRoom).toEqual({ top: 0, bottom: 0, left: 0, right: 0 });
+    for (const productType of ["apparel_model", "footwear"] as const) {
+      const output = await renderSource({ prepared: source.prepared, matte, channel: "amazon", shotNumber: 2, productType });
+      expect(output.compliance.failures, productType).toEqual([]);
+      expect(output.plan.sourceCrop, productType).toEqual(output.plan.sourceBox);
+      expect(output.plan.productBox!.h, productType).toBe(output.plan.h);
+      expect(output.notes, productType).toEqual(["The original photo is cut at the left and right, but on Amazon the product cannot reach that edge of the image without trimming more of it, so a band shows there."]);
+    }
+    // The product canvas is planned with the same rule.
     const own = planCanvas(CHANNELS.amazon, geometry.box, geometry.source, { cut: geometry.cut, trimRoom: geometry.trimRoom });
     expect(planProduct(CHANNELS.amazon, [geometry]).canvas).toEqual({ w: own.w, h: own.h });
   });
