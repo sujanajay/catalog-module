@@ -4,6 +4,7 @@ import { backgroundFor, channel, CUT_BAND_NOTE_START, DETAIL_SHOT_BBOX_FRACTION,
 import type { ChannelId, OutputFlag, ProductType } from "./types";
 import { ALPHA_BBOX_THRESHOLD, analyseBackground, borderPixels, shadowLayer } from "./shadow";
 import { BG_TOLERANCE, checkOutput } from "./compliance";
+import { shouldUpscale, upscaledRgb, upscalerKey, withColour, type Upscaler } from "./upscale";
 
 export interface Prepared { width: number; height: number; rgb: Buffer; alphaSource: Buffer | null; background: { uniform: boolean; color: [number, number, number]; stdev: number }; flags: OutputFlag[]; sourceMime: string }
 export interface Matte { alpha: Buffer; width: number; height: number; model: string; ms: number; source: "model" | "alpha_source" | "floodfill"; target: "cpu" | "gpu" | null; sentLongSide: number | null }
@@ -14,9 +15,13 @@ export interface CanvasPlan { w: number; h: number; lowResolution: boolean; safe
 /** `canvas`: the product's one canvas on this channel (planProduct), so every angle shares one size. */
 export interface RenderInput { prepared: Prepared; matte: Matte; channel: ChannelId; shotNumber: number; productType: ProductType; uniformScale?: number; canvas?: Size; identifier?: string; publicObjectPath?: string; /** false forbids a synthesised shadow (05 rule 3); absent leaves the product-type rule. */ synthesiseShadow?: boolean;
   /** Below 1 shrinks the fitted product by this factor (the auto-resolve ladder's smaller fit); absent is 1. */ fitScale?: number;
-  /** The judge saw a cut at the frame edge that the cut rule missed: shotGeometry relaxes its truncation share. */ judgedCut?: boolean }
-export interface RenderOutput { jpeg: Buffer | null; status: "ok" | "skipped" | "failed"; plan: CanvasPlan; quality: number; bytes: number; flags: OutputFlag[]; notes: string[]; attention: { why: string; what: string } | null; compliance: { ok: boolean; failures: string[] } }
-export interface RenderKeyInputs { sourceSha256: string; channel: ChannelId; rulesVersion: string; policyId: string; policyUpdatedAt: string; n: number }
+  /** The judge saw a cut at the frame edge that the cut rule missed: shotGeometry relaxes its truncation share. */ judgedCut?: boolean;
+  /** Spec 11: the GPU upscaler, used when the plan enlarges beyond its `minScale`; absent or null is the plain Lanczos path. */ upscaler?: Upscaler | null;
+  /** Ids for the upscale log lines; never shown to an operator. */ trace?: { batchId?: string; productId?: string } }
+/** `upscale`: set only when the upscaler made this output's colour (flag `upscaled`); `model` goes into render_key, never into operator copy. */
+export interface RenderOutput { jpeg: Buffer | null; status: "ok" | "skipped" | "failed"; plan: CanvasPlan; quality: number; bytes: number; flags: OutputFlag[]; notes: string[]; attention: { why: string; what: string } | null; compliance: { ok: boolean; failures: string[] }; upscale?: { model: string; ms: number } }
+/** `upscaler`: the upscaler model id, only when the upscaler made the output (the plain path keeps today's key). */
+export interface RenderKeyInputs { sourceSha256: string; channel: ChannelId; rulesVersion: string; policyId: string; policyUpdatedAt: string; n: number; upscaler?: string | null }
 
 export { ALPHA_BBOX_THRESHOLD } from "./shadow";
 export class UnsupportedSourceError extends Error { readonly flags: OutputFlag[] = ["unsupported"]; }
@@ -517,7 +522,14 @@ export async function renderSource(input: RenderInput): Promise<RenderOutput> {
     const rgba = Buffer.alloc(p.width * p.height * 4);
     for (let i = 0; i < matte.alpha.length; i++) { p.rgb.copy(rgba, i * 4, i * 3, i * 3 + 3); rgba[i * 4 + 3] = matte.alpha[i]!; }
     const crop = plan.sourceCrop ?? box;
-    const cutout = await sharp(rgba, { raw: { width: p.width, height: p.height, channels: 4 } }).extract({ left: crop.x, top: crop.y, width: crop.w, height: crop.h }).resize(product.w, product.h, { kernel: "lanczos3" }).png().toBuffer();
+    let cutout: Buffer = await sharp(rgba, { raw: { width: p.width, height: p.height, channels: 4 } }).extract({ left: crop.x, top: crop.y, width: crop.w, height: crop.h }).resize(product.w, product.h, { kernel: "lanczos3" }).png().toBuffer();
+    // Spec 11: beyond the upscaler's threshold the colour comes from the GPU upscaler (2x, then Lanczos to the product
+    // size) and the alpha stays the Lanczos alpha above; any failure keeps this plain cut-out, byte for byte, with no flag.
+    if (input.upscaler && shouldUpscale(plan.scale, input.upscaler.minScale)) {
+      const enlarged = await upscaledRgb(input.upscaler, p.rgb, p.width, crop, { w: product.w, h: product.h }, { ...input.trace, identifier: input.identifier, shot: shotNumber, channel: spec.id });
+      if (enlarged) { cutout = await withColour(cutout, enlarged.rgb, { w: product.w, h: product.h }); result.flags.push("upscaled"); result.upscale = { model: input.upscaler.model, ms: enlarged.ms }; }
+    }
+    // TODO integration: call sharpenAfterEnlarge from enhance.ts here
     const cutoutAlpha = await sharp(cutout).extractChannel(3).raw().toBuffer();
     for (let y = 0; y < product.h; y++) cutoutAlpha.copy(foregroundMask, (product.y + y) * plan.w + product.x, y * product.w, (y + 1) * product.w);
     let shadow = await shadowLayer(p, matte, crop, plan, input.productType, color, foregroundMask);
@@ -547,5 +559,5 @@ export async function renderAllChannels(prepared: Prepared, matte: Matte, channe
   for (const id of channels) outputs[id] = await renderSource({ ...ctx, prepared, matte, channel: id });
   return outputs;
 }
-export function renderKeyInputs(i: RenderKeyInputs): string { return `${i.sourceSha256}|${i.channel}|${i.rulesVersion}|${i.policyId}+${i.policyUpdatedAt}|${i.n}`; }
+export function renderKeyInputs(i: RenderKeyInputs): string { return `${i.sourceSha256}|${i.channel}|${i.rulesVersion}|${i.policyId}+${i.policyUpdatedAt}|${i.n}${i.upscaler ? `|${upscalerKey(i.upscaler)}` : ""}`; }
 export function hexColor(value: string): [number, number, number] { return [1, 3, 5].map(start => parseInt(value.slice(start, start + 2), 16)) as [number, number, number]; }

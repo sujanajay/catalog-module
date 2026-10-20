@@ -40,6 +40,8 @@ export type ProductType = (typeof PRODUCT_TYPES)[number];
 export type IdentifierMode = (typeof IDENTIFIER_MODES)[number];
 export type Precedence = (typeof PRECEDENCES)[number];
 export type OutputFlag = (typeof OUTPUT_FLAGS)[number];
+/** Spec 11: the sheet note and reason of the `upscaled` information flag (the colour was enlarged by the GPU upscaler). Model-free. */
+export const UPSCALED_SENTENCE = "Enlarged with a quality pass to meet this marketplace's size.";
 export type Decision = (typeof DECISIONS)[number];
 export type QaMode = (typeof QA_MODES)[number];
 export type PolicySource = (typeof POLICY_SOURCES)[number];
@@ -143,8 +145,7 @@ const REASONS: Partial<Record<OutputFlag, (ctx?: Ctx) => string>> = {
     "This photo is a size chart or a text-only image, so it was left out of the marketplace images. Nothing to do.",
   auto_dropped: () =>
     "This photo was left out automatically: it could not be made cleanly and this product has enough other good photos. Nothing to do.",
-  upscaled: () =>
-    "This image was enlarged by an experimental step. Check logos, text and fabric texture against the original.",
+  upscaled: () => `${UPSCALED_SENTENCE} Nothing to do.`,
 };
 
 /** Used for flags whose sentences arrive with 07 (QA). */

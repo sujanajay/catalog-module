@@ -18,6 +18,7 @@ const CORE_COPY_FILES = [
   "packages/core/src/catalog/cost.ts",
   "packages/core/src/catalog/sheet.ts",
   "packages/core/src/catalog/types.ts",
+  "packages/core/src/catalog/pipeline/report.ts",
 ];
 
 // Every candidate id the policy defines, plus provider and family names (spec 07 section 8).

@@ -16,7 +16,7 @@ import { catalogLlmDeps, CatalogQaCapError, type UnderClaim } from "./qa-stage";
 import { QA_USD_PER_CHECK_FALLBACK } from "@catalog/core/catalog/cost";
 import { handlePublishTask } from "./publish";
 import { handleFinalizeTask } from "./finalize";
-import { renderKey } from "@catalog/core/catalog/pipeline/publish";
+import { renderKey, upscaledRenderKey } from "@catalog/core/catalog/pipeline/publish";
 import { compareXlsxCsv,writeLinksXlsx } from "@catalog/core/catalog/sheet";
 import { workbookCsvSheets } from "@catalog/core/catalog/pipeline/report";
 import { cleanupTestBatch,cleanupTestBatches } from "@catalog/core/catalog/test-cleanup";
@@ -717,3 +717,22 @@ describe("shadow decision input",()=>{
   expect(r.outputs.every(o=>o.flags.includes("type_unknown"))).toBe(true);
  },60_000);
 });
+it("records an upscaled output with the upscaler in its render_key, as information, and skips it when unchanged",async()=>{
+  const w=world(),s=await seed(w,"upscaled"),model="realesrgan-x2plus";
+  const render=vi.mocked(w.deps.renderAllChannels),base=render.getMockImplementation()!;
+  render.mockImplementation(async(...args)=>Object.fromEntries(Object.entries(await base(...args)).map(([c,o])=>[c,{...o,flags:["upscaled"],upscale:{model,ms:321}}])) as Awaited<ReturnType<CatalogDeps["renderAllChannels"]>>);
+  expect((await run(w,s)).outcome).toBe("published");
+  expect(render.mock.calls.at(-1)![3]).toMatchObject({trace:{batchId:s.batch.id,productId:s.product.id}});
+  const [output]=await db.select().from(catalogOutputs).where(eq(catalogOutputs.batchId,s.batch.id));
+  const plain=renderKey({sourceSha256:"sha",channel:"noon",n:1,policyKey:"default|fixture"});
+  expect(output).toMatchObject({status:"verified",isLive:true,renderKey:upscaledRenderKey(plain,model)});
+  expect(output!.flags).toContain("upscaled");
+  // A re-run of the same photo with the upscaler on finds the upscaled key and makes nothing new.
+  vi.stubEnv("UPSCALE_MODEL",model);
+  try {
+    const again=await seed(w,"upscaled-again",{productId:s.product.id}),calls=render.mock.calls.length;
+    await run(w,again);
+    expect(await db.select().from(catalogOutputs).where(eq(catalogOutputs.batchId,again.batch.id))).toEqual([]);
+    expect(render.mock.calls.length).toBe(calls);
+  } finally { vi.unstubAllEnvs(); }
+},60_000);

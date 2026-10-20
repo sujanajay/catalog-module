@@ -167,6 +167,18 @@ WEB_ENV="$ENV_VARS,DB_POOL_MAX=$WEB_DB_POOL_MAX,SHARE_SA_EMAIL=$WEB_SA,CATALOG_C
 # jobs through WORKER_ENV (above) and the web here, so the estimate and recorded spend agree.
 WORKER_ENV+=",INR_PER_USD=$INR_PER_USD"
 WEB_ENV+=",INR_PER_USD=$INR_PER_USD,COMPUTE_USD_PER_VCPU_SECOND=$COMPUTE_USD_PER_VCPU_SECOND"
+# Spec 11: the GPU upscaler in the render. UPSCALE_MODEL names the model the GPU matting service runs at
+# POST /upscale (realesrgan-x2plus or swinir-x2); unset or empty (the default) is off, and every render keeps
+# the plain Lanczos path. UPSCALE_MIN_SCALE is the enlargement above which it is used (default 1.5, the
+# variable canvases' cap). Engineering config only, never shown to the operator. Override from the shell
+# like INR_PER_USD, e.g. UPSCALE_MODEL=realesrgan-x2plus bash infra/deploy.sh. UPSCALE_MODEL is written only
+# when set (--set-env-vars replaces the worker environment, so a redeploy without it turns the upscaler off).
+UPSCALE_MODEL=${UPSCALE_MODEL:-}
+UPSCALE_MIN_SCALE=${UPSCALE_MIN_SCALE:-1.5}
+[[ "$UPSCALE_MODEL" =~ ^[A-Za-z0-9._-]*$ ]] || { echo "UPSCALE_MODEL must be a model id such as realesrgan-x2plus, or empty" >&2; exit 1; }
+[[ "$UPSCALE_MIN_SCALE" =~ ^[0-9]+([.][0-9]+)?$ ]] || { echo "UPSCALE_MIN_SCALE must be a number such as 1.5" >&2; exit 1; }
+WORKER_ENV+=",UPSCALE_MIN_SCALE=$UPSCALE_MIN_SCALE"
+if [ -n "$UPSCALE_MODEL" ]; then WORKER_ENV+=",UPSCALE_MODEL=$UPSCALE_MODEL"; fi
 # 03: the web verifies the IAP JWT against this exact audience and accepts only this domain.
 IAP_AUDIENCE=/projects/$PN/locations/$REGION/services/$WEB_SERVICE
 WEB_ENV+=",IAP_AUDIENCE=$IAP_AUDIENCE,ALLOWED_HOSTED_DOMAIN=opptra.com"
