@@ -31,9 +31,11 @@ describe("QA triage: hard holds only", () => {
   const lone = out(3, ["halo"]);
   expect(action([out(1), lone], lone, [{channel:"noon",n:2}])).toMatchObject({action:"drop"});
  });
- it("publishes with a note when only one other good photo remains, unless the image cannot be published", () => {
-  const bad = out(2, ["halo"]);
+ it("publishes with a note when only one other good photo remains, unless the image cannot be published or shows our own defect", () => {
+  const bad = out(2, ["text_or_watermark"]);
   expect(action([out(1), bad], bad)).toMatchObject({action:"note"});
+  // Our own defects left after the re-render loop are never published with a note.
+  for (const flag of ["halo", "leftover_background", "placement"] as const) { const own = out(2, [flag]); expect(action([out(1), own], own)).toMatchObject({action:"hold",cause:"not_publishable"}); }
   const rules = out(2, ["failed_compliance"]);
   expect(action([out(1), rules], rules)).toMatchObject({action:"hold",cause:"not_publishable"});
  });
@@ -42,6 +44,24 @@ describe("QA triage: hard holds only", () => {
   expect(action([cut, out(2)], cut)).toMatchObject({action:"none"});
   const capped = out(3, ["qa_cap"]);
   expect(action([out(1), out(2), capped], capped)).toMatchObject({action:"hold",cause:"unchecked"});
+ });
+ it("leaves a size chart out with a note whatever its position, and photo 1 is the first real photo", () => {
+  const chartLast = out(3, ["chart_image"]);
+  expect(action([out(1), out(2), chartLast], chartLast)).toMatchObject({action:"drop",flags:["chart_image"]});
+  // Photo 1 a chart, or the only other photo a chart: still left out, never held.
+  const chartFirst = out(1, ["chart_image"]), two = out(2, ["text_or_watermark"]), three = out(3);
+  const decisions = triageProduct([chartFirst, two, three]);
+  expect(decisions.get(chartFirst.id)).toMatchObject({action:"drop"});
+  // Photo 2 is now photo 1, so its problem holds as photo 1 would.
+  expect(decisions.get(two.id)).toMatchObject({action:"hold",cause:"photo_one"});
+  const lone = out(1, ["chart_image"]);
+  expect(action([lone], lone)).toMatchObject({action:"drop"});
+ });
+ it("product_removed is our own defect: after the re-render loop it is dropped or held, never published with a note", () => {
+  const removed = out(3, ["product_removed"]);
+  expect(action([out(1), out(2), removed], removed)).toMatchObject({action:"drop",flags:["product_removed"]});
+  const few = out(2, ["product_removed"]);
+  expect(action([out(1), few], few)).toMatchObject({action:"hold",cause:"not_publishable"});
  });
  it("judges each channel on its own good photos and skips decided outputs", () => {
   const styli = out(2, ["failed_compliance"], {channel:"styli"}), decided = out(2, ["halo"], {decision:"use_as_is",status:"staged"});

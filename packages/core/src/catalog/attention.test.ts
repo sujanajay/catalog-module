@@ -33,3 +33,16 @@ it("gives one what-to-do instruction per photo and never adds guidance for infor
  expect(photo!.why).toBe("This photo does not match photo 1 of the same identifier. A shadow was added because the original photo had no shadow that could be kept.");
  expect(photo!.whatToDo).not.toContain("Nothing to do");
 });
+it("cites the worst photo and its main problem first, with at most three problem sentences per photo",async()=>{
+ const [batch]=await db.insert(catalogBatches).values({brandSlug:"fc",brandName:"French Connection",name:"catalog-test-attention-severity",isTest:true,channels:["noon"],createdBy:"a@opptra.com"}).returning();
+ const [p]=await db.insert(catalogProducts).values({brandSlug:"fc",identifier:"BAG",productKey:"bag",pathKey:"BAG",isTest:true}).returning();
+ const sources=await db.insert(catalogSourceImages).values([2,4].map(n=>({batchId:batch!.id,productId:p!.id,n,sha256:`s${n}`,rawUri:`gs://private/bag-${n}.jpg`,originalName:`BAG_${n}.jpg`,mime:"image/jpeg",width:1200,height:1600}))).returning();
+ const row=(n:number,flags:string[])=>({batchId:batch!.id,productId:p!.id,sourceImageId:sources.find(s=>s.n===n)!.id,n,channel:"noon" as const,canvasW:1080,canvasH:1480,scale:1,placedX:0,placedY:0,renderKey:`k${n}`,objectPath:`catalog-test/bag-${n}`,publicUrl:`https://public/bag-${n}`,status:"needs_attention" as const,flags:flags as never});
+ await db.insert(catalogOutputs).values([row(2,["text_or_watermark"]),row(4,["orientation","text_or_watermark","halo","leftover_background","product_removed","no_shadow_source"])]);
+ const [item]=await listAttention(db,batch!.id,async uri=>uri);
+ expect(item!.photos.map(photo=>photo.n)).toEqual([4,2]);
+ expect(item!.problemLine).toBe("Photo 4 lost part of the product in the cut-out; photo 2 carries text or a watermark.");
+ const worst=item!.photos[0]!;
+ expect(worst.why).toBe("Part of the product went missing when the background was removed. Some of the original background is still visible around the product. The edge of the product looks rough or shows a halo, often white on white. The original photo has no shadow that could be kept, so the product sits on the plain background without one.");
+ expect(worst.whatToDo).toContain("Remove this photo");
+});

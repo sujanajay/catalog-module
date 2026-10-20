@@ -8,9 +8,12 @@ import { BG_TOLERANCE, checkOutput } from "./compliance";
 export interface Prepared { width: number; height: number; rgb: Buffer; alphaSource: Buffer | null; background: { uniform: boolean; color: [number, number, number]; stdev: number }; flags: OutputFlag[]; sourceMime: string }
 export interface Matte { alpha: Buffer; width: number; height: number; model: string; ms: number; source: "model" | "alpha_source" | "floodfill"; target: "cpu" | "gpu" | null; sentLongSide: number | null }
 export interface BBox { x: number; y: number; w: number; h: number }
-export interface CanvasPlan { w: number; h: number; lowResolution: boolean; safeBox: BBox; scale: number; placedX: number; placedY: number; detailShot: boolean; sourceBox?: BBox; productBox?: BBox; cut?: CutEdges }
+export interface CanvasPlan { w: number; h: number; lowResolution: boolean; safeBox: BBox; scale: number; placedX: number; placedY: number; detailShot: boolean; sourceBox?: BBox; productBox?: BBox; cut?: CutEdges;
+  /** The part of `sourceBox` drawn: smaller only where a product cut on both ends of one axis fills it and the other axis is trimmed off its cut sides (cutFillScale). */ sourceCrop?: BBox }
 /** `canvas`: the product's one canvas on this channel (planProduct), so every angle shares one size. */
-export interface RenderInput { prepared: Prepared; matte: Matte; channel: ChannelId; shotNumber: number; productType: ProductType; uniformScale?: number; canvas?: Size; identifier?: string; publicObjectPath?: string; /** false forbids a synthesised shadow (05 rule 3); absent leaves the product-type rule. */ synthesiseShadow?: boolean }
+export interface RenderInput { prepared: Prepared; matte: Matte; channel: ChannelId; shotNumber: number; productType: ProductType; uniformScale?: number; canvas?: Size; identifier?: string; publicObjectPath?: string; /** false forbids a synthesised shadow (05 rule 3); absent leaves the product-type rule. */ synthesiseShadow?: boolean;
+  /** Below 1 shrinks the fitted product by this factor (the auto-resolve ladder's smaller fit); absent is 1. */ fitScale?: number;
+  /** The judge saw a cut at the frame edge that the cut rule missed: shotGeometry relaxes its truncation share. */ judgedCut?: boolean }
 export interface RenderOutput { jpeg: Buffer | null; status: "ok" | "skipped" | "failed"; plan: CanvasPlan; quality: number; bytes: number; flags: OutputFlag[]; notes: string[]; attention: { why: string; what: string } | null; compliance: { ok: boolean; failures: string[] } }
 export interface RenderKeyInputs { sourceSha256: string; channel: ChannelId; rulesVersion: string; policyId: string; policyUpdatedAt: string; n: number }
 
@@ -46,46 +49,218 @@ export function bbox(alpha: Buffer, width: number, height: number, threshold = A
 export interface CutEdges { top: boolean; bottom: boolean; left: boolean; right: boolean }
 export const NO_CUT: CutEdges = Object.freeze({ top: false, bottom: false, left: false, right: false });
 export const anyCut = (cut: CutEdges | undefined): boolean => !!cut && (cut.top || cut.bottom || cut.left || cut.right);
-/** A cut edge is a straight opaque run at least this fraction of the product box width (height for the sides). */
-export const CUT_EDGE_MIN_RUN_FRACTION = 0.25;
-/** Mattes peak at 254-255 inside the product, so a run counts as fully opaque from this alpha. */
+/** Mattes peak at 254-255 inside the product, so a cut line counts as opaque from this alpha. */
 export const CUT_EDGE_OPAQUE_ALPHA = 250;
-/** The product box edge must lie within this band of the frame edge: the brand's thin white border. */
+/** A pad line (the brand's band around the real photo) is a frame line this uniform ... */
+export const CUT_EDGE_PAD_STDEV = 6;
+/** ... whose mean colour stays within this distance per channel of the outermost line (any colour, not only white). */
+export const CUT_EDGE_PAD_TOLERANCE = 10;
+/** A pad the colour of the photo's own background is told apart only as the thin border: this fraction of the frame. */
 export const CUT_EDGE_BORDER_FRACTION = 0.03;
 export const CUT_EDGE_BORDER_MIN_PX = 4;
-/** The opaque cut line may sit this far inside the product box edge: the matte's soft fade into the border. */
+/** A pad that ends on a photo of another background colour (a letterbox) may be this deep. */
+export const CUT_EDGE_PAD_MAX_FRACTION = 0.15;
+/** A perpendicular band's inner line shows the photo starting within this many px of a band's inner edge: the photo's corner. */
+export const CUT_EDGE_LETTERBOX_TOLERANCE_PX = 4;
+/** The cut line may sit this far inside the pad's inner edge: the matte's soft fade into the pad. */
 export const CUT_EDGE_FRINGE_FRACTION = 0.01;
 export const CUT_EDGE_FRINGE_MIN_PX = 6;
+/** Signal 1, a straight edge: the opaque matte starts on one line, allowing this much jitter inwards ... */
+export const CUT_EDGE_JITTER_PX = 2;
+/** ... over at least one run this long (a fraction of the frame side, with a floor in px). */
+export const CUT_EDGE_MIN_STRAIGHT_FRACTION = 0.02;
+export const CUT_EDGE_MIN_STRAIGHT_PX = 8;
+/** Signal 2, a truncated silhouette: the straight edge holds this share of the silhouette width ... */
+export const CUT_EDGE_TRUNCATION_RATIO = 0.6;
+/** ... measured this many lines further in (a foot or a rounded hem narrows towards its edge; a cut does not). */
+export const CUT_EDGE_INSET_PX = 10;
+/**
+ * Where the band is the colour of the photo's own background (no visible photo edge), the edge must also hold
+ * this share of the product box side: the lowest shoe of a standing model (10-17% measured) is flat over
+ * 10 lines like a cut, while two shins or a hem cut at the frame span a third or more.
+ */
+export const CUT_EDGE_MIN_SHARE = 0.2;
+/** The relaxed share when the judge saw a cut at the frame edge that the rule missed. */
+export const CUT_EDGE_JUDGED_RATIO = 0.4;
+
+type Side = "top" | "bottom" | "left" | "right";
+const SIDES: readonly Side[] = ["top", "bottom", "left", "right"];
 
 export interface ShotGeometry { box: BBox; source: Size; cut: CutEdges }
+export interface ShotGeometryOptions {
+  /** The source pixels (RGB, 3 bytes per pixel): finds the pad band around the real photo. Without them only the thin border counts. */
+  rgb?: Buffer | undefined;
+  /**
+   * The judge saw a cut at the frame edge that the rule missed: the truncation share drops to CUT_EDGE_JUDGED_RATIO and
+   * a deep band of the photo's own background colour counts as a pad.
+   */
+  judgedCut?: boolean | undefined;
+}
+
+/** Pixel index of position `i` along the frame line at depth `d` from `side`. */
+function lineIndex(side: Side, d: number, i: number, width: number, height: number): number {
+  return side === "top" ? d * width + i : side === "bottom" ? (height - 1 - d) * width + i : side === "left" ? i * width + d : i * width + (width - 1 - d);
+}
+
+/**
+ * The pad band on each side: the outermost frame lines that are uniform (CUT_EDGE_PAD_STDEV) and the
+ * colour of the outermost line (CUT_EDGE_PAD_TOLERANCE), any colour. `photoEdge` is true when the
+ * band ends on a photo whose own background (where the matte is transparent, between the other
+ * sides' bands) is another colour, or on a line the product fills, or when the outermost line is
+ * not uniform at all: the band's inner edge is then the real photo's frame edge.
+ */
+export function padBands(rgb: Buffer, alpha: Buffer, width: number, height: number): Record<Side, { depth: number; photoEdge: boolean }> {
+  const depths = {} as Record<Side, { depth: number; colour: number[] | null; max: number }>;
+  for (const side of SIDES) {
+    const horizontal = side === "top" || side === "bottom", length = horizontal ? width : height, max = Math.floor((horizontal ? height : width) * CUT_EDGE_PAD_MAX_FRACTION);
+    const lineStats = (d: number) => {
+      const sum = [0, 0, 0], squares = [0, 0, 0];
+      for (let i = 0; i < length; i++) { const p = lineIndex(side, d, i, width, height) * 3; for (let c = 0; c < 3; c++) { const v = rgb[p + c]!; sum[c]! += v; squares[c]! += v * v; } }
+      const mean = sum.map(t => t / length), variance = squares.reduce((t, q, c) => t + q / length - mean[c]! ** 2, 0) / 3;
+      return { mean, stdev: Math.sqrt(Math.max(0, variance)) };
+    };
+    const outer = lineStats(0);
+    if (outer.stdev > CUT_EDGE_PAD_STDEV) { depths[side] = { depth: 0, colour: null, max }; continue; }
+    let depth = 1;
+    for (; depth <= max; depth++) { const line = lineStats(depth); if (line.stdev > CUT_EDGE_PAD_STDEV || line.mean.some((v, c) => Math.abs(v - outer.mean[c]!) > CUT_EDGE_PAD_TOLERANCE)) break; }
+    depths[side] = { depth, colour: outer.mean, max };
+  }
+  const result = {} as Record<Side, { depth: number; photoEdge: boolean }>;
+  for (const side of SIDES) {
+    const { depth, colour, max } = depths[side], horizontal = side === "top" || side === "bottom";
+    if (!colour) { result[side] = { depth, photoEdge: true }; continue; }
+    if (depth > max) { result[side] = { depth, photoEdge: false }; continue; }
+    // Two lines in, past the JPEG blend of the pad edge, between the other sides' bands: the photo's own background.
+    const [a, b] = horizontal ? [depths.left, depths.right] : [depths.top, depths.bottom], length = horizontal ? width : height;
+    // Only thin perpendicular bands are skipped: a deeper one may end on the product itself, not on the photo.
+    const qThin = Math.max(CUT_EDGE_BORDER_MIN_PX, Math.ceil(length * CUT_EDGE_BORDER_FRACTION));
+    const from = a.depth <= qThin ? a.depth : 0, to = length - (b.depth <= qThin ? b.depth : 0);
+    const probe = Math.min((horizontal ? height : width) - 1, depth + 2), background = [0, 0, 0];
+    let count = 0;
+    for (let i = from; i < to; i++) { const k = lineIndex(side, probe, i, width, height); if (alpha[k]! <= ALPHA_BBOX_THRESHOLD) { count++; for (let c = 0; c < 3; c++) background[c]! += rgb[k * 3 + c]!; } }
+    const differs = count < (to - from) * 0.1 || background.some((t, c) => Math.abs(t / count - colour[c]!) > CUT_EDGE_PAD_TOLERANCE);
+    // Or a thin perpendicular band's inner line shows the photo starting exactly here: the photo's corner.
+    const corner = (horizontal ? [depths.left, depths.right] : [depths.top, depths.bottom]).some((q, k) => {
+      if (q.depth < 1 || q.depth > qThin || !q.colour) return false;
+      const qSide: Side = horizontal ? (k ? "right" : "left") : (k ? "bottom" : "top"), qDepth = Math.min(q.depth + 2, (horizontal ? width : height) - 1);
+      const content = (p: number) => { const at = horizontal ? (side === "top" ? p : height - 1 - p) : (side === "left" ? p : width - 1 - p); const k2 = lineIndex(qSide, qDepth, at, width, height) * 3; return colour.some((v, c) => Math.abs(rgb[k2 + c]! - v) > CUT_EDGE_PAD_TOLERANCE); };
+      for (let p = 0; p <= max + CUT_EDGE_LETTERBOX_TOLERANCE_PX; p++) if (content(p) && content(p + 1) && content(p + 2) && content(p + 3)) return Math.abs(p - depth) <= CUT_EDGE_LETTERBOX_TOLERANCE_PX;
+      return false;
+    });
+    result[side] = { depth, photoEdge: differs || corner };
+  }
+  return result;
+}
 
 /**
  * The product box of a shot and the edges where the product was already cut in the source (a model
- * cut mid-jeans, a head-and-shoulders crop). A side is cut when the product box edge lies within the
- * white border band (CUT_EDGE_BORDER_FRACTION of the frame) and its outermost line, allowing for the
- * matte's soft fade (CUT_EDGE_FRINGE_FRACTION), holds a straight run of opaque matte
- * (alpha >= CUT_EDGE_OPAQUE_ALPHA) at least CUT_EDGE_MIN_RUN_FRACTION of the box side.
- * The box is trimmed to that cut line, so the hard cut, not the matte's soft fade into the border
- * beyond it, meets the canvas edge. Nothing of the product inside the cut line is removed.
+ * cut mid-shin, a head-and-shoulders crop). Per side:
+ * 1. The pad band (padBands): brands often place the real photo inside a uniform band of any colour.
+ *    A side can be cut only where the product reaches the band's inner edge (the frame edge when
+ *    there is no band), allowing the matte's soft fade (CUT_EDGE_FRINGE_FRACTION). A band the colour
+ *    of the photo's own background counts only as the thin border (CUT_EDGE_BORDER_FRACTION), unless the
+ *    product is cut at a perpendicular frame edge: the photo is then a crop and the band is its padding.
+ * 2. Two signals on the first product line inside the band, stepping inwards through the fade: a
+ *    straight edge (a run of opaque matte, alpha >= CUT_EDGE_OPAQUE_ALPHA, starting on that line
+ *    within CUT_EDGE_JITTER_PX, at least CUT_EDGE_MIN_STRAIGHT_FRACTION of the side long) AND a
+ *    truncated silhouette (the straight edge holds at least CUT_EDGE_TRUNCATION_RATIO of the
+ *    silhouette width CUT_EDGE_INSET_PX lines further in; CUT_EDGE_JUDGED_RATIO with
+ *    `opts.judgedCut`). A foot or a rounded hem narrows towards its edge and fails the second
+ *    signal; two legs cut at the knee pass both.
+ * The box is trimmed to the cut line, so the hard cut, not the matte's fade beyond it, meets the
+ * canvas edge. Nothing of the product inside the cut line is removed.
  */
-export function shotGeometry(alpha: Buffer, width: number, height: number): ShotGeometry | null {
+export function shotGeometry(alpha: Buffer, width: number, height: number, opts: ShotGeometryOptions = {}): ShotGeometry | null {
   const tight = bbox(alpha, width, height);
   if (!tight) return null;
-  const box = { ...tight }, cut = { ...NO_CUT };
-  const longestRun = (count: number, at: (i: number) => number) => { let best = 0, run = 0; for (let i = 0; i < count; i++) { run = at(i) >= CUT_EDGE_OPAQUE_ALPHA ? run + 1 : 0; if (run > best) best = run; } return best; };
-  const rowCut = (y: number) => longestRun(tight.w, i => alpha[y * width + tight.x + i]!) >= tight.w * CUT_EDGE_MIN_RUN_FRACTION;
-  const colCut = (x: number) => longestRun(tight.h, i => alpha[(tight.y + i) * width + x]!) >= tight.h * CUT_EDGE_MIN_RUN_FRACTION;
-  const band = (side: number) => Math.max(CUT_EDGE_BORDER_MIN_PX, Math.ceil(side * CUT_EDGE_BORDER_FRACTION));
+  const cut = { ...NO_CUT }, ratio = opts.judgedCut ? CUT_EDGE_JUDGED_RATIO : CUT_EDGE_TRUNCATION_RATIO;
   const fringe = Math.max(CUT_EDGE_FRINGE_MIN_PX, Math.ceil(Math.max(width, height) * CUT_EDGE_FRINGE_FRACTION));
-  const lastY = tight.y + tight.h - 1, lastX = tight.x + tight.w - 1;
-  let bottom = lastY, top = tight.y, right = lastX, left = tight.x;
-  if (height - 1 - lastY < band(height)) for (let y = lastY; y >= Math.max(lastY - fringe, tight.y); y--) if (rowCut(y)) { cut.bottom = true; bottom = y; break; }
-  if (tight.y < band(height)) for (let y = tight.y; y <= Math.min(tight.y + fringe, lastY); y++) if (rowCut(y)) { cut.top = true; top = y; break; }
-  if (width - 1 - lastX < band(width)) for (let x = lastX; x >= Math.max(lastX - fringe, tight.x); x--) if (colCut(x)) { cut.right = true; right = x; break; }
-  if (tight.x < band(width)) for (let x = tight.x; x <= Math.min(tight.x + fringe, lastX); x++) if (colCut(x)) { cut.left = true; left = x; break; }
-  if (bottom >= top) { box.y = top; box.h = bottom - top + 1; }
-  if (right >= left) { box.x = left; box.w = right - left + 1; }
-  return { box, source: { w: width, h: height }, cut };
+  // Depth of the product box edge from each frame edge; a cut side moves to its cut line.
+  const pads = opts.rgb ? padBands(opts.rgb, alpha, width, height) : null;
+  const lines: Record<Side, number> = { top: tight.y, bottom: height - tight.y - tight.h, left: tight.x, right: width - tight.x - tight.w };
+  // Sides whose band is deeper than the thin border and the colour of the photo's own background (no photo edge).
+  const deep: Side[] = [];
+  const detect = (side: Side, deepBand: boolean): void => {
+    const horizontal = side === "top" || side === "bottom", across = horizontal ? height : width, outer = lines[side];
+    const from = horizontal ? tight.x : tight.y, to = horizontal ? tight.x + tight.w : tight.y + tight.h;
+    const thin = Math.max(CUT_EDGE_BORDER_MIN_PX, Math.ceil(across * CUT_EDGE_BORDER_FRACTION));
+    const pad = pads?.[side] ?? { depth: Math.min(outer, thin), photoEdge: false };
+    // A band deeper than the thin border is a pad only when it ends on the real photo's edge (padBands), or when the
+    // judge saw the cut, or (`deepBand`) when the product is cut on a perpendicular side: a cut-out on white with
+    // nothing but the product's own straight edge to show the photo ended.
+    if (pad.depth > across * CUT_EDGE_PAD_MAX_FRACTION) return;
+    if (pad.depth > thin && !pad.photoEdge && !opts.judgedCut && !deepBand) { deep.push(side); return; }
+    if (outer > pad.depth + fringe) return;
+    const at = (d: number, i: number) => alpha[lineIndex(side, d, i, width, height)]!;
+    const minStraight = Math.max(CUT_EDGE_MIN_STRAIGHT_PX, Math.ceil((horizontal ? width : height) * CUT_EDGE_MIN_STRAIGHT_FRACTION));
+    const last = across - 1;
+    // Per position along the side: where the silhouette starts (alpha above half) and where the matte
+    // turns opaque behind it (the soft fade); Infinity when not within the search depth.
+    const half = new Float64Array(to - from).fill(Infinity), solid = new Float64Array(to - from).fill(Infinity);
+    for (let i = from; i < to; i++) {
+      let d = outer;
+      for (; d <= Math.min(outer + fringe, last); d++) if (at(d, i) > 127) { half[i - from] = d; break; }
+      if (Number.isFinite(half[i - from]!)) for (; d <= Math.min(half[i - from]! + fringe, last); d++) if (at(d, i) >= CUT_EDGE_OPAQUE_ALPHA) { solid[i - from] = d; break; }
+    }
+    const line = Math.min(...half);
+    if (!Number.isFinite(line) || line + CUT_EDGE_INSET_PX > last) return;
+    // Signal 1: positions whose silhouette starts on the outermost line (within the jitter) and turns opaque behind it.
+    let edge = 0, run = 0, longest = 0, silhouette = 0;
+    const solids: number[] = [];
+    for (let i = from; i < to; i++) {
+      if (half[i - from]! <= line + CUT_EDGE_JITTER_PX && Number.isFinite(solid[i - from]!)) { edge++; run++; longest = Math.max(longest, run); solids.push(solid[i - from]!); } else run = 0;
+      if (at(line + CUT_EDGE_INSET_PX, i) > 127) silhouette++;
+    }
+    // Signal 2: the edge holds most of the silhouette further in. The box is trimmed to where the cut turns opaque.
+    // Without a photo edge (the band is the photo's own background colour) a flat sole looks the same over 10 lines:
+    // the edge must also span CUT_EDGE_MIN_SHARE of the product box there.
+    const share = pad.photoEdge ? 0 : CUT_EDGE_MIN_SHARE * (to - from);
+    if (longest >= minStraight && edge >= silhouette * ratio && edge >= share) { cut[side] = true; lines[side] = solids.sort((a, b) => a - b)[solids.length >> 1]!; }
+  };
+  for (const side of SIDES) detect(side, false);
+  // A product cut at a frame edge shows the photo is a crop: a deep band of the photo's own background colour on a
+  // perpendicular side is then the brand's padding around that crop (a model cut at the waist and thighs inside a
+  // white band, also cut at the left edge). Only a cut found by the rule above counts, never one found this way.
+  // The two signals and CUT_EDGE_MIN_SHARE still decide.
+  const framed = { ...cut };
+  for (const side of deep) if (side === "top" || side === "bottom" ? framed.left || framed.right : framed.top || framed.bottom) detect(side, true);
+  const box = { x: lines.left, y: lines.top, w: width - lines.left - lines.right, h: height - lines.top - lines.bottom };
+  return { box: box.w > 0 && box.h > 0 ? box : tight, source: { w: width, h: height }, cut };
+}
+
+/**
+ * The most a product cut on both ends of one axis may lose off the other axis's cut sides so that it fills the
+ * axis it is cut on, as a share of the product box: a third covers the widest canvas mismatch (a square photo
+ * on the 2:3 Trendyol canvas, a 2:3 photo on a square canvas). Beyond it the product is fitted, never trimmed.
+ */
+export const CUT_FILL_MAX_TRIM = 1 / 3;
+
+/**
+ * The scale of a product in the safe box: fit, never crop (`min` of the two axes), except where the product is
+ * cut in the source on both ends of one axis and fitting would leave a band beside those cut edges. It then
+ * fills that axis, and the overflow on the other axis comes off that axis's cut sides only (never an uncut
+ * outline), by at most CUT_FILL_MAX_TRIM. A full-bleed photo (cut on all four sides) fills the safe box.
+ */
+export function cutFillScale(safe: Size, box: Size, cut: CutEdges): number {
+  const sw = safe.w / box.w, sh = safe.h / box.h, contain = Math.min(sw, sh);
+  const fills = (fill: number, other: number, otherBox: number) => 1 - other / (otherBox * fill) <= CUT_FILL_MAX_TRIM + 1e-9;
+  if (cut.top && cut.bottom && (cut.left || cut.right) && sh > sw && fills(sh, safe.w, box.w)) return sh;
+  if (cut.left && cut.right && (cut.top || cut.bottom) && sw > sh && fills(sw, safe.h, box.h)) return sw;
+  return contain;
+}
+
+/**
+ * The part of `box` drawn at `scale` into `safe`: where the scaled product overflows an axis (cutFillScale), the
+ * overflow comes off that axis's cut sides (split evenly when both are cut). Otherwise `box` itself.
+ */
+export function cutFillCrop(box: BBox, scale: number, safe: Size, cut: CutEdges): BBox {
+  const axis = (start: number, length: number, room: number, low: boolean, high: boolean): [number, number] => {
+    if (Math.round(length * scale) <= room || (!low && !high)) return [start, length];
+    const keep = Math.max(1, Math.min(length, Math.round(room / scale))), extra = length - keep;
+    return [start + (low && high ? Math.floor(extra / 2) : low ? extra : 0), keep];
+  };
+  const [x, w] = axis(box.x, box.w, safe.w, cut.left, cut.right), [y, h] = axis(box.y, box.h, safe.h, cut.top, cut.bottom);
+  return { x, y, w, h };
 }
 
 /** The canvas minus the channel's margins; a side cut in the source gets margin 0 so the cut sits flush with the canvas edge. */
@@ -115,11 +290,13 @@ function proportionalCanvas(spec: ChannelSpec, fraction: number, roundUp: boolea
 
 /**
  * `opts.canvas` (planProduct) raises an adaptive canvas to the product's one canvas on this channel;
- * `opts.cut` places each cut side flush with the canvas edge (margin 0 there, other margins kept).
+ * `opts.cut` places each cut side flush with the canvas edge (margin 0 there, other margins kept), and a
+ * product cut on both ends of an axis fills that axis (cutFillScale, cutFillCrop);
+ * `opts.fitScale` (below 1) shrinks the product by that factor inside the same canvas.
  */
-export function planCanvas(spec: ChannelSpec, box: BBox, source: Size, opts: { uniformScale?: number | undefined; canvas?: Size | undefined; cut?: CutEdges | undefined }): CanvasPlan {
+export function planCanvas(spec: ChannelSpec, box: BBox, source: Size, opts: { uniformScale?: number | undefined; canvas?: Size | undefined; cut?: CutEdges | undefined; fitScale?: number | undefined }): CanvasPlan {
   const cut = opts.cut ?? NO_CUT, wide = box.w > box.h;
-  const fit = (size: Size) => { const safe = safeBoxFor(spec, size, wide, cut); return Math.min(safe.w / box.w, safe.h / box.h); };
+  const fit = (size: Size) => cutFillScale(safeBoxFor(spec, size, wide, cut), box, cut);
   const min = effectiveMinimum(spec), target = spec.targetCanvas;
   const lowResolution = fit(min) > MAX_UPSCALE;
   let size = target;
@@ -132,12 +309,13 @@ export function planCanvas(spec: ChannelSpec, box: BBox, source: Size, opts: { u
   }
   const safeBox = safeBoxFor(spec, size, wide, cut);
   const detailShot = box.w / source.w > DETAIL_SHOT_BBOX_FRACTION || box.h / source.h > DETAIL_SHOT_BBOX_FRACTION;
-  const scale = Math.min(fit(size), spec.uniformScaleDefault && !detailShot ? opts.uniformScale ?? Infinity : Infinity);
+  // `fitScale` (below 1) shrinks the product inside the same canvas; anchoring and cut edges are unchanged.
+  const scale = Math.min(fit(size), spec.uniformScaleDefault && !detailShot ? opts.uniformScale ?? Infinity : Infinity) * Math.min(1, opts.fitScale ?? 1);
   const w = Math.max(1, Math.min(safeBox.w, Math.round(box.w * scale))), h = Math.max(1, Math.min(safeBox.h, Math.round(box.h * scale)));
   // A cut side is anchored to its canvas edge; with both opposite sides cut, the bottom wins vertically and the product stays centred horizontally.
   const placedX = safeBox.x + (cut.left && !cut.right ? 0 : cut.right && !cut.left ? safeBox.w - w : Math.round((safeBox.w - w) / 2));
   const placedY = safeBox.y + (cut.bottom || (!cut.top && spec.anchor === "bottom-centre") ? safeBox.h - h : cut.top ? 0 : Math.round((safeBox.h - h) / 2));
-  return { ...size, safeBox, lowResolution, scale, placedX, placedY, detailShot, sourceBox: box, productBox: { x: placedX, y: placedY, w, h }, cut: { ...cut } };
+  return { ...size, safeBox, lowResolution, scale, placedX, placedY, detailShot, sourceBox: box, productBox: { x: placedX, y: placedY, w, h }, cut: { ...cut }, sourceCrop: cutFillCrop(box, scale, safeBox, cut) };
 }
 
 /**
@@ -155,8 +333,8 @@ export function planProduct(spec: ChannelSpec, shots: { box: BBox; source: Size;
 export async function renderSource(input: RenderInput): Promise<RenderOutput> {
   const { prepared: p, matte, shotNumber } = input, spec = channel(input.channel);
   if (matte.width !== p.width || matte.height !== p.height) throw new Error("Matte and source dimensions must match");
-  const geometry = shotGeometry(matte.alpha, p.width, p.height), box = geometry?.box ?? null, cut = geometry?.cut ?? NO_CUT;
-  const plan = planCanvas(spec, box ?? { x: 0, y: 0, w: p.width, h: p.height }, { w: p.width, h: p.height }, { uniformScale: input.uniformScale, canvas: input.canvas, cut });
+  const geometry = shotGeometry(matte.alpha, p.width, p.height, { rgb: p.rgb, judgedCut: input.judgedCut }), box = geometry?.box ?? null, cut = geometry?.cut ?? NO_CUT;
+  const plan = planCanvas(spec, box ?? { x: 0, y: 0, w: p.width, h: p.height }, { w: p.width, h: p.height }, { uniformScale: input.uniformScale, canvas: input.canvas, cut, fitScale: input.fitScale });
   const result: RenderOutput = { jpeg: null, status: "failed", plan, quality: JPEG_QUALITY_START, bytes: 0, flags: [...p.flags], notes: [], attention: null, compliance: { ok: false, failures: [] } };
   if (!box) { result.notes.push("No product was found in this photo."); return result; }
   if (matte.source === "floodfill") result.flags.push("fallback_matte");
@@ -169,8 +347,11 @@ export async function renderSource(input: RenderInput): Promise<RenderOutput> {
   }
   if (spec.uniformScaleDefault && !plan.detailShot && input.uniformScale !== undefined && input.uniformScale > plan.scale) result.notes.push("Could not keep the same size as the other angles without cutting; fitted instead");
   const color = backgroundFor(spec.id, shotNumber), product = plan.productBox!;
+  // The sheet says a cut edge sits flush with the edge of the image; name every cut side where it does not.
+  const floating = SIDES.filter(side => cut[side] && (side === "top" ? product.y : side === "bottom" ? plan.h - product.y - product.h : side === "left" ? product.x : plan.w - product.x - product.w) > 1);
+  if (floating.length) result.notes.push(`The original photo is cut at the ${floating.join(" and ")}, but on ${spec.label} the product cannot reach that edge of the image without trimming more of it, so a band shows there.`);
   const rgbColor = hexColor(color);
-  const passthrough = p.sourceMime === "image/jpeg" && !p.alphaSource && !anyCut(cut) && p.width === plan.w && p.height === plan.h && box.x >= plan.safeBox.x && box.y >= plan.safeBox.y && box.x + box.w <= plan.safeBox.x + plan.safeBox.w && box.y + box.h <= plan.safeBox.y + plan.safeBox.h && borderPixels(p.width, p.height).every(i => rgbColor.every((v, c) => Math.abs(p.rgb[i * 3 + c]! - v) <= BG_TOLERANCE));
+  const passthrough = p.sourceMime === "image/jpeg" && !p.alphaSource && !anyCut(cut) && (input.fitScale ?? 1) >= 1 && p.width === plan.w && p.height === plan.h && box.x >= plan.safeBox.x && box.y >= plan.safeBox.y && box.x + box.w <= plan.safeBox.x + plan.safeBox.w && box.y + box.h <= plan.safeBox.y + plan.safeBox.h && borderPixels(p.width, p.height).every(i => rgbColor.every((v, c) => Math.abs(p.rgb[i * 3 + c]! - v) <= BG_TOLERANCE));
   let image: Buffer;
   const foregroundMask = Buffer.alloc(plan.w * plan.h);
   if (passthrough) {
@@ -180,12 +361,15 @@ export async function renderSource(input: RenderInput): Promise<RenderOutput> {
   } else {
     const rgba = Buffer.alloc(p.width * p.height * 4);
     for (let i = 0; i < matte.alpha.length; i++) { p.rgb.copy(rgba, i * 4, i * 3, i * 3 + 3); rgba[i * 4 + 3] = matte.alpha[i]!; }
-    const cutout = await sharp(rgba, { raw: { width: p.width, height: p.height, channels: 4 } }).extract({ left: box.x, top: box.y, width: box.w, height: box.h }).resize(product.w, product.h, { kernel: "lanczos3" }).png().toBuffer();
+    const crop = plan.sourceCrop ?? box;
+    const cutout = await sharp(rgba, { raw: { width: p.width, height: p.height, channels: 4 } }).extract({ left: crop.x, top: crop.y, width: crop.w, height: crop.h }).resize(product.w, product.h, { kernel: "lanczos3" }).png().toBuffer();
     const cutoutAlpha = await sharp(cutout).extractChannel(3).raw().toBuffer();
     for (let y = 0; y < product.h; y++) cutoutAlpha.copy(foregroundMask, (product.y + y) * plan.w + product.x, y * product.w, (y + 1) * product.w);
-    let shadow = await shadowLayer(p, matte, box, plan, input.productType, color, foregroundMask);
-    // Never a synthesised contact shadow along a bottom edge that was cut in the source: nothing stands there.
-    if ((input.synthesiseShadow === false || cut.bottom) && shadow.flags.includes("shadow_synthesised")) shadow = { layer: null, flags: ["no_shadow_source"] };
+    let shadow = await shadowLayer(p, matte, crop, plan, input.productType, color, foregroundMask);
+    // Never a synthesised contact shadow on a photo cut in the source on any side (a bag held in a cropped hand, a
+    // close-up filling the photo): nothing stands on a floor there, and the shadow below makes the centred product
+    // look off-centre.
+    if ((input.synthesiseShadow === false || anyCut(cut)) && shadow.flags.includes("shadow_synthesised")) shadow = { layer: null, flags: ["no_shadow_source"] };
     result.flags.push(...shadow.flags);
     image = await sharp({ create: { width: plan.w, height: plan.h, channels: 3, background: color } }).composite([...(shadow.layer ? [{ input: shadow.layer, blend: "multiply" as const }] : []), { input: cutout, left: product.x, top: product.y, blend: "over" }]).png().toBuffer();
   }

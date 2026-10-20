@@ -75,3 +75,36 @@ export async function retryTransient<T>(fn: (attempt: number) => Promise<T>, opt
     }
   }
 }
+
+/**
+ * Postgres SQLSTATE codes that mean "try again": connection exceptions (class 08), too many
+ * connections (53300, which Cloud SQL reports as "remaining connection slots are reserved..."),
+ * and server shutdown or restart (57P01, 57P02, 57P03).
+ */
+const TRANSIENT_PG_CODES = new Set(["08000", "08001", "08003", "08004", "08006", "53300", "57P01", "57P02", "57P03"]);
+const TRANSIENT_PG_MESSAGE = /remaining connection slots|too many clients|Connection terminated|timeout exceeded when trying to connect|ECONNRESET|ETIMEDOUT/i;
+
+/**
+ * isTransientError for database calls. Drizzle wraps the driver error ("Failed query: ...") and
+ * keeps it on `cause`, so the whole cause chain is checked.
+ */
+export function isTransientDbError(err: unknown): boolean {
+  for (let e: unknown = err, depth = 0; e && typeof e === "object" && depth < 5; e = (e as { cause?: unknown }).cause, depth++) {
+    const code = (e as { code?: unknown }).code;
+    if (typeof code === "string" && TRANSIENT_PG_CODES.has(code)) return true;
+    if (isTransientError(e)) return true;
+    if (e instanceof Error && TRANSIENT_PG_MESSAGE.test(e.message)) return true;
+  }
+  return false;
+}
+
+/** An error's message followed by its cause chain, so a wrapped driver error is not lost in a log. */
+export function describeError(err: unknown): string {
+  const parts: string[] = [];
+  for (let e: unknown = err, depth = 0; e !== undefined && e !== null && depth < 5; e = (e as { cause?: unknown }).cause, depth++) {
+    const code = typeof e === "object" ? (e as { code?: unknown }).code : undefined;
+    parts.push(`${e instanceof Error ? e.message : String(e)}${typeof code === "string" || typeof code === "number" ? ` [${code}]` : ""}`);
+    if (typeof e !== "object") break;
+  }
+  return parts.join(" <- caused by: ");
+}

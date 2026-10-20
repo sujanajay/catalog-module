@@ -4,15 +4,27 @@ import { callCatalogJson, qaImage, type CatalogLlmDeps } from "./judge";
 import { PRODUCT_TYPE_TEMPLATE } from "./templates";
 export const CATALOG_QA_DEFAULT_MODEL = "google/gemini-2.5-flash-lite";
 export interface ClassifierDeps extends CatalogLlmDeps { model?: string; env?: NodeJS.ProcessEnv }
-export async function classifyProductType(image: Buffer, deps: ClassifierDeps = {}) {
+export interface ProductTypeResult {
+  type: Exclude<ProductType, "auto">; confidence: number; usage: Record<string, unknown>; costUsd: number; calls: number;
+  /** Product-level flags (`transparent`, `type_unknown`): the caller copies them to every photo of the product. */
+  flags: OutputFlag[];
+  /**
+   * True when the classified photo is a size chart, measurement guide or other text-only image. It
+   * describes that one photo, never the product, so it is not a flag: the caller should classify
+   * the next photo for the product type and render this one without a cut-out (07 views amendment).
+   * Optional so canned classifiers stay valid; absent means false.
+   */
+  chart?: boolean;
+}
+export async function classifyProductType(image: Buffer, deps: ClassifierDeps = {}): Promise<ProductTypeResult> {
   const model = deps.model ?? (deps.env ?? process.env).CATALOG_QA_DEFAULT_MODEL ?? CATALOG_QA_DEFAULT_MODEL;
   const result = await callCatalogJson([{role:"system",content:PRODUCT_TYPE_TEMPLATE},{role:"user",content:[textPart("Classify the product in this photo."),...imageParts([await qaImage(image)])]}], obj => {
     if (typeof obj.type !== "string") throw new LlmJsonError("Product type missing", JSON.stringify(obj));
     return obj;
   }, model, deps);
   const {value,...accounting} = result;
-  if (!value) return {type:"other" as const,confidence:0,...accounting,flags:["type_unknown"] as OutputFlag[]};
+  if (!value) return {type:"other",confidence:0,...accounting,flags:["type_unknown"],chart:false};
   const type = PRODUCT_TYPES.find(t => t !== "auto" && t === value.type) as Exclude<ProductType,"auto"> | undefined;
   const confidence = typeof value.confidence === "number" && Number.isFinite(value.confidence) ? Math.max(0,Math.min(1,value.confidence)) : 0;
-  return {type:type ?? "other",confidence,...accounting,flags:(value.transparent === true ? ["transparent"] : []) as OutputFlag[]};
+  return {type:type ?? "other",confidence,...accounting,flags:value.transparent === true ? ["transparent"] : [],chart:value.chart === true};
 }

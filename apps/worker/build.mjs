@@ -19,6 +19,7 @@ await build({
     "catalog-eval": path.join(here, "src/catalog-eval.ts"),
     "catalog-load": path.join(here, "src/catalog-load.ts"),
     "catalog-recheck": path.join(here, "src/catalog-recheck.ts"),
+    "catalog-output-evals": path.join(here, "src/catalog-output-evals.ts"),
     "fault-proxy": path.join(here, "src/fault-proxy.ts"),
   },
   outdir: dist,

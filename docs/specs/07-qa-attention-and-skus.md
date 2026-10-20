@@ -151,6 +151,40 @@ that cannot see the other angles). The judge now works like this:
   opinion, `autoAction`, `holdCause`, `finalStatus`), and the batch carries `qa.attentionRate`
   (held products over products, target 0). Model ids stay out of operator copy.
 
+### 4.0a Judge views amendment (quality gate 2, 2026-10-20; supersedes conflicting lines above)
+
+Quality gate 2 held single briefs out of a 3-pack, size charts and a tights packshot as "different
+product", flagged leftover background on a clean render, gave one photo eight flags, and passed two
+close-ups whose product the cut-out had removed. The judge now works like this:
+
+- Same product (`wrong_item` false, stated in the prompt): a single item out of a multipack or set,
+  a packshot or flat photo against the product worn on a model or on legs, a size chart, care label,
+  measurement guide or infographic of the listing, a detail or close-up of any part, and exactly the
+  same design in another colour. `wrong_item` is true only for another category of product or a
+  clearly different design, and still needs the second judge (4.0).
+- `view` adds `chart` (size chart, measurement guide, care graphic, any mostly-text image). A chart
+  carries the flag `chart_image` only (no product check applies; scores read 100), asks no second
+  judge, and triage always leaves it out with the note "This photo is a size chart or a text-only
+  image, so it was left out of the marketplace images. Nothing to do." It is never held, whatever its
+  position; photo 1 is the lowest photo that is not a chart. The product-type classifier also returns
+  `chart: true` for such a photo: a property of that photo, never a product flag, so the caller must
+  not copy it to the other photos (the matte stage does not act on it yet).
+- New output dimension `product_intact` (image 2 still shows all of the product image 1 shows; a logo
+  or label alone is not the product), line `threshold`, flag `product_removed`. It is one of our own
+  defects (`JUDGED_DEFECT_FLAGS`, so `OWN_DEFECT_FLAGS`): it feeds `repairOwnDefects` and the ladder
+  (4.6a), then triage drops or holds it; never published with a note, never a direct hold. Stored
+  scores without it (older judgements, canned judges) read it as 100 (`scoreOf`).
+- `leftover_background` counts only when the first judge's evidence sentence says where the leftover
+  is and the second judge (`qaModelSecond`) also scores `background_clean` under its line; otherwise
+  `background_clean` is stored at the higher of the two scores, at least its line. One second call
+  answers both `wrong_item` and the leftover. Re-checks of other channels and ladder re-judges ask the
+  second judge for the leftover only (`wrongItemCheck: false`).
+- Only checks that actually failed raise flags: every judged score is required in the reply (a
+  partial reply is asked again once, naming the missing scores, then `qa_unavailable`), never read as
+  0. Flags and reasons are ordered worst first (`FLAG_SEVERITY` in `reasons.ts`); an attention card
+  lists its worst photo first, leads with its main problem and shows at most three problem sentences
+  per photo (`MAX_REASONS_PER_PHOTO`); the report keeps every flag and score.
+
 ### 4.1 Dimensions, thresholds, verdict, flags
 
 Dimensions (0 to 100 each, coerced and clamped by `normalizeScores`; a missing dimension becomes 0
@@ -324,6 +358,41 @@ limit was reached"; `failed_compliance` "did not meet <Channel>'s rules". Clause
 "; " and the line ends with ".", giving the v2 lines "Photo 4 is too small for Styli; photo 5 could
 not be read." and "Photo 3 looks like a different product from the others."
 
+### 4.6a Automatic resolution before a hold (auto-resolve)
+
+Defects we produced are re-made by the pipeline before a product is ever held.
+- Triggers (`OWN_DEFECT_FLAGS`, `packages/core/src/catalog/auto-resolve.ts`): `halo` and
+  `leftover_background` (the judge's `edge_quality` and `background_clean` under their lines),
+  `failed_compliance` (a channel rule we broke, including placement: margins, Styli guide, Noon
+  side margins) and `placement`.
+- Ladder, per photo, in order, checked on the failing channels: (a) re-render with the synthesised
+  shadow off (skipped when none was added), (b) re-matte with the policy's `matteModelSecond` and
+  re-render (skipped when absent, equal to the first or not listed by the matting services), (c)
+  re-render with a 5% smaller fit (`SMALLER_FIT_SCALE`) in the same canvas. The shadow stays off
+  after (a). After each step the compliance guard runs again and, when the judge flagged the photo,
+  the strictest failing channel is re-judged once (the judge caps apply; a cap ends the ladder).
+- The first step that passes is applied to every channel of the photo (a channel the step would
+  break keeps its first image). A winning second matte becomes the photo's stored matte.
+- Where: compliance failures in the render stage (`chunk.ts`, before the judge sees the image);
+  judge flags in the QA stage through `CatalogDeps.repairOwnDefects` (`qa-stage.ts`), after judging
+  and before `triageProduct`.
+- Record: every step and its result is appended to `catalog_outputs.compliance.auto_actions`
+  (`step`, `trigger`, `result` passed | failed | skipped, `channels`, `rejudged`, `detail`) and
+  written to `report-v<k>.json` per output as `autoActions`. No schema change.
+- Ladder exhausted: triage drops the photo with the drop note and the information flag
+  `auto_dropped` when it is not photo 1 and at least two good photos remain on the channel;
+  otherwise it holds with the existing flag. Our own defects are never published with a note.
+- Source problems (`cut_in_source`, `small_source`, `text_or_watermark`, `orientation`) follow the
+  triage: note-only or drop-with-note, held only for photo 1 or the last usable photo. When the judge
+  saw the photo cut at its frame edge (`judgeSawSourceCut`: `complete_product` under its line, or a
+  `source_cut` report) and the judge-relaxed cut detector (`judgedCut`, 05) finds a side the first
+  render did not place flush, every channel is re-rendered with that detector (a cut-out on the
+  photo's own background colour shows no photo edge) so the cut sits flush; recorded as `flush_cut`.
+- Fallback matte: when the cut-out service fails, the matte stage waits for the breaker cool-down,
+  polls the service's health and retries the model once while the delivery still has time for a full
+  matting call (`matte_retry`). If the retry fails the photo still renders with the simple cut-out
+  and carries `fallback_matte`, so the operator sees an image.
+
 ### 4.7 Attention model and decisions
 
 `listAttention(db, batchId)` returns 06's `AttentionProduct[]` for products of the batch with at
@@ -439,8 +508,8 @@ operator labels the Styli and Noon sets through this screen; the product owner l
 whose `change` is not `unchanged` and that have at least one output not `skipped` (unchanged
 products cost nothing and are excluded from the denominator); `usdPerIdentifier = usd /
 identifiers`; `inrPerIdentifier = usdPerIdentifier * INR_PER_USD`. Display on the batch page card
-"Cost so far": "INR <x> per style so far · INR <y> for this batch · agency reference INR 60 per
-style" (INR two decimals, USD four, so a sub-cent spend never reads 0.00; `inrAmount`, `usdAmount`). When
+"Cost so far": "USD <x> (INR <x'>) per style so far · USD <y> (INR <y'>) for this batch · agency
+reference INR 60 per style" (USD four decimals, INR two, so a sub-cent spend never reads 0.00; `usdAmount`, `inrAmount`). When
 `INR_PER_USD` is not set: "USD <x> per style so far · USD <y> for this batch · Cost in rupees is not
 configured yet · agency reference INR 60 per style". Finalize writes `cost.identifiers`, `cost.usdPerIdentifier`,
 `cost.inrPerIdentifier` into the batch and the report. The product page shows the lifetime sum

@@ -117,6 +117,20 @@ describe("GCS operations (fake client)", () => {
     expect(save).toHaveBeenCalledWith(Buffer.from("x"), { contentType: "image/jpeg", resumable: false });
   });
 
+  it("downloadBuffer retries a download whose socket hangs up twice (the job's golden-source read)", async () => {
+    const hangUp = () => Object.assign(new Error("request to https://storage.googleapis.com/storage/v1/b/x/o/y? failed, reason: socket hang up"), { type: "system", code: "ECONNRESET" });
+    download.mockReset().mockRejectedValueOnce(hangUp()).mockRejectedValueOnce(hangUp()).mockResolvedValueOnce([Buffer.from("hello")]);
+    expect(await downloadBuffer("gs://other/a.png")).toEqual({ buf: Buffer.from("hello"), mime: "image/png" });
+    expect(download).toHaveBeenCalledTimes(3);
+    expect(sleep.mock.calls.map(([ms]) => ms)).toEqual([1000, 2000]);
+  });
+
+  it("listObjects retries a listing that hangs up", async () => {
+    getFiles.mockReset().mockRejectedValueOnce(Object.assign(new Error("socket hang up"), { code: "ECONNRESET" })).mockResolvedValueOnce([[{ name: "catalog-test/evals/r/sets/a.b.json" }]]);
+    expect(await listObjects("gs://assets/catalog-test/evals/r/sets/")).toEqual(["gs://assets/catalog-test/evals/r/sets/a.b.json"]);
+    expect(getFiles).toHaveBeenCalledTimes(2);
+  });
+
   it("downloadBuffer reads bytes and content type", async () => {
     expect(await downloadBuffer("gs://other/a.png")).toEqual({ buf: Buffer.from("hello"), mime: "image/png" });
     expect(bucket).toHaveBeenCalledWith("other");

@@ -17,7 +17,8 @@ export const OUTPUT_FLAGS = [
   "complete_product","different_product","halo","leftover_background","text_or_watermark","collage",
   "orientation","placement",
   "qa_unavailable","qa_cap","qa_sampled_out","type_unknown",
-  "shadow_synthesised","transparent","upscaled","cut_in_source",
+  "shadow_synthesised","transparent","upscaled","cut_in_source","auto_dropped",
+  "product_removed","chart_image","matte_passthrough",
 ] as const;
 export const DECISIONS = ["use_as_is","remove","replaced"] as const;
 export const QA_MODES = ["per_source","per_output"] as const;
@@ -71,7 +72,11 @@ export interface BatchCounts {
   collected: number; collectTotal: number | null; previewReady: boolean; latestExport: number;
   failReason: string | null; finalizePending: boolean; policyFallback: boolean;
   newProducts: number; existingProducts: number; shotsToRemove: number;
-  recheckOk: number | null; recheckTotal: number | null;   // independent re-check written by finalize (06)
+  recheckOk: number | null; recheckTotal: number | null;   // independent re-check written by finalize (06): this batch's delivered links
+  /** Links of this batch held for a decision (held products); not delivered, so outside both Details counts. */
+  heldLinks?: number;
+  /** Earlier batches' live links the sheet keeps for held products, re-checked separately. */
+  recheckCarriedOk?: number | null; recheckCarriedTotal?: number | null;
 }
 export interface BatchCost {
   computeVcpuSeconds: number; mattingMs: number; renderMs: number; computeUsd: number;
@@ -132,6 +137,12 @@ const REASONS: Partial<Record<OutputFlag, (ctx?: Ctx) => string>> = {
     "The original photo is already cut at the frame edge, so that edge sits flush with the edge of the image. Nothing to do; ask the brand for an uncut photo if you want one.",
   transparent: () =>
     "This product looks transparent or glass; the cut-out may need a look. Compare the two images. 'Use as is' keeps it.",
+  matte_passthrough: () =>
+    "This photo is a close-up that fills the frame, so the whole photo was kept as it is instead of being cut out. Nothing to do.",
+  chart_image: () =>
+    "This photo is a size chart or a text-only image, so it was left out of the marketplace images. Nothing to do.",
+  auto_dropped: () =>
+    "This photo was left out automatically: it could not be made cleanly and this product has enough other good photos. Nothing to do.",
   upscaled: () =>
     "This image was enlarged by an experimental step. Check logos, text and fabric texture against the original.",
 };

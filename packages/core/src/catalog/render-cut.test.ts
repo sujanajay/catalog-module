@@ -2,7 +2,7 @@ import sharp from "sharp";
 import { describe, expect, it } from "vitest";
 import { CHANNELS } from "./channels";
 import { checkOutput } from "./compliance";
-import { planCanvas, planProduct, renderSource, shotGeometry, type Matte, type Prepared } from "./render";
+import { NO_CUT, planCanvas, planProduct, renderSource, shotGeometry, type Matte, type Prepared } from "./render";
 import { analyseBackground } from "./shadow";
 
 // A brand photo already cropped mid-body inside a thin white border: 800x1200, a 10 px border, the
@@ -20,17 +20,102 @@ function cutModel(opts: { width?: number; height?: number; border?: number; legW
   return { prepared: { width, height, rgb, alphaSource: null, background: analyseBackground(rgb, width, height), flags: [], sourceMime: "image/jpeg" }, matte: { alpha, width, height, model: "synthetic", ms: 0, source: "model", target: "cpu", sentLongSide: null } };
 }
 
+type Rgb = [number, number, number];
+// An 800x1200 frame: a uniform pad of `padDepth` px top and bottom (`sidePad` at the sides) around a photo of colour
+// `photo` (`sidePhoto` within 40 px of its sides); a body 400 px wide from row 300 and two legs of 80 px (20% of the
+// box) cut straight at the photo's bottom edge, the matte fading over the last 3 rows.
+function padded(o: { pad: Rgb; photo: Rgb; padDepth: number; sidePad?: number; sidePhoto?: Rgb }) {
+  const width = 800, height = 1200, rgb = Buffer.alloc(width * height * 3), alpha = Buffer.alloc(width * height), side = o.sidePad ?? 0;
+  for (let y = 0; y < height; y++) for (let x = 0; x < width; x++) {
+    const inPhoto = y >= o.padDepth && y < height - o.padDepth && x >= side && x < width - side;
+    rgb.set(!inPhoto ? o.pad : o.sidePhoto && (x < side + 40 || x >= width - side - 40) ? o.sidePhoto : o.photo, (y * width + x) * 3);
+  }
+  const bottom = height - o.padDepth - 1;
+  const paint = (x0: number, x1: number, y0: number, y1: number) => { for (let y = y0; y <= y1; y++) for (let x = x0; x < x1; x++) { const i = y * width + x; alpha[i] = 254; rgb.set([40, 70, 140], i * 3); } };
+  paint(200, 600, 300, 800); paint(260, 340, 801, bottom); paint(460, 540, 801, bottom);
+  [60, 120, 180].forEach((a, k) => { for (const x0 of [260, 460]) for (let x = x0; x < x0 + 80; x++) alpha[(bottom - k) * width + x] = a; });
+  return { width, height, rgb, alpha };
+}
+
+// A full-length model on white with the feet 13 px above the frame bottom (the bd- and Z11AA shoe shots): rounded
+// soles, or flat soles; the second shoe stands 20 px higher.
+function standing(sole: "rounded" | "flat") {
+  const width = 800, height = 1200, rgb = Buffer.alloc(width * height * 3, 255), alpha = Buffer.alloc(width * height);
+  const paint = (x0: number, x1: number, y0: number, y1: number) => { for (let y = y0; y < y1; y++) for (let x = x0; x < x1; x++) { const i = y * width + x; alpha[i] = 254; rgb.set([30, 30, 30], i * 3); } };
+  const floor = height - 13;
+  paint(220, 580, 100, 700); paint(300, 360, 700, floor - 40); paint(440, 500, 700, floor - 40);
+  for (let y = floor - 40; y < floor; y++) {
+    const half = sole === "rounded" ? Math.round(30 * Math.sqrt(1 - ((y - (floor - 40)) / 40) ** 2)) : 30;
+    paint(330 - half, 330 + half, y, y + 1);
+    if (y < floor - 20) paint(470 - half, 470 + half, y, y + 1);
+  }
+  return { width, height, rgb, alpha };
+}
+
+// A model cut at the waist and thighs on pure white, padded by the brand with a 66 px white band top and bottom
+// (Penti Z10DE shot 1): the torso starts on row 66 and, with `leftCut`, runs off the left frame edge; two thighs end
+// on row 1133. Nothing but the product's own straight edges shows where the photo ended.
+function whiteBandCrop(leftCut: boolean) {
+  const width = 800, height = 1200, rgb = Buffer.alloc(width * height * 3, 255), alpha = Buffer.alloc(width * height);
+  const paint = (x0: number, x1: number, y0: number, y1: number) => { for (let y = y0; y <= y1; y++) for (let x = x0; x < x1; x++) { const i = y * width + x; alpha[i] = 254; rgb.set([200, 150, 120], i * 3); } };
+  paint(leftCut ? 0 : 60, 700, 66, 700); paint(120, 360, 701, 1133); paint(420, 660, 701, 1133);
+  return { prepared: { width, height, rgb, alphaSource: null, background: analyseBackground(rgb, width, height), flags: [], sourceMime: "image/jpeg" } satisfies Prepared, matte: { alpha, width, height, model: "synthetic", ms: 0, source: "model", target: "cpu", sentLongSide: null } satisfies Matte };
+}
+
 describe("cut in source", () => {
   it("finds a straight opaque cut inside the white border and trims the matte's fade beyond it", () => {
     const { matte } = cutModel(), shot = shotGeometry(matte.alpha, matte.width, matte.height)!;
     expect(shot.cut).toEqual({ top: false, bottom: true, left: false, right: false });
     expect(shot.box).toEqual({ x: 250, y: 300, w: 300, h: 1185 - 300 + 1 });
   });
-  it("ignores products with room around them and runs shorter than a quarter of the box", () => {
-    const framed = cutModel({ border: 200 }).matte;
-    expect(shotGeometry(framed.alpha, framed.width, framed.height)!.cut).toEqual({ top: false, bottom: false, left: false, right: false });
-    const leg = cutModel({ legWidth: 60 }).matte; // 60 px of a 300 px box: 20%
-    expect(shotGeometry(leg.alpha, leg.width, leg.height)!.cut.bottom).toBe(false);
+  it("ignores products with room around them", () => {
+    const framed = cutModel({ border: 200 });
+    expect(shotGeometry(framed.matte.alpha, framed.matte.width, framed.matte.height, { rgb: framed.prepared.rgb })!.cut).toEqual(NO_CUT);
+  });
+  it("finds a narrow cut the old 25% run rule missed: one leg cut at the shin, 20% of the box", () => {
+    const leg = cutModel({ legWidth: 60 });
+    expect(shotGeometry(leg.matte.alpha, leg.matte.width, leg.matte.height, { rgb: leg.prepared.rgb })!.cut.bottom).toBe(true);
+  });
+  it("finds two legs cut at the knee inside a light grey pad around a grey photo (Vero Moda, Penti)", () => {
+    const shot = padded({ pad: [235, 235, 235], photo: [205, 205, 205], padDepth: 60 });
+    const geometry = shotGeometry(shot.alpha, shot.width, shot.height, { rgb: shot.rgb })!;
+    expect(geometry.cut).toEqual({ top: false, bottom: true, left: false, right: false });
+    // Trimmed to where the cut turns opaque, past the 3 px fade.
+    expect(geometry.box.y + geometry.box.h).toBe(shot.height - 60 - 3);
+    // The 60 px band is deeper than the thin border: without the pixels it is not known to be a pad.
+    expect(shotGeometry(shot.alpha, shot.width, shot.height)!.cut.bottom).toBe(false);
+  });
+  it("finds the cut of a letterboxed photo whose background is the pad colour, from the photo corner", () => {
+    // White pad 9 px at the sides and 89 px top and bottom; the photo is white at the bottom, grey near its sides.
+    const shot = padded({ pad: [255, 255, 255], photo: [255, 255, 255], padDepth: 89, sidePad: 9, sidePhoto: [228, 228, 228] });
+    expect(shotGeometry(shot.alpha, shot.width, shot.height, { rgb: shot.rgb })!.cut.bottom).toBe(true);
+  });
+  it("never flags a standing model's feet near the frame bottom", () => {
+    for (const sole of ["rounded", "flat"] as const) {
+      const shot = standing(sole);
+      expect(shotGeometry(shot.alpha, shot.width, shot.height, { rgb: shot.rgb })!.cut, sole).toEqual(NO_CUT);
+    }
+  });
+  it("on a judge-confirmed cut also takes a deep band of the photo's own colour as the pad", () => {
+    const shot = padded({ pad: [255, 255, 255], photo: [255, 255, 255], padDepth: 66 });
+    expect(shotGeometry(shot.alpha, shot.width, shot.height, { rgb: shot.rgb })!.cut.bottom).toBe(false);
+    expect(shotGeometry(shot.alpha, shot.width, shot.height, { rgb: shot.rgb, judgedCut: true })!.cut.bottom).toBe(true);
+  });
+  it("takes a deep band of the photo's own colour as the pad when the product is cut at a perpendicular frame edge", () => {
+    const crop = whiteBandCrop(true), { alpha, width, height } = crop.matte;
+    const geometry = shotGeometry(alpha, width, height, { rgb: crop.prepared.rgb })!;
+    expect(geometry.cut).toEqual({ top: true, bottom: true, left: true, right: false });
+    expect(geometry.box).toEqual({ x: 0, y: 66, w: 700, h: 1068 });
+    // Without a frame cut the same straight edges may be a flat-laid hem: the deep white band stays margin.
+    const framed = whiteBandCrop(false);
+    expect(shotGeometry(framed.matte.alpha, width, height, { rgb: framed.prepared.rgb })!.cut).toEqual(NO_CUT);
+  });
+  it.each(["noon", "namshi", "trendyol"] as const)("renders the white-band crop flush top and bottom on %s", async id => {
+    const output = await renderSource({ ...whiteBandCrop(true), channel: id, shotNumber: 1, productType: "apparel_model" });
+    expect(output.status).toBe("ok");
+    expect(output.compliance.failures).toEqual([]);
+    const box = output.plan.productBox!;
+    expect([box.y, box.y + box.h]).toEqual([0, output.plan.h]);
   });
   it("puts the cut flush with the canvas edge and keeps the other margins", () => {
     const { matte } = cutModel(), shot = shotGeometry(matte.alpha, matte.width, matte.height)!;
@@ -91,5 +176,87 @@ describe("shadow along a cut edge", () => {
     expect(output.flags).toContain("cut_in_source");
     expect(output.flags).not.toContain("shadow_synthesised");
     expect(output.compliance.failures).toEqual([]);
+  });
+  it("keeps a bag held by a hand cut at the left edge centred on Trendyol, with no synthesised shadow below it", async () => {
+    // The French Connection bag shot 1: the hand holding the bag is cut by the photo's left edge.
+    const width = 800, height = 1200, rgb = Buffer.alloc(width * height * 3, 255), alpha = Buffer.alloc(width * height);
+    for (let y = 300; y < 800; y++) for (let x = 0; x < 380; x++) { const i = y * width + x; alpha[i] = 254; rgb.set([230, 110, 40], i * 3); }
+    const prepared: Prepared = { width, height, rgb, alphaSource: null, background: analyseBackground(rgb, width, height), flags: [], sourceMime: "image/jpeg" };
+    const matte: Matte = { alpha, width, height, model: "synthetic", ms: 0, source: "model", target: "cpu", sentLongSide: null };
+    const output = await renderSource({ prepared, matte, channel: "trendyol", shotNumber: 1, productType: "bag_accessory" });
+    expect(output.flags).toContain("cut_in_source");
+    expect(output.flags).not.toContain("shadow_synthesised");
+    const box = output.plan.productBox!;
+    expect(Math.abs(box.y - (output.plan.h - box.y - box.h))).toBeLessThanOrEqual(1);
+    // Nothing darker than the canvas below the bag: the gap under it equals the gap above it.
+    const raw = await sharp(output.jpeg!).raw().toBuffer({ resolveWithObject: true });
+    const below = ((box.y + box.h + 30) * raw.info.width + Math.round(box.x + box.w / 2)) * 3;
+    expect(raw.data[below]!).toBeGreaterThanOrEqual(0xe0 - 3);
+  });
+});
+
+// A photo cut on the given sides inside a 10 px white border (the French Connection and Anta close-ups): an
+// opaque product `w` x `h` inside the border with a hard straight edge on every cut side; an uncut side is a wavy
+// outline 60 px inside the border (a hem or a sleeve), so it never reads as a cut.
+function photoCut(w: number, h: number, sides: Partial<Record<"top" | "bottom" | "left" | "right", boolean>>) {
+  const border = 10, width = w + 2 * border, height = h + 2 * border, inset = (cut?: boolean, i = 0) => cut ? 0 : 60 + Math.round(20 * Math.sin(i / 200) ** 2);
+  const rgb = Buffer.alloc(width * height * 3, 255), alpha = Buffer.alloc(width * height);
+  for (let y = border; y < border + h; y++) for (let x = border; x < border + w; x++) {
+    if (x < border + inset(sides.left, y) || x >= border + w - inset(sides.right, y) || y < border + inset(sides.top, x) || y >= border + h - inset(sides.bottom, x)) continue;
+    const i = y * width + x; alpha[i] = 254; rgb.set([40, 70, 140], i * 3);
+  }
+  const prepared: Prepared = { width, height, rgb, alphaSource: null, background: analyseBackground(rgb, width, height), flags: [], sourceMime: "image/jpeg" };
+  const matte: Matte = { alpha, width, height, model: "synthetic", ms: 0, source: "model", target: "cpu", sentLongSide: null };
+  return { prepared, matte };
+}
+
+describe("a product cut on both ends of an axis fills it", () => {
+  const ALL = { top: true, bottom: true, left: true, right: true };
+  it.each(["trendyol", "noon", "namshi"] as const)("renders a full-bleed photo wider than the %s canvas with no band beside any cut edge", async id => {
+    // 780 x 1068 (FC Z02B shot 1) on 2:3 Trendyol and 1:1.37 Noon/Namshi: fitting left a 157 px (Trendyol) band above the top cut.
+    const output = await renderSource({ ...photoCut(780, 1068, ALL), channel: id, shotNumber: 2, productType: "apparel_model" });
+    expect(output.compliance.failures).toEqual([]);
+    expect(output.flags).toContain("cut_in_source");
+    expect(output.notes).toEqual([]);
+    expect(output.plan.productBox).toEqual({ x: 0, y: 0, w: output.plan.w, h: output.plan.h });
+    // Every canvas edge row and column is product colour, not the grey canvas.
+    const raw = await sharp(output.jpeg!).raw().toBuffer({ resolveWithObject: true }), W = raw.info.width, H = raw.info.height;
+    const blue = (x: number, y: number) => raw.data[(y * W + x) * 3 + 2]! - raw.data[(y * W + x) * 3]! > 60;
+    for (const [x, y] of [[W >> 1, 0], [W >> 1, H - 1], [0, H >> 1], [W - 1, H >> 1]] as const) expect(blue(x, y), `${id} ${x},${y}`).toBe(true);
+  });
+  it("renders a square full-bleed close-up on the 2:3 Trendyol canvas flush top and bottom (Anta shots 4-5), trimming a third off its cut sides", () => {
+    const box = { x: 0, y: 0, w: 800, h: 800 }, plan = planCanvas(CHANNELS.trendyol, box, { w: 800, h: 800 }, { cut: ALL });
+    expect(plan.productBox).toEqual({ x: 0, y: 0, w: 1200, h: 1800 });
+    expect(plan.sourceCrop).toEqual({ x: 133, y: 0, w: 533, h: 800 });
+  });
+  it("trims only the cut side when the other side of that axis is an uncut outline", () => {
+    const box = { x: 10, y: 10, w: 780, h: 1068 }, cut = { top: true, bottom: true, left: true, right: false };
+    const plan = planCanvas(CHANNELS.trendyol, box, { w: 800, h: 1200 }, { cut });
+    expect(plan.productBox).toEqual({ x: 0, y: 0, w: 1200, h: 1800 });
+    // All of the overflow comes off the left (cut); the right outline ends where it did.
+    expect(plan.sourceCrop!.x + plan.sourceCrop!.w).toBe(box.x + box.w);
+    expect(plan.sourceCrop!.x).toBeGreaterThan(box.x);
+  });
+  it("never trims an uncut outline: cut top and bottom only, it is fitted and the output says the top does not reach the edge", async () => {
+    const source = photoCut(900, 1068, { top: true, bottom: true });
+    const output = await renderSource({ ...source, channel: "trendyol", shotNumber: 2, productType: "apparel_model" });
+    expect(output.compliance.failures).toEqual([]);
+    expect(output.plan.cut).toEqual({ top: true, bottom: true, left: false, right: false });
+    expect(output.plan.sourceCrop).toEqual(output.plan.sourceBox);
+    expect(output.plan.productBox!.y + output.plan.productBox!.h).toBe(output.plan.h);
+    expect(output.notes).toEqual(["The original photo is cut at the top, but on Trendyol the product cannot reach that edge of the image without trimming more of it, so a band shows there."]);
+  });
+  it("never trims more than a third: a very wide strip cut top and bottom is fitted", () => {
+    const box = { x: 0, y: 0, w: 1200, h: 300 }, plan = planCanvas(CHANNELS.trendyol, box, { w: 1200, h: 300 }, { cut: ALL });
+    expect(plan.sourceCrop).toEqual(box);
+    expect(plan.productBox!.w).toBe(1200);
+  });
+  it("leaves an uncut product exactly as before: fitted, nothing trimmed", () => {
+    const box = { x: 100, y: 100, w: 600, h: 900 };
+    for (const id of ["noon", "namshi", "trendyol", "amazon", "styli"] as const) {
+      const plan = planCanvas(CHANNELS[id], box, { w: 1000, h: 1200 }, {});
+      expect(plan.sourceCrop, id).toEqual(box);
+      expect(plan.scale, id).toBeCloseTo(Math.min(plan.safeBox.w / box.w, plan.safeBox.h / box.h), 12);
+    }
   });
 });

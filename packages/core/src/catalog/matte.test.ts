@@ -11,7 +11,7 @@ function prepared(): Prepared {
 }
 const servers: Server[] = [];
 async function service(target: "cpu" | "gpu", ids = ["general"], inputSize: number | "native" = 64) {
-  const state = { fail: false, calls: 0, convert: 0, sent: 0, headers: [] as string[] };
+  const state = { fail: false, calls: 0, convert: 0, sent: 0, headers: [] as string[], last: null as Buffer | null };
   const server = createServer(async (req, res) => {
     if (req.url === "/health") { res.setHeader("content-type", "application/json"); res.end(JSON.stringify({ ok: true, models: ids.map((id) => ({ id, inputSize, target })), default: ids[0], version: target })); return; }
     const chunks: Buffer[] = []; for await (const c of req) chunks.push(Buffer.from(c));
@@ -21,7 +21,8 @@ async function service(target: "cpu" | "gpu", ids = ["general"], inputSize: numb
     if (state.fail) { res.statusCode = 503; res.end(); return; }
     const request = new Request("http://localhost", { method: "POST", headers: { "content-type": req.headers["content-type"]! }, body: Buffer.concat(chunks) });
     const file = (await request.formData()).get("file") as File;
-    const metadata = await sharp(Buffer.from(await file.arrayBuffer())).metadata();
+    state.last = Buffer.from(await file.arrayBuffer());
+    const metadata = await sharp(state.last).metadata();
     state.sent = Math.max(metadata.width!, metadata.height!);
     const mask = await sharp({ create: { width: metadata.width!, height: metadata.height!, channels: 3, background: "white" } }).greyscale().png().toBuffer();
     res.setHeader("x-ms", "12"); res.end(mask);
@@ -42,6 +43,19 @@ describe("matting client", () => {
     expect(result.alpha.length).toBe(48 * 32); expect(gpu.state.sent).toBe(64); expect(cpu.state.calls).toBe(0);
     expect((await client.matte(prepared(), "cpu-only")).target).toBe("cpu");
     await expect(client.matte(prepared(), "missing")).rejects.toThrow("Unknown background removal model");
+  });
+  it("frames the photo in a white border for a padded matte and crops the mask back to the photo", async () => {
+    const cpu = await service("cpu"), client = new MattingClient({ services: [cpu] });
+    const result = await client.matte(prepared(), "general", { padFraction: 0.2 });
+    // 48x32 plus 10 px each side is 68x52, sent at the model's 64 px long side.
+    const sent = await sharp(cpu.state.last!).raw().toBuffer({ resolveWithObject: true });
+    expect([sent.info.width, sent.info.height]).toEqual([64, 49]);
+    expect([...sent.data.subarray(0, 3)]).toEqual([255, 255, 255]);
+    expect(result).toMatchObject({ width: 48, height: 32, sentLongSide: 64 });
+    expect(result.alpha.length).toBe(48 * 32);
+    expect(Math.min(...result.alpha)).toBeGreaterThan(240);
+    // matteFor passes the option through.
+    expect((await matteFor(prepared(), client, "general", { padFraction: 0.2 })).alpha.length).toBe(48 * 32);
   });
   it.each([1024, 2048, "native"] as const)("uses advertised %s input size and native bounds", async (size) => {
     const cpu = await service("cpu", ["test"], size), client = new MattingClient({ services: [cpu] });

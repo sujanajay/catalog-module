@@ -39,6 +39,8 @@ DB_USER=catalog_app
 DB_SECRET=catalog-db-password
 PUBLIC_BUCKET=gs://image-links-agent-public
 QUEUE=catalog
+# New-batch setup (ingest) runs on its own queue so it never waits behind batch processing.
+INGEST_QUEUE=catalog-ingest
 BQ_PROJECT=opptra-datawarehouse
 # The datasets the master sync reads (packages/core/src/catalog/master-sync.ts).
 BQ_DATASETS=(raw_gcc_dimensions fact_gcc)
@@ -347,6 +349,13 @@ else
   create "tasks queue $QUEUE"
   gcloud tasks queues create "$QUEUE" --project="$PROJECT" --location="$REGION" \
     --max-concurrent-dispatches=20 --max-attempts=5 --min-backoff=10s >/dev/null
+fi
+if gcloud tasks queues describe "$INGEST_QUEUE" --location="$REGION" --project="$PROJECT" >/dev/null 2>&1; then
+  skip "tasks queue $INGEST_QUEUE"
+else
+  create "tasks queue $INGEST_QUEUE"
+  gcloud tasks queues create "$INGEST_QUEUE" --project="$PROJECT" --location="$REGION" \
+    --max-concurrent-dispatches=2 --max-attempts=5 --min-backoff=10s >/dev/null
 fi
 
 # --- 7. Service accounts -----------------------------------------------------------------

@@ -8,19 +8,30 @@
 //   node dist/catalog-load.js [--options 270] [--passes a,reupload,b] [--reupload-sample <k>]
 //     [--timeout-min 240] [--keep]
 //
+// Connection budget guard (docs/solutions/db-connection-budget.md): the driver refuses to start
+// unless DB_CONNECTION_BUDGET (set by infra/deploy.sh) shows the deployed worker, web and job pools
+// fit the shared Cloud SQL instance, and unless no other batch is mid-pipeline (a load must never
+// run alongside a gate run or another load: they share the same capped worker and connections).
+// The load's worker scale is capped by the worker's max-instances and the Tasks queue's
+// max-concurrent-dispatches, both set from that budget, not by the option count.
+//
 // Env fallbacks for the job: LOAD_OPTIONS, LOAD_PASSES ("a+reupload+b"), LOAD_REUPLOAD_SAMPLE,
 // LOAD_TIMEOUT_MIN, LOAD_KEEP=1. The full scale is --options 2700 (FULL_LOAD_OPTIONS).
 // Passes: a = Run A (P1 channels), reupload = one altered photo and one dropped shot on a sample of
 // Run A's products, b = Run B (the same options through all nine channels).
-// Evidence: load-report.json and load-report.md in CATALOG_REAL_OUT/<run>/. Cleanup of every batch it made
-// (both buckets under catalog-test/, then the rows) runs at the end unless --keep, and is skipped
-// with a printed command when a batch did not reach its end state.
+// Evidence: load-report.json and load-report.md in CATALOG_REAL_OUT/<run>/, written even when a pass
+// fails (its error is recorded under passErrors). Every poll retries transient database errors and a
+// poll that still fails is logged and retried at the next interval, so one failed query never ends
+// a pass. Cleanup of every batch it made (both buckets under catalog-test/, then the rows) runs at
+// the end unless --keep; it first waits (up to each batch's pass deadline) for a batch that is still
+// running, and lists any batch it had to leave behind with the command that cleans it up later.
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { parseArgs } from "node:util";
 import { and, eq, inArray, isNotNull, sql } from "drizzle-orm";
+import { checkBudget, formatBudget, parseBudget } from "@catalog/core/db/budget";
 import { closeDb, getDb, type Db } from "@catalog/core/db/client";
 import { brandMaster, catalogBatches, catalogBatchProducts, catalogChunks, catalogOutputs, catalogProductEvents, catalogProducts, catalogSourceImages, catalogUploads, DEFAULT_BATCH_OPTIONS, spendDays } from "@catalog/core/db/schema";
 import { channel } from "@catalog/core/catalog/channels";
@@ -31,10 +42,12 @@ import { alterOnePixelRow, planReupload, reuploadSampleSize, type ReuploadPlan }
 import { againstTarget, formatDuration, perMinute, percentile, stageWindows, type ChunkSample } from "@catalog/core/catalog/load/timing";
 import { batchPrefix } from "@catalog/core/catalog/naming";
 import { lockProducts } from "@catalog/core/catalog/products";
+import { pollUntilEnd } from "@catalog/core/catalog/load/poll";
 import { planChunks } from "@catalog/core/catalog/pipeline/plan-chunks";
 import { cleanupTestBatches } from "@catalog/core/catalog/test-cleanup";
 import { CHANNEL_IDS, type ChannelId } from "@catalog/core/catalog/types";
 import * as storage from "@catalog/core/storage";
+import { describeError } from "@catalog/core/retry";
 import { enqueueTask } from "@catalog/core/tasks";
 import { buildZip } from "../../../packages/core/test-fixtures/catalog/ingest-a/builders";
 import { recheckBatch } from "./catalog/recheck-batch";
@@ -52,7 +65,9 @@ type Pass = "a" | "reupload" | "b";
 interface ZipFile { name: string; file: string; alter: boolean }
 
 const log = (message: string, extra: Record<string, unknown> = {}) => console.info(JSON.stringify({ at: new Date().toISOString(), message, ...extra }));
-const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+/** A batch with no stage running: never collected, collected and waiting for start, or ended. */
+const IDLE = new Set(["draft", "done", "failed"]);
+const pollError = (batchId: string, step: string) => (error: string) => log("poll failed; polling again", { batchId, step, error });
 
 async function walk(dir: string, rel = ""): Promise<string[]> {
   const found: string[] = [];
@@ -107,13 +122,14 @@ async function collect(db: Db, batchId: string, uploadIds: string[], deadline: n
   const started = Date.now();
   await db.update(catalogBatches).set({ status: "ingesting", counts: sql`${catalogBatches.counts} || '{"previewReady":false}'::jsonb`, updatedAt: new Date() }).where(eq(catalogBatches.id, batchId));
   for (const uploadId of uploadIds) await enqueueTask("/tasks/catalog/ingest", { batchId, uploadId });
-  for (;;) {
-    const [b] = await db.select().from(catalogBatches).where(eq(catalogBatches.id, batchId));
-    if (b!.status === "failed") throw new Error(`Collecting failed: ${b!.counts.failReason ?? "no reason recorded"}`);
-    if (b!.status === "draft" && b!.counts.previewReady) return Date.now() - started;
-    if (Date.now() > deadline) throw new Error("Collecting did not finish before the time limit.");
-    await sleep(POLL_MS);
-  }
+  const { ended, last: b } = await pollUntilEnd({
+    read: async () => (await db.select().from(catalogBatches).where(eq(catalogBatches.id, batchId)))[0]!,
+    isEnd: b => b.status === "failed" || (b.status === "draft" && !!b.counts.previewReady),
+    deadline, intervalMs: POLL_MS, onError: pollError(batchId, "collect"),
+  });
+  if (ended && b!.status === "failed") throw new Error(`Collecting failed: ${b!.counts.failReason ?? "no reason recorded"}`);
+  if (!ended) throw new Error("Collecting did not finish before the time limit.");
+  return Date.now() - started;
 }
 
 /** "Start processing", as the web's start route does it: lock, plan chunks, queue the matte stage. */
@@ -140,16 +156,32 @@ async function start(db: Db, batchId: string) {
 
 /** Polls until the batch ends; every poll samples the chunks for the stage windows. */
 async function waitForEnd(db: Db, batchId: string, deadline: number, samples: ChunkSample[]) {
-  for (;;) {
-    const [b] = await db.select().from(catalogBatches).where(eq(catalogBatches.id, batchId));
-    const chunks = await db.select({ id: catalogChunks.id, stage: catalogChunks.stage, status: catalogChunks.status, startedAt: catalogChunks.startedAt, finishedAt: catalogChunks.finishedAt }).from(catalogChunks).where(eq(catalogChunks.batchId, batchId));
-    samples.push({ at: new Date(), chunks });
-    const byStage = Object.fromEntries(["matte", "render", "qa"].map(s => [s, chunks.filter(c => c.stage === s && c.status !== "done").length]));
-    log("progress", { batchId, status: b!.status, chunks: chunks.length, open: byStage, done: chunks.filter(c => c.status === "done").length });
-    if (b!.status === "done" || b!.status === "failed") return true;
-    if (Date.now() > deadline) return false;
-    await sleep(POLL_MS);
-  }
+  const { ended } = await pollUntilEnd({
+    read: async () => {
+      const [b] = await db.select().from(catalogBatches).where(eq(catalogBatches.id, batchId));
+      const chunks = await db.select({ id: catalogChunks.id, stage: catalogChunks.stage, status: catalogChunks.status, startedAt: catalogChunks.startedAt, finishedAt: catalogChunks.finishedAt }).from(catalogChunks).where(eq(catalogChunks.batchId, batchId));
+      return { status: b!.status, chunks };
+    },
+    isEnd: ({ status }) => status === "done" || status === "failed",
+    onValue: ({ status, chunks }) => {
+      samples.push({ at: new Date(), chunks });
+      const byStage = Object.fromEntries(["matte", "render", "qa"].map(s => [s, chunks.filter(c => c.stage === s && c.status !== "done").length]));
+      log("progress", { batchId, status, chunks: chunks.length, open: byStage, done: chunks.filter(c => c.status === "done").length });
+    },
+    deadline, intervalMs: POLL_MS, onError: pollError(batchId, "process"),
+  });
+  return ended;
+}
+
+/** Before cleanup: waits for each batch that may still have a stage running, up to its deadline. */
+async function waitForIdle(db: Db, batchId: string, deadline: number) {
+  const { ended, last } = await pollUntilEnd({
+    read: async () => (await db.select({ status: catalogBatches.status }).from(catalogBatches).where(eq(catalogBatches.id, batchId)))[0]!.status,
+    isEnd: status => IDLE.has(status),
+    onValue: status => log("waiting for the batch before cleanup", { batchId, status }),
+    deadline, intervalMs: POLL_MS, onError: pollError(batchId, "cleanup"),
+  });
+  return { ended, status: last as string | null };
 }
 
 async function metrics(db: Db, batchId: string, samples: ChunkSample[], collectMs: number, ended: boolean) {
@@ -236,8 +268,30 @@ function markdown(report: Record<string, unknown>, passes: Record<string, Awaite
     for (const f of p.failed) lines.push(`- failed ${f.channel} ${f.n} (${f.productId}): ${f.reason}`);
     if (p.reupload) lines.push(`Re-upload: ${p.reupload.sampled} products, ${p.reupload.droppedLinksGone} dropped links answer 404, ${p.reupload.problems.length} contract problems.`, ...p.reupload.problems.slice(0, 50).map(x => `- ${x}`));
   }
+  const errors = Object.entries((report.passErrors ?? {}) as Record<string, string>);
+  if (errors.length) lines.push("", "## Pass errors", "", ...errors.map(([name, error]) => `- ${name}: ${error}`));
+  const left = (report.cleanup as { leftBehind?: { batchId: string; status: string | null }[] } | undefined)?.leftBehind ?? [];
+  if (left.length) lines.push("", "## Left behind by cleanup", "", ...left.map(b => `- ${b.batchId} (${b.status ?? "unknown"}): clean up with node dist/catalog-smoke.js --cleanup-batches ${b.batchId}`));
   lines.push("", "Cloud Run instance counts and queue depth: read from Cloud Monitoring for the run window and paste here.");
   return lines.join("\n") + "\n";
+}
+
+/** Throws unless the deployed connection budget fits; returns the line to log. */
+function budgetPreflight(env: NodeJS.ProcessEnv = process.env): string {
+  const text = env.DB_CONNECTION_BUDGET;
+  if (!text) throw new Error("DB_CONNECTION_BUDGET is not set: redeploy with infra/deploy.sh so the load can check the database connection budget before it starts.");
+  const budget = parseBudget(text);
+  const check = checkBudget(budget);
+  if (!check.fits) throw new Error(`The database connection budget is exceeded (${formatBudget(budget, check)}). Lower the worker's max instances or pools in infra/deploy.sh before a load run.`);
+  return formatBudget(budget, check);
+}
+
+const IN_FLIGHT = ["ingesting", "matting", "rendering", "qa", "publishing"] as const;
+
+/** Throws when any batch is mid-pipeline: a load never runs alongside a gate run or another load. */
+async function noOtherRunPreflight(db: Db) {
+  const busy = await db.select({ id: catalogBatches.id, status: catalogBatches.status }).from(catalogBatches).where(inArray(catalogBatches.status, [...IN_FLIGHT]));
+  if (busy.length) throw new Error(`${busy.length} batch(es) are still being processed (${busy.slice(0, 3).map(b => `${b.id} ${b.status}`).join(", ")}). Wait for them to finish before a load run.`);
 }
 
 async function main() {
@@ -249,25 +303,27 @@ async function main() {
   const sample = Number(values["reupload-sample"] ?? process.env.LOAD_REUPLOAD_SAMPLE ?? reuploadSampleSize(count));
   const timeoutMs = Number(values["timeout-min"] ?? process.env.LOAD_TIMEOUT_MIN ?? 240) * 60_000;
   const keep = values.keep ?? process.env.LOAD_KEEP === "1";
+  log("connection budget", { budget: budgetPreflight() });
+  try { await noOtherRunPreflight(getDb()); } catch (error) { await closeDb(); throw error; }
   const run = `load-${randomUUID()}`, out = path.resolve(process.env.CATALOG_REAL_OUT ?? "var/catalog-test", run);
   await mkdir(out, { recursive: true });
 
   const options: LoadOption<string>[] = replicateOptions(await realProducts(), count);
   log("plan", { run, options: options.length, shots: options.reduce((s, o) => s + o.shots.length, 0), passes, reuploadSample: passes.includes("reupload") ? sample : 0 });
   const db = getDb(), batchIds: string[] = [], results: Parameters<typeof markdown>[1] = {};
-  // Batches not yet at their end state; cleanup waits for none (the worker may still be writing).
-  let open = 0, passed = true;
+  // Each batch's pass deadline: cleanup waits up to it for a batch that is still running.
+  const deadlines = new Map<string, number>(), passErrors: Record<string, string> = {};
+  let passed = true;
   const asZips = (opts: { shots: { name: string; item: string; alter?: boolean }[] }[]): ZipFile[][] =>
     zipGroups(opts, ZIP_IMAGES).map(group => group.flatMap(o => o.shots.map(s => ({ name: s.name, file: s.item, alter: !!s.alter }))));
   const runPass = async (label: string, channels: ChannelId[], zips: ZipFile[][]) => {
     const deadline = Date.now() + timeoutMs, batch = await createBatch(db, run, label, channels);
     batchIds.push(batch.id);
-    open++;
+    deadlines.set(batch.id, deadline);
     const collectMs = await collect(db, batch.id, await uploadZips(db, batch, zips), deadline);
     await start(db, batch.id);
     const samples: ChunkSample[] = [];
     const ended = await waitForEnd(db, batch.id, deadline, samples);
-    if (ended) open--;
     const m = await metrics(db, batch.id, samples, collectMs, ended);
     let recheck = "not run";
     if (ended && m.status === "done") {
@@ -279,28 +335,54 @@ async function main() {
     log("pass finished", { label, batchId: batch.id, status: m.status, wall: m.wallMs === null ? null : formatDuration(m.wallMs), recheck });
     return { ...m, recheck };
   };
-  try {
-    let runA: string | null = null;
-    if (passes.includes("a")) { results["Run A"] = await runPass("A", P1, asZips(options)); runA = results["Run A"].batchId; }
-    if (passes.includes("reupload") && runA && results["Run A"]?.status === "done") {
-      const plan = planReupload(options, sample);
-      const r = await runPass("reupload", P1, asZips(plan.options));
-      const contract = r.status === "done" ? await checkReupload(db, runA, r.batchId, plan) : { sampled: plan.options.length, droppedLinksGone: 0, problems: ["The re-upload batch did not finish."] };
-      if (contract.problems.length) passed = false;
-      results["Re-upload"] = { ...r, reupload: contract };
+  // A pass that throws is recorded and the run goes on. A later pass is skipped while an earlier
+  // batch may still be running, since it would find the same products locked.
+  const attempt = async <T>(name: string, fn: () => Promise<T>): Promise<T | null> => {
+    try { return await fn(); } catch (error) {
+      passed = false;
+      passErrors[name] = describeError(error);
+      log("pass failed; recorded in the report", { pass: name, error: passErrors[name] });
+      return null;
     }
-    if (passes.includes("b")) results["Run B"] = await runPass("B", ALL, asZips(options));
-    const report = { run, options: count, passes, passed, batchIds, results };
-    await writeFile(path.join(out, "load-report.json"), JSON.stringify(report, null, 2));
-    await writeFile(path.join(out, "load-report.md"), markdown(report, results));
-    log("report written", { out, passed });
-    if (!passed) process.exitCode = 1;
+  };
+  const mayBeRunning = () => batchIds.some(id => !Object.values(results).some(r => r.batchId === id && r.ended));
+  const skip = (name: string) => { passed = false; passErrors[name] = "Skipped: an earlier batch had not ended, so its products may still be locked."; log("pass skipped", { pass: name }); };
+  const leftBehind: { batchId: string; status: string | null }[] = [];
+  try {
+    if (passes.includes("a")) { const r = await attempt("Run A", () => runPass("A", P1, asZips(options))); if (r) results["Run A"] = r; }
+    const runA = results["Run A"];
+    if (passes.includes("reupload") && runA?.status === "done") {
+      if (mayBeRunning()) skip("Re-upload");
+      else await attempt("Re-upload", async () => {
+        const plan = planReupload(options, sample);
+        const r = await runPass("reupload", P1, asZips(plan.options));
+        const contract = r.status === "done" ? await checkReupload(db, runA.batchId, r.batchId, plan) : { sampled: plan.options.length, droppedLinksGone: 0, problems: ["The re-upload batch did not finish."] };
+        if (contract.problems.length) passed = false;
+        results["Re-upload"] = { ...r, reupload: contract };
+      });
+    } else if (passes.includes("reupload")) { passed = false; passErrors["Re-upload"] = "Skipped: Run A did not finish as done."; }
+    if (passes.includes("b")) {
+      if (mayBeRunning()) skip("Run B");
+      else { const r = await attempt("Run B", () => runPass("B", ALL, asZips(options))); if (r) results["Run B"] = r; }
+    }
   } finally {
     if (keep) log("cleanup skipped (--keep)", { batchIds });
-    else if (open) { log("cleanup skipped: a batch is still running; clean up after it ends", { command: `node dist/catalog-smoke.js --cleanup-batches ${batchIds.join(",")}` }); }
-    else if (batchIds.length) log("cleanup", await cleanupTestBatches(db, storage, batchIds));
+    else if (batchIds.length) {
+      const idle: string[] = [];
+      for (const batchId of batchIds) {
+        const w = await waitForIdle(db, batchId, deadlines.get(batchId) ?? Date.now()).catch(error => ({ ended: false, status: `unknown (${describeError(error)})` }));
+        if (w.ended) idle.push(batchId); else leftBehind.push({ batchId, status: w.status });
+      }
+      if (idle.length) await attempt("cleanup", async () => log("cleanup", { batchIds: idle, ...await cleanupTestBatches(db, storage, idle) }));
+      if (leftBehind.length) log("cleanup left batches behind: still running at their deadline; clean up after they end", { leftBehind, command: `node dist/catalog-smoke.js --cleanup-batches ${leftBehind.map(b => b.batchId).join(",")}` });
+    }
+    const report = { run, options: count, passes, passed, batchIds, passErrors, cleanup: keep ? "kept" : { leftBehind }, results };
+    await writeFile(path.join(out, "load-report.json"), JSON.stringify(report, null, 2)).catch(error => console.error(`load-report.json not written: ${describeError(error)}`));
+    await writeFile(path.join(out, "load-report.md"), markdown(report, results)).catch(error => console.error(`load-report.md not written: ${describeError(error)}`));
+    log("report written", { out, passed });
+    if (!passed) process.exitCode = 1;
     await closeDb();
   }
 }
 
-main().catch(error => { console.error(error instanceof Error ? error.message : String(error)); process.exitCode = 1; });
+main().catch(error => { console.error(describeError(error)); process.exitCode = 1; });

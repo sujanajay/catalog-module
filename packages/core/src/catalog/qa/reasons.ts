@@ -15,6 +15,9 @@ export function flagDetails(flag: OutputFlag | "failed", ctx: ReasonContext = {}
     complete_product:["Part of the product or model looks cut at the frame edge in the original photo.",`We never crop, so the made image shows the same thing. "Use as is" keeps it; "Replace photo ${n}" swaps the photo for all ${k} marketplaces.`],
     different_product:["This photo does not match photo 1 of the same identifier.","If the file was named wrongly, remove it; the rest of the product is unaffected."],
     halo:["The edge of the product looks rough or shows a halo, often white on white.",'Compare the two images. The product itself is never redrawn; only the background changes. "Use as is" keeps it.'],
+    product_removed:["Part of the product went missing when the background was removed.",`Compare the two images. We tried to make it again and could not keep the whole product. "Remove this photo" leaves it out; "Replace photo ${n}" swaps the photo.`],
+    matte_passthrough:["This photo is a close-up that fills the frame, so the whole photo was kept as it is instead of being cut out.","Nothing to do."],
+    chart_image:["This photo is a size chart or a text-only image, so it was left out of the marketplace images.","Nothing to do."],
     leftover_background:["Some of the original background is still visible around the product.",`Compare the two images. "Use as is" keeps it; "Replace photo ${n}" swaps the photo.`],
     text_or_watermark:["The photo carries text, a watermark or a logo overlay. Marketplaces reject these.","Remove it, or replace it with a clean photo."],
     collage:["This image combines several photos in one. Marketplaces reject these.","Remove it, or replace it with the single photos."],
@@ -36,15 +39,32 @@ export function flagDetails(flag: OutputFlag | "failed", ctx: ReasonContext = {}
     passthrough:["The original already met this marketplace's rules, so it was only saved again in the right format.","Nothing to do."],
     alpha_source:["The original has a transparent background, so it was used as the cut-out directly.","Nothing to do."],
     qa_sampled_out:["This image was not selected for the quality-check sample.","Nothing to do."],
+    auto_dropped:["This photo was left out automatically: it could not be made cleanly and this product has enough other good photos.","Nothing to do; replace the photo if you want it back."],
   };
   const pair = pairs[flag];
   if (pair) return {why:pair[0],whatToDo:pair[1]};
   return {why:flagReason(flag as OutputFlag),whatToDo:"Check the original photo and replace it if needed."};
 }
 export function shortClause(flag: OutputFlag | "failed", ctx: ReasonContext = {}): string {
-  const clauses: Partial<Record<OutputFlag | "failed",string>> = {complete_product:"looks cut at the frame edge",different_product:"looks like a different product from the others",failed:"could not be read",low_resolution:`is too small for ${ctx.channel ?? "this marketplace"}`,small_source:"is too small",text_or_watermark:"carries text or a watermark",collage:"combines several photos",halo:"has a rough edge",leftover_background:"still shows some background",orientation:"looks rotated",placement:`sits differently from the other angles on ${ctx.channel ?? "this marketplace"}`,fallback_matte:"was cut out with the simple method",transparent:"looks transparent or glass",qa_unavailable:"could not be checked",qa_cap:"was not checked because the spending limit was reached",failed_compliance:`did not meet ${ctx.channel ?? "this marketplace"}'s rules`};
+  const clauses: Partial<Record<OutputFlag | "failed",string>> = {complete_product:"looks cut at the frame edge",different_product:"looks like a different product from the others",failed:"could not be read",low_resolution:`is too small for ${ctx.channel ?? "this marketplace"}`,small_source:"is too small",text_or_watermark:"carries text or a watermark",collage:"combines several photos",halo:"has a rough edge",product_removed:"lost part of the product in the cut-out",chart_image:"is a size chart or text-only image",leftover_background:"still shows some background",orientation:"looks rotated",placement:`sits differently from the other angles on ${ctx.channel ?? "this marketplace"}`,fallback_matte:"was cut out with the simple method",transparent:"looks transparent or glass",qa_unavailable:"could not be checked",qa_cap:"was not checked because the spending limit was reached",failed_compliance:`did not meet ${ctx.channel ?? "this marketplace"}'s rules`};
   return clauses[flag] ?? "needs a look";
 }
+/**
+ * Problem flags from the worst to the least bad (07 views amendment): what holds the product first,
+ * then our own defects by how much of the product they spoil, then the brand photo's own problems and
+ * the checks that could not run. A card's lead sentence and its photo order follow this list; flags
+ * not listed (information notes) keep their order after it.
+ */
+export const FLAG_SEVERITY: readonly (OutputFlag | "failed")[] = [
+  "failed", "different_product", "collage", "chart_image", "product_removed", "small_source", "failed_compliance",
+  "leftover_background", "halo", "fallback_matte", "placement", "text_or_watermark", "orientation",
+  "qa_unavailable", "qa_cap", "upscaled", "complete_product", "transparent",
+];
+export const severityRank = (flag: OutputFlag | "failed") => { const i = FLAG_SEVERITY.indexOf(flag); return i < 0 ? FLAG_SEVERITY.length : i; };
+/** The flags worst first; a stable sort, so equal ranks keep their order. */
+export const bySeverity = <F extends OutputFlag | "failed">(flags: readonly F[]): F[] => [...new Set(flags)].sort((a, b) => severityRank(a) - severityRank(b));
+/** At most this many problem sentences on one photo of a card; the report keeps every flag. */
+export const MAX_REASONS_PER_PHOTO = 3;
 export interface ProblemPhoto { n: number; flag?: OutputFlag | "failed"; flags?: OutputFlag[]; reason?: string | null; channel?: string }
 export function problemLine(photos: readonly ProblemPhoto[]): string {
   return photos.map((photo,index) => {

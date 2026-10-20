@@ -190,12 +190,32 @@ Any change to the maths in this file that alters output bytes must bump `CHANNEL
      of the product on that channel is rendered on it. `lowResolution` stays per shot.
    - Trendyol: SPEC.md says accepted files are 1200x1800, so Trendyol is a fixed canvas: always
      1200x1800, the product fitted even beyond 1.5x; `low_resolution` is then information only.
-   - Cut in source (`shotGeometry`): a side is cut when the product box edge lies within the white
-     border band (3% of the frame) and its outermost line, allowing for the matte's soft fade (1% of
-     the long side), holds a straight run of alpha >= 250 at least 25% of the box width (height for
-     the sides). The box is trimmed to that cut line, the cut side's margin becomes 0 and the
-     product is anchored to that canvas edge (bottom wins when top and bottom are both cut; centred
-     when left and right are both cut); other margins are unchanged. Flag `cut_in_source`
+   - Cut in source (`shotGeometry`, with the source pixels): first the pad band per side, the
+     outermost frame lines that are uniform and the colour of the outermost line (any colour: white,
+     light grey); a band deeper than the thin border (3% of the frame) counts only when it ends on
+     the real photo's edge (the photo background inside is another colour, or a thin side band shows
+     the photo's corner exactly there), or when the product is already cut by this rule on a
+     perpendicular side (the photo is a crop and the band is its padding: a model cut at the waist
+     and thighs inside a white band, also cut at the left edge), up to 15% of the frame. A cut found
+     through that perpendicular rule never unlocks another side. The product must reach the band's
+     inner edge (allowing the matte's soft fade, 1% of the long side). Then two signals on the
+     outermost product line: a straight edge (positions whose silhouette starts on that line within
+     2 px and turns opaque, alpha >= 250, behind it; one run at least 2% of the side long) AND a
+     truncated silhouette (the edge holds at least 60% of the silhouette width 10 lines further in).
+     Without a photo edge the edge must also span 20% of the box side (the lowest flat shoe sole of
+     a standing model measures 10-17%). A foot or a rounded hem narrows towards its edge and fails;
+     two legs cut at the knee pass. When the judge saw the cut (07 `flush_cut`) the share is 40%
+     and a deep band of the photo's own colour counts too. The box is trimmed to the cut line, the cut side's margin becomes 0 and the
+     product is anchored to that canvas edge; other margins are unchanged. A product cut on both
+     ends of one axis (top and bottom, or left and right) fills that axis, so neither cut edge has a
+     band beside it (`cutFillScale`): where that makes it overflow the other axis, the overflow comes
+     off that axis's cut sides only (split evenly when both are cut, `cutFillCrop`), never off an
+     uncut outline, and by at most a third of the product box (`CUT_FILL_MAX_TRIM`, the widest
+     canvas mismatch: a square photo on the 2:3 Trendyol canvas). A full-bleed photo (cut on all
+     four sides) fills the safe box. Where the other axis has no cut side, or the trim would pass a
+     third, the product is fitted (bottom wins when top and bottom are both cut; centred when left
+     and right are both cut) and the output carries a note naming the cut side that does not reach
+     the edge. Flag `cut_in_source`
      (information: sheet notes and report, never holds the product). Compliance accepts the flush
      edge on the cut side only (`inside_safe_box`, `styli_anchor`, `noon_wide`). Headroom on
      zero-margin channels stays 0: SPEC.md states no minimum headroom.
@@ -354,6 +374,52 @@ with `blur(1)`. Non-uniform background with an open breaker -> output `failed` f
 reason "Background removal was unavailable and this photo's background is not plain. Start the
 batch again later, or replace the photo." and no render; 06 turns it into an attention item with
 "Replace photo <n>".
+
+### Cut-out integrity guard (`matte-guard.ts`, added 2026-10-20)
+
+Quality gate 2 found close-ups that fill the frame (a leather bag, a knit polo, a lace trim on fabric)
+cut down to the logo, label or clasp on them: a salient-object model treats a frame-filling texture
+as background. The earlier investigation sampled only shoes and full-length models. The spec 10
+checker could not see it either: `cutout.pixels_lost` is "not run" when the source border is not
+uniform, which is exactly the close-up case. The worker therefore checks every model matte at run
+time, before anything is rendered.
+
+- Product estimate from the source alone. Uniform canvas strips (rows or columns that are 97% the
+  border colour, a photo pasted on a plain canvas) are trimmed. Background is every smooth region (5x5
+  range at most `SMOOTH_WINDOW_RANGE` 18) connected to the photo's own border band, plus smooth pixels
+  in the colours that region holds; so a studio wall, the floor and cast shadows are background even
+  when they differ from the canvas. Leather grain, knit, lace and embroidery are never smooth. When
+  under 10% of the photo's border band is smooth, the photo is frame-filling and everything inside the
+  strips is product. Product = the spec 10 colour estimate minus that background (grown 2 px).
+- Check (`checkMatteIntegrity`): share of the estimate's interior (3 px in) the matte drops (alpha at
+  most 10), per cell of a 6x6 grid and overall. Bars `GUARD_CELL_LOSS_MAX` 0.2 and
+  `GUARD_OVERALL_LOSS_MAX` 0.04: far above the spec 10 golden bars (1% and 0.3%), because this guard
+  only has to catch a matte that removes the product; measured on 82 real photos, destroyed close-ups
+  lose 60 to 95%, good mattes under 9% in their worst cell except two model close-ups (skin removed
+  inside a neckline, a wall corner the flood did not reach), which then take the ladder. Also rejected: a hand-held product whose
+  holding hand (skin reaching the border band, bordering the kept product, not the background colour)
+  was dropped over more than 2% of the kept product (`HAND_NOTCH_MAX_SHARE`; not applied to apparel,
+  where the skin is the model's).
+- Ladder when the first matte fails, first pass wins, each step in `compliance.auto_actions` with
+  trigger `product_removed`: `matte_check` (the failed first matte), (a) `second_matte` the policy's
+  second model, (b) `padded_matte` the photo framed in a white border of 20% of its long side
+  (`MattingClient.matte(p, model, { padFraction })`, mask cropped back) with the first, then the second
+  model, (c) `matte_passthrough` the whole frame: alpha 255 except background connected to the frame
+  edge, holes filled, components under 25% of the largest dropped, edge softened inward only. Model
+  steps are skipped when this delivery has no time left for a matting call; the pass-through always
+  completes. A pass-through adds the information flag `matte_passthrough` ("This photo is a close-up
+  that fills the frame, so the whole photo was kept as it is instead of being cut out. Nothing to
+  do."), never holds, gets no synthesised shadow, and is placed by the cut-in-source rules (sides that
+  reach the frame sit flush).
+- The judge's `product_removed` (07 4.0a) names the same failure after the render: its ladder (07
+  auto-resolve) adds the same pass-through step after the second matte, for that trigger only.
+- No synthesised contact shadow for a product held in a hand (`heldInHand`, kept or dropped hand):
+  it does not rest on a floor.
+- Size charts and text-only photos (07 4.0a, flag `chart_image`) are not cut out: a photo the
+  classifier calls a chart (the next photo then decides the product type), or that `detectTextImage`
+  finds (a light page, at least 60% plain, 60 or more dark glyph marks on 6 or more lines, nothing
+  larger than 6% of the frame), is left out on every channel with the `chart_image` note before any
+  matting. A sweep of 5,362 brand photos found the 13 Penti size charts and no product photo.
 
 ### Compliance (`compliance.ts`)
 
