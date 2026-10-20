@@ -8768,9 +8768,12 @@
     "many_shots"
    ],
    "expect": {
-    "attention": false,
-    "flags": [],
-    "detector": "code"
+    "attention": true,
+    "flags": [
+     "leftover_background"
+    ],
+    "detector": "code",
+    "reason": "A lifestyle photo on a tennis court (non-uniform background): the background cannot be removed, so the render holds the product for a person."
    }
   },
   {

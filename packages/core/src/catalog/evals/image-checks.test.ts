@@ -1,12 +1,14 @@
 import { describe, expect, it } from "vitest";
-import { CHANNEL_IDS } from "../types";
+import { renderSource } from "../render";
+import { CHANNEL_IDS, type OutputFlag } from "../types";
 import { buildContext } from "./context";
-import { checkCutEdge, CUT_SOURCE_FLAGS } from "./cut-edge";
-import { checkCutout } from "./cutout";
+import { checkCutEdge, cutBandNote, CUT_SOURCE_FLAGS } from "./cut-edge";
+import { checkCutout, checkMatte, edgeSoftnessBar } from "./cutout";
 import { checkGeometry, checkUniformScale } from "./geometry";
+import { backgroundModel, delta, dilate, thresholdMask } from "./image";
 import { checkShadow } from "./shadow";
 import { runImageChecks } from "./index";
-import { canvasColor, editOutput, paintRect, syntheticSubject } from "./synthetic";
+import { canvasColor, editOutput, paintRect, syntheticSource, syntheticSubject } from "./synthetic";
 import type { CheckResult, OutputSubject } from "./types";
 
 const failed = (results: CheckResult[]) => results.filter(r => r.status === "fail").map(r => r.id);
@@ -208,13 +210,20 @@ describe("cut sources", () => {
     expect(ctx.sourceCrop.x - ctx.sourceBox.x).toBeLessThan(Math.floor(extra / 2));
     expect(failed(await runImageChecks(sub))).toEqual([]);
   }, 60_000);
-  it("fails flush when the render fits a photo cut top and bottom and leaves a band beside the top cut, and fails trim when a placement would trim the uncut sides instead", async () => {
+  it("passes flush as information when the render fits a photo cut top and bottom by rule and notes the band beside the top cut, fails it without the note, and fails trim when a placement would trim the uncut sides instead", async () => {
     // Wider than 2:3 and cut only top and bottom: the render may not trim the uncut sides, so it fits by width and a band sits above the top cut.
     const sub = await syntheticSubject("trendyol", 1, "apparel_model", { width: 1000, height: 800, box: { x: 200, y: 100, w: 600, h: 600 }, cutTop: true, cutBottom: true });
+    expect(cutBandNote(sub.reason).sides).toEqual(new Set(["top"]));
     const results = checkCutEdge(await ctxOf(sub));
     expect(ids(results, "cut_edge.trim")[0]?.ok).toBe(true);
     expect(ids(results, "cut_edge.flush_bottom")[0]?.ok).toBe(true);
-    expect(ids(results, "cut_edge.flush_top")[0]?.ok).toBe(false);
+    expect(ids(results, "cut_edge.flush_top")[0]?.ok).toBe(true);
+    expect(ids(results, "cut_edge.flush_top")[0]?.unit).toBe("px, fitted by rule");
+    expect(ids(results, "cut_edge.flush_top")[0]?.detail).toContain("off the uncut left or right");
+    // The same output without the render's note claims a flush edge it does not have.
+    const claimed = checkCutEdge(await ctxOf({ ...sub, reason: null }));
+    expect(ids(claimed, "cut_edge.flush_top")[0]?.ok).toBe(false);
+    expect(ids(claimed, "cut_edge.flush_top")[0]?.unit).toBe("px");
     // A placement that fills the height instead (what a render trimming the uncut left and right would record) fails on the
     // placement alone: the extent and pixel checks cannot tell a trimmed flat texture apart, so trim is the guard.
     const wrongSide = checkCutEdge(await ctxOf({ ...sub, placement: { ...sub.placement, scale: sub.placement.h / 800, placedY: 0 } }));
@@ -293,9 +302,19 @@ describe("calibrated measurements (eval run 2)", () => {
     const passthrough = checkCutout(await ctxOf({ ...base, flags: ["matte_passthrough"] }));
     expect(ids(passthrough, "cutout.background_kept")[0]?.status).toBe("not_run");
     expect(ids(passthrough, "cutout.fringe")[0]?.status).toBe("not_run");
-    const busy = checkCutout(await ctxOf({ ...base, sourceBackground: { ...base.sourceBackground, uniform: false } }));
+    expect(ids(passthrough, "cutout.halo")[0]?.status).toBe("not_run");
+    // A busy border (stripes through the 2% band) fits no background model, so the colour checks stay not run.
+    const striped = Buffer.from(base.source.rgb), w = base.source.w, h = base.source.h;
+    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) if (x < 16 || x >= w - 16 || y < 16 || y >= h - 16) { const v = (x * 53 + y * 97) % 256; striped[(y * w + x) * 3] = v; striped[(y * w + x) * 3 + 1] = v; striped[(y * w + x) * 3 + 2] = v; }
+    expect(backgroundModel({ ...base.source, rgb: striped }, { uniform: false, color: base.sourceBackground.color })).toBeNull();
+    // A texture whose rows share a median is not a background either (a checkerboard border).
+    const checker = Buffer.from(base.source.rgb);
+    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) if (x < 16 || x >= w - 16 || y < 16 || y >= h - 16) { const v = (x + y) % 2 ? 0 : 255; checker[(y * w + x) * 3] = v; checker[(y * w + x) * 3 + 1] = v; checker[(y * w + x) * 3 + 2] = v; }
+    expect(backgroundModel({ ...base.source, rgb: checker }, { uniform: false, color: base.sourceBackground.color })).toBeNull();
+    const busy = checkCutout(await ctxOf({ ...base, source: { ...base.source, rgb: striped }, sourceBackground: { ...base.sourceBackground, uniform: false } }));
     expect(ids(busy, "cutout.pixels_lost")[0]?.status).toBe("not_run");
     expect(ids(busy, "cutout.fringe")[0]?.status).toBe("not_run");
+    expect(ids(busy, "cutout.edge_softness")[0]?.status).toBe("pass");
   }, 30_000);
   it("is flush with a white hem on a white canvas, fails a 150 px band beside the cut, and fires on pixels beyond the edge", async () => {
     const white = await syntheticSubject("amazon", 1, "apparel_model", { width: 1600, height: 2400, box: { x: 500, y: 300, w: 600, h: 1000 }, cutBottom: true, color: [230, 230, 230] });
@@ -311,5 +330,101 @@ describe("calibrated measurements (eval run 2)", () => {
     const beyond = checkCutEdge(await ctxOf({ ...coloured, placement: { ...coloured.placement, placedY: coloured.placement.placedY - 40 } }));
     expect(ids(beyond, "cut_edge.no_line_bottom")[0]?.ok).toBe(false);
     expect(ids(beyond, "cut_edge.no_line_bottom")[0]?.unit).toBe("pixels beyond the edge");
+  }, 60_000);
+});
+
+describe("apparel calibration (eval run 2, french_connection)", () => {
+  it("passes no_line for the one-source-pixel ring the matte's soft edge leaves inside the half mask along a two-leg silhouette (Z496A6D49F492382B0B59Z n=1 at 2.1%, Z2392E34E478442A647DBZ n=5 at 3.6%)", async () => {
+    // A model cut at the knees on a grey studio background, two legs in the strip; the suite's matte is one source pixel
+    // wider than the one the render used, so a ring of canvas background sits inside the half mask along every edge.
+    const { prepared, matte } = syntheticSource({ width: 800, height: 1200, box: { x: 250, y: 100, w: 300, h: 1100 }, cutBottom: true, bg: [200, 200, 200], strap: false });
+    for (let y = 600; y < 1200; y++) for (let x = 380; x < 420; x++) { const i = y * 800 + x; matte.alpha[i] = 0; prepared.rgb[i * 3] = 200; prepared.rgb[i * 3 + 1] = 200; prepared.rgb[i * 3 + 2] = 200; }
+    const out = await renderSource({ prepared, matte, channel: "centrepoint", shotNumber: 1, productType: "apparel_model", identifier: "LEGS", publicObjectPath: "catalog-test/x/LEGS/centrepoint/LEGS_1.jpg" });
+    if (!out.jpeg) throw new Error(out.notes.join("; "));
+    const wider = dilate(thresholdMask(matte.alpha, 127), 800, 1200, 1), alpha = Buffer.alloc(800 * 1200);
+    for (let i = 0; i < alpha.length; i++) alpha[i] = wider[i] ? 255 : 0;
+    const subject: OutputSubject = { identifier: "LEGS", n: 1, channel: "centrepoint", productType: "apparel_model", source: { w: 800, h: 1200, rgb: prepared.rgb }, sourceBackground: prepared.background, alpha, jpeg: out.jpeg, placement: { w: out.plan.w, h: out.plan.h, scale: out.plan.scale, placedX: out.plan.placedX, placedY: out.plan.placedY }, flags: out.flags as OutputFlag[], status: "staged", reason: out.notes.join("; ") || null, expect: { attention: false, flags: [], detector: "code" } };
+    const ctx = await ctxOf(subject), bg = canvasColor("centrepoint", 1);
+    // The fixture reproduces the ring: more than 1% of the half mask's last 12 rows show canvas background.
+    let half = 0, ring = 0;
+    for (let y = ctx.canvas.h - 12; y < ctx.canvas.h; y++) for (let x = 0; x < ctx.canvas.w; x++) { const i = y * ctx.canvas.w + x; if (!ctx.half[i]) continue; half++; if (delta(ctx.canvas.rgb, i, bg) <= 8) ring++; }
+    expect(ring / half).toBeGreaterThan(0.01);
+    const results = checkCutEdge(ctx);
+    expect(ids(results, "cut_edge.flush_bottom")[0]?.ok).toBe(true);
+    expect(ids(results, "cut_edge.no_line_bottom")[0]?.ok).toBe(true);
+    // A floating line under the legs still fails: the last rows lifted to background with a grey line across them.
+    const lifted = await editOutput(subject, r => { paintRect(r, 0, r.h - 20, r.w, 20, bg); paintRect(r, ctx.productBox.x + 20, r.h - 12, 100, 2, [120, 120, 120]); });
+    expect(ids(checkCutEdge(await ctxOf(lifted)), "cut_edge.no_line_bottom")[0]?.ok).toBe(false);
+  }, 60_000);
+  it("does not judge not_held on a cut photo the manifest expects to be held", async () => {
+    const held = await syntheticSubject("amazon", 1, "apparel_model", { width: 1600, height: 2400, box: { x: 500, y: 300, w: 600, h: 1000 }, cutBottom: true });
+    const results = checkCutEdge(await ctxOf({ ...held, status: "needs_attention", expect: { attention: true, flags: ["small_source"], detector: "code" } }));
+    expect(ids(results, "cut_edge.not_held")[0]?.status).toBe("not_run");
+    expect(ids(checkCutEdge(await ctxOf({ ...held, status: "needs_attention" })), "cut_edge.not_held")[0]?.ok).toBe(false);
+  }, 30_000);
+  it("holds footwear to a 3 px soft edge and apparel, bags and hardline to 3.5 px", () => {
+    expect(edgeSoftnessBar("footwear")).toBe(3);
+    expect(edgeSoftnessBar(undefined)).toBe(3);
+    for (const type of ["apparel_model", "apparel_flat", "bag_accessory", "other"] as const) expect(edgeSoftnessBar(type)).toBe(3.5);
+    // A matte whose edge ramps over 3 px on three sides and 4 px on the bottom: about 3.2 px of soft band per unit of silhouette.
+    const { prepared, box } = syntheticSource(), w = prepared.width, h = prepared.height, alpha = Buffer.alloc(w * h);
+    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+      const dx = Math.max(0, box.x - x, x - (box.x + box.w - 1)), dy = Math.max(0, box.y - y, y - (box.y + box.h - 1)), d = Math.max(dx, dy), k = y >= box.y + box.h ? 4 : 3;
+      alpha[y * w + x] = d === 0 ? 255 : d <= k ? Math.round(255 * (1 - d / (k + 1))) : 0;
+    }
+    const input = { identifier: "P", n: 1, source: { w, h, rgb: prepared.rgb }, sourceBackground: prepared.background, alpha };
+    const shoe = checkMatte({ ...input, productType: "footwear" }), top = checkMatte({ ...input, productType: "apparel_model" });
+    expect(shoe.metrics.edgeSoftness).toBeGreaterThan(3);
+    expect(shoe.metrics.edgeSoftness).toBeLessThan(3.5);
+    expect(ids(shoe.results, "cutout.edge_softness")[0]?.ok).toBe(false);
+    expect(ids(top.results, "cutout.edge_softness")[0]?.ok).toBe(true);
+  });
+  it("passes flush as information for a 2:3 close-up cut on four sides that the render fits on a square canvas because filling it would trim more than a third", async () => {
+    const sub = await syntheticSubject("centrepoint", 1, "apparel_model", { width: 800, height: 1300, box: { x: 100, y: 100, w: 600, h: 1100 }, cutTop: true, cutBottom: true, cutLeft: true, cutRight: true, pad: 10 });
+    expect(cutBandNote(sub.reason).sides).toEqual(new Set(["left", "right"]));
+    const results = await runImageChecks(sub);
+    expect(failed(results)).toEqual([]);
+    for (const side of ["left", "right"]) { expect(ids(results, `cut_edge.flush_${side}`)[0]?.unit, side).toBe("px, fitted by rule"); expect(ids(results, `cut_edge.flush_${side}`)[0]?.detail, side).toContain("at most a third"); }
+    for (const side of ["top", "bottom"]) expect(ids(results, `cut_edge.flush_${side}`)[0]?.measured, side).toBe(0);
+    expect(failed(checkCutEdge(await ctxOf({ ...sub, reason: null })))).toEqual(["cut_edge.flush_left", "cut_edge.flush_right"]);
+  }, 60_000);
+  it("allows a kept photographic shadow on apparel (SPEC.md preserve_only), compares it with the source and keeps it out of the halo ring and the stray count", async () => {
+    // A wide product on a model-photo type: the render keeps the photo's own shadow and sets no shadow flag.
+    const kept = await syntheticSubject("amazon", 1, "apparel_model", { sourceShadow: true, box: { x: 100, y: 300, w: 600, h: 300 } });
+    expect(kept.flags).not.toContain("no_shadow_source");
+    expect(kept.flags).not.toContain("shadow_synthesised");
+    const results = await runImageChecks(kept);
+    expect(failed(results)).toEqual([]);
+    expect(ids(results, "shadow.forbidden")[0]?.status).toBe("not_run");
+    expect(ids(results, "shadow.kept_matches_source")[0]?.status).toBe("pass");
+    for (const id of ["geometry.outside_product", "cutout.halo"]) expect(ids(results, id)[0]?.status, id).toBe("pass");
+    const p = kept.placement, bg = canvasColor("amazon", 1), bottom = p.placedY + Math.round(360 * p.scale), width = Math.round(600 * p.scale);
+    const block = await editOutput(kept, r => paintRect(r, p.placedX + 40, bottom + 8, width - 80, 40, [bg[0] - 60, bg[1] - 60, bg[2] - 60]));
+    expect(failed(checkShadow(await ctxOf(block)))).toContain("shadow.kept_matches_source");
+    // The same darkening on an output that says it carries no shadow is a forbidden shadow.
+    const none = await ctxOf({ ...block, flags: [...block.flags, "no_shadow_source"] });
+    expect(ids(checkShadow(none), "shadow.forbidden")[0]?.ok).toBe(false);
+    expect(failed(await checkGeometry(none))).toContain("geometry.outside_product");
+  }, 60_000);
+  it("runs the colour checks on a graded studio background and on a white border a cut product crosses, and still catches a lost region there", async () => {
+    const graded = await syntheticSubject("amazon", 1, "footwear", { gradient: 100 });
+    expect(graded.sourceBackground.uniform).toBe(false);
+    const model = backgroundModel(graded.source, graded.sourceBackground);
+    expect(model?.kind).toBe("graded");
+    expect(model!.residual).toBeLessThanOrEqual(2);
+    expect(model!.at(0)[0]).toBeGreaterThanOrEqual(253);
+    expect(model!.at(799)[0]).toBeLessThanOrEqual(157);
+    const results = checkCutout(await ctxOf(graded));
+    expect(failed(results)).toEqual([]);
+    for (const id of ["cutout.pixels_lost", "cutout.thin_parts", "cutout.background_kept", "cutout.edge_softness", "cutout.fringe"]) expect(ids(results, id)[0]?.status, id).toBe("pass");
+    const chunk = { ...graded, alpha: Buffer.from(graded.alpha) };
+    for (let y = 250; y < 330; y++) for (let x = 200; x < 300; x++) chunk.alpha[y * 800 + x] = 0;
+    expect(failed(checkCutout(await ctxOf(chunk)))).toContain("cutout.pixels_lost");
+    // A model cut at the bottom of a white frame: prepare calls the border "not uniform" (the legs cross it), the row medians are white.
+    const cut = await syntheticSubject("amazon", 1, "apparel_model", { width: 800, height: 1200, box: { x: 150, y: 100, w: 500, h: 1100 }, cutBottom: true });
+    const cutModel = backgroundModel(cut.source, { uniform: false, color: cut.sourceBackground.color });
+    expect(cutModel?.kind).toBe("graded");
+    expect(cutModel!.at(1199)).toEqual([255, 255, 255]);
+    expect(ids(checkCutout(await ctxOf({ ...cut, sourceBackground: { ...cut.sourceBackground, uniform: false } })), "cutout.pixels_lost")[0]?.status).toBe("pass");
   }, 60_000);
 });

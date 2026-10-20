@@ -245,7 +245,7 @@ async function runSet(ctx: RunContext, group: Group): Promise<SetRecord> {
       const box = bbox(alpha, p.width, p.height);
       for (const o of outputs.filter(o => o.sourceImageId === source.id && o.stagingUri)) {
         const jpeg = (await gcs.downloadBuffer(o.stagingUri!)).buf;
-        const subject: OutputSubject = { identifier, n: source.n, channel: o.channel, productType: (products.get(source.productId)?.productType ?? group.category) as ProductType, source: { w: p.width, h: p.height, rgb: p.rgb }, sourceBackground: p.background, alpha, jpeg, placement: { w: o.canvasW, h: o.canvasH, scale: Number(o.scale), placedX: o.placedX, placedY: o.placedY }, flags: o.flags, status: o.status, expect: entry.expect };
+        const subject: OutputSubject = { identifier, n: source.n, channel: o.channel, productType: (products.get(source.productId)?.productType ?? group.category) as ProductType, source: { w: p.width, h: p.height, rgb: p.rgb }, sourceBackground: p.background, alpha, jpeg, placement: { w: o.canvasW, h: o.canvasH, scale: Number(o.scale), placedX: o.placedX, placedY: o.placedY }, flags: o.flags, status: o.status, reason: o.reason, expect: entry.expect };
         const checks = await runImageChecks(subject);
         record.results.push(...checks);
         if (checks.every(c => c.ok)) deterministicPass.add(outputKey(identifier, o.channel, source.n));
@@ -293,7 +293,7 @@ async function runSet(ctx: RunContext, group: Group): Promise<SetRecord> {
         catch (error) { console.info(JSON.stringify({ message: "bakeoff matte failed", model: m.id, source: k, error: error instanceof Error ? error.message : String(error) })); }
       });
       for (const matte of mattes) {
-        const { results: r, metrics } = checkMatte({ identifier: entry.identifier, n: entry.n, source: { w: p.width, h: p.height, rgb: p.rgb }, sourceBackground: p.background, alpha: matte.alpha });
+        const { results: r, metrics } = checkMatte({ identifier: entry.identifier, n: entry.n, source: { w: p.width, h: p.height, rgb: p.rgb }, sourceBackground: p.background, alpha: matte.alpha, productType: group.category });
         const consensus = consensusMetrics(matte.alpha, mattes.filter(o => o !== matte).map(o => o.alpha));
         record.trials.push({ brand: group.brand, category: group.category, identifier: entry.identifier, n: entry.n, model: matte.model, target: matte.target, ms: matte.ms, results: r, metrics: { ...metrics, ...consensus }, tags: entry.tags });
       }
@@ -330,7 +330,9 @@ async function runCommand(db: Db, flags: Record<string, string | string[] | true
     matteFor: async (...args) => { work.matte++; return base.matteFor(...args); }, renderAllChannels: async (...args) => { work.render++; return base.renderAllChannels(...args); },
     storage: { ...storage, stageCopyToPublic: async (...args) => { work.copy++; return storage.stageCopyToPublic(...args); } } };
   const expectOf = new Map<string, Expectation>(), plantedOf = new Map<string, { n: number; from: string }>(), heldExpected = new Set<string>();
-  for (const e of manifest.entries) { expectOf.set(e.identifier, e.expect); if (e.planted) plantedOf.set(e.identifier, { n: e.n, from: e.planted.from }); }
+  // The product's expectation is its first shot that expects a hold (a per-shot expectation, such as a lifestyle photo,
+  // holds the whole product), else its last shot's.
+  for (const e of manifest.entries) { if (!expectOf.get(e.identifier)?.attention) expectOf.set(e.identifier, e.expect); if (e.planted) plantedOf.set(e.identifier, { n: e.n, from: e.planted.from }); }
   // Photos the pipeline must hold: code-detected expectations always (the 450 px copies); judge-detected ones only on a
   // live run, and for a planted product only the planted shot (its host shots go to the sheet).
   for (const e of manifest.entries) {

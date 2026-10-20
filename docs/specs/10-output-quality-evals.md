@@ -98,7 +98,7 @@ or `no_shadow_source` (nothing drawn; any darkening is then judged with the synt
 
 | Check | Applies to | Bar |
 |---|---|---|
-| `forbidden` | apparel on a model, flat lays (the owner's bar: a model photo gets no shadow at all) | 0 pixels darker than the background by more than 12 in regions of 24 px or more, and mean darkening of the band under the product <= 1.5 luma |
+| `forbidden` | apparel on a model, flat lays, in `no_shadow_source` or `shadow_synthesised` mode (SPEC.md: a photographic shadow measured on a uniform background is preserved for every type, only synthesis is forbidden on apparel, so an apparel output in kept mode is judged like footwear below and `forbidden` is not run on it) | 0 pixels darker than the background by more than 12 in regions of 24 px or more, and mean darkening of the band under the product <= 1.5 luma |
 | `footprint` | shadow-allowed types | every shadow pixel inside the band, within the render's feather of the product mask and in the lower half of the product (silhouette plus feather) |
 | `darkness` | shadow-allowed types | darkest shadow pixel <= 65% of the background luma for a synthesised shadow (spec 05 clamp 0.6 plus JPEG); <= 70% for a kept shadow (the clamp plus the product's own fade composited over it) |
 | `kept_matches_source` | kept photographic shadows | the output's darkness map equals the source's darkness (share below the source background luma, clamped at 0.6, outside the opaque matte) resampled to the placement: mean absolute difference <= 4 luma over the pixels where either shows a shadow, inside the spec 05 band, outside the 3 px ring and past the render's fade at the margins, the border band and the photo's frame; not run under 64 such pixels |
@@ -120,10 +120,17 @@ picks up colour from the sole), minus the floor reflection (in that lower zone, 
 pixel under the matte's lowest row of its column, at most 1.5% of the frame height below it and
 never under 8 px, that is lighter than the product's lowest three matted rows there and no more than
 12 chroma more saturated: a faded mirror of the product, not a lost part; a dropped sole sliver is
-darker or more saturated and still counts), minus specks under 0.02% of the frame. Only sources with
-a uniform border run these; others are "not run" and listed. On a pass-through
-(`matte_passthrough`, `passthrough`) the photo is kept whole by rule, so `background_kept` and
-`fringe` are not run; `fringe` is also not run without a uniform source border.
+darker or more saturated and still counts), minus specks under 0.02% of the frame. The "source
+background colour" is a model per row (`backgroundModel`): prepare's border colour when the border is
+uniform, else the per-row median of the 2% border band over the plain rows (per-row interquartile range
+of the band pixels under 16; a row the product crosses, or a texture with a steady median, is not plain)
+fitted linearly top to bottom, accepted when at least 95% of the rows are plain and the 95th percentile
+of their residuals is under 8 levels; it covers a smooth studio gradient and a flat border a cut
+product's legs cross, which prepare calls "not uniform"). A border that fits neither (a lifestyle
+photo, a full-bleed close-up) leaves these checks "not run" and listed. `edge_softness` needs only the
+matte and always runs. On a pass-through (`matte_passthrough`, `passthrough`) the photo is kept whole
+by rule, so `background_kept`, `halo` and `fringe` are not run; `fringe` is also not run without a
+background model.
 
 | Check | Measured | Bar |
 |---|---|---|
@@ -132,9 +139,9 @@ a uniform border run these; others are "not run" and listed. On a pass-through
 | `background_kept` | matte pixels (alpha > 10) that are source-background coloured, outside the colour estimate dilated 3 px and outside the silhouette's span | <= 1% of the matte |
 | `holes` | connected interior regions (estimate eroded 3 px) the matte drops, each >= 0.05% of the product | 0 |
 | `see_through` | share of the interior with alpha under 200 | <= 0.2% |
-| `edge_softness` | soft alpha pixels (10 to 245) per pixel of silhouette length | <= 3 px |
-| `halo` | share of the 3 px ring around the product on the canvas that is not canvas background; where a shadow is allowed, achromatic darkening (chroma under 24, the ringing a coloured edge lends a shadow) inside the band and up to 10% of the product height above it is the kept shadow and is excluded, a coloured ring or any ring higher up the silhouette counts | <= 2% |
-| `fringe` | share of soft-edge pixels (alpha 10 to 200) carrying the source background colour, when the source has a uniform border, the output is not a pass-through and the source and canvas backgrounds differ by more than 20 | <= 1% |
+| `edge_softness` | soft alpha pixels (10 to 245) per pixel of silhouette length | <= 3 px for footwear; <= 3.5 px for apparel on a model, flat lays, bags and hardline (section 15b) |
+| `halo` | share of the 3 px ring around the product on the canvas that is not canvas background; where a shadow is allowed (section 5, including a kept shadow on apparel), achromatic darkening (chroma under 24, the ringing a coloured edge lends a shadow) inside the band and up to 10% of the product height above it is the kept shadow and is excluded, a coloured ring or any ring higher up the silhouette counts; not run on a pass-through | <= 2% |
+| `fringe` | share of soft-edge pixels (alpha 10 to 200) carrying the source background colour (the row's colour of the background model), when the source has a background model, the output is not a pass-through and the source and canvas backgrounds differ by more than 20 along the product | <= 1% |
 
 White-on-white and dark-on-dark products carry little colour evidence; for them `pixels_lost` is
 weaker and the model bake-off (section 12) adds the other models' majority as a second reference.
@@ -145,11 +152,11 @@ A source is cut on a side when at least 2% of that edge's pixels carry product (
 
 | Check | Bar |
 |---|---|
-| `flush_<side>` | the visible product (section 4: inside the half-coverage mask and matching the source there, or clearly foreground next to it, so a white hem on a white canvas counts) ends within 1 px of the canvas edge on the cut side (the render drops that side's margin, so a cut side is always flush; the render's "cannot reach that edge" fallback is a failure here, reported to the render owner) |
+| `flush_<side>` | the visible product (section 4: inside the half-coverage mask and matching the source there, or clearly foreground next to it, so a white hem on a white canvas counts) ends within 1 px of the canvas edge on the cut side (the render drops that side's margin, so a cut side is always flush). A band the render left on purpose passes as information (unit `px, fitted by rule`, the gap recorded) when the output's notes carry the spec 05 band note naming that side and the suite's own rule agrees: the axis is cut on both ends and filling it would trim more than a third of the other axis or trim an uncut side (computed from the boxes alone), or the note says a logo, text or a buckle near another edge stopped the fill (trimRoom, which the suite cannot see). A band without the note (the render claims flush), or noted where the rule allowed the fill, fails |
 | `trim` | from the recorded scale alone, the share of the product box the placement leaves no room for, per axis (runs on every output; an uncut product trimmed at all fails) | trimmed only on an axis with a cut side, only when the other axis is cut on both ends and fills the canvas, and at most a third (spec 05 `CUT_FILL_MAX_TRIM`, stated independently as `MAX_TRIM_SHARE`) |
-| `no_line_<side>` | nothing beyond the cut side is drawn (regions of 12 px or more, delta > 12), and at most 1% of the half-coverage silhouette's last 12 rows or columns before the cut are a gap: canvas background (delta <= 8) where the source resampled there is something else (delta > 24), so a white shoe or the photo's own white corner is not a gap (no gap, no floating line) |
+| `no_line_<side>` | nothing beyond the cut side is drawn (regions of 12 px or more, delta > 12), and at most 1% of the silhouette's last 12 rows or columns before the cut are a gap: canvas background (delta <= 8) where the source resampled there is something else (delta > 24), so a white shoe or the photo's own white corner is not a gap, counted in regions of 12 px or more inside the half-coverage mask eroded by one source pixel at the output scale (`ceil(scale)`), so the ring the matte's soft edge leaves along every silhouette edge is not a gap and a real gap or floating line still is (no gap, no floating line) |
 | `flagged` | the output carries the information flag `cut_in_source` |
-| `not_held` | status is not `needs_attention` or `failed` |
+| `not_held` | status is not `needs_attention` or `failed`; not run when the manifest expects the photo to be held (the cut is not what holds it) |
 
 ## 8. Completeness (`completeness.*`)
 
@@ -178,7 +185,7 @@ three photos and one Amazon link is a failure with the missing shot named.
 | Check | Bar |
 |---|---|
 | `not_held` | a product the manifest does not expect to need attention goes straight to the sheet |
-| `expected` | a product the manifest expects to hold (for example a 450 px source) is held with exactly the expected flags; judge-detected expectations are asserted only on a live run |
+| `expected` | a product the manifest expects to hold (for example a 450 px source, or one shot with a per-shot expectation) is held with exactly the expected flags; information flags (`low_resolution`, `no_shadow_source`, `shadow_synthesised`, `passthrough`, `matte_passthrough`, `alpha_source`, `qa_sampled_out`, `cut_in_source`, `numbering_gap`) ride along; judge-detected expectations are asserted only on a live run |
 | `planted_caught`, `planted_rate` | every planted wrong item (a photo of another product, ideally another brand, appended as the last shot) is held as `different_product` on that shot only; 100% caught (live run) |
 | `judge_false_positive` | the judge never flags an output every deterministic check passed (live run) |
 | `judge_false_same_product` | a sole, back, inside, detail or on-model view of a golden product is never called a different product (live run) |
@@ -229,6 +236,11 @@ The owner's folders are read only. Sources, seed 10:
   (`bag_accessory`, reflective) and a gift set (`other`).
 - Derived: a 450 px copy of an Anta and a French Connection photo (expected `small_source`, held),
   two model photos cut at 85% height (`cut_edge`, must not be held).
+- Per-shot expectations (`overrides.<identifier>.shots.<n>`): `ZEE79259BBFD83FFA1DB0Z` shot 5 is a
+  lifestyle photo on a tennis court (non-uniform background, eval run 2 defect A1: published as a broken
+  pass-through, headless on the square canvases). It expects a hold for `leftover_background` with the
+  reason "background could not be removed", detected by code; the product's expectation is its first shot
+  that expects a hold. An entry's `expect.reason` documents why and is never asserted.
 - Planted: a French Connection photo under an Anta product, an Anta photo under a French
   Connection product, a Vero Moda photo under a Penti product (expected `different_product`, live
   run).
@@ -353,6 +365,27 @@ Contracts changed by this calibration: `OutputContext` gains `half` and `sourceR
 gains `heldExpected`; `ReportThumb` gains `evidence`; new check ids `shadow.kept_matches_source` and
 `completeness.held_unpublished`; `overwrite.removed_not_live` measures `k of n`; `ModelScore.composite`
 is unbounded; `progress.ts` exports `EVIDENCE_CAP_PER_SET`, `evidencePath`, `EvidenceBudget`.
+
+### 15b. Apparel calibration (eval run 2, french_connection.apparel_model: 144 photos, 1136 outputs with image checks, mocked judge)
+
+The same run's apparel-on-model set, re-read under the PR #61 rules. Every bar below was set from the
+measured distribution plus the thumbs and the golden sources; the gate cases of section 14 still fail.
+
+| Check | Run 2 distribution (old bar) | Cause | New bar and why |
+|---|---|---|---|
+| `cut_edge.no_line_*` | about 470 fails on about 354 outputs over 40+ photos, gap share 1 to 3.6% (bottom p50 1.8%, top p50 2.7%), identical across channels for a photo (Z496A6D49F492382B0B59Z n=1 2.1% on centrepoint and trendyol at scales 3.75 and 1.5), highest where the strip holds many silhouette edges (Z2392E34E478442A647DBZ n=5 top 3.6%), zero on a full-width close-up; anta 1.1 to 1.9% on cut white shoes | the half-coverage mask and the rendered alpha differ by up to one source pixel along every silhouette edge, so a one-source-pixel ring of canvas background sits inside the half mask; with the source studio grey and the canvas colour more than 24 apart the source-match rule does not absorb it | gap pixels counted only inside the half mask eroded by `ceil(scale)` and in regions of 12 px or more; bar 1% unchanged (a floating line 12 rows deep still measures over 60%) |
+| `cut_edge.not_held` | 8 fails, all on the expected hold Z023DBEC95DCF485E9E6EZ-downscale450 (a cut 450 px copy) | the check ignored the manifest's expectation | not run when the manifest expects the photo to be held |
+| `cutout.edge_softness` | 40 of 88 measured fail, 3.19 to 3.48 px (bar 3): matted outputs p50 2.98, p90 3.48, max 3.48; anta kept p50 2.56, p90 2.69, max 2.82; bake-off trials p50 3.19, p90 3.91, max 4.42 | fabric edges (fuzz, flat-lay seams) and a white box on white are softer than a shoe outline in every model and look sharp on the canvas | 3.5 px for apparel on a model, flat lays, bags and hardline; footwear keeps 3 px. The apparel bake-off ranking hinges on this bar: at 3.0 birefnet-general-lite wins (0.492 over birefnet-general 0.571); at 3.5 the top three are at 0 fails and bria-rmbg wins on composite (0.230 vs 0.492, margin 0.26), losing nothing the others keep |
+| `cutout.halo` | 2 fails on the pass-through ZEE79259BBFD83FFA1DB0Z n=5 (2.16%) measuring the photo's own background | a pass-through keeps the photo by rule | not run on a pass-through, as `background_kept` and `fringe` already were |
+| `cut_edge.flush_left`, `flush_right`, `flush_top` | 15 + 15 fails on 2:3 close-ups cut on three or four sides placed on the three square canvases (Z24C7404AA36DACC958B4Z n=2 and 5, ZB8B3C9012AE815065B7BZ n=5, Z03E68A3989163039BCFEZ n=3, Z8A70D494DBDD6A6A1C5EZ n=4, 173 to 384 px) and 5 `flush_top` fails on the logo-safe fallback (Z2392E34E478442A647DBZ n=5 trendyol 203 px, ZFAC5C5271DD3A9B41C32Z n=5 72 px, ZEE79259BBFD83FFA1DB0Z n=5 90 px), every one carrying the spec 05 band note | filling the width of a square canvas with a 2:3 photo trims a third of the height, which spec 05 refuses; the logo-safe fallback fits on purpose | decision (a), taken by the manager on the owner's behalf: a band the render fitted on purpose passes as information when the output carries the band note naming the side and the suite's own rule agrees (fill refused by the third, by an uncut side, or by a logo per the note); the render claiming flush without the note, or noting a band where the rule allowed the fill, fails. Apparel sets carry far more full-bleed close-ups than footwear (88 four-side-cut outputs here, 16 on anta) |
+| `shadow.forbidden`, `geometry.outside_product`, `cutout.halo` | 8 + 8 + 8 fails on the planted shoe Z023DBEC95DCF485E9E6EZ-planted n=4 (an Anta photo under an apparel product): the render kept its photographic contact shadow (no `no_shadow_source`), 18k to 114k shadow pixels, halo 35 to 38% | the owner's bar in section 5 ("a model photo gets no shadow at all") and SPEC.md's shadow rule (a measurable source shadow is preserved for every type; only synthesis is forbidden on apparel) disagreed; no real French Connection photo carries a source shadow (1144 `no_shadow_source`) | decision (b): the suite follows SPEC.md. An apparel output in kept mode is judged like footwear (`footprint`, `darkness` at the kept bar, `kept_matches_source`), `forbidden` is not run on it, and `outside_product` and `halo` exclude the kept shadow in its band as they do for footwear; `forbidden` still fails any darkening on an apparel output that says `no_shadow_source` or `shadow_synthesised`, and `shadow.synthesised_on_model` still fails the flag |
+| `cutout.pixels_lost`, `thin_parts`, `background_kept`, `edge_softness`, `fringe` coverage | run on 88 of 1136 outputs (11 photos, 7.7%): prepare called the border of 131 photos "not uniform" (stdev 10 to 74) | not a gradient: the French Connection borders are white (100 of the 132 fits are flat 255; the rest drop at most 9 levels top to bottom) and the product crosses the 2% band (78 cut photos, feet near the bottom), which lifts the band's standard deviation past 8 | the background model (section 6): per-row median of the band over the plain rows (interquartile range under 16) fitted linearly, accepted when at least 95% of the rows are plain and their residual at the 95th percentile is under 8 levels. On the run 2 sources the model fits 118 of 160 photos (11 uniform, 107 fitted); the colour checks would run on 880 of 1136 outputs (77.5%, from 7.7%: 110 of 142 photos, from 11). The 42 photos without a model stay not run: the lifestyle photo, the text banner, the bag and hardline close-ups, the full-bleed close-ups, and products crossing a side band for more than 5% of the rows (a cream blouse cut at the right, the candles), where a median-only fit would have called the product its own background and failed `background_kept` on it. `edge_softness` now runs on every matte |
+| `attention.expected` on an expected hold of a cut photo | would fail with "Unexpected flags: cut_in_source" under the PR #61 checkers | `cut_in_source` and `numbering_gap` were not in the suite's information flags | both are information flags (SPEC.md, spec 10 section 7), as in the pipeline's own triage |
+| golden manifest | ZEE79259BBFD83FFA1DB0Z n=5 (lifestyle photo, defect A1) expected no attention and went to the sheet as a broken pass-through | the manifest was wrong | per-shot expectation: held for `leftover_background` ("background could not be removed"), detected by code, once the render holds such photos (parallel render PR). Until that PR lands the suite reports the miss as `completeness.held_unpublished` and `attention.expected` fails on this product, which is the intent |
+
+Not changed: `geometry.extent` on hair tops and hands (9 to 16 px, about 20 predicted fails, watched on run 3), the real defects A1 (lifestyle pass-through) and A2 (candle kept-background blob, Z15276411CE85C2E728DEZ n=4, now measurable by `background_kept` with the background model) stay failures for the render owner.
+
+Contracts changed: `OutputSubject` gains `reason` (the render's notes, where the band note lives; the worker fills it from `catalog_outputs.reason`); `Expectation` gains `reason`; `MatteInput` gains `productType` (the bake-off passes the set's category); `GoldenOverride` gains `shots`; `context.ts` exports `shadowMode`, `shadowAllowedFor`, `APPAREL_TYPES`; `image.ts` exports `backgroundModel`, `GRADED_RESIDUAL_MAX`; `cutout.ts` exports `edgeSoftnessBar`, `EDGE_SOFTNESS_MAX_PX_SOFT_TYPES`; `cut-edge.ts` exports `cutBandNote`, `NO_LINE_STRIP_PX`, `NO_LINE_GAP_MAX`.
 
 ## 16. Done criteria
 

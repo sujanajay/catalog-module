@@ -13,6 +13,8 @@ export interface SyntheticOptions {
   box?: { x: number; y: number; w: number; h: number };
   /** Source background colour. */
   bg?: [number, number, number];
+  /** Darken the source background by this many levels from the top row to the bottom row (a graded studio background). */
+  gradient?: number;
   /** Product colour. */
   color?: [number, number, number];
   /** A 3 px wide vertical strap above the body (thin structure). */
@@ -46,7 +48,7 @@ export function syntheticSource(opts: SyntheticOptions = {}): { prepared: Prepar
   if (opts.cutRight) box.w = width - pad - box.x;
   if (opts.cutLeft) { box.w += box.x - pad; box.x = pad; }
   const rgb = Buffer.alloc(width * height * 3), alpha = Buffer.alloc(width * height);
-  for (let i = 0; i < width * height; i++) { rgb[i * 3] = bg[0]; rgb[i * 3 + 1] = bg[1]; rgb[i * 3 + 2] = bg[2]; }
+  for (let i = 0; i < width * height; i++) { const drop = opts.gradient ? Math.round(opts.gradient * Math.floor(i / width) / (height - 1)) : 0; rgb[i * 3] = bg[0] - drop; rgb[i * 3 + 1] = bg[1] - drop; rgb[i * 3 + 2] = bg[2] - drop; }
   const paint = (x: number, y: number, c: [number, number, number]) => { const i = y * width + x; rgb[i * 3] = c[0]; rgb[i * 3 + 1] = c[1]; rgb[i * 3 + 2] = c[2]; alpha[i] = 255; };
   const inset = opts.taper ? Math.round(box.w * 0.12) : 0, taperFrom = box.y + Math.round(box.h * 0.75);
   for (let y = box.y; y < box.y + box.h; y++) for (let x = box.x + (y >= taperFrom ? inset : 0); x < box.x + box.w - (y >= taperFrom ? inset : 0); x++) paint(x, y, [color[0] + ((x + y) % 7) * 3, color[1] + (x % 5) * 2, color[2] + (y % 3) * 4]);
@@ -72,7 +74,7 @@ export async function syntheticSubject(channel: ChannelId, n: number, productTyp
   return {
     identifier, n, channel, productType, source: { w: prepared.width, h: prepared.height, rgb: prepared.rgb }, sourceBackground: prepared.background, alpha: matte.alpha, jpeg: out.jpeg,
     placement: { w: out.plan.w, h: out.plan.h, scale: out.plan.scale, placedX: out.plan.placedX, placedY: out.plan.placedY },
-    flags: out.flags as OutputFlag[], status: "staged", expect: { attention: false, flags: [], detector: "code" },
+    flags: out.flags as OutputFlag[], status: "staged", reason: out.notes.join("; ") || null, expect: { attention: false, flags: [], detector: "code" },
   };
 }
 

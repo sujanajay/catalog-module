@@ -2,7 +2,8 @@
 // cut at the knees) must come out flush with the canvas on that side where the channel has no
 // margin, end exactly on the guide where it has one, carry no floating line or shadow under the cut,
 // and be flagged for information, never held for a person.
-import { delta, dropSpecks, SPECK_PX } from "./image";
+import { CUT_BAND_NOTE_START } from "../channels";
+import { delta, dropSpecks, erode, SPECK_PX } from "./image";
 import { SOURCE_MATCH_DELTA, sourceDelta, visibleProduct } from "./geometry";
 import { overflowPx, type OutputContext } from "./context";
 import { judge, notRun, pass, type CheckResult, type CheckSubject } from "./types";
@@ -18,8 +19,26 @@ export const FLUSH_TOLERANCE_PX = 1;
 export const MAX_TRIM_SHARE = 1 / 3;
 /** Slack on MAX_TRIM_SHARE (spec 05 CUT_FILL_TRIM_SLACK): a square full-bleed box is a pixel or two off square after the matte's soft edge. */
 export const TRIM_SLACK = 0.01;
+/** Rows (or columns) of the silhouette before a cut side that must still be product. */
+export const NO_LINE_STRIP_PX = 12;
+/** Share of the silhouette's strip (eroded by one source pixel) that may be a gap. */
+export const NO_LINE_GAP_MAX = 0.01;
 
+type Side = "top" | "bottom" | "left" | "right";
+const SIDES: readonly Side[] = ["top", "bottom", "left", "right"];
 const E = "cut_edge" as const;
+
+/**
+ * The render's own account of a cut side it could not put flush (spec 05: "The original photo is cut at the <sides>,
+ * but on <channel> ... a band shows there"), read from the output's notes: the sides named, and whether a logo, text or
+ * a buckle near another edge stopped the fill (the suite cannot see trimRoom, so that wording is taken as read).
+ */
+export function cutBandNote(reason: string | null | undefined): { sides: Set<Side>; logo: boolean; note: string | null } {
+  const notes = (reason ?? "").split("; ").filter(note => note.startsWith(CUT_BAND_NOTE_START));
+  const sides = new Set<Side>();
+  for (const note of notes) for (const word of note.slice(CUT_BAND_NOTE_START.length).split(", but")[0]!.split(" and ")) if ((SIDES as readonly string[]).includes(word.trim())) sides.add(word.trim() as Side);
+  return { sides, logo: notes.some(note => note.includes("logo")), note: notes[0] ?? null };
+}
 
 export function checkCutEdge(ctx: OutputContext): CheckResult[] {
   const { subject: s, canvas, background, safeBox, half } = ctx;
@@ -56,14 +75,36 @@ export function checkCutEdge(ctx: OutputContext): CheckResult[] {
   if (x1 < 0) return [notRun("cut_edge.flush", E, who, "No product pixels on the canvas.")];
   const limit = { top: safeBox.y, bottom: safeBox.y + safeBox.h - 1, left: safeBox.x, right: safeBox.x + safeBox.w - 1 };
   const measured = { top: y0, bottom: y1, left: x0, right: x1 };
+  // Where spec 05 lets the render fit instead of fill (a band then shows beside the cut sides of that axis): the axis is
+  // cut on both ends and filling it would need the other axis trimmed by more than a third, or trimmed on an uncut side.
+  // The suite computes this from the boxes alone; a logo-blocked fill (trimRoom) is only in the render's note.
+  const fit = { x: safe.w / box.w, y: safe.h / box.h }, contain = Math.min(fit.x, fit.y);
+  const fillRefused = (axis: "x" | "y"): { refused: boolean; why: string } => {
+    const bothCut = axis === "x" ? cut.left && cut.right : cut.top && cut.bottom, otherCut = axis === "x" ? cut.top || cut.bottom : cut.left || cut.right;
+    if (!bothCut || fit[axis] <= contain + 1e-9) return { refused: false, why: "the axis fills the canvas on its own" };
+    const otherLength = axis === "x" ? box.h : box.w, otherRoom = axis === "x" ? safe.h : safe.w, extra = overflowPx(otherLength, fit[axis], otherRoom), share = extra / otherLength;
+    if (!otherCut) return { refused: true, why: `filling the ${axis === "x" ? "width" : "height"} would trim ${extra} px (${(share * 100).toFixed(1)}%) off the uncut ${axis === "x" ? "top or bottom" : "left or right"}` };
+    if (share > MAX_TRIM_SHARE + TRIM_SLACK) return { refused: true, why: `filling the ${axis === "x" ? "width" : "height"} would trim ${(share * 100).toFixed(1)}% of the ${axis === "x" ? "height" : "width"} (at most a third)` };
+    return { refused: false, why: `filling the ${axis === "x" ? "width" : "height"} would trim only ${(share * 100).toFixed(1)}% of the ${axis === "x" ? "height" : "width"} off its cut sides` };
+  };
+  const band = cutBandNote(s.reason);
   for (const side of ctx.cutSides) {
     const gap = Math.abs(measured[side] - limit[side]);
     const edge = { top: 0, bottom: canvas.h - 1, left: 0, right: canvas.w - 1 }[side];
-    const flush = limit[side] === edge;
-    out.push(judge(gap <= FLUSH_TOLERANCE_PX && flush, `cut_edge.flush_${side}`, E, who, Math.abs(measured[side] - edge), FLUSH_TOLERANCE_PX, "px", `The product is cut at the source ${side}; on the canvas it ends ${Math.abs(measured[side] - edge)} px from the ${side} edge (must be flush, with no margin on that side).`));
+    const flush = limit[side] === edge, offEdge = Math.abs(measured[side] - edge);
+    if (gap <= FLUSH_TOLERANCE_PX && flush) out.push(pass(`cut_edge.flush_${side}`, E, who, offEdge, FLUSH_TOLERANCE_PX, "px", `The product is cut at the source ${side}; on the canvas it ends ${offEdge} px from the ${side} edge (must be flush, with no margin on that side).`));
+    else {
+      // A band the render fitted on purpose and said so (the sheet note) passes as information when the rule agrees;
+      // a band the render did not note, or noted where the rule allowed the fill, is a render fault.
+      const rule = fillRefused(side === "left" || side === "right" ? "x" : "y"), noted = band.sides.has(side), fitted = noted && (rule.refused || band.logo);
+      out.push(judge(fitted, `cut_edge.flush_${side}`, E, who, offEdge, FLUSH_TOLERANCE_PX, fitted ? "px, fitted by rule" : "px", fitted
+        ? `The product is cut at the source ${side} and ends ${offEdge} px from the ${side} edge; the render fitted it on purpose and notes the band on this channel (${band.logo ? "a logo or detail near another cut edge stops the fill" : rule.why}).`
+        : noted ? `The product is cut at the source ${side} and ends ${offEdge} px from the ${side} edge; the render notes a band but the rule allows the fill: ${rule.why}.`
+        : `The product is cut at the source ${side}; on the canvas it ends ${offEdge} px from the ${side} edge (must be flush, with no margin on that side).`));
+    }
     // No floating line or shadow: the strip just beyond the cut side must be pure background.
     let worst = 0;
-    const strip = 12, mask = new Uint8Array(canvas.w * canvas.h);
+    const strip = NO_LINE_STRIP_PX, mask = new Uint8Array(canvas.w * canvas.h);
     const mark = (x: number, y: number) => { const d = delta(canvas.rgb, y * canvas.w + x, background); if (d > 12) { mask[y * canvas.w + x] = 1; if (d > worst) worst = d; } };
     if (side === "bottom" || side === "top") {
       const from = side === "bottom" ? y1 + 1 : Math.max(0, y0 - strip), to = side === "bottom" ? Math.min(canvas.h, y1 + 1 + strip) : y0;
@@ -76,16 +117,23 @@ export function checkCutEdge(ctx: OutputContext): CheckResult[] {
     for (const v of dropSpecks(mask, canvas.w, canvas.h, SPECK_PX)) bad += v;
     // Inside the silhouette, the last rows (or columns) before the cut must still be product: a gap there is a floating
     // line. A gap pixel shows canvas background where the source has something else; a white shoe or the photo's own
-    // white corner matches the source and is not a gap.
-    let gapPixels = 0, maskPixels = 0;
+    // white corner matches the source and is not a gap. The silhouette is the half-coverage mask eroded by one source
+    // pixel at the output scale (the matte's soft edge straddles the half-coverage line by up to that much, eval run 2
+    // french_connection: a ring of 1 to 3% of the strip along every silhouette edge of a model photo), and specks are
+    // dropped, so a real gap or line (12 rows deep, spanning the silhouette) still counts.
+    const core = erode(half, canvas.w, canvas.h, Math.ceil(scale)), gapMask = new Uint8Array(canvas.w * canvas.h);
+    let maskPixels = 0;
     const inStrip = (x: number, y: number) => side === "bottom" ? y > y1 - strip : side === "top" ? y < y0 + strip : side === "right" ? x > x1 - strip : x < x0 + strip;
-    for (let y = Math.max(0, y0); y <= Math.min(canvas.h - 1, y1); y++) for (let x = Math.max(0, x0); x <= Math.min(canvas.w - 1, x1); x++) { const i = y * canvas.w + x; if (!half[i] || !inStrip(x, y)) continue; maskPixels++; if (delta(canvas.rgb, i, background) <= 8 && sourceDelta(ctx, x, y) > SOURCE_MATCH_DELTA) gapPixels++; }
+    for (let y = Math.max(0, y0); y <= Math.min(canvas.h - 1, y1); y++) for (let x = Math.max(0, x0); x <= Math.min(canvas.w - 1, x1); x++) { const i = y * canvas.w + x; if (!core[i] || !inStrip(x, y)) continue; maskPixels++; if (delta(canvas.rgb, i, background) <= 8 && sourceDelta(ctx, x, y) > SOURCE_MATCH_DELTA) gapMask[i] = 1; }
+    let gapPixels = 0;
+    for (const v of dropSpecks(gapMask, canvas.w, canvas.h, SPECK_PX)) gapPixels += v;
     const gapShare = maskPixels ? gapPixels / maskPixels : 0;
-    out.push(judge(bad === 0 && gapShare <= 0.01, `cut_edge.no_line_${side}`, E, who, bad || Math.round(gapShare * 1e4) / 1e4, 0, bad ? "pixels beyond the edge" : "gap share inside the silhouette", bad ? `${bad} pixels beyond the cut ${side} edge are not background (worst delta ${worst}): a floating line or shadow.` : gapShare > 0.01 ? `${(gapShare * 100).toFixed(1)}% of the silhouette's last ${strip} rows before the cut ${side} are background: a gap or a floating line.` : `Nothing is drawn beyond the cut ${side} edge and the silhouette runs to it.`));
+    out.push(judge(bad === 0 && gapShare <= NO_LINE_GAP_MAX, `cut_edge.no_line_${side}`, E, who, bad || Math.round(gapShare * 1e4) / 1e4, bad ? 0 : NO_LINE_GAP_MAX, bad ? "pixels beyond the edge" : "gap share inside the silhouette", bad ? `${bad} pixels beyond the cut ${side} edge are not background (worst delta ${worst}): a floating line or shadow.` : gapShare > NO_LINE_GAP_MAX ? `${(gapShare * 100).toFixed(1)}% of the silhouette's last ${strip} rows before the cut ${side} are background: a gap or a floating line.` : `Nothing is drawn beyond the cut ${side} edge and the silhouette runs to it.`));
   }
   const flagged = s.flags.some(f => CUT_SOURCE_FLAGS.includes(f));
   out.push(judge(flagged, "cut_edge.flagged", E, who, s.flags.join(",") || "none", CUT_SOURCE_FLAGS[0]!, "flag", flagged ? "The cut source carries its information flag." : `The cut source carries no information flag (expected one of ${CUT_SOURCE_FLAGS.join(", ")}).`));
   const held = s.status === "needs_attention" || s.status === "failed";
-  out.push(judge(!held, "cut_edge.not_held", E, who, s.status, "staged or verified", "status", held ? "A cut source was held for a person; it must pass with an information flag." : "The cut source was not held."));
+  if (s.expect.attention) out.push(notRun("cut_edge.not_held", E, who, `The manifest expects this photo to be held (${s.expect.flags.join(", ") || "for attention"}); the cut is not what holds it.`));
+  else out.push(judge(!held, "cut_edge.not_held", E, who, s.status, "staged or verified", "status", held ? "A cut source was held for a person; it must pass with an information flag." : "The cut source was not held."));
   return out;
 }

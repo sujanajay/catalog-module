@@ -7,8 +7,10 @@
 // resampled to the placement, within a darkness bound. Where the product type forbids one, none may exist.
 import { SHADOW_BAND_ABOVE, SHADOW_BAND_BELOW, SHADOW_BAND_SIDE, SHADOW_MAX_DARKNESS, SHADOW_PRESET } from "../shadow";
 import { dilate, distanceFrom, dropSpecks, longestRun, lumaAt, luma, shadowFeather, SPECK_PX } from "./image";
-import type { OutputContext } from "./context";
+import { APPAREL_TYPES, shadowMode, type OutputContext } from "./context";
 import { judge, notRun, type CheckResult, type CheckSubject } from "./types";
+
+export { shadowMode };
 
 /** A pixel darker than the background by more than this (0..255 luma) is shadow. JPEG noise on flat grey stays under 4. */
 export const SHADOW_MIN_DARK = 8;
@@ -62,13 +64,6 @@ export function darknessMap(ctx: OutputContext, minDark = SHADOW_MIN_DARK, speck
   let count = 0, max = 0;
   for (let i = 0; i < dark.length; i++) { if (!kept[i]) { dark[i] = 0; continue; } count++; if (dark[i]! > max) max = dark[i]!; }
   return { dark, count, max };
-}
-
-/** How the output carries its shadow, from the render's own flags on the output. */
-export function shadowMode(flags: readonly string[]): "synthesised" | "kept" | "none" {
-  if (flags.includes("shadow_synthesised")) return "synthesised";
-  if (flags.includes("no_shadow_source")) return "none";
-  return "kept";
 }
 
 /**
@@ -138,6 +133,10 @@ export function checkShadow(ctx: OutputContext): CheckResult[] {
     out.push(judge(firm.count === 0 && mean <= FORBIDDEN_MEAN_DARK, "shadow.forbidden", S, who, firm.count, 0, "shadow pixels", firm.count ? `${firm.count} pixels under or around the product are darker than the background (worst ${firm.max.toFixed(0)}); apparel never gets a shadow.` : "No shadow under the product, as the spec requires for this product type."));
     return out;
   }
+
+  // Apparel in kept mode (SPEC.md preserve_only): the photo's own shadow is allowed and compared with the source below;
+  // only a synthesised shadow is forbidden, and that fails above (no_shadow_source or shadow_synthesised flags).
+  if (APPAREL_TYPES.has(s.productType)) out.push(notRun("shadow.forbidden", S, who, "The output keeps the photo's own shadow (SPEC.md: a measurable source shadow is preserved for every type; only synthesis is forbidden on apparel), so it is compared with the source instead."));
 
   if (!count) { out.push(notRun("shadow.footprint", S, who, "No shadow on this output.")); return out; }
 

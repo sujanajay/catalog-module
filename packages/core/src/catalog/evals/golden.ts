@@ -36,7 +36,11 @@ export interface GoldenPlan {
   /** Category by shot 1 tag, for folders that mix flat lays and models; the first matching rule wins, overrides win over rules. */
   categoryRules?: { tag: GoldenTag; category: EvalCategory }[];
 }
-export interface GoldenOverride { category?: EvalCategory; tags?: GoldenTag[]; expect?: Partial<Expectation> }
+export interface GoldenOverride {
+  category?: EvalCategory; tags?: GoldenTag[]; expect?: Partial<Expectation>;
+  /** Per shot (keyed by the shot number): tags and an expectation for that photo alone, over the product's. */
+  shots?: Record<string, { tags?: GoldenTag[]; expect?: Partial<Expectation> }>;
+}
 export interface GoldenBuild {
   roots: Record<string, string>; seed: number; plans: GoldenPlan[]; overrides: Record<string, GoldenOverride>;
   derive: { from: string; op: DerivedOp; brand: string; category: EvalCategory }[];
@@ -120,10 +124,10 @@ export async function buildGolden(build: GoldenBuild, writeDerived: (name: strin
       const override = build.overrides[id] ?? {};
       let category: EvalCategory | undefined = override.category;
       for (const [index, file] of files.entries()) {
-        const bytes = await read(plan.root, file), analysed = await autoTags(bytes);
-        const tags = [...new Set([...analysed.tags, ...(override.tags ?? []), ...(files.length >= 5 ? ["many_shots" as const] : [])])];
+        const bytes = await read(plan.root, file), analysed = await autoTags(bytes), n = parseShotName(path.basename(file)).n ?? index + 1, shot = override.shots?.[String(n)] ?? {};
+        const tags = [...new Set([...analysed.tags, ...(override.tags ?? []), ...(shot.tags ?? []), ...(files.length >= 5 ? ["many_shots" as const] : [])])];
         if (index === 0) category ??= plan.categoryRules?.find(rule => tags.includes(rule.tag))?.category ?? plan.category;
-        entries.push({ identifier: id, n: parseShotName(path.basename(file)).n ?? index + 1, brand: plan.brand, category: category ?? plan.category, source: { root: plan.root, path: file.split(path.sep).join("/") }, sha256: sha256(bytes), bytes: bytes.length, width: analysed.width, height: analysed.height, mime: mimeFromPath(file), tags, expect: { ...NO_ATTENTION, ...override.expect } });
+        entries.push({ identifier: id, n, brand: plan.brand, category: category ?? plan.category, source: { root: plan.root, path: file.split(path.sep).join("/") }, sha256: sha256(bytes), bytes: bytes.length, width: analysed.width, height: analysed.height, mime: mimeFromPath(file), tags, expect: { ...NO_ATTENTION, ...override.expect, ...shot.expect } });
       }
     }
   }

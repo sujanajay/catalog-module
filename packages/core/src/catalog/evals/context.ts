@@ -39,6 +39,22 @@ export interface OutputContext {
 }
 
 export const SHADOW_TYPES = new Set(["footwear", "bag_accessory", "other", "auto"]);
+export const APPAREL_TYPES = new Set(["apparel_model", "apparel_flat"]);
+
+/** How the output carries its shadow, from the render's own flags on the output. */
+export function shadowMode(flags: readonly string[]): "synthesised" | "kept" | "none" {
+  if (flags.includes("shadow_synthesised")) return "synthesised";
+  if (flags.includes("no_shadow_source")) return "none";
+  return "kept";
+}
+/**
+ * Whether a shadow may lie under this output. Footwear, bags and hardline may carry one in either mode. Apparel follows
+ * SPEC.md's shadow rule (preserve_only): the photo's own shadow, measured on a uniform background, is kept for every
+ * type and only synthesis is forbidden, so an apparel output in kept mode (neither `shadow_synthesised` nor
+ * `no_shadow_source`) may carry the photographer's shadow and is judged against the source like footwear; one that
+ * says `no_shadow_source` or `shadow_synthesised` may carry none.
+ */
+export const shadowAllowedFor = (productType: string, flags: readonly string[]): boolean => SHADOW_TYPES.has(productType) || (APPAREL_TYPES.has(productType) && shadowMode(flags) === "kept");
 
 /** Source pixels the recorded scale leaves no room for on one axis of the safe box (0 when the product fits). */
 export function overflowPx(length: number, scale: number, room: number): number {
@@ -117,7 +133,7 @@ export async function buildContext(subject: OutputSubject): Promise<OutputContex
   return {
     subject, spec, canvas, background: hexColor(backgroundFor(subject.channel, subject.n)), sourceBox, sourceCrop, productBox,
     safeBox, band: shadowBand(productBox, canvas), expectedAlpha, sourceRgb,
-    product: thresholdMask(expectedAlpha, ALPHA_EDGE), half: thresholdMask(expectedAlpha, ALPHA_HALF - 1), shadowAllowed: SHADOW_TYPES.has(subject.productType),
+    product: thresholdMask(expectedAlpha, ALPHA_EDGE), half: thresholdMask(expectedAlpha, ALPHA_HALF - 1), shadowAllowed: shadowAllowedFor(subject.productType, subject.flags),
     cutSides: (["top", "bottom", "left", "right"] as const).filter(side => cut[side]), cut,
   };
 }
