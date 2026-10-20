@@ -6,6 +6,7 @@ import type { ChannelId,OutputFlag } from "./types";
 import { strictestChannel } from "./qa/policy";
 import { MAX_REASONS_PER_PHOTO,bySeverity,flagDetails,problemLine,severityRank } from "./qa/reasons";
 import { INFORMATION_FLAGS } from "./qa/triage";
+import { busyBackgroundHold } from "./auto-resolve";
 export interface AttentionPhoto { n:number;channel:ChannelId;outputId:string;outputIds:string[];originalUrl:string;outputUrl:string|null;why:string;whatToDo:string;liveObjectExists:boolean;liveChannels:ChannelId[];failed:boolean;flags:OutputFlag[] }
 export interface AttentionProduct { productId:string;identifier:string;totalShots:number;problemLine:string;photos:AttentionPhoto[] }
 const information = INFORMATION_FLAGS;
@@ -36,7 +37,7 @@ export async function listAttention(db:Db,batchId:string,sign:(uri:string)=>Prom
   const flags=bySeverity(siblings.flatMap(r=>r.output.flags)),problemFlags=flags.filter(f=>!information.has(f));
   const flag=o.status==="failed"?"failed":problemFlags[0]??flags[0]??"qa_unavailable";
   const spec=channel(o.channel);
-  const context={n:o.n,k:batch.channels.length,channel:spec.label,...(row.source.width!==null&&row.source.height!==null?{w:row.source.width,h:row.source.height}:{}),min:Math.max(spec.minCanvas.w,spec.minCanvas.h),failures:o.reason??"",...(o.status==="failed"&&o.error?{error:o.error}:{})};
+  const context={busy:busyBackgroundHold(o.compliance),n:o.n,k:batch.channels.length,channel:spec.label,...(row.source.width!==null&&row.source.height!==null?{w:row.source.width,h:row.source.height}:{}),min:Math.max(spec.minCanvas.w,spec.minCanvas.h),failures:o.reason??"",...(o.status==="failed"&&o.error?{error:o.error}:{})};
   // Why: the main problem first, then any other problem, then information notes on the same photo (4.6).
   // What to do: one instruction, the main problem's; information flags never add guidance of their own.
   // At most MAX_REASONS_PER_PHOTO problem sentences; the report keeps every flag.

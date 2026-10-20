@@ -218,7 +218,13 @@ Any change to the maths in this file that alters output bytes must bump `CHANNEL
      box on each axis, at most 4:1), dense (edges in 15% of its box) and sharp (a quarter of its edges
      60 levels or more) and is whole in the source (not within 2% of a box edge) is a logo, text or a
      buckle (`detailFeatures`). A cut side's trim stops 2% of the box short of it and the rest comes
-     off the opposite cut side. A full-bleed photo (cut on all four sides) fills the safe box. Where
+     off the opposite cut side. Two sides are never trimmed by rule (`trimRules`, eval run 2, French
+     Connection ZEE79259BBFD83FFA1DB0Z shot 5, heads cut off on the square canvases): on a model photo
+     (`apparel_model`) the top cut side (the head or face) has room 0, so the whole trim comes off the
+     bottom or the product is fitted; a pass-through or whole-photo matte (model `passthrough`) keeps
+     the photo's own frame, nothing in it tells a product edge from a background edge, so no side is
+     trimmed and it is fitted with the band note. The product canvas (`planProduct`) uses the same
+     rule. A full-bleed photo (cut on all four sides) fills the safe box. Where
      the other axis has no cut side, or the trim would pass a third, or the cut sides' room cannot
      take it, the product is fitted (bottom wins when top and bottom are both cut; centred when left
      and right are both cut) and the output carries a note naming the cut side that does not reach
@@ -412,7 +418,14 @@ time, before anything is rendered.
   before, 41% with the rule; good mattes on 129 real photos at most 10.7%). Also rejected: a hand-held product whose
   holding hand (skin reaching the border band, bordering the kept product, not the background colour)
   was dropped over more than 2% of the kept product (`HAND_NOTCH_MAX_SHARE`; not applied to apparel,
-  where the skin is the model's).
+  where the skin is the model's). Also rejected: a matte that keeps a chunk of the backdrop
+  (`keptBackground`, eval run 2, French Connection candle Z15276411CE85C2E728DEZ shot 4): a connected
+  kept region (alpha over 128) whose source pixels are the border colour itself (within 6 levels per
+  channel, so a pale product part with any shading of its own does not count), touching what the
+  matte dropped (within 4 px), lying wholly in the lower half of the kept product (a halo ring around
+  the whole silhouette is the judge's `halo`), covering more than 0.3%
+  of the frame and more than 2% of the kept product (`KEPT_BACKGROUND_*`); not on a frame-filling
+  photo. The ladder then continues as for a dropped product.
 - Ladder when the first matte fails, first pass wins, each step in `compliance.auto_actions` with
   trigger `product_removed`: `matte_check` (the failed first matte), (a) `second_matte` the policy's
   second model, (b) `padded_matte` the photo framed in a white border of 20% of its long side
@@ -426,8 +439,24 @@ time, before anything is rendered.
   steps are skipped when this delivery has no time left for a matting call; the pass-through always
   completes. A pass-through adds the information flag `matte_passthrough` ("This photo is a close-up
   that fills the frame, so the whole photo was kept as it is instead of being cut out. Nothing to
-  do."), never holds, gets no synthesised shadow, and is placed by the cut-in-source rules (sides that
-  reach the frame sit flush).
+  do."), never holds, gets no synthesised shadow, is placed by the cut-in-source rules (sides that
+  reach the frame sit flush) and is never trimmed (`trimRules`).
+- A pass-through replaces a plain studio backdrop only (`isBusyBackground`, eval run 2, French
+  Connection ZEE79259BBFD83FFA1DB0Z shot 5: models on a tennis court published with ragged court,
+  net and racket remnants). When, in the border band, more than 5% of the pixels are kept by the
+  pass-through although every model matte tried dropped them and they are no skin or garment panel a
+  matte cut through (`busyBorderShare`, `BUSY_BORDER_MAX_SHARE`: scenery the recolour cannot reach;
+  the court photo 33%, every plain-backdrop pass-through of the gate and golden sets 0%), and the
+  photo is not frame-filling, the step is recorded `matte_passthrough: failed` ("busy background"),
+  the matte is the whole photo as it is (every pixel opaque, model `passthrough`, so never trimmed)
+  and the photo carries `leftover_background`, code-detected (the same flag the judge raises for a
+  leftover background; the step is recorded with trigger `leftover_background`, which is how
+  `busyBackgroundHold` in auto-resolve.ts tells the two apart): rendered and staged as `needs_attention`,
+  never re-made by the repair loop, a hard
+  hold in triage (07, hold cause `unusable`), card sentence "The background could not be removed from
+  this photo. Use it as is, replace it, or remove it." "Use as is" publishes the whole photo, fitted
+  with the band note. The judge-triggered pass-through step (07 auto-resolve) is skipped on a busy
+  background ("busy background"), so the photo keeps `product_removed` and triage drops or holds it.
 - The judge's `product_removed` (07 4.0a) names the same failure after the render: its ladder (07
   auto-resolve) adds the same pass-through step after the second matte, for that trigger only.
 - No synthesised contact shadow for a product held in a hand (`heldInHand`, kept or dropped hand):

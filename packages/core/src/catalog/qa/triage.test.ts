@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import type { ChannelId, OutputFlag } from "../types";
-import { INFORMATION_FLAGS, triageProduct, type TriageOutput } from "./triage";
+import { holdsAtRender, INFORMATION_FLAGS, triageProduct, type TriageOutput } from "./triage";
+import { flagDetails } from "./reasons";
+import type { AutoAction } from "../auto-resolve";
 
 let next = 0;
 const out = (n: number, flags: OutputFlag[] = [], extra: Partial<TriageOutput> = {}): TriageOutput =>
@@ -13,6 +15,17 @@ describe("QA triage: hard holds only", () => {
    const bad = out(3, [...flags]);
    expect(action([out(1), out(2), bad, out(4)], bad)).toMatchObject({action:"hold",cause});
   }
+  // A photo whose background could not be removed (a busy scene, matte-guard.ts) is a hard hold, never dropped or
+  // noted: the code-detected `leftover_background`, marked by the matte stage's failed pass-through step.
+  const held: AutoAction = {step:"matte_passthrough",trigger:["product_removed","leftover_background"],result:"failed",channels:[],rejudged:false};
+  const busy = out(3, ["leftover_background", "cut_in_source", "qa_sampled_out"], {compliance:{auto_actions:[held]}});
+  expect(holdsAtRender(busy.flags)).toBe(true);
+  expect(action([out(1), out(2), busy, out(4)], busy)).toMatchObject({action:"hold",cause:"unusable",flags:["leftover_background"]});
+  // The judge's own leftover background on the same photo is still dropped with a note.
+  const judged = out(3, ["leftover_background"]);
+  expect(action([out(1), out(2), judged, out(4)], judged)).toMatchObject({action:"drop"});
+  expect(flagDetails("leftover_background", {busy:true})).toEqual({why:"The background could not be removed from this photo.",whatToDo:"Use it as is, replace it, or remove it."});
+  expect(flagDetails("leftover_background").why).toBe("Some of the original background is still visible around the product.");
   const corrupt = out(4, [], {status:"failed",stagingUri:null});
   expect(action([out(1), out(2), out(3), corrupt], corrupt)).toMatchObject({action:"hold",cause:"corrupt"});
  });

@@ -4,13 +4,15 @@ import { and, eq, inArray, isNull, or, sql } from "drizzle-orm";
 import { catalogBatches, catalogChunks, catalogOutputs, catalogProducts, catalogSourceImages } from "@catalog/core/db/schema";
 import { CHANNELS, STYLI_MIN_SOURCE_HEIGHT_PX, STYLI_SKIP_LOW_RESOLUTION } from "@catalog/core/catalog/channels";
 import { batchPrefix, derivedPath, publicObjectPath, publicUrl, stagingPath } from "@catalog/core/catalog/naming";
-import { planProduct, shotGeometry, UnsupportedSourceError, type Matte } from "@catalog/core/catalog/render";
+import { planProduct, shotGeometry, trimRules, UnsupportedSourceError, type Matte } from "@catalog/core/catalog/render";
 import { renderKey } from "@catalog/core/catalog/pipeline/publish";
 import { catalogLlmDeps, CatalogQaCapError, runQaStage } from "./qa-stage";
 import { checkCatalogCaps } from "@catalog/core/catalog/qa/caps";
 import { shadowSynthesisAllowed } from "@catalog/core/catalog/qa/policy";
+import { holdsAtRender } from "@catalog/core/catalog/qa/triage";
 import { flagReason } from "@catalog/core/catalog/types";
-import { autoActionsOf, withAutoActions, type AutoAction } from "@catalog/core/catalog/auto-resolve";
+import { autoActionsOf, busyBackgroundHold, withAutoActions, type AutoAction } from "@catalog/core/catalog/auto-resolve";
+import { BUSY_BACKGROUND_DETAILS } from "@catalog/core/catalog/qa/reasons";
 import { BREAKER_COOLDOWN_MS, MATTING_TIMEOUT_MS } from "@catalog/core/catalog/matte";
 import { detectTextImage, GUARD_PAD_FRACTION, heldInHand, resolveMatte } from "@catalog/core/catalog/matte-guard";
 import { DISPATCH_DEADLINE_SEC } from "@catalog/core/tasks";
@@ -188,7 +190,7 @@ export async function handleChunkTask(deps: CatalogDeps, body: Record<string,unk
             }});
             if (resolved.actions.length) deps.log("catalog matte guard",{batchId:batch.id,sourceImageId:source.id,steps:resolved.actions.map(a=>`${a.step}:${a.result}`),passthrough:resolved.passthrough});
             matte = resolved.matte;
-            const fallback = matte.source === "floodfill", flags = [...new Set([...source.flags,...p.flags,...(fallback ? ["fallback_matte" as const]:[]),...(resolved.passthrough ? ["matte_passthrough" as const]:[])])];
+            const fallback = matte.source === "floodfill", flags = [...new Set([...source.flags,...p.flags,...(fallback ? ["fallback_matte" as const]:[]),...(resolved.passthrough ? ["matte_passthrough" as const]:[]),...(resolved.busyBackground ? ["leftover_background" as const]:[])])];
             const records = [...(retry ? [retry]:[]),...resolved.actions];
             if (records.length) await underClaim(async tx=>{for (const row of pending) await tx.update(catalogOutputs).set({compliance:withAutoActions(row.compliance,records)}).where(eq(catalogOutputs.id,row.id));});
             await underClaim(async tx=>tx.update(catalogSourceImages).set({matteModel:matte.model,matteMs:matte.ms,width:p.width,height:p.height,flags}).where(eq(catalogSourceImages.id,source.id)));
@@ -225,7 +227,7 @@ export async function handleChunkTask(deps: CatalogDeps, body: Record<string,unk
             await underClaim(async tx=>tx.update(catalogOutputs).set({status:"failed",reason:error instanceof Error ? error.message : String(error),updatedAt:deps.now()}).where(and(eq(catalogOutputs.sourceImageId,source.id),eq(catalogOutputs.batchId,batch.id),eq(catalogOutputs.status,"pending"))));
           }
         }
-        const geometry = prepared.flatMap(({p,matte})=>{const shot=shotGeometry(matte.alpha,p.width,p.height,{rgb:p.rgb});return shot ? [shot]:[];});
+        const geometry = prepared.flatMap(({p,matte})=>{const shot=shotGeometry(matte.alpha,p.width,p.height,{rgb:p.rgb,...trimRules(product.productType,matte)});return shot ? [shot]:[];});
         const productPlan = (c:keyof typeof CHANNELS) => geometry.length ? planProduct(CHANNELS[c],geometry):undefined;
         const uniformScale = productPlan("styli")?.uniformScale;
         for (const {source,p,matte} of prepared) {
@@ -234,12 +236,12 @@ export async function handleChunkTask(deps: CatalogDeps, body: Record<string,unk
           const shadowAllowed = shadowSynthesisAllowed(product.productType,source.flags) && !heldInHand(p,matte.alpha).held;
           for (const output of outputs) try {
             const path = stagingPath(prefix,product.pathKey,output.channel,source.n), uri = deps.storage.toGsUri(deps.storage.getBucketName(),path), head = await deps.storage.headObject(uri);
-            if (head.exists && output.bytes !== null && head.size===output.bytes) { await underClaim(async tx=>tx.update(catalogOutputs).set({stagingUri:uri,crc32c:head.crc32c,status:output.flags.some(f=>f==="small_source" || f==="failed_compliance" || f==="fallback_matte") ? "needs_attention":"staged",updatedAt:deps.now()}).where(eq(catalogOutputs.id,output.id))); continue; }
+            if (head.exists && output.bytes !== null && head.size===output.bytes) { await underClaim(async tx=>tx.update(catalogOutputs).set({stagingUri:uri,crc32c:head.crc32c,status:output.flags.some(f=>f==="failed_compliance") || holdsAtRender(output.flags) ? "needs_attention":"staged",updatedAt:deps.now()}).where(eq(catalogOutputs.id,output.id))); continue; }
             const renderStart = +deps.now();
             const rendered = (await deps.renderAllChannels(p,matte,[output.channel],{shotNumber:source.n,productType:product.productType ?? "other",synthesiseShadow:shadowAllowed,identifier:product.identifier,publicObjectPath:output.objectPath,canvas:productPlan(output.channel)?.canvas,...(output.channel==="styli" ? {uniformScale}:{})}))[output.channel];
             renderMs += +deps.now()-renderStart;
-            const flags = [...new Set([...source.flags,...rendered.flags])], status = rendered.status==="skipped" ? "skipped":!rendered.compliance.ok || flags.includes("small_source") || flags.includes("fallback_matte") ? "needs_attention":rendered.jpeg ? "staged":"failed";
-            const patch = {canvasW:rendered.plan.w,canvasH:rendered.plan.h,scale:rendered.plan.scale,placedX:rendered.plan.placedX,placedY:rendered.plan.placedY,bytes:rendered.bytes,quality:rendered.quality,flags,compliance:{...rendered.compliance,auto_actions:autoActionsOf(output.compliance)},reason:rendered.notes.join("; ") || (flags.includes("small_source") ? flagReason("small_source"):null),updatedAt:deps.now()};
+            const flags = [...new Set([...source.flags,...rendered.flags])], status = rendered.status==="skipped" ? "skipped":!rendered.compliance.ok || holdsAtRender(flags) ? "needs_attention":rendered.jpeg ? "staged":"failed";
+            const patch = {canvasW:rendered.plan.w,canvasH:rendered.plan.h,scale:rendered.plan.scale,placedX:rendered.plan.placedX,placedY:rendered.plan.placedY,bytes:rendered.bytes,quality:rendered.quality,flags,compliance:{...rendered.compliance,auto_actions:autoActionsOf(output.compliance)},reason:[...(busyBackgroundHold(output.compliance) ? [`${BUSY_BACKGROUND_DETAILS.why} ${BUSY_BACKGROUND_DETAILS.whatToDo}`]:[]),...rendered.notes].join("; ") || (flags.includes("small_source") ? flagReason("small_source"):null),updatedAt:deps.now()};
             await underClaim(async tx=>tx.update(catalogOutputs).set(patch).where(eq(catalogOutputs.id,output.id)));
             if (rendered.jpeg) { const jpeg=rendered.jpeg; await underClaim(async()=>deps.storage.uploadBuffer(path,jpeg,"image/jpeg",{cacheControl:deps.storage.PUBLIC_CACHE_CONTROL})); }
             const staged = rendered.jpeg ? await deps.storage.headObject(uri):null;
@@ -252,7 +254,7 @@ export async function handleChunkTask(deps: CatalogDeps, body: Record<string,unk
           const failing = photo.filter(row=>row.flags.includes("failed_compliance") && !autoActionsOf(row.compliance).some(action=>action.trigger.includes("failed_compliance")));
           if (failing.length) try {
             await resolvePhoto(deps,{batch,product,source,policy:productPolicy,underClaim,outputs:photo,failing,trigger:["failed_compliance"],prepared:p,matte,
-              shadowAllowed,statusFor:flags=>flags.includes("small_source") || flags.includes("failed_compliance") || flags.includes("fallback_matte") ? "needs_attention":"staged",
+              shadowAllowed,statusFor:flags=>flags.includes("failed_compliance") || holdsAtRender(flags) ? "needs_attention":"staged",
               contextFor:row=>({...(productPlan(row.channel) ? {canvas:productPlan(row.channel)!.canvas}:{}),...(row.channel==="styli" && uniformScale!==undefined ? {uniformScale}:{})})});
           } catch(error) {
             // The ladder only improves an image; the photo keeps its flags (and its decision path) when it breaks.

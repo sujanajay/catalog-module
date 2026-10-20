@@ -1,8 +1,8 @@
 import sharp from "sharp";
 import { describe, expect, it } from "vitest";
-import { backgroundRegion, checkMatteIntegrity, detectTextImage, heldInHand, passthroughMatte, resolveMatte, type MatteVariant } from "./matte-guard";
+import { backgroundRegion, BUSY_BORDER_MAX_SHARE, busyBorderShare, checkMatteIntegrity, detectTextImage, heldInHand, keptBackground, passthroughMatte, resolveMatte, type MatteVariant } from "./matte-guard";
 import { components } from "./evals/image";
-import { renderSource, type Matte, type Prepared } from "./render";
+import { PASSTHROUGH_MODEL, renderSource, type Matte, type Prepared } from "./render";
 import { analyseBackground } from "./shadow";
 import { shadowSynthesisAllowed } from "./qa/policy";
 
@@ -189,7 +189,7 @@ describe("pass-through recolours only the true background (Penti Z91D419FC9238E8
     const inside = (y: number) => y >= 30 && y < H - 30;
     const partial = matteOf((x, y) => inside(y) && (x >= 150 || y >= 300));
     const resolved = await resolveMatte({ prepared: closeUp, first: partial, handRule: false, attempt: async v => ({ ...partial, model: v }) });
-    expect(resolved.passthrough).toBe(true);
+    expect(resolved).toMatchObject({ passthrough: true, busyBackground: false });
     for (let x = 0; x < 150; x += 7) for (const y of [550, 555, 562, 565]) expect(at(resolved.matte, x, y)).toBe(255);
     for (let x = 0; x < W; x += 7) { expect(at(resolved.matte, x, 10)).toBe(0); expect(at(resolved.matte, x, H - 10)).toBe(0); }
   });
@@ -298,5 +298,90 @@ describe("thin coloured sliver along a dark sole (Anta bd-112625546-12 shot 5, e
     expect(resolved.passthrough).toBe(true);
     expect(resolved.matte.alpha[362 * W + 200]).toBeGreaterThan(240);
     expect(resolved.matte.alpha[380 * W + 200]).toBe(0);
+  });
+});
+
+describe("busy background (French Connection ZEE79259BBFD83FFA1DB0Z shot 5, eval run 2)", () => {
+  // Two models on a tennis court: a textured hedge across the top, a plain grey wall, an orange court below, a
+  // textured net post between the models and a racket on the court. Every model matte keeps the two models only.
+  const models = (x: number, y: number) => inRect(x, y, 60, 150, 100, 450) || inRect(x, y, 240, 150, 100, 450);
+  const scenery = (x: number, y: number) => y < 60 || inRect(x, y, 195, 250, 10, 350) || inRect(x, y, 160, 420, 30, 30);
+  const court = image((x, y) => models(x, y) ? [clamp(30 + grain(x, y)), clamp(30 + grain(x, y)), clamp(34 + grain(x, y))]
+    : scenery(x, y) ? [clamp(70 + grain(x, y) * 2), clamp(110 + grain(x, y) * 2), clamp(50 + grain(x, y))]
+    : y < 250 ? [190, 188, 182] : [233, 124, 86]);
+  const kept = (model = "first") => matteOf(models, model);
+
+  it("rejects every matte (the scenery is product by the source alone), and holds the photo whole instead of a ragged pass-through", async () => {
+    expect(backgroundRegion(court).frameFilling).toBe(false);
+    expect(checkMatteIntegrity(court, kept(), { handRule: false }).ok).toBe(false);
+    const resolved = await resolveMatte({ prepared: court, first: kept(), handRule: false, attempt: async v => kept(v) });
+    expect(resolved).toMatchObject({ passthrough: false, busyBackground: true });
+    expect(resolved.actions.map(a => `${a.step}:${a.result}`)).toEqual(["matte_check:failed", "second_matte:failed", "padded_matte:failed", "padded_matte:failed", "matte_passthrough:failed"]);
+    expect(resolved.actions.at(-1)!.detail).toMatch(/busy background/);
+    // The whole photo as it is: nothing recoloured, nothing cut out.
+    expect(resolved.matte.model).toBe(PASSTHROUGH_MODEL);
+    expect(resolved.matte.alpha.every(v => v === 255)).toBe(true);
+  });
+
+  it("measures the scenery a pass-through would leave in the border band", () => {
+    const tried = [kept()], share = busyBorderShare(court, passthroughMatte(court, tried), tried);
+    expect(share).toBeGreaterThan(BUSY_BORDER_MAX_SHARE);
+    // The same models on a plain studio backdrop: the recolour replaces the whole band.
+    const studio = image((x, y) => models(x, y) ? [clamp(30 + grain(x, y)), 30, 34] : [235, 235, 235]);
+    expect(busyBorderShare(studio, passthroughMatte(studio, tried), tried)).toBe(0);
+  });
+
+  it("still passes a frame-filling close-up through whole (no backdrop to replace)", async () => {
+    const resolved = await resolveMatte({ prepared: image(leather), first: logoOnly(), handRule: true, attempt: async v => logoOnly(v) });
+    expect(resolved).toMatchObject({ passthrough: true, busyBackground: false });
+  });
+
+  it("renders the held photo whole, never trimmed, on a square canvas", async () => {
+    const resolved = await resolveMatte({ prepared: court, first: kept(), handRule: false, attempt: async v => kept(v) });
+    const output = await renderSource({ prepared: prepared(court), matte: resolved.matte, channel: "centrepoint", shotNumber: 2, productType: "apparel_model" });
+    expect(output.plan.sourceCrop).toEqual({ x: 0, y: 0, w: W, h: H });
+    expect(output.plan.productBox!.h).toBe(output.plan.h);
+    expect(output.plan.productBox!.w).toBeLessThan(output.plan.w);
+  });
+});
+
+describe("kept background chunk below the base (French Connection Z15276411CE85C2E728DEZ shot 4, eval run 2)", () => {
+  // A candle (off-white wax with green leaves) on pure white; the live defect: a matte that also keeps a white
+  // wedge of the backdrop below the base at the bottom left.
+  const candle = (x: number, y: number) => inRect(x, y, 40, 200, 320, 200);
+  const wedge = (x: number, y: number) => inRect(x, y, 40, 400, 140, 30);
+  const photo = (base: RGB) => image((x, y) => candle(x, y) ? [clamp(205 + grain(x, y) / 2), clamp(210 + grain(x, y)), clamp(195 + grain(x, y) / 2)] : wedge(x, y) ? base : [255, 255, 255]);
+  const white = photo([255, 255, 255]);
+  const withChunk = (model = "first") => matteOf((x, y) => candle(x, y) || wedge(x, y), model);
+  const clean = (model = "first") => matteOf(candle, model);
+
+  it("rejects a matte that keeps a region of the backdrop colour hanging below the product", () => {
+    const chunk = keptBackground(white, withChunk().alpha, backgroundRegion(white));
+    expect(chunk.frameShare).toBeGreaterThan(0.003);
+    expect(chunk.keptShare).toBeGreaterThan(0.02);
+    const verdict = checkMatteIntegrity(white, withChunk(), { handRule: false });
+    expect(verdict.ok).toBe(false);
+    expect(verdict.detail).toMatch(/^kept background/);
+    expect(checkMatteIntegrity(white, clean(), { handRule: false }).ok).toBe(true);
+  });
+
+  it("accepts a pale product part of its own shade at the bottom (a white sole, a pale hem)", () => {
+    const sole = photo([238, 238, 236]);
+    expect(checkMatteIntegrity(sole, withChunk(), { handRule: false }).ok).toBe(true);
+  });
+
+  it("ignores a white label inside the product and a speck at the edge", () => {
+    const label = image((x, y) => inRect(x, y, 150, 330, 100, 60) ? [255, 255, 255] : candle(x, y) ? [clamp(205 + grain(x, y) / 2), 210, 195] : [255, 255, 255]);
+    expect(checkMatteIntegrity(label, clean(), { handRule: false }).ok).toBe(true);
+    expect(checkMatteIntegrity(white, matteOf((x, y) => candle(x, y) || inRect(x, y, 40, 400, 20, 10)), { handRule: false }).ok).toBe(true);
+    // A halo ring of backdrop around the whole silhouette is the judge's halo, not a chunk below the base.
+    expect(checkMatteIntegrity(white, matteOf((x, y) => inRect(x, y, 30, 190, 340, 220)), { handRule: false }).ok).toBe(true);
+  });
+
+  it("climbs the ladder past the matte with the chunk to a clean one", async () => {
+    const resolved = await resolveMatte({ prepared: white, first: withChunk(), handRule: false, attempt: async v => v === "padded_second" ? clean(v) : withChunk(v) });
+    expect(resolved).toMatchObject({ passthrough: false, busyBackground: false });
+    expect(resolved.matte.model).toBe("padded_second");
+    expect(resolved.matte.alpha[415 * W + 100]).toBe(0);
   });
 });
