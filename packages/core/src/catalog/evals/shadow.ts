@@ -5,8 +5,9 @@
 // the silhouette, never a slab. A kept photographic shadow has the photographer's shape, so it is
 // checked against the source instead: the output's darkness must equal the source's darkness
 // resampled to the placement, within a darkness bound. Where the product type forbids one, none may exist.
-import { SHADOW_BAND_ABOVE, SHADOW_BAND_BELOW, SHADOW_BAND_SIDE, SHADOW_MAX_DARKNESS, SHADOW_PRESET } from "../shadow";
-import { dilate, distanceFrom, dropSpecks, longestRun, lumaAt, luma, shadowFeather, SPECK_PX } from "./image";
+import { preservedDarkness, SHADOW_BAND_ABOVE, SHADOW_BAND_BELOW, SHADOW_BAND_SIDE, SHADOW_MAX_DARKNESS, SHADOW_PRESET } from "../shadow";
+import { ALPHA_EDGE } from "./context";
+import { dilate, distanceFrom, dropSpecks, longestRun, lumaAt, luma, shadowFeather, SPECK_PX, thresholdMask } from "./image";
 import { APPAREL_TYPES, shadowMode, type OutputContext } from "./context";
 import { judge, notRun, type CheckResult, type CheckSubject } from "./types";
 
@@ -38,8 +39,20 @@ export const MAX_DARKNESS = 0.65;
  * kept shadows, p50 0.63, p90 0.65, max 0.67).
  */
 export const KEPT_MAX_DARKNESS = 0.7;
-/** A kept shadow must match the source darkness resampled to the placement within this mean absolute luma difference. */
+/**
+ * A kept shadow must match the darkness the render's own rule keeps from the source (preservedDarkness: the components
+ * connected to the contact line, continued past the band with its fade) within this mean absolute luma difference,
+ * compared on the source grid (the output's darkness averaged over the canvas pixels of each source pixel) at the best
+ * of a KEPT_REGISTRATION_PX registration search, outside the product ring (KEPT_RING_SOURCE_PX source pixels). Eval run 3
+ * (anta, 376 kept shadows): the canvas-resolution comparison against the whole source darkness measured p50 3.7, p75
+ * 11.6, max 66.9 against the bar of 4 set on the synthetic shadow; the same matte measured 6.3 to 31.8 across channels
+ * while its darkness maps equalled the source on every channel (a 1 source px contact line scaled 1.6 to 4.8x is a 200
+ * luma step, one pixel of registration costs about 3 luma of mean), and a raised toe's detached shadow, dropped by the
+ * render's contact-line rule, measured 52 to 67. The bar stays at 4 until run 4 measures the new metric on real photos.
+ */
 export const KEPT_MEAN_DIFF_MAX = 4;
+export const KEPT_REGISTRATION_PX = 1;
+export const KEPT_RING_SOURCE_PX = 3;
 /** Fewer shadow pixels than this in the band give no meaningful comparison. */
 export const KEPT_MIN_PIXELS = 64;
 /** Forbidden shadows are judged on firmer darkening (above ringing next to dark garments) in regions of at least this size. */
@@ -83,15 +96,34 @@ export function sourceDarkness(ctx: OutputContext): Float32Array {
 }
 
 /**
- * Kept photographic shadow: the output's darkness (background luma minus pixel luma) must equal the source's darkness
- * resampled to the placement (the same scale and offset as the product), compared inside the spec 05 band, outside the
- * product's ring and away from where the render fades a shadow out (the required margins, the border band and the edge
- * of the source photo, each over SHADOW_PRESET.fade of the canvas). Measured as the mean absolute difference in luma
- * over the pixels where either map shows a shadow.
+ * The darkness the render keeps (spec 05 preservedDarkness: the source's darkness outside the opaque matte, in the band,
+ * connected to the contact line, continued past the band with its fade), as a 0..1 map over the source; the plain source
+ * darkness (sourceDarkness) where the render's rule does not apply (no uniform border).
+ */
+export function expectedKeptDarkness(ctx: OutputContext): Float32Array {
+  const { source, sourceBackground, alpha, productType } = ctx.subject;
+  const kept = preservedDarkness(
+    { width: source.w, height: source.h, rgb: source.rgb, alphaSource: null, background: { ...sourceBackground, stdev: 0 }, flags: [], sourceMime: "image/jpeg" },
+    { alpha, width: source.w, height: source.h, model: "evals", ms: 0, source: "model", target: null, sentLongSide: null },
+    ctx.sourceBox, productType);
+  if (!kept) return sourceDarkness(ctx);
+  const out = new Float32Array(kept.length);
+  for (let i = 0; i < kept.length; i++) out[i] = kept[i]! / 255;
+  return out;
+}
+
+/**
+ * Kept photographic shadow: the output's darkness (background luma minus pixel luma) must equal the darkness the render's
+ * own rule keeps from the source (expectedKeptDarkness), compared on the source grid: every canvas pixel inside the spec
+ * 05 band and away from where the render fades a shadow out (the required margins, the border band and the edge of the
+ * source photo, each over SHADOW_PRESET.fade of the canvas) is averaged into the source pixel it was resampled from, so
+ * the channel's scale and rounding do not enter the number; source pixels within KEPT_RING_SOURCE_PX of the product are
+ * left out, and the expectation is read at the best offset of a KEPT_REGISTRATION_PX search. Measured as the mean
+ * absolute difference in luma over the source pixels where either map shows a shadow.
  */
 export function keptShadowDifference(ctx: OutputContext): { mean: number; max: number; pixels: number } {
-  const { canvas, background, productBox, sourceCrop, safeBox, subject } = ctx, bg = luma(...background), src = sourceDarkness(ctx);
-  const ring = dilate(ctx.product, canvas.w, canvas.h, SHADOW_RING_PX);
+  const { canvas, background, productBox, sourceCrop, safeBox, subject } = ctx, bg = luma(...background), src = expectedKeptDarkness(ctx);
+  const sw = subject.source.w, sh = subject.source.h;
   const sx = productBox.w / sourceCrop.w, sy = productBox.h / sourceCrop.h;
   // Spec 05 band around the product box, in canvas pixels.
   const bx0 = Math.floor(productBox.x - productBox.w * SHADOW_BAND_SIDE), bx1 = Math.ceil(productBox.x + productBox.w * (1 + SHADOW_BAND_SIDE));
@@ -101,21 +133,30 @@ export function keptShadowDifference(ctx: OutputContext): { mean: number; max: n
   const frameX0 = productBox.x - sourceCrop.x * sx, frameX1 = frameX0 + subject.source.w * sx, frameY0 = productBox.y - sourceCrop.y * sy, frameY1 = frameY0 + subject.source.h * sy;
   const x0 = Math.max(bx0, bandX, safeBox.x, Math.ceil(frameX0)) + fade, x1 = Math.min(bx1, canvas.w - bandX, safeBox.x + safeBox.w, Math.floor(frameX1)) - fade;
   const y0 = Math.max(by0, bandY, safeBox.y, Math.ceil(frameY0)) + fade, y1 = Math.min(by1, canvas.h - bandY, safeBox.y + safeBox.h, Math.floor(frameY1)) - fade;
-  const at = (x: number, y: number) => src[Math.min(subject.source.h - 1, Math.max(0, y)) * subject.source.w + Math.min(subject.source.w - 1, Math.max(0, x))]!;
-  let sum = 0, max = 0, pixels = 0;
+  // The output's darkness on the source grid: the mean over the canvas pixels each source pixel was resampled to.
+  const sums = new Float64Array(sw * sh), counts = new Uint32Array(sw * sh);
   for (let y = Math.max(0, y0); y < Math.min(canvas.h, y1); y++) for (let x = Math.max(0, x0); x < Math.min(canvas.w, x1); x++) {
-    const i = y * canvas.w + x;
-    if (ring[i]) continue;
-    // Bilinear sample of the source darkness at this canvas pixel's centre.
-    const fx = sourceCrop.x + (x - productBox.x + 0.5) / sx - 0.5, fy = sourceCrop.y + (y - productBox.y + 0.5) / sy - 0.5;
-    const ix = Math.floor(fx), iy = Math.floor(fy), tx = fx - ix, ty = fy - iy;
-    const expected = bg * ((at(ix, iy) * (1 - tx) + at(ix + 1, iy) * tx) * (1 - ty) + (at(ix, iy + 1) * (1 - tx) + at(ix + 1, iy + 1) * tx) * ty);
-    const observed = Math.max(0, bg - lumaAt(canvas.rgb, i));
-    if (expected <= SHADOW_MIN_DARK && observed <= SHADOW_MIN_DARK) continue;
-    const diff = Math.abs(expected - observed);
-    sum += diff; pixels++; if (diff > max) max = diff;
+    const ix = Math.floor(sourceCrop.x + (x - productBox.x + 0.5) / sx), iy = Math.floor(sourceCrop.y + (y - productBox.y + 0.5) / sy);
+    if (ix < 0 || iy < 0 || ix >= sw || iy >= sh) continue;
+    const s = iy * sw + ix;
+    sums[s] = sums[s]! + Math.max(0, bg - lumaAt(canvas.rgb, y * canvas.w + x)); counts[s] = counts[s]! + 1;
   }
-  return { mean: pixels ? sum / pixels : 0, max, pixels };
+  const ring = dilate(thresholdMask(subject.alpha, ALPHA_EDGE), sw, sh, KEPT_RING_SOURCE_PX);
+  const at = (x: number, y: number) => src[Math.min(sh - 1, Math.max(0, y)) * sw + Math.min(sw - 1, Math.max(0, x))]!;
+  let best = { mean: Infinity, max: 0, pixels: 0 };
+  for (let dy = -KEPT_REGISTRATION_PX; dy <= KEPT_REGISTRATION_PX; dy++) for (let dx = -KEPT_REGISTRATION_PX; dx <= KEPT_REGISTRATION_PX; dx++) {
+    let sum = 0, max = 0, pixels = 0;
+    for (let s = 0; s < counts.length; s++) {
+      if (!counts[s] || ring[s]) continue;
+      const x = s % sw, y = (s - x) / sw, expected = bg * at(x + dx, y + dy), observed = sums[s]! / counts[s]!;
+      if (expected <= SHADOW_MIN_DARK && observed <= SHADOW_MIN_DARK) continue;
+      const diff = Math.abs(expected - observed);
+      sum += diff; pixels++; if (diff > max) max = diff;
+    }
+    const mean = pixels ? sum / pixels : 0;
+    if (mean < best.mean || (dx === 0 && dy === 0 && mean === best.mean)) best = { mean, max, pixels };
+  }
+  return best.mean === Infinity ? { mean: 0, max: 0, pixels: 0 } : best;
 }
 
 export function checkShadow(ctx: OutputContext): CheckResult[] {
@@ -139,6 +180,7 @@ export function checkShadow(ctx: OutputContext): CheckResult[] {
   if (APPAREL_TYPES.has(s.productType)) out.push(notRun("shadow.forbidden", S, who, "The output keeps the photo's own shadow (SPEC.md: a measurable source shadow is preserved for every type; only synthesis is forbidden on apparel), so it is compared with the source instead."));
 
   if (!count) { out.push(notRun("shadow.footprint", S, who, "No shadow on this output.")); return out; }
+
 
   // Footprint: silhouette plus feather. A shadow pixel must sit within the render's feather of the
   // product mask (so it follows overhangs and insets), in the lower half of the product, and inside the band.

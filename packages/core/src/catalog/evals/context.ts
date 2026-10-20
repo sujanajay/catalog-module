@@ -33,9 +33,46 @@ export interface OutputContext {
   sourceRgb: Buffer;
   /** Whether the channel allows a shadow for this product type (spec 05: footwear, bags, other). */
   shadowAllowed: boolean;
-  /** Sides of the source frame the product is cut at (the render's own shotGeometry rule). */
+  /**
+   * Sides the placed crop is cut at (`placedCutSides`): of the sides the render's shotGeometry found cut (`cut`), those the
+   * part of the source actually placed still touches. The cut-fill trim can take the rows that touched a perpendicular
+   * edge off the crop (eval run 3, Z03E68A3989163039BCFEZ n=3: a 32% bottom trim removed the collar rows that touched the
+   * left edge), and the output then rightly shows a margin there. `flush_*` and `no_line_*` are judged on these sides.
+   */
   cutSides: ("top" | "bottom" | "left" | "right")[];
+  /** Sides of the source frame the product is cut at (the render's own shotGeometry rule), which decided the placement. */
   cut: CutEdges;
+}
+
+/** A cut side needs a straight run of product at least this share of the frame edge (spec 10 section 7; shotGeometry's CUT_EDGE_MIN_STRAIGHT). */
+export const PLACED_CUT_MIN_SHARE = 0.02;
+export const PLACED_CUT_MIN_PX = 8;
+
+/**
+ * Which of the render's cut sides the placed crop still touches. A side the crop was trimmed on (the crop's edge lies
+ * inside the product box there) stays cut: the product continues beyond the crop. On the other cut sides the matte along
+ * the box's edge line, within the crop's span on the other axis, must still hold a straight run of product at least
+ * PLACED_CUT_MIN_SHARE of the frame edge (never under PLACED_CUT_MIN_PX): a side whose touching rows the trim removed is
+ * not cut on this output, and its margin is a margin, not a band.
+ */
+export function placedCutSides(alpha: Buffer, source: { w: number; h: number }, sourceBox: BBox, sourceCrop: BBox, cut: CutEdges): ("top" | "bottom" | "left" | "right")[] {
+  const out: ("top" | "bottom" | "left" | "right")[] = [];
+  for (const side of ["top", "bottom", "left", "right"] as const) {
+    if (!cut[side]) continue;
+    const horizontal = side === "top" || side === "bottom";
+    const trimmed = side === "top" ? sourceCrop.y > sourceBox.y : side === "bottom" ? sourceCrop.y + sourceCrop.h < sourceBox.y + sourceBox.h : side === "left" ? sourceCrop.x > sourceBox.x : sourceCrop.x + sourceCrop.w < sourceBox.x + sourceBox.w;
+    if (trimmed) { out.push(side); continue; }
+    const line = side === "top" ? sourceBox.y : side === "bottom" ? sourceBox.y + sourceBox.h - 1 : side === "left" ? sourceBox.x : sourceBox.x + sourceBox.w - 1;
+    const from = horizontal ? sourceCrop.x : sourceCrop.y, to = horizontal ? sourceCrop.x + sourceCrop.w : sourceCrop.y + sourceCrop.h;
+    const need = Math.max(PLACED_CUT_MIN_PX, Math.ceil((horizontal ? source.w : source.h) * PLACED_CUT_MIN_SHARE));
+    let run = 0, longest = 0;
+    for (let i = Math.max(0, from); i < Math.min(horizontal ? source.w : source.h, to); i++) {
+      const a = alpha[horizontal ? line * source.w + i : i * source.w + line]!;
+      if (a > ALPHA_EDGE) { run++; if (run > longest) longest = run; } else run = 0;
+    }
+    if (longest >= need) out.push(side);
+  }
+  return out;
 }
 
 export const SHADOW_TYPES = new Set(["footwear", "bag_accessory", "other", "auto"]);
@@ -134,6 +171,6 @@ export async function buildContext(subject: OutputSubject): Promise<OutputContex
     subject, spec, canvas, background: hexColor(backgroundFor(subject.channel, subject.n)), sourceBox, sourceCrop, productBox,
     safeBox, band: shadowBand(productBox, canvas), expectedAlpha, sourceRgb,
     product: thresholdMask(expectedAlpha, ALPHA_EDGE), half: thresholdMask(expectedAlpha, ALPHA_HALF - 1), shadowAllowed: shadowAllowedFor(subject.productType, subject.flags),
-    cutSides: (["top", "bottom", "left", "right"] as const).filter(side => cut[side]), cut,
+    cutSides: placedCutSides(subject.alpha, subject.source, sourceBox, sourceCrop, cut), cut,
   };
 }
