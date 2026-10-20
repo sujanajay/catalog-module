@@ -267,3 +267,36 @@ describe("hand-held products", () => {
     expect((await sharp(inHand.jpeg!).metadata()).format).toBe("jpeg");
   });
 });
+
+describe("thin coloured sliver along a dark sole (Anta bd-112625546-12 shot 5, eval run 2)", () => {
+  /** A sole view: a dark grained outsole on white with a lime midsole sliver, 6 px, along its bottom edge (the interior rule alone measures 15% lost in its cell). */
+  const sole = (x: number, y: number) => inRect(x, y, 60, 240, 280, 120);
+  const sliver = (x: number, y: number) => inRect(x, y, 120, 360, 160, 6);
+  const photo = (strip: RGB) => image((x, y) => sole(x, y) ? [clamp(40 + grain(x, y)), clamp(40 + grain(x, y)), clamp(44 + grain(x, y))] : sliver(x, y) ? strip : [255, 255, 255]);
+  const lime: RGB = [138, 156, 32];
+
+  it("counts the dropped sliver as lost product, though most of it lies in the estimate's edge band", () => {
+    const verdict = checkMatteIntegrity(photo(lime), matteOf(sole));
+    expect(verdict.ok).toBe(false);
+    expect(verdict.worstCellLoss).toBeGreaterThan(0.2);
+    expect(checkMatteIntegrity(photo(lime), matteOf((x, y) => sole(x, y) || sliver(x, y))).ok).toBe(true);
+  });
+
+  it("still takes a dark grey strip under the sole for the source's own shadow", () => {
+    expect(checkMatteIntegrity(photo([70, 70, 74]), matteOf(sole)).ok).toBe(true);
+  });
+
+  it("accepts a good matte whose edge sits a pixel inside a strongly coloured product", () => {
+    const red = image((x, y) => sole(x, y) ? [clamp(200 + grain(x, y)), clamp(40 + grain(x, y)), 50] : [255, 255, 255]);
+    expect(checkMatteIntegrity(red, matteOf((x, y) => inRect(x, y, 61, 241, 278, 118))).ok).toBe(true);
+  });
+
+  it("climbs the ladder to the pass-through, which keeps the sliver, when every model drops it", async () => {
+    const p = photo(lime), attempts: MatteVariant[] = [];
+    const resolved = await resolveMatte({ prepared: p, first: matteOf(sole), handRule: true, attempt: async v => { attempts.push(v); return matteOf(sole, v); } });
+    expect(attempts).toEqual(["second", "padded_first", "padded_second"]);
+    expect(resolved.passthrough).toBe(true);
+    expect(resolved.matte.alpha[362 * W + 200]).toBeGreaterThan(240);
+    expect(resolved.matte.alpha[380 * W + 200]).toBe(0);
+  });
+});

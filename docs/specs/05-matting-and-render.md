@@ -404,7 +404,12 @@ time, before anything is rendered.
   `GUARD_OVERALL_LOSS_MAX` 0.04: far above the spec 10 golden bars (1% and 0.3%), because this guard
   only has to catch a matte that removes the product; measured on 82 real photos, destroyed close-ups
   lose 60 to 95%, good mattes under 9% in their worst cell except two model close-ups (skin removed
-  inside a neckline, a wall corner the flood did not reach), which then take the ladder. Also rejected: a hand-held product whose
+  inside a neckline, a wall corner the flood did not reach), which then take the ladder. A strongly
+  coloured product pixel (chroma at least 72, the spec 10 cast-shadow allowance, so neither backdrop
+  nor shadow) that the matte drops more than 1 px away from what it kept counts as lost even inside
+  the 3 px edge band (`GUARD_COLOURED_CHROMA_MIN`): a thin coloured part such as a midsole sliver
+  along a dark outsole is all edge band (eval run 2, Anta bd-112625546-12 shot 5: 17% measured
+  before, 41% with the rule; good mattes on 129 real photos at most 10.7%). Also rejected: a hand-held product whose
   holding hand (skin reaching the border band, bordering the kept product, not the background colour)
   was dropped over more than 2% of the kept product (`HAND_NOTCH_MAX_SHARE`; not applied to apparel,
   where the skin is the model's).
