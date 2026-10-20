@@ -100,6 +100,31 @@ describe("resolution ladder", () => {
   });
 });
 
+describe("close-up of a trim over skin (Penti Z91D419FC9238E844BF77Z_4)", () => {
+  // White canvas strips top and bottom; inside, smooth skin on the left, a textured trim, dark green linen on the right.
+  // The skin is smooth and reaches the border band, so the source alone takes it for background.
+  const trim = (x: number) => x >= 150 && x < 210;
+  const closeUp = image((x, y) => y < 30 || y >= H - 30 ? [255, 255, 255] : x < 150 ? [226, 186, 168] : trim(x) ? [clamp(120 + grain(x, y) * 4), clamp(120 + grain(x, y) * 4), clamp(110 + grain(x, y) * 4)] : [clamp(20 + grain(x, y)), clamp(60 + grain(x, y)), clamp(50 + grain(x, y))]);
+  const inside = (y: number) => y >= 30 && y < H - 30;
+  /** The live defect: the matte keeps the trim, the fabric and the lower skin, and drops the upper skin. */
+  const partialSkin = matteOf((x, y) => inside(y) && (x >= 150 || y >= 300));
+
+  it("rejects a matte that cuts through the skin, and keeps a complete one", () => {
+    expect(backgroundRegion(closeUp).frameFilling).toBe(false);
+    const partial = checkMatteIntegrity(closeUp, partialSkin, { handRule: false });
+    expect(partial.ok).toBe(false);
+    expect(partial.worstCellLoss).toBeGreaterThan(0.5);
+    expect(checkMatteIntegrity(closeUp, matteOf((_x, y) => inside(y)), { handRule: false }).ok).toBe(true);
+  });
+
+  it("ends in a pass-through that keeps the skin when every model cuts through it", async () => {
+    const resolved = await resolveMatte({ prepared: closeUp, first: partialSkin, handRule: false, attempt: async v => ({ ...partialSkin, model: v }) });
+    expect(resolved.passthrough).toBe(true);
+    for (const [x, y] of [[40, 100], [40, 400], [300, 100], [180, 300]] as const) expect(resolved.matte.alpha[y * W + x]).toBe(255);
+    expect(resolved.matte.alpha[5 * W + 200]).toBe(0);
+  });
+});
+
 describe("size charts and text-only images", () => {
   /** A white page with a title, a table of rows of small dark glyphs and grid lines (the Penti size chart). */
   const chart = image((x, y) => {

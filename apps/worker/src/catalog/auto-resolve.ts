@@ -82,7 +82,7 @@ export async function resolvePhoto(deps: CatalogDeps, input: ResolvePhotoInput):
   };
   // The whole frame kept (matte-guard.ts), the last answer to a cut-out that removed the product.
   let passthrough: Matte | undefined;
-  const passthroughFor = () => passthrough ??= passthroughMatte(p);
+  const passthroughFor = () => passthrough ??= passthroughMatte(p,[first,...(second ? [second]:[])]);
   const contextFor = input.contextFor ?? rowContext;
   const render = async (o: Output, step: LadderStep): Promise<RenderOutput> => {
     const variant = stepVariant(step), matte = variant.matte === "second" ? (await secondMatte())! : variant.matte === "passthrough" ? passthroughFor() : first;
