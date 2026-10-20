@@ -319,18 +319,56 @@ export function checkMatteIntegrity(p: Pick<Prepared, "width" | "height" | "rgb"
 }
 
 /**
- * The ladder's last resort: the whole frame is product. Alpha is 255 everywhere except the source
- * background connected to the frame edge (the uniform border band and white space around the
- * product), which becomes 0, except skin or a plain garment panel that one of the `tried` model mattes cut through or kept (keptSurfaces). Enclosed background is filled (no holes) and components smaller than
- * PASSTHROUGH_KEEP_SHARE of the largest are dropped (no floating fragments); a frame-filling photo
- * keeps every pixel. The edge is softened inward only (sigma 1), which cannot open a hole and keeps
- * no source background; a frame edge stays fully opaque so the cut-in-source rule places it flush.
+ * What the pass-through recolours to the channel canvas. Two parts, both reached from the frame edge:
+ * (a) the border colour itself, pixel-exact: a flood from the smooth border-colour pixels (and the
+ * canvas strips) into every neighbouring pixel within BACKGROUND_CLUSTER_DELTA of the border colour,
+ * so it runs right up to the product's edge (no 5x5 smoothness window, so no rim of source white is
+ * left on the product) and stops at the first pixel of another colour or shade. A stricter step rule
+ * between neighbours was tried and left JPEG ringing along canvas strips as light lines (gate 3e
+ * photos). (b) A smooth backdrop of another colour (a studio wall, a floor) that covers at least
+ * SURFACE_MIN_FRAME_SHARE of the frame and that no matte kept as skin or a garment panel
+ * (keptSurfaces). A smaller smooth region of another colour at the frame edge (a light strap, a sliver
+ * of skin below it) cannot be told from product by the source alone, so it stays product: a few
+ * plain pixels kept cost less than a flat canvas patch cut into the product (gate 3d, Penti
+ * Z91D419FC9238E844BF77Z shot 4).
+ */
+export function passthroughBackground(p: Pick<Prepared, "width" | "height" | "rgb">, region: BackgroundRegion, surfaces: Mask): Mask {
+  const { width: w, height: h, rgb } = p, color = borderBackground(p).color, out = new Uint8Array(w * h), queue = new Int32Array(w * h);
+  const near = (i: number) => delta(rgb, i, color) <= BACKGROUND_CLUSTER_DELTA;
+  let head = 0, tail = 0;
+  for (let i = 0; i < out.length; i++) if (region.background[i] && !surfaces[i] && near(i)) { out[i] = 1; queue[tail++] = i; }
+  while (head < tail) {
+    const i = queue[head++]!, x = i % w, y = (i - x) / w;
+    for (const j of [x > 0 ? i - 1 : -1, x + 1 < w ? i + 1 : -1, y > 0 ? i - w : -1, y + 1 < h ? i + w : -1]) {
+      if (j >= 0 && !out[j] && !surfaces[j] && near(j)) { out[j] = 1; queue[tail++] = j; }
+    }
+  }
+  // Large smooth backdrops of another colour that no matte kept.
+  const { x0, y0, x1, y1 } = region.rect, inner = new Uint8Array(w * h);
+  for (let y = y0; y <= y1; y++) for (let x = x0; x <= x1; x++) { const i = y * w + x; if (region.background[i] && !surfaces[i]) inner[i] = 1; }
+  const { labels, sizes } = components(inner, w, h), min = w * h * SURFACE_MIN_FRAME_SHARE;
+  for (let i = 0; i < out.length; i++) if (labels[i] && sizes[labels[i]!]! >= min) out[i] = 1;
+  return out;
+}
+
+/**
+ * The ladder's last resort: the whole frame is product except the source background
+ * (passthroughBackground: the border colour reached from the frame edge, pixel-exact, and any large
+ * smooth backdrop no matte kept), which becomes 0. Skin or a plain garment panel that one of the
+ * `tried` model mattes cut through or kept (keptSurfaces) is always product. Enclosed background is
+ * filled (no holes) and components smaller than PASSTHROUGH_KEEP_SHARE of the largest are dropped (no
+ * floating fragments); a frame-filling photo keeps every pixel inside its canvas strips. The edge is
+ * softened inward only (sigma 1), which cannot open a hole and keeps no source background; a frame
+ * edge stays fully opaque so the cut-in-source rule places it flush.
  */
 export function passthroughMatte(p: Pick<Prepared, "width" | "height" | "rgb">, tried: Pick<Matte, "alpha">[] = []): Matte {
   const { width: w, height: h } = p, region = backgroundRegion(p), solid = new Uint8Array(w * h);
-  for (let i = 0; i < solid.length; i++) solid[i] = region.background[i] ? 0 : 1;
-  for (const m of tried) { const surfaces = keptSurfaces(p, m.alpha, region); for (let i = 0; i < solid.length; i++) if (surfaces[i]) solid[i] = 1; }
-  if (!region.frameFilling) {
+  if (region.frameFilling) for (let i = 0; i < solid.length; i++) solid[i] = region.background[i] ? 0 : 1;
+  else {
+    const surfaces = new Uint8Array(w * h);
+    for (const m of tried) { const kept = keptSurfaces(p, m.alpha, region); for (let i = 0; i < surfaces.length; i++) if (kept[i]) surfaces[i] = 1; }
+    const background = passthroughBackground(p, region, surfaces);
+    for (let i = 0; i < solid.length; i++) solid[i] = background[i] ? 0 : 1;
     // Keep the large product components only (no floating fragments).
     const { labels, sizes } = components(solid, w, h), largest = Math.max(0, ...sizes.slice(1));
     for (let i = 0; i < solid.length; i++) if (solid[i] && sizes[labels[i]!]! < largest * PASSTHROUGH_KEEP_SHARE) solid[i] = 0;

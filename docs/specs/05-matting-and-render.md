@@ -412,8 +412,12 @@ time, before anything is rendered.
   trigger `product_removed`: `matte_check` (the failed first matte), (a) `second_matte` the policy's
   second model, (b) `padded_matte` the photo framed in a white border of 20% of its long side
   (`MattingClient.matte(p, model, { padFraction })`, mask cropped back) with the first, then the second
-  model, (c) `matte_passthrough` the whole frame: alpha 255 except background connected to the frame
-  edge, holes filled, components under 25% of the largest dropped, edge softened inward only. Model
+  model, (c) `matte_passthrough` the whole frame: alpha 255 except the source background reached from
+  the frame edge (`passthroughBackground`: the border colour, pixel-exact, within 16 levels per
+  channel, plus any smooth backdrop of another colour covering at least 1% of the frame that no matte
+  kept as skin or a garment panel; a smaller plain region at the frame edge, such as a light strap,
+  stays product), holes filled, components under 25% of the largest dropped, edge softened inward
+  only. Model
   steps are skipped when this delivery has no time left for a matting call; the pass-through always
   completes. A pass-through adds the information flag `matte_passthrough` ("This photo is a close-up
   that fills the frame, so the whole photo was kept as it is instead of being cut out. Nothing to

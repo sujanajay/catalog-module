@@ -177,6 +177,45 @@ describe("close-up of a trim between skin and a plain garment panel (Penti Z91D4
   });
 });
 
+describe("pass-through recolours only the true background (Penti Z91D419FC9238E844BF77Z_4, gate 3d)", () => {
+  const at = (m: Matte, x: number, y: number) => m.alpha[y * W + x]!;
+  const textured = (x: number, y: number): RGB => [clamp(40 + grain(x, y)), clamp(60 + grain(x, y)), clamp(50 + grain(x, y))];
+
+  it("keeps a light strap touching the frame edge, and the skin below it", async () => {
+    // As the gate 3c close-up, plus a near-white strap running off the left frame edge low in the photo,
+    // with a sliver of skin between it and the white canvas strip (the live defect: both became flat canvas).
+    const strap = (y: number) => y >= 548 && y < 560;
+    const closeUp = image((x, y) => y < 30 || y >= H - 30 ? [255, 255, 255] : x < 150 ? (strap(y) ? [211, 209, 220] : [226, 186, 168]) : x < 210 ? [clamp(120 + grain(x, y) * 4), clamp(120 + grain(x, y) * 4), clamp(110 + grain(x, y) * 4)] : textured(x, y));
+    const inside = (y: number) => y >= 30 && y < H - 30;
+    const partial = matteOf((x, y) => inside(y) && (x >= 150 || y >= 300));
+    const resolved = await resolveMatte({ prepared: closeUp, first: partial, handRule: false, attempt: async v => ({ ...partial, model: v }) });
+    expect(resolved.passthrough).toBe(true);
+    for (let x = 0; x < 150; x += 7) for (const y of [550, 555, 562, 565]) expect(at(resolved.matte, x, y)).toBe(255);
+    for (let x = 0; x < W; x += 7) { expect(at(resolved.matte, x, 10)).toBe(0); expect(at(resolved.matte, x, H - 10)).toBe(0); }
+  });
+
+  it("recolours a plain white background fully, up to the product edge", () => {
+    // A round product (no canvas strip can be trimmed off its sides): every white pixel, also next to its edge, is recoloured.
+    const round = (x: number, y: number) => (x - 200) ** 2 + (y - 300) ** 2 < 150 ** 2;
+    const p = image((x, y) => round(x, y) ? textured(x, y) : [255, 255, 255]);
+    const matte = passthroughMatte(p);
+    let kept = 0;
+    for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) if (!round(x, y) && at(matte, x, y) > 0) kept++;
+    expect(kept).toBe(0);
+    expect(at(matte, 200, 300)).toBe(255);
+  });
+
+  it("recolours a thin white gap between the product and the frame edge", () => {
+    // An L-shaped product: a bar 3 px from the left edge, and a foot that runs off the left and bottom edges.
+    const product = (x: number, y: number) => inRect(x, y, 3, 100, 250, 400) || inRect(x, y, 0, 500, 300, 100);
+    const p = image((x, y) => product(x, y) ? textured(x, y) : [255, 255, 255]);
+    const matte = passthroughMatte(p);
+    for (let y = 100; y < 500; y += 5) for (let x = 0; x < 3; x++) expect(at(matte, x, y)).toBe(0);
+    expect(at(matte, 100, 300)).toBe(255);
+    expect(at(matte, 0, H - 1)).toBe(255);
+  });
+});
+
 describe("size charts and text-only images", () => {
   /** A white page with a title, a table of rows of small dark glyphs and grid lines (the Penti size chart). */
   const chart = image((x, y) => {
