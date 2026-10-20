@@ -624,9 +624,11 @@ export function detectTextImage(p: Pick<Prepared, "width" | "height" | "rgb">): 
  * reflection (a pale copy of the sole under a light or grey gap row, eval run 3 M2) or a grey cast shadow is never
  * reached. A connected group of candidates is recovered only when the matte drops (alpha at most GUARD_ALPHA_EDGE)
  * at least SOLE_STRIP_MIN_DROPPED_PX of them and it spans at least SOLE_STRIP_MIN_SPAN_SHARE of the product width
- * (a strip along the sole, not a coloured contact smudge): its runs become opaque, together with the soft strongly coloured
- * pixels right above them, and only the last pixel of each run is feathered (SOLE_STRIP_FEATHER_ALPHA, 1 px), so
- * the strip is not softened twice.
+ * (a strip along the sole, not a coloured contact smudge): its runs become opaque, together with the soft kept pixels
+ * right above them (now inside the product). The run ends are smoothed across the group's columns (a moving average over
+ * SOLE_STRIP_SMOOTH_COLUMNS columns, clamped to each column's measured end so no pixel outside the coloured run is
+ * added, then lowered until neighbouring ends differ by at most 1 px) and the lower edge is drawn at that sub-pixel
+ * position: opaque above it and one antialiased pixel at it, so the edge shows no steps and is softened once.
  */
 export const SOLE_STRIP_DEPTH_PX = 8;
 export const SOLE_STRIP_CHROMA_MIN = 60;
@@ -634,7 +636,7 @@ export const SOLE_STRIP_SATURATION_MIN = 0.5;
 export const SOLE_STRIP_ZONE_SHARE = 0.4;
 export const SOLE_STRIP_MIN_DROPPED_PX = 20;
 export const SOLE_STRIP_MIN_SPAN_SHARE = 0.1;
-export const SOLE_STRIP_FEATHER_ALPHA = 160;
+export const SOLE_STRIP_SMOOTH_COLUMNS = 5;
 
 export interface SoleStripRecovery { alpha: Buffer; /** Pixels whose alpha was raised. */ changed: number; /** Of those, pixels the matte had dropped. */ recovered: number }
 
@@ -663,14 +665,32 @@ export function recoverSoleStrip(p: Pick<Prepared, "width" | "height" | "rgb">, 
   const minSpan = (x1 - x0 + 1) * SOLE_STRIP_MIN_SPAN_SHARE, strip = (l: number) => dropped[l]! >= SOLE_STRIP_MIN_DROPPED_PX && right[l]! - left[l]! + 1 >= minSpan;
   let changed = 0, recovered = 0;
   const raise = (i: number, to: number) => { if (alpha[i]! >= to) return; if (alpha[i]! <= GUARD_ALPHA_EDGE) recovered++; changed++; alpha[i] = to; };
+  // Per column of a recovered group: the measured run end (its last coloured row) and the group.
+  const group = new Int32Array(w), end = new Int32Array(w).fill(-1);
   for (let x = 0; x < w; x++) {
     const yb = bottom[x]!; if (yb < 0 || !run[(yb + 1) * w + x] || !strip(labels[(yb + 1) * w + x]!)) continue;
     let last = yb + 1;
     while (last + 1 < h && run[(last + 1) * w + x]) last++;
-    // The soft strongly coloured pixels right above the run belong to the same strip: opaque too.
-    for (let y = yb; y > yb - SOLE_STRIP_DEPTH_PX && y >= 0 && alpha[y * w + x]! < 255 && strong(y * w + x); y--) raise(y * w + x, 255);
-    for (let y = yb + 1; y < last; y++) raise(y * w + x, 255);
-    raise(last * w + x, SOLE_STRIP_FEATHER_ALPHA);
+    group[x] = labels[(yb + 1) * w + x]!; end[x] = last;
+  }
+  // Smooth the ends within each group of neighbouring columns: a moving average over SOLE_STRIP_SMOOTH_COLUMNS, clamped to
+  // the column's measured end (never past the coloured strip), then lowered until neighbours differ by at most 1 px.
+  const smooth = new Float64Array(w).fill(-1), half = SOLE_STRIP_SMOOTH_COLUMNS >> 1, same = (a: number, b: number) => end[a]! >= 0 && end[b]! >= 0 && group[a] === group[b];
+  for (let x = 0; x < w; x++) {
+    if (end[x]! < 0) continue;
+    let sum = 0, n = 0;
+    for (let k = Math.max(0, x - half); k <= Math.min(w - 1, x + half); k++) if (same(k, x)) { sum += end[k]!; n++; }
+    smooth[x] = Math.min(end[x]!, sum / n);
+  }
+  for (let x = 1; x < w; x++) if (same(x, x - 1)) smooth[x] = Math.min(smooth[x]!, smooth[x - 1]! + 1);
+  for (let x = w - 2; x >= 0; x--) if (same(x, x + 1)) smooth[x] = Math.min(smooth[x]!, smooth[x + 1]! + 1);
+  for (let x = 0; x < w; x++) {
+    const yb = bottom[x]!, e = smooth[x]!; if (end[x]! < 0 || e < yb + 1) continue;
+    // The kept pixels right above the run now lie inside the product (the strip is below them): opaque too, so the
+    // model's soft edge there leaves no see-through line between the outsole and the strip.
+    for (let y = yb; y > yb - SOLE_STRIP_DEPTH_PX && y >= 0 && alpha[y * w + x]! > 128 && alpha[y * w + x]! < 255; y--) raise(y * w + x, 255);
+    // Coverage of each run pixel by the smoothed edge at e + 1/2: opaque above it, one antialiased pixel at it.
+    for (let y = yb + 1; y <= end[x]!; y++) { const a = Math.round(255 * Math.max(0, Math.min(1, e + 0.5 - y))); if (a > GUARD_ALPHA_EDGE) raise(y * w + x, a); }
   }
   return { alpha, changed, recovered };
 }

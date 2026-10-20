@@ -1,6 +1,6 @@
 import sharp from "sharp";
 import { describe, expect, it } from "vitest";
-import { backgroundRegion, BUSY_BORDER_MAX_SHARE, BUSY_EDGE_DENSITY_MIN, BUSY_PLAIN_EDGE_MAX, BUSY_PLAIN_TONES_MIN, busyBorderReading, busyBorderShare, checkMatteIntegrity, detectTextImage, heldInHand, keptBackground, passthroughMatte, readsAsScenery, recoverSoleStrip, resolveMatte, SOLE_STRIP_FEATHER_ALPHA, wholePhotoMatte, type MatteVariant } from "./matte-guard";
+import { backgroundRegion, BUSY_BORDER_MAX_SHARE, BUSY_EDGE_DENSITY_MIN, BUSY_PLAIN_EDGE_MAX, BUSY_PLAIN_TONES_MIN, busyBorderReading, busyBorderShare, checkMatteIntegrity, detectTextImage, heldInHand, keptBackground, passthroughMatte, readsAsScenery, recoverSoleStrip, resolveMatte, wholePhotoMatte, type MatteVariant } from "./matte-guard";
 import { hasCutBandNote } from "./channels";
 import { components } from "./evals/image";
 import { PASSTHROUGH_MODEL, renderSource, type Matte, type Prepared } from "./render";
@@ -474,16 +474,29 @@ describe("coloured sole strip the matte drops (Anta bd-112625546-12 shot 5, eval
   const keptTo = (bottom: number) => matteOf((x, y) => x >= 60 && x < 340 && y >= 250 && y <= bottom);
   const at = (m: Buffer, x: number, y: number) => m[y * W + x]!;
 
-  it("gives back the lower rows of the strip, opaque, with a single 1 px feather", () => {
+  it("gives back the lower rows of the strip, opaque, with one antialiased edge pixel", () => {
     const p = image((x, y) => shoe(x, y, lime)), matte = keptTo(444);
     const r = recoverSoleStrip(p, matte.alpha);
     expect(r.recovered).toBe(280 * 3);
     for (const x of [60, 200, 339]) {
-      expect([at(r.alpha, x, 445), at(r.alpha, x, 446)]).toEqual([255, 255]);
-      expect(at(r.alpha, x, 447)).toBe(SOLE_STRIP_FEATHER_ALPHA);
+      expect([at(r.alpha, x, 445), at(r.alpha, x, 446), at(r.alpha, x, 447)]).toEqual([255, 255, 128]);
       expect(at(r.alpha, x, 448)).toBe(0);
     }
     expect(at(matte.alpha, 200, 446)).toBe(0);
+  });
+
+  it("smooths a ragged strip end so neighbouring columns end at most 1 px apart, never past the coloured strip", () => {
+    // The strip's lower edge jumps between rows 444 and 447 from column to column (JPEG and matte noise).
+    const ragged = (x: number) => 444 + [0, 3, 1, 3, 0, 2, 3, 1][x % 8]!;
+    const p = image((x, y) => shoe(x, y, yy => yy >= 441 && yy <= ragged(x) ? [130, 150, 20] : null)), r = recoverSoleStrip(p, keptTo(442).alpha);
+    expect(r.recovered).toBeGreaterThan(280);
+    const ends: number[] = [];
+    for (let x = 60; x < 340; x++) {
+      let y = 448; while (y > 442 && at(r.alpha, x, y) === 0) y--;
+      expect(y).toBeLessThanOrEqual(ragged(x));
+      ends.push(y);
+    }
+    for (let k = 1; k < ends.length; k++) expect(Math.abs(ends[k]! - ends[k - 1]!)).toBeLessThanOrEqual(1);
   });
 
   it("does not give back a reflection line under a grey gap, a floor, or a short coloured blob", async () => {
@@ -499,7 +512,7 @@ describe("coloured sole strip the matte drops (Anta bd-112625546-12 shot 5, eval
     const p = image((x, y) => shoe(x, y, lime)), first = keptTo(444);
     const footwear = await resolveMatte({ prepared: p, first, handRule: true, soleStrip: true, attempt: async () => null });
     expect(footwear.soleStripRecovered).toBe(280 * 3);
-    expect(at(footwear.matte.alpha, 200, 446)).toBe(255);
+    expect(at(footwear.matte.alpha, 200, 445)).toBe(255);
     const other = await resolveMatte({ prepared: p, first, handRule: true, attempt: async () => null });
     expect(other.soleStripRecovered).toBe(0);
     expect(other.matte.alpha).toBe(first.alpha);
