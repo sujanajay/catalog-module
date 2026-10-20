@@ -1,6 +1,7 @@
 import sharp from "sharp";
 import { describe, expect, it } from "vitest";
-import { backgroundRegion, BUSY_BORDER_MAX_SHARE, busyBorderShare, checkMatteIntegrity, detectTextImage, heldInHand, keptBackground, passthroughMatte, resolveMatte, type MatteVariant } from "./matte-guard";
+import { backgroundRegion, BUSY_BORDER_MAX_SHARE, BUSY_EDGE_DENSITY_MIN, BUSY_PLAIN_EDGE_MAX, BUSY_PLAIN_TONES_MIN, busyBorderReading, busyBorderShare, checkMatteIntegrity, detectTextImage, heldInHand, keptBackground, passthroughMatte, readsAsScenery, resolveMatte, wholePhotoMatte, type MatteVariant } from "./matte-guard";
+import { hasCutBandNote } from "./channels";
 import { components } from "./evals/image";
 import { PASSTHROUGH_MODEL, renderSource, type Matte, type Prepared } from "./render";
 import { analyseBackground } from "./shadow";
@@ -383,5 +384,78 @@ describe("kept background chunk below the base (French Connection Z15276411CE85C
     expect(resolved).toMatchObject({ passthrough: false, busyBackground: false });
     expect(resolved.matte.model).toBe("padded_second");
     expect(resolved.matte.alpha[415 * W + 100]).toBe(0);
+  });
+});
+
+describe("busy background is scenery, not a close-up whose mattes dropped the product (gate 3f, French Connection Z02B2EE44E3A08044B816Z)", () => {
+  // Pebbled leather: a dark pebble every 20 pixels (edge density about 0.2, two tones), the fine grain of one material.
+  const pebble = (x: number, y: number) => (x * 7 + y * 13) % 20 === 0;
+  const leatherAt = (x: number, y: number): RGB => pebble(x, y) ? [165, 50, 0] : [225, 110, 40];
+  // The close-up as the brand ships it: pasted on a white canvas with 40 px strips at the top and bottom, a white
+  // backdrop sliver above the zip in the top left corner, the gold letters in the middle.
+  const sliver = (x: number, y: number) => y < 40 + 120 - x * 0.5;
+  const closeUp = image((x, y) => y < 40 || y >= H - 40 ? [255, 255, 255] : inRect(x, y, 150, 250, 100, 100) ? [214, 180, 90] : sliver(x, y) ? [255, 255, 255] : leatherAt(x, y));
+  const letters = (model = "first") => matteOf((x, y) => inRect(x, y, 150, 250, 100, 100), model);
+
+  it("passes the close-up through whole when every matte keeps only the letters (no hold)", async () => {
+    const region = backgroundRegion(closeUp);
+    expect(region.frameFilling).toBe(false);
+    expect(region.rect).toEqual({ x0: 0, y0: 40, x1: W - 1, y1: H - 41 });
+    const tried = [letters()], reading = busyBorderReading(closeUp, passthroughMatte(closeUp, tried), tried, region);
+    // Over the share bar (the rule before gate 3f held it), but it reads as one material.
+    expect(reading.share).toBeGreaterThan(BUSY_BORDER_MAX_SHARE);
+    expect(reading.edgeDensity).toBeGreaterThan(BUSY_PLAIN_EDGE_MAX);
+    expect(reading.edgeDensity).toBeLessThan(BUSY_EDGE_DENSITY_MIN);
+    expect(reading.scenery).toBe(false);
+    const resolved = await resolveMatte({ prepared: closeUp, first: letters(), handRule: true, attempt: async v => v === "padded_first" ? letters(v) : null });
+    expect(resolved).toMatchObject({ passthrough: true, busyBackground: false });
+    expect(resolved.actions.at(-1)!.detail).toMatch(/one material or one plain colour, not scenery/);
+    // The leather is kept, the white sliver and the canvas strips are not.
+    expect(resolved.matte.alpha[400 * W + 4]).toBe(255);
+    expect(resolved.matte.alpha[45 * W + 10]).toBe(0);
+    expect(resolved.matte.alpha[10 * W + 200]).toBe(0);
+  });
+
+  it("reads plain band pixels in one colour as a backdrop kept whole and plain pixels in several tones as scenery", () => {
+    const object = (x: number, y: number) => inRect(x, y, 100, 200, 200, 200), tried = [matteOf(object)], all = matteOf(() => true);
+    // A plain pale yellow dress behind a held bag (shot 1): one colour.
+    const dress = image((x, y) => object(x, y) ? [225, 110, 40] : [245, 236, 208]);
+    expect(busyBorderReading(dress, all, tried)).toMatchObject({ edgeDensity: 0, tones: 1, scenery: false });
+    // A wall darkening towards the top over a wooden table (the lifestyle candle Z011CB57531CA8FA0CBDDZ shot 1): plain, many tones.
+    const room = image((x, y) => object(x, y) ? [240, 230, 200] : y < 420 ? [clamp(90 + y / 3), clamp(75 + y / 4), clamp(65 + y / 5)] : [185, 132, 85]);
+    const reading = busyBorderReading(room, all, tried);
+    expect(reading.edgeDensity).toBeLessThan(BUSY_PLAIN_EDGE_MAX);
+    expect(reading.tones).toBeGreaterThanOrEqual(BUSY_PLAIN_TONES_MIN);
+    expect(reading.scenery).toBe(true);
+  });
+
+  it("separates the measured gate and golden photos (edge density, tones of the band pixels no cut-out kept)", () => {
+    // Held: tennis court ZEE79259BBFD83FFA1DB0Z shot 5 (all policies), lifestyle candle Z011CB57531CA8FA0CBDDZ shot 1 (other, bag, model photo).
+    for (const [edges, tones] of [[0.509, 60], [0.507, 55], [0.0, 11], [0.01, 31], [0.01, 30]] as const) expect(readsAsScenery(edges, tones)).toBe(true);
+    // Passed through: Z02B2EE44E3A08044B816Z shots 1, 3 and 6, Z5A0B7DE13FC67EDEAC9DZ shot 5 (leather close-up).
+    for (const [edges, tones] of [[0.0, 4], [0.249, 24], [0.198, 30], [0.134, 9]] as const) expect(readsAsScenery(edges, tones)).toBe(false);
+  });
+
+  it("keeps a held photo whole but drops the brand's canvas strips, so it is fitted with the band note, never framed in white", async () => {
+    // The court scene pasted on a white canvas with 40 px strips at the top and bottom.
+    const models = (x: number, y: number) => inRect(x, y, 60, 150, 100, 400) || inRect(x, y, 240, 150, 100, 400);
+    const scene = (x: number, y: number) => y < 100 || inRect(x, y, 195, 250, 10, 300);
+    const pasted = image((x, y) => y < 40 || y >= H - 40 ? [255, 255, 255] : models(x, y) ? [clamp(30 + grain(x, y)), clamp(30 + grain(x, y)), clamp(34 + grain(x, y))]
+      : scene(x, y) ? [clamp(70 + grain(x, y) * 2), clamp(110 + grain(x, y) * 2), clamp(50 + grain(x, y))] : y < 250 ? [190, 188, 182] : [233, 124, 86]);
+    const kept = (model = "first") => matteOf(models, model);
+    const resolved = await resolveMatte({ prepared: pasted, first: kept(), handRule: false, attempt: async v => kept(v) });
+    expect(resolved).toMatchObject({ passthrough: false, busyBackground: true });
+    expect(resolved.actions.at(-1)!.detail).toMatch(/edge density 0\.\d\d, \d+ tones, read as scenery/);
+    const alpha = resolved.matte.alpha;
+    expect(alpha[10 * W + 200]).toBe(0);
+    expect(alpha[(H - 10) * W + 200]).toBe(0);
+    expect(alpha[40 * W]).toBe(255);
+    expect(alpha[(H - 41) * W + W - 1]).toBe(255);
+    expect(wholePhotoMatte(pasted).alpha.equals(alpha)).toBe(true);
+    // "Use as is" on a grey canvas: the photo is fitted (never trimmed), its cut sides float, and the band note says so.
+    const output = await renderSource({ prepared: prepared(pasted), matte: resolved.matte, channel: "noon", shotNumber: 2, productType: "apparel_model" });
+    expect(output.flags).toContain("cut_in_source");
+    expect(output.plan.sourceCrop).toEqual({ x: 0, y: 40, w: W, h: H - 80 });
+    expect(hasCutBandNote(output.notes.join("; "))).toBe(true);
   });
 });

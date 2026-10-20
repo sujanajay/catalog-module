@@ -6,7 +6,8 @@ import { createTestDb } from "@catalog/core/db/testing";
 import { catalogBatches, catalogChunks, catalogOutputs, catalogProducts, catalogSourceImages, EMPTY_BATCH_COUNTS } from "@catalog/core/db/schema";
 import * as storage from "@catalog/core/storage";
 import { listAttention } from "@catalog/core/catalog/attention";
-import { attentionRate } from "@catalog/core/catalog/pipeline/report";
+import { attentionRate, cutInSourceNote } from "@catalog/core/catalog/pipeline/report";
+import { hasCutBandNote } from "@catalog/core/catalog/channels";
 import { autoActionsOf, busyBackgroundHold, type AutoAction } from "@catalog/core/catalog/auto-resolve";
 import type { ChannelId, ProductType, ResolvedPolicy } from "@catalog/core/catalog/types";
 import type { Matte } from "@catalog/core/catalog/render";
@@ -302,7 +303,15 @@ describe("cut-out integrity guard in the matte stage (matte-guard.ts)", () => {
       expect(o.flags).toContain("leftover_background");
       expect(busyBackgroundHold(o.compliance)).toBe(true);
       expect(o.flags).not.toContain("matte_passthrough");
-      expect(o).toMatchObject({ status: "needs_attention", reason: "The background could not be removed from this photo." });
+      expect(o.status).toBe("needs_attention");
+      // The card sentence first, then the render's band note where a cut side floats (Noon here): "Use as is"
+      // publishes this fitted render, so the sheet's flush note must leave the photo out (gate 3f defect 2).
+      expect(o.reason).toMatch(/^The background could not be removed from this photo\./);
+      expect(o.reason).not.toMatch(/[.!?];/);
+      if (o.channel === "noon") {
+        expect(o.reason).toMatch(/^The background could not be removed from this photo\. The original photo is cut at the /);
+        expect(hasCutBandNote(o.reason)).toBe(true);
+      }
       expect(o.qaScores).toMatchObject({ autoAction: "hold", holdCause: "unusable" });
       // The whole photo, fitted: never trimmed.
       expect(o.canvasH).toBeGreaterThan(0);
@@ -315,6 +324,7 @@ describe("cut-out integrity guard in the matte stage (matte-guard.ts)", () => {
     expect(s.held[0]!.photos[0]).toMatchObject({ n: 2, whatToDo: "Use it as is, replace it, or remove it." });
     expect(s.held[0]!.photos[0]!.why).toMatch(/^The background could not be removed from this photo\./);
     expect(s.outputs.filter(o => o.n === 1).every(o => o.status === "staged")).toBe(true);
+    expect(cutInSourceNote(busy)).toBe("");
   }, 180_000);
 
   it("a size chart is not cut out: left out on every channel with its note, never held", async () => {
