@@ -63,25 +63,61 @@ export function createUpscaler(client: UpscaleClient, config: UpscaleConfig): Up
 export interface UpscaleTrace { batchId?: string | undefined; productId?: string | undefined; identifier?: string | undefined; shot?: number | undefined; channel?: string | undefined }
 
 /**
- * The colour of `crop` (in a `sourceWidth`-wide RGB buffer) enlarged to `target`: the crop is sent as
- * a lossless PNG (no second JPEG generation before the model; the service accepts PNG and JPEG), the
- * 2x JPEG that comes back is checked to be exactly 2x and taken to `target` with Lanczos (up or down).
- * Returns raw RGB (3 bytes per pixel) and the call time, or null after a logged warning on any failure.
+ * The upload to /upscale: JPEG quality 95 with 4:4:4 chroma (no colour subsampling). About a quarter of a lossless
+ * PNG's bytes for the cross-region transfer; at this quality the difference to the source is about one level,
+ * far below what the x2 model or the fidelity gate's bars resolve, and the sources are JPEGs already.
  */
-export async function upscaledRgb(upscaler: Upscaler, rgb: Buffer, sourceWidth: number, crop: { x: number; y: number; w: number; h: number }, target: Size, trace: UpscaleTrace = {}): Promise<{ rgb: Buffer; ms: number } | null> {
-  const started = Date.now();
+export const UPSCALE_UPLOAD_JPEG = { quality: 95, chromaSubsampling: "4:4:4" } as const;
+export async function upscaleUpload(rgb: Buffer, width: number, height: number): Promise<Buffer> {
+  return sharp(rgb, { raw: { width, height, channels: 3 } }).jpeg(UPSCALE_UPLOAD_JPEG).toBuffer();
+}
+
+/** The x2 colour of a whole source photo (raw RGB, exactly twice the source in both axes) and the service time. */
+export interface SourceX2 { rgb: Buffer; width: number; height: number; ms: number }
+/**
+ * One upscale call per source photo (spec 11 assumption 3): the first channel that needs it starts the call, every
+ * other channel and every auto-resolve re-render of the same photo (the same `Prepared.rgb` buffer) reuses the
+ * result, a failure included (null: the plain path for every output of that photo). Weakly held, so the x2 image
+ * goes when the photo's buffers do.
+ */
+const sourceX2Cache = new WeakMap<Upscaler, WeakMap<Buffer, Promise<SourceX2 | null>>>();
+export function sourceX2(upscaler: Upscaler, rgb: Buffer, width: number, trace: UpscaleTrace = {}): { result: Promise<SourceX2 | null>; reused: boolean } {
+  let perUpscaler = sourceX2Cache.get(upscaler);
+  if (!perUpscaler) { perUpscaler = new WeakMap(); sourceX2Cache.set(upscaler, perUpscaler); }
+  const cached = perUpscaler.get(rgb);
+  if (cached) return { result: cached, reused: true };
+  const result = (async (): Promise<SourceX2 | null> => {
+    const started = Date.now(), height = rgb.length / 3 / width;
+    try {
+      const reply = await upscaler.upscale(await upscaleUpload(rgb, width, height), "image/jpeg");
+      const out = await sharp(reply.jpeg).removeAlpha().toColourspace("srgb").raw().toBuffer({ resolveWithObject: true });
+      if (out.info.width !== width * UPSCALE_FACTOR || out.info.height !== height * UPSCALE_FACTOR || out.info.channels !== 3) throw new Error(`The upscale service returned ${out.info.width} x ${out.info.height} for a ${width} x ${height} photo.`);
+      console.info(JSON.stringify({ event: "catalog_upscale", ...trace, model: upscaler.model, ms: reply.ms, wallMs: Date.now() - started, source: `${width}x${height}` }));
+      return { rgb: out.data, width: out.info.width, height: out.info.height, ms: reply.ms };
+    } catch (error) {
+      console.warn(JSON.stringify({ severity: "WARNING", message: "upscale failed; used the plain enlargement", ...trace, wallMs: Date.now() - started, error: error instanceof Error ? error.message : String(error) }));
+      return null;
+    }
+  })();
+  perUpscaler.set(rgb, result);
+  return { result, reused: false };
+}
+
+/**
+ * The colour of `crop` (in a `sourceWidth`-wide RGB buffer) enlarged to `target`: cut at doubled coordinates from
+ * the photo's one x2 image (sourceX2) and taken to `target` with Lanczos3 (up or down). Returns raw RGB (3 bytes per
+ * pixel), the service time and whether the x2 image was shared with an earlier output, or null on any failure.
+ */
+export async function upscaledRgb(upscaler: Upscaler, rgb: Buffer, sourceWidth: number, crop: { x: number; y: number; w: number; h: number }, target: Size, trace: UpscaleTrace = {}): Promise<{ rgb: Buffer; ms: number; reused: boolean } | null> {
+  const { result, reused } = sourceX2(upscaler, rgb, sourceWidth, trace), x2 = await result;
+  if (!x2) return null;
   try {
-    const sourceHeight = rgb.length / 3 / sourceWidth;
-    const png = await sharp(rgb, { raw: { width: sourceWidth, height: sourceHeight, channels: 3 } }).extract({ left: crop.x, top: crop.y, width: crop.w, height: crop.h }).png().toBuffer();
-    const result = await upscaler.upscale(png, "image/png");
-    const meta = await sharp(result.jpeg).metadata();
-    if (meta.width !== crop.w * UPSCALE_FACTOR || meta.height !== crop.h * UPSCALE_FACTOR) throw new Error(`The upscale service returned ${meta.width} x ${meta.height} for a ${crop.w} x ${crop.h} crop.`);
-    const out = await sharp(result.jpeg).removeAlpha().toColourspace("srgb").resize(target.w, target.h, { fit: "fill", kernel: "lanczos3" }).raw().toBuffer({ resolveWithObject: true });
-    if (out.info.channels !== 3 || out.data.length !== target.w * target.h * 3) throw new Error("The upscaled image could not be read as RGB.");
-    console.info(JSON.stringify({ event: "catalog_upscale", ...trace, model: upscaler.model, ms: result.ms, wallMs: Date.now() - started, crop: `${crop.w}x${crop.h}`, target: `${target.w}x${target.h}` }));
-    return { rgb: out.data, ms: result.ms };
+    const f = UPSCALE_FACTOR;
+    const out = await sharp(x2.rgb, { raw: { width: x2.width, height: x2.height, channels: 3 } }).extract({ left: crop.x * f, top: crop.y * f, width: crop.w * f, height: crop.h * f }).resize(target.w, target.h, { fit: "fill", kernel: "lanczos3" }).raw().toBuffer();
+    if (out.length !== target.w * target.h * 3) throw new Error("The upscaled image could not be read as RGB.");
+    return { rgb: out, ms: x2.ms, reused };
   } catch (error) {
-    console.warn(JSON.stringify({ severity: "WARNING", message: "upscale failed; used the plain enlargement", ...trace, wallMs: Date.now() - started, error: error instanceof Error ? error.message : String(error) }));
+    console.warn(JSON.stringify({ severity: "WARNING", message: "upscale failed; used the plain enlargement", ...trace, error: error instanceof Error ? error.message : String(error) }));
     return null;
   }
 }

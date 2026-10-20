@@ -19,8 +19,11 @@ export interface RenderInput { prepared: Prepared; matte: Matte; channel: Channe
   /** The judge saw a cut at the frame edge that the cut rule missed: shotGeometry relaxes its truncation share. */ judgedCut?: boolean;
   /** Spec 11: the GPU upscaler, used when the plan enlarges beyond its `minScale`; absent or null is the plain Lanczos path. */ upscaler?: Upscaler | null;
   /** Ids for the upscale log lines; never shown to an operator. */ trace?: { batchId?: string; productId?: string } }
-/** `upscale`: set only when the upscaler made this output's colour (flag `upscaled`); `model` goes into render_key, never into operator copy. */
-export interface RenderOutput { jpeg: Buffer | null; status: "ok" | "skipped" | "failed"; plan: CanvasPlan; quality: number; bytes: number; flags: OutputFlag[]; notes: string[]; attention: { why: string; what: string } | null; compliance: { ok: boolean; failures: string[] }; upscale?: { model: string; ms: number } }
+/**
+ * `upscale`: set only when the upscaler made this output's colour (flag `upscaled`); `model` goes into render_key, never
+ * into operator copy. `reused`: the photo's one x2 image was made for an earlier output (its `ms` is not a new call).
+ */
+export interface RenderOutput { jpeg: Buffer | null; status: "ok" | "skipped" | "failed"; plan: CanvasPlan; quality: number; bytes: number; flags: OutputFlag[]; notes: string[]; attention: { why: string; what: string } | null; compliance: { ok: boolean; failures: string[] }; upscale?: { model: string; ms: number; reused?: true } }
 /** `upscaler`: the upscaler model id, only when the upscaler made the output (the plain path keeps today's key). */
 export interface RenderKeyInputs { sourceSha256: string; channel: ChannelId; rulesVersion: string; policyId: string; policyUpdatedAt: string; n: number; upscaler?: string | null }
 
@@ -528,8 +531,8 @@ export async function renderSource(input: RenderInput): Promise<RenderOutput> {
     const rgba = Buffer.alloc(p.width * p.height * 4);
     for (let i = 0; i < matte.alpha.length; i++) { p.rgb.copy(rgba, i * 4, i * 3, i * 3 + 3); rgba[i * 4 + 3] = matte.alpha[i]!; }
     const crop = plan.sourceCrop ?? box;
-    // Spec 11: beyond the upscaler's threshold the colour comes from the GPU upscaler (x2, then Lanczos3 to the product
-    // size). The plain path is Lanczos3 plus a conservative sharpen of the colour (never the alpha) when the product is
+    // Spec 11: beyond the upscaler's threshold the colour comes from the GPU upscaler (the whole photo x2 once, shared by
+    // every channel of the photo, then this crop at doubled coordinates and Lanczos3 to the product size). The plain path is Lanczos3 plus a conservative sharpen of the colour (never the alpha) when the product is
     // enlarged; on the upscaled path the same sharpening runs on the upscaler's colour with the residual factor
     // (enlargement / 2) and the alpha stays the Lanczos3 alpha. Any upscale failure leaves `upscaled` null: the plain
     // path, byte for byte, with no flag (enhance.ts enlargeCutout).
@@ -538,7 +541,7 @@ export async function renderSource(input: RenderInput): Promise<RenderOutput> {
       ? await upscaledRgb(input.upscaler, p.rgb, p.width, crop, to, { ...input.trace, identifier: input.identifier, shot: shotNumber, channel: spec.id })
       : null;
     const cutout = await enlargeCutout({ rgba, rgb: p.rgb, width: p.width, height: p.height, crop, to, ...(enlarged ? { upscaled: enlarged.rgb } : {}) });
-    if (enlarged && input.upscaler) { result.flags.push("upscaled"); result.upscale = { model: input.upscaler.model, ms: enlarged.ms }; }
+    if (enlarged && input.upscaler) { result.flags.push("upscaled"); result.upscale = { model: input.upscaler.model, ms: enlarged.ms, ...(enlarged.reused ? { reused: true as const } : {}) }; }
     const cutoutAlpha = await sharp(cutout).extractChannel(3).raw().toBuffer();
     for (let y = 0; y < product.h; y++) cutoutAlpha.copy(foregroundMask, (product.y + y) * plan.w + product.x, y * product.w, (y + 1) * product.w);
     let shadow = await shadowLayer(p, matte, crop, plan, input.productType, color, foregroundMask);

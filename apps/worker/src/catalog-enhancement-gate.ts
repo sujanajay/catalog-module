@@ -59,13 +59,13 @@ async function loadManifest(flags: Flags): Promise<{ manifest: GoldenManifest; r
   return { manifest, read: async e => (await gcs.downloadBuffer(storage.toGsUri(storage.getBucketName(), goldenSourcePath(e)))).buf, source: uri };
 }
 
-async function callTwice(client: UpscaleClient, png: Buffer, model: string): Promise<{ calls: CallRecord[]; bytes: Buffer | null; deterministic: boolean | null; expected: { w: number; h: number } }> {
+async function callTwice(client: UpscaleClient, upload: Buffer, model: string): Promise<{ calls: CallRecord[]; bytes: Buffer | null; deterministic: boolean | null; expected: { w: number; h: number } }> {
   const calls: CallRecord[] = [], results: Buffer[] = [];
   const expected = { w: 0, h: 0 };
   for (let attempt = 0; attempt < 2; attempt++) {
     const started = performance.now();
     try {
-      const r = await client.upscale(png, model, UPSCALE_SCALE);
+      const r = await client.upscale(upload, model, UPSCALE_SCALE, "image/jpeg");
       if (!expected.w) { expected.w = r.width; expected.h = r.height; }
       calls.push({ ok: true, wallMs: r.wallMs, serviceMs: r.serviceMs });
       results.push(r.jpeg);
@@ -113,11 +113,11 @@ async function main() {
     const e = item.entry;
     const original = evenCrop(await decodeRaster(await read(e)));
     const geometry = photoGeometry(original);
-    const { raster: input, png } = await shrinkForGate(original);
+    const { raster: input, upload } = await shrinkForGate(original);
     const baseline: MethodMetrics = measureRestoration(original, geometry, await baselineUpscale(input));
     const record: PhotoRecord = { identifier: e.identifier, n: e.n, brand: e.brand, width: original.w, height: original.h, productShare: geometry.area.share, productMethod: geometry.area.method, baseline, candidates: {} };
     for (const model of candidates) {
-      const { calls, bytes, deterministic, expected } = await callTwice(client, png, model);
+      const { calls, bytes, deterministic, expected } = await callTwice(client, upload, model);
       let metrics: MethodMetrics | null = null;
       if (bytes) {
         if (expected.w !== original.w || expected.h !== original.h) { calls.forEach(c => { if (c.ok) { c.ok = false; c.error = `Response is ${expected.w}x${expected.h}, expected exactly ${original.w}x${original.h}.`; } }); }

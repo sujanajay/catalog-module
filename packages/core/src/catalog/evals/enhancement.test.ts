@@ -86,9 +86,9 @@ describe("metrics", () => {
 
   it("the baseline restores a 2x shrink to the original size and beats a plain blur", async () => {
     const a = evenCrop(source()), geometry = photoGeometry(a);
-    const { raster, png } = await shrinkForGate(a);
+    const { raster, upload } = await shrinkForGate(a);
     expect([raster.w, raster.h]).toEqual([200, 200]);
-    expect((await sharp(png).metadata()).format).toBe("png");
+    expect(await sharp(upload).metadata()).toMatchObject({ format: "jpeg", chromaSubsampling: "4:4:4" });
     const restored = await baselineUpscale(raster);
     expect([restored.w, restored.h]).toEqual([a.w, a.h]);
     const m = measureRestoration(a, geometry, restored), blur = measureRestoration(a, geometry, await blurred(a, 3));

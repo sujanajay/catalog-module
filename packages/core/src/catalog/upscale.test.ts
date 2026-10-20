@@ -72,11 +72,11 @@ describe("upscale decision", () => {
 });
 
 describe("render with the upscaler", () => {
-  it("sends the crop, takes the colour from the 2x answer, keeps the exact size and flags it", async () => {
+  it("sends the whole photo as JPEG 95 4:4:4, takes the colour from the 2x answer, keeps the exact size and flags it", async () => {
     const { prepared, matte } = fixture(), upscaler = fakeUpscaler();
     const out = await renderSource({ prepared, matte, channel: "trendyol", shotNumber: 2, productType: "other", upscaler, trace: { batchId: "b1", productId: "p1" } });
     expect(out.status).toBe("ok");
-    expect(upscaler.calls).toEqual([{ w: 400, h: 600, type: "image/png" }]);
+    expect(upscaler.calls).toEqual([{ w: 800, h: 1200, type: "image/jpeg" }]);
     const meta = await sharp(out.jpeg!).metadata();
     expect([meta.width, meta.height]).toEqual([1200, 1800]);
     expect(out.flags).toContain("upscaled");
@@ -85,6 +85,23 @@ describe("render with the upscaler", () => {
     expect(g).toBeGreaterThan(150); expect(r).toBeLessThan(60); expect(b).toBeLessThan(60);
     // The product notes are model-free; no sentence names the upscaler.
     expect(out.notes.join(" ")).not.toMatch(/esrgan|swinir/i);
+  });
+  it("calls the service once per photo, shared by every channel and re-render of that photo", async () => {
+    const { prepared, matte } = fixture(), upscaler = fakeUpscaler();
+    const sent: Buffer[] = [], spy: Upscaler = { model: upscaler.model, minScale: upscaler.minScale, upscale: async (image, type) => { sent.push(image); return upscaler.upscale(image, type); } };
+    const trendyol = await renderSource({ prepared, matte, channel: "trendyol", shotNumber: 1, productType: "other", upscaler: spy });
+    const centrepoint = await renderSource({ prepared, matte, channel: "centrepoint", shotNumber: 1, productType: "other", upscaler: spy });
+    const again = await renderSource({ prepared, matte, channel: "trendyol", shotNumber: 1, productType: "other", upscaler: spy });
+    expect(centrepoint.plan.scale).toBeGreaterThan(1.5);
+    for (const out of [trendyol, centrepoint, again]) expect(out.flags).toContain("upscaled");
+    expect(upscaler.calls).toHaveLength(1);
+    expect(await sharp(sent[0]!).metadata()).toMatchObject({ format: "jpeg", chromaSubsampling: "4:4:4", width: 800, height: 1200 });
+    expect(trendyol.upscale).toEqual({ model: MODEL, ms: 42 }); expect(centrepoint.upscale).toEqual({ model: MODEL, ms: 42, reused: true });
+    expect(again.jpeg!.equals(trendyol.jpeg!)).toBe(true);
+    // A failed call is not retried for the photo's other channels: they all take the plain path.
+    const { prepared: p2, matte: m2 } = fixture(), failing = fakeUpscaler(2, new Error("down"));
+    for (const channel of ["trendyol", "centrepoint"] as const) expect((await renderSource({ prepared: p2, matte: m2, channel, shotNumber: 1, productType: "other", upscaler: failing })).flags).not.toContain("upscaled");
+    expect(failing.calls).toHaveLength(1);
   });
   it("keeps the plain path, byte for byte, when the upscaler is off, below the threshold or failing", async () => {
     const { prepared, matte } = fixture();
@@ -114,6 +131,7 @@ describe("render with the upscaler", () => {
     for (let i = 0; i < matte.alpha.length; i++) { prepared.rgb.copy(rgba, i * 4, i * 3, i * 3 + 3); rgba[i * 4 + 3] = matte.alpha[i]!; }
     const plain = await sharp(rgba, { raw: { width: prepared.width, height: prepared.height, channels: 4 } }).extract({ left: crop.x, top: crop.y, width: crop.w, height: crop.h }).resize(size.w, size.h, { kernel: "lanczos3" }).png().toBuffer();
     const enlarged = await upscaledRgb(fakeUpscaler(), prepared.rgb, prepared.width, crop, size);
+    expect(enlarged!.reused).toBe(false);
     expect(enlarged!.rgb.length).toBe(size.w * size.h * 3);
     const mixed = await enlargeCutout({ rgba, rgb: prepared.rgb, width: prepared.width, height: prepared.height, crop, to: size, upscaled: enlarged!.rgb });
     const alpha = async (png: Buffer) => sharp(png).extractChannel(3).raw().toBuffer();

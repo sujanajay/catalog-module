@@ -24,6 +24,8 @@ import sharp from "sharp";
 import { GoogleAuth } from "google-auth-library";
 import { CHANNELS, MAX_UPSCALE, type ChannelSpec, type Size } from "../channels";
 import { NO_CUT, safeBoxFor, type BBox } from "../render";
+import { sharpenAfterEnlarge } from "../enhance";
+import { upscaleUpload } from "../upscale";
 import { borderMedian, decodeRaster, delta, dilate, dropSpecks, erode, lumaAt, maskCount, SPECK_PX, type Mask } from "./image";
 import type { Raster } from "./types";
 
@@ -49,7 +51,6 @@ export const TEXTURE_VARIANCE_FLOOR = 4;
 export const TEXT_REGION_PX = 128;
 export const TEXT_REGIONS = 3;
 export const HALO_BAND_PX = 3;
-export const BASELINE_SHARPEN_SIGMA = 0.9;
 
 /** The bars, per candidate (spec 11 D). */
 export const GATE_BARS = {
@@ -78,22 +79,26 @@ export function evenCrop(r: Raster): Raster {
 
 const rawSharp = (r: Raster) => sharp(r.rgb, { raw: { width: r.w, height: r.h, channels: 3 } });
 
-/** The gate's input: the original shrunk by `scale` with lanczos3, kept lossless (PNG) for the endpoint. */
-export async function shrinkForGate(original: Raster, scale = UPSCALE_SCALE): Promise<{ raster: Raster; png: Buffer }> {
+/**
+ * The gate's input: the original shrunk by `scale` with lanczos3, and the upload the render sends for it
+ * (upscale.ts upscaleUpload: JPEG quality 95, 4:4:4), so a candidate is measured on what production sends.
+ */
+export async function shrinkForGate(original: Raster, scale = UPSCALE_SCALE): Promise<{ raster: Raster; upload: Buffer }> {
   const w = Math.round(original.w / scale), h = Math.round(original.h / scale);
   const { data, info } = await rawSharp(original).resize(w, h, { fit: "fill", kernel: "lanczos3" }).raw().toBuffer({ resolveWithObject: true });
   const raster = { w: info.width, h: info.height, rgb: data };
-  return { raster, png: await rawSharp(raster).png().toBuffer() };
+  return { raster, upload: await upscaleUpload(raster.rgb, raster.w, raster.h) };
 }
 
 /**
- * Baseline restoration: lanczos3 enlargement plus an unsharp mask (sigma 0.9). Implemented here because
- * packages/core/src/catalog/enhance.ts (sharpenAfterEnlarge, another builder) is not in this branch;
- * integration can switch this one call to the shared helper.
+ * Baseline restoration, exactly the render's plain path (enhance.ts): lanczos3 enlargement, then
+ * sharpenAfterEnlarge(rgb, size, scale), the shared unsharp mask with the production parameters for this factor.
+ * The render applies that sharpening on the fully opaque product pixels; the gate measures the product area.
  */
 export async function baselineUpscale(input: Raster, scale = UPSCALE_SCALE): Promise<Raster> {
-  const { data, info } = await rawSharp(input).resize(input.w * scale, input.h * scale, { fit: "fill", kernel: "lanczos3" }).sharpen({ sigma: BASELINE_SHARPEN_SIGMA }).raw().toBuffer({ resolveWithObject: true });
-  return { w: info.width, h: info.height, rgb: data };
+  const size = { w: input.w * scale, h: input.h * scale };
+  const enlarged = await rawSharp(input).resize(size.w, size.h, { fit: "fill", kernel: "lanczos3" }).raw().toBuffer();
+  return { ...size, rgb: await sharpenAfterEnlarge(enlarged, size, scale) };
 }
 
 // --- Product area -----------------------------------------------------------------------------------
