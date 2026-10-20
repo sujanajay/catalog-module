@@ -304,7 +304,11 @@ describe("cut-out integrity guard in the matte stage (matte-guard.ts)", () => {
       // The card sentence first, then the render's band note where a cut side floats (Noon here): "Use as is"
       // publishes this fitted render, so the sheet's flush note must leave the photo out (gate 3f defect 2).
       expect(o.reason).toMatch(/^The background could not be removed from this photo\./);
-      if (o.channel === "noon") expect(hasCutBandNote(o.reason)).toBe(true);
+      expect(o.reason).not.toMatch(/[.!?];/);
+      if (o.channel === "noon") {
+        expect(o.reason).toMatch(/^The background could not be removed from this photo\. The original photo is cut at the /);
+        expect(hasCutBandNote(o.reason)).toBe(true);
+      }
       expect(o.qaScores).toMatchObject({ autoAction: "hold", holdCause: "unusable" });
       // The whole photo, fitted: never trimmed.
       expect(o.canvasH).toBeGreaterThan(0);

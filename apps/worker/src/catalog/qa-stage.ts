@@ -262,10 +262,11 @@ export async function applyTriage(deps:CatalogDeps,batch:Batch,productId:string,
    let patch:Partial<Output>;
    if(decision.action==="hold") {
     if(!decision.cause || decision.cause==="unchecked") continue;
-    // The render's band notes stay with the hold's reason: "Use as is" publishes this render, fitted, and the sheet's
-    // flush note (cutInSourceNote) must leave a photo out wherever its cut side does not sit flush (05 busy background).
+    // The render's band notes stay with the hold's reason, as plain sentences after the card sentence: "Use as is" publishes
+    // this render, fitted, and the sheet's flush note (cutInSourceNote) must leave a photo out wherever its cut side does
+    // not sit flush (05 busy background).
     const bands=(o.reason ?? "").split("; ").filter(note=>note.startsWith(CUT_BAND_NOTE_START));
-    patch={status:"needs_attention",flags:ordered,reason:scores && why ? [why,...bands].join("; "):o.reason ?? why};
+    patch={status:"needs_attention",flags:ordered,reason:scores && why ? [why,...bands].reduce((text,note)=>`${text}${/[.!?]$/.test(text) ? " ":"; "}${note}`):o.reason ?? why};
    } else if(decision.action==="drop" && leftOut) patch={status:"skipped",flags:ordered,reason:flagReason("chart_image")};
    else if(decision.action==="drop") patch={status:"skipped",flags:[...new Set<OutputFlag>([...ordered,"auto_dropped"])],reason:autoActionNote("drop",why ?? "")};
    else if(decision.action==="note") patch={status:"staged",flags:ordered,reason:autoActionNote("note",why ?? "")};
