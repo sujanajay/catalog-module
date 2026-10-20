@@ -7,6 +7,7 @@ import path from "node:path";
 import { promisify } from "node:util";
 import { expect, test, type Locator } from "@playwright/test";
 import sharp from "sharp";
+import { gitBashPath } from "@catalog/core/git-bash";
 import { cellUrls, readSheetTable } from "@catalog/core/catalog/ingest/links-sheet";
 import { parseShotName } from "@catalog/core/catalog/naming";
 import { buildZip } from "../../../../packages/core/test-fixtures/catalog/ingest-a/builders";
@@ -19,7 +20,7 @@ const MODEL_NAMES=/birefnet|rmbg|bria|inspyre|ben_custom|esrgan|swinir|gemini|cl
 /** Runs the predeployed catalog-test cleanup job for the batches this test created. */
 async function cleanup(ids:Set<string>){
   if(!ids.size)return;
-  const bash=process.platform==="win32"?path.join(process.env.LOCALAPPDATA!,"Programs/Git/bin/bash.exe"):"bash";
+  const bash=gitBashPath();
   const script=path.resolve(__dirname,"../../../../infra/catalog-test-cleanup.sh").replace(/\\/g,"/");
   await execute(bash,[script,...ids],{timeout:60*60_000,maxBuffer:1024*1024});
 }
