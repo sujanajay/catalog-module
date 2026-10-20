@@ -1,6 +1,6 @@
 import sharp from "sharp";
 import { describe, expect, it } from "vitest";
-import { backgroundRegion, BUSY_BORDER_MAX_SHARE, BUSY_EDGE_DENSITY_MIN, BUSY_PLAIN_EDGE_MAX, BUSY_PLAIN_TONES_MIN, busyBorderReading, busyBorderShare, checkMatteIntegrity, detectTextImage, heldInHand, keptBackground, passthroughMatte, readsAsScenery, resolveMatte, wholePhotoMatte, type MatteVariant } from "./matte-guard";
+import { backgroundRegion, BUSY_BORDER_MAX_SHARE, BUSY_EDGE_DENSITY_MIN, BUSY_PLAIN_EDGE_MAX, BUSY_PLAIN_TONES_MIN, busyBorderReading, busyBorderShare, checkMatteIntegrity, detectTextImage, heldInHand, keptBackground, passthroughMatte, readsAsScenery, recoverSoleStrip, resolveMatte, SOLE_STRIP_FEATHER_ALPHA, wholePhotoMatte, type MatteVariant } from "./matte-guard";
 import { hasCutBandNote } from "./channels";
 import { components } from "./evals/image";
 import { PASSTHROUGH_MODEL, renderSource, type Matte, type Prepared } from "./render";
@@ -457,5 +457,51 @@ describe("busy background is scenery, not a close-up whose mattes dropped the pr
     expect(output.flags).toContain("cut_in_source");
     expect(output.plan.sourceCrop).toEqual({ x: 0, y: 40, w: W, h: H - 80 });
     expect(hasCutBandNote(output.notes.join("; "))).toBe(true);
+  });
+});
+
+describe("coloured sole strip the matte drops (Anta bd-112625546-12 shot 5, eval run 3 M1)", () => {
+  // A grey upper on a black outsole on a white floor, x 60 to 339; under the outsole a lime strip (rows 441 to 447).
+  const shoe = (x: number, y: number, below: (y: number) => RGB | null): RGB => {
+    if (x < 60 || x >= 340) return [255, 255, 255];
+    if (y >= 250 && y < 400) return [clamp(150 + grain(x, y) / 4), 150, 150];
+    if (y >= 400 && y <= 440) return [30, 30, 32];
+    return below(y) ?? [255, 255, 255];
+  };
+  const lime = (y: number): RGB | null => y >= 441 && y <= 447 ? [130, 150, 20] : null;
+  // The same shoe with no strip and a floor reflection: a grey gap row, then a 2 px pink line.
+  const reflected = (y: number): RGB | null => y >= 441 && y <= 442 ? [204, 205, 204] : y >= 443 && y <= 444 ? [187, 108, 95] : null;
+  const keptTo = (bottom: number) => matteOf((x, y) => x >= 60 && x < 340 && y >= 250 && y <= bottom);
+  const at = (m: Buffer, x: number, y: number) => m[y * W + x]!;
+
+  it("gives back the lower rows of the strip, opaque, with a single 1 px feather", () => {
+    const p = image((x, y) => shoe(x, y, lime)), matte = keptTo(444);
+    const r = recoverSoleStrip(p, matte.alpha);
+    expect(r.recovered).toBe(280 * 3);
+    for (const x of [60, 200, 339]) {
+      expect([at(r.alpha, x, 445), at(r.alpha, x, 446)]).toEqual([255, 255]);
+      expect(at(r.alpha, x, 447)).toBe(SOLE_STRIP_FEATHER_ALPHA);
+      expect(at(r.alpha, x, 448)).toBe(0);
+    }
+    expect(at(matte.alpha, 200, 446)).toBe(0);
+  });
+
+  it("does not give back a reflection line under a grey gap, a floor, or a short coloured blob", async () => {
+    const p = image((x, y) => shoe(x, y, reflected));
+    expect(recoverSoleStrip(p, keptTo(440).alpha).changed).toBe(0);
+    expect(recoverSoleStrip(image((x, y) => shoe(x, y, () => null)), keptTo(440).alpha).changed).toBe(0);
+    // A coloured contact smudge 10 px wide (under 10% of the shoe's width) is not a strip along the sole.
+    const blob = image((x, y) => shoe(x, y, yy => x >= 200 && x < 210 && yy <= 446 ? [134, 67, 51] : null));
+    expect(recoverSoleStrip(blob, keptTo(440).alpha).changed).toBe(0);
+  });
+
+  it("runs on the winning matte for footwear only", async () => {
+    const p = image((x, y) => shoe(x, y, lime)), first = keptTo(444);
+    const footwear = await resolveMatte({ prepared: p, first, handRule: true, soleStrip: true, attempt: async () => null });
+    expect(footwear.soleStripRecovered).toBe(280 * 3);
+    expect(at(footwear.matte.alpha, 200, 446)).toBe(255);
+    const other = await resolveMatte({ prepared: p, first, handRule: true, attempt: async () => null });
+    expect(other.soleStripRecovered).toBe(0);
+    expect(other.matte.alpha).toBe(first.alpha);
   });
 });
