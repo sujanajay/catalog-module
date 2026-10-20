@@ -49,6 +49,12 @@ export const CHANNEL_SPECIFIC_FLAGS: ReadonlySet<string> = new Set(["placement",
 export const outputKey = (identifier: string, ch: ChannelId, n: number) => `${identifier}|${ch}|${n}`;
 const held = (o: AttentionOutputRow) => (o.status === "needs_attention" || o.status === "failed") && !o.decision;
 const problemFlags = (o: AttentionOutputRow) => o.flags.filter(f => !INFORMATION_FLAGS.has(f));
+/**
+ * Flags only the judge raises. A manifest entry detected by code may still list one (the candle Z011CB57531CA8FA0CBDDZ n=1:
+ * held by the render for `leftover_background`, and by the judge for `text_or_watermark`); on a mocked run that flag is
+ * neither required nor unexpected, the code-detected ones still are.
+ */
+export const JUDGE_ONLY_FLAGS: ReadonlySet<string> = new Set(["complete_product", "different_product", "halo", "text_or_watermark", "collage", "orientation"]);
 
 export function checkAttention(input: AttentionInput): AttentionSummary {
   const A = "attention" as const, results: CheckResult[] = [];
@@ -78,8 +84,8 @@ export function checkAttention(input: AttentionInput): AttentionSummary {
     expectedAttention++;
     if (product.expect.detector === "judge" && !input.liveJudge) { results.push(notRun("attention.expected", A, who, "This case is detected by the judge, which did not run live.")); continue; }
     const raised = new Set(rows.flatMap(o => o.flags));
-    const missing = product.expect.flags.filter(f => !raised.has(f));
-    const unexpected = [...new Set(problems.flatMap(problemFlags))].filter(f => !product.expect.flags.includes(f));
+    const missing = product.expect.flags.filter(f => !raised.has(f) && (input.liveJudge || !JUDGE_ONLY_FLAGS.has(f)));
+    const unexpected = [...new Set(problems.flatMap(problemFlags))].filter(f => !product.expect.flags.includes(f) && (input.liveJudge || !JUDGE_ONLY_FLAGS.has(f)));
     results.push(judge(isHeld && !missing.length && !unexpected.length, "attention.expected", A, who, `${isHeld ? "held" : "not held"}; flags ${[...raised].join(",") || "none"}`, `held with ${product.expect.flags.join(",")}`, "flags", !isHeld ? `Expected the pipeline to hold this product (${product.expect.flags.join(", ")}) but it went to the sheet.` : missing.length ? `Expected flags missing: ${missing.join(", ")}.` : unexpected.length ? `Unexpected flags: ${unexpected.join(", ")}.` : "Held with exactly the expected flags."));
   }
   if (plantedTotal && input.liveJudge) results.push(judge(plantedCaught === plantedTotal, "attention.planted_rate", A, all, `${plantedCaught} of ${plantedTotal}`, `${plantedTotal} of ${plantedTotal}`, "planted wrong items caught", "Every planted wrong item must be caught."));

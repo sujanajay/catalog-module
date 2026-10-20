@@ -133,21 +133,33 @@ export async function checkGeometry(ctx: OutputContext): Promise<CheckResult[]> 
     else out.push(judge(sideMin >= want - 1, "geometry.noon_wide", G, who, sideMin, want, "px", `Wide Noon shot keeps ${sideMin} px at the narrower side (needs ${want}).`));
   }
 
-  // Product pixels are copied, never regenerated: compare the output with the resampled source inside the product.
-  const sourceRgb = ctx.sourceRgb;
-  let sum = 0, count = 0, big = 0;
+  // Product pixels are copied, never regenerated: the output's opaque product pixels, averaged back onto the source grid
+  // (every canvas pixel into the source pixel it was resampled from), must equal the source there. Comparing on the
+  // source grid removes the resampling kernel from the number (eval run 3, anta: 8.4 on a fine knit at 1.85x with a 2
+  // luma fit error in an independent alignment, lanczos against bilinear, not an offset).
+  const { source } = ctx.subject, { sourceCrop } = ctx, sw = source.w, sh = source.h;
+  const sums = new Float64Array(sw * sh * 3), counts = new Uint32Array(sw * sh);
   for (let y = 0; y < productBox.h; y++) for (let x = 0; x < productBox.w; x++) {
     const cx = productBox.x + x, cy = productBox.y + y;
     if (cx < 0 || cy < 0 || cx >= canvas.w || cy >= canvas.h) continue;
     const ci = cy * canvas.w + cx;
     if (ctx.expectedAlpha[ci]! < 250) continue;
-    const pi = y * productBox.w + x;
-    const d = Math.max(Math.abs(canvas.rgb[ci * 3]! - sourceRgb[pi * 3]!), Math.abs(canvas.rgb[ci * 3 + 1]! - sourceRgb[pi * 3 + 1]!), Math.abs(canvas.rgb[ci * 3 + 2]! - sourceRgb[pi * 3 + 2]!));
+    const ix = Math.floor(sourceCrop.x + (x + 0.5) * sourceCrop.w / productBox.w), iy = Math.floor(sourceCrop.y + (y + 0.5) * sourceCrop.h / productBox.h);
+    if (ix < 0 || iy < 0 || ix >= sw || iy >= sh) continue;
+    const s = iy * sw + ix;
+    for (let c = 0; c < 3; c++) sums[s * 3 + c] = sums[s * 3 + c]! + canvas.rgb[ci * 3 + c]!;
+    counts[s] = counts[s]! + 1;
+  }
+  let sum = 0, count = 0, big = 0;
+  for (let s = 0; s < counts.length; s++) {
+    if (!counts[s]) continue;
+    let d = 0;
+    for (let c = 0; c < 3; c++) d = Math.max(d, Math.abs(sums[s * 3 + c]! / counts[s]! - source.rgb[s * 3 + c]!));
     sum += d; count++; if (d > 48) big++;
   }
   if (count) {
     const mean = sum / count;
-    out.push(judge(mean <= COPY_MEAN_DELTA && big / count <= 0.01, "geometry.pixels_copied", G, who, Math.round(mean * 10) / 10, COPY_MEAN_DELTA, "mean delta", `Product pixels differ from the source by ${mean.toFixed(1)} on average; ${(100 * big / count).toFixed(2)}% differ by more than 48.`));
+    out.push(judge(mean <= COPY_MEAN_DELTA && big / count <= 0.01, "geometry.pixels_copied", G, who, Math.round(mean * 10) / 10, COPY_MEAN_DELTA, "mean delta", `Product pixels differ from the source by ${mean.toFixed(1)} on average over ${count} source pixels; ${(100 * big / count).toFixed(2)}% differ by more than 48.`));
   } else out.push(notRun("geometry.pixels_copied", G, who, "No opaque product pixels to compare."));
   return out;
 }

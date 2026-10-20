@@ -55,14 +55,40 @@ describe("completeness", () => {
     const w = completenessWorld();
     for (const o of w.outputs.filter(row => row.n === 3)) Object.assign(o, { status: "needs_attention", isLive: false, generation: null, bytes: null, crc32c: null });
     for (const cell of w.sheet.filter(c => c.n === 3)) cell.url = null;
-    Object.assign(w.counts, { verified: 4, skipped: 2, recheckOk: 4, recheckTotal: 4 });
+    // A hold is per product: the siblings of the expected hold are staged as well, and every shot leaves the counts.
+    for (const o of w.outputs.filter(row => row.n !== 3 && row.status !== "skipped")) Object.assign(o, { status: "staged", isLive: false, generation: null, bytes: null, crc32c: null });
+    for (const cell of w.sheet) cell.url = null;
+    Object.assign(w.counts, { verified: 0, skipped: 2, recheckOk: 0, recheckTotal: 0 });
     w.heldExpected = new Set(["A|3"]);
     const results = checkCompleteness(w);
     expect(failed(results)).toEqual([]);
-    expect(results.filter(r => r.id === "completeness.held_unpublished")).toHaveLength(3);
-    expect(results.some(r => r.id === "completeness.live" && r.subject.n === 3)).toBe(false);
+    // The Styli rows under the minimum stay skips (the pipeline counts them as skipped), so 7 holds and 2 skips.
+    expect(results.filter(r => r.id === "completeness.held_unpublished")).toHaveLength(7);
+    expect(results.filter(r => r.id === "completeness.skip_allowed" && r.subject.channel === "styli")).toHaveLength(2);
+    expect(results.some(r => r.id === "completeness.live")).toBe(false);
+    expect(results.find(r => r.id === "completeness.held_unpublished" && r.subject.n === 1)?.detail).toContain("a sibling of the expected hold on image 3");
+    expect(results.find(r => r.id === "completeness.held_unpublished" && r.subject.n === 3)?.detail).toContain("(expected hold)");
     // Published after all: the hold is reported here as well as by attention.expected.
     w.outputs.find(o => o.n === 3 && o.channel === "noon")!.isLive = true;
+    expect(failed(checkCompleteness(w))).toEqual(["completeness.held_unpublished"]);
+  });
+  it("expects the siblings of an expected hold staged, not live (eval run 3: ZEE79259BBFD83FFA1DB0Z n=1/2/3/4/6 beside the held n=5)", () => {
+    const w = completenessWorld();
+    // Product B: two shots, the manifest expects n=2 held; the pipeline stages n=1 as well.
+    for (const n of [1, 2]) {
+      w.sources.push({ identifier: "B", n, width: 2000, height: 3000 });
+      for (const ch of w.channels) { w.outputs.push({ identifier: "B", n, channel: ch, status: n === 2 ? "needs_attention" : "staged", isLive: false, reason: null, generation: null, bytes: null, crc32c: null, publicUrl: `https://x/B/${ch}/B_${n}.jpg`, stagingUri: `gs://a/B/${ch}/${n}` }); w.sheet.push({ identifier: "B", channel: ch, n, url: null }); }
+    }
+    w.counts.outputs = 15;
+    w.heldExpected = new Set(["B|2"]);
+    const results = checkCompleteness(w);
+    expect(failed(results)).toEqual([]);
+    expect(results.filter(r => r.id === "completeness.held_unpublished" && r.subject.identifier === "B")).toHaveLength(6);
+    expect(results.some(r => r.id === "completeness.live" && r.subject.identifier === "B")).toBe(false);
+    expect(results.find(r => r.id === "completeness.counts_verified")?.threshold).toBe("7 verified, 2 skipped");
+    // A sibling that went live while its product is held is a fault, as the held shot itself would be.
+    const live = w.outputs.find(o => o.identifier === "B" && o.n === 1 && o.channel === "noon")!;
+    Object.assign(live, { status: "verified", isLive: true, generation: 7, bytes: 100, crc32c: "c" });
     expect(failed(checkCompleteness(w))).toEqual(["completeness.held_unpublished"]);
   });
   it("accepts a size chart left out on every channel with its note, and fails it without the note", () => {
@@ -94,6 +120,17 @@ describe("attention", () => {
     const outputs = [row("C", 1, "noon", { status: "needs_attention", flags: ["small_source", "matte_passthrough", "low_resolution"] }), row("C", 1, "amazon", { status: "needs_attention", flags: ["small_source", "matte_passthrough", "low_resolution"] })];
     const out = checkAttention({ products: [{ identifier: "C", change: "pending_attention", productType: "footwear", expect: { attention: true, flags: ["small_source"], detector: "code" } }], outputs, deterministicPass: new Set(), liveJudge: false, threshold: 75 });
     expect(out.results.find(r => r.id === "attention.expected")?.ok).toBe(true);
+  });
+  it("asserts a judge-only flag on a code-detected expectation only on a live run (the candle Z011CB57531CA8FA0CBDDZ n=1: leftover_background by code, text_or_watermark by the judge)", () => {
+    const expect_: Expectation = { attention: true, flags: ["leftover_background", "text_or_watermark"], detector: "code" };
+    const outputs = [row("K", 1, "noon", { status: "needs_attention", flags: ["leftover_background", "cut_in_source"] }), row("K", 1, "amazon", { status: "needs_attention", flags: ["leftover_background", "cut_in_source"] })];
+    const mocked = checkAttention({ products: [{ identifier: "K", change: "pending_attention", productType: "other", expect: expect_ }], outputs, deterministicPass: new Set(), liveJudge: false, threshold: 75 });
+    expect(mocked.results.find(r => r.id === "attention.expected")?.ok).toBe(true);
+    const live = checkAttention({ products: [{ identifier: "K", change: "pending_attention", productType: "other", expect: expect_ }], outputs, deterministicPass: new Set(), liveJudge: true, threshold: 75 });
+    expect(live.results.find(r => r.id === "attention.expected")?.detail).toContain("missing: text_or_watermark");
+    // The code-detected flag is still required on a mocked run, and a judge flag raised there is not unexpected.
+    const none = checkAttention({ products: [{ identifier: "K", change: "pending_attention", productType: "other", expect: expect_ }], outputs: [row("K", 1, "noon", { status: "needs_attention", flags: ["halo"] })], deterministicPass: new Set(), liveJudge: false, threshold: 75 });
+    expect(none.results.find(r => r.id === "attention.expected")?.detail).toContain("missing: leftover_background");
   });
   it("treats cut_in_source and numbering_gap as information on an expected hold (the 450 px copy of a cut photo)", () => {
     const flags = ["small_source", "cut_in_source", "numbering_gap", "low_resolution", "no_shadow_source"] as never[];

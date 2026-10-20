@@ -5750,9 +5750,11 @@
    "expect": {
     "attention": true,
     "flags": [
+     "leftover_background",
      "text_or_watermark"
     ],
-    "detector": "judge"
+    "detector": "code",
+    "reason": "A lifestyle candle photo with printed text: the render holds it for leftover_background (busy background under every policy, 6.6 to 12.7% scenery), and the live judge adds text_or_watermark."
    }
   },
   {

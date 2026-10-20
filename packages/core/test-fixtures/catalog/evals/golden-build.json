@@ -21,7 +21,7 @@
     "Z0DA2A6E440944B7C839CZ": { "category": "bag_accessory", "tags": ["thin_straps", "reflective"] },
     "Z1F829A98730668CEDED8Z": { "category": "bag_accessory", "tags": ["reflective"] },
     "Z27C907CCC5461A7057B5Z": { "category": "bag_accessory", "tags": ["thin_straps"] },
-    "Z011CB57531CA8FA0CBDDZ": { "category": "other", "tags": ["hardline", "text_or_watermark"], "expect": { "attention": true, "flags": ["text_or_watermark"], "detector": "judge" } },
+    "Z011CB57531CA8FA0CBDDZ": { "category": "other", "tags": ["hardline", "text_or_watermark"], "expect": { "attention": true, "flags": ["text_or_watermark"], "detector": "judge" }, "shots": { "1": { "expect": { "attention": true, "flags": ["leftover_background", "text_or_watermark"], "detector": "code", "reason": "A lifestyle candle photo with printed text: the render holds it for leftover_background (busy background under every policy, 6.6 to 12.7% scenery), and the live judge adds text_or_watermark." } } } },
     "Z02B2EE44E3A08044B816Z": { "category": "bag_accessory", "tags": ["reflective"] },
     "Z0D5EC39FD878FEBE85B0Z": { "category": "other", "tags": ["hardline"] },
     "ZEE79259BBFD83FFA1DB0Z": { "shots": { "5": { "expect": { "attention": true, "flags": ["leftover_background"], "detector": "code", "reason": "A lifestyle photo on a tennis court (non-uniform background): the background cannot be removed, so the render holds the product for a person." } } } },

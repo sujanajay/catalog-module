@@ -65,6 +65,12 @@ export interface OutputSubject {
   /** The render's notes on this output (catalog_outputs.reason: the notes joined with "; "), where the cut-band note lives. */
   reason?: string | null;
   expect: Expectation;
+  /**
+   * A planted wrong item (the golden manifest's `planted` entry): a photo of another product, often another type, processed
+   * under this product's rules to test the judge. Checks that describe the render of a real photo of this product
+   * (`cutout.halo`, `shadow.footprint`) are not run on it; `attention.planted_caught` judges it.
+   */
+  planted?: boolean;
 }
 
 export const pass = (id: string, group: CheckGroup, subject: CheckSubject, measured: CheckResult["measured"], threshold: CheckResult["threshold"], unit: string, detail: string): CheckResult => ({ id, group, subject, ok: true, status: "pass", measured, threshold, unit, detail });
