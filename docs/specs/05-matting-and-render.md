@@ -194,7 +194,10 @@ Any change to the maths in this file that alters output bytes must bump `CHANNEL
      outermost frame lines that are uniform and the colour of the outermost line (any colour: white,
      light grey); a band deeper than the thin border (3% of the frame) counts only when it ends on
      the real photo's edge (the photo background inside is another colour, or a thin side band shows
-     the photo's corner exactly there), up to 15% of the frame. The product must reach the band's
+     the photo's corner exactly there), or when the product is already cut by this rule on a
+     perpendicular side (the photo is a crop and the band is its padding: a model cut at the waist
+     and thighs inside a white band, also cut at the left edge), up to 15% of the frame. A cut found
+     through that perpendicular rule never unlocks another side. The product must reach the band's
      inner edge (allowing the matte's soft fade, 1% of the long side). Then two signals on the
      outermost product line: a straight edge (positions whose silhouette starts on that line within
      2 px and turns opaque, alpha >= 250, behind it; one run at least 2% of the side long) AND a

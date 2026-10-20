@@ -52,6 +52,16 @@ function standing(sole: "rounded" | "flat") {
   return { width, height, rgb, alpha };
 }
 
+// A model cut at the waist and thighs on pure white, padded by the brand with a 66 px white band top and bottom
+// (Penti Z10DE shot 1): the torso starts on row 66 and, with `leftCut`, runs off the left frame edge; two thighs end
+// on row 1133. Nothing but the product's own straight edges shows where the photo ended.
+function whiteBandCrop(leftCut: boolean) {
+  const width = 800, height = 1200, rgb = Buffer.alloc(width * height * 3, 255), alpha = Buffer.alloc(width * height);
+  const paint = (x0: number, x1: number, y0: number, y1: number) => { for (let y = y0; y <= y1; y++) for (let x = x0; x < x1; x++) { const i = y * width + x; alpha[i] = 254; rgb.set([200, 150, 120], i * 3); } };
+  paint(leftCut ? 0 : 60, 700, 66, 700); paint(120, 360, 701, 1133); paint(420, 660, 701, 1133);
+  return { prepared: { width, height, rgb, alphaSource: null, background: analyseBackground(rgb, width, height), flags: [], sourceMime: "image/jpeg" } satisfies Prepared, matte: { alpha, width, height, model: "synthetic", ms: 0, source: "model", target: "cpu", sentLongSide: null } satisfies Matte };
+}
+
 describe("cut in source", () => {
   it("finds a straight opaque cut inside the white border and trims the matte's fade beyond it", () => {
     const { matte } = cutModel(), shot = shotGeometry(matte.alpha, matte.width, matte.height)!;
@@ -90,6 +100,22 @@ describe("cut in source", () => {
     const shot = padded({ pad: [255, 255, 255], photo: [255, 255, 255], padDepth: 66 });
     expect(shotGeometry(shot.alpha, shot.width, shot.height, { rgb: shot.rgb })!.cut.bottom).toBe(false);
     expect(shotGeometry(shot.alpha, shot.width, shot.height, { rgb: shot.rgb, judgedCut: true })!.cut.bottom).toBe(true);
+  });
+  it("takes a deep band of the photo's own colour as the pad when the product is cut at a perpendicular frame edge", () => {
+    const crop = whiteBandCrop(true), { alpha, width, height } = crop.matte;
+    const geometry = shotGeometry(alpha, width, height, { rgb: crop.prepared.rgb })!;
+    expect(geometry.cut).toEqual({ top: true, bottom: true, left: true, right: false });
+    expect(geometry.box).toEqual({ x: 0, y: 66, w: 700, h: 1068 });
+    // Without a frame cut the same straight edges may be a flat-laid hem: the deep white band stays margin.
+    const framed = whiteBandCrop(false);
+    expect(shotGeometry(framed.matte.alpha, width, height, { rgb: framed.prepared.rgb })!.cut).toEqual(NO_CUT);
+  });
+  it.each(["noon", "namshi", "trendyol"] as const)("renders the white-band crop flush top and bottom on %s", async id => {
+    const output = await renderSource({ ...whiteBandCrop(true), channel: id, shotNumber: 1, productType: "apparel_model" });
+    expect(output.status).toBe("ok");
+    expect(output.compliance.failures).toEqual([]);
+    const box = output.plan.productBox!;
+    expect([box.y, box.y + box.h]).toEqual([0, output.plan.h]);
   });
   it("puts the cut flush with the canvas edge and keeps the other margins", () => {
     const { matte } = cutModel(), shot = shotGeometry(matte.alpha, matte.width, matte.height)!;
