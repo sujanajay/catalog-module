@@ -14,6 +14,7 @@ import { batchPrefix, productPrefix, assertTestPrefix } from "@catalog/core/cata
 import { lockProducts } from "@catalog/core/catalog/products";
 import { planChunks } from "@catalog/core/catalog/pipeline/plan-chunks";
 import { cleanupTestBatches } from "@catalog/core/catalog/test-cleanup";
+import { runUntilSettled, waitForCutOutDefault } from "@catalog/core/catalog/retry-chunk";
 import { pinnedFetch } from "@catalog/core/safe-url";
 import { PUBLIC_CACHE_WINDOW_MS } from "@catalog/core/catalog/pipeline/verify";
 import * as storage from "@catalog/core/storage";
@@ -38,9 +39,11 @@ export async function runRealFixture(db: Db, fixture: RealFixture, out: string, 
   const batches: CatalogBatch[] = [], plans = new Map<string, CanvasPlan>();
   const calls = { matte: 0, render: 0, copy: 0 };
   const base = workerCatalogDeps(db);
+  // The last chunk error, so a Cloud Tasks style retry can name its reason in the log.
+  let lastChunkError: string | undefined;
   // Observe the real operations without replacing their implementations.
   // The smoke never calls OpenRouter: the judge is mocked (07 tier 5); live checks run as catalog-qa-check.
-  const deps: CatalogDeps = { ...base, ...cannedQa, enqueue: async () => "local-real-run", log: (message, fields) => console.info(JSON.stringify({ message, ...fields })),
+  const deps: CatalogDeps = { ...base, ...cannedQa, enqueue: async () => "local-real-run", log: (message, fields) => { if (message === "chunk failed") lastChunkError = String(fields?.error); console.info(JSON.stringify({ message, ...fields })); },
     matteFor: async (...args) => { calls.matte++; return base.matteFor(...args); },
     renderAllChannels: async (...args) => { calls.render++; const result = await base.renderAllChannels(...args); for (const channel of args[2]) plans.set(`${args[3]?.identifier}|${args[3]?.shotNumber}|${channel}`, result[channel].plan); return result; },
     storage: { ...storage, stageCopyToPublic: async (...args) => { calls.copy++; return storage.stageCopyToPublic(...args); } } };
@@ -48,6 +51,8 @@ export async function runRealFixture(db: Db, fixture: RealFixture, out: string, 
   const snapshots: { label: string; rows: CatalogOutput[] }[] = [];
   let failure: unknown;
   try {
+    // The stack scales to zero; wait out a cold cut-out service once before the first chunk.
+    await waitForCutOutDefault(base.matting);
     const first = await batch(fixture.shots, fixture.urls, [...CHANNEL_IDS], "first");
     const original = await live(first);
     const pairs = await db.select().from(catalogBatchProducts).where(eq(catalogBatchProducts.batchId, first.id));
@@ -170,7 +175,7 @@ export async function runRealFixture(db: Db, fixture: RealFixture, out: string, 
     const chunks = planChunks(productIds.map(productId => ({productId,sourceCount:sources.filter(s => s.productId===productId).length})),25);
     for (const [index,plan] of chunks.entries()) {
       const [chunk] = await db.insert(catalogChunks).values({batchId:b.id,index,stage:"matte",productIds:plan.productIds}).returning();
-      for (let stage=0;stage<3;stage++) {const result=await handleChunkTask(deps,{chunkId:chunk!.id}); assert.equal(result.httpStatus,200,`Chunk failed: ${result.outcome}`);}
+      for (let stage=0;stage<3;stage++) {lastChunkError=undefined;const result=await runUntilSettled(()=>handleChunkTask(deps,{chunkId:chunk!.id}),{label:`chunk ${chunk!.id}`,reason:()=>lastChunkError}); assert.equal(result.httpStatus,200,`Chunk failed: ${result.outcome}`);}
       for (const productId of plan.productIds) {
         const result=await handlePublishTask(deps,{batchId:b.id,productId});
         // Name each unpublished output's reason; cleanup deletes the rows before anyone can look.

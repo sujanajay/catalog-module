@@ -23,6 +23,7 @@ import * as storage from "@catalog/core/storage";
 import { buildZip } from "../../../packages/core/test-fixtures/catalog/ingest-a/builders";
 import { workerCatalogDeps, type CatalogDeps } from "./catalog/deps";
 import { handleChunkTask } from "./catalog/chunk";
+import { runUntilSettled } from "@catalog/core/catalog/retry-chunk";
 import { handlePublishTask } from "./catalog/publish";
 import { cannedQa, liveQaEnabled } from "./catalog/qa-mock";
 import { localFixture, type RealFixture } from "./catalog-real-fixtures";
@@ -60,7 +61,7 @@ async function runBatch(db: Db, deps: CatalogDeps, fixture: RealFixture, run: st
   await db.update(catalogBatches).set({ status: "matting", startedAt: new Date(), counts: { ...b.counts, products: productIds.length, sources: sources.length, outputs: sources.length * CHANNELS.length } }).where(eq(catalogBatches.id, b.id));
   for (const [index, plan] of planChunks(productIds.map(productId => ({ productId, sourceCount: sources.filter(s => s.productId === productId).length })), 25).entries()) {
     const [chunk] = await db.insert(catalogChunks).values({ batchId: b.id, index, stage: "matte", productIds: plan.productIds }).returning();
-    for (let stage = 0; stage < 3; stage++) assert.equal((await handleChunkTask(deps, { chunkId: chunk!.id })).httpStatus, 200, "A chunk stage failed.");
+    for (let stage = 0; stage < 3; stage++) assert.equal((await runUntilSettled(() => handleChunkTask(deps, { chunkId: chunk!.id }), { label: `chunk ${chunk!.id}` })).httpStatus, 200, "A chunk stage failed.");
     for (const productId of plan.productIds) await handlePublishTask(deps, { batchId: b.id, productId });
   }
   return b.id;
