@@ -3,8 +3,8 @@
 This note is for you, the person who makes marketplace images with the catalog tool. Keep it open
 the first few times you use it. When something here does not match what you see, call Sujan.
 
-Parts marked "<filled by the manager after e2e>" are filled in once the tool has been tested end
-to end on the live site.
+The live address and the test results in section 16 come from the end-to-end test on the live
+site on 2026-10-20.
 
 ## 1. What the tool does
 
@@ -15,7 +15,8 @@ and one link per picture. You paste those links into the marketplace templates.
 
 ## 2. How to sign in
 
-1. Open the link: <filled by the manager after e2e> (the live address of the tool).
+1. Open the link: https://catalog-web-847405579637.asia-south1.run.app (the live address of the
+   tool).
 2. Google asks you to sign in. Use your @opptra.com account.
 3. You land on the catalog page.
 
@@ -50,6 +51,13 @@ Press "New batch". The steps are:
 3. "Where will these images go?": tick the marketplaces you need.
 4. "Start": a last check of what will be made, then press "Start processing".
 
+About brands:
+
+- "Test Brand" is for testing only. Its pictures go to a test area, never into a real brand's
+  reports or links. Do not use it for real work.
+- Anta is not in the brand list yet. Before the first real Anta batch, ask Sujan to add Anta as a
+  brand (the steps are in `docs/solutions/manual-brand.md`). Do not use "Test Brand" instead.
+
 Step 4 is a check, not a result. Before a large run, show the grouping of one or two rows to
 whoever asked for the images and confirm it is right. "Products found" counts identifiers, never
 files: a product with five photos is one product.
@@ -65,6 +73,22 @@ files: a product with five photos is one product.
 | "Could not start" | The batch stopped before making anything. The page says why. | Fix what it says and start again. If it happens twice, call Sujan. |
 
 ## 7. Resolving attention items
+
+A product waits for your decision only when:
+
+- a photo shows a different item from the product's other photos (checked twice);
+- a photo is a collage of several photos;
+- photo 1 cannot be used;
+- none of the photos can be used;
+- a file cannot be opened, or the quality check could not run (the last rows of the table below).
+
+Smaller problems are handled for you. A weaker photo that is not photo 1 is left out with a note
+in the sheet, or kept with a note.
+
+Photos that are already cut off at the frame edge (for example a model cropped at the thighs, or
+a face cut at the top) are not held. The tool places the cut edge flush against the edge of the
+picture, with no gap and no shadow under it, and adds a note in the sheet ("Photo N: already cut
+at the frame edge"). The tool never crops; if the cut matters, ask the brand for an uncut photo.
 
 Each card shows the original photo beside the made picture, and a sentence saying what looks
 wrong. You have three buttons:
@@ -171,6 +195,20 @@ product the agency charged. Products that did not change are not counted.
 A recording of a full run, from "New batch" to the downloaded sheet, including the attention
 buttons and a re-upload:
 
-<filled by the manager after e2e> (the recording, `docs/handover/catalog-walkthrough.gif`)
+`docs/handover/catalog-e2e-2026-10-20.gif`
 
-What the end-to-end test showed on the live site: <filled by the manager after e2e>
+What the end-to-end test showed on the live site (2026-10-20): all six flows passed.
+
+1. Sign-in: the @opptra.com account got in, and the People list shows each person's role.
+2. A new batch: 2 products, 8 photos, Noon and Amazon, from "New batch" to "Ready to download"
+   in about a minute.
+3. Links: the links open for anyone, "Links verified 16 of 16" matched "Independent re-check 16
+   of 16 OK", and the sheet downloaded with 16 links.
+4. A re-upload: the same links show the new pictures, and a removed photo's link stops working.
+5. Attention: "Use as is" kept the picture, "Remove this photo" emptied the cell with a note.
+6. The cost line shows the cost per product and for the batch.
+
+The test used Test Brand batches `8af822a4`, `706e67b4` and `e19b20f9`. One problem found during
+the test was fixed: an upload could get stuck at "Collecting files 0 of ?". Now the tool tries
+again by itself, and a batch stuck for 10 minutes shows a "Try again" button. Screenshots of each
+flow are kept with the test records.
