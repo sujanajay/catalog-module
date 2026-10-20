@@ -8,6 +8,13 @@
 //   node dist/catalog-load.js [--options 270] [--passes a,reupload,b] [--reupload-sample <k>]
 //     [--timeout-min 240] [--keep]
 //
+// Connection budget guard (docs/solutions/db-connection-budget.md): the driver refuses to start
+// unless DB_CONNECTION_BUDGET (set by infra/deploy.sh) shows the deployed worker, web and job pools
+// fit the shared Cloud SQL instance, and unless no other batch is mid-pipeline (a load must never
+// run alongside a gate run or another load: they share the same capped worker and connections).
+// The load's worker scale is capped by the worker's max-instances and the Tasks queue's
+// max-concurrent-dispatches, both set from that budget, not by the option count.
+//
 // Env fallbacks for the job: LOAD_OPTIONS, LOAD_PASSES ("a+reupload+b"), LOAD_REUPLOAD_SAMPLE,
 // LOAD_TIMEOUT_MIN, LOAD_KEEP=1. The full scale is --options 2700 (FULL_LOAD_OPTIONS).
 // Passes: a = Run A (P1 channels), reupload = one altered photo and one dropped shot on a sample of
@@ -24,6 +31,7 @@ import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { parseArgs } from "node:util";
 import { and, eq, inArray, isNotNull, sql } from "drizzle-orm";
+import { checkBudget, formatBudget, parseBudget } from "@catalog/core/db/budget";
 import { closeDb, getDb, type Db } from "@catalog/core/db/client";
 import { brandMaster, catalogBatches, catalogBatchProducts, catalogChunks, catalogOutputs, catalogProductEvents, catalogProducts, catalogSourceImages, catalogUploads, DEFAULT_BATCH_OPTIONS, spendDays } from "@catalog/core/db/schema";
 import { channel } from "@catalog/core/catalog/channels";
@@ -268,6 +276,24 @@ function markdown(report: Record<string, unknown>, passes: Record<string, Awaite
   return lines.join("\n") + "\n";
 }
 
+/** Throws unless the deployed connection budget fits; returns the line to log. */
+function budgetPreflight(env: NodeJS.ProcessEnv = process.env): string {
+  const text = env.DB_CONNECTION_BUDGET;
+  if (!text) throw new Error("DB_CONNECTION_BUDGET is not set: redeploy with infra/deploy.sh so the load can check the database connection budget before it starts.");
+  const budget = parseBudget(text);
+  const check = checkBudget(budget);
+  if (!check.fits) throw new Error(`The database connection budget is exceeded (${formatBudget(budget, check)}). Lower the worker's max instances or pools in infra/deploy.sh before a load run.`);
+  return formatBudget(budget, check);
+}
+
+const IN_FLIGHT = ["ingesting", "matting", "rendering", "qa", "publishing"] as const;
+
+/** Throws when any batch is mid-pipeline: a load never runs alongside a gate run or another load. */
+async function noOtherRunPreflight(db: Db) {
+  const busy = await db.select({ id: catalogBatches.id, status: catalogBatches.status }).from(catalogBatches).where(inArray(catalogBatches.status, [...IN_FLIGHT]));
+  if (busy.length) throw new Error(`${busy.length} batch(es) are still being processed (${busy.slice(0, 3).map(b => `${b.id} ${b.status}`).join(", ")}). Wait for them to finish before a load run.`);
+}
+
 async function main() {
   const { values } = parseArgs({ options: { options: { type: "string" }, passes: { type: "string" }, "reupload-sample": { type: "string" }, "timeout-min": { type: "string" }, keep: { type: "boolean" } } });
   const count = Number(values.options ?? process.env.LOAD_OPTIONS ?? DEFAULT_OPTIONS);
@@ -277,6 +303,8 @@ async function main() {
   const sample = Number(values["reupload-sample"] ?? process.env.LOAD_REUPLOAD_SAMPLE ?? reuploadSampleSize(count));
   const timeoutMs = Number(values["timeout-min"] ?? process.env.LOAD_TIMEOUT_MIN ?? 240) * 60_000;
   const keep = values.keep ?? process.env.LOAD_KEEP === "1";
+  log("connection budget", { budget: budgetPreflight() });
+  try { await noOtherRunPreflight(getDb()); } catch (error) { await closeDb(); throw error; }
   const run = `load-${randomUUID()}`, out = path.resolve(process.env.CATALOG_REAL_OUT ?? "var/catalog-test", run);
   await mkdir(out, { recursive: true });
 
