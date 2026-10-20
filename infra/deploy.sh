@@ -89,6 +89,7 @@ fi
 ENV_VARS="GCP_PROJECT=$PROJECT,REGION=$REGION,BUCKET=image-links-agent-assets,PUBLIC_BUCKET=image-links-agent-public"
 ENV_VARS+=",DB_HOST=$DB_HOST,DB_NAME=catalog,DB_USER=catalog_app"
 ENV_VARS+=",TASKS_QUEUE=$QUEUE,WORKER_URL=$WORKER_URL,WORKER_SA_EMAIL=$WORKER_SA"
+ENV_VARS+=",TASKS_INGEST_QUEUE=$QUEUE-ingest"
 # BQ_PROJECT is where the sync's query jobs run and its unqualified table and UDF names resolve.
 # image-links-agent is a temporary mirror of the warehouse masters (infra/bq-mirror.sh) until a
 # warehouse admin grants catalog-worker@ access to opptra-datawarehouse; then set this default back
@@ -119,7 +120,10 @@ WEB_MAX_INSTANCES=3
 WEB_DB_POOL_MAX=2
 MAX_CONCURRENT_JOBS=2
 JOB_DB_POOL_MAX=1
-TASKS_MAX_DISPATCHES=$((WORKER_MAX_INSTANCES * WORKER_CONCURRENCY))
+# The worker's slots are split between the two queues so they never exceed its capacity: the
+# ingest queue (new-batch setup) keeps INGEST_MAX_DISPATCHES slots free of batch processing.
+INGEST_MAX_DISPATCHES=2
+TASKS_MAX_DISPATCHES=$((WORKER_MAX_INSTANCES * WORKER_CONCURRENCY - INGEST_MAX_DISPATCHES))
 CATALOG_DB_LIMIT=$((DB_MAX_CONNECTIONS - DB_RESERVED_CONNECTIONS - ILA_DB_SHARE))
 CATALOG_DB_TOTAL=$((WORKER_MAX_INSTANCES * WORKER_DB_POOL_MAX + WEB_MAX_INSTANCES * WEB_DB_POOL_MAX + MAX_CONCURRENT_JOBS * JOB_DB_POOL_MAX))
 if [ "$CATALOG_DB_TOTAL" -gt "$CATALOG_DB_LIMIT" ]; then
@@ -261,15 +265,21 @@ fi
 
 # --- 6. Worker -----------------------------------------------------------------------
 echo "==> worker"
-if [ "${CATALOG_PREVIEW:-0}" = 1 ]; then
-  PREVIEW_QUEUES=$(gcv tasks queues list --location="$REGION" --filter="name:/$QUEUE" --format='value(name)')
-  if grep -qxF "projects/$PROJECT/locations/$REGION/queues/$QUEUE" <<<"$PREVIEW_QUEUES"; then
-    echo "==> tasks queue $QUEUE: SKIP"
+# Check-then-create the queues the env points at: the ingest queue always, so a deploy never sends
+# ingest tasks to a missing queue, and the main queue on preview (bootstrap.sh makes it otherwise).
+ENSURE_QUEUES="$QUEUE-ingest:$INGEST_MAX_DISPATCHES"
+[ "${CATALOG_PREVIEW:-0}" = 1 ] && ENSURE_QUEUES="$QUEUE:$TASKS_MAX_DISPATCHES $ENSURE_QUEUES"
+EXISTING_QUEUES=$(gcv tasks queues list --location="$REGION" --format='value(name)')
+for Q in $ENSURE_QUEUES; do
+  if grep -qxF "projects/$PROJECT/locations/$REGION/queues/${Q%%:*}" <<<"$EXISTING_QUEUES"; then
+    # Idempotent: keep the parallelism within the worker's capacity (connection budget above).
+    gcloud tasks queues update "${Q%%:*}" --location="$REGION" --max-concurrent-dispatches="${Q##*:}" >/dev/null
+    echo "==> tasks queue ${Q%%:*}: exists, max-concurrent-dispatches ${Q##*:}"
   else
-    gcloud tasks queues create "$QUEUE" --location="$REGION" \
-      --max-concurrent-dispatches="$TASKS_MAX_DISPATCHES" --max-attempts=5 --min-backoff=10s >/dev/null
+    gcloud tasks queues create "${Q%%:*}" --location="$REGION" \
+      --max-concurrent-dispatches="${Q##*:}" --max-attempts=5 --min-backoff=10s >/dev/null
   fi
-fi
+done
 gcloud run deploy "$WORKER_SERVICE" --quiet --image="$AR/worker:$TAG" --service-account="$WORKER_SA" \
   "$(auth_flag "$WORKER_SERVICE")" --cpu=2 --memory=2Gi --concurrency="$WORKER_CONCURRENCY" \
   --min-instances=0 --max-instances="$WORKER_MAX_INSTANCES" --timeout=900 "${NET[@]}" \

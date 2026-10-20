@@ -14,6 +14,11 @@ import { retryTransient, type RetryOptions } from "./retry";
  * retried here on transient failures (UNAVAILABLE, DEADLINE_EXCEEDED, connection resets, 429, 5xx):
  * 5 tries with 1, 2, 4 and 8 s waits. An unnamed task is tried once, so a retry never duplicates it.
  *
+ * New-batch setup (the ingest route: reading uploads and grouping them, wizard step 2) goes to its
+ * own queue when TASKS_INGEST_QUEUE is set, so it never waits behind a big batch's render, qa and
+ * publish tasks on TASKS_QUEUE. Unset, every route uses TASKS_QUEUE (the old single-queue behaviour).
+ * Both queues target the same worker URL with the same OIDC token.
+ *
  * Local dev (`TASKS_INLINE=1`): POSTs the same body straight to the worker, fire-and-forget,
  * so the caller (a web request) is not blocked on the task.
  */
@@ -28,6 +33,9 @@ export const TASK_ROUTES = [
 ] as const;
 
 export type TaskRoute = (typeof TASK_ROUTES)[number];
+
+/** Routes that run on the ingest queue (TASKS_INGEST_QUEUE) when it is configured. */
+export const INGEST_TASK_ROUTES: readonly TaskRoute[] = ["/tasks/catalog/ingest"];
 
 /** Minimal surface of `CloudTasksClient` we use - lets tests pass a fake. */
 export type TasksClientLike = Pick<CloudTasksClient, "createTask">;
@@ -88,6 +96,12 @@ export function tasksConfigFromEnv(env: NodeJS.ProcessEnv = process.env): TasksC
     workerUrl: required(env, "WORKER_URL").replace(/\/+$/, ""),
     serviceAccountEmail: required(env, "WORKER_SA_EMAIL"),
   };
+}
+
+/** The queue a route's tasks go to: the ingest queue for ingest routes when set, else TASKS_QUEUE. */
+export function queueForRoute(route: TaskRoute, env: NodeJS.ProcessEnv = process.env): string {
+  if (INGEST_TASK_ROUTES.includes(route) && env.TASKS_INGEST_QUEUE) return env.TASKS_INGEST_QUEUE;
+  return env.TASKS_QUEUE || DEFAULT_TASKS_QUEUE;
 }
 
 export function queuePath(cfg: Pick<TasksConfig, "project" | "region" | "queue">): string {
@@ -162,7 +176,7 @@ export async function enqueueTask(route: TaskRoute, body: Record<string, unknown
     return "inline";
   }
 
-  const cfg = tasksConfigFromEnv(env);
+  const cfg = { ...tasksConfigFromEnv(env), queue: queueForRoute(route, env) };
   const request = buildTaskRequest(route, body, cfg, opts);
   const name = (request.task as HttpTask).name;
   const create = async () => {
