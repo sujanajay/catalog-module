@@ -123,24 +123,18 @@ git pull
 
 ## 6. Start the run
 
-Run in the repo root:
+As of 2026-10-20 the programme is resumed, not started: specs 05 to 10 are merged and deployed,
+and the remaining steps are in docs/plans/2026-10-20-go-live-resume-2.md on branch
+docs/go-live-progress. That file holds the exact prompt to paste and the prerequisites the
+session installs itself (sections 1 to 4 above are then optional: the session does them).
+Run in any empty folder:
 
 ```powershell
 claude
 ```
 
-When Claude Code opens, paste this prompt exactly and press Enter:
-
-```text
-Execute docs/plans/2026-10-19-expedited-go-live.md as the manager. Source of truth for status is docs/PROGRESS.md; read it first and resume from it. Use Opus 5.5 for every subagent. You only coordinate; subagents build, test and fix. Follow docs/specs/00-execution-protocol.md except where the plan reduces testing. Do not ask me anything; log assumptions in PROGRESS.md. Merge PRs when CI is green and deploy with bash infra/deploy.sh as the plan says. Finish with the 00 section 10 report and the live URL.
-```
-
-The session reads the plan and `docs/PROGRESS.md`, then works through specs 05, 06 and 07, the
-end-to-end browser test, and specs 08 and 09. It merges and deploys as the plan says and updates
-`docs/PROGRESS.md` after every item. It may ask you to approve some commands the first time; the
-common ones are pre-approved in `.claude/settings.json`.
-
-To see where it is at any moment, open `docs/PROGRESS.md` in the repo root.
+Then paste the prompt from the section "Prompt to start the new session with" of that file.
+To see where the run is at any moment, open docs/PROGRESS.md on that branch.
 
 ## 7. What you may still need to do by hand
 

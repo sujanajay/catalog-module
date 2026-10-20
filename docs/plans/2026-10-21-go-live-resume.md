@@ -1,5 +1,7 @@
 # Go-live resume (hand-off between manager sessions)
 
+Superseded on 2026-10-20 by docs/plans/2026-10-20-go-live-resume-2.md (session 3, new machine).
+
 Written 2026-10-21 by the first manager session, which ran out of context. A fresh session
 resumes from this file plus `docs/PROGRESS.md` (the status source of truth, on branch
 `docs/go-live-progress`, worktree `C:\Users\Sujan AH\Desktop\catalog-module-wt\docs-progress`,
