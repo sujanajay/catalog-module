@@ -226,5 +226,8 @@ Status values: `todo`, `running`, `done`, `blocked`.
   `catalog-web-00012-z98`, `catalog-matting-00007-lm5`, `catalog-matting-gpu-00007-ghh`; all five jobs on the same image.
 - After the budget deploy (`e04d7ed`, 2026-10-20 05:16 UTC, PRs #44-#47): `catalog-worker-00014-bcw`,
   `catalog-web-00013-76h`, `catalog-matting-00008-65v`; worker max 4 instances, queue limit 8; jobs on the same image.
+- After the ingest-queue deploy (`eb01c99`, 2026-10-20 05:50 UTC, PR #48, the last deploy of session 2): `catalog-worker-00015-tsd`,
+  `catalog-web-00014-pv8`, `catalog-matting-00009-26r`, `catalog-matting-gpu-00009-fch`; Tasks queue `catalog` limit 6 and new queue `catalog-ingest` limit 2;
+  smoke passed (evidence `gs://image-links-agent-assets/catalog-test/smoke/linux-06e39bf7-aa8b-4ae5-a44f-1111f7649af1/smoke/`); jobs on the same image. Live = `origin/main`; session 3 needs no deploy before quality gate 3c.
 - IAP access for `domain:opptra.com` is granted at project level (WARN from deploy.sh; see
   `docs/solutions/catalog-iap.md`).
