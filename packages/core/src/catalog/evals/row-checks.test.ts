@@ -51,6 +51,20 @@ describe("completeness", () => {
     expect(ids).toContain("completeness.skip_allowed");
     expect(ids).toContain("completeness.sheet_cell");
   });
+  it("does not require an expected hold to be live or linked, and excludes it from the counts", () => {
+    const w = completenessWorld();
+    for (const o of w.outputs.filter(row => row.n === 3)) Object.assign(o, { status: "needs_attention", isLive: false, generation: null, bytes: null, crc32c: null });
+    for (const cell of w.sheet.filter(c => c.n === 3)) cell.url = null;
+    Object.assign(w.counts, { verified: 4, skipped: 2, recheckOk: 4, recheckTotal: 4 });
+    w.heldExpected = new Set(["A|3"]);
+    const results = checkCompleteness(w);
+    expect(failed(results)).toEqual([]);
+    expect(results.filter(r => r.id === "completeness.held_unpublished")).toHaveLength(3);
+    expect(results.some(r => r.id === "completeness.live" && r.subject.n === 3)).toBe(false);
+    // Published after all: the hold is reported here as well as by attention.expected.
+    w.outputs.find(o => o.n === 3 && o.channel === "noon")!.isLive = true;
+    expect(failed(checkCompleteness(w))).toEqual(["completeness.held_unpublished"]);
+  });
   it("accepts a size chart left out on every channel with its note, and fails it without the note", () => {
     const w = completenessWorld();
     for (const o of w.outputs.filter(row => row.n === 3)) Object.assign(o, { status: "skipped", isLive: false, reason: CHART_SKIP_NOTE, generation: null, bytes: null, crc32c: null, stagingUri: null });
@@ -75,6 +89,11 @@ describe("attention", () => {
     expect(out.falseHoldRate).toBe(1);
     expect(failed(out.results)).toEqual(expect.arrayContaining(["attention.not_held", "attention.expected", "attention.false_hold_rate"]));
     expect(out.results.find(r => r.id === "attention.not_held" && !r.ok)?.detail).toContain("image 1 for noon: halo (edge)");
+  });
+  it("treats a pass-through matte as information, not a problem flag", () => {
+    const outputs = [row("C", 1, "noon", { status: "needs_attention", flags: ["small_source", "matte_passthrough", "low_resolution"] }), row("C", 1, "amazon", { status: "needs_attention", flags: ["small_source", "matte_passthrough", "low_resolution"] })];
+    const out = checkAttention({ products: [{ identifier: "C", change: "pending_attention", productType: "footwear", expect: { attention: true, flags: ["small_source"], detector: "code" } }], outputs, deterministicPass: new Set(), liveJudge: false, threshold: 75 });
+    expect(out.results.find(r => r.id === "attention.expected")?.ok).toBe(true);
   });
   it("flags a judge false positive and a false different-product only on a live run, and catches planted items", () => {
     const flagged = { status: "needs_attention", flags: ["different_product"] as never[], reason: "no match", qaScores: { verdict: "flag", same_product: 20, reasons: ["looks different"] } };
@@ -112,6 +131,13 @@ describe("overwrite", () => {
     const after = [live("A", 1, "noon", 11), live("A", 1, "amazon", 2), live("A", 2, "amazon", 4), live("B", 1, "noon", 5), live("B", 1, "amazon", 6)];
     expect(failed(checkOverwrite({ ...base(), after }))).toEqual([]);
   });
+  it("counts the removed shot's live rows before the delivery, not one per selected channel", () => {
+    // Styli skipped the removed shot: it has no live row there, and the contract still holds.
+    const after = [live("A", 1, "noon", 11), live("A", 1, "amazon", 2), live("A", 2, "amazon", 4), live("B", 1, "noon", 5), live("B", 1, "amazon", 6)];
+    const results = checkOverwrite({ ...base(), after, selected: ["noon", "styli"] });
+    expect(failed(results)).toEqual([]);
+    expect(results.find(r => r.id === "overwrite.removed_not_live")?.measured).toBe("0 of 1");
+  });
   it("fails on a rewritten untouched output, a stale altered one, a surviving removed link and a missing report entry", () => {
     const after = [live("A", 1, "noon", 1), live("A", 1, "amazon", 22), live("A", 2, "noon", 3), live("A", 2, "amazon", 4), live("B", 1, "noon", 5), live("B", 1, "amazon", 6)];
     const ids = failed(checkOverwrite({ ...base(), after, report: { removedLinks: 0, notRefreshedChannels: [] } }));
@@ -136,6 +162,10 @@ describe("matte bake-off", () => {
     expect(winners.map(w => `${w.brand}/${w.category}`)).toEqual(["*/footwear", "anta/footwear"]);
     expect(winners[0]!.winner?.model).toBe("fast");
     expect(winners[0]!.margin).toBe(0);
+    // The composite is unbounded: a model that drops 12% of the consensus product scores above 1 and its margin is real.
+    const heavy = scoreModels([{ ...trial("heavy", "A", 0.002, 0.01), metrics: { ...trial("heavy", "A", 0.002, 0.01).metrics, consensusLoss: 0.12, consensusExtra: 0.02 } }]);
+    expect(heavy[0]!.composite).toBeCloseTo(10 * 0.002 + 3 * 0.01 + 0.02 + 1.2 + 0.2, 4);
+    expect(heavy[0]!.composite).toBeGreaterThan(1);
     const rows = policyRowsFor(winners, { batchIds: ["b1"], seen: { matte: [{ id: "fast", target: "cpu" }], judges: ["j"] }, existing: [{ brandSlug: "*", category: "footwear", qaModel: "prior-judge", threshold: 80, floor: 60, qaMode: "per_output", qaSampleRate: 1 }], minSources: 2 });
     expect(rows).toHaveLength(2);
     expect(rows.find(r => r.brandSlug === "*")).toMatchObject({ matteModel: "fast", qaModel: "prior-judge", threshold: 80, source: "bakeoff", evalBatchIds: ["b1"] });

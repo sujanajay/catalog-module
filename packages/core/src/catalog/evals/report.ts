@@ -5,7 +5,7 @@ import sharp from "sharp";
 import type { FlagRow } from "./attention";
 import type { CheckGroup, CheckResult } from "./types";
 
-export interface ReportThumb { identifier: string; n: number; channel: string; original: Buffer | null; output: Buffer | null }
+export interface ReportThumb { identifier: string; n: number; channel: string; original: Buffer | null; output: Buffer | null; /** Object path of the retained full-size output (catalog-test/evals/<run>/evidence/...), when kept. */ evidence?: string | null }
 export interface EvalReport {
   run: string; startedAt: string; finishedAt: string; mode: string;
   golden: { products: number; photos: number; brands: Record<string, number>; categories: Record<string, number>; tags: Record<string, number> };
@@ -70,7 +70,7 @@ export async function reportHtml(report: EvalReport, thumbs: ReportThumb[]): Pro
   for (const [k, fails] of grouped) {
     const [identifier, n, ch] = k.split("|");
     const t = thumbs.find(x => x.identifier === identifier && String(x.n) === n && x.channel === ch);
-    const pics = t && shown < MAX_THUMBS ? `${await thumb(t.original)} ${await thumb(t.output)}` : "";
+    const pics = t && shown < MAX_THUMBS ? `${await thumb(t.original)} ${await thumb(t.output)}${t.evidence ? `<br><small>full size: <code>${esc(t.evidence)}</code></small>` : ""}` : "";
     if (pics) shown++;
     rows.push(`<tr><td><b>${esc(identifier)}</b>${n ? ` image ${esc(n)}` : ""}${ch ? ` for ${esc(ch)}` : ""}</td><td>${pics}</td><td><ul>${fails.map(f => `<li><code>${esc(f.id)}</code>: ${esc(f.detail)} <i>(measured ${esc(f.measured)}, bar ${esc(f.threshold)} ${esc(f.unit)})</i></li>`).join("")}</ul></td></tr>`);
   }

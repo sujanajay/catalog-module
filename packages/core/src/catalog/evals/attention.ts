@@ -42,7 +42,7 @@ export interface AttentionSummary {
   plantedTotal: number;
 }
 
-export const INFORMATION_FLAGS: ReadonlySet<string> = new Set(["low_resolution", "no_shadow_source", "shadow_synthesised", "passthrough", "alpha_source", "qa_sampled_out"]);
+export const INFORMATION_FLAGS: ReadonlySet<string> = new Set(["low_resolution", "no_shadow_source", "shadow_synthesised", "passthrough", "matte_passthrough", "alpha_source", "qa_sampled_out"]);
 /** Flags that legitimately differ between channels of one photo (spec 07 decision scope). */
 export const CHANNEL_SPECIFIC_FLAGS: ReadonlySet<string> = new Set(["placement", "failed_compliance", "low_resolution", "passthrough"]);
 export const outputKey = (identifier: string, ch: ChannelId, n: number) => `${identifier}|${ch}|${n}`;

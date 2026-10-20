@@ -27,6 +27,12 @@ export interface SyntheticOptions {
   taper?: boolean;
   /** A light outlined mark with a diagonal stroke on the product (a logo), in source pixels. */
   logo?: { x: number; y: number; w: number; h: number };
+  /** A photographic contact shadow in the source: grey darkening under the product fading out over 40 rows (kept by the render). */
+  sourceShadow?: boolean;
+  /** A floor reflection in the source: 5 rows of the product colour faded towards the background under the product, outside the matte. */
+  reflection?: boolean;
+  /** A saturated lime sliver (8 rows) under the product that the matte drops: a lost sole part. */
+  sliver?: boolean;
 }
 
 /** Paints the source and the matte; the matte is exact (255 inside, 0 outside). */
@@ -48,6 +54,11 @@ export function syntheticSource(opts: SyntheticOptions = {}): { prepared: Prepar
     const { x: lx, y: ly, w: lw, h: lh } = opts.logo;
     for (let y = ly; y < ly + lh; y++) for (let x = lx; x < lx + lw; x++) if (x < lx + 4 || x >= lx + lw - 4 || y < ly + 4 || y >= ly + lh - 4 || Math.abs((x - lx) * lh - (y - ly) * lw) < 3 * lh) paint(x, y, [240, 240, 240]);
   }
+  // Painted on the source only (never in the matte): what the cut-out step sees under the product.
+  const under = (rows: number, colorAt: (row: number) => [number, number, number]) => { for (let row = 0; row < rows; row++) { const y = box.y + box.h + row; if (y >= height) break; for (let x = box.x + inset; x < box.x + box.w - inset; x++) { const i = (y * width + x) * 3, c = colorAt(row); rgb[i] = c[0]; rgb[i + 1] = c[1]; rgb[i + 2] = c[2]; } } };
+  if (opts.sourceShadow) under(40, row => { const v = Math.round(bg[0] * (1 - 0.35 * (1 - row / 40) ** 2)); return [v, v, v]; });
+  if (opts.reflection) under(5, () => [193, 109, 122]);
+  if (opts.sliver) under(8, () => [180, 255, 60]);
   if (opts.strap ?? !opts.cutTop) { const sx = box.x + Math.floor(box.w / 2); for (let y = box.y - 60; y < box.y; y++) for (let x = sx - 1; x <= sx + 1; x++) paint(x, y, [40, 40, 60]); box.y -= 60; box.h += 60; }
   const prepared: Prepared = { width, height, rgb, alphaSource: null, background: analyseBackground(rgb, width, height), flags: [], sourceMime: "image/jpeg" };
   const matte: Matte = { alpha, width, height, model: "synthetic", ms: 0, source: "model", target: "cpu", sentLongSide: null };

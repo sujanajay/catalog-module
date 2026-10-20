@@ -34,11 +34,12 @@ import { CHANNEL_IDS, type ChannelId, type OutputFlag, type ProductType } from "
 import { pinnedFetch } from "@catalog/core/safe-url";
 import * as storage from "@catalog/core/storage";
 import { assertLocked, checkAttention, checkCompleteness, checkIdentical, checkOverwrite, checkUniformScale, flagRows, outputKey, overwriteFailed, overwriteNotRun, planOverwrite, runImageChecks, type CheckResult, type Expectation, type OutputSubject } from "@catalog/core/catalog/evals/index";
+import { sourceKey } from "@catalog/core/catalog/evals/completeness";
 import { checkMatte, consensusMetrics } from "@catalog/core/catalog/evals/cutout";
 import { sheetNotes } from "@catalog/core/catalog/evals/sheet-notes";
 import { buildGolden, GOLDEN_MANIFEST_PATH, goldenCounts, goldenSourcePath, parseGolden, readGoldenBytes, serializeGolden, sha256, type GoldenBuild, type GoldenEntry, type GoldenManifest } from "@catalog/core/catalog/evals/golden";
 import { policyRowsFor, winnersByScope } from "@catalog/core/catalog/evals/matte-bakeoff";
-import { EVALS_PREFIX, parseSetRecord, parseSetsFlag, RUN_ID_PATTERN, selectSets, serializeSetRecord, setId, setRecordPath, setsPrefix, withEvalRetry, type SetRecord } from "@catalog/core/catalog/evals/progress";
+import { EVALS_PREFIX, EvidenceBudget, evidencePath, parseSetRecord, parseSetsFlag, RUN_ID_PATTERN, selectSets, serializeSetRecord, setId, setRecordPath, setsPrefix, withEvalRetry, type SetRecord } from "@catalog/core/catalog/evals/progress";
 import { buildReport, reportHtml, type ReportThumb } from "@catalog/core/catalog/evals/report";
 import { buildZip } from "../../../packages/core/test-fixtures/catalog/ingest-a/builders";
 import { workerCatalogDeps, type CatalogDeps } from "./catalog/deps";
@@ -186,6 +187,8 @@ async function cleanupSetBatches(db: Db, run: string, group: Group): Promise<voi
 interface RunContext {
   db: Db; deps: CatalogDeps; run: string; channels: ChannelId[];
   expectOf: Map<string, Expectation>; plantedOf: Map<string, { n: number; from: string }>;
+  /** `identifier|n` of the photos the manifest expects the pipeline to hold (code-detected always; judge-detected on a live run). */
+  heldExpected: Set<string>;
   work: { matte: number; render: number; copy: number };
   /** Deployed cut-out models for the bake-off; empty with --skip-bakeoff. */
   models: { id: string; target: "cpu" | "gpu" }[]; bakeoffSample: number;
@@ -222,14 +225,16 @@ async function runSet(ctx: RunContext, group: Group): Promise<SetRecord> {
     });
     const links = await readSheetLinks(xlsx), notes = await sheetNotes(xlsx);
     record.results.push(...checkCompleteness({
+      heldExpected: ctx.heldExpected,
       channels, sources: sources.map(s => ({ identifier: identifierOf(s.productId), n: s.n, width: s.width, height: s.height })),
       outputs: outputs.map(o => ({ identifier: identifierOf(o.productId), n: o.n, channel: o.channel, status: o.status, isLive: o.isLive, reason: o.reason, generation: o.generation, bytes: o.bytes, crc32c: o.crc32c, publicUrl: o.publicUrl, stagingUri: o.stagingUri })),
       publicHeads, stagingHeads, sheet: links.links.map(l => ({ identifier: strip(l.identifier), channel: l.channel, n: l.n, url: l.url })),
       sheetNotes: new Map([...notes].map(([id, note]) => [strip(id), note])), counts: { outputs: batch.counts.outputs, verified: batch.counts.verified, skipped: batch.counts.skipped, recheckOk: batch.counts.recheckOk, recheckTotal: batch.counts.recheckTotal },
     }));
 
-    // Image checks on every made output.
-    const byProduct = new Map<string, { n: number; scale: number; detailShot: boolean }[]>();
+    // Image checks on every made output. The full-size output of every image with a failing check is kept under the
+    // run (evidence) before cleanup deletes the set's objects, so a failure can be looked at afterwards.
+    const byProduct = new Map<string, { n: number; scale: number; detailShot: boolean }[]>(), evidence = new EvidenceBudget();
     await mapLimit(sources, 3, async source => {
       const identifier = identifierOf(source.productId), entry = group.entries.find(e => e.identifier === identifier && e.n === source.n);
       if (!entry || !source.matteUri) return;
@@ -244,12 +249,17 @@ async function runSet(ctx: RunContext, group: Group): Promise<SetRecord> {
         const checks = await runImageChecks(subject);
         record.results.push(...checks);
         if (checks.every(c => c.ok)) deterministicPass.add(outputKey(identifier, o.channel, source.n));
-        if (checks.some(c => !c.ok)) record.thumbs.push({ identifier, n: source.n, channel: o.channel, original: await shrink(raw), output: await shrink(jpeg) });
+        if (checks.some(c => !c.ok)) {
+          let kept: string | null = null;
+          if (evidence.take()) { kept = evidencePath(run, set, identifier, o.channel, source.n); assertTestPrefix(kept); await gcs.uploadBuffer(kept, jpeg, "image/jpeg"); }
+          record.thumbs.push({ identifier, n: source.n, channel: o.channel, original: await shrink(raw), output: await shrink(jpeg), evidence: kept });
+        }
         if (o.channel === "styli" && box) byProduct.set(identifier, [...byProduct.get(identifier) ?? [], { n: source.n, scale: Number(o.scale), detailShot: box.w / p.width > 0.85 || box.h / p.height > 0.85 }]);
       }
     });
     for (const [identifier, shots] of byProduct) record.results.push(checkUniformScale(identifier, shots));
     record.deterministicPass = [...deterministicPass];
+    if (evidence.kept) console.info(JSON.stringify({ message: "evals evidence kept", set, kept: evidence.kept, overCap: evidence.skipped, prefix: `gs://${storage.getBucketName()}/${EVALS_PREFIX}/${run}/evidence/${set}/` }));
 
     // Rows for the attention checks and the flag table.
     for (const o of outputs) record.attentionRows.push({ identifier: identifierOf(o.productId), n: o.n, channel: o.channel, status: o.status, flags: o.flags, reason: o.reason, qaScores: o.qaScores, qaModel: o.qaModel, decision: o.decision, compliance: o.compliance as { ok: boolean; failures: string[] } | null });
@@ -319,8 +329,15 @@ async function runCommand(db: Db, flags: Record<string, string | string[] | true
   const deps: CatalogDeps = { ...base, ...(live ? {} : cannedQa), enqueue: async () => "evals-inline", log: (message, fields) => console.info(JSON.stringify({ message, ...fields })),
     matteFor: async (...args) => { work.matte++; return base.matteFor(...args); }, renderAllChannels: async (...args) => { work.render++; return base.renderAllChannels(...args); },
     storage: { ...storage, stageCopyToPublic: async (...args) => { work.copy++; return storage.stageCopyToPublic(...args); } } };
-  const expectOf = new Map<string, Expectation>(), plantedOf = new Map<string, { n: number; from: string }>();
+  const expectOf = new Map<string, Expectation>(), plantedOf = new Map<string, { n: number; from: string }>(), heldExpected = new Set<string>();
   for (const e of manifest.entries) { expectOf.set(e.identifier, e.expect); if (e.planted) plantedOf.set(e.identifier, { n: e.n, from: e.planted.from }); }
+  // Photos the pipeline must hold: code-detected expectations always (the 450 px copies); judge-detected ones only on a
+  // live run, and for a planted product only the planted shot (its host shots go to the sheet).
+  for (const e of manifest.entries) {
+    if (!e.expect.attention) continue;
+    const planted = manifest.entries.some(x => x.identifier === e.identifier && x.planted);
+    if (e.expect.detector === "code" || (live && (!planted || e.planted))) heldExpected.add(sourceKey(e.identifier, e.n));
+  }
   // Sets: one test batch per (brand, category); the product type is forced so the shadow rule follows the golden category.
   const groups = new Map<string, Group>();
   for (const e of manifest.entries) {
@@ -345,7 +362,7 @@ async function runCommand(db: Db, flags: Record<string, string | string[] | true
   const { run: todo, skipped } = selectSets(all, stored, only);
   console.info(`evals: ${todo.length} set(s) to run${todo.length ? ` (${todo.join(", ")})` : ""}${skipped.length ? `; ${skipped.length} already done in ${run} (${skipped.join(", ")})` : ""}`);
   const models = flags["skip-bakeoff"] ? [] : [...new Map((await deps.matting.health()).models.map(m => [m.id, m])).values()].map(m => ({ id: m.id, target: m.target }));
-  const ctx: RunContext = { db, deps, run, channels: [...CHANNEL_IDS], expectOf, plantedOf, work, models, bakeoffSample: Number(str(flags["bakeoff-sample"]) ?? 40), skipOverwrite: flags["skip-overwrite"] === true, overwriteDone: [...stored.values()].some(r => r.status === "done" && r.overwriteRan) };
+  const ctx: RunContext = { db, deps, run, channels: [...CHANNEL_IDS], expectOf, plantedOf, heldExpected, work, models, bakeoffSample: Number(str(flags["bakeoff-sample"]) ?? 40), skipOverwrite: flags["skip-overwrite"] === true, overwriteDone: [...stored.values()].some(r => r.status === "done" && r.overwriteRan) };
   for (const id of todo) {
     const record = await runSet(ctx, groups.get(id)!);
     stored.set(id, record);
