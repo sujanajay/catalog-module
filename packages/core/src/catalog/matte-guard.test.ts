@@ -125,6 +125,58 @@ describe("close-up of a trim over skin (Penti Z91D419FC9238E844BF77Z_4)", () => 
   });
 });
 
+describe("close-up of a trim between skin and a plain garment panel (Penti Z91D419FC9238E844BF77Z_4, gate 3c)", () => {
+  // As above, but the dark green fabric right of the trim is smooth linen (as in the real photo), so the
+  // source alone takes it for background too: a smooth region touching the frame edge.
+  const trim = (x: number) => x >= 150 && x < 210;
+  const noise = (x: number, y: number) => grain(x, y) >> 3;
+  const panel = image((x, y) => y < 30 || y >= H - 30 ? [255, 255, 255] : x < 150 ? [226, 186, 168] : trim(x) ? [clamp(120 + grain(x, y) * 4), clamp(120 + grain(x, y) * 4), clamp(110 + grain(x, y) * 4)] : [clamp(12 + noise(x, y)), clamp(30 + noise(x, y)), clamp(32 + noise(x, y))]);
+  const inside = (y: number) => y >= 30 && y < H - 30;
+  const at = (m: Matte, x: number, y: number) => m.alpha[y * W + x];
+
+  it("treats the smooth fabric as a background candidate in the source", () => {
+    const region = backgroundRegion(panel);
+    expect(region.frameFilling).toBe(false);
+    expect(region.background[300 * W + 320]).toBe(1);
+  });
+
+  it("rejects a matte that keeps the skin and trim but cuts the fabric panel through", () => {
+    const ragged = matteOf((x, y) => inside(y) && x < 280);
+    const verdict = checkMatteIntegrity(panel, ragged, { handRule: false });
+    expect(verdict.ok).toBe(false);
+    expect(verdict.worstCellLoss).toBeGreaterThan(0.5);
+    expect(checkMatteIntegrity(panel, matteOf((_x, y) => inside(y)), { handRule: false }).ok).toBe(true);
+  });
+
+  it("ends in a pass-through that keeps skin, trim and the whole fabric panel", async () => {
+    // The live ladder: the first matte cuts the skin and keeps a sliver of the fabric, the padded one keeps the fabric and cuts the skin.
+    const first = matteOf((x, y) => inside(y) && ((x >= 150 && x < 240) || (x < 150 && y >= 350)));
+    const padded = matteOf((x, y) => inside(y) && (x >= 150 || y >= 300), "padded");
+    const resolved = await resolveMatte({ prepared: panel, first, handRule: false, attempt: async v => v === "padded_first" ? padded : null });
+    expect(resolved.passthrough).toBe(true);
+    for (const [x, y] of [[40, 100], [40, 400], [180, 300], [230, 100], [320, 300], [W - 1, 300], [380, H - 40]] as const) expect(at(resolved.matte, x, y)).toBe(255);
+    expect(at(resolved.matte, 200, 5)).toBe(0);
+    expect(at(resolved.matte, 200, H - 5)).toBe(0);
+  });
+
+  it("does not keep a coloured backdrop that no matte kept", () => {
+    // A product on a smooth pink wall, pasted on a white canvas: a good matte keeps the product only.
+    const studio = image((x, y) => y < 30 || y >= H - 30 ? [255, 255, 255] : inRect(x, y, 120, 150, 160, 300) ? [clamp(60 + grain(x, y)), clamp(50 + grain(x, y)), clamp(40 + grain(x, y))] : [clamp(230 + noise(x, y)), clamp(170 + noise(x, y)), clamp(180 + noise(x, y))]);
+    const good = matteOf((x, y) => inRect(x, y, 120, 150, 160, 300));
+    expect(checkMatteIntegrity(studio, good, { handRule: false }).ok).toBe(true);
+    const pass = passthroughMatte(studio, [good]);
+    expect(at(pass, 20, 300)).toBe(0);
+    expect(at(pass, 200, 300)).toBe(255);
+  });
+
+  it("does not take a white region kept on a white canvas for a panel", () => {
+    // A white garment on a white wall: the matte keeps half of one white smooth region; that region stays background.
+    const white = image((x, y) => inRect(x, y, 150, 200, 100, 200) ? [clamp(70 + grain(x, y)), clamp(70 + grain(x, y)), clamp(70 + grain(x, y))] : [250, 250, 250]);
+    const half = matteOf(x => x < 200);
+    expect(at(passthroughMatte(white, [half]), 20, 20)).toBe(0);
+  });
+});
+
 describe("size charts and text-only images", () => {
   /** A white page with a title, a table of rows of small dark glyphs and grid lines (the Penti size chart). */
   const chart = image((x, y) => {

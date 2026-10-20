@@ -190,27 +190,50 @@ const isSkin = (r: number, g: number, b: number) => r > 95 && g > 40 && b > 20 &
  * source to cut along: a jagged partial. The whole region is then product and must be kept.
  * Measured on 189 photos: without the skin condition a white product on a white backdrop, or a
  * beige cardigan on a light wall, joins the backdrop in one smooth region and would be rejected.
+ *
+ * The same holds for a plain garment panel (a smooth fabric beside a trim, running off the frame
+ * edge): a region the matte keeps at least SURFACE_KEPT_MIN of, whose kept part is not the source
+ * background colour and whose dropped part has the kept part's colour (mean within
+ * SURFACE_COLOUR_DELTA per channel), is one uniform surface too. A backdrop next to a product of
+ * another colour is cut along that colour edge, so its kept and dropped parts differ; a backdrop of
+ * the border colour never qualifies.
  */
 export const SURFACE_KEPT_MIN = 0.25;
 /** Share of the kept part, and of the dropped part, that must be skin. */
 export const SURFACE_SKIN_SHARE = 0.6;
 /** Only regions at least this share of the photo count (smaller ones are edge noise). */
 export const SURFACE_MIN_FRAME_SHARE = 0.01;
+/** A non-skin surface: the dropped part's mean colour is within this (per channel) of the kept part's. */
+export const SURFACE_COLOUR_DELTA = 24;
 
-/** The skin regions among the background candidates (inside any canvas strips) that this matte cuts through (see SURFACE_KEPT_MIN). */
+/** The skin regions and plain garment panels among the background candidates (inside any canvas strips) that this matte cuts through or keeps (see SURFACE_KEPT_MIN). */
 export function keptSurfaces(p: Pick<Prepared, "width" | "height" | "rgb">, alpha: Buffer, region: BackgroundRegion): Mask {
   const { width: w, height: h, rgb } = p, { x0, y0, x1, y1 } = region.rect, inner = new Uint8Array(w * h), out = new Uint8Array(w * h);
   if (region.frameFilling) return out;
   for (let y = y0; y <= y1; y++) for (let x = x0; x <= x1; x++) { const i = y * w + x; if (region.background[i]) inner[i] = 1; }
   const border = borderBackground(p).color, { labels, sizes } = components(inner, w, h), n = sizes.length;
   const kept = new Uint32Array(n), keptSkin = new Uint32Array(n), dropped = new Uint32Array(n), droppedSkin = new Uint32Array(n);
+  const keptSum = new Float64Array(n * 3), droppedSum = new Float64Array(n * 3);
   for (let i = 0; i < inner.length; i++) {
     const l = labels[i]!; if (!l) continue;
     const skin = delta(rgb, i, border) > SKIN_MIN_BACKGROUND_DELTA && isSkin(rgb[i * 3]!, rgb[i * 3 + 1]!, rgb[i * 3 + 2]!) ? 1 : 0;
-    if (alpha[i]! > 128) { kept[l]!++; keptSkin[l]! += skin; } else if (alpha[i]! <= GUARD_ALPHA_EDGE) { dropped[l]!++; droppedSkin[l]! += skin; }
+    if (alpha[i]! > 128) { kept[l]!++; keptSkin[l]! += skin; for (let c = 0; c < 3; c++) keptSum[l * 3 + c]! += rgb[i * 3 + c]!; }
+    else if (alpha[i]! <= GUARD_ALPHA_EDGE) { dropped[l]!++; droppedSkin[l]! += skin; for (let c = 0; c < 3; c++) droppedSum[l * 3 + c]! += rgb[i * 3 + c]!; }
   }
+  // A plain panel: the kept part is not the background colour and the dropped part (if any) has its colour.
+  const panel = (l: number) => {
+    const mean = (sum: Float64Array, count: number) => [0, 1, 2].map(c => sum[l * 3 + c]! / count);
+    const k = mean(keptSum, kept[l]!), far = Math.max(...k.map((v, c) => Math.abs(v - border[c]!))) > SKIN_MIN_BACKGROUND_DELTA;
+    if (!far || !dropped[l]) return far;
+    const d = mean(droppedSum, dropped[l]!);
+    return Math.max(...k.map((v, c) => Math.abs(v - d[c]!))) <= SURFACE_COLOUR_DELTA;
+  };
   const min = w * h * SURFACE_MIN_FRAME_SHARE, surface = new Uint8Array(n);
-  for (let l = 1; l < n; l++) surface[l] = sizes[l]! >= min && kept[l]! >= sizes[l]! * SURFACE_KEPT_MIN && keptSkin[l]! >= kept[l]! * SURFACE_SKIN_SHARE && droppedSkin[l]! >= dropped[l]! * SURFACE_SKIN_SHARE ? 1 : 0;
+  for (let l = 1; l < n; l++) {
+    if (sizes[l]! < min || kept[l]! < sizes[l]! * SURFACE_KEPT_MIN) continue;
+    const skin = keptSkin[l]! >= kept[l]! * SURFACE_SKIN_SHARE && droppedSkin[l]! >= dropped[l]! * SURFACE_SKIN_SHARE;
+    surface[l] = skin || panel(l) ? 1 : 0;
+  }
   for (let i = 0; i < inner.length; i++) if (surface[labels[i]!]) out[i] = 1;
   return out;
 }
@@ -271,7 +294,7 @@ export function checkMatteIntegrity(p: Pick<Prepared, "width" | "height" | "rgb"
   if (matte.source === "alpha_source") return { ok: true, worstCellLoss: 0, overallLoss: 0, handShare: 0, estimatePixels: 0, ...base, detail: "transparent source" };
   // Only the estimate's interior counts: a matte edge a few pixels inside the silhouette (fur, a soft
   // fabric edge) is a quality question for spec 10, not a lost product.
-  // Skin the matte cut through (keptSurfaces) is product: all of it counts.
+  // Skin or a plain garment panel the matte cut through (keptSurfaces) is product: all of it counts.
   const product = productEstimate(p, alpha, region), surfaces = keptSurfaces(p, alpha, region);
   for (let i = 0; i < product.length; i++) if (surfaces[i]) product[i] = 1;
   const estimate = erode(product, w, h, GUARD_INTERIOR_PX);
@@ -298,7 +321,7 @@ export function checkMatteIntegrity(p: Pick<Prepared, "width" | "height" | "rgb"
 /**
  * The ladder's last resort: the whole frame is product. Alpha is 255 everywhere except the source
  * background connected to the frame edge (the uniform border band and white space around the
- * product), which becomes 0, except skin that one of the `tried` model mattes cut through (keptSurfaces). Enclosed background is filled (no holes) and components smaller than
+ * product), which becomes 0, except skin or a plain garment panel that one of the `tried` model mattes cut through or kept (keptSurfaces). Enclosed background is filled (no holes) and components smaller than
  * PASSTHROUGH_KEEP_SHARE of the largest are dropped (no floating fragments); a frame-filling photo
  * keeps every pixel. The edge is softened inward only (sigma 1), which cannot open a hole and keeps
  * no source background; a frame edge stays fully opaque so the cut-in-source rule places it flush.
@@ -424,7 +447,7 @@ export async function resolveMatte(input: ResolveMatteInput): Promise<MatteResol
   const { prepared: p, first } = input, actions: AutoAction[] = [], trigger: OutputFlag[] = ["product_removed"];
   const record = (step: AutoAction["step"], result: AutoAction["result"], detail: string) => actions.push({ step, trigger: [...trigger], result, channels: [], rejudged: false, detail });
   if (first.source !== "model") return { matte: first, passthrough: false, actions };
-  // Every matte tried is kept: skin one of them cut through stays product in the pass-through.
+  // Every matte tried is kept: skin or a panel one of them cut through or kept stays product in the pass-through.
   const region = backgroundRegion(p), tried: Matte[] = [];
   const check = (m: Matte) => { tried.push(m); return checkMatteIntegrity(p, m, { handRule: input.handRule, region }); };
   const verdict = check(first);
