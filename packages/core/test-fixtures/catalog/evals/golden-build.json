@@ -24,6 +24,7 @@
     "Z011CB57531CA8FA0CBDDZ": { "category": "other", "tags": ["hardline", "text_or_watermark"], "expect": { "attention": true, "flags": ["text_or_watermark"], "detector": "judge" } },
     "Z02B2EE44E3A08044B816Z": { "category": "bag_accessory", "tags": ["reflective"] },
     "Z0D5EC39FD878FEBE85B0Z": { "category": "other", "tags": ["hardline"] },
+    "ZEE79259BBFD83FFA1DB0Z": { "shots": { "5": { "expect": { "attention": true, "flags": ["leftover_background"], "detector": "code", "reason": "A lifestyle photo on a tennis court (non-uniform background): the background cannot be removed, so the render holds the product for a person." } } } },
     "bd-112545502R-2": { "tags": ["thin_straps"] },
     "bd-162637307S-2": { "tags": ["white_on_white"] }
   },

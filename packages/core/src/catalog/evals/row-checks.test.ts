@@ -95,6 +95,12 @@ describe("attention", () => {
     const out = checkAttention({ products: [{ identifier: "C", change: "pending_attention", productType: "footwear", expect: { attention: true, flags: ["small_source"], detector: "code" } }], outputs, deterministicPass: new Set(), liveJudge: false, threshold: 75 });
     expect(out.results.find(r => r.id === "attention.expected")?.ok).toBe(true);
   });
+  it("treats cut_in_source and numbering_gap as information on an expected hold (the 450 px copy of a cut photo)", () => {
+    const flags = ["small_source", "cut_in_source", "numbering_gap", "low_resolution", "no_shadow_source"] as never[];
+    const outputs = [row("C", 1, "noon", { status: "needs_attention", flags }), row("C", 1, "amazon", { status: "needs_attention", flags })];
+    const out = checkAttention({ products: [{ identifier: "C", change: "pending_attention", productType: "apparel_model", expect: { attention: true, flags: ["small_source"], detector: "code" } }], outputs, deterministicPass: new Set(), liveJudge: false, threshold: 75 });
+    expect(out.results.find(r => r.id === "attention.expected")?.ok).toBe(true);
+  });
   it("flags a judge false positive and a false different-product only on a live run, and catches planted items", () => {
     const flagged = { status: "needs_attention", flags: ["different_product"] as never[], reason: "no match", qaScores: { verdict: "flag", same_product: 20, reasons: ["looks different"] } };
     const outputs = [row("A", 1, "noon"), row("A", 2, "noon", flagged), row("P", 1, "noon"), row("P", 2, "noon", flagged)];

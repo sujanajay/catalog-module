@@ -41,6 +41,8 @@ export interface Expectation {
   flags: OutputFlag[];
   /** Which component detects the expected flags: code (always asserted) or the judge (asserted only on a live run). */
   detector: "code" | "judge";
+  /** Why the manifest expects this (documentation for the report and the next reader; never asserted). */
+  reason?: string;
 }
 
 /** Everything the image checks need for one (source, channel) output. */
@@ -60,6 +62,8 @@ export interface OutputSubject {
   placement: OutputPlacement;
   flags: OutputFlag[];
   status: string;
+  /** The render's notes on this output (catalog_outputs.reason: the notes joined with "; "), where the cut-band note lives. */
+  reason?: string | null;
   expect: Expectation;
 }
 

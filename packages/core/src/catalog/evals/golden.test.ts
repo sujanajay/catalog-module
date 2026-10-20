@@ -22,14 +22,17 @@ describe("golden manifest", () => {
     const build: GoldenBuild = {
       roots: { shoes, tops, derived }, seed: 3,
       plans: [{ root: "shoes", brand: "anta", category: "footwear" }, { root: "tops", brand: "test_brand", category: "apparel_model", identifiers: ["T1"] }],
-      overrides: { S2: { tags: ["thin_straps"], expect: { attention: false } } },
+      overrides: { S2: { tags: ["thin_straps"], expect: { attention: false } }, T1: { shots: { "2": { tags: ["grey_background"], expect: { attention: true, flags: ["leftover_background"], detector: "code", reason: "a lifestyle photo" } } } } },
       derive: [{ from: "S1_1", op: "downscale_450", brand: "anta", category: "footwear" }, { from: "T1_2", op: "cut_bottom_15", brand: "test_brand", category: "apparel_model" }],
       plant: [{ into: "S1", from: "T1_1" }],
     };
     const writes = new Map<string, Buffer>();
     const manifest = await buildGolden(build, async (name, bytes) => { await writeFile(path.join(derived, name), bytes); writes.set(name, bytes); return name; });
     const counts = goldenCounts(manifest);
-    expect(counts).toMatchObject({ products: 6, photos: 10, brands: { anta: 4, test_brand: 2 }, planted: 1, expectedAttention: 2 });
+    expect(counts).toMatchObject({ products: 6, photos: 10, brands: { anta: 4, test_brand: 2 }, planted: 1, expectedAttention: 3 });
+    // A per-shot override expects a hold for that photo alone.
+    expect(manifest.entries.find(e => e.identifier === "T1" && e.n === 1)!.expect).toEqual({ attention: false, flags: [], detector: "code" });
+    expect(manifest.entries.find(e => e.identifier === "T1" && e.n === 2)!.expect).toEqual({ attention: true, flags: ["leftover_background"], detector: "code", reason: "a lifestyle photo" });
     const s2 = manifest.entries.find(e => e.identifier === "S2")!;
     expect(s2.tags).toEqual(expect.arrayContaining(["white_on_white", "thin_straps"]));
     expect(manifest.entries.find(e => e.identifier === "S1" && e.n === 2)!.tags).toContain("dark_product");
