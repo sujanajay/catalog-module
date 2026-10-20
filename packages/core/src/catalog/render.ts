@@ -8,7 +8,8 @@ import { BG_TOLERANCE, checkOutput } from "./compliance";
 export interface Prepared { width: number; height: number; rgb: Buffer; alphaSource: Buffer | null; background: { uniform: boolean; color: [number, number, number]; stdev: number }; flags: OutputFlag[]; sourceMime: string }
 export interface Matte { alpha: Buffer; width: number; height: number; model: string; ms: number; source: "model" | "alpha_source" | "floodfill"; target: "cpu" | "gpu" | null; sentLongSide: number | null }
 export interface BBox { x: number; y: number; w: number; h: number }
-export interface CanvasPlan { w: number; h: number; lowResolution: boolean; safeBox: BBox; scale: number; placedX: number; placedY: number; detailShot: boolean; sourceBox?: BBox; productBox?: BBox; cut?: CutEdges }
+export interface CanvasPlan { w: number; h: number; lowResolution: boolean; safeBox: BBox; scale: number; placedX: number; placedY: number; detailShot: boolean; sourceBox?: BBox; productBox?: BBox; cut?: CutEdges;
+  /** The part of `sourceBox` drawn: smaller only where a product cut on both ends of one axis fills it and the other axis is trimmed off its cut sides (cutFillScale). */ sourceCrop?: BBox }
 /** `canvas`: the product's one canvas on this channel (planProduct), so every angle shares one size. */
 export interface RenderInput { prepared: Prepared; matte: Matte; channel: ChannelId; shotNumber: number; productType: ProductType; uniformScale?: number; canvas?: Size; identifier?: string; publicObjectPath?: string; /** false forbids a synthesised shadow (05 rule 3); absent leaves the product-type rule. */ synthesiseShadow?: boolean;
   /** Below 1 shrinks the fitted product by this factor (the auto-resolve ladder's smaller fit); absent is 1. */ fitScale?: number;
@@ -215,6 +216,41 @@ export function shotGeometry(alpha: Buffer, width: number, height: number, opts:
   return { box: box.w > 0 && box.h > 0 ? box : tight, source: { w: width, h: height }, cut };
 }
 
+/**
+ * The most a product cut on both ends of one axis may lose off the other axis's cut sides so that it fills the
+ * axis it is cut on, as a share of the product box: a third covers the widest canvas mismatch (a square photo
+ * on the 2:3 Trendyol canvas, a 2:3 photo on a square canvas). Beyond it the product is fitted, never trimmed.
+ */
+export const CUT_FILL_MAX_TRIM = 1 / 3;
+
+/**
+ * The scale of a product in the safe box: fit, never crop (`min` of the two axes), except where the product is
+ * cut in the source on both ends of one axis and fitting would leave a band beside those cut edges. It then
+ * fills that axis, and the overflow on the other axis comes off that axis's cut sides only (never an uncut
+ * outline), by at most CUT_FILL_MAX_TRIM. A full-bleed photo (cut on all four sides) fills the safe box.
+ */
+export function cutFillScale(safe: Size, box: Size, cut: CutEdges): number {
+  const sw = safe.w / box.w, sh = safe.h / box.h, contain = Math.min(sw, sh);
+  const fills = (fill: number, other: number, otherBox: number) => 1 - other / (otherBox * fill) <= CUT_FILL_MAX_TRIM + 1e-9;
+  if (cut.top && cut.bottom && (cut.left || cut.right) && sh > sw && fills(sh, safe.w, box.w)) return sh;
+  if (cut.left && cut.right && (cut.top || cut.bottom) && sw > sh && fills(sw, safe.h, box.h)) return sw;
+  return contain;
+}
+
+/**
+ * The part of `box` drawn at `scale` into `safe`: where the scaled product overflows an axis (cutFillScale), the
+ * overflow comes off that axis's cut sides (split evenly when both are cut). Otherwise `box` itself.
+ */
+export function cutFillCrop(box: BBox, scale: number, safe: Size, cut: CutEdges): BBox {
+  const axis = (start: number, length: number, room: number, low: boolean, high: boolean): [number, number] => {
+    if (Math.round(length * scale) <= room || (!low && !high)) return [start, length];
+    const keep = Math.max(1, Math.min(length, Math.round(room / scale))), extra = length - keep;
+    return [start + (low && high ? Math.floor(extra / 2) : low ? extra : 0), keep];
+  };
+  const [x, w] = axis(box.x, box.w, safe.w, cut.left, cut.right), [y, h] = axis(box.y, box.h, safe.h, cut.top, cut.bottom);
+  return { x, y, w, h };
+}
+
 /** The canvas minus the channel's margins; a side cut in the source gets margin 0 so the cut sits flush with the canvas edge. */
 export function safeBoxFor(spec: ChannelSpec, canvas: Size, wide: boolean, cut: CutEdges = NO_CUT): BBox {
   const m = spec.margins, horizontal = !m.sidesOnlyWhenWide || wide;
@@ -242,12 +278,13 @@ function proportionalCanvas(spec: ChannelSpec, fraction: number, roundUp: boolea
 
 /**
  * `opts.canvas` (planProduct) raises an adaptive canvas to the product's one canvas on this channel;
- * `opts.cut` places each cut side flush with the canvas edge (margin 0 there, other margins kept);
+ * `opts.cut` places each cut side flush with the canvas edge (margin 0 there, other margins kept), and a
+ * product cut on both ends of an axis fills that axis (cutFillScale, cutFillCrop);
  * `opts.fitScale` (below 1) shrinks the product by that factor inside the same canvas.
  */
 export function planCanvas(spec: ChannelSpec, box: BBox, source: Size, opts: { uniformScale?: number | undefined; canvas?: Size | undefined; cut?: CutEdges | undefined; fitScale?: number | undefined }): CanvasPlan {
   const cut = opts.cut ?? NO_CUT, wide = box.w > box.h;
-  const fit = (size: Size) => { const safe = safeBoxFor(spec, size, wide, cut); return Math.min(safe.w / box.w, safe.h / box.h); };
+  const fit = (size: Size) => cutFillScale(safeBoxFor(spec, size, wide, cut), box, cut);
   const min = effectiveMinimum(spec), target = spec.targetCanvas;
   const lowResolution = fit(min) > MAX_UPSCALE;
   let size = target;
@@ -266,7 +303,7 @@ export function planCanvas(spec: ChannelSpec, box: BBox, source: Size, opts: { u
   // A cut side is anchored to its canvas edge; with both opposite sides cut, the bottom wins vertically and the product stays centred horizontally.
   const placedX = safeBox.x + (cut.left && !cut.right ? 0 : cut.right && !cut.left ? safeBox.w - w : Math.round((safeBox.w - w) / 2));
   const placedY = safeBox.y + (cut.bottom || (!cut.top && spec.anchor === "bottom-centre") ? safeBox.h - h : cut.top ? 0 : Math.round((safeBox.h - h) / 2));
-  return { ...size, safeBox, lowResolution, scale, placedX, placedY, detailShot, sourceBox: box, productBox: { x: placedX, y: placedY, w, h }, cut: { ...cut } };
+  return { ...size, safeBox, lowResolution, scale, placedX, placedY, detailShot, sourceBox: box, productBox: { x: placedX, y: placedY, w, h }, cut: { ...cut }, sourceCrop: cutFillCrop(box, scale, safeBox, cut) };
 }
 
 /**
@@ -298,6 +335,9 @@ export async function renderSource(input: RenderInput): Promise<RenderOutput> {
   }
   if (spec.uniformScaleDefault && !plan.detailShot && input.uniformScale !== undefined && input.uniformScale > plan.scale) result.notes.push("Could not keep the same size as the other angles without cutting; fitted instead");
   const color = backgroundFor(spec.id, shotNumber), product = plan.productBox!;
+  // The sheet says a cut edge sits flush with the edge of the image; name every cut side where it does not.
+  const floating = SIDES.filter(side => cut[side] && (side === "top" ? product.y : side === "bottom" ? plan.h - product.y - product.h : side === "left" ? product.x : plan.w - product.x - product.w) > 1);
+  if (floating.length) result.notes.push(`The original photo is cut at the ${floating.join(" and ")}, but on ${spec.label} the product cannot reach that edge of the image without trimming more of it, so a band shows there.`);
   const rgbColor = hexColor(color);
   const passthrough = p.sourceMime === "image/jpeg" && !p.alphaSource && !anyCut(cut) && (input.fitScale ?? 1) >= 1 && p.width === plan.w && p.height === plan.h && box.x >= plan.safeBox.x && box.y >= plan.safeBox.y && box.x + box.w <= plan.safeBox.x + plan.safeBox.w && box.y + box.h <= plan.safeBox.y + plan.safeBox.h && borderPixels(p.width, p.height).every(i => rgbColor.every((v, c) => Math.abs(p.rgb[i * 3 + c]! - v) <= BG_TOLERANCE));
   let image: Buffer;
@@ -309,10 +349,11 @@ export async function renderSource(input: RenderInput): Promise<RenderOutput> {
   } else {
     const rgba = Buffer.alloc(p.width * p.height * 4);
     for (let i = 0; i < matte.alpha.length; i++) { p.rgb.copy(rgba, i * 4, i * 3, i * 3 + 3); rgba[i * 4 + 3] = matte.alpha[i]!; }
-    const cutout = await sharp(rgba, { raw: { width: p.width, height: p.height, channels: 4 } }).extract({ left: box.x, top: box.y, width: box.w, height: box.h }).resize(product.w, product.h, { kernel: "lanczos3" }).png().toBuffer();
+    const crop = plan.sourceCrop ?? box;
+    const cutout = await sharp(rgba, { raw: { width: p.width, height: p.height, channels: 4 } }).extract({ left: crop.x, top: crop.y, width: crop.w, height: crop.h }).resize(product.w, product.h, { kernel: "lanczos3" }).png().toBuffer();
     const cutoutAlpha = await sharp(cutout).extractChannel(3).raw().toBuffer();
     for (let y = 0; y < product.h; y++) cutoutAlpha.copy(foregroundMask, (product.y + y) * plan.w + product.x, y * product.w, (y + 1) * product.w);
-    let shadow = await shadowLayer(p, matte, box, plan, input.productType, color, foregroundMask);
+    let shadow = await shadowLayer(p, matte, crop, plan, input.productType, color, foregroundMask);
     // Never a synthesised contact shadow on a photo cut in the source on any side (a bag held in a cropped hand, a
     // close-up filling the photo): nothing stands on a floor there, and the shadow below makes the centred product
     // look off-centre.

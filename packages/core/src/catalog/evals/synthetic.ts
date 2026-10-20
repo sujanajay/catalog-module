@@ -19,6 +19,10 @@ export interface SyntheticOptions {
   strap?: boolean;
   /** Extend the product to the bottom edge of the source frame (a cut source). */
   cutBottom?: boolean;
+  /** Extend the product to the top (left, right) edge of the source frame; `cutTop` drops the strap, which has no room. */
+  cutTop?: boolean; cutLeft?: boolean; cutRight?: boolean;
+  /** A cut side stops this many pixels short of the frame edge (the thin white border a brand pads a close-up with); 0 reaches the edge. */
+  pad?: number;
   /** Narrow the bottom quarter of the body by 12% each side, like a sole under an upper, so a contact shadow stays under the product. */
   taper?: boolean;
 }
@@ -28,13 +32,17 @@ export function syntheticSource(opts: SyntheticOptions = {}): { prepared: Prepar
   const width = opts.width ?? 800, height = opts.height ?? 800, bg = opts.bg ?? [255, 255, 255], color = opts.color ?? [160, 30, 50];
   // Copied: the strap and the cut extend the box, and callers share option objects across tests.
   const box = { ...(opts.box ?? { x: 200, y: 250, w: 400, h: 380 }) };
-  if (opts.cutBottom) box.h = height - box.y;
+  const pad = opts.pad ?? 0;
+  if (opts.cutBottom) box.h = height - pad - box.y;
+  if (opts.cutTop) { box.h += box.y - pad; box.y = pad; }
+  if (opts.cutRight) box.w = width - pad - box.x;
+  if (opts.cutLeft) { box.w += box.x - pad; box.x = pad; }
   const rgb = Buffer.alloc(width * height * 3), alpha = Buffer.alloc(width * height);
   for (let i = 0; i < width * height; i++) { rgb[i * 3] = bg[0]; rgb[i * 3 + 1] = bg[1]; rgb[i * 3 + 2] = bg[2]; }
   const paint = (x: number, y: number, c: [number, number, number]) => { const i = y * width + x; rgb[i * 3] = c[0]; rgb[i * 3 + 1] = c[1]; rgb[i * 3 + 2] = c[2]; alpha[i] = 255; };
   const inset = opts.taper ? Math.round(box.w * 0.12) : 0, taperFrom = box.y + Math.round(box.h * 0.75);
   for (let y = box.y; y < box.y + box.h; y++) for (let x = box.x + (y >= taperFrom ? inset : 0); x < box.x + box.w - (y >= taperFrom ? inset : 0); x++) paint(x, y, [color[0] + ((x + y) % 7) * 3, color[1] + (x % 5) * 2, color[2] + (y % 3) * 4]);
-  if (opts.strap ?? true) { const sx = box.x + Math.floor(box.w / 2); for (let y = box.y - 60; y < box.y; y++) for (let x = sx - 1; x <= sx + 1; x++) paint(x, y, [40, 40, 60]); box.y -= 60; box.h += 60; }
+  if (opts.strap ?? !opts.cutTop) { const sx = box.x + Math.floor(box.w / 2); for (let y = box.y - 60; y < box.y; y++) for (let x = sx - 1; x <= sx + 1; x++) paint(x, y, [40, 40, 60]); box.y -= 60; box.h += 60; }
   const prepared: Prepared = { width, height, rgb, alphaSource: null, background: analyseBackground(rgb, width, height), flags: [], sourceMime: "image/jpeg" };
   const matte: Matte = { alpha, width, height, model: "synthetic", ms: 0, source: "model", target: "cpu", sentLongSide: null };
   return { prepared, matte, box };

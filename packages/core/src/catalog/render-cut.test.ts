@@ -168,3 +168,69 @@ describe("shadow along a cut edge", () => {
     expect(raw.data[below]!).toBeGreaterThanOrEqual(0xe0 - 3);
   });
 });
+
+// A photo cut on the given sides inside a 10 px white border (the French Connection and Anta close-ups): an
+// opaque product `w` x `h` inside the border with a hard straight edge on every cut side; an uncut side is a wavy
+// outline 60 px inside the border (a hem or a sleeve), so it never reads as a cut.
+function photoCut(w: number, h: number, sides: Partial<Record<"top" | "bottom" | "left" | "right", boolean>>) {
+  const border = 10, width = w + 2 * border, height = h + 2 * border, inset = (cut?: boolean, i = 0) => cut ? 0 : 60 + Math.round(20 * Math.sin(i / 200) ** 2);
+  const rgb = Buffer.alloc(width * height * 3, 255), alpha = Buffer.alloc(width * height);
+  for (let y = border; y < border + h; y++) for (let x = border; x < border + w; x++) {
+    if (x < border + inset(sides.left, y) || x >= border + w - inset(sides.right, y) || y < border + inset(sides.top, x) || y >= border + h - inset(sides.bottom, x)) continue;
+    const i = y * width + x; alpha[i] = 254; rgb.set([40, 70, 140], i * 3);
+  }
+  const prepared: Prepared = { width, height, rgb, alphaSource: null, background: analyseBackground(rgb, width, height), flags: [], sourceMime: "image/jpeg" };
+  const matte: Matte = { alpha, width, height, model: "synthetic", ms: 0, source: "model", target: "cpu", sentLongSide: null };
+  return { prepared, matte };
+}
+
+describe("a product cut on both ends of an axis fills it", () => {
+  const ALL = { top: true, bottom: true, left: true, right: true };
+  it.each(["trendyol", "noon", "namshi"] as const)("renders a full-bleed photo wider than the %s canvas with no band beside any cut edge", async id => {
+    // 780 x 1068 (FC Z02B shot 1) on 2:3 Trendyol and 1:1.37 Noon/Namshi: fitting left a 157 px (Trendyol) band above the top cut.
+    const output = await renderSource({ ...photoCut(780, 1068, ALL), channel: id, shotNumber: 2, productType: "apparel_model" });
+    expect(output.compliance.failures).toEqual([]);
+    expect(output.flags).toContain("cut_in_source");
+    expect(output.notes).toEqual([]);
+    expect(output.plan.productBox).toEqual({ x: 0, y: 0, w: output.plan.w, h: output.plan.h });
+    // Every canvas edge row and column is product colour, not the grey canvas.
+    const raw = await sharp(output.jpeg!).raw().toBuffer({ resolveWithObject: true }), W = raw.info.width, H = raw.info.height;
+    const blue = (x: number, y: number) => raw.data[(y * W + x) * 3 + 2]! - raw.data[(y * W + x) * 3]! > 60;
+    for (const [x, y] of [[W >> 1, 0], [W >> 1, H - 1], [0, H >> 1], [W - 1, H >> 1]] as const) expect(blue(x, y), `${id} ${x},${y}`).toBe(true);
+  });
+  it("renders a square full-bleed close-up on the 2:3 Trendyol canvas flush top and bottom (Anta shots 4-5), trimming a third off its cut sides", () => {
+    const box = { x: 0, y: 0, w: 800, h: 800 }, plan = planCanvas(CHANNELS.trendyol, box, { w: 800, h: 800 }, { cut: ALL });
+    expect(plan.productBox).toEqual({ x: 0, y: 0, w: 1200, h: 1800 });
+    expect(plan.sourceCrop).toEqual({ x: 133, y: 0, w: 533, h: 800 });
+  });
+  it("trims only the cut side when the other side of that axis is an uncut outline", () => {
+    const box = { x: 10, y: 10, w: 780, h: 1068 }, cut = { top: true, bottom: true, left: true, right: false };
+    const plan = planCanvas(CHANNELS.trendyol, box, { w: 800, h: 1200 }, { cut });
+    expect(plan.productBox).toEqual({ x: 0, y: 0, w: 1200, h: 1800 });
+    // All of the overflow comes off the left (cut); the right outline ends where it did.
+    expect(plan.sourceCrop!.x + plan.sourceCrop!.w).toBe(box.x + box.w);
+    expect(plan.sourceCrop!.x).toBeGreaterThan(box.x);
+  });
+  it("never trims an uncut outline: cut top and bottom only, it is fitted and the output says the top does not reach the edge", async () => {
+    const source = photoCut(900, 1068, { top: true, bottom: true });
+    const output = await renderSource({ ...source, channel: "trendyol", shotNumber: 2, productType: "apparel_model" });
+    expect(output.compliance.failures).toEqual([]);
+    expect(output.plan.cut).toEqual({ top: true, bottom: true, left: false, right: false });
+    expect(output.plan.sourceCrop).toEqual(output.plan.sourceBox);
+    expect(output.plan.productBox!.y + output.plan.productBox!.h).toBe(output.plan.h);
+    expect(output.notes).toEqual(["The original photo is cut at the top, but on Trendyol the product cannot reach that edge of the image without trimming more of it, so a band shows there."]);
+  });
+  it("never trims more than a third: a very wide strip cut top and bottom is fitted", () => {
+    const box = { x: 0, y: 0, w: 1200, h: 300 }, plan = planCanvas(CHANNELS.trendyol, box, { w: 1200, h: 300 }, { cut: ALL });
+    expect(plan.sourceCrop).toEqual(box);
+    expect(plan.productBox!.w).toBe(1200);
+  });
+  it("leaves an uncut product exactly as before: fitted, nothing trimmed", () => {
+    const box = { x: 100, y: 100, w: 600, h: 900 };
+    for (const id of ["noon", "namshi", "trendyol", "amazon", "styli"] as const) {
+      const plan = planCanvas(CHANNELS[id], box, { w: 1000, h: 1200 }, {});
+      expect(plan.sourceCrop, id).toEqual(box);
+      expect(plan.scale, id).toBeCloseTo(Math.min(plan.safeBox.w / box.w, plan.safeBox.h / box.h), 12);
+    }
+  });
+});

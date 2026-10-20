@@ -175,6 +175,43 @@ describe("cut sources", () => {
     const uncut = checkCutEdge(await ctxOf(await syntheticSubject("noon", 1, "apparel_model")));
     expect(uncut[0]?.status).toBe("not_run");
   }, 30_000);
+  // Uncut sides of these sources sit deeper than 15% of the frame, so the render's pad-band rule never reads them as cut.
+  it("is flush top and bottom on the 2:3 Trendyol canvas when the photo is cut on both, with nothing trimmed", async () => {
+    // A 1:4 product cut top and bottom fits the 2:3 canvas by height: both cut edges reach the canvas and the trim is 0.
+    const sub = await syntheticSubject("trendyol", 1, "apparel_model", { width: 800, height: 1200, box: { x: 250, y: 100, w: 300, h: 1000 }, cutTop: true, cutBottom: true });
+    const results = await runImageChecks(sub);
+    expect(failed(results)).toEqual([]);
+    for (const id of ["cut_edge.flush_top", "cut_edge.flush_bottom", "cut_edge.trim"]) expect(ids(results, id)[0]?.status, id).toBe("pass");
+    expect(ids(results, "cut_edge.trim")[0]?.measured).toBe(0);
+  }, 30_000);
+  it("accepts a square full-bleed close-up filling the 2:3 Trendyol canvas with a third trimmed off its cut sides, and bounds the trim", async () => {
+    // The Anta close-ups: 800 x 800 inside a 10 px white border, cut on all four sides.
+    const square = { width: 800, height: 800, box: { x: 100, y: 100, w: 600, h: 600 }, cutTop: true, cutBottom: true, cutLeft: true, cutRight: true, pad: 10 };
+    const sub = await syntheticSubject("trendyol", 1, "apparel_model", square);
+    const results = await runImageChecks(sub);
+    expect(failed(results)).toEqual([]);
+    for (const side of ["top", "bottom", "left", "right"]) expect(ids(results, `cut_edge.flush_${side}`)[0]?.ok, side).toBe(true);
+    const trim = ids(results, "cut_edge.trim")[0];
+    expect(trim?.ok).toBe(true);
+    expect(trim?.measured).toBeCloseTo(1 / 3, 2);
+    // The pipeline records a larger scale than the canvas has room for: more than a third would be trimmed.
+    const tooMuch = checkCutEdge(await ctxOf({ ...sub, placement: { ...sub.placement, scale: sub.placement.scale * 1.2 } }));
+    expect(ids(tooMuch, "cut_edge.trim")[0]?.ok).toBe(false);
+    expect(ids(tooMuch, "cut_edge.trim")[0]?.detail).toContain("at most a third");
+  }, 60_000);
+  it("fails flush when the render fits a photo cut top and bottom and leaves a band beside the top cut, and fails trim when a placement would trim the uncut sides instead", async () => {
+    // Wider than 2:3 and cut only top and bottom: the render may not trim the uncut sides, so it fits by width and a band sits above the top cut.
+    const sub = await syntheticSubject("trendyol", 1, "apparel_model", { width: 1000, height: 800, box: { x: 200, y: 100, w: 600, h: 600 }, cutTop: true, cutBottom: true });
+    const results = checkCutEdge(await ctxOf(sub));
+    expect(ids(results, "cut_edge.trim")[0]?.ok).toBe(true);
+    expect(ids(results, "cut_edge.flush_bottom")[0]?.ok).toBe(true);
+    expect(ids(results, "cut_edge.flush_top")[0]?.ok).toBe(false);
+    // A placement that fills the height instead (what a render trimming the uncut left and right would record) fails on the
+    // placement alone: the extent and pixel checks cannot tell a trimmed flat texture apart, so trim is the guard.
+    const wrongSide = checkCutEdge(await ctxOf({ ...sub, placement: { ...sub.placement, scale: sub.placement.h / 800, placedY: 0 } }));
+    expect(ids(wrongSide, "cut_edge.trim")[0]?.ok).toBe(false);
+    expect(ids(wrongSide, "cut_edge.trim")[0]?.detail).toContain("not cut at the left or right");
+  }, 60_000);
   it("fails no_line when a floating line sits under the cut", async () => {
     const amazon = await syntheticSubject("amazon", 1, "apparel_model", { width: 1600, height: 2400, box: { x: 500, y: 300, w: 600, h: 1000 }, cutBottom: true });
     const ctx = await ctxOf(amazon);

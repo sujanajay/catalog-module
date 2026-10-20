@@ -122,7 +122,7 @@ export async function checkGeometry(ctx: OutputContext): Promise<CheckResult[]> 
   }
 
   // Product pixels are copied, never regenerated: compare the output with the resampled source inside the product.
-  const sourceRgb = await projectRgb(s.source, ctx.sourceBox, productBox);
+  const sourceRgb = await projectRgb(s.source, ctx.sourceCrop, productBox);
   let sum = 0, count = 0, big = 0;
   for (let y = 0; y < productBox.h; y++) for (let x = 0; x < productBox.w; x++) {
     const cx = productBox.x + x, cy = productBox.y + y;
