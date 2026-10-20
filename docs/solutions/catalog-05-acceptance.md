@@ -1,6 +1,6 @@
 # Spec 05 acceptance and access follow-ups
 
-Status reconciled 2026-10-20 08:28 UTC. Historical test evidence and current deployed acceptance are tracked separately.
+Status reconciled 2026-10-20 after local archive verification. Historical test evidence and current deployed acceptance are tracked separately.
 
 The product owner authorized continuing through specs 06 and 07 and merging reviewed code when its code checks pass. Checks blocked by organization access may carry forward explicitly. This does not authorize bypassing runtime authentication or the public-image smoke gate, and does not make deferred checks pass.
 
@@ -20,7 +20,21 @@ Cloud Build `1ac2bc2a-f937-4cc5-bcb2-e9d9875bdec3` in `us-central1` ran from 202
 
 The completed French Connection render reported 29,520 planned outcomes: 26,238 compliant JPEGs, 3,280 documented Styli skips and two `failed_compliance` outcomes. The Anta dataset test and the 100-source CPU benchmark passed. Because the French Connection CLI returned exit 1, that dataset's subsequent independent report checks and private upload-sample checks did not run. These are not passing acceptance results.
 
-The private results archive is `catalog-test/render-05-1792340617303-555901/artifacts/render05-artifacts.tar.gz` in `image-links-agent-assets`, generation `1792402090149576`, size 7,389,924,481 bytes. Local retrieval and independent inspection of its manifests, individual failures, output inventory and contact sheets are in progress. Do not describe that inspection as complete until its evidence is recorded. The archived run used `birefnet-general-lite` and the earlier rendering rules; it does not certify the newer implementation or the production-default general model.
+The private results archive is `catalog-test/render-05-1792340617303-555901/artifacts/render05-artifacts.tar.gz` in `image-links-agent-assets`, generation `1792402090149576`, size 7,389,924,481 bytes. Retrieval completed on 2026-10-20. A complete local gzip/tar scan found 39,800 files; archive SHA-256 is `5ebd54cad7622c3d61d7dbaa7be506f98269ba3c527b276573c31e72a8558320`. Independent reconciliation matched every source/shot/channel key, successful JPEG byte size and JPEG signature, status total and flag count against the saved manifests and reports:
+
+| Dataset | Products | Source photos | Planned outcomes | Saved JPEGs reported compliant | Styli skips | Failed outcomes |
+|---|---:|---:|---:|---:|---:|---:|
+| Anta | 126 | 630 | 5,670 | 5,040 | 630 | 0 |
+| French Connection | 607 | 3,280 | 29,520 | 26,238 | 3,280 | 2 |
+| Total | 733 | 3,910 | 35,190 | 31,278 | 3,910 | 2 |
+
+Both failures concern French Connection identifier `ZE55EA67E0EB5401B1C25Z`, shot 3, on Noon and Namshi. Both report `background` and `inside_safe_box` failures: wrong exposed-background colour and content outside required margins. Neither failed row has a saved JPEG. The source and five successful outputs on other channels were viewed for context; those are not visual evidence of the absent failed JPEGs.
+
+The Anta distributed contact sheet covering 12 products and the original French Connection first-90-output sheet were viewed. A separate local comparison sampled 12 products spread across the 607 sorted French Connection identifiers, showing the original and Noon/Centrepoint outputs for each first and last shot. Sampled source bytes matched their manifest hashes, and decoded output dimensions matched their recorded plans. This found a visual defect despite a passing compliance report: `Z885F1C32E63514305936Z`, shot 5, loses most of the green jumper fabric, leaving narrow fragments. Cropped-source edges also visibly float inside the earlier canvas placement. These observations are historical failures, not a visual pass. Current acceptance should include these exact source cases when verifying the newer matting guard and cut-edge fixes; their presence in a later deployment is not proof that these examples passed.
+
+The archived test log records the Anta private upload sample deleting 16 objects with zero remaining. French Connection never reached its upload sample. The same build's separate 100-source CPU benchmark recorded mean inference 15,317.39 ms for general and 7,489.93 ms for lite; GPU was not configured in this build. The earlier four-combination deployed benchmark above is separate evidence.
+
+Local audit records are retained under the ignored `var/spec05-full-evidence/` folder: `archive-inventory.json`, `archive-sha256.txt`, `independent-verification.json`, extracted metadata, and `visual-samples/selection.json` with the comparison sheets. The audit checked archive consistency and sampled appearance. It did not repeat pixel-level compliance for every JPEG or inspect every photo. The archived run used `birefnet-general-lite` and the earlier rendering rules; it does not certify the newer implementation or the production-default general model.
 
 Specs 05, 06 and 07 subsequently merged through PRs [11](https://github.com/sujanajay/catalog-module/pull/11), [12](https://github.com/sujanajay/catalog-module/pull/12) and [14](https://github.com/sujanajay/catalog-module/pull/14). The expedited workflow explicitly accepted reduced testing and records newer deployments, quality fixes and the pending deployed full-data run in [Go-live progress](../PROGRESS.md). A merge or a smaller smoke test does not turn this failed historical run into a pass.
 
