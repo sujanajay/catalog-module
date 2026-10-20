@@ -14,8 +14,9 @@ export type Output = typeof catalogOutputs.$inferSelect;
 export type Source = typeof catalogSourceImages.$inferSelect;
 export interface PublishDeps { db: Db; storage: Pick<typeof storage, "headObject" | "stageCopyToPublic" | "deletePublicObject" | "setCustomTime" | "getPublicBucketName">; fetch: typeof fetch; now: () => Date; sleep?: (ms:number) => Promise<void> }
 /**
- * `upscaler` (spec 11): the upscaler model id, only when it made the output. The plain key is unchanged, so the
- * path without the upscaler keeps today's keys; an upscaled output's key is upscaledRenderKey of the plain one.
+ * `upscaler` (spec 11): the upscaler model id, only when it made the output. The plain key does not depend on the
+ * upscaler, so the path without it keeps its keys (spec 11 A's CHANNEL_RULES_VERSION 8 changes every key once, on
+ * purpose: sharpening changes output bytes); an upscaled output's key is upscaledRenderKey of the plain one.
  */
 export function renderKey(input: { sourceSha256: string; channel: ChannelId; n: number; policyKey: string; rulesVersion?: string; upscaler?: string | null }): string {
   const plain = createHash("sha256").update(`${input.sourceSha256}|${input.channel}|${input.rulesVersion ?? CHANNEL_RULES_VERSION}|${input.policyKey}|${input.n}`).digest("hex");
@@ -24,6 +25,17 @@ export function renderKey(input: { sourceSha256: string; channel: ChannelId; n: 
 /** The render_key of an output the upscaler made: the plain key with the upscaler id and UPSCALER_VERSION ("u:<id>:<version>"). */
 export function upscaledRenderKey(plainKey: string, model: string): string {
   return createHash("sha256").update(`${plainKey}|${upscalerKey(model)}`).digest("hex");
+}
+/**
+ * The render_key of an output row after a (re-)render: a row that becomes upscaled takes the upscaled key of its
+ * plain key; a row that was upscaled and is now plain (a fallback, or a smaller fit under the threshold) goes back to
+ * the plain key (`plain`, recomputed, since the upscaled key cannot be undone); otherwise the row keeps its key.
+ */
+export function rerenderedKey(row: { renderKey: string; flags: readonly string[] }, upscaleModel: string | null | undefined, plain: () => string): string {
+  const was = row.flags.includes("upscaled");
+  if (upscaleModel && !was) return upscaledRenderKey(row.renderKey, upscaleModel);
+  if (!upscaleModel && was) return plain();
+  return row.renderKey;
 }
 /**
  * The keys a live output may carry and still match this render: the plain key and, when UPSCALE_MODEL is

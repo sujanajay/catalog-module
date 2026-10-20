@@ -5,7 +5,7 @@ import { catalogBatches, catalogChunks, catalogOutputs, catalogProducts, catalog
 import { CHANNELS, STYLI_MIN_SOURCE_HEIGHT_PX, STYLI_SKIP_LOW_RESOLUTION } from "@catalog/core/catalog/channels";
 import { batchPrefix, derivedPath, publicObjectPath, publicUrl, stagingPath } from "@catalog/core/catalog/naming";
 import { planProduct, shotGeometry, trimRules, UnsupportedSourceError, type Matte } from "@catalog/core/catalog/render";
-import { renderKeys, upscaledRenderKey } from "@catalog/core/catalog/pipeline/publish";
+import { renderKey, renderKeys, rerenderedKey } from "@catalog/core/catalog/pipeline/publish";
 import { catalogLlmDeps, CatalogQaCapError, runQaStage } from "./qa-stage";
 import { checkCatalogCaps } from "@catalog/core/catalog/qa/caps";
 import { shadowSynthesisAllowed } from "@catalog/core/catalog/qa/policy";
@@ -246,7 +246,7 @@ export async function handleChunkTask(deps: CatalogDeps, body: Record<string,unk
             // one that fell back to the plain path goes back to the plain key).
             if (rendered.upscale) deps.log("catalog upscale",{batchId:batch.id,productId,sourceImageId:source.id,channel:output.channel,n:source.n,upscaleMs:rendered.upscale.reused ? 0:rendered.upscale.ms,reused:!!rendered.upscale.reused});
             const flags = [...new Set([...source.flags,...rendered.flags])], status = rendered.status==="skipped" ? "skipped":!rendered.compliance.ok || holdsAtRender(flags) ? "needs_attention":rendered.jpeg ? "staged":"failed";
-            const patch = {canvasW:rendered.plan.w,canvasH:rendered.plan.h,scale:rendered.plan.scale,placedX:rendered.plan.placedX,placedY:rendered.plan.placedY,bytes:rendered.bytes,quality:rendered.quality,flags,compliance:{...rendered.compliance,auto_actions:autoActionsOf(output.compliance)},...(rendered.upscale && !output.flags.includes("upscaled") ? {renderKey:upscaledRenderKey(output.renderKey,rendered.upscale.model)}:!rendered.upscale && output.flags.includes("upscaled") ? {renderKey:renderKeys({sourceSha256:source.sha256,channel:output.channel,n:source.n,policyKey:`default|${productPolicy.matteModel}`},null)[0]!}:{}),reason:[...(busyBackgroundHold(output.compliance) ? [`${BUSY_BACKGROUND_DETAILS.why} ${BUSY_BACKGROUND_DETAILS.whatToDo}`]:[]),...rendered.notes].join("; ") || (flags.includes("small_source") ? flagReason("small_source"):null),updatedAt:deps.now()};
+            const patch = {canvasW:rendered.plan.w,canvasH:rendered.plan.h,scale:rendered.plan.scale,placedX:rendered.plan.placedX,placedY:rendered.plan.placedY,bytes:rendered.bytes,quality:rendered.quality,flags,compliance:{...rendered.compliance,auto_actions:autoActionsOf(output.compliance)},renderKey:rerenderedKey(output,rendered.upscale?.model,()=>renderKey({sourceSha256:source.sha256,channel:output.channel,n:source.n,policyKey:`default|${productPolicy.matteModel}`})),reason:[...(busyBackgroundHold(output.compliance) ? [`${BUSY_BACKGROUND_DETAILS.why} ${BUSY_BACKGROUND_DETAILS.whatToDo}`]:[]),...rendered.notes].join("; ") || (flags.includes("small_source") ? flagReason("small_source"):null),updatedAt:deps.now()};
             await underClaim(async tx=>tx.update(catalogOutputs).set(patch).where(eq(catalogOutputs.id,output.id)));
             if (rendered.jpeg) { const jpeg=rendered.jpeg; await underClaim(async()=>deps.storage.uploadBuffer(path,jpeg,"image/jpeg",{cacheControl:deps.storage.PUBLIC_CACHE_CONTROL})); }
             const staged = rendered.jpeg ? await deps.storage.headObject(uri):null;

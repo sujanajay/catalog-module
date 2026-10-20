@@ -175,8 +175,8 @@ WEB_ENV+=",INR_PER_USD=$INR_PER_USD,COMPUTE_USD_PER_VCPU_SECOND=$COMPUTE_USD_PER
 # when set (--set-env-vars replaces the worker environment, so a redeploy without it turns the upscaler off).
 UPSCALE_MODEL=${UPSCALE_MODEL:-}
 UPSCALE_MIN_SCALE=${UPSCALE_MIN_SCALE:-1.5}
-[[ "$UPSCALE_MODEL" =~ ^[A-Za-z0-9._-]*$ ]] || { echo "UPSCALE_MODEL must be a model id such as realesrgan-x2plus, or empty" >&2; exit 1; }
-[[ "$UPSCALE_MIN_SCALE" =~ ^[0-9]+([.][0-9]+)?$ ]] || { echo "UPSCALE_MIN_SCALE must be a number such as 1.5" >&2; exit 1; }
+case "$UPSCALE_MODEL" in ""|realesrgan-x2plus|swinir-x2) ;; *) echo "UPSCALE_MODEL must be realesrgan-x2plus, swinir-x2 or empty" >&2; exit 1 ;; esac
+[[ "$UPSCALE_MIN_SCALE" =~ ^[0-9]+([.][0-9]+)?$ ]] && awk -v s="$UPSCALE_MIN_SCALE" 'BEGIN{exit !(s>=1)}'   || { echo "UPSCALE_MIN_SCALE must be a number of at least 1, such as 1.5" >&2; exit 1; }
 WORKER_ENV+=",UPSCALE_MIN_SCALE=$UPSCALE_MIN_SCALE"
 # UPSCALE_MODEL itself is added after the GPU matting step below, and only when that step yields MATTING_GPU_URL.
 # 03: the web verifies the IAP JWT against this exact audience and accepts only this domain.

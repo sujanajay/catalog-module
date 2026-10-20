@@ -6,7 +6,7 @@ import { planCanvas, renderKeyInputs, renderSource, type Matte, type Prepared } 
 import { analyseBackground } from "./shadow";
 import { enlargeCutout, sharpenAfterEnlarge } from "./enhance";
 import { createUpscaler, DEFAULT_UPSCALE_MIN_SCALE, shouldUpscale, upscaleConfigFromEnv, upscaledRgb, upscalerKey, UPSCALER_VERSION, type Upscaler } from "./upscale";
-import { renderKey, renderKeys, upscaledRenderKey } from "./pipeline/publish";
+import { renderKey, renderKeys, rerenderedKey, upscaledRenderKey } from "./pipeline/publish";
 import { upscaledNotes } from "./pipeline/report";
 import { flagDetails } from "./qa/reasons";
 import { INFORMATION_FLAGS } from "./qa/triage";
@@ -153,6 +153,12 @@ describe("render_key", () => {
     expect(upscalerKey(MODEL)).toBe(`u:${MODEL}@e828354d:${UPSCALER_VERSION}`);
     expect(renderKeys(input, null)).toEqual([plain]);
     expect(renderKeys(input, MODEL)).toEqual([plain, upscaledRenderKey(plain, MODEL)]);
+    // A re-render keeps the row's key in step with its `upscaled` flag, both ways.
+    const up = upscaledRenderKey(plain, MODEL), recompute = () => plain;
+    expect(rerenderedKey({ renderKey: plain, flags: [] }, MODEL, recompute)).toBe(up);
+    expect(rerenderedKey({ renderKey: up, flags: ["upscaled"] }, MODEL, recompute)).toBe(up);
+    expect(rerenderedKey({ renderKey: up, flags: ["upscaled"] }, undefined, recompute)).toBe(plain);
+    expect(rerenderedKey({ renderKey: plain, flags: [] }, null, recompute)).toBe(plain);
     const k = { sourceSha256: "abc", channel: "trendyol" as const, rulesVersion: "7", policyId: "p", policyUpdatedAt: "t", n: 1 };
     expect(renderKeyInputs(k)).toBe("abc|trendyol|7|p+t|1");
     expect(renderKeyInputs({ ...k, upscaler: MODEL })).toBe(`abc|trendyol|7|p+t|1|u:${MODEL}@e828354d:1`);
