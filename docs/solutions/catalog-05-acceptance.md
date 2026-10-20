@@ -1,6 +1,6 @@
 # Spec 05 acceptance and access follow-ups
 
-Status recorded 2026-10-19 04:00 UTC. Code completion and deployed acceptance are tracked separately.
+Status reconciled 2026-10-20 08:28 UTC. Historical test evidence and current deployed acceptance are tracked separately.
 
 The product owner authorized continuing through specs 06 and 07 and merging reviewed code when its code checks pass. Checks blocked by organization access may carry forward explicitly. This does not authorize bypassing runtime authentication or the public-image smoke gate, and does not make deferred checks pass.
 
@@ -14,18 +14,24 @@ The product owner authorized continuing through specs 06 and 07 and merging revi
 - Twelve general-model contact-sheet samples were viewed. The sampled black garment detail lost by lite was preserved by general. This does not claim all 630 photos were individually inspected. The Anta input also contains apparel; the forced-footwear audit is a shadow test, not product classification evidence. A separate correctly typed apparel render preserved the garment body.
 - Actual repository contact-sheet rendering with the font-fixed image produced readable identifiers and shot labels. Private test-job setup repeated with all three jobs reporting SKIP and exit 0; this is not bootstrap or public-smoke acceptance.
 
-## Still running, not access-blocked
+## Full dataset run: failed
 
-Full 3910-source all-nine-channel CPU verification, including 630 Anta and 3280 French Connection photos, remains in Cloud Build `1ac2bc2a-f937-4cc5-bcb2-e9d9875bdec3` in `us-central1`. Its hard deadline is 2026-10-19 19:49 UTC. The complete archive, output and skip counts, metadata, compliance, upload cleanup and both contact sheets must be retrieved and independently assessed. A preflight or the separate 630-source audit does not replace this run.
+Cloud Build `1ac2bc2a-f937-4cc5-bcb2-e9d9875bdec3` in `us-central1` ran from 2026-10-18 19:49:23 UTC to 2026-10-19 09:28:25 UTC and ended **FAILURE**. It is no longer running. The renderer reported two French Connection compliance failures, and the final test-result step correctly returned exit 1. The archive-upload step succeeded; the failure was not just an upload problem.
 
-## Deferred because of external access
+The completed French Connection render reported 29,520 planned outcomes: 26,238 compliant JPEGs, 3,280 documented Styli skips and two `failed_compliance` outcomes. The Anta dataset test and the 100-source CPU benchmark passed. Because the French Connection CLI returned exit 1, that dataset's subsequent independent report checks and private upload-sample checks did not run. These are not passing acceptance results.
 
-Organization policy `iam.allowedPolicyMemberDomains` prevents the public JPEG bucket grant. Google Cloud denied `orgpolicy.policies.create` to the current account. An organization administrator must review and apply a narrow exception for `image-links-agent-public` in project `image-links-agent` (847405579637), organization 1013399544102. Keep `image-links-agent-assets` private and preserve the domain restriction elsewhere. Do not retry denied policy writes, self-grant roles or weaken the existing helper's tag-scope guard.
+The private results archive is `catalog-test/render-05-1792340617303-555901/artifacts/render05-artifacts.tar.gz` in `image-links-agent-assets`, generation `1792402090149576`, size 7,389,924,481 bytes. Local retrieval and independent inspection of its manifests, individual failures, output inventory and contact sheets are in progress. Do not describe that inspection as complete until its evidence is recorded. The archived run used `birefnet-general-lite` and the earlier rendering rules; it does not certify the newer implementation or the production-default general model.
 
-Carry forward into specs 06/07: effective policy and bucket-scope verification, anonymous JPEG reads, bootstrap's unchanged second run, required public pipeline/smoke, full release deployment and recorded deployed browser acceptance. These remain incomplete until observed passing. Private matting service deployment and local mocked UI tests are narrower evidence.
+Specs 05, 06 and 07 subsequently merged through PRs [11](https://github.com/sujanajay/catalog-module/pull/11), [12](https://github.com/sujanajay/catalog-module/pull/12) and [14](https://github.com/sujanajay/catalog-module/pull/14). The expedited workflow explicitly accepted reduced testing and records newer deployments, quality fixes and the pending deployed full-data run in [Go-live progress](../PROGRESS.md). A merge or a smaller smoke test does not turn this failed historical run into a pass.
+
+## Former external-access blocker: resolved
+
+The earlier `iam.allowedPolicyMemberDomains` restriction and denied `orgpolicy.policies.create` request are historical. Read-only bucket IAM checks on 2026-10-20 confirmed that `image-links-agent-public` grants `allUsers` the object-viewer role, while `image-links-agent-assets` has no such grant. An anonymous HEAD request to the known existing private results archive returned 403. The newer workflow records anonymous JPEG reads, public smoke and protected service deployments in [Go-live progress](../PROGRESS.md). Do not repeat the denied policy writes or present the old administrator dependency as still blocking deployment.
+
+Keep source assets private and preserve runtime authentication and mandatory smoke gates. Remaining current acceptance work, including the fresh full-data run and any required recorded browser evidence, is tracked in the current progress record; it must not be inferred from the old private service checks or local mocked UI tests.
 
 ## Data and budget
 
 Original photos and Supabase remain read-only. Retain the approved private source prefix until the full run is retrieved and downstream source consumers finish. Retrieve evidence before cleanup; clean only exact authorized `catalog-test/` prefixes and object versions, preserve soft deletion, and delete no GCP resources.
 
-The shared additional cloud limit remains USD 100 across specs 05 through 07. Current estimated/reserved total is USD 91.92242, including USD 20 remaining deployment reserve and USD 2 storage/transfer allowance. Actual billing is unavailable. Do not treat estimates or reservations as billed spending, or reset the cap for another spec.
+The original shared additional-cloud cap for this chat is USD 100 across specs 05 through 07. The earlier USD 91.92242 figure was an estimate including reservations, not actual billing. The completed full build lasted 49,141.9028624 seconds: at the existing USD 1.44/hour assumption, its estimated compute is USD 19.65676 rather than the reserved USD 34.56 maximum. That reconciles the historical estimate/reservation total to USD 77.01918, including the earlier deployment and storage allowances. It excludes subsequent spending by the newer workflow and is not a statement of current account-wide spend or available budget. Actual billing remains unavailable; no new paid testing was started for this evidence follow-up.
