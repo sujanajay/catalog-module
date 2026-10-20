@@ -2,8 +2,70 @@
 // dropped keeps every link, changes only the altered shot's generation on the selected channels,
 // removes the dropped shot's objects there, leaves unselected channels untouched, and records the
 // right `change` values and events. An identical third delivery changes nothing and costs nothing.
+import assert from "node:assert/strict";
+import type { LockResult } from "../products";
 import type { ChannelId } from "../types";
-import { judge, type CheckResult, type CheckSubject } from "./types";
+import { fail, judge, notRun, type CheckResult, type CheckSubject } from "./types";
+
+/** Every check the identical, altered and removed passes record, in report order. */
+export const OVERWRITE_CHECK_IDS = ["overwrite.identical_generations", "overwrite.identical_zero_work", "overwrite.identical_change", "overwrite.same_links", "overwrite.altered_new_generation", "overwrite.untouched_unchanged", "overwrite.removed_not_live", "overwrite.removed_gone", "overwrite.not_refreshed_listed", "overwrite.removed_links_reported", "overwrite.change_shots_removed", "overwrite.change_updated", "overwrite.change_unchanged", "overwrite.events", "overwrite.recheck"] as const;
+
+export interface OverwriteProduct { id: string; change: string | null }
+export interface OverwriteSource { id: string; productId: string; n: number }
+export interface OverwritePlan {
+  /** The products the first pass released; the passes re-upload these only. */
+  productIds: string[];
+  /** The products the first pass held for attention; they keep their batch lock and are left out. */
+  held: string[];
+  /** The first-pass sources of the released products. */
+  sources: OverwriteSource[];
+  altered: OverwriteSource;
+  removed: OverwriteSource;
+}
+export type OverwriteOutcome = { ok: true; plan: OverwritePlan } | { ok: false; reason: string; held: string[] };
+
+/**
+ * Which products a second delivery may re-upload. Finalize releases the lock of every product it
+ * completed and keeps it on the products held for attention (publish.ts releaseLocks), so ingesting
+ * a held product again under a new batch fails the lock. The passes therefore cover the released
+ * products only; a held product stays covered by the first-pass and attention checks. The altered
+ * shot is the first shot of the first released product with three or more shots, the removed shot
+ * the last shot of the next such product (or of the same one when it is the only candidate). When
+ * no released product has three shots, a product with two shots serves; with none, the passes are
+ * skipped with the reason.
+ */
+export function planOverwrite(products: OverwriteProduct[], sources: OverwriteSource[]): OverwriteOutcome {
+  const held = products.filter(p => p.change === "pending_attention").map(p => p.id);
+  const productIds = products.filter(p => p.change !== "pending_attention").map(p => p.id);
+  if (!productIds.length) return { ok: false, reason: `every product of the first pass is held for attention (${held.length})`, held };
+  const kept = sources.filter(s => productIds.includes(s.productId));
+  const grouped = new Map<string, OverwriteSource[]>();
+  for (const s of kept) grouped.set(s.productId, [...grouped.get(s.productId) ?? [], s]);
+  const groups = [...grouped.values()].map(g => [...g].sort((a, b) => a.n - b.n));
+  const threeShots = groups.filter(g => g.length >= 3), candidates = threeShots.length ? threeShots : groups.filter(g => g.length >= 2);
+  if (!candidates.length) return { ok: false, reason: `no released product has two or more shots (${held.length} held for attention)`, held };
+  return { ok: true, plan: { productIds, held, sources: kept, altered: candidates[0]![0]!, removed: (candidates[1] ?? candidates[0])!.at(-1)! } };
+}
+
+/** One not_run row per overwrite check, so a skipped contract is visible in the report with its reason. */
+export function overwriteNotRun(reason: string): CheckResult[] {
+  return OVERWRITE_CHECK_IDS.map(id => notRun(id, "overwrite", { identifier: "*", n: null, channel: null }, `The overwrite passes were skipped: ${reason}.`));
+}
+
+/** One failed row per overwrite check when the passes crashed; the set keeps its first-pass checks. */
+export function overwriteFailed(message: string): CheckResult[] {
+  return OVERWRITE_CHECK_IDS.map(id => fail(id, "overwrite", { identifier: "*", n: null, channel: null }, "not run", "pass", "", `The overwrite passes failed: ${message}`));
+}
+
+/** The lock failure of a test batch, naming every busy golden product and the batch that holds it. */
+export function lockedProductsMessage(busy: { identifier: string; batchId: string; batchName: string }[]): string {
+  return `A golden product is locked by another batch: ${busy.map(b => `${b.identifier} held by batch ${b.batchId} (${b.batchName})`).join("; ")}.`;
+}
+
+/** The lock assertion of an eval test batch: an AssertionError that names the holder of every busy product. */
+export function assertLocked(lock: LockResult): asserts lock is { ok: true } {
+  if (!lock.ok) assert.fail(lockedProductsMessage(lock.busy));
+}
 
 export interface LiveRow { identifier: string; n: number; channel: ChannelId; publicUrl: string; objectPath: string; generation: number | null }
 export interface OverwriteInput {

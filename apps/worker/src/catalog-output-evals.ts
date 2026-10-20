@@ -33,7 +33,7 @@ import { qaCandidates } from "@catalog/core/catalog/eval/run";
 import { CHANNEL_IDS, type ChannelId, type OutputFlag, type ProductType } from "@catalog/core/catalog/types";
 import { pinnedFetch } from "@catalog/core/safe-url";
 import * as storage from "@catalog/core/storage";
-import { checkAttention, checkCompleteness, checkIdentical, checkOverwrite, checkUniformScale, flagRows, outputKey, runImageChecks, type CheckResult, type Expectation, type OutputSubject } from "@catalog/core/catalog/evals/index";
+import { assertLocked, checkAttention, checkCompleteness, checkIdentical, checkOverwrite, checkUniformScale, flagRows, outputKey, overwriteFailed, overwriteNotRun, planOverwrite, runImageChecks, type CheckResult, type Expectation, type OutputSubject } from "@catalog/core/catalog/evals/index";
 import { checkMatte, consensusMetrics } from "@catalog/core/catalog/evals/cutout";
 import { sheetNotes } from "@catalog/core/catalog/evals/sheet-notes";
 import { buildGolden, GOLDEN_MANIFEST_PATH, goldenCounts, goldenSourcePath, parseGolden, readGoldenBytes, serializeGolden, sha256, type GoldenBuild, type GoldenEntry, type GoldenManifest } from "@catalog/core/catalog/evals/golden";
@@ -135,7 +135,7 @@ async function runBatch(db: Db, deps: CatalogDeps, run: string, group: Group, fi
   const sources = await db.select().from(catalogSourceImages).where(eq(catalogSourceImages.batchId, b.id));
   assert.equal(sources.length, files.length, "Every golden photo must be collected.");
   const productIds = [...new Set(sources.map(s => s.productId))];
-  assert((await lockProducts(db, b.id, productIds)).ok, "A golden product is locked by another batch.");
+  assertLocked(await lockProducts(db, b.id, productIds));
   await db.update(catalogBatches).set({ status: "matting", startedAt: new Date(), counts: { ...b.counts, products: productIds.length, sources: sources.length, outputs: sources.length * channels.length } }).where(eq(catalogBatches.id, b.id));
   for (const [index, plan] of planChunks(productIds.map(productId => ({ productId, sourceCount: sources.filter(s => s.productId === productId).length })), 25).entries()) {
     const [chunk] = await db.insert(catalogChunks).values({ batchId: b.id, index, stage: "matte", productIds: plan.productIds }).returning();
@@ -194,7 +194,9 @@ interface RunContext {
 /**
  * One (brand, category) set end to end: its test batch, the completeness and image checks, the
  * overwrite contract when it is the first eligible set, the bake-off trials, then cleanup. A failure
- * anywhere makes a "failed" record (with the error, no results) instead of ending the run.
+ * anywhere makes a "failed" record (with the error, no results) instead of ending the run, except in
+ * the overwrite passes: the record then keeps the first-pass checks and only the overwrite checks
+ * are recorded as failed.
  */
 async function runSet(ctx: RunContext, group: Group): Promise<SetRecord> {
   const { db, deps, run, channels } = ctx, set = setId(group.brand, group.category), startedAt = new Date();
@@ -252,11 +254,21 @@ async function runSet(ctx: RunContext, group: Group): Promise<SetRecord> {
     for (const o of outputs) record.attentionRows.push({ identifier: identifierOf(o.productId), n: o.n, channel: o.channel, status: o.status, flags: o.flags, reason: o.reason, qaScores: o.qaScores, qaModel: o.qaModel, decision: o.decision, compliance: o.compliance as { ok: boolean; failures: string[] } | null });
     for (const [, product] of products) { const identifier = strip(product.pathKey); record.attentionProducts.push({ identifier, change: product.change, productType: product.productType, expect: ctx.expectOf.get(identifier) ?? { attention: false, flags: [], detector: "code" }, planted: ctx.plantedOf.get(identifier) ?? null }); }
 
-    // Overwrite contract on the first set with a product of three or more shots.
+    // Overwrite contract on the first set with a product of three or more shots. Its passes re-upload
+    // the released products only (a held product keeps its batch lock); a failure inside them keeps
+    // the checks above and marks the overwrite checks failed.
     if (!ctx.skipOverwrite && !ctx.overwriteDone && [...sources.reduce((m, s) => m.set(s.productId, (m.get(s.productId) ?? 0) + 1), new Map<string, number>()).values()].some(n => n >= 3)) {
-      record.results.push(...await overwritePasses(db, deps, run, collected, ctx.work, record.batches));
-      record.overwriteRan = true;
-      ctx.overwriteDone = true;
+      try {
+        const overwrite = await overwritePasses(db, deps, run, collected, ctx.work, record.batches);
+        record.results.push(...overwrite.results);
+        if (overwrite.ran) { record.overwriteRan = true; ctx.overwriteDone = true; }
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        console.error(`evals: ${set} overwrite passes failed: ${error instanceof Error ? error.stack ?? error.message : String(error)}`);
+        record.results.push(...overwriteFailed(message));
+        record.status = "failed";
+        record.error = record.error ? `${record.error}; overwrite: ${message}` : `overwrite: ${message}`;
+      }
     }
 
     // Matting bake-off: every deployed model on a sample of this set's sources.
@@ -374,7 +386,7 @@ async function runCommand(db: Db, flags: Record<string, string | string[] | true
 function setsHtml(sets: { set: string; status: string; error: string | null; photos: number; products: number; checks: number; overwriteRan: boolean; startedAt: string; finishedAt: string }[]): string {
   const esc = (v: unknown) => String(v ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]!);
   const rows = sets.map(s => `<tr><td>${esc(s.set)}</td><td class="${s.status === "done" ? "ok" : "bad"}">${esc(s.status)}</td><td>${s.photos}</td><td>${s.products}</td><td>${s.checks}</td><td>${s.overwriteRan ? "yes" : ""}</td><td>${esc(s.startedAt)}</td><td>${esc(s.finishedAt)}</td><td>${esc(s.error ?? "")}</td></tr>`);
-  return `<h2>Sets (${sets.length})</h2><p>One test batch per brand and category. A failed set carries no checks; re-run it with <code>run --resume &lt;run&gt;</code>.</p><table><thead><tr><th>Set</th><th>Status</th><th>Photos</th><th>Products</th><th>Checks</th><th>Overwrite</th><th>Started</th><th>Finished</th><th>Error</th></tr></thead><tbody>${rows.join("") || "<tr><td colspan=9>No sets.</td></tr>"}</tbody></table>`;
+  return `<h2>Sets (${sets.length})</h2><p>One test batch per brand and category. A set that failed before its checks carries none; one whose overwrite passes failed keeps its first-pass checks. Re-run a failed set with <code>run --resume &lt;run&gt;</code>.</p><table><thead><tr><th>Set</th><th>Status</th><th>Photos</th><th>Products</th><th>Checks</th><th>Overwrite</th><th>Started</th><th>Finished</th><th>Error</th></tr></thead><tbody>${rows.join("") || "<tr><td colspan=9>No sets.</td></tr>"}</tbody></table>`;
 }
 
 function bakeoffHtml(winners: ReturnType<typeof winnersByScope>, written: boolean): string {
@@ -384,13 +396,25 @@ function bakeoffHtml(winners: ReturnType<typeof winnersByScope>, written: boolea
   return `<h2>Cut-out model bake-off</h2><p>Every deployed cut-out model on the golden sources of each category, scored with the cut-out integrity checks. Rank 1 is the winner; the margin is the runner-up's composite minus the winner's. Policy rows ${written ? "were written" : "were planned (dry run; pass --write-policy to write them)"}.</p><table><thead><tr><th>Brand</th><th>Category</th><th>Rank</th><th>Model</th><th>Sources</th><th>Fail rate</th><th>Hard-case fail rate</th><th>Region loss</th><th>Thin loss</th><th>Background kept</th><th>See-through</th><th>Holes</th><th>Edge softness px</th><th>Consensus loss</th><th>Consensus extra</th><th>Composite</th><th>ms</th><th>Margin</th></tr></thead><tbody>${rows.join("") || "<tr><td colspan=18>No trials.</td></tr>"}</tbody></table>`;
 }
 
-/** Identical re-upload, then one photo altered and one shot dropped with Amazon unselected. */
-async function overwritePasses(db: Db, deps: CatalogDeps, run: string, first: BatchRun, work: { matte: number; render: number; copy: number }, batchIds: string[]): Promise<CheckResult[]> {
+/**
+ * Identical re-upload, then one photo altered and one shot dropped with Amazon unselected. Only the
+ * products the first pass released take part: a product held for attention keeps its batch lock
+ * (finalize releases completed products only), so re-ingesting it would fail the lock of the new
+ * batch. With no released candidate the checks are recorded as not run with the reason.
+ */
+async function overwritePasses(db: Db, deps: CatalogDeps, run: string, first: BatchRun, work: { matte: number; render: number; copy: number }, batchIds: string[]): Promise<{ ran: boolean; results: CheckResult[] }> {
   const results: CheckResult[] = [], strip = (identifier: string) => identifier.startsWith(`${run}-`) ? identifier.slice(run.length + 1) : identifier;
   const identifierOf = (productId: string) => strip(first.products.get(productId)?.pathKey ?? "");
+  const planned = planOverwrite([...first.products.values()].map(p => ({ id: p.id, change: p.change })), first.sources.map(s => ({ id: s.id, productId: s.productId, n: s.n })));
+  if (!planned.ok) {
+    console.info(JSON.stringify({ message: "overwrite passes skipped", set: setId(first.group.brand, first.group.category), reason: planned.reason, held: planned.held.map(identifierOf) }));
+    return { ran: false, results: overwriteNotRun(planned.reason) };
+  }
+  const { productIds, held, altered: changed, removed } = planned.plan;
+  if (held.length) console.info(JSON.stringify({ message: "overwrite passes leave out the products held for attention", set: setId(first.group.brand, first.group.category), held: held.map(identifierOf) }));
   const liveRows = async (productIds: string[]) => (await db.select().from(catalogOutputs).where(and(inArray(catalogOutputs.productId, productIds), eq(catalogOutputs.isLive, true)))).map(o => ({ identifier: identifierOf(o.productId), n: o.n, channel: o.channel, publicUrl: o.publicUrl, objectPath: o.objectPath, generation: o.generation }));
-  const productIds = [...first.products.keys()], before = await liveRows(productIds);
-  const originals = await Promise.all(first.sources.map(async s => ({ source: s, bytes: (await gcs.downloadBuffer(s.rawUri)).buf })));
+  const before = await liveRows(productIds);
+  const originals = await Promise.all(first.sources.filter(s => productIds.includes(s.productId)).map(async s => ({ source: s, bytes: (await gcs.downloadBuffer(s.rawUri)).buf })));
   const files = (edit?: { alteredId: string; removedId: string; selected: ChannelId[] }) => originals.filter(({ source }) => source.id !== edit?.removedId).map(({ source, bytes }) => ({ path: `${first.products.get(source.productId)!.pathKey}_${source.n}.${source.id === edit?.alteredId ? "png" : source.originalName.split(".").pop()}`, data: bytes, altered: source.id === edit?.alteredId }));
   const changes = async (batchId: string) => new Map((await db.select({ pair: catalogBatchProducts, product: catalogProducts }).from(catalogBatchProducts).innerJoin(catalogProducts, eq(catalogProducts.id, catalogBatchProducts.productId)).where(eq(catalogBatchProducts.batchId, batchId))).map(({ pair, product }) => [strip(product.pathKey), pair.change]));
   const events = async (batchId: string) => (await db.select().from(catalogProductEvents).where(eq(catalogProductEvents.batchId, batchId))).map(e => ({ identifier: identifierOf(e.productId), kind: e.kind }));
@@ -400,10 +424,7 @@ async function overwritePasses(db: Db, deps: CatalogDeps, run: string, first: Ba
   batchIds.push(identical.id);
   results.push(...checkIdentical({ before, after: await liveRows(productIds), changes: await changes(identical.id), work: { matte: work.matte - beforeWork.matte, render: work.render - beforeWork.render, copy: work.copy - beforeWork.copy }, events: await events(identical.id) }));
 
-  const grouped = new Map<string, typeof first.sources>();
-  for (const s of first.sources) grouped.set(s.productId, [...grouped.get(s.productId) ?? [], s]);
-  const candidates = [...grouped.values()].filter(g => g.length >= 3).map(g => [...g].sort((a, b) => a.n - b.n));
-  const changed = candidates[0]![0]!, removed = (candidates[1] ?? candidates[0])!.at(-1)!, selected: ChannelId[] = CHANNEL_IDS.filter(c => c !== "amazon");
+  const selected: ChannelId[] = CHANNEL_IDS.filter(c => c !== "amazon");
   const delivery = await Promise.all(files({ alteredId: changed.id, removedId: removed.id, selected }).map(async f => ({ path: f.path, data: f.altered ? await changeOnePixel(f.data) : f.data })));
   const second = await runBatch(db, deps, run, first.group, delivery, selected, "changed");
   batchIds.push(second.id);
@@ -411,7 +432,7 @@ async function overwritePasses(db: Db, deps: CatalogDeps, run: string, first: Ba
   const removedGone = new Map<string, boolean>();
   for (const row of before.filter(r => r.identifier === identifierOf(removed.productId) && r.n === removed.n && selected.includes(r.channel))) removedGone.set(row.publicUrl, await gone(row.publicUrl));
   results.push(...checkOverwrite({ before, after, selected, altered: { identifier: identifierOf(changed.productId), n: changed.n }, removed: { identifier: identifierOf(removed.productId), n: removed.n }, changes: await changes(second.id), events: await events(second.id), removedGone, report: { removedLinks: report.removedLinks.length, notRefreshedChannels: report.notRefreshedChannels.map(c => c.channel) }, recheck: { ok: second.counts.recheckOk, total: second.counts.recheckTotal } }));
-  return results;
+  return { ran: true, results };
 }
 
 /** A removed link may serve its old bytes from the public cache for up to the cache window. */
