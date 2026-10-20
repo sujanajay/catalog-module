@@ -45,4 +45,24 @@ with httpx.Client(base_url="http://127.0.0.1:8080", timeout=300) as client:
     response.raise_for_status()
     converted = Image.open(io.BytesIO(response.content))
     assert converted.format == "PNG" and converted.size == (32, 24)
-    print(json.dumps({"heic_convert_ms": int(response.headers["x-ms"]), "ok": True}), flush=True)
+    print(json.dumps({"heic_convert_ms": int(response.headers["x-ms"])}), flush=True)
+    # Real upscaler execution on CPU (the build runs this container with UPSCALE_CPU=1). One tile per
+    # model keeps the CPU run short; the rerun must be byte-identical.
+    upscale = payload["upscale"]
+    assert [m["id"] for m in upscale["models"]] == ["realesrgan-x2plus", "swinir-x2"], upscale
+    assert all(m["available"] and m["scale"] == 2 for m in upscale["models"]), upscale
+    assert upscale["default"] == "realesrgan-x2plus", upscale
+    small = io.BytesIO()
+    image.resize((160, 120)).save(small, format="JPEG", quality=95)
+    for model in ("realesrgan-x2plus", "swinir-x2"):
+        runs = []
+        for _ in range(2):
+            response = client.post("/upscale", params={"model": model, "scale": 2}, content=small.getvalue(), headers={"content-type": "image/jpeg"})
+            response.raise_for_status()
+            assert response.headers["x-upscale-model"] == model
+            runs.append(response)
+        result = Image.open(io.BytesIO(runs[0].content))
+        assert result.format == "JPEG" and result.mode == "RGB" and result.size == (320, 240), (model, result.size)
+        assert runs[0].content == runs[1].content, (model, "rerun not byte-identical")
+        print(json.dumps({"model": model, "upscale_ms": [int(r.headers["x-upscale-ms"]) for r in runs]}), flush=True)
+    print(json.dumps({"ok": True}), flush=True)

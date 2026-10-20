@@ -19,6 +19,66 @@ target and the image's `GIT_SHA`. Every inference call uses an explicit session.
 The owner approved non-commercial model candidates for this internal tool in spec 08. These are
 licence records. rembg itself is MIT. No custom sessions are included.
 
+## Upscaling (`/upscale`)
+
+`POST /upscale?model=<id>&scale=2` takes raw image bytes (`image/jpeg` or `image/png`) as the request
+body; a multipart `file` field, as `/matte` takes, is also accepted. It returns `200 image/jpeg`
+(quality 95, 4:4:4) at exactly 2x the received pixel dimensions, with `X-Upscale-Model` (the model
+used) and `X-Upscale-Ms` (tiling plus inference, excluding a first-use model load). Only `scale=2`
+exists. Alpha is dropped and only RGB is upscaled; an embedded ICC profile is carried over; EXIF is
+not, and orientation is not applied, so callers send upright pixels (as they do for `/matte`).
+Errors are JSON `{"error": "..."}`: 400 for a bad image, unknown model, unsupported scale or more
+than `UPSCALE_MAX_PIXELS` (default 24,000,000) input pixels; 413 over 40,000,000 bytes; 503 when
+the model is unavailable (CPU target, missing file, failed load or failed determinism check); 500
+for an unexpected inference error. Omitting `model` selects `health.upscale.default`.
+
+`/health` adds `"upscale": {"models": [{"id", "available", "scale": 2}], "default": <id or null>}`;
+the existing fields are unchanged. The CPU image reports every model unavailable and answers 503,
+because CPU inference takes tens of seconds per tile; `UPSCALE_CPU=1` enables CPU execution for
+tests and the Cloud Build smoke only.
+
+| Served id | Tile (input) | Licence | Source checkpoint (sha256) |
+|---|---:|---|---|
+| realesrgan-x2plus (default) | 512 | BSD-3-Clause | [RealESRGAN_x2plus.pth](https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.1/RealESRGAN_x2plus.pth) `49fafd45f8fd7aa8d31ab2a22d14d91b536c34494a5cfe31eb5d89c2fa266abb` |
+| swinir-x2 | 384 | Apache-2.0 | [002_lightweightSR_DIV2K_s64w8_SwinIR-S_x2.pth](https://github.com/JingyunLiang/SwinIR/releases/download/v0.0/002_lightweightSR_DIV2K_s64w8_SwinIR-S_x2.pth) `193b229909ca89cd8b55de9c9e7fce146ae759d59dfcd78d8feb9dd1d6fa0fd7` |
+
+Real-ESRGAN ([repository](https://github.com/xinntao/Real-ESRGAN), BSD-3-Clause) uses the RRDBNet
+architecture from BasicSR (Apache-2.0); `tools/convert_upscalers.py` reproduces it and loads the
+checkpoint's `params_ema` with strict key matching. SwinIR ([repository](https://github.com/JingyunLiang/SwinIR),
+Apache-2.0) is the classical lightweight x2 model (SwinIR-S, DIV2K); SwinIR publishes no lightweight
+real-world x2 checkpoint. Its architecture file is fetched from commit
+`6545850fbf8df298df73d81f3e8cba638787c8bd` (`models/network_swinir.py`, sha256
+`9e143898679ebeebc5d2fc94ad1b89c38aa4a4d43da4e0fcba0f93e476994913`) with the `lightweight_sr`
+hyperparameters from `main_test_swinir.py`; its three timm helpers are replaced by inference-time
+stand-ins (DropPath is the identity at inference).
+
+The Dockerfile's `upscale-models` stage (Python 3.12, `requirements-convert.txt`: PyTorch 2.9.1 CPU,
+onnx 1.19.1, ONNX Runtime 1.23.2) downloads the three files from those URLs, fails the build on any
+sha256 mismatch, exports fixed-shape fp32 ONNX (opset 17, TorchScript exporter), checks the ONNX
+output against PyTorch (max abs difference under 2e-3; measured 2.2e-4 and 1.0e-6) and runs it twice
+to require byte-identical output. Only the ONNX files (about 67 MB and 11 MB) reach the runtime
+images, under `/upscale-models`, read-only. Nothing is downloaded at request time.
+
+Tiling: the image is reflection-padded and cut into fixed tiles carrying 32 px of context on each
+side; only each tile's centre is kept, so tiles abut exactly with no blending. An 800x1200 photo is
+6 Real-ESRGAN tiles or 12 SwinIR tiles. Output is cropped to exactly 2x.
+
+Determinism: fp32 throughout (fp16 was not adopted because its run-to-run determinism on the L4 has
+not been verified); `SessionOptions.use_deterministic_compute`; CUDA `cudnn_conv_algo_search=HEURISTIC`
+(the default EXHAUSTIVE benchmarks at load and can choose a different algorithm per process);
+one tile at a time under the service's inference lock; fixed rounding to 8 bits; deterministic JPEG
+encoding. On first load each model runs a fixed probe tile twice and is refused (503, reported
+unavailable in health) if the two outputs differ in a single bit. The build smoke repeats the
+check end to end over HTTP on CPU.
+
+Memory and speed: models load on first request and then stay resident; matting model switches do
+not release them. CUDA options cap each upscaler's arena at 6 GiB (`gpu_mem_limit`, kSameAsRequested,
+no maximum cuDNN workspace). Estimated L4 use is about 1.5 to 2.5 GB for Real-ESRGAN at 512 px tiles
+and 1 to 2 GB for SwinIR at 384 px, alongside one resident BiRefNet session, well inside 24 GB.
+Estimated L4 time for an 800x1200 photo is roughly 1 to 3 s per model, plus a one-off load and probe
+of a few seconds; these are estimates, not measurements. Measured on a Windows laptop CPU: one 512 px
+Real-ESRGAN tile took 25 to 29 s, one 384 px SwinIR tile 15 to 33 s.
+
 ## Versions and offline models
 
 CPU: Python 3.12, rembg 2.0.85 and ONNX Runtime 1.23.2. GPU: CUDA 12.8.1, cuDNN 9,
