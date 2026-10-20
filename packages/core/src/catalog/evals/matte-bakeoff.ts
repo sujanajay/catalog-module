@@ -17,7 +17,7 @@ export interface ModelScore {
   /** Mean of the raw metrics (null when never measured). */
   regionLoss: number | null; thinLoss: number | null; backgroundKept: number | null; seeThrough: number | null; edgeSoftness: number | null; holes: number;
   consensusLoss: number | null; consensusExtra: number | null;
-  /** Composite in [0, 1]: the weighted sum of the loss shares, lower is better. */
+  /** Composite: the weighted sum of the loss shares (COMPOSITE_WEIGHTS), unbounded, lower is better; 10 x a consensus loss of 10% alone is 1. */
   composite: number;
   msPerImage: number;
   /** Fail rate on the hard-case tags, for the report. */
@@ -42,7 +42,7 @@ export function scoreModels(trials: readonly MatteTrial[]): ModelScore[] {
     const failed = (r: MatteTrial) => r.results.some(c => c.status === "fail");
     const hard = rows.filter(r => r.tags.some(t => HARD_TAGS.has(t)));
     const composite = COMPOSITE_WEIGHTS.regionLoss * (regionLoss ?? 0) + COMPOSITE_WEIGHTS.thinLoss * (thinLoss ?? 0) + COMPOSITE_WEIGHTS.backgroundKept * (backgroundKept ?? 0) + COMPOSITE_WEIGHTS.seeThrough * (seeThrough ?? 0) + COMPOSITE_WEIGHTS.edgeSoftness * (edgeSoftness ?? 0) + COMPOSITE_WEIGHTS.consensusLoss * (consensusLoss ?? 0) + COMPOSITE_WEIGHTS.consensusExtra * (consensusExtra ?? 0);
-    return { model, target, sources: rows.length, failRate: rows.filter(failed).length / rows.length, regionLoss, thinLoss, backgroundKept, seeThrough, edgeSoftness, consensusLoss, consensusExtra, holes: rows.reduce((a, r) => a + (r.metrics.holes ?? 0), 0), composite: Math.min(1, composite), msPerImage: mean(rows.map(r => r.ms)) ?? 0, hardCaseFailRate: hard.length ? hard.filter(failed).length / hard.length : null };
+    return { model, target, sources: rows.length, failRate: rows.filter(failed).length / rows.length, regionLoss, thinLoss, backgroundKept, seeThrough, edgeSoftness, consensusLoss, consensusExtra, holes: rows.reduce((a, r) => a + (r.metrics.holes ?? 0), 0), composite: Math.round(composite * 1e5) / 1e5, msPerImage: mean(rows.map(r => r.ms)) ?? 0, hardCaseFailRate: hard.length ? hard.filter(failed).length / hard.length : null };
   });
 }
 

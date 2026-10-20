@@ -70,3 +70,15 @@ describe("selectSets", () => {
     expect(() => parseSetsFlag(" , ", all)).toThrow(/at least one set id/);
   });
 });
+
+describe("evidence retention", () => {
+  it("keeps every failing output's path under catalog-test/ and caps the copies per set", async () => {
+    const { EvidenceBudget, evidencePath, EVIDENCE_CAP_PER_SET } = await import("./progress");
+    expect(evidencePath("evals-20261020111831-8d62d7", "anta.footwear", "bd-1", "noon", 4)).toBe("catalog-test/evals/evals-20261020111831-8d62d7/evidence/anta.footwear/bd-1__noon__4.jpg");
+    const budget = new EvidenceBudget(), uploaded: string[] = [];
+    for (let i = 0; i < 250; i++) if (budget.take()) uploaded.push(evidencePath("evals-r", "s.c", `id${i}`, "noon", 1));
+    expect(uploaded).toHaveLength(EVIDENCE_CAP_PER_SET);
+    expect(budget.skipped).toBe(50);
+    expect(uploaded.every(p => p.startsWith("catalog-test/evals/evals-r/evidence/s.c/"))).toBe(true);
+  });
+});

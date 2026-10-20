@@ -3,7 +3,7 @@
 // margin, end exactly on the guide where it has one, carry no floating line or shadow under the cut,
 // and be flagged for information, never held for a person.
 import { delta, dropSpecks, SPECK_PX } from "./image";
-import { EXTENT_DELTA } from "./geometry";
+import { SOURCE_MATCH_DELTA, sourceDelta, visibleProduct } from "./geometry";
 import { overflowPx, type OutputContext } from "./context";
 import { judge, notRun, pass, type CheckResult, type CheckSubject } from "./types";
 
@@ -22,7 +22,7 @@ export const TRIM_SLACK = 0.01;
 const E = "cut_edge" as const;
 
 export function checkCutEdge(ctx: OutputContext): CheckResult[] {
-  const { subject: s, canvas, background, safeBox, product } = ctx;
+  const { subject: s, canvas, background, safeBox, half } = ctx;
   const who: CheckSubject = { identifier: s.identifier, n: s.n, channel: s.channel };
   const out: CheckResult[] = [];
   // Trim: from the recorded scale alone, how much of the product the placement leaves no room for on each axis. Spec 05
@@ -47,9 +47,12 @@ export function checkCutEdge(ctx: OutputContext): CheckResult[] {
     out.push(judge(!problems.length, "cut_edge.trim", E, who, Math.round(worst * 1e4) / 1e4, Math.round(MAX_TRIM_SHARE * 1e4) / 1e4, "share of the product box", problems.length ? `${problems.join("; ")}.` : `The placement trims ${trimmed.map(a => `${a.trimmed} px of the ${a.name} (${(100 * a.trimmed / a.length).toFixed(1)}%)`).join(" and ")} off cut sides so the other axis fills the canvas.`));
   } else out.push(pass("cut_edge.trim", E, who, 0, Math.round(MAX_TRIM_SHARE * 1e4) / 1e4, "share of the product box", "The placement leaves room for the whole product; nothing is trimmed."));
   if (!ctx.cutSides.length) return [notRun("cut_edge.flush", E, who, "The product does not touch the source frame."), ...out];
-  // Measured extent of the product on the canvas: clearly foreground pixels where the product should be (a line drawn elsewhere never extends it).
+  // Measured extent of the product on the canvas: the product pixels visibly where the plan put them (visibleProduct: inside
+  // the half-coverage mask and matching the source there, so a white hem on a white canvas still counts, or clearly not
+  // background next to the mask). A line drawn elsewhere never extends it.
+  const visible = visibleProduct(ctx);
   let x0 = canvas.w, y0 = canvas.h, x1 = -1, y1 = -1;
-  for (let y = 0; y < canvas.h; y++) for (let x = 0; x < canvas.w; x++) if (product[y * canvas.w + x] && delta(canvas.rgb, y * canvas.w + x, background) > EXTENT_DELTA) { x0 = Math.min(x0, x); y0 = Math.min(y0, y); x1 = Math.max(x1, x); y1 = Math.max(y1, y); }
+  for (let y = 0; y < canvas.h; y++) for (let x = 0; x < canvas.w; x++) if (visible[y * canvas.w + x] && half[y * canvas.w + x]) { x0 = Math.min(x0, x); y0 = Math.min(y0, y); x1 = Math.max(x1, x); y1 = Math.max(y1, y); }
   if (x1 < 0) return [notRun("cut_edge.flush", E, who, "No product pixels on the canvas.")];
   const limit = { top: safeBox.y, bottom: safeBox.y + safeBox.h - 1, left: safeBox.x, right: safeBox.x + safeBox.w - 1 };
   const measured = { top: y0, bottom: y1, left: x0, right: x1 };
@@ -71,10 +74,12 @@ export function checkCutEdge(ctx: OutputContext): CheckResult[] {
     }
     let bad = 0;
     for (const v of dropSpecks(mask, canvas.w, canvas.h, SPECK_PX)) bad += v;
-    // Inside the silhouette, the last rows (or columns) before the cut must still be product: a gap there is a floating line.
+    // Inside the silhouette, the last rows (or columns) before the cut must still be product: a gap there is a floating
+    // line. A gap pixel shows canvas background where the source has something else; a white shoe or the photo's own
+    // white corner matches the source and is not a gap.
     let gapPixels = 0, maskPixels = 0;
     const inStrip = (x: number, y: number) => side === "bottom" ? y > y1 - strip : side === "top" ? y < y0 + strip : side === "right" ? x > x1 - strip : x < x0 + strip;
-    for (let y = Math.max(0, y0); y <= Math.min(canvas.h - 1, y1); y++) for (let x = Math.max(0, x0); x <= Math.min(canvas.w - 1, x1); x++) { const i = y * canvas.w + x; if (!product[i] || !inStrip(x, y)) continue; maskPixels++; if (delta(canvas.rgb, i, background) <= 8) gapPixels++; }
+    for (let y = Math.max(0, y0); y <= Math.min(canvas.h - 1, y1); y++) for (let x = Math.max(0, x0); x <= Math.min(canvas.w - 1, x1); x++) { const i = y * canvas.w + x; if (!half[i] || !inStrip(x, y)) continue; maskPixels++; if (delta(canvas.rgb, i, background) <= 8 && sourceDelta(ctx, x, y) > SOURCE_MATCH_DELTA) gapPixels++; }
     const gapShare = maskPixels ? gapPixels / maskPixels : 0;
     out.push(judge(bad === 0 && gapShare <= 0.01, `cut_edge.no_line_${side}`, E, who, bad || Math.round(gapShare * 1e4) / 1e4, 0, bad ? "pixels beyond the edge" : "gap share inside the silhouette", bad ? `${bad} pixels beyond the cut ${side} edge are not background (worst delta ${worst}): a floating line or shadow.` : gapShare > 0.01 ? `${(gapShare * 100).toFixed(1)}% of the silhouette's last ${strip} rows before the cut ${side} are background: a gap or a floating line.` : `Nothing is drawn beyond the cut ${side} edge and the silhouette runs to it.`));
   }

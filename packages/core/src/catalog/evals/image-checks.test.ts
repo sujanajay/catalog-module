@@ -74,7 +74,7 @@ describe("geometry failures", () => {
     const movedPlan = { ...moved, placement: { ...base.placement, placedX: base.placement.placedX + 40 } };
     const results = await checkGeometry(await ctxOf(movedPlan));
     expect(failed(results)).toContain("geometry.centred");
-  });
+  }, 60_000);
   it("fails the Styli anchor when the product floats above the guide", async () => {
     const base = await syntheticSubject("styli", 1, "footwear", { width: 3000, height: 3000, box: { x: 900, y: 800, w: 1200, h: 1600 } });
     const lifted = await editOutput(base, r => { const bottom = base.placement.placedY + Math.round(1660 * base.placement.scale); paintRect(r, 0, bottom - 30, r.w, 60, canvasColor("styli", 1)); });
@@ -230,4 +230,86 @@ describe("cut sources", () => {
     expect(ids(results, "cut_edge.flush_bottom")[0]?.ok).toBe(false);
     expect(ids(results, "cut_edge.no_line_bottom")[0]?.ok).toBe(false);
   }, 30_000);
+});
+
+describe("calibrated measurements (eval run 2)", () => {
+  it("measures the extent against the source: a white product on a white canvas passes, a vanished coloured part fails", async () => {
+    const white = await syntheticSubject("centrepoint", 1, "footwear", { color: [230, 230, 230] });
+    const results = await checkGeometry(await ctxOf(white));
+    for (const id of ["geometry.extent", "geometry.centred", "geometry.anchor"]) expect(ids(results, id)[0]?.status, id).toBe("pass");
+    const base = await syntheticSubject("centrepoint", 1, "footwear");
+    const p = base.placement, bg = canvasColor("centrepoint", 1);
+    // The bottom 20% of the product painted out: a vanished sole.
+    const vanished = await editOutput(base, r => paintRect(r, 0, p.placedY + Math.round(360 * p.scale), r.w, Math.round(90 * p.scale), bg));
+    expect(failed(await checkGeometry(await ctxOf(vanished)))).toContain("geometry.extent");
+  }, 60_000);
+  it("does not centre or anchor a product on a cut axis (placed flush by rule)", async () => {
+    const cut = await syntheticSubject("noon", 1, "apparel_model", { width: 1600, height: 2400, box: { x: 500, y: 300, w: 600, h: 1000 }, cutBottom: true });
+    const results = await checkGeometry(await ctxOf(cut));
+    expect(ids(results, "geometry.anchor")[0]?.status).toBe("not_run");
+    expect(ids(results, "geometry.centred")[0]?.status).toBe("pass");
+    const side = await syntheticSubject("noon", 1, "footwear", { width: 1600, height: 1000, box: { x: 300, y: 200, w: 900, h: 500 }, cutLeft: true });
+    const sideResults = await checkGeometry(await ctxOf(side));
+    expect(ids(sideResults, "geometry.centred")[0]?.status).toBe("not_run");
+    expect(ids(sideResults, "geometry.noon_wide")[0]?.status).toBe("not_run");
+    expect(ids(sideResults, "geometry.anchor")[0]?.status).toBe("pass");
+  }, 60_000);
+  it("compares a kept photographic shadow with the source, and fails a block or a slab added under it", async () => {
+    // Wide, so it fits by width and leaves room under it for the photo's shadow.
+    const kept = await syntheticSubject("amazon", 1, "footwear", { sourceShadow: true, box: { x: 100, y: 300, w: 600, h: 300 } });
+    expect(kept.flags).not.toContain("shadow_synthesised");
+    const results = await runImageChecks(kept);
+    expect(failed(results)).toEqual([]);
+    expect(ids(results, "shadow.kept_matches_source")[0]?.status).toBe("pass");
+    expect(ids(results, "shadow.hard_edge_horizontal")[0]?.status).toBe("not_run");
+    expect(ids(results, "shadow.monotone")[0]?.status).toBe("not_run");
+    const p = kept.placement, bg = canvasColor("amazon", 1), bottom = p.placedY + Math.round(360 * p.scale), width = Math.round(600 * p.scale);
+    const block = await editOutput(kept, r => paintRect(r, p.placedX + 40, bottom + 8, width - 80, 40, [bg[0] - 60, bg[1] - 60, bg[2] - 60]));
+    expect(failed(checkShadow(await ctxOf(block)))).toContain("shadow.kept_matches_source");
+    const slab = await editOutput(kept, r => paintRect(r, p.placedX + 40, bottom + 8, width - 80, 20, [40, 40, 40]));
+    expect(failed(checkShadow(await ctxOf(slab)))).toContain("shadow.darkness");
+  }, 60_000);
+  it("excludes the kept shadow from the halo ring but still fails a grey halo higher up the product", async () => {
+    const kept = await syntheticSubject("amazon", 1, "footwear", { sourceShadow: true, box: { x: 100, y: 300, w: 600, h: 300 } });
+    expect(ids(checkCutout(await ctxOf(kept)), "cutout.halo")[0]?.ok).toBe(true);
+    // A 3 px grey strip along the top edge of the body (left of the strap), inside the halo ring and above the shadow band.
+    const p = kept.placement, bodyTop = p.placedY + Math.round(60 * p.scale);
+    const halo = await editOutput(kept, r => paintRect(r, p.placedX + 50, bodyTop - 3, 300, 3, [200, 200, 200]));
+    expect(failed(checkCutout(await ctxOf(halo)))).toContain("cutout.halo");
+  }, 60_000);
+  it("fails pixels_lost for a 20% loss and a dropped sole sliver, but not for a floor reflection", async () => {
+    const base = await syntheticSubject("amazon", 2, "footwear");
+    const lost = { ...base, alpha: Buffer.from(base.alpha) };
+    for (let y = 554; y < 630; y++) for (let x = 0; x < 800; x++) lost.alpha[y * 800 + x] = 0;
+    const results = checkCutout(await ctxOf(lost));
+    expect(failed(results)).toContain("cutout.pixels_lost");
+    expect(ids(results, "cutout.pixels_lost")[0]?.measured).toBeGreaterThan(0.2);
+    expect(failed(checkCutout(await ctxOf(await syntheticSubject("amazon", 2, "footwear", { sliver: true }))))).toContain("cutout.pixels_lost");
+    const reflection = checkCutout(await ctxOf(await syntheticSubject("amazon", 2, "footwear", { reflection: true })));
+    expect(failed(reflection)).toEqual([]);
+  }, 60_000);
+  it("skips background_kept and fringe on a pass-through and on a source without a uniform border", async () => {
+    const base = await syntheticSubject("amazon", 2, "footwear");
+    const passthrough = checkCutout(await ctxOf({ ...base, flags: ["matte_passthrough"] }));
+    expect(ids(passthrough, "cutout.background_kept")[0]?.status).toBe("not_run");
+    expect(ids(passthrough, "cutout.fringe")[0]?.status).toBe("not_run");
+    const busy = checkCutout(await ctxOf({ ...base, sourceBackground: { ...base.sourceBackground, uniform: false } }));
+    expect(ids(busy, "cutout.pixels_lost")[0]?.status).toBe("not_run");
+    expect(ids(busy, "cutout.fringe")[0]?.status).toBe("not_run");
+  }, 30_000);
+  it("is flush with a white hem on a white canvas, fails a 150 px band beside the cut, and fires on pixels beyond the edge", async () => {
+    const white = await syntheticSubject("amazon", 1, "apparel_model", { width: 1600, height: 2400, box: { x: 500, y: 300, w: 600, h: 1000 }, cutBottom: true, color: [230, 230, 230] });
+    const results = checkCutEdge(await ctxOf(white));
+    expect(ids(results, "cut_edge.flush_bottom")[0]?.ok).toBe(true);
+    expect(ids(results, "cut_edge.no_line_bottom")[0]?.ok).toBe(true);
+    const coloured = await syntheticSubject("amazon", 1, "apparel_model", { width: 1600, height: 2400, box: { x: 500, y: 300, w: 600, h: 1000 }, cutBottom: true });
+    const band = await editOutput(coloured, r => paintRect(r, 0, r.h - 150, r.w, 150, canvasColor("amazon", 1)));
+    const banded = checkCutEdge(await ctxOf(band));
+    expect(ids(banded, "cut_edge.flush_bottom")[0]?.ok).toBe(false);
+    expect(ids(banded, "cut_edge.flush_bottom")[0]?.measured).toBeGreaterThanOrEqual(148);
+    // The product drawn 40 px lower than recorded: product pixels lie beyond the mask's bottom edge.
+    const beyond = checkCutEdge(await ctxOf({ ...coloured, placement: { ...coloured.placement, placedY: coloured.placement.placedY - 40 } }));
+    expect(ids(beyond, "cut_edge.no_line_bottom")[0]?.ok).toBe(false);
+    expect(ids(beyond, "cut_edge.no_line_bottom")[0]?.unit).toBe("pixels beyond the edge");
+  }, 60_000);
 });

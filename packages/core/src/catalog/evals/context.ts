@@ -2,11 +2,13 @@
 // should carry (the matte projected the way the render projects it) and the boxes of spec 05.
 import { backgroundFor, channel, type ChannelSpec } from "../channels";
 import { hexColor, safeBoxFor, shotGeometry, type BBox, type CutEdges } from "../render";
-import { decodeRaster, productBoxOf, projectAlpha, shadowBand, thresholdMask, type Mask } from "./image";
+import { decodeRaster, productBoxOf, projectAlpha, projectRgb, shadowBand, thresholdMask, type Mask } from "./image";
 import type { OutputSubject, Raster } from "./types";
 
 /** Alpha at or below this level is edge antialiasing (spec 05 ALPHA_BBOX_THRESHOLD). */
 export const ALPHA_EDGE = 10;
+/** Alpha from this level up is more product than background (half coverage): the visible edge of the product. */
+export const ALPHA_HALF = 128;
 
 export interface OutputContext {
   subject: OutputSubject;
@@ -25,6 +27,10 @@ export interface OutputContext {
   expectedAlpha: Uint8Array;
   /** expectedAlpha > ALPHA_EDGE. */
   product: Mask;
+  /** expectedAlpha >= ALPHA_HALF: where the product covers more than half of the pixel, which is what a reviewer sees as its edge. */
+  half: Mask;
+  /** The source RGB resampled to `productBox` from `sourceCrop` (lanczos3), row-major over the product box: what every product pixel should look like. */
+  sourceRgb: Buffer;
   /** Whether the channel allows a shadow for this product type (spec 05: footwear, bags, other). */
   shadowAllowed: boolean;
   /** Sides of the source frame the product is cut at (the render's own shotGeometry rule). */
@@ -56,8 +62,8 @@ export function expectedSourceCrop(sourceBox: BBox, scale: number, safeBox: BBox
 }
 
 /** Samples per axis matchCropSplit compares; a tie within this mean delta goes to the even split. */
-export const SPLIT_SAMPLES = 40;
-export const SPLIT_TIE_DELTA = 1;
+export const SPLIT_SAMPLES = 96;
+export const SPLIT_TIE_DELTA = 0.5;
 
 /**
  * Where both cut sides of an axis share a trim, spec 05 lets the render take more off one of them so a logo, text or a
@@ -65,6 +71,12 @@ export const SPLIT_TIE_DELTA = 1;
  * offset whose resampled source (nearest neighbour on a SPLIT_SAMPLES grid inside the product box) matches the output
  * best; a tie within SPLIT_TIE_DELTA goes to the even split. Both sides are cut, so any split keeps uncut outlines whole.
  */
+function bilinear(source: Raster, x: number, y: number, c: number): number {
+  const x0 = Math.floor(x), y0 = Math.floor(y), x1 = Math.min(source.w - 1, x0 + 1), y1 = Math.min(source.h - 1, y0 + 1), fx = x - x0, fy = y - y0;
+  const at = (xx: number, yy: number) => source.rgb[(yy * source.w + xx) * 3 + c]!;
+  return (at(x0, y0) * (1 - fx) + at(x1, y0) * fx) * (1 - fy) + (at(x0, y1) * (1 - fx) + at(x1, y1) * fx) * fy;
+}
+
 export function matchCropSplit(canvas: Raster, source: Raster, sourceBox: BBox, crop: BBox, productBox: BBox, axis: "x" | "y"): BBox {
   const extra = axis === "x" ? sourceBox.w - crop.w : sourceBox.h - crop.h;
   if (extra <= 0) return crop;
@@ -75,9 +87,11 @@ export function matchCropSplit(canvas: Raster, source: Raster, sourceBox: BBox, 
     for (let j = 0; j < SPLIT_SAMPLES; j++) for (let i = 0; i < SPLIT_SAMPLES; i++) {
       const px = productBox.x + Math.floor((i + 0.5) * productBox.w / SPLIT_SAMPLES), py = productBox.y + Math.floor((j + 0.5) * productBox.h / SPLIT_SAMPLES);
       if (px < 0 || py < 0 || px >= canvas.w || py >= canvas.h) continue;
-      const sx = Math.min(source.w - 1, cx + Math.floor((px - productBox.x + 0.5) * crop.w / productBox.w)), sy = Math.min(source.h - 1, cy + Math.floor((py - productBox.y + 0.5) * crop.h / productBox.h));
-      const a = (py * canvas.w + px) * 3, b = (sy * source.w + sx) * 3;
-      sum += Math.abs(canvas.rgb[a]! - source.rgb[b]!) + Math.abs(canvas.rgb[a + 1]! - source.rgb[b + 1]!) + Math.abs(canvas.rgb[a + 2]! - source.rgb[b + 2]!); count++;
+      // Bilinear sample of the source at the canvas pixel's centre, so a fine texture does not alias into a tie between neighbouring offsets.
+      const sx = Math.min(source.w - 1, Math.max(0, cx + (px - productBox.x + 0.5) * crop.w / productBox.w - 0.5)), sy = Math.min(source.h - 1, Math.max(0, cy + (py - productBox.y + 0.5) * crop.h / productBox.h - 0.5));
+      const a = (py * canvas.w + px) * 3;
+      for (let c = 0; c < 3; c++) sum += Math.abs(canvas.rgb[a + c]! - bilinear(source, sx, sy, c));
+      count++;
     }
     scores.push(count ? sum / count / 3 : 0);
   }
@@ -99,10 +113,11 @@ export async function buildContext(subject: OutputSubject): Promise<OutputContex
   if (cut.left && cut.right) sourceCrop = matchCropSplit(canvas, subject.source, sourceBox, sourceCrop, productBox, "x");
   if (cut.top && cut.bottom) sourceCrop = matchCropSplit(canvas, subject.source, sourceBox, sourceCrop, productBox, "y");
   const expectedAlpha = await projectAlpha(subject.alpha, subject.source, sourceCrop, productBox, canvas);
+  const sourceRgb = await projectRgb(subject.source, sourceCrop, productBox);
   return {
     subject, spec, canvas, background: hexColor(backgroundFor(subject.channel, subject.n)), sourceBox, sourceCrop, productBox,
-    safeBox, band: shadowBand(productBox, canvas), expectedAlpha,
-    product: thresholdMask(expectedAlpha, ALPHA_EDGE), shadowAllowed: SHADOW_TYPES.has(subject.productType),
+    safeBox, band: shadowBand(productBox, canvas), expectedAlpha, sourceRgb,
+    product: thresholdMask(expectedAlpha, ALPHA_EDGE), half: thresholdMask(expectedAlpha, ALPHA_HALF - 1), shadowAllowed: SHADOW_TYPES.has(subject.productType),
     cutSides: (["top", "bottom", "left", "right"] as const).filter(side => cut[side]), cut,
   };
 }
