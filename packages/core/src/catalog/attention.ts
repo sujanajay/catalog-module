@@ -37,7 +37,7 @@ export async function listAttention(db:Db,batchId:string,sign:(uri:string)=>Prom
   const flags=bySeverity(siblings.flatMap(r=>r.output.flags)),problemFlags=flags.filter(f=>!information.has(f));
   const flag=o.status==="failed"?"failed":problemFlags[0]??flags[0]??"qa_unavailable";
   const spec=channel(o.channel);
-  const context={busy:busyBackgroundHold(o.compliance),n:o.n,k:batch.channels.length,channel:spec.label,...(row.source.width!==null&&row.source.height!==null?{w:row.source.width,h:row.source.height}:{}),min:Math.max(spec.minCanvas.w,spec.minCanvas.h),failures:o.reason??"",...(o.status==="failed"&&o.error?{error:o.error}:{})};
+  const context={busy:busyBackgroundHold(o.compliance),n:o.n,k:batch.channels.length,channel:spec.label,...(row.source.width!==null&&row.source.height!==null?{w:row.source.width,h:row.source.height}:{}),min:Math.max(spec.minCanvas.w,spec.minCanvas.h),...(spec.fixedCanvas?{deliverW:spec.targetCanvas.w,deliverH:spec.targetCanvas.h}:{}),failures:o.reason??"",...(o.status==="failed"&&o.error?{error:o.error}:{})};
   // Why: the main problem first, then any other problem, then information notes on the same photo (4.6).
   // What to do: one instruction, the main problem's; information flags never add guidance of their own.
   // At most MAX_REASONS_PER_PHOTO problem sentences; the report keeps every flag.

@@ -56,7 +56,11 @@ The Dockerfile's `upscale-models` stage (Python 3.12, `requirements-convert.txt`
 onnx 1.19.1, ONNX Runtime 1.23.2) downloads the three files from those URLs, fails the build on any
 sha256 mismatch, exports fixed-shape fp32 ONNX (opset 17, TorchScript exporter), checks the ONNX
 output against PyTorch (max abs difference under 2e-3; measured 2.2e-4 and 1.0e-6) and runs it twice
-to require byte-identical output. Only the ONNX files (about 67 MB and 11 MB) reach the runtime
+to require byte-identical output. The exports of Cloud Build `bf4d6276-e221-4e92-8d18-7c30cc121198` have the
+sha256 `e828354d9b32d1462f0fd421a513015c80ebd6985e3e394f7d86285c102d79dd` (realesrgan-x2plus) and
+`9f4a3f856ff12923e5b33f2965ed8ff7e360cb2f7ba9ed76ff04c59bf3021881` (swinir-x2); their first 8 hex are
+`UPSCALE_MODEL_VERSIONS` in `packages/core/src/catalog/upscale.ts` (part of render_key), so a changed export
+must bump that map. Only the ONNX files (about 67 MB and 11 MB) reach the runtime
 images, under `/upscale-models`, read-only. Nothing is downloaded at request time.
 
 Tiling: the image is reflection-padded and cut into fixed tiles carrying 32 px of context on each

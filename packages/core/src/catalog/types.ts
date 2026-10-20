@@ -105,7 +105,9 @@ function channelName(ctx: Ctx | undefined, fallback: string): string {
  */
 const REASONS: Partial<Record<OutputFlag, (ctx?: Ctx) => string>> = {
   low_resolution: (ctx) =>
-    (has(ctx, "w", "h", "min")
+    (has(ctx, "w", "h", "deliverW", "deliverH")
+      ? `The original is ${ctx?.w} x ${ctx?.h}. ${channelName(ctx, "This marketplace")} images are delivered at ${ctx?.deliverW} x ${ctx?.deliverH}, so this one was enlarged and may look soft.`
+      : has(ctx, "w", "h", "min")
       ? `The original is ${ctx?.w} x ${ctx?.h}. ${channelName(ctx, "This marketplace")} wants at least ${ctx?.min} px, so this one may look soft.`
       : `The original photo is smaller than ${channelName(ctx, "this marketplace")} wants, so this one may look soft.`) +
     " It will upload, but ask the brand for a larger photo if you can.",

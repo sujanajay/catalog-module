@@ -101,7 +101,7 @@ describe("render and encoded compliance", () => {
   it("tells the truth about Trendyol's size: its minimum, the size we deliver, and that the photo was enlarged", async () => {
     const output = await renderSource({ ...fixture(300, 300, { x: 100, y: 100, w: 100, h: 100 }), channel: "trendyol", shotNumber: 1, productType: "apparel_model" });
     expect(output.status).toBe("ok"); expect(output.flags).toContain("low_resolution");
-    expect(output.attention!.why).toBe("The original is 300 x 300. Trendyol's minimum is 600 x 800 and we deliver every Trendyol image at 1200 x 1800, so this photo was enlarged and may look soft.");
+    expect(output.attention!.why).toBe("The original is 300 x 300. Trendyol images are delivered at 1200 x 1800, so this one was enlarged and may look soft.");
     expect(output.attention!.why).not.toContain("wants at least");
     expect(output.attention!.what).toBe("It will upload, but ask the brand for a larger photo if you can. The other marketplaces are fine with it.");
   });

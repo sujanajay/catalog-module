@@ -1,6 +1,6 @@
 import { flagReason, UPSCALED_SENTENCE, type OutputFlag } from "../types";
 import { CHANNELS } from "../channels";
-export interface ReasonContext { /** The code-detected `leftover_background` (a busy background held at the matte stage, busyBackgroundHold). */ busy?: boolean; n?: number; k?: number; channel?: string; w?: number; h?: number; min?: number; failures?: string; error?: string }
+export interface ReasonContext { /** The code-detected `leftover_background` (a busy background held at the matte stage, busyBackgroundHold). */ busy?: boolean; n?: number; k?: number; channel?: string; w?: number; h?: number; min?: number; /** A fixed canvas's delivered size (spec 11 4.1). */ deliverW?: number; deliverH?: number; failures?: string; error?: string }
 export interface FlagDetails { why: string; whatToDo: string }
 /** The placement sentence in the channel's own rule (the channel table's `anchor`), in operator words. */
 function placementWhy(label: string | undefined): string {
@@ -25,7 +25,7 @@ export function flagDetails(flag: OutputFlag | "failed", ctx: ReasonContext = {}
     collage:["This image combines several photos in one. Marketplaces reject these.","Remove it, or replace it with the single photos."],
     orientation:["The product looks rotated or upside down.","If the original is like this, replace it with a corrected photo."],
     placement:[placementWhy(ctx.channel),`Check the other angles of this product. This affects ${ctx.channel ?? "this marketplace"} only; "Remove this photo" removes it for ${ctx.channel ?? "this marketplace"}, "Replace photo ${n}" swaps the photo.`],
-    low_resolution:[ctx.w !== undefined && ctx.h !== undefined ? `The original is ${ctx.w} x ${ctx.h}. ${channel} wants at least ${ctx.min ?? "the required"} px, so this one may look soft.` : `The original photo is smaller than ${channel} wants, so this one may look soft.`,"It will upload, but ask the brand for a larger photo if you can. The other marketplaces are fine with it."],
+    low_resolution:[ctx.w !== undefined && ctx.h !== undefined && ctx.deliverW !== undefined && ctx.deliverH !== undefined ? `The original is ${ctx.w} x ${ctx.h}. ${channel} images are delivered at ${ctx.deliverW} x ${ctx.deliverH}, so this one was enlarged and may look soft.` : ctx.w !== undefined && ctx.h !== undefined ? `The original is ${ctx.w} x ${ctx.h}. ${channel} wants at least ${ctx.min ?? "the required"} px, so this one may look soft.` : `The original photo is smaller than ${channel} wants, so this one may look soft.`,"It will upload, but ask the brand for a larger photo if you can. The other marketplaces are fine with it."],
     small_source:[ctx.w !== undefined && ctx.h !== undefined ? `The original is only ${ctx.w} x ${ctx.h}, under 500 px on its long side.` : "The original is under 500 px on its long side.","It is too small to look good anywhere. Remove it or replace it with a larger photo."],
     failed:[ctx.error ?? "The file is corrupt and could not be decoded.","Nothing was made for any marketplace from this photo. Remove it or replace it."],
     failed_compliance:[`The image we made did not meet ${channel}'s rules${ctx.failures ? `: ${ctx.failures}` : ""}.`,"This should not happen. Remove it or replace it, and the technical team will look at the report."],

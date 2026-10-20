@@ -11,7 +11,8 @@ import { DEFAULT_POLICIES } from "@catalog/core/catalog/qa/policy";
 
 const ROOT = path.resolve(__dirname, "../../..");
 const WEB_DIRS = ["apps/web/app", "apps/web/components", "apps/web/lib"];
-// Core files whose strings reach the operator: flag sentences, banners, cost lines, sheet cells.
+// Core files whose strings reach the operator: flag sentences, banners, cost lines, sheet cells, render attention
+// text. upscale.ts is engineering config (it maps model ids to export versions for render_key) and is left out.
 const CORE_COPY_FILES = [
   "packages/core/src/catalog/qa/reasons.ts",
   "packages/core/src/catalog/pipeline/status.ts",
@@ -19,6 +20,8 @@ const CORE_COPY_FILES = [
   "packages/core/src/catalog/sheet.ts",
   "packages/core/src/catalog/types.ts",
   "packages/core/src/catalog/pipeline/report.ts",
+  "packages/core/src/catalog/enhance.ts",
+  "packages/core/src/catalog/render.ts",
 ];
 
 // Every candidate id the policy defines, plus provider and family names (spec 07 section 8).

@@ -81,3 +81,17 @@ describe("sharpening after enlargement", () => {
     expect(ours.equals(await plainLanczos(rgba, width, height, crop, to).raw().toBuffer())).toBe(true);
   });
 });
+
+describe("truthful low_resolution copy (spec 11 4.1)", () => {
+  it("names the delivered size on a fixed canvas and the minimum on an adaptive one, in qa/reasons.ts and types.ts", async () => {
+    const { flagDetails } = await import("./qa/reasons");
+    const { flagReason } = await import("./types");
+    const fixed = "The original is 800 x 1200. Trendyol images are delivered at 1200 x 1800, so this one was enlarged and may look soft.";
+    expect(flagDetails("low_resolution", { channel: "Trendyol", w: 800, h: 1200, min: 800, deliverW: 1200, deliverH: 1800 }).why).toBe(fixed);
+    expect(flagReason("low_resolution", { channel: "Trendyol", w: 800, h: 1200, min: 800, deliverW: 1200, deliverH: 1800 })).toContain(fixed);
+    const adaptive = "The original is 300 x 300. Noon wants at least 1480 px, so this one may look soft.";
+    expect(flagDetails("low_resolution", { channel: "Noon", w: 300, h: 300, min: 1480 }).why).toBe(adaptive);
+    expect(flagReason("low_resolution", { channel: "Noon", w: 300, h: 300, min: 1480 })).toContain(adaptive);
+    for (const text of [flagDetails("low_resolution", { channel: "Trendyol", w: 800, h: 1200, min: 800, deliverW: 1200, deliverH: 1800 }).why]) expect(text).not.toMatch(/at least 1800/);
+  });
+});

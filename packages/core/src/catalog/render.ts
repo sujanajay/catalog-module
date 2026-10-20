@@ -503,10 +503,11 @@ export async function renderSource(input: RenderInput): Promise<RenderOutput> {
     result.flags.push("low_resolution");
     if (spec.id === "styli" && STYLI_SKIP_LOW_RESOLUTION) { result.status = "skipped"; result.notes.push("Skipped for Styli: the photo is smaller than Styli needs."); return result; }
     const min = spec.minCanvas, target = spec.targetCanvas;
-    // A fixed canvas above the channel's minimum (Trendyol: minimum 600 x 800, delivered at 1200 x 1800) is not a
-    // minimum the photo missed: say what the channel needs, what we deliver, and that the photo was enlarged.
-    const why = spec.fixedCanvas && (target.w > min.w || target.h > min.h)
-      ? `The original is ${p.width} x ${p.height}. ${spec.label}'s minimum is ${min.w} x ${min.h} and we deliver every ${spec.label} image at ${target.w} x ${target.h}, so this photo was enlarged and may look soft.`
+    // A fixed canvas (Trendyol 1200 x 1800, minimum 600 x 800; Centrepoint) is the size we deliver, not a minimum the
+    // photo missed (spec 11 4.1): say what we deliver and that the photo was enlarged. Same words in qa/reasons.ts and
+    // types.ts REASONS.low_resolution.
+    const why = spec.fixedCanvas
+      ? `The original is ${p.width} x ${p.height}. ${spec.label} images are delivered at ${target.w} x ${target.h}, so this one was enlarged and may look soft.`
       : `The original is ${p.width} x ${p.height}. ${spec.label} wants at least ${min.h > min.w ? min.h : min.w} px, so this one may look soft.`;
     result.attention = { why, what: "It will upload, but ask the brand for a larger photo if you can. The other marketplaces are fine with it." };
   }

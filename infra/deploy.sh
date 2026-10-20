@@ -178,7 +178,7 @@ UPSCALE_MIN_SCALE=${UPSCALE_MIN_SCALE:-1.5}
 [[ "$UPSCALE_MODEL" =~ ^[A-Za-z0-9._-]*$ ]] || { echo "UPSCALE_MODEL must be a model id such as realesrgan-x2plus, or empty" >&2; exit 1; }
 [[ "$UPSCALE_MIN_SCALE" =~ ^[0-9]+([.][0-9]+)?$ ]] || { echo "UPSCALE_MIN_SCALE must be a number such as 1.5" >&2; exit 1; }
 WORKER_ENV+=",UPSCALE_MIN_SCALE=$UPSCALE_MIN_SCALE"
-if [ -n "$UPSCALE_MODEL" ]; then WORKER_ENV+=",UPSCALE_MODEL=$UPSCALE_MODEL"; fi
+# UPSCALE_MODEL itself is added after the GPU matting step below, and only when that step yields MATTING_GPU_URL.
 # 03: the web verifies the IAP JWT against this exact audience and accepts only this domain.
 IAP_AUDIENCE=/projects/$PN/locations/$REGION/services/$WEB_SERVICE
 WEB_ENV+=",IAP_AUDIENCE=$IAP_AUDIENCE,ALLOWED_HOSTED_DOMAIN=opptra.com"
@@ -274,6 +274,12 @@ else
   echo "ERROR: GPU deployment failed for a reason other than quota; stopping" >&2
   exit 1
 fi
+# Spec 11 4.5: the upscaler runs on the GPU service only, so the flag reaches the worker only with a GPU URL.
+if [ -n "$UPSCALE_MODEL" ] && [ -z "$MATTING_GPU_URL" ]; then
+  echo "WARN: UPSCALE_MODEL=$UPSCALE_MODEL ignored: no GPU matting service URL; the render keeps the plain path" >&2
+  UPSCALE_MODEL=""
+fi
+if [ -n "$UPSCALE_MODEL" ]; then WORKER_ENV+=",UPSCALE_MODEL=$UPSCALE_MODEL"; fi
 
 # --- 6. Worker -----------------------------------------------------------------------
 echo "==> worker"
@@ -414,3 +420,4 @@ echo "WEB_URL=$WEB_URL"
 echo "WORKER_URL=$WORKER_URL"
 echo "MATTING_URL=$MATTING_URL"
 echo "MATTING_GPU_URL=${MATTING_GPU_URL:-not configured}"
+echo "UPSCALE_MODEL=${UPSCALE_MODEL:-off}"

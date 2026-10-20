@@ -150,12 +150,12 @@ describe("render_key", () => {
     expect(renderKey({ ...input, upscaler: MODEL })).toBe(upscaledRenderKey(plain, MODEL));
     expect(renderKey({ ...input, upscaler: MODEL })).not.toBe(plain);
     expect(renderKey({ ...input, upscaler: "swinir-x2" })).not.toBe(renderKey({ ...input, upscaler: MODEL }));
-    expect(upscalerKey(MODEL)).toBe(`u:${MODEL}:${UPSCALER_VERSION}`);
+    expect(upscalerKey(MODEL)).toBe(`u:${MODEL}@e828354d:${UPSCALER_VERSION}`);
     expect(renderKeys(input, null)).toEqual([plain]);
     expect(renderKeys(input, MODEL)).toEqual([plain, upscaledRenderKey(plain, MODEL)]);
     const k = { sourceSha256: "abc", channel: "trendyol" as const, rulesVersion: "7", policyId: "p", policyUpdatedAt: "t", n: 1 };
     expect(renderKeyInputs(k)).toBe("abc|trendyol|7|p+t|1");
-    expect(renderKeyInputs({ ...k, upscaler: MODEL })).toBe(`abc|trendyol|7|p+t|1|u:${MODEL}:1`);
+    expect(renderKeyInputs({ ...k, upscaler: MODEL })).toBe(`abc|trendyol|7|p+t|1|u:${MODEL}@e828354d:1`);
   });
 });
 
@@ -218,11 +218,17 @@ describe("matting client upscale", () => {
     const down = client(() => Response.json({ error: "unavailable" }, { status: 503 }));
     await expect(down.c.upscale(await image(), { model: MODEL, contentType: "image/png", sleep })).rejects.toBeInstanceOf(UpscaleUnavailableError);
     expect(down.calls.filter(u => u.includes("/upscale"))).toHaveLength(2);
-    expect(down.c.breakers.gpu!.failures).toBe(1);
+    expect(down.c.upscaleBreaker.failures).toBe(1); expect(down.c.breakers.gpu!.failures).toBe(0);
     // A rejected request (too large) is not the service's fault: no retry, no breaker failure.
     const big = client(() => Response.json({ error: "too large" }, { status: 413 }));
     await expect(big.c.upscale(await image(), { model: MODEL, contentType: "image/png", sleep })).rejects.toBeInstanceOf(UpscaleUnavailableError);
-    expect(big.calls.filter(u => u.includes("/upscale"))).toHaveLength(1); expect(big.c.breakers.gpu!.failures).toBe(0);
+    expect(big.calls.filter(u => u.includes("/upscale"))).toHaveLength(1); expect(big.c.upscaleBreaker.failures).toBe(0);
+    // Repeated service failures open the upscale breaker only: the call is skipped, matting is untouched.
+    for (let i = 1; i < 5; i++) await expect(down.c.upscale(await image(), { model: MODEL, contentType: "image/png", sleep })).rejects.toBeInstanceOf(UpscaleUnavailableError);
+    expect(down.c.upscaleBreaker.openedAt).not.toBeNull(); expect(down.c.breakers.gpu!.state).toBe("closed");
+    const before = down.calls.filter(u => u.includes("/upscale")).length;
+    await expect(down.c.upscale(await image(), { model: MODEL, contentType: "image/png", sleep })).rejects.toThrow("paused");
+    expect(down.calls.filter(u => u.includes("/upscale"))).toHaveLength(before);
   });
   it("times out without a retry and skips the call while the GPU breaker is open", async () => {
     const hang: Route = init => new Promise((_, reject) => init.signal.addEventListener("abort", () => reject(init.signal.reason)));

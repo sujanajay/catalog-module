@@ -37,8 +37,14 @@ export function shouldUpscale(scale: number, minScale: number): boolean {
   return Number.isFinite(scale) && scale > minScale + 1e-9;
 }
 
-/** The render_key part that names the upscaler; present only when the upscaler was used. */
-export const upscalerKey = (model: string): string => `u:${model}:${UPSCALER_VERSION}`;
+/**
+ * Spec 11 4.2: each served model's ONNX export, as the first 8 hex of its sha256 (printed by the Dockerfile's
+ * upscale-models stage, recorded in services/matting/README.md). Bumped whenever an export changes, so the outputs
+ * it made re-render once; a redeploy with the same export keeps every key.
+ */
+export const UPSCALE_MODEL_VERSIONS: Readonly<Record<string, string>> = { "realesrgan-x2plus": "e828354d", "swinir-x2": "9f4a3f85" };
+/** The render_key part that names the upscaler, its export and the recombination; present only when the upscaler was used. */
+export const upscalerKey = (model: string): string => `u:${model}@${UPSCALE_MODEL_VERSIONS[model] ?? "unknown"}:${UPSCALER_VERSION}`;
 
 /** What the render needs from the service: one 2x JPEG for one image. Throws on any failure. */
 export interface Upscaler {

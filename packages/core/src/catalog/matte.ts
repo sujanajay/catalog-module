@@ -69,6 +69,21 @@ export class MattingClient {
   }
   /** Compatibility view is the required CPU breaker; use breakers for both targets. */
   get breaker(): Breaker { return this.states.find((s) => s.target === "cpu")!.breaker; }
+  /**
+   * Spec 11 assumption 9: the upscaler's own breaker. Upscale failures never touch the matting breakers; after
+   * BREAKER_FAILURES consecutive failures the upscaler is skipped for BREAKER_COOLDOWN_MS, closed again by a success.
+   */
+  readonly upscaleBreaker: { failures: number; openedAt: number | null } = { failures: 0, openedAt: null };
+  private upscaleAvailable(): boolean {
+    const b = this.upscaleBreaker;
+    if (b.openedAt !== null && Date.now() - b.openedAt >= BREAKER_COOLDOWN_MS) { b.openedAt = null; b.failures = BREAKER_FAILURES - 1; }
+    return b.openedAt === null;
+  }
+  private upscaleFailure(): void {
+    const b = this.upscaleBreaker;
+    b.failures++;
+    if (b.failures >= BREAKER_FAILURES) b.openedAt = Date.now();
+  }
   get breakers(): Partial<Record<"cpu" | "gpu", Breaker>> { return Object.fromEntries(this.states.map((s) => [s.target, s.breaker])); }
   private transition(s: ServiceState, state: Breaker["state"]): void {
     if (s.breaker.state === state) return;
@@ -126,9 +141,10 @@ export class MattingClient {
    * POST /upscale?model=<id>&scale=2 on the GPU service (spec 11): the body is the image bytes, the
    * answer a JPEG of exactly twice the size. Only the GPU service upscales (the CPU service answers
    * 503), and only a model its /health lists as available at scale 2 is asked for. Same auth, base
-   * URL and circuit breaker as matting: an open GPU breaker skips the call, one retry follows a 503
-   * after `retryDelayMs`, and only a final failure of the service (not a rejected request, 400 or
-   * 413) counts, once, towards the breaker. Throws UpscaleUnavailableError; the render then uses Lanczos.
+   * URL as matting: an open GPU matting breaker or an open upscale breaker skips the call, one retry follows a
+   * 503 after `retryDelayMs`, and only a final failure of the service (not a rejected request, 400 or 413)
+   * counts, once, towards the upscale breaker (never the matting one). Throws UpscaleUnavailableError; the render
+   * then uses Lanczos.
    */
   async upscale(image: Buffer, opts: UpscaleOptions): Promise<{ jpeg: Buffer; ms: number; model: string }> {
     const s = this.states.find((x) => x.target === "gpu");
@@ -138,13 +154,13 @@ export class MattingClient {
     const sleep = opts.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
     let last: unknown;
     for (let attempt = 0; attempt < 2; attempt++) {
-      if (!this.available(s)) throw new UpscaleUnavailableError("The GPU service is paused after repeated failures.");
+      if (!this.available(s) || !this.upscaleAvailable()) throw new UpscaleUnavailableError("The GPU service is paused after repeated failures.");
       const started = Date.now();
       try {
         const response = await this.call(s, `/upscale?model=${encodeURIComponent(opts.model)}&scale=2`, { method: "POST", body: new Uint8Array(image), headers: { "content-type": opts.contentType } }, opts.timeoutMs ?? UPSCALE_TIMEOUT_MS);
         const jpeg = Buffer.from(await response.arrayBuffer());
         const ms = Number(response.headers.get("x-upscale-ms"));
-        s.breaker.failures = 0; s.breaker.openedAt = null; this.transition(s, "closed");
+        this.upscaleBreaker.failures = 0; this.upscaleBreaker.openedAt = null;
         return { jpeg, ms: Number.isFinite(ms) && ms > 0 ? ms : Date.now() - started, model: response.headers.get("x-upscale-model") ?? opts.model };
       } catch (err) {
         last = err;
@@ -152,7 +168,7 @@ export class MattingClient {
         break;
       }
     }
-    if (!(last instanceof Error && /request rejected/.test(last.message))) this.failure(s);
+    if (!(last instanceof Error && /request rejected/.test(last.message))) this.upscaleFailure();
     throw new UpscaleUnavailableError(`Upscale failed: ${last instanceof Error ? last.message : String(last)}`);
   }
   sendLongSide(model: string, source: Size): number {
