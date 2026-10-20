@@ -98,8 +98,8 @@ section 10 report, the live URL and "Programme complete; no next spec."
   Owner decisions still OPEN (the owner said "let me know first"; do not build them until the owner
   says go, but list them in every status): A fair sharing between batches, queue position and ETA,
   sweeper and judge 429 fixes, load driver re-check; B free throughput fixes (GPU model cache,
-  judge concurrency limit, compute accounting); C sharpening on enlargement; D Real-ESRGAN x2 on
-  the GPU service behind a flag (needs the SPEC.md upscaler and Styli decisions); E 2x shape
+  judge concurrency limit, compute accounting); C and D (sharpening and the upscaler) are APPROVED,
+  see step 8 below; E 2x shape
   (db-g1-small, 7 workers, maintenance window); F 1,000-product load measurement (empty UTC day);
   G upload path fixes. Estimates and evidence are in the PROGRESS.md investigation rows and the
   bucket folder `investigations/`.
@@ -144,7 +144,41 @@ section 10 report, the live URL and "Programme complete; no next spec."
 6. Docs: PROGRESS.md final rows, task board, session summary, hand-over figures; merge origin/main
    into the docs branch; `gh pr ready`; CI; squash-merge with a conventional subject and no co-author.
 7. Memory note; final 00 section 10 report with the live URL and "Programme complete; no next spec.";
-   push notification. Then, only on the owner's go, items A to G as their own specs or fix PRs.
+   push notification.
+8. Image enhancement (APPROVED by the owner on 2026-10-20 16:40 UTC: "go with the best option, try it
+   out, test it, see which is best"). Run it as spec 11 `docs/specs/11-image-enhancement.md`
+   (write the spec first from the research in the bucket folder `investigations/`
+   (`image-enhancement.md`, `enhancement-cost.md`), through the 00 protocol: Opus builders, Fable
+   for the eval gate). Scope, in order:
+   a. Sharpening after any enlargement in the render (`sharp` unsharp mask, only when scale > 1),
+      fix the misleading "Trendyol wants at least 1800 px" review text, bump `CHANNEL_RULES_VERSION`,
+      spec 10 evals must stay green; small PR, deploy, gate case: the Penti and Vero Moda 800x1200
+      sources on Trendyol.
+   b. `/upscale` endpoint on `catalog-matting-gpu` (same service, not a new one) running
+      Real-ESRGAN x2plus as ONNX on the existing onnxruntime-gpu (BSD-3), colour through the model
+      and alpha through Lanczos, JPEG response, used only when the enlargement exceeds 1.5x, behind
+      an env flag (`UPSCALE_MODEL`, default off) with Lanczos plus sharpening as the fallback on any
+      failure, outputs flagged `upscaled` (information, never a hold), `render_key` includes the
+      upscaler so re-renders stay identical, no model name in UI copy or the sheet.
+   c. Fidelity gate before enabling it (Fable 5.1, as a spec 10 check set): take golden photos of
+      1,600 px or more, shrink 2x, restore with Lanczos plus sharpening, Real-ESRGAN x2plus, and at
+      least one alternative open model (SwinIR or HAT) on the same endpoint; compare to the original
+      on the product area: SSIM and LPIPS better than Lanczos plus sharpening, CIEDE2000 colour
+      difference under 2, OCR and crop diff show no logo or label text change, no invented or
+      flattened fabric texture, no halo at the cut-out edge; measure p50 and p95 seconds per photo
+      on the L4, cold start, error rate, the real share of photos that need it, and identical bytes
+      on a re-run. Pick the best candidate by these numbers; if none passes, test Topaz Precision
+      (closed source, non-generative, about USD 470 per 1,000 products, photos leave GCP) only
+      after the owner confirms that trade.
+   d. Enable the winner per channel (Trendyol first), run the gate batches again, visual inspection
+      of every upscaled output, record cost per product and per 1,000 in PROGRESS.md (baseline USD
+      0.0049; Real-ESRGAN estimate +USD 0.0022), and the operator note in the hand-over.
+   e. Owner decisions to record in SPEC.md as part of the spec: an upscaler is allowed in the default
+      path behind the flag (the owner approved trying it); whether an x2 upscale may un-skip Styli
+      (800x1200 sources would clear Styli's 1,482 px minimum) stays an OPEN owner decision, ask it
+      in the status when (c) is done; no paid image API without a separate owner yes.
+   Estimate: (a) 2 to 3 h; (b) and (c) 1.5 to 2 days; (d) half a day.
+   Items A, B, E, F and G stay open until the owner says go.
 
 ## Time estimate for the remaining programme (made at hand-off)
 
