@@ -4,20 +4,47 @@
 // and be flagged for information, never held for a person.
 import { delta, dropSpecks, SPECK_PX } from "./image";
 import { EXTENT_DELTA } from "./geometry";
-import type { OutputContext } from "./context";
-import { judge, notRun, type CheckResult, type CheckSubject } from "./types";
+import { overflowPx, type OutputContext } from "./context";
+import { judge, notRun, pass, type CheckResult, type CheckSubject } from "./types";
 
 /** The information flag the render sets on a cut source (spec 05, `cut_in_source`). */
 export const CUT_SOURCE_FLAGS: readonly string[] = ["cut_in_source"];
 export const FLUSH_TOLERANCE_PX = 1;
+/**
+ * The most of the product box a render may trim off an axis so the other axis fills the canvas (spec 05
+ * CUT_FILL_MAX_TRIM, stated here as the suite's own bound): a third, the widest canvas mismatch in the channel
+ * table (a square photo on the 2:3 Trendyol canvas).
+ */
+export const MAX_TRIM_SHARE = 1 / 3;
 
 const E = "cut_edge" as const;
 
 export function checkCutEdge(ctx: OutputContext): CheckResult[] {
   const { subject: s, canvas, background, safeBox, product } = ctx;
   const who: CheckSubject = { identifier: s.identifier, n: s.n, channel: s.channel };
-  if (!ctx.cutSides.length) return [notRun("cut_edge.flush", E, who, "The product does not touch the source frame.")];
   const out: CheckResult[] = [];
+  // Trim: from the recorded scale alone, how much of the product the placement leaves no room for on each axis. Spec 05
+  // allows that only on an axis with a cut side, only so that the other axis (cut on both ends) fills the canvas, and
+  // never beyond a third of the product box; an uncut outline is never trimmed. A fitted product is trimmed on neither axis.
+  const { sourceBox: box, cut, safeBox: safe } = ctx, scale = s.placement.scale;
+  const axes = [
+    { name: "width", trimmed: overflowPx(box.w, scale, safe.w), length: box.w, cutSide: cut.left || cut.right, otherFilled: cut.top && cut.bottom && Math.round(box.h * scale) >= safe.h - FLUSH_TOLERANCE_PX, sides: "left or right" },
+    { name: "height", trimmed: overflowPx(box.h, scale, safe.h), length: box.h, cutSide: cut.top || cut.bottom, otherFilled: cut.left && cut.right && Math.round(box.w * scale) >= safe.w - FLUSH_TOLERANCE_PX, sides: "top or bottom" },
+  ];
+  const trimmed = axes.filter(a => a.trimmed > 0);
+  if (trimmed.length) {
+    const problems = trimmed.flatMap(a => {
+      const share = a.trimmed / a.length;
+      return [
+        !a.cutSide && `${a.trimmed} px of the ${a.name} are trimmed although the photo is not cut at the ${a.sides}`,
+        a.cutSide && !a.otherFilled && `${a.trimmed} px of the ${a.name} are trimmed without the other axis being cut on both ends and filling the canvas`,
+        share > MAX_TRIM_SHARE + 1 / a.length && `${(share * 100).toFixed(1)}% of the ${a.name} is trimmed (at most a third)`,
+      ].filter((p): p is string => typeof p === "string");
+    });
+    const worst = Math.max(...trimmed.map(a => a.trimmed / a.length));
+    out.push(judge(!problems.length, "cut_edge.trim", E, who, Math.round(worst * 1e4) / 1e4, Math.round(MAX_TRIM_SHARE * 1e4) / 1e4, "share of the product box", problems.length ? `${problems.join("; ")}.` : `The placement trims ${trimmed.map(a => `${a.trimmed} px of the ${a.name} (${(100 * a.trimmed / a.length).toFixed(1)}%)`).join(" and ")} off cut sides so the other axis fills the canvas.`));
+  } else out.push(pass("cut_edge.trim", E, who, 0, Math.round(MAX_TRIM_SHARE * 1e4) / 1e4, "share of the product box", "The placement leaves room for the whole product; nothing is trimmed."));
+  if (!ctx.cutSides.length) return [notRun("cut_edge.flush", E, who, "The product does not touch the source frame."), ...out];
   // Measured extent of the product on the canvas: clearly foreground pixels where the product should be (a line drawn elsewhere never extends it).
   let x0 = canvas.w, y0 = canvas.h, x1 = -1, y1 = -1;
   for (let y = 0; y < canvas.h; y++) for (let x = 0; x < canvas.w; x++) if (product[y * canvas.w + x] && delta(canvas.rgb, y * canvas.w + x, background) > EXTENT_DELTA) { x0 = Math.min(x0, x); y0 = Math.min(y0, y); x1 = Math.max(x1, x); y1 = Math.max(y1, y); }

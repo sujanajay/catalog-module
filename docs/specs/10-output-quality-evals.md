@@ -54,6 +54,10 @@ suite tests them from the outside; findings go to the render owner as failing ch
 Measured on the staged JPEG of every made output, against the channel table. The expected product
 mask is the pipeline's own matte projected onto the canvas exactly as the render projects it (cut
 to the bbox, lanczos3 to the recorded placement), so the suite knows where the product should be.
+Where the recorded scale leaves no room for the whole bbox on an axis (spec 05 cut fill), the suite
+computes the crop itself from the recorded placement and the rule (overflow off that axis's cut
+sides only, split evenly when both are cut), never by calling the render's own crop function, so
+a render that trims an uncut outline fails `extent` and `pixels_copied`.
 
 | Check | Measured | Bar |
 |---|---|---|
@@ -121,7 +125,8 @@ A source is cut on a side when at least 2% of that edge's pixels carry product (
 
 | Check | Bar |
 |---|---|
-| `flush_<side>` | the measured product (clearly foreground pixels inside the mask) ends within 1 px of the canvas edge on the cut side (the render drops that side's margin, so a cut side is always flush) |
+| `flush_<side>` | the measured product (clearly foreground pixels inside the mask) ends within 1 px of the canvas edge on the cut side (the render drops that side's margin, so a cut side is always flush; the render's "cannot reach that edge" fallback is a failure here, reported to the render owner) |
+| `trim` | from the recorded scale alone, the share of the product box the placement leaves no room for, per axis (runs on every output; an uncut product trimmed at all fails) | trimmed only on an axis with a cut side, only when the other axis is cut on both ends and fills the canvas, and at most a third (spec 05 `CUT_FILL_MAX_TRIM`, stated independently as `MAX_TRIM_SHARE`) |
 | `no_line_<side>` | nothing beyond the cut side is drawn (regions of 12 px or more, delta > 12), and at most 1% of the silhouette's last 12 rows or columns before the cut are background (no gap, no floating line) |
 | `flagged` | the output carries the information flag `cut_in_source` |
 | `not_held` | status is not `needs_attention` or `failed` |
@@ -246,7 +251,8 @@ Tier 1 (`pnpm test`): every image check passes on a synthetic footwear product o
 (flat lay on Styli) and on a model photo; every check has a case that fails it (format, edges, band,
 stray blob, margin intrusion, shifted extent, off-centre, Styli float, redrawn pixels, forbidden
 shadow, shadow block, slab, rising gradient, out-of-band shadow, lost strap, lost region, hole, kept
-background, halo, fringe, cut flush and guide, missing flag, held, floating line); the row checks on
+background, halo, fringe, cut flush and guide, missing flag, held, floating line, a cut-fill trim beyond
+a third or on an uncut side, a fitted cut top with a band beside it); the row checks on
 synthetic rows (completeness, attention including planted items and judge false positives,
 consistency, placement, product type, flag rows, overwrite, identical); the golden builder on a
 temporary folder (auto tags, derived cases, planted copies, sha256 pinning, round trip); the
