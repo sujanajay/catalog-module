@@ -42,10 +42,13 @@ suite tests them from the outside; findings go to the render owner as failing ch
 - `golden.ts` manifest build, derived and planted cases, sha256 pinning (section 11).
 - `matte-bakeoff.ts` model scoring, ranking, policy rows (section 12).
 - `report.ts` JSON report, HTML contact sheet, the summary line.
+- `progress.ts` per-set records under `catalog-test/evals/<run>/sets/`, resume and `--sets` selection, the
+  retrying storage wrapper for the eval path (section 13).
 - `sheet-notes.ts` reads the `notes` column of a links workbook.
 - `synthetic.ts` synthetic products through the real `renderSource` for the checker tests.
 - `apps/worker/src/catalog-output-evals.ts` commands `build-golden`, `upload`, `run`, `check-folder`.
-- `infra/catalog-output-evals.sh` `deploy | upload | run [--live] [flags]`; `infra/deploy.sh` deploys the job.
+- `infra/catalog-output-evals.sh` `deploy | upload | run [--live] [flags]` (flags, including `--resume` and
+  `--sets`, pass through to the CLI); `infra/deploy.sh` deploys the job.
 - `packages/core/test-fixtures/catalog/evals/golden-build.json` (how the set is drawn) and
   `golden-manifest.json` (the pinned set).
 
@@ -238,16 +241,40 @@ with `--write-policy`, never silently. Model ids stay in the JSON report and the
   `bash infra/catalog-output-evals.sh run` (mocked judge), `bash infra/catalog-output-evals.sh run
   --live` (live judge, planted and judge checks asserted), `... run --write-policy` (also writes the
   bake-off winners to `model_policy`). Flags `--limit <products>`, `--brand <slug>`, `--skip-bakeoff`,
-  `--skip-overwrite` bound a run.
+  `--skip-overwrite` bound a run; `--sets anta.footwear,penti.apparel_flat` runs only the named
+  (brand, category) sets.
 - Output: `catalog-test/evals/<run>/report.json` and `report.html` (every failing image with its
   original, its output and the number that failed), and the one line
   `Output-quality eval: N of M checks passed, K products need attention (target 0)`. Exit code 1 on
-  any failed check or any unexpected attention product. Test batches, products and objects are
-  cleaned up in `finally` (spend rows kept).
+  any failed check, any unexpected attention product or any failed set. Each set's test batches,
+  products and objects are cleaned up as soon as the set ends, before the next one starts (spend rows
+  kept); the same cleanup runs before a set, so a crashed earlier attempt of the run leaves nothing
+  locked.
+- Durable progress and resume. The run id (`evals-<timestamp>-<6 hex>`) is the first line of the
+  job log. The job processes one (brand, category) set at a time (its batch, the row and image
+  checks, the overwrite contract on the first set with a three-shot product, the bake-off trials of
+  its sources, cleanup) and then writes `catalog-test/evals/<run>/sets/<brand>.<category>.json` with
+  everything the report needs from that set (check results, contact-sheet thumbnails, attention rows,
+  bake-off trials, which batches it made). A failure inside a set is recorded as a `failed` record
+  with the error and the job goes on with the next set; the report is still written from the sets it
+  has and the exit code is 1. `run --resume <run>` loads the records, skips the sets recorded as
+  done, re-runs the failed or missing ones and writes the report from all of them. The report's
+  `sets` table (JSON and HTML) lists every set with its status, its error and whether the overwrite
+  contract ran on it.
+- Retries. Every storage read and write of the eval path (golden sources, raw photos, mattes, staged
+  outputs, public heads, set records, the report) goes through `retryTransient` with five attempts
+  (1 s, 2 s, 4 s, 8 s between them) on socket resets, hang-ups, timeouts, 429 and 5xx. The storage
+  module itself also retries whole-object downloads and listings (four attempts), so the pipeline
+  handlers the job runs inline (ingest, matte) get the same protection. The GCS client's own retry
+  does not cover a download stream the server drops mid-read (the `socket hang up` that ended the
+  first job run), which is why the wrapping sits on our side.
 
 ## 14. Test plan
 
-Tier 1 (`pnpm test`): every image check passes on a synthetic footwear product on every channel
+Tier 1 (`pnpm test`): the eval-path storage wrapper retries a read that hangs up twice and gives up
+after the fifth attempt; a set record round-trips with its thumbnails; resume skips done sets, re-runs
+failed ones and honours `--sets`; the storage module retries a download whose socket hangs up.
+Every image check passes on a synthetic footwear product on every channel
 (flat lay on Styli) and on a model photo; every check has a case that fails it (format, edges, band,
 stray blob, margin intrusion, shifted extent, off-centre, Styli float, redrawn pixels, forbidden
 shadow, shadow block, slab, rising gradient, out-of-band shadow, lost strap, lost region, hole, kept
@@ -270,3 +297,5 @@ spec; the manager runs it after deploy and attaches the report.
   forbidden shadows under models as failing checks with their numbers.
 - The job deploys from `infra/deploy.sh`, runs end to end on the golden set, writes the report under
   `catalog-test/evals/<run>/`, prints the summary line, exits non-zero on any failure, and cleans up.
+- A run that stops in one set keeps the finished sets' records and `run --resume <run>` finishes
+  the report without re-running them.

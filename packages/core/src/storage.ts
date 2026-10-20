@@ -96,7 +96,7 @@ export class GenerationMismatchError extends Error {
   }
 }
 
-/** Attempts after the first one for a write, copy, delete or verify GET. */
+/** Attempts after the first one for a read, write, copy, delete or listing. */
 export const STORAGE_RETRIES = 3;
 /** Backoff base: waits 1 s, 2 s, 4 s. */
 export const STORAGE_RETRY_BASE_MS = 1000;
@@ -200,7 +200,9 @@ export async function uploadBuffer(path: string, buf: Buffer, mime: string, opti
 export async function downloadBuffer(gsUri: string): Promise<{ buf: Buffer; mime: string }> {
   const { bucket, path } = parseGsUri(gsUri);
   const file = getStorage().bucket(bucket).file(path);
-  const [[buf], [meta]] = await Promise.all([file.download(), file.getMetadata()]);
+  // A download stream that the server drops mid-read surfaces as a node-fetch "socket hang up"
+  // that the client's own retry does not cover, so both reads go through withStorageRetry.
+  const [[buf], [meta]] = await Promise.all([withStorageRetry(path, () => file.download()), withStorageRetry(path, () => file.getMetadata())]);
   const mime = typeof meta.contentType === "string" && meta.contentType ? meta.contentType : mimeFromPath(path);
   return { buf, mime };
 }
@@ -284,7 +286,7 @@ export function createRangeStream(gsUri: string, start: number, endInclusive: nu
 /** gs:// URIs of every object whose name starts with the prefix of `gsPrefixUri`. */
 export async function listObjects(gsPrefixUri: string): Promise<string[]> {
   const { bucket, path } = parseGsUri(gsPrefixUri);
-  const [files] = await getStorage().bucket(bucket).getFiles({ prefix: path, autoPaginate: true });
+  const [files] = await withStorageRetry(path, () => getStorage().bucket(bucket).getFiles({ prefix: path, autoPaginate: true }));
   return files.map((f) => toGsUri(bucket, f.name));
 }
 
