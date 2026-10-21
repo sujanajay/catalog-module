@@ -24,10 +24,10 @@ it("renders source alpha without a service, records every selected output and so
   const manifest = path.join(dir, "manifest.json");
   await writeFile(manifest, JSON.stringify({ brand: "test", products: [{ identifier: "ABC", shots: [{ n: 1, path: source }, { n: 2, path: path.join(dir, "missing.jpg") }] }] }));
   const report = await renderToReport({ manifest, out: path.join(dir, "out"), channels: [...CHANNEL_IDS], productType: "footwear" });
-  expect(report.summary).toMatchObject({ outputs: 18, compliant: 8, skipped: 1, failed: 9 });
+  expect(report.summary).toMatchObject({ outputs: 18, compliant: 9, skipped: 0, failed: 9 });
   expect(report.outputs.filter((o) => o.n === 2).every((o) => o.status === "failed")).toBe(true);
   expect(report.outputs.find((o) => o.channel === "noon" && o.n === 1)?.matte?.model).toBe("alpha_source");
-  expect(report.contactSheet.samples).toBe(8);
+  expect(report.contactSheet.samples).toBe(9);
   expect((await readFile(path.join(dir, "out", "noon", "ABC_1.jpg"))).subarray(0, 3)).toEqual(Buffer.from([255, 216, 255]));
   expect(JSON.parse(await readFile(path.join(dir, "out", "report.json"), "utf8"))).toMatchObject({ summary: report.summary });
 });

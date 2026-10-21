@@ -130,7 +130,7 @@ describe("completeness", () => {
     for (const o of w.outputs.filter(row => row.n === 3)) Object.assign(o, { status: "skipped", isLive: false, reason: CHART_SKIP_NOTE, generation: null, bytes: null, crc32c: null, stagingUri: null });
     for (const cell of w.sheet.filter(c => c.n === 3)) cell.url = null;
     w.sheetNotes.set("A", `${w.sheetNotes.get("A")}; photo 3: ${CHART_SKIP_NOTE}`);
-    Object.assign(w.counts, { verified: 4, skipped: 5, recheckOk: 4, recheckTotal: 4 });
+    Object.assign(w.counts, { verified: 6, skipped: 3, recheckOk: 6, recheckTotal: 6 });
     const results = checkCompleteness(w);
     expect(failed(results)).toEqual([]);
     expect(results.filter(r => r.id === "completeness.skip_allowed" && r.measured === `skipped: ${CHART_SKIP_NOTE}`)).toHaveLength(3);
@@ -342,7 +342,7 @@ describe("live run calibration 3 (session 5)", () => {
     for (const o of w.outputs.filter(o => o.n === 3)) Object.assign(o, { status: "skipped", isLive: false, reason: CHART_SKIP_NOTE, generation: null, bytes: null, crc32c: null, stagingUri: null });
     for (const cell of w.sheet.filter(c => c.n === 3)) cell.url = null;
     w.sheetNotes.set("A", `${w.sheetNotes.get("A")}; photo 3: ${CHART_SKIP_NOTE}`);
-    Object.assign(w.counts, { verified: 4, skipped: 5, recheckOk: 4, recheckTotal: 4 });
+    Object.assign(w.counts, { verified: 6, skipped: 3, recheckOk: 6, recheckTotal: 6 });
     expect(failed(checkCompleteness({ ...w, chartExpected: new Set(["A|3"]) }))).toEqual([]);
     const unexpected = checkCompleteness({ ...w, chartExpected: new Set() });
     expect(unexpected.filter(r => r.id === "completeness.skip_allowed" && !r.ok)).toHaveLength(3);
