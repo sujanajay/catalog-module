@@ -91,6 +91,30 @@ describe("completeness", () => {
     Object.assign(live, { status: "verified", isLive: true, generation: 7, bytes: 100, crc32c: "c" });
     expect(failed(checkCompleteness(w))).toEqual(["completeness.held_unpublished"]);
   });
+  it("reports a product held as a whole once (completeness.product_held) and leaves its outputs out of the counts (eval run 3: the FC bag's three false holds produced 210 completeness rows for one defect)", () => {
+    const w = completenessWorld();
+    // Product B: n=1 held on every channel, n=2 staged with it, nothing live, no links.
+    for (const n of [1, 2]) {
+      w.sources.push({ identifier: "B", n, width: 2000, height: 3000 });
+      for (const ch of w.channels) { w.outputs.push({ identifier: "B", n, channel: ch, status: n === 1 ? "needs_attention" : "staged", isLive: false, reason: n === 1 ? "halo" : null, generation: null, bytes: null, crc32c: null, publicUrl: `https://x/B/${ch}/B_${n}.jpg`, stagingUri: `gs://a/B/${ch}/${n}` }); w.sheet.push({ identifier: "B", channel: ch, n, url: null }); }
+    }
+    w.counts.outputs = 15;
+    const results = checkCompleteness(w);
+    expect(failed(results)).toEqual(["completeness.product_held"]);
+    const row = results.find(r => r.id === "completeness.product_held")!;
+    expect(row.subject).toEqual({ identifier: "B", n: null, channel: null });
+    expect(row.measured).toBe("0 of 6 live: product held");
+    expect(row.detail).toContain("image 1");
+    expect(results.some(r => r.id === "completeness.live" && r.subject.identifier === "B")).toBe(false);
+    expect(results.filter(r => r.id === "completeness.one_output" && r.subject.identifier === "B")).toHaveLength(6);
+    expect(results.find(r => r.id === "completeness.counts_verified")?.ok).toBe(true);
+    // Partly published: one shot live while another is held is not a product-level hold, every output is judged on its own.
+    const live = w.outputs.find(o => o.identifier === "B" && o.n === 2 && o.channel === "noon")!;
+    Object.assign(live, { status: "verified", isLive: true, generation: 7, bytes: 100, crc32c: "c" });
+    const partial = checkCompleteness(w);
+    expect(failed(partial)).not.toContain("completeness.product_held");
+    expect(failed(partial)).toContain("completeness.live");
+  });
   it("accepts a size chart left out on every channel with its note, and fails it without the note", () => {
     const w = completenessWorld();
     for (const o of w.outputs.filter(row => row.n === 3)) Object.assign(o, { status: "skipped", isLive: false, reason: CHART_SKIP_NOTE, generation: null, bytes: null, crc32c: null, stagingUri: null });
@@ -156,6 +180,22 @@ describe("attention", () => {
     const outputs = [row("A", 1, "noon", { status: "needs_attention", flags: ["halo"] }), row("A", 1, "centrepoint"), row("A", 1, "styli", { flags: ["placement"], compliance: { ok: true, failures: [] } }), row("M", 1, "noon", { flags: ["shadow_synthesised"] })];
     const out = checkAttention({ products: [{ identifier: "A", change: "pending_attention", productType: "auto", expect: NONE }, { identifier: "M", change: "new", productType: "apparel_model", expect: NONE }], outputs, deterministicPass: new Set(), liveJudge: false, threshold: 75 });
     expect(failed(out.results)).toEqual(expect.arrayContaining(["attention.channel_consistent", "attention.channel_consistency", "attention.placement_not_judged", "attention.product_type_set", "shadow.synthesised_on_model"]));
+  });
+  it("requires a per-shot expected flag without a hold on that shot and nothing published (the size chart Z659062EFB3FB0720BF56Z n=7, batch n=6, published on every channel as a pass-through)", () => {
+    const shots = [{ identifier: "C", n: 6, expect: { attention: false, flags: ["chart_image"] as never[], detector: "code" as const, reason: "a size chart" } }];
+    const products = [{ identifier: "C", change: "new", productType: "apparel_model", expect: NONE }];
+    const leftOut = checkAttention({ products, outputs: [row("C", 6, "noon", { status: "skipped", flags: ["chart_image"] }), row("C", 6, "amazon", { status: "skipped", flags: ["chart_image"] }), row("C", 6, "styli", { status: "skipped", flags: ["low_resolution"] })], shots, deterministicPass: new Set(), liveJudge: false, threshold: 75 });
+    expect(leftOut.results.find(r => r.id === "attention.expected_flags")?.ok).toBe(true);
+    const published = checkAttention({ products, outputs: [row("C", 6, "noon", { flags: ["matte_passthrough"] }), row("C", 6, "amazon", { flags: ["matte_passthrough"] })], shots, deterministicPass: new Set(), liveJudge: false, threshold: 75 });
+    const miss = published.results.find(r => r.id === "attention.expected_flags");
+    expect(miss?.ok).toBe(false);
+    expect(miss?.subject).toEqual({ identifier: "C", n: 6, channel: null });
+    expect(miss?.detail).toContain("missing on image 6: chart_image (2 outputs published instead of left out). a size chart");
+    // The flag raised but the outputs still published is a failure too; a judge-only flag is not required on a mocked run.
+    const flagged = checkAttention({ products, outputs: [row("C", 6, "noon", { flags: ["chart_image"] })], shots, deterministicPass: new Set(), liveJudge: false, threshold: 75 });
+    expect(flagged.results.find(r => r.id === "attention.expected_flags")?.detail).toContain("1 outputs were published instead of left out");
+    const judgeOnly = checkAttention({ products, outputs: [row("C", 6, "noon")], shots: [{ identifier: "C", n: 6, expect: { attention: false, flags: ["text_or_watermark"] as never[], detector: "judge" } }], deterministicPass: new Set(), liveJudge: false, threshold: 75 });
+    expect(judgeOnly.results.some(r => r.id === "attention.expected_flags")).toBe(false);
   });
   it("builds one flag row per flag with its dimension, score, model and action", () => {
     const rows = flagRows([row("A", 2, "noon", { status: "needs_attention", flags: ["halo", "low_resolution"], reason: "rough edge", qaScores: { edge_quality: 40 }, qaModel: "m", decision: "use_as_is" })], 75);
@@ -226,15 +266,25 @@ describe("report", () => {
       { id: "attention.not_held", group: "attention", subject: { identifier: "B", n: null, channel: null }, ok: false, status: "fail", measured: 1, threshold: 0, unit: "", detail: "Needs attention: image 1 for noon: halo" },
     ];
     const report = buildReport({ run: "r1", startedAt: new Date(0), finishedAt: new Date(1000), mode: "mocked judge", golden: { products: 2, photos: 2, brands: { anta: 2 }, categories: { footwear: 2 }, tags: {} }, results, attention: { attentionProducts: 1, attentionRate: 0.5, expectedAttention: 0, falseHoldRate: 0, useAsIsRate: null, plantedCaught: 0, plantedTotal: 0 }, flags: [], batches: ["b"] });
-    expect(report.summary).toMatchObject({ checks: 3, passed: 1, failed: 2, notRun: 1, attentionProducts: 1, passedAll: false });
+    expect(report.summary).toMatchObject({ checks: 3, passed: 1, failed: 2, notRun: 1, information: 0, attentionProducts: 1, passedAll: false });
     expect(report.summary.line).toBe(summaryLine(1, 3, 1));
     expect(report.summary.line).toBe("Output-quality eval: 1 of 3 checks passed, 1 products need attention (target 0)");
-    expect(report.byGroup.geometry).toEqual({ checks: 2, passed: 1, failed: 1, notRun: 0 });
+    expect(report.byGroup.geometry).toEqual({ checks: 2, passed: 1, failed: 1, notRun: 0, information: 0 });
     expect(report.attention).toEqual([{ identifier: "B", detail: "Needs attention: image 1 for noon: halo" }]);
     const html = await reportHtml(report, [{ identifier: "A", n: 1, channel: "noon", original: null, output: null }]);
     expect(html).toContain("geometry.edges");
     expect(html).toContain("5 edge pixels.");
     expect(html).toContain("Attention rate 50.00%");
     expect(html).not.toContain("gemini");
+  });
+  it("lists an information row (shadow.expected_synthesis) on its own, never as a pass, a failure or a not-run", async () => {
+    const info: CheckResult = { id: "shadow.expected_synthesis", group: "shadow", subject: { identifier: "A", n: 1, channel: "noon" }, ok: true, status: "info", measured: "none drawn; 900x400 box, contact line 92%", threshold: "synthesised", unit: "shadow", detail: "OPEN owner question." };
+    const report = buildReport({ run: "r2", startedAt: new Date(0), finishedAt: new Date(1000), mode: "mocked judge", golden: { products: 1, photos: 1, brands: {}, categories: {}, tags: {} }, results: [info], attention: { attentionProducts: 0, attentionRate: 0, expectedAttention: 0, falseHoldRate: null, useAsIsRate: null, plantedCaught: 0, plantedTotal: 0 }, flags: [], batches: [] });
+    expect(report.summary).toMatchObject({ checks: 0, passed: 0, failed: 0, notRun: 0, information: 1, passedAll: true });
+    expect(report.byGroup.shadow).toEqual({ checks: 1, passed: 0, failed: 0, notRun: 0, information: 1 });
+    expect(report.information).toEqual([info]);
+    const html = await reportHtml(report, []);
+    expect(html).toContain("Recorded as information: 1");
+    expect(html).toContain("contact line 92%");
   });
 });

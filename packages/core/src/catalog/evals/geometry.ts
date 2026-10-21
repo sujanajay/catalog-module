@@ -98,7 +98,12 @@ export async function checkGeometry(ctx: OutputContext): Promise<CheckResult[]> 
   // box of the half-coverage mask. A white sole on a white canvas is present when it matches the source there; a vanished
   // coloured part is not.
   const visible = visibleProduct(ctx, ring), expected = maskBox(ctx.half, canvas.w, canvas.h), measured = maskBox(visible, canvas.w, canvas.h);
-  if (!expected || !measured) { out.push(notRun("geometry.extent", G, who, "No product pixels were found on the canvas.")); return out; }
+  if (!expected || !measured) {
+    out.push(notRun("geometry.extent", G, who, "No product pixels were found on the canvas."));
+    // No half-coverage pixel at all is a translucent or empty matte (eval run 3, penti: ZBE55F7B86F158FEA0EB9Z n=5 at alpha 40 to 60): nothing of the product was copied.
+    if (!expected) out.push(judge(false, "geometry.pixels_copied", G, who, 0, 1, "opaque source pixels", "No opaque product pixels (alpha 250 or more) reach the canvas: the matte is translucent or empty, so nothing of the product was copied (eval run 3, penti: ZBE55F7B86F158FEA0EB9Z n=5 published as a ghost at effective alpha 0.22)."));
+    return out;
+  }
   const x0 = measured.x, y0 = measured.y, x1 = measured.x + measured.w - 1, y1 = measured.y + measured.h - 1;
   const sides = { left: Math.abs(x0 - expected.x), top: Math.abs(y0 - expected.y), right: Math.abs(x1 - (expected.x + expected.w - 1)), bottom: Math.abs(y1 - (expected.y + expected.h - 1)) };
   const extentWorst = Math.max(...Object.values(sides)), tolerance = extentTolerance(s.placement.scale);
@@ -160,7 +165,7 @@ export async function checkGeometry(ctx: OutputContext): Promise<CheckResult[]> 
   if (count) {
     const mean = sum / count;
     out.push(judge(mean <= COPY_MEAN_DELTA && big / count <= 0.01, "geometry.pixels_copied", G, who, Math.round(mean * 10) / 10, COPY_MEAN_DELTA, "mean delta", `Product pixels differ from the source by ${mean.toFixed(1)} on average over ${count} source pixels; ${(100 * big / count).toFixed(2)}% differ by more than 48.`));
-  } else out.push(notRun("geometry.pixels_copied", G, who, "No opaque product pixels to compare."));
+  } else out.push(judge(false, "geometry.pixels_copied", G, who, 0, 1, "opaque source pixels", "No opaque product pixels (alpha 250 or more) reach the canvas: the matte is translucent or empty, so nothing of the product was copied (eval run 3, penti: ZBE55F7B86F158FEA0EB9Z n=5 published as a ghost at effective alpha 0.22)."));
   return out;
 }
 

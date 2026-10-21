@@ -4,7 +4,7 @@
 // records, skips the sets that finished, re-runs the ones that failed and finishes the report from
 // stored results, so a transient failure costs one set and not the whole run.
 import { retryTransient, type RetryOptions } from "../../retry";
-import type { AttentionOutputRow, AttentionProductRow } from "./attention";
+import type { AttentionOutputRow, AttentionProductRow, AttentionShotRow } from "./attention";
 import type { MatteTrial } from "./matte-bakeoff";
 import type { ReportThumb } from "./report";
 import type { CheckResult } from "./types";
@@ -54,6 +54,10 @@ export interface SetRecord {
   /** The overwrite contract ran on this set (it runs on the first eligible set of the run only). */
   overwriteRan: boolean;
   batches: string[];
+  /** Per-shot expectations of the manifest in the batch's own shot numbers (mapped by source sha256), for attention.expected_flags. */
+  shotExpectations?: AttentionShotRow[];
+  /** Byte-identical sources of the set, counted once in the bake-off (the kept `identifier_n` and the ones dropped for it). */
+  duplicateSources?: { sha256: string; kept: string; dropped: string[] }[];
 }
 
 type StoredThumb = Omit<ReportThumb, "original" | "output"> & { original: string | null; output: string | null };

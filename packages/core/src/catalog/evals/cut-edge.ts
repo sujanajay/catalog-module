@@ -3,6 +3,7 @@
 // margin, end exactly on the guide where it has one, carry no floating line or shadow under the cut,
 // and be flagged for information, never held for a person.
 import { CUT_BAND_NOTE_START } from "../channels";
+import { PASSTHROUGH_FLAGS } from "./cutout";
 import { delta, dropSpecks, erode, SPECK_PX } from "./image";
 import { SOURCE_MATCH_DELTA, sourceDelta, visibleProduct } from "./geometry";
 import { overflowPx, type OutputContext } from "./context";
@@ -87,7 +88,7 @@ export function checkCutEdge(ctx: OutputContext): CheckResult[] {
     if (share > MAX_TRIM_SHARE + TRIM_SLACK) return { refused: true, why: `filling the ${axis === "x" ? "width" : "height"} would trim ${(share * 100).toFixed(1)}% of the ${axis === "x" ? "height" : "width"} (at most a third)` };
     return { refused: false, why: `filling the ${axis === "x" ? "width" : "height"} would trim only ${(share * 100).toFixed(1)}% of the ${axis === "x" ? "height" : "width"} off its cut sides` };
   };
-  const band = cutBandNote(s.reason), held = s.status === "needs_attention" || s.status === "failed";
+  const band = cutBandNote(s.reason), held = s.status === "needs_attention" || s.status === "failed", passthrough = s.flags.some(f => PASSTHROUGH_FLAGS.includes(f));
   for (const side of ctx.cutSides) {
     const gap = Math.abs(measured[side] - limit[side]);
     const edge = { top: 0, bottom: canvas.h - 1, left: 0, right: canvas.w - 1 }[side];
@@ -96,6 +97,11 @@ export function checkCutEdge(ctx: OutputContext): CheckResult[] {
     // expected hold ZEE79259BBFD83FFA1DB0Z n=5 at 46 to 500 px), and is judged after Use as is. The cut is not what
     // holds it: `not_held` below says whether the hold itself is expected.
     if (held) out.push(notRun(`cut_edge.flush_${side}`, E, who, `The output is held (${s.status}), fitted and centred while it waits for a person; its flush is not a placement and is judged after Use as is.`));
+    // A pass-through (spec 07) keeps the whole frame as the product and the render never trims it (spec 05 trimRules
+    // noTrim): it is placed fitted, with the band note where the aspect leaves a band. Eval run 3 (penti): 26 flush fails
+    // of 11 to 397 px on two pass-through close-ups (Z91D419FC9238E844BF77Z n=4, ZE24FAC8A6A40C5FE5400Z n=3) placed fitted
+    // with the band note; a kept-whole frame has no cut side to put flush. `trim` (nothing trimmed) and `no_line_*` still run.
+    else if (passthrough) out.push(notRun(`cut_edge.flush_${side}`, E, who, "The photo is kept whole by rule (pass-through) and placed fitted; a kept-whole frame has no cut side to put flush, so the band beside it is the fit, not a gap."));
     else if (gap <= FLUSH_TOLERANCE_PX && flush) out.push(pass(`cut_edge.flush_${side}`, E, who, offEdge, FLUSH_TOLERANCE_PX, "px", `The product is cut at the source ${side}; on the canvas it ends ${offEdge} px from the ${side} edge (must be flush, with no margin on that side).`));
     else {
       // A band the render fitted on purpose and said so (the sheet note) passes as information when the rule agrees;

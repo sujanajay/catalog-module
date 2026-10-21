@@ -2884,8 +2884,11 @@
    ],
    "expect": {
     "attention": false,
-    "flags": [],
-    "detector": "code"
+    "flags": [
+     "chart_image"
+    ],
+    "detector": "code",
+    "reason": "A size chart (a pink Penti bra table on white): the code detector leaves it out on every channel as chart_image; the drive numbering has a gap (1,2,3,4,5,7) and the batch renumbers it 6, so the suite maps it by sha256."
    }
   },
   {
@@ -3455,8 +3458,11 @@
    ],
    "expect": {
     "attention": false,
-    "flags": [],
-    "detector": "code"
+    "flags": [
+     "chart_image"
+    ],
+    "detector": "code",
+    "reason": "A size chart (a Penti bra table on white): the code detector leaves it out on every channel as chart_image (eval run 3: left out on the flat-lay set, published on the model set), so the suite expects the flag on the mapped shot and nothing published."
    }
   },
   {
@@ -9625,11 +9631,12 @@
     "mixed_set"
    ],
    "expect": {
-    "attention": true,
+    "attention": false,
     "flags": [
-     "different_product"
+     "chart_image"
     ],
-    "detector": "judge"
+    "detector": "code",
+    "reason": "A size chart (a pink Penti bra table on white): the code detector leaves it out on every channel as chart_image; the drive numbering has a gap (1,2,3,4,5,7) and the batch renumbers it 6, so the suite maps it by sha256."
    }
   },
   {
