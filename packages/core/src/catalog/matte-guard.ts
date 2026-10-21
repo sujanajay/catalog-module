@@ -716,8 +716,10 @@ function flatTints(p: Pick<Prepared, "width" | "height" | "rgb">, marks: TextMar
  * A size chart, infographic or text banner: a plain background, rows of small marks, nothing large.
  * A chart whose table has a tinted header band or fill (one mark over TEXT_LARGEST_MAX_SHARE once the
  * band joins the grid lines) is read a second time with each flat tinted rectangle as page
- * (flatTints); that reading counts only when the tables the rectangles sit in hold TEXT_MIN_GLYPHS
- * glyphs on TEXT_MIN_LINES lines themselves, and it passes every rule above.
+ * (flatTints). It is tried only when the first reading already finds TEXT_MIN_GLYPHS glyphs on
+ * TEXT_MIN_LINES lines on a page of TEXT_MIN_PAGE_SHARE (only the largest-mark and ink-share rules
+ * failed); it counts only when the tables the rectangles sit in hold TEXT_MIN_GLYPHS glyphs on
+ * TEXT_MIN_LINES lines themselves, and it passes every rule above.
  */
 export function detectTextImage(p: Pick<Prepared, "width" | "height" | "rgb">): TextImage {
   const { width: w, height: h } = p, bg = borderBackground(p), frame = w * h;
@@ -730,6 +732,12 @@ export function detectTextImage(p: Pick<Prepared, "width" | "height" | "rgb">): 
   };
   const plain = textMarks(p, bg.color, []), first = read(plain, 0);
   if (first.text) return first;
+  // The second reading is only for a page that already reads as text on its plain part: enough glyphs
+  // on enough lines, and mostly page. It fails only because the tinted band joined to the grid lines is
+  // one large mark that outweighs the glyph ink. A product photo has no rows of glyphs on its plain
+  // background (print on a garment, a box or a bag sits inside the product's mark), so stripes, colour
+  // blocks, printed logos and even a printed block of text on a product never get this second reading.
+  if (first.glyphs < TEXT_MIN_GLYPHS || first.lines < TEXT_MIN_LINES || plain.page / frame < TEXT_MIN_PAGE_SHARE) return first;
   const found = flatTints(p, plain);
   if (!found.length) return first;
   const second = textMarks(p, bg.color, found.map(f => f.tint));

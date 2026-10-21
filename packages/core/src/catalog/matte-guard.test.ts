@@ -270,6 +270,36 @@ describe("size charts and text-only images", () => {
     const box = image((x, y) => inRect(x, y, 80, 180, 240, 240) ? (logo(x, y) ? [30, 30, 30] : [235, 120, 150]) : [255, 255, 255]);
     expect(detectTextImage(box).text).toBe(false);
   });
+
+  it("still recognises a flat white chart on the first reading", () => {
+    expect(detectTextImage(chart)).toMatchObject({ text: true, tintedRegions: 0 });
+  });
+
+  /** A tee (body and sleeves) on a white page, painted by `fill`. */
+  const tee = (x: number, y: number) => inRect(x, y, 110, 180, 180, 300) || (y >= 180 && y < 260 && x >= 60 - (y - 180) / 4 && x < 340 + (y - 180) / 4);
+  const teePhoto = (fill: (x: number, y: number) => RGB) => image((x, y) => tee(x, y) ? fill(x, y) : [255, 255, 255]);
+
+  it("does not take a striped or colour-block garment for a chart", () => {
+    // Navy and white stripes: each navy stripe is a flat wide rectangle on the white page.
+    expect(detectTextImage(teePhoto((_x, y) => Math.floor(y / 12) % 2 ? [40, 50, 120] : [255, 255, 255])).text).toBe(false);
+    // Navy and red stripes: one large mark of two flat colours.
+    expect(detectTextImage(teePhoto((_x, y) => Math.floor(y / 12) % 2 ? [40, 50, 120] : [200, 40, 50])).text).toBe(false);
+    // Colour blocks: three flat rectangular panels.
+    expect(detectTextImage(teePhoto((_x, y) => y < 260 ? [230, 60, 60] : y < 380 ? [250, 210, 60] : [40, 90, 200])).text).toBe(false);
+  });
+
+  it("does not take a product with a small printed logo for a chart", () => {
+    const logo = (x: number, y: number) => inRect(x, y, 170, 300, 60, 22) && (y - 300) % 14 < 8 && x % 8 < 5;
+    expect(detectTextImage(teePhoto((x, y) => logo(x, y) ? [250, 250, 250] : [30, 30, 30])).text).toBe(false);
+  });
+
+  it("does not take a tinted box printed with a block of text for a chart", () => {
+    // Ten lines of small dark glyphs on a flat pink face: a chart's tinted table would read like this,
+    // but there is no text on the plain page around it, so it is never read a second time.
+    const text = (x: number, y: number) => y >= 180 && y < 420 && (y - 180) % 24 < 8 && x >= 80 && x < 320 && x % 10 < 6;
+    const box = image((x, y) => inRect(x, y, 60, 150, 280, 300) ? (text(x, y) ? [30, 30, 30] : [235, 120, 150]) : [255, 255, 255]);
+    expect(detectTextImage(box)).toMatchObject({ text: false, tintedRegions: 0 });
+  });
 });
 
 describe("hand-held products", () => {
