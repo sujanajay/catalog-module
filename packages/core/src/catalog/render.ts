@@ -515,17 +515,19 @@ export const ANCHOR_SEEN_LIFT_PX = 1;
  * move never exceeds that fade: a pale product (a white brief, a pale shirt with a logo) is placed by its silhouette,
  * never dragged after the few pixels of it that are seen. Only an axis with no cut side moves (a cut side sits flush
  * with its canvas edge by its own rule); the cut-out stays on the canvas, with the product's box inside the safe box.
+ * `under` (product.w x product.h, 3 bytes per pixel): the canvas under the cut-out once the shadow is drawn (see
+ * renderSource), so the soft edge is measured as it will show over the shadow.
  */
-export async function visibleAnchorShift(cutout: Buffer, product: BBox, safe: BBox, canvas: Size, background: [number, number, number], cut: CutEdges): Promise<{ dx: number; dy: number }> {
+export async function visibleAnchorShift(cutout: Buffer, product: BBox, safe: BBox, canvas: Size, background: [number, number, number], cut: CutEdges, under?: Buffer): Promise<{ dx: number; dy: number }> {
   const { data, info } = await sharp(cutout).ensureAlpha().raw().toBuffer({ resolveWithObject: true });
-  // The cut-out as it will show over the background, and its alpha as the check's mask.
+  // The cut-out as it will show over what lies under it (`under`, else the flat background), and its alpha as the check's mask.
   const w = info.width, h = info.height, rgb = Buffer.alloc(w * h * 3), alpha = Buffer.alloc(w * h);
   let faded = -1;
   for (let i = 0; i < w * h; i++) {
     const a = data[i * 4 + 3]!;
     if (!a) continue;
     alpha[i] = a; faded = Math.floor(i / w);
-    for (let c = 0; c < 3; c++) rgb[i * 3 + c] = a === 255 ? data[i * 4 + c]! : Math.round((data[i * 4 + c]! * a + background[c]! * (255 - a)) / 255);
+    for (let c = 0; c < 3; c++) rgb[i * 3 + c] = a === 255 ? data[i * 4 + c]! : Math.round((data[i * 4 + c]! * a + (under ? under[i * 3 + c]! : background[c]!) * (255 - a)) / 255);
   }
   const box = anchorBounds(rgb, w, h, background, alpha);
   if (!box) return { dx: 0, dy: 0 };
@@ -599,12 +601,31 @@ export async function renderSource(input: RenderInput): Promise<RenderOutput> {
       product.x += shift.dx; product.y += shift.dy; plan.placedX = product.x; plan.placedY = product.y;
     }
     const cutoutAlpha = await sharp(cutout).extractChannel(3).raw().toBuffer();
-    for (let y = 0; y < product.h; y++) cutoutAlpha.copy(foregroundMask, (product.y + y) * plan.w + product.x, y * product.w, (y + 1) * product.w);
-    let shadow = await shadowLayer(p, matte, crop, plan, input.productType, color, foregroundMask);
-    // Never a synthesised contact shadow on a photo cut in the source on any side (a bag held in a cropped hand, a
-    // close-up filling the photo): nothing stands on a floor there, and the shadow below makes the centred product
-    // look off-centre.
-    if ((input.synthesiseShadow === false || anyCut(cut)) && shadow.flags.includes("shadow_synthesised")) shadow = { layer: null, flags: ["no_shadow_source"] };
+    const drawShadow = async () => {
+      foregroundMask.fill(0);
+      for (let y = 0; y < product.h; y++) cutoutAlpha.copy(foregroundMask, (product.y + y) * plan.w + product.x, y * product.w, (y + 1) * product.w);
+      const drawn = await shadowLayer(p, matte, crop, plan, input.productType, color, foregroundMask);
+      // Never a synthesised contact shadow on a photo cut in the source on any side (a bag held in a cropped hand, a
+      // close-up filling the photo): nothing stands on a floor there, and the shadow below makes the centred product
+      // look off-centre.
+      return (input.synthesiseShadow === false || anyCut(cut)) && drawn.flags.includes("shadow_synthesised") ? { layer: null, flags: ["no_shadow_source" as const] } : drawn;
+    };
+    let shadow = await drawShadow();
+    // A shadow under the cut-out's soft edge (alpha below ANCHOR_MASK_ALPHA) darkens that edge, so the check sees more
+    // of it on the shadow's side than the placement did over the flat canvas: on batch b8a99c1b (2026-10-22) a kept
+    // floor shadow to one side of the feet put the seen edge 4 px further out on that side and the measured centre 2 px
+    // off the guide. So the placement measures once more over the shadow, as the check will, and the shadow follows the
+    // product (the shadow moves with it, so one more measure is enough).
+    if (spec.anchor === "bottom-centre" && shadow.layer) {
+      const greys = await sharp(shadow.layer).extract({ left: product.x, top: product.y, width: product.w, height: product.h }).toColourspace("b-w").raw().toBuffer();
+      const under = Buffer.alloc(product.w * product.h * 3);
+      for (let i = 0; i < greys.length; i++) for (let c = 0; c < 3; c++) under[i * 3 + c] = Math.round(rgbColor[c]! * greys[i]! / 255);
+      const again = await visibleAnchorShift(cutout, product, plan.safeBox, plan, rgbColor, cut, under);
+      if (again.dx || again.dy) {
+        product.x += again.dx; product.y += again.dy; plan.placedX = product.x; plan.placedY = product.y;
+        shadow = await drawShadow();
+      }
+    }
     result.flags.push(...shadow.flags);
     image = await sharp({ create: { width: plan.w, height: plan.h, channels: 3, background: color } }).composite([...(shadow.layer ? [{ input: shadow.layer, blend: "multiply" as const }] : []), { input: cutout, left: product.x, top: product.y, blend: "over" }]).png().toBuffer();
   }

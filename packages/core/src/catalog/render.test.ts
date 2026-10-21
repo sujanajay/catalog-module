@@ -459,4 +459,21 @@ describe("Styli judged on the upscaled size", () => {
     expect(Math.abs((2 * seen.x + seen.w) / 2 - info.width / 2)).toBeGreaterThan(1);
     expect(Math.abs((2 * box.x + box.w) / 2 - info.width / 2)).toBeLessThanOrEqual(1);
   });
+  it("puts the real black outfit photo 4 (rescued by a smaller fit in batch b8a99c1b) on the Styli guide: its shadow darkens the soft edge on one side", async () => {
+    quiet();
+    const prepared = await prepare(await readFile(new URL("black-4.jpg", FIXTURES)), "black-4.jpg", async b => b);
+    const matte: Matte = { ...(await alphaFromPng(await readFile(new URL("black-4.matte.png", FIXTURES)))), model: "birefnet", ms: 0, source: "model", target: "gpu", sentLongSide: null };
+    const output = await renderSource({ prepared, matte, channel: "styli", shotNumber: 4, productType: "apparel_model", upscaler: lanczosUpscaler() });
+    expect(output.flags).not.toContain("no_shadow_source"); expect(output.plan.cut).toEqual(NO_CUT);
+    expect(output.compliance.failures).toEqual([]); expect(output.status).toBe("ok");
+    // The soft edge (alpha below the half-alpha silhouette) shows further out where the kept shadow lies under it than
+    // the half-alpha silhouette alone: the guide is judged with that edge, and the product is centred with it.
+    const { data, info } = await sharp(output.jpeg!).raw().toBuffer({ resolveWithObject: true }), mask = output.foregroundMask!;
+    let x0 = info.width, x1 = -1;
+    for (let i = 0; i < mask.length; i++) if (mask[i]! >= 128) { const x = i % info.width; x0 = Math.min(x0, x); x1 = Math.max(x1, x); }
+    const box = anchorBounds(data, info.width, info.height, [224, 224, 224], mask)!;
+    expect(box.x + box.w - 1 - x1 + (x0 - box.x)).toBeGreaterThan(1);
+    expect(Math.abs((2 * box.x + box.w) / 2 - info.width / 2)).toBeLessThanOrEqual(1);
+    expect(Math.abs(box.y + box.h - (info.height - 450))).toBeLessThanOrEqual(1);
+  });
 });
