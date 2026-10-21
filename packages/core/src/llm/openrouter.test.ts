@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { jsonResponse, mockFetch } from "./mocks";
-import { chatCompletion, OpenRouterError } from "./openrouter";
+import { chatCompletion, OpenRouterError, retryAfterMs } from "./openrouter";
 
 const KEY = "sk-or-test-SECRET123";
 const base = { apiKey: KEY, retryDelayMs: 1 };
@@ -98,5 +98,26 @@ describe("openrouter client", () => {
   it("mockFetch throws on unmatched requests (never hits the network)", async () => {
     const f = mockFetch([]);
     await expect(chatCompletion({}, { ...base, fetch: f })).rejects.toThrow(/no handler/);
+  });
+});
+
+describe("retry policy", () => {
+  it("reads Retry-After as seconds or an HTTP date", () => {
+    const at = (value: string) => retryAfterMs(new Response(null, { status: 429, headers: { "retry-after": value } }), Date.parse("2026-10-21T07:00:00Z"));
+    expect(at("12")).toBe(12_000);
+    expect(at("Wed, 21 Oct 2026 07:00:30 GMT")).toBe(30_000);
+    expect(at("soon")).toBeNull();
+    expect(retryAfterMs(new Response(null, { status: 429 }))).toBeNull();
+  });
+
+  it("follows the given delays on 429, takes each wait off every budget and throws when they run out", async () => {
+    const f = mockFetch([{ match: "/chat", reply: { status: 429, json: { error: "rate" } } }]);
+    const waits: number[] = [], a = { remainingMs: 100 }, b = { remainingMs: 1_000 };
+    const err = await chatCompletion({}, { ...base, fetch: f, retry: { delaysMs: [30, 60, 90], budgets: [a, b], sleep: async (ms) => { waits.push(ms); } } }).catch((e: unknown) => e);
+    expect((err as OpenRouterError).status).toBe(429);
+    expect(waits).toEqual([30, 60, 10]);
+    expect(f.calls).toHaveLength(4);
+    expect(a.remainingMs).toBe(0);
+    expect(b.remainingMs).toBe(900);
   });
 });

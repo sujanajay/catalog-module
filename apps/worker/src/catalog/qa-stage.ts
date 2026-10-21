@@ -13,6 +13,7 @@ import { recordCost } from "@catalog/core/spend";
 import { qaCallCost } from "@catalog/core/catalog/cost";
 import { flagReason, type ResolvedPolicy, type OutputFlag } from "@catalog/core/catalog/types";
 import type { CatalogDeps } from "./deps";
+import type { BackoffBudget } from "@catalog/core/llm/openrouter";
 
 type Batch = typeof catalogBatches.$inferSelect;
 type Source = typeof catalogSourceImages.$inferSelect;
@@ -33,10 +34,23 @@ async function failureDetail(response:Response | undefined,failure:unknown):Prom
  try {const text=await response.clone().text();error=String((JSON.parse(text) as {error?:{message?:unknown}}).error?.message ?? text);}catch{/* No readable body. */}
  return {kind,error:error.replace(/Bearer\s+\S+/g,"Bearer [REDACTED]").slice(0,200)};
 }
-/** Check the lease and cap before every HTTP attempt, including the JSON helper's retry. */
+/**
+ * Judge back-off allowed per chunk delivery, over all its photos (each judging also stops at
+ * JUDGE_BACKOFF_BUDGET_MS), so a long rate-limit episode cannot push a delivery past its 900 s
+ * deadline: once it is used up the judge gives up at the first 429 as before and the photo is held.
+ */
+export const QA_DELIVERY_BACKOFF_MS = 300_000;
+/** Keyed by the batch row a delivery read at its start (chunk.ts reads it once per delivery). */
+const deliveryBackoff = new WeakMap<Batch,BackoffBudget>();
+function backoffFor(batch:Batch):BackoffBudget {
+ let budget=deliveryBackoff.get(batch);
+ if(!budget) {budget={remainingMs:QA_DELIVERY_BACKOFF_MS};deliveryBackoff.set(batch,budget);}
+ return budget;
+}
+/** Check the lease and cap before every HTTP attempt, including the JSON helper's retry and each back-off retry. */
 export function catalogLlmDeps(deps:CatalogDeps,batch:Batch,underClaim:UnderClaim) {
  let stopped:unknown;
- return {assertAvailable:()=>{if(stopped) throw stopped;},fetch:async(url:Parameters<typeof fetch>[0],init?:RequestInit)=>{
+ return {backoff:backoffFor(batch),...(deps.sleep ? {sleep:deps.sleep}:{}),assertAvailable:()=>{if(stopped) throw stopped;},fetch:async(url:Parameters<typeof fetch>[0],init?:RequestInit)=>{
   try {
    await underClaim(async()=>{});
    const cap=await checkCatalogCaps(deps.db,{batchId:batch.id,now:deps.now()});
