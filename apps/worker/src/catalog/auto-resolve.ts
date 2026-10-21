@@ -5,7 +5,7 @@ import { batchPrefix, stagingPath } from "@catalog/core/catalog/naming";
 import { shotGeometry, type Matte, type Prepared, type RenderInput, type RenderOutput } from "@catalog/core/catalog/render";
 import { autoActionsOf, LadderStopped, RENDER_FLAGS, runLadder, stepVariant, withAutoActions, type AutoAction, type LadderStep } from "@catalog/core/catalog/auto-resolve";
 import { strictestChannel } from "@catalog/core/catalog/qa/policy";
-import { heldInHand, isBusyBackground, passthroughMatte } from "@catalog/core/catalog/matte-guard";
+import { heldInHand, isBusyBackground, passthroughMatte, passthroughProductLoss, PASSTHROUGH_PRODUCT_LOSS_MAX } from "@catalog/core/catalog/matte-guard";
 import type { ChannelId, OutputFlag, ResolvedPolicy } from "@catalog/core/catalog/types";
 import type { CatalogDeps } from "./deps";
 import { renderKey, rerenderedKey } from "@catalog/core/catalog/pipeline/publish";
@@ -98,6 +98,8 @@ export async function resolvePhoto(deps: CatalogDeps, input: ResolvePhotoInput):
     if (step === "second_matte" && !(await secondMatte())) return {passed:false,skipped:true,detail:"no second cut-out available"};
     // A pass-through replaces a plain backdrop only; on a busy background it would leave scenery around the product.
     if (step === "matte_passthrough" && isBusyBackground(p,passthroughFor(),[first,...(second ? [second]:[])])) return {passed:false,skipped:true,detail:"busy background"};
+    // Nor where the backdrop is the product's own colour: the recolour would take the product with it.
+    if (step === "matte_passthrough" && passthroughProductLoss(p,[first,...(second ? [second]:[])]) > PASSTHROUGH_PRODUCT_LOSS_MAX) return {passed:false,skipped:true,detail:"background matches the product"};
     renders.clear();
     for (const o of input.failing) renders.set(o.id,await render(o,step));
     const broken = input.failing.find(o=>!ok(renders.get(o.id)));

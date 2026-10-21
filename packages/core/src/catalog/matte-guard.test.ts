@@ -1,6 +1,6 @@
 import sharp from "sharp";
 import { describe, expect, it } from "vitest";
-import { backgroundRegion, BUSY_BORDER_MAX_SHARE, BUSY_EDGE_DENSITY_MIN, BUSY_PLAIN_EDGE_MAX, BUSY_PLAIN_TONES_MIN, busyBorderReading, busyBorderShare, checkMatteIntegrity, detectTextImage, heldInHand, keptBackground, passthroughMatte, readsAsScenery, recoverSoleStrip, resolveMatte, wholePhotoMatte, type MatteVariant } from "./matte-guard";
+import { backgroundRegion, BUSY_BORDER_MAX_SHARE, BUSY_EDGE_DENSITY_MIN, BUSY_PLAIN_EDGE_MAX, BUSY_PLAIN_TONES_MIN, busyBorderReading, busyBorderShare, checkMatteIntegrity, detectTextImage, GUARD_OPAQUE_MIN_SHARE, heldInHand, keptBackground, PASSTHROUGH_PRODUCT_LOSS_MAX, passthroughGuide, passthroughMatte, passthroughProductLoss, readsAsScenery, recoverSoleStrip, resolveMatte, wholePhotoMatte, type MatteVariant } from "./matte-guard";
 import { hasCutBandNote } from "./channels";
 import { components } from "./evals/image";
 import { PASSTHROUGH_MODEL, renderSource, type Matte, type Prepared } from "./render";
@@ -578,5 +578,112 @@ describe("coloured sole strip the matte drops (Anta bd-112625546-12 shot 5, eval
     const other = await resolveMatte({ prepared: p, first, handRule: true, attempt: async () => null });
     expect(other.soleStripRecovered).toBe(0);
     expect(other.matte.alpha).toBe(first.alpha);
+  });
+});
+
+describe("translucent ghost matte (Penti ZBE55F7B86F158FEA0EB9Z shot 5, eval run 3)", () => {
+  /** A matte with its own alpha per pixel. */
+  const alphaOf = (value: (x: number, y: number) => number, model = "first"): Matte => {
+    const alpha = Buffer.alloc(W * H);
+    for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) alpha[y * W + x] = value(x, y);
+    return { alpha, width: W, height: H, model, ms: 1, source: "model", target: "cpu", sentLongSide: 1024 };
+  };
+  const textured = (x: number, y: number): RGB => [clamp(70 + grain(x, y)), clamp(50 + grain(x, y)), clamp(40 + grain(x, y))];
+  const body = (x: number, y: number) => inRect(x, y, 100, 120, 200, 360);
+  const onWhite = image((x, y) => body(x, y) ? textured(x, y) : [255, 255, 255]);
+  /** Distance in pixels from (x, y) inside the body to the body's nearest side. */
+  const inset = (x: number, y: number) => Math.min(x - 100, 299 - x, y - 120, 479 - y);
+
+  it("rejects a matte that keeps a frame-filling close-up at alpha 50 everywhere (it drops nothing and keeps nothing)", () => {
+    const p = image(leather), verdict = checkMatteIntegrity(p, alphaOf(() => 50), { handRule: false });
+    expect(verdict).toMatchObject({ ok: false, frameFilling: true, overallLoss: 0, opaqueShare: 0 });
+    expect(verdict.detail).toMatch(/^translucent/);
+  });
+
+  it("rejects a uniformly translucent matte of a product on a plain backdrop", () => {
+    const verdict = checkMatteIntegrity(onWhite, alphaOf((x, y) => body(x, y) ? 60 : 0), { handRule: false });
+    expect(verdict.ok).toBe(false);
+    expect(verdict.detail).toMatch(/^translucent/);
+  });
+
+  it("accepts an opaque matte with soft 2 px edges", () => {
+    const soft = alphaOf((x, y) => !body(x, y) ? 0 : inset(x, y) === 0 ? 85 : inset(x, y) === 1 ? 170 : 255);
+    const verdict = checkMatteIntegrity(onWhite, soft, { handRule: false });
+    expect(verdict.ok).toBe(true);
+    expect(verdict.opaqueShare).toBe(1);
+  });
+
+  it("accepts a sheer panel at the edge (an opaque body with a see-through sleeve)", () => {
+    // A dress: an opaque torso and a wider skirt, and a blue chiffon sleeve beside the torso that the matte keeps
+    // at alpha 110. The sleeve sits inside the dress's outline, clear of the border band.
+    const dress = (x: number, y: number) => inRect(x, y, 100, 120, 200, 180) || inRect(x, y, 40, 300, 320, 180);
+    const sleeve = (x: number, y: number) => inRect(x, y, 300, 140, 50, 160);
+    const p = image((x, y) => dress(x, y) ? textured(x, y) : sleeve(x, y) ? [70, 100, 180] : [255, 255, 255]);
+    const verdict = checkMatteIntegrity(p, alphaOf((x, y) => dress(x, y) ? 255 : sleeve(x, y) ? 110 : 0), { handRule: false });
+    expect(verdict.ok).toBe(true);
+    expect(verdict.opaqueShare).toBeLessThan(0.95);
+    expect(verdict.opaqueShare).toBeGreaterThan(GUARD_OPAQUE_MIN_SHARE);
+  });
+
+  it("climbs the ladder past the ghost to the first opaque matte", async () => {
+    const ghost = (model: string) => alphaOf(() => 50, model);
+    const resolved = await resolveMatte({ prepared: image(leather), first: ghost("first"), handRule: false, attempt: async v => v === "padded_first" ? alphaOf(() => 255, v) : ghost(v) });
+    expect(resolved).toMatchObject({ passthrough: false, busyBackground: false });
+    expect(resolved.matte.model).toBe("padded_first");
+    expect(resolved.actions.map(a => `${a.step}:${a.result}`)).toEqual(["matte_check:failed", "second_matte:failed", "padded_matte:passed"]);
+  });
+});
+
+describe("white garment on a near-white wall (Vero Moda Z40E29CD878FAA726501DZ shot 1, eval run 3)", () => {
+  // A white top (242, 13 levels off the wall, inside the 16-level border-colour flood) over dark trousers that
+  // run off the bottom edge, on a flat 229 grey wall.
+  const top = (x: number, y: number) => inRect(x, y, 120, 100, 160, 230);
+  const trousers = (x: number, y: number) => inRect(x, y, 140, 330, 120, 270);
+  const dark = (x: number, y: number): RGB => [clamp(70 + grain(x, y)), clamp(50 + grain(x, y)), clamp(40 + grain(x, y))];
+  const p = image((x, y) => top(x, y) ? [242, 241, 239] : trousers(x, y) ? dark(x, y) : [229, 229, 229]);
+  const at = (m: Matte, x: number, y: number) => m.alpha[y * W + x]!;
+  const clean = (model = "first") => matteOf((x, y) => top(x, y) || trousers(x, y), model);
+  // What every deployed matte did: the garment plus a wedge of wall beside the trousers (a kept background chunk).
+  const withChunk = (model = "first") => matteOf((x, y) => top(x, y) || trousers(x, y) || inRect(x, y, 260, 450, 40, 50), model);
+
+  it("measures how much of the product every matte kept the border-colour flood would take", () => {
+    const region = backgroundRegion(p), guide = passthroughGuide(p, region, [clean()]);
+    // The agreed product is the top and the trousers, 3 px in.
+    expect(guide.product[200 * W + 200]).toBe(1);
+    expect(guide.product[400 * W + 200]).toBe(1);
+    expect(guide.product[101 * W + 200]).toBe(0);
+    // The flood takes the white top with the wall: that is the loss, about the top's share of the product.
+    expect(at(passthroughMatte(p, [clean()]), 200, 200)).toBe(0);
+    const loss = passthroughProductLoss(p, [clean()], region, guide);
+    expect(loss).toBeGreaterThan(0.4);
+    expect(loss).toBeLessThan(0.6);
+    // A dark product on the same wall loses nothing.
+    const dark2 = image((x, y) => top(x, y) || trousers(x, y) ? dark(x, y) : [229, 229, 229]);
+    expect(passthroughProductLoss(dark2, [clean()])).toBe(0);
+  });
+
+  it("does not count a kept background chunk as product", () => {
+    const guide = passthroughGuide(p, backgroundRegion(p), [withChunk()]);
+    expect(guide.product[475 * W + 280]).toBe(0);
+    expect(guide.product[200 * W + 200]).toBe(1);
+  });
+
+  it("holds the photo whole when a pass-through would recolour the product (loss over the bound)", async () => {
+    expect(passthroughProductLoss(p, [withChunk(), withChunk("second")])).toBeGreaterThan(PASSTHROUGH_PRODUCT_LOSS_MAX);
+    const resolved = await resolveMatte({ prepared: p, first: withChunk(), handRule: false, attempt: async v => withChunk(v) });
+    expect(resolved).toMatchObject({ passthrough: false, busyBackground: true, soleStripRecovered: 0 });
+    const last = resolved.actions.at(-1)!;
+    expect(last).toMatchObject({ step: "matte_passthrough", result: "failed", trigger: ["product_removed", "leftover_background"] });
+    expect(last.detail).toMatch(/^background matches the product/);
+    expect(resolved.matte.alpha.equals(wholePhotoMatte(p).alpha)).toBe(true);
+    expect(at(resolved.matte, 200, 200)).toBe(255);
+  });
+
+  it("still passes a dark product with the same chunk through (no loss)", async () => {
+    const darkPhoto = image((x, y) => top(x, y) || trousers(x, y) ? dark(x, y) : [229, 229, 229]);
+    expect(passthroughProductLoss(darkPhoto, [withChunk()])).toBe(0);
+    const resolved = await resolveMatte({ prepared: darkPhoto, first: withChunk(), handRule: false, attempt: async v => withChunk(v) });
+    expect(resolved).toMatchObject({ passthrough: true, busyBackground: false });
+    expect(at(resolved.matte, 280, 475)).toBe(0);
   });
 });

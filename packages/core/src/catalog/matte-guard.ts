@@ -40,6 +40,18 @@ export const GUARD_CELL_MIN_PIXELS = 400;
 export const GUARD_CELL_LOSS_MAX = 0.2;
 export const GUARD_OVERALL_LOSS_MAX = 0.04;
 /**
+ * A translucent matte (spec 10 eval run 3, Penti ZBE55F7B86F158FEA0EB9Z shot 5: a frame-filling close-up of a
+ * ribbed placket matted at alpha 40 to 60 everywhere, published as a ghost on every channel). Such a matte drops
+ * nothing (alpha over GUARD_ALPHA_EDGE) and keeps nothing (alpha at most 128), so the loss bars never see it. Of
+ * the estimate's interior, at least GUARD_OPAQUE_MIN_SHARE must be opaque (alpha at least GUARD_OPAQUE_ALPHA), on
+ * every kind of photo. A soft edge lies in the GUARD_INTERIOR_PX edge band and a sheer sleeve or panel at the edge
+ * is a minority of the interior, so neither counts against a matte. Measured on 1,309 deployed matte checks (gate
+ * 3f, French Connection, Anta and eval run 3 Penti and Vero Moda photos): the ghost 0.0%; every accepted matte at
+ * least 96.4% (gate 3f Z91D419FC9238E844BF77Z shot 3).
+ */
+export const GUARD_OPAQUE_ALPHA = 200;
+export const GUARD_OPAQUE_MIN_SHARE = 0.5;
+/**
  * A strongly coloured product pixel: its chroma (max minus min channel) is at least the most a cast
  * shadow may carry in the estimate (spec 10 SHADOW_ZONE_CHROMA_MAX), so it is neither the white or grey
  * backdrop nor the source's own shadow. When the matte drops it more than GUARD_COLOURED_KEPT_GAP_PX
@@ -301,13 +313,8 @@ export function heldInHand(p: Pick<Prepared, "width" | "height" | "rgb">, alpha:
   return { held, droppedShare: kept ? Math.round(lost / kept * 1e4) / 1e4 : 0 };
 }
 
-/**
- * The largest kept background chunk (see KEPT_BACKGROUND_DELTA) as a share of the frame and of the kept product.
- * A frame-filling photo has no backdrop to keep, so it reports 0.
- */
-export function keptBackground(p: Pick<Prepared, "width" | "height" | "rgb">, alpha: Buffer, region: BackgroundRegion): { frameShare: number; keptShare: number } {
-  const none = { frameShare: 0, keptShare: 0 };
-  if (region.frameFilling) return none;
+/** The candidate kept background chunks of a matte (see KEPT_BACKGROUND_DELTA): their labels, sizes and which qualify by touch and depth. */
+function backgroundChunks(p: Pick<Prepared, "width" | "height" | "rgb">, alpha: Buffer) {
   const { width: w, height: h, rgb } = p, color = borderBackground(p).color, chunk = new Uint8Array(w * h), dropped = new Uint8Array(w * h);
   let kept = 0, y0 = h, y1 = -1;
   for (let i = 0; i < chunk.length; i++) {
@@ -316,13 +323,36 @@ export function keptBackground(p: Pick<Prepared, "width" | "height" | "rgb">, al
     const y = (i - (i % w)) / w; kept++; if (y < y0) y0 = y; if (y > y1) y1 = y;
     if (delta(rgb, i, color) <= KEPT_BACKGROUND_DELTA) chunk[i] = 1;
   }
-  if (!kept) return none;
   const near = dilate(dropped, w, h, KEPT_BACKGROUND_TOUCH_PX), { labels, sizes } = components(chunk, w, h);
-  const touches = new Uint8Array(sizes.length), top = new Int32Array(sizes.length).fill(h);
+  const touches = new Uint8Array(sizes.length), top = new Int32Array(sizes.length).fill(h), counts = new Uint8Array(sizes.length);
   for (let i = 0; i < chunk.length; i++) { const l = labels[i]!; if (!l) continue; if (near[i]) touches[l] = 1; const y = (i - (i % w)) / w; if (y < top[l]!) top[l] = y; }
+  for (let l = 1; l < sizes.length; l++) counts[l] = touches[l] && (top[l]! - y0) / Math.max(1, y1 - y0) >= KEPT_BACKGROUND_MIN_DEPTH ? 1 : 0;
+  return { labels, sizes, counts, kept };
+}
+
+/**
+ * The largest kept background chunk (see KEPT_BACKGROUND_DELTA) as a share of the frame and of the kept product.
+ * A frame-filling photo has no backdrop to keep, so it reports 0.
+ */
+export function keptBackground(p: Pick<Prepared, "width" | "height" | "rgb">, alpha: Buffer, region: BackgroundRegion): { frameShare: number; keptShare: number } {
+  const none = { frameShare: 0, keptShare: 0 };
+  if (region.frameFilling) return none;
+  const { width: w, height: h } = p, { sizes, counts, kept } = backgroundChunks(p, alpha);
+  if (!kept) return none;
   let largest = 0;
-  for (let l = 1; l < sizes.length; l++) if (touches[l] && (top[l]! - y0) / Math.max(1, y1 - y0) >= KEPT_BACKGROUND_MIN_DEPTH) largest = Math.max(largest, sizes[l]!);
+  for (let l = 1; l < sizes.length; l++) if (counts[l]) largest = Math.max(largest, sizes[l]!);
   return { frameShare: largest / (w * h), keptShare: largest / kept };
+}
+
+/** The kept background chunks large enough to reject the matte (KEPT_BACKGROUND_FRAME_SHARE and KEPT_BACKGROUND_KEPT_SHARE), as a mask. */
+export function keptBackgroundMask(p: Pick<Prepared, "width" | "height" | "rgb">, alpha: Buffer, region: BackgroundRegion): Mask {
+  const { width: w, height: h } = p, out = new Uint8Array(w * h);
+  if (region.frameFilling) return out;
+  const { labels, sizes, counts, kept } = backgroundChunks(p, alpha);
+  if (!kept) return out;
+  for (let l = 1; l < sizes.length; l++) if (counts[l] && sizes[l]! > w * h * KEPT_BACKGROUND_FRAME_SHARE && sizes[l]! > kept * KEPT_BACKGROUND_KEPT_SHARE) counts[l] = 2;
+  for (let i = 0; i < out.length; i++) if (counts[labels[i]!] === 2) out[i] = 1;
+  return out;
 }
 
 export interface MatteIntegrity {
@@ -333,6 +363,8 @@ export interface MatteIntegrity {
   handShare: number;
   /** The largest kept background chunk, as a share of the frame (see keptBackground). */
   keptBackground: number;
+  /** Share of the estimate's interior the matte keeps opaque (alpha at least GUARD_OPAQUE_ALPHA); under GUARD_OPAQUE_MIN_SHARE the matte is translucent. */
+  opaqueShare: number;
   frameFilling: boolean; borderShare: number; estimatePixels: number;
   /** Short technical note for the auto_actions record and the logs; never shown to operators. */
   detail: string;
@@ -343,12 +375,14 @@ export interface MatteIntegrity {
  * dropped, see GUARD_COLOURED_CHROMA_MIN). Rejects a matte that drops more than
  * GUARD_CELL_LOSS_MAX of any grid cell or GUARD_OVERALL_LOSS_MAX of the whole estimate, or a dropped
  * hand larger than HAND_NOTCH_MAX_SHARE (`handRule`, on unless the product is apparel: a model's own
- * skin is not a hand holding the product). A transparent source's own alpha is always accepted.
+ * skin is not a hand holding the product), a kept background chunk (keptBackground), or a translucent
+ * matte (under GUARD_OPAQUE_MIN_SHARE of the interior opaque, any kind of photo). A transparent source's
+ * own alpha is always accepted.
  */
 export function checkMatteIntegrity(p: Pick<Prepared, "width" | "height" | "rgb">, matte: Pick<Matte, "alpha" | "source">, opts: { handRule?: boolean; region?: BackgroundRegion } = {}): MatteIntegrity {
   const { width: w, height: h } = p, alpha = matte.alpha, region = opts.region ?? backgroundRegion(p);
   const base = { frameFilling: region.frameFilling, borderShare: Math.round(region.seedShare * 1000) / 1000 };
-  if (matte.source === "alpha_source") return { ok: true, worstCellLoss: 0, overallLoss: 0, handShare: 0, keptBackground: 0, estimatePixels: 0, ...base, detail: "transparent source" };
+  if (matte.source === "alpha_source") return { ok: true, worstCellLoss: 0, overallLoss: 0, handShare: 0, keptBackground: 0, opaqueShare: 1, estimatePixels: 0, ...base, detail: "transparent source" };
   // Only the estimate's interior counts: a matte edge a few pixels inside the silhouette (fur, a soft
   // fabric edge) is a quality question for spec 10, not a lost product.
   // Skin or a plain garment panel the matte cut through (keptSurfaces) is product: all of it counts.
@@ -364,23 +398,25 @@ export function checkMatteIntegrity(p: Pick<Prepared, "width" | "height" | "rgb"
   }
   let x0 = w, y0 = h, x1 = -1, y1 = -1, count = 0;
   for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) if (estimate[y * w + x]) { count++; if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y; }
-  if (!count) return { ok: true, worstCellLoss: 0, overallLoss: 0, handShare: 0, keptBackground: 0, estimatePixels: 0, ...base, detail: "no product estimate" };
+  if (!count) return { ok: true, worstCellLoss: 0, overallLoss: 0, handShare: 0, keptBackground: 0, opaqueShare: 1, estimatePixels: 0, ...base, detail: "no product estimate" };
   const cellW = (x1 - x0 + 1) / GUARD_GRID, cellH = (y1 - y0 + 1) / GUARD_GRID;
   const total = new Uint32Array(GUARD_GRID * GUARD_GRID), lost = new Uint32Array(GUARD_GRID * GUARD_GRID);
-  let lostAll = 0;
+  let lostAll = 0, opaqueAll = 0;
   for (let y = y0; y <= y1; y++) for (let x = x0; x <= x1; x++) {
     const i = y * w + x; if (!estimate[i]) continue;
     const cell = Math.min(GUARD_GRID - 1, Math.floor((y - y0) / cellH)) * GUARD_GRID + Math.min(GUARD_GRID - 1, Math.floor((x - x0) / cellW));
     total[cell]!++; if (alpha[i]! <= GUARD_ALPHA_EDGE) { lost[cell]!++; lostAll++; }
+    if (alpha[i]! >= GUARD_OPAQUE_ALPHA) opaqueAll++;
   }
   let worst = 0;
   for (let c = 0; c < total.length; c++) if (total[c]! >= GUARD_CELL_MIN_PIXELS) worst = Math.max(worst, lost[c]! / total[c]!);
   const overall = lostAll / count, hand = opts.handRule === false ? 0 : heldInHand(p, alpha).droppedShare;
   const chunk = keptBackground(p, alpha, region), chunkKept = chunk.frameShare > KEPT_BACKGROUND_FRAME_SHARE && chunk.keptShare > KEPT_BACKGROUND_KEPT_SHARE;
-  const dropped = worst > GUARD_CELL_LOSS_MAX || overall > GUARD_OVERALL_LOSS_MAX || hand > HAND_NOTCH_MAX_SHARE, ok = !dropped && !chunkKept;
+  const opaque = opaqueAll / count, translucent = opaque < GUARD_OPAQUE_MIN_SHARE;
+  const dropped = worst > GUARD_CELL_LOSS_MAX || overall > GUARD_OVERALL_LOSS_MAX || hand > HAND_NOTCH_MAX_SHARE, ok = !dropped && !chunkKept && !translucent;
   const round = (v: number) => Math.round(v * 1e4) / 1e4;
-  return { ok, worstCellLoss: round(worst), overallLoss: round(overall), handShare: round(hand), keptBackground: round(chunk.frameShare), estimatePixels: count, ...base,
-    detail: `${dropped ? "dropped product" : chunkKept ? "kept background" : "kept"}: worst cell ${(worst * 100).toFixed(1)}%, overall ${(overall * 100).toFixed(1)}%${hand ? `, hand ${(hand * 100).toFixed(1)}%` : ""}${chunk.frameShare ? `, background chunk ${(chunk.frameShare * 100).toFixed(2)}% of the frame` : ""}${region.frameFilling ? ", frame-filling" : ""}` };
+  return { ok, worstCellLoss: round(worst), overallLoss: round(overall), handShare: round(hand), keptBackground: round(chunk.frameShare), opaqueShare: round(opaque), estimatePixels: count, ...base,
+    detail: `${dropped ? "dropped product" : chunkKept ? "kept background" : translucent ? "translucent" : "kept"}: ${translucent ? `${(opaque * 100).toFixed(1)}% of the product opaque, ` : ""}worst cell ${(worst * 100).toFixed(1)}%, overall ${(overall * 100).toFixed(1)}%${hand ? `, hand ${(hand * 100).toFixed(1)}%` : ""}${chunk.frameShare ? `, background chunk ${(chunk.frameShare * 100).toFixed(2)}% of the frame` : ""}${region.frameFilling ? ", frame-filling" : ""}` };
 }
 
 /**
@@ -417,6 +453,49 @@ export function passthroughBackground(p: Pick<Prepared, "width" | "height" | "rg
 }
 
 /**
+ * What the model mattes tried say about a pass-through (spec 10 eval run 3, Vero Moda Z40E29CD878FAA726501DZ
+ * shot 1: a white top on a 229 grey wall, every matte rejected for a "kept background chunk" that was the top's
+ * own folds, and the pass-through's border-colour flood grew into the top and tore the sleeve). In plain words:
+ * a pixel that every matte tried kept (alpha over 128) is product the pass-through must not lose. A kept
+ * background chunk (keptBackgroundMask, what the guard rejected a matte for) is not: the pass-through exists to
+ * remove it. `product` is that agreed product GUARD_INTERIOR_PX in (soft matte edges do not count);
+ * `surfaces` is the skin and garment panels any matte cut through or kept (keptSurfaces), as passthroughMatte
+ * uses them.
+ */
+export interface PassthroughGuide { surfaces: Mask; product: Mask }
+export function passthroughGuide(p: Pick<Prepared, "width" | "height" | "rgb">, region: BackgroundRegion, tried: readonly Pick<Matte, "alpha">[]): PassthroughGuide {
+  const { width: w, height: h } = p, n = w * h, surfaces = new Uint8Array(n), agreed = new Uint8Array(n);
+  if (!tried.length) return { surfaces, product: agreed };
+  agreed.fill(1);
+  for (const m of tried) {
+    const kept = keptSurfaces(p, m.alpha, region), chunk = keptBackgroundMask(p, m.alpha, region);
+    for (let i = 0; i < n; i++) { if (kept[i]) surfaces[i] = 1; if (chunk[i] || m.alpha[i]! <= 128) agreed[i] = 0; }
+  }
+  return { surfaces, product: erode(agreed, w, h, GUARD_INTERIOR_PX) };
+}
+
+/**
+ * A pass-through cannot replace a backdrop the product itself matches. When its border-colour recolour
+ * (passthroughBackground) would reach over this share of the product every matte kept (passthroughGuide
+ * `product`), the product is the backdrop's colour (a white garment on a near-white wall): no pass-through is
+ * made, the photo is kept whole and held (`leftover_background`, code-detected), as on a busy background.
+ * The pass-through itself is not changed: clipping its recolour to what the mattes kept was tried and moved
+ * the edges of three published pass-throughs (gate 3f bd-112621603-1 shot 2, French Connection
+ * Z15276411CE85C2E728DEZ shot 4 and Z81A75FEBA6EE9EBA0C75Z shot 5), so the measure decides publish or hold
+ * and nothing else. Measured: Z40E29 shot 1 51%; every pass-through of the gate 3f, golden and eval run 3
+ * sets at most 1.9% (gate 3f bd-112621603-1 shot 2, a white shoe on a pale grey backdrop).
+ */
+export const PASSTHROUGH_PRODUCT_LOSS_MAX = 0.05;
+/** Share of the product every matte kept (passthroughGuide `product`) that the pass-through recolour reaches; 0 on a frame-filling photo. */
+export function passthroughProductLoss(p: Pick<Prepared, "width" | "height" | "rgb">, tried: readonly Pick<Matte, "alpha">[], region: BackgroundRegion = backgroundRegion(p), guide: PassthroughGuide = passthroughGuide(p, region, tried)): number {
+  if (region.frameFilling || !tried.length) return 0;
+  const background = passthroughBackground(p, region, guide.surfaces);
+  let total = 0, lost = 0;
+  for (let i = 0; i < background.length; i++) if (guide.product[i]) { total++; if (background[i]) lost++; }
+  return total ? lost / total : 0;
+}
+
+/**
  * The ladder's last resort: the whole frame is product except the source background
  * (passthroughBackground: the border colour reached from the frame edge, pixel-exact, and any large
  * smooth backdrop no matte kept), which becomes 0. Skin or a plain garment panel that one of the
@@ -426,8 +505,8 @@ export function passthroughBackground(p: Pick<Prepared, "width" | "height" | "rg
  * softened inward only (sigma 1), which cannot open a hole and keeps no source background; a frame
  * edge stays fully opaque so the cut-in-source rule places it flush.
  */
-export function passthroughMatte(p: Pick<Prepared, "width" | "height" | "rgb">, tried: Pick<Matte, "alpha">[] = []): Matte {
-  const { width: w, height: h } = p, region = backgroundRegion(p), solid = new Uint8Array(w * h);
+export function passthroughMatte(p: Pick<Prepared, "width" | "height" | "rgb">, tried: readonly Pick<Matte, "alpha">[] = [], region: BackgroundRegion = backgroundRegion(p)): Matte {
+  const { width: w, height: h } = p, solid = new Uint8Array(w * h);
   if (region.frameFilling) for (let i = 0; i < solid.length; i++) solid[i] = region.background[i] ? 0 : 1;
   else {
     const surfaces = new Uint8Array(w * h);
@@ -850,7 +929,8 @@ export interface MatteResolution {
   passthrough: boolean;
   /**
    * True when no model matte kept the product and the background is busy (busyBorderShare over
-   * BUSY_BORDER_MAX_SHARE): the matte is the whole photo as it is and the photo is held for a person
+   * BUSY_BORDER_MAX_SHARE), or matches the product so a pass-through would recolour the product
+   * (passthroughProductLoss over PASSTHROUGH_PRODUCT_LOSS_MAX): the matte is the whole photo as it is and the photo is held for a person
    * (flag `leftover_background`, code-detected: see auto-resolve.ts busyBackgroundHold), never published on its own.
    */
   busyBackground: boolean;
@@ -865,8 +945,8 @@ export interface MatteResolution {
  * matte when it passes checkMatteIntegrity; else (a) the policy's second model, (b) the photo framed
  * in a white border (GUARD_PAD_FRACTION) with the first, then the second model, (c) the pass-through
  * matte (the whole frame minus the plain background). The first matte that passes wins. A pass-through
- * replaces a plain backdrop only: on a busy background (busyBorderShare) the photo is kept whole and held
- * (`busyBackground`). The judge's
+ * replaces a plain backdrop only: on a busy background (busyBorderShare), or a backdrop of the product's own
+ * colour (passthroughProductLoss), the photo is kept whole and held (`busyBackground`). The judge's
  * `product_removed` names the same failure after the render, and its ladder ends in the same
  * pass-through step (auto-resolve.ts). For footwear (`soleStrip`) the winning model matte then gets a dropped
  * coloured sole strip back (recoverSoleStrip); the check itself always sees the model's own matte.
@@ -894,7 +974,13 @@ export async function resolveMatte(input: ResolveMatteInput): Promise<MatteResol
     record(step, result.ok ? "passed" : "failed", `${matte.model}${variant === "second" ? "" : " padded"}: ${result.detail}`);
     if (result.ok) return won(matte);
   }
-  const pass = passthroughMatte(p, tried);
+  const guide = passthroughGuide(p, region, tried), loss = passthroughProductLoss(p, tried, region, guide);
+  if (loss > PASSTHROUGH_PRODUCT_LOSS_MAX) {
+    // The product is the backdrop colour: a pass-through would recolour it (passthroughProductLoss). Held as on a busy background.
+    actions.push({ step: "matte_passthrough", trigger: ["product_removed", "leftover_background"], result: "failed", channels: [], rejudged: false, detail: `background matches the product: a pass-through would recolour ${(loss * 100).toFixed(1)}% of the product every cut-out kept; the whole photo is kept and held` });
+    return { matte: wholePhotoMatte(p, region), passthrough: false, busyBackground: true, actions, soleStripRecovered: 0 };
+  }
+  const pass = passthroughMatte(p, tried, region);
   // What the band pixels no cut-out kept look like (busyBorderReading), recorded so a hold can be read from the report.
   const reading = region.frameFilling ? null : busyBorderReading(p, pass, tried, region);
   const band = reading && reading.share > 0 ? `${(reading.share * 100).toFixed(1)}% of the border band no cut-out kept, edge density ${reading.edgeDensity.toFixed(2)}, ${reading.tones} tones` : "";

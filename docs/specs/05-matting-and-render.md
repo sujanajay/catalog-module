@@ -425,7 +425,12 @@ time, before anything is rendered.
   matte dropped (within 4 px), lying wholly in the lower half of the kept product (a halo ring around
   the whole silhouette is the judge's `halo`), covering more than 0.3%
   of the frame and more than 2% of the kept product (`KEPT_BACKGROUND_*`); not on a frame-filling
-  photo. The ladder then continues as for a dropped product.
+  photo. Also rejected: a translucent matte (`GUARD_OPAQUE_*`, eval run 3, Penti
+  ZBE55F7B86F158FEA0EB9Z shot 5: a frame-filling ribbed close-up matted at alpha 40 to 60 everywhere drops
+  nothing and keeps nothing, so it passed and was published as a ghost on every channel): under 50% of the
+  estimate's interior kept opaque (alpha at least 200), on any photo, frame-filling or not. A soft edge lies
+  in the 3 px edge band and a sheer sleeve or panel at the edge is a minority of the interior, so neither
+  counts against a matte. Measured on 1,309 deployed matte checks (gate 3f, French Connection, Anta and eval run 3 Penti and Vero Moda photos): the ghost 0%, every accepted matte at least 96.4%. The ladder then continues as for a dropped product.
 - Ladder when the first matte fails, first pass wins, each step in `compliance.auto_actions` with
   trigger `product_removed`: `matte_check` (the failed first matte), (a) `second_matte` the policy's
   second model, (b) `padded_matte` the photo framed in a white border of 20% of its long side
@@ -435,7 +440,15 @@ time, before anything is rendered.
   channel, plus any smooth backdrop of another colour covering at least 1% of the frame that no matte
   kept as skin or a garment panel; a smaller plain region at the frame edge, such as a light strap,
   stays product), holes filled, components under 25% of the largest dropped, edge softened inward
-  only. Model
+  only. The recolour never enters a pixel every matte tried kept (alpha over 128), except a kept
+  background chunk the guard rejected a matte for (`passthroughGuide`). When the recolour without that
+  guard would reach over 5% of what every matte kept, 3 px in (`passthroughProductLoss`,
+  `PASSTHROUGH_PRODUCT_LOSS_MAX`; eval run 3, Vero Moda Z40E29CD878FAA726501DZ shot 1: a white top on a
+  229 grey wall, every matte rejected for a "kept background chunk" that was the top's own folds, and the
+  pass-through tore the top and its sleeve; measured 51%), the product is the backdrop's own colour: no
+  pass-through is made and the photo is held as on a busy background (below), recorded
+  `matte_passthrough: failed` ("background matches the product"); the judge-triggered pass-through step
+  is skipped for the same reason. Model
   steps are skipped when this delivery has no time left for a matting call; the pass-through always
   completes. A pass-through adds the information flag `matte_passthrough` ("This photo is a close-up
   that fills the frame, so the whole photo was kept as it is instead of being cut out. Nothing to
