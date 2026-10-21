@@ -3,7 +3,7 @@
 This note is for you, the person who makes marketplace images with the catalog tool. Keep it open
 the first few times you use it. When something here does not match what you see, call Sujan.
 
-The live address and the test results in section 16 come from the end-to-end test on the live
+The live address and the test results in section 17 come from the end-to-end test on the live
 site on 2026-10-20.
 
 ## 1. What the tool does
@@ -193,7 +193,64 @@ product the agency charged. Products that did not change are not counted.
 - You had to name or group photos in a new way to make a batch work. Tell Sujan the rule you
   used, so it is written down for next time.
 
-## 16. A recorded run
+## 16. What the alert emails mean
+
+When something goes wrong, the tool sends an email by itself. The emails go to sujan@opptra.com,
+so Sujan often knows before you do. If he forwards one to you, or you see one, this section says
+what it means. Each email closes by itself about an hour after things are fine again, so an old
+email does not mean the problem is still there.
+
+Two places help you look:
+
+- The Ops page, `/catalog/ops` (for admins only): the batches running now, failures in the last 24
+  hours in plain words, and what each batch and brand cost.
+- The "Open logs" link on the batch's Details tab: it opens Google's log page already filtered to
+  that one batch, so Sujan can see its story in order. Send him that link with the batch number
+  when you call.
+
+The nine emails:
+
+1. **A chunk gave up.** The tool works on a batch in small groups of products, called chunks. One
+   group failed five times in a row and the tool stopped trying it. On the batch page those
+   products' pictures show "Processing stopped after repeated errors"; the rest of the batch
+   carries on. First: wait for the batch to finish, then upload the same products again in a new
+   batch (a re-upload keeps the links, section 10). Call Sujan if the same products fail again.
+2. **A batch failed or was swept.** A batch stopped for good, or made no progress for two hours and
+   was stopped by the tool's own clean-up. The batch page shows the batch as failed with a reason,
+   such as "No progress for 2 hours. Start the batch again." First: read the reason and start the
+   batch again once. Call Sujan if it fails a second time.
+3. **Quality checks unavailable.** The outside quality checker did not answer for many photos in a
+   few minutes. Those photos wait in "Needs attention" with "The quality check could not read this
+   image." First: look at each picture yourself and use "Use as is" if it is fine (section 7). Call
+   Sujan if a whole batch fills up with these cards.
+4. **Cut-out service breaker open.** The service that removes backgrounds kept failing, so the tool
+   stopped calling it for about a minute at a time to let it recover (like a fuse, called a
+   "breaker"). The batch page stays on "Processing" longer than usual, and some photos may wait in
+   "Needs attention" because the background could not be removed. First: wait 15 minutes; it
+   usually recovers by itself. Call Sujan if the batch has not moved after 30 minutes.
+5. **Spending limit paused quality checks.** The day's or the batch's spending limit was reached,
+   so the tool stopped running quality checks. Photos that were not checked wait in "Needs
+   attention". This is a limit that was set on purpose, not a fault. First: do not start more
+   batches today. Call Sujan, who decides whether to raise the limit or wait for the next day.
+6. **Worker errors.** The part of the tool that makes the pictures (the worker) returned many
+   errors in a few minutes. The batch page may move slowly or stop moving. First: do not start new
+   batches and wait 15 minutes. Call Sujan if it is still happening, or if a batch stops moving.
+7. **Queue stuck.** Many pieces of work have waited in line for half an hour without being picked
+   up. The batch page shows "Processing" with no change in the count. First: check that you or a
+   colleague did not start several large batches at once (section 18). Call Sujan if nothing moves
+   for another 30 minutes.
+8. **Database connections high.** The database the tool uses is close to its limit of open
+   connections. Pages may load slowly or show an error. First: do not start new batches, and ask
+   others not to use the site for a while. Call Sujan if pages still fail after 15 minutes.
+9. **Error in the logs.** Something went wrong that none of the other eight emails covers. Often
+   you see nothing on the batch page at all. First: carry on normally and look out for anything
+   odd on your batches. Call Sujan if a batch looks wrong or stops; he reads the details in the
+   logs.
+
+There are no emails about money. The cost of a batch is shown on the batch page (section 14) and
+on the Ops page, and nobody is emailed when a batch costs more than usual.
+
+## 17. A recorded run
 
 A recording of a full run, from "New batch" to the downloaded sheet, including the attention
 buttons and a re-upload:
@@ -216,7 +273,7 @@ the test was fixed: an upload could get stuck at "Collecting files 0 of ?". Now 
 again by itself, and a batch stuck for 10 minutes shows a "Try again" button. Screenshots of each
 flow are kept with the test records.
 
-## 17. How long a large batch takes
+## 18. How long a large batch takes
 
 Measured on the live site on 2026-10-21 with a test brand: 270 products with 1,258 photos on 4
 marketplaces (Noon, Namshi, Trendyol, Amazon) took 43 minutes from Start to the end of the batch.
@@ -241,7 +298,7 @@ update of 2026-10-21 the tool waits and tries again, then asks a second checker,
 holds the photo for you. So expect fewer of these cards. When you see one, look at the picture
 yourself; "Use as is" keeps it.
 
-## 18. What changed on 2026-10-21
+## 19. What changed on 2026-10-21
 
 The live site was updated five times on 2026-10-21. What you may notice:
 
@@ -255,7 +312,7 @@ The live site was updated five times on 2026-10-21. What you may notice:
 - Sole edges on shoes are cleaner. A thin coloured strip that sometimes showed along the sole is
   now removed with a soft edge.
 - When the quality checker is busy, the tool now waits and tries again, then asks a second
-  checker, and only then holds the photo for you (see section 17). The note on the card now
+  checker, and only then holds the photo for you (see section 18). The note on the card now
   names the photo by the same number you see on the sheet.
 
 Some photos are still held on purpose. For example, a product on a plain studio backdrop of almost
@@ -265,7 +322,7 @@ broken picture is never published. Look at it and choose what to do as in sectio
 On a busy day the check that tells what kind of product a photo shows can fail quietly; the tool then
 uses its general rules for that product, and a later update will show this as a note on the card.
 
-## 19. Small photos and Styli
+## 20. Small photos and Styli
 
 Since the update of 2026-10-21, when a photo has to be made more than 1.5 times bigger for a
 marketplace, the tool enlarges it with a quality pass first. This works the same way on every

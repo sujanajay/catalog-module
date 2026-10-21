@@ -159,6 +159,57 @@ claude
 Then paste the same start prompt from step 6. The new session reads `docs/PROGRESS.md` and
 resumes from the first item that is not `done`.
 
+## Monitoring and alert emails
+
+Google Cloud watches the catalog and emails sujan@opptra.com when something fails. What each of the
+nine emails means for the operator is in section 16 of `docs/handover/catalog-for-the-operator.md`;
+the details are in `docs/solutions/monitoring.md`.
+
+- **Set it up or repair it.** `infra/deploy.sh` runs it at the end of every production deploy (it is
+  skipped on the preview stack). To run it alone, run in the repo root (Git Bash must be installed):
+
+  ```powershell
+  bash infra/monitoring.sh
+  ```
+
+  It is idempotent (safe to run again: it only creates what is missing and prints SKIP for the
+  rest), and it never deletes anything.
+
+- **See the alerts.** In the Google Cloud console for project `image-links-agent`, open
+  Monitoring, then Alerting. The policies list shows the nine catalog policies; the incidents list
+  shows which fired and when. An incident closes by itself an hour after things are fine again.
+  The dashboard "Catalog ops" is under Monitoring, Dashboards.
+
+- **Read one batch's logs.** In Logging, Logs Explorer, paste this filter (replace `<id>` with the
+  full batch id from the batch page address), or use the "Open logs" link on the batch's Details
+  tab:
+
+  ```
+  labels.batchId="<id>"
+  ```
+
+- **Cost.** Cost per batch, brand, channel and image is on the admin Ops page, `/catalog/ops`.
+  There are no spending emails.
+
+- **Undo the monitoring release.** If the release that added monitoring misbehaves, send all
+  traffic back to the previous revision (the last one before that release) without rebuilding.
+  Run in any folder, after `$env:CLOUDSDK_CORE_PROJECT = "image-links-agent"` (replace
+  `<previous>` with the revision name, for example `catalog-worker-00024-mqq` and
+  `catalog-web-00023-pmb` for the release of 2026-10-21):
+
+  ```powershell
+  gcloud run services update-traffic catalog-worker --to-revisions=<previous>=100 --region=asia-south1
+  gcloud run services update-traffic catalog-web --to-revisions=<previous>=100 --region=asia-south1
+  ```
+
+  The new cost table (`catalog_cost_events`) can stay: older code does not use it. A service whose
+  traffic is pinned this way stays on that revision, even after a new deploy. Once the fix is
+  deployed, send traffic to the newest revision again (same for `catalog-web`):
+
+  ```powershell
+  gcloud run services update-traffic catalog-worker --to-latest --region=asia-south1
+  ```
+
 ## Rollback
 
 If a deploy goes live and something is badly wrong, put back the previous version. This reuses
