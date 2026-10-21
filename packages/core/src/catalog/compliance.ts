@@ -30,6 +30,8 @@ export interface Measured {
 }
 export type ComplianceCode = "magic" | "bytes" | "trendyol_name" | "extension" | "format" | "dims" | "density" | "background" | "inside_safe_box" | "styli_anchor" | "noon_wide";
 /** The rule codes of a `failures` list ("code: sentence"). */
+/** Codes our own encoder settings decide (not the photo): a second identical failure is a code fault, held for the technical team, never dropped (07 4.6a). */
+export const ENCODER_CODES: readonly ComplianceCode[] = ["dims", "density", "format", "magic", "extension", "trendyol_name"];
 export const failureCodes = (failures: readonly string[]): ComplianceCode[] => failures.map(f => f.split(":")[0] as ComplianceCode);
 export async function checkOutput(input: ComplianceInput): Promise<{ ok: boolean; failures: string[]; measured: Measured }> {
   const { jpeg, plan } = input, spec = channel(input.channel), failures: string[] = [];

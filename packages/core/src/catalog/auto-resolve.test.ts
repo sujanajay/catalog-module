@@ -68,7 +68,7 @@ describe("diagnoseOutput: the repair answers the failure", () => {
 
 describe("operator copy for repairs", () => {
   it("names the rule in plain words, never its code, and says what was tried", () => {
-    expect(plainFailures(["inside_safe_box: The product or shadow reaches outside the required margins.", "bytes: x", "inside_safe_box: y"], "Noon")).toBe("the product reaches into the margins Noon requires; the file is larger than the 2 MB this marketplace allows");
+    expect(plainFailures(["inside_safe_box: The product or shadow reaches outside the required margins.", "bytes: x", "inside_safe_box: y"], "Noon")).toBe("the product reaches into the margins Noon requires; the file is larger than the 2 MB Noon allows");
     expect(plainFailures(["dims: x"], "Trendyol")).toBe("the file format or size is not what Trendyol accepts");
     expect(plainFailures([])).toBe("");
     expect(triedSentence(["shadow_off", "refit", "refit"])).toBe("We tried the added shadow removed and a smaller fit and could not fix it.");

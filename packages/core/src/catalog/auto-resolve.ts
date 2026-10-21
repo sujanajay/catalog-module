@@ -1,5 +1,5 @@
 import type { ChannelId, OutputFlag } from "./types";
-import { failureCodes, type ComplianceCode } from "./compliance";
+import { ENCODER_CODES, failureCodes, type ComplianceCode } from "./compliance";
 import { borderBand } from "./shadow";
 import type { RenderMeasured } from "./render";
 
@@ -119,7 +119,7 @@ export function diagnoseOutput(d: Diagnosis): Repair[] {
     if (m?.seen && m.bandBreach) { const band = borderBand(m.canvas.w, m.canvas.h); refit("background", Math.min((m.canvas.w - 2 * band.x) / m.seen.w, (m.canvas.h - 2 * band.y) / m.seen.h)); }
     else refit("background", null);
   }
-  for (const code of ["dims", "density", "format", "magic", "extension", "trendyol_name"] as const) if (codes.has(code)) add("re_render", "output", {}, `${code}: encoder settings, one plain re-render`);
+  for (const code of ENCODER_CODES) if (codes.has(code)) add("re_render", "output", {}, `${code}: encoder settings, one plain re-render`);
   // The judge's own-defect flags.
   if (d.trigger.includes("leftover_background")) shadowOff("leftover_background: a drawn shadow reads as background");
   if (d.trigger.includes("placement") && !reshift("placement")) add("re_render", "output", {}, "placement: re-placed by rule");
@@ -175,6 +175,8 @@ export function failuresOf(compliance: unknown): string[] {
   const list = (compliance as { failures?: unknown } | null | undefined)?.failures;
   return Array.isArray(list) ? list.filter((f): f is string => typeof f === "string") : [];
 }
+/** The output breaks a rule our own encoder settings decide (a code fault, not the photo): held, never dropped (07 4.6a). */
+export const encoderFault = (compliance: unknown): boolean => failureCodes(failuresOf(compliance)).some(code => ENCODER_CODES.includes(code));
 /**
  * The matte stage held this photo because its background is busy (matte-guard.ts `busyBackground`): its
  * `matte_passthrough` step failed with the trigger `leftover_background`. The same flag the judge raises for

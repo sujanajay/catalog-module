@@ -52,6 +52,13 @@ describe("QA triage: hard holds only", () => {
   const rules = out(2, ["failed_compliance"]);
   expect(action([out(1), rules], rules)).toMatchObject({action:"hold",cause:"not_publishable"});
  });
+ it("a broken encoder setting left after its re-render is held for the technical team, never dropped, even with good photos left (07 4.6a)", () => {
+  const encoder = out(3, ["failed_compliance"], {compliance:{failures:["dims: The image dimensions do not meet this marketplace's canvas rules."]}});
+  expect(action([out(1), out(2), encoder, out(4)], encoder)).toMatchObject({action:"hold",cause:"code_fault"});
+  // A margin the photo could not be fitted inside is the photo's: dropped like any other own defect.
+  const margin = out(3, ["failed_compliance"], {compliance:{failures:["inside_safe_box: The product or shadow reaches outside the required margins."]}});
+  expect(action([out(1), out(2), margin, out(4)], margin)).toMatchObject({action:"drop"});
+ });
  it("note-only flags never hold or drop, and checks that could not run stay with the operator", () => {
   const cut = out(1, ["complete_product", "low_resolution", "transparent"]);
   expect(action([cut, out(2)], cut)).toMatchObject({action:"none"});

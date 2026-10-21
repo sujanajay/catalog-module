@@ -8,7 +8,7 @@ export interface FlagDetails { why: string; whatToDo: string }
  */
 export function plainFailure(code: string, channel = "this marketplace"): string {
   const rules: Record<string, string> = {
-    bytes: "the file is larger than the 2 MB this marketplace allows",
+    bytes: `the file is larger than the 2 MB ${channel} allows`,
     inside_safe_box: `the product reaches into the margins ${channel} requires`,
     styli_anchor: "the product does not sit on the Styli bottom guide",
     noon_wide: "a wide shot needs 5% side margins on Noon",

@@ -1,5 +1,5 @@
 import type { ChannelId, OutputFlag } from "../types";
-import { busyBackgroundHold, OWN_DEFECT_FLAGS } from "../auto-resolve";
+import { busyBackgroundHold, encoderFault, OWN_DEFECT_FLAGS } from "../auto-resolve";
 
 /**
  * Information flags (07 4.6): they never hold the publish gate and never create an attention item on
@@ -33,7 +33,7 @@ export const UNCHECKED_FLAGS: ReadonlySet<OutputFlag> = new Set<OutputFlag>(["qa
 export const problemFlags = (flags: readonly OutputFlag[]) => flags.filter(flag => !INFORMATION_FLAGS.has(flag));
 
 export type AutoAction = "none" | "note" | "drop" | "hold";
-export type HoldCause = "wrong_item" | "collage" | "unusable" | "corrupt" | "unchecked" | "photo_one" | "every_photo" | "not_publishable";
+export type HoldCause = "wrong_item" | "collage" | "unusable" | "corrupt" | "unchecked" | "photo_one" | "every_photo" | "not_publishable" | "code_fault";
 export interface TriageOutput {
   id: string; n: number; channel: ChannelId; status: string; flags: readonly OutputFlag[];
   decision: string | null; stagingUri: string | null;
@@ -77,6 +77,9 @@ export function triageProduct(outputs: readonly TriageOutput[], keptLive: readon
     // The background could not be removed (code-detected `leftover_background`, busyBackgroundHold): a hard hold.
     if (problems.includes("leftover_background") && busyBackgroundHold(o.compliance)) { hold("unusable"); continue; }
     if (problems.some(flag => UNCHECKED_FLAGS.has(flag))) { hold("unchecked"); continue; }
+    // A broken encoder setting (dims, format, ...) survived its re-render: a code fault, not the photo. Held for the
+    // technical team, never dropped, so it cannot hide (07 4.6a).
+    if (problems.includes("failed_compliance") && encoderFault(o.compliance)) { hold("code_fault"); continue; }
     if (o.n === photoOne) { hold("photo_one"); continue; }
     const others = goodShots(o.channel, o.n);
     if (others === 0) { hold("every_photo"); continue; }
