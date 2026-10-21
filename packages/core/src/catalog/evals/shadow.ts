@@ -9,7 +9,8 @@ import { preservedDarkness, SHADOW_BAND_ABOVE, SHADOW_BAND_BELOW, SHADOW_BAND_SI
 import { ALPHA_EDGE } from "./context";
 import { dilate, distanceFrom, dropSpecks, longestRun, lumaAt, luma, shadowFeather, SPECK_PX, thresholdMask } from "./image";
 import { APPAREL_TYPES, shadowMode, type OutputContext } from "./context";
-import { judge, notRun, type CheckResult, type CheckSubject } from "./types";
+import { info, judge, notRun, type CheckResult, type CheckSubject } from "./types";
+import type { Mask } from "./image";
 
 export { shadowMode };
 
@@ -60,6 +61,18 @@ export const FORBIDDEN_MIN_DARK = 12;
 export const FORBIDDEN_MIN_REGION_PX = 24;
 /** Distance bins measured away from the silhouette. */
 export const GRADIENT_DEPTH_PX = 48;
+/** Kept darkness over this share of the background luma (about 5 luma on white) belongs to the render's kept-darkness mask. */
+export const KEPT_MASK_MIN_DARKNESS = 0.02;
+/**
+ * Expected synthesis (section 15c): the types whose policy synthesises a contact shadow when the source has none
+ * (SPEC.md: footwear always; bags and hardline "preserve else synthesise (upright)"); a product stands on a contact line
+ * when the columns covered by its lowest CONTACT_LINE_ROWS_SHARE of box rows span more than CONTACT_LINE_MIN_COVERAGE of
+ * the box width. Eval run 3: 16 standing-bag and 40 candle outputs on white carry no shadow because the render's upright
+ * test is box.h > box.w; the spec's rule is pose, and the suite had no check that noticed a missing synthesised shadow.
+ */
+export const SYNTHESIS_TYPES: ReadonlySet<string> = new Set(["footwear", "bag_accessory", "other"]);
+export const CONTACT_LINE_ROWS_SHARE = 0.02;
+export const CONTACT_LINE_MIN_COVERAGE = 0.4;
 
 const S = "shadow" as const;
 
@@ -159,6 +172,65 @@ export function keptShadowDifference(ctx: OutputContext): { mean: number; max: n
   return best.mean === Infinity ? { mean: 0, max: 0, pixels: 0 } : best;
 }
 
+/**
+ * The render's own kept darkness (expectedKeptDarkness) on the canvas, as a mask of the canvas pixels whose source pixel
+ * the render keeps darker than KEPT_MASK_MIN_DARKNESS, grown by one source pixel at the scale plus the ring; null unless
+ * the output is in kept mode where a shadow is allowed, or when the render keeps nothing. Eval run 3 (vero_moda): 97 halo
+ * fails (2.1 to 37.5%) and 64 footprint fails (23 to 171,831 px) on exactly the 20 photos that keep a source shadow (flat
+ * lays photographed with a shadow all around the garment, full-body shots with a long floor shadow); the outputs match
+ * the source and the checks counted the shadow the render was told to keep on the sides the band does not cover.
+ */
+const keptMasks = new WeakMap<OutputContext, Mask | null>();
+export function keptShadowCanvasMask(ctx: OutputContext): Mask | null {
+  const cached = keptMasks.get(ctx);
+  if (cached !== undefined) return cached;
+  let out: Mask | null = null;
+  if (ctx.shadowAllowed && shadowMode(ctx.subject.flags) === "kept") {
+    const { canvas, productBox, sourceCrop, subject } = ctx, src = expectedKeptDarkness(ctx), sw = subject.source.w, sh = subject.source.h;
+    const sx = productBox.w / sourceCrop.w, sy = productBox.h / sourceCrop.h, raw = new Uint8Array(canvas.w * canvas.h);
+    let any = false;
+    for (let y = 0; y < canvas.h; y++) for (let x = 0; x < canvas.w; x++) {
+      const ix = Math.floor(sourceCrop.x + (x - productBox.x + 0.5) / sx), iy = Math.floor(sourceCrop.y + (y - productBox.y + 0.5) / sy);
+      if (ix < 0 || iy < 0 || ix >= sw || iy >= sh || src[iy * sw + ix]! <= KEPT_MASK_MIN_DARKNESS) continue;
+      raw[y * canvas.w + x] = 1; any = true;
+    }
+    out = any ? dilate(raw, canvas.w, canvas.h, Math.ceil(subject.placement.scale) + SHADOW_RING_PX) : null;
+  }
+  keptMasks.set(ctx, out);
+  return out;
+}
+
+/** Share of the product box's columns the matte covers in its lowest CONTACT_LINE_ROWS_SHARE of rows: a contact line, or a hanging or hand-held product. */
+export function contactLineCoverage(alpha: Buffer, source: { w: number; h: number }, box: { x: number; y: number; w: number; h: number }): number {
+  const rows = Math.max(1, Math.round(box.h * CONTACT_LINE_ROWS_SHARE));
+  let covered = 0;
+  for (let x = box.x; x < Math.min(source.w, box.x + box.w); x++) {
+    for (let y = Math.max(box.y, box.y + box.h - rows); y < Math.min(source.h, box.y + box.h); y++) if (alpha[y * source.w + x]! > ALPHA_EDGE) { covered++; break; }
+  }
+  return box.w ? covered / box.w : 0;
+}
+
+/**
+ * No shadow on an output whose policy synthesises one: a failure when the render's own rule says synthesise (footwear, or
+ * a box taller than wide) and nothing was drawn on a product standing on a contact line; information when the product
+ * stands on a contact line but is wider than tall, because SPEC.md's "upright pose" and the render's box.h > box.w
+ * disagree there (OPEN owner question, section 15c) and the live run is not failed on a decision the owner has not taken.
+ * Not run on apparel (never synthesised), on a source cut at the bottom (no contact line to draw on), when the output
+ * carries a shadow flag, or when the product does not stand on a contact line (hand-held, hanging, on a model).
+ */
+export function expectedSynthesis(ctx: OutputContext, who: CheckSubject, shadowPixels: number): CheckResult {
+  const id = "shadow.expected_synthesis", { subject: s, sourceBox: box, cut } = ctx, mode = shadowMode(s.flags);
+  if (!SYNTHESIS_TYPES.has(s.productType)) return notRun(id, S, who, "The policy never synthesises a shadow for this product type.");
+  if (mode !== "none") return notRun(id, S, who, mode === "synthesised" ? "The render synthesised a shadow." : "The render kept the photo's own shadow (no shadow flag).");
+  if (shadowPixels) return notRun(id, S, who, "The output carries darkening under the product, judged with the synthesised bars.");
+  if (cut.bottom) return notRun(id, S, who, "The product is cut at the bottom of the source: there is no contact line to synthesise a shadow on.");
+  const coverage = contactLineCoverage(s.alpha, s.source, box), pct = `${(coverage * 100).toFixed(0)}%`;
+  if (coverage <= CONTACT_LINE_MIN_COVERAGE) return notRun(id, S, who, `The product does not stand on a contact line (its lowest rows cover ${pct} of the box width: hand-held, hanging or on a model), so no shadow is expected.`);
+  const upright = box.h > box.w;
+  if (s.productType === "footwear" || upright) return judge(false, id, S, who, "none drawn", "synthesised", "shadow", `The policy says synthesise (${s.productType === "footwear" ? "footwear" : `an upright product, ${box.w}x${box.h} box`}), the source carries no measurable shadow and the product stands on a contact line covering ${pct} of its box, but no shadow was drawn.`);
+  return info(id, S, who, `${box.w}x${box.h} box, contact line ${pct}`, "upright pose (SPEC.md) against taller than wide (render)", "contact-line coverage", `OPEN owner question: SPEC.md synthesises a shadow for a bag or hardline product in an upright pose; the render's test is box.h > box.w, and this product stands on a contact line (${pct} of its box width) while wider than tall, so nothing was drawn. Recorded as information until the owner decides.`);
+}
+
 export function checkShadow(ctx: OutputContext): CheckResult[] {
   const { subject: s, canvas, band, productBox, background } = ctx;
   const who: CheckSubject = { identifier: s.identifier, n: s.n, channel: s.channel };
@@ -179,15 +251,18 @@ export function checkShadow(ctx: OutputContext): CheckResult[] {
   // only a synthesised shadow is forbidden, and that fails above (no_shadow_source or shadow_synthesised flags).
   if (APPAREL_TYPES.has(s.productType)) out.push(notRun("shadow.forbidden", S, who, "The output keeps the photo's own shadow (SPEC.md: a measurable source shadow is preserved for every type; only synthesis is forbidden on apparel), so it is compared with the source instead."));
 
+  out.push(expectedSynthesis(ctx, who, count));
   if (!count) { out.push(notRun("shadow.footprint", S, who, "No shadow on this output.")); return out; }
 
 
   // Footprint: silhouette plus feather. A shadow pixel must sit within the render's feather of the
   // product mask (so it follows overhangs and insets), in the lower half of the product, and inside the band.
-  const { radius } = shadowFeather(productBox), near = dilate(ctx.product, canvas.w, canvas.h, radius), lowerHalf = productBox.y + productBox.h / 2;
+  // In kept mode the render's own kept-darkness mask (keptShadowCanvasMask) is the photographer's shadow on every side of
+  // the product, so only darkening outside both the feather and that mask counts.
+  const { radius } = shadowFeather(productBox), near = dilate(ctx.product, canvas.w, canvas.h, radius), lowerHalf = productBox.y + productBox.h / 2, kept = keptShadowCanvasMask(ctx);
   let outsideBand = 0;
-  for (let y = 0; y < canvas.h; y++) for (let x = 0; x < canvas.w; x++) { const i = y * canvas.w + x; if (dark[i]! > 0 && (y >= band.y + band.h || !near[i] || y < lowerHalf)) outsideBand++; }
-  out.push(judge(outsideBand === 0, "shadow.footprint", S, who, outsideBand, 0, "pixels outside silhouette plus feather", outsideBand ? `${outsideBand} shadow pixels lie outside the silhouette plus its feather under the product.` : "The shadow follows the silhouette within its feather."));
+  for (let y = 0; y < canvas.h; y++) for (let x = 0; x < canvas.w; x++) { const i = y * canvas.w + x; if (dark[i]! > 0 && !kept?.[i] && (y >= band.y + band.h || !near[i] || y < lowerHalf)) outsideBand++; }
+  out.push(judge(outsideBand === 0, "shadow.footprint", S, who, outsideBand, 0, "pixels outside silhouette plus feather", outsideBand ? `${outsideBand} shadow pixels lie outside the silhouette plus its feather under the product${kept ? " and outside the render's kept-darkness mask" : ""}.` : `The shadow follows the silhouette within its feather${kept ? " and the render's kept-darkness mask" : ""}.`));
 
   // Slab guard: the darkest pixel, against the bar of the shadow's mode.
   const mode = shadowMode(s.flags), darkest = max / bg, darkBar = mode === "kept" ? KEPT_MAX_DARKNESS : MAX_DARKNESS;

@@ -37,7 +37,7 @@ import { assertLocked, checkAttention, checkCompleteness, checkIdentical, checkO
 import { sourceKey } from "@catalog/core/catalog/evals/completeness";
 import { checkMatte, consensusMetrics } from "@catalog/core/catalog/evals/cutout";
 import { sheetNotes } from "@catalog/core/catalog/evals/sheet-notes";
-import { buildGolden, GOLDEN_MANIFEST_PATH, goldenCounts, goldenSourcePath, parseGolden, readGoldenBytes, serializeGolden, sha256, type GoldenBuild, type GoldenEntry, type GoldenManifest } from "@catalog/core/catalog/evals/golden";
+import { buildGolden, GOLDEN_MANIFEST_PATH, goldenCounts, goldenSourcePath, mapShotsBySha, parseGolden, readGoldenBytes, serializeGolden, sha256, uniqueSources, type GoldenBuild, type GoldenEntry, type GoldenManifest } from "@catalog/core/catalog/evals/golden";
 import { policyRowsFor, winnersByScope } from "@catalog/core/catalog/evals/matte-bakeoff";
 import { EVALS_PREFIX, EvidenceBudget, evidencePath, parseSetRecord, parseSetsFlag, RUN_ID_PATTERN, selectSets, serializeSetRecord, setId, setRecordPath, setsPrefix, withEvalRetry, type SetRecord } from "@catalog/core/catalog/evals/progress";
 import { buildReport, reportHtml, type ReportThumb } from "@catalog/core/catalog/evals/report";
@@ -217,6 +217,19 @@ async function runSet(ctx: RunContext, group: Group): Promise<SetRecord> {
     const { products, sources, outputs, xlsx } = collected;
     const identifierOf = (productId: string) => strip(products.get(productId)?.pathKey ?? "");
 
+    // The batch's shots mapped to their manifest entries by source sha256, not by shot number: ingest renumbers a drive
+    // folder with a gap (eval run 3, penti: Z659062EFB3FB0720BF56Z files 1,2,3,4,5,7 became 1..6, so manifest n=7, a
+    // size chart, is the batch's n=6 and the planted copy's n=7 is the planted photo). Every expectation below (the
+    // held set, the planted shot, the per-shot flags, the image checks) is read on the mapped row.
+    const raws = new Map<string, Buffer>();
+    await mapLimit(sources, 6, async s => { raws.set(s.id, (await gcs.downloadBuffer(s.rawUri)).buf); });
+    const mapped = mapShotsBySha(group.entries, sources.map(s => ({ identifier: identifierOf(s.productId), n: s.n, sha256: sha256(raws.get(s.id)!) })));
+    const entryOf = (identifier: string, n: number) => mapped.get(`${identifier}|${n}`);
+    const heldExpected = new Set<string>();
+    for (const s of sources) { const e = entryOf(identifierOf(s.productId), s.n); if (e && ctx.heldExpected.has(sourceKey(e.identifier, e.n))) heldExpected.add(sourceKey(identifierOf(s.productId), s.n)); }
+    const plantedShot = (identifier: string) => sources.map(s => ({ identifier: identifierOf(s.productId), n: s.n })).find(s => s.identifier === identifier && entryOf(identifier, s.n)?.planted)?.n;
+    record.shotExpectations = sources.flatMap(s => { const identifier = identifierOf(s.productId), e = entryOf(identifier, s.n); return e && !e.expect.attention && e.expect.flags.length ? [{ identifier, n: s.n, expect: e.expect }] : []; });
+
     // Completeness over rows, public objects, staged files and the sheet.
     const publicHeads = new Map<string, Awaited<ReturnType<typeof storage.headObject>>>(), stagingHeads = new Map<string, Awaited<ReturnType<typeof storage.headObject>>>();
     await mapLimit(outputs, 8, async o => {
@@ -225,7 +238,7 @@ async function runSet(ctx: RunContext, group: Group): Promise<SetRecord> {
     });
     const links = await readSheetLinks(xlsx), notes = await sheetNotes(xlsx);
     record.results.push(...checkCompleteness({
-      heldExpected: ctx.heldExpected,
+      heldExpected,
       channels, sources: sources.map(s => ({ identifier: identifierOf(s.productId), n: s.n, width: s.width, height: s.height })),
       outputs: outputs.map(o => ({ identifier: identifierOf(o.productId), n: o.n, channel: o.channel, status: o.status, isLive: o.isLive, reason: o.reason, generation: o.generation, bytes: o.bytes, crc32c: o.crc32c, publicUrl: o.publicUrl, stagingUri: o.stagingUri })),
       publicHeads, stagingHeads, sheet: links.links.map(l => ({ identifier: strip(l.identifier), channel: l.channel, n: l.n, url: l.url })),
@@ -236,16 +249,17 @@ async function runSet(ctx: RunContext, group: Group): Promise<SetRecord> {
     // run (evidence) before cleanup deletes the set's objects, so a failure can be looked at afterwards.
     const byProduct = new Map<string, { n: number; scale: number; detailShot: boolean }[]>(), evidence = new EvidenceBudget();
     await mapLimit(sources, 3, async source => {
-      const identifier = identifierOf(source.productId), entry = group.entries.find(e => e.identifier === identifier && e.n === source.n);
+      const identifier = identifierOf(source.productId), entry = entryOf(identifier, source.n);
       if (!entry || !source.matteUri) return;
-      const raw = (await gcs.downloadBuffer(source.rawUri)).buf;
+      const raw = raws.get(source.id)!;
       const p = await prepare(raw, source.originalName, b => deps.matting.convert(b));
       const alpha = await sharp((await gcs.downloadBuffer(source.matteUri)).buf).toColourspace("b-w").raw().toBuffer();
-      prepared.set(`${identifier}_${source.n}`, { p, alpha, entry });
+      // Keyed by the manifest entry (identifier_n of the manifest), so the bake-off sample below finds it whatever the batch's numbering.
+      prepared.set(`${entry.identifier}_${entry.n}`, { p, alpha, entry });
       const box = bbox(alpha, p.width, p.height);
       for (const o of outputs.filter(o => o.sourceImageId === source.id && o.stagingUri)) {
         const jpeg = (await gcs.downloadBuffer(o.stagingUri!)).buf;
-        const subject: OutputSubject = { identifier, n: source.n, channel: o.channel, productType: (products.get(source.productId)?.productType ?? group.category) as ProductType, source: { w: p.width, h: p.height, rgb: p.rgb }, sourceBackground: p.background, alpha, jpeg, placement: { w: o.canvasW, h: o.canvasH, scale: Number(o.scale), placedX: o.placedX, placedY: o.placedY }, flags: o.flags, status: o.status, reason: o.reason, expect: entry.expect, planted: !!entry.planted };
+        const subject: OutputSubject = { identifier, n: source.n, channel: o.channel, productType: (products.get(source.productId)?.productType ?? group.category) as ProductType, source: { w: p.width, h: p.height, rgb: p.rgb }, sourceBackground: p.background, alpha, jpeg, placement: { w: o.canvasW, h: o.canvasH, scale: Number(o.scale), placedX: o.placedX, placedY: o.placedY }, flags: o.flags, status: o.status, reason: o.reason, expect: entry.expect, planted: !!entry.planted, tags: entry.tags };
         const checks = await runImageChecks(subject);
         record.results.push(...checks);
         if (checks.every(c => c.ok)) deterministicPass.add(outputKey(identifier, o.channel, source.n));
@@ -263,7 +277,11 @@ async function runSet(ctx: RunContext, group: Group): Promise<SetRecord> {
 
     // Rows for the attention checks and the flag table.
     for (const o of outputs) record.attentionRows.push({ identifier: identifierOf(o.productId), n: o.n, channel: o.channel, status: o.status, flags: o.flags, reason: o.reason, qaScores: o.qaScores, qaModel: o.qaModel, decision: o.decision, compliance: o.compliance as { ok: boolean; failures: string[] } | null });
-    for (const [, product] of products) { const identifier = strip(product.pathKey); record.attentionProducts.push({ identifier, change: product.change, productType: product.productType, expect: ctx.expectOf.get(identifier) ?? { attention: false, flags: [], detector: "code" }, planted: ctx.plantedOf.get(identifier) ?? null }); }
+    for (const [, product] of products) {
+      const identifier = strip(product.pathKey), planted = ctx.plantedOf.get(identifier);
+      // The planted expectation goes on the mapped row: the batch's number of the shot whose bytes are the planted photo.
+      record.attentionProducts.push({ identifier, change: product.change, productType: product.productType, expect: ctx.expectOf.get(identifier) ?? { attention: false, flags: [], detector: "code" }, planted: planted ? { ...planted, n: plantedShot(identifier) ?? planted.n } : null });
+    }
 
     // Overwrite contract on the first set with a product of three or more shots. Its passes re-upload
     // the released products only (a held product keeps its batch lock); a failure inside them keeps
@@ -282,8 +300,12 @@ async function runSet(ctx: RunContext, group: Group): Promise<SetRecord> {
       }
     }
 
-    // Matting bake-off: every deployed model on a sample of this set's sources.
-    const keys = [...new Set(group.entries.filter(e => !e.planted).map(e => `${e.identifier}_${e.n}`))].filter(k => prepared.has(k)).slice(0, ctx.bakeoffSample);
+    // Matting bake-off: every deployed model on a sample of this set's sources. Byte-identical sources (two products
+    // sharing every photo) are matted once and named on the record, so they do not double the numbers.
+    const unique = uniqueSources(group.entries.filter(e => !e.planted));
+    record.duplicateSources = unique.duplicates;
+    if (unique.duplicates.length) console.info(JSON.stringify({ message: "evals duplicate sources counted once in the bake-off", set, duplicates: unique.duplicates }));
+    const keys = [...new Set(unique.kept.map(e => `${e.identifier}_${e.n}`))].filter(k => prepared.has(k)).slice(0, ctx.bakeoffSample);
     // Every model mattes each sampled source; the metrics compare each matte with the source colours
     // and with the majority of the other models, so models that all pass the bars still separate.
     if (ctx.models.length) await mapLimit(keys, 3, async k => {
@@ -385,7 +407,7 @@ async function runCommand(db: Db, flags: Record<string, string | string[] | true
   const policyRows = policyRowsFor(winners, { batchIds, seen: { matte: trials.length ? [...new Map(trials.map(t => [`${t.model}|${t.target}`, { id: t.model, target: t.target }])).values()] : [], judges: qaCandidates() }, existing });
   const written = policyRows.length ? await writePolicyRows(db, policyRows, flags["write-policy"] !== true) : [];
 
-  const attention = checkAttention({ products: attentionProducts, outputs: attentionRows, deterministicPass, liveJudge: live, threshold: QA_DEFAULT_THRESHOLD });
+  const attention = checkAttention({ products: attentionProducts, outputs: attentionRows, shots: records.flatMap(r => r.shotExpectations ?? []), deterministicPass, liveJudge: live, threshold: QA_DEFAULT_THRESHOLD });
   results.push(...attention.results);
   const counts = goldenCounts(manifest);
   const startedAt = new Date(Math.min(Date.now(), ...records.map(r => Date.parse(r.startedAt))));

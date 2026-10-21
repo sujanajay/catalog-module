@@ -18,9 +18,16 @@ export interface AttentionProductRow {
   /** A planted wrong item: shot `n` belongs to another product and must be caught as different_product. */
   planted?: { n: number; from: string } | null;
 }
+/** A per-shot expectation from the manifest, keyed by the batch's own shot number (mapped by source sha256, section 15c). */
+export interface AttentionShotRow { identifier: string; n: number; expect: Expectation }
 export interface AttentionInput {
   products: AttentionProductRow[];
   outputs: AttentionOutputRow[];
+  /**
+   * Shots whose manifest entry expects flags without a hold (a size chart left out as `chart_image`): the flags must be
+   * raised on that shot and nothing of it published. A hold is judged per product by `attention.expected`.
+   */
+  shots?: AttentionShotRow[];
   /** Keys (identifier|channel|n) of outputs whose deterministic image checks all passed. */
   deterministicPass: Set<string>;
   /** The judge ran live (otherwise its verdicts are canned and never assessed). */
@@ -87,6 +94,17 @@ export function checkAttention(input: AttentionInput): AttentionSummary {
     const missing = product.expect.flags.filter(f => !raised.has(f) && (input.liveJudge || !JUDGE_ONLY_FLAGS.has(f)));
     const unexpected = [...new Set(problems.flatMap(problemFlags))].filter(f => !product.expect.flags.includes(f) && (input.liveJudge || !JUDGE_ONLY_FLAGS.has(f)));
     results.push(judge(isHeld && !missing.length && !unexpected.length, "attention.expected", A, who, `${isHeld ? "held" : "not held"}; flags ${[...raised].join(",") || "none"}`, `held with ${product.expect.flags.join(",")}`, "flags", !isHeld ? `Expected the pipeline to hold this product (${product.expect.flags.join(", ")}) but it went to the sheet.` : missing.length ? `Expected flags missing: ${missing.join(", ")}.` : unexpected.length ? `Unexpected flags: ${unexpected.join(", ")}.` : "Held with exactly the expected flags."));
+  }
+  // Per-shot expected flags without a hold (eval run 3, penti: the size chart Z659062EFB3FB0720BF56Z n=7, renumbered 6 by the
+  // batch, was published on every channel as a pass-through instead of left out as chart_image, and carried no expectation).
+  for (const shot of input.shots ?? []) {
+    if (shot.expect.attention) continue;
+    const required = shot.expect.flags.filter(f => input.liveJudge || !JUDGE_ONLY_FLAGS.has(f));
+    const rows = input.outputs.filter(o => o.identifier === shot.identifier && o.n === shot.n);
+    if (!required.length || !rows.length) continue;
+    const who: CheckSubject = { identifier: shot.identifier, n: shot.n, channel: null };
+    const raised = new Set(rows.flatMap(o => o.flags)), missing = required.filter(f => !raised.has(f)), published = rows.filter(o => o.status === "verified" || o.status === "staged");
+    results.push(judge(!missing.length && !published.length, "attention.expected_flags", A, who, `flags ${[...raised].join(",") || "none"}; ${published.length} of ${rows.length} outputs published`, `${required.join(",")}, left out`, "flags", missing.length ? `Expected flags missing on image ${shot.n}: ${missing.join(", ")}${published.length ? ` (${published.length} outputs published instead of left out)` : ""}${shot.expect.reason ? `. ${shot.expect.reason}` : "."}` : published.length ? `Image ${shot.n} carries ${required.join(", ")} but ${published.length} outputs were published instead of left out.` : `Image ${shot.n} carries ${required.join(", ")} as the manifest expects and nothing of it was published.`));
   }
   if (plantedTotal && input.liveJudge) results.push(judge(plantedCaught === plantedTotal, "attention.planted_rate", A, all, `${plantedCaught} of ${plantedTotal}`, `${plantedTotal} of ${plantedTotal}`, "planted wrong items caught", "Every planted wrong item must be caught."));
 
