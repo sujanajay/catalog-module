@@ -55,6 +55,21 @@ describe("cut-out integrity guard", () => {
     expect(verdict.overallLoss).toBeLessThan(0.01);
   });
 
+  it("names where the worst cell is, in source pixels, so a dropped backdrop corner can be told from a lost sleeve", () => {
+    const object = (x: number, y: number) => inRect(x, y, 100, 120, 200, 360);
+    const plain = image((x, y) => object(x, y) ? [clamp(60 + grain(x, y)), clamp(40 + grain(x, y)), clamp(30 + grain(x, y))] : [255, 255, 255]);
+    // The matte drops the top-left corner of the object: the worst cell is the grid's first, at the object's top left.
+    const verdict = checkMatteIntegrity(plain, matteOf((x, y) => object(x, y) && !inRect(x, y, 100, 120, 60, 80)));
+    expect(verdict.ok).toBe(false);
+    const box = /worst cell 100\.0% at x (\d+), y (\d+), (\d+) x (\d+) px, overall/.exec(verdict.detail);
+    expect(box).not.toBeNull();
+    const [x, y, w, h] = box!.slice(1).map(Number) as [number, number, number, number];
+    expect(x).toBeGreaterThanOrEqual(100); expect(x).toBeLessThan(110);
+    expect(y).toBeGreaterThanOrEqual(120); expect(y).toBeLessThan(130);
+    expect(w).toBeGreaterThan(25); expect(w).toBeLessThan(40);
+    expect(h).toBeGreaterThan(50); expect(h).toBeLessThan(65);
+  });
+
   it("passes a transparent source's own alpha and an untouched first matte without any step", async () => {
     const p = image(leather), attempts: MatteVariant[] = [];
     const resolved = await resolveMatte({ prepared: p, first: { ...logoOnly(), source: "alpha_source" }, handRule: true, attempt: async v => { attempts.push(v); return null; } });
