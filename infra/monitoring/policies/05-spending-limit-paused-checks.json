@@ -1,0 +1,40 @@
+{
+  "displayName": "Catalog: spending limit paused quality checks",
+  "documentation": {
+    "content": "The daily spending limit or a batch spending limit was reached, so quality checks were paused and the affected products are held for review. First search Logs Explorer for \"spend cap hit\" to see which limit was reached and for which batch. If the work is expected, raise the limit on purpose (DAILY_SPEND_CAP_USD in infra/deploy.sh, or the batch limit) and start the held products again; otherwise find out why spending was so high.",
+    "mimeType": "text/markdown",
+    "subject": "Catalog: spending limit paused quality checks"
+  },
+  "userLabels": {
+    "app": "catalog"
+  },
+  "conditions": [
+    {
+      "displayName": "spend cap hit, more than 0 in 5 minutes",
+      "conditionThreshold": {
+        "filter": "metric.type=\"logging.googleapis.com/user/catalog/spend_cap_hit\" AND resource.type=\"cloud_run_revision\"",
+        "aggregations": [
+          {
+            "alignmentPeriod": "300s",
+            "perSeriesAligner": "ALIGN_SUM",
+            "crossSeriesReducer": "REDUCE_SUM"
+          }
+        ],
+        "comparison": "COMPARISON_GT",
+        "thresholdValue": 0,
+        "duration": "0s",
+        "trigger": {
+          "count": 1
+        }
+      }
+    }
+  ],
+  "combiner": "OR",
+  "enabled": true,
+  "notificationChannels": [
+    "__CATALOG_EMAIL_CHANNEL__"
+  ],
+  "alertStrategy": {
+    "autoClose": "3600s"
+  }
+}

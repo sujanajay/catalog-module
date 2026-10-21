@@ -1,0 +1,40 @@
+{
+  "displayName": "Catalog: work queue stuck",
+  "documentation": {
+    "content": "The catalog Cloud Tasks queue has held more than 50 waiting tasks for 30 minutes. A very large batch can do this on its own, but it can also mean the worker is not taking work. First check in the catalog app whether a large batch is running and still making progress. If nothing is moving, open the catalog queue in Cloud Tasks and check that it is not paused, then look at the catalog-worker logs for errors.",
+    "mimeType": "text/markdown",
+    "subject": "Catalog: work queue stuck"
+  },
+  "userLabels": {
+    "app": "catalog"
+  },
+  "conditions": [
+    {
+      "displayName": "catalog queue has more than 50 tasks for 30 minutes",
+      "conditionThreshold": {
+        "filter": "metric.type=\"cloudtasks.googleapis.com/queue/depth\" AND resource.type=\"cloud_tasks_queue\" AND resource.labels.queue_id=\"catalog\"",
+        "aggregations": [
+          {
+            "alignmentPeriod": "60s",
+            "perSeriesAligner": "ALIGN_MEAN",
+            "crossSeriesReducer": "REDUCE_SUM"
+          }
+        ],
+        "comparison": "COMPARISON_GT",
+        "thresholdValue": 50,
+        "duration": "1800s",
+        "trigger": {
+          "count": 1
+        }
+      }
+    }
+  ],
+  "combiner": "OR",
+  "enabled": true,
+  "notificationChannels": [
+    "__CATALOG_EMAIL_CHANNEL__"
+  ],
+  "alertStrategy": {
+    "autoClose": "3600s"
+  }
+}

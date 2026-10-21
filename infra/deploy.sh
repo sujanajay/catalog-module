@@ -4,8 +4,8 @@
 # per-brand smoke on the just-built worker image as the Cloud Run job catalog-test-smoke, then
 # deploy catalog-matting (CPU and GPU), catalog-worker and catalog-web (all private), IAP access,
 # CORS, the catalog-qa-check, catalog-eval, catalog-load and catalog-recheck jobs (same worker
-# image, deployed but not executed), and print the URLs. A failing smoke (any failed_compliance or
-# overwrite assertion) stops the script before any service is updated. Migrations run before the
+# image, deployed but not executed), print the URLs and set up the alerts (infra/monitoring.sh,
+# a failure there only warns). A failing smoke (any failed_compliance or overwrite assertion) stops the script before any service is updated. Migrations run before the
 # smoke because the new image's smoke needs the migrated schema and the seeded test brand.
 # Idempotent; re-run to ship a commit.
 # Run infra/bootstrap.sh first.
@@ -211,7 +211,7 @@ if [ "${CATALOG_PREVIEW:-0}" != 1 ]; then
     echo "==> migrate: SKIP (this image already migrated successfully)"
   else
     gcloud run jobs deploy catalog-migrate --quiet --image="$AR/worker:$TAG" --command=node --args=dist/migrate.js \
-      --service-account="$WORKER_SA" --max-retries=0 --task-timeout=600 "${NET[@]}" \
+      --service-account="$WORKER_SA" --max-retries=0 --task-timeout=600 "${NET[@]}" --labels=app=catalog,component=job \
       --set-secrets="$SECRETS" --set-env-vars="$MIGRATE_ENV"
     gcloud run jobs execute catalog-migrate --region="$REGION" --wait
   fi
@@ -248,7 +248,8 @@ echo "==> matting CPU"
 if [ "${CATALOG_PREVIEW:-0}" != 1 ]; then
   gcloud run deploy catalog-matting --quiet --image="$AR/matting:$TAG" \
     --service-account="$MATTING_SA" --region="$REGION" "$(auth_flag catalog-matting "$REGION")" \
-    --cpu=4 --memory=16Gi --concurrency=1 --min-instances=0 --max-instances=20 --timeout=300
+    --cpu=4 --memory=16Gi --concurrency=1 --min-instances=0 --max-instances=20 --timeout=300 \
+    --labels=app=catalog,component=matte
 fi
 MATTING_URL=$(gcv run services describe catalog-matting --region="$REGION" --format='value(status.url)')
 [ -n "$MATTING_URL" ] || { echo "ERROR: CPU matting service has no URL" >&2; exit 1; }
@@ -266,7 +267,8 @@ if [ "${CATALOG_PREVIEW:-0}" = 1 ]; then
 elif GPU_ERR=$(gcloud run deploy catalog-matting-gpu --quiet --image="$AR/matting-gpu:$TAG" \
   --service-account="$MATTING_SA" --region="$GPU_REGION" "$(auth_flag catalog-matting-gpu "$GPU_REGION")" \
   --gpu=1 --gpu-type=nvidia-l4 --no-gpu-zonal-redundancy --no-cpu-throttling \
-  --cpu=4 --memory=16Gi --concurrency=1 --min-instances=0 --max-instances=3 --timeout=300 2>&1); then
+  --cpu=4 --memory=16Gi --concurrency=1 --min-instances=0 --max-instances=3 --timeout=300 \
+  --labels=app=catalog,component=matte-gpu 2>&1); then
   MATTING_GPU_URL=$(gcv run services describe catalog-matting-gpu --region="$GPU_REGION" --format='value(status.url)')
   [ -n "$MATTING_GPU_URL" ] || { echo "ERROR: GPU matting service has no URL" >&2; exit 1; }
   WORKER_ENV+=",MATTING_GPU_URL=$MATTING_GPU_URL"
@@ -307,7 +309,7 @@ done
 gcloud run deploy "$WORKER_SERVICE" --quiet --image="$AR/worker:$TAG" --service-account="$WORKER_SA" \
   "$(auth_flag "$WORKER_SERVICE")" --cpu=2 --memory=2Gi --concurrency="$WORKER_CONCURRENCY" \
   --min-instances=0 --max-instances="$WORKER_MAX_INSTANCES" --timeout=900 "${NET[@]}" \
-  --set-secrets="$WORKER_SECRETS" --set-env-vars="$WORKER_ENV"
+  --set-secrets="$WORKER_SECRETS" --set-env-vars="$WORKER_ENV" --labels=app=catalog,component=worker
 if [ "${CATALOG_PREVIEW:-0}" != 1 ]; then
   # Idempotent: keep the queue's parallelism equal to the worker's capacity (connection budget above).
   gcloud tasks queues update "$QUEUE" --location="$REGION" --max-concurrent-dispatches="$TASKS_MAX_DISPATCHES" >/dev/null
@@ -325,7 +327,7 @@ MSYS2_ARG_CONV_EXCL='--set-env-vars=' \
 gcloud run deploy "$WEB_SERVICE" --quiet --image="$AR/web:$TAG" --service-account="$WEB_SA" \
   "$(auth_flag "$WEB_SERVICE")" --iap --cpu=1 --memory=1Gi \
   --min-instances=0 --max-instances="$WEB_MAX_INSTANCES" --timeout=300 "${NET[@]}" \
-  --set-secrets="$SECRETS" --set-env-vars="$WEB_ENV"
+  --set-secrets="$SECRETS" --set-env-vars="$WEB_ENV" --labels=app=catalog,component=web
 
 IAP_ENABLED=$(gcv run services describe "$WEB_SERVICE" --region="$REGION" \
   --format='value(metadata.annotations."run.googleapis.com/iap-enabled")')
@@ -425,3 +427,17 @@ echo "WORKER_URL=$WORKER_URL"
 echo "MATTING_URL=$MATTING_URL"
 echo "MATTING_GPU_URL=${MATTING_GPU_URL:-not configured}"
 echo "UPSCALE_MODEL=${UPSCALE_MODEL:-off}"
+
+# --- 10. Monitoring --------------------------------------------------------------------
+# Email alerts, log-based metrics and the "Catalog ops" dashboard (infra/monitoring.sh, check-then-
+# create). The services are already live here, so a monitoring failure only warns and never fails
+# the deploy; re-run "bash infra/monitoring.sh" on its own after fixing the cause. The preview stack
+# shares the prod alerts (they match every catalog-* service), so it skips this step.
+echo "==> monitoring"
+if [ "${CATALOG_PREVIEW:-0}" = 1 ]; then
+  echo "==> monitoring: SKIP (preview uses the prod alerts)"
+elif bash infra/monitoring.sh; then
+  echo "==> monitoring: done"
+else
+  echo "WARN: infra/monitoring.sh failed; the deploy itself succeeded. Re-run bash infra/monitoring.sh after fixing the cause." >&2
+fi

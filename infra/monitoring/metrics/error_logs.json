@@ -1,0 +1,5 @@
+{
+  "name": "catalog/error_logs",
+  "description": "Any ERROR or worse log line from a catalog service, except the ones the chunk and batch alerts already cover and the Cloud Run request log (covered by the worker errors alert).",
+  "filter": "resource.type=\"cloud_run_revision\" AND resource.labels.service_name=~\"^catalog-\" AND severity>=ERROR AND NOT jsonPayload.message=\"chunk failed\" AND NOT jsonPayload.message=\"batch failed\" AND NOT jsonPayload.message=~\"^batch swept\" AND NOT jsonPayload.message=\"catalog_qa: quality check unavailable\" AND NOT jsonPayload.message=\"matting_breaker\" AND NOT jsonPayload.message=\"spend cap hit\" AND NOT logName=\"projects/image-links-agent/logs/run.googleapis.com%2Frequests\""
+}

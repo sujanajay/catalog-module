@@ -60,7 +60,7 @@ deploy() {
   # MSYS2_ARG_CONV_EXCL: Git Bash would rewrite "/..." values inside these flags into Windows paths.
   MSYS2_ARG_CONV_EXCL='--command=;--args=;--set-env-vars=;--add-volume=;--add-volume-mount=' \
   gcloud run jobs deploy "$JOB" --quiet --image="$EVALS_JOB_IMAGE" \
-    --service-account="$WORKER_SA" --max-retries=0 --task-timeout=14400 --cpu=2 --memory=4Gi "${NET[@]}" \
+    --service-account="$WORKER_SA" --labels=app=catalog,component=job --max-retries=0 --task-timeout=14400 --cpu=2 --memory=4Gi "${NET[@]}" \
     "${volume_flags[@]}" \
     --command=node,dist/catalog-output-evals.js --args=help \
     --set-secrets="$EVALS_JOB_SECRETS" --set-env-vars="$EVALS_JOB_ENV,CATALOG_REAL_OUT=/catalog-evidence/local,REAL_DATA=1"
