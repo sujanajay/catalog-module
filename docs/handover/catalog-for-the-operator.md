@@ -271,11 +271,13 @@ Since the update of 2026-10-21, when a photo has to be made more than 1.5 times 
 marketplace, the tool enlarges it with a quality pass first. This works the same way on every
 marketplace.
 
-- Styli wants photos at least 1,482 px tall. The tool now judges the photo after the quality pass,
-  which doubles its size, so Styli accepts photos that are at least 741 px tall.
-- Photos under 741 px tall are still skipped for Styli, with the same note as before: "Skipped for
-  Styli: the photo is smaller than Styli needs."
+- Since the update of 2026-10-22, Styli makes every photo, however much it has to be enlarged. This
+  includes photos where the product is cut at the edge of the picture: the product fills the Styli
+  image edge to edge on the cut sides.
+- No photo is skipped for Styli because it is small any more. Older batches may still show the note
+  "Skipped for Styli: the photo is smaller than Styli needs." on images made before this update; add
+  those products again to make their Styli images.
 - In the links sheet, an image made this way carries the note "Enlarged with a quality pass to meet
   this marketplace's size." It uploads like any other image.
-- In step 4, the Styli warning now uses 741 px. If it says some photos are smaller than Styli needs,
-  those photos are under 741 px tall and will be skipped for Styli.
+- A photo under 500 px on its long side is still held for you on every marketplace, as before (see
+  section 7).

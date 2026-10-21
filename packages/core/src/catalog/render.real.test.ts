@@ -72,18 +72,12 @@ async function verifyReport(report: Report, manifest: Manifest, sourceCount: num
   for (const product of manifest.products) for (const shot of product.shots) for (const id of CHANNEL_IDS) expect(keys.has(`${product.identifier}\0${shot.n}\0${id}`)).toBe(true);
   const failures = report.outputs.filter((o) => o.status === "failed" || (o.status === "ok" && !o.compliance.ok));
   console.log(JSON.stringify({ out, summary: report.summary, firstFailures: failures.slice(0, 10) }, null, 2));
-  expect(failures, "Every planned outcome must succeed or be the documented Styli skip.").toEqual([]);
-  expect(report.summary).toMatchObject({ outputs: sourceCount * 9, compliant: sourceCount * 8, skipped: sourceCount, failed: 0 });
+  expect(failures, "Every planned outcome must succeed (no Styli skip since 2026-10-22).").toEqual([]);
+  expect(report.summary).toMatchObject({ outputs: sourceCount * 9, compliant: sourceCount * 9, skipped: 0, failed: 0 });
   for (const row of report.outputs) {
     expect(row.matte?.model).toBe(MODEL);
     expect(["cpu", "gpu"]).toContain(row.matte?.target);
     expect(row.flags).not.toContain("fallback_matte");
-    if (row.channel === "styli") {
-      expect(row.status).toBe("skipped");
-      expect(row.notes).toContain("Skipped for Styli: the photo is smaller than Styli needs.");
-      expect(row.path).toBeUndefined();
-      continue;
-    }
     expect(row.status).toBe("ok");
     expect(row.compliance).toEqual({ ok: true, failures: [] });
     const spec = channel(row.channel), plan = row.plan, box = plan.productBox!;
