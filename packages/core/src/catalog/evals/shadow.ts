@@ -7,7 +7,7 @@
 // resampled to the placement, within a darkness bound. Where the product type forbids one, none may exist.
 import { preservedDarkness, SHADOW_BAND_ABOVE, SHADOW_BAND_BELOW, SHADOW_BAND_SIDE, SHADOW_MAX_DARKNESS, SHADOW_PRESET } from "../shadow";
 import { ALPHA_EDGE } from "./context";
-import { dilate, distanceFrom, dropSpecks, longestRun, lumaAt, luma, shadowFeather, SPECK_PX, thresholdMask } from "./image";
+import { dilate, distanceFrom, dropSpecks, erode, longestRun, lumaAt, luma, maskBox, shadowFeather, SPECK_PX, thresholdMask } from "./image";
 import { APPAREL_TYPES, shadowMode, type OutputContext } from "./context";
 import { info, judge, notRun, type CheckResult, type CheckSubject } from "./types";
 import type { Mask } from "./image";
@@ -49,13 +49,19 @@ export const KEPT_MAX_DARKNESS = 0.7;
  * 11.6, max 66.9 against the bar of 4 set on the synthetic shadow; the same matte measured 6.3 to 31.8 across channels
  * while its darkness maps equalled the source on every channel (a 1 source px contact line scaled 1.6 to 4.8x is a 200
  * luma step, one pixel of registration costs about 3 luma of mean), and a raised toe's detached shadow, dropped by the
- * render's contact-line rule, measured 52 to 67. The bar stays at 4 until run 4 measures the new metric on real photos.
+ * render's contact-line rule, measured 52 to 67. Live run D2 read the new metric on real photos (section 15e): anta's 371
+ * kept footwear shadows measured p50 3.0, p75 6.6, p90 10.8, max 36.4, the worst rows comparing 79 to 96 source pixels
+ * with the crop equal to the source, while the apparel and bag sets measured at most 2.8; so a kept footwear shadow gets
+ * KEPT_MEAN_DIFF_MAX_FOOTWEAR (the p75 rounded up) and the comparison needs KEPT_MIN_PIXELS compared source pixels.
+ * `footprint` and `darkness` still bound an added or removed shadow.
  */
 export const KEPT_MEAN_DIFF_MAX = 4;
+export const KEPT_MEAN_DIFF_MAX_FOOTWEAR = 8;
+export const keptDifferenceBar = (productType: string): number => (productType === "footwear" ? KEPT_MEAN_DIFF_MAX_FOOTWEAR : KEPT_MEAN_DIFF_MAX);
 export const KEPT_REGISTRATION_PX = 1;
 export const KEPT_RING_SOURCE_PX = 3;
-/** Fewer shadow pixels than this in the band give no meaningful comparison. */
-export const KEPT_MIN_PIXELS = 64;
+/** Fewer compared source pixels than this give no meaningful comparison (eval run 3: 64; live run D2: 400, section 15e). */
+export const KEPT_MIN_PIXELS = 400;
 /** Forbidden shadows are judged on firmer darkening (above ringing next to dark garments) in regions of at least this size. */
 export const FORBIDDEN_MIN_DARK = 12;
 export const FORBIDDEN_MIN_REGION_PX = 24;
@@ -72,7 +78,14 @@ export const KEPT_MASK_MIN_DARKNESS = 0.02;
  * suite had no check that noticed a missing synthesised shadow.
  */
 export const SYNTHESIS_TYPES: ReadonlySet<string> = new Set(["footwear", "bag_accessory", "other"]);
-export const CONTACT_LINE_ROWS_SHARE = 0.02;
+/**
+ * The contact line is read on the lowest CONTACT_LINE_ROWS_SHARE of the rows of the silhouette after a radius
+ * CONTACT_LINE_OPEN_PX opening (live run D2, section 15e: the standing clutch Z02B2EE44E3A08044B816Z n=7 read 13% on the
+ * lowest 2% of a box that held the strap loop hanging beside a rounded base, while its back view read 73%; the opening
+ * drops the strap and the deeper band reaches past the rounded corners).
+ */
+export const CONTACT_LINE_ROWS_SHARE = 0.05;
+export const CONTACT_LINE_OPEN_PX = 8;
 export const CONTACT_LINE_MIN_COVERAGE = 0.4;
 
 const S = "shadow" as const;
@@ -201,14 +214,21 @@ export function keptShadowCanvasMask(ctx: OutputContext): Mask | null {
   return out;
 }
 
-/** Share of the product box's columns the matte covers in its lowest CONTACT_LINE_ROWS_SHARE of rows: a contact line, or a hanging or hand-held product. */
+/**
+ * Share of the silhouette's columns the matte covers in its lowest CONTACT_LINE_ROWS_SHARE of rows, after a radius
+ * CONTACT_LINE_OPEN_PX opening of the matte (a strap or a handle in the box is not the base; a rounded base is read over a
+ * deeper band): a contact line, or a hanging or hand-held product. Falls back to the plain matte and box when the opening
+ * removes the whole silhouette (a product thinner than the opening).
+ */
 export function contactLineCoverage(alpha: Buffer, source: { w: number; h: number }, box: { x: number; y: number; w: number; h: number }): number {
-  const rows = Math.max(1, Math.round(box.h * CONTACT_LINE_ROWS_SHARE));
+  const matted = thresholdMask(alpha, ALPHA_EDGE), opened = dilate(erode(matted, source.w, source.h, CONTACT_LINE_OPEN_PX), source.w, source.h, CONTACT_LINE_OPEN_PX);
+  const base = maskBox(opened, source.w, source.h), mask = base ? opened : matted, b = base ?? box;
+  const rows = Math.max(1, Math.round(b.h * CONTACT_LINE_ROWS_SHARE));
   let covered = 0;
-  for (let x = box.x; x < Math.min(source.w, box.x + box.w); x++) {
-    for (let y = Math.max(box.y, box.y + box.h - rows); y < Math.min(source.h, box.y + box.h); y++) if (alpha[y * source.w + x]! > ALPHA_EDGE) { covered++; break; }
+  for (let x = b.x; x < Math.min(source.w, b.x + b.w); x++) {
+    for (let y = Math.max(b.y, b.y + b.h - rows); y < Math.min(source.h, b.y + b.h); y++) if (mask[y * source.w + x]) { covered++; break; }
   }
-  return box.w ? covered / box.w : 0;
+  return b.w ? covered / b.w : 0;
 }
 
 /**
@@ -256,7 +276,11 @@ export function checkShadow(ctx: OutputContext): CheckResult[] {
   if (APPAREL_TYPES.has(s.productType)) out.push(notRun("shadow.forbidden", S, who, "The output keeps the photo's own shadow (SPEC.md: a measurable source shadow is preserved for every type; only synthesis is forbidden on apparel), so it is compared with the source instead."));
 
   out.push(expectedSynthesis(ctx, who, count));
-  if (!count) { out.push(notRun("shadow.footprint", S, who, "No shadow on this output.")); return out; }
+  if (!count) {
+    out.push(notRun("shadow.footprint", S, who, "No shadow on this output."));
+    if (shadowMode(s.flags) === "kept") out.push(notRun("shadow.kept_matches_source", S, who, `No shadow on this output (0 compared source pixels, under ${KEPT_MIN_PIXELS}): the photo's own shadow faded out before the safe box or the border band, or the source carries none the render kept.`));
+    return out;
+  }
 
 
   // Footprint: silhouette plus feather. A shadow pixel must sit within the render's feather of the
@@ -274,9 +298,9 @@ export function checkShadow(ctx: OutputContext): CheckResult[] {
 
   if (mode === "kept") {
     // A kept photographic shadow has the photographer's shape: the output must carry the source's own darkness, resampled.
-    const { mean, max: worst, pixels } = keptShadowDifference(ctx);
-    if (pixels < KEPT_MIN_PIXELS) out.push(notRun("shadow.kept_matches_source", S, who, `Too few shadow pixels in the band to compare with the source (${pixels}).`));
-    else out.push(judge(mean <= KEPT_MEAN_DIFF_MAX, "shadow.kept_matches_source", S, who, Math.round(mean * 10) / 10, KEPT_MEAN_DIFF_MAX, "mean luma difference", mean <= KEPT_MEAN_DIFF_MAX ? `The kept shadow matches the source's shadow resampled to the placement (mean difference ${mean.toFixed(1)}, worst ${worst.toFixed(0)} over ${pixels} pixels).` : `The kept shadow differs from the source's shadow resampled to the placement by ${mean.toFixed(1)} luma on average (worst ${worst.toFixed(0)} over ${pixels} pixels): something was added or removed under the product.`));
+    const { mean, max: worst, pixels } = keptShadowDifference(ctx), bar = keptDifferenceBar(s.productType);
+    if (pixels < KEPT_MIN_PIXELS) out.push(notRun("shadow.kept_matches_source", S, who, `Too few shadow pixels in the band to compare with the source (${pixels} compared source pixels, under ${KEPT_MIN_PIXELS}).`));
+    else out.push(judge(mean <= bar, "shadow.kept_matches_source", S, who, Math.round(mean * 10) / 10, bar, "mean luma difference", mean <= bar ? `The kept shadow matches the source's shadow resampled to the placement (mean difference ${mean.toFixed(1)}, worst ${worst.toFixed(0)} over ${pixels} compared source pixels; bar ${bar} for ${s.productType}).` : `The kept shadow differs from the source's shadow resampled to the placement by ${mean.toFixed(1)} luma on average (worst ${worst.toFixed(0)} over ${pixels} compared source pixels; bar ${bar} for ${s.productType}): something was added or removed under the product.`));
     for (const id of ["shadow.hard_edge_horizontal", "shadow.hard_edge_vertical", "shadow.monotone"]) out.push(notRun(id, S, who, "The output keeps the photo's own shadow; its shape is compared with the source instead."));
     return out;
   }
@@ -310,4 +334,27 @@ export function checkShadow(ctx: OutputContext): CheckResult[] {
     out.push(judge(worstRise <= MONOTONE_STEP_TOLERANCE && totalRise <= MONOTONE_TOTAL_TOLERANCE, "shadow.monotone", S, who, Math.round(worstRise * 10) / 10, MONOTONE_STEP_TOLERANCE, "luma rise per px", worstRise > MONOTONE_STEP_TOLERANCE || totalRise > MONOTONE_TOTAL_TOLERANCE ? `Shadow darkness rises again further from the product (worst step ${worstRise.toFixed(1)}, total ${totalRise.toFixed(1)}; limits ${MONOTONE_STEP_TOLERANCE} and ${MONOTONE_TOTAL_TOLERANCE}).` : `Shadow darkness falls off steadily from the silhouette (worst step ${worstRise.toFixed(1)}, total rise ${totalRise.toFixed(1)}).`));
   } else out.push(notRun("shadow.monotone", S, who, "Too few shadow pixels to measure the gradient."));
   return out;
+}
+
+/** The compared source pixel count a `shadow.kept_matches_source` row records in its detail (pass, fail or not run), or null for another row. */
+export function keptComparedPixels(result: CheckResult): number | null {
+  if (result.id !== "shadow.kept_matches_source") return null;
+  const m = /(\d+) compared source pixels/.exec(result.detail);
+  return m ? Number(m[1]) : null;
+}
+
+/**
+ * Kept-shadow presence by channel, per photo (live run D2, vero_moda bags, section 15e: a tall standing bag keeps its
+ * photographed shadow on the channels whose fit leaves room under it and loses it in the fade before the safe box on
+ * the others, so a reviewer comparing channels sees a shadow on three marketplaces and none on five). Information only
+ * (status `info`) when the channels of one photo disagree on whether a kept shadow is there to compare; not run when
+ * they agree or the photo is not in kept mode. The owner decides whether the fit reserves the shadow band.
+ */
+export function keptChannelConsistency(identifier: string, n: number, rows: readonly { channel: string; compared: number }[]): CheckResult {
+  const id = "shadow.kept_channel_consistency", who: CheckSubject = { identifier, n, channel: null };
+  if (rows.length < 2) return notRun(id, S, who, "Fewer than two kept-mode outputs of this photo.");
+  const withShadow = rows.filter(r => r.compared >= KEPT_MIN_PIXELS), without = rows.filter(r => r.compared < KEPT_MIN_PIXELS);
+  if (!withShadow.length || !without.length) return notRun(id, S, who, withShadow.length ? "Every channel of the photo carries its kept shadow." : "No channel of the photo carries enough kept shadow to compare.");
+  const list = (xs: readonly { channel: string; compared: number }[]) => xs.map(r => `${r.channel} (${r.compared})`).join(", ");
+  return info(id, S, who, `${withShadow.length} of ${rows.length} channels`, `${rows.length} of ${rows.length}`, "channels with a kept shadow", `The kept shadow is visible on ${list(withShadow)} and faded out before the safe box or the border band on ${list(without)} (compared source pixels in brackets): SPEC.md fades every shadow before the required margins, so the fit decides per channel whether the photographed shadow survives (OPEN owner decision, section 15e).`);
 }

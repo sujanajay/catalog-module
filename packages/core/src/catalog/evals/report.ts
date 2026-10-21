@@ -5,7 +5,7 @@ import sharp from "sharp";
 import type { FlagRow } from "./attention";
 import type { CheckGroup, CheckResult } from "./types";
 
-export interface ReportThumb { identifier: string; n: number; channel: string; original: Buffer | null; output: Buffer | null; /** Object path of the retained full-size output (catalog-test/evals/<run>/evidence/...), when kept. */ evidence?: string | null }
+export interface ReportThumb { identifier: string; n: number; channel: string; original: Buffer | null; output: Buffer | null; /** Object path of the retained full-size output (catalog-test/evals/<run>/evidence/...), when kept. */ evidence?: string | null; /** A sample of an all-pass set (one output per photo, kept so a clean set can be looked at), not a failing image. */ sample?: boolean }
 export interface EvalReport {
   run: string; startedAt: string; finishedAt: string; mode: string;
   golden: { products: number; photos: number; brands: Record<string, number>; categories: Record<string, number>; tags: Record<string, number> };
@@ -71,11 +71,15 @@ export async function reportHtml(report: EvalReport, thumbs: ReportThumb[]): Pro
   let shown = 0;
   for (const [k, fails] of grouped) {
     const [identifier, n, ch] = k.split("|");
-    const t = thumbs.find(x => x.identifier === identifier && String(x.n) === n && x.channel === ch);
+    const t = thumbs.find(x => !x.sample && x.identifier === identifier && String(x.n) === n && x.channel === ch);
     const pics = t && shown < MAX_THUMBS ? `${await thumb(t.original)} ${await thumb(t.output)}${t.evidence ? `<br><small>full size: <code>${esc(t.evidence)}</code></small>` : ""}` : "";
     if (pics) shown++;
     rows.push(`<tr><td><b>${esc(identifier)}</b>${n ? ` image ${esc(n)}` : ""}${ch ? ` for ${esc(ch)}` : ""}</td><td>${pics}</td><td><ul>${fails.map(f => `<li><code>${esc(f.id)}</code>: ${esc(f.detail)} <i>(measured ${esc(f.measured)}, bar ${esc(f.threshold)} ${esc(f.unit)})</i></li>`).join("")}</ul></td></tr>`);
   }
+  const samples = thumbs.filter(t => t.sample).slice(0, MAX_THUMBS), sampleCells: string[] = [];
+  for (const t of samples) sampleCells.push(`<td><b>${esc(t.identifier)}</b> image ${t.n} for ${esc(t.channel)}<br>${await thumb(t.original)} ${await thumb(t.output)}${t.evidence ? `<br><small><code>${esc(t.evidence)}</code></small>` : ""}</td>`);
+  const sampleRows: string[] = [];
+  for (let i = 0; i < sampleCells.length; i += 4) sampleRows.push(`<tr>${sampleCells.slice(i, i + 4).join("")}</tr>`);
   const groupRows = Object.entries(report.byGroup).map(([g, v]) => `<tr><td>${esc(g)}</td><td>${v.checks}</td><td>${v.passed}</td><td>${v.failed}</td><td>${v.notRun}</td><td>${v.information}</td></tr>`).join("");
   const checkRows = Object.entries(report.byCheck).sort().map(([id, v]) => `<tr><td><code>${esc(id)}</code></td><td>${v.checks}</td><td>${v.failed}</td></tr>`).join("");
   return `<!doctype html><meta charset="utf-8"><title>Output-quality eval ${esc(report.run)}</title><style>body{font-family:sans-serif;margin:16px}table{border-collapse:collapse;margin:8px 0}td,th{border:1px solid #ccc;padding:4px 6px;font-size:13px;vertical-align:top}img{margin:2px;border:1px solid #999}.ok{color:#1a7f37}.bad{color:#b31d28}</style>
@@ -87,6 +91,7 @@ export async function reportHtml(report: EvalReport, thumbs: ReportThumb[]): Pro
 <h2>Products needing attention (${report.attention.length})</h2><ul>${report.attention.map(a => `<li><b>${esc(a.identifier)}</b>: ${esc(a.detail)}</li>`).join("") || "<li>none</li>"}</ul>
 <h2>Failing images (${grouped.size})</h2><table><thead><tr><th>Image</th><th>Original and output</th><th>Failed checks</th></tr></thead><tbody>${rows.join("") || "<tr><td colspan=3>None.</td></tr>"}</tbody></table>
 <h2>Flags raised (${report.flags.length})</h2><table><thead><tr><th>Product</th><th>Image</th><th>Channel</th><th>Flag</th><th>Dimension</th><th>Score</th><th>Bar</th><th>Evidence</th><th>Action</th><th>Final status</th><th>Human label</th></tr></thead><tbody>${report.flags.slice(0, 2000).map(f => `<tr><td>${esc(f.identifier)}</td><td>${f.n}</td><td>${esc(f.channel)}</td><td>${esc(f.flag)}</td><td>${esc(f.dimension ?? "")}</td><td>${f.score === null || Number.isNaN(f.score) ? "" : f.score}</td><td>${f.dimension ? f.threshold : ""}</td><td>${esc(f.evidence)}</td><td>${esc(f.action)}</td><td>${esc(f.finalStatus)}</td><td>${esc(f.humanLabel)}</td></tr>`).join("")}</tbody></table>
+<h2>Samples of all-pass sets (${samples.length})</h2><p>One output per photo of a set with no failing image, kept under the evidence cap so a clean set can be looked at (section 15e).</p><table><tbody>${sampleRows.join("") || "<tr><td>None.</td></tr>"}</tbody></table>
 <h2>Information (${report.information.length})</h2><p>Measured and recorded, not failed: an open owner decision (section 15d).</p><ul>${report.information.slice(0, 200).map(r => `<li><code>${esc(r.id)}</code> ${esc(r.subject.identifier)}${r.subject.n ? ` image ${r.subject.n}` : ""}${r.subject.channel ? ` for ${esc(r.subject.channel)}` : ""}: ${esc(r.detail)} <i>(measured ${esc(r.measured)}, bar ${esc(r.threshold)} ${esc(r.unit)})</i></li>`).join("") || "<li>none</li>"}</ul>
 <h2>Checks not run (${report.notRun.length})</h2><ul>${[...new Set(report.notRun.map(r => `${r.id}: ${r.detail}`))].slice(0, 50).map(esc).map(s => `<li>${s}</li>`).join("")}</ul>`;
 }

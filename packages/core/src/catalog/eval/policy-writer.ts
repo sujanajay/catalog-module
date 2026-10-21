@@ -15,6 +15,8 @@ type Category = (typeof POLICY_CATEGORIES)[number];
 export interface PolicyCandidates { matte: { id: string; target: "cpu" | "gpu" }[]; judges: string[] }
 export interface PlannedPolicyRow {
   brandSlug: string; category: Category; matteModel: string; matteTarget: "cpu" | "gpu"; qaModel: string;
+  /** The second matte model of the ladder (the bake-off's runner-up); absent or null keeps the category default on insert and the stored value on update. */
+  matteModelSecond?: string | null;
   threshold: number; floor: number; qaMode: "per_source" | "per_output"; qaSampleRate: number; source: "bakeoff";
   evalBatchIds: string[]; gates: PolicyGates & { candidates: PolicyCandidates };
 }
@@ -58,14 +60,16 @@ export async function writePolicyRows(db: Db, rows: readonly PlannedPolicyRow[],
     results.push({ row, outcome, previousSource: prior?.source ?? null });
     if (dryRun || outcome === "kept_manual") continue;
     const defaults = row.category === "*" ? null : DEFAULT_POLICIES[row.category as Exclude<ProductType, "auto">];
-    const values = { ...row, gates: row.gates as unknown as Record<string, unknown> };
+    const { matteModelSecond, ...planned } = row;
+    const values = { ...planned, gates: row.gates as unknown as Record<string, unknown> };
+    const second = matteModelSecond == null ? {} : { matteModelSecond };
     await db.insert(modelPolicy)
-      .values({ ...values, ...(defaults ? { shadowMode: defaults.shadowMode ?? null, matteModelSecond: defaults.matteModelSecond ?? null, qaModelSecond: defaults.qaModelSecond ?? null } : {}) })
+      .values({ ...values, ...(defaults ? { shadowMode: defaults.shadowMode ?? null, matteModelSecond: defaults.matteModelSecond ?? null, qaModelSecond: defaults.qaModelSecond ?? null } : {}), ...second })
       .onConflictDoUpdate({
         target: [modelPolicy.brandSlug, modelPolicy.category],
         set: {
           matteModel: values.matteModel, matteTarget: values.matteTarget, qaModel: values.qaModel, threshold: values.threshold, floor: values.floor,
-          qaMode: values.qaMode, qaSampleRate: values.qaSampleRate, source: values.source, evalBatchIds: values.evalBatchIds, gates: values.gates, updatedAt: new Date(),
+          qaMode: values.qaMode, qaSampleRate: values.qaSampleRate, source: values.source, evalBatchIds: values.evalBatchIds, gates: values.gates, updatedAt: new Date(), ...second,
         },
         setWhere: sql`${modelPolicy.source} <> 'manual'`,
       });

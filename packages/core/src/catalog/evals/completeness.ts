@@ -36,6 +36,12 @@ export interface CompletenessInput {
    * product that holds an expected-hold shot is expected staged with no link, and left out of the verified counts.
    */
   heldExpected?: Set<string>;
+  /**
+   * Keys `identifier|n` of the sources the manifest expects left out as a size chart (`chart_image`). A chart leave-out of
+   * any other shot fails `skip_allowed` (live run D2, section 15e: a false chart detection would drop a product photo from
+   * every channel in silence). Absent: every chart leave-out is accepted, as before.
+   */
+  chartExpected?: Set<string>;
 }
 export const sourceKey = (identifier: string, n: number) => `${identifier}|${n}`;
 
@@ -91,8 +97,8 @@ export function checkCompleteness(input: CompletenessInput): CheckResult[] {
     }
     if (want === "chart") {
       // The pipeline found a size chart: left out on every channel, with its note, never a link.
-      const note = input.sheetNotes.get(source.identifier) ?? "";
-      out.push(judge(!rows[0]!.isLive, "completeness.skip_allowed", K, who, `skipped: ${CHART_SKIP_NOTE}`, `skipped: ${CHART_SKIP_NOTE}`, "status", "A size chart or text-only photo, left out with its note."));
+      const note = input.sheetNotes.get(source.identifier) ?? "", expectedChart = !input.chartExpected || input.chartExpected.has(sourceKey(source.identifier, source.n));
+      out.push(judge(!rows[0]!.isLive && expectedChart, "completeness.skip_allowed", K, who, `skipped: ${CHART_SKIP_NOTE}`, expectedChart ? `skipped: ${CHART_SKIP_NOTE}` : "an output (the manifest expects no chart here)", "status", expectedChart ? "A size chart or text-only photo, left out with its note." : `Left out as a size chart without an expectation: the manifest does not expect image ${source.n} to be a chart, so a product photo was dropped from ${channel(ch).label} by the chart detector.`));
       out.push(judge(!cell?.url && note.includes(CHART_SKIP_NOTE), "completeness.sheet_cell", K, who, cell?.url ? "link" : note.includes(CHART_SKIP_NOTE) ? "empty with note" : "empty without note", "empty with note", "cell", cell?.url ? "A left-out chart still has a link in the sheet." : note.includes(CHART_SKIP_NOTE) ? "The sheet cell is empty and the note says why." : "The sheet cell is empty but the chart note is missing from the row's notes."));
       continue;
     }
