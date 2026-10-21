@@ -166,7 +166,9 @@ describe("render and encoded compliance", () => {
     source.prepared.background.uniform = false;
     const output = await renderSource({ ...source, channel: "centrepoint", shotNumber: 2, identifier: "NOISE", productType: "apparel_flat" });
     expect(output.status).toBe("failed"); expect(output.jpeg).toBeNull(); expect(output.quality).toBe(70); expect(output.bytes).toBeGreaterThan(2_000_000);
-    expect(output.notes).toContain("bytes: Could not get NOISE_2 for centrepoint under 2 MB.");
+    // The operator reads the sentence alone; the code stays in compliance.failures for the auto-resolve ladder.
+    expect(output.compliance.failures).toContain("bytes: Could not get NOISE_2 for centrepoint under 2 MB.");
+    expect(output.notes).toContain("Could not get NOISE_2 for centrepoint under 2 MB.");
   });
   it("encodes deterministic bytes on repeat", async () => {
     const input = { ...fixture(), channel: "noon" as const, shotNumber: 1, productType: "footwear" as const };
