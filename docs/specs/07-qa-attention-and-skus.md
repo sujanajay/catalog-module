@@ -416,7 +416,11 @@ Defects we produced are re-made by the pipeline before a product is ever held.
   code or a model id) and what was tried (`triedSentence`: "We tried the added shadow removed and a
   smaller fit and could not fix it."); triage drops the photo with the drop note and the information flag
   `auto_dropped` when it is not photo 1 and at least two good photos remain on the channel;
-  otherwise it holds with the existing flag. Our own defects are never published with a note.
+  otherwise it holds with the existing flag. Our own defects are never published with a note. An
+  encoder-setting failure left after its `re_render` is a code fault, not the photo: triage holds it
+  (cause `code_fault`) whatever the other photos, never drops it. The render's note (the row's
+  `reason`) carries the plain sentence too; the raw "code: sentence" strings stay in
+  `compliance.failures` for the report.
 - Source problems (`cut_in_source`, `small_source`, `text_or_watermark`, `orientation`) follow the
   triage: note-only or drop-with-note, held only for photo 1 or the last usable photo. When the judge
   saw the photo cut at its frame edge (`judgeSawSourceCut`: `complete_product` under its line, or a
