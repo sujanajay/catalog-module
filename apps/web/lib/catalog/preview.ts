@@ -3,7 +3,8 @@ import { catalogBatches, catalogOutputs, catalogProducts, catalogSourceImages, c
 import { buildDetectedStep2 } from "@catalog/core/catalog/ingest/detect-step";
 import { buildPreview } from "@catalog/core/catalog/ingest/index";
 import type { Detected } from "@catalog/core/catalog/ingest/types";
-import { STYLI_MIN_SOURCE_HEIGHT_PX, STYLI_SKIP_LOW_RESOLUTION } from "@catalog/core/catalog/channels";
+import { styliMinSourceHeightPx, STYLI_SKIP_LOW_RESOLUTION } from "@catalog/core/catalog/channels";
+import { upscaleFactorFromEnv } from "@catalog/core/catalog/upscale";
 import type { ChannelId } from "@catalog/core/catalog/types";
 import * as storage from "@catalog/core/storage";
 import { db } from "../db";
@@ -55,12 +56,13 @@ type LiveOutput = { productId: string; n: number; channel: ChannelId; sha256: st
  * Step 4's "images will be made" (spec 06): photos times channels, minus Styli skips, minus pairs whose
  * live image was made from the same photo (same sha256), which the pipeline keeps as they are.
  */
-export function plannedImages(sources: readonly PlannedSource[], channels: readonly ChannelId[], live: readonly LiveOutput[]): { outputs: number; sourcesToMake: number } {
+export function plannedImages(sources: readonly PlannedSource[], channels: readonly ChannelId[], live: readonly LiveOutput[], upscaleFactor: number = upscaleFactorFromEnv()): { outputs: number; sourcesToMake: number } {
   let outputs = 0, sourcesToMake = 0;
+  const styliMin = styliMinSourceHeightPx(upscaleFactor);
   for (const source of sources) {
     let made = 0;
     for (const channel of channels) {
-      if (channel === "styli" && STYLI_SKIP_LOW_RESOLUTION && source.height !== null && source.height < STYLI_MIN_SOURCE_HEIGHT_PX) continue;
+      if (channel === "styli" && STYLI_SKIP_LOW_RESOLUTION && source.height !== null && source.height < styliMin) continue;
       if (live.some((o) => o.productId === source.productId && o.n === source.n && o.channel === channel && o.sha256 === source.sha256)) continue;
       made++;
     }

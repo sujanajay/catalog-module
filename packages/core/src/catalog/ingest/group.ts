@@ -1,9 +1,10 @@
 // Grouping (spec 04, "Grouping"): which product every file belongs to and at which shot position,
 // under the three identifier modes and the three precedences; the step 4 grouping rows and warning
 // sentences. Deterministic: the order items arrive in never changes the result.
-import { STYLI_MIN_SOURCE_HEIGHT_PX } from "../channels";
+import { styliMinSourceHeightPx } from "../channels";
 import { normalizeKey, renumberShots } from "../naming";
 import type { BatchOptions, ChannelId, IdentifierMode, OutputFlag } from "../types";
+import { upscaleFactorFromEnv } from "../upscale";
 import { classifyImageReject } from "./image-check";
 import { matchProductList, missingIdentifier, type ProductListRow } from "./product-list";
 import type { GroupingResult, PreviewRow, SourceItem } from "./types";
@@ -349,7 +350,7 @@ export function warningSentences(
   grouped: GroupingResult,
   list: ProductListRow[] | null,
   channels: ChannelId[],
-  extra: { brandName?: string; dimensions?: ItemDimensions; topLevelFolders?: string[]; byMatchColumn?: boolean } = {},
+  extra: { brandName?: string; dimensions?: ItemDimensions; topLevelFolders?: string[]; byMatchColumn?: boolean; upscaleFactor?: number } = {},
 ): { headline: string; detail: string }[] {
   const out: { headline: string; detail: string }[] = [];
   // Every identifier seen, so a list row whose files were all unreadable is not also "no photos";
@@ -381,16 +382,18 @@ export function warningSentences(
   }
 
   if (channels.includes("styli")) {
+    // The render's rule: Styli judges the size after the x2 upscaler when UPSCALE_MODEL is set (741 px, else 1482 px).
+    const minHeight = styliMinSourceHeightPx(extra.upscaleFactor ?? upscaleFactorFromEnv());
     let small = 0;
     for (const items of grouped.products.values()) {
       for (const it of items) {
         const h = dimsOf(it, extra.dimensions).height;
-        if (h !== null && h < STYLI_MIN_SOURCE_HEIGHT_PX) small++;
+        if (h !== null && h < minHeight) small++;
       }
     }
     if (small) {
       out.push({
-        headline: `${fmt(small)} photos are smaller than Styli needs (under ${STYLI_MIN_SOURCE_HEIGHT_PX} px).`,
+        headline: `${fmt(small)} photos are smaller than Styli needs (under ${minHeight} px).`,
         detail: "Styli will skip them and note it in the sheet, as agreed with Styli.",
       });
     }

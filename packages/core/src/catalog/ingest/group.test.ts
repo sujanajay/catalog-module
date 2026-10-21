@@ -263,6 +263,13 @@ describe("warningSentences", () => {
     ]);
     g.warnings.pop();
   });
+  it("judges the Styli size after the x2 upscaler: an 800x1200 photo passes, the floor is 741 px", () => {
+    const heads = (upscaleFactor: number) => warningSentences(g, list, ["styli"], { brandName: "Anta", dimensions: dims, upscaleFactor }).map((w) => w.headline);
+    expect(heads(1)).toContain("1 photos are smaller than Styli needs (under 1482 px).");
+    expect(heads(2).some((h) => h.includes("smaller than Styli needs"))).toBe(false);
+    const tiny = new Map([...dims, [small, { width: 400, height: 600 }]]);
+    expect(warningSentences(g, list, ["styli"], { dimensions: tiny, upscaleFactor: 2 }).map((w) => w.headline)).toContain("1 photos are smaller than Styli needs (under 741 px).");
+  });
 
   it("leaves out the Styli pair without Styli and the list pairs without a list; one folder gives no folder warning", () => {
     const heads = warningSentences(g, null, ["noon"], { dimensions: dims }).map((w) => w.headline);

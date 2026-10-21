@@ -354,8 +354,9 @@ has no further spec, "Programme complete; no next spec."
 
 - Decided (2026-10-20): an upscaler is allowed in the default path behind the `UPSCALE_MODEL` flag,
   chosen by the fidelity gate of section 4.4; its outputs carry the information flag `upscaled`.
-- OPEN: whether an x2 upscale may un-skip Styli (800x1200 sources would clear its 1,482 px minimum).
-  Not assumed here; `STYLI_SKIP_LOW_RESOLUTION` and `STYLI_MIN_SOURCE_HEIGHT_PX` are unchanged. Asked
-  in the status when the gate is done.
+- Decided (2026-10-21, owner): the x2 upscale un-skips Styli. With the upscaler on (now the deploy
+  default, `swinir-x2`) Styli judges the size after the upscale: skipped only when `fit(min) / 2` is
+  above 1.5, so the wizard warning, step 4's count, the worker's Styli rows and the evals use
+  `styliMinSourceHeightPx` (741 px with the upscaler, 1,482 px without); `CHANNEL_RULES_VERSION` 10.
 - No paid image API (Topaz, Claid, Stability, Vertex Imagen, any hosted upscaler) without a separate
   owner yes; brand photos do not leave the GCP project.

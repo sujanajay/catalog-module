@@ -47,10 +47,12 @@ configuration. Access is by Google sign-in with three roles (admin, operator, vi
   policy defaults; the licence table stays as a record.
 - Image enhancement (approved 2026-10-20, spec 11): a conservative unsharp mask after any enlargement
   in the render, and an upscaler (x2, deterministic, on the GPU service) allowed in the default path
-  behind the worker flag `UPSCALE_MODEL` (unset = off), chosen by the fidelity gate of spec 11 and
-  used only when the enlargement exceeds `UPSCALE_MIN_SCALE` (1.5); its outputs carry the information
-  flag `upscaled`, never a hold. OPEN: whether an x2 upscale may un-skip Styli (800x1200 sources would
-  clear the 1,482 px minimum). No paid image API without a separate owner yes.
+  behind the flag `UPSCALE_MODEL`, chosen by the fidelity gate of spec 11 and used only when the
+  enlargement exceeds `UPSCALE_MIN_SCALE` (1.5); its outputs carry the information flag `upscaled`,
+  never a hold. Decided by the owner 2026-10-21: the upscaler is on by default (`swinir-x2`, deploy.sh;
+  `UPSCALE_MODEL=off` turns it off) for every channel wherever a photo is enlarged beyond 1.5x, and the
+  x2 upscale un-skips Styli: Styli judges the size after the upscale, so its source floor is 741 px with
+  the upscaler (1,482 px without). No paid image API without a separate owner yes.
 - Product identity and overwrite: the product (brand + style+colour identifier) owns its public images.
   Opptra SKU ids are attributes, never part of a link. A re-upload overwrites in place and deletes the
   shots the new upload no longer has. Batches are events; product state is the truth. Marketplaces keep
@@ -106,6 +108,9 @@ Channel rules
 - R8 Styli: 2342x3123 canvas, guides top 450, bottom 450, left 150, right 150 px, product bottom-centre,
   identical placement on all angles, no white borders or gaps on detail shots, no mixed products.
   Low-resolution sources are skipped for Styli by agreement with Styli and listed in the sheet notes.
+  The agreement applies to the size after the x2 upscaler when it is on (owner 2026-10-21): a photo is
+  skipped only when even its x2 image would need more than 1.5x (source under 741 px high; 1,482 px
+  without the upscaler, `styliMinSourceHeightPx`).
 - R9 Trendyol: HTTPS link, no spaces in the filename. Edited images are platform-exclusive.
 - R10 Channels are chosen per batch; nothing is pre-ticked and no defaults are stored. The grouping
   P1 (Namshi, Noon, Trendyol, Amazon) / P2 (Styli, 6thStreet, Centrepoint, VogaCloset, Shein) is
@@ -172,7 +177,9 @@ tall. Common: JPEG 4:4:4, sRGB with ICC, quality 90 stepping down to 70 until <=
 applied then stripped, JFIF density set. Adaptive canvas: the largest size between min and target that
 keeps upscaling <= 1.5x; below that, the min canvas with a `low_resolution` flag; Styli (fixed canvas)
 flags, and the constant `STYLI_SKIP_LOW_RESOLUTION = true` (an agreement with Styli, always applied,
-not an operator option) excludes such images from the sheet with a note. Any enlargement (scale > 1)
+not an operator option) excludes such images from the sheet with a note; with the upscaler on, Styli
+judges the enlargement left after the x2 upscale (`fit(min) / 2 > 1.5` skips), and a photo let through
+is still made if the upscale call then fails, flagged `low_resolution` with the soft note. Any enlargement (scale > 1)
 is followed by a conservative unsharp mask on the RGB only (spec 11); an enlargement past
 `UPSCALE_MIN_SCALE` (1.5) goes through the x2 upscaler when `UPSCALE_MODEL` is set, Lanczos otherwise
 (spec 11; `render_key` carries the upscaler id and version).
