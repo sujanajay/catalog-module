@@ -152,6 +152,34 @@ describe("render and encoded compliance", () => {
     const check = await checkOutput({ jpeg, channel: "styli", shotNumber: 1, plan, identifier: "white", n: 1, publicObjectPath: "white_1.jpg" });
     for (const code of ["background", "inside_safe_box", "styli_anchor"]) expect(check.failures.some(f => f.startsWith(code + ":"))).toBe(true);
   });
+  it("makes a saturated product as wide as Styli's safe box, its JPEG edge tint left out (PR #91 finding)", async () => {
+    // A square red or blue product fills the 2042 px safe box width at any scale; its corner blocks used to tint 1 to 6 px past the guide.
+    for (const [r, g, b] of [[160, 30, 50], [20, 40, 200]] as const) for (const [side, box] of [[3000, { x: 400, y: 400, w: 2200, h: 2200 }], [2000, { x: 300, y: 300, w: 1400, h: 1400 }]] as const) {
+      const source = fixture(side, side, box);
+      for (let i = 0; i < side * side; i++) if (source.matte.alpha[i]) { source.prepared.rgb[i * 3] = r; source.prepared.rgb[i * 3 + 1] = g; source.prepared.rgb[i * 3 + 2] = b; }
+      const output = await renderSource({ ...source, channel: "styli", shotNumber: 2, productType: "apparel_model" });
+      expect(output.plan.productBox!.w).toBe(output.plan.safeBox.w);
+      expect(output.compliance.failures).toEqual([]); expect(output.status).toBe("ok");
+    }
+  }, 120_000);
+  it("forgives only the tint in the product's own JPEG blocks, never a stray mark in a block of its own", async () => {
+    const plan = planCanvas(CHANNELS.styli, { x: 400, y: 400, w: 2200, h: 2200 }, { w: 3000, h: 3000 }, {}), box = plan.productBox!;
+    expect(box.x).toBe(plan.safeBox.x); expect(box.w).toBe(plan.safeBox.w);
+    const mask = Buffer.alloc(plan.w * plan.h);
+    for (let y = box.y; y < box.y + box.h; y++) mask.fill(255, y * plan.w + box.x, y * plan.w + box.x + box.w);
+    const encode = async (stray: boolean) => {
+      const product = await sharp({ create: { width: box.w, height: box.h, channels: 3, background: { r: 160, g: 30, b: 50 } } }).png().toBuffer();
+      const dot = await sharp({ create: { width: 2, height: 2, channels: 3, background: { r: 160, g: 30, b: 50 } } }).png().toBuffer();
+      return sharp({ create: { width: plan.w, height: plan.h, channels: 3, background: "#E0E0E0" } }).composite([{ input: product, left: box.x, top: box.y }, ...(stray ? [{ input: dot, left: 136, top: 1000 }] : [])]).withDensity(300).withIccProfile("srgb").jpeg({ quality: 90, chromaSubsampling: "4:4:4" }).toBuffer();
+    };
+    const args = { channel: "styli" as const, shotNumber: 2, plan, identifier: "square", n: 2, publicObjectPath: "square_2.jpg" };
+    const clean = await encode(false);
+    expect((await checkOutput({ ...args, jpeg: clean, foregroundMask: mask })).failures).toEqual([]);
+    // Without the mask nothing says which pixels are the product, so the tint is judged as before.
+    expect((await checkOutput({ ...args, jpeg: clean })).failures.some(f => f.startsWith("inside_safe_box:"))).toBe(true);
+    const stray = await checkOutput({ ...args, jpeg: await encode(true), foregroundMask: mask });
+    for (const code of ["background", "inside_safe_box"]) expect(stray.failures.some(f => f.startsWith(code + ":")), code).toBe(true);
+  }, 60_000);
   it("detects Noon wide side violations and malformed magic", async () => {
     const plan = planCanvas(CHANNELS.noon, { x: 100, y: 200, w: 600, h: 200 }, { w: 800, h: 800 }, {});
     const jpeg = await sharp({ create: { width: plan.w, height: plan.h, channels: 3, background: "red" } }).withDensity(72).withIccProfile("srgb").jpeg({ chromaSubsampling: "4:4:4" }).toBuffer();

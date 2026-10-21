@@ -47,6 +47,23 @@ export function anchorBounds(rgb: Buffer, w: number, h: number, background: [num
   }
   return x1 < 0 ? null : { x: x0, y: y0, w: x1 - x0 + 1, h: y1 - y0 + 1 };
 }
+/**
+ * A JPEG codes the picture in 8 x 8 pixel blocks, and the round trip of a hard, saturated edge spreads a faint tint into
+ * the rest of its block (never past it). A product as wide as Styli's safe box (2042 px, a square product) sits with its
+ * sides on the safe box's edges, so a red, blue, yellow or green product left 1 to 6 px of that tint just outside the
+ * guide in the corner blocks (more than BG_TOLERANCE off the canvas colour), and `inside_safe_box` and `background`
+ * failed at any scale for a pixel no one can see (2026-10-22). So a seen pixel that is not the product but shares a
+ * block with the product (the render's foreground mask above 0) is the product's own compression bleed and is not
+ * judged; a product or shadow pixel in a block of its own still is. Without a mask every seen pixel is judged.
+ */
+export const JPEG_BLOCK_PX = 8;
+const blockIndex = (w: number, x: number, y: number) => Math.floor(y / JPEG_BLOCK_PX) * Math.ceil(w / JPEG_BLOCK_PX) + Math.floor(x / JPEG_BLOCK_PX);
+/** One byte per JPEG block (row-major, JPEG_BLOCK_PX square, the last row and column partial): 1 where a pixel is the product. */
+function productBlocks(w: number, h: number, isProduct: (x: number, y: number) => boolean): Uint8Array {
+  const blocks = new Uint8Array(Math.ceil(w / JPEG_BLOCK_PX) * Math.ceil(h / JPEG_BLOCK_PX));
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) if (isProduct(x, y)) blocks[blockIndex(w, x, y)] = 1;
+  return blocks;
+}
 export interface ComplianceInput { jpeg: Buffer; channel: ChannelId; shotNumber: number; plan: CanvasPlan; identifier: string; n: number; publicObjectPath: string; foregroundMask?: Buffer }
 export async function checkOutput(input: ComplianceInput): Promise<{ ok: boolean; failures: string[] }> {
   const { jpeg, plan } = input, spec = channel(input.channel), failures: string[] = [];
@@ -66,19 +83,23 @@ export async function checkOutput(input: ComplianceInput): Promise<{ ok: boolean
     // A side cut in the source sits flush with the canvas edge (margin 0 on that side only).
     const cut = plan.cut ?? NO_CUT, safe = safeBoxFor(spec, { w, h }, wide, cut), band = borderBand(w, h), color = hexColor(backgroundFor(spec.id, input.shotNumber));
     let backgroundBad = false, outside = false, x0 = w, x1 = -1;
-    const mask = input.foregroundMask?.length === w * h ? input.foregroundMask : null;
+    const mask = input.foregroundMask?.length === w * h ? input.foregroundMask : null, product = plan.productBox;
+    const isProduct = (x: number, y: number) => mask ? mask[y * w + x]! > 0 : !!product && x >= product.x && x < product.x + product.w && y >= product.y && y < product.y + product.h;
+    // Only the mask says which pixels are the product; the plan's box alone could forgive a moved product's edge.
+    const holdsProduct = mask ? productBlocks(w, h, isProduct) : null;
     // Every pixel that is seen, the shadow included, must keep to the safe box and off the border band.
     for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
       const offset = (y * w + x) * 3;
       const delta = Math.max(Math.abs(data[offset]! - color[0]), Math.abs(data[offset + 1]! - color[1]), Math.abs(data[offset + 2]! - color[2]));
       if (delta <= BG_TOLERANCE) continue;
+      const foreground = isProduct(x, y);
+      // Compression bleed of the product's own edge (JPEG_BLOCK_PX), not a product or shadow pixel.
+      if (!foreground && holdsProduct?.[blockIndex(w, x, y)]) continue;
       x0 = Math.min(x0, x); x1 = Math.max(x1, x);
       const inSafe = x >= safe.x && x < safe.x + safe.w && y >= safe.y && y < safe.y + safe.h;
       if (!inSafe) { outside = true; backgroundBad = true; }
-      const product = plan.productBox;
-      const foregroundAtEdge = mask ? mask[y * w + x]! > 0 : product && x >= product.x && x < product.x + product.w && y >= product.y && y < product.y + product.h;
       const inBand = x < band.x || x >= w - band.x || y < band.y || y >= h - band.y;
-      if (inBand && !foregroundAtEdge) backgroundBad = true;
+      if (inBand && !foreground) backgroundBad = true;
     }
     if (backgroundBad) fail("background", "The exposed background or margin has the wrong colour.");
     if (outside) fail("inside_safe_box", "The product or shadow reaches outside the required margins.");
