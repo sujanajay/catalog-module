@@ -1,5 +1,6 @@
 import http from "node:http";
 import type { TaskRoute } from "@catalog/core/tasks";
+import { log } from "@catalog/core/log";
 import { authorize, type AuthConfig } from "./auth";
 
 /** Options a handler receives with each delivery. */
@@ -58,7 +59,7 @@ export function retryCountHeader(req: http.IncomingMessage): number | undefined 
 }
 
 function logError(message: string, fields: Record<string, unknown>): void {
-  console.error(JSON.stringify({ severity: "ERROR", message, ...fields }));
+  log("ERROR", message, fields);
 }
 
 export async function handleRequest(deps: ServerDeps, req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
@@ -91,7 +92,8 @@ export async function handleRequest(deps: ServerDeps, req: http.IncomingMessage,
   try {
     result = await handler(body as Record<string, unknown>, { retryCount: retryCountHeader(req) });
   } catch (err) {
-    logError("task handler failed", { route: pathname, error: err instanceof Error ? err.message : String(err) });
+    // The Error object itself, so the line carries its stack for Error Reporting (the line shows its message).
+    logError("task handler failed", { route: pathname, error: err instanceof Error ? err : String(err) });
     return send(res, 500, { outcome: "error" });
   }
   return send(res, result.httpStatus, { outcome: result.outcome });
@@ -100,7 +102,7 @@ export async function handleRequest(deps: ServerDeps, req: http.IncomingMessage,
 export function createServer(deps: ServerDeps): http.Server {
   return http.createServer((req, res) => {
     handleRequest(deps, req, res).catch((err: unknown) => {
-      logError("request failed", { error: String(err) });
+      logError("request failed", { error: err instanceof Error ? err : String(err) });
       if (!res.headersSent) send(res, 500, { error: "internal error" });
       else res.end();
     });

@@ -1,5 +1,6 @@
 import { CloudTasksClient } from "@google-cloud/tasks";
 import { retryTransient, type RetryOptions } from "./retry";
+import { log } from "./log";
 
 /**
  * Generic Cloud Tasks enqueue for the catalog worker.
@@ -168,9 +169,9 @@ export async function enqueueTask(route: TaskRoute, body: Record<string, unknown
     const send = () =>
       doFetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) })
         .then((res) => {
-          if (!res.ok) console.error(`[tasks] inline POST ${url} -> ${res.status}`);
+          if (!res.ok) log("ERROR", `[tasks] inline POST ${url} -> ${res.status}`, { route, status: res.status });
         })
-        .catch((err: unknown) => console.error(`[tasks] inline POST ${url} failed`, err));
+        .catch((err: unknown) => log("ERROR", `[tasks] inline POST ${url} failed`, { route, error: err instanceof Error ? err : String(err) }));
     if (opts.delaySec && opts.delaySec > 0) setTimeout(() => void send(), opts.delaySec * 1000);
     else void send();
     return "inline";

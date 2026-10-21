@@ -1,5 +1,6 @@
 import { PeopleError } from "@catalog/core/people";
 import { ZodError } from "zod";
+import { log } from "@catalog/core/log";
 
 /** A user-facing error with an HTTP status. Business logic throws these; routes turn them into JSON. */
 export class HttpError extends Error {
@@ -36,7 +37,7 @@ export function errorResponse(err: unknown): Response {
     const msg = err.issues.map((i) => `${i.path.join(".") || "body"}: ${i.message}`).join("; ");
     return Response.json({ error: msg, issues: err.issues }, { status: 400 });
   }
-  console.error("[web] unhandled error", err);
+  log("ERROR", "[web] unhandled error", { error: err instanceof Error ? err : String(err) });
   return Response.json({ error: err instanceof Error ? err.message : "Internal error" }, { status: 500 });
 }
 

@@ -163,15 +163,23 @@ it("retries a temporary matte storage failure, then resumes without labelling th
   const w=world(),s=await seed(w,"temporary-matte-store");
   const head=w.deps.storage.headObject;
   w.deps.storage.headObject=vi.fn(head).mockRejectedValueOnce(new Error("Temporary storage outage"));
+  const log=w.deps.log=vi.fn();
   expect((await handleChunkTask(w.deps,{chunkId:s.chunk.id},{retryCount:1})).httpStatus).toBe(503);
+  // Log contract: a retried failure is WARNING (the alert counts only the terminal ERROR).
+  expect(log).toHaveBeenCalledWith("chunk failed",expect.objectContaining({severity:"WARNING",batchId:s.batch.id,chunkId:s.chunk.id,stage:"matte",attempt:2,error:expect.objectContaining({message:"Temporary storage outage"})}));
   expect((await db.select().from(catalogSourceImages).where(eq(catalogSourceImages.batchId,s.batch.id)))[0]!.status).toBe("pending");
   expect((await handleChunkTask(w.deps,{chunkId:s.chunk.id},{retryCount:2})).httpStatus).toBe(200);
   expect((await db.select().from(catalogSourceImages).where(eq(catalogSourceImages.batchId,s.batch.id)))[0]!.status).toBe("matted");
+  expect(log).toHaveBeenCalledWith("chunk delivered",expect.objectContaining({batchId:s.batch.id,chunkId:s.chunk.id,stage:"matte",attempt:3,durationMs:expect.any(Number),mattingMs:12,renderMs:0}));
+  // The matting calls name the batch and product (x-catalog-batch / x-catalog-product headers).
+  expect(w.deps.matteFor).toHaveBeenCalledWith(expect.anything(),expect.anything(),"fixture",{},{batchId:s.batch.id,productId:s.product.id});
 },60_000);
 it("records the fifth dependency failure and nudges publication and finalization",async()=>{
   const w=world(),s=await seed(w,"fifth-matte-store");
   w.deps.storage.headObject=vi.fn(async()=>{throw new Error("Temporary storage outage");});
+  const log=w.deps.log=vi.fn();
   expect((await handleChunkTask(w.deps,{chunkId:s.chunk.id},{retryCount:4})).outcome).toBe("failed");
+  expect(log).toHaveBeenCalledWith("chunk failed",expect.objectContaining({severity:"ERROR",batchId:s.batch.id,chunkId:s.chunk.id,stage:"matte",attempt:2,retryCount:4}));
   expect((await db.select().from(catalogChunks).where(eq(catalogChunks.id,s.chunk.id)))[0]).toMatchObject({status:"failed",error:"Temporary storage outage"});
   expect((await db.select().from(catalogOutputs).where(eq(catalogOutputs.batchId,s.batch.id)))[0]).toMatchObject({status:"failed",reason:"Processing stopped after repeated errors: Temporary storage outage"});
   expect(w.deps.enqueue).toHaveBeenCalledWith("/tasks/catalog/publish",{batchId:s.batch.id,productId:s.product.id},expect.anything());

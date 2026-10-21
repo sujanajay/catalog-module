@@ -7,6 +7,7 @@ import type { Db } from "@catalog/core/db/client";
 import type { HandleResult } from "../server";
 import { catalogBatches, catalogChunks } from "@catalog/core/db/schema";
 import { enqueueTask } from "@catalog/core/tasks";
+import { log } from "@catalog/core/log";
 import { CATALOG_TASK_LEASE_MS, enqueueFinalize, finalizeEnqueueExpired } from "./deps";
 
 /** No progress for this long fails the batch (2 hours, from the plan). */
@@ -91,7 +92,8 @@ export async function handleSweep(deps: SweepDeps, _body: Record<string, unknown
   });
 
   for (const s of swept) {
-    console.warn(JSON.stringify({ severity: "WARNING", message: "batch swept: no progress for 2 hours", ...s }));
+    log("WARNING", "batch swept: no progress for 2 hours", s);
+    log("ERROR", "batch failed", { batchId: s.batchId, reason: SWEEP_ERROR, cause: "swept" });
   }
   return { httpStatus: 200, outcome: `swept:${swept.length}` };
 }
