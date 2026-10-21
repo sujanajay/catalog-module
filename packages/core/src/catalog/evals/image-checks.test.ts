@@ -3,11 +3,11 @@ import { renderSource } from "../render";
 import { CHANNEL_IDS, type OutputFlag } from "../types";
 import { buildContext } from "./context";
 import { checkCutEdge, cutBandNote, CUT_SOURCE_FLAGS } from "./cut-edge";
-import { checkCutout, checkMatte, convexSpan, edgeSoftnessBar, seeThroughBar } from "./cutout";
+import { canvasStrips, checkCutout, checkMatte, convexSpan, edgeSoftnessBar, OPAQUE_SHARE_MIN, seeThroughBar } from "./cutout";
 import { placedCutSides } from "./context";
 import { checkGeometry, checkUniformScale } from "./geometry";
 import { backgroundModel, delta, dilate, thresholdMask } from "./image";
-import { checkShadow, expectedKeptDarkness, sourceDarkness } from "./shadow";
+import { checkShadow, expectedKeptDarkness, keptShadowCanvasMask, sourceDarkness } from "./shadow";
 import { runImageChecks } from "./index";
 import { canvasColor, editOutput, paintRect, syntheticSource, syntheticSubject } from "./synthetic";
 import type { CheckResult, OutputSubject } from "./types";
@@ -298,12 +298,17 @@ describe("calibrated measurements (eval run 2)", () => {
     const reflection = checkCutout(await ctxOf(await syntheticSubject("amazon", 2, "footwear", { reflection: true })));
     expect(failed(reflection)).toEqual([]);
   }, 60_000);
-  it("skips background_kept and fringe on a pass-through and on a source without a uniform border", async () => {
+  it("skips halo and fringe on a pass-through, runs background_kept on it, and skips the colour checks on a source without a uniform border", async () => {
     const base = await syntheticSubject("amazon", 2, "footwear");
     const passthrough = checkCutout(await ctxOf({ ...base, flags: ["matte_passthrough"] }));
-    expect(ids(passthrough, "cutout.background_kept")[0]?.status).toBe("not_run");
+    expect(ids(passthrough, "cutout.background_kept")[0]?.status).toBe("pass");
     expect(ids(passthrough, "cutout.fringe")[0]?.status).toBe("not_run");
     expect(ids(passthrough, "cutout.halo")[0]?.status).toBe("not_run");
+    // A flood that stopped short of the product leaves a strip of flat background inside the pass-through (eval run 3,
+    // vero_moda Z40E29CD878FAA726501DZ n=1 published as a ragged pass-through): the kept accounting runs on it as on a matte.
+    const kept = { ...base, flags: ["matte_passthrough" as const], alpha: Buffer.from(base.alpha) };
+    for (let y = 250; y < 630; y++) for (let x = 100; x < 190; x++) kept.alpha[y * 800 + x] = 255;
+    expect(failed(checkCutout(await ctxOf(kept)))).toContain("cutout.background_kept");
     // A busy border (stripes through the 2% band) fits no background model, so the colour checks stay not run.
     const striped = Buffer.from(base.source.rgb), w = base.source.w, h = base.source.h;
     for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) if (x < 16 || x >= w - 16 || y < 16 || y >= h - 16) { const v = (x * 53 + y * 97) % 256; striped[(y * w + x) * 3] = v; striped[(y * w + x) * 3 + 1] = v; striped[(y * w + x) * 3 + 2] = v; }
@@ -572,4 +577,126 @@ describe("run 3 calibration (french_connection.apparel_model, mocked judge)", ()
     expect(cutModel!.at(1199)).toEqual([255, 255, 255]);
     expect(ids(checkCutout(await ctxOf({ ...cut, sourceBackground: { ...cut.sourceBackground, uniform: false } })), "cutout.pixels_lost")[0]?.status).toBe("pass");
   }, 60_000);
+});
+
+describe("run 3 calibration 2 (penti.apparel_model, vero_moda and the small sets, mocked judge)", () => {
+  const WIDE = { width: 2600, height: 2600, box: { x: 500, y: 700, w: 1600, h: 800 }, taper: true };
+  const rampAlpha = (k: number, interior: (x: number, y: number, box: { x: number; y: number; w: number; h: number }) => number | null = () => null) => {
+    const { prepared, box } = syntheticSource(), w = prepared.width, h = prepared.height, alpha = Buffer.alloc(w * h);
+    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+      const dx = Math.max(0, box.x - x, x - (box.x + box.w - 1)), dy = Math.max(0, box.y - y, y - (box.y + box.h - 1)), d = Math.max(dx, dy);
+      alpha[y * w + x] = d === 0 ? interior(x, y, box) ?? 255 : d <= k ? Math.round(255 * (1 - d / (k + 1))) : 0;
+    }
+    return { identifier: "P", n: 1, source: { w, h, rgb: prepared.rgb }, sourceBackground: prepared.background, alpha, productType: "apparel_model" as const };
+  };
+  it("does not measure flush on a pass-through placed fitted by rule (Z91D419FC9238E844BF77Z n=4, ZE24FAC8A6A40C5FE5400Z n=3) and still judges trim, no_line and the flag", async () => {
+    const sub = await syntheticSubject("centrepoint", 1, "apparel_model", { width: 800, height: 1300, box: { x: 100, y: 100, w: 600, h: 1100 }, cutTop: true, cutBottom: true, cutLeft: true, cutRight: true, pad: 10 });
+    // Without the band note the fitted bands beside the cut sides fail; on a pass-through the fit is the rule.
+    expect(failed(checkCutEdge(await ctxOf({ ...sub, reason: null })))).toEqual(["cut_edge.flush_left", "cut_edge.flush_right"]);
+    const results = checkCutEdge(await ctxOf({ ...sub, reason: null, flags: [...sub.flags, "matte_passthrough" as const] }));
+    expect(failed(results)).toEqual([]);
+    for (const side of ["top", "bottom", "left", "right"]) expect(ids(results, `cut_edge.flush_${side}`)[0]?.status, side).toBe("not_run");
+    expect(ids(results, "cut_edge.trim")[0]?.status).toBe("pass");
+    for (const side of ["top", "bottom", "left", "right"]) expect(ids(results, `cut_edge.no_line_${side}`)[0]?.status, side).toBe("pass");
+    expect(ids(results, "cut_edge.flagged")[0]?.ok).toBe(true);
+    expect(ids(results, "cut_edge.not_held")[0]?.ok).toBe(true);
+  }, 60_000);
+  it("subtracts a flat canvas strip pasted along a frame edge from the product estimate (Z41E81A2CE5C612624C11Z n=3: 100% of a cell and 80.5% of the thin pixels were a white strip) but not a textured product edge", () => {
+    const strip = (textured: boolean) => {
+      const { prepared, matte } = syntheticSource({ bg: [200, 200, 200], strap: false }), w = prepared.width, h = prepared.height;
+      for (let y = 0; y < h; y++) for (let x = w - 24; x < w; x++) { const i = (y * w + x) * 3, v = textured ? 232 + ((x + y) % 7) * 3 : 255; prepared.rgb[i] = v; prepared.rgb[i + 1] = v; prepared.rgb[i + 2] = v; }
+      const input = { identifier: "S", n: 1, source: { w, h, rgb: prepared.rgb }, sourceBackground: { uniform: true, color: [200, 200, 200] as [number, number, number] }, alpha: matte.alpha, productType: "apparel_model" as const };
+      return { input, strips: canvasStrips(input.source, backgroundModel(input.source, input.sourceBackground)!) };
+    };
+    const flat = strip(false);
+    expect(flat.strips.depth).toEqual({ top: 0, bottom: 0, left: 0, right: 24 });
+    const results = checkMatte(flat.input).results;
+    expect(ids(results, "cutout.pixels_lost")[0]?.ok).toBe(true);
+    expect(ids(results, "cutout.pixels_lost")[0]?.measured).toBe(0);
+    // The same 24 columns textured (a product edge cut at the frame, luma range over 6): product, and dropping them is a loss.
+    const textured = strip(true);
+    expect(textured.strips.depth.right).toBe(0);
+    expect(ids(checkMatte(textured.input).results, "cutout.pixels_lost")[0]?.ok).toBe(false);
+  });
+  it("fails opaque_share and pixels_copied on a translucent matte (ZBE55F7B86F158FEA0EB9Z n=5, a ghost published at effective alpha 0.22); a sheer interior at alpha 200 and hair at alpha 150 over a tenth of the body pass", async () => {
+    expect(OPAQUE_SHARE_MIN).toBe(0.8);
+    const ghost = checkMatte(rampAlpha(3, () => 50));
+    expect(ghost.metrics.opaqueShare).toBe(0);
+    expect(ids(ghost.results, "cutout.opaque_share")[0]?.ok).toBe(false);
+    expect(ids(ghost.results, "cutout.opaque_share")[0]?.detail).toContain("ghost");
+    expect(ids(checkMatte(rampAlpha(3, () => 200)).results, "cutout.opaque_share")[0]?.ok).toBe(true);
+    const hair = checkMatte(rampAlpha(3, (x, y, box) => (y < box.y + box.h * 0.1 ? 150 : null)));
+    expect(hair.metrics.opaqueShare).toBeGreaterThan(0.85);
+    expect(ids(hair.results, "cutout.opaque_share")[0]?.ok).toBe(true);
+    // On the canvas: the output carries the product, the matte says it is translucent, so no opaque product pixel reaches the canvas and nothing was copied.
+    const base = await syntheticSubject("amazon", 2, "footwear"), alpha = Buffer.from(base.alpha);
+    for (let i = 0; i < alpha.length; i++) if (alpha[i]) alpha[i] = 60;
+    const results = await checkGeometry(await ctxOf({ ...base, alpha }));
+    expect(ids(results, "geometry.pixels_copied")[0]?.status).toBe("fail");
+    expect(ids(results, "geometry.pixels_copied")[0]?.detail).toContain("No opaque product pixels");
+  }, 30_000);
+  it("keeps the render's own kept shadow out of footprint and halo on every side of a flat lay (vero_moda: 97 halo and 64 footprint fails on exactly the 20 kept-shadow photos) and still fails darkening where the render kept none", async () => {
+    const { prepared, matte, box } = syntheticSource({ sourceShadow: true, strap: false, box: { x: 150, y: 250, w: 500, h: 300 } }), w = prepared.width;
+    // The photographer's shadow beside the garment, joined to the contact shadow under it (a flat lay lit from above).
+    for (let y = box.y + 40; y < box.y + box.h + 40; y++) for (const x0 of [box.x - 30, box.x + box.w]) for (let x = x0; x < x0 + 30; x++) {
+      const i = y * w + x; if (matte.alpha[i]) continue;
+      const v = Math.round(255 * (1 - 0.3 * (1 - Math.abs(x - (x0 + 15)) / 15))); prepared.rgb[i * 3] = v; prepared.rgb[i * 3 + 1] = v; prepared.rgb[i * 3 + 2] = v;
+    }
+    const out = await renderSource({ prepared, matte, channel: "amazon", shotNumber: 1, productType: "apparel_flat", identifier: "LAY", publicObjectPath: "catalog-test/x/LAY/amazon/LAY_1.jpg" });
+    if (!out.jpeg) throw new Error(out.notes.join("; "));
+    const subject: OutputSubject = { identifier: "LAY", n: 1, channel: "amazon", productType: "apparel_flat", source: { w, h: prepared.height, rgb: prepared.rgb }, sourceBackground: prepared.background, alpha: matte.alpha, jpeg: out.jpeg, placement: { w: out.plan.w, h: out.plan.h, scale: out.plan.scale, placedX: out.plan.placedX, placedY: out.plan.placedY }, flags: out.flags as OutputFlag[], status: "staged", reason: out.notes.join("; ") || null, expect: { attention: false, flags: [], detector: "code" } };
+    expect(subject.flags).not.toContain("no_shadow_source");
+    const ctx = await ctxOf(subject);
+    expect(keptShadowCanvasMask(ctx)).not.toBeNull();
+    const results = await runImageChecks(subject);
+    expect(failed(results)).toEqual([]);
+    expect(ids(results, "shadow.footprint")[0]?.detail).toContain("kept-darkness mask");
+    expect(ids(results, "cutout.halo")[0]?.detail).toContain("kept-darkness mask");
+    // A grey patch above the garment (the render kept no darkness there) still fails footprint; a grey strip along the top edge still fails halo.
+    const p = subject.placement, bg = canvasColor("amazon", 1);
+    const patch = await editOutput(subject, r => paintRect(r, p.placedX + 100, p.placedY - 80, 40, 30, [bg[0] - 25, bg[1] - 25, bg[2] - 25]));
+    expect(failed(checkShadow(await ctxOf(patch)))).toContain("shadow.footprint");
+    const halo = await editOutput(subject, r => paintRect(r, p.placedX + 60, p.placedY - 3, 300, 3, [200, 200, 200]));
+    expect(failed(checkCutout(await ctxOf(halo)))).toContain("cutout.halo");
+    // The mask exists only in kept mode: the same output said to carry no shadow gets none, and its side shadow is then a stray.
+    expect(keptShadowCanvasMask(await ctxOf({ ...subject, flags: [...subject.flags, "no_shadow_source" as const] }))).toBeNull();
+  }, 60_000);
+  it("leaves hair and straps (the matte's thin structures) out of the fringe count (vero_moda: 14 fails of 8 to 13.6% on amazon and shein on hair and sheer tights) and does not run it on a source tagged transparent", async () => {
+    const base = await syntheticSubject("amazon", 2, "footwear"), ctx = await ctxOf(base), p = base.placement, strapBottom = p.placedY + Math.round(60 * p.scale);
+    // The soft edge along the 3 px strap painted in the source's white: thin structure, left out; the body's edge is clean.
+    const strap = await editOutput(base, r => { for (let i = 0; i < ctx.expectedAlpha.length; i++) { const a = ctx.expectedAlpha[i]!; if (Math.floor(i / r.w) < strapBottom && a > 10 && a <= 200) { r.rgb[i * 3] = 255; r.rgb[i * 3 + 1] = 255; r.rgb[i * 3 + 2] = 255; } } });
+    const fringe = ids(checkCutout(await ctxOf(strap)), "cutout.fringe")[0];
+    expect(fringe?.ok).toBe(true);
+    const counts = /(\d+) thin-structure pixels of hair, straps or sheer fabric left out of (\d+)/.exec(fringe?.detail ?? "");
+    expect(counts).not.toBeNull();
+    // Counted as edge, the strap's white pixels alone would be over the 1% bar.
+    expect(Number(counts![1]) / Number(counts![2])).toBeGreaterThan(0.01);
+    expect(ids(checkCutout(await ctxOf({ ...base, tags: ["transparent"] })), "cutout.fringe")[0]?.status).toBe("not_run");
+    // The body's soft edge in the source colour still fails (the existing fringe case, with the strap left out).
+    const body = await editOutput(base, r => { for (let i = 0; i < ctx.expectedAlpha.length; i++) { const a = ctx.expectedAlpha[i]!; if (a > 10 && a <= 200) { r.rgb[i * 3] = 255; r.rgb[i * 3 + 1] = 255; r.rgb[i * 3 + 2] = 255; } } });
+    expect(failed(checkCutout(await ctxOf(body)))).toContain("cutout.fringe");
+  }, 30_000);
+  it("records a missing synthesised shadow on a bag or hardline product standing on a contact line as information, never a failure (the standing clutch Z02B2EE44E3A08044B816Z n=7/8, the candles), and does not run it on apparel, a cut source, a hanging product or a drawn shadow", async () => {
+    const lay = await syntheticSubject("amazon", 1, "apparel_flat", WIDE);
+    expect(lay.flags).toContain("no_shadow_source");
+    expect(ids(checkShadow(await ctxOf(lay)), "shadow.expected_synthesis")[0]?.status).toBe("not_run");
+    const bag = { ...lay, productType: "bag_accessory" as const }, row = ids(checkShadow(await ctxOf(bag)), "shadow.expected_synthesis")[0];
+    expect(row?.status).toBe("info");
+    expect(row?.ok).toBe(true);
+    expect(row?.detail).toContain("wider than tall");
+    expect(failed(await runImageChecks(bag))).toEqual([]);
+    const tall = { ...await syntheticSubject("amazon", 1, "apparel_flat", { width: 2600, height: 2600, box: { x: 900, y: 500, w: 800, h: 1600 } }), productType: "other" as const };
+    expect(ids(checkShadow(await ctxOf(tall)), "shadow.expected_synthesis")[0]?.detail).toContain("taller than wide");
+    const cut = { ...await syntheticSubject("amazon", 1, "apparel_flat", { ...WIDE, cutLeft: true }), productType: "bag_accessory" as const };
+    expect(ids(checkShadow(await ctxOf(cut)), "shadow.expected_synthesis")[0]?.detail).toContain("cut at the source left");
+    // Hanging: the lowest rows of the box hold a 12 px hook only.
+    const sw = bag.source.w, c0 = await ctxOf(bag), bgc = canvasColor("amazon", 1), alpha = Buffer.from(bag.alpha);
+    for (let y = 1500 - 40; y < 1500; y++) for (let x = 500; x < 2100; x++) if (x < 1290 || x >= 1302) alpha[y * sw + x] = 0;
+    const rowOf = (sy: number) => c0.productBox.y + Math.round((sy - c0.sourceCrop.y) * c0.productBox.h / c0.sourceCrop.h);
+    const hanging = { ...await editOutput(bag, r => paintRect(r, 0, rowOf(1460) - 2, r.w, rowOf(1500) - rowOf(1460) + 6, bgc)), alpha };
+    expect(ids(checkShadow(await ctxOf(hanging)), "shadow.expected_synthesis")[0]?.detail).toContain("does not stand on a contact line");
+    const shoe = await syntheticSubject("amazon", 1, "footwear", WIDE);
+    expect(shoe.flags).toContain("shadow_synthesised");
+    expect(ids(checkShadow(await ctxOf(shoe)), "shadow.expected_synthesis")[0]?.detail).toContain("synthesised a shadow");
+  }, 90_000);
 });

@@ -126,18 +126,7 @@ export const edgeSoftnessBar = (type?: ProductType | null): number => (type && S
 
 const C = "cutout" as const;
 
-export interface MatteInput {
-  identifier: string; n: number; source: Raster; sourceBackground: { uniform: boolean; color: [number, number, number] }; alpha: Buffer;
-  /** Sets the edge-softness bar (edgeSoftnessBar); absent keeps the footwear bar. */
-  productType?: ProductType | null;
-  /**
-   * The matte is the pass-through flood (spec 07 `matte_passthrough`: the whole frame minus the background colour reached
-   * from the frame edge), not a model matte: `background_kept` then counts a flat background-coloured pixel inside it
-   * whatever the product's colour (the white-on-near-white guard is for a model matte that cannot be told from its
-   * background; a flood that stopped short left background, eval run 3 vero_moda Z40E29CD878FAA726501DZ n=1).
-   */
-  passthrough?: boolean;
-}
+export interface MatteInput { identifier: string; n: number; source: Raster; sourceBackground: { uniform: boolean; color: [number, number, number] }; alpha: Buffer; /** Sets the edge-softness bar (edgeSoftnessBar); absent keeps the footwear bar. */ productType?: ProductType | null }
 
 export function canvasStrips(source: Raster, model: BackgroundModel): { mask: Mask; depth: Record<"top" | "bottom" | "left" | "right", number> } {
   const { w, h, rgb } = source, mask = new Uint8Array(w * h), depth = { top: 0, bottom: 0, left: 0, right: 0 };
@@ -364,8 +353,8 @@ export function checkMatte(input: MatteInput, channel: CheckSubject["channel"] =
   }
   const keptShare = mattedCount ? kept / mattedCount : 0;
   metrics.backgroundKept = keptShare;
-  if (noColourEvidence > NO_COLOUR_EVIDENCE_MAX_SHARE && !input.passthrough) out.push(notRun("cutout.background_kept", C, who, `White on near-white: ${(noColourEvidence * 100).toFixed(1)}% of the matte interior is within ${SOURCE_FOREGROUND_DELTA} of the background colour, so the estimate cannot tell kept background from the product (it would measure ${(keptShare * 100).toFixed(2)}%).`));
-  else out.push(judge(keptShare <= BACKGROUND_KEPT_MAX, "cutout.background_kept", C, who, Math.round(keptShare * 1e4) / 1e4, BACKGROUND_KEPT_MAX, "share of matte that is source background", `${(keptShare * 100).toFixed(2)}% of the ${input.passthrough ? "pass-through (the whole frame minus the flooded background)" : "cut-out"} is plain source background${model.kind === "graded" ? " (graded background, fitted top to bottom)" : ""}${input.passthrough && noColourEvidence > NO_COLOUR_EVIDENCE_MAX_SHARE ? `; white on near-white (${(noColourEvidence * 100).toFixed(1)}% of the interior without colour evidence) still counts on a pass-through, where a flat background-coloured pixel inside the flood is background the flood did not reach` : ""}.`));
+  if (noColourEvidence > NO_COLOUR_EVIDENCE_MAX_SHARE) out.push(notRun("cutout.background_kept", C, who, `White on near-white: ${(noColourEvidence * 100).toFixed(1)}% of the matte interior is within ${SOURCE_FOREGROUND_DELTA} of the background colour, so the estimate cannot tell kept background from the product (it would measure ${(keptShare * 100).toFixed(2)}%).`));
+  else out.push(judge(keptShare <= BACKGROUND_KEPT_MAX, "cutout.background_kept", C, who, Math.round(keptShare * 1e4) / 1e4, BACKGROUND_KEPT_MAX, "share of matte that is source background", `${(keptShare * 100).toFixed(2)}% of the cut-out is plain source background${model.kind === "graded" ? " (graded background, fitted top to bottom)" : ""}.`));
 
   // Holes and see-through patches: the interior of the estimate the matte drops or thins.
   // The interior (the estimate eroded 3 px) holds no thin structure (what the radius-2 opening removes is under 5 px
@@ -392,14 +381,17 @@ export function checkCutout(ctx: OutputContext): CheckResult[] {
   // An expected hold is never published (eval run 3, anta: 1.22% on the held 450 px copy, a 3 px fringe on a short perimeter).
   const expectedHold = s.expect.attention && (s.status === "needs_attention" || s.status === "failed");
   // A pass-through gets the same kept and lost accounting as a matte (eval run 3, vero_moda: Z40E29CD878FAA726501DZ n=1 was
-  // published as a pass-through with its sleeve flooded away and only pixels_lost named it): background_kept runs against
-  // the colour estimate with the pass-through's own flood as the matte.
-  const matte = checkMatte({ identifier: s.identifier, n: s.n, source: s.source, sourceBackground: s.sourceBackground, alpha: s.alpha, productType: s.productType, passthrough }, s.channel);
+  // published as a pass-through with its sleeve flooded away, named only by the lost accounting): its alpha is the
+  // flood's result (spec 07: the whole frame minus the background reached from the frame edge), so flat background
+  // in the background colour left inside it, outside the product's span, is background the flood did not reach and
+  // `background_kept` measures it as on a model matte, under the same white-on-near-white guard.
+  const matte = checkMatte({ identifier: s.identifier, n: s.n, source: s.source, sourceBackground: s.sourceBackground, alpha: s.alpha, productType: s.productType }, s.channel);
   const whiteOnWhite = (matte.metrics.noColourEvidence ?? 0) > NO_COLOUR_EVIDENCE_MAX_SHARE;
   const out: CheckResult[] = matte.results
     .map(r => (expectedHold && r.id === "cutout.background_kept" && r.status !== "not_run" ? notRun(r.id, C, who, `The manifest expects this photo held and it is (${s.status}): the output is never published (it would measure ${r.measured} against ${r.threshold}).`) : r));
   if (passthrough) {
-    // The photo is kept whole by rule: the ring around the matte and the soft edge show its own background, not a halo or a fringe.
+    // The photo is kept whole by rule and placed as a whole: the ring around it and its soft edge are the photo's own
+    // background on the canvas, not a halo or a fringe (eval run 2: 12 to 17% fringe and a 2.16% ring on the pass-throughs).
     out.push(notRun("cutout.halo", C, who, "The photo is kept whole by rule (pass-through); the ring around the product is its own background, not a halo."));
     out.push(notRun("cutout.fringe", C, who, "The photo is kept whole by rule (pass-through); its own background is not a fringe."));
     return out;
@@ -450,7 +442,7 @@ export function checkCutout(ctx: OutputContext): CheckResult[] {
     }
     const share = edge ? fringe / edge : 0;
     if (!edge) out.push(notRun("cutout.fringe", C, who, `The soft edge is thin structure only (${thinEdge} pixels of hair, straps or sheer fabric), which carries the background colour by nature.`));
-    else out.push(judge(share <= FRINGE_MAX, "cutout.fringe", C, who, Math.round(share * 1e4) / 1e4, FRINGE_MAX, "share of soft-edge pixels in the source background colour", `${(share * 100).toFixed(2)}% of the soft edge carries the source background colour${thinEdge ? ` (${thinEdge} thin-structure pixels left out)` : ""}.`));
+    else out.push(judge(share <= FRINGE_MAX, "cutout.fringe", C, who, Math.round(share * 1e4) / 1e4, FRINGE_MAX, "share of soft-edge pixels in the source background colour", `${(share * 100).toFixed(2)}% of the soft edge carries the source background colour${thinEdge ? ` (${thinEdge} thin-structure pixels of hair, straps or sheer fabric left out of ${edge + thinEdge})` : ""}.`));
   }
   return out;
 }

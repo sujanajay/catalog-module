@@ -45,11 +45,6 @@ export function checkCutEdge(ctx: OutputContext): CheckResult[] {
   const { subject: s, canvas, background, safeBox, half } = ctx;
   const who: CheckSubject = { identifier: s.identifier, n: s.n, channel: s.channel };
   const out: CheckResult[] = [];
-  // A pass-through (spec 07) keeps the whole frame as the product and the render places it fitted by rule, noting the band
-  // (eval run 3, penti: 26 flush fails of 11 to 397 px on two pass-through close-ups, Z91D419FC9238E844BF77Z n=4 and
-  // ZE24FAC8A6A40C5FE5400Z n=3, placed fitted with the band note): a kept-whole frame has no cut side to fill, so the
-  // cut-fill rule and the flush checks are not run; the information flag and the hold are still judged.
-  if (s.flags.some(f => PASSTHROUGH_FLAGS.includes(f))) return [notRun("cut_edge.trim", E, who, "The photo is kept whole by rule (pass-through) and placed fitted; a kept-whole frame has no cut side to fill, so the cut-fill rule does not apply."), notRun("cut_edge.flush", E, who, "The photo is kept whole by rule (pass-through) and placed fitted with the band note; a kept-whole frame has no cut side to put flush."), ...cutSourceRows(ctx, who)];
   // Trim: from the recorded scale alone, how much of the product the placement leaves no room for on each axis. Spec 05
   // allows that only on an axis with a cut side, only so that the other axis (cut on both ends) fills the canvas, and
   // never beyond a third of the product box; an uncut outline is never trimmed. A fitted product is trimmed on neither axis.
@@ -93,7 +88,7 @@ export function checkCutEdge(ctx: OutputContext): CheckResult[] {
     if (share > MAX_TRIM_SHARE + TRIM_SLACK) return { refused: true, why: `filling the ${axis === "x" ? "width" : "height"} would trim ${(share * 100).toFixed(1)}% of the ${axis === "x" ? "height" : "width"} (at most a third)` };
     return { refused: false, why: `filling the ${axis === "x" ? "width" : "height"} would trim only ${(share * 100).toFixed(1)}% of the ${axis === "x" ? "height" : "width"} off its cut sides` };
   };
-  const band = cutBandNote(s.reason), held = s.status === "needs_attention" || s.status === "failed";
+  const band = cutBandNote(s.reason), held = s.status === "needs_attention" || s.status === "failed", passthrough = s.flags.some(f => PASSTHROUGH_FLAGS.includes(f));
   for (const side of ctx.cutSides) {
     const gap = Math.abs(measured[side] - limit[side]);
     const edge = { top: 0, bottom: canvas.h - 1, left: 0, right: canvas.w - 1 }[side];
@@ -102,6 +97,11 @@ export function checkCutEdge(ctx: OutputContext): CheckResult[] {
     // expected hold ZEE79259BBFD83FFA1DB0Z n=5 at 46 to 500 px), and is judged after Use as is. The cut is not what
     // holds it: `not_held` below says whether the hold itself is expected.
     if (held) out.push(notRun(`cut_edge.flush_${side}`, E, who, `The output is held (${s.status}), fitted and centred while it waits for a person; its flush is not a placement and is judged after Use as is.`));
+    // A pass-through (spec 07) keeps the whole frame as the product and the render never trims it (spec 05 trimRules
+    // noTrim): it is placed fitted, with the band note where the aspect leaves a band. Eval run 3 (penti): 26 flush fails
+    // of 11 to 397 px on two pass-through close-ups (Z91D419FC9238E844BF77Z n=4, ZE24FAC8A6A40C5FE5400Z n=3) placed fitted
+    // with the band note; a kept-whole frame has no cut side to put flush. `trim` (nothing trimmed) and `no_line_*` still run.
+    else if (passthrough) out.push(notRun(`cut_edge.flush_${side}`, E, who, "The photo is kept whole by rule (pass-through) and placed fitted; a kept-whole frame has no cut side to put flush, so the band beside it is the fit, not a gap."));
     else if (gap <= FLUSH_TOLERANCE_PX && flush) out.push(pass(`cut_edge.flush_${side}`, E, who, offEdge, FLUSH_TOLERANCE_PX, "px", `The product is cut at the source ${side}; on the canvas it ends ${offEdge} px from the ${side} edge (must be flush, with no margin on that side).`));
     else {
       // A band the render fitted on purpose and said so (the sheet note) passes as information when the rule agrees;
@@ -140,12 +140,6 @@ export function checkCutEdge(ctx: OutputContext): CheckResult[] {
     const gapShare = maskPixels ? gapPixels / maskPixels : 0;
     out.push(judge(bad === 0 && gapShare <= NO_LINE_GAP_MAX, `cut_edge.no_line_${side}`, E, who, bad || Math.round(gapShare * 1e4) / 1e4, bad ? 0 : NO_LINE_GAP_MAX, bad ? "pixels beyond the edge" : "gap share inside the silhouette", bad ? `${bad} pixels beyond the cut ${side} edge are not background (worst delta ${worst}): a floating line or shadow.` : gapShare > NO_LINE_GAP_MAX ? `${(gapShare * 100).toFixed(1)}% of the silhouette's last ${strip} rows before the cut ${side} are background: a gap or a floating line.` : `Nothing is drawn beyond the cut ${side} edge and the silhouette runs to it.`));
   }
-  return [...out, ...cutSourceRows(ctx, who)];
-}
-
-/** The cut source's information flag and that the cut is not what holds it (judged on every cut source, pass-through included). */
-function cutSourceRows(ctx: OutputContext, who: CheckSubject): CheckResult[] {
-  const { subject: s } = ctx, held = s.status === "needs_attention" || s.status === "failed", out: CheckResult[] = [];
   const flagged = s.flags.some(f => CUT_SOURCE_FLAGS.includes(f));
   out.push(judge(flagged, "cut_edge.flagged", E, who, s.flags.join(",") || "none", CUT_SOURCE_FLAGS[0]!, "flag", flagged ? "The cut source carries its information flag." : `The cut source carries no information flag (expected one of ${CUT_SOURCE_FLAGS.join(", ")}).`));
   if (s.expect.attention) out.push(notRun("cut_edge.not_held", E, who, `The manifest expects this photo to be held (${s.expect.flags.join(", ") || "for attention"}); the cut is not what holds it.`));

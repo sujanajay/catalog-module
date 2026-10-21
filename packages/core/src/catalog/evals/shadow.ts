@@ -64,11 +64,12 @@ export const GRADIENT_DEPTH_PX = 48;
 /** Kept darkness over this share of the background luma (about 5 luma on white) belongs to the render's kept-darkness mask. */
 export const KEPT_MASK_MIN_DARKNESS = 0.02;
 /**
- * Expected synthesis (section 15c): the types whose policy synthesises a contact shadow when the source has none
+ * Expected synthesis (section 15d): the types whose policy synthesises a contact shadow when the source has none
  * (SPEC.md: footwear always; bags and hardline "preserve else synthesise (upright)"); a product stands on a contact line
- * when the columns covered by its lowest CONTACT_LINE_ROWS_SHARE of box rows span more than CONTACT_LINE_MIN_COVERAGE of
- * the box width. Eval run 3: 16 standing-bag and 40 candle outputs on white carry no shadow because the render's upright
- * test is box.h > box.w; the spec's rule is pose, and the suite had no check that noticed a missing synthesised shadow.
+ * when the columns its matte covers in the lowest CONTACT_LINE_ROWS_SHARE of the box rows span more than
+ * CONTACT_LINE_MIN_COVERAGE of the box width. Eval run 3: 16 standing-bag and 40 candle outputs on white carry no shadow
+ * because the render's upright test is box.h > box.w while SPEC.md says "upright pose" (an OPEN owner decision), and the
+ * suite had no check that noticed a missing synthesised shadow.
  */
 export const SYNTHESIS_TYPES: ReadonlySet<string> = new Set(["footwear", "bag_accessory", "other"]);
 export const CONTACT_LINE_ROWS_SHARE = 0.02;
@@ -211,24 +212,26 @@ export function contactLineCoverage(alpha: Buffer, source: { w: number; h: numbe
 }
 
 /**
- * No shadow on an output whose policy synthesises one: a failure when the render's own rule says synthesise (footwear, or
- * a box taller than wide) and nothing was drawn on a product standing on a contact line; information when the product
- * stands on a contact line but is wider than tall, because SPEC.md's "upright pose" and the render's box.h > box.w
- * disagree there (OPEN owner question, section 15c) and the live run is not failed on a decision the owner has not taken.
- * Not run on apparel (never synthesised), on a source cut at the bottom (no contact line to draw on), when the output
- * carries a shadow flag, or when the product does not stand on a contact line (hand-held, hanging, on a model).
+ * No shadow on an output whose policy may synthesise one, recorded as information (status `info`, never a failure): the
+ * product stands on a contact line, the source carries no measurable shadow (`no_shadow_source`) and nothing was drawn.
+ * SPEC.md's "upright pose" and the render's box.h > box.w disagree on a wide standing bag or candle (OPEN owner question,
+ * section 15d), and the render drops synthesis by rule in cases the suite cannot tell apart from a defect (a source cut on
+ * any side, spec 05; an auto-resolve re-render with synthesiseShadow false), so the row carries the numbers for the
+ * owner and the live run is not failed on a decision not taken. Not run on apparel (never synthesised), on a source cut
+ * on any side (the render never synthesises there), when the output carries a shadow flag or any darkening under the
+ * product, or when the product does not stand on a contact line (hand-held, hanging, on a model).
  */
 export function expectedSynthesis(ctx: OutputContext, who: CheckSubject, shadowPixels: number): CheckResult {
   const id = "shadow.expected_synthesis", { subject: s, sourceBox: box, cut } = ctx, mode = shadowMode(s.flags);
   if (!SYNTHESIS_TYPES.has(s.productType)) return notRun(id, S, who, "The policy never synthesises a shadow for this product type.");
   if (mode !== "none") return notRun(id, S, who, mode === "synthesised" ? "The render synthesised a shadow." : "The render kept the photo's own shadow (no shadow flag).");
   if (shadowPixels) return notRun(id, S, who, "The output carries darkening under the product, judged with the synthesised bars.");
-  if (cut.bottom) return notRun(id, S, who, "The product is cut at the bottom of the source: there is no contact line to synthesise a shadow on.");
+  const cutSides = (["top", "bottom", "left", "right"] as const).filter(side => cut[side]);
+  if (cutSides.length) return notRun(id, S, who, `The product is cut at the source ${cutSides.join(" and ")}: the render never synthesises a shadow on a cut source (spec 05).`);
   const coverage = contactLineCoverage(s.alpha, s.source, box), pct = `${(coverage * 100).toFixed(0)}%`;
   if (coverage <= CONTACT_LINE_MIN_COVERAGE) return notRun(id, S, who, `The product does not stand on a contact line (its lowest rows cover ${pct} of the box width: hand-held, hanging or on a model), so no shadow is expected.`);
   const upright = box.h > box.w;
-  if (s.productType === "footwear" || upright) return judge(false, id, S, who, "none drawn", "synthesised", "shadow", `The policy says synthesise (${s.productType === "footwear" ? "footwear" : `an upright product, ${box.w}x${box.h} box`}), the source carries no measurable shadow and the product stands on a contact line covering ${pct} of its box, but no shadow was drawn.`);
-  return info(id, S, who, `${box.w}x${box.h} box, contact line ${pct}`, "upright pose (SPEC.md) against taller than wide (render)", "contact-line coverage", `OPEN owner question: SPEC.md synthesises a shadow for a bag or hardline product in an upright pose; the render's test is box.h > box.w, and this product stands on a contact line (${pct} of its box width) while wider than tall, so nothing was drawn. Recorded as information until the owner decides.`);
+  return info(id, S, who, `none drawn; ${box.w}x${box.h} box, contact line ${pct}`, "synthesised (SPEC.md: footwear always, bags and hardline in an upright pose)", "shadow", `No shadow on a ${s.productType} output standing on a contact line (${pct} of its box width, ${upright ? "taller than wide" : "wider than tall"}): the source carries none and nothing was synthesised. ${upright ? "The render's own rule would synthesise here unless an auto-resolve re-render forbade it" : "SPEC.md's upright pose and the render's taller-than-wide test disagree on this shape (OPEN owner question)"}; recorded as information until the owner decides.`);
 }
 
 export function checkShadow(ctx: OutputContext): CheckResult[] {
@@ -244,6 +247,7 @@ export function checkShadow(ctx: OutputContext): CheckResult[] {
     for (let y = band.y; y < band.y + band.h; y++) for (let x = band.x; x < band.x + band.w; x++) { const i = y * canvas.w + x; if (ctx.product[i]) continue; sum += firm.dark[i]!; n++; }
     const mean = n ? sum / n : 0;
     out.push(judge(firm.count === 0 && mean <= FORBIDDEN_MEAN_DARK, "shadow.forbidden", S, who, firm.count, 0, "shadow pixels", firm.count ? `${firm.count} pixels under or around the product are darker than the background (worst ${firm.max.toFixed(0)}); apparel never gets a shadow.` : "No shadow under the product, as the spec requires for this product type."));
+    out.push(expectedSynthesis(ctx, who, count));
     return out;
   }
 

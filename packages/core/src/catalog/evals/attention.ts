@@ -18,7 +18,7 @@ export interface AttentionProductRow {
   /** A planted wrong item: shot `n` belongs to another product and must be caught as different_product. */
   planted?: { n: number; from: string } | null;
 }
-/** A per-shot expectation from the manifest, keyed by the batch's own shot number (mapped by source sha256, section 15c). */
+/** A per-shot expectation from the manifest, keyed by the batch's own shot number (mapped by source sha256, section 15d). */
 export interface AttentionShotRow { identifier: string; n: number; expect: Expectation }
 export interface AttentionInput {
   products: AttentionProductRow[];

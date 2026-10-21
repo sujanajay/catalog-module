@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import sharp from "sharp";
 import { describe, expect, it } from "vitest";
-import { autoTags, buildGolden, deriveBytes, goldenCounts, goldenSourcePath, parseGolden, plantedShotNumber, readGoldenBytes, serializeGolden, sha256, type GoldenBuild } from "./golden";
+import { autoTags, buildGolden, deriveBytes, goldenCounts, goldenSourcePath, mapShotsBySha, parseGolden, plantedShotNumber, readGoldenBytes, serializeGolden, sha256, uniqueSources, type GoldenBuild, type GoldenEntry } from "./golden";
 
 async function photo(width: number, height: number, product: [number, number, number], bg: [number, number, number] = [255, 255, 255], box = { left: Math.round(width * 0.3), top: Math.round(height * 0.2), width: Math.round(width * 0.4), height: Math.round(height * 0.6) }) {
   const overlay = await sharp({ create: { width: box.width, height: box.height, channels: 3, background: { r: product[0], g: product[1], b: product[2] } } }).png().toBuffer();
@@ -71,14 +71,33 @@ describe("golden manifest", () => {
     const build: GoldenBuild = {
       roots: { shoes, tops, derived }, seed: 3,
       plans: [{ root: "shoes", brand: "anta", category: "footwear" }, { root: "tops", brand: "test_brand", category: "apparel_model" }],
-      overrides: {}, derive: [], plant: [{ into: "G1", from: "T1_1" }],
+      overrides: { G1: { shots: { "3": { expect: { attention: false, flags: ["chart_image"], detector: "code", reason: "a size chart" } } } } }, derive: [], plant: [{ into: "G1", from: "T1_1" }],
     };
     const manifest = await buildGolden(build, async name => name);
     const planted = manifest.entries.filter(e => e.identifier === "G1-planted");
     expect(planted.map(e => e.n)).toEqual([1, 3, 4]);
     expect(planted.find(e => e.n === 3)!.sha256).toBe(manifest.entries.find(e => e.identifier === "G1" && e.n === 3)!.sha256);
     expect(planted.find(e => e.n === 4)).toMatchObject({ planted: { from: "T1_1" } });
+    // A host shot that expects flags without a hold (a size chart) keeps that expectation in the planted copy; the other host shots carry the planted product's.
+    expect(planted.find(e => e.n === 3)!.expect).toEqual({ attention: false, flags: ["chart_image"], detector: "code", reason: "a size chart" });
+    expect(planted.find(e => e.n === 1)!.expect).toEqual({ attention: true, flags: ["different_product"], detector: "judge" });
     const paths = manifest.entries.map(goldenSourcePath);
     expect(new Set(paths).size).toBe(paths.length);
+    // The batch renumbers the gap (1, 3, 4 become 1, 2, 3): the suite maps its shots to the manifest by sha256, by number only where no entry of the product has the bytes.
+    const byBatch = (n: number, sha: string) => ({ identifier: "G1-planted", n, sha256: sha });
+    const mapped = mapShotsBySha(manifest.entries, [byBatch(1, planted[0]!.sha256), byBatch(2, planted[1]!.sha256), byBatch(3, planted[2]!.sha256), { identifier: "G1", n: 3, sha256: "unknown" }]);
+    expect(mapped.get("G1-planted|2")?.n).toBe(3);
+    expect(mapped.get("G1-planted|2")?.expect.flags).toEqual(["chart_image"]);
+    expect(mapped.get("G1-planted|3")?.planted).toEqual({ from: "T1_1" });
+    expect(mapped.get("G1|3")?.n).toBe(3);
+    expect(mapped.has("G1|9")).toBe(false);
   }, 60_000);
+
+  it("counts byte-identical sources once and names the pair (eval run 3, vero_moda: ZA879DC4CE21DC00F08C3Z and ZFEA925E26F8FACC3E40FZ doubled every bake-off number)", () => {
+    const entry = (identifier: string, n: number, sha256: string) => ({ identifier, n, sha256 }) as GoldenEntry;
+    const { kept, duplicates } = uniqueSources([entry("A", 1, "s1"), entry("A", 2, "s2"), entry("B", 1, "s1"), entry("B", 2, "s2"), entry("C", 1, "s3"), entry("D", 1, "s1")]);
+    expect(kept.map(e => `${e.identifier}_${e.n}`)).toEqual(["A_1", "A_2", "C_1"]);
+    expect(duplicates).toEqual([{ sha256: "s1", kept: "A_1", dropped: ["B_1", "D_1"] }, { sha256: "s2", kept: "A_2", dropped: ["B_2"] }]);
+    expect(uniqueSources([entry("A", 1, "s1")]).duplicates).toEqual([]);
+  });
 });

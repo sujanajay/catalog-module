@@ -3458,8 +3458,11 @@
    ],
    "expect": {
     "attention": false,
-    "flags": [],
-    "detector": "code"
+    "flags": [
+     "chart_image"
+    ],
+    "detector": "code",
+    "reason": "A size chart (a Penti bra table on white): the code detector leaves it out on every channel as chart_image (eval run 3: left out on the flat-lay set, published on the model set), so the suite expects the flag on the mapped shot and nothing published."
    }
   },
   {

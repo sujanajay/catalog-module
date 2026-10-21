@@ -20,7 +20,7 @@ export interface CheckResult {
   ok: boolean;
   /**
    * "not_run" when the check does not apply (its inputs were missing); counted separately, never as a pass. "info" when
-   * the check measured a gap the owner has not decided on (`shadow.expected_synthesis`, section 15c): recorded with
+   * the check measured a gap the owner has not decided on (`shadow.expected_synthesis`, section 15d): recorded with
    * its numbers, never a failure.
    */
   status: "pass" | "fail" | "not_run" | "info";
@@ -75,7 +75,7 @@ export interface OutputSubject {
    * (`cutout.halo`, `shadow.footprint`) are not run on it; `attention.planted_caught` judges it.
    */
   planted?: boolean;
-  /** The golden manifest's tags for this photo (`transparent` keeps `cutout.fringe` from running, section 15c). */
+  /** The golden manifest's tags for this photo (`transparent` keeps `cutout.fringe` from running, section 15d). */
   tags?: readonly string[];
 }
 
