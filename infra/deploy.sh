@@ -167,6 +167,18 @@ WEB_ENV="$ENV_VARS,DB_POOL_MAX=$WEB_DB_POOL_MAX,SHARE_SA_EMAIL=$WEB_SA,CATALOG_C
 # jobs through WORKER_ENV (above) and the web here, so the estimate and recorded spend agree.
 WORKER_ENV+=",INR_PER_USD=$INR_PER_USD"
 WEB_ENV+=",INR_PER_USD=$INR_PER_USD,COMPUTE_USD_PER_VCPU_SECOND=$COMPUTE_USD_PER_VCPU_SECOND"
+# Spec 11: the GPU upscaler in the render. UPSCALE_MODEL names the model the GPU matting service runs at
+# POST /upscale (realesrgan-x2plus or swinir-x2); unset or empty (the default) is off, and every render keeps
+# the plain Lanczos path. UPSCALE_MIN_SCALE is the enlargement above which it is used (default 1.5, the
+# variable canvases' cap). Engineering config only, never shown to the operator. Override from the shell
+# like INR_PER_USD, e.g. UPSCALE_MODEL=realesrgan-x2plus bash infra/deploy.sh. UPSCALE_MODEL is written only
+# when set (--set-env-vars replaces the worker environment, so a redeploy without it turns the upscaler off).
+UPSCALE_MODEL=${UPSCALE_MODEL:-}
+UPSCALE_MIN_SCALE=${UPSCALE_MIN_SCALE:-1.5}
+case "$UPSCALE_MODEL" in ""|realesrgan-x2plus|swinir-x2) ;; *) echo "UPSCALE_MODEL must be realesrgan-x2plus, swinir-x2 or empty" >&2; exit 1 ;; esac
+[[ "$UPSCALE_MIN_SCALE" =~ ^[0-9]+([.][0-9]+)?$ ]] && awk -v s="$UPSCALE_MIN_SCALE" 'BEGIN{exit !(s>=1)}'   || { echo "UPSCALE_MIN_SCALE must be a number of at least 1, such as 1.5" >&2; exit 1; }
+WORKER_ENV+=",UPSCALE_MIN_SCALE=$UPSCALE_MIN_SCALE"
+# UPSCALE_MODEL itself is added after the GPU matting step below, and only when that step yields MATTING_GPU_URL.
 # 03: the web verifies the IAP JWT against this exact audience and accepts only this domain.
 IAP_AUDIENCE=/projects/$PN/locations/$REGION/services/$WEB_SERVICE
 WEB_ENV+=",IAP_AUDIENCE=$IAP_AUDIENCE,ALLOWED_HOSTED_DOMAIN=opptra.com"
@@ -262,6 +274,12 @@ else
   echo "ERROR: GPU deployment failed for a reason other than quota; stopping" >&2
   exit 1
 fi
+# Spec 11 4.5: the upscaler runs on the GPU service only, so the flag reaches the worker only with a GPU URL.
+if [ -n "$UPSCALE_MODEL" ] && [ -z "$MATTING_GPU_URL" ]; then
+  echo "WARN: UPSCALE_MODEL=$UPSCALE_MODEL ignored: no GPU matting service URL; the render keeps the plain path" >&2
+  UPSCALE_MODEL=""
+fi
+if [ -n "$UPSCALE_MODEL" ]; then WORKER_ENV+=",UPSCALE_MODEL=$UPSCALE_MODEL"; fi
 
 # --- 6. Worker -----------------------------------------------------------------------
 echo "==> worker"
@@ -402,3 +420,4 @@ echo "WEB_URL=$WEB_URL"
 echo "WORKER_URL=$WORKER_URL"
 echo "MATTING_URL=$MATTING_URL"
 echo "MATTING_GPU_URL=${MATTING_GPU_URL:-not configured}"
+echo "UPSCALE_MODEL=${UPSCALE_MODEL:-off}"

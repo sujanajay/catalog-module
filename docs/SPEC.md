@@ -45,6 +45,12 @@ configuration. Access is by Google sign-in with three roles (admin, operator, vi
   experiment). Licence: any open-weight model may be used for this internal tool regardless of
   non-commercial terms, so NC models (`bria-rmbg` and others) are full candidates and may become
   policy defaults; the licence table stays as a record.
+- Image enhancement (approved 2026-10-20, spec 11): a conservative unsharp mask after any enlargement
+  in the render, and an upscaler (x2, deterministic, on the GPU service) allowed in the default path
+  behind the worker flag `UPSCALE_MODEL` (unset = off), chosen by the fidelity gate of spec 11 and
+  used only when the enlargement exceeds `UPSCALE_MIN_SCALE` (1.5); its outputs carry the information
+  flag `upscaled`, never a hold. OPEN: whether an x2 upscale may un-skip Styli (800x1200 sources would
+  clear the 1,482 px minimum). No paid image API without a separate owner yes.
 - Product identity and overwrite: the product (brand + style+colour identifier) owns its public images.
   Opptra SKU ids are attributes, never part of a link. A re-upload overwrites in place and deletes the
   shots the new upload no longer has. Batches are events; product state is the truth. Marketplaces keep
@@ -166,7 +172,10 @@ tall. Common: JPEG 4:4:4, sRGB with ICC, quality 90 stepping down to 70 until <=
 applied then stripped, JFIF density set. Adaptive canvas: the largest size between min and target that
 keeps upscaling <= 1.5x; below that, the min canvas with a `low_resolution` flag; Styli (fixed canvas)
 flags, and the constant `STYLI_SKIP_LOW_RESOLUTION = true` (an agreement with Styli, always applied,
-not an operator option) excludes such images from the sheet with a note.
+not an operator option) excludes such images from the sheet with a note. Any enlargement (scale > 1)
+is followed by a conservative unsharp mask on the RGB only (spec 11); an enlargement past
+`UPSCALE_MIN_SCALE` (1.5) goes through the x2 upscaler when `UPSCALE_MODEL` is set, Lanczos otherwise
+(spec 11; `render_key` carries the upscaler id and version).
 
 Spec 05 clarifications approved by the owner: adaptive canvases retain the target aspect and meet
 both listed minimum dimensions, even when the minimum has a different aspect (Trendyol's effective
@@ -286,10 +295,11 @@ Rules for all sources:
 - Matte-detected: a photo on a busy background no cut-out kept (`leftover_background` found by code at the
   matte stage, not by the judge; a hard hold:
   "The background could not be removed from this photo. Use it as is, replace it, or remove it."; the
-  made picture is the whole photo as it is, never trimmed).
+  made picture is the whole photo as it is without the brand's canvas strips, never trimmed; a
+  frame-filling close-up whose cut-outs all dropped the product is not a busy background).
 - Other flags: `transparent` (attention: "This product looks transparent or glass; the cut-out may need
-  a look."), `upscaled` (attention, `sr_pass` experiment only: "This image was enlarged by an
-  experimental step." with "Check logos, text and fabric texture against the original."),
+  a look."), `upscaled` (info, spec 11: "Enlarged with a quality pass to meet this marketplace's
+  size."; never a hold),
   `shadow_synthesised` (info), `fallback_matte`, `low_resolution`, `small_source`, `duplicate_shot`,
   `numbering_gap`, `failed_compliance`, `qa_unavailable`, `qa_cap`, `qa_sampled_out`, `type_unknown`.
 - Gaps in the file-name numbers close up into positions 1..k (the numbering rule above), flagged
@@ -414,8 +424,8 @@ Rules for all sources:
 | Product matting, secondary (hard-cases set and one apparel set) | `birefnet-hr` (BiRefNet HR general), `birefnet-hrsod`, `rmbg-1.4` (fast CPU floor) | same | MIT; NC for RMBG-1.4 |
 | Matting refinement experiments (hard cases only, spec 08) | ViTMatte-small trimap refinement (trimap = winner mask eroded and dilated 8 to 16 px at 1536; measured by the human edge-flag rate); SAM 2.1 box prompt for `mixed_product` and `collage` cases (box from the winner mask's largest component or from the judge; compares `different_product` recall). Dropped: MODNet, MatteFormer, SAM 3, IC-Light V2, SUPIR, SeedVR2, 4x-UltraSharp | GPU service | MIT (ViTMatte, SAM 2) |
 | Output QA judge and product-type classifier | `google/gemini-2.5-flash-lite` (default, `CATALOG_QA_DEFAULT_MODEL`), `anthropic/claude-haiku-5.5` (second judge), `google/gemini-2.5-flash`, `google/gemini-3.5-flash-lite`, `qwen/qwen3-vl-30b-a3b-instruct`, `qwen/qwen3-vl-8b-instruct` (the six of `CATALOG_QA_CANDIDATES`); `google/gemini-3-flash-preview` and `openai/gpt-5.4-mini` only if none meets the gates | `catalog-worker` via `callLlmJson` (`packages/core/src/llm/llm.ts`, OpenRouter); the classifier uses the cheapest judge | API; about USD 0.0004 (Flash-Lite, Haiku 5.5, Qwen 30B-A3B) to 0.0013 (2.5 Flash, 3.5 Flash-Lite) per check; `EVAL_BUDGET_USD` estimates use per-model OpenRouter prices, not one constant; self-hosting a judge is not worth it |
-| Resize / pad / composite / encode | sharp (libvips) only; Lanczos resize, no upscaler in the default path | `catalog-worker` | Apache-2.0; about 0.5 s per output |
-| Upscaling (`sr_pass`, spec 08 experiment only) | Real-ESRGAN x2plus, then x4plus, then SwinIR-L real-world x4 on the RGBA cutout before compositing, Lanczos down to the exact factor; outputs flagged `upscaled` (attention) and judged with "are logos, text and fabric texture unchanged from the original"; the owner decides per channel from the contact sheet | GPU service | BSD-3 (Real-ESRGAN), Apache-2.0 (SwinIR) |
+| Resize / pad / composite / encode | sharp (libvips) only; Lanczos resize, then a conservative unsharp mask on the RGB after any enlargement (spec 11) | `catalog-worker` | Apache-2.0; about 0.5 s per output |
+| Upscaling (spec 11, `POST /upscale` on the GPU service, behind `UPSCALE_MODEL`) | `realesrgan-x2plus` (Real-ESRGAN x2plus, ONNX) and `swinir-x2` (SwinIR lightweight x2, ONNX); RGB through the model at x2, alpha through Lanczos, then Lanczos to the exact factor; used only past `UPSCALE_MIN_SCALE`; outputs flagged `upscaled` (info); the winner is chosen by the spec 11 fidelity gate (SSIM, LPIPS, CIEDE2000, text, texture, halo, determinism against the original) and the judge question "are logos, text and fabric texture unchanged from the original" is information | GPU service | BSD-3 (Real-ESRGAN), Apache-2.0 (SwinIR) |
 | Generative edits, paid image APIs | not used (product pixels must not change); IC-Light only as a low-priority experiment on the shadow layer alone with a colour-delta guard | | |
 
 Throughput: 20 CPU instances at 6 s give 12,000 images per hour (4,800 at 15 s); one L4 at 0.4 s gives
@@ -817,8 +827,9 @@ always-on resources.
 
 ## Non-goals
 
-- No generative edits or paid image APIs; product pixels are never regenerated. No upscaler in the
-  default path (the `sr_pass` experiment is bake-off only and its outputs are flagged `upscaled`).
+- No generative edits or paid image APIs; product pixels are never regenerated. The only upscaler in
+  the default path is the deterministic x2 model behind `UPSCALE_MODEL` that passed the spec 11
+  fidelity gate; its outputs are flagged `upscaled` (info).
 - No lifestyle-background option and no "four options" variant; only what the sheet specifies.
 - No cropping of any kind; no cap on images per product or per channel.
 - No stored channel defaults; channels are chosen fresh every batch.
@@ -849,6 +860,9 @@ always-on resources.
 7. Whether `roles/iap.httpsResourceAccessor` can be granted at the `catalog-web` resource level with the
    operator's roles; fallback is the project-level grant for `domain:opptra.com` (spec 03), which also
    opens the earlier `ila-web` to every Opptra account and is noted in `docs/solutions/catalog-iap.md`.
+8. Whether an x2 upscale may un-skip Styli for 800x1200 sources (spec 11): OPEN, asked in the status
+   when the fidelity gate is done; until then `STYLI_SKIP_LOW_RESOLUTION` and the 1,482 px minimum
+   stand.
 
 Closed by the owner (recorded in the decisions log): the Styli size-versus-softness question (follow the
 guideline sheet; no Styli-only `MAX_UPSCALE`) and the licence posture (NC models are full candidates).

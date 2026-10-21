@@ -11,7 +11,7 @@ steps:
     args:
       - -ceu
       - |
-        docker run -d --name matting-cpu --network cloudbuild --memory=16g --cpus=4 ${_AR}/matting:${_TAG}
+        docker run -d --name matting-cpu --network cloudbuild --memory=16g --cpus=4 -e UPSCALE_CPU=1 ${_AR}/matting:${_TAG}
         trap 'docker logs matting-cpu; docker stats --no-stream matting-cpu; docker inspect matting-cpu --format "{{json .State}}"; docker stop matting-cpu >/dev/null' EXIT
         docker run --rm --network container:matting-cpu --entrypoint python -v /workspace/services/matting/tests:/tests:ro ${_AR}/matting:${_TAG} /tests/container_smoke.py
   - id: gpu

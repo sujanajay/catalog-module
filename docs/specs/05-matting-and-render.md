@@ -441,21 +441,57 @@ time, before anything is rendered.
   that fills the frame, so the whole photo was kept as it is instead of being cut out. Nothing to
   do."), never holds, gets no synthesised shadow, is placed by the cut-in-source rules (sides that
   reach the frame sit flush) and is never trimmed (`trimRules`).
+- Sole strip recovery, footwear only (`recoverSoleStrip`, eval run 3, Anta bd-112625546-12 shot 5: the
+  lower one to two rows of a 5 to 8 px lime strip under a black outsole are dropped by every deployed
+  model, 7.66% of a cell lost after the ladder). After the ladder picks a model matte (never on a
+  pass-through or a busy-background hold; the check always sees the model's own matte), per column of the
+  lower 40% of the matte: the run of strongly coloured source pixels (chroma at least 60 and at least half
+  the brightest channel) that starts right below the lowest kept pixel (alpha over 128), stays within 8 px of
+  it and stops at the first pixel that is not strongly coloured. A connected group of such runs is given
+  back only when the matte dropped at least 20 of its pixels and it spans at least 10% of the product's
+  width (a strip along the sole, not a coloured contact smudge): the runs become opaque, with the soft
+  kept pixels right above them (now inside the product). The run ends are smoothed across the group's
+  columns (a 5-column moving average clamped to each column's measured end, so no pixel outside the
+  coloured run is added, then lowered until neighbouring ends differ by at most 1 px) and the lower edge
+  is drawn at that sub-pixel position: opaque above it, one antialiased pixel at it, so the edge shows no
+  1 px steps and the strip is softened once. A floor reflection under a grey or white gap row (eval run 3
+  M2), a grey cast shadow and a pale tint are never reached. Measured with cached deployed mattes under
+  the footwear policy on the 81 unique Anta golden and gate 3f photos: only the sliver shot changes (worst
+  cell 7.66% to 0.45%, thin parts 14.3% to 1.3%, edge softness 3.19 to 2.96; a two-pixel ramp of 200 and
+  110 was tried and measured 3.03, over the 3.0 footwear bar, because the rest of that matte already
+  averages 3.13).
 - A pass-through replaces a plain studio backdrop only (`isBusyBackground`, eval run 2, French
   Connection ZEE79259BBFD83FFA1DB0Z shot 5: models on a tennis court published with ragged court,
-  net and racket remnants). When, in the border band, more than 5% of the pixels are kept by the
-  pass-through although every model matte tried dropped them and they are no skin or garment panel a
-  matte cut through (`busyBorderShare`, `BUSY_BORDER_MAX_SHARE`: scenery the recolour cannot reach;
-  the court photo 33%, every plain-backdrop pass-through of the gate and golden sets 0%), and the
-  photo is not frame-filling, the step is recorded `matte_passthrough: failed` ("busy background"),
-  the matte is the whole photo as it is (every pixel opaque, model `passthrough`, so never trimmed)
+  net and racket remnants). In the border band, the pixels kept by the pass-through although every
+  model matte tried dropped them, and that are no skin or garment panel a matte cut through, are read
+  (`busyBorderReading`): their share of the band, their edge density (share of them whose luma steps
+  by more than 20 levels per pixel) and their tones (the fewest 16-level RGB colour buckets holding
+  90% of them). They are scenery when they show strong structure (edge density at least 0.40, or at
+  least 45 tones: a net, a racket, a hedge, people) or a plain area in several tones (edge density
+  under 0.05 and at least 8 tones: a wall over a table). Anything else is one material or one plain
+  colour, never scenery: the fine grain of a frame-filling close-up whose every matte dropped the
+  leather, knit, zip or clasp itself (out-of-focus leather reads as smooth, so such a close-up can miss
+  the frame-filling test), or a plain one-colour backdrop the pass-through keeps whole. The background
+  is busy when more than 5% of the band (`BUSY_BORDER_MAX_SHARE`) is such pixels, they read as scenery
+  and the photo is not frame-filling. Measured (share, edge density, tones): the court photo 33%,
+  0.51, 55 to 60 and the lifestyle candle Z011CB57531CA8FA0CBDDZ shot 1 7 to 13%, 0.00 to 0.01, 11 to
+  31 are busy; the gate 3f bag close-ups Z02B2EE44E3A08044B816Z shots 3 and 6 (5.4%, 0.25, 24 and
+  15.5%, 0.20, 30), the leather close-up Z5A0B7DE13FC67EDEAC9DZ shot 5 (17%, 0.13, 9) and the bag
+  held against a plain dress, Z02B2EE44E3A08044B816Z shot 1 (11%, 0.00, 4), pass through; every
+  plain-backdrop pass-through of the gate and golden sets keeps 0%. The `matte_passthrough` record
+  carries the reading ("N% of the border band no cut-out kept, edge density D, T tones"), so a hold
+  can be read from the report. On a busy background the step is recorded `matte_passthrough: failed`
+  ("busy background"), the matte is the whole photo as it is inside any uniform canvas strips the
+  brand pasted it on (every pixel of the photo opaque, the strips transparent as the pass-through
+  drops them; model `passthrough`, so never trimmed)
   and the photo carries `leftover_background`, code-detected (the same flag the judge raises for a
   leftover background; the step is recorded with trigger `leftover_background`, which is how
   `busyBackgroundHold` in auto-resolve.ts tells the two apart): rendered and staged as `needs_attention`,
   never re-made by the repair loop, a hard
   hold in triage (07, hold cause `unusable`), card sentence "The background could not be removed from
   this photo. Use it as is, replace it, or remove it." "Use as is" publishes the whole photo, fitted
-  with the band note. The judge-triggered pass-through step (07 auto-resolve) is skipped on a busy
+  with the band note on each channel where a cut side does not sit flush (so the sheet's flush note
+  leaves it out), never framed in the source's white strips. The judge-triggered pass-through step (07 auto-resolve) is skipped on a busy
   background ("busy background"), so the photo keeps `product_removed` and triage drops or holds it.
 - The judge's `product_removed` (07 4.0a) names the same failure after the render: its ladder (07
   auto-resolve) adds the same pass-through step after the second matte, for that trigger only.

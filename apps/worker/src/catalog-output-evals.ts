@@ -245,7 +245,7 @@ async function runSet(ctx: RunContext, group: Group): Promise<SetRecord> {
       const box = bbox(alpha, p.width, p.height);
       for (const o of outputs.filter(o => o.sourceImageId === source.id && o.stagingUri)) {
         const jpeg = (await gcs.downloadBuffer(o.stagingUri!)).buf;
-        const subject: OutputSubject = { identifier, n: source.n, channel: o.channel, productType: (products.get(source.productId)?.productType ?? group.category) as ProductType, source: { w: p.width, h: p.height, rgb: p.rgb }, sourceBackground: p.background, alpha, jpeg, placement: { w: o.canvasW, h: o.canvasH, scale: Number(o.scale), placedX: o.placedX, placedY: o.placedY }, flags: o.flags, status: o.status, reason: o.reason, expect: entry.expect };
+        const subject: OutputSubject = { identifier, n: source.n, channel: o.channel, productType: (products.get(source.productId)?.productType ?? group.category) as ProductType, source: { w: p.width, h: p.height, rgb: p.rgb }, sourceBackground: p.background, alpha, jpeg, placement: { w: o.canvasW, h: o.canvasH, scale: Number(o.scale), placedX: o.placedX, placedY: o.placedY }, flags: o.flags, status: o.status, reason: o.reason, expect: entry.expect, planted: !!entry.planted };
         const checks = await runImageChecks(subject);
         record.results.push(...checks);
         if (checks.every(c => c.ok)) deterministicPass.add(outputKey(identifier, o.channel, source.n));

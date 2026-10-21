@@ -30,7 +30,11 @@ export interface CompletenessInput {
   /** `notes` cell per identifier from the sheet. */
   sheetNotes: Map<string, string>;
   counts: { outputs: number; verified: number; skipped: number; recheckOk: number | null; recheckTotal: number | null };
-  /** Keys `identifier|n` of the sources the manifest expects the pipeline to hold (a 450 px copy, a planted photo on a live run): not live, no link. */
+  /**
+   * Keys `identifier|n` of the sources the manifest expects the pipeline to hold (a 450 px copy, a planted photo on a live
+   * run). A hold is per product (SPEC.md: `pending_attention` stages every shot of the product), so every shot of a
+   * product that holds an expected-hold shot is expected staged with no link, and left out of the verified counts.
+   */
   heldExpected?: Set<string>;
 }
 export const sourceKey = (identifier: string, n: number) => `${identifier}|${n}`;
@@ -46,13 +50,18 @@ export function checkCompleteness(input: CompletenessInput): CheckResult[] {
   const byKey = new Map<string, OutputRow[]>();
   for (const o of input.outputs) { const k = key(o.identifier, o.channel, o.n); byKey.set(k, [...byKey.get(k) ?? [], o]); }
   const seen = new Set<string>(), heldExpected = input.heldExpected ?? new Set<string>();
+  const heldProducts = new Map<string, number[]>();
+  for (const k of heldExpected) { const [identifier, n] = k.split("|"); heldProducts.set(identifier!, [...heldProducts.get(identifier!) ?? [], Number(n)]); }
   let expectedOutputs = 0, expectedSkips = 0, expectedHeld = 0;
   for (const source of input.sources) for (const ch of input.channels) {
     const who: CheckSubject = { identifier: source.identifier, n: source.n, channel: ch }, k = key(source.identifier, ch, source.n);
     seen.add(k);
     const rows = byKey.get(k) ?? [], chart = rows.length === 1 && rows[0]!.status === "skipped" && rows[0]!.reason === CHART_SKIP_NOTE;
-    const held = heldExpected.has(sourceKey(source.identifier, source.n));
-    const want = chart ? "chart" : held ? "held" : expectedOutcome(source, ch);
+    const heldShots = heldProducts.get(source.identifier), held = !!heldShots;
+    const sibling = held && !heldExpected.has(sourceKey(source.identifier, source.n));
+    // A Styli skip under the minimum stays a skip on a held product: the pipeline counts it as skipped and the sheet row
+    // carries the note (eval run 3: the held ZEE79259BBFD83FFA1DB0Z and the 450 px copies, 144 skipped against the 142 expected).
+    const want = chart ? "chart" : expectedOutcome(source, ch) === "skip" ? "skip" : held ? "held" : "output";
     if (want === "output") expectedOutputs++; else if (want === "held") expectedHeld++; else expectedSkips++;
     out.push(judge(rows.length === 1, "completeness.one_output", K, who, rows.length, 1, "rows", rows.length === 1 ? `One output row for ${channel(ch).label} image ${source.n}.` : `${rows.length} output rows for ${channel(ch).label} image ${source.n} (expected exactly 1).`));
     const row = rows[0];
@@ -61,7 +70,8 @@ export function checkCompleteness(input: CompletenessInput): CheckResult[] {
     if (want === "held") {
       // The manifest expects this photo to be held for a person: nothing goes live and the sheet carries no link.
       // Whether it was held with the right flags is attention.expected's call.
-      out.push(judge(!row.isLive && !cell?.url, "completeness.held_unpublished", K, who, `${row.status}${row.isLive ? ", live" : ""}${cell?.url ? ", linked" : ""}`, "not live, no link", "status", !row.isLive && !cell?.url ? "Expected hold: nothing published, no link in the sheet." : `Expected the pipeline to hold this photo but it is ${row.isLive ? "live" : row.status}${cell?.url ? " with a link in the sheet" : ""}.`));
+      const why = sibling ? `a sibling of the expected hold on image ${heldShots!.sort((a, b) => a - b).join(", ")}: the product is held as a whole` : "expected hold";
+      out.push(judge(!row.isLive && !cell?.url, "completeness.held_unpublished", K, who, `${row.status}${row.isLive ? ", live" : ""}${cell?.url ? ", linked" : ""}`, "not live, no link", "status", !row.isLive && !cell?.url ? `Expected hold (${why}): nothing published, no link in the sheet.` : `Expected the pipeline to hold this photo (${why}) but it is ${row.isLive ? "live" : row.status}${cell?.url ? " with a link in the sheet" : ""}.`));
       continue;
     }
     if (want === "chart") {
@@ -96,7 +106,7 @@ export function checkCompleteness(input: CompletenessInput): CheckResult[] {
   const all: CheckSubject = { identifier: "*", n: null, channel: null };
   const planned = expectedOutputs + expectedSkips + expectedHeld;
   out.push(judge(input.counts.outputs === planned, "completeness.counts_planned", K, all, input.counts.outputs, planned, "outputs", `Batch counts ${input.counts.outputs} planned outputs; the golden set implies ${planned} (${expectedSkips} Styli skips and left-out charts, ${expectedHeld} expected holds).`));
-  out.push(judge(input.counts.verified === expectedOutputs && input.counts.skipped === expectedSkips, "completeness.counts_verified", K, all, `${input.counts.verified} verified, ${input.counts.skipped} skipped`, `${expectedOutputs} verified, ${expectedSkips} skipped`, "outputs", `Links verified must equal planned minus skipped minus the ${expectedHeld} expected holds.`));
+  out.push(judge(input.counts.verified === expectedOutputs && input.counts.skipped === expectedSkips, "completeness.counts_verified", K, all, `${input.counts.verified} verified, ${input.counts.skipped} skipped`, `${expectedOutputs} verified, ${expectedSkips} skipped`, "outputs", `Links verified must equal planned minus skipped minus the ${expectedHeld} expected holds (every shot of a held product).`));
   const links = input.sheet.filter(c => c.url).length;
   out.push(judge(input.counts.recheckOk === input.counts.recheckTotal && input.counts.recheckTotal === links && links === expectedOutputs, "completeness.recheck_equals_verified", K, all, `recheck ${input.counts.recheckOk} of ${input.counts.recheckTotal}, ${links} links in the sheet`, `${expectedOutputs} of ${expectedOutputs}`, "links", "\"Independent re-check\" must equal \"Links verified\" and the number of links in the sheet (expected holds carry no link)."));
   return out;

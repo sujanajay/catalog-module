@@ -16,7 +16,8 @@
     "catalog:eval": "node -e \"if(!require('fs').existsSync('apps/worker/dist/catalog-eval.js')){console.error('catalog-eval: not built yet');process.exit(1)}\" && node apps/worker/dist/catalog-eval.js",
     "catalog:load": "node -e \"if(!require('fs').existsSync('apps/worker/dist/catalog-load.js')){console.error('catalog-load: not built yet');process.exit(1)}\" && node apps/worker/dist/catalog-load.js",
     "catalog:recheck": "node -e \"if(!require('fs').existsSync('apps/worker/dist/catalog-recheck.js')){console.error('catalog-recheck: not built yet');process.exit(1)}\" && node apps/worker/dist/catalog-recheck.js",
-    "catalog:output-evals": "node -e \"if(!require('fs').existsSync('apps/worker/dist/catalog-output-evals.js')){console.error('catalog-output-evals: not built yet');process.exit(1)}\" && node apps/worker/dist/catalog-output-evals.js"
+    "catalog:output-evals": "node -e \"if(!require('fs').existsSync('apps/worker/dist/catalog-output-evals.js')){console.error('catalog-output-evals: not built yet');process.exit(1)}\" && node apps/worker/dist/catalog-output-evals.js",
+    "catalog:enhancement-gate": "node -e \"if(!require('fs').existsSync('apps/worker/dist/catalog-enhancement-gate.js')){console.error('catalog-enhancement-gate: not built yet');process.exit(1)}\" && node apps/worker/dist/catalog-enhancement-gate.js"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",

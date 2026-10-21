@@ -21,12 +21,23 @@ export const SHADOW_ZONE_SHARE = 0.4;
 export const SHADOW_ZONE_CHROMA_MAX = 72;
 /**
  * A floor reflection: a thin band of the product's own colour under the matte's lowest row in its column (eval run 2,
- * Anta bd-112621603-1: 1 to 7 source px of faded pink under the sole, chroma up to 92). It is lighter than the product it
- * mirrors and never more saturated than it, so a lost sole part (the lime midsole of bd-112625546-12, chroma 100 to 150
- * under a black outsole) still counts. The band is at most REFLECTION_MAX_SHARE of the frame height, never under 8 px.
+ * Anta bd-112621603-1: 1 to 7 source px of faded pink under the sole, chroma up to 92). It is lighter than the darkest of
+ * the product's lowest REFLECTION_ROWS matted rows there and no more saturated (within REFLECTION_CHROMA_SLACK) than the
+ * most saturated of them, so a lost sole part (the lime midsole of bd-112625546-12, chroma 100 to 150 under a black
+ * outsole) still counts. Eval run 3 (anta): the mean of the lowest three rows missed a 1 to 2 px pink mirror of a red
+ * sole edge under a grey row (24 fails of 3.15 to 5.53%, identical to four decimals across the four bake-off models,
+ * so the estimate owned them). The band is at most REFLECTION_MAX_SHARE of the frame height, never under 8 px.
  */
 export const REFLECTION_MAX_SHARE = 0.015;
 export const REFLECTION_CHROMA_SLACK = 12;
+export const REFLECTION_ROWS = 6;
+/**
+ * No colour evidence: when more than this share of the matte's interior (alpha 255, eroded 3 px) lies within
+ * SOURCE_FOREGROUND_DELTA of the background colour, the estimate cannot tell the product from its background (eval run 3,
+ * penti: a white bra set over a flat 245 grey measured 23.8% kept background and 9% fringe on every bake-off model with a
+ * complete matte), so `background_kept` and `fringe` are not run, listed as "white on near-white".
+ */
+export const NO_COLOUR_EVIDENCE_MAX_SHARE = 0.1;
 /** Grid over the product's bounding box for the per-region loss measurement. */
 export const REGION_GRID = 6;
 /** A region needs at least this many estimated product pixels to be measured. */
@@ -46,24 +57,49 @@ export const THIN_MIN_PIXELS = 100;
  */
 export const BACKGROUND_KEPT_MAX = 0.01;
 export const BACKGROUND_KEPT_DILATE_PX = 3;
+/**
+ * A matte pixel in the background colour is kept background only where the source is flat (local luma range under
+ * BACKGROUND_KEPT_FLAT_RANGE over a BACKGROUND_KEPT_FLAT_PX window) and outside the convex span of the colour estimate
+ * grown by BACKGROUND_KEPT_SPAN_GROW of the estimate's box. Eval run 3 (french_connection): the white borders fit at
+ * 255 and a white dress, pale trousers or a white skirt match the fit within 10 levels while carrying no colour evidence;
+ * the hem corners and the rows below the arms sit inside the garment's span and on woven fabric (range well over 6),
+ * so they are the garment (40 fails of 1.07 to 3.63%). A solid chunk of plain background beside or below the product
+ * (the candle blob of run 2, 1.99% of the frame; a 90 px strip) is flat and outside the span and still counts.
+ */
+export const BACKGROUND_KEPT_FLAT_RANGE = 6;
+export const BACKGROUND_KEPT_FLAT_PX = 5;
+export const BACKGROUND_KEPT_SPAN_GROW = 0.04;
 /** Share of the 3 px ring around the product that is not canvas background (outside the shadow band). */
 export const HALO_RING_MAX = 0.02;
 /** Share of soft-edge pixels that still carry the source background colour. */
 export const FRINGE_MAX = 0.01;
 /** Holes: interior regions the matte drops, as a share of the estimated product area. */
 export const HOLE_MIN_SHARE = 0.0005;
-/** See-through: interior product pixels whose alpha dips under this (faint patches inside a body). */
+/**
+ * See-through: interior product pixels (outside the thin structures) whose alpha dips under this (faint patches inside
+ * a body). Footwear keeps 0.2% (eval run 2). The soft types get 1.5% (eval run 3, french_connection: 112 fails at 0.2%
+ * on 14 photos, all under 1.4%: sheer chiffon 0.6 to 1.4%, hair 0.3 to 1.3%, white shirts on white 0.6%, none visible
+ * on the canvas); a 3% translucent patch inside a body still fails.
+ */
 export const SEE_THROUGH_ALPHA = 200;
 export const SEE_THROUGH_MAX = 0.002;
+export const SEE_THROUGH_MAX_SOFT_TYPES = 0.015;
+export const SOFT_TYPES: ReadonlySet<string> = new Set(["apparel_model", "apparel_flat", "bag_accessory", "other"]);
+export const seeThroughBar = (type?: ProductType | null): number => (type && SOFT_TYPES.has(type) ? SEE_THROUGH_MAX_SOFT_TYPES : SEE_THROUGH_MAX);
 /**
- * Mean width of the soft alpha band along the silhouette (over-blurred edges look like a halo). Footwear keeps the
- * bar of 3 px (eval run 2, anta: p50 2.56, p90 2.69, max 2.82). Fabric edges (fuzz, flat-lay seams) and a white box
- * on white are softer in every model (french_connection matted outputs p50 2.98, p90 3.48, max 3.48; bake-off trials
- * p50 3.19) and look sharp on the canvas, so apparel, bags and hardline get 3.5 px.
+ * Mean width of the soft alpha band along the silhouette (over-blurred edges look like a halo), counted within
+ * EDGE_SOFTNESS_REACH_PX of the silhouette so a sheer garment's interior (alpha under 245 across the whole chiffon) is not
+ * edge. Footwear keeps the bar of 3 px (eval run 2, anta: p50 2.56, p90 2.69, max 2.82). Eval run 3 measured every
+ * apparel matte (french_connection, 1136 outputs: per photo p50 3.51, p75 3.80, p90 4.18, max 8.82 against the 3.5 set on
+ * the 88 uniform-background outputs of run 2): model photos at 3.9 to 4.3 are crisp on the canvas, so apparel, bags and
+ * hardline get 4.5 px; a 12 px blurred halo still measures about 7.8 (the reach caps the count). Not run when the silhouette is the frame (edge
+ * length under EDGE_SOFTNESS_MIN_EDGE_SHARE of the frame perimeter: a full-bleed close-up, an unstable ratio).
  */
 export const EDGE_SOFTNESS_MAX_PX = 3;
-export const EDGE_SOFTNESS_MAX_PX_SOFT_TYPES = 3.5;
-export const edgeSoftnessBar = (type?: ProductType | null): number => (type === "apparel_model" || type === "apparel_flat" || type === "bag_accessory" || type === "other" ? EDGE_SOFTNESS_MAX_PX_SOFT_TYPES : EDGE_SOFTNESS_MAX_PX);
+export const EDGE_SOFTNESS_MAX_PX_SOFT_TYPES = 4.5;
+export const EDGE_SOFTNESS_REACH_PX = 8;
+export const EDGE_SOFTNESS_MIN_EDGE_SHARE = 0.02;
+export const edgeSoftnessBar = (type?: ProductType | null): number => (type && SOFT_TYPES.has(type) ? EDGE_SOFTNESS_MAX_PX_SOFT_TYPES : EDGE_SOFTNESS_MAX_PX);
 
 const C = "cutout" as const;
 
@@ -80,17 +116,17 @@ export function estimateForeground(input: MatteInput, sourceBox: { y: number; h:
   const rowBg: [number, number, number][] = [], rowLuma = new Float32Array(h);
   for (let y = 0; y < h; y++) { const c = model.at(y); rowBg.push(c); rowLuma[y] = lumaAt(Buffer.from(c), 0); }
   const zoneTop = sourceBox.y + sourceBox.h * (1 - SHADOW_ZONE_SHARE);
-  // Per column: the matte's lowest row and the mean luma and chroma of its lowest three matted rows (what a floor
-  // reflection under that column mirrors).
-  const colBottom = new Int32Array(w).fill(-1), colLuma = new Float32Array(w), colChroma = new Float32Array(w);
+  // Per column: the matte's lowest row, the darkest luma and the highest chroma of its lowest REFLECTION_ROWS matted rows
+  // (what a floor reflection under that column mirrors: the sole edge, not the mean of the sole).
+  const colBottom = new Int32Array(w).fill(-1), colLuma = new Float32Array(w).fill(Infinity), colChroma = new Float32Array(w);
   for (let x = 0; x < w; x++) {
     let rows = 0;
-    for (let y = h - 1; y >= 0 && rows < 3; y--) {
+    for (let y = h - 1; y >= 0 && rows < REFLECTION_ROWS; y--) {
       const i = y * w + x;
       if (alpha[i]! <= ALPHA_EDGE) { if (rows) break; continue; }
       if (!rows) colBottom[x] = y;
-      const r = source.rgb[i * 3]!, g = source.rgb[i * 3 + 1]!, b = source.rgb[i * 3 + 2]!;
-      colLuma[x] = colLuma[x]! + lumaAt(source.rgb, i) / 3; colChroma[x] = colChroma[x]! + (Math.max(r, g, b) - Math.min(r, g, b)) / 3; rows++;
+      const r = source.rgb[i * 3]!, g = source.rgb[i * 3 + 1]!, b = source.rgb[i * 3 + 2]!, l = lumaAt(source.rgb, i), c = Math.max(r, g, b) - Math.min(r, g, b);
+      if (l < colLuma[x]!) colLuma[x] = l; if (c > colChroma[x]!) colChroma[x] = c; rows++;
     }
   }
   const reflectionDepth = Math.max(8, Math.round(h * REFLECTION_MAX_SHARE));
@@ -103,7 +139,7 @@ export function estimateForeground(input: MatteInput, sourceBox: { y: number; h:
     // the sole) any unmatted darkening does. Dark product parts elsewhere stay in the estimate.
     const inZone = y >= zoneTop;
     let shadowLike = l < bgLuma && (inZone ? chroma < SHADOW_ZONE_CHROMA_MAX : chroma < SHADOW_CHROMA_MAX && l >= bgLuma * SHADOW_MIN_LUMA_SHARE);
-    // A floor reflection under the matte's lowest row: a thin, lighter, no more saturated copy of the product above it.
+    // A floor reflection under the matte's lowest row: a thin, lighter, no more saturated copy of the product edge above it.
     if (!shadowLike && inZone && l < bgLuma && colBottom[x]! >= 0 && y > colBottom[x]! && y - colBottom[x]! <= reflectionDepth && l > colLuma[x]! && chroma <= colChroma[x]! + REFLECTION_CHROMA_SLACK) shadowLike = true;
     if (shadowLike && alpha[i]! <= ALPHA_EDGE) continue;
     raw[i] = 1;
@@ -117,6 +153,8 @@ export function estimateForeground(input: MatteInput, sourceBox: { y: number; h:
 
 export interface MatteMetrics {
   regionLoss: number | null; globalLoss: number | null; thinLoss: number | null; backgroundKept: number | null; holes: number | null; seeThrough: number | null; edgeSoftness: number | null;
+  /** Share of the matte interior (alpha 255, eroded 3 px) within SOURCE_FOREGROUND_DELTA of the background: over NO_COLOUR_EVIDENCE_MAX_SHARE the colour checks that need the product's colour are not run. */
+  noColourEvidence?: number | null;
   /** Against the other models' majority (bake-off only): share of consensus product this matte drops, and share of this matte the consensus calls background. */
   consensusLoss?: number | null; consensusExtra?: number | null;
 }
@@ -136,6 +174,42 @@ export function consensusMetrics(alpha: Buffer, others: readonly Buffer[]): { co
   return { consensusLoss: consensus ? lost / consensus : 0, consensusExtra: mine ? extra / mine : 0 };
 }
 
+/** Whether the source is flat around (x, y): luma range under BACKGROUND_KEPT_FLAT_RANGE over a BACKGROUND_KEPT_FLAT_PX window. */
+export function flatAt(source: Raster, x: number, y: number): boolean {
+  const r = BACKGROUND_KEPT_FLAT_PX >> 1;
+  let lo = Infinity, hi = -Infinity;
+  for (let yy = Math.max(0, y - r); yy <= Math.min(source.h - 1, y + r); yy++) for (let xx = Math.max(0, x - r); xx <= Math.min(source.w - 1, x + r); xx++) { const l = lumaAt(source.rgb, yy * source.w + xx); if (l < lo) lo = l; if (l > hi) hi = l; }
+  return hi - lo < BACKGROUND_KEPT_FLAT_RANGE;
+}
+
+/**
+ * The convex hull of a mask given by its per-row extents, rasterised to a [left, right] interval per row and grown by
+ * `grow` px (Chebyshev); rows outside the hull get left = +Infinity, right = -Infinity.
+ */
+export function convexSpan(rowMin: Int32Array, rowMax: Int32Array, h: number, grow: number): { left: Float64Array; right: Float64Array } {
+  const pts: [number, number][] = [];
+  for (let y = 0; y < h; y++) if (rowMax[y]! >= 0) { pts.push([rowMin[y]!, y]); if (rowMax[y]! !== rowMin[y]!) pts.push([rowMax[y]!, y]); }
+  const left = new Float64Array(h).fill(Infinity), right = new Float64Array(h).fill(-Infinity);
+  if (!pts.length) return { left, right };
+  pts.sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+  const cross = (o: [number, number], a: [number, number], b: [number, number]) => (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0]);
+  const lower: [number, number][] = [], upper: [number, number][] = [];
+  for (const p of pts) { while (lower.length >= 2 && cross(lower[lower.length - 2]!, lower[lower.length - 1]!, p) <= 0) lower.pop(); lower.push(p); }
+  for (let k = pts.length - 1; k >= 0; k--) { const p = pts[k]!; while (upper.length >= 2 && cross(upper[upper.length - 2]!, upper[upper.length - 1]!, p) <= 0) upper.pop(); upper.push(p); }
+  const hull = [...lower.slice(0, -1), ...upper.slice(0, -1)];
+  const raw = { left: new Float64Array(h).fill(Infinity), right: new Float64Array(h).fill(-Infinity) };
+  const mark = (x: number, y: number) => { if (x < raw.left[y]!) raw.left[y] = x; if (x > raw.right[y]!) raw.right[y] = x; };
+  if (hull.length === 1) mark(hull[0]![0], hull[0]![1]);
+  for (let k = 0; k < hull.length && hull.length > 1; k++) {
+    const [x0, y0] = hull[k]!, [x1, y1] = hull[(k + 1) % hull.length]!;
+    if (y0 === y1) { mark(x0, y0); mark(x1, y0); continue; }
+    const [ya, yb] = y0 < y1 ? [y0, y1] : [y1, y0];
+    for (let y = ya; y <= yb; y++) mark(x0 + (x1 - x0) * (y - y0) / (y1 - y0), y);
+  }
+  for (let y = 0; y < h; y++) for (let dy = -grow; dy <= grow; dy++) { const yy = y + dy; if (yy < 0 || yy >= h || raw.right[yy]! < 0) continue; left[y] = Math.min(left[y]!, raw.left[yy]! - grow); right[y] = Math.max(right[y]!, raw.right[yy]! + grow); }
+  return { left, right };
+}
+
 /** The matte-only checks; `metrics` carries the raw numbers for ranking models. */
 export function checkMatte(input: MatteInput, channel: CheckSubject["channel"] = null): { results: CheckResult[]; metrics: MatteMetrics } {
   const who: CheckSubject = { identifier: input.identifier, n: input.n, channel };
@@ -146,18 +220,25 @@ export function checkMatte(input: MatteInput, channel: CheckSubject["channel"] =
   const matted = thresholdMask(alpha, ALPHA_EDGE);
 
   // Edge softness needs only the matte: soft alpha pixels per unit of silhouette length, against the type's bar.
-  const boundary = dilate(matted, w, h, 1), softBar = edgeSoftnessBar(input.productType);
-  let soft = 0, edgeLength = 0;
-  for (let i = 0; i < alpha.length; i++) { if (alpha[i]! > ALPHA_EDGE && alpha[i]! < 245) soft++; if (boundary[i] && !matted[i]) edgeLength++; }
-  const softness = edgeLength ? soft / edgeLength : 0;
-  metrics.edgeSoftness = softness;
-  out.push(judge(softness <= softBar, "cutout.edge_softness", C, who, Math.round(softness * 100) / 100, softBar, "px of soft edge", `The soft edge band averages ${softness.toFixed(2)} px wide (bar ${softBar} px for ${input.productType ?? "footwear"}).`));
+  const boundary = dilate(matted, w, h, 1), softBar = edgeSoftnessBar(input.productType), edge = new Uint8Array(alpha.length);
+  let edgeLength = 0;
+  for (let i = 0; i < alpha.length; i++) if (boundary[i] && !matted[i]) { edge[i] = 1; edgeLength++; }
+  if (edgeLength < EDGE_SOFTNESS_MIN_EDGE_SHARE * 2 * (w + h)) out.push(notRun("cutout.edge_softness", C, who, `The silhouette is the frame (${edgeLength} px of edge, under ${EDGE_SOFTNESS_MIN_EDGE_SHARE * 100}% of the perimeter): a full-bleed close-up has no soft edge to measure.`));
+  else {
+    const nearEdge = dilate(edge, w, h, EDGE_SOFTNESS_REACH_PX);
+    let soft = 0;
+    for (let i = 0; i < alpha.length; i++) if (nearEdge[i] && alpha[i]! > ALPHA_EDGE && alpha[i]! < 245) soft++;
+    const softness = soft / edgeLength;
+    metrics.edgeSoftness = softness;
+    out.push(judge(softness <= softBar, "cutout.edge_softness", C, who, Math.round(softness * 100) / 100, softBar, "px of soft edge", `The soft edge band within ${EDGE_SOFTNESS_REACH_PX} px of the silhouette averages ${softness.toFixed(2)} px wide (bar ${softBar} px for ${input.productType ?? "footwear"}).`));
+  }
 
   // The rest compares the matte with the source colours, which needs a background colour per row: flat or smoothly graded.
   const model = backgroundModel(input.source, input.sourceBackground);
   if (!model) { out.push(notRun("cutout.pixels_lost", C, who, "The source background is neither uniform nor a smooth gradient, so no independent product estimate is possible.")); return { results: out, metrics }; }
   const { mask: fg, count } = estimateForeground(input, sourceBox, model);
   if (count < REGION_MIN_PIXELS) { out.push(notRun("cutout.pixels_lost", C, who, "Too few product pixels can be told from the background by colour.")); return { results: out, metrics }; }
+
 
   // Per-region loss over a grid on the estimate's bounding box.
   let gx0 = w, gy0 = h, gx1 = -1, gy1 = -1;
@@ -177,29 +258,43 @@ export function checkMatte(input: MatteInput, channel: CheckSubject["channel"] =
   out.push(judge(worst <= REGION_LOSS_MAX && globalShare <= GLOBAL_LOSS_MAX, "cutout.pixels_lost", C, who, Math.round(worst * 1e4) / 1e4, REGION_LOSS_MAX, "share lost in the worst region", `Worst region (row ${Math.floor(worstCell / REGION_GRID) + 1}, column ${worstCell % REGION_GRID + 1} of ${REGION_GRID}x${REGION_GRID}) loses ${(worst * 100).toFixed(2)}% of its product pixels; overall ${(globalShare * 100).toFixed(2)}%.`));
 
   // Thin parts: what a radius-2 opening removes (straps, laces, hair, heels).
+  // (The white-on-near-white share is measured below, once the estimate's span is known.)
   const opened = dilate(erode(fg, w, h, 2), w, h, 2);
   let thin = 0, thinLost = 0;
   for (let i = 0; i < fg.length; i++) if (fg[i] && !opened[i]) { thin++; if (!matted[i]) thinLost++; }
   if (thin >= THIN_MIN_PIXELS) { metrics.thinLoss = thinLost / thin; out.push(judge(thinLost / thin <= THIN_LOSS_MAX, "cutout.thin_parts", C, who, Math.round(thinLost / thin * 1e3) / 1e3, THIN_LOSS_MAX, "share of thin pixels lost", `${(100 * thinLost / thin).toFixed(1)}% of ${thin} thin product pixels (straps, laces, hair) are missing from the cut-out.`)); }
   else out.push(notRun("cutout.thin_parts", C, who, "The product has no thin structures to measure."));
 
-  // Background kept inside the matte: matted pixels the colour estimate (dilated 2 px) does not cover and that match the source background.
-  // White product parts carry no colour evidence, so only background-coloured matte pixels outside the
-  // silhouette's span (no product evidence left and right, or above and below) count as kept background.
-  const near = dilate(fg, w, h, BACKGROUND_KEPT_DILATE_PX), rowMin = new Int32Array(h).fill(w), rowMax = new Int32Array(h).fill(-1), colMin = new Int32Array(w).fill(h), colMax = new Int32Array(w).fill(-1);
-  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) if (fg[y * w + x]) { if (x < rowMin[y]!) rowMin[y] = x; if (x > rowMax[y]!) rowMax[y] = x; if (y < colMin[x]!) colMin[x] = y; if (y > colMax[x]!) colMax[x] = y; }
+  // Background kept inside the matte: matted pixels the colour estimate (dilated 3 px) does not cover and that match the
+  // source background. White product parts carry no colour evidence, so a background-coloured matte pixel counts only
+  // where the source is flat (a garment is woven, a plain background is not) and outside the estimate's convex span
+  // grown by 4% of its box (no product evidence around it in any direction).
+  const near = dilate(fg, w, h, BACKGROUND_KEPT_DILATE_PX), rowMin = new Int32Array(h).fill(w), rowMax = new Int32Array(h).fill(-1);
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) if (fg[y * w + x]) { if (x < rowMin[y]!) rowMin[y] = x; if (x > rowMax[y]!) rowMax[y] = x; }
+  const span = convexSpan(rowMin, rowMax, h, Math.round(Math.max(gx1 - gx0 + 1, gy1 - gy0 + 1) * BACKGROUND_KEPT_SPAN_GROW));
+  const inSpan = (x: number, y: number) => x >= span.left[y]! && x <= span.right[y]!;
+  // White on near-white: how much of the matte's own interior inside the estimate's span (the product's body, where a
+  // kept chunk beside or below the product does not lie) the estimate cannot tell from the background.
+  const opaqueInterior = erode(thresholdMask(alpha, 254), w, h, 3);
+  let opaqueCount = 0, invisible = 0;
+  for (let i = 0; i < opaqueInterior.length; i++) if (opaqueInterior[i]) { const x = i % w, y = (i - x) / w; if (!inSpan(x, y)) continue; opaqueCount++; if (delta(input.source.rgb, i, model.at(y)) <= SOURCE_FOREGROUND_DELTA) invisible++; }
+  const noColourEvidence = opaqueCount ? invisible / opaqueCount : 0;
+  metrics.noColourEvidence = noColourEvidence;
   let kept = 0, mattedCount = 0;
   for (let i = 0; i < fg.length; i++) if (matted[i]) {
     mattedCount++;
-    const x = i % w, y = (i - x) / w, enclosed = x > rowMin[y]! && x < rowMax[y]! && y > colMin[x]! && y < colMax[x]!;
-    if (!near[i] && !enclosed && delta(input.source.rgb, i, model.at(y)) <= 10) kept++;
+    const x = i % w, y = (i - x) / w;
+    if (!near[i] && !inSpan(x, y) && delta(input.source.rgb, i, model.at(y)) <= 10 && flatAt(input.source, x, y)) kept++;
   }
   const keptShare = mattedCount ? kept / mattedCount : 0;
   metrics.backgroundKept = keptShare;
-  out.push(judge(keptShare <= BACKGROUND_KEPT_MAX, "cutout.background_kept", C, who, Math.round(keptShare * 1e4) / 1e4, BACKGROUND_KEPT_MAX, "share of matte that is source background", `${(keptShare * 100).toFixed(2)}% of the cut-out is plain source background${model.kind === "graded" ? " (graded background, fitted top to bottom)" : ""}.`));
+  if (noColourEvidence > NO_COLOUR_EVIDENCE_MAX_SHARE) out.push(notRun("cutout.background_kept", C, who, `White on near-white: ${(noColourEvidence * 100).toFixed(1)}% of the matte interior is within ${SOURCE_FOREGROUND_DELTA} of the background colour, so the estimate cannot tell kept background from the product (it would measure ${(keptShare * 100).toFixed(2)}%).`));
+  else out.push(judge(keptShare <= BACKGROUND_KEPT_MAX, "cutout.background_kept", C, who, Math.round(keptShare * 1e4) / 1e4, BACKGROUND_KEPT_MAX, "share of matte that is source background", `${(keptShare * 100).toFixed(2)}% of the cut-out is plain source background${model.kind === "graded" ? " (graded background, fitted top to bottom)" : ""}.`));
 
   // Holes and see-through patches: the interior of the estimate the matte drops or thins.
-  const interior = erode(fg, w, h, 3), holeMask = new Uint8Array(fg.length);
+  // The interior (the estimate eroded 3 px) holds no thin structure (what the radius-2 opening removes is under 5 px
+  // wide), so hair and straps are never a see-through patch inside a body.
+  const interior = erode(fg, w, h, 3), holeMask = new Uint8Array(fg.length), seeBar = seeThroughBar(input.productType);
   let interiorCount = 0, seeThrough = 0;
   for (let i = 0; i < fg.length; i++) if (interior[i]) { interiorCount++; if (!matted[i]) holeMask[i] = 1; if (alpha[i]! < SEE_THROUGH_ALPHA) seeThrough++; }
   const holes = components(holeMask, w, h).sizes.slice(1).filter(size => size >= count * HOLE_MIN_SHARE).length;
@@ -207,7 +302,7 @@ export function checkMatte(input: MatteInput, channel: CheckSubject["channel"] =
   out.push(judge(holes === 0, "cutout.holes", C, who, holes, 0, "holes", holes ? `${holes} hole(s) inside the product where the cut-out dropped pixels.` : "No holes inside the product."));
   const seeShare = interiorCount ? seeThrough / interiorCount : 0;
   metrics.seeThrough = seeShare;
-  out.push(judge(seeShare <= SEE_THROUGH_MAX, "cutout.see_through", C, who, Math.round(seeShare * 1e4) / 1e4, SEE_THROUGH_MAX, "share of interior under alpha 200", `${(seeShare * 100).toFixed(2)}% of the product interior is partly transparent in the matte.`));
+  out.push(judge(seeShare <= seeBar, "cutout.see_through", C, who, Math.round(seeShare * 1e4) / 1e4, seeBar, "share of interior under alpha 200", `${(seeShare * 100).toFixed(2)}% of the product interior (the estimate eroded 3 px, which holds no thin structure) is partly transparent in the matte (bar ${seeBar * 100}% for ${input.productType ?? "footwear"}).`));
   return { results: out, metrics };
 }
 
@@ -218,14 +313,19 @@ export function checkCutout(ctx: OutputContext): CheckResult[] {
   const { subject: s, canvas, background, product, band, productBox } = ctx;
   const who: CheckSubject = { identifier: s.identifier, n: s.n, channel: s.channel };
   const passthrough = s.flags.some(f => PASSTHROUGH_FLAGS.includes(f));
-  const out: CheckResult[] = checkMatte({ identifier: s.identifier, n: s.n, source: s.source, sourceBackground: s.sourceBackground, alpha: s.alpha, productType: s.productType }, s.channel).results
-    .map(r => (passthrough && r.id === "cutout.background_kept" ? notRun(r.id, C, who, "The photo is kept whole by rule (pass-through), so its own background inside the matte is not kept background.") : r));
+  // An expected hold is never published (eval run 3, anta: 1.22% on the held 450 px copy, a 3 px fringe on a short perimeter).
+  const expectedHold = s.expect.attention && (s.status === "needs_attention" || s.status === "failed");
+  const matte = checkMatte({ identifier: s.identifier, n: s.n, source: s.source, sourceBackground: s.sourceBackground, alpha: s.alpha, productType: s.productType }, s.channel);
+  const whiteOnWhite = (matte.metrics.noColourEvidence ?? 0) > NO_COLOUR_EVIDENCE_MAX_SHARE;
+  const out: CheckResult[] = matte.results
+    .map(r => (passthrough && r.id === "cutout.background_kept" ? notRun(r.id, C, who, "The photo is kept whole by rule (pass-through), so its own background inside the matte is not kept background.") : expectedHold && r.id === "cutout.background_kept" && r.status !== "not_run" ? notRun(r.id, C, who, `The manifest expects this photo held and it is (${s.status}): the output is never published (it would measure ${r.measured} against ${r.threshold}).`) : r));
   if (passthrough) {
     // The photo is kept whole by rule: the ring around the matte and the soft edge show its own background, not a halo or a fringe.
     out.push(notRun("cutout.halo", C, who, "The photo is kept whole by rule (pass-through); the ring around the product is its own background, not a halo."));
     out.push(notRun("cutout.fringe", C, who, "The photo is kept whole by rule (pass-through); its own background is not a fringe."));
     return out;
   }
+
 
   // Halo ring on the canvas: the 3 px ring around the product must be canvas background. Where a shadow is allowed, a
   // kept photographic shadow runs up the sides and in front of the product to SHADOW_BAND_ABOVE of its height above the
@@ -249,6 +349,8 @@ export function checkCutout(ctx: OutputContext): CheckResult[] {
   let closest = Infinity;
   if (model) for (let y = Math.max(0, pb.y); y < Math.min(canvas.h, pb.y + pb.h); y++) { const c = model.at(sourceRow(y)); closest = Math.min(closest, Math.max(Math.abs(c[0] - background[0]), Math.abs(c[1] - background[1]), Math.abs(c[2] - background[2]))); }
   if (!model) out.push(notRun("cutout.fringe", C, who, "The source has neither a uniform nor a smoothly graded border, so a fringe in its colour cannot be told from the product."));
+  else if (expectedHold) out.push(notRun("cutout.fringe", C, who, `The manifest expects this photo held and it is (${s.status}): the output is never published.`));
+  else if (whiteOnWhite) out.push(notRun("cutout.fringe", C, who, `White on near-white: ${((matte.metrics.noColourEvidence ?? 0) * 100).toFixed(1)}% of the matte interior is within ${SOURCE_FOREGROUND_DELTA} of the background colour, so a fringe in that colour cannot be told from the product.`));
   else if (closest <= 20) out.push(notRun("cutout.fringe", C, who, "Source and canvas backgrounds match, so a fringe cannot be told apart."));
   else {
     let edge = 0, fringe = 0;

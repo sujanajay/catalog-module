@@ -1,6 +1,6 @@
-import { flagReason, type OutputFlag } from "../types";
+import { flagReason, UPSCALED_SENTENCE, type OutputFlag } from "../types";
 import { CHANNELS } from "../channels";
-export interface ReasonContext { /** The code-detected `leftover_background` (a busy background held at the matte stage, busyBackgroundHold). */ busy?: boolean; n?: number; k?: number; channel?: string; w?: number; h?: number; min?: number; failures?: string; error?: string }
+export interface ReasonContext { /** The code-detected `leftover_background` (a busy background held at the matte stage, busyBackgroundHold). */ busy?: boolean; n?: number; k?: number; channel?: string; w?: number; h?: number; min?: number; /** A fixed canvas's delivered size (spec 11 4.1). */ deliverW?: number; deliverH?: number; failures?: string; error?: string }
 export interface FlagDetails { why: string; whatToDo: string }
 /** The placement sentence in the channel's own rule (the channel table's `anchor`), in operator words. */
 function placementWhy(label: string | undefined): string {
@@ -25,13 +25,13 @@ export function flagDetails(flag: OutputFlag | "failed", ctx: ReasonContext = {}
     collage:["This image combines several photos in one. Marketplaces reject these.","Remove it, or replace it with the single photos."],
     orientation:["The product looks rotated or upside down.","If the original is like this, replace it with a corrected photo."],
     placement:[placementWhy(ctx.channel),`Check the other angles of this product. This affects ${ctx.channel ?? "this marketplace"} only; "Remove this photo" removes it for ${ctx.channel ?? "this marketplace"}, "Replace photo ${n}" swaps the photo.`],
-    low_resolution:[ctx.w !== undefined && ctx.h !== undefined ? `The original is ${ctx.w} x ${ctx.h}. ${channel} wants at least ${ctx.min ?? "the required"} px, so this one may look soft.` : `The original photo is smaller than ${channel} wants, so this one may look soft.`,"It will upload, but ask the brand for a larger photo if you can. The other marketplaces are fine with it."],
+    low_resolution:[ctx.w !== undefined && ctx.h !== undefined && ctx.deliverW !== undefined && ctx.deliverH !== undefined ? `The original is ${ctx.w} x ${ctx.h}. ${channel} images are delivered at ${ctx.deliverW} x ${ctx.deliverH}, so this one was enlarged and may look soft.` : ctx.w !== undefined && ctx.h !== undefined ? `The original is ${ctx.w} x ${ctx.h}. ${channel} wants at least ${ctx.min ?? "the required"} px, so this one may look soft.` : `The original photo is smaller than ${channel} wants, so this one may look soft.`,"It will upload, but ask the brand for a larger photo if you can. The other marketplaces are fine with it."],
     small_source:[ctx.w !== undefined && ctx.h !== undefined ? `The original is only ${ctx.w} x ${ctx.h}, under 500 px on its long side.` : "The original is under 500 px on its long side.","It is too small to look good anywhere. Remove it or replace it with a larger photo."],
     failed:[ctx.error ?? "The file is corrupt and could not be decoded.","Nothing was made for any marketplace from this photo. Remove it or replace it."],
     failed_compliance:[`The image we made did not meet ${channel}'s rules${ctx.failures ? `: ${ctx.failures}` : ""}.`,"This should not happen. Remove it or replace it, and the technical team will look at the report."],
     fallback_matte:["The background was removed with the simple method because the cut-out service was unavailable.",'Check the edges. "Use as is" keeps it.'],
     transparent:["This product looks transparent or glass; the cut-out may need a look.",'Compare the two images. "Use as is" keeps it.'],
-    upscaled:["This image was enlarged by an experimental step.","Check logos, text and fabric texture against the original."],
+    upscaled:[UPSCALED_SENTENCE,"Nothing to do."],
     qa_unavailable:["The quality check could not read this image.",'Please look at it yourself. "Use as is" keeps it.'],
     qa_cap:["Quality check paused: the spending limit was reached.","Look at this image yourself, or raise the limit and start a new batch."],
     type_unknown:["We could not tell what kind of product this is, so the general treatment was used.","If the images look wrong, start a new batch with the product type chosen by hand."],
@@ -62,7 +62,7 @@ export function shortClause(flag: OutputFlag | "failed", ctx: ReasonContext = {}
 export const FLAG_SEVERITY: readonly (OutputFlag | "failed")[] = [
   "failed", "different_product", "collage", "chart_image", "product_removed", "small_source", "failed_compliance",
   "leftover_background", "halo", "fallback_matte", "placement", "text_or_watermark", "orientation",
-  "qa_unavailable", "qa_cap", "upscaled", "complete_product", "transparent",
+  "qa_unavailable", "qa_cap", "complete_product", "transparent",
 ];
 export const severityRank = (flag: OutputFlag | "failed") => { const i = FLAG_SEVERITY.indexOf(flag); return i < 0 ? FLAG_SEVERITY.length : i; };
 /** The flags worst first; a stable sort, so equal ranks keep their order. */

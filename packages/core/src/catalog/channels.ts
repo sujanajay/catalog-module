@@ -211,9 +211,9 @@ export const STYLI_MIN_SOURCE_HEIGHT_PX = 1482;
 /** Agreement with Styli; always applied (not a batch option). */
 export const STYLI_SKIP_LOW_RESOLUTION = true;
 /** Bumped on any rule change; part of render_key (06). */
-export const CHANNEL_RULES_VERSION = "7";
+export const CHANNEL_RULES_VERSION = "8";
 
 /** The start of the render note naming a cut side that does not sit flush on a channel (the sheet's cut note leaves such photos out). */
 export const CUT_BAND_NOTE_START = "The original photo is cut at the ";
-/** True when an output's notes (joined with "; ") say a cut side does not sit flush. */
-export const hasCutBandNote = (reason: string | null | undefined): boolean => !!reason && reason.split("; ").some(note => note.startsWith(CUT_BAND_NOTE_START));
+/** True when an output's notes (joined with "; ", or a sentence after a held photo's card sentence) say a cut side does not sit flush. */
+export const hasCutBandNote = (reason: string | null | undefined): boolean => !!reason && reason.split("; ").some(note => note.startsWith(CUT_BAND_NOTE_START) || note.includes(`. ${CUT_BAND_NOTE_START}`));

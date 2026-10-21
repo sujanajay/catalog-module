@@ -4,6 +4,8 @@ import { backgroundFor, channel, CUT_BAND_NOTE_START, DETAIL_SHOT_BBOX_FRACTION,
 import type { ChannelId, OutputFlag, ProductType } from "./types";
 import { ALPHA_BBOX_THRESHOLD, analyseBackground, borderPixels, shadowLayer } from "./shadow";
 import { BG_TOLERANCE, checkOutput } from "./compliance";
+import { enlargeCutout } from "./enhance";
+import { shouldUpscale, upscaledRgb, upscalerKey, type Upscaler } from "./upscale";
 
 export interface Prepared { width: number; height: number; rgb: Buffer; alphaSource: Buffer | null; background: { uniform: boolean; color: [number, number, number]; stdev: number }; flags: OutputFlag[]; sourceMime: string }
 export interface Matte { alpha: Buffer; width: number; height: number; model: string; ms: number; source: "model" | "alpha_source" | "floodfill"; target: "cpu" | "gpu" | null; sentLongSide: number | null }
@@ -14,9 +16,16 @@ export interface CanvasPlan { w: number; h: number; lowResolution: boolean; safe
 /** `canvas`: the product's one canvas on this channel (planProduct), so every angle shares one size. */
 export interface RenderInput { prepared: Prepared; matte: Matte; channel: ChannelId; shotNumber: number; productType: ProductType; uniformScale?: number; canvas?: Size; identifier?: string; publicObjectPath?: string; /** false forbids a synthesised shadow (05 rule 3); absent leaves the product-type rule. */ synthesiseShadow?: boolean;
   /** Below 1 shrinks the fitted product by this factor (the auto-resolve ladder's smaller fit); absent is 1. */ fitScale?: number;
-  /** The judge saw a cut at the frame edge that the cut rule missed: shotGeometry relaxes its truncation share. */ judgedCut?: boolean }
-export interface RenderOutput { jpeg: Buffer | null; status: "ok" | "skipped" | "failed"; plan: CanvasPlan; quality: number; bytes: number; flags: OutputFlag[]; notes: string[]; attention: { why: string; what: string } | null; compliance: { ok: boolean; failures: string[] } }
-export interface RenderKeyInputs { sourceSha256: string; channel: ChannelId; rulesVersion: string; policyId: string; policyUpdatedAt: string; n: number }
+  /** The judge saw a cut at the frame edge that the cut rule missed: shotGeometry relaxes its truncation share. */ judgedCut?: boolean;
+  /** Spec 11: the GPU upscaler, used when the plan enlarges beyond its `minScale`; absent or null is the plain Lanczos path. */ upscaler?: Upscaler | null;
+  /** Ids for the upscale log lines; never shown to an operator. */ trace?: { batchId?: string; productId?: string } }
+/**
+ * `upscale`: set only when the upscaler made this output's colour (flag `upscaled`); `model` goes into render_key, never
+ * into operator copy. `reused`: the photo's one x2 image was made for an earlier output (its `ms` is not a new call).
+ */
+export interface RenderOutput { jpeg: Buffer | null; status: "ok" | "skipped" | "failed"; plan: CanvasPlan; quality: number; bytes: number; flags: OutputFlag[]; notes: string[]; attention: { why: string; what: string } | null; compliance: { ok: boolean; failures: string[] }; upscale?: { model: string; ms: number; reused?: true } }
+/** `upscaler`: the upscaler model id, only when the upscaler made the output (the plain path keeps today's key). */
+export interface RenderKeyInputs { sourceSha256: string; channel: ChannelId; rulesVersion: string; policyId: string; policyUpdatedAt: string; n: number; upscaler?: string | null }
 
 export { ALPHA_BBOX_THRESHOLD } from "./shadow";
 export class UnsupportedSourceError extends Error { readonly flags: OutputFlag[] = ["unsupported"]; }
@@ -493,8 +502,14 @@ export async function renderSource(input: RenderInput): Promise<RenderOutput> {
   if (plan.lowResolution) {
     result.flags.push("low_resolution");
     if (spec.id === "styli" && STYLI_SKIP_LOW_RESOLUTION) { result.status = "skipped"; result.notes.push("Skipped for Styli: the photo is smaller than Styli needs."); return result; }
-    const min = spec.id === "trendyol" ? effectiveMinimum(spec) : spec.minCanvas;
-    result.attention = { why: `The original is ${p.width} x ${p.height}. ${spec.label} wants at least ${min.h > min.w ? min.h : min.w} px, so this one may look soft.`, what: "It will upload, but ask the brand for a larger photo if you can. The other marketplaces are fine with it." };
+    const min = spec.minCanvas, target = spec.targetCanvas;
+    // A fixed canvas (Trendyol 1200 x 1800, minimum 600 x 800; Centrepoint) is the size we deliver, not a minimum the
+    // photo missed (spec 11 4.1): say what we deliver and that the photo was enlarged. Same words in qa/reasons.ts and
+    // types.ts REASONS.low_resolution.
+    const why = spec.fixedCanvas
+      ? `The original is ${p.width} x ${p.height}. ${spec.label} images are delivered at ${target.w} x ${target.h}, so this one was enlarged and may look soft.`
+      : `The original is ${p.width} x ${p.height}. ${spec.label} wants at least ${min.h > min.w ? min.h : min.w} px, so this one may look soft.`;
+    result.attention = { why, what: "It will upload, but ask the brand for a larger photo if you can. The other marketplaces are fine with it." };
   }
   if (spec.uniformScaleDefault && !plan.detailShot && input.uniformScale !== undefined && input.uniformScale > plan.scale) result.notes.push("Could not keep the same size as the other angles without cutting; fitted instead");
   const color = backgroundFor(spec.id, shotNumber), product = plan.productBox!;
@@ -517,7 +532,17 @@ export async function renderSource(input: RenderInput): Promise<RenderOutput> {
     const rgba = Buffer.alloc(p.width * p.height * 4);
     for (let i = 0; i < matte.alpha.length; i++) { p.rgb.copy(rgba, i * 4, i * 3, i * 3 + 3); rgba[i * 4 + 3] = matte.alpha[i]!; }
     const crop = plan.sourceCrop ?? box;
-    const cutout = await sharp(rgba, { raw: { width: p.width, height: p.height, channels: 4 } }).extract({ left: crop.x, top: crop.y, width: crop.w, height: crop.h }).resize(product.w, product.h, { kernel: "lanczos3" }).png().toBuffer();
+    // Spec 11: beyond the upscaler's threshold the colour comes from the GPU upscaler (the whole photo x2 once, shared by
+    // every channel of the photo, then this crop at doubled coordinates and Lanczos3 to the product size). The plain path is Lanczos3 plus a conservative sharpen of the colour (never the alpha) when the product is
+    // enlarged; on the upscaled path the same sharpening runs on the upscaler's colour with the residual factor
+    // (enlargement / 2) and the alpha stays the Lanczos3 alpha. Any upscale failure leaves `upscaled` null: the plain
+    // path, byte for byte, with no flag (enhance.ts enlargeCutout).
+    const to = { w: product.w, h: product.h };
+    const enlarged = input.upscaler && shouldUpscale(plan.scale, input.upscaler.minScale)
+      ? await upscaledRgb(input.upscaler, p.rgb, p.width, crop, to, { ...input.trace, identifier: input.identifier, shot: shotNumber, channel: spec.id })
+      : null;
+    const cutout = await enlargeCutout({ rgba, rgb: p.rgb, width: p.width, height: p.height, crop, to, ...(enlarged ? { upscaled: enlarged.rgb } : {}) });
+    if (enlarged && input.upscaler) { result.flags.push("upscaled"); result.upscale = { model: input.upscaler.model, ms: enlarged.ms, ...(enlarged.reused ? { reused: true as const } : {}) }; }
     const cutoutAlpha = await sharp(cutout).extractChannel(3).raw().toBuffer();
     for (let y = 0; y < product.h; y++) cutoutAlpha.copy(foregroundMask, (product.y + y) * plan.w + product.x, y * product.w, (y + 1) * product.w);
     let shadow = await shadowLayer(p, matte, crop, plan, input.productType, color, foregroundMask);
@@ -547,5 +572,5 @@ export async function renderAllChannels(prepared: Prepared, matte: Matte, channe
   for (const id of channels) outputs[id] = await renderSource({ ...ctx, prepared, matte, channel: id });
   return outputs;
 }
-export function renderKeyInputs(i: RenderKeyInputs): string { return `${i.sourceSha256}|${i.channel}|${i.rulesVersion}|${i.policyId}+${i.policyUpdatedAt}|${i.n}`; }
+export function renderKeyInputs(i: RenderKeyInputs): string { return `${i.sourceSha256}|${i.channel}|${i.rulesVersion}|${i.policyId}+${i.policyUpdatedAt}|${i.n}${i.upscaler ? `|${upscalerKey(i.upscaler)}` : ""}`; }
 export function hexColor(value: string): [number, number, number] { return [1, 3, 5].map(start => parseInt(value.slice(start, start + 2), 16)) as [number, number, number]; }

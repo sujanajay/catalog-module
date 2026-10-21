@@ -8,6 +8,7 @@ import { strictestChannel } from "@catalog/core/catalog/qa/policy";
 import { heldInHand, isBusyBackground, passthroughMatte } from "@catalog/core/catalog/matte-guard";
 import type { ChannelId, OutputFlag, ResolvedPolicy } from "@catalog/core/catalog/types";
 import type { CatalogDeps } from "./deps";
+import { renderKey, rerenderedKey } from "@catalog/core/catalog/pipeline/publish";
 
 type Batch = typeof catalogBatches.$inferSelect;
 type Product = typeof catalogProducts.$inferSelect;
@@ -139,7 +140,7 @@ async function recordActions(deps: CatalogDeps, input: Pick<ResolvePhotoInput,"u
   await input.underClaim(async tx=>{for (const o of outputs) await tx.update(catalogOutputs).set({compliance:withAutoActions(o.compliance,all),updatedAt:deps.now()}).where(eq(catalogOutputs.id,o.id));});
 }
 /** Stages a re-made image over the first one and updates its row. Returns true when nothing is left to hold. */
-async function writeRender(deps: CatalogDeps, input: Pick<ResolvePhotoInput,"batch"|"product"|"source"|"underClaim"|"trigger"|"statusFor">, o: Output, r: RenderOutput, all: readonly AutoAction[], extra: {sourceFlags: OutputFlag[]; qaScores: Output["qaScores"]}): Promise<boolean> {
+async function writeRender(deps: CatalogDeps, input: Pick<ResolvePhotoInput,"batch"|"product"|"source"|"policy"|"underClaim"|"trigger"|"statusFor">, o: Output, r: RenderOutput, all: readonly AutoAction[], extra: {sourceFlags: OutputFlag[]; qaScores: Output["qaScores"]}): Promise<boolean> {
   const {batch,product,source,underClaim} = input, jpeg = r.jpeg!;
   const path = stagingPath(batchPrefix(batch.brandSlug,batch.id,batch.isTest),product.pathKey,o.channel,source.n), uri = deps.storage.toGsUri(deps.storage.getBucketName(),path);
   await underClaim(async()=>deps.storage.uploadBuffer(path,jpeg,"image/jpeg",{cacheControl:deps.storage.PUBLIC_CACHE_CONTROL}));
@@ -147,7 +148,9 @@ async function writeRender(deps: CatalogDeps, input: Pick<ResolvePhotoInput,"bat
   // Judge flags other than the resolved defects stay (a photo problem is not ours to fix); render flags are the new render's.
   const judged = o.flags.filter(f=>!RENDER_FLAGS.has(f) && !input.trigger.includes(f));
   const flags = [...new Set<OutputFlag>([...extra.sourceFlags,...r.flags,...judged])], status = input.statusFor(flags);
-  await underClaim(async tx=>tx.update(catalogOutputs).set({canvasW:r.plan.w,canvasH:r.plan.h,scale:r.plan.scale,placedX:r.plan.placedX,placedY:r.plan.placedY,bytes:r.bytes,quality:r.quality,flags,qaScores:extra.qaScores,
+  // Spec 11: `upscaled` is a render flag, so the re-render decides the key too (the upscaler may win or lose here).
+  const key = rerenderedKey(o,r.upscale?.model,()=>renderKey({sourceSha256:source.sha256,channel:o.channel,n:source.n,policyKey:`default|${input.policy.matteModel}`}));
+  await underClaim(async tx=>tx.update(catalogOutputs).set({renderKey:key,canvasW:r.plan.w,canvasH:r.plan.h,scale:r.plan.scale,placedX:r.plan.placedX,placedY:r.plan.placedY,bytes:r.bytes,quality:r.quality,flags,qaScores:extra.qaScores,
     compliance:withAutoActions({...r.compliance,auto_actions:autoActionsOf(o.compliance)},all),stagingUri:uri,crc32c:head.crc32c ?? null,status,
     reason:r.notes.join("; ") || (status === "needs_attention" ? o.reason:null),updatedAt:deps.now()}).where(eq(catalogOutputs.id,o.id)));
   return status !== "needs_attention";

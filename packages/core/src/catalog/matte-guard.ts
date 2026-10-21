@@ -456,35 +456,97 @@ export function passthroughMatte(p: Pick<Prepared, "width" | "height" | "rgb">, 
 /**
  * A pass-through replaces a plain studio backdrop only. In the border band, the pixels it keeps as product
  * although every model matte tried dropped them, and that are no skin or garment panel a matte cut through
- * (keptSurfaces), are scenery (a court, a hedge, a net) that the recolour could not reach: above this share of
- * the band the background is busy and the photo is held instead of published with a ragged cut-out. Measured:
- * the French Connection tennis-court photo ZEE79259BBFD83FFA1DB0Z shot 5 keeps 33% of its band this way; every
- * plain-backdrop pass-through of the gate and golden sets keeps 0%.
+ * (keptSurfaces), are what the recolour could not reach. Above this share of the band they are read
+ * (busyBorderReading): when they look like scenery the background is busy and the photo is held instead of
+ * published with a ragged cut-out. Measured: the French Connection tennis-court photo ZEE79259BBFD83FFA1DB0Z
+ * shot 5 keeps 33% of its band this way; every plain-backdrop pass-through of the gate and golden sets keeps 0%.
  */
 export const BUSY_BORDER_MAX_SHARE = 0.05;
+/** An edge pixel: its luma differs from its neighbours by more than this per pixel (central difference, halved). */
+export const BUSY_EDGE_GRADIENT = 20;
+/** Tones: the fewest 16-level RGB colour buckets that hold this share of the pixels. */
+export const BUSY_TONES_COVER = 0.9;
+/**
+ * Scenery, told from the product by the band pixels themselves. A scene shows strong structure (a net, a
+ * racket, a hedge, people: edge density at least BUSY_EDGE_DENSITY_MIN, or at least BUSY_TONES_MIN tones), or a
+ * plain area in several tones (a wall and a table: edge density under BUSY_PLAIN_EDGE_MAX and at least
+ * BUSY_PLAIN_TONES_MIN tones). Anything else is one material or one plain colour: product every matte dropped,
+ * or a plain backdrop the pass-through keeps whole, never scenery. That is the fine grain of a frame-filling
+ * close-up whose mattes dropped the leather, knit or zip itself (its out-of-focus leather reads as smooth, so it
+ * misses FRAME_FILLING_BORDER_SHARE), or a plain one-colour dress behind a held bag. Measured on the gate 3f
+ * holds and the golden busy cases (edge density / tones): tennis court ZEE79259BBFD83FFA1DB0Z shot 5 0.51 / 55
+ * to 60 (busy); lifestyle candle Z011CB57531CA8FA0CBDDZ shot 1 0.00 to 0.01 / 11 to 31 (busy, plain in several
+ * tones); bag close-ups Z02B2EE44E3A08044B816Z shots 3 and 6 0.25 / 24 and 0.20 / 30 and Z5A0B7DE13FC67EDEAC9DZ
+ * shot 5 0.13 / 9 (one material); the bag held against a plain dress, Z02B2EE44E3A08044B816Z shot 1, 0.00 / 4
+ * (one plain colour).
+ */
+export const BUSY_EDGE_DENSITY_MIN = 0.4;
+export const BUSY_TONES_MIN = 45;
+export const BUSY_PLAIN_EDGE_MAX = 0.05;
+export const BUSY_PLAIN_TONES_MIN = 8;
 
-/** Share of the border band that the pass-through `pass` keeps as scenery (see BUSY_BORDER_MAX_SHARE). */
-export function busyBorderShare(p: Pick<Prepared, "width" | "height" | "rgb">, pass: Pick<Matte, "alpha">, tried: readonly Pick<Matte, "alpha">[], region: BackgroundRegion = backgroundRegion(p)): number {
-  if (!tried.length) return 0;
-  const { width: w, height: h } = p, band = borderBand(w, h), surfaces = new Uint8Array(w * h);
+export interface BusyBorderReading {
+  /** Share of the border band the pass-through keeps and every matte dropped (no skin, no garment panel). */
+  share: number;
+  /** Of those pixels: the share that are edges (BUSY_EDGE_GRADIENT), and their tones (BUSY_TONES_COVER). */
+  edgeDensity: number; tones: number;
+  /** True when those pixels look like scenery (BUSY_EDGE_DENSITY_MIN, BUSY_TONES_MIN, BUSY_PLAIN_*). */
+  scenery: boolean;
+}
+
+/** The border band pixels the pass-through `pass` keeps although every matte tried dropped them, and what they look like (see BUSY_EDGE_DENSITY_MIN). */
+export function busyBorderReading(p: Pick<Prepared, "width" | "height" | "rgb">, pass: Pick<Matte, "alpha">, tried: readonly Pick<Matte, "alpha">[], region: BackgroundRegion = backgroundRegion(p)): BusyBorderReading {
+  const none = { share: 0, edgeDensity: 0, tones: 0, scenery: false };
+  if (!tried.length) return none;
+  const { width: w, height: h, rgb } = p, band = borderBand(w, h), surfaces = new Uint8Array(w * h);
   for (const m of tried) { const kept = keptSurfaces(p, m.alpha, region); for (let i = 0; i < surfaces.length; i++) if (kept[i]) surfaces[i] = 1; }
-  let pixels = 0, scenery = 0;
+  const luma = (i: number) => 0.299 * rgb[i * 3]! + 0.587 * rgb[i * 3 + 1]! + 0.114 * rgb[i * 3 + 2]!;
+  const buckets = new Map<number, number>();
+  let pixels = 0, kept = 0, edges = 0;
   for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
     if (x >= band.x && x < w - band.x && y >= band.y && y < h - band.y) continue;
     const i = y * w + x; pixels++;
-    if (pass.alpha[i]! > 0 && !surfaces[i] && tried.every(m => m.alpha[i]! <= GUARD_ALPHA_EDGE)) scenery++;
+    if (!(pass.alpha[i]! > 0 && !surfaces[i] && tried.every(m => m.alpha[i]! <= GUARD_ALPHA_EDGE))) continue;
+    kept++;
+    const gx = luma(y * w + Math.min(w - 1, x + 1)) - luma(y * w + Math.max(0, x - 1)), gy = luma(Math.min(h - 1, y + 1) * w + x) - luma(Math.max(0, y - 1) * w + x);
+    if (Math.hypot(gx, gy) / 2 > BUSY_EDGE_GRADIENT) edges++;
+    const key = (rgb[i * 3]! >> 4) * 256 + (rgb[i * 3 + 1]! >> 4) * 16 + (rgb[i * 3 + 2]! >> 4);
+    buckets.set(key, (buckets.get(key) ?? 0) + 1);
   }
-  return pixels ? scenery / pixels : 0;
+  if (!kept) return none;
+  let tones = 0, covered = 0;
+  for (const count of [...buckets.values()].sort((a, b) => b - a)) { if (covered >= kept * BUSY_TONES_COVER) break; covered += count; tones++; }
+  const edgeDensity = edges / kept;
+  return { share: kept / pixels, edgeDensity, tones, scenery: readsAsScenery(edgeDensity, tones) };
 }
 
-/** True when a pass-through would leave scenery (busyBorderShare over BUSY_BORDER_MAX_SHARE); a frame-filling close-up never is. */
+/** Band pixels with this edge density and this many tones are scenery (see BUSY_EDGE_DENSITY_MIN); otherwise one material or one plain colour. */
+export function readsAsScenery(edgeDensity: number, tones: number): boolean {
+  return edgeDensity >= BUSY_EDGE_DENSITY_MIN || tones >= BUSY_TONES_MIN || (edgeDensity < BUSY_PLAIN_EDGE_MAX && tones >= BUSY_PLAIN_TONES_MIN);
+}
+
+/** Share of the border band that the pass-through `pass` keeps although every matte tried dropped it (see busyBorderReading). */
+export function busyBorderShare(p: Pick<Prepared, "width" | "height" | "rgb">, pass: Pick<Matte, "alpha">, tried: readonly Pick<Matte, "alpha">[], region: BackgroundRegion = backgroundRegion(p)): number {
+  return busyBorderReading(p, pass, tried, region).share;
+}
+
+/** True when a pass-through would leave scenery: over BUSY_BORDER_MAX_SHARE of the band, read as scenery (busyBorderReading); a frame-filling close-up never is. */
 export function isBusyBackground(p: Pick<Prepared, "width" | "height" | "rgb">, pass: Pick<Matte, "alpha">, tried: readonly Pick<Matte, "alpha">[], region: BackgroundRegion = backgroundRegion(p)): boolean {
-  return !region.frameFilling && busyBorderShare(p, pass, tried, region) > BUSY_BORDER_MAX_SHARE;
+  if (region.frameFilling) return false;
+  const reading = busyBorderReading(p, pass, tried, region);
+  return reading.share > BUSY_BORDER_MAX_SHARE && reading.scenery;
 }
 
-/** The whole photo as it is (every pixel opaque): what a busy-background photo shows while it waits for a person. */
-export function wholePhotoMatte(p: Pick<Prepared, "width" | "height">): Matte {
-  return { alpha: Buffer.alloc(p.width * p.height, 255), width: p.width, height: p.height, model: PASSTHROUGH_MODEL, ms: 0, source: "model", target: null, sentLongSide: null };
+/**
+ * The photo as it is (every pixel opaque) inside the uniform canvas strips a brand pasted it on (backgroundRegion
+ * `rect`); the strips are dropped as the pass-through drops them. It is what a busy-background photo shows while it
+ * waits for a person and what "Use as is" publishes: fitted on the channel canvas with the band note, never a white
+ * frame inside a grey canvas.
+ */
+export function wholePhotoMatte(p: Pick<Prepared, "width" | "height" | "rgb">, region: BackgroundRegion = backgroundRegion(p)): Matte {
+  const { width: w, height: h } = p, { x0, y0, x1, y1 } = region.rect, alpha = Buffer.alloc(w * h);
+  for (let y = y0; y <= y1; y++) alpha.fill(255, y * w + x0, y * w + x1 + 1);
+  return { alpha, width: w, height: h, model: PASSTHROUGH_MODEL, ms: 0, source: "model", target: null, sentLongSide: null };
 }
 
 /** Separable sigma-1 Gaussian on a 0/1 mask (edge pixels replicated), as floodFillMatte does, but only inward: the background around the product stays fully clear, so no source background bleeds onto the canvas. */
@@ -551,6 +613,88 @@ export function detectTextImage(p: Pick<Prepared, "width" | "height" | "rgb">): 
     glyphs, lines, largestShare: Math.round(largestShare * 1e4) / 1e4, glyphInkShare: Math.round(glyphInkShare * 1000) / 1000, pageShare: Math.round(pageShare * 1000) / 1000 };
 }
 
+/**
+ * Sole strip recovery (footwear). A thin strongly coloured strip along the bottom of a shoe (a lime midsole
+ * sliver between a black outsole and a white floor, 5 to 8 source px) is dropped in part by every deployed model:
+ * its lowest one to two rows fall into the model's soft edge or below it. Per column of the lower
+ * SOLE_STRIP_ZONE_SHARE of the matte, the run of strongly coloured source pixels (chroma at least
+ * SOLE_STRIP_CHROMA_MIN and at least SOLE_STRIP_SATURATION_MIN of the brightest channel) that starts right below
+ * the matte's lowest kept pixel (alpha over 128) and ends within SOLE_STRIP_DEPTH_PX of it is a strip candidate.
+ * The run must touch the kept matte and stops at the first pixel that is not strongly coloured, so a floor
+ * reflection (a pale copy of the sole under a light or grey gap row, eval run 3 M2) or a grey cast shadow is never
+ * reached. A connected group of candidates is recovered only when the matte drops (alpha at most GUARD_ALPHA_EDGE)
+ * at least SOLE_STRIP_MIN_DROPPED_PX of them and it spans at least SOLE_STRIP_MIN_SPAN_SHARE of the product width
+ * (a strip along the sole, not a coloured contact smudge): its runs become opaque, together with the soft kept pixels
+ * right above them (now inside the product). The run ends are smoothed across the group's columns (a moving average over
+ * SOLE_STRIP_SMOOTH_COLUMNS columns, clamped to each column's measured end so no pixel outside the coloured run is
+ * added, then lowered until neighbouring ends differ by at most 1 px) and the lower edge is drawn at that sub-pixel
+ * position: opaque above it and one antialiased pixel at it, so the edge shows no steps and is softened once.
+ */
+export const SOLE_STRIP_DEPTH_PX = 8;
+export const SOLE_STRIP_CHROMA_MIN = 60;
+export const SOLE_STRIP_SATURATION_MIN = 0.5;
+export const SOLE_STRIP_ZONE_SHARE = 0.4;
+export const SOLE_STRIP_MIN_DROPPED_PX = 20;
+export const SOLE_STRIP_MIN_SPAN_SHARE = 0.1;
+export const SOLE_STRIP_SMOOTH_COLUMNS = 5;
+
+export interface SoleStripRecovery { alpha: Buffer; /** Pixels whose alpha was raised. */ changed: number; /** Of those, pixels the matte had dropped. */ recovered: number }
+
+/** The matte with any dropped coloured sole strip given back (see SOLE_STRIP_DEPTH_PX); the input matte is not changed. */
+export function recoverSoleStrip(p: Pick<Prepared, "width" | "height" | "rgb">, alphaIn: Buffer): SoleStripRecovery {
+  const { width: w, height: h, rgb } = p, alpha = Buffer.from(alphaIn);
+  const strong = (i: number) => { const r = rgb[i * 3]!, g = rgb[i * 3 + 1]!, b = rgb[i * 3 + 2]!, hi = Math.max(r, g, b), c = hi - Math.min(r, g, b); return c >= SOLE_STRIP_CHROMA_MIN && c >= hi * SOLE_STRIP_SATURATION_MIN; };
+  let x0 = w, x1 = -1, y0 = h, y1 = -1;
+  for (let i = 0; i < alpha.length; i++) if (alpha[i]! > 128) { const x = i % w, y = (i - x) / w; if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y; }
+  if (y1 < 0) return { alpha, changed: 0, recovered: 0 };
+  const zoneTop = y1 - (y1 - y0 + 1) * SOLE_STRIP_ZONE_SHARE, run = new Uint8Array(w * h), bottom = new Int32Array(w).fill(-1);
+  for (let x = 0; x < w; x++) {
+    let yb = -1;
+    for (let y = y1; y >= 0; y--) if (alpha[y * w + x]! > 128) { yb = y; break; }
+    if (yb < zoneTop) continue;
+    bottom[x] = yb;
+    for (let y = yb + 1; y < h && y - yb <= SOLE_STRIP_DEPTH_PX && strong(y * w + x); y++) run[y * w + x] = 1;
+  }
+  const { labels, sizes } = components(run, w, h), dropped = new Uint32Array(sizes.length), left = new Int32Array(sizes.length).fill(w), right = new Int32Array(sizes.length).fill(-1);
+  for (let i = 0; i < run.length; i++) {
+    const l = labels[i]!; if (!l) continue;
+    const x = i % w; if (x < left[l]!) left[l] = x; if (x > right[l]!) right[l] = x;
+    if (alpha[i]! <= GUARD_ALPHA_EDGE) dropped[l]!++;
+  }
+  // A strip runs along the sole: it spans at least SOLE_STRIP_MIN_SPAN_SHARE of the product's width.
+  const minSpan = (x1 - x0 + 1) * SOLE_STRIP_MIN_SPAN_SHARE, strip = (l: number) => dropped[l]! >= SOLE_STRIP_MIN_DROPPED_PX && right[l]! - left[l]! + 1 >= minSpan;
+  let changed = 0, recovered = 0;
+  const raise = (i: number, to: number) => { if (alpha[i]! >= to) return; if (alpha[i]! <= GUARD_ALPHA_EDGE) recovered++; changed++; alpha[i] = to; };
+  // Per column of a recovered group: the measured run end (its last coloured row) and the group.
+  const group = new Int32Array(w), end = new Int32Array(w).fill(-1);
+  for (let x = 0; x < w; x++) {
+    const yb = bottom[x]!; if (yb < 0 || !run[(yb + 1) * w + x] || !strip(labels[(yb + 1) * w + x]!)) continue;
+    let last = yb + 1;
+    while (last + 1 < h && run[(last + 1) * w + x]) last++;
+    group[x] = labels[(yb + 1) * w + x]!; end[x] = last;
+  }
+  // Smooth the ends within each group of neighbouring columns: a moving average over SOLE_STRIP_SMOOTH_COLUMNS, clamped to
+  // the column's measured end (never past the coloured strip), then lowered until neighbours differ by at most 1 px.
+  const smooth = new Float64Array(w).fill(-1), half = SOLE_STRIP_SMOOTH_COLUMNS >> 1, same = (a: number, b: number) => end[a]! >= 0 && end[b]! >= 0 && group[a] === group[b];
+  for (let x = 0; x < w; x++) {
+    if (end[x]! < 0) continue;
+    let sum = 0, n = 0;
+    for (let k = Math.max(0, x - half); k <= Math.min(w - 1, x + half); k++) if (same(k, x)) { sum += end[k]!; n++; }
+    smooth[x] = Math.min(end[x]!, sum / n);
+  }
+  for (let x = 1; x < w; x++) if (same(x, x - 1)) smooth[x] = Math.min(smooth[x]!, smooth[x - 1]! + 1);
+  for (let x = w - 2; x >= 0; x--) if (same(x, x + 1)) smooth[x] = Math.min(smooth[x]!, smooth[x + 1]! + 1);
+  for (let x = 0; x < w; x++) {
+    const yb = bottom[x]!, e = smooth[x]!; if (end[x]! < 0 || e < yb + 1) continue;
+    // The kept pixels right above the run now lie inside the product (the strip is below them): opaque too, so the
+    // model's soft edge there leaves no see-through line between the outsole and the strip.
+    for (let y = yb; y > yb - SOLE_STRIP_DEPTH_PX && y >= 0 && alpha[y * w + x]! > 128 && alpha[y * w + x]! < 255; y--) raise(y * w + x, 255);
+    // Coverage of each run pixel by the smoothed edge at e + 1/2: opaque above it, one antialiased pixel at it.
+    for (let y = yb + 1; y <= end[x]!; y++) { const a = Math.round(255 * Math.max(0, Math.min(1, e + 0.5 - y))); if (a > GUARD_ALPHA_EDGE) raise(y * w + x, a); }
+  }
+  return { alpha, changed, recovered };
+}
+
 /** White border, as a share of the long side, around the photo for the ladder's padded matte. */
 export const GUARD_PAD_FRACTION = 0.2;
 /** The model mattes the ladder may ask for: the policy's second model, then the padded frame with the first and the second model. */
@@ -561,6 +705,8 @@ export interface ResolveMatteInput {
   first: Matte;
   /** The hand-notch rule (off for apparel, see checkMatteIntegrity). */
   handRule: boolean;
+  /** Footwear: the model matte that wins gets a dropped coloured sole strip back (recoverSoleStrip). */
+  soleStrip?: boolean;
   /** Makes one more matte; null when that model is not served, is the same as the first, or this run has no time left. */
   attempt: (variant: MatteVariant) => Promise<Matte | null>;
 }
@@ -576,6 +722,8 @@ export interface MatteResolution {
   busyBackground: boolean;
   /** One record per step taken, for the outputs' `compliance.auto_actions`; empty when the first matte was kept. */
   actions: AutoAction[];
+  /** Pixels recoverSoleStrip gave back to the winning model matte (0 when it did not run or found no strip). */
+  soleStripRecovered: number;
 }
 
 /**
@@ -586,17 +734,23 @@ export interface MatteResolution {
  * replaces a plain backdrop only: on a busy background (busyBorderShare) the photo is kept whole and held
  * (`busyBackground`). The judge's
  * `product_removed` names the same failure after the render, and its ladder ends in the same
- * pass-through step (auto-resolve.ts).
+ * pass-through step (auto-resolve.ts). For footwear (`soleStrip`) the winning model matte then gets a dropped
+ * coloured sole strip back (recoverSoleStrip); the check itself always sees the model's own matte.
  */
 export async function resolveMatte(input: ResolveMatteInput): Promise<MatteResolution> {
   const { prepared: p, first } = input, actions: AutoAction[] = [], trigger: OutputFlag[] = ["product_removed"];
   const record = (step: AutoAction["step"], result: AutoAction["result"], detail: string) => actions.push({ step, trigger: [...trigger], result, channels: [], rejudged: false, detail });
-  if (first.source !== "model") return { matte: first, passthrough: false, busyBackground: false, actions };
+  const won = (matte: Matte): MatteResolution => {
+    if (!input.soleStrip) return { matte, passthrough: false, busyBackground: false, actions, soleStripRecovered: 0 };
+    const strip = recoverSoleStrip(p, matte.alpha);
+    return { matte: strip.changed ? { ...matte, alpha: strip.alpha } : matte, passthrough: false, busyBackground: false, actions, soleStripRecovered: strip.recovered };
+  };
+  if (first.source !== "model") return { matte: first, passthrough: false, busyBackground: false, actions, soleStripRecovered: 0 };
   // Every matte tried is kept: skin or a panel one of them cut through or kept stays product in the pass-through.
   const region = backgroundRegion(p), tried: Matte[] = [];
   const check = (m: Matte) => { tried.push(m); return checkMatteIntegrity(p, m, { handRule: input.handRule, region }); };
   const verdict = check(first);
-  if (verdict.ok) return { matte: first, passthrough: false, busyBackground: false, actions };
+  if (verdict.ok) return won(first);
   record("matte_check", "failed", `${first.model}: ${verdict.detail}`);
   const steps: [AutoAction["step"], MatteVariant][] = [["second_matte", "second"], ["padded_matte", "padded_first"], ["padded_matte", "padded_second"]];
   for (const [step, variant] of steps) {
@@ -604,14 +758,17 @@ export async function resolveMatte(input: ResolveMatteInput): Promise<MatteResol
     if (!matte) { record(step, "skipped", `${variant}: not available`); continue; }
     const result = check(matte);
     record(step, result.ok ? "passed" : "failed", `${matte.model}${variant === "second" ? "" : " padded"}: ${result.detail}`);
-    if (result.ok) return { matte, passthrough: false, busyBackground: false, actions };
+    if (result.ok) return won(matte);
   }
   const pass = passthroughMatte(p, tried);
-  if (isBusyBackground(p, pass, tried, region)) {
+  // What the band pixels no cut-out kept look like (busyBorderReading), recorded so a hold can be read from the report.
+  const reading = region.frameFilling ? null : busyBorderReading(p, pass, tried, region);
+  const band = reading && reading.share > 0 ? `${(reading.share * 100).toFixed(1)}% of the border band no cut-out kept, edge density ${reading.edgeDensity.toFixed(2)}, ${reading.tones} tones` : "";
+  if (reading && reading.share > BUSY_BORDER_MAX_SHARE && reading.scenery) {
     // Trigger `leftover_background`: the code-detected hold (auto-resolve.ts busyBackgroundHold).
-    actions.push({ step: "matte_passthrough", trigger: ["product_removed", "leftover_background"], result: "failed", channels: [], rejudged: false, detail: `busy background: ${(busyBorderShare(p, pass, tried, region) * 100).toFixed(1)}% of the border band is scenery no cut-out kept; the whole photo is kept and held` });
-    return { matte: wholePhotoMatte(p), passthrough: false, busyBackground: true, actions };
+    actions.push({ step: "matte_passthrough", trigger: ["product_removed", "leftover_background"], result: "failed", channels: [], rejudged: false, detail: `busy background: ${band}, read as scenery; the whole photo is kept and held` });
+    return { matte: wholePhotoMatte(p, region), passthrough: false, busyBackground: true, actions, soleStripRecovered: 0 };
   }
-  record("matte_passthrough", "passed", "no cut-out kept the product; the whole frame is used");
-  return { matte: pass, passthrough: true, busyBackground: false, actions };
+  record("matte_passthrough", "passed", `no cut-out kept the product; the whole frame is used${band ? ` (${band}: one material or one plain colour, not scenery)` : ""}`);
+  return { matte: pass, passthrough: true, busyBackground: false, actions, soleStripRecovered: 0 };
 }
