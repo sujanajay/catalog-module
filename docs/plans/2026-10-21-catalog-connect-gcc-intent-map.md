@@ -101,6 +101,7 @@ DD3, DD9 and gate verdicts.
 | DD2 | Derived shots and the generated-image fidelity gate ("spec 12") | done 2026-10-22, awaiting owner answer (deep-dives/02-derived-shots-fidelity-gate.md) |
 | DD3 | On-model generation bake-off: frontier image models, VTO vendors, ready-made plug-ins | queued (after DD2) |
 | DD8 | Brand style profile and model registry for GCC softline brands | done 2026-10-22, awaiting owner answer (deep-dives/08-brand-style-profile-model-registry.md) |
+| DD1a | Channel image guidelines, external vs internal, 9 channels, UAE and KSA | done 2026-10-22, awaiting owner answer (deep-dives/01a-channel-guidelines-external-vs-internal.md) |
 | DD9 | Business impact of B1 to B3, data-derived | done 2026-10-22, awaiting owner answer (deep-dives/09-business-impact.md); refresh with DD3 prices pending |
 
 Deferred deep dives (briefs kept in the owner's plan file): footwear lifestyle, attributes
