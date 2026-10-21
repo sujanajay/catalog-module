@@ -584,33 +584,167 @@ export const TEXT_MIN_PAGE_LUMA = 180;
 /** Glyph marks must carry at least this share of all ink (in a product photo the product carries almost all of it). */
 export const TEXT_MIN_GLYPH_INK_SHARE = 0.3;
 
-export interface TextImage { text: boolean; glyphs: number; lines: number; largestShare: number; glyphInkShare: number; pageShare: number }
-/** A size chart, infographic or text banner: a plain background, rows of small marks, nothing large. */
-export function detectTextImage(p: Pick<Prepared, "width" | "height" | "rgb">): TextImage {
-  const { width: w, height: h, rgb } = p, bg = borderBackground(p);
-  const pageLuma = 0.2126 * bg.color[0] + 0.7152 * bg.color[1] + 0.0722 * bg.color[2];
-  if (bg.frameFilling || pageLuma < TEXT_MIN_PAGE_LUMA) return { text: false, glyphs: 0, lines: 0, largestShare: 1, glyphInkShare: 0, pageShare: 0 };
-  const ink = new Uint8Array(w * h), contrast = new Uint8Array(w * h);
+/**
+ * A chart's tinted header band or table fill (one flat colour filling a rectangle) is a second page
+ * colour: marks inside it are read against it, and it is not counted as ink. Only marks covering at
+ * least TEXT_TINT_MIN_MARK_SHARE of the frame are looked at, and the rectangles are used only when the
+ * marks that hold them (the tables) carry the text themselves (TEXT_MIN_GLYPHS on TEXT_MIN_LINES lines).
+ */
+export const TEXT_TINT_MIN_MARK_SHARE = 0.005;
+/** A tint is one of the mark's TEXT_TINT_MAX_COLOURS most common smooth colours, holding at least this share of its smooth pixels. */
+export const TEXT_TINT_MIN_COLOUR_SHARE = 0.1;
+export const TEXT_TINT_MAX_COLOURS = 3;
+/** The tinted rectangle fills at least this share of its bounding box (lettering on it leaves holes; an outline frame does not pass). */
+export const TEXT_TINT_MIN_FILL = 0.5;
+/** And at least TEXT_TINT_SIDE_SHARE of its rows and of its columns reach both sides of the box, within TEXT_TINT_SIDE_TOLERANCE of its size (straight sides, not a garment). */
+export const TEXT_TINT_SIDE_SHARE = 0.9;
+export const TEXT_TINT_SIDE_TOLERANCE = 0.03;
+/** The tinted rectangle spans at least this share of the frame width and TEXT_TINT_MIN_HEIGHT of its height (a band, not a rule line). */
+export const TEXT_TINT_MIN_WIDTH = 0.1;
+export const TEXT_TINT_MIN_HEIGHT = 0.02;
+
+export interface TextImage { text: boolean; glyphs: number; lines: number; largestShare: number; glyphInkShare: number; pageShare: number; tintedRegions: number }
+interface Box { x0: number; y0: number; x1: number; y1: number }
+interface Tint { color: [number, number, number]; box: Box }
+interface TextMarks { glyphs: { x: number; y: number }[]; largest: number; inkTotal: number; glyphInk: number; page: number; labels: Int32Array; sizes: number[]; boxes: Box[] }
+
+/** Ink marks against the page colour (the background, or a tint inside its rectangle), and which of them are glyph-sized printed marks. */
+function textMarks(p: Pick<Prepared, "width" | "height" | "rgb">, bg: readonly [number, number, number], tints: readonly Tint[]): TextMarks {
+  const { width: w, height: h, rgb } = p, frame = w * h;
+  const ink = new Uint8Array(frame), contrast = new Uint8Array(frame);
   let page = 0;
-  for (let i = 0; i < ink.length; i++) { const d = delta(rgb, i, bg.color); contrast[i] = d; if (d > TEXT_INK_DELTA) ink[i] = 1; else if (d <= BACKGROUND_CLUSTER_DELTA) page++; }
-  const pageShare = page / (w * h);
-  const { labels, sizes } = components(ink, w, h);
-  const top = new Int32Array(sizes.length).fill(h), bottom = new Int32Array(sizes.length).fill(-1), core = new Uint8Array(sizes.length);
-  for (let i = 0; i < ink.length; i++) { const l = labels[i]!; if (!l) continue; const y = (i - (i % w)) / w; if (y < top[l]!) top[l] = y; if (y > bottom[l]!) bottom[l] = y; if (contrast[i]! > core[l]!) core[l] = contrast[i]!; }
-  const frame = w * h, rows = new Uint8Array(h);
-  let glyphs = 0, largest = 0, inkTotal = 0, glyphInk = 0;
-  for (let l = 1; l < sizes.length; l++) {
-    const size = sizes[l]!; largest = Math.max(largest, size); inkTotal += size;
-    if (size < TEXT_GLYPH_MIN_PX || size > frame * TEXT_GLYPH_MAX_SHARE || bottom[l]! - top[l]! + 1 > h * TEXT_GLYPH_MAX_HEIGHT || core[l]! < TEXT_GLYPH_CORE_DELTA) continue;
-    glyphs++; glyphInk += size; rows[Math.round((top[l]! + bottom[l]!) / 2)] = 1;
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    const i = y * w + x, t = tints.length ? tints.find(({ box: b }) => x >= b.x0 && x <= b.x1 && y >= b.y0 && y <= b.y1) : undefined;
+    const d = delta(rgb, i, t ? t.color : bg); contrast[i] = d;
+    if (d > TEXT_INK_DELTA) ink[i] = 1; else if (d <= BACKGROUND_CLUSTER_DELTA) page++;
   }
-  // A text line is a run of rows holding glyph centres; gaps of a few rows split lines.
+  const { labels, sizes } = components(ink, w, h), n = sizes.length;
+  const boxes: Box[] = Array.from({ length: n }, () => ({ x0: w, y0: h, x1: -1, y1: -1 })), core = new Uint8Array(n);
+  for (let i = 0; i < frame; i++) {
+    const l = labels[i]!; if (!l) continue;
+    const x = i % w, y = (i - x) / w, b = boxes[l]!;
+    if (x < b.x0) b.x0 = x;
+    if (x > b.x1) b.x1 = x;
+    if (y < b.y0) b.y0 = y;
+    if (y > b.y1) b.y1 = y;
+    if (contrast[i]! > core[l]!) core[l] = contrast[i]!;
+  }
+  const glyphs: TextMarks["glyphs"] = [];
+  let largest = 0, inkTotal = 0, glyphInk = 0;
+  for (let l = 1; l < n; l++) {
+    const size = sizes[l]!, b = boxes[l]!; largest = Math.max(largest, size); inkTotal += size;
+    if (size < TEXT_GLYPH_MIN_PX || size > frame * TEXT_GLYPH_MAX_SHARE || b.y1 - b.y0 + 1 > h * TEXT_GLYPH_MAX_HEIGHT || core[l]! < TEXT_GLYPH_CORE_DELTA) continue;
+    glyphInk += size; glyphs.push({ x: (b.x0 + b.x1) / 2, y: Math.round((b.y0 + b.y1) / 2) });
+  }
+  return { glyphs, largest, inkTotal, glyphInk, page, labels, sizes, boxes };
+}
+
+/** Text lines: runs of rows holding glyph centres; gaps of a few rows split lines. */
+function textLines(ys: readonly number[], h: number): number {
+  const rows = new Uint8Array(h);
+  for (const y of ys) rows[y] = 1;
   let lines = 0, gap = Infinity;
   const split = Math.max(3, Math.round(h * 0.006));
   for (let y = 0; y < h; y++) { if (rows[y]) { if (gap > split) lines++; gap = 0; } else gap++; }
-  const largestShare = largest / frame, glyphInkShare = inkTotal ? glyphInk / inkTotal : 0;
-  return { text: glyphs >= TEXT_MIN_GLYPHS && lines >= TEXT_MIN_LINES && largestShare < TEXT_LARGEST_MAX_SHARE && glyphInkShare >= TEXT_MIN_GLYPH_INK_SHARE && pageShare >= TEXT_MIN_PAGE_SHARE,
-    glyphs, lines, largestShare: Math.round(largestShare * 1e4) / 1e4, glyphInkShare: Math.round(glyphInkShare * 1000) / 1000, pageShare: Math.round(pageShare * 1000) / 1000 };
+  return lines;
+}
+
+/** A filled rectangle: dense, and almost every row runs from its left to its right side and every column from its top to its bottom (lettering inside leaves holes, not ragged sides). */
+function filledRectangle(labels: Int32Array, f: number, b: Box, w: number, size: number): boolean {
+  const bw = b.x1 - b.x0 + 1, bh = b.y1 - b.y0 + 1;
+  if (size < bw * bh * TEXT_TINT_MIN_FILL) return false;
+  const tx = Math.max(2, Math.round(bw * TEXT_TINT_SIDE_TOLERANCE)), ty = Math.max(2, Math.round(bh * TEXT_TINT_SIDE_TOLERANCE));
+  const top = new Int32Array(bw).fill(bh), bottom = new Int32Array(bw).fill(-1);
+  let rows = 0, cols = 0;
+  for (let y = b.y0; y <= b.y1; y++) {
+    let lo = -1, hi = -1;
+    for (let x = b.x0; x <= b.x1; x++) {
+      if (labels[y * w + x] !== f) continue;
+      if (lo < 0) lo = x;
+      hi = x;
+      const c = x - b.x0, r = y - b.y0;
+      if (r < top[c]!) top[c] = r;
+      if (r > bottom[c]!) bottom[c] = r;
+    }
+    if (lo >= 0 && lo - b.x0 <= tx && b.x1 - hi <= tx) rows++;
+  }
+  for (let c = 0; c < bw; c++) if (bottom[c]! >= 0 && top[c]! <= ty && bh - 1 - bottom[c]! <= ty) cols++;
+  return rows >= bh * TEXT_TINT_SIDE_SHARE && cols >= bw * TEXT_TINT_SIDE_SHARE;
+}
+
+/**
+ * Flat tinted rectangles inside the large marks (a chart's coloured header band or table fill): per
+ * mark, its most common smooth colour, and the connected pixels of that colour that fill a wide
+ * rectangle. Returns each rectangle with the bounding box of the mark that holds it (the table).
+ */
+function flatTints(p: Pick<Prepared, "width" | "height" | "rgb">, marks: TextMarks): { tint: Tint; table: Box }[] {
+  const { width: w, height: h, rgb } = p, frame = w * h, out: { tint: Tint; table: Box }[] = [];
+  for (let l = 1; l < marks.sizes.length; l++) {
+    if (marks.sizes[l]! < frame * TEXT_TINT_MIN_MARK_SHARE) continue;
+    const table = marks.boxes[l]!, hist = new Uint32Array(4096), sum = new Float64Array(4096 * 3);
+    for (let y = table.y0; y <= table.y1; y++) for (let x = table.x0; x <= table.x1; x++) {
+      const i = y * w + x; if (marks.labels[i] !== l || !smoothAt(rgb, w, h, x, y)) continue;
+      const k = ((rgb[i * 3]! >> 4) << 8) | ((rgb[i * 3 + 1]! >> 4) << 4) | (rgb[i * 3 + 2]! >> 4);
+      hist[k]!++; for (let c = 0; c < 3; c++) sum[k * 3 + c]! += rgb[i * 3 + c]!;
+    }
+    // The mark's tints: its most common smooth colours, each holding TEXT_TINT_MIN_COLOUR_SHARE of its smooth pixels (a band and a row of cells).
+    let smooth = 0;
+    for (let k = 0; k < 4096; k++) smooth += hist[k]!;
+    const colours: [number, number, number][] = [];
+    for (const k of [...hist.keys()].filter(k => hist[k]! && hist[k]! >= smooth * TEXT_TINT_MIN_COLOUR_SHARE).sort((a, b) => hist[b]! - hist[a]!)) {
+      const color = [0, 1, 2].map(c => Math.round(sum[k * 3 + c]! / hist[k]!)) as [number, number, number];
+      if (!colours.some(c => Math.max(...c.map((v, j) => Math.abs(v - color[j]!))) <= BACKGROUND_CLUSTER_DELTA)) colours.push(color);
+    }
+    for (const color of colours.slice(0, TEXT_TINT_MAX_COLOURS)) {
+      const flat = new Uint8Array(frame);
+      for (let y = table.y0; y <= table.y1; y++) for (let x = table.x0; x <= table.x1; x++) { const i = y * w + x; if (marks.labels[i] === l && delta(rgb, i, color) <= BACKGROUND_CLUSTER_DELTA) flat[i] = 1; }
+      const { labels, sizes } = components(flat, w, h), boxes = new Map<number, Box>();
+      for (let y = table.y0; y <= table.y1; y++) for (let x = table.x0; x <= table.x1; x++) {
+        const f = labels[y * w + x]!; if (!f) continue;
+        const b = boxes.get(f) ?? { x0: x, y0: y, x1: x, y1: y };
+        b.x0 = Math.min(b.x0, x); b.x1 = Math.max(b.x1, x); b.y0 = Math.min(b.y0, y); b.y1 = Math.max(b.y1, y); boxes.set(f, b);
+      }
+      for (const [f, b] of boxes) {
+        if (b.x1 - b.x0 + 1 >= w * TEXT_TINT_MIN_WIDTH && b.y1 - b.y0 + 1 >= h * TEXT_TINT_MIN_HEIGHT && filledRectangle(labels, f, b, w, sizes[f]!)) out.push({ tint: { color, box: b }, table });
+      }
+    }
+  }
+  return out;
+}
+
+/**
+ * A size chart, infographic or text banner: a plain background, rows of small marks, nothing large.
+ * A chart whose table has a tinted header band or fill (one mark over TEXT_LARGEST_MAX_SHARE once the
+ * band joins the grid lines) is read a second time with each flat tinted rectangle as page
+ * (flatTints). It is tried only when the first reading already finds TEXT_MIN_GLYPHS glyphs on
+ * TEXT_MIN_LINES lines on a page of TEXT_MIN_PAGE_SHARE (only the largest-mark and ink-share rules
+ * failed); it counts only when the tables the rectangles sit in hold TEXT_MIN_GLYPHS glyphs on
+ * TEXT_MIN_LINES lines themselves, and it passes every rule above.
+ */
+export function detectTextImage(p: Pick<Prepared, "width" | "height" | "rgb">): TextImage {
+  const { width: w, height: h } = p, bg = borderBackground(p), frame = w * h;
+  const pageLuma = 0.2126 * bg.color[0] + 0.7152 * bg.color[1] + 0.0722 * bg.color[2];
+  if (bg.frameFilling || pageLuma < TEXT_MIN_PAGE_LUMA) return { text: false, glyphs: 0, lines: 0, largestShare: 1, glyphInkShare: 0, pageShare: 0, tintedRegions: 0 };
+  const read = (m: TextMarks, tintedRegions: number): TextImage => {
+    const glyphs = m.glyphs.length, lines = textLines(m.glyphs.map(g => g.y), h), largestShare = m.largest / frame, glyphInkShare = m.inkTotal ? m.glyphInk / m.inkTotal : 0, pageShare = m.page / frame;
+    return { text: glyphs >= TEXT_MIN_GLYPHS && lines >= TEXT_MIN_LINES && largestShare < TEXT_LARGEST_MAX_SHARE && glyphInkShare >= TEXT_MIN_GLYPH_INK_SHARE && pageShare >= TEXT_MIN_PAGE_SHARE,
+      glyphs, lines, largestShare: Math.round(largestShare * 1e4) / 1e4, glyphInkShare: Math.round(glyphInkShare * 1000) / 1000, pageShare: Math.round(pageShare * 1000) / 1000, tintedRegions };
+  };
+  const plain = textMarks(p, bg.color, []), first = read(plain, 0);
+  if (first.text) return first;
+  // The second reading is only for a page that already reads as text on its plain part: enough glyphs
+  // on enough lines, and mostly page. It fails only because the tinted band joined to the grid lines is
+  // one large mark that outweighs the glyph ink. A product photo has no rows of glyphs on its plain
+  // background (print on a garment, a box or a bag sits inside the product's mark), so stripes, colour
+  // blocks, printed logos and even a printed block of text on a product never get this second reading.
+  if (first.glyphs < TEXT_MIN_GLYPHS || first.lines < TEXT_MIN_LINES || plain.page / frame < TEXT_MIN_PAGE_SHARE) return first;
+  const found = flatTints(p, plain);
+  if (!found.length) return first;
+  const second = textMarks(p, bg.color, found.map(f => f.tint));
+  const inTable = second.glyphs.filter(g => found.some(({ table: t }) => g.x >= t.x0 && g.x <= t.x1 && g.y >= t.y0 && g.y <= t.y1));
+  if (inTable.length < TEXT_MIN_GLYPHS || textLines(inTable.map(g => g.y), h) < TEXT_MIN_LINES) return first;
+  const tinted = read(second, found.length);
+  return tinted.text ? tinted : first;
 }
 
 /**

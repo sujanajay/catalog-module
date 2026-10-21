@@ -238,6 +238,68 @@ describe("size charts and text-only images", () => {
     const sequins = image((x, y) => (x % 20 < 6 && y % 20 < 6) ? [220, 220, 230] : [30, 35, 80]);
     expect(detectTextImage(sequins).text).toBe(false);
   });
+
+  /**
+   * The Penti bra chart (Z659062EFB3FB0720BF56Z): a pink header band and pale pink header cells joined
+   * to the grid lines make one mark over 6% of the frame, and their fill outweighs the glyph ink.
+   */
+  const tintedChart = image((x, y) => {
+    const inTable = x >= 20 && x < 380 && y >= 100 && y < 520;
+    if (!inTable) return y >= 40 && y < 60 && x >= 150 && x < 250 && x % 14 < 9 ? [240, 80, 110] : [255, 250, 250];
+    if (y === 100 || y === 519 || x === 20 || x === 379) return [120, 120, 120];
+    if (y < 140) return y >= 116 && y < 124 && x >= 180 && x < 220 && x % 10 < 6 ? [255, 255, 255] : [249, 81, 114];
+    if (y % 34 === 140 % 34 || (x - 20) % 60 === 0) return [120, 120, 120];
+    const glyphRow = (y - 140) % 34 >= 13 && (y - 140) % 34 < 21 && (x - 20) % 60 > 5 && (x - 20) % 60 < 55 && x % 10 < 6;
+    if (glyphRow) return [30, 30, 30];
+    return y < 174 ? [250, 200, 215] : [255, 255, 255];
+  });
+
+  it("recognises a size chart with a tinted header band and table cells", () => {
+    expect(detectTextImage(tintedChart)).toMatchObject({ text: true });
+    // Caught on the second reading only: the tinted band and cells are read as page.
+    expect(detectTextImage(tintedChart).tintedRegions).toBeGreaterThan(0);
+  });
+
+  it("does not take a flat tinted product with a printed logo for a chart", () => {
+    const logo = (x: number, y: number) => inRect(x, y, 150, 260, 100, 40) && (y - 260) % 14 < 8 && x % 10 < 6;
+    // A flat pink tee (body and sleeves) with a two-line logo, on a pale pink page.
+    const tee = (x: number, y: number) => inRect(x, y, 110, 180, 180, 300) || (y >= 180 && y < 260 && x >= 60 - (y - 180) / 4 && x < 340 + (y - 180) / 4);
+    const shirt = image((x, y) => tee(x, y) ? (logo(x, y) ? [255, 255, 255] : [235, 120, 150]) : [252, 242, 242]);
+    expect(detectTextImage(shirt).text).toBe(false);
+    // A rectangular flat pink box: a filled rectangle with the same logo is not a table.
+    const box = image((x, y) => inRect(x, y, 80, 180, 240, 240) ? (logo(x, y) ? [30, 30, 30] : [235, 120, 150]) : [255, 255, 255]);
+    expect(detectTextImage(box).text).toBe(false);
+  });
+
+  it("still recognises a flat white chart on the first reading", () => {
+    expect(detectTextImage(chart)).toMatchObject({ text: true, tintedRegions: 0 });
+  });
+
+  /** A tee (body and sleeves) on a white page, painted by `fill`. */
+  const tee = (x: number, y: number) => inRect(x, y, 110, 180, 180, 300) || (y >= 180 && y < 260 && x >= 60 - (y - 180) / 4 && x < 340 + (y - 180) / 4);
+  const teePhoto = (fill: (x: number, y: number) => RGB) => image((x, y) => tee(x, y) ? fill(x, y) : [255, 255, 255]);
+
+  it("does not take a striped or colour-block garment for a chart", () => {
+    // Navy and white stripes: each navy stripe is a flat wide rectangle on the white page.
+    expect(detectTextImage(teePhoto((_x, y) => Math.floor(y / 12) % 2 ? [40, 50, 120] : [255, 255, 255])).text).toBe(false);
+    // Navy and red stripes: one large mark of two flat colours.
+    expect(detectTextImage(teePhoto((_x, y) => Math.floor(y / 12) % 2 ? [40, 50, 120] : [200, 40, 50])).text).toBe(false);
+    // Colour blocks: three flat rectangular panels.
+    expect(detectTextImage(teePhoto((_x, y) => y < 260 ? [230, 60, 60] : y < 380 ? [250, 210, 60] : [40, 90, 200])).text).toBe(false);
+  });
+
+  it("does not take a product with a small printed logo for a chart", () => {
+    const logo = (x: number, y: number) => inRect(x, y, 170, 300, 60, 22) && (y - 300) % 14 < 8 && x % 8 < 5;
+    expect(detectTextImage(teePhoto((x, y) => logo(x, y) ? [250, 250, 250] : [30, 30, 30])).text).toBe(false);
+  });
+
+  it("does not take a tinted box printed with a block of text for a chart", () => {
+    // Ten lines of small dark glyphs on a flat pink face: a chart's tinted table would read like this,
+    // but there is no text on the plain page around it, so it is never read a second time.
+    const text = (x: number, y: number) => y >= 180 && y < 420 && (y - 180) % 24 < 8 && x >= 80 && x < 320 && x % 10 < 6;
+    const box = image((x, y) => inRect(x, y, 60, 150, 280, 300) ? (text(x, y) ? [30, 30, 30] : [235, 120, 150]) : [255, 255, 255]);
+    expect(detectTextImage(box)).toMatchObject({ text: false, tintedRegions: 0 });
+  });
 });
 
 describe("hand-held products", () => {
