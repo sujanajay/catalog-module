@@ -407,8 +407,10 @@ it("spec07 v2 an output defect on one channel re-checks the photo's other channe
  // The shadow block shows only to the judged channel's judge; the re-check of the other channel misses it.
  vi.mocked(w.deps.judgeOutput).mockImplementation(judgeWith((input):JudgePick=>input.n===2 && input.channel===judged ? {scores:{background_clean:20},evidence:{leftover_background:"A grey block remains left of the shoe."}}:{}));
  expect((await run(w,s)).outcome).toBe("published");
- // Judge, re-check, then one re-judge of the 5% smaller fit on the judged channel (the other steps have nothing to change).
- expect(vi.mocked(w.deps.judgeOutput).mock.calls.filter(call=>call[0].n===2).map(call=>call[0].channel).sort()).toEqual([judged,...["amazon","noon"]].sort());
+ // Judge and re-check only: a leftover background is answered by taking a drawn shadow off or by a second cut-out
+ // (07 4.6a), never by a blind smaller fit; this render drew no shadow and the policy has no second model, so
+ // nothing is re-made or re-judged.
+ expect(vi.mocked(w.deps.judgeOutput).mock.calls.filter(call=>call[0].n===2).map(call=>call[0].channel).sort()).toEqual(["amazon","noon"]);
  expect(vi.mocked(w.deps.judgeOutput).mock.calls.filter(call=>call[0].n!==2)).toHaveLength(3);
  const second=await db.select().from(catalogOutputs).where(and(eq(catalogOutputs.batchId,s.batch.id),eq(catalogOutputs.n,2)));
  for(const o of second) {
