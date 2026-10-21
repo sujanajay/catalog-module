@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import sharp from "sharp";
-import { judgeOutput, normalizeScores, verdictFor, dimensionThresholds, QA_DIMENSIONS, type JudgeInput } from "./judge";
+import { judgeOutput, sheetNames, sheetNumbered, normalizeScores, verdictFor, dimensionThresholds, QA_DIMENSIONS, type JudgeInput } from "./judge";
 import { classifyProductType } from "./classify";
 import { CATALOG_QA_TEMPLATE, renderTemplate } from "./templates";
 import { QA_USD_PER_CHECK_FALLBACK } from "../cost";
@@ -77,7 +77,7 @@ describe("catalog judge v2", () => {
   const agree = byModel({"first/judge":wrong,"second/judge":wrong});
   const confirmed = await judgeOutput(await input(),{apiKey:"fake",fetch:agree});
   expect(confirmed).toMatchObject({verdict:"flag",flags:["different_product"],scores:{same_product:0},wrongItem:{first:true,second:true,confirmed:true}});
-  expect(confirmed.evidence?.different_product).toBe("Image 1 shows a red sandal, image 3 a black running shoe.");
+  expect(confirmed.evidence?.different_product).toBe("Photo 5 shows a red sandal, photo 1 a black running shoe.");
   expect(confirmed.opinions?.map(o=>o.model)).toEqual(["first/judge","second/judge"]);
   // Without a second judge, or without photo 1 to compare with, a wrong_item answer never holds.
   const alone = await judgeOutput(await input({secondModel:undefined}),{apiKey:"fake",fetch:byModel({"first/judge":wrong})});
@@ -346,5 +346,27 @@ describe("judge back-off on rate limits and the second judge (07 4.2)", () => {
   const fetcher = scripted({"first/judge":[() => new Response(JSON.stringify({error:{message:"User not found.",code:401}}),{status:401})], "second/judge":[ok()]});
   const result = await judgeOutput(await input({n:1,shotOne:undefined}),{apiKey:"fake",fetch:fetcher,log:()=>{},sleep:clock.sleep,random:clock.random});
   expect(result.flags).toEqual(["qa_unavailable"]);expect(fetcher).toHaveBeenCalledTimes(1);expect(clock.waits).toEqual([]);
+ });
+});
+
+describe("the judge's evidence sentence uses the sheet's photo numbers", () => {
+ it("rewrites prompt image numbers to the product's photo numbers, at sentence start and mid-sentence", async () => {
+  // french_connection.apparel_model Z023DBEC95DCF485E9E6EZ: the planted wrong item was photo 4.
+  const wrong = reply({view:"front",wrong_item:true,evidence:{wrong_item:"Image 1 shows a pair of shoes, image 3 shows a shirt."}});
+  const result = await judgeOutput(await input({n:4,productType:"apparel_model"}),{apiKey:"fake",fetch:byModel({"first/judge":wrong,"second/judge":wrong})});
+  expect(result.flags).toEqual(["different_product"]);
+  expect(result.evidence?.different_product).toBe("Photo 4 shows a pair of shoes, photo 1 shows a shirt.");
+  expect(result.reasons).toEqual(["Photo 4 shows a pair of shoes, photo 1 shows a shirt."]);
+  expect(result.opinions?.map(o => o.evidence.wrong_item)).toEqual(["Photo 4 shows a pair of shoes, photo 1 shows a shirt.","Photo 4 shows a pair of shoes, photo 1 shows a shirt."]);
+ });
+ it("names image 2 as the output, leaves sentences without numbers and numbers outside the map untouched", () => {
+  const names = sheetNames(4, true);
+  expect(sheetNumbered("A grey block remains left of the shoe in image 2.", names)).toBe("A grey block remains left of the shoe in the output.");
+  expect(sheetNumbered("The image 2 edge is soft; Image 2 shows a halo.", names)).toBe("The output edge is soft; The output shows a halo.");
+  expect(sheetNumbered("The shirt is cut off at the bottom edge.", names)).toBe("The shirt is cut off at the bottom edge.");
+  expect(sheetNumbered("Image 5 shows a bag, unlike image 1.", names)).toBe("Image 5 shows a bag, unlike photo 4.");
+  // Without photo 1 sent, image 3 is not in the map.
+  expect(sheetNumbered("Image 3 shows a shirt.", sheetNames(1, false))).toBe("Image 3 shows a shirt.");
+  expect(sheetNumbered("image 1 is blurred.", sheetNames(1, false))).toBe("photo 1 is blurred.");
  });
 });
