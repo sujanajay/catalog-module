@@ -1,4 +1,4 @@
-import { and, desc, eq, sql } from "drizzle-orm";
+import { and, desc, eq, gt, inArray, ne, sql } from "drizzle-orm";
 import { brandMaster, catalogBatches, catalogUploads, type CatalogBatch } from "@catalog/core/db/schema";
 import { CHANNEL_IDS, IDENTIFIER_MODES, PRECEDENCES, PRODUCT_TYPES, type BatchOptions, type ChannelId, type ProductType } from "@catalog/core/catalog/types";
 import { db, type Db } from "../db";
@@ -29,8 +29,16 @@ export function publicBatch(batch: CatalogBatch) {
   const { policy: _policy, ...options } = batch.options;
   return { ...batch, options };
 }
-export function batchState(batch: CatalogBatch, source?: string) {
-  return deriveBatchState({ status: batch.status, counts: batch.counts, source, updatedAt: batch.updatedAt });
+export function batchState(batch: CatalogBatch, source?: string, now?: Date) {
+  return deriveBatchState({ status: batch.status, counts: batch.counts, source, updatedAt: batch.updatedAt, startedAt: batch.startedAt, now });
+}
+/**
+ * Whether a batch other than this one is being processed now, so wizard step 4 can say this one may wait.
+ * A processing row untouched for an hour is an old batch left behind, not one ahead in the queue.
+ */
+export async function anotherBatchProcessing(id: string, now = new Date()): Promise<boolean> {
+  const [row] = await db().select({ id: catalogBatches.id }).from(catalogBatches).where(and(ne(catalogBatches.id, id), inArray(catalogBatches.status, ["matting", "rendering", "qa", "publishing"]), gt(catalogBatches.updatedAt, new Date(+now - 60 * 60_000)))).limit(1);
+  return !!row;
 }
 export async function listBatches() {
   const rows = await db().select({ batch: catalogBatches, brandLine: brandMaster.line }).from(catalogBatches).leftJoin(brandMaster, eq(catalogBatches.brandSlug, brandMaster.slug))

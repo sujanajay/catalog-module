@@ -51,7 +51,9 @@ export default async function BatchPage({ params, searchParams }: { params: Prom
   const channelLabels = batch.channels.map(c => channel(c).label);
   const missingSkus = data.sheet.rows.filter(r => !r.opptraSkuIds.length).length;
   const source = batchSource(data.uploads.map(u => u.kind));
-  const state = batchState(batch, source);
+  // One clock for the whole render, so the banner's time left and the page state agree.
+  const now = new Date();
+  const state = batchState(batch, source, now);
   const downloads = (batch.sheetXlsxUri || batch.sheetCsvUri || data.filled) ? (
     <div className="dl">
       {batch.sheetXlsxUri && <a className="btn primary" href={`/api/catalog/batches/${id}/export?format=xlsx`}>Download links sheet (Excel)</a>}
@@ -60,7 +62,7 @@ export default async function BatchPage({ params, searchParams }: { params: Prom
     </div>
   ) : null;
   const next: Record<string, string> = {
-    processing: "You can close this page; nothing stops.",
+    processing: "You can close this page and come back; nothing stops.",
     collecting: collectingText(source),
     attention: `Open "Needs attention" for the ${batch.counts.attentionProducts} ${plural(batch.counts.attentionProducts, "product", "products")} with a problem.`,
     ready: "Download the sheet and paste the links into the marketplace templates.",
@@ -82,7 +84,7 @@ export default async function BatchPage({ params, searchParams }: { params: Prom
         )}
         {canAct && state.stalled && <ActionOnly><RetryCollectButton batchId={id} /></ActionOnly>}
       </div>
-      <BatchBanner key={id} status={batch.status} counts={batch.counts} source={source} updatedAt={new Date(batch.updatedAt).toISOString()} keptPhotos={data.keptPhotos} />
+      <BatchBanner key={id} status={batch.status} counts={batch.counts} source={source} updatedAt={new Date(batch.updatedAt).toISOString()} startedAt={batch.startedAt ? new Date(batch.startedAt).toISOString() : null} now={now.toISOString()} keptPhotos={data.keptPhotos} />
       <NotRefreshedLine items={data.notRefreshedChannels} />
       <BatchKpis counts={batch.counts} />
       <AutoRefresh active={state.state === "collecting" || state.state === "processing"} />

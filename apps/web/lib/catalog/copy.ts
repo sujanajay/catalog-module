@@ -1,5 +1,6 @@
 // Pure copy helpers shared by server pages and client components (no server imports here).
 import { RUPEES_NOT_CONFIGURED } from "@catalog/core/catalog/cost";
+import { styliSkipText } from "@catalog/core/catalog/pipeline/status";
 
 /** The operator's sentence when the ingest hand-off to the worker queue failed for a transient reason. */
 export const HAND_OFF_RETRY = "The upload could not be handed to processing. Please try again.";
@@ -39,10 +40,11 @@ export function estimateText(estimate: CostEstimate | null | undefined): string 
  * The Ready banner for a batch where an operator kept flagged photos with "Use as is" (spec 07 4.7:
  * those photos are live "kept as is"); the plain "passed every check" sentence would be untrue then.
  */
-export function readyText(images: number, keptPhotos: number): string {
+export function readyText(images: number, keptPhotos: number, skipped = 0): string {
   const live = `All ${count(images)} ${plural(images, "image is", "images are")} live`;
-  if (keptPhotos <= 0) return `${live} and passed every check. Nothing needs your attention.`;
-  return `${live}. ${count(keptPhotos)} ${plural(keptPhotos, "photo was", "photos were")} kept as is after a decision; everything else passed every check. Nothing needs your attention.`;
+  const tail = skipped > 0 ? styliSkipText(skipped) : "Nothing needs your attention.";
+  if (keptPhotos <= 0) return `${live} and passed every check. ${tail}`;
+  return `${live}. ${count(keptPhotos)} ${plural(keptPhotos, "photo was", "photos were")} kept as is after a decision; everything else passed every check. ${tail}`;
 }
 
 export type BatchSource = "Drive folder" | "Google Sheet" | "links" | "zip" | "upload";
@@ -61,8 +63,6 @@ export function batchSource(kinds: readonly string[]): BatchSource {
 
 /** The Overview line while files are collected, worded for the batch's source. */
 export function collectingText(source: BatchSource): string {
-  if (source === "zip") return "We unpack your zip first. Processing starts automatically.";
-  if (source === "upload") return "We check your uploaded files first. Processing starts automatically.";
-  const from = source === "links" ? "your links" : `the ${source}`;
-  return `We copy your files first so the batch does not depend on ${from} later. Processing starts automatically.`;
+  const first = source === "zip" ? "Unpacking your zip." : source === "upload" ? "Checking your uploaded files." : "Copying your files.";
+  return `${first} Processing starts by itself. You can close this page.`;
 }

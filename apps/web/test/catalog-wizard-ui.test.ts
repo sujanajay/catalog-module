@@ -28,6 +28,9 @@ describe("wizard visible state",()=>{
     expect(ready).not.toMatch(/model|policy|INR_PER_USD/i);
     const priced=renderToStaticMarkup(createElement(WizardStep4,{preview:{...preview,estimate:{usd:0.5,inr:42,images:416,qaChecks:104}}}));
     expect(priced).toContain("Estimated cost: about INR 42.00 (416 images, 104 quality checks)");expect(priced).not.toContain("not available");
+    expect(ready).toContain("This usually takes about 1 to 5 minutes. After you press Start you can close this page; the batch keeps going, and you can come back to it any time from All batches.");
+    expect(ready).not.toContain("Another batch is running");
+    expect(renderToStaticMarkup(createElement(WizardStep4,{preview:{...preview,otherBatchProcessing:true}}))).toContain("Another batch is running; yours may wait behind it.");
   });
   it("names busy products and duplicate spellings in the visible overwrite preview",()=>{
     const html=renderToStaticMarkup(createElement(OverwritePreview,{preview:{...preview,busy:[{identifier:"ABC123",batchName:"October photos"}],overwrite:{...preview.overwrite,sameProductPairs:[{a:"ABC-123",b:"ABC123"}]}}}));
