@@ -3,7 +3,8 @@ import { checkAttention, flagRows } from "./attention";
 import { CHART_SKIP_NOTE, checkCompleteness, expectedOutcome, STYLI_SKIP_NOTE, type CompletenessInput, type OutputRow } from "./completeness";
 import { checkIdentical, checkOverwrite, type LiveRow } from "./overwrite";
 import { buildReport, reportHtml, summaryLine } from "./report";
-import { policyRowsFor, rankModels, scoreModels, winnersByScope, type MatteTrial } from "./matte-bakeoff";
+import { bakeoffPolicy, policyRowsFor, rankModels, scoreModels, winnersByScope, type MatteTrial } from "./matte-bakeoff";
+import { samplePath, selectSets, type SetRecord } from "./progress";
 import type { CheckResult, Expectation } from "./types";
 import type { ChannelId } from "../types";
 
@@ -91,6 +92,30 @@ describe("completeness", () => {
     Object.assign(live, { status: "verified", isLive: true, generation: 7, bytes: 100, crc32c: "c" });
     expect(failed(checkCompleteness(w))).toEqual(["completeness.held_unpublished"]);
   });
+  it("reports a product held as a whole once (completeness.product_held) and leaves its outputs out of the counts (eval run 3: the FC bag's three false holds produced 210 completeness rows for one defect)", () => {
+    const w = completenessWorld();
+    // Product B: n=1 held on every channel, n=2 staged with it, nothing live, no links.
+    for (const n of [1, 2]) {
+      w.sources.push({ identifier: "B", n, width: 2000, height: 3000 });
+      for (const ch of w.channels) { w.outputs.push({ identifier: "B", n, channel: ch, status: n === 1 ? "needs_attention" : "staged", isLive: false, reason: n === 1 ? "halo" : null, generation: null, bytes: null, crc32c: null, publicUrl: `https://x/B/${ch}/B_${n}.jpg`, stagingUri: `gs://a/B/${ch}/${n}` }); w.sheet.push({ identifier: "B", channel: ch, n, url: null }); }
+    }
+    w.counts.outputs = 15;
+    const results = checkCompleteness(w);
+    expect(failed(results)).toEqual(["completeness.product_held"]);
+    const row = results.find(r => r.id === "completeness.product_held")!;
+    expect(row.subject).toEqual({ identifier: "B", n: null, channel: null });
+    expect(row.measured).toBe("0 of 6 live: product held");
+    expect(row.detail).toContain("image 1");
+    expect(results.some(r => r.id === "completeness.live" && r.subject.identifier === "B")).toBe(false);
+    expect(results.filter(r => r.id === "completeness.one_output" && r.subject.identifier === "B")).toHaveLength(6);
+    expect(results.find(r => r.id === "completeness.counts_verified")?.ok).toBe(true);
+    // Partly published: one shot live while another is held is not a product-level hold, every output is judged on its own.
+    const live = w.outputs.find(o => o.identifier === "B" && o.n === 2 && o.channel === "noon")!;
+    Object.assign(live, { status: "verified", isLive: true, generation: 7, bytes: 100, crc32c: "c" });
+    const partial = checkCompleteness(w);
+    expect(failed(partial)).not.toContain("completeness.product_held");
+    expect(failed(partial)).toContain("completeness.live");
+  });
   it("accepts a size chart left out on every channel with its note, and fails it without the note", () => {
     const w = completenessWorld();
     for (const o of w.outputs.filter(row => row.n === 3)) Object.assign(o, { status: "skipped", isLive: false, reason: CHART_SKIP_NOTE, generation: null, bytes: null, crc32c: null, stagingUri: null });
@@ -156,6 +181,22 @@ describe("attention", () => {
     const outputs = [row("A", 1, "noon", { status: "needs_attention", flags: ["halo"] }), row("A", 1, "centrepoint"), row("A", 1, "styli", { flags: ["placement"], compliance: { ok: true, failures: [] } }), row("M", 1, "noon", { flags: ["shadow_synthesised"] })];
     const out = checkAttention({ products: [{ identifier: "A", change: "pending_attention", productType: "auto", expect: NONE }, { identifier: "M", change: "new", productType: "apparel_model", expect: NONE }], outputs, deterministicPass: new Set(), liveJudge: false, threshold: 75 });
     expect(failed(out.results)).toEqual(expect.arrayContaining(["attention.channel_consistent", "attention.channel_consistency", "attention.placement_not_judged", "attention.product_type_set", "shadow.synthesised_on_model"]));
+  });
+  it("requires a per-shot expected flag without a hold on that shot and nothing published (the size chart Z659062EFB3FB0720BF56Z n=7, batch n=6, published on every channel as a pass-through)", () => {
+    const shots = [{ identifier: "C", n: 6, expect: { attention: false, flags: ["chart_image"] as never[], detector: "code" as const, reason: "a size chart" } }];
+    const products = [{ identifier: "C", change: "new", productType: "apparel_model", expect: NONE }];
+    const leftOut = checkAttention({ products, outputs: [row("C", 6, "noon", { status: "skipped", flags: ["chart_image"] }), row("C", 6, "amazon", { status: "skipped", flags: ["chart_image"] }), row("C", 6, "styli", { status: "skipped", flags: ["low_resolution"] })], shots, deterministicPass: new Set(), liveJudge: false, threshold: 75 });
+    expect(leftOut.results.find(r => r.id === "attention.expected_flags")?.ok).toBe(true);
+    const published = checkAttention({ products, outputs: [row("C", 6, "noon", { flags: ["matte_passthrough"] }), row("C", 6, "amazon", { flags: ["matte_passthrough"] })], shots, deterministicPass: new Set(), liveJudge: false, threshold: 75 });
+    const miss = published.results.find(r => r.id === "attention.expected_flags");
+    expect(miss?.ok).toBe(false);
+    expect(miss?.subject).toEqual({ identifier: "C", n: 6, channel: null });
+    expect(miss?.detail).toContain("missing on image 6: chart_image (2 outputs published instead of left out). a size chart");
+    // The flag raised but the outputs still published is a failure too; a judge-only flag is not required on a mocked run.
+    const flagged = checkAttention({ products, outputs: [row("C", 6, "noon", { flags: ["chart_image"] })], shots, deterministicPass: new Set(), liveJudge: false, threshold: 75 });
+    expect(flagged.results.find(r => r.id === "attention.expected_flags")?.detail).toContain("1 outputs were published instead of left out");
+    const judgeOnly = checkAttention({ products, outputs: [row("C", 6, "noon")], shots: [{ identifier: "C", n: 6, expect: { attention: false, flags: ["text_or_watermark"] as never[], detector: "judge" } }], deterministicPass: new Set(), liveJudge: false, threshold: 75 });
+    expect(judgeOnly.results.some(r => r.id === "attention.expected_flags")).toBe(false);
   });
   it("builds one flag row per flag with its dimension, score, model and action", () => {
     const rows = flagRows([row("A", 2, "noon", { status: "needs_attention", flags: ["halo", "low_resolution"], reason: "rough edge", qaScores: { edge_quality: 40 }, qaModel: "m", decision: "use_as_is" })], 75);
@@ -226,15 +267,100 @@ describe("report", () => {
       { id: "attention.not_held", group: "attention", subject: { identifier: "B", n: null, channel: null }, ok: false, status: "fail", measured: 1, threshold: 0, unit: "", detail: "Needs attention: image 1 for noon: halo" },
     ];
     const report = buildReport({ run: "r1", startedAt: new Date(0), finishedAt: new Date(1000), mode: "mocked judge", golden: { products: 2, photos: 2, brands: { anta: 2 }, categories: { footwear: 2 }, tags: {} }, results, attention: { attentionProducts: 1, attentionRate: 0.5, expectedAttention: 0, falseHoldRate: 0, useAsIsRate: null, plantedCaught: 0, plantedTotal: 0 }, flags: [], batches: ["b"] });
-    expect(report.summary).toMatchObject({ checks: 3, passed: 1, failed: 2, notRun: 1, attentionProducts: 1, passedAll: false });
+    expect(report.summary).toMatchObject({ checks: 3, passed: 1, failed: 2, notRun: 1, information: 0, attentionProducts: 1, passedAll: false });
     expect(report.summary.line).toBe(summaryLine(1, 3, 1));
     expect(report.summary.line).toBe("Output-quality eval: 1 of 3 checks passed, 1 products need attention (target 0)");
-    expect(report.byGroup.geometry).toEqual({ checks: 2, passed: 1, failed: 1, notRun: 0 });
+    expect(report.byGroup.geometry).toEqual({ checks: 2, passed: 1, failed: 1, notRun: 0, information: 0 });
     expect(report.attention).toEqual([{ identifier: "B", detail: "Needs attention: image 1 for noon: halo" }]);
     const html = await reportHtml(report, [{ identifier: "A", n: 1, channel: "noon", original: null, output: null }]);
     expect(html).toContain("geometry.edges");
     expect(html).toContain("5 edge pixels.");
     expect(html).toContain("Attention rate 50.00%");
     expect(html).not.toContain("gemini");
+  });
+  it("lists an information row (shadow.expected_synthesis) on its own, never as a pass, a failure or a not-run", async () => {
+    const info: CheckResult = { id: "shadow.expected_synthesis", group: "shadow", subject: { identifier: "A", n: 1, channel: "noon" }, ok: true, status: "info", measured: "none drawn; 900x400 box, contact line 92%", threshold: "synthesised", unit: "shadow", detail: "OPEN owner question." };
+    const report = buildReport({ run: "r2", startedAt: new Date(0), finishedAt: new Date(1000), mode: "mocked judge", golden: { products: 1, photos: 1, brands: {}, categories: {}, tags: {} }, results: [info], attention: { attentionProducts: 0, attentionRate: 0, expectedAttention: 0, falseHoldRate: null, useAsIsRate: null, plantedCaught: 0, plantedTotal: 0 }, flags: [], batches: [] });
+    expect(report.summary).toMatchObject({ checks: 0, passed: 0, failed: 0, notRun: 0, information: 1, passedAll: true });
+    expect(report.byGroup.shadow).toEqual({ checks: 1, passed: 0, failed: 0, notRun: 0, information: 1 });
+    expect(report.information).toEqual([info]);
+    const html = await reportHtml(report, []);
+    expect(html).toContain("Recorded as information: 1");
+    expect(html).toContain("contact line 92%");
+  });
+});
+
+describe("live run calibration 3 (session 5)", () => {
+  const row = (identifier: string, n: number, channel: ChannelId, extra: Partial<Parameters<typeof checkAttention>[0]["outputs"][number]> = {}) => ({ identifier, n, channel, status: "verified", flags: [] as never[], reason: null, qaScores: null, ...extra });
+  it("counts a judging without a verdict (qa_unavailable, qa_cap) under judge_unavailable, never as a judge false positive", () => {
+    const zeroed = { verdict: "flag", complete_product: 0, same_product: 100, edge_quality: 0, reasons: ["The quality check could not read this image."] };
+    const outputs = [row("A", 1, "noon", { status: "needs_attention", flags: ["qa_unavailable"], reason: "The quality check could not read this image.", qaScores: zeroed }), row("A", 1, "amazon", { status: "needs_attention", flags: ["qa_unavailable"], qaScores: zeroed }), row("B", 1, "noon", { status: "needs_attention", flags: ["qa_cap"], qaScores: zeroed })];
+    const out = checkAttention({ products: [{ identifier: "A", change: "pending_attention", productType: "apparel_model", expect: NONE }, { identifier: "B", change: "pending_attention", productType: "apparel_model", expect: NONE }], outputs, deterministicPass: new Set(["A|noon|1", "A|amazon|1", "B|noon|1"]), liveJudge: true, threshold: 75 });
+    expect(failed(out.results)).not.toContain("attention.judge_false_positive");
+    const unavailable = out.results.filter(r => r.id === "attention.judge_unavailable");
+    expect(unavailable).toHaveLength(3);
+    expect(unavailable.every(r => r.status === "fail")).toBe(true);
+    expect(unavailable[0]!.detail).toContain("held without one");
+    expect(unavailable[2]!.measured).toBe("qa_cap");
+    // The hold is still counted: not_held per product and the false-hold rate.
+    expect(failed(out.results).filter(id => id === "attention.not_held")).toHaveLength(2);
+    expect(out.falseHoldRate).toBe(1);
+  });
+  it("passes a complete_product note on a source cut at the frame (cut_in_source) and keeps failing it on an uncut source or when it held the output", () => {
+    const note = { verdict: "flag", complete_product: 55, same_product: 100, edge_quality: 100, background_clean: 100, no_text_or_watermark: 100, orientation_ok: 100, product_intact: 100, reasons: ["The skirt runs off the bottom edge of the photo."] };
+    const outputs = [row("A", 2, "noon", { flags: ["complete_product", "cut_in_source"], qaScores: note }), row("A", 3, "noon", { flags: ["complete_product"], qaScores: note }), row("A", 4, "noon", { status: "needs_attention", flags: ["complete_product", "cut_in_source"], qaScores: note })];
+    const out = checkAttention({ products: [{ identifier: "A", change: "pending_attention", productType: "apparel_model", expect: NONE }], outputs, deterministicPass: new Set(["A|noon|2", "A|noon|3", "A|noon|4"]), liveJudge: true, threshold: 75 });
+    const rows = out.results.filter(r => r.id === "attention.judge_false_positive");
+    expect(rows.map(r => [r.subject.n, r.status])).toEqual([[2, "pass"], [3, "fail"], [4, "fail"]]);
+    expect(rows[0]!.detail).toContain("true of the original photo");
+  });
+  it("asserts a per-shot hold expectation on that shot's own rows, held or staged under a sibling's hold, on a live run (the candle Z011CB57531CA8FA0CBDDZ: shot 1 holds, shots 2 to 6 expect nothing)", () => {
+    const shots = [{ identifier: "K", n: 1, expect: { attention: true, flags: ["leftover_background", "text_or_watermark"] as never[], detector: "code" as const } }, { identifier: "K", n: 2, expect: { attention: true, flags: ["text_or_watermark"] as never[], detector: "judge" as const, reason: "a wrong manifest line" } }];
+    const outputs = [row("K", 1, "noon", { status: "needs_attention", flags: ["leftover_background", "text_or_watermark", "cut_in_source"] }), row("K", 2, "noon", { status: "staged", flags: ["no_shadow_source"] })];
+    const products = [{ identifier: "K", change: "pending_attention", productType: "other", expect: shots[0]!.expect }];
+    const live = checkAttention({ products, outputs, shots, deterministicPass: new Set(), liveJudge: true, threshold: 75 });
+    const rows = live.results.filter(r => r.id === "attention.expected_flags");
+    expect(rows.map(r => [r.subject.n, r.status])).toEqual([[1, "pass"], [2, "fail"]]);
+    expect(rows[1]!.detail).toContain("missing on image 2: text_or_watermark");
+    expect(rows[1]!.detail).toContain("a wrong manifest line");
+    expect(live.results.find(r => r.id === "attention.expected")?.ok).toBe(true);
+    // On a mocked run the judge-only expectation of shot 2 is not asserted and shot 1's code flag still is.
+    const mocked = checkAttention({ products, outputs, shots, deterministicPass: new Set(), liveJudge: false, threshold: 75 });
+    expect(mocked.results.filter(r => r.id === "attention.expected_flags").map(r => [r.subject.n, r.status])).toEqual([[1, "pass"]]);
+  });
+  it("fails a chart leave-out of a shot the manifest does not expect to be a chart, and accepts the expected one", () => {
+    const w = completenessWorld();
+    for (const o of w.outputs.filter(o => o.n === 3)) Object.assign(o, { status: "skipped", isLive: false, reason: CHART_SKIP_NOTE, generation: null, bytes: null, crc32c: null, stagingUri: null });
+    for (const cell of w.sheet.filter(c => c.n === 3)) cell.url = null;
+    w.sheetNotes.set("A", `${w.sheetNotes.get("A")}; photo 3: ${CHART_SKIP_NOTE}`);
+    Object.assign(w.counts, { verified: 4, skipped: 5, recheckOk: 4, recheckTotal: 4 });
+    expect(failed(checkCompleteness({ ...w, chartExpected: new Set(["A|3"]) }))).toEqual([]);
+    const unexpected = checkCompleteness({ ...w, chartExpected: new Set() });
+    expect(unexpected.filter(r => r.id === "completeness.skip_allowed" && !r.ok)).toHaveLength(3);
+    expect(unexpected.find(r => r.id === "completeness.skip_allowed" && !r.ok)?.detail).toContain("Left out as a size chart without an expectation");
+    expect(unexpected.find(r => r.id === "completeness.counts_verified")?.ok).toBe(true);
+  });
+  it("writes the bake-off runner-up as the second matte model and re-plans the rows from a run's set records without re-running a set", () => {
+    const trial = (model: string, identifier: string, regionLoss: number, fails = false): MatteTrial => ({ brand: "vero_moda", category: "apparel_model", identifier, n: 1, model, target: "gpu", ms: 500, tags: [], results: fails ? [{ id: "cutout.pixels_lost", group: "cutout", subject: { identifier, n: 1, channel: null }, ok: false, status: "fail", measured: regionLoss, threshold: 0.01, unit: "", detail: "" }] : [], metrics: { regionLoss, globalLoss: 0, thinLoss: 0, backgroundKept: 0, holes: 0, seeThrough: 0, edgeSoftness: 3.6 } });
+    const trials = ["A", "B", "C"].flatMap(id => [trial("bria-rmbg", id, 0.001), trial("birefnet-general", id, 0.002, id === "C"), trial("birefnet-general-lite", id, 0.01, id !== "A")]);
+    const done = (set: string, extra: Partial<SetRecord>): SetRecord => ({ set, brand: "vero_moda", category: "apparel_model", status: "done", error: null, startedAt: "2026-10-21T06:48:28.000Z", finishedAt: "2026-10-21T08:51:06.000Z", photos: 3, products: 3, results: [], thumbs: [], deterministicPass: [], attentionRows: [], attentionProducts: [], trials: [], overwriteRan: false, batches: ["b1"], ...extra });
+    const records = new Map([["vero_moda.apparel_model", done("vero_moda.apparel_model", { trials })]]);
+    // A resume of the completed run: every set is skipped and the policy step runs from the records alone.
+    expect(selectSets(["vero_moda.apparel_model"], records)).toEqual({ run: [], skipped: ["vero_moda.apparel_model"] });
+    const { winners, rows } = bakeoffPolicy([...records.values()].flatMap(r => r.trials), { batchIds: [...records.values()].flatMap(r => r.batches), judges: ["judge-a"], existing: [{ brandSlug: "*", category: "apparel_model", qaModel: "prior-judge", threshold: 80, floor: 60, qaMode: "per_output", qaSampleRate: 1 }], minSources: 3 });
+    expect(winners.find(w => w.brand === "*")?.ranking.map(m => m.model)).toEqual(["bria-rmbg", "birefnet-general", "birefnet-general-lite"]);
+    expect(rows).toHaveLength(2);
+    for (const r of rows) expect(r).toMatchObject({ matteModel: "bria-rmbg", matteModelSecond: "birefnet-general", source: "bakeoff", evalBatchIds: ["b1"] });
+    expect(rows.find(r => r.brandSlug === "*")).toMatchObject({ qaModel: "prior-judge", threshold: 80 });
+    expect((rows[0]!.gates as unknown as { candidates: { judges: string[] } }).candidates.judges).toEqual(["judge-a"]);
+    expect(bakeoffPolicy([trial("bria-rmbg", "A", 0.001)], { batchIds: [], judges: [], existing: [], minSources: 1 }).rows[0]?.matteModelSecond).toBeNull();
+  });
+  it("renders the samples of an all-pass set on their own, apart from the failing images", async () => {
+    const report = buildReport({ run: "r3", startedAt: new Date(0), finishedAt: new Date(1000), mode: "live judge", golden: { products: 1, photos: 1, brands: {}, categories: {}, tags: {} }, results: [{ id: "geometry.edges", group: "geometry", subject: { identifier: "A", n: 1, channel: "noon" }, ok: true, status: "pass", measured: 0, threshold: 0, unit: "px", detail: "ok" }], attention: { attentionProducts: 0, attentionRate: 0, expectedAttention: 0, falseHoldRate: null, useAsIsRate: null, plantedCaught: 0, plantedTotal: 0 }, flags: [], batches: [] });
+    const html = await reportHtml(report, [{ identifier: "A", n: 1, channel: "noon", original: null, output: null, evidence: "catalog-test/evals/r3/evidence/vero_moda.bag_accessory/A__noon__1__sample.jpg", sample: true }]);
+    expect(html).toContain("Samples of all-pass sets (1)");
+    expect(html).toContain("A__noon__1__sample.jpg");
+    expect(html).toContain("Failing images (0)");
+    expect(samplePath("r3", "vero_moda.bag_accessory", "A", "noon", 1)).toBe("catalog-test/evals/r3/evidence/vero_moda.bag_accessory/A__noon__1__sample.jpg");
   });
 });

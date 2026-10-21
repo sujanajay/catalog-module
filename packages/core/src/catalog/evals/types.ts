@@ -18,8 +18,12 @@ export interface CheckResult {
   group: CheckGroup;
   subject: CheckSubject;
   ok: boolean;
-  /** "not_run" when the check does not apply (its inputs were missing); counted separately, never as a pass. */
-  status: "pass" | "fail" | "not_run";
+  /**
+   * "not_run" when the check does not apply (its inputs were missing); counted separately, never as a pass. "info" when
+   * the check measured a gap the owner has not decided on (`shadow.expected_synthesis`, section 15d): recorded with
+   * its numbers, never a failure.
+   */
+  status: "pass" | "fail" | "not_run" | "info";
   /** What was measured, in the unit named by `unit`. */
   measured: number | string | null;
   /** The bar, in the same unit. */
@@ -71,10 +75,14 @@ export interface OutputSubject {
    * (`cutout.halo`, `shadow.footprint`) are not run on it; `attention.planted_caught` judges it.
    */
   planted?: boolean;
+  /** The golden manifest's tags for this photo (`transparent` keeps `cutout.fringe` from running, section 15d). */
+  tags?: readonly string[];
 }
 
 export const pass = (id: string, group: CheckGroup, subject: CheckSubject, measured: CheckResult["measured"], threshold: CheckResult["threshold"], unit: string, detail: string): CheckResult => ({ id, group, subject, ok: true, status: "pass", measured, threshold, unit, detail });
 export const fail = (id: string, group: CheckGroup, subject: CheckSubject, measured: CheckResult["measured"], threshold: CheckResult["threshold"], unit: string, detail: string): CheckResult => ({ id, group, subject, ok: false, status: "fail", measured, threshold, unit, detail });
 export const notRun = (id: string, group: CheckGroup, subject: CheckSubject, detail: string): CheckResult => ({ id, group, subject, ok: true, status: "not_run", measured: null, threshold: null, unit: "", detail });
+/** Information: measured and recorded, never a failure (an open owner decision; the report lists it on its own). */
+export const info = (id: string, group: CheckGroup, subject: CheckSubject, measured: CheckResult["measured"], threshold: CheckResult["threshold"], unit: string, detail: string): CheckResult => ({ id, group, subject, ok: true, status: "info", measured, threshold, unit, detail });
 /** Pass or fail in one call: `ok` decides, the numbers are recorded either way. */
 export const judge = (ok: boolean, id: string, group: CheckGroup, subject: CheckSubject, measured: CheckResult["measured"], threshold: CheckResult["threshold"], unit: string, detail: string): CheckResult => (ok ? pass : fail)(id, group, subject, measured, threshold, unit, detail);

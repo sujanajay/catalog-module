@@ -425,7 +425,12 @@ time, before anything is rendered.
   matte dropped (within 4 px), lying wholly in the lower half of the kept product (a halo ring around
   the whole silhouette is the judge's `halo`), covering more than 0.3%
   of the frame and more than 2% of the kept product (`KEPT_BACKGROUND_*`); not on a frame-filling
-  photo. The ladder then continues as for a dropped product.
+  photo. Also rejected: a translucent matte (`GUARD_OPAQUE_*`, eval run 3, Penti
+  ZBE55F7B86F158FEA0EB9Z shot 5: a frame-filling ribbed close-up matted at alpha 40 to 60 everywhere drops
+  nothing and keeps nothing, so it passed and was published as a ghost on every channel): under 50% of the
+  estimate's interior kept opaque (alpha at least 200), on any photo, frame-filling or not. A soft edge lies
+  in the 3 px edge band and a sheer sleeve or panel at the edge is a minority of the interior, so neither
+  counts against a matte. Measured on 1,309 deployed matte checks (gate 3f, French Connection, Anta and eval run 3 Penti and Vero Moda photos): the ghost 0%, every accepted matte at least 96.4%. The ladder then continues as for a dropped product.
 - Ladder when the first matte fails, first pass wins, each step in `compliance.auto_actions` with
   trigger `product_removed`: `matte_check` (the failed first matte), (a) `second_matte` the policy's
   second model, (b) `padded_matte` the photo framed in a white border of 20% of its long side
@@ -435,31 +440,42 @@ time, before anything is rendered.
   channel, plus any smooth backdrop of another colour covering at least 1% of the frame that no matte
   kept as skin or a garment panel; a smaller plain region at the frame edge, such as a light strap,
   stays product), holes filled, components under 25% of the largest dropped, edge softened inward
-  only. Model
+  only. The recolour never enters a pixel every matte tried kept (alpha over 128), except a kept
+  background chunk the guard rejected a matte for (`passthroughGuide`). When the recolour without that
+  guard would reach over 5% of what every matte kept, 3 px in (`passthroughProductLoss`,
+  `PASSTHROUGH_PRODUCT_LOSS_MAX`; eval run 3, Vero Moda Z40E29CD878FAA726501DZ shot 1: a white top on a
+  229 grey wall, every matte rejected for a "kept background chunk" that was the top's own folds, and the
+  pass-through tore the top and its sleeve; measured 51%), the product is the backdrop's own colour: no
+  pass-through is made and the photo is held as on a busy background (below), recorded
+  `matte_passthrough: failed` ("background matches the product"); the judge-triggered pass-through step
+  is skipped for the same reason. Model
   steps are skipped when this delivery has no time left for a matting call; the pass-through always
   completes. A pass-through adds the information flag `matte_passthrough` ("This photo is a close-up
   that fills the frame, so the whole photo was kept as it is instead of being cut out. Nothing to
   do."), never holds, gets no synthesised shadow, is placed by the cut-in-source rules (sides that
   reach the frame sit flush) and is never trimmed (`trimRules`).
-- Sole strip recovery, footwear only (`recoverSoleStrip`, eval run 3, Anta bd-112625546-12 shot 5: the
-  lower one to two rows of a 5 to 8 px lime strip under a black outsole are dropped by every deployed
-  model, 7.66% of a cell lost after the ladder). After the ladder picks a model matte (never on a
-  pass-through or a busy-background hold; the check always sees the model's own matte), per column of the
-  lower 40% of the matte: the run of strongly coloured source pixels (chroma at least 60 and at least half
-  the brightest channel) that starts right below the lowest kept pixel (alpha over 128), stays within 8 px of
-  it and stops at the first pixel that is not strongly coloured. A connected group of such runs is given
-  back only when the matte dropped at least 20 of its pixels and it spans at least 10% of the product's
-  width (a strip along the sole, not a coloured contact smudge): the runs become opaque, with the soft
-  kept pixels right above them (now inside the product). The run ends are smoothed across the group's
-  columns (a 5-column moving average clamped to each column's measured end, so no pixel outside the
-  coloured run is added, then lowered until neighbouring ends differ by at most 1 px) and the lower edge
-  is drawn at that sub-pixel position: opaque above it, one antialiased pixel at it, so the edge shows no
-  1 px steps and the strip is softened once. A floor reflection under a grey or white gap row (eval run 3
-  M2), a grey cast shadow and a pale tint are never reached. Measured with cached deployed mattes under
-  the footwear policy on the 81 unique Anta golden and gate 3f photos: only the sliver shot changes (worst
-  cell 7.66% to 0.45%, thin parts 14.3% to 1.3%, edge softness 3.19 to 2.96; a two-pixel ramp of 200 and
-  110 was tried and measured 3.03, over the 3.0 footwear bar, because the rest of that matte already
-  averages 3.13).
+- Sole strip recovery, footwear only (`recoverSoleStrip`, eval run 3 and live run D2, Anta bd-112625546-12
+  shot 5: a 5 to 8 px lime strip under the sole, partly or wholly dropped by every deployed model). After the
+  ladder picks a model matte (never on a pass-through or a busy-background hold; the check always sees the
+  model's own matte), per column of the lower 40% of the matte: the run that starts right below the lowest
+  kept pixel (alpha over 128) and stays within 10 px of it, continuing while the source is coloured
+  (hysteresis: chroma at least 35 and more than 30 from the floor colour), is a candidate only when it holds a
+  strongly coloured pixel (chroma at least 60 and at least half the brightest channel), so a paler band of the
+  product between the matte and the strip (olive mesh over the lime) no longer stops it. Below the last
+  strongly coloured pixel only its lighter antialiased edge is kept, not a darker contact shadow (more than 10
+  luma darker). A white or grey row stops the run, so a floor reflection under a gap row (eval run 3 M2), a
+  grey cast shadow and a pale or brown band with no strong pixel are never reached. Candidate columns at most 6
+  columns apart form one group (a highlight or a pale gap across the strip is bridged, its run end
+  interpolated); a group is given back only when the matte dropped at least 20 of its pixels and it spans at
+  least 10% of the product's width (a strip along the sole, not a coloured contact smudge). The run ends are
+  smoothed (a 15-column moving average never past a column's measured end, a 1 px per column taper at both
+  ends of the group, at most 1 px between neighbours) and the outline is feathered over 2 source px (opaque
+  one px above the smoothed end, half at it, nothing below), so the 1.35x to 2.6x enlargement shows a soft
+  edge and no staircase; the soft kept pixels right above a recovered run become opaque. Measured on the live
+  D2 matte (padded birefnet-general, the ladder's winner; byte-identical to the cached matte): worst cell
+  5.97% to 0%, thin parts 41.6% to 0%, edge softness 2.68 to 2.54 (footwear bar 3.0), no cutout check fails on
+  noon or amazon. On the 82 unique Anta golden and gate 3f photos under 8 policies with cached deployed mattes
+  only this shot changes.
 - A pass-through replaces a plain studio backdrop only (`isBusyBackground`, eval run 2, French
   Connection ZEE79259BBFD83FFA1DB0Z shot 5: models on a tennis court published with ragged court,
   net and racket remnants). In the border band, the pixels kept by the pass-through although every
@@ -502,6 +518,15 @@ time, before anything is rendered.
   finds (a light page, at least 60% plain, 60 or more dark glyph marks on 6 or more lines, nothing
   larger than 6% of the frame), is left out on every channel with the `chart_image` note before any
   matting. A sweep of 5,362 brand photos found the 13 Penti size charts and no product photo.
+  A chart with a tinted header band or tinted table cells (the Penti bra chart, where the band and
+  the grid lines make one mark over 6%) is read a second time, but only when the first reading
+  already finds 60 glyphs on 6 lines on a page at least 60% plain (only the largest-mark and ink-share
+  rules failed; print on a product sits inside the product's mark, so a product photo never gets
+  here). That reading takes each flat tinted rectangle in a
+  large mark (one of its 3 most common smooth colours, at least half of its box filled, straight
+  sides, at least 10% of the frame wide and 2% high) as a second page colour; it counts only when
+  the tables holding those rectangles carry 60 glyphs on 6 lines themselves and every rule above
+  still passes.
 
 ### Compliance (`compliance.ts`)
 

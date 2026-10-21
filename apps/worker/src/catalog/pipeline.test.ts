@@ -604,6 +604,31 @@ it("spec07 a judge timeout is logged at warn before it becomes qa_unavailable",a
  expect(log).toHaveBeenCalledWith("catalog_qa call failed",expect.objectContaining({severity:"WARNING",status:0,kind:"timeout"}));
  expect(log).toHaveBeenCalledWith("catalog_qa: quality check unavailable",expect.objectContaining({severity:"WARNING",status:0,kind:"no_response"}));
 },60_000);
+it("spec07 a 429 burst on the judge backs off and the photo gets its normal verdict; every attempt is logged and counted",async()=>{
+ const w=world(),s=await seed(w,"qa-rate-limit-burst"),log=vi.fn(),waits:number[]=[];
+ vi.mocked(w.deps.resolvePolicy).mockResolvedValue({matteModel:"fixture",qaModel:"test/judge",qaModelSecond:"test/second",threshold:75,floor:60,qaMode:"per_source",qaSampleRate:1,source:"default"});
+ for(let i=0;i<2;i++) await handleChunkTask(w.deps,{chunkId:s.chunk.id});
+ const real=await sharp({create:{width:64,height:64,channels:3,background:"white"}}).jpeg().toBuffer();
+ for(const [uri,obj] of w.objects) if(uri.includes(s.batch.id)) w.objects.set(uri,{...obj,buf:real});
+ const publicFetch=w.deps.fetch;
+ const replies=[429,429,200];
+ const llm=vi.fn(async()=>{const status=replies.shift() ?? 200;return status===200 ? new Response(JSON.stringify(openRouterReply(passScores))):new Response(JSON.stringify({error:{message:"temporarily rate-limited upstream",code:429}}),{status});});
+ w.deps.fetch=vi.fn<typeof globalThis.fetch>(async(url,init)=>String(url).startsWith("https://openrouter.ai/")?llm():publicFetch(url,init));
+ w.deps.judgeOutput=judgeOutput;w.deps.log=log;w.deps.sleep=async ms=>{waits.push(ms);};
+ vi.stubEnv("OPENROUTER_API_KEY","test-key");
+ try { expect((await handleChunkTask(w.deps,{chunkId:s.chunk.id})).httpStatus).toBe(200); } finally { vi.unstubAllEnvs(); }
+ expect(llm).toHaveBeenCalledTimes(3);
+ const [output]=await db.select().from(catalogOutputs).where(eq(catalogOutputs.batchId,s.batch.id));
+ expect(output!.flags).not.toContain("qa_unavailable");expect(output!.qaModel).toBe("test/judge");
+ expect(log.mock.calls.filter(([message,fields])=>message==="catalog_qa call failed" && (fields as {kind?:string}).kind==="rate_limit")).toHaveLength(2);
+ expect(log).toHaveBeenCalledWith("catalog_qa: judge back-off",expect.objectContaining({batchId:s.batch.id,status:429,kind:"rate_limit",attempt:2}));
+ // The judge's waits are about 5 and 15 s (+/- 20%); the chunk's own waits are not in this list.
+ const judgeWaits=log.mock.calls.filter(([message])=>message==="catalog_qa: judge back-off").map(([,fields])=>(fields as {waitMs:number}).waitMs);
+ expect(judgeWaits).toHaveLength(2);expect(judgeWaits[0]).toBeGreaterThanOrEqual(4_000);expect(judgeWaits[0]).toBeLessThanOrEqual(6_000);expect(judgeWaits[1]).toBeGreaterThanOrEqual(12_000);expect(judgeWaits[1]).toBeLessThanOrEqual(18_000);
+ for(const ms of judgeWaits) expect(waits).toContain(ms);
+ const [batch]=await db.select().from(catalogBatches).where(eq(catalogBatches.id,s.batch.id));
+ expect(batch!.cost).toMatchObject({qaCalls:3});expect(Number(batch!.cost.qaUsd)).toBeCloseTo(0.000139,9);
+},60_000);
 describe("spec07 caps count the recorded judge spend",()=>{
  const url="https://openrouter.ai/api/v1/chat/completions";
  async function capWorld(name:string,options:Record<string,unknown>,day:string) {

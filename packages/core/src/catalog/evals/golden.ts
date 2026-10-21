@@ -145,10 +145,40 @@ export async function buildGolden(build: GoldenBuild, writeDerived: (name: strin
     const foreign = entries.find(e => `${e.identifier}_${e.n}` === p.from);
     if (!host.length || !foreign) throw new Error(`Planted case ${p.from} into ${p.into}: both must be in the golden set.`);
     const identifier = `${p.into}-planted`;
-    for (const e of host) entries.push({ ...e, identifier, source: { ...e.source }, tags: [...new Set([...e.tags, "mixed_set" as const])], expect: PLANTED_EXPECTATION });
+    // A host shot that expects flags without a hold (a size chart left out as chart_image) keeps that expectation in the copy.
+    for (const e of host) entries.push({ ...e, identifier, source: { ...e.source }, tags: [...new Set([...e.tags, "mixed_set" as const])], expect: !e.expect.attention && e.expect.flags.length ? { ...e.expect } : PLANTED_EXPECTATION });
     entries.push({ ...foreign, identifier, n: plantedShotNumber(host), brand: host[0]!.brand, category: host[0]!.category, source: { ...foreign.source }, tags: [...new Set([...foreign.tags, "mixed_set" as const])], expect: PLANTED_EXPECTATION, planted: { from: p.from } });
   }
   return { version: 1, seed: build.seed, roots: build.roots, entries };
+}
+
+/**
+ * Maps a batch's shots to their manifest entries by source sha256 (eval run 3: the drive files of Z659062EFB3FB0720BF56Z
+ * are numbered 1,2,3,4,5,7 and ingest renumbers them 1..6 with `numbering_gap`, so manifest n=7, a size chart, is the
+ * batch's n=6 while n=7 of the planted copy is the planted photo), falling back to the shot number when no entry of the
+ * product has the shot's bytes. Keyed by `identifier|n` of the batch's numbering.
+ */
+export function mapShotsBySha(entries: readonly GoldenEntry[], shots: readonly { identifier: string; n: number; sha256: string }[]): Map<string, GoldenEntry> {
+  const out = new Map<string, GoldenEntry>();
+  for (const s of shots) {
+    const entry = entries.find(e => e.identifier === s.identifier && e.sha256 === s.sha256) ?? entries.find(e => e.identifier === s.identifier && e.n === s.n);
+    if (entry) out.set(`${s.identifier}|${s.n}`, entry);
+  }
+  return out;
+}
+
+/**
+ * Byte-identical sources counted once (eval run 3, vero_moda: ZA879DC4CE21DC00F08C3Z and ZFEA925E26F8FACC3E40FZ share
+ * every photo and doubled every bake-off number without a duplicate flag): the first entry of each sha256 in the given
+ * order is kept, the others named as its duplicates.
+ */
+export function uniqueSources<T extends { identifier: string; n: number; sha256: string }>(entries: readonly T[]): { kept: T[]; duplicates: { sha256: string; kept: string; dropped: string[] }[] } {
+  const bySha = new Map<string, { first: T; dropped: string[] }>(), kept: T[] = [];
+  for (const e of entries) {
+    const seen = bySha.get(e.sha256);
+    if (seen) seen.dropped.push(`${e.identifier}_${e.n}`); else { bySha.set(e.sha256, { first: e, dropped: [] }); kept.push(e); }
+  }
+  return { kept, duplicates: [...bySha.entries()].filter(([, v]) => v.dropped.length).map(([sha256, v]) => ({ sha256, kept: `${v.first.identifier}_${v.first.n}`, dropped: v.dropped })) };
 }
 
 /** The planted photo follows the host's highest shot number, so a gap in the host's numbering never makes it collide with a real shot. */

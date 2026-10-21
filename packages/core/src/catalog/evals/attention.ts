@@ -18,9 +18,16 @@ export interface AttentionProductRow {
   /** A planted wrong item: shot `n` belongs to another product and must be caught as different_product. */
   planted?: { n: number; from: string } | null;
 }
+/** A per-shot expectation from the manifest, keyed by the batch's own shot number (mapped by source sha256, section 15d). */
+export interface AttentionShotRow { identifier: string; n: number; expect: Expectation }
 export interface AttentionInput {
   products: AttentionProductRow[];
   outputs: AttentionOutputRow[];
+  /**
+   * Shots whose manifest entry expects flags without a hold (a size chart left out as `chart_image`): the flags must be
+   * raised on that shot and nothing of it published. A hold is judged per product by `attention.expected`.
+   */
+  shots?: AttentionShotRow[];
   /** Keys (identifier|channel|n) of outputs whose deterministic image checks all passed. */
   deterministicPass: Set<string>;
   /** The judge ran live (otherwise its verdicts are canned and never assessed). */
@@ -55,6 +62,8 @@ const problemFlags = (o: AttentionOutputRow) => o.flags.filter(f => !INFORMATION
  * neither required nor unexpected, the code-detected ones still are.
  */
 export const JUDGE_ONLY_FLAGS: ReadonlySet<string> = new Set(["complete_product", "different_product", "halo", "text_or_watermark", "collage", "orientation"]);
+/** A judging that carries one of these returned no verdict (the judge could not be reached, or the spending limit stopped it). */
+export const NO_VERDICT_FLAGS: readonly string[] = ["qa_unavailable", "qa_cap"];
 
 export function checkAttention(input: AttentionInput): AttentionSummary {
   const A = "attention" as const, results: CheckResult[] = [];
@@ -87,6 +96,24 @@ export function checkAttention(input: AttentionInput): AttentionSummary {
     const missing = product.expect.flags.filter(f => !raised.has(f) && (input.liveJudge || !JUDGE_ONLY_FLAGS.has(f)));
     const unexpected = [...new Set(problems.flatMap(problemFlags))].filter(f => !product.expect.flags.includes(f) && (input.liveJudge || !JUDGE_ONLY_FLAGS.has(f)));
     results.push(judge(isHeld && !missing.length && !unexpected.length, "attention.expected", A, who, `${isHeld ? "held" : "not held"}; flags ${[...raised].join(",") || "none"}`, `held with ${product.expect.flags.join(",")}`, "flags", !isHeld ? `Expected the pipeline to hold this product (${product.expect.flags.join(", ")}) but it went to the sheet.` : missing.length ? `Expected flags missing: ${missing.join(", ")}.` : unexpected.length ? `Unexpected flags: ${unexpected.join(", ")}.` : "Held with exactly the expected flags."));
+  }
+  // Per-shot expected flags without a hold (eval run 3, penti: the size chart Z659062EFB3FB0720BF56Z n=7, renumbered 6 by the
+  // batch, was published on every channel as a pass-through instead of left out as chart_image, and carried no expectation).
+  for (const shot of input.shots ?? []) {
+    const required = shot.expect.flags.filter(f => input.liveJudge || !JUDGE_ONLY_FLAGS.has(f));
+    const rows = input.outputs.filter(o => o.identifier === shot.identifier && o.n === shot.n);
+    if (!required.length || !rows.length) continue;
+    const who: CheckSubject = { identifier: shot.identifier, n: shot.n, channel: null };
+    const raised = new Set(rows.flatMap(o => o.flags)), missing = required.filter(f => !raised.has(f)), published = rows.filter(o => o.status === "verified" || o.status === "staged");
+    if (shot.expect.attention) {
+      // A per-shot hold expectation (the lifestyle candle's shot 1; a judge-detected flag on a shot whose product a sibling
+      // holds): the flags must be raised on that shot's own rows, held or staged under the product's hold, so a manifest line
+      // that expects a flag the judge rightly never raises fails by name instead of passing silently under the sibling hold
+      // (live run D2, french_connection.other, section 15e). Whether the product holds is attention.expected's call.
+      results.push(judge(!missing.length, "attention.expected_flags", A, who, `flags ${[...raised].join(",") || "none"}`, `${required.join(",")}, on a held or staged shot`, "flags", missing.length ? `Expected flags missing on image ${shot.n}: ${missing.join(", ")} (the manifest expects this shot held for them${shot.expect.reason ? `: ${shot.expect.reason}` : ""}).` : `Image ${shot.n} carries ${required.join(", ")} as the manifest expects.`));
+      continue;
+    }
+    results.push(judge(!missing.length && !published.length, "attention.expected_flags", A, who, `flags ${[...raised].join(",") || "none"}; ${published.length} of ${rows.length} outputs published`, `${required.join(",")}, left out`, "flags", missing.length ? `Expected flags missing on image ${shot.n}: ${missing.join(", ")}${published.length ? ` (${published.length} outputs published instead of left out)` : ""}${shot.expect.reason ? `. ${shot.expect.reason}` : "."}` : published.length ? `Image ${shot.n} carries ${required.join(", ")} but ${published.length} outputs were published instead of left out.` : `Image ${shot.n} carries ${required.join(", ")} as the manifest expects and nothing of it was published.`));
   }
   if (plantedTotal && input.liveJudge) results.push(judge(plantedCaught === plantedTotal, "attention.planted_rate", A, all, `${plantedCaught} of ${plantedTotal}`, `${plantedTotal} of ${plantedTotal}`, "planted wrong items caught", "Every planted wrong item must be caught."));
 
@@ -124,10 +151,19 @@ export function checkAttention(input: AttentionInput): AttentionSummary {
     const product = input.products.find(p => p.identifier === o.identifier);
     if (product?.expect.attention) continue;
     const who: CheckSubject = { identifier: o.identifier, n: o.n, channel: o.channel };
+    // A judging that returned no verdict (live run D2, section 15e: 14 judge_false_positive rows on outputs the judge never read,
+    // held on a 429 with zeroed scores) is counted on its own row, never as a false positive: there is no opinion to be wrong.
+    const noVerdict = NO_VERDICT_FLAGS.find(f => o.flags.includes(f as OutputFlag));
+    if (noVerdict) { results.push(judge(false, "attention.judge_unavailable", A, who, noVerdict, "a verdict", "judging", `The judge returned no verdict for this output (${noVerdict}${o.reason ? `: ${o.reason}` : ""}) and the output is ${held(o) ? "held without one" : o.status}. A judging without a verdict is not a judge false positive; the hold is the pipeline's, not the judge's.`)); continue; }
     const lowest = QA_DIMENSIONS.map(d => [d, scoreOf(scores, d)] as const).sort((a, b) => a[1] - b[1])[0]!;
     const reasons = Array.isArray(scores.reasons) ? (scores.reasons as unknown[]).map(String).join(" ") : "";
     if (o.flags.includes("different_product") && o.n > 1 && !(product?.planted && product.planted.n === o.n)) results.push(judge(false, "attention.judge_false_same_product", A, who, `same_product ${Number(scores.same_product ?? 0)}`, `>= ${input.threshold}`, "score", `The judge said image ${o.n} does not match photo 1, but it is a sole, back, inside, detail or on-model view of the same golden product. ${reasons}`.trim()));
-    if (input.deterministicPass.has(outputKey(o.identifier, o.channel, o.n)) && !(product?.planted && product.planted.n === o.n)) results.push(judge(false, "attention.judge_false_positive", A, who, `${lowest[0]} ${lowest[1]}`, `>= ${input.threshold}`, "lowest dimension", `The judge flagged an output every deterministic check passed (${lowest[0]} ${lowest[1]}). ${reasons}`.trim()));
+    if (!input.deterministicPass.has(outputKey(o.identifier, o.channel, o.n)) || (product?.planted && product.planted.n === o.n)) continue;
+    // A complete_product note on a source cut at the frame (live run D2: "the skirt runs off the bottom edge of the photo") is true of
+    // the photo and the information the spec intends; the code already says the cut is in the original (cut_in_source). It keeps
+    // failing on an uncut source, and when the note held the output.
+    if (lowest[0] === "complete_product" && o.flags.includes("cut_in_source") && !held(o)) { results.push(judge(true, "attention.judge_false_positive", A, who, `${lowest[0]} ${lowest[1]}`, `>= ${input.threshold}`, "lowest dimension", `The judge noted complete_product ${lowest[1]} on a source cut at the frame (cut_in_source) and the output was published with the note: the sentence is true of the original photo, not a false positive. ${reasons}`.trim())); continue; }
+    results.push(judge(false, "attention.judge_false_positive", A, who, `${lowest[0]} ${lowest[1]}`, `>= ${input.threshold}`, "lowest dimension", `The judge flagged an output every deterministic check passed (${lowest[0]} ${lowest[1]}). ${reasons}`.trim()));
   }
   return { results, attentionProducts, attentionRate: input.products.length ? attentionProducts / input.products.length : 0, expectedAttention, falseHoldRate, useAsIsRate, plantedCaught, plantedTotal };
 }

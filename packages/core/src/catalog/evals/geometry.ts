@@ -3,6 +3,7 @@
 import sharp from "sharp";
 import { MAX_OUTPUT_BYTES } from "../channels";
 import { effectiveMinimum } from "../render";
+import { enlargementOf, innerAlpha, SHARPEN_EDGE_PX, sharpenAfterEnlarge, sharpenWeight } from "../enhance";
 import { delta, dilate, dropSpecks, inBox, luma, maskBox, SPECK_PX, type Mask } from "./image";
 import type { OutputContext } from "./context";
 import { ALPHA_EDGE } from "./context";
@@ -98,7 +99,12 @@ export async function checkGeometry(ctx: OutputContext): Promise<CheckResult[]> 
   // box of the half-coverage mask. A white sole on a white canvas is present when it matches the source there; a vanished
   // coloured part is not.
   const visible = visibleProduct(ctx, ring), expected = maskBox(ctx.half, canvas.w, canvas.h), measured = maskBox(visible, canvas.w, canvas.h);
-  if (!expected || !measured) { out.push(notRun("geometry.extent", G, who, "No product pixels were found on the canvas.")); return out; }
+  if (!expected || !measured) {
+    out.push(notRun("geometry.extent", G, who, "No product pixels were found on the canvas."));
+    // No half-coverage pixel at all is a translucent or empty matte (eval run 3, penti: ZBE55F7B86F158FEA0EB9Z n=5 at alpha 40 to 60): nothing of the product was copied.
+    if (!expected) out.push(judge(false, "geometry.pixels_copied", G, who, 0, 1, "opaque source pixels", "No opaque product pixels (alpha 250 or more) reach the canvas: the matte is translucent or empty, so nothing of the product was copied (eval run 3, penti: ZBE55F7B86F158FEA0EB9Z n=5 published as a ghost at effective alpha 0.22)."));
+    return out;
+  }
   const x0 = measured.x, y0 = measured.y, x1 = measured.x + measured.w - 1, y1 = measured.y + measured.h - 1;
   const sides = { left: Math.abs(x0 - expected.x), top: Math.abs(y0 - expected.y), right: Math.abs(x1 - (expected.x + expected.w - 1)), bottom: Math.abs(y1 - (expected.y + expected.h - 1)) };
   const extentWorst = Math.max(...Object.values(sides)), tolerance = extentTolerance(s.placement.scale);
@@ -133,12 +139,55 @@ export async function checkGeometry(ctx: OutputContext): Promise<CheckResult[]> 
     else out.push(judge(sideMin >= want - 1, "geometry.noon_wide", G, who, sideMin, want, "px", `Wide Noon shot keeps ${sideMin} px at the narrower side (needs ${want}).`));
   }
 
-  // Product pixels are copied, never regenerated: the output's opaque product pixels, averaged back onto the source grid
-  // (every canvas pixel into the source pixel it was resampled from), must equal the source there. Comparing on the
-  // source grid removes the resampling kernel from the number (eval run 3, anta: 8.4 on a fine knit at 1.85x with a 2
-  // luma fit error in an independent alignment, lanczos against bilinear, not an offset).
-  const { source } = ctx.subject, { sourceCrop } = ctx, sw = source.w, sh = source.h;
-  const sums = new Float64Array(sw * sh * 3), counts = new Uint32Array(sw * sh);
+  out.push(await pixelsCopied(ctx, who));
+  return out;
+}
+
+/**
+ * The render's own reproduction of the product (section 15e, the reproduction floor): the source crop enlarged with
+ * lanczos3 to the product box (`sourceRgb`) with the spec 11 unsharp mask applied the way enhance.ts applies it, at the
+ * output's enlargement and weighted by the lowest alpha within SHARPEN_EDGE_PX of each pixel (sharpenWeight of innerAlpha),
+ * so the silhouette edge keeps its plain lanczos colour as it does in the render. Row-major over the product box.
+ */
+export async function reproductionFloor(ctx: OutputContext, scale: number): Promise<Buffer> {
+  const { productBox: pb, sourceRgb, expectedAlpha, canvas } = ctx, size = { w: pb.w, h: pb.h };
+  const sharpened = await sharpenAfterEnlarge(sourceRgb, size, scale);
+  if (sharpened === sourceRgb) return sourceRgb;
+  const rgba = Buffer.alloc(pb.w * pb.h * 4);
+  for (let y = 0; y < pb.h; y++) for (let x = 0; x < pb.w; x++) {
+    const cx = pb.x + x, cy = pb.y + y;
+    rgba[(y * pb.w + x) * 4 + 3] = cx < 0 || cy < 0 || cx >= canvas.w || cy >= canvas.h ? 0 : expectedAlpha[cy * canvas.w + cx]!;
+  }
+  const inner = innerAlpha(rgba, size, SHARPEN_EDGE_PX), out = Buffer.from(sourceRgb);
+  for (let i = 0, n = pb.w * pb.h; i < n; i++) {
+    const weight = sharpenWeight(inner[i]!);
+    if (!weight) continue;
+    for (let c = 0; c < 3; c++) { const base = sourceRgb[i * 3 + c]!, d = sharpened[i * 3 + c]! - base; if (d) out[i * 3 + c] = Math.max(0, Math.min(255, base + Math.round(d * weight))); }
+  }
+  return out;
+}
+
+/**
+ * Product pixels are copied, never regenerated. The output's opaque product pixels (alpha 250+) are averaged back onto
+ * the source grid (every canvas pixel into the source pixel it was resampled from) and compared with the render's own
+ * reproduction averaged back through the same mapping (reproductionFloor: lanczos3 plus the spec 11 sharpening with the
+ * render's alpha weight), so neither the resampling kernel nor the sharpening enters the number. Live run D2 (section 15e):
+ * the comparison with the source pixel itself measured the lanczos3 round trip of a 1 px texture (pointelle, polka dots,
+ * pin stripes, a fine knit) at 1.01x to 1.55x as 8.5 to 25.6, with the same crops passing at 2.5x and above and the source's
+ * own round trip reproducing the number without a render. At a scale of 1 or under (a downscale, never sharpened) the
+ * plain comparison with the source pixel stays. On a near-1x enlargement (under COPY_REGISTRATION_MAX_SCALE) the
+ * expectation is read at the best of a plus or minus COPY_REGISTRATION_PX source px registration search, as
+ * `shadow.kept_matches_source` does, since a sub-pixel phase on a 1 px dot pattern costs several luma on its own. A
+ * redrawn product differs from the floor as much as from the source; a translucent or empty matte still fails by name.
+ */
+export const COPY_REGISTRATION_MAX_SCALE = 1.5;
+export const COPY_REGISTRATION_PX = 1;
+const GHOST_DETAIL = "No opaque product pixels (alpha 250 or more) reach the canvas: the matte is translucent or empty, so nothing of the product was copied (eval run 3, penti: ZBE55F7B86F158FEA0EB9Z n=5 published as a ghost at effective alpha 0.22).";
+export async function pixelsCopied(ctx: OutputContext, who: CheckSubject): Promise<CheckResult> {
+  const { canvas, productBox, sourceCrop, subject: { source } } = ctx, sw = source.w, sh = source.h;
+  const scale = enlargementOf(sourceCrop, productBox), enlarged = scale > 1;
+  const floor = enlarged ? await reproductionFloor(ctx, scale) : null;
+  const sums = new Float64Array(sw * sh * 3), expected = new Float64Array(sw * sh * 3), counts = new Uint32Array(sw * sh);
   for (let y = 0; y < productBox.h; y++) for (let x = 0; x < productBox.w; x++) {
     const cx = productBox.x + x, cy = productBox.y + y;
     if (cx < 0 || cy < 0 || cx >= canvas.w || cy >= canvas.h) continue;
@@ -146,22 +195,33 @@ export async function checkGeometry(ctx: OutputContext): Promise<CheckResult[]> 
     if (ctx.expectedAlpha[ci]! < 250) continue;
     const ix = Math.floor(sourceCrop.x + (x + 0.5) * sourceCrop.w / productBox.w), iy = Math.floor(sourceCrop.y + (y + 0.5) * sourceCrop.h / productBox.h);
     if (ix < 0 || iy < 0 || ix >= sw || iy >= sh) continue;
-    const s = iy * sw + ix;
-    for (let c = 0; c < 3; c++) sums[s * 3 + c] = sums[s * 3 + c]! + canvas.rgb[ci * 3 + c]!;
+    const s = iy * sw + ix, pi = y * productBox.w + x;
+    for (let c = 0; c < 3; c++) { sums[s * 3 + c] = sums[s * 3 + c]! + canvas.rgb[ci * 3 + c]!; if (floor) expected[s * 3 + c] = expected[s * 3 + c]! + floor[pi * 3 + c]!; }
     counts[s] = counts[s]! + 1;
   }
-  let sum = 0, count = 0, big = 0;
-  for (let s = 0; s < counts.length; s++) {
-    if (!counts[s]) continue;
-    let d = 0;
-    for (let c = 0; c < 3; c++) d = Math.max(d, Math.abs(sums[s * 3 + c]! / counts[s]! - source.rgb[s * 3 + c]!));
-    sum += d; count++; if (d > 48) big++;
-  }
-  if (count) {
+  const reach = enlarged && scale < COPY_REGISTRATION_MAX_SCALE ? COPY_REGISTRATION_PX : 0;
+  let best: { mean: number; big: number; count: number; dx: number; dy: number } | null = null;
+  for (let dy = -reach; dy <= reach; dy++) for (let dx = -reach; dx <= reach; dx++) {
+    let sum = 0, count = 0, big = 0;
+    for (let s = 0; s < counts.length; s++) {
+      if (!counts[s]) continue;
+      let d = 0;
+      if (floor) {
+        const x = s % sw, y = (s - x) / sw, xx = x + dx, yy = y + dy;
+        if (xx < 0 || yy < 0 || xx >= sw || yy >= sh) continue;
+        const t = yy * sw + xx;
+        if (!counts[t]) continue;
+        for (let c = 0; c < 3; c++) d = Math.max(d, Math.abs(sums[s * 3 + c]! / counts[s]! - expected[t * 3 + c]! / counts[t]!));
+      } else for (let c = 0; c < 3; c++) d = Math.max(d, Math.abs(sums[s * 3 + c]! / counts[s]! - source.rgb[s * 3 + c]!));
+      sum += d; count++; if (d > 48) big++;
+    }
+    if (!count) continue;
     const mean = sum / count;
-    out.push(judge(mean <= COPY_MEAN_DELTA && big / count <= 0.01, "geometry.pixels_copied", G, who, Math.round(mean * 10) / 10, COPY_MEAN_DELTA, "mean delta", `Product pixels differ from the source by ${mean.toFixed(1)} on average over ${count} source pixels; ${(100 * big / count).toFixed(2)}% differ by more than 48.`));
-  } else out.push(notRun("geometry.pixels_copied", G, who, "No opaque product pixels to compare."));
-  return out;
+    if (!best || mean < best.mean) best = { mean, big, count, dx, dy };
+  }
+  if (!best) return judge(false, "geometry.pixels_copied", G, who, 0, 1, "opaque source pixels", GHOST_DETAIL);
+  const { mean, big, count, dx, dy } = best, against = floor ? `the render's own reproduction (lanczos3 at ${scale.toFixed(2)}x with the spec 11 sharpening at the render's alpha weight)` : "the source";
+  return judge(mean <= COPY_MEAN_DELTA && big / count <= 0.01, "geometry.pixels_copied", G, who, Math.round(mean * 10) / 10, COPY_MEAN_DELTA, "mean delta", `Product pixels differ from ${against} by ${mean.toFixed(1)} on average over ${count} source pixels; ${(100 * big / count).toFixed(2)}% differ by more than 48${dx || dy ? ` (read at a registration offset of ${dx}, ${dy} source px)` : ""}.`);
 }
 
 /** Achromatic darkening where a shadow is allowed: judged by the shadow checks, never as product or as a stray. */

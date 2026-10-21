@@ -63,18 +63,35 @@ export function winnersByScope(trials: readonly MatteTrial[]): CategoryWinner[] 
   }).sort((a, b) => a.brand.localeCompare(b.brand) || a.category.localeCompare(b.category));
 }
 
-/** Policy rows for spec 08's writer; the judge settings come from the existing row for the pair when there is one. */
+/**
+ * Policy rows for spec 08's writer; the judge settings come from the existing row for the pair when there is one. The
+ * runner-up (the next model by fewest failing sources, then the composite) is written as the second matte model, so the
+ * live ladder has a model to retry a rejected or translucent first matte on before the padded pass, a pass-through or a
+ * hold (live run D2, section 15e: every bake-off row carried no second model and the matte guard logged "second: not
+ * available" on every chain; Z40E29CD878FAA726501DZ n=1 was held with no second model to try).
+ */
 export function policyRowsFor(winners: readonly CategoryWinner[], input: { batchIds: string[]; seen: PolicyCandidates; existing: { brandSlug: string; category: string; qaModel: string; threshold: number; floor: number; qaMode: "per_source" | "per_output"; qaSampleRate: number }[]; minSources?: number }): PlannedPolicyRow[] {
   const rows: PlannedPolicyRow[] = [];
   for (const w of winners) {
     if (!w.winner || w.sources < (input.minSources ?? 10)) continue;
     const prior = input.existing.find(e => e.brandSlug === w.brand && e.category === w.category);
     rows.push({
-      brandSlug: w.brand, category: w.category as PlannedPolicyRow["category"], matteModel: w.winner.model, matteTarget: w.winner.target,
+      brandSlug: w.brand, category: w.category as PlannedPolicyRow["category"], matteModel: w.winner.model, matteTarget: w.winner.target, matteModelSecond: w.runnerUp?.model ?? null,
       qaModel: prior?.qaModel ?? CATALOG_QA_DEFAULT_MODEL, threshold: prior?.threshold ?? QA_DEFAULT_THRESHOLD, floor: prior?.floor ?? QA_DEFAULT_FLOOR,
       qaMode: prior?.qaMode ?? "per_source", qaSampleRate: prior?.qaSampleRate ?? 1, source: "bakeoff", evalBatchIds: input.batchIds,
       gates: { precision: null, recall: null, n_labelled: 0, met: false, candidates: input.seen, ...({ matteBakeoff: { sources: w.sources, winner: w.winner.model, runnerUp: w.runnerUp?.model ?? null, margin: w.margin, composite: w.winner.composite, failRate: w.winner.failRate } } as object) } as PlannedPolicyRow["gates"],
     });
   }
   return rows;
+}
+
+/**
+ * The bake-off's outcome from a run's trials (the `trials` of its set records): the winners per scope and the policy rows
+ * to write. `run --write-policy --resume <run>` on a completed run skips every recorded set and reaches this step alone, so
+ * the rows can be re-written from the records without a full run.
+ */
+export function bakeoffPolicy(trials: readonly MatteTrial[], input: { batchIds: string[]; judges: string[]; existing: Parameters<typeof policyRowsFor>[1]["existing"]; minSources?: number }): { winners: CategoryWinner[]; rows: PlannedPolicyRow[] } {
+  const winners = winnersByScope(trials);
+  const seen: PolicyCandidates = { matte: trials.length ? [...new Map(trials.map(t => [`${t.model}|${t.target}`, { id: t.model, target: t.target }])).values()] : [], judges: input.judges };
+  return { winners, rows: policyRowsFor(winners, { batchIds: input.batchIds, seen, existing: input.existing, ...(input.minSources === undefined ? {} : { minSources: input.minSources }) }) };
 }

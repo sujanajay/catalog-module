@@ -225,7 +225,13 @@ coding). The validator requires at least one numeric dimension. `costUsd` is `us
 present, else `QA_USD_PER_CHECK_ESTIMATE` with a log line (never 0 for a billed completion;
 `qaCallCost` in `cost.ts`). A thrown `LlmResponseError` or `LlmJsonError` after the built-in
 retry marks the output `needs_attention` with flag `qa_unavailable` and its sentence; it never
-fails the batch. Cost per check is about USD 0.0004 (Flash-Lite, Haiku 5.5, Qwen 30B-A3B) to
+fails the batch. A 429 or 5xx from the judge is backed off first: about 5, 15 and 45 s (+/- 20%
+jitter, or the Retry-After header), at most 120 s of waiting per judging and 300 s per chunk
+delivery (`JUDGE_BACKOFF_*`, `QA_DELIVERY_BACKOFF_MS`). When the first judge is still rate-limited
+(or 5xx) after that, the second judge (`qaModelSecond`) is asked once for the verdict, and the first
+judge then gives any second opinion; only when both fail is the output `qa_unavailable`. Every
+attempt is one `catalog_qa call` log line and one counted call; each wait is a `catalog_qa: judge
+back-off` line; a timeout or an auth failure is not retried. Cost per check is about USD 0.0004 (Flash-Lite, Haiku 5.5, Qwen 30B-A3B) to
 0.0013 (2.5 Flash, 3.5 Flash-Lite).
 
 `CATALOG_QA_TEMPLATE` tells the judge, in this order: the product pixels were copied, never

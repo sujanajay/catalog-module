@@ -4,9 +4,10 @@
 // around the product, a colour fringe from the source background, and holes. `checkMatte` needs only
 // the source and the matte, so the matting bake-off scores every model with the same bar.
 import { backgroundModel, components, delta, dilate, erode, lumaAt, maskCount, thresholdMask, type BackgroundModel, type Mask } from "./image";
-import { ALPHA_EDGE, type OutputContext } from "./context";
+import { ALPHA_EDGE, ALPHA_HALF, type OutputContext } from "./context";
 import { SHADOW_RING_CHROMA_MAX, shadowLikePixel } from "./geometry";
-import { judge, notRun, type CheckResult, type CheckSubject, type Raster } from "./types";
+import { keptShadowCanvasMask } from "./shadow";
+import { info, judge, notRun, type CheckResult, type CheckSubject, type Raster } from "./types";
 import type { ProductType } from "../types";
 import { bbox } from "../render";
 import { SHADOW_BAND_ABOVE } from "../shadow";
@@ -32,12 +33,53 @@ export const REFLECTION_MAX_SHARE = 0.015;
 export const REFLECTION_CHROMA_SLACK = 12;
 export const REFLECTION_ROWS = 6;
 /**
+ * A contact shadow under the sole (live run D2, anta, section 15e: 2.19% of a cell on bd-112621603-1 n=4 and 3.62% on
+ * bd-112545581-15 n=2, identical to three decimals across the bake-off models, on tan colour-bleed patches and a brown
+ * smudge in the contact shadow under a red sole edge): in the lower zone, a pixel under the matte's lowest row of its
+ * column that is darker than the floor and less saturated than the sole edge above it by CONTACT_SHADOW_CHROMA_DROP is
+ * shadow, not product; the lime strip of bd-112625546-12 (chroma over 100 under a black outsole) still counts.
+ */
+export const CONTACT_SHADOW_CHROMA_DROP = 30;
+/**
+ * A dark product's edge blend (live run D2, vero_moda, section 15e: 3.24% of a cell on the black tee dress
+ * ZA879DC4CE21DC00F08C3Z n=5 and 1.93% on the brown satin halter Z4DDB3211D630521AA4D9Z n=2, the same on every bake-off
+ * model): where the matte interior's median luma is under DARK_PRODUCT_LUMA_MAX, every pixel of the soft edge and the
+ * shadow beside the garment blends black with the background into a grey the foreground delta calls product. An unmatted
+ * candidate that is lighter than the product's median by more than DARK_EDGE_LUMA_SLACK and carries less chroma than
+ * DARK_EDGE_CHROMA_MAX is that blend or shadow, not product; a dropped part as dark as the product still counts.
+ */
+export const DARK_PRODUCT_LUMA_MAX = 60;
+export const DARK_EDGE_CHROMA_MAX = 40;
+export const DARK_EDGE_LUMA_SLACK = 10;
+/**
  * No colour evidence: when more than this share of the matte's interior (alpha 255, eroded 3 px) lies within
  * SOURCE_FOREGROUND_DELTA of the background colour, the estimate cannot tell the product from its background (eval run 3,
  * penti: a white bra set over a flat 245 grey measured 23.8% kept background and 9% fringe on every bake-off model with a
  * complete matte), so `background_kept` and `fringe` are not run, listed as "white on near-white".
  */
 export const NO_COLOUR_EVIDENCE_MAX_SHARE = 0.1;
+/**
+ * A canvas strip: a flat band pasted along a frame edge (eval run 3, penti: 100% of a cell and 80.5% of the thin pixels
+ * "lost" on Z41E81A2CE5C612624C11Z n=3 were a white strip at the source's right edge, luma 255 against a 234 gradient;
+ * the matte dropped it correctly and the output was complete). A row (or column) along a frame edge is a strip line when
+ * its luma range over the whole edge length is under CANVAS_STRIP_FLAT_RANGE and it differs from the background model
+ * by more than SOURCE_FOREGROUND_DELTA somewhere along it (a flat line in the background colour is plain background and
+ * never product anyway); the strip runs inward from the edge while its lines stay such,
+ * at most CANVAS_STRIP_MAX_SHARE of the frame. The estimate subtracts the strips, as the matte guard's backgroundRegion does.
+ */
+export const CANVAS_STRIP_FLAT_RANGE = 6;
+export const CANVAS_STRIP_MAX_SHARE = 0.2;
+/**
+ * Opaque share: the share of the matte's own support (alpha over ALPHA_EDGE, eroded OPAQUE_SHARE_ERODE_PX) at alpha
+ * SEE_THROUGH_ALPHA or more. A translucent matte (eval run 3, penti: ZBE55F7B86F158FEA0EB9Z n=5 published as a ghost at
+ * effective alpha 0.22 while the only loud signal was edge_softness 266) must fail by name; a sheer garment's interior
+ * stays well over the bar (its see-through share is under 1.5%). Measured on the matte alone, so it runs on every
+ * matte and every bake-off trial, with or without a background model.
+ */
+export const OPAQUE_SHARE_MIN = 0.8;
+export const OPAQUE_SHARE_ERODE_PX = 3;
+/** Thin structures of the matte (hair, straps, sheer edges): what a radius-THIN_OPEN_PX opening of the matte removes, grown back by the same radius. */
+export const THIN_OPEN_PX = 2;
 /** Grid over the product's bounding box for the per-region loss measurement. */
 export const REGION_GRID = 6;
 /** A region needs at least this many estimated product pixels to be measured. */
@@ -73,6 +115,16 @@ export const BACKGROUND_KEPT_SPAN_GROW = 0.04;
 export const HALO_RING_MAX = 0.02;
 /** Share of soft-edge pixels that still carry the source background colour. */
 export const FRINGE_MAX = 0.01;
+/**
+ * A textured source edge (hair): the soft pixels whose source side is high-variance, a luma range over
+ * FRINGE_TEXTURE_RANGE among the outer soft pixels (source alpha from ALPHA_EDGE to ALPHA_HALF) of a FRINGE_TEXTURE_PX
+ * window, are left out of the fringe count (live run D2, vero_moda, section 15e: 12 fails of 8.0 to 10.8% on the white
+ * channels, all hair, after the thin-structure exclusion removed under 2% of the soft pixels; no rim on the crops). The
+ * outer soft band of a blurred matte over a smooth garment is the flat background and still counts.
+ */
+export const FRINGE_TEXTURE_RANGE = 40;
+export const FRINGE_TEXTURE_PX = 5;
+export const FRINGE_TEXTURE_MIN_PIXELS = 4;
 /** Holes: interior regions the matte drops, as a share of the estimated product area. */
 export const HOLE_MIN_SHARE = 0.0005;
 /**
@@ -99,11 +151,51 @@ export const EDGE_SOFTNESS_MAX_PX = 3;
 export const EDGE_SOFTNESS_MAX_PX_SOFT_TYPES = 4.5;
 export const EDGE_SOFTNESS_REACH_PX = 8;
 export const EDGE_SOFTNESS_MIN_EDGE_SHARE = 0.02;
+/**
+ * Sheer fabric (live run D2, french_connection, section 15e: the chiffon blouse Z2392E34E478442A647DBZ n=1/3/4/5 at 4.57
+ * to 5.31 against 4.5 on every bake-off model, the sleeve's outline being the fabric's own translucency): a photo whose
+ * see-through share is over SHEER_SEE_THROUGH_MIN and whose interior holds more than SHEER_SOFT_INTERIOR_MIN of soft
+ * alpha (ALPHA_EDGE to 245) while the matte is not a ghost (`opaque_share` passes) is listed as sheer, and its
+ * `edge_softness` is recorded as information with its number, never a failure.
+ */
+export const SHEER_SEE_THROUGH_MIN = 0.005;
+export const SHEER_SOFT_INTERIOR_MIN = 0.1;
 export const edgeSoftnessBar = (type?: ProductType | null): number => (type && SOFT_TYPES.has(type) ? EDGE_SOFTNESS_MAX_PX_SOFT_TYPES : EDGE_SOFTNESS_MAX_PX);
 
 const C = "cutout" as const;
+/** The checks that need the colour estimate: recorded as not run, every one of them, when there is no background model. */
+export const COLOUR_ESTIMATE_CHECKS = ["cutout.pixels_lost", "cutout.thin_parts", "cutout.background_kept", "cutout.holes", "cutout.see_through"] as const;
 
 export interface MatteInput { identifier: string; n: number; source: Raster; sourceBackground: { uniform: boolean; color: [number, number, number] }; alpha: Buffer; /** Sets the edge-softness bar (edgeSoftnessBar); absent keeps the footwear bar. */ productType?: ProductType | null }
+
+export function canvasStrips(source: Raster, model: BackgroundModel): { mask: Mask; depth: Record<"top" | "bottom" | "left" | "right", number> } {
+  const { w, h, rgb } = source, mask = new Uint8Array(w * h), depth = { top: 0, bottom: 0, left: 0, right: 0 };
+  const stripLine = (horizontal: boolean, line: number): boolean => {
+    let lo = Infinity, hi = -Infinity, differs = false;
+    for (let k = 0, n = horizontal ? w : h; k < n; k++) {
+      const x = horizontal ? k : line, y = horizontal ? line : k, i = y * w + x, l = lumaAt(rgb, i);
+      if (l < lo) lo = l; if (l > hi) hi = l;
+      if (hi - lo >= CANVAS_STRIP_FLAT_RANGE) return false;
+      if (!differs && delta(rgb, i, model.at(y)) > SOURCE_FOREGROUND_DELTA) differs = true;
+    }
+    return differs;
+  };
+  const scan = (side: keyof typeof depth, horizontal: boolean, from: number, step: number) => {
+    const limit = Math.round((horizontal ? h : w) * CANVAS_STRIP_MAX_SHARE);
+    for (let line = from, d = 0; d < limit && stripLine(horizontal, line); line += step, d++) {
+      depth[side] = d + 1;
+      for (let k = 0, n = horizontal ? w : h; k < n; k++) mask[horizontal ? line * w + k : k * w + line] = 1;
+    }
+  };
+  scan("top", true, 0, 1); scan("bottom", true, h - 1, -1); scan("left", false, 0, 1); scan("right", false, w - 1, -1);
+  return { mask, depth };
+}
+
+export function thinStructures(alpha: Buffer, w: number, h: number): Mask {
+  const matted = thresholdMask(alpha, ALPHA_EDGE), opened = dilate(erode(matted, w, h, THIN_OPEN_PX), w, h, THIN_OPEN_PX), thin = new Uint8Array(alpha.length);
+  for (let i = 0; i < thin.length; i++) if (matted[i] && !opened[i]) thin[i] = 1;
+  return dilate(thin, w, h, THIN_OPEN_PX);
+}
 
 /**
  * Product estimate from the source colours: far from the background colour (a flat border colour, or the row's colour
@@ -129,10 +221,17 @@ export function estimateForeground(input: MatteInput, sourceBox: { y: number; h:
       if (l < colLuma[x]!) colLuma[x] = l; if (c > colChroma[x]!) colChroma[x] = c; rows++;
     }
   }
-  const reflectionDepth = Math.max(8, Math.round(h * REFLECTION_MAX_SHARE));
+  const reflectionDepth = Math.max(8, Math.round(h * REFLECTION_MAX_SHARE)), strips = canvasStrips(source, model).mask;
+  // The product's median luma over the matte's half-coverage pixels: under DARK_PRODUCT_LUMA_MAX the edge blend rule applies.
+  const lumaHist = new Uint32Array(256);
+  let matted = 0;
+  for (let i = 0; i < alpha.length; i++) if (alpha[i]! >= ALPHA_HALF) { const v = Math.min(255, Math.round(lumaAt(source.rgb, i))); lumaHist[v] = lumaHist[v]! + 1; matted++; }
+  let productLuma = 255;
+  for (let v = 0, seen = 0; v < 256; v++) { seen += lumaHist[v]!; if (seen * 2 >= matted) { productLuma = v; break; } }
+  const darkProduct = matted > 0 && productLuma < DARK_PRODUCT_LUMA_MAX;
   for (let i = 0; i < raw.length; i++) {
     const x = i % w, y = (i - x) / w, bgLuma = rowLuma[y]!;
-    if (delta(source.rgb, i, rowBg[y]!) <= SOURCE_FOREGROUND_DELTA) continue;
+    if (strips[i] || delta(source.rgb, i, rowBg[y]!) <= SOURCE_FOREGROUND_DELTA) continue;
     const r = source.rgb[i * 3]!, g = source.rgb[i * 3 + 1]!, b = source.rgb[i * 3 + 2]!, l = lumaAt(source.rgb, i), chroma = Math.max(r, g, b) - Math.min(r, g, b);
     // The source's own cast shadow, not product: outside the lower zone of the silhouette only a soft
     // grey darkening counts; inside it (where a contact shadow is dark and picks up colour bleed from
@@ -141,6 +240,10 @@ export function estimateForeground(input: MatteInput, sourceBox: { y: number; h:
     let shadowLike = l < bgLuma && (inZone ? chroma < SHADOW_ZONE_CHROMA_MAX : chroma < SHADOW_CHROMA_MAX && l >= bgLuma * SHADOW_MIN_LUMA_SHARE);
     // A floor reflection under the matte's lowest row: a thin, lighter, no more saturated copy of the product edge above it.
     if (!shadowLike && inZone && l < bgLuma && colBottom[x]! >= 0 && y > colBottom[x]! && y - colBottom[x]! <= reflectionDepth && l > colLuma[x]! && chroma <= colChroma[x]! + REFLECTION_CHROMA_SLACK) shadowLike = true;
+    // A contact shadow under the sole: under the matte's lowest row, darker than the floor, less saturated than the sole edge by CONTACT_SHADOW_CHROMA_DROP.
+    if (!shadowLike && inZone && l < bgLuma && colBottom[x]! >= 0 && y > colBottom[x]! && chroma <= colChroma[x]! - CONTACT_SHADOW_CHROMA_DROP) shadowLike = true;
+    // A dark product's edge blend or shadow: lighter than the product and nearly grey.
+    if (!shadowLike && darkProduct && l < bgLuma && chroma < DARK_EDGE_CHROMA_MAX && l > productLuma + DARK_EDGE_LUMA_SLACK) shadowLike = true;
     if (shadowLike && alpha[i]! <= ALPHA_EDGE) continue;
     raw[i] = 1;
   }
@@ -153,10 +256,14 @@ export function estimateForeground(input: MatteInput, sourceBox: { y: number; h:
 
 export interface MatteMetrics {
   regionLoss: number | null; globalLoss: number | null; thinLoss: number | null; backgroundKept: number | null; holes: number | null; seeThrough: number | null; edgeSoftness: number | null;
+  /** Share of the matte's own support (eroded OPAQUE_SHARE_ERODE_PX) at alpha SEE_THROUGH_ALPHA or more; under OPAQUE_SHARE_MIN the matte is translucent. */
+  opaqueShare?: number | null;
   /** Share of the matte interior (alpha 255, eroded 3 px) within SOURCE_FOREGROUND_DELTA of the background: over NO_COLOUR_EVIDENCE_MAX_SHARE the colour checks that need the product's colour are not run. */
   noColourEvidence?: number | null;
   /** Against the other models' majority (bake-off only): share of consensus product this matte drops, and share of this matte the consensus calls background. */
   consensusLoss?: number | null; consensusExtra?: number | null;
+  /** Sheer fabric (SHEER_SEE_THROUGH_MIN, SHEER_SOFT_INTERIOR_MIN): `edge_softness` is information on this matte. */
+  sheer?: boolean;
 }
 
 /** Majority of the other mattes (alpha over one half) versus this one, for the bake-off. */
@@ -213,7 +320,7 @@ export function convexSpan(rowMin: Int32Array, rowMax: Int32Array, h: number, gr
 /** The matte-only checks; `metrics` carries the raw numbers for ranking models. */
 export function checkMatte(input: MatteInput, channel: CheckSubject["channel"] = null): { results: CheckResult[]; metrics: MatteMetrics } {
   const who: CheckSubject = { identifier: input.identifier, n: input.n, channel };
-  const metrics: MatteMetrics = { regionLoss: null, globalLoss: null, thinLoss: null, backgroundKept: null, holes: null, seeThrough: null, edgeSoftness: null };
+  const metrics: MatteMetrics = { regionLoss: null, globalLoss: null, thinLoss: null, backgroundKept: null, holes: null, seeThrough: null, edgeSoftness: null, opaqueShare: null };
   const out: CheckResult[] = [], w = input.source.w, h = input.source.h, alpha = input.alpha;
   const sourceBox = bbox(alpha, w, h);
   if (!sourceBox) { out.push(notRun("cutout.pixels_lost", C, who, "The matte holds no product.")); return { results: out, metrics }; }
@@ -233,11 +340,23 @@ export function checkMatte(input: MatteInput, channel: CheckSubject["channel"] =
     out.push(judge(softness <= softBar, "cutout.edge_softness", C, who, Math.round(softness * 100) / 100, softBar, "px of soft edge", `The soft edge band within ${EDGE_SOFTNESS_REACH_PX} px of the silhouette averages ${softness.toFixed(2)} px wide (bar ${softBar} px for ${input.productType ?? "footwear"}).`));
   }
 
+  // Opaque share needs only the matte: the support's interior must be (nearly) opaque, or the output is a ghost.
+  const support = erode(matted, w, h, OPAQUE_SHARE_ERODE_PX);
+  let supportCount = 0, opaque = 0;
+  for (let i = 0; i < alpha.length; i++) if (support[i]) { supportCount++; if (alpha[i]! >= SEE_THROUGH_ALPHA) opaque++; }
+  if (supportCount < REGION_MIN_PIXELS) out.push(notRun("cutout.opaque_share", C, who, `The matte's support holds ${supportCount} interior pixels (under ${REGION_MIN_PIXELS}): nothing to measure.`));
+  else {
+    const opaqueShare = opaque / supportCount;
+    metrics.opaqueShare = opaqueShare;
+    out.push(judge(opaqueShare >= OPAQUE_SHARE_MIN, "cutout.opaque_share", C, who, Math.round(opaqueShare * 1e4) / 1e4, OPAQUE_SHARE_MIN, "share of the matte interior at alpha 200 or more", opaqueShare >= OPAQUE_SHARE_MIN ? `${(opaqueShare * 100).toFixed(1)}% of the matte's interior is opaque.` : `Only ${(opaqueShare * 100).toFixed(1)}% of the matte's interior is opaque (alpha 200 or more): a translucent matte publishes the product as a ghost.`));
+  }
+
   // The rest compares the matte with the source colours, which needs a background colour per row: flat or smoothly graded.
-  const model = backgroundModel(input.source, input.sourceBackground);
-  if (!model) { out.push(notRun("cutout.pixels_lost", C, who, "The source background is neither uniform nor a smooth gradient, so no independent product estimate is possible.")); return { results: out, metrics }; }
+  const model = backgroundModel(input.source, input.sourceBackground, alpha);
+  const noEstimate = (why: string) => { for (const id of COLOUR_ESTIMATE_CHECKS) out.push(notRun(id, C, who, why)); return { results: out, metrics }; };
+  if (!model) return noEstimate("The source background is neither uniform nor a smooth gradient, so no independent product estimate is possible.");
   const { mask: fg, count } = estimateForeground(input, sourceBox, model);
-  if (count < REGION_MIN_PIXELS) { out.push(notRun("cutout.pixels_lost", C, who, "Too few product pixels can be told from the background by colour.")); return { results: out, metrics }; }
+  if (count < REGION_MIN_PIXELS) return noEstimate("Too few product pixels can be told from the background by colour.");
 
 
   // Per-region loss over a grid on the estimate's bounding box.
@@ -295,15 +414,40 @@ export function checkMatte(input: MatteInput, channel: CheckSubject["channel"] =
   // The interior (the estimate eroded 3 px) holds no thin structure (what the radius-2 opening removes is under 5 px
   // wide), so hair and straps are never a see-through patch inside a body.
   const interior = erode(fg, w, h, 3), holeMask = new Uint8Array(fg.length), seeBar = seeThroughBar(input.productType);
-  let interiorCount = 0, seeThrough = 0;
-  for (let i = 0; i < fg.length; i++) if (interior[i]) { interiorCount++; if (!matted[i]) holeMask[i] = 1; if (alpha[i]! < SEE_THROUGH_ALPHA) seeThrough++; }
+  let interiorCount = 0, seeThrough = 0, softInterior = 0;
+  for (let i = 0; i < fg.length; i++) if (interior[i]) { interiorCount++; if (!matted[i]) holeMask[i] = 1; if (alpha[i]! < SEE_THROUGH_ALPHA) seeThrough++; if (alpha[i]! > ALPHA_EDGE && alpha[i]! < 245) softInterior++; }
   const holes = components(holeMask, w, h).sizes.slice(1).filter(size => size >= count * HOLE_MIN_SHARE).length;
   metrics.holes = holes;
   out.push(judge(holes === 0, "cutout.holes", C, who, holes, 0, "holes", holes ? `${holes} hole(s) inside the product where the cut-out dropped pixels.` : "No holes inside the product."));
-  const seeShare = interiorCount ? seeThrough / interiorCount : 0;
+  const seeShare = interiorCount ? seeThrough / interiorCount : 0, softShare = interiorCount ? softInterior / interiorCount : 0;
   metrics.seeThrough = seeShare;
   out.push(judge(seeShare <= seeBar, "cutout.see_through", C, who, Math.round(seeShare * 1e4) / 1e4, seeBar, "share of interior under alpha 200", `${(seeShare * 100).toFixed(2)}% of the product interior (the estimate eroded 3 px, which holds no thin structure) is partly transparent in the matte (bar ${seeBar * 100}% for ${input.productType ?? "footwear"}).`));
+  // Sheer fabric: the softness of a translucent garment's outline is the fabric, recorded as information.
+  const sheer = (metrics.opaqueShare ?? 0) >= OPAQUE_SHARE_MIN && seeShare > SHEER_SEE_THROUGH_MIN && softShare > SHEER_SOFT_INTERIOR_MIN;
+  metrics.sheer = sheer;
+  if (sheer) {
+    const k = out.findIndex(r => r.id === "cutout.edge_softness" && r.status !== "not_run");
+    if (k >= 0) out[k] = info("cutout.edge_softness", C, who, out[k]!.measured, out[k]!.threshold, out[k]!.unit, `Sheer fabric: ${(seeShare * 100).toFixed(2)}% of the interior is see-through and ${(softShare * 100).toFixed(1)}% of it is soft alpha, so the outline's softness (${out[k]!.measured} px against ${out[k]!.threshold}) is the fabric's own translucency, recorded as information.`);
+  }
   return { results: out, metrics };
+}
+
+/**
+ * Whether the source edge at (x, y) is textured (hair): the luma range over the outer soft pixels (source alpha from
+ * ALPHA_EDGE to ALPHA_HALF) of a FRINGE_TEXTURE_PX window exceeds FRINGE_TEXTURE_RANGE, over at least
+ * FRINGE_TEXTURE_MIN_PIXELS such pixels. Strand tips and the gaps between them alternate dark and light; the outer soft
+ * band of a blurred matte over a smooth garment is the flat background.
+ */
+export function texturedSourceEdge(source: Raster, alpha: Buffer, x: number, y: number): boolean {
+  const r = FRINGE_TEXTURE_PX >> 1;
+  let lo = Infinity, hi = -Infinity, n = 0;
+  for (let yy = Math.max(0, y - r); yy <= Math.min(source.h - 1, y + r); yy++) for (let xx = Math.max(0, x - r); xx <= Math.min(source.w - 1, x + r); xx++) {
+    const i = yy * source.w + xx, a = alpha[i]!;
+    if (a <= ALPHA_EDGE || a > ALPHA_HALF) continue;
+    const l = lumaAt(source.rgb, i);
+    if (l < lo) lo = l; if (l > hi) hi = l; n++;
+  }
+  return n >= FRINGE_TEXTURE_MIN_PIXELS && hi - lo > FRINGE_TEXTURE_RANGE;
 }
 
 /** The output is the photo itself (spec 07 pass-through): the matte was not used, so matte-against-photo checks do not apply. */
@@ -315,12 +459,18 @@ export function checkCutout(ctx: OutputContext): CheckResult[] {
   const passthrough = s.flags.some(f => PASSTHROUGH_FLAGS.includes(f));
   // An expected hold is never published (eval run 3, anta: 1.22% on the held 450 px copy, a 3 px fringe on a short perimeter).
   const expectedHold = s.expect.attention && (s.status === "needs_attention" || s.status === "failed");
+  // A pass-through gets the same kept and lost accounting as a matte (eval run 3, vero_moda: Z40E29CD878FAA726501DZ n=1 was
+  // published as a pass-through with its sleeve flooded away, named only by the lost accounting): its alpha is the
+  // flood's result (spec 07: the whole frame minus the background reached from the frame edge), so flat background
+  // in the background colour left inside it, outside the product's span, is background the flood did not reach and
+  // `background_kept` measures it as on a model matte, under the same white-on-near-white guard.
   const matte = checkMatte({ identifier: s.identifier, n: s.n, source: s.source, sourceBackground: s.sourceBackground, alpha: s.alpha, productType: s.productType }, s.channel);
   const whiteOnWhite = (matte.metrics.noColourEvidence ?? 0) > NO_COLOUR_EVIDENCE_MAX_SHARE;
   const out: CheckResult[] = matte.results
-    .map(r => (passthrough && r.id === "cutout.background_kept" ? notRun(r.id, C, who, "The photo is kept whole by rule (pass-through), so its own background inside the matte is not kept background.") : expectedHold && r.id === "cutout.background_kept" && r.status !== "not_run" ? notRun(r.id, C, who, `The manifest expects this photo held and it is (${s.status}): the output is never published (it would measure ${r.measured} against ${r.threshold}).`) : r));
+    .map(r => (expectedHold && r.id === "cutout.background_kept" && r.status !== "not_run" ? notRun(r.id, C, who, `The manifest expects this photo held and it is (${s.status}): the output is never published (it would measure ${r.measured} against ${r.threshold}).`) : r));
   if (passthrough) {
-    // The photo is kept whole by rule: the ring around the matte and the soft edge show its own background, not a halo or a fringe.
+    // The photo is kept whole by rule and placed as a whole: the ring around it and its soft edge are the photo's own
+    // background on the canvas, not a halo or a fringe (eval run 2: 12 to 17% fringe and a 2.16% ring on the pass-throughs).
     out.push(notRun("cutout.halo", C, who, "The photo is kept whole by rule (pass-through); the ring around the product is its own background, not a halo."));
     out.push(notRun("cutout.fringe", C, who, "The photo is kept whole by rule (pass-through); its own background is not a fringe."));
     return out;
@@ -330,21 +480,23 @@ export function checkCutout(ctx: OutputContext): CheckResult[] {
   // Halo ring on the canvas: the 3 px ring around the product must be canvas background. Where a shadow is allowed, a
   // kept photographic shadow runs up the sides and in front of the product to SHADOW_BAND_ABOVE of its height above the
   // band (the render's continueBeyondBand), so achromatic darkening there (with the chroma JPEG ringing lends it next to
-  // a coloured product) is the shadow, not a halo; a coloured ring or any ring higher up the silhouette counts.
-  const ring = dilate(product, canvas.w, canvas.h, 3), reach = Math.ceil(productBox.h * SHADOW_BAND_ABOVE);
+  // a coloured product) is the shadow, not a halo; so is achromatic darkening anywhere inside the render's own kept-darkness
+  // mask (keptShadowCanvasMask: a flat lay photographed with a shadow all around the garment, eval run 3 vero_moda); a
+  // coloured ring, or a grey ring where the render kept nothing, counts.
+  const ring = dilate(product, canvas.w, canvas.h, 3), reach = Math.ceil(productBox.h * SHADOW_BAND_ABOVE), kept = keptShadowCanvasMask(ctx);
   let ringPixels = 0, ringBad = 0;
   for (let y = 0; y < canvas.h; y++) for (let x = 0; x < canvas.w; x++) {
     const i = y * canvas.w + x;
     if (!ring[i] || product[i]) continue;
-    if (ctx.shadowAllowed && y >= band.y - reach && x >= band.x && x < band.x + band.w && shadowLikePixel(ctx, i, SHADOW_RING_CHROMA_MAX)) continue;
+    if (ctx.shadowAllowed && ((y >= band.y - reach && x >= band.x && x < band.x + band.w) || kept?.[i]) && shadowLikePixel(ctx, i, SHADOW_RING_CHROMA_MAX)) continue;
     ringPixels++; if (delta(canvas.rgb, i, background) > 12) ringBad++;
   }
   const haloShare = ringPixels ? ringBad / ringPixels : 0;
-  out.push(judge(haloShare <= HALO_RING_MAX, "cutout.halo", C, who, Math.round(haloShare * 1e4) / 1e4, HALO_RING_MAX, "share of the ring off background", `${(haloShare * 100).toFixed(2)}% of the 3 px ring around the product is not canvas background${ctx.shadowAllowed ? " (shadow-like darkening in the shadow band excluded)" : ""}.`));
+  out.push(judge(haloShare <= HALO_RING_MAX, "cutout.halo", C, who, Math.round(haloShare * 1e4) / 1e4, HALO_RING_MAX, "share of the ring off background", `${(haloShare * 100).toFixed(2)}% of the 3 px ring around the product is not canvas background${ctx.shadowAllowed ? ` (shadow-like darkening in the shadow band${kept ? " and in the render's kept-darkness mask" : ""} excluded)` : ""}.`));
 
   // Colour fringe: soft-edge pixels that still show the source background colour (flat, or the row's colour of a smooth
   // gradient), when it differs from the canvas along the product.
-  const model = backgroundModel(s.source, s.sourceBackground), { sourceCrop, productBox: pb } = ctx;
+  const model = backgroundModel(s.source, s.sourceBackground, s.alpha), { sourceCrop, productBox: pb } = ctx;
   const sourceRow = (y: number) => Math.round(sourceCrop.y + (y - pb.y + 0.5) * sourceCrop.h / Math.max(1, pb.h) - 0.5);
   let closest = Infinity;
   if (model) for (let y = Math.max(0, pb.y); y < Math.min(canvas.h, pb.y + pb.h); y++) { const c = model.at(sourceRow(y)); closest = Math.min(closest, Math.max(Math.abs(c[0] - background[0]), Math.abs(c[1] - background[1]), Math.abs(c[2] - background[2]))); }
@@ -352,15 +504,28 @@ export function checkCutout(ctx: OutputContext): CheckResult[] {
   else if (expectedHold) out.push(notRun("cutout.fringe", C, who, `The manifest expects this photo held and it is (${s.status}): the output is never published.`));
   else if (whiteOnWhite) out.push(notRun("cutout.fringe", C, who, `White on near-white: ${((matte.metrics.noColourEvidence ?? 0) * 100).toFixed(1)}% of the matte interior is within ${SOURCE_FOREGROUND_DELTA} of the background colour, so a fringe in that colour cannot be told from the product.`));
   else if (closest <= 20) out.push(notRun("cutout.fringe", C, who, "Source and canvas backgrounds match, so a fringe cannot be told apart."));
+  else if (s.tags?.includes("transparent")) out.push(notRun("cutout.fringe", C, who, "The source is tagged transparent (sheer tights, glass): its soft edge carries the background colour by nature, not as a fringe."));
   else {
-    let edge = 0, fringe = 0;
+    // Hair and sheer edges (the matte's thin structures) are grey by nature against a white canvas (eval run 3, vero_moda:
+    // 14 fails of 8 to 13.6% on amazon and shein only, on hair and sheer tights, no grey rim on the crops), so the soft
+    // pixels that map into the thin-structure mask of the matte are left out; the body's edge is judged as before.
+    const thin = thinStructures(s.alpha, s.source.w, s.source.h), sw = s.source.w, sh = s.source.h;
+    const sourceCol = (x: number) => Math.round(sourceCrop.x + (x - pb.x + 0.5) * sourceCrop.w / Math.max(1, pb.w) - 0.5);
+    let edge = 0, fringe = 0, thinEdge = 0, textured = 0;
+    const texture = new Map<number, boolean>();
     for (let y = 0; y < canvas.h; y++) for (let x = 0; x < canvas.w; x++) {
       const i = y * canvas.w + x, a = ctx.expectedAlpha[i]!;
       if (a <= ALPHA_EDGE || a > 200) continue;
+      const sx = Math.min(sw - 1, Math.max(0, sourceCol(x))), sy = Math.min(sh - 1, Math.max(0, sourceRow(y))), si = sy * sw + sx;
+      if (thin[si]) { thinEdge++; continue; }
+      let t = texture.get(si);
+      if (t === undefined) { t = texturedSourceEdge(s.source, s.alpha, sx, sy); texture.set(si, t); }
+      if (t) { textured++; continue; }
       edge++; if (delta(canvas.rgb, i, model.at(sourceRow(y))) <= 10) fringe++;
     }
-    const share = edge ? fringe / edge : 0;
-    out.push(judge(share <= FRINGE_MAX, "cutout.fringe", C, who, Math.round(share * 1e4) / 1e4, FRINGE_MAX, "share of soft-edge pixels in the source background colour", `${(share * 100).toFixed(2)}% of the soft edge carries the source background colour.`));
+    const share = edge ? fringe / edge : 0, leftOut = [thinEdge ? `${thinEdge} thin-structure pixels of hair, straps or sheer fabric` : "", textured ? `${textured} pixels on a textured source edge (hair)` : ""].filter(Boolean).join(" and ");
+    if (!edge) out.push(notRun("cutout.fringe", C, who, `The soft edge is ${leftOut || "empty"}, which carries the background colour by nature.`));
+    else out.push(judge(share <= FRINGE_MAX, "cutout.fringe", C, who, Math.round(share * 1e4) / 1e4, FRINGE_MAX, "share of soft-edge pixels in the source background colour", `${(share * 100).toFixed(2)}% of the soft edge carries the source background colour${leftOut ? ` (${leftOut} left out of ${edge + thinEdge + textured})` : ""}.`));
   }
   return out;
 }

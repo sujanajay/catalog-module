@@ -169,10 +169,20 @@ export const inBox = (b: BBox, x: number, y: number) => x >= b.x && x < b.x + b.
  * product crossing the band on a cut side takes a few rows, never the fit) and the 95th percentile of the plain rows'
  * residuals stays under GRADED_RESIDUAL_MAX levels. A busy border (a lifestyle photo, a full-bleed close-up) fits
  * nothing and returns null, so those checks stay not run there.
+ *
+ * A flat border the product crosses on its cut sides (live run D2, french_connection.other, section 15e: a gift box cut
+ * at the left and right of a pure white frame had 70.5% plain rows and no background model, so the loss checks never ran
+ * on the glass bottles beside it) is accepted from the plain rows alone when, given the matte, the plain rows cover at
+ * least GRADED_PLAIN_ROWS_MIN of the rows outside the matte's row span grown by GRADED_SPAN_GROW of the frame height, or
+ * at least GRADED_PLAIN_ROWS_MIN_OVERALL of all rows, under the same residual bar; a lifestyle photo with no plain rows
+ * still fits nothing.
  */
 export const GRADED_RESIDUAL_MAX = 8;
 export const GRADED_ROW_SPREAD_MAX = 16;
 export const GRADED_PLAIN_ROWS_MIN = 0.95;
+export const GRADED_PLAIN_ROWS_MIN_OVERALL = 0.5;
+export const GRADED_SPAN_GROW = 0.04;
+export const GRADED_OUTSIDE_MIN_ROWS = 8;
 export interface BackgroundModel {
   kind: "uniform" | "graded";
   /** 95th percentile of the per-row residual against the fit (0 for a uniform border). */
@@ -183,7 +193,24 @@ export interface BackgroundModel {
   at: (y: number) => [number, number, number];
 }
 const n95 = (n: number) => Math.floor(n * 0.95);
-export function backgroundModel(r: Raster, bg: { uniform: boolean; color: [number, number, number] }): BackgroundModel | null {
+/**
+ * Whether the plain rows carry the fit: GRADED_PLAIN_ROWS_MIN of all rows; else, with the matte, the same share of the
+ * rows outside the matte's row span (grown by GRADED_SPAN_GROW of the frame height, at least GRADED_OUTSIDE_MIN_ROWS of
+ * them), or GRADED_PLAIN_ROWS_MIN_OVERALL of all rows.
+ */
+export function plainRowsSuffice(plain: readonly number[], r: { w: number; h: number }, alpha?: Buffer): boolean {
+  if (plain.length >= r.h * GRADED_PLAIN_ROWS_MIN) return true;
+  if (plain.length >= r.h * GRADED_PLAIN_ROWS_MIN_OVERALL) return true;
+  if (!alpha) return false;
+  let y0 = r.h, y1 = -1;
+  // Matte support (alpha over ALPHA_EDGE, which lives in context.ts; the literal keeps this module free of that import).
+  for (let y = 0; y < r.h; y++) for (let x = 0; x < r.w; x++) if (alpha[y * r.w + x]! > 10) { if (y < y0) y0 = y; if (y > y1) y1 = y; break; }
+  if (y1 < 0) return false;
+  const grow = Math.round(r.h * GRADED_SPAN_GROW), top = Math.max(0, y0 - grow), bottom = Math.min(r.h - 1, y1 + grow);
+  const outside = top + (r.h - 1 - bottom), plainOutside = plain.filter(y => y < top || y > bottom).length;
+  return outside >= GRADED_OUTSIDE_MIN_ROWS && plainOutside >= outside * GRADED_PLAIN_ROWS_MIN;
+}
+export function backgroundModel(r: Raster, bg: { uniform: boolean; color: [number, number, number] }, alpha?: Buffer): BackgroundModel | null {
   if (bg.uniform) return { kind: "uniform", residual: 0, color: bg.color, at: () => bg.color };
   const bx = Math.max(4, Math.ceil(r.w * 0.02)), by = Math.max(4, Math.ceil(r.h * 0.02));
   if (r.h < 8) return null;
@@ -206,7 +233,7 @@ export function backgroundModel(r: Raster, bg: { uniform: boolean; color: [numbe
   }
   const plain: number[] = [];
   for (let y = 0; y < r.h; y++) if (spreads[y]! <= GRADED_ROW_SPREAD_MAX) plain.push(y);
-  if (plain.length < 2 || plain.length < r.h * GRADED_PLAIN_ROWS_MIN) return null;
+  if (plain.length < 2 || !plainRowsSuffice(plain, r, alpha)) return null;
   // Least-squares line per channel over the plain rows (a row the product crosses never tilts the fit).
   const n = r.h, m = plain.length, slope = [0, 0, 0], offset = [0, 0, 0];
   let sumY = 0, sumYY = 0;

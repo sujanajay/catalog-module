@@ -36,6 +36,12 @@ export interface CompletenessInput {
    * product that holds an expected-hold shot is expected staged with no link, and left out of the verified counts.
    */
   heldExpected?: Set<string>;
+  /**
+   * Keys `identifier|n` of the sources the manifest expects left out as a size chart (`chart_image`). A chart leave-out of
+   * any other shot fails `skip_allowed` (live run D2, section 15e: a false chart detection would drop a product photo from
+   * every channel in silence). Absent: every chart leave-out is accepted, as before.
+   */
+  chartExpected?: Set<string>;
 }
 export const sourceKey = (identifier: string, n: number) => `${identifier}|${n}`;
 
@@ -52,6 +58,19 @@ export function checkCompleteness(input: CompletenessInput): CheckResult[] {
   const seen = new Set<string>(), heldExpected = input.heldExpected ?? new Set<string>();
   const heldProducts = new Map<string, number[]>();
   for (const k of heldExpected) { const [identifier, n] = k.split("|"); heldProducts.set(identifier!, [...heldProducts.get(identifier!) ?? [], Number(n)]); }
+  // A hold is per product. When a product the manifest does not expect held ends with every made output held or staged
+  // and nothing live, its completeness is one product-level row (`completeness.product_held`) instead of a live,
+  // public-object, sheet-cell and Amazon or Shein row per output (eval run 3: the FC bag's three false holds produced
+  // 210 completeness rows for one defect), and its outputs leave the verified counts as an expected hold's do, so the
+  // count of fails tracks defects. Whether the hold was right is attention.not_held's call.
+  const byProduct = new Map<string, OutputRow[]>();
+  for (const o of input.outputs) byProduct.set(o.identifier, [...byProduct.get(o.identifier) ?? [], o]);
+  const productHeld = new Map<string, { held: OutputRow[]; made: number }>();
+  for (const [identifier, rows] of byProduct) {
+    if (heldProducts.has(identifier)) continue;
+    const made = rows.filter(r => r.status !== "skipped"), held = made.filter(r => r.status === "needs_attention" || r.status === "failed");
+    if (held.length && !made.some(r => r.isLive)) productHeld.set(identifier, { held, made: made.length });
+  }
   let expectedOutputs = 0, expectedSkips = 0, expectedHeld = 0;
   for (const source of input.sources) for (const ch of input.channels) {
     const who: CheckSubject = { identifier: source.identifier, n: source.n, channel: ch }, k = key(source.identifier, ch, source.n);
@@ -61,11 +80,13 @@ export function checkCompleteness(input: CompletenessInput): CheckResult[] {
     const sibling = held && !heldExpected.has(sourceKey(source.identifier, source.n));
     // A Styli skip under the minimum stays a skip on a held product: the pipeline counts it as skipped and the sheet row
     // carries the note (eval run 3: the held ZEE79259BBFD83FFA1DB0Z and the 450 px copies, 144 skipped against the 142 expected).
-    const want = chart ? "chart" : expectedOutcome(source, ch) === "skip" ? "skip" : held ? "held" : "output";
-    if (want === "output") expectedOutputs++; else if (want === "held") expectedHeld++; else expectedSkips++;
+    const want = chart ? "chart" : expectedOutcome(source, ch) === "skip" ? "skip" : held ? "held" : productHeld.has(source.identifier) ? "product_held" : "output";
+    if (want === "output") expectedOutputs++; else if (want === "held" || want === "product_held") expectedHeld++; else expectedSkips++;
     out.push(judge(rows.length === 1, "completeness.one_output", K, who, rows.length, 1, "rows", rows.length === 1 ? `One output row for ${channel(ch).label} image ${source.n}.` : `${rows.length} output rows for ${channel(ch).label} image ${source.n} (expected exactly 1).`));
     const row = rows[0];
     if (!row) continue;
+    // Judged once for the product below (completeness.product_held), not once per output.
+    if (want === "product_held") continue;
     const cell = input.sheet.find(c => c.identifier === source.identifier && c.channel === ch && c.n === source.n);
     if (want === "held") {
       // The manifest expects this photo to be held for a person: nothing goes live and the sheet carries no link.
@@ -76,8 +97,8 @@ export function checkCompleteness(input: CompletenessInput): CheckResult[] {
     }
     if (want === "chart") {
       // The pipeline found a size chart: left out on every channel, with its note, never a link.
-      const note = input.sheetNotes.get(source.identifier) ?? "";
-      out.push(judge(!rows[0]!.isLive, "completeness.skip_allowed", K, who, `skipped: ${CHART_SKIP_NOTE}`, `skipped: ${CHART_SKIP_NOTE}`, "status", "A size chart or text-only photo, left out with its note."));
+      const note = input.sheetNotes.get(source.identifier) ?? "", expectedChart = !input.chartExpected || input.chartExpected.has(sourceKey(source.identifier, source.n));
+      out.push(judge(!rows[0]!.isLive && expectedChart, "completeness.skip_allowed", K, who, `skipped: ${CHART_SKIP_NOTE}`, expectedChart ? `skipped: ${CHART_SKIP_NOTE}` : "an output (the manifest expects no chart here)", "status", expectedChart ? "A size chart or text-only photo, left out with its note." : `Left out as a size chart without an expectation: the manifest does not expect image ${source.n} to be a chart, so a product photo was dropped from ${channel(ch).label} by the chart detector.`));
       out.push(judge(!cell?.url && note.includes(CHART_SKIP_NOTE), "completeness.sheet_cell", K, who, cell?.url ? "link" : note.includes(CHART_SKIP_NOTE) ? "empty with note" : "empty without note", "empty with note", "cell", cell?.url ? "A left-out chart still has a link in the sheet." : note.includes(CHART_SKIP_NOTE) ? "The sheet cell is empty and the note says why." : "The sheet cell is empty but the chart note is missing from the row's notes."));
       continue;
     }
@@ -99,14 +120,18 @@ export function checkCompleteness(input: CompletenessInput): CheckResult[] {
     out.push(judge(cell?.url === row.publicUrl, "completeness.sheet_cell", K, who, cell?.url ?? "empty", row.publicUrl, "cell", cell?.url === row.publicUrl ? "The sheet cell carries the live link." : "The sheet cell does not carry the live link."));
     if (ch === "amazon" || ch === "shein") out.push(judge(live, `completeness.${ch}_shot`, K, who, live ? "present" : row.status, "present", "output", `${channel(ch).label} image ${source.n} of this product: ${live ? "present and live" : row.status} (every shot of a product gets its own ${channel(ch).label} image; image 1 is white, the rest grey).`));
   }
+  for (const [identifier, p] of productHeld) {
+    const shots = [...new Set(p.held.map(r => r.n))].sort((a, b) => a - b), links = input.sheet.filter(c => c.identifier === identifier && c.url).length;
+    out.push(judge(false, "completeness.product_held", K, { identifier, n: null, channel: null }, `0 of ${p.made} live: product held`, `${p.made} of ${p.made} live`, "outputs", `The product is held as a whole (${p.held.length} of its ${p.made} outputs ${p.held.length === 1 ? "is" : "are"} needs attention or failed: image ${shots.join(", ")}; the rest staged) and nothing of it went live${links ? `, yet ${links} links are in the sheet` : ""}; the manifest expects it on the sheet. One row for the product: its outputs are left out of the per-output rows and of the verified counts, and attention.not_held names the hold.`));
+  }
   const extra = input.outputs.filter(o => !seen.has(key(o.identifier, o.channel, o.n)));
   out.push(judge(extra.length === 0, "completeness.no_extra_outputs", K, { identifier: "*", n: null, channel: null }, extra.length, 0, "rows", extra.length ? `${extra.length} output rows belong to no golden source: ${extra.slice(0, 5).map(o => `${o.identifier} ${o.channel} ${o.n}`).join("; ")}.` : "No stray output rows."));
   const extraCells = input.sheet.filter(c => c.url && !seen.has(key(c.identifier, c.channel, c.n)));
   out.push(judge(extraCells.length === 0, "completeness.no_extra_cells", K, { identifier: "*", n: null, channel: null }, extraCells.length, 0, "cells", extraCells.length ? `${extraCells.length} sheet links belong to no golden source.` : "No stray sheet links."));
   const all: CheckSubject = { identifier: "*", n: null, channel: null };
   const planned = expectedOutputs + expectedSkips + expectedHeld;
-  out.push(judge(input.counts.outputs === planned, "completeness.counts_planned", K, all, input.counts.outputs, planned, "outputs", `Batch counts ${input.counts.outputs} planned outputs; the golden set implies ${planned} (${expectedSkips} Styli skips and left-out charts, ${expectedHeld} expected holds).`));
-  out.push(judge(input.counts.verified === expectedOutputs && input.counts.skipped === expectedSkips, "completeness.counts_verified", K, all, `${input.counts.verified} verified, ${input.counts.skipped} skipped`, `${expectedOutputs} verified, ${expectedSkips} skipped`, "outputs", `Links verified must equal planned minus skipped minus the ${expectedHeld} expected holds (every shot of a held product).`));
+  out.push(judge(input.counts.outputs === planned, "completeness.counts_planned", K, all, input.counts.outputs, planned, "outputs", `Batch counts ${input.counts.outputs} planned outputs; the golden set implies ${planned} (${expectedSkips} Styli skips and left-out charts, ${expectedHeld} outputs of expected or product-level holds).`));
+  out.push(judge(input.counts.verified === expectedOutputs && input.counts.skipped === expectedSkips, "completeness.counts_verified", K, all, `${input.counts.verified} verified, ${input.counts.skipped} skipped`, `${expectedOutputs} verified, ${expectedSkips} skipped`, "outputs", `Links verified must equal planned minus skipped minus the ${expectedHeld} outputs of held products (every shot of an expected hold, and of a product held as a whole, which completeness.product_held names).`));
   const links = input.sheet.filter(c => c.url).length;
   out.push(judge(input.counts.recheckOk === input.counts.recheckTotal && input.counts.recheckTotal === links && links === expectedOutputs, "completeness.recheck_equals_verified", K, all, `recheck ${input.counts.recheckOk} of ${input.counts.recheckTotal}, ${links} links in the sheet`, `${expectedOutputs} of ${expectedOutputs}`, "links", "\"Independent re-check\" must equal \"Links verified\" and the number of links in the sheet (expected holds carry no link)."));
   return out;
