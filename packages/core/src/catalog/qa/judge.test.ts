@@ -370,3 +370,68 @@ describe("the judge's evidence sentence uses the sheet's photo numbers", () => {
   expect(sheetNumbered("image 1 is blurred.", sheetNames(1, false))).toBe("photo 1 is blurred.");
  });
 });
+
+describe("classifier back-off on rate limits and the second model (gate 3h)", () => {
+ const limited = (headers: Record<string, string> = {}) => new Response(JSON.stringify({error:{message:"Provider returned error",metadata:{raw:"temporarily rate-limited upstream"},code:429}}),{status:429,headers});
+ const scripted = (plans: Record<string, (() => Response)[]>) => vi.fn<typeof fetch>(async (_url, init) => {
+  const plan = plans[requestModel(init)]!;
+  return (plan.length > 1 ? plan.shift()! : plan[0]!)();
+ });
+ const typed = (value: unknown = {type:"apparel_model",confidence:.9}) => () => response(value, .001);
+ const fast = () => { const waits: number[] = []; return {waits, sleep: vi.fn(async (ms: number) => { waits.push(ms); }), random: () => .5}; };
+ it("a 429 burst that recovers classifies normally with no flag, waiting about 5 then 15 s", async () => {
+  const clock = fast(), log = vi.fn();
+  const fetcher = scripted({"first/classifier":[limited, limited, typed()]});
+  const result = await classifyProductType(await image(),{apiKey:"fake",model:"first/classifier",secondModel:"second/classifier",fetch:fetcher,log,sleep:clock.sleep,random:clock.random});
+  expect(result).toMatchObject({type:"apparel_model",confidence:.9,flags:[],calls:3,costUsd:.001,model:"first/classifier"});
+  expect(clock.waits).toEqual([5_000, 15_000]);
+  expect(log.mock.calls.filter(([m]) => m === "catalog_qa: classifier back-off").map(([, f]) => f)).toEqual([
+   expect.objectContaining({severity:"WARNING",model:"first/classifier",attempt:1,status:429,kind:"rate_limit",waitMs:5_000,retryAfterMs:null}),
+   expect.objectContaining({attempt:2,status:429,kind:"rate_limit",waitMs:15_000}),
+  ]);
+  expect(log).not.toHaveBeenCalledWith("catalog_qa: quality check unavailable", expect.anything());
+  expect(fetcher.mock.calls.map(([, init]) => requestModel(init))).not.toContain("second/classifier");
+ });
+ it("honours Retry-After and backs off on a 5xx", async () => {
+  const clock = fast();
+  const fetcher = scripted({"first/classifier":[() => limited({"retry-after":"7"}), () => new Response("upstream error",{status:503}), typed()]});
+  const result = await classifyProductType(await image(),{apiKey:"fake",model:"first/classifier",fetch:fetcher,log:()=>{},sleep:clock.sleep,random:clock.random});
+  expect(result).toMatchObject({type:"apparel_model",flags:[]});
+  expect(clock.waits).toEqual([7_000, 15_000]);
+ });
+ it("first model exhausted, then the second model classifies once: no flag, and the log says the fallback was used", async () => {
+  const clock = fast(), log = vi.fn();
+  const fetcher = scripted({"first/classifier":[limited], "second/classifier":[typed({type:"footwear",confidence:.8})]});
+  const result = await classifyProductType(await image(),{apiKey:"fake",model:"first/classifier",secondModel:"second/classifier",fetch:fetcher,log,sleep:clock.sleep,random:clock.random});
+  expect(result).toMatchObject({type:"footwear",confidence:.8,flags:[],calls:5,costUsd:.001,model:"second/classifier"});
+  expect(fetcher.mock.calls.map(([, init]) => requestModel(init))).toEqual(["first/classifier","first/classifier","first/classifier","first/classifier","second/classifier"]);
+  expect(clock.waits).toEqual([5_000, 15_000, 45_000]);
+  expect(log).toHaveBeenCalledWith("catalog_qa: quality check unavailable", expect.objectContaining({model:"first/classifier",status:429,kind:"rate_limit",calls:4}));
+  expect(log).toHaveBeenCalledWith("catalog_qa: classifier unavailable; the second model gave the product type", expect.objectContaining({severity:"WARNING",model:"first/classifier",fallbackModel:"second/classifier",kind:"rate_limit",status:429,calls:5}));
+ });
+ it("both models exhausted: the general rules with type_unknown, every attempt counted, the second model asked once", async () => {
+  const clock = fast(), log = vi.fn();
+  const fetcher = scripted({"first/classifier":[limited], "second/classifier":[limited]});
+  const result = await classifyProductType(await image(),{apiKey:"fake",model:"first/classifier",secondModel:"second/classifier",fetch:fetcher,log,sleep:clock.sleep,random:clock.random});
+  expect(result).toMatchObject({type:"other",confidence:0,flags:["type_unknown"],chart:false,calls:5,costUsd:0});
+  expect(result.model).toBeUndefined();
+  expect(clock.waits).toEqual([5_000, 15_000, 45_000]);
+  expect(log).toHaveBeenCalledWith("catalog_qa: both classifier models unavailable; the general rules are used", expect.objectContaining({fallbackModel:"second/classifier",fallbackKind:"rate_limit",fallbackStatus:429,calls:5}));
+ });
+ it("without a second model the general rules follow the back-off; an auth failure is neither retried nor sent to the second model", async () => {
+  const clock = fast();
+  const exhausted = await classifyProductType(await image(),{apiKey:"fake",model:"first/classifier",fetch:scripted({"first/classifier":[limited]}),log:()=>{},sleep:clock.sleep,random:clock.random});
+  expect(exhausted).toMatchObject({type:"other",flags:["type_unknown"],calls:4});
+  const auth = scripted({"first/classifier":[() => new Response("no",{status:401})], "second/classifier":[typed()]});
+  const denied = await classifyProductType(await image(),{apiKey:"fake",model:"first/classifier",secondModel:"second/classifier",fetch:auth,log:()=>{},sleep:clock.sleep,random:clock.random});
+  expect(denied).toMatchObject({type:"other",flags:["type_unknown"],calls:1});
+ });
+ it("stops waiting when the classification budget or the shared delivery budget is used up", async () => {
+  const clock = fast();
+  const backoff = {remainingMs:10_000};
+  const result = await classifyProductType(await image(),{apiKey:"fake",model:"first/classifier",fetch:scripted({"first/classifier":[limited]}),backoff,log:()=>{},sleep:clock.sleep,random:clock.random});
+  expect(result.flags).toEqual(["type_unknown"]);
+  expect(clock.waits).toEqual([5_000, 5_000]);
+  expect(backoff.remainingMs).toBe(0);
+ });
+});

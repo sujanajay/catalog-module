@@ -1,5 +1,7 @@
 import {expect,it,vi} from "vitest";
-import {cutInSourceNote,deliveredLinks,mergeNotes,readIngestReport,sortNotesByPhoto,splitRecheck} from "./report";
+import {cutInSourceNote,deliveredLinks,mergeNotes,readIngestReport,sortNotesByPhoto,splitRecheck,typeUnknownNote} from "./report";
+import {CATALOG_QA_DEFAULT_MODEL} from "../qa/classify";
+import {DEFAULT_POLICIES} from "../qa/policy";
 import {outputNote} from "./publish";
 it("keeps rejected images without DB rows in the final report",async()=>{
   const ledger={rejected:[{item:{item:{originalName:"A.bmp",identifier:"A"}},reason:"A.bmp is a BMP file. Save it as JPEG or PNG and add it again."},{item:{item:{originalName:"B_1.jpg",identifier:"B"}},reason:"Two files claim shot 1 of B: B_1.jpg, B-1.jpg. Rename one and re-upload."}],duplicates:[{a:"C-1",b:"C1"}]};
@@ -32,4 +34,14 @@ it("counts delivered links the same way on both Details lines (quality gate 2: 3
   expect(d.carried.sort()).toEqual(["https://pub/B/amazon/1/b1","https://pub/B/noon/1/b1"]);
   // The sheet holds 5 links: 3 delivered by this batch and 2 carried over; one carried link failed.
   expect(splitRecheck({ok:4,total:5,failures:[{url:"https://pub/B/noon/1/b1",reason:"HTTP 404"}]},d.carried)).toEqual({ok:3,total:3,carriedOk:1,carriedTotal:2});
+});
+it("notes a product whose type could not be checked once, first, with no model id in it (gate 3h)",()=>{
+  const note=typeUnknownNote([{flags:["type_unknown","cut_in_source"]},{flags:["type_unknown"]}]);
+  expect(note).toBe("We could not tell what kind of product this is, so the general treatment was used.");
+  expect(typeUnknownNote([{flags:["cut_in_source"]}])).toBe("");
+  const ids=[CATALOG_QA_DEFAULT_MODEL,...Object.values(DEFAULT_POLICIES).flatMap(p=>[p.qaModel,p.qaModelSecond,p.matteModel,p.matteModelSecond])].filter((id):id is string=>!!id);
+  for(const id of ids) expect(note.toLowerCase()).not.toContain(id.toLowerCase());
+  expect(note).not.toMatch(/gemini|claude|haiku|qwen|anthropic|google|openrouter|model/i);
+  const flush="Photos 1 and 2: already cut at the frame edge in the original photo; the cut edge sits flush with the edge of the image";
+  expect(mergeNotes(null,["Noon img 2: Skipped.",note,flush])).toBe(`${note}; ${flush}; Noon img 2: Skipped.`);
 });

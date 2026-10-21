@@ -258,8 +258,15 @@ flat, bag or accessory, other. Same `callLlmJson` pattern, temperature 0, the ch
 1 (lowest `n`) when `catalog_batches.product_type = "auto"` and `catalog_products.product_type` is
 empty; a forced batch type is copied to every product; a product that already has a type keeps it.
 The result drives the per-product policy (4.4) and 05's render options (shadow rule, detail-shot
-heuristics). A failed classification stores `other` with flag `type_unknown` and the report lists
-it; the operator can start a new batch with the type chosen by hand. Unknown labels map to `other`.
+heuristics). A 429 or 5xx from the classifier is backed off like the judge's (4.2): about 5, 15 and
+45 s (+/- 20% jitter, or the Retry-After header), at most `CLASSIFIER_BACKOFF_BUDGET_MS` = 120 s of
+waiting per classification and the chunk delivery's shared `QA_DELIVERY_BACKOFF_MS`; each wait is a
+`catalog_qa: classifier back-off` line. When the first model is still rate-limited (or 5xx), the
+batch policy's second judge model (`qaModelSecond`) is asked once for the type. A failed
+classification (both models unavailable, an auth failure, a timeout, invalid JSON or the spending
+limit) stores `other` with flag `type_unknown`; the report lists it, the sheet notes carry its
+sentence once for the product, and an attention card shows it with any other problem on the photo;
+the operator can start a new batch with the type chosen by hand. Unknown labels map to `other`.
 
 ### 4.4 Policy and defaults (`policy.ts`)
 

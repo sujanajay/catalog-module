@@ -1,6 +1,7 @@
 import sharp from "sharp";
 import {startReplacement,completeReplacement,applyDecision,applySkuMap} from "@catalog/core/catalog/decisions";
 import { judgeOutput } from "@catalog/core/catalog/qa/judge";
+import { classifyProductType } from "@catalog/core/catalog/qa/classify";
 import { batchPrefix, publicObjectPath, stagingPath } from "@catalog/core/catalog/naming";
 import { afterAll,beforeAll,describe,expect,it,vi } from "vitest";
 import { and,eq,sql } from "drizzle-orm";
@@ -629,6 +630,44 @@ it("spec07 a 429 burst on the judge backs off and the photo gets its normal verd
  const [batch]=await db.select().from(catalogBatches).where(eq(catalogBatches.id,s.batch.id));
  expect(batch!.cost).toMatchObject({qaCalls:3});expect(Number(batch!.cost.qaUsd)).toBeCloseTo(0.000139,9);
 },60_000);
+describe("spec07 the classifier backs off on rate limits and then asks the second model (gate 3h)",()=>{
+ const limited=()=>new Response(JSON.stringify({error:{message:"temporarily rate-limited upstream",code:429}}),{status:429});
+ async function classifyLive(name:string,second:(()=>Response)) {
+  const w=world(),s=await seed(w,name),log=vi.fn(),waits:number[]=[];
+  vi.mocked(w.deps.resolvePolicy).mockResolvedValue({matteModel:"fixture",qaModel:"test/judge",qaModelSecond:"test/second",threshold:75,floor:60,qaMode:"per_source",qaSampleRate:1,source:"default"});
+  const real=await sharp({create:{width:64,height:64,channels:3,background:"white"}}).jpeg().toBuffer();
+  for(const [uri,obj] of w.objects) if(uri.includes(s.batch.id)) w.objects.set(uri,{...obj,buf:real});
+  const publicFetch=w.deps.fetch,models:string[]=[];
+  const llm=vi.fn(async(init?:RequestInit)=>{const model=String((JSON.parse(String(init?.body)) as {model:string}).model);models.push(model);return model==="test/second" ? second():limited();});
+  w.deps.fetch=vi.fn<typeof globalThis.fetch>(async(url,init)=>String(url).startsWith("https://openrouter.ai/")?llm(init):publicFetch(url,init));
+  w.deps.classifyProductType=classifyProductType;w.deps.log=log;w.deps.sleep=async ms=>{waits.push(ms);};
+  vi.stubEnv("OPENROUTER_API_KEY","test-key");vi.stubEnv("CATALOG_QA_DEFAULT_MODEL","test/classifier");
+  try { expect((await handleChunkTask(w.deps,{chunkId:s.chunk.id})).httpStatus).toBe(200); } finally { vi.unstubAllEnvs(); }
+  const [product]=await db.select().from(catalogProducts).where(eq(catalogProducts.id,s.product.id));
+  const sources=await db.select().from(catalogSourceImages).where(eq(catalogSourceImages.batchId,s.batch.id));
+  const [batch]=await db.select().from(catalogBatches).where(eq(catalogBatches.id,s.batch.id));
+  return {log,waits,models,product:product!,sources,batch:batch!};
+ }
+ it("first model exhausted, the second model gives the type: no type_unknown, every attempt logged and counted",async()=>{
+  const r=await classifyLive("fc-classifier-fallback",()=>new Response(JSON.stringify(openRouterReply(JSON.stringify({type:"apparel_model",confidence:.9})))));
+  expect(r.product.productType).toBe("apparel_model");
+  expect(r.sources.every(source=>!source.flags.includes("type_unknown"))).toBe(true);
+  expect(r.models).toEqual(["test/classifier","test/classifier","test/classifier","test/classifier","test/second"]);
+  const backoff=r.log.mock.calls.filter(([message])=>message==="catalog_qa: classifier back-off").map(([,fields])=>fields as {waitMs:number;batchId:string});
+  expect(backoff).toHaveLength(3);expect(backoff.every(f=>f.batchId===r.batch.id)).toBe(true);
+  for(const f of backoff) expect(r.waits).toContain(f.waitMs);
+  expect(r.log.mock.calls.filter(([message,fields])=>message==="catalog_qa call failed" && (fields as {kind?:string}).kind==="rate_limit")).toHaveLength(4);
+  expect(r.log).toHaveBeenCalledWith("catalog_qa: classifier unavailable; the second model gave the product type",expect.objectContaining({model:"test/classifier",fallbackModel:"test/second",kind:"rate_limit"}));
+  expect(r.batch.cost).toMatchObject({qaCalls:5});
+ },60_000);
+ it("both models exhausted: the general rules with type_unknown on every photo, as before",async()=>{
+  const r=await classifyLive("fc-classifier-exhausted",limited);
+  expect(r.product.productType).toBe("other");
+  expect(r.sources.every(source=>source.flags.includes("type_unknown"))).toBe(true);
+  expect(r.log).toHaveBeenCalledWith("catalog_qa: both classifier models unavailable; the general rules are used",expect.objectContaining({fallbackModel:"test/second",fallbackKind:"rate_limit"}));
+  expect(r.batch.cost).toMatchObject({qaCalls:5});
+ },60_000);
+});
 describe("spec07 caps count the recorded judge spend",()=>{
  const url="https://openrouter.ai/api/v1/chat/completions";
  async function capWorld(name:string,options:Record<string,unknown>,day:string) {
