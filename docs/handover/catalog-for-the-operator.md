@@ -198,7 +198,9 @@ product the agency charged. Products that did not change are not counted.
 When something goes wrong, the tool sends an email by itself. The emails go to sujan@opptra.com,
 so Sujan often knows before you do. If he forwards one to you, or you see one, this section says
 what it means. About an hour after things are fine again a second email says the problem is
-resolved, so an old email does not mean the problem is still there.
+resolved, so an old email does not mean the problem is still there. Each alert sends one email
+when it starts; more of the same failure within the next hour sends no new email. Test runs that
+Sujan starts himself (smoke, eval and load jobs) never send emails.
 
 Two places help you look:
 
@@ -235,10 +237,10 @@ The nine emails:
 6. **Worker errors.** The part of the tool that makes the pictures (the worker) returned many
    errors in a few minutes. The batch page may move slowly or stop moving. First: do not start new
    batches and wait 15 minutes. Call Sujan if it is still happening, or if a batch stops moving.
-7. **Queue stuck.** Many pieces of work have waited in line for half an hour without being picked
-   up. The batch page shows "Processing" with no change in the count. First: check that you or a
-   colleague did not start several large batches at once (section 18). Call Sujan if nothing moves
-   for another 30 minutes.
+7. **Queue stuck.** More than 50 pieces of work are waiting in line and none has been picked up
+   for half an hour. A large batch that is still moving does not send this email. The batch page
+   shows "Processing" with no change in the count. First: refresh the batch page after a few
+   minutes to see if the count moves. Call Sujan if nothing moves for another 30 minutes.
 8. **Database connections high.** The database the tool uses is close to its limit of open
    connections. Pages may load slowly or show an error. First: do not start new batches, and ask
    others not to use the site for a while. Call Sujan if pages still fail after 15 minutes.

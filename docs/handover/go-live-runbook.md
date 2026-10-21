@@ -165,8 +165,17 @@ Google Cloud watches the catalog and emails sujan@opptra.com when something fail
 nine emails means for the operator is in section 16 of `docs/handover/catalog-for-the-operator.md`;
 the details are in `docs/solutions/monitoring.md`.
 
-- **Set it up or repair it.** `infra/deploy.sh` runs it at the end of every production deploy (it is
-  skipped on the preview stack). To run it alone, run in the repo root (Git Bash must be installed):
+- **Once, before the first deploy that runs it.** Install the gcloud beta commands (email
+  notification channels exist only in the beta command group). Run in any folder:
+
+  ```powershell
+  gcloud components install beta
+  ```
+
+  If they are missing, `infra/monitoring.sh` stops and prints this instruction.
+
+- **Set it up or repair it.** `infra/deploy.sh` runs `infra/monitoring.sh` at the end of every
+  production deploy (it is skipped on the preview stack). To run it alone, run in the repo root (Git Bash must be installed):
 
   ```powershell
   bash infra/monitoring.sh

@@ -44,11 +44,19 @@ The worker sends `x-catalog-batch` and `x-catalog-product` headers on each matti
 Python matting service logs JSON with those ids.
 
 ## Metrics and the nine alert policies
-Log-based metrics (on `cloud_run_revision`): `catalog/chunk_failed_terminal`,
-`catalog/batch_failed`, `catalog/qa_unavailable`, `catalog/matting_breaker_open`,
-`catalog/spend_cap_hit`.
+Six log-based metrics (on `cloud_run_revision`):
+- `catalog/chunk_failed_terminal`: `chunk failed` at ERROR (the last attempt).
+- `catalog/batch_failed`: `batch failed` at ERROR only, or `batch swept`. An upload with no photos
+  logs `batch failed` at WARNING and sends nothing.
+- `catalog/qa_unavailable`, `catalog/matting_breaker_open` (state open), `catalog/spend_cap_hit`.
+- `catalog/error_logs` (backs policy 9): ERROR and above from catalog-* services, excluding
+  `chunk failed`, `batch failed`, `batch swept`, `quality check unavailable`, `matting_breaker`,
+  `spend cap hit` and the Cloud Run request log, so one failure sends one email.
 
-All policies email the channel `catalog-email-tech` (sujan@opptra.com) and auto-close after 1 hour.
+All policies email the channel `catalog-email-tech` (sujan@opptra.com). Each alert sends one email
+when it opens and stays open for an hour after the last event, so repeated failures inside that
+hour add no new email; a second email says when it is resolved. Alerts cover Cloud Run services
+only, not jobs, so the smoke, eval and load jobs never send emails.
 
 | # | policy | fires when |
 |---|---|---|
@@ -58,11 +66,11 @@ All policies email the channel `catalog-email-tech` (sujan@opptra.com) and auto-
 | 4 | Cut-out service breaker open | matting_breaker_open > 0 in 5 min |
 | 5 | Spending limit paused quality checks | spend_cap_hit > 0 in 5 min |
 | 6 | Worker errors | catalog-worker 5xx responses other than 503 > 5 a minute for 5 min |
-| 7 | Queue stuck | Cloud Tasks queue `catalog` depth > 50 for 30 min |
+| 7 | Queue stuck | more than 50 tasks wait in Cloud Tasks queue `catalog` AND no task has been attempted for 30 min (a large batch that is moving does not trigger it) |
 | 8 | Database connections high | Cloud SQL `ila-pg` backends > 20 for 5 min (the limit is 25) |
-| 9 | Error in the logs | any ERROR line from a catalog-* service in 5 min, except the messages policies 1 to 5 cover |
+| 9 | Error in the logs | error_logs > 0 in 5 min |
 
-Policy 9 excludes the messages of policies 1 to 5 so one failure sends one email, not two. Policy 5
+Policy 9's metric excludes the messages of policies 1 to 5 so one failure sends one email, not two. Policy 5
 is a failure-type event (held products result), not a spending warning. 503 is left out of
 policy 6 because the worker returns 503 on purpose to make Cloud Tasks retry (lost claim, retry).
 
@@ -95,7 +103,8 @@ ledger workstream; see the comment in `infra/deploy.sh` for the numbers and the 
 checked. Re-check them there when Google changes its prices.
 
 ## Cloud Run labels
-`deploy.sh` adds `app=catalog,component=worker|web|matte|matte-gpu` to every service and job, so
+`deploy.sh` adds `app=catalog,component=worker|web|matte|matte-gpu|job` to every service and job
+(`component=job` on the job scripts), so
 Google's billing page can show the catalog's share by component. Labels count from the next
 revision only: billing before the first labelled deploy is not split. If the ledger's numbers ever
 look wrong, the labelled billing page is the check.
