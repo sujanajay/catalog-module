@@ -243,7 +243,7 @@ yourself; "Use as is" keeps it.
 
 ## 18. What changed on 2026-10-21
 
-The live site was updated twice on 2026-10-21. What you may notice:
+The live site was updated five times on 2026-10-21. What you may notice:
 
 - Enlarged pictures are sharper. When a small photo has to be made bigger for a marketplace, the
   edges of the product are now sharpened as well, also on photos whose background was removed.
@@ -264,3 +264,18 @@ broken picture is never published. Look at it and choose what to do as in sectio
 
 On a busy day the check that tells what kind of product a photo shows can fail quietly; the tool then
 uses its general rules for that product, and a later update will show this as a note on the card.
+
+## 19. Small photos and Styli
+
+Since the update of 2026-10-21, when a photo has to be made more than 1.5 times bigger for a
+marketplace, the tool enlarges it with a quality pass first. This works the same way on every
+marketplace.
+
+- Styli wants photos at least 1,482 px tall. The tool now judges the photo after the quality pass,
+  which doubles its size, so Styli accepts photos that are at least 741 px tall.
+- Photos under 741 px tall are still skipped for Styli, with the same note as before: "Skipped for
+  Styli: the photo is smaller than Styli needs."
+- In the links sheet, an image made this way carries the note "Enlarged with a quality pass to meet
+  this marketplace's size." It uploads like any other image.
+- In step 4, the Styli warning now uses 741 px. If it says some photos are smaller than Styli needs,
+  those photos are under 741 px tall and will be skipped for Styli.
