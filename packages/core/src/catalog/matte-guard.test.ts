@@ -536,15 +536,42 @@ describe("coloured sole strip the matte drops (Anta bd-112625546-12 shot 5, eval
   const keptTo = (bottom: number) => matteOf((x, y) => x >= 60 && x < 340 && y >= 250 && y <= bottom);
   const at = (m: Buffer, x: number, y: number) => m[y * W + x]!;
 
-  it("gives back the lower rows of the strip, opaque, with one antialiased edge pixel", () => {
+  it("gives back the lower rows of the strip, opaque, with a 2 px feathered edge and tapered ends", () => {
     const p = image((x, y) => shoe(x, y, lime)), matte = keptTo(444);
     const r = recoverSoleStrip(p, matte.alpha);
-    expect(r.recovered).toBe(280 * 3);
-    for (const x of [60, 200, 339]) {
+    for (const x of [64, 200, 335]) {
       expect([at(r.alpha, x, 445), at(r.alpha, x, 446), at(r.alpha, x, 447)]).toEqual([255, 255, 128]);
       expect(at(r.alpha, x, 448)).toBe(0);
     }
+    // The group's two ends taper 1 px per column into the kept matte: no block end.
+    expect([at(r.alpha, 60, 445), at(r.alpha, 60, 446)]).toEqual([128, 0]);
+    expect([at(r.alpha, 61, 445), at(r.alpha, 61, 446), at(r.alpha, 61, 447)]).toEqual([255, 128, 0]);
+    expect([at(r.alpha, 339, 445), at(r.alpha, 339, 446)]).toEqual([128, 0]);
     expect(at(matte.alpha, 200, 446)).toBe(0);
+  });
+
+  it("recovers a strip under a paler band of the product whole, bridges a 4-column gap and feathers its outline", () => {
+    // Olive mesh (chroma 45, under the strong test) between the kept matte and the lime on the left third, as on the
+    // live D2 photo; a 4-column highlight across the strip at x 200 to 203.
+    const olive: RGB = [110, 115, 70];
+    const strip = (x: number) => (y: number): RGB | null => {
+      if (y < 441 || y > 447) return null;
+      if (x >= 200 && x <= 203) return [250, 250, 250];
+      return x < 150 && y <= 443 ? olive : [130, 150, 20];
+    };
+    const p = image((x, y) => shoe(x, y, strip(x))), matte = keptTo(440), r = recoverSoleStrip(p, matte.alpha);
+    // PR 70's run test (strong from the first row) stopped at the olive band and at the gap: the left third and the gap were lost.
+    for (const x of [70, 120, 149, 200, 202, 203, 250, 330]) {
+      for (let y = 441; y <= 445; y++) expect(at(r.alpha, x, y)).toBe(255);
+      expect(at(r.alpha, x, 446)).toBeGreaterThan(128);
+      // Soft, not a hard 0 to 255 step: the last row of the strip is partly transparent, nothing below it.
+      expect(at(r.alpha, x, 447)).toBeGreaterThan(10);
+      expect(at(r.alpha, x, 447)).toBeLessThan(255);
+      expect(at(r.alpha, x, 448)).toBe(0);
+    }
+    // One smooth outline: neighbouring columns' lowest rows over alpha 128 differ by at most 1 px.
+    const lowest = (x: number) => { let y = 448; while (y > 440 && at(r.alpha, x, y) <= 128) y--; return y; };
+    for (let x = 61; x < 340; x++) expect(Math.abs(lowest(x) - lowest(x - 1))).toBeLessThanOrEqual(1);
   });
 
   it("smooths a ragged strip end so neighbouring columns end at most 1 px apart, never past the coloured strip", () => {
@@ -561,19 +588,29 @@ describe("coloured sole strip the matte drops (Anta bd-112625546-12 shot 5, eval
     for (let k = 1; k < ends.length; k++) expect(Math.abs(ends[k]! - ends[k - 1]!)).toBeLessThanOrEqual(1);
   });
 
-  it("does not give back a reflection line under a grey gap, a floor, or a short coloured blob", async () => {
+  it("does not give back a reflection line under a grey gap, a floor, a short coloured blob, a contact shadow or a patch off the sole", async () => {
     const p = image((x, y) => shoe(x, y, reflected));
     expect(recoverSoleStrip(p, keptTo(440).alpha).changed).toBe(0);
     expect(recoverSoleStrip(image((x, y) => shoe(x, y, () => null)), keptTo(440).alpha).changed).toBe(0);
     // A coloured contact smudge 10 px wide (under 10% of the shoe's width) is not a strip along the sole.
     const blob = image((x, y) => shoe(x, y, yy => x >= 200 && x < 210 && yy <= 446 ? [134, 67, 51] : null));
     expect(recoverSoleStrip(blob, keptTo(440).alpha).changed).toBe(0);
+    // A brown contact shadow along the whole sole (chroma 40, never strongly coloured) is not a strip.
+    expect(recoverSoleStrip(image((x, y) => shoe(x, y, yy => yy <= 444 ? [95, 80, 55] : null)), keptTo(440).alpha).changed).toBe(0);
+    // Under a lime strip, the darker brown contact line below it stays out.
+    const shadowed = recoverSoleStrip(image((x, y) => shoe(x, y, yy => yy <= 445 ? [130, 150, 20] : yy <= 447 ? [90, 82, 45] : null)), keptTo(440).alpha);
+    expect(at(shadowed.alpha, 200, 444)).toBe(255);
+    expect([at(shadowed.alpha, 200, 446), at(shadowed.alpha, 200, 447)]).toEqual([0, 0]);
+    // A strongly coloured patch the matte dropped beside the upper, not along the sole bottom, is not touched.
+    const patch = image((x, y) => x >= 340 && x < 380 && y >= 300 && y < 330 ? [130, 150, 20] : shoe(x, y, () => null));
+    expect(recoverSoleStrip(patch, keptTo(440).alpha).changed).toBe(0);
   });
 
   it("runs on the winning matte for footwear only", async () => {
     const p = image((x, y) => shoe(x, y, lime)), first = keptTo(444);
     const footwear = await resolveMatte({ prepared: p, first, handRule: true, soleStrip: true, attempt: async () => null });
-    expect(footwear.soleStripRecovered).toBe(280 * 3);
+    expect(footwear.soleStripRecovered).toBe(recoverSoleStrip(p, first.alpha).recovered);
+    expect(footwear.soleStripRecovered).toBeGreaterThan(270 * 3);
     expect(at(footwear.matte.alpha, 200, 445)).toBe(255);
     const other = await resolveMatte({ prepared: p, first, handRule: true, attempt: async () => null });
     expect(other.soleStripRecovered).toBe(0);
