@@ -157,6 +157,14 @@ export function autoActionsOf(compliance: unknown): AutoAction[] {
   const list = (compliance as { auto_actions?: unknown } | null | undefined)?.auto_actions;
   return Array.isArray(list) ? list as AutoAction[] : [];
 }
+/**
+ * The steps recorded on an output that touched its own channel: its render repairs and the photo's matte
+ * steps. Every output of a photo carries the photo's whole record, so a repair made on another channel is
+ * left out here: it was not tried on this one (07 4.6a, a fix applies only to the failing channel).
+ */
+export function actionsOn(compliance: unknown, channel: ChannelId): AutoAction[] {
+  return autoActionsOf(compliance).filter(action => !Array.isArray(action.channels) || action.channels.includes(channel));
+}
 /** The compliance measurement recorded on an output (null on rows made before it existed). */
 export function measuredOf(compliance: unknown): RenderMeasured | null {
   const m = (compliance as { measured?: unknown } | null | undefined)?.measured;

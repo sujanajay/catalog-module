@@ -6,7 +6,7 @@ import type { ChannelId,OutputFlag } from "./types";
 import { strictestChannel } from "./qa/policy";
 import { MAX_REASONS_PER_PHOTO,bySeverity,flagDetails,problemLine,severityRank } from "./qa/reasons";
 import { INFORMATION_FLAGS } from "./qa/triage";
-import { autoActionsOf, busyBackgroundHold, failuresOf, OWN_DEFECT_FLAGS } from "./auto-resolve";
+import { actionsOn, busyBackgroundHold, failuresOf, OWN_DEFECT_FLAGS } from "./auto-resolve";
 import { plainFailures, triedSentence } from "./qa/reasons";
 export interface AttentionPhoto { n:number;channel:ChannelId;outputId:string;outputIds:string[];originalUrl:string;outputUrl:string|null;why:string;whatToDo:string;liveObjectExists:boolean;liveChannels:ChannelId[];failed:boolean;flags:OutputFlag[] }
 export interface AttentionProduct { productId:string;identifier:string;totalShots:number;problemLine:string;photos:AttentionPhoto[] }
@@ -43,7 +43,7 @@ export async function listAttention(db:Db,batchId:string,sign:(uri:string)=>Prom
   // What to do: one instruction, the main problem's; information flags never add guidance of their own.
   // At most MAX_REASONS_PER_PHOTO problem sentences; the report keeps every flag.
   // Our own defect, still there after the repair loop: the card says what was tried (07 4.6a), in plain words.
-  const tried=OWN_DEFECT_FLAGS.has(flag as OutputFlag)&&!context.busy?triedSentence(autoActionsOf(o.compliance).filter(a=>a.result!=="skipped").map(a=>a.step)):"";
+  const tried=OWN_DEFECT_FLAGS.has(flag as OutputFlag)&&!context.busy?triedSentence(actionsOn(o.compliance,o.channel).filter(a=>a.result!=="skipped").map(a=>a.step)):"";
   const main=flagDetails(flag,context),others=[...problemFlags.filter(f=>f!==flag).slice(0,MAX_REASONS_PER_PHOTO-1),...flags.filter(f=>information.has(f))].map(f=>flagDetails(f,context));
   const liveChannels=[...new Set(live.filter(l=>l.productId===o.productId&&l.n===o.n&&(siblings.length>1||!flags.every(local)||l.channel===o.channel)).map(l=>l.channel))];
   const photo:AttentionPhoto={n:o.n,channel:o.channel,outputId:o.id,outputIds:siblings.map(r=>r.output.id),originalUrl:await sign(row.source.rawUri),outputUrl:o.stagingUri?await sign(o.stagingUri):null,why:[main.why,tried,...others.map(d=>d.why)].filter(Boolean).join(" "),whatToDo:main.whatToDo,liveObjectExists:liveChannels.length>0,liveChannels,failed:siblings.some(r=>r.output.status==="failed"),flags};

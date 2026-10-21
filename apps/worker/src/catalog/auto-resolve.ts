@@ -3,7 +3,7 @@ import { eq } from "drizzle-orm";
 import { catalogBatches, catalogOutputs, catalogProducts, catalogSourceImages } from "@catalog/core/db/schema";
 import { batchPrefix, stagingPath } from "@catalog/core/catalog/naming";
 import { shotGeometry, type Matte, type Prepared, type RenderInput, type RenderMeasured, type RenderOutput } from "@catalog/core/catalog/render";
-import { autoActionsOf, diagnoseOutput, failuresOf, LadderStopped, MAX_REJUDGES_PER_PHOTO, MAX_REPAIRS_PER_OUTPUT, measuredOf, ownDefects, RENDER_FLAGS, variantOf, withAutoActions, type AutoAction, type AutoActionKind, type Repair, type RenderVariant } from "@catalog/core/catalog/auto-resolve";
+import { actionsOn, autoActionsOf, diagnoseOutput, failuresOf, LadderStopped, MAX_REJUDGES_PER_PHOTO, MAX_REPAIRS_PER_OUTPUT, measuredOf, ownDefects, RENDER_FLAGS, variantOf, withAutoActions, type AutoAction, type AutoActionKind, type Repair, type RenderVariant } from "@catalog/core/catalog/auto-resolve";
 import { strictestChannel } from "@catalog/core/catalog/qa/policy";
 import { heldInHand, isBusyBackground, passthroughMatte, passthroughProductLoss, PASSTHROUGH_PRODUCT_LOSS_MAX } from "@catalog/core/catalog/matte-guard";
 import type { ChannelId, OutputFlag, ResolvedPolicy } from "@catalog/core/catalog/types";
@@ -102,7 +102,7 @@ export async function resolvePhoto(deps: CatalogDeps, input: ResolvePhotoInput):
     return (await deps.renderAllChannels(p,matte,[o.channel],{shotNumber:source.n,productType:product.productType ?? "other",identifier:product.identifier,publicObjectPath:o.objectPath,...contextFor(o),...variantOptions(v,input.shadowAllowed),...(input.judgedCut ? {judgedCut:true}:{}),trace}))[o.channel];
   };
   const states = new Map<string, OutputState>();
-  for (const o of input.outputs) states.set(o.id,{o,variant:variantOf(o.compliance),render:null,failures:failuresOf(o.compliance),measured:measuredOf(o.compliance),tried:autoActionsOf(o.compliance).map(a=>a.step),attempts:0,target:input.failing.some(f=>f.id===o.id)});
+  for (const o of input.outputs) states.set(o.id,{o,variant:variantOf(o.compliance),render:null,failures:failuresOf(o.compliance),measured:measuredOf(o.compliance),tried:actionsOn(o.compliance,o.channel).map(a=>a.step),attempts:0,target:input.failing.some(f=>f.id===o.id)});
   const targets = () => [...states.values()].filter(st=>st.target);
   const actions: AutoAction[] = [];
   const record = (step: AutoActionKind, result: AutoAction["result"], channels: ChannelId[], detail: string): AutoAction => { const a: AutoAction = {step,trigger:[...trigger],result,channels,rejudged:false,detail}; actions.push(a); return a; };

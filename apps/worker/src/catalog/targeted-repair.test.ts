@@ -125,4 +125,19 @@ describe("resolvePhoto: the fix is computed from the measurement and applied to 
     expect(after).toMatchObject({ status: "needs_attention", crc32c: "first" });
     expect(autoActionsOf(after!.compliance).map(a => `${a.step}:${a.result}`)).toEqual(["re_render:failed"]);
   }, 60_000);
+
+  it("a step made on another channel of the photo is still offered on this one (the record is the photo's, the repair was not)", async () => {
+    const seen: { channel: ChannelId; ctx: Ctx }[] = [];
+    const w = world((channel, ctx) => { seen.push({ channel, ctx }); return made(channel, []); });
+    const s = await seed(["noon"]);
+    const noon = s.outputs[0]!;
+    // Styli's shadow came off earlier in the run; the record sits on Noon's row too. Noon now breaks its margin with its own added shadow.
+    const styliShadowOff = { step: "shadow_off", trigger: ["failed_compliance"], result: "passed", channels: ["styli"], rejudged: false };
+    await db.update(catalogOutputs).set({ flags: ["failed_compliance"], compliance: { ...stored(made("noon", ["inside_safe_box: x"], { shadow: "synthesised" })), auto_actions: [styliShadowOff] } }).where(eq(catalogOutputs.id, noon.id));
+    const [row] = await db.select().from(catalogOutputs).where(eq(catalogOutputs.id, noon.id));
+    await resolvePhoto(w.deps, { batch: s.batch, product: s.product, source: s.source, policy, underClaim, outputs: [row!], failing: [row!], trigger: ["failed_compliance"], shadowAllowed: true, statusFor, prepared, matte });
+    expect(seen).toEqual([{ channel: "noon", ctx: expect.objectContaining({ synthesiseShadow: false }) }]);
+    const [after] = await db.select().from(catalogOutputs).where(eq(catalogOutputs.id, noon.id));
+    expect(autoActionsOf(after!.compliance).map(a => `${a.step}:${a.result}:${a.channels.join()}`)).toEqual(["shadow_off:passed:styli", "shadow_off:passed:noon"]);
+  }, 60_000);
 });

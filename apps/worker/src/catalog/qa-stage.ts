@@ -6,7 +6,7 @@ import { sampledForQa, strictestChannel } from "@catalog/core/catalog/qa/policy"
 import { autoActionNote, bySeverity, flagDetails, plainFailures, triedSentence } from "@catalog/core/catalog/qa/reasons";
 import { CHART_VIEW, DIMENSION_FLAGS, OUTPUT_DIMENSIONS, PHOTO_DIMENSIONS, QA_DIMENSIONS, dimensionThresholds, failingDimensions, scoreOf, withOverall, type JudgeResult, type QaDimension } from "@catalog/core/catalog/qa/judge";
 import { HARD_HOLD_FLAGS, INFORMATION_FLAGS, LEFT_OUT_FLAGS, problemFlags, triageProduct, type RepairOwnDefects } from "@catalog/core/catalog/qa/triage";
-import { autoActionsOf, busyBackgroundHold, failuresOf, judgeSawSourceCut, OWN_DEFECT_FLAGS, ownDefects } from "@catalog/core/catalog/auto-resolve";
+import { actionsOn, autoActionsOf, busyBackgroundHold, failuresOf, judgeSawSourceCut, OWN_DEFECT_FLAGS, ownDefects } from "@catalog/core/catalog/auto-resolve";
 import { shadowSynthesisAllowed } from "@catalog/core/catalog/qa/policy";
 import { flushCutPhoto, resolvePhoto, stopOn } from "./auto-resolve";
 import { recordCost } from "@catalog/core/spend";
@@ -272,7 +272,7 @@ export async function applyTriage(deps:CatalogDeps,batch:Batch,productId:string,
    if(!decision || o.status==="failed") continue;
    // The rule in plain words (never its code) and, for our own defect still there after the repair loop, what was tried (07 4.6a).
    const lead=leadFlag(o.flags),ctx={channel:CHANNELS[o.channel].label,n:o.n,k:batch.channels.length,busy:busyBackgroundHold(o.compliance),failures:plainFailures(failuresOf(o.compliance),CHANNELS[o.channel].label)};
-   const tried=lead && OWN_DEFECT_FLAGS.has(lead) && !ctx.busy ? triedSentence(autoActionsOf(o.compliance).filter(a=>a.result!=="skipped").map(a=>a.step)):"";
+   const tried=lead && OWN_DEFECT_FLAGS.has(lead) && !ctx.busy ? triedSentence(actionsOn(o.compliance,o.channel).filter(a=>a.result!=="skipped").map(a=>a.step)):"";
    const why=lead ? [flagDetails(lead,ctx).why,tried].filter(Boolean).join(" "):null;
    // Hard holds first, then the worst problem, so the card and the note cite the main problem.
    const ordered=[...new Set([...o.flags.filter(flag=>HARD_HOLD_FLAGS.has(flag)),...bySeverity(o.flags)])];
