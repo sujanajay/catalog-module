@@ -441,6 +441,25 @@ time, before anything is rendered.
   that fills the frame, so the whole photo was kept as it is instead of being cut out. Nothing to
   do."), never holds, gets no synthesised shadow, is placed by the cut-in-source rules (sides that
   reach the frame sit flush) and is never trimmed (`trimRules`).
+- Sole strip recovery, footwear only (`recoverSoleStrip`, eval run 3, Anta bd-112625546-12 shot 5: the
+  lower one to two rows of a 5 to 8 px lime strip under a black outsole are dropped by every deployed
+  model, 7.66% of a cell lost after the ladder). After the ladder picks a model matte (never on a
+  pass-through or a busy-background hold; the check always sees the model's own matte), per column of the
+  lower 40% of the matte: the run of strongly coloured source pixels (chroma at least 60 and at least half
+  the brightest channel) that starts right below the lowest kept pixel (alpha over 128), stays within 8 px of
+  it and stops at the first pixel that is not strongly coloured. A connected group of such runs is given
+  back only when the matte dropped at least 20 of its pixels and it spans at least 10% of the product's
+  width (a strip along the sole, not a coloured contact smudge): the runs become opaque, with the soft
+  kept pixels right above them (now inside the product). The run ends are smoothed across the group's
+  columns (a 5-column moving average clamped to each column's measured end, so no pixel outside the
+  coloured run is added, then lowered until neighbouring ends differ by at most 1 px) and the lower edge
+  is drawn at that sub-pixel position: opaque above it, one antialiased pixel at it, so the edge shows no
+  1 px steps and the strip is softened once. A floor reflection under a grey or white gap row (eval run 3
+  M2), a grey cast shadow and a pale tint are never reached. Measured with cached deployed mattes under
+  the footwear policy on the 81 unique Anta golden and gate 3f photos: only the sliver shot changes (worst
+  cell 7.66% to 0.45%, thin parts 14.3% to 1.3%, edge softness 3.19 to 2.96; a two-pixel ramp of 200 and
+  110 was tried and measured 3.03, over the 3.0 footwear bar, because the rest of that matte already
+  averages 3.13).
 - A pass-through replaces a plain studio backdrop only (`isBusyBackground`, eval run 2, French
   Connection ZEE79259BBFD83FFA1DB0Z shot 5: models on a tennis court published with ragged court,
   net and racket remnants). In the border band, the pixels kept by the pass-through although every

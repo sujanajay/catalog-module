@@ -179,7 +179,7 @@ export async function handleChunkTask(deps: CatalogDeps, body: Record<string,unk
             // Cut-out integrity (matte-guard.ts): a matte that removed the product is replaced by the
             // second model, the padded frame, or the whole frame, before anything is rendered.
             const deadline=+started+DISPATCH_DEADLINE_SEC*1000-MATTING_TIMEOUT_MS-MATTE_RETRY_MARGIN_MS, firstModel=matte.model;
-            const resolved = await resolveMatte({prepared:p,first:matte,handRule:product.productType!=="apparel_model" && product.productType!=="apparel_flat",attempt:async variant=>{
+            const resolved = await resolveMatte({prepared:p,first:matte,handRule:product.productType!=="apparel_model" && product.productType!=="apparel_flat",soleStrip:product.productType==="footwear",attempt:async variant=>{
               const model = variant==="padded_first" ? firstModel : productPolicy.matteModelSecond;
               if (!model || (variant!=="padded_first" && model===firstModel) || +deps.now()>deadline) return null;
               if (!(await deps.matting.health()).models.some(m=>m.id===model)) return null;
@@ -189,6 +189,7 @@ export async function handleChunkTask(deps: CatalogDeps, body: Record<string,unk
               return next.source==="model" ? next:null;
             }});
             if (resolved.actions.length) deps.log("catalog matte guard",{batchId:batch.id,sourceImageId:source.id,steps:resolved.actions.map(a=>`${a.step}:${a.result}`),passthrough:resolved.passthrough});
+            if (resolved.soleStripRecovered) deps.log("catalog sole strip recovered",{batchId:batch.id,sourceImageId:source.id,pixels:resolved.soleStripRecovered});
             matte = resolved.matte;
             const fallback = matte.source === "floodfill", flags = [...new Set([...source.flags,...p.flags,...(fallback ? ["fallback_matte" as const]:[]),...(resolved.passthrough ? ["matte_passthrough" as const]:[]),...(resolved.busyBackground ? ["leftover_background" as const]:[])])];
             const records = [...(retry ? [retry]:[]),...resolved.actions];

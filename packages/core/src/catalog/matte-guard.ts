@@ -613,6 +613,88 @@ export function detectTextImage(p: Pick<Prepared, "width" | "height" | "rgb">): 
     glyphs, lines, largestShare: Math.round(largestShare * 1e4) / 1e4, glyphInkShare: Math.round(glyphInkShare * 1000) / 1000, pageShare: Math.round(pageShare * 1000) / 1000 };
 }
 
+/**
+ * Sole strip recovery (footwear). A thin strongly coloured strip along the bottom of a shoe (a lime midsole
+ * sliver between a black outsole and a white floor, 5 to 8 source px) is dropped in part by every deployed model:
+ * its lowest one to two rows fall into the model's soft edge or below it. Per column of the lower
+ * SOLE_STRIP_ZONE_SHARE of the matte, the run of strongly coloured source pixels (chroma at least
+ * SOLE_STRIP_CHROMA_MIN and at least SOLE_STRIP_SATURATION_MIN of the brightest channel) that starts right below
+ * the matte's lowest kept pixel (alpha over 128) and ends within SOLE_STRIP_DEPTH_PX of it is a strip candidate.
+ * The run must touch the kept matte and stops at the first pixel that is not strongly coloured, so a floor
+ * reflection (a pale copy of the sole under a light or grey gap row, eval run 3 M2) or a grey cast shadow is never
+ * reached. A connected group of candidates is recovered only when the matte drops (alpha at most GUARD_ALPHA_EDGE)
+ * at least SOLE_STRIP_MIN_DROPPED_PX of them and it spans at least SOLE_STRIP_MIN_SPAN_SHARE of the product width
+ * (a strip along the sole, not a coloured contact smudge): its runs become opaque, together with the soft kept pixels
+ * right above them (now inside the product). The run ends are smoothed across the group's columns (a moving average over
+ * SOLE_STRIP_SMOOTH_COLUMNS columns, clamped to each column's measured end so no pixel outside the coloured run is
+ * added, then lowered until neighbouring ends differ by at most 1 px) and the lower edge is drawn at that sub-pixel
+ * position: opaque above it and one antialiased pixel at it, so the edge shows no steps and is softened once.
+ */
+export const SOLE_STRIP_DEPTH_PX = 8;
+export const SOLE_STRIP_CHROMA_MIN = 60;
+export const SOLE_STRIP_SATURATION_MIN = 0.5;
+export const SOLE_STRIP_ZONE_SHARE = 0.4;
+export const SOLE_STRIP_MIN_DROPPED_PX = 20;
+export const SOLE_STRIP_MIN_SPAN_SHARE = 0.1;
+export const SOLE_STRIP_SMOOTH_COLUMNS = 5;
+
+export interface SoleStripRecovery { alpha: Buffer; /** Pixels whose alpha was raised. */ changed: number; /** Of those, pixels the matte had dropped. */ recovered: number }
+
+/** The matte with any dropped coloured sole strip given back (see SOLE_STRIP_DEPTH_PX); the input matte is not changed. */
+export function recoverSoleStrip(p: Pick<Prepared, "width" | "height" | "rgb">, alphaIn: Buffer): SoleStripRecovery {
+  const { width: w, height: h, rgb } = p, alpha = Buffer.from(alphaIn);
+  const strong = (i: number) => { const r = rgb[i * 3]!, g = rgb[i * 3 + 1]!, b = rgb[i * 3 + 2]!, hi = Math.max(r, g, b), c = hi - Math.min(r, g, b); return c >= SOLE_STRIP_CHROMA_MIN && c >= hi * SOLE_STRIP_SATURATION_MIN; };
+  let x0 = w, x1 = -1, y0 = h, y1 = -1;
+  for (let i = 0; i < alpha.length; i++) if (alpha[i]! > 128) { const x = i % w, y = (i - x) / w; if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y; }
+  if (y1 < 0) return { alpha, changed: 0, recovered: 0 };
+  const zoneTop = y1 - (y1 - y0 + 1) * SOLE_STRIP_ZONE_SHARE, run = new Uint8Array(w * h), bottom = new Int32Array(w).fill(-1);
+  for (let x = 0; x < w; x++) {
+    let yb = -1;
+    for (let y = y1; y >= 0; y--) if (alpha[y * w + x]! > 128) { yb = y; break; }
+    if (yb < zoneTop) continue;
+    bottom[x] = yb;
+    for (let y = yb + 1; y < h && y - yb <= SOLE_STRIP_DEPTH_PX && strong(y * w + x); y++) run[y * w + x] = 1;
+  }
+  const { labels, sizes } = components(run, w, h), dropped = new Uint32Array(sizes.length), left = new Int32Array(sizes.length).fill(w), right = new Int32Array(sizes.length).fill(-1);
+  for (let i = 0; i < run.length; i++) {
+    const l = labels[i]!; if (!l) continue;
+    const x = i % w; if (x < left[l]!) left[l] = x; if (x > right[l]!) right[l] = x;
+    if (alpha[i]! <= GUARD_ALPHA_EDGE) dropped[l]!++;
+  }
+  // A strip runs along the sole: it spans at least SOLE_STRIP_MIN_SPAN_SHARE of the product's width.
+  const minSpan = (x1 - x0 + 1) * SOLE_STRIP_MIN_SPAN_SHARE, strip = (l: number) => dropped[l]! >= SOLE_STRIP_MIN_DROPPED_PX && right[l]! - left[l]! + 1 >= minSpan;
+  let changed = 0, recovered = 0;
+  const raise = (i: number, to: number) => { if (alpha[i]! >= to) return; if (alpha[i]! <= GUARD_ALPHA_EDGE) recovered++; changed++; alpha[i] = to; };
+  // Per column of a recovered group: the measured run end (its last coloured row) and the group.
+  const group = new Int32Array(w), end = new Int32Array(w).fill(-1);
+  for (let x = 0; x < w; x++) {
+    const yb = bottom[x]!; if (yb < 0 || !run[(yb + 1) * w + x] || !strip(labels[(yb + 1) * w + x]!)) continue;
+    let last = yb + 1;
+    while (last + 1 < h && run[(last + 1) * w + x]) last++;
+    group[x] = labels[(yb + 1) * w + x]!; end[x] = last;
+  }
+  // Smooth the ends within each group of neighbouring columns: a moving average over SOLE_STRIP_SMOOTH_COLUMNS, clamped to
+  // the column's measured end (never past the coloured strip), then lowered until neighbours differ by at most 1 px.
+  const smooth = new Float64Array(w).fill(-1), half = SOLE_STRIP_SMOOTH_COLUMNS >> 1, same = (a: number, b: number) => end[a]! >= 0 && end[b]! >= 0 && group[a] === group[b];
+  for (let x = 0; x < w; x++) {
+    if (end[x]! < 0) continue;
+    let sum = 0, n = 0;
+    for (let k = Math.max(0, x - half); k <= Math.min(w - 1, x + half); k++) if (same(k, x)) { sum += end[k]!; n++; }
+    smooth[x] = Math.min(end[x]!, sum / n);
+  }
+  for (let x = 1; x < w; x++) if (same(x, x - 1)) smooth[x] = Math.min(smooth[x]!, smooth[x - 1]! + 1);
+  for (let x = w - 2; x >= 0; x--) if (same(x, x + 1)) smooth[x] = Math.min(smooth[x]!, smooth[x + 1]! + 1);
+  for (let x = 0; x < w; x++) {
+    const yb = bottom[x]!, e = smooth[x]!; if (end[x]! < 0 || e < yb + 1) continue;
+    // The kept pixels right above the run now lie inside the product (the strip is below them): opaque too, so the
+    // model's soft edge there leaves no see-through line between the outsole and the strip.
+    for (let y = yb; y > yb - SOLE_STRIP_DEPTH_PX && y >= 0 && alpha[y * w + x]! > 128 && alpha[y * w + x]! < 255; y--) raise(y * w + x, 255);
+    // Coverage of each run pixel by the smoothed edge at e + 1/2: opaque above it, one antialiased pixel at it.
+    for (let y = yb + 1; y <= end[x]!; y++) { const a = Math.round(255 * Math.max(0, Math.min(1, e + 0.5 - y))); if (a > GUARD_ALPHA_EDGE) raise(y * w + x, a); }
+  }
+  return { alpha, changed, recovered };
+}
+
 /** White border, as a share of the long side, around the photo for the ladder's padded matte. */
 export const GUARD_PAD_FRACTION = 0.2;
 /** The model mattes the ladder may ask for: the policy's second model, then the padded frame with the first and the second model. */
@@ -623,6 +705,8 @@ export interface ResolveMatteInput {
   first: Matte;
   /** The hand-notch rule (off for apparel, see checkMatteIntegrity). */
   handRule: boolean;
+  /** Footwear: the model matte that wins gets a dropped coloured sole strip back (recoverSoleStrip). */
+  soleStrip?: boolean;
   /** Makes one more matte; null when that model is not served, is the same as the first, or this run has no time left. */
   attempt: (variant: MatteVariant) => Promise<Matte | null>;
 }
@@ -638,6 +722,8 @@ export interface MatteResolution {
   busyBackground: boolean;
   /** One record per step taken, for the outputs' `compliance.auto_actions`; empty when the first matte was kept. */
   actions: AutoAction[];
+  /** Pixels recoverSoleStrip gave back to the winning model matte (0 when it did not run or found no strip). */
+  soleStripRecovered: number;
 }
 
 /**
@@ -648,17 +734,23 @@ export interface MatteResolution {
  * replaces a plain backdrop only: on a busy background (busyBorderShare) the photo is kept whole and held
  * (`busyBackground`). The judge's
  * `product_removed` names the same failure after the render, and its ladder ends in the same
- * pass-through step (auto-resolve.ts).
+ * pass-through step (auto-resolve.ts). For footwear (`soleStrip`) the winning model matte then gets a dropped
+ * coloured sole strip back (recoverSoleStrip); the check itself always sees the model's own matte.
  */
 export async function resolveMatte(input: ResolveMatteInput): Promise<MatteResolution> {
   const { prepared: p, first } = input, actions: AutoAction[] = [], trigger: OutputFlag[] = ["product_removed"];
   const record = (step: AutoAction["step"], result: AutoAction["result"], detail: string) => actions.push({ step, trigger: [...trigger], result, channels: [], rejudged: false, detail });
-  if (first.source !== "model") return { matte: first, passthrough: false, busyBackground: false, actions };
+  const won = (matte: Matte): MatteResolution => {
+    if (!input.soleStrip) return { matte, passthrough: false, busyBackground: false, actions, soleStripRecovered: 0 };
+    const strip = recoverSoleStrip(p, matte.alpha);
+    return { matte: strip.changed ? { ...matte, alpha: strip.alpha } : matte, passthrough: false, busyBackground: false, actions, soleStripRecovered: strip.recovered };
+  };
+  if (first.source !== "model") return { matte: first, passthrough: false, busyBackground: false, actions, soleStripRecovered: 0 };
   // Every matte tried is kept: skin or a panel one of them cut through or kept stays product in the pass-through.
   const region = backgroundRegion(p), tried: Matte[] = [];
   const check = (m: Matte) => { tried.push(m); return checkMatteIntegrity(p, m, { handRule: input.handRule, region }); };
   const verdict = check(first);
-  if (verdict.ok) return { matte: first, passthrough: false, busyBackground: false, actions };
+  if (verdict.ok) return won(first);
   record("matte_check", "failed", `${first.model}: ${verdict.detail}`);
   const steps: [AutoAction["step"], MatteVariant][] = [["second_matte", "second"], ["padded_matte", "padded_first"], ["padded_matte", "padded_second"]];
   for (const [step, variant] of steps) {
@@ -666,7 +758,7 @@ export async function resolveMatte(input: ResolveMatteInput): Promise<MatteResol
     if (!matte) { record(step, "skipped", `${variant}: not available`); continue; }
     const result = check(matte);
     record(step, result.ok ? "passed" : "failed", `${matte.model}${variant === "second" ? "" : " padded"}: ${result.detail}`);
-    if (result.ok) return { matte, passthrough: false, busyBackground: false, actions };
+    if (result.ok) return won(matte);
   }
   const pass = passthroughMatte(p, tried);
   // What the band pixels no cut-out kept look like (busyBorderReading), recorded so a hold can be read from the report.
@@ -675,8 +767,8 @@ export async function resolveMatte(input: ResolveMatteInput): Promise<MatteResol
   if (reading && reading.share > BUSY_BORDER_MAX_SHARE && reading.scenery) {
     // Trigger `leftover_background`: the code-detected hold (auto-resolve.ts busyBackgroundHold).
     actions.push({ step: "matte_passthrough", trigger: ["product_removed", "leftover_background"], result: "failed", channels: [], rejudged: false, detail: `busy background: ${band}, read as scenery; the whole photo is kept and held` });
-    return { matte: wholePhotoMatte(p, region), passthrough: false, busyBackground: true, actions };
+    return { matte: wholePhotoMatte(p, region), passthrough: false, busyBackground: true, actions, soleStripRecovered: 0 };
   }
   record("matte_passthrough", "passed", `no cut-out kept the product; the whole frame is used${band ? ` (${band}: one material or one plain colour, not scenery)` : ""}`);
-  return { matte: pass, passthrough: true, busyBackground: false, actions };
+  return { matte: pass, passthrough: true, busyBackground: false, actions, soleStripRecovered: 0 };
 }
