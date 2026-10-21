@@ -8,21 +8,14 @@ Rupees at INR 84 per USD, the default in infra/deploy.sh.
 
 ## Summary
 
-- Addressable: 3,754 softline options (16,358 SKUs) across 10 brands in master_sl, listed as about
-  20,500 option-channel pairs on 9 channels. Apparel (the 5-shot rule applies) is about 2,170 options.
-- B2 backlog is real but smaller than the meeting implied: 770 of 3,315 options matched on Trendyol
-  show fewer than 5 images (258 fewer than 4). US Polo has 529 options and 2,974 SKUs; "2,700 options
-  with 3 images" is the SKU count, and USPA already averages 5.3 to 5.9 listing images on Trendyol.
-- Direct cost saving is small in dollars: agency at INR 60 per style versus about INR 1 to 4 per style in
-  the catalog module is roughly INR 2.2 lakh (USD 2.6k) for the whole catalogue once, and about INR 1.9
-  lakh (USD 2.3k) a year at the planned inflow. The money is in revenue and channel eligibility, not cost.
-- Revenue uplift, base case about USD 0.21M a year on a softline base of about USD 9.2M trailing 12
-  months (low USD 0.05M, high USD 0.59M). Confidence is low: the warehouse cannot link image count to
-  sales (only 13% of Trendyol orders join to the listing report) and no public study isolates 3 vs 5 images.
-- Ranking by expected dollars: B2 (USD 0.11M base) > B1 (USD 0.09M base) > B3 (USD 0.01M base, Vero
-  Moda only; grows only if more flat-lay brands are found). B1 remains the prerequisite for both.
-- Biggest value not in the money model: the manual route makes about 1,300 images a year; the B2 backlog
-  alone is 1,540 images, so without the module most of it never gets done.
+- Addressable: 3,754 softline options (16,358 SKUs), about 20,500 option-channel pairs on 9 channels; apparel (5-shot rule) about 2,170.
+- B2 backlog: 770 of 3,315 options on Trendyol have fewer than 5 images (258 fewer than 4). USPA has 529 options and 2,974 SKUs; "2,700 options with 3 images" is the SKU count, and USPA already averages 5.3 to 5.9 images.
+- Cash saving is small: agency INR 60 per style vs INR 1 to 4 in the module is INR 2.2 lakh (USD 2.6k) once and INR 1.9 lakh (USD 2.3k) a year at planned inflow.
+- Generated images cost USD 0.20 each accepted (DD3): INR 3.5 per option on average for B2 (only 5 in 24 options need a generated head-to-toe), INR 84 per style for a B3 5-shot set.
+- Revenue uplift base about USD 0.21M a year on a softline base of about USD 9.2M trailing 12 months (low 0.05M, high 0.59M).
+- Confidence low: the warehouse cannot link image count to sales (13% of Trendyol orders join the listing report) and no public study isolates 3 vs 5 images.
+- Ranking by expected dollars: B2 (USD 0.11M base) > B1 (USD 0.09M) > B3 (USD 0.01M, Vero Moda only). B1 is the prerequisite and ships first.
+- Biggest value outside the money model: the manual route makes about 1,300 images a year; the B2 backlog alone is 1,540 images.
 
 ## Findings
 
@@ -152,8 +145,13 @@ section "Cost so far", infra/deploy.sh):
   under INR 0.5 per style. The UI's illustrative line reads "INR 3.80 per style so far". Working figure:
   INR 1 to 4 per style, exact per batch in the batch page cost line.
 - Derived crops (B2 first path): same compute path, effectively INR 0 extra.
-- Generated images (B2 second path, B3): placeholder below until DD3 reports exact generator prices; the
-  brief's working range is INR 3 to 12 per image plus verification, INR 15 to 60 per 5-shot style.
+- Generated images (B2 second path, B3), prices from DD3 (single generator through OpenRouter's Image
+  API): USD 0.10 per image at 2K, USD 0.15 at 4K, USD 0.20 per accepted image once regeneration retries
+  are counted (INR 8.4, 12.6 and 16.8). Fidelity checks on top use existing free tooling. The accepted-image
+  price is the one used below.
+- Which B2 roles need generation (DD2 sample of 24 options): role 3 fabric close-up missing in 7 of 24
+  and role 2 head-to-toe missing in 5 of 24. Fabric is derived by crop (about INR 0); head-to-toe cannot be
+  cropped from a shorter shot and is generated, so B2 generates on average 5/24 = 0.21 images per option.
 
 | Route | Per style | Source |
 |---|---|---|
@@ -161,8 +159,8 @@ section "Cost so far", infra/deploy.sh):
 | Manual ChatGPT | not priced; throughput 5 to 6 images a day | meeting |
 | Catalog module, existing photos (B1) | INR 1 to 4 | cost.ts, SPEC |
 | Catalog module, derived crops (B2 derive) | about INR 0 extra | cost.ts |
-| Generated 2 views (B2 generate) | INR 6 to 24 plus verification, PLACEHOLDER: refresh from DD3 | brief |
-| Generated 5-shot set (B3) | INR 15 to 60 plus verification, PLACEHOLDER: refresh from DD3 | brief |
+| Generated head-to-toe (B2 generate, the 5 in 24 options that need it) | INR 16.8 per accepted image; INR 3.5 per option averaged over the B2 population, plus INR 1 to 4 module cost | DD3, DD2 |
+| Generated 5-shot set (B3) | 5 x USD 0.20 = USD 1.00 = INR 84 per style (INR 42 at 2K list price, INR 63 at 4K, before retries), plus INR 1 to 4 module cost | DD3 |
 
 Annual cost saved, exact option counts, agency as the comparator (INR 60 minus INR 2 module cost):
 - B1, whole current catalogue once: 3,754 options x INR 58 = INR 217,700 (USD 2.6k). Ongoing at the
@@ -170,9 +168,12 @@ Annual cost saved, exact option counts, agency as the comparator (INR 60 minus I
   paid for template filling, the saving is a fraction of this (B6 deferred).
 - B2, 770 options x 2 images: the agency does not generate views, so the comparator is the manual route.
   1,540 images is more than a full year of the manual route's output; crop derivation costs about nothing
-  and generation INR 4,600 to 18,500 for the backlog (placeholder prices). The saving is capacity, not cash.
-- B3, Vero Moda 121 options x 5 images = 605 images (half a year of the manual route); module cost
-  INR 1,800 to 7,300 (placeholder prices).
+  (about 225 fabric crops at 7/24) and generation about 160 head-to-toe images at 5/24, USD 32 = INR 2,700
+  for the backlog at USD 0.20 per accepted image. The saving is capacity, not cash.
+- B3, Vero Moda 121 options x 5 images = 605 images (half a year of the manual route); generation USD 121
+  = INR 10,200 (INR 25,700 if the 306 Trendyol options are the true count). At INR 84 per style a generated
+  5-shot set costs more than the agency's INR 60, but the agency does not produce on-model shots from flat
+  lays at all, so there is no like-for-like saving; the comparison is against a studio shoot or nothing.
 - Program: cash saving about USD 2.5k to 5k a year. Too small to rank on; rank on revenue and eligibility.
 
 ### 4. Revenue base and uplift
@@ -257,9 +258,9 @@ to 5.
 | Bucket | Addressable (exact) | Cost saved a year | Revenue uplift low / base / high (USD a year) | Key assumptions | Confidence |
 |---|---|---|---|---|---|
 | B1 shot-list compliance | 3,754 options, 16,358 SKUs, about 20,500 option-channel pairs on 9 channels; apparel about 2,170 options | INR 2.2 lakh once for the catalogue, INR 1.9 lakh (USD 2.3k) a year at 3,350 new options; less if the agency still fills templates | 0 / 92k / 184k | one third of options have a defect B1 fixes; 3% conversion lift on them; traffic constant | low |
-| B2 fill the shot list | 770 options with fewer than 5 images (258 with fewer than 4), about 700 apparel; 1,540 images; about 530 apparel options absent from Centrepoint | manual route replaced: 1,540 images is more than a year of manual output; generation INR 4.6k to 18.5k for the backlog (PLACEHOLDER until DD3) | 42k / 106k / 318k (high includes 30k eligibility) | image count is a proxy for role coverage; revenue share proportional to option share; 5% lift base | low |
-| B3 flat lay to on-model | Vero Moda 121 master options (306 on Trendyol), 605 images; other flat-lay brands unknown | 605 manual images avoided; generation INR 1.8k to 7.3k (PLACEHOLDER until DD3) | 4k / 13k / 32k | 10% lift base on VM revenue of 126k; no public evidence for on-model vs flat lay | low |
-| PLACEHOLDER: DD3 exact generator prices | to be filled: INR per generated image, per verified 5-shot set, per 2-view fill, and the bake-off winner's price | recompute B2 and B3 cost rows | unchanged | | |
+| B2 fill the shot list | 770 options with fewer than 5 images (258 with fewer than 4), about 700 apparel; 1,540 images; about 530 apparel options absent from Centrepoint | manual route replaced: 1,540 images is more than a year of manual output; backlog generation about 160 images, INR 2.7k (USD 0.20 per accepted image), crops about INR 0; INR 3.5 per option on average | 42k / 106k / 318k (high includes 30k eligibility) | image count is a proxy for role coverage; revenue share proportional to option share; 5% lift base; DD2's 24-option sample sets the 5/24 generation share | low |
+| B3 flat lay to on-model | Vero Moda 121 master options (306 on Trendyol), 605 images; other flat-lay brands unknown | 605 manual images avoided; generation INR 84 per style, INR 10.2k for 121 options (INR 25.7k for 306) | 4k / 13k / 32k | 10% lift base on VM revenue of 126k; no public evidence for on-model vs flat lay | low |
+| DD3 generator prices (refreshed 2026-10-22) | USD 0.10 per image at 2K, 0.15 at 4K, 0.20 per accepted image with retries; one generator through OpenRouter's Image API; fidelity checks on free tooling | used in the B2 and B3 rows above | unchanged | retry rate as measured in DD3 | medium |
 | Program B1 to B3 | 3,754 options; 770 need fill; 121 need on-model | about USD 2.5k to 5k a year cash, plus the manual route's whole capacity | 46k / 211k / 564k | as above | low |
 
 Ranking by base-case dollars: B2, then B1, then B3. B1 is the prerequisite (the roles must be known
@@ -277,8 +278,9 @@ before anything can be filled), so the build order V1 B1, V2 B2, V3 B3 in the in
 4. Styli and Centrepoint blocks are proxied by absence from master_sl channel ids; no listing status feed
    exists for either channel. Low.
 5. Costs: agency INR 60 is the meeting figure, unverified by any invoice; module cost from measured batch
-   b489e466 and list prices; generator prices are placeholders from the brief until DD3. Cost figures
-   medium, generator placeholders low.
+   b489e466 and list prices; generator prices from DD3 (USD 0.20 per accepted image, retries included) and
+   the B2 generation share from DD2's 24-option sample (5 of 24 need a generated head-to-toe). Cost
+   figures medium; the 5/24 share is a small sample, low.
 6. Revenue base: gross listing price, trailing 12 months, warehouse transfers excluded; about 1.3M USD of
    softline-channel rows carry no brand. Medium for the total, low per brand on Trendyol, Centrepoint, Styli.
 7. Uplift lifts are judgment anchored on eBay 2014 and Profitero 2023; nothing in our data confirms them.
@@ -307,7 +309,10 @@ or more images.
 
 What it costs today and tomorrow: the agency charges INR 60 per style; the catalog module runs at about
 INR 1 to 4 per style. Across the whole catalogue that is a saving of roughly INR 2 lakh once and about
-INR 2 lakh a year, which is small. The real constraint is capacity: making images by hand yields about
+INR 2 lakh a year, which is small. Generated images cost about INR 17 each once retries are counted: filling
+the gaps (B2) adds about INR 3.5 per style on average, and a full five-shot on-model set from a flat lay
+(B3) about INR 84 per style, which no agency or manual route offers at any price today. The real
+constraint is capacity: making images by hand yields about
 1,300 images a year, and the B2 backlog alone is 1,540 images. Without the module, most of it will not
 get done.
 
