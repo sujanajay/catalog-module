@@ -215,3 +215,52 @@ The test used Test Brand batches `8af822a4`, `706e67b4` and `e19b20f9`. One prob
 the test was fixed: an upload could get stuck at "Collecting files 0 of ?". Now the tool tries
 again by itself, and a batch stuck for 10 minutes shows a "Try again" button. Screenshots of each
 flow are kept with the test records.
+
+## 17. How long a large batch takes
+
+Measured on the live site on 2026-10-21 with a test brand: 270 products with 1,258 photos on 4
+marketplaces (Noon, Namshi, Trendyol, Amazon) took 43 minutes from Start to the end of the batch.
+That is 5,032 pictures, about 110 finished pictures a minute, or about 6 products a minute.
+
+- 255 products went straight into the sheet. 15 products waited in "Needs attention": 13 photos
+  whose background could not be removed, and 9 photos the quality check could not run on.
+- Every link was checked again afterwards by a separate check: 4,744 of 4,744 opened.
+- More marketplaces mean more pictures. The same 270 products on all 9 marketplaces is about
+  11,300 pictures; expect roughly 1 hour 45 minutes (an estimate, not measured).
+- Cost: about INR 0.30 (USD 0.0036) per product for the quality check and the image work, so
+  about INR 82 for the whole batch of 270, against the INR 60 per product the agency charged.
+
+While a batch this size runs, do not start other batches and ask others not to use the site. The
+tool shares its machines and its database between all batches, so a second batch waits behind the
+first and pages can load slowly. Start large batches when nobody else needs the site.
+
+The quality checker is an outside service and sometimes says "too busy, try later". In this run
+that happened on about 1 check in 30. Most of those checks were simply tried again and passed; 4
+photos ended up in "Needs attention" with "The quality check could not read this image." Since the
+update of 2026-10-21 the tool waits and tries again, then asks a second checker, and only then
+holds the photo for you. So expect fewer of these cards. When you see one, look at the picture
+yourself; "Use as is" keeps it.
+
+## 18. What changed on 2026-10-21
+
+The live site was updated twice on 2026-10-21. What you may notice:
+
+- Enlarged pictures are sharper. When a small photo has to be made bigger for a marketplace, the
+  edges of the product are now sharpened as well, also on photos whose background was removed.
+- Size charts with coloured tables are left out. A size chart printed on a tinted or coloured table
+  is now recognised as a chart and is not used as a product picture, like plain size charts.
+- Faint, see-through cut-outs are rejected. If removing the background leaves the product looking
+  washed out or see-through, the tool tries another way. If the product would lose part of
+  itself, the photo waits in "Needs attention" instead of being published torn.
+- Sole edges on shoes are cleaner. A thin coloured strip that sometimes showed along the sole is
+  now removed with a soft edge.
+- When the quality checker is busy, the tool now waits and tries again, then asks a second
+  checker, and only then holds the photo for you (see section 17). The note on the card now
+  names the photo by the same number you see on the sheet.
+
+Some photos are still held on purpose. For example, a product on a plain studio backdrop of almost
+the same colour can lose part of itself when the background is removed; the tool holds it so a
+broken picture is never published. Look at it and choose what to do as in section 7.
+
+On a busy day the check that tells what kind of product a photo shows can fail quietly; the tool then
+uses its general rules for that product, and a later update will show this as a note on the card.
