@@ -89,7 +89,8 @@ describe("batch copy for the real state of the batch", () => {
     expect(text(renderToStaticMarkup(createElement(BatchBanner, { status: "done", counts, keptPhotos: 2 })))).toBe("ReadyAll 12 images are live. 2 photos were kept as is after a decision; everything else passed every check. Nothing needs your attention.");
     expect(text(renderToStaticMarkup(createElement(BatchBanner, { status: "done", counts })))).toContain("passed every check. Nothing needs your attention.");
     const skipped = { ...counts, outputs: 15, skipped: 5, verified: 10, recheckOk: 10, recheckTotal: 10 };
-    expect(text(renderToStaticMarkup(createElement(BatchBanner, { status: "done", counts: skipped })))).toBe("ReadyAll 10 images are live and passed every check. 5 Styli images were not made because the photos are too small for Styli even after enlargement (see the notes column).");
+    expect(text(renderToStaticMarkup(createElement(BatchBanner, { status: "done", counts: skipped })))).toBe("ReadyAll 10 images are live and passed every check. Nothing needs your attention.");
+    expect(text(renderToStaticMarkup(createElement(BatchBanner, { status: "done", counts: skipped, styliSkipped: 5 })))).toBe("ReadyAll 10 images are live and passed every check. 5 Styli images were not made because the photos are too small for Styli even after enlargement (see the notes column).");
     expect(readyText(10, 1, 1)).toBe("All 10 images are live. 1 photo was kept as is after a decision; everything else passed every check. 1 Styli image was not made because the photo is too small for Styli even after enlargement (see the notes column).");
   });
   it("shows the server's time left in the processing banner, the same on every reload", () => {

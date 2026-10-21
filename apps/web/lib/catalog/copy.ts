@@ -40,9 +40,9 @@ export function estimateText(estimate: CostEstimate | null | undefined): string 
  * The Ready banner for a batch where an operator kept flagged photos with "Use as is" (spec 07 4.7:
  * those photos are live "kept as is"); the plain "passed every check" sentence would be untrue then.
  */
-export function readyText(images: number, keptPhotos: number, skipped = 0): string {
+export function readyText(images: number, keptPhotos: number, styliSkipped = 0): string {
   const live = `All ${count(images)} ${plural(images, "image is", "images are")} live`;
-  const tail = skipped > 0 ? styliSkipText(skipped) : "Nothing needs your attention.";
+  const tail = styliSkipped > 0 ? styliSkipText(styliSkipped) : "Nothing needs your attention.";
   if (keptPhotos <= 0) return `${live} and passed every check. ${tail}`;
   return `${live}. ${count(keptPhotos)} ${plural(keptPhotos, "photo was", "photos were")} kept as is after a decision; everything else passed every check. ${tail}`;
 }

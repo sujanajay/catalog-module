@@ -5,10 +5,10 @@ import { readyText } from "../../lib/catalog/copy";
  * The time left is worked out on the server from startedAt and the made count (the page passes its
  * render time as `now`), so it is the same on every reload and the page auto-refresh keeps it current.
  */
-export default function BatchBanner({status, counts, source, updatedAt, startedAt, now, keptPhotos = 0}: {status:BatchStatus;counts:BatchCounts;source?:string;updatedAt?:string;startedAt?:string|null;now?:string;keptPhotos?:number}) {
-  const derived = deriveBatchState({status, counts, source, updatedAt, startedAt, now: now ? new Date(now) : undefined});
+export default function BatchBanner({status, counts, source, updatedAt, startedAt, now, keptPhotos = 0, styliSkipped = 0}: {status:BatchStatus;counts:BatchCounts;source?:string;updatedAt?:string;startedAt?:string|null;now?:string;keptPhotos?:number;styliSkipped?:number}) {
+  const derived = deriveBatchState({status, counts, source, updatedAt, startedAt, now: now ? new Date(now) : undefined, styliSkipped});
   // A batch finished with "Use as is" decisions is Ready, but not every image passed every check.
-  const state = derived.state === "ready" && keptPhotos > 0 ? {...derived, text: readyText(counts.outputs - counts.skipped, keptPhotos, counts.skipped)} : derived;
+  const state = derived.state === "ready" && keptPhotos > 0 ? {...derived, text: readyText(counts.outputs - counts.skipped, keptPhotos, styliSkipped)} : derived;
   const tone = state.state === "ready" ? "ok" : state.state === "failed" ? "bad" : ["attention","recheck_failed"].includes(state.state) || state.stalled ? "warn" : "run";
   return <div className="banner" role="status"><span className={`pill ${tone}`}>{state.pill}</span>{state.state === "processing" && <progress aria-label="Images made" value={state.made} max={Math.max(1,state.total)} />}<span>{state.text}</span></div>;
 }

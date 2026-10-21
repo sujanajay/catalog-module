@@ -59,7 +59,10 @@ describe("processing banner time left",()=>{
   });
 });
 it("names the Styli images that were not made in the Ready banner",()=>{
-  const ready=(skipped:number)=>deriveBatchState({status:"done",counts:{...EMPTY_BATCH_COUNTS,outputs:10+skipped,verified:10,skipped,recheckOk:10,recheckTotal:10}});
+  const ready=(skipped:number,styliSkipped=skipped)=>deriveBatchState({status:"done",counts:{...EMPTY_BATCH_COUNTS,outputs:10+skipped,verified:10,skipped,recheckOk:10,recheckTotal:10},styliSkipped});
+  // A removed, replaced or size-chart skip is in counts.skipped too, but is not a Styli skip.
+  expect(ready(2,0).text).toBe("All 10 images are live and passed every check. Nothing needs your attention.");
+  expect(ready(3,1).text).toBe("All 10 images are live and passed every check. 1 Styli image was not made because the photo is too small for Styli even after enlargement (see the notes column).");
   expect(ready(5)).toMatchObject({state:"ready",text:"All 10 images are live and passed every check. 5 Styli images were not made because the photos are too small for Styli even after enlargement (see the notes column)."});
   expect(ready(1).text).toContain("1 Styli image was not made because the photo is too small for Styli");
   expect(ready(0).text).toBe("All 10 images are live and passed every check. Nothing needs your attention.");

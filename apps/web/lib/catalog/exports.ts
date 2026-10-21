@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { and, eq, inArray } from "drizzle-orm";
+import { and, eq, inArray, like } from "drizzle-orm";
 import { catalogBatches, catalogBatchProducts, catalogOutputs, catalogProducts, catalogSourceImages, catalogUploads } from "@catalog/core/db/schema";
 import { brandExportPath } from "@catalog/core/catalog/naming";
 import { CHANNEL_IDS, type ChannelId, type ChangeKind, type SheetStatus } from "@catalog/core/catalog/types";
@@ -12,6 +12,7 @@ import { channel } from "@catalog/core/catalog/channels";
 import { readSheetTable } from "@catalog/core/catalog/ingest/links-sheet";
 import { batchSheetStatus, notRefreshedChannels as readNotRefreshedChannels } from "@catalog/core/catalog/pipeline/report";
 import { withoutModelNames } from "./redact";
+import { STYLI_SKIP_NOTE } from "@catalog/core/catalog/evals/completeness";
 
 export async function batchExportUrl(id: string, format: string, conn: Db = db(), storage = { signedUrl, downloadBuffer }) {
   const [batch] = await conn.select().from(catalogBatches).where(eq(catalogBatches.id, id));
@@ -120,11 +121,14 @@ export async function exportBrand(slug: string, productIds: string[], conn: Db =
 export async function batchDetails(id: string, conn: Db = db(), read = downloadBuffer) {
   const [batch] = await conn.select().from(catalogBatches).where(eq(catalogBatches.id, id));
   if (!batch) throw new HttpError(404, "This batch was not found. Return to All batches.");
-  const [uploads, failures, sheet, kept] = await Promise.all([
+  const [uploads, failures, sheet, kept, styliSkips] = await Promise.all([
     conn.select({ kind: catalogUploads.kind, detected: catalogUploads.detected }).from(catalogUploads).where(eq(catalogUploads.batchId, id)),
     conn.select({ n: catalogOutputs.n, originalName: catalogSourceImages.originalName, channel: catalogOutputs.channel, reason: catalogOutputs.reason, error: catalogOutputs.error }).from(catalogOutputs).innerJoin(catalogSourceImages, eq(catalogSourceImages.id,catalogOutputs.sourceImageId)).where(and(eq(catalogOutputs.batchId, id), eq(catalogOutputs.status, "failed"))),
     batchSheet(id, conn, read),
     conn.select({ sourceImageId: catalogOutputs.sourceImageId }).from(catalogOutputs).where(and(eq(catalogOutputs.batchId, id), eq(catalogOutputs.decision, "use_as_is"))),
+    // Styli outputs left out as too small, for the Ready line; counts.skipped also holds removed, replaced and chart skips.
+    // The render can join other notes onto the skip note, so it is matched anywhere in the reason.
+    conn.select({ id: catalogOutputs.id }).from(catalogOutputs).where(and(eq(catalogOutputs.batchId, id), eq(catalogOutputs.channel, "styli"), eq(catalogOutputs.status, "skipped"), like(catalogOutputs.reason, `%${STYLI_SKIP_NOTE}%`))),
   ]);
   // Photos an operator kept with "Use as is": the Ready line must not claim they passed every check.
   const keptPhotos = new Set(kept.map((k) => k.sourceImageId)).size;
@@ -136,5 +140,5 @@ export async function batchDetails(id: string, conn: Db = db(), read = downloadB
     recheckFailures = withoutModelNames(report.recheck?.failures ?? []);
     filled = !!report.exports?.filledProductList;
   }
-  return { batch, sheet, failures, recheckFailures, notRefreshedChannels, filled, uploads, keptPhotos };
+  return { batch, sheet, failures, recheckFailures, notRefreshedChannels, filled, uploads, keptPhotos, styliSkipped: styliSkips.length };
 }

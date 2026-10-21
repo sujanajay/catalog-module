@@ -36,7 +36,10 @@ export function waitText(images: number): string {
 export const ANOTHER_BATCH_RUNNING = "Another batch is running; yours may wait behind it.";
 export const CLOSE_PAGE_TEXT = "You can close this page and come back; nothing stops.";
 export const STARTING_SERVICES_TEXT = "Starting the image services. The first pictures usually take a minute or two on the first batch after a quiet spell.";
-/** The Ready clause for Styli pairs that were not made (spec 07 R8): the banner must not hide them. */
+/**
+ * The Ready clause for Styli pairs not made because the photo is too small (spec 07 R8): the banner must
+ * not hide them. Its count is only those Styli skips, never removed, replaced or size-chart skips.
+ */
 export function styliSkipText(skipped: number): string {
   return `${skipped} Styli ${plural(skipped, "image was", "images were")} not made because the ${plural(skipped, "photo is", "photos are")} too small for Styli even after enlargement (see the notes column).`;
 }
@@ -55,7 +58,7 @@ export function timeLeftText(input: { planned: number; done: number; startedAt: 
   const perMinute = input.done / Math.max(elapsedMin, 1 / 60);
   return `about ${Math.max(1, Math.ceil((input.planned - input.done) / perMinute))} min left`;
 }
-export function deriveBatchState(input: { status: BatchStatus; counts: BatchCounts; source?: string; samples?: { at: Date; made: number }[]; now?: Date; updatedAt?: Date | string; startedAt?: Date | string | null }): BatchState {
+export function deriveBatchState(input: { status: BatchStatus; counts: BatchCounts; source?: string; samples?: { at: Date; made: number }[]; now?: Date; updatedAt?: Date | string; startedAt?: Date | string | null; /** Styli outputs skipped as too small; counts.skipped also holds removed and chart skips. */ styliSkipped?: number }): BatchState {
   const { status, counts: c } = input;
   const made = Math.min(c.outputs,Number((c as BatchCounts & {staged?:number}).staged ?? 0) + c.verified + c.needsAttention + c.failed + c.skipped + c.unchanged);
   const result: BatchState = { state: "draft", pill: "Draft", text: "Check what we found and start processing.", made, total: c.outputs, progress: c.outputs ? Math.min(1, made / c.outputs) : 0, eta: null, listPill: "Draft" };
@@ -79,7 +82,7 @@ export function deriveBatchState(input: { status: BatchStatus; counts: BatchCoun
     const capped = (c as BatchCounts & { qaCapped?: boolean }).qaCapped ? ` ${QA_CAP_BANNER}` : "";
     if (c.attentionProducts > 0) return { ...result, state: "attention", pill: `${c.attentionProducts} ${plural(c.attentionProducts, "product needs", "products need")} your attention`, listPill: `Needs attention (${c.attentionProducts} ${plural(c.attentionProducts, "product", "products")})`, text: `Everything else is done and in the sheet. Decide now or download the sheet as it is; each decision updates the sheet.${capped}` };
     const planned = c.outputs - c.skipped;
-    if (c.verified === planned && c.recheckOk !== null && c.recheckTotal !== null && c.recheckOk === c.recheckTotal) return { ...result, state: "ready", pill: "Ready", listPill: "Ready to download", text: `All ${planned} ${plural(planned, "image is", "images are")} live and passed every check. ${c.skipped > 0 ? styliSkipText(c.skipped) : "Nothing needs your attention."}` };
+    if (c.verified === planned && c.recheckOk !== null && c.recheckTotal !== null && c.recheckOk === c.recheckTotal) return { ...result, state: "ready", pill: "Ready", listPill: "Ready to download", text: `All ${planned} ${plural(planned, "image is", "images are")} live and passed every check. ${(input.styliSkipped ?? 0) > 0 ? styliSkipText(input.styliSkipped!) : "Nothing needs your attention."}` };
     const bad = Math.max(planned - c.verified, (c.recheckTotal ?? planned) - (c.recheckOk ?? 0));
     return { ...result, state: "recheck_failed", pill: `${bad} ${plural(bad, "link", "links")} did not pass the independent re-check`, listPill: `${bad} ${plural(bad, "link needs", "links need")} a check`, text: `The sheet is ready but ${bad} ${plural(bad, "link", "links")} did not pass the independent re-check. See Details before sharing it.` };
   }
