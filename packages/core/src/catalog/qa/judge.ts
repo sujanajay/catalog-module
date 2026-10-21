@@ -187,10 +187,34 @@ export const CHART_VIEW = "chart";
  */
 const PLACE = /\b(left|right|top|bottom|corner|corners|edge|edges|above|below|behind|under|underneath|beneath|beside|next to|near|around|between|centre|center|middle|side|sides|upper|lower|outline|border)\b/i;
 export const namesPlace = (sentence: string | undefined) => !!sentence && PLACE.test(sentence);
-function readOpinion(value: Record<string, unknown>, model: string, hasReference: boolean): JudgeOpinion & {missing: string[]} {
+/**
+ * What each prompt image is on the operator's sheet: image 1 is the product's photo `n`, image 2 our
+ * output rendered from it, image 3 (when sent) the product's photo 1.
+ */
+export function sheetNames(n: number, hasReference: boolean): Record<number, string> {
+  const names: Record<number, string> = {1:`photo ${n}`, 2:"the output"};
+  if (hasReference) names[3] = "photo 1";
+  return names;
+}
+/**
+ * The judge numbers images as the prompt orders them (the photo first, the reference last); the
+ * operator reads the sheet. Rewrite each "image N" through `names`; a number outside it, or a
+ * sentence without one, is left as is.
+ */
+export function sheetNumbered(sentence: string, names: Record<number, string>): string {
+  return sentence.replace(/\b(?:(the)\s+)?(image)\s+(\d+)\b/gi, (match, the: string | undefined, word: string, digits: string) => {
+    const name = names[Number(digits)];
+    if (!name) return match;
+    const lead = the ?? word;
+    const upper = lead[0] === lead[0]!.toUpperCase();
+    const text = the && !name.startsWith("the ") ? `the ${name}` : name;
+    return upper ? text[0]!.toUpperCase() + text.slice(1) : text;
+  });
+}
+function readOpinion(value: Record<string, unknown>, model: string, hasReference: boolean, names: Record<number, string>): JudgeOpinion & {missing: string[]} {
   const {scores, reasons: missing} = normalizeScores({...value, same_product: undefined});
   const raw = value.evidence && typeof value.evidence === "object" && !Array.isArray(value.evidence) ? value.evidence as Record<string, unknown> : {};
-  const evidence = Object.fromEntries(Object.entries(raw).filter((entry): entry is [string, string] => typeof entry[1] === "string" && !!entry[1].trim()).map(([k, v]) => [k, v.trim()]));
+  const evidence = Object.fromEntries(Object.entries(raw).filter((entry): entry is [string, string] => typeof entry[1] === "string" && !!entry[1].trim()).map(([k, v]) => [k, sheetNumbered(v.trim(), names)]));
   const view = typeof value.view === "string" && (VIEWS as readonly string[]).includes(value.view.trim().toLowerCase()) ? value.view.trim().toLowerCase() : null;
   // Without image 3 there is nothing to compare with, so the photo is never a different item; a chart
   // belongs to the listing, so it is never a different item either.
@@ -216,12 +240,13 @@ async function askJudge(input: JudgeInput, model: string, deps: CatalogLlmDeps) 
   }, model, deps);
 }
 /** Older replies carry a `reasons` array instead of `evidence`; keep them in their order. */
-function legacyReasons(value: Record<string, unknown>): string[] {
-  return Array.isArray(value.reasons) ? value.reasons.filter((r): r is string => typeof r === "string" && !!r.trim()).map(r => r.trim()) : [];
+function legacyReasons(value: Record<string, unknown>, names: Record<number, string>): string[] {
+  return Array.isArray(value.reasons) ? value.reasons.filter((r): r is string => typeof r === "string" && !!r.trim()).map(r => sheetNumbered(r.trim(), names)) : [];
 }
 const allPass = (): Record<QaDimension, number> => Object.fromEntries(QA_DIMENSIONS.map(d => [d, 100])) as Record<QaDimension, number>;
 export async function judgeOutput(input: JudgeInput, deps: CatalogLlmDeps = {}): Promise<JudgeResult> {
   const hasReference = input.n > 1 && !!input.shotOne;
+  const names = sheetNames(input.n, hasReference);
   const thresholds = dimensionThresholds(input.threshold, input.floor);
   const budgets = [{remainingMs:JUDGE_BACKOFF_BUDGET_MS}, ...(deps.backoff ? [deps.backoff] : [])];
   const withRetry = (model: string, delaysMs?: readonly number[]): CatalogLlmDeps => ({...deps, retry:judgeRetry(model, budgets, deps, delaysMs)});
@@ -242,7 +267,7 @@ export async function judgeOutput(input: JudgeInput, deps: CatalogLlmDeps = {}):
     const {usage, costUsd, calls} = first;
     return {scores:normalizeScores({}).scores,verdict:"flag",reasons:[flagDetails("qa_unavailable").why],isCollage:false,usage,costUsd,calls,model:input.model,flags:["qa_unavailable"],thresholds,opinions:[]};
   }
-  const opinion = readOpinion(first.value, judgeModel, hasReference);
+  const opinion = readOpinion(first.value, judgeModel, hasReference, names);
   const opinions: JudgeOpinion[] = [opinion];
   // A size chart or text-only image is left out with a note: no product check applies to it.
   if (opinion.view === CHART_VIEW) {
@@ -260,7 +285,7 @@ export async function judgeOutput(input: JudgeInput, deps: CatalogLlmDeps = {}):
   if ((wrongFirst || located) && otherModel) {
     const reply = await askJudge(input, otherModel, withRetry(otherModel));
     usages.push(reply.usage); costUsd += reply.costUsd; calls += reply.calls;
-    if (reply.value) { other = readOpinion(reply.value, otherModel, hasReference); opinions.push(other); }
+    if (reply.value) { other = readOpinion(reply.value, otherModel, hasReference, names); opinions.push(other); }
   }
   const secondWrong = wrongFirst && other ? other.wrongItem : null;
   const confirmed = wrongFirst && secondWrong === true;
@@ -277,7 +302,7 @@ export async function judgeOutput(input: JudgeInput, deps: CatalogLlmDeps = {}):
   const evidence: Partial<Record<OutputFlag, string>> = {};
   for (const d of failing) evidence[DIMENSION_FLAGS[d]] = (d === "same_product" ? opinion.evidence.wrong_item : opinion.evidence[d]) ?? flagDetails(DIMENSION_FLAGS[d]).why;
   if (opinion.isCollage) evidence.collage = opinion.evidence.is_collage ?? flagDetails("collage").why;
-  const legacy = legacyReasons(first.value);
+  const legacy = legacyReasons(first.value, names);
   const reasons = [...(legacy.length ? legacy : flags.map(flag => evidence[flag]!)), ...opinion.missing];
   const secondModel = otherModel ?? null;
   return {scores,verdict:flags.length ? "flag" : "pass",reasons,isCollage:opinion.isCollage,usage:sumUsage(usages),costUsd,calls,model:judgeModel,flags,view:opinion.view,thresholds,evidence,
