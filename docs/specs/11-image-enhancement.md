@@ -113,8 +113,10 @@ image API (section 10); the judge prompt.
 
 ### 4.3 Workstream C: render integration (`upscale.ts`, `render.ts`, `chunk.ts`, `deps.ts`)
 
-- Worker env `UPSCALE_MODEL` (model id; unset = off, the default) and `UPSCALE_MIN_SCALE` (default
-  1.5). When a photo must be enlarged by more than `UPSCALE_MIN_SCALE` on a channel (today only the
+- Worker env `UPSCALE_MODEL` (model id; unset or empty in the service env = off) and `UPSCALE_MIN_SCALE`
+  (default 1.5). `infra/deploy.sh` sets it to `swinir-x2` by default since 2026-10-21 (owner decision);
+  `UPSCALE_MODEL=off` in the deploy environment leaves it unset, which turns the upscaler off. The model id
+  is engineering config only and never appears in UI copy. When a photo must be enlarged by more than `UPSCALE_MIN_SCALE` on a channel (today only the
   exact-size channels such as Trendyol 1200x1800 from 800x1200 sources; variable-size canvases are
   capped at 1.5x so they never trigger it, except the case where even the minimum canvas needs more,
   which already carries `low_resolution` and follows the same rule), the render upscales the RGB
@@ -228,7 +230,7 @@ passes. Model ids appear in the JSON and HTML report and the job log only.
 
 | Name | Default | Used by |
 |---|---|---|
-| `UPSCALE_MODEL` | unset (off) | worker, catalog-local, deploy.sh pass-through |
+| `UPSCALE_MODEL` | `swinir-x2` from deploy.sh (`off` leaves it unset = off; unset in the service env = off) | worker, web (Styli threshold), jobs, catalog-local, deploy.sh |
 | `UPSCALE_MIN_SCALE` | `1.5` | worker, catalog-local |
 | `UPSCALE_TIMEOUT_MS` | `60000` | worker |
 | `UPSCALE_MODELS` | `realesrgan-x2plus,swinir-x2` | matting (gpu target only) |

@@ -509,8 +509,7 @@ export async function renderSource(input: RenderInput): Promise<RenderOutput> {
     // Styli judges the size after the x2 upscaler when one is configured (owner decision 2026-10-21): skipped only
     // when even the x2 photo would need more than MAX_UPSCALE. A photo let through here is made even if the upscale
     // call then fails (the plain path below), with low_resolution and the soft note.
-    const remaining = minimumFit(spec, box, cut, geometry?.trimRoom) / (input.upscaler ? UPSCALE_FACTOR : 1);
-    if (spec.id === "styli" && STYLI_SKIP_LOW_RESOLUTION && remaining > MAX_UPSCALE) { result.status = "skipped"; result.notes.push("Skipped for Styli: the photo is smaller than Styli needs."); return result; }
+    if (spec.id === "styli" && STYLI_SKIP_LOW_RESOLUTION && minimumFit(spec, box, cut, geometry?.trimRoom) / (input.upscaler ? UPSCALE_FACTOR : 1) > MAX_UPSCALE) { result.status = "skipped"; result.notes.push("Skipped for Styli: the photo is smaller than Styli needs."); return result; }
     const min = spec.minCanvas, target = spec.targetCanvas;
     // A fixed canvas (Trendyol 1200 x 1800, minimum 600 x 800; Centrepoint) is the size we deliver, not a minimum the
     // photo missed (spec 11 4.1): say what we deliver and that the photo was enlarged. Same words in qa/reasons.ts and

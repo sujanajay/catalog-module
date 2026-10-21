@@ -26,6 +26,13 @@ function completenessWorld() {
 }
 
 describe("completeness", () => {
+  it("expects a Styli skip under 1482 px without the upscaler and under 741 px with it", () => {
+    const s = (height: number) => ({ identifier: "A", n: 1, width: 800, height });
+    expect(expectedOutcome(s(1200), "styli", 1)).toBe("skip");
+    expect(expectedOutcome(s(1200), "styli", 2)).toBe("output");
+    expect(expectedOutcome(s(600), "styli", 2)).toBe("skip");
+    expect(expectedOutcome(s(600), "noon", 2)).toBe("output");
+  });
   it("expects one live output per source and channel, Styli skips only under the minimum, and every Amazon shot", () => {
     const results = checkCompleteness(completenessWorld());
     expect(failed(results)).toEqual([]);
