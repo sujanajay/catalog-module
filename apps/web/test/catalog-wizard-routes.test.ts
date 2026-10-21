@@ -134,7 +134,10 @@ describe("catalog wizard authorization and contracts",()=>{
     await runIngest(db,{storage,fetch:vi.fn(()=>{throw new Error("Should not fetch again");}),enqueue:enqueueTask},{batchId:id,uploadId:photo.id});
     expect((await patch(request("PATCH",{channels:["noon","styli"]}),ctx(id))).status).toBe(200);
     const shown=await (await preview(request("GET"),ctx(id))).json();expect(shown.ready).toBe(true);expect(shown.estimate).toBeNull();expect(shown.groupedBy).toBe("Grouped by folder name");expect(shown.groups[0].files[0]).toMatchObject({n:1,originalName:"ABC123/ABC123_1.heic",width:1200,height:1600});expect(shown.groups[0].firstPhotoUrl).toContain("thumb.example");expect(shown.counts.outputs).toBe(2);
+    const info=vi.spyOn(console,"info").mockImplementation(()=>{});
     const response=await start(request("POST",{previewAt:shown.previewAt}),ctx(id));expect(response.status).toBe(200);expect(await response.json()).toMatchObject({id,status:"matting"});
+    const lines=info.mock.calls.map(([line])=>{try{return JSON.parse(String(line)) as Record<string,unknown>;}catch{return {};}});info.mockRestore();
+    expect(lines.filter(l=>l.message==="batch started")).toEqual([expect.objectContaining({severity:"INFO",batchId:id,products:1,sources:1,outputs:2,chunks:1,"logging.googleapis.com/labels":{app:"catalog",batchId:id}})]);
     const chunks=(await db.select().from(catalogChunks)).filter((c)=>c.batchId===id);expect(chunks).toHaveLength(1);expect(chunks[0]).toMatchObject({stage:"matte",status:"queued"});expect(enqueueTask).toHaveBeenCalledWith("/tasks/catalog/chunk",{chunkId:chunks[0]!.id},{taskId:`chunk-${chunks[0]!.id}-matte`});
     expect((await patch(request("PATCH",{channels:["amazon"]}),ctx(id))).status).toBe(409);
     expect((await upload(request("POST",{files:[]}),ctx(id))).status).toBe(409);
@@ -190,10 +193,14 @@ describe("catalog wizard authorization and contracts",()=>{
   });
   it("records the plain no-photos failure and returns it from Start",async()=>{
     const id=await newBatch();
+    const logged=vi.spyOn(console,"error").mockImplementation(()=>{});
     const [plan]=await (await upload(request("POST",{files:[{name:"EMPTY_1.bmp",relativePath:"EMPTY_1.bmp",size:54,mime:"image/bmp"}]}),ctx(id))).json();
     const stored=(await db.select().from(catalogUploads)).find((u)=>u.id===plan.uploadId)!;const bmp=Buffer.alloc(54);bmp.write("BM");objects.set(stored.gcsUri!,{buf:bmp,mime:"image/bmp"});
     expect((await complete(request("POST"),ctx(id,stored.id))).status).toBe(200);await collectBatch(id);
     const shown=await (await preview(request("GET"),ctx(id))).json();expect(shown.counts.failReason).toContain("No photos were found");
+    // Log contract: the failed-status write logs "batch failed" at ERROR with the reason.
+    const failed=logged.mock.calls.map(([line])=>{try{return JSON.parse(String(line)) as Record<string,unknown>;}catch{return {};}}).filter(l=>l.message==="batch failed");logged.mockRestore();
+    expect(failed).toEqual([expect.objectContaining({severity:"ERROR",batchId:id,reason:shown.counts.failReason,cause:"no_photos"})]);
     const refused=await start(request("POST",{previewAt:shown.previewAt}),ctx(id));expect(refused.status).toBe(400);expect((await refused.json()).error).toContain("No photos were found");
     expect((await (await get(request("GET"),ctx(id))).json()).batch.status).toBe("failed");
   });

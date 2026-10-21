@@ -11,7 +11,7 @@ import { CATALOG_TASK_LEASE_MS, enqueueFinalize, type CatalogDeps } from "./deps
 export async function handleFinalizeTask(deps:CatalogDeps,body:Record<string,unknown>):Promise<HandleResult> {
   if(typeof body.batchId!=="string") return {httpStatus:400,outcome:"batchId is required"};
   const batchId = body.batchId;
-  const claim=randomUUID(),leaseUntil=+deps.now()+CATALOG_TASK_LEASE_MS;
+  const claim=randomUUID(),started=+deps.now(),leaseUntil=started+CATALOG_TASK_LEASE_MS;
   const claimWhere=and(eq(catalogBatches.id,batchId),sql`${catalogBatches.counts}->>'finalizeClaim' = ${claim}`);
   const cleanCounts=(counts:typeof catalogBatches.$inferSelect.counts)=>{
     const copy={...counts} as typeof counts & {finalizeClaim?:string;finalizeClaimUntil?:number;finalizeEnqueuedAt?:number};
@@ -83,8 +83,14 @@ export async function handleFinalizeTask(deps:CatalogDeps,body:Record<string,unk
       await releaseLocks(tx as unknown as CatalogDeps["db"],batchId);
       return "done";
     });
+    if(outcome==="done") {
+      const c=counts,cost=initial.batch.cost;
+      deps.log("batch finalized",{batchId,brandSlug:batch.brandSlug,durationMs:+deps.now()-started,batchMs:batch.startedAt ? +deps.now()-+batch.startedAt:null,
+        counts:{products:c.products,outputs:c.outputs,verified:c.verified,needsAttention:c.needsAttention,attentionProducts:c.attentionProducts,failed:c.failed,skipped:c.skipped,recheckOk:c.recheckOk,recheckTotal:c.recheckTotal},
+        cost:{qaUsd:cost.qaUsd,qaCalls:cost.qaCalls,computeUsd:cost.computeUsd,computeVcpuSeconds:cost.computeVcpuSeconds,mattingMs:cost.mattingMs,renderMs:cost.renderMs}});
+    }
     return {httpStatus:outcome==="snapshot_changed" ? 503:200,outcome};
-  } catch(error) { deps.log("finalize failed",{batchId,error:error instanceof Error ? error.message:String(error)}); return {httpStatus:503,outcome:"retry"}; }
+  } catch(error) { deps.log("finalize failed",{severity:"WARNING",batchId,error:error instanceof Error ? error.message:String(error)}); return {httpStatus:503,outcome:"retry"}; }
   finally {
     await deps.db.update(catalogBatches).set({updatedAt:sql`${catalogBatches.updatedAt}`,counts:sql`${catalogBatches.counts} - 'finalizeClaim' - 'finalizeClaimUntil'`}).where(claimWhere);
   }

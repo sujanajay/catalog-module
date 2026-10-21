@@ -374,7 +374,7 @@ async function runCommand(db: Db, flags: Record<string, string | string[] | true
   const manifest = parseGolden((await gcs.downloadBuffer(storage.toGsUri(storage.getBucketName(), GOLDEN_MANIFEST_PATH))).buf.toString("utf8"));
   const limit = flags.limit ? Number(flags.limit) : Infinity, brandFilter = str(flags.brand);
   const base = workerCatalogDeps(db), work = { matte: 0, render: 0, copy: 0 };
-  const deps: CatalogDeps = { ...base, ...(live ? {} : cannedQa), enqueue: async () => "evals-inline", log: (message, fields) => console.info(JSON.stringify({ message, ...fields })),
+  const deps: CatalogDeps = { ...base, ...(live ? {} : cannedQa), enqueue: async () => "evals-inline", log: base.log,
     matteFor: async (...args) => { work.matte++; return base.matteFor(...args); }, renderAllChannels: async (...args) => { work.render++; return base.renderAllChannels(...args); },
     storage: { ...storage, stageCopyToPublic: async (...args) => { work.copy++; return storage.stageCopyToPublic(...args); } } };
   const expectOf = new Map<string, Expectation>(), plantedOf = new Map<string, { n: number; from: string }>(), heldExpected = new Set<string>();

@@ -65,7 +65,9 @@ export async function storedMatte(deps: CatalogDeps, source: Source, p: Prepared
 export async function resolvePhoto(deps: CatalogDeps, input: ResolvePhotoInput): Promise<ResolveResult> {
   const {product,source,underClaim} = input;
   if (!input.failing.length) return {winner:null,actions:[],fixed:new Set()};
-  const p = input.prepared ?? await deps.prepare((await deps.storage.downloadBuffer(source.rawUri)).buf,source.originalName,b=>deps.matting.convert(b));
+  // Ids for the matting service's log lines (x-catalog-batch / x-catalog-product) and the upscale log.
+  const trace = {batchId:input.batch.id,productId:product.id};
+  const p = input.prepared ?? await deps.prepare((await deps.storage.downloadBuffer(source.rawUri)).buf,source.originalName,b=>deps.matting.convert(b,trace));
   const first = input.matte ?? await storedMatte(deps,source,p,input.policy.matteModel);
   if (!first) return {winner:null,actions:[],fixed:new Set()};
   let second: Matte | null | undefined;
@@ -77,7 +79,7 @@ export async function resolvePhoto(deps: CatalogDeps, input: ResolvePhotoInput):
     const health = await deps.matting.health();
     if (!health.models.some(m => m.id === secondModel)) return second;
     await underClaim(async()=>{});
-    const matte = await deps.matteFor(p,deps.matting,secondModel);
+    const matte = await deps.matteFor(p,deps.matting,secondModel,{},trace);
     second = matte.source === "model" ? matte : null;
     return second;
   };
@@ -88,7 +90,7 @@ export async function resolvePhoto(deps: CatalogDeps, input: ResolvePhotoInput):
   const render = async (o: Output, step: LadderStep): Promise<RenderOutput> => {
     const variant = stepVariant(step), matte = variant.matte === "second" ? (await secondMatte())! : variant.matte === "passthrough" ? passthroughFor() : first;
     await underClaim(async()=>{});
-    return (await deps.renderAllChannels(p,matte,[o.channel],{shotNumber:source.n,productType:product.productType ?? "other",identifier:product.identifier,publicObjectPath:o.objectPath,...contextFor(o),synthesiseShadow:variant.synthesiseShadow,...(variant.fitScale !== 1 ? {fitScale:variant.fitScale}:{}),...(input.judgedCut ? {judgedCut:true}:{})}))[o.channel];
+    return (await deps.renderAllChannels(p,matte,[o.channel],{shotNumber:source.n,productType:product.productType ?? "other",identifier:product.identifier,publicObjectPath:o.objectPath,...contextFor(o),synthesiseShadow:variant.synthesiseShadow,...(variant.fitScale !== 1 ? {fitScale:variant.fitScale}:{}),...(input.judgedCut ? {judgedCut:true}:{}),trace}))[o.channel];
   };
   const renders = new Map<string, RenderOutput>();
   // Assigned inside the step callback; the casts keep TypeScript from narrowing them to null.
@@ -170,8 +172,8 @@ export async function flushCutPhoto(deps: CatalogDeps, input: FlushCutInput): Pr
   const trigger: OutputFlag[] = ["complete_product"], channels = input.outputs.map(o=>o.channel);
   const done = async (action: AutoAction) => { await recordActions(deps,input,input.outputs,[action]); return action; };
   if (!input.outputs.length) return {step:"flush_cut",trigger,result:"skipped",channels,rejudged:false,detail:"nothing to re-make"};
-  const {source,product} = input;
-  const p = input.prepared ?? await deps.prepare((await deps.storage.downloadBuffer(source.rawUri)).buf,source.originalName,b=>deps.matting.convert(b));
+  const {source,product} = input, trace = {batchId:input.batch.id,productId:product.id};
+  const p = input.prepared ?? await deps.prepare((await deps.storage.downloadBuffer(source.rawUri)).buf,source.originalName,b=>deps.matting.convert(b,trace));
   const matte = input.matte ?? await storedMatte(deps,source,p,input.policy.matteModel);
   if (!matte) return done({step:"flush_cut",trigger,result:"skipped",channels,rejudged:false,detail:"no cut-out stored"});
   // Only a side the first render did not already place flush is worth a re-render.
@@ -183,7 +185,7 @@ export async function flushCutPhoto(deps: CatalogDeps, input: FlushCutInput): Pr
   const shadowAllowed = input.shadowAllowed && !heldInHand(p,matte.alpha).held;
   for (const o of input.outputs) {
     await input.underClaim(async()=>{});
-    const r = (await deps.renderAllChannels(p,matte,[o.channel],{shotNumber:source.n,productType:product.productType ?? "other",identifier:product.identifier,publicObjectPath:o.objectPath,...contextFor(o),synthesiseShadow:shadowAllowed,judgedCut:true}))[o.channel];
+    const r = (await deps.renderAllChannels(p,matte,[o.channel],{shotNumber:source.n,productType:product.productType ?? "other",identifier:product.identifier,publicObjectPath:o.objectPath,...contextFor(o),synthesiseShadow:shadowAllowed,judgedCut:true,trace}))[o.channel];
     if (!r.flags.includes("cut_in_source")) return done({step:"flush_cut",trigger,result:"failed",channels,rejudged:false,detail:"no cut edge found"});
     if (!ok(r)) return done({step:"flush_cut",trigger,result:"failed",channels,rejudged:false,detail:`${o.channel}: ${codes(r)}`});
     renders.set(o.id,r);

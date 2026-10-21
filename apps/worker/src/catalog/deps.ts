@@ -13,6 +13,11 @@ import { createUpscaler, upscaleConfigFromEnv } from "@catalog/core/catalog/upsc
 import type { ResolvedPolicy } from "@catalog/core/catalog/types";
 import * as storage from "@catalog/core/storage";
 import { DISPATCH_DEADLINE_SEC, enqueueTask } from "@catalog/core/tasks";
+import { log as structuredLog, toSeverity } from "@catalog/core/log";
+/** One structured JSON line (core/log.ts): a `severity` field picks the severity, INFO when absent. */
+export function catalogLog(message: string, fields: Record<string,unknown> = {}): void {
+  structuredLog(toSeverity(fields.severity) ?? "INFO", message, fields);
+}
 export interface CatalogDeps {
   db: Db; storage: typeof storage; matting: MattingClient; enqueue: typeof enqueueTask;
   fetch: typeof fetch; now: () => Date; log: (message: string, fields?: Record<string,unknown>) => void;
@@ -34,7 +39,7 @@ export function workerCatalogDeps(db: Db): CatalogDeps {
   // auto-resolve ladder included; the upscaler uses the GPU matting service through the same client and breaker.
   const upscaler = createUpscaler(matting,upscaleConfigFromEnv());
   const render: typeof renderAllChannels = upscaler ? (p,m,channels,ctx)=>renderAllChannels(p,m,channels,{upscaler,...ctx}) : renderAllChannels;
-  return {db,storage,matting,enqueue:enqueueTask,fetch,now:()=>new Date(),log:(message,fields)=>console.info(JSON.stringify({message,...fields})),prepare,matteFor,renderAllChannels:render,judgeOutput,classifyProductType,repairOwnDefects,
+  return {db,storage,matting,enqueue:enqueueTask,fetch,now:()=>new Date(),log:catalogLog,prepare,matteFor,renderAllChannels:render,judgeOutput,classifyProductType,repairOwnDefects,
     resolvePolicy:async(brandSlug,category)=> {
       if (!defaultsEnsured) {
         const health = await matting.health();

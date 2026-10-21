@@ -1,5 +1,7 @@
 """HTTP contract tests with deterministic inference, no model downloads."""
 import importlib
+import json
+import logging
 import io
 import sys
 import time
@@ -216,3 +218,35 @@ def test_gpu_rejects_cpu_only_replacement_session(service, monkeypatch):
     response = client.post("/matte?model=birefnet-general-lite", files={"file": ("source.png", image_bytes())})
     assert response.status_code == 500
     assert not module.SESSIONS or "birefnet-general-lite" not in module.SESSIONS
+
+
+def json_lines(module, caplog, prefix):
+    """The matting logger's records starting with `prefix`, formatted by the service's JSON formatter."""
+    formatter = module.JsonFormatter()
+    return [json.loads(formatter.format(r)) for r in caplog.records if r.name == "matting" and r.getMessage().startswith(prefix)]
+
+
+def test_matte_logs_one_json_line_with_the_batch_from_the_headers(service, caplog):
+    client, module, _, _ = service
+    caplog.set_level(logging.INFO, logger="matting")
+    headers = {"x-catalog-batch": "batch-123", "x-catalog-product": "product-456"}
+    assert client.post("/matte?model=birefnet-general", files={"file": ("a.png", image_bytes())}, headers=headers).status_code == 200
+    [line] = json_lines(module, caplog, "inference_complete")
+    assert line["severity"] == "INFO"
+    assert line["message"].startswith("inference_complete model=birefnet-general target=cpu memory=")
+    assert line["batchId"] == "batch-123" and line["productId"] == "product-456"
+    assert line["model"] == "birefnet-general" and line["target"] == "cpu" and line["ms"] >= 0
+    assert line["logging.googleapis.com/labels"] == {"app": "catalog", "batchId": "batch-123"}
+
+
+def test_matte_log_without_headers_has_no_batch_and_errors_are_error_severity(service, caplog):
+    client, module, _, remove = service
+    caplog.set_level(logging.INFO, logger="matting")
+    assert client.post("/matte", files={"file": ("a.png", image_bytes())}).status_code == 200
+    [line] = json_lines(module, caplog, "inference_complete")
+    assert "batchId" not in line and "logging.googleapis.com/labels" not in line
+    remove.side_effect = RuntimeError("do not leak internal details")
+    assert client.post("/matte", files={"file": ("a.png", image_bytes())}, headers={"x-catalog-batch": "b9"}).status_code == 500
+    [failed] = json_lines(module, caplog, "inference_failed")
+    assert failed["severity"] == "ERROR" and failed["batchId"] == "b9"
+    assert "do not leak" not in json.dumps(failed)

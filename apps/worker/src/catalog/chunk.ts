@@ -14,7 +14,7 @@ import { holdsAtRender } from "@catalog/core/catalog/qa/triage";
 import { flagReason } from "@catalog/core/catalog/types";
 import { autoActionsOf, busyBackgroundHold, withAutoActions, type AutoAction } from "@catalog/core/catalog/auto-resolve";
 import { BUSY_BACKGROUND_DETAILS } from "@catalog/core/catalog/qa/reasons";
-import { BREAKER_COOLDOWN_MS, MATTING_TIMEOUT_MS } from "@catalog/core/catalog/matte";
+import { BREAKER_COOLDOWN_MS, MATTING_TIMEOUT_MS, type MattingTrace } from "@catalog/core/catalog/matte";
 import { detectTextImage, GUARD_PAD_FRACTION, heldInHand, resolveMatte } from "@catalog/core/catalog/matte-guard";
 import { DISPATCH_DEADLINE_SEC } from "@catalog/core/tasks";
 import { resolvePhoto } from "./auto-resolve";
@@ -48,7 +48,7 @@ export async function handleChunkTask(deps: CatalogDeps, body: Record<string,unk
    * simple method). Waits for the service's breaker cool-down, then polls its health; retries only
    * while this delivery still has time for a full matting call, and not again after a retry failed.
    */
-  async function retryMatte(p:Awaited<ReturnType<CatalogDeps["prepare"]>>,model:string):Promise<{matte:Matte|null;action:AutoAction}> {
+  async function retryMatte(p:Awaited<ReturnType<CatalogDeps["prepare"]>>,model:string,trace:MattingTrace):Promise<{matte:Matte|null;action:AutoAction}> {
     const action=(result:AutoAction["result"],detail:string):AutoAction=>({step:"matte_retry",trigger:["fallback_matte"],result,channels:[],rejudged:false,detail});
     const deadline=+started+DISPATCH_DEADLINE_SEC*1000-MATTING_TIMEOUT_MS-MATTE_RETRY_MARGIN_MS, sleep=deps.sleep ?? (ms=>new Promise<void>(resolve=>setTimeout(resolve,ms)));
     if (matteRetryFailed) return {matte:null,action:action("skipped","an earlier retry in this run failed")};
@@ -60,7 +60,7 @@ export async function handleChunkTask(deps: CatalogDeps, body: Record<string,unk
       if (health.ok && health.models.some(m=>m.id===model)) break;
       wait=MATTE_RETRY_POLL_MS;
     }
-    const matte=await deps.matteFor(p,deps.matting,model);
+    const matte=await deps.matteFor(p,deps.matting,model,{},trace);
     if (matte.source==="floodfill") { matteRetryFailed=true; return {matte:null,action:action("failed","the service failed again")}; }
     return {matte,action:action("passed",matte.model)};
   }
@@ -83,6 +83,8 @@ export async function handleChunkTask(deps: CatalogDeps, body: Record<string,unk
       await underClaim(async()=>{});
       const [product] = await deps.db.select().from(catalogProducts).where(eq(catalogProducts.id,productId));
       if (!product || product.lockBatchId !== batch.id) continue;
+      // Sent to the matting service as x-catalog-batch / x-catalog-product, so its log lines carry the ids.
+      const trace:MattingTrace = {batchId:batch.id,productId};
       const allSources = await deps.db.select().from(catalogSourceImages).where(and(eq(catalogSourceImages.productId,productId),eq(catalogSourceImages.batchId,batch.id))).orderBy(catalogSourceImages.n);
       const replaced=new Set(allSources.flatMap(source=>source.replacesId ? [source.replacesId]:[]));
       const sources=allSources.filter(source=>!replaced.has(source.id) && (!chunk!.sourceImageIds?.length || chunk!.sourceImageIds.includes(source.id)));
@@ -157,7 +159,7 @@ export async function handleChunkTask(deps: CatalogDeps, body: Record<string,unk
             const raw = await deps.storage.downloadBuffer(source.rawUri);
             let conversionFailure:unknown;
             let p:Awaited<ReturnType<CatalogDeps["prepare"]>>;
-            try { p = await deps.prepare(raw.buf,source.originalName,async b=>{try{return await deps.matting.convert(b);}catch(error){conversionFailure=error;throw error;}}); }
+            try { p = await deps.prepare(raw.buf,source.originalName,async b=>{try{return await deps.matting.convert(b,trace);}catch(error){conversionFailure=error;throw error;}}); }
             catch(error) { throw conversionFailure ?? error; }
             // A size chart or text-only photo is not cut out: left out with its note (07 4.0a), never held.
             const text = detectTextImage(p);
@@ -170,11 +172,11 @@ export async function handleChunkTask(deps: CatalogDeps, body: Record<string,unk
               continue;
             }
             await underClaim(async()=>{});
-            let matte = await deps.matteFor(p,deps.matting,productPolicy.matteModel); mattingMs += matte.ms;
+            let matte = await deps.matteFor(p,deps.matting,productPolicy.matteModel,{},trace); mattingMs += matte.ms;
             // 07 auto-resolve: the cut-out service was down. Retry once it responds, within this delivery's time budget, before holding.
             let retry: AutoAction | null = null;
             if (matte.source === "floodfill") {
-              const retried = await retryMatte(p,productPolicy.matteModel);
+              const retried = await retryMatte(p,productPolicy.matteModel,trace);
               retry = retried.action; mattingMs += retried.matte?.ms ?? 0;
               if (retried.matte) matte = retried.matte;
             }
@@ -186,7 +188,7 @@ export async function handleChunkTask(deps: CatalogDeps, body: Record<string,unk
               if (!model || (variant!=="padded_first" && model===firstModel) || +deps.now()>deadline) return null;
               if (!(await deps.matting.health()).models.some(m=>m.id===model)) return null;
               await underClaim(async()=>{});
-              const next = await deps.matteFor(p,deps.matting,model,variant==="second" ? {}:{padFraction:GUARD_PAD_FRACTION});
+              const next = await deps.matteFor(p,deps.matting,model,variant==="second" ? {}:{padFraction:GUARD_PAD_FRACTION},trace);
               mattingMs += next.ms;
               return next.source==="model" ? next:null;
             }});
@@ -223,7 +225,7 @@ export async function handleChunkTask(deps: CatalogDeps, body: Record<string,unk
           }
           if ((!pending.length && !productOutputs.length) || !matteUri) continue;
           try {
-            const p = await deps.prepare((await deps.storage.downloadBuffer(source.rawUri)).buf,source.originalName,b=>deps.matting.convert(b));
+            const p = await deps.prepare((await deps.storage.downloadBuffer(source.rawUri)).buf,source.originalName,b=>deps.matting.convert(b,trace));
             const alpha = await sharp((await deps.storage.downloadBuffer(matteUri)).buf).toColourspace("b-w").raw().toBuffer();
             prepared.push({source,p,matte:{alpha,width:p.width,height:p.height,model:source.matteModel ?? productPolicy.matteModel,ms:source.matteMs ?? 0,source:source.flags.includes("alpha_source") ? "alpha_source":"model",target:null,sentLongSide:null}});
           } catch(error) {
@@ -290,12 +292,16 @@ export async function handleChunkTask(deps: CatalogDeps, body: Record<string,unk
       if(remaining.every(row=>row.stage==="qa" || row.status==="done" || row.status==="failed")) await deps.db.update(catalogBatches).set({status:"qa"}).where(eq(catalogBatches.id,batch.id));
       await deps.enqueue("/tasks/catalog/chunk",{chunkId:chunk.id},{taskId:`chunk-${chunk.id}-qa`});
     } else { const completed = await deps.db.update(catalogChunks).set({status:"done",taskName:null,finishedAt:deps.now()}).where(ownsClaim()).returning({id:catalogChunks.id}); if (!completed.length) return {httpStatus:503,outcome:"claim_lost"}; await finish(); }
+    deps.log("chunk delivered",{batchId:batch.id,chunkId:chunk.id,stage:chunk.stage,attempt:chunk.attempt,durationMs:+deps.now()-+started,mattingMs,renderMs});
     await refreshBatchProgress(deps.db,batch.id);
     return {httpStatus:200,outcome:"done"};
   } catch(error) {
     const reason = error instanceof Error ? error.message:String(error);
-    deps.log("chunk failed",{chunkId:chunk.id,error:reason});
-    if ((opts.retryCount ?? 0) >= 4) {
+    // Terminal (the chunk is marked failed below) is ERROR, a retried attempt WARNING: the alert counts ERROR only.
+    // An Error object is passed whole, so a terminal line carries its stack for Error Reporting (the line shows its message).
+    const terminal = (opts.retryCount ?? 0) >= 4;
+    deps.log("chunk failed",{severity:terminal ? "ERROR":"WARNING",batchId:chunk.batchId,chunkId:chunk.id,stage:chunk.stage,attempt:chunk.attempt,retryCount:opts.retryCount ?? 0,error:error instanceof Error ? error:reason});
+    if (terminal) {
       const failed = await deps.db.update(catalogChunks).set({status:"failed",taskName:null,error:reason,finishedAt:deps.now()}).where(ownsClaim()).returning({id:catalogChunks.id});
       if (!failed.length) return {httpStatus:503,outcome:"retry"};
       if (chunk.productIds.length) await deps.db.update(catalogOutputs).set({status:"failed",reason:`Processing stopped after repeated errors: ${reason}`,updatedAt:deps.now()}).where(and(eq(catalogOutputs.batchId,chunk.batchId),inArray(catalogOutputs.productId,chunk.productIds),eq(catalogOutputs.status,"pending")));

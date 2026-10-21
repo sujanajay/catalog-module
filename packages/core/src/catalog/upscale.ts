@@ -7,6 +7,7 @@
 // model-free (types.ts UPSCALED_SENTENCE) and the id lives only in render_key and engineering logs.
 import sharp from "sharp";
 import type { Size } from "./channels";
+import { log } from "../log";
 
 /** Bumped when the request or the recombination changes; part of render_key when the upscaler was used. */
 export const UPSCALER_VERSION = "1";
@@ -55,19 +56,20 @@ export const upscalerKey = (model: string): string => `u:${model}@${UPSCALE_MODE
 export interface Upscaler {
   readonly model: string;
   readonly minScale: number;
-  upscale(image: Buffer, contentType: "image/png" | "image/jpeg"): Promise<{ jpeg: Buffer; ms: number }>;
+  /** `trace` names the batch and product for the service's log lines (MattingTrace headers). */
+  upscale(image: Buffer, contentType: "image/png" | "image/jpeg", trace?: { batchId?: string | undefined; productId?: string | undefined }): Promise<{ jpeg: Buffer; ms: number }>;
 }
 
 /** The client method this module uses (MattingClient.upscale), so tests can pass a fake. */
 export interface UpscaleClient {
-  upscale(image: Buffer, opts: { model: string; contentType: "image/png" | "image/jpeg" }): Promise<{ jpeg: Buffer; ms: number; model: string }>;
+  upscale(image: Buffer, opts: { model: string; contentType: "image/png" | "image/jpeg" }, trace?: { batchId?: string | undefined; productId?: string | undefined }): Promise<{ jpeg: Buffer; ms: number; model: string }>;
 }
 
 /** The worker's upscaler, or null when UPSCALE_MODEL is unset (the default). */
 export function createUpscaler(client: UpscaleClient, config: UpscaleConfig): Upscaler | null {
   const model = config.model;
   if (!model) return null;
-  return { model, minScale: config.minScale, upscale: async (image, contentType) => { const r = await client.upscale(image, { model, contentType }); return { jpeg: r.jpeg, ms: r.ms }; } };
+  return { model, minScale: config.minScale, upscale: async (image, contentType, trace) => { const r = await client.upscale(image, { model, contentType }, trace); return { jpeg: r.jpeg, ms: r.ms }; } };
 }
 
 /** Ids for the logs; never shown to an operator. */
@@ -100,13 +102,13 @@ export function sourceX2(upscaler: Upscaler, rgb: Buffer, width: number, trace: 
   const result = (async (): Promise<SourceX2 | null> => {
     const started = Date.now(), height = rgb.length / 3 / width;
     try {
-      const reply = await upscaler.upscale(await upscaleUpload(rgb, width, height), "image/jpeg");
+      const reply = await upscaler.upscale(await upscaleUpload(rgb, width, height), "image/jpeg", { batchId: trace.batchId, productId: trace.productId });
       const out = await sharp(reply.jpeg).removeAlpha().toColourspace("srgb").raw().toBuffer({ resolveWithObject: true });
       if (out.info.width !== width * UPSCALE_FACTOR || out.info.height !== height * UPSCALE_FACTOR || out.info.channels !== 3) throw new Error(`The upscale service returned ${out.info.width} x ${out.info.height} for a ${width} x ${height} photo.`);
-      console.info(JSON.stringify({ event: "catalog_upscale", ...trace, model: upscaler.model, ms: reply.ms, wallMs: Date.now() - started, source: `${width}x${height}` }));
+      log("INFO", "catalog_upscale", { ...trace, model: upscaler.model, ms: reply.ms, wallMs: Date.now() - started, source: `${width}x${height}` });
       return { rgb: out.data, width: out.info.width, height: out.info.height, ms: reply.ms };
     } catch (error) {
-      console.warn(JSON.stringify({ severity: "WARNING", message: "upscale failed; used the plain enlargement", ...trace, wallMs: Date.now() - started, error: error instanceof Error ? error.message : String(error) }));
+      log("WARNING", "upscale failed; used the plain enlargement", { ...trace, wallMs: Date.now() - started, error: error instanceof Error ? error.message : String(error) });
       return null;
     }
   })();
@@ -128,7 +130,7 @@ export async function upscaledRgb(upscaler: Upscaler, rgb: Buffer, sourceWidth: 
     if (out.length !== target.w * target.h * 3) throw new Error("The upscaled image could not be read as RGB.");
     return { rgb: out, ms: x2.ms, reused };
   } catch (error) {
-    console.warn(JSON.stringify({ severity: "WARNING", message: "upscale failed; used the plain enlargement", ...trace, error: error instanceof Error ? error.message : String(error) }));
+    log("WARNING", "upscale failed; used the plain enlargement", { ...trace, error: error instanceof Error ? error.message : String(error) });
     return null;
   }
 }

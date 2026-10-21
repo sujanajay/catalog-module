@@ -2,6 +2,7 @@ import { drizzle } from "drizzle-orm/node-postgres";
 import type { PgDatabase, PgQueryResultHKT } from "drizzle-orm/pg-core";
 import pg from "pg";
 import * as schema from "./schema";
+import { log } from "../log";
 
 export type Schema = typeof schema;
 
@@ -82,7 +83,7 @@ export class RetryingPool extends pg.Pool {
   connect(callback: ConnectCallback): void;
   connect(callback?: ConnectCallback): Promise<pg.PoolClient> | void {
     const p = connectWithRetry(() => super.connect(), {
-      onRetry: (attempt, waitMs) => console.warn(JSON.stringify({ msg: "db connect: too many connections, retrying", attempt, waitMs: Math.round(waitMs) })),
+      onRetry: (attempt, waitMs) => log("WARNING", "db connect: too many connections, retrying", { attempt, waitMs: Math.round(waitMs) }),
       ...this.retry,
     });
     if (!callback) return p;

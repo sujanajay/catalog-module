@@ -4,8 +4,19 @@ import type { Size } from "./channels";
 import type { Matte, Prepared } from "./render";
 import { BG_TOLERANCE } from "./compliance";
 import { UPSCALE_RETRY_DELAY_MS, UPSCALE_TIMEOUT_MS } from "./upscale";
+import { log } from "../log";
 
 export interface MattingService { baseUrl: string; target: "cpu" | "gpu" }
+/**
+ * Ids of the batch and product one call works for, sent as the `x-catalog-batch` and `x-catalog-product`
+ * headers so the matting service's log lines carry them. Per call, because the worker shares one client.
+ */
+export interface MattingTrace { batchId?: string | undefined; productId?: string | undefined }
+export const TRACE_HEADERS = { batchId: "x-catalog-batch", productId: "x-catalog-product" } as const;
+function setTraceHeaders(headers: Headers, trace: MattingTrace | undefined): void {
+  if (trace?.batchId) headers.set(TRACE_HEADERS.batchId, trace.batchId);
+  if (trace?.productId) headers.set(TRACE_HEADERS.productId, trace.productId);
+}
 export interface ModelInfo { id: string; inputSize: number | "native"; target: "cpu" | "gpu" }
 /** One upscaler the GPU service lists in /health (`upscale.models`); `scale` is its fixed factor. */
 export interface UpscaleModelInfo { id: string; available: boolean; scale: number }
@@ -13,7 +24,7 @@ export interface UpscaleModelInfo { id: string; available: boolean; scale: numbe
 export interface UpscaleHealth { models: UpscaleModelInfo[]; default: string | null }
 export interface MattingClientOptions {
   services: MattingService[]; fetch?: typeof fetch; idToken?: (audience: string) => Promise<string>;
-  model?: string; timeoutMs?: number; batchId?: string;
+  model?: string; timeoutMs?: number;
 }
 /**
  * The model ids the matting services serve: services/matting/app.py `INPUT_SIZES`, which is also
@@ -88,7 +99,8 @@ export class MattingClient {
   private transition(s: ServiceState, state: Breaker["state"]): void {
     if (s.breaker.state === state) return;
     s.breaker.state = state;
-    console.info(JSON.stringify({ event: "matting_breaker", batchId: this.opts.batchId ?? "local", service: s.target, state }));
+    // Process-wide (the worker shares one client), so the line names no batch.
+    log(state === "open" ? "WARNING" : "INFO", "matting_breaker", { service: s.target, state });
   }
   private available(s: ServiceState): boolean {
     if (s.breaker.state === "open" && Date.now() - s.breaker.openedAt! >= BREAKER_COOLDOWN_MS) this.transition(s, "half-open");
@@ -100,11 +112,12 @@ export class MattingClient {
       s.breaker.openedAt = Date.now(); this.transition(s, "open");
     }
   }
-  private async call(s: ServiceState, endpoint: string, init: RequestInit = {}, timeoutMs = this.opts.timeoutMs ?? MATTING_TIMEOUT_MS): Promise<Response> {
+  private async call(s: ServiceState, endpoint: string, init: RequestInit = {}, timeoutMs = this.opts.timeoutMs ?? MATTING_TIMEOUT_MS, trace?: MattingTrace): Promise<Response> {
     const signal = AbortSignal.timeout(timeoutMs);
     const url = new URL(s.baseUrl);
     const local = url.protocol === "http:" && ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname);
     const headers = new Headers(init.headers);
+    setTraceHeaders(headers, trace);
     if (!local) {
       signal.throwIfAborted();
       let onAbort!: () => void;
@@ -146,7 +159,7 @@ export class MattingClient {
    * counts, once, towards the upscale breaker (never the matting one). Throws UpscaleUnavailableError; the render
    * then uses Lanczos.
    */
-  async upscale(image: Buffer, opts: UpscaleOptions): Promise<{ jpeg: Buffer; ms: number; model: string }> {
+  async upscale(image: Buffer, opts: UpscaleOptions, trace?: MattingTrace): Promise<{ jpeg: Buffer; ms: number; model: string }> {
     const s = this.states.find((x) => x.target === "gpu");
     if (!s) throw new UpscaleUnavailableError("No GPU service is configured for upscaling.");
     const h = await this.health();
@@ -157,7 +170,7 @@ export class MattingClient {
       if (!this.available(s) || !this.upscaleAvailable()) throw new UpscaleUnavailableError("The GPU service is paused after repeated failures.");
       const started = Date.now();
       try {
-        const response = await this.call(s, `/upscale?model=${encodeURIComponent(opts.model)}&scale=2`, { method: "POST", body: new Uint8Array(image), headers: { "content-type": opts.contentType } }, opts.timeoutMs ?? UPSCALE_TIMEOUT_MS);
+        const response = await this.call(s, `/upscale?model=${encodeURIComponent(opts.model)}&scale=2`, { method: "POST", body: new Uint8Array(image), headers: { "content-type": opts.contentType } }, opts.timeoutMs ?? UPSCALE_TIMEOUT_MS, trace);
         const jpeg = Buffer.from(await response.arrayBuffer());
         const ms = Number(response.headers.get("x-upscale-ms"));
         this.upscaleBreaker.failures = 0; this.upscaleBreaker.openedAt = null;
@@ -182,7 +195,7 @@ export class MattingClient {
    * salient-object model keeps the whole surface instead of only the logo on it (the cut-out
    * integrity ladder in matte-guard.ts).
    */
-  async matte(prepared: Prepared, model?: string, opts: MatteOptions = {}): Promise<Matte> {
+  async matte(prepared: Prepared, model?: string, opts: MatteOptions = {}, trace?: MattingTrace): Promise<Matte> {
     const h = await this.health();
     const chosen = model ?? this.opts.model ?? h.default;
     if (!chosen) throw new UnavailableError("The CPU background removal service's default model is unavailable.");
@@ -202,7 +215,7 @@ export class MattingClient {
       const png = await source.resize(sentLongSide, sentLongSide, { fit: "inside", kernel: "lanczos3" }).png().toBuffer();
       const body = new FormData(); body.set("file", new Blob([new Uint8Array(png)], { type: "image/png" }), "source.png");
       try {
-        const response = await this.call(s, `/matte?model=${encodeURIComponent(chosen)}`, { method: "POST", body });
+        const response = await this.call(s, `/matte?model=${encodeURIComponent(chosen)}`, { method: "POST", body }, undefined, trace);
         const mask = await alphaFromPng(Buffer.from(await response.arrayBuffer()));
         const upscaled = sharp(mask.alpha, { raw: { width: mask.width, height: mask.height, channels: 1 } }).resize(framed.w, framed.h, { fit: "fill", kernel: "lanczos3" });
         const fitted = pad ? sharp(await upscaled.extract({ left: pad, top: pad, width: prepared.width, height: prepared.height }).toColourspace("b-w").raw().toBuffer(), { raw: { width: prepared.width, height: prepared.height, channels: 1 } }) : upscaled;
@@ -216,9 +229,9 @@ export class MattingClient {
     }
     throw new UnavailableError("Background removal services are unavailable.");
   }
-  async convert(buf: Buffer): Promise<Buffer> {
+  async convert(buf: Buffer, trace?: MattingTrace): Promise<Buffer> {
     const body = new FormData(); body.set("file", new Blob([new Uint8Array(buf)]), "source.heic");
-    return Buffer.from(await (await this.call(this.states.find((s) => s.target === "cpu")!, "/convert", { method: "POST", body })).arrayBuffer());
+    return Buffer.from(await (await this.call(this.states.find((s) => s.target === "cpu")!, "/convert", { method: "POST", body }, undefined, trace)).arrayBuffer());
   }
 }
 
@@ -249,8 +262,8 @@ export function floodFillMatte(p: Prepared): Matte {
   return { alpha: blurred, width: w, height: h, model: "floodfill", ms: 0, source: "floodfill", target: null, sentLongSide: null };
 }
 
-export async function matteFor(prepared: Prepared, client: MattingClient | null, model?: string, opts: MatteOptions = {}): Promise<Matte> {
+export async function matteFor(prepared: Prepared, client: MattingClient | null, model?: string, opts: MatteOptions = {}, trace?: MattingTrace): Promise<Matte> {
   if (prepared.alphaSource) return { alpha: prepared.alphaSource, width: prepared.width, height: prepared.height, model: "alpha_source", ms: 0, source: "alpha_source", target: null, sentLongSide: null };
   if (!client) return floodFillMatte(prepared);
-  try { return await client.matte(prepared, model, opts); } catch (err) { if (!(err instanceof UnavailableError)) throw err; return floodFillMatte(prepared); }
+  try { return await client.matte(prepared, model, opts, trace); } catch (err) { if (!(err instanceof UnavailableError)) throw err; return floodFillMatte(prepared); }
 }

@@ -28,6 +28,7 @@ import {
 } from "../../db/schema";
 import { getBucketName, isRetryableStorageError, toGsUri } from "../../storage";
 import type { enqueueTask } from "../../tasks";
+import { log } from "../../log";
 import { batchPrefix, normalizeKey, rawPath, sanitizeSegment } from "../naming";
 import { findOrCreateProduct } from "../products";
 import { resolveSkus, type ResolveResult } from "../sku-mapping";
@@ -787,6 +788,7 @@ async function finishBatch(db: Db, deps: IngestDeps, batchId: string): Promise<{
     const uploadErrors = uploads.filter((u) => u.status === "failed" && u.error).map((u) => u.error!);
     const failReason = noPhotosReason(grouped.rejected, uploadErrors);
     await patchCounts(db, batch.id, { ...counts, failReason }, { status: "failed" });
+    log("ERROR", "batch failed", { batchId: batch.id, brandSlug: batch.brandSlug, reason: failReason, cause: "no_photos" });
     return { progress: { done: 0, total: 0, phase: "done" }, outcome: "failed: no photos" };
   }
   await patchCounts(db, batch.id, counts, { status: "draft" });

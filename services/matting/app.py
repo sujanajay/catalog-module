@@ -1,11 +1,13 @@
 """Byte-in, mask/PNG-out service. Cloud Run supplies authentication at its edge."""
 import io
 import gc
+import json
 import logging
 import math
 import os
 import time
 from contextlib import asynccontextmanager
+from contextvars import ContextVar
 from pathlib import Path
 from threading import Lock
 
@@ -19,8 +21,54 @@ from pillow_heif import register_heif_opener
 from rembg import new_session, remove
 
 register_heif_opener()
-logging.basicConfig(level=logging.INFO)
+# Structured logs: one JSON line per record, which Cloud Run turns into a LogEntry (severity, jsonPayload.message,
+# labels). The worker sends x-catalog-batch and x-catalog-product; LogContextMiddleware puts them in LOG_CONTEXT
+# and every line logged while serving that request carries them as batchId and productId.
+LOG_CONTEXT = ContextVar("log_context", default={})
+CONTEXT_HEADERS = {b"x-catalog-batch": "batchId", b"x-catalog-product": "productId"}
+
+
+class LogContextFilter(logging.Filter):
+    """Stamps the request's ids on the record when it is made, before any handler formats it."""
+
+    def filter(self, record):
+        record.log_context = LOG_CONTEXT.get()
+        return True
+
+
+class JsonFormatter(logging.Formatter):
+    def format(self, record):
+        entry = {"severity": record.levelname, "message": record.getMessage(), **getattr(record, "log_context", {}), **getattr(record, "fields", {})}
+        if entry.get("batchId"):
+            entry["logging.googleapis.com/labels"] = {"app": "catalog", "batchId": str(entry["batchId"])}
+        return json.dumps(entry, default=str)
+
+
+class LogContextMiddleware:
+    """Pure ASGI: reads the trace headers into LOG_CONTEXT for the rest of the request."""
+
+    def __init__(self, inner):
+        self.inner = inner
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            return await self.inner(scope, receive, send)
+        context = {CONTEXT_HEADERS[name]: value.decode("latin-1")[:128] for name, value in scope.get("headers", []) if name in CONTEXT_HEADERS and value}
+        token = LOG_CONTEXT.set(context)
+        try:
+            await self.inner(scope, receive, send)
+        finally:
+            LOG_CONTEXT.reset(token)
+
+
+_handler = logging.StreamHandler()
+_handler.setFormatter(JsonFormatter())
+logging.basicConfig(level=logging.INFO, handlers=[_handler])
 logger = logging.getLogger("matting")
+# One filter, also when the module is imported again (the tests do): the newest reads the current LOG_CONTEXT.
+for _old in [f for f in logger.filters if type(f).__name__ == "LogContextFilter"]:
+    logger.removeFilter(_old)
+logger.addFilter(LogContextFilter())
 INPUT_SIZES = {
     "birefnet-general": 1024,
     "birefnet-general-lite": 1024,
@@ -84,6 +132,7 @@ async def lifespan(_app):
 
 
 app = FastAPI(lifespan=lifespan)
+app.add_middleware(LogContextMiddleware)
 
 
 def png_response(image, started, headers):
@@ -125,13 +174,14 @@ def matte(file: UploadFile, model: str = DEFAULT_MODEL):
             mask = remove(image, session=session_for(model), only_mask=True).convert("L")
             status = Path("/proc/self/status")
             memory = [line for line in status.read_text().splitlines() if line.startswith(("VmRSS:", "VmHWM:"))] if status.exists() else []
-            logger.info("inference_complete model=%s target=%s memory=%s", model, TARGET, memory)
+            ms = int((time.perf_counter() - started) * 1000)
+            logger.info("inference_complete model=%s target=%s memory=%s ms=%d", model, TARGET, memory, ms, extra={"fields": {"model": model, "target": TARGET, "ms": ms}})
         if mask.size != image.size:
             mask = mask.resize(image.size, Image.Resampling.LANCZOS)
         return png_response(mask, started, {"x-model": model, "x-input-size": f"{image.width}x{image.height}"})
     except Exception:
         # Inference internals and user image bytes do not belong in HTTP errors or logs.
-        logger.error("inference_failed target=%s model=%s", TARGET, model)
+        logger.error("inference_failed target=%s model=%s", TARGET, model, extra={"fields": {"model": model, "target": TARGET}})
         return JSONResponse({"error": "background removal failed"}, status_code=500)
 
 
@@ -330,7 +380,7 @@ def run_upscale(model, image):
         started = time.perf_counter()
         pixels = upscale_array(np.asarray(image, dtype=np.uint8), upscaler.run, upscaler.tile)
         elapsed = int((time.perf_counter() - started) * 1000)
-    logger.info("upscale_complete model=%s target=%s size=%dx%d ms=%d", model, TARGET, image.width, image.height, elapsed)
+    logger.info("upscale_complete model=%s target=%s size=%dx%d ms=%d", model, TARGET, image.width, image.height, elapsed, extra={"fields": {"model": model, "target": TARGET, "ms": elapsed}})
     return Image.fromarray(pixels, "RGB"), elapsed
 
 
@@ -358,7 +408,7 @@ async def upscale(request: Request, model: str | None = None, scale: str = str(U
         return upscale_error(f"upscale model {chosen} unavailable", 503)
     except Exception:
         # Inference internals and user image bytes do not belong in HTTP errors or logs.
-        logger.error("upscale_failed target=%s model=%s", TARGET, chosen)
+        logger.error("upscale_failed target=%s model=%s", TARGET, chosen, extra={"fields": {"model": chosen, "target": TARGET}})
         return upscale_error("upscale failed", 500)
     output = io.BytesIO()
     options = {"quality": 95, "subsampling": 0}

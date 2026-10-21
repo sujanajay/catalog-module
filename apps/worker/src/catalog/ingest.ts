@@ -8,6 +8,7 @@ import type { Db } from "@catalog/core/db/client";
 import { pinnedFetch } from "@catalog/core/safe-url";
 import * as storage from "@catalog/core/storage";
 import { enqueueTask } from "@catalog/core/tasks";
+import { log } from "@catalog/core/log";
 import type { HandleResult } from "../server";
 
 export interface IngestTaskDeps {
@@ -37,7 +38,7 @@ export async function handleIngestTask(deps: IngestTaskDeps, body: Record<string
     const { outcome } = await (deps.run ?? runIngest)(deps.db, deps.ingest, { batchId, uploadId, ...(cursor ? { cursor } : {}) });
     return { httpStatus: 200, outcome };
   } catch (err) {
-    console.error(JSON.stringify({ severity: "ERROR", message: "ingest task failed", batchId, uploadId, error: err instanceof Error ? err.message : String(err) }));
+    log("ERROR", "ingest task failed", { batchId, uploadId, error: err instanceof Error ? err : String(err) });
     return { httpStatus: 500, outcome: "error" };
   }
 }

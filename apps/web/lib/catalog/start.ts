@@ -5,6 +5,7 @@ import { planChunks } from "@catalog/core/catalog/pipeline/plan-chunks";
 import { buildPreview } from "@catalog/core/catalog/ingest/index";
 import * as storage from "@catalog/core/storage";
 import { enqueueTask } from "@catalog/core/tasks";
+import { log } from "@catalog/core/log";
 import { db } from "../db";
 import { badRequest, HttpError } from "../errors";
 import { queryBatch } from "./batches";
@@ -30,6 +31,7 @@ export async function startBatch(id: string, value: unknown, _actor: string) {
     const detail = uploads.map((u) => u.error).filter(Boolean).join(" ");
     const sentence = `No photos were found in what you uploaded.${detail ? ` ${detail}` : " Upload photos and start again."}`;
     await db().update(catalogBatches).set({ status: "failed", counts: { ...batch.counts, failReason: sentence }, updatedAt: new Date() }).where(eq(catalogBatches.id, id));
+    log("ERROR", "batch failed", { batchId: id, brandSlug: batch.brandSlug, reason: sentence, cause: "no_photos" });
     throw badRequest(sentence);
   }
   const preview = await buildPreview(db(), id, { storage });
@@ -56,5 +58,6 @@ export async function startBatch(id: string, value: unknown, _actor: string) {
     return rows;
   });
   for (const chunk of chunks) await enqueueTask("/tasks/catalog/chunk", { chunkId: chunk.id }, {taskId:`chunk-${chunk.id}-matte`});
+  log("INFO", "batch started", { batchId: id, brandSlug: batch.brandSlug, products: products.length, sources: sources.length, outputs: sources.length * batch.channels.length, chunks: chunks.length, channels: batch.channels });
   return { id, status: "matting" };
 }

@@ -1,7 +1,7 @@
 import { createServer, type Server } from "node:http";
 import sharp from "sharp";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { alphaFromPng, BREAKER_COOLDOWN_MS, BREAKER_FAILURES, floodFillMatte, MattingClient, matteFor } from "./matte";
+import { alphaFromPng, BREAKER_COOLDOWN_MS, BREAKER_FAILURES, floodFillMatte, MattingClient, matteFor, TRACE_HEADERS } from "./matte";
 import type { Prepared } from "./render";
 
 function prepared(): Prepared {
@@ -31,7 +31,7 @@ async function service(target: "cpu" | "gpu", ids = ["general"], inputSize: numb
   const address = server.address() as { port: number };
   return { ...state, state, baseUrl: `http://127.0.0.1:${address.port}`, target };
 }
-beforeEach(() => vi.spyOn(console, "info").mockImplementation(() => undefined));
+beforeEach(() => { vi.spyOn(console, "info").mockImplementation(() => undefined); vi.spyOn(console, "warn").mockImplementation(() => undefined); });
 afterEach(async () => { vi.restoreAllMocks(); await Promise.all(servers.splice(0).map((s) => new Promise<void>((r) => s.close(() => r())))); });
 
 describe("matting client", () => {
@@ -67,6 +67,9 @@ describe("matting client", () => {
     gpu.state.fail = true;
     for (let i = 0; i < BREAKER_FAILURES; i++) expect((await matteFor(prepared(), client)).target).toBe("cpu");
     expect(client.breakers.gpu?.state).toBe("open"); expect(client.breaker.state).toBe("closed");
+    // Log contract: key `message` (never `event`), WARNING when open, no batchId (the breaker is process-wide).
+    const opened = vi.mocked(console.warn).mock.calls.map(([line]) => JSON.parse(String(line)) as Record<string, unknown>);
+    expect(opened).toEqual([{ severity: "WARNING", message: "matting_breaker", service: "gpu", state: "open" }]);
     cpu.state.fail = true;
     for (let i = 0; i < BREAKER_FAILURES; i++) expect((await matteFor(prepared(), client)).source).toBe("floodfill");
     expect(client.breaker.state).toBe("open");
@@ -75,6 +78,8 @@ describe("matting client", () => {
     gpu.state.fail = false;
     vi.spyOn(Date, "now").mockReturnValue(Date.now() + BREAKER_COOLDOWN_MS + 1);
     expect((await matteFor(prepared(), client)).target).toBe("gpu"); expect(client.breakers.gpu).toMatchObject({ state: "closed", failures: 0, openedAt: null });
+    const recovered = vi.mocked(console.info).mock.calls.map(([line]) => JSON.parse(String(line)) as Record<string, unknown>).filter((l) => l.message === "matting_breaker" && l.service === "gpu");
+    expect(recovered).toEqual([{ severity: "INFO", message: "matting_breaker", service: "gpu", state: "half-open" }, { severity: "INFO", message: "matting_breaker", service: "gpu", state: "closed" }]);
   });
   it("convert bypasses the breaker and failures do not increment it", async () => {
     const cpu = await service("cpu"), client = new MattingClient({ services: [cpu] });
@@ -170,4 +175,36 @@ it("flood fills border-connected background, keeps product interior and prefers 
   expect(await matteFor(p, null)).toMatchObject({ source: "alpha_source", alpha: p.alphaSource });
   const png = await sharp(Buffer.from([0, 255]), { raw: { width: 2, height: 1, channels: 1 } }).png().toBuffer();
   expect(await alphaFromPng(png)).toEqual({ alpha: Buffer.from([0, 255]), width: 2, height: 1 });
+});
+
+describe("per-call trace headers", () => {
+  const upscale = { models: [{ id: "x2", available: true, scale: 2 }], default: "x2" };
+  function recorder() {
+    const seen: { path: string; batch: string | null; product: string | null }[] = [];
+    const fetch = vi.fn<typeof globalThis.fetch>(async (url, init) => {
+      const u = new URL(String(url)), headers = new Headers(init?.headers);
+      seen.push({ path: u.pathname, batch: headers.get(TRACE_HEADERS.batchId), product: headers.get(TRACE_HEADERS.productId) });
+      const target = u.hostname === "cpu.local" ? "cpu" : "gpu";
+      if (u.pathname === "/health") return Response.json({ ok: true, models: [{ id: "general", inputSize: 64, target }], default: "general", version: "v", ...(target === "gpu" ? { upscale } : {}) });
+      if (u.pathname === "/matte") return new Response(new Uint8Array(await sharp({ create: { width: 64, height: 43, channels: 3, background: "white" } }).png().toBuffer()), { headers: { "x-ms": "5" } });
+      if (u.pathname === "/upscale") return new Response(new Uint8Array([1, 2, 3]), { headers: { "x-upscale-ms": "7" } });
+      return new Response(new Uint8Array([9]));
+    });
+    return { seen, client: new MattingClient({ services: [{ baseUrl: "http://cpu.local", target: "cpu" }, { baseUrl: "http://gpu.local", target: "gpu" }], fetch, idToken: async () => "token" }) };
+  }
+  it("sends x-catalog-batch and x-catalog-product on /matte, /convert and /upscale, and not on /health", async () => {
+    const { seen, client } = recorder(), trace = { batchId: "b1", productId: "p1" };
+    expect((await matteFor(prepared(), client, "general", {}, trace)).source).toBe("model");
+    await client.convert(Buffer.from([1]), trace);
+    await client.upscale(Buffer.from([1]), { model: "x2", contentType: "image/jpeg" }, trace);
+    const traced = seen.filter((s) => s.path !== "/health");
+    expect(traced.map((s) => s.path)).toEqual(["/matte", "/convert", "/upscale"]);
+    expect(traced.every((s) => s.batch === "b1" && s.product === "p1")).toBe(true);
+    expect(seen.filter((s) => s.path === "/health").every((s) => s.batch === null && s.product === null)).toBe(true);
+  });
+  it("sends no trace headers when the caller gives no ids", async () => {
+    const { seen, client } = recorder();
+    await client.matte(prepared(), "general"); await client.convert(Buffer.from([1]));
+    expect(seen.every((s) => s.batch === null && s.product === null)).toBe(true);
+  });
 });

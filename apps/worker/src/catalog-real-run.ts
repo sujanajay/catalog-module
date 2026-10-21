@@ -43,7 +43,7 @@ export async function runRealFixture(db: Db, fixture: RealFixture, out: string, 
   let lastChunkError: string | undefined;
   // Observe the real operations without replacing their implementations.
   // The smoke never calls OpenRouter: the judge is mocked (07 tier 5); live checks run as catalog-qa-check.
-  const deps: CatalogDeps = { ...base, ...cannedQa, enqueue: async () => "local-real-run", log: (message, fields) => { if (message === "chunk failed") lastChunkError = String(fields?.error); console.info(JSON.stringify({ message, ...fields })); },
+  const deps: CatalogDeps = { ...base, ...cannedQa, enqueue: async () => "local-real-run", log: (message, fields) => { if (message === "chunk failed") lastChunkError = fields?.error instanceof Error ? fields.error.message : String(fields?.error); base.log(message, fields); },
     matteFor: async (...args) => { calls.matte++; return base.matteFor(...args); },
     renderAllChannels: async (...args) => { calls.render++; const result = await base.renderAllChannels(...args); for (const channel of args[2]) plans.set(`${args[3]?.identifier}|${args[3]?.shotNumber}|${channel}`, result[channel].plan); return result; },
     storage: { ...storage, stageCopyToPublic: async (...args) => { calls.copy++; return storage.stageCopyToPublic(...args); } } };

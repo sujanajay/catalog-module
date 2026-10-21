@@ -1,6 +1,8 @@
 """/upscale contract tests. No GPU and no real model: a stubbed ONNX session stands in for inference."""
 import importlib
 import io
+import json
+import logging
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -286,3 +288,14 @@ def test_constant_image_stays_constant_across_tiles(service):
     out = service[1].upscale_array(rgb, blurred, TILE)
     assert out.shape == (600, 820, 3)
     assert (out == np.array([17, 128, 250], dtype=np.uint8)).all()
+
+
+def test_upscale_log_line_carries_the_batch_and_ms(enabled, caplog):
+    client, module = enabled[0], enabled[1]
+    caplog.set_level(logging.INFO, logger="matting")
+    response = client.post("/upscale?model=realesrgan-x2plus&scale=2", content=encoded(checker()), headers={"content-type": "image/png", "x-catalog-batch": "b1", "x-catalog-product": "p1"})
+    assert response.status_code == 200
+    formatter = module.JsonFormatter()
+    [line] = [json.loads(formatter.format(r)) for r in caplog.records if r.getMessage().startswith("upscale_complete")]
+    assert line["severity"] == "INFO" and line["batchId"] == "b1" and line["productId"] == "p1"
+    assert line["model"] == "realesrgan-x2plus" and line["ms"] == int(response.headers["x-upscale-ms"])
