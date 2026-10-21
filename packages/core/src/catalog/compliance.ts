@@ -7,6 +7,14 @@ import type { ChannelId } from "./types";
 // Flat quality-70 and high-contrast quality-90 JPEG round trips are tested against this bound.
 // Keep below 31 so white product pixels on the prescribed grey still count as foreground.
 export const BG_TOLERANCE = 24;
+/**
+ * The Styli guide (styli_anchor) is judged on the product: what is seen (more than BG_TOLERANCE off the canvas colour)
+ * together with where the render's foreground mask (the placed cut-out's alpha) is at least this, the matte's
+ * half-alpha silhouette. A white or pale grey product is barely seen on the #E0E0E0 canvas (white cotton photographs
+ * at 240 to 250), so the seen pixels alone leave out whole parts of it; the soft outer fade below this alpha is left
+ * to what is seen. Without a mask (a re-check of a stored JPEG) only what is seen counts.
+ */
+export const ANCHOR_MASK_ALPHA = 128;
 export interface ComplianceInput { jpeg: Buffer; channel: ChannelId; shotNumber: number; plan: CanvasPlan; identifier: string; n: number; publicObjectPath: string; foregroundMask?: Buffer }
 export async function checkOutput(input: ComplianceInput): Promise<{ ok: boolean; failures: string[] }> {
   const { jpeg, plan } = input, spec = channel(input.channel), failures: string[] = [];
@@ -25,9 +33,11 @@ export async function checkOutput(input: ComplianceInput): Promise<{ ok: boolean
     const source = plan.sourceBox, wide = source ? source.w > source.h : (plan.productBox?.w ?? 0) > (plan.productBox?.h ?? 0);
     // A side cut in the source sits flush with the canvas edge (margin 0 on that side only).
     const cut = plan.cut ?? NO_CUT, safe = safeBoxFor(spec, { w, h }, wide, cut), band = borderBand(w, h), color = hexColor(backgroundFor(spec.id, input.shotNumber));
-    let backgroundBad = false, outside = false, x0 = w, x1 = -1, y0 = h, y1 = -1;
+    let backgroundBad = false, outside = false, x0 = w, x1 = -1, y0 = h, y1 = -1, ax0 = w, ax1 = -1, ay0 = h, ay1 = -1;
+    const mask = input.foregroundMask?.length === w * h ? input.foregroundMask : null;
     for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
       const offset = (y * w + x) * 3;
+      if (mask && mask[y * w + x]! >= ANCHOR_MASK_ALPHA) { ax0 = Math.min(ax0, x); ax1 = Math.max(ax1, x); ay0 = Math.min(ay0, y); ay1 = Math.max(ay1, y); }
       const delta = Math.max(Math.abs(data[offset]! - color[0]), Math.abs(data[offset + 1]! - color[1]), Math.abs(data[offset + 2]! - color[2]));
       if (delta <= BG_TOLERANCE) continue;
       x0 = Math.min(x0, x); x1 = Math.max(x1, x); y0 = Math.min(y0, y); y1 = Math.max(y1, y);
@@ -40,8 +50,10 @@ export async function checkOutput(input: ComplianceInput): Promise<{ ok: boolean
     }
     if (backgroundBad) fail("background", "The exposed background or margin has the wrong colour.");
     if (outside) fail("inside_safe_box", "The product or shadow reaches outside the required margins.");
-    const styliVertical = cut.bottom ? Math.abs(y1 + 1 - h) <= 1 : cut.top ? y0 <= 1 : Math.abs(y1 + 1 - (h - 450)) <= 1;
-    const styliHorizontal = cut.left && !cut.right ? x0 <= 1 : cut.right && !cut.left ? x1 + 1 >= w - 1 : Math.abs((x0 + x1 + 1) / 2 - w / 2) <= 1;
+    // The product's box for the guide: what is seen and the mask's half-alpha silhouette (ANCHOR_MASK_ALPHA).
+    const px0 = Math.min(x0, ax0), px1 = Math.max(x1, ax1), py0 = Math.min(y0, ay0), py1 = Math.max(y1, ay1);
+    const styliVertical = cut.bottom ? Math.abs(py1 + 1 - h) <= 1 : cut.top ? py0 <= 1 : Math.abs(py1 + 1 - (h - 450)) <= 1;
+    const styliHorizontal = cut.left && !cut.right ? px0 <= 1 : cut.right && !cut.left ? px1 + 1 >= w - 1 : Math.abs((px0 + px1 + 1) / 2 - w / 2) <= 1;
     if (spec.id === "styli" && (!styliVertical || !styliHorizontal)) fail("styli_anchor", "The product must be centred on the Styli bottom guide.");
     if (spec.id === "noon" && wide && ((!cut.left && x0 < Math.ceil(w * 0.05)) || (!cut.right && x1 + 1 > Math.floor(w * 0.95)))) fail("noon_wide", "Wide Noon shots need at least 5% side margins.");
   } catch { fail("format", "The encoded image cannot be decoded."); }

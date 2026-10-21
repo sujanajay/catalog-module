@@ -5,6 +5,8 @@ import sharp from "sharp";
 import { CHANNEL_IDS } from "./types";
 import { prepare, renderSource, renderKeyInputs, planProduct, safeBoxFor, UnsupportedSourceError, visibleAnchorShift, NO_CUT, type Prepared, type Matte } from "./render";
 import { checkOutput, BG_TOLERANCE } from "./compliance";
+import { alphaFromPng } from "./matte";
+import { readFile } from "node:fs/promises";
 import { analyseBackground, preservedDarkness, shadowLayer, SHADOW_MAX_DARKNESS } from "./shadow";
 import { contactSheet } from "./contact-sheet";
 import type { Upscaler } from "./upscale";
@@ -288,10 +290,10 @@ describe("Styli judged on the upscaled size", () => {
     for (let i = 0; i < 40 * 40; i++) { raw.fill(30, i * 4, i * 4 + 3); raw[i * 4 + 3] = i < 30 * 40 ? 255 : 20; }
     const fade = await sharp(raw, { raw: { width: 40, height: 40, channels: 4 } }).png().toBuffer();
     const box = { x: 1000, y: 3083, w: 40, h: 40 }, safe = { x: 150, y: 450, w: 2042, h: 2673 }, canvas = { w: 2342, h: 3123 };
-    expect((await visibleAnchorShift(fade, box, safe, canvas, [224, 224, 224], { ...NO_CUT, bottom: true }, 2)).dy).toBe(0);
-    expect((await visibleAnchorShift(fade, { ...box, x: 0 }, safe, canvas, [224, 224, 224], { ...NO_CUT, left: true }, 2)).dx).toBe(0);
+    expect((await visibleAnchorShift(fade, box, safe, canvas, [224, 224, 224], { ...NO_CUT, bottom: true })).dy).toBe(0);
+    expect((await visibleAnchorShift(fade, { ...box, x: 0 }, safe, canvas, [224, 224, 224], { ...NO_CUT, left: true })).dx).toBe(0);
   });
-  it("does not move a product that is barely seen on the grey canvas; the check holds it as before", async () => {
+  it("places a product that is barely seen on the grey canvas by its silhouette, never dragged after its logo", async () => {
     quiet();
     // A pale grey shirt (#EAEAEA, under BG_TOLERANCE from #E0E0E0) with a dark logo high on its left chest.
     const width = 800, height = 1200, rgb = Buffer.alloc(width * height * 3, 255), alpha = Buffer.alloc(width * height);
@@ -302,11 +304,13 @@ describe("Styli judged on the upscaled size", () => {
     const source = { prepared: { width, height, rgb, alphaSource: null, background: analyseBackground(rgb, width, height), flags: [], sourceMime: "image/jpeg" }, matte: { alpha, width, height, model: "synthetic", ms: 0, source: "model" as const, target: "gpu" as const, sentLongSide: null } };
     const output = await renderSource({ ...source, channel: "styli", shotNumber: 2, productType: "apparel_flat", upscaler: lanczosUpscaler() });
     const planned = planCanvas(CHANNELS.styli, { x: 250, y: 100, w: 300, h: 1000 }, { w: width, h: height }, {});
+    // Not dragged after the logo (that moved the shirt 450 px into the bottom margin): the shirt sits where the plan
+    // put it, on the guide and centred, and the check, which measures the shirt by its silhouette too, passes.
     expect(output.plan.productBox).toEqual(planned.productBox);
-    expect(output.compliance.failures.some(f => f.startsWith("styli_anchor:"))).toBe(true); expect(output.status).toBe("failed");
-    // Nothing seen at all (the whole cut-out the canvas grey): no move.
-    const blank = await sharp({ create: { width: 40, height: 40, channels: 4, background: { r: 224, g: 224, b: 224, alpha: 1 } } }).png().toBuffer();
-    expect(await visibleAnchorShift(blank, { x: 1000, y: 2633, w: 40, h: 40 }, { x: 150, y: 450, w: 2042, h: 2223 }, { w: 2342, h: 3123 }, [224, 224, 224], NO_CUT, 2)).toEqual({ dx: 0, dy: 0 });
+    expect(output.compliance.failures).toEqual([]); expect(output.status).toBe("ok");
+    // Nothing there at all (a fully transparent cut-out): no move.
+    const blank = await sharp({ create: { width: 40, height: 40, channels: 4, background: { r: 224, g: 224, b: 224, alpha: 0 } } }).png().toBuffer();
+    expect(await visibleAnchorShift(blank, { x: 1000, y: 2633, w: 40, h: 40 }, { x: 150, y: 450, w: 2042, h: 2223 }, { w: 2342, h: 3123 }, [224, 224, 224], NO_CUT)).toEqual({ dx: 0, dy: 0 });
   });
   it("keeps a moved cut-out on the canvas with what is seen inside the safe box, for a product as tall as the safe box", async () => {
     // A dark product filling the safe box height, its last 6 rows a faint fade: it moves down only into the margin.
@@ -314,9 +318,28 @@ describe("Styli judged on the upscaled size", () => {
     for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) { const i = (y * w + x) * 4; raw[i] = raw[i + 1] = raw[i + 2] = 30; raw[i + 3] = y < h - 6 ? 255 : 20; }
     const cutout = await sharp(raw, { raw: { width: w, height: h, channels: 4 } }).png().toBuffer();
     const product = { x: 870, y: 450, w, h }, safe = { x: 150, y: 450, w: 2042, h: 2223 }, canvas = { w: 2342, h: 3123 };
-    const { dx, dy } = await visibleAnchorShift(cutout, product, safe, canvas, [224, 224, 224], NO_CUT, 2);
+    const { dx, dy } = await visibleAnchorShift(cutout, product, safe, canvas, [224, 224, 224], NO_CUT);
     expect(dy).toBe(5); expect(dx).toBe(1);
     expect(product.y + dy).toBeGreaterThanOrEqual(safe.y); expect(product.y + dy + h).toBeLessThanOrEqual(canvas.h);
     expect(product.y + dy + (h - 6)).toBeLessThanOrEqual(safe.y + safe.h);
+  });
+
+  // The b1 gate on D5 (batch 4a8c7912, Z0136): an 800x1200 photo of three briefs stacked (white on top, grey, black at
+  // the bottom) and one of a single white brief on white, with the real model mattes from that batch. White cotton
+  // photographs at 237 to 246, within BG_TOLERANCE of the #E0E0E0 canvas, so the pixels seen leave out the white brief
+  // (photo 4: its seen bottom 19 px above the guide and its seen centre 44 px off): styli_anchor failed on both, and
+  // both auto-fix steps too.
+  const FIXTURES = new URL("../../test-fixtures/catalog/styli-anchor/", import.meta.url);
+  it.each([1, 4])("puts the real white brief photo %i on the Styli guide by its silhouette", async n => {
+    quiet();
+    const prepared = await prepare(await readFile(new URL(`brief-${n}.jpg`, FIXTURES)), `brief-${n}.jpg`, async b => b);
+    const matte: Matte = { ...(await alphaFromPng(await readFile(new URL(`brief-${n}.matte.png`, FIXTURES)))), model: "birefnet", ms: 0, source: "model", target: "gpu", sentLongSide: null };
+    const output = await renderSource({ prepared, matte, channel: "styli", shotNumber: n, productType: "apparel_flat", upscaler: lanczosUpscaler() });
+    expect(output.flags).toContain("upscaled"); expect(output.plan.cut).toEqual(NO_CUT);
+    expect(output.compliance.failures).toEqual([]); expect(output.status).toBe("ok");
+    // Placed by its silhouette: the cut-out moved no more than a fade's few px from the plan.
+    const planned = planCanvas(CHANNELS.styli, bbox(matte.alpha, matte.width, matte.height)!, { w: 800, h: 1200 }, {});
+    expect(Math.abs(output.plan.productBox!.x - planned.productBox!.x)).toBeLessThanOrEqual(6);
+    expect(Math.abs(output.plan.productBox!.y - planned.productBox!.y)).toBeLessThanOrEqual(6);
   });
 });
