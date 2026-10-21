@@ -145,8 +145,9 @@ function synthesisedDarkness(matte: Matte, box: BBox, plan: CanvasPlan, intensit
   return out;
 }
 
-export async function shadowLayer(p: Prepared, matte: Matte, box: BBox, plan: CanvasPlan, type: ProductType, background: string, foregroundMask?: Buffer): Promise<{ layer: Buffer | null; flags: OutputFlag[] }> {
-  const darkness = preservedDarkness(p, matte, box, type), product = plan.productBox!;
+/** `keepSource` false skips the shadow kept from the source photo (07 4.6a `source_shadow_off`); the synthesis rule then decides as if none could be measured. */
+export async function shadowLayer(p: Prepared, matte: Matte, box: BBox, plan: CanvasPlan, type: ProductType, background: string, foregroundMask?: Buffer, keepSource = true): Promise<{ layer: Buffer | null; flags: OutputFlag[] }> {
+  const darkness = keepSource ? preservedDarkness(p, matte, box, type) : null, product = plan.productBox!;
   let flags: OutputFlag[] = [], projected: Float32Array, frame = { x0: 0, y0: 0, x1: plan.w, y1: plan.h };
   if (darkness) {
     const resizedW = Math.max(1, Math.round(p.width * plan.scale)), resizedH = Math.max(1, Math.round(p.height * plan.scale));

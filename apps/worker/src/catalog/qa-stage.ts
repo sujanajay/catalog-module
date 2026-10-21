@@ -3,10 +3,10 @@ import { catalogBatches, catalogOutputs, catalogProducts, catalogSourceImages } 
 import { CHANNELS, CUT_BAND_NOTE_START } from "@catalog/core/catalog/channels";
 import { checkCatalogCaps } from "@catalog/core/catalog/qa/caps";
 import { sampledForQa, strictestChannel } from "@catalog/core/catalog/qa/policy";
-import { autoActionNote, bySeverity, flagDetails } from "@catalog/core/catalog/qa/reasons";
+import { autoActionNote, bySeverity, flagDetails, plainFailures, triedSentence } from "@catalog/core/catalog/qa/reasons";
 import { CHART_VIEW, DIMENSION_FLAGS, OUTPUT_DIMENSIONS, PHOTO_DIMENSIONS, QA_DIMENSIONS, dimensionThresholds, failingDimensions, scoreOf, withOverall, type JudgeResult, type QaDimension } from "@catalog/core/catalog/qa/judge";
 import { HARD_HOLD_FLAGS, INFORMATION_FLAGS, LEFT_OUT_FLAGS, problemFlags, triageProduct, type RepairOwnDefects } from "@catalog/core/catalog/qa/triage";
-import { autoActionsOf, busyBackgroundHold, judgeSawSourceCut, OWN_DEFECT_FLAGS, ownDefects } from "@catalog/core/catalog/auto-resolve";
+import { autoActionsOf, busyBackgroundHold, failuresOf, judgeSawSourceCut, OWN_DEFECT_FLAGS, ownDefects } from "@catalog/core/catalog/auto-resolve";
 import { shadowSynthesisAllowed } from "@catalog/core/catalog/qa/policy";
 import { flushCutPhoto, resolvePhoto, stopOn } from "./auto-resolve";
 import { recordCost } from "@catalog/core/spend";
@@ -188,11 +188,12 @@ export async function runQaStage(deps:CatalogDeps,batch:Batch,sources:Source[],p
 /** Judge flags the ladder resolves in the QA stage (code-checked placement fails compliance at render). */
 const JUDGE_TRIGGERS=new Set<OutputFlag>([...OWN_DEFECT_FLAGS].filter(flag=>flag!=="failed_compliance"));
 /**
- * The production `repairOwnDefects` (07 auto-resolve), run before triage decides anything: a photo the judge found cut at its own frame edge
+ * The production `repairOwnDefects` (07 4.6a), run before triage decides anything: a photo the judge found cut at its own frame edge
  * that the cut detector missed is re-placed flush; a photo with our own defect (halo, leftover
- * background) climbs the retry ladder (shadow off, second matte, 5% smaller fit) with one re-judge
- * per step. The winner is applied to every channel of the photo. The judge cap rules apply to every
- * re-judge; reaching a cap ends the ladder and the photo keeps its flags for the triage.
+ * background, part of the product removed) gets the repair its failure asks for (the drawn shadow off on
+ * the channels that carry it, the second cut-out, the whole frame) with one re-judge per round. A render
+ * fix changes its own channel only; a matte change re-checks every channel. The judge cap rules apply to
+ * every re-judge; reaching a cap ends the loop and the photo keeps its flags for the triage.
  */
 export interface QaRepairContext { deps: CatalogDeps; batch: Batch; policy: ResolvedPolicy; productId: string; underClaim: UnderClaim }
 /** Outputs the re-render loop gets: our own defects, or a frame cut the judge saw (flushCutPhoto decides whether a side is new). */
@@ -269,7 +270,10 @@ export async function applyTriage(deps:CatalogDeps,batch:Batch,productId:string,
   for(const o of current) {
    const decision=decisions.get(o.id),scores=o.qaScores;
    if(!decision || o.status==="failed") continue;
-   const lead=leadFlag(o.flags),ctx={channel:CHANNELS[o.channel].label,n:o.n,k:batch.channels.length,busy:busyBackgroundHold(o.compliance)},why=lead ? flagDetails(lead,ctx).why:null;
+   // The rule in plain words (never its code) and, for our own defect still there after the repair loop, what was tried (07 4.6a).
+   const lead=leadFlag(o.flags),ctx={channel:CHANNELS[o.channel].label,n:o.n,k:batch.channels.length,busy:busyBackgroundHold(o.compliance),failures:plainFailures(failuresOf(o.compliance),CHANNELS[o.channel].label)};
+   const tried=lead && OWN_DEFECT_FLAGS.has(lead) && !ctx.busy ? triedSentence(autoActionsOf(o.compliance).filter(a=>a.result!=="skipped").map(a=>a.step)):"";
+   const why=lead ? [flagDetails(lead,ctx).why,tried].filter(Boolean).join(" "):null;
    // Hard holds first, then the worst problem, so the card and the note cite the main problem.
    const ordered=[...new Set([...o.flags.filter(flag=>HARD_HOLD_FLAGS.has(flag)),...bySeverity(o.flags)])];
    const leftOut=o.flags.some(flag=>LEFT_OUT_FLAGS.has(flag));

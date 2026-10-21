@@ -53,6 +53,13 @@ configuration. Access is by Google sign-in with three roles (admin, operator, vi
   `UPSCALE_MODEL=off` turns it off) for every channel wherever a photo is enlarged beyond 1.5x, and the
   x2 upscale un-skips Styli: Styli judges the size after the upscale, so its source floor is 741 px with
   the upscaler (1,482 px without). No paid image API without a separate owner yes.
+- Repairs (owner, 2026-10-22): a defect we produced is never answered by a fixed list. For each output
+  (channel x photo) the pipeline reads what failed (the rule code, the measured values, the judge's flag
+  and evidence) and applies the fix for that failure on that channel, computed from the measurement
+  where there is one, re-checks, and leaves an image out only when the source is genuinely unfixable,
+  with a plain reason naming the rule (never a rule id or a model id). Fixes happen in the first run; a
+  fix touches the failing channel only; a cut-out change re-checks every channel (spec 07 4.6a, design
+  `docs/plans/2026-10-22-targeted-repair.md`).
 - Product identity and overwrite: the product (brand + style+colour identifier) owns its public images.
   Opptra SKU ids are attributes, never part of a link. A re-upload overwrites in place and deletes the
   shots the new upload no longer has. Batches are events; product state is the truth. Marketplaces keep

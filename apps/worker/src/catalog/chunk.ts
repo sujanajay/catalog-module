@@ -257,10 +257,10 @@ export async function handleChunkTask(deps: CatalogDeps, body: Record<string,unk
             const staged = rendered.jpeg ? await deps.storage.headObject(uri):null;
             await underClaim(async tx=>tx.update(catalogOutputs).set({status,stagingUri:rendered.jpeg ? uri:null,crc32c:staged?.crc32c ?? null,updatedAt:deps.now()}).where(eq(catalogOutputs.id,output.id)));
           } catch(error) { const reason = error instanceof Error ? error.message:String(error); await underClaim(async tx=>tx.update(catalogOutputs).set({status:"failed",error:reason,reason,updatedAt:deps.now()}).where(eq(catalogOutputs.id,output.id))); }
-          // 07 auto-resolve: a channel rule we broke (placement, margins, background) is re-made before
-          // anything is held: shadow off, second matte, 5% smaller fit, the winner on every channel.
+          // 07 4.6a: a channel rule we broke (the Styli guide, margins, the band colour, the file size) is re-made
+          // before anything is held, with the fix the measured failure asks for, on the failing channel only.
           const photo = await deps.db.select().from(catalogOutputs).where(and(eq(catalogOutputs.sourceImageId,source.id),eq(catalogOutputs.batchId,batch.id),isNull(catalogOutputs.decision),inArray(catalogOutputs.status,["staged","needs_attention"])));
-          // Once per photo: a redelivered chunk does not climb the ladder again.
+          // Once per photo: a redelivered chunk does not repair again.
           const failing = photo.filter(row=>row.flags.includes("failed_compliance") && !autoActionsOf(row.compliance).some(action=>action.trigger.includes("failed_compliance")));
           if (failing.length) try {
             await resolvePhoto(deps,{batch,product,source,policy:productPolicy,underClaim,outputs:photo,failing,trigger:["failed_compliance"],prepared:p,matte,

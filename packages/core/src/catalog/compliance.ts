@@ -1,6 +1,6 @@
 import sharp from "sharp";
 import { backgroundFor, channel, MAX_OUTPUT_BYTES } from "./channels";
-import { effectiveMinimum, hexColor, NO_CUT, safeBoxFor, type CanvasPlan } from "./render";
+import { effectiveMinimum, hexColor, NO_CUT, safeBoxFor, type BBox, type CanvasPlan } from "./render";
 import { borderBand } from "./shadow";
 import type { ChannelId } from "./types";
 
@@ -16,9 +16,25 @@ export const BG_TOLERANCE = 24;
  */
 export const ANCHOR_MASK_ALPHA = 128;
 export interface ComplianceInput { jpeg: Buffer; channel: ChannelId; shotNumber: number; plan: CanvasPlan; identifier: string; n: number; publicObjectPath: string; foregroundMask?: Buffer }
-export async function checkOutput(input: ComplianceInput): Promise<{ ok: boolean; failures: string[] }> {
+/**
+ * What the check measured, kept with the failures so a repair can compute its fix from the numbers (07 4.6a):
+ * `seen` is the product's box as the check sees it (seen pixels plus the half-alpha silhouette), `outside` how many
+ * px of it lie past the safe box per side (0 inside), `anchorDelta` the move (canvas px) that would put a Styli
+ * product on its guide (null off Styli or where a cut side fixes the axis), `bandBreach` whether the border band
+ * holds a wrong colour outside the product. Never shown to operators.
+ */
+export interface Measured {
+  canvas: { w: number; h: number }; safe: BBox; seen: BBox | null;
+  outside: { top: number; bottom: number; left: number; right: number };
+  anchorDelta: { dx: number; dy: number } | null; bandBreach: boolean; bytes: number;
+}
+export type ComplianceCode = "magic" | "bytes" | "trendyol_name" | "extension" | "format" | "dims" | "density" | "background" | "inside_safe_box" | "styli_anchor" | "noon_wide";
+/** The rule codes of a `failures` list ("code: sentence"). */
+export const failureCodes = (failures: readonly string[]): ComplianceCode[] => failures.map(f => f.split(":")[0] as ComplianceCode);
+export async function checkOutput(input: ComplianceInput): Promise<{ ok: boolean; failures: string[]; measured: Measured }> {
   const { jpeg, plan } = input, spec = channel(input.channel), failures: string[] = [];
-  const fail = (code: string, sentence: string) => failures.push(`${code}: ${sentence}`);
+  const fail = (code: ComplianceCode, sentence: string) => failures.push(`${code}: ${sentence}`);
+  const measured: Measured = { canvas: { w: plan.w, h: plan.h }, safe: plan.safeBox, seen: null, outside: { top: 0, bottom: 0, left: 0, right: 0 }, anchorDelta: null, bandBreach: false, bytes: jpeg.length };
   if (!jpeg.subarray(0, 3).equals(Buffer.from([255, 216, 255]))) fail("magic", "The file is not a JPEG.");
   if (jpeg.length > MAX_OUTPUT_BYTES) fail("bytes", `Could not get ${input.identifier}_${input.n} for ${input.channel} under 2 MB.`);
   if (input.publicObjectPath.includes(" ")) fail("trendyol_name", "The output path contains spaces.");
@@ -33,7 +49,8 @@ export async function checkOutput(input: ComplianceInput): Promise<{ ok: boolean
     const source = plan.sourceBox, wide = source ? source.w > source.h : (plan.productBox?.w ?? 0) > (plan.productBox?.h ?? 0);
     // A side cut in the source sits flush with the canvas edge (margin 0 on that side only).
     const cut = plan.cut ?? NO_CUT, safe = safeBoxFor(spec, { w, h }, wide, cut), band = borderBand(w, h), color = hexColor(backgroundFor(spec.id, input.shotNumber));
-    let backgroundBad = false, outside = false, x0 = w, x1 = -1, y0 = h, y1 = -1, ax0 = w, ax1 = -1, ay0 = h, ay1 = -1;
+    measured.canvas = { w, h }; measured.safe = safe;
+    let backgroundBad = false, outside = false, bandBad = false, x0 = w, x1 = -1, y0 = h, y1 = -1, ax0 = w, ax1 = -1, ay0 = h, ay1 = -1;
     const mask = input.foregroundMask?.length === w * h ? input.foregroundMask : null;
     for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
       const offset = (y * w + x) * 3;
@@ -46,16 +63,23 @@ export async function checkOutput(input: ComplianceInput): Promise<{ ok: boolean
       const product = plan.productBox;
       const foregroundAtEdge = input.foregroundMask?.length === w * h ? input.foregroundMask[y * w + x]! > 0 : product && x >= product.x && x < product.x + product.w && y >= product.y && y < product.y + product.h;
       const inBand = x < band.x || x >= w - band.x || y < band.y || y >= h - band.y;
-      if (inBand && !foregroundAtEdge) backgroundBad = true;
+      if (inBand && !foregroundAtEdge) { backgroundBad = true; bandBad = true; }
     }
+    measured.bandBreach = bandBad;
     if (backgroundBad) fail("background", "The exposed background or margin has the wrong colour.");
     if (outside) fail("inside_safe_box", "The product or shadow reaches outside the required margins.");
     // The product's box for the guide: what is seen and the mask's half-alpha silhouette (ANCHOR_MASK_ALPHA).
     const px0 = Math.min(x0, ax0), px1 = Math.max(x1, ax1), py0 = Math.min(y0, ay0), py1 = Math.max(y1, ay1);
+    if (px1 >= 0) {
+      measured.seen = { x: px0, y: py0, w: px1 - px0 + 1, h: py1 - py0 + 1 };
+      measured.outside = { top: Math.max(0, safe.y - py0), bottom: Math.max(0, py1 + 1 - safe.y - safe.h), left: Math.max(0, safe.x - px0), right: Math.max(0, px1 + 1 - safe.x - safe.w) };
+      // The move onto the Styli guide, as this check measures it: only an axis with no cut side can move.
+      if (spec.id === "styli") measured.anchorDelta = { dx: cut.left || cut.right ? 0 : Math.round(w / 2 - (px0 + px1 + 1) / 2), dy: cut.top || cut.bottom ? 0 : (h - 450) - (py1 + 1) };
+    }
     const styliVertical = cut.bottom ? Math.abs(py1 + 1 - h) <= 1 : cut.top ? py0 <= 1 : Math.abs(py1 + 1 - (h - 450)) <= 1;
     const styliHorizontal = cut.left && !cut.right ? px0 <= 1 : cut.right && !cut.left ? px1 + 1 >= w - 1 : Math.abs((px0 + px1 + 1) / 2 - w / 2) <= 1;
     if (spec.id === "styli" && (!styliVertical || !styliHorizontal)) fail("styli_anchor", "The product must be centred on the Styli bottom guide.");
     if (spec.id === "noon" && wide && ((!cut.left && x0 < Math.ceil(w * 0.05)) || (!cut.right && x1 + 1 > Math.floor(w * 0.95)))) fail("noon_wide", "Wide Noon shots need at least 5% side margins.");
   } catch { fail("format", "The encoded image cannot be decoded."); }
-  return { ok: failures.length === 0, failures };
+  return { ok: failures.length === 0, failures, measured };
 }
