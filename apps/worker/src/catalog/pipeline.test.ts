@@ -9,6 +9,7 @@ import type { Db } from "@catalog/core/db/client";
 import { createTestDb } from "@catalog/core/db/testing";
 import { brandMaster,catalogBatches,catalogBatchProducts,catalogChunks,catalogOutputs,catalogProductAliases,catalogProducts,catalogProductEvents,catalogSourceImages,catalogUploads,DEFAULT_BATCH_OPTIONS,EMPTY_BATCH_COUNTS,spendDays } from "@catalog/core/db/schema";
 import * as storage from "@catalog/core/storage";
+import { catalogCostEvents } from "@catalog/core/db/schema";
 import { workerCatalogDeps,type CatalogDeps } from "./deps";
 import { UnsupportedSourceError } from "@catalog/core/catalog/render";
 import { handleSweep } from "./sweep";
@@ -820,4 +821,80 @@ it("records an upscaled output with the upscaler in its render_key, as informati
     expect(await db.select().from(catalogOutputs).where(eq(catalogOutputs.batchId,again.batch.id))).toEqual([]);
     expect(render.mock.calls.length).toBe(calls);
   } finally { vi.unstubAllEnvs(); }
+},60_000);
+/** A clock that moves one second per reading, so compute wall time and the ledger's ms are not 0. */
+function ticking(w:ReturnType<typeof world>) { let t=+new Date("2026-01-01T00:00:00Z"); w.deps.now=()=>new Date(t+=1000); }
+const ledgerOf=(batchId:string)=>db.select().from(catalogCostEvents).where(eq(catalogCostEvents.batchId,batchId)).orderBy(catalogCostEvents.at);
+it("cost ledger: one delivery per stage writes attributable rows whose judge and compute sums equal the batch cost, priced from the environment",async()=>{
+ const w=world(),s=await seed(w,"ledger-rows");ticking(w);
+ vi.mocked(w.deps.resolvePolicy).mockResolvedValue({matteModel:"fixture",qaModel:"test/judge",threshold:75,floor:60,qaMode:"per_source",qaSampleRate:1,source:"default"});
+ const render=vi.mocked(w.deps.renderAllChannels),base=render.getMockImplementation()!;
+ render.mockImplementation(async(...args)=>Object.fromEntries(Object.entries(await base(...args)).map(([c,o])=>[c,{...o,flags:["upscaled"],upscale:{model:"realesrgan-x2plus",ms:250}}])) as Awaited<ReturnType<CatalogDeps["renderAllChannels"]>>);
+ vi.stubEnv("COMPUTE_USD_PER_VCPU_SECOND","0.001");vi.stubEnv("PRICE_MATTE_CPU_USD_PER_SECOND","0.5");vi.stubEnv("PRICE_MATTE_GPU_USD_PER_SECOND","2");vi.stubEnv("OPENROUTER_API_KEY","test-key");
+ try {
+  for(let i=0;i<2;i++) expect((await handleChunkTask(w.deps,{chunkId:s.chunk.id})).httpStatus).toBe(200);
+  // The real judge decodes its images, so the batch's objects are real JPEGs during the qa delivery and
+  // the rendered fixtures again for the publication (whose staged-size check needs the recorded bytes).
+  const real=await sharp({create:{width:64,height:64,channels:3,background:"white"}}).jpeg().toBuffer(),fixtures=new Map(w.objects);
+  for(const [uri,obj] of w.objects) if(uri.includes(s.batch.id)) w.objects.set(uri,{...obj,buf:real});
+  const publicFetch=w.deps.fetch;
+  w.deps.fetch=vi.fn<typeof globalThis.fetch>(async(url,init)=>String(url).startsWith("https://openrouter.ai/")?new Response(JSON.stringify(openRouterReply(passScores,0.000139))):publicFetch(url,init));
+  w.deps.judgeOutput=judgeOutput;
+  expect((await handleChunkTask(w.deps,{chunkId:s.chunk.id})).httpStatus).toBe(200);
+  for(const [uri,obj] of fixtures) w.objects.set(uri,obj);
+  expect((await handlePublishTask(w.deps,{batchId:s.batch.id,productId:s.product.id})).outcome).toBe("published");
+ } finally { vi.unstubAllEnvs(); }
+ const rows=await ledgerOf(s.batch.id);
+ const [output]=await db.select().from(catalogOutputs).where(eq(catalogOutputs.batchId,s.batch.id));
+ const [source]=await db.select().from(catalogSourceImages).where(eq(catalogSourceImages.batchId,s.batch.id));
+ expect(rows.every(r=>r.brandSlug==="anta" && r.isTest)).toBe(true);
+ const matte=rows.filter(r=>r.kind==="matte_call");
+ expect(matte).toHaveLength(1);
+ expect(matte[0]).toMatchObject({stage:"matte",engine:"cpu",ms:12,estimated:false,outcome:"ok",attempt:1,productId:s.product.id,sourceImageId:source!.id,chunkId:s.chunk.id,channel:null,outputId:null});
+ expect(Number(matte[0]!.usd)).toBeCloseTo(12/1000*0.5,12);
+ expect(rows.find(r=>r.kind==="render")).toMatchObject({stage:"render",engine:"worker",outputId:output!.id,channel:"noon",productId:s.product.id,sourceImageId:source!.id,outcome:"ok"});
+ expect(Number(rows.find(r=>r.kind==="render")!.usd)).toBe(0);
+ const upscale=rows.find(r=>r.kind==="upscale_call");
+ expect(upscale).toMatchObject({stage:"upscale",engine:"gpu",ms:250,outputId:output!.id,channel:"noon",estimated:false});
+ expect(Number(upscale!.usd)).toBeCloseTo(250/1000*2,12);
+ const judge=rows.filter(r=>r.kind==="llm_call");
+ expect(judge).toHaveLength(1);
+ expect(judge[0]).toMatchObject({stage:"qa",engine:"test/judge",promptTokens:2911,completionTokens:160,estimated:false,outcome:"ok",attempt:1,outputId:output!.id,channel:"noon",productId:s.product.id,sourceImageId:source!.id,chunkId:s.chunk.id});
+ const compute=rows.filter(r=>r.kind==="compute" && r.stage!=="publish");
+ expect(compute.map(r=>r.stage)).toEqual(["matte","render","qa"]);
+ expect(compute.every(r=>r.engine==="worker" && r.chunkId===s.chunk.id && r.ms>0 && Number(r.usd)>0)).toBe(true);
+ expect(rows.find(r=>r.stage==="publish")).toMatchObject({kind:"compute",engine:"worker",productId:s.product.id,outcome:"ok"});
+ expect(Number(rows.find(r=>r.stage==="publish")!.usd)).toBe(0);
+ const [batch]=await db.select().from(catalogBatches).where(eq(catalogBatches.id,s.batch.id));
+ expect(judge.reduce((sum,r)=>sum+Number(r.usd),0)).toBeCloseTo(Number(batch!.cost.qaUsd),9);
+ expect(compute.reduce((sum,r)=>sum+Number(r.usd),0)).toBeCloseTo(Number(batch!.cost.computeUsd),9);
+ expect(Number(batch!.cost.computeUsd)).toBeGreaterThan(0);
+},60_000);
+it("cost ledger: a delivery that loses its claim writes no ledger rows",async()=>{
+ const w=world(),s=await seed(w,"ledger-lost-claim");ticking(w);
+ // The cut-out call succeeds, but another worker took the chunk meanwhile: every later write under the claim refuses.
+ vi.mocked(w.deps.matteFor).mockImplementationOnce(async()=>{await db.update(catalogChunks).set({taskName:"someone-else"}).where(eq(catalogChunks.id,s.chunk.id));return {alpha:Buffer.alloc(800*800,255),width:800,height:800,model:"fixture",ms:12,source:"model",target:"cpu",sentLongSide:800};});
+ expect((await handleChunkTask(w.deps,{chunkId:s.chunk.id})).outcome).toBe("retry");
+ expect(await ledgerOf(s.batch.id)).toEqual([]);
+},60_000);
+it("cost ledger: a failing ledger write is logged as an error and the delivery still completes",async()=>{
+ const w=world(),s=await seed(w,"ledger-write-fails"),log=vi.fn();w.deps.log=log;ticking(w);
+ await db.execute(sql`alter table catalog_cost_events rename to catalog_cost_events_hidden`);
+ try { expect((await handleChunkTask(w.deps,{chunkId:s.chunk.id})).httpStatus).toBe(200); }
+ finally { await db.execute(sql`alter table catalog_cost_events_hidden rename to catalog_cost_events`); }
+ expect((await db.select().from(catalogChunks).where(eq(catalogChunks.id,s.chunk.id)))[0]).toMatchObject({stage:"render",status:"queued"});
+ expect(log).toHaveBeenCalledWith("cost event write failed",expect.objectContaining({severity:"ERROR",batchId:s.batch.id}));
+ const spend=await db.select().from(spendDays).where(eq(spendDays.batchId,s.batch.id));
+ expect(spend.map(row=>row.engine)).toEqual(["catalog_compute"]);
+ expect(await ledgerOf(s.batch.id)).toEqual([]);
+},60_000);
+it("cost ledger: a spend cap refusal is logged once per check as a WARNING with the dollars used of the cap",async()=>{
+ const w=world(),s=await seed(w,"ledger-cap-log"),log=vi.fn();w.deps.log=log;
+ for(let i=0;i<2;i++) await handleChunkTask(w.deps,{chunkId:s.chunk.id});
+ vi.stubEnv("DAILY_SPEND_CAP_USD","0");
+ try { expect((await handleChunkTask(w.deps,{chunkId:s.chunk.id})).httpStatus).toBe(200); } finally { vi.unstubAllEnvs(); }
+ const hits=log.mock.calls.filter(([message])=>message==="spend cap hit");
+ expect(hits).toHaveLength(1);
+ expect(hits[0]![1]).toMatchObject({severity:"WARNING",batchId:s.batch.id,reason:expect.stringMatching(/^Daily spend cap reached: \$\d+\.\d\d of \$0\.00 used this UTC day/)});
+ expect((await db.select().from(catalogOutputs).where(eq(catalogOutputs.batchId,s.batch.id)))[0]!.flags).toContain("qa_cap");
 },60_000);

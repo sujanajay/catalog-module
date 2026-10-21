@@ -72,12 +72,14 @@ export async function releaseLocks(db: Db, batchId: string): Promise<number> {
   const completed = db.select({ id: catalogBatchProducts.productId }).from(catalogBatchProducts).where(and(eq(catalogBatchProducts.batchId, batchId), ne(catalogBatchProducts.change, "pending_attention")));
   return (await db.update(catalogProducts).set({ lockBatchId: null }).where(and(eq(catalogProducts.lockBatchId,batchId), inArray(catalogProducts.id,completed))).returning({ id: catalogProducts.id })).length;
 }
-export async function publishProduct(deps: PublishDeps, batchId: string, productId: string): Promise<{ outcome: string }> {
+/** `batch` (brand and test flag, for the worker's cost ledger row) is present whenever the batch was read. */
+export async function publishProduct(deps: PublishDeps, batchId: string, productId: string): Promise<{ outcome: string; batch?: { brandSlug: string; isTest: boolean } }> {
   return deps.db.transaction(async tx => {
     const [product] = await tx.select().from(catalogProducts).where(eq(catalogProducts.id,productId)).for("update");
     if (!product || product.lockBatchId !== batchId) return { outcome: "not_locked" };
     const [batch] = await tx.select().from(catalogBatches).where(eq(catalogBatches.id,batchId));
     if (!batch) return { outcome: "not_found" };
+    const found = { brandSlug: batch.brandSlug, isTest: batch.isTest };
     const where = and(eq(catalogBatchProducts.batchId,batchId),eq(catalogBatchProducts.productId,productId));
     const outputs = await tx.select().from(catalogOutputs).where(and(eq(catalogOutputs.batchId,batchId),eq(catalogOutputs.productId,productId)));
     const allSources = await tx.select().from(catalogSourceImages).where(and(eq(catalogSourceImages.batchId,batchId),eq(catalogSourceImages.productId,productId)));
@@ -97,7 +99,7 @@ export async function publishProduct(deps: PublishDeps, batchId: string, product
         const head = await deps.storage.headObject(storage.toGsUri(deps.storage.getPublicBucketName(),output.objectPath));
         if (!head.exists || head.crc32c !== output.crc32c || Number(head.generation) !== output.generation) { alreadyPublished = false; break; }
       }
-      if (alreadyPublished) return {outcome:"published"};
+      if (alreadyPublished) return {outcome:"published",batch:found};
     }
     // 07 section 1 and 5: a staged output counts as decided only after the QA judge passed it (scores,
     // or the information flag qa_sampled_out) or the operator chose "Use as is". A decision-triggered
@@ -105,7 +107,7 @@ export async function publishProduct(deps: PublishDeps, batchId: string, product
     const unjudged = (o: Output) => o.status === "staged" && o.decision === null && o.qaScores === null && !o.flags.includes("qa_sampled_out");
     if (missingPairs || pair?.flags.includes("duplicate_shot") || outputs.some(o => unjudged(o) || (!["staged","skipped","verified"].includes(o.status) && o.decision !== "use_as_is" && o.decision !== "remove" && o.decision !== "replaced"))) {
       await tx.update(catalogBatchProducts).set({ change:"pending_attention", notes: [pair?.notes,missingPairs ? "Some photos could not be processed. Start this product again.":"",...outputs.filter(o => o.reason).map(outputNote)].filter(Boolean).join("; ") }).where(where);
-      return { outcome:"held" };
+      return { outcome:"held", batch:found };
     }
     const plan = planPublish({ ...product, channels:batch.channels, sources,outputs,live });
     const now = deps.now(), actor = batch.createdBy;
@@ -172,6 +174,6 @@ export async function publishProduct(deps: PublishDeps, batchId: string, product
     const notes = [failure ? `Some images could not be published: ${failure}. ${liveNotes}` : "", removed.length ? `photos ${removed.map(o=>o.n).join(" and ")} removed in batch ${batch.name}` : "",...outputs.filter(o=>o.decision === "use_as_is" && o.reason).map(outputNote),...outputs.filter(o=>o.status === "skipped" && o.reason).map(outputNote)].filter(Boolean).join("; ");
     await tx.update(catalogBatchProducts).set({change,notes}).where(where);
     await tx.update(catalogProducts).set({lastBatchId:batchId}).where(eq(catalogProducts.id,productId));
-    return { outcome: failure ? "failed" : "published" };
+    return { outcome: failure ? "failed" : "published", batch: found };
   });
 }

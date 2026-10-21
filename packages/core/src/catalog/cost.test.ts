@@ -1,6 +1,28 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { COMPUTE_VCPU_SECONDS_PER_OUTPUT_ESTIMATE, costLine, DEFAULT_COMPUTE_USD_PER_VCPU_SECOND, estimateCost, inrAmount, QA_USD_PER_CHECK_ESTIMATE, QA_USD_PER_CHECK_FALLBACK, qaCallCost, usdAmount } from "./cost";
+import { COMPUTE_VCPU_SECONDS_PER_OUTPUT_ESTIMATE, costLine, DEFAULT_COMPUTE_USD_PER_VCPU_SECOND, DEFAULT_PRICE_MATTE_CPU_USD_PER_SECOND, DEFAULT_PRICE_MATTE_GPU_USD_PER_SECOND, estimateCost, inrAmount, matteCallUsd, mattePricesFromEnv, QA_USD_PER_CHECK_ESTIMATE, QA_USD_PER_CHECK_FALLBACK, qaCallCost, usdAmount } from "./cost";
+describe("matting service prices (cost ledger)",()=>{
+ it("prices the 4 vCPU, 16 GiB CPU service at the asia-south1 request-based rate and the GPU service at the asia-southeast1 L4 instance rate, the same defaults deploy.sh sets",()=>{
+  expect(DEFAULT_PRICE_MATTE_CPU_USD_PER_SECOND).toBeCloseTo(4*0.000024+16*0.0000025,12);
+  expect(DEFAULT_PRICE_MATTE_GPU_USD_PER_SECOND).toBeCloseTo(0.00022404+4*0.0000216+16*0.0000024,12);
+  const deploy=readFileSync(new URL("../../../../infra/deploy.sh",import.meta.url),"utf8");
+  expect(deploy).toContain(`PRICE_MATTE_CPU_USD_PER_SECOND=\${PRICE_MATTE_CPU_USD_PER_SECOND:-${DEFAULT_PRICE_MATTE_CPU_USD_PER_SECOND}}`);
+  expect(deploy).toContain(`PRICE_MATTE_GPU_USD_PER_SECOND=\${PRICE_MATTE_GPU_USD_PER_SECOND:-${DEFAULT_PRICE_MATTE_GPU_USD_PER_SECOND}}`);
+  expect(deploy).toContain("PRICE_MATTE_CPU_USD_PER_SECOND=$PRICE_MATTE_CPU_USD_PER_SECOND,PRICE_MATTE_GPU_USD_PER_SECOND=$PRICE_MATTE_GPU_USD_PER_SECOND");
+ });
+ it("reads both prices from the environment and falls back to the defaults for missing or invalid values",()=>{
+  expect(mattePricesFromEnv({PRICE_MATTE_CPU_USD_PER_SECOND:"0.0002",PRICE_MATTE_GPU_USD_PER_SECOND:"0.0009"})).toEqual({cpu:0.0002,gpu:0.0009});
+  expect(mattePricesFromEnv({PRICE_MATTE_CPU_USD_PER_SECOND:"",PRICE_MATTE_GPU_USD_PER_SECOND:"abc"})).toEqual({cpu:DEFAULT_PRICE_MATTE_CPU_USD_PER_SECOND,gpu:DEFAULT_PRICE_MATTE_GPU_USD_PER_SECOND});
+  expect(mattePricesFromEnv({})).toEqual({cpu:DEFAULT_PRICE_MATTE_CPU_USD_PER_SECOND,gpu:DEFAULT_PRICE_MATTE_GPU_USD_PER_SECOND});
+ });
+ it("prices a call by its service seconds and target, free for the worker's own cut-out, estimated when the rate is a code default",()=>{
+  expect(matteCallUsd("cpu",2000,{PRICE_MATTE_CPU_USD_PER_SECOND:"0.0002"})).toEqual({usd:0.0004,estimated:false});
+  expect(matteCallUsd("gpu",500,{PRICE_MATTE_GPU_USD_PER_SECOND:"0.001"})).toEqual({usd:0.0005,estimated:false});
+  expect(matteCallUsd("gpu",1000,{})).toEqual({usd:DEFAULT_PRICE_MATTE_GPU_USD_PER_SECOND,estimated:true});
+  expect(matteCallUsd(null,5000,{})).toEqual({usd:0,estimated:false});
+  expect(matteCallUsd("cpu",NaN,{})).toEqual({usd:0,estimated:false});
+ });
+});
 describe("catalog cost",()=>{
  const cost={qaUsd:1,computeUsd:2,identifiers:99};
  const products=[{change:"new",outputs:[{status:"staged"}]},{change:"updated",outputs:[{status:"skipped"},{status:"verified"}]},{change:"unchanged",outputs:[{status:"verified"}]},{change:"new",outputs:[{status:"skipped"}]}];

@@ -31,6 +31,44 @@ export const COMPUTE_VCPU_SECONDS_PER_OUTPUT_ESTIMATE = 4.3;
  * Ignores the monthly free tier and the USD 0.40 per million requests fee (both negligible here).
  */
 export const DEFAULT_COMPUTE_USD_PER_VCPU_SECOND = 0.0000265;
+/**
+ * USD per second of the CPU matting service (catalog-matting, asia-south1, --cpu=4 --memory=16Gi,
+ * concurrency 1, request-based billing because deploy.sh sets no --no-cpu-throttling). Must match
+ * PRICE_MATTE_CPU_USD_PER_SECOND in infra/deploy.sh; this default is used when the env var is missing.
+ * Source: cloud.google.com/run/pricing, read 2026-10-22, region Mumbai (asia-south1), "Services
+ * (Requests-based billing)": CPU active time USD 0.000024 per vCPU-second, memory active time
+ * USD 0.0000025 per GiB-second. 4 * 0.000024 + 16 * 0.0000025 = 0.000096 + 0.00004 = 0.000136.
+ */
+export const DEFAULT_PRICE_MATTE_CPU_USD_PER_SECOND = 0.000136;
+/**
+ * USD per second of the GPU matting service (catalog-matting-gpu, asia-southeast1, one NVIDIA L4 with
+ * --no-gpu-zonal-redundancy, --no-cpu-throttling so instance-based billing, --cpu=4 --memory=16Gi).
+ * Must match PRICE_MATTE_GPU_USD_PER_SECOND in infra/deploy.sh.
+ * Source: cloud.google.com/run/pricing, read 2026-10-22, region Singapore (asia-southeast1), "Services
+ * (Instance-based billing)": GPU Type NVIDIA L4 non-zonal redundancy USD 0.00022404 per second,
+ * CPU USD 0.0000216 per vCPU-second, memory USD 0.0000024 per GiB-second.
+ * 0.00022404 + 4 * 0.0000216 + 16 * 0.0000024 = 0.00022404 + 0.0000864 + 0.0000384 = 0.00034884.
+ * Both rates price the seconds the service reports for a call; instance start-up and the idle time
+ * before an instance stops are billed by Google but are not in the ledger.
+ */
+export const DEFAULT_PRICE_MATTE_GPU_USD_PER_SECOND = 0.00034884;
+/** The matting-service target of a cut-out or upscale call; null is the worker's own simple cut-out. */
+export type MatteTarget = "cpu" | "gpu" | null;
+/** PRICE_MATTE_CPU_USD_PER_SECOND and PRICE_MATTE_GPU_USD_PER_SECOND; missing or invalid values use the documented defaults. */
+export function mattePricesFromEnv(env: NodeJS.ProcessEnv = process.env): { cpu: number; gpu: number } {
+ return {cpu:positive(env.PRICE_MATTE_CPU_USD_PER_SECOND) ?? DEFAULT_PRICE_MATTE_CPU_USD_PER_SECOND,gpu:positive(env.PRICE_MATTE_GPU_USD_PER_SECOND) ?? DEFAULT_PRICE_MATTE_GPU_USD_PER_SECOND};
+}
+/**
+ * What `ms` of a matting-service call cost on `target` (the ledger's matte_call and upscale_call rows).
+ * A call the worker answered itself (floodfill, alpha_source) is free. `estimated` is true when the
+ * rate came from the code default rather than the environment, so the Ops page can say so.
+ */
+export function matteCallUsd(target: MatteTarget, ms: number, env: NodeJS.ProcessEnv = process.env): { usd: number; estimated: boolean } {
+ if (target === null || !Number.isFinite(ms) || ms <= 0) return {usd:0,estimated:false};
+ const configured = positive(target === "gpu" ? env.PRICE_MATTE_GPU_USD_PER_SECOND : env.PRICE_MATTE_CPU_USD_PER_SECOND);
+ const rate = configured ?? (target === "gpu" ? DEFAULT_PRICE_MATTE_GPU_USD_PER_SECOND : DEFAULT_PRICE_MATTE_CPU_USD_PER_SECOND);
+ return {usd:ms/1000*rate,estimated:configured === null};
+}
 /** Operator copy when no rupee rate is configured; never names the env var (spec 07 4.11). */
 export const RUPEES_NOT_CONFIGURED = "Cost in rupees is not configured yet";
 /** What one quality-check or classifier completion cost, as recorded in spend_days (07 4.5). */

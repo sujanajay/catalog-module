@@ -10,8 +10,9 @@ import { actionsOn, autoActionsOf, busyBackgroundHold, failuresOf, judgeSawSourc
 import { shadowSynthesisAllowed } from "@catalog/core/catalog/qa/policy";
 import { flushCutPhoto, resolvePhoto, stopOn } from "./auto-resolve";
 import { recordCost } from "@catalog/core/spend";
+import { recordCostEvent, type CostEventInput } from "@catalog/core/cost-events";
 import { qaCallCost } from "@catalog/core/catalog/cost";
-import { flagReason, type ResolvedPolicy, type OutputFlag } from "@catalog/core/catalog/types";
+import { flagReason, type ChannelId, type ResolvedPolicy, type OutputFlag } from "@catalog/core/catalog/types";
 import type { CatalogDeps } from "./deps";
 import type { BackoffBudget } from "@catalog/core/llm/openrouter";
 
@@ -19,6 +20,16 @@ type Batch = typeof catalogBatches.$inferSelect;
 type Source = typeof catalogSourceImages.$inferSelect;
 export type UnderClaim = <T>(write:(db:CatalogDeps["db"])=>Promise<T>)=>Promise<T>;
 export class CatalogQaCapError extends Error {}
+/**
+ * A spend cap refused the next quality check: one WARNING line ("spend cap hit", the alert policy's
+ * filter) with the "$X of $Y" reason, then the error the callers hold the photo with.
+ */
+export function spendCapHit(deps:Pick<CatalogDeps,"log">,batchId:string,reason:string):CatalogQaCapError {
+ deps.log("spend cap hit",{severity:"WARNING",batchId,reason});
+ return new CatalogQaCapError(reason);
+}
+/** Who a judge or classifier call is for, so its ledger rows (catalog_cost_events) are attributable. */
+export interface LlmAttribution { stage:"qa"|"classify"; productId?:string; sourceImageId?:string; outputId?:string; channel?:ChannelId; chunkId?:string }
 /** The model id of a chat completion request; it is the first field of the JSON body. */
 function requestModel(init?:RequestInit):string | null {
  return typeof init?.body==="string" ? /"model"\s*:\s*"([^"]{1,200})"/.exec(init.body.slice(0,500))?.[1] ?? null : null;
@@ -48,13 +59,20 @@ function backoffFor(batch:Batch):BackoffBudget {
  return budget;
 }
 /** Check the lease and cap before every HTTP attempt, including the JSON helper's retry and each back-off retry. */
-export function catalogLlmDeps(deps:CatalogDeps,batch:Batch,underClaim:UnderClaim) {
- let stopped:unknown;
+export function catalogLlmDeps(deps:CatalogDeps,batch:Batch,underClaim:UnderClaim,who:LlmAttribution={stage:"qa"}) {
+ let stopped:unknown,attempts=0;
+ // One ledger row per HTTP attempt (and one for a cap refusal), beside the spend_days row; a failing
+ // ledger write is logged and never fails the call.
+ const ledgerRow=(fields:Partial<CostEventInput>,init?:RequestInit):CostEventInput=>({batchId:batch.id,brandSlug:batch.brandSlug,isTest:batch.isTest,productId:who.productId ?? null,sourceImageId:who.sourceImageId ?? null,outputId:who.outputId ?? null,channel:who.channel ?? null,chunkId:who.chunkId ?? null,stage:who.stage,kind:"llm_call",engine:requestModel(init) ?? "unknown",attempt:attempts,...fields});
  return {backoff:backoffFor(batch),...(deps.sleep ? {sleep:deps.sleep}:{}),assertAvailable:()=>{if(stopped) throw stopped;},fetch:async(url:Parameters<typeof fetch>[0],init?:RequestInit)=>{
+  attempts+=1;
   try {
    await underClaim(async()=>{});
    const cap=await checkCatalogCaps(deps.db,{batchId:batch.id,now:deps.now()});
-   if(!cap.ok) throw new CatalogQaCapError(cap.reason);
+   if(!cap.ok) {
+    await recordCostEvent(deps.db,ledgerRow({outcome:"cap"},init),deps.log);
+    throw spendCapHit(deps,batch.id,cap.reason);
+   }
   }catch(error){stopped=error;throw error;}
   let response:Response | undefined,failure:unknown;
   const started=Date.now();
@@ -73,6 +91,7 @@ export function catalogLlmDeps(deps:CatalogDeps,batch:Batch,underClaim:UnderClai
    await deps.db.transaction(async tx=>{
     await recordCost(tx as unknown as CatalogDeps["db"],{brandSlug:batch.brandSlug,batchId:batch.id,engine:"catalog_qa",costUsd,day:deps.now()});
     await tx.update(catalogBatches).set({cost:sql`${catalogBatches.cost} || jsonb_build_object('qaUsd',coalesce((${catalogBatches.cost}->>'qaUsd')::numeric,0)+${costUsd}::numeric,'qaCalls',coalesce((${catalogBatches.cost}->>'qaCalls')::numeric,0)+1,'qaPromptTokens',coalesce((${catalogBatches.cost}->>'qaPromptTokens')::numeric,0)+${promptTokens}::numeric,'qaCompletionTokens',coalesce((${catalogBatches.cost}->>'qaCompletionTokens')::numeric,0)+${completionTokens}::numeric)`}).where(eq(catalogBatches.id,batch.id));
+    await recordCostEvent(tx as unknown as CatalogDeps["db"],ledgerRow({ms:fields.ms,usd:costUsd,estimated:spent.estimated,promptTokens,completionTokens,outcome:response?.ok ? "ok":response?.status===429 ? "rate_limited":"failed",at:deps.now()},init),deps.log);
    });
   }
  },log:(message:string,fields?:Record<string,unknown>)=>deps.log(message,{batchId:batch.id,...fields})};
@@ -94,7 +113,7 @@ const clean = (sentence: string | undefined, fallback: string) => sentence && !M
  * dimensions take the strictest score across the photo's channels, so one defect gives one consistent
  * result everywhere. Then `triageProduct` turns the problems into notes, drops and the few hard holds.
  */
-export async function runQaStage(deps:CatalogDeps,batch:Batch,sources:Source[],policy:ResolvedPolicy,underClaim:UnderClaim):Promise<void> {
+export async function runQaStage(deps:CatalogDeps,batch:Batch,sources:Source[],policy:ResolvedPolicy,underClaim:UnderClaim,chunkId?:string):Promise<void> {
  if(!sources.length) return;
  const candidates=await deps.db.select().from(catalogOutputs).where(and(eq(catalogOutputs.batchId,batch.id),inArray(catalogOutputs.sourceImageId,sources.map(s=>s.id)),inArray(catalogOutputs.status,["staged","needs_attention"]),isNull(catalogOutputs.qaScores),isNull(catalogOutputs.decision)));
  // A needs_attention output from render (small_source) is judged too, so a note never publishes an unseen image.
@@ -110,7 +129,7 @@ export async function runQaStage(deps:CatalogDeps,batch:Batch,sources:Source[],p
   }
   try {
    const cap=await checkCatalogCaps(deps.db,{batchId:batch.id,now:deps.now()});
-   if(!cap.ok) throw new CatalogQaCapError(cap.reason);
+   if(!cap.ok) throw spendCapHit(deps,batch.id,cap.reason);
    const [fresh]=await deps.db.select().from(catalogBatches).where(eq(catalogBatches.id,batch.id));
    const state=fresh!.counts as Batch["counts"] & {qaUnavailableStreak?:number;qaUseSecond?:boolean};
    const model=state.qaUseSecond && policy.qaModelSecond ? policy.qaModelSecond : policy.qaModel;
@@ -125,7 +144,7 @@ export async function runQaStage(deps:CatalogDeps,batch:Batch,sources:Source[],p
    // re-check of another channel, whose photo checks are not used, so wrong_item asks no one there.
    const judge=async(row:Output,photoChecks:boolean)=>{
     const output=(await deps.storage.downloadBuffer(row.stagingUri!)).buf;
-    const llm=catalogLlmDeps(deps,batch,underClaim);
+    const llm=catalogLlmDeps(deps,batch,underClaim,{stage:"qa",productId:product.id,sourceImageId:source.id,outputId:row.id,channel:row.channel,...(chunkId ? {chunkId}:{})});
     const result=await deps.judgeOutput({output,original,...(shotOneBytes ? {shotOne:shotOneBytes}:{}),channel:row.channel,anchor:row.channel==="styli" ? "bottom-centre":"centre",productType:product.productType ?? "other",identifier:product.identifier,n:source.n,model,threshold:policy.threshold,floor:policy.floor,...(secondModel ? {secondModel}:{}),wrongItemCheck:photoChecks},llm);
     llm.assertAvailable();
     return result;
@@ -221,12 +240,12 @@ export const repairOwnDefects:RepairOwnDefects<QaRepairContext>=async(candidates
   if(!failing.length) continue;
   const rejudge=stopOn(error=>error instanceof CatalogQaCapError,async(row,jpeg)=>{
    const cap=await checkCatalogCaps(deps.db,{batchId:batch.id,now:deps.now()});
-   if(!cap.ok) throw new CatalogQaCapError(cap.reason);
+   if(!cap.ok) throw spendCapHit(deps,batch.id,cap.reason);
    const [fresh]=await deps.db.select().from(catalogBatches).where(eq(catalogBatches.id,batch.id));
    const state=fresh!.counts as Batch["counts"] & {qaUseSecond?:boolean};
    const originals=await deps.db.select().from(catalogSourceImages).where(and(eq(catalogSourceImages.productId,productId),eq(catalogSourceImages.batchId,batch.id))).orderBy(catalogSourceImages.n);
    const superseded=new Set(originals.flatMap(s=>s.replacesId ? [s.replacesId]:[])),shotOne=originals.find(s=>!superseded.has(s.id));
-   const llm=catalogLlmDeps(deps,batch,underClaim);
+   const llm=catalogLlmDeps(deps,batch,underClaim,{stage:"qa",productId,sourceImageId:source.id,outputId:row.id,channel:row.channel});
    // The same two judges as the first judging, so a leftover background still needs both to agree.
    const model=state.qaUseSecond && policy.qaModelSecond ? policy.qaModelSecond:policy.qaModel,secondModel=model===policy.qaModelSecond ? policy.qaModel:policy.qaModelSecond;
    const result=await deps.judgeOutput({output:jpeg,original:(await deps.storage.downloadBuffer(source.rawUri)).buf,...(source.n>1 && shotOne ? {shotOne:(await deps.storage.downloadBuffer(shotOne.rawUri)).buf}:{}),channel:row.channel,anchor:row.channel==="styli" ? "bottom-centre":"centre",productType:product.productType ?? "other",identifier:product.identifier,n:source.n,model,...(secondModel ? {secondModel}:{}),wrongItemCheck:false,threshold:policy.threshold,floor:policy.floor},llm);
