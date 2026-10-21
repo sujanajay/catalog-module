@@ -454,25 +454,28 @@ time, before anything is rendered.
   that fills the frame, so the whole photo was kept as it is instead of being cut out. Nothing to
   do."), never holds, gets no synthesised shadow, is placed by the cut-in-source rules (sides that
   reach the frame sit flush) and is never trimmed (`trimRules`).
-- Sole strip recovery, footwear only (`recoverSoleStrip`, eval run 3, Anta bd-112625546-12 shot 5: the
-  lower one to two rows of a 5 to 8 px lime strip under a black outsole are dropped by every deployed
-  model, 7.66% of a cell lost after the ladder). After the ladder picks a model matte (never on a
-  pass-through or a busy-background hold; the check always sees the model's own matte), per column of the
-  lower 40% of the matte: the run of strongly coloured source pixels (chroma at least 60 and at least half
-  the brightest channel) that starts right below the lowest kept pixel (alpha over 128), stays within 8 px of
-  it and stops at the first pixel that is not strongly coloured. A connected group of such runs is given
-  back only when the matte dropped at least 20 of its pixels and it spans at least 10% of the product's
-  width (a strip along the sole, not a coloured contact smudge): the runs become opaque, with the soft
-  kept pixels right above them (now inside the product). The run ends are smoothed across the group's
-  columns (a 5-column moving average clamped to each column's measured end, so no pixel outside the
-  coloured run is added, then lowered until neighbouring ends differ by at most 1 px) and the lower edge
-  is drawn at that sub-pixel position: opaque above it, one antialiased pixel at it, so the edge shows no
-  1 px steps and the strip is softened once. A floor reflection under a grey or white gap row (eval run 3
-  M2), a grey cast shadow and a pale tint are never reached. Measured with cached deployed mattes under
-  the footwear policy on the 81 unique Anta golden and gate 3f photos: only the sliver shot changes (worst
-  cell 7.66% to 0.45%, thin parts 14.3% to 1.3%, edge softness 3.19 to 2.96; a two-pixel ramp of 200 and
-  110 was tried and measured 3.03, over the 3.0 footwear bar, because the rest of that matte already
-  averages 3.13).
+- Sole strip recovery, footwear only (`recoverSoleStrip`, eval run 3 and live run D2, Anta bd-112625546-12
+  shot 5: a 5 to 8 px lime strip under the sole, partly or wholly dropped by every deployed model). After the
+  ladder picks a model matte (never on a pass-through or a busy-background hold; the check always sees the
+  model's own matte), per column of the lower 40% of the matte: the run that starts right below the lowest
+  kept pixel (alpha over 128) and stays within 10 px of it, continuing while the source is coloured
+  (hysteresis: chroma at least 35 and more than 30 from the floor colour), is a candidate only when it holds a
+  strongly coloured pixel (chroma at least 60 and at least half the brightest channel), so a paler band of the
+  product between the matte and the strip (olive mesh over the lime) no longer stops it. Below the last
+  strongly coloured pixel only its lighter antialiased edge is kept, not a darker contact shadow (more than 10
+  luma darker). A white or grey row stops the run, so a floor reflection under a gap row (eval run 3 M2), a
+  grey cast shadow and a pale or brown band with no strong pixel are never reached. Candidate columns at most 6
+  columns apart form one group (a highlight or a pale gap across the strip is bridged, its run end
+  interpolated); a group is given back only when the matte dropped at least 20 of its pixels and it spans at
+  least 10% of the product's width (a strip along the sole, not a coloured contact smudge). The run ends are
+  smoothed (a 15-column moving average never past a column's measured end, a 1 px per column taper at both
+  ends of the group, at most 1 px between neighbours) and the outline is feathered over 2 source px (opaque
+  one px above the smoothed end, half at it, nothing below), so the 1.35x to 2.6x enlargement shows a soft
+  edge and no staircase; the soft kept pixels right above a recovered run become opaque. Measured on the live
+  D2 matte (padded birefnet-general, the ladder's winner; byte-identical to the cached matte): worst cell
+  5.97% to 0%, thin parts 41.6% to 0%, edge softness 2.68 to 2.54 (footwear bar 3.0), no cutout check fails on
+  noon or amazon. On the 82 unique Anta golden and gate 3f photos under 8 policies with cached deployed mattes
+  only this shot changes.
 - A pass-through replaces a plain studio backdrop only (`isBusyBackground`, eval run 2, French
   Connection ZEE79259BBFD83FFA1DB0Z shot 5: models on a tennis court published with ragged court,
   net and racket remnants). In the border band, the pixels kept by the pass-through although every
