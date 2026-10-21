@@ -1,0 +1,40 @@
+{
+  "displayName": "Catalog: database connections high",
+  "documentation": {
+    "content": "The shared ila-pg database has had more than 20 connections for 5 minutes. Its limit is 25, and when it is reached every catalog page and batch fails. First check whether a load test, an eval job or many batches are running at once and stop the extra work. Then compare the worker, web and job sizes in infra/deploy.sh with docs/solutions/db-connection-budget.md.",
+    "mimeType": "text/markdown",
+    "subject": "Catalog: database connections high"
+  },
+  "userLabels": {
+    "app": "catalog"
+  },
+  "conditions": [
+    {
+      "displayName": "ila-pg has more than 20 connections for 5 minutes",
+      "conditionThreshold": {
+        "filter": "metric.type=\"cloudsql.googleapis.com/database/postgresql/num_backends\" AND resource.type=\"cloudsql_database\" AND resource.labels.database_id=\"image-links-agent:ila-pg\"",
+        "aggregations": [
+          {
+            "alignmentPeriod": "60s",
+            "perSeriesAligner": "ALIGN_MEAN",
+            "crossSeriesReducer": "REDUCE_SUM"
+          }
+        ],
+        "comparison": "COMPARISON_GT",
+        "thresholdValue": 20,
+        "duration": "300s",
+        "trigger": {
+          "count": 1
+        }
+      }
+    }
+  ],
+  "combiner": "OR",
+  "enabled": true,
+  "notificationChannels": [
+    "__CATALOG_EMAIL_CHANNEL__"
+  ],
+  "alertStrategy": {
+    "autoClose": "3600s"
+  }
+}

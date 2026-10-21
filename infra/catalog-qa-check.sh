@@ -63,7 +63,7 @@ deploy() {
   # gcloud launcher itself needs (MSYS_NO_PATHCONV=1 would break it).
   MSYS2_ARG_CONV_EXCL='--command=;--args=;--set-env-vars=;--add-volume=;--add-volume-mount=' \
   gcloud run jobs deploy "$JOB" --quiet --image="$QA_JOB_IMAGE" \
-    --service-account="$WORKER_SA" --max-retries=0 --task-timeout=10800 --cpu=2 --memory=4Gi "${NET[@]}" \
+    --service-account="$WORKER_SA" --labels=app=catalog,component=job --max-retries=0 --task-timeout=10800 --cpu=2 --memory=4Gi "${NET[@]}" \
     "${volume_flags[@]}" \
     --command=/bin/sh \
     --args=-ec,"mkdir -p /tmp/catalog-data; tar -xf /catalog-input/anta.tar -C /tmp/catalog-data; tar -xf /catalog-input/french-connection.tar -C /tmp/catalog-data; exec node dist/catalog-qa-check.js" \

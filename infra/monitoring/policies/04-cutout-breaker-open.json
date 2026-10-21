@@ -1,0 +1,40 @@
+{
+  "displayName": "Catalog: cut-out service breaker open",
+  "documentation": {
+    "content": "The worker stopped calling a cut-out (background removal) service for a while because its calls kept failing. Batches slow down or fall back to the other cut-out service while this lasts. First open the catalog-matting and catalog-matting-gpu services in Cloud Run and look at their errors and recent revisions. Then search Logs Explorer for \"matting_breaker\" to see which service opened the breaker.",
+    "mimeType": "text/markdown",
+    "subject": "Catalog: cut-out service breaker open"
+  },
+  "userLabels": {
+    "app": "catalog"
+  },
+  "conditions": [
+    {
+      "displayName": "cut-out breaker opened, more than 0 in 5 minutes",
+      "conditionThreshold": {
+        "filter": "metric.type=\"logging.googleapis.com/user/catalog/matting_breaker_open\" AND resource.type=\"cloud_run_revision\"",
+        "aggregations": [
+          {
+            "alignmentPeriod": "300s",
+            "perSeriesAligner": "ALIGN_SUM",
+            "crossSeriesReducer": "REDUCE_SUM"
+          }
+        ],
+        "comparison": "COMPARISON_GT",
+        "thresholdValue": 0,
+        "duration": "0s",
+        "trigger": {
+          "count": 1
+        }
+      }
+    }
+  ],
+  "combiner": "OR",
+  "enabled": true,
+  "notificationChannels": [
+    "__CATALOG_EMAIL_CHANNEL__"
+  ],
+  "alertStrategy": {
+    "autoClose": "3600s"
+  }
+}

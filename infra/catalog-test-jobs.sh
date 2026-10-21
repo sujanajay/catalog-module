@@ -52,7 +52,7 @@ for(const kind of kinds) {
     task.volumes=[volume('input',input,true),volume('evidence',`catalog-test/smoke/linux-${run}/${kind}`,false)];
   }
   const annotations={'run.googleapis.com/execution-environment':'gen2','run.googleapis.com/network-interfaces':JSON.stringify([{network:'ila-vpc',subnetwork:'ila-subnet'}]),'run.googleapis.com/vpc-access-egress':'private-ranges-only'};
-  const desired={apiVersion:'run.googleapis.com/v1',kind:'Job',metadata:{name},spec:{template:{metadata:{annotations},spec:{taskCount:1,parallelism:1,template:{spec:task}}}}};
+  const desired={apiVersion:'run.googleapis.com/v1',kind:'Job',metadata:{name,labels:{app:'catalog',component:'job'}},spec:{template:{metadata:{annotations},spec:{taskCount:1,parallelism:1,template:{spec:task}}}}};
   fs.writeFileSync(`${dir}/${kind}.json`,JSON.stringify(desired));
 }
 NODE
@@ -67,7 +67,7 @@ for(const volume of old?.spec?.template?.spec?.template?.spec?.volumes??[]) {
   if(volume.csi?.driver==='gcsfuse.run.googleapis.com') volume.csi.readOnly??=false;
 }
 function contains(a,b){if(Array.isArray(b))return Array.isArray(a)&&a.length===b.length&&b.every((v,i)=>contains(a[i],v));if(b&&typeof b==='object')return !!a&&Object.entries(b).every(([k,v])=>contains(a[k],v));return a===b;}
-process.exit(old&&contains(old.spec,desired.spec)?0:1);
+process.exit(old&&contains(old.spec,desired.spec)&&contains(old.metadata?.labels,desired.metadata.labels)?0:1);
 NODE
   then
     echo "$job: SKIP (current image and bounded configuration already match)"

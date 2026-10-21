@@ -1,0 +1,40 @@
+{
+  "displayName": "Catalog: quality checks unavailable",
+  "documentation": {
+    "content": "Ten or more image quality checks could not run in the last 10 minutes, so those images are held for a person to review instead of being checked automatically. First check that the OpenRouter service is up and that the account still has credit. Then search Logs Explorer for \"quality check unavailable\" on catalog-worker to see the error and the batch ids.",
+    "mimeType": "text/markdown",
+    "subject": "Catalog: quality checks unavailable"
+  },
+  "userLabels": {
+    "app": "catalog"
+  },
+  "conditions": [
+    {
+      "displayName": "quality check unavailable, at least 10 in 10 minutes",
+      "conditionThreshold": {
+        "filter": "metric.type=\"logging.googleapis.com/user/catalog/qa_unavailable\" AND resource.type=\"cloud_run_revision\"",
+        "aggregations": [
+          {
+            "alignmentPeriod": "600s",
+            "perSeriesAligner": "ALIGN_SUM",
+            "crossSeriesReducer": "REDUCE_SUM"
+          }
+        ],
+        "comparison": "COMPARISON_GT",
+        "thresholdValue": 9,
+        "duration": "0s",
+        "trigger": {
+          "count": 1
+        }
+      }
+    }
+  ],
+  "combiner": "OR",
+  "enabled": true,
+  "notificationChannels": [
+    "__CATALOG_EMAIL_CHANNEL__"
+  ],
+  "alertStrategy": {
+    "autoClose": "3600s"
+  }
+}

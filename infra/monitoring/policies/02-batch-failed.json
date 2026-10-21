@@ -1,0 +1,40 @@
+{
+  "displayName": "Catalog: a batch failed or was swept",
+  "documentation": {
+    "content": "A catalog batch was marked failed because of a fault (a batch with no usable photos does not send this email), or the sweeper stopped it because it made no progress for two hours. First open the batch in the catalog app and read the reason on its Details tab. Then search Logs Explorer for \"batch failed\" or \"batch swept\" to see the batch id. The operator can start the batch again after the cause is fixed.",
+    "mimeType": "text/markdown",
+    "subject": "Catalog: a batch failed or was swept"
+  },
+  "userLabels": {
+    "app": "catalog"
+  },
+  "conditions": [
+    {
+      "displayName": "batch failed or swept, more than 0 in 5 minutes",
+      "conditionThreshold": {
+        "filter": "metric.type=\"logging.googleapis.com/user/catalog/batch_failed\" AND resource.type=\"cloud_run_revision\"",
+        "aggregations": [
+          {
+            "alignmentPeriod": "300s",
+            "perSeriesAligner": "ALIGN_SUM",
+            "crossSeriesReducer": "REDUCE_SUM"
+          }
+        ],
+        "comparison": "COMPARISON_GT",
+        "thresholdValue": 0,
+        "duration": "0s",
+        "trigger": {
+          "count": 1
+        }
+      }
+    }
+  ],
+  "combiner": "OR",
+  "enabled": true,
+  "notificationChannels": [
+    "__CATALOG_EMAIL_CHANNEL__"
+  ],
+  "alertStrategy": {
+    "autoClose": "3600s"
+  }
+}

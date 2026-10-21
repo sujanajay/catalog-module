@@ -1,0 +1,40 @@
+{
+  "displayName": "Catalog: a chunk gave up",
+  "documentation": {
+    "content": "A chunk of a catalog batch failed on its last retry and will not be tried again, so some images of that batch were not made. First open the batch in the catalog app and read the error on its Details tab. Then open Logs Explorer for the catalog-worker service and search for \"chunk failed\" to see the batch id and the error. Starting the batch again usually finishes the missing images once the cause is fixed.",
+    "mimeType": "text/markdown",
+    "subject": "Catalog: a chunk gave up"
+  },
+  "userLabels": {
+    "app": "catalog"
+  },
+  "conditions": [
+    {
+      "displayName": "chunk failed for the last time, more than 0 in 5 minutes",
+      "conditionThreshold": {
+        "filter": "metric.type=\"logging.googleapis.com/user/catalog/chunk_failed_terminal\" AND resource.type=\"cloud_run_revision\"",
+        "aggregations": [
+          {
+            "alignmentPeriod": "300s",
+            "perSeriesAligner": "ALIGN_SUM",
+            "crossSeriesReducer": "REDUCE_SUM"
+          }
+        ],
+        "comparison": "COMPARISON_GT",
+        "thresholdValue": 0,
+        "duration": "0s",
+        "trigger": {
+          "count": 1
+        }
+      }
+    }
+  ],
+  "combiner": "OR",
+  "enabled": true,
+  "notificationChannels": [
+    "__CATALOG_EMAIL_CHANNEL__"
+  ],
+  "alertStrategy": {
+    "autoClose": "3600s"
+  }
+}

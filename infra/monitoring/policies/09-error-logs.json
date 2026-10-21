@@ -1,0 +1,40 @@
+{
+  "displayName": "Catalog: error in the logs",
+  "documentation": {
+    "content": "A catalog service (worker, web or cut-out) wrote an error to its log. Errors that the chunk and batch alerts already report are left out, so this is something else. First open Error Reporting in the Google Cloud console for the image-links-agent project to see the error and how often it happens. Then open Logs Explorer for that service around the time of this email.",
+    "mimeType": "text/markdown",
+    "subject": "Catalog: error in the logs"
+  },
+  "userLabels": {
+    "app": "catalog"
+  },
+  "conditions": [
+    {
+      "displayName": "ERROR log lines not covered by other alerts, more than 0 in 5 minutes",
+      "conditionThreshold": {
+        "filter": "metric.type=\"logging.googleapis.com/user/catalog/error_logs\" AND resource.type=\"cloud_run_revision\"",
+        "aggregations": [
+          {
+            "alignmentPeriod": "300s",
+            "perSeriesAligner": "ALIGN_SUM",
+            "crossSeriesReducer": "REDUCE_SUM"
+          }
+        ],
+        "comparison": "COMPARISON_GT",
+        "thresholdValue": 0,
+        "duration": "0s",
+        "trigger": {
+          "count": 1
+        }
+      }
+    }
+  ],
+  "combiner": "OR",
+  "enabled": true,
+  "notificationChannels": [
+    "__CATALOG_EMAIL_CHANNEL__"
+  ],
+  "alertStrategy": {
+    "autoClose": "3600s"
+  }
+}

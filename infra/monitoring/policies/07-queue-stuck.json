@@ -1,0 +1,60 @@
+{
+  "displayName": "Catalog: queue stuck",
+  "documentation": {
+    "content": "The catalog Cloud Tasks queue has held more than 50 waiting tasks for 30 minutes and has not started a single task in that time, so batches are not moving. First open the catalog queue in Cloud Tasks and check that it is not paused. Then check that the catalog-worker service is running and look at its logs for errors. Once the cause is fixed the waiting tasks run on their own.",
+    "mimeType": "text/markdown",
+    "subject": "Catalog: queue stuck"
+  },
+  "userLabels": {
+    "app": "catalog"
+  },
+  "conditions": [
+    {
+      "displayName": "catalog queue has more than 50 tasks for 30 minutes",
+      "conditionThreshold": {
+        "filter": "metric.type=\"cloudtasks.googleapis.com/queue/depth\" AND resource.type=\"cloud_tasks_queue\" AND resource.labels.queue_id=\"catalog\"",
+        "aggregations": [
+          {
+            "alignmentPeriod": "60s",
+            "perSeriesAligner": "ALIGN_MEAN",
+            "crossSeriesReducer": "REDUCE_SUM"
+          }
+        ],
+        "comparison": "COMPARISON_GT",
+        "thresholdValue": 50,
+        "duration": "1800s",
+        "trigger": {
+          "count": 1
+        }
+      }
+    },
+    {
+      "displayName": "no task started on the catalog queue for 30 minutes",
+      "conditionThreshold": {
+        "filter": "metric.type=\"cloudtasks.googleapis.com/queue/task_attempt_count\" AND resource.type=\"cloud_tasks_queue\" AND resource.labels.queue_id=\"catalog\"",
+        "aggregations": [
+          {
+            "alignmentPeriod": "60s",
+            "perSeriesAligner": "ALIGN_SUM",
+            "crossSeriesReducer": "REDUCE_SUM"
+          }
+        ],
+        "comparison": "COMPARISON_LT",
+        "thresholdValue": 1,
+        "duration": "1800s",
+        "trigger": {
+          "count": 1
+        },
+        "evaluationMissingData": "EVALUATION_MISSING_DATA_ACTIVE"
+      }
+    }
+  ],
+  "combiner": "AND",
+  "enabled": true,
+  "notificationChannels": [
+    "__CATALOG_EMAIL_CHANNEL__"
+  ],
+  "alertStrategy": {
+    "autoClose": "3600s"
+  }
+}

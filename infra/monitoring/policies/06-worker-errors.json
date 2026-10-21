@@ -1,0 +1,40 @@
+{
+  "displayName": "Catalog: worker errors",
+  "documentation": {
+    "content": "The catalog-worker service answered more than 5 requests a minute with a server error for 5 minutes in a row (503 \"no free instance\" answers are left out because Cloud Tasks retries them). Batches may be failing. First open the catalog-worker service in Cloud Run and look at its Logs tab. If the errors started right after a deploy, roll back to the previous revision as the go-live runbook describes.",
+    "mimeType": "text/markdown",
+    "subject": "Catalog: worker errors"
+  },
+  "userLabels": {
+    "app": "catalog"
+  },
+  "conditions": [
+    {
+      "displayName": "catalog-worker 5xx responses other than 503, more than 5 a minute for 5 minutes",
+      "conditionThreshold": {
+        "filter": "metric.type=\"run.googleapis.com/request_count\" AND resource.type=\"cloud_run_revision\" AND resource.labels.service_name=\"catalog-worker\" AND metric.labels.response_code_class=\"5xx\" AND metric.labels.response_code=monitoring.regex.full_match(\"5(0[0-24-9]|[1-9][0-9])\")",
+        "aggregations": [
+          {
+            "alignmentPeriod": "60s",
+            "perSeriesAligner": "ALIGN_SUM",
+            "crossSeriesReducer": "REDUCE_SUM"
+          }
+        ],
+        "comparison": "COMPARISON_GT",
+        "thresholdValue": 5,
+        "duration": "300s",
+        "trigger": {
+          "count": 1
+        }
+      }
+    }
+  ],
+  "combiner": "OR",
+  "enabled": true,
+  "notificationChannels": [
+    "__CATALOG_EMAIL_CHANNEL__"
+  ],
+  "alertStrategy": {
+    "autoClose": "3600s"
+  }
+}

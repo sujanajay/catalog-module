@@ -40,7 +40,7 @@ const flags = {
   '--args': ['-c', fs.readFileSync('services/matting/tests/cloudrun_check.py', 'utf8')],
   '--region': 'asia-south1', '--service-account': 'catalog-worker@image-links-agent.iam.gserviceaccount.com',
   '--tasks': 1, '--parallelism': 1, '--max-retries': 0, '--task-timeout': '600s',
-  '--cpu': '1', '--memory': '512Mi', '--set-env-vars': variables, '--clear-secrets': true,
+  '--cpu': '1', '--memory': '512Mi', '--set-env-vars': variables, '--clear-secrets': true, '--labels': { app: 'catalog', component: 'job' },
 };
 fs.writeFileSync(path.join(dir, 'flags.json'), JSON.stringify(flags));
 NODE
