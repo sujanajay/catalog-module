@@ -119,6 +119,9 @@ describe("batch copy for the real state of the batch", () => {
     // Photo 1 is unchanged on Noon but new on Styli; photo 2 changed on Noon and is too small for Styli.
     expect(plannedImages(sources, ["noon", "styli"], live)).toEqual({ outputs: 2, sourcesToMake: 2 });
     expect(plannedImages([sources[0]!], ["noon"], live)).toEqual({ outputs: 0, sourcesToMake: 0 });
+    // With the x2 upscaler on, Styli judges the upscaled size: the 800 px photo is made for Styli too (floor 741 px).
+    expect(plannedImages(sources, ["noon", "styli"], live, 2)).toEqual({ outputs: 3, sourcesToMake: 2 });
+    expect(plannedImages([{ productId: "p", n: 3, sha256: "tiny", height: 600 }], ["styli"], [], 2)).toEqual({ outputs: 0, sourcesToMake: 0 });
   });
 });
 

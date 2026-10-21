@@ -5,7 +5,7 @@ import type { ChannelId, OutputFlag, ProductType } from "./types";
 import { ALPHA_BBOX_THRESHOLD, analyseBackground, borderPixels, shadowLayer } from "./shadow";
 import { BG_TOLERANCE, checkOutput } from "./compliance";
 import { enlargeCutout } from "./enhance";
-import { shouldUpscale, upscaledRgb, upscalerKey, type Upscaler } from "./upscale";
+import { shouldUpscale, UPSCALE_FACTOR, upscaledRgb, upscalerKey, type Upscaler } from "./upscale";
 
 export interface Prepared { width: number; height: number; rgb: Buffer; alphaSource: Buffer | null; background: { uniform: boolean; color: [number, number, number]; stdev: number }; flags: OutputFlag[]; sourceMime: string }
 export interface Matte { alpha: Buffer; width: number; height: number; model: string; ms: number; source: "model" | "alpha_source" | "floodfill"; target: "cpu" | "gpu" | null; sentLongSide: number | null }
@@ -432,6 +432,11 @@ export function safeBoxFor(spec: ChannelSpec, canvas: Size, wide: boolean, cut: 
   return { x: left, y: top, w: canvas.w - left - right, h: canvas.h - top - bottom };
 }
 
+/** The enlargement the channel's minimum canvas needs for this product (planCanvas's fit(min)); above MAX_UPSCALE is low resolution. */
+export function minimumFit(spec: ChannelSpec, box: BBox, cut: CutEdges = NO_CUT, trimRoom?: TrimRoom): number {
+  return cutFillScale(safeBoxFor(spec, effectiveMinimum(spec), box.w > box.h, cut), box, cut, trimRoom);
+}
+
 export function effectiveMinimum(spec: ChannelSpec): Size {
   if (spec.fixedCanvas) return spec.targetCanvas;
   const fraction = Math.max(spec.minCanvas.w / spec.targetCanvas.w, spec.minCanvas.h / spec.targetCanvas.h);
@@ -501,7 +506,10 @@ export async function renderSource(input: RenderInput): Promise<RenderOutput> {
   if (anyCut(cut)) result.flags.push("cut_in_source");
   if (plan.lowResolution) {
     result.flags.push("low_resolution");
-    if (spec.id === "styli" && STYLI_SKIP_LOW_RESOLUTION) { result.status = "skipped"; result.notes.push("Skipped for Styli: the photo is smaller than Styli needs."); return result; }
+    // Styli judges the size after the x2 upscaler when one is configured (owner decision 2026-10-21): skipped only
+    // when even the x2 photo would need more than MAX_UPSCALE. A photo let through here is made even if the upscale
+    // call then fails (the plain path below), with low_resolution and the soft note.
+    if (spec.id === "styli" && STYLI_SKIP_LOW_RESOLUTION && minimumFit(spec, box, cut, geometry?.trimRoom) / (input.upscaler ? UPSCALE_FACTOR : 1) > MAX_UPSCALE) { result.status = "skipped"; result.notes.push("Skipped for Styli: the photo is smaller than Styli needs."); return result; }
     const min = spec.minCanvas, target = spec.targetCanvas;
     // A fixed canvas (Trendyol 1200 x 1800, minimum 600 x 800; Centrepoint) is the size we deliver, not a minimum the
     // photo missed (spec 11 4.1): say what we deliver and that the photo was enlarged. Same words in qa/reasons.ts and

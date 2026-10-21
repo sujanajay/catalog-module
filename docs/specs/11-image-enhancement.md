@@ -113,8 +113,10 @@ image API (section 10); the judge prompt.
 
 ### 4.3 Workstream C: render integration (`upscale.ts`, `render.ts`, `chunk.ts`, `deps.ts`)
 
-- Worker env `UPSCALE_MODEL` (model id; unset = off, the default) and `UPSCALE_MIN_SCALE` (default
-  1.5). When a photo must be enlarged by more than `UPSCALE_MIN_SCALE` on a channel (today only the
+- Worker env `UPSCALE_MODEL` (model id; unset or empty in the service env = off) and `UPSCALE_MIN_SCALE`
+  (default 1.5). `infra/deploy.sh` sets it to `swinir-x2` by default since 2026-10-21 (owner decision);
+  `UPSCALE_MODEL=off` in the deploy environment leaves it unset, which turns the upscaler off. The model id
+  is engineering config only and never appears in UI copy. When a photo must be enlarged by more than `UPSCALE_MIN_SCALE` on a channel (today only the
   exact-size channels such as Trendyol 1200x1800 from 800x1200 sources; variable-size canvases are
   capped at 1.5x so they never trigger it, except the case where even the minimum canvas needs more,
   which already carries `low_resolution` and follows the same rule), the render upscales the RGB
@@ -228,7 +230,7 @@ passes. Model ids appear in the JSON and HTML report and the job log only.
 
 | Name | Default | Used by |
 |---|---|---|
-| `UPSCALE_MODEL` | unset (off) | worker, catalog-local, deploy.sh pass-through |
+| `UPSCALE_MODEL` | `swinir-x2` from deploy.sh (`off` leaves it unset = off; unset in the service env = off) | worker, web (Styli threshold), jobs, catalog-local, deploy.sh |
 | `UPSCALE_MIN_SCALE` | `1.5` | worker, catalog-local |
 | `UPSCALE_TIMEOUT_MS` | `60000` | worker |
 | `UPSCALE_MODELS` | `realesrgan-x2plus,swinir-x2` | matting (gpu target only) |
@@ -354,8 +356,9 @@ has no further spec, "Programme complete; no next spec."
 
 - Decided (2026-10-20): an upscaler is allowed in the default path behind the `UPSCALE_MODEL` flag,
   chosen by the fidelity gate of section 4.4; its outputs carry the information flag `upscaled`.
-- OPEN: whether an x2 upscale may un-skip Styli (800x1200 sources would clear its 1,482 px minimum).
-  Not assumed here; `STYLI_SKIP_LOW_RESOLUTION` and `STYLI_MIN_SOURCE_HEIGHT_PX` are unchanged. Asked
-  in the status when the gate is done.
+- Decided (2026-10-21, owner): the x2 upscale un-skips Styli. With the upscaler on (now the deploy
+  default, `swinir-x2`) Styli judges the size after the upscale: skipped only when `fit(min) / 2` is
+  above 1.5, so the wizard warning, step 4's count, the worker's Styli rows and the evals use
+  `styliMinSourceHeightPx` (741 px with the upscaler, 1,482 px without); `CHANNEL_RULES_VERSION` 10.
 - No paid image API (Topaz, Claid, Stability, Vertex Imagen, any hosted upscaler) without a separate
   owner yes; brand photos do not leave the GCP project.

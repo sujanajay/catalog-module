@@ -206,12 +206,20 @@ export const MAX_OUTPUT_BYTES = 2_000_000;
 export const MAX_UPSCALE = 1.5;
 export const DETAIL_SHOT_BBOX_FRACTION = 0.85;
 export const MIN_SOURCE_LONG_SIDE_PX = 500;
-/** ceil((3123 - 450 - 450) / 1.5); feeds the wizard warning only. */
+/** ceil((3123 - 450 - 450) / 1.5): the Styli floor without the upscaler; use styliMinSourceHeightPx. */
 export const STYLI_MIN_SOURCE_HEIGHT_PX = 1482;
+/**
+ * The smallest source height Styli takes (the agreement judges the size after the upscaler, owner decision
+ * 2026-10-21): 1482 px without the upscaler (factor 1), 741 px with the x2 upscaler (factor 2). One rule for the
+ * wizard warning, step 4's count and cost, the worker's Styli rows and the evals.
+ */
+export function styliMinSourceHeightPx(upscaleFactor: number): number {
+  return Math.ceil(STYLI_MIN_SOURCE_HEIGHT_PX / Math.max(1, upscaleFactor));
+}
 /** Agreement with Styli; always applied (not a batch option). */
 export const STYLI_SKIP_LOW_RESOLUTION = true;
 /** Bumped on any rule change; part of render_key (06). */
-export const CHANNEL_RULES_VERSION = "9";
+export const CHANNEL_RULES_VERSION = "10";
 
 /** The start of the render note naming a cut side that does not sit flush on a channel (the sheet's cut note leaves such photos out). */
 export const CUT_BAND_NOTE_START = "The original photo is cut at the ";

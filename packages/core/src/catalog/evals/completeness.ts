@@ -1,9 +1,10 @@
 // Completeness (spec 10 section 2): for every golden source and ticked channel exactly the expected
 // output exists, live and verified, with its public object, its staged file and its sheet cell; a
-// skip only where the spec allows (Styli under STYLI_MIN_SOURCE_HEIGHT_PX, or a size chart left out with its note) and with the exact note.
+// skip only where the spec allows (Styli under styliMinSourceHeightPx, or a size chart left out with its note) and with the exact note.
 // Pure over plain rows so it is unit tested without a database.
-import { channel, STYLI_MIN_SOURCE_HEIGHT_PX } from "../channels";
+import { channel, styliMinSourceHeightPx } from "../channels";
 import { flagReason, type ChannelId } from "../types";
+import { upscaleFactorFromEnv } from "../upscale";
 import { judge, type CheckResult, type CheckSubject } from "./types";
 
 export const STYLI_SKIP_NOTE = "Skipped for Styli: the photo is smaller than Styli needs.";
@@ -45,9 +46,9 @@ export interface CompletenessInput {
 }
 export const sourceKey = (identifier: string, n: number) => `${identifier}|${n}`;
 
-/** The spec's expectation for one (source, channel): "output" or "skip" (Styli low resolution). */
-export function expectedOutcome(source: SourceRow, ch: ChannelId): "output" | "skip" {
-  return ch === "styli" && (source.height ?? Infinity) < STYLI_MIN_SOURCE_HEIGHT_PX ? "skip" : "output";
+/** The spec's expectation for one (source, channel): "output" or "skip" (Styli low resolution, judged after the upscaler when UPSCALE_MODEL is set). */
+export function expectedOutcome(source: SourceRow, ch: ChannelId, upscaleFactor: number = upscaleFactorFromEnv()): "output" | "skip" {
+  return ch === "styli" && (source.height ?? Infinity) < styliMinSourceHeightPx(upscaleFactor) ? "skip" : "output";
 }
 
 export function checkCompleteness(input: CompletenessInput): CheckResult[] {

@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { bbox, planCanvas } from "./render";
 import { CHANNELS } from "./channels";
 import sharp from "sharp";
@@ -7,6 +7,7 @@ import { prepare, renderSource, renderKeyInputs, planProduct, safeBoxFor, Unsupp
 import { checkOutput, BG_TOLERANCE } from "./compliance";
 import { analyseBackground, preservedDarkness, shadowLayer, SHADOW_MAX_DARKNESS } from "./shadow";
 import { contactSheet } from "./contact-sheet";
+import type { Upscaler } from "./upscale";
 
 function fixture(width = 800, height = 800, box = { x: 200, y: 200, w: 400, h: 400 }): { prepared: Prepared; matte: Matte } {
   const rgb = Buffer.alloc(width * height * 3, 255), alpha = Buffer.alloc(width * height);
@@ -189,5 +190,47 @@ describe("shadow decisions", () => {
     const box = { x: 200, y: 200, w: 400, h: 400 }, plan = planCanvas(CHANNELS.noon, box, { w: 800, h: 800 }, {});
     expect((await shadowLayer(source.prepared, source.matte, box, plan, "footwear", "#E0E0E0")).flags).toEqual(["shadow_synthesised"]);
     expect((await shadowLayer(source.prepared, source.matte, box, plan, "apparel_flat", "#E0E0E0")).flags).toEqual(["no_shadow_source"]);
+  });
+});
+
+describe("Styli judged on the upscaled size", () => {
+  /** A fake x2 upscaler answering a solid colour JPEG of exactly twice the sent image; `fail` makes every call throw. */
+  const fakeUpscaler = (fail = false): Upscaler & { calls: number } => {
+    const up = { model: "fake-x2", minScale: 1.5, calls: 0, async upscale(image: Buffer) {
+      up.calls++;
+      if (fail) throw new Error("down");
+      const meta = await sharp(image).metadata();
+      return { jpeg: await sharp({ create: { width: meta.width! * 2, height: meta.height! * 2, channels: 3, background: { r: 160, g: 30, b: 50 } } }).jpeg({ quality: 95 }).toBuffer(), ms: 1 };
+    } };
+    return up;
+  };
+  // An 800x1200 photo whose product needs 2.47x on Styli: over the 1.5x cap alone, 1.24x after the x2 upscale.
+  const medium = () => fixture(800, 1200, { x: 150, y: 150, w: 500, h: 900 });
+  const quiet = () => { vi.spyOn(console, "info").mockImplementation(() => undefined); vi.spyOn(console, "warn").mockImplementation(() => undefined); };
+  afterEach(() => vi.restoreAllMocks());
+
+  it("makes an 800x1200 photo for Styli with the upscaler, flagged upscaled", async () => {
+    quiet();
+    const upscaler = fakeUpscaler(), output = await renderSource({ ...medium(), channel: "styli", shotNumber: 2, productType: "apparel_model", upscaler });
+    expect(output.status).toBe("ok"); expect(output.jpeg).not.toBeNull();
+    expect(output.flags).toContain("upscaled"); expect(output.flags).not.toContain("cut_in_source");
+    expect(upscaler.calls).toBe(1);
+    expect(output.notes).not.toContain("Skipped for Styli: the photo is smaller than Styli needs.");
+  });
+  it("skips the same photo for Styli without the upscaler, with the agreed note", async () => {
+    const output = await renderSource({ ...medium(), channel: "styli", shotNumber: 2, productType: "apparel_model" });
+    expect(output.status).toBe("skipped"); expect(output.jpeg).toBeNull();
+    expect(output.notes).toEqual(["Skipped for Styli: the photo is smaller than Styli needs."]);
+  });
+  it("still makes it when the upscale call fails at render time, flagged low_resolution with the soft note", async () => {
+    quiet();
+    const output = await renderSource({ ...medium(), channel: "styli", shotNumber: 2, productType: "apparel_model", upscaler: fakeUpscaler(true) });
+    expect(output.status).toBe("ok"); expect(output.flags).toContain("low_resolution"); expect(output.flags).not.toContain("upscaled");
+    expect(output.attention?.why).toMatch(/may look soft/);
+  });
+  it("still skips a 400x600 photo for Styli with the upscaler", async () => {
+    const upscaler = fakeUpscaler(), output = await renderSource({ ...fixture(400, 600, { x: 75, y: 75, w: 250, h: 450 }), channel: "styli", shotNumber: 2, productType: "apparel_model", upscaler });
+    expect(output.status).toBe("skipped"); expect(output.notes).toEqual(["Skipped for Styli: the photo is smaller than Styli needs."]);
+    expect(output.flags).not.toContain("cut_in_source"); expect(upscaler.calls).toBe(0);
   });
 });

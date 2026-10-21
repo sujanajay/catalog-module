@@ -56,7 +56,7 @@ function world() {
     renderAllChannels:vi.fn<CatalogDeps["renderAllChannels"]>(async(_p,_m,channels)=>Object.fromEntries(channels.map(channel=>[channel,{jpeg:Buffer.from([255,216,255,_p.rgb[0]!]),status:"ok",plan:{w:800,h:1000,lowResolution:false,safeBox:{x:0,y:0,w:800,h:1000},scale:1,placedX:0,placedY:0,detailShot:false},quality:90,bytes:4,flags:[],notes:[],attention:null,compliance:{ok:true,failures:[]}}])) as unknown as Awaited<ReturnType<CatalogDeps["renderAllChannels"]>>)};
   return {deps,objects,copy,remove,upload};
 }
-async function seed(w:ReturnType<typeof world>,name:string,options:{productId?:string;shots?:string[];channels?: ("noon"|"amazon")[]}={}) {
+async function seed(w:ReturnType<typeof world>,name:string,options:{productId?:string;shots?:string[];channels?: ("noon"|"amazon"|"styli")[]}={}) {
   const [batch]=await db.insert(catalogBatches).values({brandSlug:"anta",brandName:"Anta",name,isTest:true,createdBy:"test@opptra.com",status:"matting",channels:options.channels ?? ["noon"],counts:{...EMPTY_BATCH_COUNTS,products:1,sources:(options.shots ?? ["sha"]).length,outputs:(options.shots ?? ["sha"]).length*(options.channels ?? ["noon"]).length}}).returning();
   const product=options.productId ? (await db.select().from(catalogProducts).where(eq(catalogProducts.id,options.productId)))[0]!:(await db.insert(catalogProducts).values({brandSlug:"anta",isTest:true,productKey:name,pathKey:name,identifier:name}).returning())[0]!;
   await db.update(catalogProducts).set({lockBatchId:batch!.id}).where(eq(catalogProducts.id,product.id));
@@ -121,6 +121,18 @@ it("a redelivered shot that ingest links to the previous source stages under its
   // stageCopyToPublic only publishes <root>/<brand>/<batch>/staging/<pathKey>/<channel>/<name>.
   expect(output!.stagingUri).toBe(storage.toGsUri("assets",stagingPath(batchPrefix("anta",next.batch.id,true),s.product.pathKey,"noon",1)));
   expect(w.copy.mock.calls.at(-1)![0]).toBe(output!.stagingUri);
+},60_000);
+it("pre-skips an 800 px Styli photo at the matte stage without the upscaler and plans it with the upscaler on",async()=>{
+ for (const [model,skipped] of [["",true],["swinir-x2",false]] as const) {
+  vi.stubEnv("UPSCALE_MODEL",model);
+  try {
+   const w=world(),s=await seed(w,`styli-floor-${model || "off"}`,{channels:["styli"]});
+   await handleChunkTask(w.deps,{chunkId:s.chunk.id});
+   const [output]=await db.select().from(catalogOutputs).where(eq(catalogOutputs.batchId,s.batch.id));
+   if (skipped) { expect(output!.status).toBe("skipped"); expect(output!.reason).toBe("Skipped for Styli: the photo is smaller than Styli needs."); }
+   else { expect(output!.status).not.toBe("skipped"); expect(output!.reason).toBeNull(); }
+  } finally { vi.unstubAllEnvs(); }
+ }
 },60_000);
 it("render keys include rules, policy, shot, channel and source",()=>{const input={sourceSha256:"one",channel:"noon" as const,n:1,policyKey:"default|fixture"};expect(new Set([renderKey(input),renderKey({...input,n:2}),renderKey({...input,channel:"amazon"}),renderKey({...input,policyKey:"other"}),renderKey({...input,rulesVersion:"next"}),renderKey({...input,sourceSha256:"two"})]).size).toBe(6);});
 it("holds a product if its chunk failed before it could create planned outputs",async()=>{const w=world(),s=await seed(w,"missing-output");await db.update(catalogChunks).set({status:"failed"}).where(eq(catalogChunks.id,s.chunk.id));expect((await handlePublishTask(w.deps,{batchId:s.batch.id,productId:s.product.id})).outcome).toBe("held");expect(w.copy).not.toHaveBeenCalled();},60_000);
