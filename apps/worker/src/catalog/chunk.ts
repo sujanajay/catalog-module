@@ -99,7 +99,8 @@ export async function handleChunkTask(deps: CatalogDeps, body: Record<string,unk
         try {
          const cap=await checkCatalogCaps(deps.db,{batchId:batch.id,now:deps.now()});if(!cap.ok) throw new CatalogQaCapError(cap.reason);
          const lowest=allSources.find(source=>!replaced.has(source.id))!;
-         const llm=catalogLlmDeps(deps,batch,underClaim);
+         // A rate-limited classifier backs off (the delivery's shared budget) and then asks the judge's second model once.
+         const llm={...catalogLlmDeps(deps,batch,underClaim),...(policy.qaModelSecond ? {secondModel:policy.qaModelSecond}:{})};
          let result=await deps.classifyProductType((await deps.storage.downloadBuffer(lowest.rawUri)).buf,llm);
          llm.assertAvailable();
          // 07 4.0a: a size chart says nothing about the product type. It is a property of that photo only

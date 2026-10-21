@@ -11,6 +11,7 @@ import { CHANNEL_ORDER, CHANNELS, hasCutBandNote } from "../channels";
 import type { SheetSpec } from "../sheet";
 import { CHANNEL_IDS, UPSCALED_SENTENCE, type ChannelId, type LinkStatus, type ChangeKind, type SheetStatus } from "../types";
 import { outputNote, type Output } from "./publish";
+import { flagDetails } from "../qa/reasons";
 import type { RecheckResult } from "../recheck/index";
 import { isDuplicateReject } from "../ingest/group";
 import type * as storage from "../../storage";
@@ -45,6 +46,14 @@ export function cutInSourceNote(outputs: readonly (Pick<Output, "n" | "status" |
   if (!shots.length) return "";
   const list = shots.length > 1 ? `${shots.slice(0, -1).join(", ")} and ${shots.at(-1)}` : String(shots[0]);
   return `${shots.length > 1 ? "Photos" : "Photo"} ${list}: already cut at the frame edge in the original photo; the cut edge sits flush with the edge of the image`;
+}
+/**
+ * The product note for `type_unknown` (information; never holds the product): the product type could
+ * not be checked (the classifier stayed unavailable, the spending limit, or a mocked classifier), so
+ * the general rules were used. One note for the product, not one per photo.
+ */
+export function typeUnknownNote(outputs: readonly Pick<Output, "flags">[]): string {
+  return outputs.some(o => o.flags.includes("type_unknown")) ? flagDetails("type_unknown").why : "";
 }
 /**
  * Spec 11: "<Channel> img 1 and 2: Enlarged with a quality pass to meet this marketplace's size." per channel, for the
@@ -140,7 +149,7 @@ export async function buildReport(db:Db,batchId:string,extra:{recheck:RecheckRes
     const links:SheetSpec["rows"][number]["links"] = {};
     for (const output of live) { links[output.channel] ??= []; links[output.channel]![output.n-1]=output.publicUrl; }
     const times = live.flatMap(o=>o.publishedAt ? [+o.publishedAt]:[]);
-    return {brand:batch.brandName,identifier:product.identifier,optionIdStyleColor:product.optionIdStyleColor ?? "",opptraSkuIds:product.opptraSkuIds,links,status:batchSheetStatus(pair),notes:mergeNotes(pair.notes,[...problems,cutInSourceNote(outputs.filter(o=>o.productId===product.id && o.batchId===batchId)),...upscaledNotes(outputs.filter(o=>o.productId===product.id && o.batchId===batchId))]),change:pair.change,changedAt:times.length ? new Date(Math.max(...times)):null};
+    return {brand:batch.brandName,identifier:product.identifier,optionIdStyleColor:product.optionIdStyleColor ?? "",opptraSkuIds:product.opptraSkuIds,links,status:batchSheetStatus(pair),notes:mergeNotes(pair.notes,[typeUnknownNote(outputs.filter(o=>o.productId===product.id && o.batchId===batchId)),...problems,cutInSourceNote(outputs.filter(o=>o.productId===product.id && o.batchId===batchId)),...upscaledNotes(outputs.filter(o=>o.productId===product.id && o.batchId===batchId))]),change:pair.change,changedAt:times.length ? new Date(Math.max(...times)):null};
   });
   const selected = outputs.filter(o=>o.batchId===batchId), unchanged = pairs.reduce((n,{product})=>n+Math.max(0,sources.filter(s=>s.productId===product.id).length*batch.channels.length-selected.filter(o=>o.productId===product.id).length),0);
   const qaCap=selected.some(output=>output.flags.includes("qa_cap"));

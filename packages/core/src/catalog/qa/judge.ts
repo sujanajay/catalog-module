@@ -60,7 +60,7 @@ export const JUDGE_BACKOFF_DELAYS_MS = [5_000, 15_000, 45_000] as const;
 export const JUDGE_BACKOFF_JITTER = 0.2;
 export const JUDGE_BACKOFF_BUDGET_MS = 120_000;
 /** Failure kinds that a burst explains, so the other judge model is asked before qa_unavailable. */
-const TRANSIENT = new Set(["rate_limit", "server"]);
+export const TRANSIENT = new Set(["rate_limit", "server"]);
 export interface JudgeFailure { status: number | null; kind: string }
 
 /**
@@ -222,8 +222,15 @@ function readOpinion(value: Record<string, unknown>, model: string, hasReference
 }
 /** The judge's back-off for one model: waits come off this judging's budget and the shared one. */
 function judgeRetry(model: string, budgets: BackoffBudget[], deps: CatalogLlmDeps, delaysMs: readonly number[] = JUDGE_BACKOFF_DELAYS_MS): RetryPolicy {
+  return backoffRetry("catalog_qa: judge back-off", model, budgets, deps, delaysMs);
+}
+/**
+ * The 429/5xx back-off of one catalog model call (judge or classifier): about 5, 15 and 45 s (+/- 20%)
+ * or Retry-After, every wait taken off `budgets`, each wait logged as `line`.
+ */
+export function backoffRetry(line: string, model: string, budgets: BackoffBudget[], deps: CatalogLlmDeps, delaysMs: readonly number[] = JUDGE_BACKOFF_DELAYS_MS): RetryPolicy {
   return {delaysMs, jitter:JUDGE_BACKOFF_JITTER, budgets, ...(deps.sleep ? {sleep:deps.sleep} : {}), ...(deps.random ? {random:deps.random} : {}),
-    onRetry: ({attempt, status, waitMs, retryAfterMs}) => (deps.log ?? console.warn)("catalog_qa: judge back-off", {severity:"WARNING", model, attempt, status, kind:status === 429 ? "rate_limit" : "server", waitMs, retryAfterMs, budgetLeftMs:Math.min(...budgets.map(b => b.remainingMs))})};
+    onRetry: ({attempt, status, waitMs, retryAfterMs}) => (deps.log ?? console.warn)(line, {severity:"WARNING", model, attempt, status, kind:status === 429 ? "rate_limit" : "server", waitMs, retryAfterMs, budgetLeftMs:Math.min(...budgets.map(b => b.remainingMs))})};
 }
 async function askJudge(input: JudgeInput, model: string, deps: CatalogLlmDeps) {
   const content = [textPart("Image 1: the source photo"), ...imageParts([await qaImage(input.original)]), textPart(`Image 2: the output we rendered from image 1 for ${CHANNELS[input.channel].label}`), ...imageParts([await qaImage(input.output)])];
