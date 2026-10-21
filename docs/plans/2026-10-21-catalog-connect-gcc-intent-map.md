@@ -1,6 +1,6 @@
 # Catalog Module Connect GCC: intent map, prioritization and deep-dive program
 
-Date: 2026-10-21. Owner: Sujan Ajay. Status: program approved; deep dives in progress.
+Date: 2026-10-21. Owner: Sujan Ajay. Status: program approved; all deep dives written, awaiting Gate B answers.
 This document is a plan and an investigation record. Nothing in it is implemented.
 Implementation decisions are taken by the owner separately after reviewing the deep dives.
 
@@ -134,17 +134,15 @@ and listing fill, infographics compositor, review ingestion.
 - Gate D: before any generator reaches the default path, bake-off and fidelity gate numbers
   are reviewed by the owner; generated shots stay in review-all until they hold.
 
-## 9. Resume point (paused 2026-10-21 at the owner's request)
+## 9. Resume point (deep dives complete 2026-10-22)
 
-State: program approved (Gate A). Program doc written. No deep dive has produced output.
-Worktree: C:\Users\Sujan Ajay\Desktop\catalog-module-wt\01-intent-map, branch
-docs/catalog-connect-gcc-intent-map (from origin/main c9a1afb). Nothing committed yet.
-Full evidence and the deep-dive briefs: the owner's plan file
-C:\Users\Sujan Ajay\.claude\plans\pasted-content-id-5756-what-i-rustling-raccoon.md.
-Video frames (131 jpg) remain in the session scratchpad under watch\watch-iomhnjfy\frames;
-they are not needed again unless a deep dive wants a visual recheck.
+State: all deep dives written and committed on branch docs/catalog-connect-gcc-intent-map
+(worktree C:\Users\Sujan Ajay\Desktop\catalog-module-wt\01-intent-map, rebased on
+origin/main 4be472d). Files: docs/plans/deep-dives/00, 01, 01a, 02, 03, 08, 09. DD3 trial
+spend: 5.39 USD of the 50 USD cap. Nothing implemented. No PR opened.
 
-To resume: launch DD0 (Opus), DD2 (Fable) and DD9 (Fable) in parallel using the briefs
-in the plan file; then DD1 (Opus) after DD0; then DD3 (Fable) and DD8 (Opus). Each writes
-docs/plans/deep-dives/<nn>-<slug>.md and ends with an approval question. Come back to the
-owner with the documents; implement nothing.
+Next step is Gate B: the owner answers each deep dive's approval question (last section of
+each file) and the open items in 00 (16 categories), 01a (unverified channel values) and
+08 (which brand sites the written rights cover). Only after those answers does any
+dependent work get specified; implementation still requires Gate C (SPEC.md amendment and
+a yes per paid generator).
