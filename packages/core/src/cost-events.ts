@@ -4,6 +4,7 @@
 import type { Db } from "./db/client";
 import { catalogCostEvents, type CostKind, type CostOutcome, type CostStage } from "./db/schema";
 import type { ChannelId } from "./catalog/types";
+import { log } from "./log";
 
 export interface CostEventInput {
   batchId: string;
@@ -22,16 +23,21 @@ export interface CostEventInput {
   completionTokens?: number;
   usd?: number;
   estimated?: boolean;
+  /**
+   * `cap` is written only by the judge's fetch wrapper, when a spend cap refused the next attempt in the
+   * middle of a quality check (the photo is then held with `qa_cap`). The cap checks before a judging,
+   * before a re-judge and before the classifier write no row: nothing was spent there.
+   */
   outcome?: CostOutcome;
   chunkId?: string | null;
   attempt?: number | null;
   at?: Date;
 }
 
-/** The worker's `deps.log` shape; the default prints one JSON line to stderr. */
+/** The worker's `deps.log` shape (a `severity` field picks the severity); the default is the shared log helper. */
 export type CostEventLog = (message: string, fields?: Record<string, unknown>) => void;
 export const COST_EVENT_WRITE_FAILED = "cost event write failed";
-const defaultLog: CostEventLog = (message, fields) => console.error(JSON.stringify({ message, ...fields }));
+const defaultLog: CostEventLog = (message, fields) => log("ERROR", message, fields);
 
 const whole = (value: number | undefined | null) => (typeof value === "number" && Number.isFinite(value) && value > 0 ? Math.round(value) : 0);
 const money = (value: number | undefined) => (typeof value === "number" && Number.isFinite(value) && value > 0 ? value : 0);

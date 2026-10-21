@@ -9,6 +9,8 @@ import { heldInHand, isBusyBackground, passthroughMatte, passthroughProductLoss,
 import type { ChannelId, OutputFlag, ResolvedPolicy } from "@catalog/core/catalog/types";
 import type { CatalogDeps } from "./deps";
 import { renderKey, rerenderedKey } from "@catalog/core/catalog/pipeline/publish";
+import { recordCostEvents } from "@catalog/core/cost-events";
+import { matteCallUsd } from "@catalog/core/catalog/cost";
 
 type Batch = typeof catalogBatches.$inferSelect;
 type Product = typeof catalogProducts.$inferSelect;
@@ -90,6 +92,9 @@ export async function resolvePhoto(deps: CatalogDeps, input: ResolvePhotoInput):
     await underClaim(async()=>{});
     const matte = await deps.matteFor(p,deps.matting,secondModel!,{},trace);
     second = matte.source === "model" ? matte : null;
+    // Cost ledger: the ladder's second cut-out call, on the photo. No claim write follows at once, so this
+    // is a standalone savepoint write that never throws (recordCostEvents logs a failure).
+    await recordCostEvents(deps.db,[{batchId:input.batch.id,brandSlug:input.batch.brandSlug,isTest:input.batch.isTest,productId:product.id,sourceImageId:source.id,stage:"matte",kind:"matte_call",engine:matte.target ?? "worker",ms:matte.ms,...matteCallUsd(matte.target,matte.ms),outcome:second ? "ok":"failed",at:deps.now()}],deps.log);
     return second;
   };
   // The whole frame kept (matte-guard.ts), the last answer to a cut-out that removed the product.

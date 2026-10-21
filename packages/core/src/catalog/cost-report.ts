@@ -2,12 +2,14 @@
 // (one batch, a time window, a top-N) and uses the ledger's indexes. Labels never name a model: an
 // engine is shown by its kind ("quality check", "cut-out", "image making", "worker").
 //
-// Attribution rule (SPEC R16): render and upscale rows are direct per output and so per channel; matte,
-// classify and judge rows belong to their source image and split evenly across that image's non-skipped
-// outputs in the batch; the per-chunk compute row splits evenly across the chunk's non-skipped outputs;
-// a publish row (timed, usd 0) splits across its product's non-skipped outputs. A row with nothing to
-// split over (every output skipped) stays in `unattributedUsd`.
-import { and, eq, gte, sql } from "drizzle-orm";
+// Attribution rule (SPEC R16a): render, upscale and judge rows are direct per output (the image the
+// quality check looked at) and so per channel; matte and classify rows belong to their source image and
+// split evenly across that image's non-skipped outputs in the batch; the per-chunk compute row splits
+// evenly across the chunk's non-skipped outputs; a publish row (timed, usd 0) splits across its product's
+// non-skipped outputs. A judge row without an output (or whose output was skipped) falls back to the
+// source split. A row with nothing to split over (every output skipped) stays in `unattributedUsd`.
+// Outcome `cap` rows (a cap refused a judge attempt mid-check) carry usd 0 and only count as calls.
+import { and, eq, gte, inArray, sql } from "drizzle-orm";
 import type { Db } from "../db/client";
 import { catalogChunks, catalogCostEvents, catalogOutputs, catalogProducts, catalogSourceImages, type CostKind, type CostStage } from "../db/schema";
 import type { ChannelId } from "./types";
@@ -110,10 +112,8 @@ export async function batchCostAttribution(db: Db, batchId: string, opts: { top?
   const byId = new Map(outputs.map((o) => [o.id, o]));
   const live = outputs.filter((o) => !o.skipped);
   const bySource = new Map<string, OutputRef[]>(), byProduct = new Map<string, OutputRef[]>();
-  for (const o of live) {
-    bySource.set(o.sourceImageId, [...(bySource.get(o.sourceImageId) ?? []), o]);
-    byProduct.set(o.productId, [...(byProduct.get(o.productId) ?? []), o]);
-  }
+  const add = (map: Map<string, OutputRef[]>, key: string, o: OutputRef) => { const list = map.get(key); if (list) list.push(o); else map.set(key, [o]); };
+  for (const o of live) { add(bySource, o.sourceImageId, o); add(byProduct, o.productId, o); }
   const byChunk = new Map(chunks.map((c) => {
     const products = new Set(c.productIds), sources = c.sourceImageIds?.length ? new Set(c.sourceImageIds) : null;
     return [c.id, live.filter((o) => products.has(o.productId) && (!sources || sources.has(o.sourceImageId)))];
@@ -130,6 +130,7 @@ export async function batchCostAttribution(db: Db, batchId: string, opts: { top?
     if (g.usd === 0) continue;
     const direct = g.outputId ? byId.get(g.outputId) : undefined;
     if (direct && (g.kind === "render" || g.kind === "upscale_call")) spread(direct.skipped ? [] : [direct], g.usd);
+    else if (direct && !direct.skipped && g.kind === "llm_call" && g.stage === "qa") spread([direct], g.usd);
     else if (g.kind === "compute" && g.chunkId && byChunk.has(g.chunkId)) spread(byChunk.get(g.chunkId), g.usd);
     else if (g.sourceImageId) spread(bySource.get(g.sourceImageId), g.usd);
     else if (g.productId) spread(byProduct.get(g.productId), g.usd);
@@ -157,8 +158,8 @@ export async function batchCostAttribution(db: Db, batchId: string, opts: { top?
   const addHints = (into: CostHints, from: CostHints | undefined) => { if (!from) return; into.matteCalls += from.matteCalls; into.matteExtraCalls += from.matteExtraCalls; into.judgeCalls += from.judgeCalls; into.upscaleCalls += from.upscaleCalls; };
 
   const productIds = [...byProduct.keys()], sourceIds = [...bySource.keys()];
-  const products = productIds.length ? await db.select({ id: catalogProducts.id, identifier: catalogProducts.identifier }).from(catalogProducts).where(sql`${catalogProducts.id} in ${productIds}`) : [];
-  const sources = sourceIds.length ? await db.select({ id: catalogSourceImages.id, n: catalogSourceImages.n }).from(catalogSourceImages).where(sql`${catalogSourceImages.id} in ${sourceIds}`) : [];
+  const products = productIds.length ? await db.select({ id: catalogProducts.id, identifier: catalogProducts.identifier }).from(catalogProducts).where(inArray(catalogProducts.id, productIds)) : [];
+  const sources = sourceIds.length ? await db.select({ id: catalogSourceImages.id, n: catalogSourceImages.n }).from(catalogSourceImages).where(inArray(catalogSourceImages.id, sourceIds)) : [];
   const identifierOf = new Map(products.map((p) => [p.id, p.identifier])), shotOf = new Map(sources.map((s) => [s.id, s.n]));
 
   const topProducts: ProductCost[] = productIds.map((productId) => {
@@ -200,7 +201,11 @@ export async function brandCostTotals(db: Db, opts: { since?: Date; includeTest?
 }
 
 export const BRAND_REPORT_DAYS = 30;
-/** Per-brand totals for the last 30 days and for all time. */
+/**
+ * Per-brand totals for the last 30 days and for all time. The lifetime half reads every non-test row of
+ * the table, so a page that auto-refreshes should call brandCostTotals with `since` on its refresh path
+ * and load the lifetime half on demand.
+ */
 export async function brandCostReport(db: Db, opts: { now?: Date; includeTest?: boolean } = {}): Promise<{ last30Days: BrandCost[]; lifetime: BrandCost[] }> {
   const now = opts.now ?? new Date();
   const since = new Date(+now - BRAND_REPORT_DAYS * 86_400_000);

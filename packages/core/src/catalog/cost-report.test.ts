@@ -41,10 +41,10 @@ describe("cost report", () => {
     expect(Object.values(ENGINE_LABELS).join(" ")).not.toMatch(/gemini|birefnet|claude|gpt|\//i);
   });
 
-  it("splits a photo's cut-out and judge cost across its channels, the compute row across the chunk's outputs, and render rows stay direct", async () => {
+  it("splits a photo's cut-out across its channels, the compute row across the chunk's outputs; judge, render and upscale rows stay direct", async () => {
     const w = await world("split");
     await recordCostEvents(db, [
-      // Photo 1: three live channels share the cut-out (0.30) and the judge (0.03 over two attempts).
+      // Photo 1: three live channels share the cut-out (0.30); the judge (0.03 over two attempts) is direct to the noon image it checked.
       w.row({ productId: w.p1.id, sourceImageId: w.s1.id, stage: "matte", kind: "matte_call", engine: "cpu", usd: 0.30, ms: 2000, attempt: 1 }),
       w.row({ productId: w.p1.id, sourceImageId: w.s1.id, outputId: w.o.s1noon.id, channel: "noon", stage: "qa", kind: "llm_call", engine: "test/judge", usd: 0.01, outcome: "rate_limited", attempt: 1 }),
       w.row({ productId: w.p1.id, sourceImageId: w.s1.id, outputId: w.o.s1noon.id, channel: "noon", stage: "qa", kind: "llm_call", engine: "test/judge", usd: 0.02, attempt: 2 }),
@@ -67,11 +67,11 @@ describe("cost report", () => {
     expect(report.totalUsd).toBeCloseTo(1.42, 9);
     expect(report.unattributedUsd).toBe(0);
     const channel = Object.fromEntries(report.byChannel.map((c) => [c.channel, c.usd]));
-    // noon: s1 share (0.30+0.03)/3 + upscale 0.06 + s2 0.20/2 + s3 0.03/3 + compute 3*0.10
-    expect(channel.noon).toBeCloseTo(0.11 + 0.06 + 0.10 + 0.01 + 0.30, 9);
-    expect(channel.amazon).toBeCloseTo(0.11 + 0.10 + 0.01 + 0.30, 9);
-    // styli: s1 share + s3 share + compute for its two live outputs; nothing from the skipped photo 2.
-    expect(channel.styli).toBeCloseTo(0.11 + 0.01 + 0.20, 9);
+    // noon: s1 cut-out 0.30/3 + judge 0.03 direct + upscale 0.06 + s2 0.20/2 + s3 0.03/3 + compute 3*0.10
+    expect(channel.noon).toBeCloseTo(0.10 + 0.03 + 0.06 + 0.10 + 0.01 + 0.30, 9);
+    expect(channel.amazon).toBeCloseTo(0.10 + 0.10 + 0.01 + 0.30, 9);
+    // styli: s1 share + s3 share + compute for its two live outputs; nothing from the skipped photo 2, nothing from the judge.
+    expect(channel.styli).toBeCloseTo(0.10 + 0.01 + 0.20, 9);
     expect(report.byChannel.find((c) => c.channel === "styli")!.outputs).toBe(2);
     expect(report.byChannel.map((c) => c.usd).reduce((a, b) => a + b, 0)).toBeCloseTo(1.42, 9);
 

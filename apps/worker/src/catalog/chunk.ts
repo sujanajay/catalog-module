@@ -35,10 +35,12 @@ export async function handleChunkTask(deps: CatalogDeps, body: Record<string,unk
   let [chunk] = await deps.db.select().from(catalogChunks).where(eq(catalogChunks.id,body.chunkId));
   if (!chunk) return {httpStatus:200,outcome:"not_found"};
   const started = deps.now(), claim = randomUUID(); let mattingMs = 0, renderMs = 0;
-  // Cost ledger rows of this delivery (observability plan, part A), kept in memory and written with the
-  // compute row inside the same claim transaction at the end, so a lost claim writes nothing.
+  // Cost ledger rows of this delivery (observability plan, part A): collected in memory and flushed inside
+  // the next existing claim write (the photo's matte update, each output's render update, the compute row),
+  // so paid calls survive a delivery that throws later, while a lost claim writes nothing for that write.
   const ledger: CostEventInput[] = [];
   type LedgerRow = Omit<CostEventInput,"batchId"|"brandSlug"|"isTest"|"chunkId">;
+  const flush = async (tx:CatalogDeps["db"]) => { if (ledger.length) await recordCostEvents(tx,ledger.splice(0),deps.log); };
   const matteRow = (productId:string,sourceImageId:string,m:Matte,attempt:number,outcome:CostOutcome):LedgerRow =>
     ({productId,sourceImageId,stage:"matte",kind:"matte_call",engine:m.target ?? "worker",ms:m.ms,...matteCallUsd(m.target,m.ms),attempt,outcome});
   const ownsClaim = () => and(eq(catalogChunks.id,chunk!.id),eq(catalogChunks.taskName,claim),eq(catalogChunks.stage,chunk!.stage),eq(catalogChunks.status,"running"));
@@ -80,7 +82,7 @@ export async function handleChunkTask(deps: CatalogDeps, body: Record<string,unk
     const [claimed] = await deps.db.update(catalogChunks).set({status:"running",taskName:claim,attempt:sql`${catalogChunks.attempt}+1`,startedAt:started,finishedAt:null}).where(and(eq(catalogChunks.id,chunk.id),eq(catalogChunks.stage,chunk.stage),or(eq(catalogChunks.status,"queued"),and(eq(catalogChunks.status,"running"),sql`${catalogChunks.startedAt} < ${new Date(+started-CATALOG_TASK_LEASE_MS)}::timestamptz`)))).returning();
     if (!claimed) return {httpStatus:503,outcome:"busy"};
     chunk = claimed;
-    const note = (row:LedgerRow) => { ledger.push({batchId:batch.id,brandSlug:batch.brandSlug,isTest:batch.isTest,chunkId:chunk!.id,...row}); };
+    const note = (row:LedgerRow) => { ledger.push({batchId:batch.id,brandSlug:batch.brandSlug,isTest:batch.isTest,chunkId:chunk!.id,at:deps.now(),...row}); };
     let policy = batch.options.policy;
     if (!policy) {
       const resolved = await deps.resolvePolicy(batch.brandSlug,batch.productType === "auto" ? "*":batch.productType);
@@ -213,7 +215,7 @@ export async function handleChunkTask(deps: CatalogDeps, body: Record<string,unk
             const fallback = matte.source === "floodfill", flags = [...new Set([...source.flags,...p.flags,...(fallback ? ["fallback_matte" as const]:[]),...(resolved.passthrough ? ["matte_passthrough" as const]:[]),...(resolved.busyBackground ? ["leftover_background" as const]:[])])];
             const records = [...(retry ? [retry]:[]),...resolved.actions];
             if (records.length) await underClaim(async tx=>{for (const row of pending) await tx.update(catalogOutputs).set({compliance:withAutoActions(row.compliance,records)}).where(eq(catalogOutputs.id,row.id));});
-            await underClaim(async tx=>tx.update(catalogSourceImages).set({matteModel:matte.model,matteMs:matte.ms,width:p.width,height:p.height,flags}).where(eq(catalogSourceImages.id,source.id)));
+            await underClaim(async tx=>{await tx.update(catalogSourceImages).set({matteModel:matte.model,matteMs:matte.ms,width:p.width,height:p.height,flags}).where(eq(catalogSourceImages.id,source.id));await flush(tx);});
             // The retry failed too: the outputs still render with the simple cut-out so the operator sees
             // something, and carry `fallback_matte` (render marks them needs_attention; triage decides).
             if (fallback) await underClaim(async tx=>{for (const row of pending) await tx.update(catalogOutputs).set({flags:[...new Set([...row.flags,"fallback_matte" as const])],reason:flagReason("fallback_matte"),updatedAt:deps.now()}).where(and(eq(catalogOutputs.id,row.id),eq(catalogOutputs.status,"pending")));});
@@ -260,10 +262,12 @@ export async function handleChunkTask(deps: CatalogDeps, body: Record<string,unk
             const renderStart = +deps.now();
             const rendered = (await deps.renderAllChannels(p,matte,[output.channel],{shotNumber:source.n,productType:product.productType ?? "other",synthesiseShadow:shadowAllowed,identifier:product.identifier,publicObjectPath:output.objectPath,canvas:productPlan(output.channel)?.canvas,...(output.channel==="styli" ? {uniformScale}:{}),trace:{batchId:batch.id,productId}}))[output.channel];
             renderMs += +deps.now()-renderStart;
-            // Ledger: worker time per output (ms only; the per-chunk compute row carries the money) and the
-            // photo's one GPU upscale call, priced at the GPU service rate (an output that reused it records nothing).
-            note({productId,sourceImageId:source.id,outputId:output.id,channel:output.channel,stage:"render",kind:"render",engine:"worker",ms:+deps.now()-renderStart,usd:0,outcome:rendered.status==="failed" ? "failed":"ok"});
-            if (rendered.upscale && !rendered.upscale.reused) note({productId,sourceImageId:source.id,outputId:output.id,channel:output.channel,stage:"upscale",kind:"upscale_call",engine:"gpu",ms:rendered.upscale.ms,...matteCallUsd("gpu",rendered.upscale.ms)});
+            // Ledger: worker time per output (ms only; the per-chunk compute row carries the money) without the
+            // photo's one GPU upscale call, which gets its own row priced at the GPU service rate (an output
+            // that reused the x2 image records no upscale row and no upscale time).
+            const upscaleMs = rendered.upscale && !rendered.upscale.reused ? rendered.upscale.ms : 0;
+            note({productId,sourceImageId:source.id,outputId:output.id,channel:output.channel,stage:"render",kind:"render",engine:"worker",ms:Math.max(0,+deps.now()-renderStart-upscaleMs),usd:0,outcome:rendered.status==="failed" ? "failed":"ok"});
+            if (upscaleMs) note({productId,sourceImageId:source.id,outputId:output.id,channel:output.channel,stage:"upscale",kind:"upscale_call",engine:"gpu",ms:upscaleMs,...matteCallUsd("gpu",upscaleMs)});
             // Spec 11: the per-image upscale time, for the cost record (the call time is inside renderMs too; one call per photo,
             // so an output that reused the photo's x2 image records 0). An upscaled
             // output's render_key names the upscaler (a redelivered render whose row already says `upscaled` keeps its key, and
@@ -271,11 +275,11 @@ export async function handleChunkTask(deps: CatalogDeps, body: Record<string,unk
             if (rendered.upscale) deps.log("catalog upscale",{batchId:batch.id,productId,sourceImageId:source.id,channel:output.channel,n:source.n,upscaleMs:rendered.upscale.reused ? 0:rendered.upscale.ms,reused:!!rendered.upscale.reused});
             const flags = [...new Set([...source.flags,...rendered.flags])], status = rendered.status==="skipped" ? "skipped":!rendered.compliance.ok || holdsAtRender(flags) ? "needs_attention":rendered.jpeg ? "staged":"failed";
             const patch = {canvasW:rendered.plan.w,canvasH:rendered.plan.h,scale:rendered.plan.scale,placedX:rendered.plan.placedX,placedY:rendered.plan.placedY,bytes:rendered.bytes,quality:rendered.quality,flags,compliance:{...rendered.compliance,auto_actions:autoActionsOf(output.compliance)},renderKey:rerenderedKey(output,rendered.upscale?.model,()=>renderKey({sourceSha256:source.sha256,channel:output.channel,n:source.n,policyKey:`default|${productPolicy.matteModel}`})),reason:[...(busyBackgroundHold(output.compliance) ? [`${BUSY_BACKGROUND_DETAILS.why} ${BUSY_BACKGROUND_DETAILS.whatToDo}`]:[]),...rendered.notes].join("; ") || (flags.includes("small_source") ? flagReason("small_source"):null),updatedAt:deps.now()};
-            await underClaim(async tx=>tx.update(catalogOutputs).set(patch).where(eq(catalogOutputs.id,output.id)));
+            await underClaim(async tx=>{await tx.update(catalogOutputs).set(patch).where(eq(catalogOutputs.id,output.id));await flush(tx);});
             if (rendered.jpeg) { const jpeg=rendered.jpeg; await underClaim(async()=>deps.storage.uploadBuffer(path,jpeg,"image/jpeg",{cacheControl:deps.storage.PUBLIC_CACHE_CONTROL})); }
             const staged = rendered.jpeg ? await deps.storage.headObject(uri):null;
             await underClaim(async tx=>tx.update(catalogOutputs).set({status,stagingUri:rendered.jpeg ? uri:null,crc32c:staged?.crc32c ?? null,updatedAt:deps.now()}).where(eq(catalogOutputs.id,output.id)));
-          } catch(error) { const reason = error instanceof Error ? error.message:String(error); await underClaim(async tx=>tx.update(catalogOutputs).set({status:"failed",error:reason,reason,updatedAt:deps.now()}).where(eq(catalogOutputs.id,output.id))); }
+          } catch(error) { const reason = error instanceof Error ? error.message:String(error); await underClaim(async tx=>{await tx.update(catalogOutputs).set({status:"failed",error:reason,reason,updatedAt:deps.now()}).where(eq(catalogOutputs.id,output.id));await flush(tx);}); }
           // 07 4.6a: a channel rule we broke (the Styli guide, margins, the band colour, the file size) is re-made
           // before anything is held, with the fix the measured failure asks for, on the failing channel only.
           const photo = await deps.db.select().from(catalogOutputs).where(and(eq(catalogOutputs.sourceImageId,source.id),eq(catalogOutputs.batchId,batch.id),isNull(catalogOutputs.decision),inArray(catalogOutputs.status,["staged","needs_attention"])));
@@ -298,9 +302,9 @@ export async function handleChunkTask(deps: CatalogDeps, body: Record<string,unk
     await underClaim(async tx=>{
     await tx.update(catalogBatches).set({cost:sql`${catalogBatches.cost} || jsonb_build_object('mattingMs',(${catalogBatches.cost}->>'mattingMs')::numeric+${mattingMs}::numeric,'renderMs',(${catalogBatches.cost}->>'renderMs')::numeric+${renderMs}::numeric,'computeVcpuSeconds',(${catalogBatches.cost}->>'computeVcpuSeconds')::numeric+${wall}::numeric,'computeUsd',(${catalogBatches.cost}->>'computeUsd')::numeric+${usd}::numeric)`}).where(eq(catalogBatches.id,batch.id));
     await recordCost(tx,{brandSlug:batch.brandSlug,batchId:batch.id,engine:"catalog_compute",costUsd:usd});
-    // The delivery's ledger rows plus one compute row with the same USD as spend_days, in a savepoint:
+    // Any ledger rows not yet flushed plus one compute row with the same USD as spend_days, in a savepoint:
     // a failing ledger write is logged and the delivery carries on.
-    await recordCostEvents(tx,[...ledger,{batchId:batch.id,brandSlug:batch.brandSlug,isTest:batch.isTest,chunkId:chunk!.id,stage:chunk!.stage,kind:"compute",engine:"worker",ms:+deps.now()-+started,usd,attempt:chunk!.attempt}],deps.log);
+    await recordCostEvents(tx,[...ledger.splice(0),{batchId:batch.id,brandSlug:batch.brandSlug,isTest:batch.isTest,chunkId:chunk!.id,stage:chunk!.stage,kind:"compute",engine:"worker",ms:+deps.now()-+started,usd,attempt:chunk!.attempt,at:deps.now()}],deps.log);
     });
     if (chunk.stage === "matte") {
       const advanced = await deps.db.update(catalogChunks).set({stage:"render",status:"queued",taskName:null,finishedAt:deps.now()}).where(ownsClaim()).returning({id:catalogChunks.id});

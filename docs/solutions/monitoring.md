@@ -86,8 +86,9 @@ inside the existing claim transactions, in a savepoint: if the insert fails it l
 batch carries on. A lost claim writes nothing.
 
 Attribution rule (SPEC R16a), applied when reading, not stored:
-- render, upscale and publish rows are direct per channel;
-- matte, classify and judge rows belong to the source image and split evenly across that image's
+- render, upscale and publish rows are direct per channel; quality check (judge) cost is direct to
+  the image it checked;
+- matte and classify rows belong to the source image and split evenly across that image's
   non-skipped outputs;
 - the per-chunk worker compute row splits evenly across the chunk's non-skipped outputs;
 - per-image cost = its direct rows plus its shares.

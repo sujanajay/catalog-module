@@ -854,6 +854,8 @@ it("cost ledger: one delivery per stage writes attributable rows whose judge and
  expect(Number(matte[0]!.usd)).toBeCloseTo(12/1000*0.5,12);
  expect(rows.find(r=>r.kind==="render")).toMatchObject({stage:"render",engine:"worker",outputId:output!.id,channel:"noon",productId:s.product.id,sourceImageId:source!.id,outcome:"ok"});
  expect(Number(rows.find(r=>r.kind==="render")!.usd)).toBe(0);
+ // The clock moves 1 s per reading: renderStart, renderMs, then the row's ms, minus the upscale's own 250 ms.
+ expect(rows.find(r=>r.kind==="render")!.ms).toBe(2000-250);
  const upscale=rows.find(r=>r.kind==="upscale_call");
  expect(upscale).toMatchObject({stage:"upscale",engine:"gpu",ms:250,outputId:output!.id,channel:"noon",estimated:false});
  expect(Number(upscale!.usd)).toBeCloseTo(250/1000*2,12);
@@ -862,6 +864,9 @@ it("cost ledger: one delivery per stage writes attributable rows whose judge and
  expect(judge[0]).toMatchObject({stage:"qa",engine:"test/judge",promptTokens:2911,completionTokens:160,estimated:false,outcome:"ok",attempt:1,outputId:output!.id,channel:"noon",productId:s.product.id,sourceImageId:source!.id,chunkId:s.chunk.id});
  const compute=rows.filter(r=>r.kind==="compute" && r.stage!=="publish");
  expect(compute.map(r=>r.stage)).toEqual(["matte","render","qa"]);
+ // `at` is taken from the delivery clock when each row is noted, so rows are ordered as the work happened.
+ expect(rows.map(r=>+r.at)).toEqual([...rows.map(r=>+r.at)].sort((a,b)=>a-b));
+ expect(+matte[0]!.at).toBeLessThan(+compute[0]!.at);expect(+compute[0]!.at).toBeLessThan(+rows.find(r=>r.kind==="render")!.at);
  expect(compute.every(r=>r.engine==="worker" && r.chunkId===s.chunk.id && r.ms>0 && Number(r.usd)>0)).toBe(true);
  expect(rows.find(r=>r.stage==="publish")).toMatchObject({kind:"compute",engine:"worker",productId:s.product.id,outcome:"ok"});
  expect(Number(rows.find(r=>r.stage==="publish")!.usd)).toBe(0);
@@ -869,6 +874,18 @@ it("cost ledger: one delivery per stage writes attributable rows whose judge and
  expect(judge.reduce((sum,r)=>sum+Number(r.usd),0)).toBeCloseTo(Number(batch!.cost.qaUsd),9);
  expect(compute.reduce((sum,r)=>sum+Number(r.usd),0)).toBeCloseTo(Number(batch!.cost.computeUsd),9);
  expect(Number(batch!.cost.computeUsd)).toBeGreaterThan(0);
+},60_000);
+it("cost ledger: a paid cut-out call is flushed with the photo's matte write, so it survives a delivery that throws later",async()=>{
+ const w=world(),s=await seed(w,"ledger-flush");ticking(w);
+ vi.stubEnv("PRICE_MATTE_CPU_USD_PER_SECOND","0.5");
+ const upload=w.deps.storage.uploadBuffer;
+ // The matte PNG upload (after the photo's matte update) crashes once: the delivery fails and is retried.
+ w.deps.storage.uploadBuffer=async(path,...rest)=>{if(/matte/.test(path)) {w.deps.storage.uploadBuffer=upload;throw new Error("bucket hiccup");} return upload(path,...rest);};
+ try { expect((await handleChunkTask(w.deps,{chunkId:s.chunk.id})).outcome).toBe("retry"); } finally { vi.unstubAllEnvs(); }
+ const rows=await ledgerOf(s.batch.id);
+ expect(rows.map(r=>r.kind)).toEqual(["matte_call"]);
+ expect(rows[0]).toMatchObject({engine:"cpu",ms:12,attempt:1,outcome:"ok"});
+ expect(Number(rows[0]!.usd)).toBeCloseTo(12/1000*0.5,12);
 },60_000);
 it("cost ledger: a delivery that loses its claim writes no ledger rows",async()=>{
  const w=world(),s=await seed(w,"ledger-lost-claim");ticking(w);

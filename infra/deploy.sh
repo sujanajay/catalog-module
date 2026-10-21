@@ -160,7 +160,9 @@ WORKER_ENV+=",COMPUTE_USD_PER_VCPU_SECOND=$COMPUTE_USD_PER_VCPU_SECOND"
 # redundancy, --no-cpu-throttling (instance-based billing), --cpu=4 --memory=16Gi: L4 non-zonal
 # USD 0.00022404 per second, CPU USD 0.0000216 per vCPU-second, memory USD 0.0000024 per
 # GiB-second, so 0.00022404 + 4 * 0.0000216 + 16 * 0.0000024 = 0.00034884 per second.
-# Instance start-up and idle time before an instance stops are billed but not in the ledger.
+# The ledger prices the service-reported inference seconds of each call, so its matte and upscale rows
+# are a lower bound: instance start-up, idle time before an instance stops, failed upscale calls and a
+# GPU attempt that failed before the CPU service answered are billed but not recorded.
 # Re-check both if a service's shape, region, billing mode or zonal redundancy changes.
 PRICE_MATTE_CPU_USD_PER_SECOND=${PRICE_MATTE_CPU_USD_PER_SECOND:-0.000136}
 PRICE_MATTE_GPU_USD_PER_SECOND=${PRICE_MATTE_GPU_USD_PER_SECOND:-0.00034884}

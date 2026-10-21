@@ -48,8 +48,10 @@ export const DEFAULT_PRICE_MATTE_CPU_USD_PER_SECOND = 0.000136;
  * (Instance-based billing)": GPU Type NVIDIA L4 non-zonal redundancy USD 0.00022404 per second,
  * CPU USD 0.0000216 per vCPU-second, memory USD 0.0000024 per GiB-second.
  * 0.00022404 + 4 * 0.0000216 + 16 * 0.0000024 = 0.00022404 + 0.0000864 + 0.0000384 = 0.00034884.
- * Both rates price the seconds the service reports for a call; instance start-up and the idle time
- * before an instance stops are billed by Google but are not in the ledger.
+ * Both rates price the seconds the service reports for a call (its inference time), so matte and
+ * upscale rows are a lower bound of what Google bills: instance start-up and the idle time before an
+ * instance stops are not in the ledger, nor are upscale calls that failed (the render falls back
+ * silently) or a GPU cut-out attempt that failed before the CPU service answered.
  */
 export const DEFAULT_PRICE_MATTE_GPU_USD_PER_SECOND = 0.00034884;
 /** The matting-service target of a cut-out or upscale call; null is the worker's own simple cut-out. */
