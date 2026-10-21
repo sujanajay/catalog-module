@@ -7,7 +7,7 @@ import DetailsTab from "../components/catalog/DetailsTab";
 import BatchTabs, { attentionLabel, showAttentionTab } from "../components/catalog/BatchTabs";
 import BatchBanner from "../components/catalog/BatchBanner";
 import { EMPTY_BATCH_COUNTS } from "@catalog/core/db/schema";
-import { plannedImages } from "../lib/catalog/preview";
+import { matteModelFor, plannedImages } from "../lib/catalog/preview";
 import { renderKey, upscaledRenderKey } from "@catalog/core/catalog/pipeline/publish";
 import { missingLine, skuAddedToast, unmatchedLine } from "../components/catalog/SkuMapModal";
 import { ToastProvider } from "../components/Toast";
@@ -117,7 +117,7 @@ describe("batch copy for the real state of the batch", () => {
   it("leaves out pairs whose live image was made from the same photo in the step 4 count", () => {
     const sources = [{ productId: "p", n: 1, sha256: "same", height: 1600 }, { productId: "p", n: 2, sha256: "new", height: 800 }];
     const key = (sha256: string, n: number, channel: "noon" | "centrepoint", rulesVersion?: string) => renderKey({ sourceSha256: sha256, channel, n, policyKey: "default|birefnet", ...(rulesVersion ? { rulesVersion } : {}) });
-    const live = [{ productId: "p", n: 1, channel: "noon" as const, sha256: "same", renderKey: key("same", 1, "noon"), matteModel: "birefnet" }, { productId: "p", n: 2, channel: "noon" as const, sha256: "old", renderKey: key("old", 2, "noon"), matteModel: "birefnet" }];
+    const live = [{ productId: "p", n: 1, channel: "noon" as const, sha256: "same", renderKey: key("same", 1, "noon"), workerMatteModel: "birefnet" }, { productId: "p", n: 2, channel: "noon" as const, sha256: "old", renderKey: key("old", 2, "noon"), workerMatteModel: "birefnet" }];
     // Photo 1 is unchanged on Noon but new on Styli; photo 2 changed on Noon and is too small for Styli.
     expect(plannedImages(sources, ["noon", "styli"], live)).toEqual({ outputs: 2, sourcesToMake: 2 });
     expect(plannedImages([sources[0]!], ["noon"], live)).toEqual({ outputs: 0, sourcesToMake: 0 });
@@ -125,18 +125,31 @@ describe("batch copy for the real state of the batch", () => {
     expect(plannedImages(sources, ["noon", "styli"], live, 2)).toEqual({ outputs: 3, sourcesToMake: 2 });
     expect(plannedImages([{ productId: "p", n: 3, sha256: "tiny", height: 600 }], ["styli"], [], 2)).toEqual({ outputs: 0, sourcesToMake: 0 });
   });
+  it("predicts the cut-out model the worker will use, or none when only the classifier can tell", async () => {
+    const policies: Record<string, { matteModel: string; matteModelSecond?: string }> = { footwear: { matteModel: "birefnet" }, other: { matteModel: "birefnet", matteModelSecond: "bria-rmbg" } };
+    const resolve = async (_brand: string, type: string) => ({ ...policies[type]!, qaModel: "q", threshold: 80, floor: 60, qaMode: "per_source" as const, qaSampleRate: 1, source: "default" as const });
+    const batch = (productType: string, evalSet?: string) => ({ brandSlug: "b", productType, options: evalSet ? { evalSet } : {} });
+    expect(await matteModelFor({ productType: "footwear" }, batch("auto"), false, resolve)).toBe("birefnet");
+    expect(await matteModelFor({ productType: null }, batch("footwear"), false, resolve)).toBe("birefnet");
+    expect(await matteModelFor({ productType: "other" }, batch("auto"), true, resolve)).toBe("bria-rmbg");
+    expect(await matteModelFor({ productType: null }, batch("auto"), false, resolve)).toBeNull();
+    expect(await matteModelFor({ productType: "auto" }, batch("auto"), false, resolve)).toBeNull();
+    expect(await matteModelFor({ productType: "footwear" }, batch("auto", "set1"), false, resolve)).toBeNull();
+  });
   it("counts again a live image made from the same photo under older channel rules, as the worker makes it again", () => {
     // The D4 check (batch 29d25c7b): 5 photos 800x1200 already live on Noon and Centrepoint from a batch made under
     // rules version 9; with version 10 every key changed and the worker made all 15, while step 4 said 5.
     const sources = [1, 2, 3, 4, 5].map((n) => ({ productId: "p", n, sha256: `s${n}`, height: 1200 }));
-    const liveUnder = (rulesVersion?: string) => sources.flatMap((s) => (["noon", "centrepoint"] as const).map((channel) => ({ productId: "p", n: s.n, channel, sha256: s.sha256, matteModel: "birefnet", renderKey: renderKey({ sourceSha256: s.sha256, channel, n: s.n, policyKey: "default|birefnet", ...(rulesVersion ? { rulesVersion } : {}) }) })));
+    const liveUnder = (rulesVersion?: string) => sources.flatMap((s) => (["noon", "centrepoint"] as const).map((channel) => ({ productId: "p", n: s.n, channel, sha256: s.sha256, workerMatteModel: "birefnet", renderKey: renderKey({ sourceSha256: s.sha256, channel, n: s.n, policyKey: "default|birefnet", ...(rulesVersion ? { rulesVersion } : {}) }) })));
     expect(plannedImages(sources, ["noon", "styli", "centrepoint"], liveUnder("9"), 2, "swinir-x2")).toEqual({ outputs: 15, sourcesToMake: 5 });
     // Made under today's rules (plain, or by the upscaler) they stay as they are: only Styli is made.
     expect(plannedImages(sources, ["noon", "styli", "centrepoint"], liveUnder(), 2, "swinir-x2")).toEqual({ outputs: 5, sourcesToMake: 5 });
     const upscaled = liveUnder().map((o) => (o.channel === "centrepoint" ? { ...o, renderKey: upscaledRenderKey(o.renderKey, "swinir-x2") } : o));
     expect(plannedImages(sources, ["noon", "styli", "centrepoint"], upscaled, 2, "swinir-x2")).toEqual({ outputs: 5, sourcesToMake: 5 });
-    // A live image whose photo has no recorded cut-out model cannot be matched to a key: it is counted.
-    expect(plannedImages(sources, ["noon"], liveUnder().map((o) => ({ ...o, matteModel: null })), 2, "swinir-x2")).toEqual({ outputs: 5, sourcesToMake: 5 });
+    // A live image made with another cut-out model than the worker will use now is made again, and counted.
+    expect(plannedImages(sources, ["noon"], liveUnder().map((o) => ({ ...o, workerMatteModel: "bria-rmbg" })), 2, "swinir-x2")).toEqual({ outputs: 5, sourcesToMake: 5 });
+    // When the worker's cut-out model cannot be known before the batch runs, the live image is counted.
+    expect(plannedImages(sources, ["noon"], liveUnder().map((o) => ({ ...o, workerMatteModel: null })), 2, "swinir-x2")).toEqual({ outputs: 5, sourcesToMake: 5 });
   });
 });
 

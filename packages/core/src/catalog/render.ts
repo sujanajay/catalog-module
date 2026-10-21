@@ -502,32 +502,50 @@ export function planProduct(spec: ChannelSpec, shots: { box: BBox; source: Size;
  */
 export const ANCHOR_SEEN_LIFT_PX = 1;
 /**
- * The move (canvas px) that puts the product as it is seen on the bottom-centre guide (Styli, compliance
- * `styli_anchor`): its visible width centred in the safe box and its lowest visible row on (or ANCHOR_SEEN_LIFT_PX above) the
- * safe box's bottom edge. Seen means what the compliance check sees: the cut-out over `background` differs from it by
- * more than BG_TOLERANCE. The plan places the matte's box (alpha above ALPHA_BBOX_THRESHOLD), and a model matte's
- * outer fade is alpha above that threshold over a pale blend of the old background, which looks like the canvas.
- * Drawn at 1x or less the fade is under a pixel; enlarged (an 800 x 1200 photo is drawn about 1.9x on Styli once the
- * x2 upscaler lets it through) it is several px, so the seen product stood above the guide and off centre. Only an
- * axis with no cut side moves (a cut side sits flush with its canvas edge by its own rule), and the cut-out stays on
- * the canvas with its seen pixels inside the safe box.
+ * The most the seen bottom may sit above the matte's half-alpha silhouette and still count as the matte's soft fade, in
+ * source px (times the plan's scale on the canvas). Further up, the product itself is pale there (a white shirt on the
+ * grey canvas, a grey sole): the seen part is not the product's bottom, so it is not moved down and the check judges
+ * the placement as it is.
  */
-export async function visibleAnchorShift(cutout: Buffer, product: BBox, safe: BBox, canvas: Size, background: [number, number, number], cut: CutEdges): Promise<{ dx: number; dy: number }> {
+export const ANCHOR_FADE_SOURCE_PX = 2;
+/**
+ * The most the product moves sideways to centre what is seen, as a share of its half-alpha width (or the fade, if
+ * larger): a pale strip of the product on one side (a shearling cuff the grey of the canvas) is centred; a product
+ * mostly invisible on the canvas (a white shirt with a logo on one side) is not moved, and the check judges it.
+ */
+export const ANCHOR_PALE_SIDE_SHARE = 0.05;
+/**
+ * The move (canvas px) that puts the product as it is seen on the bottom-centre guide (Styli, compliance
+ * `styli_anchor`): its visible width centred in the safe box and its lowest visible row on (or ANCHOR_SEEN_LIFT_PX
+ * above) the safe box's bottom edge. Seen means what the compliance check sees: the cut-out over `background` differs
+ * from it by more than BG_TOLERANCE. The plan places the matte's box (alpha above ALPHA_BBOX_THRESHOLD), and a model
+ * matte's outer fade is alpha above that threshold over a pale blend of the old background, which looks like the
+ * canvas. Drawn at 1x or less the fade is under a pixel; enlarged (an 800 x 1200 photo is drawn about 1.9x on Styli
+ * once the x2 upscaler lets it through) it is several px, so the seen product stood above the guide and off centre.
+ * An axis moves only when it has no cut side (a cut side sits flush with its canvas edge by its own rule): down only
+ * while the seen bottom is within the fade (ANCHOR_FADE_SOURCE_PX) of the half-alpha silhouette, sideways only by up
+ * to ANCHOR_PALE_SIDE_SHARE of its width; nothing seen, no move. The
+ * cut-out always stays on the canvas, with its seen pixels inside the safe box.
+ */
+export async function visibleAnchorShift(cutout: Buffer, product: BBox, safe: BBox, canvas: Size, background: [number, number, number], cut: CutEdges, scale: number): Promise<{ dx: number; dy: number }> {
   const { data, info } = await sharp(cutout).ensureAlpha().raw().toBuffer({ resolveWithObject: true });
-  let x0 = info.width, x1 = -1, y1 = -1, faded = -1;
+  let x0 = info.width, x1 = -1, y1 = -1, faded = -1, hx0 = info.width, hx1 = -1, hy1 = -1;
   for (let y = 0; y < info.height; y++) for (let x = 0; x < info.width; x++) {
     const i = (y * info.width + x) * 4, a = data[i + 3]!;
     if (!a) continue;
     faded = y;
+    if (a >= 128) { hx0 = Math.min(hx0, x); hx1 = Math.max(hx1, x); hy1 = Math.max(hy1, y); }
     let delta = 0;
     for (let c = 0; c < 3; c++) delta = Math.max(delta, Math.abs(Math.round((data[i + c]! * a + background[c]! * (255 - a)) / 255) - background[c]!));
     if (delta > BG_TOLERANCE) { x0 = Math.min(x0, x); x1 = Math.max(x1, x); y1 = Math.max(y1, y); }
   }
-  if (x1 < 0) return { dx: 0, dy: 0 };
+  if (x1 < 0 || hx1 < 0) return { dx: 0, dy: 0 };
+  const fade = Math.ceil(ANCHOR_FADE_SOURCE_PX * Math.max(1, scale));
   const clamp = (v: number, lo: number, hi: number) => (lo > hi ? 0 : Math.max(lo, Math.min(hi, v)));
-  const dy = cut.top || cut.bottom ? 0 : clamp(safe.y + safe.h - (faded > y1 ? ANCHOR_SEEN_LIFT_PX : 0) - (product.y + y1 + 1), -product.y, canvas.h - product.y - product.h);
-  const dx = cut.left || cut.right ? 0 : clamp(Math.round(safe.x + safe.w / 2 - (product.x + (x0 + x1 + 1) / 2)),
-    Math.max(-product.x, safe.x - product.x - x0), Math.min(canvas.w - product.x - product.w, safe.x + safe.w - product.x - x1 - 1));
+  const dy = cut.top || cut.bottom || hy1 - y1 > fade ? 0 : clamp(safe.y + safe.h - (faded > y1 ? ANCHOR_SEEN_LIFT_PX : 0) - (product.y + y1 + 1), -product.y, canvas.h - product.y - product.h);
+  const centre = Math.round(safe.x + safe.w / 2 - (product.x + (x0 + x1 + 1) / 2));
+  const dx = cut.left || cut.right || Math.abs(centre) > Math.max(fade, Math.ceil(ANCHOR_PALE_SIDE_SHARE * (hx1 - hx0 + 1))) ? 0
+    : clamp(centre, Math.max(-product.x, safe.x - product.x - x0), Math.min(canvas.w - product.x - product.w, safe.x + safe.w - product.x - x1 - 1));
   return { dx, dy };
 }
 
@@ -589,7 +607,7 @@ export async function renderSource(input: RenderInput): Promise<RenderOutput> {
     if (enlarged && input.upscaler) { result.flags.push("upscaled"); result.upscale = { model: input.upscaler.model, ms: enlarged.ms, ...(enlarged.reused ? { reused: true as const } : {}) }; }
     // Styli's guide is judged on the product as it is seen (visibleAnchorShift); the shadow and the mask follow the move.
     if (spec.anchor === "bottom-centre") {
-      const shift = await visibleAnchorShift(cutout, product, plan.safeBox, plan, rgbColor, cut);
+      const shift = await visibleAnchorShift(cutout, product, plan.safeBox, plan, rgbColor, cut, plan.scale);
       product.x += shift.dx; product.y += shift.dy; plan.placedX = product.x; plan.placedY = product.y;
     }
     const cutoutAlpha = await sharp(cutout).extractChannel(3).raw().toBuffer();

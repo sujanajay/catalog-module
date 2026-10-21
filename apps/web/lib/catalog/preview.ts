@@ -5,6 +5,7 @@ import { buildPreview } from "@catalog/core/catalog/ingest/index";
 import type { Detected } from "@catalog/core/catalog/ingest/types";
 import { styliMinSourceHeightPx, STYLI_SKIP_LOW_RESOLUTION } from "@catalog/core/catalog/channels";
 import { renderKeys } from "@catalog/core/catalog/pipeline/publish";
+import { resolvePolicy } from "@catalog/core/catalog/qa/policy";
 import { upscaleConfigFromEnv, upscaleFactorFromEnv } from "@catalog/core/catalog/upscale";
 import type { ChannelId } from "@catalog/core/catalog/types";
 import * as storage from "@catalog/core/storage";
@@ -52,16 +53,19 @@ export async function patchDetected(id: string, value: unknown) {
   return { collecting: true };
 }
 type PlannedSource = { productId: string; n: number; sha256: string; height: number | null };
-/** A live output, the photo it was made from (sha256) and that photo's cut-out model. */
-type LiveOutput = { productId: string; n: number; channel: ChannelId; sha256: string; renderKey: string; matteModel: string | null };
 /**
- * Step 4's "images will be made" (spec 06): photos times channels, minus Styli skips, minus pairs whose
- * live image the pipeline keeps as it is: made from the same photo (same sha256) under today's rules, so its
- * render_key is still one the worker accepts (chunk.ts, renderKeys). A live image made under an older
- * CHANNEL_RULES_VERSION is made again, and counted.
+ * A live output and the photo it was made from (sha256). `workerMatteModel`: the cut-out model the worker will use
+ * for this product in this batch (matteModelFor), or null when that cannot be known before the batch runs.
+ */
+type LiveOutput = { productId: string; n: number; channel: ChannelId; sha256: string; renderKey: string; workerMatteModel: string | null };
+/**
+ * Step 4's "images will be made" (spec 06): photos times channels, minus Styli skips, minus pairs whose live image
+ * the worker keeps as it is: its render_key is one the worker accepts for this photo (chunk.ts, renderKeys: same
+ * sha256, today's CHANNEL_RULES_VERSION, the cut-out model it will use, plain or upscaled). Anything in doubt is
+ * counted, so the count may be higher than what is made but never lower.
  */
 export function plannedImages(sources: readonly PlannedSource[], channels: readonly ChannelId[], live: readonly LiveOutput[], upscaleFactor: number = upscaleFactorFromEnv(), upscaleModel: string | null = upscaleConfigFromEnv().model): { outputs: number; sourcesToMake: number } {
-  const current = (o: LiveOutput) => o.matteModel !== null && renderKeys({ sourceSha256: o.sha256, channel: o.channel, n: o.n, policyKey: `default|${o.matteModel}` }, upscaleModel).includes(o.renderKey);
+  const current = (o: LiveOutput) => o.workerMatteModel !== null && renderKeys({ sourceSha256: o.sha256, channel: o.channel, n: o.n, policyKey: `default|${o.workerMatteModel}` }, upscaleModel).includes(o.renderKey);
   let outputs = 0, sourcesToMake = 0;
   const styliMin = styliMinSourceHeightPx(upscaleFactor);
   for (const source of sources) {
@@ -76,6 +80,19 @@ export function plannedImages(sources: readonly PlannedSource[], channels: reado
   }
   return { outputs, sourcesToMake };
 }
+/**
+ * The cut-out model chunk.ts will use for a product: the policy for its type (the product's own, else the batch's
+ * when that is not "auto"), the second model for a transparent "other" product. Null (its live images are counted)
+ * when the type is decided only by the classifier while the batch runs, or for an eval batch with a forced policy.
+ * The worker may still fall back to another model when the service lacks this one; that is not known here.
+ */
+export async function matteModelFor(product: { productType: string | null }, batch: { brandSlug: string; productType: string; options: { evalSet?: unknown } }, transparent: boolean, resolve: (brandSlug: string, type: Parameters<typeof resolvePolicy>[2]) => ReturnType<typeof resolvePolicy> = (brandSlug, type) => resolvePolicy(db(), brandSlug, type)): Promise<string | null> {
+  if (batch.options.evalSet) return null;
+  const type = product.productType && product.productType !== "auto" ? product.productType : batch.productType !== "auto" ? batch.productType : null;
+  if (!type) return null;
+  const policy = await resolve(batch.brandSlug, type as Parameters<typeof resolvePolicy>[2]);
+  return type === "other" && transparent && policy.matteModelSecond && policy.matteModelSecond !== policy.matteModel ? policy.matteModelSecond : policy.matteModel;
+}
 export async function previewBatch(id: string) {
   const batch = await queryBatch(id);
   const base = { otherBatchProcessing: await anotherBatchProcessing(id), ready: batch.counts.previewReady, previewAt: batch.updatedAt.toISOString(), counts: {...batch.counts, photos: batch.counts.sources, channels: batch.channels.length}, collected: batch.counts.collected, collectTotal: batch.counts.collectTotal, estimate: null as CostEstimate | null };
@@ -83,10 +100,13 @@ export async function previewBatch(id: string) {
   const [preview, detected] = await Promise.all([buildPreview(db(), id, { storage }, { limit: 50 }), buildDetectedStep2(db(), id, { storage })]);
   const sources = await db().select().from(catalogSourceImages).where(eq(catalogSourceImages.batchId, id));
   const productIds = [...new Set(sources.map((s) => s.productId))];
-  const live = productIds.length ? await db().select({ productId: catalogOutputs.productId, n: catalogOutputs.n, channel: catalogOutputs.channel, sha256: catalogSourceImages.sha256, renderKey: catalogOutputs.renderKey, matteModel: catalogSourceImages.matteModel }).from(catalogOutputs).innerJoin(catalogSourceImages, eq(catalogSourceImages.id, catalogOutputs.sourceImageId)).where(and(inArray(catalogOutputs.productId, productIds), eq(catalogOutputs.isLive, true))) : [];
+  const products = productIds.length ? await db().select({ id: catalogProducts.id, productType: catalogProducts.productType }).from(catalogProducts).where(inArray(catalogProducts.id, productIds)) : [];
+  const liveRows = productIds.length ? await db().select({ productId: catalogOutputs.productId, n: catalogOutputs.n, channel: catalogOutputs.channel, sha256: catalogSourceImages.sha256, renderKey: catalogOutputs.renderKey }).from(catalogOutputs).innerJoin(catalogSourceImages, eq(catalogSourceImages.id, catalogOutputs.sourceImageId)).where(and(inArray(catalogOutputs.productId, productIds), eq(catalogOutputs.isLive, true))) : [];
+  const models = new Map(await Promise.all([...new Set(liveRows.map((o) => o.productId))].map(async (productId) => [productId, await matteModelFor(products.find((p) => p.id === productId) ?? { productType: null }, batch, sources.some((s) => s.productId === productId && s.flags.includes("transparent")))] as const)));
+  const live = liveRows.map((o) => ({ ...o, workerMatteModel: models.get(o.productId) ?? null }));
   const { outputs, sourcesToMake } = plannedImages(sources, batch.channels, live);
   // One classifier call per product without a type when the batch type is "auto" (spec 07 4.3, 4.11).
-  const untypedProducts = batch.productType !== "auto" || !productIds.length ? 0 : (await db().select({ productType: catalogProducts.productType }).from(catalogProducts).where(inArray(catalogProducts.id, productIds))).filter((p) => !p.productType).length;
+  const untypedProducts = batch.productType !== "auto" ? 0 : products.filter((p) => !p.productType).length;
   const estimate = wizardEstimate({ outputs, sources: sourcesToMake, untypedProducts, qaMode: batch.options.policy?.qaMode ?? "per_source", qaSampleRate: batch.options.policy?.qaSampleRate ?? 1 });
   const existing = new Set(preview.overwrite.existingProducts.map((p) => p.identifier));
   const groups = await Promise.all(preview.rows.map(async ({ firstShotUri, ...row }) => ({ ...row, firstPhotoUrl: firstShotUri ? await storage.signedUrl(firstShotUri, 900) : null, status: row.status === "duplicate shot" ? "two files for one shot" : row.status === "ok" && existing.has(row.identifier) ? "existing" : row.notes.some((n) => /not in sheet/i.test(n)) ? "not in sheet" : row.status })));
