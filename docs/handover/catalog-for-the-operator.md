@@ -261,3 +261,6 @@ The live site was updated twice on 2026-10-21. What you may notice:
 Some photos are still held on purpose. For example, a product on a plain studio backdrop of almost
 the same colour can lose part of itself when the background is removed; the tool holds it so a
 broken picture is never published. Look at it and choose what to do as in section 7.
+
+On a busy day the check that tells what kind of product a photo shows can fail quietly; the tool then
+uses its general rules for that product, and a later update will show this as a note on the card.
