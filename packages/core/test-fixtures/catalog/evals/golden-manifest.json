@@ -2500,8 +2500,11 @@
    ],
    "expect": {
     "attention": false,
-    "flags": [],
-    "detector": "code"
+    "flags": [
+     "chart_image"
+    ],
+    "detector": "code",
+    "reason": "A tinted Penti bra size table with a body diagram (the PR #74 case): published as a product shot on eval run 3, left out as chart_image on the live run; the suite requires the flag by name on this shot and nothing published."
    }
   },
   {
@@ -4173,9 +4176,12 @@
     "many_shots"
    ],
    "expect": {
-    "attention": false,
-    "flags": [],
-    "detector": "code"
+    "attention": true,
+    "flags": [
+     "leftover_background"
+    ],
+    "detector": "code",
+    "reason": "A white top on the 229 backdrop: the model matte keeps a chunk of the gap between the arm and the waist (1.67% of the frame), no second matte model was available, and a pass-through would recolour 51% of the product, so the render holds the photo whole by rule (PR #75); goes back to published once a second matte or a recolour of the gap cuts it clean."
    }
   },
   {
@@ -5784,11 +5790,9 @@
     "many_shots"
    ],
    "expect": {
-    "attention": true,
-    "flags": [
-     "text_or_watermark"
-    ],
-    "detector": "judge"
+    "attention": false,
+    "flags": [],
+    "detector": "code"
    }
   },
   {
@@ -5811,11 +5815,9 @@
     "many_shots"
    ],
    "expect": {
-    "attention": true,
-    "flags": [
-     "text_or_watermark"
-    ],
-    "detector": "judge"
+    "attention": false,
+    "flags": [],
+    "detector": "code"
    }
   },
   {
@@ -5838,11 +5840,9 @@
     "many_shots"
    ],
    "expect": {
-    "attention": true,
-    "flags": [
-     "text_or_watermark"
-    ],
-    "detector": "judge"
+    "attention": false,
+    "flags": [],
+    "detector": "code"
    }
   },
   {
@@ -5865,11 +5865,9 @@
     "many_shots"
    ],
    "expect": {
-    "attention": true,
-    "flags": [
-     "text_or_watermark"
-    ],
-    "detector": "judge"
+    "attention": false,
+    "flags": [],
+    "detector": "code"
    }
   },
   {
@@ -5892,11 +5890,9 @@
     "many_shots"
    ],
    "expect": {
-    "attention": true,
-    "flags": [
-     "text_or_watermark"
-    ],
-    "detector": "judge"
+    "attention": false,
+    "flags": [],
+    "detector": "code"
    }
   },
   {

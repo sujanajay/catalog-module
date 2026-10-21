@@ -3,11 +3,12 @@ import { renderSource } from "../render";
 import { CHANNEL_IDS, type OutputFlag } from "../types";
 import { buildContext } from "./context";
 import { checkCutEdge, cutBandNote, CUT_SOURCE_FLAGS } from "./cut-edge";
-import { canvasStrips, checkCutout, checkMatte, convexSpan, edgeSoftnessBar, OPAQUE_SHARE_MIN, seeThroughBar } from "./cutout";
+import { canvasStrips, checkCutout, checkMatte, COLOUR_ESTIMATE_CHECKS, convexSpan, edgeSoftnessBar, OPAQUE_SHARE_MIN, seeThroughBar, texturedSourceEdge } from "./cutout";
 import { placedCutSides } from "./context";
-import { checkGeometry, checkUniformScale } from "./geometry";
+import { checkGeometry, checkUniformScale, pixelsCopied, reproductionFloor } from "./geometry";
+import { enlargementOf } from "../enhance";
 import { backgroundModel, delta, dilate, thresholdMask } from "./image";
-import { checkShadow, expectedKeptDarkness, keptShadowCanvasMask, sourceDarkness } from "./shadow";
+import { checkShadow, expectedKeptDarkness, KEPT_MIN_PIXELS, keptChannelConsistency, keptComparedPixels, keptDifferenceBar, keptShadowCanvasMask, sourceDarkness } from "./shadow";
 import { runImageChecks } from "./index";
 import { canvasColor, editOutput, paintRect, syntheticSource, syntheticSubject } from "./synthetic";
 import type { CheckResult, OutputSubject } from "./types";
@@ -689,14 +690,154 @@ describe("run 3 calibration 2 (penti.apparel_model, vero_moda and the small sets
     expect(ids(checkShadow(await ctxOf(tall)), "shadow.expected_synthesis")[0]?.detail).toContain("taller than wide");
     const cut = { ...await syntheticSubject("amazon", 1, "apparel_flat", { ...WIDE, cutLeft: true }), productType: "bag_accessory" as const };
     expect(ids(checkShadow(await ctxOf(cut)), "shadow.expected_synthesis")[0]?.detail).toContain("cut at the source left");
-    // Hanging: the lowest rows of the box hold a 12 px hook only.
+    // Hanging: the lowest 120 rows of the box hold a 24 px hook only (wider than the radius-8 opening, so it is the base the
+    // suite reads); a 12 px strap below a wide base is dropped by the opening and the base is the contact line (section 15e).
     const sw = bag.source.w, c0 = await ctxOf(bag), bgc = canvasColor("amazon", 1), alpha = Buffer.from(bag.alpha);
-    for (let y = 1500 - 40; y < 1500; y++) for (let x = 500; x < 2100; x++) if (x < 1290 || x >= 1302) alpha[y * sw + x] = 0;
+    for (let y = 1500 - 120; y < 1500; y++) for (let x = 500; x < 2100; x++) if (x < 1288 || x >= 1312) alpha[y * sw + x] = 0;
     const rowOf = (sy: number) => c0.productBox.y + Math.round((sy - c0.sourceCrop.y) * c0.productBox.h / c0.sourceCrop.h);
-    const hanging = { ...await editOutput(bag, r => paintRect(r, 0, rowOf(1460) - 2, r.w, rowOf(1500) - rowOf(1460) + 6, bgc)), alpha };
+    const hanging = { ...await editOutput(bag, r => paintRect(r, 0, rowOf(1380) - 2, r.w, rowOf(1500) - rowOf(1380) + 6, bgc)), alpha };
     expect(ids(checkShadow(await ctxOf(hanging)), "shadow.expected_synthesis")[0]?.detail).toContain("does not stand on a contact line");
+    const strap = Buffer.from(bag.alpha);
+    for (let y = 1500 - 40; y < 1500; y++) for (let x = 500; x < 2100; x++) if (x < 1290 || x >= 1302) strap[y * sw + x] = 0;
+    expect(ids(checkShadow(await ctxOf({ ...await editOutput(bag, r => paintRect(r, 0, rowOf(1460) - 2, r.w, rowOf(1500) - rowOf(1460) + 6, bgc)), alpha: strap })), "shadow.expected_synthesis")[0]?.status).toBe("info");
     const shoe = await syntheticSubject("amazon", 1, "footwear", WIDE);
     expect(shoe.flags).toContain("shadow_synthesised");
     expect(ids(checkShadow(await ctxOf(shoe)), "shadow.expected_synthesis")[0]?.detail).toContain("synthesised a shadow");
   }, 90_000);
+});
+
+describe("live run calibration 3 (session 5, live judge, build 13fe10d)", () => {
+  it("compares pixels_copied with the render's own reproduction (lanczos3 plus the spec 11 sharpening at the render's alpha weight) on an enlargement and with the source on a downscale, and still fails a redrawn product and a ghost", async () => {
+    const enlarged = await syntheticSubject("centrepoint", 1, "footwear", { logo: { x: 300, y: 350, w: 120, h: 80 } });
+    const ctx = await ctxOf(enlarged), scale = enlargementOf(ctx.sourceCrop, ctx.productBox);
+    expect(scale).toBeGreaterThan(1);
+    const floor = await reproductionFloor(ctx, scale);
+    let changed = 0;
+    for (let i = 0; i < floor.length; i++) if (floor[i] !== ctx.sourceRgb[i]) changed++;
+    expect(changed).toBeGreaterThan(0);
+    // The silhouette edge keeps its plain lanczos colour: a pixel whose alpha within 2 px is under the floor is untouched.
+    const { productBox: pb, canvas } = ctx;
+    for (let y = 0; y < pb.h; y++) for (let x = 0; x < pb.w; x++) {
+      const a = ctx.expectedAlpha[(pb.y + y) * canvas.w + pb.x + x]!;
+      if (a > 0 && a <= 200) for (let c = 0; c < 3; c++) expect(floor[(y * pb.w + x) * 3 + c]).toBe(ctx.sourceRgb[(y * pb.w + x) * 3 + c]);
+    }
+    const row = await pixelsCopied(ctx, { identifier: "S", n: 1, channel: "centrepoint" });
+    expect(row.status).toBe("pass");
+    expect(row.detail).toContain("the render's own reproduction (lanczos3 at");
+    const downscaled = await syntheticSubject("noon", 1, "footwear", { width: 3000, height: 3000, box: { x: 300, y: 300, w: 2400, h: 2000 } });
+    const dctx = await ctxOf(downscaled);
+    expect(enlargementOf(dctx.sourceCrop, dctx.productBox)).toBeLessThanOrEqual(1);
+    const plain = await pixelsCopied(dctx, { identifier: "S", n: 1, channel: "noon" });
+    expect(plain.status).toBe("pass");
+    expect(plain.detail).toContain("differ from the source by");
+    const p = enlarged.placement, redrawn = await editOutput(enlarged, r => paintRect(r, p.placedX + Math.round(80 * p.scale), p.placedY + Math.round(120 * p.scale), 600, 600, [0, 200, 0]));
+    expect(failed(await checkGeometry(await ctxOf(redrawn)))).toContain("geometry.pixels_copied");
+    const ghost = Buffer.from(enlarged.alpha);
+    for (let i = 0; i < ghost.length; i++) if (ghost[i]) ghost[i] = 60;
+    expect(ids(await checkGeometry(await ctxOf({ ...enlarged, alpha: ghost })), "geometry.pixels_copied")[0]?.status).toBe("fail");
+  }, 90_000);
+  it("holds a kept footwear shadow to 8 luma and apparel to 4, needs 400 compared source pixels, and still fails a block under the product", async () => {
+    expect(keptDifferenceBar("footwear")).toBe(8);
+    expect(keptDifferenceBar("apparel_model")).toBe(4);
+    expect(KEPT_MIN_PIXELS).toBe(400);
+    const kept = await syntheticSubject("amazon", 1, "footwear", { sourceShadow: true, box: { x: 100, y: 300, w: 600, h: 300 } });
+    const results = checkShadow(await ctxOf(kept)), row = ids(results, "shadow.kept_matches_source")[0]!;
+    expect(row.status).toBe("pass");
+    expect(row.threshold).toBe(8);
+    expect(keptComparedPixels(row)).toBeGreaterThanOrEqual(400);
+    const p = kept.placement, bg = canvasColor("amazon", 1), bottom = p.placedY + Math.round(360 * p.scale), width = Math.round(600 * p.scale);
+    const block = await editOutput(kept, r => paintRect(r, p.placedX + 40, bottom + 8, width - 80, 40, [bg[0] - 60, bg[1] - 60, bg[2] - 60]));
+    expect(failed(checkShadow(await ctxOf(block)))).toContain("shadow.kept_matches_source");
+    // Kept mode with nothing under the product on this channel: recorded with 0 compared pixels, so the per-photo row can read it.
+    const faded = await editOutput(kept, r => paintRect(r, 0, bottom + 1, r.w, r.h - bottom - 1, bg));
+    const none = ids(checkShadow(await ctxOf(faded)), "shadow.kept_matches_source")[0]!;
+    expect(none.status).toBe("not_run");
+    expect(keptComparedPixels(none)).toBe(0);
+    const consistency = keptChannelConsistency("P", 1, [{ channel: "trendyol", compared: 8344 }, { channel: "noon", compared: 2 }, { channel: "amazon", compared: 0 }]);
+    expect(consistency.status).toBe("info");
+    expect(consistency.detail).toContain("trendyol (8344)");
+    expect(keptChannelConsistency("P", 1, [{ channel: "trendyol", compared: 8344 }, { channel: "noon", compared: 900 }]).status).toBe("not_run");
+  }, 60_000);
+  it("reads a contact shadow under the sole (less saturated than the sole edge by 30 chroma) and a dark product's edge blend as shadow, not product, while the lime sliver and a dropped dark part still count", async () => {
+    // A tan colour-bleed patch (chroma 100) under a red sole edge (chroma over 130): shadow. The lime sliver (chroma 195): product.
+    const { prepared, matte, box } = syntheticSource({ taper: true }), w = prepared.width;
+    for (let row = 0; row < 6; row++) for (let x = box.x + 60; x < box.x + box.w - 60; x++) { const i = ((box.y + box.h + row) * w + x) * 3; prepared.rgb[i] = 200; prepared.rgb[i + 1] = 150; prepared.rgb[i + 2] = 100; }
+    const input = { identifier: "P", n: 1, source: { w, h: prepared.height, rgb: prepared.rgb }, sourceBackground: prepared.background, alpha: matte.alpha, productType: "footwear" as const };
+    expect(ids(checkMatte(input).results, "cutout.pixels_lost")[0]?.ok).toBe(true);
+    expect(failed(checkCutout(await ctxOf(await syntheticSubject("amazon", 2, "footwear", { sliver: true }))))).toContain("cutout.pixels_lost");
+    // A black garment: its soft edge blends into greys the foreground delta calls product; outside the matte they are the blend.
+    const dark = syntheticSource({ color: [25, 25, 30], strap: false, box: { x: 200, y: 200, w: 400, h: 450 } }), dw = dark.prepared.width;
+    for (let y = dark.box.y - 12; y < dark.box.y + dark.box.h + 12; y++) for (let x = dark.box.x - 12; x < dark.box.x + dark.box.w + 12; x++) {
+      if (dark.matte.alpha[y * dw + x]) continue;
+      const d = Math.max(dark.box.x - x, x - (dark.box.x + dark.box.w - 1), dark.box.y - y, y - (dark.box.y + dark.box.h - 1)), v = Math.round(60 + 190 * (d / 12));
+      const i = (y * dw + x) * 3; dark.prepared.rgb[i] = v; dark.prepared.rgb[i + 1] = v; dark.prepared.rgb[i + 2] = v;
+    }
+    const darkInput = { identifier: "D", n: 1, source: { w: dw, h: dark.prepared.height, rgb: dark.prepared.rgb }, sourceBackground: dark.prepared.background, alpha: dark.matte.alpha, productType: "apparel_model" as const };
+    expect(ids(checkMatte(darkInput).results, "cutout.pixels_lost")[0]?.ok).toBe(true);
+    const dropped = Buffer.from(dark.matte.alpha);
+    // A dropped part above the lower zone (where any unmatted darkening is read as the contact shadow by the footwear rule).
+    for (let y = dark.box.y; y < dark.box.y + 150; y++) for (let x = dark.box.x; x < dark.box.x + 120; x++) dropped[y * dw + x] = 0;
+    expect(ids(checkMatte({ ...darkInput, alpha: dropped }).results, "cutout.pixels_lost")[0]?.ok).toBe(false);
+  }, 60_000);
+  it("leaves the soft edge of a textured source (hair) out of the fringe count and still fails a smooth garment edge carrying the background colour", async () => {
+    const base = await syntheticSubject("amazon", 2, "footwear"), ctx = await ctxOf(base), sw = base.source.w;
+    const fringeOn = (subject: OutputSubject) => editOutput(subject, r => { for (let i = 0; i < ctx.expectedAlpha.length; i++) if (ctx.expectedAlpha[i]! > 10 && ctx.expectedAlpha[i]! <= 200) { r.rgb[i * 3] = 255; r.rgb[i * 3 + 1] = 255; r.rgb[i * 3 + 2] = 255; } });
+    const smooth = ids(checkCutout(await ctxOf(await fringeOn(base))), "cutout.fringe")[0]!;
+    expect(smooth.ok).toBe(false);
+    // Hair along the whole outline: a 6 px outer soft band (alpha 60) whose source pixels alternate dark strands and background.
+    const hair = { ...base, alpha: Buffer.from(base.alpha), source: { ...base.source, rgb: Buffer.from(base.source.rgb) } };
+    const matted = thresholdMask(base.alpha, 10), band = dilate(matted, sw, base.source.h, 6);
+    for (let i = 0; i < band.length; i++) if (band[i] && !matted[i]) { hair.alpha[i] = 60; const x = i % sw, y = (i - x) / sw; if ((x + y) % 2 === 0) { hair.source.rgb[i * 3] = 40; hair.source.rgb[i * 3 + 1] = 30; hair.source.rgb[i * 3 + 2] = 20; } }
+    expect(texturedSourceEdge(hair.source, hair.alpha, 300, 247)).toBe(true);
+    expect(texturedSourceEdge(base.source, base.alpha, 300, 247)).toBe(false);
+    const hairCtx = await ctxOf(hair), textured = ids(checkCutout(await ctxOf(await editOutput(hair, r => { for (let i = 0; i < hairCtx.expectedAlpha.length; i++) if (hairCtx.expectedAlpha[i]! > 10 && hairCtx.expectedAlpha[i]! <= 200) { r.rgb[i * 3] = 255; r.rgb[i * 3 + 1] = 255; r.rgb[i * 3 + 2] = 255; } }))), "cutout.fringe")[0]!;
+    expect(textured.detail).toContain("textured source edge (hair)");
+    expect(Number(/(\d+) pixels on a textured source edge/.exec(textured.detail)?.[1] ?? 0)).toBeGreaterThan(1000);
+  }, 60_000);
+  it("lists a sheer garment's edge softness as information (see-through over 0.5%, soft interior over 10%) and keeps a ghost failing by name", () => {
+    const { prepared, box } = syntheticSource(), w = prepared.width, h = prepared.height;
+    const alphaOf = (interior: (x: number, y: number) => number) => { const a = Buffer.alloc(w * h); for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) { const inside = x >= box.x && x < box.x + box.w && y >= box.y && y < box.y + box.h; const d = inside ? 0 : Math.max(box.x - x, x - (box.x + box.w - 1), box.y - y, y - (box.y + box.h - 1)); a[y * w + x] = inside ? interior(x, y) : d <= 6 ? Math.round(255 * (1 - d / 7)) : 0; } return a; };
+    const input = (alpha: Buffer) => ({ identifier: "S", n: 1, source: { w, h, rgb: prepared.rgb }, sourceBackground: prepared.background, alpha, productType: "apparel_model" as const });
+    const sheer = checkMatte(input(alphaOf((x, y) => ((x * 7 + y * 3) % 10 < 3 ? 215 : (x + y) % 97 === 0 ? 150 : 255))));
+    expect(sheer.metrics.sheer).toBe(true);
+    expect(ids(sheer.results, "cutout.edge_softness")[0]?.status).toBe("info");
+    expect(ids(sheer.results, "cutout.edge_softness")[0]?.detail).toContain("Sheer fabric");
+    const solid = checkMatte(input(alphaOf(() => 255)));
+    expect(solid.metrics.sheer).toBe(false);
+    expect(ids(solid.results, "cutout.edge_softness")[0]?.status).toBe("fail");
+    const ghost = checkMatte(input(alphaOf(() => 50)));
+    expect(ghost.metrics.sheer).toBe(false);
+    expect(ids(ghost.results, "cutout.opaque_share")[0]?.ok).toBe(false);
+    expect(ids(ghost.results, "cutout.edge_softness")[0]?.status).toBe("fail");
+  });
+  it("fits a flat border the product crosses on its cut sides from the plain rows outside the matte's span, records every colour-estimate check as not run without a model, and still fits nothing on a busy border", async () => {
+    // A wide box cut at the left and right over 45% of the rows of a white frame: 55% plain rows, accepted (over the 50% overall bar).
+    // The product is textured (a two-colour weave), so the rows it crosses are not plain, as a real box or bottle is not.
+    const weave = (subject: OutputSubject) => { const rgb = Buffer.from(subject.source.rgb), w = subject.source.w; for (let i = 0; i < subject.alpha.length; i++) if (subject.alpha[i]) { const x = i % w, y = (i - x) / w, c = (x + y) % 2 ? [60, 120, 200] : [160, 30, 50]; rgb[i * 3] = c[0]!; rgb[i * 3 + 1] = c[1]!; rgb[i * 3 + 2] = c[2]!; } return { ...subject, source: { ...subject.source, rgb } }; };
+    const wide = weave(await syntheticSubject("amazon", 1, "other", { width: 800, height: 800, box: { x: 10, y: 220, w: 780, h: 360 }, cutLeft: true, cutRight: true, strap: false }));
+    const src = wide.source, notUniform = { uniform: false, color: wide.sourceBackground.color };
+    expect(backgroundModel(src, notUniform)?.kind).toBe("graded");
+    // Crossing 70% of the rows: under 50% overall, accepted with the matte (the rows outside the span are all plain), not without it.
+    const tall = weave(await syntheticSubject("amazon", 1, "other", { width: 800, height: 800, box: { x: 10, y: 120, w: 780, h: 560 }, cutLeft: true, cutRight: true, strap: false }));
+    expect(backgroundModel(tall.source, { uniform: false, color: tall.sourceBackground.color })).toBeNull();
+    expect(backgroundModel(tall.source, { uniform: false, color: tall.sourceBackground.color }, tall.alpha)?.kind).toBe("graded");
+    expect(ids(checkCutout(await ctxOf({ ...tall, sourceBackground: { ...tall.sourceBackground, uniform: false } })), "cutout.pixels_lost")[0]?.status).toBe("pass");
+    // A busy border (random noise everywhere) fits nothing, and every colour-estimate check says so.
+    const busy = { ...tall, source: { ...tall.source, rgb: Buffer.from(tall.source.rgb) } };
+    for (let i = 0; i < busy.source.rgb.length; i++) busy.source.rgb[i] = (i * 7919) % 256;
+    const results = checkMatte({ identifier: "B", n: 1, source: busy.source, sourceBackground: { uniform: false, color: [255, 255, 255] }, alpha: busy.alpha, productType: "other" });
+    for (const id of COLOUR_ESTIMATE_CHECKS) expect(ids(results.results, id)[0]?.status, id).toBe("not_run");
+  }, 60_000);
+  it("takes the render's band note as read on a whole-frame close-up cut on all four sides, keeps failing a band without the note, and protects the top of a model shot in the fill rule", async () => {
+    const sub = await syntheticSubject("centrepoint", 1, "apparel_model", { width: 800, height: 1300, box: { x: 100, y: 100, w: 600, h: 1100 }, cutTop: true, cutBottom: true, cutLeft: true, cutRight: true, pad: 10 });
+    const results = checkCutEdge(await ctxOf(sub));
+    for (const side of ["left", "right"]) expect(ids(results, `cut_edge.flush_${side}`)[0]?.unit, side).toBe("px, fitted by rule");
+    expect(failed(checkCutEdge(await ctxOf({ ...sub, reason: null })))).toEqual(["cut_edge.flush_left", "cut_edge.flush_right"]);
+    // Cut at the top (and both sides) only: filling the width would trim the uncut bottom, and the top is never trimmed on a model shot.
+    const top = await syntheticSubject("centrepoint", 1, "apparel_model", { width: 800, height: 1300, box: { x: 100, y: 10, w: 600, h: 1000 }, cutTop: true, cutLeft: true, cutRight: true, pad: 10 });
+    const topResults = checkCutEdge(await ctxOf(top));
+    expect(failed(topResults)).toEqual([]);
+    const flushLeft = ids(topResults, "cut_edge.flush_left")[0];
+    if (flushLeft?.unit === "px, fitted by rule") expect(flushLeft.detail).toContain("never trimmed");
+  }, 60_000);
 });

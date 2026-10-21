@@ -80,15 +80,23 @@ export function checkCutEdge(ctx: OutputContext): CheckResult[] {
   // cut on both ends and filling it would need the other axis trimmed by more than a third, or trimmed on an uncut side.
   // The suite computes this from the boxes alone; a logo-blocked fill (trimRoom) is only in the render's note.
   const fit = { x: safe.w / box.w, y: safe.h / box.h }, contain = Math.min(fit.x, fit.y);
+  // The top of a model shot is never trimmed (spec 05 trimRules protectTop for apparel_model): filling the width may take the
+  // overflow off a cut bottom only (live run D2, penti, section 15e).
+  const protectTop = s.productType === "apparel_model";
   const fillRefused = (axis: "x" | "y"): { refused: boolean; why: string } => {
-    const bothCut = axis === "x" ? cut.left && cut.right : cut.top && cut.bottom, otherCut = axis === "x" ? cut.top || cut.bottom : cut.left || cut.right;
+    const bothCut = axis === "x" ? cut.left && cut.right : cut.top && cut.bottom, otherCut = axis === "x" ? (protectTop && cut.top ? cut.bottom : cut.top || cut.bottom) : cut.left || cut.right;
     if (!bothCut || fit[axis] <= contain + 1e-9) return { refused: false, why: "the axis fills the canvas on its own" };
     const otherLength = axis === "x" ? box.h : box.w, otherRoom = axis === "x" ? safe.h : safe.w, extra = overflowPx(otherLength, fit[axis], otherRoom), share = extra / otherLength;
-    if (!otherCut) return { refused: true, why: `filling the ${axis === "x" ? "width" : "height"} would trim ${extra} px (${(share * 100).toFixed(1)}%) off the uncut ${axis === "x" ? "top or bottom" : "left or right"}` };
+    if (!otherCut) return { refused: true, why: axis === "x" && protectTop && cut.top && !cut.bottom ? `filling the width would trim ${extra} px (${(share * 100).toFixed(1)}%) off the uncut bottom, and the top of a model shot is never trimmed` : `filling the ${axis === "x" ? "width" : "height"} would trim ${extra} px (${(share * 100).toFixed(1)}%) off the uncut ${axis === "x" ? "top or bottom" : "left or right"}` };
     if (share > MAX_TRIM_SHARE + TRIM_SLACK) return { refused: true, why: `filling the ${axis === "x" ? "width" : "height"} would trim ${(share * 100).toFixed(1)}% of the ${axis === "x" ? "height" : "width"} (at most a third)` };
     return { refused: false, why: `filling the ${axis === "x" ? "width" : "height"} would trim only ${(share * 100).toFixed(1)}% of the ${axis === "x" ? "height" : "width"} off its cut sides` };
   };
   const band = cutBandNote(s.reason), held = s.status === "needs_attention" || s.status === "failed", passthrough = s.flags.some(f => PASSTHROUGH_FLAGS.includes(f));
+  // A matte that covers the frame on all four sides (a padded whole-frame matte of a close-up, live run D2 penti:
+  // ZBE55F7B86F158FEA0EB9Z n=5 placed fitted with the band note, 16 flush rows of 6 to 511 px) is the same presentation as a
+  // pass-through: a frame cut on every side has no side to put flush, and what stopped the fill (trimRoom, the protected
+  // top) is only in the render's note, so the note is taken as read there; a band without the note still fails.
+  const frameFilling = cut.top && cut.bottom && cut.left && cut.right;
   for (const side of ctx.cutSides) {
     const gap = Math.abs(measured[side] - limit[side]);
     const edge = { top: 0, bottom: canvas.h - 1, left: 0, right: canvas.w - 1 }[side];
@@ -106,9 +114,9 @@ export function checkCutEdge(ctx: OutputContext): CheckResult[] {
     else {
       // A band the render fitted on purpose and said so (the sheet note) passes as information when the rule agrees;
       // a band the render did not note, or noted where the rule allowed the fill, is a render fault.
-      const rule = fillRefused(side === "left" || side === "right" ? "x" : "y"), noted = band.sides.has(side), fitted = noted && (rule.refused || band.logo);
+      const rule = fillRefused(side === "left" || side === "right" ? "x" : "y"), noted = band.sides.has(side), fitted = noted && (rule.refused || band.logo || frameFilling);
       out.push(judge(fitted, `cut_edge.flush_${side}`, E, who, offEdge, FLUSH_TOLERANCE_PX, fitted ? "px, fitted by rule" : "px", fitted
-        ? `The product is cut at the source ${side} and ends ${offEdge} px from the ${side} edge; the render fitted it on purpose and notes the band on this channel (${band.logo ? "a logo or detail near another cut edge stops the fill" : rule.why}).`
+        ? `The product is cut at the source ${side} and ends ${offEdge} px from the ${side} edge; the render fitted it on purpose and notes the band on this channel (${band.logo ? "a logo or detail near another cut edge stops the fill" : rule.refused ? rule.why : "the matte covers the frame on all four sides, a whole-frame close-up placed fitted like a pass-through"}).`
         : noted ? `The product is cut at the source ${side} and ends ${offEdge} px from the ${side} edge; the render notes a band but the rule allows the fill: ${rule.why}.`
         : `The product is cut at the source ${side}; on the canvas it ends ${offEdge} px from the ${side} edge (must be flush, with no margin on that side).`));
     }

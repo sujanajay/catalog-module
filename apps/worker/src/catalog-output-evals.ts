@@ -38,8 +38,9 @@ import { sourceKey } from "@catalog/core/catalog/evals/completeness";
 import { checkMatte, consensusMetrics } from "@catalog/core/catalog/evals/cutout";
 import { sheetNotes } from "@catalog/core/catalog/evals/sheet-notes";
 import { buildGolden, GOLDEN_MANIFEST_PATH, goldenCounts, goldenSourcePath, mapShotsBySha, parseGolden, readGoldenBytes, serializeGolden, sha256, uniqueSources, type GoldenBuild, type GoldenEntry, type GoldenManifest } from "@catalog/core/catalog/evals/golden";
-import { policyRowsFor, winnersByScope } from "@catalog/core/catalog/evals/matte-bakeoff";
-import { EVALS_PREFIX, EvidenceBudget, evidencePath, parseSetRecord, parseSetsFlag, RUN_ID_PATTERN, selectSets, serializeSetRecord, setId, setRecordPath, setsPrefix, withEvalRetry, type SetRecord } from "@catalog/core/catalog/evals/progress";
+import { bakeoffPolicy } from "@catalog/core/catalog/evals/matte-bakeoff";
+import { keptChannelConsistency, keptComparedPixels } from "@catalog/core/catalog/evals/shadow";
+import { EVALS_PREFIX, EvidenceBudget, evidencePath, parseSetRecord, parseSetsFlag, RUN_ID_PATTERN, SAMPLE_CHANNEL, samplePath, selectSets, serializeSetRecord, setId, setRecordPath, setsPrefix, withEvalRetry, type SetRecord } from "@catalog/core/catalog/evals/progress";
 import { buildReport, reportHtml, type ReportThumb } from "@catalog/core/catalog/evals/report";
 import { buildZip } from "../../../packages/core/test-fixtures/catalog/ingest-a/builders";
 import { workerCatalogDeps, type CatalogDeps } from "./catalog/deps";
@@ -54,7 +55,9 @@ const USAGE = `Usage: catalog:output-evals <command>
   build-golden [--build <golden-build.json>] [--out <golden-manifest.json>] [--root name=path ...]
   upload [--manifest <golden-manifest.json>] [--root name=path ...]      (copies the pinned photos under catalog-test/evals/golden/)
   run [--resume <run>] [--sets <brand.category,...>] [--limit <products>] [--brand <slug>] [--bakeoff-sample <n>] [--skip-bakeoff] [--skip-overwrite] [--write-policy]
-      (--resume continues a run from its recorded sets; --sets runs only the named sets, for example anta.footwear)
+      (--resume continues a run from its recorded sets; --sets runs only the named sets, for example anta.footwear;
+       on a completed run, run --write-policy --resume <run> skips every recorded set and re-writes the report and the
+       policy rows from the records alone, which is how the bake-off rows are re-written without a full run)
   check-folder --dir <root> --product-type <type> [--only <ids>] [--out <dir>]   (raw/, mattes/, outputs/<product>/<channel>/ layout; no GCP)`;
 const FIXTURES = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../packages/core/test-fixtures/catalog/evals");
 /** Every direct storage call of the eval path retries transient network errors (five attempts). */
@@ -228,7 +231,10 @@ async function runSet(ctx: RunContext, group: Group): Promise<SetRecord> {
     const heldExpected = new Set<string>();
     for (const s of sources) { const e = entryOf(identifierOf(s.productId), s.n); if (e && ctx.heldExpected.has(sourceKey(e.identifier, e.n))) heldExpected.add(sourceKey(identifierOf(s.productId), s.n)); }
     const plantedShot = (identifier: string) => sources.map(s => ({ identifier: identifierOf(s.productId), n: s.n })).find(s => s.identifier === identifier && entryOf(identifier, s.n)?.planted)?.n;
-    record.shotExpectations = sources.flatMap(s => { const identifier = identifierOf(s.productId), e = entryOf(identifier, s.n); return e && !e.expect.attention && e.expect.flags.length ? [{ identifier, n: s.n, expect: e.expect }] : []; });
+    // Per-shot expectations on the batch's numbering: flags without a hold (a chart), and per-shot holds of products that
+    // are not planted copies (a planted copy's host shots carry the planted expectation, judged by attention.planted_caught).
+    record.shotExpectations = sources.flatMap(s => { const identifier = identifierOf(s.productId), e = entryOf(identifier, s.n); return e && e.expect.flags.length && (!e.expect.attention || !ctx.plantedOf.has(identifier)) ? [{ identifier, n: s.n, expect: e.expect }] : []; });
+    const chartExpected = new Set(sources.flatMap(s => { const identifier = identifierOf(s.productId), e = entryOf(identifier, s.n); return e && !e.expect.attention && e.expect.flags.includes("chart_image") ? [sourceKey(identifier, s.n)] : []; }));
 
     // Completeness over rows, public objects, staged files and the sheet.
     const publicHeads = new Map<string, Awaited<ReturnType<typeof storage.headObject>>>(), stagingHeads = new Map<string, Awaited<ReturnType<typeof storage.headObject>>>();
@@ -238,7 +244,7 @@ async function runSet(ctx: RunContext, group: Group): Promise<SetRecord> {
     });
     const links = await readSheetLinks(xlsx), notes = await sheetNotes(xlsx);
     record.results.push(...checkCompleteness({
-      heldExpected,
+      heldExpected, chartExpected,
       channels, sources: sources.map(s => ({ identifier: identifierOf(s.productId), n: s.n, width: s.width, height: s.height })),
       outputs: outputs.map(o => ({ identifier: identifierOf(o.productId), n: o.n, channel: o.channel, status: o.status, isLive: o.isLive, reason: o.reason, generation: o.generation, bytes: o.bytes, crc32c: o.crc32c, publicUrl: o.publicUrl, stagingUri: o.stagingUri })),
       publicHeads, stagingHeads, sheet: links.links.map(l => ({ identifier: strip(l.identifier), channel: l.channel, n: l.n, url: l.url })),
@@ -248,6 +254,7 @@ async function runSet(ctx: RunContext, group: Group): Promise<SetRecord> {
     // Image checks on every made output. The full-size output of every image with a failing check is kept under the
     // run (evidence) before cleanup deletes the set's objects, so a failure can be looked at afterwards.
     const byProduct = new Map<string, { n: number; scale: number; detailShot: boolean }[]>(), evidence = new EvidenceBudget();
+    const samples: { identifier: string; n: number; raw: Buffer; jpeg: Buffer }[] = [];
     await mapLimit(sources, 3, async source => {
       const identifier = identifierOf(source.productId), entry = entryOf(identifier, source.n);
       if (!entry || !source.matteUri) return;
@@ -256,13 +263,17 @@ async function runSet(ctx: RunContext, group: Group): Promise<SetRecord> {
       const alpha = await sharp((await gcs.downloadBuffer(source.matteUri)).buf).toColourspace("b-w").raw().toBuffer();
       // Keyed by the manifest entry (identifier_n of the manifest), so the bake-off sample below finds it whatever the batch's numbering.
       prepared.set(`${entry.identifier}_${entry.n}`, { p, alpha, entry });
-      const box = bbox(alpha, p.width, p.height);
+      const box = bbox(alpha, p.width, p.height), keptRows: { channel: string; compared: number }[] = [];
       for (const o of outputs.filter(o => o.sourceImageId === source.id && o.stagingUri)) {
         const jpeg = (await gcs.downloadBuffer(o.stagingUri!)).buf;
         const subject: OutputSubject = { identifier, n: source.n, channel: o.channel, productType: (products.get(source.productId)?.productType ?? group.category) as ProductType, source: { w: p.width, h: p.height, rgb: p.rgb }, sourceBackground: p.background, alpha, jpeg, placement: { w: o.canvasW, h: o.canvasH, scale: Number(o.scale), placedX: o.placedX, placedY: o.placedY }, flags: o.flags, status: o.status, reason: o.reason, expect: entry.expect, planted: !!entry.planted, tags: entry.tags };
         const checks = await runImageChecks(subject);
         record.results.push(...checks);
-        if (checks.every(c => c.ok)) deterministicPass.add(outputKey(identifier, o.channel, source.n));
+        for (const c of checks) { const compared = keptComparedPixels(c); if (compared !== null) keptRows.push({ channel: o.channel, compared }); }
+        // The hold's own row (cut_edge.not_held) never takes a held output out of the deterministic-pass set, or a false hold on a
+        // cut source would not count as one (live run D2, penti: 2 of 3 false holds missed by the rate, section 15e).
+        if (checks.every(c => c.ok || c.id === "cut_edge.not_held")) deterministicPass.add(outputKey(identifier, o.channel, source.n));
+        if (o.channel === SAMPLE_CHANNEL && !entry.planted) samples.push({ identifier, n: source.n, raw, jpeg });
         if (checks.some(c => !c.ok)) {
           let kept: string | null = null;
           if (evidence.take()) { kept = evidencePath(run, set, identifier, o.channel, source.n); assertTestPrefix(kept); await gcs.uploadBuffer(kept, jpeg, "image/jpeg"); }
@@ -270,9 +281,24 @@ async function runSet(ctx: RunContext, group: Group): Promise<SetRecord> {
         }
         if (o.channel === "styli" && box) byProduct.set(identifier, [...byProduct.get(identifier) ?? [], { n: source.n, scale: Number(o.scale), detailShot: box.w / p.width > 0.85 || box.h / p.height > 0.85 }]);
       }
+      if (keptRows.length && !entry.planted) record.results.push(keptChannelConsistency(identifier, source.n, keptRows));
     });
     for (const [identifier, shots] of byProduct) record.results.push(checkUniformScale(identifier, shots));
     record.deterministicPass = [...deterministicPass];
+    // An all-pass set leaves nothing to look at (live run D2, vero_moda bags, section 15e): keep one sample output per photo
+    // (the noon output, which carries the kept shadow and the grey canvas) and its thumb under the same cap, with the sample suffix.
+    if (!record.thumbs.length) {
+      let kept = 0;
+      for (const sample of samples.sort((a, b) => a.identifier.localeCompare(b.identifier) || a.n - b.n)) {
+        if (!evidence.take()) break;
+        const path = samplePath(run, set, sample.identifier, SAMPLE_CHANNEL, sample.n);
+        assertTestPrefix(path);
+        await gcs.uploadBuffer(path, sample.jpeg, "image/jpeg");
+        record.thumbs.push({ identifier: sample.identifier, n: sample.n, channel: SAMPLE_CHANNEL, original: await shrink(sample.raw), output: await shrink(sample.jpeg), evidence: path, sample: true });
+        kept++;
+      }
+      if (kept) console.info(JSON.stringify({ message: "evals samples kept on an all-pass set", set, kept, prefix: `gs://${storage.getBucketName()}/${EVALS_PREFIX}/${run}/evidence/${set}/` }));
+    }
     if (evidence.kept) console.info(JSON.stringify({ message: "evals evidence kept", set, kept: evidence.kept, overCap: evidence.skipped, prefix: `gs://${storage.getBucketName()}/${EVALS_PREFIX}/${run}/evidence/${set}/` }));
 
     // Rows for the attention checks and the flag table.
@@ -402,9 +428,10 @@ async function runCommand(db: Db, flags: Record<string, string | string[] | true
   const results = records.flatMap(r => r.results), thumbs = records.flatMap(r => r.thumbs), trials = records.flatMap(r => r.trials), batchIds = records.flatMap(r => r.batches);
   const attentionRows = records.flatMap(r => r.attentionRows), attentionProducts = records.flatMap(r => r.attentionProducts), deterministicPass = new Set(records.flatMap(r => r.deterministicPass));
   const failedSets = records.filter(r => r.status === "failed");
-  const winners = winnersByScope(trials);
+  // The bake-off from every record's trials (a resume of a completed run reaches this step with no set re-run, so the policy
+  // rows can be re-written from the records alone); the runner-up goes to the row as the second matte model.
   const existing = await db.select().from(modelPolicy);
-  const policyRows = policyRowsFor(winners, { batchIds, seen: { matte: trials.length ? [...new Map(trials.map(t => [`${t.model}|${t.target}`, { id: t.model, target: t.target }])).values()] : [], judges: qaCandidates() }, existing });
+  const { winners, rows: policyRows } = bakeoffPolicy(trials, { batchIds, judges: qaCandidates(), existing });
   const written = policyRows.length ? await writePolicyRows(db, policyRows, flags["write-policy"] !== true) : [];
 
   const attention = checkAttention({ products: attentionProducts, outputs: attentionRows, shots: records.flatMap(r => r.shotExpectations ?? []), deterministicPass, liveJudge: live, threshold: QA_DEFAULT_THRESHOLD });
@@ -413,14 +440,15 @@ async function runCommand(db: Db, flags: Record<string, string | string[] | true
   const startedAt = new Date(Math.min(Date.now(), ...records.map(r => Date.parse(r.startedAt))));
   const report = buildReport({ run, startedAt, finishedAt: new Date(), mode: live ? "live judge" : "mocked judge (LIVE_SMOKE is not 1)", golden: { products: counts.products, photos: counts.photos, brands: counts.brands, categories: counts.categories, tags: counts.tags }, results, attention, flags: flagRows(attentionRows, QA_DEFAULT_THRESHOLD), batches: batchIds, includeAll: true });
   const sets = records.map(r => ({ set: r.set, status: r.status, error: r.error, photos: r.photos, products: r.products, checks: r.results.length, overwriteRan: r.overwriteRan, startedAt: r.startedAt, finishedAt: r.finishedAt }));
-  const full = { ...report, sets, matteBakeoff: { trials: trials.length, winners, policyRows: written.map(w => ({ brand: w.row.brandSlug, category: w.row.category, matteModel: w.row.matteModel, outcome: flags["write-policy"] === true ? w.outcome : `dry run (${w.outcome})` })) } };
+  const full = { ...report, sets, matteBakeoff: { trials: trials.length, winners, policyRows: written.map(w => ({ brand: w.row.brandSlug, category: w.row.category, matteModel: w.row.matteModel, matteModelSecond: w.row.matteModelSecond ?? null, outcome: flags["write-policy"] === true ? w.outcome : `dry run (${w.outcome})` })) } };
   const html = await reportHtml(report, thumbs) + setsHtml(sets) + bakeoffHtml(winners, flags["write-policy"] === true);
   await writeFile(path.join(out, "report.json"), JSON.stringify(full, null, 1));
   await writeFile(path.join(out, "report.html"), html);
   for (const [name, body, mime] of [["report.json", JSON.stringify(full), "application/json"], ["report.html", html, "text/html"]] as const) { const objectPath = `${EVALS_PREFIX}/${run}/${name}`; assertTestPrefix(objectPath); await gcs.uploadBuffer(objectPath, Buffer.from(body), mime); }
   console.info(report.summary.line);
   console.info(`Report: gs://${storage.getBucketName()}/${EVALS_PREFIX}/${run}/report.html (also ${out})`);
-  for (const w of winners) console.info(`matte bake-off ${w.brand}/${w.category}: ${w.winner ? `${w.winner.model} (composite ${w.winner.composite.toFixed(4)}, fail rate ${(w.winner.failRate * 100).toFixed(0)}%)` : "no trials"}${w.runnerUp ? `, runner-up ${w.runnerUp.model}, margin ${w.margin}` : ""} over ${w.sources} sources`);
+  for (const w of winners) console.info(`matte bake-off ${w.brand}/${w.category}: ${w.winner ? `${w.winner.model} (composite ${w.winner.composite.toFixed(4)}, fail rate ${(w.winner.failRate * 100).toFixed(0)}%)` : "no trials"}${w.runnerUp ? `, runner-up ${w.runnerUp.model} (written as the second matte model), margin ${w.margin}` : ""} over ${w.sources} sources`);
+  for (const w of written) console.info(`policy row ${w.row.brandSlug}/${w.row.category}: ${w.row.matteModel}, second ${w.row.matteModelSecond ?? "none"}: ${flags["write-policy"] === true ? w.outcome : `dry run (${w.outcome})`}`);
   if (failedSets.length) console.error(`evals: ${failedSets.length} set(s) failed (${failedSets.map(r => r.set).join(", ")}); re-run them with: run --resume ${run}`);
   if (!report.summary.passedAll || failedSets.length) process.exitCode = 1;
 }
@@ -431,11 +459,11 @@ function setsHtml(sets: { set: string; status: string; error: string | null; pho
   return `<h2>Sets (${sets.length})</h2><p>One test batch per brand and category. A set that failed before its checks carries none; one whose overwrite passes failed keeps its first-pass checks. Re-run a failed set with <code>run --resume &lt;run&gt;</code>.</p><table><thead><tr><th>Set</th><th>Status</th><th>Photos</th><th>Products</th><th>Checks</th><th>Overwrite</th><th>Started</th><th>Finished</th><th>Error</th></tr></thead><tbody>${rows.join("") || "<tr><td colspan=9>No sets.</td></tr>"}</tbody></table>`;
 }
 
-function bakeoffHtml(winners: ReturnType<typeof winnersByScope>, written: boolean): string {
+function bakeoffHtml(winners: ReturnType<typeof bakeoffPolicy>["winners"], written: boolean): string {
   const esc = (v: unknown) => String(v ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]!);
   const pct = (v: number | null) => (v === null ? "n/a" : `${(v * 100).toFixed(2)}%`);
   const rows = winners.flatMap(w => w.ranking.map((m, i) => `<tr><td>${esc(w.brand)}</td><td>${esc(w.category)}</td><td>${i + 1}</td><td>${esc(m.model)} (${m.target})</td><td>${m.sources}</td><td>${pct(m.failRate)}</td><td>${pct(m.hardCaseFailRate)}</td><td>${pct(m.regionLoss)}</td><td>${pct(m.thinLoss)}</td><td>${pct(m.backgroundKept)}</td><td>${pct(m.seeThrough)}</td><td>${m.holes}</td><td>${m.edgeSoftness === null ? "n/a" : m.edgeSoftness.toFixed(2)}</td><td>${pct(m.consensusLoss)}</td><td>${pct(m.consensusExtra)}</td><td>${m.composite.toFixed(4)}</td><td>${Math.round(m.msPerImage)}</td><td>${i === 0 && w.margin !== null ? w.margin : ""}</td></tr>`));
-  return `<h2>Cut-out model bake-off</h2><p>Every deployed cut-out model on the golden sources of each category, scored with the cut-out integrity checks. Rank 1 is the winner; the margin is the runner-up's composite minus the winner's. Policy rows ${written ? "were written" : "were planned (dry run; pass --write-policy to write them)"}.</p><table><thead><tr><th>Brand</th><th>Category</th><th>Rank</th><th>Model</th><th>Sources</th><th>Fail rate</th><th>Hard-case fail rate</th><th>Region loss</th><th>Thin loss</th><th>Background kept</th><th>See-through</th><th>Holes</th><th>Edge softness px</th><th>Consensus loss</th><th>Consensus extra</th><th>Composite</th><th>ms</th><th>Margin</th></tr></thead><tbody>${rows.join("") || "<tr><td colspan=18>No trials.</td></tr>"}</tbody></table>`;
+  return `<h2>Cut-out model bake-off</h2><p>Every deployed cut-out model on the golden sources of each category, scored with the cut-out integrity checks. Rank 1 is the winner and goes to the policy row as the first matte model, rank 2 as its second; the margin is the runner-up's composite minus the winner's. Policy rows ${written ? "were written" : "were planned (dry run; pass --write-policy to write them)"}.</p><table><thead><tr><th>Brand</th><th>Category</th><th>Rank</th><th>Model</th><th>Sources</th><th>Fail rate</th><th>Hard-case fail rate</th><th>Region loss</th><th>Thin loss</th><th>Background kept</th><th>See-through</th><th>Holes</th><th>Edge softness px</th><th>Consensus loss</th><th>Consensus extra</th><th>Composite</th><th>ms</th><th>Margin</th></tr></thead><tbody>${rows.join("") || "<tr><td colspan=18>No trials.</td></tr>"}</tbody></table>`;
 }
 
 /**

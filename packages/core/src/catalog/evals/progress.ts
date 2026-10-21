@@ -26,6 +26,9 @@ export const setRecordPath = (run: string, set: string) => `${setsPrefix(run)}${
 export const EVIDENCE_CAP_PER_SET = 200;
 export const evidencePrefix = (run: string, set: string) => `${EVALS_PREFIX}/${run}/evidence/${set}/`;
 export const evidencePath = (run: string, set: string, identifier: string, channel: string, n: number) => `${evidencePrefix(run, set)}${identifier}__${channel}__${n}.jpg`;
+/** A sample of an all-pass set: one output per photo (noon), kept under the same cap with the `sample` suffix (section 15e). */
+export const samplePath = (run: string, set: string, identifier: string, channel: string, n: number) => `${evidencePrefix(run, set)}${identifier}__${channel}__${n}__sample.jpg`;
+export const SAMPLE_CHANNEL = "noon";
 /** Hands out at most `cap` evidence slots; `take` is synchronous so concurrent image checks never exceed the cap. */
 export class EvidenceBudget {
   kept = 0;
