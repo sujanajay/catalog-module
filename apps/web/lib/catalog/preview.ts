@@ -9,7 +9,7 @@ import type { ChannelId } from "@catalog/core/catalog/types";
 import * as storage from "@catalog/core/storage";
 import { db } from "../db";
 import { badRequest } from "../errors";
-import { assertDraft, draftForUpdate, parseOptions, queryBatch } from "./batches";
+import { anotherBatchProcessing, assertDraft, draftForUpdate, parseOptions, queryBatch } from "./batches";
 import { wizardEstimate } from "./cost";
 import type { CostEstimate } from "./copy";
 import { regroupBatch } from "./uploads";
@@ -73,7 +73,7 @@ export function plannedImages(sources: readonly PlannedSource[], channels: reado
 }
 export async function previewBatch(id: string) {
   const batch = await queryBatch(id);
-  const base = { ready: batch.counts.previewReady, previewAt: batch.updatedAt.toISOString(), counts: {...batch.counts, photos: batch.counts.sources, channels: batch.channels.length}, collected: batch.counts.collected, collectTotal: batch.counts.collectTotal, estimate: null as CostEstimate | null };
+  const base = { otherBatchProcessing: await anotherBatchProcessing(id), ready: batch.counts.previewReady, previewAt: batch.updatedAt.toISOString(), counts: {...batch.counts, photos: batch.counts.sources, channels: batch.channels.length}, collected: batch.counts.collected, collectTotal: batch.counts.collectTotal, estimate: null as CostEstimate | null };
   if (!base.ready) return { ...base, groupedBy: "", warnings: [], groups: [], totalRows: 0, overwrite: { newProducts: 0, existingProducts: [], renameHints: [], sameProductPairs: [] }, busy: [] };
   const [preview, detected] = await Promise.all([buildPreview(db(), id, { storage }, { limit: 50 }), buildDetectedStep2(db(), id, { storage })]);
   const sources = await db().select().from(catalogSourceImages).where(eq(catalogSourceImages.batchId, id));
