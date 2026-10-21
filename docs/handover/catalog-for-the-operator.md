@@ -240,3 +240,24 @@ photos ended up in "Needs attention" with "The quality check could not read this
 update of 2026-10-21 the tool waits and tries again, then asks a second checker, and only then
 holds the photo for you. So expect fewer of these cards. When you see one, look at the picture
 yourself; "Use as is" keeps it.
+
+## 18. What changed on 2026-10-21
+
+The live site was updated twice on 2026-10-21. What you may notice:
+
+- Enlarged pictures are sharper. When a small photo has to be made bigger for a marketplace, the
+  edges of the product are now sharpened as well, also on photos whose background was removed.
+- Size charts with coloured tables are left out. A size chart printed on a tinted or coloured table
+  is now recognised as a chart and is not used as a product picture, like plain size charts.
+- Faint, see-through cut-outs are rejected. If removing the background leaves the product looking
+  washed out or see-through, the tool tries another way. If the product would lose part of
+  itself, the photo waits in "Needs attention" instead of being published torn.
+- Sole edges on shoes are cleaner. A thin coloured strip that sometimes showed along the sole is
+  now removed with a soft edge.
+- When the quality checker is busy, the tool now waits and tries again, then asks a second
+  checker, and only then holds the photo for you (see section 17). The note on the card now
+  names the photo by the same number you see on the sheet.
+
+Some photos are still held on purpose. For example, a product on a plain studio backdrop of almost
+the same colour can lose part of itself when the background is removed; the tool holds it so a
+broken picture is never published. Look at it and choose what to do as in section 7.
