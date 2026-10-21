@@ -4,7 +4,8 @@ import { buildDetectedStep2 } from "@catalog/core/catalog/ingest/detect-step";
 import { buildPreview } from "@catalog/core/catalog/ingest/index";
 import type { Detected } from "@catalog/core/catalog/ingest/types";
 import { styliMinSourceHeightPx, STYLI_SKIP_LOW_RESOLUTION } from "@catalog/core/catalog/channels";
-import { upscaleFactorFromEnv } from "@catalog/core/catalog/upscale";
+import { renderKeys } from "@catalog/core/catalog/pipeline/publish";
+import { upscaleConfigFromEnv, upscaleFactorFromEnv } from "@catalog/core/catalog/upscale";
 import type { ChannelId } from "@catalog/core/catalog/types";
 import * as storage from "@catalog/core/storage";
 import { db } from "../db";
@@ -51,19 +52,23 @@ export async function patchDetected(id: string, value: unknown) {
   return { collecting: true };
 }
 type PlannedSource = { productId: string; n: number; sha256: string; height: number | null };
-type LiveOutput = { productId: string; n: number; channel: ChannelId; sha256: string };
+/** A live output, the photo it was made from (sha256) and that photo's cut-out model. */
+type LiveOutput = { productId: string; n: number; channel: ChannelId; sha256: string; renderKey: string; matteModel: string | null };
 /**
  * Step 4's "images will be made" (spec 06): photos times channels, minus Styli skips, minus pairs whose
- * live image was made from the same photo (same sha256), which the pipeline keeps as they are.
+ * live image the pipeline keeps as it is: made from the same photo (same sha256) under today's rules, so its
+ * render_key is still one the worker accepts (chunk.ts, renderKeys). A live image made under an older
+ * CHANNEL_RULES_VERSION is made again, and counted.
  */
-export function plannedImages(sources: readonly PlannedSource[], channels: readonly ChannelId[], live: readonly LiveOutput[], upscaleFactor: number = upscaleFactorFromEnv()): { outputs: number; sourcesToMake: number } {
+export function plannedImages(sources: readonly PlannedSource[], channels: readonly ChannelId[], live: readonly LiveOutput[], upscaleFactor: number = upscaleFactorFromEnv(), upscaleModel: string | null = upscaleConfigFromEnv().model): { outputs: number; sourcesToMake: number } {
+  const current = (o: LiveOutput) => o.matteModel !== null && renderKeys({ sourceSha256: o.sha256, channel: o.channel, n: o.n, policyKey: `default|${o.matteModel}` }, upscaleModel).includes(o.renderKey);
   let outputs = 0, sourcesToMake = 0;
   const styliMin = styliMinSourceHeightPx(upscaleFactor);
   for (const source of sources) {
     let made = 0;
     for (const channel of channels) {
       if (channel === "styli" && STYLI_SKIP_LOW_RESOLUTION && source.height !== null && source.height < styliMin) continue;
-      if (live.some((o) => o.productId === source.productId && o.n === source.n && o.channel === channel && o.sha256 === source.sha256)) continue;
+      if (live.some((o) => o.productId === source.productId && o.n === source.n && o.channel === channel && o.sha256 === source.sha256 && current(o))) continue;
       made++;
     }
     outputs += made;
@@ -78,7 +83,7 @@ export async function previewBatch(id: string) {
   const [preview, detected] = await Promise.all([buildPreview(db(), id, { storage }, { limit: 50 }), buildDetectedStep2(db(), id, { storage })]);
   const sources = await db().select().from(catalogSourceImages).where(eq(catalogSourceImages.batchId, id));
   const productIds = [...new Set(sources.map((s) => s.productId))];
-  const live = productIds.length ? await db().select({ productId: catalogOutputs.productId, n: catalogOutputs.n, channel: catalogOutputs.channel, sha256: catalogSourceImages.sha256 }).from(catalogOutputs).innerJoin(catalogSourceImages, eq(catalogSourceImages.id, catalogOutputs.sourceImageId)).where(and(inArray(catalogOutputs.productId, productIds), eq(catalogOutputs.isLive, true))) : [];
+  const live = productIds.length ? await db().select({ productId: catalogOutputs.productId, n: catalogOutputs.n, channel: catalogOutputs.channel, sha256: catalogSourceImages.sha256, renderKey: catalogOutputs.renderKey, matteModel: catalogSourceImages.matteModel }).from(catalogOutputs).innerJoin(catalogSourceImages, eq(catalogSourceImages.id, catalogOutputs.sourceImageId)).where(and(inArray(catalogOutputs.productId, productIds), eq(catalogOutputs.isLive, true))) : [];
   const { outputs, sourcesToMake } = plannedImages(sources, batch.channels, live);
   // One classifier call per product without a type when the batch type is "auto" (spec 07 4.3, 4.11).
   const untypedProducts = batch.productType !== "auto" || !productIds.length ? 0 : (await db().select({ productType: catalogProducts.productType }).from(catalogProducts).where(inArray(catalogProducts.id, productIds))).filter((p) => !p.productType).length;

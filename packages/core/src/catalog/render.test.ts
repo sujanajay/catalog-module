@@ -233,4 +233,40 @@ describe("Styli judged on the upscaled size", () => {
     expect(output.status).toBe("skipped"); expect(output.notes).toEqual(["Skipped for Styli: the photo is smaller than Styli needs."]);
     expect(output.flags).not.toContain("cut_in_source"); expect(upscaler.calls).toBe(0);
   });
+
+  // The D4 live check (batch 29d25c7b, five 800x1200 Penti photos): every Styli output failed styli_anchor once the
+  // x2 upscaler let them through. A model matte fades out over a pixel or two; enlarged about 2x on Styli that fade is
+  // several canvas px of alpha above the box threshold that look like the grey canvas, so the product that is seen
+  // stood above the guide and off centre. A dark coat with a soft one-pixel matte edge, a near-white cuff on its left
+  // (barely visible on #E0E0E0) and anti-aliased source colours, as a camera and a matting model give them.
+  const softSilhouette = (): { prepared: Prepared; matte: Matte } => {
+    const width = 800, height = 1200, rgb = Buffer.alloc(width * height * 3, 255), alpha = Buffer.alloc(width * height);
+    const coverage = (x: number, y: number, cx: number, cy: number, ax: number, ay: number) => Math.max(0, Math.min(1, 0.5 + (1 - Math.hypot((x - cx) / ax, (y - cy) / ay)) * Math.min(ax, ay)));
+    for (let y = 0; y < height; y++) for (let x = 0; x < width; x++) {
+      const coat = coverage(x, y, 410, 615, 170, 555), cuff = coverage(x, y, 250, 640, 30, 45), a = Math.max(coat, cuff), i = y * width + x;
+      const colour = coat >= cuff ? [30, 30, 35] : [250, 248, 244];
+      alpha[i] = Math.round(a * 255);
+      for (let c = 0; c < 3; c++) rgb[i * 3 + c] = Math.round(colour[c]! * a + 255 * (1 - a));
+    }
+    return { prepared: { width, height, rgb, alphaSource: null, background: analyseBackground(rgb, width, height), flags: [], sourceMime: "image/jpeg" }, matte: { alpha, width, height, model: "synthetic", ms: 0, source: "model", target: "gpu", sentLongSide: null } };
+  };
+  /** A real x2 enlargement (Lanczos3) of the photo the render sends, as the service returns it. */
+  const lanczosUpscaler = (): Upscaler => ({ model: "fake-x2", minScale: 1.5, async upscale(image: Buffer) {
+    const meta = await sharp(image).metadata();
+    return { jpeg: await sharp(image).resize(meta.width! * 2, meta.height! * 2, { kernel: "lanczos3" }).jpeg({ quality: 95, chromaSubsampling: "4:4:4" }).toBuffer(), ms: 1 };
+  } });
+  it("puts an upscaled 800x1200 photo's visible product on the Styli bottom guide, centred", async () => {
+    quiet();
+    const output = await renderSource({ ...softSilhouette(), channel: "styli", shotNumber: 2, productType: "apparel_model", upscaler: lanczosUpscaler() });
+    expect(output.flags).toContain("upscaled"); expect(output.plan.scale).toBeGreaterThan(1.5);
+    expect(output.compliance.failures).toEqual([]); expect(output.status).toBe("ok");
+    // The compliance check run again on the delivered JPEG agrees.
+    const check = await checkOutput({ jpeg: output.jpeg!, channel: "styli", shotNumber: 2, plan: output.plan, identifier: "coat", n: 2, publicObjectPath: "coat_2.jpg" });
+    expect(check.failures).toEqual([]);
+  });
+  it("keeps the same photo on the guide on the plain path when the upscale call fails", async () => {
+    quiet();
+    const output = await renderSource({ ...softSilhouette(), channel: "styli", shotNumber: 2, productType: "apparel_model", upscaler: { ...lanczosUpscaler(), async upscale() { throw new Error("down"); } } });
+    expect(output.flags).not.toContain("upscaled"); expect(output.compliance.failures).toEqual([]); expect(output.status).toBe("ok");
+  });
 });
