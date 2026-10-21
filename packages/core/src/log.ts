@@ -30,8 +30,9 @@ export function toSeverity(value: unknown): Severity | undefined {
 }
 
 /** The JSON object `log` prints (exported for tests). `severity` and `message` in `fields` are ignored. */
-export function logEntry(severity: Severity, message: string, fields: LogFields = {}, env: NodeJS.ProcessEnv = process.env): Record<string, unknown> {
-  const { severity: _severity, message: _message, ...rest } = fields;
+export function logEntry(severity: Severity, message: string, fields: LogFields | null | undefined = {}, env: NodeJS.ProcessEnv = process.env): Record<string, unknown> {
+  // A null or undefined fields value never throws: the line is still written.
+  const { severity: _severity, message: _message, ...rest } = fields ?? {};
   const entry: Record<string, unknown> = { severity, message, ...rest };
   const error = rest.error;
   if (error instanceof Error) {
@@ -39,7 +40,7 @@ export function logEntry(severity: Severity, message: string, fields: LogFields 
     if (AT_LEAST_ERROR.has(severity)) {
       entry["@type"] = ERROR_EVENT_TYPE;
       entry.stack_trace = error.stack ?? `${error.name}: ${error.message}`;
-      entry.serviceContext = { service: env.K_SERVICE || env.K_JOB || LOG_APP_LABEL };
+      entry.serviceContext = { service: env.K_SERVICE || env.CLOUD_RUN_JOB || LOG_APP_LABEL };
     }
   }
   const batchId = rest.batchId;
@@ -57,7 +58,7 @@ function serialize(entry: Record<string, unknown>): string {
 }
 
 /** Prints one JSON line: ERROR and above on stderr (console.error), WARNING on console.warn, the rest on console.info. */
-export function log(severity: Severity, message: string, fields: LogFields = {}): void {
+export function log(severity: Severity, message: string, fields: LogFields | null | undefined = {}): void {
   const line = serialize(logEntry(severity, message, fields));
   if (AT_LEAST_ERROR.has(severity)) console.error(line);
   else if (severity === "WARNING") console.warn(line);

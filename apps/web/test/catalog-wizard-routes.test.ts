@@ -193,14 +193,16 @@ describe("catalog wizard authorization and contracts",()=>{
   });
   it("records the plain no-photos failure and returns it from Start",async()=>{
     const id=await newBatch();
-    const logged=vi.spyOn(console,"error").mockImplementation(()=>{});
+    const logged=vi.spyOn(console,"warn").mockImplementation(()=>{}),errors=vi.spyOn(console,"error").mockImplementation(()=>{});
     const [plan]=await (await upload(request("POST",{files:[{name:"EMPTY_1.bmp",relativePath:"EMPTY_1.bmp",size:54,mime:"image/bmp"}]}),ctx(id))).json();
     const stored=(await db.select().from(catalogUploads)).find((u)=>u.id===plan.uploadId)!;const bmp=Buffer.alloc(54);bmp.write("BM");objects.set(stored.gcsUri!,{buf:bmp,mime:"image/bmp"});
     expect((await complete(request("POST"),ctx(id,stored.id))).status).toBe(200);await collectBatch(id);
     const shown=await (await preview(request("GET"),ctx(id))).json();expect(shown.counts.failReason).toContain("No photos were found");
-    // Log contract: the failed-status write logs "batch failed" at ERROR with the reason.
-    const failed=logged.mock.calls.map(([line])=>{try{return JSON.parse(String(line)) as Record<string,unknown>;}catch{return {};}}).filter(l=>l.message==="batch failed");logged.mockRestore();
-    expect(failed).toEqual([expect.objectContaining({severity:"ERROR",batchId:id,reason:shown.counts.failReason,cause:"no_photos"})]);
+    // Log contract: an upload with nothing usable logs "batch failed" at WARNING (no alert, no Error Reporting), never ERROR.
+    const parse=(calls:unknown[][])=>calls.map(([line])=>{try{return JSON.parse(String(line)) as Record<string,unknown>;}catch{return {};}}).filter(l=>l.message==="batch failed");
+    const failed=parse(logged.mock.calls),asErrors=parse(errors.mock.calls);logged.mockRestore();errors.mockRestore();
+    expect(failed).toEqual([expect.objectContaining({severity:"WARNING",batchId:id,reason:shown.counts.failReason,cause:"no_photos"})]);
+    expect(asErrors).toEqual([]);
     const refused=await start(request("POST",{previewAt:shown.previewAt}),ctx(id));expect(refused.status).toBe(400);expect((await refused.json()).error).toContain("No photos were found");
     expect((await (await get(request("GET"),ctx(id))).json()).batch.status).toBe("failed");
   });

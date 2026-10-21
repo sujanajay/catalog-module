@@ -250,3 +250,17 @@ def test_matte_log_without_headers_has_no_batch_and_errors_are_error_severity(se
     [failed] = json_lines(module, caplog, "inference_failed")
     assert failed["severity"] == "ERROR" and failed["batchId"] == "b9"
     assert "do not leak" not in json.dumps(failed)
+
+
+def test_json_formatter_keeps_a_traceback_as_stack_trace(service):
+    _, module, _, _ = service
+    try:
+        raise RuntimeError("library failure")
+    except RuntimeError:
+        record = logging.getLogger("matting").makeRecord("matting", logging.ERROR, __file__, 1, "inference_failed target=%s", ("cpu",), sys.exc_info())
+    line = json.loads(module.JsonFormatter().format(record))
+    assert line["severity"] == "ERROR" and line["message"] == "inference_failed target=cpu"
+    assert line["stack_trace"].startswith("Traceback (most recent call last):")
+    assert "RuntimeError: library failure" in line["stack_trace"]
+    plain = logging.getLogger("matting").makeRecord("matting", logging.INFO, __file__, 1, "sessions_ready", (), None)
+    assert "stack_trace" not in json.loads(module.JsonFormatter().format(plain))

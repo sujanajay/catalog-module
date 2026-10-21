@@ -33,6 +33,9 @@ describe("log", () => {
   });
   it("names the Cloud Run service in serviceContext and keeps a WARNING's Error to its message", () => {
     expect(logEntry("ERROR", "x", { error: new Error("e") }, { K_SERVICE: "catalog-worker" }).serviceContext).toEqual({ service: "catalog-worker" });
+    // A Cloud Run job sets CLOUD_RUN_JOB (not K_SERVICE); outside Cloud Run the app name is used.
+    expect(logEntry("ERROR", "x", { error: new Error("e") }, { CLOUD_RUN_JOB: "catalog-qa-check" }).serviceContext).toEqual({ service: "catalog-qa-check" });
+    expect(logEntry("ERROR", "x", { error: new Error("e") }, {}).serviceContext).toEqual({ service: "catalog" });
     expect(logEntry("WARNING", "chunk failed", { error: new Error("retry me") })).toEqual({ severity: "WARNING", message: "chunk failed", error: "retry me" });
   });
   it("never lets fields replace severity or message, and survives fields JSON cannot write", () => {
@@ -41,6 +44,13 @@ describe("log", () => {
     const loop: Record<string, unknown> = {}; loop.self = loop;
     log("INFO", "chunk delivered", { batchId: "b3", loop, big: 1n });
     expect(lineOf(info)).toMatchObject({ severity: "INFO", message: "chunk delivered", batchId: "b3", [LABELS_KEY]: { app: "catalog", batchId: "b3" } });
+  });
+  it("never throws on null or undefined fields", () => {
+    const info = vi.spyOn(console, "info").mockImplementation(() => undefined);
+    expect(() => log("INFO", "batch started", null)).not.toThrow();
+    expect(() => log("INFO", "batch started", undefined)).not.toThrow();
+    expect(lineOf(info)).toEqual({ severity: "INFO", message: "batch started" });
+    expect(logEntry("WARNING", "w", null)).toEqual({ severity: "WARNING", message: "w" });
   });
   it("reads a severity name in any case", () => {
     expect(toSeverity("warning")).toBe("WARNING");

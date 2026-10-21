@@ -39,6 +39,11 @@ class LogContextFilter(logging.Filter):
 class JsonFormatter(logging.Formatter):
     def format(self, record):
         entry = {"severity": record.levelname, "message": record.getMessage(), **getattr(record, "log_context", {}), **getattr(record, "fields", {})}
+        # A traceback (logger.exception, or a library logging exc_info) is kept for Error Reporting.
+        if record.exc_info:
+            entry["stack_trace"] = self.formatException(record.exc_info)
+        if record.stack_info:
+            entry["stack_info"] = self.formatStack(record.stack_info)
         if entry.get("batchId"):
             entry["logging.googleapis.com/labels"] = {"app": "catalog", "batchId": str(entry["batchId"])}
         return json.dumps(entry, default=str)
@@ -63,6 +68,8 @@ class LogContextMiddleware:
 
 _handler = logging.StreamHandler()
 _handler.setFormatter(JsonFormatter())
+# basicConfig is a no-op when the root logger already has handlers: fine under the Dockerfile's uvicorn CMD, but
+# gunicorn or uvicorn --log-config would configure logging first and these lines would revert to plain text.
 logging.basicConfig(level=logging.INFO, handlers=[_handler])
 logger = logging.getLogger("matting")
 # One filter, also when the module is imported again (the tests do): the newest reads the current LOG_CONTEXT.

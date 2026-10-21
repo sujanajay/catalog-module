@@ -91,7 +91,7 @@ describe("handleSweep (PGlite)", () => {
     expect(JSON.parse(String(warn.mock.calls[0]![0]))).toMatchObject({ severity: "WARNING", batchId: stale, releasedProducts: 3 });
     // Log contract: the swept batch also logs "batch failed" at ERROR (the alert's filter), with its reason.
     expect(error).toHaveBeenCalledTimes(1);
-    expect(JSON.parse(String(error.mock.calls[0]![0]))).toMatchObject({ severity: "ERROR", message: "batch failed", batchId: stale, reason: SWEEP_ERROR, "logging.googleapis.com/labels": { app: "catalog", batchId: stale } });
+    expect(JSON.parse(String(error.mock.calls[0]![0]))).toMatchObject({ severity: "ERROR", message: "batch failed", batchId: stale, reason: SWEEP_ERROR, cause: "swept", "logging.googleapis.com/labels": { app: "catalog", batchId: stale } });
 
     // Idempotent: a second run finds nothing.
     expect(await handleSweep({ db, enqueue:vi.fn(async()=>"task"), releaseLocks, now: () => NOW }, {})).toEqual({ httpStatus: 200, outcome: "swept:0" });

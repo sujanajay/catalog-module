@@ -16,7 +16,7 @@ import { DISPATCH_DEADLINE_SEC, enqueueTask } from "@catalog/core/tasks";
 import { log as structuredLog, toSeverity } from "@catalog/core/log";
 /** One structured JSON line (core/log.ts): a `severity` field picks the severity, INFO when absent. */
 export function catalogLog(message: string, fields: Record<string,unknown> = {}): void {
-  structuredLog(toSeverity(fields.severity) ?? "INFO", message, fields);
+  structuredLog(toSeverity(fields?.severity) ?? "INFO", message, fields);
 }
 export interface CatalogDeps {
   db: Db; storage: typeof storage; matting: MattingClient; enqueue: typeof enqueueTask;

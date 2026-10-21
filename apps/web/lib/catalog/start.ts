@@ -31,7 +31,8 @@ export async function startBatch(id: string, value: unknown, _actor: string) {
     const detail = uploads.map((u) => u.error).filter(Boolean).join(" ");
     const sentence = `No photos were found in what you uploaded.${detail ? ` ${detail}` : " Upload photos and start again."}`;
     await db().update(catalogBatches).set({ status: "failed", counts: { ...batch.counts, failReason: sentence }, updatedAt: new Date() }).where(eq(catalogBatches.id, id));
-    log("ERROR", "batch failed", { batchId: id, brandSlug: batch.brandSlug, reason: sentence, cause: "no_photos" });
+    // An operator upload with nothing usable: WARNING, so it sends no alert and stays out of Error Reporting.
+    log("WARNING", "batch failed", { batchId: id, brandSlug: batch.brandSlug, reason: sentence, cause: "no_photos" });
     throw badRequest(sentence);
   }
   const preview = await buildPreview(db(), id, { storage });

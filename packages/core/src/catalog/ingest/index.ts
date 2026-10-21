@@ -788,7 +788,8 @@ async function finishBatch(db: Db, deps: IngestDeps, batchId: string): Promise<{
     const uploadErrors = uploads.filter((u) => u.status === "failed" && u.error).map((u) => u.error!);
     const failReason = noPhotosReason(grouped.rejected, uploadErrors);
     await patchCounts(db, batch.id, { ...counts, failReason }, { status: "failed" });
-    log("ERROR", "batch failed", { batchId: batch.id, brandSlug: batch.brandSlug, reason: failReason, cause: "no_photos" });
+    // An operator upload with nothing usable: WARNING, so it sends no alert and stays out of Error Reporting.
+    log("WARNING", "batch failed", { batchId: batch.id, brandSlug: batch.brandSlug, reason: failReason, cause: "no_photos" });
     return { progress: { done: 0, total: 0, phase: "done" }, outcome: "failed: no photos" };
   }
   await patchCounts(db, batch.id, counts, { status: "draft" });
