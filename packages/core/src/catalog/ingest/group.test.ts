@@ -239,11 +239,10 @@ describe("warningSentences", () => {
   const unreadable = new Map([[bmp, unsupportedMessage("BAD_1.bmp", "BMP")], [corrupt, "CRP_1.jpg is corrupt (cannot be decoded)."]]);
   const g = groupItems(items, opts(), unreadable);
   const list: ProductListRow[] = ["BIG", "ABC", "HEICOK", "dup", "MISS1", "MISS-2", "miss1", "BAD", "CRP"].map((identifier) => ({ identifier, ean: null, raw: {} }));
-  const dims: ItemDimensions = new Map([[big, { width: 2000, height: 3000 }], [small, { width: 800, height: 1200 }]]);
 
   it("lists every pair with its counts in the spec's order", () => {
     g.warnings.push("2 identifiers appear more than once in links.xlsx; the first row of each is used.");
-    expect(warningSentences(g, list, ["noon", "styli"], { brandName: "Anta", dimensions: dims })).toEqual([
+    expect(warningSentences(g, list, ["noon", "styli"], { brandName: "Anta" })).toEqual([
       {
         headline: "2 products have no photos.",
         detail: 'They are in your product list but no files matched: MISS1, MISS-2. They will appear in the sheet as "missing images".',
@@ -253,7 +252,6 @@ describe("warningSentences", () => {
         headline: "2 files could not be read.",
         detail: "BAD_1.bmp: is a BMP file; CRP_1.jpg: is corrupt and could not be decoded. Fix them and use them in a new batch, or continue without them.",
       },
-      { headline: "1 photos are smaller than Styli needs (under 1482 px).", detail: "Styli will skip them and note it in the sheet, as agreed with Styli." },
       { headline: "1 products have two files for the same shot number: DUP.", detail: "They are left out until one file is renamed; see the grouping table." },
       {
         headline: "Your upload has 2 top-level folders (Anta, Campus).",
@@ -263,16 +261,12 @@ describe("warningSentences", () => {
     ]);
     g.warnings.pop();
   });
-  it("judges the Styli size after the x2 upscaler: an 800x1200 photo passes, the floor is 741 px", () => {
-    const heads = (upscaleFactor: number) => warningSentences(g, list, ["styli"], { brandName: "Anta", dimensions: dims, upscaleFactor }).map((w) => w.headline);
-    expect(heads(1)).toContain("1 photos are smaller than Styli needs (under 1482 px).");
-    expect(heads(2).some((h) => h.includes("smaller than Styli needs"))).toBe(false);
-    const tiny = new Map([...dims, [small, { width: 400, height: 600 }]]);
-    expect(warningSentences(g, list, ["styli"], { dimensions: tiny, upscaleFactor: 2 }).map((w) => w.headline)).toContain("1 photos are smaller than Styli needs (under 741 px).");
+  it("never warns that a photo is too small for Styli: no enlargement cap (owner decision 2026-10-22)", () => {
+    expect(warningSentences(g, list, ["styli"], { brandName: "Anta" }).some((w) => /Styli/.test(w.headline + w.detail))).toBe(false);
   });
 
-  it("leaves out the Styli pair without Styli and the list pairs without a list; one folder gives no folder warning", () => {
-    const heads = warningSentences(g, null, ["noon"], { dimensions: dims }).map((w) => w.headline);
+  it("leaves out the list pairs without a list; one folder gives no folder warning", () => {
+    const heads = warningSentences(g, null, ["noon"]).map((w) => w.headline);
     expect(heads).toEqual([
       "2 files could not be read.",
       "1 products have two files for the same shot number: DUP.",

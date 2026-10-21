@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { checkAttention, flagRows } from "./attention";
-import { CHART_SKIP_NOTE, checkCompleteness, expectedOutcome, STYLI_SKIP_NOTE, type CompletenessInput, type OutputRow } from "./completeness";
+import { CHART_SKIP_NOTE, checkCompleteness, STYLI_SKIP_NOTE, type CompletenessInput, type OutputRow } from "./completeness";
 import { checkIdentical, checkOverwrite, type LiveRow } from "./overwrite";
 import { buildReport, reportHtml, summaryLine } from "./report";
 import { bakeoffPolicy, policyRowsFor, rankModels, scoreModels, winnersByScope, type MatteTrial } from "./matte-bakeoff";
@@ -16,28 +16,31 @@ function completenessWorld() {
   const sources = [{ identifier: "A", n: 1, width: 800, height: 800 }, { identifier: "A", n: 2, width: 800, height: 800 }, { identifier: "A", n: 3, width: 2000, height: 3000 }];
   const outputs: OutputRow[] = [], publicHeads = new Map(), stagingHeads = new Map(), sheet: CompletenessInput["sheet"] = [];
   for (const s of sources) for (const ch of channels) {
-    const skip = expectedOutcome(s, ch) === "skip", url = `https://x/${s.identifier}/${ch}/${s.identifier}_${s.n}.jpg`;
-    outputs.push({ identifier: s.identifier, n: s.n, channel: ch, status: skip ? "skipped" : "verified", isLive: !skip, reason: skip ? STYLI_SKIP_NOTE : null, generation: skip ? null : 7, bytes: skip ? null : 100, crc32c: skip ? null : "c", publicUrl: url, stagingUri: skip ? null : `gs://a/${ch}/${s.n}` });
-    if (!skip) { publicHeads.set(url, { exists: true, size: 100, generation: "7", contentType: "image/jpeg" }); stagingHeads.set(`gs://a/${ch}/${s.n}`, { exists: true, size: 100, generation: "1", contentType: "image/jpeg" }); }
-    sheet.push({ identifier: s.identifier, channel: ch, n: s.n, url: skip ? null : url });
+    const url = `https://x/${s.identifier}/${ch}/${s.identifier}_${s.n}.jpg`;
+    outputs.push({ identifier: s.identifier, n: s.n, channel: ch, status: "verified", isLive: true, reason: null, generation: 7, bytes: 100, crc32c: "c", publicUrl: url, stagingUri: `gs://a/${ch}/${s.n}` });
+    publicHeads.set(url, { exists: true, size: 100, generation: "7", contentType: "image/jpeg" }); stagingHeads.set(`gs://a/${ch}/${s.n}`, { exists: true, size: 100, generation: "1", contentType: "image/jpeg" });
+    sheet.push({ identifier: s.identifier, channel: ch, n: s.n, url });
   }
-  const input: CompletenessInput = { channels, sources, outputs, publicHeads, stagingHeads, sheet, sheetNotes: new Map([["A", `Styli img 1: ${STYLI_SKIP_NOTE}; Styli img 2: ${STYLI_SKIP_NOTE}`]]), counts: { outputs: 9, verified: 7, skipped: 2, recheckOk: 7, recheckTotal: 7 } };
+  const input: CompletenessInput = { channels, sources, outputs, publicHeads, stagingHeads, sheet, sheetNotes: new Map([["A", ""]]), counts: { outputs: 9, verified: 9, skipped: 0, recheckOk: 9, recheckTotal: 9 } };
   return input;
 }
 
 describe("completeness", () => {
-  it("expects a Styli skip under 1482 px without the upscaler and under 741 px with it", () => {
-    const s = (height: number) => ({ identifier: "A", n: 1, width: 800, height });
-    expect(expectedOutcome(s(1200), "styli", 1)).toBe("skip");
-    expect(expectedOutcome(s(1200), "styli", 2)).toBe("output");
-    expect(expectedOutcome(s(600), "styli", 2)).toBe("skip");
-    expect(expectedOutcome(s(600), "noon", 2)).toBe("output");
-  });
-  it("expects one live output per source and channel, Styli skips only under the minimum, and every Amazon shot", () => {
+  it("expects one live output per source and channel, Styli included for 800 px photos, and every Amazon shot", () => {
     const results = checkCompleteness(completenessWorld());
     expect(failed(results)).toEqual([]);
     expect(results.filter(r => r.id === "completeness.amazon_shot")).toHaveLength(3);
-    expect(results.filter(r => r.id === "completeness.skip_allowed" && r.measured === `skipped: ${STYLI_SKIP_NOTE}`)).toHaveLength(2);
+    expect(results.filter(r => r.id === "completeness.live" && r.subject.channel === "styli")).toHaveLength(3);
+  });
+  it("fails a Styli skip for the photo's size: no channel has an enlargement cap (owner decision 2026-10-22)", () => {
+    const w = completenessWorld(), styli = w.outputs.find(o => o.channel === "styli" && o.n === 1)!;
+    Object.assign(styli, { status: "skipped", isLive: false, reason: STYLI_SKIP_NOTE, generation: null, bytes: null, crc32c: null });
+    w.sheet.find(c => c.channel === "styli" && c.n === 1)!.url = null;
+    w.sheetNotes.set("A", `Styli img 1: ${STYLI_SKIP_NOTE}`);
+    Object.assign(w.counts, { verified: 8, skipped: 1, recheckOk: 8, recheckTotal: 8 });
+    const ids = failed(checkCompleteness(w));
+    expect(ids).toContain("completeness.skip_allowed");
+    expect(ids).toContain("completeness.counts_verified");
   });
   it("fails on a missing output, a wrong public object, an extra row and count mismatches", () => {
     const w = completenessWorld();
@@ -54,7 +57,7 @@ describe("completeness", () => {
   it("fails a skip the spec does not allow and a sheet cell without its note", () => {
     const w = completenessWorld();
     w.outputs.find(o => o.channel === "noon" && o.n === 1)!.status = "skipped";
-    w.sheetNotes.set("A", "");
+    w.sheet.find(c => c.channel === "noon" && c.n === 1)!.url = null;
     const ids = failed(checkCompleteness(w));
     expect(ids).toContain("completeness.skip_allowed");
     expect(ids).toContain("completeness.sheet_cell");
@@ -64,15 +67,14 @@ describe("completeness", () => {
     for (const o of w.outputs.filter(row => row.n === 3)) Object.assign(o, { status: "needs_attention", isLive: false, generation: null, bytes: null, crc32c: null });
     for (const cell of w.sheet.filter(c => c.n === 3)) cell.url = null;
     // A hold is per product: the siblings of the expected hold are staged as well, and every shot leaves the counts.
-    for (const o of w.outputs.filter(row => row.n !== 3 && row.status !== "skipped")) Object.assign(o, { status: "staged", isLive: false, generation: null, bytes: null, crc32c: null });
+    for (const o of w.outputs.filter(row => row.n !== 3)) Object.assign(o, { status: "staged", isLive: false, generation: null, bytes: null, crc32c: null });
     for (const cell of w.sheet) cell.url = null;
-    Object.assign(w.counts, { verified: 0, skipped: 2, recheckOk: 0, recheckTotal: 0 });
+    Object.assign(w.counts, { verified: 0, skipped: 0, recheckOk: 0, recheckTotal: 0 });
     w.heldExpected = new Set(["A|3"]);
     const results = checkCompleteness(w);
     expect(failed(results)).toEqual([]);
-    // The Styli rows under the minimum stay skips (the pipeline counts them as skipped), so 7 holds and 2 skips.
-    expect(results.filter(r => r.id === "completeness.held_unpublished")).toHaveLength(7);
-    expect(results.filter(r => r.id === "completeness.skip_allowed" && r.subject.channel === "styli")).toHaveLength(2);
+    // Every row of the product is held, Styli included (no Styli size skips): 9 holds.
+    expect(results.filter(r => r.id === "completeness.held_unpublished")).toHaveLength(9);
     expect(results.some(r => r.id === "completeness.live")).toBe(false);
     expect(results.find(r => r.id === "completeness.held_unpublished" && r.subject.n === 1)?.detail).toContain("a sibling of the expected hold on image 3");
     expect(results.find(r => r.id === "completeness.held_unpublished" && r.subject.n === 3)?.detail).toContain("(expected hold)");
@@ -93,7 +95,7 @@ describe("completeness", () => {
     expect(failed(results)).toEqual([]);
     expect(results.filter(r => r.id === "completeness.held_unpublished" && r.subject.identifier === "B")).toHaveLength(6);
     expect(results.some(r => r.id === "completeness.live" && r.subject.identifier === "B")).toBe(false);
-    expect(results.find(r => r.id === "completeness.counts_verified")?.threshold).toBe("7 verified, 2 skipped");
+    expect(results.find(r => r.id === "completeness.counts_verified")?.threshold).toBe("9 verified, 0 skipped");
     // A sibling that went live while its product is held is a fault, as the held shot itself would be.
     const live = w.outputs.find(o => o.identifier === "B" && o.n === 1 && o.channel === "noon")!;
     Object.assign(live, { status: "verified", isLive: true, generation: 7, bytes: 100, crc32c: "c" });

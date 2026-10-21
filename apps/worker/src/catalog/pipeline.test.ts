@@ -122,15 +122,14 @@ it("a redelivered shot that ingest links to the previous source stages under its
   expect(output!.stagingUri).toBe(storage.toGsUri("assets",stagingPath(batchPrefix("anta",next.batch.id,true),s.product.pathKey,"noon",1)));
   expect(w.copy.mock.calls.at(-1)![0]).toBe(output!.stagingUri);
 },60_000);
-it("pre-skips an 800 px Styli photo at the matte stage without the upscaler and plans it with the upscaler on",async()=>{
- for (const [model,skipped] of [["",true],["swinir-x2",false]] as const) {
+it("never pre-skips an 800 px Styli photo at the matte stage, with or without the upscaler (no enlargement cap)",async()=>{
+ for (const model of ["","swinir-x2"]) {
   vi.stubEnv("UPSCALE_MODEL",model);
   try {
    const w=world(),s=await seed(w,`styli-floor-${model || "off"}`,{channels:["styli"]});
    await handleChunkTask(w.deps,{chunkId:s.chunk.id});
    const [output]=await db.select().from(catalogOutputs).where(eq(catalogOutputs.batchId,s.batch.id));
-   if (skipped) { expect(output!.status).toBe("skipped"); expect(output!.reason).toBe("Skipped for Styli: the photo is smaller than Styli needs."); }
-   else { expect(output!.status).not.toBe("skipped"); expect(output!.reason).toBeNull(); }
+   expect(output!.status).not.toBe("skipped"); expect(output!.reason).toBeNull();
   } finally { vi.unstubAllEnvs(); }
  }
 },60_000);

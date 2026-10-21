@@ -35,7 +35,7 @@ export interface ChannelSpec {
    * True where every output is exactly the target canvas: styli and centrepoint (min equals target)
    * and trendyol, whose accepted files are 1200x1800 (SPEC.md channel table). A fixed canvas scales
    * the product to fit even beyond MAX_UPSCALE; `low_resolution` then stays an information flag
-   * (Styli alone skips such shots).
+   * on every channel, Styli included (owner decision 2026-10-22: no Styli enlargement cap).
    */
   fixedCanvas: boolean;
   /** True for styli. */
@@ -203,21 +203,15 @@ export const JPEG_QUALITY_START = 90;
 export const JPEG_QUALITY_MIN = 70;
 export const JPEG_QUALITY_STEP = 5;
 export const MAX_OUTPUT_BYTES = 2_000_000;
+/**
+ * The enlargement a variable canvas shrinks to stay under, and above which an output carries the `low_resolution`
+ * information flag. Never a skip: no channel, Styli included, leaves a photo out because it needs more enlargement
+ * (owner decision 2026-10-22).
+ */
 export const MAX_UPSCALE = 1.5;
 export const DETAIL_SHOT_BBOX_FRACTION = 0.85;
+/** The one size floor on every channel: a source under this long side is flagged `small_source` and held for a person. */
 export const MIN_SOURCE_LONG_SIDE_PX = 500;
-/** ceil((3123 - 450 - 450) / 1.5): the Styli floor without the upscaler; use styliMinSourceHeightPx. */
-export const STYLI_MIN_SOURCE_HEIGHT_PX = 1482;
-/**
- * The smallest source height Styli takes (the agreement judges the size after the upscaler, owner decision
- * 2026-10-21): 1482 px without the upscaler (factor 1), 741 px with the x2 upscaler (factor 2). One rule for the
- * wizard warning, step 4's count and cost, the worker's Styli rows and the evals.
- */
-export function styliMinSourceHeightPx(upscaleFactor: number): number {
-  return Math.ceil(STYLI_MIN_SOURCE_HEIGHT_PX / Math.max(1, upscaleFactor));
-}
-/** Agreement with Styli; always applied (not a batch option). */
-export const STYLI_SKIP_LOW_RESOLUTION = true;
 /** Bumped on any rule change; part of render_key (06). */
 export const CHANNEL_RULES_VERSION = "10";
 

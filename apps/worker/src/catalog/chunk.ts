@@ -2,11 +2,10 @@ import { randomUUID } from "node:crypto";
 import sharp from "sharp";
 import { and, eq, inArray, isNull, or, sql } from "drizzle-orm";
 import { catalogBatches, catalogChunks, catalogOutputs, catalogProducts, catalogSourceImages } from "@catalog/core/db/schema";
-import { CHANNELS, styliMinSourceHeightPx, STYLI_SKIP_LOW_RESOLUTION } from "@catalog/core/catalog/channels";
+import { CHANNELS } from "@catalog/core/catalog/channels";
 import { batchPrefix, derivedPath, publicObjectPath, publicUrl, stagingPath } from "@catalog/core/catalog/naming";
 import { planProduct, shotGeometry, trimRules, UnsupportedSourceError, type Matte } from "@catalog/core/catalog/render";
 import { renderKey, renderKeys, rerenderedKey } from "@catalog/core/catalog/pipeline/publish";
-import { upscaleFactorFromEnv } from "@catalog/core/catalog/upscale";
 import { catalogLlmDeps, CatalogQaCapError, runQaStage } from "./qa-stage";
 import { checkCatalogCaps } from "@catalog/core/catalog/qa/caps";
 import { shadowSynthesisAllowed } from "@catalog/core/catalog/qa/policy";
@@ -146,8 +145,8 @@ export async function handleChunkTask(deps: CatalogDeps, body: Record<string,unk
             if (live.some(o=>o.channel===channel && o.n===source.n && keys.includes(o.renderKey))) continue;
             const [exists] = await deps.db.select({id:catalogOutputs.id}).from(catalogOutputs).where(and(eq(catalogOutputs.batchId,batch.id),eq(catalogOutputs.sourceImageId,source.id),eq(catalogOutputs.channel,channel)));
             if (exists) continue;
-            const path = publicObjectPath(batch.brandSlug,product.pathKey,channel,source.n,batch.isTest), chart = source.flags.includes("chart_image"), skip = !chart && channel === "styli" && STYLI_SKIP_LOW_RESOLUTION && (source.height ?? Infinity) < styliMinSourceHeightPx(upscaleFactorFromEnv());
-            await underClaim(async tx=>tx.insert(catalogOutputs).values({batchId:batch.id,productId,sourceImageId:source.id,channel,n:source.n,canvasW:0,canvasH:0,scale:0,placedX:0,placedY:0,renderKey:key,objectPath:path,publicUrl:publicUrl(deps.storage.getPublicBucketName(),path),status:skip || chart ? "skipped":"pending",flags:chart ? ["chart_image"]:skip ? ["low_resolution"]:source.flags.filter(flag=>flag==="type_unknown" || flag==="transparent"),reason:chart ? flagReason("chart_image"):skip ? "Skipped for Styli: the photo is smaller than Styli needs.":null}));
+            const path = publicObjectPath(batch.brandSlug,product.pathKey,channel,source.n,batch.isTest), chart = source.flags.includes("chart_image");
+            await underClaim(async tx=>tx.insert(catalogOutputs).values({batchId:batch.id,productId,sourceImageId:source.id,channel,n:source.n,canvasW:0,canvasH:0,scale:0,placedX:0,placedY:0,renderKey:key,objectPath:path,publicUrl:publicUrl(deps.storage.getPublicBucketName(),path),status:chart ? "skipped":"pending",flags:chart ? ["chart_image"]:source.flags.filter(flag=>flag==="type_unknown" || flag==="transparent"),reason:chart ? flagReason("chart_image"):null}));
           }
           const pending = await deps.db.select().from(catalogOutputs).where(and(eq(catalogOutputs.sourceImageId,source.id),eq(catalogOutputs.batchId,batch.id),eq(catalogOutputs.status,"pending")));
           if (!pending.length || source.matteUri) continue;
