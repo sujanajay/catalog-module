@@ -243,7 +243,7 @@ yourself; "Use as is" keeps it.
 
 ## 18. What changed on 2026-10-21
 
-The live site was updated four times on 2026-10-21. What you may notice:
+The live site was updated five times on 2026-10-21. What you may notice:
 
 - Enlarged pictures are sharper. When a small photo has to be made bigger for a marketplace, the
   edges of the product are now sharpened as well, also on photos whose background was removed.
