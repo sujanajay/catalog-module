@@ -14,6 +14,7 @@ import { readSheetTable } from "@catalog/core/catalog/ingest/links-sheet";
 import { buildReport } from "@catalog/core/catalog/pipeline/report";
 import { DEFAULT_POLICIES } from "@catalog/core/catalog/qa/policy";
 import { batchDetails, batchExportUrl, batchSheet, exportBrand } from "../lib/catalog/exports";
+import { anotherBatchProcessing } from "../lib/catalog/batches";
 import { POST as aliasPost } from "../app/api/catalog/products/[id]/aliases/route";
 import { DELETE as productDelete } from "../app/api/catalog/products/[id]/route";
 import { POST as brandExport } from "../app/api/catalog/brands/[slug]/export/route";
@@ -72,6 +73,23 @@ it("shows live marketplaces not refreshed before this batch has any finalized re
  const [old]=await db.insert(catalogBatches).values({name:"Earlier Amazon delivery",brandSlug:"uspa",brandName:"USPA",channels:["amazon"],createdBy:actor}).returning();
  await output({batchId:old!.id,channel:"amazon",objectPath:"catalog/uspa/ABC-123/amazon/ABC-123_1.jpg",publishedAt:new Date("2026-10-18T12:00:00Z")});
  const details=await batchDetails(batchId,db);expect(details.batch.reportUri).toBeNull();expect(details.notRefreshedChannels).toEqual([{channel:"amazon",lastBatchId:old!.id,lastBatchName:"Earlier Amazon delivery"}]);
+});
+it("counts only Styli skips for being too small, not removed or chart skips, for the Ready line",async()=>{
+ await output({channel:"styli",status:"skipped",isLive:false,reason:"Skipped for Styli: the photo is smaller than Styli needs.",objectPath:"catalog/uspa/ABC-123/styli/ABC-123_1.jpg"});
+ await output({channel:"styli",n:2,status:"skipped",isLive:false,reason:"Removed by ops@opptra.com",objectPath:"catalog/uspa/ABC-123/styli/ABC-123_2.jpg"});
+ await output({channel:"noon",n:3,status:"skipped",isLive:false,reason:"Skipped for Styli: the photo is smaller than Styli needs.",objectPath:"catalog/uspa/ABC-123/noon/ABC-123_3.jpg"});
+ await output({channel:"styli",n:4,status:"skipped",isLive:false,reason:"Upscaled. Skipped for Styli: the photo is smaller than Styli needs.",objectPath:"catalog/uspa/ABC-123/styli/ABC-123_4.jpg"});
+ expect((await batchDetails(batchId,db)).styliSkipped).toBe(2);
+});
+it("tells step 4 another batch is processing only for a different batch that moved in the last hour",async()=>{
+ const now=new Date("2026-10-21T14:00:00Z");
+ expect(await anotherBatchProcessing(batchId,now)).toBe(false);
+ await db.update(catalogBatches).set({status:"rendering",updatedAt:new Date(+now-5*60_000)}).where(eq(catalogBatches.id,batchId));
+ expect(await anotherBatchProcessing(batchId,now)).toBe(false);
+ const [other]=await db.insert(catalogBatches).values({name:"Second delivery",brandSlug:"uspa",brandName:"USPA",channels:["noon"],createdBy:actor,status:"matting",updatedAt:new Date(+now-2*60*60_000)}).returning();
+ expect(await anotherBatchProcessing(batchId,now)).toBe(false);
+ await db.update(catalogBatches).set({updatedAt:new Date(+now-10*60_000)}).where(eq(catalogBatches.id,other!.id));
+ expect(await anotherBatchProcessing(batchId,now)).toBe(true);
 });
 it("exports only the selected brand products and every live channel through existing writers",async()=>{
  await output();const uploadBuffer=vi.fn(async(path:string)=>`gs://private/${path}`);const signedUrl=vi.fn(async(uri:string)=>`signed:${uri}`);
