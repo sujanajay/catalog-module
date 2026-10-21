@@ -102,7 +102,7 @@ look wrong, the labelled billing page is the check.
 
 ## No spending warnings (owner decision, 2026-10-21)
 No monthly budget alert, no "batch getting expensive" email or banner, no budget of any kind. Cost
-is for seeing, not for alerting: it is shown on the Ops page only. The existing daily cap
+is for seeing, not for alerting: the breakdown is on the Ops page and the batch page keeps its cost line. The existing daily cap
 (`DAILY_SPEND_CAP_USD`) and per-batch cap stay as they are.
 
 ## Rollback

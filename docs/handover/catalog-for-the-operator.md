@@ -197,13 +197,13 @@ product the agency charged. Products that did not change are not counted.
 
 When something goes wrong, the tool sends an email by itself. The emails go to sujan@opptra.com,
 so Sujan often knows before you do. If he forwards one to you, or you see one, this section says
-what it means. Each email closes by itself about an hour after things are fine again, so an old
-email does not mean the problem is still there.
+what it means. About an hour after things are fine again a second email says the problem is
+resolved, so an old email does not mean the problem is still there.
 
 Two places help you look:
 
-- The Ops page, `/catalog/ops` (for admins only): the batches running now, failures in the last 24
-  hours in plain words, and what each batch and brand cost.
+- The Ops page, `/catalog/ops`, which Sujan or another admin can open: the batches running now,
+  failures in the last 24 hours in plain words, and what each batch and brand cost.
 - The "Open logs" link on the batch's Details tab: it opens Google's log page already filtered to
   that one batch, so Sujan can see its story in order. Send him that link with the batch number
   when you call.
@@ -211,13 +211,13 @@ Two places help you look:
 The nine emails:
 
 1. **A chunk gave up.** The tool works on a batch in small groups of products, called chunks. One
-   group failed five times in a row and the tool stopped trying it. On the batch page those
-   products' pictures show "Processing stopped after repeated errors"; the rest of the batch
+   group failed five times in a row and the tool stopped trying it. On the batch's Details tab
+   those photos are listed with "Processing stopped after repeated errors"; the rest of the batch
    carries on. First: wait for the batch to finish, then upload the same products again in a new
    batch (a re-upload keeps the links, section 10). Call Sujan if the same products fail again.
 2. **A batch failed or was swept.** A batch stopped for good, or made no progress for two hours and
-   was stopped by the tool's own clean-up. The batch page shows the batch as failed with a reason,
-   such as "No progress for 2 hours. Start the batch again." First: read the reason and start the
+   was stopped by the tool's own clean-up. The batch page shows "Could not start" and the reason,
+   for example "No progress for 2 hours. Start the batch again." First: read the reason and start the
    batch again once. Call Sujan if it fails a second time.
 3. **Quality checks unavailable.** The outside quality checker did not answer for many photos in a
    few minutes. Those photos wait in "Needs attention" with "The quality check could not read this
@@ -242,7 +242,7 @@ The nine emails:
 8. **Database connections high.** The database the tool uses is close to its limit of open
    connections. Pages may load slowly or show an error. First: do not start new batches, and ask
    others not to use the site for a while. Call Sujan if pages still fail after 15 minutes.
-9. **Error in the logs.** Something went wrong that none of the other eight emails covers. Often
+9. **Error in the logs.** Something went wrong that none of the first five emails covers. Often
    you see nothing on the batch page at all. First: carry on normally and look out for anything
    odd on your batches. Call Sujan if a batch looks wrong or stops; he reads the details in the
    logs.

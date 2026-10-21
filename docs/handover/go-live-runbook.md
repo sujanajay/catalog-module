@@ -193,9 +193,12 @@ the details are in `docs/solutions/monitoring.md`.
 
 - **Undo the monitoring release.** If the release that added monitoring misbehaves, send all
   traffic back to the previous revision (the last one before that release) without rebuilding.
-  Run in any folder, after `$env:CLOUDSDK_CORE_PROJECT = "image-links-agent"` (replace
-  `<previous>` with the revision name, for example `catalog-worker-00024-mqq` and
-  `catalog-web-00023-pmb` for the release of 2026-10-21):
+  This moves traffic only and is faster than the full Rollback below; use Rollback when the
+  previous images must be redeployed. Run in any folder, after
+  `$env:CLOUDSDK_CORE_PROJECT = "image-links-agent"` (replace `<previous>` with the revision name:
+  `catalog-worker-00024-mqq` and `catalog-web-00023-pmb` are the revisions that were live before
+  the monitoring release, from the deploy of 2026-10-21; confirm with
+  `gcloud run revisions list --service catalog-worker --region asia-south1`):
 
   ```powershell
   gcloud run services update-traffic catalog-worker --to-revisions=<previous>=100 --region=asia-south1
