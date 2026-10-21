@@ -483,6 +483,12 @@ time, before anything is rendered.
   finds (a light page, at least 60% plain, 60 or more dark glyph marks on 6 or more lines, nothing
   larger than 6% of the frame), is left out on every channel with the `chart_image` note before any
   matting. A sweep of 5,362 brand photos found the 13 Penti size charts and no product photo.
+  A chart with a tinted header band or tinted table cells (the Penti bra chart, where the band and
+  the grid lines make one mark over 6%) is read a second time with each flat tinted rectangle in a
+  large mark (one of its 3 most common smooth colours, at least half of its box filled, straight
+  sides, at least 10% of the frame wide and 2% high) as a second page colour; it counts only when
+  the tables holding those rectangles carry 60 glyphs on 6 lines themselves and every rule above
+  still passes.
 
 ### Compliance (`compliance.ts`)
 
