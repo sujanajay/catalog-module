@@ -1,6 +1,6 @@
 import sharp from "sharp";
 import { callLlmJson, imageParts, textPart, LLM_MAX_TOKENS, LlmJsonError, LlmResponseError, type LlmMessage } from "../../llm/llm";
-import { OpenRouterError } from "../../llm/openrouter";
+import { OpenRouterError, type BackoffBudget, type RetryPolicy } from "../../llm/openrouter";
 import type { OpenRouterDeps } from "../../llm/types";
 import { sumUsage } from "../../llm/util";
 import { qaCallCost } from "../cost";
@@ -39,7 +39,29 @@ export function scoreOf(scores: Partial<Record<string, unknown>>, d: QaDimension
   const n = Number(value);
   return Number.isFinite(n) ? n : 0;
 }
-export interface CatalogLlmDeps extends OpenRouterDeps { log?: (message: string, fields?: Record<string, unknown>) => void }
+export interface CatalogLlmDeps extends OpenRouterDeps {
+  log?: (message: string, fields?: Record<string, unknown>) => void;
+  /**
+   * Back-off allowance shared by every judge call that gets these deps (the worker passes one per QA
+   * delivery), on top of each judging's own `JUDGE_BACKOFF_BUDGET_MS`.
+   */
+  backoff?: BackoffBudget;
+  /** Injectable waits for the judge back-off (tests). */
+  sleep?: (ms: number) => Promise<void>;
+  random?: () => number;
+}
+
+/**
+ * A 429 ("temporarily rate-limited upstream") or a 5xx from the judge comes in bursts: wait about
+ * 5, 15 and 45 s (+/- 20%), or the Retry-After header, before giving up (07 4.2). One judging (the
+ * first judge, the fallback and the second opinion together) waits at most `JUDGE_BACKOFF_BUDGET_MS`.
+ */
+export const JUDGE_BACKOFF_DELAYS_MS = [5_000, 15_000, 45_000] as const;
+export const JUDGE_BACKOFF_JITTER = 0.2;
+export const JUDGE_BACKOFF_BUDGET_MS = 120_000;
+/** Failure kinds that a burst explains, so the other judge model is asked before qa_unavailable. */
+const TRANSIENT = new Set(["rate_limit", "server"]);
+export interface JudgeFailure { status: number | null; kind: string }
 
 /**
  * Per-dimension pass lines from the resolved policy (no mean). Output dimensions use the policy
@@ -80,7 +102,7 @@ export function verdictFor(scores: QaScores, threshold = QA_DEFAULT_THRESHOLD, f
 }
 
 /** Keep request accounting even when the JSON helper exhausts its retry and throws. */
-export async function callCatalogJson<T>(messages: LlmMessage[], validate: (obj: Record<string, unknown>) => T, model: string, deps: CatalogLlmDeps) {
+export async function callCatalogJson<T>(messages: LlmMessage[], validate: (obj: Record<string, unknown>) => T, model: string, deps: CatalogLlmDeps): Promise<{value: T | null; usage: Record<string, unknown>; costUsd: number; calls: number; failure: JudgeFailure | null}> {
   const usages: Record<string, unknown>[] = [];
   let calls = 0, costUsd = 0;
   const request = deps.fetch ?? globalThis.fetch;
@@ -98,7 +120,7 @@ export async function callCatalogJson<T>(messages: LlmMessage[], validate: (obj:
     }
     return response;
   };
-  let value: T | null;
+  let value: T | null, failure: JudgeFailure | null = null;
   try {
     value = (await callLlmJson(messages, validate, {temperature:0,maxTokens:LLM_MAX_TOKENS,model}, {...deps,fetch:tracked})).value;
   } catch (error) {
@@ -106,11 +128,12 @@ export async function callCatalogJson<T>(messages: LlmMessage[], validate: (obj:
     // Warn before the caller maps this to qa_unavailable, so a bad key, an auth failure or a timeout
     // is visible in the logs. The OpenRouter message is already redacted; prompts are never logged.
     const status = error instanceof OpenRouterError ? error.status : null;
-    const kind = error instanceof OpenRouterError ? (status === 401 || status === 403 ? "auth" : status === 0 ? (/API_KEY is not set/.test(error.message) ? "no_key" : "no_response") : "http") : error instanceof LlmJsonError ? "invalid_json" : "empty_reply";
+    const kind = error instanceof OpenRouterError ? (status === 401 || status === 403 ? "auth" : status === 0 ? (/API_KEY is not set/.test(error.message) ? "no_key" : "no_response") : status === 429 ? "rate_limit" : (status ?? 0) >= 500 ? "server" : "http") : error instanceof LlmJsonError ? "invalid_json" : "empty_reply";
     (deps.log ?? console.warn)("catalog_qa: quality check unavailable", {severity:"WARNING", model, status, kind, calls, error:error.message.slice(0, 300)});
     value = null;
+    failure = {status, kind};
   }
-  return {value, usage:sumUsage(usages), costUsd, calls};
+  return {value, usage:sumUsage(usages), costUsd, calls, failure};
 }
 
 /** Resize only the judge's transmitted copy, leaving source and staged bytes untouched. */
@@ -173,6 +196,11 @@ function readOpinion(value: Record<string, unknown>, model: string, hasReference
   // belongs to the listing, so it is never a different item either.
   return {model, view, wrongItem: hasReference && view !== CHART_VIEW && value.wrong_item === true, isCollage: value.is_collage === true, scores, evidence, missing};
 }
+/** The judge's back-off for one model: waits come off this judging's budget and the shared one. */
+function judgeRetry(model: string, budgets: BackoffBudget[], deps: CatalogLlmDeps, delaysMs: readonly number[] = JUDGE_BACKOFF_DELAYS_MS): RetryPolicy {
+  return {delaysMs, jitter:JUDGE_BACKOFF_JITTER, budgets, ...(deps.sleep ? {sleep:deps.sleep} : {}), ...(deps.random ? {random:deps.random} : {}),
+    onRetry: ({attempt, status, waitMs, retryAfterMs}) => (deps.log ?? console.warn)("catalog_qa: judge back-off", {severity:"WARNING", model, attempt, status, kind:status === 429 ? "rate_limit" : "server", waitMs, retryAfterMs, budgetLeftMs:Math.min(...budgets.map(b => b.remainingMs))})};
+}
 async function askJudge(input: JudgeInput, model: string, deps: CatalogLlmDeps) {
   const content = [textPart("Image 1: the source photo"), ...imageParts([await qaImage(input.original)]), textPart(`Image 2: the output we rendered from image 1 for ${CHANNELS[input.channel].label}`), ...imageParts([await qaImage(input.output)])];
   if (input.n > 1 && input.shotOne) content.push(textPart(`Image 3: photo 1 of the same product id (${input.identifier}), for reference only`), ...imageParts([await qaImage(input.shotOne)]));
@@ -195,17 +223,31 @@ const allPass = (): Record<QaDimension, number> => Object.fromEntries(QA_DIMENSI
 export async function judgeOutput(input: JudgeInput, deps: CatalogLlmDeps = {}): Promise<JudgeResult> {
   const hasReference = input.n > 1 && !!input.shotOne;
   const thresholds = dimensionThresholds(input.threshold, input.floor);
-  const first = await askJudge(input, input.model, deps);
+  const budgets = [{remainingMs:JUDGE_BACKOFF_BUDGET_MS}, ...(deps.backoff ? [deps.backoff] : [])];
+  const withRetry = (model: string, delaysMs?: readonly number[]): CatalogLlmDeps => ({...deps, retry:judgeRetry(model, budgets, deps, delaysMs)});
+  let first = await askJudge(input, input.model, withRetry(input.model));
+  let judgeModel = input.model, otherModel = input.secondModel;
+  // The first judge stayed rate-limited (or 5xx) through its back-off: the second judge gives the
+  // verdict, asked once, before the photo is held as unchecked. The first judge then gives the
+  // second opinion, so two models still have to agree on a different item or a leftover.
+  if (!first.value && first.failure && TRANSIENT.has(first.failure.kind) && input.secondModel && input.secondModel !== input.model) {
+    const spent = first;
+    const fallback = await askJudge(input, input.secondModel, withRetry(input.secondModel, []));
+    first = {...fallback, usage:sumUsage([spent.usage, fallback.usage]), costUsd:spent.costUsd + fallback.costUsd, calls:spent.calls + fallback.calls};
+    (deps.log ?? console.warn)(fallback.value ? "catalog_qa: first judge unavailable; the second judge gave the verdict" : "catalog_qa: both judges unavailable",
+      {severity:"WARNING", model:input.model, fallbackModel:input.secondModel, kind:spent.failure!.kind, status:spent.failure!.status, fallbackKind:fallback.failure?.kind ?? null, fallbackStatus:fallback.failure?.status ?? null, calls:first.calls});
+    if (fallback.value) { judgeModel = input.secondModel; otherModel = input.model; }
+  }
   if (!first.value) {
     const {usage, costUsd, calls} = first;
     return {scores:normalizeScores({}).scores,verdict:"flag",reasons:[flagDetails("qa_unavailable").why],isCollage:false,usage,costUsd,calls,model:input.model,flags:["qa_unavailable"],thresholds,opinions:[]};
   }
-  const opinion = readOpinion(first.value, input.model, hasReference);
+  const opinion = readOpinion(first.value, judgeModel, hasReference);
   const opinions: JudgeOpinion[] = [opinion];
   // A size chart or text-only image is left out with a note: no product check applies to it.
   if (opinion.view === CHART_VIEW) {
     const why = flagDetails("chart_image").why;
-    return {scores:withOverall(allPass()),verdict:"flag",reasons:[why],isCollage:false,usage:first.usage,costUsd:first.costUsd,calls:first.calls,model:input.model,flags:["chart_image"],view:opinion.view,thresholds,evidence:{chart_image:why},
+    return {scores:withOverall(allPass()),verdict:"flag",reasons:[why],isCollage:false,usage:first.usage,costUsd:first.costUsd,calls:first.calls,model:judgeModel,flags:["chart_image"],view:opinion.view,thresholds,evidence:{chart_image:why},
       wrongItem:{first:false,second:null,secondModel:null,confirmed:false},leftover:{first:false,second:null,secondModel:null,confirmed:false,located:false},opinions};
   }
   const wrongFirst = opinion.wrongItem && input.wrongItemCheck !== false;
@@ -215,10 +257,10 @@ export async function judgeOutput(input: JudgeInput, deps: CatalogLlmDeps = {}):
   let costUsd = first.costUsd, calls = first.calls, other: JudgeOpinion | null = null;
   // A different item holds the product and a leftover background re-makes or drops the photo, so a
   // second model must agree before either counts (07 4.2 v2). One second call answers both.
-  if ((wrongFirst || located) && input.secondModel) {
-    const reply = await askJudge(input, input.secondModel, deps);
+  if ((wrongFirst || located) && otherModel) {
+    const reply = await askJudge(input, otherModel, withRetry(otherModel));
     usages.push(reply.usage); costUsd += reply.costUsd; calls += reply.calls;
-    if (reply.value) { other = readOpinion(reply.value, input.secondModel, hasReference); opinions.push(other); }
+    if (reply.value) { other = readOpinion(reply.value, otherModel, hasReference); opinions.push(other); }
   }
   const secondWrong = wrongFirst && other ? other.wrongItem : null;
   const confirmed = wrongFirst && secondWrong === true;
@@ -237,8 +279,8 @@ export async function judgeOutput(input: JudgeInput, deps: CatalogLlmDeps = {}):
   if (opinion.isCollage) evidence.collage = opinion.evidence.is_collage ?? flagDetails("collage").why;
   const legacy = legacyReasons(first.value);
   const reasons = [...(legacy.length ? legacy : flags.map(flag => evidence[flag]!)), ...opinion.missing];
-  const secondModel = input.secondModel ?? null;
-  return {scores,verdict:flags.length ? "flag" : "pass",reasons,isCollage:opinion.isCollage,usage:sumUsage(usages),costUsd,calls,model:input.model,flags,view:opinion.view,thresholds,evidence,
+  const secondModel = otherModel ?? null;
+  return {scores,verdict:flags.length ? "flag" : "pass",reasons,isCollage:opinion.isCollage,usage:sumUsage(usages),costUsd,calls,model:judgeModel,flags,view:opinion.view,thresholds,evidence,
     wrongItem:{first:wrongFirst,second:secondWrong,secondModel:wrongFirst ? secondModel : null,confirmed},
     leftover:{first:leftoverFirst,second:secondLeftover,secondModel:located ? secondModel : null,confirmed:leftoverConfirmed,located},opinions};
 }

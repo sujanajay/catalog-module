@@ -263,3 +263,88 @@ it("classifies transparent material explicitly for the specified engineering tre
  const result=await classifyProductType(await image(),{apiKey:"fake",model:"test",fetch:async()=>response({type:"other",confidence:.9,transparent:true})});
  expect(result.flags).toContain("transparent");
 });
+
+describe("judge back-off on rate limits and the second judge (07 4.2)", () => {
+ const limited = (headers: Record<string, string> = {}) => new Response(JSON.stringify({error:{message:"Provider returned error",metadata:{raw:"temporarily rate-limited upstream"},code:429}}),{status:429,headers});
+ /** A judge that answers per model from a queue of responses; the last one repeats. */
+ const scripted = (plans: Record<string, (() => Response)[]>) => vi.fn<typeof fetch>(async (_url, init) => {
+  const model = requestModel(init), plan = plans[model]!;
+  return (plan.length > 1 ? plan.shift()! : plan[0]!)();
+ });
+ const ok = (value: unknown = reply()) => () => response(value, .001);
+ const fast = () => { const waits: number[] = []; return {waits, sleep: vi.fn(async (ms: number) => { waits.push(ms); }), random: () => .5}; };
+ it("a 429 burst that recovers within the back-off gives the normal verdict with no flag, waiting about 5 then 15 s", async () => {
+  const clock = fast(), log = vi.fn();
+  const fetcher = scripted({"first/judge":[limited, limited, ok()]});
+  const result = await judgeOutput(await input({n:1,shotOne:undefined}),{apiKey:"fake",fetch:fetcher,log,sleep:clock.sleep,random:clock.random});
+  expect(result).toMatchObject({verdict:"pass",flags:[],model:"first/judge",calls:3,costUsd:.001});
+  expect(clock.waits).toEqual([5_000, 15_000]);
+  expect(log.mock.calls.filter(([m]) => m === "catalog_qa: judge back-off").map(([, f]) => f)).toEqual([
+   expect.objectContaining({severity:"WARNING",model:"first/judge",attempt:1,status:429,kind:"rate_limit",waitMs:5_000,retryAfterMs:null}),
+   expect.objectContaining({attempt:2,status:429,kind:"rate_limit",waitMs:15_000}),
+  ]);
+  expect(log).not.toHaveBeenCalledWith("catalog_qa: quality check unavailable", expect.anything());
+ });
+ it("spreads the waits with jitter, about 5, 15 and 45 s", async () => {
+  for (const [random, expected] of [[0, [4_000, 12_000, 36_000]], [.999999, [6_000, 18_000, 54_000]]] as const) {
+   const waits: number[] = [];
+   await judgeOutput(await input({n:1,shotOne:undefined,secondModel:undefined}),{apiKey:"fake",fetch:scripted({"first/judge":[limited]}),log:()=>{},sleep:async ms=>{waits.push(ms);},random:()=>random});
+   expect(waits).toEqual(expected);
+  }
+ });
+ it("backs off on a 5xx the same way", async () => {
+  const clock = fast();
+  const fetcher = scripted({"first/judge":[() => new Response("upstream error",{status:502}), ok()]});
+  const result = await judgeOutput(await input({n:1,shotOne:undefined}),{apiKey:"fake",fetch:fetcher,log:()=>{},sleep:clock.sleep,random:clock.random});
+  expect(result).toMatchObject({verdict:"pass",flags:[],calls:2});
+  expect(clock.waits).toEqual([5_000]);
+ });
+ it("honours Retry-After instead of its own delay", async () => {
+  const clock = fast();
+  const fetcher = scripted({"first/judge":[() => limited({"retry-after":"7"}), ok()]});
+  await judgeOutput(await input({n:1,shotOne:undefined}),{apiKey:"fake",fetch:fetcher,log:()=>{},sleep:clock.sleep,random:clock.random});
+  expect(clock.waits).toEqual([7_000]);
+ });
+ it("first judge exhausted, then the second judge gives the verdict once: no hold, and the log says the fallback was used", async () => {
+  const clock = fast(), log = vi.fn();
+  const fetcher = scripted({"first/judge":[limited], "second/judge":[ok()]});
+  const result = await judgeOutput(await input({n:1,shotOne:undefined}),{apiKey:"fake",fetch:fetcher,log,sleep:clock.sleep,random:clock.random});
+  expect(result).toMatchObject({verdict:"pass",flags:[],model:"second/judge",calls:5,costUsd:.001});
+  expect(fetcher.mock.calls.map(([, init]) => requestModel(init))).toEqual(["first/judge","first/judge","first/judge","first/judge","second/judge"]);
+  expect(clock.waits).toEqual([5_000, 15_000, 45_000]);
+  expect(log).toHaveBeenCalledWith("catalog_qa: first judge unavailable; the second judge gave the verdict", expect.objectContaining({model:"first/judge",fallbackModel:"second/judge",kind:"rate_limit",status:429,calls:5}));
+ });
+ it("after the fallback, the first judge gives the second opinion on a different item", async () => {
+  const clock = fast();
+  const fetcher = scripted({"first/judge":[limited, limited, limited, limited, ok(reply({wrong_item:true}))], "second/judge":[ok(reply({wrong_item:true}))]});
+  const result = await judgeOutput(await input(),{apiKey:"fake",fetch:fetcher,log:()=>{},sleep:clock.sleep,random:clock.random});
+  expect(result.wrongItem).toMatchObject({first:true,second:true,confirmed:true,secondModel:"first/judge"});
+  expect(result.flags).toContain("different_product");
+  expect(result.calls).toBe(6);
+ });
+ it("both judges exhausted: qa_unavailable as before, every attempt counted", async () => {
+  const clock = fast(), log = vi.fn();
+  const fetcher = scripted({"first/judge":[limited], "second/judge":[limited]});
+  const result = await judgeOutput(await input({n:1,shotOne:undefined}),{apiKey:"fake",fetch:fetcher,log,sleep:clock.sleep,random:clock.random});
+  expect(result).toMatchObject({verdict:"flag",flags:["qa_unavailable"],reasons:["The quality check could not read this image."],calls:5,costUsd:0,model:"first/judge"});
+  // The second judge is asked once: no back-off of its own.
+  expect(clock.waits).toEqual([5_000, 15_000, 45_000]);
+  expect(log).toHaveBeenCalledWith("catalog_qa: both judges unavailable", expect.objectContaining({fallbackKind:"rate_limit",fallbackStatus:429}));
+ });
+ it("stops at the back-off budget: a Retry-After beyond what is left gives up, and a shared budget is drawn down", async () => {
+  const clock = fast();
+  const huge = scripted({"first/judge":[() => limited({"retry-after":"600"})]});
+  const one = await judgeOutput(await input({n:1,shotOne:undefined,secondModel:undefined}),{apiKey:"fake",fetch:huge,log:()=>{},sleep:clock.sleep,random:clock.random});
+  expect(one.flags).toEqual(["qa_unavailable"]);expect(huge).toHaveBeenCalledTimes(1);expect(clock.waits).toEqual([]);
+  const shared = {remainingMs:12_000};
+  const two = await judgeOutput(await input({n:1,shotOne:undefined,secondModel:undefined}),{apiKey:"fake",fetch:scripted({"first/judge":[limited]}),log:()=>{},sleep:clock.sleep,random:clock.random,backoff:shared});
+  expect(two.flags).toEqual(["qa_unavailable"]);
+  expect(clock.waits).toEqual([5_000, 7_000]);expect(shared.remainingMs).toBe(0);
+ });
+ it("an auth failure is not retried and does not ask the second judge", async () => {
+  const clock = fast();
+  const fetcher = scripted({"first/judge":[() => new Response(JSON.stringify({error:{message:"User not found.",code:401}}),{status:401})], "second/judge":[ok()]});
+  const result = await judgeOutput(await input({n:1,shotOne:undefined}),{apiKey:"fake",fetch:fetcher,log:()=>{},sleep:clock.sleep,random:clock.random});
+  expect(result.flags).toEqual(["qa_unavailable"]);expect(fetcher).toHaveBeenCalledTimes(1);expect(clock.waits).toEqual([]);
+ });
+});
