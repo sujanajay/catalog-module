@@ -408,15 +408,20 @@ export function checkMatteIntegrity(p: Pick<Prepared, "width" | "height" | "rgb"
     total[cell]!++; if (alpha[i]! <= GUARD_ALPHA_EDGE) { lost[cell]!++; lostAll++; }
     if (alpha[i]! >= GUARD_OPAQUE_ALPHA) opaqueAll++;
   }
-  let worst = 0;
-  for (let c = 0; c < total.length; c++) if (total[c]! >= GUARD_CELL_MIN_PIXELS) worst = Math.max(worst, lost[c]! / total[c]!);
+  let worst = 0, worstAt = -1;
+  for (let c = 0; c < total.length; c++) if (total[c]! >= GUARD_CELL_MIN_PIXELS && lost[c]! / total[c]! > worst) { worst = lost[c]! / total[c]!; worstAt = c; }
+  // Where the worst cell is, in source pixels, so a reader can tell a dropped backdrop corner from a lost sleeve.
+  const cellBox = (c: number) => {
+    const col = c % GUARD_GRID, row = Math.floor(c / GUARD_GRID), cx = x0 + Math.round(col * cellW), cy = y0 + Math.round(row * cellH);
+    return ` at x ${cx}, y ${cy}, ${x0 + Math.round((col + 1) * cellW) - cx} x ${y0 + Math.round((row + 1) * cellH) - cy} px`;
+  };
   const overall = lostAll / count, hand = opts.handRule === false ? 0 : heldInHand(p, alpha).droppedShare;
   const chunk = keptBackground(p, alpha, region), chunkKept = chunk.frameShare > KEPT_BACKGROUND_FRAME_SHARE && chunk.keptShare > KEPT_BACKGROUND_KEPT_SHARE;
   const opaque = opaqueAll / count, translucent = opaque < GUARD_OPAQUE_MIN_SHARE;
   const dropped = worst > GUARD_CELL_LOSS_MAX || overall > GUARD_OVERALL_LOSS_MAX || hand > HAND_NOTCH_MAX_SHARE, ok = !dropped && !chunkKept && !translucent;
   const round = (v: number) => Math.round(v * 1e4) / 1e4;
   return { ok, worstCellLoss: round(worst), overallLoss: round(overall), handShare: round(hand), keptBackground: round(chunk.frameShare), opaqueShare: round(opaque), estimatePixels: count, ...base,
-    detail: `${dropped ? "dropped product" : chunkKept ? "kept background" : translucent ? "translucent" : "kept"}: ${translucent ? `${(opaque * 100).toFixed(1)}% of the product opaque, ` : ""}worst cell ${(worst * 100).toFixed(1)}%, overall ${(overall * 100).toFixed(1)}%${hand ? `, hand ${(hand * 100).toFixed(1)}%` : ""}${chunk.frameShare ? `, background chunk ${(chunk.frameShare * 100).toFixed(2)}% of the frame` : ""}${region.frameFilling ? ", frame-filling" : ""}` };
+    detail: `${dropped ? "dropped product" : chunkKept ? "kept background" : translucent ? "translucent" : "kept"}: ${translucent ? `${(opaque * 100).toFixed(1)}% of the product opaque, ` : ""}worst cell ${(worst * 100).toFixed(1)}%${worstAt >= 0 ? cellBox(worstAt) : ""}, overall ${(overall * 100).toFixed(1)}%${hand ? `, hand ${(hand * 100).toFixed(1)}%` : ""}${chunk.frameShare ? `, background chunk ${(chunk.frameShare * 100).toFixed(2)}% of the frame` : ""}${region.frameFilling ? ", frame-filling" : ""}` };
 }
 
 /**
@@ -557,7 +562,11 @@ export const BUSY_TONES_COVER = 0.9;
  * to 60 (busy); lifestyle candle Z011CB57531CA8FA0CBDDZ shot 1 0.00 to 0.01 / 11 to 31 (busy, plain in several
  * tones); bag close-ups Z02B2EE44E3A08044B816Z shots 3 and 6 0.25 / 24 and 0.20 / 30 and Z5A0B7DE13FC67EDEAC9DZ
  * shot 5 0.13 / 9 (one material); the bag held against a plain dress, Z02B2EE44E3A08044B816Z shot 1, 0.00 / 4
- * (one plain colour).
+ * (one plain colour). The Penti jogger close-up Z3B9BF560CF23A23F7E69Z shot 3 (0.03 / 14, held) reads as scenery
+ * although its band pixels are the ribbed waistband every matte dropped (each kept only the drawstring), not
+ * the pink backdrop corner; the hold is still the right outcome there, because the pass-through would recolour
+ * the smooth out-of-focus jogger panel as a backdrop no matte kept (passthroughBackground) and publish a
+ * drawstring on a grey canvas. Releasing it needs a pass-through that keeps that panel first.
  */
 export const BUSY_EDGE_DENSITY_MIN = 0.4;
 export const BUSY_TONES_MIN = 45;
