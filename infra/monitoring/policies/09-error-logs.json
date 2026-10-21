@@ -1,9 +1,9 @@
 {
-  "displayName": "Catalog: error in a catalog service",
+  "displayName": "Catalog: error in the logs",
   "documentation": {
     "content": "A catalog service (worker, web or cut-out) wrote an error to its log. Errors that the chunk and batch alerts already report are left out, so this is something else. First open Error Reporting in the Google Cloud console for the image-links-agent project to see the error and how often it happens. Then open Logs Explorer for that service around the time of this email.",
     "mimeType": "text/markdown",
-    "subject": "Catalog: error in a catalog service"
+    "subject": "Catalog: error in the logs"
   },
   "userLabels": {
     "app": "catalog"

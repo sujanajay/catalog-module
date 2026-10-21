@@ -41,6 +41,10 @@ const fake = `gcloud() {
     esac
   done
   case "$*" in
+    "components list"*) printf '%s\\r\\n' "\${BETA_STATE-Installed}" ;;
+    "monitoring policies create"*)
+      # Simulates a create the server stored but reported as failed (timeout): the next list shows it.
+      if [ -f "$STATE/policies-after.json" ]; then mv "$STATE/policies-after.json" "$STATE/policies.json"; return 1; fi ;;
     "services list"*) cat "$STATE/services.txt" ;;
     "beta monitoring channels list"*) cat "$STATE/channels.json" ;;
     "beta monitoring channels create"*) echo "${CHANNEL}" ;;
@@ -57,6 +61,7 @@ function writeState(name, state) {
   for (const k of ['channels', 'metrics', 'policies', 'dashboards']) {
     fs.writeFileSync(path.join(d, k + '.json'), JSON.stringify(state[k] ?? []));
   }
+  if (state.policiesAfterCreate) fs.writeFileSync(path.join(d, 'policies-after.json'), JSON.stringify(state.policiesAfterCreate));
   return d;
 }
 
@@ -166,7 +171,30 @@ try {
     cases++;
   }
 
-  // 4. A failed lookup stops the script (it never creates blind).
+  // 4a. The beta component is checked read-only first; without it nothing runs or installs.
+  for (const [label, beta] of [['beta-missing', 'Not Installed'], ['beta-unknown', '']]) {
+    const r = run(label, {}, {BETA_STATE: beta});
+    assert.notEqual(r.status, 0, label + ' must fail');
+    assert.match(r.stderr, /the gcloud beta component is missing; run: gcloud components install beta/, label);
+    assert.deepEqual(r.calls, ['components list --filter=id=beta --format=value(state.name)'], label + ' makes only the read-only check');
+    console.log('PASS ' + label + ' stops before any change');
+    cases++;
+  }
+
+  // 4b. A policy create that failed after the server stored it is not repeated into a duplicate.
+  {
+    const s = existingState();
+    s.policiesAfterCreate = s.policies;
+    s.policies = s.policies.filter((p) => p.displayName !== policies[4].displayName);
+    const r = run('create-retry', s);
+    commonChecks('create-retry', r);
+    assert.equal(count(r, /^monitoring policies create /), 1, 'one create attempt, no duplicate');
+    assert.match(r.stdout, /exists after the failed attempt; not creating it again/);
+    console.log('PASS create-retry re-lists and does not duplicate');
+    cases++;
+  }
+
+  // 4c. A failed lookup stops the script (it never creates blind).
   {
     const r = run('list-fails', existingState(), {POLICY_LIST_FAIL: '1'});
     assert.notEqual(r.status, 0, 'a failed policy list must fail the run');
@@ -179,7 +207,7 @@ try {
   {
     const files = [...metricFiles.map((f) => path.join(monDir, 'metrics', f)), ...policyFiles.map((f) => path.join(monDir, 'policies', f)),
       path.join(monDir, 'dashboard.json'), path.join(infra, 'monitoring.sh'), path.join(infra, 'deploy.sh')];
-    for (const f of files) assert.ok(!fs.readFileSync(f, 'utf8').includes('—'), 'em dash in ' + f);
+    for (const f of files) assert.ok(!fs.readFileSync(f, 'utf8').includes(String.fromCharCode(0x2014)), 'em dash in ' + f);
     assert.equal(policies.length, 9, 'nine alert policies');
     assert.equal(new Set(policies.map((p) => p.displayName)).size, 9, 'policy display names are unique');
     for (const p of policies) {
@@ -187,11 +215,23 @@ try {
       assert.equal(p.documentation.mimeType, 'text/markdown');
       assert.equal(p.alertStrategy?.autoClose, '3600s', p.displayName + ' autoClose');
       assert.deepEqual(p.notificationChannels, ['__CATALOG_EMAIL_CHANNEL__'], p.displayName + ' channel placeholder');
-      assert.equal(p.conditions.length, 1);
+      assert.equal(p.conditions.length, p.displayName === 'Catalog: queue stuck' ? 2 : 1, p.displayName + ' conditions');
       const t = p.conditions[0].conditionThreshold;
       assert.ok(t && t.filter && t.comparison === 'COMPARISON_GT' && typeof t.thresholdValue === 'number', p.displayName + ' threshold');
       assert.doesNotMatch(p.documentation.content, /gemini|gpt|claude|llama|qwen|google\//i, p.displayName + ' names a model');
     }
+    // Names the operator docs use.
+    for (const name of ['Catalog: queue stuck', 'Catalog: error in the logs']) assert.ok(policies.some((p) => p.displayName === name), name);
+    // Queue stuck means a deep queue AND no task attempts for 30 minutes (a big batch that is
+    // moving keeps attempting tasks, so it never emails); no attempts at all counts as zero.
+    const stuck = policies.find((p) => p.displayName === 'Catalog: queue stuck');
+    assert.equal(stuck.combiner, 'AND');
+    const idle = stuck.conditions[1].conditionThreshold;
+    assert.match(idle.filter, /cloudtasks\.googleapis\.com\/queue\/task_attempt_count".*queue_id="catalog"/);
+    assert.equal(idle.comparison, 'COMPARISON_LT');
+    assert.equal(idle.duration, '1800s');
+    assert.equal(idle.evaluationMissingData, 'EVALUATION_MISSING_DATA_ACTIVE');
+    assert.doesNotMatch(stuck.documentation.content, /large batch can do this/);
     const usedMetrics = policies.map((p) => p.conditions[0].conditionThreshold.filter.match(/logging\.googleapis\.com\/user\/([\w/]+)/)?.[1]).filter(Boolean);
     assert.deepEqual(usedMetrics.sort(), metrics.map((m) => m.name).sort(), 'every log metric has one policy');
     for (const m of metrics) {
@@ -199,7 +239,13 @@ try {
       assert.match(m.filter, /^resource\.type="cloud_run_revision" AND resource\.labels\.service_name=~"\^catalog-" AND /);
       assert.doesNotMatch(m.filter, /jsonPayload\.(event|msg)\b/, 'log contract uses message');
     }
+    // Log contract (PR #89): "batch failed" is ERROR for real faults and WARNING for cause no_photos
+    // (an operator input mistake), so only the ERROR ones and the sweeper count towards an email.
+    const batchFailed = metrics.find((m) => m.name === 'catalog/batch_failed').filter;
+    assert.ok(batchFailed.includes('((jsonPayload.message="batch failed" AND severity=ERROR) OR jsonPayload.message=~"^batch swept")'), 'batch_failed counts ERROR failures and sweeps only');
+    assert.ok(metrics.find((m) => m.name === 'catalog/chunk_failed_terminal').filter.includes('jsonPayload.message="chunk failed" AND severity=ERROR'), 'chunk_failed counts terminal (ERROR) only');
     const errors = metrics.find((m) => m.name === 'catalog/error_logs').filter;
+    assert.match(errors, /severity>=ERROR/, 'error_logs counts ERROR and worse only (WARNING lines such as publish failed never email)');
     for (const msg of ['chunk failed', 'batch failed']) assert.ok(errors.includes(`NOT jsonPayload.message="${msg}"`), 'error_logs excludes ' + msg);
     assert.equal(dashboard.displayName, 'Catalog ops');
     console.log('PASS definition files');

@@ -1,7 +1,7 @@
 {
   "displayName": "Catalog: a batch failed or was swept",
   "documentation": {
-    "content": "A catalog batch was marked failed, or the sweeper stopped it because it made no progress for two hours. First open the batch in the catalog app and read the reason on its Details tab. Then search Logs Explorer for \"batch failed\" or \"batch swept\" to see the batch id. The operator can start the batch again after the cause is fixed.",
+    "content": "A catalog batch was marked failed because of a fault (a batch with no usable photos does not send this email), or the sweeper stopped it because it made no progress for two hours. First open the batch in the catalog app and read the reason on its Details tab. Then search Logs Explorer for \"batch failed\" or \"batch swept\" to see the batch id. The operator can start the batch again after the cause is fixed.",
     "mimeType": "text/markdown",
     "subject": "Catalog: a batch failed or was swept"
   },

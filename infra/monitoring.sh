@@ -8,7 +8,10 @@
 # What it makes (definitions live in infra/monitoring/):
 #   APIs           monitoring.googleapis.com, clouderrorreporting.googleapis.com (enabled if off)
 #   email channel  catalog-email-tech -> ALERT_EMAIL (default sujan@opptra.com)
-#   log metrics    catalog/<file name> for each infra/monitoring/metrics/*.json
+#   log metrics    catalog/<file name> for each infra/monitoring/metrics/*.json. They match Cloud
+#                  Run services only (resource.type cloud_run_revision), not Cloud Run jobs, on
+#                  purpose: the eval, smoke, load and QA-check jobs fail on purpose in tests and
+#                  must never send an alert email.
 #   alert policies one per infra/monitoring/policies/*.json, matched by displayName; the
 #                  placeholder __CATALOG_EMAIL_CHANNEL__ is replaced with the channel at run time
 #   dashboard      "Catalog ops" from infra/monitoring/dashboard.json
@@ -114,6 +117,11 @@ render() {
   ' "$(native_path "$1")" "$(native_path "$2")" "${CHANNEL:-}" "${3:-}" "$CHANNEL_PLACEHOLDER"
 }
 
+# --- 0. Preflight -----------------------------------------------------------------------------
+# Read only: the channel commands need the beta component. This script never installs anything.
+BETA_STATE=$(gcv components list --filter=id=beta --format='value(state.name)')
+[ "$BETA_STATE" = Installed ] || die "the gcloud beta component is missing; run: gcloud components install beta"
+
 # --- 1. APIs ----------------------------------------------------------------------------------
 ENABLED=$(gcv services list --enabled --format='value(config.name)')
 for api in "${APIS[@]}"; do
@@ -169,6 +177,22 @@ for file in "$DIR"/metrics/*.json; do
 done
 
 # --- 4. Alert policies ------------------------------------------------------------------------
+# One create attempt. Before every attempt it lists the policies again and stops if one with this
+# display name exists now, so a create that failed after the server stored the policy (a timeout,
+# a dropped connection) is never repeated into a duplicate.
+CREATE_ATTEMPTED=""
+create_policy() {
+  if [ "$CREATE_ATTEMPTED" = "$1" ]; then
+    local now
+    now=$(gcv monitoring policies list --format=json) || return 1
+    if [ -n "$(json_names displayName "$1" <<<"$now")" ]; then
+      log "policy \"$1\" exists after the failed attempt; not creating it again"
+      return 0
+    fi
+  fi
+  CREATE_ATTEMPTED=$1
+  gcloud monitoring policies create --policy-from-file="$(native_path "$2")" >/dev/null
+}
 POLICIES=$(gcv monitoring policies list --format=json)
 for file in "$DIR"/policies/*.json; do
   rendered="$TMP/$(basename "$file")"
@@ -186,7 +210,7 @@ for file in "$DIR"/policies/*.json; do
     fi
   else
     create "policy \"$title\""
-    retry gcloud monitoring policies create --policy-from-file="$(native_path "$rendered")" >/dev/null
+    retry create_policy "$title" "$rendered"
   fi
 done
 
