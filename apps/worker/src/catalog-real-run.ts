@@ -28,7 +28,8 @@ import { handleFinalizeTask } from "./catalog/finalize";
 import { cannedQa } from "./catalog/qa-mock";
 import { changeOnePixel, type RealFixture, type RealShot } from "./catalog-real-fixtures";
 
-export interface VerifyRow { url: string; generation: number; bytes: number; channel: ChannelId; n: number; identifier: string; objectPath: string; plan: CanvasPlan }
+/** `mask`: the render's foreground mask as a greyscale PNG next to the manifest, so the independent re-check judges the Styli guide on the product and not on a kept shadow (compliance.ts anchorBounds). */
+export interface VerifyRow { url: string; generation: number; bytes: number; channel: ChannelId; n: number; identifier: string; objectPath: string; plan: CanvasPlan; mask?: string }
 export interface VerificationManifest { outputs: VerifyRow[]; xlsx: string }
 export interface RunEvidence { slug: string; brand: string; source: string; batches: string[]; first: { products: number; sources: number; verified: number; skipped: number }; unchanged: { matte: number; render: number; copy: number }; changed: number; removed: number; report: string; cleanup: boolean; qa: string }
 const execute = promisify(execFile);
@@ -36,7 +37,7 @@ const execute = promisify(execFile);
 export async function runRealFixture(db: Db, fixture: RealFixture, out: string, cli: string): Promise<RunEvidence> {
   await mkdir(out, { recursive: true });
   await writeFile(path.join(out,"source-manifest.json"),JSON.stringify({brand:fixture.slug,source:fixture.source,files:fixture.shots.map(s=>({deliveryName:s.name,sourceName:s.originalName??s.name})),pastedLinks:fixture.urls},null,2));
-  const batches: CatalogBatch[] = [], plans = new Map<string, CanvasPlan>();
+  const batches: CatalogBatch[] = [], plans = new Map<string, CanvasPlan>(), masks = new Map<string, Buffer>();
   const calls = { matte: 0, render: 0, copy: 0 };
   const base = workerCatalogDeps(db);
   // The last chunk error, so a Cloud Tasks style retry can name its reason in the log.
@@ -45,7 +46,7 @@ export async function runRealFixture(db: Db, fixture: RealFixture, out: string, 
   // The smoke never calls OpenRouter: the judge is mocked (07 tier 5); live checks run as catalog-qa-check.
   const deps: CatalogDeps = { ...base, ...cannedQa, enqueue: async () => "local-real-run", log: (message, fields) => { if (message === "chunk failed") lastChunkError = fields?.error instanceof Error ? fields.error.message : String(fields?.error); base.log(message, fields); },
     matteFor: async (...args) => { calls.matte++; return base.matteFor(...args); },
-    renderAllChannels: async (...args) => { calls.render++; const result = await base.renderAllChannels(...args); for (const channel of args[2]) plans.set(`${args[3]?.identifier}|${args[3]?.shotNumber}|${channel}`, result[channel].plan); return result; },
+    renderAllChannels: async (...args) => { calls.render++; const result = await base.renderAllChannels(...args); for (const channel of args[2]) { const key = `${args[3]?.identifier}|${args[3]?.shotNumber}|${channel}`; plans.set(key, result[channel].plan); if (result[channel].foregroundMask) masks.set(key, result[channel].foregroundMask); else masks.delete(key); } return result; },
     storage: { ...storage, stageCopyToPublic: async (...args) => { calls.copy++; return storage.stageCopyToPublic(...args); } } };
   const evidence: RunEvidence = { slug: fixture.slug, brand: fixture.name, source: fixture.source, batches: [], first: { products: 0, sources: 0, verified: 0, skipped: 0 }, unchanged: { matte: 0, render: 0, copy: 0 }, changed: 0, removed: 0, report: path.join(out, "report.html"), cleanup: false, qa: "mocked judge (canned pass verdicts, flag qa_sampled_out)" };
   const snapshots: { label: string; rows: CatalogOutput[] }[] = [];
@@ -198,11 +199,16 @@ export async function runRealFixture(db: Db, fixture: RealFixture, out: string, 
   }
   async function verify(b: CatalogBatch, rows: CatalogOutput[], label: string) {
     const products = await db.select().from(catalogProducts).where(inArray(catalogProducts.id,[...new Set(rows.map(r=>r.productId))]));
-    const manifest: VerificationManifest = { xlsx:path.resolve(out,`${label}.xlsx`),outputs:rows.map(r=> {
-      const identifier=products.find(p=>p.id===r.productId)!.identifier,plan=plans.get(`${identifier}|${r.n}|${r.channel}`);
+    const maskDir=path.resolve(out,`${label}-masks`); await mkdir(maskDir,{recursive:true});
+    const outputs: VerifyRow[] = [];
+    for (const r of rows) {
+      const identifier=products.find(p=>p.id===r.productId)!.identifier,key=`${identifier}|${r.n}|${r.channel}`,plan=plans.get(key),mask=masks.get(key);
       assert(plan,`No real render plan captured for ${r.objectPath}`); assert(r.generation && r.bytes);
-      return {url:r.publicUrl,generation:r.generation,bytes:r.bytes,channel:r.channel,n:r.n,identifier,objectPath:r.objectPath,plan};
-    }) };
+      const row: VerifyRow = {url:r.publicUrl,generation:r.generation,bytes:r.bytes,channel:r.channel,n:r.n,identifier,objectPath:r.objectPath,plan};
+      if (mask) { row.mask=path.join(maskDir,`${r.objectPath.replace(/[^A-Za-z0-9_.-]/g,"_")}.png`); await writeFile(row.mask,await sharp(mask,{raw:{width:plan.w,height:plan.h,channels:1}}).png().toBuffer()); }
+      outputs.push(row);
+    }
+    const manifest: VerificationManifest = { xlsx:path.resolve(out,`${label}.xlsx`),outputs };
     const file=path.resolve(out,`${label}-verify.json`);await writeFile(file,JSON.stringify(manifest));
     const result=await execute(process.execPath,[cli,"--verify-manifest",file],{timeout:24*60*60_000,maxBuffer:1024*1024});
     await writeFile(path.join(out,`${label}-independent.json`),result.stdout);

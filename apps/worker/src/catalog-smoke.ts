@@ -4,6 +4,7 @@ import { randomUUID } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import sharp from "sharp";
 import { getDb, closeDb } from "@catalog/core/db/client";
 import { brandMaster, catalogBatches } from "@catalog/core/db/schema";
 import { inArray } from "drizzle-orm";
@@ -37,7 +38,9 @@ async function main() {
       // Score the verified generation itself, never older bytes a cache may still hold.
       const response = await fetch(`${output.url}?generation=${output.generation}`);
       assert.equal(response.status,200);
-      const compliance = await checkOutput({jpeg:Buffer.from(await response.arrayBuffer()),channel:output.channel,shotNumber:output.n,plan:output.plan,identifier:output.identifier,n:output.n,publicObjectPath:output.objectPath});
+      // The render's foreground mask (a PNG next to the manifest) so the Styli guide is judged on the product, not on a kept shadow.
+      const foregroundMask = output.mask ? await sharp(await readFile(output.mask)).toColourspace("b-w").raw().toBuffer() : undefined;
+      const compliance = await checkOutput({jpeg:Buffer.from(await response.arrayBuffer()),channel:output.channel,shotNumber:output.n,plan:output.plan,identifier:output.identifier,n:output.n,publicObjectPath:output.objectPath,...(foregroundMask ? {foregroundMask}:{})});
       assert(compliance.ok,`${output.objectPath}: ${compliance.failures.join("; ")}`);
     }
     const recheck = await recheckSheet(await readFile(manifest.xlsx),{fetch,concurrency:16});

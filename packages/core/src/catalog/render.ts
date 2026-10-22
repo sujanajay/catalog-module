@@ -1,12 +1,12 @@
 import sharp from "sharp";
 import { fileTypeFromBuffer } from "file-type";
-import { backgroundFor, channel, CUT_BAND_NOTE_START, DETAIL_SHOT_BBOX_FRACTION, JPEG_QUALITY_MIN, JPEG_QUALITY_START, JPEG_QUALITY_STEP, MAX_OUTPUT_BYTES, MAX_UPSCALE, MIN_SOURCE_LONG_SIDE_PX, STYLI_SKIP_LOW_RESOLUTION, type ChannelSpec, type Size } from "./channels";
+import { backgroundFor, channel, CUT_BAND_NOTE_START, DETAIL_SHOT_BBOX_FRACTION, JPEG_QUALITY_MIN, JPEG_QUALITY_START, JPEG_QUALITY_STEP, MAX_OUTPUT_BYTES, MAX_UPSCALE, MIN_SOURCE_LONG_SIDE_PX, type ChannelSpec, type Size } from "./channels";
 import type { ChannelId, OutputFlag, ProductType } from "./types";
 import { ALPHA_BBOX_THRESHOLD, analyseBackground, borderPixels, shadowLayer } from "./shadow";
-import { ANCHOR_MASK_ALPHA, BG_TOLERANCE, checkOutput, type Measured } from "./compliance";
+import { anchorBounds, BG_TOLERANCE, checkOutput, type Measured } from "./compliance";
 import { enlargeCutout } from "./enhance";
 import { plainFailures } from "./qa/reasons";
-import { shouldUpscale, UPSCALE_FACTOR, upscaledRgb, upscalerKey, type Upscaler } from "./upscale";
+import { shouldUpscale, upscaledRgb, upscalerKey, type Upscaler } from "./upscale";
 
 export interface Prepared { width: number; height: number; rgb: Buffer; alphaSource: Buffer | null; background: { uniform: boolean; color: [number, number, number]; stdev: number }; flags: OutputFlag[]; sourceMime: string }
 export interface Matte { alpha: Buffer; width: number; height: number; model: string; ms: number; source: "model" | "alpha_source" | "floodfill"; target: "cpu" | "gpu" | null; sentLongSide: number | null }
@@ -31,7 +31,8 @@ export type ShadowKind = "kept" | "synthesised" | "none";
 /** The compliance measurement plus what this render drew (07 4.6a): the shadow kind and the cut sides. Stored in `catalog_outputs.compliance.measured`. */
 export interface RenderMeasured extends Measured { shadow: ShadowKind; cut: CutEdges }
 export interface RenderCompliance { ok: boolean; failures: string[]; measured?: RenderMeasured }
-export interface RenderOutput { jpeg: Buffer | null; status: "ok" | "skipped" | "failed"; plan: CanvasPlan; quality: number; bytes: number; flags: OutputFlag[]; notes: string[]; attention: { why: string; what: string } | null; compliance: RenderCompliance; upscale?: { model: string; ms: number; reused?: true } }
+export interface RenderOutput { jpeg: Buffer | null; status: "ok" | "skipped" | "failed"; plan: CanvasPlan; quality: number; bytes: number; flags: OutputFlag[]; notes: string[]; attention: { why: string; what: string } | null; compliance: RenderCompliance; upscale?: { model: string; ms: number; reused?: true };
+  /** The placed cut-out's alpha on the canvas (plan.w x plan.h, one byte per pixel), the mask the compliance check judged with: a re-check of the delivered JPEG (catalog-smoke --verify-manifest) passes it so the Styli guide is judged on the product, never on a kept shadow. Absent when nothing was drawn. */ foregroundMask?: Buffer }
 /** `upscaler`: the upscaler model id, only when the upscaler made the output (the plain path keeps today's key). */
 export interface RenderKeyInputs { sourceSha256: string; channel: ChannelId; rulesVersion: string; policyId: string; policyUpdatedAt: string; n: number; upscaler?: string | null }
 
@@ -440,11 +441,6 @@ export function safeBoxFor(spec: ChannelSpec, canvas: Size, wide: boolean, cut: 
   return { x: left, y: top, w: canvas.w - left - right, h: canvas.h - top - bottom };
 }
 
-/** The enlargement the channel's minimum canvas needs for this product (planCanvas's fit(min)); above MAX_UPSCALE is low resolution. */
-export function minimumFit(spec: ChannelSpec, box: BBox, cut: CutEdges = NO_CUT, trimRoom?: TrimRoom): number {
-  return cutFillScale(safeBoxFor(spec, effectiveMinimum(spec), box.w > box.h, cut), box, cut, trimRoom);
-}
-
 export function effectiveMinimum(spec: ChannelSpec): Size {
   if (spec.fixedCanvas) return spec.targetCanvas;
   const fraction = Math.max(spec.minCanvas.w / spec.targetCanvas.w, spec.minCanvas.h / spec.targetCanvas.h);
@@ -511,9 +507,10 @@ export function planProduct(spec: ChannelSpec, shots: { box: BBox; source: Size;
 export const ANCHOR_SEEN_LIFT_PX = 1;
 /**
  * The move (canvas px) that puts the product on the bottom-centre guide (Styli, compliance `styli_anchor`) as the check
- * measures it: what is seen (the cut-out over `background` differs from it by more than BG_TOLERANCE) together with
- * the cut-out's half-alpha silhouette (ANCHOR_MASK_ALPHA), its width centred in the safe box and its lowest row on (or
- * ANCHOR_SEEN_LIFT_PX above) the safe box's bottom edge. The plan places the matte's box (alpha above
+ * measures it, with the check's own definition of the product (compliance.ts anchorBounds, on the cut-out drawn over
+ * `background`): the cut-out's half-alpha silhouette (ANCHOR_MASK_ALPHA) together with what is seen of its soft edge
+ * (more than BG_TOLERANCE off the background), never a shadow, which lies outside the cut-out. Its width is centred in
+ * the safe box and its lowest row put on (or ANCHOR_SEEN_LIFT_PX above) the safe box's bottom edge. The plan places the matte's box (alpha above
  * ALPHA_BBOX_THRESHOLD), and a model matte's outer fade is alpha above that threshold over a pale blend of the old
  * background, which looks like the canvas. Drawn at 1x or less the fade is under a pixel; enlarged (an 800 x 1200 photo
  * is drawn about 2x on Styli once the x2 upscaler lets it through) it is several px, so the product stood above the
@@ -521,19 +518,23 @@ export const ANCHOR_SEEN_LIFT_PX = 1;
  * move never exceeds that fade: a pale product (a white brief, a pale shirt with a logo) is placed by its silhouette,
  * never dragged after the few pixels of it that are seen. Only an axis with no cut side moves (a cut side sits flush
  * with its canvas edge by its own rule); the cut-out stays on the canvas, with the product's box inside the safe box.
+ * `under` (product.w x product.h, 3 bytes per pixel): the canvas under the cut-out once the shadow is drawn (see
+ * renderSource), so the soft edge is measured as it will show over the shadow.
  */
-export async function visibleAnchorShift(cutout: Buffer, product: BBox, safe: BBox, canvas: Size, background: [number, number, number], cut: CutEdges): Promise<{ dx: number; dy: number }> {
+export async function visibleAnchorShift(cutout: Buffer, product: BBox, safe: BBox, canvas: Size, background: [number, number, number], cut: CutEdges, under?: Buffer): Promise<{ dx: number; dy: number }> {
   const { data, info } = await sharp(cutout).ensureAlpha().raw().toBuffer({ resolveWithObject: true });
-  let x0 = info.width, x1 = -1, y1 = -1, faded = -1;
-  for (let y = 0; y < info.height; y++) for (let x = 0; x < info.width; x++) {
-    const i = (y * info.width + x) * 4, a = data[i + 3]!;
+  // The cut-out as it will show over what lies under it (`under`, else the flat background), and its alpha as the check's mask.
+  const w = info.width, h = info.height, rgb = Buffer.alloc(w * h * 3), alpha = Buffer.alloc(w * h);
+  let faded = -1;
+  for (let i = 0; i < w * h; i++) {
+    const a = data[i * 4 + 3]!;
     if (!a) continue;
-    faded = y;
-    let delta = 0;
-    if (a < ANCHOR_MASK_ALPHA) for (let c = 0; c < 3; c++) delta = Math.max(delta, Math.abs(Math.round((data[i + c]! * a + background[c]! * (255 - a)) / 255) - background[c]!));
-    if (a >= ANCHOR_MASK_ALPHA || delta > BG_TOLERANCE) { x0 = Math.min(x0, x); x1 = Math.max(x1, x); y1 = Math.max(y1, y); }
+    alpha[i] = a; faded = Math.floor(i / w);
+    for (let c = 0; c < 3; c++) rgb[i * 3 + c] = a === 255 ? data[i * 4 + c]! : Math.round((data[i * 4 + c]! * a + (under ? under[i * 3 + c]! : background[c]!) * (255 - a)) / 255);
   }
-  if (x1 < 0) return { dx: 0, dy: 0 };
+  const box = anchorBounds(rgb, w, h, background, alpha);
+  if (!box) return { dx: 0, dy: 0 };
+  const x0 = box.x, x1 = box.x + box.w - 1, y1 = box.y + box.h - 1;
   const clamp = (v: number, lo: number, hi: number) => (lo > hi ? 0 : Math.max(lo, Math.min(hi, v)));
   const dy = cut.top || cut.bottom ? 0 : clamp(safe.y + safe.h - (faded > y1 ? ANCHOR_SEEN_LIFT_PX : 0) - (product.y + y1 + 1), -product.y, canvas.h - product.y - product.h);
   const dx = cut.left || cut.right ? 0 : clamp(Math.round(safe.x + safe.w / 2 - (product.x + (x0 + x1 + 1) / 2)),
@@ -552,10 +553,8 @@ export async function renderSource(input: RenderInput): Promise<RenderOutput> {
   if (anyCut(cut)) result.flags.push("cut_in_source");
   if (plan.lowResolution) {
     result.flags.push("low_resolution");
-    // Styli judges the size after the x2 upscaler when one is configured (owner decision 2026-10-21): skipped only
-    // when even the x2 photo would need more than MAX_UPSCALE. A photo let through here is made even if the upscale
-    // call then fails (the plain path below), with low_resolution and the soft note.
-    if (spec.id === "styli" && STYLI_SKIP_LOW_RESOLUTION && minimumFit(spec, box, cut, geometry?.trimRoom) / (input.upscaler ? UPSCALE_FACTOR : 1) > MAX_UPSCALE) { result.status = "skipped"; result.notes.push("Skipped for Styli: the photo is smaller than Styli needs."); return result; }
+    // Never a skip, Styli included (owner decision 2026-10-22): any enlargement is fine. The x2 upscaler makes the colour
+    // when the plan enlarges beyond its threshold and Lanczos3 does the rest; the flag and this note are information only.
     const min = spec.minCanvas, target = spec.targetCanvas;
     // A fixed canvas (Trendyol 1200 x 1800, minimum 600 x 800; Centrepoint) is the size we deliver, not a minimum the
     // photo missed (spec 11 4.1): say what we deliver and that the photo was enlarged. Same words in qa/reasons.ts and
@@ -602,19 +601,39 @@ export async function renderSource(input: RenderInput): Promise<RenderOutput> {
       const shift = await visibleAnchorShift(cutout, product, plan.safeBox, plan, rgbColor, cut);
       product.x += shift.dx; product.y += shift.dy;
     }
-    // The computed `reshift` repair (07 4.6a): the move the compliance check measured, kept on the canvas.
+    const cutoutAlpha = await sharp(cutout).extractChannel(3).raw().toBuffer();
+    const drawShadow = async () => {
+      foregroundMask.fill(0);
+      for (let y = 0; y < product.h; y++) cutoutAlpha.copy(foregroundMask, (product.y + y) * plan.w + product.x, y * product.w, (y + 1) * product.w);
+      const drawn = await shadowLayer(p, matte, crop, plan, input.productType, color, foregroundMask, input.keepSourceShadow !== false);
+      // Never a synthesised contact shadow on a photo cut in the source on any side (a bag held in a cropped hand, a
+      // close-up filling the photo): nothing stands on a floor there, and the shadow below makes the centred product
+      // look off-centre.
+      return (input.synthesiseShadow === false || anyCut(cut)) && drawn.flags.includes("shadow_synthesised") ? { layer: null, flags: ["no_shadow_source" as const] } : drawn;
+    };
+    let shadow = await drawShadow();
+    // A shadow under the cut-out's soft edge (alpha below ANCHOR_MASK_ALPHA) darkens that edge, so the check sees more
+    // of it on the shadow's side than the placement did over the flat canvas: on batch b8a99c1b (2026-10-22) a kept
+    // floor shadow to one side of the feet put the seen edge 4 px further out on that side and the measured centre 2 px
+    // off the guide. So the placement measures once more over the shadow, as the check will, and the shadow follows the
+    // product (the shadow moves with it, so one more measure is enough).
+    if (spec.anchor === "bottom-centre" && shadow.layer) {
+      const greys = await sharp(shadow.layer).extract({ left: product.x, top: product.y, width: product.w, height: product.h }).toColourspace("b-w").raw().toBuffer();
+      const under = Buffer.alloc(product.w * product.h * 3);
+      for (let i = 0; i < greys.length; i++) for (let c = 0; c < 3; c++) under[i * 3 + c] = Math.round(rgbColor[c]! * greys[i]! / 255);
+      const again = await visibleAnchorShift(cutout, product, plan.safeBox, plan, rgbColor, cut, under);
+      if (again.dx || again.dy) {
+        product.x += again.dx; product.y += again.dy;
+        shadow = await drawShadow();
+      }
+    }
+    // The computed `reshift` repair (07 4.6a): the move the compliance check measured, made after the anchor rule and
+    // kept on the canvas; the mask and the shadow follow it.
     if (input.anchorShift) {
-      product.x = Math.max(0, Math.min(plan.w - product.w, product.x + input.anchorShift.dx));
-      product.y = Math.max(0, Math.min(plan.h - product.h, product.y + input.anchorShift.dy));
+      const x = Math.max(0, Math.min(plan.w - product.w, product.x + input.anchorShift.dx)), y = Math.max(0, Math.min(plan.h - product.h, product.y + input.anchorShift.dy));
+      if (x !== product.x || y !== product.y) { product.x = x; product.y = y; shadow = await drawShadow(); }
     }
     plan.placedX = product.x; plan.placedY = product.y;
-    const cutoutAlpha = await sharp(cutout).extractChannel(3).raw().toBuffer();
-    for (let y = 0; y < product.h; y++) cutoutAlpha.copy(foregroundMask, (product.y + y) * plan.w + product.x, y * product.w, (y + 1) * product.w);
-    let shadow = await shadowLayer(p, matte, crop, plan, input.productType, color, foregroundMask, input.keepSourceShadow !== false);
-    // Never a synthesised contact shadow on a photo cut in the source on any side (a bag held in a cropped hand, a
-    // close-up filling the photo): nothing stands on a floor there, and the shadow below makes the centred product
-    // look off-centre.
-    if ((input.synthesiseShadow === false || anyCut(cut)) && shadow.flags.includes("shadow_synthesised")) shadow = { layer: null, flags: ["no_shadow_source"] };
     result.flags.push(...shadow.flags);
     shadowKind = shadow.flags.includes("shadow_synthesised") ? "synthesised" : shadow.layer ? "kept" : "none";
     image = await sharp({ create: { width: plan.w, height: plan.h, channels: 3, background: color } }).composite([...(shadow.layer ? [{ input: shadow.layer, blend: "multiply" as const }] : []), { input: cutout, left: product.x, top: product.y, blend: "over" }]).png().toBuffer();
@@ -628,6 +647,7 @@ export async function renderSource(input: RenderInput): Promise<RenderOutput> {
   }
   result.bytes = jpeg.length;
   const identifier = input.identifier ?? "photo";
+  result.foregroundMask = foregroundMask;
   const checked = await checkOutput({ jpeg, channel: spec.id, shotNumber, plan, identifier, n: shotNumber, publicObjectPath: input.publicObjectPath ?? `${encodeURIComponent(identifier)}_${shotNumber}.jpg`, foregroundMask });
   result.compliance = { ok: checked.ok, failures: checked.failures, measured: { ...checked.measured, shadow: shadowKind, cut: { ...cut } } };
   // The note (the row's reason) names the rule in plain words; the "code: sentence" strings stay in compliance.failures (07 4.6a).

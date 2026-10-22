@@ -306,6 +306,9 @@ Any change to the maths in this file that alters output bytes must bump `CHANNEL
     `STYLI_SKIP_LOW_RESOLUTION` (02, a constant, always true) makes the output `skipped` with the note
     "Skipped for Styli: the photo is smaller than Styli needs." and no JPEG; the sheet cell stays
     empty with that note (06). This is the agreement with Styli; there is no option to turn it off.
+    Superseded 2026-10-22 (owner decision, docs/SPEC.md R8): Styli has no enlargement cap. The
+    output is made with `low_resolution` as information; `STYLI_SKIP_LOW_RESOLUTION` is removed and the
+    only size floor is `MIN_SOURCE_LONG_SIDE_PX` (`small_source`, held).
 
 Where the bytes go: `renderSource` returns `jpeg`. In production 06 writes it to
 `stagingPath(prefix, pathKey, channel, n)` (02) and later copies it to

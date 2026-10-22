@@ -851,7 +851,7 @@ export async function buildPreview(db: Db, batchId: string, deps: Pick<IngestDep
   const photoCount = Number(photos?.n ?? 0);
   return {
     kpis: { products: grouped.products.size, photos: photoCount, channels: channels.length, outputs: photoCount * channels.length },
-    warnings: warningSentences(grouped, state.list, channels, { brandName: batch.brandName, dimensions, topLevelFolders: state.topLevelFolders, byMatchColumn: state.byMatchColumn }),
+    warnings: warningSentences(grouped, state.list, channels, { brandName: batch.brandName, topLevelFolders: state.topLevelFolders, byMatchColumn: state.byMatchColumn }),
     rows: allRows.slice(0, Math.max(0, opts.limit ?? PREVIEW_ROW_LIMIT)),
     totalRows: allRows.length,
     overwrite,
@@ -922,6 +922,6 @@ export async function collectOffline(input: {
     products,
     missing: a.missing,
     rejected,
-    warnings: warningSentences(a.grouped, a.list, input.channels ?? [], { brandName: input.brandName, dimensions: a.dimensions, topLevelFolders, byMatchColumn: a.byMatchColumn }),
+    warnings: warningSentences(a.grouped, a.list, input.channels ?? [], { brandName: input.brandName, topLevelFolders, byMatchColumn: a.byMatchColumn }),
   };
 }

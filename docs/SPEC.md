@@ -50,9 +50,13 @@ configuration. Access is by Google sign-in with three roles (admin, operator, vi
   behind the flag `UPSCALE_MODEL`, chosen by the fidelity gate of spec 11 and used only when the
   enlargement exceeds `UPSCALE_MIN_SCALE` (1.5); its outputs carry the information flag `upscaled`,
   never a hold. Decided by the owner 2026-10-21: the upscaler is on by default (`swinir-x2`, deploy.sh;
-  `UPSCALE_MODEL=off` turns it off) for every channel wherever a photo is enlarged beyond 1.5x, and the
-  x2 upscale un-skips Styli: Styli judges the size after the upscale, so its source floor is 741 px with
-  the upscaler (1,482 px without). No paid image API without a separate owner yes.
+  `UPSCALE_MODEL=off` turns it off) for every channel wherever a photo is enlarged beyond 1.5x. No paid
+  image API without a separate owner yes.
+- No Styli enlargement cap (owner decision 2026-10-22, replacing the 2026-10-21 size floor of 741 px with
+  the upscaler and 1,482 px without): any amount of enlargement is fine and a product cut at the photo
+  edge is made on Styli like any other photo. No channel skips a photo because it needs more
+  enlargement; the only size floor is the global one (long side under 500 px: `small_source`, held for a
+  person). Batch b8a99c1b had 20 of 201 Styli images skipped by the old rule after step 4 had counted them.
 - Repairs (owner, 2026-10-22): a defect we produced is never answered by a fixed list. For each output
   (channel x photo) the pipeline reads what failed (the rule code, the measured values, the judge's flag
   and evidence) and applies the fix for that failure on that channel, computed from the measurement
@@ -114,10 +118,9 @@ Channel rules
 - R7 Light grey `#E0E0E0` background on every channel; Amazon and Shein image 1 pure white `#FFFFFF`.
 - R8 Styli: 2342x3123 canvas, guides top 450, bottom 450, left 150, right 150 px, product bottom-centre,
   identical placement on all angles, no white borders or gaps on detail shots, no mixed products.
-  Low-resolution sources are skipped for Styli by agreement with Styli and listed in the sheet notes.
-  The agreement applies to the size after the x2 upscaler when it is on (owner 2026-10-21): a photo is
-  skipped only when even its x2 image would need more than 1.5x (source under 741 px high; 1,482 px
-  without the upscaler, `styliMinSourceHeightPx`).
+  Every photo is made for Styli whatever enlargement it needs (owner 2026-10-22): the x2 upscaler makes
+  the colour beyond 1.5x and Lanczos does the rest; a large enlargement carries the information flag
+  `low_resolution`, never a skip. Only the global floor (long side under 500 px, `small_source`) holds a photo.
 - R9 Trendyol: HTTPS link, no spaces in the filename. Edited images are platform-exclusive.
 - R10 Channels are chosen per batch; nothing is pre-ticked and no defaults are stored. The grouping
   P1 (Namshi, Noon, Trendyol, Amazon) / P2 (Styli, 6thStreet, Centrepoint, VogaCloset, Shein) is
@@ -190,11 +193,10 @@ Scale, operations, cost, people
 centred. Noon's "(horizontal shots)": the 5% side margin is the minimum when the product is wider than
 tall. Common: JPEG 4:4:4, sRGB with ICC, quality 90 stepping down to 70 until <= 2,000,000 bytes, EXIF
 applied then stripped, JFIF density set. Adaptive canvas: the largest size between min and target that
-keeps upscaling <= 1.5x; below that, the min canvas with a `low_resolution` flag; Styli (fixed canvas)
-flags, and the constant `STYLI_SKIP_LOW_RESOLUTION = true` (an agreement with Styli, always applied,
-not an operator option) excludes such images from the sheet with a note; with the upscaler on, Styli
-judges the enlargement left after the x2 upscale (`fit(min) / 2 > 1.5` skips), and a photo let through
-is still made if the upscale call then fails, flagged `low_resolution` with the soft note. Any enlargement (scale > 1)
+keeps upscaling <= 1.5x; below that, the min canvas with a `low_resolution` flag; a fixed canvas (Styli,
+Centrepoint, Trendyol) is filled whatever the enlargement and flagged `low_resolution` the same way. The
+flag is information only and never a skip on any channel (owner 2026-10-22: no Styli enlargement cap); a
+photo is made even if the upscale call fails, with the soft note. Any enlargement (scale > 1)
 is followed by a conservative unsharp mask on the RGB only (spec 11); an enlargement past
 `UPSCALE_MIN_SCALE` (1.5) goes through the x2 upscaler when `UPSCALE_MODEL` is set, Lanczos otherwise
 (spec 11; `render_key` carries the upscaler id and version).
@@ -207,7 +209,7 @@ required margins; foreground is allowed at zero-margin edges under the full-canv
 
 Constants: `JPEG_QUALITY_START = 90`, `JPEG_QUALITY_MIN = 70`, `JPEG_QUALITY_STEP = 5` (builder
 constant), `MAX_OUTPUT_BYTES = 2_000_000`, `MAX_UPSCALE = 1.5`, `DETAIL_SHOT_BBOX_FRACTION = 0.85`,
-`MIN_SOURCE_LONG_SIDE_PX = 500`, `STYLI_MIN_SOURCE_HEIGHT_PX = 1482`, `CHANNEL_RULES_VERSION` (bumped on
+`MIN_SOURCE_LONG_SIDE_PX = 500` (the one size floor on every channel), `CHANNEL_RULES_VERSION` (bumped on
 any rule change; part of `render_key`). Labels: Noon, Namshi, Trendyol, Styli, Centrepoint, 6thStreet,
 VogaCloset, Shein, Amazon. Groups P1 and P2 are information only; nothing pre-ticked, no stored defaults.
 
@@ -573,8 +575,8 @@ flood-fill fallback with flag `fallback_matte` and status `needs_attention` inst
   per channel in plain words, Continue disabled until one is ticked). "Start" (KPIs "products found",
   "photos", "marketplaces", "images will be made"; "Estimated cost: about INR <x> (<n> images, <m>
   quality checks)" or "not available" when `INR_PER_USD` is unset; warning list without any SKU warning:
-  products with no photos, "<k> files could not be read." with names and reasons, Styli low-resolution
-  skips, "<k> products have photos but are not in your product list", "<k> products have two files for
+  products with no photos, "<k> files could not be read." with names and reasons (no Styli size
+  warning: no photo is skipped for its size), "<k> products have photos but are not in your product list", "<k> products have two files for
   the same shot number", multiple top-level folders, duplicate identifier rows, "<k> size rows matched
   <m> products."; overwrite preview "<n> products are new", "<m> products already exist and will be
   overwritten", per product the shots to be removed and the rename hint; busy products; the
@@ -882,9 +884,8 @@ always-on resources.
 7. Whether `roles/iap.httpsResourceAccessor` can be granted at the `catalog-web` resource level with the
    operator's roles; fallback is the project-level grant for `domain:opptra.com` (spec 03), which also
    opens the earlier `ila-web` to every Opptra account and is noted in `docs/solutions/catalog-iap.md`.
-8. Whether an x2 upscale may un-skip Styli for 800x1200 sources (spec 11): OPEN, asked in the status
-   when the fidelity gate is done; until then `STYLI_SKIP_LOW_RESOLUTION` and the 1,482 px minimum
-   stand.
+8. Whether an x2 upscale may un-skip Styli for 800x1200 sources (spec 11): CLOSED by the owner
+   2026-10-22, no Styli enlargement cap at all; every photo of 500 px or more is made for Styli.
 
 Closed by the owner (recorded in the decisions log): the Styli size-versus-softness question (follow the
 guideline sheet; no Styli-only `MAX_UPSCALE`) and the licence posture (NC models are full candidates).

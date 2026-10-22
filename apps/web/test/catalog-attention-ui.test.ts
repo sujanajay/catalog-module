@@ -118,12 +118,16 @@ describe("batch copy for the real state of the batch", () => {
     const sources = [{ productId: "p", n: 1, sha256: "same", height: 1600 }, { productId: "p", n: 2, sha256: "new", height: 800 }];
     const key = (sha256: string, n: number, channel: "noon" | "centrepoint", rulesVersion?: string) => renderKey({ sourceSha256: sha256, channel, n, policyKey: "default|birefnet", ...(rulesVersion ? { rulesVersion } : {}) });
     const live = [{ productId: "p", n: 1, channel: "noon" as const, sha256: "same", renderKey: key("same", 1, "noon"), workerMatteModel: "birefnet" }, { productId: "p", n: 2, channel: "noon" as const, sha256: "old", renderKey: key("old", 2, "noon"), workerMatteModel: "birefnet" }];
-    // Photo 1 is unchanged on Noon but new on Styli; photo 2 changed on Noon and is too small for Styli.
-    expect(plannedImages(sources, ["noon", "styli"], live)).toEqual({ outputs: 2, sourcesToMake: 2 });
+    // Photo 1 is unchanged on Noon but new on Styli; photo 2 changed on Noon and is made for Styli too.
+    expect(plannedImages(sources, ["noon", "styli"], live)).toEqual({ outputs: 3, sourcesToMake: 2 });
     expect(plannedImages([sources[0]!], ["noon"], live)).toEqual({ outputs: 0, sourcesToMake: 0 });
-    // With the x2 upscaler on, Styli judges the upscaled size: the 800 px photo is made for Styli too (floor 741 px).
-    expect(plannedImages(sources, ["noon", "styli"], live, 2)).toEqual({ outputs: 3, sourcesToMake: 2 });
-    expect(plannedImages([{ productId: "p", n: 3, sha256: "tiny", height: 600 }], ["styli"], [], 2)).toEqual({ outputs: 0, sourcesToMake: 0 });
+  });
+  it("counts every Styli image the render makes, whatever the photo's size (no enlargement cap, owner decision 2026-10-22)", () => {
+    // Batch b8a99c1b: 1000 x 1000 photos cut at the edge were counted in step 4 and then skipped by the render. Now the
+    // render makes them (render-cut.test.ts), so step 4 counts them, with or without the upscaler.
+    const sources = [1000, 900, 600].map((height, i) => ({ productId: "p", n: i + 1, sha256: `s${i}`, height }));
+    expect(plannedImages(sources, ["styli"], [])).toEqual({ outputs: 3, sourcesToMake: 3 });
+    expect(plannedImages(sources, ["styli"], [], "swinir-x2")).toEqual({ outputs: 3, sourcesToMake: 3 });
   });
   it("predicts the cut-out model the worker will use, or none when only the classifier can tell", async () => {
     const policies: Record<string, { matteModel: string; matteModelSecond?: string }> = { footwear: { matteModel: "birefnet" }, other: { matteModel: "birefnet", matteModelSecond: "bria-rmbg" } };
@@ -141,15 +145,15 @@ describe("batch copy for the real state of the batch", () => {
     // rules version 9; with version 10 every key changed and the worker made all 15, while step 4 said 5.
     const sources = [1, 2, 3, 4, 5].map((n) => ({ productId: "p", n, sha256: `s${n}`, height: 1200 }));
     const liveUnder = (rulesVersion?: string) => sources.flatMap((s) => (["noon", "centrepoint"] as const).map((channel) => ({ productId: "p", n: s.n, channel, sha256: s.sha256, workerMatteModel: "birefnet", renderKey: renderKey({ sourceSha256: s.sha256, channel, n: s.n, policyKey: "default|birefnet", ...(rulesVersion ? { rulesVersion } : {}) }) })));
-    expect(plannedImages(sources, ["noon", "styli", "centrepoint"], liveUnder("9"), 2, "swinir-x2")).toEqual({ outputs: 15, sourcesToMake: 5 });
+    expect(plannedImages(sources, ["noon", "styli", "centrepoint"], liveUnder("9"), "swinir-x2")).toEqual({ outputs: 15, sourcesToMake: 5 });
     // Made under today's rules (plain, or by the upscaler) they stay as they are: only Styli is made.
-    expect(plannedImages(sources, ["noon", "styli", "centrepoint"], liveUnder(), 2, "swinir-x2")).toEqual({ outputs: 5, sourcesToMake: 5 });
+    expect(plannedImages(sources, ["noon", "styli", "centrepoint"], liveUnder(), "swinir-x2")).toEqual({ outputs: 5, sourcesToMake: 5 });
     const upscaled = liveUnder().map((o) => (o.channel === "centrepoint" ? { ...o, renderKey: upscaledRenderKey(o.renderKey, "swinir-x2") } : o));
-    expect(plannedImages(sources, ["noon", "styli", "centrepoint"], upscaled, 2, "swinir-x2")).toEqual({ outputs: 5, sourcesToMake: 5 });
+    expect(plannedImages(sources, ["noon", "styli", "centrepoint"], upscaled, "swinir-x2")).toEqual({ outputs: 5, sourcesToMake: 5 });
     // A live image made with another cut-out model than the worker will use now is made again, and counted.
-    expect(plannedImages(sources, ["noon"], liveUnder().map((o) => ({ ...o, workerMatteModel: "bria-rmbg" })), 2, "swinir-x2")).toEqual({ outputs: 5, sourcesToMake: 5 });
+    expect(plannedImages(sources, ["noon"], liveUnder().map((o) => ({ ...o, workerMatteModel: "bria-rmbg" })), "swinir-x2")).toEqual({ outputs: 5, sourcesToMake: 5 });
     // When the worker's cut-out model cannot be known before the batch runs, the live image is counted.
-    expect(plannedImages(sources, ["noon"], liveUnder().map((o) => ({ ...o, workerMatteModel: null })), 2, "swinir-x2")).toEqual({ outputs: 5, sourcesToMake: 5 });
+    expect(plannedImages(sources, ["noon"], liveUnder().map((o) => ({ ...o, workerMatteModel: null })), "swinir-x2")).toEqual({ outputs: 5, sourcesToMake: 5 });
   });
 });
 
