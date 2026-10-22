@@ -3,13 +3,12 @@ import Link from "next/link";
 import { channel } from "@catalog/core/catalog/channels";
 import { inrPerUsdFromEnv, RUPEES_NOT_CONFIGURED, usdAmount } from "@catalog/core/catalog/cost";
 import type { BrandCost } from "@catalog/core/catalog/cost-report";
-import { dailyCapFromEnv } from "@catalog/core/spend";
 import AutoRefresh from "@/components/AutoRefresh";
 import { when } from "@/components/ui";
 import { db } from "@/lib/db";
 import { requireRole } from "@/lib/user";
 import { activeBatches, batchCostDetail, costOverview, lifetimeBrandCost, recentBatches, recentFailures, COST_TTL_MS } from "@/lib/catalog/ops";
-import { REPORT_UNAVAILABLE, AGENCY_REFERENCE, chunkGaveUpText, chunkProgressText, chunkTotal, COST_STAGE_WORDS, hintText, logsUrl, money, OPS_HREF, OPS_REFRESH_MS, shareOfCap, statusWord } from "@/lib/catalog/ops-copy";
+import { REPORT_UNAVAILABLE, AGENCY_REFERENCE, chunkGaveUpText, chunkProgressText, chunkTotal, COST_STAGE_WORDS, hintText, logsUrl, money, OPS_HREF, OPS_REFRESH_MS, statusWord } from "@/lib/catalog/ops-copy";
 
 export const dynamic = "force-dynamic";
 
@@ -52,7 +51,6 @@ export default async function OpsPage({ searchParams }: { searchParams: Promise<
   const now = new Date();
   const conn = db();
   const rate = inrPerUsdFromEnv();
-  const cap = dailyCapFromEnv();
   // In sequence on purpose: the page holds at most one of the web instance's two pooled connections.
   const active = await activeBatches(conn, now);
   const failures = await recentFailures(conn, now);
@@ -192,12 +190,12 @@ export default async function OpsPage({ searchParams }: { searchParams: Promise<
 
       <section>
         <h2>Cost per day, last 30 days</h2>
-        <p className="help">Days are UTC. The daily limit is USD {usdAmount(cap)}; it counts quality checks and worker time, while these totals also include the cut-out service. Test batches are left out.</p>
+        <p className="help">Days are UTC. Test batches are left out.</p>
         {!overview ? <p>{REPORT_UNAVAILABLE}</p> : overview.days.length ? (
           <div className="tw"><table>
-            <thead><tr>{["Day", "Cost", "Batches", "Against the daily limit"].map(c => <th key={c}>{c}</th>)}</tr></thead>
+            <thead><tr>{["Day", "Cost", "Batches"].map(c => <th key={c}>{c}</th>)}</tr></thead>
             <tbody>{[...overview.days].reverse().map(d => (
-              <tr key={d.day}><td>{d.day}</td><td>{money(d.usd, rate)}</td><td>{d.batches}</td><td>{shareOfCap(d.usd, cap)}</td></tr>
+              <tr key={d.day}><td>{d.day}</td><td>{money(d.usd, rate)}</td><td>{d.batches}</td></tr>
             ))}</tbody>
           </table></div>
         ) : <p>No cost recorded in the last 30 days.</p>}

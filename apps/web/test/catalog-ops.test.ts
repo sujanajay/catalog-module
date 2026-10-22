@@ -100,7 +100,7 @@ describe("admin Ops page", () => {
     expect(html).toContain(`Total ${money(attribution.totalUsd, 85)}`);
     expect(html).toContain("1 extra cut-out call, 1 quality check");
     expect(html).toContain("ABC-123, photo 1");
-    expect(html).toContain("% of the daily limit");
+    expect(html).not.toContain("daily limit");
     expect(html).toContain(logsUrl(batch.id).replace(/&/g, "&amp;"));
     expect(html).not.toMatch(MODEL_WORDS);
   });

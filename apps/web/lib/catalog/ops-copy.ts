@@ -130,9 +130,3 @@ export function hintText(h: { matteExtraCalls: number; judgeCalls: number; upsca
   ].filter(Boolean);
   return parts.join(", ");
 }
-
-/** "12% of the daily limit"; the limit counts quality checks and worker time only. */
-export function shareOfCap(usd: number, capUsd: number): string {
-  if (capUsd <= 0) return "";
-  return `${Math.round((usd / capUsd) * 100)}% of the daily limit`;
-}
