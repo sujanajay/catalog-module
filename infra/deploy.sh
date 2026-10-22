@@ -281,8 +281,13 @@ echo "==> matting GPU"
 MATTING_GPU_URL=""
 if [ "${CATALOG_PREVIEW:-0}" = 1 ]; then
   # Reuse 05's existing matting endpoints; never change them from an unmerged preview.
-  MATTING_GPU_URL=$(gcv run services describe catalog-worker --region="$REGION" \
-    --format='value(spec.template.spec.containers[0].env.filter(name=MATTING_GPU_URL).value)')
+  # Read it from JSON: newer gcloud SDKs (589) reject the filter() transform in --format=value.
+  WORKER_JSON=$(gcv run services describe catalog-worker --region="$REGION" --format=json)
+  MATTING_GPU_URL=$(node -e '
+    const svc = JSON.parse(require("fs").readFileSync(0, "utf8"));
+    const env = svc?.spec?.template?.spec?.containers?.[0]?.env ?? [];
+    console.log(env.find((e) => e.name === "MATTING_GPU_URL")?.value ?? "");
+  ' <<<"$WORKER_JSON")
   if [ -n "$MATTING_GPU_URL" ]; then WORKER_ENV+=",MATTING_GPU_URL=$MATTING_GPU_URL"; fi
 elif GPU_ERR=$(gcloud run deploy catalog-matting-gpu --quiet --image="$AR/matting-gpu:$TAG" \
   --service-account="$MATTING_SA" --region="$GPU_REGION" "$(auth_flag catalog-matting-gpu "$GPU_REGION")" \
