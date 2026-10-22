@@ -73,8 +73,10 @@ export async function handleSweep(deps: SweepDeps, _body: Record<string, unknown
 
   const swept = await deps.db.transaction(async (tx) => {
     const result = await tx.execute(sql`
+      -- counts.failReason is what the batch page shows under "Could not start" (pipeline/status.ts).
       UPDATE catalog_batches AS b
-      SET status = 'failed', error = ${SWEEP_ERROR}, updated_at = now()
+      SET status = 'failed', error = ${SWEEP_ERROR},
+        counts = b.counts || jsonb_build_object('failReason', ${SWEEP_ERROR}::text), updated_at = now()
       WHERE b.status IN (${statuses})
         AND GREATEST(
           b.updated_at,

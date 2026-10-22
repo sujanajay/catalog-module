@@ -5,6 +5,9 @@ import type { Db } from "@catalog/core/db/client";
 import { releaseLocks } from "@catalog/core/catalog/products";
 import { createTestDb } from "@catalog/core/db/testing";
 import { handleSweep, SWEEP_ERROR, type ReleaseLocks } from "./sweep";
+import { EMPTY_BATCH_COUNTS } from "@catalog/core/db/schema";
+import type { BatchCounts } from "@catalog/core/catalog/types";
+import { deriveBatchState } from "@catalog/core/catalog/pipeline/status";
 
 /** Tier 2 (PGlite): the real 0000_init.sql migration (via createTestDb) and the real releaseLocks. */
 type Row = Record<string, unknown>;
@@ -60,6 +63,23 @@ afterEach(async () => {
 });
 
 describe("handleSweep (PGlite)", () => {
+  it("writes the sweep sentence to counts.failReason too, so the batch page shows the reason, and keeps the other counts", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const stale = await insertBatch("matting", 5);
+    await db.execute(sql`UPDATE catalog_batches SET counts = ${JSON.stringify({ ...EMPTY_BATCH_COUNTS, outputs: 12, verified: 3 })}::jsonb WHERE id = ${stale}`);
+    const fresh = await insertBatch("matting", 0.5);
+    await handleSweep({ db, enqueue: vi.fn(async () => "task"), releaseLocks, now: () => NOW }, {});
+    const [row] = await rows(db, sql`SELECT status, error, counts FROM catalog_batches WHERE id = ${stale}`);
+    const counts = row!.counts as BatchCounts;
+    expect(row).toMatchObject({ status: "failed", error: SWEEP_ERROR });
+    expect(counts).toMatchObject({ failReason: "No progress for 2 hours. Start the batch again.", outputs: 12, verified: 3 });
+    // What the batch page shows for it: the reason, not only "Start the batch again."
+    expect(deriveBatchState({ status: "failed", counts }).text).toBe(SWEEP_ERROR);
+    const [untouched] = await rows(db, sql`SELECT counts FROM catalog_batches WHERE id = ${fresh}`);
+    expect(untouched!.counts).toEqual({});
+  });
+
   it("fails a stale batch, releases its locks and logs one WARNING; fresh and idle batches are untouched", async () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
     const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
