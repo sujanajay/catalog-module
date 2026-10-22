@@ -10,6 +10,7 @@ import { readFile } from "node:fs/promises";
 import { analyseBackground, preservedDarkness, shadowLayer, SHADOW_MAX_DARKNESS } from "./shadow";
 import { contactSheet } from "./contact-sheet";
 import type { Upscaler } from "./upscale";
+import { holdsAtRender } from "./qa/triage";
 
 function fixture(width = 800, height = 800, box = { x: 200, y: 200, w: 400, h: 400 }): { prepared: Prepared; matte: Matte } {
   const rgb = Buffer.alloc(width * height * 3, 255), alpha = Buffer.alloc(width * height);
@@ -83,12 +84,13 @@ describe("prepare", () => {
 });
 
 describe("render and encoded compliance", () => {
-  it.each(CHANNEL_IDS)("renders %s shots 1 and 2, skipping small Styli", async id => {
-    const source = fixture();
+  it.each(CHANNEL_IDS)("renders %s shots 1 and 2, small Styli included (no enlargement cap)", async id => {
+    // Styli: a tall product from an 800 px photo needs about 3.7x and is made. (A product as wide as Styli's safe box
+    // fails the encoded check at any scale, enlarged or not, and is left to auto-resolve's smaller fit.)
+    const source = id === "styli" ? fixture(800, 800, { x: 250, y: 100, w: 300, h: 600 }) : fixture();
     for (const shotNumber of [1, 2]) {
       const output = await renderSource({ ...source, channel: id, shotNumber, productType: "apparel_model" });
-      if (id === "styli") { expect(output.status).toBe("skipped"); expect(output.jpeg).toBeNull(); }
-      else { expect(output.compliance.failures).toEqual([]); expect(output.status).toBe("ok"); }
+      expect(output.compliance.failures).toEqual([]); expect(output.status).toBe("ok");
     }
   });
   it("anchors high-resolution Styli on its exact bottom guide", async () => {
@@ -249,10 +251,12 @@ describe("Styli judged on the upscaled size", () => {
     expect(upscaler.calls).toBe(1);
     expect(output.notes).not.toContain("Skipped for Styli: the photo is smaller than Styli needs.");
   });
-  it("skips the same photo for Styli without the upscaler, with the agreed note", async () => {
+  it("makes the same photo for Styli without the upscaler too: plain enlargement, low_resolution as information only", async () => {
     const output = await renderSource({ ...medium(), channel: "styli", shotNumber: 2, productType: "apparel_model" });
-    expect(output.status).toBe("skipped"); expect(output.jpeg).toBeNull();
-    expect(output.notes).toEqual(["Skipped for Styli: the photo is smaller than Styli needs."]);
+    expect(output.status).toBe("ok"); expect(output.jpeg).not.toBeNull(); expect(output.compliance.failures).toEqual([]);
+    expect([output.plan.w, output.plan.h]).toEqual([2342, 3123]);
+    expect(output.flags).toContain("low_resolution"); expect(output.flags).not.toContain("upscaled");
+    expect(output.notes).not.toContain("Skipped for Styli: the photo is smaller than Styli needs.");
   });
   it("still makes it when the upscale call fails at render time, flagged low_resolution with the soft note", async () => {
     quiet();
@@ -260,10 +264,20 @@ describe("Styli judged on the upscaled size", () => {
     expect(output.status).toBe("ok"); expect(output.flags).toContain("low_resolution"); expect(output.flags).not.toContain("upscaled");
     expect(output.attention?.why).toMatch(/may look soft/);
   });
-  it("still skips a 400x600 photo for Styli with the upscaler", async () => {
+  it("makes a 400x600 photo for Styli with the upscaler (no enlargement cap, owner decision 2026-10-22)", async () => {
+    quiet();
     const upscaler = fakeUpscaler(), output = await renderSource({ ...fixture(400, 600, { x: 75, y: 75, w: 250, h: 450 }), channel: "styli", shotNumber: 2, productType: "apparel_model", upscaler });
-    expect(output.status).toBe("skipped"); expect(output.notes).toEqual(["Skipped for Styli: the photo is smaller than Styli needs."]);
-    expect(output.flags).not.toContain("cut_in_source"); expect(upscaler.calls).toBe(0);
+    expect(output.status).toBe("ok"); expect(output.compliance.failures).toEqual([]);
+    expect(output.flags).toContain("upscaled"); expect(output.flags).toContain("low_resolution"); expect(output.flags).not.toContain("cut_in_source");
+    expect(upscaler.calls).toBe(1);
+  });
+  it("still holds a source under 500 px for a person (small_source), on Styli as on every channel", async () => {
+    const png = await sharp({ create: { width: 300, height: 450, channels: 3, background: "white" } }).composite([{ input: await sharp({ create: { width: 180, height: 330, channels: 3, background: { r: 160, g: 30, b: 50 } } }).png().toBuffer(), left: 60, top: 60 }]).png().toBuffer();
+    const prepared = await prepare(png, "tiny.png", async b => b);
+    expect(prepared.flags).toContain("small_source");
+    const { matte } = fixture(300, 450, { x: 60, y: 60, w: 180, h: 330 });
+    const output = await renderSource({ prepared, matte, channel: "styli", shotNumber: 2, productType: "apparel_model" });
+    expect(output.flags).toContain("small_source"); expect(holdsAtRender(output.flags)).toBe(true);
   });
 
   // The D4 live check (batch 29d25c7b, five 800x1200 Penti photos): every Styli output failed styli_anchor once the

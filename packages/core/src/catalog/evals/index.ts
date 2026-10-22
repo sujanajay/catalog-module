@@ -22,7 +22,7 @@ export async function runImageChecks(subject: OutputSubject): Promise<CheckResul
   return results.map(r => (r.status === "not_run" ? r : notRun(r.id, r.group, r.subject, `Planted wrong item (${r.status}: ${r.measured} against ${r.threshold} ${r.unit}): the photo is of another product and is judged by attention.planted_caught, not by the render checks. ${r.detail}`)));
 }
 export { checkUniformScale } from "./geometry";
-export { CHART_SKIP_NOTE, checkCompleteness, expectedOutcome, STYLI_SKIP_NOTE } from "./completeness";
+export { CHART_SKIP_NOTE, checkCompleteness, STYLI_SKIP_NOTE } from "./completeness";
 export { checkAttention, flagRows, outputKey, type AttentionShotRow } from "./attention";
 export { assertLocked, checkIdentical, checkOverwrite, lockedProductsMessage, overwriteFailed, overwriteNotRun, planOverwrite } from "./overwrite";
 export { buildReport, reportHtml, summaryLine } from "./report";

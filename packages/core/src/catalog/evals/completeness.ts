@@ -1,12 +1,13 @@
 // Completeness (spec 10 section 2): for every golden source and ticked channel exactly the expected
 // output exists, live and verified, with its public object, its staged file and its sheet cell; a
-// skip only where the spec allows (Styli under styliMinSourceHeightPx, or a size chart left out with its note) and with the exact note.
+// skip only where the spec allows (a size chart left out with its note) and with the exact note. No channel skips a
+// photo for its size (owner decision 2026-10-22: no Styli enlargement cap), so a Styli size skip fails skip_allowed.
 // Pure over plain rows so it is unit tested without a database.
-import { channel, styliMinSourceHeightPx } from "../channels";
+import { channel } from "../channels";
 import { flagReason, type ChannelId } from "../types";
-import { upscaleFactorFromEnv } from "../upscale";
 import { judge, type CheckResult, type CheckSubject } from "./types";
 
+/** The note on Styli outputs skipped for their size before 2026-10-22; only older batches carry it (exports.ts counts them). */
 export const STYLI_SKIP_NOTE = "Skipped for Styli: the photo is smaller than Styli needs.";
 /** A size chart or text-only photo is left out on every channel with this note (07 4.0a, flag `chart_image`). */
 export const CHART_SKIP_NOTE = flagReason("chart_image");
@@ -46,11 +47,6 @@ export interface CompletenessInput {
 }
 export const sourceKey = (identifier: string, n: number) => `${identifier}|${n}`;
 
-/** The spec's expectation for one (source, channel): "output" or "skip" (Styli low resolution, judged after the upscaler when UPSCALE_MODEL is set). */
-export function expectedOutcome(source: SourceRow, ch: ChannelId, upscaleFactor: number = upscaleFactorFromEnv()): "output" | "skip" {
-  return ch === "styli" && (source.height ?? Infinity) < styliMinSourceHeightPx(upscaleFactor) ? "skip" : "output";
-}
-
 export function checkCompleteness(input: CompletenessInput): CheckResult[] {
   const K = "completeness" as const, out: CheckResult[] = [];
   const key = (identifier: string, ch: ChannelId, n: number) => `${identifier}|${ch}|${n}`;
@@ -79,9 +75,7 @@ export function checkCompleteness(input: CompletenessInput): CheckResult[] {
     const rows = byKey.get(k) ?? [], chart = rows.length === 1 && rows[0]!.status === "skipped" && rows[0]!.reason === CHART_SKIP_NOTE;
     const heldShots = heldProducts.get(source.identifier), held = !!heldShots;
     const sibling = held && !heldExpected.has(sourceKey(source.identifier, source.n));
-    // A Styli skip under the minimum stays a skip on a held product: the pipeline counts it as skipped and the sheet row
-    // carries the note (eval run 3: the held ZEE79259BBFD83FFA1DB0Z and the 450 px copies, 144 skipped against the 142 expected).
-    const want = chart ? "chart" : expectedOutcome(source, ch) === "skip" ? "skip" : held ? "held" : productHeld.has(source.identifier) ? "product_held" : "output";
+    const want = chart ? "chart" : held ? "held" : productHeld.has(source.identifier) ? "product_held" : "output";
     if (want === "output") expectedOutputs++; else if (want === "held" || want === "product_held") expectedHeld++; else expectedSkips++;
     out.push(judge(rows.length === 1, "completeness.one_output", K, who, rows.length, 1, "rows", rows.length === 1 ? `One output row for ${channel(ch).label} image ${source.n}.` : `${rows.length} output rows for ${channel(ch).label} image ${source.n} (expected exactly 1).`));
     const row = rows[0];
@@ -101,12 +95,6 @@ export function checkCompleteness(input: CompletenessInput): CheckResult[] {
       const note = input.sheetNotes.get(source.identifier) ?? "", expectedChart = !input.chartExpected || input.chartExpected.has(sourceKey(source.identifier, source.n));
       out.push(judge(!rows[0]!.isLive && expectedChart, "completeness.skip_allowed", K, who, `skipped: ${CHART_SKIP_NOTE}`, expectedChart ? `skipped: ${CHART_SKIP_NOTE}` : "an output (the manifest expects no chart here)", "status", expectedChart ? "A size chart or text-only photo, left out with its note." : `Left out as a size chart without an expectation: the manifest does not expect image ${source.n} to be a chart, so a product photo was dropped from ${channel(ch).label} by the chart detector.`));
       out.push(judge(!cell?.url && note.includes(CHART_SKIP_NOTE), "completeness.sheet_cell", K, who, cell?.url ? "link" : note.includes(CHART_SKIP_NOTE) ? "empty with note" : "empty without note", "empty with note", "cell", cell?.url ? "A left-out chart still has a link in the sheet." : note.includes(CHART_SKIP_NOTE) ? "The sheet cell is empty and the note says why." : "The sheet cell is empty but the chart note is missing from the row's notes."));
-      continue;
-    }
-    if (want === "skip") {
-      out.push(judge(row.status === "skipped" && row.reason === STYLI_SKIP_NOTE && !row.isLive, "completeness.skip_allowed", K, who, `${row.status}: ${row.reason ?? ""}`, `skipped: ${STYLI_SKIP_NOTE}`, "status", row.status === "skipped" ? "Styli skip with the agreed note." : `Styli should skip this ${source.height} px source but the output is ${row.status}.`));
-      const note = input.sheetNotes.get(source.identifier) ?? "";
-      out.push(judge(!cell?.url && note.includes(STYLI_SKIP_NOTE), "completeness.sheet_cell", K, who, cell?.url ? "link" : note.includes(STYLI_SKIP_NOTE) ? "empty with note" : "empty without note", "empty with note", "cell", cell?.url ? "A skipped Styli image still has a link in the sheet." : note.includes(STYLI_SKIP_NOTE) ? "The sheet cell is empty and the note says why." : "The sheet cell is empty but the Styli note is missing from the row's notes."));
       continue;
     }
     out.push(judge(row.status !== "skipped", "completeness.skip_allowed", K, who, row.status, "not skipped", "status", row.status === "skipped" ? `Skipped although the spec allows no skip here: ${row.reason ?? ""}` : "Not skipped."));
@@ -131,7 +119,7 @@ export function checkCompleteness(input: CompletenessInput): CheckResult[] {
   out.push(judge(extraCells.length === 0, "completeness.no_extra_cells", K, { identifier: "*", n: null, channel: null }, extraCells.length, 0, "cells", extraCells.length ? `${extraCells.length} sheet links belong to no golden source.` : "No stray sheet links."));
   const all: CheckSubject = { identifier: "*", n: null, channel: null };
   const planned = expectedOutputs + expectedSkips + expectedHeld;
-  out.push(judge(input.counts.outputs === planned, "completeness.counts_planned", K, all, input.counts.outputs, planned, "outputs", `Batch counts ${input.counts.outputs} planned outputs; the golden set implies ${planned} (${expectedSkips} Styli skips and left-out charts, ${expectedHeld} outputs of expected or product-level holds).`));
+  out.push(judge(input.counts.outputs === planned, "completeness.counts_planned", K, all, input.counts.outputs, planned, "outputs", `Batch counts ${input.counts.outputs} planned outputs; the golden set implies ${planned} (${expectedSkips} left-out charts, ${expectedHeld} outputs of expected or product-level holds).`));
   out.push(judge(input.counts.verified === expectedOutputs && input.counts.skipped === expectedSkips, "completeness.counts_verified", K, all, `${input.counts.verified} verified, ${input.counts.skipped} skipped`, `${expectedOutputs} verified, ${expectedSkips} skipped`, "outputs", `Links verified must equal planned minus skipped minus the ${expectedHeld} outputs of held products (every shot of an expected hold, and of a product held as a whole, which completeness.product_held names).`));
   const links = input.sheet.filter(c => c.url).length;
   out.push(judge(input.counts.recheckOk === input.counts.recheckTotal && input.counts.recheckTotal === links && links === expectedOutputs, "completeness.recheck_equals_verified", K, all, `recheck ${input.counts.recheckOk} of ${input.counts.recheckTotal}, ${links} links in the sheet`, `${expectedOutputs} of ${expectedOutputs}`, "links", "\"Independent re-check\" must equal \"Links verified\" and the number of links in the sheet (expected holds carry no link)."));

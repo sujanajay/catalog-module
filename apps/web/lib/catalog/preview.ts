@@ -3,10 +3,9 @@ import { catalogBatches, catalogOutputs, catalogProducts, catalogSourceImages, c
 import { buildDetectedStep2 } from "@catalog/core/catalog/ingest/detect-step";
 import { buildPreview } from "@catalog/core/catalog/ingest/index";
 import type { Detected } from "@catalog/core/catalog/ingest/types";
-import { styliMinSourceHeightPx, STYLI_SKIP_LOW_RESOLUTION } from "@catalog/core/catalog/channels";
 import { renderKeys } from "@catalog/core/catalog/pipeline/publish";
 import { resolvePolicy } from "@catalog/core/catalog/qa/policy";
-import { upscaleConfigFromEnv, upscaleFactorFromEnv } from "@catalog/core/catalog/upscale";
+import { upscaleConfigFromEnv } from "@catalog/core/catalog/upscale";
 import type { ChannelId } from "@catalog/core/catalog/types";
 import * as storage from "@catalog/core/storage";
 import { db } from "../db";
@@ -52,26 +51,24 @@ export async function patchDetected(id: string, value: unknown) {
   await regroupBatch(id);
   return { collecting: true };
 }
-type PlannedSource = { productId: string; n: number; sha256: string; height: number | null };
+type PlannedSource = { productId: string; n: number; sha256: string };
 /**
  * A live output and the photo it was made from (sha256). `workerMatteModel`: the cut-out model the worker will use
  * for this product in this batch (matteModelFor), or null when that cannot be known before the batch runs.
  */
 type LiveOutput = { productId: string; n: number; channel: ChannelId; sha256: string; renderKey: string; workerMatteModel: string | null };
 /**
- * Step 4's "images will be made" (spec 06): photos times channels, minus Styli skips, minus pairs whose live image
+ * Step 4's "images will be made" (spec 06): photos times channels (no channel skips a photo for its size), minus pairs whose live image
  * the worker keeps as it is: its render_key is one the worker accepts for this photo (chunk.ts, renderKeys: same
  * sha256, today's CHANNEL_RULES_VERSION, the cut-out model it will use, plain or upscaled). Anything in doubt is
  * counted, so the count may be higher than what is made but never lower.
  */
-export function plannedImages(sources: readonly PlannedSource[], channels: readonly ChannelId[], live: readonly LiveOutput[], upscaleFactor: number = upscaleFactorFromEnv(), upscaleModel: string | null = upscaleConfigFromEnv().model): { outputs: number; sourcesToMake: number } {
+export function plannedImages(sources: readonly PlannedSource[], channels: readonly ChannelId[], live: readonly LiveOutput[], upscaleModel: string | null = upscaleConfigFromEnv().model): { outputs: number; sourcesToMake: number } {
   const current = (o: LiveOutput) => o.workerMatteModel !== null && renderKeys({ sourceSha256: o.sha256, channel: o.channel, n: o.n, policyKey: `default|${o.workerMatteModel}` }, upscaleModel).includes(o.renderKey);
   let outputs = 0, sourcesToMake = 0;
-  const styliMin = styliMinSourceHeightPx(upscaleFactor);
   for (const source of sources) {
     let made = 0;
     for (const channel of channels) {
-      if (channel === "styli" && STYLI_SKIP_LOW_RESOLUTION && source.height !== null && source.height < styliMin) continue;
       if (live.some((o) => o.productId === source.productId && o.n === source.n && o.channel === channel && o.sha256 === source.sha256 && current(o))) continue;
       made++;
     }

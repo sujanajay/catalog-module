@@ -1,10 +1,8 @@
 // Grouping (spec 04, "Grouping"): which product every file belongs to and at which shot position,
 // under the three identifier modes and the three precedences; the step 4 grouping rows and warning
 // sentences. Deterministic: the order items arrive in never changes the result.
-import { styliMinSourceHeightPx } from "../channels";
 import { normalizeKey, renumberShots } from "../naming";
 import type { BatchOptions, ChannelId, IdentifierMode, OutputFlag } from "../types";
-import { upscaleFactorFromEnv } from "../upscale";
 import { classifyImageReject } from "./image-check";
 import { matchProductList, missingIdentifier, type ProductListRow } from "./product-list";
 import type { GroupingResult, PreviewRow, SourceItem } from "./types";
@@ -338,9 +336,9 @@ function readPhrase(reason: string): string | null {
 
 /**
  * The step 4 warning list, in the order of spec 04, each `{ headline, detail }`. `list` is the
- * product list (null without one). Optional `extra` (after the contract's parameters):
+ * product list (null without one). `_channels` stays in the contract but no sentence depends on it: no channel
+ * leaves a photo out for its size (owner decision 2026-10-22, Styli included). Optional `extra` (after the contract's parameters):
  * - `brandName` for the top-level folders sentence (default "this brand");
- * - `dimensions` for the Styli estimate (photos whose height is unknown are not counted);
  * - `topLevelFolders` from `Detected` (default: the first folder of every uploaded file's path);
  * - `byMatchColumn` when the product list's match column was chosen in step 2 (see matchProductList).
  * Batch-level sentences in `grouped.warnings` (for example the duplicate sheet rows sentence from
@@ -349,8 +347,8 @@ function readPhrase(reason: string): string | null {
 export function warningSentences(
   grouped: GroupingResult,
   list: ProductListRow[] | null,
-  channels: ChannelId[],
-  extra: { brandName?: string; dimensions?: ItemDimensions; topLevelFolders?: string[]; byMatchColumn?: boolean; upscaleFactor?: number } = {},
+  _channels: ChannelId[],
+  extra: { brandName?: string; topLevelFolders?: string[]; byMatchColumn?: boolean } = {},
 ): { headline: string; detail: string }[] {
   const out: { headline: string; detail: string }[] = [];
   // Every identifier seen, so a list row whose files were all unreadable is not also "no photos";
@@ -379,24 +377,6 @@ export function warningSentences(
       headline: `${fmt(unreadable.length)} files could not be read.`,
       detail: `${parts.join("; ")}. Fix them and use them in a new batch, or continue without them.`,
     });
-  }
-
-  if (channels.includes("styli")) {
-    // The render's rule: Styli judges the size after the x2 upscaler when UPSCALE_MODEL is set (741 px, else 1482 px).
-    const minHeight = styliMinSourceHeightPx(extra.upscaleFactor ?? upscaleFactorFromEnv());
-    let small = 0;
-    for (const items of grouped.products.values()) {
-      for (const it of items) {
-        const h = dimsOf(it, extra.dimensions).height;
-        if (h !== null && h < minHeight) small++;
-      }
-    }
-    if (small) {
-      out.push({
-        headline: `${fmt(small)} photos are smaller than Styli needs (under ${minHeight} px).`,
-        detail: "Styli will skip them and note it in the sheet, as agreed with Styli.",
-      });
-    }
   }
 
   const duplicates = distinct(grouped.rejected.filter((r) => DUPLICATE_REJECT.test(r.reason)).map((r) => r.item.identifier));
