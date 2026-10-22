@@ -3,7 +3,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { and, eq } from "drizzle-orm";
 import type { Db } from "@catalog/core/db/client";
 import { createTestDb } from "@catalog/core/db/testing";
-import { catalogBatches, catalogChunks, catalogOutputs, catalogProducts, catalogSourceImages, EMPTY_BATCH_COUNTS } from "@catalog/core/db/schema";
+import { catalogBatches, catalogChunks, catalogCostEvents, catalogOutputs, catalogProducts, catalogSourceImages, EMPTY_BATCH_COUNTS } from "@catalog/core/db/schema";
 import * as storage from "@catalog/core/storage";
 import { listAttention } from "@catalog/core/catalog/attention";
 import { attentionRate, cutInSourceNote } from "@catalog/core/catalog/pipeline/report";
@@ -144,6 +144,10 @@ describe("07 auto-resolve: re-render and re-judge before holding", () => {
       expect(autoActionsOf(o.compliance).at(-1)!.channels.sort()).toEqual(["amazon", "noon"]);
       expect(o.status).toBe("staged");
       expect(o.flags).not.toContain("halo");
+      // Cost ledger: the matte stage's first cut-out call on this photo, then the repair ladder's second one, which
+      // runs here in the render stage and is written by itself outside the chunk claim, so it never carries a chunk id or attempt.
+      const calls = await db.select().from(catalogCostEvents).where(and(eq(catalogCostEvents.sourceImageId, o.sourceImageId), eq(catalogCostEvents.kind, "matte_call"))).orderBy(catalogCostEvents.at);
+      expect(calls.map(c => [c.outcome, c.chunkId === null])).toEqual([["ok", false], ["ok", true]]);
       expect(o.compliance).toMatchObject({ ok: true });
     }
     const [source] = await db.select().from(catalogSourceImages).where(and(eq(catalogSourceImages.batchId, s.batch.id), eq(catalogSourceImages.n, 2)));

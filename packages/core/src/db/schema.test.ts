@@ -32,6 +32,7 @@ const TABLES = [
   "catalog_batch_products", "catalog_product_aliases", "catalog_product_events", "catalog_source_images",
   "catalog_outputs", "catalog_chunks", "catalog_eval_labels", "catalog_eval_judgements", "spend_days",
   "users", // 0001_users.sql (spec 03)
+  "catalog_cost_events", // 0002_cost_events.sql (observability plan, part A)
 ];
 
 const INDEXES = [
@@ -43,6 +44,8 @@ const INDEXES = [
   "catalog_outputs_batch_id_idx", "catalog_outputs_product_id_idx", "catalog_outputs_live_uq",
   "catalog_chunks_batch_id_idx", "catalog_eval_labels_batch_id_idx", "catalog_eval_judgements_batch_id_idx",
   "catalog_eval_judgements_output_model_uq", "brand_master_slug_unique",
+  "catalog_cost_events_batch_id_idx", "catalog_cost_events_brand_slug_at_idx", "catalog_cost_events_output_id_idx",
+  "catalog_cost_events_at_idx",
 ];
 
 describe("generated migrations", () => {

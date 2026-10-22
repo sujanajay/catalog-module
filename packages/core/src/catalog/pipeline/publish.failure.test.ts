@@ -45,7 +45,7 @@ async function replacement(name: string) {
 
 it("reports the landed replacement generation when both public readbacks fail without claiming verified DB state", async () => {
   const s = await replacement("unverified-copy");
-  expect(await publishProduct(s.deps, s.batch.id, s.product.id)).toEqual({ outcome: "failed" });
+  expect(await publishProduct(s.deps, s.batch.id, s.product.id)).toMatchObject({ outcome: "failed", batch: { brandSlug: s.batch.brandSlug, isTest: s.batch.isTest } });
   expect(s.copy.mock.calls.map(call => call[2])).toEqual([{ ifGenerationMatch: 20 }, { ifGenerationMatch: "21" }]);
   expect(s.generation()).toBe(22);
   expect(s.deps.fetch).toHaveBeenCalledTimes(2);
@@ -61,7 +61,7 @@ it("reports the landed replacement generation when both public readbacks fail wi
 it("preserves previous live records and generation when a real storage generation precondition rejects the copy", async () => {
   const s = await replacement("generation-conflict");
   s.raceBeforeCopy();
-  expect(await publishProduct(s.deps, s.batch.id, s.product.id)).toEqual({ outcome: "failed" });
+  expect(await publishProduct(s.deps, s.batch.id, s.product.id)).toMatchObject({ outcome: "failed", batch: { brandSlug: s.batch.brandSlug, isTest: s.batch.isTest } });
   expect(s.copy).toHaveBeenCalledTimes(1);
   expect(s.copy.mock.calls[0]![2]).toEqual({ ifGenerationMatch: 20 });
   expect(s.generation()).toBe(99);

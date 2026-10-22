@@ -149,6 +149,26 @@ job_env() { printf '%s' "${WORKER_ENV/DB_POOL_MAX=$WORKER_DB_POOL_MAX,/DB_POOL_M
 COMPUTE_USD_PER_VCPU_SECOND=${COMPUTE_USD_PER_VCPU_SECOND:-0.0000265}
 [[ "$COMPUTE_USD_PER_VCPU_SECOND" =~ ^[0-9]+([.][0-9]+)?$ ]] || { echo "COMPUTE_USD_PER_VCPU_SECOND must be a number such as 0.0000265" >&2; exit 1; }
 WORKER_ENV+=",COMPUTE_USD_PER_VCPU_SECOND=$COMPUTE_USD_PER_VCPU_SECOND"
+# Matting-service spend for the cost ledger (catalog_cost_events): the worker prices each cut-out and
+# upscale call at service-seconds * the rate of the service that answered it. Keep both equal to
+# DEFAULT_PRICE_MATTE_CPU_USD_PER_SECOND and DEFAULT_PRICE_MATTE_GPU_USD_PER_SECOND in
+# packages/core/src/catalog/cost.ts. Source: cloud.google.com/run/pricing, read 2026-10-22.
+# CPU service catalog-matting: asia-south1 (Tier 1), --cpu=4 --memory=16Gi, request-based billing
+# (no --no-cpu-throttling): CPU active USD 0.000024 per vCPU-second, memory active USD 0.0000025
+# per GiB-second, so 4 * 0.000024 + 16 * 0.0000025 = 0.000136 per second.
+# GPU service catalog-matting-gpu: asia-southeast1 (Tier 2), one NVIDIA L4 without zonal
+# redundancy, --no-cpu-throttling (instance-based billing), --cpu=4 --memory=16Gi: L4 non-zonal
+# USD 0.00022404 per second, CPU USD 0.0000216 per vCPU-second, memory USD 0.0000024 per
+# GiB-second, so 0.00022404 + 4 * 0.0000216 + 16 * 0.0000024 = 0.00034884 per second.
+# The ledger prices the service-reported inference seconds of each call, so its matte and upscale rows
+# are a lower bound: instance start-up, idle time before an instance stops, failed upscale calls and a
+# GPU attempt that failed before the CPU service answered are billed but not recorded.
+# Re-check both if a service's shape, region, billing mode or zonal redundancy changes.
+PRICE_MATTE_CPU_USD_PER_SECOND=${PRICE_MATTE_CPU_USD_PER_SECOND:-0.000136}
+PRICE_MATTE_GPU_USD_PER_SECOND=${PRICE_MATTE_GPU_USD_PER_SECOND:-0.00034884}
+[[ "$PRICE_MATTE_CPU_USD_PER_SECOND" =~ ^[0-9]+([.][0-9]+)?$ ]] || { echo "PRICE_MATTE_CPU_USD_PER_SECOND must be a number such as 0.000136" >&2; exit 1; }
+[[ "$PRICE_MATTE_GPU_USD_PER_SECOND" =~ ^[0-9]+([.][0-9]+)?$ ]] || { echo "PRICE_MATTE_GPU_USD_PER_SECOND must be a number such as 0.00034884" >&2; exit 1; }
+WORKER_ENV+=",PRICE_MATTE_CPU_USD_PER_SECOND=$PRICE_MATTE_CPU_USD_PER_SECOND,PRICE_MATTE_GPU_USD_PER_SECOND=$PRICE_MATTE_GPU_USD_PER_SECOND"
 # 07: the QA judge and its spend caps. Override from the shell like BQ_PROJECT, e.g.
 # INR_PER_USD=83.5 bash infra/deploy.sh. CATALOG_QA_DEFAULT_MODEL is engineering config only; it is
 # never shown to the operator. It has no leading "/", so Git Bash leaves it alone.

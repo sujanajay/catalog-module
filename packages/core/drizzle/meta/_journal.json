@@ -15,6 +15,13 @@
       "when": 1792264549905,
       "tag": "0001_users",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1792615226844,
+      "tag": "0002_cost_events",
+      "breakpoints": true
     }
   ]
 }

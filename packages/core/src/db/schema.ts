@@ -63,10 +63,19 @@ export const CHUNK_STATUSES = ["queued", "running", "done", "failed"] as const;
 export const SPEND_ENGINES = ["catalog_qa", "catalog_compute"] as const;
 /** model_policy.category: a ProductType or "*" (any). */
 export const POLICY_CATEGORIES = [...PRODUCT_TYPES, "*"] as const;
+/** catalog_cost_events.stage: where in the pipeline the money or time went. */
+export const COST_STAGES = ["matte", "render", "upscale", "qa", "classify", "publish", "finalize"] as const;
+/** catalog_cost_events.kind: what was priced or timed. */
+export const COST_KINDS = ["llm_call", "matte_call", "render", "upscale_call", "compute"] as const;
+/** catalog_cost_events.outcome. `fallback`: the simple cut-out stood in for a failed service call. */
+export const COST_OUTCOMES = ["ok", "failed", "rate_limited", "cap", "fallback"] as const;
 
 export type BrandLine = (typeof BRAND_LINES)[number];
 export type MasterSource = (typeof MASTER_SOURCES)[number];
 export type SpendEngine = (typeof SPEND_ENGINES)[number];
+export type CostStage = (typeof COST_STAGES)[number];
+export type CostKind = (typeof COST_KINDS)[number];
+export type CostOutcome = (typeof COST_OUTCOMES)[number];
 
 /**
  * sku_map.channel_ids keys. Softline columns keep their warehouse names (6th_street_* becomes
@@ -562,6 +571,55 @@ export const spendDays = pgTable(
   ],
 );
 
+/**
+ * Cost ledger (observability plan, part A): one row per priced or timed event of a batch, written
+ * beside the existing spend_days and catalog_batches.cost updates (which stay the source for the caps
+ * and the cost line). Additive and never read by the pipeline; the Ops page reads it through
+ * catalog/cost-report.ts. `engine` is `cpu`, `gpu`, `worker` or a model id, never shown in the UI.
+ * Only batch_id is a foreign key (test cleanup deletes batches); the other ids are plain references
+ * because outputs and source images are deleted while their batch is kept.
+ */
+export const catalogCostEvents = pgTable(
+  "catalog_cost_events",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    at: timestamp("at", { withTimezone: true }).notNull().defaultNow(),
+    batchId: uuid("batch_id")
+      .notNull()
+      .references(() => catalogBatches.id, { onDelete: "cascade" }),
+    brandSlug: text("brand_slug").notNull(),
+    isTest: boolean("is_test").notNull().default(false),
+    productId: uuid("product_id"),
+    sourceImageId: uuid("source_image_id"),
+    outputId: uuid("output_id"),
+    channel: text("channel", { enum: CHANNEL_IDS }),
+    stage: text("stage", { enum: COST_STAGES }).notNull(),
+    kind: text("kind", { enum: COST_KINDS }).notNull(),
+    engine: text("engine").notNull(),
+    ms: integer("ms").notNull().default(0),
+    promptTokens: integer("prompt_tokens").notNull().default(0),
+    completionTokens: integer("completion_tokens").notNull().default(0),
+    usd: numeric("usd", { precision: 12, scale: 8, mode: "number" }).notNull().default(0),
+    /** A fallback price was used (no billed cost from the provider, or a rate from the environment). */
+    estimated: boolean("estimated").notNull().default(false),
+    outcome: text("outcome", { enum: COST_OUTCOMES }).notNull().default("ok"),
+    chunkId: uuid("chunk_id"),
+    /** The attempt number of this call: a judge's HTTP attempt, or a photo's n-th cut-out call in a delivery. */
+    attempt: integer("attempt"),
+  },
+  (t) => [
+    index("catalog_cost_events_batch_id_idx").on(t.batchId),
+    index("catalog_cost_events_brand_slug_at_idx").on(t.brandSlug, t.at),
+    index("catalog_cost_events_output_id_idx").on(t.outputId),
+    // Day totals across brands read a time window only.
+    index("catalog_cost_events_at_idx").on(t.at),
+    enumCheck("catalog_cost_events", "channel", t.channel, CHANNEL_IDS),
+    enumCheck("catalog_cost_events", "stage", t.stage, COST_STAGES),
+    enumCheck("catalog_cost_events", "kind", t.kind, COST_KINDS),
+    enumCheck("catalog_cost_events", "outcome", t.outcome, COST_OUTCOMES),
+  ],
+);
+
 // ---------------------------------------------------------------------------
 // Row types
 // ---------------------------------------------------------------------------
@@ -582,3 +640,4 @@ export type CatalogChunk = typeof catalogChunks.$inferSelect;
 export type CatalogEvalLabel = typeof catalogEvalLabels.$inferSelect;
 export type CatalogEvalJudgement = typeof catalogEvalJudgements.$inferSelect;
 export type SpendDay = typeof spendDays.$inferSelect;
+export type CatalogCostEvent = typeof catalogCostEvents.$inferSelect;
