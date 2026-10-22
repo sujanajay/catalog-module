@@ -9,6 +9,9 @@ import { batchDetails } from "@/lib/catalog/exports";
 import { batchAttention } from "@/lib/catalog/products";
 import { evalOutputs } from "@/lib/catalog/eval";
 import { batchCostLine } from "@/lib/catalog/cost";
+import { inrPerUsdFromEnv } from "@catalog/core/catalog/cost";
+import { batchChunkSummary, batchStageCost } from "@/lib/catalog/ops";
+import { fullCostText } from "@/lib/catalog/ops-copy";
 import AutoRefresh from "@/components/AutoRefresh";
 import { ActionOnly } from "@/components/ViewerPreview";
 import { when } from "@/components/ui";
@@ -43,11 +46,14 @@ export default async function BatchPage({ params, searchParams }: { params: Prom
   const query = await searchParams;
   const evalFilters = { channel: query.channel ?? "", verdict: query.verdict ?? "" };
   const evalMode = batch.isTest && !!batch.options.evalSet;
-  const [attention, evalPage, cost] = await Promise.all([
+  const [attention, evalPage, cost, stageCost, chunks] = await Promise.all([
     evalMode ? Promise.resolve([]) : batchAttention(id),
     evalMode ? evalOutputs(id, { page: Number(query.page ?? 0) || 0, ...evalFilters }) : Promise.resolve(null),
     batchCostLine(batch),
+    batchStageCost(id),
+    batchChunkSummary(id),
   ]);
+  const fullCost = fullCostText(stageCost, inrPerUsdFromEnv());
   const channelLabels = batch.channels.map(c => channel(c).label);
   const missingSkus = data.sheet.rows.filter(r => !r.opptraSkuIds.length).length;
   const source = batchSource(data.uploads.map(u => u.kind));
@@ -103,6 +109,7 @@ export default async function BatchPage({ params, searchParams }: { params: Prom
             <div className="card">
               <h2>Cost so far</h2>
               <CostLine line={{ usdPerIdentifier: cost.usdPerIdentifier, inrPerIdentifier: cost.inrPerIdentifier, usd: cost.usd, inr: cost.inr }} />
+              {fullCost && <p className="cost-split">{fullCost}</p>}
             </div>
           </div>
         }
@@ -124,7 +131,8 @@ export default async function BatchPage({ params, searchParams }: { params: Prom
         details={
           <DetailsTab id={id} brand={batch.brandSlug} isTest={batch.isTest} counts={batch.counts}
             failures={data.failures} recheckFailures={data.recheckFailures}
-            notRefreshedChannels={data.notRefreshedChannels} hasReport={!!batch.reportUri} />
+            notRefreshedChannels={data.notRefreshedChannels} hasReport={!!batch.reportUri}
+            chunks={chunks.counts} lastFailedChunk={chunks.lastFailed} batchError={batch.error} />
         }
       />
     </main>

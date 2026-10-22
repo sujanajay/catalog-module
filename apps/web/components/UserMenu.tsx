@@ -1,13 +1,14 @@
 "use client";
 
 // User button in the top bar (spec 03 "UI"): "<email> · <Role> ▾", or "<email> · Viewer (preview) ▾"
-// while previewing. Menu: "People" (admins only, hidden while previewing); "Preview as viewer", a
+// while previewing. Menu: "People" and "Ops" (admins only, hidden while previewing); "Preview as viewer", a
 // checkable item offered to every role per the permission matrix (the People modal keeps its own
 // switch); "Sign out", which goes to IAP's URL that clears its session cookie. The menu closes on any
 // click outside it.
 
 import { useEffect, useId, useRef, useState } from "react";
-import { PREVIEW_LABEL, showPeopleMenuItem, SIGN_OUT_URL, userButtonLabel, type Role } from "@/lib/people-copy";
+import { PREVIEW_LABEL, showOpsMenuItem, showPeopleMenuItem, SIGN_OUT_URL, userButtonLabel, type Role } from "@/lib/people-copy";
+import { OPS_HREF, OPS_TITLE } from "@/lib/catalog/ops-copy";
 import PeopleModal from "./PeopleModal";
 import { usePreviewToggle, useViewerPreview } from "./ViewerPreview";
 
@@ -41,6 +42,7 @@ export default function UserMenu({ email, role }: UserMenuProps) {
   }, [open]);
 
   const showPeople = showPeopleMenuItem(role, previewing);
+  const showOps = showOpsMenuItem(role, previewing);
 
   return (
     <div className="user" ref={wrapRef}>
@@ -68,6 +70,11 @@ export default function UserMenu({ email, role }: UserMenuProps) {
             >
               People
             </button>
+          ) : null}
+          {showOps ? (
+            <a role="menuitem" href={OPS_HREF} onClick={() => setOpen(false)}>
+              {OPS_TITLE}
+            </a>
           ) : null}
           <button
             type="button"
