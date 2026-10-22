@@ -43,11 +43,11 @@ repo, opptra-scrapers repo, Opptra public site, BigQuery warehouse metadata.
 | B1 | Shot-list compliance for existing on-model photos | Every softline product gets each channel's required shot set, or a precise reason why not | IN |
 | B2 | Fill the shot list: derive first, generate second | A product with 3 of 5 roles gets the other 2 (crops first, generated views second) | IN |
 | B3 | Flat lay to on-model with the brand's real models | Flat-lay brands get the 5-shot on-model set with a consistent model | IN |
-| B4 | Footwear and bags lifestyle with scene rules | One lifestyle image where none exists, scene by subcategory | deferred |
-| B5 | Infographics and callouts | Feature callouts and use-case panels from attributes, text rendered in code | deferred |
-| B6 | Attributes backbone and GCC listing fill | Typed fact sheet per product; fill Noon, Namshi, Styli, Centrepoint templates | deferred |
-| B7 | Review-driven enhancement (inside the product) and NPD inputs (separate) | What customers say feeds content fixes; NPD insight is a separate product | deferred |
-| B8 | Forecasting and product selection | Demand planning; outside this team | deferred |
+| B4 | Footwear and bags lifestyle with scene rules | One lifestyle image where none exists, scene by subcategory | re-opened 2026-10-22 (DD4) |
+| B5 | Infographics and callouts | Feature callouts and use-case panels from attributes, text rendered in code | re-opened 2026-10-22 (DD6) |
+| B6 | Attributes backbone and GCC listing fill | Typed fact sheet per product; fill Noon, Namshi, Styli, Centrepoint templates | re-opened 2026-10-22 (DD5) |
+| B7 | Review-driven enhancement (inside the product) and NPD inputs (separate) | What customers say feeds content fixes; NPD insight is a separate product | re-opened 2026-10-22 (B7a in DD7, B7b in DD10) |
+| B8 | Forecasting and product selection | Demand planning; outside this team | re-opened 2026-10-22 as a boundary memo (DD10) |
 | B9 | Cross-cutting: brand style profile and model registry, fidelity gate, cost model | Works for 33+ brands and 6 categories without code per brand | IN (as B3 foundation) |
 
 ## 4. Product boundary
@@ -102,10 +102,16 @@ DD3, DD9 and gate verdicts.
 | DD3 | On-model generation bake-off: frontier image models, VTO vendors, ready-made plug-ins | done 2026-10-22, awaiting owner answer (deep-dives/03-on-model-generation-bake-off.md); trial spend 5.39 USD of 50 |
 | DD8 | Brand style profile and model registry for GCC softline brands | done 2026-10-22, awaiting owner answer (deep-dives/08-brand-style-profile-model-registry.md) |
 | DD1a | Channel image guidelines, external vs internal, 9 channels, UAE and KSA | done 2026-10-22, awaiting owner answer (deep-dives/01a-channel-guidelines-external-vs-internal.md) |
-| DD9 | Business impact of B1 to B3, data-derived | done 2026-10-22, refreshed with DD3 prices, awaiting owner answer (deep-dives/09-business-impact.md) |
+| DD9 | Business impact, data-derived | done 2026-10-22, refreshed with DD3 prices, then extended to B1 to B8 with one ranking and corrected B1 to B3 numbers; awaiting owner answer (deep-dives/09-business-impact.md) |
+| DD4 | Footwear and bags lifestyle with scene rules (B4) | done 2026-10-22, awaiting owner answer (deep-dives/04-footwear-bags-lifestyle.md); trial spend 1.80 USD |
+| DD5 | Attributes backbone and GCC listing fill (B6) | done 2026-10-22, awaiting owner answer (deep-dives/05-attributes-listing-fill.md) |
+| DD6 | Infographics and callouts compositor (B5) | done 2026-10-22, awaiting owner answer (deep-dives/06-infographics-compositor.md); trial spend 0.45 USD |
+| DD7 | Review ingestion and review-driven enhancement (B7a) | done 2026-10-22, awaiting owner answer (deep-dives/07-review-ingestion-enhancement.md) |
+| DD10 | Boundary memo: forecasting and product selection (B8) and NPD insight (B7b) | done 2026-10-22, awaiting owner answer (deep-dives/10-boundary-forecasting-npd.md) |
 
-Deferred deep dives (briefs kept in the owner's plan file): footwear lifestyle, attributes
-and listing fill, infographics compositor, review ingestion.
+B4 to B8 were re-opened by the owner on 2026-10-22 under the same rules, with Opus 5.5 for all
+subagent work in that round. Because Gate B was still open, DD4 to DD7 and DD10 assume each
+earlier deep dive's recommendation is approved and list what changes otherwise.
 
 ## 7. Evidence summary used by the deep dives
 
@@ -134,15 +140,19 @@ and listing fill, infographics compositor, review ingestion.
 - Gate D: before any generator reaches the default path, bake-off and fidelity gate numbers
   are reviewed by the owner; generated shots stay in review-all until they hold.
 
-## 9. Resume point (deep dives complete 2026-10-22)
+## 9. Resume point (B1 to B8 deep dives complete 2026-10-22)
 
 State: all deep dives written and committed on branch docs/catalog-connect-gcc-intent-map
-(worktree C:\Users\Sujan Ajay\Desktop\catalog-module-wt\01-intent-map, rebased on
-origin/main 4be472d). Files: docs/plans/deep-dives/00, 01, 01a, 02, 03, 08, 09. DD3 trial
-spend: 5.39 USD of the 50 USD cap. Nothing implemented. No PR opened.
+(worktree C:\Users\Sujan Ajay\Desktop\catalog-module-wt\01-intent-map). Files:
+docs/plans/deep-dives/00, 01, 01a, 02, 03, 04, 05, 06, 07, 08, 09, 10. Trial spend: DD3
+5.39 USD, DD4 1.80 USD, DD6 0.45 USD; total 7.64 USD of the 50 USD cap. Nothing
+implemented. No PR opened.
 
 Next step is Gate B: the owner answers each deep dive's approval question (last section of
-each file) and the open items in 00 (16 categories), 01a (unverified channel values) and
-08 (which brand sites the written rights cover). Only after those answers does any
+each file) and the open items in 00 (16 categories), 01a (unverified channel values),
+08 (which brand sites the written rights cover), 04 to 07 (templates, channel acceptance of
+lifestyle and infographic images, rights for generated and lettered images, Arabic review,
+review scraping ownership) and 10 (owner of B8 and B7b). DD9 proposes a dependency order of
+B1, B6, B4, B5, B2, B7a, B3 for the owner to confirm against the V1 to V3 sequence above. Only after those answers does any
 dependent work get specified; implementation still requires Gate C (SPEC.md amendment and
 a yes per paid generator).
