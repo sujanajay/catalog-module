@@ -181,6 +181,16 @@ try {
     cases++;
   }
 
+  // 4a2. An installed beta component passes the check, also when a newer version is available.
+  for (const [label, beta] of [['beta-installed', 'Installed'], ['beta-update-available', 'Update Available']]) {
+    const r = run(label, {services: ['compute.googleapis.com']}, {BETA_STATE: beta});
+    commonChecks(label, r);
+    assert.doesNotMatch(r.stderr, /the gcloud beta component is missing/, label);
+    assert.equal(count(r, /^beta monitoring channels create /), 1, label + ' goes on past the check');
+    console.log('PASS ' + label + ' passes the beta check');
+    cases++;
+  }
+
   // 4b. A policy create that failed after the server stored it is not repeated into a duplicate.
   {
     const s = existingState();
