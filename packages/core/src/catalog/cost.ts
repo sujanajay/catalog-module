@@ -98,6 +98,10 @@ function positive(value: string | undefined): number | null {
  const number = value?.trim() ? Number(value) : NaN;
  return Number.isFinite(number) && number > 0 ? number : null;
 }
+/** INR_PER_USD as a positive number, or null when it is not configured. */
+export function inrPerUsdFromEnv(env: NodeJS.ProcessEnv = process.env): number | null {
+ return positive(env.INR_PER_USD);
+}
 interface CostBatch {
  cost: Pick<BatchCost,"qaUsd"|"computeUsd"|"identifiers">;
  products?: readonly {change:string;outputs:readonly {status:string}[]}[];

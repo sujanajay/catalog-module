@@ -53,6 +53,11 @@ export function showPeopleMenuItem(role: Role, previewing: boolean): boolean {
   return canManagePeople(role, previewing);
 }
 
+/** The "Ops" menu item (the admin Ops page): gated like "People". */
+export function showOpsMenuItem(role: Role, previewing: boolean): boolean {
+  return canManagePeople(role, previewing);
+}
+
 export interface PersonRow {
   email: string;
   role: Role;

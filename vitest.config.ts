@@ -1,7 +1,10 @@
+import { fileURLToPath } from "node:url";
 import { defineConfig } from "vitest/config";
 
 export default defineConfig({
   oxc: { jsx: { runtime: "automatic" } },
+  // The web app's "@/" import alias (apps/web/tsconfig.json), so tests can render its pages.
+  resolve: { alias: [{ find: /^@\//, replacement: fileURLToPath(new URL("./apps/web/", import.meta.url)) }] },
   test: {
     include: ["{apps,packages}/*/src/**/*.test.ts", "{apps,packages}/*/test/**/*.test.ts"],
     exclude: ["**/node_modules/**", "**/*.real.test.ts", "**/*.human.spec.ts", ".claude/**"],
