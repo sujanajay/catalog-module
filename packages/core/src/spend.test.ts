@@ -40,16 +40,16 @@ beforeEach(async () => {
 });
 
 describe("dailyCapFromEnv", () => {
-  it("defaults to 10 and parses numbers", () => {
-    expect(dailyCapFromEnv({})).toBe(10);
+  it("defaults to no cap and parses numbers", () => {
+    expect(dailyCapFromEnv({})).toBe(Infinity);
     expect(dailyCapFromEnv({ DAILY_SPEND_CAP_USD: "2.5" })).toBe(2.5);
     expect(dailyCapFromEnv({ DAILY_SPEND_CAP_USD: "0" })).toBe(0);
   });
 
   it("falls back to the default for empty, invalid or negative values", () => {
-    expect(dailyCapFromEnv({ DAILY_SPEND_CAP_USD: "" })).toBe(10);
-    expect(dailyCapFromEnv({ DAILY_SPEND_CAP_USD: "abc" })).toBe(10);
-    expect(dailyCapFromEnv({ DAILY_SPEND_CAP_USD: "-1" })).toBe(10);
+    expect(dailyCapFromEnv({ DAILY_SPEND_CAP_USD: "" })).toBe(Infinity);
+    expect(dailyCapFromEnv({ DAILY_SPEND_CAP_USD: "abc" })).toBe(Infinity);
+    expect(dailyCapFromEnv({ DAILY_SPEND_CAP_USD: "-1" })).toBe(Infinity);
   });
 });
 
@@ -83,7 +83,12 @@ describe("checkCaps", () => {
 
   it("only counts the current UTC day", async () => {
     await recordCost(db, { brandSlug: "uspa", batchId, engine: "catalog_qa", costUsd: 50, day: new Date("2026-10-01T23:59:00Z") });
-    expect((await checkCaps(db, { brandSlug: "uspa", batchId, env: {}, now: NOW })).ok).toBe(true);
+    expect((await checkCaps(db, { brandSlug: "uspa", batchId, env: { DAILY_SPEND_CAP_USD: "10" }, now: NOW })).ok).toBe(true);
+  });
+
+  it("has no daily cap when DAILY_SPEND_CAP_USD is not set", async () => {
+    await recordCost(db, { brandSlug: "uspa", batchId, engine: "catalog_qa", costUsd: 500, day: NOW });
+    expect(await checkCaps(db, { brandSlug: "uspa", batchId, env: {}, now: NOW })).toEqual({ ok: true });
   });
 
   it("refuses when the batch's QA total reaches options.qaCapUsd", async () => {

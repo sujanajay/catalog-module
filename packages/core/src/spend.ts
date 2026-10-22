@@ -1,4 +1,5 @@
-// Spend control (spec 02, "Spend"): the UTC daily cap across all brands, the optional per-batch QA
+// Spend control (spec 02, "Spend"): the optional UTC daily cap across all brands (off unless
+// DAILY_SPEND_CAP_USD is set), the optional per-batch QA
 // cap (catalog_batches.options.qaCapUsd, set by 07), and spend recording into spend_days.
 import { and, eq, sql } from "drizzle-orm";
 import type { Db } from "./db/client";
@@ -7,7 +8,8 @@ import { SPEND_ENGINES, catalogBatches, spendDays, type SpendEngine } from "./db
 export { SPEND_ENGINES };
 export type { SpendEngine };
 
-export const DEFAULT_DAILY_SPEND_CAP_USD = 10;
+/** No daily cap unless DAILY_SPEND_CAP_USD is set. */
+export const DEFAULT_DAILY_SPEND_CAP_USD = Infinity;
 
 export type CapCheck = { ok: true } | { ok: false; reason: string };
 
@@ -18,7 +20,7 @@ export function utcDay(d: Date = new Date()): string {
   return d.toISOString().slice(0, 10);
 }
 
-/** DAILY_SPEND_CAP_USD, default 10. Empty, invalid or negative values fall back to the default. */
+/** DAILY_SPEND_CAP_USD, default no cap. Empty, invalid or negative values fall back to the default. */
 export function dailyCapFromEnv(env: NodeJS.ProcessEnv = process.env): number {
   const raw = env.DAILY_SPEND_CAP_USD;
   if (raw === undefined || raw.trim() === "") return DEFAULT_DAILY_SPEND_CAP_USD;

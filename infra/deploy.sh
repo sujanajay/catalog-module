@@ -175,12 +175,14 @@ WORKER_ENV+=",PRICE_MATTE_CPU_USD_PER_SECOND=$PRICE_MATTE_CPU_USD_PER_SECOND,PRI
 # INR_PER_USD defaults to 84 (spec 07 4.11 states no rate) so the cost line and the wizard estimate
 # show rupees; update when the rate moves.
 CATALOG_QA_DEFAULT_MODEL=${CATALOG_QA_DEFAULT_MODEL:-google/gemini-2.5-flash-lite}
-DAILY_SPEND_CAP_USD=${DAILY_SPEND_CAP_USD:-10}
+# No daily spend cap unless DAILY_SPEND_CAP_USD is set; per-batch QA caps still apply.
+DAILY_SPEND_CAP_USD=${DAILY_SPEND_CAP_USD:-}
 INR_PER_USD=${INR_PER_USD:-84}
 [[ "$CATALOG_QA_DEFAULT_MODEL" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._:-]+$ ]] || { echo "CATALOG_QA_DEFAULT_MODEL must look like provider/model" >&2; exit 1; }
-[[ "$DAILY_SPEND_CAP_USD" =~ ^[0-9]+([.][0-9]+)?$ ]] || { echo "DAILY_SPEND_CAP_USD must be a non-negative number" >&2; exit 1; }
+[[ -z "$DAILY_SPEND_CAP_USD" || "$DAILY_SPEND_CAP_USD" =~ ^[0-9]+([.][0-9]+)?$ ]] || { echo "DAILY_SPEND_CAP_USD must be a non-negative number" >&2; exit 1; }
 [[ "$INR_PER_USD" =~ ^[0-9]+([.][0-9]+)?$ ]] || { echo "INR_PER_USD must be a number such as 84" >&2; exit 1; }
-WORKER_ENV+=",CATALOG_QA_DEFAULT_MODEL=$CATALOG_QA_DEFAULT_MODEL,DAILY_SPEND_CAP_USD=$DAILY_SPEND_CAP_USD"
+WORKER_ENV+=",CATALOG_QA_DEFAULT_MODEL=$CATALOG_QA_DEFAULT_MODEL"
+if [ -n "$DAILY_SPEND_CAP_USD" ]; then WORKER_ENV+=",DAILY_SPEND_CAP_USD=$DAILY_SPEND_CAP_USD"; fi
 WEB_ENV="$ENV_VARS,DB_POOL_MAX=$WEB_DB_POOL_MAX,SHARE_SA_EMAIL=$WEB_SA,CATALOG_CHUNK_IMAGES=$CHUNK_IMAGES"
 # INR_PER_USD reaches the web (cost line, wizard estimate), the worker (finalize) and, through
 # WORKER_ENV, the Cloud Run jobs (07 4.11). COMPUTE_USD_PER_VCPU_SECOND reaches the worker and the

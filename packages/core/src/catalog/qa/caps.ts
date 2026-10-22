@@ -14,7 +14,7 @@ export function batchQaCap(value: unknown): number | null {
 
 /**
  * 07 4.5: refuses the next QA call once the UTC day's spend over all engines and brands reaches
- * DAILY_SPEND_CAP_USD (default 10), or once this batch's `catalog_qa` spend reaches its
+ * DAILY_SPEND_CAP_USD (no cap unless set), or once this batch's `catalog_qa` spend reaches its
  * `catalog_batches.options.qaCapUsd` (null = no per-batch cap).
  */
 export async function checkCatalogCaps(db: Db, input: { batchId: string; env?: NodeJS.ProcessEnv; now?: Date }): Promise<CapCheck> {
