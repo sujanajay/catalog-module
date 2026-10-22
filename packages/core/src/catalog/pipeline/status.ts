@@ -37,7 +37,8 @@ export const ANOTHER_BATCH_RUNNING = "Another batch is running; yours may wait b
 export const CLOSE_PAGE_TEXT = "You can close this page and come back; nothing stops.";
 export const STARTING_SERVICES_TEXT = "Starting the image services. The first pictures usually take a minute or two on the first batch after a quiet spell.";
 /**
- * The Ready clause for Styli pairs not made because the photo is too small (spec 07 R8): the banner must
+ * The Ready clause for Styli pairs not made because the photo is too small (spec 07 R8, batches before 2026-10-22,
+ * when Styli still skipped photos for their size): the banner must
  * not hide them. Its count is only those Styli skips, never removed, replaced or size-chart skips.
  */
 export function styliSkipText(skipped: number): string {

@@ -5,10 +5,9 @@ import {
   CHANNEL_ORDER,
   CHANNEL_RULES_VERSION,
   CHANNELS,
-  STYLI_MIN_SOURCE_HEIGHT_PX,
-  styliMinSourceHeightPx,
-  STYLI_SKIP_LOW_RESOLUTION,
+  MIN_SOURCE_LONG_SIDE_PX,
 } from "./channels";
+import * as channels from "./channels";
 import { CHANNEL_IDS, type ChannelId } from "./types";
 
 // The rules sheet re-declared independently, one row per channel, compared field by field.
@@ -81,11 +80,11 @@ describe("channel table", () => {
   });
 
   it("keeps the constants", () => {
-    expect(STYLI_SKIP_LOW_RESOLUTION).toBe(true);
     expect(typeof CHANNEL_RULES_VERSION).toBe("string");
     expect(CHANNEL_RULES_VERSION.length).toBeGreaterThan(0);
-    expect(STYLI_MIN_SOURCE_HEIGHT_PX).toBe(Math.ceil((3123 - 450 - 450) / 1.5));
-    expect(styliMinSourceHeightPx(1)).toBe(1482);
-    expect(styliMinSourceHeightPx(2)).toBe(741);
+  });
+  it("has one size floor for every channel, 500 px, and no Styli-only one (owner decision 2026-10-22)", () => {
+    expect(MIN_SOURCE_LONG_SIDE_PX).toBe(500);
+    expect(Object.keys(channels).filter(name => /styli/i.test(name))).toEqual([]);
   });
 });

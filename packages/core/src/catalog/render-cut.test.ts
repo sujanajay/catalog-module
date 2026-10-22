@@ -408,3 +408,58 @@ describe("a cut-fill trim never takes a head, and never trims a pass-through (Fr
     expect(planProduct(CHANNELS.amazon, [geometry]).canvas).toEqual({ w: own.w, h: own.h });
   });
 });
+
+// Batch b8a99c1b: 20 of 201 Styli images were skipped as too small. Every source was 1000 x 1000 and the product was
+// cut at the photo edge, so the cut sides fill the 2342 x 3123 canvas and need about 3.1x. Owner decision 2026-10-22:
+// any enlargement is fine and a product cut at the edge is made; only a source under 500 px is held (small_source).
+describe("Styli has no enlargement cap: a product cut at the edge is made", () => {
+  // A `size` x `size` photo inside a 10 px white border, the product cut straight on `sides` and with a wavy outline
+  // ending near x = `right` on the uncut right side.
+  function edgeCut(size: number, right: number, sides: { top: boolean; bottom: boolean; left: boolean }) {
+    const border = 10, rgb = Buffer.alloc(size * size * 3, 255), alpha = Buffer.alloc(size * size);
+    for (let y = border; y < size - border; y++) for (let x = border; x < right - Math.round(20 * Math.sin(y / 200) ** 2); x++) {
+      if ((!sides.top && y < border + 60) || (!sides.bottom && y >= size - border - 60) || (!sides.left && x < border + 60)) continue;
+      const i = y * size + x; alpha[i] = 254; rgb.set([40, 70, 140], i * 3);
+    }
+    const prepared: Prepared = { width: size, height: size, rgb, alphaSource: null, background: analyseBackground(rgb, size, size), flags: [], sourceMime: "image/jpeg" };
+    const matte: Matte = { alpha, width: size, height: size, model: "synthetic", ms: 0, source: "model", target: "cpu", sentLongSide: null };
+    return { prepared, matte };
+  }
+  const CUT3 = { top: true, bottom: true, left: true };
+
+  it("renders a 1000 x 1000 photo cut on the top, bottom and left at 2342 x 3123, compliant, flush on the cut sides", async () => {
+    const source = edgeCut(1000, 560, CUT3);
+    const output = await renderSource({ ...source, channel: "styli", shotNumber: 2, productType: "apparel_model" });
+    expect(output.status).toBe("ok");
+    expect(output.notes).not.toContain("Skipped for Styli: the photo is smaller than Styli needs.");
+    expect([output.plan.w, output.plan.h]).toEqual([2342, 3123]);
+    expect(output.plan.cut).toEqual({ ...CUT3, right: false });
+    expect(output.plan.scale).toBeGreaterThan(3);
+    expect(output.flags).toEqual(expect.arrayContaining(["cut_in_source", "low_resolution"]));
+    // Filled: the cut sides sit on the canvas edges, no band.
+    const box = output.plan.productBox!;
+    expect([box.x, box.y, box.y + box.h]).toEqual([0, 0, 3123]);
+    expect(output.notes.some(n => n.startsWith("The original photo is cut at the "))).toBe(false);
+    expect(output.compliance.failures).toEqual([]);
+    const again = await checkOutput({ jpeg: output.jpeg!, channel: "styli", shotNumber: 2, plan: output.plan, identifier: "cut", n: 2, publicObjectPath: "cut_2.jpg" });
+    expect(again.failures).toEqual([]);
+    const meta = await sharp(output.jpeg!).metadata();
+    expect([meta.width, meta.height]).toEqual([2342, 3123]);
+  });
+  it("renders a tall product cut top and bottom that needs over 3.4x (900 x 900 photo)", async () => {
+    const tall = edgeCut(900, 420, { top: true, bottom: true, left: false });
+    const output = await renderSource({ ...tall, channel: "styli", shotNumber: 2, productType: "apparel_model" });
+    expect(output.status).toBe("ok");
+    expect(output.plan.scale).toBeGreaterThan(3.4);
+    expect(output.plan.productBox!.h).toBe(3123);
+    expect(output.compliance.failures).toEqual([]);
+  });
+  it("plans exactly what it renders: every shot of the product is made on Styli, on one uniform scale", async () => {
+    const shots = [edgeCut(1000, 560, CUT3), edgeCut(1000, 520, CUT3), edgeCut(900, 420, { top: true, bottom: true, left: false })];
+    const geometry = shots.map(({ matte }) => shotGeometry(matte.alpha, matte.width, matte.height)!);
+    const plan = planProduct(CHANNELS.styli, geometry);
+    const outputs = await Promise.all(shots.map((s, i) => renderSource({ ...s, channel: "styli", shotNumber: i + 2, productType: "apparel_model", uniformScale: plan.uniformScale, canvas: plan.canvas })));
+    expect(outputs.map(o => o.status)).toEqual(["ok", "ok", "ok"]);
+    expect(outputs.every(o => o.compliance.failures.length === 0)).toBe(true);
+  });
+});

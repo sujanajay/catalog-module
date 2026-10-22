@@ -29,11 +29,6 @@ export function upscaleConfigFromEnv(env: NodeJS.ProcessEnv = process.env): Upsc
   return { model, minScale: Number.isFinite(parsed) && parsed >= 1 ? parsed : DEFAULT_UPSCALE_MIN_SCALE };
 }
 
-/** The enlargement the upscaler gives before the render's own resize: UPSCALE_FACTOR when UPSCALE_MODEL is set, else 1. */
-export function upscaleFactorFromEnv(env: NodeJS.ProcessEnv = process.env): number {
-  return upscaleConfigFromEnv(env).model ? UPSCALE_FACTOR : 1;
-}
-
 /**
  * The decision: the plan's scale (source px to canvas px, the same factor on both axes) is above the
  * threshold. The plan's continuous scale is compared, not the rounded pixel ratio, so a variable
