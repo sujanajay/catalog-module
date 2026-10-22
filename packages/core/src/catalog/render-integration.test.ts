@@ -61,7 +61,7 @@ describe("renderer integration edge cases", () => {
     expect(preservedDarkness(prepared, matte, box, "other")).toBeNull();
     const output = await renderSource({ prepared, matte, channel: "noon", shotNumber: 1, productType: "other" });
     expect(output.flags).toContain("shadow_synthesised");
-    expect(output.compliance).toEqual({ ok: true, failures: [] });
+    expect(output.compliance).toMatchObject({ ok: true, failures: [] });
   });
 
   it("keeps an asymmetric soft mask whole and inside its safe box", async () => {
@@ -73,7 +73,7 @@ describe("renderer integration edge cases", () => {
     }
     const original = Buffer.from(matte.alpha), output = await renderSource({ prepared, matte, channel: "noon", shotNumber: 1, productType: "apparel_model" });
     expect(output.status).toBe("ok");
-    expect(output.compliance).toEqual({ ok: true, failures: [] });
+    expect(output.compliance).toMatchObject({ ok: true, failures: [] });
     expect(matte.alpha).toEqual(original);
     expect(output.plan.sourceBox).toEqual({ x: 40, y: 30, w: 40, h: 100 });
     expect(output.plan.productBox!.y).toBeGreaterThanOrEqual(output.plan.safeBox.y);
@@ -94,7 +94,7 @@ describe("renderer integration edge cases", () => {
     const output = await renderSource({ prepared, matte, channel: "noon", shotNumber: 1, productType: productType ?? "other", synthesiseShadow });
     expect(output.flags.includes("shadow_synthesised")).toBe(synthesised);
     if (!synthesised) expect(output.flags).toContain("no_shadow_source");
-    expect(output.compliance).toEqual({ ok: true, failures: [] });
+    expect(output.compliance).toMatchObject({ ok: true, failures: [] });
   });
 
   it("keeps the product-type rule when no decision input is given", async () => {

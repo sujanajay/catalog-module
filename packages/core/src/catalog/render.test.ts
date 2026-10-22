@@ -5,6 +5,7 @@ import sharp from "sharp";
 import { CHANNEL_IDS } from "./types";
 import { prepare, renderSource, renderKeyInputs, planProduct, safeBoxFor, UnsupportedSourceError, visibleAnchorShift, NO_CUT, type Prepared, type Matte } from "./render";
 import { anchorBounds, checkOutput, BG_TOLERANCE, STYLI_ANCHOR_SENTENCE } from "./compliance";
+import { MAX_REPAIRS_PER_OUTPUT } from "./auto-resolve";
 import { alphaFromPng } from "./matte";
 import { readFile } from "node:fs/promises";
 import { analyseBackground, preservedDarkness, shadowLayer, SHADOW_MAX_DARKNESS } from "./shadow";
@@ -196,9 +197,32 @@ describe("render and encoded compliance", () => {
     source.prepared.background.uniform = false;
     const output = await renderSource({ ...source, channel: "centrepoint", shotNumber: 2, identifier: "NOISE", productType: "apparel_flat" });
     expect(output.status).toBe("failed"); expect(output.jpeg).toBeNull(); expect(output.quality).toBe(70); expect(output.bytes).toBeGreaterThan(2_000_000);
-    // The operator reads the sentence alone; the code stays in compliance.failures for the auto-resolve ladder.
+    // The raw rule stays in compliance.failures; the note (the row's reason) says it in plain words, with the measurement kept for a repair.
     expect(output.compliance.failures).toContain("bytes: Could not get NOISE_2 for centrepoint under 2 MB.");
-    expect(output.notes).toContain("Could not get NOISE_2 for centrepoint under 2 MB.");
+    expect(output.notes).toContain("The image we made did not meet Centrepoint's rules: the file is larger than the 2 MB Centrepoint allows.");
+    expect(output.compliance.measured).toMatchObject({ bytes: output.bytes });
+  });
+  it("measures what a repair needs: the exact move onto the Styli guide and the overflow past the Noon margins (07 4.6a)", async () => {
+    const big = () => fixture(2400, 3200, { x: 200, y: 200, w: 2000, h: 2600 });
+    // 7 px under the guide: the measured move is exactly 7 up.
+    const styli = await renderSource({ ...big(), channel: "styli", shotNumber: 1, productType: "apparel_flat", anchorShift: { dx: 0, dy: 7 } });
+    expect(styli.compliance.failures.some(f => f.startsWith("styli_anchor:"))).toBe(true);
+    expect(styli.compliance.measured).toMatchObject({ anchorDelta: { dx: 0, dy: -7 }, shadow: "none", cut: NO_CUT });
+    // Any miss, moved by the measured delta (the reshift repair, repeated on a residual within MAX_REPAIRS_PER_OUTPUT), lands on the guide.
+    for (const start of [{ dx: 0, dy: 7 }, { dx: 0, dy: -7 }, { dx: 7, dy: 0 }]) {
+      let shift = start, r = styli;
+      for (let i = 0; i < MAX_REPAIRS_PER_OUTPUT; i++) {
+        r = await renderSource({ ...big(), channel: "styli", shotNumber: 1, productType: "apparel_flat", anchorShift: shift });
+        const d = r.compliance.measured!.anchorDelta!;
+        if (!r.compliance.failures.some(f => f.startsWith("styli_anchor:"))) break;
+        shift = { dx: shift.dx + d.dx, dy: shift.dy + d.dy };
+      }
+      expect(r.compliance.failures, JSON.stringify(start)).toEqual([]);
+    }
+    const noon = await renderSource({ ...fixture(), channel: "noon", shotNumber: 1, productType: "apparel_flat", anchorShift: { dx: 0, dy: -100 } });
+    expect(noon.compliance.failures.some(f => f.startsWith("inside_safe_box:"))).toBe(true);
+    expect(noon.compliance.measured!.outside.top).toBeGreaterThan(0);
+    expect(noon.compliance.measured!.outside.bottom).toBe(0);
   });
   it("encodes deterministic bytes on repeat", async () => {
     const input = { ...fixture(), channel: "noon" as const, shotNumber: 1, productType: "footwear" as const };
@@ -472,6 +496,25 @@ describe("Styli judged on the upscaled size", () => {
     expect(seen.x + seen.w).toBeGreaterThan(box.x + box.w + 1);
     expect(Math.abs((2 * seen.x + seen.w) / 2 - info.width / 2)).toBeGreaterThan(1);
     expect(Math.abs((2 * box.x + box.w) / 2 - info.width / 2)).toBeLessThanOrEqual(1);
+  });
+  it("measures the exact move onto the guide for a reshift repair on the real tracksuit with its kept shadow, and one reshift lands (07 4.6a)", async () => {
+    quiet();
+    const prepared = await prepare(await readFile(new URL("tracksuit-3.jpg", FIXTURES)), "tracksuit-3.jpg", async b => b);
+    const matte: Matte = { ...(await alphaFromPng(await readFile(new URL("tracksuit-3.matte.png", FIXTURES)))), model: "birefnet", ms: 0, source: "model", target: "gpu", sentLongSide: null };
+    const render = (anchorShift?: { dx: number; dy: number }) => renderSource({ prepared, matte, channel: "styli", shotNumber: 3, productType: "apparel_model", upscaler: lanczosUpscaler(), ...(anchorShift ? { anchorShift } : {}) });
+    // The repair's delta is read on the same product box as the check and the placement (anchorBounds), never the shadow:
+    // a product moved off the guide reads exactly that move back, plus the first placement's own residual (it may stand
+    // ANCHOR_SEEN_LIFT_PX above the guide, inside the check's 1 px), and the shadow follows the product.
+    const placed = await render();
+    expect(placed.compliance.failures).toEqual([]);
+    const residual = placed.compliance.measured!.anchorDelta!;
+    for (const shift of [{ dx: 0, dy: -7 }, { dx: 5, dy: 0 }]) {
+      const off = await render(shift);
+      expect(off.compliance.failures.map(f => f.split(":")[0])).toContain("styli_anchor");
+      expect(off.compliance.measured).toMatchObject({ anchorDelta: { dx: residual.dx - shift.dx, dy: residual.dy - shift.dy }, shadow: "kept" });
+      const back = await render({ dx: shift.dx + off.compliance.measured!.anchorDelta!.dx, dy: shift.dy + off.compliance.measured!.anchorDelta!.dy });
+      expect(back.compliance.failures).toEqual([]);
+    }
   });
   it("puts the real black outfit photo 4 (rescued by a smaller fit in batch b8a99c1b) on the Styli guide: its shadow darkens the soft edge on one side", async () => {
     quiet();

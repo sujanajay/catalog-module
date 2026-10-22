@@ -3,8 +3,9 @@ import { fileTypeFromBuffer } from "file-type";
 import { backgroundFor, channel, CUT_BAND_NOTE_START, DETAIL_SHOT_BBOX_FRACTION, JPEG_QUALITY_MIN, JPEG_QUALITY_START, JPEG_QUALITY_STEP, MAX_OUTPUT_BYTES, MAX_UPSCALE, MIN_SOURCE_LONG_SIDE_PX, type ChannelSpec, type Size } from "./channels";
 import type { ChannelId, OutputFlag, ProductType } from "./types";
 import { ALPHA_BBOX_THRESHOLD, analyseBackground, borderPixels, shadowLayer } from "./shadow";
-import { anchorBounds, BG_TOLERANCE, checkOutput } from "./compliance";
+import { anchorBounds, BG_TOLERANCE, checkOutput, type Measured } from "./compliance";
 import { enlargeCutout } from "./enhance";
+import { plainFailures } from "./qa/reasons";
 import { shouldUpscale, upscaledRgb, upscalerKey, type Upscaler } from "./upscale";
 
 export interface Prepared { width: number; height: number; rgb: Buffer; alphaSource: Buffer | null; background: { uniform: boolean; color: [number, number, number]; stdev: number }; flags: OutputFlag[]; sourceMime: string }
@@ -17,13 +18,20 @@ export interface CanvasPlan { w: number; h: number; lowResolution: boolean; safe
 export interface RenderInput { prepared: Prepared; matte: Matte; channel: ChannelId; shotNumber: number; productType: ProductType; uniformScale?: number; canvas?: Size; identifier?: string; publicObjectPath?: string; /** false forbids a synthesised shadow (05 rule 3); absent leaves the product-type rule. */ synthesiseShadow?: boolean;
   /** Below 1 shrinks the fitted product by this factor (the auto-resolve ladder's smaller fit); absent is 1. */ fitScale?: number;
   /** The judge saw a cut at the frame edge that the cut rule missed: shotGeometry relaxes its truncation share. */ judgedCut?: boolean;
+  /** false drops a shadow kept from the source photo (07 4.6a `source_shadow_off`); absent keeps it where it can be measured. */ keepSourceShadow?: boolean;
+  /** An extra move (canvas px) after the anchor rule, the computed `reshift` repair; clamped so the product stays on the canvas. */ anchorShift?: { dx: number; dy: number };
+  /** The quality loop's floor for this render (the `reencode` repair goes below JPEG_QUALITY_MIN); absent is JPEG_QUALITY_MIN. */ jpegQualityMin?: number;
   /** Spec 11: the GPU upscaler, used when the plan enlarges beyond its `minScale`; absent or null is the plain Lanczos path. */ upscaler?: Upscaler | null;
   /** Ids for the upscale log lines; never shown to an operator. */ trace?: { batchId?: string; productId?: string } }
 /**
  * `upscale`: set only when the upscaler made this output's colour (flag `upscaled`); `model` goes into render_key, never
  * into operator copy. `reused`: the photo's one x2 image was made for an earlier output (its `ms` is not a new call).
  */
-export interface RenderOutput { jpeg: Buffer | null; status: "ok" | "skipped" | "failed"; plan: CanvasPlan; quality: number; bytes: number; flags: OutputFlag[]; notes: string[]; attention: { why: string; what: string } | null; compliance: { ok: boolean; failures: string[] }; upscale?: { model: string; ms: number; reused?: true };
+export type ShadowKind = "kept" | "synthesised" | "none";
+/** The compliance measurement plus what this render drew (07 4.6a): the shadow kind and the cut sides. Stored in `catalog_outputs.compliance.measured`. */
+export interface RenderMeasured extends Measured { shadow: ShadowKind; cut: CutEdges }
+export interface RenderCompliance { ok: boolean; failures: string[]; measured?: RenderMeasured }
+export interface RenderOutput { jpeg: Buffer | null; status: "ok" | "skipped" | "failed"; plan: CanvasPlan; quality: number; bytes: number; flags: OutputFlag[]; notes: string[]; attention: { why: string; what: string } | null; compliance: RenderCompliance; upscale?: { model: string; ms: number; reused?: true };
   /** The placed cut-out's alpha on the canvas (plan.w x plan.h, one byte per pixel), the mask the compliance check judged with: a re-check of the delivered JPEG (catalog-smoke --verify-manifest) passes it so the Styli guide is judged on the product, never on a kept shadow. Absent when nothing was drawn. */ foregroundMask?: Buffer }
 /** `upscaler`: the upscaler model id, only when the upscaler made the output (the plain path keeps today's key). */
 export interface RenderKeyInputs { sourceSha256: string; channel: ChannelId; rulesVersion: string; policyId: string; policyUpdatedAt: string; n: number; upscaler?: string | null }
@@ -567,7 +575,7 @@ export async function renderSource(input: RenderInput): Promise<RenderOutput> {
     : `${CUT_BAND_NOTE_START}${floating.join(" and ")}, but on ${spec.label} the product cannot reach that edge of the image without trimming more of it, so a band shows there.`);
   const rgbColor = hexColor(color);
   const passthrough = p.sourceMime === "image/jpeg" && !p.alphaSource && !anyCut(cut) && (input.fitScale ?? 1) >= 1 && p.width === plan.w && p.height === plan.h && box.x >= plan.safeBox.x && box.y >= plan.safeBox.y && box.x + box.w <= plan.safeBox.x + plan.safeBox.w && box.y + box.h <= plan.safeBox.y + plan.safeBox.h && borderPixels(p.width, p.height).every(i => rgbColor.every((v, c) => Math.abs(p.rgb[i * 3 + c]! - v) <= BG_TOLERANCE));
-  let image: Buffer;
+  let image: Buffer, shadowKind: ShadowKind = "none";
   const foregroundMask = Buffer.alloc(plan.w * plan.h);
   if (passthrough) {
     result.flags.push("passthrough"); image = await sharp(p.rgb, { raw: { width: p.width, height: p.height, channels: 3 } }).png().toBuffer();
@@ -591,13 +599,13 @@ export async function renderSource(input: RenderInput): Promise<RenderOutput> {
     // Styli's guide is judged on the product as it is seen (visibleAnchorShift); the shadow and the mask follow the move.
     if (spec.anchor === "bottom-centre") {
       const shift = await visibleAnchorShift(cutout, product, plan.safeBox, plan, rgbColor, cut);
-      product.x += shift.dx; product.y += shift.dy; plan.placedX = product.x; plan.placedY = product.y;
+      product.x += shift.dx; product.y += shift.dy;
     }
     const cutoutAlpha = await sharp(cutout).extractChannel(3).raw().toBuffer();
     const drawShadow = async () => {
       foregroundMask.fill(0);
       for (let y = 0; y < product.h; y++) cutoutAlpha.copy(foregroundMask, (product.y + y) * plan.w + product.x, y * product.w, (y + 1) * product.w);
-      const drawn = await shadowLayer(p, matte, crop, plan, input.productType, color, foregroundMask);
+      const drawn = await shadowLayer(p, matte, crop, plan, input.productType, color, foregroundMask, input.keepSourceShadow !== false);
       // Never a synthesised contact shadow on a photo cut in the source on any side (a bag held in a cropped hand, a
       // close-up filling the photo): nothing stands on a floor there, and the shadow below makes the centred product
       // look off-centre.
@@ -615,15 +623,24 @@ export async function renderSource(input: RenderInput): Promise<RenderOutput> {
       for (let i = 0; i < greys.length; i++) for (let c = 0; c < 3; c++) under[i * 3 + c] = Math.round(rgbColor[c]! * greys[i]! / 255);
       const again = await visibleAnchorShift(cutout, product, plan.safeBox, plan, rgbColor, cut, under);
       if (again.dx || again.dy) {
-        product.x += again.dx; product.y += again.dy; plan.placedX = product.x; plan.placedY = product.y;
+        product.x += again.dx; product.y += again.dy;
         shadow = await drawShadow();
       }
     }
+    // The computed `reshift` repair (07 4.6a): the move the compliance check measured, made after the anchor rule and
+    // kept on the canvas; the mask and the shadow follow it.
+    if (input.anchorShift) {
+      const x = Math.max(0, Math.min(plan.w - product.w, product.x + input.anchorShift.dx)), y = Math.max(0, Math.min(plan.h - product.h, product.y + input.anchorShift.dy));
+      if (x !== product.x || y !== product.y) { product.x = x; product.y = y; shadow = await drawShadow(); }
+    }
+    plan.placedX = product.x; plan.placedY = product.y;
     result.flags.push(...shadow.flags);
+    shadowKind = shadow.flags.includes("shadow_synthesised") ? "synthesised" : shadow.layer ? "kept" : "none";
     image = await sharp({ create: { width: plan.w, height: plan.h, channels: 3, background: color } }).composite([...(shadow.layer ? [{ input: shadow.layer, blend: "multiply" as const }] : []), { input: cutout, left: product.x, top: product.y, blend: "over" }]).png().toBuffer();
   }
   let jpeg: Buffer = Buffer.alloc(0);
-  for (let quality = JPEG_QUALITY_START; quality >= JPEG_QUALITY_MIN; quality -= JPEG_QUALITY_STEP) {
+  const qualityMin = Math.min(JPEG_QUALITY_MIN, input.jpegQualityMin ?? JPEG_QUALITY_MIN);
+  for (let quality = JPEG_QUALITY_START; quality >= qualityMin; quality -= JPEG_QUALITY_STEP) {
     result.quality = quality;
     jpeg = await sharp(image).withDensity(spec.dpi).withIccProfile("srgb").jpeg({ quality, chromaSubsampling: "4:4:4" }).toBuffer();
     if (jpeg.length <= MAX_OUTPUT_BYTES) break;
@@ -631,9 +648,11 @@ export async function renderSource(input: RenderInput): Promise<RenderOutput> {
   result.bytes = jpeg.length;
   const identifier = input.identifier ?? "photo";
   result.foregroundMask = foregroundMask;
-  result.compliance = await checkOutput({ jpeg, channel: spec.id, shotNumber, plan, identifier, n: shotNumber, publicObjectPath: input.publicObjectPath ?? `${encodeURIComponent(identifier)}_${shotNumber}.jpg`, foregroundMask });
-  // The operator reads the sentence; the code before it stays in `compliance.failures` for the auto-resolve ladder and the evals.
-  if (!result.compliance.ok) { result.flags.push("failed_compliance"); result.notes.push(...result.compliance.failures.map(f => f.slice(f.indexOf(": ") + 2))); return result; }
+  const checked = await checkOutput({ jpeg, channel: spec.id, shotNumber, plan, identifier, n: shotNumber, publicObjectPath: input.publicObjectPath ?? `${encodeURIComponent(identifier)}_${shotNumber}.jpg`, foregroundMask });
+  result.compliance = { ok: checked.ok, failures: checked.failures, measured: { ...checked.measured, shadow: shadowKind, cut: { ...cut } } };
+  // The note (the row's reason) names the rule in plain words; the "code: sentence" strings stay in compliance.failures (07 4.6a).
+  if (!result.compliance.ok) { result.flags.push("failed_compliance");
+    result.notes.push(`The image we made did not meet ${spec.label}'s rules: ${plainFailures(result.compliance.failures, spec.label)}.`); return result; }
   result.jpeg = jpeg; result.status = "ok";
   return result;
 }

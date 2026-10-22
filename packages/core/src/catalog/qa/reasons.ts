@@ -2,6 +2,36 @@ import { flagReason, UPSCALED_SENTENCE, type OutputFlag } from "../types";
 import { CHANNELS } from "../channels";
 export interface ReasonContext { /** The code-detected `leftover_background` (a busy background held at the matte stage, busyBackgroundHold). */ busy?: boolean; n?: number; k?: number; channel?: string; w?: number; h?: number; min?: number; /** A fixed canvas's delivered size (spec 11 4.1). */ deliverW?: number; deliverH?: number; failures?: string; error?: string }
 export interface FlagDetails { why: string; whatToDo: string }
+/**
+ * The channel rule a compliance code names, in operator words (07 4.6a). The raw "code: sentence" strings stay in
+ * `compliance.failures` for the report; the operator reads these. `channel` is the marketplace label.
+ */
+export function plainFailure(code: string, channel = "this marketplace"): string {
+  const rules: Record<string, string> = {
+    bytes: `the file is larger than the 2 MB ${channel} allows`,
+    inside_safe_box: `the product reaches into the margins ${channel} requires`,
+    styli_anchor: "the product does not sit on the Styli bottom guide",
+    noon_wide: "a wide shot needs 5% side margins on Noon",
+    background: `the background around the product is not the exact colour ${channel} requires`,
+  };
+  return rules[code] ?? `the file format or size is not what ${channel} accepts`;
+}
+/** The plain rule sentences of a failures list, each once, joined with "; " (empty when nothing failed). */
+export function plainFailures(failures: readonly string[], channel?: string): string {
+  return [...new Set(failures.map(f => plainFailure(f.split(":")[0]!, channel)))].join("; ");
+}
+/** What each repair step did, in operator words, for the tried sentence. Steps with no operator meaning are left out. */
+export const STEP_WORDS: Record<string, string> = {
+  shadow_off: "the added shadow removed", source_shadow_off: "the photo's own shadow removed", refit: "a smaller fit", reshift: "moved onto the guide",
+  reencode: "saved smaller", re_render: "made again", second_matte: "a second cut-out", matte_passthrough: "the whole photo kept", smaller_fit: "a smaller fit", padded_matte: "a padded cut-out",
+};
+/** "We tried the added shadow removed and a smaller fit and could not fix it." from the steps that ran; "" when none ran. */
+export function triedSentence(steps: readonly string[]): string {
+  const words = [...new Set(steps.map(step => STEP_WORDS[step]).filter((w): w is string => !!w))];
+  if (!words.length) return "";
+  const list = words.length > 1 ? `${words.slice(0, -1).join(", ")} and ${words.at(-1)}` : words[0]!;
+  return `We tried ${list} and could not fix it.`;
+}
 /** The placement sentence in the channel's own rule (the channel table's `anchor`), in operator words. */
 function placementWhy(label: string | undefined): string {
   const spec = Object.values(CHANNELS).find(c => c.label === label);

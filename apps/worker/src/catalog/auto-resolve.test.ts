@@ -121,10 +121,10 @@ const steps = (actions: AutoAction[]) => actions.map(a => `${a.step}:${a.result}
 const own = ["halo", "leftover_background", "failed_compliance"];
 
 describe("07 auto-resolve: re-render and re-judge before holding", () => {
-  it("a leftover-background failure is resolved at step (a), shadow off, and recorded", async () => {
+  it("a leftover background read from the shadow we added is repaired by taking that shadow off, on that channel, and recorded", async () => {
     const w = world(), s = await seed(w, "footwear", [block(PLAIN, 300, 500)]);
     const [o] = s.outputs;
-    expect(steps(autoActionsOf(o!.compliance))).toEqual(["shadow_off:passed", "apply:passed"]);
+    expect(steps(autoActionsOf(o!.compliance))).toEqual(["shadow_off:passed"]);
     expect(autoActionsOf(o!.compliance)[0]).toMatchObject({ trigger: ["leftover_background"], channels: ["noon"], rejudged: true });
     expect(o).toMatchObject({ status: "staged", compliance: { ok: true } });
     expect(o!.flags).not.toContain("shadow_synthesised");
@@ -134,13 +134,13 @@ describe("07 auto-resolve: re-render and re-judge before holding", () => {
     expect(s.held).toEqual([]);
   }, 120_000);
 
-  it("a halo is resolved at step (b), the second matte, and the winner is applied to every channel of the photo", async () => {
+  it("a halo is repaired by the second cut-out, the photo's matte, and every channel is re-made with it and re-checked", async () => {
     const w = world(), s = await seed(w, "apparel_flat", [block(PLAIN), block(HALO_FIRST)], ["noon", "amazon"]);
     const photo = s.outputs.filter(o => o.n === 2);
     expect(photo).toHaveLength(2);
     for (const o of photo) {
-      // No synthesised shadow on apparel, so step (a) has nothing to change and costs nothing.
-      expect(steps(autoActionsOf(o.compliance))).toEqual(["shadow_off:skipped", "second_matte:passed", "apply:passed"]);
+      // No shadow was drawn on apparel, so no shadow step is offered or recorded: the failure names the cut-out.
+      expect(steps(autoActionsOf(o.compliance))).toEqual(["second_matte:passed"]);
       expect(autoActionsOf(o.compliance).at(-1)!.channels.sort()).toEqual(["amazon", "noon"]);
       expect(o.status).toBe("staged");
       expect(o.flags).not.toContain("halo");
@@ -153,50 +153,62 @@ describe("07 auto-resolve: re-render and re-judge before holding", () => {
     expect(s.held).toEqual([]);
   }, 180_000);
 
-  it("a placement failure of the channel rules is resolved at step (c), a 5% smaller fit, before the judge", async () => {
+  it("a margin breach of the channel rules is repaired by a fit computed from the measured overflow, before the judge", async () => {
     const w = world(), real = w.deps.renderAllChannels;
     // The checks no longer judge the checker's JPEG tint inside its own 8 x 8 blocks (compliance.ts JPEG_BLOCK_PX), and
-    // nothing else in this world reaches past the margin at full fit, so photo 2's full-fit render is failed here.
+    // nothing else in this world reaches past the margin at full fit, so photo 2's full-fit render is failed here, with
+    // a measurement 12 px past the safe box at the top and the bottom for the refit to compute from.
     w.deps.renderAllChannels = async (p, m, channels, ctx) => {
       const out = await real(p, m, channels, ctx);
       if (ctx.shotNumber !== 2 || ctx.fitScale !== undefined) return out;
       const failure = "inside_safe_box: The product or shadow reaches outside the required margins.";
-      for (const c of channels) out[c] = { ...out[c], jpeg: null, status: "failed", flags: [...out[c].flags, "failed_compliance"], notes: [failure.slice(failure.indexOf(": ") + 2)], compliance: { ok: false, failures: [failure] } };
+      for (const c of channels) {
+        const measured = out[c].compliance.measured!, seen = { ...measured.safe, y: measured.safe.y - 12, h: measured.safe.h + 24 };
+        out[c] = { ...out[c], jpeg: null, status: "failed", flags: [...out[c].flags, "failed_compliance"], notes: ["The image we made did not meet Noon's rules: the product reaches into the margins Noon requires."], compliance: { ok: false, failures: [failure], measured: { ...measured, seen, outside: { ...measured.outside, top: 12, bottom: 12 } } } };
+      }
       return out;
     };
     const s = await seed(w, "apparel_flat", [block(PLAIN), checker]);
     const o = s.outputs.find(row => row.n === 2)!;
     const actions = autoActionsOf(o.compliance);
-    expect(steps(actions)).toEqual(["shadow_off:skipped", "second_matte:failed", "smaller_fit:passed", "apply:passed"]);
-    expect(actions[1]!.detail).toMatch(/inside_safe_box/);
+    expect(steps(actions)).toEqual(["refit:passed"]);
+    expect(actions[0]!).toMatchObject({ channels: ["noon"], trigger: ["failed_compliance"] });
+    expect(actions[0]!.detail).toMatch(/^inside_safe_box -> fit 0\.9\d\d$/);
     expect(actions.every(a => !a.rejudged)).toBe(true);
-    expect(o).toMatchObject({ status: "staged", compliance: { ok: true } });
+    expect(o).toMatchObject({ status: "staged", compliance: { ok: true, variant: { fitScale: expect.any(Number) } } });
+    // The measurement is kept with the image, so a later repair can compute from it.
+    expect((o.compliance as { measured: { seen: unknown; shadow: string } }).measured).toMatchObject({ seen: expect.objectContaining({ w: expect.any(Number) }), shadow: "none" });
     expect(o.flags).not.toContain("failed_compliance");
     // The fixed image was judged like any other.
     expect(w.judgeOutput.mock.calls.filter(call => call[0].n === 2)).toHaveLength(1);
     expect(s.held).toEqual([]);
   }, 180_000);
 
-  it("an exhausted ladder on photo 3 with two good photos left drops it with a note and no hold", async () => {
+  it("a halo no cut-out fixes on photo 3 with two good photos left drops it with a note saying what was tried, and no hold", async () => {
     const w = world(), s = await seed(w, "apparel_flat", [block(PLAIN), block(PLAIN), block(HALO_ALWAYS)]);
     const o = s.outputs.find(row => row.n === 3)!;
-    expect(steps(autoActionsOf(o.compliance))).toEqual(["shadow_off:skipped", "second_matte:failed", "smaller_fit:failed"]);
+    // The only repair a halo has is the second cut-out (the product's pixels are never redrawn); a smaller fit cannot answer it.
+    expect(steps(autoActionsOf(o.compliance))).toEqual(["second_matte:failed"]);
     expect(o.status).toBe("skipped");
     expect(o.flags).toEqual(expect.arrayContaining(["halo", "auto_dropped"]));
+    expect(o.reason).toContain("We tried a second cut-out and could not fix it.");
     expect(o.reason).toContain("Left out automatically");
+    // Plain words only: no step id, no rule code, no model name.
+    expect(o.reason).not.toMatch(/second_matte|_|birefnet|test\/judge/);
     expect(o.qaScores).toMatchObject({ autoAction: "drop" });
-    // At most one re-judge per step that ran: judge + second matte + smaller fit.
-    expect(w.judgeOutput.mock.calls.filter(call => call[0].n === 3)).toHaveLength(3);
+    // One judge look per round: the first judging plus one re-judge of the second cut-out.
+    expect(w.judgeOutput.mock.calls.filter(call => call[0].n === 3)).toHaveLength(2);
     expect(s.held).toEqual([]);
   }, 180_000);
 
-  it("an exhausted ladder on photo 1 holds the product with the existing flag", async () => {
+  it("a halo no cut-out fixes on photo 1 holds the product with the existing flag and the tried sentence on the card", async () => {
     const w = world(), s = await seed(w, "apparel_flat", [block(HALO_ALWAYS), block(PLAIN), block(PLAIN)]);
     const o = s.outputs.find(row => row.n === 1)!;
-    expect(steps(autoActionsOf(o.compliance))).toEqual(["shadow_off:skipped", "second_matte:failed", "smaller_fit:failed"]);
+    expect(steps(autoActionsOf(o.compliance))).toEqual(["second_matte:failed"]);
     expect(o).toMatchObject({ status: "needs_attention", qaScores: { autoAction: "hold", holdCause: "photo_one" } });
     expect(o.flags).toContain("halo");
     expect(s.held.map(p => p.photos.map(photo => photo.n))).toEqual([[1]]);
+    expect(s.held[0]!.photos[0]!.why).toContain("We tried a second cut-out and could not fix it.");
   }, 180_000);
 
   it("a judge-seen cut at the knees with no photo edge is placed flush; it stays a note, never a hold", async () => {
@@ -240,8 +252,9 @@ describe("07 auto-resolve: re-render and re-judge before holding", () => {
   it("a batch whose only problems are our own defects ends with an attention rate of 0", async () => {
     const w = world(), s = await seed(w, "footwear", [block(PLAIN), block(HALO_FIRST), checker]);
     const actions = s.outputs.map(o => steps(autoActionsOf(o.compliance)));
-    // Every photo had a defect we made (a stray shadow, a halo, ringing past the margin) and every one was re-made.
-    expect(actions.every(list => list.at(-1) === "apply:passed")).toBe(true);
+    // Every photo had a defect we made (a stray shadow, a halo, and on the checker its added shadow; its JPEG tint stays
+    // inside its own 8 x 8 blocks and no longer breaks the margin, compliance.ts JPEG_BLOCK_PX) and each got its own fix.
+    expect(actions.map(list => list.at(-1))).toEqual(["shadow_off:passed", "second_matte:passed", "shadow_off:passed"]);
     for (const o of s.outputs) { expect(o.status).toBe("staged"); for (const flag of own) expect(o.flags).not.toContain(flag); }
     expect(attentionRate(s.held.length, 1)).toBe(0);
   }, 240_000);
@@ -361,12 +374,12 @@ describe("cut-out integrity guard in the matte stage (matte-guard.ts)", () => {
     expect(sources.map(source => source.flags.includes("chart_image"))).toEqual([true, false]);
   }, 180_000);
 
-  it("a judge-seen product_removed climbs to the same pass-through step and keeps the winner as the photo's matte", async () => {
+  it("a judge-seen product_removed goes to the second cut-out, then the same pass-through step, and keeps the winner as the photo's matte", async () => {
     let judged = 0;
     const w = world({ photoScores: (n): Record<string, number> => (n === 2 && ++judged < 3 ? { product_intact: 30 } : {}) });
     const s = await seed(w, "apparel_flat", [block(PLAIN), block(PLAIN)]);
     const o = s.outputs.find(row => row.n === 2)!;
-    expect(steps(autoActionsOf(o.compliance))).toEqual(["shadow_off:skipped", "second_matte:failed", "matte_passthrough:passed", "apply:passed"]);
+    expect(steps(autoActionsOf(o.compliance))).toEqual(["second_matte:failed", "matte_passthrough:passed"]);
     expect(o.flags).toContain("matte_passthrough");
     expect(o.flags).not.toContain("product_removed");
     expect(o.status).toBe("staged");

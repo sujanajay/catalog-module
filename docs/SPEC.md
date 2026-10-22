@@ -57,6 +57,13 @@ configuration. Access is by Google sign-in with three roles (admin, operator, vi
   edge is made on Styli like any other photo. No channel skips a photo because it needs more
   enlargement; the only size floor is the global one (long side under 500 px: `small_source`, held for a
   person). Batch b8a99c1b had 20 of 201 Styli images skipped by the old rule after step 4 had counted them.
+- Repairs (owner, 2026-10-22): a defect we produced is never answered by a fixed list. For each output
+  (channel x photo) the pipeline reads what failed (the rule code, the measured values, the judge's flag
+  and evidence) and applies the fix for that failure on that channel, computed from the measurement
+  where there is one, re-checks, and leaves an image out only when the source is genuinely unfixable,
+  with a plain reason naming the rule (never a rule id or a model id). Fixes happen in the first run; a
+  fix touches the failing channel only; a cut-out change re-checks every channel (spec 07 4.6a, design
+  `docs/plans/2026-10-22-targeted-repair.md`).
 - Product identity and overwrite: the product (brand + style+colour identifier) owns its public images.
   Opptra SKU ids are attributes, never part of a link. A re-upload overwrites in place and deletes the
   shots the new upload no longer has. Batches are events; product state is the truth. Marketplaces keep

@@ -79,7 +79,7 @@ describe("synthesised contact shadow follows the silhouette", () => {
     const { prepared, matte } = model();
     for (const channel of ["noon", "namshi", "trendyol", "centrepoint", "sixthstreet", "shein"] as const) {
       const output = await renderSource({ prepared, matte, channel, shotNumber: 2, productType: "other" });
-      expect(output.compliance, channel).toEqual({ ok: true, failures: [] });
+      expect(output.compliance, channel).toMatchObject({ ok: true, failures: [] });
       expect(output.flags).toContain("shadow_synthesised");
     }
   });

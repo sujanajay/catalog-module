@@ -382,23 +382,45 @@ Defects we produced are re-made by the pipeline before a product is ever held.
   `leftover_background` (the judge's `edge_quality` and `background_clean` under their lines),
   `failed_compliance` (a channel rule we broke, including placement: margins, Styli guide, Noon
   side margins) and `placement`.
-- Ladder, per photo, in order, checked on the failing channels: (a) re-render with the synthesised
-  shadow off (skipped when none was added), (b) re-matte with the policy's `matteModelSecond` and
-  re-render (skipped when absent, equal to the first or not listed by the matting services), (c)
-  re-render with a 5% smaller fit (`SMALLER_FIT_SCALE`) in the same canvas. The shadow stays off
-  after (a). After each step the compliance guard runs again and, when the judge flagged the photo,
-  the strictest failing channel is re-judged once (the judge caps apply; a cap ends the ladder).
-- The first step that passes is applied to every channel of the photo (a channel the step would
-  break keeps its first image). A winning second matte becomes the photo's stored matte.
+- Diagnosis, per output (channel x photo), from the rule code, the compliance measurement
+  (`compliance.measured`: the seen product box, the safe box, the overflow per side, the Styli guide
+  delta, the band breach, the file size, the shadow drawn, the cut sides) and the judge's flags
+  (`diagnoseOutput`, `packages/core/src/catalog/auto-resolve.ts`; design: `docs/plans/2026-10-22-targeted-repair.md`).
+  Each failure gets the repair that answers it, computed from the measurement where there is one:
+  `styli_anchor` -> `reshift` by the exact measured delta; `bytes` -> `reencode` (quality floor
+  `JPEG_QUALITY_REPAIR_MIN`); `inside_safe_box`, `background`, `noon_wide` -> the drawn shadow off first
+  (`shadow_off` for one we added, `source_shadow_off` for one kept from the photo), then `refit` by the
+  factor that puts the seen box inside the safe box (slack `REFIT_SLACK`, floor `REFIT_MIN_SCALE`);
+  encoder-setting codes (`dims`, `format`, ...) -> one `re_render`, then a hold for the technical team;
+  `leftover_background` (judge) -> the drawn shadow off, then `second_matte`; `halo` -> `second_matte`;
+  `product_removed` -> `second_matte`, then `matte_passthrough` (matte-guard rules). `orientation` is
+  never auto-rotated and a halo is never eroded (R11: product pixels are never removed or redrawn).
+- Scope: a render-level step changes its own channel only; the other channels' images stay unchanged.
+  A matte step is the photo's (every channel shares the cut-out): every channel is re-made with it, each
+  with its own render repairs so far, and re-checked; a channel the new matte breaks and no repair mends
+  keeps its first image. A winning second or pass-through matte becomes the photo's stored matte.
+- Bounds: at most `MAX_REPAIRS_PER_OUTPUT` (3) render-level repairs per output per run; at most one
+  matte change per step per photo; when the judge flagged the photo, one re-judge per round on the
+  strictest channel, at most `MAX_REJUDGES_PER_PHOTO` (3) per photo (the judge caps apply; a cap ends
+  the loop). A Styli `refit` on one angle keeps that angle's own size and carries the renderer's
+  "Could not keep the same size as the other angles" note (R11a is kept on the angles that passed).
+- The options a repaired output was made with stay in `compliance.variant`, so a later repair (the QA
+  stage after the render stage, a redelivery) starts from them.
 - Where: compliance failures in the render stage (`chunk.ts`, before the judge sees the image);
   judge flags in the QA stage through `CatalogDeps.repairOwnDefects` (`qa-stage.ts`), after judging
   and before `triageProduct`.
 - Record: every step and its result is appended to `catalog_outputs.compliance.auto_actions`
   (`step`, `trigger`, `result` passed | failed | skipped, `channels`, `rejudged`, `detail`) and
   written to `report-v<k>.json` per output as `autoActions`. No schema change.
-- Ladder exhausted: triage drops the photo with the drop note and the information flag
+- Repairs exhausted: the output's reason names the rule in plain words (`plainFailures`, never a rule
+  code or a model id) and what was tried (`triedSentence`: "We tried the added shadow removed and a
+  smaller fit and could not fix it."); triage drops the photo with the drop note and the information flag
   `auto_dropped` when it is not photo 1 and at least two good photos remain on the channel;
-  otherwise it holds with the existing flag. Our own defects are never published with a note.
+  otherwise it holds with the existing flag. Our own defects are never published with a note. An
+  encoder-setting failure left after its `re_render` is a code fault, not the photo: triage holds it
+  (cause `code_fault`) whatever the other photos, never drops it. The render's note (the row's
+  `reason`) carries the plain sentence too; the raw "code: sentence" strings stay in
+  `compliance.failures` for the report.
 - Source problems (`cut_in_source`, `small_source`, `text_or_watermark`, `orientation`) follow the
   triage: note-only or drop-with-note, held only for photo 1 or the last usable photo. When the judge
   saw the photo cut at its frame edge (`judgeSawSourceCut`: `complete_product` under its line, or a
