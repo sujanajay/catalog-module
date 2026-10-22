@@ -119,8 +119,12 @@ render() {
 
 # --- 0. Preflight -----------------------------------------------------------------------------
 # Read only: the channel commands need the beta component. This script never installs anything.
+# "Update Available" means installed but not the newest version, which is fine to use.
 BETA_STATE=$(gcv components list --filter=id=beta --format='value(state.name)')
-[ "$BETA_STATE" = Installed ] || die "the gcloud beta component is missing; run: gcloud components install beta"
+case "$BETA_STATE" in
+  Installed|"Update Available") ;;
+  *) die "the gcloud beta component is missing; run: gcloud components install beta" ;;
+esac
 
 # --- 1. APIs ----------------------------------------------------------------------------------
 ENABLED=$(gcv services list --enabled --format='value(config.name)')
