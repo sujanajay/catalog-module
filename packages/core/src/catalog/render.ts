@@ -3,7 +3,7 @@ import { fileTypeFromBuffer } from "file-type";
 import { backgroundFor, channel, CUT_BAND_NOTE_START, DETAIL_SHOT_BBOX_FRACTION, JPEG_QUALITY_MIN, JPEG_QUALITY_START, JPEG_QUALITY_STEP, MAX_OUTPUT_BYTES, MAX_UPSCALE, MIN_SOURCE_LONG_SIDE_PX, type ChannelSpec, type Size } from "./channels";
 import type { ChannelId, OutputFlag, ProductType } from "./types";
 import { ALPHA_BBOX_THRESHOLD, analyseBackground, borderPixels, shadowLayer } from "./shadow";
-import { ANCHOR_MASK_ALPHA, BG_TOLERANCE, checkOutput } from "./compliance";
+import { anchorBounds, BG_TOLERANCE, checkOutput } from "./compliance";
 import { enlargeCutout } from "./enhance";
 import { shouldUpscale, upscaledRgb, upscalerKey, type Upscaler } from "./upscale";
 
@@ -23,7 +23,8 @@ export interface RenderInput { prepared: Prepared; matte: Matte; channel: Channe
  * `upscale`: set only when the upscaler made this output's colour (flag `upscaled`); `model` goes into render_key, never
  * into operator copy. `reused`: the photo's one x2 image was made for an earlier output (its `ms` is not a new call).
  */
-export interface RenderOutput { jpeg: Buffer | null; status: "ok" | "skipped" | "failed"; plan: CanvasPlan; quality: number; bytes: number; flags: OutputFlag[]; notes: string[]; attention: { why: string; what: string } | null; compliance: { ok: boolean; failures: string[] }; upscale?: { model: string; ms: number; reused?: true } }
+export interface RenderOutput { jpeg: Buffer | null; status: "ok" | "skipped" | "failed"; plan: CanvasPlan; quality: number; bytes: number; flags: OutputFlag[]; notes: string[]; attention: { why: string; what: string } | null; compliance: { ok: boolean; failures: string[] }; upscale?: { model: string; ms: number; reused?: true };
+  /** The placed cut-out's alpha on the canvas (plan.w x plan.h, one byte per pixel), the mask the compliance check judged with: a re-check of the delivered JPEG (catalog-smoke --verify-manifest) passes it so the Styli guide is judged on the product, never on a kept shadow. Absent when nothing was drawn. */ foregroundMask?: Buffer }
 /** `upscaler`: the upscaler model id, only when the upscaler made the output (the plain path keeps today's key). */
 export interface RenderKeyInputs { sourceSha256: string; channel: ChannelId; rulesVersion: string; policyId: string; policyUpdatedAt: string; n: number; upscaler?: string | null }
 
@@ -498,9 +499,10 @@ export function planProduct(spec: ChannelSpec, shots: { box: BBox; source: Size;
 export const ANCHOR_SEEN_LIFT_PX = 1;
 /**
  * The move (canvas px) that puts the product on the bottom-centre guide (Styli, compliance `styli_anchor`) as the check
- * measures it: what is seen (the cut-out over `background` differs from it by more than BG_TOLERANCE) together with
- * the cut-out's half-alpha silhouette (ANCHOR_MASK_ALPHA), its width centred in the safe box and its lowest row on (or
- * ANCHOR_SEEN_LIFT_PX above) the safe box's bottom edge. The plan places the matte's box (alpha above
+ * measures it, with the check's own definition of the product (compliance.ts anchorBounds, on the cut-out drawn over
+ * `background`): the cut-out's half-alpha silhouette (ANCHOR_MASK_ALPHA) together with what is seen of its soft edge
+ * (more than BG_TOLERANCE off the background), never a shadow, which lies outside the cut-out. Its width is centred in
+ * the safe box and its lowest row put on (or ANCHOR_SEEN_LIFT_PX above) the safe box's bottom edge. The plan places the matte's box (alpha above
  * ALPHA_BBOX_THRESHOLD), and a model matte's outer fade is alpha above that threshold over a pale blend of the old
  * background, which looks like the canvas. Drawn at 1x or less the fade is under a pixel; enlarged (an 800 x 1200 photo
  * is drawn about 2x on Styli once the x2 upscaler lets it through) it is several px, so the product stood above the
@@ -508,19 +510,23 @@ export const ANCHOR_SEEN_LIFT_PX = 1;
  * move never exceeds that fade: a pale product (a white brief, a pale shirt with a logo) is placed by its silhouette,
  * never dragged after the few pixels of it that are seen. Only an axis with no cut side moves (a cut side sits flush
  * with its canvas edge by its own rule); the cut-out stays on the canvas, with the product's box inside the safe box.
+ * `under` (product.w x product.h, 3 bytes per pixel): the canvas under the cut-out once the shadow is drawn (see
+ * renderSource), so the soft edge is measured as it will show over the shadow.
  */
-export async function visibleAnchorShift(cutout: Buffer, product: BBox, safe: BBox, canvas: Size, background: [number, number, number], cut: CutEdges): Promise<{ dx: number; dy: number }> {
+export async function visibleAnchorShift(cutout: Buffer, product: BBox, safe: BBox, canvas: Size, background: [number, number, number], cut: CutEdges, under?: Buffer): Promise<{ dx: number; dy: number }> {
   const { data, info } = await sharp(cutout).ensureAlpha().raw().toBuffer({ resolveWithObject: true });
-  let x0 = info.width, x1 = -1, y1 = -1, faded = -1;
-  for (let y = 0; y < info.height; y++) for (let x = 0; x < info.width; x++) {
-    const i = (y * info.width + x) * 4, a = data[i + 3]!;
+  // The cut-out as it will show over what lies under it (`under`, else the flat background), and its alpha as the check's mask.
+  const w = info.width, h = info.height, rgb = Buffer.alloc(w * h * 3), alpha = Buffer.alloc(w * h);
+  let faded = -1;
+  for (let i = 0; i < w * h; i++) {
+    const a = data[i * 4 + 3]!;
     if (!a) continue;
-    faded = y;
-    let delta = 0;
-    if (a < ANCHOR_MASK_ALPHA) for (let c = 0; c < 3; c++) delta = Math.max(delta, Math.abs(Math.round((data[i + c]! * a + background[c]! * (255 - a)) / 255) - background[c]!));
-    if (a >= ANCHOR_MASK_ALPHA || delta > BG_TOLERANCE) { x0 = Math.min(x0, x); x1 = Math.max(x1, x); y1 = Math.max(y1, y); }
+    alpha[i] = a; faded = Math.floor(i / w);
+    for (let c = 0; c < 3; c++) rgb[i * 3 + c] = a === 255 ? data[i * 4 + c]! : Math.round((data[i * 4 + c]! * a + (under ? under[i * 3 + c]! : background[c]!) * (255 - a)) / 255);
   }
-  if (x1 < 0) return { dx: 0, dy: 0 };
+  const box = anchorBounds(rgb, w, h, background, alpha);
+  if (!box) return { dx: 0, dy: 0 };
+  const x0 = box.x, x1 = box.x + box.w - 1, y1 = box.y + box.h - 1;
   const clamp = (v: number, lo: number, hi: number) => (lo > hi ? 0 : Math.max(lo, Math.min(hi, v)));
   const dy = cut.top || cut.bottom ? 0 : clamp(safe.y + safe.h - (faded > y1 ? ANCHOR_SEEN_LIFT_PX : 0) - (product.y + y1 + 1), -product.y, canvas.h - product.y - product.h);
   const dx = cut.left || cut.right ? 0 : clamp(Math.round(safe.x + safe.w / 2 - (product.x + (x0 + x1 + 1) / 2)),
@@ -588,12 +594,31 @@ export async function renderSource(input: RenderInput): Promise<RenderOutput> {
       product.x += shift.dx; product.y += shift.dy; plan.placedX = product.x; plan.placedY = product.y;
     }
     const cutoutAlpha = await sharp(cutout).extractChannel(3).raw().toBuffer();
-    for (let y = 0; y < product.h; y++) cutoutAlpha.copy(foregroundMask, (product.y + y) * plan.w + product.x, y * product.w, (y + 1) * product.w);
-    let shadow = await shadowLayer(p, matte, crop, plan, input.productType, color, foregroundMask);
-    // Never a synthesised contact shadow on a photo cut in the source on any side (a bag held in a cropped hand, a
-    // close-up filling the photo): nothing stands on a floor there, and the shadow below makes the centred product
-    // look off-centre.
-    if ((input.synthesiseShadow === false || anyCut(cut)) && shadow.flags.includes("shadow_synthesised")) shadow = { layer: null, flags: ["no_shadow_source"] };
+    const drawShadow = async () => {
+      foregroundMask.fill(0);
+      for (let y = 0; y < product.h; y++) cutoutAlpha.copy(foregroundMask, (product.y + y) * plan.w + product.x, y * product.w, (y + 1) * product.w);
+      const drawn = await shadowLayer(p, matte, crop, plan, input.productType, color, foregroundMask);
+      // Never a synthesised contact shadow on a photo cut in the source on any side (a bag held in a cropped hand, a
+      // close-up filling the photo): nothing stands on a floor there, and the shadow below makes the centred product
+      // look off-centre.
+      return (input.synthesiseShadow === false || anyCut(cut)) && drawn.flags.includes("shadow_synthesised") ? { layer: null, flags: ["no_shadow_source" as const] } : drawn;
+    };
+    let shadow = await drawShadow();
+    // A shadow under the cut-out's soft edge (alpha below ANCHOR_MASK_ALPHA) darkens that edge, so the check sees more
+    // of it on the shadow's side than the placement did over the flat canvas: on batch b8a99c1b (2026-10-22) a kept
+    // floor shadow to one side of the feet put the seen edge 4 px further out on that side and the measured centre 2 px
+    // off the guide. So the placement measures once more over the shadow, as the check will, and the shadow follows the
+    // product (the shadow moves with it, so one more measure is enough).
+    if (spec.anchor === "bottom-centre" && shadow.layer) {
+      const greys = await sharp(shadow.layer).extract({ left: product.x, top: product.y, width: product.w, height: product.h }).toColourspace("b-w").raw().toBuffer();
+      const under = Buffer.alloc(product.w * product.h * 3);
+      for (let i = 0; i < greys.length; i++) for (let c = 0; c < 3; c++) under[i * 3 + c] = Math.round(rgbColor[c]! * greys[i]! / 255);
+      const again = await visibleAnchorShift(cutout, product, plan.safeBox, plan, rgbColor, cut, under);
+      if (again.dx || again.dy) {
+        product.x += again.dx; product.y += again.dy; plan.placedX = product.x; plan.placedY = product.y;
+        shadow = await drawShadow();
+      }
+    }
     result.flags.push(...shadow.flags);
     image = await sharp({ create: { width: plan.w, height: plan.h, channels: 3, background: color } }).composite([...(shadow.layer ? [{ input: shadow.layer, blend: "multiply" as const }] : []), { input: cutout, left: product.x, top: product.y, blend: "over" }]).png().toBuffer();
   }
@@ -605,8 +630,10 @@ export async function renderSource(input: RenderInput): Promise<RenderOutput> {
   }
   result.bytes = jpeg.length;
   const identifier = input.identifier ?? "photo";
+  result.foregroundMask = foregroundMask;
   result.compliance = await checkOutput({ jpeg, channel: spec.id, shotNumber, plan, identifier, n: shotNumber, publicObjectPath: input.publicObjectPath ?? `${encodeURIComponent(identifier)}_${shotNumber}.jpg`, foregroundMask });
-  if (!result.compliance.ok) { result.flags.push("failed_compliance"); result.notes.push(...result.compliance.failures); return result; }
+  // The operator reads the sentence; the code before it stays in `compliance.failures` for the auto-resolve ladder and the evals.
+  if (!result.compliance.ok) { result.flags.push("failed_compliance"); result.notes.push(...result.compliance.failures.map(f => f.slice(f.indexOf(": ") + 2))); return result; }
   result.jpeg = jpeg; result.status = "ok";
   return result;
 }

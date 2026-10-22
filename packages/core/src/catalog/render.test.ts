@@ -4,7 +4,7 @@ import { CHANNELS } from "./channels";
 import sharp from "sharp";
 import { CHANNEL_IDS } from "./types";
 import { prepare, renderSource, renderKeyInputs, planProduct, safeBoxFor, UnsupportedSourceError, visibleAnchorShift, NO_CUT, type Prepared, type Matte } from "./render";
-import { checkOutput, BG_TOLERANCE } from "./compliance";
+import { anchorBounds, checkOutput, BG_TOLERANCE, STYLI_ANCHOR_SENTENCE } from "./compliance";
 import { alphaFromPng } from "./matte";
 import { readFile } from "node:fs/promises";
 import { analyseBackground, preservedDarkness, shadowLayer, SHADOW_MAX_DARKNESS } from "./shadow";
@@ -154,6 +154,34 @@ describe("render and encoded compliance", () => {
     const check = await checkOutput({ jpeg, channel: "styli", shotNumber: 1, plan, identifier: "white", n: 1, publicObjectPath: "white_1.jpg" });
     for (const code of ["background", "inside_safe_box", "styli_anchor"]) expect(check.failures.some(f => f.startsWith(code + ":"))).toBe(true);
   });
+  it("makes a saturated product as wide as Styli's safe box, its JPEG edge tint left out (PR #91 finding)", async () => {
+    // A square red or blue product fills the 2042 px safe box width at any scale; its corner blocks used to tint 1 to 6 px past the guide.
+    for (const [r, g, b] of [[160, 30, 50], [20, 40, 200]] as const) for (const [side, box] of [[3000, { x: 400, y: 400, w: 2200, h: 2200 }], [2000, { x: 300, y: 300, w: 1400, h: 1400 }]] as const) {
+      const source = fixture(side, side, box);
+      for (let i = 0; i < side * side; i++) if (source.matte.alpha[i]) { source.prepared.rgb[i * 3] = r; source.prepared.rgb[i * 3 + 1] = g; source.prepared.rgb[i * 3 + 2] = b; }
+      const output = await renderSource({ ...source, channel: "styli", shotNumber: 2, productType: "apparel_model" });
+      expect(output.plan.productBox!.w).toBe(output.plan.safeBox.w);
+      expect(output.compliance.failures).toEqual([]); expect(output.status).toBe("ok");
+    }
+  }, 120_000);
+  it("forgives only the tint in the product's own JPEG blocks, never a stray mark in a block of its own", async () => {
+    const plan = planCanvas(CHANNELS.styli, { x: 400, y: 400, w: 2200, h: 2200 }, { w: 3000, h: 3000 }, {}), box = plan.productBox!;
+    expect(box.x).toBe(plan.safeBox.x); expect(box.w).toBe(plan.safeBox.w);
+    const mask = Buffer.alloc(plan.w * plan.h);
+    for (let y = box.y; y < box.y + box.h; y++) mask.fill(255, y * plan.w + box.x, y * plan.w + box.x + box.w);
+    const encode = async (stray: boolean) => {
+      const product = await sharp({ create: { width: box.w, height: box.h, channels: 3, background: { r: 160, g: 30, b: 50 } } }).png().toBuffer();
+      const dot = await sharp({ create: { width: 2, height: 2, channels: 3, background: { r: 160, g: 30, b: 50 } } }).png().toBuffer();
+      return sharp({ create: { width: plan.w, height: plan.h, channels: 3, background: "#E0E0E0" } }).composite([{ input: product, left: box.x, top: box.y }, ...(stray ? [{ input: dot, left: 136, top: 1000 }] : [])]).withDensity(300).withIccProfile("srgb").jpeg({ quality: 90, chromaSubsampling: "4:4:4" }).toBuffer();
+    };
+    const args = { channel: "styli" as const, shotNumber: 2, plan, identifier: "square", n: 2, publicObjectPath: "square_2.jpg" };
+    const clean = await encode(false);
+    expect((await checkOutput({ ...args, jpeg: clean, foregroundMask: mask })).failures).toEqual([]);
+    // Without the mask nothing says which pixels are the product, so the tint is judged as before.
+    expect((await checkOutput({ ...args, jpeg: clean })).failures.some(f => f.startsWith("inside_safe_box:"))).toBe(true);
+    const stray = await checkOutput({ ...args, jpeg: await encode(true), foregroundMask: mask });
+    for (const code of ["background", "inside_safe_box"]) expect(stray.failures.some(f => f.startsWith(code + ":")), code).toBe(true);
+  }, 60_000);
   it("detects Noon wide side violations and malformed magic", async () => {
     const plan = planCanvas(CHANNELS.noon, { x: 100, y: 200, w: 600, h: 200 }, { w: 800, h: 800 }, {});
     const jpeg = await sharp({ create: { width: plan.w, height: plan.h, channels: 3, background: "red" } }).withDensity(72).withIccProfile("srgb").jpeg({ chromaSubsampling: "4:4:4" }).toBuffer();
@@ -168,7 +196,9 @@ describe("render and encoded compliance", () => {
     source.prepared.background.uniform = false;
     const output = await renderSource({ ...source, channel: "centrepoint", shotNumber: 2, identifier: "NOISE", productType: "apparel_flat" });
     expect(output.status).toBe("failed"); expect(output.jpeg).toBeNull(); expect(output.quality).toBe(70); expect(output.bytes).toBeGreaterThan(2_000_000);
-    expect(output.notes).toContain("bytes: Could not get NOISE_2 for centrepoint under 2 MB.");
+    // The operator reads the sentence alone; the code stays in compliance.failures for the auto-resolve ladder.
+    expect(output.compliance.failures).toContain("bytes: Could not get NOISE_2 for centrepoint under 2 MB.");
+    expect(output.notes).toContain("Could not get NOISE_2 for centrepoint under 2 MB.");
   });
   it("encodes deterministic bytes on repeat", async () => {
     const input = { ...fixture(), channel: "noon" as const, shotNumber: 1, productType: "footwear" as const };
@@ -355,5 +385,109 @@ describe("Styli judged on the upscaled size", () => {
     const planned = planCanvas(CHANNELS.styli, bbox(matte.alpha, matte.width, matte.height)!, { w: 800, h: 1200 }, {});
     expect(Math.abs(output.plan.productBox!.x - planned.productBox!.x)).toBeLessThanOrEqual(6);
     expect(Math.abs(output.plan.productBox!.y - planned.productBox!.y)).toBeLessThanOrEqual(6);
+  });
+
+  // Batch b8a99c1b (2026-10-21, 46 tracksuits on a model, 1000x1000 photos): nine Styli renders failed styli_anchor and
+  // the auto-resolve ladder dropped three. Every one kept the floor shadow of the source photo (shadow.ts
+  // preservedDarkness), composited outside the cut-out and, with the light from one side, seen 2 to 20 px beyond one
+  // foot. The check unioned those pixels into the product's box, so its centre measured 1.5 to 2.5 px off the guide
+  // while the placement, which only ever saw the cut-out, had the product centred. The 165 renders without a kept
+  // shadow all passed. Placement and check now share one definition of the product (compliance.ts anchorBounds):
+  // the cut-out's silhouette and what shows of its soft edge, never a pixel outside the cut-out.
+  const floorShadowSource = (overhang: number): { prepared: Prepared; matte: Matte } => {
+    // A dark jacket-shaped product on a uniform white photo, standing on a floor shadow that reaches `overhang` px past
+    // its right side (the light from the left), as a studio photo keeps it; the matte holds the product only.
+    const width = 800, height = 1200, rgb = Buffer.alloc(width * height * 3, 255), alpha = Buffer.alloc(width * height);
+    const box = { x: 300, y: 100, w: 200, h: 900 };
+    for (let y = 0; y < height; y++) for (let x = 0; x < width; x++) {
+      const i = y * width + x, inside = x >= box.x && x < box.x + box.w && y >= box.y && y < box.y + box.h;
+      if (inside) { alpha[i] = 255; rgb.fill(40, i * 3, i * 3 + 3); continue; }
+      // Darkest at the contact line, fading 60 rows up the floor beside the product and 40 rows below it.
+      const below = y - (box.y + box.h), beyond = Math.max(0, x - (box.x + box.w), box.x - x), vertical = below >= 0 ? 1 - below / 40 : 1 + below / 60;
+      if (vertical > 0 && x >= box.x && x < box.x + box.w + overhang) {
+        const darkness = 0.45 * vertical * (1 - beyond / Math.max(1, overhang + 1));
+        rgb.fill(Math.round(255 * (1 - darkness)), i * 3, i * 3 + 3);
+      }
+    }
+    return { prepared: { width, height, rgb, alphaSource: null, background: analyseBackground(rgb, width, height), flags: [], sourceMime: "image/jpeg" }, matte: { alpha, width, height, model: "synthetic", ms: 0, source: "model", target: "gpu", sentLongSide: null } };
+  };
+  it("defines the product for the guide without the shadow: anchorBounds", () => {
+    // 10 x 4: a product 4 px wide at columns 3 to 6 (alpha 255), a faded edge at column 7 (alpha 60) seen on the
+    // right, a pale edge at column 2 (alpha 200, the canvas colour) and a dark shadow at columns 7 to 9 of the last
+    // row outside the mask.
+    const w = 10, h = 4, bg: [number, number, number] = [224, 224, 224], rgb = Buffer.alloc(w * h * 3), mask = Buffer.alloc(w * h);
+    for (let i = 0; i < w * h; i++) rgb.fill(224, i * 3, i * 3 + 3);
+    for (let y = 0; y < h; y++) {
+      for (let x = 3; x <= 6; x++) { mask[y * w + x] = 255; rgb.fill(40, (y * w + x) * 3, (y * w + x) * 3 + 3); }
+      mask[y * w + 7] = 60; rgb.fill(150, (y * w + 7) * 3, (y * w + 7) * 3 + 3);
+      mask[y * w + 2] = 200;
+    }
+    for (let x = 7; x <= 9; x++) rgb.fill(120, (3 * w + x) * 3, (3 * w + x) * 3 + 3);
+    // The silhouette (pale column 2 included) and the seen fade (column 7); the shadow at columns 8 and 9 never.
+    expect(anchorBounds(rgb, w, h, bg, mask)).toEqual({ x: 2, y: 0, w: 6, h: 4 });
+    // Without a mask only what is seen counts: the shadow included, the pale column left out.
+    expect(anchorBounds(rgb, w, h, bg, null)).toEqual({ x: 3, y: 0, w: 7, h: 4 });
+    expect(anchorBounds(Buffer.alloc(w * h * 3, 224), w, h, bg, Buffer.alloc(w * h))).toBeNull();
+    expect(() => anchorBounds(rgb, w, h, bg, Buffer.alloc(3))).toThrow(/size/);
+  });
+  it("keeps a product with a kept floor shadow overhanging one side on the Styli guide, centred", async () => {
+    quiet();
+    const source = floorShadowSource(150), output = await renderSource({ ...source, channel: "styli", shotNumber: 2, productType: "apparel_model", upscaler: lanczosUpscaler() });
+    expect(output.flags).toContain("upscaled"); expect(output.flags).not.toContain("no_shadow_source"); expect(output.flags).not.toContain("shadow_synthesised");
+    expect(output.compliance.failures).toEqual([]); expect(output.status).toBe("ok");
+    // The shadow is really there, to the right of the product on the guide, so the seen pixels alone are off centre ...
+    const { data, info } = await sharp(output.jpeg!).raw().toBuffer({ resolveWithObject: true });
+    const product = output.plan.productBox!, floor = product.y + product.h - 1;
+    const seen = anchorBounds(data, info.width, info.height, [224, 224, 224], null)!;
+    expect(seen.x + seen.w).toBeGreaterThan(product.x + product.w + 100);
+    expect(Math.abs((2 * seen.x + seen.w) / 2 - info.width / 2)).toBeGreaterThan(50);
+    expect(data[((floor - 100) * info.width + product.x + product.w + 50) * 3]!).toBeLessThan(224 - BG_TOLERANCE);
+    // ... and the product itself is on the guide: its box by the render's mask is centred within a pixel, bottom on the guide.
+    const box = anchorBounds(data, info.width, info.height, [224, 224, 224], output.foregroundMask!)!;
+    expect(Math.abs((2 * box.x + box.w) / 2 - info.width / 2)).toBeLessThanOrEqual(1);
+    expect(Math.abs(box.y + box.h - (info.height - 450))).toBeLessThanOrEqual(1);
+    // The operator's note is a sentence, the code stays in `failures` (checked on a render that fails the guide on purpose).
+    const shifted = await checkOutput({ jpeg: output.jpeg!, channel: "styli", shotNumber: 2, plan: { ...output.plan, cut: { ...NO_CUT, left: true } }, identifier: "jacket", n: 2, publicObjectPath: "jacket_2.jpg", foregroundMask: output.foregroundMask! });
+    expect(shifted.failures).toEqual([`styli_anchor: ${STYLI_ANCHOR_SENTENCE}`]);
+  });
+  it("judges the delivered JPEG the same way with the render's mask (catalog-smoke --verify-manifest)", async () => {
+    quiet();
+    const output = await renderSource({ ...floorShadowSource(150), channel: "styli", shotNumber: 2, productType: "apparel_model", upscaler: lanczosUpscaler() });
+    expect(output.status).toBe("ok");
+    const mask = await sharp(await sharp(output.foregroundMask!, { raw: { width: output.plan.w, height: output.plan.h, channels: 1 } }).png().toBuffer()).toColourspace("b-w").raw().toBuffer();
+    expect(mask.equals(output.foregroundMask!)).toBe(true);
+    const again = await checkOutput({ jpeg: output.jpeg!, channel: "styli", shotNumber: 2, plan: output.plan, identifier: "jacket", n: 2, publicObjectPath: "jacket_2.jpg", foregroundMask: mask });
+    expect(again.failures).toEqual([]);
+  });
+  it("puts the real tracksuit photo 3 (dropped from batch b8a99c1b) on the Styli guide with its kept shadow", async () => {
+    quiet();
+    const prepared = await prepare(await readFile(new URL("tracksuit-3.jpg", FIXTURES)), "tracksuit-3.jpg", async b => b);
+    const matte: Matte = { ...(await alphaFromPng(await readFile(new URL("tracksuit-3.matte.png", FIXTURES)))), model: "birefnet", ms: 0, source: "model", target: "gpu", sentLongSide: null };
+    const output = await renderSource({ prepared, matte, channel: "styli", shotNumber: 3, productType: "apparel_model", upscaler: lanczosUpscaler() });
+    expect(output.flags).toContain("upscaled"); expect(output.flags).not.toContain("no_shadow_source"); expect(output.plan.cut).toEqual(NO_CUT);
+    expect(output.compliance.failures).toEqual([]); expect(output.status).toBe("ok");
+    // Its kept shadow shows to the right of the feet (the light from the left): seen pixels alone are off centre by over a pixel.
+    const { data, info } = await sharp(output.jpeg!).raw().toBuffer({ resolveWithObject: true });
+    const seen = anchorBounds(data, info.width, info.height, [224, 224, 224], null)!, box = anchorBounds(data, info.width, info.height, [224, 224, 224], output.foregroundMask!)!;
+    expect(seen.x + seen.w).toBeGreaterThan(box.x + box.w + 1);
+    expect(Math.abs((2 * seen.x + seen.w) / 2 - info.width / 2)).toBeGreaterThan(1);
+    expect(Math.abs((2 * box.x + box.w) / 2 - info.width / 2)).toBeLessThanOrEqual(1);
+  });
+  it("puts the real black outfit photo 4 (rescued by a smaller fit in batch b8a99c1b) on the Styli guide: its shadow darkens the soft edge on one side", async () => {
+    quiet();
+    const prepared = await prepare(await readFile(new URL("black-4.jpg", FIXTURES)), "black-4.jpg", async b => b);
+    const matte: Matte = { ...(await alphaFromPng(await readFile(new URL("black-4.matte.png", FIXTURES)))), model: "birefnet", ms: 0, source: "model", target: "gpu", sentLongSide: null };
+    const output = await renderSource({ prepared, matte, channel: "styli", shotNumber: 4, productType: "apparel_model", upscaler: lanczosUpscaler() });
+    expect(output.flags).not.toContain("no_shadow_source"); expect(output.plan.cut).toEqual(NO_CUT);
+    expect(output.compliance.failures).toEqual([]); expect(output.status).toBe("ok");
+    // The soft edge (alpha below the half-alpha silhouette) shows further out where the kept shadow lies under it than
+    // the half-alpha silhouette alone: the guide is judged with that edge, and the product is centred with it.
+    const { data, info } = await sharp(output.jpeg!).raw().toBuffer({ resolveWithObject: true }), mask = output.foregroundMask!;
+    let x0 = info.width, x1 = -1;
+    for (let i = 0; i < mask.length; i++) if (mask[i]! >= 128) { const x = i % info.width; x0 = Math.min(x0, x); x1 = Math.max(x1, x); }
+    const box = anchorBounds(data, info.width, info.height, [224, 224, 224], mask)!;
+    expect(box.x + box.w - 1 - x1 + (x0 - box.x)).toBeGreaterThan(1);
+    expect(Math.abs((2 * box.x + box.w) / 2 - info.width / 2)).toBeLessThanOrEqual(1);
+    expect(Math.abs(box.y + box.h - (info.height - 450))).toBeLessThanOrEqual(1);
   });
 });

@@ -31,7 +31,7 @@ const rect = (rgb: Buffer, x0: number, y0: number, w: number, h: number, color: 
   for (let y = y0; y < y0 + h; y++) for (let x = x0; x < x0 + w; x++) rgb.set(color(x, y), (y * W + x) * 3);
 };
 const block = (color: RGB, w = 400, h = 700): Shot => ({ draw: rgb => rect(rgb, (W - w) >> 1, (H - h) >> 1, w, h, () => color) });
-/** Saturated 2 px red and blue checks: JPEG chroma ringing pushes past the margin at full fit (real render). */
+/** Saturated 2 px red and blue checks: the strongest JPEG chroma tint, which stays inside the product's own 8 x 8 blocks. */
 const checker: Shot = { draw: rgb => rect(rgb, 200, 50, 400, 700, (x, y) => (((x >> 1) + (y >> 1)) & 1 ? [255, 0, 0] : [0, 0, 255])) };
 /**
  * A cut-out on the photo's own plain background, cut at the knees 40 px above the frame bottom: no photo edge shows,
@@ -154,7 +154,17 @@ describe("07 auto-resolve: re-render and re-judge before holding", () => {
   }, 180_000);
 
   it("a placement failure of the channel rules is resolved at step (c), a 5% smaller fit, before the judge", async () => {
-    const w = world(), s = await seed(w, "apparel_flat", [block(PLAIN), checker]);
+    const w = world(), real = w.deps.renderAllChannels;
+    // The checks no longer judge the checker's JPEG tint inside its own 8 x 8 blocks (compliance.ts JPEG_BLOCK_PX), and
+    // nothing else in this world reaches past the margin at full fit, so photo 2's full-fit render is failed here.
+    w.deps.renderAllChannels = async (p, m, channels, ctx) => {
+      const out = await real(p, m, channels, ctx);
+      if (ctx.shotNumber !== 2 || ctx.fitScale !== undefined) return out;
+      const failure = "inside_safe_box: The product or shadow reaches outside the required margins.";
+      for (const c of channels) out[c] = { ...out[c], jpeg: null, status: "failed", flags: [...out[c].flags, "failed_compliance"], notes: [failure.slice(failure.indexOf(": ") + 2)], compliance: { ok: false, failures: [failure] } };
+      return out;
+    };
+    const s = await seed(w, "apparel_flat", [block(PLAIN), checker]);
     const o = s.outputs.find(row => row.n === 2)!;
     const actions = autoActionsOf(o.compliance);
     expect(steps(actions)).toEqual(["shadow_off:skipped", "second_matte:failed", "smaller_fit:passed", "apply:passed"]);
