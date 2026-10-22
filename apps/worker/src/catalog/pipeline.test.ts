@@ -887,6 +887,22 @@ it("cost ledger: a paid cut-out call is flushed with the photo's matte write, so
  expect(rows[0]).toMatchObject({engine:"cpu",ms:12,attempt:1,outcome:"ok"});
  expect(Number(rows[0]!.usd)).toBeCloseTo(12/1000*0.5,12);
 },60_000);
+it("cost ledger: a publish whose finalize enqueue fails keeps its one ok row and writes no failed row",async()=>{
+ const w=world(),s=await seed(w,"ledger-publish-retry"),log=vi.fn();w.deps.log=log;ticking(w);
+ for(let i=0;i<3;i++) expect((await handleChunkTask(w.deps,{chunkId:s.chunk.id})).httpStatus).toBe(200);
+ // The product publishes, then the finalize enqueue fails once: the task is retried. No finalize is pending
+ // yet, so the publish task itself enqueues one.
+ await db.update(catalogBatches).set({counts:sql`${catalogBatches.counts} || jsonb_build_object('finalizePending',false)`}).where(eq(catalogBatches.id,s.batch.id));
+ vi.mocked(w.deps.enqueue).mockRejectedValueOnce(new Error("queue hiccup"));
+ expect((await handlePublishTask(w.deps,{batchId:s.batch.id,productId:s.product.id})).outcome).toBe("retry");
+ expect(log).toHaveBeenCalledWith("publish failed",expect.objectContaining({severity:"WARNING",batchId:s.batch.id,productId:s.product.id}));
+ const publishRows=async()=>(await ledgerOf(s.batch.id)).filter(r=>r.stage==="publish");
+ expect((await publishRows()).map(r=>r.outcome)).toEqual(["ok"]);
+ // The retry runs the publication again and writes its own timed row; never a failed one.
+ expect((await handlePublishTask(w.deps,{batchId:s.batch.id,productId:s.product.id})).outcome).toBe("published");
+ expect((await publishRows()).map(r=>r.outcome)).toEqual(["ok","ok"]);
+ expect((await publishRows()).every(r=>Number(r.usd)===0 && r.productId===s.product.id)).toBe(true);
+},60_000);
 it("cost ledger: a delivery that loses its claim writes no ledger rows",async()=>{
  const w=world(),s=await seed(w,"ledger-lost-claim");ticking(w);
  // The cut-out call succeeds, but another worker took the chunk meanwhile: every later write under the claim refuses.

@@ -83,18 +83,24 @@ Table `catalog_cost_events`, one row per priced or timed event (matte call, rend
 judge or classifier call, publish, and one compute row per chunk delivery). It is additive: the
 caps still read `spend_days` and `catalog_batches.cost`, and there is no backfill. Rows are written
 inside the existing claim transactions, in a savepoint: if the insert fails it logs ERROR and the
-batch carries on. A lost claim writes nothing.
+batch carries on. A lost claim writes nothing. One exception: the repair ladder's second cut-out
+(auto-resolve.ts) writes its matte_call row by itself, outside the chunk claim, right after the paid
+call (no chunk id or attempt; still never throws). That keeps the accounting of a paid call accurate;
+on rare occasions the row comes from a delivery that later lost its claim. The publish row is written
+as soon as the publication returns, so a later failure (progress refresh, finalize enqueue) never
+leaves a "failed" row beside it; a retry writes its own timed row.
 
 Attribution rule (SPEC R16a), applied when reading, not stored:
-- render, upscale and publish rows are direct per channel; quality check (judge) cost is direct to
-  the image it checked;
+- render and upscale rows are direct per channel; quality check (judge) cost is direct to the image
+  it checked;
+- publish rows are time only (USD 0) and split evenly across the product's non-skipped outputs;
 - matte and classify rows belong to the source image and split evenly across that image's
   non-skipped outputs;
 - the per-chunk worker compute row splits evenly across the chunk's non-skipped outputs;
 - per-image cost = its direct rows plus its shares.
 
 Render rows carry ms only (usd 0), because worker time is already priced once by the compute row.
-Publish rows are ms only. Ledger total = qaUsd + computeUsd + the matting service USD.
+Publish rows are ms only (USD 0). Ledger total = qaUsd + computeUsd + the matting service USD.
 
 ## Prices
 `PRICE_MATTE_CPU_USD_PER_SECOND` and `PRICE_MATTE_GPU_USD_PER_SECOND` price matte and upscale calls

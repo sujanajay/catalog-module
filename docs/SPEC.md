@@ -154,11 +154,13 @@ Scale, operations, cost, people
   options, 24,000 sources, 100,000 outputs.
 - R16 Model and compute cost recorded per batch and attributed to the brand; benchmark INR 60 per
   style+colour.
-- R16a Cost is attributed to channels and images by one rule. Render, upscale and publish cost is
-  direct per channel. Quality check (judge) cost is direct to the image it checked. Cut-out (matte)
-  and product-type check (classify) cost belongs to the source image and splits evenly across that
-  image's non-skipped outputs. Worker
-  compute per chunk splits evenly across the chunk's non-skipped outputs. Per-image cost = its direct
+- R16a Cost is attributed to channels and images by one rule. Render and upscale cost is direct per
+  channel. Quality check (judge) cost is direct to the image it checked. Cut-out (matte) and
+  product-type check (classify) cost belongs to the source image and splits evenly across that
+  image's non-skipped outputs; this includes the repair ladder's second cut-out, whose row is written
+  by itself outside the chunk claim. Publish rows are time only (USD 0) and split evenly across the
+  product's non-skipped outputs. Worker compute per chunk splits evenly across the chunk's
+  non-skipped outputs. Per-image cost = its direct
   rows plus its shares. The ledger table `catalog_cost_events` records every priced or timed event;
   the rule is applied when reading, not stored. The per-channel and per-image breakdown is shown on
   the admin Ops page (`/catalog/ops`); the batch page keeps its cost line. There are no spending

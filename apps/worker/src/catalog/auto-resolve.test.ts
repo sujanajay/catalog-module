@@ -144,7 +144,8 @@ describe("07 auto-resolve: re-render and re-judge before holding", () => {
       expect(autoActionsOf(o.compliance).at(-1)!.channels.sort()).toEqual(["amazon", "noon"]);
       expect(o.status).toBe("staged");
       expect(o.flags).not.toContain("halo");
-      // Cost ledger: the chunk's first cut-out call on this photo and the ladder's second one (no chunk id: it runs in the repair).
+      // Cost ledger: the matte stage's first cut-out call on this photo, then the repair ladder's second one, which
+      // runs here in the render stage and is written by itself outside the chunk claim, so it never carries a chunk id or attempt.
       const calls = await db.select().from(catalogCostEvents).where(and(eq(catalogCostEvents.sourceImageId, o.sourceImageId), eq(catalogCostEvents.kind, "matte_call"))).orderBy(catalogCostEvents.at);
       expect(calls.map(c => [c.outcome, c.chunkId === null])).toEqual([["ok", false], ["ok", true]]);
       expect(o.compliance).toMatchObject({ ok: true });
