@@ -3,6 +3,7 @@
 // stubbed; everything else (the page, its queries, requireRole) is the real code.
 import { createElement, type ReactElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
+import { eq } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { createTestDb } from "@catalog/core/db/testing";
 import { catalogBatches, catalogChunks, catalogCostEvents, catalogOutputs, catalogProducts, catalogSourceImages, EMPTY_BATCH_COUNTS } from "@catalog/core/db/schema";
@@ -13,8 +14,11 @@ import type { Role } from "@catalog/core/catalog/types";
 import { setDbForTests, type Db } from "../lib/db";
 import { resetUserDeps, setUserDeps } from "../lib/user";
 import { ForbiddenError } from "../lib/errors";
-import { activeBatches, recentFailures, resetOpsCostCache, batchChunkSummary, costOverview } from "../lib/catalog/ops";
-import { chunkProgressText, logsUrl, money, stageSplitText } from "../lib/catalog/ops-copy";
+import { activeBatches, recentFailures, resetOpsCostCache, batchChunkSummary, batchStageCost, costOverview, opsCostCacheSize, CACHE_MAX_ENTRIES } from "../lib/catalog/ops";
+import { batchCostLine } from "../lib/catalog/cost";
+import CostLine from "../components/catalog/CostLine";
+import { randomUUID } from "node:crypto";
+import { chunkProgressText, fullCostParts, fullCostText, logsUrl, money, REPORT_UNAVAILABLE } from "../lib/catalog/ops-copy";
 import { showOpsMenuItem } from "../lib/people-copy";
 import DetailsTab from "../components/catalog/DetailsTab";
 import OpsPage from "../app/catalog/ops/page";
@@ -111,13 +115,36 @@ describe("admin Ops page", () => {
 
   it("keeps the cost sections for a few minutes so the 30 s refresh reads only active batches and failures", async () => {
     const { batch } = await world();
-    const first = await costOverview(db, NOW);
+    const read = async (at: Date) => { const r = await costOverview(db, at); if (!r.ok) throw new Error("report failed"); return r.value; };
+    const first = await read(NOW);
+    const before = (await activeBatches(db, NOW))[0]!.usd;
     await recordCostEvents(db, [{ batchId: batch.id, brandSlug: "uspa", isTest: false, stage: "qa", kind: "llm_call", engine: "x", usd: 1 }]);
-    expect(await costOverview(db, new Date(+NOW + 30_000))).toBe(first);
-    expect((await costOverview(db, new Date(+NOW + 6 * 60_000))).brands[0]!.usd).toBeGreaterThan(first.brands[0]!.usd);
-    // The live parts read fresh on every call.
-    expect((await activeBatches(db))[0]!.usd).toBeGreaterThan(1);
+    expect(await read(new Date(+NOW + 30_000))).toBe(first);
+    // Cost so far of a running batch is kept 60 s; failures are read fresh on every call.
+    expect((await activeBatches(db, new Date(+NOW + 30_000)))[0]!.usd).toBe(before);
+    expect((await activeBatches(db, new Date(+NOW + 61_000)))[0]!.usd).toBeGreaterThan(1);
+    expect((await read(new Date(+NOW + 6 * 60_000))).brands[0]!.usd).toBeGreaterThan(first.brands[0]!.usd);
     expect((await recentFailures(db, NOW)).chunks).toHaveLength(1);
+  });
+
+  it("forgets expired cost reads when storing and keeps at most 50", async () => {
+    for (let i = 0; i < CACHE_MAX_ENTRIES + 10; i++) await batchStageCost(randomUUID(), db, NOW);
+    expect(opsCostCacheSize()).toBe(CACHE_MAX_ENTRIES);
+    await batchStageCost(randomUUID(), db, new Date(+NOW + 61_000));
+    expect(opsCostCacheSize()).toBe(1);
+  });
+
+  it("shows a plain sentence, not an error page, when a report read times out", async () => {
+    const { batch } = await world();
+    const timeout = Object.assign(new Error("canceling statement due to statement timeout"), { code: "57014" });
+    const slow = new Proxy(db, { get: (target, key) => (key === "transaction" ? async () => { throw timeout; } : Reflect.get(target, key)) }) as Db;
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    setDbForTests(slow);
+    try {
+      const html = await render(OpsPage({ searchParams: Promise.resolve({ batch: batch.id, lifetime: "1" }) }));
+      expect(html.split(REPORT_UNAVAILABLE.replace(/'/g, "&#x27;")).length - 1).toBe(4);
+      expect(html).toContain("October drop");
+    } finally { setDbForTests(db); warn.mockRestore(); }
   });
 
   it("ignores a batch parameter that is not an id", async () => {
@@ -129,17 +156,25 @@ describe("admin Ops page", () => {
 });
 
 describe("batch page and Details", () => {
-  it("adds a cost split by step under the cost line from batchCostByStage", async () => {
+  it("keeps the cost line as it is and adds a full-cost line whose parts add up to its own total", async () => {
     const { batch } = await world();
+    const [costed] = await db.update(catalogBatches).set({ cost: { ...batch.cost, qaUsd: 0.001, computeUsd: 0.0006 } }).where(eq(catalogBatches.id, batch.id)).returning();
     const stages = await batchCostByStage(db, batch.id);
-    const split = stageSplitText(stages, 85)!;
-    expect(split).toBe(`By step: cut-out INR ${inrAmount(0.004 * 85)}, images INR ${inrAmount(0.0006 * 85)}, quality checks INR ${inrAmount(0.001 * 85)}`);
-    expect(stageSplitText(stages, null)).toBe(`By step: cut-out USD ${usdAmount(0.004)}, images USD ${usdAmount(0.0006)}, quality checks USD ${usdAmount(0.001)}`);
-    expect(stageSplitText([], 85)).toBeNull();
+    const { usd, parts } = fullCostParts(stages);
+    expect(parts.reduce((sum, p) => sum + p.usd, 0)).toBeCloseTo(usd, 12);
+    expect(usd).toBeCloseTo(stages.reduce((sum, s) => sum + s.usd, 0), 12);
+    const full = fullCostText(stages, 85)!;
+    expect(full).toBe(`Full cost including the cut-out service: INR ${inrAmount(0.0056 * 85)} (cut-out INR ${inrAmount(0.004 * 85)}, images INR ${inrAmount(0.0006 * 85)}, quality checks INR ${inrAmount(0.001 * 85)})`);
+    expect(fullCostText(stages, null)).toBe(`Full cost including the cut-out service: USD ${usdAmount(0.0056)} (cut-out USD ${usdAmount(0.004)}, images USD ${usdAmount(0.0006)}, quality checks USD ${usdAmount(0.001)})`);
+    expect(fullCostText([], 85)).toBeNull();
+    // The existing cost line (quality checks and worker time per style, against INR 60) is unchanged.
+    const line = await batchCostLine(costed!, db);
+    expect(line.usd).toBeCloseTo(0.0016, 12);
+    const costLine = renderToStaticMarkup(createElement(CostLine, { line: { usdPerIdentifier: line.usdPerIdentifier, inrPerIdentifier: line.inrPerIdentifier, usd: line.usd, inr: line.inr } }));
     const html = await render(BatchPage({ params: Promise.resolve({ id: batch.id }), searchParams: Promise.resolve({}) }));
     expect(html).toContain("Cost so far");
-    expect(html).toContain(split);
-    expect(html).toContain("agency reference INR 60 per style");
+    expect(html).toContain(costLine);
+    expect(html).toContain(`${costLine}<p class="cost-split">${full}</p>`);
     expect(html).not.toMatch(MODEL_WORDS);
   });
 
@@ -154,7 +189,7 @@ describe("batch page and Details", () => {
     expect(html).toContain("Work groups (chunks): 3 in total");
     expect(html).toContain("Chunk 3 (quality check) gave up after repeated errors: model A timed out after 60 s.");
     expect(html).toContain("Last problem recorded for this batch: No progress for 2 hours. Start the batch again.");
-    expect(logsUrl(batch.id)).toBe(`https://console.cloud.google.com/logs/query;query=labels.batchId%3D%22${batch.id}%22?project=image-links-agent`);
+    expect(logsUrl(batch.id)).toBe(`https://console.cloud.google.com/logs/query;query=labels.batchId%3D%22${batch.id}%22;duration=P7D?project=image-links-agent`);
     expect(html).toContain(`href="${logsUrl(batch.id)}"`);
     expect(html).not.toMatch(MODEL_WORDS);
   });

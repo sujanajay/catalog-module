@@ -75,18 +75,23 @@ const STEP_OF: Record<CostStage, "cut-out" | "images" | "quality checks"> = {
 };
 const STEPS = ["cut-out", "images", "quality checks"] as const;
 
+/** The ledger cost of one batch per step; the parts add up to `usd`. */
+export function fullCostParts(stages: readonly StageCost[]): { usd: number; parts: { step: (typeof STEPS)[number]; usd: number }[] } {
+  const parts = STEPS.map((step) => ({ step, usd: stages.filter((s) => STEP_OF[s.stage] === step).reduce((sum, s) => sum + s.usd, 0) }));
+  return { usd: parts.reduce((sum, p) => sum + p.usd, 0), parts };
+}
+
 /**
- * "By step: cut-out INR 1.20, images INR 0.40, quality checks INR 2.10" from batchCostByStage; USD with
- * four decimals when no rupee rate is set. Null for a batch with no ledger rows (batches from before the
- * ledger), so the page shows nothing rather than zeros.
+ * "Full cost including the cut-out service: INR 3.70 (cut-out INR 1.20, images INR 0.40, quality checks
+ * INR 2.10)" from batchCostByStage; USD with four decimals when no rupee rate is set. It sits under the
+ * cost line, which counts quality checks and worker time only. Null for a batch with no ledger rows
+ * (batches from before the ledger), so the page shows nothing rather than zeros.
  */
-export function stageSplitText(stages: readonly StageCost[], inrPerUsd: number | null): string | null {
+export function fullCostText(stages: readonly StageCost[], inrPerUsd: number | null): string | null {
   if (!stages.length) return null;
-  const parts = STEPS.map((step) => {
-    const usd = stages.filter((s) => STEP_OF[s.stage] === step).reduce((sum, s) => sum + s.usd, 0);
-    return `${step} ${inrPerUsd === null ? `USD ${usdAmount(usd)}` : `INR ${inrAmount(usd * inrPerUsd)}`}`;
-  });
-  return `By step: ${parts.join(", ")}`;
+  const amount = (usd: number) => (inrPerUsd === null ? `USD ${usdAmount(usd)}` : `INR ${inrAmount(usd * inrPerUsd)}`);
+  const { usd, parts } = fullCostParts(stages);
+  return `Full cost including the cut-out service: ${amount(usd)} (${parts.map((p) => `${p.step} ${amount(p.usd)}`).join(", ")})`;
 }
 
 /** A ledger stage in plain words, for the Ops page's per-stage table. */
@@ -100,10 +105,15 @@ export const COST_STAGE_WORDS: Record<CostStage, string> = {
   finalize: "finishing",
 };
 
-/** Logs Explorer filtered on the batch label the log helper sets (logging.googleapis.com/labels.batchId). */
+/** Logs Explorer looks back this far, so a batch from earlier in the week still shows its lines. */
+export const LOGS_DURATION = "P7D";
+/** Logs Explorer filtered on the batch label the log helper sets (logging.googleapis.com/labels.batchId), last 7 days. */
 export function logsUrl(batchId: string): string {
-  return `https://console.cloud.google.com/logs/query;query=${encodeURIComponent(`labels.batchId="${batchId}"`)}?project=${LOGS_PROJECT}`;
+  return `https://console.cloud.google.com/logs/query;query=${encodeURIComponent(`labels.batchId="${batchId}"`)};duration=${LOGS_DURATION}?project=${LOGS_PROJECT}`;
 }
+
+/** Shown in place of a cost table whose read timed out or failed. */
+export const REPORT_UNAVAILABLE = "Could not read the totals right now. Try again in a few minutes.";
 
 /** "Chunk 4 (cut-out) gave up: <reason>." for a chunk that stopped after repeated errors. */
 export function chunkGaveUpText(chunk: { index: number; stage: ChunkStage; error: string | null }): string {

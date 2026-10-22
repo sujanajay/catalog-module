@@ -9,11 +9,9 @@ import { batchDetails } from "@/lib/catalog/exports";
 import { batchAttention } from "@/lib/catalog/products";
 import { evalOutputs } from "@/lib/catalog/eval";
 import { batchCostLine } from "@/lib/catalog/cost";
-import { batchCostByStage } from "@catalog/core/catalog/cost-report";
 import { inrPerUsdFromEnv } from "@catalog/core/catalog/cost";
-import { db } from "@/lib/db";
-import { batchChunkSummary } from "@/lib/catalog/ops";
-import { stageSplitText } from "@/lib/catalog/ops-copy";
+import { batchChunkSummary, batchStageCost } from "@/lib/catalog/ops";
+import { fullCostText } from "@/lib/catalog/ops-copy";
 import AutoRefresh from "@/components/AutoRefresh";
 import { ActionOnly } from "@/components/ViewerPreview";
 import { when } from "@/components/ui";
@@ -52,10 +50,10 @@ export default async function BatchPage({ params, searchParams }: { params: Prom
     evalMode ? Promise.resolve([]) : batchAttention(id),
     evalMode ? evalOutputs(id, { page: Number(query.page ?? 0) || 0, ...evalFilters }) : Promise.resolve(null),
     batchCostLine(batch),
-    batchCostByStage(db(), id),
+    batchStageCost(id),
     batchChunkSummary(id),
   ]);
-  const stageSplit = stageSplitText(stageCost, inrPerUsdFromEnv());
+  const fullCost = fullCostText(stageCost, inrPerUsdFromEnv());
   const channelLabels = batch.channels.map(c => channel(c).label);
   const missingSkus = data.sheet.rows.filter(r => !r.opptraSkuIds.length).length;
   const source = batchSource(data.uploads.map(u => u.kind));
@@ -111,7 +109,7 @@ export default async function BatchPage({ params, searchParams }: { params: Prom
             <div className="card">
               <h2>Cost so far</h2>
               <CostLine line={{ usdPerIdentifier: cost.usdPerIdentifier, inrPerIdentifier: cost.inrPerIdentifier, usd: cost.usd, inr: cost.inr }} />
-              {stageSplit && <p className="cost-split">{stageSplit}</p>}
+              {fullCost && <p className="cost-split">{fullCost}</p>}
             </div>
           </div>
         }

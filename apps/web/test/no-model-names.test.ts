@@ -17,6 +17,7 @@ const CORE_COPY_FILES = [
   "packages/core/src/catalog/qa/reasons.ts",
   "packages/core/src/catalog/pipeline/status.ts",
   "packages/core/src/catalog/cost.ts",
+  "packages/core/src/catalog/cost-report.ts",
   "packages/core/src/catalog/sheet.ts",
   "packages/core/src/catalog/types.ts",
   "packages/core/src/catalog/pipeline/report.ts",

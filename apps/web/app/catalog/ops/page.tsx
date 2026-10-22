@@ -9,7 +9,7 @@ import { when } from "@/components/ui";
 import { db } from "@/lib/db";
 import { requireRole } from "@/lib/user";
 import { activeBatches, batchCostDetail, costOverview, lifetimeBrandCost, recentBatches, recentFailures, COST_TTL_MS } from "@/lib/catalog/ops";
-import { AGENCY_REFERENCE, chunkGaveUpText, chunkProgressText, chunkTotal, COST_STAGE_WORDS, hintText, logsUrl, money, OPS_HREF, OPS_REFRESH_MS, shareOfCap, statusWord } from "@/lib/catalog/ops-copy";
+import { REPORT_UNAVAILABLE, AGENCY_REFERENCE, chunkGaveUpText, chunkProgressText, chunkTotal, COST_STAGE_WORDS, hintText, logsUrl, money, OPS_HREF, OPS_REFRESH_MS, shareOfCap, statusWord } from "@/lib/catalog/ops-copy";
 
 export const dynamic = "force-dynamic";
 
@@ -42,7 +42,8 @@ function BrandTable({ rows, rate }: { rows: BrandCost[]; rate: number | null }) 
 }
 
 // Admin only. Read only. Active batches and failures are read on every 30 s refresh; the cost sections are
-// kept for a few minutes per web instance, and lifetime brand totals are read only on demand (no refresh).
+// kept for a few minutes per web instance (a read that times out shows a plain sentence), and lifetime
+// brand totals are read only on demand (no refresh).
 export default async function OpsPage({ searchParams }: { searchParams: Promise<OpsQuery> }) {
   await requireRole("admin");
   const query = await searchParams;
@@ -53,12 +54,14 @@ export default async function OpsPage({ searchParams }: { searchParams: Promise<
   const rate = inrPerUsdFromEnv();
   const cap = dailyCapFromEnv();
   // In sequence on purpose: the page holds at most one of the web instance's two pooled connections.
-  const active = await activeBatches(conn);
+  const active = await activeBatches(conn, now);
   const failures = await recentFailures(conn, now);
-  const overview = await costOverview(conn, now);
-  const lifetimeRows = lifetime ? await lifetimeBrandCost(conn) : null;
+  const overviewRead = await costOverview(conn, now);
+  const overview = overviewRead.ok ? overviewRead.value : null;
+  const lifetimeRead = lifetime ? await lifetimeBrandCost(conn, now) : null;
   const recent = await recentBatches(conn);
-  const detail = selected ? await batchCostDetail(selected, conn, now) : null;
+  const detailRead = selected ? await batchCostDetail(selected, conn, now) : null;
+  const detail = detailRead?.ok ? detailRead.value : null;
   const costMinutes = Math.round(COST_TTL_MS / 60_000);
 
   return (
@@ -109,12 +112,12 @@ export default async function OpsPage({ searchParams }: { searchParams: Promise<
 
       <section>
         <h2>Cost per brand, last 30 days</h2>
-        <p className="help">Test batches are left out. Compare the cost per product with the {AGENCY_REFERENCE}. Cost figures are read at most every {costMinutes} minutes, last at {when(overview.readAt)}.</p>
-        <BrandTable rows={overview.brands} rate={rate} />
-        {lifetimeRows ? (
+        <p className="help">Test batches are left out. Compare the cost per product with the {AGENCY_REFERENCE}. Cost figures are read at most every {costMinutes} minutes{overview ? `, last at ${when(overview.readAt)}` : ""}.</p>
+        {overview ? <BrandTable rows={overview.brands} rate={rate} /> : <p>{REPORT_UNAVAILABLE}</p>}
+        {lifetimeRead ? (
           <>
             <h3>Cost per brand, all time</h3>
-            <BrandTable rows={lifetimeRows} rate={rate} />
+            {lifetimeRead.ok ? <BrandTable rows={lifetimeRead.value} rate={rate} /> : <p>{REPORT_UNAVAILABLE}</p>}
             <p><Link href={opsLink({ batch: selected })}>Back to the live view</Link> (this view does not refresh by itself)</p>
           </>
         ) : <p><Link href={opsLink({ batch: selected, lifetime: true })}>Show all-time totals</Link></p>}
@@ -131,13 +134,14 @@ export default async function OpsPage({ searchParams }: { searchParams: Promise<
           {lifetime ? <input type="hidden" name="lifetime" value="1" /> : null}
           <button type="submit" className="btn">Show</button>
         </form>
-        {selected && !detail ? <p>This batch was not found.</p> : null}
+        {detailRead && !detailRead.ok ? <p>{REPORT_UNAVAILABLE}</p> : null}
+        {detailRead?.ok && !detail ? <p>This batch was not found.</p> : null}
         {detail ? (
           <div className="card">
             <h3><Link href={`/catalog/${detail.batch.id}`}>{detail.batch.name}</Link> ({detail.batch.brandName})</h3>
             {!detail.stages.length ? <p>No cost is recorded for this batch yet.</p> : (
               <>
-                <p>Total {money(detail.attribution.totalUsd, rate)}. <a href={logsUrl(detail.batch.id)} target="_blank" rel="noreferrer">Open logs</a></p>
+                <p>Total {money(detail.attribution.totalUsd, rate)}, read at {when(detail.readAt)}. <a href={logsUrl(detail.batch.id)} target="_blank" rel="noreferrer">Open logs</a></p>
                 <div className="grid2">
                   <div>
                     <h4>By step</h4>
@@ -189,7 +193,7 @@ export default async function OpsPage({ searchParams }: { searchParams: Promise<
       <section>
         <h2>Cost per day, last 30 days</h2>
         <p className="help">Days are UTC. The daily limit is USD {usdAmount(cap)}; it counts quality checks and worker time, while these totals also include the cut-out service. Test batches are left out.</p>
-        {overview.days.length ? (
+        {!overview ? <p>{REPORT_UNAVAILABLE}</p> : overview.days.length ? (
           <div className="tw"><table>
             <thead><tr>{["Day", "Cost", "Batches", "Against the daily limit"].map(c => <th key={c}>{c}</th>)}</tr></thead>
             <tbody>{[...overview.days].reverse().map(d => (
