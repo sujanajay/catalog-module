@@ -4,6 +4,10 @@ Status: measured, read-only, 26 Oct 2026.
 
 Read-only count, run 26 Oct 2026. Sources: BigQuery `opptra-datawarehouse` (SELECT only) and GCS listings of
 `image-links-agent-assets` and `image-links-agent-public` (`catalog/` prefix). The catalog Postgres was not queried (see B).
+Priority note (27 Oct 2026): the owner has set new products as the primary use of both initiatives. Column E
+(new options May-Oct 2026, six months of inflow) is therefore the primary base for every cost in the business cases;
+column D (live and stocked) is the ceiling for work done on request and is secondary.
+
 Counts are exact for the rule stated; "option" = style-colour from `master_sl.option_id_style_color` (Campus with the size code stripped).
 
 | Segment | A/C options in master | Images per option on Trendyol 1 / 2 / 3 / 4 / 5+ (not on Trendyol) | B cut / flat (sample only) | C kids | D live and stocked, any channel | E new options May-Oct 2026 |

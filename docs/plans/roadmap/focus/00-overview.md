@@ -167,6 +167,12 @@ were granted and an implementation spec, plus a measured inventory note:
   [spec 13](../../../specs/13-footwear-scene-image.md)
 - [Measured inventory count](../../proposals/2026-10-26-apparel-shot-set/01-inventory-count.md)
 
+Revised 27 Oct 2026 on the owner's instructions: for both groups the primary use is every new product arriving
+through the normal batch flow; already-live images are fixed on request through the same upload flow, with no
+programme of their own. No garment type, audience or product type is left out; the generator is a bench with
+Nano Banana and Nano Banana Pro first; a per-brand model registry with face embeddings is in; evaluations and
+guardrails are strengthened; every photo of a product is used as a reference.
+
 The F01 to F04 pages stay as the sourced sign-off sheets they were.
 
 Status: draft for owner approval
