@@ -8,6 +8,8 @@ import { HttpError } from "@/lib/errors";
 import { batchDetails } from "@/lib/catalog/exports";
 import { batchAttention } from "@/lib/catalog/products";
 import { evalOutputs } from "@/lib/catalog/eval";
+import { batchCompare } from "@/lib/catalog/compare";
+import { LINKABLE_TABS } from "@/lib/catalog/compare-copy";
 import { batchCostLine } from "@/lib/catalog/cost";
 import { inrPerUsdFromEnv } from "@catalog/core/catalog/cost";
 import { batchChunkSummary, batchStageCost } from "@/lib/catalog/ops";
@@ -18,6 +20,7 @@ import { when } from "@/components/ui";
 import BatchBanner from "@/components/catalog/BatchBanner";
 import BatchKpis from "@/components/catalog/BatchKpis";
 import BatchTabs from "@/components/catalog/BatchTabs";
+import CompareTab, { compareHref } from "@/components/catalog/CompareTab";
 import AttentionList from "@/components/catalog/AttentionList";
 import SheetPreview from "@/components/catalog/SheetPreview";
 import DetailsTab from "@/components/catalog/DetailsTab";
@@ -29,8 +32,10 @@ import SkuMapModal from "@/components/catalog/SkuMapModal";
 import { EvalList } from "@/components/catalog/EvalLabelBar";
 
 type EvalQuery = { page?: string; channel?: string; verdict?: string };
+/** ?tab= opens a tab; q, cchannel, cstatus and cpage are the Compare tab's filters and page. */
+type PageQuery = EvalQuery & { tab?: string; q?: string; cchannel?: string; cstatus?: string; cpage?: string };
 
-export default async function BatchPage({ params, searchParams }: { params: Promise<{ id: string }>; searchParams: Promise<EvalQuery> }) {
+export default async function BatchPage({ params, searchParams }: { params: Promise<{ id: string }>; searchParams: Promise<PageQuery> }) {
   const user = await requireRole("viewer");
   const { id } = await params;
   let data;
@@ -46,12 +51,16 @@ export default async function BatchPage({ params, searchParams }: { params: Prom
   const query = await searchParams;
   const evalFilters = { channel: query.channel ?? "", verdict: query.verdict ?? "" };
   const evalMode = batch.isTest && !!batch.options.evalSet;
-  const [attention, evalPage, cost, stageCost, chunks] = await Promise.all([
+  const tab = (LINKABLE_TABS as readonly string[]).includes(query.tab ?? "") ? query.tab! : undefined;
+  const compareFilters = { channel: query.cchannel ?? "", status: query.cstatus ?? "", q: query.q ?? "" };
+  // The comparison signs a page of images, so it loads only when its tab is asked for (?tab=compare).
+  const [attention, evalPage, cost, stageCost, chunks, comparePage] = await Promise.all([
     evalMode ? Promise.resolve([]) : batchAttention(id),
     evalMode ? evalOutputs(id, { page: Number(query.page ?? 0) || 0, ...evalFilters }) : Promise.resolve(null),
     batchCostLine(batch),
     batchStageCost(id),
     batchChunkSummary(id),
+    tab === "compare" ? batchCompare(id, { page: Number(query.cpage ?? 0) || 0, ...compareFilters }) : Promise.resolve(null),
   ]);
   const fullCost = fullCostText(stageCost, inrPerUsdFromEnv());
   const channelLabels = batch.channels.map(c => channel(c).label);
@@ -97,7 +106,9 @@ export default async function BatchPage({ params, searchParams }: { params: Prom
       <BatchTabs
         attentionCount={attention.length}
         evalLabel={evalPage ? `Needs attention (${evalPage.total} ${plural(evalPage.total, "image", "images")})` : undefined}
-        initialTab={evalMode && (query.page || query.channel || query.verdict) ? "attention" : undefined}
+        initialTab={tab ?? (evalMode && (query.page || query.channel || query.verdict) ? "attention" : undefined)}
+        compare={comparePage ? <CompareTab data={comparePage} channels={batch.channels} filters={compareFilters} /> : <p className="muted">Loading the comparison.</p>}
+        compareHref={comparePage ? undefined : compareHref(compareFilters)}
         overview={
           <div className="grid2">
             <div className="card">
