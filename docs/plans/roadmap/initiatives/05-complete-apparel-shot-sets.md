@@ -27,7 +27,7 @@ as technical facts; they never appear in operator copy.
    where no photo is big enough, then gate and review every generated shot (DD2 R1 to R3; DD3).
 3. Buy only the generator (one image API through OpenRouter, swappable); build the planner, crop rules, gate, review.
 4. Value (06, 07): low 0.9k, base 50.6k, high 132.0k USD a year. Half the base (25k) is B2e: options that can list.
-5. Run cost about 74 USD one-off (153 at DD9 counts): about 680 USD of base revenue per USD.
+5. Run cost about 74 USD one-off (153 at DD9 counts): about 680 USD of base revenue per USD. Buying the same generated shots from an agency (INR 500 to 800 per style-colour) would cost about 1.5k to 2.4k USD once (spend avoided, not cash paid today).
 6. Example: 1 crop cleared every floor at no cost; 2 generated shots (0.2064 USD) looked right but the gate holds both.
 7. Waits on: two SPEC amendments (cropping, generation), the gate's bars and exit numbers, brand rights for real-model
    references, the vendor data position, and Styli and Centrepoint confirming what they accept.
@@ -268,12 +268,33 @@ Ad money saved at the same ad sales (comparison only, counted once in initiative
 
 People time (review of every generated shot until exit) and margin are excluded by rule (06 Assumptions row 11).
 
+### Agency cost avoided (owner prices, 2026-10-26; not cash paid today)
+
+Agencies charge about INR 500 to 800 per style-colour (5.95 to 9.52 USD) for generated images; one price covers the
+generated images one style-colour needs. The agency's INR 60 per style is resizing with links plus template filling,
+never generation, so it is not the comparator. The agency does not make these images for us today, so this is spend
+avoided, not cash saved.
+
+| Work | Style-colours | Agency | Ours (USD) | Net avoided (USD) |
+|---|---|---|---|---|
+| B2 generated head-to-toe | 219 (1,050 x 5/24) | INR 109,500 to 175,200 (1,304 to 2,086 USD) | 43.80 | 1,260 to 2,042 |
+| B3 flat lay to model, 5-shot set | 30 | INR 15,000 to 24,000 (179 to 286 USD) | 30 | 149 to 256 |
+| **Total at 06 counts** | **249** | **INR 124,500 to 199,200 (1.5k to 2.4k USD)** | **74** | **1.4k to 2.3k** |
+| At DD9 counts (B2 160, B3 121) | 281 | INR 140,500 to 224,800 (1.7k to 2.7k USD) | 153 | 1.5k to 2.5k |
+
+Per image we pay about 0.20 USD (INR 16.8), 30 to 48 times less than an agency style-colour; a 5-shot set costs
+1.00 USD (INR 84), 6 to 10 times less. Derived crops are not generation and are not counted. Note only, not counted:
+new apparel needing generated shots (about 196 style-colours a year, derived) would add about 1.2k to 1.9k a year.
+If the agency prices per image, B3 is 5 times higher; if per size-level SKU, all rows are about 5 times higher.
+
 ### ROI
 
 - Base: 50.6k / 74 = about 680 USD of base revenue per USD of run cost (07). At DD9 counts: 50.6k / 153 = about 330.
 - Low: 0.9k / 74 = about 12. High: 132.0k / 74 = about 1,780.
 - About half the base (25k of 50.6k) is B2e, a listing effect with no ad data and a judged 25% sell share; the
   conversion half (22.5k) rests on a judged 3% lift that our own data does not yet support (01 s3).
+- Cash: none paid today. Spend avoided against agency generation prices: about 1.5k to 2.4k USD once (see "Agency
+  cost avoided"); not in the ratios.
 - These ratios show run cost does not limit the initiative; they are not profit figures.
 
 ## Risks

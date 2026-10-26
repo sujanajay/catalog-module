@@ -288,6 +288,7 @@ L4's size, not extra money.
 | Apparel re-render and reorder | inside initiative 2's 77 USD | 07 |
 | Target list, guard, title list | queries on existing tables; no generation cost | this file |
 | Recurring | not sized | 07 Total budget |
+| Agency price for the same views (spend avoided, not cash paid today) | 455 style-colours x INR 500 to 800 = INR 227,500 to 364,000 (2.7k to 4.3k USD) once, against our about 91 | owner, 2026-10-26 (agency generation price; never part of the INR 60) |
 
 | Case | Year-one run cost | Base revenue per USD of run cost |
 |---|---|---|

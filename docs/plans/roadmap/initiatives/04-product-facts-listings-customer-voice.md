@@ -28,7 +28,7 @@ Words used here:
    channel once a native Arabic reader has passed the golden set.
 4. Then turn reviews and fit returns into typed fix proposals ("check the size chart", "add a back view") in a
    "What customers say" list; a review never becomes a fact.
-5. Value (06, unchanged): **low 0, base 60.7k, high 241k USD a year**, plus about 1.0k a year of agency fees saved.
+5. Value (06, unchanged): **low 0, base 60.7k, high 241k USD a year**, plus about 1.0k a year of agency template-filling fees saved (the template share of the INR 60 per style).
    Year-one run cost about **804 USD**; base ROI about 75 USD of revenue per USD.
 6. Ownership: we recommend the GCC catalog module owns all GCC listing content (Noon, Namshi, Styli, Centrepoint,
    and Amazon.ae / .sa when it is taken on); India's catalog-service keeps India channels; both share a pattern
@@ -56,8 +56,10 @@ Words used here:
 
 ### 2. Templates are filled by hand, outside any system
 
-- The agency fills 9,280 template pairs (Noon 2,929, Namshi 2,930, Styli 1,784, Centrepoint 1,637) at INR 60 per
-  style for images plus templates; the split between the two is unknown (DD9 s9; DD9 s6; IM s2).
+- The agency fills 9,280 template pairs (Noon 2,929, Namshi 2,930, Styli 1,784, Centrepoint 1,637). Its INR 60 per
+  style covers resizing existing images with the image links, and filling these templates; the split between the
+  two is unknown, and it never includes image generation (owner, 2026-10-26; DD9 s9; DD9 s6; IM s2). Initiative 2
+  replaces the resizing part; this initiative replaces the template part.
 - Only Trendyol and Amazon publish template specs. Noon's field list and enums are inside its logged-in template
   download; Namshi, Styli and Centrepoint publish nothing (DD5 F3). The real blank templates must come from the
   owner's seller accounts.
@@ -301,9 +303,12 @@ Money is USD a year of extra revenue unless stated; gross listing price, not mar
 
 ### Cash saved
 
-Agency template share: base INR 30 of the INR 60 per style, minus INR 5.4 copy cost = INR 24.6 x 3,350 styles =
-INR 82,400, about **1.0k USD a year**; range 0.5k to 1.5k at a 30 / 70 to 70 / 30 split; INR 77,300 (0.9k) once for
-the current catalogue (DD9 s6, s9). It is 0 if the agency keeps the templates. The invoice split is unknown (DD5 Q6).
+The agency's INR 60 per style covers resizing with links plus template filling, split unknown, never generation
+(owner, 2026-10-26). Template share: base INR 30 of the INR 60 per style, minus INR 5.4 copy cost = INR 24.6 x 3,350
+styles = INR 82,400, about **1.0k USD a year**; range 0.5k to 1.5k at a 30 / 70 to 70 / 30 split; INR 77,300 (0.9k)
+once for the current catalogue (DD9 s6, s9). It is 0 if the agency keeps the templates. The breakdown of the INR 60
+between resizing with links and template filling is unknown (DD5 Q6). This initiative generates no images, so the
+agency's generation price (INR 500 to 800 per style-colour) does not apply here.
 
 ### ROI
 
@@ -389,8 +394,8 @@ actually prove.
 4. **Brand-manager sheets**: which brands have sheets with material, care, fit and origin, and can French
    Connection, Puma and Nautica supply one (DD5 Q2)?
 5. **sku_master_p2p**: who owns it, is it the GCC product master, and may catalog-worker read it (DD5 Q3, Q8)?
-6. **Agency**: can the invoice be shared to split INR 60 between images and templates (DD5 Q6), and is the agency
-   told that templates move channel by channel after a side-by-side?
+6. **Agency**: what is the breakdown of the INR 60 per style between resizing with links and template filling
+   (DD5 Q6), and is the agency told that templates move channel by channel after a side-by-side?
 7. **Today's listings**: may we check a sample of live Noon and Namshi pages for Arabic text and attribute fill
    before build, to measure B6's defect share (DD9 s9)?
 8. **Reviews**: who builds the Scout reviews entity (DD7 Q1); may one Apify account with a monthly cap be used for

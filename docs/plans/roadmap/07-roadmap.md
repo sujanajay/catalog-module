@@ -176,6 +176,11 @@ superseded: PR #91 removed the skip, so a soft-image note replaces it. Re-submit
 fresh. Release condition: role accuracy at least 95% per required role and 100% on head cuts on the golden set
 before "incomplete" goes live (DD1 Recommendation 3).
 
+In four versions (initiative 2 "Versions"): V1 resizing and image links move off the agency for new styles (no
+build; about 1.1k USD a year of agency fees); V2 roles, order and status rules with the apparel re-render (B1,
+14.0k base); V3 Noon rejections re-submitted (L2a, 7.5k base); V4 footwear re-render and the Noon white image 1.
+Nothing in initiative 2 is image generation.
+
 **Build vs buy.** Build (already built). Cut-out, per-channel render for 9 channels, compliance, the judge and
 auto-repair, publish and the ledger cost about 0.004 to 0.012 USD per style-colour; doing the same through
 Photoroom would cost about 1,600 to 14,000 USD a year and break our fidelity rules (05 Summary 1).
@@ -196,8 +201,10 @@ Photoroom would cost about 1,600 to 14,000 USD a year and break our fidelity rul
   0.466M; lift 0 / 3% / 6% (judged) = 0 / 14.0k / 28.0k.
 - L2a (06 "L2a"): 479 x 31.2 USD (French Connection revenue per live EAN-pair) = 15.0k if all recovered; recovered
   share 0 / 50% / 100% (judged); high at Noon country means = 24.4k. So 0 / 7.5k / 24.4k.
-- **Total: low 0, base 21.5k, high 52.4k.** Plus about 1.1k USD a year of agency fees saved (INR 93,800 at a 50%
-  image share; DD9 s6). Ad money saved at base 0.6k is counted once in initiative 3, not here (06 Overlaps).
+- **Total: low 0, base 21.5k, high 52.4k.** Plus about 1.1k USD a year of agency resizing fees saved: 3,350 new
+  styles x (INR 30 resizing share of the INR 60 - INR 2 module cost) = INR 93,800, and about 1.0k once (INR 88,000:
+  V2 1,912 x 28 + V4 1,229 x 28) (DD9 s6). The INR 60 covers resizing with links plus template filling, split
+  unknown (50 / 50 working, range 30 / 70), never generation (owner, 2026-10-26). Ad money saved at base 0.6k is counted once in initiative 3, not here (06 Overlaps).
 - Why B1 fell from DD9's 92k: weighted by brand revenue the defect share is 12.8%, not one in three, because US Polo
   (6.08M of 8.52M) is almost clean on that rule (06 Summary 2).
 
@@ -270,6 +277,8 @@ generator, and only for footwear views a brand cannot supply.
 
 **Run cost.** About 91 USD one-off if all missing footwear views are generated (about 455 style-colours x 1 view x
 0.20 USD per accepted image); 0 where brands supply the view (06 "L4"). Apparel fixes are inside initiative 2's cost.
+Buying the 455 views from an agency at INR 500 to 800 per style-colour would cost INR 227,500 to 364,000 (2.7k to 4.3k USD)
+(owner prices, 2026-10-26; spend avoided, not cash paid today).
 
 **ROI.** 13.0k / 91 = about 140 USD of base revenue per USD (06 Summary table), plus 5.0k of ad money at the
 same ad sales.
@@ -299,8 +308,9 @@ first checked for size run and price, then the gallery is fixed: 7 of 20 sampled
 - A structured attribute source exists but is unused: `dimensions.sku_master_p2p` covers 2,419 of 3,748 options;
   French Connection, Puma and Nautica (1,248 options) are absent (DD5 Summary 1). Facts from data exist for 58% of
   style-colours (1,812 of 3,141) (DD9 sizing table).
-- The agency fills 9,280 template pairs (Noon 2,929, Namshi 2,930, Styli 1,784, Centrepoint 1,637) at INR 60 per
-  style for images plus templates, split unknown (DD9 sizing table; IM s2).
+- The agency fills 9,280 template pairs (Noon 2,929, Namshi 2,930, Styli 1,784, Centrepoint 1,637). Its INR 60 per
+  style covers resizing existing images with the image links, and filling these templates; the split between the
+  two is unknown and it never includes generation (owner, 2026-10-26; DD9 sizing table; IM s2).
 - On Namshi, 15.3% of softline order lines carry a return reason; size or fit is 71% of those reasons, 17,678 lines
   and 0.68M USD gross a year (06 Storefront table).
 - Review text is reachable without login on Namshi, Trendyol and Amazon.ae; about 420 Noon.ae and 444 Noon.sa
@@ -334,8 +344,8 @@ for Noon only if Scout cannot reach it (USD 10 per 1,000 results) (DD7 Summary 2
 - B6: 7.33M (Noon and Namshi revenue of p2p-covered brands) x 0 / 0.5% / 2% (judged) = 0 / 36.7k / 165k.
 - B7a: 2% x 0.68M (fit returns avoided) + 5% x 32k ("not as described") + 0.5% x 1.8M (Noon conversion) =
   13.6k + 1.6k + 9k = 24k base; 0 / 24k / 76k.
-- **Total: low 0, base 60.7k, high 241k.** Plus about 1.0k USD a year of agency template fees saved (INR 82,400 at
-  a 50% template share; DD9 s9). The defect share for B6 is unmeasured (the audit does not measure text), so this
+- **Total: low 0, base 60.7k, high 241k.** Plus about 1.0k USD a year of agency template-filling fees saved: 3,350 x
+  (INR 30 template share of the INR 60 - INR 5.4 copy cost) = INR 82,400, and about 0.9k once (INR 77,300) (DD9 s9). The defect share for B6 is unmeasured (the audit does not measure text), so this
   is the least measured row (06 "B6").
 
 **Run cost.** B6: 240 USD one-off for the catalogue plus about 214 USD a year (DD5; DD9 s9). B7a: up to about 350
@@ -349,7 +359,8 @@ stage B. Initiative 6's infographics cannot draw a single fact without stage A (
 
 **Pending owner answers.** The real blank templates for Noon (English + Arabic), Namshi, Styli and Centrepoint, and
 agency-filled examples (DD5 Q4); brand-manager sheets for French Connection, Puma, Nautica (DD5 Q2); ownership of
-sku_master_p2p (DD5 Q3); a native Arabic reviewer (DD5 Q5); the agency invoice split (DD5 Q6); who owns GCC listing
+sku_master_p2p (DD5 Q3); a native Arabic reviewer (DD5 Q5); the breakdown of the INR 60 per style between resizing with links and template
+filling (DD5 Q6); who owns GCC listing
 fill, given India's Catalog v2 lists Amazon, Noon and Namshi (04 Q1); Scout as owner of review ingestion and the
 capped Noon actor (DD7 Q1, Q2).
 
@@ -404,7 +415,9 @@ stay in policy and logs, never in operator copy.
 
 **Run cost.** About 74 USD one-off: B2 about 1,050 options x 5/24 generated x 0.20 USD = 44; B3 about 30 options x
 1.00 USD per 5-shot set = 30 (06 Summary table). At DD9's full counts: 32 + 121 = 153 USD. Recurring for new
-styles: not sized in the evidence; small at 0.20 USD per accepted image.
+styles: not sized in the evidence; small at 0.20 USD per accepted image. Buying the same from an agency at
+INR 500 to 800 per style-colour: 249 style-colours (219 generated head-to-toe + 30 flat-lay sets) = INR 124,500 to 199,200
+(1.5k to 2.4k USD) once, against our 74 (owner prices, 2026-10-26; spend avoided, not cash paid today).
 
 **ROI.** 50.6k / 74 = about 680 USD of base revenue per USD (the B2e half is a listing effect with no ad data).
 
@@ -465,7 +478,10 @@ misplaced pointers) (DD6 Summary 4, 7, 8).
 
 **Run cost.** B4: 244.40 USD one-off for the 1,222 backlog at 0.20 USD per accepted image, plus about 260 USD a year
 for new styles (DD4 R6; DD9 s7). B5: up to about 481 USD one-off (5 to 17 USD callouts, up to 30 brand-photo panels,
-up to 435 generated footwear panels) (DD9 sizing table). Year one about 985 USD.
+up to 435 generated footwear panels) (DD9 sizing table). Year one about 985 USD. Buying the lifestyle images from an
+agency at INR 500 to 800 per style-colour: 1,222 = INR 611,000 to 977,600 (7.3k to 11.6k USD) once against 244.40, and about
+1,300 new styles a year = INR 650,000 to 1,040,000 (7.7k to 12.4k USD) a year against about 260 (spend avoided,
+not cash paid today; the agency does not make them now).
 
 **ROI.** 116.9k / 985 = about 120 USD of base revenue per USD of year-one run cost.
 
@@ -513,8 +529,17 @@ list prices; people time and margin are excluded (06 Assumptions row 11).
 | **Program** | **about 1.5k** | **about 0.5k to 0.7k** | **about 2.0k** (06: 77 + 44 + 30 + 504 + 481 + 454 + 350 + 91 = 2,031) | **269.4k** (low about 1k, high about 841k) | **about 130** |
 
 Other money lines:
-- Agency fees saved: about 2.1k USD a year (B1 1.1k + B6 1.0k), at an assumed 50 / 50 split of the INR 60 per style
-  (range 30 / 70); about the size of the whole run cost (DD9 Summary).
+- Agency fees saved (cash paid today): about 2.1k USD a year and about 2.0k once. The agency's INR 60 per style covers
+  resizing existing images with the image links, and filling the listing templates; the split is unknown, so the
+  working split stays 50 / 50 (range 30 / 70); it never includes generation (owner, 2026-10-26). Initiative 2
+  replaces the resizing part: 3,350 x (30 - 2) = INR 93,800 (1.1k) a year, INR 88,000 (1.0k) once. Initiative 4
+  replaces the template part: 3,350 x (30 - 5.4) = INR 82,400 (1.0k) a year, INR 77,300 (0.9k) once. About the
+  size of the whole run cost (DD9 Summary).
+- Generation avoided against agency prices (spend avoided, not cash paid today): agency image generation costs
+  INR 500 to 800 per style-colour against our about 0.20 USD (INR 16.8) per accepted image. One-off: 1,926 style-colours
+  (initiative 3: 455, initiative 5: 249, initiative 6: 1,222) = INR 963,000 to 1,540,800 = about 11.5k to 18.3k USD,
+  against about 409 USD of our run cost. A year: about 1,300 new footwear and bag styles (initiative 6) = about 7.7k
+  to 12.4k USD, against about 260. Not in any ROI.
 - Platform kept: about 12 to 40 USD a year for all channels at about 3,350 new styles a year (05 "What we have today").
 - Vendor trials before any buy: Photoroom sandbox free (1,000 watermarked calls a month), FASHN minimum pack 7.50 USD
   (05 Q3). Earlier trials spent 5.39 USD (DD3), 1.80 USD (DD4) and 0.45 USD (DD6).
@@ -525,7 +550,7 @@ Other money lines:
   3,400 images (B2, B3, B4), about 4,900 with infographics (DD9 Summary).
 
 Program ROI: 269.4k / 2,031 = about 130 USD of base revenue per USD of year-one run cost. At the low case (about
-1k) the run cost is roughly covered by the 2.1k of agency fees saved. These ratios show that run cost does not
+1k) the run cost is roughly covered by the 2.1k of agency fees saved (cash). These ratios show that run cost does not
 limit the program; they are not profit figures.
 
 ## Risks
@@ -556,8 +581,8 @@ limit the program; they are not profit figures.
    generated images, lettered infographics and real-model references (DD4 Q5, DD6 Q5, DD8).
 5. **Channel acceptance:** written confirmation from Noon and Namshi that a text-and-photo infographic is accepted as
    an additional image, and whether generated images must be labelled (DD6 Q2, DD4 Q4).
-6. **Inputs for listings:** real blank templates, brand-manager sheets, a native Arabic reviewer, the agency invoice
-   split (DD5 Q2, Q4, Q5, Q6).
+6. **Inputs for listings:** real blank templates, brand-manager sheets, a native Arabic reviewer, the breakdown of
+   the INR 60 per style between resizing with links and template filling (DD5 Q2, Q4, Q5, Q6).
 7. **Ownership:** GCC listing fill versus India Catalog v2 (04 Q1); Scout as owner of review ingestion (DD7 Q1);
    who restores the reason and traffic feeds in gcc-dashboard.
 8. **Proof:** a bid, budget and price freeze for holdout options, agreed with the ad agencies (06).

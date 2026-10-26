@@ -10,6 +10,13 @@ selected); every number states its query shape. The refresh queries are kept in 
 Revenue is gross listing price times quantity at fixed rates (AED 3.6725, SAR 3.75 per USD) unless stated.
 Rupees at INR 84 per USD, the default in infra/deploy.sh. No model or image spend was made for this refresh.
 
+Correction 2026-10-26 (owner): the agency's INR 60 per style covers resizing existing images to each
+marketplace's standard with the image links, plus listing-template filling; the split between the two is
+unknown and it never includes image generation. Agency image generation costs about INR 500 to 800 per
+style-colour. Sections 3, 5, 6, 7, 8, 9, the sizing table, the ranking, the assumptions and the one-page summary
+carry this; the cash figures (B1 USD 1.1k, B6 USD 1.0k a year) are unchanged, and generation avoided is added as
+spend avoided, not cash.
+
 Words used here:
 - **Option**: one row key `option_id_style_color` in master_sl. **Style-colour**: one design in one colour.
   They are the same thing for every brand except Campus, whose 1,012 option ids are 405 style-colours (DD4).
@@ -32,10 +39,12 @@ Words used here:
   are USPA footwear carrying USD 1.46M of the USD 1.95M "under 5 images" revenue. B2's apparel engine cannot
   fill footwear views, so B2's revenue touched drops from USD 2.1M (assumed) to USD 0.47M (measured), and its
   base from USD 106k to USD 23k. B1 to B3 together: base USD 211k becomes USD 128k.
-- Correction to the cash line: the agency's INR 60 covers images and template filling, and nobody has the
-  split (DD5 owner question 6). With an assumed 50 / 50 split (range 30 / 70 either way), B1 saves about
+- Correction to the cash line: the agency's INR 60 covers resizing images with the image links, and template
+  filling, never generation (owner, 2026-10-26), and nobody has the split (DD5 owner question 6). With an assumed 50 / 50 split (range 30 / 70 either way), B1 saves about
   INR 94k (USD 1.1k) a year and B6 about INR 82k (USD 1.0k) a year; together about INR 1.8 lakh (USD 2.1k),
-  close to the first version's B1-only figure, which assumed the whole INR 60 goes away.
+  close to the first version's B1-only figure, which assumed the whole INR 60 goes away. Generation work (B2,
+  B3, B4) also avoids the INR 500 to 800 per style-colour an agency charges for generated images (spend not paid
+  today; section 6).
 - Run costs stay small next to the revenue: one-off backlogs B2 USD 32, B3 USD 121, B4 USD 244, B5 up to
   about USD 481, B6 USD 240, B7a up to about USD 190 (Noon actor fallback only).
 - The real constraint is still capacity: the manual route makes about 1,300 images a year; the open
@@ -168,9 +177,17 @@ also be commercial choice.
 
 ### 3. Cost today versus the catalog module
 
-Agency: INR 60 per style, all platforms plus listing-template filling (meeting, 2026-10-21). No agency
+Note 2026-10-26 (owner): the agency's INR 60 per style covers two jobs, (a) resizing the brand's existing images
+to each marketplace's standard and creating the image links and (b) filling the listing templates; the split
+between them is unknown (50 / 50 working, range 30 / 70), and it never includes image generation. Agency image
+generation costs INR 500 to 800 per style-colour (USD 5.95 to 9.52), counted as spend avoided, not cash paid today.
+Campus is assumed billed per style-colour (405); per option id (1,013) is the upside case.
+
+Agency: INR 60 per style, all platforms plus listing-template filling (meeting, 2026-10-21); the image part is
+resizing the brand's existing images and creating the image links, never generation (owner, 2026-10-26). Agency
+image generation is a separate price, INR 500 to 800 per style-colour (owner, 2026-10-26). No agency
 invoice or cost table exists in the warehouse (confirmed: no dataset or table name matches agency, vendor
-cost or studio). DD5 did not find how the INR 60 splits between images and templates (DD5 "Exact costs":
+cost or studio). DD5 did not find how the INR 60 splits between resizing and templates (DD5 "Exact costs":
 "the template share of the 60 is unknown"; owner question 6). Manual route: ChatGPT by hand at 5 to 6 images
 a day (meeting), about 1,300 images a year at 240 working days.
 
@@ -197,7 +214,8 @@ section "Cost so far", infra/deploy.sh):
 
 | Route | Per style | Source |
 |---|---|---|
-| Agency | INR 60 (includes template filling; split unknown, see section 6) | meeting |
+| Agency, resizing with links plus template filling | INR 60 (split unknown, see section 6; never generation) | meeting; owner 2026-10-26 |
+| Agency, image generation | INR 500 to 800 per style-colour (USD 5.95 to 9.52) | owner 2026-10-26 |
 | Manual ChatGPT | not priced; throughput 5 to 6 images a day | meeting |
 | Catalog module, existing photos (B1) | INR 1 to 4 | cost.ts, SPEC |
 | Catalog module, derived crops (B2 derive) | about INR 0 extra | cost.ts |
@@ -211,21 +229,25 @@ section "Cost so far", infra/deploy.sh):
 Annual cost saved, B1 to B3, agency as the comparator:
 - B1, first version: 3,754 options x (INR 60 minus INR 2) = INR 217,700 (USD 2.6k) once, INR 194,300
   (USD 2.3k) a year at the SPEC R15a planned inflow of about 3,350 options. Corrected in the refresh: that
-  assumed the whole INR 60 disappears when B1 ships, but B1 replaces only the image part, and the
-  catalogue is 3,141 style-colours. With the image share at 50% (range 30% to 70%, section 6): INR 30 minus
+  assumed the whole INR 60 disappears when B1 ships, but B1 replaces only the resizing-and-links part, and the
+  catalogue is 3,141 style-colours. With the resizing share at 50% (range 30% to 70%, section 6): INR 30 minus
   INR 2 = INR 28 per style; INR 88,000 (USD 1.0k) once for the catalogue and INR 93,800 (USD 1.1k) a year at
   3,350 a year (range INR 53,600 to 134,000, USD 0.6k to 1.6k).
-- B2, 770 options x 2 images: the agency does not generate views, so the comparator is the manual route.
+- B2, 770 options x 2 images: the agency does not generate views for us today, so the capacity comparator is the
+  manual route. Buying the about 160 generated head-to-toe images from an agency at INR 500 to 800 per
+  style-colour would cost INR 80,000 to 128,000 (USD 0.95k to 1.5k) against USD 32 (spend avoided, not cash).
   1,540 images is more than a full year of the manual route's output; crop derivation costs about nothing
   (about 225 fabric crops at 7/24) and generation about 160 head-to-toe images at 5/24, USD 32 = INR 2,700
   for the backlog at USD 0.20 per accepted image. The saving is capacity, not cash. (Unchanged; if the 77
   USPA footwear options are left to B4, the apparel backlog is about 1,390 images and USD 29.)
 - B3, Vero Moda 121 options x 5 images = 605 images (half a year of the manual route); generation USD 121
-  = INR 10,200 (INR 25,700 if the 306 Trendyol options are the true count). At INR 84 per style a generated
-  5-shot set costs more than the agency's INR 60, but the agency does not produce on-model shots from flat
-  lays at all, so there is no like-for-like saving; the comparison is against a studio shoot or nothing.
-- B1 to B3 cash, corrected: about USD 1.0k to 1.1k a year (B1 only). Too small to rank on; rank on revenue
-  and eligibility.
+  = INR 10,200 (INR 25,700 if the 306 Trendyol options are the true count). The INR 60 is resizing and
+  templates only and is not the comparator. Against agency generation at INR 500 to 800 per style-colour, a
+  generated 5-shot set at INR 84 is 6 to 10 times cheaper: 121 x INR 500 to 800 = INR 60,500 to 96,800 (USD 0.7k
+  to 1.2k) avoided against USD 121, if one agency price covers the set (5 times more if priced per image).
+- B1 to B3 cash, corrected: about USD 1.0k to 1.1k a year (B1 only). B2 and B3 avoid agency generation spend
+  not paid today: about USD 1.7k to 2.7k once (281 style-colours x INR 500 to 800). Too small to rank on; rank on
+  revenue and eligibility.
 
 ### 4. Revenue base and uplift
 
@@ -340,7 +362,7 @@ to 5.
 | USPA department | 240 apparel, 290 footwear | 529 footwear, 0 apparel | DD4 F1, DD5 (USPA footwear only), revenue by department above |
 | Apparel options | about 2,170 | 1,746 (DD0) | DD0 summary item 7 |
 | Catalogue for per-style cash | 3,754 options | 3,141 style-colours (Campus 1,013 option ids = 405 style-colours) | DD4 F1, `COUNT(DISTINCT name, colour)` |
-| B1 cash saving | INR 1.9 lakh (USD 2.3k) a year | INR 93,800 (USD 1.1k) a year at a 50% image share; range USD 0.6k to 1.6k | section 6 |
+| B1 cash saving | INR 1.9 lakh (USD 2.3k) a year | INR 93,800 (USD 1.1k) a year at a 50% resizing share; range USD 0.6k to 1.6k | section 6 |
 | B2 revenue touched | 2.1M (proportional assumption) | 0.47M apparel (measured); 1.46M of the under-5 revenue is 77 USPA footwear options | `b2rev.sql` |
 | B2 uplift | 42k / 106k / 318k | 9k / 23k / 120k (70k plus 49k eligibility) | as above |
 | Centrepoint / Styli absent apparel | about 530 / 1,330 | about 663 / 893 (plus Puma apparel) | `b2rev.sql` |
@@ -348,23 +370,36 @@ to 5.
 | Ranking | B2 > B1 > B3 | B1 > B2 > B3 (and B4, B5, B6 rank between B1 and B2) | section "Ranking" |
 | Unchanged | B1 revenue model, B3 numbers, DD3 prices, the 770 / 258 / 99 counts, the USPA "2,700" reading | | |
 
+Note 2026-10-26 (owner): the agency's INR 60 per style covers two jobs, (a) resizing the brand's existing images
+to each marketplace's standard and creating the image links and (b) filling the listing templates; the split
+between them is unknown (50 / 50 working, range 30 / 70), and it never includes image generation. Agency image
+generation costs INR 500 to 800 per style-colour (USD 5.95 to 9.52), counted as spend avoided, not cash paid today.
+Campus is assumed billed per style-colour (405); per option id (1,013) is the upside case.
+
 ### 6. The agency's INR 60: how it splits (explicit assumption)
 
 DD5 searched and did not find the split: no invoice in the warehouse or repo, and the meeting gives one
 figure "all platforms plus template filling". Owner question 6 in DD5 is still open. This refresh therefore
 treats the split as an assumption:
-- Base: 50% images (INR 30), 50% listing templates including Arabic text (INR 30).
-- Range: images 30% to 70% (INR 18 to 42), templates the rest (INR 42 to 18).
+- Base: 50% resizing with image links (INR 30), 50% listing templates including Arabic text (INR 30).
+- Range: resizing 30% to 70% (INR 18 to 42), templates the rest (INR 42 to 18).
 - Why 50 / 50 as base: the agency's image work is resizing and re-backgrounding the brand's own photos for
   each channel (what B1 automates); its template work is filling 4 channel templates per style with
   attributes and copy in two languages (what B6 automates). Neither side is obviously the larger; the
   range covers both readings.
 - Unit: per style. Whether the agency bills Campus per style-colour (405) or per option id (1,013) is not
-  known; per style-colour is used, which is the lower figure.
+  known; per style-colour is used, which is the lower figure (option id is the upside case).
+- Not in the INR 60: image generation. The agency charges INR 500 to 800 per style-colour for it (owner,
+  2026-10-26). Generation in B2, B3, B4 (and L4 footwear views in the roadmap) is compared with that price
+  against our USD 0.20 (INR 16.8) per accepted image; it is spend avoided, not cash paid today, because the
+  agency does not make these images now. At this document's counts: B2 160 + B3 121 + B4 1,222 = 1,503
+  style-colours x INR 500 to 800 = INR 751,500 to 1,202,400 (USD 8.9k to 14.3k) once; B4 new styles about
+  1,300 a year = USD 7.7k to 12.4k a year. The roadmap (06 "Agency money") adds L4's 455 views and uses its own
+  B2 and B3 counts: USD 11.5k to 18.3k once.
 
 | Saving a year at 3,350 new styles (SPEC R15a inflow) | Images share 30% | Base 50% | Images share 70% |
 |---|---|---|---|
-| B1 replaces images (INR share minus INR 2 module cost) | INR 53,600 (USD 0.6k) | INR 93,800 (USD 1.1k) | INR 134,000 (USD 1.6k) |
+| B1 replaces resizing and links (INR share minus INR 2 module cost) | INR 53,600 (USD 0.6k) | INR 93,800 (USD 1.1k) | INR 134,000 (USD 1.6k) |
 | B6 replaces templates (INR share minus INR 5.4 copy cost) | INR 122,600 (USD 1.5k) | INR 82,400 (USD 1.0k) | INR 42,200 (USD 0.5k) |
 | Both (INR 60 minus INR 7.4) | INR 176,200 (USD 2.1k) | INR 176,200 (USD 2.1k) | INR 176,200 (USD 2.1k) |
 
@@ -400,7 +435,9 @@ Who already has a lifestyle-like photo (DD4 F2 sample of 48): USPA 0 of 8 and Ke
 addressable); Campus 8 of 8 have a styled studio set (addressable only if the owner says that does not
 count, DD4 Q2); Puma 5 of 8 and French Connection bags 7 of 8 already show the product worn or carried.
 
-Cost saved per year versus today: none in cash. The agency does not make lifestyle images; the manual route
+Cost saved per year versus today: none in cash paid today; against agency generation at INR 500 to 800 per
+style-colour the backlog avoids USD 7.3k to 11.6k once and new styles USD 7.7k to 12.4k a year (spend avoided,
+note 2026-10-26). The agency does not make lifestyle images now; the manual route
 does (Naz with ChatGPT), at 5 to 6 a day. The backlog of 1,222 images is about 94% of a year of the manual
 route's output. The saving is capacity.
 
@@ -469,7 +506,8 @@ and Trendyol yes; Noon and Namshi yes pending written confirmation (DD6 Q2); 6th
 Shein and VogaCloset not sent until confirmed. Revenue of the 1,560 set by channel: Noon and Namshi 6.02M,
 Amazon and Trendyol 0.05M. So almost all of B5's value hangs on Noon and Namshi saying yes.
 
-Cost saved per year versus today: none in cash. The agency does not make infographics; Naz does a few by
+Cost saved per year versus today: none in cash paid today (generated footwear panels would cost USD 6.3k to
+10.1k from an agency if charged as a second job, 1,061 x INR 500 to 800; note only). The agency does not make infographics; Naz does a few by
 hand with ChatGPT. Capacity: 1,560 callout images plus panels is more than a year of the manual route.
 
 Run cost (DD6 prices, now on sized counts): callouts 467 x USD 0.0108 = USD 5.04 (confirmable set) to
@@ -547,7 +585,8 @@ read-only identity and attributes export, DD10).
 
 What blocks value (owner answers pending, DD5): the real blank templates (Noon per fashion product type,
 Namshi, Styli, Centrepoint) and agency-filled examples (Q4); brand-manager sheets for FC, Puma, Nautica (Q2);
-ownership of and read access to sku_master_p2p (Q3, Q8); an Arabic reviewer (Q5); the INR 60 split (Q6).
+ownership of and read access to sku_master_p2p (Q3, Q8); an Arabic reviewer (Q5); the breakdown of the INR 60
+between resizing with links and template filling (Q6).
 
 ### 10. B7a: review ingestion and review-driven content fixes
 
@@ -614,17 +653,17 @@ ingestion layer that accepts any listing id (B7a).
 
 | Bucket | Addressable (exact unless marked) | Cost saved a year | Run cost | Revenue uplift low / base / high (USD a year) | Key assumptions | Confidence |
 |---|---|---|---|---|---|---|
-| B1 shot-list compliance | 3,141 style-colours (3,754 options), 16,358 SKUs, about 17,270 style-colour-channel pairs on 9 channels; apparel 1,746 options | INR 93,800 (USD 1.1k) at a 50% image share, range USD 0.6k to 1.6k (corrected from USD 2.3k) | INR 1 to 4 per style | 0 / 92k / 184k | one third of options have a defect B1 fixes; 3% conversion lift on them; traffic constant | low |
-| B2 fill the shot list | 770 options with fewer than 5 images (258 with fewer than 4), about 500 to 560 apparel; 1,540 images; about 663 apparel options absent from Centrepoint, 893 from Styli | manual route replaced: 1,540 images is more than a year of manual output | USD 32 backlog (USD 0.20 per accepted image), crops about 0; INR 3.5 per option on average | 9k / 23k / 120k (corrected from 42k / 106k / 318k; high includes 49k eligibility) | apparel revenue of under-5 options 0.47M measured; 5% lift base; DD2's 24-option sample sets the 5/24 generation share | low |
-| B3 flat lay to on-model | Vero Moda 121 master options (306 on Trendyol), 605 images; other flat-lay brands unknown | 605 manual images avoided | USD 121 for 121 options (USD 306 for 306) | 4k / 13k / 32k | 10% lift base on VM revenue of 126k; no public evidence for on-model vs flat lay | low |
-| B4 footwear and bags lifestyle | 1,222 style-colours (USPA 529, Campus 406, Puma 106, Keds 105, FC bags 63, VM bags 13; 85 kids); about 7,560 style-colour-channel pairs | manual route: 1,222 images is about 94% of a year of manual output; no agency cash | USD 244.40 once; about USD 260 a year for new styles | 0 / 69k / 212k | 1% lift base on footwear revenue 6.86M; lifestyle as the last image only; USPA and Keds have no lifestyle today | low |
-| B5 infographics | 467 style-colours with 2+ features in sku_master_p2p; 1,560 with Trendyol-derived (proposed) features; Noon 467 / 1,500, Namshi 467 / 1,500, Trendyol 456 / 1,544, Amazon 388 / 1,185 | manual route; no agency cash | USD 5 to 17 callouts, at most USD 30 brand-photo panels, at most USD 435 footwear generated panels | 0 / 60k / 183k (13k base on confirmable features only) | Noon and Namshi accept infographics; Naz confirms proposed features; 1% lift base | low |
-| B6 attributes and listing fill | 3,141 style-colours; 9,280 template pairs on Noon 2,929, Namshi 2,930, Styli 1,784, Centrepoint 1,637; facts from data for 1,812 (58%) | INR 82,400 (USD 1.0k) a year at a 50% template share, range USD 0.5k to 1.5k | USD 240 once for the catalogue; about USD 214 a year | 0 / 37k / 165k | 0.5% lift base on Noon and Namshi revenue of p2p-covered brands; the agency split | low (revenue), medium (cash, run cost) |
+| B1 shot-list compliance | 3,141 style-colours (3,754 options), 16,358 SKUs, about 17,270 style-colour-channel pairs on 9 channels; apparel 1,746 options | INR 93,800 (USD 1.1k) at a 50% resizing-and-links share, range USD 0.6k to 1.6k (corrected from USD 2.3k) | INR 1 to 4 per style | 0 / 92k / 184k | one third of options have a defect B1 fixes; 3% conversion lift on them; traffic constant | low |
+| B2 fill the shot list | 770 options with fewer than 5 images (258 with fewer than 4), about 500 to 560 apparel; 1,540 images; about 663 apparel options absent from Centrepoint, 893 from Styli | manual route replaced: 1,540 images is more than a year of manual output; agency generation avoided about USD 0.95k to 1.5k once (160 x INR 500 to 800), not cash | USD 32 backlog (USD 0.20 per accepted image), crops about 0; INR 3.5 per option on average | 9k / 23k / 120k (corrected from 42k / 106k / 318k; high includes 49k eligibility) | apparel revenue of under-5 options 0.47M measured; 5% lift base; DD2's 24-option sample sets the 5/24 generation share | low |
+| B3 flat lay to on-model | Vero Moda 121 master options (306 on Trendyol), 605 images; other flat-lay brands unknown | 605 manual images avoided; agency generation avoided USD 0.7k to 1.2k once (121 x INR 500 to 800), not cash | USD 121 for 121 options (USD 306 for 306) | 4k / 13k / 32k | 10% lift base on VM revenue of 126k; no public evidence for on-model vs flat lay | low |
+| B4 footwear and bags lifestyle | 1,222 style-colours (USPA 529, Campus 406, Puma 106, Keds 105, FC bags 63, VM bags 13; 85 kids); about 7,560 style-colour-channel pairs | manual route: 1,222 images is about 94% of a year of manual output; no agency cash paid today; agency generation avoided USD 7.3k to 11.6k once and USD 7.7k to 12.4k a year (INR 500 to 800 per style-colour) | USD 244.40 once; about USD 260 a year for new styles | 0 / 69k / 212k | 1% lift base on footwear revenue 6.86M; lifestyle as the last image only; USPA and Keds have no lifestyle today | low |
+| B5 infographics | 467 style-colours with 2+ features in sku_master_p2p; 1,560 with Trendyol-derived (proposed) features; Noon 467 / 1,500, Namshi 467 / 1,500, Trendyol 456 / 1,544, Amazon 388 / 1,185 | manual route; no agency cash paid today; generated footwear panels would cost USD 6.3k to 10.1k from an agency if charged as a second job (note only) | USD 5 to 17 callouts, at most USD 30 brand-photo panels, at most USD 435 footwear generated panels | 0 / 60k / 183k (13k base on confirmable features only) | Noon and Namshi accept infographics; Naz confirms proposed features; 1% lift base | low |
+| B6 attributes and listing fill | 3,141 style-colours; 9,280 template pairs on Noon 2,929, Namshi 2,930, Styli 1,784, Centrepoint 1,637; facts from data for 1,812 (58%) | INR 82,400 (USD 1.0k) a year at a 50% template share, range USD 0.5k to 1.5k | USD 240 once for the catalogue; about USD 214 a year | 0 / 37k / 165k | 0.5% lift base on Noon and Namshi revenue of p2p-covered brands; the INR 60 breakdown | low (revenue), medium (cash, run cost) |
 | B7a review-driven fixes | 714 / 747 options rated on Noon.ae / .sa (420 / 444 with 10+ ratings), 463 / 351 on Namshi, 142 / 12 on Amazon; about 11,000 text reviews (approximate) | none in cash | at most about USD 350 first year with the Noon actor, then USD 100 to 160 a year (under USD 20 without the actor) | 0 / 24k / 76k | Namshi fit returns USD 0.68M a year; 2% of them avoided base; 0.5% conversion on 1.8M | low |
 | B7b NPD insight (outside, context) | Cardio Bunny about USD 0.10M revenue; no competitor data | n/a | one-off scrape USD 1.50 to 7.50 per 1,000 reviews | not sized | DD10: separate product | n/a |
 | B8 forecasting (outside, context) | 16,095 softline SKUs; 51% stocked for Noon UAE, 34% for Noon KSA | n/a | inside Channel Replenishment | not sized | DD10: gcc-dashboard | n/a |
 | DD3 generator prices (refreshed 2026-10-22) | USD 0.10 per image at 2K, 0.15 at 4K, 0.20 per accepted image with retries; one generator through OpenRouter's Image API; fidelity checks on free tooling | used in B2, B3, B4, B5 | | unchanged | retry rate as measured in DD3 | medium |
-| Program B1 to B7a | 3,141 style-colours; 770 need fill; 121 need on-model; 1,222 need lifestyle; 467 to 1,560 can carry callouts; 9,280 template pairs; about 450 options have enough reviews | about USD 2.1k a year cash (B1 plus B6, whole INR 60 replaced), plus the manual route's whole capacity many times over | about USD 1.3k once in total (B2 32, B3 121, B4 244, B5 up to 481, B6 240, B7a up to 190); then about USD 0.6k to 0.7k a year | about 13k / 318k / 972k (highs overlap; not additive) | as above | low |
+| Program B1 to B7a | 3,141 style-colours; 770 need fill; 121 need on-model; 1,222 need lifestyle; 467 to 1,560 can carry callouts; 9,280 template pairs; about 450 options have enough reviews | about USD 2.1k a year cash (B1 plus B6, whole INR 60 replaced), plus agency generation avoided about USD 8.9k to 14.3k once (B2 160, B3 121, B4 1,222 = 1,503 x INR 500 to 800) and USD 7.7k to 12.4k a year (B4 new styles), not cash, plus the manual route's whole capacity many times over | about USD 1.3k once in total (B2 32, B3 121, B4 244, B5 up to 481, B6 240, B7a up to 190); then about USD 0.6k to 0.7k a year | about 13k / 318k / 972k (highs overlap; not additive) | as above | low |
 
 ## Ranking across B1 to B8
 
@@ -635,7 +674,7 @@ By base-case dollars, with what each depends on. Values in USD a year.
 | 1 | B1 shot-list compliance | 92k (0 to 184k) | 1.1k (0.6k to 1.6k) | low | DD0, DD1, DD1a | none that block; the 1-in-3 defect share is unverified |
 | 2 | B4 footwear and bags lifestyle | 69k (0 to 212k) | 0 | low | B1 roles (LS placed last), DD2 gate, DD3 generator, DD8 scene profile | DD4 Q2, Q3, Q4, Q5 |
 | 3 | B5 infographics | 60k (0 to 183k); 13k without confirmed proposed features | 0 | low | B6 fact sheet (features), B1 roles (slot), B4 scenes for footwear panels, DD8 fonts | DD6 Q2 (Noon and Namshi acceptance) above all; DD5 brand sheets |
-| 4 | B6 attributes and listing fill | 37k (0 to 165k) | 1.0k (0.5k to 1.5k) | low (revenue), medium (cash) | DD0 taxonomy, sku_master_p2p access | DD5 Q4 templates, Q2 brand sheets, Q5 Arabic reviewer, Q6 split |
+| 4 | B6 attributes and listing fill | 37k (0 to 165k) | 1.0k (0.5k to 1.5k) | low (revenue), medium (cash) | DD0 taxonomy, sku_master_p2p access | DD5 Q4 templates, Q2 brand sheets, Q5 Arabic reviewer, Q6 INR 60 breakdown |
 | 5 | B7a review-driven fixes | 24k (0 to 76k) | 0 | low | B6 fact sheet (checks), B1 roles (shot fixes), B5 (callout order), Scout | DD7 Q1 Scout ownership, Q2 Apify, Q5 golden set |
 | 6 | B2 fill the shot list | 23k (9k to 120k), corrected | 0 | low | B1, DD2, DD3 | DD2 gate approval; Centrepoint and Styli eligibility rules |
 | 7 | B3 flat lay to on-model | 13k (4k to 32k) | 0 | low | B1, B2 engine, DD3, DD8 registry and rights | DD8 written rights per brand site |
@@ -665,8 +704,9 @@ Reading:
    Check the catalog module's own product records for source photo counts. Medium.
 4. Styli and Centrepoint blocks are proxied by absence from master_sl channel ids; no listing status feed
    exists for either channel. Low.
-5. Costs: agency INR 60 is the meeting figure, unverified by any invoice; its split between images and
-   templates is assumed 50 / 50 (range 30 / 70) because DD5 found no split; module cost from measured batch
+5. Costs: agency INR 60 is the meeting figure, unverified by any invoice; it covers resizing with links plus
+   template filling, never generation (owner, 2026-10-26); its split between the two is assumed 50 / 50
+   (range 30 / 70) because DD5 found no split; agency generation INR 500 to 800 per style-colour (owner); module cost from measured batch
    b489e466 and list prices; generator prices from DD3 (USD 0.20 per accepted image, retries included);
    B4, B5, B6 and B7a run costs from DD4, DD6, DD5 and DD7. Cost figures medium; the split, low.
 6. Revenue base: gross listing price, trailing 12 months, warehouse transfers excluded; about 1.3M USD of
@@ -737,8 +777,10 @@ What each is worth, best estimate a year of extra revenue (range in brackets):
   content to sales.
 
 What it costs: running all of it on today's backlog costs about USD 1.3k once and well under USD 1k a year
-after that. Cash saved is small, about USD 2k a year, when both the photo work and the listing sheets move
-off the agency (we do not know how the agency's INR 60 per style splits between the two). The bigger point
+after that. Cash saved is small, about USD 2k a year, when both the photo resizing and the listing sheets move
+off the agency (we do not know how the agency's INR 60 per style splits between the two; it never covers
+generation). Making new images ourselves also avoids the INR 500 to 800 per product agencies charge for
+generated images (spend avoided, not cash we pay today). The bigger point
 is capacity: making images by hand gives about 1,300 a year, and the open backlog is about 3,400 images
 (B2, B3, B4), about 4,900 counting the feature pictures.
 
@@ -750,15 +792,15 @@ Noon, comparing conversion and returns.
 
 Do you confirm (a) the working assumptions behind the refreshed numbers: master_sl as the option universe
 counted in style-colours (3,141, with Campus as 405), Trendyol image count as the proxy for role coverage,
-the agency's INR 60 split 50 / 50 between images and templates (range 30 / 70) until an invoice says
-otherwise, and the corrections to B1 to B3 in section 5; (b) the ranking B1, B4, B5, B6, B7a, B2, B3 by
+the agency's INR 60 split 50 / 50 between resizing with links and templates (range 30 / 70) until an
+invoice says otherwise, and INR 500 to 800 per style-colour for agency generation (owner, 2026-10-26), and the corrections to B1 to B3 in section 5; (b) the ranking B1, B4, B5, B6, B7a, B2, B3 by
 base-case dollars, with B7b and B8 left outside the catalog team, and a dependency order of B1, then B6,
 then B4, B5, B2, B7a and B3 in place of the intent map's V1 B1, V2 B2, V3 B3; and (c) that the dependent
 specs size against these counts?
 
 Open items only the owner can answer:
-- How the agency's INR 60 per style splits between images and template filling, and whether Campus is billed
-  per style-colour (405) or per option id (1,013) (DD5 Q6).
+- The breakdown of the agency's INR 60 per style between resizing with links and template filling, and
+  whether Campus is billed per style-colour (405, assumed) or per option id (1,013, upside) (DD5 Q6).
 - Whether the SPEC R15a inflow of about 3,350 a year counts style-colours or option ids.
 - Noon and Namshi written acceptance of infographics (DD6 Q2); B5 is worth almost nothing without it.
 - Whether worn studio photos and Campus's styled sets count as "lifestyle present" (DD4 Q2), and whether

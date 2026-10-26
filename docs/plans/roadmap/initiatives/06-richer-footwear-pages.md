@@ -18,7 +18,7 @@ Engine names appear below as technical facts only; they never appear in operator
    lifestyle scene and no feature picture (06 B4, B5).
 2. Adds, never as image 1, one lifestyle shot (legs-only or carried, no face; real cut-out in a generated scene for kids
    and thin sets) and one infographic lettered by code from confirmed facts, in English and Arabic.
-3. Base 116.9k USD a year (low 0, high 350.8k), 43% of the program base; year-one run cost about 985 USD (07).
+3. Base 116.9k USD a year (low 0, high 350.8k), 43% of the program base; year-one run cost about 985 USD (07). Buying the lifestyle images from an agency (INR 500 to 800 per style-colour) would cost about 7.3k to 11.6k USD once and 7.7k to 12.4k a year (spend avoided, not cash paid today).
 4. Buy only the image generator behind our own gate; build the composite fallback and the compositor (05, DD4, DD6).
 5. Trial: 2 US Polo sneakers, 0.206382 USD. Shape, colour and main logos held; one invented garbled label text, both
    framed above the knee, so the gate is needed. Last only because gated on US Polo rights and Noon / Namshi acceptance.
@@ -242,9 +242,14 @@ and margin are excluded by rule (06 Assumptions 11).
 ### ROI
 
 - Base: 116.9k / 985 = about **120 USD of base revenue per USD** of year-one run cost (07).
-- Low revenue case: 0 (if every lift is zero or the gates say no). Cash saved: none; the agency does not make these
-  images (DD9 s7, s8). The saving is capacity: the 1,222 lifestyle backlog is about 94% of a year of the manual route
-  (DD9 s7).
+- Low revenue case: 0 (if every lift is zero or the gates say no). Cash saved today: none; the agency does not make
+  these images now, and its INR 60 per style is resizing with links plus template filling, never generation (DD9 s7,
+  s8; owner, 2026-10-26). Spend avoided against agency generation at INR 500 to 800 per style-colour: B4 backlog
+  1,222 = INR 611,000 to 977,600 (7.3k to 11.6k USD) once against 244.40 USD; new styles about 1,300 a year = INR
+  650,000 to 1,040,000 (7.7k to 12.4k USD) a year against about 260. Note only, not counted: if an agency charged the
+  1,061 generated footwear panels as a second job, add INR 530,500 to 848,800 (6.3k to 10.1k USD) once against 435.
+  Callouts are drawn in code and not counted. The saving is also capacity: the 1,222 lifestyle backlog is about 94%
+  of a year of the manual route (DD9 s7).
 - High: 350.8k / 985 = about 356 per USD (highs overlap, so this is a ceiling).
 - These ratios show that run cost does not limit the initiative; they are not profit figures (07).
 

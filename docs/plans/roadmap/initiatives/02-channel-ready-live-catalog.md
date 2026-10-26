@@ -16,11 +16,83 @@ Measured = a count or sum from data; judged = an assumption.
 2. Our module already renders every photo to all 9 channels' canvas rules for about 0.012 USD per style-colour (05); what it lacks is shot roles, order, image caps and minimums, a cut-product rule for image 1, Noon's white first image outside fashion, and a visible "incomplete" status (DD1, DD1a).
 3. This initiative adds those rules to the existing platform, then re-renders and re-submits the live back catalog: 3,141 style-colours, about 17,270 style-colour-channel pairs (DD9).
 4. Order: apparel brands first (French Connection, Penti, Vero Moda, Cardio Bunny, Nautica; 1,912 style-colours), Noon and Namshi first, then footwear brands (1,229).
-5. Value: low 0, base 21.5k, high 52.4k USD a year (B1 14.0k + L2a 7.5k at base), plus about 1.1k a year of agency image fees (06; 07).
+5. Value: low 0, base 21.5k, high 52.4k USD a year (B1 14.0k + L2a 7.5k at base), plus about 1.1k a year of agency resizing fees saved (the resizing-and-links share of the INR 60 per style; 06; 07).
 6. Run cost: about 77 USD in year one (37 one-off re-run + up to 40 a year for new styles); base ROI about 280 USD of revenue per USD of run cost (07).
 7. Build, not buy: the platform exists; buying the same layout from Photoroom would cost about 1,600 to 14,000 USD a year (05).
 8. Nothing blocks the start; Noon recovery waits for the fresh Noon Not Live feed (C-02) from initiative 1.
 9. Two findings in the deep dives are now stale on `main`: Styli no longer skips small photos (PR #91), and cut products are placed flush on every channel, image 1 included (see "Findings now stale").
+10. Four versions, in order (see "Versions"): V1 resizing moves off the agency (1.1k a year cash); V2 apparel rules and re-render (14.0k); V3 Noon rejections (7.5k); V4 footwear and Noon white image 1.
+
+## Versions
+
+Added 2026-10-26 (owner decisions). The initiative ships in four versions, in priority order. No part of it
+generates images: everything re-makes the brand's existing photos to each channel's rules (cut-out, background,
+padding, resize, the x2 enlarger, reorder, drop beyond a cap, notes). Missing shots it reports are filled in
+initiatives 5 (apparel), 3 (footwear views) and 6 (lifestyle and infographics).
+
+The agency is paid INR 60 per style today for two jobs: (a) resizing existing images to each marketplace's standard
+and creating the image links, and (b) filling the listing templates used to upload. The split is unknown; the
+working split is 50 / 50 (range 30 / 70). It never includes image generation (owner, 2026-10-26). This initiative
+replaces part (a); initiative 4 replaces part (b).
+
+| | V1 Resizing moves off the agency | V2 Right first image on apparel (B1) | V3 Noon rejections back live (L2a) | V4 Footwear re-render and Noon white image 1 |
+|---|---|---|---|---|
+| What it does | Every new style is resized to each channel and its links sheet made by our platform (already built and live), instead of the agency | Shot roles, required roles and order, cut product never image 1, head-cut rule, caps and minimums, "incomplete" status and notes, fixed sheet texts, golden-set release bar; re-renders and re-submits the apparel back catalogue | Matches the fresh Noon rejected list to re-rendered products and re-submits them first | Re-renders and re-submits the footwear brands under the V2 rules; white Noon image 1 for the departments the owner names as non-fashion |
+| Brands | All 9 | French Connection, Penti, Vero Moda, Cardio Bunny, Nautica | FC 365, Campus 44, Penti 26, Nautica 22, US Polo 10, others 12 | US Polo, Campus, Keds, Puma |
+| Channels | All 9, as ticked | All 9 where listed (Shein 0 for these brands); Namshi holdout pilot first, then Noon, Namshi, Amazon, Trendyol, Styli, Centrepoint, 6thStreet, VogaCloset | Noon UAE and KSA | Noon (white image 1 if footwear is non-fashion), Namshi, Amazon, Trendyol, then the rest |
+| Listings | About 3,350 new styles a year | 1,912 style-colours; 9,881 style-colour-channel pairs | 479 SKUs (264 UAE, 215 KSA) | 1,229 style-colours (Campus as 405); 7,389 style-colour-channel pairs (10,663 counting Campus option ids) |
+| Depends on | Owner OK; who uploads the links sheets (Q6) | DD0, DD1 items (a)(b), golden-set labels and the 95% / 100% bar; initiative 1 treatment log and bid freeze (pilot); re-submission route | Initiative 1 fresh C-02; V2 for 425 SKUs, V4 for 54 | V2 rules live; the owner's Noon fashion answer (Q2) |
+| Revenue low / base / high (USD a year) | 0 / 0 / 0 | 0 / 14.0k / 28.0k | 0 / 7.5k / 24.4k | 0 / 0 / 0 counted |
+| Spend one-off | 0 | 22.75 USD | 0 (inside V2 and V4 renders) | 14.63 USD |
+| Spend a year | 12 to 40 USD | 0 (roles inside the judge call; new styles are in V1) | 0 | 0 |
+| Agency fees replaced (cash, resizing share) | INR 93,800 a year (about 1.1k USD) | INR 53,500 once (about 0.64k USD) | none | INR 34,400 once (about 0.41k USD); 0.61k if Campus is billed per option id |
+| Ratio | 1.1k cash / 40 = about 28 USD of cash saved per USD of run cost (no revenue) | 14.0k / 22.75 = about 620 (high about 1,230) | no own run cost; ratio not defined | no counted revenue; 0.41k cash once against about 15 USD |
+| Owner decision | Yes: agree to move resizing and links for new styles; the INR 60 breakdown (Q10) | Yes: Q1 (roles and rule table), Q3 (caps, cap priority), Q4 (cut out of position 1), Q5 (Centrepoint), Q6 (who re-submits), Q7 (Namshi pilot), Q9 (close DD1 item c) | Only who owns C-02 (initiative 1) and who re-submits (Q6) | Yes: Q2 (which products Noon counts as fashion) |
+
+Formulas (INR 84 per USD; module resize cost INR 2 per style, DD9 s3; resizing share INR 30 = 50% of INR 60):
+- Agency fees replaced: V1 3,350 x (30 - 2) = INR 93,800 = 1,117 USD a year (range 3,350 x (18 - 2) = INR 53,600,
+  0.64k, to 3,350 x (42 - 2) = INR 134,000, 1.6k, at 30 / 70). V2 1,912 x 28 = INR 53,536 (53,500) = 637 USD once.
+  V4 1,229 x 28 = INR 34,412 (34,400) = 410 USD once; with Campus billed per option id (1,229 - 405 + 1,013 = 1,837)
+  x 28 = INR 51,436 = 612 USD (the upside case; per style-colour is the working assumption). V2 + V4 = 3,141 x 28 =
+  INR 88,000 (1.0k), the "once" figure in "Other money" below.
+- Listings: V2 = the five apparel brands' channel cells in "How many listings": Noon 1,892 + Namshi 1,893 + Trendyol
+  1,782 + Amazon 1,097 + Shein 0 + Styli 904 + Centrepoint 1,074 + 6thStreet 1,127 + VogaCloset 112 = 9,881. V4 =
+  17,270 - 9,881 = 7,389, counting Campus in style-colours (2,660 = 17,270 - (20,544 - 5,934)).
+- Revenue: V2 = B1 = 0.466M x 0 / 3% / 6%. V3 = L2a = 479 x 31.2 x 0 / 50%; high 264 x 33.9 + 215 x 72.1. By
+  readiness: 425 apparel-brand SKUs x 31.2 x 50% = 6.6k after V2; 54 footwear SKUs x 31.2 x 50% = 0.8k after V4.
+  V4 counted revenue is 0 because the measured B1 defect share for US Polo, Campus and Keds is 0 (06 "B1"); Puma's
+  share of B1 (about 0.1k) sits in V2's 14.0k though Puma is in the V4 wave (rounding only).
+- Spend: V2 1,912 x 0.0119 = 22.75; V4 1,229 x 0.0119 = 14.63; V1 3,350 x 0.0036 to 0.0119 = 12 to 40 (05).
+- Check against the whole initiative: revenue 0 + 14.0k + 7.5k + 0 = 21.5k base (high 28.0k + 24.4k = 52.4k);
+  one-off 22.75 + 14.63 = 37; a year 12 to 40; year one 37 + 40 = 77 USD; cash 1.1k a year and 1.0k once.
+- The "once" figures are cash only if the agency would otherwise be paid to redo the back catalogue to the new
+  rules; the catalogue was already paid for once.
+
+**V1 - Resizing moves off the agency.** Our platform already makes every channel's photo sizes and the links sheet
+for all 9 channels (05 "What we have today"); the only change is that new styles go through it instead of the
+agency. All brands, all channels, about 3,350 new styles a year. No build and no rule decision, only the owner's OK
+and a named person to upload the links sheets. No counted revenue, but it replaces the resizing-and-links share of
+the INR 60, about INR 93,800 (1.1k USD) a year, for 12 to 40 USD a year of run cost. First because it has no
+dependency.
+
+**V2 - Right first image on apparel (B1).** The new rules: a role for every photo, image 1 is a front, a cut product
+or cut head never leads, caps and minimums, and an "incomplete" status with plain notes instead of a silent "ok".
+Then the apparel back catalogue (1,912 style-colours) is re-rendered and re-submitted, starting with the Namshi
+holdout pilot. All of B1's 14.0k base sits here (French Connection alone 0.265M of the 0.466M touched); about INR
+53,500 (0.64k USD) of agency resizing is replaced once. The caps and "incomplete" parts add no counted revenue but
+ship in the same release and rules version bump; splitting them out would mean a second re-submission round in
+every portal. Needs the golden-set bar and the owner's rule-table approval.
+
+**V3 - Noon rejections back live (L2a).** Once initiative 1 restores Noon's Not Live file (C-02), rejected SKUs are
+matched to re-rendered products and re-submitted first. No run cost of its own. 425 of 479 SKUs are apparel brands
+and can go after V2 (6.6k base); the 54 footwear SKUs after V4 (0.8k). Some "Content Issues" may be text, which
+initiative 4 fixes; the judged 50% recovery covers that.
+
+**V4 - Footwear re-render and Noon white image 1.** The V2 rules applied to US Polo, Campus, Keds and Puma (1,229
+style-colours), plus a white Noon image 1 if Noon counts footwear as non-fashion. No counted revenue, but it stops
+our render turning white shoe mains grey on Noon, handles Keds' 9 images against Trendyol's 8, and is the base for
+initiative 3's footwear queue. About INR 34,400 (0.41k USD) of agency resizing is replaced once (0.61k if Campus is
+billed per option id). Waits on the owner's Noon fashion answer.
 
 ## Problem, with evidence and real examples
 
@@ -276,8 +348,13 @@ Assumptions row 11).
 | **Total** | B1 + L2a | **0** | **21.5k** | **52.4k** |
 
 Other money, not added to revenue:
-- Agency image fees: about 1.1k USD a year (INR 93,800 at a 50% image share of INR 60 per style; range about 0.6k to
-  1.6k at 30 / 70); about 1.0k once for the current catalogue (INR 88,000) (DD9 s6).
+- Agency resizing fees (cash paid today): the agency's INR 60 per style covers resizing existing images with the
+  image links, and filling the listing templates; the split is unknown and it never includes generation (owner,
+  2026-10-26). This initiative replaces the resizing part: about 1.1k USD a year (V1: 3,350 x (INR 30 resizing
+  share minus INR 2) = INR 93,800; range about 0.6k to 1.6k at 30 / 70); about 1.0k once for the current catalogue (V2 INR
+  53,500 + V4 INR 34,400 = INR 88,000) (DD9 s6). Cash only while the agency is still paid INR 60. Nothing in this
+  initiative is image generation, so the agency's INR 500 to 800 per style-colour generation price does not apply
+  here (generation avoided is counted in initiatives 3, 5 and 6).
 - Ad money saved at the base lift: 22.2k touched x 0.03 / 1.03 = 0.6k (1.3k high); counted once in initiative 3,
   not here (06 Overlaps).
 - The Amazon main-image rule fails 31% of products, but on brands with small Amazon sales: French Connection 1,391
@@ -298,7 +375,7 @@ Other money, not added to revenue:
 
 | Case | Formula | USD of revenue per USD of year-one run cost |
 |---|---|---|
-| Low | 0 / 77 | 0 (run cost covered by the 1.1k agency fees saved) |
+| Low | 0 / 77 | 0 (run cost covered by the 1.1k agency resizing fees saved) |
 | Base | 21.5k / 77 | about 280 |
 | High | 52.4k / 77 | about 680 |
 
@@ -343,6 +420,7 @@ review, golden-set labelling and the re-submission work in the portals, which ar
 - **DD1a owner items 1, 2, 4, 6**: Noon fashion definition, caps and minimums, Centrepoint spec, cut main out of
   position 1.
 - **A re-submission route**: who uploads the links sheets in each portal (agency or channel team).
+- **Owner OK to move resizing and links off the agency** for new styles (V1).
 - **Downstream**: initiative 3 uses this re-render for its apparel fixes; initiative 5 needs the roles and
   required-role lists; initiative 6 needs caps and last-slot placement (07 Dependencies).
 
@@ -365,5 +443,8 @@ review, golden-set labelling and the re-submission work in the portals, which ar
    Shein, 6thStreet and VogaCloset?
 9. Should DD1 approval item (c) be closed as superseded by your 2026-10-22 decision (no Styli enlargement cap), with
    a soft-image note on Styli and Centrepoint in its place?
+10. May resizing and image links for new styles move from the agency to the module now (V1)? What is the breakdown of
+    the INR 60 per style between resizing with links and template filling? (Campus is assumed billed per
+    style-colour, 405; per option id, 1,013, is the upside case.)
 
 Status: done
