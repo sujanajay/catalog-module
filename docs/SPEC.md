@@ -588,8 +588,8 @@ flood-fill fallback with flag `fallback_matte` and status `needs_attention` inst
   new batch for anything else."; button "Start processing", refused with "Files changed since the
   preview. Open step 4 again." when an upload completed after the last preview; toast "Batch started. We
   will show progress here."). Step 4 is a check, not a result; no question is ever asked after Start.
-- Batch page (`/catalog/[id]`): tabs Overview, "Needs attention (N products)" (hidden when 0), Links
-  sheet, Details. Overview: state banner, KPIs, "How this works", "Cost so far" ("INR 3.80 per style so far
+- Batch page (`/catalog/[id]`): tabs Overview, "Needs attention (N products)" (hidden when 0), Compare
+  images, Links sheet, Details; `?tab=<overview|attention|compare|sheet|details>` opens a tab. Overview: state banner, KPIs, "How this works", "Cost so far" ("INR 3.80 per style so far
   · agency reference INR 60 per style"), "Not refreshed in this batch" line, downloads "Download links
   sheet (Excel)", "Download CSV" and "Download filled product list" when a product-list workbook was
   uploaded, "Start again" on a failed batch. The "Ready" banner appears only when links verified equals
@@ -609,7 +609,24 @@ flood-fill fallback with flag `fallback_matte` and status `needs_attention` inst
   Usually done in a minute."; resolved card: pill "Resolved", identifier, "Sheet updated." Replace modal
   "Replace photo <n> of <identifier>": "Drop the new photo. We will make it for <channels> again and
   update the sheet. Nothing else changes."
-- Product page (`/catalog/products/[brand]/[key]`): live images per channel, Opptra SKU ids, aliases,
+- Compare images tab (every batch, live and test, past and new; viewers too): lead "Every photo in this
+  batch next to what was made for each marketplace. Click any image to see it large." One line per input
+  photo (identifier and photo number), then the original, then one column per batch channel. Rows are the
+  batch's products (`catalog_batch_products`) and the photo versions that batch brought
+  (`catalog_source_images.batch_id`), less a photo replaced inside the same batch. A cell shows that
+  batch's output (its `staging_uri`, signed for one hour; the public link only while the output is live
+  and has no staging copy). A re-run with the same photo makes no new output, so the cell then shows the
+  newest published output of the same product, channel and shot with the same photo bytes from an earlier
+  batch, labelled "Unchanged, made in an earlier batch". Badges: Passed, Repaired (a repair passed on
+  that channel), Needs attention, Could not be made, Skipped, Unchanged, Not made yet (batch running),
+  with the plain reason. Filters in a GET form (product, marketplace, result) and 25 photos per page,
+  filtered and paged in SQL. Any image opens a large viewer: original and one channel side by side, channel
+  buttons, Previous and Next (also the arrow keys), the reason, and "Open full size" links. A link
+  `/catalog/<id>?tab=compare&q=<identifier>` opens the tab on one product; the comparison loads only when
+  its tab is asked for, since it signs a page of images. Learnings: docs/solutions/compare-images.md.
+- Product page (`/catalog/products/[brand]/[key]`): each current photo's original next to its live image
+  per channel (same grid and viewer as Compare images), the live links per channel, "Batches that touched
+  this product" (date, batch, change; each opens that batch's Compare tab on this product), Opptra SKU ids, aliases,
   events newest first, "Download links", "Add alias", "Remove product" with a typed confirmation (deletes
   only this product's public objects; event `removed`). Brand page (`/catalog/brands/[slug]`): product
   search, "Download links for selected products", cost per brand.

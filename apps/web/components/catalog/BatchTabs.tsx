@@ -28,11 +28,18 @@ type TabsProps = {
   initialTab?: string;
   overview: ReactNode;
   attention: ReactNode;
+  /** "Compare images": every photo next to what was made for each channel. Absent on older callers. */
+  compare?: ReactNode;
+  /**
+   * Set while the comparison is not loaded on this render (it signs a page of images, so it loads only
+   * when asked for): choosing the tab opens this link, which renders the page with the comparison.
+   */
+  compareHref?: string;
   sheet: ReactNode;
   details: ReactNode;
 };
 
-export default function BatchTabs({ attentionCount, evalLabel, initialTab, overview, attention, sheet, details }: TabsProps) {
+export default function BatchTabs({ attentionCount, evalLabel, initialTab, overview, attention, compare, compareHref, sheet, details }: TabsProps) {
   const [active, setActive] = useState(initialTab ?? "overview");
   const [remaining, setRemaining] = useState<number | null>(null);
   // Once the batch had something to decide, the attention panel stays mounted (hidden when its tab is
@@ -44,6 +51,7 @@ export default function BatchTabs({ attentionCount, evalLabel, initialTab, overv
   const panels = [
     { id: "overview", label: "Overview", body: overview },
     ...(evalLabel || attentionCount || hadAttention || attentionTab ? [{ id: "attention", label: evalLabel ?? attentionLabel(count), body: attention }] : []),
+    ...(compare !== undefined ? [{ id: "compare", label: "Compare images", body: compare }] : []),
     { id: "sheet", label: "Links sheet", body: sheet },
     { id: "details", label: "Details", body: details },
   ];
@@ -59,8 +67,13 @@ export default function BatchTabs({ attentionCount, evalLabel, initialTab, overv
     else return;
     event.preventDefault();
     const tab = tabs[next]!;
-    setActive(tab.id);
+    choose(tab.id);
     document.getElementById(`tab-${tab.id}`)?.focus();
+  }
+
+  function choose(id: string) {
+    setActive(id);
+    if (id === "compare" && compareHref) window.location.assign(compareHref);
   }
 
   return (
@@ -69,7 +82,7 @@ export default function BatchTabs({ attentionCount, evalLabel, initialTab, overv
         {tabs.map((tab, index) => (
           <button key={tab.id} id={`tab-${tab.id}`} role="tab" aria-selected={selected === tab.id}
             aria-controls={`panel-${tab.id}`} tabIndex={selected === tab.id ? 0 : -1}
-            className={selected === tab.id ? "on" : ""} onClick={() => setActive(tab.id)}
+            className={selected === tab.id ? "on" : ""} onClick={() => choose(tab.id)}
             onKeyDown={event => navigate(event, index)}>{tab.label}</button>
         ))}
       </div>
