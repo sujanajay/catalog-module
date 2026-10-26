@@ -1,6 +1,6 @@
 # Compare images: inputs next to outputs, per channel, for every batch
 
-Written 2026-10-26 for the `feat/compare-images` branch (worktree `..\catalog-module-wt	-compare-images`), from main d82cc36.
+Written 2026-10-26 for the `feat/compare-images` branch (worktree `..\catalog-module-wt\11-compare-images`), from main d82cc36.
 Approved plan, copied from the planning session.
 
 ## Checklist
@@ -12,7 +12,7 @@ Approved plan, copied from the planning session.
 - [x] 4. Copy rules: no model ids, no em dashes, plain words
 - [x] 5. Docs: SPEC section and the docs/solutions note on staging copies
 - [x] Verification: unit tests, typecheck, lint, screenshots (component harness; no local DB run, see .runs/2026-10-26-compare-images.md)
-- [ ] PR opened
+- [x] PR opened (#100)
 - [ ] PR merged
 
 ## Context
