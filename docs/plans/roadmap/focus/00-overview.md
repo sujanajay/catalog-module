@@ -155,4 +155,18 @@ OWNER DECISIONS (Wave B)                      OUTSIDE ASKS (send now, no cost)
 - [F03 - Lifestyle for footwear: 6.1b and 6.1a](03-lifestyle-footwear-6.1b-6.1a.md)
 - [F04 - Composite scene: 6.2](04-composite-scene-6.2.md)
 
+## 8. Superseded for groups A and B (2026-10-26)
+
+F01 and F02 are grouped as one initiative, "complete the apparel shot set", and F03 and F04 as one initiative,
+"one scene image per footwear and bag style-colour". Each now has a business case written as if every approval
+were granted and an implementation spec, plus a measured inventory note:
+
+- [Apparel shot set: business case](../../proposals/2026-10-26-apparel-shot-set/00-business-case.md) and
+  [spec 12](../../../specs/12-apparel-shot-set.md)
+- [Footwear scene image: business case](../../proposals/2026-10-26-footwear-scene-image/00-business-case.md) and
+  [spec 13](../../../specs/13-footwear-scene-image.md)
+- [Measured inventory count](../../proposals/2026-10-26-apparel-shot-set/01-inventory-count.md)
+
+The F01 to F04 pages stay as the sourced sign-off sheets they were.
+
 Status: draft for owner approval
