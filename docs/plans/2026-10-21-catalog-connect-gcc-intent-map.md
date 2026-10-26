@@ -156,3 +156,15 @@ review scraping ownership) and 10 (owner of B8 and B7b). DD9 proposes a dependen
 B1, B6, B4, B5, B2, B7a, B3 for the owner to confirm against the V1 to V3 sequence above. Only after those answers does any
 dependent work get specified; implementation still requires Gate C (SPEC.md amendment and
 a yes per paid generator).
+
+## 10. Roadmap proposal (2026-10-26)
+
+The deep dives were turned into a business proposal in docs/plans/roadmap/: evidence files
+01 to 05 (marketing data, catalog liveness, raw and live image audit, India learnings, build
+vs buy), 06 metrics and impact model v2, 07 roadmap, 00 one-pager, and six initiative
+documents in initiatives/. Order: 01 measure and unblock, 02 channel-ready live catalog,
+03 fix the pages we pay to advertise, 04 product facts, listings and customer voice,
+05 complete apparel shot sets, 06 richer footwear pages. Base about 269k USD a year for
+about 2k USD a year running cost; every revenue lift is still judged until the holdout test
+runs. Cumulative trial spend 8.05 USD of the 50 USD cap. Next step: the owner reviews the
+one-pager and takes the business asks it lists.
