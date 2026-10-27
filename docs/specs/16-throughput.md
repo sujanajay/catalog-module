@@ -154,8 +154,9 @@ default) no queue is created and the env is absent; an existing `catalog-bulk` i
 
 3.2.4 GPU service flags: `--cpu=$GPU_CPU --memory=$GPU_MEMORY --concurrency=$GPU_CONCURRENCY
 --max-instances=$GPU_MAX_INSTANCES` and `--set-env-vars=MAX_RESIDENT_SESSIONS=...[,GPU_MEM_LIMIT_BYTES=...]`.
-CPU service: `--max-instances=$MATTING_CPU_MAX_INSTANCES`, `MAX_RESIDENT_SESSIONS=1` and, when
-`UPSCALE_SERVICE=cpu`, `UPSCALE_CPU=1`. With `UPSCALE_SERVICE=cpu` the worker gets `UPSCALE_URL=$MATTING_URL` and
+CPU service: `--max-instances=$MATTING_CPU_MAX_INSTANCES`, `MAX_RESIDENT_SESSIONS=1` and always `UPSCALE_CPU=1`
+(the upscaler loads only when called, so serving `/upscale` costs nothing until the worker or the fidelity gate
+calls it; the preview stack and the gate need it before the F2 switch). With `UPSCALE_SERVICE=cpu` the worker gets `UPSCALE_URL=$MATTING_URL` and
 the upscaler no longer needs a GPU URL; with `gpu` (default) the spec 11 rule stays (no GPU URL, no upscaler).
 
 3.2.5 `infra/sql-tier.sh` (new): prints the current tier of `ila-pg`; prints `SKIP` and exits 0 when it equals
@@ -333,6 +334,8 @@ the judge.
    operator of the deploy does not know the URL in advance.
 5. The GPU render key is unchanged so the F1 deploy re-renders nothing; only the CPU path gets the `:cpu` suffix,
    and `renderKeys` accepts both, so the F2 switch re-makes nothing by itself either.
+11. `UPSCALE_CPU=1` is set on the CPU service at every deploy, not only with `UPSCALE_SERVICE=cpu`, so the fidelity
+   gate and the preview stack can reach the CPU upscaler before the F2 switch.
 9. Only 429 counts as "busy" for the wait-and-retry rule; the plan also named 503, but a 503 from our matting
    service means a fault, and Cloud Run answers 429 when max-instances are all busy. Keeping 503 as an immediate
    failure also keeps the spec 05 breaker behaviour and its tests unchanged.
