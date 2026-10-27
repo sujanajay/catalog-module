@@ -9,6 +9,8 @@ export class LlmLimiter {
   private inflight = 0;
   private floor: number;
   private cutAt: number | null = null;
+  /** Counts the cuts, so 429s from requests sent before the latest cut do not cut again. */
+  private cuts = 0;
   private readonly waiting: (() => void)[] = [];
 
   constructor(readonly max: number, private readonly now: () => number = Date.now) {
@@ -26,9 +28,6 @@ export class LlmLimiter {
 
   /** Requests in flight now. */
   active(): number { return this.inflight; }
-
-  /** Counts the cuts, so 429s from requests sent before the latest cut do not cut again. */
-  private cuts = 0;
 
   /** A 429 answer: the cap halves (at least 1) from what it is now. `sentAfterCut` is the cut count when the
    * request was sent; a burst of 429s for requests sent together halves the cap once, not once per answer. */

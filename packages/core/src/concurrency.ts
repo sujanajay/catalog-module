@@ -39,7 +39,7 @@ export async function eachLimit<T>(items: readonly T[], limit: number, fn: (item
 export function serialLock(): <T>(fn: () => Promise<T>) => Promise<T> {
   let tail: Promise<unknown> = Promise.resolve();
   return <T>(fn: () => Promise<T>) => {
-    const result = tail.then(fn, fn);
+    const result = tail.then(fn);
     tail = result.catch(() => undefined);
     return result;
   };

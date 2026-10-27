@@ -7,6 +7,7 @@ import type { Db } from "../../db/client";
 import { catalogBatches, catalogChunks } from "../../db/schema";
 import { log as structuredLog, toSeverity } from "../../log";
 import { chunkTaskId, DISPATCH_DEADLINE_SEC, type enqueueTask } from "../../tasks";
+import { positiveIntEnv } from "../../concurrency";
 
 /** A delivery starts no new photo after this much of its time (the request deadline is 900 s). */
 export const CHUNK_TIME_BUDGET_MS = 480_000;
@@ -30,15 +31,10 @@ type Enqueue = typeof enqueueTask;
 type Log = (message: string, fields?: Record<string, unknown>) => void;
 const defaultLog: Log = (message, fields = {}) => structuredLog(toSeverity(fields.severity) ?? "INFO", message, fields);
 
-function positiveInt(value: string | undefined): number | null {
-  if (!value) return null;
-  const n = Number(value);
-  return Number.isInteger(n) && n > 0 ? n : null;
-}
 
 /** `CATALOG_CHUNK_TIME_BUDGET_MS` may lower the budget (proof runs only); unset or invalid keeps 480 s. */
 export function chunkTimeBudgetMs(env: NodeJS.ProcessEnv = process.env): number {
-  return Math.min(positiveInt(env.CATALOG_CHUNK_TIME_BUDGET_MS) ?? CHUNK_TIME_BUDGET_MS, CHUNK_TIME_BUDGET_MS);
+  return Math.min(positiveIntEnv(env.CATALOG_CHUNK_TIME_BUDGET_MS, CHUNK_TIME_BUDGET_MS), CHUNK_TIME_BUDGET_MS);
 }
 
 /** `CATALOG_CHUNK_WINDOW`, default 8. */
@@ -48,7 +44,7 @@ export function chunkImages(env: NodeJS.ProcessEnv = process.env): number {
   return Number(env.CATALOG_CHUNK_IMAGES ?? DEFAULT_CHUNK_IMAGES);
 }
 export function chunkWindow(env: NodeJS.ProcessEnv = process.env): number {
-  return positiveInt(env.CATALOG_CHUNK_WINDOW) ?? DEFAULT_CHUNK_WINDOW;
+  return positiveIntEnv(env.CATALOG_CHUNK_WINDOW, DEFAULT_CHUNK_WINDOW);
 }
 
 /** Spec 16: a Test Brand load batch's name starts with this (apps/worker/src/catalog-load.ts names it). */
@@ -64,12 +60,12 @@ export interface BatchClassFields { isTest: boolean; name: string; counts: { pro
  */
 export function isBulkBatch(batch: BatchClassFields, env: NodeJS.ProcessEnv = process.env): boolean {
   const products = batch.counts?.products ?? 0;
-  return products >= (positiveInt(env.BULK_BATCH_PRODUCTS) ?? DEFAULT_BULK_BATCH_PRODUCTS) || (batch.isTest && batch.name.startsWith(LOAD_BATCH_NAME_PREFIX));
+  return products >= positiveIntEnv(env.BULK_BATCH_PRODUCTS, DEFAULT_BULK_BATCH_PRODUCTS) || (batch.isTest && batch.name.startsWith(LOAD_BATCH_NAME_PREFIX));
 }
 
 /** Spec 16: the per-batch cap of queued or running chunks; `CATALOG_BULK_WINDOW` for bulk (default the operator window). */
 export function windowFor(bulk: boolean, env: NodeJS.ProcessEnv = process.env): number {
-  return bulk ? positiveInt(env.CATALOG_BULK_WINDOW) ?? chunkWindow(env) : chunkWindow(env);
+  return bulk ? positiveIntEnv(env.CATALOG_BULK_WINDOW, chunkWindow(env)) : chunkWindow(env);
 }
 
 const batchClassColumns = { isTest: catalogBatches.isTest, name: catalogBatches.name, counts: catalogBatches.counts };
