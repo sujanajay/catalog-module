@@ -3,7 +3,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
 import { EMPTY_BATCH_COUNTS } from "@catalog/core/db/schema";
 import { deriveBatchState } from "@catalog/core/catalog/pipeline/status";
-import CatalogWizard, { type WizardInitialBatch } from "../components/catalog/CatalogWizard";
+import CatalogWizard, { resumedGrouping, type WizardInitialBatch } from "../components/catalog/CatalogWizard";
 import ChannelPicker from "../components/catalog/ChannelPicker";
 import OverwritePreview from "../components/catalog/OverwritePreview";
 import WizardStep2, { mergeSheetChoices } from "../components/catalog/WizardStep2";
@@ -103,13 +103,29 @@ describe("wizard steps 2 and 3 while collecting (F6 release A)", () => {
     expect(html).not.toContain("0 of 0 products");expect(html).not.toContain("Processing starts by itself");
   });
   it("step 3 uses the same polled text; the fixed sentences only before a count or once stalled", () => {
-    expect(wizardCollectingText(state, STEP3_COLLECTING_TEXT)).toBe(`40 of 287 files copied from your links. ${LEAVING_LINE}`);
-    expect(wizardCollectingText(null, STEP3_COLLECTING_TEXT)).toBe(`Collecting files. Continue when the grouping is ready. ${LEAVING_LINE}`);
-    expect(wizardCollectingText({ ...state, stalled: true }, STEP2_COLLECTING_TEXT)).toBe(`${STEP2_COLLECTING_TEXT} ${LEAVING_LINE}`);
-    expect(wizardCollectingText(deriveBatchState({ status: "draft", counts: EMPTY_BATCH_COUNTS }), STEP2_COLLECTING_TEXT)).not.toMatch(/0 of 0/);
+    expect(wizardCollectingText(state, 287, STEP3_COLLECTING_TEXT)).toBe(`40 of 287 files copied from your links. ${LEAVING_LINE}`);
+    expect(wizardCollectingText(null, null, STEP3_COLLECTING_TEXT)).toBe(`Collecting files. Continue when the grouping is ready. ${LEAVING_LINE}`);
+    expect(wizardCollectingText({ ...state, stalled: true }, 287, STEP2_COLLECTING_TEXT)).toBe(`${STEP2_COLLECTING_TEXT} ${LEAVING_LINE}`);
+    expect(wizardCollectingText(deriveBatchState({ status: "draft", counts: EMPTY_BATCH_COUNTS }), null, STEP2_COLLECTING_TEXT)).not.toMatch(/0 of 0/);
     expect(LEAVING_LINE).toBe("You can close this page. Open this batch again from the batch list and press Continue setting up when it is ready.");
   });
-  it("step 4 while collecting carries the leaving line", () => {
-    expect(renderToStaticMarkup(createElement(WizardStep4, { preview: null }))).toContain(LEAVING_LINE);
+  it("a resumed batch keeps the grouping answers saved at step 2; untouched defaults let detection decide", () => {
+    const ready = { ...resumed, status: "draft" as const, counts: { ...counts, previewReady: true } };
+    expect(resumedGrouping(undefined, 1)).toEqual({ mode: "filename", precedence: "uploads_then_links", chosen: false });
+    expect(resumedGrouping(ready, 2)).toEqual({ mode: "filename", precedence: "uploads_then_links", chosen: false });
+    expect(resumedGrouping({ ...ready, options: { identifierMode: "folder", precedence: "uploads_then_links" } }, 2)).toEqual({ mode: "folder", precedence: "uploads_then_links", chosen: true });
+    expect(resumedGrouping({ ...ready, options: { identifierMode: "filename", precedence: "links_only" } }, 2)).toEqual({ mode: "filename", precedence: "links_only", chosen: true });
+    expect(resumedGrouping(ready, 4).chosen).toBe(true);
+  });
+  it("a collecting batch whose files are not listed yet shows the fixed sentence, never 0 of 0", () => {
+    const listing = deriveBatchState({ status: "ingesting", counts: { ...EMPTY_BATCH_COUNTS, collected: 0, collectTotal: 0 }, source: "links" });
+    expect(listing.text).toBe("0 of 0 files copied from your links");
+    expect(wizardCollectingText(listing, 0, STEP2_COLLECTING_TEXT)).toBe(`${STEP2_COLLECTING_TEXT} ${LEAVING_LINE}`);
+    expect(wizardCollectingText(listing, null, STEP3_COLLECTING_TEXT)).toBe(`${STEP3_COLLECTING_TEXT} ${LEAVING_LINE}`);
+  });
+  it("step 4 while collecting carries the leaving line and never shows 0 of 0 before a count exists", () => {
+    const empty = renderToStaticMarkup(createElement(WizardStep4, { preview: null }));
+    expect(empty).toContain(LEAVING_LINE);expect(empty).toContain("Collecting files.");expect(empty).not.toMatch(/\b0 of 0\b/);
+    expect(renderToStaticMarkup(createElement(WizardStep4, { preview: { ...preview, ready: false, collected: 0, collectTotal: 0 } }))).not.toMatch(/\b0 of 0\b/);
   });
 });

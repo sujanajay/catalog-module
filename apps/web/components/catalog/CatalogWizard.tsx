@@ -21,7 +21,17 @@ export interface WizardInitialBatch {
   options: { identifierMode: IdentifierMode; precedence: Precedence };
   uploads: { status: string }[]; counts: BatchCounts; status: BatchStatus; state: BatchState;
 }
-type PolledBatch = { counts: { previewReady: boolean; failReason: string | null }; state?: BatchState };
+/**
+ * The grouping answers a resumed batch opens with. A batch resumed at step 4 has passed step 2, and saved options
+ * that differ from the creation defaults can only come from the operator's step 2 Continue, so in both cases the
+ * saved options win and the first poll must not replace them with the detected defaults (`chosen`).
+ */
+export function resumedGrouping(initialBatch: WizardInitialBatch | undefined, initialStep: number): { mode: IdentifierMode; precedence: Precedence; chosen: boolean } {
+  if (!initialBatch) return { mode: "filename", precedence: "uploads_then_links", chosen: false };
+  const { identifierMode: mode, precedence } = initialBatch.options;
+  return { mode, precedence, chosen: initialStep === 4 || mode !== "filename" || precedence !== "uploads_then_links" };
+}
+type PolledBatch = { counts: { previewReady: boolean; failReason: string | null; collectTotal?: number | null }; state?: BatchState };
 
 const STEPS = ["Brand and files", "Check what we found", "Where will these images go?", "Start"];
 export default function CatalogWizard({ brands, shareEmail, initialBrand = "", initialBatch }: { brands: BrandOption[]; shareEmail: string; initialBrand?: string; initialBatch?: WizardInitialBatch }) {
@@ -38,9 +48,9 @@ export default function CatalogWizard({ brands, shareEmail, initialBrand = "", i
   const [isCreating, setIsCreating] = useState(false);
   const detectedRequest = useRef(0);
   const [channels, setChannels] = useState<ChannelId[]>(initialBatch?.channels ?? []);
-  // A batch resumed at step 4 has passed step 2, so its saved options are the operator's answers.
-  const [mode, setMode] = useState<IdentifierMode>(initialStep === 4 ? initialBatch!.options.identifierMode : "filename");
-  const [precedence, setPrecedence] = useState<Precedence>(initialStep === 4 ? initialBatch!.options.precedence : "uploads_then_links");
+  const [resumed] = useState(() => resumedGrouping(initialBatch, initialStep));
+  const [mode, setMode] = useState<IdentifierMode>(resumed.mode);
+  const [precedence, setPrecedence] = useState<Precedence>(resumed.precedence);
   const [sheets, setSheets] = useState<SheetChoice[]>([]);
   const [detected, setDetected] = useState<WizardDetected | null>(null);
   const [preview, setPreview] = useState<WizardPreview | null>(null);
@@ -54,9 +64,11 @@ export default function CatalogWizard({ brands, shareEmail, initialBrand = "", i
   const [stalled, setStalled] = useState(!!initialBatch?.state.stalled);
   /** The polled batch state: its live count is what steps 2 and 3 show while collecting. */
   const [batchState, setBatchState] = useState<BatchState | null>(initialBatch?.state ?? null);
+  /** How many files the batch is collecting; 0 until they are listed, so no "0 of 0" is shown. */
+  const [collectTotal, setCollectTotal] = useState<number | null>(initialBatch?.counts.collectTotal ?? null);
   /** The name the batch already has, so a second Continue after a failed hand-off skips the PATCH. */
   const savedName = useRef<string | null>(initialBatch ? initialBatch.name.trim() : null);
-  const detectedInitialised = useRef(initialStep === 4);
+  const detectedInitialised = useRef(resumed.chosen);
   async function ensureBatch() {
     if (id) return id;
     if (!brandSlug) throw new Error("Choose a brand before adding files or links.");
@@ -78,6 +90,7 @@ export default function CatalogWizard({ brands, shareEmail, initialBrand = "", i
     setCollecting(!batch.counts.previewReady);
     setStalled(!!batch.state?.stalled);
     setBatchState(batch.state ?? null);
+    setCollectTotal(batch.counts.collectTotal ?? null);
     setDetected(value);
     if (batch.counts.previewReady && !detectedInitialised.current) {
       detectedInitialised.current = true;
@@ -146,9 +159,9 @@ export default function CatalogWizard({ brands, shareEmail, initialBrand = "", i
   const disabled = working || !!failReason || (step===1 && (!brandSlug || !hasInputs || uploadsBusy || linksBusy)) || (step===2 && (collecting || !detected || sheets.some((s)=>s.identifierColumn<0))) || (step===3 && (!channels.length || collecting)) || (step===4 && (!preview?.ready || !channels.length || !!preview.busy.length || !!preview.overwrite.sameProductPairs.length));
   return <div className="catalog-wizard"><h1>New batch</h1><ol className="steps" aria-label="Batch steps">{STEPS.map((title,i)=><li key={title} className={step===i+1?"on":step>i+1?"done":""} aria-current={step===i+1?"step":undefined}>{title}</li>)}</ol>
     <div hidden={step!==1}><WizardStep1 brands={brands} brandSlug={brandSlug} name={name} productType={productType} locked={!!id || isCreating} email={shareEmail} setBrand={(value)=>{if(!id && !creating.current)setBrand(value);}} setName={setName} setProductType={(value)=>{if(!id && !creating.current)setProductType(value);}} ensureBatch={ensureBatch} onUploadsBusy={setUploadsBusy} onLinksBusy={setLinksBusy} onAdded={onAdded}/></div>
-    {step===2 && id ? <>{detected?<WizardStep2 detected={detected} collecting={collecting} mode={mode} precedence={precedence} sheets={sheets} setMode={setMode} setPrecedence={setPrecedence} setSheets={setSheets} email={shareEmail} id={id} onError={setError} onAccessChecked={async()=>{await loadDetected(id);}}/>:<h2>Check what we found</h2>}{collecting?<p role="status">{wizardCollectingText(batchState,STEP2_COLLECTING_TEXT)}</p>:null}</>:null}
+    {step===2 && id ? <>{detected?<WizardStep2 detected={detected} collecting={collecting} mode={mode} precedence={precedence} sheets={sheets} setMode={setMode} setPrecedence={setPrecedence} setSheets={setSheets} email={shareEmail} id={id} onError={setError} onAccessChecked={async()=>{await loadDetected(id);}}/>:<h2>Check what we found</h2>}{collecting?<p role="status">{wizardCollectingText(batchState,collectTotal,STEP2_COLLECTING_TEXT)}</p>:null}</>:null}
     {(step===2 || step===3) && stalled && id ? <p role="alert">{COLLECT_STALLED_TEXT} <RetryCollectButton batchId={id} onDone={()=>setStalled(false)}/></p>:null}
-    {step===3?<><WizardStep3 channels={channels} onChange={setChannels}/>{collecting?<p role="status">{wizardCollectingText(batchState,STEP3_COLLECTING_TEXT)}</p>:null}</>:null}
+    {step===3?<><WizardStep3 channels={channels} onChange={setChannels}/>{collecting?<p role="status">{wizardCollectingText(batchState,collectTotal,STEP3_COLLECTING_TEXT)}</p>:null}</>:null}
     {step===4?<WizardStep4 preview={preview}/>:null}
     {error?<p role="alert">{error}</p>:null}
     {failReason?<p role="alert">{failReason} <a href={`/catalog/${id}`}>Open batch details</a></p>:null}

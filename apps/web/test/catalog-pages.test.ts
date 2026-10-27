@@ -342,8 +342,14 @@ it("the error page with a known batch shows the safe sentence, both links and th
  const html=renderToStaticMarkup(view);
  for(const text of [ERROR_HEADING,ERROR_BATCH_SAFE,ERROR_OPEN_BATCH,ERROR_ALL_BATCHES,ERROR_TRY_AGAIN])expect(html).toContain(text);
  expect(html).toContain(`href="/catalog/${id}">${ERROR_OPEN_BATCH}</a>`);expect(html).toContain(`href="/catalog">${ERROR_ALL_BATCHES}</a>`);
- const acts=(view.props as {children:ReactElement<{children:ReactElement<{onClick?:()=>void}>[]}>[]}).children[2]!;
- acts.props.children[2]!.props.onClick!();expect(reset).toHaveBeenCalledTimes(1);
+ // Find the button by its type wherever it sits in the tree, then press it.
+ const findButton=(node:unknown):ReactElement<{onClick?:()=>void}>|undefined=>{
+  if(Array.isArray(node))return node.map(findButton).find(Boolean);
+  if(!node||typeof node!=="object"||!("props" in node))return undefined;
+  const el=node as ReactElement<{children?:unknown;onClick?:()=>void}>;
+  return el.type==="button"?el:findButton(el.props.children);
+ };
+ findButton(view)!.props.onClick!();expect(reset).toHaveBeenCalledTimes(1);
  nav.pathname="/catalog/new";nav.search=`?batch=${id}`;
  const page=renderToStaticMarkup(createElement(CatalogErrorPage,{error:new Error("boom"),reset}));
  expect(page).toContain(`href="/catalog/new?batch=${id}">${ERROR_OPEN_BATCH}</a>`);expect(page).toContain(ERROR_BATCH_SAFE);
@@ -386,7 +392,7 @@ it("GET /catalog/new?batch= of a missing batch shows the 404 sentence; a viewer 
   expect(html).toContain(BATCH_NOT_FOUND);expect(html).not.toContain("catalog-wizard");
  }
  vi.stubEnv("DEV_USER_EMAIL","viewer@opptra.com");
- await expect(newPage({batch:batchId})).rejects.toThrow();
+ await expect(newPage({batch:batchId})).rejects.toMatchObject({name:"ForbiddenError",status:403});
 });
 // Spec 14 section 6, the removed sentences of release A: absent from the web app and core sources.
 const ROOT=path.resolve(__dirname,"../../..");

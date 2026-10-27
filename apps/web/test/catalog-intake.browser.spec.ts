@@ -69,6 +69,8 @@ test.describe("5. leave and return, release A form (F4, F6)", () => {
   test("the URL carries ?batch=, the count moves, reload keeps step and count, Continue setting up reopens the wizard", async ({ page }) => {
     // The attempt 3 stand-in is the csv the web tier writes for a Google Sheet. Google is disabled in
     // the harness, so the csv is added as a file; collection then runs the same sheet path in runIngest.
+    // Pasting the csv text is not possible in release A: the paste box reads one link per line (or
+    // identifier<TAB>link), so comma-separated rows yield no links; pasted grids arrive with release B (F2).
     const name = `Intake 5 large sheet ${Date.now()}`;
     const id = await uploadOnStep1(page, name, LARGE_SHEET);
     await page.getByRole("button", { name: "Continue" }).click();
@@ -98,7 +100,8 @@ test.describe("5. leave and return, release A form (F4, F6)", () => {
     await expect(page).toHaveURL(new RegExp(`/catalog/${id}$`));
     await page.getByRole("link", { name: "Continue setting up" }).click();
     await expect(page).toHaveURL(new RegExp(`/catalog/new\\?(.*&)?batch=${id}`));
-    await expect(currentStep(page)).not.toHaveText("Brand and files");
+    // No marketplaces are chosen yet, so the batch reopens at step 2 whether or not collection has finished.
+    await expect(currentStep(page)).toHaveText("Check what we found");
   });
 });
 

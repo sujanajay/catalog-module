@@ -77,6 +77,7 @@ describe("wizardStepFor: the step an existing batch opens at",()=>{
     ["inputs added, not handed to collecting yet",{status:"draft",channels:[],counts:EMPTY_BATCH_COUNTS},uploaded,1],
     ["collecting",{status:"ingesting",channels:[],counts:{...EMPTY_BATCH_COUNTS,collected:40,collectTotal:287}},uploaded,2],
     ["placing",{status:"ingesting",channels:[],counts:{...EMPTY_BATCH_COUNTS,collected:287,collectTotal:287}},[{status:"collected"}],2],
+    ["pending upload wins over collecting",{status:"ingesting",channels:[],counts:{...EMPTY_BATCH_COUNTS,collected:40,collectTotal:287}},[{status:"collected"},{status:"pending"}],1],
     ["waiting for a column",{status:"draft",channels:[],counts:ready},[{status:"collected"}],2],
     ["ready without channels",{status:"draft",channels:[],counts:ready},[{status:"collected"}],2],
     ["ready with channels",{status:"draft",channels:["noon","styli"],counts:ready},[{status:"collected"}],4],

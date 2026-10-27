@@ -1,6 +1,5 @@
 import { ERROR_ALL_BATCHES, ERROR_BATCH_SAFE, ERROR_HEADING, ERROR_OPEN_BATCH, ERROR_TRY_AGAIN } from "../../lib/catalog/copy";
-
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+import { isUuid } from "../../lib/catalog/uuid";
 
 /**
  * The batch a crashed /catalog page was about, and where "Open this batch" leads (spec 14a F1). The
@@ -8,10 +7,10 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
  * wizard's link reopens the wizard at its step; the batch page's link reloads the batch page.
  */
 export function batchLinkFor(pathname: string, batchParam: string | null): string | null {
-  const fromQuery = batchParam && UUID.test(batchParam) ? batchParam : null;
+  const fromQuery = batchParam && isUuid(batchParam) ? batchParam : null;
   if (fromQuery) return pathname.replace(/\/$/, "") === "/catalog/new" ? `/catalog/new?batch=${fromQuery}` : `/catalog/${fromQuery}`;
   const fromPath = /^\/catalog\/([^/?#]+)\/?$/.exec(pathname)?.[1];
-  return fromPath && UUID.test(fromPath) ? `/catalog/${fromPath}` : null;
+  return fromPath && isUuid(fromPath) ?`/catalog/${fromPath}` : null;
 }
 
 /** The error page body: plain links (a full load) so a broken client state is left behind. */

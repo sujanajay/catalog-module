@@ -1,6 +1,7 @@
 // Pure copy helpers shared by server pages and client components (no server imports here).
 import { RUPEES_NOT_CONFIGURED } from "@catalog/core/catalog/cost";
 import { styliSkipText } from "@catalog/core/catalog/pipeline/status";
+import type { BatchStatus } from "@catalog/core/catalog/types";
 
 /** The operator's sentence when the ingest hand-off to the worker queue failed for a transient reason. */
 export const HAND_OFF_RETRY = "The upload could not be handed to processing. Please try again.";
@@ -47,7 +48,6 @@ export function readyText(images: number, keptPhotos: number, styliSkipped = 0):
   return `${live}. ${count(keptPhotos)} ${plural(keptPhotos, "photo was", "photos were")} kept as is after a decision; everything else passed every check. ${tail}`;
 }
 
-// ---- Spec 14a (F1 error page, F9 draft and failed screens, F4 part 1 way back); parent 14 section 6 rows "A". ----
 /** The error page under /catalog (F1). The batch sentence and link show only when a batch id is known. */
 export const ERROR_HEADING = "Something went wrong on our side.";
 export const ERROR_BATCH_SAFE = "Your batch is safe; nothing was lost.";
@@ -78,16 +78,15 @@ export function shortReason(reason: string): string {
   return reason.length <= LIST_REASON_CHARS ? reason : `${reason.slice(0, LIST_REASON_CHARS).trimEnd()}...`;
 }
 /** A batch that never reached Start: draft, collecting, or failed before it started. */
-export function hasNotStarted(batch: { status: string; startedAt: Date | string | null }): boolean {
+export function hasNotStarted(batch: { status: BatchStatus; startedAt: Date | string | null }): boolean {
   return batch.startedAt === null && ["draft", "ingesting", "failed"].includes(batch.status);
 }
-/** A batch the operator can still set up in the wizard: draft or collecting, never started. */
-export function canContinueSettingUp(batch: { status: string; startedAt: Date | string | null }): boolean {
-  return batch.startedAt === null && ["draft", "ingesting"].includes(batch.status);
+/** A batch the operator can still set up in the wizard: not started and not failed (no reopen until release C). */
+export function canContinueSettingUp(batch: { status: BatchStatus; startedAt: Date | string | null }): boolean {
+  return hasNotStarted(batch) && batch.status !== "failed";
 }
-// ---- End of spec 14a copy. ----
 
-export type BatchSource ="Drive folder" | "Google Sheet" | "links" | "zip" | "upload";
+export type BatchSource = "Drive folder" | "Google Sheet" | "links" | "zip" | "upload";
 
 /**
  * Where a batch's files came from, for the collecting banner ("files copied from your <source>", spec 06)
@@ -101,7 +100,6 @@ export function batchSource(kinds: readonly string[]): BatchSource {
   return "upload";
 }
 
-// ---- Spec 14a wizard copy (F1 sheet reading, F6 release A polled count, F4 part 1 leaving line). ----
 /** Wizard step 2: a sheet uploaded but not read yet. */
 export const SHEET_READING_TEXT = "Reading your sheet. The columns will appear here when it has been read.";
 /** Release A's leaving line, true while nothing starts by itself (steps 2 to 4 while collecting, batch page overview). */
@@ -111,14 +109,13 @@ export const STEP2_COLLECTING_TEXT = "Collecting files. The grouping will appear
 export const STEP3_COLLECTING_TEXT = "Collecting files. Continue when the grouping is ready.";
 /**
  * Wizard steps 2 and 3 while collecting: the polled batch state's live count ("40 of 287 files copied from
- * your links"), or the step's fixed sentence before a count exists or once stalled (the stall alert says that),
- * then the leaving line. Never a product count, so a batch still collecting never reads as "0 of 0 products".
+ * your links"), or the step's fixed sentence before a count exists (no files listed yet, so never "0 of 0")
+ * or once stalled (the stall alert says that), then the leaving line. Never a product count.
  */
-export function wizardCollectingText(state: { state: string; text: string; stalled?: boolean } | null | undefined, fallback: string): string {
-  const live = state && state.state === "collecting" && !state.stalled ? `${state.text.replace(/\.$/, "")}.` : fallback;
+export function wizardCollectingText(state: { state: string; text: string; stalled?: boolean } | null | undefined, collectTotal: number | null | undefined, fallback: string): string {
+  const live = state && state.state === "collecting" && !state.stalled && (collectTotal ?? 0) > 0 ? `${state.text.replace(/\.$/, "")}.` : fallback;
   return `${live} ${LEAVING_LINE}`;
 }
-// ---- End of spec 14a wizard copy. ----
 
 /** The Overview line while files are collected, worded for the batch's source. */
 export function collectingText(source: BatchSource): string {
