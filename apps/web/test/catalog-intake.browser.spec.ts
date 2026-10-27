@@ -43,7 +43,7 @@ async function uploadOnStep1(page: Page, name: string, file: string): Promise<st
   const created = page.waitForResponse((r) => r.url().endsWith("/api/catalog/batches") && r.request().method() === "POST");
   await page.locator('input[aria-label="Choose files"]').setInputFiles(file);
   const id = ((await (await created).json()) as { id: string }).id;
-  await expect(page.getByRole("listitem").filter({ hasText: path.basename(file) }).filter({ hasText: /Uploaded$/ })).toBeVisible({ timeout: 30_000 });
+  await expect(page.getByRole("listitem").filter({ hasText: path.basename(file) }).filter({ hasText: /Uploaded( Remove)?$/ })).toBeVisible({ timeout: 30_000 });
   return id;
 }
 
