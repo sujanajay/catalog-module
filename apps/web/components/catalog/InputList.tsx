@@ -67,7 +67,7 @@ export function InputListView({ rows }: { rows: InputRow[] }) {
  * Lists what the batch holds from the server (`GET batch`), refreshed when `version` changes, with Remove
  * (no confirmation: a removed input can be added again). Reports how many inputs remain (`onCount`).
  */
-export default function InputList({ batchId, version, local, onCount, onRemoved }: { batchId: string | null; version: number; local: LocalUpload[]; onCount(count: number): void; onRemoved(): void }) {
+export default function InputList({ batchId, version, local, onCount, onRemoved }: { batchId: string | null; version: number; local: LocalUpload[]; onCount(count: number): void; onRemoved(input: ServerInput): void }) {
   const [server, setServer] = useState<ServerInput[]>([]);
   const [removedHere, setRemovedHere] = useState<ReadonlySet<string>>(new Set());
   const [error, setError] = useState<UploadFailure | null>(null);
@@ -93,7 +93,7 @@ export default function InputList({ batchId, version, local, onCount, onRemoved 
     try {
       await wizardApi(batchUrl(batchId, `/${LINK_KINDS.includes(input.kind) ? "links" : "uploads"}/${input.id}`), "DELETE");
       setRemovedHere((old) => new Set([...old, input.id]));
-      onRemoved();
+      onRemoved(input);
     } catch (err) { setError(uploadFailureOf(err)); }
     setRefresh((n) => n + 1);
   }

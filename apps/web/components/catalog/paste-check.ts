@@ -48,7 +48,8 @@ export function createPasteChecker(opts: PasteCheckerOptions) {
       try {
         if (turn !== latest) return; // replaced by a later edit before it was sent
         const results = await opts.save(value);
-        savedText = value;
+        // A later edit or a forget() decides what counts as saved; an answer it replaced does not.
+        if (turn === latest) savedText = value;
         opts.onSaved();
         if (turn === latest) show({ checking: false, results });
       } catch (err) {
@@ -59,7 +60,19 @@ export function createPasteChecker(opts: PasteCheckerOptions) {
     });
   }
 
-  return { check, settled: () => chain, view: () => view };
+  /**
+   * The paste was removed from the batch (the input list's Remove): nothing counts as saved any more,
+   * so the same text pasted again is sent again, and the old readback is cleared. A check still
+   * waiting its turn is dropped; one already sent finishes but its answer is not shown.
+   */
+  function forget(): void {
+    latest++;
+    savedText = "";
+    queuedText = "";
+    show({ checking: false, results: [], error: "" });
+  }
+
+  return { check, forget, settled: () => chain, view: () => view };
 }
 
 const GOOGLE = /https?:\/\/(docs\.google\.com\/spreadsheets|drive\.google\.com\/.*folders)/i;

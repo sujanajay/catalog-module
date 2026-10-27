@@ -1,5 +1,5 @@
 "use client";
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { batchUrl, wizardApi } from "./wizard-client";
 import ShareBox from "./ShareBox";
 import { createPasteChecker, EMPTY_PASTE_VIEW, pasteEntries, type PasteResult, type PasteView } from "./paste-check";
@@ -23,7 +23,11 @@ export function PasteStatus({ view }: { view: PasteView }) {
   </>;
 }
 
-export default function PasteBox({ email, ensureBatch, onBusy, onAdded }: { email: string; ensureBatch(): Promise<string>; onBusy(busy: boolean): void; onAdded(): void }) {
+/**
+ * `removed` counts the pasted inputs removed through the input list: each change clears the box and its
+ * readback and forgets what was saved, so pasting the same text again adds it again (spec 14b F3).
+ */
+export default function PasteBox({ email, ensureBatch, onBusy, onAdded, removed = 0 }: { email: string; ensureBatch(): Promise<string>; onBusy(busy: boolean): void; onAdded(): void; removed?: number }) {
   const [text, setText] = useState("");
   const [view, setView] = useState<PasteView>(EMPTY_PASTE_VIEW);
   // The latest callbacks, so the checker made once on the first render always calls the current ones.
@@ -42,6 +46,11 @@ export default function PasteBox({ email, ensureBatch, onBusy, onAdded }: { emai
     onSaved: () => props.current.onAdded(),
   });
   const check = (value: string) => checker.current!.check(value);
+  useEffect(() => {
+    if (!removed) return;
+    setText("");
+    checker.current!.forget();
+  }, [removed]);
   return <div><label htmlFor="source-links">Or paste a link</label><textarea id="source-links" rows={3} value={text} placeholder="A Google Sheet link, a Google Drive folder link, or image links one per line" onChange={(e) => setText(e.target.value)} onPaste={(e) => { const field = e.currentTarget; const value = text.slice(0, field.selectionStart) + e.clipboardData.getData("text") + text.slice(field.selectionEnd); setTimeout(() => check(value), 0); }} onBlur={() => check(text)} />
     {/https?:\/\/(docs\.google\.com\/spreadsheets|drive\.google\.com)/i.test(text) ? <ShareBox email={email}/> : null}
     <PasteStatus view={view} />

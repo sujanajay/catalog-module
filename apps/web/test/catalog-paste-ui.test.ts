@@ -98,6 +98,36 @@ describe("paste box waiting state (spec 14b F2)", () => {
   });
 });
 
+describe("paste removed from the input list (spec 14b F3)", () => {
+  it("Remove followed by the same paste sends it again; without Remove the same text is not sent twice", async () => {
+    const h = harness();
+    const text = "https://example.com/test_brand/A_1.jpg";
+    h.checker.check(text);
+    await h.tick(); h.answer(text); await h.checker.settled();
+    h.checker.check(text);
+    expect(h.sent).toEqual([text]);
+    h.checker.forget();
+    expect(h.checker.view()).toEqual(EMPTY_PASTE_VIEW);
+    h.checker.check(text);
+    await h.tick(); h.answer(text); await h.checker.settled();
+    expect(h.sent).toEqual([text, text]);
+    expect(h.checker.view().results).toHaveLength(1);
+  });
+
+  it("a check already sent when the paste is removed does not count as saved and its answer is not shown", async () => {
+    const h = harness();
+    const text = "https://example.com/test_brand/B_1.jpg";
+    h.checker.check(text);
+    await h.tick();
+    h.checker.forget();
+    h.answer(text); await h.checker.settled();
+    expect(h.checker.view()).toEqual(EMPTY_PASTE_VIEW);
+    h.checker.check(text);
+    await h.tick();
+    expect(h.sent).toEqual([text, text]);
+  });
+});
+
 describe("pasteEntries", () => {
   it("sends each Google link alone and the image links as pasted, keeping rows and empty cells", () => {
     const sheet = "https://docs.google.com/spreadsheets/d/abc/edit";
