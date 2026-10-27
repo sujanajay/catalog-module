@@ -22,6 +22,29 @@ import { GET as brandSearch } from "../app/api/catalog/brands/[slug]/products/ro
 import { GET as attentionGet } from "../app/api/catalog/batches/[id]/attention/route";
 import { GET as batchDownload } from "../app/api/catalog/batches/[id]/export/route";
 import { GET as batchGet } from "../app/api/catalog/batches/[id]/route";
+import { readdirSync, readFileSync, statSync } from "node:fs";
+import path from "node:path";
+import { createElement, type ReactElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
+import BatchPage from "../app/catalog/[id]/page";
+import CatalogPage from "../app/catalog/page";
+import BrandPage from "../app/catalog/brands/[slug]/page";
+import CatalogErrorPage from "../app/catalog/error";
+import CatalogError, { batchLinkFor } from "../components/catalog/CatalogError";
+import ProductSearch from "../components/catalog/ProductSearch";
+import { ToastProvider } from "../components/Toast";
+import { ViewerPreviewProvider } from "../components/ViewerPreview";
+import { brandEmptyText, CONTINUE_SETTING_UP, DRAFT_READY_TEXT, ERROR_ALL_BATCHES, ERROR_BATCH_SAFE, ERROR_HEADING, ERROR_OPEN_BATCH, ERROR_TRY_AGAIN, HOW_THIS_WORKS_DRAFT, notStartedText, shortReason } from "../lib/catalog/copy";
+
+// Pages render statically here: the App Router hooks are stubbed, the pages and their queries are real.
+const nav = vi.hoisted(() => ({ pathname: "/catalog", search: "" }));
+vi.mock("next/navigation", async (actual) => ({
+ ...(await actual<typeof import("next/navigation")>()),
+ useRouter: () => ({ refresh: () => undefined, replace: () => undefined, push: () => undefined }),
+ usePathname: () => nav.pathname,
+ useSearchParams: () => new URLSearchParams(nav.search),
+ notFound: () => { throw new Error("not found"); },
+}));
 
 let db:Db;let close:()=>Promise<void>;let batchId:string;let productId:string;let sourceId:string;
 const actor="admin@opptra.com";
@@ -233,4 +256,110 @@ it("keeps model ids out of the report export, the links sheets, the brand downlo
  expect(JSON.stringify(details.recheckFailures)).not.toMatch(MODEL_NAMES);
  const batchApi=await batchGet(new Request(`http://localhost/api/catalog/batches/${batchId}`),ctx);expect(batchApi.status).toBe(200);expect(await batchApi.text()).not.toMatch(MODEL_NAMES);
  const product=await getProduct("uspa","ABC-123",false,db);expect(JSON.stringify(product)).not.toMatch(MODEL_NAMES);
+});
+
+// ---- Spec 14a F9 and F1: draft and failed screens tell the truth; the error page has a way back. ----
+const render=async(page:Promise<ReactElement>|ReactElement)=>renderToStaticMarkup(createElement(ViewerPreviewProvider,null,createElement(ToastProvider,null,await page)));
+const batchPage=(query:Record<string,string>={})=>render(BatchPage({params:Promise.resolve({id:batchId}),searchParams:Promise.resolve(query)}));
+const panel=(html:string,id:string)=>new RegExp(`<section[^>]*id="panel-${id}"[^>]*>([\\s\\S]*?)</section>`).exec(html)?.[1]??"";
+type BatchRow=typeof catalogBatches.$inferSelect;
+async function setBatch(values:Partial<Omit<BatchRow,"counts">>&{counts?:Partial<BatchRow["counts"]>}){
+ const [row]=await db.select().from(catalogBatches).where(eq(catalogBatches.id,batchId));
+ await db.update(catalogBatches).set({...values,counts:{...row!.counts,...values.counts}}).where(eq(catalogBatches.id,batchId));
+}
+it("a ready draft says created, carries Continue setting up and says its tabs have nothing made yet",async()=>{
+ await setBatch({channels:[],counts:{previewReady:true,products:6,sources:27}});
+ const html=await batchPage();
+ expect(html).toMatch(/created \d{4}-\d\d-\d\d \d\d:\d\dZ by admin@opptra\.com/);
+ expect(html).not.toMatch(/started \d{4}-/);expect(html).not.toMatch(/·\s*(<!-- -->)?\s*·/);
+ expect(html).toContain(DRAFT_READY_TEXT);
+ expect(html).toContain(`<a class="btn primary" href="/catalog/new?batch=${batchId}">${CONTINUE_SETTING_UP}</a>`);
+ expect(html).toContain(HOW_THIS_WORKS_DRAFT);
+ const line=notStartedText(27,6);expect(line).toBe("This batch has not started. 27 photos found for 6 products; nothing has been made yet.");
+ expect(panel(html,"sheet")).toBe(`<p>${line}</p>`);
+ expect(html).not.toContain("Add SKU ids");
+ const compare=await batchPage({tab:"compare"});
+ expect(panel(compare,"compare")).toBe(`<p>${line}</p>`);expect(compare).not.toContain("Loading the comparison.");
+});
+it("a draft still collecting keeps its state text, the button and the draft paragraph; a viewer gets no button",async()=>{
+ await setBatch({status:"ingesting",updatedAt:new Date(),counts:{collected:3,collectTotal:10}});
+ let html=await batchPage();
+ expect(html).toContain("3 of 10 files copied");expect(html).not.toContain(DRAFT_READY_TEXT);
+ expect(html).toContain(`href="/catalog/new?batch=${batchId}">${CONTINUE_SETTING_UP}</a>`);expect(html).toContain(HOW_THIS_WORKS_DRAFT);
+ expect(html).toMatch(/ · Noon · (<!-- -->)?created /);
+ vi.stubEnv("DEV_USER_EMAIL","viewer@opptra.com");
+ html=await batchPage();expect(html).not.toContain(CONTINUE_SETTING_UP);
+});
+it("a draft whose grouping is not ready keeps the existing banner text",async()=>{
+ const html=await batchPage();
+ expect(html).toContain("Check what we found and start processing.");expect(html).not.toContain(DRAFT_READY_TEXT);expect(html).toContain(CONTINUE_SETTING_UP);
+});
+it("a batch that could not start says created, with the not-started tabs and without Continue setting up",async()=>{
+ await setBatch({status:"failed",counts:{failReason:"No photos could be downloaded.",products:0,sources:0}});
+ const html=await batchPage();
+ expect(html).toMatch(/(<!-- -->)?created \d{4}-/);expect(html).not.toMatch(/started \d{4}-/);
+ expect(html).not.toContain(CONTINUE_SETTING_UP);expect(html).not.toContain(HOW_THIS_WORKS_DRAFT);
+ expect(panel(html,"sheet")).toBe(`<p>${notStartedText(0,0)}</p>`);
+ expect(html).toContain("Start again");
+});
+it("a started batch says started, keeps its sheet and hides Add SKU ids only with 0 products",async()=>{
+ vi.stubEnv("DEV_USER_EMAIL","operator@opptra.com");
+ await setBatch({status:"rendering",startedAt:new Date("2026-10-27T09:00:00Z"),counts:{products:0}});
+ let html=await batchPage();
+ expect(html).toContain("started 2026-10-27 09:00Z by admin@opptra.com");expect(html).not.toMatch(/created \d{4}-/);
+ expect(html).not.toContain(CONTINUE_SETTING_UP);expect(html).not.toContain("This batch has not started.");
+ expect(html).not.toContain("Add SKU ids");
+ await setBatch({counts:{products:1}});
+ html=await batchPage();expect(html).toContain("Add SKU ids");
+});
+it("the batch list shows a failed batch's reason under its name, cut at 120 characters with the full reason on hover",async()=>{
+ const reason=`No photos could be downloaded from the 27 links you pasted. ${"Check that the links open in a browser. ".repeat(4)}`.trim();
+ await setBatch({status:"failed",counts:{failReason:reason}});
+ const html=await render(CatalogPage());
+ const short=shortReason(reason);expect(reason.length).toBeGreaterThan(120);expect(short.length).toBeLessThanOrEqual(123);expect(short.startsWith(reason.slice(0,100))).toBe(true);
+ expect(html).toContain(`<div class="help" title="${reason}">${short}</div>`);
+ // On a phone the collapsible columns carry classes; State has none, so it stays on screen.
+ expect(html).toContain('<th class="col-channels">Channels</th>');expect(html).toContain("<th>State</th>");
+ expect(shortReason("Short reason.")).toBe("Short reason.");
+});
+it("the brand page names the query only when there is one",async()=>{
+ await db.insert(brandMaster).values({slug:"empty-brand",name:"Empty Brand",line:"softline",source:"manual"});
+ expect(await render(BrandPage({params:Promise.resolve({slug:"empty-brand"})}))).toContain("No products of Empty Brand yet.");
+ expect(brandEmptyText("USPA","  ")).toBe("No products of USPA yet.");
+ expect(brandEmptyText("USPA","abc")).toBe("No products of USPA match abc.");
+ expect(await render(createElement(ProductSearch,{slug:"uspa",brand:"USPA",initial:[],canAct:false}))).toContain("No products of USPA yet.");
+});
+it("the error page with a known batch shows the safe sentence, both links and the button, which calls reset",()=>{
+ const id="0b6f3a52-6f0e-4c1e-9d1a-2f6f1b1c9e01";
+ expect(batchLinkFor(`/catalog/${id}`,null)).toBe(`/catalog/${id}`);
+ expect(batchLinkFor("/catalog/new",id)).toBe(`/catalog/new?batch=${id}`);
+ for(const [p,b] of [["/catalog/new",null],["/catalog/ops",null],["/catalog/new","not-an-id"],["/catalog/brands/uspa",null]] as const)expect(batchLinkFor(p,b)).toBeNull();
+ const reset=vi.fn();
+ const view=CatalogError({batchHref:`/catalog/${id}`,reset});
+ const html=renderToStaticMarkup(view);
+ for(const text of [ERROR_HEADING,ERROR_BATCH_SAFE,ERROR_OPEN_BATCH,ERROR_ALL_BATCHES,ERROR_TRY_AGAIN])expect(html).toContain(text);
+ expect(html).toContain(`href="/catalog/${id}">${ERROR_OPEN_BATCH}</a>`);expect(html).toContain(`href="/catalog">${ERROR_ALL_BATCHES}</a>`);
+ const acts=(view.props as {children:ReactElement<{children:ReactElement<{onClick?:()=>void}>[]}>[]}).children[2]!;
+ acts.props.children[2]!.props.onClick!();expect(reset).toHaveBeenCalledTimes(1);
+ nav.pathname="/catalog/new";nav.search=`?batch=${id}`;
+ const page=renderToStaticMarkup(createElement(CatalogErrorPage,{error:new Error("boom"),reset}));
+ expect(page).toContain(`href="/catalog/new?batch=${id}">${ERROR_OPEN_BATCH}</a>`);expect(page).toContain(ERROR_BATCH_SAFE);
+ nav.pathname="/catalog";nav.search="";
+});
+it("the error page without a batch shows the heading, All batches and the button only",()=>{
+ nav.pathname="/catalog/ops";
+ const html=renderToStaticMarkup(createElement(CatalogErrorPage,{error:new Error("boom"),reset:()=>undefined}));
+ expect(html).toContain(ERROR_HEADING);expect(html).toContain(ERROR_ALL_BATCHES);expect(html).toContain(ERROR_TRY_AGAIN);
+ expect(html).not.toContain(ERROR_BATCH_SAFE);expect(html).not.toContain(ERROR_OPEN_BATCH);
+ nav.pathname="/catalog";
+});
+// Spec 14 section 6, the removed sentences of release A: absent from the web app and core sources.
+const ROOT=path.resolve(__dirname,"../../..");
+function sources(dir:string):string[]{return readdirSync(dir).flatMap(name=>{const full=path.join(dir,name);if(statSync(full).isDirectory())return ["node_modules",".next"].includes(name)?[]:sources(full);return /\.tsx?$/.test(name)&&!/\.(test|spec)\.tsx?$/.test(name)?[full]:[];});}
+it("the removed sentences of release A are gone from apps/web and packages/core",()=>{
+ const files=[...["apps/web/app","apps/web/components","apps/web/lib","packages/core/src"].flatMap(d=>sources(path.join(ROOT,d)))];
+ expect(files.length).toBeGreaterThan(50);
+ // "started <time>" on an unstarted batch came from falling back to createdAt when startedAt was null.
+ const hits=files.filter(f=>{const text=readFileSync(f,"utf8");return text.includes("Processing starts by itself")||/started \$\{[^}]*startedAt\s*\?\?/.test(text);}).map(f=>path.relative(ROOT,f));
+ expect(hits).toEqual([]);
 });
