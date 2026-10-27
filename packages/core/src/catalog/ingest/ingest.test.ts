@@ -586,7 +586,7 @@ describe("links that could not be downloaded (spec 14b F5 part 1)", () => {
     expect(batch.counts).toMatchObject({ linkFailures: 27, unsupportedFiles: 0, sources: 0 });
     expect(batch.counts.failReason).toBe(
       `No photos could be downloaded from the 27 links you pasted. 27 answered 'not found' (404), for example ${G}/BH-4610-NE-NERO_1.JPG (row 1, column 1). ` +
-      "Check that the links open in a browser, then make a new batch and paste the corrected links.",
+      "Check that the links open in a browser, then press Fix and continue and paste the corrected links.",
     );
   });
 

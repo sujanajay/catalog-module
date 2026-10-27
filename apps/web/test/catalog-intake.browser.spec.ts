@@ -21,7 +21,7 @@ const CHECKING = "Checking your links...";
 const GRID_READBACK = "4 to 5 links per row. This paste has no product code column, so products will be named from the photo file names, for example BH-4610-NE-NERO. To name them yourself, copy the product code column in as the first column. We opened the first 3 links: all fine.";
 const GRID_IGNORED = "3 empty or non-link cells were ignored.";
 const VARIANTS_SAME_NAME = "Rows 6 and 7 would get the same name, TB-F. Check those rows before you continue.";
-const NO_PHOTOS_404 = "No photos could be downloaded from the 27 links you pasted. 27 answered 'not found' (404), for example https://missing.example.com/test_brand/BH-4610-NE-NERO_1.JPG (row 1, column 1). Check that the links open in a browser, then make a new batch and paste the corrected links.";
+const NO_PHOTOS_404 = "No photos could be downloaded from the 27 links you pasted. 27 answered 'not found' (404), for example https://missing.example.com/test_brand/BH-4610-NE-NERO_1.JPG (row 1, column 1). Check that the links open in a browser, then press Fix and continue and paste the corrected links.";
 const RETRY_LINKS = "Try the failed links again";
 
 const READING = "Reading your sheet. The columns will appear here when it has been read.";
