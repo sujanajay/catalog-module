@@ -29,6 +29,13 @@ export interface SafeFetchOptions {
   maxRedirects?: number;
   /** Resolves a host name to its addresses. Defaults to the system resolver; tests inject a fake. */
   lookup?: (hostname: string) => Promise<string[]>;
+  /** Request headers sent on every hop (the paste readback sends `Range: bytes=0-1023`). */
+  headers?: Record<string, string>;
+  /**
+   * Read at most this many bytes, cancel the rest of the body, and return any final status instead
+   * of throwing on a non-2xx answer (the paste readback's peek). An unsafe link still throws.
+   */
+  truncateAt?: number;
 }
 
 export const DEFAULT_MAX_BYTES = 40 * 1024 * 1024;
@@ -170,6 +177,23 @@ function megabytes(bytes: number): string {
   return `${Math.round(bytes / (1024 * 1024))} MB`;
 }
 
+/** The first `limit` bytes of the body; the rest is cancelled so the connection is released. */
+async function readHead(res: Response, limit: number): Promise<Buffer> {
+  if (!res.body) return Buffer.alloc(0);
+  const reader = res.body.getReader();
+  const chunks: Buffer[] = [];
+  let total = 0;
+  while (total < limit) {
+    const { done, value } = await reader.read();
+    if (done) return Buffer.concat(chunks, total);
+    const take = Math.min(value.byteLength, limit - total);
+    chunks.push(Buffer.from(value.subarray(0, take)));
+    total += take;
+  }
+  await reader.cancel().catch(() => undefined);
+  return Buffer.concat(chunks, total);
+}
+
 async function readCapped(res: Response, maxBytes: number, url: string): Promise<Buffer> {
   const tooLarge = () => new Error(`The file at ${shown(url)} is larger than ${megabytes(maxBytes)}.`);
   const declared = Number(res.headers.get("content-length"));
@@ -197,7 +221,8 @@ async function readCapped(res: Response, maxBytes: number, url: string): Promise
 /**
  * GET an https URL safely: every hop (the first URL and each redirect) passes assertSafeUrl and a
  * DNS check, redirects are followed by hand up to `maxRedirects`, and the body is streamed and
- * stopped once it exceeds `maxBytes`. A non-2xx final answer throws a plain error.
+ * stopped once it exceeds `maxBytes`. A non-2xx final answer throws a plain error. With
+ * `truncateAt`, only the first bytes are read and any final status is returned (see the option).
  */
 export async function safeFetch(
   url: string,
@@ -215,7 +240,7 @@ export async function safeFetch(
     await assertPublicHost(target, lookup);
     let res: Response;
     try {
-      res = await f(target.href, { method: "GET", redirect: "manual", signal: AbortSignal.timeout(timeoutMs) });
+      res = await f(target.href, { method: "GET", redirect: "manual", signal: AbortSignal.timeout(timeoutMs), ...(opts.headers ? { headers: { ...opts.headers } } : {}) });
     } catch (err) {
       const cause = (err as { cause?: unknown } | null)?.cause;
       if (cause instanceof UnsafeUrlError) throw cause;
@@ -234,12 +259,16 @@ export async function safeFetch(
       current = new URL(location, target).href;
       continue;
     }
+    const mimeOf = () => (res.headers.get("content-type") ?? "").split(";")[0]!.trim().toLowerCase() || "application/octet-stream";
+    if (opts.truncateAt !== undefined) {
+      const buf = await readHead(res, Math.max(0, opts.truncateAt));
+      return { buf, mime: mimeOf(), finalUrl: target.href, status: res.status };
+    }
     if (!res.ok) {
       await res.body?.cancel().catch(() => undefined);
       throw new Error(`Could not download ${shown(target)}: the server answered ${res.status}.`);
     }
     const buf = await readCapped(res, maxBytes, target.href);
-    const mime = (res.headers.get("content-type") ?? "").split(";")[0]!.trim().toLowerCase() || "application/octet-stream";
-    return { buf, mime, finalUrl: target.href, status: res.status };
+    return { buf, mime: mimeOf(), finalUrl: target.href, status: res.status };
   }
 }

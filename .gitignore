@@ -37,3 +37,4 @@ test-results/
 # build and test output (spec 02)
 smoke-output/
 next-env.d.ts
+.claude/agent-memory/

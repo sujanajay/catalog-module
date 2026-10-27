@@ -10,12 +10,14 @@
 //   our bucket are never fetched again.
 // - `<prefix>/derived/_ingest/<uploadId>/<sha256>.<ext>`: the bytes of zip entries and fetched links
 //   (uploaded files already sit under uploads/ and are read from there).
+// - `<prefix>/derived/_ingest/place-state.json`: the shot list groupBatch planned, for the placing
+//   deliveries (spec 14d F7 part 2).
 // - `<prefix>/derived/_ingest/preview-state.json`: the grouping the batch-wide step decided, for
 //   buildPreview.
 // Version rows point at `rawPath(prefix, path_key, n, ext)`, written by the batch-wide step.
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type { Readable } from "node:stream";
-import { and, count, eq, inArray, sql } from "drizzle-orm";
+import { and, count, eq, inArray, ne, sql } from "drizzle-orm";
 import type { Db } from "../../db/client";
 import {
   catalogBatches,
@@ -29,17 +31,22 @@ import {
 import { getBucketName, isRetryableStorageError, toGsUri } from "../../storage";
 import type { enqueueTask } from "../../tasks";
 import { log } from "../../log";
+import { mergeCounts, placingClaim, placingLeaseFree, placingLeaseHeld, placingLeaseResumable, placingToken, progressCounts, RATE_SAMPLE_GAP_MS, type DoneKey } from "../counts";
 import { batchPrefix, normalizeKey, rawPath, sanitizeSegment } from "../naming";
 import { findOrCreateProduct } from "../products";
 import { resolveSkus, type ResolveResult } from "../sku-mapping";
-import type { BatchCounts, BatchOptions, ChangeKind, ChannelId, LinkStatus, OutputFlag, UploadKind } from "../types";
+import type { BatchCounts, BatchOptions, ChangeKind, ChannelId, IntakePhase, LinkStatus, OutputFlag, PlacingClaim, UploadKind } from "../types";
 import { driveFolderAdapter } from "./drive-folder";
 import { googleSheetAdapter, sheetCopyUri } from "./google-sheet";
+import { hashedTaskId, INGEST_ROUTE } from "./hand-off";
 import {
   baseName, byText, distinct, fmt, groupItems, isDuplicateReject, isSameProductReject, originalOf, previewRows, sameProductMessage, shotFlags,
   warningSentences, type ItemDimensions,
 } from "./group";
 import { checkImage, classifyImageReject, corruptMessage, imageFlags } from "./image-check";
+import { classifyLinkReject, isLinkReject, noLinkPhotosReason, type LinkReject } from "./link-reasons";
+import { itemKey, loadJson, manifestPath, saveJson, workPrefix, type ItemResult, type UploadManifest } from "./manifest";
+import { LINK_UPLOAD_KINDS } from "./link-failures";
 import { linksSheetAdapter, readLinksSheetUpload, normalizeHeader } from "./links-sheet";
 import { completeUploads, mapLimit } from "./local-files";
 import { buildOverwritePreview, matchProducts } from "./overwrite-preview";
@@ -82,27 +89,26 @@ const PREVIEW_ROW_LIMIT = 100;
 /** Bytes file-type needs to recognise every format. */
 const SNIFF_BYTES = 4100;
 
-const INGEST_ROUTE = "/tasks/catalog/ingest" as const;
+
+/** Builder constants (spec 14d F5 part 2): fetches of a link inside one delivery, and across runs before a transient failure is final. */
+export const LINK_RETRY_ATTEMPTS = 3;
+export const LINK_MAX_ATTEMPTS = 9;
+/** Waits before the second and third fetch of a link. */
+export const LINK_RETRY_BACKOFF_MS = [2_000, 8_000] as const;
+/** Timeout of a retry; the first fetch keeps safeFetch's 60 s. */
+export const LINK_RETRY_TIMEOUT_MS = 20_000;
+/**
+ * Builder constant (spec 14d F5 part 2): after this much work a delivery starts no new item, saves what
+ * it read and continues in a new delivery, so a slow host cannot push it past the 900 s deadline. An
+ * item started just before the budget runs out takes at most 60 + 2 + 20 + 8 + 20 s more.
+ */
+export const INGEST_TIME_BUDGET_MS = 600_000;
 const FILE_KINDS: UploadKind[] = ["zip", "image", "drive_folder"];
 
 // --- Item results --------------------------------------------------------------------------
 
-/** What reading one item gave: where its bytes are and what they are, or the reject sentence. */
-type ItemResult =
-  | { ok: true; sha256: string; uri: string; mime: string; ext: string; width: number | null; height: number | null; size: number; flags: OutputFlag[] }
-  | { ok: false; reason: string };
 type OkResult = Extract<ItemResult, { ok: true }>;
 
-/** Stable key of an item's bytes, so a re-collected item finds its earlier result. */
-function itemKey(item: SourceItem): string {
-  const b = item.bytes;
-  if (b.kind === "gcs") return `gcs:${b.gsUri}`;
-  if (b.kind === "url") return `url:${b.url}`;
-  return `zip:${b.zipGsUri}#${b.entryPath}`;
-}
-
-const workPrefix = (prefix: string) => `${prefix}/derived/_ingest`;
-const manifestPath = (prefix: string, uploadId: string) => `${workPrefix(prefix)}/${uploadId}/manifest.json`;
 const stagedPath = (prefix: string, uploadId: string, sha256: string, ext: string) => `${workPrefix(prefix)}/${uploadId}/${sha256}.${ext}`;
 const statePath = (prefix: string) => `${workPrefix(prefix)}/preview-state.json`;
 
@@ -123,6 +129,26 @@ async function readStream(stream: Readable, maxBytes: number): Promise<Buffer | 
 
 type ZipReaders = Map<string, Promise<{ entryStream(entryPath: string): Readable }>>;
 
+const defaultSleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+/**
+ * Fetches a link with automatic retry (spec 14d F5 part 2): a transient failure (a timeout, a 429 or a
+ * 5xx, classifyLinkReject) is tried again up to LINK_RETRY_ATTEMPTS times in this delivery, waiting
+ * LINK_RETRY_BACKOFF_MS, with a LINK_RETRY_TIMEOUT_MS timeout. `prior` is the fetches earlier runs made.
+ * A failure is final when it is permanent or the attempts reach LINK_MAX_ATTEMPTS.
+ */
+async function fetchLink(item: SourceItem, deps: IngestDeps, prior: number): Promise<{ ok: true; buf: Buffer; attempts: number } | { ok: false; result: ItemResult }> {
+  for (let tries = 1; ; tries++) {
+    const got = await fetchSourceUrl(item, deps, { ...(deps.lookup ? { lookup: deps.lookup } : {}), ...(tries > 1 ? { timeoutMs: LINK_RETRY_TIMEOUT_MS } : {}) });
+    const attempts = prior + tries;
+    if (got.ok) return { ok: true, buf: got.buf, attempts };
+    const temporary = classifyLinkReject(got.reason)?.temporary === true;
+    if (!temporary || attempts >= LINK_MAX_ATTEMPTS) return { ok: false, result: { ok: false, reason: got.reason, attempts, final: true } };
+    if (tries >= LINK_RETRY_ATTEMPTS) return { ok: false, result: { ok: false, reason: got.reason, attempts, final: false } };
+    await (deps.sleep ?? defaultSleep)(LINK_RETRY_BACKOFF_MS[tries - 1]!);
+  }
+}
+
 const isNotFound = (err: unknown) => [(err as { code?: unknown })?.code, (err as { status?: unknown })?.status].some((c) => Number(c) === 404);
 
 /**
@@ -130,15 +156,17 @@ const isNotFound = (err: unknown) => [(err as { code?: unknown })?.code, (err as
  * fetchSourceUrl), sha256 and checkImage on the full bytes. Zip entries and fetched links are
  * stored content-addressed under derived/_ingest/, so a repeated call writes the same object.
  */
-async function readItem(item: SourceItem, deps: IngestDeps, ctx: { prefix: string; uploadId: string; zips: ZipReaders }): Promise<ItemResult> {
+async function readItem(item: SourceItem, deps: IngestDeps, ctx: { prefix: string; uploadId: string; zips: ZipReaders; priorAttempts?: Record<string, number> }): Promise<ItemResult> {
   const reject = collectRejectReason(item);
   if (reject) return { ok: false, reason: reject };
   const name = baseName(item);
   let buf: Buffer;
+  let attempts: number | null = null;
   if (item.bytes.kind === "url") {
-    const got = await fetchSourceUrl(item, deps);
-    if (!got.ok) return { ok: false, reason: got.reason };
+    const got = await fetchLink(item, deps, ctx.priorAttempts?.[itemKey(item)] ?? 0);
+    if (!got.ok) return got.result;
     buf = got.buf;
+    attempts = got.attempts;
   } else if (item.bytes.kind === "zip-entry") {
     const { zipGsUri, entryPath } = item.bytes;
     if (!ctx.zips.has(zipGsUri)) ctx.zips.set(zipGsUri, openZipReader(deps.storage, zipGsUri));
@@ -167,21 +195,11 @@ async function readItem(item: SourceItem, deps: IngestDeps, ctx: { prefix: strin
   const uri = item.bytes.kind === "gcs" ? item.bytes.gsUri : await deps.storage.uploadBuffer(stagedPath(ctx.prefix, ctx.uploadId, sha256, check.ext), buf, check.mime);
   return {
     ok: true, sha256, uri, mime: check.mime, ext: check.ext, width: check.width || null, height: check.height || null,
-    size: buf.length, flags: imageFlags(check),
+    size: buf.length, flags: imageFlags(check), ...(attempts !== null ? { attempts } : {}),
   };
 }
 
 // --- Listing an upload --------------------------------------------------------------------
-
-/** Per upload: its items, the results so far, sheet warnings and the Detected for catalog_uploads. */
-interface UploadManifest {
-  version: 1;
-  items: SourceItem[];
-  results: Record<string, ItemResult>;
-  warnings: string[];
-  productList: boolean;
-  detected: Detected;
-}
 
 /**
  * The product list's step 2 match column, when the operator picked one: the stored matchColumn
@@ -265,17 +283,6 @@ function finalDetected(m: UploadManifest, kind: UploadKind): Detected {
 
 // --- Storage helpers ------------------------------------------------------------------------
 
-async function loadJson<T>(deps: Pick<IngestDeps, "storage">, objectPath: string): Promise<T | null> {
-  const gsUri = toGsUri(getBucketName(), objectPath);
-  const head = await deps.storage.headObject(gsUri);
-  if (!head.exists) return null;
-  return JSON.parse((await deps.storage.downloadBuffer(gsUri)).buf.toString("utf8")) as T;
-}
-
-async function saveJson(deps: Pick<IngestDeps, "storage">, objectPath: string, value: unknown): Promise<void> {
-  await deps.storage.uploadBuffer(objectPath, Buffer.from(JSON.stringify(value), "utf8"), "application/json");
-}
-
 const doneCount = (m: UploadManifest | null) => (m ? m.items.filter((i) => m.results[itemKey(i)]).length : 0);
 
 /** Adds to counts.collected and counts.collectTotal in one statement (uploads run in parallel). */
@@ -289,11 +296,49 @@ async function bumpCollected(db: Db, batchId: string, done: number, total: numbe
     .where(eq(catalogBatches.id, batchId));
 }
 
-async function patchCounts(db: Db, batchId: string, patch: Partial<BatchCounts>, set: Partial<typeof catalogBatches.$inferInsert> = {}): Promise<void> {
-  await db
+/**
+ * Records collecting progress (spec 14c F6): `phase` and a `rate` sample of `collected`, merged into
+ * counts. Applies only while the batch is `ingesting`, so it is also the delivery's cancel check:
+ * false when the batch is no longer collecting.
+ */
+async function collectProgress(db: Db, batchId: string, phase: IntakePhase, at: Date, patch: Partial<BatchCounts> = {}, done: number | DoneKey = "collected"): Promise<boolean> {
+  const rows = await db
     .update(catalogBatches)
-    .set({ ...set, counts: sql`${catalogBatches.counts} || ${JSON.stringify(patch)}::jsonb` })
-    .where(eq(catalogBatches.id, batchId));
+    .set({ counts: progressCounts(patch, { phase, done, at }) })
+    .where(and(eq(catalogBatches.id, batchId), eq(catalogBatches.status, "ingesting")))
+    .returning({ id: catalogBatches.id });
+  return rows.length > 0;
+}
+
+
+/**
+ * The collecting phase of a batch (spec 14c F6), one for all its uploads so parallel deliveries write
+ * the same phase and `rate` stays measurable: links to download (pasted, or in a sheet that is not a
+ * product list) -> downloading; else a zip -> unpacking; else checking uploaded files.
+ */
+async function collectPhaseOf(db: Db, batchId: string): Promise<IntakePhase> {
+  const uploads = await db
+    .select({ kind: catalogUploads.kind, detected: catalogUploads.detected })
+    .from(catalogUploads)
+    .where(and(eq(catalogUploads.batchId, batchId), ne(catalogUploads.status, "removed")));
+  if (uploads.some((u) => LINK_UPLOAD_KINDS.includes(u.kind) && (u.detected as Detected | null)?.kind !== "product_list")) return "downloading";
+  if (uploads.some((u) => u.kind === "zip")) return "unpacking";
+  return "checking";
+}
+
+/**
+ * One ingest delivery's body. `place` (spec 14d F7 part 2) marks a placing continuation: it carries the
+ * cursor into the shot list, and the rest of the body is that of the delivery that claimed the lease,
+ * so deliveryToken gives the same token.
+ */
+export interface DeliveryBody { batchId: string; uploadId: string; cursor?: string; run?: string; place?: string }
+
+/**
+ * The placing token of a delivery (spec 14c F6): its run (the hand-off's `run` when the body carries
+ * one, and its cursor) and upload id, so a Cloud Tasks retry of the same task presents the same token.
+ */
+export function deliveryToken(body: { uploadId: string; cursor?: string; run?: string }): string {
+  return placingToken(`${body.run ?? "-"}@${body.cursor ?? "0"}`, body.uploadId);
 }
 
 // --- The task --------------------------------------------------------------------------------
@@ -303,30 +348,56 @@ async function patchCounts(db: Db, batchId: string, patch: Partial<BatchCounts>,
  * skipped. Processes at most INGEST_BUDGET_ITEMS items per call and re-enqueues itself with the same
  * body plus a cursor while work remains. `deps.budgetItems` (optional) overrides the budget.
  *
- * A delivery for an upload already `collected` or `failed` is a no-op (it only finishes the batch
+ * A delivery for an upload already `collected`, `failed` or `removed` is a no-op (it only finishes the batch
  * if that was left undone). A step 2 re-run is 06 setting the batch's uploads back to `uploaded`
  * and enqueueing them again: the items are listed again and only items never read before are read.
  */
 export async function runIngest(
   db: Db,
-  deps: IngestDeps & { enqueue: typeof enqueueTask; budgetItems?: number },
-  body: { batchId: string; uploadId: string; cursor?: string },
+  deps: PlaceDeps & { budgetItems?: number },
+  body: DeliveryBody,
 ): Promise<{ progress: IngestProgress; outcome: string }> {
   const [upload] = await db.select().from(catalogUploads).where(eq(catalogUploads.id, body.uploadId));
   if (!upload || upload.batchId !== body.batchId) throw new Error(`Upload ${body.uploadId} is not part of batch ${body.batchId}.`);
   const [batch] = await db.select().from(catalogBatches).where(eq(catalogBatches.id, body.batchId));
   if (!batch) throw new Error(`Batch ${body.batchId} does not exist.`);
   const prefix = batchPrefix(batch.brandSlug, batch.id, batch.isTest);
+  const clock = () => deps.now?.() ?? new Date();
+  const token = deliveryToken(body);
+  const noop = (why: string) => ({ progress: { done: 0, total: null, phase: "done" as const }, outcome: `noop: ${why}` });
 
-  if (upload.status === "collected" || upload.status === "failed") {
-    return (await finishIfLast(db, deps, batch.id)) ?? { progress: { done: 0, total: null, phase: "done" }, outcome: "noop: upload already collected" };
+  // A cancelled batch is never collected or placed again (spec 14c F4 part 2). A placing continuation
+  // that finds it cancelled between two chunks removes the rows grouping wrote, as the placing would.
+  if (batch.status === "cancelled") {
+    if (body.place !== undefined) await removeDraftRows(db, batch.id);
+    return noop("the batch is cancelled");
   }
-  if (!["draft", "ingesting", "failed"].includes(batch.status)) {
-    return { progress: { done: 0, total: null, phase: "done" }, outcome: `noop: the batch is ${batch.status}` };
+  // A placing continuation (spec 14d F7 part 2) places the next chunk under its lease, whatever the upload's status.
+  if (body.place !== undefined) {
+    if (batch.status !== "ingesting") return noop(`the batch is ${batch.status}`);
+    const cursor = Number(body.place);
+    return (await resumeAttempt(db, deps, batch.id, token, body, cursor, (attempt) => placeBatch(db, deps, batch.id, token, attempt, cursor, body)))
+      ?? noop("another delivery holds the placing lease");
   }
+  if (upload.status === "collected" || upload.status === "failed" || upload.status === "removed") {
+    // A removed upload (spec 14b F3) is never read; a delivery queued before the removal only finishes the batch.
+    return (await finishIfLast(db, deps, batch.id, token, body)) ?? noop(`upload already ${upload.status}`);
+  }
+  if (!["draft", "ingesting", "failed"].includes(batch.status)) return noop(`the batch is ${batch.status}`);
+  const phase = await collectPhaseOf(db, batch.id);
   if (!body.cursor) {
-    // A new run (first delivery or a step 2 re-run): the batch is collecting again.
-    await patchCounts(db, batch.id, { previewReady: false, failReason: null }, { status: "ingesting" });
+    // A new run (first delivery or a step 2 re-run): the batch is collecting again. A placing lease left
+    // by an earlier run is cleared, since its grouping is out of date. Conditional, so a batch cancelled
+    // since it was read above stays cancelled.
+    const started = await db
+      .update(catalogBatches)
+      .set({
+        status: "ingesting",
+        counts: progressCounts({ previewReady: false, failReason: null, placingClaim: null }, { phase: upload.kind === "sheet" || upload.kind === "google_sheet" ? "reading" : phase, done: "collected", at: clock() }),
+      })
+      .where(and(eq(catalogBatches.id, batch.id), inArray(catalogBatches.status, ["draft", "ingesting", "failed"])))
+      .returning({ id: catalogBatches.id });
+    if (!started.length) return noop("the batch is no longer collecting");
   }
 
   const input: CollectInput = { batchId: batch.id, brandSlug: batch.brandSlug, prefix, upload, options: batch.options, deps };
@@ -340,14 +411,21 @@ export async function runIngest(
       if (isRetryableStorageError(err)) throw err;
       const error = err instanceof Error ? err.message : String(err);
       await db.update(catalogUploads).set({ status: "failed", error }).where(eq(catalogUploads.id, upload.id));
-      return (await finishIfLast(db, deps, batch.id)) ?? { progress: { done: 0, total: 0, phase: "done" }, outcome: `upload failed: ${error}` };
+      return (await finishIfLast(db, deps, batch.id, token, body)) ?? { progress: { done: 0, total: 0, phase: "done" }, outcome: `upload failed: ${error}` };
     }
+    // A new run carries every result forward except a link's non-final failure (spec 14d F5 part 2):
+    // that link is fetched again, its earlier attempts kept so they add up towards LINK_MAX_ATTEMPTS.
+    // Continuations of this run read the saved manifest, so they never fetch it again.
     const results: Record<string, ItemResult> = {};
+    const priorAttempts: Record<string, number> = {};
     for (const item of listing.items) {
-      const prev = old?.results[itemKey(item)];
-      if (prev) results[itemKey(item)] = prev;
+      const k = itemKey(item);
+      const prev = old?.results[k];
+      if (prev && !prev.ok && prev.final === false) priorAttempts[k] = prev.attempts ?? 0;
+      else if (prev) results[k] = prev;
+      else if (old?.priorAttempts?.[k]) priorAttempts[k] = old.priorAttempts[k];
     }
-    manifest = { version: 1, ...listing, results };
+    manifest = { version: 1, ...listing, results, ...(Object.keys(priorAttempts).length ? { priorAttempts } : {}) };
   } else {
     manifest = old;
   }
@@ -359,25 +437,38 @@ export async function runIngest(
   const unread = () => order.filter((i) => !manifest.results[itemKey(manifest.items[i]!)]);
   const todo = unread().slice(0, deps.budgetItems ?? INGEST_BUDGET_ITEMS);
   const zips: ZipReaders = new Map();
+  const startedAt = clock().getTime();
   await mapLimit(todo, ITEM_CONCURRENCY, async (i) => {
+    // The time budget (spec 14d F5 part 2): past it, no new item starts; the continuation reads the rest.
+    if (clock().getTime() - startedAt >= INGEST_TIME_BUDGET_MS) return;
     const item = manifest.items[i]!;
-    manifest.results[itemKey(item)] = await readItem(item, deps, { prefix, uploadId: upload.id, zips });
+    manifest.results[itemKey(item)] = await readItem(item, deps, { prefix, uploadId: upload.id, zips, ...(manifest.priorAttempts ? { priorAttempts: manifest.priorAttempts } : {}) });
   });
   // Cloud Tasks delivers at least once, so another delivery of this upload may have saved while this
   // one was reading: keep what it read, and count only what this save adds to the stored manifest.
   const stored = await loadJson<UploadManifest>(deps, manifestPath(prefix, upload.id));
   for (const item of manifest.items) {
     const k = itemKey(item);
-    if (!manifest.results[k] && stored?.results[k]) manifest.results[k] = stored.results[k];
+    const theirs = stored?.results[k];
+    // A non-final failure no newer than this run's attempt history is the earlier run's, which this
+    // run fetches again (spec 14d F5 part 2): it is not carried back as if read.
+    const earlierRun = theirs && !theirs.ok && theirs.final === false && manifest.priorAttempts?.[k] !== undefined && (theirs.attempts ?? 0) <= manifest.priorAttempts[k]!;
+    if (!manifest.results[k] && theirs && !earlierRun) manifest.results[k] = theirs;
   }
   await saveJson(deps, manifestPath(prefix, upload.id), manifest);
   await bumpCollected(db, batch.id, doneCount(manifest) - doneCount(stored), total - (stored?.items.length ?? 0));
+  // The phase and a rate sample, read after the bump; a batch cancelled meanwhile stops here, with
+  // no continuation and no upload marked collected.
+  if (!(await collectProgress(db, batch.id, phase, clock()))) {
+    const [now] = await db.select({ status: catalogBatches.status }).from(catalogBatches).where(eq(catalogBatches.id, batch.id));
+    if (now?.status === "cancelled") return { progress: { done: doneCount(manifest), total, phase: "done" }, outcome: "stopped: the batch was cancelled" };
+  }
 
   const done = doneCount(manifest);
   const left = unread();
   if (left.length) {
     const cursor = String(left[0]);
-    await deps.enqueue(INGEST_ROUTE, { batchId: batch.id, uploadId: upload.id, cursor });
+    await deps.enqueue(INGEST_ROUTE, { batchId: batch.id, uploadId: upload.id, cursor, ...(body.run ? { run: body.run } : {}) });
     return { progress: { done, total, phase: "copying" }, outcome: `collected ${done} of ${total}; continuing at ${cursor}` };
   }
 
@@ -385,33 +476,86 @@ export async function runIngest(
     .update(catalogUploads)
     .set({ status: "collected", error: null, detected: finalDetected(manifest, upload.kind) as unknown as Record<string, unknown> })
     .where(eq(catalogUploads.id, upload.id));
-  return (await finishIfLast(db, deps, batch.id)) ?? { progress: { done, total, phase: "done" }, outcome: "collected; waiting for the other uploads" };
+  return (await finishIfLast(db, deps, batch.id, token, body)) ?? { progress: { done, total, phase: "done" }, outcome: "collected; waiting for the other uploads" };
+}
+
+const UPLOADS_LEFT = (batchId: string) =>
+  sql`EXISTS (SELECT 1 FROM ${catalogUploads} WHERE ${catalogUploads.batchId} = ${batchId} AND ${catalogUploads.status} NOT IN ('collected', 'failed', 'removed'))`;
+
+/**
+ * Runs the batch-wide step (groupBatch, then placeBatch in chunks) when every upload is collected, failed or removed and the batch is still
+ * `ingesting` (spec 14c F6). The claim is one conditional UPDATE that takes the placing lease
+ * (`placingClaim` for `token`, `phase: "placing"`), so of two uploads finishing together only one
+ * runs it; the batch stays `ingesting` until the closing write. Each run of the step carries its own
+ * `attempt` in the claim. A thrown error keeps the lease but releases the attempt, so the retry of the
+ * same task (same token) takes it back and runs the step again; a duplicate delivery of that task while
+ * its first copy still runs does nothing, and so does a delivery with another token while the lease is
+ * live (it takes the lease over once it ran out). A run killed without throwing (the request deadline)
+ * holds its attempt until the lease runs out, which shows as stalled; Try again clears it.
+ */
+async function finishIfLast(db: Db, deps: PlaceDeps, batchId: string, token: string, body: DeliveryBody): Promise<{ progress: IngestProgress; outcome: string } | null> {
+  const now = deps.now?.() ?? new Date();
+  const attempt = randomUUID();
+  const ingesting = and(eq(catalogBatches.id, batchId), eq(catalogBatches.status, "ingesting"));
+  const claimed = await db
+    .update(catalogBatches)
+    .set({ counts: progressCounts({ placingClaim: placingClaim(token, now, attempt), placed: 0, placeTotal: null }, { phase: "placing", done: 0, at: now }) })
+    .where(and(ingesting, placingLeaseFree(now), sql`NOT ${UPLOADS_LEFT(batchId)}`))
+    .returning({ id: catalogBatches.id });
+  // Grouping is not run again once placing went on to a later chunk (spec 14d F7 part 2): the retry
+  // of this delivery after that only queues the continuation again.
+  if (!claimed.length) return resumeAttempt(db, deps, batchId, token, body, null, (a) => groupBatch(db, deps, batchId, token, a, body));
+  return runAttempt(db, deps, batchId, token, attempt, () => groupBatch(db, deps, batchId, token, attempt, body));
+}
+
+const claimNextSql = sql`${catalogBatches.counts}->'placingClaim'->'next'`;
+/** The counts with `claim`'s keys merged into the stored placing claim (its `next` kept). */
+const mergeClaim = (claim: PlacingClaim) => sql`${catalogBatches.counts} || jsonb_build_object('placingClaim', (${catalogBatches.counts}->'placingClaim') || ${JSON.stringify(claim)}::jsonb)`;
+
+/**
+ * Runs one attempt of the batch-wide step under the lease `token` (spec 14c F6). A thrown error keeps
+ * the lease but releases the attempt, so the retry of the same task takes it back.
+ */
+async function runAttempt(db: Db, deps: IngestDeps, batchId: string, token: string, attempt: string, step: () => Promise<StepResult>): Promise<StepResult> {
+  try {
+    return await step();
+  } catch (err) {
+    await db
+      .update(catalogBatches)
+      .set({ counts: mergeClaim(placingClaim(token, deps.now?.() ?? new Date(), null)) })
+      .where(and(eq(catalogBatches.id, batchId), eq(catalogBatches.status, "ingesting"), placingLeaseHeld(token, attempt)));
+    throw err;
+  }
 }
 
 /**
- * Runs the batch-wide step when every upload is collected or failed and the batch is still
- * `ingesting`. The claim is one conditional UPDATE (status ingesting -> draft), so of two uploads
- * finishing together only one runs it; on an error the claim is given back so a retry runs it.
+ * Takes back the live, released lease `token` for one attempt (spec 14c F6) when placing stands at
+ * `cursor` (null: grouping, before any chunk was handed on; a number: the chunk a placing continuation
+ * carries, spec 14d F7 part 2), and runs `step` under it. When placing already went past `cursor`
+ * under this token (a retried or duplicate delivery whose hand-off happened), the continuation is
+ * queued again (named, so Cloud Tasks drops a copy) and nothing else runs. Otherwise null.
  */
-async function finishIfLast(db: Db, deps: IngestDeps, batchId: string): Promise<{ progress: IngestProgress; outcome: string } | null> {
-  const claimed = await db
+async function resumeAttempt(
+  db: Db, deps: PlaceDeps, batchId: string, token: string, body: DeliveryBody, cursor: number | null,
+  step: (attempt: string) => Promise<StepResult>,
+): Promise<StepResult | null> {
+  const now = deps.now?.() ?? new Date();
+  const attempt = randomUUID();
+  const ingesting = and(eq(catalogBatches.id, batchId), eq(catalogBatches.status, "ingesting"));
+  const at = cursor === null ? sql`${claimNextSql} IS NULL` : sql`(${claimNextSql})::int = ${cursor}`;
+  const resumed = await db
     .update(catalogBatches)
-    .set({ status: "draft" })
-    .where(
-      and(
-        eq(catalogBatches.id, batchId),
-        eq(catalogBatches.status, "ingesting"),
-        sql`NOT EXISTS (SELECT 1 FROM ${catalogUploads} WHERE ${catalogUploads.batchId} = ${batchId} AND ${catalogUploads.status} NOT IN ('collected', 'failed'))`,
-      ),
-    )
+    .set({ counts: mergeClaim(placingClaim(token, now, attempt)) })
+    .where(and(ingesting, placingLeaseResumable(token, now), at))
     .returning({ id: catalogBatches.id });
-  if (!claimed.length) return null;
-  try {
-    return await finishBatch(db, deps, batchId);
-  } catch (err) {
-    await db.update(catalogBatches).set({ status: "ingesting" }).where(eq(catalogBatches.id, batchId));
-    throw err;
+  if (resumed.length) return runAttempt(db, deps, batchId, token, attempt, () => step(attempt));
+  const [b] = await db.select({ status: catalogBatches.status, counts: catalogBatches.counts }).from(catalogBatches).where(eq(catalogBatches.id, batchId));
+  const claim = b?.status === "ingesting" ? b.counts.placingClaim : null;
+  if (claim?.token === token && typeof claim.next === "number" && claim.next > (cursor ?? -1)) {
+    await deps.enqueue(INGEST_ROUTE, { ...body, place: String(claim.next) }, { taskId: placeTaskId(batchId, token, claim.next) });
+    return { progress: { done: claim.next, total: null, phase: "copying" }, outcome: `placing already at ${claim.next}; continuation queued again` };
   }
+  return null;
 }
 
 // --- Grouping what was collected (shared by the runner and the CLI) -----------------------------
@@ -569,19 +713,21 @@ interface PreviewState {
  * ("The zip Images.zip was not found in storage"), without its own action sentence.
  */
 function whatWasFound(rejected: GroupingResult["rejected"], uploadErrors: string[] = []): string {
-  // Unsupported image formats first, then files that are not images, corrupt files, the rest.
-  const counts = new Map<string, { rank: number; k: number }>();
-  const add = (what: string, rank: number) => counts.set(what, { rank, k: (counts.get(what)?.k ?? 0) + 1 });
+  // Unsupported image formats first, then files that are not images, corrupt files, the rest, then links.
+  const counts = new Map<string, { rank: number; k: number; many?: string }>();
+  const add = (what: string, rank: number, many?: string) => counts.set(what, { rank, k: (counts.get(what)?.k ?? 0) + 1, ...(many ? { many } : {}) });
   for (const r of rejected) {
     const kind = classifyImageReject(r.reason);
     if (kind === "unsupported") add(`${/is an? (\S+) file/.exec(r.reason)?.[1] ?? "unsupported"} file`, 0);
     else if (kind === "not_image") add(r.item.ext ? r.item.ext.toUpperCase() : "file that is not an image", 1);
     else if (kind === "corrupt") add("corrupt file", 2);
+    // A link is not a file (spec 14b F5: "<n> other files" is not said of links).
+    else if (kind === "link") add("link that could not be downloaded", 4, "links that could not be downloaded");
     else add("other file", 3);
   }
   const parts = [...counts]
     .sort(([a, x], [b, y]) => x.rank - y.rank || byText(a, b))
-    .map(([what, { k }]) => `${fmt(k)} ${what}${k === 1 ? "" : "s"}`);
+    .map(([what, { k, many }]) => `${fmt(k)} ${k === 1 ? what : many ?? `${what}s`}`);
   const facts = distinct(uploadErrors.map(firstFact).filter(Boolean));
   if (!parts.length && !facts.length) return "The upload was empty";
   const found = !parts.length ? [] : [parts.length === 1 ? parts[0]! : `${parts.slice(0, -1).join(", ")} and ${parts[parts.length - 1]}`];
@@ -594,9 +740,25 @@ function firstFact(error: string): string {
   return (m ? m[1]! : error.trim().replace(/[.!?]+$/, "")).trim();
 }
 
-/** counts.failReason when the whole batch holds no photo: from the rejects and the uploads that failed. */
-function noPhotosReason(rejected: GroupingResult["rejected"], uploadErrors: string[] = []): string {
+/**
+ * counts.failReason when the whole batch holds no photo: from the rejects and the uploads that failed.
+ * When every reject is a link that could not be downloaded and no upload failed, the links sentence
+ * (spec 14b F5 part 1, `linkSource` says where the links came from); else the file sentence.
+ */
+function noPhotosReason(rejected: GroupingResult["rejected"], uploadErrors: string[] = [], linkSource?: { links: number; source: string }): string {
+  const links = rejected.map((r) => classifyLinkReject(r.reason));
+  if (linkSource && links.length && !uploadErrors.length && links.every((l) => l !== null)) {
+    return noLinkPhotosReason(links as LinkReject[], linkSource.links, linkSource.source);
+  }
   return `No photos were found in what you uploaded. ${whatWasFound(rejected, uploadErrors)}. Upload photos and start again.`;
+}
+
+/** "pasted", "listed in <sheet>", or both: where the batch's links came from, for the no-photos sentence. */
+function linkSourceWords(uploads: CatalogUpload[]): string {
+  const pasted = uploads.some((u) => u.kind === "url_list");
+  const sheets = distinct(uploads.filter((u) => u.kind === "sheet" || u.kind === "google_sheet").map((u) => (u.detected as Detected | null)?.title || u.name));
+  const listed = sheets.length ? `listed in ${sheets.join(" and ")}` : "";
+  return [pasted ? "pasted" : "", listed].filter(Boolean).join(" and ") || "pasted";
 }
 
 /**
@@ -627,11 +789,17 @@ async function deleteUnusedProducts(db: Db, ids: string[]): Promise<void> {
   );
 }
 
-/** Puts an item's bytes at the raw object `target` (unless they are already there); returns its gs:// URI. */
-async function placeRaw(storage: IngestDeps["storage"], bucket: string, target: string, r: OkResult): Promise<string> {
+/**
+ * Puts an item's bytes at the raw object `target` unless they are already there (spec 14c F7 part 1):
+ * a target whose stored sha256 (custom metadata, written here) equals the item's is not copied
+ * again, so a repeated placing costs one metadata read per photo. Returns the gs:// URI.
+ */
+async function placeRaw(storage: IngestDeps["storage"], bucket: string, target: string, r: Pick<OkResult, "uri" | "sha256" | "mime">): Promise<string> {
   const uri = toGsUri(bucket, target);
   if (r.uri === uri) return uri;
-  return storage.uploadBuffer(target, (await storage.downloadBuffer(r.uri)).buf, r.mime);
+  const head = await storage.headObject(uri);
+  if (head.exists && head.sha256 === r.sha256) return uri;
+  return storage.uploadBuffer(target, (await storage.downloadBuffer(r.uri)).buf, r.mime, { sha256: r.sha256 });
 }
 
 /** findOrCreateProduct's operator sentences (an empty or clashing path); anything else is rethrown. */
@@ -643,11 +811,102 @@ function mergeSkus(skus: ResolveResult, extra: string[] | undefined): ResolveRes
   return { ...skus, opptraSkuIds: ids, method: skus.method === "unresolved" ? "manual" : skus.method };
 }
 
-async function finishBatch(db: Db, deps: IngestDeps, batchId: string): Promise<{ progress: IngestProgress; outcome: string }> {
+/** Builder constant (spec 14d F7 part 2): photos one delivery places. At the measured 280 photos a minute, 800 take about 3 minutes, well inside the 900 s deadline. */
+export const PLACE_BUDGET_ITEMS = 800;
+
+/** One photo groupBatch decided, as placeBatch copies it and the last chunk writes its version row. */
+interface PlannedShot {
+  productId: string; n: number; sourceUri: string; sha256: string;
+  target: string; rawUri: string; mime: string; width: number | null; height: number | null; size: number;
+  flags: OutputFlag[]; originalName: string; uploadId: string;
+}
+
+/**
+ * `derived/_ingest/place-state.json` (spec 14d F7 part 2): what groupBatch decided, for the placing
+ * deliveries that follow. `token` is the lease it was written under: a delivery with another token
+ * never places from it.
+ */
+interface PlaceState {
+  version: 1;
+  token: string;
+  shots: PlannedShot[];
+  /** The preview state the last chunk writes for buildPreview (raw URIs are known before copying). */
+  preview: PreviewState;
+  counts: Partial<BatchCounts>;
+  /** The inputs grouped, to tell at the end whether one was removed meanwhile (spec 14b F3). */
+  uploadIds: string[];
+  /** Set when the batch holds no photo: the closing write fails the batch with it. */
+  failReason: string | null;
+  waitingForColumn: boolean;
+}
+
+const placeStatePath = (prefix: string) => `${workPrefix(prefix)}/place-state.json`;
+
+/** A named continuation per (batch, lease, cursor), so a retried delivery never queues the next chunk twice (Cloud Tasks deduplicates task names). */
+const placeTaskId = (batchId: string, token: string, cursor: number) => hashedTaskId("place", batchId, token, cursor);
+
+type StepResult = { progress: IngestProgress; outcome: string };
+type PlaceDeps = IngestDeps & { enqueue: typeof enqueueTask; placeBudgetItems?: number };
+
+/**
+ * The batch's writes under the placing lease `token` (spec 14c F6): each applies only while the batch
+ * is `ingesting` and the lease carries `token` (spec 14c F4 part 2). `placing` writes progress and
+ * renews the lease; `close` is the closing write (lease and rate cleared). When one is refused the
+ * step stops; if the batch was cancelled, the rows it wrote are removed again, so a cancelled batch
+ * keeps no version rows.
+ */
+function leaseWrites(db: Db, deps: IngestDeps, batchId: string, token: string, attempt: string, next?: number) {
+  const clock = () => deps.now?.() ?? new Date();
+  const held = and(eq(catalogBatches.id, batchId), eq(catalogBatches.status, "ingesting"), placingLeaseHeld(token, attempt));
+  const claim = (at: Date) => ({ ...placingClaim(token, at, attempt), ...(next !== undefined ? { next } : {}) });
+  return {
+    clock,
+    placing: async (patch: Partial<BatchCounts>, done: number): Promise<boolean> => {
+      const at = clock();
+      const rows = await db.update(catalogBatches)
+        .set({ counts: progressCounts({ ...patch, placingClaim: claim(at) }, { phase: "placing", done, at }) })
+        .where(held).returning({ id: catalogBatches.id });
+      return rows.length > 0;
+    },
+    /** Hands placing on at `end` (spec 14d F7 part 2): `placed` and `next` written, this attempt released for the continuation. */
+    continueAt: async (end: number): Promise<boolean> => {
+      const at = clock();
+      const rows = await db.update(catalogBatches)
+        .set({ counts: progressCounts({ placed: end, placingClaim: { ...placingClaim(token, at, null), next: end } }, { phase: "placing", done: end, at }) })
+        .where(held).returning({ id: catalogBatches.id });
+      return rows.length > 0;
+    },
+    close: async (patch: Partial<BatchCounts>, status: "draft" | "failed"): Promise<boolean> => {
+      const rows = await db.update(catalogBatches)
+        .set({ status, counts: mergeCounts({ ...patch, placingClaim: null, rate: [] }) })
+        .where(held).returning({ id: catalogBatches.id });
+      return rows.length > 0;
+    },
+    stopped: async (): Promise<StepResult> => {
+      const [now] = await db.select({ status: catalogBatches.status }).from(catalogBatches).where(eq(catalogBatches.id, batchId));
+      if (now?.status === "cancelled") {
+        await removeDraftRows(db, batchId);
+        return { progress: { done: 0, total: 0, phase: "done" }, outcome: "stopped: the batch was cancelled" };
+      }
+      return { progress: { done: 0, total: 0, phase: "done" }, outcome: "stopped: another delivery holds the placing lease" };
+    },
+  };
+}
+
+/**
+ * The first half of the batch-wide step (spec 14d F7 part 2), run by the holder of the placing lease:
+ * removes what an earlier run wrote, assembles, matches and finds or creates the products, then saves
+ * the planned shot list with everything the closing write needs to `place-state.json` and starts
+ * placing at the first chunk.
+ */
+async function groupBatch(db: Db, deps: PlaceDeps, batchId: string, token: string, attempt: string, body: DeliveryBody): Promise<StepResult> {
   const [batch] = await db.select().from(catalogBatches).where(eq(catalogBatches.id, batchId));
   if (!batch) throw new Error(`Batch ${batchId} does not exist.`);
   const prefix = batchPrefix(batch.brandSlug, batch.id, batch.isTest);
-  const uploads = await db.select().from(catalogUploads).where(eq(catalogUploads.batchId, batchId));
+  const lease = leaseWrites(db, deps, batchId, token, attempt);
+  if (batch.status !== "ingesting") return lease.stopped();
+  // A removed upload (spec 14b F3) is not an input: its photos, sheets and errors are left out.
+  const uploads = await db.select().from(catalogUploads).where(and(eq(catalogUploads.batchId, batchId), ne(catalogUploads.status, "removed")));
   await removeDraftRows(db, batch.id);
 
   const manifests = new Map<string, UploadManifest>();
@@ -663,7 +922,7 @@ async function finishBatch(db: Db, deps: IngestDeps, batchId: string): Promise<{
   // Matching and the overwrite preview come first: duplicate spellings leave the grouping here.
   const ids = [...grouped.products.keys()];
   const matches = await matchProducts(db, batch, ids, a.eans);
-  const overwrite = await buildOverwritePreview(db, batch, grouped, matches, a.sha256ByItem);
+  const overwrite = await buildOverwritePreview(db, batch, grouped, matches, a.sha256ByItem, { otherBatches: false });
   const duplicates = [...overwrite.duplicates];
 
   // Products for what is left, then for the product list rows without photos. Each product's
@@ -722,8 +981,122 @@ async function finishBatch(db: Db, deps: IngestDeps, batchId: string): Promise<{
   const withPhotos = [...grouped.products.keys()].filter((id) => productOf.has(id));
   const missing = a.missing.filter((id) => productOf.has(id) && !grouped.products.has(id));
 
-  // Version rows: one per (product, n), not current, replacing the current row of that shot.
-  const productIds = withPhotos.map((id) => productOf.get(id)!.id);
+  // The shot list: one per (product, n). Raw URIs are known before copying (placeRaw writes `target`).
+  const bucket = getBucketName();
+  const rawUriOf = new Map<SourceItem, string>();
+  const shots: PlannedShot[] = [];
+  for (const id of withPhotos) {
+    const product = productOf.get(id)!;
+    for (const [i, item] of grouped.products.get(id)!.entries()) {
+      const r = a.resultOf(item);
+      if (!r) continue;
+      const n = item.n ?? i + 1;
+      const target = rawPath(prefix, product.pathKey, n, r.ext);
+      const rawUri = toGsUri(bucket, target);
+      rawUriOf.set(item, rawUri);
+      shots.push({
+        productId: product.id, n, sourceUri: r.uri, sha256: r.sha256, target, rawUri, mime: r.mime,
+        width: r.width, height: r.height, size: r.size, flags: [...new Set([...r.flags, ...shotFlags(item)])],
+        originalName: item.originalName, uploadId: item.uploadId,
+      });
+    }
+  }
+
+  // The preview state buildPreview reads, and the counts, written by the last placing delivery.
+  const stored = (item: SourceItem): StoredItem => {
+    const r = a.resultOf(item);
+    return { item, sha256: r?.sha256 ?? null, width: r?.width ?? null, height: r?.height ?? null, rawUri: rawUriOf.get(item) ?? null };
+  };
+  const topLevelFolders = [...new Set(uploads.flatMap((u) => ((u.detected as Detected | null)?.topLevelFolders ?? [])))].sort(byText);
+  const skus = [...withPhotos, ...missing].map((id) => [id, productOf.get(id)!.skuIds] as [string, string[]]);
+  const preview: PreviewState = {
+    version: 1,
+    products: withPhotos.map((id) => ({ identifier: id, productId: productOf.get(id)!.id, items: grouped.products.get(id)!.map(stored) })),
+    rejected: grouped.rejected.map((r) => ({ item: stored(r.item), reason: r.reason })),
+    warnings: grouped.warnings, missing, list: a.list, byMatchColumn: a.byMatchColumn, duplicates, skus, topLevelFolders,
+  };
+  const newCount = withPhotos.filter((id) => productOf.get(id)!.isNew).length;
+  const existing = overwrite.existingProducts.filter((p) => productOf.has(p.identifier));
+  const rejects = grouped.rejected.filter((r) => !isSameProductReject(r.reason));
+  // Links that could not be downloaded are counted on their own, not as unsupported files (spec 14b F5).
+  const linkRejects = rejects.filter((r) => isLinkReject(r.reason));
+  const counts: Partial<BatchCounts> = {
+    products: withPhotos.length, sources: shots.length,
+    skuResolved: [...withPhotos, ...missing].filter((id) => productOf.get(id)!.resolved || productOf.get(id)!.skuIds.length > 0).length,
+    missingImages: missing.length, notInSheet: withPhotos.filter((id) => a.statuses.get(id) === "not_in_sheet").length,
+    unsupportedFiles: rejects.filter((r) => !isDuplicateReject(r.reason) && !isLinkReject(r.reason)).length,
+    linkFailures: linkRejects.length,
+    duplicateFiles: rejects.filter((r) => isDuplicateReject(r.reason)).length,
+    newProducts: newCount, existingProducts: withPhotos.length - newCount,
+    shotsToRemove: existing.reduce((s, p) => s + p.shotsToRemove.length, 0),
+    previewReady: true, failReason: null,
+  };
+  const waitingForColumn = uploads.some((u) => (u.detected as Detected | null)?.cannotRead);
+  let failReason: string | null = null;
+  if (!shots.length && !waitingForColumn) {
+    const uploadErrors = uploads.filter((u) => u.status === "failed" && u.error).map((u) => u.error!);
+    const linkUploads = uploads.filter((u) => manifests.get(u.id)?.items.some((i) => i.bytes.kind === "url"));
+    const links = linkUploads.reduce((n, u) => n + manifests.get(u.id)!.items.filter((i) => i.bytes.kind === "url").length, 0);
+    failReason = noPhotosReason(grouped.rejected, uploadErrors, links ? { links, source: linkSourceWords(linkUploads) } : undefined);
+  }
+  const state: PlaceState = { version: 1, token, shots, preview, counts, uploadIds: uploads.map((u) => u.id), failReason, waitingForColumn };
+  await saveJson(deps, placeStatePath(prefix), state);
+  if (!(await lease.placing({ placeTotal: shots.length, placed: 0 }, 0))) return lease.stopped();
+  return placeBatch(db, deps, batchId, token, attempt, 0, body, state);
+}
+
+/**
+ * The second half of the batch-wide step (spec 14d F7 part 2): copies the next PLACE_BUDGET_ITEMS
+ * photos of `place-state.json` from `cursor` with the sha256 skip of placeRaw, writing `placed` (at
+ * most every RATE_SAMPLE_GAP_MS during the chunk and once after it, each renewing the lease), then
+ * re-enqueues itself with the next cursor under the same lease token. The delivery that places the
+ * last chunk inserts the version rows, writes `preview-state.json` and makes the closing write.
+ * `deps.placeBudgetItems` (optional) overrides the chunk size.
+ */
+async function placeBatch(db: Db, deps: PlaceDeps, batchId: string, token: string, attempt: string, cursor: number, body: DeliveryBody, planned?: PlaceState): Promise<StepResult> {
+  const [batch] = await db.select().from(catalogBatches).where(eq(catalogBatches.id, batchId));
+  if (!batch) throw new Error(`Batch ${batchId} does not exist.`);
+  const prefix = batchPrefix(batch.brandSlug, batch.id, batch.isTest);
+  // The first chunk runs in the grouping delivery, whose claim has no `next` yet.
+  const lease = leaseWrites(db, deps, batchId, token, attempt, planned ? undefined : cursor);
+  if (batch.status !== "ingesting") return lease.stopped();
+  const state = planned ?? (await loadJson<PlaceState>(deps, placeStatePath(prefix)));
+  // A later run regrouped the batch under another lease: its own deliveries place from its state.
+  if (!state || state.token !== token) return lease.stopped();
+
+  const total = state.shots.length;
+  const start = Math.min(Math.max(0, Math.floor(cursor) || 0), total);
+  const end = Math.min(total, start + Math.max(1, deps.placeBudgetItems ?? PLACE_BUDGET_ITEMS));
+  const bucket = getBucketName();
+  let placed = start, lastWrite = lease.clock().getTime(), writing = false, refused = false;
+  await mapLimit(state.shots.slice(start, end), COPY_CONCURRENCY, async (shot) => {
+    if (refused) return;
+    await placeRaw(deps.storage, bucket, shot.target, { uri: shot.sourceUri, sha256: shot.sha256, mime: shot.mime });
+    placed++;
+    // `placed` and a rate sample at most every RATE_SAMPLE_GAP_MS (this also renews the lease and keeps
+    // updated_at moving, so a long placing never looks stalled); a refused write stops the placing.
+    if (!writing && lease.clock().getTime() - lastWrite >= RATE_SAMPLE_GAP_MS) {
+      writing = true;
+      lastWrite = lease.clock().getTime();
+      try {
+        if (!(await lease.placing({ placed }, placed))) refused = true;
+      } finally {
+        writing = false;
+      }
+    }
+  });
+  // Still ours and still collecting after the chunk (the hand-off, or the progress write before any version row is written).
+  if (refused) return lease.stopped();
+  if (end < total) {
+    if (!(await lease.continueAt(end))) return lease.stopped();
+    await deps.enqueue(INGEST_ROUTE, { ...body, place: String(end) }, { taskId: placeTaskId(batchId, token, end) });
+    return { progress: { done: end, total, phase: "copying" }, outcome: `placed ${end} of ${total}; continuing at ${end}` };
+  }
+
+  if (!(await lease.placing({ placed: end }, end))) return lease.stopped();
+
+  // The last chunk. Version rows: one per (product, n), not current, replacing the current row of that shot.
+  const productIds = [...new Set(state.shots.map((s) => s.productId))];
   const current = new Map<string, string>();
   for (let i = 0; i < productIds.length; i += 1000) {
     const part = productIds.slice(i, i + 1000);
@@ -733,69 +1106,34 @@ async function finishBatch(db: Db, deps: IngestDeps, batchId: string): Promise<{
       .where(and(inArray(catalogSourceImages.productId, part), eq(catalogSourceImages.isCurrent, true)));
     for (const c of cur) current.set(`${c.productId}:${c.n}`, c.id);
   }
-  const bucket = getBucketName();
-  const shots = withPhotos.flatMap((id) => grouped.products.get(id)!.map((item, i) => ({ id, item, n: item.n ?? i + 1 })));
-  const rawUriOf = new Map<SourceItem, string>();
-  const versions = (
-    await mapLimit(shots, COPY_CONCURRENCY, async ({ id, item, n }) => {
-      const r = a.resultOf(item);
-      if (!r) return null;
-      const product = productOf.get(id)!;
-      const rawUri = await placeRaw(deps.storage, bucket, rawPath(prefix, product.pathKey, n, r.ext), r);
-      rawUriOf.set(item, rawUri);
-      const flags = [...new Set([...r.flags, ...shotFlags(item)])];
-      return {
-        productId: product.id, batchId: batch.id, n, sha256: r.sha256, isCurrent: false, replacesId: current.get(`${product.id}:${n}`) ?? null,
-        originalName: item.originalName, uploadId: item.uploadId, rawUri, mime: r.mime, width: r.width, height: r.height, bytes: r.size,
-        flags, status: "prepared" as const,
-      };
-    })
-  ).filter((v): v is NonNullable<typeof v> => v !== null);
+  const versions = state.shots.map((s) => ({
+    productId: s.productId, batchId: batch.id, n: s.n, sha256: s.sha256, isCurrent: false, replacesId: current.get(`${s.productId}:${s.n}`) ?? null,
+    originalName: s.originalName, uploadId: s.uploadId, rawUri: s.rawUri, mime: s.mime, width: s.width, height: s.height, bytes: s.size,
+    flags: s.flags, status: "prepared" as const,
+  }));
   for (let i = 0; i < versions.length; i += 500) {
     await db.insert(catalogSourceImages).values(versions.slice(i, i + 500)).onConflictDoNothing();
   }
+  await saveJson(deps, statePath(prefix), state.preview);
 
-  // The preview state buildPreview reads, and the counts.
-  const stored = (item: SourceItem): StoredItem => {
-    const r = a.resultOf(item);
-    return { item, sha256: r?.sha256 ?? null, width: r?.width ?? null, height: r?.height ?? null, rawUri: rawUriOf.get(item) ?? null };
-  };
-  const topLevelFolders = [...new Set(uploads.flatMap((u) => ((u.detected as Detected | null)?.topLevelFolders ?? [])))].sort(byText);
-  const skus = [...withPhotos, ...missing].map((id) => [id, productOf.get(id)!.skuIds] as [string, string[]]);
-  const state: PreviewState = {
-    version: 1,
-    products: withPhotos.map((id) => ({ identifier: id, productId: productOf.get(id)!.id, items: grouped.products.get(id)!.map(stored) })),
-    rejected: grouped.rejected.map((r) => ({ item: stored(r.item), reason: r.reason })),
-    warnings: grouped.warnings, missing, list: a.list, byMatchColumn: a.byMatchColumn, duplicates, skus, topLevelFolders,
-  };
-  await saveJson(deps, statePath(prefix), state);
-
-  const newCount = withPhotos.filter((id) => productOf.get(id)!.isNew).length;
-  const existing = overwrite.existingProducts.filter((p) => productOf.has(p.identifier));
-  const rejects = grouped.rejected.filter((r) => !isSameProductReject(r.reason));
-  const counts: Partial<BatchCounts> = {
-    products: withPhotos.length, sources: versions.length,
-    skuResolved: [...withPhotos, ...missing].filter((id) => productOf.get(id)!.resolved || productOf.get(id)!.skuIds.length > 0).length,
-    missingImages: missing.length, notInSheet: withPhotos.filter((id) => a.statuses.get(id) === "not_in_sheet").length,
-    unsupportedFiles: rejects.filter((r) => !isDuplicateReject(r.reason)).length,
-    duplicateFiles: rejects.filter((r) => isDuplicateReject(r.reason)).length,
-    newProducts: newCount, existingProducts: withPhotos.length - newCount,
-    shotsToRemove: existing.reduce((s, p) => s + p.shotsToRemove.length, 0),
-    previewReady: true, failReason: null,
-  };
-  const waitingForColumn = uploads.some((u) => (u.detected as Detected | null)?.cannotRead);
-  if (!versions.length && !waitingForColumn) {
-    const uploadErrors = uploads.filter((u) => u.status === "failed" && u.error).map((u) => u.error!);
-    const failReason = noPhotosReason(grouped.rejected, uploadErrors);
-    await patchCounts(db, batch.id, { ...counts, failReason }, { status: "failed" });
+  // An input removed while this ran (spec 14b F3) was read above, so this result is out of date. The
+  // removal already cleared previewReady; keep it cleared (no failure either) so the next Continue
+  // runs this step again without it.
+  const removedSince = state.uploadIds.length ? await db.select({ id: catalogUploads.id }).from(catalogUploads).where(and(inArray(catalogUploads.id, state.uploadIds), eq(catalogUploads.status, "removed"))) : [];
+  if (removedSince.length) {
+    if (!(await lease.close({ ...state.counts, previewReady: false, phase: null, placed: total }, "draft"))) return lease.stopped();
+    return { progress: { done: 0, total: 0, phase: "done" }, outcome: "stale: an input was removed" };
+  }
+  if (state.failReason) {
+    if (!(await lease.close({ ...state.counts, failReason: state.failReason, phase: null, placed: total }, "failed"))) return lease.stopped();
     // An operator upload with nothing usable: WARNING, so it sends no alert and stays out of Error Reporting.
-    log("WARNING", "batch failed", { batchId: batch.id, brandSlug: batch.brandSlug, reason: failReason, cause: "no_photos" });
+    log("WARNING", "batch failed", { batchId: batch.id, brandSlug: batch.brandSlug, reason: state.failReason, cause: "no_photos" });
     return { progress: { done: 0, total: 0, phase: "done" }, outcome: "failed: no photos" };
   }
-  await patchCounts(db, batch.id, counts, { status: "draft" });
+  if (!(await lease.close({ ...state.counts, phase: state.waitingForColumn ? "needs_input" : "ready", placed: total }, "draft"))) return lease.stopped();
   return {
     progress: { done: versions.length, total: versions.length, phase: "done" },
-    outcome: `preview ready: ${withPhotos.length} products, ${versions.length} photos`,
+    outcome: `preview ready: ${state.preview.products.length} products, ${versions.length} photos`,
   };
 }
 

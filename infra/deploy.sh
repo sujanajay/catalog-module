@@ -11,6 +11,8 @@
 # Run infra/bootstrap.sh first.
 #
 # Usage (Git Bash, from the repo root): bash infra/deploy.sh
+# Spec 16: the service shape (instances, CPU, queue slots, connection budget, GPU service, which service upscales)
+# is env with today's values as defaults; see infra/lib/shape.sh for the names and the F2 run values.
 # Env overrides: SKIP_BUILD=1 (reuse the images tagged with the current commit; also the rollback
 # path: check out an older commit and run SKIP_BUILD=1 bash infra/deploy.sh).
 # CATALOG_LOCAL_SMOKE=1 runs the smoke in-process on this machine instead of the Cloud Run job
@@ -32,8 +34,14 @@ WEB_SERVICE=catalog-web
 WORKER_SERVICE=catalog-worker
 QUEUE=catalog
 BUILD_CONFIG=cloudbuild.yaml
-CHUNK_IMAGES=${CATALOG_CHUNK_IMAGES:-25}
+CHUNK_IMAGES=${CATALOG_CHUNK_IMAGES:-10}
 [[ "$CHUNK_IMAGES" =~ ^[1-9][0-9]*$ ]] || { echo "CATALOG_CHUNK_IMAGES must be a positive integer" >&2; exit 1; }
+# Spec 15: chunk tasks queued at once per batch (web Start and the worker both dispatch the window).
+CHUNK_WINDOW=${CATALOG_CHUNK_WINDOW:-8}
+[[ "$CHUNK_WINDOW" =~ ^[1-9][0-9]*$ ]] || { echo "CATALOG_CHUNK_WINDOW must be a positive integer" >&2; exit 1; }
+# Spec 15: optional per-delivery time budget for the worker (code default 480000 ms, the cap).
+CHUNK_BUDGET=${CATALOG_CHUNK_TIME_BUDGET_MS:-}
+[[ -z "$CHUNK_BUDGET" || "$CHUNK_BUDGET" =~ ^[1-9][0-9]*$ ]] || { echo "CATALOG_CHUNK_TIME_BUDGET_MS must be a positive integer" >&2; exit 1; }
 if [ "${CATALOG_PREVIEW:-0}" = 1 ]; then
   WEB_SERVICE=catalog-web-preview
   WORKER_SERVICE=catalog-worker-preview
@@ -53,6 +61,18 @@ ASSETS_BUCKET=gs://image-links-agent-assets
 DB_HOST=$(gcv sql instances describe ila-pg --format='value(ipAddresses.filter("type:PRIVATE").extract(ipAddress).flatten())')
 
 [ -n "$DB_HOST" ] || { echo "ila-pg has no private IP; run infra/bootstrap.sh first" >&2; exit 1; }
+# Spec 16: what ila-pg allows now (its max_connections flag, else the tier's default), so the connection budget
+# is never raised before the tier is (infra/sql-tier.sh).
+SQL_TIER_LIVE=$(gcv sql instances describe ila-pg --format='value(settings.tier)')
+SQL_FLAGS_JSON=$(gcv sql instances describe ila-pg --format='json(settings.databaseFlags)')
+SQL_MAX_FLAG=$(node -e '
+  const flags = JSON.parse(require("fs").readFileSync(0, "utf8").trim() || "{}")?.settings?.databaseFlags ?? [];
+  console.log(flags.find((f) => f.name === "max_connections")?.value ?? "");
+' <<<"$SQL_FLAGS_JSON")
+# shellcheck source=lib/shape.sh
+source infra/lib/shape.sh
+SQL_CONNECTION_LIMIT=${SQL_MAX_FLAG:-$(tier_max_connections "$SQL_TIER_LIVE")}
+[ -n "$SQL_CONNECTION_LIMIT" ] || { echo "ERROR: unknown ila-pg tier '$SQL_TIER_LIVE'; cannot check the connection budget" >&2; exit 1; }
 gcloud secrets describe catalog-db-password >/dev/null 2>&1 || { echo "secret catalog-db-password missing; run infra/bootstrap.sh first" >&2; exit 1; }
 if [ -n "$(git status --porcelain)" ]; then
   echo "ERROR: commit source changes before deploying; image tag $TAG must identify the source being built" >&2
@@ -96,46 +116,37 @@ ENV_VARS+=",TASKS_INGEST_QUEUE=$QUEUE-ingest"
 # to opptra-datawarehouse and redeploy. See docs/solutions/infra-bootstrap.md.
 BQ_PROJECT=${BQ_PROJECT:-image-links-agent}
 # --- Database connection budget (docs/solutions/db-connection-budget.md) ----------------------
-# ila-pg is a shared db-f1-micro with no max_connections flag: Postgres allows 25 connections, 3 of
-# them reserved for superusers (superuser_reserved_connections), so ordinary roles get 22. The
-# earlier ila-web and ila-worker apps use the same instance; we assume 4 for them when idle (their
-# pools are not ours to cap). That leaves 18 for the catalog, counted at the worst case (every
-# service at max instances, every pool full):
+# ila-pg is shared with the earlier ila-web and ila-worker apps; we assume 4 connections for them when idle (their
+# pools are not ours to cap) and Postgres keeps 3 for superusers. On today's db-f1-micro (25 connections) that leaves
+# 18 for the catalog, counted at the worst case (every service at max instances, every pool full):
 #   worker 4 instances x pool 2 = 8   (concurrency 2, so one connection per in-flight task)
 #   web    3 instances x pool 2 = 6   (queries are short; extra requests wait for a pooled client)
 #   jobs   2 at a time x pool 1 = 2   (load, recheck, QA check, evals, migrate, smoke)
 #   total                       = 16, headroom 2 of 18.
 # 2026-10-20 incident: worker 10 x 2 + web 3 x 3 + jobs 2 x 2 = 33 > 18, every page failed.
-# The Tasks queue dispatches at most worker instances x concurrency = 8 at once so a large batch
-# queues tasks instead of hitting 429 "no available instance" and burning retry attempts.
-# Raise the budget only after a tier or max_connections change in a maintenance window, then
-# change DB_MAX_CONNECTIONS here; the check below refuses a shape that does not fit.
-DB_MAX_CONNECTIONS=25
-DB_RESERVED_CONNECTIONS=3
-ILA_DB_SHARE=4
-WORKER_MAX_INSTANCES=4
-WORKER_CONCURRENCY=2
-WORKER_DB_POOL_MAX=2
-WEB_MAX_INSTANCES=3
-WEB_DB_POOL_MAX=2
-MAX_CONCURRENT_JOBS=2
-JOB_DB_POOL_MAX=1
-# The worker's slots are split between the two queues so they never exceed its capacity: the
-# ingest queue (new-batch setup) keeps INGEST_MAX_DISPATCHES slots free of batch processing.
-INGEST_MAX_DISPATCHES=2
-TASKS_MAX_DISPATCHES=$((WORKER_MAX_INSTANCES * WORKER_CONCURRENCY - INGEST_MAX_DISPATCHES))
-CATALOG_DB_LIMIT=$((DB_MAX_CONNECTIONS - DB_RESERVED_CONNECTIONS - ILA_DB_SHARE))
-CATALOG_DB_TOTAL=$((WORKER_MAX_INSTANCES * WORKER_DB_POOL_MAX + WEB_MAX_INSTANCES * WEB_DB_POOL_MAX + MAX_CONCURRENT_JOBS * JOB_DB_POOL_MAX))
-if [ "$CATALOG_DB_TOTAL" -gt "$CATALOG_DB_LIMIT" ]; then
-  echo "ERROR: catalog connections $CATALOG_DB_TOTAL exceed the budget $CATALOG_DB_LIMIT; see docs/solutions/db-connection-budget.md" >&2
-  exit 1
-fi
-echo "==> connection budget: catalog $CATALOG_DB_TOTAL of $CATALOG_DB_LIMIT"
+# The Tasks queues dispatch at most worker instances x concurrency at once so a large batch queues tasks instead
+# of hitting 429 "no available instance" and burning retry attempts. Spec 16 F2 (db-custom-2-7680, 400
+# connections): worker 24 x 4 (photos at once take a second connection per task, shape.sh) + web 6 + jobs 2 = 104
+# of 393. The defaults and checks live in infra/lib/shape.sh; a shape
+# that does not fit (budget, what ila-pg allows now, slots, the asia-south1 CPU quota, the L4 quota and shape)
+# stops the deploy here, before anything is changed.
+shape_defaults
+shape_check "$SQL_CONNECTION_LIMIT" || exit 1
+echo "==> connection budget: catalog $CATALOG_DB_TOTAL of $CATALOG_DB_LIMIT (ila-pg $SQL_TIER_LIVE allows $SQL_CONNECTION_LIMIT)"
+echo "==> shape: worker $WORKER_MAX_INSTANCES x ${WORKER_CPU} vCPU/$WORKER_MEMORY; slots $TASKS_MAX_DISPATCHES + bulk $BULK_MAX_DISPATCHES + ingest $INGEST_MAX_DISPATCHES of $SLOTS_CAPACITY; asia-south1 vCPU $CPU_TOTAL of $CPU_QUOTA_LIMIT; GPU $GPU_MAX_INSTANCES x ${GPU_CPU} vCPU/$GPU_MEMORY concurrency $GPU_CONCURRENCY, $MAX_RESIDENT_SESSIONS resident; upscale on $UPSCALE_SERVICE"
 # Semicolons, not commas: the value travels inside --set-env-vars. The load driver re-checks it.
 DB_CONNECTION_BUDGET="max=$DB_MAX_CONNECTIONS;reserved=$DB_RESERVED_CONNECTIONS;ila=$ILA_DB_SHARE"
 DB_CONNECTION_BUDGET+=";worker=${WORKER_MAX_INSTANCES}x$WORKER_DB_POOL_MAX;web=${WEB_MAX_INSTANCES}x$WEB_DB_POOL_MAX;jobs=${MAX_CONCURRENT_JOBS}x$JOB_DB_POOL_MAX"
-WORKER_ENV="$ENV_VARS,DB_POOL_MAX=$WORKER_DB_POOL_MAX,BQ_PROJECT=$BQ_PROJECT,BQ_LOCATION=asia-south1,CATALOG_CHUNK_IMAGES=$CHUNK_IMAGES"
+WORKER_ENV="$ENV_VARS,DB_POOL_MAX=$WORKER_DB_POOL_MAX,BQ_PROJECT=$BQ_PROJECT,BQ_LOCATION=asia-south1,CATALOG_CHUNK_IMAGES=$CHUNK_IMAGES,CATALOG_CHUNK_WINDOW=$CHUNK_WINDOW${CHUNK_BUDGET:+,CATALOG_CHUNK_TIME_BUDGET_MS=$CHUNK_BUDGET}"
 WORKER_ENV+=",DB_CONNECTION_BUDGET=$DB_CONNECTION_BUDGET"
+# Spec 16: the throughput settings: the matting client's in-flight limit, photos at once, the bulk class and window,
+# the compute cost line (WORKER_CPU / WORKER_CONCURRENCY) and the AI check pacing (only when set).
+WORKER_ENV+=",MATTE_INFLIGHT_PER_INSTANCE=$MATTE_INFLIGHT_PER_INSTANCE,CATALOG_PHOTO_CONCURRENCY=$CATALOG_PHOTO_CONCURRENCY"
+WORKER_ENV+=",CATALOG_BULK_WINDOW=$CATALOG_BULK_WINDOW,BULK_BATCH_PRODUCTS=$BULK_BATCH_PRODUCTS,WORKER_CPU=$WORKER_CPU,WORKER_CONCURRENCY=$WORKER_CONCURRENCY"
+if [ -n "$LLM_INFLIGHT_PER_INSTANCE" ]; then WORKER_ENV+=",LLM_INFLIGHT_PER_INSTANCE=$LLM_INFLIGHT_PER_INSTANCE"; fi
+# The bulk queue (spec 16 3.2.3): only when it has slots; without it the env is absent and every task uses $QUEUE.
+BULK_QUEUE=$QUEUE-bulk
+if [ "$BULK_MAX_DISPATCHES" -gt 0 ]; then WORKER_ENV+=",TASKS_BULK_QUEUE=$BULK_QUEUE"; fi
 # Jobs get the worker environment with the job pool size (budget above).
 job_env() { printf '%s' "${WORKER_ENV/DB_POOL_MAX=$WORKER_DB_POOL_MAX,/DB_POOL_MAX=$JOB_DB_POOL_MAX,}"; }
 # Compute spend: the worker records cost.computeUsd = vCPU-seconds * COMPUTE_USD_PER_VCPU_SECOND
@@ -146,6 +157,10 @@ job_env() { printf '%s' "${WORKER_ENV/DB_POOL_MAX=$WORKER_DB_POOL_MAX,/DB_POOL_M
 # USD 0.000024 per vCPU-second and memory USD 0.0000025 per GiB-second. The worker shape is
 # --cpu=2 --memory=2Gi, 1 GiB per vCPU: 0.000024 + 1 * 0.0000025 = 0.0000265 per vCPU-second
 # (free tier and the per-request fee ignored). Re-check if the worker's shape or billing changes.
+# Spec 16: a worker shape with another memory per vCPU than 1 GiB gets its own default (2 vCPU/2Gi and the F2
+# 4 vCPU/4Gi both keep 0.0000265, equal to cost.ts).
+usd() { awk "BEGIN { printf \"%.10f\", $1 }" | sed -e 's/0*$//' -e 's/\.$//'; }
+if [ -z "${COMPUTE_USD_PER_VCPU_SECOND:-}" ] && [ "${WORKER_MEMORY%Gi}" != "$WORKER_CPU" ]; then COMPUTE_USD_PER_VCPU_SECOND=$(usd "0.000024 + (${WORKER_MEMORY%Gi} / $WORKER_CPU) * 0.0000025"); fi
 COMPUTE_USD_PER_VCPU_SECOND=${COMPUTE_USD_PER_VCPU_SECOND:-0.0000265}
 [[ "$COMPUTE_USD_PER_VCPU_SECOND" =~ ^[0-9]+([.][0-9]+)?$ ]] || { echo "COMPUTE_USD_PER_VCPU_SECOND must be a number such as 0.0000265" >&2; exit 1; }
 WORKER_ENV+=",COMPUTE_USD_PER_VCPU_SECOND=$COMPUTE_USD_PER_VCPU_SECOND"
@@ -164,7 +179,10 @@ WORKER_ENV+=",COMPUTE_USD_PER_VCPU_SECOND=$COMPUTE_USD_PER_VCPU_SECOND"
 # are a lower bound: instance start-up, idle time before an instance stops, failed upscale calls and a
 # GPU attempt that failed before the CPU service answered are billed but not recorded.
 # Re-check both if a service's shape, region, billing mode or zonal redundancy changes.
+# Spec 16: a GPU shape other than 4 vCPU/16Gi gets its own default from GPU_CPU and GPU_MEMORY (8 vCPU/32Gi:
+# 0.00047364); 4 vCPU/16Gi keeps 0.00034884, equal to cost.ts.
 PRICE_MATTE_CPU_USD_PER_SECOND=${PRICE_MATTE_CPU_USD_PER_SECOND:-0.000136}
+if [ -z "${PRICE_MATTE_GPU_USD_PER_SECOND:-}" ] && [ "$GPU_CPU/$GPU_MEMORY" != 4/16Gi ]; then PRICE_MATTE_GPU_USD_PER_SECOND=$(usd "0.00022404 + $GPU_CPU * 0.0000216 + ${GPU_MEMORY%Gi} * 0.0000024"); fi
 PRICE_MATTE_GPU_USD_PER_SECOND=${PRICE_MATTE_GPU_USD_PER_SECOND:-0.00034884}
 [[ "$PRICE_MATTE_CPU_USD_PER_SECOND" =~ ^[0-9]+([.][0-9]+)?$ ]] || { echo "PRICE_MATTE_CPU_USD_PER_SECOND must be a number such as 0.000136" >&2; exit 1; }
 [[ "$PRICE_MATTE_GPU_USD_PER_SECOND" =~ ^[0-9]+([.][0-9]+)?$ ]] || { echo "PRICE_MATTE_GPU_USD_PER_SECOND must be a number such as 0.00034884" >&2; exit 1; }
@@ -183,7 +201,11 @@ INR_PER_USD=${INR_PER_USD:-84}
 [[ "$INR_PER_USD" =~ ^[0-9]+([.][0-9]+)?$ ]] || { echo "INR_PER_USD must be a number such as 84" >&2; exit 1; }
 WORKER_ENV+=",CATALOG_QA_DEFAULT_MODEL=$CATALOG_QA_DEFAULT_MODEL"
 if [ -n "$DAILY_SPEND_CAP_USD" ]; then WORKER_ENV+=",DAILY_SPEND_CAP_USD=$DAILY_SPEND_CAP_USD"; fi
-WEB_ENV="$ENV_VARS,DB_POOL_MAX=$WEB_DB_POOL_MAX,SHARE_SA_EMAIL=$WEB_SA,CATALOG_CHUNK_IMAGES=$CHUNK_IMAGES"
+# Days without a write after which the sweep cancels an unstarted draft (spec 14d F12; 14 decided 2026-10-27).
+WORKER_ENV+=",DRAFT_EXPIRY_DAYS=${DRAFT_EXPIRY_DAYS:-14}"
+WEB_ENV="$ENV_VARS,DB_POOL_MAX=$WEB_DB_POOL_MAX,SHARE_SA_EMAIL=$WEB_SA,CATALOG_CHUNK_IMAGES=$CHUNK_IMAGES,CATALOG_CHUNK_WINDOW=$CHUNK_WINDOW"
+WEB_ENV+=",CATALOG_BULK_WINDOW=$CATALOG_BULK_WINDOW,BULK_BATCH_PRODUCTS=$BULK_BATCH_PRODUCTS"
+if [ "$BULK_MAX_DISPATCHES" -gt 0 ]; then WEB_ENV+=",TASKS_BULK_QUEUE=$BULK_QUEUE"; fi
 # INR_PER_USD reaches the web (cost line, wizard estimate), the worker (finalize) and, through
 # WORKER_ENV, the Cloud Run jobs (07 4.11). COMPUTE_USD_PER_VCPU_SECOND reaches the worker and the
 # jobs through WORKER_ENV (above) and the web here, so the estimate and recorded spend agree.
@@ -267,10 +289,14 @@ auth_flag() {
 }
 
 echo "==> matting CPU"
+# Spec 16 3.2.4: one resident cut-out model, and /upscale served (UPSCALE_CPU=1). The upscaler loads only when a
+# call comes, and calls come only when the worker's UPSCALE_URL names this service (UPSCALE_SERVICE=cpu), or from
+# the preview stack and the fidelity gate, so serving it costs nothing otherwise.
 if [ "${CATALOG_PREVIEW:-0}" != 1 ]; then
   gcloud run deploy catalog-matting --quiet --image="$AR/matting:$TAG" \
     --service-account="$MATTING_SA" --region="$REGION" "$(auth_flag catalog-matting "$REGION")" \
-    --cpu=4 --memory=16Gi --concurrency=1 --min-instances=0 --max-instances=20 --timeout=300 \
+    --cpu=4 --memory=16Gi --concurrency=1 --min-instances=0 --max-instances="$MATTING_CPU_MAX_INSTANCES" --timeout=300 \
+    --set-env-vars="MAX_RESIDENT_SESSIONS=1,UPSCALE_CPU=1" \
     --labels=app=catalog,component=matte
 fi
 MATTING_URL=$(gcv run services describe catalog-matting --region="$REGION" --format='value(status.url)')
@@ -278,6 +304,9 @@ MATTING_URL=$(gcv run services describe catalog-matting --region="$REGION" --for
 WORKER_ENV+=",MATTING_URL=$MATTING_URL"
 
 echo "==> matting GPU"
+# Spec 16 3.1: resident cut-out models and the CUDA arena cap per model.
+GPU_ENV="MAX_RESIDENT_SESSIONS=$MAX_RESIDENT_SESSIONS"
+if [ -n "$GPU_MEM_LIMIT_BYTES" ]; then GPU_ENV+=",GPU_MEM_LIMIT_BYTES=$GPU_MEM_LIMIT_BYTES"; fi
 # A failed update can leave an older service running. Only this successful deployment supplies
 # its URL; --set-env-vars below replaces the worker environment, clearing any stale GPU URL.
 MATTING_GPU_URL=""
@@ -294,7 +323,8 @@ if [ "${CATALOG_PREVIEW:-0}" = 1 ]; then
 elif GPU_ERR=$(gcloud run deploy catalog-matting-gpu --quiet --image="$AR/matting-gpu:$TAG" \
   --service-account="$MATTING_SA" --region="$GPU_REGION" "$(auth_flag catalog-matting-gpu "$GPU_REGION")" \
   --gpu=1 --gpu-type=nvidia-l4 --no-gpu-zonal-redundancy --no-cpu-throttling \
-  --cpu=4 --memory=16Gi --concurrency=1 --min-instances=0 --max-instances=3 --timeout=300 \
+  --cpu="$GPU_CPU" --memory="$GPU_MEMORY" --concurrency="$GPU_CONCURRENCY" --min-instances=0 \
+  --max-instances="$GPU_MAX_INSTANCES" --timeout=300 --set-env-vars="$GPU_ENV" \
   --labels=app=catalog,component=matte-gpu 2>&1); then
   MATTING_GPU_URL=$(gcv run services describe catalog-matting-gpu --region="$GPU_REGION" --format='value(status.url)')
   [ -n "$MATTING_GPU_URL" ] || { echo "ERROR: GPU matting service has no URL" >&2; exit 1; }
@@ -307,8 +337,12 @@ else
   echo "ERROR: GPU deployment failed for a reason other than quota; stopping" >&2
   exit 1
 fi
-# Spec 11 4.5: the upscaler runs on the GPU service only, so the flag reaches the worker only with a GPU URL.
-if [ -n "$UPSCALE_MODEL" ] && [ -z "$MATTING_GPU_URL" ]; then
+# Spec 11 4.5: the upscaler runs on the GPU service, so the flag reaches the worker only with a GPU URL.
+# Spec 16 3.1.3: with UPSCALE_SERVICE=cpu the CPU cut-out service upscales (it serves /upscale, above) and the worker
+# sends /upscale to it through UPSCALE_URL, so no GPU URL is needed.
+if [ "$UPSCALE_SERVICE" = cpu ]; then
+  if [ -n "$UPSCALE_MODEL" ]; then WORKER_ENV+=",UPSCALE_URL=$MATTING_URL"; fi
+elif [ -n "$UPSCALE_MODEL" ] && [ -z "$MATTING_GPU_URL" ]; then
   echo "WARN: UPSCALE_MODEL=$UPSCALE_MODEL ignored: no GPU matting service URL; the render keeps the plain path" >&2
   UPSCALE_MODEL=""
 fi
@@ -323,6 +357,21 @@ ENSURE_QUEUES="$QUEUE-ingest:$INGEST_MAX_DISPATCHES"
 # gcloud 589 prints short queue names from list while older releases print the full
 # projects/.../queues/<name>; compare basenames so both match (docs/solutions/gcloud-list-names.md).
 EXISTING_QUEUES=$(gcv tasks queues list --location="$REGION" --format='value(name)' | sed 's#.*/##')
+# Spec 16 3.2.3: the bulk queue. Created only when it has slots; an existing one is never deleted. Its slots never
+# exceed what the running worker takes: lowered before the worker deploy, raised after it. With no bulk slots it
+# keeps 1, so a backlog left from a bigger shape drains slowly instead of flooding a smaller worker (the env no
+# longer names it, so it gets no new tasks).
+BULK_QUEUE_EXISTS=0; grep -qxF "$BULK_QUEUE" <<<"$EXISTING_QUEUES" && BULK_QUEUE_EXISTS=1
+BULK_QUEUE_SLOTS=$BULK_MAX_DISPATCHES; [ "$BULK_QUEUE_SLOTS" -gt 0 ] || BULK_QUEUE_SLOTS=1
+if [ "$BULK_QUEUE_EXISTS" = 1 ]; then
+  BULK_NOW=$(gcv tasks queues describe "$BULK_QUEUE" --location="$REGION" --format='value(rateLimits.maxConcurrentDispatches)')
+  if [ -n "$BULK_NOW" ] && [ "$BULK_NOW" -gt "$BULK_QUEUE_SLOTS" ]; then
+    gcloud tasks queues update "$BULK_QUEUE" --location="$REGION" --max-concurrent-dispatches="$BULK_QUEUE_SLOTS" >/dev/null
+    echo "==> tasks queue $BULK_QUEUE: max-concurrent-dispatches lowered to $BULK_QUEUE_SLOTS before the worker deploy"
+  fi
+elif [ "$BULK_MAX_DISPATCHES" -gt 0 ]; then
+  ENSURE_QUEUES+=" $BULK_QUEUE:$BULK_MAX_DISPATCHES"
+fi
 for Q in $ENSURE_QUEUES; do
   if grep -qxF "${Q%%:*}" <<<"$EXISTING_QUEUES"; then
     # Idempotent: keep the parallelism within the worker's capacity (connection budget above).
@@ -334,13 +383,17 @@ for Q in $ENSURE_QUEUES; do
   fi
 done
 gcloud run deploy "$WORKER_SERVICE" --quiet --image="$AR/worker:$TAG" --service-account="$WORKER_SA" \
-  "$(auth_flag "$WORKER_SERVICE")" --cpu=2 --memory=2Gi --concurrency="$WORKER_CONCURRENCY" \
+  "$(auth_flag "$WORKER_SERVICE")" --cpu="$WORKER_CPU" --memory="$WORKER_MEMORY" --concurrency="$WORKER_CONCURRENCY" \
   --min-instances=0 --max-instances="$WORKER_MAX_INSTANCES" --timeout=900 "${NET[@]}" \
   --set-secrets="$WORKER_SECRETS" --set-env-vars="$WORKER_ENV" --labels=app=catalog,component=worker
 if [ "${CATALOG_PREVIEW:-0}" != 1 ]; then
   # Idempotent: keep the queue's parallelism equal to the worker's capacity (connection budget above).
   gcloud tasks queues update "$QUEUE" --location="$REGION" --max-concurrent-dispatches="$TASKS_MAX_DISPATCHES" >/dev/null
   echo "==> tasks queue $QUEUE: max-concurrent-dispatches $TASKS_MAX_DISPATCHES"
+fi
+if [ "$BULK_QUEUE_EXISTS" = 1 ]; then
+  gcloud tasks queues update "$BULK_QUEUE" --location="$REGION" --max-concurrent-dispatches="$BULK_QUEUE_SLOTS" >/dev/null
+  echo "==> tasks queue $BULK_QUEUE: max-concurrent-dispatches $BULK_QUEUE_SLOTS"
 fi
 
 # --- 7. Web --------------------------------------------------------------------------
@@ -453,7 +506,7 @@ echo "WEB_URL=$WEB_URL"
 echo "WORKER_URL=$WORKER_URL"
 echo "MATTING_URL=$MATTING_URL"
 echo "MATTING_GPU_URL=${MATTING_GPU_URL:-not configured}"
-echo "UPSCALE_MODEL=${UPSCALE_MODEL:-off}"
+echo "UPSCALE_MODEL=${UPSCALE_MODEL:-off} (on $UPSCALE_SERVICE)"
 
 # --- 10. Monitoring --------------------------------------------------------------------
 # Email alerts, log-based metrics and the "Catalog ops" dashboard (infra/monitoring.sh, check-then-

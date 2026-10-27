@@ -17,3 +17,15 @@ jobs:
       - run: pnpm lint
       - run: pnpm typecheck
       - run: pnpm test
+      # Intake browser scenarios (spec 14 section 8.3): local harness, no GCP, no deployed service.
+      - name: Install Chromium for the browser tests
+        run: pnpm --filter @catalog/web exec playwright install --with-deps chromium
+      - name: Intake browser scenarios
+        run: pnpm --filter @catalog/web exec playwright test --config test/catalog-intake.config.ts
+      - name: Keep the browser test videos and traces
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: catalog-intake-browser
+          path: apps/web/test-results/catalog-intake/
+          if-no-files-found: ignore

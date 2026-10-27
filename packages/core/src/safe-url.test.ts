@@ -154,3 +154,65 @@ describe("safeFetch", () => {
     await expect(safeFetch("https://c.example.com/missing.jpg", { fetch: f, lookup })).rejects.toThrow(/answered 404/);
   });
 });
+
+describe("safeFetch headers and truncateAt (spec 14b F2)", () => {
+  /** Fake fetch that records the headers of every request and streams a large body in chunks. */
+  function recording(routes: Record<string, Reply & { chunks?: number }>) {
+    const calls: { url: string; headers: Record<string, string>; cancelled: boolean }[] = [];
+    const fn = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const call = { url, headers: { ...(init?.headers as Record<string, string> | undefined) }, cancelled: false };
+      calls.push(call);
+      const r = routes[url];
+      if (!r) throw new Error(`fakeFetch: no route for ${url}`);
+      if (!r.chunks) return new Response(r.body ?? null, { status: r.status, headers: r.headers });
+      let sent = 0;
+      const body = new ReadableStream<Uint8Array>({
+        pull(controller) {
+          if (sent++ >= r.chunks!) return controller.close();
+          controller.enqueue(new Uint8Array(700).fill(sent));
+        },
+        cancel() { call.cancelled = true; },
+      });
+      return new Response(body, { status: r.status, headers: r.headers });
+    }) as typeof fetch;
+    return Object.assign(fn, { calls });
+  }
+
+  it("truncateAt 1024 returns 1,024 bytes and status 404 without throwing, and cancels the rest", async () => {
+    const f = recording({ "https://a.example.com/missing.jpg": { status: 404, headers: { "content-type": "text/html" }, chunks: 10 } });
+    const r = await safeFetch("https://a.example.com/missing.jpg", { fetch: f, lookup, truncateAt: 1024 });
+    expect(r.status).toBe(404);
+    expect(r.buf.length).toBe(1024);
+    expect(r.mime).toBe("text/html");
+    expect(f.calls[0]!.cancelled).toBe(true);
+  });
+
+  it("truncateAt returns a short body whole", async () => {
+    const f = recording({ "https://a.example.com/a.jpg": { status: 206, headers: { "content-type": "image/jpeg" }, body: "JPEG" } });
+    const r = await safeFetch("https://a.example.com/a.jpg", { fetch: f, lookup, truncateAt: 1024 });
+    expect([r.status, r.buf.toString(), r.mime]).toEqual([206, "JPEG", "image/jpeg"]);
+  });
+
+  it("sends the headers on every redirect hop", async () => {
+    const f = recording({
+      "https://a.example.com/start": { status: 302, headers: { location: "https://b.example.com/next" } },
+      "https://b.example.com/next": { status: 301, headers: { location: "/final.jpg" } },
+      "https://b.example.com/final.jpg": { status: 206, headers: { "content-type": "image/jpeg" }, body: "JPEG" },
+    });
+    await safeFetch("https://a.example.com/start", { fetch: f, lookup, headers: { Range: "bytes=0-1023" }, truncateAt: 1024 });
+    expect(f.calls.map((c) => [c.url, c.headers.Range])).toEqual([
+      ["https://a.example.com/start", "bytes=0-1023"],
+      ["https://b.example.com/next", "bytes=0-1023"],
+      ["https://b.example.com/final.jpg", "bytes=0-1023"],
+    ]);
+  });
+
+  it("still throws for an unsafe link with truncateAt, and sends no headers without the option", async () => {
+    const f = recording({ "https://a.example.com/start": { status: 302, headers: { location: "https://169.254.169.254/x" } }, "https://c.example.com/x.jpg": { status: 200, body: "x" } });
+    await expect(safeFetch("https://a.example.com/start", { fetch: f, lookup, truncateAt: 1024 })).rejects.toBeInstanceOf(UnsafeUrlError);
+    await expect(safeFetch("http://c.example.com/x.jpg", { fetch: f, lookup, truncateAt: 1024 })).rejects.toBeInstanceOf(UnsafeUrlError);
+    await safeFetch("https://c.example.com/x.jpg", { fetch: f, lookup });
+    expect(f.calls.at(-1)!.headers).toEqual({});
+  });
+});

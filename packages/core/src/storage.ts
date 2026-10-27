@@ -187,12 +187,19 @@ const CREATED_SKEW_MS = 60_000;
 
 // --- Private bucket: lifted base -------------------------------------------
 
-/** Upload to `BUCKET` at `path`; returns the gs:// URI. */
-export async function uploadBuffer(path: string, buf: Buffer, mime: string, options: { cacheControl?: string } = {}): Promise<string> {
+/**
+ * Upload to `BUCKET` at `path`; returns the gs:// URI. `sha256` is stored as the object's custom
+ * metadata `sha256` (headObject returns it), so a later copy of the same bytes can be skipped.
+ */
+export async function uploadBuffer(path: string, buf: Buffer, mime: string, options: { cacheControl?: string; sha256?: string } = {}): Promise<string> {
   const bucket = getBucketName();
   const objectPath = path.replace(/^\/+/, "");
+  const metadata = {
+    ...(options.cacheControl === undefined ? {} : { cacheControl: options.cacheControl }),
+    ...(options.sha256 === undefined ? {} : { metadata: { sha256: options.sha256 } }),
+  };
   await withStorageRetry(objectPath, () =>
-      getStorage().bucket(bucket).file(objectPath).save(buf, { contentType: mime, resumable: false, ...(options.cacheControl === undefined ? {} : { metadata: { cacheControl: options.cacheControl } }) }),
+      getStorage().bucket(bucket).file(objectPath).save(buf, { contentType: mime, resumable: false, ...(Object.keys(metadata).length ? { metadata } : {}) }),
   );
   return toGsUri(bucket, objectPath);
 }
@@ -241,6 +248,8 @@ export interface ObjectHead {
   contentType: string | null;
   generation: string | null;
   crc32c: string | null;
+  /** The custom metadata `sha256` uploadBuffer wrote, when the object carries it. */
+  sha256?: string;
 }
 
 /** Metadata of one object; `exists: false` (other fields null) when it is not there. */
@@ -255,6 +264,7 @@ export async function headObject(gsUri: string): Promise<ObjectHead> {
       contentType: typeof meta.contentType === "string" ? meta.contentType : null,
       generation: meta.generation === undefined ? null : String(meta.generation),
       crc32c: typeof meta.crc32c === "string" ? meta.crc32c : null,
+      ...(typeof meta.metadata?.sha256 === "string" ? { sha256: meta.metadata.sha256 } : {}),
     };
   } catch (err) {
     if (isNotFound(err)) return { exists: false, size: null, contentType: null, generation: null, crc32c: null };

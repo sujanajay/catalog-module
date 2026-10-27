@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Db } from "@catalog/core/db/client";
 import { releaseLocks } from "@catalog/core/catalog/products";
 import { createTestDb } from "@catalog/core/db/testing";
-import { handleSweep, SWEEP_ERROR, type ReleaseLocks } from "./sweep";
+import { DEFAULT_DRAFT_EXPIRY_DAYS, draftExpiryDaysFromEnv, handleSweep, SWEEP_ERROR, type ReleaseLocks } from "./sweep";
 import { EMPTY_BATCH_COUNTS } from "@catalog/core/db/schema";
 import type { BatchCounts } from "@catalog/core/catalog/types";
 import { deriveBatchState } from "@catalog/core/catalog/pipeline/status";
@@ -127,6 +127,15 @@ describe("handleSweep (PGlite)", () => {
     expect((await batch(recent)).status).toBe("ingesting");
   });
 
+  it("ignores cancelled batches, however old (spec 14c F4 part 2)", async () => {
+    const cancelled = await insertBatch("cancelled", 48);
+    await db.execute(sql`UPDATE catalog_batches SET counts = '{"placingClaim":{"token":"t","until":"2026-10-17T00:00:00Z"},"finalizePending":true,"finalizeEnqueuedAt":0}'::jsonb WHERE id = ${cancelled}`);
+    const enqueue = vi.fn(async () => "task");
+    expect(await handleSweep({ db, enqueue, releaseLocks, now: () => NOW }, {})).toEqual({ httpStatus: 200, outcome: "swept:0" });
+    expect(await batch(cancelled)).toEqual({ status: "cancelled", error: null });
+    expect(enqueue).not.toHaveBeenCalled();
+  });
+
   it("rolls the status change back when releasing locks fails", async () => {
     const stale = await insertBatch("publishing", 5);
     await insertLockedProducts(stale, 1);
@@ -151,4 +160,50 @@ it("does not count recovery enqueue intents as progress beyond the stale deadlin
   expect((await batch(abandoned)).status).toBe("rendering");
   expect(await handleSweep({db,releaseLocks,enqueue,now:()=>new Date(+NOW+2*3600_000)},{})).toEqual({httpStatus:200,outcome:"swept:1"});
   expect((await batch(abandoned)).status).toBe("failed");
+});
+
+describe("draft expiry (spec 14d F12)", () => {
+  const day = 24;
+  const expiredOf = async (id: string) => (await rows(db, sql`SELECT status, options, updated_at FROM catalog_batches WHERE id = ${id}`))[0]!;
+
+  it("cancels a 15-day draft with options.expired, keeps a 13-day one, leaves a cancelled one alone; the list reads Expired", async () => {
+    const info = vi.spyOn(console, "info").mockImplementation(() => undefined);
+    const old = await insertBatch("draft", 15 * day);
+    const young = await insertBatch("draft", 13 * day);
+    const cancelled = await insertBatch("cancelled", 20 * day);
+    const r = await handleSweep({ db, enqueue: vi.fn(async () => "task"), releaseLocks, now: () => NOW }, {});
+    expect(r).toEqual({ httpStatus: 200, outcome: "swept:0; expired:1" });
+
+    const row = await expiredOf(old);
+    expect(row).toMatchObject({ status: "cancelled", options: { expired: { at: NOW.toISOString(), days: DEFAULT_DRAFT_EXPIRY_DAYS } } });
+    expect((await expiredOf(young)).status).toBe("draft");
+    expect(await expiredOf(cancelled)).toMatchObject({ status: "cancelled", options: {} });
+    const expired = (row.options as { expired: { days: number } }).expired;
+    expect(deriveBatchState({ status: "cancelled", counts: EMPTY_BATCH_COUNTS, updatedAt: NOW, now: NOW, expired }).intake).toBe("Expired after 14 days with no activity");
+    expect(info.mock.calls.map((c) => JSON.parse(String(c[0])))).toContainEqual(expect.objectContaining({ message: "draft expired", batchId: old, days: 14 }));
+
+    // Idempotent: the expired draft is no longer a draft.
+    expect(await handleSweep({ db, enqueue: vi.fn(async () => "task"), releaseLocks, now: () => NOW }, {})).toEqual({ httpStatus: 200, outcome: "swept:0" });
+  });
+
+  it("DRAFT_EXPIRY_DAYS sets the days; a value that is not a whole number of at least 1 keeps 14", async () => {
+    vi.spyOn(console, "info").mockImplementation(() => undefined);
+    expect(draftExpiryDaysFromEnv({ DRAFT_EXPIRY_DAYS: "3" })).toBe(3);
+    for (const v of [undefined, "", "0", "-2", "1.5", "two"]) expect(draftExpiryDaysFromEnv({ DRAFT_EXPIRY_DAYS: v })).toBe(14);
+    const fourDays = await insertBatch("draft", 4 * day);
+    await handleSweep({ db, enqueue: vi.fn(async () => "task"), releaseLocks, now: () => NOW, draftExpiryDays: 3 }, {});
+    expect(await expiredOf(fourDays)).toMatchObject({ status: "cancelled", options: { expired: { days: 3 } } });
+  });
+
+  it("expires drafts even when a recovery enqueue later in the same sweep throws", async () => {
+    vi.spyOn(console, "info").mockImplementation(() => undefined);
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const old = await insertBatch("draft", 15 * day);
+    const pending = await insertBatch("publishing", 1);
+    await db.execute(sql`UPDATE catalog_batches SET counts='{"finalizePending":true,"finalizeEnqueuedAt":0}'::jsonb WHERE id=${pending}`);
+    const enqueue = vi.fn(async () => { throw new Error("queue unavailable"); });
+    await expect(handleSweep({ db, enqueue, releaseLocks, now: () => NOW }, {})).rejects.toThrow("queue unavailable");
+    expect((await expiredOf(old)).status).toBe("cancelled");
+  });
 });

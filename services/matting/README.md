@@ -158,6 +158,27 @@ failures. Build `31868513-c828-4f71-848e-4934547b8a68` passed general/lite/gener
 the same 16 GiB limit without an OOM kill: peak 8,052,648 KiB (7.68 GiB). Keep CPU at 16 GiB
 for headroom; this short smoke does not establish sustained or all-model peak memory.
 
+### Spec 16: resident models and the lock (2026-10-27)
+
+- `MAX_RESIDENT_SESSIONS` (default 1, the policy above) keeps that many cut-out sessions loaded, least recently
+  used first. A switch with the map full releases only the oldest session (and collects it) before loading.
+  Spec 16 runs the GPU service at 3 and the CPU service at 1.
+- On the GPU every cut-out session gets the CUDA option `arena_extend_strategy=kSameAsRequested`, and
+  `gpu_mem_limit` when `GPU_MEM_LIMIT_BYTES` is set (spec 16: 6 GiB, so 3 sessions stay under 18 GiB of the L4's
+  24 GB). This is the guard against the 822 MB arena failure above. Whether three sessions fit is measured in the
+  first GPU run after deploy (`session_ready ... resident=` lines and `/health` `gpuMemory`); the fallback is
+  `MAX_RESIDENT_SESSIONS=2`.
+- `INFERENCE_LOCK` is held only around ONNX session runs (each session's `inner_session` is wrapped so its `run`
+  takes the lock; rembg 2.0.85 calls it inside `predict`) and around loading or evicting a session. Decode,
+  rembg's resize and post-processing, the resize back and the PNG encode run outside it, so with
+  `--concurrency=2` one request's CPU work overlaps the other's inference. An upscale takes the lock per tile.
+- A request that already holds a session evicted by another request finishes with it; that session's memory goes
+  when the request ends, so for a moment one more session than `MAX_RESIDENT_SESSIONS` can be alive.
+- `/health` adds `resident` (loaded ids, most recent last), `maxResident` and `gpuMemory` (`usedMiB`, `totalMiB`
+  from `nvidia-smi`, cached 10 s; null on CPU or when it cannot be read).
+- The CPU service serves `/upscale` when `UPSCALE_CPU=1`; spec 16 sets it there so the GPUs do only cut-outs.
+- Batching several photos into one GPU call is not done: the baked cut-out exports take a batch of 1.
+
 Measurement procedure: Cloud Build switches CPU general/lite/general while all four models remain supported, captures `session_ready`
 logs with actual providers and process resident/high-water KiB, captures `sessions_ready startup_ms`,
 then executes the real smoke and `docker stats --no-stream`. The smoke prints version,

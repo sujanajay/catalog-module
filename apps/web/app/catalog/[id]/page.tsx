@@ -27,7 +27,9 @@ import DetailsTab from "@/components/catalog/DetailsTab";
 import NotRefreshedLine from "@/components/catalog/NotRefreshedLine";
 import CostLine from "@/components/catalog/CostLine";
 import RetryCollectButton from "@/components/catalog/RetryCollectButton";
-import { batchSource, collectingText, plural } from "@/lib/catalog/copy";
+import { canRetryLinks } from "@/lib/catalog/copy";
+import { batchLinkFailures } from "@/lib/catalog/preview";
+import { batchSource, canCancel, canContinueSettingUp, collectingText, continueSettingUpHref, createdText, hasNotStarted, HOW_THIS_WORKS_DRAFT, notStartedText, NOTHING_PROCESSED, plural } from "@/lib/catalog/copy";
 import SkuMapModal from "@/components/catalog/SkuMapModal";
 import { EvalList } from "@/components/catalog/EvalLabelBar";
 
@@ -53,6 +55,10 @@ export default async function BatchPage({ params, searchParams }: { params: Prom
   const evalMode = batch.isTest && !!batch.options.evalSet;
   const tab = (LINKABLE_TABS as readonly string[]).includes(query.tab ?? "") ? query.tab! : undefined;
   const compareFilters = { channel: query.cchannel ?? "", status: query.cstatus ?? "", q: query.q ?? "" };
+  // A batch that never reached Start has made nothing: its Compare and Links sheet tabs say so in one line (spec 14a F9).
+  // A cancelled batch never started (a started one cannot be cancelled, spec 14c F4 part 2).
+  const notStarted = hasNotStarted(batch) || batch.status === "cancelled";
+  const settingUp = canContinueSettingUp(batch);
   // The comparison signs a page of images, so it loads only when its tab is asked for (?tab=compare).
   const [attention, evalPage, cost, stageCost, chunks, comparePage] = await Promise.all([
     evalMode ? Promise.resolve([]) : batchAttention(id),
@@ -60,7 +66,7 @@ export default async function BatchPage({ params, searchParams }: { params: Prom
     batchCostLine(batch),
     batchStageCost(id),
     batchChunkSummary(id),
-    tab === "compare" ? batchCompare(id, { page: Number(query.cpage ?? 0) || 0, ...compareFilters }) : Promise.resolve(null),
+    tab === "compare" && !notStarted ? batchCompare(id, { page: Number(query.cpage ?? 0) || 0, ...compareFilters }) : Promise.resolve(null),
   ]);
   const fullCost = fullCostText(stageCost, inrPerUsdFromEnv());
   const channelLabels = batch.channels.map(c => channel(c).label);
@@ -81,8 +87,13 @@ export default async function BatchPage({ params, searchParams }: { params: Prom
     collecting: collectingText(source),
     attention: `Open "Needs attention" for the ${batch.counts.attentionProducts} ${plural(batch.counts.attentionProducts, "product", "products")} with a problem.`,
     ready: "Download the sheet and paste the links into the marketplace templates.",
-    failed: "Nothing was processed and nothing was charged.",
+    failed: NOTHING_PROCESSED,
+    cancelled: NOTHING_PROCESSED,
   };
+  const notStartedLine = <p>{notStartedText(batch.counts.sources, batch.counts.products)}</p>;
+  // "Try the failed links again" (spec 14b F5 part 1): a draft or a batch that failed before Start, with link failures of which some may be temporary.
+  const linksRetryable = canAct && (batch.counts.linkFailures ?? 0) > 0 && !batch.startedAt && (batch.status === "draft" || batch.status === "failed")
+    && canRetryLinks((await batchLinkFailures(id)).linkFailures);
   return (
     <main>
       <div className="hdr">
@@ -90,16 +101,17 @@ export default async function BatchPage({ params, searchParams }: { params: Prom
           <Link href="/catalog">← All batches</Link>
           <h1>{batch.name}</h1>
           <p className="lead">
-            <Link href={`/catalog/brands/${batch.brandSlug}`}>{batch.brandName}</Link> · {batch.channels.map(c => channel(c).label).join(", ")} · {batch.finishedAt ? `finished ${when(batch.finishedAt)}` : `started ${when(batch.startedAt ?? batch.createdAt)}`} by {batch.createdBy}
+            <Link href={`/catalog/brands/${batch.brandSlug}`}>{batch.brandName}</Link>{channelLabels.length > 0 && ` · ${channelLabels.join(", ")}`} · {batch.finishedAt ? `finished ${when(batch.finishedAt)} by ${batch.createdBy}` : batch.startedAt ? `started ${when(batch.startedAt)} by ${batch.createdBy}` : createdText(when(batch.createdAt), batch.createdBy)}
           </p>
         </div>
         {downloads}
-        {canAct && batch.status === "failed" && (
+        {/* A batch that failed before Start is fixed in place from the banner (Fix and continue, spec 14c F8); one that failed after Start begins again. */}
+        {canAct && batch.status === "failed" && !state.fixable && (
           <ActionOnly><Link className="btn primary" href={`/catalog/new?brand=${encodeURIComponent(batch.brandSlug)}`}>Start again</Link></ActionOnly>
         )}
         {canAct && state.stalled && <ActionOnly><RetryCollectButton batchId={id} /></ActionOnly>}
       </div>
-      <BatchBanner key={id} status={batch.status} counts={batch.counts} source={source} updatedAt={new Date(batch.updatedAt).toISOString()} startedAt={batch.startedAt ? new Date(batch.startedAt).toISOString() : null} now={now.toISOString()} keptPhotos={data.keptPhotos} styliSkipped={data.styliSkipped} />
+      <BatchBanner key={id} status={batch.status} counts={batch.counts} source={source} updatedAt={new Date(batch.updatedAt).toISOString()} startedAt={batch.startedAt ? new Date(batch.startedAt).toISOString() : null} now={now.toISOString()} keptPhotos={data.keptPhotos} styliSkipped={data.styliSkipped} continueHref={canAct && settingUp ? continueSettingUpHref(id) : undefined} fixId={canAct && state.fixable ? id : undefined} retryLinksId={linksRetryable ? id : undefined} cancel={canAct && canCancel(batch) ? { id, name: batch.name } : undefined} />
       <NotRefreshedLine items={data.notRefreshedChannels} />
       <BatchKpis counts={batch.counts} />
       <AutoRefresh active={state.state === "collecting" || state.state === "processing"} />
@@ -107,14 +119,15 @@ export default async function BatchPage({ params, searchParams }: { params: Prom
         attentionCount={attention.length}
         evalLabel={evalPage ? `Needs attention (${evalPage.total} ${plural(evalPage.total, "image", "images")})` : undefined}
         initialTab={tab ?? (evalMode && (query.page || query.channel || query.verdict) ? "attention" : undefined)}
-        compare={comparePage ? <CompareTab data={comparePage} channels={batch.channels} filters={compareFilters} /> : <p className="muted">Loading the comparison.</p>}
-        compareHref={comparePage ? undefined : compareHref(compareFilters)}
+        compare={notStarted ? notStartedLine : comparePage ? <CompareTab data={comparePage} channels={batch.channels} filters={compareFilters} /> : <p className="muted">Loading the comparison.</p>}
+        compareHref={comparePage || notStarted ? undefined : compareHref(compareFilters)}
         overview={
           <div className="grid2">
             <div className="card">
               <h2>How this works</h2>
               <p>We check every image against the marketplace rules and our quality check. Images that pass go straight into the links sheet. Only products with a problem are listed under Needs attention.</p>
-              <p>{next[state.state]}</p>
+              {settingUp && <p>{HOW_THIS_WORKS_DRAFT}</p>}
+              {next[state.state] && <p>{next[state.state]}</p>}
               {batch.counts.existingProducts > 0 && <p>Marketplaces keep their own copy. Re-submit the image columns for products marked updated, shots_removed or reordered in the sheet.</p>}
             </div>
             <div className="card">
@@ -127,18 +140,18 @@ export default async function BatchPage({ params, searchParams }: { params: Prom
         attention={evalPage
           ? <EvalList batchId={id} data={evalPage} channels={batch.channels} filters={evalFilters} canAct={canAct} />
           : <AttentionList items={attention} canAct={canAct} channels={channelLabels} />}
-        sheet={
+        sheet={notStarted ? notStartedLine : (
           <>
             <SheetPreview sheet={data.sheet} />
             {downloads}
-            {canAct && (
+            {canAct && batch.counts.products > 0 && (
               <ActionOnly>
                 <SkuMapModal batchId={id} missing={missingSkus} sheetUri={batch.sheetXlsxUri} />
               </ActionOnly>
             )}
             <p className="help">Opptra SKU ids are filled in automatically when they exist.</p>
           </>
-        }
+        )}
         details={
           <DetailsTab id={id} brand={batch.brandSlug} isTest={batch.isTest} counts={batch.counts}
             failures={data.failures} recheckFailures={data.recheckFailures}

@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import path from "node:path";
 import { Readable } from "node:stream";
 import { eq } from "drizzle-orm";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
@@ -13,17 +15,31 @@ import { GET as get, PATCH as patch } from "../app/api/catalog/batches/[id]/rout
 import { POST as upload } from "../app/api/catalog/batches/[id]/uploads/route";
 import { POST as complete } from "../app/api/catalog/batches/[id]/uploads/[uploadId]/complete/route";
 import { POST as links } from "../app/api/catalog/batches/[id]/links/route";
+import { DELETE as removeLinks, PATCH as patchLinks } from "../app/api/catalog/batches/[id]/links/[uploadId]/route";
+import { DELETE as removeUpload } from "../app/api/catalog/batches/[id]/uploads/[uploadId]/route";
 import { POST as ingest } from "../app/api/catalog/batches/[id]/ingest/route";
 import { GET as detected, PATCH as regroup } from "../app/api/catalog/batches/[id]/detected/route";
 import { GET as preview } from "../app/api/catalog/batches/[id]/preview/route";
 import { POST as start } from "../app/api/catalog/batches/[id]/start/route";
+import { POST as retryLinks } from "../app/api/catalog/batches/[id]/retry-links/route";
 import { setDbForTests, type Db } from "../lib/db";
 import { handOffError } from "../lib/catalog/uploads";
 import { HAND_OFF_FAILED, HAND_OFF_RETRY } from "../lib/catalog/copy";
 import { COLLECT_STALLED_TEXT } from "@catalog/core/catalog/pipeline/status";
 import { resetUserDeps, setUserDeps } from "../lib/user";
 
-vi.mock("@catalog/core/tasks", () => ({ enqueueTask: vi.fn(async () => "test-task") }));
+vi.mock(import("@catalog/core/tasks"), async (original) => ({ ...await original(), enqueueTask: vi.fn(async () => "test-task") }));
+// The paste readback opens the first links (spec 14b F2): a fake image host and a fake resolver, so no network is used.
+vi.mock("@catalog/core/safe-url", async (original) => {
+  const actual = await original<typeof import("@catalog/core/safe-url")>();
+  const jpegHead = () => new Response(new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 0, 0x10]), { status: 206, headers: { "content-type": "image/jpeg" } });
+  const shareHost = /dropbox\.example\.com/;
+  return {
+    ...actual,
+    pinnedFetch: vi.fn(async (input: RequestInfo | URL) => (shareHost.test(String(input)) ? new Response("<html>Dropbox</html>", { status: 200, headers: { "content-type": "text/html" } }) : jpegHead())),
+    safeFetch: (url: string, opts: import("@catalog/core/safe-url").SafeFetchOptions = {}) => actual.safeFetch(url, { lookup: async () => ["93.184.215.14"], ...opts }),
+  };
+});
 vi.mock("@catalog/core/catalog/ingest/google-sheet", async (original) => ({...await original<typeof import("@catalog/core/catalog/ingest/google-sheet")>(),googleClients:vi.fn()}));
 vi.mock("@catalog/core/storage", async (original) => {
   const actual = await original<typeof storage>();
@@ -125,7 +141,19 @@ describe("catalog wizard authorization and contracts",()=>{
   it("stores plain image links with no Google sharing requirement",async()=>{
     const id=await newBatch();
     const response=await links(request("POST",{text:"https://images.example/ABC_1.jpg\nhttps://images.example/ABC_2.jpg"}),ctx(id));
-    expect(response.status).toBe(200);expect(await response.json()).toMatchObject({kind:"url_list",access:"ok",summary:"We will download them when you start. No sharing needed.",count:2});
+    expect(response.status).toBe(200);expect(await response.json()).toMatchObject({kind:"url_list",access:"ok",summary:"Products will be named from the file names, for example ABC. We opened the first 2 links: all fine.",count:2,pill:"2 image links",notes:[]});
+  });
+  it("reads back a pasted grid and explains a share page while still keeping the paste (spec 14b F2)",async()=>{
+    const id=await newBatch();
+    const grid=readFileSync(path.resolve(__dirname,"../../../packages/core/test-fixtures/catalog/intake/intake-pasted-grid.txt"),"utf8");
+    const body=await (await links(request("POST",{text:grid}),ctx(id))).json();
+    expect(body).toMatchObject({kind:"url_list",access:"ok",count:27,pill:"6 rows, 27 links",notes:["3 empty or non-link cells were ignored."]});
+    expect(body.summary).toBe("4 to 5 links per row. This paste has no product code column, so products will be named from the photo file names, for example BH-4610-NE-NERO. To name them yourself, copy the product code column in as the first column. We opened the first 3 links: all fine.");
+    const shared=await newBatch();
+    const share=await (await links(request("POST",{text:"https://www.dropbox.example.com/s/tbd1share/TB-D_1.JPG?dl=0"}),ctx(shared))).json();
+    expect(share.notes).toEqual(["These look like share pages, not image links. Download the photos and drop them here, or paste direct image links."]);
+    const [row]=await db.select().from(catalogUploads).where(eq(catalogUploads.batchId,shared));
+    expect(row!.status).toBe("uploaded");expect(row!.detected).toMatchObject({shape:"one_per_line",sample:{tried:1,ok:0,webPages:1}});
   });
   it("keeps folder paths and HEIC, collects, re-groups without fetching URLs, previews and starts real chunks",async()=>{
     const id=await newBatch();const photo=await addPhoto(id,"ABC123/ABC123_1.heic");await collectBatch(id);
@@ -138,7 +166,7 @@ describe("catalog wizard authorization and contracts",()=>{
     const response=await start(request("POST",{previewAt:shown.previewAt}),ctx(id));expect(response.status).toBe(200);expect(await response.json()).toMatchObject({id,status:"matting"});
     const lines=info.mock.calls.map(([line])=>{try{return JSON.parse(String(line)) as Record<string,unknown>;}catch{return {};}});info.mockRestore();
     expect(lines.filter(l=>l.message==="batch started")).toEqual([expect.objectContaining({severity:"INFO",batchId:id,products:1,sources:1,outputs:2,chunks:1,"logging.googleapis.com/labels":{app:"catalog",batchId:id}})]);
-    const chunks=(await db.select().from(catalogChunks)).filter((c)=>c.batchId===id);expect(chunks).toHaveLength(1);expect(chunks[0]).toMatchObject({stage:"matte",status:"queued"});expect(enqueueTask).toHaveBeenCalledWith("/tasks/catalog/chunk",{chunkId:chunks[0]!.id},{taskId:`chunk-${chunks[0]!.id}-matte`});
+    const chunks=(await db.select().from(catalogChunks)).filter((c)=>c.batchId===id);expect(chunks).toHaveLength(1);expect(chunks[0]).toMatchObject({stage:"matte",status:"queued"});expect(chunks[0]!.dispatchedAt).not.toBeNull();expect(enqueueTask).toHaveBeenCalledWith("/tasks/catalog/chunk",{chunkId:chunks[0]!.id,stage:"matte",step:0},{taskId:`chunk-${chunks[0]!.id}-matte-0`});
     expect((await patch(request("PATCH",{channels:["amazon"]}),ctx(id))).status).toBe(409);
     expect((await upload(request("POST",{files:[]}),ctx(id))).status).toBe(409);
   });
@@ -246,7 +274,8 @@ describe("ingest hand-off failures and stalled collecting",()=>{
     expect((await patch(request("PATCH",{name:"catalog-test e2e b"}),ctx(id))).status).toBe(200);
     expect((await ingest(request("POST"),ctx(id))).status).toBe(200);
     expect(await statusOf(id)).toBe("ingesting");
-    const ids=ingestCalls().map(([,body,opts])=>{expect(body).toEqual({batchId:id,uploadId:photo.id});return opts?.taskId;});
+    // The body carries the hand-off's run (spec 14c F6), the same one the task name ends with.
+    const ids=ingestCalls().map(([,body,opts])=>{expect(body).toEqual({batchId:id,uploadId:photo.id,run:expect.any(String)});expect(opts?.taskId).toBe(`ingest-${photo.id}-${(body as {run:string}).run}`);return opts?.taskId;});
     expect(ids).toHaveLength(2);
     for(const taskId of ids) expect(taskId).toMatch(new RegExp(`^ingest-${photo.id}-[0-9a-f-]{36}$`));
     expect(ids[0]).not.toBe(ids[1]);
@@ -271,7 +300,7 @@ describe("ingest hand-off failures and stalled collecting",()=>{
     expect(stuck).toMatchObject({state:"collecting",stalled:true,text:COLLECT_STALLED_TEXT});
     vi.mocked(enqueueTask).mockClear();
     expect((await ingest(request("POST"),ctx(id))).status).toBe(200);
-    expect(ingestCalls().map(([,body])=>body)).toEqual([{batchId:id,uploadId:photo.id}]);
+    expect(ingestCalls().map(([,body])=>body)).toEqual([{batchId:id,uploadId:photo.id,run:expect.any(String)}]);
     expect((await (await get(request("GET"),ctx(id))).json()).state.stalled).toBeUndefined();
   });
   it("Try again on a stalled batch whose files were all read hands one read upload over, so the grouping step runs",async()=>{
@@ -281,9 +310,180 @@ describe("ingest hand-off failures and stalled collecting",()=>{
     await db.update(catalogBatches).set({status:"ingesting",counts:{...row!.counts,previewReady:false},updatedAt:new Date(Date.now()-15*60_000)}).where(eq(catalogBatches.id,id));
     vi.mocked(enqueueTask).mockClear();
     expect((await ingest(request("POST"),ctx(id))).status).toBe(200);
-    expect(ingestCalls().map(([,body])=>body)).toEqual([{batchId:id,uploadId:photo.id}]);
+    expect(ingestCalls().map(([,body])=>body)).toEqual([{batchId:id,uploadId:photo.id,run:expect.any(String)}]);
     await runIngest(db,{storage,fetch:vi.fn(),enqueue:enqueueTask},{batchId:id,uploadId:photo.id});
     const [after]=await db.select().from(catalogBatches).where(eq(catalogBatches.id,id));
     expect(after!.status).toBe("draft");expect(after!.counts.previewReady).toBe(true);
+  });
+});
+
+describe("inputs corrected without duplicates (spec 14b F3)",()=>{
+  const heic=()=>vi.fn(async()=>new Response(new Uint8Array(heicFixture(1200,1600)),{headers:{"content-type":"image/heic"}}));
+  const rowsOf=async(id:string)=>(await db.select().from(catalogUploads)).filter((u)=>u.batchId===id);
+  const countsOf=async(id:string)=>(await db.select().from(catalogBatches).where(eq(catalogBatches.id,id)))[0]!.counts;
+  async function collectAll(id:string){
+    expect((await ingest(request("POST"),ctx(id))).status).toBe(200);
+    const fetchImage=heic();
+    for(const u of (await rowsOf(id)).filter((u)=>u.status==="uploaded"))await runIngest(db,{storage,fetch:fetchImage,enqueue:enqueueTask},{batchId:id,uploadId:u.id});
+  }
+  const groupsOf=async(id:string)=>((await (await preview(request("GET"),ctx(id))).json()).groups as {identifier:string}[]).map((g)=>g.identifier).sort();
+  it("paste A (3 links) then PATCH with text B (2 links): one url_list row, 2 links, preview invalidated",async()=>{
+    const id=await newBatch();
+    const first=await links(request("POST",{text:"https://8.8.8.8/AAA_1.heic\nhttps://8.8.8.8/AAA_2.heic\nhttps://8.8.8.8/BBB_1.heic"}),ctx(id));
+    expect(first.status).toBe(200);const {uploadId}=await first.json() as {uploadId:string};
+    await collectAll(id);expect((await countsOf(id)).previewReady).toBe(true);
+    expect(await groupsOf(id)).toEqual(["AAA","BBB"]);
+    const replaced=await patchLinks(request("PATCH",{text:"https://8.8.8.8/CCC_1.heic\nhttps://8.8.8.8/CCC_2.heic"}),ctx(id,uploadId));
+    expect(replaced.status).toBe(200);expect(await replaced.json()).toMatchObject({kind:"url_list",access:"ok",count:2,uploadId});
+    const lists=(await rowsOf(id)).filter((u)=>u.kind==="url_list");
+    expect(lists).toHaveLength(1);expect(lists[0]!.id).toBe(uploadId);expect(lists[0]!.status).toBe("uploaded");
+    expect(lists[0]!.sourceUrl!.split("\n")).toHaveLength(2);
+    expect((await countsOf(id)).previewReady).toBe(false);
+    await collectAll(id);
+    expect(await groupsOf(id)).toEqual(["CCC"]);
+  });
+  it("keeps the paste as sent, so a failed link's row and column match the readback's lines (a leading blank line and cell count)",async()=>{
+    const id=await newBatch();
+    const text="\n\thttps://8.8.8.8/AAA_1.heic\nhttps://8.8.8.8/BBB_1.heic";
+    expect((await links(request("POST",{text}),ctx(id))).status).toBe(200);
+    expect((await rowsOf(id))[0]!.sourceUrl).toBe(text);
+    expect((await ingest(request("POST"),ctx(id))).status).toBe(200);
+    const image=heic();
+    const fetchSome=vi.fn(async(input:RequestInfo|URL)=>String(input).includes("AAA")?new Response("missing",{status:404,headers:{"content-type":"text/plain"}}):image());
+    for(const u of (await rowsOf(id)).filter((u)=>u.status==="uploaded"))await runIngest(db,{storage,fetch:fetchSome as typeof fetch,enqueue:enqueueTask},{batchId:id,uploadId:u.id});
+    const body=await (await preview(request("GET"),ctx(id))).json() as {linkFailureRows:{where:string;url:string}[]};
+    expect(body.linkFailureRows).toEqual([expect.objectContaining({where:"row 2, column 2",url:"https://8.8.8.8/AAA_1.heic"})]);
+  });
+  it("binds the paste box to one url_list row: a second POST /links replaces it, and a removed paste comes back as the same row",async()=>{
+    const id=await newBatch();
+    const a=await (await links(request("POST",{text:"https://8.8.8.8/AAA_1.heic"}),ctx(id))).json() as {uploadId:string};
+    const b=await (await links(request("POST",{text:"https://8.8.8.8/BBB_1.heic\nhttps://8.8.8.8/BBB_2.heic"}),ctx(id))).json() as {uploadId:string};
+    expect(b.uploadId).toBe(a.uploadId);
+    expect((await rowsOf(id)).filter((u)=>u.kind==="url_list")).toHaveLength(1);
+    expect((await removeLinks(request("DELETE"),ctx(id,a.uploadId))).status).toBe(200);
+    expect((await rowsOf(id))[0]!.status).toBe("removed");
+    const again=await (await links(request("POST",{text:"https://8.8.8.8/DDD_1.heic"}),ctx(id))).json() as {uploadId:string};
+    expect(again.uploadId).toBe(a.uploadId);
+    const rows=await rowsOf(id);expect(rows).toHaveLength(1);expect(rows[0]!.status).toBe("uploaded");
+  });
+  it("DELETE an upload: the row is removed, the preview is invalidated by a merge, and ingestBatch ignores it",async()=>{
+    const id=await newBatch();const kept=await addPhoto(id,"KEEP_1.heic");const gone=await addPhoto(id,"GONE_1.heic");
+    await collectAll(id);expect(await groupsOf(id)).toEqual(["GONE","KEEP"]);
+    // A counts key written by the worker after the web tier read the row must survive (merge, not replace).
+    await db.update(catalogBatches).set({counts:{...(await countsOf(id)),collected:7}}).where(eq(catalogBatches.id,id));
+    const removed=await removeUpload(request("DELETE"),ctx(id,gone.id));
+    expect(removed.status).toBe(200);expect(await removed.json()).toEqual({removed:true});
+    expect((await rowsOf(id)).find((u)=>u.id===gone.id)!.status).toBe("removed");
+    const counts=await countsOf(id);expect(counts.previewReady).toBe(false);expect(counts.collected).toBe(7);
+    vi.mocked(enqueueTask).mockClear();
+    expect((await ingest(request("POST"),ctx(id))).status).toBe(200);
+    const handed=vi.mocked(enqueueTask).mock.calls.filter(([route])=>route==="/tasks/catalog/ingest").map(([,body])=>(body as {uploadId:string}).uploadId);
+    expect(handed).toEqual([kept.id]);
+    for(const uploadId of handed)await runIngest(db,{storage,fetch:vi.fn(),enqueue:enqueueTask},{batchId:id,uploadId});
+    expect(await groupsOf(id)).toEqual(["KEEP"]);
+    // A delivery for the removed upload queued before the removal reads nothing.
+    expect((await runIngest(db,{storage,fetch:vi.fn(),enqueue:enqueueTask},{batchId:id,uploadId:gone.id})).outcome).toBe("noop: upload already removed");
+  });
+  it("a batch with one removed and one uploaded row collects the uploaded one only",async()=>{
+    const id=await newBatch();const gone=await addPhoto(id,"OLD_1.heic");
+    expect((await removeUpload(request("DELETE"),ctx(id,gone.id))).status).toBe(200);
+    const kept=await addPhoto(id,"NEW_1.heic");
+    await collectAll(id);
+    const rows=await rowsOf(id);
+    expect(rows.find((u)=>u.id===gone.id)!.status).toBe("removed");expect(rows.find((u)=>u.id===kept.id)!.status).toBe("collected");
+    expect(await groupsOf(id)).toEqual(["NEW"]);
+    expect(JSON.stringify(await (await detected(request("GET"),ctx(id))).json())).not.toContain("OLD");
+  });
+  it("keeps a file removed while it uploaded removed when its completion arrives, and it no longer blocks Continue",async()=>{
+    const id=await newBatch();
+    const [plan]=await (await upload(request("POST",{files:[{name:"LATE_1.heic",size:10,mime:"image/heic",relativePath:"LATE_1.heic"}]}),ctx(id))).json();
+    const row=(await rowsOf(id))[0]!;objects.set(row.gcsUri!,{buf:Buffer.alloc(10),mime:"image/heic"});
+    expect((await removeUpload(request("DELETE"),ctx(id,plan.uploadId))).status).toBe(200);
+    expect((await complete(request("POST"),ctx(id,plan.uploadId))).status).toBe(410);
+    expect((await rowsOf(id))[0]!.status).toBe("removed");
+    const refused=await ingest(request("POST"),ctx(id));
+    expect(refused.status).toBe(400);expect((await refused.json()).error).toBe("Add photos or a links sheet before continuing.");
+  });
+});
+
+describe("POST /retry-links re-fetches only the failed links (spec 14b F5 part 1)",()=>{
+  const H="https://8.8.8.8";
+  const batchOf=async(id:string)=>(await db.select().from(catalogBatches).where(eq(catalogBatches.id,id)))[0]!;
+  /** A fake image host: `answer(url)` is the status; 200 serves a HEIC photo. Records every GET. */
+  function host(answer:(url:string)=>number){
+    const calls:string[]=[];
+    const fetch=vi.fn(async(input:RequestInfo|URL)=>{const url=String(input);calls.push(url);const s=answer(url);return s===200?new Response(new Uint8Array(heicFixture(1200,1600)),{headers:{"content-type":"image/heic"}}):new Response("no",{status:s,headers:{"content-type":"text/plain"}});});
+    return {fetch:fetch as unknown as typeof globalThis.fetch,calls};
+  }
+  /** Runs every `uploaded` upload of the batch once, as the worker does for the hand-off. */
+  async function runUploaded(id:string,fetch:typeof globalThis.fetch){
+    for(const u of (await db.select().from(catalogUploads)).filter((u)=>u.batchId===id && u.status==="uploaded"))await runIngest(db,{storage,fetch,enqueue:enqueueTask},{batchId:id,uploadId:u.id});
+  }
+  async function pastedBatch(text:string,answer:(url:string)=>number){
+    const id=await newBatch();
+    expect((await links(request("POST",{text}),ctx(id))).status).toBe(200);
+    expect((await ingest(request("POST"),ctx(id))).status).toBe(200);
+    await runUploaded(id,host(answer).fetch);
+    return id;
+  }
+  const text=`${H}/AAA_1.heic\t${H}/AAA_2.heic\n${H}/BBB_1.heic\t${H}/BBB_2.heic`;
+
+  it("on a draft re-fetches only the rejects (fake fetch count equals the reject count) and the batch ends ready",async()=>{
+    const id=await pastedBatch(text,(url)=>url.endsWith("AAA_2.heic")?503:url.endsWith("BBB_2.heic")?404:200);
+    expect((await batchOf(id)).status).toBe("draft");
+    expect((await batchOf(id)).counts).toMatchObject({previewReady:true,linkFailures:2,sources:2,unsupportedFiles:0});
+    const step2=await (await detected(request("GET"),ctx(id))).json();
+    expect(step2.linkFailures).toMatchObject({total:2,temporary:1,links:4,products:2});
+    expect(step2.unreadable).toEqual([]);
+    const shown=await (await preview(request("GET"),ctx(id))).json();
+    expect(shown.linkFailureRows).toEqual([
+      {url:`${H}/AAA_2.heic`,where:"row 1, column 2",reason:"could not be reached"},
+      {url:`${H}/BBB_2.heic`,where:"row 2, column 2",reason:"answered 'not found' (404)"},
+    ]);
+    expect(shown.warnings).toContainEqual({headline:"2 links could not be downloaded.",detail:"2 products are missing shots: AAA, BBB. Try the failed links again, fix the sheet, or continue without them."});
+
+    const retried=await retryLinks(request("POST"),ctx(id));
+    expect(retried.status).toBe(200);expect(await retried.json()).toEqual({collecting:true});
+    expect((await batchOf(id)).status).toBe("ingesting");
+    const now=host(()=>200);
+    await runUploaded(id,now.fetch);
+    expect(now.calls.sort()).toEqual([`${H}/AAA_2.heic`,`${H}/BBB_2.heic`]);
+    const after=await batchOf(id);
+    expect(after.status).toBe("draft");
+    expect(after.counts).toMatchObject({previewReady:true,linkFailures:0,sources:4,collected:4,collectTotal:4});
+  });
+
+  it("on a links batch that failed before Start reopens it (reason cleared), re-fetches only the rejects and ends draft ready when the host now answers",async()=>{
+    const id=await pastedBatch(text,()=>503);
+    const failed=await batchOf(id);
+    expect(failed.status).toBe("failed");expect(failed.startedAt).toBeNull();
+    expect(failed.counts.failReason).toBe(`No photos could be downloaded from the 4 links you pasted. 4 could not be reached, for example ${H}/AAA_1.heic (row 1, column 1). Some of these may work on a second try. Press Try the failed links again.`);
+    const retried=await retryLinks(request("POST"),ctx(id));
+    expect(retried.status).toBe(200);
+    const reopened=await batchOf(id);
+    expect(reopened.status).toBe("ingesting");expect(reopened.counts.failReason).toBeNull();expect(reopened.counts.previewReady).toBe(false);
+    const now=host(()=>200);
+    await runUploaded(id,now.fetch);
+    expect(now.calls).toHaveLength(4);
+    const ready=await batchOf(id);
+    expect(ready.status).toBe("draft");expect(ready.counts).toMatchObject({previewReady:true,failReason:null,linkFailures:0,sources:4});
+  });
+
+  it("is refused for a started or collecting batch (409), for a viewer (403), and when no link failed (400)",async()=>{
+    const id=await pastedBatch(text,(url)=>url.endsWith("AAA_2.heic")?503:200);
+    await db.update(catalogBatches).set({status:"failed",startedAt:new Date()}).where(eq(catalogBatches.id,id));
+    const started=await retryLinks(request("POST"),ctx(id));
+    expect(started.status).toBe(409);expect(await started.json()).toEqual({error:"This batch has already started. Make a new batch to add more photos."});
+    for(const status of ["matting","ingesting"] as const){
+      await db.update(catalogBatches).set({status,startedAt:status==="matting"?new Date():null}).where(eq(catalogBatches.id,id));
+      expect((await retryLinks(request("POST"),ctx(id))).status).toBe(409);
+    }
+    expect(enqueueTask).toHaveBeenCalledTimes(1);
+    setUserDeps({roleLookup:async()=>"viewer"});
+    expect((await retryLinks(request("POST"),ctx(id))).status).toBe(403);
+    setUserDeps({roleLookup:async()=>"operator"});
+    const clean=await pastedBatch(`${H}/CCC_1.heic`,()=>200);
+    const none=await retryLinks(request("POST"),ctx(clean));
+    expect(none.status).toBe(400);expect(await none.json()).toEqual({error:"No links failed in this batch. Reload this page."});
   });
 });

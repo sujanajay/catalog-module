@@ -1,4 +1,5 @@
 // Tier 2 (PGlite): product matching and the overwrite preview (spec 04, "Overwrite preview cases").
+import { eq } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { Db } from "../../db/client";
 import {
@@ -274,5 +275,52 @@ describe("buildOverwritePreview", () => {
     const batch = await newBatch("unmatched");
     const { grouped, sha256ByItem } = grouping({ LOST1: [sha("l1")] });
     await expect(buildOverwritePreview(db, batch, grouped, [], sha256ByItem)).rejects.toThrow(/No product match was computed for LOST1/);
+  });
+});
+
+describe("the same photos in another batch (spec 14d F10)", () => {
+  const BRAND = "f10brand";
+  const twelve = Array.from({ length: 12 }, (_, i) => sha(`f10-${String(i).padStart(2, "0")}x`));
+  /** Another batch of the brand holding `shas` under `identifier` (version rows, as its placing wrote them). */
+  async function holding(name: string, identifier: string, shas: string[], status: BatchStatus, startedAt: Date | null = null) {
+    const b = await newBatch(name, { brandSlug: BRAND, status });
+    if (startedAt) await db.update(catalogBatches).set({ startedAt }).where(eq(catalogBatches.id, b.id));
+    await seedCurrent(await seedProduct(identifier, { brandSlug: BRAND }), b.id, shas);
+    return b;
+  }
+
+  it("two drafts with the same 12 photos under X and X_OD give one sameBatches entry with the example; started and small overlaps are not listed", async () => {
+    const other = await holding("first delivery", "F10X", twelve, "draft");
+    await holding("started already", "F10S", twelve, "failed", new Date("2026-10-20T10:00:00Z"));
+    await holding("one in common", "F10Y", [twelve[0]!], "draft");
+    const batch = await newBatch("second delivery", { brandSlug: BRAND });
+    const { result } = await preview(batch, { F10X_OD: twelve });
+    expect(result.sameBatches).toEqual([{
+      batchId: other.id, name: "first delivery", createdAt: other.createdAt.toISOString(), state: "Added, not collected yet",
+      sharedPhotos: 12, example: { here: "F10X_OD", there: "F10X" },
+    }]);
+    expect(result.duplicatePhotos).toEqual([]);
+  });
+
+  it("a failed-before-start batch is listed; the same spelling gives no example", async () => {
+    const shas = Array.from({ length: 10 }, (_, i) => sha(`f10b-${i}`));
+    const other = await holding("could not start", "F10Z", shas, "failed");
+    const batch = await newBatch("again", { brandSlug: BRAND });
+    const { result } = await preview(batch, { F10Z: shas });
+    expect(result.sameBatches).toMatchObject([{ batchId: other.id, sharedPhotos: 10, example: null }]);
+    expect(result.sameBatches[0]!.state).toMatch(/^Could not start/);
+  });
+
+  it("one photo under two identifiers gives one duplicatePhotos entry", async () => {
+    const batch = await newBatch("tan and black", { brandSlug: "f10dup" });
+    const { result } = await preview(batch, { "BAG-TAN": [sha("dup-1"), sha("dup-2")], "BAG-BLACK": [sha("dup-1"), sha("dup-3")] });
+    expect(result.duplicatePhotos).toEqual([{ sha256: sha("dup-1"), identifiers: ["BAG-BLACK", "BAG-TAN"], name: "BAG-TAN_1.jpg" }]);
+  });
+
+  it("the batch-wide step skips the cross-batch lookup", async () => {
+    const batch = await newBatch("ingest time", { brandSlug: BRAND });
+    const { grouped, sha256ByItem } = grouping({ F10X_OD: twelve });
+    const matches = await matchProducts(db, batch, [...grouped.products.keys()]);
+    expect((await buildOverwritePreview(db, batch, grouped, matches, sha256ByItem, { otherBatches: false })).sameBatches).toEqual([]);
   });
 });

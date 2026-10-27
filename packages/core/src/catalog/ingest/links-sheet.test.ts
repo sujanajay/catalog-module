@@ -247,3 +247,19 @@ describe("links-sheet.ts reading", () => {
     expect((items[0] as SheetSourceItem).uploadId).toBe("u9");
   });
 });
+
+describe("links with a space in the intake fixtures (spec 14b F2)", () => {
+  const INTAKE = new URL("../../../test-fixtures/catalog/intake/", import.meta.url);
+  const spaceLinks = [1, 2, 3, 4].map((n) => `https://example.com/test_brand/BHSS2620Z-WHITE NAVY_${n}.JPG`);
+
+  for (const [name, identifier] of [["intake-large-sheet.csv", "BHSS2620Z-WN_OD"], ["intake-xlsx-grid.xlsx", "BHSS2620Z-WN"]] as const) {
+    it(`${name} gives the space-name product with all its shots, each link whole`, async () => {
+      const table = await readSheetTable(readFileSync(new URL(name, INTAKE)), name);
+      const { items } = readLinksSheet(table, { sheetColumns: null }, { uploadId: "u1", origin: "sheet" });
+      const space = items.filter((i) => i.identifier === identifier);
+      expect(space.map((i) => [i.n, i.originalName, i.bytes.kind === "url" ? i.bytes.url : ""])).toEqual(
+        spaceLinks.map((url, k) => [k + 1, `BHSS2620Z-WHITE NAVY_${k + 1}.JPG`, url]),
+      );
+    });
+  }
+});

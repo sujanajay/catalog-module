@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { and, eq, inArray, like } from "drizzle-orm";
+import { and, eq, inArray, like, ne } from "drizzle-orm";
 import { catalogBatches, catalogBatchProducts, catalogOutputs, catalogProducts, catalogSourceImages, catalogUploads } from "@catalog/core/db/schema";
 import { brandExportPath } from "@catalog/core/catalog/naming";
 import { CHANNEL_IDS, type ChannelId, type ChangeKind, type SheetStatus } from "@catalog/core/catalog/types";
@@ -122,7 +122,7 @@ export async function batchDetails(id: string, conn: Db = db(), read = downloadB
   const [batch] = await conn.select().from(catalogBatches).where(eq(catalogBatches.id, id));
   if (!batch) throw new HttpError(404, "This batch was not found. Return to All batches.");
   const [uploads, failures, sheet, kept, styliSkips] = await Promise.all([
-    conn.select({ kind: catalogUploads.kind, detected: catalogUploads.detected }).from(catalogUploads).where(eq(catalogUploads.batchId, id)),
+    conn.select({ kind: catalogUploads.kind, detected: catalogUploads.detected }).from(catalogUploads).where(and(eq(catalogUploads.batchId, id), ne(catalogUploads.status, "removed"))),
     conn.select({ n: catalogOutputs.n, originalName: catalogSourceImages.originalName, channel: catalogOutputs.channel, reason: catalogOutputs.reason, error: catalogOutputs.error }).from(catalogOutputs).innerJoin(catalogSourceImages, eq(catalogSourceImages.id,catalogOutputs.sourceImageId)).where(and(eq(catalogOutputs.batchId, id), eq(catalogOutputs.status, "failed"))),
     batchSheet(id, conn, read),
     conn.select({ sourceImageId: catalogOutputs.sourceImageId }).from(catalogOutputs).where(and(eq(catalogOutputs.batchId, id), eq(catalogOutputs.decision, "use_as_is"))),

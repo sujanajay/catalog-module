@@ -174,6 +174,13 @@ describe("GCS operations (fake client)", () => {
     expect(await headObject("gs://b/missing.jpg")).toEqual({ exists: false, size: null, contentType: null, generation: null, crc32c: null });
   });
 
+  it("uploadBuffer stores sha256 as custom metadata and headObject returns it (spec 14c F7 part 1)", async () => {
+    await uploadBuffer("catalog/uspa/b1/raw/A/A_1.jpg", Buffer.from("x"), "image/jpeg", { sha256: "ab12" });
+    expect(save).toHaveBeenCalledWith(Buffer.from("x"), { contentType: "image/jpeg", resumable: false, metadata: { metadata: { sha256: "ab12" } } });
+    getMetadata.mockResolvedValueOnce([{ size: "1", contentType: "image/jpeg", generation: "7", crc32c: "c==", metadata: { sha256: "ab12" } }]);
+    expect(await headObject("gs://b/p.jpg")).toEqual({ exists: true, size: 1, contentType: "image/jpeg", generation: "7", crc32c: "c==", sha256: "ab12" });
+  });
+
   it("readRange and createRangeStream pass an inclusive end", async () => {
     await readRange("gs://b/big.zip", 10, 19);
     expect(download).toHaveBeenCalledWith({ start: 10, end: 19 });

@@ -1,0 +1,40 @@
+{
+  "displayName": "Catalog: a chunk task ran out of time",
+  "documentation": {
+    "content": "A piece of batch work ran past its time limit and was cut off (Cloud Run answered 504 on /tasks/catalog/chunk). The work is retried by itself and nothing is lost, but each piece of work is meant to stop and hand over well before the limit, so this means the time budget is set wrong. Open Logs Explorer for the catalog-worker service, search for \"chunk delivery\" and read the ms and msPerStep fields of the slow delivery. Then check CATALOG_CHUNK_TIME_BUDGET_MS on the worker.",
+    "mimeType": "text/markdown",
+    "subject": "Catalog: a chunk task ran out of time"
+  },
+  "userLabels": {
+    "app": "catalog"
+  },
+  "conditions": [
+    {
+      "displayName": "chunk task answered 504, more than 0 in 15 minutes",
+      "conditionThreshold": {
+        "filter": "metric.type=\"logging.googleapis.com/user/catalog/chunk_timeout\" AND resource.type=\"cloud_run_revision\"",
+        "aggregations": [
+          {
+            "alignmentPeriod": "900s",
+            "perSeriesAligner": "ALIGN_SUM",
+            "crossSeriesReducer": "REDUCE_SUM"
+          }
+        ],
+        "comparison": "COMPARISON_GT",
+        "thresholdValue": 0,
+        "duration": "0s",
+        "trigger": {
+          "count": 1
+        }
+      }
+    }
+  ],
+  "combiner": "OR",
+  "enabled": true,
+  "notificationChannels": [
+    "__CATALOG_EMAIL_CHANNEL__"
+  ],
+  "alertStrategy": {
+    "autoClose": "3600s"
+  }
+}

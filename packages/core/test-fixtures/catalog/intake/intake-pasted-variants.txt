@@ -1,0 +1,7 @@
+https://example.com/test_brand/TB-A_1.JPG	https://example.com/test_brand/TB-A_2.JPG
+TB-B	https://example.com/test_brand/TB-B_1.JPG	https://example.com/test_brand/TB-B_2.JPG
+https://example.com/test_brand/TB-C_1.JPG https://example.com/test_brand/TB-C_2.JPG
+https://www.dropbox.example.com/s/tbd1share/TB-D_1.JPG?dl=0
+http://example.com/test_brand/TB-E_1.JPG
+https://example.com/test_brand/TB-F_1.JPG	https://example.com/test_brand/TB-F_2.JPG
+https://example.com/test_brand/TB-F_3.JPG	https://example.com/test_brand/TB-F_4.JPG

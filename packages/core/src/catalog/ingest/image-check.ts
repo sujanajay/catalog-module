@@ -4,6 +4,7 @@ import { fileTypeFromBuffer } from "file-type";
 import sharp from "sharp";
 import { MIN_SOURCE_LONG_SIDE_PX } from "../channels";
 import { flagReason, type OutputFlag } from "../types";
+import { isLinkReject } from "./link-reasons";
 
 /**
  * A usable image. `width` and `height` are 0 when they could not be read yet (a HEIC file whose
@@ -28,8 +29,10 @@ export function notImageMessage(name: string): string {
 /**
  * The kind of an image-check reject from its sentence, or null for any other sentence. Lets the
  * step 4 warning tell unreadable files apart from grouping rejects in `GroupingResult.rejected`.
+ * `link` is a link that could not be downloaded (fetchSourceUrl's sentence, spec 14b F5 part 1).
  */
-export function classifyImageReject(reason: string): "unsupported" | "corrupt" | "not_image" | null {
+export function classifyImageReject(reason: string): "unsupported" | "corrupt" | "not_image" | "link" | null {
+  if (isLinkReject(reason)) return "link";
   if (/ is an? \S+ file\. Save it as JPEG or PNG and add it again\.$/.test(reason)) return "unsupported";
   if (reason.endsWith(" is corrupt (cannot be decoded).")) return "corrupt";
   if (reason.endsWith(" is not an image.")) return "not_image";

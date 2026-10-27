@@ -1,7 +1,7 @@
 import { afterAll, afterEach, beforeAll, beforeEach, expect, it, vi } from "vitest";
 import { eq } from "drizzle-orm";
 import { createTestDb } from "@catalog/core/db/testing";
-import { brandMaster, catalogBatches, catalogBatchProducts, catalogOutputs, catalogProducts, catalogProductAliases, catalogSourceImages, users } from "@catalog/core/db/schema";
+import { brandMaster, catalogBatches, catalogBatchProducts, catalogOutputs, catalogProducts, catalogProductAliases, catalogSourceImages, catalogUploads, users } from "@catalog/core/db/schema";
 import { findOrCreateProduct } from "@catalog/core/catalog/products";
 import { seedAdmin, upsertPerson } from "@catalog/core/people";
 import { setStorageClient, type StorageLike } from "@catalog/core/storage";
@@ -22,6 +22,33 @@ import { GET as brandSearch } from "../app/api/catalog/brands/[slug]/products/ro
 import { GET as attentionGet } from "../app/api/catalog/batches/[id]/attention/route";
 import { GET as batchDownload } from "../app/api/catalog/batches/[id]/export/route";
 import { GET as batchGet } from "../app/api/catalog/batches/[id]/route";
+import { readdirSync, readFileSync, statSync } from "node:fs";
+import path from "node:path";
+import { createElement, type ReactElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
+import BatchPage from "../app/catalog/[id]/page";
+import CatalogPage from "../app/catalog/page";
+import BrandPage from "../app/catalog/brands/[slug]/page";
+import NewBatchPage from "../app/catalog/new/page";
+import { BATCH_NOT_FOUND } from "../lib/catalog/batches";
+import CatalogErrorPage from "../app/catalog/error";
+import CatalogError, { batchLinkFor } from "../components/catalog/CatalogError";
+import ProductSearch from "../components/catalog/ProductSearch";
+import { ToastProvider } from "../components/Toast";
+import { ViewerPreviewProvider } from "../components/ViewerPreview";
+import { EMPTY_BATCH_COUNTS } from "@catalog/core/db/schema";
+import { CANCEL_THIS_BATCH, FIX_AND_CONTINUE, LEAVING_LINE, NOTHING_PROCESSED, SHOW_CANCELLED, UNFINISHED_HEADING } from "../lib/catalog/copy";
+import { brandEmptyText, CONTINUE_SETTING_UP, DRAFT_READY_TEXT, ERROR_ALL_BATCHES, ERROR_BATCH_SAFE, ERROR_HEADING, ERROR_OPEN_BATCH, ERROR_TRY_AGAIN, HOW_THIS_WORKS_DRAFT, notStartedText, shortReason } from "../lib/catalog/copy";
+
+// Pages render statically here: the App Router hooks are stubbed, the pages and their queries are real.
+const nav = vi.hoisted(() => ({ pathname: "/catalog", search: "" }));
+vi.mock("next/navigation", async (actual) => ({
+ ...(await actual<typeof import("next/navigation")>()),
+ useRouter: () => ({ refresh: () => undefined, replace: () => undefined, push: () => undefined }),
+ usePathname: () => nav.pathname,
+ useSearchParams: () => new URLSearchParams(nav.search),
+ notFound: () => { throw new Error("not found"); },
+}));
 
 let db:Db;let close:()=>Promise<void>;let batchId:string;let productId:string;let sourceId:string;
 const actor="admin@opptra.com";
@@ -233,4 +260,240 @@ it("keeps model ids out of the report export, the links sheets, the brand downlo
  expect(JSON.stringify(details.recheckFailures)).not.toMatch(MODEL_NAMES);
  const batchApi=await batchGet(new Request(`http://localhost/api/catalog/batches/${batchId}`),ctx);expect(batchApi.status).toBe(200);expect(await batchApi.text()).not.toMatch(MODEL_NAMES);
  const product=await getProduct("uspa","ABC-123",false,db);expect(JSON.stringify(product)).not.toMatch(MODEL_NAMES);
+});
+
+// ---- Spec 14a F9 and F1: draft and failed screens tell the truth; the error page has a way back. ----
+const render=async(page:Promise<ReactElement>|ReactElement)=>renderToStaticMarkup(createElement(ViewerPreviewProvider,null,createElement(ToastProvider,null,await page)));
+const batchPage=(query:Record<string,string>={})=>render(BatchPage({params:Promise.resolve({id:batchId}),searchParams:Promise.resolve(query)}));
+const panel=(html:string,id:string)=>new RegExp(`<section[^>]*id="panel-${id}"[^>]*>([\\s\\S]*?)</section>`).exec(html)?.[1]??"";
+type BatchRow=typeof catalogBatches.$inferSelect;
+async function setBatch(values:Partial<Omit<BatchRow,"counts">>&{counts?:Partial<BatchRow["counts"]>}){
+ const [row]=await db.select().from(catalogBatches).where(eq(catalogBatches.id,batchId));
+ await db.update(catalogBatches).set({...values,counts:{...row!.counts,...values.counts}}).where(eq(catalogBatches.id,batchId));
+}
+it("a ready draft says created, carries Continue setting up and says its tabs have nothing made yet",async()=>{
+ await setBatch({channels:[],counts:{previewReady:true,products:6,sources:27}});
+ const html=await batchPage();
+ expect(html).toMatch(/created \d{4}-\d\d-\d\d \d\d:\d\dZ by admin@opptra\.com/);
+ expect(html).not.toMatch(/started \d{4}-/);expect(html).not.toMatch(/·\s*(<!-- -->)?\s*·/);
+ expect(html).toContain(DRAFT_READY_TEXT);
+ expect(html).toContain(`<a class="btn primary" href="/catalog/new?batch=${batchId}">${CONTINUE_SETTING_UP}</a>`);
+ expect(html).toContain(HOW_THIS_WORKS_DRAFT);
+ const line=notStartedText(27,6);expect(line).toBe("This batch has not started. 27 photos found for 6 products; nothing has been made yet.");
+ expect(panel(html,"sheet")).toBe(`<p>${line}</p>`);
+ expect(html).not.toContain("Add SKU ids");
+ const compare=await batchPage({tab:"compare"});
+ expect(panel(compare,"compare")).toBe(`<p>${line}</p>`);expect(compare).not.toContain("Loading the comparison.");
+});
+it("a draft still collecting keeps its state text, the button and the draft paragraph; a viewer gets no button",async()=>{
+ await setBatch({status:"ingesting",updatedAt:new Date(),counts:{collected:3,collectTotal:10}});
+ let html=await batchPage();
+ expect(html).toContain("Checking your uploaded files 3 of 10");expect(html).not.toContain(DRAFT_READY_TEXT);
+ expect(html).toContain(`href="/catalog/new?batch=${batchId}">${CONTINUE_SETTING_UP}</a>`);expect(html).toContain(HOW_THIS_WORKS_DRAFT);
+ expect(html).toMatch(/ · Noon · (<!-- -->)?created /);
+ vi.stubEnv("DEV_USER_EMAIL","viewer@opptra.com");
+ // The overview's leaving line names the button in words; the viewer gets no button.
+ html=await batchPage();expect(html).not.toContain(`>${CONTINUE_SETTING_UP}</a>`);expect(html).not.toContain("/catalog/new?batch=");
+});
+it("a draft whose grouping is not ready keeps the existing banner text",async()=>{
+ const html=await batchPage();
+ expect(html).toContain("Check what we found and start processing.");expect(html).not.toContain(DRAFT_READY_TEXT);expect(html).toContain(CONTINUE_SETTING_UP);
+});
+it("a batch that could not start says created, with the not-started tabs and without Continue setting up",async()=>{
+ await setBatch({status:"failed",counts:{failReason:"No photos could be downloaded.",products:0,sources:0}});
+ const html=await batchPage();
+ expect(html).toMatch(/(<!-- -->)?created \d{4}-/);expect(html).not.toMatch(/started \d{4}-/);
+ expect(html).not.toContain(CONTINUE_SETTING_UP);expect(html).not.toContain(HOW_THIS_WORKS_DRAFT);
+ expect(panel(html,"sheet")).toBe(`<p>${notStartedText(0,0)}</p>`);
+ // Fixed in place (spec 14c F8): Fix and continue in the banner replaces Start again; Cancel this batch beside it.
+ expect(html).toContain(`>${FIX_AND_CONTINUE}</button>`);expect(html).not.toContain("Start again");
+ expect(html).toContain(`>${CANCEL_THIS_BATCH}</button>`);
+});
+it("a batch that failed after Start keeps Start again, without Fix and continue or Cancel this batch",async()=>{
+ await setBatch({status:"failed",startedAt:new Date("2026-10-27T09:00:00Z"),counts:{failReason:"No progress for 2 hours. Start the batch again."}});
+ const html=await batchPage();
+ expect(html).toContain("Start again");expect(html).not.toContain(FIX_AND_CONTINUE);expect(html).not.toContain(CANCEL_THIS_BATCH);
+});
+it("a draft and a collecting batch carry Cancel this batch next to Continue setting up; a viewer gets neither",async()=>{
+ let html=await batchPage();
+ expect(html).toMatch(new RegExp(`>${CONTINUE_SETTING_UP}</a><button type="button" class="btn ghost sm">${CANCEL_THIS_BATCH}</button>`));
+ await setBatch({status:"ingesting",updatedAt:new Date()});
+ html=await batchPage();expect(html).toContain(`>${CANCEL_THIS_BATCH}</button>`);
+ vi.stubEnv("DEV_USER_EMAIL","viewer@opptra.com");
+ html=await batchPage();expect(html).not.toContain(CANCEL_THIS_BATCH);
+});
+it("a cancelled batch says so, with nothing made and no button to continue or cancel",async()=>{
+ await setBatch({status:"cancelled",updatedAt:new Date()});
+ const html=await batchPage();
+ expect(html).toContain('<span class="pill ">Cancelled</span><span>Cancelled just now</span>');
+ expect(html).toContain(NOTHING_PROCESSED);
+ for(const text of [CONTINUE_SETTING_UP,CANCEL_THIS_BATCH,FIX_AND_CONTINUE,"Start again"])expect(html).not.toContain(text);
+ expect(panel(html,"sheet")).toContain("This batch has not started.");
+});
+it("a started batch says started, keeps its sheet and hides Add SKU ids only with 0 products",async()=>{
+ vi.stubEnv("DEV_USER_EMAIL","operator@opptra.com");
+ await setBatch({status:"rendering",startedAt:new Date("2026-10-27T09:00:00Z"),counts:{products:0}});
+ let html=await batchPage();
+ expect(html).toContain("started 2026-10-27 09:00Z by admin@opptra.com");expect(html).not.toMatch(/created \d{4}-/);
+ expect(html).not.toContain(CONTINUE_SETTING_UP);expect(html).not.toContain("This batch has not started.");
+ expect(html).not.toContain("Add SKU ids");
+ await setBatch({counts:{products:1}});
+ html=await batchPage();expect(html).toContain("Add SKU ids");
+});
+it("the batch list shows a failed batch's reason under its name, cut at 120 characters with the full reason on hover",async()=>{
+ const reason=`No photos could be downloaded from the 27 links you pasted. ${"Check that the links open in a browser. ".repeat(4)}`.trim();
+ await setBatch({status:"failed",counts:{failReason:reason}});
+ const html=await render(CatalogPage());
+ const short=shortReason(reason);expect(reason.length).toBeGreaterThan(120);expect(short.length).toBeLessThanOrEqual(123);expect(short.startsWith(reason.slice(0,100))).toBe(true);
+ expect(html).toContain(`<div class="help" title="${reason}">${short}</div>`);
+ // On a phone the collapsible columns carry classes; State has none, so it stays on screen.
+ expect(html).toContain('<th class="col-channels">Channels</th>');expect(html).toContain("<th>State</th>");
+ expect(shortReason("Short reason.")).toBe("Short reason.");
+});
+// ---- Spec 14c F4 part 2: "Your unfinished batches" and the cancelled filter on the batch list. ----
+const listPage=(query:Record<string,string>={})=>render(CatalogPage({searchParams:Promise.resolve(query)}));
+const unfinishedSection=(html:string)=>/<section class="unfinished"[\s\S]*?<\/section>/.exec(html)?.[0]??"";
+async function otherBatch(name:string,createdBy:string,values:Partial<typeof catalogBatches.$inferInsert>={}){
+ const [row]=await db.insert(catalogBatches).values({name,brandSlug:"uspa",brandName:"USPA",channels:[],createdBy,...values}).returning();return row!;
+}
+it("shows the creator their unfinished batches and not another operator's; an admin sees both with the creator; a viewer sees rows without buttons",async()=>{
+ await upsertPerson(db,{email:"other@opptra.com",role:"operator",addedBy:actor});
+ await otherBatch("Operator lot","operator@opptra.com");await otherBatch("Other lot","other@opptra.com");
+ await otherBatch("Started lot","operator@opptra.com",{status:"rendering",startedAt:new Date()});
+ vi.stubEnv("DEV_USER_EMAIL","operator@opptra.com");
+ let section=unfinishedSection(await listPage());
+ expect(section).toContain(UNFINISHED_HEADING);expect(section).toContain("Operator lot");
+ expect(section).not.toContain("Other lot");expect(section).not.toContain("First delivery");expect(section).not.toContain("Started lot");
+ expect(section).toContain("created just now");expect(section).not.toContain(" by ");expect(section).toContain(">Continue</a>");
+ vi.stubEnv("DEV_USER_EMAIL","other@opptra.com");
+ section=unfinishedSection(await listPage());expect(section).toContain("Other lot");expect(section).not.toContain("Operator lot");
+ vi.stubEnv("DEV_USER_EMAIL",actor);
+ section=unfinishedSection(await listPage());
+ for(const name of ["Operator lot","Other lot","First delivery"])expect(section).toContain(name);
+ expect(section).toContain("by other@opptra.com");expect(section).not.toContain("Started lot");
+ vi.stubEnv("DEV_USER_EMAIL","viewer@opptra.com");
+ section=unfinishedSection(await listPage());
+ expect(section).toContain("Operator lot");expect(section).not.toContain("<button");expect(section).not.toContain(">Continue</a>");
+});
+it("an unfinished row says what to do next in words; a failed-before-start row carries Fix and continue",async()=>{
+ await db.insert(catalogUploads).values({batchId,kind:"zip",name:"photos.zip",status:"collected"});
+ await setBatch({counts:{previewReady:true}});
+ let section=unfinishedSection(await listPage());expect(section).toContain("Ready to start");
+ await otherBatch("Empty lot",actor);
+ await otherBatch("Failed lot",actor,{status:"failed",counts:{...EMPTY_BATCH_COUNTS,failReason:"No photos could be downloaded."}});
+ section=unfinishedSection(await listPage());
+ expect(section).toContain("Nothing added yet");
+ expect(section).toContain("Could not start: No photos could be downloaded.");expect(section).toContain(`>${FIX_AND_CONTINUE}</button>`);
+ // Newest first.
+ expect(section.indexOf("Failed lot")).toBeLessThan(section.indexOf("First delivery"));
+});
+it("leaves cancelled batches out of the list until Show cancelled, and the section is absent when nothing is unfinished",async()=>{
+ await setBatch({status:"cancelled"});
+ let html=await listPage();
+ expect(html).not.toContain("First delivery");expect(unfinishedSection(html)).toBe("");
+ expect(html).toContain(`<a href="/catalog?cancelled=1">${SHOW_CANCELLED}</a>`);
+ html=await listPage({cancelled:"1"});
+ expect(html).toContain("First delivery");expect(html).toContain('<span class="pill cancelled">Cancelled</span>');
+ expect(html).toContain('<th>State</th>');
+});
+it("the brand page names the query only when there is one",async()=>{
+ await db.insert(brandMaster).values({slug:"empty-brand",name:"Empty Brand",line:"softline",source:"manual"});
+ expect(await render(BrandPage({params:Promise.resolve({slug:"empty-brand"})}))).toContain("No products of Empty Brand yet.");
+ expect(brandEmptyText("USPA","  ")).toBe("No products of USPA yet.");
+ expect(brandEmptyText("USPA","abc")).toBe("No products of USPA match abc.");
+ expect(await render(createElement(ProductSearch,{slug:"uspa",brand:"USPA",initial:[],canAct:false}))).toContain("No products of USPA yet.");
+});
+it("the error page with a known batch shows the safe sentence, both links and the button, which calls reset",()=>{
+ const id="0b6f3a52-6f0e-4c1e-9d1a-2f6f1b1c9e01";
+ expect(batchLinkFor(`/catalog/${id}`,null)).toBe(`/catalog/${id}`);
+ expect(batchLinkFor("/catalog/new",id)).toBe(`/catalog/new?batch=${id}`);
+ for(const [p,b] of [["/catalog/new",null],["/catalog/ops",null],["/catalog/new","not-an-id"],["/catalog/brands/uspa",null]] as const)expect(batchLinkFor(p,b)).toBeNull();
+ const reset=vi.fn();
+ const view=CatalogError({batchHref:`/catalog/${id}`,reset});
+ const html=renderToStaticMarkup(view);
+ for(const text of [ERROR_HEADING,ERROR_BATCH_SAFE,ERROR_OPEN_BATCH,ERROR_ALL_BATCHES,ERROR_TRY_AGAIN])expect(html).toContain(text);
+ expect(html).toContain(`href="/catalog/${id}">${ERROR_OPEN_BATCH}</a>`);expect(html).toContain(`href="/catalog">${ERROR_ALL_BATCHES}</a>`);
+ // Find the button by its type wherever it sits in the tree, then press it.
+ const findButton=(node:unknown):ReactElement<{onClick?:()=>void}>|undefined=>{
+  if(Array.isArray(node))return node.map(findButton).find(Boolean);
+  if(!node||typeof node!=="object"||!("props" in node))return undefined;
+  const el=node as ReactElement<{children?:unknown;onClick?:()=>void}>;
+  return el.type==="button"?el:findButton(el.props.children);
+ };
+ findButton(view)!.props.onClick!();expect(reset).toHaveBeenCalledTimes(1);
+ nav.pathname="/catalog/new";nav.search=`?batch=${id}`;
+ const page=renderToStaticMarkup(createElement(CatalogErrorPage,{error:new Error("boom"),reset}));
+ expect(page).toContain(`href="/catalog/new?batch=${id}">${ERROR_OPEN_BATCH}</a>`);expect(page).toContain(ERROR_BATCH_SAFE);
+ nav.pathname="/catalog";nav.search="";
+});
+it("the error page without a batch shows the heading, All batches and the button only",()=>{
+ nav.pathname="/catalog/ops";
+ const html=renderToStaticMarkup(createElement(CatalogErrorPage,{error:new Error("boom"),reset:()=>undefined}));
+ expect(html).toContain(ERROR_HEADING);expect(html).toContain(ERROR_ALL_BATCHES);expect(html).toContain(ERROR_TRY_AGAIN);
+ expect(html).not.toContain(ERROR_BATCH_SAFE);expect(html).not.toContain(ERROR_OPEN_BATCH);
+ nav.pathname="/catalog";
+});
+// ---- Spec 14a F4 part 1: /catalog/new?batch=<id> reopens the wizard, or goes to the batch page. ----
+const newPage=(query:Record<string,string>)=>NewBatchPage({searchParams:Promise.resolve(query)});
+const redirectTo=(target:string)=>expect.objectContaining({digest:expect.stringContaining(`;${target};`)});
+async function addUpload(status:"pending"|"uploaded"|"collected"="collected"){await db.insert(catalogUploads).values({batchId,kind:"zip",name:"photos.zip",status});}
+it("GET /catalog/new?batch= of a draft renders the wizard at its step",async()=>{
+ await addUpload();await setBatch({counts:{previewReady:true}});
+ let html=await render(newPage({batch:batchId}));
+ expect(html).toContain('aria-current="step">Start</li>');expect(html).toContain('value="uspa" selected=""');
+ await setBatch({channels:[]});
+ html=await render(newPage({batch:batchId}));expect(html).toContain('aria-current="step">Check what we found</li>');
+ await setBatch({status:"ingesting",updatedAt:new Date(),counts:{previewReady:false,collected:40,collectTotal:287}});
+ html=await render(newPage({batch:batchId}));
+ expect(html).toContain('aria-current="step">Check what we found</li>');expect(html).toContain("Unpacking your zip 40 of 287.");expect(html).not.toContain("0 of 0 products");
+ await addUpload("pending");
+ expect(await render(newPage({batch:batchId}))).toContain('aria-current="step">Brand and files</li>');
+});
+it("GET /catalog/new?batch= of a cancelled batch redirects to the batch page",async()=>{
+ await setBatch({status:"cancelled"});
+ await expect(newPage({batch:batchId})).rejects.toEqual(redirectTo(`/catalog/${batchId}`));
+});
+it("GET /catalog/new?batch= of a failed or a started batch redirects to the batch page",async()=>{
+ await setBatch({status:"failed",counts:{failReason:"No photos could be downloaded."}});
+ await expect(newPage({batch:batchId})).rejects.toEqual(redirectTo(`/catalog/${batchId}`));
+ await setBatch({status:"rendering",startedAt:new Date()});
+ await expect(newPage({batch:batchId})).rejects.toEqual(redirectTo(`/catalog/${batchId}`));
+ await setBatch({status:"draft"});
+ await expect(newPage({batch:batchId})).rejects.toEqual(redirectTo(`/catalog/${batchId}`));
+});
+it("GET /catalog/new?batch= of a missing batch shows the 404 sentence; a viewer is refused",async()=>{
+ for(const id of ["00000000-0000-4000-8000-000000000000","not-an-id"]){
+  const html=await render(newPage({batch:id}));
+  expect(html).toContain(BATCH_NOT_FOUND);expect(html).not.toContain("catalog-wizard");
+ }
+ vi.stubEnv("DEV_USER_EMAIL","viewer@opptra.com");
+ await expect(newPage({batch:batchId})).rejects.toMatchObject({name:"ForbiddenError",status:403});
+});
+// Spec 14 section 6, the removed sentences of release A: absent from the web app and core sources.
+const ROOT=path.resolve(__dirname,"../../..");
+function sources(dir:string):string[]{return readdirSync(dir).flatMap(name=>{const full=path.join(dir,name);if(statSync(full).isDirectory())return ["node_modules",".next"].includes(name)?[]:sources(full);return /\.tsx?$/.test(name)&&!/\.(test|spec)\.tsx?$/.test(name)?[full]:[];});}
+it("the removed sentences of release A are gone from apps/web and packages/core",()=>{
+ const files=[...["apps/web/app","apps/web/components","apps/web/lib","packages/core/src"].flatMap(d=>sources(path.join(ROOT,d)))];
+ expect(files.length).toBeGreaterThan(50);
+ // "started <time>" on an unstarted batch came from falling back to createdAt when startedAt was null.
+ const hits=files.filter(f=>{const text=readFileSync(f,"utf8");return text.includes("Processing starts by itself")||/started \$\{[^}]*startedAt\s*\?\?/.test(text);}).map(f=>path.relative(ROOT,f));
+ expect(hits).toEqual([]);
+});
+// Spec 14 section 6, the removed sentences of release B. "N image links" for a grid: the only count
+// pill with "image links" left in the sources is the paste box's fallback for an answer without a
+// readback pill (the readback says "<rows> rows, <links> links" for a grid; detect.test.ts). "<n> other
+// files" for links is a generated word, so ingest.test.ts checks the sentence itself ("names the link
+// as a link").
+it("the removed sentences of release B are gone from apps/web and packages/core",()=>{
+ const files=["apps/web/app","apps/web/components","apps/web/lib","packages/core/src"].flatMap(d=>sources(path.join(ROOT,d)));
+ const pills=files.flatMap(f=>(readFileSync(f,"utf8").match(/^.*\} image links`.*$/gm)??[]).map(line=>`${path.relative(ROOT,f).replaceAll("\\","/")}: ${line.trim()}`));
+ expect(pills).toEqual(["apps/web/components/catalog/PasteBox.tsx: if (r.kind === \"url_list\") return r.pill ?? `${r.count ?? 0} image links`;"]);
+});
+// Spec 14 section 6, the removed sentences of release C: the PR A leaving line and the PR B no-photos ending.
+it("the removed sentences of release C are gone from apps/web and packages/core",()=>{
+ const files=["apps/web/app","apps/web/components","apps/web/lib","packages/core/src"].flatMap(d=>sources(path.join(ROOT,d)));
+ const removed=["Open this batch again from the batch list and press Continue setting up when it is ready.","then make a new batch and paste the corrected links."];
+ const hits=files.flatMap(f=>{const text=readFileSync(f,"utf8");return removed.filter(s=>text.includes(s)).map(s=>`${path.relative(ROOT,f)}: ${s}`);});
+ expect(hits).toEqual([]);
+ expect(LEAVING_LINE).toBe("You can close this page. Find this batch under Your unfinished batches and press Continue when it is ready.");
 });

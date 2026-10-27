@@ -8,6 +8,7 @@ import { step } from "../components/catalog/CompareViewer";
 import ProductBatches, { compareLink } from "../components/catalog/ProductBatches";
 import type { ComparePage } from "../lib/catalog/compare";
 import type { CompareCell } from "../lib/catalog/compare-copy";
+import { notStartedText } from "../lib/catalog/copy";
 
 const cell = (extra: Partial<CompareCell>): CompareCell => ({ channel: "styli", outputId: "o1", url: "https://signed/out.jpg", grade: "passed", unchanged: false, skipped: false, why: "", ...extra });
 const page: ComparePage = {
@@ -34,6 +35,14 @@ describe("Compare images tab", () => {
     expect(html).toContain("Page 1 of 2");
     expect(html).toContain("href=\"?tab=compare&amp;cpage=1\"");
     expect(html).not.toMatch(/\u2014/);
+  });
+  it("says a draft with photos has not started, in one line and without a table (spec 14a F9)", () => {
+    const line = notStartedText(1240, 312);
+    expect(line).toBe("This batch has not started. 1,240 photos found for 312 products; nothing has been made yet.");
+    expect(notStartedText(1, 1)).toBe("This batch has not started. 1 photo found for 1 product; nothing has been made yet.");
+    const html = renderToStaticMarkup(createElement(BatchTabs, { attentionCount: 0, initialTab: "compare", overview: "O", attention: "A", compare: createElement("p", null, line), sheet: "S", details: "D" }));
+    expect(html).toContain(`id="panel-compare" role="tabpanel" tabindex="0" aria-labelledby="tab-compare"><p>${line}</p></section>`);
+    expect(html).not.toContain("<table");
   });
   it("words each cell state plainly", () => {
     expect(cellLabel(cell({ grade: "repaired" }))).toBe("Repaired");

@@ -1,5 +1,6 @@
 // Dependencies of the OpenRouter client. Tests inject `fetch` so no live call is ever made.
 import type { RetryPolicy } from "./openrouter";
+import type { LlmLimiter } from "./limiter";
 
 export interface OpenRouterDeps {
   /** Defaults to process.env.OPENROUTER_API_KEY (read at call time, mounted from Secret Manager). */
@@ -16,4 +17,6 @@ export interface OpenRouterDeps {
   retryDelayMs?: number;
   /** Back-off on 429/5xx beyond the single default retry (the QA judge sets one). */
   retry?: RetryPolicy;
+  /** Spec 16: the in-flight cap on each HTTP attempt; absent uses LLM_INFLIGHT_PER_INSTANCE (unset: none); null none. */
+  limiter?: LlmLimiter | null;
 }

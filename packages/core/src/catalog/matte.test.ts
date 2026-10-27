@@ -1,7 +1,7 @@
 import { createServer, type Server } from "node:http";
 import sharp from "sharp";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { alphaFromPng, BREAKER_COOLDOWN_MS, BREAKER_FAILURES, floodFillMatte, MattingClient, matteFor, TRACE_HEADERS } from "./matte";
+import { alphaFromPng, BREAKER_COOLDOWN_MS, BREAKER_FAILURES, busyWaitMs, floodFillMatte, MattingClient, mattingClientFromEnv, matteFor, TRACE_HEADERS } from "./matte";
 import type { Prepared } from "./render";
 
 function prepared(): Prepared {
@@ -11,7 +11,7 @@ function prepared(): Prepared {
 }
 const servers: Server[] = [];
 async function service(target: "cpu" | "gpu", ids = ["general"], inputSize: number | "native" = 64) {
-  const state = { fail: false, calls: 0, convert: 0, sent: 0, headers: [] as string[], last: null as Buffer | null };
+  const state = { fail: false, calls: 0, convert: 0, sent: 0, headers: [] as string[], last: null as Buffer | null, statuses: [] as number[], delayMs: 0, active: 0, peak: 0 };
   const server = createServer(async (req, res) => {
     if (req.url === "/health") { res.setHeader("content-type", "application/json"); res.end(JSON.stringify({ ok: true, models: ids.map((id) => ({ id, inputSize, target })), default: ids[0], version: target })); return; }
     const chunks: Buffer[] = []; for await (const c of req) chunks.push(Buffer.from(c));
@@ -19,6 +19,11 @@ async function service(target: "cpu" | "gpu", ids = ["general"], inputSize: numb
     if (req.url === "/convert") { state.convert++; res.statusCode = 500; res.end(); return; }
     state.calls++;
     if (state.fail) { res.statusCode = 503; res.end(); return; }
+    const status = state.statuses.shift();
+    if (status) { res.statusCode = status; res.end(); return; }
+    state.active++; state.peak = Math.max(state.peak, state.active);
+    if (state.delayMs) await new Promise((r) => setTimeout(r, state.delayMs));
+    state.active--;
     const request = new Request("http://localhost", { method: "POST", headers: { "content-type": req.headers["content-type"]! }, body: Buffer.concat(chunks) });
     const file = (await request.formData()).get("file") as File;
     state.last = Buffer.from(await file.arrayBuffer());
@@ -80,6 +85,50 @@ describe("matting client", () => {
     expect((await matteFor(prepared(), client)).target).toBe("gpu"); expect(client.breakers.gpu).toMatchObject({ state: "closed", failures: 0, openedAt: null });
     const recovered = vi.mocked(console.info).mock.calls.map(([line]) => JSON.parse(String(line)) as Record<string, unknown>).filter((l) => l.message === "matting_breaker" && l.service === "gpu");
     expect(recovered).toEqual([{ severity: "INFO", message: "matting_breaker", service: "gpu", state: "half-open" }, { severity: "INFO", message: "matting_breaker", service: "gpu", state: "closed" }]);
+  });
+  it("takes the GPU services in turn (spec 16 3.1.5)", async () => {
+    const cpu = await service("cpu"), a = await service("gpu"), b = await service("gpu");
+    const client = new MattingClient({ services: [cpu, a, b] });
+    for (let i = 0; i < 4; i++) expect((await client.matte(prepared(), "general")).target).toBe("gpu");
+    expect([a.state.calls, b.state.calls, cpu.state.calls]).toEqual([2, 2, 0]);
+    expect((await client.health()).models).toEqual([{ id: "general", inputSize: 64, target: "cpu" }, { id: "general", inputSize: 64, target: "gpu" }]);
+    // One service down: its breaker opens, the other GPU service keeps every photo.
+    a.state.fail = true;
+    for (let i = 0; i < 2 * BREAKER_FAILURES; i++) expect((await client.matte(prepared(), "general")).target).toBe("gpu");
+    expect(client.gpuBreakers.map((x) => x.state)).toEqual(["open", "closed"]);
+    expect(cpu.state.calls).toBe(0);
+  });
+  it("waits after a busy GPU answer, and only three busy answers in a row reach the CPU service", async () => {
+    const cpu = await service("cpu"), gpu = await service("gpu");
+    const sleep = vi.fn(async (_ms: number) => undefined);
+    const client = new MattingClient({ services: [cpu, gpu], sleep });
+    gpu.state.statuses.push(429);
+    expect((await client.matte(prepared(), "general")).target).toBe("gpu");
+    expect(sleep).toHaveBeenCalledTimes(1);
+    expect(sleep.mock.calls[0]![0]).toBeGreaterThanOrEqual(1000); expect(sleep.mock.calls[0]![0]).toBeLessThanOrEqual(3000);
+    expect(client.breakers.gpu).toMatchObject({ failures: 0, state: "closed" });
+    gpu.state.statuses.push(429, 429, 429);
+    expect((await client.matte(prepared(), "general")).target).toBe("cpu");
+    expect(sleep).toHaveBeenCalledTimes(3);
+    expect(client.breakers.gpu!.failures).toBe(1);
+    expect([busyWaitMs(0), busyWaitMs(1)]).toEqual([1000, 3000]);
+  });
+  it("keeps at most the in-flight limit of calls on one GPU service", async () => {
+    const cpu = await service("cpu"), gpu = await service("gpu");
+    gpu.state.delayMs = 40;
+    const client = new MattingClient({ services: [cpu, gpu], inflightPerService: 2 });
+    const results = await Promise.all(Array.from({ length: 5 }, () => client.matte(prepared(), "general")));
+    expect(results.every((r) => r.target === "gpu")).toBe(true);
+    expect(gpu.state.peak).toBe(2);
+  });
+  it("builds the worker client from the environment", async () => {
+    const cpu = await service("cpu"), a = await service("gpu"), b = await service("gpu");
+    const list = mattingClientFromEnv({ MATTING_URL: cpu.baseUrl, MATTING_GPU_URLS: `${a.baseUrl}, ${b.baseUrl}/`, MATTING_GPU_URL: "http://ignored.example", UPSCALE_URL: cpu.baseUrl });
+    expect(list.gpuBreakers).toHaveLength(2); expect(list.upscaleTarget).toBe("cpu");
+    const single = mattingClientFromEnv({ MATTING_URL: cpu.baseUrl, MATTING_GPU_URL: a.baseUrl });
+    expect(single.gpuBreakers).toHaveLength(1); expect(single.upscaleTarget).toBe("gpu");
+    expect(mattingClientFromEnv({ MATTING_URL: cpu.baseUrl }).gpuBreakers).toHaveLength(0);
+    expect(() => new MattingClient({ services: [cpu, { baseUrl: cpu.baseUrl, target: "cpu" }] })).toThrow("only one CPU");
   });
   it("convert bypasses the breaker and failures do not increment it", async () => {
     const cpu = await service("cpu"), client = new MattingClient({ services: [cpu] });
