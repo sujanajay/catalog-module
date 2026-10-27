@@ -11,7 +11,7 @@ import { INPUT_NOT_FOUND } from "../lib/catalog/batches";
 import { setDbForTests, type Db } from "../lib/db";
 import { resetUserDeps, setUserDeps } from "../lib/user";
 
-vi.mock("@catalog/core/tasks", () => ({ enqueueTask: vi.fn(async () => "test-task") }));
+vi.mock(import("@catalog/core/tasks"), async (original) => ({ ...await original(), enqueueTask: vi.fn(async () => "test-task") }));
 // The paste readback opens the first links (spec 14b F2): a fake image host, so no network is used.
 vi.mock("@catalog/core/safe-url", async (original) => ({
   ...await original<typeof import("@catalog/core/safe-url")>(),
