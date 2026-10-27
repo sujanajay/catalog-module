@@ -1,7 +1,7 @@
 import { and, desc, eq, sql } from "drizzle-orm";
 import type { UploadKind } from "@catalog/core/catalog/types";
 import { catalogBatches, catalogUploads, type CatalogBatch, type CatalogUpload } from "@catalog/core/db/schema";
-import { accessStatus, checkLinkAccess, detectPastedText, NOTHING_TO_CHECK } from "@catalog/core/catalog/ingest/detect";
+import { accessStatus, checkLinkAccess, detectPastedText, NOTHING_TO_CHECK, pasteReadback } from "@catalog/core/catalog/ingest/detect";
 import { collectGoogleSheetOnWeb, googleClients } from "@catalog/core/catalog/ingest/google-sheet";
 import { collectDriveFolderOnWeb } from "@catalog/core/catalog/ingest/drive-folder";
 import { batchPrefix } from "@catalog/core/catalog/naming";
@@ -33,7 +33,9 @@ export async function addLinks(id: string, value: unknown, target?: string) {
     else await tx.update(catalogBatches).set({ updatedAt: new Date() }).where(eq(catalogBatches.id, id));
     return rowId;
   });
-  return { kind, access, summary, count: "fileCount" in result ? result.fileCount : undefined, uploadId };
+  // A list of image links answers with its readback pill and notes (spec 14b F2).
+  const readback = kind === "url_list" && !("error" in result) ? pasteReadback(result) : null;
+  return { kind, access, summary, count: "fileCount" in result ? result.fileCount : undefined, uploadId, ...(readback ? { pill: readback.pill, notes: readback.notes } : {}) };
 }
 type Tx = Parameters<Parameters<ReturnType<typeof db>["transaction"]>[0]>[0];
 /**

@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import path from "node:path";
 import { Readable } from "node:stream";
 import { eq } from "drizzle-orm";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
@@ -26,6 +28,17 @@ import { COLLECT_STALLED_TEXT } from "@catalog/core/catalog/pipeline/status";
 import { resetUserDeps, setUserDeps } from "../lib/user";
 
 vi.mock("@catalog/core/tasks", () => ({ enqueueTask: vi.fn(async () => "test-task") }));
+// The paste readback opens the first links (spec 14b F2): a fake image host and a fake resolver, so no network is used.
+vi.mock("@catalog/core/safe-url", async (original) => {
+  const actual = await original<typeof import("@catalog/core/safe-url")>();
+  const jpegHead = () => new Response(new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 0, 0x10]), { status: 206, headers: { "content-type": "image/jpeg" } });
+  const shareHost = /dropbox\.example\.com/;
+  return {
+    ...actual,
+    pinnedFetch: vi.fn(async (input: RequestInfo | URL) => (shareHost.test(String(input)) ? new Response("<html>Dropbox</html>", { status: 200, headers: { "content-type": "text/html" } }) : jpegHead())),
+    safeFetch: (url: string, opts: import("@catalog/core/safe-url").SafeFetchOptions = {}) => actual.safeFetch(url, { lookup: async () => ["93.184.215.14"], ...opts }),
+  };
+});
 vi.mock("@catalog/core/catalog/ingest/google-sheet", async (original) => ({...await original<typeof import("@catalog/core/catalog/ingest/google-sheet")>(),googleClients:vi.fn()}));
 vi.mock("@catalog/core/storage", async (original) => {
   const actual = await original<typeof storage>();
@@ -127,7 +140,19 @@ describe("catalog wizard authorization and contracts",()=>{
   it("stores plain image links with no Google sharing requirement",async()=>{
     const id=await newBatch();
     const response=await links(request("POST",{text:"https://images.example/ABC_1.jpg\nhttps://images.example/ABC_2.jpg"}),ctx(id));
-    expect(response.status).toBe(200);expect(await response.json()).toMatchObject({kind:"url_list",access:"ok",summary:"We will download them when you start. No sharing needed.",count:2});
+    expect(response.status).toBe(200);expect(await response.json()).toMatchObject({kind:"url_list",access:"ok",summary:"Products will be named from the file names, for example ABC. We opened the first 2 links: all fine.",count:2,pill:"2 image links",notes:[]});
+  });
+  it("reads back a pasted grid and explains a share page while still keeping the paste (spec 14b F2)",async()=>{
+    const id=await newBatch();
+    const grid=readFileSync(path.resolve(__dirname,"../../../packages/core/test-fixtures/catalog/intake/intake-pasted-grid.txt"),"utf8");
+    const body=await (await links(request("POST",{text:grid}),ctx(id))).json();
+    expect(body).toMatchObject({kind:"url_list",access:"ok",count:27,pill:"6 rows, 27 links",notes:["3 empty or non-link cells were ignored."]});
+    expect(body.summary).toBe("4 to 5 links per row. This paste has no product code column, so products will be named from the photo file names, for example BH-4610-NE-NERO. To name them yourself, copy the product code column in as the first column. We opened the first 3 links: all fine.");
+    const shared=await newBatch();
+    const share=await (await links(request("POST",{text:"https://www.dropbox.example.com/s/tbd1share/TB-D_1.JPG?dl=0"}),ctx(shared))).json();
+    expect(share.notes).toEqual(["These look like share pages, not image links. Download the photos and drop them here, or paste direct image links."]);
+    const [row]=await db.select().from(catalogUploads).where(eq(catalogUploads.batchId,shared));
+    expect(row!.status).toBe("uploaded");expect(row!.detected).toMatchObject({shape:"one_per_line",sample:{tried:1,ok:0,webPages:1}});
   });
   it("keeps folder paths and HEIC, collects, re-groups without fetching URLs, previews and starts real chunks",async()=>{
     const id=await newBatch();const photo=await addPhoto(id,"ABC123/ABC123_1.heic");await collectBatch(id);

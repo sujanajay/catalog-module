@@ -12,6 +12,11 @@ import { setDbForTests, type Db } from "../lib/db";
 import { resetUserDeps, setUserDeps } from "../lib/user";
 
 vi.mock("@catalog/core/tasks", () => ({ enqueueTask: vi.fn(async () => "test-task") }));
+// The paste readback opens the first links (spec 14b F2): a fake image host, so no network is used.
+vi.mock("@catalog/core/safe-url", async (original) => ({
+  ...await original<typeof import("@catalog/core/safe-url")>(),
+  pinnedFetch: vi.fn(async () => new Response(new Uint8Array([0xff, 0xd8, 0xff, 0xe0]), { status: 206, headers: { "content-type": "image/jpeg" } })),
+}));
 
 let db: Db;
 let close: () => Promise<void>;
