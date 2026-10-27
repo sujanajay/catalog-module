@@ -1,0 +1,5 @@
+{
+  "name": "catalog/chunk_timeout",
+  "description": "A chunk task request to the worker ran past its deadline and Cloud Run answered 504. Since spec 15 every delivery stops on a time budget well inside the deadline, so any 504 here means the budget is wrong.",
+  "filter": "resource.type=\"cloud_run_revision\" AND resource.labels.service_name=~\"^catalog-\" AND resource.labels.service_name=\"catalog-worker\" AND logName=\"projects/image-links-agent/logs/run.googleapis.com%2Frequests\" AND httpRequest.status=504 AND httpRequest.requestUrl:\"/tasks/catalog/chunk\""
+}

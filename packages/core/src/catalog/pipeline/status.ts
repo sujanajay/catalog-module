@@ -36,6 +36,26 @@ export function waitText(images: number): string {
 export const ANOTHER_BATCH_RUNNING = "Another batch is running; yours may wait behind it.";
 export const CLOSE_PAGE_TEXT = "You can close this page and come back; nothing stops.";
 export const STARTING_SERVICES_TEXT = "Starting the image services. The first pictures usually take a minute or two on the first batch after a quiet spell.";
+/** Spec 15 E7: the starting line shows only this long after Start, and only before any photo is prepared. */
+export const STARTING_SERVICES_MS = 5 * 60_000;
+/** Spec 15 E7: a processing batch with no finished photo for this long gets the stall sentence. */
+export const PROCESSING_STALL_MS = 20 * 60_000;
+export const TAKING_LONGER_TEXT = "taking longer than usual";
+export function processingStalledText(minutes: number): string {
+  return `Nothing has moved for ${minutes} minutes. The system is retrying by itself; you do not need to do anything.`;
+}
+/**
+ * Images made per second from the server's samples (counts.processingRate): from the newest sample back to the
+ * newest one at least 60 s older. Null when there is no such pair or nothing moved between them.
+ */
+export function measuredRate(samples: readonly { at: string; made: number }[] | undefined): number | null {
+  const sorted = [...(samples ?? [])].sort((a, b) => Date.parse(a.at) - Date.parse(b.at)), last = sorted.at(-1);
+  if (!last) return null;
+  const first = sorted.filter((s) => Date.parse(last.at) - Date.parse(s.at) >= 60_000).at(-1);
+  if (!first || last.made <= first.made) return null;
+  return (last.made - first.made) / ((Date.parse(last.at) - Date.parse(first.at)) / 1000);
+}
+const fmt = (n: number) => n.toLocaleString("en");
 /**
  * The Ready clause for Styli pairs not made because the photo is too small (spec 07 R8, batches before 2026-10-22,
  * when Styli still skipped photos for their size): the banner must
@@ -53,6 +73,8 @@ export function timeLeftText(input: { planned: number; done: number; startedAt: 
   const elapsedMin = Math.max(0, (input.now.getTime() - new Date(input.startedAt).getTime()) / 60_000);
   if (input.planned <= 0 || input.done < input.planned * 0.1) {
     const { low, high } = waitRangeMinutes(input.planned);
+    // Spec 15 E7: past the usual range the fit says nothing, so the page says so instead of "about 1 min left".
+    if (high - elapsedMin <= 1) return TAKING_LONGER_TEXT;
     const lo = Math.max(1, Math.round(low - elapsedMin)), hi = Math.max(lo, Math.ceil(high - elapsedMin));
     return lo === hi ? `about ${lo} min left` : `about ${lo} to ${hi} min left`;
   }
@@ -75,9 +97,22 @@ export function deriveBatchState(input: { status: BatchStatus; counts: BatchCoun
     const eta = rate > 0 ? Math.ceil(Math.max(0, c.outputs - made) / rate) : null;
     // Skipped and unchanged pairs are not made, so they count on neither side: the figure is wizard step 4's "images will be made".
     const planned = Math.max(0, c.outputs - c.skipped - c.unchanged), done = Math.min(planned, Math.max(0, made - c.skipped - c.unchanged));
-    // The server's figure from startedAt survives reloads; browser samples are only a fallback without one.
-    const left = input.startedAt ? timeLeftText({ planned, done, startedAt: input.startedAt, now: new Date(now) }) : eta === null ? "" : `about ${Math.ceil(eta / 60)} min left`;
-    return { ...result, state: "processing", pill: "Processing", made: done, total: planned, progress: planned ? Math.min(1, done / planned) : 0, listPill: `Processing ${done.toLocaleString("en")} of ${planned.toLocaleString("en")}`, eta,...(status === "qa" ? {qualityLine:"Quality check running"}:{}), text: [`${done} of ${planned} ${plural(planned, "image", "images")} made${notMade(c)}${left ? ` · ${left}` : ""}.`, CLOSE_PAGE_TEXT, ...(status === "matting" && done === 0 ? [STARTING_SERVICES_TEXT] : [])].join(" ") };
+    // Spec 15 E7: photos prepared, a stall line and a measured time. Publishing has no chunk progress, so it keeps
+    // the plain count. A batch from before release E has no `prepared` and reads as all prepared.
+    const chunked = status !== "publishing", startedMs = input.startedAt ? new Date(input.startedAt).getTime() : null;
+    const lastProgress = c.progressAt ? Date.parse(c.progressAt) : startedMs;
+    const quietMs = chunked && lastProgress !== null ? now - lastProgress : 0, stalled = quietMs > PROCESSING_STALL_MS;
+    const serverRate = measuredRate(c.processingRate);
+    // The server's figures survive reloads; browser samples are only a fallback without a start time.
+    const left = stalled ? TAKING_LONGER_TEXT
+      : serverRate ? `about ${Math.max(1, Math.ceil((planned - done) / serverRate / 60))} min left`
+      : input.startedAt ? timeLeftText({ planned, done, startedAt: input.startedAt, now: new Date(now) }) : eta === null ? "" : `about ${Math.ceil(eta / 60)} min left`;
+    const madeText = `${fmt(done)} of ${fmt(planned)} ${plural(planned, "image", "images")} made${notMade(c)}${left ? ` · ${left}` : ""}.`;
+    const preparing = chunked && c.prepared !== undefined && c.prepared < c.sources;
+    const starting = status === "matting" && (c.prepared ?? done) === 0 && (startedMs === null || now - startedMs < STARTING_SERVICES_MS);
+    const text = [preparing ? `Preparing photos ${fmt(c.prepared!)} of ${fmt(c.sources)} · ${madeText}` : madeText, CLOSE_PAGE_TEXT,
+      ...(stalled ? [processingStalledText(Math.floor(quietMs / 60_000))] : []), ...(starting ? [STARTING_SERVICES_TEXT] : [])].join(" ");
+    return { ...result, state: "processing", pill: "Processing", made: done, total: planned, progress: planned ? Math.min(1, done / planned) : 0, listPill: `Processing ${fmt(done)} of ${fmt(planned)}`, eta,...(status === "qa" ? {qualityLine:"Quality check running"}:{}), text };
   }
   if (status === "done") {
     const capped = (c as BatchCounts & { qaCapped?: boolean }).qaCapped ? ` ${QA_CAP_BANNER}` : "";

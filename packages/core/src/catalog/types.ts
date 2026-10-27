@@ -87,6 +87,16 @@ export interface BatchCounts {
   heldLinks?: number;
   /** Earlier batches' live links the sheet keeps for held products, re-checked separately. */
   recheckCarriedOk?: number | null; recheckCarriedTotal?: number | null;
+  /**
+   * Spec 15 E7, written by every chunk delivery (refreshBatchProgress). Optional for the same reason as
+   * `linkFailures`: a batch from before release E reads `prepared` as unknown and the others as absent.
+   * `prepared`: photos of the batch that are cut out, failed, or left out as a size chart.
+   * `progressAt`: the last time a photo finished in any stage (ISO time).
+   * `processingRate`: the last 5 samples of the images made, appended when the count changed.
+   */
+  prepared?: number;
+  progressAt?: string | null;
+  processingRate?: { at: string; made: number }[];
 }
 export interface BatchCost {
   computeVcpuSeconds: number; mattingMs: number; renderMs: number; computeUsd: number;

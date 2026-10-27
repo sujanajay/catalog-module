@@ -6,7 +6,8 @@ import { CHANNELS } from "@catalog/core/catalog/channels";
 import { batchPrefix, derivedPath, publicObjectPath, publicUrl, stagingPath } from "@catalog/core/catalog/naming";
 import { planProduct, shotGeometry, trimRules, UnsupportedSourceError, type Matte } from "@catalog/core/catalog/render";
 import { renderKey, renderKeys, rerenderedKey } from "@catalog/core/catalog/pipeline/publish";
-import { catalogLlmDeps, CatalogQaCapError, runQaStage, spendCapHit } from "./qa-stage";
+import { catalogLlmDeps, CatalogQaCapError, limitDeliveryBackoff, runQaStage, spendCapHit } from "./qa-stage";
+import { CHUNK_HEARTBEAT_MS, CHUNK_LEASE_MS, CHUNK_MAX_STALLS, CHUNK_STALLED_REASON, chunkTimeBudgetMs, chunkWindow, dispatchChunks, leaseLapsed, tryEnqueueChunk } from "@catalog/core/catalog/pipeline/dispatch";
 import { recordCostEvents, type CostEventInput } from "@catalog/core/cost-events";
 import { matteCallUsd } from "@catalog/core/catalog/cost";
 import type { CostOutcome } from "@catalog/core/db/schema";
@@ -22,19 +23,82 @@ import { DISPATCH_DEADLINE_SEC } from "@catalog/core/tasks";
 import { resolvePhoto } from "./auto-resolve";
 import { recordCost } from "@catalog/core/spend";
 import type { HandleOptions, HandleResult } from "../server";
-import { CATALOG_TASK_LEASE_MS, enqueueFinalize, refreshBatchProgress, type CatalogDeps } from "./deps";
+import { enqueueFinalize, refreshBatchProgress, type CatalogDeps } from "./deps";
 
 /** The first wait matches the matting breaker's cool-down, so the retry reaches a half-open service. */
 export const MATTE_RETRY_WAIT_MS = BREAKER_COOLDOWN_MS;
 export const MATTE_RETRY_POLL_MS = 15_000;
 /** Time kept back after a retry for the rest of the delivery's writes. */
 export const MATTE_RETRY_MARGIN_MS = 60_000;
+/** Spec 15 E1: the QA back-off never waits into the last two minutes before the request deadline. */
+export const QA_BACKOFF_DEADLINE_MARGIN_MS = 120_000;
+/** Same-step retries that wait for a live lease to lapse (503 "busy") before a copy answers "duplicate". The queue
+ * (5 attempts, back-off 10 s doubling) sends retries 1-4 at about +10, +30, +70 and +150 s; a crashed holder's lease
+ * lapses within 120 s, so only the last attempt (retryCount 4) can claim, and every earlier one must wait. */
+export const LAST_QUEUE_RETRY = 4;
+export const CHUNK_BUSY_RETRIES = LAST_QUEUE_RETRY;
+const OWNERSHIP_CHANGED = "Chunk ownership changed.";
 
-export async function handleChunkTask(deps: CatalogDeps, body: Record<string,unknown>, opts: HandleOptions = {}): Promise<HandleResult> {
+/** Where a delivery's time went, for the `chunk delivery` line (spec 15 E7). */
+export type DeliverySteps = Record<"download"|"prepare"|"matte"|"guard"|"render"|"upscale"|"judge"|"write",number>;
+
+/** Spec 15 E2: renews the lease every 30 s until `renew` reports the deadline passed; returns the stop function. */
+export const defaultHeartbeat = (renew:()=>Promise<boolean>) => {
+  const timer = setInterval(()=>{ void renew().then(more=>{ if (!more) clearInterval(timer); }).catch(()=>{}); },CHUNK_HEARTBEAT_MS);
+  timer.unref?.();
+  return ()=>clearInterval(timer);
+};
+
+/** The delivery's deps with each slow call timed into `steps` (the calls themselves are unchanged). */
+function timedDeps(deps:CatalogDeps,steps:DeliverySteps):CatalogDeps {
+  const timed = <A extends unknown[],R>(step:keyof DeliverySteps,fn:(...args:A)=>Promise<R>) => async (...args:A):Promise<R> => {
+    const t0 = Date.now();
+    try { return await fn(...args); } finally { steps[step] += Date.now()-t0; }
+  };
+  return {...deps,storage:{...deps.storage,downloadBuffer:timed("download",deps.storage.downloadBuffer)},prepare:timed("prepare",deps.prepare),matteFor:timed("matte",deps.matteFor),
+    renderAllChannels:timed("render",deps.renderAllChannels),judgeOutput:timed("judge",deps.judgeOutput),classifyProductType:timed("judge",deps.classifyProductType)};
+}
+
+/**
+ * The current task body of a chunk, for in-process callers (evals, real runs, tests) that run a chunk's stages
+ * one after the other without a queue.
+ */
+export async function currentChunkTask(db:CatalogDeps["db"],chunkId:string):Promise<Record<string,unknown>> {
+  const [row] = await db.select({stage:catalogChunks.stage,step:catalogChunks.step}).from(catalogChunks).where(eq(catalogChunks.id,chunkId));
+  return row ? {chunkId,stage:row.stage,step:row.step}:{chunkId};
+}
+/** In-process callers deliver a chunk until it is done or failed: three stages plus any hand-offs, at most this many. */
+const IN_PROCESS_DELIVERIES = 100;
+async function chunkFinished(db:CatalogDeps["db"],chunkId:string):Promise<boolean> {
+  const [row] = await db.select({status:catalogChunks.status}).from(catalogChunks).where(eq(catalogChunks.id,chunkId));
+  return !row || row.status === "done" || row.status === "failed";
+}
+/** Runs a chunk in process (eval, QA-check and real-run tools): one `each(deliver)` per delivery, each with the row's current task. */
+export async function deliverChunkToEnd(deps:CatalogDeps,chunkId:string,each:(deliver:()=>Promise<HandleResult>)=>Promise<void>):Promise<void> {
+  for (let delivery=0; delivery<IN_PROCESS_DELIVERIES && !(await chunkFinished(deps.db,chunkId)); delivery++) await each(async()=>handleChunkTask(deps,await currentChunkTask(deps.db,chunkId)));
+}
+
+/**
+ * One chunk delivery (spec 15). Before any claim: a task whose stage or step is not the row's current one, or a
+ * legacy task (no step) for a row from after 0004, answers 200 "stale". The claim takes a queued row or one whose
+ * lease lapsed, and a heartbeat renews the lease while the delivery works. The delivery starts no new photo after
+ * its time budget: it saves what it did, takes the next step and queues the rest ("handed_off").
+ */
+export async function handleChunkTask(rawDeps: CatalogDeps, body: Record<string,unknown>, opts: HandleOptions = {}): Promise<HandleResult> {
   if (typeof body.chunkId !== "string") return {httpStatus:400,outcome:"chunkId is required"};
-  let [chunk] = await deps.db.select().from(catalogChunks).where(eq(catalogChunks.id,body.chunkId));
+  let [chunk] = await rawDeps.db.select().from(catalogChunks).where(eq(catalogChunks.id,body.chunkId));
   if (!chunk) return {httpStatus:200,outcome:"not_found"};
+  const steps:DeliverySteps = {download:0,prepare:0,matte:0,guard:0,render:0,upscale:0,judge:0,write:0};
+  const deps = timedDeps(rawDeps,steps);
   const started = deps.now(), claim = randomUUID(); let mattingMs = 0, renderMs = 0;
+  const deadlineAt = +started+DISPATCH_DEADLINE_SEC*1000, budgetMs = deps.chunkTimeBudgetMs ?? chunkTimeBudgetMs();
+  const bodyStep = typeof body.step === "number" ? body.step:undefined;
+  const fromProduct = bodyStep !== undefined && typeof body.fromProduct === "number" ? body.fromProduct:0;
+  // Photos finished by this delivery. The budget is honoured once one photo is done, so a delivery always moves.
+  let photos = 0, lost = false;
+  const budgetLeft = () => photos === 0 || +deps.now() < +started+budgetMs;
+  const delivery = (outcome:string,fields:Record<string,unknown> = {}) => deps.log("chunk delivery",{batchId:chunk!.batchId,chunkId:chunk!.id,stage:chunk!.stage,step:chunk!.step,attempt:chunk!.attempt,outcome,photos,ms:+deps.now()-+started,msPerStep:steps,...fields});
+  const answer = (httpStatus:number,outcome:string,logged = outcome):HandleResult => { delivery(logged); return {httpStatus,outcome}; };
   // Cost ledger rows of this delivery (observability plan, part A): collected in memory and flushed inside
   // the next existing claim write (the photo's matte update, each output's render update, the compute row),
   // so paid calls survive a delivery that throws later, while a lost claim writes nothing for that write.
@@ -45,12 +109,33 @@ export async function handleChunkTask(deps: CatalogDeps, body: Record<string,unk
     ({productId,sourceImageId,stage:"matte",kind:"matte_call",engine:m.target ?? "worker",ms:m.ms,...matteCallUsd(m.target,m.ms),attempt,outcome});
   const ownsClaim = () => and(eq(catalogChunks.id,chunk!.id),eq(catalogChunks.taskName,claim),eq(catalogChunks.stage,chunk!.stage),eq(catalogChunks.status,"running"));
   // Ownership changes lock this same row. Keep compute/downloads outside these small write sections.
+  // Every write also renews the lease (spec 15 E2), but never past the delivery's own deadline.
   async function underClaim<T>(write:(db:CatalogDeps["db"])=>Promise<T>):Promise<T> {
-    return deps.db.transaction(async tx=>{
-      const [owner]=await tx.select({id:catalogChunks.id}).from(catalogChunks).where(ownsClaim()).for("update");
-      if(!owner) throw new Error("Chunk ownership changed.");
-      return write(tx as unknown as CatalogDeps["db"]);
-    });
+    if (lost) throw new Error(OWNERSHIP_CHANGED);
+    const t0 = Date.now();
+    try {
+      return await deps.db.transaction(async tx=>{
+        const now = +deps.now();
+        const [owner]=now < deadlineAt
+          ? await tx.update(catalogChunks).set({leaseUntil:new Date(now+CHUNK_LEASE_MS)}).where(ownsClaim()).returning({id:catalogChunks.id})
+          : await tx.select({id:catalogChunks.id}).from(catalogChunks).where(ownsClaim()).for("update");
+        if(!owner) { lost = true; throw new Error(OWNERSHIP_CHANGED); }
+        return write(tx as unknown as CatalogDeps["db"]);
+      });
+    } finally { steps.write += Date.now()-t0; }
+  }
+  /** The heartbeat's renewal: false once the deadline passed (the lease then lapses within CHUNK_LEASE_MS). */
+  async function renew():Promise<boolean> {
+    const now = +deps.now();
+    if (lost || now >= deadlineAt) return false;
+    const rows = await deps.db.update(catalogChunks).set({leaseUntil:new Date(now+CHUNK_LEASE_MS)}).where(ownsClaim()).returning({id:catalogChunks.id});
+    if (!rows.length) lost = true;
+    return !lost;
+  }
+  /** A photo finished in this stage: counted for the stall rule and the batch page (spec 15 E4, E7). */
+  async function photoDone(tx:CatalogDeps["db"]):Promise<void> {
+    photos += 1;
+    await tx.update(catalogChunks).set({progressAt:deps.now()}).where(eq(catalogChunks.id,chunk!.id));
   }
   let matteRetryFailed = false;
   /**
@@ -60,7 +145,7 @@ export async function handleChunkTask(deps: CatalogDeps, body: Record<string,unk
    */
   async function retryMatte(p:Awaited<ReturnType<CatalogDeps["prepare"]>>,model:string,trace:MattingTrace):Promise<{matte:Matte|null;action:AutoAction;call?:Matte}> {
     const action=(result:AutoAction["result"],detail:string):AutoAction=>({step:"matte_retry",trigger:["fallback_matte"],result,channels:[],rejudged:false,detail});
-    const deadline=+started+DISPATCH_DEADLINE_SEC*1000-MATTING_TIMEOUT_MS-MATTE_RETRY_MARGIN_MS, sleep=deps.sleep ?? (ms=>new Promise<void>(resolve=>setTimeout(resolve,ms)));
+    const deadline=deadlineAt-MATTING_TIMEOUT_MS-MATTE_RETRY_MARGIN_MS, sleep=deps.sleep ?? (ms=>new Promise<void>(resolve=>setTimeout(resolve,ms)));
     if (matteRetryFailed) return {matte:null,action:action("skipped","an earlier retry in this run failed")};
     let wait=MATTE_RETRY_WAIT_MS;
     for (;;) {
@@ -74,14 +159,35 @@ export async function handleChunkTask(deps: CatalogDeps, body: Record<string,unk
     if (matte.source==="floodfill") { matteRetryFailed=true; return {matte:null,action:action("failed","the service failed again"),call:matte}; }
     return {matte,action:action("passed",matte.model),call:matte};
   }
+  const [batch] = await deps.db.select().from(catalogBatches).where(eq(catalogBatches.id,chunk.batchId));
+  if (!batch || batch.status === "failed") return {httpStatus:200,outcome:"stopped"};
+  if (chunk.status === "done" || chunk.status === "failed") { await finish(); return {httpStatus:200,outcome:chunk.status}; }
+  // Spec 15 E3: only the chunk's current task may claim it. A legacy task (from before 0004, no step) may adopt
+  // a row from before 0004, or one queued by old code that no window ever dispatched.
+  if (bodyStep !== undefined ? body.stage !== chunk.stage || bodyStep !== chunk.step : chunk.stepKnown && chunk.dispatchedAt !== null) return answer(200,"stale");
+  const legacyOnly = bodyStep === undefined ? or(eq(catalogChunks.stepKnown,false),isNull(catalogChunks.dispatchedAt)):undefined;
+  // Spec 15 E2: a queued row, or a running one whose holder is dead (its lease lapsed). The stall count goes up
+  // when the previous delivery of this chunk finished no photo.
+  const [claimed] = await deps.db.update(catalogChunks).set({status:"running",taskName:claim,attempt:sql`${catalogChunks.attempt}+1`,startedAt:started,finishedAt:null,
+    leaseUntil:new Date(+started+CHUNK_LEASE_MS),stepKnown:true,dispatchedAt:sql`coalesce(${catalogChunks.dispatchedAt},${started}::timestamptz)`,
+    stalls:sql`CASE WHEN ${catalogChunks.startedAt} IS NOT NULL AND (${catalogChunks.progressAt} IS NULL OR ${catalogChunks.progressAt} < ${catalogChunks.startedAt}) THEN ${catalogChunks.stalls}+1 ELSE 0 END`})
+    .where(and(eq(catalogChunks.id,chunk.id),eq(catalogChunks.stage,chunk.stage),eq(catalogChunks.step,chunk.step),legacyOnly,or(eq(catalogChunks.status,"queued"),and(eq(catalogChunks.status,"running"),leaseLapsed(started))))).returning();
+  if (!claimed) {
+    const [now] = await deps.db.select().from(catalogChunks).where(eq(catalogChunks.id,chunk.id));
+    if (!now || now.stage !== chunk.stage || now.step !== chunk.step) return answer(200,"stale");
+    // The same task's own retry after a crash waits for the lease to lapse; any other copy drops itself.
+    if (now.status === "running" && bodyStep !== undefined && (opts.retryCount ?? 0) < CHUNK_BUSY_RETRIES) return answer(503,"busy");
+    return answer(200,"duplicate");
+  }
+  chunk = claimed;
+  if (chunk.stalls >= CHUNK_MAX_STALLS) {
+    // Spec 15 E4: three deliveries in a row finished no photo. Fail the chunk cleanly (alert 1 counts the ERROR).
+    deps.log("chunk failed",{severity:"ERROR",batchId:chunk.batchId,chunkId:chunk.id,stage:chunk.stage,attempt:chunk.attempt,stalls:chunk.stalls,error:CHUNK_STALLED_REASON});
+    await failChunk(CHUNK_STALLED_REASON,CHUNK_STALLED_REASON);
+    return answer(200,"failed");
+  }
+  const stopHeartbeat = (deps.heartbeat ?? defaultHeartbeat)(renew);
   try {
-    const [batch] = await deps.db.select().from(catalogBatches).where(eq(catalogBatches.id,chunk.batchId));
-    if (!batch || batch.status === "failed") return {httpStatus:200,outcome:"stopped"};
-    if (chunk.status === "done" || chunk.status === "failed") { await finish(); return {httpStatus:200,outcome:chunk.status}; }
-    // The lease outlasts the worker/task 900-second request deadline. A killed delivery is recoverable.
-    const [claimed] = await deps.db.update(catalogChunks).set({status:"running",taskName:claim,attempt:sql`${catalogChunks.attempt}+1`,startedAt:started,finishedAt:null}).where(and(eq(catalogChunks.id,chunk.id),eq(catalogChunks.stage,chunk.stage),or(eq(catalogChunks.status,"queued"),and(eq(catalogChunks.status,"running"),sql`${catalogChunks.startedAt} < ${new Date(+started-CATALOG_TASK_LEASE_MS)}::timestamptz`)))).returning();
-    if (!claimed) return {httpStatus:503,outcome:"busy"};
-    chunk = claimed;
     const note = (row:LedgerRow) => { ledger.push({batchId:batch.id,brandSlug:batch.brandSlug,isTest:batch.isTest,chunkId:chunk!.id,at:deps.now(),...row}); };
     let policy = batch.options.policy;
     if (!policy) {
@@ -90,7 +196,12 @@ export async function handleChunkTask(deps: CatalogDeps, body: Record<string,unk
       const [fresh] = await deps.db.select().from(catalogBatches).where(eq(catalogBatches.id,batch.id)); policy = fresh!.options.policy!;
     }
     const prefix = batchPrefix(batch.brandSlug,batch.id,batch.isTest);
-    for (const productId of chunk.productIds) {
+    limitDeliveryBackoff(batch,deadlineAt-QA_BACKOFF_DEADLINE_MARGIN_MS,deps.now);
+    // Spec 15 E1: the index of the product to resume at when the budget stopped this delivery (null: finished).
+    let stopAt: number | null = null;
+    products: for (const [index,productId] of chunk.productIds.entries()) {
+      if (index < fromProduct) continue;
+      if (!budgetLeft()) { stopAt = index; break; }
       await underClaim(async()=>{});
       const [product] = await deps.db.select().from(catalogProducts).where(eq(catalogProducts.id,productId));
       if (!product || product.lockBatchId !== batch.id) continue;
@@ -141,7 +252,11 @@ export async function handleChunkTask(deps: CatalogDeps, body: Record<string,unk
        if(second && second!==productPolicy.matteModel) productPolicy={...productPolicy,matteModel:second,matteModelSecond:productPolicy.matteModel};
       }
       // Threshold, floor, mode and sampling follow the product's policy; the judge stays the batch's (4.4).
-      if(chunk.stage==="qa") {await runQaStage(deps,batch,sources,productPolicy,underClaim,chunk.id);continue;}
+      if(chunk.stage==="qa") {
+        const qa=await runQaStage(deps,batch,sources,productPolicy,underClaim,chunk.id,{shouldStop:()=>!budgetLeft(),onPhoto:photoDone});
+        if(!qa.complete) { stopAt = index; break; }
+        continue;
+      }
       if(chunk.stage==="matte") {
        await underClaim(async()=>{});
        const health=await deps.matting.health();
@@ -165,9 +280,11 @@ export async function handleChunkTask(deps: CatalogDeps, body: Record<string,unk
           }
           const pending = await deps.db.select().from(catalogOutputs).where(and(eq(catalogOutputs.sourceImageId,source.id),eq(catalogOutputs.batchId,batch.id),eq(catalogOutputs.status,"pending")));
           if (!pending.length || source.matteUri) continue;
+          // Spec 15 E1: a matted photo is saved (matteUri), so the continuation starts at this photo.
+          if (!budgetLeft()) { stopAt = index; break products; }
           try {
             const mattePath = derivedPath(derivedPrefix(source),product.pathKey,source.n,"matte"), gs = deps.storage.toGsUri(deps.storage.getBucketName(),mattePath), cached = await deps.storage.headObject(gs);
-            if (cached.exists) { await underClaim(async tx=>tx.update(catalogSourceImages).set({matteUri:gs,status:"matted"}).where(eq(catalogSourceImages.id,source.id))); continue; }
+            if (cached.exists) { await underClaim(async tx=>{await tx.update(catalogSourceImages).set({matteUri:gs,status:"matted"}).where(eq(catalogSourceImages.id,source.id));await photoDone(tx);}); continue; }
             const raw = await deps.storage.downloadBuffer(source.rawUri);
             let conversionFailure:unknown;
             let p:Awaited<ReturnType<CatalogDeps["prepare"]>>;
@@ -180,6 +297,7 @@ export async function handleChunkTask(deps: CatalogDeps, body: Record<string,unk
               await underClaim(async tx=>{
                 await tx.update(catalogSourceImages).set({width:p.width,height:p.height,status:"prepared",flags:[...new Set([...source.flags,"chart_image" as const])]}).where(eq(catalogSourceImages.id,source.id));
                 await tx.update(catalogOutputs).set({status:"skipped",flags:["chart_image"],reason:flagReason("chart_image"),updatedAt:deps.now()}).where(and(eq(catalogOutputs.sourceImageId,source.id),eq(catalogOutputs.batchId,batch.id),eq(catalogOutputs.status,"pending")));
+                await photoDone(tx);
               });
               continue;
             }
@@ -198,7 +316,8 @@ export async function handleChunkTask(deps: CatalogDeps, body: Record<string,unk
             }
             // Cut-out integrity (matte-guard.ts): a matte that removed the product is replaced by the
             // second model, the padded frame, or the whole frame, before anything is rendered.
-            const deadline=+started+DISPATCH_DEADLINE_SEC*1000-MATTING_TIMEOUT_MS-MATTE_RETRY_MARGIN_MS, firstModel=matte.model;
+            const deadline=deadlineAt-MATTING_TIMEOUT_MS-MATTE_RETRY_MARGIN_MS, firstModel=matte.model;
+            const guardStart=Date.now(), matteBefore=steps.matte;
             const resolved = await resolveMatte({prepared:p,first:matte,handRule:product.productType!=="apparel_model" && product.productType!=="apparel_flat",soleStrip:product.productType==="footwear",attempt:async variant=>{
               const model = variant==="padded_first" ? firstModel : productPolicy.matteModelSecond;
               if (!model || (variant!=="padded_first" && model===firstModel) || +deps.now()>deadline) return null;
@@ -209,6 +328,7 @@ export async function handleChunkTask(deps: CatalogDeps, body: Record<string,unk
               note(matteRow(productId,source.id,next,++matteCalls,next.source==="model" ? "ok":"failed"));
               return next.source==="model" ? next:null;
             }});
+            steps.guard += Date.now()-guardStart-(steps.matte-matteBefore);
             if (resolved.actions.length) deps.log("catalog matte guard",{batchId:batch.id,sourceImageId:source.id,steps:resolved.actions.map(a=>`${a.step}:${a.result}`),passthrough:resolved.passthrough});
             if (resolved.soleStripRecovered) deps.log("catalog sole strip recovered",{batchId:batch.id,sourceImageId:source.id,pixels:resolved.soleStripRecovered});
             matte = resolved.matte;
@@ -221,12 +341,12 @@ export async function handleChunkTask(deps: CatalogDeps, body: Record<string,unk
             if (fallback) await underClaim(async tx=>{for (const row of pending) await tx.update(catalogOutputs).set({flags:[...new Set([...row.flags,"fallback_matte" as const])],reason:flagReason("fallback_matte"),updatedAt:deps.now()}).where(and(eq(catalogOutputs.id,row.id),eq(catalogOutputs.status,"pending")));});
             const png = await sharp(matte.alpha,{raw:{width:p.width,height:p.height,channels:1}}).png().toBuffer();
             await underClaim(async()=>deps.storage.uploadBuffer(mattePath,png,"image/png"));
-            await underClaim(async tx=>tx.update(catalogSourceImages).set({matteUri:gs,status:"matted"}).where(eq(catalogSourceImages.id,source.id)));
+            await underClaim(async tx=>{await tx.update(catalogSourceImages).set({matteUri:gs,status:"matted"}).where(eq(catalogSourceImages.id,source.id));await photoDone(tx);});
           } catch (failure) {
             if (!(failure instanceof UnsupportedSourceError)) throw failure;
             const error = "The file is corrupt and could not be decoded.";
             await underClaim(async tx=>tx.update(catalogSourceImages).set({status:"failed",error}).where(eq(catalogSourceImages.id,source.id)));
-            await underClaim(async tx=>tx.update(catalogOutputs).set({status:"failed",reason:error,error,updatedAt:deps.now()}).where(and(eq(catalogOutputs.sourceImageId,source.id),eq(catalogOutputs.batchId,batch.id),eq(catalogOutputs.status,"pending"))));
+            await underClaim(async tx=>{await tx.update(catalogOutputs).set({status:"failed",reason:error,error,updatedAt:deps.now()}).where(and(eq(catalogOutputs.sourceImageId,source.id),eq(catalogOutputs.batchId,batch.id),eq(catalogOutputs.status,"pending")));await photoDone(tx);});
           }
         }
       } else if(chunk.stage==="render") {
@@ -241,6 +361,8 @@ export async function handleChunkTask(deps: CatalogDeps, body: Record<string,unk
             matteUri ??= old?.matteUri ?? null;
           }
           if ((!pending.length && !productOutputs.length) || !matteUri) continue;
+          // Spec 15 E1: staged outputs are skipped and the plan is rebuilt from the stored mattes, so a stop here is safe.
+          if (!budgetLeft()) { stopAt = index; break products; }
           try {
             const p = await deps.prepare((await deps.storage.downloadBuffer(source.rawUri)).buf,source.originalName,b=>deps.matting.convert(b,trace));
             const alpha = await sharp((await deps.storage.downloadBuffer(matteUri)).buf).toColourspace("b-w").raw().toBuffer();
@@ -255,6 +377,7 @@ export async function handleChunkTask(deps: CatalogDeps, body: Record<string,unk
         for (const {source,p,matte} of prepared) {
           const outputs = await deps.db.select().from(catalogOutputs).where(and(eq(catalogOutputs.sourceImageId,source.id),eq(catalogOutputs.batchId,batch.id),eq(catalogOutputs.status,"pending")));
           // 05 rule 3 plus: a product held in a hand does not rest on a floor, so it gets no contact shadow.
+          if (outputs.length && !budgetLeft()) { stopAt = index; break products; }
           const shadowAllowed = shadowSynthesisAllowed(product.productType,source.flags) && !heldInHand(p,matte.alpha).held;
           for (const output of outputs) try {
             const path = stagingPath(prefix,product.pathKey,output.channel,source.n), uri = deps.storage.toGsUri(deps.storage.getBucketName(),path), head = await deps.storage.headObject(uri);
@@ -266,6 +389,7 @@ export async function handleChunkTask(deps: CatalogDeps, body: Record<string,unk
             // photo's one GPU upscale call, which gets its own row priced at the GPU service rate (an output
             // that reused the x2 image records no upscale row and no upscale time).
             const upscaleMs = rendered.upscale && !rendered.upscale.reused ? rendered.upscale.ms : 0;
+            steps.upscale += upscaleMs; steps.render -= upscaleMs;
             note({productId,sourceImageId:source.id,outputId:output.id,channel:output.channel,stage:"render",kind:"render",engine:"worker",ms:Math.max(0,+deps.now()-renderStart-upscaleMs),usd:0,outcome:rendered.status==="failed" ? "failed":"ok"});
             if (upscaleMs) note({productId,sourceImageId:source.id,outputId:output.id,channel:output.channel,stage:"upscale",kind:"upscale_call",engine:"gpu",ms:upscaleMs,...matteCallUsd("gpu",upscaleMs)});
             // Spec 11: the per-image upscale time, for the cost record (the call time is inside renderMs too; one call per photo,
@@ -294,6 +418,7 @@ export async function handleChunkTask(deps: CatalogDeps, body: Record<string,unk
             if (error instanceof Error && /ownership changed/.test(error.message)) throw error;
             deps.log("catalog auto-resolve failed",{batchId:batch.id,sourceImageId:source.id,error:error instanceof Error ? error.message:String(error)});
           }
+          if (outputs.length) await underClaim(photoDone);
         }
       }
     }
@@ -306,39 +431,63 @@ export async function handleChunkTask(deps: CatalogDeps, body: Record<string,unk
     // a failing ledger write is logged and the delivery carries on.
     await recordCostEvents(tx,[...ledger.splice(0),{batchId:batch.id,brandSlug:batch.brandSlug,isTest:batch.isTest,chunkId:chunk!.id,stage:chunk!.stage,kind:"compute",engine:"worker",ms:+deps.now()-+started,usd,attempt:chunk!.attempt,at:deps.now()}],deps.log);
     });
-    if (chunk.stage === "matte") {
-      const advanced = await deps.db.update(catalogChunks).set({stage:"render",status:"queued",taskName:null,finishedAt:deps.now()}).where(ownsClaim()).returning({id:catalogChunks.id});
-      if (!advanced.length) return {httpStatus:503,outcome:"claim_lost"};
-      await deps.db.update(catalogBatches).set({status:"rendering"}).where(and(eq(catalogBatches.id,batch.id),eq(catalogBatches.status,"matting")));
-      await deps.enqueue("/tasks/catalog/chunk",{chunkId:chunk.id},{taskId:`chunk-${chunk.id}-render`});
-    } else if(chunk.stage==="render") {
-      const advanced=await deps.db.update(catalogChunks).set({stage:"qa",status:"queued",taskName:null,finishedAt:deps.now()}).where(ownsClaim()).returning({id:catalogChunks.id});
-      if(!advanced.length) return {httpStatus:503,outcome:"claim_lost"};
-      const remaining=await deps.db.select().from(catalogChunks).where(eq(catalogChunks.batchId,batch.id));
-      if(remaining.every(row=>row.stage==="qa" || row.status==="done" || row.status==="failed")) await deps.db.update(catalogBatches).set({status:"qa"}).where(eq(catalogBatches.id,batch.id));
-      await deps.enqueue("/tasks/catalog/chunk",{chunkId:chunk.id},{taskId:`chunk-${chunk.id}-qa`});
-    } else { const completed = await deps.db.update(catalogChunks).set({status:"done",taskName:null,finishedAt:deps.now()}).where(ownsClaim()).returning({id:catalogChunks.id}); if (!completed.length) return {httpStatus:503,outcome:"claim_lost"}; await finish(); }
+    const release = {status:"queued" as const,taskName:null,leaseUntil:null,step:sql`${catalogChunks.step}+1`,dispatchedAt:deps.now()};
+    let outcome = "done";
+    if (stopAt !== null) {
+      // Spec 15 E1: the budget stopped the loop. Release the chunk at the next step and queue the rest.
+      const [handed] = await deps.db.update(catalogChunks).set(release).where(ownsClaim()).returning();
+      if (!handed) return answer(200,"lost");
+      await dispatchNext(handed,{fromProduct:stopAt});
+      outcome = "handed_off";
+    } else if (chunk.stage === "matte" || chunk.stage === "render") {
+      // The stage finished: the next one starts at a new step, with its own attempt count.
+      const [advanced] = await deps.db.update(catalogChunks).set({...release,stage:chunk.stage === "matte" ? "render":"qa",attempt:0,finishedAt:deps.now(),progressAt:deps.now()}).where(ownsClaim()).returning();
+      if (!advanced) return answer(200,"lost");
+      if (chunk.stage === "matte") await deps.db.update(catalogBatches).set({status:"rendering"}).where(and(eq(catalogBatches.id,batch.id),eq(catalogBatches.status,"matting")));
+      else {
+        const remaining=await deps.db.select().from(catalogChunks).where(eq(catalogChunks.batchId,batch.id));
+        if(remaining.every(row=>row.stage==="qa" || row.status==="done" || row.status==="failed")) await deps.db.update(catalogBatches).set({status:"qa"}).where(eq(catalogBatches.id,batch.id));
+      }
+      await dispatchNext(advanced);
+    } else { const completed = await deps.db.update(catalogChunks).set({status:"done",taskName:null,leaseUntil:null,finishedAt:deps.now()}).where(ownsClaim()).returning({id:catalogChunks.id}); if (!completed.length) return answer(200,"lost"); await finish(); }
     deps.log("chunk delivered",{batchId:batch.id,chunkId:chunk.id,stage:chunk.stage,attempt:chunk.attempt,durationMs:+deps.now()-+started,mattingMs,renderMs});
-    await refreshBatchProgress(deps.db,batch.id);
-    return {httpStatus:200,outcome:"done"};
+    await refreshBatchProgress(deps.db,batch.id,deps.now());
+    return answer(200,"done",outcome);
   } catch(error) {
     const reason = error instanceof Error ? error.message:String(error);
+    // Another delivery holds the chunk now: this copy's work is saved photo by photo, and retrying it is pointless.
+    if (lost || reason === OWNERSHIP_CHANGED) return answer(200,"lost");
     // Terminal (the chunk is marked failed below) is ERROR, a retried attempt WARNING: the alert counts ERROR only.
     // An Error object is passed whole, so a terminal line carries its stack for Error Reporting (the line shows its message).
-    const terminal = (opts.retryCount ?? 0) >= 4;
+    const terminal = (opts.retryCount ?? 0) >= LAST_QUEUE_RETRY;
     deps.log("chunk failed",{severity:terminal ? "ERROR":"WARNING",batchId:chunk.batchId,chunkId:chunk.id,stage:chunk.stage,attempt:chunk.attempt,retryCount:opts.retryCount ?? 0,error:error instanceof Error ? error:reason});
     if (terminal) {
-      const failed = await deps.db.update(catalogChunks).set({status:"failed",taskName:null,error:reason,finishedAt:deps.now()}).where(ownsClaim()).returning({id:catalogChunks.id});
-      if (!failed.length) return {httpStatus:503,outcome:"retry"};
-      if (chunk.productIds.length) await deps.db.update(catalogOutputs).set({status:"failed",reason:`Processing stopped after repeated errors: ${reason}`,updatedAt:deps.now()}).where(and(eq(catalogOutputs.batchId,chunk.batchId),inArray(catalogOutputs.productId,chunk.productIds),eq(catalogOutputs.status,"pending")));
-      await finish(); return {httpStatus:200,outcome:"failed"};
+      if (!(await failChunk(reason,`Processing stopped after repeated errors: ${reason}`))) return answer(200,"lost");
+      return answer(200,"failed");
     }
-    await deps.db.update(catalogChunks).set({status:"queued",taskName:null}).where(ownsClaim());
-    return {httpStatus:503,outcome:"retry"};
+    // The same task retries at the same step and claims the released row.
+    await deps.db.update(catalogChunks).set({status:"queued",taskName:null,leaseUntil:null}).where(ownsClaim());
+    return answer(503,"retry","failed");
+  } finally {
+    stopHeartbeat();
+  }
+  /** Queues the chunk's new step; a failed enqueue is left to the sweep (the lost-task rule, 30 minutes). */
+  async function dispatchNext(next:NonNullable<typeof chunk>,extra:Record<string,unknown> = {}) {
+    await tryEnqueueChunk(deps.enqueue,next,deps.log,extra);
+  }
+  /** Terminal: the chunk fails, its pending outputs fail with `outputReason`, the batch moves on. False when not the owner. */
+  async function failChunk(error:string,outputReason:string):Promise<boolean> {
+    const failed = await deps.db.update(catalogChunks).set({status:"failed",taskName:null,leaseUntil:null,error,finishedAt:deps.now()}).where(ownsClaim()).returning({id:catalogChunks.id});
+    if (!failed.length) return false;
+    if (chunk!.productIds.length) await deps.db.update(catalogOutputs).set({status:"failed",reason:outputReason,updatedAt:deps.now()}).where(and(eq(catalogOutputs.batchId,chunk!.batchId),inArray(catalogOutputs.productId,chunk!.productIds),eq(catalogOutputs.status,"pending")));
+    await finish();
+    return true;
   }
   async function finish() {
     for (const productId of chunk!.productIds) await deps.enqueue("/tasks/catalog/publish",{batchId:chunk!.batchId,productId},{taskId:`publish-${chunk!.batchId}-${productId}-chunk`});
     const chunks = await deps.db.select().from(catalogChunks).where(eq(catalogChunks.batchId,chunk!.batchId));
     if (chunks.every(c=>c.status==="done" || c.status==="failed")) { await deps.db.update(catalogBatches).set({status:"publishing"}).where(and(eq(catalogBatches.id,chunk!.batchId),inArray(catalogBatches.status,["matting","rendering","qa"]))); await enqueueFinalize(deps,chunk!.batchId); }
+    // Spec 15 E5: a finished chunk frees a slot in the batch's window.
+    else await dispatchChunks(deps.db,deps.enqueue,chunk!.batchId,{now:deps.now(),log:deps.log,window:deps.chunkWindow ?? chunkWindow()});
   }
 }

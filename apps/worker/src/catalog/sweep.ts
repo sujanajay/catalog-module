@@ -5,10 +5,11 @@ import { and, inArray, or, sql } from "drizzle-orm";
 import type { BatchStatus } from "@catalog/core/catalog/types";
 import type { Db } from "@catalog/core/db/client";
 import type { HandleResult } from "../server";
-import { catalogBatches, catalogChunks } from "@catalog/core/db/schema";
+import { catalogBatches } from "@catalog/core/db/schema";
 import { enqueueTask } from "@catalog/core/tasks";
 import { log } from "@catalog/core/log";
-import { CATALOG_TASK_LEASE_MS, enqueueFinalize, finalizeEnqueueExpired } from "./deps";
+import { PROCESSING_STATUSES, recoverBatchChunks } from "@catalog/core/catalog/pipeline/dispatch";
+import { enqueueFinalize, finalizeEnqueueExpired } from "./deps";
 
 /** No progress for this long fails the batch (2 hours, from the plan). */
 export const SWEEP_STALE_MS = 2 * 60 * 60 * 1000;
@@ -26,6 +27,8 @@ export interface SweepDeps {
   releaseLocks: ReleaseLocks;
   now?: () => Date;
   enqueue?: typeof enqueueTask;
+  /** The per-batch chunk window; absent reads CATALOG_CHUNK_WINDOW (default 8). */
+  window?: number;
 }
 
 function rowsOf(result: unknown): Record<string, unknown>[] {
@@ -51,20 +54,10 @@ export async function handleSweep(deps: SweepDeps, _body: Record<string, unknown
     ),
   ));
   for(const batch of pending) await enqueueFinalize({db:deps.db,enqueue:deps.enqueue ?? enqueueTask,now:()=>now},batch.id);
-  // A process can die before task retries can acquire its still-live lease. Requeue only expired work.
-  // The enqueue lease is not processing progress: leave started_at unchanged for the stale check.
-  const abandoned=await deps.db.update(catalogChunks).set({status:"queued",taskName:`recovery-${+now}`}).where(and(
-    sql`${catalogChunks.status} IN ('queued','running')`,
-    sql`CASE WHEN coalesce(${catalogChunks.taskName},'') ~ '^recovery-[0-9]+$'
-      THEN substring(${catalogChunks.taskName} from 10)::numeric
-      ELSE extract(epoch from coalesce(${catalogChunks.startedAt},${catalogChunks.createdAt}))*1000
-      END < ${+now-CATALOG_TASK_LEASE_MS}`,
-    sql`${catalogChunks.batchId} IN (SELECT id FROM catalog_batches WHERE status IN ('matting','rendering','qa'))`,
-    sql`GREATEST(${catalogChunks.startedAt},${catalogChunks.finishedAt},
-      (SELECT b.updated_at FROM catalog_batches b WHERE b.id=${catalogChunks.batchId}))
-      >= ${new Date(+now-SWEEP_STALE_MS)}::timestamptz`,
-  )).returning();
-  for(const chunk of abandoned) await (deps.enqueue ?? enqueueTask)("/tasks/catalog/chunk",{chunkId:chunk.id},{taskId:`chunk-${chunk.id}-${chunk.stage}-recovery-${+now}`});
+  // Spec 15 E4: recover only dead chunks (a lapsed lease, or a task lost for 30 minutes) and top up each
+  // processing batch's window. A live lease and a recently queued task are never touched.
+  const processing=await deps.db.select({id:catalogBatches.id}).from(catalogBatches).where(inArray(catalogBatches.status,PROCESSING_STATUSES));
+  for(const batch of processing) await recoverBatchChunks(deps.db,deps.enqueue ?? enqueueTask,batch.id,{now,...(deps.window ? {window:deps.window}:{})});
   const cutoff = new Date(now.getTime() - SWEEP_STALE_MS).toISOString();
   const statuses = sql.join(
     SWEEPABLE_STATUSES.map((s) => sql`${s}`),

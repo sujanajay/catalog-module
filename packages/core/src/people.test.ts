@@ -86,8 +86,8 @@ describe("0001_users.sql", () => {
     expect(tablesAfter0000).toContain("catalog_batches");
     expect(await publicTables()).toContain("users");
     const applied = await rows<{ n: number }>(sql`select count(*)::int as n from drizzle.__drizzle_migrations`);
-    // 0000_init, 0001_users, 0002_cost_events, 0003_intake_states
-    expect(applied[0]!.n).toBe(4);
+    // Every migration in the journal is applied (0000_init and 0001_users among them).
+    expect(applied[0]!.n).toBe(JSON.parse(await readFile(path.join(resolveMigrationsFolder(), "meta", "_journal.json"), "utf8")).entries.length);
     const cols = await rows<{ column_name: string; data_type: string; is_nullable: string }>(
       sql`select column_name, data_type, is_nullable from information_schema.columns where table_name = 'users' order by ordinal_position`,
     );

@@ -13,7 +13,7 @@ import type { ChannelId, ProductType, ResolvedPolicy } from "@catalog/core/catal
 import type { Matte } from "@catalog/core/catalog/render";
 import { flagReason } from "@catalog/core/catalog/types";
 import { workerCatalogDeps, type CatalogDeps } from "./deps";
-import { handleChunkTask } from "./chunk";
+import { currentChunkTask, handleChunkTask } from "./chunk";
 
 // 07 auto-resolve, end to end through the chunk: the real prepare, render and compliance guard; a
 // mocked judge that reads the rendered pixels; mocked cut-out models; in-memory storage.
@@ -112,7 +112,7 @@ async function seed(w: ReturnType<typeof world>, productType: ProductType, shots
     await db.insert(catalogSourceImages).values({ batchId: batch!.id, productId: product!.id, n: i + 1, sha256: `${name}-${i}`, originalName: `${name}_${i + 1}.png`, rawUri, mime: "image/png", width: W, height: H });
   }
   const [chunk] = await db.insert(catalogChunks).values({ batchId: batch!.id, index: 0, stage: "matte", productIds: [product!.id] }).returning();
-  for (let stage = 0; stage < 3; stage++) expect((await handleChunkTask(w.deps, { chunkId: chunk!.id })).httpStatus).toBe(200);
+  for (let stage = 0; stage < 3; stage++) expect((await handleChunkTask(w.deps,await currentChunkTask(db,chunk!.id))).httpStatus).toBe(200);
   const outputs = await db.select().from(catalogOutputs).where(eq(catalogOutputs.batchId, batch!.id)).orderBy(catalogOutputs.n, catalogOutputs.channel);
   const held = await listAttention(db, batch!.id, async uri => uri);
   return { batch: batch!, product: product!, outputs, held };

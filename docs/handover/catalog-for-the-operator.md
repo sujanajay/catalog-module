@@ -210,7 +210,7 @@ Two places help you look:
   that one batch, so Sujan can see its story in order. Send him that link with the batch number
   when you call.
 
-The nine emails:
+The ten emails:
 
 1. **A chunk gave up.** The tool works on a batch in small groups of products, called chunks. One
    group failed five times in a row and the tool stopped trying it. On the batch's Details tab
@@ -248,6 +248,9 @@ The nine emails:
    you see nothing on the batch page at all. First: carry on normally and look out for anything
    odd on your batches. Call Sujan if a batch looks wrong or stops; he reads the details in the
    logs.
+10. **A chunk task ran out of time.** A piece of batch work ran past its time limit and was cut
+   off. It is tried again by itself and nothing is lost, but this should never happen, so a
+   setting is wrong. First: carry on normally. Always tell Sujan the same day.
 
 There are no emails about money. The cost of a batch is shown on the batch page (section 14) and
 on the Ops page, and nobody is emailed when a batch costs more than usual.

@@ -34,8 +34,14 @@ WEB_SERVICE=catalog-web
 WORKER_SERVICE=catalog-worker
 QUEUE=catalog
 BUILD_CONFIG=cloudbuild.yaml
-CHUNK_IMAGES=${CATALOG_CHUNK_IMAGES:-25}
+CHUNK_IMAGES=${CATALOG_CHUNK_IMAGES:-10}
 [[ "$CHUNK_IMAGES" =~ ^[1-9][0-9]*$ ]] || { echo "CATALOG_CHUNK_IMAGES must be a positive integer" >&2; exit 1; }
+# Spec 15: chunk tasks queued at once per batch (web Start and the worker both dispatch the window).
+CHUNK_WINDOW=${CATALOG_CHUNK_WINDOW:-8}
+[[ "$CHUNK_WINDOW" =~ ^[1-9][0-9]*$ ]] || { echo "CATALOG_CHUNK_WINDOW must be a positive integer" >&2; exit 1; }
+# Spec 15: optional per-delivery time budget for the worker (code default 480000 ms, the cap).
+CHUNK_BUDGET=${CATALOG_CHUNK_TIME_BUDGET_MS:-}
+[[ -z "$CHUNK_BUDGET" || "$CHUNK_BUDGET" =~ ^[1-9][0-9]*$ ]] || { echo "CATALOG_CHUNK_TIME_BUDGET_MS must be a positive integer" >&2; exit 1; }
 if [ "${CATALOG_PREVIEW:-0}" = 1 ]; then
   WEB_SERVICE=catalog-web-preview
   WORKER_SERVICE=catalog-worker-preview
@@ -130,7 +136,7 @@ echo "==> shape: worker $WORKER_MAX_INSTANCES x ${WORKER_CPU} vCPU/$WORKER_MEMOR
 # Semicolons, not commas: the value travels inside --set-env-vars. The load driver re-checks it.
 DB_CONNECTION_BUDGET="max=$DB_MAX_CONNECTIONS;reserved=$DB_RESERVED_CONNECTIONS;ila=$ILA_DB_SHARE"
 DB_CONNECTION_BUDGET+=";worker=${WORKER_MAX_INSTANCES}x$WORKER_DB_POOL_MAX;web=${WEB_MAX_INSTANCES}x$WEB_DB_POOL_MAX;jobs=${MAX_CONCURRENT_JOBS}x$JOB_DB_POOL_MAX"
-WORKER_ENV="$ENV_VARS,DB_POOL_MAX=$WORKER_DB_POOL_MAX,BQ_PROJECT=$BQ_PROJECT,BQ_LOCATION=asia-south1,CATALOG_CHUNK_IMAGES=$CHUNK_IMAGES"
+WORKER_ENV="$ENV_VARS,DB_POOL_MAX=$WORKER_DB_POOL_MAX,BQ_PROJECT=$BQ_PROJECT,BQ_LOCATION=asia-south1,CATALOG_CHUNK_IMAGES=$CHUNK_IMAGES,CATALOG_CHUNK_WINDOW=$CHUNK_WINDOW${CHUNK_BUDGET:+,CATALOG_CHUNK_TIME_BUDGET_MS=$CHUNK_BUDGET}"
 WORKER_ENV+=",DB_CONNECTION_BUDGET=$DB_CONNECTION_BUDGET"
 # Spec 16: the throughput settings. MATTE_INFLIGHT_PER_INSTANCE is read by the matting client now; the others by
 # spec 16 F3 (photos at once, the bulk class and window, the compute cost line), harmless before it.
@@ -193,7 +199,7 @@ INR_PER_USD=${INR_PER_USD:-84}
 [[ "$INR_PER_USD" =~ ^[0-9]+([.][0-9]+)?$ ]] || { echo "INR_PER_USD must be a number such as 84" >&2; exit 1; }
 WORKER_ENV+=",CATALOG_QA_DEFAULT_MODEL=$CATALOG_QA_DEFAULT_MODEL"
 if [ -n "$DAILY_SPEND_CAP_USD" ]; then WORKER_ENV+=",DAILY_SPEND_CAP_USD=$DAILY_SPEND_CAP_USD"; fi
-WEB_ENV="$ENV_VARS,DB_POOL_MAX=$WEB_DB_POOL_MAX,SHARE_SA_EMAIL=$WEB_SA,CATALOG_CHUNK_IMAGES=$CHUNK_IMAGES"
+WEB_ENV="$ENV_VARS,DB_POOL_MAX=$WEB_DB_POOL_MAX,SHARE_SA_EMAIL=$WEB_SA,CATALOG_CHUNK_IMAGES=$CHUNK_IMAGES,CATALOG_CHUNK_WINDOW=$CHUNK_WINDOW"
 WEB_ENV+=",CATALOG_BULK_WINDOW=$CATALOG_BULK_WINDOW,BULK_BATCH_PRODUCTS=$BULK_BATCH_PRODUCTS"
 if [ "$BULK_MAX_DISPATCHES" -gt 0 ]; then WEB_ENV+=",TASKS_BULK_QUEUE=$BULK_QUEUE"; fi
 # INR_PER_USD reaches the web (cost line, wizard estimate), the worker (finalize) and, through

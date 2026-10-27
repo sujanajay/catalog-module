@@ -1,6 +1,6 @@
-import { and, count, eq, sql } from "drizzle-orm";
+import { and, count, eq, isNotNull, max, or, sql } from "drizzle-orm";
 import type { Db } from "@catalog/core/db/client";
-import { catalogBatches, catalogBatchProducts, catalogOutputs } from "@catalog/core/db/schema";
+import { catalogBatches, catalogBatchProducts, catalogChunks, catalogOutputs, catalogSourceImages } from "@catalog/core/db/schema";
 import { ensureDefaultPolicies, resolvePolicy } from "@catalog/core/catalog/qa/policy";
 import { judgeOutput } from "@catalog/core/catalog/qa/judge";
 import { classifyProductType } from "@catalog/core/catalog/qa/classify";
@@ -28,6 +28,15 @@ export interface CatalogDeps {
   sleep?: (ms: number) => Promise<void>;
   /** The re-render-and-re-judge loop run before triage (qa/triage.ts); absent repairs nothing. */
   repairOwnDefects?: RepairOwnDefects<QaRepairContext>;
+  /**
+   * Spec 15 E2: starts the lease heartbeat of a running delivery and returns its stop. `renew` resolves false once
+   * the delivery is past its deadline (stop renewing). Absent: a timer every CHUNK_HEARTBEAT_MS. Tests drive it.
+   */
+  heartbeat?: (renew: () => Promise<boolean>) => () => void;
+  /** Spec 15 E1: the delivery's time budget; absent reads CATALOG_CHUNK_TIME_BUDGET_MS (default 480 s). */
+  chunkTimeBudgetMs?: number;
+  /** Spec 15 E5: the per-batch window; absent reads CATALOG_CHUNK_WINDOW (default 8). */
+  chunkWindow?: number;
 }
 let sharedMatting: MattingClient | undefined;
 // Default rows are check-then-insert; once per process is enough.
@@ -64,10 +73,26 @@ export async function enqueueFinalize(deps: Pick<CatalogDeps,"db"|"enqueue"> & P
   try { await deps.enqueue("/tasks/catalog/finalize",{batchId}, delaySec ? {delaySec}:{}); }
   catch(error) { await deps.db.update(catalogBatches).set({updatedAt:sql`${catalogBatches.updatedAt}`,counts:sql`jsonb_set(${catalogBatches.counts}, '{finalizePending}', 'false')`}).where(and(eq(catalogBatches.id,batchId),sql`${catalogBatches.counts}->>'finalizeEnqueuedAt' = ${String(now)}`)); throw error; }
 }
-export async function refreshBatchProgress(db:Db,batchId:string):Promise<void> {
+/** Spec 15 E7: the newest samples of the images made that the batch page's measured time is read from. */
+export const PROCESSING_RATE_SAMPLES = 5;
+export async function refreshBatchProgress(db:Db,batchId:string,now:Date=new Date()):Promise<void> {
   const groups=await db.select({status:catalogOutputs.status,n:count()}).from(catalogOutputs).where(eq(catalogOutputs.batchId,batchId)).groupBy(catalogOutputs.status);
   const [held]=await db.select({n:count()}).from(catalogBatchProducts).where(and(eq(catalogBatchProducts.batchId,batchId),eq(catalogBatchProducts.change,"pending_attention")));
+  // Spec 15 E7: photos prepared (cut out, failed, or left out as a size chart) and the last finished photo. A photo
+  // the cut-out step skips (an unchanged shot of a re-upload has no pending output) counts once its chunk has left
+  // the cut-out step, so the count reaches the total.
+  const [prepared]=await db.select({n:count()}).from(catalogSourceImages).where(and(eq(catalogSourceImages.batchId,batchId),or(isNotNull(catalogSourceImages.matteUri),eq(catalogSourceImages.status,"failed"),sql`${catalogSourceImages.flags} @> '["chart_image"]'::jsonb`,
+    sql`EXISTS (SELECT 1 FROM ${catalogChunks} c WHERE c.batch_id = ${catalogSourceImages.batchId} AND c.product_ids @> jsonb_build_array(${catalogSourceImages.productId}) AND (c.source_image_ids IS NULL OR jsonb_array_length(c.source_image_ids) = 0 OR c.source_image_ids @> jsonb_build_array(${catalogSourceImages.id})) AND (c.stage <> 'matte' OR c.status IN ('done','failed')))`)));
+  const [last]=await db.select({at:max(catalogChunks.progressAt)}).from(catalogChunks).where(eq(catalogChunks.batchId,batchId));
   const total=(status:string)=>groups.find(g=>g.status===status)?.n ?? 0;
-  const patch={verified:total("verified"),needsAttention:total("needs_attention"),failed:total("failed"),skipped:total("skipped"),staged:total("staged"),attentionProducts:held?.n ?? 0};
-  await db.update(catalogBatches).set({counts:sql`${catalogBatches.counts} || ${JSON.stringify(patch)}::jsonb`}).where(and(eq(catalogBatches.id,batchId),sql`${catalogBatches.status} <> 'done'`));
+  const patch={verified:total("verified"),needsAttention:total("needs_attention"),failed:total("failed"),skipped:total("skipped"),staged:total("staged"),attentionProducts:held?.n ?? 0,prepared:prepared?.n ?? 0,progressAt:last?.at ? new Date(last.at).toISOString():null};
+  const made=patch.verified+patch.needsAttention+patch.failed+patch.skipped+patch.staged;
+  // The samples are read and written under the row lock, so two deliveries ending together both count.
+  await db.transaction(async tx=>{
+    const [row]=await tx.select({counts:catalogBatches.counts}).from(catalogBatches).where(and(eq(catalogBatches.id,batchId),sql`${catalogBatches.status} <> 'done'`)).for("update");
+    if(!row) return;
+    const samples=row.counts.processingRate ?? [];
+    const processingRate=samples.at(-1)?.made===made ? samples:[...samples,{at:now.toISOString(),made}].slice(-PROCESSING_RATE_SAMPLES);
+    await tx.update(catalogBatches).set({counts:sql`${catalogBatches.counts} || ${JSON.stringify({...patch,processingRate})}::jsonb`}).where(eq(catalogBatches.id,batchId));
+  });
 }
