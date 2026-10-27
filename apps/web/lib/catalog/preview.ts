@@ -1,4 +1,4 @@
-import { and, eq, inArray } from "drizzle-orm";
+import { and, eq, inArray, ne } from "drizzle-orm";
 import { catalogBatches, catalogOutputs, catalogProducts, catalogSourceImages, catalogUploads } from "@catalog/core/db/schema";
 import { buildDetectedStep2 } from "@catalog/core/catalog/ingest/detect-step";
 import { buildPreview } from "@catalog/core/catalog/ingest/index";
@@ -18,7 +18,7 @@ import { regroupBatch } from "./uploads";
 export async function detectedBatch(id: string) {
   await queryBatch(id);
   const detected = await buildDetectedStep2(db(), id, { storage });
-  const uploads = await db().select().from(catalogUploads).where(eq(catalogUploads.batchId, id));
+  const uploads = await db().select().from(catalogUploads).where(and(eq(catalogUploads.batchId, id), ne(catalogUploads.status, "removed")));
   const batch = await queryBatch(id);
   return { ...detected, totalProducts: batch.counts.products, unreadable: uploads.flatMap((u) => (u.detected as unknown as Detected | null)?.rejected ?? []), sheets: detected.sheets.map((sheet) => ({ ...sheet, columns: (uploads.find((u) => u.id === sheet.uploadId)?.detected as unknown as Detected | null)?.columns ?? [] })) };
 }

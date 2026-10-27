@@ -1,4 +1,4 @@
-import { and, eq } from "drizzle-orm";
+import { and, eq, ne } from "drizzle-orm";
 import { catalogBatches, catalogBatchProducts, catalogChunks, catalogProducts, catalogSourceImages, catalogUploads } from "@catalog/core/db/schema";
 import { lockProducts } from "@catalog/core/catalog/products";
 import { planChunks } from "@catalog/core/catalog/pipeline/plan-chunks";
@@ -24,7 +24,7 @@ export async function startBatch(id: string, value: unknown, _actor: string) {
   if (batch.status !== "draft") throw new HttpError(409, "This batch has already started. Open its progress page.");
   if (!batch.channels.length) throw badRequest("Choose at least one marketplace before starting.");
   if (!batch.counts.previewReady || batch.updatedAt.getTime() > Date.parse(previewAt)) throw new HttpError(409, STALE_PREVIEW);
-  const uploads = await db().select().from(catalogUploads).where(eq(catalogUploads.batchId, id));
+  const uploads = await db().select().from(catalogUploads).where(and(eq(catalogUploads.batchId, id), ne(catalogUploads.status, "removed")));
   if (uploads.some((u) => u.status === "pending" || u.status === "uploaded" || (typeof u.detected?.completedAt === "string" && Date.parse(u.detected.completedAt) > Date.parse(previewAt)))) throw new HttpError(409, STALE_PREVIEW);
   const sources = await db().select().from(catalogSourceImages).where(eq(catalogSourceImages.batchId, id));
   if (!sources.length) {

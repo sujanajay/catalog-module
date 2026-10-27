@@ -2,7 +2,7 @@ import { costLine } from "../cost";
 import { QA_DIMENSIONS } from "../qa/judge";
 import { autoActionsOf } from "../auto-resolve";
 import { QA_CAP_BANNER } from "./status";
-import { and, eq, inArray } from "drizzle-orm";
+import { and, eq, inArray, ne } from "drizzle-orm";
 import ExcelJS from "exceljs";
 import { buildCsv } from "../../csv";
 import type { Db } from "../../db/client";
@@ -140,7 +140,7 @@ export async function buildReport(db:Db,batchId:string,extra:{recheck:RecheckRes
   const ids = pairs.map(p=>p.product.id);
   const outputs = ids.length ? await db.select().from(catalogOutputs).where(inArray(catalogOutputs.productId,ids)):[];
   const sources = await db.select().from(catalogSourceImages).where(eq(catalogSourceImages.batchId,batchId));
-  const uploads = await db.select().from(catalogUploads).where(eq(catalogUploads.batchId,batchId));
+  const uploads = await db.select().from(catalogUploads).where(and(eq(catalogUploads.batchId,batchId),ne(catalogUploads.status,"removed")));
   const events = await db.select().from(catalogProductEvents).where(eq(catalogProductEvents.batchId,batchId));
   const chunks = await db.select().from(catalogChunks).where(eq(catalogChunks.batchId,batchId));
   const rows:SheetSpec["rows"] = pairs.map(({product,pair})=> {

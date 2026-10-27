@@ -15,7 +15,7 @@
 // Version rows point at `rawPath(prefix, path_key, n, ext)`, written by the batch-wide step.
 import { createHash } from "node:crypto";
 import type { Readable } from "node:stream";
-import { and, count, eq, inArray, sql } from "drizzle-orm";
+import { and, count, eq, inArray, ne, sql } from "drizzle-orm";
 import type { Db } from "../../db/client";
 import {
   catalogBatches,
@@ -303,7 +303,7 @@ async function patchCounts(db: Db, batchId: string, patch: Partial<BatchCounts>,
  * skipped. Processes at most INGEST_BUDGET_ITEMS items per call and re-enqueues itself with the same
  * body plus a cursor while work remains. `deps.budgetItems` (optional) overrides the budget.
  *
- * A delivery for an upload already `collected` or `failed` is a no-op (it only finishes the batch
+ * A delivery for an upload already `collected`, `failed` or `removed` is a no-op (it only finishes the batch
  * if that was left undone). A step 2 re-run is 06 setting the batch's uploads back to `uploaded`
  * and enqueueing them again: the items are listed again and only items never read before are read.
  */
@@ -318,8 +318,9 @@ export async function runIngest(
   if (!batch) throw new Error(`Batch ${body.batchId} does not exist.`);
   const prefix = batchPrefix(batch.brandSlug, batch.id, batch.isTest);
 
-  if (upload.status === "collected" || upload.status === "failed") {
-    return (await finishIfLast(db, deps, batch.id)) ?? { progress: { done: 0, total: null, phase: "done" }, outcome: "noop: upload already collected" };
+  if (upload.status === "collected" || upload.status === "failed" || upload.status === "removed") {
+    // A removed upload (spec 14b F3) is never read; a delivery queued before the removal only finishes the batch.
+    return (await finishIfLast(db, deps, batch.id)) ?? { progress: { done: 0, total: null, phase: "done" }, outcome: `noop: upload already ${upload.status}` };
   }
   if (!["draft", "ingesting", "failed"].includes(batch.status)) {
     return { progress: { done: 0, total: null, phase: "done" }, outcome: `noop: the batch is ${batch.status}` };
@@ -401,7 +402,7 @@ async function finishIfLast(db: Db, deps: IngestDeps, batchId: string): Promise<
       and(
         eq(catalogBatches.id, batchId),
         eq(catalogBatches.status, "ingesting"),
-        sql`NOT EXISTS (SELECT 1 FROM ${catalogUploads} WHERE ${catalogUploads.batchId} = ${batchId} AND ${catalogUploads.status} NOT IN ('collected', 'failed'))`,
+        sql`NOT EXISTS (SELECT 1 FROM ${catalogUploads} WHERE ${catalogUploads.batchId} = ${batchId} AND ${catalogUploads.status} NOT IN ('collected', 'failed', 'removed'))`,
       ),
     )
     .returning({ id: catalogBatches.id });
@@ -647,7 +648,8 @@ async function finishBatch(db: Db, deps: IngestDeps, batchId: string): Promise<{
   const [batch] = await db.select().from(catalogBatches).where(eq(catalogBatches.id, batchId));
   if (!batch) throw new Error(`Batch ${batchId} does not exist.`);
   const prefix = batchPrefix(batch.brandSlug, batch.id, batch.isTest);
-  const uploads = await db.select().from(catalogUploads).where(eq(catalogUploads.batchId, batchId));
+  // A removed upload (spec 14b F3) is not an input: its photos, sheets and errors are left out.
+  const uploads = await db.select().from(catalogUploads).where(and(eq(catalogUploads.batchId, batchId), ne(catalogUploads.status, "removed")));
   await removeDraftRows(db, batch.id);
 
   const manifests = new Map<string, UploadManifest>();

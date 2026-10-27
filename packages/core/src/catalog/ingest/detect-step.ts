@@ -1,7 +1,7 @@
 // Step 2 data (spec 04, "Step 2 data"): what "Check what we found" shows, built from the batch's
 // stored `catalog_uploads.detected` rows, its options and the source rows the ingest wrote. No
 // guessing: a sheet whose identifier column could not be told says so and waits for the operator.
-import { asc, eq } from "drizzle-orm";
+import { and, asc, eq, ne } from "drizzle-orm";
 import type { Db } from "../../db/client";
 import { catalogBatches, catalogProducts, catalogSourceImages, catalogUploads, type CatalogUpload } from "../../db/schema";
 import { signedUrl } from "../../storage";
@@ -131,7 +131,8 @@ export async function buildDetectedStep2(
   const [batch] = await db.select().from(catalogBatches).where(eq(catalogBatches.id, batchId));
   if (!batch) throw new Error("This batch does not exist.");
   const options = batch.options;
-  const uploads = await db.select().from(catalogUploads).where(eq(catalogUploads.batchId, batchId)).orderBy(asc(catalogUploads.createdAt), asc(catalogUploads.id));
+  // A removed upload (spec 14b F3) is not an input of step 2.
+  const uploads = await db.select().from(catalogUploads).where(and(eq(catalogUploads.batchId, batchId), ne(catalogUploads.status, "removed"))).orderBy(asc(catalogUploads.createdAt), asc(catalogUploads.id));
   const sources = await db
     .select({ productId: catalogSourceImages.productId, identifier: catalogProducts.identifier, n: catalogSourceImages.n, rawUri: catalogSourceImages.rawUri, originalName: catalogSourceImages.originalName, uploadId: catalogSourceImages.uploadId })
     .from(catalogSourceImages)
