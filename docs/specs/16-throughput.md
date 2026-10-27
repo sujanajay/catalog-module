@@ -182,7 +182,7 @@ worker pool stays 2 (concurrency 2, one connection per in-flight task; F3's grou
 - Class and queue: a batch with at least `BULK_BATCH_PRODUCTS` products (default 100), or a Test Brand load
   batch, is bulk; its chunk and publish tasks go to `TASKS_BULK_QUEUE` when set. `dispatchChunks` uses
   `CATALOG_CHUNK_WINDOW` (8) for operator batches and `CATALOG_BULK_WINDOW` (30) for bulk.
-- `deps.ts` builds the client with `mattingClientFromEnv(process.env)`.
+- `deps.ts` builds the client with `mattingClientFromEnv(process.env)` (today it builds it inline from `MATTING_URL` and `MATTING_GPU_URL`), and the `upscale_call` cost row in `chunk.ts` is priced at the CPU rate when `isCpuUpscalerId(rendered.upscale.model)` (today it is always the GPU rate).
 - Grouped writes per product (one `UPDATE ... FROM (VALUES ...)` under the claim; cost ledger rows in one insert),
   Start's chunk rows in one multi-row insert, the compute cost line `wall x WORKER_CPU / WORKER_CONCURRENCY`.
 - AI check pacing: a per-process limiter `LLM_INFLIGHT_PER_INSTANCE` (unset: no limit) that halves after a 429 for
@@ -334,18 +334,24 @@ the judge.
    operator of the deploy does not know the URL in advance.
 5. The GPU render key is unchanged so the F1 deploy re-renders nothing; only the CPU path gets the `:cpu` suffix,
    and `renderKeys` accepts both, so the F2 switch re-makes nothing by itself either.
-11. `UPSCALE_CPU=1` is set on the CPU service at every deploy, not only with `UPSCALE_SERVICE=cpu`, so the fidelity
-   gate and the preview stack can reach the CPU upscaler before the F2 switch.
-9. Only 429 counts as "busy" for the wait-and-retry rule; the plan also named 503, but a 503 from our matting
-   service means a fault, and Cloud Run answers 429 when max-instances are all busy. Keeping 503 as an immediate
-   failure also keeps the spec 05 breaker behaviour and its tests unchanged.
-10. The cost ledger's `upscale_call` row is priced at the GPU rate in E's `chunk.ts`; F3 prices it by the upscaler
-   id (`isCpuUpscalerId`) once E has merged. Until then CPU upscale calls are recorded at the GPU rate (an
-   over-statement of about 2.5x on that line only).
 6. The live test is 200 products (owner decision 5), not the plan's 1,000-product rehearsal.
 7. The finalize split and the B4 GPU trial are deferred (section 12); they are not needed for 200 or 2,000
    products.
 8. The checks of section 3.2.2 live in `infra/lib/shape.sh` so they can be tested offline without gcloud.
+9. Only 429 counts as "busy" for the wait-and-retry rule; the plan also named 503, but a 503 from our matting
+   service means a fault, and Cloud Run answers 429 when max-instances are all busy. Keeping 503 as an immediate
+   failure also keeps the spec 05 breaker behaviour and its tests unchanged.
+10. The cost ledger's `upscale_call` row is priced at the GPU rate in E's `chunk.ts`; F3 prices it by the upscaler
+    id (`isCpuUpscalerId`) once E has merged. Until then CPU upscale calls are recorded at the GPU rate (an
+    over-statement of about 2.5x on that line only).
+11. `UPSCALE_CPU=1` is set on the CPU service at every deploy, not only with `UPSCALE_SERVICE=cpu`, so the fidelity
+    gate and the preview stack can reach the CPU upscaler before the F2 switch.
+12. The price defaults in `deploy.sh` (`COMPUTE_USD_PER_VCPU_SECOND`, `PRICE_MATTE_GPU_USD_PER_SECOND`) follow the
+    shape (worker memory per vCPU; GPU CPU and memory), so the cost ledger stays right at the F2 shape. The F1
+    values are unchanged (0.0000265 and 0.00034884); at F2 the GPU rate is 0.00047364 per second.
+13. The bulk queue is `$QUEUE-bulk` (`catalog-bulk`, or `catalog-preview-bulk` on preview), created in `deploy.sh`
+    next to the ingest queue; `bootstrap.sh` is unchanged.
+14. No DB pool code change: the worker pool stays 2 per instance; `WORKER_DB_POOL_MAX` is an env override.
 
 ## 14. Done when
 

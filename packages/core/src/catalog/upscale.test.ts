@@ -273,7 +273,7 @@ describe("matting client upscale", () => {
     // Unset keeps the GPU service; an URL that names no service warns once and keeps it too.
     expect(new MattingClient({ services, fetch, upscaleUrl: null }).upscaleTarget).toBe("gpu");
     expect(new MattingClient({ services, fetch, upscaleUrl: "https://elsewhere.example" }).upscaleTarget).toBe("gpu");
-    expect(warn.mock.calls.map(([line]) => JSON.parse(String(line)).message)).toEqual(["upscale_url_unknown"]);
+    expect(warn.mock.calls.map((call: unknown[]) => (JSON.parse(String(call[0])) as { message: string }).message)).toEqual(["upscale_url_unknown"]);
     // Without a GPU service, the CPU service named by UPSCALE_URL still upscales.
     expect(new MattingClient({ services: [services[0]!], fetch, upscaleUrl: "http://127.0.0.1:1" }).upscaleTarget).toBe("cpu");
   });
