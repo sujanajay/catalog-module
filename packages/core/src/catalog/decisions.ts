@@ -107,7 +107,7 @@ export async function completeReplacement(deps: ReplacementDeps, input: { output
     await tx.update(catalogProducts).set({ lockBatchId: output.batchId, updatedAt: now }).where(eq(catalogProducts.id, product.id));
     await recordEvent(tx, { productId: product.id, batchId: output.batchId, kind: "replacement_uploaded", actor: input.actor, details: { n: output.n, oldSha256: old!.sha256, newSha256: sha256 } });
     const [index] = await tx.select({ value: sql<number>`coalesce(max(${catalogChunks.index}), -1) + 1` }).from(catalogChunks).where(eq(catalogChunks.batchId, output.batchId));
-    const [chunk] = await tx.insert(catalogChunks).values({ batchId: output.batchId, index: Number(index!.value), stage: "matte", productIds: [product.id], sourceImageIds: [source!.id], status: "queued" }).returning();
+    const [chunk] = await tx.insert(catalogChunks).values({ batchId: output.batchId, index: Number(index!.value), stage: "matte", productIds: [product.id], sourceImageIds: [source!.id], status: "queued", attempt: 0, dispatchedAt: now }).returning();
     return { batchId: output.batchId, productId: product.id, sourceImageId: source!.id, chunkId: chunk!.id };
   });
 }

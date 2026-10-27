@@ -32,6 +32,8 @@ export const NOT_COLLECTED_TEXT = "Added, not collected yet";
 export const pendingUploadsText = (n: number) => `${num(n)} ${plural(n, "file", "files")} did not finish uploading`;
 export const couldNotStartText = (reason: string | null | undefined) => `Could not start: ${reason ?? "Start the batch again."}`;
 export const cancelledText = (age: string) => `Cancelled ${age}`;
+/** A draft the sweep cancelled after `days` days without a write (spec 14d F12). */
+export const expiredText = (days: number) => `Expired after ${num(days)} ${plural(days, "day", "days")} with no activity`;
 /** The words of each phase while collecting or placing; a count "<done> of <total>" follows them. */
 export const PHASE_WORDS: Record<"downloading" | "reading" | "unpacking" | "checking" | "placing", string> = {
   downloading: "Downloading photos",
@@ -121,6 +123,26 @@ export function waitText(images: number): string {
 export const ANOTHER_BATCH_RUNNING = "Another batch is running; yours may wait behind it.";
 export const CLOSE_PAGE_TEXT = "You can close this page and come back; nothing stops.";
 export const STARTING_SERVICES_TEXT = "Starting the image services. The first pictures usually take a minute or two on the first batch after a quiet spell.";
+/** Spec 15 E7: the starting line shows only this long after Start, and only before any photo is prepared. */
+export const STARTING_SERVICES_MS = 5 * 60_000;
+/** Spec 15 E7: a processing batch with no finished photo for this long gets the stall sentence. */
+export const PROCESSING_STALL_MS = 20 * 60_000;
+export const TAKING_LONGER_TEXT = "taking longer than usual";
+export function processingStalledText(minutes: number): string {
+  return `Nothing has moved for ${minutes} minutes. The system is retrying by itself; you do not need to do anything.`;
+}
+/**
+ * Images made per second from the server's samples (counts.processingRate): from the newest sample back to the
+ * newest one at least 60 s older. Null when there is no such pair or nothing moved between them.
+ */
+export function measuredRate(samples: readonly { at: string; made: number }[] | undefined): number | null {
+  const sorted = [...(samples ?? [])].sort((a, b) => Date.parse(a.at) - Date.parse(b.at)), last = sorted.at(-1);
+  if (!last) return null;
+  const first = sorted.filter((s) => Date.parse(last.at) - Date.parse(s.at) >= 60_000).at(-1);
+  if (!first || last.made <= first.made) return null;
+  return (last.made - first.made) / ((Date.parse(last.at) - Date.parse(first.at)) / 1000);
+}
+const fmt = (n: number) => n.toLocaleString("en");
 /**
  * The Ready clause for Styli pairs not made because the photo is too small (spec 07 R8, batches before 2026-10-22,
  * when Styli still skipped photos for their size): the banner must
@@ -138,6 +160,8 @@ export function timeLeftText(input: { planned: number; done: number; startedAt: 
   const elapsedMin = Math.max(0, (input.now.getTime() - new Date(input.startedAt).getTime()) / 60_000);
   if (input.planned <= 0 || input.done < input.planned * 0.1) {
     const { low, high } = waitRangeMinutes(input.planned);
+    // Spec 15 E7: past the usual range the fit says nothing, so the page says so instead of "about 1 min left".
+    if (high - elapsedMin <= 1) return TAKING_LONGER_TEXT;
     const lo = Math.max(1, Math.round(low - elapsedMin)), hi = Math.max(lo, Math.ceil(high - elapsedMin));
     return lo === hi ? `about ${lo} min left` : `about ${lo} to ${hi} min left`;
   }
@@ -154,8 +178,9 @@ function draftWords(c: BatchCounts, channels: readonly ChannelId[] | undefined, 
   if (!c.previewReady) return NOT_COLLECTED_TEXT;
   return channels?.length ? READY_TO_START_TEXT : READY_TO_CHECK_TEXT;
 }
-/** Cancelled words. Release D adds "Expired after <N> days with no activity" here for a batch the sweep cancelled. */
-function cancelledWords(input: { updatedAt?: Date | string; now?: Date }): string {
+/** Cancelled words: "Expired after <N> days with no activity" for a draft the sweep cancelled (spec 14d F12), else "Cancelled <age>". */
+function cancelledWords(input: { updatedAt?: Date | string; now?: Date; expired?: { days: number } | null }): string {
+  if (input.expired) return expiredText(input.expired.days);
   return input.updatedAt === undefined ? "Cancelled" : cancelledText(ageText(input.updatedAt, input.now ?? new Date()));
 }
 export interface BatchStateInput {
@@ -164,6 +189,7 @@ export interface BatchStateInput {
   /** Styli outputs skipped as too small; counts.skipped also holds removed and chart skips. */ styliSkipped?: number;
   /** The batch's channels: a ready draft with channels reads "Ready to start". */ channels?: readonly ChannelId[];
   /** The batch's uploads (any status): pending and missing inputs are named in `intake`; left out, those checks are skipped. */ uploads?: readonly { status: string }[];
+  /** `options.expired`: a cancelled batch the sweep expired reads "Expired after <N> days with no activity". */ expired?: { days: number } | null;
 }
 export function deriveBatchState(input: BatchStateInput): BatchState {
   const state = derive(input);
@@ -195,9 +221,22 @@ function derive(input: BatchStateInput): BatchState {
     const eta = rate > 0 ? Math.ceil(Math.max(0, c.outputs - made) / rate) : null;
     // Skipped and unchanged pairs are not made, so they count on neither side: the figure is wizard step 4's "images will be made".
     const planned = Math.max(0, c.outputs - c.skipped - c.unchanged), done = Math.min(planned, Math.max(0, made - c.skipped - c.unchanged));
-    // The server's figure from startedAt survives reloads; browser samples are only a fallback without one.
-    const left = input.startedAt ? timeLeftText({ planned, done, startedAt: input.startedAt, now: new Date(now) }) : eta === null ? "" : `about ${Math.ceil(eta / 60)} min left`;
-    return { ...result, state: "processing", pill: "Processing", made: done, total: planned, progress: planned ? Math.min(1, done / planned) : 0, listPill: `Processing ${done.toLocaleString("en")} of ${planned.toLocaleString("en")}`, eta,...(status === "qa" ? {qualityLine:"Quality check running"}:{}), text: [`${done} of ${planned} ${plural(planned, "image", "images")} made${notMade(c)}${left ? ` · ${left}` : ""}.`, CLOSE_PAGE_TEXT, ...(status === "matting" && done === 0 ? [STARTING_SERVICES_TEXT] : [])].join(" ") };
+    // Spec 15 E7: photos prepared, a stall line and a measured time. Publishing has no chunk progress, so it keeps
+    // the plain count. A batch from before release E has no `prepared` and reads as all prepared.
+    const chunked = status !== "publishing", startedMs = input.startedAt ? new Date(input.startedAt).getTime() : null;
+    const lastProgress = c.progressAt ? Date.parse(c.progressAt) : startedMs;
+    const quietMs = chunked && lastProgress !== null ? now - lastProgress : 0, stalled = quietMs > PROCESSING_STALL_MS;
+    const serverRate = measuredRate(c.processingRate);
+    // The server's figures survive reloads; browser samples are only a fallback without a start time.
+    const left = stalled ? TAKING_LONGER_TEXT
+      : serverRate ? `about ${Math.max(1, Math.ceil((planned - done) / serverRate / 60))} min left`
+      : input.startedAt ? timeLeftText({ planned, done, startedAt: input.startedAt, now: new Date(now) }) : eta === null ? "" : `about ${Math.ceil(eta / 60)} min left`;
+    const madeText = `${fmt(done)} of ${fmt(planned)} ${plural(planned, "image", "images")} made${notMade(c)}${left ? ` · ${left}` : ""}.`;
+    const preparing = chunked && c.prepared !== undefined && c.prepared < c.sources;
+    const starting = status === "matting" && (c.prepared ?? done) === 0 && (startedMs === null || now - startedMs < STARTING_SERVICES_MS);
+    const text = [preparing ? `Preparing photos ${fmt(c.prepared!)} of ${fmt(c.sources)} · ${madeText}` : madeText, CLOSE_PAGE_TEXT,
+      ...(stalled ? [processingStalledText(Math.floor(quietMs / 60_000))] : []), ...(starting ? [STARTING_SERVICES_TEXT] : [])].join(" ");
+    return { ...result, state: "processing", pill: "Processing", made: done, total: planned, progress: planned ? Math.min(1, done / planned) : 0, listPill: `Processing ${fmt(done)} of ${fmt(planned)}`, eta,...(status === "qa" ? {qualityLine:"Quality check running"}:{}), text };
   }
   if (status === "done") {
     const capped = (c as BatchCounts & { qaCapped?: boolean }).qaCapped ? ` ${QA_CAP_BANNER}` : "";

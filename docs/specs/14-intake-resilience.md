@@ -15,7 +15,7 @@ to build in order.
 | A, truth and way back | [`14a-intake-release-a.md`](14a-intake-release-a.md) | `feat/catalog-14a-intake-truth` | `catalog-web` |
 | B, inputs, failures, migration 0003 | [`14b-intake-release-b.md`](14b-intake-release-b.md) | `feat/catalog-14b-intake-inputs` | migrate job, `catalog-web`, `catalog-worker` |
 | C, resume and progress | [`14c-intake-release-c.md`](14c-intake-release-c.md) | `feat/catalog-14c-intake-resume` | `catalog-web`, `catalog-worker` |
-| D, the should set and the finished-collection email | [`14d-intake-release-d.md`](14d-intake-release-d.md) | `feat/catalog-14d-intake-should` | `catalog-worker`, `catalog-web`, `infra/notify.sh` |
+| D, the should set | [`14d-intake-release-d.md`](14d-intake-release-d.md) | `feat/catalog-14d-intake-should` | `catalog-worker`, `catalog-web` |
 
 Plain-language terms. Draft: a batch that exists but has not been started. Collection: the system
 downloading or reading the photos. Placing: copying each photo to its product's `raw/` object (the
@@ -25,9 +25,7 @@ Transient failure: one that may succeed on a second try (a timeout, a 429 or a 5
 that will not (404, 403, not an image). Lease: a claim with an expiry time that its holder renews while
 it works; when the holder dies, the lease runs out and someone else may take over. Release: one of the
 four parts A to D of this spec; each ships as one PR, called PR A to PR D in the release files.
-Domain-wide delegation: a Google Workspace setting that lets a service account act for a mailbox of the
-company domain within the scopes an admin granted (used by F14 only). Paths: `web/` means `apps/web/`,
-`ingest/` means `packages/core/src/catalog/ingest/`.
+Paths: `web/` means `apps/web/`, `ingest/` means `packages/core/src/catalog/ingest/`.
 
 ## 1. Purpose
 
@@ -66,8 +64,6 @@ in brackets):
 5. The batch page of a draft says "created", carries Continue setting up, and its Compare and Links
    sheet tabs say the batch has not started [A]. A failed batch offers "Fix and continue" with the
    inputs kept [C].
-6. When a collection took longer than a few minutes, the person who created the batch gets one email
-   when it is ready to check, needs their input, or could not start, with a link to the batch (F14) [D].
 
 No new setting, no model name, no technical word in any sentence. The spec 07 banned-names test keeps
 passing.
@@ -83,9 +79,10 @@ section.
 
 ## 4. Conventions for the fix sections
 
-Each fix of the proposal (F1 to F12 and F14) is specified in a release file with behaviour, contracts,
-copy and acceptance tests; where a fix ships in two releases, each release file holds its own part and
-points to the other. F13 is deferred and specified in section 9 here. Sentences in quotes are exact.
+Each fix of the proposal (F1 to F12) is specified in a release file with behaviour, contracts, copy
+and acceptance tests; where a fix ships in two releases, each release file holds its own part and
+points to the other. F13 is deferred and specified in section 9 here. F14 (the finished-collection
+email) was dropped on 2026-10-27 (section 11, decision 5). Sentences in quotes are exact.
 `<n>` placeholders are numbers with thousands separators and singular/plural handled by the existing
 `plural` helper. Cross-references name the fix and the file, for example "F8 (14c section 3.4)".
 
@@ -95,7 +92,6 @@ points to the other. F13 is deferred and specified in section 9 here. Sentences 
 |---|---|---|---|
 | `counts.phase`, `placed`, `placeTotal`, `rate` (with `phase` per sample), `placingClaim` | `catalog_batches.counts` jsonb (`BatchCounts` type) | No (jsonb; `EMPTY_BATCH_COUNTS` gets defaults; old rows read as null/0) | C |
 | `counts.linkFailures` | same | No | B |
-| `counts.collectStartedAt`, `counts.notified` (F14) | same | No | D |
 | `detected.reading` | `catalog_uploads.detected` jsonb (via `DetectedStep2.sheets[].reading`) | No | A |
 | `detected.linksPerRow`, `shape`, `collisions`, `sample` | `catalog_uploads.detected` jsonb | No | B |
 | manifest `attempts`, `final`; `place-state.json` | bucket objects | No | D |
@@ -107,7 +103,6 @@ points to the other. F13 is deferred and specified in section 9 here. Sentences 
 | New routes `POST cancel`, `POST reopen` | web | No | C |
 | Worker task `/tasks/catalog/ingest-more` | worker | No | D |
 | Env `DRAFT_EXPIRY_DAYS` (14) | worker, deploy.sh | No | D |
-| Env `NOTIFY_SENDER` (default empty), `NOTIFY_AFTER_MINUTES` (5), `WEB_URL` (F14) | worker, deploy.sh | No | D |
 
 Builder constants (in code, not env, proven in tier 2): `LINK_RETRY_ATTEMPTS` (3), `LINK_MAX_ATTEMPTS`
 (9), `INGEST_TIME_BUDGET_MS` (600 s), `PLACE_BUDGET_ITEMS` (start 800), `PLACING_LEASE_MS`,
@@ -172,9 +167,6 @@ says which release introduces the row; the release files point here.
 | Brand page empty | No products of <brand> yet. | A |
 | Same photos pair | These photos are already in <name> (<state>, created <age>). / <shared> of <photos> photos are the same, under different identifiers (<there> there, <here> here). Continue that batch or cancel it before starting this one, so the same product is not made twice. (<name> links to that batch) | D |
 | Duplicate photo pair | <k> photos appear under two products. / <name> is in <id a> and <id b>. Check the sheet before starting. | D |
-| Finished-collection email, subjects | <name> is ready to check / <name> needs your input / <name> could not start | D |
-| Finished-collection email, bodies | Your batch <name> for <brand> has finished collecting: <photos> photos for <products> products. Nothing has been processed yet. Open it and press Continue setting up to check the grouping, choose marketplaces and start: <link> / Your batch <name> for <brand> has finished collecting and needs one answer before it can continue: which column holds the identifier? Open it and press Continue setting up: <link> / Your batch <name> for <brand> could not start: <failReason> Open it and press Fix and continue to change its photos or links: <link> | D |
-| Finished-collection email, closing line | You get this email because you created this batch and collecting its photos took more than <m> minutes. We send one email per collection that takes this long. | D |
 
 Removed sentences: "Processing starts by itself. You can close this page." (A); "N image links" for a
 grid (B); "<n> other files" for links (B); "started <time>" on unstarted batches (A); the PR A leaving
@@ -182,8 +174,8 @@ line and the PR B no-photos ending, once PR C ships (C).
 
 ## 7. Releases and build order
 
-Must set: F1, F2, F3, F4, F5 (visible part), F6, F8, F9 (releases A to C). Should set: release D,
-including F14. Order A, B, C, D, each merged and deployed before the next starts (approved,
+Must set: F1, F2, F3, F4, F5 (visible part), F6, F8, F9 (releases A to C). Should set: release D.
+Order A, B, C, D, each merged and deployed before the next starts (approved,
 section 11, decision 4).
 
 | Release | Fixes | Worktree | Depends on |
@@ -191,7 +183,7 @@ section 11, decision 4).
 | A, truth and way back (small, first) | F1, F9, the release A part of F6 (copy and step 2 text from the existing counts, no worker change), F4 part 1 (`?batch=` in the URL, `/catalog/new?batch=` for draft and ingesting batches, `wizardStepFor`, "Continue setting up" on the batch page) | `catalog-module-wt\14a-intake-truth` | nothing; deployable alone |
 | B, inputs and failures | F2, F3, F5 part 1, migration `0003_intake_states.sql` + `schema.ts` | `catalog-module-wt\14b-intake-inputs` | A merged |
 | C, resume and progress | F4 part 2 (unfinished section, Cancel, cancel guards), F6 worker side (phase, rate, lease, merge writes), F7 part 1 (sha256 skip, instant Continue), F8, F11 part 1 | `catalog-module-wt\14c-intake-resume` | A, B merged |
-| D (should) | F7 part 2 (groupBatch first, chunked placeBatch), F5 part 2 (automatic retry), F10, F11 part 2 (`ingest-more`), F12, F14 (finished-collection email) | `catalog-module-wt\14d-intake-should` | C merged |
+| D (should) | F7 part 2 (groupBatch first, chunked placeBatch), F5 part 2 (automatic retry), F10, F11 part 2 (`ingest-more`), F12 | `catalog-module-wt\14d-intake-should` | C merged |
 | later | F13 (section 9) | own PR | none |
 
 Within a release, workstreams that touch the same files run one after the other in the release's
@@ -302,8 +294,6 @@ needed, after release D, executed with 00 like a release.
    unfinished batches" read-only, with no actions.
 9. A server upload row still `pending` that the current browser session is not uploading is treated as
    cut off (closed tab); the operator decides whether to add it again or remove it.
-10. The creator's `createdBy` address (the IAP-verified `@opptra.com` sign-in) is a deliverable
-    mailbox; F14 sends to it and to no one else.
 
 ## 11. Owner decisions (decided 2026-10-27; to be recorded in `docs/SPEC.md`)
 
@@ -315,9 +305,8 @@ needed, after release D, executed with 00 like a release.
    09dd86f2) are cancelled either way (14c section 9).
 4. The must set (F1, F2, F3, F4, F5 visible part, F6, F8, F9) and the release order A, B, C, D:
    **approved**.
-5. Tell the operator when a long collection finishes: **yes**, as a should-fix in release D, after C
-   (F14, 14d section 3.6). Its one-time Workspace step by the owner is the single open item of release
-   D.
+5. Email when a long collection finishes: **no**, dropped on 2026-10-27; operators return to the
+   dashboard (Your unfinished batches).
 
 Interim, until release A ships (proposal section 7): the owner tells the operator to use the Google
 Sheet route and keep the wizard tab open until step 2 shows the grouping.
@@ -334,5 +323,5 @@ Sheet route and keep the wizard tab open until step 2 shows the grouping.
 - No change to the identifier rules, precedence rules or sheet column detection of spec 04, except the
   cell split (F2) and the readback.
 - No automatic merging of the two BHPC drafts; a person chooses the key.
-- No general mail system: F14 sends one kind of email to one recipient, with no settings, digests or
-  other notifications.
+- No outgoing email or other notifications (F14 was dropped on 2026-10-27; operators return to the
+  dashboard, Your unfinished batches).

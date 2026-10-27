@@ -1,8 +1,10 @@
 import { afterEach, describe, expect, expectTypeOf, it, vi } from "vitest";
 import {
   buildTaskRequest,
+  chunkTaskId,
   DISPATCH_DEADLINE_SEC,
   enqueueTask,
+  INGEST_TASK_ROUTES,
   TASK_ROUTES,
   tasksConfigFromEnv,
   type TaskRoute,
@@ -34,9 +36,11 @@ function fakeClient() {
 afterEach(() => vi.useRealTimers());
 
 describe("TaskRoute", () => {
-  it("TASK_ROUTES lists exactly the six routes of the type", () => {
+  it("TASK_ROUTES lists exactly the seven routes of the type", () => {
     expectTypeOf<(typeof TASK_ROUTES)[number]>().toEqualTypeOf<TaskRoute>();
-    expect(TASK_ROUTES).toHaveLength(6);
+    expect(TASK_ROUTES).toHaveLength(7);
+    // Both ingest routes go to the ingest queue (spec 14d F11 part 2).
+    expect(INGEST_TASK_ROUTES).toEqual(["/tasks/catalog/ingest", "/tasks/catalog/ingest-more"]);
   });
 });
 
@@ -76,6 +80,12 @@ describe("buildTaskRequest", () => {
     expect((req.task as BuiltTask).name).toBe(`${QUEUE}/tasks/chunk-b1_3-render`);
   });
 
+  it("chunkTaskId names one task per chunk step and passes the task id rule (spec 15 E3)", () => {
+    const id = chunkTaskId("6f1c1a52-1d0e-4c9b-9a51-2b1f0f3c7d10", "render", 2);
+    expect(id).toBe("chunk-6f1c1a52-1d0e-4c9b-9a51-2b1f0f3c7d10-render-2");
+    expect((buildTaskRequest("/tasks/catalog/chunk", {}, cfg, { taskId: id }).task as BuiltTask).name).toBe(`${QUEUE}/tasks/${id}`);
+  });
+
   it("rejects a taskId with characters Cloud Tasks does not allow", () => {
     expect(() => buildTaskRequest("/tasks/catalog/chunk", {}, cfg, { taskId: "chunk/1" })).toThrow(/Invalid task id/);
     expect(() => buildTaskRequest("/tasks/catalog/chunk", {}, cfg, { taskId: "" })).toThrow(/Invalid task id/);
@@ -112,6 +122,20 @@ describe("enqueueTask", () => {
     expect(reqs[1]!.parent).toBe(QUEUE);
     // Same worker endpoint and OIDC identity on both queues.
     expect(reqs[0]!.task.httpRequest.oidcToken).toEqual(reqs[1]!.task.httpRequest.oidcToken);
+  });
+
+  it("spec 16: sends a bulk batch's chunk and publish tasks to TASKS_BULK_QUEUE when set; operator and other routes stay", async () => {
+    const { client, createTask } = fakeClient();
+    const split = { ...env, TASKS_INGEST_QUEUE: "catalog-ingest", TASKS_BULK_QUEUE: "catalog-bulk" };
+    await enqueueTask("/tasks/catalog/chunk", { chunkId: "c1" }, { env: split, client, bulk: true, taskId: "chunk-c1-matte-0" });
+    await enqueueTask("/tasks/catalog/publish", { batchId: "b1" }, { env: split, client, bulk: true });
+    await enqueueTask("/tasks/catalog/chunk", { chunkId: "c2" }, { env: split, client });
+    await enqueueTask("/tasks/catalog/finalize", { batchId: "b1" }, { env: split, client, bulk: true });
+    await enqueueTask("/tasks/catalog/ingest", { batchId: "b1" }, { env: split, client, bulk: true });
+    await enqueueTask("/tasks/catalog/chunk", { chunkId: "c3" }, { env, client, bulk: true });
+    const queues = createTask.mock.calls.map(([req]) => (req as { parent: string }).parent.split("/").at(-1));
+    expect(queues).toEqual(["catalog-bulk", "catalog-bulk", "catalog", "catalog", "catalog-ingest", "catalog"]);
+    expect((createTask.mock.calls[0]![0] as { task: BuiltTask }).task.name).toBe("projects/image-links-agent/locations/asia-south1/queues/catalog-bulk/tasks/chunk-c1-matte-0");
   });
 
   it("keeps ingest tasks on TASKS_QUEUE (or the default) when TASKS_INGEST_QUEUE is unset", async () => {

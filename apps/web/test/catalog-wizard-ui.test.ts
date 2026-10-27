@@ -21,7 +21,7 @@ const preview = {
   ready: true, previewAt: "2026-10-19T00:00:00.000Z", groupedBy: "Grouped by folder name",
   counts: {products:1,sources:3,photos:3,channels:2,outputs:6}, warnings: [], collected:3,collectTotal:3,estimate:null,
   groups:[{identifier:"ABC123",opptraSkuIds:[],shots:3,firstPhotoUrl:"https://thumb.example/one",status:"existing",files:[{n:1,originalName:"ABC123/ABC123_1.heic",width:1200,height:1600}],notes:[]}],totalRows:1,
-  overwrite:{newProducts:0,existingProducts:[{identifier:"ABC123",liveShots:[1,2,3,4,5],uploadShots:[1,2,3],shotsToRemove:[4,5],channels:["noon"]}],renameHints:[],sameProductPairs:[]},busy:[]
+  overwrite:{newProducts:0,existingProducts:[{identifier:"ABC123",liveShots:[1,2,3,4,5],uploadShots:[1,2,3],shotsToRemove:[4,5],channels:["noon"]}],renameHints:[],sameProductPairs:[],sameBatches:[],duplicatePhotos:[]},busy:[]
 } as unknown as WizardPreview;
 describe("wizard visible state",()=>{
   it("starts with all nine marketplaces unchecked and reflects a deliberate selection",()=>{

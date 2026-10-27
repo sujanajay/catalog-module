@@ -23,7 +23,7 @@ cd "$(dirname "$0")/.."
 # --- Builder constants -------------------------------------------------------
 SCHEDULER_TZ=Asia/Kolkata
 SYNC_MASTER_CRON="30 2 * * *"   # nightly at 02:30 IST
-SWEEP_CRON="*/30 * * * *"       # every 30 minutes
+SWEEP_CRON="*/10 * * * *"       # every 10 minutes (spec 15: lost chunk tasks come back within 30 min)
 
 # Shared (checked only).
 VPC=ila-vpc
@@ -490,9 +490,15 @@ done
 
 # --- 10. Cloud Scheduler -------------------------------------------------------------------
 ensure_scheduler_job() { # name route cron
-  local name="$1" route="$2" cron="$3"
-  if gcloud scheduler jobs describe "$name" --location="$REGION" --project="$PROJECT" >/dev/null 2>&1; then
-    skip "scheduler job $name"
+  local name="$1" route="$2" cron="$3" current
+  if current=$(gcloud scheduler jobs describe "$name" --location="$REGION" --project="$PROJECT" --format='value(schedule)' 2>/dev/null | tr -d '\r'); then
+    if [ "$current" = "$cron" ]; then
+      skip "scheduler job $name"
+    else
+      update "scheduler job $name schedule ($current -> $cron)"
+      gcloud scheduler jobs update http "$name" --project="$PROJECT" --location="$REGION" \
+        --schedule="$cron" --time-zone="$SCHEDULER_TZ" >/dev/null
+    fi
   else
     create "scheduler job $name ($cron $SCHEDULER_TZ -> $route)"
     gcloud scheduler jobs create http "$name" --project="$PROJECT" --location="$REGION" \

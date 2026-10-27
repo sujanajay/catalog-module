@@ -5,8 +5,8 @@ import { MattingClient, parseUpscaleHealth, UpscaleUnavailableError } from "./ma
 import { planCanvas, renderKeyInputs, renderSource, type Matte, type Prepared } from "./render";
 import { analyseBackground } from "./shadow";
 import { enlargeCutout, sharpenAfterEnlarge } from "./enhance";
-import { createUpscaler, DEFAULT_UPSCALE_MIN_SCALE, shouldUpscale, upscaleConfigFromEnv, upscaledRgb, upscalerKey, UPSCALER_VERSION, type Upscaler } from "./upscale";
-import { renderKey, renderKeys, rerenderedKey, upscaledRenderKey } from "./pipeline/publish";
+import { createUpscaler, DEFAULT_UPSCALE_MIN_SCALE, otherTargetUpscalerId, shouldUpscale, upscaleConfigFromEnv, upscaledRgb, upscalerId, upscalerKey, upscaleTargetFromEnv, UPSCALER_VERSION, type Upscaler } from "./upscale";
+import { configuredUpscalerId, renderKey, renderKeys, rerenderedKey, upscaledRenderKey } from "./pipeline/publish";
 import { upscaledNotes } from "./pipeline/report";
 import { flagDetails } from "./qa/reasons";
 import { INFORMATION_FLAGS } from "./qa/triage";
@@ -152,13 +152,24 @@ describe("render_key", () => {
     expect(renderKey({ ...input, upscaler: "swinir-x2" })).not.toBe(renderKey({ ...input, upscaler: MODEL }));
     expect(upscalerKey(MODEL)).toBe(`u:${MODEL}@e828354d:${UPSCALER_VERSION}`);
     expect(renderKeys(input, null)).toEqual([plain]);
-    expect(renderKeys(input, MODEL)).toEqual([plain, upscaledRenderKey(plain, MODEL)]);
+    // Spec 16: an image the same model made on the other service (GPU or CPU) also counts as unchanged.
+    expect(renderKeys(input, MODEL)).toEqual([plain, upscaledRenderKey(plain, MODEL), upscaledRenderKey(plain, `${MODEL}+cpu`)]);
+    expect(renderKeys(input, `${MODEL}+cpu`)).toEqual([plain, upscaledRenderKey(plain, `${MODEL}+cpu`), upscaledRenderKey(plain, MODEL)]);
     // A re-render keeps the row's key in step with its `upscaled` flag, both ways.
     const up = upscaledRenderKey(plain, MODEL), recompute = () => plain;
     expect(rerenderedKey({ renderKey: plain, flags: [] }, MODEL, recompute)).toBe(up);
     expect(rerenderedKey({ renderKey: up, flags: ["upscaled"] }, MODEL, recompute)).toBe(up);
     expect(rerenderedKey({ renderKey: up, flags: ["upscaled"] }, undefined, recompute)).toBe(plain);
     expect(rerenderedKey({ renderKey: plain, flags: [] }, null, recompute)).toBe(plain);
+    // Spec 16 3.1.3: the GPU id keeps today's key byte for byte; the CPU id gets its own; a row upscaled before and
+    // re-made on the CPU takes the CPU key from its recomputed plain key.
+    expect(upscalerId(MODEL, "gpu")).toBe(MODEL);
+    expect(upscalerKey(`${MODEL}+cpu`)).toBe(`u:${MODEL}@e828354d:${UPSCALER_VERSION}:cpu`);
+    expect(otherTargetUpscalerId(`${MODEL}+cpu`)).toBe(MODEL);
+    const cpuUp = upscaledRenderKey(plain, `${MODEL}+cpu`);
+    expect(cpuUp).not.toBe(up);
+    expect(rerenderedKey({ renderKey: up, flags: ["upscaled"] }, `${MODEL}+cpu`, recompute)).toBe(cpuUp);
+    expect(rerenderedKey({ renderKey: plain, flags: [] }, `${MODEL}+cpu`, recompute)).toBe(cpuUp);
     const k = { sourceSha256: "abc", channel: "trendyol" as const, rulesVersion: "7", policyId: "p", policyUpdatedAt: "t", n: 1 };
     expect(renderKeyInputs(k)).toBe("abc|trendyol|7|p+t|1");
     expect(renderKeyInputs({ ...k, upscaler: MODEL })).toBe(`abc|trendyol|7|p+t|1|u:${MODEL}@e828354d:1`);
@@ -244,6 +255,36 @@ describe("matting client upscale", () => {
     slow.c.breakers.gpu!.state = "open"; slow.c.breakers.gpu!.openedAt = Date.now();
     await expect(slow.c.upscale(await image(), { model: MODEL, contentType: "image/png", timeoutMs: 30 })).rejects.toThrow("paused");
     expect(slow.calls.filter(u => u.includes("/upscale"))).toHaveLength(1);
+  });
+  it("sends /upscale to the CPU cut-out service when UPSCALE_URL names it (spec 16 3.1.3)", async () => {
+    const calls: string[] = [];
+    const fetch = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      const u = String(url); calls.push(u);
+      if (u.endsWith("/health")) return health(u.includes(":2") ? "gpu" : "cpu", listed);
+      return new Response(new Uint8Array(await jpeg2x(init!.body)), { headers: { "x-upscale-ms": "6100" } });
+    }) as unknown as typeof globalThis.fetch;
+    const services = [{ baseUrl: "http://127.0.0.1:1", target: "cpu" as const }, { baseUrl: "http://127.0.0.1:2", target: "gpu" as const }];
+    const cpu = new MattingClient({ services, fetch, upscaleUrl: "http://127.0.0.1:1/" });
+    expect(cpu.upscaleTarget).toBe("cpu");
+    await expect(cpu.upscale(await image(), { model: MODEL, contentType: "image/png" })).resolves.toMatchObject({ ms: 6100 });
+    expect(calls.filter(u => u.includes("/upscale"))).toEqual([`http://127.0.0.1:1/upscale?model=${MODEL}&scale=2`]);
+    // The worker's upscaler carries the CPU id, so its render_key differs from a GPU-made image's.
+    expect(createUpscaler(cpu, { model: MODEL, minScale: 1.5 })!.model).toBe(`${MODEL}+cpu`);
+    // Unset keeps the GPU service; an URL that names no service warns once and keeps it too.
+    expect(new MattingClient({ services, fetch, upscaleUrl: null }).upscaleTarget).toBe("gpu");
+    expect(new MattingClient({ services, fetch, upscaleUrl: "https://elsewhere.example" }).upscaleTarget).toBe("gpu");
+    expect(warn.mock.calls.map((call: unknown[]) => (JSON.parse(String(call[0])) as { message: string }).message)).toEqual(["upscale_url_unknown"]);
+    // Without a GPU service, the CPU service named by UPSCALE_URL still upscales.
+    expect(new MattingClient({ services: [services[0]!], fetch, upscaleUrl: "http://127.0.0.1:1" }).upscaleTarget).toBe("cpu");
+  });
+  it("reads the target from UPSCALE_URL against MATTING_URL", () => {
+    expect(upscaleTargetFromEnv({})).toBe("gpu");
+    expect(upscaleTargetFromEnv({ UPSCALE_URL: "https://cpu.example/", MATTING_URL: "https://cpu.example" })).toBe("cpu");
+    expect(upscaleTargetFromEnv({ UPSCALE_URL: "https://gpu.example", MATTING_URL: "https://cpu.example" })).toBe("gpu");
+    expect(upscaleConfigFromEnv({ UPSCALE_MODEL: MODEL, UPSCALE_URL: "https://cpu.example", MATTING_URL: "https://cpu.example" })).toEqual({ model: MODEL, minScale: 1.5, target: "cpu" });
+    expect(configuredUpscalerId({ UPSCALE_MODEL: MODEL, UPSCALE_URL: "https://cpu.example", MATTING_URL: "https://cpu.example" })).toBe(`${MODEL}+cpu`);
+    expect(configuredUpscalerId({ UPSCALE_MODEL: MODEL })).toBe(MODEL);
+    expect(configuredUpscalerId({})).toBeNull();
   });
   it("falls back to the plain bytes in the render on a 503 and on a timeout", async () => {
     const { prepared, matte } = fixture();

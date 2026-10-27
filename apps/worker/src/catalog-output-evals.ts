@@ -44,7 +44,7 @@ import { EVALS_PREFIX, EvidenceBudget, evidencePath, parseSetRecord, parseSetsFl
 import { buildReport, reportHtml, type ReportThumb } from "@catalog/core/catalog/evals/report";
 import { buildZip } from "../../../packages/core/test-fixtures/catalog/ingest-a/builders";
 import { workerCatalogDeps, type CatalogDeps } from "./catalog/deps";
-import { handleChunkTask } from "./catalog/chunk";
+import { deliverChunkToEnd } from "./catalog/chunk";
 import { runUntilSettled } from "@catalog/core/catalog/retry-chunk";
 import { handlePublishTask } from "./catalog/publish";
 import { handleFinalizeTask } from "./catalog/finalize";
@@ -144,7 +144,7 @@ async function runBatch(db: Db, deps: CatalogDeps, run: string, group: Group, fi
   await db.update(catalogBatches).set({ status: "matting", startedAt: new Date(), counts: { ...b.counts, products: productIds.length, sources: sources.length, outputs: sources.length * channels.length } }).where(eq(catalogBatches.id, b.id));
   for (const [index, plan] of planChunks(productIds.map(productId => ({ productId, sourceCount: sources.filter(s => s.productId === productId).length })), 25).entries()) {
     const [chunk] = await db.insert(catalogChunks).values({ batchId: b.id, index, stage: "matte", productIds: plan.productIds }).returning();
-    for (let stage = 0; stage < 3; stage++) assert.equal((await runUntilSettled(() => handleChunkTask(deps, { chunkId: chunk!.id }), { label: `chunk ${chunk!.id}` })).httpStatus, 200, "A chunk stage failed.");
+    await deliverChunkToEnd(deps, chunk!.id, async (deliver) => assert.equal((await runUntilSettled(deliver, { label: `chunk ${chunk!.id}` })).httpStatus, 200, "A chunk stage failed."));
     for (const productId of plan.productIds) await handlePublishTask(deps, { batchId: b.id, productId });
   }
   const finalize = await handleFinalizeTask(deps, { batchId: b.id });

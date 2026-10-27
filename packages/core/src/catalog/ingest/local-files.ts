@@ -6,25 +6,14 @@ import { parseShotName, sanitizeSegment, uploadPath } from "../naming";
 import { extFromMime, getBucketName, mimeFromPath, parseGsUri, toGsUri, type signedPutUrl } from "../../storage";
 import type { UploadKind } from "../types";
 import type { BytesRef, CollectInput, SourceItem } from "./types";
+import { mapLimit } from "../../concurrency";
+
+export { mapLimit };
 
 export interface PlannedUpload { relativePath: string; objectPath: string; putUrl: string; contentType: string }
 
 /** Parallel signing and HEAD requests per call; keeps a 3,000-file folder well under API rate limits. */
 const PARALLEL = 16;
-
-/** `fn` over `items` with at most `limit` running at once; results in input order. */
-export async function mapLimit<T, R>(items: readonly T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> {
-  const out = new Array<R>(items.length);
-  let next = 0;
-  const worker = async () => {
-    while (next < items.length) {
-      const i = next++;
-      out[i] = await fn(items[i]!);
-    }
-  };
-  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
-  return out;
-}
 
 /** Path segments of a browser or archive path ("\" and "/" both separate; empty, "." and ".." dropped). */
 function segmentsOf(relativePath: string): string[] {

@@ -62,6 +62,8 @@ export interface IngestDeps {
   now?: () => Date;
   /** Host name resolver for safeFetch; tests inject a fake so no DNS is used. Production leaves it unset. */
   lookup?: (hostname: string) => Promise<string[]>;
+  /** Waits between link retries (spec 14d F5 part 2); tests pass a fake that moves their clock. Defaults to setTimeout. */
+  sleep?: (ms: number) => Promise<void>;
 }
 
 export interface Adapter { kind: UploadKind; collect(input: CollectInput): Promise<SourceItem[]> }
@@ -118,6 +120,8 @@ export interface DetectedStep2 {
 
 export interface LinkFailuresBlock {
   total: number; temporary: number; links: number; products: number;
+  /** The highest attempt count of a failed link that was retried (spec 14d F5 part 2), 0 when none was. */
+  attempts: number;
   byReason: { reason: string; count: number; first: { url: string; where: string } }[];
 }
 
@@ -127,6 +131,14 @@ export interface OverwritePreview {
   renameHints: { newIdentifier: string; existingIdentifier: string }[];
   duplicates: { a: string; b: string }[];
   busy: { identifier: string; batchName: string }[];
+  /**
+   * The brand's other unfinished batches (draft, ingesting, failed before Start; same is_test) whose
+   * photos overlap this batch's by at least 10 or 20% (spec 14d F10), with one example of the two
+   * identifier spellings when they differ. `state` is the batch's state words; `createdAt` ISO.
+   */
+  sameBatches: { batchId: string; name: string; createdAt: string; state: string; sharedPhotos: number; example: { here: string; there: string } | null }[];
+  /** Photos that sit under two or more identifiers of this batch (spec 14d F10): `name` is one file name of the photo. */
+  duplicatePhotos: { sha256: string; identifiers: string[]; name: string }[];
 }
 
 export interface Preview {                           // step 4 data

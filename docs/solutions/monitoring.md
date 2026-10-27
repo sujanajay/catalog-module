@@ -43,8 +43,8 @@ Success lines at INFO: `batch started`, `chunk delivered`, `product published`, 
 The worker sends `x-catalog-batch` and `x-catalog-product` headers on each matting call, and the
 Python matting service logs JSON with those ids.
 
-## Metrics and the nine alert policies
-Six log-based metrics (on `cloud_run_revision`):
+## Metrics and the ten alert policies
+Seven log-based metrics (on `cloud_run_revision`):
 - `catalog/chunk_failed_terminal`: `chunk failed` at ERROR (the last attempt).
 - `catalog/batch_failed`: `batch failed` at ERROR only, or `batch swept`. An upload with no photos
   logs `batch failed` at WARNING and sends nothing.
@@ -52,6 +52,9 @@ Six log-based metrics (on `cloud_run_revision`):
 - `catalog/error_logs` (backs policy 9): ERROR and above from catalog-* services, excluding
   `chunk failed`, `batch failed`, `batch swept`, `quality check unavailable`, `matting_breaker`,
   `spend cap hit` and the Cloud Run request log, so one failure sends one email.
+- `catalog/chunk_timeout` (backs policy 10, spec 15): a 504 in the catalog-worker request log on
+  `/tasks/catalog/chunk`. Every delivery stops on a 480 s budget, so a 504 means the budget is wrong.
+  A 504 also counts toward policy 6.
 
 All policies email the channel `catalog-email-tech` (sujan@opptra.com). Each alert sends one email
 when it opens and stays open for an hour after the last event, so repeated failures inside that
@@ -69,6 +72,7 @@ only, not jobs, so the smoke, eval and load jobs never send emails.
 | 7 | Queue stuck | more than 50 tasks wait in Cloud Tasks queue `catalog` AND no task has been attempted for 30 min (a large batch that is moving does not trigger it) |
 | 8 | Database connections high | Cloud SQL `ila-pg` backends > 20 for 5 min (the limit is 25) |
 | 9 | Error in the logs | error_logs > 0 in 5 min |
+| 10 | A chunk task ran out of time | chunk_timeout > 0 in 15 min |
 
 Policy 9's metric excludes the messages of policies 1 to 5 so one failure sends one email, not two. Policy 5
 is a failure-type event (held products result), not a spending warning. 503 is left out of
