@@ -51,6 +51,14 @@ describe("LlmLimiter", () => {
     expect(limiter.limit()).toBe(2);
     expect(peakAfter).toBeLessThanOrEqual(4);
   });
+
+
+  it("a burst of 429s for requests sent together halves the cap once", async () => {
+    const limiter = new LlmLimiter(6);
+    const fetch = limiter.wrap(async () => { await pause(2); return new Response("", { status: 429 }); });
+    await Promise.all(Array.from({ length: 6 }, () => fetch("https://example.test")));
+    expect(limiter.limit()).toBe(3);
+  });
 });
 
 describe("callLlm pacing", () => {

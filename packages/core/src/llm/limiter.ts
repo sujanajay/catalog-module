@@ -27,8 +27,14 @@ export class LlmLimiter {
   /** Requests in flight now. */
   active(): number { return this.inflight; }
 
-  /** A 429 answer: the cap halves (at least 1) from what it is now. */
-  rateLimited(): void {
+  /** Counts the cuts, so 429s from requests sent before the latest cut do not cut again. */
+  private cuts = 0;
+
+  /** A 429 answer: the cap halves (at least 1) from what it is now. `sentAfterCut` is the cut count when the
+   * request was sent; a burst of 429s for requests sent together halves the cap once, not once per answer. */
+  rateLimited(sentAfterCut: number = this.cuts): void {
+    if (sentAfterCut !== this.cuts) return;
+    this.cuts += 1;
     this.floor = Math.max(1, Math.floor(this.limit() / 2));
     this.cutAt = this.now();
   }
@@ -55,9 +61,11 @@ export class LlmLimiter {
   wrap(fetchImpl: typeof fetch): typeof fetch {
     return async (input, init) => {
       const release = await this.acquire();
+      const sentAfterCut = this.cuts;
       try {
+        init?.signal?.throwIfAborted();
         const response = await fetchImpl(input, init);
-        if (response.status === 429) this.rateLimited();
+        if (response.status === 429) this.rateLimited(sentAfterCut);
         return response;
       } finally {
         release();

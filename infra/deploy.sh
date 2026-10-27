@@ -352,12 +352,24 @@ echo "==> worker"
 # ingest tasks to a missing queue, and the main queue on preview (bootstrap.sh makes it otherwise).
 ENSURE_QUEUES="$QUEUE-ingest:$INGEST_MAX_DISPATCHES"
 [ "${CATALOG_PREVIEW:-0}" = 1 ] && ENSURE_QUEUES="$QUEUE:$TASKS_MAX_DISPATCHES $ENSURE_QUEUES"
-# Spec 16 3.2.3: the bulk queue only when it has slots. An existing one is never deleted; without slots it gets no
-# tasks because TASKS_BULK_QUEUE is absent from the env.
-if [ "$BULK_MAX_DISPATCHES" -gt 0 ]; then ENSURE_QUEUES+=" $BULK_QUEUE:$BULK_MAX_DISPATCHES"; fi
 # gcloud 589 prints short queue names from list while older releases print the full
 # projects/.../queues/<name>; compare basenames so both match (docs/solutions/gcloud-list-names.md).
 EXISTING_QUEUES=$(gcv tasks queues list --location="$REGION" --format='value(name)' | sed 's#.*/##')
+# Spec 16 3.2.3: the bulk queue. Created only when it has slots; an existing one is never deleted. Its slots never
+# exceed what the running worker takes: lowered before the worker deploy, raised after it. With no bulk slots it
+# keeps 1, so a backlog left from a bigger shape drains slowly instead of flooding a smaller worker (the env no
+# longer names it, so it gets no new tasks).
+BULK_QUEUE_EXISTS=0; grep -qxF "$BULK_QUEUE" <<<"$EXISTING_QUEUES" && BULK_QUEUE_EXISTS=1
+BULK_QUEUE_SLOTS=$BULK_MAX_DISPATCHES; [ "$BULK_QUEUE_SLOTS" -gt 0 ] || BULK_QUEUE_SLOTS=1
+if [ "$BULK_QUEUE_EXISTS" = 1 ]; then
+  BULK_NOW=$(gcv tasks queues describe "$BULK_QUEUE" --location="$REGION" --format='value(rateLimits.maxConcurrentDispatches)')
+  if [ -n "$BULK_NOW" ] && [ "$BULK_NOW" -gt "$BULK_QUEUE_SLOTS" ]; then
+    gcloud tasks queues update "$BULK_QUEUE" --location="$REGION" --max-concurrent-dispatches="$BULK_QUEUE_SLOTS" >/dev/null
+    echo "==> tasks queue $BULK_QUEUE: max-concurrent-dispatches lowered to $BULK_QUEUE_SLOTS before the worker deploy"
+  fi
+elif [ "$BULK_MAX_DISPATCHES" -gt 0 ]; then
+  ENSURE_QUEUES+=" $BULK_QUEUE:$BULK_MAX_DISPATCHES"
+fi
 for Q in $ENSURE_QUEUES; do
   if grep -qxF "${Q%%:*}" <<<"$EXISTING_QUEUES"; then
     # Idempotent: keep the parallelism within the worker's capacity (connection budget above).
@@ -376,6 +388,10 @@ if [ "${CATALOG_PREVIEW:-0}" != 1 ]; then
   # Idempotent: keep the queue's parallelism equal to the worker's capacity (connection budget above).
   gcloud tasks queues update "$QUEUE" --location="$REGION" --max-concurrent-dispatches="$TASKS_MAX_DISPATCHES" >/dev/null
   echo "==> tasks queue $QUEUE: max-concurrent-dispatches $TASKS_MAX_DISPATCHES"
+fi
+if [ "$BULK_QUEUE_EXISTS" = 1 ]; then
+  gcloud tasks queues update "$BULK_QUEUE" --location="$REGION" --max-concurrent-dispatches="$BULK_QUEUE_SLOTS" >/dev/null
+  echo "==> tasks queue $BULK_QUEUE: max-concurrent-dispatches $BULK_QUEUE_SLOTS"
 fi
 
 # --- 7. Web --------------------------------------------------------------------------

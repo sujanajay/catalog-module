@@ -114,7 +114,10 @@ export async function handleChunkTask(rawDeps: CatalogDeps, body: Record<string,
   // so paid calls survive a delivery that throws later, while a lost claim writes nothing for that write.
   const ledger: CostEventInput[] = [];
   type LedgerRow = Omit<CostEventInput,"batchId"|"brandSlug"|"isTest"|"chunkId">;
-  const flush = async (tx:CatalogDeps["db"]) => { if (ledger.length) await recordCostEvents(tx,ledger.splice(0),deps.log); };
+  // Rows flushed inside the claim write now running; put back if that write rolls back, so another photo's
+  // failed write does not drop this photo's paid calls (photos run in parallel, spec 16).
+  let flushing: CostEventInput[] = [];
+  const flush = async (tx:CatalogDeps["db"]) => { if (ledger.length) { const rows = ledger.splice(0); flushing.push(...rows); await recordCostEvents(tx,rows,deps.log); } };
   const matteRow = (productId:string,sourceImageId:string,m:Matte,attempt:number,outcome:CostOutcome):LedgerRow =>
     ({productId,sourceImageId,stage:"matte",kind:"matte_call",engine:m.target ?? "worker",ms:m.ms,...matteCallUsd(m.target,m.ms),attempt,outcome});
   const ownsClaim = () => and(eq(catalogChunks.id,chunk!.id),eq(catalogChunks.taskName,claim),eq(catalogChunks.stage,chunk!.stage),eq(catalogChunks.status,"running"));
@@ -138,7 +141,10 @@ export async function handleChunkTask(rawDeps: CatalogDeps, body: Record<string,
         if(!owner) { lost = true; throw new Error(OWNERSHIP_CHANGED); }
         return write(tx as unknown as CatalogDeps["db"]);
       });
-    } finally { steps.write += Date.now()-t0; }
+    } catch (err) {
+      ledger.unshift(...flushing);
+      throw err;
+    } finally { flushing = []; steps.write += Date.now()-t0; }
   }
   /** The heartbeat's renewal: false once the deadline passed (the lease then lapses within CHUNK_LEASE_MS). */
   async function renew():Promise<boolean> {

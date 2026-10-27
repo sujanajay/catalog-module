@@ -11,6 +11,8 @@ import { db } from "../db";
 import { badRequest, HttpError } from "../errors";
 import { queryBatch } from "./batches";
 
+/** Chunk rows per insert at Start (7 bind parameters per row, Postgres allows 65,535). */
+const START_INSERT_ROWS = 1000;
 const STALE_PREVIEW = "Files changed since the preview. Open step 4 again.";
 export async function startBatch(id: string, value: unknown, _actor: string) {
   const previewAt = (value as { previewAt?: unknown })?.previewAt;
@@ -43,7 +45,10 @@ export async function startBatch(id: string, value: unknown, _actor: string) {
     throw new HttpError(409, `${pair.a} and ${pair.b} are the same product. Keep one.`);
   }
   const products = await db().select({ id: catalogProducts.id, identifier: catalogProducts.identifier }).from(catalogBatchProducts).innerJoin(catalogProducts, eq(catalogProducts.id, catalogBatchProducts.productId)).where(eq(catalogBatchProducts.batchId, id));
-  const plans = planChunks(products.filter((p) => sources.some((s) => s.productId === p.id)).map((p) => ({productId:p.id,identifier:p.identifier,sourceCount:sources.filter((s) => s.productId===p.id).length})), chunkImages());
+  // Source ids by product, built once (a 7,000-product batch has about 28,000 photos).
+  const sourceIds = new Map<string, string[]>();
+  for (const s of sources) { const ids = sourceIds.get(s.productId); if (ids) ids.push(s.id); else sourceIds.set(s.productId, [s.id]); }
+  const plans = planChunks(products.filter((p) => sourceIds.has(p.id)).map((p) => ({productId:p.id,identifier:p.identifier,sourceCount:sourceIds.get(p.id)!.length})), chunkImages());
   const chunks = await db().transaction(async (tx) => {
     const [current] = await tx.select().from(catalogBatches).where(eq(catalogBatches.id, id)).for("update");
     if (!current || current.status !== "draft" || !current.counts.previewReady || current.updatedAt.getTime() !== batch.updatedAt.getTime()) throw new HttpError(409, STALE_PREVIEW);
@@ -52,10 +57,11 @@ export async function startBatch(id: string, value: unknown, _actor: string) {
       const first = locked.busy[0]!;
       throw new HttpError(409, `${first.identifier}${locked.busy.length > 1 ? ` and ${locked.busy.length-1} others are` : " is"} still being processed in batch ${first.batchName}. Wait for it to finish or remove them from this upload.`);
     }
-    // Spec 16: every chunk row in one insert, so a 7,000-product Start stays well inside the web request limit.
-    const sourceIds = new Map<string, string[]>();
-    for (const s of sources) sourceIds.set(s.productId, [...(sourceIds.get(s.productId) ?? []), s.id]);
-    const rows = plans.length ? await tx.insert(catalogChunks).values(plans.map((plan, index) => ({batchId:id,index,stage:"matte" as const,status:"queued" as const,attempt:0,productIds:plan.productIds,sourceImageIds:plan.productIds.flatMap((p)=>sourceIds.get(p) ?? [])}))).returning() : [];
+    // Spec 16: chunk rows in a few big inserts, so a 7,000-product Start stays well inside the web request limit.
+    // Slices of 1,000 rows keep each insert under Postgres's 65,535 bind parameters (7 per row).
+    const values = plans.map((plan, index) => ({batchId:id,index,stage:"matte" as const,status:"queued" as const,attempt:0,productIds:plan.productIds,sourceImageIds:plan.productIds.flatMap((p)=>sourceIds.get(p) ?? [])}));
+    const rows = [];
+    for (let at = 0; at < values.length; at += START_INSERT_ROWS) rows.push(...await tx.insert(catalogChunks).values(values.slice(at, at + START_INSERT_ROWS)).returning());
     await tx.update(catalogBatches).set({status:"matting",startedAt:new Date(),updatedAt:new Date(),counts:{...current.counts,products:products.length,sources:sources.length,outputs:sources.length*batch.channels.length,newProducts:preview.overwrite.newProducts,existingProducts:preview.overwrite.existingProducts.length,shotsToRemove:preview.overwrite.existingProducts.reduce((n,p)=>n+p.shotsToRemove.length,0)}}).where(eq(catalogBatches.id,id));
     return rows;
   });

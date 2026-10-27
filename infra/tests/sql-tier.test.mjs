@@ -20,12 +20,15 @@ printf '%s\\n' "$*" >> "$FAKE_DIR/log"
 case "$*" in
   "sql instances describe ila-pg --format=value(settings.tier)") printf '%s\\r\\n' "$(cat "$FAKE_DIR/tier")" ;;
   "sql instances patch ila-pg --tier="*" --quiet") t="$5"; printf '%s' "\${t#--tier=}" > "$FAKE_DIR/tier" ;;
+  "run services describe catalog-worker --region=asia-south1 --format=json")
+    printf '{"spec":{"template":{"spec":{"containers":[{"env":[{"name":"DB_CONNECTION_BUDGET","value":"max=%s;reserved=3;ila=4"}]}]}}}}\\r\\n' "$(cat "$FAKE_DIR/budget")" ;;
   *) echo "unexpected gcloud call: $*" >&2; exit 2 ;;
 esac
 `, {mode: 0o755});
 
-function run(tier, env) {
+function run(tier, env, budget = '400') {
   fs.writeFileSync(path.join(dir, 'tier'), tier);
+  fs.writeFileSync(path.join(dir, 'budget'), budget);
   fs.rmSync(path.join(dir, 'log'), {force: true});
   const clean = Object.fromEntries(Object.entries(process.env).filter(([k]) => !['SQL_TIER', 'CONFIRM_RESTART'].includes(k)));
   const r = spawnSync(bash, ['-c', 'export FAKE_DIR="$(cygpath -u "$FAKE_WIN" 2>/dev/null || echo "$FAKE_WIN")"; export PATH="$FAKE_DIR:$PATH"; bash infra/sql-tier.sh'],
@@ -66,7 +69,17 @@ try {
   assert.match(r.stderr, /SQL_TIER must be/);
   assert.deepEqual(r.log, []);
   console.log('PASS refuses an unknown tier before calling gcloud');
-  console.log('5 offline sql-tier cases passed');
+  r = run('db-custom-2-7680', {CONFIRM_RESTART: '1', SQL_TIER: 'db-f1-micro'}, '400');
+  assert.equal(r.status, 1);
+  assert.match(r.stderr, /connection budget of '400', above the 25 that db-f1-micro allows/);
+  assert.ok(!r.log.some((l) => l.includes('patch')), 'no patch while the deployed budget is too big');
+  console.log('PASS refuses a smaller tier while the deployed budget is above it');
+
+  r = run('db-custom-2-7680', {CONFIRM_RESTART: '1', SQL_TIER: 'db-f1-micro'}, '25');
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(r.after, 'db-f1-micro');
+  console.log('PASS rolls back once the deployed budget fits');
+  console.log('7 offline sql-tier cases passed');
 } finally {
   fs.rmSync(dir, {recursive: true, force: true});
 }

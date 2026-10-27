@@ -8,7 +8,7 @@
 # Usage (Git Bash, from the repo root):
 #   bash infra/sql-tier.sh                                   # prints the tier; SKIP when it is db-custom-2-7680
 #   CONFIRM_RESTART=1 bash infra/sql-tier.sh                 # changes it to db-custom-2-7680
-#   CONFIRM_RESTART=1 SQL_TIER=db-f1-micro bash infra/sql-tier.sh   # rollback, only after DB_MAX_CONNECTIONS=25
+#   CONFIRM_RESTART=1 SQL_TIER=db-f1-micro bash infra/sql-tier.sh   # rollback; refused until the worker is deployed with DB_MAX_CONNECTIONS=25
 #
 # After a change, deploy with DB_MAX_CONNECTIONS at most the new tier's default (printed below); infra/deploy.sh
 # refuses a budget the live tier does not allow.
@@ -42,6 +42,24 @@ fi
 if [ "${CONFIRM_RESTART:-0}" != 1 ]; then
   echo "ERROR: changing $INSTANCE from $CURRENT to $SQL_TIER restarts it for a few minutes (the catalog and the earlier ila apps). Re-run in a quiet window with CONFIRM_RESTART=1." >&2
   exit 1
+fi
+
+# A smaller tier allows fewer connections: refuse while the deployed worker's budget (DB_CONNECTION_BUDGET max=, set
+# by infra/deploy.sh) is above what the new tier allows; redeploy with a smaller DB_MAX_CONNECTIONS first.
+TARGET_MAX=$(tier_max_connections "$SQL_TIER" || true)
+CURRENT_MAX=$(tier_max_connections "$CURRENT" || true)
+if [ -n "$TARGET_MAX" ] && { [ -z "$CURRENT_MAX" ] || [ "$TARGET_MAX" -lt "$CURRENT_MAX" ]; }; then
+  WORKER_JSON=$(gcv run services describe catalog-worker --region=asia-south1 --format=json)
+  DEPLOYED_MAX=$(node -e '
+    const svc = JSON.parse(require("fs").readFileSync(0, "utf8"));
+    const env = svc?.spec?.template?.spec?.containers?.[0]?.env ?? [];
+    const budget = env.find((e) => e.name === "DB_CONNECTION_BUDGET")?.value ?? "";
+    console.log(/(?:^|;)max=(\d+)/.exec(budget)?.[1] ?? "");
+  ' <<<"$WORKER_JSON")
+  if [ -z "$DEPLOYED_MAX" ] || [ "$DEPLOYED_MAX" -gt "$TARGET_MAX" ]; then
+    echo "ERROR: catalog-worker is deployed with a connection budget of '${DEPLOYED_MAX:-unknown}', above the $TARGET_MAX that $SQL_TIER allows. Deploy with DB_MAX_CONNECTIONS=$TARGET_MAX (and the matching shape) first." >&2
+    exit 1
+  fi
 fi
 
 echo "==> sql tier: PATCH $CURRENT -> $SQL_TIER (restarts $INSTANCE)"
