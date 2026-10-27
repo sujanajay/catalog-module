@@ -14,8 +14,13 @@ export interface QueuedTask { route: TaskRoute; taskId: string; body: Record<str
 
 const pause = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
-/** Fakes around the real worker deps. `delayMs` is the real wait inside each fake service call. */
-export function fakeWorld(db: Db, delayMs = 1) {
+/**
+ * Fakes around the real worker deps. `delayMs` is the real wait inside each fake service call. `imageScale` shrinks
+ * the fake photos (default full size, about 600 x 800): the real cut-out checks scan every pixel on the one test
+ * thread, so the scale test uses small photos to drain thousands of them in minutes.
+ */
+export function fakeWorld(db: Db, delayMs = 1, options: { imageScale?: number } = {}) {
+  const scale = options.imageScale ?? 1;
   const objects = new Map<string, Buffer>();
   const uploads = new Map<string, number>();
   const tasks: QueuedTask[] = [], names = new Set<string>();
@@ -38,7 +43,7 @@ export function fakeWorld(db: Db, delayMs = 1) {
       headObject: async (uri: string) => { const buf = objects.get(uri); return buf ? { exists: true, size: buf.length, contentType: "image/jpeg", generation: "1", crc32c: "c" } : { exists: false, size: null, contentType: null, generation: null, crc32c: null }; } } as unknown as CatalogDeps["storage"],
     matting: { ...base.matting, health: vi.fn(async () => ({ ok: true, models: [{ id: "fixture", inputSize: 1024, target: "cpu" }], default: "fixture", versions: { cpu: null, gpu: null } })), convert: base.matting.convert.bind(base.matting) } as unknown as CatalogDeps["matting"],
     // Each photo has its own size (from its fourth byte), so a product plan that misses a photo would differ.
-    prepare: vi.fn(async (buf: Buffer) => { await pause(delayMs); if (buf[3] === 0xee) { const { UnsupportedSourceError } = await import("@catalog/core/catalog/render"); throw new UnsupportedSourceError("corrupt"); } const width = 600 + (buf[3] ?? 0) * 4; return { width, height: 800, rgb: Buffer.alloc(width * 800 * 3, 128), alphaSource: null, background: { uniform: true, color: [255, 255, 255] as [number, number, number], stdev: 0 }, flags: [], sourceMime: "image/jpeg" }; }) as unknown as CatalogDeps["prepare"],
+    prepare: vi.fn(async (buf: Buffer) => { await pause(delayMs); if (buf[3] === 0xee) { const { UnsupportedSourceError } = await import("@catalog/core/catalog/render"); throw new UnsupportedSourceError("corrupt"); } const width = Math.round((600 + (buf[3] ?? 0) * 4) * scale), height = Math.round(800 * scale); return { width, height, rgb: Buffer.alloc(width * height * 3, 128), alphaSource: null, background: { uniform: true, color: [255, 255, 255] as [number, number, number], stdev: 0 }, flags: [], sourceMime: "image/jpeg" }; }) as unknown as CatalogDeps["prepare"],
     matteFor: vi.fn<CatalogDeps["matteFor"]>(async (p) => { inMatte += 1; peakMatte = Math.max(peakMatte, inMatte); try { await pause(delayMs * 2); } finally { inMatte -= 1; } return { alpha: Buffer.alloc(p.width * p.height, 255), width: p.width, height: p.height, model: "fixture", ms: 12, source: "model", target: "cpu", sentLongSide: 800 }; }),
     renderAllChannels: vi.fn<CatalogDeps["renderAllChannels"]>(async (p, _m, channels, ctx) => { await pause(delayMs); return Object.fromEntries(channels.map((channel) => [channel, { jpeg: Buffer.from([255, 216, 255, p.width % 251]), status: "ok", plan: { w: ctx?.canvas?.w ?? p.width, h: ctx?.canvas?.h ?? p.height, lowResolution: false, safeBox: { x: 0, y: 0, w: 1, h: 1 }, scale: ctx?.uniformScale ?? 1, placedX: (ctx?.canvas?.w ?? 0) - p.width, placedY: 0, detailShot: false }, quality: 90, bytes: 4, flags: [], notes: [], attention: null, compliance: { ok: true, failures: [] } }])) as unknown as Awaited<ReturnType<CatalogDeps["renderAllChannels"]>>; }),
     judgeOutput: vi.fn<CatalogDeps["judgeOutput"]>(async (input) => { await pause(delayMs); return { scores: { complete_product: 95, same_product: 95, edge_quality: 95, background_clean: 95, no_text_or_watermark: 95, orientation_ok: 95, product_intact: 95, placement_ok: 95, overall: 95 }, verdict: "pass", reasons: [], isCollage: false, costUsd: 0, calls: 0, usage: {}, model: input.model, flags: [] }; }),

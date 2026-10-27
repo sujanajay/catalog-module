@@ -5,7 +5,10 @@
 // Part 2, the real handlers (PGlite + fakes, two FIFO queues with their slots, photos at once): the pipeline drains
 // with every photo cut out and rendered exactly once, no ownership-changed discard, no duplicate or stale task, the
 // window held, and the operator batch done long before the bulk batch. A small size runs in `pnpm test`; set
-// SCALE_PRODUCTS (for example 2000) for the full size, which takes many minutes.
+// SCALE_PRODUCTS (for example 2000) for the full size, which takes about 15 minutes on one test thread. From
+// 1,000 products it uses the F2 slots and window (SCALE_SHAPE=full or small picks one at any size), and
+// SCALE_PROGRESS_MS prints progress. The fake photos are small (imageScale), because the real cut-out checks scan
+// every pixel on the one thread the whole drain shares.
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { and, count, eq, isNotNull, notInArray } from "drizzle-orm";
 import type { Db } from "@catalog/core/db/client";
@@ -94,13 +97,13 @@ function runQueues(w: FakeWorld, slots: { operator: number; bulk: number }, hand
 }
 
 describe("F4 part 2: the real handlers drain a bulk batch and an operator batch together", () => {
-  const products = Number(process.env.SCALE_PRODUCTS ?? 12), full = products >= 1000;
+  const products = Number(process.env.SCALE_PRODUCTS ?? 12), full = process.env.SCALE_SHAPE ? process.env.SCALE_SHAPE === "full" : products >= 1000;
   const shape = full ? { slots: { operator: 8, bulk: 36 }, window: { operator: 8, bulk: 30 }, photos: 4 } : { slots: { operator: 2, bulk: 4 }, window: { operator: 2, bulk: 6 }, photos: 3 };
 
   it(`${products} bulk products (5 photos, 4 channels) and a 3-product operator batch: every photo once, no lost claim, window held, operator first`, async () => {
     vi.stubEnv("CATALOG_CHUNK_WINDOW", String(shape.window.operator)); vi.stubEnv("CATALOG_BULK_WINDOW", String(shape.window.bulk));
     try {
-      const w = fakeWorld(db, 1);
+      const w = fakeWorld(db, 1, { imageScale: 0.1 });
       w.deps.photoConcurrency = shape.photos;
       const channels = ["noon", "amazon", "namshi", "trendyol"] as const;
       const bulk = await seedBatch(db, w, `${LOAD_BATCH_NAME_PREFIX}scale`, Array.from({ length: Math.ceil(products / 2) }, (_, i) => (i * 2 + 1 < products ? [5, 5] : [5])), { channels: [...channels] });
@@ -109,17 +112,29 @@ describe("F4 part 2: the real handlers drain a bulk batch and an operator batch 
       await dispatchChunks(db, w.deps.enqueue, operator.batch.id);
       const finished: string[] = [];
       let windowBreaks = 0;
+      // SCALE_PROGRESS_MS (for example 60000) prints the drain's progress while a long run works.
+      const t0 = Date.now(); let handled = 0, handlerMs = 0;
+      const progress = process.env.SCALE_PROGRESS_MS ? setInterval(() => {
+        const outcomes: Record<string, number> = {};
+        for (const d of w.deliveries()) outcomes[String(d.outcome)] = (outcomes[String(d.outcome)] ?? 0) + 1;
+        const owned = w.log.mock.calls.filter(([, f]) => JSON.stringify(f ?? {}).includes("ownership changed")).length;
+        process.stderr.write(`[scale] t=${Math.round((Date.now() - t0) / 1000)}s chunksDone=${finished.length} tasks=${handled} avgTaskMs=${handled ? Math.round(handlerMs / handled) : 0} queued=${w.tasks.length} deliveries=${JSON.stringify(outcomes)} ownershipChanged=${owned}\n`);
+        handled = 0; handlerMs = 0;
+      }, Number(process.env.SCALE_PROGRESS_MS)) : undefined;
       await runQueues(w, shape.slots, async (task) => {
-        if (task.route === "/tasks/catalog/publish") return { httpStatus: 200 };
-        const chunkId = String(task.body.chunkId);
-        const [chunk] = await db.select({ batchId: catalogChunks.batchId }).from(catalogChunks).where(eq(catalogChunks.id, chunkId));
-        const [active] = await db.select({ n: count() }).from(catalogChunks).where(and(eq(catalogChunks.batchId, chunk!.batchId), isNotNull(catalogChunks.dispatchedAt), notInArray(catalogChunks.status, ["done", "failed"])));
-        if (active!.n > (chunk!.batchId === bulk.batch.id ? shape.window.bulk : shape.window.operator)) windowBreaks += 1;
-        const result = await handleChunkTask(w.deps, task.body, { retryCount: task.retryCount });
-        const [after] = await db.select({ status: catalogChunks.status }).from(catalogChunks).where(eq(catalogChunks.id, chunkId));
-        if (after!.status === "done") finished.push(chunk!.batchId);
-        return result;
-      });
+        const h0 = Date.now();
+        try {
+          if (task.route === "/tasks/catalog/publish") return { httpStatus: 200 };
+          const chunkId = String(task.body.chunkId);
+          const [chunk] = await db.select({ batchId: catalogChunks.batchId }).from(catalogChunks).where(eq(catalogChunks.id, chunkId));
+          const [active] = await db.select({ n: count() }).from(catalogChunks).where(and(eq(catalogChunks.batchId, chunk!.batchId), isNotNull(catalogChunks.dispatchedAt), notInArray(catalogChunks.status, ["done", "failed"])));
+          if (active!.n > (chunk!.batchId === bulk.batch.id ? shape.window.bulk : shape.window.operator)) windowBreaks += 1;
+          const result = await handleChunkTask(w.deps, task.body, { retryCount: task.retryCount });
+          const [after] = await db.select({ status: catalogChunks.status }).from(catalogChunks).where(eq(catalogChunks.id, chunkId));
+          if (after!.status === "done") finished.push(chunk!.batchId);
+          return result;
+        } finally { handled += 1; handlerMs += Date.now() - h0; }
+      }).finally(() => clearInterval(progress));
       // Drained: every chunk done, every photo cut out once and every image rendered once.
       for (const b of [bulk, operator]) {
         const chunks = await db.select({ status: catalogChunks.status }).from(catalogChunks).where(eq(catalogChunks.batchId, b.batch.id));
@@ -149,5 +164,5 @@ describe("F4 part 2: the real handlers drain a bulk batch and an operator batch 
       // Photos really ran at once.
       expect(w.peakMatte()).toBeGreaterThan(1);
     } finally { vi.unstubAllEnvs(); }
-  }, full ? 4 * 60 * 60_000 : 180_000);
+  }, Math.max(180_000, products * 2_000));
 });
