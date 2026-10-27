@@ -8,6 +8,13 @@ export const HAND_OFF_RETRY = "The upload could not be handed to processing. Ple
 /** The same failure when trying again will not help (for example a missing queue permission). */
 export const HAND_OFF_FAILED = "The upload could not be handed to processing. Email sujan@opptra.com if this keeps happening.";
 
+// Platform errors (spec 14c F11 part 1; parent copy register "Platform error"): an API call answered
+// with a page that is not JSON, such as the load balancer's HTML timeout page.
+export const PLATFORM_TIMEOUT = "The server did not answer in time. Your files are safe. Reload this page to continue.";
+export const PLATFORM_ERROR = "This did not finish. Reload this page and try again.";
+/** The sentence for a non-JSON answer: the timeout one for 502, 503 and 504, the general one otherwise. */
+export const platformErrorText = (status: number) => (status === 502 || status === 503 || status === 504 ? PLATFORM_TIMEOUT : PLATFORM_ERROR);
+
 /** "Noon", "Noon and Styli", "Noon, Namshi, Trendyol and Styli" (spec 01 section 8). */
 export function listAnd(items: readonly string[]): string {
   if (items.length <= 1) return items[0] ?? "";
