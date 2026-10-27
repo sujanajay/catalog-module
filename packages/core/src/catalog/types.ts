@@ -87,7 +87,26 @@ export interface BatchCounts {
   heldLinks?: number;
   /** Earlier batches' live links the sheet keeps for held products, re-checked separately. */
   recheckCarriedOk?: number | null; recheckCarriedTotal?: number | null;
+  // Intake progress (spec 14c F6). Optional and not in EMPTY_BATCH_COUNTS (a new default would need a
+  // migration): a row written before release C reads phase and placingClaim as null, placed as 0.
+  /** What intake is doing now; the worker writes it with every counts update and clears `rate` when it changes. */
+  phase?: IntakePhase | null;
+  /** Photos placed so far (placing writes it after each chunk, or once at the end). */
+  placed?: number;
+  /** Photos to place, set when placing is claimed. */
+  placeTotal?: number | null;
+  /** The last RATE_SAMPLES progress samples, all of the current phase (`done` is `placed` while placing). */
+  rate?: RateSample[];
+  /** The placing lease: the batch stays `ingesting` while a delivery holds it. */
+  placingClaim?: PlacingClaim | null;
 }
+/** Intake phases (spec 14c F6). The first five are collecting, `placing` follows, the last two end intake. */
+export const INTAKE_PHASES = ["uploading", "downloading", "reading", "unpacking", "checking", "placing", "ready", "needs_input"] as const;
+export type IntakePhase = (typeof INTAKE_PHASES)[number];
+/** One progress sample: ISO time, the phase it was taken in, and the phase's done count then. */
+export interface RateSample { at: string; phase: IntakePhase; done: number }
+/** A placing lease: `token` names the claiming delivery (run and upload id), `until` is an ISO expiry. */
+export interface PlacingClaim { token: string; until: string }
 export interface BatchCost {
   computeVcpuSeconds: number; mattingMs: number; renderMs: number; computeUsd: number;
   qaUsd: number; qaCalls: number; identifiers: number;
