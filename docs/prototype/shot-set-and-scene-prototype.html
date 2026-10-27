@@ -313,7 +313,7 @@ function batchA(){return [
   app('A10','VM-BRA-110','Lace bralette, blush','lingerie_underwear','bra','#e7b3b5',[ph(1,'flat'),ph(2,'bh',{onModel:true}),ph(3,'fm',{onModel:true})],{cropFrom:{fc:1},scenario:'Lingerie: off-figure shots, the on-model photos stay as extras.'}),
   app('A11','VM-SWIM-111','Swimsuit, cobalt','swimwear','swim','#2a50b8',[ph(1,'flat'),ph(2,'other',{view:'back',note:'back, on a hanger'})],{cropFrom:{fc:1},scenario:'Swimwear: the flat-lay back is made. Swimwear is not covered by the test run yet, so a person checks it.'}),
   app('A12','VM-PACK-112','Basic tee, pack of 3','multipack','top','#d6d1c4',[ph(1,'fm'),ph(2,'fl'),ph(3,'fc'),ph(4,'flat',{pieces:2})],{packOf:3,pkOk:true,outcomes:{pk:'pieces_mismatch'},scenario:'Pack of 3: the made all-pieces photo shows the wrong piece count, so it is not made. Try again from this page.'}),
-  app('A13','VM-KIDS-113','Girls frill dress, yellow','kids','dress','#f1c94b',[ph(1,'flat'),ph(2,'fm',{onModel:true,child:true})],{audience:'kids',cropFrom:{fc:1},scenario:'Kids: flat shots and cuts only. A made photo never shows a child.'}),
+  app('A13','VM-KIDS-113','Girls frill dress, yellow','kids','dress','#f1c94b',[ph(1,'flat'),ph(2,'fm',{onModel:true,child:true})],{audience:'kids',cropFrom:{fc:1},scenario:'Kids: flat shots and cuts here, because Vero Moda has no approved kids model. A made photo shows a child only on an approved kids model from Brand DNA, where the marketplace allows it.'}),
   app('A14','VM-TEE-114','Printed logo tee, white','tops','top','#f4f4f2',[ph(1,'fm'),ph(2,'fl'),ph(3,'fc'),ph(4,'hs'),ph(5,'other',{view:'back',note:'back view'})],{logo:true,outcomes:{bh:'logo_changed'},scenario:'Printed tee: the made back changed the logo, so it is not made. It can be fixed, but never published as it is.'}),
   app('A15','VM-TOP-115','Puff-sleeve top, coral','tops','top','#ef7b62',STD().concat([ph(6,'other',{cut:'product',note:'side view'})]),{scenario:'A cut photo in a shot type no marketplace asks for: it stays, with a note.'}),
   app('A16','VM-SHIRT-116','Oxford shirt, white','tops','top','#f0f1f4',[ph(1,'fm'),ph(2,'fl'),ph(3,'fc'),ph(4,'hs'),ph(5,'other',{view:'back',note:'back view, new photo'})],{carried:{role:'bh'},scenario:'Made photo from an earlier batch: checked again against the current photos and kept, with no question.'})
@@ -376,7 +376,7 @@ function defaultDna(){
     kids:{layout:'Kids packshots: side view facing left, light grey #F2F2F2, no shadow.',n:12,version:1}},
   campus:{marks:[{id:'m8',label:'',kind:'Wordmark',shape:'wordmark',text:'CAMPUS',color:'#c23a32',status:'candidate',seen:12}],words:[{text:'CAMPUS',seen:12,status:'candidate'}],
     look:{versions:[],draft:null},kids:{layout:'No kids photos of this brand yet.',n:0,version:0}}}}
-function defaultCells(){const c=(n,target,mode)=>({n,target,mode:mode||'auto'});return {tops_women:c(64,20),tops_men:c(28,20),knit_women:c(22,20),dresses_women:c(41,20),bottoms_women:c(26,20),outerwear_women:c(20,20),lingerie_women:c(21,20),swimwear_women:c(6,20,'person'),packs_women:c(20,20),kids:c(24,20),scene_shoe_men:c(48,10),scene_shoe_women:c(37,10),scene_shoe_kids:c(31,30),scene_bag_women:c(22,10),still_life:c(26,20)}}
+function defaultCells(){const c=(n,target,mode)=>({n,target,mode:mode||'auto'});return {tops_women:c(64,20),tops_men:c(28,20),knit_women:c(22,20),dresses_women:c(41,20),bottoms_women:c(26,20),outerwear_women:c(20,20),lingerie_women:c(21,20),swimwear_women:c(6,20,'person'),packs_women:c(20,20),kids:c(24,20),'scene:sneaker:men':c(48,10),'scene:sneaker:women':c(37,10),'scene:sneaker:kids':c(31,30),'scene:handbag:women':c(22,10),still_life:c(26,20)}}
 function defaultLearn(){return {mode:'suggest',notice:null,
   sugg:[{id:'s1',where:'Vero Moda, dresses, back views',text:'Photo maker 2 made photos that people approved more often: 41 of 46 first tries, against 33 of 45 for photo maker 1.',sugg:'Try photo maker 2 first for Vero Moda dresses.',ev:'Checked on 120 saved photos the system never learned from: no new mistakes, every planted fault still caught.',cost:'Cost per accepted photo: 0.24 USD instead of 0.21 USD.',status:'waiting'},
     {id:'s2',where:'US Polo, shoe scenes, women',text:'People picked "The colour is different" on 9 of 22 checked scenes.',sugg:'Use the wording that asks harder for the exact colour.',ev:'Checked on 64 saved photos: no new mistakes.',cost:'',status:'waiting'},
@@ -521,23 +521,25 @@ function sceneOutcome(p,e){let route=e.route,attempts=1,hold=null;
    photos once they pass the checks; about 1 in 10 products (1 in 4 for kids scenes) gets a spot check, answered by
    the batch's operator. A department x audience cell the test run did not cover stays "Checked by a person". */
 const BUSY=['planned','making','checking','ready','fixing'];
-const CELL_LABEL={tops_women:'Tops, women',tops_men:'Tops, men',knit_women:'Knitwear, women',dresses_women:'Dresses and jumpsuits, women',bottoms_women:'Trousers and skirts, women',outerwear_women:'Jackets and coats, women',lingerie_women:'Lingerie, women',swimwear_women:'Swimwear, women',packs_women:'Packs of several pieces, women',kids:'Kids clothes (flat shots only)',scene_shoe_men:'Shoe scenes, men',scene_shoe_women:'Shoe scenes, women',scene_shoe_kids:'Shoe scenes, kids',scene_bag_women:'Bag scenes, women',still_life:'Still life scenes, every brand'};
+const CELL_LABEL={tops_women:'Tops, women',tops_men:'Tops, men',knit_women:'Knitwear, women',dresses_women:'Dresses and jumpsuits, women',bottoms_women:'Trousers and skirts, women',outerwear_women:'Jackets and coats, women',lingerie_women:'Lingerie, women',swimwear_women:'Swimwear, women',packs_women:'Packs of several pieces, women',kids:'Kids clothes (flat shots only)',still_life:'Still life scenes, every brand'};
+/* Scene cells are audience x subcategory (spec 13 s8.2); the Ops page shows a few sample rows. */
+const SCENE_CELLS=['scene:sneaker:men','scene:sneaker:women','scene:sneaker:kids','scene:handbag:women'];
 function cellOf(p,j){
   const aud=p.audience==='men'?'men':(p.audience==='kids'||p.audience==='unknown')?'kids':'women';
-  if(j&&j.path==='scene'){if(j.route==='composite')return 'still_life';return 'scene_'+p.kind+'_'+aud}
+  if(j&&j.path==='scene'){if(j.route==='composite')return 'still_life';return 'scene:'+p.sub+':'+aud}
   const g={tops:'tops',knit_sweat:'knit',outerwear:'outerwear',dresses_jumpsuits:'dresses',bottoms:'bottoms',active_top:'tops',active_bottom:'bottoms',lingerie_underwear:'lingerie',sleep_lounge:'tops',swimwear:'swimwear',multipack:'packs',kids:'kids',unknown:'tops'}[p.dept]||'tops';
   if(g==='kids'||aud==='kids')return 'kids';
   return g+'_'+aud;
 }
-function cellInfo(k){return S.cells[k]||{n:0,target:20,mode:'person'}}
-function cellLabel(k){return CELL_LABEL[k]||k.replace(/_/g,', ')}
+function cellInfo(k){if(S.cells[k])return S.cells[k];if(k.startsWith('scene:')){const t=k.endsWith(':kids')?30:10;return {n:t,target:t,mode:'auto'}}return {n:0,target:20,mode:'person'}}
+function cellLabel(k){if(k.startsWith('scene:')){const [,sub,aud]=k.split(':');return `${SUBS[sub]||sub} scenes, ${aud}`}return CELL_LABEL[k]||k.replace(/_/g,', ')}
 function cellPhrase(k){const l=cellLabel(k).toLowerCase();const i=l.lastIndexOf(', ');return i>0&&!l.includes('(')?l.slice(0,i)+' for '+l.slice(i+2):l}
 function scopeOf(j){return j.path==='crop'?'crops':j.path==='scene'?(j.route==='composite'?'scene_composite':'scene_full'):'made'}
 function spotWhy(b,p,j){
   if(j.fixed)return 'fixed';
   if(j.anchor)return 'anchor';
   const sc=S.modes[scopeOf(j)];if(sc==='paused')return 'paused';if(sc==='person')return 'scope';
-  if(j.path==='crop')return null;
+  if(j.path==='crop')return p.spot?'spot':null;
   if(cellInfo(cellOf(p,j)).mode!=='auto')return 'cell';
   if(p.spot)return 'spot';
   return null;
@@ -689,7 +691,19 @@ function sheetRow(b,p,v){
       shots:L.order.map((it,i)=>`${i+1} ${roleWord(it.role,p)}${it.kind==='derived'?` (cut from photo ${it.parent})`:it.kind==='generated'?' (made)':''}`).join(', '),
       missing:L.missing.map(e=>entryWords(e,p)).join(', '),
       ai:L.order.map((it,i)=>it.kind==='generated'?`${i+1} yes`:null).filter(Boolean).join(', ')}});
-  return {key:p.key,name:p.name,brand:BRANDS[p.brand],ch,status:'ok',change,notes:notesFor(b,p)};
+  return {key:p.key,name:p.name,brand:BRANDS[p.brand],ch,status:'ok',change,todo:whatToDo(b,p,change,fresh,freshBrand),notes:notesFor(b,p)};
+}
+/* "What to do" (spec 12 s8.4): one plain action per product, computed from change and the slots, never typed. */
+function whatToDo(b,p,change,fresh,freshBrand){
+  if(change==='pending_review')return 'Nothing yet: new photos waiting for a spot check';
+  let chs=[];
+  if(change==='new'||change==='updated'||freshBrand)chs=b.channels.slice();
+  else if(['role_added','cut_replaced','scene_added'].includes(change))chs=b.channels.filter(c=>liveItems(b,p,c).order.some(it=>it.kind!=='brand'&&fresh.some(j=>j.n===it.n)));
+  if(chs.length)return 'Re-submit images on '+andList(chs.map(c=>CH[c]));
+  if(p.kind==='apparel'){const pl=planProduct(p,ctxFor(b));const add=new Set();
+    for(const c of b.channels)(pl.slots[c]||[]).forEach(sl=>{if(sl.state==='filled')return;const r=sl.via&&sl.via.reason;if(r==='no_view')add.add(`a photo of the ${BACK.has(sl.role)?'back':'front'}`);if(r==='cannot_check')add.add('a larger photo')});
+    if(add.size)return 'Add more photos: '+andList([...add]);}
+  return 'Nothing to do';
 }
 
 /* ============ Drawn stand-in images ============ */
@@ -939,7 +953,7 @@ function extraShotsCard(b,s,df){
   if(s.productCut)det.push(`${s.productCut} ${plural(s.productCut,'has','have')} a photo with the product cut at the frame edge. It is replaced only when the new photo passes our checks.`);
   if(s.unknown)det.push(s.unknown===1?'1 product: we could not tell what kind of garment it is. It gets cuts only. You can pick a garment type later to get more shots.':`${s.unknown} products: we could not tell what kind of garment they are. They get cuts only. You can pick a garment type later to get more shots.`);
   if(s.modeB)det.push(`${s.modeB} ${plural(s.modeB,'has','have')} flat lays only: ${plural(s.modeB,'its','their')} shots are made on the brand's model, starting with one full-length photo that one person approves first.`);
-  if(s.kids)det.push(`${s.kids} ${plural(s.kids,'is','are')} for kids: flat shots and cuts only. A made photo never shows a child.`);
+  if(s.kids)det.push(`${s.kids} ${plural(s.kids,'is','are')} for kids: flat shots and cuts only. A made photo shows a child only on the brand's approved kids model from Brand DNA, where the marketplace allows it, under the kids rules.`);
   if(s.gen>0)det.push(`Spending limit for this batch: ${usd(cap)}, set automatically. Fixes asked for in review: up to 0.24 USD each, inside the same limit.`);
   return card(`<p><b>${esc(l1)}</b></p>${l2?`<p>${esc(l2)}</p>`:''}${amber.map(a=>`<p class="notice">${esc(a)}</p>`).join('')}
     <details style="margin-top:10px" ${S.open.plan?'open':''} ontoggle="S.open.plan=this.open"><summary>Details</summary><ul class="lines">${det.map(l=>`<li>${esc(l)}</li>`).join('')}</ul>${planTable(b,s)}</details>`);
@@ -953,7 +967,7 @@ function sceneLine(b,sc,df){
   if(!df&&sc.elig===0)return card('<p>Scene images: none needed.</p>');
   const n=df?sc.n:sc.elig;
   const l1=`${df?'Up to ':''}${n} of ${sc.n} ${noun} get one scene image, shown last. About ${usd(n*0.2)}.`;
-  const det=[`Most it can cost: ${usd(n*0.76)}.`];
+  const det=[`Most it can cost: ${usd(n*0.81)}.`];
   if(!df&&sc.worn)det.push(`${sc.worn} already ${plural(sc.worn,'has','have')} a worn photo, so ${plural(sc.worn,'it does','they do')} not need one.`);
   if(!df&&sc.unknownSub)det.push(`${sc.unknownSub} ${plural(sc.unknownSub,'is a type','are types')} we could not tell yet.`);
   det.push('Made by AI: the image file says so, and so does the sheet where a marketplace asks for it.');
@@ -1105,6 +1119,7 @@ function whyText(j,p){
   if(j.why==='fixed')return 'Fixed version: a person checks every fixed photo';
   return 'Checked by a person';
 }
+function kidsNoFace(p){if(p.audience==='unknown')return true;if(p.audience!=='kids')return false;const pr=approvedProfile(p.brand);return !pr||!pr.person||pr.person.kids==='never'}
 function dnaUsed(p){const D=S.dna[p.brand];if(!D)return '';const m=D.marks.filter(x=>x.status==='approved').length,w=D.words.filter(x=>x.status==='approved').length;return `${m} ${plural(m,'logo','logos')} and ${w} brand ${plural(w,'word','words')}`}
 function spotCard(b,pid){
   const p=b.products.find(x=>x.id===pid);const js=b.jobs.filter(j=>j.pid===pid&&(j.state==='in_review'||(j.state==='fixing'&&j.fromCard)));
@@ -1127,7 +1142,7 @@ function photoBox(b,p,j,ro){
   if(j.state==='fixing')pill='<span class="pill run">Being fixed</span>';
   else if(j.fixed&&j.state==='in_review')pill=`<span class="pill warn">Fixed version, round ${j.fixRound} of 2</span>`;
   if(ro)pill=`<span class="pill ${j.state==='live'?'ok':j.state==='replaced'?'ok':'bad'}">${j.state==='live'?'All good: live':j.state==='replaced'?'Replaced by a real photo':j.answer&&j.answer.act==='remove'?'Removed':'Not made'}</span>`;
-  const side=j.retires?`<figure>${photoImg(p,p.photos.find(f=>f.n===j.retires))}<figcaption>Photo ${j.retires} will leave the listing when this one is published.</figcaption></figure>`:j.path==='scene'?`<div><div class="crops">${b.channels.map(ch=>{const L=liveItems(b,p,ch);const r=sceneChannel(b,p,ch,L.order.length);return `<figure>${cropSVG(p,j,ch)}<figcaption>${CH[ch]}${r.ok?'':'<br><span class="badge cut">Not added</span>'}</figcaption></figure>`}).join('')}</div><p class="note">Dashed box: where the product must stay. Coloured lines: the marketplace crops.${p.audience==='kids'?' Kids: legs only, never a face.':''}</p></div>`:'';
+  const side=j.retires?`<figure>${photoImg(p,p.photos.find(f=>f.n===j.retires))}<figcaption>Photo ${j.retires} will leave the listing when this one is published.</figcaption></figure>`:j.path==='scene'?`<div><div class="crops">${b.channels.map(ch=>{const L=liveItems(b,p,ch);const r=sceneChannel(b,p,ch,L.order.length);return `<figure>${cropSVG(p,j,ch)}<figcaption>${CH[ch]}${r.ok?'':'<br><span class="badge cut">Not added</span>'}</figcaption></figure>`}).join('')}</div><p class="note">Dashed box: where the product must stay. Coloured lines: the marketplace crops.${kidsNoFace(p)?' Kids: legs or feet only, no face.':(p.audience==='kids'?" Kids: only the brand's approved kids model may show, where the marketplace allows it.":'')}</p></div>`:'';
   const dna=(j.path==='mode_a'||j.path==='mode_b')?`<p class="note">Checked against Brand DNA: ${dnaUsed(p)}.</p>`:'';
   const showHist=ro||(j.fixed&&j.state!=='in_review');
   const acts=(!ro&&j.state==='in_review')?`<div class="acts"><button class="btn ghost sm" onclick="event.stopPropagation();openWrong('${j.id}')">Something is wrong</button><button class="btn ghost sm" onclick="event.stopPropagation();replaceStart('${j.id}')">Replace photo ${j.n}</button></div>`:'';
@@ -1153,9 +1168,11 @@ function doReplace(jid){const {b,j,p}=findJob(jid);closeModal();S.clicks++;
 /* ============ Fix and try again ============ */
 /* A person's words never reach the photo maker. Reasons and pickers become fixed correction sentences; the optional
    note can only pick from those same corrections (the prototype fakes that reading with keyword matching). */
+const CROP_REASONS=['The head or the product is cut','A logo or text is cut','It is not the same product or the right shot type'];
 const AREAS=['Front','Back','Chest','Sleeve','Collar','Hem','Pocket','Label'];
 const REFUSE={new_text:'Made photos never get new or changed text or logos.',change_design:"A made photo must show the product exactly as the brand's photos do.",more_skin:"How much the model shows is set by the brand's rules.",change_person:"The model is set by the brand's rules.",other:'We could not turn this into a fix. Pick a reason above instead.'};
 function reasonsFor(p,j){
+  if(j.path==='crop')return CROP_REASONS.map((q,i)=>({key:'c'+i,q,photo:false,area:false}));
   if(j.path!=='scene')return QUESTIONS.map((q,i)=>({key:'a'+i,q,photo:i!==5,area:i===1||i===3}));
   const all=[['same','It is not the same product',true],['logo','A logo or text changed, moved or was added',true],['colour','The colour is different',true],['shape',p.kind==='bag'?'The shape, strap count or hardware is different':'The shape is different',true],['framing',p.kind==='bag'?'It shows a face or too much of the person':'It shows a face, or more of the person than the knee',false],['modest','The clothing is not modest enough for the audience',false],['forbidden',"Something from the brand's never-in-a-scene list is in it",false],['real','It does not look like a real photo',false]];
   return (j.route==='composite'?all.filter(r=>r[0]==='forbidden'||r[0]==='real'):all).map(r=>({key:r[0],q:r[1],photo:r[2],area:r[0]==='logo'}));
@@ -1192,6 +1209,7 @@ function readNote(note,p){
 }
 function defaultPhoto(p,j){const back=BACK.has(j.role);const f=p.photos.find(x=>(x.view==='back')===back&&!x.cut)||p.photos[0];return f.n}
 function fixLimit(b,p,j){
+  if(j.path==='crop')return "This photo is cut from the brand's own photo, so there is nothing to fix. Remove it, or replace it with a real photo.";
   if(j.path==='scene'&&j.hold==='paste_back_mismatch')return 'Our fault: this image cannot be used. We make it again by ourselves.';
   if(j.fixRound>=2)return 'This photo was already fixed twice. Remove it, or replace it with a real photo.';
   if(S.sw.noFixMoney)return 'This batch has reached its spending limit, so this photo cannot be fixed. Remove it, or replace it with a real photo.';
@@ -1205,8 +1223,8 @@ function fixPanel(b,p,j,inModal){
   return `<div class="picks" id="fx-${id}" onclick="event.stopPropagation()">${hard?'<div class="err"><b>This photo cannot be published.</b> Our checks found a change that no person can approve. Ask for a fixed version, remove it, or replace it with a real photo.</div>':''}${j.path==='scene'&&j.hold?`<div class="err">${SCENE_HOLD[j.hold]}</div>`:''}
   <b>What is wrong? (pick all that apply)</b>
   ${R.map((r,i)=>`<label><input type="checkbox" class="fr-${id}" value="${i}" onchange="fixChanged('${id}')"> ${r.q}</label>${r.photo||r.area?`<div class="sub hide" id="fs-${id}-${i}">${r.photo?`<span>Which photo shows it right?</span>${thumbs(i)}`:''}${r.area?`<label style="display:flex;gap:6px;align-items:center">Where? <select id="fw-${id}-${i}" onchange="fixChanged('${id}')"><option value="">Anywhere</option>${AREAS.map(a=>`<option>${a}</option>`).join('')}</select></label>`:''}</div>`:''}`).join('')}
-  <label class="sm" style="display:block;margin-top:6px">Anything to add? (optional) <input type="text" id="fn-${id}" class="full" maxlength="200" placeholder="For example: the collar should look like photo 2"></label>
-  <div class="ask" id="fa-${id}"><span class="muted">Pick what is wrong to see what we will ask for.</span></div>
+  ${j.path==='crop'?'':`<label class="sm" style="display:block;margin-top:6px">Anything to add? (optional) <input type="text" id="fn-${id}" class="full" maxlength="200" placeholder="For example: the collar should look like photo 2"></label>
+  <div class="ask" id="fa-${id}"><span class="muted">Pick what is wrong to see what we will ask for.</span></div>`}
   ${lim?`<p class="notice" style="margin:8px 0 0">${lim}</p>`:''}
   <div class="acts" style="margin-top:8px">${lim?'':`<button class="btn primary sm" id="ffix-${id}" disabled onclick="doFix('${id}',${inModal})">Fix and try again</button>`}<button class="btn danger sm" id="frm-${id}" disabled onclick="doRemove('${id}',${inModal})">Remove this photo</button><button class="btn ghost sm" onclick="${inModal?'closeModal()':`S.open['rm-${id}']=false;render()`}">Cancel</button></div></div>`;
 }
@@ -1214,15 +1232,16 @@ function fixState(id){const {b,j,p}=findJob(id);const R=reasonsFor(p,j);
   const picks=[...document.querySelectorAll('.fr-'+CSS.escape(id))].filter(x=>x.checked).map(x=>+x.value);
   const items=picks.map(i=>{const ph=document.querySelector(`input[name="fp-${id}-${i}"]:checked`);const ar=document.getElementById(`fw-${id}-${i}`);return {key:R[i].key,n:ph?+ph.value:defaultPhoto(p,j),area:ar?ar.value:''}});
   const note=(document.getElementById('fn-'+id)||{}).value||'';
-  return {b,j,p,R,picks,items,note,asks:items.map(it=>correction(p,j,it.key,it.n,it.area))}}
+  return {b,j,p,R,picks,items,note,asks:j.path==='crop'?[]:items.map(it=>correction(p,j,it.key,it.n,it.area))}}
 function fixChanged(id){const st=fixState(id);
   st.R.forEach((r,i)=>{const el=document.getElementById(`fs-${id}-${i}`);if(el)el.classList.toggle('hide',!st.picks.includes(i))});
   const a=document.getElementById('fa-'+id);if(a)a.innerHTML=st.asks.length?`<b>We will ask for:</b><ul class="lines">${st.asks.map(s=>`<li>${esc(s)}</li>`).join('')}</ul>`:'<span class="muted">Pick what is wrong to see what we will ask for.</span>';
   ['ffix-','frm-'].forEach(k=>{const e=document.getElementById(k+id);if(e)e.disabled=!st.picks.length})}
 function openWrong(jid){const {p}=findJob(jid);S.focus='p-'+p.id;S.open['rm-'+jid]=true;render();const el=document.getElementById('fx-'+jid);if(el)el.scrollIntoView({block:'nearest'})}
 function relapseIf(p,j,keys){
+  if(j.path==='crop'&&j.why==='spot'){S.modes.crops='person';return ' Photo swaps: back to "Checked by a person" until 100 new approved swaps in a row.'}
   if(j.why!=='spot'||!keys.some(k=>['a0','a1','same','logo'].includes(k)))return '';
-  const k=cellOf(p,j);const c=S.cells[k]||(S.cells[k]={n:0,target:20,mode:'auto'});c.mode='person';c.relapse=TODAY;
+  const k=cellOf(p,j);const c=S.cells[k]||(S.cells[k]=Object.assign({},cellInfo(k)));c.mode='person';c.relapse=TODAY;
   S.ops.relapse={cell:k,why:keys.some(x=>x==='a1'||x==='logo')?'a changed logo':'a different product'};
   return ` ${cellLabel(k)}: back to "Checked by a person" until 50 new clean checks.`;
 }
@@ -1259,14 +1278,14 @@ function tSheet(b){
   const hasAI=c=>S.chScene[c].ai==='xmp_and_sheet';
   const head1=useChs.map(c=>`<th colspan="${maxImg[c]+2+(hasAI(c)?1:0)}" class="merged">${CH[c]}</th>`).join('');
   const head2=useChs.map(c=>Array.from({length:maxImg[c]},(_,i)=>`<th>Image ${i+1}</th>`).join('')+`<th>${CH[c]} shots</th><th>${CH[c]} missing</th>${hasAI(c)?`<th>${CH[c]} AI-made</th>`:''}`).join('');
-  const body=sh.rows.map(r=>`<tr><td>${r.brand}</td><td>${r.key}</td>${useChs.map(c=>{const x=r.ch[c]||{links:[]};return Array.from({length:maxImg[c]},(_,i)=>`<td>${x.links[i]?`<a href="#" onclick="return false">${esc(x.links[i])}</a>`:''}</td>`).join('')+`<td class="wrap">${esc(x.shots||'')}</td><td class="wrap">${esc(x.missing||'')}</td>${hasAI(c)?`<td>${esc(x.ai||'')}</td>`:''}`}).join('')}<td>${r.status}</td><td><b>${r.change}</b></td><td class="notes">${r.notes.map(esc).join('<br>')}</td></tr>`).join('');
+  const body=sh.rows.map(r=>`<tr><td class="wrap"><b>${esc(r.todo||'')}</b></td><td>${r.brand}</td><td>${r.key}</td>${useChs.map(c=>{const x=r.ch[c]||{links:[]};return Array.from({length:maxImg[c]},(_,i)=>`<td>${x.links[i]?`<a href="#" onclick="return false">${esc(x.links[i])}</a>`:''}</td>`).join('')+`<td class="wrap">${esc(x.shots||'')}</td><td class="wrap">${esc(x.missing||'')}</td>${hasAI(c)?`<td>${esc(x.ai||'')}</td>`:''}`}).join('')}<td>${r.status}</td><td><b>${r.change}</b></td><td class="notes">${r.notes.map(esc).join('<br>')}</td></tr>`).join('');
   const resub=sh.rows.filter(r=>['role_added','cut_replaced','scene_added','updated'].includes(r.change));
-  return `<p class="lead">One row per product. Each marketplace has its own set of links, then the shots it has and the shots still missing. This is a preview of the Excel file.</p>
+  return `<p class="lead">One row per product. "What to do" says what to re-submit and where. Each marketplace has its own set of links, then the shots it has and the shots still missing. This is a preview of the Excel file.</p>
   <div class="inline-sel" style="margin-bottom:10px"><label>Version <select onchange="S.sheetV['${b.id}']=+this.value;render()">${b.sheets.map(s=>`<option value="${s.v}" ${s.v===v?'selected':''}>Version ${s.v}: ${s.label} (${s.at})</option>`).join('')}</select></label>
   <label>Marketplaces <select onchange="S.sheetCh=this.value;render()"><option value="two" ${S.sheetCh==='two'?'selected':''}>First two</option><option value="all" ${S.sheetCh==='all'?'selected':''}>All ticked</option>${b.channels.map(c=>`<option value="${c}" ${S.sheetCh===c?'selected':''}>${CH[c]} only</option>`).join('')}</select></label></div>
   ${b.updatedNotice&&v<b.sheets.length?`<div class="notice">You are looking at an older version. The links sheet was updated after review on ${b.updatedNotice}. Download it again.</div>`:''}
   <div class="notice ${resub.length?'':'ok'}">${resub.length?`<b>To re-submit in this version:</b> ${resub.map(r=>`${r.key} (${r.change})`).join(', ')}. Each on the marketplaces named in its notes, as for "updated" today.`:'Nothing to re-submit in this version.'}</div>
-  <div class="tw sheet"><table><thead><tr><th rowspan="2">brand</th><th rowspan="2">identifier</th>${head1}<th rowspan="2">status</th><th rowspan="2">change</th><th rowspan="2">notes</th></tr><tr>${head2}</tr></thead><tbody>${body}</tbody></table></div>
+  <div class="tw sheet"><table><thead><tr><th rowspan="2">What to do</th><th rowspan="2">brand</th><th rowspan="2">identifier</th>${head1}<th rowspan="2">status</th><th rowspan="2">change</th><th rowspan="2">notes</th></tr><tr>${head2}</tr></thead><tbody>${body}</tbody></table></div>
   <div class="acts" style="margin-top:14px"><button class="btn primary" onclick="toast('Prototype: the Excel file is not generated. The table above is what it holds.')">Download links sheet (Excel)</button><button class="btn ghost" onclick="toast('Prototype: CSV not generated.')">Download CSV</button></div>
   <div class="card" style="margin-top:16px"><h3>What the change column means</h3><div class="legend">${Object.entries(CHANGE_MEANING).map(([k,m])=>`<div><span class="mono">${k}</span><span>${esc(m)}</span></div>`).join('')}</div></div>`;
 }
@@ -1372,7 +1391,7 @@ function tModels(brand){
   const R=S.registry[brand];const aud=S.open.modAud||'women';
   if(R.deleted)return `<div class="card" style="margin-top:14px"><h3>No model data for ${BRANDS[brand]}</h3><p class="muted">This brand's model data was deleted on ${TODAY}. Published product images stay.</p><button class="btn" onclick="restoreReg('${brand}')">Prototype: collect photos again</button></div>`;
   const seg=`<div class="seg" role="group" aria-label="Audience">${AUDS.map(([k,l])=>`<button class="${aud===k?'on':''}" onclick="S.open.modAud='${k}';render()">${l} (${R.packs.filter(x=>x.aud===k&&x.status==='approved').length})</button>`).join('')}</div>`;
-  const kidsNote=aud==='kids'?`<div class="notice"><b>Admin only.</b> Storing children's face data needs a legal yes before the real build.</div><p class="help">Kids models are kept like the adult ones. A made apparel photo still never shows a child, and kids shoe scenes stay legs or feet only.</p>`:'';
+  const kidsNote=aud==='kids'?`<div class="notice"><b>Admin only.</b> Storing children's face data: legal confirmation recommended before go-live.</div><p class="help">Kids models are kept like the adult ones. A made photo shows a child only on an approved kids model, only where the marketplace allows it and under the kids rules. Kids scenes show legs or feet only unless the Scenes tab names an approved kids model.</p>`:'';
   const rm=R.removed[aud]||[];const G=R.groups.filter(g=>g.aud===aud);const hair=(G[0]||{}).hair||'#3b2b22';
   const contact=Array.from({length:aud==='kids'?6:12},(_,i)=>i).filter(i=>!rm.includes(i)).map(i=>{const r=['fl','hs','bh','fm'][i%4];return `<figure>${apparelImg({g:i%3===1?'dress':'top',color:['#e8dcc4','#9cc3e4','#b5562f','#24305e'][i%4],length:'short'},r,{hair,child:aud==='kids'})}<figcaption>${ROLE_WORDS[r]}<br><button class="link sm" onclick="removeRegPhoto('${brand}','${aud}',${i})">Remove</button></figcaption></figure>`}).join('');
   const groups=G.map(g=>{const gi=R.groups.indexOf(g);return `<div class="prow" style="grid-template-columns:minmax(0,1fr) auto"><div><b>${g.status==='confirmed'?esc(g.label):'Group '+(G.indexOf(g)+1)}</b> <span class="muted sm">${g.size} photos</span> <span class="pill ${g.status==='confirmed'?'ok':g.status==='rejected'?'bad':''}">${{candidate:'To confirm',confirmed:'Same person, confirmed',rejected:'Not usable'}[g.status]}</span><div class="faces" style="margin-top:8px">${Array.from({length:Math.min(g.size,8)},(_,i)=>faceSVG(g.mixed&&i%2?'#a8743a':g.hair,i+gi)).join('')}</div>${g.mixed?'<p class="help">These may be two people. Use Split if so.</p>':''}${g.status==='confirmed'&&!g.packed?packApprove(brand,gi,g):''}</div>
@@ -1417,7 +1436,7 @@ function approveLook(brand){const L=S.dna[brand].look;const cur=L.versions[L.ver
 function tKids(brand){const K=S.dna[brand].kids;const pr=approvedProfile(brand);
   return `<div class="card" style="margin-top:6px"><h3>Kids layout</h3><p>${esc(K.layout)}</p><p class="help">${K.n?`Measured from ${K.n} photos with no person in them.`:'Nothing measured yet.'}</p></div>
   <div class="card"><h3>Kids scene styling</h3><p>${pr?esc(pr.subcategories.sneaker.styling.kids):'No approved scene profile yet.'}</p><p class="help">From the Scenes tab.</p></div>
-  <div class="notice">A made apparel photo never shows a child: kids clothes are shown as flat lays, packshots, on an invisible mannequin or as crops. Kids shoe scenes show legs or feet only. Kids models of this brand are kept on the Models tab.</div>
+  <div class="notice">A made photo shows a child only on an approved kids model of this brand (Models tab), only where the marketplace allows it, under the kids rules below. Otherwise kids clothes are shown as flat lays, packshots, on an invisible mannequin or as crops, and kids shoe scenes show legs or feet only.</div><div class="card"><h3>Kids rules</h3><p class="sm">Knees and torso covered; everyday standing, walking or sitting only; no adult in the frame; kids lingerie, underwear and swimwear are never shown on a child. These rules are fixed and cannot be edited.</p></div>
   ${K.n?`<div class="row-acts"><button class="btn primary" onclick="S.dna['${brand}'].kids.version++;render();toast('Kids look version '+S.dna['${brand}'].kids.version+' approved.')">Approve this version</button></div>`:''}`}
 function tDelete(brand){const word='DELETE '+BRANDS[brand].toUpperCase();
   return `<div class="card" style="border-color:var(--bad);margin-top:6px"><h3>Delete this brand's data</h3><p>Deletes this brand's face data, person groups, model packs, model photos, logo crops and layout photos. Published product images are not affected. Only after the owner's typed yes.</p><button class="btn danger" onclick="delReg('${brand}')">Delete this brand's data</button></div>
@@ -1442,8 +1461,8 @@ function aScene(brand){
   <div class="inline-sel" style="margin:8px 0"><label>Try first <select onchange="S.profiles['${brand}'].draft.routePreference=this.value"><option value="full_first" ${d.routePreference==='full_first'?'selected':''}>Worn scene, still life if it fails</option><option value="composite_first" ${d.routePreference==='composite_first'?'selected':''}>Still life, worn scene if it fails</option></select></label><label>Unisex products styled as <select onchange="S.profiles['${brand}'].draft.unisexStyling=this.value"><option value="men" ${d.unisexStyling==='men'?'selected':''}>Men</option><option value="women" ${d.unisexStyling==='women'?'selected':''}>Women</option></select></label></div>
   <h4 style="margin-top:14px">Scenes per type</h4><div class="tw"><table><thead><tr><th>Type</th><th>Worn scene</th><th>Framing</th><th>Still life</th><th>Styling (men / women)</th></tr></thead><tbody>${subRows}</tbody></table></div>
   <h4 style="margin-top:14px">Never in a scene</h4><textarea aria-label="Never in a scene" onchange="S.profiles['${brand}'].draft.forbidden=this.value.split('\\n').filter(Boolean)">${esc(d.forbidden.join('\n'))}</textarea>
-  <h4 style="margin-top:14px">Kids</h4><div class="card" style="background:var(--soft)"><ul class="lines sm"><li>No child is ever drawn as a person: shoes are legs only or feet only, bags held at the waist, no face, head or body above the knee or waist, one child and no adult in the frame.</li><li>Knees covered except at a pool or beach (then the frame stops below the knee); torso covered; no swimwear or underwear; everyday standing, walking or sitting only.</li><li>Also never: ${esc(d.kidsForbidden.join(', ').toLowerCase())}.</li><li>Products we cannot place by audience are treated as kids.</li></ul><p class="help">These rules are fixed and cannot be edited.</p></div>
-  <h4 style="margin-top:14px">Show the face of</h4>${face('men')}${face('women')}${face('unisex')}${face('kids')}<p class="help">A kids model can be picked here. Kids shoe scenes still show legs or feet only.</p>
+  <h4 style="margin-top:14px">Kids</h4><div class="card" style="background:var(--soft)"><ul class="lines sm"><li>By default no child is drawn as a person: shoes are legs only or feet only, bags held at the waist, no face, head or body above the knee or waist, one child and no adult in the frame.</li><li>A child's face shows only when "Show the face of" names an approved kids model of this brand, only on marketplaces that allow kids photos on a model, and never a made-up child.</li><li>Knees covered except at a pool or beach (then the frame stops below the knee); torso covered; no swimwear or underwear; everyday standing, walking or sitting only.</li><li>Also never: ${esc(d.kidsForbidden.join(', ').toLowerCase())}.</li><li>Products we cannot place by audience are treated as kids.</li></ul><p class="help">These rules are fixed and cannot be edited.</p></div>
+  <h4 style="margin-top:14px">Show the face of</h4>${face('men')}${face('women')}${face('unisex')}${face('kids')}<p class="help">A kids model can be picked here; kids scenes then show that child on marketplaces that take photos of children on a model. Otherwise kids scenes show legs or feet only.</p>
   ${warn.length?`<div class="notice"><b>Before you approve:</b><ul class="lines">${warn.map(w=>`<li>${esc(w)}</li>`).join('')}</ul></div>`:''}
   <div class="row-acts"><button class="btn ghost" onclick="S.profiles['${brand}'].draft=null;render()">Discard draft</button><button class="btn primary" onclick="approveProfile('${brand}')">Approve this version</button></div></div>`;
   if(P.versions.length)h+=`<h3 style="margin-top:18px">Versions</h3><ul class="lines">${P.versions.map(v=>`<li>Version ${v.v}, approved by ${v.by}, ${v.at}${v.body.enabled?'':' (scene images off)'}</li>`).join('')}</ul>`;
@@ -1467,21 +1486,22 @@ function aMakers(){
 function moveMaker(i,d){const a=S.makers;[a[i],a[i+d]]=[a[i+d],a[i]];render();toast('Order changed. The nightly test run starts again.')}
 function approveMaker(i){const m=S.makers[i];modal(`<h3>Approve ${m.name}</h3><p>Approve it for:</p>${['shotset','scene_full','scene_background'].map(u=>`<label class="opt"><input type="checkbox" class="mu" value="${u}" ${m.uses.includes(u)?'checked':''}><span>${{shotset:'Apparel shots',scene_full:'Scene, worn',scene_background:'Scene, background'}[u]}</span></label>`).join('')}<label class="f" for="mref">Reference to the written yes</label><input type="text" id="mref" class="full" placeholder="For example: email of 27 Oct 2026"><div class="row-acts"><button class="btn ghost" onclick="closeModal()">Cancel</button><button class="btn primary" onclick="doApproveMaker(${i})">Approve</button></div>`)}
 function doApproveMaker(i){const m=S.makers[i];m.uses=[...document.querySelectorAll('.mu')].filter(x=>x.checked).map(x=>x.value);m.approved=true;m.enabled=true;closeModal();render();toast(m.name+' approved and switched on.')}
-const SCOPES=[['made','Made photos (apparel)','About 1 in 10 products with made photos is checked by hand.'],['crops','Photo swaps, all brands','100 swaps in a row approved in the test run, with no head or logo cut. About 1 in 20 is checked by hand.'],['scene_full','Scene images, worn','About 1 in 10 checked by hand, 1 in 4 for kids scenes.'],['scene_composite','Scene images, still life','About 1 in 10 checked by hand.']];
+const SCOPES=[['made','Made photos (apparel)','About 1 in 10 products with made photos is checked by hand, 1 in 4 when they show a child. One card per product.'],['crops','Photo swaps, all brands','100 swaps in a row approved in the test run, with no head or logo cut. About 1 in 20 products with swaps is checked by hand.'],['scene_full','Scene images, worn','About 1 in 10 products checked by hand, 1 in 4 for kids scenes.'],['scene_composite','Scene images, still life','About 1 in 10 products checked by hand.']];
 function modePill(m){return m==='auto'?'<span class="pill ok">Automatic, a few checked by hand</span>':m==='paused'?'<span class="pill warn">Paused: every one checked by a person</span>':'<span class="pill warn">Checked by a person</span>'}
 function aOps(){
   const A=B('A');const ans=A.jobs.filter(j=>j.answer);const nOk=ans.filter(j=>j.answer.act==='ok').length,nFix=ans.filter(j=>j.answer.act==='fix').length,nRm=ans.filter(j=>j.answer.act==='remove').length;
   const rel=S.ops.relapse;
   const cards=SCOPES.map(([k,l,rate])=>{const m=S.modes[k];return `<div class="card"><div class="hdr" style="margin:0"><h3>${l}</h3>${modePill(m)}</div><p class="sm">${m==='auto'?'Switched to automatic on 20 Oct 2026 when the test run numbers held.':m==='paused'?`Paused by Admin on ${TODAY}. Every new photo waits for a person.`:'Not covered by the test run yet: every photo waits for a person.'}</p><p class="sm muted">${rate}</p>
     <div class="acts">${m==='auto'?`<button class="btn ghost sm" onclick="pauseScope('${k}',true)">Pause automatic publishing</button>`:m==='paused'?`<button class="btn primary sm" onclick="pauseScope('${k}',false)">Resume automatic publishing</button>`:''}</div></div>`}).join('');
-  const cellRows=Object.keys(CELL_LABEL).map(k=>{const c=cellInfo(k);return `<tr><td><b>${cellLabel(k)}</b></td><td>${c.n} labelled (needs ${c.target})</td><td><div class="bar" style="min-width:80px"><i style="width:${Math.min(100,100*c.n/c.target)}%"></i></div></td><td>${c.mode==='auto'?'<span class="pill ok">Automatic</span>':`<span class="pill warn">Checked by a person</span>${c.relapse?`<br><span class="sm muted">Since a spot check on ${c.relapse}</span>`:c.n<c.target?`<br><span class="sm muted">Needs ${c.target-c.n} more test run labels</span>`:''}`}</td><td>${c.relapse&&c.mode!=='auto'?`<button class="btn ghost sm" onclick="notFault('${k}')">Not a real fault</button>`:''}</td></tr>`}).join('');
+  const opsCells=Object.keys(CELL_LABEL).filter(k=>k!=='still_life').concat([...new Set(SCENE_CELLS.concat(Object.keys(S.cells).filter(k=>k.startsWith('scene:'))))],['still_life']);
+  const cellRows=opsCells.map(k=>{const c=cellInfo(k);return `<tr><td><b>${cellLabel(k)}</b></td><td>${c.n} labelled (needs ${c.target})</td><td><div class="bar" style="min-width:80px"><i style="width:${Math.min(100,100*c.n/c.target)}%"></i></div></td><td>${c.mode==='auto'?'<span class="pill ok">Automatic</span>':`<span class="pill warn">Checked by a person</span>${c.relapse?`<br><span class="sm muted">Since a spot check on ${c.relapse}</span>`:c.n<c.target?`<br><span class="sm muted">Needs ${c.target-c.n} more labels</span>`:''}`}</td><td>${c.relapse&&c.mode!=='auto'?`<button class="btn ghost sm" onclick="notFault('${k}')">Not a real fault</button>`:''}</td></tr>`}).join('');
   const sceneRows=CH_ORDER.map(c=>{const r=S.chScene[c];return `<tr><td><b>${CH[c]}</b></td><td>${r.max||'No limit'}</td><td><select aria-label="Takes scene images" onchange="S.chScene['${c}'].life=this.value;render()">${['published','assumed','off'].map(v=>`<option value="${v}" ${r.life===v?'selected':''}>${{published:'Yes, published rule',assumed:'Yes, assumed',off:'No'}[v]}</option>`).join('')}</select></td><td><select aria-label="AI-made disclosure" onchange="S.chScene['${c}'].ai=this.value;render()"><option value="xmp" ${r.ai==='xmp'?'selected':''}>File label only</option><option value="xmp_and_sheet" ${r.ai==='xmp_and_sheet'?'selected':''}>File label and sheet column</option></select></td></tr>`}).join('');
   const dept=S.open.opsDept||'*';const rowsP=S.policy[dept];
   const ruleRows=CH_ORDER.map(c=>{const r=rowsP[c];return `<tr><td><b>${CH[c]}</b></td><td class="sm">${r.roles.map((e,i)=>`${i+1} ${entryWords(e,{length:'short'})}`).join(', ')}</td><td class="sm">${r.head==='fail'?'Face cut not allowed':'Cut allowed at nose or lips'}</td><td><span class="pill ${r.status==='confirmed'?'ok':r.status==='assumed'?'warn':''}">${r.status}</span>${r.by!=='seed'?`<br><span class="sm muted">edited by ${r.by}</span>`:''}</td><td><button class="btn ghost sm" onclick="editRule('${dept}','${c}')">Edit</button></td></tr>`}).join('');
   return `${rel?`<div class="notice bad"><b>${cellLabel(rel.cell)}: back to "Checked by a person".</b> A spot check found ${rel.why}. The photo did not go live, and every made photo in this cell is checked by one person again until 50 new clean checks. <button class="link" onclick="S.ops.relapse=null;render()">Dismiss</button></div>`:''}
   <h2 style="margin:6px 0 8px">How photos go live</h2><p class="lead">The internal test run checked every photo. Live batches publish once our checks pass, and a few are checked by hand by the batch's operator. A spot check left for 7 days means the photo is not made.</p>
   <div class="grid2" style="margin-top:12px">${cards}</div>
-  <h2 style="margin:22px 0 8px">Test run labels per cell</h2><p class="muted sm">A cell goes automatic once the test run labelled enough photos in it with no wrong pass on the garment or a logo. A cell that is not covered stays "Checked by a person".</p>
+  <h2 style="margin:22px 0 8px">Test run labels per cell</h2><p class="muted sm">A cell goes automatic once the test run labelled enough photos in it with no wrong pass on the garment or a logo. A cell that is not covered stays "Checked by a person": one person checks each of its photos in live batches, those answers count towards its labels, and it goes automatic when it meets the same bars.</p>
   <div class="tw"><table style="min-width:680px"><thead><tr><th>Cell</th><th>Labels</th><th></th><th>Status</th><th></th></tr></thead><tbody>${cellRows}</tbody></table></div>
   <h2 style="margin:22px 0 8px">Shot sets per brand</h2><div class="tw"><table style="min-width:980px"><thead><tr><th>Brand</th><th>Apparel products</th><th>Complete on Styli before / after</th><th>Filled by: existing / cut / made / brand model</th><th>Not made</th><th>Cut photos found / replaced / still live</th><th>Spot checks: all good / fixed / removed</th><th>Cost per accepted made photo</th></tr></thead><tbody>
   <tr><td><b>Vero Moda</b></td><td>16</td><td>2 / 9</td><td>41 / 14 / 5 / 4</td><td>9</td><td>2 / 1 / 1</td><td>${nOk} / ${nFix} / ${nRm}</td><td>0.21 USD</td></tr>
@@ -1510,7 +1530,7 @@ function learnSection(){const L=S.learn;const modes=[['off','Off'],['report','Re
   ${L.mode==='off'?'<p class="muted" style="margin-top:10px">Learning is off.</p>':`
   ${showS?`<h3 style="margin:16px 0 8px">Suggestions waiting for you (${wait.length})</h3>${wait.concat(applied).map(sCard).join('')||'<p class="muted">None right now.</p>'}${later?`<p class="help">${later} put off with "Not now".</p>`:''}`:'<p class="help" style="margin-top:10px">Report only: the system shows what it sees but suggests nothing.</p>'}
   <h3 style="margin:16px 0 8px">Changes in use</h3><div class="tw"><table style="min-width:720px"><thead><tr><th>Where</th><th>What changed</th><th>Since</th><th>Approved by</th><th>Since then</th><th></th></tr></thead><tbody>${L.inUse.map(u=>`<tr><td>${esc(u.where)}</td><td>${esc(u.what)}</td><td>${u.since}</td><td>${u.by}</td><td>${u.rolled?`<span style="color:var(--bad)">${esc(u.rolled)}</span>`:esc(u.result)}</td><td>${u.rolled?'':`<button class="btn ghost sm" onclick="rollBack('${u.id}')">Roll back</button>`}</td></tr>`).join('')}</tbody></table></div>
-  <h3 style="margin:16px 0 8px">Still learning</h3><ul class="lines sm"><li>Vero Moda swimwear: 6 of 30 checked photos needed before we suggest anything.</li><li>US Polo kids shoe scenes: 18 of 30.</li></ul>`}`;
+  <h3 style="margin:16px 0 8px">Still learning</h3><ul class="lines sm"><li>Vero Moda swimwear: 6 of 30 checked photos needed before we suggest anything.</li><li>US Polo, sneaker scenes for kids: 18 of 30.</li></ul>`}`;
 }
 function setLearn(k){S.learn.mode=k;render();toast(k==='off'?'Learning is off.':'Learning: '+{report:'report only',suggest:'suggest changes',try:'try alternatives where every photo is checked'}[k]+'.')}
 function learnSugg(id,act){const L=S.learn;const s=L.sugg.find(x=>x.id===id);
@@ -1633,7 +1653,7 @@ const SCEN=[
  ['C23','"More options": try "Still life only" and "Not this time".',()=>{base();freshDraft('B');S.open.more=true;go('#new/4')}],
  ['C24','Kids shoe scene spot check (1 in 4 for kids): do the marketplace crops and the box help you judge? Try "Something is wrong" to see the scene reasons and Fix.',()=>{base();reviewReady('B');focusCard('p-B07');go('#batch/B/attention')}],
  ['C25','Handbag scene showed part of a face: not made, with "Try again" on the product page. Then open the evening clutch (paste-back mismatch): why is there no Try again?',()=>{base();reviewReady('B');go('#product/B/B09')}],
- ['C26','Kids shoe: legs only. Product with a worn photo: skipped with a note. (Products tab, All, open Details.)',()=>{base();reviewReady('B');S.open['pf-B']='all';go('#batch/B/products')}],
+ ['C26','Kids shoe with no kids model named on the Scenes tab: legs only. Product with a worn photo: skipped with a note. (Products tab, All, open Details.)',()=>{base();reviewReady('B');S.open['pf-B']='all';go('#batch/B/products')}],
  ['C27','Trendyol at its cap, Namshi takes no scene images: read the "Not added" notes in the sheet.',()=>{base();S.sw.trendyolFull=true;S.sw.noScene=true;const b=reviewReady('B');spotProducts(b).forEach(pid=>allGood('B',pid));S.sheetCh='all';go('#batch/B/sheet')}],
  ['C28','Campus (no permission): what does the operator see, and is it clear who to ask?',()=>{base();freshDraft('CA');go('#new/4')}],
  ['D','D. Links sheet and re-submit'],
