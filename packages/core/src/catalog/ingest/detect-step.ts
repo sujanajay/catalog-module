@@ -138,7 +138,7 @@ export function linkFailuresBlock({ links, rows }: { links: number; rows: LinkFa
 export async function buildDetectedStep2(
   db: Db,
   batchId: string,
-  _deps: Pick<IngestDeps, "storage">,
+  deps: Pick<IngestDeps, "storage">,
   extra: { sign?: (gsUri: string) => Promise<string> } = {},
 ): Promise<DetectedStep2> {
   const sign = extra.sign ?? ((u: string) => signedUrl(u, EXAMPLE_THUMB_TTL_SEC));
@@ -278,7 +278,8 @@ export async function buildDetectedStep2(
   }
 
   return {
-    linkFailures: linkFailuresBlock(await linkFailuresOf(db, batchId, _deps)),
+    // The manifests are read only when the last collection counted failed links (step 2 polls this).
+    linkFailures: linkFailuresBlock(batch.counts.linkFailures ? await linkFailuresOf(db, batchId, deps) : { links: 0, rows: [] }),
     identifierMode: { detected: detectedMode, options: modeOptions, examples },
     groupedBy,
     precedence: { shown: kinds.some((k) => FILE_KINDS.includes(k)) && kinds.some((k) => LINK_KINDS.includes(k)), default: "uploads_then_links" },

@@ -297,6 +297,10 @@ describe("buildDetectedStep2", () => {
     };
     const manifest = { version: 1, items, results, warnings: [], productList: false, detected: { kind: "url_list", message: "" } };
     objects.set(`gs://bkt/${manifestPath(batchPrefix("uspa", b, false), paste)}`, Buffer.from(JSON.stringify(manifest)));
+    // Before the collection counted failed links the manifests are not read (step 2 polls this).
+    expect((await buildDetectedStep2(db, b, deps, { sign })).linkFailures.total).toBe(0);
+    const [row] = await db.select().from(catalogBatches).where(eq(catalogBatches.id, b));
+    await db.update(catalogBatches).set({ counts: { ...row!.counts, linkFailures: 4 } }).where(eq(catalogBatches.id, b));
 
     const s = await buildDetectedStep2(db, b, deps, { sign });
     expect(s.linkFailures).toEqual({

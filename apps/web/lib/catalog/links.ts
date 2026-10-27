@@ -22,7 +22,7 @@ export async function addLinks(id: string, value: unknown, target?: string) {
   const result = await checkLinkAccess(text, deps);
   const access = accessStatus(result);
   const summary = "error" in result ? result.error : result.message;
-  const values = { kind, name: "title" in result && result.title ? result.title : kind === "url_list" ? "Image links" : text.trim(), sourceUrl: text.trim(), status: access === "ok" ? "uploaded" as const : "failed" as const, error: access === "ok" ? null : summary, detected: { ...result, message: summary } };
+  const values = { kind, name: "title" in result && result.title ? result.title : kind === "url_list" ? "Image links" : text.trim(), sourceUrl: kind === "url_list" ? text : text.trim(), status: access === "ok" ? "uploaded" as const : "failed" as const, error: access === "ok" ? null : summary, detected: { ...result, message: summary } };
   const uploadId = await db().transaction(async (tx) => {
     await draftForUpdate(tx, id);
     const prior = await linkRowFor(tx, id, kind, text.trim(), target);

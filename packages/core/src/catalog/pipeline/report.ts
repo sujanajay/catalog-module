@@ -14,6 +14,7 @@ import { outputNote, type Output } from "./publish";
 import { flagDetails } from "../qa/reasons";
 import type { RecheckResult } from "../recheck/index";
 import { isDuplicateReject } from "../ingest/group";
+import { isLinkReject } from "../ingest/link-reasons";
 import type * as storage from "../../storage";
 export function batchSheetStatus(member: { linkStatus: LinkStatus; change: ChangeKind }): SheetStatus {
   if (member.linkStatus === "missing_images") return "missing_images";
@@ -79,7 +80,7 @@ export async function notRefreshedChannels(db:Db,batchId:string):Promise<NotRefr
   });
 }
 export interface ExportPaths { xlsx:string; csv:string; report:string; filledProductList:{xlsx:string;csv:string[]}|null; exportsMatch:boolean }
-export interface IngestReport { unsupportedFiles:unknown[];duplicates:unknown[];sourceOrigins?:Record<string,{origin:string;sourceUrl?:string;relativePath?:string}> }
+export interface IngestReport { unsupportedFiles:unknown[];duplicates:unknown[];linkFailures?:unknown[];sourceOrigins?:Record<string,{origin:string;sourceUrl?:string;relativePath?:string}> }
 /** The reject ledger written by ingest includes files that have no product/source DB row. */
 export async function readIngestReport(store:Pick<typeof storage,"headObject"|"downloadBuffer"|"getBucketName">,prefix:string):Promise<IngestReport|undefined> {
   const uri=`gs://${store.getBucketName()}/${prefix}/derived/_ingest/preview-state.json`;
@@ -89,7 +90,8 @@ export async function readIngestReport(store:Pick<typeof storage,"headObject"|"d
   const rejected=(state.rejected ?? []).map(r=>({name:r.item.item.originalName,identifier:r.item.item.identifier,reason:r.reason}));
   const sourceOrigins:NonNullable<IngestReport["sourceOrigins"]>={};
   for(const source of (state.products ?? []).flatMap(p=>p.items)) if(source.rawUri) sourceOrigins[source.rawUri]={origin:source.item.origin,...(source.item.bytes.kind==="url" ? {sourceUrl:source.item.bytes.url}:{relativePath:source.item.originalName})};
-  return {unsupportedFiles:rejected.filter(r=>!isDuplicateReject(r.reason)),duplicates:[...rejected.filter(r=>isDuplicateReject(r.reason)),...(state.duplicates ?? [])],sourceOrigins};
+  // Links that could not be downloaded are listed on their own, as counts.linkFailures counts them (spec 14b F5).
+  return {unsupportedFiles:rejected.filter(r=>!isDuplicateReject(r.reason) && !isLinkReject(r.reason)),linkFailures:rejected.filter(r=>isLinkReject(r.reason)),duplicates:[...rejected.filter(r=>isDuplicateReject(r.reason)),...(state.duplicates ?? [])],sourceOrigins};
 }
 export async function workbookCsvSheets(bytes:Buffer):Promise<{name:string;csv:string}[]> {
   const workbook=new ExcelJS.Workbook(); await workbook.xlsx.load(bytes as unknown as Parameters<typeof workbook.xlsx.load>[0]);
@@ -161,6 +163,8 @@ export async function buildReport(db:Db,batchId:string,extra:{recheck:RecheckRes
   const cost={...batch.cost,identifiers:line.identifiers,usdPerIdentifier:line.usdPerIdentifier,inrPerIdentifier:line.inrPerIdentifier};
   const judged = selected.filter(o=>o.qaScores), autoActions = Object.fromEntries(["none","note","drop","hold"].map(a=>[a,judged.filter(o=>(autoActionOf(o) ?? "none")===a).length]));
   const qa = {judgedOutputs:judged.length,autoActions,productsHeld:counts.attentionProducts,products:pairs.length,attentionRate:attentionRate(counts.attentionProducts,pairs.length)};
+  const uploadRejects=uploads.flatMap(u=>Array.isArray(u.detected?.rejected) ? u.detected.rejected as {reason?:unknown}[]:[]);
+  const isLink=(r:{reason?:unknown})=>typeof r.reason==="string" && isLinkReject(r.reason);
   const report = {batchId,brand:batch.brandName,channels:batch.channels,summary:{linksPlanned:counts.outputs-counts.skipped-delivery.held,linksVerified:counts.verified,linksSkipped:counts.skipped,linksHeld:delivery.held,linksCarriedOver:delivery.carried.length,productsHeld:counts.attentionProducts},counts,cost,qa,...(qaCap ? {banner:QA_CAP_BANNER}:{}),
     products:pairs.map(({product,pair})=>({identifier:product.identifier,pathKey:product.pathKey,linkStatus:batchSheetStatus(pair),change:pair.change,changedAt:rows.find(r=>r.identifier===product.identifier)?.changedAt,optionIdStyleColor:product.optionIdStyleColor,opptraSkuIds:product.opptraSkuIds,sources:sources.filter(s=>s.productId===product.id).map(s=>({n:s.n,originalName:s.originalName,...(extra.ingest?.sourceOrigins?.[s.rawUri] ?? {origin:uploads.find(u=>u.id===s.uploadId)?.kind ?? "image",relativePath:s.originalName}),mime:s.mime,width:s.width,height:s.height,sha256:s.sha256,rawUri:s.rawUri,status:s.status,flags:s.flags})),outputs:outputs.filter(o=>o.productId===product.id && (o.batchId===batchId || o.isLive)).map(o=>({channel:o.channel,n:o.n,status:o.status,url:o.isLive ? o.publicUrl:null,generation:o.generation,flags:o.flags,reason:o.reason,qa:qaReportEntry(o),autoActions:autoActionsOf(o.compliance)}))})),
     overwrites:events.filter(e=>["overwritten","shots_removed","reordered","channel_added"].includes(e.kind)).flatMap((e):Record<string,unknown>[]=> {
@@ -168,6 +172,6 @@ export async function buildReport(db:Db,batchId:string,extra:{recheck:RecheckRes
       const changes=Array.isArray(e.details.changes) ? e.details.changes as Record<string,unknown>[]:[];
       return changes.length ? changes.map(c=>({identifier,kind:e.kind,channels:[c.channel],shots:[c.n],oldGeneration:c.oldGeneration,newGeneration:c.newGeneration,sha256:c.sha256})):[{identifier,kind:e.kind,channels:e.details.channels,shots:e.details.shots,oldGeneration:null,newGeneration:null,sha256:null}];
     }),notRefreshedChannels:await notRefreshedChannels(db,batchId),removedLinks:events.flatMap(e=>e.kind==="shots_removed" && Array.isArray(e.details.removedLinks) ? e.details.removedLinks.map((r:unknown)=>({identifier:pairs.find(p=>p.product.id===e.productId)?.product.identifier,...r as Record<string,unknown>})):[]),recheck:extra.recheck,exports:extra.exports,
-    unsupportedFiles:extra.ingest?.unsupportedFiles ?? uploads.flatMap(u=>Array.isArray(u.detected?.rejected) ? u.detected.rejected:[]),duplicates:extra.ingest?.duplicates ?? pairs.filter(p=>p.pair.flags.includes("duplicate_shot")).map(p=>({identifier:p.product.identifier,reason:p.pair.notes})),unresolvedIdentifiers:pairs.filter(p=>!p.product.opptraSkuIds.length).map(p=>p.product.identifier),chunks:chunks.map(c=>({index:c.index,stage:c.stage,status:c.status,attempt:c.attempt,error:c.error}))};
+    unsupportedFiles:extra.ingest?.unsupportedFiles ?? uploadRejects.filter(r=>!isLink(r)),linkFailures:extra.ingest?.linkFailures ?? uploadRejects.filter(isLink),duplicates:extra.ingest?.duplicates ?? pairs.filter(p=>p.pair.flags.includes("duplicate_shot")).map(p=>({identifier:p.product.identifier,reason:p.pair.notes})),unresolvedIdentifiers:pairs.filter(p=>!p.product.opptraSkuIds.length).map(p=>p.product.identifier),chunks:chunks.map(c=>({index:c.index,stage:c.stage,status:c.status,attempt:c.attempt,error:c.error}))};
   return {sheet:{channels:CHANNEL_ORDER.filter(c=>batch.channels.includes(c)),rows},report,batch:{...batch,counts,cost},carriedLinks:delivery.carried};
 }

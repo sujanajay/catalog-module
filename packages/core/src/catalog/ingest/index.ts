@@ -773,6 +773,14 @@ async function finishBatch(db: Db, deps: IngestDeps, batchId: string): Promise<{
     shotsToRemove: existing.reduce((s, p) => s + p.shotsToRemove.length, 0),
     previewReady: true, failReason: null,
   };
+  // An input removed while this ran (spec 14b F3) was read above, so this result is out of date. The
+  // removal already cleared previewReady; keep it cleared (no failure either) so the next Continue
+  // runs this step again without it.
+  const removedSince = uploads.length ? await db.select({ id: catalogUploads.id }).from(catalogUploads).where(and(inArray(catalogUploads.id, uploads.map((u) => u.id)), eq(catalogUploads.status, "removed"))) : [];
+  if (removedSince.length) {
+    await patchCounts(db, batch.id, { ...counts, previewReady: false }, { status: "draft" });
+    return { progress: { done: 0, total: 0, phase: "done" }, outcome: "stale: an input was removed" };
+  }
   const waitingForColumn = uploads.some((u) => (u.detected as Detected | null)?.cannotRead);
   if (!versions.length && !waitingForColumn) {
     const uploadErrors = uploads.filter((u) => u.status === "failed" && u.error).map((u) => u.error!);

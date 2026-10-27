@@ -22,6 +22,7 @@ import { findOrCreateProduct } from "../products";
 import type { ChannelId, IdentifierMode, UploadKind } from "../types";
 import { buildZip } from "../../../test-fixtures/catalog/ingest-a/builders";
 import { buildPreview, runIngest } from "./index";
+import { manifestPath } from "./manifest";
 import type { IngestDeps } from "./types";
 
 // findOrCreateProduct keeps its real behaviour; one test makes a call fail part-way through.
@@ -488,6 +489,39 @@ describe("runIngest", () => {
   });
 });
 
+describe("an input removed while the batch-wide step runs (spec 14b F3)", () => {
+  it("leaves the preview not ready instead of ready with the removed input's photos, and the next run leaves them out", async () => {
+    const w = fakeWorld();
+    const batch = await newBatch("remove during finish");
+    const kept = await folderUpload(w, batch, { "RK_1.jpg": await jpeg() });
+    const gone = await folderUpload(w, batch, { "RG_1.jpg": await jpeg() });
+    await runIngest(db, deps(w), { batchId: batch.id, uploadId: kept });
+    // The operator's Remove lands while the last delivery's batch-wide step reads the manifests.
+    const keptManifest = `gs://${BUCKET}/${manifestPath(prefixOf(batch), kept)}`;
+    let removedOnce = false;
+    const storage: IngestDeps["storage"] = {
+      ...w.storage,
+      downloadBuffer: async (gsUri: string) => {
+        if (gsUri === keptManifest && !removedOnce && (await batchRow(batch.id)).status === "draft") {
+          removedOnce = true;
+          await db.update(catalogUploads).set({ status: "removed" }).where(eq(catalogUploads.id, gone));
+        }
+        return w.storage.downloadBuffer(gsUri);
+      },
+    };
+    await runIngest(db, { ...deps(w), storage }, { batchId: batch.id, uploadId: gone });
+    expect(removedOnce).toBe(true);
+    expect((await batchRow(batch.id))).toMatchObject({ status: "draft", counts: { previewReady: false, failReason: null } });
+
+    // Continue hands one read upload again (ingestBatch marks the batch collecting first): the step runs
+    // again without the removed input.
+    await db.update(catalogBatches).set({ status: "ingesting" }).where(eq(catalogBatches.id, batch.id));
+    await runIngest(db, deps(w), { batchId: batch.id, uploadId: kept });
+    expect((await batchRow(batch.id)).counts).toMatchObject({ previewReady: true, products: 1, sources: 1 });
+    expect((await sourcesOf(batch.id)).map((s) => s.uploadId)).toEqual([kept]);
+  });
+});
+
 describe("a pasted grid of links (spec 14b F2)", () => {
   it("collects intake-pasted-grid.txt end to end: 6 products, 27 photos, the space-name product with 5 shots", async () => {
     const w = fakeWorld();
@@ -564,6 +598,22 @@ describe("links that could not be downloaded (spec 14b F5 part 1)", () => {
       `No photos could be downloaded from the 27 links you pasted. 22 answered 'not found' (404), for example ${G}/BH-4610-NE-NERO_1.JPG (row 1, column 1). ` +
       `5 could not be reached, for example ${G}/BH-4612-MO-MOCHA_1.JPG (row 3, column 1). Some of these may work on a second try. Press Try the failed links again.`,
     );
+  });
+
+  it("a batch of a file and a link that both fail names the link as a link, never as one of the other files (removed sentence of release B)", async () => {
+    const w = fakeWorld();
+    const batch = await newBatch("file and link fail");
+    await folderUpload(w, batch, { "ODD_1.bmp": bmp() });
+    const [u] = await db.insert(catalogUploads).values({ batchId: batch.id, kind: "url_list", name: "Image links", sourceUrl: `${G}/GONE_1.JPG`, gcsUri: null, status: "uploaded" }).returning();
+    for (const id of (await db.select().from(catalogUploads).where(eq(catalogUploads.batchId, batch.id))).map((r) => r.id)) {
+      await runIngest(db, { ...deps(w), lookup: async () => ["93.184.215.14"] }, { batchId: batch.id, uploadId: id });
+    }
+    expect(u).toBeDefined();
+    const { status, counts } = await batchRow(batch.id);
+    expect(status).toBe("failed");
+    expect(counts).toMatchObject({ linkFailures: 1, unsupportedFiles: 1 });
+    expect(counts.failReason).toMatch(/1 link that could not be downloaded/);
+    expect(counts.failReason).not.toMatch(/other files?/);
   });
 
   it("a partial failure keeps the batch ready and counts only the failed links", async () => {

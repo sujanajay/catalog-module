@@ -23,6 +23,12 @@ const CORE_COPY_FILES = [
   "packages/core/src/catalog/pipeline/report.ts",
   "packages/core/src/catalog/enhance.ts",
   "packages/core/src/catalog/render.ts",
+  // Intake sentences (spec 14b): the paste readback, link failure reasons, the step 4 pair and the no-photos sentences.
+  "packages/core/src/catalog/ingest/detect.ts",
+  "packages/core/src/catalog/ingest/link-reasons.ts",
+  "packages/core/src/catalog/ingest/group.ts",
+  "packages/core/src/catalog/ingest/index.ts",
+  "packages/core/src/catalog/ingest/url-list.ts",
 ];
 
 // Every candidate id the policy defines, plus provider and family names (spec 07 section 8).

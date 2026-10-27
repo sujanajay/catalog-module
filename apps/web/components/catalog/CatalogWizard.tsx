@@ -90,7 +90,8 @@ export default function CatalogWizard({ brands, shareEmail, initialBrand = "", i
   const onInputCount = useCallback((count: number) => setHasInputs(count > 0), []);
   const onInputRemoved = useCallback(() => setPreview(null), []);
   /** "Try the failed links again" (spec 14b F5): the batch is collecting again, so the steps wait for it. */
-  const onLinksRetried = useCallback(() => {setFailReason(null); setCollecting(true); setPreview(null);}, []);
+  // A poll sent before the retry would answer with the old failure, so its answer is dropped.
+  const onLinksRetried = useCallback(() => {detectedRequest.current++; setFailReason(null); setCollecting(true); setPreview(null);}, []);
   /** Settles when the paste box has no write outstanding; Continue waits for it instead of being disabled (spec 14b F2). */
   const linksIdle = useRef<{promise: Promise<void>; resolve(): void} | null>(null);
   const onLinksBusy = useCallback((busy: boolean) => {

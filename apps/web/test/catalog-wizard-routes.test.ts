@@ -341,6 +341,18 @@ describe("inputs corrected without duplicates (spec 14b F3)",()=>{
     await collectAll(id);
     expect(await groupsOf(id)).toEqual(["CCC"]);
   });
+  it("keeps the paste as sent, so a failed link's row and column match the readback's lines (a leading blank line and cell count)",async()=>{
+    const id=await newBatch();
+    const text="\n\thttps://8.8.8.8/AAA_1.heic\nhttps://8.8.8.8/BBB_1.heic";
+    expect((await links(request("POST",{text}),ctx(id))).status).toBe(200);
+    expect((await rowsOf(id))[0]!.sourceUrl).toBe(text);
+    expect((await ingest(request("POST"),ctx(id))).status).toBe(200);
+    const image=heic();
+    const fetchSome=vi.fn(async(input:RequestInfo|URL)=>String(input).includes("AAA")?new Response("missing",{status:404,headers:{"content-type":"text/plain"}}):image());
+    for(const u of (await rowsOf(id)).filter((u)=>u.status==="uploaded"))await runIngest(db,{storage,fetch:fetchSome as typeof fetch,enqueue:enqueueTask},{batchId:id,uploadId:u.id});
+    const body=await (await preview(request("GET"),ctx(id))).json() as {linkFailureRows:{where:string;url:string}[]};
+    expect(body.linkFailureRows).toEqual([expect.objectContaining({where:"row 2, column 2",url:"https://8.8.8.8/AAA_1.heic"})]);
+  });
   it("binds the paste box to one url_list row: a second POST /links replaces it, and a removed paste comes back as the same row",async()=>{
     const id=await newBatch();
     const a=await (await links(request("POST",{text:"https://8.8.8.8/AAA_1.heic"}),ctx(id))).json() as {uploadId:string};

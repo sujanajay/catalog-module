@@ -404,3 +404,13 @@ it("the removed sentences of release A are gone from apps/web and packages/core"
  const hits=files.filter(f=>{const text=readFileSync(f,"utf8");return text.includes("Processing starts by itself")||/started \$\{[^}]*startedAt\s*\?\?/.test(text);}).map(f=>path.relative(ROOT,f));
  expect(hits).toEqual([]);
 });
+// Spec 14 section 6, the removed sentences of release B. "N image links" for a grid: the only count
+// pill with "image links" left in the sources is the paste box's fallback for an answer without a
+// readback pill (the readback says "<rows> rows, <links> links" for a grid; detect.test.ts). "<n> other
+// files" for links is a generated word, so ingest.test.ts checks the sentence itself ("names the link
+// as a link").
+it("the removed sentences of release B are gone from apps/web and packages/core",()=>{
+ const files=["apps/web/app","apps/web/components","apps/web/lib","packages/core/src"].flatMap(d=>sources(path.join(ROOT,d)));
+ const pills=files.flatMap(f=>(readFileSync(f,"utf8").match(/^.*\} image links`.*$/gm)??[]).map(line=>`${path.relative(ROOT,f).replaceAll("\\","/")}: ${line.trim()}`));
+ expect(pills).toEqual(["apps/web/components/catalog/PasteBox.tsx: if (r.kind === \"url_list\") return r.pill ?? `${r.count ?? 0} image links`;"]);
+});

@@ -130,14 +130,15 @@ export async function retryLinks(id: string) {
   const { rows } = await linkFailuresOf(db(), id, { storage });
   if (!rows.length) throw badRequest(NO_FAILED_LINKS);
   await reopenBatch(id);
-  const { uploadIds } = await dropLinkRejects(db(), id, { storage });
-  if (uploadIds.length) {
-    await db().transaction(async (tx) => {
-      await draftForUpdate(tx, id);
-      await tx.update(catalogUploads).set({ status: "uploaded" }).where(and(eq(catalogUploads.batchId, id), inArray(catalogUploads.id, uploadIds), inArray(catalogUploads.status, ["collected", "failed"])));
-      await tx.update(catalogBatches).set({ counts: mergeCounts({ previewReady: false }), updatedAt: new Date() }).where(eq(catalogBatches.id, id));
-    });
-  }
+  // The uploads go back to `uploaded` before their manifests change: if dropping the results fails
+  // part-way, the failures are still in the manifests, so pressing the button again retries them.
+  const uploadIds = [...new Set(rows.map((r) => r.uploadId))];
+  await db().transaction(async (tx) => {
+    await draftForUpdate(tx, id);
+    await tx.update(catalogUploads).set({ status: "uploaded" }).where(and(eq(catalogUploads.batchId, id), inArray(catalogUploads.id, uploadIds), inArray(catalogUploads.status, ["collected", "failed"])));
+    await tx.update(catalogBatches).set({ counts: mergeCounts({ previewReady: false }), updatedAt: new Date() }).where(eq(catalogBatches.id, id));
+  });
+  await dropLinkRejects(db(), id, { storage });
   return ingestBatch(id);
 }
 export async function regroupBatch(id: string) {
