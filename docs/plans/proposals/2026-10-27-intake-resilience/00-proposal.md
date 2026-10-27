@@ -1,7 +1,9 @@
 # Intake resilience: proposal
 
-Date: 2026-10-27. Status: proposal for the owner's decision. Build: live 5c48d85 (origin/main).
-Companion spec: `docs/specs/14-intake-resilience.md` (executable, per `docs/specs/00-execution-protocol.md`).
+Date: 2026-10-27. Status: proposal; the owner's decisions were made on 2026-10-27 (section 7). Build: live 5c48d85 (origin/main).
+Companion specs: the parent `docs/specs/14-intake-resilience.md` and one executable spec per release,
+`docs/specs/14a-intake-release-a.md` to `docs/specs/14d-intake-release-d.md` (each run on its own per
+`docs/specs/00-execution-protocol.md`).
 
 Scope: everything from an operator pressing "New batch" until the batch is started, plus how they find,
 understand and resume an unfinished batch. The processing pipeline after Start is out of scope and is
@@ -56,7 +58,7 @@ be. People abandon and redo within minutes (db, headline 2 and 3).
 They retry instead of waiting. They leave and come back. They try several routes for the same list.
 All of that is reasonable. The product treats each of those behaviours as an error.
 
-**What we propose.** Eight principles (section 3) and thirteen fixes (section 5) that make intake
+**What we propose.** Eight principles (section 3) and fourteen fixes (section 5) that make intake
 accommodate those behaviours instead of fighting them. The eight fixes marked "must fix" close the
 gaps the operator hit: a sheet upload never crashes the screen; a pasted grid is understood (or
 explained) before anything runs; a wrong paste or file can be corrected without duplicates; every
@@ -74,9 +76,11 @@ will be named from the photo file names") before anything runs. Failures are lis
 with the reason and the next step. Long waits show "Downloading photos 612 of 1,400, about 7 min left"
 and say plainly whether the operator may leave.
 
-**What we need from the owner.** Five decisions in section 7 (one of them is whether a small database
-migration is allowed; the protocol reserves migrations for specs 02 and 03, so it needs an explicit
-yes). Until the first fix ships, section 7 also recommends one thing to tell the operator.
+**What the owner decided.** The five decisions of section 7 were made on 2026-10-27: the small
+database migration is allowed, drafts expire after 14 days, the BHPC key is asked of the operator
+once, the must set and the order A, B, C, D are approved, and the creator gets an email when a long
+collection finishes (F14, in PR D). One one-time Google Workspace step for F14 remains with the
+owner. Until the first fix ships, section 7 also recommends one thing to tell the operator.
 
 ---
 
@@ -239,10 +243,11 @@ message pass).
 
 Size is relative (S, M, L) and compares effort between the fixes only; no time or money estimates.
 "Must" means: fix before the next operator uses intake. Dependencies name other fixes. Each fix is
-specified in full in spec 14 (section numbers given). The PR each part ships in is named; the full
+specified in full in the release spec named (14a to 14d, one file per PR, section numbers given). The
+PR each part ships in is named; the full
 order is under "Must-fix set and order" below.
 
-### F1. A sheet upload never crashes the screen (must, S, PR A) - spec 4.1
+### F1. A sheet upload never crashes the screen (must, S, PR A) - spec 14a section 3.1
 
 - Problem: any uploaded xlsx/xlsm/csv throws in step 2 and the whole page becomes "Application error"
   with no way back (b574; paths #35, #36).
@@ -256,7 +261,7 @@ order is under "Must-fix set and order" below.
   was lost." with "Open this batch"; it always offers "All batches" and "Try this page again".
 - Risk: low; it is a guard and a state fill. Dependencies: none.
 
-### F2. A pasted grid is understood, and the screen says back what it understood (must, M, PR B) - spec 4.2
+### F2. A pasted grid is understood, and the screen says back what it understood (must, M, PR B) - spec 14b section 3.1
 
 - Problem: multi-link rows glued into one URL; URL used as identifier; `0` cells; no shape check
   (baefb; paths #20 to #22, #34, #45; ux repro b, b2).
@@ -281,9 +286,9 @@ order is under "Must-fix set and order" below.
   not image links. Download the photos and drop them here, or paste direct image links."
 - Risk: medium; the parser touches every paste and the Google Sheet route. Mitigated by replaying the
   real aefb3a0f shape, including file names with a space, as fixtures for paste, Google Sheet and xlsx
-  (spec 8.1). Dependencies: none (F5 improves the failure path when links still fail).
+  (spec 14 section 8.1). Dependencies: none (F5 improves the failure path when links still fail).
 
-### F3. A wrong paste or file can be corrected without duplicates (must, M, PR B) - spec 4.3
+### F3. A wrong paste or file can be corrected without duplicates (must, M, PR B) - spec 14b section 3.2
 
 - Problem: edits and appends to the paste box add a second upload; clearing removes nothing; files
   cannot be removed; a failed upload after 15 minutes can never be retried and blocks Continue
@@ -297,10 +302,10 @@ order is under "Must-fix set and order" below.
   count in place; a file cut off by a closed tab reads "Upload did not finish. Add the file again or
   remove it."; Continue is never blocked by a row they cannot act on.
 - Risk: low to medium. Removing an upload needs a delete route and a state for "removed" (section 7,
-  decision 1; the migration ships in PR B). Dependencies: F4 (way back, PR A) for inputs from an
+  decision 1, decided yes; the migration ships in PR B). Dependencies: F4 (way back, PR A) for inputs from an
   earlier session.
 
-### F4. Every unfinished batch can be found and resumed (must, M, PR A and PR C) - spec 4.4
+### F4. Every unfinished batch can be found and resumed (must, M, PR A and PR C) - spec 14a section 3.4 and 14c section 3.1
 
 - Problem: batch id in browser memory only; `?batch=` ignored; drafts unreachable; no age, state or
   action in the list; no cancel (paths #53, #62; ux sections 1, 6; db Drafts).
@@ -327,7 +332,7 @@ order is under "Must-fix set and order" below.
   the biggest change to the wizard and is why it comes first. Dependencies: F1 (step 2 must render from
   server state).
 
-### F5. Every failed link says which row, why, and what to do (must for the visible part, M, PR B; automatic retry should, PR D) - spec 4.5
+### F5. Every failed link says which row, why, and what to do (must for the visible part, M, PR B; automatic retry should, PR D) - spec 14b section 3.3 and 14d section 3.2
 
 - Problem: reasons hidden; links mislabelled as files; transient errors cached for ever; wrong fix
   suggested (baefb; paths #27 to #30).
@@ -352,7 +357,7 @@ order is under "Must-fix set and order" below.
   numbers on pastes; F8 for the "Fix and continue" button (until PR C ships, the all-permanent sentence
   says to make a new batch with the corrected links).
 
-### F6. Every intake wait shows a count, a phase and an honest time; the copy tells the truth about leaving (must, M, PR A and PR C) - spec 4.6
+### F6. Every intake wait shows a count, a phase and an honest time; the copy tells the truth about leaving (must, M, PR A and PR C) - spec 14a section 3.3 and 14c section 3.2
 
 - Problem: fixed sentence for 17 minutes; grouping invisible; false "you can close this page"; no
   ETA (b09dd; paths #48, #54, #56; ux repro c).
@@ -374,7 +379,7 @@ order is under "Must-fix set and order" below.
   F7 for `placed` to move during placing (until F7's second part ships, the placing count moves only at
   the end).
 
-### F7. Placing is resumable and never re-copies (should; must for batches over about 4,000 photos, L, PR C and PR D) - spec 4.7
+### F7. Placing is resumable and never re-copies (should; must for batches over about 4,000 photos, L, PR C and PR D) - spec 14c section 3.3 and 14d section 3.1
 
 - Problem: Continue on step 2 regroups and re-copies every photo (5 min at 1,400); a grouping over
   900 s strands the batch for ever; spec 04 already promised the sha256 skip (paths #55, #58).
@@ -389,11 +394,11 @@ order is under "Must-fix set and order" below.
 - Operator sees: Continue on step 2 is instant when nothing changed (PR C); a 10,000-photo links batch
   finishes instead of hanging (PR D).
 - Risk: medium to high; this is the deepest change and touches the idempotency of ingest. Covered by
-  the existing tier 2 ingest tests plus new ones (spec 8). Unproven: the grouping step alone at about
+  the existing tier 2 ingest tests plus new ones (spec 14 section 8 and the release specs). Unproven: the grouping step alone at about
   2,000 products has not been measured against the 900 s limit; the builder measures it and reports.
   Dependencies: F6 (phase and counters).
 
-### F8. A batch that failed before Start can be fixed in place (must, S, PR C) - spec 4.8
+### F8. A batch that failed before Start can be fixed in place (must, S, PR C) - spec 14c section 3.4
 
 - Problem: "Start again" opens an empty wizard; re-paste gets 409; collected bytes wasted (paths #31,
   #61; baefb 18:57).
@@ -407,7 +412,7 @@ order is under "Must-fix set and order" below.
 - Risk: low; no new status (failed to draft is an allowed transition for never-started batches).
   Dependencies: F3, F4.
 
-### F9. Draft and failed screens tell the truth (must for the copy, S, PR A) - spec 4.9
+### F9. Draft and failed screens tell the truth (must for the copy, S, PR A) - spec 14a section 3.2
 
 - Problem: "started <time>" on a draft; draft banner with no button; "No photos in this batch yet" on
   a draft holding 1,400; Links sheet tab reads as a finished result; empty "How this works" paragraph;
@@ -420,7 +425,7 @@ order is under "Must-fix set and order" below.
   fixed.
 - Risk: low. Dependencies: F4 part 1 for the button (same PR).
 
-### F10. The same photos in another batch are flagged (should, M, PR D) - spec 4.10
+### F10. The same photos in another batch are flagged (should, M, PR D) - spec 14d section 3.3
 
 - Problem: two drafts, same 1,390 photo hashes, different keys; no warning (db headline 5). Within
   a batch, two products carrying the same photo are never reported (db section 1).
@@ -435,7 +440,7 @@ order is under "Must-fix set and order" below.
 - Risk: low to medium (a hash comparison over the brand's unfinished batches). Dependencies: F4
   (cancel), F6.
 
-### F11. Platform errors and large hand-offs do not break the wizard (should, S, PR C and PR D) - spec 4.11
+### F11. Platform errors and large hand-offs do not break the wizard (should, S, PR C and PR D) - spec 14c section 3.5 and 14d section 3.4
 
 - Problem: a 502/504 HTML page becomes a raw JSON parse error; over about 1,900 loose files the
   hand-off exceeds the 300 s web request (paths #8, #57).
@@ -445,16 +450,16 @@ order is under "Must-fix set and order" below.
   page and queues itself again until none remain, so one Continue is enough for any count.
 - Risk: low. Dependencies: F4 (reload lands back in the batch).
 
-### F12. Draft housekeeping and a trace per ingest delivery (should, S, PR D) - spec 4.12
+### F12. Draft housekeeping and a trace per ingest delivery (should, S, PR D) - spec 14d section 3.5
 
 - Problem: drafts never expire; a successful ingest leaves no log line with the batch id, so the two
   batch investigations had to tie worker requests to batches by timing (b574, b09dd; paths #62).
-- Fix: the sweep cancels drafts untouched for N days (owner sets N; section 7, decision 2) with the
+- Fix: the sweep cancels drafts untouched for N days (14 days; section 7, decision 2) with the
   state word "Expired" and the age; their stored photos are left alone; one INFO log line per ingest
   delivery with batch id, upload id, phase, done and total.
 - Risk: low. Dependencies: F4 (the cancelled state).
 
-### F13. Google and Drive edge cases (later, S) - spec 4.13
+### F13. Google and Drive edge cases (later, S) - spec 14 section 9
 
 - Problem: re-pasting the same Google link after sharing does nothing; a Drive folder over 1 GiB is
   called fine at paste and refused at Continue without the reason; Drive rejects are lost (paths #37,
@@ -464,20 +469,53 @@ order is under "Must-fix set and order" below.
 - Risk: low. Dependencies: none. Deferred because no operator has used Drive folders yet (db, section 3:
   `drive_folder` never used).
 
+### F14. The creator is told when a long collection finishes (should, M, PR D, after PR C) - spec 14d section 3.6
+
+- Problem: no batch was ever started more than 30 minutes after it was created (2.2), and a
+  collection can take 17 minutes (b09dd). An operator who leaves during a long collection is told
+  where to find the batch, but nothing reminds them to come back. The product sends no mail today; the
+  alert emails of `infra/monitoring.sh` go through a Cloud Monitoring email channel to a fixed address
+  and are not meant for per-user mail.
+- Fix: when a collection that ran longer than a threshold (5 minutes, worker env) reaches "ready to
+  check", "needs your input" or "could not start", the worker sends one plain-text email to the
+  batch's creator with a link to the batch, once per collection (an atomic claim in `counts`, so
+  retries never send twice). It sends through the Gmail API from one company mailbox, using Google
+  Workspace domain-wide delegation with keyless signing: the worker's own service account signs the
+  token request through the IAM Service Account Credentials API, so there is no key and no secret
+  anywhere. A new idempotent `infra/notify.sh` enables the two APIs and lets the worker sign for
+  itself. A mail error is logged and never touches the batch. With no sender configured the feature
+  is off, so PR D ships before the setup is done.
+- Operator sees: an email such as "BHPC bags is ready to check" with "Your batch BHPC bags for Test
+  Brand has finished collecting: 1,400 photos for 287 products. Nothing has been processed yet. Open it
+  and press Continue setting up to check the grouping, choose marketplaces and start: <link>". No model
+  names, no technical words.
+- Owner prerequisite (one time): choose the sender mailbox (a licensed Workspace user, ideally a
+  dedicated notifications mailbox), and have a Workspace super admin authorise the worker's client id
+  (printed by `infra/notify.sh`) for the single scope `gmail.send` under domain-wide delegation in the
+  Admin console. This is the single open item of PR D.
+- Risk: low to medium. Domain-wide delegation could in principle act for any mailbox of the domain
+  within the granted scope; mitigated by the single `gmail.send` scope, a code path that only ever
+  uses the configured sender (unit-tested), and no key that could leak. Rejected routes: Cloud
+  Monitoring channels (fixed recipients), the Workspace SMTP relay (static egress address or a
+  password), a stored refresh token (a long-lived secret), third-party mail services (a new vendor and
+  an API key). Dependencies: F6 worker side (the ready and needs-input phases), F8 ("Fix and
+  continue"), F4 part 2 (cancelled batches never mail).
+
 ### Must-fix set and order
 
 Before the next operator uses intake: F1, F2, F3, F4, F5 (visible part), F6, F8, F9. PR order A, B, C,
-D (spec section 7):
+D (spec 14 section 7; approved, section 7 decision 4), one spec file per PR:
 
-- PR A, truth and way back: F1, F9, the F6 copy and step 2 count, and F4 part 1 (the batch id in the
+- PR A, truth and way back (`14a-intake-release-a.md`): F1, F9, the F6 copy and step 2 count, and F4 part 1 (the batch id in the
   address bar, `/catalog/new?batch=` for draft and collecting batches, "Continue setting up" on the
   batch page). Small, safe, deployable alone.
-- PR B, inputs and failures: F2, F3, F5 visible part, and migration `0003_intake_states.sql` (decision
+- PR B, inputs and failures (`14b-intake-release-b.md`): F2, F3, F5 visible part, and migration `0003_intake_states.sql` (decision
   1).
-- PR C, resume and progress: F4 part 2 ("Your unfinished batches", Cancel), F6 worker side, F7 part 1
+- PR C, resume and progress (`14c-intake-release-c.md`): F4 part 2 ("Your unfinished batches", Cancel), F6 worker side, F7 part 1
   (sha256 skip, instant Continue), F8, F11 response check.
-- PR D (should): F7 part 2, F5 automatic retry, F10, F11 paged hand-off, F12.
-- Later: F13.
+- PR D (should, `14d-intake-release-d.md`): F7 part 2, F5 automatic retry, F10, F11 paged hand-off,
+  F12, F14 (finished-collection email).
+- Later: F13 (described in spec 14 section 9, deferred).
 
 ### How we will know
 
@@ -522,36 +560,33 @@ D (spec section 7):
 
 ---
 
-## 7. Open questions for the owner
+## 7. Owner decisions (decided 2026-10-27)
 
-Each is a yes/no or a pick, with the recommended answer first.
+The five questions this proposal put to the owner, with the owner's answers. All are recorded as
+decided in spec 14 (parent, section 11).
 
-1. **One small migration, yes or no?** Recommended: yes. F3 (an upload removed from a batch) and F4
-   (a cancelled draft) are cleanest as two new status values, `removed` on `catalog_uploads` and
-   `cancelled` on `catalog_batches`. Both columns are text with a CHECK constraint
-   (`packages/core/src/db/schema.ts:237,256,275,283`), so new values need a migration
-   (`0003_intake_states.sql`, shipped in PR B, where `removed` is first used). 00 section 11 says only
-   specs 02 and 03 ship migrations, but `0002_cost_events.sql` (PR #90) already shipped outside them
-   with the owner's approval. If no: F3 hard-deletes the upload row and its uploaded object, and F4
-   marks cancellation inside the `options` jsonb; both work, both are less clean (a cancelled draft then
-   still has status `draft` in the database and every query has to remember the flag). The spec
-   describes both paths.
-2. **Draft expiry: after how many days does the sweep cancel an untouched draft?** Recommended: 14
-   days. Expired drafts keep their photos until the existing 180-day raw lifecycle.
-3. **BHPC product key.** Before any real BHPC batch: is the product identifier "Option Id"
-   (`BH-4610-NE_Black`) or "Unicommerce Code" (`BH-4610-NE_Black_OD`)? Recommended: ask the operator
-   once and record it in the brand's notes; cancel both test drafts either way.
+1. **One small migration, yes or no?** Decided: **yes**. F3 (an upload removed from a batch) and F4 (a
+   cancelled draft) use two new status values, `removed` on `catalog_uploads` and `cancelled` on
+   `catalog_batches`. Both columns are text with a CHECK constraint
+   (`packages/core/src/db/schema.ts:237,256,275,283`), so the new values come with migration
+   `0003_intake_states.sql`, shipped in PR B (14b section 4.1), where `removed` is first used. 00
+   section 11 says only specs 02 and 03 ship migrations; `0002_cost_events.sql` (PR #90) already
+   shipped outside them with the owner's approval, and this one is approved the same way. The
+   no-migration alternative (hard-deleting removed uploads, marking cancellation inside `options`) was
+   rejected and is not built.
+2. **Draft expiry: after how many days does the sweep cancel an untouched draft?** Decided: **14
+   days**. Expired drafts keep their photos until the existing 180-day raw lifecycle.
+3. **BHPC product key.** Decided: **as recommended**. Before any real BHPC batch, the operator is asked
+   once whether the product identifier is "Option Id" (`BH-4610-NE_Black`) or "Unicommerce Code"
+   (`BH-4610-NE_Black_OD`), and the answer is recorded in the brand's notes. Both test drafts are
+   cancelled either way (14c section 9).
 4. **Approve the must-fix set (F1, F2, F3, F4, F5 visible part, F6, F8, F9) and the PR order A, B, C,
-   D (section 5)?** If the set should be smaller, the smallest useful cut is PR A alone (no crash,
-   truthful copy, a count on step 2, a way back into any draft), which fixes attempts 1 and 3 in part
-   but leaves attempt 2 (pasted grid) broken.
-5. **Should the system tell the operator when a long collection finishes** (for example an email to
-   the person who created the batch)? The data shows no batch was ever started more than 30 minutes
-   after it was created, so an operator who leaves during a 17-minute collection may never come back
-   unprompted. Yes: a new, small should-fix after PR C; the product gains its first outgoing message
-   (there is no mail sending today), which needs a sender and the creator's address. No: the leaving
-   line and "Your unfinished batches" are the only way back, and the operator has to remember to
-   return. Recommended: yes, after PR C, so the must set is not held up by it.
+   D (section 5)?** Decided: **approved**. Each release is built and shipped on its own from its spec
+   file (14a to 14d).
+5. **Should the system tell the operator when a long collection finishes?** Decided: **yes**, as a
+   should-fix in PR D, after PR C: F14 (section 5). The product gains its first outgoing message: one
+   email from a company mailbox to the person who created the batch. Its one-time Google Workspace step
+   by the owner (14d section 3.6, "Prerequisite") is the single open item of PR D.
 
 **Until PR A ships (interim, no build needed).** Recommended: tell the operator to use the Google Sheet
 route (paste the Google Sheet link) and to keep the wizard tab open until step 2 shows the grouping.
