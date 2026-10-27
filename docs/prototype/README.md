@@ -23,19 +23,25 @@ belong to the earlier app and are not built.
 set) and 13 (footwear and bag scene image), built before deciding whether to build them. Nothing real
 runs: it uses sample data (Vero Moda apparel, US Polo shoes and bags, a mixed US Polo batch, Campus
 with no scene permission, and products already live) and a fake worker you move with "Advance time".
-Open it by double-click; no server needed. The top bar has:
+Open it by double-click; no server needed. Version 2 (2026-10-27) follows the owner's decisions of
+that day: every photo is reviewed only in the internal test run; live batches publish automatically
+after our checks, with spot checks of about 1 in 10 (1 in 4 for kids scenes) answered by the batch
+operator, and a cell the test run did not cover stays "Checked by a person". The top bar has:
 
-- **You are**: Operator Naz, Second rater or Admin. The review rules follow spec 12 s7.2: one answer
-  per person, the second rater does not see the first answer, a disagreement goes to an admin who did
-  not rate, and photos under a hard block offer only "Remove this photo" and "Replace photo n".
-- **Test controls** (prototype only): review phase per scope, making on or off, approved brand model,
-  scene permission, detection fails, batch limit runs out, newer delivery, Trendyol at its cap, a
-  marketplace that takes no scene images, exit numbers hold, Advance time, theme and Reset.
-- **Test guide**: the 30 scenarios and the feel questions of the plan, each with "Take me there" and
-  a tick box (kept in the browser only).
+- **You are**: Operator or Admin (no second rater). The batch page has a Products tab ("Needs me /
+  All", one status and one action per product) and a Needs me tab with only "Questions for you" and
+  "Spot checks". "Something is wrong" opens "Fix and try again" (two rounds, refused notes explained).
+  Step 4 is a two-line plan with "More options" and "Details".
+- **Admin**: Brand DNA (logos, brand words, models for women, men and kids, look, scenes, kids look,
+  delete) and Ops (pause automatic publishing per scope, test run labels per cell, and "What the
+  system learned", marked "Later phase").
+- **Test controls** (prototype only): how photos go live per scope, swimwear coverage, making on or
+  off, approved brand model, scene permission, detection fails, batch limit events, fixes that fail,
+  newer delivery, marketplace limits, 7 days of unanswered spot checks, learning mode, theme, Reset.
+- **Test guide**: 38 scenarios and the feel questions, each with "Take me there" and a tick box
+  (kept in the browser only).
 
-Images are drawn stand-ins, not brand photos. Copy follows the specs' sentences; no model, vendor or
-check name appears. Known shortcuts: plan counts come from a simplified planner over hand-written
-sample data (which shots can be cut from which photo is part of the data); Ops scorecard numbers are
-partly fixed sample values; scene and made-photo outcomes (pass, held, hard block) are set per sample
-product.
+Images are drawn stand-ins, not brand photos. No model, vendor or check name appears. Known
+shortcuts: plan counts come from a simplified planner over hand-written sample data; which products
+get a spot check is fixed per sample product, not sampled; Ops numbers are partly fixed sample
+values; made-photo and scene outcomes are set per sample product.
