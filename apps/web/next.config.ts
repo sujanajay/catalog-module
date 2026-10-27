@@ -24,6 +24,17 @@ const nextConfig: NextConfig = {
   poweredByHeader: false,
   // Lint runs from the repo root (`pnpm lint`); Next's own ESLint pass is skipped during build.
   eslint: { ignoreDuringBuilds: true },
+  // The intake browser harness only (test/catalog-intake.server.ts, next dev with INTAKE_HARNESS=1):
+  // the server bundle's `undici` becomes the harness's fake image host, so pasted links never reach
+  // the network. Never applied to `next build`, and kept in its own webpack cache so a later plain
+  // `next dev` does not reuse it.
+  webpack(config, { dev, isServer }) {
+    if (dev && isServer && process.env.INTAKE_HARNESS === "1") {
+      config.resolve.alias = { ...config.resolve.alias, undici$: path.join(__dirname, "test/catalog-intake.undici.ts") };
+      if (config.cache && typeof config.cache === "object") config.cache.name = `${config.cache.name ?? "cache"}-intake-harness`;
+    }
+    return config;
+  },
 };
 
 export default nextConfig;

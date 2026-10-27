@@ -4,7 +4,10 @@
 // the app's own Storage client, a fake queue that runs the real runIngest (as the worker would), and a
 // fake image host for the example.com fixture links. Google is disabled (no credentials, no client).
 // Nothing here can reach GCP: DATABASE_URL points at a closed port, storage never leaves the Map, and
-// TASKS_INLINE sends tasks to this server.
+// TASKS_INLINE sends tasks to this server. Nothing here reaches an image host either: the worker side
+// gets the fake fetch and lookup as deps, and the web tier's POST /links (the paste readback) gets the
+// same fake through next.config.ts's INTAKE_HARNESS alias of `undici` (catalog-intake.undici.ts) and
+// a DNS lookup that answers example.com hosts itself.
 //
 // Started by test/catalog-intake.config.ts (Playwright webServer). By hand, from apps/web:
 //   pnpm exec tsx test/catalog-intake.server.ts      (then open http://127.0.0.1:3417/catalog/new)
@@ -13,7 +16,8 @@ import { createRequire } from "node:module";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
-import { fakeImageHost, fakeStorage, pgliteBackedPool, type ObjectStore } from "./catalog-intake.fakes";
+import dnsPromises from "node:dns/promises";
+import { fakeImageHost, fakeLookup, fakeStorage, pgliteBackedPool, type ObjectStore } from "./catalog-intake.fakes";
 
 const WEB_DIR = path.resolve(__dirname, "..");
 const ROOT = path.resolve(WEB_DIR, "../..");
@@ -36,6 +40,7 @@ Object.assign(process.env, {
   WORKER_URL: `${ORIGIN}/harness/worker`,
   SHARE_SA_EMAIL: "catalog-reader@example.iam.gserviceaccount.com",
   NEXT_TELEMETRY_DISABLED: "1",
+  INTAKE_HARNESS: "1", // next.config.ts: the server bundle's undici is catalog-intake.undici.ts
 });
 for (const key of ["GOOGLE_APPLICATION_CREDENTIALS", "DB_HOST", "TASKS_INGEST_QUEUE", "IAP_AUDIENCE"]) delete process.env[key];
 
@@ -82,9 +87,23 @@ async function main() {
   const schema = await import("@catalog/core/db/schema");
   const workerDb = drizzle(new HarnessPool() as never, { schema }) as never;
   const { runIngest } = await import("@catalog/core/catalog/ingest/index");
-  // The fixture links: every link of the large sheet (the xlsx links are its first 6 rows).
-  const links = readFileSync(path.join(FIXTURES, "intake-large-sheet.csv"), "utf8").trim().split("\n").slice(1).flatMap((line) => line.split(",").slice(1).filter(Boolean));
+  // The fixture links: every link of the large sheet (the xlsx links are its first 6 rows) and of the
+  // two pasted fixtures.
+  const fixture = (name: string) => readFileSync(path.join(FIXTURES, name), "utf8").trim().split(/\r?\n/);
+  const links = [
+    ...fixture("intake-large-sheet.csv").slice(1).flatMap((line) => line.split(",").slice(1).filter(Boolean)),
+    ...["intake-pasted-grid.txt", "intake-pasted-variants.txt"].flatMap(fixture).flatMap((line) => line.split("\t")).flatMap((cell) => cell.split(/ (?=https?:\/\/)/)).filter((cell) => /^https?:\/\//.test(cell)),
+  ];
   const imageFetch = fakeImageHost(links, () => queue.fetchDelayMs, workerLog);
+  // The web tier (POST /links) reaches the same fake host: the aliased undici reads it from here, and
+  // its DNS check gets fakeLookup's answer for example.com hosts (the only hosts the scenarios use).
+  (globalThis as Record<symbol, unknown>)[Symbol.for("catalog.intakeHarness.imageHost")] = imageFetch;
+  const systemLookup = dnsPromises.lookup;
+  dnsPromises.lookup = (async (hostname: string, options?: { all?: boolean }) => {
+    if (hostname === "localhost") return systemLookup(hostname, options as never);
+    const [address] = await fakeLookup(hostname);
+    return options?.all ? [{ address, family: 4 }] : { address, family: 4 };
+  }) as typeof dnsPromises.lookup;
   const deliver = (body: Record<string, unknown>) => {
     if (queue.paused) return void queue.pending.push(body);
     // A delivery whose wait ends while the queue is held waits with the others.
@@ -95,7 +114,7 @@ async function main() {
     queue.running++;
     try {
       const enqueue = async (_route: string, next: Record<string, unknown>) => (deliver(next), "harness-task");
-      const r = await runIngest(workerDb, { storage, fetch: imageFetch, enqueue: enqueue as never, budgetItems: queue.budgetItems }, body as { batchId: string; uploadId: string; cursor?: string });
+      const r = await runIngest(workerDb, { storage, fetch: imageFetch, lookup: fakeLookup, enqueue: enqueue as never, budgetItems: queue.budgetItems }, body as { batchId: string; uploadId: string; cursor?: string });
       note(`ingest ${String(body.uploadId).slice(0, 8)} ${Date.now() - t0} ms: ${r.outcome}`);
     } catch (err) {
       note(`ingest ERROR ${err instanceof Error ? err.message : String(err)}`);
@@ -166,6 +185,7 @@ async function warmUp(verbose: boolean) {
     ["GET", "/catalog"], ["GET", "/catalog/new"], ["GET", `/catalog/${none}`],
     ["POST", "/api/catalog/batches"], ["GET", api], ["PATCH", api], ["POST", `${api}/uploads`], ["POST", `${api}/uploads/${none}/complete`],
     ["POST", `${api}/links`], ["POST", `${api}/ingest`], ["GET", `${api}/detected`], ["PATCH", `${api}/detected`], ["GET", `${api}/preview`],
+    ["PATCH", `${api}/links/${none}`], ["DELETE", `${api}/links/${none}`], ["DELETE", `${api}/uploads/${none}`], ["POST", `${api}/retry-links`],
   ];
   for (const [method, p] of hits) {
     const t0 = Date.now();
