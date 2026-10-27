@@ -3,17 +3,16 @@ import { DEFAULT_BATCH_OPTIONS } from "../../db/schema";
 import { parseShotName } from "../naming";
 import type { BatchOptions, IdentifierMode, Precedence } from "../types";
 import {
-  duplicatePhotosPair,
   groupItems,
   originalOf,
   previewRows,
-  samePhotosPair,
   shotFlags,
   warningSentences,
   type ItemDimensions,
   type ProductListRow,
 } from "./group";
 import { notImageMessage, unsupportedMessage } from "./image-check";
+import { duplicatePhotosPair, samePhotosPair } from "./same-photos";
 import { linkStatuses } from "./product-list";
 import { sourceItemFromPath } from "./local-files";
 import type { GroupingResult, SourceItem } from "./types";

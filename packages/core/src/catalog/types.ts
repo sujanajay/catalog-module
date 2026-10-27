@@ -114,11 +114,9 @@ export type IntakePhase = (typeof INTAKE_PHASES)[number];
 export interface RateSample { at: string; phase: IntakePhase; done: number }
 /**
  * A placing lease: `token` names the claiming delivery (run and upload id), `until` is an ISO expiry,
- * `attempt` the run of the step working under it (null once that run stopped on an error).
- */
-/**
- * `next` (spec 14d F7 part 2): the first photo of the chunk placing handed on to its continuation;
- * absent while grouping or the first chunk runs.
+ * `attempt` the run of the step working under it (null once that run stopped on an error), `next`
+ * (spec 14d F7 part 2) the first photo of the chunk placing handed on to its continuation (absent while
+ * grouping or the first chunk runs).
  */
 export interface PlacingClaim { token: string; until: string; attempt?: string | null; next?: number }
 export interface BatchCost {

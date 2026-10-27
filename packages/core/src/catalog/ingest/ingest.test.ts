@@ -884,7 +884,6 @@ describe("cancel guards (spec 14c F4 part 2)", () => {
   });
 });
 
-// --- Release D (spec 14d) --------------------------------------------------------------------------
 
 /** A distinct tiny jpeg per index (the colour encodes it), quick enough for a thousand photos. */
 async function tinyJpeg(i: number): Promise<Buffer> {
@@ -1077,7 +1076,7 @@ describe("placing in resumable chunks (spec 14d F7 part 2)", () => {
     const r = await runIngest(db, { ...deps(w), storage }, w.enqueued.at(-1)!.body as PlaceBody);
     expect(r.outcome).toBe(`placed ${PLACE_BUDGET_ITEMS} of ${N}; continuing at ${PLACE_BUDGET_ITEMS}`);
     const groupMs = Math.round(planSaved - manifestSaved);
-    // Reported in the release report; PGlite in one process is slower than Cloud SQL.
+    // PGlite in one process is slower than Cloud SQL, so this bound is loose.
     console.info(JSON.stringify({ event: "groupBatch timing", products: N, ms: groupMs }));
     expect(groupMs).toBeGreaterThan(0);
     expect(groupMs).toBeLessThan(300_000);

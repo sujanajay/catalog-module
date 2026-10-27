@@ -21,6 +21,7 @@ export const SWEEP_ERROR = "No progress for 2 hours. Start the batch again.";
 
 /** Days without a write after which the sweep cancels a draft (spec 14d F12; owner decision 2026-10-27). */
 export const DEFAULT_DRAFT_EXPIRY_DAYS = 14;
+const DAY_MS = 86_400_000;
 
 /** DRAFT_EXPIRY_DAYS from the env: a whole number of days of at least 1, else the default. */
 export function draftExpiryDaysFromEnv(env: NodeJS.ProcessEnv): number {
@@ -120,7 +121,7 @@ export async function handleSweep(deps: SweepDeps, _body: Record<string, unknown
       options: sql`${catalogBatches.options} || jsonb_build_object('expired', jsonb_build_object('at', ${now.toISOString()}::text, 'days', ${days}::int))`,
       updatedAt: now,
     })
-    .where(and(eq(catalogBatches.status, "draft"), isNull(catalogBatches.startedAt), lt(catalogBatches.updatedAt, new Date(now.getTime() - days * 24 * 60 * 60 * 1000))))
+    .where(and(eq(catalogBatches.status, "draft"), isNull(catalogBatches.startedAt), lt(catalogBatches.updatedAt, new Date(now.getTime() - days * DAY_MS))))
     .returning({ id: catalogBatches.id });
   for (const e of expired) log("INFO", "draft expired", { batchId: e.id, days });
   return { httpStatus: 200, outcome: `swept:${swept.length}${expired.length ? `; expired:${expired.length}` : ""}` };

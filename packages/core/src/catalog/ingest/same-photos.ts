@@ -1,4 +1,4 @@
-// The step 4 same-photos sentences (spec 14d F10). Kept apart from group.ts, which re-exports them, so
+// The step 4 same-photos sentences (spec 14d F10). Kept apart from group.ts so
 // the wizard's client bundle can import them without the image libraries group.ts needs.
 import type { OverwritePreview } from "./types";
 

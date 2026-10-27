@@ -35,9 +35,10 @@ import { mergeCounts, placingClaim, placingLeaseFree, placingLeaseHeld, placingL
 import { batchPrefix, normalizeKey, rawPath, sanitizeSegment } from "../naming";
 import { findOrCreateProduct } from "../products";
 import { resolveSkus, type ResolveResult } from "../sku-mapping";
-import type { BatchCounts, BatchOptions, ChangeKind, ChannelId, IntakePhase, LinkStatus, OutputFlag, UploadKind } from "../types";
+import type { BatchCounts, BatchOptions, ChangeKind, ChannelId, IntakePhase, LinkStatus, OutputFlag, PlacingClaim, UploadKind } from "../types";
 import { driveFolderAdapter } from "./drive-folder";
 import { googleSheetAdapter, sheetCopyUri } from "./google-sheet";
+import { hashedTaskId, INGEST_ROUTE } from "./hand-off";
 import {
   baseName, byText, distinct, fmt, groupItems, isDuplicateReject, isSameProductReject, originalOf, previewRows, sameProductMessage, shotFlags,
   warningSentences, type ItemDimensions,
@@ -88,7 +89,6 @@ const PREVIEW_ROW_LIMIT = 100;
 /** Bytes file-type needs to recognise every format. */
 const SNIFF_BYTES = 4100;
 
-const INGEST_ROUTE = "/tasks/catalog/ingest" as const;
 
 /** Builder constants (spec 14d F5 part 2): fetches of a link inside one delivery, and across runs before a transient failure is final. */
 export const LINK_RETRY_ATTEMPTS = 3;
@@ -509,6 +509,8 @@ async function finishIfLast(db: Db, deps: PlaceDeps, batchId: string, token: str
 }
 
 const claimNextSql = sql`${catalogBatches.counts}->'placingClaim'->'next'`;
+/** The counts with `claim`'s keys merged into the stored placing claim (its `next` kept). */
+const mergeClaim = (claim: PlacingClaim) => sql`${catalogBatches.counts} || jsonb_build_object('placingClaim', (${catalogBatches.counts}->'placingClaim') || ${JSON.stringify(claim)}::jsonb)`;
 
 /**
  * Runs one attempt of the batch-wide step under the lease `token` (spec 14c F6). A thrown error keeps
@@ -520,7 +522,7 @@ async function runAttempt(db: Db, deps: IngestDeps, batchId: string, token: stri
   } catch (err) {
     await db
       .update(catalogBatches)
-      .set({ counts: sql`${catalogBatches.counts} || jsonb_build_object('placingClaim', (${catalogBatches.counts}->'placingClaim') || ${JSON.stringify(placingClaim(token, deps.now?.() ?? new Date(), null))}::jsonb)` })
+      .set({ counts: mergeClaim(placingClaim(token, deps.now?.() ?? new Date(), null)) })
       .where(and(eq(catalogBatches.id, batchId), eq(catalogBatches.status, "ingesting"), placingLeaseHeld(token, attempt)));
     throw err;
   }
@@ -543,7 +545,7 @@ async function resumeAttempt(
   const at = cursor === null ? sql`${claimNextSql} IS NULL` : sql`(${claimNextSql})::int = ${cursor}`;
   const resumed = await db
     .update(catalogBatches)
-    .set({ counts: sql`${catalogBatches.counts} || jsonb_build_object('placingClaim', (${catalogBatches.counts}->'placingClaim') || ${JSON.stringify(placingClaim(token, now, attempt))}::jsonb)` })
+    .set({ counts: mergeClaim(placingClaim(token, now, attempt)) })
     .where(and(ingesting, placingLeaseResumable(token, now), at))
     .returning({ id: catalogBatches.id });
   if (resumed.length) return runAttempt(db, deps, batchId, token, attempt, () => step(attempt));
@@ -841,7 +843,7 @@ interface PlaceState {
 const placeStatePath = (prefix: string) => `${workPrefix(prefix)}/place-state.json`;
 
 /** A named continuation per (batch, lease, cursor), so a retried delivery never queues the next chunk twice (Cloud Tasks deduplicates task names). */
-const placeTaskId = (batchId: string, token: string, cursor: number) => `place-${createHash("sha256").update(`${batchId}|${token}|${cursor}`).digest("hex").slice(0, 40)}`;
+const placeTaskId = (batchId: string, token: string, cursor: number) => hashedTaskId("place", batchId, token, cursor);
 
 type StepResult = { progress: IngestProgress; outcome: string };
 type PlaceDeps = IngestDeps & { enqueue: typeof enqueueTask; placeBudgetItems?: number };
@@ -867,7 +869,7 @@ function leaseWrites(db: Db, deps: IngestDeps, batchId: string, token: string, a
       return rows.length > 0;
     },
     /** Hands placing on at `end` (spec 14d F7 part 2): `placed` and `next` written, this attempt released for the continuation. */
-    handOff: async (end: number): Promise<boolean> => {
+    continueAt: async (end: number): Promise<boolean> => {
       const at = clock();
       const rows = await db.update(catalogBatches)
         .set({ counts: progressCounts({ placed: end, placingClaim: { ...placingClaim(token, at, null), next: end } }, { phase: "placing", done: end, at }) })
@@ -1086,7 +1088,7 @@ async function placeBatch(db: Db, deps: PlaceDeps, batchId: string, token: strin
   // Still ours and still collecting after the chunk (the hand-off, or the progress write before any version row is written).
   if (refused) return lease.stopped();
   if (end < total) {
-    if (!(await lease.handOff(end))) return lease.stopped();
+    if (!(await lease.continueAt(end))) return lease.stopped();
     await deps.enqueue(INGEST_ROUTE, { ...body, place: String(end) }, { taskId: placeTaskId(batchId, token, end) });
     return { progress: { done: end, total, phase: "copying" }, outcome: `placed ${end} of ${total}; continuing at ${end}` };
   }

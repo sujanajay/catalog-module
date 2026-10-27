@@ -13,13 +13,17 @@ import type { enqueueTask } from "../../tasks";
 /** Builder constant: uploads handed per request or task. */
 export const HAND_OFF_PAGE = 500;
 
+export const INGEST_ROUTE = "/tasks/catalog/ingest" as const;
 export const INGEST_MORE_ROUTE = "/tasks/catalog/ingest-more" as const;
+
+/** A task name from `parts`, hashed (as Cloud Tasks recommends for task names) behind `prefix`. */
+export const hashedTaskId = (prefix: string, ...parts: Array<string | number>) => `${prefix}-${createHash("sha256").update(parts.join("|")).digest("hex").slice(0, 40)}`;
 
 /** The ingest task of one upload in one hand-off run. */
 export const ingestTaskId = (uploadId: string, run: string) => `ingest-${uploadId}-${run}`;
 
-/** The ingest-more task after `after` in `run` (hashed, as Cloud Tasks recommends for task names). */
-export const ingestMoreTaskId = (batchId: string, run: string, after: string) => `more-${createHash("sha256").update(`${batchId}|${run}|${after}`).digest("hex").slice(0, 40)}`;
+/** The ingest-more task after `after` in `run`. */
+export const ingestMoreTaskId = (batchId: string, run: string, after: string) => hashedTaskId("more", batchId, run, after);
 
 /** The next page of the batch's `uploaded` uploads after `after` (upload id order), and whether more follow. */
 export async function uploadedPage(db: Db, batchId: string, after: string | null, page = HAND_OFF_PAGE): Promise<{ ids: string[]; more: boolean }> {
@@ -46,7 +50,7 @@ export async function handOff(
 ): Promise<void> {
   for (const uploadId of page.ids) {
     // `run` is part of the placing token (spec 14c F6), so a Try again never reuses a lost delivery's lease.
-    await enqueue("/tasks/catalog/ingest", { batchId, uploadId, run }, { taskId: ingestTaskId(uploadId, run) });
+    await enqueue(INGEST_ROUTE, { batchId, uploadId, run }, { taskId: ingestTaskId(uploadId, run) });
     onHanded?.();
   }
   const last = page.ids.at(-1);
