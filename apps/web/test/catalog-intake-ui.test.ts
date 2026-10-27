@@ -4,6 +4,9 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
 import { DID_NOT_FINISH, inputRows, InputListView, type ServerInput } from "../components/catalog/InputList";
 import type { LocalUpload } from "../components/catalog/Uploader";
+import { LinkFailuresView, type LinkFailureRow } from "../components/catalog/LinkFailures";
+import { canRetryLinks } from "../lib/catalog/copy";
+import type { LinkFailuresBlock } from "@catalog/core/catalog/ingest/types";
 
 const server = (id: string, status: string, extra: Partial<ServerInput> = {}): ServerInput => ({ id, kind: "image", name: `${id}.jpg`, relativePath: `${id}.jpg`, sizeBytes: 2 * 1024 * 1024, status, error: null, ...extra });
 const local = (key: string, extra: Partial<LocalUpload> = {}): LocalUpload => ({ key, name: `${key}.jpg`, relativePath: `${key}.jpg`, size: 1024 * 1024, progress: 40, status: "uploading", retry: vi.fn(), remove: vi.fn(), ...extra });
@@ -63,5 +66,40 @@ describe("input list (spec 14b F3)", () => {
 
   it("renders nothing for an empty batch", () => {
     expect(render(inputRows([], [], none, vi.fn()))).toBe("");
+  });
+});
+
+describe("link failures card (spec 14b F5 part 1)", () => {
+  const H = "https://example.com/test_brand";
+  const block = (temporary: number): LinkFailuresBlock => ({
+    total: 3, temporary, links: 27, products: 2,
+    byReason: [
+      { reason: "answered 'not found' (404)", count: 2, first: { url: `${H}/A_2.JPG`, where: "row 1, column 2" } },
+      { reason: temporary ? "did not answer in time" : "use http instead of https", count: 1, first: { url: `${H}/B_1.JPG`, where: "row 2, column 1" } },
+    ],
+  });
+  const card = (failures: LinkFailuresBlock, rows?: LinkFailureRow[]) => renderToStaticMarkup(createElement(LinkFailuresView, { failures, rows }));
+
+  it("names the failures by reason with an example and where it is, and offers Show all", () => {
+    const html = card(block(1));
+    expect(html).toContain("<h3>Links that could not be downloaded</h3>");
+    expect(html).toContain("3 of 27 links could not be downloaded (2 products affected).");
+    expect(html).toContain(`2 answered &#x27;not found&#x27; (404), for example ${H}/A_2.JPG (row 1, column 2).`);
+    expect(html).toContain(`1 did not answer in time, for example ${H}/B_1.JPG (row 2, column 1).`);
+    expect(html).toContain(">Show all 3</button>");
+  });
+
+  it("offers Try the failed links again when some may be temporary, and not when every failure is permanent", () => {
+    expect(card(block(1))).toContain(">Try the failed links again</button>");
+    expect(card(block(0))).not.toContain("Try the failed links again");
+    expect(canRetryLinks(block(0))).toBe(false);
+    expect(canRetryLinks(block(1))).toBe(true);
+  });
+
+  it("shows the full table after Show all, and nothing when no link failed", () => {
+    const html = card(block(0), [{ url: `${H}/A_2.JPG`, where: "row 1, column 2", reason: "answered 'not found' (404)" }]);
+    expect(html).toContain(`<td>row 1, column 2</td>`);
+    expect(html).not.toContain("Show all");
+    expect(card({ total: 0, temporary: 0, links: 4, products: 0, byReason: [] })).toBe("");
   });
 });

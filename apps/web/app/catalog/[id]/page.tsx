@@ -27,6 +27,8 @@ import DetailsTab from "@/components/catalog/DetailsTab";
 import NotRefreshedLine from "@/components/catalog/NotRefreshedLine";
 import CostLine from "@/components/catalog/CostLine";
 import RetryCollectButton from "@/components/catalog/RetryCollectButton";
+import { canRetryLinks } from "@/lib/catalog/copy";
+import { batchLinkFailures } from "@/lib/catalog/preview";
 import { batchSource, canContinueSettingUp, collectingText, continueSettingUpHref, createdText, hasNotStarted, HOW_THIS_WORKS_DRAFT, notStartedText, plural } from "@/lib/catalog/copy";
 import SkuMapModal from "@/components/catalog/SkuMapModal";
 import { EvalList } from "@/components/catalog/EvalLabelBar";
@@ -87,6 +89,9 @@ export default async function BatchPage({ params, searchParams }: { params: Prom
     failed: "Nothing was processed and nothing was charged.",
   };
   const notStartedLine = <p>{notStartedText(batch.counts.sources, batch.counts.products)}</p>;
+  // "Try the failed links again" (spec 14b F5 part 1): a draft or a batch that failed before Start, with link failures of which some may be temporary.
+  const linksRetryable = canAct && (batch.counts.linkFailures ?? 0) > 0 && !batch.startedAt && (batch.status === "draft" || batch.status === "failed")
+    && canRetryLinks((await batchLinkFailures(id)).linkFailures);
   return (
     <main>
       <div className="hdr">
@@ -103,7 +108,7 @@ export default async function BatchPage({ params, searchParams }: { params: Prom
         )}
         {canAct && state.stalled && <ActionOnly><RetryCollectButton batchId={id} /></ActionOnly>}
       </div>
-      <BatchBanner key={id} status={batch.status} counts={batch.counts} source={source} updatedAt={new Date(batch.updatedAt).toISOString()} startedAt={batch.startedAt ? new Date(batch.startedAt).toISOString() : null} now={now.toISOString()} keptPhotos={data.keptPhotos} styliSkipped={data.styliSkipped} continueHref={canAct && settingUp ? continueSettingUpHref(id) : undefined} />
+      <BatchBanner key={id} status={batch.status} counts={batch.counts} source={source} updatedAt={new Date(batch.updatedAt).toISOString()} startedAt={batch.startedAt ? new Date(batch.startedAt).toISOString() : null} now={now.toISOString()} keptPhotos={data.keptPhotos} styliSkipped={data.styliSkipped} continueHref={canAct && settingUp ? continueSettingUpHref(id) : undefined} retryLinksId={linksRetryable ? id : undefined} />
       <NotRefreshedLine items={data.notRefreshedChannels} />
       <BatchKpis counts={batch.counts} />
       <AutoRefresh active={state.state === "collecting" || state.state === "processing"} />

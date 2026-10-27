@@ -4,7 +4,7 @@ import { useRouter } from "next/navigation";
 import type { BrandOption } from "@catalog/core/catalog/brands";
 import type { BatchCounts, BatchStatus, ChannelId, IdentifierMode, Precedence, ProductType } from "@catalog/core/catalog/types";
 import { COLLECT_STALLED_TEXT, wizardStepFor, type BatchState } from "@catalog/core/catalog/pipeline/status";
-import { continueSettingUpHref, STEP2_COLLECTING_TEXT, STEP3_COLLECTING_TEXT, wizardCollectingText } from "../../lib/catalog/copy";
+import { canRetryLinks, continueSettingUpHref, STEP2_COLLECTING_TEXT, STEP3_COLLECTING_TEXT, wizardCollectingText } from "../../lib/catalog/copy";
 import type { WizardDetected, WizardPreview } from "../../lib/catalog/preview";
 import { useToast } from "../Toast";
 import WizardStep1 from "./WizardStep1";
@@ -12,6 +12,7 @@ import WizardStep2, { mergeSheetChoices, type SheetChoice } from "./WizardStep2"
 import WizardStep3 from "./WizardStep3";
 import WizardStep4 from "./WizardStep4";
 import RetryCollectButton from "./RetryCollectButton";
+import { RetryLinksButton } from "./LinkFailures";
 import { batchUrl, wizardApi } from "./wizard-client";
 import "./wizard.css";
 
@@ -88,6 +89,8 @@ export default function CatalogWizard({ brands, shareEmail, initialBrand = "", i
   /** The step 1 input list (spec 14b F3): what the server holds decides whether there is anything to continue with. */
   const onInputCount = useCallback((count: number) => setHasInputs(count > 0), []);
   const onInputRemoved = useCallback(() => setPreview(null), []);
+  /** "Try the failed links again" (spec 14b F5): the batch is collecting again, so the steps wait for it. */
+  const onLinksRetried = useCallback(() => {setFailReason(null); setCollecting(true); setPreview(null);}, []);
   /** Settles when the paste box has no write outstanding; Continue waits for it instead of being disabled (spec 14b F2). */
   const linksIdle = useRef<{promise: Promise<void>; resolve(): void} | null>(null);
   const onLinksBusy = useCallback((busy: boolean) => {
@@ -171,12 +174,13 @@ export default function CatalogWizard({ brands, shareEmail, initialBrand = "", i
   const disabled = working || !!failReason || (step===1 && (!brandSlug || !(hasInputs || linksBusy) || uploadsBusy)) || (step===2 && (collecting || !detected || sheets.some((s)=>s.identifierColumn<0))) || (step===3 && (!channels.length || collecting)) || (step===4 && (!preview?.ready || !channels.length || !!preview.busy.length || !!preview.overwrite.sameProductPairs.length));
   return <div className="catalog-wizard"><h1>New batch</h1><ol className="steps" aria-label="Batch steps">{STEPS.map((title,i)=><li key={title} className={step===i+1?"on":step>i+1?"done":""} aria-current={step===i+1?"step":undefined}>{title}</li>)}</ol>
     <div hidden={step!==1}><WizardStep1 brands={brands} brandSlug={brandSlug} name={name} productType={productType} locked={!!id || isCreating} email={shareEmail} setBrand={(value)=>{if(!id && !creating.current)setBrand(value);}} setName={setName} setProductType={(value)=>{if(!id && !creating.current)setProductType(value);}} ensureBatch={ensureBatch} onUploadsBusy={setUploadsBusy} onLinksBusy={onLinksBusy} onAdded={onAdded} batchId={id} onInputCount={onInputCount} onRemoved={onInputRemoved}/></div>
-    {step===2 && id ? <>{detected?<WizardStep2 detected={detected} collecting={collecting} mode={mode} precedence={precedence} sheets={sheets} setMode={setMode} setPrecedence={setPrecedence} setSheets={setSheets} email={shareEmail} id={id} onError={setError} onAccessChecked={async()=>{await loadDetected(id);}}/>:<h2>Check what we found</h2>}{collecting?<p role="status">{wizardCollectingText(batchState,collectTotal,STEP2_COLLECTING_TEXT)}</p>:null}</>:null}
+    {step===2 && id ? <>{detected?<WizardStep2 detected={detected} collecting={collecting} mode={mode} precedence={precedence} sheets={sheets} setMode={setMode} setPrecedence={setPrecedence} setSheets={setSheets} email={shareEmail} id={id} onError={setError} onAccessChecked={async()=>{await loadDetected(id);}} onLinksRetried={onLinksRetried}/>:<h2>Check what we found</h2>}{collecting?<p role="status">{wizardCollectingText(batchState,collectTotal,STEP2_COLLECTING_TEXT)}</p>:null}</>:null}
     {(step===2 || step===3) && stalled && id ? <p role="alert">{COLLECT_STALLED_TEXT} <RetryCollectButton batchId={id} onDone={()=>setStalled(false)}/></p>:null}
     {step===3?<><WizardStep3 channels={channels} onChange={setChannels}/>{collecting?<p role="status">{wizardCollectingText(batchState,collectTotal,STEP3_COLLECTING_TEXT)}</p>:null}</>:null}
-    {step===4?<WizardStep4 preview={preview}/>:null}
+    {step===4?<WizardStep4 preview={preview} batchId={id} onLinksRetried={onLinksRetried}/>:null}
     {error?<p role="alert">{error}</p>:null}
-    {failReason?<p role="alert">{failReason} <a href={`/catalog/${id}`}>Open batch details</a></p>:null}
+    {/* Step 2's link failures card carries the retry button itself; elsewhere it goes with the failed sentence. */}
+    {failReason?<p role="alert">{failReason} {id && step!==2 && canRetryLinks(detected?.linkFailures)?<><RetryLinksButton batchId={id} onDone={onLinksRetried}/> </>:null}<a href={`/catalog/${id}`}>Open batch details</a></p>:null}
     <div className="actions">{step>1?<button type="button" className="btn ghost" disabled={working} onClick={()=>{setError("");setStep(step-1);}}>Back</button>:<a className="btn ghost" href="/catalog">All batches</a>}<button type="button" className="btn primary" disabled={disabled} onClick={()=>void continueStep()}>{working?"Please wait...":step===4?"Start processing":"Continue"}</button></div>
   </div>;
 }

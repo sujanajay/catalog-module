@@ -122,3 +122,16 @@ export function collectingText(source: BatchSource): string {
   const first = source === "zip" ? "Unpacking your zip." : source === "upload" ? "Checking your uploaded files." : "Copying your files.";
   return `${first} ${LEAVING_LINE}`;
 }
+
+// Link failures (spec 14b F5 part 1; parent copy register "Link failures card" and "Batch page").
+export const LINK_FAILURES_HEADING = "Links that could not be downloaded";
+export const RETRY_LINKS = "Try the failed links again";
+/** "<total> of <links> links could not be downloaded (<products> products affected)." */
+export function linkFailuresSummary(total: number, links: number, products: number): string {
+  return `${count(total)} of ${count(links)} ${plural(links, "link", "links")} could not be downloaded (${count(products)} ${plural(products, "product", "products")} affected).`;
+}
+export const showAllText = (total: number) => `Show all ${count(total)}`;
+/** Whether "Try the failed links again" is offered: some links failed and at least one may work on a second try. */
+export const canRetryLinks = (failures: { total: number; temporary: number } | null | undefined) => !!failures && failures.total > 0 && failures.temporary > 0;
+/** The toast after the failed links were handed back to collection. */
+export const RETRY_LINKS_STARTED = "Trying the failed links again.";

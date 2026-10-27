@@ -4,6 +4,7 @@ import type { IdentifierMode, Precedence } from "@catalog/core/catalog/types";
 import type { WizardDetected } from "../../lib/catalog/preview";
 import { SHEET_READING_TEXT } from "../../lib/catalog/copy";
 import { batchUrl, wizardApi } from "./wizard-client";
+import LinkFailures from "./LinkFailures";
 export type SheetChoice = {uploadId:string;identifierColumn:number;imageColumns:number[];kind:"sheet"|"product_list"};
 type DetectedSheet = WizardDetected["sheets"][number];
 /**
@@ -15,7 +16,7 @@ export function mergeSheetChoices(old:SheetChoice[],detected:Pick<DetectedSheet,
  return detected.filter((s)=>!s.reading).map((s)=>old.find((prior)=>prior.uploadId===s.uploadId) ?? {uploadId:s.uploadId,identifierColumn:s.identifierColumn,imageColumns:s.imageColumns,kind:s.kind});
 }
 const sheetSummary=(sheet:DetectedSheet)=>sheet.cannotRead||`Sheet ${sheet.name}: identifier column ${sheet.identifierHeader||"-"}, ${sheet.imageColumns.length} image columns, read as ${sheet.kind==="product_list"?"product list":"links sheet"}`;
-export default function WizardStep2({detected,mode,precedence,sheets,setMode,setPrecedence,setSheets,email,id,onError,onAccessChecked,collecting=false}: {detected:WizardDetected;mode:IdentifierMode;precedence:Precedence;sheets:SheetChoice[];setMode(value:IdentifierMode):void;setPrecedence(value:Precedence):void;setSheets(value:SheetChoice[]):void;email:string;id:string;onError(value:string):void;onAccessChecked():Promise<void>;/** While files are collected the grouping cards are hidden; only sheets being read are shown. */collecting?:boolean}) {
+export default function WizardStep2({detected,mode,precedence,sheets,setMode,setPrecedence,setSheets,email,id,onError,onAccessChecked,collecting=false,onLinksRetried}: {detected:WizardDetected;mode:IdentifierMode;precedence:Precedence;sheets:SheetChoice[];setMode(value:IdentifierMode):void;setPrecedence(value:Precedence):void;setSheets(value:SheetChoice[]):void;email:string;id:string;onError(value:string):void;onAccessChecked():Promise<void>;/** While files are collected the grouping cards are hidden; only sheets being read are shown. */collecting?:boolean;/** "Try the failed links again" handed the links back to collection (spec 14b F5). */onLinksRetried?():void}) {
  const [open,setOpen]=useState<string[]>([]);
  const update=(uploadId:string,patch:Partial<SheetChoice>)=>setSheets(sheets.map((s)=>s.uploadId===uploadId?{...s,...patch}:s));
  const reading=detected.sheets.filter((sheet)=>sheet.reading);
@@ -25,6 +26,7 @@ export default function WizardStep2({detected,mode,precedence,sheets,setMode,set
  <div className="examples">{detected.identifierMode.examples.map((e)=><p key={e.identifier}><code>{e.identifier}</code> {e.label} {e.thumbs.map((url,i)=><img alt={`Example ${e.identifier} photo ${i+1}`} key={i} src={url}/>)}</p>)}</div><p className="note">{detected.identifierMode.examples.length} of {detected.totalProducts} products, so you can check the grouping.</p></section>
  {detected.precedence.shown?<section className="card"><h3>You gave us a folder and a sheet of links. Which wins when both have the same product?</h3><p className="note">Shown because you added both.</p>{([["uploads_then_links","Use the uploaded photos, fill gaps from the links"],["links_only","Use the links only"],["uploads_only","Use the uploaded photos only"]] as const).map(([value,label])=><label className="opt" key={value}><input type="radio" name="precedence" checked={precedence===value} onChange={()=>setPrecedence(value)}/><span>{label}{value==="uploads_then_links"?<small>Recommended.</small>:null}</span></label>)}</section>:null}
  <section className="card"><h3>Photo formats</h3><p>{detected.formats.sentence}</p>{detected.unreadable.length?<p>{detected.unreadable.length} files cannot be read ({detected.unreadable.map((f)=>f.name).join(", ")})</p>:<p className="help">No action needed.</p>}</section>
+ {detected.linkFailures?.total?<LinkFailures batchId={id} failures={detected.linkFailures} onRetried={onLinksRetried}/>:null}
  {detected.sheets.length?<section className="card"><h3>Sheet columns</h3><p className="note">Shown because you added a sheet.</p>{detected.sheets.map((sheet)=>{
   if(sheet.reading) return <p key={sheet.uploadId}>{SHEET_READING_TEXT}</p>;
   const choice=sheets.find((s)=>s.uploadId===sheet.uploadId);
