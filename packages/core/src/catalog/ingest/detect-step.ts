@@ -6,7 +6,9 @@ import type { Db } from "../../db/client";
 import { catalogBatches, catalogProducts, catalogSourceImages, catalogUploads, type CatalogUpload } from "../../db/schema";
 import { signedUrl } from "../../storage";
 import { IDENTIFIER_MODES, type IdentifierMode, type UploadKind } from "../types";
-import type { Detected, DetectedStep2, IngestDeps } from "./types";
+import { linkFailuresOf, type LinkFailureRow } from "./link-failures";
+import { groupLinkRejects, type LinkReasonPhrase } from "./link-reasons";
+import type { Detected, DetectedStep2, IngestDeps, LinkFailuresBlock } from "./types";
 
 export const CANNOT_READ_IDENTIFIER = "Could not tell which column holds the identifier.";
 /** Short TTL for the example thumbnails. */
@@ -116,10 +118,22 @@ function effectiveKind(u: CatalogUpload): UploadKind {
 /** True for a purely numeric stem of up to three digits (`1.jpg`, `02.jpg`): a shot with no identifier. */
 const isNumericStem = (name: string) => /^\s*\d{1,3}\s*(\.[^./\\]*)?$/.test(name.split(/[\\/]/).pop() ?? "");
 
+/** The step 2 link failures block (spec 14b F5 part 1) from linkFailuresOf's rows. */
+export function linkFailuresBlock({ links, rows }: { links: number; rows: LinkFailureRow[] }): LinkFailuresBlock {
+  const rejects = rows.map((r) => ({ url: r.url, where: r.where || null, phrase: r.reason as LinkReasonPhrase, temporary: r.temporary }));
+  return {
+    total: rows.length,
+    temporary: rows.filter((r) => r.temporary).length,
+    links,
+    products: new Set(rows.map((r) => r.identifier)).size,
+    byReason: groupLinkRejects(rejects),
+  };
+}
+
 /**
  * Step 2 data for one batch. `extra.sign` (after the contract's parameters) signs the example
- * thumbnails; it defaults to `signedUrl` with a short TTL. `deps` is kept for the contract; this
- * function reads only the database.
+ * thumbnails; it defaults to `signedUrl` with a short TTL. `deps.storage` reads the upload
+ * manifests for the link failures block; everything else comes from the database.
  */
 export async function buildDetectedStep2(
   db: Db,
@@ -264,6 +278,7 @@ export async function buildDetectedStep2(
   }
 
   return {
+    linkFailures: linkFailuresBlock(await linkFailuresOf(db, batchId, _deps)),
     identifierMode: { detected: detectedMode, options: modeOptions, examples },
     groupedBy,
     precedence: { shown: kinds.some((k) => FILE_KINDS.includes(k)) && kinds.some((k) => LINK_KINDS.includes(k)), default: "uploads_then_links" },

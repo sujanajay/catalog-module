@@ -40,6 +40,8 @@ import {
   warningSentences, type ItemDimensions,
 } from "./group";
 import { checkImage, classifyImageReject, corruptMessage, imageFlags } from "./image-check";
+import { classifyLinkReject, isLinkReject, noLinkPhotosReason, type LinkReject } from "./link-reasons";
+import { itemKey, loadJson, manifestPath, saveJson, workPrefix, type ItemResult, type UploadManifest } from "./manifest";
 import { linksSheetAdapter, readLinksSheetUpload, normalizeHeader } from "./links-sheet";
 import { completeUploads, mapLimit } from "./local-files";
 import { buildOverwritePreview, matchProducts } from "./overwrite-preview";
@@ -87,22 +89,8 @@ const FILE_KINDS: UploadKind[] = ["zip", "image", "drive_folder"];
 
 // --- Item results --------------------------------------------------------------------------
 
-/** What reading one item gave: where its bytes are and what they are, or the reject sentence. */
-type ItemResult =
-  | { ok: true; sha256: string; uri: string; mime: string; ext: string; width: number | null; height: number | null; size: number; flags: OutputFlag[] }
-  | { ok: false; reason: string };
 type OkResult = Extract<ItemResult, { ok: true }>;
 
-/** Stable key of an item's bytes, so a re-collected item finds its earlier result. */
-function itemKey(item: SourceItem): string {
-  const b = item.bytes;
-  if (b.kind === "gcs") return `gcs:${b.gsUri}`;
-  if (b.kind === "url") return `url:${b.url}`;
-  return `zip:${b.zipGsUri}#${b.entryPath}`;
-}
-
-const workPrefix = (prefix: string) => `${prefix}/derived/_ingest`;
-const manifestPath = (prefix: string, uploadId: string) => `${workPrefix(prefix)}/${uploadId}/manifest.json`;
 const stagedPath = (prefix: string, uploadId: string, sha256: string, ext: string) => `${workPrefix(prefix)}/${uploadId}/${sha256}.${ext}`;
 const statePath = (prefix: string) => `${workPrefix(prefix)}/preview-state.json`;
 
@@ -172,16 +160,6 @@ async function readItem(item: SourceItem, deps: IngestDeps, ctx: { prefix: strin
 }
 
 // --- Listing an upload --------------------------------------------------------------------
-
-/** Per upload: its items, the results so far, sheet warnings and the Detected for catalog_uploads. */
-interface UploadManifest {
-  version: 1;
-  items: SourceItem[];
-  results: Record<string, ItemResult>;
-  warnings: string[];
-  productList: boolean;
-  detected: Detected;
-}
 
 /**
  * The product list's step 2 match column, when the operator picked one: the stored matchColumn
@@ -264,17 +242,6 @@ function finalDetected(m: UploadManifest, kind: UploadKind): Detected {
 }
 
 // --- Storage helpers ------------------------------------------------------------------------
-
-async function loadJson<T>(deps: Pick<IngestDeps, "storage">, objectPath: string): Promise<T | null> {
-  const gsUri = toGsUri(getBucketName(), objectPath);
-  const head = await deps.storage.headObject(gsUri);
-  if (!head.exists) return null;
-  return JSON.parse((await deps.storage.downloadBuffer(gsUri)).buf.toString("utf8")) as T;
-}
-
-async function saveJson(deps: Pick<IngestDeps, "storage">, objectPath: string, value: unknown): Promise<void> {
-  await deps.storage.uploadBuffer(objectPath, Buffer.from(JSON.stringify(value), "utf8"), "application/json");
-}
 
 const doneCount = (m: UploadManifest | null) => (m ? m.items.filter((i) => m.results[itemKey(i)]).length : 0);
 
@@ -570,19 +537,21 @@ interface PreviewState {
  * ("The zip Images.zip was not found in storage"), without its own action sentence.
  */
 function whatWasFound(rejected: GroupingResult["rejected"], uploadErrors: string[] = []): string {
-  // Unsupported image formats first, then files that are not images, corrupt files, the rest.
-  const counts = new Map<string, { rank: number; k: number }>();
-  const add = (what: string, rank: number) => counts.set(what, { rank, k: (counts.get(what)?.k ?? 0) + 1 });
+  // Unsupported image formats first, then files that are not images, corrupt files, the rest, then links.
+  const counts = new Map<string, { rank: number; k: number; many?: string }>();
+  const add = (what: string, rank: number, many?: string) => counts.set(what, { rank, k: (counts.get(what)?.k ?? 0) + 1, ...(many ? { many } : {}) });
   for (const r of rejected) {
     const kind = classifyImageReject(r.reason);
     if (kind === "unsupported") add(`${/is an? (\S+) file/.exec(r.reason)?.[1] ?? "unsupported"} file`, 0);
     else if (kind === "not_image") add(r.item.ext ? r.item.ext.toUpperCase() : "file that is not an image", 1);
     else if (kind === "corrupt") add("corrupt file", 2);
+    // A link is not a file (spec 14b F5: "<n> other files" is not said of links).
+    else if (kind === "link") add("link that could not be downloaded", 4, "links that could not be downloaded");
     else add("other file", 3);
   }
   const parts = [...counts]
     .sort(([a, x], [b, y]) => x.rank - y.rank || byText(a, b))
-    .map(([what, { k }]) => `${fmt(k)} ${what}${k === 1 ? "" : "s"}`);
+    .map(([what, { k, many }]) => `${fmt(k)} ${k === 1 ? what : many ?? `${what}s`}`);
   const facts = distinct(uploadErrors.map(firstFact).filter(Boolean));
   if (!parts.length && !facts.length) return "The upload was empty";
   const found = !parts.length ? [] : [parts.length === 1 ? parts[0]! : `${parts.slice(0, -1).join(", ")} and ${parts[parts.length - 1]}`];
@@ -595,9 +564,25 @@ function firstFact(error: string): string {
   return (m ? m[1]! : error.trim().replace(/[.!?]+$/, "")).trim();
 }
 
-/** counts.failReason when the whole batch holds no photo: from the rejects and the uploads that failed. */
-function noPhotosReason(rejected: GroupingResult["rejected"], uploadErrors: string[] = []): string {
+/**
+ * counts.failReason when the whole batch holds no photo: from the rejects and the uploads that failed.
+ * When every reject is a link that could not be downloaded and no upload failed, the links sentence
+ * (spec 14b F5 part 1, `linkSource` says where the links came from); else the file sentence.
+ */
+function noPhotosReason(rejected: GroupingResult["rejected"], uploadErrors: string[] = [], linkSource?: { links: number; source: string }): string {
+  const links = rejected.map((r) => classifyLinkReject(r.reason));
+  if (linkSource && links.length && !uploadErrors.length && links.every((l) => l !== null)) {
+    return noLinkPhotosReason(links as LinkReject[], linkSource.links, linkSource.source);
+  }
   return `No photos were found in what you uploaded. ${whatWasFound(rejected, uploadErrors)}. Upload photos and start again.`;
+}
+
+/** "pasted", "listed in <sheet>", or both: where the batch's links came from, for the no-photos sentence. */
+function linkSourceWords(uploads: CatalogUpload[]): string {
+  const pasted = uploads.some((u) => u.kind === "url_list");
+  const sheets = distinct(uploads.filter((u) => u.kind === "sheet" || u.kind === "google_sheet").map((u) => (u.detected as Detected | null)?.title || u.name));
+  const listed = sheets.length ? `listed in ${sheets.join(" and ")}` : "";
+  return [pasted ? "pasted" : "", listed].filter(Boolean).join(" and ") || "pasted";
 }
 
 /**
@@ -775,11 +760,14 @@ async function finishBatch(db: Db, deps: IngestDeps, batchId: string): Promise<{
   const newCount = withPhotos.filter((id) => productOf.get(id)!.isNew).length;
   const existing = overwrite.existingProducts.filter((p) => productOf.has(p.identifier));
   const rejects = grouped.rejected.filter((r) => !isSameProductReject(r.reason));
+  // Links that could not be downloaded are counted on their own, not as unsupported files (spec 14b F5).
+  const linkRejects = rejects.filter((r) => isLinkReject(r.reason));
   const counts: Partial<BatchCounts> = {
     products: withPhotos.length, sources: versions.length,
     skuResolved: [...withPhotos, ...missing].filter((id) => productOf.get(id)!.resolved || productOf.get(id)!.skuIds.length > 0).length,
     missingImages: missing.length, notInSheet: withPhotos.filter((id) => a.statuses.get(id) === "not_in_sheet").length,
-    unsupportedFiles: rejects.filter((r) => !isDuplicateReject(r.reason)).length,
+    unsupportedFiles: rejects.filter((r) => !isDuplicateReject(r.reason) && !isLinkReject(r.reason)).length,
+    linkFailures: linkRejects.length,
     duplicateFiles: rejects.filter((r) => isDuplicateReject(r.reason)).length,
     newProducts: newCount, existingProducts: withPhotos.length - newCount,
     shotsToRemove: existing.reduce((s, p) => s + p.shotsToRemove.length, 0),
@@ -788,7 +776,9 @@ async function finishBatch(db: Db, deps: IngestDeps, batchId: string): Promise<{
   const waitingForColumn = uploads.some((u) => (u.detected as Detected | null)?.cannotRead);
   if (!versions.length && !waitingForColumn) {
     const uploadErrors = uploads.filter((u) => u.status === "failed" && u.error).map((u) => u.error!);
-    const failReason = noPhotosReason(grouped.rejected, uploadErrors);
+    const linkUploads = uploads.filter((u) => manifests.get(u.id)?.items.some((i) => i.bytes.kind === "url"));
+    const links = linkUploads.reduce((n, u) => n + manifests.get(u.id)!.items.filter((i) => i.bytes.kind === "url").length, 0);
+    const failReason = noPhotosReason(grouped.rejected, uploadErrors, links ? { links, source: linkSourceWords(linkUploads) } : undefined);
     await patchCounts(db, batch.id, { ...counts, failReason }, { status: "failed" });
     // An operator upload with nothing usable: WARNING, so it sends no alert and stays out of Error Reporting.
     log("WARNING", "batch failed", { batchId: batch.id, brandSlug: batch.brandSlug, reason: failReason, cause: "no_photos" });

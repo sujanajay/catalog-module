@@ -9,8 +9,12 @@ import { normalizeKey, parseShotName } from "../naming";
 import { extOf, isLinkToken, splitCell, urlFileName, type SheetSourceItem } from "./links-sheet";
 import type { Adapter, IngestDeps, SourceItem } from "./types";
 
-/** One pasted row with at least one link. `row` is its 1-based line number in the paste. */
-export interface PastedRow { row: number; identifier: string | null; urls: string[]; name: string | null }
+/**
+ * One pasted row with at least one link. `row` is its 1-based line number in the paste; `columns[i]`
+ * is the 1-based cell number of `urls[i]` on that line (tab cells, a cell holding two links counting
+ * as two), so a failed link can be named "row <r>, column <c>" (spec 14b F5).
+ */
+export interface PastedRow { row: number; identifier: string | null; urls: string[]; columns: number[]; name: string | null }
 
 /** What a paste holds (spec 14b F2). */
 export interface PastedTable {
@@ -42,6 +46,7 @@ export function parsePastedLinks(text: string): PastedTable {
     const tokens = line.includes("\t") ? line.split("\t").flatMap((cell) => (cell.trim() === "" ? [""] : splitCell(cell))) : splitCell(line);
     const urls = tokens.filter(isLinkToken);
     if (!urls.length) return;
+    const columns = tokens.flatMap((token, k) => (isLinkToken(token) ? [k + 1] : []));
     let identifier: string | null = null;
     for (const token of tokens) {
       if (isLinkToken(token)) continue;
@@ -49,7 +54,7 @@ export function parsePastedLinks(text: string): PastedTable {
       else ignoredCells++;
     }
     const stem = urls.length >= 2 ? parseShotName(urlFileName(urls[0]!)).identifier : "";
-    rows.push({ row: i + 1, identifier, urls, name: identifier ?? (stem || null) });
+    rows.push({ row: i + 1, identifier, urls, columns, name: identifier ?? (stem || null) });
   });
 
   const byName = new Map<string, PastedRow[]>();
@@ -92,13 +97,18 @@ function urlFolder(url: string): string | null {
  * without one (two or more links): its name, shots 1..k in column order. Else parseShotName of the
  * link's file name. `originalName` is always the link's own decoded file name; the fetched URL has
  * its spaces percent-encoded. The pasted text is read from the upload's object when `gcsUri` is
- * set, else from `sourceUrl`.
+ * set, else from `sourceUrl`. Each item carries its place in the paste as `sheetRow` (the line) and
+ * `sheetHeader` (the cell number), as a links sheet's items do, so a link that fails is named
+ * "Row <r>, column <c>: ..." (spec 14b F5).
  */
-export function urlListItems(table: PastedTable, uploadId: string): SourceItem[] {
+export function urlListItems(table: PastedTable, uploadId: string): SheetSourceItem[] {
   const counts = new Map<string, number>();
-  return table.rows.flatMap(({ identifier, urls, name }) => urls.map((url, i) => {
+  return table.rows.flatMap(({ row, identifier, urls, columns, name }) => urls.map((url, i) => {
     const originalName = urlFileName(url);
-    const base = { originalName, folder: urlFolder(url), sheetIdentifier: null, ext: extOf(originalName), bytes: { kind: "url" as const, url: fetchableUrl(url) }, uploadId, origin: "url_list" as const, warnings: [] };
+    const base = {
+      originalName, folder: urlFolder(url), sheetIdentifier: null, ext: extOf(originalName), bytes: { kind: "url" as const, url: fetchableUrl(url) }, uploadId, origin: "url_list" as const, warnings: [],
+      sheetRow: row, sheetHeader: String(columns[i] ?? i + 1),
+    };
     if (identifier) {
       const key = normalizeKey(identifier);
       const n = (counts.get(key) ?? 0) + 1;

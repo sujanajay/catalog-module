@@ -174,10 +174,10 @@ describe("fetchSourceUrl", () => {
       "https://cdn.example.com/moved.jpg": () => new Response(null, { status: 302, headers: { location: "https://cdn.example.com/gone.jpg" } }),
     });
     expect(await fetchSourceUrl(item(url), { fetch: f }, { lookup })).toEqual({
-      ok: false, reason: `${SUPA}/ABC123/ABC123_1.jpeg did not return an image (got text/html).`,
+      ok: false, reason: `Row 1, column 1: ${SUPA}/ABC123/ABC123_1.jpeg did not return an image (got text/html).`,
     });
     expect(await fetchSourceUrl(item("https://cdn.example.com/moved.jpg"), { fetch: f }, { lookup })).toEqual({
-      ok: false, reason: "https://cdn.example.com/moved.jpg did not return an image (got 404).",
+      ok: false, reason: "Row 1, column 1: https://cdn.example.com/moved.jpg did not return an image (got 404).",
     });
     expect(calls.map((c) => [c.url, c.method])).toEqual([
       [url, "GET"], ["https://cdn.example.com/moved.jpg", "GET"], ["https://cdn.example.com/gone.jpg", "GET"],
@@ -187,7 +187,7 @@ describe("fetchSourceUrl", () => {
   it("reports a refused link with the safe-fetch reason, without fetching", async () => {
     const { f, calls } = fakeFetch({});
     expect(await fetchSourceUrl(item("http://cdn.example.com/a_1.jpg"), { fetch: f }, { lookup })).toEqual({
-      ok: false, reason: "http://cdn.example.com/a_1.jpg did not return an image (got Only https links can be used: http://cdn.example.com/a_1.jpg).",
+      ok: false, reason: "Row 1, column 1: http://cdn.example.com/a_1.jpg did not return an image (got Only https links can be used: http://cdn.example.com/a_1.jpg).",
     });
     expect(calls).toEqual([]);
   });

@@ -108,6 +108,17 @@ export interface DetectedStep2 {
   sheetColumns: { identifier: number; images: number[]; sentence: string; choices: { identifier: { column: number; header: string }[]; images: { columns: number[]; header: string }[] } } | null;
   sheets: { uploadId: string; name: string; identifierColumn: number; identifierHeader: string | null; imageColumns: number[]; kind: "sheet" | "product_list"; /** Uploaded but not read yet (no columns): the card says "Reading your sheet". */ reading: boolean; cannotRead: string | null }[];
   googleAccess: { url: string; kind: "google_sheet" | "drive_folder"; status: "ok" | "no_access" | "blocked"; sentence: string }[];
+  /**
+   * Links that could not be downloaded (spec 14b F5 part 1), from the upload manifests: `total`
+   * failures of `links` links read, `temporary` of them may work on a second try, one entry per
+   * reason phrase (most first) with its first failure, and how many products they affect.
+   */
+  linkFailures: LinkFailuresBlock;
+}
+
+export interface LinkFailuresBlock {
+  total: number; temporary: number; links: number; products: number;
+  byReason: { reason: string; count: number; first: { url: string; where: string } }[];
 }
 
 export interface OverwritePreview {

@@ -296,3 +296,35 @@ describe("warningSentences", () => {
     expect(warningSentences(gh, null, [])).toEqual([]);
   });
 });
+
+describe("the step 4 link pair (spec 14b F5 part 1)", () => {
+  const failed = (item: SourceItem, row: number, column: string, got: string) =>
+    [item, `Row ${row}, column ${column}: ${(item.bytes as { url: string }).url} did not return an image (got ${got}).`] as const;
+  const a1 = link("AAA", 1), a2 = link("AAA", 2), b1 = link("BBB", 1), c1 = link("CCC", 1), c2 = link("CCC", 2);
+  const bmp = file("BAD_1.bmp");
+
+  it("all permanent: the fix ending, and links stay out of the files sentence", () => {
+    const unreadable = new Map([failed(a2, 2, "Image 2", "404"), failed(b1, 3, "Image 1", "text/html"), [bmp, unsupportedMessage("BAD_1.bmp", "BMP")] as const]);
+    const g = groupItems([a1, a2, b1, c1, c2, bmp], opts(), new Map(unreadable));
+    expect(warningSentences(g, null, ["noon"])).toEqual([
+      { headline: "1 files could not be read.", detail: "BAD_1.bmp: is a BMP file. Fix them and use them in a new batch, or continue without them." },
+      { headline: "2 links could not be downloaded.", detail: "2 products are missing shots: AAA, BBB. Fix the links, or continue without them." },
+    ]);
+  });
+
+  it("some temporary: the retry ending", () => {
+    const g = groupItems([a1, a2, b1, c1, c2], opts(), new Map([failed(a2, 2, "Image 2", "404"), failed(c2, 4, "Image 2", "503")]));
+    expect(warningSentences(g, null, ["noon"])).toEqual([
+      { headline: "2 links could not be downloaded.", detail: "2 products are missing shots: AAA, CCC. Try the failed links again, fix the sheet, or continue without them." },
+    ]);
+  });
+
+  it("names the first 10 products only and says one product in the singular", () => {
+    const many = Array.from({ length: 12 }, (_, i) => link(`P${String(i + 1).padStart(2, "0")}`, 1));
+    const g = groupItems(many, opts(), new Map(many.map((item, i) => failed(item, i + 2, "Image 1", "404"))));
+    const [pair] = warningSentences(g, null, ["noon"]);
+    expect(pair).toEqual({ headline: "12 links could not be downloaded.", detail: "12 products are missing shots: P01, P02, P03, P04, P05, P06, P07, P08, P09, P10. Fix the links, or continue without them." });
+    const one = groupItems([a1, a2], opts(), new Map([failed(a2, 2, "Image 2", "404")]));
+    expect(warningSentences(one, null, ["noon"])).toEqual([{ headline: "1 link could not be downloaded.", detail: "1 product is missing shots: AAA. Fix the links, or continue without them." }]);
+  });
+});

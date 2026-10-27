@@ -75,6 +75,12 @@ export interface BatchCounts {
   failReason: string | null; finalizePending: boolean; policyFallback: boolean;
   newProducts: number; existingProducts: number; shotsToRemove: number;
   recheckOk: number | null; recheckTotal: number | null;   // independent re-check written by finalize (06): this batch's delivered links
+  /**
+   * Links that could not be downloaded (spec 14b F5 part 1); `unsupportedFiles` counts files only.
+   * Optional and not in EMPTY_BATCH_COUNTS (the column's DDL default, which would need a migration):
+   * a batch not yet collected, or written before release B, reads it as 0.
+   */
+  linkFailures?: number;
   /** Links of this batch held for a decision (held products); not delivered, so outside both Details counts. */
   heldLinks?: number;
   /** Earlier batches' live links the sheet keeps for held products, re-checked separately. */

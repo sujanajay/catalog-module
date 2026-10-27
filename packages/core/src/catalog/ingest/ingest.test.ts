@@ -518,3 +518,57 @@ describe("a pasted grid of links (spec 14b F2)", () => {
     expect(w.calls.fetches.filter((f) => f.includes("BHSS2620Z")).every((f) => f.includes("WHITE%20NAVY"))).toBe(true);
   });
 });
+
+describe("links that could not be downloaded (spec 14b F5 part 1)", () => {
+  const G = "https://example.com/test_brand";
+  /** Collects intake-pasted-grid.txt with a fake host that answers `status(url)` (200 serves a jpeg). */
+  async function collectGrid(status: (url: string) => number) {
+    const w = fakeWorld();
+    const text = readFileSync(new URL("../../../test-fixtures/catalog/intake/intake-pasted-grid.txt", import.meta.url), "utf8");
+    const fetches: string[] = [];
+    const fetch: typeof globalThis.fetch = async (input) => {
+      const url = String(input);
+      fetches.push(url);
+      const s = status(url);
+      return s === 200 ? new Response(new Uint8Array(await jpeg()), { status: 200, headers: { "content-type": "image/jpeg" } }) : new Response("no", { status: s, headers: { "content-type": "text/plain" } });
+    };
+    const [b] = await db.insert(catalogBatches).values({
+      brandSlug: "test_brand", brandName: "Test Brand", name: "failing grid", isTest: true, createdBy: "op@opptra.com", channels: [],
+      options: { identifierMode: "filename", precedence: "uploads_then_links", sheetColumns: null },
+    }).returning();
+    const [u] = await db.insert(catalogUploads).values({ batchId: b!.id, kind: "url_list", name: "Image links", sourceUrl: text.trim(), gcsUri: null, status: "uploaded" }).returning();
+    let body: { batchId: string; uploadId: string; cursor?: string } | null = { batchId: b!.id, uploadId: u!.id };
+    while (body) {
+      const from = w.enqueued.length;
+      await runIngest(db, { ...deps(w), fetch, lookup: async () => ["93.184.215.14"] }, body);
+      body = (w.enqueued[from]?.body as typeof body) ?? null;
+    }
+    return { batch: await batchRow(b!.id), fetches };
+  }
+
+  it("the grid with every link 404 fails with the all-permanent no-photos sentence, linkFailures 27, unsupportedFiles 0", async () => {
+    const { batch } = await collectGrid(() => 404);
+    expect(batch.status).toBe("failed");
+    expect(batch.counts).toMatchObject({ linkFailures: 27, unsupportedFiles: 0, sources: 0 });
+    expect(batch.counts.failReason).toBe(
+      `No photos could be downloaded from the 27 links you pasted. 27 answered 'not found' (404), for example ${G}/BH-4610-NE-NERO_1.JPG (row 1, column 1). ` +
+      "Check that the links open in a browser, then make a new batch and paste the corrected links.",
+    );
+  });
+
+  it("with some links answering 503, the some-temporary sentence", async () => {
+    const { batch } = await collectGrid((url) => (url.includes("BH-4612-MO-MOCHA") ? 503 : 404));
+    expect(batch.status).toBe("failed");
+    expect(batch.counts).toMatchObject({ linkFailures: 27, unsupportedFiles: 0 });
+    expect(batch.counts.failReason).toBe(
+      `No photos could be downloaded from the 27 links you pasted. 22 answered 'not found' (404), for example ${G}/BH-4610-NE-NERO_1.JPG (row 1, column 1). ` +
+      `5 could not be reached, for example ${G}/BH-4612-MO-MOCHA_1.JPG (row 3, column 1). Some of these may work on a second try. Press Try the failed links again.`,
+    );
+  });
+
+  it("a partial failure keeps the batch ready and counts only the failed links", async () => {
+    const { batch } = await collectGrid((url) => (url.includes("BH-4611-BX-BOXER_2") ? 404 : 200));
+    expect(batch.status).toBe("draft");
+    expect(batch.counts).toMatchObject({ linkFailures: 1, unsupportedFiles: 0, sources: 26, previewReady: true });
+  });
+});
