@@ -2,7 +2,7 @@
 // The arrays are the single source for the database text enums (schema.ts) and for every type below.
 
 export const CHANNEL_IDS = ["noon","namshi","trendyol","styli","centrepoint","sixthstreet","vogacloset","amazon","shein"] as const;
-export const BATCH_STATUSES = ["draft","ingesting","matting","rendering","qa","publishing","done","failed"] as const;
+export const BATCH_STATUSES = ["draft","ingesting","matting","rendering","qa","publishing","done","failed","cancelled"] as const;
 export const UPLOAD_KINDS = ["zip","image","sheet","product_list","google_sheet","drive_folder","url_list"] as const;
 export const OUTPUT_STATUSES = ["pending","staged","verified","needs_attention","failed","skipped"] as const;
 export const LINK_STATUSES = ["ok","missing_images","not_in_sheet"] as const;
