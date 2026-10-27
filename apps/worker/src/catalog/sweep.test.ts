@@ -194,4 +194,16 @@ describe("draft expiry (spec 14d F12)", () => {
     await handleSweep({ db, enqueue: vi.fn(async () => "task"), releaseLocks, now: () => NOW, draftExpiryDays: 3 }, {});
     expect(await expiredOf(fourDays)).toMatchObject({ status: "cancelled", options: { expired: { days: 3 } } });
   });
+
+  it("expires drafts even when a recovery enqueue later in the same sweep throws", async () => {
+    vi.spyOn(console, "info").mockImplementation(() => undefined);
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const old = await insertBatch("draft", 15 * day);
+    const pending = await insertBatch("publishing", 1);
+    await db.execute(sql`UPDATE catalog_batches SET counts='{"finalizePending":true,"finalizeEnqueuedAt":0}'::jsonb WHERE id=${pending}`);
+    const enqueue = vi.fn(async () => { throw new Error("queue unavailable"); });
+    await expect(handleSweep({ db, enqueue, releaseLocks, now: () => NOW }, {})).rejects.toThrow("queue unavailable");
+    expect((await expiredOf(old)).status).toBe("cancelled");
+  });
 });

@@ -56,6 +56,21 @@ function rowsOf(result: unknown): Record<string, unknown>[] {
  */
 export async function handleSweep(deps: SweepDeps, _body: Record<string, unknown>): Promise<HandleResult> {
   const now = deps.now?.() ?? new Date();
+  // Draft housekeeping (spec 14d F12): a draft never started whose row nobody wrote to for the expiry days
+  // (page reads never write it) is cancelled with options.expired; its objects stay where they are. It runs
+  // first, so a recovery step below that throws never holds it up.
+  const days = deps.draftExpiryDays ?? DEFAULT_DRAFT_EXPIRY_DAYS;
+  const expired = await deps.db
+    .update(catalogBatches)
+    .set({
+      status: "cancelled",
+      options: sql`${catalogBatches.options} || jsonb_build_object('expired', jsonb_build_object('at', ${now.toISOString()}::text, 'days', ${days}::int))`,
+      updatedAt: now,
+    })
+    .where(and(eq(catalogBatches.status, "draft"), isNull(catalogBatches.startedAt), lt(catalogBatches.updatedAt, new Date(now.getTime() - days * DAY_MS))))
+    .returning({ id: catalogBatches.id });
+  for (const e of expired) log("INFO", "draft expired", { batchId: e.id, days });
+
   // Recover a committed enqueue intent before the normal stale-batch failure check.
   const pending=await deps.db.select({id:catalogBatches.id}).from(catalogBatches).where(and(
     inArray(catalogBatches.status,[...SWEEPABLE_STATUSES,"done"]),
@@ -104,18 +119,5 @@ export async function handleSweep(deps: SweepDeps, _body: Record<string, unknown
     log("ERROR", "batch failed", { batchId: s.batchId, reason: SWEEP_ERROR, cause: "swept" });
   }
 
-  // Draft housekeeping (spec 14d F12): a draft never started whose row nobody wrote to for the expiry
-  // days (page reads never write it) is cancelled with options.expired; its objects stay where they are.
-  const days = deps.draftExpiryDays ?? DEFAULT_DRAFT_EXPIRY_DAYS;
-  const expired = await deps.db
-    .update(catalogBatches)
-    .set({
-      status: "cancelled",
-      options: sql`${catalogBatches.options} || jsonb_build_object('expired', jsonb_build_object('at', ${now.toISOString()}::text, 'days', ${days}::int))`,
-      updatedAt: now,
-    })
-    .where(and(eq(catalogBatches.status, "draft"), isNull(catalogBatches.startedAt), lt(catalogBatches.updatedAt, new Date(now.getTime() - days * DAY_MS))))
-    .returning({ id: catalogBatches.id });
-  for (const e of expired) log("INFO", "draft expired", { batchId: e.id, days });
   return { httpStatus: 200, outcome: `swept:${swept.length}${expired.length ? `; expired:${expired.length}` : ""}` };
 }
