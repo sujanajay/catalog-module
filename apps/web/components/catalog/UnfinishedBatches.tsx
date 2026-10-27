@@ -9,7 +9,7 @@ import { useToast } from "@/components/Toast";
 import { ActionOnly } from "@/components/ViewerPreview";
 import type { UnfinishedBatch } from "@/lib/catalog/batches";
 import { CANCEL, cancelConfirmText, CONTINUE, continueSettingUpHref, createdAgoText, FIX_AND_CONTINUE, KEEP_IT, UNFINISHED_HEADING, YES_CANCEL } from "@/lib/catalog/copy";
-import { batchUrl, rememberFixReason, wizardApi } from "./wizard-client";
+import { batchUrl, wizardApi } from "./wizard-client";
 
 const errorText = (err: unknown) => (err instanceof Error && err.message ? err.message : "This did not finish. Try again.");
 
@@ -51,8 +51,7 @@ export function FixAndContinueButton({ batchId, className = "btn primary sm" }: 
   async function fix() {
     setBusy(true);
     try {
-      const reopened = await wizardApi<{ failReason: string | null }>(batchUrl(batchId, "/reopen"), "POST");
-      rememberFixReason(batchId, reopened.failReason);
+      await wizardApi(batchUrl(batchId, "/reopen"), "POST");
       window.location.assign(continueSettingUpHref(batchId));
     } catch (err) {
       if (!(err instanceof SessionEndedError)) toast(errorText(err));

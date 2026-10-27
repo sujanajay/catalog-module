@@ -185,10 +185,14 @@ describe("reopen and the assertDraft sentences (spec 14c F8)", () => {
     const response = await reopen(request("POST"), ctx(id));
     expect(response.status).toBe(200); expect(await response.json()).toEqual({ id, status: "draft", failReason: REASON });
     const row = await batchRow(id);
-    expect(row.status).toBe("draft"); expect(row.counts).toMatchObject({ failReason: null, previewReady: false, linkFailures: 2 });
+    // The old reason is kept as fixReason, so step 1 shows it after a reload too.
+    expect(row.status).toBe("draft"); expect(row.counts).toMatchObject({ failReason: null, fixReason: REASON, previewReady: false, linkFailures: 2 });
     expect(await statusOf(paste.id)).toBe("failed"); expect(await statusOf(file.id)).toBe("uploaded");
-    // A draft answers as it is.
-    expect(await (await reopen(request("POST"), ctx(id))).json()).toEqual({ id, status: "draft", failReason: null });
+    // A draft answers as it is (a second press of Fix and continue).
+    expect(await (await reopen(request("POST"), ctx(id))).json()).toEqual({ id, status: "draft", failReason: REASON });
+    // The next hand-off to collecting clears it.
+    expect((await ingest(request("POST"), ctx(id))).status).toBe(200);
+    expect((await batchRow(id)).counts.fixReason).toBeNull();
   });
   it("refuses to reopen a batch that failed after Start, and a viewer", async () => {
     const id = await newBatch();

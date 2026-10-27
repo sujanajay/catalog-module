@@ -116,8 +116,8 @@ describe("link failures card (spec 14b F5 part 1)", () => {
 describe("Your unfinished batches (spec 14c F4 part 2)", () => {
   const ID = "0b6f3a52-6f0e-4c1e-9d1a-2f6f1b1c9e01", FAILED = "0b6f3a52-6f0e-4c1e-9d1a-2f6f1b1c9e02";
   const rows: UnfinishedBatch[] = [
-    { id: ID, name: "October lot", brandName: "Test Brand", createdBy: "operator@opptra.com", age: "5 minutes ago", words: "Ready to check", fixable: false, collecting: false },
-    { id: FAILED, name: "Grid paste", brandName: "Test Brand", createdBy: "other@opptra.com", age: "2 days ago", words: "Could not start: No photos could be downloaded.", fixable: true, collecting: false },
+    { id: ID, name: "October lot", brandName: "Test Brand", createdBy: "operator@opptra.com", age: "5 minutes ago", words: "Ready to check", fixable: false },
+    { id: FAILED, name: "Grid paste", brandName: "Test Brand", createdBy: "other@opptra.com", age: "2 days ago", words: "Could not start: No photos could be downloaded.", fixable: true },
   ];
   const section = (props: { rows: UnfinishedBatch[]; canAct: boolean; showCreator: boolean }) => renderToStaticMarkup(createElement(ViewerPreviewProvider, null, createElement(ToastProvider, null, createElement(UnfinishedBatches, props))));
 

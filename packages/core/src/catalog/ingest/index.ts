@@ -13,7 +13,7 @@
 // - `<prefix>/derived/_ingest/preview-state.json`: the grouping the batch-wide step decided, for
 //   buildPreview.
 // Version rows point at `rawPath(prefix, path_key, n, ext)`, written by the batch-wide step.
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type { Readable } from "node:stream";
 import { and, count, eq, inArray, ne, sql } from "drizzle-orm";
 import type { Db } from "../../db/client";
@@ -29,7 +29,7 @@ import {
 import { getBucketName, isRetryableStorageError, toGsUri } from "../../storage";
 import type { enqueueTask } from "../../tasks";
 import { log } from "../../log";
-import { mergeCounts, placingClaim, placingLeaseFree, placingLeaseHeld, placingLeaseHeldBy, placingToken, progressCounts, RATE_SAMPLE_GAP_MS, type DoneKey } from "../counts";
+import { mergeCounts, placingClaim, placingLeaseFree, placingLeaseHeld, placingLeaseResumable, placingToken, progressCounts, RATE_SAMPLE_GAP_MS, type DoneKey } from "../counts";
 import { batchPrefix, normalizeKey, rawPath, sanitizeSegment } from "../naming";
 import { findOrCreateProduct } from "../products";
 import { resolveSkus, type ResolveResult } from "../sku-mapping";
@@ -43,6 +43,7 @@ import {
 import { checkImage, classifyImageReject, corruptMessage, imageFlags } from "./image-check";
 import { classifyLinkReject, isLinkReject, noLinkPhotosReason, type LinkReject } from "./link-reasons";
 import { itemKey, loadJson, manifestPath, saveJson, workPrefix, type ItemResult, type UploadManifest } from "./manifest";
+import { LINK_UPLOAD_KINDS } from "./link-failures";
 import { linksSheetAdapter, readLinksSheetUpload, normalizeHeader } from "./links-sheet";
 import { completeUploads, mapLimit } from "./local-files";
 import { buildOverwritePreview, matchProducts } from "./overwrite-preview";
@@ -271,7 +272,6 @@ async function collectProgress(db: Db, batchId: string, phase: IntakePhase, at: 
   return rows.length > 0;
 }
 
-const LINK_KINDS: UploadKind[] = ["url_list", "sheet", "google_sheet"];
 
 /**
  * The collecting phase of a batch (spec 14c F6), one for all its uploads so parallel deliveries write
@@ -283,7 +283,7 @@ async function collectPhaseOf(db: Db, batchId: string): Promise<IntakePhase> {
     .select({ kind: catalogUploads.kind, detected: catalogUploads.detected })
     .from(catalogUploads)
     .where(and(eq(catalogUploads.batchId, batchId), ne(catalogUploads.status, "removed")));
-  if (uploads.some((u) => LINK_KINDS.includes(u.kind) && (u.detected as Detected | null)?.kind !== "product_list")) return "downloading";
+  if (uploads.some((u) => LINK_UPLOAD_KINDS.includes(u.kind) && (u.detected as Detected | null)?.kind !== "product_list")) return "downloading";
   if (uploads.some((u) => u.kind === "zip")) return "unpacking";
   return "checking";
 }
@@ -416,23 +416,39 @@ const UPLOADS_LEFT = (batchId: string) =>
  * Runs the batch-wide step when every upload is collected, failed or removed and the batch is still
  * `ingesting` (spec 14c F6). The claim is one conditional UPDATE that takes the placing lease
  * (`placingClaim` for `token`, `phase: "placing"`), so of two uploads finishing together only one
- * runs it; the batch stays `ingesting` until the closing write. A thrown error leaves the lease, so
- * the retry of the same task (same token) runs the step again; a delivery with another token does
- * nothing while the lease is live, and takes it over once it ran out.
+ * runs it; the batch stays `ingesting` until the closing write. Each run of the step carries its own
+ * `attempt` in the claim. A thrown error keeps the lease but releases the attempt, so the retry of the
+ * same task (same token) takes it back and runs the step again; a duplicate delivery of that task while
+ * its first copy still runs does nothing, and so does a delivery with another token while the lease is
+ * live (it takes the lease over once it ran out). A run killed without throwing (the request deadline)
+ * holds its attempt until the lease runs out, which shows as stalled; Try again clears it.
  */
 async function finishIfLast(db: Db, deps: IngestDeps, batchId: string, token: string): Promise<{ progress: IngestProgress; outcome: string } | null> {
   const now = deps.now?.() ?? new Date();
+  const attempt = randomUUID();
+  const ingesting = and(eq(catalogBatches.id, batchId), eq(catalogBatches.status, "ingesting"));
   const claimed = await db
     .update(catalogBatches)
-    .set({ counts: progressCounts({ placingClaim: placingClaim(token, now), placed: 0, placeTotal: null }, { phase: "placing", done: 0, at: now }) })
-    .where(and(eq(catalogBatches.id, batchId), eq(catalogBatches.status, "ingesting"), placingLeaseFree(now), sql`NOT ${UPLOADS_LEFT(batchId)}`))
+    .set({ counts: progressCounts({ placingClaim: placingClaim(token, now, attempt), placed: 0, placeTotal: null }, { phase: "placing", done: 0, at: now }) })
+    .where(and(ingesting, placingLeaseFree(now), sql`NOT ${UPLOADS_LEFT(batchId)}`))
     .returning({ id: catalogBatches.id });
   if (!claimed.length) {
-    // The retry of the delivery that holds the lease continues; anything else does nothing.
-    const [b] = await db.select({ status: catalogBatches.status, counts: catalogBatches.counts }).from(catalogBatches).where(eq(catalogBatches.id, batchId));
-    if (!b || b.status !== "ingesting" || !placingLeaseHeldBy(b.counts.placingClaim, token, now)) return null;
+    const resumed = await db
+      .update(catalogBatches)
+      .set({ counts: mergeCounts({ placingClaim: placingClaim(token, now, attempt) }) })
+      .where(and(ingesting, placingLeaseResumable(token, now)))
+      .returning({ id: catalogBatches.id });
+    if (!resumed.length) return null;
   }
-  return finishBatch(db, deps, batchId, token);
+  try {
+    return await finishBatch(db, deps, batchId, token, attempt);
+  } catch (err) {
+    await db
+      .update(catalogBatches)
+      .set({ counts: mergeCounts({ placingClaim: placingClaim(token, deps.now?.() ?? new Date(), null) }) })
+      .where(and(ingesting, placingLeaseHeld(token, attempt)));
+    throw err;
+  }
 }
 
 // --- Grouping what was collected (shared by the runner and the CLI) -----------------------------
@@ -689,23 +705,24 @@ function mergeSkus(skus: ResolveResult, extra: string[] | undefined): ResolveRes
 }
 
 /**
- * The batch-wide step, run by the holder of the placing lease (`token`, spec 14c F6). Every write to
- * the batch applies only while it is `ingesting` and the lease carries `token` (spec 14c F4 part 2):
+ * The batch-wide step, run by the holder of the placing lease (`token` and this run's `attempt`, spec
+ * 14c F6). Every write to the batch applies only while it is `ingesting` and the lease carries both
+ * (spec 14c F4 part 2):
  * the progress writes (`placeTotal`, then `placed` at most every RATE_SAMPLE_GAP_MS, each renewing the
  * lease) and the closing write (`draft` with `phase` "ready" or "needs_input", or `failed`; lease and
  * rate cleared). When one is refused the step stops; if the batch was cancelled, the rows it wrote are
  * removed again, so a cancelled batch keeps no version rows.
  */
-async function finishBatch(db: Db, deps: IngestDeps, batchId: string, token: string): Promise<{ progress: IngestProgress; outcome: string }> {
+async function finishBatch(db: Db, deps: IngestDeps, batchId: string, token: string, attempt: string): Promise<{ progress: IngestProgress; outcome: string }> {
   const [batch] = await db.select().from(catalogBatches).where(eq(catalogBatches.id, batchId));
   if (!batch) throw new Error(`Batch ${batchId} does not exist.`);
   const prefix = batchPrefix(batch.brandSlug, batch.id, batch.isTest);
   const clock = () => deps.now?.() ?? new Date();
-  const held = and(eq(catalogBatches.id, batchId), eq(catalogBatches.status, "ingesting"), placingLeaseHeld(token));
+  const held = and(eq(catalogBatches.id, batchId), eq(catalogBatches.status, "ingesting"), placingLeaseHeld(token, attempt));
   const placing = async (patch: Partial<BatchCounts>, done: number): Promise<boolean> => {
     const at = clock();
     const rows = await db.update(catalogBatches)
-      .set({ counts: progressCounts({ ...patch, placingClaim: placingClaim(token, at) }, { phase: "placing", done, at }) })
+      .set({ counts: progressCounts({ ...patch, placingClaim: placingClaim(token, at, attempt) }, { phase: "placing", done, at }) })
       .where(held).returning({ id: catalogBatches.id });
     return rows.length > 0;
   };

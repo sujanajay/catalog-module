@@ -10,7 +10,7 @@ import { itemKey, loadJson, manifestPath, saveJson, type UploadManifest } from "
 import type { IngestDeps } from "./types";
 
 /** Kinds whose items are links. */
-const LINK_UPLOAD_KINDS: UploadKind[] = ["url_list", "sheet", "google_sheet"];
+export const LINK_UPLOAD_KINDS: UploadKind[] = ["url_list", "sheet", "google_sheet"];
 
 /** One link that could not be downloaded, for the "Show all" table and the counts. `reason` is the reason phrase. */
 export interface LinkFailureRow { url: string; where: string; reason: string; temporary: boolean; identifier: string; uploadId: string }

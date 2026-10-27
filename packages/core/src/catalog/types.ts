@@ -91,7 +91,7 @@ export interface BatchCounts {
   // migration): a row written before release C reads phase and placingClaim as null, placed as 0.
   /** What intake is doing now; the worker writes it with every counts update and clears `rate` when it changes. */
   phase?: IntakePhase | null;
-  /** Photos placed so far (placing writes it after each chunk, or once at the end). */
+  /** Photos placed so far (written at most every 10 s while placing, and with the closing write). */
   placed?: number;
   /** Photos to place, set when placing is claimed. */
   placeTotal?: number | null;
@@ -99,14 +99,22 @@ export interface BatchCounts {
   rate?: RateSample[];
   /** The placing lease: the batch stays `ingesting` while a delivery holds it. */
   placingClaim?: PlacingClaim | null;
+  /**
+   * Why a batch reopened with Fix and continue could not start (spec 14c F8): the reopen keeps the old
+   * `failReason` here, step 1 shows it above the inputs, and the next hand-off to collecting clears it.
+   */
+  fixReason?: string | null;
 }
 /** Intake phases (spec 14c F6). The first five are collecting, `placing` follows, the last two end intake. */
 export const INTAKE_PHASES = ["uploading", "downloading", "reading", "unpacking", "checking", "placing", "ready", "needs_input"] as const;
 export type IntakePhase = (typeof INTAKE_PHASES)[number];
 /** One progress sample: ISO time, the phase it was taken in, and the phase's done count then. */
 export interface RateSample { at: string; phase: IntakePhase; done: number }
-/** A placing lease: `token` names the claiming delivery (run and upload id), `until` is an ISO expiry. */
-export interface PlacingClaim { token: string; until: string }
+/**
+ * A placing lease: `token` names the claiming delivery (run and upload id), `until` is an ISO expiry,
+ * `attempt` the run of the step working under it (null once that run stopped on an error).
+ */
+export interface PlacingClaim { token: string; until: string; attempt?: string | null }
 export interface BatchCost {
   computeVcpuSeconds: number; mattingMs: number; renderMs: number; computeUsd: number;
   qaUsd: number; qaCalls: number; identifiers: number;

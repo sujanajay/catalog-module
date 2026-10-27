@@ -726,6 +726,28 @@ describe("phase, rate and the placing lease (spec 14c F6)", () => {
     expect(await sourcesOf(batch.id)).toHaveLength(2);
   });
 
+  it("a duplicate delivery of the claiming task while its first copy still places does nothing", async () => {
+    const w = fakeWorld();
+    const batch = await newBatch("lease duplicate");
+    const uploadId = await folderUpload(w, batch, { "LD1_1.jpg": await jpeg(), "LD2_1.jpg": await jpeg() });
+    const body: Body = { batchId: batch.id, uploadId, run: "run-1" };
+    let duplicate: string | null = null;
+    const storage: IngestDeps["storage"] = {
+      ...w.storage,
+      downloadBuffer: async (gsUri) => {
+        if (duplicate === null && gsUri.includes("/uploads/") && (await batchRow(batch.id)).counts.phase === "placing") {
+          // Cloud Tasks delivers the same task again (same body, same token) while this run places.
+          duplicate = (await runIngest(db, deps(w), body)).outcome;
+        }
+        return w.storage.downloadBuffer(gsUri);
+      },
+    };
+    expect((await runIngest(db, { ...deps(w), storage }, body)).outcome).toBe("preview ready: 2 products, 2 photos");
+    expect(duplicate).toBe("noop: upload already collected");
+    expect((await batchRow(batch.id)).counts).toMatchObject({ phase: "ready", placingClaim: null, previewReady: true });
+    expect(await sourcesOf(batch.id)).toHaveLength(2);
+  });
+
   it("a lapsed lease can be claimed by another delivery", async () => {
     const w = fakeWorld();
     const c = clock();
@@ -777,6 +799,18 @@ describe("placing never re-copies (spec 14c F7 part 1)", () => {
     expect(w.calls.uploads.filter((u) => u.includes("/raw/")).length).toBe(copies);
     expect((await batchRow(batch.id)).counts).toMatchObject({ previewReady: true, sources: 3, phase: "ready" });
     expect(await sourcesOf(batch.id)).toHaveLength(3);
+
+    // A raw object whose bytes differ (another sha256), or that carries no sha256 (written before
+    // release C), is copied again and gets the item's sha256.
+    const changed = `gs://${BUCKET}/${rawPath(prefixOf(batch), "NR1", 1, "jpg")}`;
+    const unmarked = `gs://${BUCKET}/${rawPath(prefixOf(batch), "NR2", 1, "jpg")}`;
+    w.objects.set(changed, { ...w.objects.get(changed)!, sha256: "0".repeat(64) });
+    w.objects.set(unmarked, { ...w.objects.get(unmarked)!, sha256: undefined });
+    await db.update(catalogUploads).set({ status: "uploaded" }).where(eq(catalogUploads.batchId, batch.id));
+    await ingestAll(w, batch);
+    expect(w.calls.uploads.filter((u) => u.includes("/raw/")).length).toBe(copies + 2);
+    expect(w.objects.get(changed)!.sha256).toBe(raw.sha256);
+    expect(w.objects.get(unmarked)!.sha256).toMatch(/^[0-9a-f]{64}$/);
   });
 });
 
