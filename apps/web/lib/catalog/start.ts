@@ -8,7 +8,7 @@ import { enqueueTask } from "@catalog/core/tasks";
 import { log } from "@catalog/core/log";
 import { db } from "../db";
 import { badRequest, HttpError } from "../errors";
-import { queryBatch } from "./batches";
+import { mergeCounts, notDraftText, queryBatch } from "./batches";
 
 const STALE_PREVIEW = "Files changed since the preview. Open step 4 again.";
 export async function startBatch(id: string, value: unknown, _actor: string) {
@@ -21,7 +21,8 @@ export async function startBatch(id: string, value: unknown, _actor: string) {
     for (const chunk of queued) await enqueueTask("/tasks/catalog/chunk", { chunkId: chunk.id }, { taskId: `chunk-${chunk.id}-${chunk.stage}` });
     return { id, status: batch.status };
   }
-  if (batch.status !== "draft") throw new HttpError(409, "This batch has already started. Open its progress page.");
+  // A collecting, cancelled or failed-before-Start batch gets its own sentence (spec 14c F8).
+  if (batch.status !== "draft") throw new HttpError(409, batch.startedAt ? "This batch has already started. Open its progress page." : notDraftText(batch));
   if (!batch.channels.length) throw badRequest("Choose at least one marketplace before starting.");
   if (!batch.counts.previewReady || batch.updatedAt.getTime() > Date.parse(previewAt)) throw new HttpError(409, STALE_PREVIEW);
   const uploads = await db().select().from(catalogUploads).where(and(eq(catalogUploads.batchId, id), ne(catalogUploads.status, "removed")));
@@ -30,7 +31,7 @@ export async function startBatch(id: string, value: unknown, _actor: string) {
   if (!sources.length) {
     const detail = uploads.map((u) => u.error).filter(Boolean).join(" ");
     const sentence = `No photos were found in what you uploaded.${detail ? ` ${detail}` : " Upload photos and start again."}`;
-    await db().update(catalogBatches).set({ status: "failed", counts: { ...batch.counts, failReason: sentence }, updatedAt: new Date() }).where(eq(catalogBatches.id, id));
+    await db().update(catalogBatches).set({ status: "failed", counts: mergeCounts({ failReason: sentence }), updatedAt: new Date() }).where(and(eq(catalogBatches.id, id), eq(catalogBatches.status, "draft")));
     // An operator upload with nothing usable: WARNING, so it sends no alert and stays out of Error Reporting.
     log("WARNING", "batch failed", { batchId: id, brandSlug: batch.brandSlug, reason: sentence, cause: "no_photos" });
     throw badRequest(sentence);

@@ -1,7 +1,7 @@
 // Pure copy helpers shared by server pages and client components (no server imports here).
 import { RUPEES_NOT_CONFIGURED } from "@catalog/core/catalog/cost";
-import { styliSkipText } from "@catalog/core/catalog/pipeline/status";
-import type { BatchStatus } from "@catalog/core/catalog/types";
+import { intakeTimeText, PHASE_WORDS, phaseCount, shownPhase, styliSkipText } from "@catalog/core/catalog/pipeline/status";
+import type { BatchCounts, BatchStatus } from "@catalog/core/catalog/types";
 
 /** The operator's sentence when the ingest hand-off to the worker queue failed for a transient reason. */
 export const HAND_OFF_RETRY = "The upload could not be handed to processing. Please try again.";
@@ -88,10 +88,31 @@ export function shortReason(reason: string): string {
 export function hasNotStarted(batch: { status: BatchStatus; startedAt: Date | string | null }): boolean {
   return batch.startedAt === null && ["draft", "ingesting", "failed"].includes(batch.status);
 }
-/** A batch the operator can still set up in the wizard: not started and not failed (no reopen until release C). */
+/**
+ * A batch the operator can still set up in the wizard: a draft or collecting batch that has not started.
+ * A failed batch is reopened first (Fix and continue, spec 14c F8); a cancelled one never opens the wizard.
+ */
 export function canContinueSettingUp(batch: { status: BatchStatus; startedAt: Date | string | null }): boolean {
   return hasNotStarted(batch) && batch.status !== "failed";
 }
+/** A batch that can be cancelled (spec 14c F4 part 2): a draft, a collecting batch, or one that failed before Start. */
+export const canCancel = hasNotStarted;
+
+// "Your unfinished batches" and Cancel (spec 14c F4 part 2; parent copy register "List section",
+// "Batch page" and "Cancel confirmation").
+export const UNFINISHED_HEADING = "Your unfinished batches";
+export const CONTINUE = "Continue";
+export const CANCEL = "Cancel";
+export const FIX_AND_CONTINUE = "Fix and continue";
+export const SHOW_CANCELLED = "Show cancelled";
+export const CANCEL_THIS_BATCH = "Cancel this batch";
+export const cancelConfirmText = (name: string) => `Cancel ${name}? Nothing was processed and nothing was charged.`;
+export const YES_CANCEL = "Yes, cancel";
+export const KEEP_IT = "Keep it";
+/** The age of an unfinished row: "created 5 minutes ago". */
+export const createdAgoText = (age: string) => `created ${age}`;
+/** The banner and Overview line of a cancelled batch (the failed batch's existing sentence, true of a cancelled one too). */
+export const NOTHING_PROCESSED = "Nothing was processed and nothing was charged.";
 
 export type BatchSource = "Drive folder" | "Google Sheet" | "links" | "zip" | "upload";
 
@@ -109,14 +130,14 @@ export function batchSource(kinds: readonly string[]): BatchSource {
 
 /** Wizard step 2: a sheet uploaded but not read yet. */
 export const SHEET_READING_TEXT = "Reading your sheet. The columns will appear here when it has been read.";
-/** Release A's leaving line, true while nothing starts by itself (steps 2 to 4 while collecting, batch page overview). */
-export const LEAVING_LINE = "You can close this page. Open this batch again from the batch list and press Continue setting up when it is ready.";
+/** The leaving line from release C (steps 2 to 4 while collecting, batch page overview): nothing starts by itself. */
+export const LEAVING_LINE = "You can close this page. Find this batch under Your unfinished batches and press Continue when it is ready.";
 /** The fixed sentences of steps 2 and 3 while collecting, shown until the poll has a live count. */
 export const STEP2_COLLECTING_TEXT = "Collecting files. The grouping will appear here when the files are ready.";
 export const STEP3_COLLECTING_TEXT = "Collecting files. Continue when the grouping is ready.";
 /**
- * Wizard steps 2 and 3 while collecting: the polled batch state's live count ("40 of 287 files copied from
- * your links"), or the step's fixed sentence before a count exists (no files listed yet, so never "0 of 0")
+ * Wizard steps 2 and 3 while collecting: the polled batch state's live count and time ("Downloading photos
+ * 612 of 1,400, about 7 min left", spec 14c F6), or the step's fixed sentence before a count exists (no files listed yet, so never "0 of 0")
  * or once stalled (the stall alert says that), then the leaving line. Never a product count.
  */
 export function wizardCollectingText(state: { state: string; text: string; stalled?: boolean } | null | undefined, collectTotal: number | null | undefined, fallback: string): string {
@@ -124,6 +145,27 @@ export function wizardCollectingText(state: { state: string; text: string; stall
   return `${live} ${LEAVING_LINE}`;
 }
 
+/**
+ * Where a collecting or placing batch is (spec 14c F6): the phase words, "<done> of <total>" once the
+ * total is known (never "0 of 0"), and the measured time ("" until a rate is measured). Rows written
+ * before the worker wrote `phase` take the source's phase.
+ */
+export function intakeProgress(counts: BatchCounts, now: Date, source?: string): { counted: string; done: number; total: number | null; time: string } {
+  const phase = shownPhase(counts.phase, source);
+  const { done, total } = phaseCount(counts, phase);
+  return { counted: total ? `${PHASE_WORDS[phase]} ${count(done)} of ${count(total)}` : PHASE_WORDS[phase], done, total: total || null, time: intakeTimeText(counts, now) };
+}
+/**
+ * The batch page banner while collecting: "<phase words> <done> of <total> from your <source>, about <m>
+ * min left". Phase words that already name the source ("Unpacking your zip", "Reading your sheet",
+ * "Checking your uploaded files") are not followed by it again.
+ */
+export function collectingBannerText(counts: BatchCounts, source: BatchSource, now: Date): string {
+  const { counted, time } = intakeProgress(counts, now, source);
+  const phase = shownPhase(counts.phase, source);
+  const from = phase === "downloading" || phase === "placing" ? ` from your ${source}` : "";
+  return `${counted}${from}${time ? `, ${time}` : ""}`;
+}
 /** The Overview line while files are collected, worded for the batch's source. */
 export function collectingText(source: BatchSource): string {
   const first = source === "zip" ? "Unpacking your zip." : source === "upload" ? "Checking your uploaded files." : "Copying your files.";

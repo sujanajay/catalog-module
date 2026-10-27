@@ -12,7 +12,7 @@ import type { ChannelId } from "@catalog/core/catalog/types";
 import * as storage from "@catalog/core/storage";
 import { db } from "../db";
 import { badRequest } from "../errors";
-import { anotherBatchProcessing, assertDraft, draftForUpdate, parseOptions, queryBatch } from "./batches";
+import { anotherBatchProcessing, assertDraft, draftForUpdate, mergeCounts, parseOptions, queryBatch } from "./batches";
 import { wizardEstimate } from "./cost";
 import type { CostEstimate } from "./copy";
 import { regroupBatch } from "./uploads";
@@ -47,10 +47,18 @@ export async function patchDetected(id: string, value: unknown) {
   });
   if (patches.length === 1) options.sheetColumns = { identifier: patches[0]!.identifier, images: patches[0]!.images };
   if (patches.length > 1) options.sheetColumns = null;
+  // Nothing changed since the grouping was made (same options, every sheet's columns already chosen as
+  // sent): step 2 Continue returns at once, with no regroup, no upload change and no hand-off (spec 14c F7 part 1).
+  const sameOptions = options.identifierMode === batch.options.identifierMode && options.precedence === batch.options.precedence && JSON.stringify(options.sheetColumns ?? null) === JSON.stringify(batch.options.sheetColumns ?? null);
+  const sameSheets = patches.every(({ upload, detected }) => {
+    const prior = upload.detected as unknown as (Detected & { columnsChosen?: boolean }) | null;
+    return prior?.columnsChosen === true && prior.kind === detected.kind && prior.identifierColumn === detected.identifierColumn && JSON.stringify(prior.urlColumns ?? []) === JSON.stringify(detected.urlColumns);
+  });
+  if (batch.counts.previewReady && sameOptions && sameSheets) return { collecting: false };
   await db().transaction(async (tx) => {
     await draftForUpdate(tx, id);
     for (const patch of patches) await tx.update(catalogUploads).set({ detected: patch.detected, kind: patch.upload.kind === "google_sheet" ? "google_sheet" : patch.detected.kind }).where(eq(catalogUploads.id, patch.upload.id));
-    await tx.update(catalogBatches).set({ options, counts: { ...batch.counts, previewReady: false }, updatedAt: new Date() }).where(eq(catalogBatches.id, id));
+    await tx.update(catalogBatches).set({ options, counts: mergeCounts({ previewReady: false }), updatedAt: new Date() }).where(eq(catalogBatches.id, id));
   });
   await regroupBatch(id);
   return { collecting: true };

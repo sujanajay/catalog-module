@@ -7,10 +7,11 @@ import { batchPrefix } from "@catalog/core/catalog/naming";
 import * as storage from "@catalog/core/storage";
 import { enqueueTask } from "@catalog/core/tasks";
 import { isTransientError } from "@catalog/core/retry";
+import { COLLECT_STALL_MS } from "@catalog/core/catalog/pipeline/status";
 import { db } from "../db";
 import { badRequest, HttpError } from "../errors";
 import { dropLinkRejects, linkFailuresOf } from "@catalog/core/catalog/ingest/link-failures";
-import { assertDraft, BATCH_STARTED, draftForUpdate, INPUT_NOT_FOUND, LINK_KINDS, mergeCounts, queryBatch, reopenBatch } from "./batches";
+import { assertDraft, draftForUpdate, INPUT_NOT_FOUND, LINK_KINDS, mergeCounts, notDraftText, queryBatch, reopenBatch } from "./batches";
 import { HAND_OFF_FAILED, HAND_OFF_RETRY } from "./copy";
 import { collectGoogleLink } from "./links";
 
@@ -26,9 +27,9 @@ export async function planUploads(id: string, value: unknown) {
     const [plan] = await planSignedUploads({ prefix, uploadId, files: [{ relativePath: f.relativePath, size: Number(f.size), type: f.mime }] }, storage.signedPutUrl);
     const kind = /\.zip$/i.test(f.name) ? "zip" : /\.(csv|xls[xm])$/i.test(f.name) ? "sheet" : "image";
     await db().transaction(async (tx) => {
-      const current = await draftForUpdate(tx, id);
+      await draftForUpdate(tx, id);
       await tx.insert(catalogUploads).values({ id: uploadId, batchId: id, name: f.name as string, relativePath: f.relativePath as string, kind, sizeBytes: Number(f.size), mime: plan!.contentType, gcsUri: storage.toGsUri(storage.getBucketName(), plan!.objectPath) });
-      await tx.update(catalogBatches).set({ counts: { ...current.counts, previewReady: false }, updatedAt: new Date() }).where(eq(catalogBatches.id, id));
+      await tx.update(catalogBatches).set({ counts: mergeCounts({ previewReady: false }), updatedAt: new Date() }).where(eq(catalogBatches.id, id));
     });
     return { uploadId, putUrl: plan!.putUrl, headers: { "Content-Type": plan!.contentType } };
   });
@@ -44,11 +45,11 @@ export async function completeUpload(id: string, uploadId: string) {
   const bytes = head.size ? await storage.readRange(upload.gcsUri, 0, Math.min(4099, head.size - 1)) : Buffer.alloc(0);
   const kind = detectUploadKind(upload.name, bytes);
   await db().transaction(async (tx) => {
-    const current = await draftForUpdate(tx, id);
+    await draftForUpdate(tx, id);
     // Conditional: a Remove that landed while the bytes were checked wins (the row stays removed).
     const [done] = await tx.update(catalogUploads).set({ status: "uploaded", kind: kind === "unknown" ? "image" : kind, error: null, detected: { ...upload.detected, completedAt: new Date().toISOString() } }).where(and(eq(catalogUploads.id, uploadId), ne(catalogUploads.status, "removed"))).returning({ id: catalogUploads.id });
     if (!done) throw new HttpError(410, UPLOAD_REMOVED);
-    await tx.update(catalogBatches).set({ counts: { ...current.counts, previewReady: false }, updatedAt: new Date() }).where(eq(catalogBatches.id, id));
+    await tx.update(catalogBatches).set({ counts: mergeCounts({ previewReady: false }), updatedAt: new Date() }).where(eq(catalogBatches.id, id));
   });
   return { uploaded: true };
 }
@@ -56,8 +57,8 @@ export async function completeUpload(id: string, uploadId: string) {
 export const UPLOAD_REMOVED = "This file was removed. Add it again to use it.";
 /**
  * Remove (spec 14b F3, decision 1): the row becomes `removed`, so collection, step 2, the preview and
- * the counts ignore it; its object under uploads/ is left for the lifecycle. Draft only (the existing
- * refusal for a collecting or started batch, until release C). Removing an input invalidates the
+ * the counts ignore it; its object under uploads/ is left for the lifecycle. Draft only (any other
+ * batch is refused with its status sentence, spec 14c F8). Removing an input invalidates the
  * preview with a merge-only counts write. `route` is the route family the id came in on.
  */
 export async function removeInput(id: string, uploadId: string, route: "uploads" | "links") {
@@ -84,7 +85,7 @@ export function handOffError(err: unknown): HttpError {
  */
 export async function ingestBatch(id: string) {
   const batch = await queryBatch(id);
-  if (!["draft", "ingesting"].includes(batch.status)) throw new HttpError(409, BATCH_STARTED);
+  if (!["draft", "ingesting"].includes(batch.status)) throw new HttpError(409, notDraftText(batch));
   // A removed input (spec 14b F3) is neither collected nor waited for.
   const all = await db().select().from(catalogUploads).where(and(eq(catalogUploads.batchId, id), ne(catalogUploads.status, "removed")));
   if (!all.length) throw badRequest("Add photos or a links sheet before continuing.");
@@ -97,12 +98,19 @@ export async function ingestBatch(id: string) {
   if (!uploads.length && batch.counts.previewReady) return { collecting: false };
   const targets = uploads.length ? uploads : current.filter((u) => u.status === "collected").slice(0, 1);
   if (!targets.length) throw badRequest("No files are ready. Check access to your links and try again.");
-  await db().update(catalogBatches).set({ status: "ingesting", counts: { ...batch.counts, previewReady: false }, updatedAt: new Date() }).where(eq(catalogBatches.id, id));
+  // Conditional and merge-only (spec 14c F4 part 2 and F6): a Cancel that landed meanwhile is never
+  // revived, and the worker's counts keys (phase, rate) are kept. "Try again" on a stalled batch clears
+  // the placing lease its lost holder left, so the next delivery can claim it (spec 14c section 3.2).
+  const stalled = batch.status === "ingesting" && Date.now() - batch.updatedAt.getTime() > COLLECT_STALL_MS;
+  const [handing] = await db().update(catalogBatches).set({ status: "ingesting", counts: mergeCounts({ previewReady: false, ...(stalled ? { placingClaim: null } : {}) }), updatedAt: new Date() })
+    .where(and(eq(catalogBatches.id, id), inArray(catalogBatches.status, ["draft", "ingesting"]))).returning({ id: catalogBatches.id });
+  if (!handing) throw new HttpError(409, notDraftText(await queryBatch(id)));
   const run = randomUUID();
   let handed = 0;
   try {
     for (const upload of targets) {
-      await enqueueTask("/tasks/catalog/ingest", { batchId: id, uploadId: upload.id }, { taskId: `ingest-${upload.id}-${run}` });
+      // `run` is part of the placing token (spec 14c F6), so a Try again never reuses a lost delivery's lease.
+      await enqueueTask("/tasks/catalog/ingest", { batchId: id, uploadId: upload.id, run }, { taskId: `ingest-${upload.id}-${run}` });
       handed++;
     }
   } catch (err) {
@@ -122,11 +130,11 @@ export const NO_FAILED_LINKS = "No links failed in this batch. Reload this page.
  * (reopened first, `reopenBatch`), drops the link reject results from the manifests so only those
  * links count as unread, sets the uploads that held them back to `uploaded` (as regroupBatch does)
  * and hands them to collection. Links that were read fine are not fetched again. Refused for a
- * collecting or started batch (the existing refusal, until release C).
+ * collecting, cancelled or started batch, with its status sentence (spec 14c F8).
  */
 export async function retryLinks(id: string) {
   const batch = await queryBatch(id);
-  if (batch.status !== "draft" && !(batch.status === "failed" && !batch.startedAt)) throw new HttpError(409, BATCH_STARTED);
+  if (batch.status !== "draft" && !(batch.status === "failed" && !batch.startedAt)) throw new HttpError(409, notDraftText(batch));
   const { rows } = await linkFailuresOf(db(), id, { storage });
   if (!rows.length) throw badRequest(NO_FAILED_LINKS);
   await reopenBatch(id);
@@ -142,8 +150,9 @@ export async function retryLinks(id: string) {
   return ingestBatch(id);
 }
 export async function regroupBatch(id: string) {
-  const batch = await assertDraft(id);
+  await assertDraft(id);
   await db().update(catalogUploads).set({ status: "uploaded" }).where(and(eq(catalogUploads.batchId, id), inArray(catalogUploads.status, ["collected", "failed"])));
-  await db().update(catalogBatches).set({ counts: { ...batch.counts, previewReady: false } }).where(eq(catalogBatches.id, id));
+  // A merge: only previewReady and the placing lease change (spec 14c section 3.2: regroupBatch clears the lease).
+  await db().update(catalogBatches).set({ counts: mergeCounts({ previewReady: false, placingClaim: null }) }).where(eq(catalogBatches.id, id));
   return ingestBatch(id);
 }

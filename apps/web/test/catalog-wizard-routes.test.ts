@@ -274,7 +274,8 @@ describe("ingest hand-off failures and stalled collecting",()=>{
     expect((await patch(request("PATCH",{name:"catalog-test e2e b"}),ctx(id))).status).toBe(200);
     expect((await ingest(request("POST"),ctx(id))).status).toBe(200);
     expect(await statusOf(id)).toBe("ingesting");
-    const ids=ingestCalls().map(([,body,opts])=>{expect(body).toEqual({batchId:id,uploadId:photo.id});return opts?.taskId;});
+    // The body carries the hand-off's run (spec 14c F6), the same one the task name ends with.
+    const ids=ingestCalls().map(([,body,opts])=>{expect(body).toEqual({batchId:id,uploadId:photo.id,run:expect.any(String)});expect(opts?.taskId).toBe(`ingest-${photo.id}-${(body as {run:string}).run}`);return opts?.taskId;});
     expect(ids).toHaveLength(2);
     for(const taskId of ids) expect(taskId).toMatch(new RegExp(`^ingest-${photo.id}-[0-9a-f-]{36}$`));
     expect(ids[0]).not.toBe(ids[1]);
@@ -299,7 +300,7 @@ describe("ingest hand-off failures and stalled collecting",()=>{
     expect(stuck).toMatchObject({state:"collecting",stalled:true,text:COLLECT_STALLED_TEXT});
     vi.mocked(enqueueTask).mockClear();
     expect((await ingest(request("POST"),ctx(id))).status).toBe(200);
-    expect(ingestCalls().map(([,body])=>body)).toEqual([{batchId:id,uploadId:photo.id}]);
+    expect(ingestCalls().map(([,body])=>body)).toEqual([{batchId:id,uploadId:photo.id,run:expect.any(String)}]);
     expect((await (await get(request("GET"),ctx(id))).json()).state.stalled).toBeUndefined();
   });
   it("Try again on a stalled batch whose files were all read hands one read upload over, so the grouping step runs",async()=>{
@@ -309,7 +310,7 @@ describe("ingest hand-off failures and stalled collecting",()=>{
     await db.update(catalogBatches).set({status:"ingesting",counts:{...row!.counts,previewReady:false},updatedAt:new Date(Date.now()-15*60_000)}).where(eq(catalogBatches.id,id));
     vi.mocked(enqueueTask).mockClear();
     expect((await ingest(request("POST"),ctx(id))).status).toBe(200);
-    expect(ingestCalls().map(([,body])=>body)).toEqual([{batchId:id,uploadId:photo.id}]);
+    expect(ingestCalls().map(([,body])=>body)).toEqual([{batchId:id,uploadId:photo.id,run:expect.any(String)}]);
     await runIngest(db,{storage,fetch:vi.fn(),enqueue:enqueueTask},{batchId:id,uploadId:photo.id});
     const [after]=await db.select().from(catalogBatches).where(eq(catalogBatches.id,id));
     expect(after!.status).toBe("draft");expect(after!.counts.previewReady).toBe(true);

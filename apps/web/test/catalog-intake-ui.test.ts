@@ -7,6 +7,15 @@ import type { LocalUpload } from "../components/catalog/Uploader";
 import { LinkFailuresView, type LinkFailureRow } from "../components/catalog/LinkFailures";
 import { canRetryLinks } from "../lib/catalog/copy";
 import type { LinkFailuresBlock } from "@catalog/core/catalog/ingest/types";
+import UnfinishedBatches, { CancelConfirmView } from "../components/catalog/UnfinishedBatches";
+import { ToastProvider } from "../components/Toast";
+import { ViewerPreviewProvider } from "../components/ViewerPreview";
+import type { UnfinishedBatch } from "../lib/catalog/batches";
+
+vi.mock("next/navigation", async (actual) => ({
+  ...(await actual<typeof import("next/navigation")>()),
+  useRouter: () => ({ refresh: () => undefined, replace: () => undefined, push: () => undefined }),
+}));
 
 const server = (id: string, status: string, extra: Partial<ServerInput> = {}): ServerInput => ({ id, kind: "image", name: `${id}.jpg`, relativePath: `${id}.jpg`, sizeBytes: 2 * 1024 * 1024, status, error: null, ...extra });
 const local = (key: string, extra: Partial<LocalUpload> = {}): LocalUpload => ({ key, name: `${key}.jpg`, relativePath: `${key}.jpg`, size: 1024 * 1024, progress: 40, status: "uploading", retry: vi.fn(), remove: vi.fn(), ...extra });
@@ -101,5 +110,49 @@ describe("link failures card (spec 14b F5 part 1)", () => {
     expect(html).toContain(`<td>row 1, column 2</td>`);
     expect(html).not.toContain("Show all");
     expect(card({ total: 0, temporary: 0, links: 4, products: 0, byReason: [] })).toBe("");
+  });
+});
+
+describe("Your unfinished batches (spec 14c F4 part 2)", () => {
+  const ID = "0b6f3a52-6f0e-4c1e-9d1a-2f6f1b1c9e01", FAILED = "0b6f3a52-6f0e-4c1e-9d1a-2f6f1b1c9e02";
+  const rows: UnfinishedBatch[] = [
+    { id: ID, name: "October lot", brandName: "Test Brand", createdBy: "operator@opptra.com", age: "5 minutes ago", words: "Ready to check", fixable: false, collecting: false },
+    { id: FAILED, name: "Grid paste", brandName: "Test Brand", createdBy: "other@opptra.com", age: "2 days ago", words: "Could not start: No photos could be downloaded.", fixable: true, collecting: false },
+  ];
+  const section = (props: { rows: UnfinishedBatch[]; canAct: boolean; showCreator: boolean }) => renderToStaticMarkup(createElement(ViewerPreviewProvider, null, createElement(ToastProvider, null, createElement(UnfinishedBatches, props))));
+
+  it("lists each batch with its name, brand, state words, age, Continue and Cancel", () => {
+    const html = section({ rows, canAct: true, showCreator: false });
+    expect(html).toContain("<h2 id=\"unfinished-heading\">Your unfinished batches</h2>");
+    for (const text of ["October lot", "Test Brand", "Ready to check", "created 5 minutes ago", "created 2 days ago"]) expect(html).toContain(text);
+    expect(html).toContain(`<a class="btn primary sm" href="/catalog/new?batch=${ID}">Continue</a>`);
+    expect(html.match(/>Cancel<\/button>/g)).toHaveLength(2);
+    expect(html).not.toContain("by operator@opptra.com");
+  });
+
+  it("a batch that failed before Start carries Fix and continue instead of Continue", () => {
+    const html = section({ rows: [rows[1]!], canAct: true, showCreator: false });
+    expect(html).toContain("Could not start: No photos could be downloaded.");
+    expect(html).toContain(">Fix and continue</button>");
+    expect(html).not.toContain(">Continue</a>");
+  });
+
+  it("names the creator for an admin, and gives a viewer the rows without buttons", () => {
+    expect(section({ rows, canAct: true, showCreator: true })).toContain("created 2 days ago by other@opptra.com");
+    const viewer = section({ rows, canAct: false, showCreator: true });
+    expect(viewer).toContain("October lot"); expect(viewer).toContain("Ready to check");
+    expect(viewer).not.toContain("<button"); expect(viewer).not.toContain(">Continue</a>");
+  });
+
+  it("is absent when nothing is unfinished", () => {
+    expect(section({ rows: [], canAct: true, showCreator: false })).toBe("");
+  });
+
+  it("asks inline before cancelling, with Yes, cancel and Keep it", () => {
+    const yes = vi.fn(), keep = vi.fn();
+    const html = renderToStaticMarkup(createElement(CancelConfirmView, { name: "October lot", onYes: yes, onKeep: keep }));
+    expect(html).toContain("Cancel October lot? Nothing was processed and nothing was charged.");
+    expect(html).toContain(">Yes, cancel</button>"); expect(html).toContain(">Keep it</button>");
+    expect(html).not.toContain("modal");
   });
 });

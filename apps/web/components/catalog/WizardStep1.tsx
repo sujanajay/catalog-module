@@ -7,8 +7,11 @@ import PasteBox from "./PasteBox";
 import InputList, { type ServerInput } from "./InputList";
 /** Inputs the paste box adds (pasted links and Google links). */
 const PASTE_KINDS: readonly string[] = PASTE_INPUT_KINDS;
-/** `batchId`, `onInputCount` and `onRemoved` feed the input list (spec 14b F3): what the batch holds, with Remove. */
-export default function WizardStep1({brands,brandSlug,name,productType,locked,email,setBrand,setName,setProductType,ensureBatch,onUploadsBusy,onLinksBusy,onAdded,batchId,onInputCount,onRemoved}: {brands:BrandOption[];brandSlug:string;name:string;productType:ProductType;locked:boolean;email:string;setBrand(value:string):void;setName(value:string):void;setProductType(value:ProductType):void;ensureBatch():Promise<string>;onUploadsBusy(value:boolean):void;onLinksBusy(value:boolean):void;onAdded():void;batchId?:string|null;onInputCount?(count:number):void;onRemoved?():void}) {
+/**
+ * `batchId`, `onInputCount` and `onRemoved` feed the input list (spec 14b F3): what the batch holds, with Remove.
+ * `fixReason` is the reason a batch reopened with Fix and continue could not start, shown above the list (spec 14c F8).
+ */
+export default function WizardStep1({brands,brandSlug,name,productType,locked,email,setBrand,setName,setProductType,ensureBatch,onUploadsBusy,onLinksBusy,onAdded,batchId,onInputCount,onRemoved,fixReason}: {brands:BrandOption[];brandSlug:string;name:string;productType:ProductType;locked:boolean;email:string;setBrand(value:string):void;setName(value:string):void;setProductType(value:ProductType):void;ensureBatch():Promise<string>;onUploadsBusy(value:boolean):void;onLinksBusy(value:boolean):void;onAdded():void;batchId?:string|null;onInputCount?(count:number):void;onRemoved?():void;fixReason?:string|null}) {
  const [local,setLocal] = useState<LocalUpload[]>([]);
  const [version,setVersion] = useState(0);
  // Every add (or a removal from the uploader) refreshes the input list from the server.
@@ -20,5 +23,6 @@ export default function WizardStep1({brands,brandSlug,name,productType,locked,em
  <label htmlFor="batch-name">Batch name (optional)</label><input type="text" id="batch-name" value={name} onChange={(e)=>setName(e.target.value)} placeholder="USPA kids sneakers, Oct lot"/>
  <label htmlFor="product-type">What kind of products?</label><select id="product-type" value={productType} disabled={locked} onChange={(e)=>setProductType(e.target.value as ProductType)}>{[["auto","Detect automatically (recommended)"],["footwear","Footwear"],["apparel_model","Apparel on a model"],["apparel_flat","Apparel laid flat"],["bag_accessory","Bags and accessories"],["other","Other"]].map(([value,label])=><option key={value} value={value}>{label}</option>)}</select><p className="help">A folder can mix footwear, apparel and accessories; we detect each product separately.</p></section>
  <section className="card"><p className="f" style={{marginTop:0}}>What do you have?</p><Uploader ensureBatch={ensureBatch} onBusy={onUploadsBusy} onAdded={added} onRows={setLocal}/><PasteBox email={email} ensureBatch={ensureBatch} onBusy={onLinksBusy} onAdded={added} removed={pasteRemoved}/>
+ {fixReason?<p role="alert" className="fix-reason">{fixReason}</p>:null}
  <InputList batchId={batchId ?? null} version={version} local={local} onCount={(count)=>onInputCount?.(count)} onRemoved={removed}/></section></div>;
 }
