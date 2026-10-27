@@ -60,6 +60,8 @@ export interface IngestDeps {
   fetch: typeof fetch;                               // injected for tests; production passes safeFetch's fetch
   sheets?: SheetsLike; drive?: DriveLike;            // googleapis clients or fakes (web tier only)
   now?: () => Date;
+  /** Host name resolver for safeFetch; tests inject a fake so no DNS is used. Production leaves it unset. */
+  lookup?: (hostname: string) => Promise<string[]>;
 }
 
 export interface Adapter { kind: UploadKind; collect(input: CollectInput): Promise<SourceItem[]> }
@@ -75,6 +77,12 @@ export interface Detected {                          // stored in catalog_upload
   cannotRead?: string | null;                        // "Could not tell which column holds the identifier."
   fileCount?: number; topLevelFolders?: string[];
   formats?: { jpg: number; png: number; heic: number; other: number };
+  // The paste readback (spec 14b F2, url_list only): see parsePastedLinks and checkLinkAccess.
+  linksPerRow?: { min: number; max: number };
+  shape?: "one_per_line" | "id_and_links" | "links_grid";
+  collisions?: { name: string; rows: number[] }[];
+  ignoredCells?: number;
+  sample?: { tried: number; ok: number; webPages: number; failures: { url: string; reason: string }[] };
   rejected?: { name: string; reason: string }[];     // per-upload rejects with their sentences
   message: string;                                   // the one-line text for the wizard
 }

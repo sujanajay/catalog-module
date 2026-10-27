@@ -59,9 +59,26 @@ const isKnownHeading = (h: string) =>
 
 const URL_RE = /^https?:\/\//i;
 
-/** The URL tokens of a cell: split on "," and ";", trimmed, http(s) only. */
+/** A run of whitespace (newlines included), commas or semicolons right before a following link. */
+const BEFORE_LINK = /[\s,;]+(?=https?:\/\/)/i;
+
+/** True for a token that starts with http:// or https:// (case-insensitive) after trimming. */
+export function isLinkToken(token: string): boolean {
+  return URL_RE.test(token.trim());
+}
+
+/**
+ * The tokens of one cell (spec 14b F2): split only before a following http(s) link, never inside a
+ * link, so a link with a space (`.../X-WHITE NAVY_1.JPG`) stays whole and `BH-4610-NE Black` is one
+ * token. Tokens are trimmed; a separator left at the end of a link is dropped.
+ */
+export function splitCell(cell: string): string[] {
+  return cell.split(BEFORE_LINK).map((s) => s.trim()).filter((s) => s !== "").map((s) => (isLinkToken(s) ? s.replace(/[\s,;]+$/, "") : s));
+}
+
+/** The URL tokens of a cell, in order (see splitCell). */
 export function cellUrls(cell: string | undefined): string[] {
-  return (cell ?? "").split(/[,;]/).map((s) => s.trim()).filter((s) => URL_RE.test(s));
+  return splitCell(cell ?? "").filter(isLinkToken);
 }
 
 /** The step 2 sentence for a detection (detect-step.ts's sheetColumnsSentence on this sheet's header). */

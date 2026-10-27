@@ -1,4 +1,5 @@
 // Tier 2 (PGlite + fake storage, fake fetch, fake enqueue): the ingest run (spec 04, "Ingest run").
+import { readFileSync } from "node:fs";
 import { Readable } from "node:stream";
 import { and, eq } from "drizzle-orm";
 import sharp from "sharp";
@@ -484,5 +485,36 @@ describe("runIngest", () => {
     expect(await db.select().from(catalogProductAliases).where(and(eq(catalogProductAliases.aliasKey, "RA"), eq(catalogProductAliases.brandSlug, "uspa")))).toEqual([]);
     expect(await sourcesOf(other.id)).toEqual(otherRows);
     expect((await batchRow(batch.id)).counts).toMatchObject({ products: 3, sources: 4, newProducts: 3, collected: 4, collectTotal: 4 });
+  });
+});
+
+describe("a pasted grid of links (spec 14b F2)", () => {
+  it("collects intake-pasted-grid.txt end to end: 6 products, 27 photos, the space-name product with 5 shots", async () => {
+    const w = fakeWorld();
+    const text = readFileSync(new URL("../../../test-fixtures/catalog/intake/intake-pasted-grid.txt", import.meta.url), "utf8");
+    // The fake host serves every link of the paste, by the URL that is fetched (spaces as %20).
+    for (const line of text.trim().split("\n")) for (const link of line.split("\t").filter((c) => c.startsWith("https://"))) w.web.set(link.replace(/ /g, "%20"), await jpeg());
+    const [b] = await db.insert(catalogBatches).values({
+      brandSlug: "test_brand", brandName: "Test Brand", name: "pasted grid", isTest: true, createdBy: "op@opptra.com", channels: [],
+      options: { identifierMode: "filename", precedence: "uploads_then_links", sheetColumns: null },
+    }).returning();
+    const [u] = await db.insert(catalogUploads).values({ batchId: b!.id, kind: "url_list", name: "Image links", sourceUrl: text.trim(), gcsUri: null, status: "uploaded" }).returning();
+    const lookup = async () => ["93.184.215.14"];
+    let body: { batchId: string; uploadId: string; cursor?: string } | null = { batchId: b!.id, uploadId: u!.id };
+    while (body) {
+      const from = w.enqueued.length;
+      await runIngest(db, { ...deps(w), lookup }, body);
+      body = (w.enqueued[from]?.body as typeof body) ?? null;
+    }
+
+    expect((await batchRow(b!.id)).counts).toMatchObject({ products: 6, sources: 27, unsupportedFiles: 0, previewReady: true, failReason: null });
+    const [upload] = await db.select().from(catalogUploads).where(eq(catalogUploads.id, u!.id));
+    expect(upload!.detected?.rejected ?? []).toEqual([]);
+    const statuses = await linkStatusesOf(b!.id);
+    expect(Object.keys(statuses).sort()).toEqual(["BH-4610-NE-NERO", "BH-4611-BX-BOXER", "BH-4612-MO-MOCHA", "BH-4613-TN-TAN", "BH-4614-OL-OLIVE", "BHSS2620Z-WHITE NAVY"]);
+    const rows = await sourcesOf(b!.id);
+    expect(rows).toHaveLength(27);
+    expect(rows.filter((r) => r.originalName.startsWith("BHSS2620Z-WHITE NAVY_")).map((r) => r.originalName).sort()).toEqual([1, 2, 3, 4, 5].map((n) => `BHSS2620Z-WHITE NAVY_${n}.JPG`));
+    expect(w.calls.fetches.filter((f) => f.includes("BHSS2620Z")).every((f) => f.includes("WHITE%20NAVY"))).toBe(true);
   });
 });

@@ -136,7 +136,7 @@ async function readItem(item: SourceItem, deps: IngestDeps, ctx: { prefix: strin
   const name = baseName(item);
   let buf: Buffer;
   if (item.bytes.kind === "url") {
-    const got = await fetchSourceUrl(item, deps);
+    const got = await fetchSourceUrl(item, deps, deps.lookup ? { lookup: deps.lookup } : {});
     if (!got.ok) return { ok: false, reason: got.reason };
     buf = got.buf;
   } else if (item.bytes.kind === "zip-entry") {
