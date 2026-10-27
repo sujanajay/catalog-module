@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, expectTypeOf, it, vi } from "vitest";
 import {
   buildTaskRequest,
+  chunkTaskId,
   DISPATCH_DEADLINE_SEC,
   enqueueTask,
   TASK_ROUTES,
@@ -74,6 +75,12 @@ describe("buildTaskRequest", () => {
   it("taskId becomes task.name under the queue path", () => {
     const req = buildTaskRequest("/tasks/catalog/chunk", {}, cfg, { taskId: "chunk-b1_3-render" });
     expect((req.task as BuiltTask).name).toBe(`${QUEUE}/tasks/chunk-b1_3-render`);
+  });
+
+  it("chunkTaskId names one task per chunk step and passes the task id rule (spec 15 E3)", () => {
+    const id = chunkTaskId("6f1c1a52-1d0e-4c9b-9a51-2b1f0f3c7d10", "render", 2);
+    expect(id).toBe("chunk-6f1c1a52-1d0e-4c9b-9a51-2b1f0f3c7d10-render-2");
+    expect((buildTaskRequest("/tasks/catalog/chunk", {}, cfg, { taskId: id }).task as BuiltTask).name).toBe(`${QUEUE}/tasks/${id}`);
   });
 
   it("rejects a taskId with characters Cloud Tasks does not allow", () => {

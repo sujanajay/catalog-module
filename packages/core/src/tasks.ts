@@ -80,6 +80,15 @@ export const DISPATCH_DEADLINE_SEC = 900;
 
 const TASK_ID_RE = /^[A-Za-z0-9_-]{1,500}$/;
 
+/**
+ * Spec 15: the id of a chunk's one live task, `chunk-<chunkId>-<stage>-<step>`. Every chunk enqueue uses it
+ * with the body `{chunkId, stage, step}`, and every re-dispatch raises the step, so a new task never meets
+ * the queue's deduplication of an id that ran recently.
+ */
+export function chunkTaskId(chunkId: string, stage: string, step: number): string {
+  return `chunk-${chunkId}-${stage}-${step}`;
+}
+
 /** gRPC code ALREADY_EXISTS: a task with this name exists or ran recently (deduplicated). */
 const GRPC_ALREADY_EXISTS = 6;
 

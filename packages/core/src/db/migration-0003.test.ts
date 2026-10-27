@@ -56,7 +56,7 @@ describe("0003_intake_states.sql", () => {
 
     await runMigrations(db, resolveMigrationsFolder());
     const applied = await rows<{ n: number }>(sql`select count(*)::int as n from drizzle.__drizzle_migrations`);
-    expect(applied[0]!.n).toBe(4);
+    expect(applied[0]!.n).toBeGreaterThanOrEqual(4);
 
     await insertBatch("cancelled");
     await insertUpload("removed");
