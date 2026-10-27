@@ -9,7 +9,8 @@ type PGlite = Awaited<ReturnType<typeof createTestDb>>["client"];
 
 // --- In-memory storage --------------------------------------------------------------------------
 
-export type StoredObject = { buf: Buffer; mime: string };
+/** `metadata` is the object's custom metadata (the sha256 placing reads back, spec 14c F7 part 1). */
+export type StoredObject = { buf: Buffer; mime: string; metadata?: Record<string, string> };
 export type ObjectStore = Map<string, StoredObject>;
 
 const notFound = (uri: string) => Object.assign(new Error(`harness: no object ${uri}`), { code: 404 });
@@ -30,15 +31,15 @@ export function fakeStorage(objects: ObjectStore, origin: string) {
     const slice = (buf: Buffer, opts?: { start?: number; end?: number }) => (opts?.start === undefined ? buf : buf.subarray(opts.start, (opts.end ?? buf.length - 1) + 1));
     return {
       name,
-      async save(buf: Buffer | Uint8Array | string, opts?: { contentType?: string }) {
-        objects.set(uri, { buf: Buffer.from(buf), mime: opts?.contentType ?? "application/octet-stream" });
+      async save(buf: Buffer | Uint8Array | string, opts?: { contentType?: string; metadata?: { metadata?: Record<string, string> } }) {
+        objects.set(uri, { buf: Buffer.from(buf), mime: opts?.contentType ?? "application/octet-stream", metadata: opts?.metadata?.metadata });
       },
       async download(opts?: { start?: number; end?: number }) {
         return [slice(get().buf, opts)] as [Buffer];
       },
       async getMetadata() {
         const o = get();
-        return [{ name, bucket, size: String(o.buf.length), contentType: o.mime, generation: "1" }] as const;
+        return [{ name, bucket, size: String(o.buf.length), contentType: o.mime, generation: "1", metadata: o.metadata }] as const;
       },
       async exists() {
         return [objects.has(uri)] as [boolean];

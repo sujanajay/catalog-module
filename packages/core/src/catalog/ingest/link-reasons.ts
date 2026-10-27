@@ -106,8 +106,8 @@ export function reasonLine(g: LinkReasonGroup): string {
   return `${fmtCount(g.count)} ${g.reason}, for example ${g.first.url}${g.first.where ? ` (${g.first.where})` : ""}.`;
 }
 
-/** The ending of the links no-photos sentence when every failure is permanent (release B; release C replaces it). */
-export const NO_LINK_PHOTOS_PERMANENT = "Check that the links open in a browser, then make a new batch and paste the corrected links.";
+/** The ending of the links no-photos sentence when every failure is permanent (from release C, spec 14c F8: the batch is fixed in place). */
+export const NO_LINK_PHOTOS_PERMANENT = "Check that the links open in a browser, then press Fix and continue and paste the corrected links.";
 /** The ending when some failures may work on a second try (the retry button is shown with it). */
 export const NO_LINK_PHOTOS_TEMPORARY = "Some of these may work on a second try. Press Try the failed links again.";
 

@@ -7,9 +7,9 @@ import CatalogWizard, { resumedGrouping, type WizardInitialBatch } from "../comp
 import ChannelPicker from "../components/catalog/ChannelPicker";
 import OverwritePreview from "../components/catalog/OverwritePreview";
 import WizardStep2, { mergeSheetChoices } from "../components/catalog/WizardStep2";
-import WizardStep4 from "../components/catalog/WizardStep4";
+import WizardStep4, { step4CollectingLine } from "../components/catalog/WizardStep4";
 import { ToastProvider } from "../components/Toast";
-import { LEAVING_LINE, SHEET_READING_TEXT, STEP2_COLLECTING_TEXT, STEP3_COLLECTING_TEXT, wizardCollectingText } from "../lib/catalog/copy";
+import { collectingBannerText, LEAVING_LINE, SHEET_READING_TEXT, STEP2_COLLECTING_TEXT, STEP3_COLLECTING_TEXT, wizardCollectingText } from "../lib/catalog/copy";
 import type { WizardDetected, WizardPreview } from "../lib/catalog/preview";
 
 vi.mock("next/navigation", async (actual) => ({
@@ -21,7 +21,7 @@ const preview = {
   ready: true, previewAt: "2026-10-19T00:00:00.000Z", groupedBy: "Grouped by folder name",
   counts: {products:1,sources:3,photos:3,channels:2,outputs:6}, warnings: [], collected:3,collectTotal:3,estimate:null,
   groups:[{identifier:"ABC123",opptraSkuIds:[],shots:3,firstPhotoUrl:"https://thumb.example/one",status:"existing",files:[{n:1,originalName:"ABC123/ABC123_1.heic",width:1200,height:1600}],notes:[]}],totalRows:1,
-  overwrite:{newProducts:0,existingProducts:[{identifier:"ABC123",liveShots:[1,2,3,4,5],uploadShots:[1,2,3],shotsToRemove:[4,5],channels:["noon"]}],renameHints:[],sameProductPairs:[]},busy:[]
+  overwrite:{newProducts:0,existingProducts:[{identifier:"ABC123",liveShots:[1,2,3,4,5],uploadShots:[1,2,3],shotsToRemove:[4,5],channels:["noon"]}],renameHints:[],sameProductPairs:[],sameBatches:[],duplicatePhotos:[]},busy:[]
 } as unknown as WizardPreview;
 describe("wizard visible state",()=>{
   it("starts with all nine marketplaces unchecked and reflects a deliberate selection",()=>{
@@ -99,15 +99,15 @@ describe("wizard steps 2 and 3 while collecting (F6 release A)", () => {
   it("step 2 renders the polled count and the leaving line, never 0 of 0 products", () => {
     const html = renderToStaticMarkup(createElement(ToastProvider, null, createElement(CatalogWizard, { brands: [{ slug: "uspa", name: "USPA" }] as never, shareEmail: "", initialBatch: resumed })));
     expect(html).toContain('aria-current="step">Check what we found');
-    expect(html).toContain(`40 of 287 files copied from your links. ${LEAVING_LINE}`);
+    expect(html).toContain(`Downloading photos 40 of 287. ${LEAVING_LINE}`);
     expect(html).not.toContain("0 of 0 products");expect(html).not.toContain("Processing starts by itself");
   });
   it("step 3 uses the same polled text; the fixed sentences only before a count or once stalled", () => {
-    expect(wizardCollectingText(state, 287, STEP3_COLLECTING_TEXT)).toBe(`40 of 287 files copied from your links. ${LEAVING_LINE}`);
+    expect(wizardCollectingText(state, 287, STEP3_COLLECTING_TEXT)).toBe(`Downloading photos 40 of 287. ${LEAVING_LINE}`);
     expect(wizardCollectingText(null, null, STEP3_COLLECTING_TEXT)).toBe(`Collecting files. Continue when the grouping is ready. ${LEAVING_LINE}`);
     expect(wizardCollectingText({ ...state, stalled: true }, 287, STEP2_COLLECTING_TEXT)).toBe(`${STEP2_COLLECTING_TEXT} ${LEAVING_LINE}`);
     expect(wizardCollectingText(deriveBatchState({ status: "draft", counts: EMPTY_BATCH_COUNTS }), null, STEP2_COLLECTING_TEXT)).not.toMatch(/0 of 0/);
-    expect(LEAVING_LINE).toBe("You can close this page. Open this batch again from the batch list and press Continue setting up when it is ready.");
+    expect(LEAVING_LINE).toBe("You can close this page. Find this batch under Your unfinished batches and press Continue when it is ready.");
   });
   it("a resumed batch keeps the grouping answers saved at step 2; untouched defaults let detection decide", () => {
     const ready = { ...resumed, status: "draft" as const, counts: { ...counts, previewReady: true } };
@@ -119,7 +119,7 @@ describe("wizard steps 2 and 3 while collecting (F6 release A)", () => {
   });
   it("a collecting batch whose files are not listed yet shows the fixed sentence, never 0 of 0", () => {
     const listing = deriveBatchState({ status: "ingesting", counts: { ...EMPTY_BATCH_COUNTS, collected: 0, collectTotal: 0 }, source: "links" });
-    expect(listing.text).toBe("0 of 0 files copied from your links");
+    expect(listing.text).toBe("Downloading photos");
     expect(wizardCollectingText(listing, 0, STEP2_COLLECTING_TEXT)).toBe(`${STEP2_COLLECTING_TEXT} ${LEAVING_LINE}`);
     expect(wizardCollectingText(listing, null, STEP3_COLLECTING_TEXT)).toBe(`${STEP3_COLLECTING_TEXT} ${LEAVING_LINE}`);
   });
@@ -127,5 +127,31 @@ describe("wizard steps 2 and 3 while collecting (F6 release A)", () => {
     const empty = renderToStaticMarkup(createElement(WizardStep4, { preview: null }));
     expect(empty).toContain(LEAVING_LINE);expect(empty).toContain("Collecting files.");expect(empty).not.toMatch(/\b0 of 0\b/);
     expect(renderToStaticMarkup(createElement(WizardStep4, { preview: { ...preview, ready: false, collected: 0, collectTotal: 0 } }))).not.toMatch(/\b0 of 0\b/);
+  });
+});
+describe("phase, count and time while collecting and placing (spec 14c F6, web side)", () => {
+  const t0 = new Date("2026-10-27T10:00:00Z"), t1 = new Date(+t0 + 100_000);
+  const placing = { ...EMPTY_BATCH_COUNTS, collected: 1400, collectTotal: 1400, phase: "placing" as const, placed: 200, placeTotal: 1400, rate: [{ at: t0.toISOString(), phase: "placing" as const, done: 0 }, { at: t1.toISOString(), phase: "placing" as const, done: 200 }] };
+  const notReady = (counts: { collected: number; collectTotal: number | null; placeTotal?: number | null }) => ({ ...preview, ready: false, counts: { ...preview.counts, ...counts }, collected: counts.collected, collectTotal: counts.collectTotal }) as unknown as WizardPreview;
+  it("step 4's bar follows placed during placing, with the measured time", () => {
+    expect(step4CollectingLine(notReady(placing), t1)).toEqual({ text: "Placing photos 200 of 1,400, about 10 min left", done: 200, total: 1400 });
+    const html = renderToStaticMarkup(createElement(WizardStep4, { preview: notReady(placing) }));
+    expect(html).toContain('<progress value="200" max="1400">');expect(html).toContain("Placing photos 200 of 1,400");expect(html).toContain(LEAVING_LINE);
+  });
+  it("step 4 keeps the plain count for a row without a phase and shows nothing before a total", () => {
+    expect(step4CollectingLine(notReady({ ...EMPTY_BATCH_COUNTS, collected: 3, collectTotal: 10 }), t1)?.text).toBe("Collecting files 3 of 10");
+    expect(step4CollectingLine(notReady({ ...placing, placeTotal: null }), t1)).toBeNull();
+    expect(step4CollectingLine(null, t1)).toBeNull();
+  });
+  it("the batch page banner names the phase, the count, the source and the time", () => {
+    expect(collectingBannerText({ ...placing, phase: "downloading", collected: 612, rate: [{ at: t0.toISOString(), phase: "downloading", done: 400 }, { at: t1.toISOString(), phase: "downloading", done: 612 }] }, "links", t1)).toBe("Downloading photos 612 of 1,400 from your links, about 7 min left");
+    expect(collectingBannerText(placing, "Google Sheet", t1)).toBe("Placing photos 200 of 1,400 from your Google Sheet, about 10 min left");
+    // Phase words that already name the source are not followed by it; no count before a total.
+    expect(collectingBannerText({ ...EMPTY_BATCH_COUNTS, collected: 0, collectTotal: null }, "zip", t1)).toBe("Unpacking your zip");
+    expect(collectingBannerText({ ...EMPTY_BATCH_COUNTS, phase: "reading", collected: 40, collectTotal: 287 }, "Google Sheet", t1)).toBe("Reading your sheet 40 of 287");
+  });
+  it("steps 2 and 3 show the polled phase words and time with the leaving line", () => {
+    const state = deriveBatchState({ status: "ingesting", counts: placing, source: "links", now: t1, updatedAt: t1 });
+    expect(wizardCollectingText(state, 1400, STEP2_COLLECTING_TEXT)).toBe(`Placing photos 200 of 1,400, about 10 min left. ${LEAVING_LINE}`);
   });
 });

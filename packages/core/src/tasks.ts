@@ -31,6 +31,7 @@ export const TASK_ROUTES = [
   "/tasks/catalog/sync-master",
   "/tasks/catalog/sweep",
   "/tasks/catalog/ingest",
+  "/tasks/catalog/ingest-more",
   "/tasks/catalog/chunk",
   "/tasks/catalog/publish",
   "/tasks/catalog/finalize",
@@ -39,7 +40,7 @@ export const TASK_ROUTES = [
 export type TaskRoute = (typeof TASK_ROUTES)[number];
 
 /** Routes that run on the ingest queue (TASKS_INGEST_QUEUE) when it is configured. */
-export const INGEST_TASK_ROUTES: readonly TaskRoute[] = ["/tasks/catalog/ingest"];
+export const INGEST_TASK_ROUTES: readonly TaskRoute[] = ["/tasks/catalog/ingest", "/tasks/catalog/ingest-more"];
 
 /** Routes that run on the bulk queue (TASKS_BULK_QUEUE) for a bulk batch, when it is configured (spec 16). */
 export const BULK_TASK_ROUTES: readonly TaskRoute[] = ["/tasks/catalog/chunk", "/tasks/catalog/publish"];
