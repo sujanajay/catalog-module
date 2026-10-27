@@ -22,7 +22,7 @@ import { CHANNEL_IDS, type ChannelId } from "@catalog/core/catalog/types";
 import type { CanvasPlan } from "@catalog/core/catalog/render";
 import { buildZip } from "../../../packages/core/test-fixtures/catalog/ingest-a/builders";
 import { workerCatalogDeps, type CatalogDeps } from "./catalog/deps";
-import { chunkFinished, currentChunkTask, handleChunkTask, IN_PROCESS_DELIVERIES } from "./catalog/chunk";
+import { deliverChunkToEnd } from "./catalog/chunk";
 import { handlePublishTask } from "./catalog/publish";
 import { handleFinalizeTask } from "./catalog/finalize";
 import { cannedQa } from "./catalog/qa-mock";
@@ -176,7 +176,7 @@ export async function runRealFixture(db: Db, fixture: RealFixture, out: string, 
     const chunks = planChunks(productIds.map(productId => ({productId,sourceCount:sources.filter(s => s.productId===productId).length})),25);
     for (const [index,plan] of chunks.entries()) {
       const [chunk] = await db.insert(catalogChunks).values({batchId:b.id,index,stage:"matte",productIds:plan.productIds}).returning();
-      for (let delivery=0;delivery<IN_PROCESS_DELIVERIES && !(await chunkFinished(deps.db,chunk!.id));delivery++) {lastChunkError=undefined;const result=await runUntilSettled(async()=>handleChunkTask(deps,await currentChunkTask(deps.db,chunk!.id)),{label:`chunk ${chunk!.id}`,reason:()=>lastChunkError}); assert.equal(result.httpStatus,200,`Chunk failed: ${result.outcome}`);}
+      await deliverChunkToEnd(deps,chunk!.id,async deliver=>{lastChunkError=undefined;const result=await runUntilSettled(deliver,{label:`chunk ${chunk!.id}`,reason:()=>lastChunkError}); assert.equal(result.httpStatus,200,`Chunk failed: ${result.outcome}`);});
       for (const productId of plan.productIds) {
         const result=await handlePublishTask(deps,{batchId:b.id,productId});
         // Name each unpublished output's reason; cleanup deletes the rows before anyone can look.

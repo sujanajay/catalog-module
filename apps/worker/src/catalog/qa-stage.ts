@@ -53,7 +53,7 @@ async function failureDetail(response:Response | undefined,failure:unknown):Prom
 export const QA_DELIVERY_BACKOFF_MS = 300_000;
 /** Keyed by the batch row a delivery read at its start (chunk.ts reads it once per delivery). */
 const deliveryBackoff = new WeakMap<Batch,BackoffBudget>();
-function backoffFor(batch:Batch):BackoffBudget {
+export function backoffFor(batch:Batch):BackoffBudget {
  let budget=deliveryBackoff.get(batch);
  if(!budget) {budget={remainingMs:QA_DELIVERY_BACKOFF_MS};deliveryBackoff.set(batch,budget);}
  return budget;

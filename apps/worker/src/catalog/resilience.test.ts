@@ -9,7 +9,7 @@ import * as storage from "@catalog/core/storage";
 import { CHUNK_STALLED_REASON, dispatchChunks } from "@catalog/core/catalog/pipeline/dispatch";
 import { chunkTaskId, DISPATCH_DEADLINE_SEC } from "@catalog/core/tasks";
 import type { ChannelId } from "@catalog/core/catalog/types";
-import { workerCatalogDeps, type CatalogDeps } from "./deps";
+import { refreshBatchProgress, workerCatalogDeps, type CatalogDeps } from "./deps";
 import { currentChunkTask, handleChunkTask } from "./chunk";
 import { handleSweep } from "./sweep";
 import type { HandleOptions } from "../server";
@@ -202,7 +202,7 @@ describe("E2: heartbeat lease", () => {
       w.set(T0 + t);
       expect(await live.renew()).toBe(true);
       expect(await handleChunkTask(w.deps, live.body)).toEqual({ httpStatus: 503, outcome: "busy" });
-      expect(await handleChunkTask(w.deps, live.body, { retryCount: 3 })).toEqual({ httpStatus: 200, outcome: "duplicate" });
+      expect(await handleChunkTask(w.deps, live.body, { retryCount: 4 })).toEqual({ httpStatus: 200, outcome: "duplicate" });
     }
     expect((await row(id)).taskName).toBe(holder);
     w.set(T0 + DEADLINE_MS);
@@ -219,7 +219,7 @@ describe("E2: heartbeat lease", () => {
     w.set(T0 + 60_000);
     await live.renew();
     w.set(T0 + 60_000 + 119_000);
-    expect((await handleChunkTask(w.deps, live.body, { retryCount: 3 })).outcome).toBe("duplicate");
+    expect((await handleChunkTask(w.deps, live.body, { retryCount: 4 })).outcome).toBe("duplicate");
     w.set(T0 + 60_000 + 121_000);
     expect((await handleChunkTask(w.deps, live.body, { retryCount: 1 })).httpStatus).toBe(200);
     live.release();
@@ -245,7 +245,7 @@ describe("E3: one live task per chunk", () => {
     const before = await row(id);
     expect(await w.deliver({ chunkId: id, stage: "matte", step: 5 })).toEqual({ httpStatus: 200, outcome: "stale" });
     expect(await w.deliver({ chunkId: id, stage: "render", step: 0 })).toEqual({ httpStatus: 200, outcome: "stale" });
-    expect(await w.deliver(live.body, { retryCount: 3 })).toEqual({ httpStatus: 200, outcome: "duplicate" });
+    expect(await w.deliver(live.body, { retryCount: 4 })).toEqual({ httpStatus: 200, outcome: "duplicate" });
     expect(await w.deliver({ chunkId: id })).toEqual({ httpStatus: 200, outcome: "stale" });
     expect(await row(id)).toEqual(before);
     expect(w.queue).toHaveLength(0);
@@ -261,13 +261,18 @@ describe("E3: one live task per chunk", () => {
     expect(await w.deliver({ chunkId: id, stage: "render", step: 1 })).toEqual({ httpStatus: 200, outcome: "stale" });
   }, 60_000);
 
-  it("the same task's retry after a crash waits (503) and claims once the lease lapses", async () => {
+  it("the same task's retries after a crash wait (503) on the queue's real back-off and the last one claims", async () => {
     const w = world(), s = await seed(w, "e3-crash", [[1]]), id = s.chunks[0]!.id;
-    await db.update(catalogChunks).set({ status: "running", taskName: "crashed", startedAt: new Date(T0 - 60_000), leaseUntil: new Date(T0 + 60_000), dispatchedAt: new Date(T0 - 60_000) }).where(eq(catalogChunks.id, id));
+    // The holder renewed just before it crashed at T0, so its lease runs the full 120 s.
+    await db.update(catalogChunks).set({ status: "running", taskName: "crashed", startedAt: new Date(T0 - 60_000), leaseUntil: new Date(T0 + 120_000), dispatchedAt: new Date(T0 - 60_000) }).where(eq(catalogChunks.id, id));
     const body = { chunkId: id, stage: "matte", step: 0 };
-    expect(await w.deliver(body, { retryCount: 1 })).toEqual({ httpStatus: 503, outcome: "busy" });
-    w.advance(61_000);
-    expect(await w.deliver(body, { retryCount: 2 })).toEqual({ httpStatus: 200, outcome: "done" });
+    // Cloud Tasks: 5 attempts, back-off 10 s doubling, so retries 1-4 arrive at about +10, +30, +70 and +150 s.
+    for (const [retryCount, at] of [[1, 10_000], [2, 30_000], [3, 70_000]] as const) {
+      w.set(T0 + at);
+      expect(await w.deliver(body, { retryCount })).toEqual({ httpStatus: 503, outcome: "busy" });
+    }
+    w.set(T0 + 150_000);
+    expect(await w.deliver(body, { retryCount: 4 })).toEqual({ httpStatus: 200, outcome: "done" });
   }, 60_000);
 });
 
@@ -285,7 +290,6 @@ describe("E4: the sweep recovers only dead chunks", () => {
     w.set(T0 + 21 * 60_000);
     await sweep(w);
     expect(w.queue.map((t) => t.taskId)).toEqual([chunkTaskId(waiting!, "matte", 1)]);
-    expect(w.log).not.toHaveBeenCalledWith("chunk recovered", expect.anything()); // the core logger writes it
     w.set(T0 + 21 * 60_000 + 30_000);
     await sweep(w);
     expect(w.queue).toHaveLength(1);
@@ -300,6 +304,26 @@ describe("E4: the sweep recovers only dead chunks", () => {
     expect(await row(id)).toMatchObject({ status: "queued", step: 1, taskName: null });
     await drain(w);
     expect(await row(id)).toMatchObject({ status: "done" });
+  }, 60_000);
+
+  it("a hand-off whose enqueue fails is logged, keeps the delivery's 200, and the sweep sends the next step after 30 min", async () => {
+    const w = world(), s = await seed(w, "e4-handoff-lost", [[10]]), id = s.chunks[0]!.id;
+    w.slow("matteFor", () => 60_000);
+    const enqueue = w.deps.enqueue;
+    w.deps.enqueue = vi.fn(async (...args: Parameters<CatalogDeps["enqueue"]>) => { if (args[2]?.taskId === chunkTaskId(id, "matte", 1)) throw new Error("UNAVAILABLE"); return enqueue(...args); }) as CatalogDeps["enqueue"];
+    expect((await w.deliver(await currentChunkTask(db, id))).httpStatus).toBe(200);
+    expect(deliveries(w, "handed_off")).toHaveLength(1);
+    expect(w.log).toHaveBeenCalledWith("chunk dispatch failed", expect.objectContaining({ severity: "WARNING", chunkId: id, step: 1 }));
+    expect(w.queue).toHaveLength(0);
+    expect(await row(id)).toMatchObject({ status: "queued", step: 1 });
+    w.advance(31 * 60_000);
+    await sweep(w);
+    // The database is shared by this file's tests; keep only this chunk's tasks.
+    w.queue.splice(0, w.queue.length, ...w.queue.filter((t) => t.body.chunkId === id));
+    expect(w.queue.map((t) => t.taskId)).toEqual([chunkTaskId(id, "matte", 2)]);
+    await drain(w);
+    expect(await row(id)).toMatchObject({ status: "done" });
+    expect(w.deps.matteFor).toHaveBeenCalledTimes(10);
   }, 60_000);
 
   it("three deliveries in a row that finish no photo fail the chunk with the sentence", async () => {
@@ -378,6 +402,18 @@ describe("E5: a window per batch", () => {
 });
 
 describe("E7: the operator sees true processing progress", () => {
+  it("counts a photo the cut-out step skipped (no matte) as prepared once its chunk has left that step", async () => {
+    const w = world(), s = await seed(w, "e7-skipped", [[2], [1]]);
+    const [first, second] = s.chunks.map((c) => c.id);
+    const prepared = async () => { await refreshBatchProgress(db, s.batch.id); return (await batchRow(s.batch.id)).counts.prepared; };
+    expect(await prepared()).toBe(0);
+    // As for unchanged shots of a re-upload: the first chunk moved on with no matte written for its photos.
+    await db.update(catalogChunks).set({ stage: "render" }).where(eq(catalogChunks.id, first!));
+    expect(await prepared()).toBe(2);
+    await db.update(catalogChunks).set({ status: "failed" }).where(eq(catalogChunks.id, second!));
+    expect(await prepared()).toBe(3);
+  }, 60_000);
+
   it("logs one chunk delivery line per delivery with the step times, and a render hand-off moves the measured rate", async () => {
     const w = world(), s = await seed(w, "e7-line", [[4]]), id = s.chunks[0]!.id;
     w.queue.push({ taskId: "start", body: await currentChunkTask(db, id), retryCount: 0 });

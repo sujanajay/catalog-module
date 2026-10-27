@@ -78,8 +78,11 @@ export const PROCESSING_RATE_SAMPLES = 5;
 export async function refreshBatchProgress(db:Db,batchId:string,now:Date=new Date()):Promise<void> {
   const groups=await db.select({status:catalogOutputs.status,n:count()}).from(catalogOutputs).where(eq(catalogOutputs.batchId,batchId)).groupBy(catalogOutputs.status);
   const [held]=await db.select({n:count()}).from(catalogBatchProducts).where(and(eq(catalogBatchProducts.batchId,batchId),eq(catalogBatchProducts.change,"pending_attention")));
-  // Spec 15 E7: photos prepared (cut out, failed, or left out as a size chart) and the last finished photo.
-  const [prepared]=await db.select({n:count()}).from(catalogSourceImages).where(and(eq(catalogSourceImages.batchId,batchId),or(isNotNull(catalogSourceImages.matteUri),eq(catalogSourceImages.status,"failed"),sql`${catalogSourceImages.flags} @> '["chart_image"]'::jsonb`)));
+  // Spec 15 E7: photos prepared (cut out, failed, or left out as a size chart) and the last finished photo. A photo
+  // the cut-out step skips (an unchanged shot of a re-upload has no pending output) counts once its chunk has left
+  // the cut-out step, so the count reaches the total.
+  const [prepared]=await db.select({n:count()}).from(catalogSourceImages).where(and(eq(catalogSourceImages.batchId,batchId),or(isNotNull(catalogSourceImages.matteUri),eq(catalogSourceImages.status,"failed"),sql`${catalogSourceImages.flags} @> '["chart_image"]'::jsonb`,
+    sql`EXISTS (SELECT 1 FROM ${catalogChunks} c WHERE c.batch_id = ${catalogSourceImages.batchId} AND c.product_ids @> jsonb_build_array(${catalogSourceImages.productId}) AND (c.source_image_ids IS NULL OR jsonb_array_length(c.source_image_ids) = 0 OR c.source_image_ids @> jsonb_build_array(${catalogSourceImages.id})) AND (c.stage <> 'matte' OR c.status IN ('done','failed')))`)));
   const [last]=await db.select({at:max(catalogChunks.progressAt)}).from(catalogChunks).where(eq(catalogChunks.batchId,batchId));
   const total=(status:string)=>groups.find(g=>g.status===status)?.n ?? 0;
   const patch={verified:total("verified"),needsAttention:total("needs_attention"),failed:total("failed"),skipped:total("skipped"),staged:total("staged"),attentionProducts:held?.n ?? 0,prepared:prepared?.n ?? 0,progressAt:last?.at ? new Date(last.at).toISOString():null};

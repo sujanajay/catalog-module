@@ -20,7 +20,8 @@ holder's next write failed, so no delivery ever finished, and the queue filled w
 - **Step tokens.** `catalog_chunks.step` grows by one at every hand-off, advance and recovery. The task id and
   body carry `{chunkId, stage, step}`. A task whose stage or step does not match the row answers 200 `stale` and
   changes nothing. A same-step copy while the lease is live answers 503 `busy` (Cloud Tasks retries it
-  later), and after 3 retries 200 `duplicate`. So at most one live task exists per chunk, and Cloud Tasks
+  later), and on its last attempt (retry 4, about 150 s after the first try, past any crashed holder's
+  120 s lease) either claims or answers 200 `duplicate`. So at most one live task exists per chunk, and Cloud Tasks
   name dedup (24 h) makes a re-sent id a no-op.
 - **Window.** At most `CATALOG_CHUNK_WINDOW` (8) chunks per batch are dispatched at once
   (`dispatched_at` set and not done). Start dispatches the first 8; each finished chunk dispatches the next under

@@ -32,14 +32,17 @@ export const MATTE_RETRY_POLL_MS = 15_000;
 export const MATTE_RETRY_MARGIN_MS = 60_000;
 /** Spec 15 E1: the QA back-off never waits into the last two minutes before the request deadline. */
 export const QA_BACKOFF_DEADLINE_MARGIN_MS = 120_000;
-/** Same-step retries that wait for a live lease to lapse (503 "busy") before a copy answers "duplicate". */
-export const CHUNK_BUSY_RETRIES = 3;
+/** Same-step retries that wait for a live lease to lapse (503 "busy") before a copy answers "duplicate". The queue
+ * (5 attempts, back-off 10 s doubling) sends retries 1-4 at about +10, +30, +70 and +150 s; a crashed holder's lease
+ * lapses within 120 s, so only the last attempt (retryCount 4) can claim, and every earlier one must wait. */
+export const CHUNK_BUSY_RETRIES = 4;
 const OWNERSHIP_CHANGED = "Chunk ownership changed.";
 
 /** Where a delivery's time went, for the `chunk delivery` line (spec 15 E7). */
 export type DeliverySteps = Record<"download"|"prepare"|"matte"|"guard"|"render"|"upscale"|"judge"|"write",number>;
 
-const defaultHeartbeat = (renew:()=>Promise<boolean>) => {
+/** Spec 15 E2: renews the lease every 30 s until `renew` reports the deadline passed; returns the stop function. */
+export const defaultHeartbeat = (renew:()=>Promise<boolean>) => {
   const timer = setInterval(()=>{ void renew().then(more=>{ if (!more) clearInterval(timer); }).catch(()=>{}); },CHUNK_HEARTBEAT_MS);
   timer.unref?.();
   return ()=>clearInterval(timer);
@@ -64,10 +67,14 @@ export async function currentChunkTask(db:CatalogDeps["db"],chunkId:string):Prom
   return row ? {chunkId,stage:row.stage,step:row.step}:{chunkId};
 }
 /** In-process callers deliver a chunk until it is done or failed: three stages plus any hand-offs, at most this many. */
-export const IN_PROCESS_DELIVERIES = 100;
-export async function chunkFinished(db:CatalogDeps["db"],chunkId:string):Promise<boolean> {
+const IN_PROCESS_DELIVERIES = 100;
+async function chunkFinished(db:CatalogDeps["db"],chunkId:string):Promise<boolean> {
   const [row] = await db.select({status:catalogChunks.status}).from(catalogChunks).where(eq(catalogChunks.id,chunkId));
   return !row || row.status === "done" || row.status === "failed";
+}
+/** Runs a chunk in process (eval, QA-check and real-run tools): one `each(deliver)` per delivery, each with the row's current task. */
+export async function deliverChunkToEnd(deps:CatalogDeps,chunkId:string,each:(deliver:()=>Promise<HandleResult>)=>Promise<void>):Promise<void> {
+  for (let delivery=0; delivery<IN_PROCESS_DELIVERIES && !(await chunkFinished(deps.db,chunkId)); delivery++) await each(async()=>handleChunkTask(deps,await currentChunkTask(deps.db,chunkId)));
 }
 
 /**
