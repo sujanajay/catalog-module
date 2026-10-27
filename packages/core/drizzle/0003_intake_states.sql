@@ -1,0 +1,4 @@
+ALTER TABLE "catalog_batches" DROP CONSTRAINT "catalog_batches_status_check";--> statement-breakpoint
+ALTER TABLE "catalog_uploads" DROP CONSTRAINT "catalog_uploads_status_check";--> statement-breakpoint
+ALTER TABLE "catalog_batches" ADD CONSTRAINT "catalog_batches_status_check" CHECK ("catalog_batches"."status" IN ('draft', 'ingesting', 'matting', 'rendering', 'qa', 'publishing', 'done', 'failed', 'cancelled'));--> statement-breakpoint
+ALTER TABLE "catalog_uploads" ADD CONSTRAINT "catalog_uploads_status_check" CHECK ("catalog_uploads"."status" IN ('pending', 'uploaded', 'collected', 'failed', 'removed'));

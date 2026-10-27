@@ -1,12 +1,14 @@
 // Step 2 data (spec 04, "Step 2 data"): what "Check what we found" shows, built from the batch's
 // stored `catalog_uploads.detected` rows, its options and the source rows the ingest wrote. No
 // guessing: a sheet whose identifier column could not be told says so and waits for the operator.
-import { asc, eq } from "drizzle-orm";
+import { and, asc, eq, ne } from "drizzle-orm";
 import type { Db } from "../../db/client";
 import { catalogBatches, catalogProducts, catalogSourceImages, catalogUploads, type CatalogUpload } from "../../db/schema";
 import { signedUrl } from "../../storage";
 import { IDENTIFIER_MODES, type IdentifierMode, type UploadKind } from "../types";
-import type { Detected, DetectedStep2, IngestDeps } from "./types";
+import { linkFailuresOf, type LinkFailureRow } from "./link-failures";
+import { groupLinkRejects, type LinkReasonPhrase } from "./link-reasons";
+import type { Detected, DetectedStep2, IngestDeps, LinkFailuresBlock } from "./types";
 
 export const CANNOT_READ_IDENTIFIER = "Could not tell which column holds the identifier.";
 /** Short TTL for the example thumbnails. */
@@ -116,22 +118,36 @@ function effectiveKind(u: CatalogUpload): UploadKind {
 /** True for a purely numeric stem of up to three digits (`1.jpg`, `02.jpg`): a shot with no identifier. */
 const isNumericStem = (name: string) => /^\s*\d{1,3}\s*(\.[^./\\]*)?$/.test(name.split(/[\\/]/).pop() ?? "");
 
+/** The step 2 link failures block (spec 14b F5 part 1) from linkFailuresOf's rows. */
+export function linkFailuresBlock({ links, rows }: { links: number; rows: LinkFailureRow[] }): LinkFailuresBlock {
+  const rejects = rows.map((r) => ({ url: r.url, where: r.where || null, phrase: r.reason as LinkReasonPhrase, temporary: r.temporary }));
+  return {
+    total: rows.length,
+    temporary: rows.filter((r) => r.temporary).length,
+    links,
+    products: new Set(rows.map((r) => r.identifier)).size,
+    attempts: rows.reduce((m, r) => (r.attempts > 1 && r.attempts > m ? r.attempts : m), 0),
+    byReason: groupLinkRejects(rejects),
+  };
+}
+
 /**
  * Step 2 data for one batch. `extra.sign` (after the contract's parameters) signs the example
- * thumbnails; it defaults to `signedUrl` with a short TTL. `deps` is kept for the contract; this
- * function reads only the database.
+ * thumbnails; it defaults to `signedUrl` with a short TTL. `deps.storage` reads the upload
+ * manifests for the link failures block; everything else comes from the database.
  */
 export async function buildDetectedStep2(
   db: Db,
   batchId: string,
-  _deps: Pick<IngestDeps, "storage">,
+  deps: Pick<IngestDeps, "storage">,
   extra: { sign?: (gsUri: string) => Promise<string> } = {},
 ): Promise<DetectedStep2> {
   const sign = extra.sign ?? ((u: string) => signedUrl(u, EXAMPLE_THUMB_TTL_SEC));
   const [batch] = await db.select().from(catalogBatches).where(eq(catalogBatches.id, batchId));
   if (!batch) throw new Error("This batch does not exist.");
   const options = batch.options;
-  const uploads = await db.select().from(catalogUploads).where(eq(catalogUploads.batchId, batchId)).orderBy(asc(catalogUploads.createdAt), asc(catalogUploads.id));
+  // A removed upload (spec 14b F3) is not an input of step 2.
+  const uploads = await db.select().from(catalogUploads).where(and(eq(catalogUploads.batchId, batchId), ne(catalogUploads.status, "removed"))).orderBy(asc(catalogUploads.createdAt), asc(catalogUploads.id));
   const sources = await db
     .select({ productId: catalogSourceImages.productId, identifier: catalogProducts.identifier, n: catalogSourceImages.n, rawUri: catalogSourceImages.rawUri, originalName: catalogSourceImages.originalName, uploadId: catalogSourceImages.uploadId })
     .from(catalogSourceImages)
@@ -263,6 +279,8 @@ export async function buildDetectedStep2(
   }
 
   return {
+    // The manifests are read only when the last collection counted failed links (step 2 polls this).
+    linkFailures: linkFailuresBlock(batch.counts.linkFailures ? await linkFailuresOf(db, batchId, deps) : { links: 0, rows: [] }),
     identifierMode: { detected: detectedMode, options: modeOptions, examples },
     groupedBy,
     precedence: { shown: kinds.some((k) => FILE_KINDS.includes(k)) && kinds.some((k) => LINK_KINDS.includes(k)), default: "uploads_then_links" },

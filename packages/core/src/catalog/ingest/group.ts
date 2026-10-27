@@ -4,6 +4,7 @@
 import { normalizeKey, renumberShots } from "../naming";
 import type { BatchOptions, ChannelId, IdentifierMode, OutputFlag } from "../types";
 import { classifyImageReject } from "./image-check";
+import { classifyLinkReject } from "./link-reasons";
 import { matchProductList, missingIdentifier, type ProductListRow } from "./product-list";
 import type { GroupingResult, PreviewRow, SourceItem } from "./types";
 import { collectRejectReason } from "./zip";
@@ -327,6 +328,8 @@ function readPhrase(reason: string): string | null {
     case "unsupported": return /is an? \S+ file/.exec(reason)?.[0] ?? "is not a supported image";
     case "corrupt": return "is corrupt and could not be decoded";
     case "not_image": return "is not an image";
+    // A link that could not be downloaded has its own reason phrase and its own warning (spec 14b F5).
+    case "link": return classifyLinkReject(reason)!.phrase;
   }
   if (reason.startsWith("Nested zip files are not opened.")) return "is a zip file inside the zip";
   if (reason.endsWith(" is larger than 40 MB and was skipped.")) return "is larger than 40 MB";
@@ -368,7 +371,8 @@ export function warningSentences(
     out.push(split(`${fmt(match.notInList.length)} products have photos but are not in your product list: ${match.notInList.join(", ")}. They will appear in the sheet as not in sheet.`));
   }
 
-  const unreadable = grouped.rejected.filter((r) => readPhrase(r.reason) !== null && r.item.ext !== "heic" && r.item.ext !== "heif");
+  // Files only: links that could not be downloaded are the pair below.
+  const unreadable = grouped.rejected.filter((r) => readPhrase(r.reason) !== null && classifyImageReject(r.reason) !== "link" && r.item.ext !== "heic" && r.item.ext !== "heif");
   if (unreadable.length) {
     const groups = new Map<string, SourceItem[]>();
     for (const r of unreadable) groups.set(readPhrase(r.reason)!, [...(groups.get(readPhrase(r.reason)!) ?? []), r.item]);
@@ -378,6 +382,9 @@ export function warningSentences(
       detail: `${parts.join("; ")}. Fix them and use them in a new batch, or continue without them.`,
     });
   }
+
+  const linkPair = linkFailureWarning(grouped.rejected);
+  if (linkPair) out.push(linkPair);
 
   const duplicates = distinct(grouped.rejected.filter((r) => DUPLICATE_REJECT.test(r.reason)).map((r) => r.item.identifier));
   if (duplicates.length) {
@@ -393,6 +400,29 @@ export function warningSentences(
 
   if (match?.sizeSentence) out.push({ headline: match.sizeSentence, detail: "" });
   return out;
+}
+
+/** Products named in the step 4 link pair. */
+const LINK_PAIR_IDS = 10;
+
+/**
+ * The step 4 link pair (spec 14b F5 part 1): "<k> links could not be downloaded." and "<products>
+ * products are missing shots: <ids, first 10>." with the retry ending when some failures may be
+ * temporary, else the fix ending. Null when no link failed.
+ */
+export function linkFailureWarning(rejected: GroupingResult["rejected"]): { headline: string; detail: string } | null {
+  const links = rejected.flatMap((r) => {
+    const link = classifyLinkReject(r.reason);
+    return link ? [{ link, identifier: r.item.identifier }] : [];
+  });
+  if (!links.length) return null;
+  const ids = distinct(links.map((l) => l.identifier).filter(Boolean)).sort(byText);
+  const temporary = links.some((l) => l.link.temporary);
+  const products = `${fmt(ids.length)} ${ids.length === 1 ? "product is" : "products are"} missing shots: ${ids.slice(0, LINK_PAIR_IDS).join(", ")}.`;
+  return {
+    headline: `${fmt(links.length)} ${links.length === 1 ? "link" : "links"} could not be downloaded.`,
+    detail: `${products} ${temporary ? "Try the failed links again, fix the sheet, or continue without them." : "Fix the links, or continue without them."}`,
+  };
 }
 
 /** First folder of every uploaded (not linked) grouped file's path, sorted. */

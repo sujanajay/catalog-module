@@ -10,7 +10,7 @@ import { POST as label,GET as labels } from "../app/api/catalog/batches/[id]/eva
 import { POST as replacement } from "../app/api/catalog/outputs/[id]/replacement/route";
 import { POST as replacementComplete } from "../app/api/catalog/outputs/[id]/replacement/complete/route";
 import { POST as skuMapPost } from "../app/api/catalog/batches/[id]/sku-map/route";
-vi.mock("@catalog/core/tasks",()=>({enqueueTask:vi.fn(async()=>"task")}));
+vi.mock(import("@catalog/core/tasks"),async original=>({...await original(),enqueueTask:vi.fn(async()=>"task")}));
 // Only the replacement route signs a URL here; no storage call leaves the test.
 vi.mock(import("@catalog/core/storage"),async original=>({...await original(),getBucketName:()=>"private",signedPutUrl:vi.fn(async()=>"https://signed.example/put")}));
 import { SKU_MAP_MAX_BYTES,SKU_MAP_TOO_LARGE } from "../lib/catalog/sku-map";

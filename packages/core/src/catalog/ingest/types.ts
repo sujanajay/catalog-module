@@ -60,6 +60,10 @@ export interface IngestDeps {
   fetch: typeof fetch;                               // injected for tests; production passes safeFetch's fetch
   sheets?: SheetsLike; drive?: DriveLike;            // googleapis clients or fakes (web tier only)
   now?: () => Date;
+  /** Host name resolver for safeFetch; tests inject a fake so no DNS is used. Production leaves it unset. */
+  lookup?: (hostname: string) => Promise<string[]>;
+  /** Waits between link retries (spec 14d F5 part 2); tests pass a fake that moves their clock. Defaults to setTimeout. */
+  sleep?: (ms: number) => Promise<void>;
 }
 
 export interface Adapter { kind: UploadKind; collect(input: CollectInput): Promise<SourceItem[]> }
@@ -75,6 +79,12 @@ export interface Detected {                          // stored in catalog_upload
   cannotRead?: string | null;                        // "Could not tell which column holds the identifier."
   fileCount?: number; topLevelFolders?: string[];
   formats?: { jpg: number; png: number; heic: number; other: number };
+  // The paste readback (spec 14b F2, url_list only): see parsePastedLinks and checkLinkAccess.
+  linksPerRow?: { min: number; max: number };
+  shape?: "one_per_line" | "id_and_links" | "links_grid";
+  collisions?: { name: string; rows: number[] }[];
+  ignoredCells?: number;
+  sample?: { tried: number; ok: number; webPages: number; failures: { url: string; reason: string }[] };
   rejected?: { name: string; reason: string }[];     // per-upload rejects with their sentences
   message: string;                                   // the one-line text for the wizard
 }
@@ -100,6 +110,19 @@ export interface DetectedStep2 {
   sheetColumns: { identifier: number; images: number[]; sentence: string; choices: { identifier: { column: number; header: string }[]; images: { columns: number[]; header: string }[] } } | null;
   sheets: { uploadId: string; name: string; identifierColumn: number; identifierHeader: string | null; imageColumns: number[]; kind: "sheet" | "product_list"; /** Uploaded but not read yet (no columns): the card says "Reading your sheet". */ reading: boolean; cannotRead: string | null }[];
   googleAccess: { url: string; kind: "google_sheet" | "drive_folder"; status: "ok" | "no_access" | "blocked"; sentence: string }[];
+  /**
+   * Links that could not be downloaded (spec 14b F5 part 1), from the upload manifests: `total`
+   * failures of `links` links read, `temporary` of them may work on a second try, one entry per
+   * reason phrase (most first) with its first failure, and how many products they affect.
+   */
+  linkFailures: LinkFailuresBlock;
+}
+
+export interface LinkFailuresBlock {
+  total: number; temporary: number; links: number; products: number;
+  /** The highest attempt count of a failed link that was retried (spec 14d F5 part 2), 0 when none was. */
+  attempts: number;
+  byReason: { reason: string; count: number; first: { url: string; where: string } }[];
 }
 
 export interface OverwritePreview {
@@ -108,6 +131,14 @@ export interface OverwritePreview {
   renameHints: { newIdentifier: string; existingIdentifier: string }[];
   duplicates: { a: string; b: string }[];
   busy: { identifier: string; batchName: string }[];
+  /**
+   * The brand's other unfinished batches (draft, ingesting, failed before Start; same is_test) whose
+   * photos overlap this batch's by at least 10 or 20% (spec 14d F10), with one example of the two
+   * identifier spellings when they differ. `state` is the batch's state words; `createdAt` ISO.
+   */
+  sameBatches: { batchId: string; name: string; createdAt: string; state: string; sharedPhotos: number; example: { here: string; there: string } | null }[];
+  /** Photos that sit under two or more identifiers of this batch (spec 14d F10): `name` is one file name of the photo. */
+  duplicatePhotos: { sha256: string; identifiers: string[]; name: string }[];
 }
 
 export interface Preview {                           // step 4 data

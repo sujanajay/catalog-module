@@ -8,7 +8,7 @@ import { assertWithinProduct, productPrefix, publicObjectPath } from "../naming"
 import { lockProducts } from "../products";
 import type { ChannelId, EventKind } from "../types";
 import { verifyPublic } from "./verify";
-import { upscaleConfigFromEnv, upscalerKey } from "../upscale";
+import { isCpuUpscalerId, otherTargetUpscalerId, upscaleConfigFromEnv, upscalerId, upscalerKey } from "../upscale";
 export { lockProducts };
 export type Output = typeof catalogOutputs.$inferSelect;
 export type Source = typeof catalogSourceImages.$inferSelect;
@@ -34,6 +34,9 @@ export function upscaledRenderKey(plainKey: string, model: string): string {
 export function rerenderedKey(row: { renderKey: string; flags: readonly string[] }, upscaleModel: string | null | undefined, plain: () => string): string {
   const was = row.flags.includes("upscaled");
   if (upscaleModel && !was) return upscaledRenderKey(row.renderKey, upscaleModel);
+  // Spec 16 3.1.3: a row upscaled before (perhaps on the GPU) and re-made on the CPU service takes the CPU key, so
+  // CPU bytes never keep a GPU key. The plain key is recomputed because an upscaled key cannot be undone.
+  if (upscaleModel && was && isCpuUpscalerId(upscaleModel)) return upscaledRenderKey(plain(), upscaleModel);
   if (!upscaleModel && was) return plain();
   return row.renderKey;
 }
@@ -41,11 +44,12 @@ export function rerenderedKey(row: { renderKey: string; flags: readonly string[]
  * The keys a live output may carry and still match this render: the plain key and, when UPSCALE_MODEL is
  * set, the key of an output the upscaler made. Whether a render needs the upscaler is known only after its
  * plan, so an output made on the plain path (no enlargement beyond the threshold, or a fallback) and one
- * the upscaler made both count as unchanged.
+ * the upscaler made both count as unchanged. `upscaleModel` is an upscalerId; an output the same model made on the
+ * other matting service (GPU or CPU, spec 16) also counts as unchanged, so moving the upscaler re-makes nothing.
  */
-export function renderKeys(input: Omit<Parameters<typeof renderKey>[0], "upscaler">, upscaleModel: string | null = upscaleConfigFromEnv().model): string[] {
+export function renderKeys(input: Omit<Parameters<typeof renderKey>[0], "upscaler">, upscaleModel: string | null = configuredUpscalerId()): string[] {
   const plain = renderKey(input);
-  return [plain, ...(upscaleModel ? [upscaledRenderKey(plain, upscaleModel)] : [])];
+  return [plain, ...(upscaleModel ? [upscaledRenderKey(plain, upscaleModel), upscaledRenderKey(plain, otherTargetUpscalerId(upscaleModel))] : [])];
 }
 /** One output's sheet note, "<Channel label> img <n>: <reason>" (spec 06 5.6). The publish step and the report write the same words, so the report's de-duplication finds them. */
 export function outputNote(o: Pick<Output, "channel" | "n" | "reason" | "decision" | "decidedBy">): string {
@@ -176,4 +180,9 @@ export async function publishProduct(deps: PublishDeps, batchId: string, product
     await tx.update(catalogProducts).set({lastBatchId:batchId}).where(eq(catalogProducts.id,productId));
     return { outcome: failure ? "failed" : "published", batch: found };
   });
+}
+/** The upscalerId the worker's env selects (UPSCALE_MODEL on the service UPSCALE_URL names), or null when off. */
+export function configuredUpscalerId(env: NodeJS.ProcessEnv = process.env): string | null {
+  const config = upscaleConfigFromEnv(env);
+  return config.model ? upscalerId(config.model, config.target) : null;
 }

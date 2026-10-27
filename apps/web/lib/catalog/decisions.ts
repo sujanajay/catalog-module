@@ -1,5 +1,6 @@
 import { applyDecision, CatalogDecisionError, completeReplacement, startReplacement } from "@catalog/core/catalog/decisions";
 import { enqueueTask } from "@catalog/core/tasks";
+import { enqueueChunk } from "@catalog/core/catalog/pipeline/dispatch";
 import * as storage from "@catalog/core/storage";
 import { db } from "../db";
 import { HttpError } from "../errors";
@@ -32,7 +33,8 @@ export async function replacementUpload(outputId: string, input: { name: string;
 export async function finishReplacement(outputId: string, uploadId: string, actor: string) {
   return decisionAction(async () => {
     const result = await completeReplacement({ db: db(), storage }, { outputId, uploadId, actor });
-    await enqueueTask("/tasks/catalog/chunk", { chunkId: result.chunkId }, { taskId: `chunk-${result.chunkId}-matte` });
+    // Spec 15 E5: one chunk, dispatched at once outside the batch window (it is created with dispatched_at set).
+    await enqueueChunk(enqueueTask, { id: result.chunkId, stage: "matte", step: 0 });
     return result;
   });
 }

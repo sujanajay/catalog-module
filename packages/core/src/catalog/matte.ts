@@ -25,6 +25,16 @@ export interface UpscaleHealth { models: UpscaleModelInfo[]; default: string | n
 export interface MattingClientOptions {
   services: MattingService[]; fetch?: typeof fetch; idToken?: (audience: string) => Promise<string>;
   model?: string; timeoutMs?: number;
+  /**
+   * Spec 16 3.1.3: the base URL of the service that answers /upscale; it must equal one of `services`. Absent reads
+   * `UPSCALE_URL` from the environment; unset or empty keeps the first GPU service (spec 11). An URL that matches
+   * no service logs one WARNING `upscale_url_unknown` and keeps the GPU service.
+   */
+  upscaleUrl?: string | null;
+  /** Spec 16 3.1.5: cut-out calls in flight per GPU service from this process (default MATTE_INFLIGHT_PER_INSTANCE). */
+  inflightPerService?: number;
+  /** Waits between busy (429) answers; tests pass an instant one. */
+  sleep?: (ms: number) => Promise<void>;
 }
 /**
  * The model ids the matting services serve: services/matting/app.py `INPUT_SIZES`, which is also
@@ -35,13 +45,23 @@ export const BREAKER_FAILURES =Number(process.env.MATTING_BREAKER_FAILURES ?? 5)
 export const BREAKER_COOLDOWN_MS = Number(process.env.MATTING_BREAKER_COOLDOWN_MS ?? 60_000);
 // Allow measured 64-second CPU readiness plus startup headroom, below Cloud Run's 300 seconds.
 export const MATTING_TIMEOUT_MS = Number(process.env.MATTING_TIMEOUT_MS ?? 180_000);
+const positiveInt = (raw: string | undefined, fallback: number): number => { const n = Number(raw); return Number.isInteger(n) && n > 0 ? n : fallback; };
+/**
+ * Spec 16 3.1.5: cut-out calls one worker process keeps in flight per GPU service; extra calls wait in the client
+ * instead of meeting Cloud Run's 429 when every GPU instance is busy.
+ */
+export const MATTE_INFLIGHT_PER_INSTANCE = positiveInt(process.env.MATTE_INFLIGHT_PER_INSTANCE, 4);
+/** Busy (429) answers from the GPU services in a row for one photo before one breaker failure and the CPU service. */
+export const MATTE_BUSY_TRIES = 3;
+/** The wait after a busy answer: 1 to 3 s with jitter, so parallel callers do not retry in step. */
+export const busyWaitMs = (random: number = Math.random()): number => 1000 + Math.round(random * 2000);
 // Discovery is refreshed once a minute, independently for each service.
 export const HEALTH_TTL_MS = 60_000;
 export const FLOODFILL_TOLERANCE = 24;
 // Border seeds use the tighter tolerance; propagation permits compression noise.
 const SEED_TOLERANCE = BG_TOLERANCE;
 type Breaker = { state: "closed" | "open" | "half-open"; failures: number; openedAt: number | null };
-interface ServiceState extends MattingService { breaker: Breaker; models: ModelInfo[]; default: string; version: string | null; checkedAt: number; upscale: UpscaleHealth | null }
+interface ServiceState extends MattingService { breaker: Breaker; models: ModelInfo[]; default: string; version: string | null; checkedAt: number; upscale: UpscaleHealth | null; inflight: number; waiters: (() => void)[] }
 /** The `upscale` section of a /health body, or null when absent or malformed (a malformed section never fails matting). */
 export function parseUpscaleHealth(value: unknown): UpscaleHealth | null {
   if (!value || typeof value !== "object") return null;
@@ -67,10 +87,24 @@ export class MattingClient {
   private readonly states: ServiceState[];
   private readonly request: typeof fetch;
   private readonly token: (audience: string) => Promise<string>;
+  /** The service /upscale goes to (spec 16 3.1.3); null without a GPU service and without a matching UPSCALE_URL. */
+  private readonly upscaleState: ServiceState | null;
+  private readonly inflightLimit: number;
+  private readonly sleep: (ms: number) => Promise<void>;
+  /** Round-robin position over the GPU services. */
+  private turn = 0;
   constructor(private readonly opts: MattingClientOptions) {
-    if (!opts.services.some((s) => s.target === "cpu")) throw new Error("MATTING_URL is required for background removal.");
-    if (new Set(opts.services.map((s) => s.target)).size !== opts.services.length) throw new Error("Only one matting service per target is supported.");
-    this.states = opts.services.map((s) => ({ ...s, baseUrl: s.baseUrl.replace(/\/$/, ""), breaker: { state: "closed", failures: 0, openedAt: null }, models: [], default: "", version: null, checkedAt: -Infinity, upscale: null }));
+    if (opts.services.filter((s) => s.target === "cpu").length !== 1) throw new Error("MATTING_URL is required for background removal, and only one CPU matting service is supported.");
+    const urls = opts.services.map((s) => normaliseUrl(s.baseUrl));
+    if (new Set(urls).size !== urls.length) throw new Error("Each matting service URL may be listed once.");
+    this.states = opts.services.map((s) => ({ ...s, baseUrl: normaliseUrl(s.baseUrl), breaker: { state: "closed", failures: 0, openedAt: null }, models: [], default: "", version: null, checkedAt: -Infinity, upscale: null, inflight: 0, waiters: [] }));
+    const upscaleUrl = normaliseUrl((opts.upscaleUrl === undefined ? process.env.UPSCALE_URL : opts.upscaleUrl) ?? "");
+    const firstGpu = this.states.find((s) => s.target === "gpu") ?? null;
+    const named = upscaleUrl ? this.states.find((s) => s.baseUrl === upscaleUrl) ?? null : null;
+    if (upscaleUrl && !named) log("WARNING", "upscale_url_unknown", { detail: "UPSCALE_URL matches no matting service; the GPU service upscales" });
+    this.upscaleState = named ?? firstGpu;
+    this.inflightLimit = opts.inflightPerService ?? MATTE_INFLIGHT_PER_INSTANCE;
+    this.sleep = opts.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
     this.request = opts.fetch ?? fetch;
     const auth = new GoogleAuth();
     this.token = opts.idToken ?? (async (audience) => {
@@ -95,7 +129,19 @@ export class MattingClient {
     b.failures++;
     if (b.failures >= BREAKER_FAILURES) b.openedAt = Date.now();
   }
-  get breakers(): Partial<Record<"cpu" | "gpu", Breaker>> { return Object.fromEntries(this.states.map((s) => [s.target, s.breaker])); }
+  /** The first service of each target; with several GPU services see `gpuBreakers`. */
+  get breakers(): Partial<Record<"cpu" | "gpu", Breaker>> { return Object.fromEntries([...this.states].reverse().map((s) => [s.target, s.breaker])); }
+  /** Every GPU service's breaker, in the configured order. */
+  get gpuBreakers(): Breaker[] { return this.states.filter((s) => s.target === "gpu").map((s) => s.breaker); }
+  /** The service /upscale goes to: "cpu" when UPSCALE_URL names the CPU cut-out service, otherwise "gpu". */
+  get upscaleTarget(): "cpu" | "gpu" { return this.upscaleState?.target ?? "gpu"; }
+  /** Waits for a free in-flight place on a GPU service (spec 16 3.1.5); the CPU service is not limited here. */
+  private async acquire(s: ServiceState): Promise<() => void> {
+    const limit = s.target === "gpu" ? this.inflightLimit : Infinity;
+    while (s.inflight >= limit) await new Promise<void>((resolve) => s.waiters.push(resolve));
+    s.inflight++;
+    return () => { s.inflight--; s.waiters.shift()?.(); };
+  }
   private transition(s: ServiceState, state: Breaker["state"]): void {
     if (s.breaker.state === state) return;
     s.breaker.state = state;
@@ -148,26 +194,28 @@ export class MattingClient {
         s.models = h.models; s.default = h.default; s.version = h.version; s.upscale = parseUpscaleHealth(h.upscale); s.checkedAt = Date.now();
       } catch { this.failure(s); }
     }));
-    return { ok: this.states.some((s) => s.models.length > 0), models: this.states.flatMap((s) => s.models), default: this.states.find((s) => s.target === "cpu")!.default, versions: { cpu: this.states.find((s) => s.target === "cpu")?.version ?? null, gpu: this.states.find((s) => s.target === "gpu")?.version ?? null }, upscale: this.states.find((s) => s.target === "gpu")?.upscale ?? null };
+    // Several GPU services serve the same models; each model id is listed once.
+    const models = this.states.flatMap((s) => s.models).filter((m, i, all) => all.findIndex((x) => x.id === m.id && x.target === m.target) === i);
+    return { ok: this.states.some((s) => s.models.length > 0), models, default: this.states.find((s) => s.target === "cpu")!.default, versions: { cpu: this.states.find((s) => s.target === "cpu")?.version ?? null, gpu: this.states.find((s) => s.target === "gpu" && s.version)?.version ?? null }, upscale: this.upscaleState?.upscale ?? null };
   }
   /**
-   * POST /upscale?model=<id>&scale=2 on the GPU service (spec 11): the body is the image bytes, the
-   * answer a JPEG of exactly twice the size. Only the GPU service upscales (the CPU service answers
-   * 503), and only a model its /health lists as available at scale 2 is asked for. Same auth, base
-   * URL as matting: an open GPU matting breaker or an open upscale breaker skips the call, one retry follows a
+   * POST /upscale?model=<id>&scale=2 on the upscale service (spec 11; spec 16 3.1.3: the GPU service, or the CPU
+   * cut-out service when UPSCALE_URL names it, which serves /upscale with UPSCALE_CPU=1): the body is the image
+   * bytes, the answer a JPEG of exactly twice the size. Only a model that service's /health lists as available at
+   * scale 2 is asked for. Same auth, base URL as matting: an open matting breaker of that service or an open upscale breaker skips the call, one retry follows a
    * 503 after `retryDelayMs`, and only a final failure of the service (not a rejected request, 400 or 413)
    * counts, once, towards the upscale breaker (never the matting one). Throws UpscaleUnavailableError; the render
    * then uses Lanczos.
    */
   async upscale(image: Buffer, opts: UpscaleOptions, trace?: MattingTrace): Promise<{ jpeg: Buffer; ms: number; model: string }> {
-    const s = this.states.find((x) => x.target === "gpu");
-    if (!s) throw new UpscaleUnavailableError("No GPU service is configured for upscaling.");
+    const s = this.upscaleState;
+    if (!s) throw new UpscaleUnavailableError("No matting service is configured for upscaling.");
     const h = await this.health();
-    if (!h.upscale?.models.some((m) => m.id === opts.model && m.available && m.scale === 2)) throw new UpscaleUnavailableError("The GPU service does not list this upscaler as available.");
+    if (!h.upscale?.models.some((m) => m.id === opts.model && m.available && m.scale === 2)) throw new UpscaleUnavailableError(`The ${s.target.toUpperCase()} service does not list this upscaler as available.`);
     const sleep = opts.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
     let last: unknown;
     for (let attempt = 0; attempt < 2; attempt++) {
-      if (!this.available(s) || !this.upscaleAvailable()) throw new UpscaleUnavailableError("The GPU service is paused after repeated failures.");
+      if (!this.available(s) || !this.upscaleAvailable()) throw new UpscaleUnavailableError(`The ${s.target.toUpperCase()} service is paused after repeated failures.`);
       const started = Date.now();
       try {
         const response = await this.call(s, `/upscale?model=${encodeURIComponent(opts.model)}&scale=2`, { method: "POST", body: new Uint8Array(image), headers: { "content-type": opts.contentType } }, opts.timeoutMs ?? UPSCALE_TIMEOUT_MS, trace);
@@ -204,35 +252,76 @@ export class MattingClient {
       if (!h.ok) throw new UnavailableError("Background removal services are unavailable.");
       throw new UnknownMatteModelError(`Unknown background removal model: ${chosen}.`);
     }
-    for (const s of candidates) {
+    // Spec 16 3.1.5: the GPU services in turn (round robin), each call within the in-flight limit. A busy answer
+    // (429: every instance of that service is working) waits 1 to 3 s and tries the next GPU service; only
+    // MATTE_BUSY_TRIES busy answers in a row count one breaker failure and hand the photo to the CPU service. Any
+    // other failure counts at once and moves on, as before.
+    const gpus = candidates.filter((s) => s.target === "gpu"), cpus = candidates.filter((s) => s.target === "cpu");
+    const start = gpus.length ? this.turn++ % gpus.length : 0;
+    const order = [...gpus.slice(start), ...gpus.slice(0, start)];
+    const failed = new Set<ServiceState>();
+    let busy = 0, next = 0;
+    for (;;) {
+      const live = order.filter((s) => !failed.has(s) && this.available(s));
+      if (!live.length) break;
+      const s = live[next++ % live.length]!;
+      try { return await this.matteOn(s, prepared, chosen, opts, trace); }
+      catch (err) {
+        if (err instanceof Error && /request rejected/.test(err.message)) throw err;
+        if (err instanceof UnavailableError && err.status === 429 && ++busy < MATTE_BUSY_TRIES) { await this.sleep(busyWaitMs()); continue; }
+        this.failure(s); failed.add(s);
+        if (busy >= MATTE_BUSY_TRIES) break;
+      }
+    }
+    for (const s of cpus) {
       if (!this.available(s)) continue;
-      const info = s.models.find((m) => m.id === chosen)!;
-      const pad = Math.round(Math.max(prepared.width, prepared.height) * Math.max(0, opts.padFraction ?? 0));
-      const framed = { w: prepared.width + 2 * pad, h: prepared.height + 2 * pad };
-      const sentLongSide = modelSendLongSide(info.inputSize, framed);
-      const raw = sharp(prepared.rgb, { raw: { width: prepared.width, height: prepared.height, channels: 3 } });
-      const source = pad ? sharp(await raw.extend({ top: pad, bottom: pad, left: pad, right: pad, background: { r: 255, g: 255, b: 255 } }).png().toBuffer()) : raw;
-      const png = await source.resize(sentLongSide, sentLongSide, { fit: "inside", kernel: "lanczos3" }).png().toBuffer();
-      const body = new FormData(); body.set("file", new Blob([new Uint8Array(png)], { type: "image/png" }), "source.png");
-      try {
-        const response = await this.call(s, `/matte?model=${encodeURIComponent(chosen)}`, { method: "POST", body }, undefined, trace);
-        const mask = await alphaFromPng(Buffer.from(await response.arrayBuffer()));
-        const upscaled = sharp(mask.alpha, { raw: { width: mask.width, height: mask.height, channels: 1 } }).resize(framed.w, framed.h, { fit: "fill", kernel: "lanczos3" });
-        const fitted = pad ? sharp(await upscaled.extract({ left: pad, top: pad, width: prepared.width, height: prepared.height }).toColourspace("b-w").raw().toBuffer(), { raw: { width: prepared.width, height: prepared.height, channels: 1 } }) : upscaled;
-        const alpha = await fitted.blur(1).toColourspace("b-w").raw().toBuffer();
-        s.breaker.failures = 0; s.breaker.openedAt = null; this.transition(s, "closed");
-        return { alpha, width: prepared.width, height: prepared.height, model: chosen, ms: Number(response.headers.get("x-ms") ?? 0), source: "model", target: s.target, sentLongSide };
-      } catch (err) {
+      try { return await this.matteOn(s, prepared, chosen, opts, trace); }
+      catch (err) {
         if (err instanceof Error && /request rejected/.test(err.message)) throw err;
         this.failure(s);
       }
     }
     throw new UnavailableError("Background removal services are unavailable.");
   }
-  async convert(buf: Buffer, trace?: MattingTrace): Promise<Buffer> {
+  /** One cut-out call on one service; throws on any failure (the caller counts it). */
+  private async matteOn(s: ServiceState, prepared: Prepared, chosen: string, opts: MatteOptions, trace: MattingTrace | undefined): Promise<Matte> {
+    const info = s.models.find((m) => m.id === chosen)!;
+    const pad = Math.round(Math.max(prepared.width, prepared.height) * Math.max(0, opts.padFraction ?? 0));
+    const framed = { w: prepared.width + 2 * pad, h: prepared.height + 2 * pad };
+    const sentLongSide = modelSendLongSide(info.inputSize, framed);
+    const raw = sharp(prepared.rgb, { raw: { width: prepared.width, height: prepared.height, channels: 3 } });
+    const source = pad ? sharp(await raw.extend({ top: pad, bottom: pad, left: pad, right: pad, background: { r: 255, g: 255, b: 255 } }).png().toBuffer()) : raw;
+    const png = await source.resize(sentLongSide, sentLongSide, { fit: "inside", kernel: "lanczos3" }).png().toBuffer();
+    const body = new FormData(); body.set("file", new Blob([new Uint8Array(png)], { type: "image/png" }), "source.png");
+    const release = await this.acquire(s);
+    let response: Response, maskPng: Buffer;
+    try {
+      response = await this.call(s, `/matte?model=${encodeURIComponent(chosen)}`, { method: "POST", body }, undefined, trace);
+      maskPng = Buffer.from(await response.arrayBuffer());
+    } finally { release(); }
+    const mask = await alphaFromPng(maskPng);
+    const upscaled = sharp(mask.alpha, { raw: { width: mask.width, height: mask.height, channels: 1 } }).resize(framed.w, framed.h, { fit: "fill", kernel: "lanczos3" });
+    const fitted = pad ? sharp(await upscaled.extract({ left: pad, top: pad, width: prepared.width, height: prepared.height }).toColourspace("b-w").raw().toBuffer(), { raw: { width: prepared.width, height: prepared.height, channels: 1 } }) : upscaled;
+    const alpha = await fitted.blur(1).toColourspace("b-w").raw().toBuffer();
+    s.breaker.failures = 0; s.breaker.openedAt = null; this.transition(s, "closed");
+    return { alpha, width: prepared.width, height: prepared.height, model: chosen, ms: Number(response.headers.get("x-ms") ?? 0), source: "model", target: s.target, sentLongSide };
+  }  async convert(buf: Buffer, trace?: MattingTrace): Promise<Buffer> {
     const body = new FormData(); body.set("file", new Blob([new Uint8Array(buf)]), "source.heic");
     return Buffer.from(await (await this.call(this.states.find((s) => s.target === "cpu")!, "/convert", { method: "POST", body }, undefined, trace)).arrayBuffer());
   }
+}
+
+const normaliseUrl = (url: string): string => url.trim().replace(/\/+$/, "");
+
+/**
+ * The worker's client from its environment (spec 16 3.1.5): `MATTING_URL` (the CPU service, required; local default
+ * http://localhost:8081), `MATTING_GPU_URLS` (comma list) or else the single `MATTING_GPU_URL`, `UPSCALE_URL` and
+ * `MATTE_INFLIGHT_PER_INSTANCE`.
+ */
+export function mattingClientFromEnv(env: NodeJS.ProcessEnv = process.env, extra: Omit<MattingClientOptions, "services" | "upscaleUrl" | "inflightPerService"> = {}): MattingClient {
+  const gpuUrls = (env.MATTING_GPU_URLS?.trim() ? env.MATTING_GPU_URLS.split(",") : [env.MATTING_GPU_URL ?? ""]).map(normaliseUrl).filter(Boolean);
+  const services: MattingService[] = [{ baseUrl: env.MATTING_URL?.trim() || "http://localhost:8081", target: "cpu" }, ...[...new Set(gpuUrls)].map((baseUrl) => ({ baseUrl, target: "gpu" as const }))];
+  return new MattingClient({ ...extra, services, upscaleUrl: env.UPSCALE_URL ?? null, inflightPerService: positiveInt(env.MATTE_INFLIGHT_PER_INSTANCE, 4) });
 }
 
 export async function alphaFromPng(png: Buffer): Promise<{ alpha: Buffer; width: number; height: number }> {

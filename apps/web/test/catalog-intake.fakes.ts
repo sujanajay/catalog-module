@@ -9,7 +9,8 @@ type PGlite = Awaited<ReturnType<typeof createTestDb>>["client"];
 
 // --- In-memory storage --------------------------------------------------------------------------
 
-export type StoredObject = { buf: Buffer; mime: string };
+/** `metadata` is the object's custom metadata (the sha256 placing reads back, spec 14c F7 part 1). */
+export type StoredObject = { buf: Buffer; mime: string; metadata?: Record<string, string> };
 export type ObjectStore = Map<string, StoredObject>;
 
 const notFound = (uri: string) => Object.assign(new Error(`harness: no object ${uri}`), { code: 404 });
@@ -30,15 +31,15 @@ export function fakeStorage(objects: ObjectStore, origin: string) {
     const slice = (buf: Buffer, opts?: { start?: number; end?: number }) => (opts?.start === undefined ? buf : buf.subarray(opts.start, (opts.end ?? buf.length - 1) + 1));
     return {
       name,
-      async save(buf: Buffer | Uint8Array | string, opts?: { contentType?: string }) {
-        objects.set(uri, { buf: Buffer.from(buf), mime: opts?.contentType ?? "application/octet-stream" });
+      async save(buf: Buffer | Uint8Array | string, opts?: { contentType?: string; metadata?: { metadata?: Record<string, string> } }) {
+        objects.set(uri, { buf: Buffer.from(buf), mime: opts?.contentType ?? "application/octet-stream", metadata: opts?.metadata?.metadata });
       },
       async download(opts?: { start?: number; end?: number }) {
         return [slice(get().buf, opts)] as [Buffer];
       },
       async getMetadata() {
         const o = get();
-        return [{ name, bucket, size: String(o.buf.length), contentType: o.mime, generation: "1" }] as const;
+        return [{ name, bucket, size: String(o.buf.length), contentType: o.mime, generation: "1", metadata: o.metadata }] as const;
       },
       async exists() {
         return [objects.has(uri)] as [boolean];
@@ -146,9 +147,25 @@ export function pgliteBackedPool(pglite: PGlite, pg: { types: PgTypes }, prepare
 
 // --- Fake image host -----------------------------------------------------------------------------
 
+/** The address every example.com host "resolves" to. Public, so safeFetch's checks pass; never connected to. */
+export const FAKE_HOST_ADDRESS = "93.184.215.14";
+/** The share-page host of intake-pasted-variants.txt: answers a web page. */
+export const SHARE_PAGE_HOST = "www.dropbox.example.com";
+/** A host that answers 404 to everything (browser scenario 3). */
+export const MISSING_HOST = "missing.example.com";
+
+const isExampleHost = (host: string) => host === "example.com" || host.endsWith(".example.com");
+
+/** A DNS stand-in: example.com hosts resolve to FAKE_HOST_ADDRESS, every other name is not found. */
+export async function fakeLookup(hostname: string): Promise<string[]> {
+  if (isExampleHost(hostname)) return [FAKE_HOST_ADDRESS];
+  throw Object.assign(new Error(`getaddrinfo ENOTFOUND ${hostname}`), { code: "ENOTFOUND", hostname });
+}
+
 /**
  * Answers the fixture links (exact match after decoding, so a link with a literal space works either
- * way) with a distinct JPEG per link, after `delayMs()`; every other URL answers 404.
+ * way) with a distinct JPEG per link, after `delayMs()`; SHARE_PAGE_HOST answers a web page, and every
+ * other URL (all of MISSING_HOST included) answers 404. It never touches the network.
  */
 export function fakeImageHost(links: string[], delayMs: () => number, log: string[]) {
   const known = new Set(links.map((u) => decodeURI(u)));
@@ -169,6 +186,10 @@ export function fakeImageHost(links: string[], delayMs: () => number, log: strin
     const url = decodeURI(raw);
     const wait = delayMs();
     if (wait) await new Promise((r) => setTimeout(r, wait));
+    if (new URL(raw).hostname === SHARE_PAGE_HOST) {
+      log.push(`fetch web page ${url}`);
+      return new Response("<!doctype html><html><body>Shared file</body></html>", { status: 200, headers: { "content-type": "text/html; charset=utf-8" } });
+    }
     if (!known.has(url)) {
       log.push(`fetch 404 ${url}`);
       return new Response("<Error>Not found</Error>", { status: 404, headers: { "content-type": "application/xml" } });

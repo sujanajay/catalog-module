@@ -1,26 +1,84 @@
-// Pasted image URLs (spec 04, "URL list"): one link per line, optionally `identifier<TAB>url`.
-// Collecting only lists the links (bytes {kind:"url"}); the bytes are fetched when the item is
-// copied to raw/, through `fetchSourceUrl`, which is GET only (Supabase is only ever read), SSRF
-// safe, capped at 40 MB and follows redirects by hand (02's safeFetch).
+// Pasted image URLs (spec 04 "URL list", spec 14b F2): one link per line, `identifier<TAB>url`
+// lines, or a grid of links copied from a spreadsheet (each row a product). Collecting only lists
+// the links (bytes {kind:"url"}); the bytes are fetched when the item is copied to raw/, through
+// `fetchSourceUrl`, which is GET only (Supabase is only ever read), SSRF safe, capped at 40 MB and
+// follows redirects by hand (02's safeFetch).
 import { fileTypeFromBuffer } from "file-type";
 import { safeFetch, type SafeFetchOptions } from "../../safe-url";
 import { normalizeKey, parseShotName } from "../naming";
-import { extOf, urlFileName, type SheetSourceItem } from "./links-sheet";
+import { extOf, isLinkToken, splitCell, urlFileName, type SheetSourceItem } from "./links-sheet";
 import type { Adapter, IngestDeps, SourceItem } from "./types";
 
-const URL_RE = /^https?:\/\//i;
+/**
+ * One pasted row with at least one link. `row` is its 1-based line number in the paste; `columns[i]`
+ * is the 1-based cell number of `urls[i]` on that line (tab cells, a cell holding two links counting
+ * as two), so a failed link can be named "row <r>, column <c>" (spec 14b F5).
+ */
+export interface PastedRow { row: number; identifier: string | null; urls: string[]; columns: number[]; name: string | null }
 
-/** One entry per line with an http(s) link; blank lines and lines without a link are skipped. */
-export function parseUrlList(text: string): { identifier: string | null; url: string }[] {
-  const out: { identifier: string | null; url: string }[] = [];
-  for (const line of text.split(/\r?\n/)) {
-    const tab = line.indexOf("\t");
-    const id = tab >= 0 ? line.slice(0, tab).trim() : "";
-    const url = (tab >= 0 ? line.slice(tab + 1) : line).trim();
-    if (URL_RE.test(url)) out.push({ identifier: id || null, url });
-    else if (!url && URL_RE.test(id)) out.push({ identifier: null, url: id }); // a link with a trailing tab
+/** What a paste holds (spec 14b F2). */
+export interface PastedTable {
+  rows: PastedRow[];
+  links: number;
+  linksPerRow: { min: number; max: number };
+  shape: "one_per_line" | "id_and_links" | "links_grid";
+  ignoredCells: number;
+  collisions: { name: string; rows: number[] }[];
+}
+
+/** Cells that are never an identifier: blank, `0`, `-` and `n/a`. */
+const FILLER = new Set(["", "0", "-", "n/a"]);
+
+/**
+ * Reads pasted text (spec 14b F2). Lines split into cells on tabs; a cell, and a line without a
+ * tab, split further only before a following http(s) link (splitCell). Every link of a row is a URL
+ * of that row in column order; the first non-link cell that is not filler is the identifier; every
+ * other non-link cell is ignored and counted. Naming: the identifier; else, for two or more links,
+ * the first link's file name stem (parseShotName); else null (grouped by file name later). Rows
+ * without a link are skipped. A collision is two or more named rows with the same name (compared
+ * as normalizeKey does) where at least one of them holds two or more links: one link per line under
+ * a repeated identifier is how shots are listed, not a collision.
+ */
+export function parsePastedLinks(text: string): PastedTable {
+  const rows: PastedRow[] = [];
+  let ignoredCells = 0;
+  text.split(/\r?\n/).forEach((line, i) => {
+    const tokens = line.includes("\t") ? line.split("\t").flatMap((cell) => (cell.trim() === "" ? [""] : splitCell(cell))) : splitCell(line);
+    const urls = tokens.filter(isLinkToken);
+    if (!urls.length) return;
+    const columns = tokens.flatMap((token, k) => (isLinkToken(token) ? [k + 1] : []));
+    let identifier: string | null = null;
+    for (const token of tokens) {
+      if (isLinkToken(token)) continue;
+      if (identifier === null && !FILLER.has(token.toLowerCase())) identifier = token;
+      else ignoredCells++;
+    }
+    const stem = urls.length >= 2 ? parseShotName(urlFileName(urls[0]!)).identifier : "";
+    rows.push({ row: i + 1, identifier, urls, columns, name: identifier ?? (stem || null) });
+  });
+
+  const byName = new Map<string, PastedRow[]>();
+  for (const r of rows) {
+    if (r.name === null) continue;
+    const key = normalizeKey(r.name);
+    byName.set(key, [...(byName.get(key) ?? []), r]);
   }
-  return out;
+  const collisions = [...byName.values()]
+    .filter((group) => group.length > 1 && group.some((r) => r.urls.length >= 2))
+    .map((group) => ({ name: group[0]!.name!, rows: group.map((r) => r.row) }));
+
+  const counts = rows.map((r) => r.urls.length);
+  const shape = rows.some((r) => r.identifier !== null) ? "id_and_links" : counts.some((n) => n >= 2) ? "links_grid" : "one_per_line";
+  return {
+    rows, links: counts.reduce((a, b) => a + b, 0),
+    linksPerRow: { min: counts.length ? Math.min(...counts) : 0, max: counts.length ? Math.max(...counts) : 0 },
+    shape, ignoredCells, collisions,
+  };
+}
+
+/** The link as it is fetched: internal spaces percent-encoded (the pasted text keeps them). */
+export function fetchableUrl(url: string): string {
+  return url.replace(/ /g, "%20");
 }
 
 /** Decoded parent path segment of a URL (`.../ABC123/1.jpg` -> `ABC123`), or null. */
@@ -34,24 +92,33 @@ function urlFolder(url: string): string | null {
 }
 
 /**
- * Items for a pasted list. Identifier = the pasted identifier (shots numbered in line order), else
- * parseShotName of the URL's last path segment. The pasted text is read from the upload's object
- * when `gcsUri` is set, else from `sourceUrl`.
+ * Items for a paste (parsePastedLinks). A row with an identifier: that identifier, shots numbered
+ * in order and continuing across rows with the same identifier (one link per line). A named row
+ * without one (two or more links): its name, shots 1..k in column order. Else parseShotName of the
+ * link's file name. `originalName` is always the link's own decoded file name; the fetched URL has
+ * its spaces percent-encoded. The pasted text is read from the upload's object when `gcsUri` is
+ * set, else from `sourceUrl`. Each item carries its place in the paste as `sheetRow` (the line) and
+ * `sheetHeader` (the cell number), as a links sheet's items do, so a link that fails is named
+ * "Row <r>, column <c>: ..." (spec 14b F5).
  */
-export function urlListItems(text: string, uploadId: string): SourceItem[] {
+export function urlListItems(table: PastedTable, uploadId: string): SheetSourceItem[] {
   const counts = new Map<string, number>();
-  return parseUrlList(text).map(({ identifier, url }) => {
+  return table.rows.flatMap(({ row, identifier, urls, columns, name }) => urls.map((url, i) => {
     const originalName = urlFileName(url);
-    const parsed = parseShotName(originalName);
-    const base = { originalName, folder: urlFolder(url), sheetIdentifier: null, ext: extOf(originalName), bytes: { kind: "url" as const, url }, uploadId, origin: "url_list" as const, warnings: [] };
+    const base = {
+      originalName, folder: urlFolder(url), sheetIdentifier: null, ext: extOf(originalName), bytes: { kind: "url" as const, url: fetchableUrl(url) }, uploadId, origin: "url_list" as const, warnings: [],
+      sheetRow: row, sheetHeader: String(columns[i] ?? i + 1),
+    };
     if (identifier) {
       const key = normalizeKey(identifier);
       const n = (counts.get(key) ?? 0) + 1;
       counts.set(key, n);
       return { ...base, identifier, n, suffix: "" as const };
     }
+    if (name) return { ...base, identifier: name, n: i + 1, suffix: "" as const };
+    const parsed = parseShotName(originalName);
     return { ...base, identifier: parsed.identifier, n: parsed.n, suffix: parsed.suffix };
-  });
+  }));
 }
 
 /** kind "url_list". */
@@ -60,7 +127,7 @@ export const urlListAdapter: Adapter = {
   async collect(input) {
     const { upload, deps } = input;
     const text = upload.gcsUri ? (await deps.storage.downloadBuffer(upload.gcsUri)).buf.toString("utf8") : (upload.sourceUrl ?? "");
-    return urlListItems(text, upload.id);
+    return urlListItems(parsePastedLinks(text), upload.id);
   },
 };
 

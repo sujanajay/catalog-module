@@ -2,7 +2,7 @@
 // The arrays are the single source for the database text enums (schema.ts) and for every type below.
 
 export const CHANNEL_IDS = ["noon","namshi","trendyol","styli","centrepoint","sixthstreet","vogacloset","amazon","shein"] as const;
-export const BATCH_STATUSES = ["draft","ingesting","matting","rendering","qa","publishing","done","failed"] as const;
+export const BATCH_STATUSES = ["draft","ingesting","matting","rendering","qa","publishing","done","failed","cancelled"] as const;
 export const UPLOAD_KINDS = ["zip","image","sheet","product_list","google_sheet","drive_folder","url_list"] as const;
 export const OUTPUT_STATUSES = ["pending","staged","verified","needs_attention","failed","skipped"] as const;
 export const LINK_STATUSES = ["ok","missing_images","not_in_sheet"] as const;
@@ -32,6 +32,8 @@ export const ROLES = ["admin","operator","viewer"] as const;
 export type ChannelId = (typeof CHANNEL_IDS)[number];
 export type BatchStatus = (typeof BATCH_STATUSES)[number];
 export type UploadKind = (typeof UPLOAD_KINDS)[number];
+/** Inputs added through the paste box (pasted image links and Google links); every other kind is a file. */
+export const PASTE_INPUT_KINDS: readonly UploadKind[] = ["url_list", "google_sheet", "drive_folder"];
 export type OutputStatus = (typeof OUTPUT_STATUSES)[number];
 export type LinkStatus = (typeof LINK_STATUSES)[number];
 export type SheetStatus = (typeof SHEET_STATUSES)[number];
@@ -65,6 +67,8 @@ export interface BatchOptions {
   qaCapUsd?: number | null;                // per-batch QA cap (07)
   evalSet?: string | null;                 // eval batches (08)
   cleanedUp?: boolean;                     // test batch cleaned up while its spend still counts today; hidden from the list
+  /** Set when the sweep cancelled an untouched draft (spec 14d F12): when, and after how many days. */
+  expired?: { at: string; days: number } | null;
 }
 
 export interface BatchCounts {
@@ -75,11 +79,56 @@ export interface BatchCounts {
   failReason: string | null; finalizePending: boolean; policyFallback: boolean;
   newProducts: number; existingProducts: number; shotsToRemove: number;
   recheckOk: number | null; recheckTotal: number | null;   // independent re-check written by finalize (06): this batch's delivered links
+  /**
+   * Links that could not be downloaded (spec 14b F5 part 1); `unsupportedFiles` counts files only.
+   * Optional and not in EMPTY_BATCH_COUNTS (the column's DDL default, which would need a migration):
+   * a batch not yet collected, or written before release B, reads it as 0.
+   */
+  linkFailures?: number;
   /** Links of this batch held for a decision (held products); not delivered, so outside both Details counts. */
   heldLinks?: number;
   /** Earlier batches' live links the sheet keeps for held products, re-checked separately. */
   recheckCarriedOk?: number | null; recheckCarriedTotal?: number | null;
+  /**
+   * Spec 15 E7, written by every chunk delivery (refreshBatchProgress). Optional for the same reason as
+   * `linkFailures`: a batch from before release E reads `prepared` as unknown and the others as absent.
+   * `prepared`: photos of the batch that are cut out, failed, or left out as a size chart.
+   * `progressAt`: the last time a photo finished in any stage (ISO time).
+   * `processingRate`: the last 5 samples of the images made, appended when the count changed.
+   */
+  prepared?: number;
+  progressAt?: string | null;
+  processingRate?: { at: string; made: number }[];
+  // Intake progress (spec 14c F6). Optional and not in EMPTY_BATCH_COUNTS (a new default would need a
+  // migration): a row written before release C reads phase and placingClaim as null, placed as 0.
+  /** What intake is doing now; the worker writes it with every counts update and clears `rate` when it changes. */
+  phase?: IntakePhase | null;
+  /** Photos placed so far (written at most every 10 s while placing, and with the closing write). */
+  placed?: number;
+  /** Photos to place, set when placing is claimed. */
+  placeTotal?: number | null;
+  /** The last RATE_SAMPLES progress samples, all of the current phase (`done` is `placed` while placing). */
+  rate?: RateSample[];
+  /** The placing lease: the batch stays `ingesting` while a delivery holds it. */
+  placingClaim?: PlacingClaim | null;
+  /**
+   * Why a batch reopened with Fix and continue could not start (spec 14c F8): the reopen keeps the old
+   * `failReason` here, step 1 shows it above the inputs, and the next hand-off to collecting clears it.
+   */
+  fixReason?: string | null;
 }
+/** Intake phases (spec 14c F6). The first five are collecting, `placing` follows, the last two end intake. */
+export const INTAKE_PHASES = ["uploading", "downloading", "reading", "unpacking", "checking", "placing", "ready", "needs_input"] as const;
+export type IntakePhase = (typeof INTAKE_PHASES)[number];
+/** One progress sample: ISO time, the phase it was taken in, and the phase's done count then. */
+export interface RateSample { at: string; phase: IntakePhase; done: number }
+/**
+ * A placing lease: `token` names the claiming delivery (run and upload id), `until` is an ISO expiry,
+ * `attempt` the run of the step working under it (null once that run stopped on an error), `next`
+ * (spec 14d F7 part 2) the first photo of the chunk placing handed on to its continuation (absent while
+ * grouping or the first chunk runs).
+ */
+export interface PlacingClaim { token: string; until: string; attempt?: string | null; next?: number }
 export interface BatchCost {
   computeVcpuSeconds: number; mattingMs: number; renderMs: number; computeUsd: number;
   qaUsd: number; qaCalls: number; identifiers: number;

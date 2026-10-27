@@ -1,9 +1,11 @@
 import { eq } from "drizzle-orm";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import type { Db } from "../../db/client";
 import { catalogBatches, catalogProducts, catalogSourceImages, catalogUploads, DEFAULT_BATCH_OPTIONS } from "../../db/schema";
 import { createTestDb } from "../../db/testing";
-import { normalizeKey } from "../naming";
+import { batchPrefix, normalizeKey } from "../naming";
+import { itemKey, manifestPath } from "./manifest";
+import { parsePastedLinks, urlListItems } from "./url-list";
 import type { BatchOptions, UploadKind } from "../types";
 import { buildDetectedStep2, columnLetter, formatsSentence, headerRange, sheetColumnsSentence } from "./detect-step";
 import type { Detected, IngestDeps } from "./types";
@@ -13,13 +15,22 @@ let close: () => Promise<void>;
 let seq = 0;
 
 beforeAll(async () => {
+  vi.stubEnv("BUCKET", "bkt");
   ({ db, close } = await createTestDb());
 });
 afterAll(async () => {
+  vi.unstubAllEnvs();
   await close();
 });
 
-const deps = { storage: {} as IngestDeps["storage"] };
+/** Step 2 reads the link uploads' manifests (spec 14b F5); `objects` holds the ones a test writes. */
+const objects = new Map<string, Buffer>();
+const deps = {
+  storage: {
+    headObject: async (gsUri: string) => ({ exists: objects.has(gsUri), size: objects.get(gsUri)?.length ?? null, contentType: null, generation: null, crc32c: null }),
+    downloadBuffer: async (gsUri: string) => ({ buf: objects.get(gsUri)!, mime: "application/json" }),
+  } as unknown as IngestDeps["storage"],
+};
 const sign = async (gsUri: string) => `https://signed.example/${gsUri.slice(5)}?ttl=900`;
 
 /** The links sheet of the prototype: identifier in B, photos in H to M. */
@@ -268,6 +279,45 @@ describe("buildDetectedStep2", () => {
       { url: "https://drive.google.com/drive/folders/1xY", kind: "drive_folder", status: "no_access", sentence: "Share the folder with the address above, then paste again." },
       { url: "https://drive.google.com/drive/folders/2zZ", kind: "drive_folder", status: "blocked", sentence: "Your Google settings block sharing with our address. Download the folder as a zip and drop it instead." },
     ]);
+  });
+
+  it("the linkFailures block (spec 14b F5): failures by reason with the first example, temporary count and products, from the manifests", async () => {
+    const b = await batch();
+    const paste = await addUpload(b, "url_list", { kind: "url_list", message: "" });
+    const H = "https://example.com/test_brand";
+    // Row 1: 3 links of TB-A; row 2: 2 links of TB-B (tab cells); row 3 (TB-C): one link after an empty cell.
+    const text = `${H}/TB-A_1.JPG\t${H}/TB-A_2.JPG\t${H}/TB-A_3.JPG\n${H}/TB-B_1.JPG\t${H}/TB-B_2.JPG\nTB-C\t\t${H}/TB-C_1.JPG`;
+    const items = urlListItems(parsePastedLinks(text), paste);
+    const reject = (k: number, got: string) => ({ ok: false as const, reason: `Row ${items[k]!.sheetRow}, column ${items[k]!.sheetHeader}: ${(items[k]!.bytes as { url: string }).url} did not return an image (got ${got}).` });
+    const ok = { ok: true as const, sha256: "x", uri: "gs://bkt/x.jpg", mime: "image/jpeg", ext: "jpg", width: 600, height: 800, size: 10, flags: [] };
+    const results = {
+      [itemKey(items[0]!)]: ok, [itemKey(items[1]!)]: reject(1, "404"), [itemKey(items[2]!)]: reject(2, "404"),
+      [itemKey(items[3]!)]: reject(3, "503"), [itemKey(items[4]!)]: reject(4, "text/html"),
+      // items[5] (TB-C) not read yet: counted as a link, not as a failure.
+    };
+    const manifest = { version: 1, items, results, warnings: [], productList: false, detected: { kind: "url_list", message: "" } };
+    objects.set(`gs://bkt/${manifestPath(batchPrefix("uspa", b, false), paste)}`, Buffer.from(JSON.stringify(manifest)));
+    // Before the collection counted failed links the manifests are not read (step 2 polls this).
+    expect((await buildDetectedStep2(db, b, deps, { sign })).linkFailures.total).toBe(0);
+    const [row] = await db.select().from(catalogBatches).where(eq(catalogBatches.id, b));
+    await db.update(catalogBatches).set({ counts: { ...row!.counts, linkFailures: 4 } }).where(eq(catalogBatches.id, b));
+
+    const s = await buildDetectedStep2(db, b, deps, { sign });
+    expect(s.linkFailures).toEqual({
+      total: 4, temporary: 1, links: 6, products: 2, attempts: 0,
+      byReason: [
+        { reason: "answered 'not found' (404)", count: 2, first: { url: `${H}/TB-A_2.JPG`, where: "row 1, column 2" } },
+        { reason: "could not be reached", count: 1, first: { url: `${H}/TB-B_1.JPG`, where: "row 2, column 1" } },
+        { reason: "returned a web page instead of an image", count: 1, first: { url: `${H}/TB-B_2.JPG`, where: "row 2, column 2" } },
+      ],
+    });
+    expect(items[5]!.sheetHeader).toBe("3");
+  });
+
+  it("an empty linkFailures block when the batch holds no links", async () => {
+    const b = await batch();
+    await addUpload(b, "image", files(2));
+    expect((await buildDetectedStep2(db, b, deps, { sign })).linkFailures).toEqual({ total: 0, temporary: 0, links: 0, products: 0, attempts: 0, byReason: [] });
   });
 
   it("refuses an unknown batch", async () => {

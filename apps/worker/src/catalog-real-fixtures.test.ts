@@ -1,7 +1,7 @@
 import { expect, test } from "vitest";
 import sharp from "sharp";
 import { changeOnePixel, pastedLines } from "./catalog-real-fixtures";
-import { urlListItems } from "@catalog/core/catalog/ingest/url-list";
+import { parsePastedLinks, urlListItems } from "@catalog/core/catalog/ingest/url-list";
 import { productPrefix, normalizeKey } from "@catalog/core/catalog/naming";
 import { createHash } from "node:crypto";
 import { prepare, renderAllChannels } from "@catalog/core/catalog/render";
@@ -35,7 +35,7 @@ test("a genuine one-pixel source change can encode to the same JPEG, so source i
 
 test("two independent real runs use disjoint public prefixes while reading the exact original URLs",()=>{
   const urls=["https://photos.supabase.co/storage/v1/object/public/shoes/ABC_1.jpg","https://photos.supabase.co/storage/v1/object/public/shoes/ABC_2.jpg"];
-  const collect=(run:string)=>urlListItems(pastedLines(urls,run).join("\n"),"upload");
+  const collect=(run:string)=>urlListItems(parsePastedLinks(pastedLines(urls,run).join("\n")),"upload");
   const first=collect("run-one"),second=collect("run-two");
   expect(first.map(s=>s.identifier)).toEqual(["run-one-ABC","run-one-ABC"]);
   expect(first.map(s=>s.n)).toEqual([1,2]);

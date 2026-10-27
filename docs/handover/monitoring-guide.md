@@ -104,7 +104,7 @@ Three places hold the records:
 - **Test runs never email.** Test jobs (smoke tests, evals, load tests) do not send alerts.
 - **There are no emails about money.** Alert 5 is about a limit pausing work, not about cost.
 
-### The nine alerts
+### The ten alerts
 
 | # | Email subject | What it means in plain words | What the operator sees | What to do first | Call Sujan when |
 |---|---|---|---|---|---|
@@ -117,6 +117,7 @@ Three places hold the records:
 | 7 | Catalog: queue stuck | More than 50 pieces of work have been waiting in line for 30 minutes and not one was picked up. A large batch that is still moving does not trigger it. | "Processing" with a count that does not change. | Refresh the batch page after a few minutes to see if the count moves. | Nothing moves for another 30 minutes. |
 | 8 | Catalog: database connections high | The database is close to its limit of open connections (more than 20 of 25 for 5 minutes). At the limit, every page and batch fails. | Pages load slowly or show an error. | Do not start new batches. Ask others not to use the site for a while. | Pages still fail after 15 minutes. |
 | 9 | Catalog: error in the logs | Something went wrong that alerts 1 to 5 do not cover. | Often nothing on the batch page. | Carry on normally. Watch your batches for anything odd. | A batch looks wrong or stops. Sujan reads the details in the logs. |
+| 10 | Catalog: a chunk task ran out of time | A piece of batch work ran past its time limit and was cut off. It is retried by itself, but this should never happen, so a setting is wrong. | Usually nothing; the batch may move a little slower. | Carry on normally. | Always, the same day. Sujan checks the time budget setting. |
 
 When you call Sujan, send Sujan the batch name and the "Open logs" link from the batch's Details tab.
 

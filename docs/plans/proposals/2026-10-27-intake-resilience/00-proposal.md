@@ -1,5 +1,8 @@
 # Intake resilience: proposal
 
+> Note 2026-10-27: F14 (the finished-collection email) was dropped by the owner; operators return to
+> the dashboard (Your unfinished batches). Spec 14d ships without it.
+
 Date: 2026-10-27. Status: proposal; the owner's decisions were made on 2026-10-27 (section 7). Build: live 5c48d85 (origin/main).
 Companion specs: the parent `docs/specs/14-intake-resilience.md` and one executable spec per release,
 `docs/specs/14a-intake-release-a.md` to `docs/specs/14d-intake-release-d.md` (each run on its own per

@@ -26,6 +26,7 @@ const STATUS_WORDS: Record<BatchStatus, string> = {
   publishing: "Publishing",
   done: "Done",
   failed: "Could not start",
+  cancelled: "Cancelled",
 };
 export function statusWord(status: BatchStatus): string {
   return STATUS_WORDS[status];

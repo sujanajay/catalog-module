@@ -13,7 +13,7 @@ import { catalogCostEvents } from "@catalog/core/db/schema";
 import { workerCatalogDeps,type CatalogDeps } from "./deps";
 import { UnsupportedSourceError } from "@catalog/core/catalog/render";
 import { handleSweep } from "./sweep";
-import { handleChunkTask } from "./chunk";
+import { currentChunkTask, handleChunkTask } from "./chunk";
 import { catalogLlmDeps, CatalogQaCapError, type UnderClaim } from "./qa-stage";
 import { QA_USD_PER_CHECK_FALLBACK } from "@catalog/core/catalog/cost";
 import { handlePublishTask } from "./publish";
@@ -66,9 +66,9 @@ async function seed(w:ReturnType<typeof world>,name:string,options:{productId?:s
   const [chunk]=await db.insert(catalogChunks).values({batchId:batch!.id,index:0,stage:"matte",productIds:[product.id]}).returning();
   return {batch:batch!,product,chunk:chunk!};
 }
-async function run(w:ReturnType<typeof world>,s:Awaited<ReturnType<typeof seed>>) {expect((await handleChunkTask(w.deps,{chunkId:s.chunk.id})).httpStatus).toBe(200);expect((await handleChunkTask(w.deps,{chunkId:s.chunk.id})).httpStatus).toBe(200);expect((await handleChunkTask(w.deps,{chunkId:s.chunk.id})).httpStatus).toBe(200);return handlePublishTask(w.deps,{batchId:s.batch.id,productId:s.product.id});}
+async function run(w:ReturnType<typeof world>,s:Awaited<ReturnType<typeof seed>>) {expect((await handleChunkTask(w.deps,await currentChunkTask(db,s.chunk.id))).httpStatus).toBe(200);expect((await handleChunkTask(w.deps,await currentChunkTask(db,s.chunk.id))).httpStatus).toBe(200);expect((await handleChunkTask(w.deps,await currentChunkTask(db,s.chunk.id))).httpStatus).toBe(200);return handlePublishTask(w.deps,{batchId:s.batch.id,productId:s.product.id});}
 it("does not finalize initial new rows, publishes, checks exports, then increments export versions",async()=>{const w=world(),s=await seed(w,"first");expect((await handleFinalizeTask(w.deps,{batchId:s.batch.id})).outcome).toBe("not_ready");expect((await run(w,s)).outcome).toBe("published");expect((await handleFinalizeTask(w.deps,{batchId:s.batch.id})).outcome).toBe("done");const [batch]=await db.select().from(catalogBatches).where(eq(catalogBatches.id,s.batch.id));expect(batch!.counts).toMatchObject({latestExport:1,recheckOk:1,recheckTotal:1,verified:1});expect(deriveBatchState(batch!).state).toBe("ready");expect((await handleFinalizeTask(w.deps,{batchId:s.batch.id})).outcome).toBe("done");const [again]=await db.select().from(catalogBatches).where(eq(catalogBatches.id,s.batch.id));expect(again!.sheetXlsxUri).toContain("links-v2.xlsx");expect(w.copy).toHaveBeenCalledTimes(1);},60_000);
-it("redelivery repeats no finished matte, render or copy; identical reupload keeps generations",async()=>{const w=world(),s=await seed(w,"repeat");await run(w,s);await handleChunkTask(w.deps,{chunkId:s.chunk.id});await handlePublishTask(w.deps,{batchId:s.batch.id,productId:s.product.id});expect(w.deps.matteFor).toHaveBeenCalledTimes(1);expect(w.deps.renderAllChannels).toHaveBeenCalledTimes(1);expect(w.copy).toHaveBeenCalledTimes(1);const next=await seed(w,"repeat2",{productId:s.product.id});await run(w,next);expect(w.deps.matteFor).toHaveBeenCalledTimes(1);expect(w.deps.renderAllChannels).toHaveBeenCalledTimes(1);expect(w.copy).toHaveBeenCalledTimes(1);const [pair]=await db.select().from(catalogBatchProducts).where(eq(catalogBatchProducts.batchId,next.batch.id));expect(pair!.change).toBe("unchanged");},60_000);
+it("redelivery repeats no finished matte, render or copy; identical reupload keeps generations",async()=>{const w=world(),s=await seed(w,"repeat");await run(w,s);await handleChunkTask(w.deps,await currentChunkTask(db,s.chunk.id));await handlePublishTask(w.deps,{batchId:s.batch.id,productId:s.product.id});expect(w.deps.matteFor).toHaveBeenCalledTimes(1);expect(w.deps.renderAllChannels).toHaveBeenCalledTimes(1);expect(w.copy).toHaveBeenCalledTimes(1);const next=await seed(w,"repeat2",{productId:s.product.id});await run(w,next);expect(w.deps.matteFor).toHaveBeenCalledTimes(1);expect(w.deps.renderAllChannels).toHaveBeenCalledTimes(1);expect(w.copy).toHaveBeenCalledTimes(1);const [pair]=await db.select().from(catalogBatchProducts).where(eq(catalogBatchProducts.batchId,next.batch.id));expect(pair!.change).toBe("unchanged");},60_000);
 it("replaces a changed source even when its rendered JPEG bytes match the live image",async()=>{
   const w=world(),first=await seed(w,"same-jpeg",{shots:["source-one"]});
   await run(w,first);
@@ -91,9 +91,9 @@ it("reuses a completed public copy after the publication transaction rolls back"
   await run(w,first);
   const [old]=await db.select().from(catalogOutputs).where(eq(catalogOutputs.batchId,first.batch.id));
   const next=await seed(w,"public-copy-crash-next",{productId:first.product.id,shots:["source-two"]});
-  await handleChunkTask(w.deps,{chunkId:next.chunk.id});
-  await handleChunkTask(w.deps,{chunkId:next.chunk.id});
-  await handleChunkTask(w.deps,{chunkId:next.chunk.id});
+  await handleChunkTask(w.deps,await currentChunkTask(db,next.chunk.id));
+  await handleChunkTask(w.deps,await currentChunkTask(db,next.chunk.id));
+  await handleChunkTask(w.deps,await currentChunkTask(db,next.chunk.id));
   vi.mocked(w.deps.storage.setCustomTime).mockRejectedValueOnce(new Error("Crash before DB commit"));
   expect((await handlePublishTask(w.deps,{batchId:next.batch.id,productId:next.product.id})).outcome).toBe("retry");
   const [rolledBack]=await db.select().from(catalogOutputs).where(eq(catalogOutputs.batchId,next.batch.id));
@@ -109,7 +109,7 @@ it("reuses a completed public copy after the publication transaction rolls back"
   expect((await handlePublishTask(w.deps,{batchId:next.batch.id,productId:next.product.id})).outcome).toBe("published");
   expect(w.copy).toHaveBeenCalledTimes(2);
 },60_000);
-it("holds undecided outputs with no public writes, then publishes once staged",async()=>{const w=world(),s=await seed(w,"held");await handleChunkTask(w.deps,{chunkId:s.chunk.id});await handleChunkTask(w.deps,{chunkId:s.chunk.id});await handleChunkTask(w.deps,{chunkId:s.chunk.id});await db.update(catalogOutputs).set({status:"needs_attention",reason:"Check the edge."}).where(eq(catalogOutputs.batchId,s.batch.id));expect((await handlePublishTask(w.deps,{batchId:s.batch.id,productId:s.product.id})).outcome).toBe("held");expect(w.copy).not.toHaveBeenCalled();expect((await handleFinalizeTask(w.deps,{batchId:s.batch.id})).outcome).toBe("done");expect((await db.select().from(catalogProducts).where(eq(catalogProducts.id,s.product.id)))[0]!.lockBatchId).toBe(s.batch.id);await db.update(catalogOutputs).set({status:"staged"}).where(eq(catalogOutputs.batchId,s.batch.id));expect((await handlePublishTask(w.deps,{batchId:s.batch.id,productId:s.product.id})).outcome).toBe("published");},60_000);
+it("holds undecided outputs with no public writes, then publishes once staged",async()=>{const w=world(),s=await seed(w,"held");await handleChunkTask(w.deps,await currentChunkTask(db,s.chunk.id));await handleChunkTask(w.deps,await currentChunkTask(db,s.chunk.id));await handleChunkTask(w.deps,await currentChunkTask(db,s.chunk.id));await db.update(catalogOutputs).set({status:"needs_attention",reason:"Check the edge."}).where(eq(catalogOutputs.batchId,s.batch.id));expect((await handlePublishTask(w.deps,{batchId:s.batch.id,productId:s.product.id})).outcome).toBe("held");expect(w.copy).not.toHaveBeenCalled();expect((await handleFinalizeTask(w.deps,{batchId:s.batch.id})).outcome).toBe("done");expect((await db.select().from(catalogProducts).where(eq(catalogProducts.id,s.product.id)))[0]!.lockBatchId).toBe(s.batch.id);await db.update(catalogOutputs).set({status:"staged"}).where(eq(catalogOutputs.batchId,s.batch.id));expect((await handlePublishTask(w.deps,{batchId:s.batch.id,productId:s.product.id})).outcome).toBe("published");},60_000);
 it("replaces changed bytes and deletes removed shots only on selected channels",async()=>{const w=world(),s=await seed(w,"overwrite",{shots:["one","two"],channels:["noon","amazon"]});await run(w,s);const next=await seed(w,"overwrite2",{productId:s.product.id,shots:["changed"]});await run(w,next);expect(w.remove).toHaveBeenCalledTimes(1);expect(w.remove.mock.calls[0]![0]).toContain("/noon/");const [pair]=await db.select().from(catalogBatchProducts).where(eq(catalogBatchProducts.batchId,next.batch.id));expect(pair!.change).toBe("shots_removed");const events=await db.select().from(catalogProductEvents).where(eq(catalogProductEvents.batchId,next.batch.id));expect(events.map(e=>e.kind)).toEqual(expect.arrayContaining(["overwritten","shots_removed"]));const amazon=await db.select().from(catalogOutputs).where(and(eq(catalogOutputs.productId,s.product.id),eq(catalogOutputs.channel,"amazon"),eq(catalogOutputs.isLive,true)));expect(amazon).toHaveLength(2);},60_000);
 it("a redelivered shot that ingest links to the previous source stages under its own batch prefix",async()=>{
   const w=world(),s=await seed(w,"redeliver",{shots:["one","two"]});await run(w,s);
@@ -128,7 +128,7 @@ it("never pre-skips an 800 px Styli photo at the matte stage, with or without th
   vi.stubEnv("UPSCALE_MODEL",model);
   try {
    const w=world(),s=await seed(w,`styli-floor-${model || "off"}`,{channels:["styli"]});
-   await handleChunkTask(w.deps,{chunkId:s.chunk.id});
+   await handleChunkTask(w.deps,await currentChunkTask(db,s.chunk.id));
    const [output]=await db.select().from(catalogOutputs).where(eq(catalogOutputs.batchId,s.batch.id));
    expect(output!.status).not.toBe("skipped"); expect(output!.reason).toBeNull();
   } finally { vi.unstubAllEnvs(); }
@@ -137,11 +137,11 @@ it("never pre-skips an 800 px Styli photo at the matte stage, with or without th
 it("render keys include rules, policy, shot, channel and source",()=>{const input={sourceSha256:"one",channel:"noon" as const,n:1,policyKey:"default|fixture"};expect(new Set([renderKey(input),renderKey({...input,n:2}),renderKey({...input,channel:"amazon"}),renderKey({...input,policyKey:"other"}),renderKey({...input,rulesVersion:"next"}),renderKey({...input,sourceSha256:"two"})]).size).toBe(6);});
 it("holds a product if its chunk failed before it could create planned outputs",async()=>{const w=world(),s=await seed(w,"missing-output");await db.update(catalogChunks).set({status:"failed"}).where(eq(catalogChunks.id,s.chunk.id));expect((await handlePublishTask(w.deps,{batchId:s.batch.id,productId:s.product.id})).outcome).toBe("held");expect(w.copy).not.toHaveBeenCalled();},60_000);
 it("isolates one render exception, retries a fallback matte once, then renders and holds it",async()=>{const w=world(),s=await seed(w,"render-error",{channels:["noon","amazon"]});vi.mocked(w.deps.renderAllChannels).mockRejectedValueOnce(new Error("Could not make this photo."));await run(w,s);const outputs=await db.select().from(catalogOutputs).where(eq(catalogOutputs.batchId,s.batch.id));expect(outputs.map(o=>o.status)).toEqual(["failed","staged"]);expect(w.copy).not.toHaveBeenCalled();const fallback=await seed(w,"fallback");const flood={alpha:Buffer.alloc(800*800,255),width:800,height:800,model:"floodfill",ms:0,source:"floodfill" as const,target:null,sentLongSide:null};vi.mocked(w.deps.matteFor).mockClear().mockResolvedValueOnce(flood).mockResolvedValueOnce(flood);expect((await run(w,fallback)).outcome).toBe("held");expect(w.deps.matteFor).toHaveBeenCalledTimes(2);const [output]=await db.select().from(catalogOutputs).where(eq(catalogOutputs.batchId,fallback.batch.id));expect(output!.flags).toContain("fallback_matte");expect(output!.stagingUri).not.toBeNull();expect(output!.status).toBe("needs_attention");expect((output!.compliance as {auto_actions:{step:string;result:string}[]}).auto_actions).toEqual([expect.objectContaining({step:"matte_retry",result:"failed"})]);expect(output!.reason).toContain("cut-out service was unavailable");},60_000);
-it("re-copies only once before recording a public verification failure",async()=>{const w=world(),s=await seed(w,"verify-failure");w.deps.fetch=vi.fn(async()=>new Response(new Uint8Array(jpeg),{headers:{"content-type":"text/plain","content-length":"4","x-goog-generation":"wrong"}}));await handleChunkTask(w.deps,{chunkId:s.chunk.id});await handleChunkTask(w.deps,{chunkId:s.chunk.id});await handleChunkTask(w.deps,{chunkId:s.chunk.id});const result=await handlePublishTask(w.deps,{batchId:s.batch.id,productId:s.product.id});expect(result.outcome).toBe("failed");expect(w.copy).toHaveBeenCalledTimes(2);const [output]=await db.select().from(catalogOutputs).where(eq(catalogOutputs.batchId,s.batch.id));expect(output!.reason).toBe("Uploaded file could not be read back from the public link");},60_000);
+it("re-copies only once before recording a public verification failure",async()=>{const w=world(),s=await seed(w,"verify-failure");w.deps.fetch=vi.fn(async()=>new Response(new Uint8Array(jpeg),{headers:{"content-type":"text/plain","content-length":"4","x-goog-generation":"wrong"}}));await handleChunkTask(w.deps,await currentChunkTask(db,s.chunk.id));await handleChunkTask(w.deps,await currentChunkTask(db,s.chunk.id));await handleChunkTask(w.deps,await currentChunkTask(db,s.chunk.id));const result=await handlePublishTask(w.deps,{batchId:s.batch.id,productId:s.product.id});expect(result.outcome).toBe("failed");expect(w.copy).toHaveBeenCalledTimes(2);const [output]=await db.select().from(catalogOutputs).where(eq(catalogOutputs.batchId,s.batch.id));expect(output!.reason).toBe("Uploaded file could not be read back from the public link");},60_000);
 it("leaves the batch unfinished when xlsx and csv differ",async()=>{const w=world(),s=await seed(w,"mismatch");await run(w,s);vi.mocked(compareXlsxCsv).mockResolvedValueOnce({equal:false,differences:["Identifier differs."]});expect((await handleFinalizeTask(w.deps,{batchId:s.batch.id})).outcome).toBe("exports_mismatch");const [batch]=await db.select().from(catalogBatches).where(eq(catalogBatches.id,s.batch.id));expect(batch!.status).not.toBe("done");expect(batch!.error).toContain("Identifier differs.");},60_000);
 it("writes a filled product list, repeats links per size, preserves the upload and records CSV exports",async()=>{const w=world(),s=await seed(w,"filled");const original=await writeLinksXlsx({channels:["noon"],rows:[7,8].map(size=>({brand:"Anta",identifier:`filled/${size}`,optionIdStyleColor:"",opptraSkuIds:[],links:{},status:"ok",notes:`size ${size}`,change:"new",changedAt:null}))});const originalUri=await w.upload(`catalog-test/anta/${s.batch.id}/uploads/list.xlsx`,original,"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");await db.insert(catalogUploads).values({batchId:s.batch.id,kind:"product_list",name:"list.xlsx",gcsUri:originalUri,status:"collected",detected:{matchColumn:1}});await run(w,s);expect((await handleFinalizeTask(w.deps,{batchId:s.batch.id})).outcome).toBe("done");const [batch]=await db.select().from(catalogBatches).where(eq(catalogBatches.id,s.batch.id));const report=JSON.parse(w.objects.get(batch!.reportUri!)!.buf.toString());expect(report.exports.filledProductList.csv).toHaveLength(1);const filled=await workbookCsvSheets(w.objects.get(report.exports.filledProductList.xlsx)!.buf);expect(filled[0]!.csv).toContain("link_status");expect(filled[0]!.csv.match(/https:\/\/storage.googleapis.com/g)).toHaveLength(2);expect(w.objects.get(originalUri)!.buf).toEqual(original);},60_000);
 it("refuses production cleanup and cleans both passes only under test prefixes",async()=>{const w=world();const [production]=await db.insert(catalogBatches).values({brandSlug:"anta",brandName:"Anta",name:"production",createdBy:"test@opptra.com",isTest:false}).returning();const remove=vi.fn(async(uri:string)=>{expect(uri).toMatch(/^gs:\/\/(assets|public)\/catalog-test\//);return 1;});const deps={...w.deps.storage,deleteTestObjects:remove};await expect(cleanupTestBatch(db,deps,production!.id)).rejects.toThrow("catalog-test/");expect(remove).not.toHaveBeenCalled();const first=await seed(w,"cleanup");await run(w,first);const second=await seed(w,"cleanup2",{productId:first.product.id});await run(w,second);await expect(cleanupTestBatch(db,deps,first.batch.id)).rejects.toThrow("shared");await expect(cleanupTestBatches(db,deps,[first.batch.id,second.batch.id])).resolves.toMatchObject({objects:3});expect((await db.select().from(catalogProducts).where(eq(catalogProducts.id,first.product.id)))).toHaveLength(0);},60_000);
-it("recovers uploaded matte and staging caches after a crash before their final DB updates",async()=>{const w=world(),s=await seed(w,"crash");await handleChunkTask(w.deps,{chunkId:s.chunk.id});await db.update(catalogChunks).set({stage:"matte",status:"queued"}).where(eq(catalogChunks.id,s.chunk.id));await db.update(catalogSourceImages).set({matteUri:null}).where(eq(catalogSourceImages.batchId,s.batch.id));await handleChunkTask(w.deps,{chunkId:s.chunk.id});expect(w.deps.matteFor).toHaveBeenCalledTimes(1);await handleChunkTask(w.deps,{chunkId:s.chunk.id});await db.update(catalogChunks).set({stage:"render",status:"queued"}).where(eq(catalogChunks.id,s.chunk.id));await db.update(catalogOutputs).set({status:"pending",stagingUri:null}).where(eq(catalogOutputs.batchId,s.batch.id));await handleChunkTask(w.deps,{chunkId:s.chunk.id});expect(w.deps.renderAllChannels).toHaveBeenCalledTimes(1);await handleChunkTask(w.deps,{chunkId:s.chunk.id});expect((await handlePublishTask(w.deps,{batchId:s.batch.id,productId:s.product.id})).outcome).toBe("published");expect(w.copy).toHaveBeenCalledTimes(1);},60_000);
+it("recovers uploaded matte and staging caches after a crash before their final DB updates",async()=>{const w=world(),s=await seed(w,"crash");await handleChunkTask(w.deps,await currentChunkTask(db,s.chunk.id));await db.update(catalogChunks).set({stage:"matte",status:"queued"}).where(eq(catalogChunks.id,s.chunk.id));await db.update(catalogSourceImages).set({matteUri:null}).where(eq(catalogSourceImages.batchId,s.batch.id));await handleChunkTask(w.deps,await currentChunkTask(db,s.chunk.id));expect(w.deps.matteFor).toHaveBeenCalledTimes(1);await handleChunkTask(w.deps,await currentChunkTask(db,s.chunk.id));await db.update(catalogChunks).set({stage:"render",status:"queued"}).where(eq(catalogChunks.id,s.chunk.id));await db.update(catalogOutputs).set({status:"pending",stagingUri:null}).where(eq(catalogOutputs.batchId,s.batch.id));await handleChunkTask(w.deps,await currentChunkTask(db,s.chunk.id));expect(w.deps.renderAllChannels).toHaveBeenCalledTimes(1);await handleChunkTask(w.deps,await currentChunkTask(db,s.chunk.id));expect((await handlePublishTask(w.deps,{batchId:s.batch.id,productId:s.product.id})).outcome).toBe("published");expect(w.copy).toHaveBeenCalledTimes(1);},60_000);
 
 it("serializes overlapping chunk deliveries before either can regress the stage",async()=>{
   const w=world(),s=await seed(w,"overlapping");
@@ -150,11 +150,11 @@ it("serializes overlapping chunk deliveries before either can regress the stage"
   const head=w.deps.storage.headObject;
   let first=true;
   w.deps.storage.headObject=async uri=>{if(first){first=false;entered();await paused;}return head(uri);};
-  const firstDelivery=handleChunkTask(w.deps,{chunkId:s.chunk.id});
+  const firstDelivery=handleChunkTask(w.deps,await currentChunkTask(db,s.chunk.id));
   await started;
-  const duplicate=await handleChunkTask(w.deps,{chunkId:s.chunk.id});
+  const duplicate=await handleChunkTask(w.deps,await currentChunkTask(db,s.chunk.id));
   release();await firstDelivery;
-  await handleChunkTask(w.deps,{chunkId:s.chunk.id});
+  await handleChunkTask(w.deps,await currentChunkTask(db,s.chunk.id));
   expect(duplicate.httpStatus).toBe(503);
   expect((await db.select().from(catalogChunks).where(eq(catalogChunks.id,s.chunk.id)))[0]).toMatchObject({stage:"qa",status:"queued"});
   expect(w.deps.matteFor).toHaveBeenCalledTimes(1);
@@ -164,11 +164,11 @@ it("retries a temporary matte storage failure, then resumes without labelling th
   const head=w.deps.storage.headObject;
   w.deps.storage.headObject=vi.fn(head).mockRejectedValueOnce(new Error("Temporary storage outage"));
   const log=w.deps.log=vi.fn();
-  expect((await handleChunkTask(w.deps,{chunkId:s.chunk.id},{retryCount:1})).httpStatus).toBe(503);
+  expect((await handleChunkTask(w.deps,await currentChunkTask(db,s.chunk.id),{retryCount:1})).httpStatus).toBe(503);
   // Log contract: a retried failure is WARNING (the alert counts only the terminal ERROR).
   expect(log).toHaveBeenCalledWith("chunk failed",expect.objectContaining({severity:"WARNING",batchId:s.batch.id,chunkId:s.chunk.id,stage:"matte",attempt:2,error:expect.objectContaining({message:"Temporary storage outage"})}));
   expect((await db.select().from(catalogSourceImages).where(eq(catalogSourceImages.batchId,s.batch.id)))[0]!.status).toBe("pending");
-  expect((await handleChunkTask(w.deps,{chunkId:s.chunk.id},{retryCount:2})).httpStatus).toBe(200);
+  expect((await handleChunkTask(w.deps,await currentChunkTask(db,s.chunk.id),{retryCount:2})).httpStatus).toBe(200);
   expect((await db.select().from(catalogSourceImages).where(eq(catalogSourceImages.batchId,s.batch.id)))[0]!.status).toBe("matted");
   expect(log).toHaveBeenCalledWith("chunk delivered",expect.objectContaining({batchId:s.batch.id,chunkId:s.chunk.id,stage:"matte",attempt:3,durationMs:expect.any(Number),mattingMs:12,renderMs:0}));
   // The matting calls name the batch and product (x-catalog-batch / x-catalog-product headers).
@@ -178,7 +178,7 @@ it("records the fifth dependency failure and nudges publication and finalization
   const w=world(),s=await seed(w,"fifth-matte-store");
   w.deps.storage.headObject=vi.fn(async()=>{throw new Error("Temporary storage outage");});
   const log=w.deps.log=vi.fn();
-  expect((await handleChunkTask(w.deps,{chunkId:s.chunk.id},{retryCount:4})).outcome).toBe("failed");
+  expect((await handleChunkTask(w.deps,await currentChunkTask(db,s.chunk.id),{retryCount:4})).outcome).toBe("failed");
   expect(log).toHaveBeenCalledWith("chunk failed",expect.objectContaining({severity:"ERROR",batchId:s.batch.id,chunkId:s.chunk.id,stage:"matte",attempt:2,retryCount:4}));
   expect((await db.select().from(catalogChunks).where(eq(catalogChunks.id,s.chunk.id)))[0]).toMatchObject({status:"failed",error:"Temporary storage outage"});
   expect((await db.select().from(catalogOutputs).where(eq(catalogOutputs.batchId,s.batch.id)))[0]).toMatchObject({status:"failed",reason:"Processing stopped after repeated errors: Temporary storage outage"});
@@ -223,10 +223,11 @@ it("does not let an expired delayed matte delivery regress a later completed ren
   const paused=new Promise<void>(resolve=>{release=resolve;}),started=new Promise<void>(resolve=>{entered=resolve;});
   const head=w.deps.storage.headObject;let first=true;
   w.deps.storage.headObject=async uri=>{if(first){first=false;entered();await paused;}return head(uri);};
-  const delayed=handleChunkTask(w.deps,{chunkId:s.chunk.id});await started;
+  const delayed=handleChunkTask(w.deps,await currentChunkTask(db,s.chunk.id));await started;
   now=new Date(+now+1_000_000);
-  await handleChunkTask(w.deps,{chunkId:s.chunk.id});await handleChunkTask(w.deps,{chunkId:s.chunk.id});
-  release();expect((await delayed).httpStatus).toBe(503);
+  await handleChunkTask(w.deps,await currentChunkTask(db,s.chunk.id));await handleChunkTask(w.deps,await currentChunkTask(db,s.chunk.id));
+  // Spec 15: the old holder lost its lease; its next write sees the new owner and it drops itself (200 "lost").
+  release();expect(await delayed).toEqual({httpStatus:200,outcome:"lost"});
   expect((await db.select().from(catalogChunks).where(eq(catalogChunks.id,s.chunk.id)))[0]).toMatchObject({stage:"qa",status:"queued"});
 },60_000);
 it("a stale finalizer cannot clear a newer owner's recoverable claim",async()=>{
@@ -250,39 +251,40 @@ it("recovers a dead chunk owner after its delivery retries have stopped",async()
   const w=world(),s=await seed(w,"chunk-execution-death");
   await db.update(catalogChunks).set({status:"running",taskName:"dead-owner",startedAt:new Date(+w.deps.now()-1_000_000)}).where(eq(catalogChunks.id,s.chunk.id));
   await handleSweep({db,enqueue:w.deps.enqueue,releaseLocks:async()=>0,now:w.deps.now},{});
-  expect(w.deps.enqueue).toHaveBeenCalledWith("/tasks/catalog/chunk",{chunkId:s.chunk.id},expect.objectContaining({taskId:expect.stringContaining("-recovery-")}));
+  // Spec 15 E4: the lapsed claim gets the next step and its one task.
+  expect(w.deps.enqueue).toHaveBeenCalledWith("/tasks/catalog/chunk",{chunkId:s.chunk.id,stage:"matte",step:1},{taskId:`chunk-${s.chunk.id}-matte-1`});
   vi.mocked(w.deps.enqueue).mockClear();
   await handleSweep({db,enqueue:w.deps.enqueue,releaseLocks:async()=>0,now:w.deps.now},{});
   expect(w.deps.enqueue).not.toHaveBeenCalled();
-  expect((await handleChunkTask(w.deps,{chunkId:s.chunk.id})).httpStatus).toBe(200);
+  expect((await handleChunkTask(w.deps,await currentChunkTask(db,s.chunk.id))).httpStatus).toBe(200);
 },60_000);
 
 it("keeps an actual decode error terminal while retrying a conversion service outage",async()=>{
   const w=world(),bad=await seed(w,"actual-corrupt");
   vi.mocked(w.deps.prepare).mockRejectedValueOnce(new UnsupportedSourceError("Cannot decode this image"));
-  expect((await handleChunkTask(w.deps,{chunkId:bad.chunk.id})).httpStatus).toBe(200);
+  expect((await handleChunkTask(w.deps,await currentChunkTask(db,bad.chunk.id))).httpStatus).toBe(200);
   expect((await db.select().from(catalogSourceImages).where(eq(catalogSourceImages.batchId,bad.batch.id)))[0]).toMatchObject({status:"failed",error:"The file is corrupt and could not be decoded."});
   const converted=await seed(w,"convert-outage");
   w.deps.prepare=async(buf,_name,convert)=>{try{await convert(buf);}catch{throw new UnsupportedSourceError("Wrapped decoder error");}throw new Error("Expected conversion failure");};
   const convert=vi.spyOn(w.deps.matting,"convert").mockRejectedValueOnce(new Error("Conversion service unavailable"));
   try {
-    expect((await handleChunkTask(w.deps,{chunkId:converted.chunk.id})).httpStatus).toBe(503);
+    expect((await handleChunkTask(w.deps,await currentChunkTask(db,converted.chunk.id))).httpStatus).toBe(503);
     expect((await db.select().from(catalogSourceImages).where(eq(catalogSourceImages.batchId,converted.batch.id)))[0]!.status).toBe("pending");
   } finally {convert.mockRestore();}
 },60_000);
 
 it("keeps verified output state when an expired render resumes after newer publication",async()=>{
   const w=world(),s=await seed(w,"late-render-publication");
-  await handleChunkTask(w.deps,{chunkId:s.chunk.id});
+  await handleChunkTask(w.deps,await currentChunkTask(db,s.chunk.id));
   let now=w.deps.now();w.deps.now=()=>now;
   let release!:()=>void,entered!:()=>void;
   const paused=new Promise<void>(resolve=>{release=resolve;}),started=new Promise<void>(resolve=>{entered=resolve;});
   const render=w.deps.renderAllChannels;let first=true;
   w.deps.renderAllChannels=async(...args)=>{if(first){first=false;entered();await paused;}return render(...args);};
-  const old=handleChunkTask(w.deps,{chunkId:s.chunk.id});await started;
+  const old=handleChunkTask(w.deps,await currentChunkTask(db,s.chunk.id));await started;
   now=new Date(+now+1_000_000);
-  await handleChunkTask(w.deps,{chunkId:s.chunk.id});
-  await handleChunkTask(w.deps,{chunkId:s.chunk.id});
+  await handleChunkTask(w.deps,await currentChunkTask(db,s.chunk.id));
+  await handleChunkTask(w.deps,await currentChunkTask(db,s.chunk.id));
   expect((await handlePublishTask(w.deps,{batchId:s.batch.id,productId:s.product.id})).outcome).toBe("published");
   release();await old;
   expect((await db.select().from(catalogOutputs).where(eq(catalogOutputs.batchId,s.batch.id)))[0]).toMatchObject({status:"verified",isLive:true});
@@ -295,8 +297,8 @@ it("prevents an expired fallback attempt replacing a newer model matte cache",as
   const paused=new Promise<void>(resolve=>{release=resolve;}),started=new Promise<void>(resolve=>{entered=resolve;});
   const matte=w.deps.matteFor;let first=true;
   w.deps.matteFor=async(...args)=>{if(first){first=false;entered();await paused;return {alpha:Buffer.alloc(800*800,0),width:800,height:800,model:"floodfill",ms:0,source:"floodfill",target:null,sentLongSide:null};}return matte(...args);};
-  const old=handleChunkTask(w.deps,{chunkId:s.chunk.id});await started;
-  now=new Date(+now+1_000_000);await handleChunkTask(w.deps,{chunkId:s.chunk.id});
+  const old=handleChunkTask(w.deps,await currentChunkTask(db,s.chunk.id));await started;
+  now=new Date(+now+1_000_000);await handleChunkTask(w.deps,await currentChunkTask(db,s.chunk.id));
   const [source]=await db.select().from(catalogSourceImages).where(eq(catalogSourceImages.batchId,s.batch.id));
   const checked=Buffer.from(w.objects.get(source!.matteUri!)!.buf);
   release();await old;
@@ -328,12 +330,12 @@ it("stops an expired owner before it requests another matte while its replacemen
     else if(calls===3){enteredNew();await newPause;}
     return matte(...args);
   });
-  const old=handleChunkTask(w.deps,{chunkId:s.chunk.id});await oldStarted;
+  const old=handleChunkTask(w.deps,await currentChunkTask(db,s.chunk.id));await oldStarted;
   now=new Date(+now+1_000_000);
-  const replacement=handleChunkTask(w.deps,{chunkId:s.chunk.id});await newStarted;
+  const replacement=handleChunkTask(w.deps,await currentChunkTask(db,s.chunk.id));await newStarted;
   releaseOld();
   try {
-    expect((await old).httpStatus).toBe(503);
+    expect(await old).toEqual({httpStatus:200,outcome:"lost"});
     expect(w.deps.matteFor).toHaveBeenCalledTimes(3);
   } finally {releaseNew();await replacement;}
 },60_000);
@@ -353,7 +355,7 @@ it("spec07 renders a replacement from its own private cache, processes only that
  await w.upload(storage.parseGsUri(upload!.gcsUri!).path,bytes,"image/jpeg");
  const replacement=await completeReplacement(replacementDeps,{outputId:target.id,uploadId:start.uploadId,actor:"operator@opptra.com"});
  const matteCalls=vi.mocked(w.deps.matteFor).mock.calls.length,renderCalls=vi.mocked(w.deps.renderAllChannels).mock.calls.length;
- for(let i=0;i<3;i++) expect((await handleChunkTask(w.deps,{chunkId:replacement.chunkId})).httpStatus).toBe(200);
+ for(let i=0;i<3;i++) expect((await handleChunkTask(w.deps,await currentChunkTask(db,replacement.chunkId))).httpStatus).toBe(200);
  expect(w.deps.matteFor).toHaveBeenCalledTimes(matteCalls+1);
  expect(w.deps.renderAllChannels).toHaveBeenCalledTimes(renderCalls+2);
  // The publish copy goes through the real staging guard, which only accepts <batch>/staging/...
@@ -372,7 +374,7 @@ it("spec07 renders a replacement from its own private cache, processes only that
 },60_000);
 it("spec07 renders into a queued QA delivery before publication",async()=>{
  const w=world(),s=await seed(w,"qa-stage-order");
- await handleChunkTask(w.deps,{chunkId:s.chunk.id});await handleChunkTask(w.deps,{chunkId:s.chunk.id});
+ await handleChunkTask(w.deps,await currentChunkTask(db,s.chunk.id));await handleChunkTask(w.deps,await currentChunkTask(db,s.chunk.id));
  const [chunk]=await db.select().from(catalogChunks).where(eq(catalogChunks.id,s.chunk.id));
  expect(chunk).toMatchObject({stage:"qa",status:"queued"});
  expect(w.deps.enqueue).not.toHaveBeenCalledWith("/tasks/catalog/publish",expect.anything(),expect.anything());
@@ -495,9 +497,9 @@ it("judge views: product_removed goes to the re-render loop, never straight to a
 },60_000);
 it("spec07 a spending cap hit before QA marks outputs qa_cap, completes the chunk and shows the banner",async()=>{
  const w=world(),s=await seed(w,"qa-cap");
- for(let i=0;i<2;i++) await handleChunkTask(w.deps,{chunkId:s.chunk.id});
+ for(let i=0;i<2;i++) await handleChunkTask(w.deps,await currentChunkTask(db,s.chunk.id));
  vi.stubEnv("DAILY_SPEND_CAP_USD","0");
- try { expect((await handleChunkTask(w.deps,{chunkId:s.chunk.id})).httpStatus).toBe(200); } finally { vi.unstubAllEnvs(); }
+ try { expect((await handleChunkTask(w.deps,await currentChunkTask(db,s.chunk.id))).httpStatus).toBe(200); } finally { vi.unstubAllEnvs(); }
  expect(w.deps.judgeOutput).not.toHaveBeenCalled();
  expect((await db.select().from(catalogChunks).where(eq(catalogChunks.id,s.chunk.id)))[0]!.status).toBe("done");
  const [output]=await db.select().from(catalogOutputs).where(eq(catalogOutputs.batchId,s.batch.id));
@@ -511,12 +513,12 @@ it("spec07 a spending cap hit before QA marks outputs qa_cap, completes the chun
 const flagHalo:CatalogDeps["judgeOutput"]=async input=>({scores:{complete_product:95,same_product:95,edge_quality:20,background_clean:20,no_text_or_watermark:95,orientation_ok:95,product_intact:95,placement_ok:95,overall:(95*5+40)/7},verdict:"flag",reasons:[],isCollage:false,costUsd:0,calls:0,usage:{},model:input.model,flags:["halo"]});
 it("spec07 a decision-triggered publish during the qa stage never copies unjudged staged outputs",async()=>{
  const w=world(),s=await seed(w,"qa-race");
- for(let i=0;i<2;i++) await handleChunkTask(w.deps,{chunkId:s.chunk.id});
+ for(let i=0;i<2;i++) await handleChunkTask(w.deps,await currentChunkTask(db,s.chunk.id));
  const [output]=await db.select().from(catalogOutputs).where(eq(catalogOutputs.batchId,s.batch.id));
  expect(output).toMatchObject({status:"staged",qaScores:null});
  expect((await handlePublishTask(w.deps,{batchId:s.batch.id,productId:s.product.id})).outcome).toBe("held");
  expect(w.copy).not.toHaveBeenCalled();
- await handleChunkTask(w.deps,{chunkId:s.chunk.id});
+ await handleChunkTask(w.deps,await currentChunkTask(db,s.chunk.id));
  expect((await handlePublishTask(w.deps,{batchId:s.batch.id,productId:s.product.id})).outcome).toBe("published");
 },60_000);
 it("spec07 use_as_is releases the publish gate and the product goes live on the next publish",async()=>{
@@ -552,7 +554,7 @@ it("spec07 remove on a live shot deletes only that product's object on the batch
 it("spec07 a malformed judge reply retries once, then qa_unavailable; spend_days keeps catalog_qa and catalog_compute rows",async()=>{
  const w=world(),s=await seed(w,"qa-malformed");
  vi.mocked(w.deps.resolvePolicy).mockResolvedValue({matteModel:"fixture",qaModel:"test/judge",threshold:75,floor:60,qaMode:"per_source",qaSampleRate:1,source:"default"});
- for(let i=0;i<2;i++) await handleChunkTask(w.deps,{chunkId:s.chunk.id});
+ for(let i=0;i<2;i++) await handleChunkTask(w.deps,await currentChunkTask(db,s.chunk.id));
  const real=await sharp({create:{width:64,height:64,channels:3,background:"white"}}).jpeg().toBuffer();
  for(const [uri,obj] of w.objects) if(uri.includes(s.batch.id)) w.objects.set(uri,{...obj,buf:real});
  const publicFetch=w.deps.fetch;
@@ -560,7 +562,7 @@ it("spec07 a malformed judge reply retries once, then qa_unavailable; spend_days
  w.deps.fetch=vi.fn<typeof globalThis.fetch>(async(url,init)=>String(url).startsWith("https://openrouter.ai/")?llm():publicFetch(url,init));
  w.deps.judgeOutput=judgeOutput;
  vi.stubEnv("OPENROUTER_API_KEY","test-key");
- try { expect((await handleChunkTask(w.deps,{chunkId:s.chunk.id})).httpStatus).toBe(200); } finally { vi.unstubAllEnvs(); }
+ try { expect((await handleChunkTask(w.deps,await currentChunkTask(db,s.chunk.id))).httpStatus).toBe(200); } finally { vi.unstubAllEnvs(); }
  expect(llm).toHaveBeenCalledTimes(2);
  const [output]=await db.select().from(catalogOutputs).where(eq(catalogOutputs.batchId,s.batch.id));
  expect(output).toMatchObject({status:"needs_attention",reason:"The quality check could not read this image."});
@@ -581,7 +583,7 @@ const passScores=JSON.stringify({complete_product:95,same_product:95,edge_qualit
 async function judgeOnceLive(name:string,respond:()=>Promise<Response>) {
  const w=world(),s=await seed(w,name),log=vi.fn();
  vi.mocked(w.deps.resolvePolicy).mockResolvedValue({matteModel:"fixture",qaModel:"test/judge",threshold:75,floor:60,qaMode:"per_source",qaSampleRate:1,source:"default"});
- for(let i=0;i<2;i++) await handleChunkTask(w.deps,{chunkId:s.chunk.id});
+ for(let i=0;i<2;i++) await handleChunkTask(w.deps,await currentChunkTask(db,s.chunk.id));
  const real=await sharp({create:{width:64,height:64,channels:3,background:"white"}}).jpeg().toBuffer();
  for(const [uri,obj] of w.objects) if(uri.includes(s.batch.id)) w.objects.set(uri,{...obj,buf:real});
  const publicFetch=w.deps.fetch;
@@ -589,7 +591,7 @@ async function judgeOnceLive(name:string,respond:()=>Promise<Response>) {
  w.deps.fetch=vi.fn<typeof globalThis.fetch>(async(url,init)=>String(url).startsWith("https://openrouter.ai/")?llm():publicFetch(url,init));
  w.deps.judgeOutput=judgeOutput;w.deps.log=log;
  vi.stubEnv("OPENROUTER_API_KEY","test-key");
- try { expect((await handleChunkTask(w.deps,{chunkId:s.chunk.id})).httpStatus).toBe(200); } finally { vi.unstubAllEnvs(); }
+ try { expect((await handleChunkTask(w.deps,await currentChunkTask(db,s.chunk.id))).httpStatus).toBe(200); } finally { vi.unstubAllEnvs(); }
  expect(llm).toHaveBeenCalledTimes(1);
  const spend=(await db.select().from(spendDays).where(and(eq(spendDays.batchId,s.batch.id),eq(spendDays.engine,"catalog_qa"))));
  const [batch]=await db.select().from(catalogBatches).where(eq(catalogBatches.id,s.batch.id));
@@ -630,7 +632,7 @@ it("spec07 a judge timeout is logged at warn before it becomes qa_unavailable",a
 it("spec07 a 429 burst on the judge backs off and the photo gets its normal verdict; every attempt is logged and counted",async()=>{
  const w=world(),s=await seed(w,"qa-rate-limit-burst"),log=vi.fn(),waits:number[]=[];
  vi.mocked(w.deps.resolvePolicy).mockResolvedValue({matteModel:"fixture",qaModel:"test/judge",qaModelSecond:"test/second",threshold:75,floor:60,qaMode:"per_source",qaSampleRate:1,source:"default"});
- for(let i=0;i<2;i++) await handleChunkTask(w.deps,{chunkId:s.chunk.id});
+ for(let i=0;i<2;i++) await handleChunkTask(w.deps,await currentChunkTask(db,s.chunk.id));
  const real=await sharp({create:{width:64,height:64,channels:3,background:"white"}}).jpeg().toBuffer();
  for(const [uri,obj] of w.objects) if(uri.includes(s.batch.id)) w.objects.set(uri,{...obj,buf:real});
  const publicFetch=w.deps.fetch;
@@ -639,7 +641,7 @@ it("spec07 a 429 burst on the judge backs off and the photo gets its normal verd
  w.deps.fetch=vi.fn<typeof globalThis.fetch>(async(url,init)=>String(url).startsWith("https://openrouter.ai/")?llm():publicFetch(url,init));
  w.deps.judgeOutput=judgeOutput;w.deps.log=log;w.deps.sleep=async ms=>{waits.push(ms);};
  vi.stubEnv("OPENROUTER_API_KEY","test-key");
- try { expect((await handleChunkTask(w.deps,{chunkId:s.chunk.id})).httpStatus).toBe(200); } finally { vi.unstubAllEnvs(); }
+ try { expect((await handleChunkTask(w.deps,await currentChunkTask(db,s.chunk.id))).httpStatus).toBe(200); } finally { vi.unstubAllEnvs(); }
  expect(llm).toHaveBeenCalledTimes(3);
  const [output]=await db.select().from(catalogOutputs).where(eq(catalogOutputs.batchId,s.batch.id));
  expect(output!.flags).not.toContain("qa_unavailable");expect(output!.qaModel).toBe("test/judge");
@@ -664,7 +666,7 @@ describe("spec07 the classifier backs off on rate limits and then asks the secon
   w.deps.fetch=vi.fn<typeof globalThis.fetch>(async(url,init)=>String(url).startsWith("https://openrouter.ai/")?llm(init):publicFetch(url,init));
   w.deps.classifyProductType=classifyProductType;w.deps.log=log;w.deps.sleep=async ms=>{waits.push(ms);};
   vi.stubEnv("OPENROUTER_API_KEY","test-key");vi.stubEnv("CATALOG_QA_DEFAULT_MODEL","test/classifier");
-  try { expect((await handleChunkTask(w.deps,{chunkId:s.chunk.id})).httpStatus).toBe(200); } finally { vi.unstubAllEnvs(); }
+  try { expect((await handleChunkTask(w.deps,await currentChunkTask(db,s.chunk.id))).httpStatus).toBe(200); } finally { vi.unstubAllEnvs(); }
   const [product]=await db.select().from(catalogProducts).where(eq(catalogProducts.id,s.product.id));
   const sources=await db.select().from(catalogSourceImages).where(eq(catalogSourceImages.batchId,s.batch.id));
   const [batch]=await db.select().from(catalogBatches).where(eq(catalogBatches.id,s.batch.id));
@@ -749,7 +751,7 @@ it("spec08 an eval batch runs exactly its forced policy; a batch without evalSet
  expect(vi.mocked(w.deps.matteFor).mock.calls.at(-1)![2]).toBe("fixture");
  const unlisted=await seed(w,"eval-unlisted");
  await db.update(catalogBatches).set({options:{...DEFAULT_BATCH_OPTIONS,evalSet:"anta",policy:{...forced,matteModel:"not-listed"}}}).where(eq(catalogBatches.id,unlisted.batch.id));
- expect((await handleChunkTask(w.deps,{chunkId:unlisted.chunk.id})).httpStatus).not.toBe(200);
+ expect((await handleChunkTask(w.deps,await currentChunkTask(db,unlisted.chunk.id))).httpStatus).not.toBe(200);
  expect(vi.mocked(w.deps.matteFor).mock.calls.map(c=>c[2])).not.toContain("not-listed");
  expect(vi.mocked(w.deps.matteFor).mock.calls.map(c=>c[2]).filter(m=>m==="fixture")).toHaveLength(1);
 },60_000);
@@ -760,7 +762,7 @@ describe("shadow decision input",()=>{
  async function renderStages(w:ReturnType<typeof world>,name:string,classify?:CatalogDeps["classifyProductType"]) {
   const s=await seed(w,name);
   if(classify) w.deps.classifyProductType=vi.fn(classify);
-  await handleChunkTask(w.deps,{chunkId:s.chunk.id});await handleChunkTask(w.deps,{chunkId:s.chunk.id});
+  await handleChunkTask(w.deps,await currentChunkTask(db,s.chunk.id));await handleChunkTask(w.deps,await currentChunkTask(db,s.chunk.id));
   const ctx=vi.mocked(w.deps.renderAllChannels).mock.calls.at(-1)![3];
   const [product]=await db.select().from(catalogProducts).where(eq(catalogProducts.id,s.product.id));
   const outputs=await db.select().from(catalogOutputs).where(eq(catalogOutputs.batchId,s.batch.id));
@@ -778,7 +780,7 @@ describe("shadow decision input",()=>{
   const w=world(),s=await seed(w,"fc-legacy-auto");
   await db.update(catalogProducts).set({productType:"auto"}).where(eq(catalogProducts.id,s.product.id));
   w.deps.classifyProductType=vi.fn<CatalogDeps["classifyProductType"]>(async()=>({type:"apparel_model",confidence:.9,costUsd:0,calls:1,usage:{},flags:[]}));
-  await handleChunkTask(w.deps,{chunkId:s.chunk.id});await handleChunkTask(w.deps,{chunkId:s.chunk.id});
+  await handleChunkTask(w.deps,await currentChunkTask(db,s.chunk.id));await handleChunkTask(w.deps,await currentChunkTask(db,s.chunk.id));
   expect(w.deps.classifyProductType).toHaveBeenCalledTimes(1);
   expect((await db.select().from(catalogProducts).where(eq(catalogProducts.id,s.product.id)))[0]!.productType).toBe("apparel_model");
   expect(vi.mocked(w.deps.renderAllChannels).mock.calls.at(-1)![3]).toMatchObject({productType:"apparel_model",synthesiseShadow:false});
@@ -832,7 +834,7 @@ it("cost ledger: one delivery per stage writes attributable rows whose judge and
  render.mockImplementation(async(...args)=>Object.fromEntries(Object.entries(await base(...args)).map(([c,o])=>[c,{...o,flags:["upscaled"],upscale:{model:"realesrgan-x2plus",ms:250}}])) as Awaited<ReturnType<CatalogDeps["renderAllChannels"]>>);
  vi.stubEnv("COMPUTE_USD_PER_VCPU_SECOND","0.001");vi.stubEnv("PRICE_MATTE_CPU_USD_PER_SECOND","0.5");vi.stubEnv("PRICE_MATTE_GPU_USD_PER_SECOND","2");vi.stubEnv("OPENROUTER_API_KEY","test-key");
  try {
-  for(let i=0;i<2;i++) expect((await handleChunkTask(w.deps,{chunkId:s.chunk.id})).httpStatus).toBe(200);
+  for(let i=0;i<2;i++) expect((await handleChunkTask(w.deps,await currentChunkTask(db,s.chunk.id))).httpStatus).toBe(200);
   // The real judge decodes its images, so the batch's objects are real JPEGs during the qa delivery and
   // the rendered fixtures again for the publication (whose staged-size check needs the recorded bytes).
   const real=await sharp({create:{width:64,height:64,channels:3,background:"white"}}).jpeg().toBuffer(),fixtures=new Map(w.objects);
@@ -840,7 +842,7 @@ it("cost ledger: one delivery per stage writes attributable rows whose judge and
   const publicFetch=w.deps.fetch;
   w.deps.fetch=vi.fn<typeof globalThis.fetch>(async(url,init)=>String(url).startsWith("https://openrouter.ai/")?new Response(JSON.stringify(openRouterReply(passScores,0.000139))):publicFetch(url,init));
   w.deps.judgeOutput=judgeOutput;
-  expect((await handleChunkTask(w.deps,{chunkId:s.chunk.id})).httpStatus).toBe(200);
+  expect((await handleChunkTask(w.deps,await currentChunkTask(db,s.chunk.id))).httpStatus).toBe(200);
   for(const [uri,obj] of fixtures) w.objects.set(uri,obj);
   expect((await handlePublishTask(w.deps,{batchId:s.batch.id,productId:s.product.id})).outcome).toBe("published");
  } finally { vi.unstubAllEnvs(); }
@@ -881,7 +883,7 @@ it("cost ledger: a paid cut-out call is flushed with the photo's matte write, so
  const upload=w.deps.storage.uploadBuffer;
  // The matte PNG upload (after the photo's matte update) crashes once: the delivery fails and is retried.
  w.deps.storage.uploadBuffer=async(path,...rest)=>{if(/matte/.test(path)) {w.deps.storage.uploadBuffer=upload;throw new Error("bucket hiccup");} return upload(path,...rest);};
- try { expect((await handleChunkTask(w.deps,{chunkId:s.chunk.id})).outcome).toBe("retry"); } finally { vi.unstubAllEnvs(); }
+ try { expect((await handleChunkTask(w.deps,await currentChunkTask(db,s.chunk.id))).outcome).toBe("retry"); } finally { vi.unstubAllEnvs(); }
  const rows=await ledgerOf(s.batch.id);
  expect(rows.map(r=>r.kind)).toEqual(["matte_call"]);
  expect(rows[0]).toMatchObject({engine:"cpu",ms:12,attempt:1,outcome:"ok"});
@@ -889,7 +891,7 @@ it("cost ledger: a paid cut-out call is flushed with the photo's matte write, so
 },60_000);
 it("cost ledger: a publish whose finalize enqueue fails keeps its one ok row and writes no failed row",async()=>{
  const w=world(),s=await seed(w,"ledger-publish-retry"),log=vi.fn();w.deps.log=log;ticking(w);
- for(let i=0;i<3;i++) expect((await handleChunkTask(w.deps,{chunkId:s.chunk.id})).httpStatus).toBe(200);
+ for(let i=0;i<3;i++) expect((await handleChunkTask(w.deps,await currentChunkTask(db,s.chunk.id))).httpStatus).toBe(200);
  // The product publishes, then the finalize enqueue fails once: the task is retried. No finalize is pending
  // yet, so the publish task itself enqueues one.
  await db.update(catalogBatches).set({counts:sql`${catalogBatches.counts} || jsonb_build_object('finalizePending',false)`}).where(eq(catalogBatches.id,s.batch.id));
@@ -907,13 +909,13 @@ it("cost ledger: a delivery that loses its claim writes no ledger rows",async()=
  const w=world(),s=await seed(w,"ledger-lost-claim");ticking(w);
  // The cut-out call succeeds, but another worker took the chunk meanwhile: every later write under the claim refuses.
  vi.mocked(w.deps.matteFor).mockImplementationOnce(async()=>{await db.update(catalogChunks).set({taskName:"someone-else"}).where(eq(catalogChunks.id,s.chunk.id));return {alpha:Buffer.alloc(800*800,255),width:800,height:800,model:"fixture",ms:12,source:"model",target:"cpu",sentLongSide:800};});
- expect((await handleChunkTask(w.deps,{chunkId:s.chunk.id})).outcome).toBe("retry");
+ expect((await handleChunkTask(w.deps,await currentChunkTask(db,s.chunk.id))).outcome).toBe("lost");
  expect(await ledgerOf(s.batch.id)).toEqual([]);
 },60_000);
 it("cost ledger: a failing ledger write is logged as an error and the delivery still completes",async()=>{
  const w=world(),s=await seed(w,"ledger-write-fails"),log=vi.fn();w.deps.log=log;ticking(w);
  await db.execute(sql`alter table catalog_cost_events rename to catalog_cost_events_hidden`);
- try { expect((await handleChunkTask(w.deps,{chunkId:s.chunk.id})).httpStatus).toBe(200); }
+ try { expect((await handleChunkTask(w.deps,await currentChunkTask(db,s.chunk.id))).httpStatus).toBe(200); }
  finally { await db.execute(sql`alter table catalog_cost_events_hidden rename to catalog_cost_events`); }
  expect((await db.select().from(catalogChunks).where(eq(catalogChunks.id,s.chunk.id)))[0]).toMatchObject({stage:"render",status:"queued"});
  expect(log).toHaveBeenCalledWith("cost event write failed",expect.objectContaining({severity:"ERROR",batchId:s.batch.id}));
@@ -923,9 +925,9 @@ it("cost ledger: a failing ledger write is logged as an error and the delivery s
 },60_000);
 it("cost ledger: a spend cap refusal is logged once per check as a WARNING with the dollars used of the cap",async()=>{
  const w=world(),s=await seed(w,"ledger-cap-log"),log=vi.fn();w.deps.log=log;
- for(let i=0;i<2;i++) await handleChunkTask(w.deps,{chunkId:s.chunk.id});
+ for(let i=0;i<2;i++) await handleChunkTask(w.deps,await currentChunkTask(db,s.chunk.id));
  vi.stubEnv("DAILY_SPEND_CAP_USD","0");
- try { expect((await handleChunkTask(w.deps,{chunkId:s.chunk.id})).httpStatus).toBe(200); } finally { vi.unstubAllEnvs(); }
+ try { expect((await handleChunkTask(w.deps,await currentChunkTask(db,s.chunk.id))).httpStatus).toBe(200); } finally { vi.unstubAllEnvs(); }
  const hits=log.mock.calls.filter(([message])=>message==="spend cap hit");
  expect(hits).toHaveLength(1);
  expect(hits[0]![1]).toMatchObject({severity:"WARNING",batchId:s.batch.id,reason:expect.stringMatching(/^Daily spend cap reached: \$\d+\.\d\d of \$0\.00 used this UTC day/)});
