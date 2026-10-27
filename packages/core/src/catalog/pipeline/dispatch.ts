@@ -42,6 +42,11 @@ export function chunkTimeBudgetMs(env: NodeJS.ProcessEnv = process.env): number 
 }
 
 /** `CATALOG_CHUNK_WINDOW`, default 8. */
+/** `CATALOG_CHUNK_IMAGES`, the photos per chunk that Start and the load driver plan with (deploy.sh checks it). */
+export const DEFAULT_CHUNK_IMAGES = 10;
+export function chunkImages(env: NodeJS.ProcessEnv = process.env): number {
+  return Number(env.CATALOG_CHUNK_IMAGES ?? DEFAULT_CHUNK_IMAGES);
+}
 export function chunkWindow(env: NodeJS.ProcessEnv = process.env): number {
   return positiveInt(env.CATALOG_CHUNK_WINDOW) ?? DEFAULT_CHUNK_WINDOW;
 }
@@ -70,6 +75,17 @@ export function enqueueChunk(enqueue: Enqueue, chunk: ChunkTaskRef, extra: Recor
 
 export interface DispatchOptions { window?: number; now?: Date; log?: Log }
 
+/** Enqueues the chunk's current step; a failure is logged as WARNING `chunk dispatch failed` and returns false. */
+export async function tryEnqueueChunk(enqueue: Enqueue, chunk: { id: string; batchId: string; stage: string; step: number }, log: Log, extra: Record<string, unknown> = {}): Promise<boolean> {
+  try {
+    await enqueueChunk(enqueue, chunk, extra);
+    return true;
+  } catch (error) {
+    log("chunk dispatch failed", { severity: "WARNING", batchId: chunk.batchId, chunkId: chunk.id, stage: chunk.stage, step: chunk.step, error: error instanceof Error ? error.message : String(error) });
+    return false;
+  }
+}
+
 /**
  * Tops up a batch's window: queues the next waiting chunks (in index order) until `window` chunks of the batch
  * are queued or running. Idempotent: with a full window it does nothing. The batch row lock makes two callers
@@ -92,10 +108,7 @@ export async function dispatchChunks(db: Db, enqueue: Enqueue, batchId: string, 
     return tx.update(catalogChunks).set({ dispatchedAt: now }).where(inArray(catalogChunks.id, waiting.map((row) => row.id))).returning();
   });
   for (const chunk of picked) {
-    try {
-      await enqueueChunk(enqueue, chunk);
-    } catch (error) {
-      log("chunk dispatch failed", { severity: "WARNING", batchId, chunkId: chunk.id, stage: chunk.stage, step: chunk.step, error: error instanceof Error ? error.message : String(error) });
+    if (!(await tryEnqueueChunk(enqueue, { ...chunk, batchId }, log))) {
       await db.update(catalogChunks).set({ dispatchedAt: null }).where(and(eq(catalogChunks.id, chunk.id), eq(catalogChunks.status, "queued"), eq(catalogChunks.step, chunk.step)));
     }
   }
@@ -120,12 +133,8 @@ export async function recoverBatchChunks(db: Db, enqueue: Enqueue, batchId: stri
   for (const [chunks, reason] of [[lapsed, "lease_lapsed"], [lost, "task_lost"]] as const) {
     for (const chunk of chunks) {
       log("chunk recovered", { batchId, chunkId: chunk.id, stage: chunk.stage, step: chunk.step, reason });
-      try {
-        await enqueueChunk(enqueue, chunk);
-      } catch (error) {
-        // The chunk keeps its new step and dispatched_at, so the lost-task rule queues it again in 30 minutes.
-        log("chunk dispatch failed", { severity: "WARNING", batchId, chunkId: chunk.id, stage: chunk.stage, step: chunk.step, error: error instanceof Error ? error.message : String(error) });
-      }
+      // A failed enqueue keeps the new step and dispatched_at, so the lost-task rule queues it again in 30 minutes.
+      await tryEnqueueChunk(enqueue, { ...chunk, batchId }, log);
     }
   }
   const dispatched = await dispatchChunks(db, enqueue, batchId, options);

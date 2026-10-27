@@ -5,7 +5,7 @@ import { planChunks } from "@catalog/core/catalog/pipeline/plan-chunks";
 import { buildPreview } from "@catalog/core/catalog/ingest/index";
 import * as storage from "@catalog/core/storage";
 import { enqueueTask } from "@catalog/core/tasks";
-import { dispatchChunks, recoverBatchChunks } from "@catalog/core/catalog/pipeline/dispatch";
+import { chunkImages, dispatchChunks, recoverBatchChunks } from "@catalog/core/catalog/pipeline/dispatch";
 import { log } from "@catalog/core/log";
 import { db } from "../db";
 import { badRequest, HttpError } from "../errors";
@@ -43,7 +43,7 @@ export async function startBatch(id: string, value: unknown, _actor: string) {
     throw new HttpError(409, `${pair.a} and ${pair.b} are the same product. Keep one.`);
   }
   const products = await db().select({ id: catalogProducts.id, identifier: catalogProducts.identifier }).from(catalogBatchProducts).innerJoin(catalogProducts, eq(catalogProducts.id, catalogBatchProducts.productId)).where(eq(catalogBatchProducts.batchId, id));
-  const plans = planChunks(products.filter((p) => sources.some((s) => s.productId === p.id)).map((p) => ({productId:p.id,identifier:p.identifier,sourceCount:sources.filter((s) => s.productId===p.id).length})), Number(process.env.CATALOG_CHUNK_IMAGES ?? 10));
+  const plans = planChunks(products.filter((p) => sources.some((s) => s.productId === p.id)).map((p) => ({productId:p.id,identifier:p.identifier,sourceCount:sources.filter((s) => s.productId===p.id).length})), chunkImages());
   const chunks = await db().transaction(async (tx) => {
     const [current] = await tx.select().from(catalogBatches).where(eq(catalogBatches.id, id)).for("update");
     if (!current || current.status !== "draft" || !current.counts.previewReady || current.updatedAt.getTime() !== batch.updatedAt.getTime()) throw new HttpError(409, STALE_PREVIEW);

@@ -44,7 +44,7 @@ import { batchPrefix } from "@catalog/core/catalog/naming";
 import { lockProducts } from "@catalog/core/catalog/products";
 import { pollUntilEnd } from "@catalog/core/catalog/load/poll";
 import { planChunks } from "@catalog/core/catalog/pipeline/plan-chunks";
-import { dispatchChunks } from "@catalog/core/catalog/pipeline/dispatch";
+import { chunkImages, dispatchChunks } from "@catalog/core/catalog/pipeline/dispatch";
 import { cleanupTestBatches } from "@catalog/core/catalog/test-cleanup";
 import { CHANNEL_IDS, type ChannelId } from "@catalog/core/catalog/types";
 import * as storage from "@catalog/core/storage";
@@ -139,7 +139,7 @@ async function start(db: Db, batchId: string) {
   const sources = await db.select({ id: catalogSourceImages.id, productId: catalogSourceImages.productId }).from(catalogSourceImages).where(eq(catalogSourceImages.batchId, batchId));
   const productIds = (await db.select({ id: catalogBatchProducts.productId }).from(catalogBatchProducts).where(eq(catalogBatchProducts.batchId, batchId))).map(p => p.id);
   const withPhotos = productIds.filter(id => sources.some(s => s.productId === id));
-  const plans = planChunks(withPhotos.map(productId => ({ productId, sourceCount: sources.filter(s => s.productId === productId).length })), Number(process.env.CATALOG_CHUNK_IMAGES ?? 10));
+  const plans = planChunks(withPhotos.map(productId => ({ productId, sourceCount: sources.filter(s => s.productId === productId).length })), chunkImages());
   const chunks = await db.transaction(async tx => {
     const locked = await lockProducts(tx as unknown as Db, batchId, productIds);
     if (!locked.ok) throw new Error(`${locked.busy.length} products are locked by another batch.`);

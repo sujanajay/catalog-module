@@ -7,7 +7,7 @@ import { batchPrefix, derivedPath, publicObjectPath, publicUrl, stagingPath } fr
 import { planProduct, shotGeometry, trimRules, UnsupportedSourceError, type Matte } from "@catalog/core/catalog/render";
 import { renderKey, renderKeys, rerenderedKey } from "@catalog/core/catalog/pipeline/publish";
 import { catalogLlmDeps, CatalogQaCapError, limitDeliveryBackoff, runQaStage, spendCapHit } from "./qa-stage";
-import { CHUNK_HEARTBEAT_MS, CHUNK_LEASE_MS, CHUNK_MAX_STALLS, CHUNK_STALLED_REASON, chunkTimeBudgetMs, chunkWindow, dispatchChunks, enqueueChunk, leaseLapsed } from "@catalog/core/catalog/pipeline/dispatch";
+import { CHUNK_HEARTBEAT_MS, CHUNK_LEASE_MS, CHUNK_MAX_STALLS, CHUNK_STALLED_REASON, chunkTimeBudgetMs, chunkWindow, dispatchChunks, leaseLapsed, tryEnqueueChunk } from "@catalog/core/catalog/pipeline/dispatch";
 import { recordCostEvents, type CostEventInput } from "@catalog/core/cost-events";
 import { matteCallUsd } from "@catalog/core/catalog/cost";
 import type { CostOutcome } from "@catalog/core/db/schema";
@@ -35,7 +35,8 @@ export const QA_BACKOFF_DEADLINE_MARGIN_MS = 120_000;
 /** Same-step retries that wait for a live lease to lapse (503 "busy") before a copy answers "duplicate". The queue
  * (5 attempts, back-off 10 s doubling) sends retries 1-4 at about +10, +30, +70 and +150 s; a crashed holder's lease
  * lapses within 120 s, so only the last attempt (retryCount 4) can claim, and every earlier one must wait. */
-export const CHUNK_BUSY_RETRIES = 4;
+export const LAST_QUEUE_RETRY = 4;
+export const CHUNK_BUSY_RETRIES = LAST_QUEUE_RETRY;
 const OWNERSHIP_CHANGED = "Chunk ownership changed.";
 
 /** Where a delivery's time went, for the `chunk delivery` line (spec 15 E7). */
@@ -144,7 +145,7 @@ export async function handleChunkTask(rawDeps: CatalogDeps, body: Record<string,
    */
   async function retryMatte(p:Awaited<ReturnType<CatalogDeps["prepare"]>>,model:string,trace:MattingTrace):Promise<{matte:Matte|null;action:AutoAction;call?:Matte}> {
     const action=(result:AutoAction["result"],detail:string):AutoAction=>({step:"matte_retry",trigger:["fallback_matte"],result,channels:[],rejudged:false,detail});
-    const deadline=+started+DISPATCH_DEADLINE_SEC*1000-MATTING_TIMEOUT_MS-MATTE_RETRY_MARGIN_MS, sleep=deps.sleep ?? (ms=>new Promise<void>(resolve=>setTimeout(resolve,ms)));
+    const deadline=deadlineAt-MATTING_TIMEOUT_MS-MATTE_RETRY_MARGIN_MS, sleep=deps.sleep ?? (ms=>new Promise<void>(resolve=>setTimeout(resolve,ms)));
     if (matteRetryFailed) return {matte:null,action:action("skipped","an earlier retry in this run failed")};
     let wait=MATTE_RETRY_WAIT_MS;
     for (;;) {
@@ -315,7 +316,7 @@ export async function handleChunkTask(rawDeps: CatalogDeps, body: Record<string,
             }
             // Cut-out integrity (matte-guard.ts): a matte that removed the product is replaced by the
             // second model, the padded frame, or the whole frame, before anything is rendered.
-            const deadline=+started+DISPATCH_DEADLINE_SEC*1000-MATTING_TIMEOUT_MS-MATTE_RETRY_MARGIN_MS, firstModel=matte.model;
+            const deadline=deadlineAt-MATTING_TIMEOUT_MS-MATTE_RETRY_MARGIN_MS, firstModel=matte.model;
             const guardStart=Date.now(), matteBefore=steps.matte;
             const resolved = await resolveMatte({prepared:p,first:matte,handRule:product.productType!=="apparel_model" && product.productType!=="apparel_flat",soleStrip:product.productType==="footwear",attempt:async variant=>{
               const model = variant==="padded_first" ? firstModel : productPolicy.matteModelSecond;
@@ -458,7 +459,7 @@ export async function handleChunkTask(rawDeps: CatalogDeps, body: Record<string,
     if (lost || reason === OWNERSHIP_CHANGED) return answer(200,"lost");
     // Terminal (the chunk is marked failed below) is ERROR, a retried attempt WARNING: the alert counts ERROR only.
     // An Error object is passed whole, so a terminal line carries its stack for Error Reporting (the line shows its message).
-    const terminal = (opts.retryCount ?? 0) >= 4;
+    const terminal = (opts.retryCount ?? 0) >= LAST_QUEUE_RETRY;
     deps.log("chunk failed",{severity:terminal ? "ERROR":"WARNING",batchId:chunk.batchId,chunkId:chunk.id,stage:chunk.stage,attempt:chunk.attempt,retryCount:opts.retryCount ?? 0,error:error instanceof Error ? error:reason});
     if (terminal) {
       if (!(await failChunk(reason,`Processing stopped after repeated errors: ${reason}`))) return answer(200,"lost");
@@ -472,8 +473,7 @@ export async function handleChunkTask(rawDeps: CatalogDeps, body: Record<string,
   }
   /** Queues the chunk's new step; a failed enqueue is left to the sweep (the lost-task rule, 30 minutes). */
   async function dispatchNext(next:NonNullable<typeof chunk>,extra:Record<string,unknown> = {}) {
-    try { await enqueueChunk(deps.enqueue,next,extra); }
-    catch(error) { deps.log("chunk dispatch failed",{severity:"WARNING",batchId:next.batchId,chunkId:next.id,stage:next.stage,step:next.step,error:error instanceof Error ? error.message:String(error)}); }
+    await tryEnqueueChunk(deps.enqueue,next,deps.log,extra);
   }
   /** Terminal: the chunk fails, its pending outputs fail with `outputReason`, the batch moves on. False when not the owner. */
   async function failChunk(error:string,outputReason:string):Promise<boolean> {

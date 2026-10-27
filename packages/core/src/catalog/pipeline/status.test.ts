@@ -92,7 +92,6 @@ describe("spec 15 E7: true processing progress",()=>{
     // The range for 5,600 images ends at 67 min; this batch is 2 hours past it and still moving.
     const late=text("matting",counts({prepared:900,progressAt:iso(186)}),187);
     expect(late).toBe(`Preparing photos 900 of 1,400 · 0 of 5,600 images made · taking longer than usual. ${CLOSE_PAGE_TEXT}`);
-    expect(late).not.toContain("about 1 min left");
     for(let minutes=0;minutes<=300;minutes+=7) expect(text("matting",counts({prepared:10,progressAt:iso(minutes)}),minutes)).not.toContain("about 1 min left");
   });
   it("adds the stall sentence after 20 minutes with no finished photo, and not at 19",()=>{
