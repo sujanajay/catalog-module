@@ -29,10 +29,11 @@ import {
 import { getBucketName, isRetryableStorageError, toGsUri } from "../../storage";
 import type { enqueueTask } from "../../tasks";
 import { log } from "../../log";
+import { mergeCounts, placingClaim, placingLeaseFree, placingLeaseHeld, placingLeaseHeldBy, placingToken, progressCounts, RATE_SAMPLE_GAP_MS, type DoneKey } from "../counts";
 import { batchPrefix, normalizeKey, rawPath, sanitizeSegment } from "../naming";
 import { findOrCreateProduct } from "../products";
 import { resolveSkus, type ResolveResult } from "../sku-mapping";
-import type { BatchCounts, BatchOptions, ChangeKind, ChannelId, LinkStatus, OutputFlag, UploadKind } from "../types";
+import type { BatchCounts, BatchOptions, ChangeKind, ChannelId, IntakePhase, LinkStatus, OutputFlag, UploadKind } from "../types";
 import { driveFolderAdapter } from "./drive-folder";
 import { googleSheetAdapter, sheetCopyUri } from "./google-sheet";
 import {
@@ -256,11 +257,43 @@ async function bumpCollected(db: Db, batchId: string, done: number, total: numbe
     .where(eq(catalogBatches.id, batchId));
 }
 
-async function patchCounts(db: Db, batchId: string, patch: Partial<BatchCounts>, set: Partial<typeof catalogBatches.$inferInsert> = {}): Promise<void> {
-  await db
+/**
+ * Records collecting progress (spec 14c F6): `phase` and a `rate` sample of `collected`, merged into
+ * counts. Applies only while the batch is `ingesting`, so it is also the delivery's cancel check:
+ * false when the batch is no longer collecting.
+ */
+async function collectProgress(db: Db, batchId: string, phase: IntakePhase, at: Date, patch: Partial<BatchCounts> = {}, done: number | DoneKey = "collected"): Promise<boolean> {
+  const rows = await db
     .update(catalogBatches)
-    .set({ ...set, counts: sql`${catalogBatches.counts} || ${JSON.stringify(patch)}::jsonb` })
-    .where(eq(catalogBatches.id, batchId));
+    .set({ counts: progressCounts(patch, { phase, done, at }) })
+    .where(and(eq(catalogBatches.id, batchId), eq(catalogBatches.status, "ingesting")))
+    .returning({ id: catalogBatches.id });
+  return rows.length > 0;
+}
+
+const LINK_KINDS: UploadKind[] = ["url_list", "sheet", "google_sheet"];
+
+/**
+ * The collecting phase of a batch (spec 14c F6), one for all its uploads so parallel deliveries write
+ * the same phase and `rate` stays measurable: links to download (pasted, or in a sheet that is not a
+ * product list) -> downloading; else a zip -> unpacking; else checking uploaded files.
+ */
+async function collectPhaseOf(db: Db, batchId: string): Promise<IntakePhase> {
+  const uploads = await db
+    .select({ kind: catalogUploads.kind, detected: catalogUploads.detected })
+    .from(catalogUploads)
+    .where(and(eq(catalogUploads.batchId, batchId), ne(catalogUploads.status, "removed")));
+  if (uploads.some((u) => LINK_KINDS.includes(u.kind) && (u.detected as Detected | null)?.kind !== "product_list")) return "downloading";
+  if (uploads.some((u) => u.kind === "zip")) return "unpacking";
+  return "checking";
+}
+
+/**
+ * The placing token of a delivery (spec 14c F6): its run (the hand-off's `run` when the body carries
+ * one, and its cursor) and upload id, so a Cloud Tasks retry of the same task presents the same token.
+ */
+export function deliveryToken(body: { uploadId: string; cursor?: string; run?: string }): string {
+  return placingToken(`${body.run ?? "-"}@${body.cursor ?? "0"}`, body.uploadId);
 }
 
 // --- The task --------------------------------------------------------------------------------
@@ -277,24 +310,38 @@ async function patchCounts(db: Db, batchId: string, patch: Partial<BatchCounts>,
 export async function runIngest(
   db: Db,
   deps: IngestDeps & { enqueue: typeof enqueueTask; budgetItems?: number },
-  body: { batchId: string; uploadId: string; cursor?: string },
+  body: { batchId: string; uploadId: string; cursor?: string; run?: string },
 ): Promise<{ progress: IngestProgress; outcome: string }> {
   const [upload] = await db.select().from(catalogUploads).where(eq(catalogUploads.id, body.uploadId));
   if (!upload || upload.batchId !== body.batchId) throw new Error(`Upload ${body.uploadId} is not part of batch ${body.batchId}.`);
   const [batch] = await db.select().from(catalogBatches).where(eq(catalogBatches.id, body.batchId));
   if (!batch) throw new Error(`Batch ${body.batchId} does not exist.`);
   const prefix = batchPrefix(batch.brandSlug, batch.id, batch.isTest);
+  const clock = () => deps.now?.() ?? new Date();
+  const token = deliveryToken(body);
+  const noop = (why: string) => ({ progress: { done: 0, total: null, phase: "done" as const }, outcome: `noop: ${why}` });
 
+  // A cancelled batch is never collected or placed again (spec 14c F4 part 2).
+  if (batch.status === "cancelled") return noop("the batch is cancelled");
   if (upload.status === "collected" || upload.status === "failed" || upload.status === "removed") {
     // A removed upload (spec 14b F3) is never read; a delivery queued before the removal only finishes the batch.
-    return (await finishIfLast(db, deps, batch.id)) ?? { progress: { done: 0, total: null, phase: "done" }, outcome: `noop: upload already ${upload.status}` };
+    return (await finishIfLast(db, deps, batch.id, token)) ?? noop(`upload already ${upload.status}`);
   }
-  if (!["draft", "ingesting", "failed"].includes(batch.status)) {
-    return { progress: { done: 0, total: null, phase: "done" }, outcome: `noop: the batch is ${batch.status}` };
-  }
+  if (!["draft", "ingesting", "failed"].includes(batch.status)) return noop(`the batch is ${batch.status}`);
+  const phase = await collectPhaseOf(db, batch.id);
   if (!body.cursor) {
-    // A new run (first delivery or a step 2 re-run): the batch is collecting again.
-    await patchCounts(db, batch.id, { previewReady: false, failReason: null }, { status: "ingesting" });
+    // A new run (first delivery or a step 2 re-run): the batch is collecting again. A placing lease left
+    // by an earlier run is cleared, since its grouping is out of date. Conditional, so a batch cancelled
+    // since it was read above stays cancelled.
+    const started = await db
+      .update(catalogBatches)
+      .set({
+        status: "ingesting",
+        counts: progressCounts({ previewReady: false, failReason: null, placingClaim: null }, { phase: upload.kind === "sheet" || upload.kind === "google_sheet" ? "reading" : phase, done: "collected", at: clock() }),
+      })
+      .where(and(eq(catalogBatches.id, batch.id), inArray(catalogBatches.status, ["draft", "ingesting", "failed"])))
+      .returning({ id: catalogBatches.id });
+    if (!started.length) return noop("the batch is no longer collecting");
   }
 
   const input: CollectInput = { batchId: batch.id, brandSlug: batch.brandSlug, prefix, upload, options: batch.options, deps };
@@ -308,7 +355,7 @@ export async function runIngest(
       if (isRetryableStorageError(err)) throw err;
       const error = err instanceof Error ? err.message : String(err);
       await db.update(catalogUploads).set({ status: "failed", error }).where(eq(catalogUploads.id, upload.id));
-      return (await finishIfLast(db, deps, batch.id)) ?? { progress: { done: 0, total: 0, phase: "done" }, outcome: `upload failed: ${error}` };
+      return (await finishIfLast(db, deps, batch.id, token)) ?? { progress: { done: 0, total: 0, phase: "done" }, outcome: `upload failed: ${error}` };
     }
     const results: Record<string, ItemResult> = {};
     for (const item of listing.items) {
@@ -340,12 +387,18 @@ export async function runIngest(
   }
   await saveJson(deps, manifestPath(prefix, upload.id), manifest);
   await bumpCollected(db, batch.id, doneCount(manifest) - doneCount(stored), total - (stored?.items.length ?? 0));
+  // The phase and a rate sample, read after the bump; a batch cancelled meanwhile stops here, with
+  // no continuation and no upload marked collected.
+  if (!(await collectProgress(db, batch.id, phase, clock()))) {
+    const [now] = await db.select({ status: catalogBatches.status }).from(catalogBatches).where(eq(catalogBatches.id, batch.id));
+    if (now?.status === "cancelled") return { progress: { done: doneCount(manifest), total, phase: "done" }, outcome: "stopped: the batch was cancelled" };
+  }
 
   const done = doneCount(manifest);
   const left = unread();
   if (left.length) {
     const cursor = String(left[0]);
-    await deps.enqueue(INGEST_ROUTE, { batchId: batch.id, uploadId: upload.id, cursor });
+    await deps.enqueue(INGEST_ROUTE, { batchId: batch.id, uploadId: upload.id, cursor, ...(body.run ? { run: body.run } : {}) });
     return { progress: { done, total, phase: "copying" }, outcome: `collected ${done} of ${total}; continuing at ${cursor}` };
   }
 
@@ -353,33 +406,33 @@ export async function runIngest(
     .update(catalogUploads)
     .set({ status: "collected", error: null, detected: finalDetected(manifest, upload.kind) as unknown as Record<string, unknown> })
     .where(eq(catalogUploads.id, upload.id));
-  return (await finishIfLast(db, deps, batch.id)) ?? { progress: { done, total, phase: "done" }, outcome: "collected; waiting for the other uploads" };
+  return (await finishIfLast(db, deps, batch.id, token)) ?? { progress: { done, total, phase: "done" }, outcome: "collected; waiting for the other uploads" };
 }
 
+const UPLOADS_LEFT = (batchId: string) =>
+  sql`EXISTS (SELECT 1 FROM ${catalogUploads} WHERE ${catalogUploads.batchId} = ${batchId} AND ${catalogUploads.status} NOT IN ('collected', 'failed', 'removed'))`;
+
 /**
- * Runs the batch-wide step when every upload is collected or failed and the batch is still
- * `ingesting`. The claim is one conditional UPDATE (status ingesting -> draft), so of two uploads
- * finishing together only one runs it; on an error the claim is given back so a retry runs it.
+ * Runs the batch-wide step when every upload is collected, failed or removed and the batch is still
+ * `ingesting` (spec 14c F6). The claim is one conditional UPDATE that takes the placing lease
+ * (`placingClaim` for `token`, `phase: "placing"`), so of two uploads finishing together only one
+ * runs it; the batch stays `ingesting` until the closing write. A thrown error leaves the lease, so
+ * the retry of the same task (same token) runs the step again; a delivery with another token does
+ * nothing while the lease is live, and takes it over once it ran out.
  */
-async function finishIfLast(db: Db, deps: IngestDeps, batchId: string): Promise<{ progress: IngestProgress; outcome: string } | null> {
+async function finishIfLast(db: Db, deps: IngestDeps, batchId: string, token: string): Promise<{ progress: IngestProgress; outcome: string } | null> {
+  const now = deps.now?.() ?? new Date();
   const claimed = await db
     .update(catalogBatches)
-    .set({ status: "draft" })
-    .where(
-      and(
-        eq(catalogBatches.id, batchId),
-        eq(catalogBatches.status, "ingesting"),
-        sql`NOT EXISTS (SELECT 1 FROM ${catalogUploads} WHERE ${catalogUploads.batchId} = ${batchId} AND ${catalogUploads.status} NOT IN ('collected', 'failed', 'removed'))`,
-      ),
-    )
+    .set({ counts: progressCounts({ placingClaim: placingClaim(token, now), placed: 0, placeTotal: null }, { phase: "placing", done: 0, at: now }) })
+    .where(and(eq(catalogBatches.id, batchId), eq(catalogBatches.status, "ingesting"), placingLeaseFree(now), sql`NOT ${UPLOADS_LEFT(batchId)}`))
     .returning({ id: catalogBatches.id });
-  if (!claimed.length) return null;
-  try {
-    return await finishBatch(db, deps, batchId);
-  } catch (err) {
-    await db.update(catalogBatches).set({ status: "ingesting" }).where(eq(catalogBatches.id, batchId));
-    throw err;
+  if (!claimed.length) {
+    // The retry of the delivery that holds the lease continues; anything else does nothing.
+    const [b] = await db.select({ status: catalogBatches.status, counts: catalogBatches.counts }).from(catalogBatches).where(eq(catalogBatches.id, batchId));
+    if (!b || b.status !== "ingesting" || !placingLeaseHeldBy(b.counts.placingClaim, token, now)) return null;
   }
+  return finishBatch(db, deps, batchId, token);
 }
 
 // --- Grouping what was collected (shared by the runner and the CLI) -----------------------------
@@ -613,11 +666,17 @@ async function deleteUnusedProducts(db: Db, ids: string[]): Promise<void> {
   );
 }
 
-/** Puts an item's bytes at the raw object `target` (unless they are already there); returns its gs:// URI. */
+/**
+ * Puts an item's bytes at the raw object `target` unless they are already there (spec 14c F7 part 1):
+ * a target whose stored sha256 (custom metadata, written here) equals the item's is not copied
+ * again, so a repeated placing costs one metadata read per photo. Returns the gs:// URI.
+ */
 async function placeRaw(storage: IngestDeps["storage"], bucket: string, target: string, r: OkResult): Promise<string> {
   const uri = toGsUri(bucket, target);
   if (r.uri === uri) return uri;
-  return storage.uploadBuffer(target, (await storage.downloadBuffer(r.uri)).buf, r.mime);
+  const head = await storage.headObject(uri);
+  if (head.exists && head.sha256 === r.sha256) return uri;
+  return storage.uploadBuffer(target, (await storage.downloadBuffer(r.uri)).buf, r.mime, { sha256: r.sha256 });
 }
 
 /** findOrCreateProduct's operator sentences (an empty or clashing path); anything else is rethrown. */
@@ -629,10 +688,42 @@ function mergeSkus(skus: ResolveResult, extra: string[] | undefined): ResolveRes
   return { ...skus, opptraSkuIds: ids, method: skus.method === "unresolved" ? "manual" : skus.method };
 }
 
-async function finishBatch(db: Db, deps: IngestDeps, batchId: string): Promise<{ progress: IngestProgress; outcome: string }> {
+/**
+ * The batch-wide step, run by the holder of the placing lease (`token`, spec 14c F6). Every write to
+ * the batch applies only while it is `ingesting` and the lease carries `token` (spec 14c F4 part 2):
+ * the progress writes (`placeTotal`, then `placed` at most every RATE_SAMPLE_GAP_MS, each renewing the
+ * lease) and the closing write (`draft` with `phase` "ready" or "needs_input", or `failed`; lease and
+ * rate cleared). When one is refused the step stops; if the batch was cancelled, the rows it wrote are
+ * removed again, so a cancelled batch keeps no version rows.
+ */
+async function finishBatch(db: Db, deps: IngestDeps, batchId: string, token: string): Promise<{ progress: IngestProgress; outcome: string }> {
   const [batch] = await db.select().from(catalogBatches).where(eq(catalogBatches.id, batchId));
   if (!batch) throw new Error(`Batch ${batchId} does not exist.`);
   const prefix = batchPrefix(batch.brandSlug, batch.id, batch.isTest);
+  const clock = () => deps.now?.() ?? new Date();
+  const held = and(eq(catalogBatches.id, batchId), eq(catalogBatches.status, "ingesting"), placingLeaseHeld(token));
+  const placing = async (patch: Partial<BatchCounts>, done: number): Promise<boolean> => {
+    const at = clock();
+    const rows = await db.update(catalogBatches)
+      .set({ counts: progressCounts({ ...patch, placingClaim: placingClaim(token, at) }, { phase: "placing", done, at }) })
+      .where(held).returning({ id: catalogBatches.id });
+    return rows.length > 0;
+  };
+  const close = async (patch: Partial<BatchCounts>, status: "draft" | "failed"): Promise<boolean> => {
+    const rows = await db.update(catalogBatches)
+      .set({ status, counts: mergeCounts({ ...patch, placingClaim: null, rate: [] }) })
+      .where(held).returning({ id: catalogBatches.id });
+    return rows.length > 0;
+  };
+  const stopped = async () => {
+    const [now] = await db.select({ status: catalogBatches.status }).from(catalogBatches).where(eq(catalogBatches.id, batchId));
+    if (now?.status === "cancelled") {
+      await removeDraftRows(db, batchId);
+      return { progress: { done: 0, total: 0, phase: "done" as const }, outcome: "stopped: the batch was cancelled" };
+    }
+    return { progress: { done: 0, total: 0, phase: "done" as const }, outcome: "stopped: another delivery holds the placing lease" };
+  };
+  if (batch.status !== "ingesting") return stopped();
   // A removed upload (spec 14b F3) is not an input: its photos, sheets and errors are left out.
   const uploads = await db.select().from(catalogUploads).where(and(eq(catalogUploads.batchId, batchId), ne(catalogUploads.status, "removed")));
   await removeDraftRows(db, batch.id);
@@ -722,14 +813,29 @@ async function finishBatch(db: Db, deps: IngestDeps, batchId: string): Promise<{
   }
   const bucket = getBucketName();
   const shots = withPhotos.flatMap((id) => grouped.products.get(id)!.map((item, i) => ({ id, item, n: item.n ?? i + 1 })));
+  if (!(await placing({ placeTotal: shots.length, placed: 0 }, 0))) return stopped();
   const rawUriOf = new Map<SourceItem, string>();
+  let placed = 0, lastWrite = clock().getTime(), writing = false, refused = false;
   const versions = (
     await mapLimit(shots, COPY_CONCURRENCY, async ({ id, item, n }) => {
+      if (refused) return null;
       const r = a.resultOf(item);
       if (!r) return null;
       const product = productOf.get(id)!;
       const rawUri = await placeRaw(deps.storage, bucket, rawPath(prefix, product.pathKey, n, r.ext), r);
       rawUriOf.set(item, rawUri);
+      placed++;
+      // `placed` and a rate sample at most every RATE_SAMPLE_GAP_MS (this also renews the lease and keeps
+      // updated_at moving, so a long placing never looks stalled); a refused write stops the placing.
+      if (!writing && clock().getTime() - lastWrite >= RATE_SAMPLE_GAP_MS) {
+        writing = true;
+        lastWrite = clock().getTime();
+        try {
+          if (!(await placing({ placed }, placed))) refused = true;
+        } finally {
+          writing = false;
+        }
+      }
       const flags = [...new Set([...r.flags, ...shotFlags(item)])];
       return {
         productId: product.id, batchId: batch.id, n, sha256: r.sha256, isCurrent: false, replacesId: current.get(`${product.id}:${n}`) ?? null,
@@ -738,6 +844,8 @@ async function finishBatch(db: Db, deps: IngestDeps, batchId: string): Promise<{
       };
     })
   ).filter((v): v is NonNullable<typeof v> => v !== null);
+  // Still ours and still collecting before any version row is written.
+  if (refused || !(await placing({ placed }, placed))) return stopped();
   for (let i = 0; i < versions.length; i += 500) {
     await db.insert(catalogSourceImages).values(versions.slice(i, i + 500)).onConflictDoNothing();
   }
@@ -778,7 +886,7 @@ async function finishBatch(db: Db, deps: IngestDeps, batchId: string): Promise<{
   // runs this step again without it.
   const removedSince = uploads.length ? await db.select({ id: catalogUploads.id }).from(catalogUploads).where(and(inArray(catalogUploads.id, uploads.map((u) => u.id)), eq(catalogUploads.status, "removed"))) : [];
   if (removedSince.length) {
-    await patchCounts(db, batch.id, { ...counts, previewReady: false }, { status: "draft" });
+    if (!(await close({ ...counts, previewReady: false, phase: null, placed }, "draft"))) return stopped();
     return { progress: { done: 0, total: 0, phase: "done" }, outcome: "stale: an input was removed" };
   }
   const waitingForColumn = uploads.some((u) => (u.detected as Detected | null)?.cannotRead);
@@ -787,12 +895,12 @@ async function finishBatch(db: Db, deps: IngestDeps, batchId: string): Promise<{
     const linkUploads = uploads.filter((u) => manifests.get(u.id)?.items.some((i) => i.bytes.kind === "url"));
     const links = linkUploads.reduce((n, u) => n + manifests.get(u.id)!.items.filter((i) => i.bytes.kind === "url").length, 0);
     const failReason = noPhotosReason(grouped.rejected, uploadErrors, links ? { links, source: linkSourceWords(linkUploads) } : undefined);
-    await patchCounts(db, batch.id, { ...counts, failReason }, { status: "failed" });
+    if (!(await close({ ...counts, failReason, phase: null, placed }, "failed"))) return stopped();
     // An operator upload with nothing usable: WARNING, so it sends no alert and stays out of Error Reporting.
     log("WARNING", "batch failed", { batchId: batch.id, brandSlug: batch.brandSlug, reason: failReason, cause: "no_photos" });
     return { progress: { done: 0, total: 0, phase: "done" }, outcome: "failed: no photos" };
   }
-  await patchCounts(db, batch.id, counts, { status: "draft" });
+  if (!(await close({ ...counts, phase: waitingForColumn ? "needs_input" : "ready", placed }, "draft"))) return stopped();
   return {
     progress: { done: versions.length, total: versions.length, phase: "done" },
     outcome: `preview ready: ${withPhotos.length} products, ${versions.length} photos`,

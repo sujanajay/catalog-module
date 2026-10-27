@@ -13,7 +13,7 @@ import { CATALOG_TASK_LEASE_MS, enqueueFinalize, finalizeEnqueueExpired } from "
 /** No progress for this long fails the batch (2 hours, from the plan). */
 export const SWEEP_STALE_MS = 2 * 60 * 60 * 1000;
 
-/** Batch statuses that mean "work in flight". */
+/** Batch statuses that mean "work in flight". A `cancelled` batch is never swept (spec 14c F4 part 2). */
 export const SWEEPABLE_STATUSES = ["ingesting", "matting", "rendering", "qa", "publishing"] as const satisfies readonly BatchStatus[];
 
 export const SWEEP_ERROR = "No progress for 2 hours. Start the batch again.";

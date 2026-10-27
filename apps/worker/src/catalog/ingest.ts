@@ -30,12 +30,14 @@ export function workerIngestDeps(): IngestTaskDeps["ingest"] {
 const isId = (v: unknown): v is string => typeof v === "string" && v.length > 0;
 
 export async function handleIngestTask(deps: IngestTaskDeps, body: Record<string, unknown>): Promise<HandleResult> {
-  const { batchId, uploadId, cursor } = body;
-  if (!isId(batchId) || !isId(uploadId) || (cursor !== undefined && typeof cursor !== "string")) {
+  const { batchId, uploadId, cursor, run } = body;
+  if (!isId(batchId) || !isId(uploadId) || (cursor !== undefined && typeof cursor !== "string") || (run !== undefined && typeof run !== "string")) {
     return { httpStatus: 400, outcome: "invalid body: batchId and uploadId are required" };
   }
   try {
-    const { outcome } = await (deps.run ?? runIngest)(deps.db, deps.ingest, { batchId, uploadId, ...(cursor ? { cursor } : {}) });
+    // `run` (optional, spec 14c F6): the hand-off's run id, part of the placing token. Bodies without it
+    // (an earlier web tier) still work: the token is then the upload id and the cursor.
+    const { outcome } = await (deps.run ?? runIngest)(deps.db, deps.ingest, { batchId, uploadId, ...(cursor ? { cursor } : {}), ...(run ? { run } : {}) });
     return { httpStatus: 200, outcome };
   } catch (err) {
     log("ERROR", "ingest task failed", { batchId, uploadId, error: err instanceof Error ? err : String(err) });

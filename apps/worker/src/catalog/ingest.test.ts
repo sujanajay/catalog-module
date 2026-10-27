@@ -20,6 +20,9 @@ describe("handleIngestTask", () => {
     expect(run).toHaveBeenCalledWith(db, ingest, { batchId: "b1", uploadId: "u1", cursor: "25" });
     await handleIngestTask({ db, ingest, run }, { batchId: "b1", uploadId: "u1" });
     expect(run).toHaveBeenLastCalledWith(db, ingest, { batchId: "b1", uploadId: "u1" });
+    // The hand-off's run id (spec 14c F6 placing token) is passed on when the body carries it.
+    await handleIngestTask({ db, ingest, run }, { batchId: "b1", uploadId: "u1", run: "r1" });
+    expect(run).toHaveBeenLastCalledWith(db, ingest, { batchId: "b1", uploadId: "u1", run: "r1" });
   });
 
   it("answers 500 on an unexpected error so Cloud Tasks retries", async () => {
@@ -34,7 +37,7 @@ describe("handleIngestTask", () => {
 
   it("refuses a body without the batch and upload ids", async () => {
     const run = vi.fn();
-    for (const body of [{}, { batchId: "b1" }, { batchId: "b1", uploadId: 7 }, { batchId: "b1", uploadId: "u1", cursor: 3 }]) {
+    for (const body of [{}, { batchId: "b1" }, { batchId: "b1", uploadId: 7 }, { batchId: "b1", uploadId: "u1", cursor: 3 }, { batchId: "b1", uploadId: "u1", run: 7 }]) {
       expect((await handleIngestTask({ db, ingest, run }, body)).httpStatus).toBe(400);
     }
     expect(run).not.toHaveBeenCalled();

@@ -21,7 +21,8 @@ import { batchPrefix, rawPath } from "../naming";
 import { findOrCreateProduct } from "../products";
 import type { ChannelId, IdentifierMode, UploadKind } from "../types";
 import { buildZip } from "../../../test-fixtures/catalog/ingest-a/builders";
-import { buildPreview, runIngest } from "./index";
+import { mergeCounts, PLACING_LEASE_MS } from "../counts";
+import { buildPreview, deliveryToken, runIngest } from "./index";
 import { manifestPath } from "./manifest";
 import type { IngestDeps } from "./types";
 
@@ -50,13 +51,13 @@ afterAll(async () => {
 // --- Fakes ---------------------------------------------------------------------------------
 
 function fakeWorld() {
-  const objects = new Map<string, { buf: Buffer; mime: string }>();
+  const objects = new Map<string, { buf: Buffer; mime: string; sha256?: string }>();
   const calls = { uploads: [] as string[], downloads: [] as string[], customTime: [] as string[], fetches: [] as string[] };
   const gs = (p: string) => `gs://${BUCKET}/${p}`;
   const notFound = () => Object.assign(new Error("No such object"), { code: 404 });
   const storage: IngestDeps["storage"] = {
-    uploadBuffer: async (path: string, buf: Buffer, mime: string) => {
-      objects.set(gs(path), { buf, mime });
+    uploadBuffer: async (path: string, buf: Buffer, mime: string, opts?: { sha256?: string }) => {
+      objects.set(gs(path), { buf, mime, ...(opts?.sha256 ? { sha256: opts.sha256 } : {}) });
       calls.uploads.push(gs(path));
       return gs(path);
     },
@@ -68,7 +69,7 @@ function fakeWorld() {
     },
     headObject: async (gsUri: string) => {
       const o = objects.get(gsUri);
-      return { exists: !!o, size: o ? o.buf.length : null, contentType: o?.mime ?? null, generation: o ? "1" : null, crc32c: null };
+      return { exists: !!o, size: o ? o.buf.length : null, contentType: o?.mime ?? null, generation: o ? "1" : null, crc32c: null, ...(o?.sha256 ? { sha256: o.sha256 } : {}) };
     },
     readRange: async (gsUri: string, start: number, end: number) => objects.get(gsUri)!.buf.subarray(start, end + 1),
     createRangeStream: (gsUri: string, start: number, end: number) => Readable.from([objects.get(gsUri)!.buf.subarray(start, end + 1)]),
@@ -502,7 +503,8 @@ describe("an input removed while the batch-wide step runs (spec 14b F3)", () => 
     const storage: IngestDeps["storage"] = {
       ...w.storage,
       downloadBuffer: async (gsUri: string) => {
-        if (gsUri === keptManifest && !removedOnce && (await batchRow(batch.id)).status === "draft") {
+        // The batch-wide step runs while the batch is placing (spec 14c F6: it stays `ingesting`).
+        if (gsUri === keptManifest && !removedOnce && (await batchRow(batch.id)).counts.phase === "placing") {
           removedOnce = true;
           await db.update(catalogUploads).set({ status: "removed" }).where(eq(catalogUploads.id, gone));
         }
@@ -620,5 +622,227 @@ describe("links that could not be downloaded (spec 14b F5 part 1)", () => {
     const { batch } = await collectGrid((url) => (url.includes("BH-4611-BX-BOXER_2") ? 404 : 200));
     expect(batch.status).toBe("draft");
     expect(batch.counts).toMatchObject({ linkFailures: 1, unsupportedFiles: 0, sources: 26, previewReady: true });
+  });
+});
+
+describe("phase, rate and the placing lease (spec 14c F6)", () => {
+  const T0 = Date.parse("2026-10-27T10:00:00Z");
+  /** A clock the test moves by hand. */
+  function clock() {
+    let t = T0;
+    return { now: () => new Date(t), advance: (ms: number) => (t += ms) };
+  }
+  type Body = { batchId: string; uploadId: string; cursor?: string; run?: string };
+
+  it("collecting writes phase and rate; placing stays ingesting with phase placing, then draft with phase ready and the lease and rate cleared", async () => {
+    const w = fakeWorld();
+    const c = clock();
+    const batch = await newBatch("phases");
+    const files: Record<string, Buffer> = {};
+    for (let n = 1; n <= 6; n++) files[`PH${n}_1.jpg`] = await jpeg();
+    const uploadId = await folderUpload(w, batch, files);
+
+    await runIngest(db, { ...deps(w, 2), now: c.now }, { batchId: batch.id, uploadId });
+    const first = (await batchRow(batch.id)).counts;
+    expect(first).toMatchObject({ phase: "checking", collected: 2, collectTotal: 6, placingClaim: null });
+    expect(first.rate?.at(-1)).toEqual({ at: new Date(T0).toISOString(), phase: "checking", done: 2 });
+    c.advance(30_000);
+    await runIngest(db, { ...deps(w, 2), now: c.now }, w.enqueued[0]!.body as Body);
+    expect((await batchRow(batch.id)).counts.rate?.map((s) => [s.phase, s.done])).toEqual([["checking", 0], ["checking", 2], ["checking", 4]]);
+
+    // Snapshot the row while the last delivery places the photos.
+    // Each photo placed takes 11 s on the test clock, so `placed` is written while placing.
+    let during: CatalogBatch | null = null;
+    let beforeClose: CatalogBatch | null = null;
+    const storage: IngestDeps["storage"] = {
+      ...w.storage,
+      downloadBuffer: async (gsUri) => {
+        if (gsUri.includes("/uploads/")) {
+          const row = await batchRow(batch.id);
+          if (row.counts.phase === "placing") {
+            during ??= row;
+            c.advance(11_000);
+          }
+        }
+        return w.storage.downloadBuffer(gsUri);
+      },
+      uploadBuffer: async (path, buf, mime, opts) => {
+        if (path.endsWith("preview-state.json")) beforeClose = await batchRow(batch.id);
+        return w.storage.uploadBuffer(path, buf, mime, opts);
+      },
+    };
+    c.advance(30_000);
+    const last = w.enqueued[1]!.body as Body;
+    expect((await runIngest(db, { ...deps(w, 2), storage, now: c.now }, last)).outcome).toBe("preview ready: 6 products, 6 photos");
+    expect(during).not.toBeNull();
+    expect(during!.status).toBe("ingesting");
+    expect(during!.counts).toMatchObject({ phase: "placing", placed: 0, placeTotal: 6, placingClaim: { token: deliveryToken(last), until: new Date(T0 + 60_000 + PLACING_LEASE_MS).toISOString() } });
+    // The phase changed, so rate restarted with placing samples only.
+    expect(during!.counts.rate!.every((s) => s.phase === "placing")).toBe(true);
+    // Before the closing write: every photo placed, and a `placed` sample written part-way.
+    expect(beforeClose!).toMatchObject({ status: "ingesting", counts: { phase: "placing", placed: 6 } });
+    const dones = beforeClose!.counts.rate!.map((s) => s.done);
+    expect(dones.some((d) => d > 0 && d < 6)).toBe(true);
+    expect(dones.at(-1)).toBe(6);
+
+    const done = await batchRow(batch.id);
+    expect(done.status).toBe("draft");
+    expect(done.counts).toMatchObject({ phase: "ready", placed: 6, placeTotal: 6, placingClaim: null, rate: [], previewReady: true, collected: 6 });
+  });
+
+  it("a thrown placing leaves the lease; another token does nothing while it is live; the retry with the same token runs it to the end", async () => {
+    const w = fakeWorld();
+    const c = clock();
+    const batch = await newBatch("lease retry");
+    const uploadId = await folderUpload(w, batch, { "LR1_1.jpg": await jpeg(), "LR2_1.jpg": await jpeg() });
+    const body: Body = { batchId: batch.id, uploadId, run: "run-1" };
+    let fail = true;
+    const storage: IngestDeps["storage"] = {
+      ...w.storage,
+      uploadBuffer: async (path, buf, mime, opts) => {
+        if (fail && path.includes("/raw/")) throw Object.assign(new Error("Connection reset"), { code: "ECONNRESET" });
+        return w.storage.uploadBuffer(path, buf, mime, opts);
+      },
+    };
+    await expect(runIngest(db, { ...deps(w), storage, now: c.now }, body)).rejects.toThrow("Connection reset");
+    let row = await batchRow(batch.id);
+    expect(row.status).toBe("ingesting");
+    expect(row.counts.placingClaim?.token).toBe(deliveryToken(body));
+    expect(row.counts.phase).toBe("placing");
+    fail = false;
+
+    // A delivery of another hand-off (another token) while the lease is live: nothing happens.
+    c.advance(60_000);
+    expect((await runIngest(db, { ...deps(w), now: c.now }, { ...body, run: "run-2" })).outcome).toBe("noop: upload already collected");
+    row = await batchRow(batch.id);
+    expect(row.status).toBe("ingesting");
+    expect(row.counts.placingClaim?.token).toBe(deliveryToken(body));
+    expect(await sourcesOf(batch.id)).toEqual([]);
+
+    // Cloud Tasks retries the same task: same token, so it continues.
+    expect((await runIngest(db, { ...deps(w), now: c.now }, body)).outcome).toBe("preview ready: 2 products, 2 photos");
+    row = await batchRow(batch.id);
+    expect(row).toMatchObject({ status: "draft", counts: { phase: "ready", placingClaim: null, previewReady: true } });
+    expect(await sourcesOf(batch.id)).toHaveLength(2);
+  });
+
+  it("a lapsed lease can be claimed by another delivery", async () => {
+    const w = fakeWorld();
+    const c = clock();
+    const batch = await newBatch("lease lapsed");
+    const uploadId = await folderUpload(w, batch, { "LL1_1.jpg": await jpeg() });
+    const body: Body = { batchId: batch.id, uploadId, run: "dead" };
+    const storage: IngestDeps["storage"] = { ...w.storage, uploadBuffer: async () => { throw new Error("killed"); } };
+    await expect(runIngest(db, { ...deps(w), storage, now: c.now }, body)).rejects.toThrow("killed");
+    c.advance(PLACING_LEASE_MS + 1_000);
+    const other: Body = { ...body, run: "try-again" };
+    expect((await runIngest(db, { ...deps(w), now: c.now }, other)).outcome).toBe("preview ready: 1 products, 1 photos");
+    expect((await batchRow(batch.id)).counts).toMatchObject({ phase: "ready", placingClaim: null });
+  });
+
+  it("a web write merged during placing (as regroupBatch now writes) keeps phase and placingClaim", async () => {
+    const w = fakeWorld();
+    const batch = await newBatch("merge during placing");
+    const uploadId = await folderUpload(w, batch, { "MP1_1.jpg": await jpeg() });
+    let seen: CatalogBatch | null = null;
+    const storage: IngestDeps["storage"] = {
+      ...w.storage,
+      downloadBuffer: async (gsUri) => {
+        if (!seen && gsUri.includes("/uploads/") && (await batchRow(batch.id)).counts.phase === "placing") {
+          await db.update(catalogBatches).set({ counts: mergeCounts({ previewReady: false }) }).where(eq(catalogBatches.id, batch.id));
+          seen = await batchRow(batch.id);
+        }
+        return w.storage.downloadBuffer(gsUri);
+      },
+    };
+    await runIngest(db, { ...deps(w), storage }, { batchId: batch.id, uploadId });
+    expect(seen!.counts).toMatchObject({ phase: "placing", previewReady: false, placingClaim: { token: deliveryToken({ uploadId }) } });
+  });
+});
+
+describe("placing never re-copies (spec 14c F7 part 1)", () => {
+  it("a second placing run on the same batch performs zero copies", async () => {
+    const w = fakeWorld();
+    const batch = await newBatch("no re-copy");
+    await folderUpload(w, batch, { "NR1_1.jpg": await jpeg(), "NR1_2.jpg": await jpeg(), "NR2_1.jpg": await jpeg() });
+    await ingestAll(w, batch);
+    const copies = w.calls.uploads.filter((u) => u.includes("/raw/")).length;
+    expect(copies).toBe(3);
+    const raw = w.objects.get(`gs://${BUCKET}/${rawPath(prefixOf(batch), "NR1", 1, "jpg")}`)!;
+    expect(raw.sha256).toMatch(/^[0-9a-f]{64}$/);
+
+    // Continue on step 2 hands the uploads again: the grouping runs, the photos are already in place.
+    await db.update(catalogUploads).set({ status: "uploaded" }).where(eq(catalogUploads.batchId, batch.id));
+    await ingestAll(w, batch);
+    expect(w.calls.uploads.filter((u) => u.includes("/raw/")).length).toBe(copies);
+    expect((await batchRow(batch.id)).counts).toMatchObject({ previewReady: true, sources: 3, phase: "ready" });
+    expect(await sourcesOf(batch.id)).toHaveLength(3);
+  });
+});
+
+describe("cancel guards (spec 14c F4 part 2)", () => {
+  type Body = { batchId: string; uploadId: string; cursor?: string };
+  const cancel = (id: string) => db.update(catalogBatches).set({ status: "cancelled" }).where(eq(catalogBatches.id, id));
+  const products = async (batchId: string) => db.select().from(catalogBatchProducts).where(eq(catalogBatchProducts.batchId, batchId));
+
+  it("a batch cancelled mid-collection stays cancelled through the remaining deliveries and the placing, with no version rows", async () => {
+    const w = fakeWorld();
+    const batch = await newBatch("cancel collecting");
+    const files: Record<string, Buffer> = {};
+    for (let n = 1; n <= 6; n++) files[`CC${n}_1.jpg`] = await jpeg();
+    const uploadId = await folderUpload(w, batch, files);
+    const other = await folderUpload(w, batch, { "CO1_1.jpg": await jpeg() });
+
+    await runIngest(db, deps(w, 2), { batchId: batch.id, uploadId });
+    // The operator cancels while the second delivery reads its photos.
+    let cancelled = false;
+    const storage: IngestDeps["storage"] = {
+      ...w.storage,
+      downloadBuffer: async (gsUri) => {
+        if (!cancelled && gsUri.endsWith(".jpg")) {
+          cancelled = true;
+          await cancel(batch.id);
+        }
+        return w.storage.downloadBuffer(gsUri);
+      },
+    };
+    const queued = w.enqueued.length;
+    expect((await runIngest(db, { ...deps(w, 2), storage }, w.enqueued[0]!.body as Body)).outcome).toBe("stopped: the batch was cancelled");
+    expect(w.enqueued).toHaveLength(queued);
+    // Every later delivery, including the other upload's first one, does nothing.
+    expect((await runIngest(db, deps(w, 10), { batchId: batch.id, uploadId, cursor: "4" })).outcome).toBe("noop: the batch is cancelled");
+    expect((await runIngest(db, deps(w, 10), { batchId: batch.id, uploadId: other })).outcome).toBe("noop: the batch is cancelled");
+    await db.update(catalogUploads).set({ status: "collected" }).where(eq(catalogUploads.batchId, batch.id));
+    expect((await runIngest(db, deps(w, 10), { batchId: batch.id, uploadId: other })).outcome).toBe("noop: the batch is cancelled");
+
+    expect((await batchRow(batch.id)).status).toBe("cancelled");
+    expect(await sourcesOf(batch.id)).toEqual([]);
+    expect(await products(batch.id)).toEqual([]);
+  });
+
+  it("a batch cancelled while placing is not revived, and the rows placing wrote are removed", async () => {
+    const w = fakeWorld();
+    const batch = await newBatch("cancel placing");
+    const uploadId = await folderUpload(w, batch, { "CP1_1.jpg": await jpeg(), "CP2_1.jpg": await jpeg() });
+    let cancelled = false;
+    const storage: IngestDeps["storage"] = {
+      ...w.storage,
+      uploadBuffer: async (path, buf, mime, opts) => {
+        if (!cancelled && path.includes("/raw/")) {
+          cancelled = true;
+          await cancel(batch.id);
+        }
+        return w.storage.uploadBuffer(path, buf, mime, opts);
+      },
+    };
+    expect((await runIngest(db, { ...deps(w), storage }, { batchId: batch.id, uploadId })).outcome).toBe("stopped: the batch was cancelled");
+    const row = await batchRow(batch.id);
+    expect(row.status).toBe("cancelled");
+    expect(row.counts.previewReady).toBe(false);
+    expect(await sourcesOf(batch.id)).toEqual([]);
+    expect(await products(batch.id)).toEqual([]);
+    // A retry of the same task finds the batch cancelled.
+    expect((await runIngest(db, deps(w), { batchId: batch.id, uploadId })).outcome).toBe("noop: the batch is cancelled");
+    expect((await batchRow(batch.id)).status).toBe("cancelled");
   });
 });

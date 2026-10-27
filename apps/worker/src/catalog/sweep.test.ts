@@ -127,6 +127,15 @@ describe("handleSweep (PGlite)", () => {
     expect((await batch(recent)).status).toBe("ingesting");
   });
 
+  it("ignores cancelled batches, however old (spec 14c F4 part 2)", async () => {
+    const cancelled = await insertBatch("cancelled", 48);
+    await db.execute(sql`UPDATE catalog_batches SET counts = '{"placingClaim":{"token":"t","until":"2026-10-17T00:00:00Z"},"finalizePending":true,"finalizeEnqueuedAt":0}'::jsonb WHERE id = ${cancelled}`);
+    const enqueue = vi.fn(async () => "task");
+    expect(await handleSweep({ db, enqueue, releaseLocks, now: () => NOW }, {})).toEqual({ httpStatus: 200, outcome: "swept:0" });
+    expect(await batch(cancelled)).toEqual({ status: "cancelled", error: null });
+    expect(enqueue).not.toHaveBeenCalled();
+  });
+
   it("rolls the status change back when releasing locks fails", async () => {
     const stale = await insertBatch("publishing", 5);
     await insertLockedProducts(stale, 1);
