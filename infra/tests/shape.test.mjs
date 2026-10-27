@@ -26,8 +26,8 @@ const pick = (prefix) => {
   assert.ok(line, `${prefix} not found in deploy.sh`);
   return line;
 };
-const prices = [pick('usd() {'), pick('COMPUTE_USD_PER_VCPU_SECOND=${COMPUTE_USD_PER_VCPU_SECOND:-'),
-  pick('PRICE_MATTE_GPU_USD_PER_SECOND=${PRICE_MATTE_GPU_USD_PER_SECOND:-')].join('\n');
+const prices = [pick('usd() {'), pick('if [ -z "${COMPUTE_USD_PER_VCPU_SECOND:-}"'), pick('COMPUTE_USD_PER_VCPU_SECOND=${COMPUTE_USD_PER_VCPU_SECOND:-'),
+  pick('if [ -z "${PRICE_MATTE_GPU_USD_PER_SECOND:-}"'), pick('PRICE_MATTE_GPU_USD_PER_SECOND=${PRICE_MATTE_GPU_USD_PER_SECOND:-')].join('\n');
 
 function run(env, live = '25') {
   const clean = Object.fromEntries(Object.entries(process.env).filter(([k]) => !NAMES.includes(k) && !k.startsWith('COMPUTE_USD') && !k.startsWith('PRICE_MATTE')));

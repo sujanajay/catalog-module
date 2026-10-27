@@ -149,9 +149,11 @@ job_env() { printf '%s' "${WORKER_ENV/DB_POOL_MAX=$WORKER_DB_POOL_MAX,/DB_POOL_M
 # USD 0.000024 per vCPU-second and memory USD 0.0000025 per GiB-second. The worker shape is
 # --cpu=2 --memory=2Gi, 1 GiB per vCPU: 0.000024 + 1 * 0.0000025 = 0.0000265 per vCPU-second
 # (free tier and the per-request fee ignored). Re-check if the worker's shape or billing changes.
-# Spec 16: the default follows the worker shape (memory GiB per vCPU); 2 vCPU/2Gi and 4 vCPU/4Gi both give 0.0000265.
+# Spec 16: a worker shape with another memory per vCPU than 1 GiB gets its own default (2 vCPU/2Gi and the F2
+# 4 vCPU/4Gi both keep 0.0000265, equal to cost.ts).
 usd() { awk "BEGIN { printf \"%.10f\", $1 }" | sed -e 's/0*$//' -e 's/\.$//'; }
-COMPUTE_USD_PER_VCPU_SECOND=${COMPUTE_USD_PER_VCPU_SECOND:-$(usd "0.000024 + (${WORKER_MEMORY%Gi} / $WORKER_CPU) * 0.0000025")}
+if [ -z "${COMPUTE_USD_PER_VCPU_SECOND:-}" ] && [ "${WORKER_MEMORY%Gi}" != "$WORKER_CPU" ]; then COMPUTE_USD_PER_VCPU_SECOND=$(usd "0.000024 + (${WORKER_MEMORY%Gi} / $WORKER_CPU) * 0.0000025"); fi
+COMPUTE_USD_PER_VCPU_SECOND=${COMPUTE_USD_PER_VCPU_SECOND:-0.0000265}
 [[ "$COMPUTE_USD_PER_VCPU_SECOND" =~ ^[0-9]+([.][0-9]+)?$ ]] || { echo "COMPUTE_USD_PER_VCPU_SECOND must be a number such as 0.0000265" >&2; exit 1; }
 WORKER_ENV+=",COMPUTE_USD_PER_VCPU_SECOND=$COMPUTE_USD_PER_VCPU_SECOND"
 # Matting-service spend for the cost ledger (catalog_cost_events): the worker prices each cut-out and
@@ -169,9 +171,11 @@ WORKER_ENV+=",COMPUTE_USD_PER_VCPU_SECOND=$COMPUTE_USD_PER_VCPU_SECOND"
 # are a lower bound: instance start-up, idle time before an instance stops, failed upscale calls and a
 # GPU attempt that failed before the CPU service answered are billed but not recorded.
 # Re-check both if a service's shape, region, billing mode or zonal redundancy changes.
-# Spec 16: the GPU default follows GPU_CPU and GPU_MEMORY (4 vCPU/16Gi: 0.00034884; 8 vCPU/32Gi: 0.00047364).
+# Spec 16: a GPU shape other than 4 vCPU/16Gi gets its own default from GPU_CPU and GPU_MEMORY (8 vCPU/32Gi:
+# 0.00047364); 4 vCPU/16Gi keeps 0.00034884, equal to cost.ts.
 PRICE_MATTE_CPU_USD_PER_SECOND=${PRICE_MATTE_CPU_USD_PER_SECOND:-0.000136}
-PRICE_MATTE_GPU_USD_PER_SECOND=${PRICE_MATTE_GPU_USD_PER_SECOND:-$(usd "0.00022404 + $GPU_CPU * 0.0000216 + ${GPU_MEMORY%Gi} * 0.0000024")}
+if [ -z "${PRICE_MATTE_GPU_USD_PER_SECOND:-}" ] && [ "$GPU_CPU/$GPU_MEMORY" != 4/16Gi ]; then PRICE_MATTE_GPU_USD_PER_SECOND=$(usd "0.00022404 + $GPU_CPU * 0.0000216 + ${GPU_MEMORY%Gi} * 0.0000024"); fi
+PRICE_MATTE_GPU_USD_PER_SECOND=${PRICE_MATTE_GPU_USD_PER_SECOND:-0.00034884}
 [[ "$PRICE_MATTE_CPU_USD_PER_SECOND" =~ ^[0-9]+([.][0-9]+)?$ ]] || { echo "PRICE_MATTE_CPU_USD_PER_SECOND must be a number such as 0.000136" >&2; exit 1; }
 [[ "$PRICE_MATTE_GPU_USD_PER_SECOND" =~ ^[0-9]+([.][0-9]+)?$ ]] || { echo "PRICE_MATTE_GPU_USD_PER_SECOND must be a number such as 0.00034884" >&2; exit 1; }
 WORKER_ENV+=",PRICE_MATTE_CPU_USD_PER_SECOND=$PRICE_MATTE_CPU_USD_PER_SECOND,PRICE_MATTE_GPU_USD_PER_SECOND=$PRICE_MATTE_GPU_USD_PER_SECOND"
