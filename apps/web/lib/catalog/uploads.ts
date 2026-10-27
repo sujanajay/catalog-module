@@ -9,7 +9,8 @@ import { enqueueTask } from "@catalog/core/tasks";
 import { isTransientError } from "@catalog/core/retry";
 import { db } from "../db";
 import { badRequest, HttpError } from "../errors";
-import { assertDraft, draftForUpdate, INPUT_NOT_FOUND, LINK_KINDS, mergeCounts, queryBatch } from "./batches";
+import { dropLinkRejects, linkFailuresOf } from "@catalog/core/catalog/ingest/link-failures";
+import { assertDraft, BATCH_STARTED, draftForUpdate, INPUT_NOT_FOUND, LINK_KINDS, mergeCounts, queryBatch, reopenBatch } from "./batches";
 import { HAND_OFF_FAILED, HAND_OFF_RETRY } from "./copy";
 import { collectGoogleLink } from "./links";
 
@@ -113,6 +114,31 @@ export async function ingestBatch(id: string) {
     throw handOffError(err);
   }
   return { collecting: true };
+}
+/** POST /retry-links when the batch holds no link that failed. */
+export const NO_FAILED_LINKS = "No links failed in this batch. Reload this page.";
+/**
+ * "Try the failed links again" (spec 14b F5 part 1): for a draft, or a batch that failed before Start
+ * (reopened first, `reopenBatch`), drops the link reject results from the manifests so only those
+ * links count as unread, sets the uploads that held them back to `uploaded` (as regroupBatch does)
+ * and hands them to collection. Links that were read fine are not fetched again. Refused for a
+ * collecting or started batch (the existing refusal, until release C).
+ */
+export async function retryLinks(id: string) {
+  const batch = await queryBatch(id);
+  if (batch.status !== "draft" && !(batch.status === "failed" && !batch.startedAt)) throw new HttpError(409, BATCH_STARTED);
+  const { rows } = await linkFailuresOf(db(), id, { storage });
+  if (!rows.length) throw badRequest(NO_FAILED_LINKS);
+  await reopenBatch(id);
+  const { uploadIds } = await dropLinkRejects(db(), id, { storage });
+  if (uploadIds.length) {
+    await db().transaction(async (tx) => {
+      await draftForUpdate(tx, id);
+      await tx.update(catalogUploads).set({ status: "uploaded" }).where(and(eq(catalogUploads.batchId, id), inArray(catalogUploads.id, uploadIds), inArray(catalogUploads.status, ["collected", "failed"])));
+      await tx.update(catalogBatches).set({ counts: mergeCounts({ previewReady: false }), updatedAt: new Date() }).where(eq(catalogBatches.id, id));
+    });
+  }
+  return ingestBatch(id);
 }
 export async function regroupBatch(id: string) {
   const batch = await assertDraft(id);

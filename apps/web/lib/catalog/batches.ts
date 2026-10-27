@@ -1,4 +1,4 @@
-import { and, desc, eq, gt, inArray, ne, sql } from "drizzle-orm";
+import { and, desc, eq, gt, inArray, isNull, ne, sql } from "drizzle-orm";
 import { brandMaster, catalogBatches, catalogUploads, type CatalogBatch } from "@catalog/core/db/schema";
 import { CHANNEL_IDS, IDENTIFIER_MODES, PRECEDENCES, PRODUCT_TYPES, type BatchCounts, type BatchOptions, type ChannelId, type ProductType, type UploadKind } from "@catalog/core/catalog/types";
 import { db, type Db } from "../db";
@@ -37,6 +37,24 @@ export const LINK_KINDS: readonly UploadKind[] = ["url_list", "google_sheet", "d
  */
 export function mergeCounts(patch: Partial<BatchCounts>) {
   return sql`${catalogBatches.counts} || ${JSON.stringify(patch)}::jsonb`;
+}
+/** The refusal for a batch that has started (release C words it by status, 14c F8). */
+export const BATCH_STARTED = "This batch has already started. Make a new batch to add more photos.";
+/**
+ * The reopen of F8 (spec 14c section 3.4), written for POST /retry-links (spec 14b F5 part 1): a batch
+ * that failed before Start (`failed`, `startedAt` null) returns to `draft` with `failReason` cleared
+ * and `previewReady` false (a merge, so a worker counts key is kept). Uploads are untouched, so their
+ * manifests and staged bytes are reused. A draft is returned as it is; any other batch is refused.
+ */
+export async function reopenBatch(id: string): Promise<CatalogBatch> {
+  const [reopened] = await db().update(catalogBatches)
+    .set({ status: "draft", counts: mergeCounts({ failReason: null, previewReady: false }), updatedAt: new Date() })
+    .where(and(eq(catalogBatches.id, id), eq(catalogBatches.status, "failed"), isNull(catalogBatches.startedAt)))
+    .returning();
+  if (reopened) return reopened;
+  const batch = await queryBatch(id);
+  if (batch.status !== "draft") throw new HttpError(409, BATCH_STARTED);
+  return batch;
 }
 export function publicBatch(batch: CatalogBatch) {
   const { policy: _policy, ...options } = batch.options;

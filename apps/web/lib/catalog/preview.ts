@@ -1,6 +1,8 @@
 import { and, eq, inArray, ne } from "drizzle-orm";
 import { catalogBatches, catalogOutputs, catalogProducts, catalogSourceImages, catalogUploads } from "@catalog/core/db/schema";
-import { buildDetectedStep2 } from "@catalog/core/catalog/ingest/detect-step";
+import { buildDetectedStep2, linkFailuresBlock } from "@catalog/core/catalog/ingest/detect-step";
+import { linkFailuresOf } from "@catalog/core/catalog/ingest/link-failures";
+import { isLinkReject } from "@catalog/core/catalog/ingest/link-reasons";
 import { buildPreview } from "@catalog/core/catalog/ingest/index";
 import type { Detected } from "@catalog/core/catalog/ingest/types";
 import { renderKeys } from "@catalog/core/catalog/pipeline/publish";
@@ -20,7 +22,9 @@ export async function detectedBatch(id: string) {
   const detected = await buildDetectedStep2(db(), id, { storage });
   const uploads = await db().select().from(catalogUploads).where(and(eq(catalogUploads.batchId, id), ne(catalogUploads.status, "removed")));
   const batch = await queryBatch(id);
-  return { ...detected, totalProducts: batch.counts.products, unreadable: uploads.flatMap((u) => (u.detected as unknown as Detected | null)?.rejected ?? []), sheets: detected.sheets.map((sheet) => ({ ...sheet, columns: (uploads.find((u) => u.id === sheet.uploadId)?.detected as unknown as Detected | null)?.columns ?? [] })) };
+  // Files only: links that could not be downloaded are `linkFailures` (spec 14b F5 part 1).
+  const unreadable = uploads.flatMap((u) => (u.detected as unknown as Detected | null)?.rejected ?? []).filter((r) => !isLinkReject(r.reason));
+  return { ...detected, totalProducts: batch.counts.products, unreadable, sheets: detected.sheets.map((sheet) => ({ ...sheet, columns: (uploads.find((u) => u.id === sheet.uploadId)?.detected as unknown as Detected | null)?.columns ?? [] })) };
 }
 export async function patchDetected(id: string, value: unknown) {
   const batch = await assertDraft(id);
@@ -90,9 +94,17 @@ export async function matteModelFor(product: { productType: string | null }, bat
   const policy = await resolve(batch.brandSlug, type as Parameters<typeof resolvePolicy>[2]);
   return type === "other" && transparent && policy.matteModelSecond && policy.matteModelSecond !== policy.matteModel ? policy.matteModelSecond : policy.matteModel;
 }
+/**
+ * The batch's links that could not be downloaded (spec 14b F5 part 1): the summary block (as step 2's)
+ * and every failure for the "Show all" table, as `{ url, where, reason }` with the reason phrase.
+ */
+export async function batchLinkFailures(id: string) {
+  const found = await linkFailuresOf(db(), id, { storage });
+  return { linkFailures: linkFailuresBlock(found), linkFailureRows: found.rows.map(({ url, where, reason }) => ({ url, where, reason })) };
+}
 export async function previewBatch(id: string) {
   const batch = await queryBatch(id);
-  const base = { otherBatchProcessing: await anotherBatchProcessing(id), ready: batch.counts.previewReady, previewAt: batch.updatedAt.toISOString(), counts: {...batch.counts, photos: batch.counts.sources, channels: batch.channels.length}, collected: batch.counts.collected, collectTotal: batch.counts.collectTotal, estimate: null as CostEstimate | null };
+  const base = { otherBatchProcessing: await anotherBatchProcessing(id), ready: batch.counts.previewReady, previewAt: batch.updatedAt.toISOString(), counts: {...batch.counts, photos: batch.counts.sources, channels: batch.channels.length}, collected: batch.counts.collected, collectTotal: batch.counts.collectTotal, estimate: null as CostEstimate | null, ...await batchLinkFailures(id) };
   if (!base.ready) return { ...base, groupedBy: "", warnings: [], groups: [], totalRows: 0, overwrite: { newProducts: 0, existingProducts: [], renameHints: [], sameProductPairs: [] }, busy: [] };
   const [preview, detected] = await Promise.all([buildPreview(db(), id, { storage }, { limit: 50 }), buildDetectedStep2(db(), id, { storage })]);
   const sources = await db().select().from(catalogSourceImages).where(eq(catalogSourceImages.batchId, id));

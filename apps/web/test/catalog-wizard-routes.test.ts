@@ -21,6 +21,7 @@ import { POST as ingest } from "../app/api/catalog/batches/[id]/ingest/route";
 import { GET as detected, PATCH as regroup } from "../app/api/catalog/batches/[id]/detected/route";
 import { GET as preview } from "../app/api/catalog/batches/[id]/preview/route";
 import { POST as start } from "../app/api/catalog/batches/[id]/start/route";
+import { POST as retryLinks } from "../app/api/catalog/batches/[id]/retry-links/route";
 import { setDbForTests, type Db } from "../lib/db";
 import { handOffError } from "../lib/catalog/uploads";
 import { HAND_OFF_FAILED, HAND_OFF_RETRY } from "../lib/catalog/copy";
@@ -389,5 +390,87 @@ describe("inputs corrected without duplicates (spec 14b F3)",()=>{
     expect((await rowsOf(id))[0]!.status).toBe("removed");
     const refused=await ingest(request("POST"),ctx(id));
     expect(refused.status).toBe(400);expect((await refused.json()).error).toBe("Add photos or a links sheet before continuing.");
+  });
+});
+
+describe("POST /retry-links re-fetches only the failed links (spec 14b F5 part 1)",()=>{
+  const H="https://8.8.8.8";
+  const batchOf=async(id:string)=>(await db.select().from(catalogBatches).where(eq(catalogBatches.id,id)))[0]!;
+  /** A fake image host: `answer(url)` is the status; 200 serves a HEIC photo. Records every GET. */
+  function host(answer:(url:string)=>number){
+    const calls:string[]=[];
+    const fetch=vi.fn(async(input:RequestInfo|URL)=>{const url=String(input);calls.push(url);const s=answer(url);return s===200?new Response(new Uint8Array(heicFixture(1200,1600)),{headers:{"content-type":"image/heic"}}):new Response("no",{status:s,headers:{"content-type":"text/plain"}});});
+    return {fetch:fetch as unknown as typeof globalThis.fetch,calls};
+  }
+  /** Runs every `uploaded` upload of the batch once, as the worker does for the hand-off. */
+  async function runUploaded(id:string,fetch:typeof globalThis.fetch){
+    for(const u of (await db.select().from(catalogUploads)).filter((u)=>u.batchId===id && u.status==="uploaded"))await runIngest(db,{storage,fetch,enqueue:enqueueTask},{batchId:id,uploadId:u.id});
+  }
+  async function pastedBatch(text:string,answer:(url:string)=>number){
+    const id=await newBatch();
+    expect((await links(request("POST",{text}),ctx(id))).status).toBe(200);
+    expect((await ingest(request("POST"),ctx(id))).status).toBe(200);
+    await runUploaded(id,host(answer).fetch);
+    return id;
+  }
+  const text=`${H}/AAA_1.heic\t${H}/AAA_2.heic\n${H}/BBB_1.heic\t${H}/BBB_2.heic`;
+
+  it("on a draft re-fetches only the rejects (fake fetch count equals the reject count) and the batch ends ready",async()=>{
+    const id=await pastedBatch(text,(url)=>url.endsWith("AAA_2.heic")?503:url.endsWith("BBB_2.heic")?404:200);
+    expect((await batchOf(id)).status).toBe("draft");
+    expect((await batchOf(id)).counts).toMatchObject({previewReady:true,linkFailures:2,sources:2,unsupportedFiles:0});
+    const step2=await (await detected(request("GET"),ctx(id))).json();
+    expect(step2.linkFailures).toMatchObject({total:2,temporary:1,links:4,products:2});
+    expect(step2.unreadable).toEqual([]);
+    const shown=await (await preview(request("GET"),ctx(id))).json();
+    expect(shown.linkFailureRows).toEqual([
+      {url:`${H}/AAA_2.heic`,where:"row 1, column 2",reason:"could not be reached"},
+      {url:`${H}/BBB_2.heic`,where:"row 2, column 2",reason:"answered 'not found' (404)"},
+    ]);
+    expect(shown.warnings).toContainEqual({headline:"2 links could not be downloaded.",detail:"2 products are missing shots: AAA, BBB. Try the failed links again, fix the sheet, or continue without them."});
+
+    const retried=await retryLinks(request("POST"),ctx(id));
+    expect(retried.status).toBe(200);expect(await retried.json()).toEqual({collecting:true});
+    expect((await batchOf(id)).status).toBe("ingesting");
+    const now=host(()=>200);
+    await runUploaded(id,now.fetch);
+    expect(now.calls.sort()).toEqual([`${H}/AAA_2.heic`,`${H}/BBB_2.heic`]);
+    const after=await batchOf(id);
+    expect(after.status).toBe("draft");
+    expect(after.counts).toMatchObject({previewReady:true,linkFailures:0,sources:4,collected:4,collectTotal:4});
+  });
+
+  it("on a links batch that failed before Start reopens it (reason cleared), re-fetches only the rejects and ends draft ready when the host now answers",async()=>{
+    const id=await pastedBatch(text,()=>503);
+    const failed=await batchOf(id);
+    expect(failed.status).toBe("failed");expect(failed.startedAt).toBeNull();
+    expect(failed.counts.failReason).toBe(`No photos could be downloaded from the 4 links you pasted. 4 could not be reached, for example ${H}/AAA_1.heic (row 1, column 1). Some of these may work on a second try. Press Try the failed links again.`);
+    const retried=await retryLinks(request("POST"),ctx(id));
+    expect(retried.status).toBe(200);
+    const reopened=await batchOf(id);
+    expect(reopened.status).toBe("ingesting");expect(reopened.counts.failReason).toBeNull();expect(reopened.counts.previewReady).toBe(false);
+    const now=host(()=>200);
+    await runUploaded(id,now.fetch);
+    expect(now.calls).toHaveLength(4);
+    const ready=await batchOf(id);
+    expect(ready.status).toBe("draft");expect(ready.counts).toMatchObject({previewReady:true,failReason:null,linkFailures:0,sources:4});
+  });
+
+  it("is refused for a started or collecting batch (409), for a viewer (403), and when no link failed (400)",async()=>{
+    const id=await pastedBatch(text,(url)=>url.endsWith("AAA_2.heic")?503:200);
+    await db.update(catalogBatches).set({status:"failed",startedAt:new Date()}).where(eq(catalogBatches.id,id));
+    const started=await retryLinks(request("POST"),ctx(id));
+    expect(started.status).toBe(409);expect(await started.json()).toEqual({error:"This batch has already started. Make a new batch to add more photos."});
+    for(const status of ["matting","ingesting"] as const){
+      await db.update(catalogBatches).set({status,startedAt:status==="matting"?new Date():null}).where(eq(catalogBatches.id,id));
+      expect((await retryLinks(request("POST"),ctx(id))).status).toBe(409);
+    }
+    expect(enqueueTask).toHaveBeenCalledTimes(1);
+    setUserDeps({roleLookup:async()=>"viewer"});
+    expect((await retryLinks(request("POST"),ctx(id))).status).toBe(403);
+    setUserDeps({roleLookup:async()=>"operator"});
+    const clean=await pastedBatch(`${H}/CCC_1.heic`,()=>200);
+    const none=await retryLinks(request("POST"),ctx(clean));
+    expect(none.status).toBe(400);expect(await none.json()).toEqual({error:"No links failed in this batch. Reload this page."});
   });
 });
