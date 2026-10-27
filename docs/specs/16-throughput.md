@@ -302,12 +302,13 @@ photos per minute, the limiting stage and the re-estimate for 2,000 and 7,000.
 - Order: F1 deploy (behaviour-neutral defaults), the fidelity gate, the database tier, the F2 deploy, the speed
   test.
 - Rollback of the shape: `bash infra/deploy.sh` with no overrides restores today's shape (min-instances 0, 6 + 2
-  slots, one resident model, upscale on the GPU). The `catalog-bulk` queue stays but receives no tasks once
-  `TASKS_BULK_QUEUE` is absent.
+  slots, one resident model, upscale on the GPU). The `catalog-bulk` queue stays but receives no new tasks once
+  `TASKS_BULK_QUEUE` is absent; deploy.sh lowers it to 1 slot before the worker shrinks, so a backlog left in it
+  drains slowly instead of flooding the smaller worker.
 - Rollback of the code: per 00 section 6, `SKIP_BUILD=1 bash infra/deploy.sh` from a checkout of the previous
   commit.
 - Rollback of the tier: `CONFIRM_RESTART=1 SQL_TIER=db-f1-micro bash infra/sql-tier.sh` in a quiet window, only
-  after `DB_MAX_CONNECTIONS` is back at 25 (deploy refuses otherwise).
+  after `DB_MAX_CONNECTIONS` is back at 25 (sql-tier.sh reads the deployed worker's budget and refuses otherwise).
 - CPU-upscaled outputs carry their own render key, so returning the upscaler to the GPU re-renders them once on
   their next run; nothing is overwritten silently.
 
@@ -389,10 +390,21 @@ Decisions of the F3 and F4 builder (2026-10-27, owner not available):
 23. Cloud Run keeps a request pending for up to 3.5 times the container start time or 10 s, whichever is greater,
     before a 429 (Cloud Run autoscaling doc via Context7, 2026-10-27). With a GPU start of about 2 minutes the
     GPU service queues rather than refuses, so the model sees no 429 and no CPU fallback at the F2 shape.
+24. Code review outcomes (concurrency focus). Fixed: a burst of 429s for requests sent together halves the AI
+    check cap once, not once per answer; a request whose signal fired while waiting for a place does not send;
+    cost rows flushed in a claim write that rolls back go back to the ledger (photos share it); Start inserts chunk
+    rows in slices of 1,000 (Postgres's 65,535 bind parameters) and groups photos by product once; the bulk queue's
+    slots never exceed the running worker's (lowered before the worker deploy, raised after, 1 slot with no bulk
+    slots); `sql-tier.sh` refuses a smaller tier while the deployed worker budget is above it. Kept on purpose:
+    the matte PNG and staging JPEG uploads stay inside the claim write (E's guard that a stale delivery never
+    overwrites an object), so with photos at once they take turns; they are short next to the GPU cut-out, and
+    the 200-product test's write time per step shows whether that holds. Accepted: QA photo groups that start
+    together read the judge-switch streak once each, so up to photos-at-once minus 1 groups use the first judge
+    after the switch; the cap is re-checked on every attempt.
 
 ## 14. Done when
 
-- [ ] F1 and F2 built; every acceptance item of sections 3.1 and 3.2 green (vitest, pytest, infra tests).
+- [x] F1 and F2 built; every acceptance item of sections 3.1 and 3.2 green (vitest, pytest, infra tests).
 - [x] F3 and F4 built on E (merged into the F branch); every acceptance item of sections 3.3 and 3.4 green, except
   grouped writes (deferred, decision 15) and the plus or minus 10% time bands (decision 22).
 - [ ] PR F merged after PR E; F1 deployed with the tier 5 smoke green; the fidelity gate on the CPU upscale passes.
