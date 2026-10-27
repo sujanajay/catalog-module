@@ -247,8 +247,8 @@ run are compared in the report.
 
 `CATALOG_CHUNK_WINDOW` (8) and `CATALOG_CHUNK_IMAGES` (10) are E's and unchanged here.
 
-Connection budget at the run values: worker 24 x 2 = 48, web 3 x 2 = 6, jobs 2 x 1 = 2, total 56 of 400 - 3
-reserved - 4 ila = 393. CPU quota in asia-south1: 24 x 4 + 16 x 4 + 3 + 8 = 171 of 200. The GPU service's 8 vCPU
+Connection budget at the run values: worker 24 x 4 = 96 (the pool doubles with photos at once, decision 17), web
+3 x 2 = 6, jobs 2 x 1 = 2, total 104 of 400 - 3 reserved - 4 ila = 393. CPU quota in asia-south1: 24 x 4 + 16 x 4 + 3 + 8 = 171 of 200. The GPU service's 8 vCPU
 count against asia-southeast1.
 
 The F2 deploy command (Git Bash, repo root):
@@ -257,7 +257,7 @@ The F2 deploy command (Git Bash, repo root):
 WORKER_MAX_INSTANCES=24 WORKER_CPU=4 WORKER_MEMORY=4Gi TASKS_MAX_DISPATCHES=8 BULK_MAX_DISPATCHES=36 \
 INGEST_MAX_DISPATCHES=4 DB_MAX_CONNECTIONS=400 MATTING_CPU_MAX_INSTANCES=16 GPU_CPU=8 GPU_MEMORY=32Gi \
 GPU_CONCURRENCY=2 MAX_RESIDENT_SESSIONS=3 GPU_MEM_LIMIT_BYTES=6442450944 UPSCALE_SERVICE=cpu \
-CATALOG_PHOTO_CONCURRENCY=4 CATALOG_BULK_WINDOW=30 bash infra/deploy.sh
+CATALOG_PHOTO_CONCURRENCY=4 CATALOG_BULK_WINDOW=30 LLM_INFLIGHT_PER_INSTANCE=6 bash infra/deploy.sh
 ```
 
 ## 9. Live verification (after deploy, Test Brand only)
@@ -352,11 +352,49 @@ the judge.
 13. The bulk queue is `$QUEUE-bulk` (`catalog-bulk`, or `catalog-preview-bulk` on preview), created in `deploy.sh`
     next to the ingest queue; `bootstrap.sh` is unchanged.
 14. No DB pool code change: the worker pool stays 2 per instance; `WORKER_DB_POOL_MAX` is an env override.
+    Superseded by decision 17 for the F2 shape.
+
+Decisions of the F3 and F4 builder (2026-10-27, owner not available):
+
+15. Grouped writes (one `UPDATE ... FROM (VALUES ...)` per product) are deferred. Instead a delivery's writes take
+    turns (`serialLock` in `chunk.ts`): they lock the same chunk row anyway, so running them at once only took more
+    pool connections. With the turns, one delivery holds at most one connection for writes, whatever
+    `CATALOG_PHOTO_CONCURRENCY` is. The database is not the limiting stage (plan section 1.3), and rewriting the
+    render write path (about 15 typed columns, jsonb and arrays) that E just made safe is a larger risk than its
+    gain. Follow-up if the 200-product test shows write time per delivery above 10%.
+16. Photos run in parallel within one product (render needs the whole product's plan), up to
+    `CATALOG_PHOTO_CONCURRENCY`, for the matte loop, the render prepare and render loops and the QA photo groups.
+    E's budget is asked before each photo starts; started photos finish; one photo's error stops new photos and is
+    rethrown after the started ones finish, so the delivery's retry semantics stay E's.
+17. Worker pool by shape (`infra/lib/shape.sh`): 2 when photos run one at a time (today), else `2 x
+    WORKER_CONCURRENCY` (4 at F2): one connection for a delivery's writes plus one for its reads, lease renewals and
+    the AI checks' cost rows. Budget at F2: 24 x 4 + 6 + 2 = 104 of 393. With today's 25-connection tier the budget
+    check refuses photos at once, so the tier must change first. An explicit `WORKER_DB_POOL_MAX` still wins.
+18. Bulk class: at least `BULK_BATCH_PRODUCTS` products (from `counts.products`, set at Start), or a Test Brand load
+    batch, recognised by its name prefix `catalog-test load ` (`LOAD_BATCH_NAME_PREFIX`, now shared with the load
+    driver). `CATALOG_BULK_WINDOW` unset falls back to the operator window. Finalize stays on `catalog`.
+19. Stage fairness needs no extra rule: the window counts a chunk until all its stages are done, and the window is
+    at most the class's slots (8 of 8, 30 of 36), so a chunk's next stage always finds a slot instead of waiting
+    behind new cut-out work. The scale test checks that render runs alongside matte for the whole bulk run.
+20. The compute line uses `WORKER_CPU / WORKER_CONCURRENCY` (defaults 2 and 2), as the spec says. At today's shape
+    that records half of the old `x 2`; at F2 it is the same factor 2. The wizard estimate constant is unchanged.
+21. AI check pacing wraps each HTTP attempt inside `callLlm` (the first and every back-off retry), so a place is
+    never held during a back-off wait. `LLM_INFLIGHT_PER_INSTANCE` reaches the worker only when set.
+22. F4 is two tests in `apps/worker/src/catalog/scale.test.ts`: a discrete-event model (`scale-model.ts`, simulated
+    time, about 2 s for 7,000 products) for the times and the fairness rule, and the real handlers on PGlite with two
+    FIFO queues for "every photo once, no lost claim, window held, operator first" (12 products in `pnpm test`;
+    `SCALE_PRODUCTS=2000` for the full size). The model's drain times sit at the fast end of section 1's ranges (it
+    has no finalize step and a fixed warm-up), so the test bands are the spec's ranges widened by 10% at the
+    bottom, not plus or minus 10% of the typical value; the 200-product live test is the real measurement.
+23. Cloud Run keeps a request pending for up to 3.5 times the container start time or 10 s, whichever is greater,
+    before a 429 (Cloud Run autoscaling doc via Context7, 2026-10-27). With a GPU start of about 2 minutes the
+    GPU service queues rather than refuses, so the model sees no 429 and no CPU fallback at the F2 shape.
 
 ## 14. Done when
 
 - [ ] F1 and F2 built; every acceptance item of sections 3.1 and 3.2 green (vitest, pytest, infra tests).
-- [ ] F3 and F4 built after E merges; every acceptance item of sections 3.3 and 3.4 green.
+- [x] F3 and F4 built on E (merged into the F branch); every acceptance item of sections 3.3 and 3.4 green, except
+  grouped writes (deferred, decision 15) and the plus or minus 10% time bands (decision 22).
 - [ ] PR F merged after PR E; F1 deployed with the tier 5 smoke green; the fidelity gate on the CPU upscale passes.
 - [ ] Database tier changed in a quiet window; F2 deployed; re-runs show SKIP or the same values.
 - [ ] The 200-product speed test passes section 9 step 4; cleanup confirmed; report written.

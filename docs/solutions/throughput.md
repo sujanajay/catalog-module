@@ -28,6 +28,14 @@ calls in flight). Everything else (worker CPU, database, publish, GCS) has more 
   200, 7.5 to <15 GB 400. deploy.sh reads the live tier (or a `max_connections` flag) and refuses a
   `DB_MAX_CONNECTIONS` above it.
 
+- Photos at once and stage fairness (F3): `chunk.ts` works on `CATALOG_PHOTO_CONCURRENCY` photos of a product at
+  once (`eachLimit` in `packages/core/src/concurrency.ts`); a bulk batch (`isBulkBatch` in `dispatch.ts`: 100+
+  products or a Test Brand load batch) sends chunk and publish tasks to `catalog-bulk` and gets
+  `CATALOG_BULK_WINDOW`; the AI checks are paced by `LLM_INFLIGHT_PER_INSTANCE` (`llm/limiter.ts`, halve on 429).
+- The local scale test (F4): `apps/worker/src/catalog/scale.test.ts`. The model (`scale-model.ts`) gives 200
+  products about 10 min, 2,000 about 54 min and 7,000 about 2 h 59 min at the F2 shape, limited by the GPU at about
+  210 to 220 photos a minute. Run the real-handler part at full size with `SCALE_PRODUCTS=2000`.
+
 ## Gotchas
 
 - In the GPU service, a request that already holds a session evicted by another request finishes with it, so for a
@@ -36,7 +44,14 @@ calls in flight). Everything else (worker CPU, database, publish, GCS) has more 
 - Only 429 is "busy". A 503 from the matting service is a real fault and still counts at once.
 - Cloud Run L4: at least 4 CPU and 16 GiB, 8 CPU and 32 GiB recommended; RTX PRO 6000 needs at least 20 CPU and
   80 GiB (Cloud Run GPU docs, read 2026-10-27).
-- The cost ledger's `upscale_call` rows are priced at the GPU rate in `chunk.ts` until spec 16 F3 prices them by the
-  upscaler id (`isCpuUpscalerId`).
+- The cost ledger's `upscale_call` rows are priced by the upscaler id (`isCpuUpscalerId`): CPU rate and engine `cpu`
+  for `<model>+cpu`, else the GPU rate.
+- Photos at once (`CATALOG_PHOTO_CONCURRENCY`) need the bigger tier first: the worker pool doubles (shape.sh), and
+  the budget check refuses it on db-f1-micro.
+- A delivery's DB writes take turns (`serialLock` in `chunk.ts`); never call `underClaim` from inside another
+  `underClaim` write, it would wait for itself. Never use `deps.db` inside an `underClaim` callback either: with a
+  full pool that is a deadlock (PGlite in the scale test hangs on it, which is how you would notice).
+- Cloud Run queues a request for up to 3.5 x the start time (or 10 s) before a 429 when every instance is busy, so
+  with a GPU start of about 2 minutes a busy GPU service makes callers wait rather than fall back to the CPU.
 - The PowerShell `bash` on this machine is WSL without a distribution; run the infra tests with `node`, which finds
   Git Bash through `packages/core/src/git-bash.ts`.
