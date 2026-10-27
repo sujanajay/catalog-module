@@ -302,12 +302,12 @@ export async function handleChunkTask(rawDeps: CatalogDeps, body: Record<string,
           for (const channel of batch.channels) {
             const keys = renderKeys({sourceSha256:source.sha256,channel,n:source.n,policyKey:`default|${productPolicy.matteModel}`}), key = keys[0]!;
             if (live.some(o=>o.channel===channel && o.n===source.n && keys.includes(o.renderKey))) continue;
-            const [exists] = await deps.db.select({id:catalogOutputs.id}).from(catalogOutputs).where(and(eq(catalogOutputs.batchId,batch.id),eq(catalogOutputs.sourceImageId,source.id),eq(catalogOutputs.channel,channel)));
+            const [exists] = await deps.db.select({id:catalogOutputs.id}).from(catalogOutputs).where(and(eq(catalogOutputs.batchId,batch.id),eq(catalogOutputs.productId,productId),eq(catalogOutputs.sourceImageId,source.id),eq(catalogOutputs.channel,channel)));
             if (exists) continue;
             const path = publicObjectPath(batch.brandSlug,product.pathKey,channel,source.n,batch.isTest), chart = source.flags.includes("chart_image");
             await underClaim(async tx=>tx.insert(catalogOutputs).values({batchId:batch.id,productId,sourceImageId:source.id,channel,n:source.n,canvasW:0,canvasH:0,scale:0,placedX:0,placedY:0,renderKey:key,objectPath:path,publicUrl:publicUrl(deps.storage.getPublicBucketName(),path),status:chart ? "skipped":"pending",flags:chart ? ["chart_image"]:source.flags.filter(flag=>flag==="type_unknown" || flag==="transparent"),reason:chart ? flagReason("chart_image"):null}));
           }
-          const pending = await deps.db.select().from(catalogOutputs).where(and(eq(catalogOutputs.sourceImageId,source.id),eq(catalogOutputs.batchId,batch.id),eq(catalogOutputs.status,"pending")));
+          const pending = await deps.db.select().from(catalogOutputs).where(and(eq(catalogOutputs.productId,productId),eq(catalogOutputs.sourceImageId,source.id),eq(catalogOutputs.batchId,batch.id),eq(catalogOutputs.status,"pending")));
           if (!pending.length || source.matteUri) return;
           // Spec 15 E1: a matted photo is saved (matteUri), so the continuation starts at this photo.
           if (!startPhoto()) return;
@@ -325,7 +325,7 @@ export async function handleChunkTask(rawDeps: CatalogDeps, body: Record<string,
               deps.log("catalog chart left out",{batchId:batch.id,sourceImageId:source.id,glyphs:text.glyphs,lines:text.lines});
               await underClaim(async tx=>{
                 await tx.update(catalogSourceImages).set({width:p.width,height:p.height,status:"prepared",flags:[...new Set([...source.flags,"chart_image" as const])]}).where(eq(catalogSourceImages.id,source.id));
-                await tx.update(catalogOutputs).set({status:"skipped",flags:["chart_image"],reason:flagReason("chart_image"),updatedAt:deps.now()}).where(and(eq(catalogOutputs.sourceImageId,source.id),eq(catalogOutputs.batchId,batch.id),eq(catalogOutputs.status,"pending")));
+                await tx.update(catalogOutputs).set({status:"skipped",flags:["chart_image"],reason:flagReason("chart_image"),updatedAt:deps.now()}).where(and(eq(catalogOutputs.productId,productId),eq(catalogOutputs.sourceImageId,source.id),eq(catalogOutputs.batchId,batch.id),eq(catalogOutputs.status,"pending")));
                 await photoDone(tx);
               });
               return;
@@ -376,7 +376,7 @@ export async function handleChunkTask(rawDeps: CatalogDeps, body: Record<string,
             if (!(failure instanceof UnsupportedSourceError)) throw failure;
             const error = "The file is corrupt and could not be decoded.";
             await underClaim(async tx=>tx.update(catalogSourceImages).set({status:"failed",error}).where(eq(catalogSourceImages.id,source.id)));
-            await underClaim(async tx=>{await tx.update(catalogOutputs).set({status:"failed",reason:error,error,updatedAt:deps.now()}).where(and(eq(catalogOutputs.sourceImageId,source.id),eq(catalogOutputs.batchId,batch.id),eq(catalogOutputs.status,"pending")));await photoDone(tx);});
+            await underClaim(async tx=>{await tx.update(catalogOutputs).set({status:"failed",reason:error,error,updatedAt:deps.now()}).where(and(eq(catalogOutputs.productId,productId),eq(catalogOutputs.sourceImageId,source.id),eq(catalogOutputs.batchId,batch.id),eq(catalogOutputs.status,"pending")));await photoDone(tx);});
           }
         });
         if (outOfTime) { stopAt = index; break products; }
@@ -385,7 +385,7 @@ export async function handleChunkTask(rawDeps: CatalogDeps, body: Record<string,
         const ready: ({ source: typeof sources[number]; p: Awaited<ReturnType<CatalogDeps["prepare"]>>; matte: Matte } | undefined)[] = new Array(sources.length);
         const productOutputs = await deps.db.select().from(catalogOutputs).where(and(eq(catalogOutputs.batchId,batch.id),eq(catalogOutputs.productId,productId),eq(catalogOutputs.status,"pending")));
         await eachPhoto(sources.map((source,at)=>({source,at})),async ({source,at})=>{
-          const pending = await deps.db.select().from(catalogOutputs).where(and(eq(catalogOutputs.sourceImageId,source.id),eq(catalogOutputs.batchId,batch.id),eq(catalogOutputs.status,"pending")));
+          const pending = await deps.db.select().from(catalogOutputs).where(and(eq(catalogOutputs.productId,productId),eq(catalogOutputs.sourceImageId,source.id),eq(catalogOutputs.batchId,batch.id),eq(catalogOutputs.status,"pending")));
           let matteUri = source.matteUri;
           // Unchanged angles still take part in the product-wide plan (one canvas per channel, Styli's uniform scale).
           if (!pending.length && productOutputs.length) {
@@ -400,7 +400,7 @@ export async function handleChunkTask(rawDeps: CatalogDeps, body: Record<string,
             const alpha = await sharp((await deps.storage.downloadBuffer(matteUri)).buf).toColourspace("b-w").raw().toBuffer();
             ready[at] = {source,p,matte:{alpha,width:p.width,height:p.height,model:source.matteModel ?? productPolicy.matteModel,ms:source.matteMs ?? 0,source:source.flags.includes("alpha_source") ? "alpha_source":"model",target:null,sentLongSide:null}};
           } catch(error) {
-            await underClaim(async tx=>tx.update(catalogOutputs).set({status:"failed",reason:error instanceof Error ? error.message : String(error),updatedAt:deps.now()}).where(and(eq(catalogOutputs.sourceImageId,source.id),eq(catalogOutputs.batchId,batch.id),eq(catalogOutputs.status,"pending"))));
+            await underClaim(async tx=>tx.update(catalogOutputs).set({status:"failed",reason:error instanceof Error ? error.message : String(error),updatedAt:deps.now()}).where(and(eq(catalogOutputs.productId,productId),eq(catalogOutputs.sourceImageId,source.id),eq(catalogOutputs.batchId,batch.id),eq(catalogOutputs.status,"pending"))));
           }
         });
         if (outOfTime) { stopAt = index; break products; }
@@ -409,7 +409,7 @@ export async function handleChunkTask(rawDeps: CatalogDeps, body: Record<string,
         const productPlan = (c:keyof typeof CHANNELS) => geometry.length ? planProduct(CHANNELS[c],geometry):undefined;
         const uniformScale = productPlan("styli")?.uniformScale;
         await eachPhoto(prepared,async ({source,p,matte})=>{
-          const outputs = await deps.db.select().from(catalogOutputs).where(and(eq(catalogOutputs.sourceImageId,source.id),eq(catalogOutputs.batchId,batch.id),eq(catalogOutputs.status,"pending")));
+          const outputs = await deps.db.select().from(catalogOutputs).where(and(eq(catalogOutputs.productId,productId),eq(catalogOutputs.sourceImageId,source.id),eq(catalogOutputs.batchId,batch.id),eq(catalogOutputs.status,"pending")));
           // 05 rule 3 plus: a product held in a hand does not rest on a floor, so it gets no contact shadow.
           if (outputs.length && !startPhoto()) return;
           const shadowAllowed = shadowSynthesisAllowed(product.productType,source.flags) && !heldInHand(p,matte.alpha).held;
@@ -442,7 +442,7 @@ export async function handleChunkTask(rawDeps: CatalogDeps, body: Record<string,
           } catch(error) { const reason = error instanceof Error ? error.message:String(error); await underClaim(async tx=>{await tx.update(catalogOutputs).set({status:"failed",error:reason,reason,updatedAt:deps.now()}).where(eq(catalogOutputs.id,output.id));await flush(tx);}); }
           // 07 4.6a: a channel rule we broke (the Styli guide, margins, the band colour, the file size) is re-made
           // before anything is held, with the fix the measured failure asks for, on the failing channel only.
-          const photo = await deps.db.select().from(catalogOutputs).where(and(eq(catalogOutputs.sourceImageId,source.id),eq(catalogOutputs.batchId,batch.id),isNull(catalogOutputs.decision),inArray(catalogOutputs.status,["staged","needs_attention"])));
+          const photo = await deps.db.select().from(catalogOutputs).where(and(eq(catalogOutputs.productId,productId),eq(catalogOutputs.sourceImageId,source.id),eq(catalogOutputs.batchId,batch.id),isNull(catalogOutputs.decision),inArray(catalogOutputs.status,["staged","needs_attention"])));
           // Once per photo: a redelivered chunk does not repair again.
           const failing = photo.filter(row=>row.flags.includes("failed_compliance") && !autoActionsOf(row.compliance).some(action=>action.trigger.includes("failed_compliance")));
           if (failing.length) try {

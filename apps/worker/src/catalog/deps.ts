@@ -89,9 +89,12 @@ export async function refreshBatchProgress(db:Db,batchId:string,now:Date=new Dat
   const [held]=await db.select({n:count()}).from(catalogBatchProducts).where(and(eq(catalogBatchProducts.batchId,batchId),eq(catalogBatchProducts.change,"pending_attention")));
   // Spec 15 E7: photos prepared (cut out, failed, or left out as a size chart) and the last finished photo. A photo
   // the cut-out step skips (an unchanged shot of a re-upload has no pending output) counts once its chunk has left
-  // the cut-out step, so the count reaches the total.
+  // the cut-out step, so the count reaches the total. The products of chunks past that step are listed once (a
+  // materialized list, so the planner hashes it even without table statistics) and joined to their photos. A
+  // per-photo search over every chunk grew with photos x chunks and, run after every delivery, slowed a 2,000-product
+  // batch to a crawl (spec 16 F4 scale test).
   const [prepared]=await db.select({n:count()}).from(catalogSourceImages).where(and(eq(catalogSourceImages.batchId,batchId),or(isNotNull(catalogSourceImages.matteUri),eq(catalogSourceImages.status,"failed"),sql`${catalogSourceImages.flags} @> '["chart_image"]'::jsonb`,
-    sql`EXISTS (SELECT 1 FROM ${catalogChunks} c WHERE c.batch_id = ${catalogSourceImages.batchId} AND c.product_ids @> jsonb_build_array(${catalogSourceImages.productId}) AND (c.source_image_ids IS NULL OR jsonb_array_length(c.source_image_ids) = 0 OR c.source_image_ids @> jsonb_build_array(${catalogSourceImages.id})) AND (c.stage <> 'matte' OR c.status IN ('done','failed')))`)));
+    sql`${catalogSourceImages.id} IN (WITH moved AS MATERIALIZED (SELECT p.product_id::uuid AS product_id, c.source_image_ids FROM ${catalogChunks} c CROSS JOIN LATERAL jsonb_array_elements_text(c.product_ids) AS p(product_id) WHERE c.batch_id = ${batchId} AND (c.stage <> 'matte' OR c.status IN ('done','failed'))) SELECT si.id FROM moved JOIN ${catalogSourceImages} si ON si.product_id = moved.product_id WHERE si.batch_id = ${batchId} AND (moved.source_image_ids IS NULL OR jsonb_array_length(moved.source_image_ids) = 0 OR moved.source_image_ids @> jsonb_build_array(si.id)))`)));
   const [last]=await db.select({at:max(catalogChunks.progressAt)}).from(catalogChunks).where(eq(catalogChunks.batchId,batchId));
   const total=(status:string)=>groups.find(g=>g.status===status)?.n ?? 0;
   const patch={verified:total("verified"),needsAttention:total("needs_attention"),failed:total("failed"),skipped:total("skipped"),staged:total("staged"),attentionProducts:held?.n ?? 0,prepared:prepared?.n ?? 0,progressAt:last?.at ? new Date(last.at).toISOString():null};

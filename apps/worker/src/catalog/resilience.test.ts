@@ -414,6 +414,29 @@ describe("E7: the operator sees true processing progress", () => {
     expect(await prepared()).toBe(3);
   }, 60_000);
 
+  it("counts prepared photos of a 2,000-product batch quickly (the count runs after every delivery)", async () => {
+    // Spec 16 F4: a per-photo search over every chunk grew with photos x chunks; at 2,000 products it took about
+    // 10 s per delivery on PGlite and stalled the scale test. Listing the moved-on chunks' photos once stays flat.
+    const [batch] = await db.insert(catalogBatches).values({ brandSlug: "test_brand", brandName: "Test Brand", name: "e7-big", isTest: true, createdBy: "t@opptra.com", status: "matting", productType: "footwear", channels: ["noon"], startedAt: new Date(), counts: { ...EMPTY_BATCH_COUNTS } }).returning();
+    const products = await db.insert(catalogProducts).values(Array.from({ length: 2000 }, (_, i) => ({ brandSlug: "test_brand", isTest: true, productKey: `e7-big-${i}`, pathKey: `e7-big-${i}`, identifier: `e7-big-${i}`, productType: "footwear" as const, lockBatchId: batch!.id }))).returning({ id: catalogProducts.id });
+    for (let i = 0; i < products.length; i += 500) {
+      await db.insert(catalogSourceImages).values(products.slice(i, i + 500).flatMap((p) => [1, 2, 3, 4, 5].map((n) => ({ batchId: batch!.id, productId: p.id, n, sha256: `${p.id}-${n}`, originalName: `${n}.jpg`, rawUri: `gs://assets/catalog-test/${p.id}/${n}.jpg`, mime: "image/jpeg", width: 800, height: 800 }))));
+    }
+    // 1,000 chunks of two products; the first 400 left the cut-out step with no matte written, and one of them
+    // names only its first photo (as a targeted re-run does).
+    const chunks = Array.from({ length: 1000 }, (_, index) => ({ batchId: batch!.id, index, stage: (index < 400 ? "render" : "matte") as "render" | "matte", status: "queued" as const, attempt: 0, productIds: [products[index * 2]!.id, products[index * 2 + 1]!.id] }));
+    for (let i = 0; i < chunks.length; i += 500) await db.insert(catalogChunks).values(chunks.slice(i, i + 500));
+    const [first] = await db.select({ id: catalogSourceImages.id }).from(catalogSourceImages).where(and(eq(catalogSourceImages.productId, products[0]!.id), eq(catalogSourceImages.n, 1)));
+    await db.update(catalogChunks).set({ sourceImageIds: [first!.id] }).where(and(eq(catalogChunks.batchId, batch!.id), eq(catalogChunks.index, 0)));
+    const started = Date.now();
+    await refreshBatchProgress(db, batch!.id);
+    const ms = Date.now() - started;
+    expect((await batchRow(batch!.id)).counts.prepared).toBe(399 * 10 + 1);
+    expect(ms).toBeLessThan(2000);
+    // The sweep tests below scan every processing batch; this one is not meant to run.
+    await db.update(catalogBatches).set({ status: "done" }).where(eq(catalogBatches.id, batch!.id));
+  }, 120_000);
+
   it("logs one chunk delivery line per delivery with the step times, and a render hand-off moves the measured rate", async () => {
     const w = world(), s = await seed(w, "e7-line", [[4]]), id = s.chunks[0]!.id;
     w.queue.push({ taskId: "start", body: await currentChunkTask(db, id), retryCount: 0 });
