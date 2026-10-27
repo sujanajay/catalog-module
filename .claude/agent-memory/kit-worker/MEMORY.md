@@ -1,0 +1,1 @@
+- [Build and test quirks](build-test-quirks.md) - WSL bash trap, local matting pytest venv, slow vitest, gcloud.cmd path
