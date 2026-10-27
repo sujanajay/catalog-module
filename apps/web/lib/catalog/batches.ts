@@ -53,13 +53,14 @@ export { mergeCounts };
 /**
  * The reopen of F8 (spec 14c section 3.4; POST /reopen, "Fix and continue", and POST /retry-links of
  * spec 14b F5 part 1): a batch that failed before Start (`failed`, `startedAt` null) returns to `draft`
- * with `failReason` cleared and `previewReady` false (a merge, so a worker counts key is kept). Uploads
- * are untouched, so their manifests and staged bytes are reused. A draft is returned as it is; any other
- * batch is refused with its status sentence.
+ * with `failReason` cleared and `previewReady` false (a merge, so a worker counts key is kept). The old
+ * reason moves to `fixReason`, which step 1 shows until the next hand-off. Uploads are untouched, so their
+ * manifests and staged bytes are reused. A draft is returned as it is; any other batch is refused with
+ * its status sentence.
  */
 export async function reopenBatch(id: string): Promise<CatalogBatch> {
   const [reopened] = await db().update(catalogBatches)
-    .set({ status: "draft", counts: mergeCounts({ failReason: null, previewReady: false }), updatedAt: new Date() })
+    .set({ status: "draft", counts: sql`${mergeCounts({ failReason: null, previewReady: false })} || jsonb_build_object('fixReason', ${catalogBatches.counts}->'failReason')`, updatedAt: new Date() })
     .where(and(eq(catalogBatches.id, id), eq(catalogBatches.status, "failed"), isNull(catalogBatches.startedAt)))
     .returning();
   if (reopened) return reopened;
@@ -104,7 +105,11 @@ const notCleanedUp = sql`not coalesce((${catalogBatches.options}->>'cleanedUp'):
 async function uploadsOf(ids: string[]): Promise<Map<string, { status: string; kind: string }[]>> {
   const rows = ids.length ? await db().select({ batchId: catalogUploads.batchId, status: catalogUploads.status, kind: catalogUploads.kind }).from(catalogUploads).where(inArray(catalogUploads.batchId, ids)) : [];
   const byBatch = new Map<string, { status: string; kind: string }[]>();
-  for (const row of rows) byBatch.set(row.batchId, [...(byBatch.get(row.batchId) ?? []), row]);
+  for (const row of rows) {
+    const list = byBatch.get(row.batchId);
+    if (list) list.push(row);
+    else byBatch.set(row.batchId, [row]);
+  }
   return byBatch;
 }
 /** A batch's source for the phase words, from its inputs that were not removed. */
@@ -119,7 +124,7 @@ export async function listBatches(options: { cancelled?: boolean } = {}) {
   const uploads = await uploadsOf(rows.filter(({ batch }) => batch.status === "ingesting").map(({ batch }) => batch.id));
   return rows.map(({ batch, brandLine }) => ({ ...publicBatch(batch), brandLine, state: batchState(batch, uploads.has(batch.id) ? sourceOf(uploads.get(batch.id)) : undefined) }));
 }
-export type UnfinishedBatch = { id: string; name: string; brandName: string; createdBy: string; age: string; words: string; fixable: boolean; collecting: boolean };
+export type UnfinishedBatch = { id: string; name: string; brandName: string; createdBy: string; age: string; words: string; fixable: boolean };
 /**
  * "Your unfinished batches" (spec 14c F4 part 2): drafts, collecting batches and batches that failed
  * before Start, newest first, with their state words and age. An operator sees their own; an admin and a
@@ -132,7 +137,7 @@ export async function unfinishedBatches(user: CurrentUser, now = new Date()): Pr
   const uploads = await uploadsOf(rows.map((b) => b.id));
   return rows.map((batch) => {
     const state = batchState(batch, sourceOf(uploads.get(batch.id)), now, uploads.get(batch.id) ?? []);
-    return { id: batch.id, name: batch.name, brandName: batch.brandName, createdBy: batch.createdBy, age: ageText(batch.createdAt, now), words: state.intake, fixable: !!state.fixable, collecting: state.state === "collecting" };
+    return { id: batch.id, name: batch.name, brandName: batch.brandName, createdBy: batch.createdBy, age: ageText(batch.createdAt, now), words: state.intake, fixable: !!state.fixable };
   });
 }
 export async function getBatch(id: string) {

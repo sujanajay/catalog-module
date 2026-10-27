@@ -162,6 +162,22 @@ describe("web counts writes and the instant step 2 Continue (spec 14c F6 and F7 
     expect(await statusOf(file.id)).toBe("collected");
     expect((await batchRow(id)).status).toBe("ingesting");
   });
+  it("a changed sheet column collects the sheet again; the same columns keep it collected", async () => {
+    const id = await newBatch();
+    const detected = { kind: "sheet", columns: ["SKU", "Image 1", "Image 2"], columnsChosen: true, identifierColumn: 0, urlColumns: [1] };
+    const [sheet] = await db.insert(catalogUploads).values({ batchId: id, kind: "sheet", name: "links.csv", status: "collected", detected }).returning();
+    const { options, counts } = await batchRow(id);
+    await setStatus(id, { counts: { ...counts, previewReady: true, phase: "ready" } });
+    const send = (urlColumns: number[]) => patchDetected(request("PATCH", { identifierMode: options.identifierMode, precedence: options.precedence, sheets: [{ uploadId: sheet!.id, identifierColumn: 0, imageColumns: urlColumns, kind: "sheet" }] }), ctx(id));
+    // The same columns with a changed option set (sheetColumns now recorded): regrouped, sheet stays collected.
+    expect(await (await send([1])).json()).toEqual({ collecting: true });
+    expect(await statusOf(sheet!.id)).toBe("collected");
+    await setStatus(id, { status: "draft", counts: { ...(await batchRow(id)).counts, previewReady: true } });
+    vi.mocked(enqueueTask).mockClear();
+    expect(await (await send([1, 2])).json()).toEqual({ collecting: true });
+    expect(await statusOf(sheet!.id)).toBe("uploaded");
+    expect(enqueueTask).toHaveBeenCalledWith("/tasks/catalog/ingest", expect.objectContaining({ batchId: id, uploadId: sheet!.id }), expect.anything());
+  });
   it("regroupBatch merges: phase and the other worker keys stay, previewReady and the placing lease are cleared", async () => {
     const id = await newBatch(); await addRow(id, "image");
     await setStatus(id, { counts: { ...(await batchRow(id)).counts, previewReady: true, phase: "ready", placed: 27, placeTotal: 27, placingClaim: claim, collected: 27, collectTotal: 27 } });
@@ -205,10 +221,14 @@ describe("reopen and the assertDraft sentences (spec 14c F8)", () => {
     const response = await reopen(request("POST"), ctx(id));
     expect(response.status).toBe(200); expect(await response.json()).toEqual({ id, status: "draft", failReason: REASON });
     const row = await batchRow(id);
-    expect(row.status).toBe("draft"); expect(row.counts).toMatchObject({ failReason: null, previewReady: false, linkFailures: 2 });
+    // The old reason is kept as fixReason, so step 1 shows it after a reload too.
+    expect(row.status).toBe("draft"); expect(row.counts).toMatchObject({ failReason: null, fixReason: REASON, previewReady: false, linkFailures: 2 });
     expect(await statusOf(paste.id)).toBe("failed"); expect(await statusOf(file.id)).toBe("uploaded");
-    // A draft answers as it is.
-    expect(await (await reopen(request("POST"), ctx(id))).json()).toEqual({ id, status: "draft", failReason: null });
+    // A draft answers as it is (a second press of Fix and continue).
+    expect(await (await reopen(request("POST"), ctx(id))).json()).toEqual({ id, status: "draft", failReason: REASON });
+    // The next hand-off to collecting clears it.
+    expect((await ingest(request("POST"), ctx(id))).status).toBe(200);
+    expect((await batchRow(id)).counts.fixReason).toBeNull();
   });
   it("refuses to reopen a batch that failed after Start, and a viewer", async () => {
     const id = await newBatch();

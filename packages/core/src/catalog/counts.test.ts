@@ -4,7 +4,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import type { Db } from "../db/client";
 import { catalogBatches, EMPTY_BATCH_COUNTS } from "../db/schema";
 import { createTestDb } from "../db/testing";
-import { mergeCounts, PLACING_LEASE_MS, placingClaim, placingLeaseFree, placingLeaseHeld, placingLeaseHeldBy, placingLeaseLive, placingToken, progressCounts, RATE_SAMPLES } from "./counts";
+import { mergeCounts, PLACING_LEASE_MS, placingClaim, placingLeaseFree, placingLeaseHeld, placingLeaseResumable, placingToken, progressCounts, RATE_SAMPLES } from "./counts";
 import type { BatchCounts } from "./types";
 
 let db: Db;
@@ -81,19 +81,26 @@ describe("placing lease", () => {
     await write(mergeCounts({ placingClaim: null }));
     expect(await claimIfFree(a, lapsed)).toBe(1);
   });
-  it("guards a final write by token, and the pure checks agree", async () => {
+  it("guards a final write by token and attempt", async () => {
     const a = placingToken("run1", "u1");
-    await write(mergeCounts({ placingClaim: placingClaim(a, t0) }));
-    const finish = async (token: string) => (await db.update(catalogBatches).set({ status: "draft" }).where(and(eq(catalogBatches.id, id), eq(catalogBatches.status, "ingesting"), placingLeaseHeld(token))).returning({ id: catalogBatches.id })).length;
-    expect(await finish("other:u9")).toBe(0);
-    expect(await finish(a)).toBe(1);
+    await write(mergeCounts({ placingClaim: placingClaim(a, t0, "att-1") }));
+    const finish = async (token: string, attempt: string) => (await db.update(catalogBatches).set({ status: "draft" }).where(and(eq(catalogBatches.id, id), eq(catalogBatches.status, "ingesting"), placingLeaseHeld(token, attempt))).returning({ id: catalogBatches.id })).length;
+    expect(await finish("other:u9", "att-1")).toBe(0);
+    expect(await finish(a, "att-2")).toBe(0);
+    expect(await finish(a, "att-1")).toBe(1);
     const claim = placingClaim(a, t0);
     expect(new Date(claim.until).getTime() - t0.getTime()).toBe(PLACING_LEASE_MS);
     expect(PLACING_LEASE_MS).toBeGreaterThan(900_000);
-    expect(placingLeaseLive(claim, at(60))).toBe(true);
-    expect(placingLeaseLive(claim, new Date(+t0 + PLACING_LEASE_MS + 1))).toBe(false);
-    expect(placingLeaseLive(null, t0)).toBe(false);
-    expect(placingLeaseHeldBy(claim, a, at(60))).toBe(true);
-    expect(placingLeaseHeldBy(claim, "other:u9", at(60))).toBe(false);
+  });
+  it("lets the same token resume only a live claim no run works under", async () => {
+    const a = placingToken("run1", "u1");
+    const resume = async (token: string, now: Date) => (await db.update(catalogBatches).set({ counts: mergeCounts({ placingClaim: placingClaim(token, now, "att-2") }) }).where(and(eq(catalogBatches.id, id), eq(catalogBatches.status, "ingesting"), placingLeaseResumable(token, now))).returning({ id: catalogBatches.id })).length;
+    await write(mergeCounts({ placingClaim: placingClaim(a, t0, "att-1") }));
+    expect(await resume(a, at(60))).toBe(0); // a run works under it (a duplicate delivery)
+    await write(mergeCounts({ placingClaim: placingClaim(a, t0, null) }));
+    expect(await resume("other:u9", at(60))).toBe(0);
+    expect(await resume(a, new Date(+t0 + PLACING_LEASE_MS + 1000))).toBe(0); // lapsed: free for anyone instead
+    expect(await resume(a, at(60))).toBe(1);
+    expect((await counts()).placingClaim).toMatchObject({ token: a, attempt: "att-2" });
   });
 });

@@ -1,7 +1,7 @@
 // Tier 2 (PGlite + fake storage, fake fetch, fake enqueue): the ingest run (spec 04, "Ingest run").
 import { readFileSync } from "node:fs";
 import { Readable } from "node:stream";
-import { and, eq } from "drizzle-orm";
+import { and, eq, inArray, sql } from "drizzle-orm";
 import sharp from "sharp";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import type { Db } from "../../db/client";
@@ -729,6 +729,28 @@ describe("phase, rate and the placing lease (spec 14c F6)", () => {
     expect(await sourcesOf(batch.id)).toHaveLength(2);
   });
 
+  it("a duplicate delivery of the claiming task while its first copy still places does nothing", async () => {
+    const w = fakeWorld();
+    const batch = await newBatch("lease duplicate");
+    const uploadId = await folderUpload(w, batch, { "LD1_1.jpg": await jpeg(), "LD2_1.jpg": await jpeg() });
+    const body: Body = { batchId: batch.id, uploadId, run: "run-1" };
+    let duplicate: string | null = null;
+    const storage: IngestDeps["storage"] = {
+      ...w.storage,
+      downloadBuffer: async (gsUri) => {
+        if (duplicate === null && gsUri.includes("/uploads/") && (await batchRow(batch.id)).counts.phase === "placing") {
+          // Cloud Tasks delivers the same task again (same body, same token) while this run places.
+          duplicate = (await runIngest(db, deps(w), body)).outcome;
+        }
+        return w.storage.downloadBuffer(gsUri);
+      },
+    };
+    expect((await runIngest(db, { ...deps(w), storage }, body)).outcome).toBe("preview ready: 2 products, 2 photos");
+    expect(duplicate).toBe("noop: upload already collected");
+    expect((await batchRow(batch.id)).counts).toMatchObject({ phase: "ready", placingClaim: null, previewReady: true });
+    expect(await sourcesOf(batch.id)).toHaveLength(2);
+  });
+
   it("a lapsed lease can be claimed by another delivery", async () => {
     const w = fakeWorld();
     const c = clock();
@@ -780,6 +802,18 @@ describe("placing never re-copies (spec 14c F7 part 1)", () => {
     expect(w.calls.uploads.filter((u) => u.includes("/raw/")).length).toBe(copies);
     expect((await batchRow(batch.id)).counts).toMatchObject({ previewReady: true, sources: 3, phase: "ready" });
     expect(await sourcesOf(batch.id)).toHaveLength(3);
+
+    // A raw object whose bytes differ (another sha256), or that carries no sha256 (written before
+    // release C), is copied again and gets the item's sha256.
+    const changed = `gs://${BUCKET}/${rawPath(prefixOf(batch), "NR1", 1, "jpg")}`;
+    const unmarked = `gs://${BUCKET}/${rawPath(prefixOf(batch), "NR2", 1, "jpg")}`;
+    w.objects.set(changed, { ...w.objects.get(changed)!, sha256: "0".repeat(64) });
+    w.objects.set(unmarked, { ...w.objects.get(unmarked)!, sha256: undefined });
+    await db.update(catalogUploads).set({ status: "uploaded" }).where(eq(catalogUploads.batchId, batch.id));
+    await ingestAll(w, batch);
+    expect(w.calls.uploads.filter((u) => u.includes("/raw/")).length).toBe(copies + 2);
+    expect(w.objects.get(changed)!.sha256).toBe(raw.sha256);
+    expect(w.objects.get(unmarked)!.sha256).toMatch(/^[0-9a-f]{64}$/);
   });
 });
 
@@ -949,7 +983,58 @@ describe("placing in resumable chunks (spec 14d F7 part 2)", () => {
     // Try again on a stalled batch: the web clears the lease and a new run takes it and regroups.
     await db.update(catalogBatches).set({ counts: mergeCounts({ placingClaim: null }) }).where(eq(catalogBatches.id, batch.id));
     await runIngest(db, d, { batchId: batch.id, uploadId, run: "new" });
-    expect((await runIngest(db, d, stale)).outcome).toBe("stopped: another delivery holds the placing lease");
+    expect((await runIngest(db, d, stale)).outcome).toBe("noop: another delivery holds the placing lease");
+    expect(await sourcesOf(batch.id)).toEqual([]);
+  });
+
+  it("a redelivered grouping task after the first hand-off queues the continuation again and never regroups", async () => {
+    const w = fakeWorld();
+    const batch = await newBatch("regroup redelivery");
+    const files: Record<string, Buffer> = {};
+    for (let i = 0; i < 6; i++) files[`RG${i}_1.jpg`] = await tinyJpeg(5000 + i);
+    const uploadId = await folderUpload(w, batch, files);
+    const d = { ...deps(w), placeBudgetItems: 2 };
+    const body: PlaceBody = { batchId: batch.id, uploadId, run: "rg" };
+    await runIngest(db, d, body);
+    const productsBefore = (await db.select().from(catalogBatchProducts).where(eq(catalogBatchProducts.batchId, batch.id))).map((p) => p.productId).sort();
+    const from = w.enqueued.length;
+    // At-least-once delivery: the grouping task arrives again while its chain is under way.
+    const again = await runIngest(db, d, body);
+    expect(again.outcome).toBe("placing already at 2; continuation queued again");
+    expect(w.enqueued.slice(from).map((e) => e.body.place)).toEqual(["2"]);
+    const productsAfter = (await db.select().from(catalogBatchProducts).where(eq(catalogBatchProducts.batchId, batch.id))).map((p) => p.productId).sort();
+    expect(productsAfter).toEqual(productsBefore);
+    expect(await batchRow(batch.id)).toMatchObject({ status: "ingesting", counts: { placed: 2, placingClaim: { next: 2, attempt: null } } });
+  });
+
+  it("a duplicate continuation while its first copy still places does nothing", async () => {
+    const w = fakeWorld();
+    const batch = await newBatch("duplicate continuation");
+    const uploadId = await folderUpload(w, batch, { "DC1_1.jpg": await tinyJpeg(5101), "DC2_1.jpg": await tinyJpeg(5102), "DC3_1.jpg": await tinyJpeg(5103) });
+    const d = { ...deps(w), placeBudgetItems: 1 };
+    await runIngest(db, d, { batchId: batch.id, uploadId, run: "dc" });
+    const second = w.enqueued.at(-1)!.body as PlaceBody;
+    // The first copy took the attempt (as resumeAttempt does) and is still running.
+    await db.update(catalogBatches).set({ counts: sql`jsonb_set(${catalogBatches.counts}, '{placingClaim,attempt}', '"running"'::jsonb)` }).where(eq(catalogBatches.id, batch.id));
+    expect((await runIngest(db, d, second)).outcome).toBe("noop: another delivery holds the placing lease");
+    expect(rawCopies(w)).toBe(1);
+  });
+
+  it("a cancel between two placing chunks removes the products and rows grouping wrote", async () => {
+    const w = fakeWorld();
+    const batch = await newBatch("cancel between chunks");
+    const files: Record<string, Buffer> = {};
+    for (let i = 0; i < 10; i++) files[`CB${i}_1.jpg`] = await tinyJpeg(5200 + i);
+    const uploadId = await folderUpload(w, batch, files);
+    const d = { ...deps(w), placeBudgetItems: 3 };
+    await runIngest(db, d, { batchId: batch.id, uploadId, run: "cb" });
+    const next = w.enqueued.at(-1)!.body as PlaceBody;
+    const created = (await db.select().from(catalogBatchProducts).where(eq(catalogBatchProducts.batchId, batch.id))).map((p) => p.productId);
+    expect(created).toHaveLength(10);
+    await db.update(catalogBatches).set({ status: "cancelled" }).where(eq(catalogBatches.id, batch.id));
+    expect((await runIngest(db, d, next)).outcome).toBe("noop: the batch is cancelled");
+    expect(await db.select().from(catalogBatchProducts).where(eq(catalogBatchProducts.batchId, batch.id))).toEqual([]);
+    expect(await db.select().from(catalogProducts).where(inArray(catalogProducts.id, created))).toEqual([]);
     expect(await sourcesOf(batch.id)).toEqual([]);
   });
 
@@ -1072,6 +1157,20 @@ describe("automatic retry of transient link failures (spec 14d F5 part 2)", () =
     expect(x.calls.get(ok)).toBe(1);
     // The card's sentence: the highest attempt count of a retried link.
     expect(linkFailuresBlock(await linkFailuresOf(db, x.batchId, { storage: x.w.storage })).attempts).toBe(LINK_MAX_ATTEMPTS);
+  });
+
+  it("a new run that reads only part of the earlier run's non-final links leaves the rest unread, not restored", async () => {
+    const urls = Array.from({ length: 6 }, (_, i) => `${LINK}/PART${i}_1.jpg`);
+    const x = await linkBatch(urls, () => 429);
+    await x.run("r1");
+    expect(Object.values((await x.manifest()).results).every((r) => !r.ok && r.final === false)).toBe(true);
+    // The new run's first delivery reads two links (the item budget), then saves.
+    await db.update(catalogUploads).set({ status: "uploaded" }).where(eq(catalogUploads.id, x.uploadId));
+    await runIngest(db, { ...x.d, budgetItems: 2 }, { batchId: x.batchId, uploadId: x.uploadId, run: "r2" });
+    const m = await x.manifest();
+    expect(Object.keys(m.results)).toHaveLength(2);
+    expect(Object.keys(m.priorAttempts ?? {})).toHaveLength(6);
+    expect(x.w.enqueued.at(-1)).toMatchObject({ body: { run: "r2", cursor: expect.any(String) } });
   });
 
   it("a host that answers after 60 s every time still yields a saved manifest and a continuation within the time budget", async () => {

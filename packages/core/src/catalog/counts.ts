@@ -59,27 +59,32 @@ export function progressCounts(patch: Partial<BatchCounts>, progress: { phase: I
 export function placingToken(run: string, uploadId: string): string {
   return `${run}:${uploadId}`;
 }
-/** A new or renewed claim for `token`, running PLACING_LEASE_MS from `now`. */
-export function placingClaim(token: string, now: Date): PlacingClaim {
-  return { token, until: new Date(now.getTime() + PLACING_LEASE_MS).toISOString() };
+/**
+ * A new or renewed claim for `token`, running PLACING_LEASE_MS from `now`. `attempt` names the one run
+ * of the step working under it; null means no run is (its holder stopped on an error), so the retry of
+ * the same task may take it back.
+ */
+export function placingClaim(token: string, now: Date, attempt: string | null = null): PlacingClaim {
+  return { token, until: new Date(now.getTime() + PLACING_LEASE_MS).toISOString(), attempt };
 }
-/** Whether a claim read from counts is still running at `now`. */
-export function placingLeaseLive(claim: PlacingClaim | null | undefined, now: Date): boolean {
-  return !!claim && new Date(claim.until).getTime() >= now.getTime();
-}
-/** Whether `token` holds a live claim: a delivery that does not does nothing. */
-export function placingLeaseHeldBy(claim: PlacingClaim | null | undefined, token: string, now: Date): boolean {
-  return placingLeaseLive(claim, now) && claim!.token === token;
-}
+const claimSql = sql`${catalogBatches.counts}->'placingClaim'`;
 /** WHERE condition: no claim (absent or null) or one that ran out before `now`. Combine with `status = 'ingesting'`. */
 export function placingLeaseFree(now: Date): SQL {
-  const claim = sql`${catalogBatches.counts}->'placingClaim'`;
-  return sql`(COALESCE(jsonb_typeof(${claim}), 'null') = 'null' OR (${claim}->>'until')::timestamptz < ${now.toISOString()}::timestamptz)`;
+  return sql`(COALESCE(jsonb_typeof(${claimSql}), 'null') = 'null' OR (${claimSql}->>'until')::timestamptz < ${now.toISOString()}::timestamptz)`;
 }
 /**
- * WHERE condition: the stored claim carries `token`, whether or not it ran out (another delivery that
- * took over a lapsed lease has its own token). Guards the worker's final writes (spec 14c F4 part 2).
+ * WHERE condition: a live claim of `token` that no run is working under (released on an error). The
+ * retry of the claiming task resumes through it; a duplicate delivery of that task while its first copy
+ * still runs does not, so two runs of the step never overlap.
  */
-export function placingLeaseHeld(token: string): SQL {
-  return sql`(${catalogBatches.counts}->'placingClaim'->>'token') = ${token}::text`;
+export function placingLeaseResumable(token: string, now: Date): SQL {
+  return sql`((${claimSql}->>'token') = ${token}::text AND (${claimSql}->>'attempt') IS NULL AND (${claimSql}->>'until')::timestamptz >= ${now.toISOString()}::timestamptz)`;
+}
+/**
+ * WHERE condition: the stored claim carries `token` and `attempt`, whether or not it ran out (a
+ * delivery that took over a lapsed lease, or a resumed retry, has its own). Guards the worker's writes
+ * during placing (spec 14c F4 part 2).
+ */
+export function placingLeaseHeld(token: string, attempt: string): SQL {
+  return sql`((${claimSql}->>'token') = ${token}::text AND (${claimSql}->>'attempt') = ${attempt}::text)`;
 }

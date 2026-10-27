@@ -27,7 +27,7 @@ export const NOTHING_ADDED_TEXT = "Nothing added yet";
 export const READY_TO_CHECK_TEXT = "Ready to check";
 export const READY_TO_START_TEXT = "Ready to start";
 export const NEEDS_INPUT_TEXT = "Needs your input: which column holds the identifier?";
-/** A draft with inputs that were never handed to collecting (step 1 Continue not pressed, or its hand-off failed). Not in the parent copy register: proposed in the 14c c1 report. */
+/** A draft with inputs that were never handed to collecting (step 1 Continue not pressed, or its hand-off failed). Not in the parent copy register yet. */
 export const NOT_COLLECTED_TEXT = "Added, not collected yet";
 export const pendingUploadsText = (n: number) => `${num(n)} ${plural(n, "file", "files")} did not finish uploading`;
 export const couldNotStartText = (reason: string | null | undefined) => `Could not start: ${reason ?? "Start the batch again."}`;
@@ -95,6 +95,8 @@ export function ageText(at: Date | string, now: Date): string {
  * chain was lost. "Try again" re-runs the hand-off idempotently, so an early press costs nothing.
  */
 export const COLLECT_STALL_MS = 10 * 60_000;
+/** Whether a collecting batch last written at `updatedAt` is stalled at `now` (COLLECT_STALL_MS of silence). */
+export const isCollectStalled = (updatedAt: Date | string, now: Date) => now.getTime() - new Date(updatedAt).getTime() > COLLECT_STALL_MS;
 export const COLLECT_STALLED_TEXT = "Collecting files stopped: nothing has moved for more than 10 minutes. Press Try again to hand the files to processing again.";
 /**
  * The processing total is wizard step 4's "images will be made": it leaves out skipped pairs (too
@@ -183,7 +185,7 @@ function derive(input: BatchStateInput): BatchState {
   if (status === "failed") return { ...result, state: "failed", pill: "Could not start", listPill: "Could not start", text: c.failReason ?? "Start the batch again.", intake: couldNotStartText(c.failReason), ...(input.startedAt === null ? { fixable: true } : {}) };
   if (status === "ingesting") {
     const now = input.now ?? new Date();
-    const stalled = input.updatedAt !== undefined && now.getTime() - new Date(input.updatedAt).getTime() > COLLECT_STALL_MS;
+    const stalled = input.updatedAt !== undefined && isCollectStalled(input.updatedAt, now);
     const phase = shownPhase(c.phase, input.source), { done, total } = phaseCount(c, phase);
     const counted = total ? `${PHASE_WORDS[phase]} ${num(done)} of ${num(total)}` : PHASE_WORDS[phase];
     const time = intakeTimeText(c, now);

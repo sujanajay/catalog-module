@@ -184,6 +184,7 @@ async function warmUp(verbose: boolean) {
     ["POST", "/api/catalog/batches"], ["GET", api], ["PATCH", api], ["POST", `${api}/uploads`], ["POST", `${api}/uploads/${none}/complete`],
     ["POST", `${api}/links`], ["POST", `${api}/ingest`], ["GET", `${api}/detected`], ["PATCH", `${api}/detected`], ["GET", `${api}/preview`],
     ["PATCH", `${api}/links/${none}`], ["DELETE", `${api}/links/${none}`], ["DELETE", `${api}/uploads/${none}`], ["POST", `${api}/retry-links`],
+    ["POST", `${api}/cancel`], ["POST", `${api}/reopen`],
   ];
   for (const [method, p] of hits) {
     const t0 = Date.now();

@@ -19,18 +19,3 @@ export async function wizardApi<T>(url: string, method = "GET", value?: unknown)
   return body as T;
 }
 export const batchUrl = (id: string, path = "") => `/api/catalog/batches/${id}${path}`;
-/**
- * The reason a reopened batch could not start (spec 14c F8): "Fix and continue" keeps it for this tab, and
- * step 1 shows it above the inputs until the batch is handed to collecting again. Storage may be blocked
- * (a private window): the reason is then not shown, and nothing else changes.
- */
-const fixReasonKey = (id: string) => `catalog-fix-reason:${id}`;
-export function rememberFixReason(id: string, reason: string | null): void {
-  try { if (reason) sessionStorage.setItem(fixReasonKey(id), reason); } catch { /* storage blocked */ }
-}
-export function readFixReason(id: string): string | null {
-  try { return sessionStorage.getItem(fixReasonKey(id)); } catch { return null; }
-}
-export function forgetFixReason(id: string): void {
-  try { sessionStorage.removeItem(fixReasonKey(id)); } catch { /* storage blocked */ }
-}

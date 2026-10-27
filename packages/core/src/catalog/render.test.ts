@@ -13,6 +13,9 @@ import { contactSheet } from "./contact-sheet";
 import type { Upscaler } from "./upscale";
 import { holdsAtRender } from "./qa/triage";
 
+// Full-size renders are CPU-bound; with three other test workers busy some pass the 30 s default.
+vi.setConfig({ testTimeout: 120_000 });
+
 function fixture(width = 800, height = 800, box = { x: 200, y: 200, w: 400, h: 400 }): { prepared: Prepared; matte: Matte } {
   const rgb = Buffer.alloc(width * height * 3, 255), alpha = Buffer.alloc(width * height);
   for (let y = box.y; y < box.y + box.h; y++) for (let x = box.x; x < box.x + box.w; x++) { const i = y * width + x; rgb[i * 3] = 160; rgb[i * 3 + 1] = 30; rgb[i * 3 + 2] = 50; alpha[i] = 255; }

@@ -14,7 +14,7 @@ import WizardStep4 from "./WizardStep4";
 import RetryCollectButton from "./RetryCollectButton";
 import { RetryLinksButton } from "./LinkFailures";
 import { FixAndContinueButton } from "./UnfinishedBatches";
-import { batchUrl, forgetFixReason, readFixReason, wizardApi } from "./wizard-client";
+import { batchUrl, wizardApi } from "./wizard-client";
 import "./wizard.css";
 
 /** An existing draft or collecting batch the wizard reopens at (spec 14a F4 part 1, `/catalog/new?batch=<id>`). */
@@ -72,9 +72,7 @@ export default function CatalogWizard({ brands, shareEmail, initialBrand = "", i
   const savedName = useRef<string | null>(initialBatch ? initialBatch.name.trim() : null);
   const detectedInitialised = useRef(resumed.chosen);
   /** Why a batch reopened with Fix and continue could not start (spec 14c F8): step 1 shows it until Continue hands the batch on. */
-  const [fixReason, setFixReason] = useState<string | null>(null);
-  const initialId = initialBatch?.id;
-  useEffect(() => { if (initialId) setFixReason(readFixReason(initialId)); }, [initialId]);
+  const [fixReason, setFixReason] = useState<string | null>(initialBatch?.counts.fixReason ?? null);
   async function ensureBatch() {
     if (id) return id;
     if (!brandSlug) throw new Error("Choose a brand before adding files or links.");
@@ -161,7 +159,7 @@ export default function CatalogWizard({ brands, shareEmail, initialBrand = "", i
         if(linksIdle.current) await linksIdle.current.promise;
         if(name.trim() && name.trim() !== savedName.current) {await wizardApi(batchUrl(batchId),"PATCH",{name});savedName.current = name.trim();}
         await wizardApi(batchUrl(batchId,"/ingest"),"POST");
-        forgetFixReason(batchId);setFixReason(null);
+        setFixReason(null);
         await loadDetected(batchId);
         setStep(2);
       } else if(step === 2) {
