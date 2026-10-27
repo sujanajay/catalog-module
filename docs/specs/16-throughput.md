@@ -95,7 +95,10 @@ configured matting service URLs; any other value logs one WARNING `upscale_url_u
 The client checks that service's `/health` `upscale` section, uses that service's breaker and keeps the separate
 upscale breaker. The render key carries the target only when it is not the GPU: `u:<model>@<export>:<version>`
 stays the same for the GPU path (no re-render at F1) and gains `:cpu` on the CPU path, so a CPU-made image is a
-new key, never a silent overwrite of a GPU-made one.
+new key, never a silent overwrite of a GPU-made one. The worker carries this as the upscaler id `<model>+cpu`
+(`upscalerId`), so the call sites in E's `chunk.ts` and `auto-resolve.ts` need no change. A live image the same
+model made on the other service counts as unchanged (`renderKeys` lists both), so moving the upscaler re-makes
+nothing by itself; a row that is re-made on the CPU takes the CPU key.
 - Acceptance (vitest): `matte.test.ts` sends `/upscale` to the CPU URL when `upscaleUrl` names it, reads the CPU
   service's `upscale` health, and falls back to GPU with one warning on an unknown URL; `upscale.test.ts`: the
   key for target gpu equals today's key byte for byte, the key for cpu ends in `:cpu`; `publish.test.ts` live-key
@@ -109,13 +112,15 @@ batch axis would gain about 1.3x (assumption) and needs a new eval pass under sp
   service stays required and stays the fallback when every GPU breaker is open.
 - A per-process limit of `MATTE_INFLIGHT_PER_INSTANCE` calls in flight per GPU service (default 4) queues extra
   calls in the client instead of letting Cloud Run answer 429.
-- A 429 or 503 from a GPU service waits 1 to 3 s with jitter and tries the next GPU service; it counts as one
-  breaker failure only after 3 such waits in a row for that photo, and then the CPU service answers.
+- A 429 from a GPU service (Cloud Run: every instance busy) waits 1 to 3 s with jitter and tries the next GPU
+  service; only the third busy answer in a row for that photo counts as one breaker failure, and then the CPU
+  service answers. A 503 or any other failure counts at once, as today (a 503 from our service is a real fault,
+  not overload).
 - `mattingClientFromEnv(env)` builds the client from `MATTING_URL`, `MATTING_GPU_URLS` (comma list) or the old
   `MATTING_GPU_URL`, and `UPSCALE_URL`. F3 switches `deps.ts` to it (E's file; until then `deps.ts` keeps its
   inline constructor and `UPSCALE_URL` is read from the environment by the client itself).
 - Acceptance (vitest): round robin over two GPU fakes; per-service breakers; a 429 then 200 succeeds on GPU with
-  one wait and no breaker failure; three 429 in a row fall to CPU and count one failure; with a limit of 2 and 5
+  one wait and no breaker failure; three 429 in a row fall to CPU after two waits and count one failure; with a limit of 2 and 5
   parallel calls the fake never sees more than 2 at once.
 
 ### 3.2 F2: queue, instances, database tier and pools
@@ -326,7 +331,14 @@ the judge.
    so the upscaler can leave the GPU without editing E's `deps.ts`.
 4. The deploy knob is `UPSCALE_SERVICE=gpu|cpu`, which sets `UPSCALE_URL` to the CPU service URL, because the
    operator of the deploy does not know the URL in advance.
-5. The GPU render key is unchanged so the F1 deploy re-renders nothing; only the CPU path gets the `:cpu` suffix.
+5. The GPU render key is unchanged so the F1 deploy re-renders nothing; only the CPU path gets the `:cpu` suffix,
+   and `renderKeys` accepts both, so the F2 switch re-makes nothing by itself either.
+9. Only 429 counts as "busy" for the wait-and-retry rule; the plan also named 503, but a 503 from our matting
+   service means a fault, and Cloud Run answers 429 when max-instances are all busy. Keeping 503 as an immediate
+   failure also keeps the spec 05 breaker behaviour and its tests unchanged.
+10. The cost ledger's `upscale_call` row is priced at the GPU rate in E's `chunk.ts`; F3 prices it by the upscaler
+   id (`isCpuUpscalerId`) once E has merged. Until then CPU upscale calls are recorded at the GPU rate (an
+   over-statement of about 2.5x on that line only).
 6. The live test is 200 products (owner decision 5), not the plan's 1,000-product rehearsal.
 7. The finalize split and the B4 GPU trial are deferred (section 12); they are not needed for 200 or 2,000
    products.
