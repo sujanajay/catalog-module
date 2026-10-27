@@ -1,0 +1,1372 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Shot Set Prototype</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Spectral:wght@300;600;700&family=Raleway:wght@400;500;600&display=swap">
+<style>
+/* Prototype of specs 12 (apparel shot set) and 13 (footwear and bag scene image). Look copied from catalog-prototype.html. */
+:root{--navy:#131A48;--orange:#FF5800;--orange-h:#FF8C4F;--yellow:#FFFCE8;--grey:#5A5A5A;--grey-l:#CECECE;--bg:#FFFFFF;--fg:#1b1b1f;--muted:#5A5A5A;--line:#dedbd3;--card:#FFFFFF;--soft:#f6f5f0;--ok:#1f7a3f;--warn:#b86e00;--bad:#b3261e;--run:#1d2a7a;--proto:#fff1e8;--font-h:'Spectral',Georgia,serif;--font-b:'Raleway','Segoe UI',system-ui,sans-serif;color-scheme:light}
+@media (prefers-color-scheme: dark){:root:not([data-theme="light"]){--bg:#0f1330;--fg:#f1f1f4;--muted:#b9bcc9;--line:#2b315c;--card:#171c3f;--soft:#141839;--yellow:#2a2a1a;--grey-l:#3a3f66;--ok:#6fd49a;--warn:#f0b35a;--bad:#ff8a80;--run:#c9d0ff;--proto:#2e1d14;color-scheme:dark}}
+:root[data-theme="dark"]{--bg:#0f1330;--fg:#f1f1f4;--muted:#b9bcc9;--line:#2b315c;--card:#171c3f;--soft:#141839;--yellow:#2a2a1a;--grey-l:#3a3f66;--ok:#6fd49a;--warn:#f0b35a;--bad:#ff8a80;--run:#c9d0ff;--proto:#2e1d14;color-scheme:dark}
+*{box-sizing:border-box}
+html{-webkit-text-size-adjust:100%}
+body{background:var(--bg);color:var(--fg);font-family:var(--font-b);font-size:15px;line-height:1.5;margin:0;overflow-x:hidden}
+h1,h2,h3,h4{font-family:var(--font-h);font-weight:600;margin:0;text-wrap:balance;color:var(--fg)}
+h1{font-size:30px;font-weight:300;letter-spacing:-0.02em}h2{font-size:22px}h3{font-size:17px}h4{font-size:15px}
+a{color:var(--orange)}
+p{margin:6px 0}
+.top{background:var(--navy);color:#fff;position:sticky;top:0;z-index:5}
+.top .in{display:flex;align-items:center;gap:14px;padding:10px 16px;max-width:1180px;margin:0 auto;flex-wrap:wrap}
+.logo{font-family:var(--font-h);font-weight:700;font-size:20px;letter-spacing:-0.02em;color:#fff;text-decoration:none}
+.nav a{color:#fff;text-decoration:none;opacity:.8;margin-right:14px;font-weight:500}.nav a.on{opacity:1;border-bottom:2px solid var(--orange);padding-bottom:4px}
+.proto{font-size:12px;background:var(--orange);color:#fff;padding:3px 10px;border-radius:999px;font-weight:600;white-space:nowrap}
+.tright{margin-left:auto;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.ub{font:inherit;font-size:13px;font-weight:500;color:#fff;background:transparent;border:1px solid rgba(255,255,255,.4);border-radius:6px;padding:6px 10px;cursor:pointer}
+.ub:hover{border-color:#fff}.ub:focus-visible{outline:3px solid var(--orange-h);outline-offset:2px}
+.seat{display:flex;align-items:center;gap:6px;font-size:13px}
+.seat select{font:inherit;font-size:13px;background:#1f2760;color:#fff;border:1px solid rgba(255,255,255,.4);border-radius:6px;padding:5px 8px}
+main{max-width:1180px;margin:0 auto;padding:24px 16px 80px}
+.hdr{display:flex;justify-content:space-between;align-items:flex-end;gap:16px;flex-wrap:wrap;margin-bottom:18px}
+.lead{color:var(--muted);max-width:68ch;margin-top:6px}
+.btn{font-family:var(--font-b);font-weight:600;border:1px solid var(--navy);background:var(--navy);color:#fff;padding:9px 16px;border-radius:6px;cursor:pointer;font-size:14px;line-height:1.3}
+:root[data-theme="dark"] .btn:not(.primary):not(.ghost):not(.ok):not(.danger){background:#2c3680;border-color:#3d4aa0}
+@media (prefers-color-scheme: dark){:root:not([data-theme="light"]) .btn:not(.primary):not(.ghost):not(.ok):not(.danger){background:#2c3680;border-color:#3d4aa0}}
+.btn.primary{background:var(--orange);border-color:var(--orange)}.btn.primary:hover{background:var(--orange-h);border-color:var(--orange-h)}
+.btn.ghost{background:transparent;color:var(--fg);border-color:var(--grey-l)}
+.btn.ok{background:var(--ok);border-color:var(--ok);color:#fff}
+.btn.danger{background:var(--bad);border-color:var(--bad);color:#fff}
+.btn.sm{padding:5px 11px;font-size:13px}.btn:focus-visible{outline:3px solid var(--orange-h);outline-offset:2px}
+.btn[disabled]{opacity:.45;cursor:not-allowed}
+.link{font:inherit;background:none;border:0;padding:0;color:var(--orange);cursor:pointer;text-decoration:underline}
+table{width:100%;border-collapse:collapse;font-variant-numeric:tabular-nums}
+th{text-align:left;font-size:12px;letter-spacing:.05em;text-transform:uppercase;color:var(--muted);padding:9px 10px;border-bottom:1px solid var(--line);vertical-align:bottom}
+td{padding:11px 10px;border-bottom:1px solid var(--line);vertical-align:top}
+tr.row{cursor:pointer}tr.row:hover td{background:var(--soft)}
+.tw{overflow-x:auto;max-width:100%;border:1px solid var(--line);border-radius:8px}
+.tw table{min-width:640px}
+.pill{display:inline-block;padding:2px 9px;border-radius:999px;font-size:12px;font-weight:600;background:var(--soft);color:var(--fg);border:1px solid var(--line);white-space:nowrap}
+.pill.ok{background:#e4f5ea;color:#145a2e;border-color:#bfe5cc}.pill.warn{background:#fff3dc;color:#7a4a00;border-color:#f3d79a}.pill.run{background:#e8ecff;color:#1d2a7a;border-color:#c3cbff}.pill.bad{background:#fde7e5;color:#8a1c16;border-color:#f6b9b4}
+@media (prefers-color-scheme: dark){:root:not([data-theme="light"]) .pill.ok{background:#173a26;color:#9fe3b6;border-color:#245a3a}:root:not([data-theme="light"]) .pill.warn{background:#3d2e10;color:#f5cf85;border-color:#5c4518}:root:not([data-theme="light"]) .pill.run{background:#1f2a66;color:#c9d0ff;border-color:#33408a}:root:not([data-theme="light"]) .pill.bad{background:#4a1b18;color:#ffb3ad;border-color:#6d2a25}}
+:root[data-theme="dark"] .pill.ok{background:#173a26;color:#9fe3b6;border-color:#245a3a}:root[data-theme="dark"] .pill.warn{background:#3d2e10;color:#f5cf85;border-color:#5c4518}:root[data-theme="dark"] .pill.run{background:#1f2a66;color:#c9d0ff;border-color:#33408a}:root[data-theme="dark"] .pill.bad{background:#4a1b18;color:#ffb3ad;border-color:#6d2a25}
+.steps{display:flex;gap:8px;flex-wrap:wrap;margin:10px 0 20px;padding:0;list-style:none;counter-reset:s}
+.steps li{counter-increment:s;display:flex;align-items:center;gap:8px;color:var(--muted);font-weight:500}
+.steps li::before{content:counter(s);display:inline-grid;place-items:center;width:26px;height:26px;border-radius:50%;border:2px solid var(--grey-l);font-size:13px}
+.steps li.on{color:var(--fg)}.steps li.on::before{background:var(--orange);border-color:var(--orange);color:#fff}
+.steps li.done::before{background:var(--navy);border-color:var(--navy);color:#fff;content:"\2713"}
+.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:18px}
+.card+.card{margin-top:14px}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:16px}@media (max-width:760px){.grid2{grid-template-columns:1fr}}
+label.f{display:block;font-weight:600;margin-bottom:6px}
+select,input[type=text],input[type=number],input[type=date],textarea{font:inherit;padding:8px 10px;border:1px solid var(--grey-l);border-radius:6px;background:var(--bg);color:var(--fg);max-width:100%}
+.full{width:100%}
+textarea{min-height:80px;resize:vertical;width:100%}
+.help{color:var(--muted);font-size:13px;margin-top:6px}
+.note{color:var(--muted);font-size:12px;font-style:italic}
+.drop{border:2px dashed var(--grey-l);border-radius:10px;padding:22px;text-align:center;background:var(--soft);cursor:pointer}
+.drop:hover{border-color:var(--orange)}.drop b{display:block;font-size:16px;margin-bottom:4px}
+.opt{display:grid;grid-template-columns:auto 1fr;gap:10px;align-items:start;padding:6px 0;cursor:pointer}
+.opt input{width:18px;height:18px;margin-top:3px;accent-color:var(--orange)}
+.opt small{display:block;color:var(--muted)}
+.opt.inline{display:inline-grid;margin-left:8px}
+.chan{display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:12px}
+.ch{border:1px solid var(--line);border-radius:10px;padding:12px;background:var(--card);cursor:pointer;display:grid;grid-template-columns:auto 1fr;gap:10px;align-items:start}
+.ch input{width:18px;height:18px;margin-top:3px;accent-color:var(--orange)}
+.ch.on{border-color:var(--orange);box-shadow:0 0 0 2px var(--orange) inset}
+.ch b{display:block}.ch small{color:var(--muted);display:block;line-height:1.4}
+.kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:12px;margin:16px 0}
+.kpi{padding:10px 14px;border-left:3px solid var(--navy);background:var(--soft);border-radius:6px}.kpi b{display:block;font-size:22px;font-family:var(--font-h);font-weight:600}.kpi span{color:var(--muted);font-size:13px}
+.kpi.o{border-left-color:var(--orange)}
+.tabs{display:flex;gap:4px;border-bottom:1px solid var(--line);margin:20px 0 16px;flex-wrap:wrap}
+.tabs a{font-weight:600;border-bottom:3px solid transparent;padding:9px 12px;color:var(--muted);text-decoration:none}
+.tabs a.on{color:var(--fg);border-bottom-color:var(--orange)}
+.banner{display:grid;gap:6px;background:var(--soft);border:1px solid var(--line);border-radius:10px;padding:14px 16px}
+.banner .line{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+.bar{height:8px;background:var(--line);border-radius:999px;overflow:hidden;flex:1 1 200px;min-width:120px}.bar i{display:block;height:100%;background:var(--orange);border-radius:999px}
+.notice{background:var(--yellow);border:1px solid var(--line);border-left:4px solid var(--warn);border-radius:8px;padding:10px 14px;margin:10px 0}
+.notice.bad{border-left-color:var(--bad)}
+.notice.ok{border-left-color:var(--ok)}
+.err{border-left:3px solid var(--bad);background:var(--soft);padding:10px 12px;border-radius:6px;margin:8px 0}
+.mono{font-family:ui-monospace,Consolas,monospace;font-size:13px}
+.toast{position:fixed;left:50%;bottom:24px;transform:translateX(-50%);background:var(--navy);color:#fff;padding:10px 18px;border-radius:8px;font-weight:500;z-index:40;max-width:calc(100% - 32px);box-shadow:0 8px 24px rgba(0,0,0,.25)}
+.modal{position:fixed;inset:0;background:rgba(19,26,72,.55);display:grid;place-items:center;padding:16px;z-index:30}
+.modal .card{max-width:560px;width:100%;max-height:calc(100vh - 32px);overflow:auto}
+.row-acts{display:flex;gap:8px;flex-wrap:wrap;margin-top:14px;justify-content:flex-end}
+.acts{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+/* Drawers */
+.drawer{position:fixed;top:0;right:0;bottom:0;width:min(460px,100%);background:var(--card);border-left:1px solid var(--line);z-index:25;overflow:auto;padding:16px 16px 40px;box-shadow:-10px 0 30px rgba(0,0,0,.2)}
+.drawer h2{font-size:20px}
+.drawer section{border-top:1px solid var(--line);padding-top:12px;margin-top:12px}
+.drawer .sw{display:grid;grid-template-columns:1fr auto;gap:8px;align-items:center;padding:5px 0;font-size:14px}
+.drawer .sw select{font-size:13px;padding:4px 6px}
+.pbadge{display:inline-block;font-size:11px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;color:#7a2e00;background:#ffe2cf;border:1px dashed var(--orange);border-radius:6px;padding:2px 8px}
+:root[data-theme="dark"] .pbadge{color:#ffd2b5;background:#3a2213}
+@media (prefers-color-scheme: dark){:root:not([data-theme="light"]) .pbadge{color:#ffd2b5;background:#3a2213}}
+.protobox{border:1px dashed var(--orange);background:var(--proto);border-radius:8px;padding:10px 12px;margin:10px 0;font-size:13px}
+.chain{display:flex;gap:4px;flex-wrap:wrap;align-items:center;font-size:13px;margin:8px 0}
+.chain span{padding:2px 8px;border-radius:999px;border:1px solid var(--line)}
+.chain span.on{background:var(--orange);color:#fff;border-color:var(--orange)}
+.chain span.done{background:var(--soft);color:var(--muted)}
+.guide-item{display:grid;grid-template-columns:auto 1fr;gap:8px;padding:8px 0;border-bottom:1px solid var(--line);font-size:14px}
+.guide-item input{width:18px;height:18px;accent-color:var(--orange);margin-top:2px}
+.guide-item .gid{font-weight:700;margin-right:4px}
+/* Images */
+svg.ph{display:block;width:100%;height:auto;border-radius:6px;border:1px solid var(--line);background:#ecebe7}
+figure{margin:0}
+figcaption{font-size:12px;color:var(--muted);margin-top:4px;line-height:1.35}
+.strip{display:flex;gap:8px;overflow-x:auto;padding-bottom:4px;max-width:100%}
+.strip figure{width:64px;flex:none}
+.thumbs{display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:14px}
+.thumbs figure{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:8px}
+.badge{display:inline-block;font-size:11px;font-weight:700;padding:1px 7px;border-radius:999px;margin:2px 4px 0 0}
+.badge.cut{background:#fde7e5;color:#8a1c16}.badge.made{background:#e8ecff;color:#1d2a7a}.badge.crop{background:#e4f5ea;color:#145a2e}
+/* Review cards */
+.att{display:grid;gap:14px}
+.sec-h{display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;margin:24px 0 10px}
+.rc{border:1px solid var(--line);border-radius:10px;padding:14px;background:var(--card);outline:none}
+.rc.focus{box-shadow:0 0 0 3px var(--orange-h)}
+.rc header{display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap;align-items:baseline}
+.rc-main{display:grid;grid-template-columns:minmax(0,220px) minmax(0,150px) minmax(0,1fr);gap:16px;margin-top:12px;align-items:start}
+.rc-main.two{grid-template-columns:minmax(0,180px) minmax(0,180px) minmax(0,1fr)}
+.rc-main.scene{grid-template-columns:minmax(0,110px) minmax(0,230px) minmax(0,1fr)}
+@media (max-width:820px){.rc-main,.rc-main.two,.rc-main.scene{grid-template-columns:1fr 1fr}.rc-main .why{grid-column:1/-1}}
+.why p{margin:4px 0 10px}
+.checkline{border-left:3px solid var(--navy);padding:6px 10px;background:var(--soft);border-radius:4px;font-size:14px}
+.answers{font-size:13px;color:var(--muted);margin:8px 0}
+.result{font-size:13px;border:1px solid var(--line);border-radius:6px;padding:8px 10px;margin:8px 0;background:var(--soft)}
+.picks{display:grid;gap:2px;margin:8px 0;padding:10px 12px;border:1px solid var(--line);border-radius:8px;background:var(--soft)}
+.picks label{display:flex;gap:8px;align-items:flex-start;font-size:14px;cursor:pointer}
+.picks input{accent-color:var(--orange);margin-top:3px}
+.qlist{display:grid;gap:4px;margin:8px 0}
+.qrow{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:6px 10px;align-items:center;font-size:14px;padding:4px 0;border-bottom:1px dashed var(--line)}
+.qrow small{grid-column:1/-1;color:var(--muted);font-size:12px;margin-top:-4px}
+.qrow small.bad{color:var(--bad)}
+.yn{display:inline-flex;border:1px solid var(--grey-l);border-radius:6px;overflow:hidden}
+.yn button{font:inherit;font-size:12px;border:0;background:transparent;color:var(--fg);padding:3px 10px;cursor:pointer}
+.yn button.on{background:var(--navy);color:#fff}
+.yn button.on.no{background:var(--bad)}
+.kbd{font-family:ui-monospace,Consolas,monospace;border:1px solid var(--grey-l);border-bottom-width:2px;border-radius:4px;padding:0 5px;font-size:12px}
+.crops{display:flex;gap:8px;flex-wrap:wrap}
+.crops figure{width:64px}
+.chips{display:flex;flex-wrap:wrap;gap:4px}
+.chip{font-size:12px;padding:1px 8px;border-radius:999px;border:1px solid var(--line);background:var(--soft);white-space:nowrap}
+.chip.ok{background:#e4f5ea;color:#145a2e;border-color:#bfe5cc}.chip.warn{background:#fff3dc;color:#7a4a00;border-color:#f3d79a}.chip.bad{background:#fde7e5;color:#8a1c16;border-color:#f6b9b4}.chip.run{background:#e8ecff;color:#1d2a7a;border-color:#c3cbff}
+.pend{color:var(--muted);font-style:italic}
+.plist{display:grid;gap:12px}
+.prow{border:1px solid var(--line);border-radius:10px;padding:12px;background:var(--card);display:grid;grid-template-columns:minmax(0,260px) minmax(0,1fr);gap:14px}
+@media (max-width:760px){.prow{grid-template-columns:1fr}}
+.chrow{display:grid;grid-template-columns:96px minmax(0,1fr);gap:6px;align-items:start;font-size:13px;padding:3px 0}
+.lines{margin:0;padding-left:18px}.lines li{margin:4px 0}
+.subnav{display:flex;gap:6px;flex-wrap:wrap;margin:10px 0 18px}
+.subnav a{padding:6px 12px;border:1px solid var(--line);border-radius:999px;text-decoration:none;color:var(--fg);font-size:14px}
+.subnav a.on{background:var(--navy);color:#fff;border-color:var(--navy)}
+.faces{display:flex;gap:6px;flex-wrap:wrap}
+.faces svg{width:44px;height:44px;border-radius:50%;border:1px solid var(--line);background:#ecebe7}
+.sheet table td,.sheet table th{white-space:nowrap;font-size:13px;padding:7px 9px}
+.sheet td.notes{white-space:normal;min-width:320px}
+.sheet td.wrap{white-space:normal;min-width:220px}
+.sheet .merged{text-align:center;background:var(--soft);font-weight:600}
+.legend{display:grid;gap:6px;margin-top:12px;font-size:14px}
+.legend div{display:grid;grid-template-columns:140px 1fr;gap:10px}
+@media (max-width:560px){.legend div{grid-template-columns:1fr}}
+.inline-sel{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.rolelist{display:grid;gap:6px;margin:8px 0}
+.rolelist .rr{display:grid;grid-template-columns:auto 1fr auto auto auto;gap:6px;align-items:center}
+.bars{list-style:none;padding:0;margin:8px 0;display:grid;gap:4px;font-size:14px}
+.bars li{display:grid;grid-template-columns:22px 1fr;gap:6px}
+.bars .y{color:var(--ok);font-weight:700}.bars .n{color:var(--bad);font-weight:700}
+.muted{color:var(--muted)}
+.sm{font-size:13px}
+.hide{display:none!important}
+.att,.plist{grid-template-columns:minmax(0,1fr)}
+.prow>*,.rc-main>*,.rc,.chrow>*{min-width:0}
+.pill.warn{white-space:normal}
+.inline-sel label{display:flex;flex-wrap:wrap;gap:6px;align-items:center;max-width:100%}
+.inline-sel select{max-width:100%;min-width:0}
+@media (prefers-reduced-motion: reduce){*{transition:none!important;animation:none!important}}
+@media (max-width:600px){h1{font-size:25px}.top .in{gap:8px}.nav a{margin-right:8px}}
+</style>
+</head>
+<body>
+<div class="top"><div class="in">
+  <a class="logo" href="#home">Opptra</a>
+  <nav class="nav" id="nav"></nav>
+  <div class="tright">
+    <span class="proto">Prototype only</span>
+    <label class="seat">You are
+      <select id="seat" onchange="setSeat(this.value)" aria-label="You are">
+        <option value="naz">Operator Naz</option>
+        <option value="rater2">Second rater</option>
+        <option value="admin">Admin</option>
+      </select></label>
+    <button class="ub" onclick="openDrawer('controls')">Test controls</button>
+    <button class="ub" onclick="openDrawer('guide')">Test guide</button>
+  </div>
+</div></div>
+<main id="app"></main>
+<aside id="drawer" class="drawer" hidden></aside>
+<div id="modal"></div>
+<div id="toast" class="toast" hidden></div>
+
+<script>
+'use strict';
+/* ============ Utilities ============ */
+const $=s=>document.querySelector(s);
+const esc=s=>String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const usd=x=>(Math.round(x*100)/100).toFixed(2)+' USD';
+const TODAY='27 Oct 2026';
+const plural=(n,one,many)=>n===1?one:many;
+function clock(){const d=new Date();return String(d.getHours()).padStart(2,'0')+':'+String(d.getMinutes()).padStart(2,'0')}
+function shade(hex,amt){let c=hex.replace('#','');if(c.length===3)c=c.split('').map(x=>x+x).join('');const n=parseInt(c,16);let r=(n>>16)+amt,g=((n>>8)&255)+amt,b=(n&255)+amt;r=Math.max(0,Math.min(255,r));g=Math.max(0,Math.min(255,g));b=Math.max(0,Math.min(255,b));return '#'+((1<<24)+(r<<16)+(g<<8)+b).toString(16).slice(1)}
+function hash(s){let h=0;for(const c of s)h=(h*31+c.charCodeAt(0))>>>0;return h}
+const clone=o=>JSON.parse(JSON.stringify(o));
+
+/* ============ Words and rules (copy from specs 12 and 13) ============ */
+const ROLE_WORDS={fm:'front to mid-thigh',fl:'full length',fc:'fabric close-up',bh:'back to the hips',hs:'head and shoulders',bl:'back full length',fw:'front from the waist down',bw:'back from the waist down',dt:'detail',pk:'all pieces together',flat:'flat lay',fb:'flat lay, back',chart:'size chart',other:'other angle',ls:'lifestyle',none:'not sure'};
+const ROLE_OPTS=['fm','fl','fc','bh','hs','bl','fw','bw','dt','pk','flat','fb','chart','other','none'];
+const PERSON=new Set(['fm','fl','bh','hs','bl','fw','bw','dt']);
+const BACK=new Set(['bh','bl','bw','fb']);
+function roleWord(r,p){if(r==='fm'&&p&&p.length==='long')return 'front to the knee';return ROLE_WORDS[r||'none']||r}
+const GROUP={bh:'back',bl:'back',bw:'back',fb:'back',fc:'fc',hs:'hs',fm:'fm',fl:'fl',fw:'fw',dt:'dt',pk:'pk',flat:'flat'};
+const GROUP_WORDS={back:'a back view',fc:'a fabric close-up',hs:'a head and shoulders shot',fm:'a front to mid-thigh shot',fl:'a full-length shot',fw:'a front from the waist down shot',dt:'a detail shot',pk:'a photo of all pieces together',flat:'a flat lay'};
+const CH={styli:'Styli',centrepoint:'Centrepoint',sixthstreet:'6thStreet',vogacloset:'VogaCloset',noon:'Noon',namshi:'Namshi',trendyol:'Trendyol',shein:'Shein',amazon:'Amazon'};
+const CH_ORDER=['namshi','noon','trendyol','amazon','styli','sixthstreet','centrepoint','vogacloset','shein'];
+const CH_P1=['namshi','noon','trendyol','amazon'];
+const WINDOWS={noon:[1751,2400],namshi:[1751,2400],trendyol:[1600,2400],styli:[1792,2390],sixthstreet:[1792,2390],vogacloset:[1792,2390],amazon:[1792,1792],shein:[1792,1792],centrepoint:[1792,1792]};
+const BRANDS={vero_moda:'Vero Moda',us_polo:'US Polo',campus:'Campus'};
+const GARMENTS=[['tops','Top'],['knit_sweat','Knitwear or sweatshirt'],['outerwear','Jacket or coat'],['dresses_jumpsuits','Dress or jumpsuit'],['bottoms','Trousers, jeans, shorts or skirt'],['active_top','Sports top or sports bra'],['active_bottom','Leggings, sports shorts or joggers'],['lingerie_underwear','Lingerie or underwear'],['sleep_lounge','Nightwear or loungewear'],['swimwear','Swimwear'],['multipack','Pack of several pieces'],['kids','Kids'],['unknown','Not sure']];
+const GARMENT_WORD=Object.fromEntries(GARMENTS);
+const SUBS={sneaker:'Sneaker',running_sports:'Running or sports shoe',loafer_slip_on:'Loafer or slip-on',football:'Football boot',boot:'Boot',lace_up_comfort:'Lace-up comfort shoe',sandal:'Sandal',slide_flip_flop:'Slide or flip-flop',slipper:'Slipper',handbag:'Handbag',shoulder:'Shoulder bag',clutch:'Clutch',unknown:'Not known yet'};
+const FRAMINGS={legs_only:'Legs only',feet_only:'Feet only',shoulder_to_hip:'Shoulder to hip',waist_held:'Held at the waist',full_length:'Full length'};
+const ROW_LABEL={'*':'All other garments (tops, knitwear, nightwear, sports tops)',dresses_jumpsuits:'Dresses and jumpsuits',outerwear:'Jackets and coats',bottoms:'Trousers, skirts, shorts, leggings',lingerie_underwear:'Lingerie and underwear',swimwear:'Swimwear',multipack:'Packs of several pieces',kids:'Kids (every age)'};
+const QUESTIONS=['It is not the same garment','A logo or text changed, moved or was added','The colour is different','The print or fabric texture is different','The model, lighting or background differs from the other photos','The hands, body or framing are wrong'];
+const SWAP_REASONS=['The head or the product is cut','A logo or text is cut','It is not the same product or the right shot type'];
+const CHECK_LINE="Check that the garment, every logo and text, the colour, the print, the model and the framing all match the product's own photos.";
+const HARD={logo_changed:'A logo or text on the garment changed, moved or was added.',pieces_mismatch:'The number or the colours of the pieces do not match the pack.'};
+const SCENE_HOLD={face:"The scene image shows more of the person than this brand allows, or part of a face.",paste_back_mismatch:"The product pixels in the scene image differ from the brand's photo. Our fault; this image cannot be used.",scene_realism:"The product does not sit naturally in the scene (size, shadow or light)."};
+const CHANGE_MEANING={new:'New product: submit its images as usual.',role_added:"New shot added: re-submit this product's images on this marketplace",cut_replaced:"A cut photo was replaced: re-submit this product's images on this marketplace",scene_added:"Scene image added: re-submit this product's images on each marketplace named in the notes, scene image last",pending_review:'New shots waiting for review: nothing to re-submit yet',updated:"Photos changed: re-submit this product's images",unchanged:'Nothing to re-submit'};
+function notMade(reason,ch,role,p){
+  const C=CH[ch],R=roleWord(role,p),view=BACK.has(role)?'back':'front';
+  const g=p.audience==='men'?'men':'women';
+  const T={too_small:`${C}: ${R} not made: the photo is too small to cut a ${R} from it.`,no_whole_head:`${C}: ${R} not made: no photo shows the whole head to cut it from.`,no_parent:`${C}: ${R} not made: no photo of this product contains a ${R}.`,no_view:`${C}: ${R} not made: no photo shows the ${view} of this product, so a new photo would be guessed. Add a photo of the ${view}.`,cannot_check:`${C}: ${R} not made: the only photo is too small or unclear to check a new photo against. Add a larger photo.`,no_pieces:`${C}: ${R} not made: no photo shows every piece of the pack.`,department_unset:`${C}: ${R} not made: pick a garment type for this product to make it.`,making_off:`${C}: ${R} not made: making new photos is off for this brand.`,batch_off:`${C}: ${R} not made: making new photos was not chosen for this batch.`,no_brand_model:`${C}: ${R} not made: no approved brand model for ${BRANDS[p.brand]} ${g} yet.`,no_rights:`${C}: ${R} not made: no written permission is recorded for this brand's model photos.`,failed_checks:`${C}: ${R} not made: the made photo did not match the product closely enough.`,removed:`${C}: ${R} not made: a reviewer chose not to use the made photo.`,cap:`${C}: ${R} not made: this batch's limit for made photos was reached. Raise it to make the rest.`,not_active:`${C}: ${R} is missing.`,superseded:`${C}: ${R} not made: a newer delivery of this product replaced this one.`};
+  return T[reason]||`${C}: ${R} not made.`;
+}
+
+/* ============ Channel rules (owner-changeable data) ============ */
+function defaultPolicy(){
+  const L=['styli','centrepoint','sixthstreet','vogacloset'],M=['namshi','trendyol','shein'];
+  const mk=(roles,status,head)=>({roles,status,head:head||'fail',by:'seed'});
+  const star={};L.forEach(c=>star[c]=mk(['fm','fl','fc','bh','hs'],c==='styli'?'confirmed':'assumed'));
+  star.noon=mk([['fm','fl'],'bh','fc','hs'],'confirmed');M.forEach(c=>star[c]=mk([['fm','fl'],'fc','bh','hs'],'assumed'));
+  star.amazon=mk([['fm','fl'],'fc','bh'],'confirmed','amazon_nose_lip');
+  const copy=(st)=>{const o={};for(const c in star)o[c]=Object.assign(clone(star[c]),{status:st});return o};
+  const rows={'*':star};
+  rows.dresses_jumpsuits=copy('proposed');rows.dresses_jumpsuits.amazon.roles=['fl','fc','bl'];
+  rows.outerwear=copy('proposed');
+  const b={};L.forEach(c=>b[c]=mk(['fw','fl','fc','bw','dt'],'proposed'));M.forEach(c=>b[c]=mk([['fw','fl'],'fc','bw','dt'],'proposed'));b.noon=mk([['fw','fl'],'bw','fc','dt'],'proposed');b.amazon=mk(['fw','fc','bw'],'proposed','amazon_nose_lip');rows.bottoms=b;
+  for(const d of ['lingerie_underwear','swimwear','kids']){const o={};CH_ORDER.forEach(c=>o[c]=mk(['flat','fb','fc'],'proposed'));rows[d]=o}
+  const mp={};L.concat(M).forEach(c=>mp[c]=mk(['pk','fm','fl','fc'],'proposed'));mp.noon=mk(['pk',['fm','fl'],'bh','fc'],'proposed');mp.amazon=mk(['pk','flat','fc'],'proposed');rows.multipack=mp;
+  return rows;
+}
+function defaultChScene(){const o={};CH_ORDER.forEach(c=>o[c]={max:{trendyol:8,amazon:9,shein:10,vogacloset:10}[c]||null,life:(c==='noon'||c==='amazon')?'published':'assumed',ai:c==='noon'?'xmp_and_sheet':'xmp'});return o}
+function rowKey(p){if(p.audience==='kids'||p.dept==='kids')return 'kids';return ({tops:'*',knit_sweat:'*',sleep_lounge:'*',active_top:'*',unknown:'*',active_bottom:'bottoms'})[p.dept]||p.dept}
+function entriesFor(p,ch){const r=S.policy[rowKey(p)];return r&&r[ch]?r[ch].roles:[]}
+function entryWords(e,p){return Array.isArray(e)?e.map(r=>roleWord(r,p)).join(' or '):roleWord(e,p)}
+
+/* ============ Sample data ============ */
+function ph(n,role,o){return Object.assign({n,role,cut:null,view:BACK.has(role)?'back':'front'},o||{})}
+function app(id,key,name,dept,g,color,photos,o){return Object.assign({id,key,name,kind:'apparel',brand:'vero_moda',dept,length:'short',audience:'women',g,color,photos,cropFrom:{},outcomes:{}},o||{})}
+function foot(id,key,name,kind,sub,color,photos,o){return Object.assign({id,key,name,kind,brand:'us_polo',sub,audience:'men',color,photos,scene:{fullFails:false,hold:null}},o||{})}
+const pk=(n,view,o)=>Object.assign({n,role:'flat',presence:'packshot',view},o||{});
+const STD=()=>[ph(1,'fm'),ph(2,'fl'),ph(3,'fc'),ph(4,'bh'),ph(5,'hs')];
+function batchA(){return [
+  app('A01','VM-TOP-101','Ribbed knit top, ecru','knit_sweat','top','#e8dcc4',STD(),{scenario:'Complete already: nothing is shown for it.'}),
+  app('A02','VM-TOP-102','Satin blouse, sage','tops','top','#9fb59a',[ph(1,'fm'),ph(2,'fl'),ph(3,'fc'),ph(4,'bl'),ph(5,'hs')],{cropFrom:{bh:4},scenario:'Missing back: cut from a bigger photo.'}),
+  app('A03','VM-SHIRT-103','Linen shirt, sky blue','tops','top','#9cc3e4',[ph(1,'fm'),ph(2,'fl'),ph(3,'fc'),ph(4,'hs'),ph(5,'other',{view:'back',note:'back, three-quarter'})],{scenario:'Missing back: made from the other photos.'}),
+  app('A04','VM-DRESS-104','Wrap dress, rust','dresses_jumpsuits','dress','#b5562f',[ph(1,'fm',{cut:'head',head:'cut'}),ph(2,'fl'),ph(3,'fc'),ph(4,'bh'),ph(5,'hs'),ph(6,'bl')],{cropFrom:{fm:2},scenario:'Face cut at the top edge on photo 1: swap card.'}),
+  app('A05','VM-TOP-105','Cropped cardigan, lilac','knit_sweat','top','#b9a3d6',[ph(1,'fm')],{cropFrom:{fc:1,hs:1},scenario:'One photo only: cannot be completed.'}),
+  app('A06','VM-TOP-106','Draped top, black','unknown','top','#3a3a3f',[ph(1,'fm'),ph(2,'fl'),ph(3,'other',{view:'back',note:'back view'})],{cropFrom:{fc:1,hs:1},scenario:'Garment type not known: crops only until you pick one.'}),
+  app('A07','VM-TOP-107','Striped tee, navy and white','tops','top','#24305e',[ph(1,'flat'),ph(2,'fb')],{cropFrom:{fc:1},stripes:true,scenario:"Flat lays only: made on the brand's model, full-length photo first."}),
+  app('A08','VM-DRESS-108','Maxi dress, emerald','dresses_jumpsuits','dress','#1f7a5a',[ph(1,'fl'),ph(2,'bl'),ph(3,'fc')],{length:'long',cropFrom:{fm:1,hs:1,bh:2},scenario:'Long dress: the front shot is cut on the knee band.'}),
+  app('A09','VM-TROUSER-109','Wide-leg trousers, camel','bottoms','trousers','#c49a6c',[ph(1,'fl'),ph(2,'bl'),ph(3,'fc')],{cropFrom:{fw:1,bw:2,dt:1},scenario:'Trousers: waist-down shot types.'}),
+  app('A10','VM-BRA-110','Lace bralette, blush','lingerie_underwear','bra','#e7b3b5',[ph(1,'flat'),ph(2,'bh',{onModel:true}),ph(3,'fm',{onModel:true})],{cropFrom:{fc:1},scenario:'Lingerie: off-figure shots, the on-model photos stay as extras.'}),
+  app('A11','VM-SWIM-111','Swimsuit, cobalt','swimwear','swim','#2a50b8',[ph(1,'flat'),ph(2,'fb')],{cropFrom:{fc:1},scenario:'Swimwear: off-figure, completed by a cut.'}),
+  app('A12','VM-PACK-112','Basic tee, pack of 3','multipack','top','#d6d1c4',[ph(1,'fm'),ph(2,'fl'),ph(3,'fc'),ph(4,'flat',{pieces:2})],{packOf:3,pkOk:true,outcomes:{pk:'pieces_mismatch'},scenario:'Pack of 3: the made all-pieces photo shows the wrong piece count (held).'}),
+  app('A13','VM-KIDS-113','Girls frill dress, yellow','kids','dress','#f1c94b',[ph(1,'flat'),ph(2,'fm',{onModel:true,child:true})],{audience:'kids',cropFrom:{fc:1},scenario:'Kids: flat shots only, a child is never made.'}),
+  app('A14','VM-TEE-114','Printed logo tee, white','tops','top','#f4f4f2',[ph(1,'fm'),ph(2,'fl'),ph(3,'fc'),ph(4,'hs'),ph(5,'other',{view:'back',note:'back view'})],{logo:true,outcomes:{bh:'logo_changed'},scenario:'Printed tee: the made back changed the logo (hard block).'}),
+  app('A15','VM-TOP-115','Puff-sleeve top, coral','tops','top','#ef7b62',STD().concat([ph(6,'other',{cut:'product',note:'side view'})]),{scenario:'A cut photo in a shot type no marketplace asks for: it stays, with a note.'}),
+  app('A16','VM-SHIRT-116','Oxford shirt, white','tops','top','#f0f1f4',[ph(1,'fm'),ph(2,'fl'),ph(3,'fc'),ph(4,'hs'),ph(5,'other',{view:'back',note:'back view, new photo'})],{carried:{role:'bh'},scenario:'Made photo from an earlier batch: keep it or remove it.'})
+]}
+function batchB(){return [
+  foot('B01','USP-SNK-201','Court sneaker, white and navy','shoe','sneaker','#f2f2f0',[pk(1,'side'),pk(2,'pair'),pk(3,'sole')],{color2:'#24305e'}),
+  foot('B02','USP-RUN-202','Running shoe, grey','shoe','running_sports','#8e949c',[pk(1,'side'),pk(2,'pair')],{audience:'women'}),
+  foot('B03','USP-LOF-203','Suede loafer, tan','shoe','loafer_slip_on','#b98a5a',[pk(1,'side'),pk(2,'pair')]),
+  foot('B04','USP-LCE-204','Lace-up comfort, brown','shoe','lace_up_comfort','#6b4a32',[pk(1,'side'),pk(2,'pair'),pk(3,'side',{presence:'worn'})]),
+  foot('B05','USP-SNK-205','Canvas sneaker, red','shoe','sneaker','#c23a32',[pk(1,'side'),pk(2,'side',{presence:'scene'})]),
+  foot('B06','USP-BOT-206','Chelsea boot, black','shoe','boot','#2b2b2b',[pk(1,'side'),pk(2,'pair')],{audience:'women',scene:{fullFails:true,hold:null}}),
+  foot('B07','USP-SNK-207-K','Kids velcro sneaker, blue','shoe','sneaker','#3f78c8',[pk(1,'side'),pk(2,'pair')],{audience:'kids'}),
+  foot('B08','USP-SDL-208','Strappy sandal, gold','shoe','sandal','#c9a24a',[pk(1,'side')],{audience:'women'}),
+  foot('B09','USP-HBG-209','Structured handbag, cream','bag','handbag','#e6dcc6',[pk(1,'front'),pk(2,'side')],{audience:'women',scene:{fullFails:false,hold:'face'}}),
+  foot('B10','USP-CLT-210','Evening clutch, black','bag','clutch','#222226',[pk(1,'front'),pk(2,'back')],{audience:'women',scene:{fullFails:true,hold:'paste_back'}}),
+  foot('B11','USP-ACC-211','Woven slip-on, natural','shoe','unknown','#d8c7a0',[pk(1,'side'),pk(2,'pair')]),
+  foot('B12','USP-SHB-212','Shoulder bag, olive','bag','shoulder','#6f7a3c',[pk(1,'front'),pk(2,'back')],{audience:'women'}),
+  foot('B13','USP-SLD-213','Pool slide, navy','shoe','slide_flip_flop','#24305e',[pk(1,'side'),pk(2,'pair')]),
+  foot('B14','USP-FTB-214','Football boot, white','shoe','football','#f2f2f0',[pk(1,'side'),pk(2,'sole')],{color2:'#c23a32'}),
+  foot('B15','USP-SLP-215','House slipper, grey','shoe','slipper','#9a9a9e',[pk(1,'side'),pk(2,'pair')])
+]}
+function batchC(){return [
+  app('C01','USP-POLO-301','Pique polo, navy','tops','top','#24305e',[ph(1,'fm'),ph(2,'fl'),ph(3,'fc'),ph(4,'hs'),ph(5,'other',{view:'back',note:'back view'})],{brand:'us_polo',audience:'men'}),
+  app('C02','USP-TEE-302','Crew tee, red','tops','top','#c23a32',[ph(1,'fm',{cut:'head',head:'cut'}),ph(2,'fl'),ph(3,'fc'),ph(4,'bh'),ph(5,'hs')],{brand:'us_polo',audience:'men',cropFrom:{fm:2}}),
+  app('C03','USP-SHRT-303','Oxford shirt, white','tops','top','#f0f1f4',STD(),{brand:'us_polo',audience:'men'}),
+  foot('C04','USP-SNK-304','Retro sneaker, white','shoe','sneaker','#f2f2f0',[pk(1,'side'),pk(2,'pair')],{color2:'#c23a32'}),
+  foot('C05','USP-LOF-305','Penny loafer, brown','shoe','loafer_slip_on','#5a3a26',[pk(1,'side'),pk(2,'pair')]),
+  foot('C06','USP-SNK-306','High-top sneaker, black','shoe','sneaker','#2b2b2b',[pk(1,'side'),pk(2,'side',{presence:'worn'})])
+]}
+function batchCampus(){return ['Runner, grey','Walking shoe, black','Sneaker, white','Slip-on, navy','Sports shoe, blue'].map((nm,i)=>foot('CA0'+(i+1),'CMP-'+(401+i),nm,'shoe',['running_sports','sneaker','sneaker','loafer_slip_on','running_sports'][i],['#8e949c','#2b2b2b','#f2f2f0','#24305e','#3f78c8'][i],[pk(1,'side'),pk(2,'pair')],{brand:'campus'}))}
+function mkBatch(id,name,brand,defCh,products,created){return {id,name,brand,defCh,channels:[],products,status:'draft',step:1,folder:false,detect:{state:'idle',done:0},makeTicked:true,limit:null,limitTouched:false,sceneMode:'auto',jobs:[],sheets:[],finalized:false,created,kind:'new'}}
+function makeBatches(){
+  const L1=mkBatch('L1','Vero Moda SS26 relist','vero_moda',['noon','styli'],[
+    app('L01','VM-LIVE-201','Tie-front shirt, white','tops','top','#f4f1ea',[ph(1,'fm'),ph(2,'fl'),ph(3,'fc')],{cropFrom:{hs:1}}),
+    app('L02','VM-LIVE-202','Knit vest, grey','knit_sweat','top','#a7a7ab',STD())],'12 Aug');
+  const L2=mkBatch('L2','US Polo SS26 shoes','us_polo',['noon','amazon'],[foot('L03','USP-LIVE-310','Classic sneaker, white','shoe','sneaker','#f2f2f0',[pk(1,'side'),pk(2,'pair')],{color2:'#24305e'})],'20 Aug');
+  [L1,L2].forEach(b=>{b.status='done';b.channels=b.defCh.slice();b.finalized=true;b.folder=true;b.detect={state:'done',done:1,total:1}});
+  return {A:mkBatch('A','Vero Moda AW26 drop','vero_moda',['styli','noon','namshi','amazon'],batchA(),'Today 09:10'),
+    B:mkBatch('B','US Polo shoes and bags, Oct','us_polo',['noon','namshi','trendyol','amazon'],batchB(),'Today 09:40'),
+    C:mkBatch('C','US Polo mixed drop','us_polo',['noon','namshi','styli','amazon'],batchC(),'Today 10:05'),
+    CA:mkBatch('CA','Campus sneakers','campus',['noon','namshi'],batchCampus(),'Today 10:20'),L1,L2};
+}
+const SCENE_ROWS={sneaker:['Legs only, seated on a concrete ledge or walking in a modern plaza, late afternoon','legs_only','The pair on a concrete ledge or steps'],running_sports:['Legs only on a waterfront path at sunrise','legs_only','At the edge of a running track'],loafer_slip_on:['Legs only on a cafe terrace or in a marble lobby','legs_only','On light stone paving'],lace_up_comfort:['Legs only on a cafe terrace or in a marble lobby','legs_only','On light stone paving'],football:['Legs only on a floodlit artificial pitch','legs_only','On artificial turf'],boot:['Legs only on desert-toned stone steps','legs_only','On stone'],sandal:['Feet only on a pool deck or boardwalk','feet_only','On wooden decking'],slide_flip_flop:['Feet only on a pool deck or boardwalk','feet_only','On wooden decking'],slipper:['Feet only on a bedroom rug','feet_only','On a rug'],handbag:['Shoulder to hip in a hotel lobby or cafe','shoulder_to_hip','On a marble side table'],shoulder:['Shoulder to hip in a hotel lobby or cafe','shoulder_to_hip','On a marble side table'],clutch:['Held at the waist in an evening lobby','waist_held','On a marble console']};
+function defaultSceneBody(){const subs={};for(const k in SCENE_ROWS){const r=SCENE_ROWS[k];subs[k]={worn:r[0],framing:r[1],stillLife:r[2],styling:{men:'Chinos or tailored trousers, plain socks',women:'Ankle-length trousers or a midi skirt',kids:'Knee-length shorts or long trousers, plain ankle socks, a school-day or park setting'},bareFeet:{adults:r[1]==='feet_only',kids:k==='sandal'||k==='slide_flip_flop'}}}
+  return {enabled:true,routes:{full:true,composite:true},routePreference:'full_first',unisexStyling:'men',aboveKneeWhenCovered:true,subcategories:subs,forbidden:['Readable text or signs','Other brands or logos','Real landmarks or recognisable skylines','Alcohol','Religious buildings','Flags',"Faces other than an allowed registered model's"],kidsForbidden:['Nightlife, bars or cafes at night','Adult fashion poses','Make-up','High heels on a child','Any setting with adults only'],person:{men:'never',women:'never',unisex:'never',kids:'never'}}}
+function defaultState(){return {v:8,seat:'naz',theme:null,
+  sw:{phase:{made:'review_all',crops:'review_all',scene_full:'review_all',scene_composite:'review_all'},making:{vero_moda:true,us_polo:true,campus:true},detectFail:false,capOut:false,newer:false,trendyolFull:false,noScene:false,exitHold:false},
+  policy:defaultPolicy(),chScene:defaultChScene(),batches:makeBatches(),wiz:{bid:null},guide:{},feel:{},notes:'',
+  rights:{vero_moda:{grantor:'Vero Moda Middle East',doc:'Contract VM-2026-014',scope:'worn_or_carried',ref:true,likeness:true,from:'2026-09-01',to:'2027-08-31'},us_polo:{grantor:'US Polo Assn. licensee',doc:'Contract USPA-2026-007',scope:'worn_or_carried',ref:true,likeness:false,from:'2026-07-01',to:'2027-06-30'},campus:{grantor:'',doc:'',scope:'none',ref:false,likeness:false,from:'',to:''}},
+  profiles:{us_polo:{versions:[{v:1,by:'Admin',at:'14 Oct 2026',body:defaultSceneBody()}],draft:null},vero_moda:{versions:[],draft:null},campus:{versions:[{v:1,by:'Admin',at:'2 Oct 2026',body:defaultSceneBody()}],draft:null}},
+  registry:{vero_moda:{groups:[{id:'g1',size:14,hair:'#3b2b22',status:'candidate'},{id:'g2',size:6,hair:'#a8743a',status:'candidate'},{id:'g3',size:4,hair:'#1d1d1d',status:'candidate',mixed:true}],pack:'approved',packLabel:'Vero Moda model A',packDepts:['tops','dresses_jumpsuits','bottoms'],deleted:false},us_polo:{groups:[],pack:null,deleted:false},campus:{groups:[],pack:null,deleted:false}},
+  makers:[{id:1,name:'Photo maker 1',uses:['shotset','scene_full','scene_background'],enabled:true,approved:true,pass:0.91,usd:0.20,hosted:false},{id:2,name:'Photo maker 2',uses:['shotset','scene_full'],enabled:true,approved:true,pass:0.88,usd:0.28,hosted:false},{id:3,name:'Photo maker 3',uses:['shotset'],enabled:false,approved:false,pass:0.79,usd:0.19,hosted:false},{id:4,name:'Photo maker 4 (outside scene service)',uses:['scene_background'],enabled:false,approved:false,pass:null,usd:null,hosted:true}],
+  hostedAllowed:{vero_moda:false,us_polo:false,campus:false},
+  ops:{relapse:null,crops:{vero_moda:31,us_polo:12}},clicks:0,focus:null,kb:null,open:{},sheetCh:'two',sheetV:{}}}
+let S;
+function save(){try{localStorage.setItem('ssproto',JSON.stringify(S))}catch(e){}}
+function load(){try{const t=localStorage.getItem('ssproto');if(t){const o=JSON.parse(t);if(o&&o.v===8){S=o;return}}}catch(e){}S=defaultState()}
+load();
+
+/* ============ Lookups ============ */
+const B=id=>S.batches[id];
+function findProduct(pid){for(const id in S.batches){const p=S.batches[id].products.find(x=>x.id===pid);if(p)return {b:S.batches[id],p}}return {}}
+function findJob(jid){for(const id in S.batches){const j=S.batches[id].jobs.find(x=>x.id===jid);if(j)return {b:S.batches[id],j,p:S.batches[id].products.find(x=>x.id===j.pid)}}return {}}
+const isGen=j=>j.path==='mode_a'||j.path==='mode_b'||j.path==='carried';
+const PENDING=['planned','making','checking','in_review','held','waiting'];
+function modeBOk(brand){const r=S.registry[brand];return !!(r&&r.pack==='approved'&&!r.deleted)}
+function detectFailed(b){return b.status==='draft'?(b.detect.state!=='running'&&S.sw.detectFail):!!b.detectFailed}
+function ctxFor(b){const brandOn=S.sw.making[b.brand];const df=detectFailed(b);return {channels:b.channels,make:brandOn&&b.makeTicked&&!df,makeReason:!brandOn?'making_off':'batch_off',modeB:modeBOk(b.brand)}}
+function approvedProfile(brand){const p=S.profiles[brand];return p&&p.versions.length?p.versions[p.versions.length-1].body:null}
+function seatName(s){return {naz:'Operator Naz',rater2:'Second rater',admin:'Admin'}[s]||s}
+
+/* ============ Planner (spec 12 s3, simplified) ============ */
+function planProduct(p,ctx){
+  const out={slots:{},jobs:[],faceCut:false,productCut:false,cutKept:[]};
+  if(p.kind!=='apparel')return out;
+  const photos=p.photos;
+  const uncut=r=>photos.filter(f=>f.role===r&&!f.cut).sort((a,b)=>a.n-b.n)[0];
+  const cutOf=r=>photos.find(f=>f.role===r&&f.cut);
+  const onModel=photos.some(f=>PERSON.has(f.role)||f.onModel);
+  const hasFlat=photos.some(f=>f.role==='flat');
+  const views=new Set(photos.map(f=>f.view||'front'));
+  const memo={};
+  const ladder=r=>{
+    if(memo[r])return memo[r];let res;
+    if(p.carried&&p.carried.role===r)res={path:'carried',refs:[1,2,5]};
+    else if(p.cropFrom&&p.cropFrom[r]&&photos.some(f=>f.n===p.cropFrom[r]))res={path:'crop',parent:p.cropFrom[r]};
+    else if(p.dept==='unknown')res={reason:'department_unset'};
+    else if(!ctx.make)res={reason:ctx.makeReason};
+    else if(r==='pk')res=p.pkOk?{path:'mode_a',refs:photos.map(f=>f.n)}:{reason:'no_pieces'};
+    else if(PERSON.has(r)&&!onModel){
+      if(rowKey(p)==='kids')res={reason:'no_parent'};
+      else if(hasFlat&&ctx.modeB)res={path:'mode_b',refs:photos.filter(f=>f.role==='flat'||f.role==='fb').map(f=>f.n)};
+      else if(hasFlat)res={reason:'no_brand_model'};
+      else res={reason:'no_parent'};
+    }
+    else if(!views.has(BACK.has(r)?'back':'front'))res={reason:'no_view'};
+    else if(photos.length<2)res={reason:'cannot_check'};
+    else res={path:'mode_a',refs:photos.filter(f=>!f.cut).map(f=>f.n)};
+    return memo[r]=res;
+  };
+  for(const ch of ctx.channels){
+    out.slots[ch]=entriesFor(p,ch).map(e=>{
+      const alts=Array.isArray(e)?e:[e];
+      for(const a of alts){const f=uncut(a);if(f)return {e,role:a,state:'filled',n:f.n}}
+      const occ=alts.map(cutOf).find(Boolean);
+      let pick=null;for(const a of alts){const l=ladder(a);if(l.path){pick={a,l};break}}
+      if(!pick)pick={a:alts[0],l:ladder(alts[0])};
+      if(occ&&occ.cut==='head')out.faceCut=true;
+      if(occ&&occ.cut==='product')out.productCut=true;
+      return {e,role:pick.a,state:occ?'occupied_cut':'missing',occ:occ?occ.n:null,occCut:occ?occ.cut:null,via:pick.l};
+    });
+  }
+  const jobs={};
+  for(const ch of ctx.channels)for(const sl of out.slots[ch]){
+    if(sl.state==='filled'||!sl.via.path)continue;
+    const j=jobs[sl.role]||(jobs[sl.role]={role:sl.role,path:sl.via.path,parent:sl.via.parent||null,refs:sl.via.refs||null,retires:null,retireCut:null,retireChs:[]});
+    if(sl.occ){j.retires=sl.occ;j.retireCut=sl.occCut;if(!j.retireChs.includes(ch))j.retireChs.push(ch)}
+  }
+  let list=Object.values(jobs);
+  if(list.some(j=>j.path==='mode_b')){
+    if(!jobs.fl)list.push({role:'fl',path:'mode_b',refs:photos.filter(f=>f.role==='flat').map(f=>f.n),retireChs:[]});
+    list.forEach(j=>{if(j.path==='mode_b'){if(j.role==='fl')j.anchor=true;else j.waitAnchor=true}});
+    list.sort((a,b)=>(b.anchor?1:0)-(a.anchor?1:0));
+  }
+  out.jobs=list;
+  const req=new Set();for(const ch of ctx.channels)entriesFor(p,ch).flat().forEach(r=>req.add(r));
+  photos.forEach(f=>{if(f.cut&&!req.has(f.role))out.cutKept.push(f.n)});
+  return out;
+}
+function summary(b){
+  const ctx=ctxFor(b);const res={apparel:0,missing:0,groups:{},faceCut:0,productCut:0,oneOnly:0,unknown:0,modeB:0,kids:0,gen:0,rows:[]};
+  b.products.filter(p=>p.kind==='apparel').forEach(p=>{
+    res.apparel++;const pl=planProduct(p,ctx);let miss=false;const seen={};
+    for(const ch in pl.slots)pl.slots[ch].forEach(sl=>{
+      if(sl.state==='filled')return;if(sl.via.path==='carried')return;miss=true;
+      if(sl.state==='occupied_cut'&&sl.via.path)return;
+      const g=GROUP[sl.role]||sl.role;const cat=sl.via.path==='crop'?'cut':sl.via.path?'made':'not';
+      const order={cut:0,made:1,not:2};if(!seen[g]||order[cat]<order[seen[g]])seen[g]=cat;
+    });
+    for(const g in seen){const G=res.groups[g]||(res.groups[g]={n:0,cut:0,made:0,not:0});G.n++;G[seen[g]]++}
+    if(miss)res.missing++;if(pl.faceCut)res.faceCut++;if(pl.productCut)res.productCut++;if(p.photos.length===1&&miss)res.oneOnly++;if(p.dept==='unknown')res.unknown++;
+    if(pl.jobs.some(j=>j.path==='mode_b'))res.modeB++;if(rowKey(p)==='kids')res.kids++;
+    const g=pl.jobs.filter(j=>j.path==='mode_a'||j.path==='mode_b').length;res.gen+=g;
+    res.rows.push({p,pl,miss,gen:g});
+  });
+  return res;
+}
+const limitDefault=gen=>Math.max(1,Math.ceil(gen*30/100-1e-9));
+
+/* ============ Scene eligibility (spec 13 s2.1) ============ */
+function sceneElig(b,p,ignoreMode){
+  if(p.kind==='apparel')return null;
+  if(!ignoreMode&&b.sceneMode==='off')return {skip:'No scene image: scene images were switched off for this batch.',batchOff:true};
+  const prof=approvedProfile(p.brand);
+  const benchOk=S.makers.some(m=>m.enabled&&m.approved&&(m.uses.includes('scene_full')||m.uses.includes('scene_background')));
+  if(!prof||!prof.enabled||!benchOk)return {skip:'No scene image: scene images are switched off for this brand.',brandOff:true};
+  const scope=S.rights[p.brand]?S.rights[p.brand].scope:'none';
+  if(scope==='none')return {skip:"No scene image: the brand's written permission for generated images is not on record.",brandOff:true,noRights:true};
+  if(p.photos.some(f=>['worn','carried','scene'].includes(f.presence)))return {skip:"No scene image needed: the brand's photos already show it worn or in a scene.",worn:true};
+  if(!p.sub||p.sub==='unknown')return {skip:'No scene image: the type of shoe or bag is not known yet.',unknownSub:true};
+  const entry=prof.subcategories[p.sub]||{};
+  const full=prof.routes.full&&scope==='worn_or_carried'&&(ignoreMode||b.sceneMode!=='still_life')&&!!entry.worn;
+  const comp=prof.routes.composite;
+  if(!full&&!comp)return {skip:'No scene image: the brand allows neither a worn scene nor a still life for this product.'};
+  const route=full?(prof.routePreference==='composite_first'&&comp?'composite':'full'):'composite';
+  return {route,full,comp,stillOnly:scope==='still_life'};
+}
+function sceneSum(b){
+  const prods=b.products.filter(p=>p.kind!=='apparel');const r={n:prods.length,elig:0,worn:0,unknownSub:0,other:0,brandSkip:null,shoes:prods.some(p=>p.kind==='shoe'),bags:prods.some(p=>p.kind==='bag')};
+  prods.forEach(p=>{const e=sceneElig(b,p,true);if(e.skip){if(e.brandOff)r.brandSkip=e;else if(e.worn)r.worn++;else if(e.unknownSub)r.unknownSub++;else r.other++}else r.elig++});
+  return r;
+}
+function sceneOutcome(p,e){let route=e.route,attempts=1,hold=null;
+  if(route==='full'){if(p.scene.hold==='face'){hold='face';attempts=4}else if(p.scene.fullFails){if(e.comp){route='composite';attempts=5}else{hold='scene_realism';attempts=4}}}
+  if(route==='composite'&&p.scene.hold==='paste_back'){hold='paste_back_mismatch';attempts=6}
+  return {route,attempts,hold}}
+
+/* ============ Batch life cycle ============ */
+function addJob(b,p,pj,state){
+  const n=101+b.jobs.filter(j=>j.pid===p.id).length;
+  const j=Object.assign({},pj,{id:b.id+'-'+p.id+'-'+pj.role+'-'+n,pid:p.id,state,n,labels:[],mk:0,wave:b.jobs.length%2});
+  j.retireChs=(pj.retireChs||[]).slice();if(pj.refs)j.refs=pj.refs.slice();
+  j.outcome=pj.path==='carried'?'references_changed':((p.outcomes&&p.outcomes[pj.role])||'pass');
+  j.attempts=j.outcome==='pass'?(hash(j.id)%2?1:2):3;
+  b.jobs.push(j);return j;
+}
+function addScene(b,p,e){const o=sceneOutcome(p,e);const n=101+b.jobs.filter(j=>j.pid===p.id).length;
+  b.jobs.push({id:b.id+'-'+p.id+'-ls-'+n,pid:p.id,role:'ls',path:'scene',state:'planned',n,labels:[],mk:0,wave:b.jobs.length%2,route:o.route,attempts:o.attempts,hold:o.hold,answers:null,retireChs:[]})}
+function startBatch(id){
+  const b=B(id);const s4=summary(b);
+  if(b.makeTicked&&s4.gen>0&&!detectFailed(b)&&!(b.limitTouched?b.limit:String(limitDefault(s4.gen)))){toast('Set a limit for made photos, or untick Make the missing shots.');return}
+  if(!b.limitTouched)b.limit=String(limitDefault(s4.gen));
+  b.detectFailed=detectFailed(b);b.status='running';b.startedAt=TODAY+' '+clock();b.jobs=[];b.sheets=[];b.finalized=false;b.updatedNotice=null;b.capRaised=false;
+  const ctx=ctxFor(b);
+  b.products.forEach(p=>{const pl=planProduct(p,ctx);pl.jobs.forEach(pj=>addJob(b,p,pj,pj.path==='carried'?'held':(pj.waitAnchor?'waiting':'planned')));const e=sceneElig(b,p);if(e&&!e.skip)addScene(b,p,e)});
+  applySwitchEffects();save();go('#batch/'+id+'/products');toast('Started. Brand photos go live as soon as they are ready; made photos never hold them back.');
+}
+function sampled(j){return hash(j.id)%10===0}
+function resolveCheck(b,j){
+  if(j.path==='crop'){j.state=(j.retires&&(S.sw.phase.crops==='review_all'||sampled(j)))?'in_review':'ready';return}
+  if(j.path==='scene'){if(j.hold)j.state='held';else j.state=(S.sw.phase['scene_'+j.route]==='review_all'||sampled(j))?'in_review':'ready';return}
+  if(j.outcome!=='pass')j.state='held';else j.state=(S.sw.phase.made==='review_all'||j.anchor||sampled(j))?'in_review':'ready';
+}
+function capHit(b,j){if(!S.sw.capOut||b.capRaised)return false;return b.jobs.filter(x=>x!==j&&(x.path==='mode_a'||x.path==='mode_b')&&!['planned','making','waiting','dropped'].includes(x.state)&&x.reason!=='cap').length>=4}
+function advanceBatch(b){
+  const before=b.jobs.map(j=>j.state);const liveNow=[];const steps=new Set();
+  b.jobs.forEach((j,i)=>{const s=before[i];
+    if(s==='ready'){j.state='live';liveNow.push(j);steps.add('publish')}
+    else if(s==='checking'){resolveCheck(b,j);steps.add('check')}
+    else if(s==='making'){if(j.mk>=j.wave){if((j.path==='mode_a'||j.path==='mode_b')&&capHit(b,j)){j.state='not_made';j.reason='cap'}else j.state='checking'}else j.mk++;steps.add('make')}
+    else if(s==='planned'){j.state=j.path==='crop'?'checking':'making';steps.add('make')}
+  });
+  applySwitchEffects();
+  const busy=b.jobs.some(j=>['planned','making','checking','ready'].includes(j.state));
+  if(!busy&&!b.finalized){b.finalized=true;snapshot(b,'When the batch finished');steps.add('publish')}
+  else if(liveNow.length&&b.finalized){snapshot(b,'After review');b.updatedNotice=TODAY}
+  b.lastSteps=[...steps];
+  return steps;
+}
+function fastForward(b){for(let i=0;i<12;i++){if(!b.jobs.some(j=>['planned','making','checking','ready'].includes(j.state))&&b.finalized)break;advanceBatch(b)}}
+function applySwitchEffects(){
+  for(const id in S.batches){const b=S.batches[id];if(b.status!=='running')continue;
+    if(S.sw.newer){b.jobs.forEach(j=>{if((j.pid==='A03'||j.pid==='B01'||j.pid==='C01')&&['in_review','held'].includes(j.state)){j.state='not_made';j.reason='superseded';b.supersededNote=true}})}
+  }
+}
+function snapshot(b,label){
+  const v=b.sheets.length+1;const rows=b.products.map(p=>sheetRow(b,p,v));
+  b.sheets.push({v,label,at:TODAY+' '+clock(),rows});
+  b.jobs.forEach(j=>{if(j.state==='live'&&!j.inV)j.inV=v});
+  b.products.forEach(p=>p.photos.forEach(f=>{if(f.newV===v)f.inV=v}));
+}
+function batchState(b){
+  if(b.status==='draft')return {txt:'Not started (step '+(b.step||1)+')',cls:''};
+  if(b.status==='done')return {txt:'Ready to download',cls:'ok'};
+  const att=attentionJobs(b).length;
+  if(b.jobs.some(j=>['planned','making','checking','ready'].includes(j.state)))return {txt:'Processing',cls:'run'};
+  if(att)return {txt:'Needs attention ('+att+')',cls:'warn'};
+  return {txt:'Ready to download',cls:'ok'};
+}
+function attentionJobs(b){return b.jobs.filter(j=>['in_review','held'].includes(j.state))}
+function reconcile(b,p){
+  if(b.status!=='running')return '';
+  const pl=planProduct(p,ctxFor(b));let added=0,dropped=0;
+  pl.jobs.forEach(pj=>{const ex=b.jobs.find(j=>j.pid===p.id&&j.role===pj.role&&!['not_made','dropped','replaced'].includes(j.state));if(!ex){addJob(b,p,pj,pj.waitAnchor?'waiting':'planned');added++}});
+  b.jobs.filter(j=>j.pid===p.id&&j.path!=='scene').forEach(j=>{if(['not_made','dropped','replaced'].includes(j.state))return;
+    if(!pl.jobs.some(pj=>pj.role===j.role)){const filler=p.photos.find(f=>f.role===j.role&&!f.cut);j.state='dropped';j.byBrand=filler?filler.n:null;dropped++}});
+  return (added?added+' new '+plural(added,'shot','shots')+' planned. ':'')+(dropped?dropped+' made '+plural(dropped,'photo is','photos are')+' no longer needed. ':'');
+}
+
+/* ============ Links sheet ============ */
+function liveItems(b,p,ch){
+  const items=[];
+  p.photos.forEach(f=>{if(b.jobs.some(j=>j.pid===p.id&&j.state==='live'&&j.retires===f.n&&j.retireChs.includes(ch)))return;items.push({n:f.n,role:f.role,kind:'brand',cut:f.cut})});
+  b.jobs.filter(j=>j.pid===p.id&&j.state==='live'&&j.path!=='scene').forEach(j=>items.push({n:j.n,role:j.role,kind:j.path==='crop'?'derived':'generated',parent:j.parent}));
+  const used=new Set(),order=[],missing=[];const rank=x=>({brand:0,derived:1,generated:2}[x.kind]*1000+x.n);
+  if(p.kind==='apparel')entriesFor(p,ch).forEach(e=>{const alts=Array.isArray(e)?e:[e];for(const a of alts){const c=items.filter(it=>it.role===a&&!it.cut&&!used.has(it)).sort((x,y)=>rank(x)-rank(y))[0];if(c){used.add(c);order.push(c);return}}missing.push(e)});
+  items.filter(it=>!used.has(it)).sort((x,y)=>x.n-y.n).forEach(it=>order.push(it));
+  const ls=b.jobs.find(j=>j.pid===p.id&&j.path==='scene'&&j.state==='live');
+  let sceneWhy=null;
+  if(ls){const r=sceneChannel(b,p,ch,order.length);if(r.ok)order.push({n:ls.n,role:'ls',kind:'generated',route:ls.route});else sceneWhy=r.why}
+  return {order,missing,sceneWhy};
+}
+function sceneChannel(b,p,ch,count){
+  if(S.rights[p.brand].scope==='none')return {ok:false,why:"Not added: the brand's written permission for generated images is not on record."};
+  if(S.chScene[ch].life==='off'||(S.sw.noScene&&ch==='namshi'))return {ok:false,why:'Not added: this marketplace does not take scene images.'};
+  const max=S.chScene[ch].max;
+  if((S.sw.trendyolFull&&ch==='trendyol')||(max&&count+1>max))return {ok:false,why:'Not added: this marketplace already has its maximum number of photos.'};
+  return {ok:true,pos:count+1};
+}
+function notesFor(b,p){
+  const N=[];
+  if(p.kind==='apparel'){
+    const pl=planProduct(p,ctxFor(b));
+    for(const ch of b.channels)(pl.slots[ch]||[]).forEach(sl=>{
+      if(sl.state==='filled')return;
+      const j=b.jobs.find(x=>x.pid===p.id&&x.role===sl.role&&x.state!=='dropped');
+      let reason=null;
+      if(b.status==='done')reason='not_active';
+      else if(j){if(j.state==='not_made')reason=j.reason;else return}
+      else reason=sl.via.reason;
+      if(!reason)return;
+      N.push(notMade(reason,ch,sl.role,p));
+      if(sl.state==='occupied_cut')N.push(`Photo ${sl.occ} is still used: no replacement could be made.`);
+    });
+    b.jobs.filter(j=>j.pid===p.id&&j.state==='live'&&j.retires).forEach(j=>j.retireChs.forEach(ch=>N.push(`Photo ${j.retires} was replaced on ${CH[ch]} because ${j.retireCut==='head'?'the face was cut at the top edge':'the product was cut at the frame edge'}.`)));
+    pl.cutKept.forEach(n=>N.push(`Photo ${n} is still used: it is cut at the edge and no shot type the channel asks for replaces it.`));
+    b.jobs.filter(j=>j.pid===p.id&&j.state==='dropped'&&j.byBrand&&j.inV).forEach(j=>N.push(`Photo ${j.n} was replaced by the brand's own photo ${j.byBrand}.`));
+  }else{
+    const e=sceneElig(b,p);const j=b.jobs.find(x=>x.pid===p.id&&x.path==='scene'&&x.state!=='dropped');
+    if(!j){if(e&&e.skip)N.push(e.skip)}
+    else if(j.state==='live')b.channels.forEach(ch=>{const L=liveItems(b,p,ch);if(L.sceneWhy)N.push(`${CH[ch]}: ${L.sceneWhy}`);else N.push(`${CH[ch]} img ${L.order.length}: ${j.route==='composite'?"The brand's own product photo placed in an AI-made scene.":"Scene image made by AI from the brand's photos."}`)});
+    else if(j.state==='not_made')N.push(j.reason==='superseded'?'Scene image not used: a newer delivery of this product replaced this one.':'No scene image: a reviewer chose not to use it.');
+    else if(j.state==='replaced')N.push("Generated scene image removed: the brand's own worn photo replaced it.");
+    else if(b.status==='running')N.push('Brand photos are live; the scene image waits for review.');
+  }
+  return [...new Set(N)];
+}
+function sheetRow(b,p,v){
+  const jobsP=b.jobs.filter(j=>j.pid===p.id);
+  const pending=jobsP.some(j=>PENDING.includes(j.state));
+  const fresh=jobsP.filter(j=>j.state==='live'&&!j.inV);
+  const freshBrand=p.photos.some(f=>f.newV===v);
+  let change;
+  if(pending)change='pending_review';
+  else if(fresh.some(j=>j.retires))change='cut_replaced';
+  else if(fresh.some(j=>j.path!=='scene'))change='role_added';
+  else if(fresh.some(j=>j.path==='scene'))change='scene_added';
+  else if(freshBrand)change='updated';
+  else change=(v===1&&b.kind!=='upload')?'new':'unchanged';
+  if(v===1&&b.kind!=='upload'&&!pending)change='new';
+  const ch={};
+  b.channels.forEach(c=>{const L=liveItems(b,p,c);
+    ch[c]={links:L.order.map(it=>`.../${c}/${p.key}_${it.n}.jpg`),
+      shots:L.order.map((it,i)=>`${i+1} ${roleWord(it.role,p)}${it.kind==='derived'?` (cut from photo ${it.parent})`:it.kind==='generated'?' (made)':''}`).join(', '),
+      missing:L.missing.map(e=>entryWords(e,p)).join(', '),
+      ai:L.order.map((it,i)=>it.kind==='generated'?`${i+1} yes`:null).filter(Boolean).join(', ')}});
+  return {key:p.key,name:p.name,brand:BRANDS[p.brand],ch,status:'ok',change,notes:notesFor(b,p)};
+}
+
+/* ============ Drawn stand-in images ============ */
+const VB={fl:'-25 0 150 200',bl:'-25 0 150 200',fm:'9.5 4 81 108',fmk:'-1 4 102 136',hs:'29 5 42 56',bh:'14 4 72 96',fw:'5 80 90 120',bw:'5 80 90 120',dt:'38.75 80 22.5 30',other:'-15 0 150 200',headcut:'9.5 19 81 108',prodcut:'38 18 75 100'};
+const FLATVB={top:'14 18 72 96',dress:'-6 30 112 150',trousers:'12.5 88 75 100',bra:'20 30 60 80',swim:'20 28 60 80'};
+function garment(o){
+  const c=o.color,d=shade(c,-45),base=o.g;let s='';
+  const top=`<path d="M31 38 Q50 33 69 38 L76 60 L70 63 L68 52 L68 94 L32 94 L32 52 L30 63 L24 60 Z" fill="${c}" stroke="${d}" stroke-width=".7"/>`;
+  if(base==='top')s+=top;
+  if(base==='trousers'){if(!o.flat)s+=`<path d="M31 38 Q50 33 69 38 L76 60 L70 63 L68 52 L68 92 L32 92 L32 52 L30 63 L24 60 Z" fill="#efece6" stroke="#cfcac0" stroke-width=".7"/>`;s+=`<path d="M33 88 L67 88 L68 186 L53 186 L50 112 L47 186 L32 186 Z" fill="${c}" stroke="${d}" stroke-width=".7"/><rect x="33" y="88" width="34" height="5" fill="${d}" opacity=".5"/>`}
+  if(base==='dress'){const h=o.long?180:124;s+=`<path d="M32 38 Q50 33 68 38 L70 72 L${o.long?84:78} ${h} L${o.long?16:22} ${h} L30 72 Z" fill="${c}" stroke="${d}" stroke-width=".7"/><path d="M33 72 L67 72" stroke="${d}" stroke-width="1.2"/>`}
+  if(base==='bra')s+=`<path d="M35 50 Q42 43 49 50 L49 58 L35 58Z M51 50 Q58 43 65 50 L65 58 L51 58Z" fill="${c}" stroke="${d}" stroke-width=".7"/><rect x="34" y="57" width="32" height="3" fill="${d}"/><rect x="34" y="88" width="32" height="8" fill="${c}"/>`;
+  if(base==='swim')s+=`<path d="M34 42 L44 40 L50 52 L56 40 L66 42 L66 96 L58 100 L50 92 L42 100 L34 96 Z" fill="${c}" stroke="${d}" stroke-width=".7"/>`;
+  if(o.stripes&&base==='top'){for(let y=46;y<92;y+=7)s+=`<rect x="32.5" y="${y}" width="35" height="2.6" fill="#ffffff" opacity=".9"/>`}
+  if(o.logo&&!o.back&&(base==='top'))s+=`<rect x="41" y="50" width="18" height="11" fill="#fff" stroke="${d}" stroke-width=".6"/><text x="50" y="58.5" font-size="7" text-anchor="middle" fill="#c23a32" font-family="Arial,sans-serif" font-weight="700">${o.logoBad?'V/M':'VM'}</text>`;
+  if(o.back&&base!=='bra')s+=`<path d="M50 38 L50 92" stroke="${d}" stroke-width=".5" opacity=".6"/>`;
+  if(o.back&&o.flat)s+=`<rect x="46" y="38" width="8" height="5" fill="#fff" stroke="${d}" stroke-width=".4"/>`;
+  return s;
+}
+function body(o){
+  const sk=o.skin||'#e3b590',hr=o.hair||'#3b2b22',back=!!o.back,base=o.g;let s='';
+  const legCol=base==='trousers'?o.color:(base==='dress'||base==='swim'||base==='bra')?sk:'#b9b4aa';
+  s+=`<path d="M38 92 L36 186 L47 186 L50 112 L53 186 L64 186 L62 92 Z" fill="${legCol}"/>`;
+  s+=`<ellipse cx="41" cy="189" rx="7" ry="3" fill="#2d2d2d"/><ellipse cx="59" cy="189" rx="7" ry="3" fill="#2d2d2d"/>`;
+  s+=`<path d="M31 42 L23 92" stroke="${sk}" stroke-width="7" stroke-linecap="round"/><path d="M69 42 L77 92" stroke="${sk}" stroke-width="7" stroke-linecap="round"/>`;
+  if(base==='bra'||base==='swim')s+=`<path d="M32 38 Q50 33 68 38 L68 96 L32 96Z" fill="${sk}"/>`;
+  if(base==='bra')s+=`<rect x="32" y="88" width="36" height="10" fill="#cfc8bd"/>`;
+  s+=`<rect x="46" y="29" width="8" height="10" fill="${sk}"/><circle cx="50" cy="21" r="10.5" fill="${sk}"/>`;
+  s+=back?`<circle cx="50" cy="20" r="11" fill="${hr}"/><path d="M39 21 Q50 42 61 21Z" fill="${hr}"/>`:`<path d="M39.3 21 Q40 8 50 8.5 Q60 8 60.7 21 Q58 13 50 13 Q42 13 39.3 21Z" fill="${hr}"/><circle cx="46" cy="21.5" r="1.1" fill="#333"/><circle cx="54" cy="21.5" r="1.1" fill="#333"/><path d="M47 26.5 Q50 28.5 53 26.5" stroke="#a0524a" stroke-width=".9" fill="none"/>`;
+  s+=garment(o);
+  return o.child?`<g transform="translate(10,36) scale(.8)">${s}</g>`:s;
+}
+function wrap(inner,o){o=o||{};
+  const tag=o.tag?`<g><rect x="78" y="5" width="37" height="14" rx="7" fill="rgba(19,26,72,.85)"/><text x="96.5" y="14.6" font-size="8" text-anchor="middle" fill="#fff" font-family="Raleway,Segoe UI,sans-serif" font-weight="600">${o.tag}</text></g>`:'';
+  const cut=o.cutEdge==='top'?`<line x1="0" y1="1.5" x2="120" y2="1.5" stroke="#d93025" stroke-width="2.4" stroke-dasharray="5 3"/>`:o.cutEdge==='right'?`<line x1="118.5" y1="0" x2="118.5" y2="160" stroke="#d93025" stroke-width="2.4" stroke-dasharray="5 3"/>`:'';
+  return `<svg class="ph" viewBox="0 0 120 160" role="img" aria-label="${esc(o.alt||'photo')}"><rect width="120" height="160" fill="${o.bg||'#ecebe7'}"/>${inner}${cut}${tag}</svg>`}
+const nest=(vb,c)=>`<svg x="0" y="0" width="120" height="160" viewBox="${vb}" preserveAspectRatio="xMidYMid slice">${c}</svg>`;
+function fabric(o){const c=o.color,d=shade(c,-30);let s=`<rect x="-200" y="-200" width="600" height="600" fill="${c}"/>`;for(let i=-20;i<40;i++)s+=`<path d="M${i*6} 0 L${i*6+160} 160" stroke="${d}" stroke-width=".7" opacity=".45"/>`;if(o.stripes)for(let y=0;y<160;y+=22)s+=`<rect x="0" y="${y}" width="120" height="8" fill="#fff" opacity=".9"/>`;if(o.logo)s+=`<text x="60" y="95" font-size="34" text-anchor="middle" fill="#c23a32" font-family="Arial,sans-serif" font-weight="700" opacity=".85">VM</text>`;return s}
+function apparelImg(p,role,o){
+  o=o||{};const g={g:p.g,color:p.color,long:p.length==='long',stripes:p.stripes,logo:p.logo,logoBad:o.logoBad,child:o.child,hair:o.hair,back:o.view==='back'||BACK.has(role)};
+  let inner,bg='#ecebe7';
+  if(role==='fc'){inner=nest('20 30 80 107',fabric(g))}
+  else if(role==='flat'||role==='fb'){inner=nest(FLATVB[p.g]||FLATVB.top,garment(Object.assign(g,{flat:true,back:role==='fb'})));bg='#f4f3ef'}
+  else if(role==='pk'){const n=o.pieces||p.packOf||3;let s='';const cols=[p.color,shade(p.color,-60),'#9cc3e4'];for(let i=0;i<n;i++)s+=`<g transform="translate(${(n===2?8:-10)+i*(n===2?50:38)},40) scale(.6)">${garment({g:'top',color:cols[i%3]})}</g>`;inner=s;bg='#f4f3ef'}
+  else{let vb=VB[role]||VB.other;if(role==='fm'&&p.length==='long')vb=VB.fmk;if(o.cut==='head')vb=VB.headcut;if(o.cut==='product')vb=VB.prodcut;inner=nest(vb,body(g))}
+  return wrap(inner,{bg,tag:o.tag,cutEdge:o.cut==='head'?'top':o.cut==='product'?'right':null,alt:o.alt||roleWord(role,p)});
+}
+function shoeShape(sub,c,c2){
+  const d=shade(c,-50),acc=c2||d;let s='';
+  const sole=`<path d="M2 40 Q1 48 12 48 L90 48 Q100 48 98 40 Z" fill="#f6f6f4" stroke="#9a9a9a" stroke-width="1"/>`;
+  if(sub==='boot')s=`<path d="M8 41 L10 2 L44 2 L46 24 L84 30 Q98 33 97 41 Z" fill="${c}" stroke="${d}" stroke-width="1"/><path d="M12 10 L40 10" stroke="${d}" stroke-width="2"/>`+sole;
+  else if(sub==='loafer_slip_on'||sub==='lace_up_comfort')s=`<path d="M4 41 Q8 26 26 27 L60 25 Q90 27 97 41 Z" fill="${c}" stroke="${d}" stroke-width="1"/><path d="M58 29 L80 33" stroke="${acc}" stroke-width="3"/>`+sole.replace('#f6f6f4',shade(c,-70));
+  else if(sub==='sandal')s=`<path d="M3 44 L97 44" stroke="${shade(c,-40)}" stroke-width="6" stroke-linecap="round"/><path d="M20 42 Q30 20 42 42 M52 42 Q64 18 76 42 M12 42 L22 22 L32 22" stroke="${c}" stroke-width="4.5" fill="none" stroke-linecap="round"/>`;
+  else if(sub==='slide_flip_flop')s=`<path d="M3 44 L97 44" stroke="#2b2b2b" stroke-width="7" stroke-linecap="round"/><path d="M38 42 Q60 14 90 42 Z" fill="${c}" stroke="${d}" stroke-width="1"/>`;
+  else if(sub==='slipper')s=`<path d="M5 42 Q8 24 40 25 Q82 23 97 42 Z" fill="${c}" stroke="${d}" stroke-width="1"/><path d="M3 44 L97 44" stroke="${shade(c,-40)}" stroke-width="5" stroke-linecap="round"/>`;
+  else{s=`<path d="M4 41 Q6 22 20 20 L40 13 Q55 9 62 21 L86 29 Q98 32 97 41 Z" fill="${c}" stroke="${d}" stroke-width="1"/><path d="M40 17 L44 25 M46 15 L50 24 M52 14 L56 23" stroke="${acc}" stroke-width="1.6"/><path d="M20 33 Q45 26 70 36" stroke="${acc}" stroke-width="3" fill="none"/>`+sole;
+    if(sub==='football')s+=`<g fill="#555">${[14,30,50,70,86].map(x=>`<rect x="${x}" y="47" width="4" height="5" rx="1"/>`).join('')}</g>`}
+  return s;
+}
+function bagShape(sub,c){const d=shade(c,-50);
+  if(sub==='clutch')return `<rect x="8" y="30" width="84" height="44" rx="5" fill="${c}" stroke="${d}"/><path d="M8 32 L50 58 L92 32" fill="${shade(c,15)}" stroke="${d}"/><circle cx="50" cy="57" r="3" fill="#c9a24a"/>`;
+  if(sub==='shoulder')return `<path d="M24 34 Q50 -40 76 34" stroke="${d}" stroke-width="3" fill="none"/><rect x="16" y="34" width="68" height="54" rx="8" fill="${c}" stroke="${d}"/><rect x="44" y="52" width="12" height="7" rx="2" fill="#c9a24a"/>`;
+  return `<path d="M32 40 Q50 4 68 40" stroke="${d}" stroke-width="5" fill="none"/><path d="M14 40 L86 40 L80 92 L20 92 Z" fill="${c}" stroke="${d}"/><rect x="44" y="50" width="12" height="7" rx="2" fill="#c9a24a"/>`}
+function packshot(p,f){
+  if(f.presence==='worn')return sceneSVG(p,{route:'full',studio:true,alt:'worn on legs, studio'});
+  if(f.presence==='scene')return sceneSVG(p,{route:'composite',alt:'in a real setting'});
+  let s;
+  if(p.kind==='bag'){s=`<g transform="translate(10,${f.view==='back'?36:30}) scale(1)">${bagShape(p.sub,f.view==='back'?shade(p.color,-12):p.color)}</g>`}
+  else if(f.view==='pair')s=`<g transform="translate(6,52) scale(.9)">${shoeShape(p.sub,p.color,p.color2)}</g><g transform="translate(18,78) scale(.9)">${shoeShape(p.sub,p.color,p.color2)}</g>`;
+  else if(f.view==='sole')s=`<g transform="translate(60,80) rotate(-90) scale(1)"><path d="M-45 -16 Q-50 0 -45 16 L40 20 Q55 0 40 -20 Z" fill="#e8e8e6" stroke="#999"/>${Array.from({length:14},(_,i)=>`<circle cx="${-38+i*6}" cy="${i%2?-6:6}" r="2" fill="#bbb"/>`).join('')}</g>`;
+  else s=`<g transform="translate(10,58)">${shoeShape(p.sub,p.color,p.color2)}</g>`;
+  return wrap(s,{bg:'#f7f7f5',alt:'packshot, '+(f.view||'side')});
+}
+const SCENE_BG={sneaker:['#d9cbb8','#a9a39a'],running_sports:['#f3c9a0','#7d8f99'],loafer_slip_on:['#e9e2d6','#cfc6b8'],lace_up_comfort:['#e9e2d6','#cfc6b8'],football:['#203a2a','#3f8a4a'],boot:['#e2c79e','#b49a72'],sandal:['#9fd3e0','#c89f6f'],slide_flip_flop:['#9fd3e0','#c89f6f'],slipper:['#efe4d8','#b98f86'],handbag:['#e8e0d4','#cbbfae'],shoulder:['#e8e0d4','#cbbfae'],clutch:['#3b3550','#6b5f78'],unknown:['#ddd','#bbb']};
+function sceneParts(p,o){
+  const bg=o.studio?['#f7f7f5','#f0efeb']:(SCENE_BG[p.sub]||SCENE_BG.sneaker);const sk='#e3b590';let s=`<rect x="0" y="0" width="120" height="160" fill="${bg[0]}"/><rect x="0" y="104" width="120" height="56" fill="${bg[1]}"/><path d="M0 104 L120 104" stroke="${shade(bg[1],-25)}" stroke-width=".8"/>`;let box;
+  if(o.route==='composite'){
+    s+=`<rect x="0" y="108" width="120" height="16" fill="${shade(bg[1],20)}"/><rect x="0" y="124" width="120" height="3" fill="${shade(bg[1],-30)}"/><ellipse cx="60" cy="110" rx="40" ry="4" fill="rgba(0,0,0,.18)"/>`;
+    if(p.kind==='bag'){s+=`<g transform="translate(32,44) scale(.56)">${bagShape(p.sub,p.color)}</g>`;box={x:34,y:44,w:52,h:66}}
+    else{s+=`<g transform="translate(14,70) scale(.85)">${shoeShape(p.sub,p.color,p.color2)}</g><g transform="translate(26,80) scale(.75)">${shoeShape(p.sub,p.color,p.color2)}</g>`;box={x:14,y:78,w:90,h:34}}
+  }else if(p.kind==='bag'){
+    const coat='#5b4b43';
+    if(p.sub==='clutch'){s+=`<path d="M26 -2 L94 -2 L98 150 L22 150 Z" fill="#1f2338"/><path d="M30 40 L58 84 M90 40 L62 84" stroke="#1f2338" stroke-width="14" stroke-linecap="round"/><circle cx="58" cy="86" r="5" fill="${sk}"/><circle cx="62" cy="86" r="5" fill="${sk}"/><g transform="translate(36,72) scale(.48)">${bagShape('clutch',p.color)}</g>`;box={x:36,y:84,w:44,h:24}}
+    else{s+=`<path d="M24 -2 L92 -2 L96 140 L20 140 Z" fill="${coat}"/><path d="M88 6 L104 92" stroke="${coat}" stroke-width="13" stroke-linecap="round"/><circle cx="104" cy="96" r="5.5" fill="${sk}"/>`;
+      if(p.sub==='shoulder'){s+=`<path d="M80 -2 L90 70" stroke="${shade(p.color,-40)}" stroke-width="2.5"/><g transform="translate(70,64) scale(.5)">${bagShape('handbag',p.color).replace(/<path d="M32 40 Q50 4 68 40"[^>]*\/>/,'')}</g>`;box={x:74,y:82,w:38,h:30}}
+      else{s+=`<g transform="translate(80,74) scale(.44)">${bagShape('handbag',p.color)}</g>`;box={x:84,y:76,w:34,h:42}}}
+    if(o.face)s+=`<circle cx="58" cy="2" r="13" fill="${sk}"/><circle cx="54" cy="4" r="1.2" fill="#333"/><circle cx="62" cy="4" r="1.2" fill="#333"/><path d="M55 9 Q58 11 61 9" stroke="#a0524a" stroke-width="1" fill="none"/>`;
+  }else{
+    const feet=['sandal','slide_flip_flop','slipper'].includes(p.sub);const kids=p.audience==='kids'||p.audience==='unknown';
+    if(feet){s+=`<path d="M36 -2 L50 -2 L49 116 L37 116 Z M66 -2 L80 -2 L79 112 L67 112 Z" fill="${sk}"/>`}
+    else if(kids){s+=`<path d="M36 -2 L50 -2 L49 108 L37 108 Z M66 -2 L80 -2 L79 104 L67 104 Z" fill="${sk}"/><rect x="36" y="96" width="14" height="12" fill="#fafafa"/><rect x="66" y="92" width="14" height="12" fill="#fafafa"/>`}
+    else{const tr=p.audience==='women'?'#e8dfcf':'#2f3a5a';s+=`<path d="M28 -2 L56 -2 L54 ${p.audience==='women'?96:106} L32 ${p.audience==='women'?96:106} Z M62 -2 L90 -2 L88 ${p.audience==='women'?92:102} L66 ${p.audience==='women'?92:102} Z" fill="${tr}"/>`;if(p.audience==='women')s+=`<rect x="36" y="96" width="14" height="12" fill="${sk}"/><rect x="70" y="92" width="14" height="12" fill="${sk}"/>`}
+    s+=`<g transform="translate(18,92) scale(.48)">${shoeShape(p.sub,p.color,p.color2)}</g><g transform="translate(50,88) scale(.48)">${shoeShape(p.sub,p.color,p.color2)}</g>`;box={x:18,y:88,w:82,h:28};
+  }
+  return {s,box};
+}
+function windowRect(ch,box){const sc=120/1792,w=WINDOWS[ch][0]*sc,h=WINDOWS[ch][1]*sc;const cx=box.x+box.w/2,cy=box.y+box.h/2;return {x:Math.max(0,Math.min(120-w,cx-w/2)),y:Math.max(0,Math.min(160-h,cy-h/2)),w,h}}
+function sceneSVG(p,o){const {s,box}=sceneParts(p,o);let over='';
+  if(o.box)over+=`<rect x="${box.x}" y="${box.y}" width="${box.w}" height="${box.h}" fill="none" stroke="#fff" stroke-width="1" stroke-dasharray="3 2" opacity=".85"/>`;
+  if(o.windows)o.windows.forEach((ch,i)=>{const r=windowRect(ch,box);over+=`<rect x="${r.x+.5}" y="${r.y+.5}" width="${r.w-1}" height="${r.h-1}" fill="none" stroke="${['#FF5800','#4aa3ff','#ffd400','#7be07b'][i%4]}" stroke-width=".9" opacity=".9"/>`});
+  if(o.vb){return `<svg class="ph" viewBox="${o.vb}" preserveAspectRatio="xMidYMid meet" role="img" aria-label="${esc(o.alt||'crop')}">${s}</svg>`}
+  return wrap(s+over,{bg:'#ddd',tag:o.tag,alt:o.alt||'scene image'});
+}
+function cropSVG(p,j,ch){const {box}=sceneParts(p,{route:j.route,face:j.hold==='face'});const r=windowRect(ch,box);return sceneSVG(p,{route:j.route,face:j.hold==='face',vb:`${r.x} ${r.y} ${r.w} ${r.h}`,alt:CH[ch]+' crop'})}
+function photoImg(p,f){if(p.kind!=='apparel')return packshot(p,f);return apparelImg(p,f.role,{cut:f.cut,view:f.view,child:f.child,alt:'Photo '+f.n+', '+roleWord(f.role,p)})}
+function jobImg(p,j){
+  if(j.path==='scene')return sceneSVG(p,{route:j.route,face:j.hold==='face',tag:'made'});
+  if(j.path==='crop')return apparelImg(p,j.role,{alt:'cut from photo '+j.parent});
+  if(j.role==='pk')return apparelImg(p,'pk',{tag:'made',pieces:j.outcome==='pieces_mismatch'?2:p.packOf});
+  return apparelImg(p,j.role,{tag:'made',logoBad:j.outcome==='logo_changed',hair:j.path==='mode_b'?'#6b4a2a':null,alt:'made photo, '+roleWord(j.role,p)});
+}
+function faceSVG(hair,i){const sk=['#e3b590','#d9a77c','#c98f66','#e8c1a0'][i%4];return `<svg viewBox="0 0 40 40" role="img" aria-label="face"><rect width="40" height="40" fill="#ecebe7"/><circle cx="20" cy="22" r="11" fill="${sk}"/><path d="M8.5 21 Q9 7 20 7.5 Q31 7 31.5 21 Q29 13 20 13 Q11 13 8.5 21Z" fill="${hair}"/><circle cx="16" cy="22" r="1.2" fill="#333"/><circle cx="24" cy="22" r="1.2" fill="#333"/><path d="M17 27 Q20 29 23 27" stroke="#a0524a" stroke-width="1" fill="none"/></svg>`}
+
+/* ============ Router and shell ============ */
+function route(){return (location.hash||'#home').slice(1).split('/')}
+function go(h){if(location.hash===h)render();else location.hash=h}
+window.addEventListener('hashchange',()=>{S.focus=null;S.kb=null;render();window.scrollTo(0,0)});
+let detTimer=null;
+function render(){
+  if(detTimer){clearInterval(detTimer);detTimer=null}
+  document.documentElement.dataset.theme=S.theme||'';if(!S.theme)document.documentElement.removeAttribute('data-theme');
+  $('#seat').value=S.seat;
+  const r=route();
+  $('#nav').innerHTML=`<a href="#home" class="${r[0]!=='admin'?'on':''}">Catalog images</a>`+(S.seat==='admin'?`<a href="#admin/models" class="${r[0]==='admin'?'on':''}">Admin</a>`:'');
+  let h='';
+  try{
+    if(r[0]==='home'||r[0]==='')h=vHome();
+    else if(r[0]==='new')h=vWizard(+r[1]||1);
+    else if(r[0]==='batch')h=vBatch(r[1],r[2]);
+    else if(r[0]==='product')h=vProduct(r[1],r[2]);
+    else if(r[0]==='admin')h=vAdmin(r[1]||'models');
+    else h=vHome();
+  }catch(e){h=`<div class="err"><b>Prototype error.</b> ${esc(e.message)}</div>`;console.error(e)}
+  $('#app').innerHTML=h;
+  if(!$('#drawer').hidden)renderDrawer();
+  afterRender(r);
+  save();
+}
+function afterRender(r){
+  if(r[0]==='new'&&+r[1]===4){const b=B(S.wiz.bid);if(b&&b.detect.state==='running'){detTimer=setInterval(()=>{b.detect.done=Math.min(b.detect.total,b.detect.done+1+(hash(String(Date.now()))%2));if(b.detect.done>=b.detect.total){finishDetect(b);render()}else{const el=$('#detline');if(el)el.textContent=`Checking which shots each product has (${b.detect.done} of ${b.detect.total})`;const bar=$('#detbar');if(bar)bar.style.width=(100*b.detect.done/b.detect.total)+'%'}},900)}}
+  if(S.focus){const el=document.querySelector(`[data-card="${S.focus}"]`);if(el)el.classList.add('focus')}
+}
+function toast(msg){const t=$('#toast');t.textContent=msg;t.hidden=false;clearTimeout(toast.t);toast.t=setTimeout(()=>t.hidden=true,4200)}
+function modal(html){$('#modal').innerHTML=`<div class="modal" onclick="if(event.target===this)closeModal()"><div class="card" role="dialog" aria-modal="true">${html}</div></div>`;const f=$('#modal input,#modal select,#modal button');if(f)f.focus()}
+function closeModal(){$('#modal').innerHTML=''}
+function setSeat(v){S.seat=v;S.kb=null;render();toast('You are now '+seatName(v)+'.')}
+
+/* ============ Home ============ */
+function vHome(){
+  const rows=['A','B','C','CA','L1','L2'].map(id=>{const b=B(id);const st=batchState(b);const ch=(b.channels.length?b.channels:b.defCh).map(c=>CH[c]).join(', ');
+    return `<tr class="row" onclick="openBatch('${id}')"><td><b>${BRANDS[b.brand]}</b></td><td>${esc(b.name)}</td><td>${ch}</td><td>${b.products.length}</td><td><span class="pill ${st.cls}">${st.txt}</span></td><td>${b.created}</td></tr>`}).join('');
+  const ups=Object.values(S.batches).filter(b=>b.kind==='upload').map(b=>{const st=batchState(b);return `<tr class="row" onclick="openBatch('${b.id}')"><td><b>${BRANDS[b.brand]}</b></td><td>${esc(b.name)}</td><td>${b.channels.map(c=>CH[c]).join(', ')}</td><td>1</td><td><span class="pill ${st.cls}">${st.txt}</span></td><td>Today</td></tr>`}).join('');
+  const live=[B('L1'),B('L2')].flatMap(b=>b.products.map(p=>`<li><a href="#product/${b.id}/${p.id}">${p.key}</a>, ${esc(p.name)} <span class="muted sm">(live on ${b.channels.map(c=>CH[c]).join(' and ')})</span></li>`)).join('');
+  return `<div class="hdr"><div><h1>Catalog images</h1><p class="lead">Turn a brand's product photos into marketplace-ready images and get a sheet of links. One brand per batch.</p></div><button class="btn primary" onclick="newBatch()">New batch</button></div>
+  <div class="tw"><table><thead><tr><th>Brand</th><th>Batch</th><th>Channels</th><th>Products</th><th>State</th><th>Created</th></tr></thead><tbody>${rows}${ups}</tbody></table></div>
+  <div class="card" style="margin-top:20px"><h3>Products already live</h3><p class="muted">Open one to try "Upload photos", the only way to complete a product that is already live.</p><ul class="lines">${live}</ul></div>
+  <div class="protobox"><span class="pbadge">Prototype only</span> Nothing here is real. Use <b>Test controls</b> to switch scenarios and press <b>Advance time</b> to move the fake worker. <b>Test guide</b> lists 30 things to try, each with a "Take me there" link.</div>`;
+}
+function openBatch(id){const b=B(id);if(b.status==='draft'){S.wiz.bid=id;go('#new/'+(b.step||1))}else go('#batch/'+id)}
+function newBatch(){S.wiz.bid=null;go('#new/1')}
+
+/* ============ Wizard ============ */
+function stepsBar(n,b){const names=['Brand and files','Check what we found','Where will these images go?','Start'];
+  return `<ol class="steps">${names.map((x,i)=>{const done=i+1<n;const chg=b&&b.kind==='upload'&&(i===1||i===2);return `<li class="${i+1===n?'on':done?'done':''}">${x}${chg?` <button class="link sm" onclick="go('#new/${i+1}')">Change</button>`:''}</li>`}).join('')}</ol>`}
+const FOLDERS={vero_moda:[['A','Vero Moda AW26 drop: 16 products, 60 photos']],us_polo:[['B','US Polo shoes and bags: 15 products, 31 photos'],['C','US Polo mixed drop: 6 products, 21 photos']],campus:[['CA','Campus sneakers: 5 products, 10 photos']]};
+function vWizard(n){
+  let b=S.wiz.bid?B(S.wiz.bid):null;
+  if(n>1&&!b)return vWizard(1);
+  if(b){b.step=n}
+  const head=b&&b.kind==='upload'?`Add photos to ${b.products[0].key}`:'New batch';
+  if(n===1){
+    const brand=b?b.brand:(S.wiz.brand||'');
+    const folders=(FOLDERS[brand]||[]).map(([id,txt])=>`<button class="btn ${b&&b.id===id?'primary':'ghost'} sm" style="margin:4px" onclick="pickFolder('${id}')">${txt}</button>`).join('');
+    const files=b&&b.folder?(b.kind==='upload'?`<div class="notice ok">${b.products[0].key}_${b.products[0].photos.length}.jpg collected (1 photo). Every photo you drop here belongs to ${b.products[0].key}.</div>`:`<div class="notice ok">Collected ${b.products.reduce((a,p)=>a+p.photos.length,0)} of ${b.products.reduce((a,p)=>a+p.photos.length,0)} files from "${esc(b.name)}".</div>`):'';
+    const drop=b&&b.kind==='upload'?`<div class="drop" onclick="uploadDrop()"><b>Drop photos of this product here</b>Or click to choose. Prototype: adds one back-view photo.</div>`:`<div class="drop" onclick="${brand?'':`toast('Choose a brand first.')`}"><b>Drop images, folders, zips or a links sheet here</b>${brand?'Prototype: pick a sample folder below.':'Choose a brand first.'}</div><div style="margin-top:10px">${folders}</div>`;
+    return `<h1>${head}</h1>${stepsBar(1,b)}<div class="grid2"><div class="card"><label class="f" for="brand">Which brand?</label><select id="brand" class="full" ${b&&b.kind==='upload'?'disabled':''} onchange="S.wiz.brand=this.value;S.wiz.bid=null;render()"><option value="">Choose a brand</option>${Object.keys(BRANDS).map(k=>`<option value="${k}" ${brand===k?'selected':''}>${BRANDS[k]}</option>`).join('')}</select>
+      <label class="f" for="ptype" style="margin-top:14px">What kind of products?</label><select id="ptype" class="full"><option>Detect automatically (recommended)</option><option>Footwear</option><option>Apparel on a model</option><option>Apparel laid flat</option><option>Bags and accessories</option></select><p class="help">A folder can mix footwear, apparel and accessories; we detect each product separately.</p></div>
+      <div class="card"><label class="f">What do you have?</label>${drop}${files}</div></div>
+      <div class="hdr" style="margin-top:20px"><button class="btn ghost" onclick="go('#home')">Cancel</button><button class="btn primary" ${b&&b.folder?'':'disabled'} onclick="go('${b&&b.kind==='upload'?'#new/4':'#new/2'}')">Continue</button></div>`;
+  }
+  if(n===2){
+    return `<h1>${head}</h1>${stepsBar(2,b)}<p class="lead">We have looked at what you gave us. The usual answers are already selected; press Continue if they look right.</p>
+      <div class="card"><h3>How should we tell products apart?</h3><label class="opt"><input type="radio" name="idm" checked><span>By file name before the last _number <small>Recommended: ${b.products[0].key}_1.jpg, ${b.products[0].key}_2.jpg. This is what we detected.</small></span></label><label class="opt"><input type="radio" name="idm"><span>By folder name <small>One folder per product.</small></span></label></div>
+      <div class="card"><h3>Photo formats</h3><p>${b.products.reduce((a,p)=>a+p.photos.length,0)} JPG. No action needed.</p></div>
+      <div class="hdr" style="margin-top:20px"><button class="btn ghost" onclick="go('#new/1')">Back</button><button class="btn primary" onclick="go('#new/3')">Continue</button></div>`;
+  }
+  if(n===3){
+    const card=c=>`<label class="ch ${b.channels.includes(c)?'on':''}"><input type="checkbox" ${b.channels.includes(c)?'checked':''} onchange="toggleCh('${c}',this.checked)"><span><b>${CH[c]}</b><small>${b.defCh.includes(c)?'Usual for this sample':'Made to its own rules'}</small></span></label>`;
+    return `<h1>${head}</h1>${stepsBar(3,b)}<p class="lead">Tick every marketplace you want images for. Each one is made to that marketplace's own rules. Nothing is pre-selected.</p>
+      <h3 style="margin:14px 0 8px">Usually listed first</h3><div class="chan">${CH_P1.map(card).join('')}</div>
+      <h3 style="margin:18px 0 8px">Also available</h3><div class="chan">${CH_ORDER.filter(c=>!CH_P1.includes(c)).map(card).join('')}</div>
+      <p class="help"><button class="link" onclick="B(S.wiz.bid).channels=B(S.wiz.bid).defCh.slice();render()">Prototype: tick the usual ones for this sample (${b.defCh.map(c=>CH[c]).join(', ')})</button></p>
+      <div class="hdr" style="margin-top:20px"><button class="btn ghost" onclick="go('#new/2')">Back</button><button class="btn primary" ${b.channels.length?'':'disabled'} onclick="go('#new/4')">Continue</button></div>`;
+  }
+  return vStep4(b,head);
+}
+function pickFolder(id){S.batches[id]=makeBatches()[id];const b=B(id);b.folder=true;b.step=1;S.wiz.bid=id;S.wiz.brand=b.brand;render()}
+function toggleCh(c,on){const b=B(S.wiz.bid);if(on&&!b.channels.includes(c))b.channels.push(c);if(!on)b.channels=b.channels.filter(x=>x!==c);b.channels.sort((x,y)=>CH_ORDER.indexOf(x)-CH_ORDER.indexOf(y));render()}
+function uploadDrop(){const b=B(S.wiz.bid);const p=b.products[0];if(b.folder){toast('This photo is already added.');return}
+  if(p.kind==='apparel')p.photos.push(ph(p.photos.length+1,'bh',{newV:1,note:'uploaded back view'}));else p.photos.push(pk(p.photos.length+1,'side',{newV:1}));
+  b.folder=true;render()}
+function finishDetect(b){b.detect.done=b.detect.total;b.detect.state='done'}
+function vStep4(b,head){
+  if(!b.channels.length)b.channels=b.defCh.slice();
+  if(b.detect.state==='idle'){const t=b.products.length;b.detect={state:b.kind==='upload'?'done':'running',done:b.kind==='upload'?t:Math.round(t*0.4),total:t}}
+  const photos=b.products.reduce((a,p)=>a+p.photos.length,0);
+  const running=b.detect.state==='running';const df=detectFailed(b);
+  const s=summary(b);const sc=sceneSum(b);
+  let html=`<h1>${head}</h1>${stepsBar(4,b)}${b.kind==='upload'?`<p class="lead">Only ${b.products[0].key}. Marketplaces it is live on are ticked: ${b.channels.map(c=>CH[c]).join(', ')}.</p>`:''}
+  <div class="kpis"><div class="kpi"><b>${b.products.length}</b><span>products found</span></div><div class="kpi"><b>${photos}</b><span>photos</span></div><div class="kpi o"><b>${b.channels.length}</b><span>marketplaces</span></div><div class="kpi o"><b>${(photos*b.channels.length).toLocaleString()}</b><span>images will be made</span></div></div>
+  <div class="banner"><div class="line"><span>Collected ${photos} of ${photos} files</span><div class="bar"><i style="width:100%"></i></div></div>`;
+  if(running)html+=`<div class="line"><span id="detline">Checking which shots each product has (${b.detect.done} of ${b.detect.total})</span><div class="bar"><i id="detbar" style="width:${100*b.detect.done/b.detect.total}%"></i></div></div><div class="protobox" style="margin:4px 0 0">Prototype: this finishes by itself in a few seconds, or press <button class="link" onclick="advance()">Advance time</button>.</div>`;
+  html+=`</div>`;
+  if(!running&&s.apparel){
+    if(df){html+=`<div class="card" style="margin-top:16px"><h3>Missing shots</h3><p>We could not check which shots are missing. They will be found while the batch runs; only cuts from bigger photos will be done.</p></div>`}
+    else if(s.missing){
+      const lines=[];
+      lines.push(`${s.missing} ${plural(s.missing,'product is','products are')} missing shots the marketplaces ask for.`);
+      Object.entries(s.groups).sort((a,b)=>b[1].n-a[1].n).forEach(([g,G])=>{const parts=[];
+        if(G.cut)parts.push(G.cut===G.n?(G.n===1?'it will be cut from a bigger photo':`all ${G.n} will be cut from a bigger photo`):`${G.cut} will be cut from a bigger photo`);
+        if(G.made)parts.push(G.made===G.n&&G.n>1?`all ${G.n} will be made`:G.made===G.n?'it will be made':`${G.made} will be made`);
+        if(G.not)parts.push(G.not===G.n&&G.n>1?`none can be made yet`:G.not===G.n?'it cannot be made yet':`${G.not} cannot be made yet`);
+        lines.push(`${G.n} ${plural(G.n,'is','are')} missing ${GROUP_WORDS[g]||g}: ${parts.join(', ')}.`)});
+      if(s.faceCut)lines.push(`${s.faceCut} ${plural(s.faceCut,'has','have')} a photo with the face cut at the top edge. It is replaced only after the new photo is approved.`);
+      if(s.productCut)lines.push(`${s.productCut} ${plural(s.productCut,'has','have')} a photo with the product cut at the frame edge. It is replaced only after the new photo is approved.`);
+      if(s.oneOnly)lines.push(`${s.oneOnly} cannot be completed: only one photo was sent, so a back view would be guessed. Add more photos to complete ${plural(s.oneOnly,'it','them')}.`);
+      if(s.unknown)lines.push(s.unknown===1?`1 product: we could not tell what kind of garment it is. It gets cuts only until you pick a garment type on the batch page.`:`${s.unknown} products: we could not tell what kind of garment they are. They get cuts only until you pick a garment type on the batch page.`);
+      if(s.modeB)lines.push(`${s.modeB} ${plural(s.modeB,'has','have')} flat lays only: ${plural(s.modeB,'its','their')} shots are made on the brand's model, starting with one full-length photo that two people approve first.`);
+      if(s.kids)lines.push(`${s.kids} ${plural(s.kids,'is','are')} for kids: flat shots and cuts only. A made photo never shows a child.`);
+      const brandOn=S.sw.making[b.brand];const lim=b.limitTouched?b.limit:String(limitDefault(s.gen));
+      let mk='';
+      if(!brandOn)mk=`<p class="notice">Making new photos is off for this brand. Only cuts from bigger photos will be done.</p>`;
+      else{mk=`<label class="opt"><input type="checkbox" ${b.makeTicked?'checked':''} onchange="setMake(this.checked)"><span><b>Make the missing shots</b></span></label>`;
+        if(b.makeTicked&&s.gen>0)mk+=`<div class="inline-sel"><span>Making ${s.gen} new ${plural(s.gen,'photo','photos')} costs about ${usd(s.gen*0.2)}. Limit for this batch:</span><input type="number" min="0" step="1" id="limit" style="width:90px" value="${esc(lim)}" oninput="setLimit(this.value)" aria-label="Limit for this batch in USD"><span>USD</span></div>`;
+        else if(b.makeTicked)mk+=`<p class="help">Nothing needs to be made; cuts from bigger photos cost nothing.</p>`;}
+      const rev=S.sw.phase.made==='review_all'?'Every made photo is checked by two people before it goes live.':'A sample of made photos is checked by two people.';
+      html+=`<div class="card" style="margin-top:16px"><h3>Missing shots</h3><ul class="lines">${lines.map(l=>`<li>${esc(l)}</li>`).join('')}</ul>${mk}<p class="help">${rev}</p>
+      <details style="margin-top:10px" ${S.open.plan?'open':''} ontoggle="S.open.plan=this.open"><summary>See the plan per product</summary>${planTable(b,s)}</details></div>`;
+    }else html+=`<div class="card" style="margin-top:16px"><h3>Missing shots</h3><p>Every product has the shots the marketplaces ask for.</p></div>`;
+  }
+  if(!running&&sc.n)html+=sceneLine(b,sc,df);
+  const s4=summary(b);const limEmpty=b.makeTicked&&S.sw.making[b.brand]&&s4.gen>0&&!df&&!(b.limitTouched?b.limit:'x');
+  html+=`<div class="hdr" style="margin-top:20px"><button class="btn ghost" onclick="go('#new/${b.kind==='upload'?1:3}')">Back</button><div style="text-align:right"><p class="help" id="startmsg" style="color:var(--bad)">${running?'Start waits until we finish checking which shots each product has.':limEmpty?'Set a limit for made photos, or untick Make the missing shots.':''}</p><span class="help" style="display:inline;margin-right:12px">Once you start, you cannot add more photos to this batch.</span><button class="btn primary" id="startbtn" ${running||limEmpty?'disabled':''} onclick="startBatch('${b.id}')">Start processing</button></div></div>`;
+  return html;
+}
+function planTable(b,s){return `<div class="tw" style="margin-top:8px"><table><thead><tr><th>Product</th><th>Garment type</th><th>What happens</th></tr></thead><tbody>${s.rows.map(r=>{const items=[];const seen=new Set();for(const ch in r.pl.slots)r.pl.slots[ch].forEach(sl=>{if(sl.state==='filled'||seen.has(sl.role))return;seen.add(sl.role);items.push(`${roleWord(sl.role,r.p)}: ${sl.via.path==='crop'?`cut from photo ${sl.via.parent}`:sl.via.path==='mode_b'?"made on the brand's model":sl.via.path==='mode_a'?'made':sl.via.path==='carried'?'made earlier, needs a check':'not made'}`)});return `<tr><td><b>${r.p.key}</b><br><span class="muted sm">${esc(r.p.name)}</span></td><td>${garmentSelect(b,r.p)}</td><td class="sm">${items.length?items.join('<br>'):'<span class="muted">Complete</span>'}</td></tr>`}).join('')}</tbody></table></div>`}
+function sceneLine(b,sc,df){
+  const noun=sc.shoes&&sc.bags?'shoes and bags':sc.bags?'bags':'shoes';
+  if(sc.brandSkip){return `<div class="card" style="margin-top:16px"><h3>Scene images</h3><p>${esc(sc.brandSkip.skip)}</p><p class="help">${sc.brandSkip.noRights?'An admin records the brand\'s permission on the Brand permissions page. Ask Sujan (sujan@opptra.com) if this brand should get scene images.':'An admin switches scene images on in the brand\'s scene style profile.'}</p></div>`}
+  let line;
+  if(df)line=`Scene images: up to ${sc.n} ${noun} get one. Made by AI, always shown last. About ${usd(sc.n*0.2)}, never more than ${usd(sc.n*0.76)}.`;
+  else if(sc.elig===0)return `<div class="card" style="margin-top:16px"><h3>Scene images</h3><p>Scene images: none needed.</p></div>`;
+  else{const paren=[];if(sc.worn)paren.push(`${sc.worn} already ${plural(sc.worn,'has','have')} a worn photo`);if(sc.unknownSub)paren.push(`${sc.unknownSub} ${plural(sc.unknownSub,'is a type','are types')} we could not tell yet`);
+    line=`Scene images: ${sc.elig} of ${sc.n} ${noun} get one${paren.length?' ('+paren.join(', ')+')':''}. Made by AI, always shown last. About ${usd(sc.elig*0.2)}, never more than ${usd(sc.elig*0.76)}.`}
+  const still=S.rights[b.brand].scope==='still_life';
+  const off=b.sceneMode==='off';
+  const radio=(v,l)=>`<label class="opt" style="display:inline-grid;margin-right:16px"><input type="radio" name="scm" ${b.sceneMode===v?'checked':''} onchange="setSceneMode('${v}')"><span>${l}</span></label>`;
+  return `<div class="card" style="margin-top:16px"><h3>Scene images</h3><p>${off?'No scene images will be made for this batch.':esc(line)}</p>${still?'<p class="help">This brand\'s permission covers a still life only, so every scene image is the brand\'s own product photo placed in an AI-made scene.</p>':''}${b.sceneMode==='still_life'?'<p class="help">Still life only: the brand\'s own product photo placed in an AI-made scene, no person.</p>':''}<div><b>Scene images:</b> ${radio('auto','Make them (recommended)')}${radio('still_life','Still life only')}${radio('off','Not this time')}</div><p class="help">${S.sw.phase.scene_full==='review_all'?'Every scene image is checked by two people before it goes live.':'A sample of scene images is checked by two people.'}</p></div>`;
+}
+function setMake(v){B(S.wiz.bid).makeTicked=v;render()}
+function setLimit(v){const b=B(S.wiz.bid);b.limit=v;b.limitTouched=true;save();const e=!v&&b.makeTicked;const btn=$('#startbtn');if(btn)btn.disabled=e;const m=$('#startmsg');if(m)m.textContent=e?'Set a limit for made photos, or untick Make the missing shots.':''}
+function setSceneMode(v){B(S.wiz.bid).sceneMode=v;render()}
+
+/* ============ Batch page ============ */
+function vBatch(id,tab){
+  const b=B(id);if(!b)return `<p>Batch not found. <a href="#home">All batches</a></p>`;
+  if(b.status==='draft'){S.wiz.bid=id;return vWizard(b.step||1)}
+  const att=attentionJobs(b).length;
+  tab=tab||(att?'attention':'products');
+  const tabs=[['products','Products'],['attention',`Needs attention (${att})`],['sheet','Links sheet']];
+  return `<div class="hdr"><div><a href="#home" class="sm">All batches</a><h1>${esc(b.name)}</h1><p class="lead">${BRANDS[b.brand]} . ${b.channels.map(c=>CH[c]).join(', ')} . ${b.status==='done'?'finished '+b.created:'started '+(b.startedAt||'today')+' by Naz'}</p></div></div>
+  ${banner(b)}
+  <div class="tabs">${tabs.map(([k,l])=>`<a href="#batch/${id}/${k}" class="${tab===k?'on':''}">${l}</a>`).join('')}</div>
+  ${tab==='products'?tProducts(b):tab==='attention'?tAttention(b):tSheet(b)}`;
+}
+function banner(b){
+  if(b.status==='done')return `<div class="banner"><div class="line">Finished. Every product is in the links sheet.</div></div>`;
+  const gen=b.jobs.filter(j=>(j.path==='mode_a'||j.path==='mode_b')&&j.state!=='dropped');
+  const genDone=gen.filter(j=>!['planned','making','waiting'].includes(j.state)&&j.reason!=='cap').length;
+  const sc=b.jobs.filter(j=>j.path==='scene');
+  const scMade=sc.filter(j=>['in_review','held','ready','live'].includes(j.state)).length,scCheck=sc.filter(j=>j.state==='checking').length,scMaking=sc.filter(j=>['planned','making'].includes(j.state)).length;
+  const cap=b.jobs.filter(j=>j.reason==='cap'&&j.state==='not_made');
+  let h=`<div class="banner"><div class="line"><span class="pill ok">Brand photos: live</span><span class="muted sm">Brand photos are published as soon as they are ready. Made photos never hold them back.</span></div>`;
+  if(gen.length)h+=`<div class="line"><span>Making missing shots: ${genDone} of ${gen.length} done</span><div class="bar"><i style="width:${100*genDone/gen.length}%"></i></div></div>`;
+  if(sc.length)h+=`<div class="line"><span>Scene images: ${scMade} made, ${scCheck} being checked${scMaking?`, ${scMaking} being made`:''}</span><div class="bar"><i style="width:${100*scMade/sc.length}%"></i></div></div>`;
+  const waiting=attentionJobs(b).length;if(waiting)h+=`<div class="line"><span class="pill warn">${waiting} waiting for review</span><a href="#batch/${b.id}/attention" class="sm">Open Needs attention</a></div>`;
+  h+=`</div>`;
+  if(cap.length)h+=`<div class="notice bad"><b>This batch's limit for made photos was reached: ${genDone} of ${gen.length} made.</b> Raise it to make the rest. <button class="btn sm" onclick="raiseLimit('${b.id}')">Raise the limit</button></div>`;
+  if(b.supersededNote)h+=`<div class="notice">A newer delivery arrived for a product waiting for review here. Its made photo was not used; the newer batch plans the product again.</div>`;
+  if(b.updatedNotice)h+=`<div class="notice ok">The links sheet was updated after review on ${b.updatedNotice}. Download it again. <a href="#batch/${b.id}/sheet">Open the links sheet</a></div>`;
+  if(!b.finalized)h+=`<div class="protobox">Prototype: press <button class="link" onclick="advance()">Advance time</button> to move the worker (collect, detect, make, check, publish).</div>`;
+  return h;
+}
+function raiseLimit(id){const b=B(id);modal(`<h3>Raise the limit for made photos</h3><p>Current limit: ${esc(b.limit||'0')} USD. The photos that stopped at the limit will be made next.</p><label class="f" for="nl">New limit (USD)</label><input type="number" id="nl" value="${(+b.limit||3)+2}" min="1"><div class="row-acts"><button class="btn ghost" onclick="closeModal()">Cancel</button><button class="btn primary" onclick="doRaise('${id}')">Raise the limit</button></div>`)}
+function doRaise(id){const b=B(id);const v=$('#nl').value;if(!v){toast('Enter a limit.');return}b.limit=v;b.capRaised=true;b.jobs.forEach(j=>{if(j.reason==='cap'){j.state='planned';j.reason=null;j.mk=0}});closeModal();render();toast('Limit raised. The rest will be made; press Advance time.')}
+function slotView(b,p,ch){
+  const pl=planProduct(p,ctxFor(b));
+  return (pl.slots[ch]||[]).map(sl=>{const w=roleWord(sl.role,p);
+    if(sl.state==='filled')return `<span class="chip ok" title="Photo ${sl.n}">${w}</span>`;
+    const j=b.jobs.find(x=>x.pid===p.id&&x.role===sl.role&&x.state!=='dropped');
+    if(b.status==='draft'||!j){if(b.status==='done')return `<span class="chip bad">${w}: missing</span>`;const r=sl.via;return `<span class="chip ${r.path?'run':'bad'}">${w}: ${r.path==='crop'?'will be cut':r.path?'will be made':'not made'}${sl.state==='occupied_cut'?' (cut photo stays for now)':''}</span>`}
+    const map={planned:['run','planned'],making:['run','being made'],checking:['run','being checked'],in_review:['warn','waiting for review'],held:['warn','held, needs review'],waiting:['run','waits for the first photo'],ready:['run','approved, publishing'],live:['ok',j.path==='crop'?'cut, live':'made, live'],not_made:['bad','not made'],replaced:['ok','real photo']};
+    const m=map[j.state]||['',j.state];return `<span class="chip ${m[0]}">${w}: ${m[1]}</span>`}).join(' ');
+}
+function productStatus(b,p){const js=b.jobs.filter(j=>j.pid===p.id);
+  if(js.some(j=>['planned','making','checking','ready','waiting'].includes(j.state)))return '<span class="pill run">Making</span>';
+  if(js.some(j=>['in_review','held'].includes(j.state)))return '<span class="pill warn" title="pending_review">pending_review: brand photos live, made photos wait for review</span>';
+  return '<span class="pill ok">Done</span>'}
+function tProducts(b){
+  return `<p class="lead">Each product with the shots every marketplace asks for. Green is live, blue is on its way, amber waits for a person, red is not made (see the sheet notes).</p><div class="plist">${b.products.map(p=>{
+    const strip=p.photos.map(f=>`<figure>${photoImg(p,f)}<figcaption>${f.n}</figcaption></figure>`).join('')+b.jobs.filter(j=>j.pid===p.id&&['live','in_review','held'].includes(j.state)).map(j=>`<figure>${jobImg(p,j)}<figcaption>${j.n}</figcaption></figure>`).join('');
+    const right=p.kind==='apparel'?b.channels.map(ch=>`<div class="chrow"><b>${CH[ch]}</b><div class="chips">${slotView(b,p,ch)||'<span class="muted">nothing required</span>'}</div></div>`).join(''):sceneStatusLine(b,p);
+    return `<div class="prow"><div><a href="#product/${b.id}/${p.id}"><b>${p.key}</b></a> <span class="muted sm">${esc(p.name)}</span><div style="margin:6px 0">${productStatus(b,p)}</div>${p.kind==='apparel'?garmentSelect(b,p):`<span class="sm muted">${SUBS[p.sub]} . ${p.audience}</span>`}<div class="strip" style="margin-top:8px">${strip}</div></div><div>${right}</div></div>`}).join('')}</div>`;
+}
+function sceneStatusLine(b,p){const j=b.jobs.find(x=>x.pid===p.id&&x.path==='scene');if(!j){const e=sceneElig(b,p);return `<p class="sm">${esc(e&&e.skip||'')}</p>`}
+  const w={planned:'Scene image: planned',making:'Scene image: being made',checking:'Scene image: being checked',in_review:'Scene image: waiting for review',held:'Scene image: held, needs review',ready:'Scene image: approved, publishing',live:'Scene image: live',not_made:'Scene image: not used',replaced:'Scene image: replaced by a real photo'}[j.state];
+  return `<p class="sm"><b>${w}</b>${j.route==='composite'?" . the brand's own product photo placed in an AI-made scene":''}</p><ul class="lines sm">${notesFor(b,p).map(n=>`<li>${esc(n)}</li>`).join('')}</ul>`}
+function garmentSelect(b,p){
+  const longable=['dresses_jumpsuits','outerwear','bottoms'].includes(p.dept);
+  return `<div class="inline-sel sm"><label>Garment type <select onchange="setDept('${b.id}','${p.id}',this.value)">${GARMENTS.map(([v,l])=>`<option value="${v}" ${p.dept===v?'selected':''}>${l}</option>`).join('')}</select></label>${longable?`<label><input type="checkbox" ${p.length==='long'?'checked':''} onchange="setLong('${b.id}','${p.id}',this.checked)"> Long (below the knee)</label>`:''}</div>`}
+function setDept(bid,pid,v){const b=B(bid);const p=b.products.find(x=>x.id===pid);const before=summary(b).gen;p.dept=v;p.deptBy='operator';if(v==='kids')p.audience='kids';else if(p.audience==='kids')p.audience='women';const msg=reconcile(b,p);const after=summary(b).gen;render();toast(`Garment type set to "${GARMENT_WORD[v]}". The plan was run again.${b.status==='draft'?` Made photos planned: ${before} to ${after}.`:' '+(msg||'No change to what will be made.')}`)}
+function setLong(bid,pid,on){const b=B(bid);const p=b.products.find(x=>x.id===pid);p.length=on?'long':'short';reconcile(b,p);render();toast(on?'Long: the front shot is cut on the knee band.':'Short: the front shot is cut at mid-thigh.')}
+
+/* ============ Needs attention ============ */
+function tAttention(b){
+  const A=attentionJobs(b);
+  const made=A.filter(j=>isGen(j)&&!j.third),swaps=A.filter(j=>j.path==='crop'&&!j.third),third=A.filter(j=>j.third),scene=A.filter(j=>j.path==='scene'&&!j.third);
+  const sup=b.jobs.filter(j=>j.reason==='superseded');
+  const bulkable=scene.filter(j=>!j.hold&&!j.labels.length);
+  const decisions=b.jobs.filter(j=>isGen(j)||j.path==='scene').length*2+b.jobs.filter(j=>j.path==='crop'&&j.retires).length;
+  let h=`<p class="lead">Each card asks one decision. Brand photos are already live; nothing here holds them back.</p>
+  <div class="protobox"><span class="pbadge">Prototype only</span> Decisions clicked so far: <b>${S.clicks}</b>. In review-all this batch needs about ${decisions} answers (2 people per made or scene photo, 1 per photo swap). Keyboard: <span class="kbd">Y</span> use as is, <span class="kbd">N</span> remove, <span class="kbd">R</span> replace, <span class="kbd">J</span> and <span class="kbd">K</span> next and previous card, <span class="kbd">Enter</span> confirms.</div>`;
+  if(sup.length)h+=sup.map(j=>{const p=b.products.find(x=>x.id===j.pid);return `<div class="notice">${p.key}: ${j.path==='scene'?'Scene image not used: a newer delivery of this product replaced this one.':notMade('superseded',b.channels[0],j.role,p)}</div>`}).join('');
+  if(b.updatedNotice)h+=`<div class="notice ok">The links sheet was updated after review on ${b.updatedNotice}. Download it again.</div>`;
+  if(!A.length)h+=`<div class="card"><h3>Nothing needs you right now.</h3><p class="muted">${b.jobs.some(j=>['planned','making','checking'].includes(j.state))?'Made photos are still being made or checked. Press Advance time.':'Every decision is done.'}</p></div>`;
+  if(made.length)h+=`<div class="sec-h"><h2>Made photos to review (${made.length})</h2></div><div class="att">${made.map(j=>madeCard(b,j)).join('')}</div>`;
+  if(swaps.length)h+=`<div class="sec-h"><h2>Photo swaps to approve (${swaps.length})</h2></div><div class="att">${swaps.map(j=>swapCard(b,j)).join('')}</div>`;
+  if(third.length)h+=`<div class="sec-h"><h2>Needs a third opinion (${third.length})</h2></div><div class="att">${third.map(j=>thirdCard(b,j)).join('')}</div>`;
+  if(scene.length)h+=`<div class="sec-h"><h2>Scene images (${scene.length})</h2><button class="btn ok sm" ${bulkable.length?'':'disabled'} onclick="bulkApprove('${b.id}')">Approve all that passed every check (${bulkable.length})</button></div><div class="att">${scene.map(j=>sceneCard(b,j)).join('')}</div>`;
+  return h;
+}
+function answersLine(j){
+  const mine=j.labels.find(l=>l.by===S.seat);const n=j.labels.length;
+  let t=n===0?'Answers: 0 of 2.':n===1?'1 of 2 answers in. The other answer stays hidden until both people have answered.':'2 of 2 answers in.';
+  if(mine)t+=` You answered: ${mine.yes?'Use as is':'Remove this photo'}.`;
+  return `<p class="answers">${t}</p>`}
+function resultLine(j){
+  const mine=j.labels.find(l=>l.by===S.seat);if(!mine)return '';
+  let t;if(j.path==='scene')return '';
+  if(j.outcome==='pass')t=`Our checks: passed every check on attempt ${j.attempts} of 3.`;
+  else if(j.outcome==='references_changed')t='Our checks: the photos this was made from have changed since it was made.';
+  else t=`Our checks: held after ${j.attempts} attempts. ${HARD[j.outcome]}`;
+  return `<div class="result">${t}</div>`}
+function refusal(j){return S.open['refused-'+j.id]?`<div class="err">You already answered for this photo.</div>`:''}
+function stripOf(p,j){return `<div class="strip">${p.photos.map(f=>`<figure>${photoImg(p,f)}<figcaption>Photo ${f.n}${f.cut?'<br><span class="badge cut">cut</span>':''}</figcaption></figure>`).join('')}</div>`}
+function kbHint(j){return S.kb&&S.kb.jid===j.id?`<div class="notice">Press Enter to confirm: <b>${{yes:'Use as is',no:'Remove this photo',replace:'Replace photo '+j.n}[S.kb.act]}</b>. Press Esc to cancel.</div>`:''}
+function madeCard(b,j){
+  const p=b.products.find(x=>x.id===j.pid);const hard=j.outcome==='pieces_mismatch'||j.outcome==='logo_changed';
+  const from=j.path==='mode_b'?"Made by placing this product on the brand's model":`Made from photos ${andList(j.refs||[])}`;
+  const retire=j.retires?`<figure>${photoImg(p,p.photos.find(f=>f.n===j.retires))}<figcaption>Photo ${j.retires} will leave the listing when this one is published.</figcaption></figure>`:'<div></div>';
+  const open=S.open['rm-'+j.id];
+  return `<article class="rc" data-card="${j.id}" tabindex="-1" onclick="S.focus='${j.id}'">
+  <header><div><b>${p.key}</b> <span class="muted">${esc(p.name)} . ${GARMENT_WORD[p.dept]||''}</span></div>${j.state==='held'?'<span class="pill warn">Held</span>':'<span class="pill warn">Waiting for review</span>'}</header>
+  ${stripOf(p,j)}
+  <div class="rc-main"><figure>${jobImg(p,j)}<figcaption><b>Photo ${j.n}: ${roleWord(j.role,p)}</b><br>${from}<br><span class="badge made">made</span></figcaption></figure>${retire}
+  <div class="why">
+    ${j.anchor?'<p class="checkline"><b>First full-length photo: the other shots will be made from it.</b></p>':''}
+    ${j.outcome==='references_changed'?`<p class="checkline"><b>Photo ${j.n} was made from earlier photos of this product. Keep it or remove it.</b></p>`:''}
+    <p class="checkline">${CHECK_LINE}</p>
+    ${hard?`<div class="err"><b>This photo cannot be published.</b> Our checks found a change that no reviewer can approve. Remove it, or replace it with a real photo.</div>`:''}
+    ${answersLine(j)}${resultLine(j)}${refusal(j)}${kbHint(j)}
+    <div class="acts">${hard?'':`<button class="btn ok" onclick="answer('${j.id}',true)">Use as is</button>`}<button class="btn ghost" onclick="openRemove('${j.id}')">Remove this photo</button><button class="btn ghost" onclick="replaceStart('${j.id}')">Replace photo ${j.n}</button></div>
+    ${open?removePanel(j,QUESTIONS):''}
+  </div></div></article>`;
+}
+function andList(a){if(a.length<2)return a.join('');return a.slice(0,-1).join(', ')+' and '+a[a.length-1]}
+function removePanel(j,qs){return `<div class="picks"><b>What is wrong? (pick all that apply)</b>${qs.map((q,i)=>`<label><input type="checkbox" class="pick-${j.id}" value="${i}" onchange="pickChanged('${j.id}')"> ${q}</label>`).join('')}<label class="sm" style="display:block;margin-top:6px">Anything to add? <input type="text" id="note-${j.id}" class="full" placeholder="Optional note"></label><div class="acts" style="margin-top:8px"><button class="btn danger sm" id="rmc-${j.id}" disabled onclick="confirmRemove('${j.id}')">Remove this photo</button><button class="btn ghost sm" onclick="S.open['rm-${j.id}']=false;render()">Cancel</button></div></div>`}
+function pickChanged(jid){const any=[...document.querySelectorAll('.pick-'+CSS.escape(jid))].some(x=>x.checked);const b=document.getElementById('rmc-'+jid);if(b)b.disabled=!any}
+function openRemove(jid){const {j}=findJob(jid);S.focus=jid;if(already(j))return;S.open['rm-'+jid]=true;render()}
+function already(j){if(j.labels.some(l=>l.by===S.seat)){S.open['refused-'+j.id]=true;render();toast('You already answered for this photo.');return true}return false}
+function confirmRemove(jid){const picks=[...document.querySelectorAll('.pick-'+CSS.escape(jid))].filter(x=>x.checked).map(x=>+x.value);const note=(document.getElementById('note-'+jid)||{}).value||'';S.open['rm-'+jid]=false;answer(jid,false,picks,note)}
+function answer(jid,yes,picks,note,bulk){
+  const {b,j,p}=findJob(jid);if(!j)return;S.focus=jid;
+  if(already(j))return;
+  S.clicks++;
+  const hard=j.outcome==='pieces_mismatch'||j.outcome==='logo_changed';
+  const lab={by:S.seat,yes,picks:picks||[],note:note||'',at:clock()};
+  if(j.path==='crop'){j.labels.push(lab);if(yes){publishJob(b,j);toast(`Swapped. Photo ${j.retires} leaves the listing in the same publish.`)}else{j.state='not_made';j.reason='removed';snapIf(b);toast('Removed. The cut photo stays: no replacement could be made.')}render();return}
+  if(hard){if(yes)return;j.labels.push(lab);j.state='not_made';j.reason='removed';snapIf(b);render();toast('Removed. The sheet says why it was not made.');return}
+  j.labels.push(lab);
+  if(j.labels.length>=2){const [a,c]=j.labels;
+    if(a.yes&&c.yes){publishJob(b,j);toast(j.anchor?'Both said yes. Published, and the other shots are now being made from it.':'Both said yes. Published; the links sheet was updated.')}
+    else if(!a.yes&&!c.yes){removeJob(b,j);toast('Both said no. Removed.')}
+    else{j.third=true;toast('The two answers differ. The photo moves to "Needs a third opinion" for an admin who did not rate it.')}
+  }else toast('Answer saved. A second person answers next; they will not see your answer.');
+  render();
+}
+function removeJob(b,j){j.state='not_made';j.reason='removed';if(j.anchor)b.jobs.filter(x=>x.pid===j.pid&&x.waitAnchor&&['waiting','planned'].includes(x.state)).forEach(x=>{x.state='not_made';x.reason='removed'});snapIf(b)}
+function snapIf(b){if(b.finalized&&!b.jobs.some(j=>['planned','making','checking','ready'].includes(j.state))){snapshot(b,'After review');b.updatedNotice=TODAY}}
+function publishJob(b,j){j.state='live';if(j.path==='scene')j.answersDone=true;if(j.anchor)b.jobs.filter(x=>x.pid===j.pid&&x.waitAnchor&&x.state==='waiting').forEach(x=>x.state='planned');if(b.finalized){snapshot(b,'After review');b.updatedNotice=TODAY}}
+function thirdCard(b,j){
+  const p=b.products.find(x=>x.id===j.pid);const rated=j.labels.some(l=>l.by===S.seat);
+  const ans=j.labels.map(l=>`<li><b>${seatName(l.by)}</b>: ${l.yes?'Use as is':'Remove this photo'}${l.picks.length?` (${l.picks.map(i=>(j.path==='scene'?SCENEQ_LAB(j)[i]:QUESTIONS[i])).join('; ')})`:''}${l.note?`. Note: ${esc(l.note)}`:''}</li>`).join('');
+  const img=j.path==='scene'?sceneSVG(p,{route:j.route,face:j.hold==='face',tag:'made'}):jobImg(p,j);
+  let acts;
+  if(S.seat!=='admin')acts=`<p class="muted">An admin who did not rate this photo decides.</p>`;
+  else if(rated)acts=`<p class="muted">You rated this photo, so another admin decides.</p>`;
+  else acts=`<div class="acts"><button class="btn ok" onclick="adjudicate('${j.id}',true)">Use as is</button><button class="btn ghost" onclick="adjudicate('${j.id}',false)">Remove this photo</button></div>`;
+  return `<article class="rc" data-card="${j.id}" tabindex="-1"><header><div><b>${p.key}</b> <span class="muted">${esc(p.name)}</span></div><span class="pill bad">The two answers differ</span></header>
+  <div class="rc-main"><figure>${img}<figcaption>Photo ${j.n}: ${roleWord(j.role,p)}</figcaption></figure><div></div><div class="why"><ul class="lines">${ans}</ul>${j.path!=='scene'?`<div class="result">Our checks: ${j.outcome==='pass'?'passed every check':'held'} (attempt ${j.attempts}).</div>`:''}${acts}</div></div></article>`;
+}
+function adjudicate(jid,yes){const {b,j}=findJob(jid);S.clicks++;j.adj={by:S.seat,yes};j.third=false;if(yes){publishJob(b,j);toast('Decided: published.')}else{removeJob(b,j);toast('Decided: removed.')}render()}
+function swapCard(b,j){
+  const p=b.products.find(x=>x.id===j.pid);const cut=p.photos.find(f=>f.n===j.retires);const open=S.open['rm-'+j.id];
+  return `<article class="rc" data-card="${j.id}" tabindex="-1" onclick="S.focus='${j.id}'"><header><div><b>${p.key}</b> <span class="muted">${esc(p.name)}</span></div><span class="pill warn">One person decides</span></header>
+  <div class="rc-main two"><figure>${photoImg(p,cut)}<figcaption><b>Photo ${cut.n}: ${roleWord(cut.role,p)}</b><br><span class="badge cut">${cut.cut==='head'?'Face cut at the top edge':'Product cut at the frame edge'}</span></figcaption></figure>
+  <figure>${jobImg(p,j)}<figcaption><b>Photo ${j.n}: ${roleWord(j.role,p)}</b><br>Cut from photo ${j.parent}</figcaption></figure>
+  <div class="why"><p class="checkline">Photo ${j.retires} will leave the listing when this one is published.</p><p class="sm muted">On: ${j.retireChs.map(c=>CH[c]).join(', ')}. On other marketplaces photo ${j.retires} moves to a later position or stays.</p>${refusal(j)}${kbHint(j)}
+  <div class="acts"><button class="btn ok" onclick="answer('${j.id}',true)">Use as is</button><button class="btn ghost" onclick="openRemove('${j.id}')">Remove this photo</button><button class="btn ghost" onclick="replaceStart('${j.id}')">Replace photo ${j.n}</button></div>${open?removePanel(j,SWAP_REASONS):''}</div></div></article>`;
+}
+function SCENEQ(j,p){
+  const face=j.hold==='face',pb=j.hold==='paste_back_mismatch',real=j.hold==='scene_realism';
+  if(j.route==='composite')return [['No face','No face found'],['Scene free of the forbidden list','Nothing from the forbidden list found'],['Looks like a real photo',real?'The product does not sit naturally in the scene':'Looks natural'],['Product sits naturally',pb?'Product pixels differ from the brand\'s photo':'Size, shadow and light look right']].map((q,i)=>({q:q[0],r:q[1],bad:(pb&&i===3)||(real&&i===2)}));
+  return [['Same product','Matches the brand\'s photos'],['Logos and text intact','No change found'],['Same colour','Colour difference within the limit'],[p.kind==='bag'?'Shape intact (strap count and hardware)':'Shape intact','Shape matches'],["Framing within the rule (no face, or only the brand's chosen model)",face?'Part of a face found':(p.audience==='kids'?'Legs only, no face, one child, no adult':'No face found')],['Modest clothing for the audience','Within the rules'],['Scene free of the forbidden list','Nothing from the forbidden list found'],['Looks like a real photo','Looks natural']].map((q,i)=>({q:q[0],r:q[1],bad:face&&i===4}));
+}
+function SCENEQ_LAB(j){const {p}=findJob(j.id);return SCENEQ(j,p).map(x=>x.q)}
+function sceneCard(b,j){
+  const p=b.products.find(x=>x.id===j.pid);const qs=SCENEQ(j,p);
+  const noUse=j.hold==='face'||j.hold==='paste_back_mismatch';
+  const ans=S.open['sq-'+j.id]||qs.map(()=>true);
+  const anyNo=ans.some(a=>!a);
+  const crops=b.channels.map(ch=>{const L=liveItems(b,p,ch);const r=sceneChannel(b,p,ch,L.order.length);return `<figure>${cropSVG(p,j,ch)}<figcaption>${CH[ch]}${r.ok?'':'<br><span class="badge cut">Not added</span>'}</figcaption></figure>`}).join('');
+  const line=j.route==='composite'?"The brand's own product photo placed in an AI-made scene":"Scene image made by AI from the brand's photos";
+  const f1=p.photos[0];
+  return `<article class="rc" data-card="${j.id}" tabindex="-1" onclick="S.focus='${j.id}'"><header><div><b>${p.key}</b> <span class="muted">${esc(p.name)} . ${SUBS[p.sub]} . ${p.audience}</span></div>${j.state==='held'?'<span class="pill warn">Held</span>':'<span class="pill warn">Waiting for review</span>'}</header>
+  <p style="margin-top:8px"><b>${line}</b></p>
+  <div class="rc-main scene"><figure>${photoImg(p,f1)}<figcaption>Brand's photo 1</figcaption></figure>
+  <figure>${sceneSVG(p,{route:j.route,face:j.hold==='face',box:true,windows:b.channels,tag:'made'})}<figcaption>Scene image, photo ${j.n}. The dashed box is where the product must stay; coloured lines are the marketplace crops.${p.audience==='kids'?' Kids: legs only, never a face.':''}</figcaption></figure>
+  <div class="why"><div class="crops">${crops}</div>
+  ${j.hold?`<div class="err"><b>${SCENE_HOLD[j.hold]}</b></div>`:''}
+  <div class="qlist">${qs.map((q,i)=>`<div class="qrow"><span>${q.q}</span><span class="yn"><button class="${ans[i]?'on':''}" onclick="setQ('${j.id}',${i},true,${qs.length})">Yes</button><button class="${!ans[i]?'on no':''}" onclick="setQ('${j.id}',${i},false,${qs.length})">No</button></span><small class="${q.bad?'bad':''}">Our check: ${q.r}</small></div>`).join('')}</div>
+  <details class="sm"><summary>Details</summary><p>Route: ${j.route==='composite'?'still life with the real product pasted back':'worn or carried scene'}. Attempts: ${j.attempts}. Made from photos ${andList(p.photos.map(f=>f.n))}.</p>${j.route==='composite'?`<p>${j.hold==='paste_back_mismatch'?'Product pixels differ from the brand\'s photo (checked by code).':'Product pixels identical to the brand\'s photo (checked by code)'}</p>`:''}</details>
+  ${answersLine(j)}${refusal(j)}${kbHint(j)}
+  ${anyNo&&!noUse?'<p class="sm" style="color:var(--bad)">You marked something wrong. Remove this photo, or set it back to Yes.</p>':''}
+  <div class="acts">${noUse?'':`<button class="btn ok" ${anyNo?'disabled':''} onclick="sceneAnswer('${j.id}',true)">Use as is</button>`}<button class="btn ghost" onclick="sceneAnswer('${j.id}',false)">Remove this photo</button><button class="btn ghost" onclick="replaceStart('${j.id}')">Replace photo</button></div>
+  ${noUse?'<p class="help">"Use as is" is not offered for this image.</p>':''}</div></div></article>`;
+}
+function setQ(jid,i,v,n){const a=S.open['sq-'+jid]||Array(n).fill(true);a[i]=v;S.open['sq-'+jid]=a;S.focus=jid;render()}
+function sceneAnswer(jid,yes){const ans=S.open['sq-'+jid]||[];const picks=ans.map((a,i)=>a===false?i:null).filter(x=>x!==null);answer(jid,yes,picks,'')}
+function bulkApprove(bid){const b=B(bid);const list=attentionJobs(b).filter(j=>j.path==='scene'&&!j.hold&&!j.labels.length&&!j.third);S.clicks++;
+  list.forEach(j=>{j.labels.push({by:S.seat,yes:true,picks:[],bulk:true});j.state='live';j.inV=undefined});
+  if(b.finalized){snapshot(b,'After review');b.updatedNotice=TODAY}
+  const left=attentionJobs(b).filter(j=>j.path==='scene');
+  render();toast(`${list.length} scene images approved and published. ${left.length} left for a person: ${left.map(j=>b.products.find(p=>p.id===j.pid).key).join(', ')||'none'}. Bulk answers never count towards the exit numbers.`)}
+function replaceStart(jid){const {b,j,p}=findJob(jid);S.focus=jid;
+  modal(`<h3>Replace photo ${j.path==='scene'?'':j.n} with a real photo</h3><p>${p.key}, ${esc(p.name)}. ${j.path==='scene'?'Upload a real lifestyle or worn photo. It becomes a brand photo and the scene image is retired.':`Upload a real photo of the ${roleWord(j.role,p)}. The made photo is removed and the brand photo takes its place.`}</p><div class="drop" onclick="this.innerHTML='<b>${p.key}_real.jpg</b>Ready to upload';document.getElementById('dorep').disabled=false"><b>Drop the photo here</b>Or click to choose (prototype: any click adds a photo).</div><div class="row-acts"><button class="btn ghost" onclick="closeModal()">Cancel</button><button class="btn primary" id="dorep" disabled onclick="doReplace('${jid}')">Replace</button></div>`)}
+function doReplace(jid){const {b,j,p}=findJob(jid);closeModal();S.clicks++;
+  const n=Math.max(...p.photos.map(f=>f.n))+1;const v=b.sheets.length+1;
+  if(j.path==='scene')p.photos.push(pk(n,'side',{presence:'worn',newV:v}));else p.photos.push(ph(n,j.role,{newV:v,note:'real photo'}));
+  j.state='replaced';
+  if(j.retires&&j.path!=='scene'){}
+  toast('Replacement in progress');
+  setTimeout(()=>{if(b.finalized){snapshot(b,'After a replacement');b.updatedNotice=TODAY}render();toast('Sheet updated.')},900);render()}
+
+/* ============ Links sheet tab ============ */
+function tSheet(b){
+  if(b.status==='done'&&!b.sheets.length)snapshot(b,'Final');
+  if(!b.sheets.length)return `<div class="card"><h3>No links sheet yet</h3><p class="muted">The first version is written when the batch finishes. Press Advance time until the banner says the brand photos and made photos are done.</p></div>`;
+  const v=Math.min(S.sheetV[b.id]||b.sheets.length,b.sheets.length);const sh=b.sheets[v-1];
+  const chs=S.sheetCh==='all'?b.channels:S.sheetCh==='two'?b.channels.slice(0,2):[S.sheetCh].filter(c=>b.channels.includes(c));
+  const useChs=chs.length?chs:b.channels.slice(0,2);
+  const maxImg={};useChs.forEach(c=>maxImg[c]=Math.max(1,...sh.rows.map(r=>r.ch[c]?r.ch[c].links.length:0)));
+  const hasAI=c=>S.chScene[c].ai==='xmp_and_sheet';
+  const head1=useChs.map(c=>`<th colspan="${maxImg[c]+2+(hasAI(c)?1:0)}" class="merged">${CH[c]}</th>`).join('');
+  const head2=useChs.map(c=>Array.from({length:maxImg[c]},(_,i)=>`<th>Image ${i+1}</th>`).join('')+`<th>${CH[c]} shots</th><th>${CH[c]} missing</th>${hasAI(c)?`<th>${CH[c]} AI-made</th>`:''}`).join('');
+  const body=sh.rows.map(r=>`<tr><td>${r.brand}</td><td>${r.key}</td>${useChs.map(c=>{const x=r.ch[c]||{links:[]};return Array.from({length:maxImg[c]},(_,i)=>`<td>${x.links[i]?`<a href="#" onclick="return false">${esc(x.links[i])}</a>`:''}</td>`).join('')+`<td class="wrap">${esc(x.shots||'')}</td><td class="wrap">${esc(x.missing||'')}</td>${hasAI(c)?`<td>${esc(x.ai||'')}</td>`:''}`}).join('')}<td>${r.status}</td><td><b>${r.change}</b></td><td class="notes">${r.notes.map(esc).join('<br>')}</td></tr>`).join('');
+  const resub=sh.rows.filter(r=>['role_added','cut_replaced','scene_added','updated'].includes(r.change));
+  return `<p class="lead">One row per product. Each marketplace has its own set of links, then the shots it has and the shots still missing. This is a preview of the Excel file.</p>
+  <div class="inline-sel" style="margin-bottom:10px"><label>Version <select onchange="S.sheetV['${b.id}']=+this.value;render()">${b.sheets.map(s=>`<option value="${s.v}" ${s.v===v?'selected':''}>Version ${s.v}: ${s.label} (${s.at})</option>`).join('')}</select></label>
+  <label>Marketplaces <select onchange="S.sheetCh=this.value;render()"><option value="two" ${S.sheetCh==='two'?'selected':''}>First two</option><option value="all" ${S.sheetCh==='all'?'selected':''}>All ticked</option>${b.channels.map(c=>`<option value="${c}" ${S.sheetCh===c?'selected':''}>${CH[c]} only</option>`).join('')}</select></label></div>
+  ${b.updatedNotice&&v<b.sheets.length?`<div class="notice">You are looking at an older version. The links sheet was updated after review on ${b.updatedNotice}. Download it again.</div>`:''}
+  <div class="notice ${resub.length?'':'ok'}">${resub.length?`<b>To re-submit in this version:</b> ${resub.map(r=>`${r.key} (${r.change})`).join(', ')}. Each on the marketplaces named in its notes, as for "updated" today.`:'Nothing to re-submit in this version.'}</div>
+  <div class="tw sheet"><table><thead><tr><th rowspan="2">brand</th><th rowspan="2">identifier</th>${head1}<th rowspan="2">status</th><th rowspan="2">change</th><th rowspan="2">notes</th></tr><tr>${head2}</tr></thead><tbody>${body}</tbody></table></div>
+  <div class="acts" style="margin-top:14px"><button class="btn primary" onclick="toast('Prototype: the Excel file is not generated. The table above is what it holds.')">Download links sheet (Excel)</button><button class="btn ghost" onclick="toast('Prototype: CSV not generated.')">Download CSV</button></div>
+  <div class="card" style="margin-top:16px"><h3>What the change column means</h3><div class="legend">${Object.entries(CHANGE_MEANING).map(([k,m])=>`<div><span class="mono">${k}</span><span>${esc(m)}</span></div>`).join('')}</div></div>`;
+}
+
+/* ============ Product page ============ */
+function vProduct(bid,pid){
+  const b=B(bid);const p=b&&b.products.find(x=>x.id===pid);if(!p)return `<p>Product not found. <a href="#home">All batches</a></p>`;
+  const locked=b.status==='running'&&b.jobs.some(j=>j.pid===p.id&&['planned','making','checking','ready'].includes(j.state));
+  const photos=p.photos.map(f=>`<figure>${photoImg(p,f)}<figcaption><b>Photo ${f.n}</b>: ${p.kind==='apparel'?roleWord(f.role,p):(f.presence==='packshot'?'packshot, '+f.view:f.presence)}${f.note?` (${esc(f.note)})`:''}<br>${f.cut?`<span class="badge cut">${f.cut==='head'?'Face cut at the top edge':'Product cut at the frame edge'}</span><br>`:''}${p.kind==='apparel'?`<label class="sm">Change shot type <select onchange="setRole('${bid}','${pid}',${f.n},this.value)">${ROLE_OPTS.map(r=>`<option value="${r}" ${(f.role||'none')===r?'selected':''}>${ROLE_WORDS[r]}</option>`).join('')}</select></label>`:''}</figcaption></figure>`).join('');
+  const made=b.jobs.filter(j=>j.pid===p.id&&!['dropped'].includes(j.state)).map(j=>`<figure>${jobImg(p,j)}<figcaption><b>Photo ${j.n}</b>: ${roleWord(j.role,p)}<br>${j.path==='crop'?`<span class="badge crop">Cut from photo ${j.parent}</span>`:j.path==='scene'?`<span class="badge made">${j.route==='composite'?'still life, made':'made'}</span>`:`<span class="badge made">made</span>`}<br><span class="sm muted">${jobWord(j)}</span></figcaption></figure>`).join('');
+  const notes=notesFor(b,p);
+  const order=b.channels.map(ch=>{const L=liveItems(b,p,ch);return `<div class="chrow"><b>${CH[ch]}</b><div class="sm">${L.order.map((it,i)=>`${i+1} ${roleWord(it.role,p)}${it.kind==='derived'?' (cut)':it.kind==='generated'?' (made)':''}`).join(', ')}${L.missing.length?`<br><span style="color:var(--bad)">Missing: ${L.missing.map(e=>entryWords(e,p)).join(', ')}</span>`:''}${L.sceneWhy?`<br><span class="muted">${L.sceneWhy}</span>`:''}</div></div>`}).join('');
+  return `<div class="hdr"><div><a href="#batch/${bid}/products" class="sm">${esc(b.name)}</a><h1>${p.key}</h1><p class="lead">${esc(p.name)} . ${BRANDS[p.brand]} . ${p.kind==='apparel'?(GARMENT_WORD[p.dept]||''):SUBS[p.sub]} . ${p.audience}</p></div>
+  <div class="acts"><button class="btn ghost" onclick="toast('Prototype: download not built.')">Download photos</button>${locked?'<span class="pill run">Locked by a running batch</span>':`<button class="btn primary" onclick="uploadPhotos('${bid}','${pid}')">Upload photos</button>`}</div></div>
+  ${p.scenario?`<div class="protobox"><span class="pbadge">Sample scenario</span> ${esc(p.scenario)}</div>`:''}
+  ${p.kind==='apparel'?`<div class="card">${garmentSelect(b,p)}<p class="help">Changing the garment type or a photo's shot type runs the plan again for this product.</p></div>`:''}
+  <h2 style="margin:20px 0 10px">Brand photos</h2><div class="thumbs">${photos}</div>
+  ${made?`<h2 style="margin:20px 0 10px">Made photos</h2><div class="thumbs">${made}</div>`:''}
+  <h2 style="margin:20px 0 10px">Order per marketplace</h2><div class="card">${order}</div>
+  <h2 style="margin:20px 0 10px">Notes</h2><div class="card">${notes.length?`<ul class="lines">${notes.map(n=>`<li>${esc(n)}</li>`).join('')}</ul>`:'<p class="muted">No notes.</p>'}</div>`;
+}
+function jobWord(j){return {planned:'Planned',making:'Being made',checking:'Being checked',in_review:'Waiting for review',held:'Held: needs review',waiting:'Waits for the first full-length photo',ready:'Approved, publishing',live:'Live',not_made:'Not made',replaced:'Replaced by a real photo'}[j.state]||j.state}
+function setRole(bid,pid,n,v){const b=B(bid);const p=b.products.find(x=>x.id===pid);const f=p.photos.find(x=>x.n===n);const before=summary(b);f.role=v==='none'?null:v;f.roleBy='operator';f.view=BACK.has(v)?'back':f.view;
+  const msg=reconcile(b,p);const after=summary(b);render();toast(`Photo ${n} is now "${ROLE_WORDS[v]}". The plan for ${p.key} was run again. ${b.status==='draft'?`Made photos planned in this batch: ${before.gen} to ${after.gen}.`:(msg||'Nothing else changes.')}`)}
+function uploadPhotos(bid,pid){const src=B(bid).products.find(x=>x.id===pid);const p=clone(src);const id='U'+Object.keys(S.batches).filter(k=>k[0]==='U').length+'-'+src.id;p.id=id+'P';
+  const chs=B(bid).channels.slice();
+  const b=mkBatch(id,`${p.key} photos ${TODAY}`,p.brand,chs,[p],'Today');b.kind='upload';b.channels=chs;b.step=1;
+  S.batches[id]=b;S.wiz.bid=id;go('#new/1')}
+
+/* ============ Admin ============ */
+function vAdmin(page){
+  if(S.seat!=='admin')return `<div class="card"><h2>Only admins see this page.</h2><p class="muted">Switch "You are" to Admin in the top bar.</p></div>`;
+  const pages=[['models','Brand models'],['scene','Scene style profile'],['rights','Brand permissions'],['makers','Photo makers'],['ops','Ops']];
+  const nav=`<div class="subnav">${pages.map(([k,l])=>`<a href="#admin/${k}" class="${page===k?'on':''}">${l}</a>`).join('')}</div>`;
+  const body={models:aModels,scene:aScene,rights:aRights,makers:aMakers,ops:aOps}[page]||aModels;
+  return `<h1>Admin</h1>${nav}${body()}`;
+}
+function aModels(){
+  const brand=S.open.regBrand||'vero_moda';const R=S.registry[brand];
+  const sel=`<label class="inline-sel">Brand <select onchange="S.open.regBrand=this.value;render()">${Object.keys(BRANDS).map(k=>`<option value="${k}" ${k===brand?'selected':''}>${BRANDS[k]}</option>`).join('')}</select></label>`;
+  if(R.deleted||!R.groups.length&&!R.pack)return `${sel}<div class="card" style="margin-top:14px"><h3>No model photos for ${BRANDS[brand]}</h3><p class="muted">${R.deleted?'This brand\'s model data was deleted on '+TODAY+'. Published product images stay.':'No photos of this brand\'s models have been collected yet.'}</p>${R.deleted?`<button class="btn" onclick="restoreReg('${brand}')">Prototype: collect photos again</button>`:''}</div>`;
+  const contact=Array.from({length:12},(_,i)=>{const roles=['fl','hs','bh','fm'];const r=roles[i%4];return `<figure>${apparelImg({g:i%3===1?'dress':'top',color:['#e8dcc4','#9cc3e4','#b5562f','#24305e'][i%4],length:'short'},r,{hair:R.groups[i%3]?R.groups[i%3].hair:'#3b2b22'})}<figcaption>${ROLE_WORDS[r]}, light background</figcaption></figure>`}).join('');
+  const groups=R.groups.map((g,gi)=>`<div class="prow" style="grid-template-columns:minmax(0,1fr) auto"><div><b>${g.status==='confirmed'?(g.label||`${BRANDS[brand]} model ${String.fromCharCode(65+gi)}`):'Group '+(gi+1)}</b> <span class="muted sm">${g.size} photos</span> <span class="pill ${g.status==='confirmed'?'ok':g.status==='rejected'?'bad':''}">${{candidate:'To confirm',confirmed:'Same person, confirmed',rejected:'Not usable'}[g.status]}</span><div class="faces" style="margin-top:8px">${Array.from({length:Math.min(g.size,8)},(_,i)=>faceSVG(g.mixed&&i%2?'#a8743a':g.hair,i+gi)).join('')}</div>${g.mixed?'<p class="help">These may be two people. Use Split if so.</p>':''}</div>
+  <div class="acts">${g.status==='candidate'?`<button class="btn ok sm" onclick="grp('${brand}',${gi},'same')">Same person</button><button class="btn ghost sm" onclick="grp('${brand}',${gi},'split')">Split</button><button class="btn ghost sm" onclick="grp('${brand}',${gi},'bad')">Not usable</button>`:''}</div></div>`).join('');
+  const confirmed=R.groups.some(g=>g.status==='confirmed');
+  const packTiles=['fl','hs','bh','fm'].map(r=>`<figure>${apparelImg({g:'top',color:'#d6d1c4',length:'short'},r,{hair:(R.groups[0]||{}).hair})}<figcaption>${ROLE_WORDS[r]}${r==='fl'?' with face':''}<br><span class="sm muted">2,400 px, light grey, permission on record</span></figcaption></figure>`).join('');
+  return `${sel}<p class="lead">Only admins see these pages. Faces are grouped within this brand only and never shown anywhere else. No child ever enters this list.</p>
+  <h2 style="margin:18px 0 8px">Contact sheet</h2><p class="muted sm">Usable photos of the brand's own adult models, tagged by shot type.</p><div class="thumbs" style="grid-template-columns:repeat(auto-fill,minmax(96px,1fr))">${contact}</div>
+  <h2 style="margin:22px 0 8px">Person groups</h2><div class="plist">${groups}</div>
+  <h2 style="margin:22px 0 8px">Model pack</h2><div class="card"><p>One pack per person: full length front with face, head and shoulders, back to the hips, and front to mid-thigh if there is one.</p><div class="thumbs" style="grid-template-columns:repeat(auto-fill,minmax(110px,1fr))">${packTiles}</div>
+  ${R.pack==='approved'?`<div class="notice ok" style="margin-top:12px"><b>${R.packLabel}: approved</b> by Admin for ${R.packDepts.map(d=>GARMENT_WORD[d]).join(', ')}. An approved pack is never edited; a change is a new version. <button class="btn ghost sm" onclick="S.registry['${brand}'].pack='candidate';render();toast('Prototype: pack set back to not approved.')">Prototype: un-approve</button></div>`:`<p class="help">Approve the pack for these garment types:</p><div class="chips">${['tops','dresses_jumpsuits','bottoms','outerwear'].map(d=>`<label class="chip"><input type="checkbox" checked class="pdept" value="${d}"> ${GARMENT_WORD[d]}</label>`).join('')}</div><div class="acts" style="margin-top:10px"><button class="btn primary" ${confirmed?'':'disabled'} onclick="approvePack('${brand}')">Approve</button>${confirmed?'':'<span class="help">Confirm a person group first (Same person).</span>'}</div>`}</div>
+  <h2 style="margin:22px 0 8px">Delete face data</h2><div class="card" style="border-color:var(--bad)"><p>Deletes this brand's face data, person groups, model packs and model photos. Published product images are not affected. Only after the owner's typed yes.</p><button class="btn danger" onclick="delReg('${brand}')">Delete this brand's model data</button></div>`;
+}
+function grp(brand,gi,act){const R=S.registry[brand];const g=R.groups[gi];
+  if(act==='same'){g.status='confirmed';g.label=`${BRANDS[brand]} model ${String.fromCharCode(65+R.groups.filter(x=>x.status==='confirmed').length-1)}`;toast(`Confirmed as ${g.label}. It can now become a model pack.`)}
+  if(act==='bad'){g.status='rejected';toast('Marked not usable.')}
+  if(act==='split'){const half=Math.floor(g.size/2);R.groups.splice(gi+1,0,{id:g.id+'b',size:g.size-half,hair:'#a8743a',status:'candidate'});g.size=half;g.mixed=false;toast('Split into two groups.')}
+  render()}
+function approvePack(brand){const R=S.registry[brand];R.pack='approved';R.packLabel=(R.groups.find(g=>g.status==='confirmed')||{}).label||BRANDS[brand]+' model A';R.packDepts=[...document.querySelectorAll('.pdept')].filter(x=>x.checked).map(x=>x.value);R.deleted=false;render();toast(`${R.packLabel} approved. Flat-lay-only products of ${BRANDS[brand]} can now be made on this model.`)}
+function delReg(brand){const word='DELETE '+BRANDS[brand].toUpperCase();modal(`<h3>Delete this brand's model data</h3><p>This deletes every face record, person group, model pack and model photo of ${BRANDS[brand]}. It cannot be undone. Published product images stay.</p><p>Only do this after the owner's typed yes. Type <b class="mono">${word}</b> to confirm.</p><input type="text" id="delw" class="full" oninput="document.getElementById('delgo').disabled=this.value!=='${word}'" autocomplete="off"><div class="row-acts"><button class="btn ghost" onclick="closeModal()">Cancel</button><button class="btn danger" id="delgo" disabled onclick="doDel('${brand}')">Delete</button></div>`)}
+function doDel(brand){const R=S.registry[brand];const n=R.groups.length,ph=R.groups.reduce((a,g)=>a+g.size,0);R.groups=[];R.pack=null;R.deleted=true;closeModal();render();toast(`Deleted: ${n} groups, ${ph} photos, 1 model pack. Recorded with counts only.`)}
+function restoreReg(brand){S.registry[brand]=clone(defaultState().registry[brand]);S.registry[brand].pack='candidate';render()}
+function aScene(){
+  const brand=S.open.profBrand||'us_polo';const P=S.profiles[brand];const ap=approvedProfile(brand);const d=P.draft;
+  const sel=`<label class="inline-sel">Brand <select onchange="S.open.profBrand=this.value;render()">${Object.keys(BRANDS).map(k=>`<option value="${k}" ${k===brand?'selected':''}>${BRANDS[k]}</option>`).join('')}</select></label>`;
+  const status=ap?`<span class="pill ok">Approved version ${P.versions.length}</span> <span class="muted sm">by ${P.versions[P.versions.length-1].by}, ${P.versions[P.versions.length-1].at}</span>`:'<span class="pill">No approved profile: scene images are off for this brand</span>';
+  let h=`${sel}<p style="margin-top:10px">${status}</p><p class="lead">How scene images look for this brand: the scene per type of shoe or bag, the styling for each audience, and whose face may show. A draft is used only once approved.</p>`;
+  if(!d)return h+`<div class="acts"><button class="btn primary" onclick="startDraft('${brand}',true)">Start from the default</button>${ap?`<button class="btn ghost" onclick="startDraft('${brand}',false)">Edit the approved version</button>`:''}</div>`;
+  const models=S.registry[brand]&&S.registry[brand].pack==='approved'&&!S.registry[brand].deleted?[S.registry[brand].packLabel]:[];
+  const warn=[];Object.entries(d.subcategories).forEach(([k,e])=>{if(!e.worn)warn.push(`${SUBS[k]}: no worn scene. Only a still life will be made.`)});
+  if(!d.routes.full&&!d.routes.composite)warn.push('Neither route is on: no scene images will be made.');
+  ['men','women','unisex'].forEach(a=>{if(d.person[a]!=='never'&&!S.rights[brand].likeness)warn.push(`${a}: a face needs the brand's permission for its model's likeness, which is not on record.`)});
+  const subRows=Object.entries(d.subcategories).map(([k,e])=>`<tr><td><b>${SUBS[k]}</b></td><td><input type="text" value="${esc(e.worn||'')}" placeholder="No worn scene" onchange="setSub('${brand}','${k}','worn',this.value)" style="min-width:200px"></td><td><select onchange="setSub('${brand}','${k}','framing',this.value)">${Object.entries(FRAMINGS).map(([f,l])=>`<option value="${f}" ${e.framing===f?'selected':''}>${l}</option>`).join('')}</select></td><td><input type="text" value="${esc(e.stillLife)}" onchange="setSub('${brand}','${k}','stillLife',this.value)" style="min-width:160px"></td><td class="sm">${esc(e.styling.men)}<br>${esc(e.styling.women)}</td></tr>`).join('');
+  const face=a=>`<div class="sw" style="display:grid;grid-template-columns:90px minmax(0,1fr);gap:8px;align-items:center;margin:4px 0"><span>${a==='unisex'?'Unisex':a[0].toUpperCase()+a.slice(1)}</span><select onchange="S.profiles['${brand}'].draft.person['${a}']=this.value;render()"><option value="never">Nobody (legs only)</option>${models.length?models.map(m=>`<option value="${m}" ${d.person[a]===m?'selected':''}>${m}</option>`).join(''):'<option disabled>No approved brand model yet</option>'}</select></div>`;
+  h+=`<div class="card"><h3>Draft</h3>
+  <label class="opt"><input type="checkbox" ${d.enabled?'checked':''} onchange="S.profiles['${brand}'].draft.enabled=this.checked;render()"><span>Scene images on for this brand</span></label>
+  <label class="opt"><input type="checkbox" ${d.routes.full?'checked':''} onchange="S.profiles['${brand}'].draft.routes.full=this.checked;render()"><span>Worn or carried scene<small>Drawn by AI from every usable photo of the product.</small></span></label>
+  <label class="opt"><input type="checkbox" ${d.routes.composite?'checked':''} onchange="S.profiles['${brand}'].draft.routes.composite=this.checked;render()"><span>Still life<small>The brand's real cut-out placed in an AI-made scene; product pixels unchanged.</small></span></label>
+  <div class="inline-sel" style="margin:8px 0"><label>Try first <select onchange="S.profiles['${brand}'].draft.routePreference=this.value"><option value="full_first" ${d.routePreference==='full_first'?'selected':''}>Worn scene, still life if it fails</option><option value="composite_first" ${d.routePreference==='composite_first'?'selected':''}>Still life, worn scene if it fails</option></select></label><label>Unisex products styled as <select onchange="S.profiles['${brand}'].draft.unisexStyling=this.value"><option value="men" ${d.unisexStyling==='men'?'selected':''}>Men</option><option value="women" ${d.unisexStyling==='women'?'selected':''}>Women</option></select></label></div>
+  <h4 style="margin-top:14px">Scenes per type</h4><div class="tw"><table><thead><tr><th>Type</th><th>Worn scene</th><th>Framing</th><th>Still life</th><th>Styling (men / women)</th></tr></thead><tbody>${subRows}</tbody></table></div>
+  <h4 style="margin-top:14px">Never in a scene</h4><textarea onchange="S.profiles['${brand}'].draft.forbidden=this.value.split('\\n').filter(Boolean)">${esc(d.forbidden.join('\n'))}</textarea>
+  <h4 style="margin-top:14px">Kids</h4><div class="card" style="background:var(--soft)"><ul class="lines sm"><li>No child is ever drawn as a person: shoes are legs only or feet only, bags held at the waist, no face, head or body above the knee or waist, one child and no adult in the frame.</li><li>Knees covered except at a pool or beach (then the frame stops below the knee); torso covered; no swimwear or underwear; everyday standing, walking or sitting only.</li><li>Also never: ${esc(d.kidsForbidden.join(', ').toLowerCase())}.</li><li>Products we cannot place by audience are treated as kids.</li></ul><p class="help">These rules are fixed and cannot be edited.</p></div>
+  <h4 style="margin-top:14px">Show the face of</h4>${face('men')}${face('women')}${face('unisex')}
+  <div class="sw" style="display:grid;grid-template-columns:90px minmax(0,1fr);gap:8px;align-items:center;margin:4px 0"><span>Kids</span><select disabled><option>Nobody (legs only)</option></select></div><p class="help">Children are never shown with a face, and the model list holds no child models and no child face data. This cannot be changed.</p>
+  ${warn.length?`<div class="notice"><b>Before you approve:</b><ul class="lines">${warn.map(w=>`<li>${esc(w)}</li>`).join('')}</ul></div>`:''}
+  <div class="row-acts"><button class="btn ghost" onclick="S.profiles['${brand}'].draft=null;render()">Discard draft</button><button class="btn primary" onclick="approveProfile('${brand}')">Approve this version</button></div></div>`;
+  if(P.versions.length)h+=`<h3 style="margin-top:18px">Versions</h3><ul class="lines">${P.versions.map(v=>`<li>Version ${v.v}, approved by ${v.by}, ${v.at}${v.body.enabled?'':' (scene images off)'}</li>`).join('')}</ul>`;
+  return h;
+}
+function startDraft(brand,fromDefault){const P=S.profiles[brand];P.draft=fromDefault?defaultSceneBody():clone(approvedProfile(brand));render()}
+function setSub(brand,k,f,v){S.profiles[brand].draft.subcategories[k][f]=v||(f==='worn'?null:v);render()}
+function approveProfile(brand){const P=S.profiles[brand];const d=P.draft;if(!d.forbidden.length){toast('The forbidden list cannot be empty.');return}P.versions.push({v:P.versions.length+1,by:'Admin',at:TODAY,body:d});P.draft=null;render();toast(`Version ${P.versions.length} approved. New batches of ${BRANDS[brand]} use it.`)}
+function aRights(){
+  const scopeOpts=[['none','Not granted'],['still_life','Still life only'],['worn_or_carried','Worn or carried scene']];
+  const rows=Object.keys(BRANDS).map(k=>{const r=S.rights[k];return `<tr><td><b>${BRANDS[k]}</b></td><td><input type="text" value="${esc(r.grantor)}" onchange="S.rights['${k}'].grantor=this.value;save()" style="width:160px"></td><td><input type="text" value="${esc(r.doc)}" onchange="S.rights['${k}'].doc=this.value;save()" style="width:160px"></td><td><select onchange="setScope('${k}',this.value)">${scopeOpts.map(([v,l])=>`<option value="${v}" ${r.scope===v?'selected':''}>${l}</option>`).join('')}</select></td><td><input type="checkbox" ${r.ref?'checked':''} onchange="S.rights['${k}'].ref=this.checked;save()" aria-label="Reference use"></td><td><input type="checkbox" ${r.likeness?'checked':''} onchange="S.rights['${k}'].likeness=this.checked;save()" aria-label="Model likeness"></td><td><input type="date" value="${r.from}" onchange="S.rights['${k}'].from=this.value;save()"></td><td><input type="date" value="${r.to}" onchange="S.rights['${k}'].to=this.value;save()"></td></tr>`}).join('');
+  return `<p class="lead">The brand's written permission for generated images. Only the reference to the document is kept here, never the document itself. A scene image needs at least "Still life only"; a worn scene needs "Worn or carried scene".</p><div class="tw"><table style="min-width:900px"><thead><tr><th>Brand</th><th>Granted by</th><th>Document reference</th><th>Scene images</th><th>Model photos as reference</th><th>Model's likeness</th><th>Valid from</th><th>Valid to</th></tr></thead><tbody>${rows}</tbody></table></div><p class="help">Changes save as you edit. Prototype: the US Polo scene permission is the same switch as in Test controls.</p>`;
+}
+function setScope(k,v){S.rights[k].scope=v;render();toast(`${BRANDS[k]} scene images: ${({none:'not granted',still_life:'still life only',worn_or_carried:'worn or carried scene'})[v]}.`)}
+function aMakers(){
+  const U={shotset:'Apparel shots',scene_full:'Scene, worn',scene_background:'Scene, background'};
+  const rows=S.makers.map((m,i)=>`<tr><td>${i+1} <button class="link sm" ${i?'':'disabled'} onclick="moveMaker(${i},-1)">up</button> <button class="link sm" ${i<S.makers.length-1?'':'disabled'} onclick="moveMaker(${i},1)">down</button></td><td><b>${m.name}</b>${m.hosted?'<br><span class="sm muted">Always last; only when the brand allows outside services</span>':''}</td><td><div class="chips">${m.uses.map(u=>`<span class="chip">${U[u]}</span>`).join('')}</div></td><td><label><input type="checkbox" ${m.enabled?'checked':''} onchange="S.makers[${i}].enabled=this.checked;render()"> On</label></td><td>${m.approved?'<span class="pill ok">Approved</span>':`<button class="btn sm" onclick="approveMaker(${i})">Approve</button>`}</td><td class="sm">${m.pass==null?'Not tested yet':`${Math.round(m.pass*100)}% passed on the test set, ${usd(m.usd)} per accepted photo`}</td></tr>`).join('');
+  return `<p class="lead">The photo makers this module may call, in the order it tries them. Names are neutral on purpose; the technical team keeps the details. A maker is used only when it is on and approved for that use. Every change starts the nightly test run again.</p><div class="tw"><table style="min-width:820px"><thead><tr><th>Order</th><th>Name</th><th>Used for</th><th>On</th><th>Approval</th><th>Test results</th></tr></thead><tbody>${rows}</tbody></table></div>
+  <div class="card" style="margin-top:16px"><h3>Outside scene services per brand</h3><p class="muted sm">Off by default. When on, an outside service may draw the background of a still life only; the product pixels are always pasted back by us.</p>${Object.keys(BRANDS).map(k=>`<label class="opt"><input type="checkbox" ${S.hostedAllowed[k]?'checked':''} onchange="S.hostedAllowed['${k}']=this.checked;save()"><span>${BRANDS[k]}</span></label>`).join('')}</div>`;
+}
+function moveMaker(i,d){const a=S.makers;[a[i],a[i+d]]=[a[i+d],a[i]];render();toast('Order changed. The nightly test run starts again.')}
+function approveMaker(i){const m=S.makers[i];modal(`<h3>Approve ${m.name}</h3><p>Approve it for:</p>${['shotset','scene_full','scene_background'].map(u=>`<label class="opt"><input type="checkbox" class="mu" value="${u}" ${m.uses.includes(u)?'checked':''}><span>${{shotset:'Apparel shots',scene_full:'Scene, worn',scene_background:'Scene, background'}[u]}</span></label>`).join('')}<label class="f" for="mref">Reference to the written yes</label><input type="text" id="mref" class="full" placeholder="For example: email of 27 Oct 2026"><div class="row-acts"><button class="btn ghost" onclick="closeModal()">Cancel</button><button class="btn primary" onclick="doApproveMaker(${i})">Approve</button></div>`)}
+function doApproveMaker(i){const m=S.makers[i];m.uses=[...document.querySelectorAll('.mu')].filter(x=>x.checked).map(x=>x.value);m.approved=true;m.enabled=true;closeModal();render();toast(m.name+' approved and switched on.')}
+function exitBars(scope){
+  const ok=S.sw.exitHold;
+  if(scope==='made')return [[ok,`At least 300 labelled made photos over at least 3 brands, every required shot type covered (now ${ok?'318 over 3':'212 over 2'})`],[ok,`Wrong passes 2% or less, none on the garment or logo checks, no hard-block miss (now ${ok?'1.3%':'1.4%, 1 on a logo'})`],[true,'Wrong holds 15% or less (now 11%)'],[true,'Planted defects caught: 100%'],[ok,`Two raters agree well on every question (now lowest ${ok?'0.71':'0.61, on print or fabric texture'})`],[ok,`Vero Moda: at least 50 labelled made photos, no garment or logo wrong pass (now ${ok?'64':'38'})`]];
+  if(scope==='crops')return [[ok||S.ops.crops.vero_moda>=50,`50 swap cards in a row approved with no rejection and no reported cut (now ${ok?50:S.ops.crops.vero_moda} of 50)`]];
+  return [[ok,`At least 150 labelled scene images over at least 3 brands (now ${ok?'162 over 3':'64 over 2'})`],[ok,`Every coverage cell has 10 labels: men, women, unisex, kids, each type, bags with one or two views, one-photo products (now ${ok?'all filled':'kids and clutch below 10'})`],[true,'No wrong pass on face, modesty, identity or pixel checks'],[ok,`Two raters agree well on every question (now lowest ${ok?'0.70':'0.64'})`]];
+}
+function aOps(){
+  const ph=S.sw.phase;
+  const A=B('A');const lab=A.jobs.reduce((a,j)=>a+j.labels.length,0);const pub=A.jobs.filter(j=>isGen(j)&&j.state==='live').length;const rem=A.jobs.filter(j=>j.reason==='removed').length;const dis=A.jobs.filter(j=>j.third||j.adj).length;
+  const exitCard=(scope,label,phaseKey)=>{const bars=exitBars(scope);const all=bars.every(b=>b[0]);const cur=ph[phaseKey];
+    return `<div class="card"><div class="hdr" style="margin:0"><h3>${label}</h3><span class="pill ${cur==='sampled'?'ok':'warn'}">${cur==='sampled'?'Sampled: 10% checked by two people':'Review-all: every one checked'}</span></div><ul class="bars">${bars.map(b=>`<li><span class="${b[0]?'y':'n'}">${b[0]?'\u2713':'x'}</span><span>${b[1]}</span></li>`).join('')}</ul>
+    <div class="acts">${scope==='crops'?`<span class="help">Moves to sampled by itself on the 50th approved swap in a row.</span>${all&&cur!=='sampled'?`<button class="btn sm" onclick="setPhase('${phaseKey}','sampled')">Prototype: reach the 50th</button>`:''}`:`<button class="btn primary sm" ${all&&cur!=='sampled'?'':'disabled'} onclick="setPhase('${phaseKey}','sampled')">Move to sampled review</button>`}${cur==='sampled'?`<button class="btn ghost sm" onclick="relapse('${phaseKey}','${label}')">Prototype: simulate a relapse</button>`:''}</div>${all||cur==='sampled'?'':'<p class="help">The button stays greyed until every number holds.</p>'}</div>`};
+  const dept=S.open.opsDept||'*';const rowsP=S.policy[dept];
+  const ruleRows=CH_ORDER.map(c=>{const r=rowsP[c];return `<tr><td><b>${CH[c]}</b></td><td class="sm">${r.roles.map((e,i)=>`${i+1} ${entryWords(e,{length:'short'})}`).join(', ')}</td><td class="sm">${r.head==='fail'?'Face cut not allowed':'Cut allowed at nose or lips'}</td><td><span class="pill ${r.status==='confirmed'?'ok':r.status==='assumed'?'warn':''}">${r.status}</span>${r.by!=='seed'?`<br><span class="sm muted">edited by ${r.by}</span>`:''}</td><td><button class="btn ghost sm" onclick="editRule('${dept}','${c}')">Edit</button></td></tr>`}).join('');
+  const sceneRows=CH_ORDER.map(c=>{const r=S.chScene[c];return `<tr><td><b>${CH[c]}</b></td><td>${r.max||'No limit'}</td><td><select onchange="S.chScene['${c}'].life=this.value;render()">${['published','assumed','off'].map(v=>`<option value="${v}" ${r.life===v?'selected':''}>${{published:'Yes, published rule',assumed:'Yes, assumed',off:'No'}[v]}</option>`).join('')}</select></td><td><select onchange="S.chScene['${c}'].ai=this.value;render()"><option value="xmp" ${r.ai==='xmp'?'selected':''}>File label only</option><option value="xmp_and_sheet" ${r.ai==='xmp_and_sheet'?'selected':''}>File label and sheet column</option></select></td></tr>`}).join('');
+  return `${S.ops.relapse?`<div class="notice bad"><b>${S.ops.relapse.label}: back to review-all.</b> ${S.ops.relapse.msg} <button class="link" onclick="S.ops.relapse=null;render()">Dismiss</button></div>`:''}
+  <h2 style="margin:6px 0 8px">Shot sets per brand</h2><div class="tw"><table style="min-width:980px"><thead><tr><th>Brand</th><th>Apparel products</th><th>Complete on Styli before / after</th><th>Filled by: existing / cut / made / brand model</th><th>Not made</th><th>Cut photos found / replaced / still live</th><th>Reviewed answers / published / removed / disagreed</th><th>Cost per accepted made photo</th></tr></thead><tbody>
+  <tr><td><b>Vero Moda</b></td><td>16</td><td>2 / 9</td><td>41 / 14 / 5 / 4</td><td>9</td><td>2 / 1 / 1</td><td>${lab} / ${pub} / ${rem} / ${dis}</td><td>0.21 USD</td></tr>
+  <tr><td><b>US Polo</b></td><td>3</td><td>1 / 3</td><td>12 / 1 / 1 / 0</td><td>0</td><td>1 / 1 / 0</td><td>0 / 0 / 0 / 0</td><td>0.19 USD</td></tr></tbody></table></div>
+  <h2 style="margin:22px 0 8px">Scene images per brand</h2><div class="tw"><table style="min-width:820px"><thead><tr><th>Brand</th><th>Eligible</th><th>Skipped: already worn / other</th><th>Accepted: worn / still life</th><th>Held</th><th>Cost per accepted</th><th>Not sent at a marketplace's limit</th></tr></thead><tbody><tr><td><b>US Polo</b></td><td>12</td><td>2 / 1</td><td>8 / 2</td><td>2</td><td>0.22 USD (target 0.20)</td><td>Trendyol 1</td></tr><tr><td><b>Campus</b></td><td>0</td><td>0 / 5 (no permission)</td><td>0 / 0</td><td>0</td><td>-</td><td>-</td></tr></tbody></table></div>
+  <h2 style="margin:22px 0 8px">Leaving review-all</h2><div class="protobox">Prototype: flip "Exit numbers hold" in Test controls to see the buttons turn on.</div>
+  <div class="grid2">${exitCard('made','Vero Moda made photos','made')}${exitCard('crops','Vero Moda photo swaps','crops')}${exitCard('scene','Scene images, worn (every brand)','scene_full')}${exitCard('scene','Scene images, still life (every brand)','scene_composite')}</div>
+  <h2 style="margin:22px 0 8px">Shots each marketplace asks for</h2><p class="muted sm">Confirmed: the marketplace told us. Assumed: from its public guide. Proposed: our suggestion, waiting for the owner. Edits apply to the next plan run.</p>
+  <label class="inline-sel" style="margin-bottom:8px">Garments <select onchange="S.open.opsDept=this.value;render()">${Object.keys(ROW_LABEL).map(k=>`<option value="${k}" ${k===dept?'selected':''}>${ROW_LABEL[k]}</option>`).join('')}</select></label>
+  <div class="tw"><table style="min-width:760px"><thead><tr><th>Marketplace</th><th>Shots in order</th><th>Face cut</th><th>Status</th><th></th></tr></thead><tbody>${ruleRows}</tbody></table></div>
+  <h2 style="margin:22px 0 8px">Scene images per marketplace</h2><div class="tw"><table style="min-width:620px"><thead><tr><th>Marketplace</th><th>Most photos</th><th>Takes scene images</th><th>AI-made disclosure</th></tr></thead><tbody>${sceneRows}</tbody></table></div>`;
+}
+function setPhase(k,v){S.sw.phase[k]=v;if(k==='crops'&&v==='sampled')S.ops.crops.vero_moda=50;render();toast(v==='sampled'?'Moved to sampled review: 10% are still checked by two people.':'Back to review-all.')}
+function relapse(k,label){S.sw.phase[k]='review_all';if(k==='crops')S.ops.crops.vero_moda=0;S.ops.relapse={label,msg:k==='crops'?'A sampled photo swap was rejected. Every swap waits for a person again, and the run of 50 starts from 0.':'A sampled batch had a photo that passed our checks but the reviewers found a changed logo. Every one is checked by two people again; leaving review-all needs 50 new labelled photos.'};render();window.scrollTo(0,0)}
+const RULE_CHOICES=['fm','fl','fc','bh','hs','bl','fw','bw','dt','pk','flat','fb','fm|fl','fw|fl'];
+function editRule(dept,ch){if(S.seat!=='admin')return;S.open.edit={dept,ch,roles:S.policy[dept][ch].roles.map(e=>Array.isArray(e)?e.join('|'):e),status:S.policy[dept][ch].status};ruleModal()}
+function ruleModal(){const E=S.open.edit;const w=v=>v.split('|').map(r=>ROLE_WORDS[r]).join(' or ');
+  modal(`<h3>${CH[E.ch]}: ${ROW_LABEL[E.dept]}</h3><p class="muted sm">Shots in order. The first one is image 1.</p><div class="rolelist">${E.roles.map((r,i)=>`<div class="rr"><span>${i+1}</span><select onchange="S.open.edit.roles[${i}]=this.value">${RULE_CHOICES.map(c=>`<option value="${c}" ${c===r?'selected':''}>${w(c)}</option>`).join('')}</select><button class="btn ghost sm" ${i?'':'disabled'} onclick="mvRole(${i},-1)">Up</button><button class="btn ghost sm" ${i<E.roles.length-1?'':'disabled'} onclick="mvRole(${i},1)">Down</button><button class="btn ghost sm" onclick="S.open.edit.roles.splice(${i},1);ruleModal()">Remove</button></div>`).join('')}</div><button class="btn ghost sm" onclick="S.open.edit.roles.push('hs');ruleModal()">Add a shot</button><label class="f" style="margin-top:12px">Status <select onchange="S.open.edit.status=this.value"><option ${E.status==='confirmed'?'selected':''} value="confirmed">confirmed</option><option ${E.status==='assumed'?'selected':''} value="assumed">assumed</option><option ${E.status==='proposed'?'selected':''} value="proposed">proposed</option></select></label><div class="row-acts"><button class="btn ghost" onclick="closeModal()">Cancel</button><button class="btn primary" onclick="saveRule()">Save</button></div>`)}
+function mvRole(i,d){const a=S.open.edit.roles;[a[i],a[i+d]]=[a[i+d],a[i]];ruleModal()}
+function saveRule(){const E=S.open.edit;const A=B('A');const before=planCounts(A);
+  S.policy[E.dept][E.ch]={roles:E.roles.map(v=>v.includes('|')?v.split('|'):v),status:E.status,head:S.policy[E.dept][E.ch].head,by:'Admin, '+TODAY};
+  for(const id in S.batches){const b=S.batches[id];if(b.status==='running')b.products.forEach(p=>reconcile(b,p))}
+  const after=planCounts(A);closeModal();render();
+  modal(`<h3>Saved</h3><p>${CH[E.ch]}, ${ROW_LABEL[E.dept]} now asks for: ${S.policy[E.dept][E.ch].roles.map((e,i)=>`${i+1} ${entryWords(e,{})}`).join(', ')}.</p><p>Plans were run again. Vero Moda AW26 drop${A.channels.includes(E.ch)?'':` (does not include ${CH[E.ch]}; tick it on step 3 to see an effect)`}:</p><ul class="lines"><li>Products missing shots: ${before.missing} to ${after.missing}</li><li>Photos that will be made: ${before.gen} to ${after.gen}</li><li>Shots that will be cut from a bigger photo: ${before.cut} to ${after.cut}</li></ul><div class="row-acts"><button class="btn ghost" onclick="closeModal()">Close</button><button class="btn primary" onclick="closeModal();openBatch('A')">Open the batch</button></div>`)}
+function planCounts(b){const ch=b.channels.length?b:Object.assign({},b,{channels:b.defCh});const s=summary(ch);let cut=0;Object.values(s.groups).forEach(g=>cut+=g.cut);return {missing:s.missing,gen:s.gen,cut}}
+
+/* ============ Drawers: test controls and test guide ============ */
+let drawerKind=null;
+function openDrawer(k){drawerKind=(drawerKind===k&&!$('#drawer').hidden)?null:k;$('#drawer').hidden=!drawerKind;if(drawerKind)renderDrawer()}
+function closeDrawer(){drawerKind=null;$('#drawer').hidden=true}
+function curBatch(){const r=route();if(r[0]==='batch')return B(r[1]);if(r[0]==='product')return B(r[1]);if(r[0]==='new')return S.wiz.bid?B(S.wiz.bid):null;return null}
+function stageOf(b){if(!b)return null;if(b.status==='draft')return b.detect.state==='running'?'detect':(b.step>=4?'detect':'collect');if(b.status==='done')return 'done';
+  const st=b.lastSteps||[];if(b.jobs.some(j=>j.state==='ready'))return 'publish';if(b.jobs.some(j=>j.state==='checking'))return 'check';if(b.jobs.some(j=>['planned','making'].includes(j.state)))return 'make';return 'done'}
+function renderDrawer(){
+  const d=$('#drawer');
+  if(drawerKind==='guide'){d.innerHTML=vGuide();return}
+  const b=curBatch();const stg=stageOf(b);const chain=['collect','detect','make','check','publish'];
+  const sel=(path,opts,cur)=>`<select onchange="setSw('${path}',this.value)">${opts.map(([v,l])=>`<option value="${v}" ${String(cur)===String(v)?'selected':''}>${l}</option>`).join('')}</select>`;
+  const onoff=(path,cur)=>sel(path,[['true','On'],['false','Off']],cur);
+  const ph=S.sw.phase;const PH=[['review_all','Review-all'],['sampled','Sampled']];
+  d.innerHTML=`<div class="hdr" style="margin:0"><h2>Test controls</h2><button class="btn ghost sm" onclick="closeDrawer()">Close</button></div><span class="pbadge">Prototype only</span><p class="sm muted">These switches fake the world. The real module has none of them.</p>
+  <section><h3>Advance time</h3><p class="sm">${b?`Batch: <b>${esc(b.name)}</b>`:'Open a batch, or step 4 of the wizard.'}</p><div class="chain">${chain.map((c,i)=>`<span class="${stg===c?'on':(stg&&(chain.indexOf(stg)>i||stg==='done'))?'done':''}">${c}</span>${i<4?'&gt;':''}`).join('')}</div><button class="btn primary" onclick="advance()">Advance time</button></section>
+  <section><h3>Review phase</h3>
+  <div class="sw"><span>Made photos</span>${sel('phase.made',PH,ph.made)}</div><div class="sw"><span>Photo swaps (crops)</span>${sel('phase.crops',PH,ph.crops)}</div><div class="sw"><span>Scene images, worn</span>${sel('phase.scene_full',PH,ph.scene_full)}</div><div class="sw"><span>Scene images, still life</span>${sel('phase.scene_composite',PH,ph.scene_composite)}</div></section>
+  <section><h3>Brands</h3>
+  <div class="sw"><span>Making new photos: Vero Moda</span>${onoff('making.vero_moda',S.sw.making.vero_moda)}</div>
+  <div class="sw"><span>Making new photos: US Polo</span>${onoff('making.us_polo',S.sw.making.us_polo)}</div>
+  <div class="sw"><span>Vero Moda has an approved brand model</span>${sel('modeB',[['true','Yes'],['false','No']],modeBOk('vero_moda'))}</div>
+  <div class="sw"><span>US Polo scene permission</span>${sel('scope',[['none','None'],['still_life','Still life'],['worn_or_carried','Worn or carried']],S.rights.us_polo.scope)}</div></section>
+  <section><h3>Events</h3>
+  <div class="sw"><span>Detection fails (step 4)</span>${onoff('detectFail',S.sw.detectFail)}</div>
+  <div class="sw"><span>Batch limit runs out mid-way</span>${onoff('capOut',S.sw.capOut)}</div>
+  <div class="sw"><span>A newer delivery arrives while a review waits</span>${onoff('newer',S.sw.newer)}</div>
+  <div class="sw"><span>Trendyol full at its cap</span>${onoff('trendyolFull',S.sw.trendyolFull)}</div>
+  <div class="sw"><span>Namshi takes no scene images</span>${onoff('noScene',S.sw.noScene)}</div>
+  <div class="sw"><span>Exit numbers hold (Ops)</span>${onoff('exitHold',S.sw.exitHold)}</div></section>
+  <section><h3>Look</h3><div class="sw"><span>Theme</span>${sel('theme',[['','Follow the device'],['light','Light'],['dark','Dark']],S.theme||'')}</div></section>
+  <section><button class="btn danger" onclick="askReset()">Reset everything</button><p class="help">Puts every batch, switch and admin page back to the start. Your ticks in the test guide stay.</p></section>`;
+}
+function setSw(path,v){
+  if(path==='theme'){S.theme=v||null;render();return}
+  if(path==='modeB'){const R=S.registry.vero_moda;if(v==='true'){if(R.deleted||!R.groups.length){S.registry.vero_moda=clone(defaultState().registry.vero_moda)}else{R.pack='approved';R.deleted=false}}else{R.pack='candidate'}render();return}
+  if(path==='scope'){S.rights.us_polo.scope=v;render();return}
+  const val=v==='true'?true:v==='false'?false:v;
+  const parts=path.split('.');if(parts.length===2)S.sw[parts[0]][parts[1]]=val;else S.sw[path]=val;
+  if(path==='newer'&&val){applySwitchEffects()}
+  if(path==='phase.crops'&&val==='review_all')S.ops.crops.vero_moda=Math.min(S.ops.crops.vero_moda,31);
+  render();
+}
+function advance(){
+  const r=route();
+  if(r[0]==='new'){const b=S.wiz.bid?B(S.wiz.bid):null;if(b&&b.detect.state==='running'){finishDetect(b);render();toast(S.sw.detectFail?'Detection could not run. See the Missing shots card.':'Detection finished. The plan is shown.')}else toast('Nothing to advance here. Advance time works while we check the photos on step 4, and on a running batch.');return}
+  const b=curBatch();if(!b||b.status!=='running'){toast('Open a running batch first. Advance time moves its worker one step.');return}
+  const steps=advanceBatch(b);render();
+  toast(steps.size?'Worker step: '+[...steps].join(', ')+'.':'Nothing is running. Waiting for review decisions.');
+}
+function askReset(){modal(`<h3>Reset everything?</h3><p>Every batch, switch and admin page goes back to the start. Your ticks and notes in the test guide stay.</p><div class="row-acts"><button class="btn ghost" onclick="closeModal()">Cancel</button><button class="btn danger" onclick="doReset()">Reset</button></div>`)}
+function doReset(){const g=S.guide,f=S.feel,n=S.notes,t=S.theme;S=defaultState();S.guide=g;S.feel=f;S.notes=n;S.theme=t;closeModal();closeDrawer();go('#home');toast('Reset done.')}
+
+/* ============ Test guide and scenario set-ups ============ */
+function freshDraft(id,step){S.batches[id]=makeBatches()[id];const b=B(id);b.folder=true;b.channels=b.defCh.slice();b.step=step||4;b.detect={state:'done',done:b.products.length,total:b.products.length};S.wiz.bid=id;return b}
+function reviewReady(id){const b=freshDraft(id,4);b.status='draft';startQuiet(b);fastForward(b);return b}
+function startQuiet(b){const s=summary(b);b.limit=String(limitDefault(s.gen));b.limitTouched=false;b.detectFailed=false;b.status='running';b.startedAt=TODAY+' 09:12';b.jobs=[];b.sheets=[];b.finalized=false;b.updatedNotice=null;const ctx=ctxFor(b);b.products.forEach(p=>{const pl=planProduct(p,ctx);pl.jobs.forEach(pj=>addJob(b,p,pj,pj.path==='carried'?'held':(pj.waitAnchor?'waiting':'planned')));const e=sceneElig(b,p);if(e&&!e.skip)addScene(b,p,e)})}
+function base(){S.sw=defaultState().sw;S.registry=defaultState().registry;S.rights=defaultState().rights;S.profiles=defaultState().profiles;S.makers=defaultState().makers;S.policy=defaultPolicy();S.chScene=defaultChScene();S.seat='naz';S.open={};S.ops.relapse=null;S.clicks=0;S.sheetV={}}
+const SCEN=[
+ ['A','A. Apparel, operator'],
+ ['A1','Start Batch A: does step 4 tell you clearly what will happen and what it costs, without reading twice?',()=>{base();freshDraft('A');go('#new/4')}],
+ ['A2','Untick "Make the missing shots", clear the limit: is the blocked Start message clear?',()=>{base();freshDraft('A');go('#new/4')}],
+ ['A3','Switch making off for the brand: does the card still make sense with crops only?',()=>{base();S.sw.making.vero_moda=false;freshDraft('A');go('#new/4')}],
+ ['A4','Turn on "detection fails": is the fallback message reassuring or worrying?',()=>{base();S.sw.detectFail=true;freshDraft('A');go('#new/4')}],
+ ['A5','Advance time: do brand photos feel "done" while made photos are still being made?',()=>{base();const b=freshDraft('A');startQuiet(b);go('#batch/A/products');openDrawer('controls')}],
+ ['A6','Pick a garment type for the "not sure" product: does the plan update the way you expect?',()=>{base();reviewReady('A');go('#product/A/A06')}],
+ ['A7',"Change a photo's shot type on the product page: is it obvious what that triggers? (try photo 5 of VM-SHIRT-103 as \"back to the hips\")",()=>{base();freshDraft('A');go('#product/A/A03')}],
+ ['A8','Hit the batch limit mid-way: is "raise it to make the rest" actionable?',()=>{base();S.sw.capOut=true;const b=freshDraft('A');startQuiet(b);advanceBatch(b);advanceBatch(b);advanceBatch(b);go('#batch/A/products')}],
+ ['B','B. Review (switch seats between Naz, second rater, admin)'],
+ ['B9','Approve a made photo as rater 1, then try again as rater 1 (should refuse), then as rater 2.',()=>{base();reviewReady('A');S.focus='A-A03-bh-101';go('#batch/A/attention')}],
+ ['B10','Disagree between the two raters, then settle it as admin.',()=>{base();reviewReady('A');go('#batch/A/attention')}],
+ ['B11','Try the printed tee with a changed logo: no publish button. Does that feel right or frustrating?',()=>{base();reviewReady('A');go('#batch/A/attention')}],
+ ['B12','Swap card for the face-cut photo: is "Photo 1 will leave the listing" clear?',()=>{base();reviewReady('A');go('#batch/A/attention')}],
+ ['B13','Mode B: approve the full-length anchor, watch the other shots get made from it; then remove an anchor.',()=>{base();reviewReady('A');go('#batch/A/attention')}],
+ ['B14','"Replace photo n" on a made photo: does it feel like today\'s replace flow?',()=>{base();reviewReady('A');go('#batch/A/attention')}],
+ ['B15','Turn on "newer delivery arrives" while a review waits: what do you see?',()=>{base();reviewReady('A');go('#batch/A/attention');openDrawer('controls')}],
+ ['B16','Count the clicks for a 20-product batch in review-all. Is the review load acceptable?',()=>{base();reviewReady('A');S.clicks=0;go('#batch/A/attention')}],
+ ['C','C. Footwear and bags'],
+ ['C17','Batch B step 4 scene line: is "never more than 9.12 USD" reassuring or confusing next to "about 2.40"?',()=>{base();freshDraft('B');go('#new/4')}],
+ ['C18','Try "Still life only" and "Not this time".',()=>{base();freshDraft('B');go('#new/4')}],
+ ['C19','Scene cards: do the marketplace crops strip and core box help you judge? Try keyboard Y/N/J/K.',()=>{base();reviewReady('B');go('#batch/B/attention')}],
+ ['C20','Bulk approve: what gets approved and what is left (face found, paste-back mismatch)?',()=>{base();reviewReady('B');go('#batch/B/attention')}],
+ ['C21','Kids shoe: legs only. Product with a worn photo: skipped with a note.',()=>{base();reviewReady('B');go('#batch/B/products')}],
+ ['C22','Trendyol at its cap, channel that takes no scene images: read the "Not added" notes.',()=>{base();S.sw.trendyolFull=true;S.sw.noScene=true;const b=reviewReady('B');bulkApprove('B');go('#batch/B/sheet')}],
+ ['C23','Campus (no permission): what does the operator see, and is it clear who to ask?',()=>{base();freshDraft('CA');go('#new/4')}],
+ ['D','D. After review, sheet and re-submit'],
+ ['D24','Download the sheet before and after review: is it obvious which rows to re-submit and on which marketplace?',()=>{base();const b=reviewReady('A');S.seat='naz';const j=b.jobs.find(x=>x.pid==='A04'&&x.path==='crop');if(j)answer(j.id,true);S.sheetCh='all';go('#batch/A/sheet')}],
+ ['D25','Read the "shots" and "missing" columns: could a marketplace team member act on them alone?',()=>{base();reviewReady('A');S.sheetCh='all';go('#batch/A/sheet')}],
+ ['E','E. Live products on request'],
+ ['E26','From a live product page, "Upload photos" a back view: lands at step 4, only that product, channels ticked.',()=>{base();go('#product/L1/L01')}],
+ ['F','F. Admin'],
+ ['F27',"Confirm a person group, approve a model pack, then delete the brand's model data.",()=>{base();S.seat='admin';S.registry.vero_moda.pack='candidate';S.open.regBrand='vero_moda';go('#admin/models')}],
+ ['F28','Edit the scene profile: try to give kids a face (should be impossible), approve a new version.',()=>{base();S.seat='admin';S.open.profBrand='us_polo';go('#admin/scene')}],
+ ['F29','Ops: exit button greyed until numbers hold; flip the brand to sampled, then trigger a relapse.',()=>{base();S.seat='admin';go('#admin/ops');openDrawer('controls')}],
+ ['F30','Edit a channel rule row (for example Noon bottoms) and see the plan change.',()=>{base();S.seat='admin';freshDraft('A');S.open.opsDept='bottoms';go('#admin/ops')}]
+];
+const FEEL=['Where did you hesitate?',"Any word you didn't understand?",'Anywhere you wanted an undo?','Does two-person review feel heavy?','Do "made" photos feel trustworthy from the card alone?'];
+function vGuide(){
+  const done=SCEN.filter(s=>s[2]&&S.guide[s[0]]).length;
+  return `<div class="hdr" style="margin:0"><h2>Test guide</h2><button class="btn ghost sm" onclick="closeDrawer()">Close</button></div><p class="sm muted">${done} of 30 ticked. "Take me there" sets up the scenario and opens the right screen. Ticks are kept in this browser only.</p>
+  ${SCEN.map(s=>s[2]?`<div class="guide-item"><input type="checkbox" ${S.guide[s[0]]?'checked':''} onchange="S.guide['${s[0]}']=this.checked;save();renderDrawer()" aria-label="Done ${s[0]}"><div><span class="gid">${s[0].slice(1)}.</span>${esc(s[1])}<br><button class="link sm" onclick="takeMe('${s[0]}')">Take me there</button></div></div>`:`<h3 style="margin-top:16px">${s[1]}</h3>`).join('')}
+  <h3 style="margin-top:18px">Feel questions to note while testing</h3>${FEEL.map((q,i)=>`<div class="guide-item"><input type="checkbox" ${S.feel[i]?'checked':''} onchange="S.feel[${i}]=this.checked;save()" aria-label="Noted"><div>${q}</div></div>`).join('')}
+  <label class="f" style="margin-top:10px" for="gnotes">Your notes</label><textarea id="gnotes" oninput="S.notes=this.value;save()">${esc(S.notes)}</textarea>`;
+}
+function takeMe(id){const s=SCEN.find(x=>x[0]===id);try{s[2]()}catch(e){console.error(e);toast('Could not set up '+id)}save();if(drawerKind==='guide')closeDrawer();render();toast('Set up: '+id+'.')}
+
+/* ============ Keyboard (review cards) ============ */
+document.addEventListener('keydown',e=>{
+  if(e.key==='Escape'){if($('#modal').innerHTML){closeModal();return}if(S.kb){S.kb=null;render();return}if(!$('#drawer').hidden){closeDrawer();return}}
+  const t=e.target;if(t&&(t.tagName==='INPUT'||t.tagName==='TEXTAREA'||t.tagName==='SELECT'))return;
+  if($('#modal').innerHTML)return;
+  const r=route();if(r[0]!=='batch'||(r[2]&&r[2]!=='attention'))return;
+  const cards=[...document.querySelectorAll('[data-card]')].map(x=>x.dataset.card);if(!cards.length)return;
+  const k=e.key.toLowerCase();let i=cards.indexOf(S.focus);
+  if(k==='j'||k==='k'){i=k==='j'?Math.min(cards.length-1,i+1):Math.max(0,i<0?0:i-1);S.focus=cards[i];S.kb=null;render();const el=document.querySelector(`[data-card="${S.focus}"]`);if(el)el.scrollIntoView({block:'center'});e.preventDefault();return}
+  if(!S.focus||i<0){if('ynr'.includes(k)&&k.length===1){S.focus=cards[0];render()}return}
+  if(k==='y'||k==='n'||k==='r'){S.kb={jid:S.focus,act:{y:'yes',n:'no',r:'replace'}[k]};render();e.preventDefault();return}
+  if(k==='enter'&&S.kb){const {jid,act}=S.kb;S.kb=null;const {j}=findJob(jid);if(!j)return;
+    if(act==='replace')replaceStart(jid);
+    else if(j.path==='scene')sceneAnswer(jid,act==='yes');
+    else if(act==='yes'){if(j.outcome==='pass'||j.outcome==='references_changed'||j.path==='crop')answer(jid,true);else toast('"Use as is" is not offered for this photo.')}
+    else openRemove(jid);
+    e.preventDefault()}
+});
+render();
+</script>
+</body>
+</html>
