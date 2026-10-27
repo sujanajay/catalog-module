@@ -16,7 +16,8 @@ Ships migration `0004_chunk_leases` (additive columns, guarded, safe with chunks
 - [x] Web: Start and resume dispatch the window; wizard routes test uses the new task id
 - [x] Infra: chunk size 10, window 8, optional budget, 10-minute sweep with check-then-update, metric and alert 10, infra tests
 - [x] Docs: chunk leases note, monitoring docs and operator guide list ten alerts
-- [ ] Review and simplify, gates green (lint, typecheck, unit tests, intake browser scenarios)
+- [x] Review (10 reviewers; 2 bugs fixed: last queue retry claims a crashed chunk, skipped photos count as prepared) and simplify
+- [x] Gates green (lint, typecheck, unit tests, infra tests, intake browser scenarios)
 - [ ] Alerting price confirmed before `monitoring.sh` runs on the live project
 - [ ] PR opened (after PR #102 merges, or stacked on it)
 - [ ] CI green

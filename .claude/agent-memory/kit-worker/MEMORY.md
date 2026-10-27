@@ -1,0 +1,1 @@
+- [Build and test quirks](build-test-quirks.md) - shell refusals, web vitest scoping, flaky render tests, migration counters, tasks mock, shared PGlite
