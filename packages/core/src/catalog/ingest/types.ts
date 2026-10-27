@@ -98,7 +98,7 @@ export interface DetectedStep2 {
   precedence: { shown: boolean; default: Precedence };
   formats: { jpg: number; png: number; heic: number; other: number; sentence: string };
   sheetColumns: { identifier: number; images: number[]; sentence: string; choices: { identifier: { column: number; header: string }[]; images: { columns: number[]; header: string }[] } } | null;
-  sheets: { uploadId: string; name: string; identifierColumn: number; identifierHeader: string | null; imageColumns: number[]; kind: "sheet" | "product_list"; cannotRead: string | null }[];
+  sheets: { uploadId: string; name: string; identifierColumn: number; identifierHeader: string | null; imageColumns: number[]; kind: "sheet" | "product_list"; /** Uploaded but not read yet (no columns): the card says "Reading your sheet". */ reading: boolean; cannotRead: string | null }[];
   googleAccess: { url: string; kind: "google_sheet" | "drive_folder"; status: "ok" | "no_access" | "blocked"; sentence: string }[];
 }
 

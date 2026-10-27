@@ -1,7 +1,7 @@
 import { afterAll, afterEach, beforeAll, beforeEach, expect, it, vi } from "vitest";
 import { eq } from "drizzle-orm";
 import { createTestDb } from "@catalog/core/db/testing";
-import { brandMaster, catalogBatches, catalogBatchProducts, catalogOutputs, catalogProducts, catalogProductAliases, catalogSourceImages, users } from "@catalog/core/db/schema";
+import { brandMaster, catalogBatches, catalogBatchProducts, catalogOutputs, catalogProducts, catalogProductAliases, catalogSourceImages, catalogUploads, users } from "@catalog/core/db/schema";
 import { findOrCreateProduct } from "@catalog/core/catalog/products";
 import { seedAdmin, upsertPerson } from "@catalog/core/people";
 import { setStorageClient, type StorageLike } from "@catalog/core/storage";
@@ -29,6 +29,8 @@ import { renderToStaticMarkup } from "react-dom/server";
 import BatchPage from "../app/catalog/[id]/page";
 import CatalogPage from "../app/catalog/page";
 import BrandPage from "../app/catalog/brands/[slug]/page";
+import NewBatchPage from "../app/catalog/new/page";
+import { BATCH_NOT_FOUND } from "../lib/catalog/batches";
 import CatalogErrorPage from "../app/catalog/error";
 import CatalogError, { batchLinkFor } from "../components/catalog/CatalogError";
 import ProductSearch from "../components/catalog/ProductSearch";
@@ -288,7 +290,8 @@ it("a draft still collecting keeps its state text, the button and the draft para
  expect(html).toContain(`href="/catalog/new?batch=${batchId}">${CONTINUE_SETTING_UP}</a>`);expect(html).toContain(HOW_THIS_WORKS_DRAFT);
  expect(html).toMatch(/ · Noon · (<!-- -->)?created /);
  vi.stubEnv("DEV_USER_EMAIL","viewer@opptra.com");
- html=await batchPage();expect(html).not.toContain(CONTINUE_SETTING_UP);
+ // The overview's leaving line names the button in words; the viewer gets no button.
+ html=await batchPage();expect(html).not.toContain(`>${CONTINUE_SETTING_UP}</a>`);expect(html).not.toContain("/catalog/new?batch=");
 });
 it("a draft whose grouping is not ready keeps the existing banner text",async()=>{
  const html=await batchPage();
@@ -352,6 +355,38 @@ it("the error page without a batch shows the heading, All batches and the button
  expect(html).toContain(ERROR_HEADING);expect(html).toContain(ERROR_ALL_BATCHES);expect(html).toContain(ERROR_TRY_AGAIN);
  expect(html).not.toContain(ERROR_BATCH_SAFE);expect(html).not.toContain(ERROR_OPEN_BATCH);
  nav.pathname="/catalog";
+});
+// ---- Spec 14a F4 part 1: /catalog/new?batch=<id> reopens the wizard, or goes to the batch page. ----
+const newPage=(query:Record<string,string>)=>NewBatchPage({searchParams:Promise.resolve(query)});
+const redirectTo=(target:string)=>expect.objectContaining({digest:expect.stringContaining(`;${target};`)});
+async function addUpload(status:"pending"|"uploaded"|"collected"="collected"){await db.insert(catalogUploads).values({batchId,kind:"zip",name:"photos.zip",status});}
+it("GET /catalog/new?batch= of a draft renders the wizard at its step",async()=>{
+ await addUpload();await setBatch({counts:{previewReady:true}});
+ let html=await render(newPage({batch:batchId}));
+ expect(html).toContain('aria-current="step">Start</li>');expect(html).toContain('value="uspa" selected=""');
+ await setBatch({channels:[]});
+ html=await render(newPage({batch:batchId}));expect(html).toContain('aria-current="step">Check what we found</li>');
+ await setBatch({status:"ingesting",updatedAt:new Date(),counts:{previewReady:false,collected:40,collectTotal:287}});
+ html=await render(newPage({batch:batchId}));
+ expect(html).toContain('aria-current="step">Check what we found</li>');expect(html).toContain("40 of 287 files copied from your zip.");expect(html).not.toContain("0 of 0 products");
+ await addUpload("pending");
+ expect(await render(newPage({batch:batchId}))).toContain('aria-current="step">Brand and files</li>');
+});
+it("GET /catalog/new?batch= of a failed or a started batch redirects to the batch page",async()=>{
+ await setBatch({status:"failed",counts:{failReason:"No photos could be downloaded."}});
+ await expect(newPage({batch:batchId})).rejects.toEqual(redirectTo(`/catalog/${batchId}`));
+ await setBatch({status:"rendering",startedAt:new Date()});
+ await expect(newPage({batch:batchId})).rejects.toEqual(redirectTo(`/catalog/${batchId}`));
+ await setBatch({status:"draft"});
+ await expect(newPage({batch:batchId})).rejects.toEqual(redirectTo(`/catalog/${batchId}`));
+});
+it("GET /catalog/new?batch= of a missing batch shows the 404 sentence; a viewer is refused",async()=>{
+ for(const id of ["00000000-0000-4000-8000-000000000000","not-an-id"]){
+  const html=await render(newPage({batch:id}));
+  expect(html).toContain(BATCH_NOT_FOUND);expect(html).not.toContain("catalog-wizard");
+ }
+ vi.stubEnv("DEV_USER_EMAIL","viewer@opptra.com");
+ await expect(newPage({batch:batchId})).rejects.toThrow();
 });
 // Spec 14 section 6, the removed sentences of release A: absent from the web app and core sources.
 const ROOT=path.resolve(__dirname,"../../..");

@@ -155,7 +155,7 @@ describe("buildDetectedStep2", () => {
       },
     });
     expect(s.sheets).toEqual([
-      { uploadId: sheetId, name: "Spring delivery", identifierColumn: 1, identifierHeader: "Vendor Style Number", imageColumns: [7, 8, 9, 10, 11, 12], kind: "sheet", cannotRead: null },
+      { uploadId: sheetId, name: "Spring delivery", identifierColumn: 1, identifierHeader: "Vendor Style Number", imageColumns: [7, 8, 9, 10, 11, 12], kind: "sheet", reading: false, cannotRead: null },
     ]);
   });
 
@@ -232,9 +232,26 @@ describe("buildDetectedStep2", () => {
     const id = await addUpload(b, "sheet", { ...vendorSheet, identifierColumn: -1, identifierHeader: undefined, cannotRead: "Could not tell which column holds the identifier." });
     const s = await buildDetectedStep2(db, b, deps, { sign });
     expect(s.sheets).toEqual([
-      { uploadId: id, name: "Spring delivery", identifierColumn: -1, identifierHeader: null, imageColumns: [7, 8, 9, 10, 11, 12], kind: "sheet", cannotRead: "Could not tell which column holds the identifier." },
+      { uploadId: id, name: "Spring delivery", identifierColumn: -1, identifierHeader: null, imageColumns: [7, 8, 9, 10, 11, 12], kind: "sheet", reading: false, cannotRead: "Could not tell which column holds the identifier." },
     ]);
     expect(s.sheetColumns?.sentence).toBe("Could not tell which column holds the identifier.");
+  });
+
+  it("a sheet upload not read yet (no columns) is reading, not cannot-read", async () => {
+    const b = await batch();
+    // What the upload route stores when the file finishes uploading: no columns until the ingest reads it.
+    const id = await addUpload(b, "sheet", { completedAt: "2026-10-27T10:00:00.000Z" } as unknown as Detected, { name: "grid.xlsx" });
+    const s = await buildDetectedStep2(db, b, deps, { sign });
+    expect(s.sheets).toEqual([
+      { uploadId: id, name: "grid.xlsx", identifierColumn: -1, identifierHeader: null, imageColumns: [], kind: "sheet", reading: true, cannotRead: null },
+    ]);
+  });
+
+  it("a failed sheet upload without columns is not reading", async () => {
+    const b = await batch();
+    await addUpload(b, "google_sheet", { kind: "google_sheet", message: "No access yet." }, { error: "No access yet." });
+    const s = await buildDetectedStep2(db, b, deps, { sign });
+    expect(s.sheets[0]).toMatchObject({ reading: false, cannotRead: "Could not tell which column holds the identifier." });
   });
 
   it("lists every pasted Google link with its access sentence", async () => {

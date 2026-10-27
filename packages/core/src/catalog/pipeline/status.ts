@@ -1,4 +1,4 @@
-import type { BatchCounts, BatchStatus } from "../types";
+import type { BatchCounts, BatchStatus, ChannelId } from "../types";
 export const QA_CAP_BANNER = "The quality check stopped early because the spending limit was reached.";
 /** "1 product needs" / "3 products need": picks the singular or plural phrase for a count. */
 const plural = (n: number, one: string, many: string) => n === 1 ? one : many;
@@ -88,4 +88,15 @@ export function deriveBatchState(input: { status: BatchStatus; counts: BatchCoun
     return { ...result, state: "recheck_failed", pill: `${bad} ${plural(bad, "link", "links")} did not pass the independent re-check`, listPill: `${bad} ${plural(bad, "link needs", "links need")} a check`, text: `The sheet is ready but ${bad} ${plural(bad, "link", "links")} did not pass the independent re-check. See Details before sharing it.` };
   }
   return result;
+}
+export type WizardStep = 1 | 2 | 3 | 4;
+/** The step an existing batch opens at: 1 while inputs are pending or missing; 2 while collecting, placing, waiting for a column, or ready without channels; 3 never (it is reached from 2 by Continue); 4 when ready with channels. */
+export function wizardStepFor(batch: { status: BatchStatus; channels: ChannelId[]; counts: BatchCounts }, uploads: { status: string }[]): WizardStep {
+  // "removed" arrives with release B; a removed upload is not an input.
+  const inputs = uploads.filter((u) => u.status !== "removed");
+  if (!inputs.length || inputs.some((u) => u.status === "pending")) return 1;
+  if (batch.status === "ingesting") return 2;
+  // A draft that was never handed to collecting (or whose hand-off failed) waits on step 1's Continue.
+  if (!batch.counts.previewReady) return 1;
+  return batch.channels.length ? 4 : 2;
 }

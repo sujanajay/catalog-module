@@ -109,10 +109,10 @@ describe("batch copy for the real state of the batch", () => {
     expect(batchSource(["drive_folder", "zip"])).toBe("Drive folder");
     const banner = text(renderToStaticMarkup(createElement(BatchBanner, { status: "ingesting", counts: { ...EMPTY_BATCH_COUNTS, collected: 3, collectTotal: 10 }, source: batchSource(["image"]) })));
     expect(banner).toContain("3 of 10 files copied from your upload");
-    expect(collectingText("upload")).toBe("Checking your uploaded files. Processing starts by itself. You can close this page.");
+    expect(collectingText("upload")).toBe("Checking your uploaded files. You can close this page. Open this batch again from the batch list and press Continue setting up when it is ready.");
     for (const source of ["upload", "zip", "links", "Google Sheet"] as const) expect(collectingText(source)).not.toContain("Drive folder");
-    expect(collectingText("zip")).toBe("Unpacking your zip. Processing starts by itself. You can close this page.");
-    for (const source of ["links", "Google Sheet", "Drive folder"] as const) expect(collectingText(source)).toBe("Copying your files. Processing starts by itself. You can close this page.");
+    expect(collectingText("zip")).toBe("Unpacking your zip. You can close this page. Open this batch again from the batch list and press Continue setting up when it is ready.");
+    for (const source of ["links", "Google Sheet", "Drive folder"] as const) expect(collectingText(source)).toBe("Copying your files. You can close this page. Open this batch again from the batch list and press Continue setting up when it is ready.");
   });
   it("leaves out pairs whose live image was made from the same photo in the step 4 count", () => {
     const sources = [{ productId: "p", n: 1, sha256: "same", height: 1600 }, { productId: "p", n: 2, sha256: "new", height: 800 }];

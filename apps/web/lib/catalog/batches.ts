@@ -8,9 +8,11 @@ import { notRefreshedChannels } from "@catalog/core/catalog/pipeline/report";
 import { badRequest, HttpError } from "../errors";
 import { batchSource } from "./copy";
 
+/** The 404 sentence for a batch id that does not exist (API routes and `/catalog/new?batch=`). */
+export const BATCH_NOT_FOUND = "This batch does not exist. Open the batch list and choose another.";
 export async function queryBatch(id: string): Promise<CatalogBatch> {
   const [batch] = await db().select().from(catalogBatches).where(eq(catalogBatches.id, id));
-  if (!batch) throw new HttpError(404, "This batch does not exist. Open the batch list and choose another.");
+  if (!batch) throw new HttpError(404, BATCH_NOT_FOUND);
   return batch;
 }
 export async function assertDraft(id: string): Promise<CatalogBatch> {
@@ -21,7 +23,7 @@ export async function assertDraft(id: string): Promise<CatalogBatch> {
 type Transaction = Parameters<Parameters<Db["transaction"]>[0]>[0];
 export async function draftForUpdate(tx: Transaction, id: string): Promise<CatalogBatch> {
   const [batch] = await tx.select().from(catalogBatches).where(eq(catalogBatches.id, id)).for("update");
-  if (!batch) throw new HttpError(404, "This batch does not exist. Open the batch list and choose another.");
+  if (!batch) throw new HttpError(404, BATCH_NOT_FOUND);
   if (batch.status !== "draft") throw new HttpError(409, "This batch has already started. Make a new batch to add more photos.");
   return batch;
 }

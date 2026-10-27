@@ -238,6 +238,9 @@ export async function buildDetectedStep2(
   uploads.forEach((u, i) => {
     const d = detectedOf(u);
     if (!SHEET_KINDS.includes(u.kind) || !d) return;
+    // Not read yet: the upload finished but the ingest has not written its columns. A failed upload
+    // (for example a Google Sheet without access) is not "reading"; it keeps its cannot-read sentence.
+    const reading = !Array.isArray(d.columns) && u.status !== "failed" && !u.error;
     const identifierColumn = d.identifierColumn ?? d.matchColumn ?? -1;
     sheets.push({
       uploadId: u.id,
@@ -246,7 +249,8 @@ export async function buildDetectedStep2(
       identifierHeader: d.identifierHeader ?? (identifierColumn >= 0 ? d.columns?.[identifierColumn] ?? null : null),
       imageColumns: d.urlColumns ?? [],
       kind: kinds[i] === "product_list" ? "product_list" : "sheet",
-      cannotRead: identifierColumn < 0 ? d.cannotRead || CANNOT_READ_IDENTIFIER : null,
+      reading,
+      cannotRead: reading ? null : identifierColumn < 0 ? d.cannotRead || CANNOT_READ_IDENTIFIER : null,
     });
   });
 

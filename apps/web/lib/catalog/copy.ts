@@ -101,8 +101,27 @@ export function batchSource(kinds: readonly string[]): BatchSource {
   return "upload";
 }
 
+// ---- Spec 14a wizard copy (F1 sheet reading, F6 release A polled count, F4 part 1 leaving line). ----
+/** Wizard step 2: a sheet uploaded but not read yet. */
+export const SHEET_READING_TEXT = "Reading your sheet. The columns will appear here when it has been read.";
+/** Release A's leaving line, true while nothing starts by itself (steps 2 to 4 while collecting, batch page overview). */
+export const LEAVING_LINE = "You can close this page. Open this batch again from the batch list and press Continue setting up when it is ready.";
+/** The fixed sentences of steps 2 and 3 while collecting, shown until the poll has a live count. */
+export const STEP2_COLLECTING_TEXT = "Collecting files. The grouping will appear here when the files are ready.";
+export const STEP3_COLLECTING_TEXT = "Collecting files. Continue when the grouping is ready.";
+/**
+ * Wizard steps 2 and 3 while collecting: the polled batch state's live count ("40 of 287 files copied from
+ * your links"), or the step's fixed sentence before a count exists or once stalled (the stall alert says that),
+ * then the leaving line. Never a product count, so a batch still collecting never reads as "0 of 0 products".
+ */
+export function wizardCollectingText(state: { state: string; text: string; stalled?: boolean } | null | undefined, fallback: string): string {
+  const live = state && state.state === "collecting" && !state.stalled ? `${state.text.replace(/\.$/, "")}.` : fallback;
+  return `${live} ${LEAVING_LINE}`;
+}
+// ---- End of spec 14a wizard copy. ----
+
 /** The Overview line while files are collected, worded for the batch's source. */
 export function collectingText(source: BatchSource): string {
   const first = source === "zip" ? "Unpacking your zip." : source === "upload" ? "Checking your uploaded files." : "Copying your files.";
-  return `${first} Processing starts by itself. You can close this page.`;
+  return `${first} ${LEAVING_LINE}`;
 }

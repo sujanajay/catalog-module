@@ -1,6 +1,6 @@
 import { describe,expect,it } from "vitest";
 import { EMPTY_BATCH_COUNTS } from "../../db/schema";
-import { CLOSE_PAGE_TEXT, COLLECT_STALLED_TEXT, STARTING_SERVICES_TEXT, deriveBatchState, waitRangeMinutes, waitText } from "./status";
+import { CLOSE_PAGE_TEXT, COLLECT_STALLED_TEXT, STARTING_SERVICES_TEXT, deriveBatchState, waitRangeMinutes, waitText, wizardStepFor, type WizardStep } from "./status";
 it.each(["matting","rendering","qa","publishing"] as const)("shows %s as processing",status=>expect(deriveBatchState({status,counts:EMPTY_BATCH_COUNTS}).state).toBe("processing"));
 it("requires independent counts before Ready",()=>{const counts={...EMPTY_BATCH_COUNTS,outputs:4,verified:4};expect(deriveBatchState({status:"done",counts}).state).toBe("recheck_failed");expect(deriveBatchState({status:"done",counts:{...counts,recheckOk:4,recheckTotal:4}}).state).toBe("ready");expect(deriveBatchState({status:"done",counts:{...counts,attentionProducts:1}}).state).toBe("attention");});
 it("derives ETA from the last five minutes",()=>{const now=new Date("2026-01-01T00:05:00Z");const state=deriveBatchState({status:"publishing",counts:{...EMPTY_BATCH_COUNTS,outputs:40,verified:20},now,samples:[{at:new Date(+now-60_000),made:10},{at:now,made:20}]});expect(state.eta).toBe(120);});
@@ -66,4 +66,23 @@ it("names the Styli images that were not made in the Ready banner",()=>{
   expect(ready(5)).toMatchObject({state:"ready",text:"All 10 images are live and passed every check. 5 Styli images were not made because the photos are too small for Styli even after enlargement (see the notes column)."});
   expect(ready(1).text).toContain("1 Styli image was not made because the photo is too small for Styli");
   expect(ready(0).text).toBe("All 10 images are live and passed every check. Nothing needs your attention.");
+});
+describe("wizardStepFor: the step an existing batch opens at",()=>{
+  const ready={...EMPTY_BATCH_COUNTS,previewReady:true};
+  const uploaded=[{status:"uploaded"}];
+  it.each<[string,Parameters<typeof wizardStepFor>[0],{status:string}[],WizardStep]>([
+    ["no input",{status:"draft",channels:[],counts:EMPTY_BATCH_COUNTS},[],1],
+    ["no input (only removed uploads)",{status:"draft",channels:[],counts:EMPTY_BATCH_COUNTS},[{status:"removed"}],1],
+    ["pending upload",{status:"draft",channels:[],counts:EMPTY_BATCH_COUNTS},[{status:"uploaded"},{status:"pending"}],1],
+    ["inputs added, not handed to collecting yet",{status:"draft",channels:[],counts:EMPTY_BATCH_COUNTS},uploaded,1],
+    ["collecting",{status:"ingesting",channels:[],counts:{...EMPTY_BATCH_COUNTS,collected:40,collectTotal:287}},uploaded,2],
+    ["placing",{status:"ingesting",channels:[],counts:{...EMPTY_BATCH_COUNTS,collected:287,collectTotal:287}},[{status:"collected"}],2],
+    ["waiting for a column",{status:"draft",channels:[],counts:ready},[{status:"collected"}],2],
+    ["ready without channels",{status:"draft",channels:[],counts:ready},[{status:"collected"}],2],
+    ["ready with channels",{status:"draft",channels:["noon","styli"],counts:ready},[{status:"collected"}],4],
+  ])("%s",(_label,batch,uploads,step)=>expect(wizardStepFor(batch,uploads)).toBe(step));
+  it("never opens at step 3",()=>{
+    for(const status of ["draft","ingesting"] as const)for(const previewReady of [true,false])for(const channels of [[],["noon"]] as const)for(const uploads of [[],[{status:"pending"}],[{status:"collected"}]])
+      expect(wizardStepFor({status,channels:[...channels],counts:{...EMPTY_BATCH_COUNTS,previewReady}},uploads)).not.toBe(3);
+  });
 });
