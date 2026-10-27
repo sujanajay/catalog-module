@@ -16,6 +16,12 @@ export async function outputId(context: OutputContext) {
   if (!UUID.test(params.id)) throw badRequest("This photo link is incomplete. Reload the batch page and try again.");
   return params.id;
 }
+/** The `[uploadId]` segment of an input route (spec 14b F3), checked like the batch id. */
+export async function uploadIdOf(context: BatchContext) {
+  const { uploadId } = await context.params;
+  if (!uploadId || !UUID.test(uploadId)) throw badRequest("This input link is incomplete. Reload this page and try again.");
+  return uploadId;
+}
 export async function batchId(context: BatchContext) {
   const params = await context.params;
   if (!/^[\da-f]{8}-[\da-f]{4}-[\da-f]{4}-[\da-f]{4}-[\da-f]{12}$/i.test(params.id)) throw badRequest("This batch link is incomplete. Open the batch list and choose the batch again.");

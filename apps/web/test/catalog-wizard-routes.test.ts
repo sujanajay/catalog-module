@@ -13,6 +13,8 @@ import { GET as get, PATCH as patch } from "../app/api/catalog/batches/[id]/rout
 import { POST as upload } from "../app/api/catalog/batches/[id]/uploads/route";
 import { POST as complete } from "../app/api/catalog/batches/[id]/uploads/[uploadId]/complete/route";
 import { POST as links } from "../app/api/catalog/batches/[id]/links/route";
+import { DELETE as removeLinks, PATCH as patchLinks } from "../app/api/catalog/batches/[id]/links/[uploadId]/route";
+import { DELETE as removeUpload } from "../app/api/catalog/batches/[id]/uploads/[uploadId]/route";
 import { POST as ingest } from "../app/api/catalog/batches/[id]/ingest/route";
 import { GET as detected, PATCH as regroup } from "../app/api/catalog/batches/[id]/detected/route";
 import { GET as preview } from "../app/api/catalog/batches/[id]/preview/route";
@@ -285,5 +287,82 @@ describe("ingest hand-off failures and stalled collecting",()=>{
     await runIngest(db,{storage,fetch:vi.fn(),enqueue:enqueueTask},{batchId:id,uploadId:photo.id});
     const [after]=await db.select().from(catalogBatches).where(eq(catalogBatches.id,id));
     expect(after!.status).toBe("draft");expect(after!.counts.previewReady).toBe(true);
+  });
+});
+
+describe("inputs corrected without duplicates (spec 14b F3)",()=>{
+  const heic=()=>vi.fn(async()=>new Response(new Uint8Array(heicFixture(1200,1600)),{headers:{"content-type":"image/heic"}}));
+  const rowsOf=async(id:string)=>(await db.select().from(catalogUploads)).filter((u)=>u.batchId===id);
+  const countsOf=async(id:string)=>(await db.select().from(catalogBatches).where(eq(catalogBatches.id,id)))[0]!.counts;
+  async function collectAll(id:string){
+    expect((await ingest(request("POST"),ctx(id))).status).toBe(200);
+    const fetchImage=heic();
+    for(const u of (await rowsOf(id)).filter((u)=>u.status==="uploaded"))await runIngest(db,{storage,fetch:fetchImage,enqueue:enqueueTask},{batchId:id,uploadId:u.id});
+  }
+  const groupsOf=async(id:string)=>((await (await preview(request("GET"),ctx(id))).json()).groups as {identifier:string}[]).map((g)=>g.identifier).sort();
+  it("paste A (3 links) then PATCH with text B (2 links): one url_list row, 2 links, preview invalidated",async()=>{
+    const id=await newBatch();
+    const first=await links(request("POST",{text:"https://8.8.8.8/AAA_1.heic\nhttps://8.8.8.8/AAA_2.heic\nhttps://8.8.8.8/BBB_1.heic"}),ctx(id));
+    expect(first.status).toBe(200);const {uploadId}=await first.json() as {uploadId:string};
+    await collectAll(id);expect((await countsOf(id)).previewReady).toBe(true);
+    expect(await groupsOf(id)).toEqual(["AAA","BBB"]);
+    const replaced=await patchLinks(request("PATCH",{text:"https://8.8.8.8/CCC_1.heic\nhttps://8.8.8.8/CCC_2.heic"}),ctx(id,uploadId));
+    expect(replaced.status).toBe(200);expect(await replaced.json()).toMatchObject({kind:"url_list",access:"ok",count:2,uploadId});
+    const lists=(await rowsOf(id)).filter((u)=>u.kind==="url_list");
+    expect(lists).toHaveLength(1);expect(lists[0]!.id).toBe(uploadId);expect(lists[0]!.status).toBe("uploaded");
+    expect(lists[0]!.sourceUrl!.split("\n")).toHaveLength(2);
+    expect((await countsOf(id)).previewReady).toBe(false);
+    await collectAll(id);
+    expect(await groupsOf(id)).toEqual(["CCC"]);
+  });
+  it("binds the paste box to one url_list row: a second POST /links replaces it, and a removed paste comes back as the same row",async()=>{
+    const id=await newBatch();
+    const a=await (await links(request("POST",{text:"https://8.8.8.8/AAA_1.heic"}),ctx(id))).json() as {uploadId:string};
+    const b=await (await links(request("POST",{text:"https://8.8.8.8/BBB_1.heic\nhttps://8.8.8.8/BBB_2.heic"}),ctx(id))).json() as {uploadId:string};
+    expect(b.uploadId).toBe(a.uploadId);
+    expect((await rowsOf(id)).filter((u)=>u.kind==="url_list")).toHaveLength(1);
+    expect((await removeLinks(request("DELETE"),ctx(id,a.uploadId))).status).toBe(200);
+    expect((await rowsOf(id))[0]!.status).toBe("removed");
+    const again=await (await links(request("POST",{text:"https://8.8.8.8/DDD_1.heic"}),ctx(id))).json() as {uploadId:string};
+    expect(again.uploadId).toBe(a.uploadId);
+    const rows=await rowsOf(id);expect(rows).toHaveLength(1);expect(rows[0]!.status).toBe("uploaded");
+  });
+  it("DELETE an upload: the row is removed, the preview is invalidated by a merge, and ingestBatch ignores it",async()=>{
+    const id=await newBatch();const kept=await addPhoto(id,"KEEP_1.heic");const gone=await addPhoto(id,"GONE_1.heic");
+    await collectAll(id);expect(await groupsOf(id)).toEqual(["GONE","KEEP"]);
+    // A counts key written by the worker after the web tier read the row must survive (merge, not replace).
+    await db.update(catalogBatches).set({counts:{...(await countsOf(id)),collected:7}}).where(eq(catalogBatches.id,id));
+    const removed=await removeUpload(request("DELETE"),ctx(id,gone.id));
+    expect(removed.status).toBe(200);expect(await removed.json()).toEqual({removed:true});
+    expect((await rowsOf(id)).find((u)=>u.id===gone.id)!.status).toBe("removed");
+    const counts=await countsOf(id);expect(counts.previewReady).toBe(false);expect(counts.collected).toBe(7);
+    vi.mocked(enqueueTask).mockClear();
+    expect((await ingest(request("POST"),ctx(id))).status).toBe(200);
+    const handed=vi.mocked(enqueueTask).mock.calls.filter(([route])=>route==="/tasks/catalog/ingest").map(([,body])=>(body as {uploadId:string}).uploadId);
+    expect(handed).toEqual([kept.id]);
+    for(const uploadId of handed)await runIngest(db,{storage,fetch:vi.fn(),enqueue:enqueueTask},{batchId:id,uploadId});
+    expect(await groupsOf(id)).toEqual(["KEEP"]);
+    // A delivery for the removed upload queued before the removal reads nothing.
+    expect((await runIngest(db,{storage,fetch:vi.fn(),enqueue:enqueueTask},{batchId:id,uploadId:gone.id})).outcome).toBe("noop: upload already removed");
+  });
+  it("a batch with one removed and one uploaded row collects the uploaded one only",async()=>{
+    const id=await newBatch();const gone=await addPhoto(id,"OLD_1.heic");
+    expect((await removeUpload(request("DELETE"),ctx(id,gone.id))).status).toBe(200);
+    const kept=await addPhoto(id,"NEW_1.heic");
+    await collectAll(id);
+    const rows=await rowsOf(id);
+    expect(rows.find((u)=>u.id===gone.id)!.status).toBe("removed");expect(rows.find((u)=>u.id===kept.id)!.status).toBe("collected");
+    expect(await groupsOf(id)).toEqual(["NEW"]);
+    expect(JSON.stringify(await (await detected(request("GET"),ctx(id))).json())).not.toContain("OLD");
+  });
+  it("keeps a file removed while it uploaded removed when its completion arrives, and it no longer blocks Continue",async()=>{
+    const id=await newBatch();
+    const [plan]=await (await upload(request("POST",{files:[{name:"LATE_1.heic",size:10,mime:"image/heic",relativePath:"LATE_1.heic"}]}),ctx(id))).json();
+    const row=(await rowsOf(id))[0]!;objects.set(row.gcsUri!,{buf:Buffer.alloc(10),mime:"image/heic"});
+    expect((await removeUpload(request("DELETE"),ctx(id,plan.uploadId))).status).toBe(200);
+    expect((await complete(request("POST"),ctx(id,plan.uploadId))).status).toBe(410);
+    expect((await rowsOf(id))[0]!.status).toBe("removed");
+    const refused=await ingest(request("POST"),ctx(id));
+    expect(refused.status).toBe(400);expect((await refused.json()).error).toBe("Add photos or a links sheet before continuing.");
   });
 });

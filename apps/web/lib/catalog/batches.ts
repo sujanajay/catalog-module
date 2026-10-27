@@ -1,6 +1,6 @@
 import { and, desc, eq, gt, inArray, ne, sql } from "drizzle-orm";
 import { brandMaster, catalogBatches, catalogUploads, type CatalogBatch } from "@catalog/core/db/schema";
-import { CHANNEL_IDS, IDENTIFIER_MODES, PRECEDENCES, PRODUCT_TYPES, type BatchOptions, type ChannelId, type ProductType } from "@catalog/core/catalog/types";
+import { CHANNEL_IDS, IDENTIFIER_MODES, PRECEDENCES, PRODUCT_TYPES, type BatchCounts, type BatchOptions, type ChannelId, type ProductType, type UploadKind } from "@catalog/core/catalog/types";
 import { db, type Db } from "../db";
 import { deriveBatchState } from "@catalog/core/catalog/pipeline/status";
 import { TEST_BRAND } from "@catalog/core/catalog/brands";
@@ -27,6 +27,17 @@ export async function draftForUpdate(tx: Transaction, id: string): Promise<Catal
   if (batch.status !== "draft") throw new HttpError(409, "This batch has already started. Make a new batch to add more photos.");
   return batch;
 }
+/** The answer for an upload id that is not an input of this batch, or not of the route's kind. */
+export const INPUT_NOT_FOUND = "This input is not part of this batch. Reload this page.";
+/** Inputs added through the paste box (`/links` routes); every other kind is a file (`/uploads` routes). */
+export const LINK_KINDS: readonly UploadKind[] = ["url_list", "google_sheet", "drive_folder"];
+/**
+ * A merge-only write to `counts`: only the named keys change, so a worker write to other keys made in
+ * between is never lost. Spec 14b F3 needs it for `previewReady`; the general web-tier form is F6 (14c).
+ */
+export function mergeCounts(patch: Partial<BatchCounts>) {
+  return sql`${catalogBatches.counts} || ${JSON.stringify(patch)}::jsonb`;
+}
 export function publicBatch(batch: CatalogBatch) {
   const { policy: _policy, ...options } = batch.options;
   return { ...batch, options };
@@ -51,7 +62,8 @@ export async function listBatches() {
 export async function getBatch(id: string) {
   const batch = await queryBatch(id);
   const uploads = await db().select().from(catalogUploads).where(eq(catalogUploads.batchId, id));
-  const source = batchSource(uploads.map((u) => u.kind));
+  // Removed inputs stay in `uploads` (the step 1 input list shows them) but say nothing about the source.
+  const source = batchSource(uploads.filter((u) => u.status !== "removed").map((u) => u.kind));
   return { batch: publicBatch(batch), counts: batch.counts, cost: batch.cost, state: batchState(batch, source), uploads, notRefreshedChannels: await notRefreshedChannels(db(), id) };
 }
 /** A batch is a test batch when its name starts with catalog-test or its brand is the test brand. */
