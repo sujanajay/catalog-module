@@ -173,8 +173,6 @@ async function main() {
   await warmUp(true);
   ready = true;
   console.log("[harness] ready");
-  // next dev disposes a compiled entry after a minute without requests (onDemandEntries.maxInactiveAge); keep them all in use.
-  setInterval(() => void warmUp(false), 30_000).unref();
 }
 
 /** next dev compiles each page and route on its first request; do it now so a scenario's 2 s bound measures the app, not the compiler. */
