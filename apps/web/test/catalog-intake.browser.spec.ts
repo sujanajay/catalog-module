@@ -32,6 +32,7 @@ test.beforeEach(async ({ page }) => {
 async function queue(page: Page, settings: { delayMs?: number; fetchDelayMs?: number; budgetItems?: number; paused?: boolean }) {
   const r = await page.request.post("/harness/queue", { data: settings });
   expect(r.ok()).toBe(true);
+  return (await r.json()) as { running: number; pending: number };
 }
 
 /** Step 1 with Test Brand and a name; uploads one file and waits for "Uploaded". Returns the batch id. */
@@ -83,7 +84,8 @@ test.describe("5. leave and return, release A form (F4, F6)", () => {
 
     // Reload while the queue is held: same step, same count.
     await queue(page, { paused: true });
-    await page.waitForTimeout(3_000); // let the delivery in flight finish and the poll catch up
+    await expect.poll(async () => (await queue(page, {})).running, { timeout: 30_000 }).toBe(0);
+    await page.waitForTimeout(3_500); // one wizard poll (every 2.5 s) shows the last delivery's count
     const before = await count.innerText();
     await page.reload();
     await expect(currentStep(page)).toHaveText("Check what we found");

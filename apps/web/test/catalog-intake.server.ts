@@ -39,8 +39,11 @@ Object.assign(process.env, {
 });
 for (const key of ["GOOGLE_APPLICATION_CREDENTIALS", "DB_HOST", "TASKS_INGEST_QUEUE", "IAP_AUDIENCE"]) delete process.env[key];
 
-/** The fake queue and image host settings; the tests change them through POST /harness/queue. */
-const queue = { delayMs: 1000, fetchDelayMs: 50, budgetItems: 40, paused: false, pending: [] as Record<string, unknown>[] };
+/**
+ * The fake queue and image host settings; the tests change them through POST /harness/queue, which
+ * answers with them plus `pending` (held deliveries) and `running` (deliveries in progress).
+ */
+const queue = { delayMs: 1000, fetchDelayMs: 50, budgetItems: 40, paused: false, running: 0, pending: [] as Record<string, unknown>[] };
 const workerLog: string[] = [];
 /** A worker line: kept for GET /harness/log and printed with the server output. */
 const note = (line: string) => {
@@ -84,16 +87,20 @@ async function main() {
   const imageFetch = fakeImageHost(links, () => queue.fetchDelayMs, workerLog);
   const deliver = (body: Record<string, unknown>) => {
     if (queue.paused) return void queue.pending.push(body);
-    setTimeout(() => void runTask(body), queue.delayMs);
+    // A delivery whose wait ends while the queue is held waits with the others.
+    setTimeout(() => (queue.paused ? void queue.pending.push(body) : void runTask(body)), queue.delayMs);
   };
   async function runTask(body: Record<string, unknown>) {
     const t0 = Date.now();
+    queue.running++;
     try {
       const enqueue = async (_route: string, next: Record<string, unknown>) => (deliver(next), "harness-task");
       const r = await runIngest(workerDb, { storage, fetch: imageFetch, enqueue: enqueue as never, budgetItems: queue.budgetItems }, body as { batchId: string; uploadId: string; cursor?: string });
       note(`ingest ${String(body.uploadId).slice(0, 8)} ${Date.now() - t0} ms: ${r.outcome}`);
     } catch (err) {
       note(`ingest ERROR ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      queue.running--;
     }
   }
 
