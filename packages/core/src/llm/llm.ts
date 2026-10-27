@@ -4,6 +4,7 @@
 import { chatCompletion, type ChatCompletionResponse } from "./openrouter";
 import type { OpenRouterDeps } from "./types";
 import { readCost, refsToImageParts, sumUsage, type ImageRef } from "./util";
+import { sharedLlmLimiter } from "./limiter";
 
 /**
  * Output cap for LLM calls. Generous on purpose: reasoning tokens count against max_tokens, and a
@@ -80,7 +81,10 @@ export async function callLlm(messages: LlmMessage[], opts: LlmCallOptions, deps
   const body: Record<string, unknown> = { model, messages, usage: { include: true } };
   if (opts.temperature !== undefined) body.temperature = opts.temperature;
   if (opts.maxTokens !== undefined) body.max_tokens = opts.maxTokens;
-  const res = await chatCompletion<ChatCompletionResponse>(body, deps);
+  // Spec 16: each HTTP attempt (the first and every back-off retry) holds one place under the process's cap.
+  const limiter = deps?.limiter === undefined ? sharedLlmLimiter() : deps.limiter;
+  const paced = limiter ? { ...deps, fetch: limiter.wrap(deps?.fetch ?? globalThis.fetch) } : deps;
+  const res = await chatCompletion<ChatCompletionResponse>(body, paced);
   const usage = (res.usage ?? {}) as Record<string, unknown>;
   const cost = readCost(usage) ?? 0;
   const text = responseText(res);

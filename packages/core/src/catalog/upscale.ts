@@ -20,13 +20,26 @@ export const UPSCALE_TIMEOUT_MS = 60_000;
 /** One retry after a 503 (the GPU service starting or busy), after this wait. */
 export const UPSCALE_RETRY_DELAY_MS = 5_000;
 
-export interface UpscaleConfig { model: string | null; minScale: number }
+export interface UpscaleConfig { model: string | null; minScale: number; /** Which matting service upscales (spec 16 3.1.3); absent is the GPU service. */ target?: UpscaleTarget }
+/** The matting service that answers /upscale: the GPU service (spec 11) or the CPU cut-out service (spec 16). */
+export type UpscaleTarget = "cpu" | "gpu";
 
-/** `UPSCALE_MODEL` (unset or empty: off) and `UPSCALE_MIN_SCALE` (default 1.5; a value that is not a number of at least 1 keeps the default). */
+const normalisedUrl = (url: string | undefined): string => (url ?? "").trim().replace(/\/+$/, "");
+/**
+ * Spec 16 3.1.3: `UPSCALE_URL` equal to `MATTING_URL` (the CPU cut-out service) moves the upscaler to the CPU; unset,
+ * empty or any other value keeps the GPU service, as the matting client does.
+ */
+export function upscaleTargetFromEnv(env: NodeJS.ProcessEnv = process.env): UpscaleTarget {
+  const url = normalisedUrl(env.UPSCALE_URL);
+  return url && url === normalisedUrl(env.MATTING_URL) ? "cpu" : "gpu";
+}
+
+/** `UPSCALE_MODEL` (unset or empty: off), `UPSCALE_MIN_SCALE` (default 1.5; a value that is not a number of at least 1 keeps the default) and the target from `UPSCALE_URL`. */
 export function upscaleConfigFromEnv(env: NodeJS.ProcessEnv = process.env): UpscaleConfig {
   const model = env.UPSCALE_MODEL?.trim() || null;
   const raw = env.UPSCALE_MIN_SCALE?.trim(), parsed = raw ? Number(raw) : NaN;
-  return { model, minScale: Number.isFinite(parsed) && parsed >= 1 ? parsed : DEFAULT_UPSCALE_MIN_SCALE };
+  const target = upscaleTargetFromEnv(env);
+  return { model, minScale: Number.isFinite(parsed) && parsed >= 1 ? parsed : DEFAULT_UPSCALE_MIN_SCALE, ...(target === "cpu" ? { target } : {}) };
 }
 
 /**
@@ -44,11 +57,27 @@ export function shouldUpscale(scale: number, minScale: number): boolean {
  * it made re-render once; a redeploy with the same export keeps every key.
  */
 export const UPSCALE_MODEL_VERSIONS: Readonly<Record<string, string>> = { "realesrgan-x2plus": "e828354d", "swinir-x2": "9f4a3f85" };
-/** The render_key part that names the upscaler, its export and the recombination; present only when the upscaler was used. */
-export const upscalerKey = (model: string): string => `u:${model}@${UPSCALE_MODEL_VERSIONS[model] ?? "unknown"}:${UPSCALER_VERSION}`;
+/**
+ * The upscaler id that goes into render_key and the render result: the model id for the GPU service (spec 11, so
+ * every key made there stays the same) and `<model>+cpu` for the CPU service (spec 16 3.1.3: CPU and GPU float
+ * results can differ in the last bits, so a CPU-made image has its own key and never silently replaces a GPU one).
+ * Engineering only; never shown to an operator.
+ */
+export const CPU_UPSCALER_SUFFIX = "+cpu";
+export function upscalerId(model: string, target: UpscaleTarget = "gpu"): string { return target === "cpu" ? `${model}${CPU_UPSCALER_SUFFIX}` : model; }
+/** True for an upscaler id made by upscalerId(model, "cpu"). */
+export function isCpuUpscalerId(id: string): boolean { return id.endsWith(CPU_UPSCALER_SUFFIX); }
+/** The id of the same model on the other service, for the keys a live output may carry (renderKeys). */
+export function otherTargetUpscalerId(id: string): string { return isCpuUpscalerId(id) ? id.slice(0, -CPU_UPSCALER_SUFFIX.length) : upscalerId(id, "cpu"); }
+/** The render_key part that names the upscaler (an upscalerId), its export and the recombination; present only when the upscaler was used. */
+export const upscalerKey = (id: string): string => {
+  const cpu = isCpuUpscalerId(id), model = cpu ? id.slice(0, -CPU_UPSCALER_SUFFIX.length) : id;
+  return `u:${model}@${UPSCALE_MODEL_VERSIONS[model] ?? "unknown"}:${UPSCALER_VERSION}${cpu ? ":cpu" : ""}`;
+};
 
 /** What the render needs from the service: one 2x JPEG for one image. Throws on any failure. */
 export interface Upscaler {
+  /** The upscalerId (model id, plus "+cpu" on the CPU service): what render_key and the logs carry. */
   readonly model: string;
   readonly minScale: number;
   /** `trace` names the batch and product for the service's log lines (MattingTrace headers). */
@@ -57,6 +86,8 @@ export interface Upscaler {
 
 /** The client method this module uses (MattingClient.upscale), so tests can pass a fake. */
 export interface UpscaleClient {
+  /** The service the client sends /upscale to (MattingClient.upscaleTarget); absent is the GPU service. */
+  readonly upscaleTarget?: UpscaleTarget;
   upscale(image: Buffer, opts: { model: string; contentType: "image/png" | "image/jpeg" }, trace?: { batchId?: string | undefined; productId?: string | undefined }): Promise<{ jpeg: Buffer; ms: number; model: string }>;
 }
 
@@ -64,7 +95,9 @@ export interface UpscaleClient {
 export function createUpscaler(client: UpscaleClient, config: UpscaleConfig): Upscaler | null {
   const model = config.model;
   if (!model) return null;
-  return { model, minScale: config.minScale, upscale: async (image, contentType, trace) => { const r = await client.upscale(image, { model, contentType }, trace); return { jpeg: r.jpeg, ms: r.ms }; } };
+  // The client knows which service it really calls; the config's target is only the env reading of the same choice.
+  const id = upscalerId(model, client.upscaleTarget ?? config.target ?? "gpu");
+  return { model: id, minScale: config.minScale, upscale: async (image, contentType, trace) => { const r = await client.upscale(image, { model, contentType }, trace); return { jpeg: r.jpeg, ms: r.ms }; } };
 }
 
 /** Ids for the logs; never shown to an operator. */

@@ -304,7 +304,7 @@ describe("buildDetectedStep2", () => {
 
     const s = await buildDetectedStep2(db, b, deps, { sign });
     expect(s.linkFailures).toEqual({
-      total: 4, temporary: 1, links: 6, products: 2,
+      total: 4, temporary: 1, links: 6, products: 2, attempts: 0,
       byReason: [
         { reason: "answered 'not found' (404)", count: 2, first: { url: `${H}/TB-A_2.JPG`, where: "row 1, column 2" } },
         { reason: "could not be reached", count: 1, first: { url: `${H}/TB-B_1.JPG`, where: "row 2, column 1" } },
@@ -317,7 +317,7 @@ describe("buildDetectedStep2", () => {
   it("an empty linkFailures block when the batch holds no links", async () => {
     const b = await batch();
     await addUpload(b, "image", files(2));
-    expect((await buildDetectedStep2(db, b, deps, { sign })).linkFailures).toEqual({ total: 0, temporary: 0, links: 0, products: 0, byReason: [] });
+    expect((await buildDetectedStep2(db, b, deps, { sign })).linkFailures).toEqual({ total: 0, temporary: 0, links: 0, products: 0, attempts: 0, byReason: [] });
   });
 
   it("refuses an unknown batch", async () => {

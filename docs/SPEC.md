@@ -97,8 +97,8 @@ configuration. Access is by Google sign-in with three roles (admin, operator, vi
   no-migration alternative is rejected. An untouched draft is cancelled after `DRAFT_EXPIRY_DAYS` = 14.
   The BHPC product key (Option Id or Unicommerce Code) is asked of the operator once and recorded in the
   brand's notes before any real BHPC batch; test drafts 574f2025 and 09dd86f2 are cancelled either way.
-  The batch creator gets an email when a long collection finishes (F14, release D); its one-time
-  Workspace step by the owner is release D's single open item.
+  No email when a long collection finishes (F14 dropped on 2026-10-27); operators return to the
+  dashboard (Your unfinished batches).
 
 ## Requirements register
 
@@ -652,7 +652,7 @@ Real test data is read-only at the source, copied under `gs://image-links-agent-
 and deleted by the test itself in `finally`:
 - Supabase public links from the earlier delivery sheets (`opptra-image-links/new_resources_3/*.xlsx`,
   `new_resources_4/*.xlsx`): Anta, Campus, ONLY, Cardio Bunny, Keds, USPA, Vero Moda, French Connection, Penti.
-- Local sets: `C:\Users\Sujan AH\Desktop\opptra-image-links\new_resources_3\French Connection Final`
+- Local sets: `C:\Users\Sujan Ajay\Desktop\opptra-image-links\new_resources_3\French Connection Final`
   (3,280 apparel, 800x1200, white) and `new_resources_4\Images` (630 Anta footwear, 800x800, pure white);
   the operator's USPA footwear sets (Styli-rejected and accepted) for the golden set when provided.
 - Golden set `eval/<set>/` with manifest and human labels (`catalog_eval_labels`), covering every brand

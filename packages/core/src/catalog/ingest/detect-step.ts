@@ -126,6 +126,7 @@ export function linkFailuresBlock({ links, rows }: { links: number; rows: LinkFa
     temporary: rows.filter((r) => r.temporary).length,
     links,
     products: new Set(rows.map((r) => r.identifier)).size,
+    attempts: rows.reduce((m, r) => (r.attempts > 1 && r.attempts > m ? r.attempts : m), 0),
     byReason: groupLinkRejects(rejects),
   };
 }

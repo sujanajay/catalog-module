@@ -43,7 +43,7 @@ const full = (q) => `projects/image-links-agent/locations/asia-south1/queues/${q
 const queueScript = `set -euo pipefail
 ${fake}
 gcv() { gcloud "$@" | tr -d '\\r'; }
-PROJECT=image-links-agent REGION=asia-south1 QUEUE=catalog INGEST_MAX_DISPATCHES=4 TASKS_MAX_DISPATCHES=8
+PROJECT=image-links-agent REGION=asia-south1 QUEUE=catalog INGEST_MAX_DISPATCHES=4 TASKS_MAX_DISPATCHES=8 BULK_MAX_DISPATCHES=0 BULK_QUEUE=catalog-bulk
 ${queueBlock}`;
 
 const queueCases = [

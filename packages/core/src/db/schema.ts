@@ -488,6 +488,17 @@ export const catalogChunks = pgTable(
     finishedAt: tsNull("finished_at"),
     error: text("error"),
     createdAt: createdAt(),
+    // Spec 15 (migration 0004). The holder of a running chunk renews lease_until while it works; a lapsed
+    // lease means the holder is dead. step names the chunk's one live task (chunk-<id>-<stage>-<step>);
+    // step_known is false on rows from before 0004, whose tasks carry no step. dispatched_at is when the
+    // chunk's current task was queued (null: waiting for the batch window). progress_at is the last time a
+    // photo finished; stalls counts deliveries in a row that finished none.
+    leaseUntil: tsNull("lease_until"),
+    step: integer("step").notNull().default(0),
+    stepKnown: boolean("step_known").notNull().default(true),
+    dispatchedAt: tsNull("dispatched_at"),
+    progressAt: tsNull("progress_at"),
+    stalls: integer("stalls").notNull().default(0),
   },
   (t) => [
     index("catalog_chunks_batch_id_idx").on(t.batchId),

@@ -7,6 +7,9 @@ import math
 import os
 import time
 from contextlib import asynccontextmanager
+import shutil
+import subprocess
+from collections import OrderedDict
 from contextvars import ContextVar
 from pathlib import Path
 from threading import Lock
@@ -86,8 +89,30 @@ MODELS = tuple(dict.fromkeys(os.getenv("MATTE_MODELS", ",".join(INPUT_SIZES)).sp
 DEFAULT_MODEL = os.getenv("DEFAULT_MATTE_MODEL", "birefnet-general")
 TARGET = os.getenv("MATTE_TARGET", "cpu")
 MAX_INPUT_BYTES = int(os.getenv("MAX_INPUT_BYTES", "40000000"))
-SESSIONS = {}
+# Spec 16 3.1.1: cut-out sessions kept loaded, least recently used first. 1 (the default) keeps one model and
+# releases it before loading the next; the GPU service runs 3 so a model switch does not pay a 4 to 8 s reload.
+MAX_RESIDENT_SESSIONS = max(1, int(os.getenv("MAX_RESIDENT_SESSIONS", "1") or "1"))
+# Caps each GPU cut-out session's CUDA arena so one model cannot grow into another's memory. Unset: no cap.
+GPU_MEM_LIMIT_BYTES = os.getenv("GPU_MEM_LIMIT_BYTES", "").strip()
+SESSIONS = OrderedDict()
+# Spec 16 3.1.2: held only around ONNX session runs and around loading or evicting a session. Decode, resize,
+# normalisation, mask post-processing and PNG encode run outside it, so with concurrency 2 one request's CPU work
+# overlaps the other's inference.
 INFERENCE_LOCK = Lock()
+
+
+class LockedRun:
+    """Wraps an ONNX InferenceSession so only `run` takes INFERENCE_LOCK; every other attribute passes through."""
+
+    def __init__(self, inner):
+        self._inner = inner
+
+    def run(self, *args, **kwargs):
+        with INFERENCE_LOCK:
+            return self._inner.run(*args, **kwargs)
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
 
 
 def load_sessions():
@@ -102,8 +127,18 @@ def load_sessions():
     return {DEFAULT_MODEL: create_session(DEFAULT_MODEL)}
 
 
+def cuda_options():
+    """CUDA provider options for a cut-out session (ONNX Runtime CUDA EP docs, read 2026-10-27): the arena grows by
+    what is asked, not the next power of two, and GPU_MEM_LIMIT_BYTES caps it when set."""
+    options = {"arena_extend_strategy": "kSameAsRequested"}
+    if GPU_MEM_LIMIT_BYTES:
+        options["gpu_mem_limit"] = GPU_MEM_LIMIT_BYTES
+    return options
+
+
 def create_session(model):
-    providers = ["CUDAExecutionProvider", "CPUExecutionProvider"] if TARGET == "gpu" else ["CPUExecutionProvider"]
+    # rembg passes a providers list through to onnxruntime.InferenceSession unchanged, so a (name, options) tuple works.
+    providers = [("CUDAExecutionProvider", cuda_options()), "CPUExecutionProvider"] if TARGET == "gpu" else ["CPUExecutionProvider"]
     options = ort.SessionOptions()
     options.intra_op_num_threads = 4
     if TARGET == "cpu":
@@ -113,20 +148,53 @@ def create_session(model):
     actual = session.inner_session.get_providers()
     if TARGET == "gpu" and "CUDAExecutionProvider" not in actual:
         raise RuntimeError(f"{model}: CUDAExecutionProvider unavailable; refusing CPU-labelled-as-GPU service")
+    # rembg's predict calls inner_session.run between its own resize and post-processing; only that run takes the lock.
+    if not isinstance(session.inner_session, LockedRun):
+        session.inner_session = LockedRun(session.inner_session)
     status = Path("/proc/self/status")
     memory = [line for line in status.read_text().splitlines() if line.startswith(("VmRSS:", "VmHWM:"))] if status.exists() else []
-    logger.info("session_ready model=%s target=%s providers=%s memory=%s", model, TARGET, actual, memory)
+    logger.info("session_ready model=%s target=%s providers=%s memory=%s resident=%d", model, TARGET, actual, memory, len(SESSIONS) + 1)
     return session
 
 
 def session_for(model):
-    # Release the old session and its retained workspace before loading another model.
-    # Callers hold INFERENCE_LOCK through selection and inference on either target.
-    if model not in SESSIONS:
-        SESSIONS.clear()
+    """The session for `model`, loading it when it is not resident. When MAX_RESIDENT_SESSIONS are loaded, the least
+    recently used one is released (and its workspace collected) before the new one loads. Holds INFERENCE_LOCK while
+    it looks up, evicts and loads, so a load never overlaps an inference. A request that already holds an evicted
+    session finishes with it; its memory goes when that request ends."""
+    with INFERENCE_LOCK:
+        if model in SESSIONS:
+            SESSIONS.move_to_end(model)
+            return SESSIONS[model]
+        while len(SESSIONS) >= MAX_RESIDENT_SESSIONS:
+            SESSIONS.popitem(last=False)
         gc.collect()
         SESSIONS[model] = create_session(model)
-    return SESSIONS[model]
+        return SESSIONS[model]
+
+
+GPU_MEMORY_TTL_S = 10.0
+_gpu_memory = {"at": -math.inf, "value": None}
+
+
+def gpu_memory():
+    """Used and total VRAM of GPU 0 in MiB from nvidia-smi, or None (CPU target, no nvidia-smi, any failure). Cached 10 s."""
+    if TARGET != "gpu":
+        return None
+    now = time.monotonic()
+    if now - _gpu_memory["at"] < GPU_MEMORY_TTL_S:
+        return _gpu_memory["value"]
+    value = None
+    tool = shutil.which("nvidia-smi")
+    if tool:
+        try:
+            out = subprocess.run([tool, "--query-gpu=memory.used,memory.total", "--format=csv,noheader,nounits"], capture_output=True, text=True, timeout=2, check=True).stdout
+            used, total = (int(part.strip()) for part in out.splitlines()[0].split(","))
+            value = {"usedMiB": used, "totalMiB": total}
+        except (OSError, subprocess.SubprocessError, ValueError, IndexError):
+            value = None
+    _gpu_memory.update(at=now, value=value)
+    return value
 
 
 @asynccontextmanager
@@ -158,7 +226,8 @@ def read_upload(file):
 
 @app.get("/health")
 def health():
-    return {"ok": True, "models": [{"id": name, "inputSize": INPUT_SIZES[name], "target": TARGET} for name in MODELS], "default": DEFAULT_MODEL, "version": os.getenv("GIT_SHA", "dev"), "upscale": upscale_health()}
+    return {"ok": True, "models": [{"id": name, "inputSize": INPUT_SIZES[name], "target": TARGET} for name in MODELS], "default": DEFAULT_MODEL, "version": os.getenv("GIT_SHA", "dev"), "upscale": upscale_health(),
+            "resident": list(SESSIONS), "maxResident": MAX_RESIDENT_SESSIONS, "gpuMemory": gpu_memory()}
 
 
 @app.post("/matte")
@@ -177,12 +246,12 @@ def matte(file: UploadFile, model: str = DEFAULT_MODEL):
     except (UnidentifiedImageError, OSError, ValueError, Image.DecompressionBombError):
         return JSONResponse({"error": "not a PNG or JPEG file"}, status_code=400)
     try:
-        with INFERENCE_LOCK:
-            mask = remove(image, session=session_for(model), only_mask=True).convert("L")
-            status = Path("/proc/self/status")
-            memory = [line for line in status.read_text().splitlines() if line.startswith(("VmRSS:", "VmHWM:"))] if status.exists() else []
-            ms = int((time.perf_counter() - started) * 1000)
-            logger.info("inference_complete model=%s target=%s memory=%s ms=%d", model, TARGET, memory, ms, extra={"fields": {"model": model, "target": TARGET, "ms": ms}})
+        # Only the session's inner run holds INFERENCE_LOCK (LockedRun); rembg's resize and post-processing do not.
+        mask = remove(image, session=session_for(model), only_mask=True).convert("L")
+        status = Path("/proc/self/status")
+        memory = [line for line in status.read_text().splitlines() if line.startswith(("VmRSS:", "VmHWM:"))] if status.exists() else []
+        ms = int((time.perf_counter() - started) * 1000)
+        logger.info("inference_complete model=%s target=%s memory=%s ms=%d", model, TARGET, memory, ms, extra={"fields": {"model": model, "target": TARGET, "ms": ms}})
         if mask.size != image.size:
             mask = mask.resize(image.size, Image.Resampling.LANCZOS)
         return png_response(mask, started, {"x-model": model, "x-input-size": f"{image.width}x{image.height}"})
@@ -384,9 +453,15 @@ def decode_rgb(data):
 def run_upscale(model, image):
     with INFERENCE_LOCK:
         upscaler = load_upscaler(model)
-        started = time.perf_counter()
-        pixels = upscale_array(np.asarray(image, dtype=np.uint8), upscaler.run, upscaler.tile)
-        elapsed = int((time.perf_counter() - started) * 1000)
+
+    def locked_tile(batch):
+        # Spec 16 3.1.2: the lock is held per tile, so a cut-out can run between two tiles of an upscale.
+        with INFERENCE_LOCK:
+            return upscaler.run(batch)
+
+    started = time.perf_counter()
+    pixels = upscale_array(np.asarray(image, dtype=np.uint8), locked_tile, upscaler.tile)
+    elapsed = int((time.perf_counter() - started) * 1000)
     logger.info("upscale_complete model=%s target=%s size=%dx%d ms=%d", model, TARGET, image.width, image.height, elapsed, extra={"fields": {"model": model, "target": TARGET, "ms": elapsed}})
     return Image.fromarray(pixels, "RGB"), elapsed
 

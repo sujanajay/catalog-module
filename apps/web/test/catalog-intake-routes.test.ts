@@ -1,4 +1,5 @@
-// Tier 2 (PGlite): the input routes of spec 14b F3 - DELETE uploads/[uploadId], PATCH and DELETE links/[uploadId].
+// Tier 2 (PGlite): the input routes of spec 14b F3 - DELETE uploads/[uploadId], PATCH and DELETE links/[uploadId] -
+// and the routes of spec 14c - POST cancel and POST reopen.
 // The F3 acceptance flows (paste then replace, remove then collect) are in catalog-wizard-routes.test.ts.
 import { eq } from "drizzle-orm";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
@@ -7,11 +8,18 @@ import { createTestDb } from "@catalog/core/db/testing";
 import { POST as create } from "../app/api/catalog/batches/route";
 import { DELETE as removeLinks, PATCH as patchLinks } from "../app/api/catalog/batches/[id]/links/[uploadId]/route";
 import { DELETE as removeUpload } from "../app/api/catalog/batches/[id]/uploads/[uploadId]/route";
-import { INPUT_NOT_FOUND } from "../lib/catalog/batches";
+import { POST as cancel } from "../app/api/catalog/batches/[id]/cancel/route";
+import { POST as reopen } from "../app/api/catalog/batches/[id]/reopen/route";
+import { POST as ingest } from "../app/api/catalog/batches/[id]/ingest/route";
+import { POST as start } from "../app/api/catalog/batches/[id]/start/route";
+import { PATCH as patchDetected } from "../app/api/catalog/batches/[id]/detected/route";
+import { regroupBatch } from "../lib/catalog/uploads";
+import { BATCH_CANCELLED, BATCH_COULD_NOT_START, BATCH_STILL_COLLECTING, INPUT_NOT_FOUND } from "../lib/catalog/batches";
 import { setDbForTests, type Db } from "../lib/db";
 import { resetUserDeps, setUserDeps } from "../lib/user";
+import { enqueueTask } from "@catalog/core/tasks";
 
-vi.mock("@catalog/core/tasks", () => ({ enqueueTask: vi.fn(async () => "test-task") }));
+vi.mock(import("@catalog/core/tasks"), async (original) => ({ ...await original(), enqueueTask: vi.fn(async () => "test-task") }));
 // The paste readback opens the first links (spec 14b F2): a fake image host, so no network is used.
 vi.mock("@catalog/core/safe-url", async (original) => ({
   ...await original<typeof import("@catalog/core/safe-url")>(),
@@ -73,14 +81,179 @@ describe("input routes (spec 14b F3)", () => {
     }
     expect(await statusOf(cut.id)).toBe("removed");
   });
-  it("refuses removing or replacing while the batch is collecting or started, with the existing sentence", async () => {
-    for (const status of ["ingesting", "matting"] as const) {
+  it("refuses removing or replacing while the batch is collecting or started, with the sentence for its status", async () => {
+    for (const [status, sentence] of [["ingesting", BATCH_STILL_COLLECTING], ["matting", STARTED]] as const) {
       const id = await newBatch(); const file = await addRow(id, "image"); const paste = await addRow(id, "url_list");
-      await db.update(catalogBatches).set({ status }).where(eq(catalogBatches.id, id));
+      await db.update(catalogBatches).set({ status, ...(status === "matting" ? { startedAt: new Date() } : {}) }).where(eq(catalogBatches.id, id));
       for (const response of [await removeUpload(request("DELETE"), ctx(id, file.id)), await removeLinks(request("DELETE"), ctx(id, paste.id)), await patchLinks(request("PATCH", { text: "https://8.8.8.8/A_1.jpg" }), ctx(id, paste.id))]) {
-        expect(response.status).toBe(409); expect(await response.json()).toEqual({ error: STARTED });
+        expect(response.status).toBe(409); expect(await response.json()).toEqual({ error: sentence });
       }
       expect(await statusOf(file.id)).toBe("uploaded"); expect(await statusOf(paste.id)).toBe("uploaded");
+    }
+  });
+});
+
+// Tier 2: POST cancel (spec 14c F4 part 2), POST reopen and the assertDraft sentences (spec 14c F8).
+const batchRow = async (id: string) => (await db.select().from(catalogBatches).where(eq(catalogBatches.id, id)))[0]!;
+async function setStatus(id: string, values: Partial<typeof catalogBatches.$inferInsert>) {
+  await db.update(catalogBatches).set(values).where(eq(catalogBatches.id, id));
+}
+const REASON = "No photos could be downloaded from the 2 links you pasted.";
+describe("cancel (spec 14c F4 part 2)", () => {
+  it("cancels a draft, a collecting batch and a batch that failed before Start, and refuses a started one with 409", async () => {
+    const draft = await newBatch(); const collecting = await newBatch(); const failed = await newBatch(); const started = await newBatch();
+    await setStatus(collecting, { status: "ingesting" });
+    await setStatus(failed, { status: "failed", counts: { ...(await batchRow(failed)).counts, failReason: REASON } });
+    await setStatus(started, { status: "matting", startedAt: new Date() });
+    for (const id of [draft, collecting, failed]) {
+      const response = await cancel(request("POST"), ctx(id));
+      expect(response.status).toBe(200); expect(await response.json()).toEqual({ id, status: "cancelled" });
+      expect((await batchRow(id)).status).toBe("cancelled");
+    }
+    const refused = await cancel(request("POST"), ctx(started));
+    expect(refused.status).toBe(409); expect(await refused.json()).toEqual({ error: STARTED });
+    expect((await batchRow(started)).status).toBe("matting");
+    // A batch that failed after Start is started: refused too.
+    const late = await newBatch(); await setStatus(late, { status: "failed", startedAt: new Date() });
+    expect((await cancel(request("POST"), ctx(late))).status).toBe(409);
+  });
+  it("answers the same when cancelled twice, keeps the counts, and refuses a viewer", async () => {
+    const id = await newBatch(); await addRow(id, "url_list");
+    await setStatus(id, { status: "ingesting", counts: { ...(await batchRow(id)).counts, collected: 3, collectTotal: 10, phase: "downloading" } });
+    expect((await cancel(request("POST"), ctx(id))).status).toBe(200);
+    expect((await cancel(request("POST"), ctx(id))).status).toBe(200);
+    expect((await batchRow(id)).counts).toMatchObject({ collected: 3, collectTotal: 10, phase: "downloading" });
+    const other = await newBatch();
+    setUserDeps({ roleLookup: async () => "viewer" });
+    expect((await cancel(request("POST"), ctx(other))).status).toBe(403);
+    expect((await batchRow(other)).status).toBe("draft");
+  });
+  it("a cancelled batch is never handed to collecting again and refuses every change with its sentence", async () => {
+    const id = await newBatch(); const file = await addRow(id, "image"); const paste = await addRow(id, "url_list");
+    expect((await cancel(request("POST"), ctx(id))).status).toBe(200);
+    for (const response of [
+      await ingest(request("POST"), ctx(id)),
+      await removeUpload(request("DELETE"), ctx(id, file.id)),
+      await patchLinks(request("PATCH", { text: "https://8.8.8.8/A_1.jpg" }), ctx(id, paste.id)),
+      await reopen(request("POST"), ctx(id)),
+      await start(request("POST", { previewAt: new Date().toISOString() }), ctx(id)),
+    ]) { expect(response.status).toBe(409); expect(await response.json()).toEqual({ error: BATCH_CANCELLED }); }
+    expect((await batchRow(id)).status).toBe("cancelled");
+    expect(enqueueTask).not.toHaveBeenCalledWith("/tasks/catalog/ingest", expect.objectContaining({ batchId: id }), expect.anything());
+  });
+});
+describe("web counts writes and the instant step 2 Continue (spec 14c F6 and F7 part 1)", () => {
+  const claim = { token: "run-1:upload-1", until: new Date(Date.now() + 60_000).toISOString() };
+  it("a step 2 Continue with nothing changed returns at once: no regroup, no upload change, no hand-off", async () => {
+    const id = await newBatch(); const file = await addRow(id, "image");
+    await db.update(catalogUploads).set({ status: "collected" }).where(eq(catalogUploads.id, file.id));
+    const { options, counts } = await batchRow(id);
+    await setStatus(id, { counts: { ...counts, previewReady: true, phase: "ready" } });
+    vi.mocked(enqueueTask).mockClear();
+    const same = await patchDetected(request("PATCH", { identifierMode: options.identifierMode, precedence: options.precedence, sheets: [] }), ctx(id));
+    expect(same.status).toBe(200); expect(await same.json()).toEqual({ collecting: false });
+    expect(enqueueTask).not.toHaveBeenCalled(); expect(await statusOf(file.id)).toBe("collected");
+    expect((await batchRow(id)).counts.previewReady).toBe(true);
+    // A changed option regroups without collecting again (spec 14d F7 part 2): the upload stays collected
+    // and is handed once, so the worker reruns the grouping and the placing with the new options.
+    const changed = await patchDetected(request("PATCH", { identifierMode: "folder", precedence: options.precedence, sheets: [] }), ctx(id));
+    expect(await changed.json()).toEqual({ collecting: true });
+    expect(enqueueTask).toHaveBeenCalledWith("/tasks/catalog/ingest", expect.objectContaining({ batchId: id, uploadId: file.id, run: expect.any(String) }), expect.anything());
+    expect(await statusOf(file.id)).toBe("collected");
+    expect((await batchRow(id)).status).toBe("ingesting");
+  });
+  it("a changed sheet column collects the sheet again; the same columns keep it collected", async () => {
+    const id = await newBatch();
+    const detected = { kind: "sheet", columns: ["SKU", "Image 1", "Image 2"], columnsChosen: true, identifierColumn: 0, urlColumns: [1] };
+    const [sheet] = await db.insert(catalogUploads).values({ batchId: id, kind: "sheet", name: "links.csv", status: "collected", detected }).returning();
+    const { options, counts } = await batchRow(id);
+    await setStatus(id, { counts: { ...counts, previewReady: true, phase: "ready" } });
+    const send = (urlColumns: number[]) => patchDetected(request("PATCH", { identifierMode: options.identifierMode, precedence: options.precedence, sheets: [{ uploadId: sheet!.id, identifierColumn: 0, imageColumns: urlColumns, kind: "sheet" }] }), ctx(id));
+    // The same columns with a changed option set (sheetColumns now recorded): regrouped, sheet stays collected.
+    expect(await (await send([1])).json()).toEqual({ collecting: true });
+    expect(await statusOf(sheet!.id)).toBe("collected");
+    await setStatus(id, { status: "draft", counts: { ...(await batchRow(id)).counts, previewReady: true } });
+    vi.mocked(enqueueTask).mockClear();
+    expect(await (await send([1, 2])).json()).toEqual({ collecting: true });
+    expect(await statusOf(sheet!.id)).toBe("uploaded");
+    expect(enqueueTask).toHaveBeenCalledWith("/tasks/catalog/ingest", expect.objectContaining({ batchId: id, uploadId: sheet!.id }), expect.anything());
+  });
+  it("regroupBatch merges: phase and the other worker keys stay, previewReady and the placing lease are cleared", async () => {
+    const id = await newBatch(); await addRow(id, "image");
+    await setStatus(id, { counts: { ...(await batchRow(id)).counts, previewReady: true, phase: "ready", placed: 27, placeTotal: 27, placingClaim: claim, collected: 27, collectTotal: 27 } });
+    await regroupBatch(id);
+    expect((await batchRow(id)).counts).toMatchObject({ previewReady: false, phase: "ready", placed: 27, placeTotal: 27, placingClaim: null, collected: 27, collectTotal: 27 });
+  });
+  it("Try again keeps a live placing lease and clears the one a stalled batch left", async () => {
+    const id = await newBatch(); const file = await addRow(id, "image");
+    await setStatus(id, { status: "ingesting", updatedAt: new Date(), counts: { ...(await batchRow(id)).counts, phase: "placing", placingClaim: claim } });
+    expect((await ingest(request("POST"), ctx(id))).status).toBe(200);
+    expect((await batchRow(id)).counts).toMatchObject({ phase: "placing", placingClaim: claim });
+    await setStatus(id, { updatedAt: new Date(Date.now() - 11 * 60_000) });
+    await db.update(catalogUploads).set({ status: "uploaded" }).where(eq(catalogUploads.id, file.id));
+    expect((await ingest(request("POST"), ctx(id))).status).toBe(200);
+    expect((await batchRow(id)).counts).toMatchObject({ phase: "placing", placingClaim: null });
+  });
+});
+describe("the paged hand-off (spec 14d F11 part 2)", () => {
+  it("1,200 uploads: the request hands 500 and queues one ingest-more task for the rest", async () => {
+    const id = await newBatch();
+    for (let i = 0; i < 1200; i += 200) await db.insert(catalogUploads).values(Array.from({ length: 200 }, (_, k) => ({ batchId: id, kind: "image" as const, name: `P${i + k}_1.jpg`, status: "uploaded" as const })));
+    vi.mocked(enqueueTask).mockClear();
+    const res = await ingest(request("POST"), ctx(id));
+    expect(await res.json()).toEqual({ collecting: true, remaining: 700 });
+    const calls = vi.mocked(enqueueTask).mock.calls;
+    const handed = calls.filter((c) => c[0] === "/tasks/catalog/ingest");
+    expect(handed).toHaveLength(500);
+    const more = calls.filter((c) => c[0] === "/tasks/catalog/ingest-more");
+    expect(more).toHaveLength(1);
+    const ids = (await db.select({ id: catalogUploads.id }).from(catalogUploads).where(eq(catalogUploads.batchId, id))).map((u) => u.id).sort();
+    expect(handed.map((c) => (c[1] as { uploadId: string }).uploadId)).toEqual(ids.slice(0, 500));
+    expect(more[0]![1]).toEqual({ batchId: id, run: (handed[0]![1] as { run: string }).run, after: ids[499] });
+    expect((await batchRow(id)).status).toBe("ingesting");
+  });
+});
+describe("reopen and the assertDraft sentences (spec 14c F8)", () => {
+  it("reopens a batch that failed before Start: draft, reason cleared, inputs kept, the old reason answered", async () => {
+    const id = await newBatch(); const paste = await addRow(id, "url_list"); const file = await addRow(id, "image");
+    await db.update(catalogUploads).set({ status: "failed" }).where(eq(catalogUploads.id, paste.id));
+    await setStatus(id, { status: "failed", counts: { ...(await batchRow(id)).counts, failReason: REASON, previewReady: true, linkFailures: 2 } });
+    const response = await reopen(request("POST"), ctx(id));
+    expect(response.status).toBe(200); expect(await response.json()).toEqual({ id, status: "draft", failReason: REASON });
+    const row = await batchRow(id);
+    // The old reason is kept as fixReason, so step 1 shows it after a reload too.
+    expect(row.status).toBe("draft"); expect(row.counts).toMatchObject({ failReason: null, fixReason: REASON, previewReady: false, linkFailures: 2 });
+    expect(await statusOf(paste.id)).toBe("failed"); expect(await statusOf(file.id)).toBe("uploaded");
+    // A draft answers as it is (a second press of Fix and continue).
+    expect(await (await reopen(request("POST"), ctx(id))).json()).toEqual({ id, status: "draft", failReason: REASON });
+    // The next hand-off to collecting clears it.
+    expect((await ingest(request("POST"), ctx(id))).status).toBe(200);
+    expect((await batchRow(id)).counts.fixReason).toBeNull();
+  });
+  it("refuses to reopen a batch that failed after Start, and a viewer", async () => {
+    const id = await newBatch();
+    await setStatus(id, { status: "failed", startedAt: new Date(), counts: { ...(await batchRow(id)).counts, failReason: REASON } });
+    const refused = await reopen(request("POST"), ctx(id));
+    expect(refused.status).toBe(409); expect(await refused.json()).toEqual({ error: STARTED });
+    expect((await batchRow(id)).status).toBe("failed");
+    const never = await newBatch(); await setStatus(never, { status: "failed" });
+    setUserDeps({ roleLookup: async () => "viewer" });
+    expect((await reopen(request("POST"), ctx(never))).status).toBe(403);
+    expect((await batchRow(never)).status).toBe("failed");
+  });
+  it("words the refusal of a change by the batch's status", async () => {
+    const cases = [
+      [{ status: "failed" }, "This batch could not start. Press Fix and continue to change its photos or links."],
+      [{ status: "ingesting" }, "This batch is still collecting. Wait for it to finish, or press Try again if nothing has moved for 10 minutes."],
+      [{ status: "rendering", startedAt: new Date() }, "This batch has already started. Make a new batch to add more photos."],
+      [{ status: "cancelled" }, "This batch was cancelled. Make a new batch."],
+    ] as const;
+    expect(cases.map(([, s]) => s)).toEqual([BATCH_COULD_NOT_START, BATCH_STILL_COLLECTING, STARTED, BATCH_CANCELLED]);
+    for (const [values, sentence] of cases) {
+      const id = await newBatch(); const file = await addRow(id, "image");
+      await setStatus(id, values);
+      const response = await removeUpload(request("DELETE"), ctx(id, file.id));
+      expect(response.status).toBe(409); expect(await response.json()).toEqual({ error: sentence });
     }
   });
 });

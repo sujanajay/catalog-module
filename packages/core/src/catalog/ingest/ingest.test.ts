@@ -1,7 +1,7 @@
 // Tier 2 (PGlite + fake storage, fake fetch, fake enqueue): the ingest run (spec 04, "Ingest run").
 import { readFileSync } from "node:fs";
 import { Readable } from "node:stream";
-import { and, eq } from "drizzle-orm";
+import { and, eq, inArray, sql } from "drizzle-orm";
 import sharp from "sharp";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import type { Db } from "../../db/client";
@@ -21,8 +21,11 @@ import { batchPrefix, rawPath } from "../naming";
 import { findOrCreateProduct } from "../products";
 import type { ChannelId, IdentifierMode, UploadKind } from "../types";
 import { buildZip } from "../../../test-fixtures/catalog/ingest-a/builders";
-import { buildPreview, runIngest } from "./index";
-import { manifestPath } from "./manifest";
+import { mergeCounts, PLACING_LEASE_MS } from "../counts";
+import { buildPreview, deliveryToken, INGEST_TIME_BUDGET_MS, LINK_MAX_ATTEMPTS, LINK_RETRY_ATTEMPTS, PLACE_BUDGET_ITEMS, runIngest } from "./index";
+import { linkFailuresBlock } from "./detect-step";
+import { linkFailuresOf } from "./link-failures";
+import { manifestPath, type UploadManifest } from "./manifest";
 import type { IngestDeps } from "./types";
 
 // findOrCreateProduct keeps its real behaviour; one test makes a call fail part-way through.
@@ -50,13 +53,13 @@ afterAll(async () => {
 // --- Fakes ---------------------------------------------------------------------------------
 
 function fakeWorld() {
-  const objects = new Map<string, { buf: Buffer; mime: string }>();
+  const objects = new Map<string, { buf: Buffer; mime: string; sha256?: string }>();
   const calls = { uploads: [] as string[], downloads: [] as string[], customTime: [] as string[], fetches: [] as string[] };
   const gs = (p: string) => `gs://${BUCKET}/${p}`;
   const notFound = () => Object.assign(new Error("No such object"), { code: 404 });
   const storage: IngestDeps["storage"] = {
-    uploadBuffer: async (path: string, buf: Buffer, mime: string) => {
-      objects.set(gs(path), { buf, mime });
+    uploadBuffer: async (path: string, buf: Buffer, mime: string, opts?: { sha256?: string }) => {
+      objects.set(gs(path), { buf, mime, ...(opts?.sha256 ? { sha256: opts.sha256 } : {}) });
       calls.uploads.push(gs(path));
       return gs(path);
     },
@@ -68,7 +71,7 @@ function fakeWorld() {
     },
     headObject: async (gsUri: string) => {
       const o = objects.get(gsUri);
-      return { exists: !!o, size: o ? o.buf.length : null, contentType: o?.mime ?? null, generation: o ? "1" : null, crc32c: null };
+      return { exists: !!o, size: o ? o.buf.length : null, contentType: o?.mime ?? null, generation: o ? "1" : null, crc32c: null, ...(o?.sha256 ? { sha256: o.sha256 } : {}) };
     },
     readRange: async (gsUri: string, start: number, end: number) => objects.get(gsUri)!.buf.subarray(start, end + 1),
     createRangeStream: (gsUri: string, start: number, end: number) => Readable.from([objects.get(gsUri)!.buf.subarray(start, end + 1)]),
@@ -142,7 +145,8 @@ async function folderUpload(w: World, batch: CatalogBatch, files: Record<string,
 }
 
 function deps(w: World, budgetItems?: number) {
-  return { storage: w.storage, fetch: w.fetch, enqueue: w.enqueue as never, ...(budgetItems ? { budgetItems } : {}) };
+  // Link retries wait for nothing here (spec 14d F5 part 2); the retry tests pass their own clock.
+  return { storage: w.storage, fetch: w.fetch, enqueue: w.enqueue as never, sleep: async () => {}, ...(budgetItems ? { budgetItems } : {}) };
 }
 
 /** Runs every upload of the batch, following the self-enqueued continuations. */
@@ -502,7 +506,8 @@ describe("an input removed while the batch-wide step runs (spec 14b F3)", () => 
     const storage: IngestDeps["storage"] = {
       ...w.storage,
       downloadBuffer: async (gsUri: string) => {
-        if (gsUri === keptManifest && !removedOnce && (await batchRow(batch.id)).status === "draft") {
+        // The batch-wide step runs while the batch is placing (spec 14c F6: it stays `ingesting`).
+        if (gsUri === keptManifest && !removedOnce && (await batchRow(batch.id)).counts.phase === "placing") {
           removedOnce = true;
           await db.update(catalogUploads).set({ status: "removed" }).where(eq(catalogUploads.id, gone));
         }
@@ -586,7 +591,7 @@ describe("links that could not be downloaded (spec 14b F5 part 1)", () => {
     expect(batch.counts).toMatchObject({ linkFailures: 27, unsupportedFiles: 0, sources: 0 });
     expect(batch.counts.failReason).toBe(
       `No photos could be downloaded from the 27 links you pasted. 27 answered 'not found' (404), for example ${G}/BH-4610-NE-NERO_1.JPG (row 1, column 1). ` +
-      "Check that the links open in a browser, then make a new batch and paste the corrected links.",
+      "Check that the links open in a browser, then press Fix and continue and paste the corrected links.",
     );
   });
 
@@ -620,5 +625,567 @@ describe("links that could not be downloaded (spec 14b F5 part 1)", () => {
     const { batch } = await collectGrid((url) => (url.includes("BH-4611-BX-BOXER_2") ? 404 : 200));
     expect(batch.status).toBe("draft");
     expect(batch.counts).toMatchObject({ linkFailures: 1, unsupportedFiles: 0, sources: 26, previewReady: true });
+  });
+});
+
+describe("phase, rate and the placing lease (spec 14c F6)", () => {
+  const T0 = Date.parse("2026-10-27T10:00:00Z");
+  /** A clock the test moves by hand. */
+  function clock() {
+    let t = T0;
+    return { now: () => new Date(t), advance: (ms: number) => (t += ms) };
+  }
+  type Body = { batchId: string; uploadId: string; cursor?: string; run?: string };
+
+  it("collecting writes phase and rate; placing stays ingesting with phase placing, then draft with phase ready and the lease and rate cleared", async () => {
+    const w = fakeWorld();
+    const c = clock();
+    const batch = await newBatch("phases");
+    const files: Record<string, Buffer> = {};
+    for (let n = 1; n <= 6; n++) files[`PH${n}_1.jpg`] = await jpeg();
+    const uploadId = await folderUpload(w, batch, files);
+
+    await runIngest(db, { ...deps(w, 2), now: c.now }, { batchId: batch.id, uploadId });
+    const first = (await batchRow(batch.id)).counts;
+    expect(first).toMatchObject({ phase: "checking", collected: 2, collectTotal: 6, placingClaim: null });
+    expect(first.rate?.at(-1)).toEqual({ at: new Date(T0).toISOString(), phase: "checking", done: 2 });
+    c.advance(30_000);
+    await runIngest(db, { ...deps(w, 2), now: c.now }, w.enqueued[0]!.body as Body);
+    expect((await batchRow(batch.id)).counts.rate?.map((s) => [s.phase, s.done])).toEqual([["checking", 0], ["checking", 2], ["checking", 4]]);
+
+    // Snapshot the row while the last delivery places the photos.
+    // Each photo placed takes 11 s on the test clock, so `placed` is written while placing.
+    let during: CatalogBatch | null = null;
+    let beforeClose: CatalogBatch | null = null;
+    const storage: IngestDeps["storage"] = {
+      ...w.storage,
+      downloadBuffer: async (gsUri) => {
+        if (gsUri.includes("/uploads/")) {
+          const row = await batchRow(batch.id);
+          if (row.counts.phase === "placing") {
+            during ??= row;
+            c.advance(11_000);
+          }
+        }
+        return w.storage.downloadBuffer(gsUri);
+      },
+      uploadBuffer: async (path, buf, mime, opts) => {
+        if (path.endsWith("preview-state.json")) beforeClose = await batchRow(batch.id);
+        return w.storage.uploadBuffer(path, buf, mime, opts);
+      },
+    };
+    c.advance(30_000);
+    const last = w.enqueued[1]!.body as Body;
+    expect((await runIngest(db, { ...deps(w, 2), storage, now: c.now }, last)).outcome).toBe("preview ready: 6 products, 6 photos");
+    expect(during).not.toBeNull();
+    expect(during!.status).toBe("ingesting");
+    expect(during!.counts).toMatchObject({ phase: "placing", placed: 0, placeTotal: 6, placingClaim: { token: deliveryToken(last), until: new Date(T0 + 60_000 + PLACING_LEASE_MS).toISOString() } });
+    // The phase changed, so rate restarted with placing samples only.
+    expect(during!.counts.rate!.every((s) => s.phase === "placing")).toBe(true);
+    // Before the closing write: every photo placed, and a `placed` sample written part-way.
+    expect(beforeClose!).toMatchObject({ status: "ingesting", counts: { phase: "placing", placed: 6 } });
+    const dones = beforeClose!.counts.rate!.map((s) => s.done);
+    expect(dones.some((d) => d > 0 && d < 6)).toBe(true);
+    expect(dones.at(-1)).toBe(6);
+
+    const done = await batchRow(batch.id);
+    expect(done.status).toBe("draft");
+    expect(done.counts).toMatchObject({ phase: "ready", placed: 6, placeTotal: 6, placingClaim: null, rate: [], previewReady: true, collected: 6 });
+  });
+
+  it("a thrown placing leaves the lease; another token does nothing while it is live; the retry with the same token runs it to the end", async () => {
+    const w = fakeWorld();
+    const c = clock();
+    const batch = await newBatch("lease retry");
+    const uploadId = await folderUpload(w, batch, { "LR1_1.jpg": await jpeg(), "LR2_1.jpg": await jpeg() });
+    const body: Body = { batchId: batch.id, uploadId, run: "run-1" };
+    let fail = true;
+    const storage: IngestDeps["storage"] = {
+      ...w.storage,
+      uploadBuffer: async (path, buf, mime, opts) => {
+        if (fail && path.includes("/raw/")) throw Object.assign(new Error("Connection reset"), { code: "ECONNRESET" });
+        return w.storage.uploadBuffer(path, buf, mime, opts);
+      },
+    };
+    await expect(runIngest(db, { ...deps(w), storage, now: c.now }, body)).rejects.toThrow("Connection reset");
+    let row = await batchRow(batch.id);
+    expect(row.status).toBe("ingesting");
+    expect(row.counts.placingClaim?.token).toBe(deliveryToken(body));
+    expect(row.counts.phase).toBe("placing");
+    fail = false;
+
+    // A delivery of another hand-off (another token) while the lease is live: nothing happens.
+    c.advance(60_000);
+    expect((await runIngest(db, { ...deps(w), now: c.now }, { ...body, run: "run-2" })).outcome).toBe("noop: upload already collected");
+    row = await batchRow(batch.id);
+    expect(row.status).toBe("ingesting");
+    expect(row.counts.placingClaim?.token).toBe(deliveryToken(body));
+    expect(await sourcesOf(batch.id)).toEqual([]);
+
+    // Cloud Tasks retries the same task: same token, so it continues.
+    expect((await runIngest(db, { ...deps(w), now: c.now }, body)).outcome).toBe("preview ready: 2 products, 2 photos");
+    row = await batchRow(batch.id);
+    expect(row).toMatchObject({ status: "draft", counts: { phase: "ready", placingClaim: null, previewReady: true } });
+    expect(await sourcesOf(batch.id)).toHaveLength(2);
+  });
+
+  it("a duplicate delivery of the claiming task while its first copy still places does nothing", async () => {
+    const w = fakeWorld();
+    const batch = await newBatch("lease duplicate");
+    const uploadId = await folderUpload(w, batch, { "LD1_1.jpg": await jpeg(), "LD2_1.jpg": await jpeg() });
+    const body: Body = { batchId: batch.id, uploadId, run: "run-1" };
+    let duplicate: string | null = null;
+    const storage: IngestDeps["storage"] = {
+      ...w.storage,
+      downloadBuffer: async (gsUri) => {
+        if (duplicate === null && gsUri.includes("/uploads/") && (await batchRow(batch.id)).counts.phase === "placing") {
+          // Cloud Tasks delivers the same task again (same body, same token) while this run places.
+          duplicate = (await runIngest(db, deps(w), body)).outcome;
+        }
+        return w.storage.downloadBuffer(gsUri);
+      },
+    };
+    expect((await runIngest(db, { ...deps(w), storage }, body)).outcome).toBe("preview ready: 2 products, 2 photos");
+    expect(duplicate).toBe("noop: upload already collected");
+    expect((await batchRow(batch.id)).counts).toMatchObject({ phase: "ready", placingClaim: null, previewReady: true });
+    expect(await sourcesOf(batch.id)).toHaveLength(2);
+  });
+
+  it("a lapsed lease can be claimed by another delivery", async () => {
+    const w = fakeWorld();
+    const c = clock();
+    const batch = await newBatch("lease lapsed");
+    const uploadId = await folderUpload(w, batch, { "LL1_1.jpg": await jpeg() });
+    const body: Body = { batchId: batch.id, uploadId, run: "dead" };
+    const storage: IngestDeps["storage"] = { ...w.storage, uploadBuffer: async () => { throw new Error("killed"); } };
+    await expect(runIngest(db, { ...deps(w), storage, now: c.now }, body)).rejects.toThrow("killed");
+    c.advance(PLACING_LEASE_MS + 1_000);
+    const other: Body = { ...body, run: "try-again" };
+    expect((await runIngest(db, { ...deps(w), now: c.now }, other)).outcome).toBe("preview ready: 1 products, 1 photos");
+    expect((await batchRow(batch.id)).counts).toMatchObject({ phase: "ready", placingClaim: null });
+  });
+
+  it("a web write merged during placing (as regroupBatch now writes) keeps phase and placingClaim", async () => {
+    const w = fakeWorld();
+    const batch = await newBatch("merge during placing");
+    const uploadId = await folderUpload(w, batch, { "MP1_1.jpg": await jpeg() });
+    let seen: CatalogBatch | null = null;
+    const storage: IngestDeps["storage"] = {
+      ...w.storage,
+      downloadBuffer: async (gsUri) => {
+        if (!seen && gsUri.includes("/uploads/") && (await batchRow(batch.id)).counts.phase === "placing") {
+          await db.update(catalogBatches).set({ counts: mergeCounts({ previewReady: false }) }).where(eq(catalogBatches.id, batch.id));
+          seen = await batchRow(batch.id);
+        }
+        return w.storage.downloadBuffer(gsUri);
+      },
+    };
+    await runIngest(db, { ...deps(w), storage }, { batchId: batch.id, uploadId });
+    expect(seen!.counts).toMatchObject({ phase: "placing", previewReady: false, placingClaim: { token: deliveryToken({ uploadId }) } });
+  });
+});
+
+describe("placing never re-copies (spec 14c F7 part 1)", () => {
+  it("a second placing run on the same batch performs zero copies", async () => {
+    const w = fakeWorld();
+    const batch = await newBatch("no re-copy");
+    await folderUpload(w, batch, { "NR1_1.jpg": await jpeg(), "NR1_2.jpg": await jpeg(), "NR2_1.jpg": await jpeg() });
+    await ingestAll(w, batch);
+    const copies = w.calls.uploads.filter((u) => u.includes("/raw/")).length;
+    expect(copies).toBe(3);
+    const raw = w.objects.get(`gs://${BUCKET}/${rawPath(prefixOf(batch), "NR1", 1, "jpg")}`)!;
+    expect(raw.sha256).toMatch(/^[0-9a-f]{64}$/);
+
+    // Continue on step 2 hands the uploads again: the grouping runs, the photos are already in place.
+    await db.update(catalogUploads).set({ status: "uploaded" }).where(eq(catalogUploads.batchId, batch.id));
+    await ingestAll(w, batch);
+    expect(w.calls.uploads.filter((u) => u.includes("/raw/")).length).toBe(copies);
+    expect((await batchRow(batch.id)).counts).toMatchObject({ previewReady: true, sources: 3, phase: "ready" });
+    expect(await sourcesOf(batch.id)).toHaveLength(3);
+
+    // A raw object whose bytes differ (another sha256), or that carries no sha256 (written before
+    // release C), is copied again and gets the item's sha256.
+    const changed = `gs://${BUCKET}/${rawPath(prefixOf(batch), "NR1", 1, "jpg")}`;
+    const unmarked = `gs://${BUCKET}/${rawPath(prefixOf(batch), "NR2", 1, "jpg")}`;
+    w.objects.set(changed, { ...w.objects.get(changed)!, sha256: "0".repeat(64) });
+    w.objects.set(unmarked, { ...w.objects.get(unmarked)!, sha256: undefined });
+    await db.update(catalogUploads).set({ status: "uploaded" }).where(eq(catalogUploads.batchId, batch.id));
+    await ingestAll(w, batch);
+    expect(w.calls.uploads.filter((u) => u.includes("/raw/")).length).toBe(copies + 2);
+    expect(w.objects.get(changed)!.sha256).toBe(raw.sha256);
+    expect(w.objects.get(unmarked)!.sha256).toMatch(/^[0-9a-f]{64}$/);
+  });
+});
+
+describe("cancel guards (spec 14c F4 part 2)", () => {
+  type Body = { batchId: string; uploadId: string; cursor?: string };
+  const cancel = (id: string) => db.update(catalogBatches).set({ status: "cancelled" }).where(eq(catalogBatches.id, id));
+  const products = async (batchId: string) => db.select().from(catalogBatchProducts).where(eq(catalogBatchProducts.batchId, batchId));
+
+  it("a batch cancelled mid-collection stays cancelled through the remaining deliveries and the placing, with no version rows", async () => {
+    const w = fakeWorld();
+    const batch = await newBatch("cancel collecting");
+    const files: Record<string, Buffer> = {};
+    for (let n = 1; n <= 6; n++) files[`CC${n}_1.jpg`] = await jpeg();
+    const uploadId = await folderUpload(w, batch, files);
+    const other = await folderUpload(w, batch, { "CO1_1.jpg": await jpeg() });
+
+    await runIngest(db, deps(w, 2), { batchId: batch.id, uploadId });
+    // The operator cancels while the second delivery reads its photos.
+    let cancelled = false;
+    const storage: IngestDeps["storage"] = {
+      ...w.storage,
+      downloadBuffer: async (gsUri) => {
+        if (!cancelled && gsUri.endsWith(".jpg")) {
+          cancelled = true;
+          await cancel(batch.id);
+        }
+        return w.storage.downloadBuffer(gsUri);
+      },
+    };
+    const queued = w.enqueued.length;
+    expect((await runIngest(db, { ...deps(w, 2), storage }, w.enqueued[0]!.body as Body)).outcome).toBe("stopped: the batch was cancelled");
+    expect(w.enqueued).toHaveLength(queued);
+    // Every later delivery, including the other upload's first one, does nothing.
+    expect((await runIngest(db, deps(w, 10), { batchId: batch.id, uploadId, cursor: "4" })).outcome).toBe("noop: the batch is cancelled");
+    expect((await runIngest(db, deps(w, 10), { batchId: batch.id, uploadId: other })).outcome).toBe("noop: the batch is cancelled");
+    await db.update(catalogUploads).set({ status: "collected" }).where(eq(catalogUploads.batchId, batch.id));
+    expect((await runIngest(db, deps(w, 10), { batchId: batch.id, uploadId: other })).outcome).toBe("noop: the batch is cancelled");
+
+    expect((await batchRow(batch.id)).status).toBe("cancelled");
+    expect(await sourcesOf(batch.id)).toEqual([]);
+    expect(await products(batch.id)).toEqual([]);
+  });
+
+  it("a batch cancelled while placing is not revived, and the rows placing wrote are removed", async () => {
+    const w = fakeWorld();
+    const batch = await newBatch("cancel placing");
+    const uploadId = await folderUpload(w, batch, { "CP1_1.jpg": await jpeg(), "CP2_1.jpg": await jpeg() });
+    let cancelled = false;
+    const storage: IngestDeps["storage"] = {
+      ...w.storage,
+      uploadBuffer: async (path, buf, mime, opts) => {
+        if (!cancelled && path.includes("/raw/")) {
+          cancelled = true;
+          await cancel(batch.id);
+        }
+        return w.storage.uploadBuffer(path, buf, mime, opts);
+      },
+    };
+    expect((await runIngest(db, { ...deps(w), storage }, { batchId: batch.id, uploadId })).outcome).toBe("stopped: the batch was cancelled");
+    const row = await batchRow(batch.id);
+    expect(row.status).toBe("cancelled");
+    expect(row.counts.previewReady).toBe(false);
+    expect(await sourcesOf(batch.id)).toEqual([]);
+    expect(await products(batch.id)).toEqual([]);
+    // A retry of the same task finds the batch cancelled.
+    expect((await runIngest(db, deps(w), { batchId: batch.id, uploadId })).outcome).toBe("noop: the batch is cancelled");
+    expect((await batchRow(batch.id)).status).toBe("cancelled");
+  });
+});
+
+
+/** A distinct tiny jpeg per index (the colour encodes it), quick enough for a thousand photos. */
+async function tinyJpeg(i: number): Promise<Buffer> {
+  return sharp({ create: { width: 32, height: 32, channels: 3, background: { r: i % 256, g: Math.floor(i / 256) % 256, b: 101 } } }).jpeg().toBuffer();
+}
+
+type PlaceBody = { batchId: string; uploadId: string; cursor?: string; run?: string; place?: string };
+const rawCopies = (w: World) => w.calls.uploads.filter((u) => u.includes("/raw/")).length;
+
+describe("placing in resumable chunks (spec 14d F7 part 2)", () => {
+  it("1,000 photos with PLACE_BUDGET_ITEMS 300: four placing deliveries, placed 300, 600, 900, 1,000, rows only after the last", async () => {
+    const w = fakeWorld();
+    const batch = await newBatch("chunked placing");
+    const files: Record<string, Buffer> = {};
+    for (let i = 0; i < 1000; i++) files[`CH${String(Math.floor(i / 4)).padStart(3, "0")}_${(i % 4) + 1}.jpg`] = await tinyJpeg(i);
+    const uploadId = await folderUpload(w, batch, files);
+    const d = { ...deps(w, 1000), placeBudgetItems: 300 };
+
+    const placed: number[] = [];
+    const first = await runIngest(db, d, { batchId: batch.id, uploadId, run: "r1" });
+    expect(first.outcome).toBe("placed 300 of 1000; continuing at 300");
+    let row = await batchRow(batch.id);
+    placed.push(row.counts.placed ?? 0);
+    expect(row).toMatchObject({ status: "ingesting", counts: { phase: "placing", placeTotal: 1000 } });
+    expect(await sourcesOf(batch.id)).toEqual([]);
+    expect(w.objects.has(`gs://${BUCKET}/${prefixOf(batch)}/derived/_ingest/place-state.json`)).toBe(true);
+
+    let deliveries = 1;
+    for (let next = w.enqueued.at(-1); next?.body.place; next = w.enqueued.at(-1)) {
+      const from = w.enqueued.length;
+      const r = await runIngest(db, d, next.body as PlaceBody);
+      deliveries++;
+      row = await batchRow(batch.id);
+      placed.push(row.counts.placed ?? 0);
+      if (w.enqueued.length === from) {
+        expect(r.outcome).toBe("preview ready: 250 products, 1000 photos");
+        break;
+      }
+      expect(row).toMatchObject({ status: "ingesting", counts: { phase: "placing" } });
+      expect(await sourcesOf(batch.id)).toEqual([]);
+    }
+    expect(deliveries).toBe(4);
+    expect(placed).toEqual([300, 600, 900, 1000]);
+    // Every continuation carries the lease's body (same token) and a named task.
+    expect(w.enqueued.filter((e) => e.body.place).map((e) => [e.body.place, e.body.run])).toEqual([["300", "r1"], ["600", "r1"], ["900", "r1"]]);
+    row = await batchRow(batch.id);
+    expect(row).toMatchObject({ status: "draft", counts: { phase: "ready", previewReady: true, placed: 1000, sources: 1000, placingClaim: null } });
+    expect(await sourcesOf(batch.id)).toHaveLength(1000);
+    expect(rawCopies(w)).toBe(1000);
+  }, 120_000);
+
+  it("a delivery killed after chunk 2 keeps the lease and the cursor: its retry with the same token continues to the end", async () => {
+    const w = fakeWorld();
+    const batch = await newBatch("killed placing");
+    const files: Record<string, Buffer> = {};
+    for (let i = 0; i < 10; i++) files[`KP${i}_1.jpg`] = await tinyJpeg(2000 + i);
+    const uploadId = await folderUpload(w, batch, files);
+    let kill = true;
+    const enqueue = async (route: string, body: Record<string, unknown>) => {
+      if (kill && body.place === "6") throw new Error("killed");
+      return w.enqueue(route, body);
+    };
+    const d = { ...deps(w), enqueue: enqueue as never, placeBudgetItems: 3 };
+    const body: PlaceBody = { batchId: batch.id, uploadId, run: "kp" };
+    await runIngest(db, d, body);
+    const second = w.enqueued.at(-1)!.body as PlaceBody;
+    expect(second.place).toBe("3");
+    await expect(runIngest(db, d, second)).rejects.toThrow("killed");
+    let row = await batchRow(batch.id);
+    expect(row).toMatchObject({ status: "ingesting", counts: { phase: "placing", placed: 6, placingClaim: { token: deliveryToken(body) } } });
+    const copies = rawCopies(w);
+    expect(copies).toBe(6);
+
+    // Cloud Tasks retries the killed delivery (same body, same token): chunk 2 costs no copy, then on.
+    kill = false;
+    await runIngest(db, d, second);
+    expect(rawCopies(w)).toBe(copies);
+    for (let next = w.enqueued.at(-1)!.body as PlaceBody; next.place !== "done"; ) {
+      const from = w.enqueued.length;
+      await runIngest(db, d, next);
+      next = (w.enqueued[from]?.body as PlaceBody) ?? { ...next, place: "done" };
+    }
+    row = await batchRow(batch.id);
+    expect(row).toMatchObject({ status: "draft", counts: { phase: "ready", placed: 10, placingClaim: null } });
+    expect(await sourcesOf(batch.id)).toHaveLength(10);
+    expect(rawCopies(w)).toBe(10);
+  });
+
+  it("a continuation under an older lease places nothing once a later run regrouped the batch", async () => {
+    const w = fakeWorld();
+    const batch = await newBatch("stale continuation");
+    const uploadId = await folderUpload(w, batch, { "SC1_1.jpg": await tinyJpeg(3001), "SC2_1.jpg": await tinyJpeg(3002) });
+    const d = { ...deps(w), placeBudgetItems: 1 };
+    await runIngest(db, d, { batchId: batch.id, uploadId, run: "old" });
+    const stale = w.enqueued.at(-1)!.body as PlaceBody;
+    // Try again on a stalled batch: the web clears the lease and a new run takes it and regroups.
+    await db.update(catalogBatches).set({ counts: mergeCounts({ placingClaim: null }) }).where(eq(catalogBatches.id, batch.id));
+    await runIngest(db, d, { batchId: batch.id, uploadId, run: "new" });
+    expect((await runIngest(db, d, stale)).outcome).toBe("noop: another delivery holds the placing lease");
+    expect(await sourcesOf(batch.id)).toEqual([]);
+  });
+
+  it("a redelivered grouping task after the first hand-off queues the continuation again and never regroups", async () => {
+    const w = fakeWorld();
+    const batch = await newBatch("regroup redelivery");
+    const files: Record<string, Buffer> = {};
+    for (let i = 0; i < 6; i++) files[`RG${i}_1.jpg`] = await tinyJpeg(5000 + i);
+    const uploadId = await folderUpload(w, batch, files);
+    const d = { ...deps(w), placeBudgetItems: 2 };
+    const body: PlaceBody = { batchId: batch.id, uploadId, run: "rg" };
+    await runIngest(db, d, body);
+    const productsBefore = (await db.select().from(catalogBatchProducts).where(eq(catalogBatchProducts.batchId, batch.id))).map((p) => p.productId).sort();
+    const from = w.enqueued.length;
+    // At-least-once delivery: the grouping task arrives again while its chain is under way.
+    const again = await runIngest(db, d, body);
+    expect(again.outcome).toBe("placing already at 2; continuation queued again");
+    expect(w.enqueued.slice(from).map((e) => e.body.place)).toEqual(["2"]);
+    const productsAfter = (await db.select().from(catalogBatchProducts).where(eq(catalogBatchProducts.batchId, batch.id))).map((p) => p.productId).sort();
+    expect(productsAfter).toEqual(productsBefore);
+    expect(await batchRow(batch.id)).toMatchObject({ status: "ingesting", counts: { placed: 2, placingClaim: { next: 2, attempt: null } } });
+  });
+
+  it("a duplicate continuation while its first copy still places does nothing", async () => {
+    const w = fakeWorld();
+    const batch = await newBatch("duplicate continuation");
+    const uploadId = await folderUpload(w, batch, { "DC1_1.jpg": await tinyJpeg(5101), "DC2_1.jpg": await tinyJpeg(5102), "DC3_1.jpg": await tinyJpeg(5103) });
+    const d = { ...deps(w), placeBudgetItems: 1 };
+    await runIngest(db, d, { batchId: batch.id, uploadId, run: "dc" });
+    const second = w.enqueued.at(-1)!.body as PlaceBody;
+    // The first copy took the attempt (as resumeAttempt does) and is still running.
+    await db.update(catalogBatches).set({ counts: sql`jsonb_set(${catalogBatches.counts}, '{placingClaim,attempt}', '"running"'::jsonb)` }).where(eq(catalogBatches.id, batch.id));
+    expect((await runIngest(db, d, second)).outcome).toBe("noop: another delivery holds the placing lease");
+    expect(rawCopies(w)).toBe(1);
+  });
+
+  it("a cancel between two placing chunks removes the products and rows grouping wrote", async () => {
+    const w = fakeWorld();
+    const batch = await newBatch("cancel between chunks");
+    const files: Record<string, Buffer> = {};
+    for (let i = 0; i < 10; i++) files[`CB${i}_1.jpg`] = await tinyJpeg(5200 + i);
+    const uploadId = await folderUpload(w, batch, files);
+    const d = { ...deps(w), placeBudgetItems: 3 };
+    await runIngest(db, d, { batchId: batch.id, uploadId, run: "cb" });
+    const next = w.enqueued.at(-1)!.body as PlaceBody;
+    const created = (await db.select().from(catalogBatchProducts).where(eq(catalogBatchProducts.batchId, batch.id))).map((p) => p.productId);
+    expect(created).toHaveLength(10);
+    await db.update(catalogBatches).set({ status: "cancelled" }).where(eq(catalogBatches.id, batch.id));
+    expect((await runIngest(db, d, next)).outcome).toBe("noop: the batch is cancelled");
+    expect(await db.select().from(catalogBatchProducts).where(eq(catalogBatchProducts.batchId, batch.id))).toEqual([]);
+    expect(await db.select().from(catalogProducts).where(inArray(catalogProducts.id, created))).toEqual([]);
+    expect(await sourcesOf(batch.id)).toEqual([]);
+  });
+
+  it("an options-only regroup runs groupBatch then placeBatch with zero copies and no upload status change", async () => {
+    const w = fakeWorld();
+    const batch = await newBatch("options only");
+    const uploadId = await folderUpload(w, batch, { "OO1_1.jpg": await tinyJpeg(4001), "OO1_2.jpg": await tinyJpeg(4002), "OO2_1.jpg": await tinyJpeg(4003) });
+    await ingestAll(w, batch);
+    const copies = rawCopies(w);
+    expect(copies).toBe(3);
+    // What the web tier does (regroupBatch with optionsOnly, then ingestBatch): new options, the batch
+    // collecting again, the preview cleared, one collected upload handed under a new run.
+    await db.update(catalogBatches).set({ status: "ingesting", options: { ...batch.options, precedence: "uploads_only" }, counts: mergeCounts({ previewReady: false, placingClaim: null }) }).where(eq(catalogBatches.id, batch.id));
+    const outcome = await runIngest(db, deps(w), { batchId: batch.id, uploadId, run: "regroup" });
+    expect(outcome.outcome).toBe("preview ready: 2 products, 3 photos");
+    expect(rawCopies(w)).toBe(copies);
+    const uploads = await db.select({ status: catalogUploads.status }).from(catalogUploads).where(eq(catalogUploads.batchId, batch.id));
+    expect(uploads.map((u) => u.status)).toEqual(["collected"]);
+    expect((await batchRow(batch.id))).toMatchObject({ status: "draft", options: { precedence: "uploads_only" }, counts: { previewReady: true, phase: "ready" } });
+  });
+
+  it("measures groupBatch at about 2,000 products against the 900 s deadline", async () => {
+    const w = fakeWorld();
+    const batch = await newBatch("group timing");
+    const files: Record<string, Buffer> = {};
+    const N = 2000;
+    for (let i = 0; i < N; i++) files[`GT${String(i).padStart(4, "0")}_1.jpg`] = await tinyJpeg(10_000 + i);
+    const uploadId = await folderUpload(w, batch, files);
+    // Collect all but one item first, so the timed delivery reads one item and then groups.
+    await runIngest(db, deps(w, N - 1), { batchId: batch.id, uploadId, run: "gt" });
+    let manifestSaved = 0, planSaved = 0;
+    const storage: IngestDeps["storage"] = {
+      ...w.storage,
+      uploadBuffer: async (path, buf, mime, opts) => {
+        if (path.endsWith("manifest.json")) manifestSaved = performance.now();
+        if (path.endsWith("place-state.json")) planSaved = performance.now();
+        return w.storage.uploadBuffer(path, buf, mime, opts);
+      },
+    };
+    const r = await runIngest(db, { ...deps(w), storage }, w.enqueued.at(-1)!.body as PlaceBody);
+    expect(r.outcome).toBe(`placed ${PLACE_BUDGET_ITEMS} of ${N}; continuing at ${PLACE_BUDGET_ITEMS}`);
+    const groupMs = Math.round(planSaved - manifestSaved);
+    // PGlite in one process is slower than Cloud SQL, so this bound is loose.
+    console.info(JSON.stringify({ event: "groupBatch timing", products: N, ms: groupMs }));
+    expect(groupMs).toBeGreaterThan(0);
+    expect(groupMs).toBeLessThan(300_000);
+  }, 600_000);
+});
+
+describe("automatic retry of transient link failures (spec 14d F5 part 2)", () => {
+  const LINK = "https://104.18.38.10/retry";
+  /** A url_list batch of `urls`, a clock the fake fetch and sleep move, and the fetch log. */
+  async function linkBatch(urls: string[], answer: (url: string, call: number) => number | "timeout") {
+    const w = fakeWorld();
+    let t = Date.parse("2026-10-27T10:00:00Z");
+    const calls = new Map<string, number>();
+    const fetch: typeof globalThis.fetch = async (input) => {
+      const url = String(input);
+      const n = (calls.get(url) ?? 0) + 1;
+      calls.set(url, n);
+      const a = answer(url, n);
+      if (a === "timeout") {
+        t += 60_000;
+        throw new DOMException("The operation was aborted due to timeout", "TimeoutError");
+      }
+      return a === 200 ? new Response(new Uint8Array(await jpeg()), { status: 200, headers: { "content-type": "image/jpeg" } }) : new Response("no", { status: a, headers: { "content-type": "text/plain" } });
+    };
+    const [b] = await db.insert(catalogBatches).values({
+      brandSlug: "test_brand", brandName: "Test Brand", name: "retry", isTest: true, createdBy: "op@opptra.com", channels: [],
+      options: { identifierMode: "filename", precedence: "uploads_then_links", sheetColumns: null },
+    }).returning();
+    const [u] = await db.insert(catalogUploads).values({ batchId: b!.id, kind: "url_list", name: "Image links", sourceUrl: urls.join("\n"), gcsUri: null, status: "uploaded" }).returning();
+    const d = { ...deps(w), fetch, now: () => new Date(t), sleep: async (ms: number) => { t += ms; } };
+    /** Runs one hand-off (a new run) through its collecting continuations. */
+    const run = async (runId: string) => {
+      await db.update(catalogUploads).set({ status: "uploaded" }).where(eq(catalogUploads.id, u!.id));
+      await db.update(catalogBatches).set({ status: "draft" }).where(eq(catalogBatches.id, b!.id));
+      let body: PlaceBody | null = { batchId: b!.id, uploadId: u!.id, run: runId };
+      while (body) {
+        const from = w.enqueued.length;
+        await runIngest(db, d, body);
+        body = (w.enqueued[from]?.body as PlaceBody | undefined) ?? null;
+      }
+    };
+    const manifest = async () => JSON.parse(w.objects.get(`gs://${BUCKET}/${manifestPath(batchPrefix(b!.brandSlug, b!.id, true), u!.id)}`)!.buf.toString("utf8")) as UploadManifest;
+    const result = async (url: string) => (await manifest()).results[`url:${url}`];
+    return { w, calls, run, manifest, result, batchId: b!.id, uploadId: u!.id, d, tick: () => t };
+  }
+
+  it("503 twice then 200 gives one photo with attempts 3", async () => {
+    const x = await linkBatch([`${LINK}/A_1.jpg`], (_url, n) => (n <= 2 ? 503 : 200));
+    await x.run("r1");
+    expect(await x.result(`${LINK}/A_1.jpg`)).toMatchObject({ ok: true, attempts: 3 });
+    expect((await batchRow(x.batchId)).counts).toMatchObject({ sources: 1, linkFailures: 0 });
+  });
+
+  it("a 404 is final and never fetched again; a 429 left non-final is fetched again only by a new run; after LINK_MAX_ATTEMPTS it is final", async () => {
+    const nf = `${LINK}/NF_1.jpg`, busy = `${LINK}/BUSY_1.jpg`, ok = `${LINK}/OK_1.jpg`;
+    const x = await linkBatch([nf, busy, ok], (url) => (url === nf ? 404 : url === busy ? 429 : 200));
+    await x.run("r1");
+    expect(await x.result(nf)).toMatchObject({ ok: false, attempts: 1, final: true });
+    expect(await x.result(busy)).toMatchObject({ ok: false, attempts: LINK_RETRY_ATTEMPTS, final: false });
+    expect(x.calls.get(busy)).toBe(3);
+
+    // A continuation of the same run reads the saved manifest: nothing is fetched again.
+    await db.update(catalogUploads).set({ status: "uploaded" }).where(eq(catalogUploads.id, x.uploadId));
+    await db.update(catalogBatches).set({ status: "ingesting" }).where(eq(catalogBatches.id, x.batchId));
+    await runIngest(db, x.d, { batchId: x.batchId, uploadId: x.uploadId, run: "r1", cursor: "0" });
+    expect([x.calls.get(nf), x.calls.get(busy)]).toEqual([1, 3]);
+
+    // A new run fetches the non-final link again, never the final one; the attempts add up.
+    await x.run("r2");
+    expect([x.calls.get(nf), x.calls.get(busy)]).toEqual([1, 6]);
+    expect(await x.result(busy)).toMatchObject({ attempts: 6, final: false });
+    await x.run("r3");
+    expect(await x.result(busy)).toMatchObject({ ok: false, attempts: LINK_MAX_ATTEMPTS, final: true });
+    expect((await x.result(busy) as { reason: string }).reason).toContain("(got 429)");
+    await x.run("r4");
+    expect(x.calls.get(busy)).toBe(LINK_MAX_ATTEMPTS);
+    expect(x.calls.get(ok)).toBe(1);
+    // The card's sentence: the highest attempt count of a retried link.
+    expect(linkFailuresBlock(await linkFailuresOf(db, x.batchId, { storage: x.w.storage })).attempts).toBe(LINK_MAX_ATTEMPTS);
+  });
+
+  it("a new run that reads only part of the earlier run's non-final links leaves the rest unread, not restored", async () => {
+    const urls = Array.from({ length: 6 }, (_, i) => `${LINK}/PART${i}_1.jpg`);
+    const x = await linkBatch(urls, () => 429);
+    await x.run("r1");
+    expect(Object.values((await x.manifest()).results).every((r) => !r.ok && r.final === false)).toBe(true);
+    // The new run's first delivery reads two links (the item budget), then saves.
+    await db.update(catalogUploads).set({ status: "uploaded" }).where(eq(catalogUploads.id, x.uploadId));
+    await runIngest(db, { ...x.d, budgetItems: 2 }, { batchId: x.batchId, uploadId: x.uploadId, run: "r2" });
+    const m = await x.manifest();
+    expect(Object.keys(m.results)).toHaveLength(2);
+    expect(Object.keys(m.priorAttempts ?? {})).toHaveLength(6);
+    expect(x.w.enqueued.at(-1)).toMatchObject({ body: { run: "r2", cursor: expect.any(String) } });
+  });
+
+  it("a host that answers after 60 s every time still yields a saved manifest and a continuation within the time budget", async () => {
+    const urls = Array.from({ length: 40 }, (_, i) => `${LINK}/SLOW${i}_1.jpg`);
+    const x = await linkBatch(urls, () => "timeout");
+    await runIngest(db, x.d, { batchId: x.batchId, uploadId: x.uploadId, run: "slow" });
+    const m = await x.manifest();
+    const read = Object.keys(m.results).length;
+    expect(read).toBeGreaterThan(0);
+    expect(read).toBeLessThan(urls.length);
+    expect(Object.values(m.results).every((r) => !r.ok && r.final === false && r.attempts === LINK_RETRY_ATTEMPTS)).toBe(true);
+    expect(x.w.enqueued.at(-1)).toMatchObject({ route: "/tasks/catalog/ingest", body: { uploadId: x.uploadId, run: "slow", cursor: expect.any(String) } });
+    expect((await batchRow(x.batchId)).counts.collected).toBe(read);
+    // The continuation starts again with a fresh budget and reads the next items.
+    await runIngest(db, x.d, x.w.enqueued.at(-1)!.body as PlaceBody);
+    expect(Object.keys((await x.manifest()).results).length).toBeGreaterThan(read);
+    expect(INGEST_TIME_BUDGET_MS).toBe(600_000);
   });
 });

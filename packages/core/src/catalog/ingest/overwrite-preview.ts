@@ -5,7 +5,7 @@
 // which existing products will be overwritten and which of their live shots will be removed, which
 // new identifiers look like a rename, which two spellings are one product, and which products are
 // still held by another batch.
-import { and, eq, inArray } from "drizzle-orm";
+import { and, eq, inArray, isNull, ne, or, sql } from "drizzle-orm";
 import type { Db } from "../../db/client";
 import {
   catalogBatches,
@@ -16,8 +16,9 @@ import {
   type CatalogBatch,
 } from "../../db/schema";
 import { normalizeKey, sanitizeSegment } from "../naming";
+import { deriveBatchState } from "../pipeline/status";
 import { resolveSkus } from "../sku-mapping";
-import { sameProductMessage } from "./group";
+import { baseName, sameProductMessage } from "./group";
 import type { GroupingResult, OverwritePreview, SourceItem } from "./types";
 
 export interface ProductMatch { identifier: string; productId: string | null; pathKey: string; isNew: boolean; matchedBy: "alias" | "option_key" | null }
@@ -112,6 +113,7 @@ export async function buildOverwritePreview(
   grouped: GroupingResult,
   matches: ProductMatch[],
   sha256ByItem: Map<SourceItem, string>,
+  opts: { otherBatches?: boolean } = {},
 ): Promise<OverwritePreview> {
   const matchOf = new Map(matches.map((m) => [m.identifier, m]));
   const groupedIds = [...grouped.products.keys()];
@@ -187,7 +189,80 @@ export async function buildOverwritePreview(
   busy.sort((x, y) => byText(x.identifier, y.identifier));
 
   const renameHints = await findRenameHints(db, batch, grouped, fresh, sha256ByItem);
-  return { newProducts: fresh.length, existingProducts, renameHints, duplicates, busy };
+  // `otherBatches: false` (the batch-wide step, which stores only `duplicates`) skips the cross-batch lookup.
+  const sameBatches = opts.otherBatches === false ? [] : await findSameBatches(db, batch, grouped, sha256ByItem);
+  return { newProducts: fresh.length, existingProducts, renameHints, duplicates, busy, sameBatches, duplicatePhotos: findDuplicatePhotos(grouped, sha256ByItem) };
+}
+
+/** Builder constants (spec 14d F10): another batch is flagged when it shares at least this many photos, or this share of this batch's. */
+export const SAME_PHOTOS_MIN = 10;
+export const SAME_PHOTOS_SHARE = 0.2;
+
+/** sha256 -> the identifiers (in grouping order) and the first file name of the grouped photos with that hash. */
+function photosByHash(grouped: GroupingResult, sha256ByItem: Map<SourceItem, string>): Map<string, { identifiers: string[]; name: string }> {
+  const out = new Map<string, { identifiers: string[]; name: string }>();
+  for (const [identifier, items] of grouped.products) {
+    for (const item of items) {
+      const sha = sha256ByItem.get(item);
+      if (!sha) continue;
+      const entry = out.get(sha) ?? { identifiers: [], name: baseName(item) };
+      if (!entry.identifiers.includes(identifier)) entry.identifiers.push(identifier);
+      out.set(sha, entry);
+    }
+  }
+  return out;
+}
+
+/** One photo under two identifiers of this batch (the Tan/Black case), sorted by the first identifier. */
+function findDuplicatePhotos(grouped: GroupingResult, sha256ByItem: Map<SourceItem, string>): OverwritePreview["duplicatePhotos"] {
+  return [...photosByHash(grouped, sha256ByItem)]
+    .filter(([, e]) => e.identifiers.length > 1)
+    .map(([sha256, e]) => ({ sha256, identifiers: [...e.identifiers].sort(byText), name: e.name }))
+    .sort((x, y) => byText(x.identifiers[0]!, y.identifiers[0]!) || byText(x.sha256, y.sha256));
+}
+
+/**
+ * The brand's other unfinished batches holding the same photos (spec 14d F10): their version rows
+ * (written when their placing ended) compared by sha256 with this batch's grouped photos. A started,
+ * cancelled or test-flag-different batch is never listed. Most shared first.
+ */
+async function findSameBatches(db: Db, batch: CatalogBatch, grouped: GroupingResult, sha256ByItem: Map<SourceItem, string>): Promise<OverwritePreview["sameBatches"]> {
+  const here = photosByHash(grouped, sha256ByItem);
+  if (!here.size) return [];
+  const unfinished = or(inArray(catalogBatches.status, ["draft", "ingesting"]), and(eq(catalogBatches.status, "failed"), isNull(catalogBatches.startedAt)));
+  const found = new Map<string, { row: CatalogBatch; shared: Map<string, string> }>();
+  for (const part of chunks([...here.keys()])) {
+    const rows = await db
+      .select({ batch: catalogBatches, sha256: catalogSourceImages.sha256, identifier: catalogProducts.identifier })
+      .from(catalogSourceImages)
+      .innerJoin(catalogBatches, eq(catalogBatches.id, catalogSourceImages.batchId))
+      .innerJoin(catalogProducts, eq(catalogProducts.id, catalogSourceImages.productId))
+      .where(and(
+        eq(catalogBatches.brandSlug, batch.brandSlug), eq(catalogBatches.isTest, batch.isTest), ne(catalogBatches.id, batch.id),
+        unfinished, inArray(catalogSourceImages.sha256, part),
+      ))
+      .orderBy(sql`${catalogSourceImages.sha256}`, catalogProducts.identifier);
+    for (const r of rows) {
+      const entry = found.get(r.batch.id) ?? { row: r.batch, shared: new Map<string, string>() };
+      if (!entry.shared.has(r.sha256)) entry.shared.set(r.sha256, r.identifier);
+      found.set(r.batch.id, entry);
+    }
+  }
+  const out: OverwritePreview["sameBatches"] = [];
+  for (const { row, shared } of found.values()) {
+    if (shared.size < SAME_PHOTOS_MIN && shared.size < here.size * SAME_PHOTOS_SHARE) continue;
+    let example: { here: string; there: string } | null = null;
+    for (const [sha, there] of [...shared].sort(([a], [b]) => byText(a, b))) {
+      const mine = here.get(sha)!.identifiers[0]!;
+      if (normalizeKey(mine) !== normalizeKey(there)) {
+        example = { here: mine, there };
+        break;
+      }
+    }
+    const state = deriveBatchState({ status: row.status, counts: row.counts, startedAt: row.startedAt, channels: row.channels, updatedAt: row.updatedAt, expired: row.options.expired ?? null }).intake;
+    out.push({ batchId: row.id, name: row.name, createdAt: row.createdAt.toISOString(), state, sharedPhotos: shared.size, example });
+  }
+  return out.sort((x, y) => y.sharedPhotos - x.sharedPhotos || byText(x.name, y.name));
 }
 
 /**

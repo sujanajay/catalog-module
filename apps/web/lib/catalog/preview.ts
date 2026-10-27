@@ -12,7 +12,7 @@ import type { ChannelId } from "@catalog/core/catalog/types";
 import * as storage from "@catalog/core/storage";
 import { db } from "../db";
 import { badRequest } from "../errors";
-import { anotherBatchProcessing, assertDraft, draftForUpdate, parseOptions, queryBatch } from "./batches";
+import { anotherBatchProcessing, assertDraft, draftForUpdate, mergeCounts, parseOptions, queryBatch } from "./batches";
 import { wizardEstimate } from "./cost";
 import type { CostEstimate } from "./copy";
 import { regroupBatch } from "./uploads";
@@ -47,12 +47,20 @@ export async function patchDetected(id: string, value: unknown) {
   });
   if (patches.length === 1) options.sheetColumns = { identifier: patches[0]!.identifier, images: patches[0]!.images };
   if (patches.length > 1) options.sheetColumns = null;
+  // Nothing changed since the grouping was made (same options, every sheet's columns already chosen as
+  // sent): step 2 Continue returns at once, with no regroup, no upload change and no hand-off (spec 14c F7 part 1).
+  const sameOptions = options.identifierMode === batch.options.identifierMode && options.precedence === batch.options.precedence && JSON.stringify(options.sheetColumns ?? null) === JSON.stringify(batch.options.sheetColumns ?? null);
+  const sameSheets = patches.every(({ upload, detected }) => {
+    const prior = upload.detected as unknown as (Detected & { columnsChosen?: boolean }) | null;
+    return prior?.columnsChosen === true && prior.kind === detected.kind && prior.identifierColumn === detected.identifierColumn && JSON.stringify(prior.urlColumns ?? []) === JSON.stringify(detected.urlColumns);
+  });
+  if (batch.counts.previewReady && sameOptions && sameSheets) return { collecting: false };
   await db().transaction(async (tx) => {
     await draftForUpdate(tx, id);
     for (const patch of patches) await tx.update(catalogUploads).set({ detected: patch.detected, kind: patch.upload.kind === "google_sheet" ? "google_sheet" : patch.detected.kind }).where(eq(catalogUploads.id, patch.upload.id));
-    await tx.update(catalogBatches).set({ options, counts: { ...batch.counts, previewReady: false }, updatedAt: new Date() }).where(eq(catalogBatches.id, id));
+    await tx.update(catalogBatches).set({ options, counts: mergeCounts({ previewReady: false }), updatedAt: new Date() }).where(eq(catalogBatches.id, id));
   });
-  await regroupBatch(id);
+  await regroupBatch(id, { optionsOnly: sameSheets });
   return { collecting: true };
 }
 type PlannedSource = { productId: string; n: number; sha256: string };
@@ -109,7 +117,7 @@ function linkFailuresIfAny(batch: { id: string; counts: { linkFailures?: number 
 export async function previewBatch(id: string) {
   const batch = await queryBatch(id);
   const base = { otherBatchProcessing: await anotherBatchProcessing(id), ready: batch.counts.previewReady, previewAt: batch.updatedAt.toISOString(), counts: {...batch.counts, photos: batch.counts.sources, channels: batch.channels.length}, collected: batch.counts.collected, collectTotal: batch.counts.collectTotal, estimate: null as CostEstimate | null, ...await linkFailuresIfAny(batch) };
-  if (!base.ready) return { ...base, groupedBy: "", warnings: [], groups: [], totalRows: 0, overwrite: { newProducts: 0, existingProducts: [], renameHints: [], sameProductPairs: [] }, busy: [] };
+  if (!base.ready) return { ...base, groupedBy: "", warnings: [], groups: [], totalRows: 0, overwrite: { newProducts: 0, existingProducts: [], renameHints: [], sameProductPairs: [], sameBatches: [], duplicatePhotos: [] }, busy: [] };
   const [preview, detected] = await Promise.all([buildPreview(db(), id, { storage }, { limit: 50 }), buildDetectedStep2(db(), id, { storage })]);
   const sources = await db().select().from(catalogSourceImages).where(eq(catalogSourceImages.batchId, id));
   const productIds = [...new Set(sources.map((s) => s.productId))];
@@ -123,7 +131,7 @@ export async function previewBatch(id: string) {
   const estimate = wizardEstimate({ outputs, sources: sourcesToMake, untypedProducts, qaMode: batch.options.policy?.qaMode ?? "per_source", qaSampleRate: batch.options.policy?.qaSampleRate ?? 1 });
   const existing = new Set(preview.overwrite.existingProducts.map((p) => p.identifier));
   const groups = await Promise.all(preview.rows.map(async ({ firstShotUri, ...row }) => ({ ...row, firstPhotoUrl: firstShotUri ? await storage.signedUrl(firstShotUri, 900) : null, status: row.status === "duplicate shot" ? "two files for one shot" : row.status === "ok" && existing.has(row.identifier) ? "existing" : row.notes.some((n) => /not in sheet/i.test(n)) ? "not in sheet" : row.status })));
-  return { ...base, estimate, groupedBy: detected.groupedBy, counts: { ...batch.counts, ...preview.kpis, outputs }, warnings: preview.warnings, groups, totalRows: preview.totalRows, overwrite: { newProducts: preview.overwrite.newProducts, existingProducts: preview.overwrite.existingProducts, renameHints: preview.overwrite.renameHints, sameProductPairs: preview.overwrite.duplicates }, busy: preview.overwrite.busy };
+  return { ...base, estimate, groupedBy: detected.groupedBy, counts: { ...batch.counts, ...preview.kpis, outputs }, warnings: preview.warnings, groups, totalRows: preview.totalRows, overwrite: { newProducts: preview.overwrite.newProducts, existingProducts: preview.overwrite.existingProducts, renameHints: preview.overwrite.renameHints, sameProductPairs: preview.overwrite.duplicates, sameBatches: preview.overwrite.sameBatches, duplicatePhotos: preview.overwrite.duplicatePhotos }, busy: preview.overwrite.busy };
 }
 export type WizardPreview = Awaited<ReturnType<typeof previewBatch>>;
 export type WizardDetected = Awaited<ReturnType<typeof detectedBatch>>;

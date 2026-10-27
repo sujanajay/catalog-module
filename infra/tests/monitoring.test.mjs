@@ -218,8 +218,8 @@ try {
     const files = [...metricFiles.map((f) => path.join(monDir, 'metrics', f)), ...policyFiles.map((f) => path.join(monDir, 'policies', f)),
       path.join(monDir, 'dashboard.json'), path.join(infra, 'monitoring.sh'), path.join(infra, 'deploy.sh')];
     for (const f of files) assert.ok(!fs.readFileSync(f, 'utf8').includes(String.fromCharCode(0x2014)), 'em dash in ' + f);
-    assert.equal(policies.length, 9, 'nine alert policies');
-    assert.equal(new Set(policies.map((p) => p.displayName)).size, 9, 'policy display names are unique');
+    assert.equal(policies.length, 10, 'ten alert policies');
+    assert.equal(new Set(policies.map((p) => p.displayName)).size, 10, 'policy display names are unique');
     for (const p of policies) {
       assert.ok(p.displayName && p.documentation?.content?.length > 80, p.displayName + ' documentation');
       assert.equal(p.documentation.mimeType, 'text/markdown');
@@ -254,6 +254,12 @@ try {
     const batchFailed = metrics.find((m) => m.name === 'catalog/batch_failed').filter;
     assert.ok(batchFailed.includes('((jsonPayload.message="batch failed" AND severity=ERROR) OR jsonPayload.message=~"^batch swept")'), 'batch_failed counts ERROR failures and sweeps only');
     assert.ok(metrics.find((m) => m.name === 'catalog/chunk_failed_terminal').filter.includes('jsonPayload.message="chunk failed" AND severity=ERROR'), 'chunk_failed counts terminal (ERROR) only');
+    // Spec 15 E7: a 504 on a chunk task from the worker's request log, emailed once in 15 minutes.
+    const timeout = metrics.find((m) => m.name === 'catalog/chunk_timeout').filter;
+    for (const part of ['resource.labels.service_name="catalog-worker"', 'logName="projects/image-links-agent/logs/run.googleapis.com%2Frequests"', 'httpRequest.status=504', 'httpRequest.requestUrl:"/tasks/catalog/chunk"']) assert.ok(timeout.includes(part), 'chunk_timeout filter has ' + part);
+    const ranOut = policies.find((p) => p.displayName === 'Catalog: a chunk task ran out of time').conditions[0].conditionThreshold;
+    assert.match(ranOut.filter, /user\/catalog\/chunk_timeout"/);
+    assert.deepEqual([ranOut.aggregations[0].alignmentPeriod, ranOut.thresholdValue, ranOut.comparison], ['900s', 0, 'COMPARISON_GT']);
     const errors = metrics.find((m) => m.name === 'catalog/error_logs').filter;
     assert.match(errors, /severity>=ERROR/, 'error_logs counts ERROR and worse only (WARNING lines such as publish failed never email)');
     for (const msg of ['chunk failed', 'batch failed']) assert.ok(errors.includes(`NOT jsonPayload.message="${msg}"`), 'error_logs excludes ' + msg);

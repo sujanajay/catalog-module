@@ -16,6 +16,8 @@ const WEB_DIRS = ["apps/web/app", "apps/web/components", "apps/web/lib"];
 const CORE_COPY_FILES = [
   "packages/core/src/catalog/qa/reasons.ts",
   "packages/core/src/catalog/pipeline/status.ts",
+  // Spec 15: the output reason of a chunk that stopped making progress.
+  "packages/core/src/catalog/pipeline/dispatch.ts",
   "packages/core/src/catalog/cost.ts",
   "packages/core/src/catalog/cost-report.ts",
   "packages/core/src/catalog/sheet.ts",

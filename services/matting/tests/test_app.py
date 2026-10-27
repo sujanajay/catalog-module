@@ -8,6 +8,7 @@ import time
 import weakref
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from threading import Lock
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -103,17 +104,47 @@ def test_cpu_releases_previous_session_before_loading_next(service):
     assert create.call_count == 5
 
 
-def test_inference_and_session_switch_are_serialized(service):
-    client, _, _, remove = service
-    active = 0
-    peak = 0
+def counting_sessions(create, module, lock_seen=None):
+    """Fresh fake sessions whose inner run counts how many run at once; `lock_seen` records loads under the lock."""
+    state = {"active": 0, "peak": 0, "loads": 0}
+    counter = Lock()
 
-    def infer(image, **kwargs):
-        nonlocal active, peak
-        active += 1
-        peak = max(peak, active)
+    def run(*args, **kwargs):
+        with counter:
+            state["active"] += 1
+            state["peak"] = max(state["peak"], state["active"])
         time.sleep(0.03)
-        active -= 1
+        with counter:
+            state["active"] -= 1
+        return []
+
+    def factory(*args, **kwargs):
+        state["loads"] += 1
+        if lock_seen is not None:
+            lock_seen.append(module.INFERENCE_LOCK.locked())
+        return SimpleNamespace(inner_session=SimpleNamespace(get_providers=lambda: ["CPUExecutionProvider"], run=run))
+
+    create.side_effect = factory
+    return state
+
+
+def test_only_the_session_run_holds_the_lock(service):
+    """Spec 16 3.1.2: runs never overlap, while the work before and after a run (decode, resize, encode) does."""
+    client, module, create, remove = service
+    module.SESSIONS.clear()
+    loads_under_lock = []
+    runs = counting_sessions(create, module, loads_under_lock)
+    outside = {"active": 0, "peak": 0}
+    counter = Lock()
+
+    def infer(image, session, **kwargs):
+        with counter:
+            outside["active"] += 1
+            outside["peak"] = max(outside["peak"], outside["active"])
+        time.sleep(0.05)  # stands for rembg's resize and normalisation
+        with counter:
+            outside["active"] -= 1
+        session.inner_session.run(None, {})
         return ImageOps.invert(image.convert("L"))
 
     remove.side_effect = infer
@@ -124,7 +155,56 @@ def test_inference_and_session_switch_are_serialized(service):
 
     with ThreadPoolExecutor(max_workers=8) as pool:
         assert list(pool.map(request, range(8))) == [200] * 8
-    assert peak == 1
+    assert runs["peak"] == 1
+    assert outside["peak"] >= 2
+    assert loads_under_lock and all(loads_under_lock)
+
+
+def test_resident_sessions_are_least_recently_used(service, monkeypatch):
+    """Spec 16 3.1.1: with 3 resident, A B C A D loads 4 sessions and keeps C A D."""
+    client, module, create, remove = service
+    monkeypatch.setattr(module, "MAX_RESIDENT_SESSIONS", 3)
+    module.SESSIONS.clear()
+    runs = counting_sessions(create, module)
+    remove.side_effect = lambda image, session, **kwargs: (session.inner_session.run(None, {}), ImageOps.invert(image.convert("L")))[1]
+    for name in ["birefnet-general", "birefnet-general-lite", "birefnet-hrsod", "birefnet-general", "bria-rmbg"]:
+        assert client.post(f"/matte?model={name}", files={"file": ("source.png", image_bytes())}).status_code == 200
+    assert runs["loads"] == 4
+    assert list(module.SESSIONS) == ["birefnet-hrsod", "birefnet-general", "bria-rmbg"]
+    health = client.get("/health").json()
+    assert health["resident"] == ["birefnet-hrsod", "birefnet-general", "bria-rmbg"]
+    assert health["maxResident"] == 3
+    assert health["gpuMemory"] is None
+
+
+def test_resident_default_is_one(service):
+    _, module, _, _ = service
+    assert module.MAX_RESIDENT_SESSIONS == 1
+
+
+def test_gpu_session_gets_the_memory_options(service, monkeypatch):
+    _, module, create, _ = service
+    monkeypatch.setattr(module, "TARGET", "gpu")
+    monkeypatch.setattr(module, "GPU_MEM_LIMIT_BYTES", "6442450944")
+    create.side_effect = lambda *args, **kwargs: SimpleNamespace(inner_session=SimpleNamespace(get_providers=lambda: ["CUDAExecutionProvider", "CPUExecutionProvider"]))
+    module.create_session("birefnet-general")
+    providers = create.call_args.kwargs["providers"]
+    assert providers == [("CUDAExecutionProvider", {"arena_extend_strategy": "kSameAsRequested", "gpu_mem_limit": "6442450944"}), "CPUExecutionProvider"]
+    monkeypatch.setattr(module, "GPU_MEM_LIMIT_BYTES", "")
+    module.create_session("birefnet-general")
+    assert create.call_args.kwargs["providers"][0] == ("CUDAExecutionProvider", {"arena_extend_strategy": "kSameAsRequested"})
+
+
+def test_gpu_memory_reads_nvidia_smi_and_tolerates_its_absence(service, monkeypatch):
+    _, module, _, _ = service
+    monkeypatch.setattr(module, "TARGET", "gpu")
+    monkeypatch.setattr(module, "_gpu_memory", {"at": -float("inf"), "value": None})
+    monkeypatch.setattr(module.shutil, "which", lambda name: "/usr/bin/nvidia-smi")
+    monkeypatch.setattr(module.subprocess, "run", lambda *a, **k: SimpleNamespace(stdout="5120, 23034\n"))
+    assert module.gpu_memory() == {"usedMiB": 5120, "totalMiB": 23034}
+    monkeypatch.setattr(module, "_gpu_memory", {"at": -float("inf"), "value": None})
+    monkeypatch.setattr(module.shutil, "which", lambda name: None)
+    assert module.gpu_memory() is None
 
 
 def test_unknown_model(service):
@@ -196,7 +276,7 @@ def test_gpu_releases_resident_workspace_before_model_switch(service, monkeypatc
 
     def factory(*args, **kwargs):
         assert all(ref() is None for ref in refs), "previous GPU session still owns its workspace"
-        assert kwargs["providers"] == ["CUDAExecutionProvider", "CPUExecutionProvider"]
+        assert [p if isinstance(p, str) else p[0] for p in kwargs["providers"]] == ["CUDAExecutionProvider", "CPUExecutionProvider"]
         session = Session()
         refs.append(weakref.ref(session))
         return session

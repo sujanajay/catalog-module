@@ -28,7 +28,7 @@ import { HAND_OFF_FAILED, HAND_OFF_RETRY } from "../lib/catalog/copy";
 import { COLLECT_STALLED_TEXT } from "@catalog/core/catalog/pipeline/status";
 import { resetUserDeps, setUserDeps } from "../lib/user";
 
-vi.mock("@catalog/core/tasks", () => ({ enqueueTask: vi.fn(async () => "test-task") }));
+vi.mock(import("@catalog/core/tasks"), async (original) => ({ ...await original(), enqueueTask: vi.fn(async () => "test-task") }));
 // The paste readback opens the first links (spec 14b F2): a fake image host and a fake resolver, so no network is used.
 vi.mock("@catalog/core/safe-url", async (original) => {
   const actual = await original<typeof import("@catalog/core/safe-url")>();
@@ -166,7 +166,7 @@ describe("catalog wizard authorization and contracts",()=>{
     const response=await start(request("POST",{previewAt:shown.previewAt}),ctx(id));expect(response.status).toBe(200);expect(await response.json()).toMatchObject({id,status:"matting"});
     const lines=info.mock.calls.map(([line])=>{try{return JSON.parse(String(line)) as Record<string,unknown>;}catch{return {};}});info.mockRestore();
     expect(lines.filter(l=>l.message==="batch started")).toEqual([expect.objectContaining({severity:"INFO",batchId:id,products:1,sources:1,outputs:2,chunks:1,"logging.googleapis.com/labels":{app:"catalog",batchId:id}})]);
-    const chunks=(await db.select().from(catalogChunks)).filter((c)=>c.batchId===id);expect(chunks).toHaveLength(1);expect(chunks[0]).toMatchObject({stage:"matte",status:"queued"});expect(enqueueTask).toHaveBeenCalledWith("/tasks/catalog/chunk",{chunkId:chunks[0]!.id},{taskId:`chunk-${chunks[0]!.id}-matte`});
+    const chunks=(await db.select().from(catalogChunks)).filter((c)=>c.batchId===id);expect(chunks).toHaveLength(1);expect(chunks[0]).toMatchObject({stage:"matte",status:"queued"});expect(chunks[0]!.dispatchedAt).not.toBeNull();expect(enqueueTask).toHaveBeenCalledWith("/tasks/catalog/chunk",{chunkId:chunks[0]!.id,stage:"matte",step:0},{taskId:`chunk-${chunks[0]!.id}-matte-0`});
     expect((await patch(request("PATCH",{channels:["amazon"]}),ctx(id))).status).toBe(409);
     expect((await upload(request("POST",{files:[]}),ctx(id))).status).toBe(409);
   });
@@ -274,7 +274,8 @@ describe("ingest hand-off failures and stalled collecting",()=>{
     expect((await patch(request("PATCH",{name:"catalog-test e2e b"}),ctx(id))).status).toBe(200);
     expect((await ingest(request("POST"),ctx(id))).status).toBe(200);
     expect(await statusOf(id)).toBe("ingesting");
-    const ids=ingestCalls().map(([,body,opts])=>{expect(body).toEqual({batchId:id,uploadId:photo.id});return opts?.taskId;});
+    // The body carries the hand-off's run (spec 14c F6), the same one the task name ends with.
+    const ids=ingestCalls().map(([,body,opts])=>{expect(body).toEqual({batchId:id,uploadId:photo.id,run:expect.any(String)});expect(opts?.taskId).toBe(`ingest-${photo.id}-${(body as {run:string}).run}`);return opts?.taskId;});
     expect(ids).toHaveLength(2);
     for(const taskId of ids) expect(taskId).toMatch(new RegExp(`^ingest-${photo.id}-[0-9a-f-]{36}$`));
     expect(ids[0]).not.toBe(ids[1]);
@@ -299,7 +300,7 @@ describe("ingest hand-off failures and stalled collecting",()=>{
     expect(stuck).toMatchObject({state:"collecting",stalled:true,text:COLLECT_STALLED_TEXT});
     vi.mocked(enqueueTask).mockClear();
     expect((await ingest(request("POST"),ctx(id))).status).toBe(200);
-    expect(ingestCalls().map(([,body])=>body)).toEqual([{batchId:id,uploadId:photo.id}]);
+    expect(ingestCalls().map(([,body])=>body)).toEqual([{batchId:id,uploadId:photo.id,run:expect.any(String)}]);
     expect((await (await get(request("GET"),ctx(id))).json()).state.stalled).toBeUndefined();
   });
   it("Try again on a stalled batch whose files were all read hands one read upload over, so the grouping step runs",async()=>{
@@ -309,7 +310,7 @@ describe("ingest hand-off failures and stalled collecting",()=>{
     await db.update(catalogBatches).set({status:"ingesting",counts:{...row!.counts,previewReady:false},updatedAt:new Date(Date.now()-15*60_000)}).where(eq(catalogBatches.id,id));
     vi.mocked(enqueueTask).mockClear();
     expect((await ingest(request("POST"),ctx(id))).status).toBe(200);
-    expect(ingestCalls().map(([,body])=>body)).toEqual([{batchId:id,uploadId:photo.id}]);
+    expect(ingestCalls().map(([,body])=>body)).toEqual([{batchId:id,uploadId:photo.id,run:expect.any(String)}]);
     await runIngest(db,{storage,fetch:vi.fn(),enqueue:enqueueTask},{batchId:id,uploadId:photo.id});
     const [after]=await db.select().from(catalogBatches).where(eq(catalogBatches.id,id));
     expect(after!.status).toBe("draft");expect(after!.counts.previewReady).toBe(true);

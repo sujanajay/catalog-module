@@ -44,6 +44,7 @@ import { batchPrefix } from "@catalog/core/catalog/naming";
 import { lockProducts } from "@catalog/core/catalog/products";
 import { pollUntilEnd } from "@catalog/core/catalog/load/poll";
 import { planChunks } from "@catalog/core/catalog/pipeline/plan-chunks";
+import { chunkImages, dispatchChunks, LOAD_BATCH_NAME_PREFIX } from "@catalog/core/catalog/pipeline/dispatch";
 import { cleanupTestBatches } from "@catalog/core/catalog/test-cleanup";
 import { CHANNEL_IDS, type ChannelId } from "@catalog/core/catalog/types";
 import * as storage from "@catalog/core/storage";
@@ -95,7 +96,7 @@ async function realProducts() {
 async function createBatch(db: Db, run: string, label: string, channels: ChannelId[]) {
   const [brand] = await db.select().from(brandMaster).where(eq(brandMaster.slug, BRAND));
   if (!brand) throw new Error(`The test brand ${BRAND} is missing. Run the migrate job first.`);
-  const [batch] = await db.insert(catalogBatches).values({ brandSlug: BRAND, brandName: brand.name, name: `catalog-test load ${run} ${label}`, isTest: true, createdBy: "catalog-test@opptra.com", productType: "auto", channels, options: DEFAULT_BATCH_OPTIONS }).returning();
+  const [batch] = await db.insert(catalogBatches).values({ brandSlug: BRAND, brandName: brand.name, name: `${LOAD_BATCH_NAME_PREFIX}${run} ${label}`, isTest: true, createdBy: "catalog-test@opptra.com", productType: "auto", channels, options: DEFAULT_BATCH_OPTIONS }).returning();
   return batch!;
 }
 
@@ -138,19 +139,20 @@ async function start(db: Db, batchId: string) {
   const sources = await db.select({ id: catalogSourceImages.id, productId: catalogSourceImages.productId }).from(catalogSourceImages).where(eq(catalogSourceImages.batchId, batchId));
   const productIds = (await db.select({ id: catalogBatchProducts.productId }).from(catalogBatchProducts).where(eq(catalogBatchProducts.batchId, batchId))).map(p => p.id);
   const withPhotos = productIds.filter(id => sources.some(s => s.productId === id));
-  const plans = planChunks(withPhotos.map(productId => ({ productId, sourceCount: sources.filter(s => s.productId === productId).length })), Number(process.env.CATALOG_CHUNK_IMAGES ?? 25));
+  const plans = planChunks(withPhotos.map(productId => ({ productId, sourceCount: sources.filter(s => s.productId === productId).length })), chunkImages());
   const chunks = await db.transaction(async tx => {
     const locked = await lockProducts(tx as unknown as Db, batchId, productIds);
     if (!locked.ok) throw new Error(`${locked.busy.length} products are locked by another batch.`);
     const rows = [];
     for (const [index, plan] of plans.entries()) {
-      const [chunk] = await tx.insert(catalogChunks).values({ batchId, index, stage: "matte", status: "queued", productIds: plan.productIds, sourceImageIds: sources.filter(s => plan.productIds.includes(s.productId)).map(s => s.id) }).returning();
+      const [chunk] = await tx.insert(catalogChunks).values({ batchId, index, stage: "matte", status: "queued", attempt: 0, productIds: plan.productIds, sourceImageIds: sources.filter(s => plan.productIds.includes(s.productId)).map(s => s.id) }).returning();
       rows.push(chunk!);
     }
     await tx.update(catalogBatches).set({ status: "matting", startedAt: new Date(), updatedAt: new Date(), counts: { ...batch!.counts, products: productIds.length, sources: sources.length, outputs: sources.length * batch!.channels.length } }).where(eq(catalogBatches.id, batchId));
     return rows;
   });
-  for (const chunk of chunks) await enqueueTask("/tasks/catalog/chunk", { chunkId: chunk.id }, { taskId: `chunk-${chunk.id}-matte` });
+  // Spec 15 E5: the window queues the first chunks; each finished chunk queues the next.
+  await dispatchChunks(db, enqueueTask, batchId);
   log("started", { batchId, chunks: chunks.length, sources: sources.length });
 }
 

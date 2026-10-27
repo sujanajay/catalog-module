@@ -5,10 +5,15 @@ import { getBucketName, toGsUri } from "../../storage";
 import type { OutputFlag } from "../types";
 import type { Detected, IngestDeps, SourceItem } from "./types";
 
-/** What reading one item gave: where its bytes are and what they are, or the reject sentence. */
+/**
+ * What reading one item gave: where its bytes are and what they are, or the reject sentence. A link
+ * (spec 14d F5 part 2) also carries `attempts`, the fetches made for it across runs, and a failed link
+ * `final`: false while a later run may fetch it again (a transient failure under LINK_MAX_ATTEMPTS),
+ * true otherwise. Results written before release D have neither; they are kept as they are.
+ */
 export type ItemResult =
-  | { ok: true; sha256: string; uri: string; mime: string; ext: string; width: number | null; height: number | null; size: number; flags: OutputFlag[] }
-  | { ok: false; reason: string };
+  | { ok: true; sha256: string; uri: string; mime: string; ext: string; width: number | null; height: number | null; size: number; flags: OutputFlag[]; attempts?: number }
+  | { ok: false; reason: string; attempts?: number; final?: boolean };
 
 /** Per upload: its items, the results so far, sheet warnings and the Detected for catalog_uploads. */
 export interface UploadManifest {
@@ -18,6 +23,11 @@ export interface UploadManifest {
   warnings: string[];
   productList: boolean;
   detected: Detected;
+  /**
+   * Fetches already made in earlier runs for links whose non-final failure this run dropped (spec 14d
+   * F5 part 2), by item key, so the attempts add up across runs towards LINK_MAX_ATTEMPTS.
+   */
+  priorAttempts?: Record<string, number>;
 }
 
 /** Stable key of an item's bytes, so a re-collected item finds its earlier result. */

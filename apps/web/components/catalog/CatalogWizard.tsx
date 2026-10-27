@@ -13,6 +13,7 @@ import WizardStep3 from "./WizardStep3";
 import WizardStep4 from "./WizardStep4";
 import RetryCollectButton from "./RetryCollectButton";
 import { RetryLinksButton } from "./LinkFailures";
+import { FixAndContinueButton } from "./UnfinishedBatches";
 import { batchUrl, wizardApi } from "./wizard-client";
 import "./wizard.css";
 
@@ -70,6 +71,8 @@ export default function CatalogWizard({ brands, shareEmail, initialBrand = "", i
   /** The name the batch already has, so a second Continue after a failed hand-off skips the PATCH. */
   const savedName = useRef<string | null>(initialBatch ? initialBatch.name.trim() : null);
   const detectedInitialised = useRef(resumed.chosen);
+  /** Why a batch reopened with Fix and continue could not start (spec 14c F8): step 1 shows it until Continue hands the batch on. */
+  const [fixReason, setFixReason] = useState<string | null>(initialBatch?.counts.fixReason ?? null);
   async function ensureBatch() {
     if (id) return id;
     if (!brandSlug) throw new Error("Choose a brand before adding files or links.");
@@ -156,11 +159,13 @@ export default function CatalogWizard({ brands, shareEmail, initialBrand = "", i
         if(linksIdle.current) await linksIdle.current.promise;
         if(name.trim() && name.trim() !== savedName.current) {await wizardApi(batchUrl(batchId),"PATCH",{name});savedName.current = name.trim();}
         await wizardApi(batchUrl(batchId,"/ingest"),"POST");
+        setFixReason(null);
         await loadDetected(batchId);
         setStep(2);
       } else if(step === 2) {
-        await wizardApi(batchUrl(batchId,"/detected"),"PATCH",{identifierMode:mode,precedence,sheets});
-        setCollecting(true);setPreview(null);setStep(3);
+        // Nothing changed: the server keeps the grouping it has and answers collecting false (spec 14c F7 part 1).
+        const patched = await wizardApi<{collecting:boolean}>(batchUrl(batchId,"/detected"),"PATCH",{identifierMode:mode,precedence,sheets});
+        setCollecting(patched.collecting !== false);setPreview(null);setStep(3);
       } else if(step === 3) {
         await wizardApi(batchUrl(batchId),"PATCH",{channels});
         setPreview(null);setStep(4);
@@ -174,14 +179,14 @@ export default function CatalogWizard({ brands, shareEmail, initialBrand = "", i
   }
   const disabled = working || !!failReason || (step===1 && (!brandSlug || !(hasInputs || linksBusy) || uploadsBusy)) || (step===2 && (collecting || !detected || sheets.some((s)=>s.identifierColumn<0))) || (step===3 && (!channels.length || collecting)) || (step===4 && (!preview?.ready || !channels.length || !!preview.busy.length || !!preview.overwrite.sameProductPairs.length));
   return <div className="catalog-wizard"><h1>New batch</h1><ol className="steps" aria-label="Batch steps">{STEPS.map((title,i)=><li key={title} className={step===i+1?"on":step>i+1?"done":""} aria-current={step===i+1?"step":undefined}>{title}</li>)}</ol>
-    <div hidden={step!==1}><WizardStep1 brands={brands} brandSlug={brandSlug} name={name} productType={productType} locked={!!id || isCreating} email={shareEmail} setBrand={(value)=>{if(!id && !creating.current)setBrand(value);}} setName={setName} setProductType={(value)=>{if(!id && !creating.current)setProductType(value);}} ensureBatch={ensureBatch} onUploadsBusy={setUploadsBusy} onLinksBusy={onLinksBusy} onAdded={onAdded} batchId={id} onInputCount={onInputCount} onRemoved={onInputRemoved}/></div>
+    <div hidden={step!==1}><WizardStep1 brands={brands} brandSlug={brandSlug} name={name} productType={productType} locked={!!id || isCreating} email={shareEmail} setBrand={(value)=>{if(!id && !creating.current)setBrand(value);}} setName={setName} setProductType={(value)=>{if(!id && !creating.current)setProductType(value);}} ensureBatch={ensureBatch} onUploadsBusy={setUploadsBusy} onLinksBusy={onLinksBusy} onAdded={onAdded} batchId={id} onInputCount={onInputCount} onRemoved={onInputRemoved} fixReason={fixReason}/></div>
     {step===2 && id ? <>{detected?<WizardStep2 detected={detected} collecting={collecting} mode={mode} precedence={precedence} sheets={sheets} setMode={setMode} setPrecedence={setPrecedence} setSheets={setSheets} email={shareEmail} id={id} onError={setError} onAccessChecked={async()=>{await loadDetected(id);}} onLinksRetried={onLinksRetried}/>:<h2>Check what we found</h2>}{collecting?<p role="status">{wizardCollectingText(batchState,collectTotal,STEP2_COLLECTING_TEXT)}</p>:null}</>:null}
     {(step===2 || step===3) && stalled && id ? <p role="alert">{COLLECT_STALLED_TEXT} <RetryCollectButton batchId={id} onDone={()=>setStalled(false)}/></p>:null}
     {step===3?<><WizardStep3 channels={channels} onChange={setChannels}/>{collecting?<p role="status">{wizardCollectingText(batchState,collectTotal,STEP3_COLLECTING_TEXT)}</p>:null}</>:null}
     {step===4?<WizardStep4 preview={preview} batchId={id} onLinksRetried={onLinksRetried}/>:null}
     {error?<p role="alert">{error}</p>:null}
-    {/* Step 2's link failures card carries the retry button itself; elsewhere it goes with the failed sentence. */}
-    {failReason?<p role="alert">{failReason} {id && step!==2 && canRetryLinks(detected?.linkFailures)?<><RetryLinksButton batchId={id} onDone={onLinksRetried}/> </>:null}<a href={`/catalog/${id}`}>Open batch details</a></p>:null}
+    {/* Step 2's link failures card carries the retry button itself; elsewhere it goes with the failed sentence. Fix and continue reopens the batch at step 1 (spec 14c F8). */}
+    {failReason?<p role="alert">{failReason} {id && batchState?.fixable?<><FixAndContinueButton batchId={id}/> </>:null}{id && step!==2 && canRetryLinks(detected?.linkFailures)?<><RetryLinksButton batchId={id} onDone={onLinksRetried}/> </>:null}<a href={`/catalog/${id}`}>Open batch details</a></p>:null}
     <div className="actions">{step>1?<button type="button" className="btn ghost" disabled={working} onClick={()=>{setError("");setStep(step-1);}}>Back</button>:<a className="btn ghost" href="/catalog">All batches</a>}<button type="button" className="btn primary" disabled={disabled} onClick={()=>void continueStep()}>{working?"Please wait...":step===4?"Start processing":"Continue"}</button></div>
   </div>;
 }
