@@ -34,17 +34,17 @@ system sorting them into products.
 **What is broken.** On 2026-10-26 the first real operator tried to deliver one set of 287 bags (1,400
 photos) three times and never got to Start:
 
-1. She uploaded an Excel sheet of photo links. The screen crashed to a blank "Application error" page
-   the moment she pressed Continue. The system kept working behind the crash and had everything ready
+1. They uploaded an Excel sheet of photo links. The screen crashed to a blank "Application error" page
+   the moment they pressed Continue. The system kept working behind the crash and had everything ready
    17 minutes later, but nothing on any screen lets anyone get back into that batch (b574).
-2. She pasted the same links straight from the spreadsheet (one row per product, five links per row).
+2. They pasted the same links straight from the spreadsheet (one row per product, five links per row).
    The screen said "287 image links" and accepted it. The system glued each row's links into one broken
    address, every download failed, and the batch failed with "No photos were found in what you
    uploaded. 287 other files." Nothing was uploaded, the photos were real, and the true reason was saved
-   but never shown. When she tried to paste again, the screen said the batch "has already started"
+   but never shown. When they tried to paste again, the screen said the batch "has already started"
    (baefb).
-3. She pasted a Google Sheet link. This route works, but for 17 minutes the screen showed one fixed
-   sentence with no count, no progress and no time. She left about a minute after it quietly became
+3. They pasted a Google Sheet link. This route works, but for 17 minutes the screen showed one fixed
+   sentence with no count, no progress and no time. They left about a minute after it quietly became
    ready. Again, no way back in (b09dd).
 
 These are not three unrelated bugs. The database shows the same pattern for everyone who has ever used
@@ -57,24 +57,26 @@ They retry instead of waiting. They leave and come back. They try several routes
 All of that is reasonable. The product treats each of those behaviours as an error.
 
 **What we propose.** Eight principles (section 3) and thirteen fixes (section 5) that make intake
-accommodate those behaviours instead of fighting them. The seven fixes marked "must fix" close the
-gaps the operator hit: a sheet upload never crashes the screen; a pasted grid is understood (or refused with a
-reason) before anything runs; a wrong paste or file can be corrected without duplicates; every unfinished
-batch can be found and resumed from the list; every failed link says which row, why, and what to do;
-every wait shows a count and an honest time; and no screen says something false (for example that a
-draft "started" or that processing "starts by itself").
+accommodate those behaviours instead of fighting them. The eight fixes marked "must fix" close the
+gaps the operator hit: a sheet upload never crashes the screen; a pasted grid is understood (or
+explained) before anything runs; a wrong paste or file can be corrected without duplicates; every
+unfinished batch can be found and resumed from the list; a batch that failed before Start can be fixed
+in place; every failed link says which row, why, and what to do; every wait shows a count and an honest
+time; and no screen says something false (for example that a draft "started" or that processing
+"starts by itself").
 
 **What it changes for operators.** The same four steps. The batch is remembered by the server, not by
-the browser tab, so closing the tab, a crash or a reload loses nothing: the batch list shows "Your
-unfinished batches" with a Continue button that opens the wizard at the right step. Pasting a grid
-copied from a spreadsheet just works, and the screen says back what it understood ("287 rows, 1,400
-links, 4 to 5 per row; products named from the file names") before anything runs. Failures are listed
-by row and link with the reason and the next step. Long waits show "Downloading photos 612 of 1,400,
-about 7 minutes left" and say plainly whether the operator may leave.
+the browser tab, so closing the tab, a crash or a reload loses nothing: the batch can always be opened
+again and continued at the right step, and the batch list shows "Your unfinished batches" with a
+Continue button. Pasting a grid copied from a spreadsheet just works, and the screen says back what it
+understood ("287 rows, 1,400 links, 4 to 5 per row; this paste has no product code column, so products
+will be named from the photo file names") before anything runs. Failures are listed by row and link
+with the reason and the next step. Long waits show "Downloading photos 612 of 1,400, about 7 min left"
+and say plainly whether the operator may leave.
 
-**What we need from the owner.** Four decisions in section 7 (one of them is whether a small database
+**What we need from the owner.** Five decisions in section 7 (one of them is whether a small database
 migration is allowed; the protocol reserves migrations for specs 02 and 03, so it needs an explicit
-yes).
+yes). Until the first fix ships, section 7 also recommends one thing to tell the operator.
 
 ---
 
@@ -89,9 +91,11 @@ and the fixes are worth making even if the next operator is different.
 
 - The operator's source of truth was an item master workbook: 326 rows, 31 columns, identifier in
   column E ("Option Id"), five photo-link columns Z to AD (db, section 1 uploads table). That is the
-  shape a merchandiser has. She uploaded it as is (b574), then copied the link block out of it and
+  shape a merchandiser has. They uploaded it as is (b574), then copied the link block out of it and
   pasted it (baefb: 271 rows with 5 cells, 16 with 4 cells, 19 cells holding a literal `0` where the
   spreadsheet was blank), then put it into a Google Sheet (b09dd).
+- Some photo file names contain a space (`BHSS2620Z-WHITE NAVY_1.JPG`), so a link can contain a space
+  and still be one link (baefb).
 - Both people who ever uploaded an xlsx abandoned it and switched to a Google Sheet within minutes
   (db, Drafts: 7d72112c then b8a99c1b; 574f2025 then 09dd86f2).
 - Uploaded photos arrive clean: every source image ever stored is a JPEG; HEIC, PNG, csv and xls have
@@ -235,178 +239,219 @@ message pass).
 
 Size is relative (S, M, L) and compares effort between the fixes only; no time or money estimates.
 "Must" means: fix before the next operator uses intake. Dependencies name other fixes. Each fix is
-specified in full in spec 14 (section numbers given).
+specified in full in spec 14 (section numbers given). The PR each part ships in is named; the full
+order is under "Must-fix set and order" below.
 
-### F1. A sheet upload never crashes the screen (must, S) - spec 4.1
+### F1. A sheet upload never crashes the screen (must, S, PR A) - spec 4.1
 
 - Problem: any uploaded xlsx/xlsm/csv throws in step 2 and the whole page becomes "Application error"
   with no way back (b574; paths #35, #36).
 - Fix: `loadDetected` fills the `sheets` state whatever `previewReady` is; `WizardStep2` never assumes
   a choice exists; a sheet that is not read yet is reported as "Reading your sheet" instead of "cannot
-  read"; an `error.tsx` under `/catalog` gives any future crash a message and two links (this batch,
-  all batches); a browser test covers an xlsx upload through step 2.
+  read"; an `error.tsx` under `/catalog` gives any future crash a message and a way out; a browser test
+  covers an xlsx upload through step 2.
 - Operator sees: step 2 renders at once with "Reading your sheet. The columns will appear here when
-  it has been read." and then the column sentence; a crash anywhere in `/catalog` shows "Something went
-  wrong on our side. Your batch is safe." with "Open this batch" and "All batches".
+  it has been read." and then the column sentence. A crash anywhere in `/catalog` shows "Something went
+  wrong on our side." When the page knows which batch it was on, it adds "Your batch is safe; nothing
+  was lost." with "Open this batch"; it always offers "All batches" and "Try this page again".
 - Risk: low; it is a guard and a state fill. Dependencies: none.
 
-### F2. A pasted grid is understood, and the screen says back what it understood (must, M) - spec 4.2
+### F2. A pasted grid is understood, and the screen says back what it understood (must, M, PR B) - spec 4.2
 
 - Problem: multi-link rows glued into one URL; URL used as identifier; `0` cells; no shape check
   (baefb; paths #20 to #22, #34, #45; ux repro b, b2).
-- Fix: one table parser for pasted text (split on tabs; also on commas, semicolons and whitespace
-  between links); every http(s) token in a row is a link; the first non-link cell is the identifier;
-  a link is never an identifier; `0`, blank and non-link cells are ignored; rows with several links are
-  one product each with column order as shot order; single-link lines keep today's file-name grouping.
-  `cellUrls` in sheets splits on newlines and whitespace too. At paste time the server returns a
-  readback: rows, links, links per row (min to max), how products will be named, and the result of a
-  cheap check of the first three links (a range GET through `safeFetch`). Share-page links (Dropbox,
-  OneDrive, WeTransfer, Drive file links) are refused at paste with the reason and the alternative.
-- Operator sees: "287 rows, 1,400 links (4 to 5 per row). Products will be named from the file names,
-  for example BH-4610-NE. We opened the first 3 links: all fine." Or, for a refused shape: "These are
-  Dropbox share pages, not image links. Download the photos and drop them here, or paste direct image
-  links."
-- Risk: medium; the parser touches every paste. Mitigated by replaying the real aefb3a0f shape as a
-  fixture (spec 6). Dependencies: none (F5 improves the failure path when links still fail).
+- Fix: one table parser for pasted text. A cell is a link when it starts with `http://` or `https://`;
+  a link may contain spaces (they are encoded before download), and a cell is split only where another
+  link starts, never inside a link. The first non-link cell of a row is its identifier; `0`, blank and
+  other non-link cells are ignored. Each row is named on its own: a row with an identifier is named by
+  it; a row with two or more links and no identifier is one product named from its first link's file
+  name (for example BH-4610-NE-NERO from `BH-4610-NE-NERO_1.JPG`); single-link rows keep today's
+  grouping by file name. Google Sheet cells use the same split rule, so the working Google Sheet route
+  keeps working for names with spaces. At paste time the server returns a readback: rows, links, links
+  per row, how products will be named, any rows that would get the same name (by row number), and the
+  result of a small check of the first three links (the first 1 KB of each, through the same safe
+  download path the worker uses). While the check runs, the box shows "Checking your links..." and
+  Continue stays available. No list of refused websites: when a checked link turns out to be a web
+  page, the readback says so.
+- Operator sees: "287 rows, 1,400 links (4 to 5 per row). This paste has no product code column, so
+  products will be named from the photo file names, for example BH-4610-NE-NERO. To name them
+  yourself, copy the product code column in as the first column. We opened the first 3 links: all
+  fine." If two rows would get the same name: "Rows 12 and 40 would get the same name, BH-4610-NE-NERO.
+  Check those rows before you continue." If the links are share pages: "These look like share pages,
+  not image links. Download the photos and drop them here, or paste direct image links."
+- Risk: medium; the parser touches every paste and the Google Sheet route. Mitigated by replaying the
+  real aefb3a0f shape, including file names with a space, as fixtures for paste, Google Sheet and xlsx
+  (spec 8.1). Dependencies: none (F5 improves the failure path when links still fail).
 
-### F3. A wrong paste or file can be corrected without duplicates (must, M) - spec 4.3
+### F3. A wrong paste or file can be corrected without duplicates (must, M, PR B) - spec 4.3
 
 - Problem: edits and appends to the paste box add a second upload; clearing removes nothing; files
   cannot be removed; a failed upload after 15 minutes can never be retried and blocks Continue
   (paths #2, #3, #23, #24; ux step 1).
 - Fix: the paste box is one input bound to one `url_list` upload row (keyed by upload id, not by text):
   editing replaces, clearing removes. Every file row and every pasted link row has Remove. Retry
-  re-plans the upload (fresh signed URL) when the plan is older than its TTL. The wizard shows every
-  input the batch holds, including inputs added in an earlier session (F4).
+  re-plans the upload (fresh signed URL) when the plan is older than its lifetime. The wizard shows
+  every input the batch holds, including inputs added in an earlier session. A file whose upload was
+  cut off (the tab was closed mid-upload) says so and can be removed.
 - Operator sees: a list of what the batch holds, each with Remove; editing the paste changes the
-  count in place; Continue is never blocked by a row they cannot act on.
-- Risk: low to medium. Removing an upload needs a delete route and a state for "removed" (see
-  section 7, decision 1). Dependencies: F4 for the "inputs from an earlier session" part.
+  count in place; a file cut off by a closed tab reads "Upload did not finish. Add the file again or
+  remove it."; Continue is never blocked by a row they cannot act on.
+- Risk: low to medium. Removing an upload needs a delete route and a state for "removed" (section 7,
+  decision 1; the migration ships in PR B). Dependencies: F4 (way back, PR A) for inputs from an
+  earlier session.
 
-### F4. Every unfinished batch can be found and resumed (must, M) - spec 4.4
+### F4. Every unfinished batch can be found and resumed (must, M, PR A and PR C) - spec 4.4
 
 - Problem: batch id in browser memory only; `?batch=` ignored; drafts unreachable; no age, state or
   action in the list; no cancel (paths #53, #62; ux sections 1, 6; db Drafts).
-- Fix: the wizard writes `?batch=<id>` into the URL as soon as the batch exists and reads it on load;
-  `/catalog/new?batch=<id>` opens the wizard at the step the batch is in (step 1 while inputs are
-  pending or missing; step 2 while collecting or ready; step 3 once ready with no marketplaces; step 4
-  once marketplaces are chosen). The batch page for a draft gets "Continue setting up"; the list gets a
-  "Your unfinished batches" section at the top with state words ("Collecting 612 of 1,400",
-  "Ready to check", "Needs your input: which column holds the identifier?", "Could not start: <reason>"),
-  age, Continue and Cancel; the brand page lists the brand's unfinished batches. Cancel marks the
-  draft cancelled and hides it from the default list.
-- Operator sees: after a crash, reload or a day away, the list says "Your unfinished batches: BHPC
-  bags, Test Brand, ready to check, created 2 hours ago [Continue] [Cancel]".
+- Fix, part 1, the way back (PR A): the wizard writes `?batch=<id>` into the address bar as soon as the
+  batch exists (the first file or paste). `/catalog/new?batch=<id>` opens the wizard for a draft or a
+  collecting batch at the step the batch is in: step 1 while inputs are pending or missing; step 2
+  while collecting, placing, waiting for a column, or ready with no marketplaces; step 4 once
+  marketplaces are chosen (step 3 is reached from step 2 by Continue). Any other batch (failed,
+  cancelled, started) goes to its batch page instead. The batch page of a draft carries "Continue
+  setting up". The batch list already links every row to its batch page, so a batch can always be
+  found from the list.
+- Fix, part 2, the unfinished list (PR C): the list gets a "Your unfinished batches" section at the top
+  with state words ("Downloading photos 612 of 1,400", "Ready to check", "Needs your input: which
+  column holds the identifier?", "3 files did not finish uploading", "Could not start: <reason>"), age,
+  Continue and Cancel. A batch that failed before Start shows "Fix and continue" instead of Continue
+  (F8). Viewers see the section without the buttons. Cancel marks the batch cancelled and hides it from
+  the default list; the worker can never bring a cancelled batch back to life. Also in PR C, moved here
+  from F7 because a returning operator must not wait for a full re-copy: placing a photo skips the copy
+  when the same photo is already there, and Continue on step 2 with nothing changed returns at once.
+- Operator sees: after a crash, reload or a day away, the address bar or the batch page brings them
+  back to the right step (PR A); from PR C the list says "Your unfinished batches: BHPC bags, Test
+  Brand, ready to check, created 2 hours ago [Continue] [Cancel]".
 - Risk: medium; the wizard must initialise from server state instead of from its own memory, which is
-  the biggest change to the wizard. Dependencies: F1 (step 2 must render from server state).
+  the biggest change to the wizard and is why it comes first. Dependencies: F1 (step 2 must render from
+  server state).
 
-### F5. Every failed link says which row, why, and what to do; transient failures are retried (must, M) - spec 4.5
+### F5. Every failed link says which row, why, and what to do (must for the visible part, M, PR B; automatic retry should, PR D) - spec 4.5
 
 - Problem: reasons hidden; links mislabelled as files; transient errors cached for ever; wrong fix
   suggested (baefb; paths #27 to #30).
-- Fix: a `link` reject class with the row, column, status and the URL; transient failures (429, 5xx,
-  network, timeout) retried inside the run with backoff and never stored as final in the manifest;
-  permanent failures (404, 403, not an image, http only) stored with their reason. Step 2 and step 4
-  list link failures separately from unreadable files, with the first examples and a "show all" table;
-  a "Try the failed links again" action re-fetches only the failed ones. The no-photos sentence names
-  links as links and gives the real next step. `counts.linkFailures` is separate from
-  `unsupportedFiles`.
-- Operator sees: "287 links could not be downloaded. All 287 answered 'not found' (404). First: <url>
-  (row 1, column 2). Check that the links open in a browser, fix the sheet, and paste again." Or, for
-  a partial failure: "12 of 1,400 links could not be downloaded (3 products affected). 9 timed out and
-  were tried 3 times. [Try the failed links again] [Show all 12]".
+- Fix, visible part (must, PR B): a `link` reject class with the row, column, status and the URL;
+  `counts.linkFailures` separate from `unsupportedFiles`; step 2 and step 4 list link failures
+  separately from unreadable files, with the first examples and a "show all" table; the no-photos
+  sentence names links as links and gives the real next step. "Try the failed links again" re-fetches
+  only the failed links, also on a batch that failed before Start, and is shown only when some of the
+  failures may be temporary (a timeout, a busy server); when every failure is permanent (not found,
+  refused, not an image) the sentence sends the operator to fix the links instead.
+- Fix, automatic retry (should, PR D): temporary failures are retried inside the run with backoff;
+  later deliveries of the same run never re-fetch them; only a new run tries them again; after a total
+  number of attempts across runs a link is stored as failed with its reason. A time budget per delivery
+  keeps a slow host from pushing a delivery past the 900 s limit.
+- Operator sees: "No photos could be downloaded from the 287 links you pasted. 287 answered 'not found'
+  (404), for example <url> (row 1, column 2). Check that the links open in a browser, then press Fix
+  and continue and paste the corrected links." Or, for a partial failure with temporary causes: "12 of
+  1,400 links could not be downloaded (3 products affected). [Try the failed links again] [Show all
+  12]". After PR D the card adds how many times temporary problems were tried.
 - Risk: medium; the retry must not turn a dead host into a very long run (bounded attempts, bounded
-  time per item). Dependencies: F2 for row and column numbers on pastes.
+  time per item), which is why it is a separate, later part. Dependencies: F2 for row and column
+  numbers on pastes; F8 for the "Fix and continue" button (until PR C ships, the all-permanent sentence
+  says to make a new batch with the corrected links).
 
-### F6. Every intake wait shows a count, a phase and an honest time; the copy tells the truth about leaving (must, M) - spec 4.6
+### F6. Every intake wait shows a count, a phase and an honest time; the copy tells the truth about leaving (must, M, PR A and PR C) - spec 4.6
 
 - Problem: fixed sentence for 17 minutes; grouping invisible; false "you can close this page"; no
   ETA (b09dd; paths #48, #54, #56; ux repro c).
-- Fix: the batch carries `counts.phase` (`uploading | downloading | reading | placing | ready |
-  needs_input`) and `counts.placed / placeTotal` for the grouping phase; every intake screen (wizard
+- Fix: PR A replaces the fixed sentences on steps 2 and 3 with the count the wizard already polls, hides
+  the step 2 cards while collecting instead of showing zeros, and replaces the false leaving sentence
+  with one that is true in PR A: "You can close this page. Open this batch again from the batch list and
+  press Continue setting up when it is ready." PR C adds the worker side: the batch carries
+  `counts.phase` (`uploading | downloading | reading | unpacking | checking | placing | ready |
+  needs_input`) and `counts.placed / placeTotal` for the placing phase; every intake screen (wizard
   steps 2 to 4, batch page, list row) shows the phase, the count and an estimate from the measured rate
-  of this batch (same rolling-sample method the processing ETA uses, `pipeline/status.ts`); the batch
-  stays "collecting" until the preview is ready; stall detection covers the placing phase; the copy
-  says "You can close this page. Find this batch under Your unfinished batches and press Continue when
-  it is ready." (true once F4 ships). The step 2 cards are hidden while collecting instead of showing
-  zeros.
-- Operator sees: "Downloading photos 612 of 1,400, about 7 minutes left", then "Placing photos 300
-  of 1,400, about 4 minutes left", then the grouping.
+  of this batch in the current phase only (the samples restart when the phase changes); the batch stays
+  "collecting" until the preview is ready, under a renewable claim so a crashed placing is picked up
+  again and a stall is detected; and the leaving line becomes "You can close this page. Find this batch
+  under Your unfinished batches and press Continue when it is ready."
+- Operator sees: "Downloading photos 612 of 1,400, about 7 min left", then "Placing photos 300 of
+  1,400, about 4 min left", then the grouping.
 - Risk: low to medium; the `phase` lives in the existing `counts` jsonb column (no migration). The
   estimate is honest only if the rate is measured, never fitted. Dependencies: F4 for the leaving copy;
-  F7 for `placed` to move during grouping (without F7 the placing phase shows a count that moves only
-  at the end, so F6 ships the phase word first and the moving count with F7).
+  F7 for `placed` to move during placing (until F7's second part ships, the placing count moves only at
+  the end).
 
-### F7. Grouping is resumable and never re-copies (should; must for batches over about 4,000 photos, L) - spec 4.7
+### F7. Placing is resumable and never re-copies (should; must for batches over about 4,000 photos, L, PR C and PR D) - spec 4.7
 
 - Problem: Continue on step 2 regroups and re-copies every photo (5 min at 1,400); a grouping over
   900 s strands the batch for ever; spec 04 already promised the sha256 skip (paths #55, #58).
-- Fix: raw placement skips an object that exists with the same sha256; the placing phase runs in
-  budgeted chunks with self-continuation like collection, writing `counts.placed` after each chunk;
-  the database step runs once at the end; the claim stays in status `ingesting` (an atomic marker
-  inside `counts`), so a killed request is retried and a stall is detected. Step 2 Continue with no
-  change skips the regroup entirely.
-- Operator sees: Continue on step 2 is instant when nothing changed; a 10,000-photo links batch
-  finishes instead of hanging.
+- Fix, part 1 (must, PR C, shipped with F4): placing skips a photo that is already in place with the
+  same sha256; Continue on step 2 with nothing changed returns at once without regrouping.
+- Fix, part 2 (should, PR D): the grouping runs first and saves the planned list of shots (which
+  product, which shot number, which source photo); placing then copies that list in budgeted chunks
+  with self-continuation like collection, writing `counts.placed` after each chunk; the last chunk
+  writes the photo rows and the preview. A change of options only on step 2 reruns the grouping and
+  then the (now free) placing. A killed request is retried from where it stopped, and a stall is
+  detected.
+- Operator sees: Continue on step 2 is instant when nothing changed (PR C); a 10,000-photo links batch
+  finishes instead of hanging (PR D).
 - Risk: medium to high; this is the deepest change and touches the idempotency of ingest. Covered by
-  the existing tier 2 ingest tests plus new ones (spec 6). Dependencies: F6 (phase and counters).
+  the existing tier 2 ingest tests plus new ones (spec 8). Unproven: the grouping step alone at about
+  2,000 products has not been measured against the 900 s limit; the builder measures it and reports.
+  Dependencies: F6 (phase and counters).
 
-### F8. A batch that failed before Start can be fixed in place (should, S) - spec 4.8
+### F8. A batch that failed before Start can be fixed in place (must, S, PR C) - spec 4.8
 
 - Problem: "Start again" opens an empty wizard; re-paste gets 409; collected bytes wasted (paths #31,
   #61; baefb 18:57).
 - Fix: a batch that failed before `startedAt` can be reopened as a draft ("Fix and continue"), keeping
   its name, product type and inputs; the 409 sentence distinguishes failed ("could not start"),
   collecting ("still collecting; wait or press Try again") and started. The failure reason is carried
-  into step 1 so the operator sees what to change.
-- Operator sees: on the failed batch page, "Fix and continue" opens step 1 with the inputs listed, the
-  reason above them and Remove on each.
+  into step 1 so the operator sees what to change. The wizard never opens on a failed batch: "Fix and
+  continue" (on the batch page and in the unfinished list) reopens it first, then opens step 1.
+- Operator sees: on the failed batch page or in "Your unfinished batches", "Fix and continue" opens
+  step 1 with the inputs listed, the reason above them and Remove on each.
 - Risk: low; no new status (failed to draft is an allowed transition for never-started batches).
   Dependencies: F3, F4.
 
-### F9. Draft and failed screens tell the truth (must for the copy, S) - spec 4.9
+### F9. Draft and failed screens tell the truth (must for the copy, S, PR A) - spec 4.9
 
 - Problem: "started <time>" on a draft; draft banner with no button; "No photos in this batch yet" on
   a draft holding 1,400; Links sheet tab reads as a finished result; empty "How this works" paragraph;
   "Start again" above the reason on phones; failed reason missing from the list; broken "No products
   of Test Brand match ." sentence (ux sections 1, 2, 6, 7).
 - Fix: "created" for unstarted batches; channels omitted when empty; the draft banner carries the
-  Continue button (F4); Compare and Links sheet tabs for drafts say "This batch has not started. 1,400
-  photos found for 287 products; nothing has been made yet."; the list shows the reason on failed rows
-  and keeps State visible on phones; the empty-search sentence is fixed.
-- Risk: low. Dependencies: F4 for the button.
+  "Continue setting up" button (F4 part 1); Compare and Links sheet tabs for drafts say "This batch has
+  not started. 1,400 photos found for 287 products; nothing has been made yet."; the list shows the
+  reason on failed rows and keeps State visible on phones; the brand page's empty-search sentence is
+  fixed.
+- Risk: low. Dependencies: F4 part 1 for the button (same PR).
 
-### F10. The same photos in another batch are flagged (should, M) - spec 4.10
+### F10. The same photos in another batch are flagged (should, M, PR D) - spec 4.10
 
 - Problem: two drafts, same 1,390 photo hashes, different keys; no warning (db headline 5). Within
   a batch, two products carrying the same photo are never reported (db section 1).
 - Fix: at grouping, compare the batch's sha256 set with the brand's other unfinished and failed
   batches and with live products (the existing `renameHints` already covers the live case); warn with
-  the batch name, age and the two identifier spellings; within a batch, warn when the same photo sits
-  under two identifiers.
+  the batch name (a link to that batch), age and the two identifier spellings; within a batch, warn
+  when the same photo sits under two identifiers.
 - Operator sees: "These photos are already in BHPC bags (created 5 minutes ago, not started) under
   different identifiers (BH-4610-NE_Black there, BH-4610-NE_Black_OD here). Continue that batch, or
-  cancel it, before starting this one." and "10 photos appear under two products: BHSS26M10_Tan and
-  BHSS26M10-BLACK share BHSS26M10-BLACK_1.JPG. Check the sheet."
+  cancel it, before starting this one." with "BHPC bags" linking to that batch, and "10 photos appear
+  under two products: BHSS26M10_Tan and BHSS26M10-BLACK share BHSS26M10-BLACK_1.JPG. Check the sheet."
 - Risk: low to medium (a hash comparison over the brand's unfinished batches). Dependencies: F4
   (cancel), F6.
 
-### F11. Platform errors and large hand-offs do not break the wizard (should, S) - spec 4.11
+### F11. Platform errors and large hand-offs do not break the wizard (should, S, PR C and PR D) - spec 4.11
 
 - Problem: a 502/504 HTML page becomes a raw JSON parse error; over about 1,900 loose files the
   hand-off exceeds the 300 s web request (paths #8, #57).
 - Fix: `wizardApi` checks the response before parsing and shows "The server did not answer in time.
-  Your files are safe. Reload this page to continue."; the hand-off enqueues in pages and returns
-  early with the batch collecting (Try again hands over the rest, as it does today).
+  Your files are safe. Reload this page to continue." (PR C). The hand-off is paged (PR D): the web
+  request hands over the first page of uploads and queues one follow-up task, which hands over the next
+  page and queues itself again until none remain, so one Continue is enough for any count.
 - Risk: low. Dependencies: F4 (reload lands back in the batch).
 
-### F12. Draft housekeeping and a trace per ingest delivery (should, S) - spec 4.12
+### F12. Draft housekeeping and a trace per ingest delivery (should, S, PR D) - spec 4.12
 
 - Problem: drafts never expire; a successful ingest leaves no log line with the batch id, so the two
   batch investigations had to tie worker requests to batches by timing (b574, b09dd; paths #62).
-- Fix: the sweep cancels drafts untouched for N days (owner sets N; proposal 14) with the state word
-  "Expired" and the age; one INFO log line per ingest delivery with batch id, upload id, phase, done
-  and total.
+- Fix: the sweep cancels drafts untouched for N days (owner sets N; section 7, decision 2) with the
+  state word "Expired" and the age; their stored photos are left alone; one INFO log line per ingest
+  delivery with batch id, upload id, phase, done and total.
 - Risk: low. Dependencies: F4 (the cancelled state).
 
 ### F13. Google and Drive edge cases (later, S) - spec 4.13
@@ -421,25 +466,42 @@ specified in full in spec 14 (section numbers given).
 
 ### Must-fix set and order
 
-Before the next operator uses intake: F1, F2, F3, F4, F5, F6, F9. Proposed as three PRs in this order
-(spec 7): PR A = F1 + F9 + the F6 copy and step 2 count (small, safe, deployable within a day of
-approval); PR B = F2 + F3 + F5 (the input and failure layer); PR C = F4 + F6 (resume and progress).
-Then F7, F8, F10, F11, F12 as a fourth PR, F13 later.
+Before the next operator uses intake: F1, F2, F3, F4, F5 (visible part), F6, F8, F9. PR order A, B, C,
+D (spec section 7):
+
+- PR A, truth and way back: F1, F9, the F6 copy and step 2 count, and F4 part 1 (the batch id in the
+  address bar, `/catalog/new?batch=` for draft and collecting batches, "Continue setting up" on the
+  batch page). Small, safe, deployable alone.
+- PR B, inputs and failures: F2, F3, F5 visible part, and migration `0003_intake_states.sql` (decision
+  1).
+- PR C, resume and progress: F4 part 2 ("Your unfinished batches", Cancel), F6 worker side, F7 part 1
+  (sha256 skip, instant Continue), F8, F11 response check.
+- PR D (should): F7 part 2, F5 automatic retry, F10, F11 paged hand-off, F12.
+- Later: F13.
+
+### How we will know
+
+- The must set is done when the operator takes the real BHPC list (real brand, product key from
+  decision 3) to Start on their own, without help.
+- After the next two weeks of operator use, re-read the per-route start rates (uploaded sheets, pasted
+  links, Google Sheets, photos) and the number of drafts resumed from the db report, and compare them
+  with today's (sheets 0 of 2, pasted links 0 of 1, drafts resumed 0 of 14).
 
 ### What to do with the existing drafts (recommendation, not done)
 
 - 574f2025 and 09dd86f2 (the operator's two BHPC drafts, Test Brand): they are technical tests on the
   test brand, and the real BHPC delivery will run on the real brand after the fixes. Recommended: cancel
-  both through the Cancel action once F4 ships, after telling the operator. Do not start either: they
-  carry different product keys (Option Id against Unicommerce Code) and the right key for BHPC is an
-  operator decision that has to be made once, before the real batch (section 7, decision 3).
-- aefb3a0f (failed): leave as is until F8 ships, then cancel. It is useful evidence until then.
+  both through the Cancel action once PR C ships, after telling the operator, then clean their
+  `catalog-test/` prefixes once with the existing test cleanup (`deleteTestObjects`). Do not start
+  either: they carry different product keys (Option Id against Unicommerce Code) and the right key for
+  BHPC is an operator decision that has to be made once, before the real batch (section 7, decision 3).
+- aefb3a0f (failed): leave as is until F8 ships (PR C), then cancel. It is useful evidence until then.
 - The 12 older drafts (owner's tests, 2026-10-19 to 10-21) and 47f98f2a (the only real draft, puma, 5
   photos, superseded 3 minutes later by a finished batch): cancel through the same action. No manual
   database writes; the action is the way, so the first use of Cancel is on batches nobody needs.
-- Bytes: a cancelled draft keeps its objects by default. The two BHPC drafts hold 2 x 8.4 GB under
-  `catalog-test/`, where test cleanup is allowed by the repo rules; whether cancelled test drafts are
-  cleaned after N days is decision 2.
+- Bytes: a cancelled draft keeps its objects (the existing 180-day raw lifecycle applies). The only
+  exception is the one-off cleanup of the two BHPC test drafts above (2 x 8.4 GB under
+  `catalog-test/`, where test cleanup is allowed by the repo rules).
 
 ---
 
@@ -448,8 +510,8 @@ Then F7, F8, F10, F11, F12 as a fourth PR, F13 later.
 - No change to processing after Start (matting, render, QA, publish, sheets, re-check).
 - No change to the core flow: four steps, one brand per batch, no stored defaults, channels chosen
   fresh every batch (SPEC.md non-goals).
-- No new input routes (Dropbox, OneDrive, WeTransfer APIs); they are refused with a clear sentence
-  and the existing alternative (download and drop).
+- No new input routes (Dropbox, OneDrive, WeTransfer APIs); a share page is explained with a clear
+  sentence and the existing alternative (download and drop).
 - No resumable or chunked browser uploads (paths #4); a big zip on a flaky line still restarts.
 - No language model anywhere in intake (SPEC.md: grouping, counting and column detection are
   deterministic code).
@@ -468,18 +530,30 @@ Each is a yes/no or a pick, with the recommended answer first.
    (a cancelled draft) are cleanest as two new status values, `removed` on `catalog_uploads` and
    `cancelled` on `catalog_batches`. Both columns are text with a CHECK constraint
    (`packages/core/src/db/schema.ts:237,256,275,283`), so new values need a migration
-   (`0003_intake_states.sql`). 00 section 11 says only specs 02 and 03 ship migrations, but
-   `0002_cost_events.sql` (PR #90) already shipped outside them with the owner's approval. If no: F3
-   hard-deletes the upload row and its uploaded object, and F4 marks cancellation inside the `options`
-   jsonb; both work, both are less clean (a cancelled draft then still has status `draft` in the
-   database and every query has to remember the flag). The spec describes both paths.
-2. **Draft expiry: after how many days does the sweep cancel an untouched draft, and may the bytes of
-   cancelled test-brand drafts be cleaned up?** Recommended: 14 days, and yes for `catalog-test/`
-   only (the repo rule already allows test cleanup there); real-brand drafts keep their bytes until
-   the existing 180-day raw lifecycle.
+   (`0003_intake_states.sql`, shipped in PR B, where `removed` is first used). 00 section 11 says only
+   specs 02 and 03 ship migrations, but `0002_cost_events.sql` (PR #90) already shipped outside them
+   with the owner's approval. If no: F3 hard-deletes the upload row and its uploaded object, and F4
+   marks cancellation inside the `options` jsonb; both work, both are less clean (a cancelled draft then
+   still has status `draft` in the database and every query has to remember the flag). The spec
+   describes both paths.
+2. **Draft expiry: after how many days does the sweep cancel an untouched draft?** Recommended: 14
+   days. Expired drafts keep their photos until the existing 180-day raw lifecycle.
 3. **BHPC product key.** Before any real BHPC batch: is the product identifier "Option Id"
    (`BH-4610-NE_Black`) or "Unicommerce Code" (`BH-4610-NE_Black_OD`)? Recommended: ask the operator
    once and record it in the brand's notes; cancel both test drafts either way.
-4. **Approve the must-fix set and the three-PR order (section 5)?** If the set should be smaller,
-   the smallest useful cut is PR A alone (no crash, truthful copy, a count on step 2), which fixes
-   attempts 1 and 3 partly but leaves attempt 2 (pasted grid) broken.
+4. **Approve the must-fix set (F1, F2, F3, F4, F5 visible part, F6, F8, F9) and the PR order A, B, C,
+   D (section 5)?** If the set should be smaller, the smallest useful cut is PR A alone (no crash,
+   truthful copy, a count on step 2, a way back into any draft), which fixes attempts 1 and 3 in part
+   but leaves attempt 2 (pasted grid) broken.
+5. **Should the system tell the operator when a long collection finishes** (for example an email to
+   the person who created the batch)? The data shows no batch was ever started more than 30 minutes
+   after it was created, so an operator who leaves during a 17-minute collection may never come back
+   unprompted. Yes: a new, small should-fix after PR C; the product gains its first outgoing message
+   (there is no mail sending today), which needs a sender and the creator's address. No: the leaving
+   line and "Your unfinished batches" are the only way back, and the operator has to remember to
+   return. Recommended: yes, after PR C, so the must set is not held up by it.
+
+**Until PR A ships (interim, no build needed).** Recommended: tell the operator to use the Google Sheet
+route (paste the Google Sheet link) and to keep the wizard tab open until step 2 shows the grouping.
+That is the only route that works end to end today, and the open tab is today's only way back into
+the batch.
