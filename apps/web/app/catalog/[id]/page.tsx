@@ -27,7 +27,7 @@ import DetailsTab from "@/components/catalog/DetailsTab";
 import NotRefreshedLine from "@/components/catalog/NotRefreshedLine";
 import CostLine from "@/components/catalog/CostLine";
 import RetryCollectButton from "@/components/catalog/RetryCollectButton";
-import { batchSource, collectingText, plural } from "@/lib/catalog/copy";
+import { batchSource, canContinueSettingUp, collectingText, createdText, hasNotStarted, HOW_THIS_WORKS_DRAFT, notStartedText, plural } from "@/lib/catalog/copy";
 import SkuMapModal from "@/components/catalog/SkuMapModal";
 import { EvalList } from "@/components/catalog/EvalLabelBar";
 
@@ -53,6 +53,9 @@ export default async function BatchPage({ params, searchParams }: { params: Prom
   const evalMode = batch.isTest && !!batch.options.evalSet;
   const tab = (LINKABLE_TABS as readonly string[]).includes(query.tab ?? "") ? query.tab! : undefined;
   const compareFilters = { channel: query.cchannel ?? "", status: query.cstatus ?? "", q: query.q ?? "" };
+  // A batch that never reached Start has made nothing: its Compare and Links sheet tabs say so in one line (spec 14a F9).
+  const notStarted = hasNotStarted(batch);
+  const settingUp = canContinueSettingUp(batch);
   // The comparison signs a page of images, so it loads only when its tab is asked for (?tab=compare).
   const [attention, evalPage, cost, stageCost, chunks, comparePage] = await Promise.all([
     evalMode ? Promise.resolve([]) : batchAttention(id),
@@ -60,7 +63,7 @@ export default async function BatchPage({ params, searchParams }: { params: Prom
     batchCostLine(batch),
     batchStageCost(id),
     batchChunkSummary(id),
-    tab === "compare" ? batchCompare(id, { page: Number(query.cpage ?? 0) || 0, ...compareFilters }) : Promise.resolve(null),
+    tab === "compare" && !notStarted ? batchCompare(id, { page: Number(query.cpage ?? 0) || 0, ...compareFilters }) : Promise.resolve(null),
   ]);
   const fullCost = fullCostText(stageCost, inrPerUsdFromEnv());
   const channelLabels = batch.channels.map(c => channel(c).label);
@@ -83,6 +86,7 @@ export default async function BatchPage({ params, searchParams }: { params: Prom
     ready: "Download the sheet and paste the links into the marketplace templates.",
     failed: "Nothing was processed and nothing was charged.",
   };
+  const notStartedLine = <p>{notStartedText(batch.counts.sources, batch.counts.products)}</p>;
   return (
     <main>
       <div className="hdr">
@@ -90,7 +94,7 @@ export default async function BatchPage({ params, searchParams }: { params: Prom
           <Link href="/catalog">← All batches</Link>
           <h1>{batch.name}</h1>
           <p className="lead">
-            <Link href={`/catalog/brands/${batch.brandSlug}`}>{batch.brandName}</Link> · {batch.channels.map(c => channel(c).label).join(", ")} · {batch.finishedAt ? `finished ${when(batch.finishedAt)}` : `started ${when(batch.startedAt ?? batch.createdAt)}`} by {batch.createdBy}
+            <Link href={`/catalog/brands/${batch.brandSlug}`}>{batch.brandName}</Link>{channelLabels.length > 0 && ` · ${channelLabels.join(", ")}`} · {batch.finishedAt ? `finished ${when(batch.finishedAt)} by ${batch.createdBy}` : batch.startedAt ? `started ${when(batch.startedAt)} by ${batch.createdBy}` : createdText(when(batch.createdAt), batch.createdBy)}
           </p>
         </div>
         {downloads}
@@ -99,7 +103,7 @@ export default async function BatchPage({ params, searchParams }: { params: Prom
         )}
         {canAct && state.stalled && <ActionOnly><RetryCollectButton batchId={id} /></ActionOnly>}
       </div>
-      <BatchBanner key={id} status={batch.status} counts={batch.counts} source={source} updatedAt={new Date(batch.updatedAt).toISOString()} startedAt={batch.startedAt ? new Date(batch.startedAt).toISOString() : null} now={now.toISOString()} keptPhotos={data.keptPhotos} styliSkipped={data.styliSkipped} />
+      <BatchBanner key={id} status={batch.status} counts={batch.counts} source={source} updatedAt={new Date(batch.updatedAt).toISOString()} startedAt={batch.startedAt ? new Date(batch.startedAt).toISOString() : null} now={now.toISOString()} keptPhotos={data.keptPhotos} styliSkipped={data.styliSkipped} batchId={id} canAct={canAct} />
       <NotRefreshedLine items={data.notRefreshedChannels} />
       <BatchKpis counts={batch.counts} />
       <AutoRefresh active={state.state === "collecting" || state.state === "processing"} />
@@ -107,14 +111,15 @@ export default async function BatchPage({ params, searchParams }: { params: Prom
         attentionCount={attention.length}
         evalLabel={evalPage ? `Needs attention (${evalPage.total} ${plural(evalPage.total, "image", "images")})` : undefined}
         initialTab={tab ?? (evalMode && (query.page || query.channel || query.verdict) ? "attention" : undefined)}
-        compare={comparePage ? <CompareTab data={comparePage} channels={batch.channels} filters={compareFilters} /> : <p className="muted">Loading the comparison.</p>}
-        compareHref={comparePage ? undefined : compareHref(compareFilters)}
+        compare={notStarted ? notStartedLine : comparePage ? <CompareTab data={comparePage} channels={batch.channels} filters={compareFilters} /> : <p className="muted">Loading the comparison.</p>}
+        compareHref={comparePage || notStarted ? undefined : compareHref(compareFilters)}
         overview={
           <div className="grid2">
             <div className="card">
               <h2>How this works</h2>
               <p>We check every image against the marketplace rules and our quality check. Images that pass go straight into the links sheet. Only products with a problem are listed under Needs attention.</p>
-              <p>{next[state.state]}</p>
+              {settingUp && <p>{HOW_THIS_WORKS_DRAFT}</p>}
+              {next[state.state] && <p>{next[state.state]}</p>}
               {batch.counts.existingProducts > 0 && <p>Marketplaces keep their own copy. Re-submit the image columns for products marked updated, shots_removed or reordered in the sheet.</p>}
             </div>
             <div className="card">
@@ -127,18 +132,18 @@ export default async function BatchPage({ params, searchParams }: { params: Prom
         attention={evalPage
           ? <EvalList batchId={id} data={evalPage} channels={batch.channels} filters={evalFilters} canAct={canAct} />
           : <AttentionList items={attention} canAct={canAct} channels={channelLabels} />}
-        sheet={
+        sheet={notStarted ? notStartedLine : (
           <>
             <SheetPreview sheet={data.sheet} />
             {downloads}
-            {canAct && (
+            {canAct && batch.counts.products > 0 && (
               <ActionOnly>
                 <SkuMapModal batchId={id} missing={missingSkus} sheetUri={batch.sheetXlsxUri} />
               </ActionOnly>
             )}
             <p className="help">Opptra SKU ids are filled in automatically when they exist.</p>
           </>
-        }
+        )}
         details={
           <DetailsTab id={id} brand={batch.brandSlug} isTest={batch.isTest} counts={batch.counts}
             failures={data.failures} recheckFailures={data.recheckFailures}

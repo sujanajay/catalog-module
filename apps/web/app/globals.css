@@ -315,6 +315,18 @@ table {
 .tw {
   overflow-x: auto;
 }
+/* The batch list on a phone keeps State on screen: Channels collapses first, then Products and Created. */
+@media (max-width: 700px) {
+  .batch-list .col-channels {
+    display: none;
+  }
+}
+@media (max-width: 520px) {
+  .batch-list .col-products,
+  .batch-list .col-created {
+    display: none;
+  }
+}
 
 /* ---- status pills ---- */
 .pill {
