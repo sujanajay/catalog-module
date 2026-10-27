@@ -3,9 +3,11 @@ import { DEFAULT_BATCH_OPTIONS } from "../../db/schema";
 import { parseShotName } from "../naming";
 import type { BatchOptions, IdentifierMode, Precedence } from "../types";
 import {
+  duplicatePhotosPair,
   groupItems,
   originalOf,
   previewRows,
+  samePhotosPair,
   shotFlags,
   warningSentences,
   type ItemDimensions,
@@ -326,5 +328,24 @@ describe("the step 4 link pair (spec 14b F5 part 1)", () => {
     expect(pair).toEqual({ headline: "12 links could not be downloaded.", detail: "12 products are missing shots: P01, P02, P03, P04, P05, P06, P07, P08, P09, P10. Fix the links, or continue without them." });
     const one = groupItems([a1, a2], opts(), new Map([failed(a2, 2, "Image 2", "404")]));
     expect(warningSentences(one, null, ["noon"])).toEqual([{ headline: "1 link could not be downloaded.", detail: "1 product is missing shots: AAA. Fix the links, or continue without them." }]);
+  });
+});
+
+describe("the same photos pairs (spec 14d F10)", () => {
+  const other = { batchId: "b2", name: "BHPC bags", createdAt: "2026-10-26T10:00:00Z", state: "Ready to check", sharedPhotos: 12, example: { here: "BH-4610-NE-NERO_OD", there: "BH-4610-NE-NERO" } };
+
+  it("names the other batch, its state and age, how many photos are shared and the two spellings", () => {
+    const p = samePhotosPair(other, 1400, "1 day ago");
+    expect(p.before + p.name + p.after).toBe("These photos are already in BHPC bags (ready to check, created 1 day ago).");
+    expect(p.name).toBe("BHPC bags");
+    expect(p.detail).toBe("12 of 1,400 photos are the same, under different identifiers (BH-4610-NE-NERO there, BH-4610-NE-NERO_OD here). Continue that batch or cancel it before starting this one, so the same product is not made twice.");
+    expect(samePhotosPair({ ...other, example: null }, 12, "just now").detail).toBe("12 of 12 photos are the same. Continue that batch or cancel it before starting this one, so the same product is not made twice.");
+  });
+
+  it("names one photo under two products and how many more there are", () => {
+    expect(duplicatePhotosPair([])).toBeNull();
+    const one = { sha256: "a", identifiers: ["BAG-BLACK", "BAG-TAN"], name: "BAG_1.jpg" };
+    expect(duplicatePhotosPair([one])).toEqual({ headline: "1 photo appears under two products.", detail: "BAG_1.jpg is in BAG-BLACK and BAG-TAN. Check the sheet before starting." });
+    expect(duplicatePhotosPair([one, { ...one, sha256: "b" }, { ...one, sha256: "c" }])).toEqual({ headline: "3 photos appear under two products.", detail: "BAG_1.jpg is in BAG-BLACK and BAG-TAN; 2 more. Check the sheet before starting." });
   });
 });

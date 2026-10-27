@@ -60,7 +60,7 @@ export async function patchDetected(id: string, value: unknown) {
     for (const patch of patches) await tx.update(catalogUploads).set({ detected: patch.detected, kind: patch.upload.kind === "google_sheet" ? "google_sheet" : patch.detected.kind }).where(eq(catalogUploads.id, patch.upload.id));
     await tx.update(catalogBatches).set({ options, counts: mergeCounts({ previewReady: false }), updatedAt: new Date() }).where(eq(catalogBatches.id, id));
   });
-  await regroupBatch(id);
+  await regroupBatch(id, { optionsOnly: sameSheets });
   return { collecting: true };
 }
 type PlannedSource = { productId: string; n: number; sha256: string };
@@ -117,7 +117,7 @@ function linkFailuresIfAny(batch: { id: string; counts: { linkFailures?: number 
 export async function previewBatch(id: string) {
   const batch = await queryBatch(id);
   const base = { otherBatchProcessing: await anotherBatchProcessing(id), ready: batch.counts.previewReady, previewAt: batch.updatedAt.toISOString(), counts: {...batch.counts, photos: batch.counts.sources, channels: batch.channels.length}, collected: batch.counts.collected, collectTotal: batch.counts.collectTotal, estimate: null as CostEstimate | null, ...await linkFailuresIfAny(batch) };
-  if (!base.ready) return { ...base, groupedBy: "", warnings: [], groups: [], totalRows: 0, overwrite: { newProducts: 0, existingProducts: [], renameHints: [], sameProductPairs: [] }, busy: [] };
+  if (!base.ready) return { ...base, groupedBy: "", warnings: [], groups: [], totalRows: 0, overwrite: { newProducts: 0, existingProducts: [], renameHints: [], sameProductPairs: [], sameBatches: [], duplicatePhotos: [] }, busy: [] };
   const [preview, detected] = await Promise.all([buildPreview(db(), id, { storage }, { limit: 50 }), buildDetectedStep2(db(), id, { storage })]);
   const sources = await db().select().from(catalogSourceImages).where(eq(catalogSourceImages.batchId, id));
   const productIds = [...new Set(sources.map((s) => s.productId))];
@@ -131,7 +131,7 @@ export async function previewBatch(id: string) {
   const estimate = wizardEstimate({ outputs, sources: sourcesToMake, untypedProducts, qaMode: batch.options.policy?.qaMode ?? "per_source", qaSampleRate: batch.options.policy?.qaSampleRate ?? 1 });
   const existing = new Set(preview.overwrite.existingProducts.map((p) => p.identifier));
   const groups = await Promise.all(preview.rows.map(async ({ firstShotUri, ...row }) => ({ ...row, firstPhotoUrl: firstShotUri ? await storage.signedUrl(firstShotUri, 900) : null, status: row.status === "duplicate shot" ? "two files for one shot" : row.status === "ok" && existing.has(row.identifier) ? "existing" : row.notes.some((n) => /not in sheet/i.test(n)) ? "not in sheet" : row.status })));
-  return { ...base, estimate, groupedBy: detected.groupedBy, counts: { ...batch.counts, ...preview.kpis, outputs }, warnings: preview.warnings, groups, totalRows: preview.totalRows, overwrite: { newProducts: preview.overwrite.newProducts, existingProducts: preview.overwrite.existingProducts, renameHints: preview.overwrite.renameHints, sameProductPairs: preview.overwrite.duplicates }, busy: preview.overwrite.busy };
+  return { ...base, estimate, groupedBy: detected.groupedBy, counts: { ...batch.counts, ...preview.kpis, outputs }, warnings: preview.warnings, groups, totalRows: preview.totalRows, overwrite: { newProducts: preview.overwrite.newProducts, existingProducts: preview.overwrite.existingProducts, renameHints: preview.overwrite.renameHints, sameProductPairs: preview.overwrite.duplicates, sameBatches: preview.overwrite.sameBatches, duplicatePhotos: preview.overwrite.duplicatePhotos }, busy: preview.overwrite.busy };
 }
 export type WizardPreview = Awaited<ReturnType<typeof previewBatch>>;
 export type WizardDetected = Awaited<ReturnType<typeof detectedBatch>>;

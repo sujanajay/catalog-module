@@ -183,6 +183,8 @@ INR_PER_USD=${INR_PER_USD:-84}
 [[ "$INR_PER_USD" =~ ^[0-9]+([.][0-9]+)?$ ]] || { echo "INR_PER_USD must be a number such as 84" >&2; exit 1; }
 WORKER_ENV+=",CATALOG_QA_DEFAULT_MODEL=$CATALOG_QA_DEFAULT_MODEL"
 if [ -n "$DAILY_SPEND_CAP_USD" ]; then WORKER_ENV+=",DAILY_SPEND_CAP_USD=$DAILY_SPEND_CAP_USD"; fi
+# Days without a write after which the sweep cancels an unstarted draft (spec 14d F12; 14 decided 2026-10-27).
+WORKER_ENV+=",DRAFT_EXPIRY_DAYS=${DRAFT_EXPIRY_DAYS:-14}"
 WEB_ENV="$ENV_VARS,DB_POOL_MAX=$WEB_DB_POOL_MAX,SHARE_SA_EMAIL=$WEB_SA,CATALOG_CHUNK_IMAGES=$CHUNK_IMAGES"
 # INR_PER_USD reaches the web (cost line, wizard estimate), the worker (finalize) and, through
 # WORKER_ENV, the Cloud Run jobs (07 4.11). COMPUTE_USD_PER_VCPU_SECOND reaches the worker and the

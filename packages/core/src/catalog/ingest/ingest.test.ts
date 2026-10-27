@@ -22,8 +22,10 @@ import { findOrCreateProduct } from "../products";
 import type { ChannelId, IdentifierMode, UploadKind } from "../types";
 import { buildZip } from "../../../test-fixtures/catalog/ingest-a/builders";
 import { mergeCounts, PLACING_LEASE_MS } from "../counts";
-import { buildPreview, deliveryToken, runIngest } from "./index";
-import { manifestPath } from "./manifest";
+import { buildPreview, deliveryToken, INGEST_TIME_BUDGET_MS, LINK_MAX_ATTEMPTS, LINK_RETRY_ATTEMPTS, PLACE_BUDGET_ITEMS, runIngest } from "./index";
+import { linkFailuresBlock } from "./detect-step";
+import { linkFailuresOf } from "./link-failures";
+import { manifestPath, type UploadManifest } from "./manifest";
 import type { IngestDeps } from "./types";
 
 // findOrCreateProduct keeps its real behaviour; one test makes a call fail part-way through.
@@ -143,7 +145,8 @@ async function folderUpload(w: World, batch: CatalogBatch, files: Record<string,
 }
 
 function deps(w: World, budgetItems?: number) {
-  return { storage: w.storage, fetch: w.fetch, enqueue: w.enqueue as never, ...(budgetItems ? { budgetItems } : {}) };
+  // Link retries wait for nothing here (spec 14d F5 part 2); the retry tests pass their own clock.
+  return { storage: w.storage, fetch: w.fetch, enqueue: w.enqueue as never, sleep: async () => {}, ...(budgetItems ? { budgetItems } : {}) };
 }
 
 /** Runs every upload of the batch, following the self-enqueued continuations. */
@@ -844,5 +847,247 @@ describe("cancel guards (spec 14c F4 part 2)", () => {
     // A retry of the same task finds the batch cancelled.
     expect((await runIngest(db, deps(w), { batchId: batch.id, uploadId })).outcome).toBe("noop: the batch is cancelled");
     expect((await batchRow(batch.id)).status).toBe("cancelled");
+  });
+});
+
+// --- Release D (spec 14d) --------------------------------------------------------------------------
+
+/** A distinct tiny jpeg per index (the colour encodes it), quick enough for a thousand photos. */
+async function tinyJpeg(i: number): Promise<Buffer> {
+  return sharp({ create: { width: 32, height: 32, channels: 3, background: { r: i % 256, g: Math.floor(i / 256) % 256, b: 101 } } }).jpeg().toBuffer();
+}
+
+type PlaceBody = { batchId: string; uploadId: string; cursor?: string; run?: string; place?: string };
+const rawCopies = (w: World) => w.calls.uploads.filter((u) => u.includes("/raw/")).length;
+
+describe("placing in resumable chunks (spec 14d F7 part 2)", () => {
+  it("1,000 photos with PLACE_BUDGET_ITEMS 300: four placing deliveries, placed 300, 600, 900, 1,000, rows only after the last", async () => {
+    const w = fakeWorld();
+    const batch = await newBatch("chunked placing");
+    const files: Record<string, Buffer> = {};
+    for (let i = 0; i < 1000; i++) files[`CH${String(Math.floor(i / 4)).padStart(3, "0")}_${(i % 4) + 1}.jpg`] = await tinyJpeg(i);
+    const uploadId = await folderUpload(w, batch, files);
+    const d = { ...deps(w, 1000), placeBudgetItems: 300 };
+
+    const placed: number[] = [];
+    const first = await runIngest(db, d, { batchId: batch.id, uploadId, run: "r1" });
+    expect(first.outcome).toBe("placed 300 of 1000; continuing at 300");
+    let row = await batchRow(batch.id);
+    placed.push(row.counts.placed ?? 0);
+    expect(row).toMatchObject({ status: "ingesting", counts: { phase: "placing", placeTotal: 1000 } });
+    expect(await sourcesOf(batch.id)).toEqual([]);
+    expect(w.objects.has(`gs://${BUCKET}/${prefixOf(batch)}/derived/_ingest/place-state.json`)).toBe(true);
+
+    let deliveries = 1;
+    for (let next = w.enqueued.at(-1); next?.body.place; next = w.enqueued.at(-1)) {
+      const from = w.enqueued.length;
+      const r = await runIngest(db, d, next.body as PlaceBody);
+      deliveries++;
+      row = await batchRow(batch.id);
+      placed.push(row.counts.placed ?? 0);
+      if (w.enqueued.length === from) {
+        expect(r.outcome).toBe("preview ready: 250 products, 1000 photos");
+        break;
+      }
+      expect(row).toMatchObject({ status: "ingesting", counts: { phase: "placing" } });
+      expect(await sourcesOf(batch.id)).toEqual([]);
+    }
+    expect(deliveries).toBe(4);
+    expect(placed).toEqual([300, 600, 900, 1000]);
+    // Every continuation carries the lease's body (same token) and a named task.
+    expect(w.enqueued.filter((e) => e.body.place).map((e) => [e.body.place, e.body.run])).toEqual([["300", "r1"], ["600", "r1"], ["900", "r1"]]);
+    row = await batchRow(batch.id);
+    expect(row).toMatchObject({ status: "draft", counts: { phase: "ready", previewReady: true, placed: 1000, sources: 1000, placingClaim: null } });
+    expect(await sourcesOf(batch.id)).toHaveLength(1000);
+    expect(rawCopies(w)).toBe(1000);
+  }, 120_000);
+
+  it("a delivery killed after chunk 2 keeps the lease and the cursor: its retry with the same token continues to the end", async () => {
+    const w = fakeWorld();
+    const batch = await newBatch("killed placing");
+    const files: Record<string, Buffer> = {};
+    for (let i = 0; i < 10; i++) files[`KP${i}_1.jpg`] = await tinyJpeg(2000 + i);
+    const uploadId = await folderUpload(w, batch, files);
+    let kill = true;
+    const enqueue = async (route: string, body: Record<string, unknown>) => {
+      if (kill && body.place === "6") throw new Error("killed");
+      return w.enqueue(route, body);
+    };
+    const d = { ...deps(w), enqueue: enqueue as never, placeBudgetItems: 3 };
+    const body: PlaceBody = { batchId: batch.id, uploadId, run: "kp" };
+    await runIngest(db, d, body);
+    const second = w.enqueued.at(-1)!.body as PlaceBody;
+    expect(second.place).toBe("3");
+    await expect(runIngest(db, d, second)).rejects.toThrow("killed");
+    let row = await batchRow(batch.id);
+    expect(row).toMatchObject({ status: "ingesting", counts: { phase: "placing", placed: 6, placingClaim: { token: deliveryToken(body) } } });
+    const copies = rawCopies(w);
+    expect(copies).toBe(6);
+
+    // Cloud Tasks retries the killed delivery (same body, same token): chunk 2 costs no copy, then on.
+    kill = false;
+    await runIngest(db, d, second);
+    expect(rawCopies(w)).toBe(copies);
+    for (let next = w.enqueued.at(-1)!.body as PlaceBody; next.place !== "done"; ) {
+      const from = w.enqueued.length;
+      await runIngest(db, d, next);
+      next = (w.enqueued[from]?.body as PlaceBody) ?? { ...next, place: "done" };
+    }
+    row = await batchRow(batch.id);
+    expect(row).toMatchObject({ status: "draft", counts: { phase: "ready", placed: 10, placingClaim: null } });
+    expect(await sourcesOf(batch.id)).toHaveLength(10);
+    expect(rawCopies(w)).toBe(10);
+  });
+
+  it("a continuation under an older lease places nothing once a later run regrouped the batch", async () => {
+    const w = fakeWorld();
+    const batch = await newBatch("stale continuation");
+    const uploadId = await folderUpload(w, batch, { "SC1_1.jpg": await tinyJpeg(3001), "SC2_1.jpg": await tinyJpeg(3002) });
+    const d = { ...deps(w), placeBudgetItems: 1 };
+    await runIngest(db, d, { batchId: batch.id, uploadId, run: "old" });
+    const stale = w.enqueued.at(-1)!.body as PlaceBody;
+    // Try again on a stalled batch: the web clears the lease and a new run takes it and regroups.
+    await db.update(catalogBatches).set({ counts: mergeCounts({ placingClaim: null }) }).where(eq(catalogBatches.id, batch.id));
+    await runIngest(db, d, { batchId: batch.id, uploadId, run: "new" });
+    expect((await runIngest(db, d, stale)).outcome).toBe("stopped: another delivery holds the placing lease");
+    expect(await sourcesOf(batch.id)).toEqual([]);
+  });
+
+  it("an options-only regroup runs groupBatch then placeBatch with zero copies and no upload status change", async () => {
+    const w = fakeWorld();
+    const batch = await newBatch("options only");
+    const uploadId = await folderUpload(w, batch, { "OO1_1.jpg": await tinyJpeg(4001), "OO1_2.jpg": await tinyJpeg(4002), "OO2_1.jpg": await tinyJpeg(4003) });
+    await ingestAll(w, batch);
+    const copies = rawCopies(w);
+    expect(copies).toBe(3);
+    // What the web tier does (regroupBatch with optionsOnly, then ingestBatch): new options, the batch
+    // collecting again, the preview cleared, one collected upload handed under a new run.
+    await db.update(catalogBatches).set({ status: "ingesting", options: { ...batch.options, precedence: "uploads_only" }, counts: mergeCounts({ previewReady: false, placingClaim: null }) }).where(eq(catalogBatches.id, batch.id));
+    const outcome = await runIngest(db, deps(w), { batchId: batch.id, uploadId, run: "regroup" });
+    expect(outcome.outcome).toBe("preview ready: 2 products, 3 photos");
+    expect(rawCopies(w)).toBe(copies);
+    const uploads = await db.select({ status: catalogUploads.status }).from(catalogUploads).where(eq(catalogUploads.batchId, batch.id));
+    expect(uploads.map((u) => u.status)).toEqual(["collected"]);
+    expect((await batchRow(batch.id))).toMatchObject({ status: "draft", options: { precedence: "uploads_only" }, counts: { previewReady: true, phase: "ready" } });
+  });
+
+  it("measures groupBatch at about 2,000 products against the 900 s deadline", async () => {
+    const w = fakeWorld();
+    const batch = await newBatch("group timing");
+    const files: Record<string, Buffer> = {};
+    const N = 2000;
+    for (let i = 0; i < N; i++) files[`GT${String(i).padStart(4, "0")}_1.jpg`] = await tinyJpeg(10_000 + i);
+    const uploadId = await folderUpload(w, batch, files);
+    // Collect all but one item first, so the timed delivery reads one item and then groups.
+    await runIngest(db, deps(w, N - 1), { batchId: batch.id, uploadId, run: "gt" });
+    let manifestSaved = 0, planSaved = 0;
+    const storage: IngestDeps["storage"] = {
+      ...w.storage,
+      uploadBuffer: async (path, buf, mime, opts) => {
+        if (path.endsWith("manifest.json")) manifestSaved = performance.now();
+        if (path.endsWith("place-state.json")) planSaved = performance.now();
+        return w.storage.uploadBuffer(path, buf, mime, opts);
+      },
+    };
+    const r = await runIngest(db, { ...deps(w), storage }, w.enqueued.at(-1)!.body as PlaceBody);
+    expect(r.outcome).toBe(`placed ${PLACE_BUDGET_ITEMS} of ${N}; continuing at ${PLACE_BUDGET_ITEMS}`);
+    const groupMs = Math.round(planSaved - manifestSaved);
+    // Reported in the release report; PGlite in one process is slower than Cloud SQL.
+    console.info(JSON.stringify({ event: "groupBatch timing", products: N, ms: groupMs }));
+    expect(groupMs).toBeGreaterThan(0);
+    expect(groupMs).toBeLessThan(300_000);
+  }, 600_000);
+});
+
+describe("automatic retry of transient link failures (spec 14d F5 part 2)", () => {
+  const LINK = "https://104.18.38.10/retry";
+  /** A url_list batch of `urls`, a clock the fake fetch and sleep move, and the fetch log. */
+  async function linkBatch(urls: string[], answer: (url: string, call: number) => number | "timeout") {
+    const w = fakeWorld();
+    let t = Date.parse("2026-10-27T10:00:00Z");
+    const calls = new Map<string, number>();
+    const fetch: typeof globalThis.fetch = async (input) => {
+      const url = String(input);
+      const n = (calls.get(url) ?? 0) + 1;
+      calls.set(url, n);
+      const a = answer(url, n);
+      if (a === "timeout") {
+        t += 60_000;
+        throw new DOMException("The operation was aborted due to timeout", "TimeoutError");
+      }
+      return a === 200 ? new Response(new Uint8Array(await jpeg()), { status: 200, headers: { "content-type": "image/jpeg" } }) : new Response("no", { status: a, headers: { "content-type": "text/plain" } });
+    };
+    const [b] = await db.insert(catalogBatches).values({
+      brandSlug: "test_brand", brandName: "Test Brand", name: "retry", isTest: true, createdBy: "op@opptra.com", channels: [],
+      options: { identifierMode: "filename", precedence: "uploads_then_links", sheetColumns: null },
+    }).returning();
+    const [u] = await db.insert(catalogUploads).values({ batchId: b!.id, kind: "url_list", name: "Image links", sourceUrl: urls.join("\n"), gcsUri: null, status: "uploaded" }).returning();
+    const d = { ...deps(w), fetch, now: () => new Date(t), sleep: async (ms: number) => { t += ms; } };
+    /** Runs one hand-off (a new run) through its collecting continuations. */
+    const run = async (runId: string) => {
+      await db.update(catalogUploads).set({ status: "uploaded" }).where(eq(catalogUploads.id, u!.id));
+      await db.update(catalogBatches).set({ status: "draft" }).where(eq(catalogBatches.id, b!.id));
+      let body: PlaceBody | null = { batchId: b!.id, uploadId: u!.id, run: runId };
+      while (body) {
+        const from = w.enqueued.length;
+        await runIngest(db, d, body);
+        body = (w.enqueued[from]?.body as PlaceBody | undefined) ?? null;
+      }
+    };
+    const manifest = async () => JSON.parse(w.objects.get(`gs://${BUCKET}/${manifestPath(batchPrefix(b!.brandSlug, b!.id, true), u!.id)}`)!.buf.toString("utf8")) as UploadManifest;
+    const result = async (url: string) => (await manifest()).results[`url:${url}`];
+    return { w, calls, run, manifest, result, batchId: b!.id, uploadId: u!.id, d, tick: () => t };
+  }
+
+  it("503 twice then 200 gives one photo with attempts 3", async () => {
+    const x = await linkBatch([`${LINK}/A_1.jpg`], (_url, n) => (n <= 2 ? 503 : 200));
+    await x.run("r1");
+    expect(await x.result(`${LINK}/A_1.jpg`)).toMatchObject({ ok: true, attempts: 3 });
+    expect((await batchRow(x.batchId)).counts).toMatchObject({ sources: 1, linkFailures: 0 });
+  });
+
+  it("a 404 is final and never fetched again; a 429 left non-final is fetched again only by a new run; after LINK_MAX_ATTEMPTS it is final", async () => {
+    const nf = `${LINK}/NF_1.jpg`, busy = `${LINK}/BUSY_1.jpg`, ok = `${LINK}/OK_1.jpg`;
+    const x = await linkBatch([nf, busy, ok], (url) => (url === nf ? 404 : url === busy ? 429 : 200));
+    await x.run("r1");
+    expect(await x.result(nf)).toMatchObject({ ok: false, attempts: 1, final: true });
+    expect(await x.result(busy)).toMatchObject({ ok: false, attempts: LINK_RETRY_ATTEMPTS, final: false });
+    expect(x.calls.get(busy)).toBe(3);
+
+    // A continuation of the same run reads the saved manifest: nothing is fetched again.
+    await db.update(catalogUploads).set({ status: "uploaded" }).where(eq(catalogUploads.id, x.uploadId));
+    await db.update(catalogBatches).set({ status: "ingesting" }).where(eq(catalogBatches.id, x.batchId));
+    await runIngest(db, x.d, { batchId: x.batchId, uploadId: x.uploadId, run: "r1", cursor: "0" });
+    expect([x.calls.get(nf), x.calls.get(busy)]).toEqual([1, 3]);
+
+    // A new run fetches the non-final link again, never the final one; the attempts add up.
+    await x.run("r2");
+    expect([x.calls.get(nf), x.calls.get(busy)]).toEqual([1, 6]);
+    expect(await x.result(busy)).toMatchObject({ attempts: 6, final: false });
+    await x.run("r3");
+    expect(await x.result(busy)).toMatchObject({ ok: false, attempts: LINK_MAX_ATTEMPTS, final: true });
+    expect((await x.result(busy) as { reason: string }).reason).toContain("(got 429)");
+    await x.run("r4");
+    expect(x.calls.get(busy)).toBe(LINK_MAX_ATTEMPTS);
+    expect(x.calls.get(ok)).toBe(1);
+    // The card's sentence: the highest attempt count of a retried link.
+    expect(linkFailuresBlock(await linkFailuresOf(db, x.batchId, { storage: x.w.storage })).attempts).toBe(LINK_MAX_ATTEMPTS);
+  });
+
+  it("a host that answers after 60 s every time still yields a saved manifest and a continuation within the time budget", async () => {
+    const urls = Array.from({ length: 40 }, (_, i) => `${LINK}/SLOW${i}_1.jpg`);
+    const x = await linkBatch(urls, () => "timeout");
+    await runIngest(db, x.d, { batchId: x.batchId, uploadId: x.uploadId, run: "slow" });
+    const m = await x.manifest();
+    const read = Object.keys(m.results).length;
+    expect(read).toBeGreaterThan(0);
+    expect(read).toBeLessThan(urls.length);
+    expect(Object.values(m.results).every((r) => !r.ok && r.final === false && r.attempts === LINK_RETRY_ATTEMPTS)).toBe(true);
+    expect(x.w.enqueued.at(-1)).toMatchObject({ route: "/tasks/catalog/ingest", body: { uploadId: x.uploadId, run: "slow", cursor: expect.any(String) } });
+    expect((await batchRow(x.batchId)).counts.collected).toBe(read);
+    // The continuation starts again with a fresh budget and reads the next items.
+    await runIngest(db, x.d, x.w.enqueued.at(-1)!.body as PlaceBody);
+    expect(Object.keys((await x.manifest()).results).length).toBeGreaterThan(read);
+    expect(INGEST_TIME_BUDGET_MS).toBe(600_000);
   });
 });

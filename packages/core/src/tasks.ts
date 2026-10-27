@@ -28,6 +28,7 @@ export const TASK_ROUTES = [
   "/tasks/catalog/sync-master",
   "/tasks/catalog/sweep",
   "/tasks/catalog/ingest",
+  "/tasks/catalog/ingest-more",
   "/tasks/catalog/chunk",
   "/tasks/catalog/publish",
   "/tasks/catalog/finalize",
@@ -36,7 +37,7 @@ export const TASK_ROUTES = [
 export type TaskRoute = (typeof TASK_ROUTES)[number];
 
 /** Routes that run on the ingest queue (TASKS_INGEST_QUEUE) when it is configured. */
-export const INGEST_TASK_ROUTES: readonly TaskRoute[] = ["/tasks/catalog/ingest"];
+export const INGEST_TASK_ROUTES: readonly TaskRoute[] = ["/tasks/catalog/ingest", "/tasks/catalog/ingest-more"];
 
 /** Minimal surface of `CloudTasksClient` we use - lets tests pass a fake. */
 export type TasksClientLike = Pick<CloudTasksClient, "createTask">;

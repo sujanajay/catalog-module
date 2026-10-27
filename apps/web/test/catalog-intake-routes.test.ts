@@ -154,10 +154,12 @@ describe("web counts writes and the instant step 2 Continue (spec 14c F6 and F7 
     expect(same.status).toBe(200); expect(await same.json()).toEqual({ collecting: false });
     expect(enqueueTask).not.toHaveBeenCalled(); expect(await statusOf(file.id)).toBe("collected");
     expect((await batchRow(id)).counts.previewReady).toBe(true);
-    // A changed answer regroups: the upload is read again and handed to collecting.
+    // A changed option regroups without collecting again (spec 14d F7 part 2): the upload stays collected
+    // and is handed once, so the worker reruns the grouping and the placing with the new options.
     const changed = await patchDetected(request("PATCH", { identifierMode: "folder", precedence: options.precedence, sheets: [] }), ctx(id));
     expect(await changed.json()).toEqual({ collecting: true });
     expect(enqueueTask).toHaveBeenCalledWith("/tasks/catalog/ingest", expect.objectContaining({ batchId: id, uploadId: file.id, run: expect.any(String) }), expect.anything());
+    expect(await statusOf(file.id)).toBe("collected");
     expect((await batchRow(id)).status).toBe("ingesting");
   });
   it("regroupBatch merges: phase and the other worker keys stay, previewReady and the placing lease are cleared", async () => {
@@ -175,6 +177,24 @@ describe("web counts writes and the instant step 2 Continue (spec 14c F6 and F7 
     await db.update(catalogUploads).set({ status: "uploaded" }).where(eq(catalogUploads.id, file.id));
     expect((await ingest(request("POST"), ctx(id))).status).toBe(200);
     expect((await batchRow(id)).counts).toMatchObject({ phase: "placing", placingClaim: null });
+  });
+});
+describe("the paged hand-off (spec 14d F11 part 2)", () => {
+  it("1,200 uploads: the request hands 500 and queues one ingest-more task for the rest", async () => {
+    const id = await newBatch();
+    for (let i = 0; i < 1200; i += 200) await db.insert(catalogUploads).values(Array.from({ length: 200 }, (_, k) => ({ batchId: id, kind: "image" as const, name: `P${i + k}_1.jpg`, status: "uploaded" as const })));
+    vi.mocked(enqueueTask).mockClear();
+    const res = await ingest(request("POST"), ctx(id));
+    expect(await res.json()).toEqual({ collecting: true, remaining: 700 });
+    const calls = vi.mocked(enqueueTask).mock.calls;
+    const handed = calls.filter((c) => c[0] === "/tasks/catalog/ingest");
+    expect(handed).toHaveLength(500);
+    const more = calls.filter((c) => c[0] === "/tasks/catalog/ingest-more");
+    expect(more).toHaveLength(1);
+    const ids = (await db.select({ id: catalogUploads.id }).from(catalogUploads).where(eq(catalogUploads.batchId, id))).map((u) => u.id).sort();
+    expect(handed.map((c) => (c[1] as { uploadId: string }).uploadId)).toEqual(ids.slice(0, 500));
+    expect(more[0]![1]).toEqual({ batchId: id, run: (handed[0]![1] as { run: string }).run, after: ids[499] });
+    expect((await batchRow(id)).status).toBe("ingesting");
   });
 });
 describe("reopen and the assertDraft sentences (spec 14c F8)", () => {

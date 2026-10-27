@@ -11,6 +11,7 @@ import { COLLECT_STALL_MS } from "@catalog/core/catalog/pipeline/status";
 import { db } from "../db";
 import { badRequest, HttpError } from "../errors";
 import { dropLinkRejects, linkFailuresOf } from "@catalog/core/catalog/ingest/link-failures";
+import { handOff, uploadedPage } from "@catalog/core/catalog/ingest/hand-off";
 import { assertDraft, draftForUpdate, INPUT_NOT_FOUND, LINK_KINDS, mergeCounts, notDraftText, queryBatch, reopenBatch } from "./batches";
 import { HAND_OFF_FAILED, HAND_OFF_RETRY } from "./copy";
 import { collectGoogleLink } from "./links";
@@ -82,6 +83,8 @@ export function handOffError(err: unknown): HttpError {
  * (ingest is idempotent, so a second delivery only reads what was never read), and when every upload
  * is already read but the batch-wide step never ran, one read upload is handed so its task runs it.
  * Each call names its tasks `ingest-<uploadId>-<run>`, so enqueueTask's retries never duplicate one.
+ * At most HAND_OFF_PAGE uploads are handed here (spec 14d F11 part 2); the rest go through one
+ * `/tasks/catalog/ingest-more` task, and the answer says how many are `remaining`.
  */
 export async function ingestBatch(id: string) {
   const batch = await queryBatch(id);
@@ -106,22 +109,20 @@ export async function ingestBatch(id: string) {
     .where(and(eq(catalogBatches.id, id), inArray(catalogBatches.status, ["draft", "ingesting"]))).returning({ id: catalogBatches.id });
   if (!handing) throw new HttpError(409, notDraftText(await queryBatch(id)));
   const run = randomUUID();
+  const page = uploads.length ? await uploadedPage(db(), id, null) : { ids: targets.map((u) => u.id), more: false };
   let handed = 0;
   try {
-    for (const upload of targets) {
-      // `run` is part of the placing token (spec 14c F6), so a Try again never reuses a lost delivery's lease.
-      await enqueueTask("/tasks/catalog/ingest", { batchId: id, uploadId: upload.id, run }, { taskId: `ingest-${upload.id}-${run}` });
-      handed++;
-    }
+    await handOff(enqueueTask, id, run, page, () => handed++);
   } catch (err) {
-    console.error(JSON.stringify({ severity: "ERROR", message: "ingest hand-off failed", batchId: id, handed, uploads: targets.length, code: (err as { code?: unknown } | null)?.code ?? null, error: err instanceof Error ? err.message : String(err) }));
+    console.error(JSON.stringify({ severity: "ERROR", message: "ingest hand-off failed", batchId: id, handed, uploads: page.ids.length, code: (err as { code?: unknown } | null)?.code ?? null, error: err instanceof Error ? err.message : String(err) }));
     // Nothing reached the queue: the batch goes back to draft, so Continue (PATCH, then /ingest) works
     // again instead of answering 409. Once a task is queued its worker may already be collecting, so
     // the batch stays collecting; the next /ingest (Continue or Try again) hands over the rest.
     if (!handed && batch.status === "draft") await db().update(catalogBatches).set({ status: "draft" }).where(and(eq(catalogBatches.id, id), eq(catalogBatches.status, "ingesting")));
     throw handOffError(err);
   }
-  return { collecting: true };
+  const remaining = Math.max(0, uploads.length - page.ids.length);
+  return remaining ? { collecting: true, remaining } : { collecting: true };
 }
 /** POST /retry-links when the batch holds no link that failed. */
 export const NO_FAILED_LINKS = "No links failed in this batch. Reload this page.";
@@ -149,9 +150,16 @@ export async function retryLinks(id: string) {
   await dropLinkRejects(db(), id, { storage });
   return ingestBatch(id);
 }
-export async function regroupBatch(id: string) {
+/**
+ * Step 2 regroup. `optionsOnly` (spec 14d F7 part 2): the change touched only the grouping options
+ * (identifier mode, precedence) and no sheet's columns or kind, so what was collected stands: no upload
+ * status changes, and the hand-off of one collected upload makes the worker rerun groupBatch with the new
+ * options and then placeBatch, where the sha256 skip makes unchanged photos free. A sheet column or
+ * kind change changes the items a sheet lists, so it collects again (links already read are kept).
+ */
+export async function regroupBatch(id: string, opts: { optionsOnly?: boolean } = {}) {
   await assertDraft(id);
-  await db().update(catalogUploads).set({ status: "uploaded" }).where(and(eq(catalogUploads.batchId, id), inArray(catalogUploads.status, ["collected", "failed"])));
+  if (!opts.optionsOnly) await db().update(catalogUploads).set({ status: "uploaded" }).where(and(eq(catalogUploads.batchId, id), inArray(catalogUploads.status, ["collected", "failed"])));
   // A merge: only previewReady and the placing lease change (spec 14c section 3.2: regroupBatch clears the lease).
   await db().update(catalogBatches).set({ counts: mergeCounts({ previewReady: false, placingClaim: null }) }).where(eq(catalogBatches.id, id));
   return ingestBatch(id);

@@ -168,6 +168,9 @@ describe("deriveBatchState intake words (spec 14c F4 part 2)", () => {
     const state = deriveBatchState({ status: "cancelled", counts: EMPTY_BATCH_COUNTS, updatedAt: ago(2 * 24 * 60), now });
     expect(state).toMatchObject({ state: "cancelled", pill: "Cancelled", listPill: "Cancelled", intake: "Cancelled 2 days ago", text: "Cancelled 2 days ago" });
     expect(deriveBatchState({ status: "cancelled", counts: EMPTY_BATCH_COUNTS }).intake).toBe("Cancelled");
+    // A draft the sweep expired (spec 14d F12).
+    expect(deriveBatchState({ status: "cancelled", counts: EMPTY_BATCH_COUNTS, updatedAt: "2026-10-25T10:00:00Z", expired: { days: 14 } })).toMatchObject({ state: "cancelled", intake: "Expired after 14 days with no activity", text: "Expired after 14 days with no activity" });
+    expect(deriveBatchState({ status: "cancelled", counts: EMPTY_BATCH_COUNTS, expired: { days: 1 } }).intake).toBe("Expired after 1 day with no activity");
   });
   it("gives a started batch its list pill as intake words", () => {
     expect(deriveBatchState({ status: "rendering", counts: { ...EMPTY_BATCH_COUNTS, outputs: 10, verified: 2 } }).intake).toBe("Processing 2 of 10");

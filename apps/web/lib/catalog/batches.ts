@@ -88,7 +88,7 @@ export function publicBatch(batch: CatalogBatch) {
 }
 /** The batch's state; with `uploads` (any status) the unfinished words also name pending and missing inputs. */
 export function batchState(batch: CatalogBatch, source?: string, now?: Date, uploads?: readonly { status: string }[]) {
-  return deriveBatchState({ status: batch.status, counts: batch.counts, source, updatedAt: batch.updatedAt, startedAt: batch.startedAt, now, channels: batch.channels, uploads });
+  return deriveBatchState({ status: batch.status, counts: batch.counts, source, updatedAt: batch.updatedAt, startedAt: batch.startedAt, now, channels: batch.channels, uploads, expired: batch.options.expired ?? null });
 }
 /**
  * Whether a batch other than this one is being processed now, so wizard step 4 can say this one may wait.

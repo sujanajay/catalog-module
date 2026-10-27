@@ -34,9 +34,9 @@ function fakeClient() {
 afterEach(() => vi.useRealTimers());
 
 describe("TaskRoute", () => {
-  it("TASK_ROUTES lists exactly the six routes of the type", () => {
+  it("TASK_ROUTES lists exactly the seven routes of the type", () => {
     expectTypeOf<(typeof TASK_ROUTES)[number]>().toEqualTypeOf<TaskRoute>();
-    expect(TASK_ROUTES).toHaveLength(6);
+    expect(TASK_ROUTES).toHaveLength(7);
   });
 });
 

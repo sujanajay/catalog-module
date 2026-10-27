@@ -13,7 +13,7 @@ import type { IngestDeps } from "./types";
 const LINK_UPLOAD_KINDS: UploadKind[] = ["url_list", "sheet", "google_sheet"];
 
 /** One link that could not be downloaded, for the "Show all" table and the counts. `reason` is the reason phrase. */
-export interface LinkFailureRow { url: string; where: string; reason: string; temporary: boolean; identifier: string; uploadId: string }
+export interface LinkFailureRow { url: string; where: string; reason: string; temporary: boolean; identifier: string; uploadId: string; /** Fetches made (spec 14d F5 part 2); 1 for results written before release D. */ attempts: number }
 
 async function linkUploads(db: Db, batchId: string): Promise<{ prefix: string; uploads: CatalogUpload[] }> {
   const [batch] = await db.select().from(catalogBatches).where(eq(catalogBatches.id, batchId));
@@ -38,7 +38,7 @@ export async function linkFailuresOf(db: Db, batchId: string, deps: Pick<IngestD
       links++;
       const r = m.results[itemKey(item)];
       const link = r && !r.ok ? classifyLinkReject(r.reason) : null;
-      if (link) rows.push({ url: link.url, where: link.where ?? "", reason: link.phrase, temporary: link.temporary, identifier: item.identifier, uploadId: u.id });
+      if (link) rows.push({ url: link.url, where: link.where ?? "", reason: link.phrase, temporary: link.temporary, identifier: item.identifier, uploadId: u.id, attempts: (r && !r.ok && r.attempts) || 1 });
     }
   }
   return { links, rows };

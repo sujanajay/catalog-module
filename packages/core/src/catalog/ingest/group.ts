@@ -7,6 +7,7 @@ import { classifyImageReject } from "./image-check";
 import { classifyLinkReject } from "./link-reasons";
 import { matchProductList, missingIdentifier, type ProductListRow } from "./product-list";
 import type { GroupingResult, PreviewRow, SourceItem } from "./types";
+export { duplicatePhotosPair, samePhotosPair } from "./same-photos";
 import { collectRejectReason } from "./zip";
 
 export type { ProductListRow };

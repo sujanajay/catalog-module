@@ -32,6 +32,8 @@ export const NOT_COLLECTED_TEXT = "Added, not collected yet";
 export const pendingUploadsText = (n: number) => `${num(n)} ${plural(n, "file", "files")} did not finish uploading`;
 export const couldNotStartText = (reason: string | null | undefined) => `Could not start: ${reason ?? "Start the batch again."}`;
 export const cancelledText = (age: string) => `Cancelled ${age}`;
+/** A draft the sweep cancelled after `days` days without a write (spec 14d F12). */
+export const expiredText = (days: number) => `Expired after ${num(days)} ${plural(days, "day", "days")} with no activity`;
 /** The words of each phase while collecting or placing; a count "<done> of <total>" follows them. */
 export const PHASE_WORDS: Record<"downloading" | "reading" | "unpacking" | "checking" | "placing", string> = {
   downloading: "Downloading photos",
@@ -152,8 +154,9 @@ function draftWords(c: BatchCounts, channels: readonly ChannelId[] | undefined, 
   if (!c.previewReady) return NOT_COLLECTED_TEXT;
   return channels?.length ? READY_TO_START_TEXT : READY_TO_CHECK_TEXT;
 }
-/** Cancelled words. Release D adds "Expired after <N> days with no activity" here for a batch the sweep cancelled. */
-function cancelledWords(input: { updatedAt?: Date | string; now?: Date }): string {
+/** Cancelled words: "Expired after <N> days with no activity" for a draft the sweep cancelled (spec 14d F12), else "Cancelled <age>". */
+function cancelledWords(input: { updatedAt?: Date | string; now?: Date; expired?: { days: number } | null }): string {
+  if (input.expired) return expiredText(input.expired.days);
   return input.updatedAt === undefined ? "Cancelled" : cancelledText(ageText(input.updatedAt, input.now ?? new Date()));
 }
 export interface BatchStateInput {
@@ -162,6 +165,7 @@ export interface BatchStateInput {
   /** Styli outputs skipped as too small; counts.skipped also holds removed and chart skips. */ styliSkipped?: number;
   /** The batch's channels: a ready draft with channels reads "Ready to start". */ channels?: readonly ChannelId[];
   /** The batch's uploads (any status): pending and missing inputs are named in `intake`; left out, those checks are skipped. */ uploads?: readonly { status: string }[];
+  /** `options.expired`: a cancelled batch the sweep expired reads "Expired after <N> days with no activity". */ expired?: { days: number } | null;
 }
 export function deriveBatchState(input: BatchStateInput): BatchState {
   const state = derive(input);

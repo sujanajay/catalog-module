@@ -174,6 +174,8 @@ export function collectingText(source: BatchSource): string {
 
 // Link failures (spec 14b F5 part 1; parent copy register "Link failures card" and "Batch page").
 export const LINK_FAILURES_HEADING = "Links that could not be downloaded";
+/** The link failures card when the system retried some links itself (spec 14d F5 part 2); `attempts` is the highest attempt count. */
+export const retriedText = (attempts: number) => `Transient problems were tried ${count(attempts)} times.`;
 export const RETRY_LINKS = "Try the failed links again";
 /** "<total> of <links> links could not be downloaded (<products> products affected)." */
 export function linkFailuresSummary(total: number, links: number, products: number): string {

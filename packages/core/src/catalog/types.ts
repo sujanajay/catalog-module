@@ -67,6 +67,8 @@ export interface BatchOptions {
   qaCapUsd?: number | null;                // per-batch QA cap (07)
   evalSet?: string | null;                 // eval batches (08)
   cleanedUp?: boolean;                     // test batch cleaned up while its spend still counts today; hidden from the list
+  /** Set when the sweep cancelled an untouched draft (spec 14d F12): when, and after how many days. */
+  expired?: { at: string; days: number } | null;
 }
 
 export interface BatchCounts {
