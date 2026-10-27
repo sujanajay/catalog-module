@@ -1,6 +1,7 @@
 import { and, desc, eq, gt, inArray, isNull, ne, sql } from "drizzle-orm";
 import { brandMaster, catalogBatches, catalogUploads, type CatalogBatch } from "@catalog/core/db/schema";
-import { CHANNEL_IDS, IDENTIFIER_MODES, PRECEDENCES, PRODUCT_TYPES, PASTE_INPUT_KINDS, type BatchCounts, type BatchOptions, type ChannelId, type ProductType } from "@catalog/core/catalog/types";
+import { CHANNEL_IDS, IDENTIFIER_MODES, PRECEDENCES, PRODUCT_TYPES, PASTE_INPUT_KINDS, type BatchOptions, type ChannelId, type ProductType } from "@catalog/core/catalog/types";
+import { mergeCounts } from "@catalog/core/catalog/counts";
 import { db, type Db } from "../db";
 import { deriveBatchState } from "@catalog/core/catalog/pipeline/status";
 import { TEST_BRAND } from "@catalog/core/catalog/brands";
@@ -35,11 +36,9 @@ export const INPUT_NOT_FOUND = "This input is not part of this batch. Reload thi
 export const LINK_KINDS = PASTE_INPUT_KINDS;
 /**
  * A merge-only write to `counts`: only the named keys change, so a worker write to other keys made in
- * between is never lost. Spec 14b F3 needs it for `previewReady`; the general web-tier form is F6 (14c).
+ * between (phase, placingClaim, rate) is never lost. Every web write to `counts` uses it (spec 14c F6).
  */
-export function mergeCounts(patch: Partial<BatchCounts>) {
-  return sql`${catalogBatches.counts} || ${JSON.stringify(patch)}::jsonb`;
-}
+export { mergeCounts };
 /**
  * The reopen of F8 (spec 14c section 3.4), written for POST /retry-links (spec 14b F5 part 1): a batch
  * that failed before Start (`failed`, `startedAt` null) returns to `draft` with `failReason` cleared
