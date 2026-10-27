@@ -5,6 +5,7 @@ import { planChunks } from "@catalog/core/catalog/pipeline/plan-chunks";
 import { buildPreview } from "@catalog/core/catalog/ingest/index";
 import * as storage from "@catalog/core/storage";
 import { enqueueTask } from "@catalog/core/tasks";
+import { dispatchChunks, recoverBatchChunks } from "@catalog/core/catalog/pipeline/dispatch";
 import { log } from "@catalog/core/log";
 import { db } from "../db";
 import { badRequest, HttpError } from "../errors";
@@ -17,8 +18,9 @@ export async function startBatch(id: string, value: unknown, _actor: string) {
   const batch = await queryBatch(id);
   if (batch.status === "failed" && batch.counts.failReason?.startsWith("No photos were found")) throw badRequest(batch.counts.failReason);
   if (["matting", "rendering", "publishing"].includes(batch.status)) {
-    const queued = await db().select().from(catalogChunks).where(and(eq(catalogChunks.batchId, id), eq(catalogChunks.status, "queued")));
-    for (const chunk of queued) await enqueueTask("/tasks/catalog/chunk", { chunkId: chunk.id }, { taskId: `chunk-${chunk.id}-${chunk.stage}` });
+    // Spec 15 E4: a second press runs the sweep's rules for this batch (recover dead chunks, top up the window)
+    // instead of queueing every queued chunk again.
+    await recoverBatchChunks(db(), enqueueTask, id);
     return { id, status: batch.status };
   }
   if (batch.status !== "draft") throw new HttpError(409, "This batch has already started. Open its progress page.");
@@ -41,7 +43,7 @@ export async function startBatch(id: string, value: unknown, _actor: string) {
     throw new HttpError(409, `${pair.a} and ${pair.b} are the same product. Keep one.`);
   }
   const products = await db().select({ id: catalogProducts.id, identifier: catalogProducts.identifier }).from(catalogBatchProducts).innerJoin(catalogProducts, eq(catalogProducts.id, catalogBatchProducts.productId)).where(eq(catalogBatchProducts.batchId, id));
-  const plans = planChunks(products.filter((p) => sources.some((s) => s.productId === p.id)).map((p) => ({productId:p.id,identifier:p.identifier,sourceCount:sources.filter((s) => s.productId===p.id).length})), Number(process.env.CATALOG_CHUNK_IMAGES ?? 25));
+  const plans = planChunks(products.filter((p) => sources.some((s) => s.productId === p.id)).map((p) => ({productId:p.id,identifier:p.identifier,sourceCount:sources.filter((s) => s.productId===p.id).length})), Number(process.env.CATALOG_CHUNK_IMAGES ?? 10));
   const chunks = await db().transaction(async (tx) => {
     const [current] = await tx.select().from(catalogBatches).where(eq(catalogBatches.id, id)).for("update");
     if (!current || current.status !== "draft" || !current.counts.previewReady || current.updatedAt.getTime() !== batch.updatedAt.getTime()) throw new HttpError(409, STALE_PREVIEW);
@@ -52,13 +54,14 @@ export async function startBatch(id: string, value: unknown, _actor: string) {
     }
     const rows = [];
     for (const [index, plan] of plans.entries()) {
-      const [chunk] = await tx.insert(catalogChunks).values({batchId:id,index,stage:"matte",status:"queued",productIds:plan.productIds,sourceImageIds:sources.filter((s)=>plan.productIds.includes(s.productId)).map((s)=>s.id)}).returning();
+      const [chunk] = await tx.insert(catalogChunks).values({batchId:id,index,stage:"matte",status:"queued",attempt:0,productIds:plan.productIds,sourceImageIds:sources.filter((s)=>plan.productIds.includes(s.productId)).map((s)=>s.id)}).returning();
       rows.push(chunk!);
     }
     await tx.update(catalogBatches).set({status:"matting",startedAt:new Date(),updatedAt:new Date(),counts:{...current.counts,products:products.length,sources:sources.length,outputs:sources.length*batch.channels.length,newProducts:preview.overwrite.newProducts,existingProducts:preview.overwrite.existingProducts.length,shotsToRemove:preview.overwrite.existingProducts.reduce((n,p)=>n+p.shotsToRemove.length,0)}}).where(eq(catalogBatches.id,id));
     return rows;
   });
-  for (const chunk of chunks) await enqueueTask("/tasks/catalog/chunk", { chunkId: chunk.id }, {taskId:`chunk-${chunk.id}-matte`});
+  // Spec 15 E5: only the batch's window of chunks is queued now; each finished chunk queues the next.
+  await dispatchChunks(db(), enqueueTask, id);
   log("INFO", "batch started", { batchId: id, brandSlug: batch.brandSlug, products: products.length, sources: sources.length, outputs: sources.length * batch.channels.length, chunks: chunks.length, channels: batch.channels });
   return { id, status: "matting" };
 }

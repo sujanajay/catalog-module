@@ -58,6 +58,14 @@ function backoffFor(batch:Batch):BackoffBudget {
  if(!budget) {budget={remainingMs:QA_DELIVERY_BACKOFF_MS};deliveryBackoff.set(batch,budget);}
  return budget;
 }
+/**
+ * Spec 15 E1: the delivery's back-off allowance also never waits past `untilMs` (the request deadline less
+ * two minutes), so a back-off that starts late in a delivery cannot push it past its deadline.
+ */
+export function limitDeliveryBackoff(batch:Batch,untilMs:number,now:()=>Date):void {
+ let left=QA_DELIVERY_BACKOFF_MS;
+ deliveryBackoff.set(batch,{get remainingMs(){return Math.max(0,Math.min(left,untilMs-+now()));},set remainingMs(value:number){left=Math.min(left,value);}});
+}
 /** Check the lease and cap before every HTTP attempt, including the JSON helper's retry and each back-off retry. */
 export function catalogLlmDeps(deps:CatalogDeps,batch:Batch,underClaim:UnderClaim,who:LlmAttribution={stage:"qa"}) {
  let stopped:unknown,attempts=0;
@@ -113,19 +121,24 @@ const clean = (sentence: string | undefined, fallback: string) => sentence && !M
  * dimensions take the strictest score across the photo's channels, so one defect gives one consistent
  * result everywhere. Then `triageProduct` turns the problems into notes, drops and the few hard holds.
  */
-export async function runQaStage(deps:CatalogDeps,batch:Batch,sources:Source[],policy:ResolvedPolicy,underClaim:UnderClaim,chunkId?:string):Promise<void> {
- if(!sources.length) return;
+/** Spec 15 E1: `shouldStop` is asked before each photo group; `onPhoto` runs inside each group's final write. */
+export interface QaStageOptions { shouldStop?: ()=>boolean; onPhoto?: (tx:CatalogDeps["db"])=>Promise<void> }
+export async function runQaStage(deps:CatalogDeps,batch:Batch,sources:Source[],policy:ResolvedPolicy,underClaim:UnderClaim,chunkId?:string,options:QaStageOptions={}):Promise<{complete:boolean}> {
+ if(!sources.length) return {complete:true};
+ const onPhoto=options.onPhoto ?? (async()=>{});
  const candidates=await deps.db.select().from(catalogOutputs).where(and(eq(catalogOutputs.batchId,batch.id),inArray(catalogOutputs.sourceImageId,sources.map(s=>s.id)),inArray(catalogOutputs.status,["staged","needs_attention"]),isNull(catalogOutputs.qaScores),isNull(catalogOutputs.decision)));
  // A needs_attention output from render (small_source) is judged too, so a note never publishes an unseen image.
  const rows=candidates.filter(row=>row.status==="staged" || (!!row.stagingUri && !row.flags.some(flag=>NOT_JUDGED.has(flag))));
  const groups=sources.map(source=>rows.filter(row=>row.sourceImageId===source.id)).filter(group=>group.length);
  for(const group of groups) {
+  // A stop between groups: the continuation judges only rows without scores, then triages.
+  if(options.shouldStop?.()) return {complete:false};
   await underClaim(async()=>{});
   const first=group[0]!,source=sources.find(s=>s.id===first.sourceImageId)!;
   const [product]=await deps.db.select().from(catalogProducts).where(eq(catalogProducts.id,source.productId));
   if(!product) continue;
   if(!sampledForQa(product.identifier,policy.qaSampleRate)) {
-   await underClaim(async tx=>{for(const row of group) await tx.update(catalogOutputs).set({flags:[...new Set([...row.flags,"qa_sampled_out" as const])],reason:row.reason ?? flagDetails("qa_sampled_out").why,updatedAt:deps.now()}).where(eq(catalogOutputs.id,row.id));});continue;
+   await underClaim(async tx=>{for(const row of group) await tx.update(catalogOutputs).set({flags:[...new Set([...row.flags,"qa_sampled_out" as const])],reason:row.reason ?? flagDetails("qa_sampled_out").why,updatedAt:deps.now()}).where(eq(catalogOutputs.id,row.id));await onPhoto(tx);});continue;
   }
   try {
    const cap=await checkCatalogCaps(deps.db,{batchId:batch.id,now:deps.now()});
@@ -167,6 +180,7 @@ export async function runQaStage(deps:CatalogDeps,batch:Batch,sources:Source[],p
      secondOpinion:result.opinions?.[1] ? {model:result.opinions[1].model,wrongItem:result.opinions[1].wrongItem,view:result.opinions[1].view,backgroundClean:result.opinions[1].scores.background_clean}:null}));
     if(unavailable) {
      for(const row of group) await tx.update(catalogOutputs).set({qaScores:{...main.scores,verdict:"flag",reasons:[flagDetails("qa_unavailable").why],thresholds,judgements,autoAction:null},qaModel:main.model,flags:[...new Set<OutputFlag>([...row.flags,"qa_unavailable"])],status:"needs_attention",reason:flagDetails("qa_unavailable").why,updatedAt:deps.now()}).where(eq(catalogOutputs.id,row.id));
+     await onPhoto(tx);
      return;
     }
     const photoPool=ok.filter(entry=>entry.role==="judge");
@@ -195,13 +209,15 @@ export async function runQaStage(deps:CatalogDeps,batch:Batch,sources:Source[],p
       // Held until the triage below decides; a crash in between leaves the product held, never published unseen.
       status:problemFlags(flags).length ? "needs_attention":row.status,updatedAt:deps.now()}).where(eq(catalogOutputs.id,row.id));
     }
+    await onPhoto(tx);
    });
   } catch(error) {
    if(!(error instanceof CatalogQaCapError)) throw error;
-   await underClaim(async tx=>{for(const row of group) await tx.update(catalogOutputs).set({status:"needs_attention",flags:[...new Set<OutputFlag>([...row.flags,"qa_cap"])],reason:qaCapReason,updatedAt:deps.now()}).where(eq(catalogOutputs.id,row.id));});
+   await underClaim(async tx=>{for(const row of group) await tx.update(catalogOutputs).set({status:"needs_attention",flags:[...new Set<OutputFlag>([...row.flags,"qa_cap"])],reason:qaCapReason,updatedAt:deps.now()}).where(eq(catalogOutputs.id,row.id));await onPhoto(tx);});
   }
  }
  for(const productId of new Set(sources.map(source=>source.productId))) await applyTriage(deps,batch,productId,underClaim,policy);
+ return {complete:true};
 }
 
 /** Judge flags the ladder resolves in the QA stage (code-checked placement fails compliance at render). */
