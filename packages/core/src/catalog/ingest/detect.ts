@@ -76,7 +76,6 @@ export function detectPastedText(text: string): { kind: "google_sheet" | "drive_
 export const SAMPLE_LINKS = 3;
 export const SAMPLE_TIMEOUT_MS = 5_000;
 export const SAMPLE_BYTES = 1024;
-export const PASTE_WAITING = "Checking your links...";
 export const SHARE_PAGES = "These look like share pages, not image links. Download the photos and drop them here, or paste direct image links.";
 
 type Sample = NonNullable<Detected["sample"]>;

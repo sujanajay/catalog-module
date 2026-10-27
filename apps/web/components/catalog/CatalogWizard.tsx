@@ -85,6 +85,13 @@ export default function CatalogWizard({ brands, shareEmail, initialBrand = "", i
     return creating.current;
   }
   const onAdded = useCallback(() => {setHasInputs(true); setPreview(null);}, []);
+  /** Settles when the paste box has no write outstanding; Continue waits for it instead of being disabled (spec 14b F2). */
+  const linksIdle = useRef<{promise: Promise<void>; resolve(): void} | null>(null);
+  const onLinksBusy = useCallback((busy: boolean) => {
+    setLinksBusy(busy);
+    if (busy && !linksIdle.current) {let resolve!: () => void; const promise = new Promise<void>((done) => {resolve = done;}); linksIdle.current = {promise, resolve};}
+    if (!busy && linksIdle.current) {linksIdle.current.resolve(); linksIdle.current = null;}
+  }, []);
   function applyPolled(batch: PolledBatch, value: WizardDetected) {
     setFailReason(batch.counts.failReason);
     setCollecting(!batch.counts.previewReady);
@@ -138,6 +145,8 @@ export default function CatalogWizard({ brands, shareEmail, initialBrand = "", i
     try {
       const batchId = await ensureBatch();
       if(step === 1) {
+        // A paste still being checked is saved first, so the collection includes it.
+        if(linksIdle.current) await linksIdle.current.promise;
         if(name.trim() && name.trim() !== savedName.current) {await wizardApi(batchUrl(batchId),"PATCH",{name});savedName.current = name.trim();}
         await wizardApi(batchUrl(batchId,"/ingest"),"POST");
         await loadDetected(batchId);
@@ -156,9 +165,9 @@ export default function CatalogWizard({ brands, shareEmail, initialBrand = "", i
     } catch(err) {setError(err instanceof Error ? err.message : "This did not finish. Try again.");}
     finally {setWorking(false);}
   }
-  const disabled = working || !!failReason || (step===1 && (!brandSlug || !hasInputs || uploadsBusy || linksBusy)) || (step===2 && (collecting || !detected || sheets.some((s)=>s.identifierColumn<0))) || (step===3 && (!channels.length || collecting)) || (step===4 && (!preview?.ready || !channels.length || !!preview.busy.length || !!preview.overwrite.sameProductPairs.length));
+  const disabled = working || !!failReason || (step===1 && (!brandSlug || !(hasInputs || linksBusy) || uploadsBusy)) || (step===2 && (collecting || !detected || sheets.some((s)=>s.identifierColumn<0))) || (step===3 && (!channels.length || collecting)) || (step===4 && (!preview?.ready || !channels.length || !!preview.busy.length || !!preview.overwrite.sameProductPairs.length));
   return <div className="catalog-wizard"><h1>New batch</h1><ol className="steps" aria-label="Batch steps">{STEPS.map((title,i)=><li key={title} className={step===i+1?"on":step>i+1?"done":""} aria-current={step===i+1?"step":undefined}>{title}</li>)}</ol>
-    <div hidden={step!==1}><WizardStep1 brands={brands} brandSlug={brandSlug} name={name} productType={productType} locked={!!id || isCreating} email={shareEmail} setBrand={(value)=>{if(!id && !creating.current)setBrand(value);}} setName={setName} setProductType={(value)=>{if(!id && !creating.current)setProductType(value);}} ensureBatch={ensureBatch} onUploadsBusy={setUploadsBusy} onLinksBusy={setLinksBusy} onAdded={onAdded}/></div>
+    <div hidden={step!==1}><WizardStep1 brands={brands} brandSlug={brandSlug} name={name} productType={productType} locked={!!id || isCreating} email={shareEmail} setBrand={(value)=>{if(!id && !creating.current)setBrand(value);}} setName={setName} setProductType={(value)=>{if(!id && !creating.current)setProductType(value);}} ensureBatch={ensureBatch} onUploadsBusy={setUploadsBusy} onLinksBusy={onLinksBusy} onAdded={onAdded}/></div>
     {step===2 && id ? <>{detected?<WizardStep2 detected={detected} collecting={collecting} mode={mode} precedence={precedence} sheets={sheets} setMode={setMode} setPrecedence={setPrecedence} setSheets={setSheets} email={shareEmail} id={id} onError={setError} onAccessChecked={async()=>{await loadDetected(id);}}/>:<h2>Check what we found</h2>}{collecting?<p role="status">{wizardCollectingText(batchState,collectTotal,STEP2_COLLECTING_TEXT)}</p>:null}</>:null}
     {(step===2 || step===3) && stalled && id ? <p role="alert">{COLLECT_STALLED_TEXT} <RetryCollectButton batchId={id} onDone={()=>setStalled(false)}/></p>:null}
     {step===3?<><WizardStep3 channels={channels} onChange={setChannels}/>{collecting?<p role="status">{wizardCollectingText(batchState,collectTotal,STEP3_COLLECTING_TEXT)}</p>:null}</>:null}
