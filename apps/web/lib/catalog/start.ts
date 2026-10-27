@@ -52,11 +52,10 @@ export async function startBatch(id: string, value: unknown, _actor: string) {
       const first = locked.busy[0]!;
       throw new HttpError(409, `${first.identifier}${locked.busy.length > 1 ? ` and ${locked.busy.length-1} others are` : " is"} still being processed in batch ${first.batchName}. Wait for it to finish or remove them from this upload.`);
     }
-    const rows = [];
-    for (const [index, plan] of plans.entries()) {
-      const [chunk] = await tx.insert(catalogChunks).values({batchId:id,index,stage:"matte",status:"queued",attempt:0,productIds:plan.productIds,sourceImageIds:sources.filter((s)=>plan.productIds.includes(s.productId)).map((s)=>s.id)}).returning();
-      rows.push(chunk!);
-    }
+    // Spec 16: every chunk row in one insert, so a 7,000-product Start stays well inside the web request limit.
+    const sourceIds = new Map<string, string[]>();
+    for (const s of sources) sourceIds.set(s.productId, [...(sourceIds.get(s.productId) ?? []), s.id]);
+    const rows = plans.length ? await tx.insert(catalogChunks).values(plans.map((plan, index) => ({batchId:id,index,stage:"matte" as const,status:"queued" as const,attempt:0,productIds:plan.productIds,sourceImageIds:plan.productIds.flatMap((p)=>sourceIds.get(p) ?? [])}))).returning() : [];
     await tx.update(catalogBatches).set({status:"matting",startedAt:new Date(),updatedAt:new Date(),counts:{...current.counts,products:products.length,sources:sources.length,outputs:sources.length*batch.channels.length,newProducts:preview.overwrite.newProducts,existingProducts:preview.overwrite.existingProducts.length,shotsToRemove:preview.overwrite.existingProducts.reduce((n,p)=>n+p.shotsToRemove.length,0)}}).where(eq(catalogBatches.id,id));
     return rows;
   });

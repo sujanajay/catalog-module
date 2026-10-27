@@ -5,7 +5,7 @@ import type { Db } from "../../db/client";
 import { createTestDb } from "../../db/testing";
 import { catalogBatches, catalogChunks, EMPTY_BATCH_COUNTS } from "../../db/schema";
 import { chunkTaskId } from "../../tasks";
-import { chunkTimeBudgetMs, chunkWindow, CHUNK_TIME_BUDGET_MS, dispatchChunks, enqueueChunk, recoverBatchChunks } from "./dispatch";
+import { chunkTimeBudgetMs, chunkWindow, CHUNK_TIME_BUDGET_MS, dispatchChunks, enqueueChunk, isBulkBatch, LOAD_BATCH_NAME_PREFIX, recoverBatchChunks, windowFor } from "./dispatch";
 
 let db: Db, close: () => Promise<void>;
 beforeAll(async () => { ({ db, close } = await createTestDb()); }, 60_000);
@@ -61,6 +61,21 @@ describe("chunk task ids and env", () => {
     expect(chunkTimeBudgetMs({ CATALOG_CHUNK_TIME_BUDGET_MS: "60000" })).toBe(60_000);
     expect(chunkTimeBudgetMs({ CATALOG_CHUNK_TIME_BUDGET_MS: "900000" })).toBe(CHUNK_TIME_BUDGET_MS);
     expect(chunkTimeBudgetMs({ CATALOG_CHUNK_TIME_BUDGET_MS: "-5" })).toBe(CHUNK_TIME_BUDGET_MS);
+  });
+});
+
+describe("batch class (spec 16)", () => {
+  it("bulk at BULK_BATCH_PRODUCTS products or a Test Brand load batch; the window follows the class", () => {
+    const batch = (products: number, name = "Spring drop", isTest = false) => ({ isTest, name, counts: { products } });
+    expect(isBulkBatch(batch(99), {})).toBe(false);
+    expect(isBulkBatch(batch(100), {})).toBe(true);
+    expect(isBulkBatch(batch(20), { BULK_BATCH_PRODUCTS: "20" })).toBe(true);
+    expect(isBulkBatch(batch(3, `${LOAD_BATCH_NAME_PREFIX}r1 A`, true), {})).toBe(true);
+    expect(isBulkBatch(batch(3, `${LOAD_BATCH_NAME_PREFIX}r1 A`, false), {})).toBe(false);
+    expect(isBulkBatch({ isTest: false, name: "x", counts: null }, {})).toBe(false);
+    expect(windowFor(false, { CATALOG_CHUNK_WINDOW: "8", CATALOG_BULK_WINDOW: "30" })).toBe(8);
+    expect(windowFor(true, { CATALOG_CHUNK_WINDOW: "8", CATALOG_BULK_WINDOW: "30" })).toBe(30);
+    expect(windowFor(true, { CATALOG_CHUNK_WINDOW: "5" })).toBe(5);
   });
 });
 

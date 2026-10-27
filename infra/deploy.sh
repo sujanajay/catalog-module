@@ -126,7 +126,8 @@ BQ_PROJECT=${BQ_PROJECT:-image-links-agent}
 # 2026-10-20 incident: worker 10 x 2 + web 3 x 3 + jobs 2 x 2 = 33 > 18, every page failed.
 # The Tasks queues dispatch at most worker instances x concurrency at once so a large batch queues tasks instead
 # of hitting 429 "no available instance" and burning retry attempts. Spec 16 F2 (db-custom-2-7680, 400
-# connections): worker 24 x 2 + web 6 + jobs 2 = 56. The defaults and checks live in infra/lib/shape.sh; a shape
+# connections): worker 24 x 4 (photos at once take a second connection per task, shape.sh) + web 6 + jobs 2 = 104
+# of 393. The defaults and checks live in infra/lib/shape.sh; a shape
 # that does not fit (budget, what ila-pg allows now, slots, the asia-south1 CPU quota, the L4 quota and shape)
 # stops the deploy here, before anything is changed.
 shape_defaults
@@ -138,10 +139,11 @@ DB_CONNECTION_BUDGET="max=$DB_MAX_CONNECTIONS;reserved=$DB_RESERVED_CONNECTIONS;
 DB_CONNECTION_BUDGET+=";worker=${WORKER_MAX_INSTANCES}x$WORKER_DB_POOL_MAX;web=${WEB_MAX_INSTANCES}x$WEB_DB_POOL_MAX;jobs=${MAX_CONCURRENT_JOBS}x$JOB_DB_POOL_MAX"
 WORKER_ENV="$ENV_VARS,DB_POOL_MAX=$WORKER_DB_POOL_MAX,BQ_PROJECT=$BQ_PROJECT,BQ_LOCATION=asia-south1,CATALOG_CHUNK_IMAGES=$CHUNK_IMAGES,CATALOG_CHUNK_WINDOW=$CHUNK_WINDOW${CHUNK_BUDGET:+,CATALOG_CHUNK_TIME_BUDGET_MS=$CHUNK_BUDGET}"
 WORKER_ENV+=",DB_CONNECTION_BUDGET=$DB_CONNECTION_BUDGET"
-# Spec 16: the throughput settings. MATTE_INFLIGHT_PER_INSTANCE is read by the matting client now; the others by
-# spec 16 F3 (photos at once, the bulk class and window, the compute cost line), harmless before it.
+# Spec 16: the throughput settings: the matting client's in-flight limit, photos at once, the bulk class and window,
+# the compute cost line (WORKER_CPU / WORKER_CONCURRENCY) and the AI check pacing (only when set).
 WORKER_ENV+=",MATTE_INFLIGHT_PER_INSTANCE=$MATTE_INFLIGHT_PER_INSTANCE,CATALOG_PHOTO_CONCURRENCY=$CATALOG_PHOTO_CONCURRENCY"
 WORKER_ENV+=",CATALOG_BULK_WINDOW=$CATALOG_BULK_WINDOW,BULK_BATCH_PRODUCTS=$BULK_BATCH_PRODUCTS,WORKER_CPU=$WORKER_CPU,WORKER_CONCURRENCY=$WORKER_CONCURRENCY"
+if [ -n "$LLM_INFLIGHT_PER_INSTANCE" ]; then WORKER_ENV+=",LLM_INFLIGHT_PER_INSTANCE=$LLM_INFLIGHT_PER_INSTANCE"; fi
 # The bulk queue (spec 16 3.2.3): only when it has slots; without it the env is absent and every task uses $QUEUE.
 BULK_QUEUE=$QUEUE-bulk
 if [ "$BULK_MAX_DISPATCHES" -gt 0 ]; then WORKER_ENV+=",TASKS_BULK_QUEUE=$BULK_QUEUE"; fi

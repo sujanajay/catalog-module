@@ -51,6 +51,35 @@ export function chunkWindow(env: NodeJS.ProcessEnv = process.env): number {
   return positiveInt(env.CATALOG_CHUNK_WINDOW) ?? DEFAULT_CHUNK_WINDOW;
 }
 
+/** Spec 16: a Test Brand load batch's name starts with this (apps/worker/src/catalog-load.ts names it). */
+export const LOAD_BATCH_NAME_PREFIX = "catalog-test load ";
+/** Spec 16: a batch with at least this many products is bulk (`BULK_BATCH_PRODUCTS`). */
+export const DEFAULT_BULK_BATCH_PRODUCTS = 100;
+export interface BatchClassFields { isTest: boolean; name: string; counts: { products?: number } | null }
+
+/**
+ * Spec 16: a bulk batch (at least `BULK_BATCH_PRODUCTS` products, or a Test Brand load batch) sends its chunk and
+ * publish tasks to the bulk queue when one is configured, and gets the bulk window. Every other batch is an
+ * operator batch: the `catalog` queue and `CATALOG_CHUNK_WINDOW`.
+ */
+export function isBulkBatch(batch: BatchClassFields, env: NodeJS.ProcessEnv = process.env): boolean {
+  const products = batch.counts?.products ?? 0;
+  return products >= (positiveInt(env.BULK_BATCH_PRODUCTS) ?? DEFAULT_BULK_BATCH_PRODUCTS) || (batch.isTest && batch.name.startsWith(LOAD_BATCH_NAME_PREFIX));
+}
+
+/** Spec 16: the per-batch cap of queued or running chunks; `CATALOG_BULK_WINDOW` for bulk (default the operator window). */
+export function windowFor(bulk: boolean, env: NodeJS.ProcessEnv = process.env): number {
+  return bulk ? positiveInt(env.CATALOG_BULK_WINDOW) ?? chunkWindow(env) : chunkWindow(env);
+}
+
+const batchClassColumns = { isTest: catalogBatches.isTest, name: catalogBatches.name, counts: catalogBatches.counts };
+
+/** True when the batch is bulk; false for a missing batch. */
+export async function batchIsBulk(db: Db, batchId: string): Promise<boolean> {
+  const [batch] = await db.select(batchClassColumns).from(catalogBatches).where(eq(catalogBatches.id, batchId));
+  return batch ? isBulkBatch(batch) : false;
+}
+
 /**
  * True when a running chunk's holder is dead at `now`. A claim from this code has lease_until after its
  * started_at; a claim written by code from before 0004 has none (or an old one), and keeps the old
@@ -68,17 +97,18 @@ export function chunkTaskBody(chunk: ChunkTaskRef, extra: Record<string, unknown
   return { chunkId: chunk.id, stage: chunk.stage, step: chunk.step, ...extra };
 }
 
-/** Queues the chunk's current step as its one task. */
-export function enqueueChunk(enqueue: Enqueue, chunk: ChunkTaskRef, extra: Record<string, unknown> = {}): Promise<string> {
-  return enqueue("/tasks/catalog/chunk", chunkTaskBody(chunk, extra), { taskId: chunkTaskId(chunk.id, chunk.stage, chunk.step) });
+/** Queues the chunk's current step as its one task (a bulk batch's on the bulk queue, spec 16). */
+export function enqueueChunk(enqueue: Enqueue, chunk: ChunkTaskRef, extra: Record<string, unknown> = {}, bulk = false): Promise<string> {
+  return enqueue("/tasks/catalog/chunk", chunkTaskBody(chunk, extra), { taskId: chunkTaskId(chunk.id, chunk.stage, chunk.step), ...(bulk ? { bulk } : {}) });
 }
 
+/** `window` overrides the batch class's window (tests, the sweep's override). */
 export interface DispatchOptions { window?: number; now?: Date; log?: Log }
 
 /** Enqueues the chunk's current step; a failure is logged as WARNING `chunk dispatch failed` and returns false. */
-export async function tryEnqueueChunk(enqueue: Enqueue, chunk: { id: string; batchId: string; stage: string; step: number }, log: Log, extra: Record<string, unknown> = {}): Promise<boolean> {
+export async function tryEnqueueChunk(enqueue: Enqueue, chunk: { id: string; batchId: string; stage: string; step: number }, log: Log, extra: Record<string, unknown> = {}, bulk = false): Promise<boolean> {
   try {
-    await enqueueChunk(enqueue, chunk, extra);
+    await enqueueChunk(enqueue, chunk, extra, bulk);
     return true;
   } catch (error) {
     log("chunk dispatch failed", { severity: "WARNING", batchId: chunk.batchId, chunkId: chunk.id, stage: chunk.stage, step: chunk.step, error: error instanceof Error ? error.message : String(error) });
@@ -94,10 +124,13 @@ export async function tryEnqueueChunk(enqueue: Enqueue, chunk: { id: string; bat
  * Returns the number of chunks queued.
  */
 export async function dispatchChunks(db: Db, enqueue: Enqueue, batchId: string, options: DispatchOptions = {}): Promise<number> {
-  const window = options.window ?? chunkWindow(), now = options.now ?? new Date(), log = options.log ?? defaultLog;
+  const now = options.now ?? new Date(), log = options.log ?? defaultLog;
+  let bulk = false;
   const picked = await db.transaction(async (tx) => {
-    const [batch] = await tx.select({ id: catalogBatches.id }).from(catalogBatches).where(and(eq(catalogBatches.id, batchId), inArray(catalogBatches.status, PROCESSING_STATUSES))).for("update");
+    const [batch] = await tx.select(batchClassColumns).from(catalogBatches).where(and(eq(catalogBatches.id, batchId), inArray(catalogBatches.status, PROCESSING_STATUSES))).for("update");
     if (!batch) return [];
+    bulk = isBulkBatch(batch);
+    const window = options.window ?? windowFor(bulk);
     const [active] = await tx.select({ n: count() }).from(catalogChunks).where(and(eq(catalogChunks.batchId, batchId), isNotNull(catalogChunks.dispatchedAt), notInArray(catalogChunks.status, ["done", "failed"])));
     const room = window - (active?.n ?? 0);
     if (room <= 0) return [];
@@ -108,7 +141,7 @@ export async function dispatchChunks(db: Db, enqueue: Enqueue, batchId: string, 
     return tx.update(catalogChunks).set({ dispatchedAt: now }).where(inArray(catalogChunks.id, waiting.map((row) => row.id))).returning();
   });
   for (const chunk of picked) {
-    if (!(await tryEnqueueChunk(enqueue, { ...chunk, batchId }, log))) {
+    if (!(await tryEnqueueChunk(enqueue, { ...chunk, batchId }, log, {}, bulk))) {
       await db.update(catalogChunks).set({ dispatchedAt: null }).where(and(eq(catalogChunks.id, chunk.id), eq(catalogChunks.status, "queued"), eq(catalogChunks.step, chunk.step)));
     }
   }
@@ -124,7 +157,7 @@ export interface RecoveryResult { lapsed: number; lost: number; dispatched: numb
  * touched. Each rule is one guarded update, so a second run at the same time changes nothing.
  */
 export async function recoverBatchChunks(db: Db, enqueue: Enqueue, batchId: string, options: DispatchOptions = {}): Promise<RecoveryResult> {
-  const now = options.now ?? new Date(), log = options.log ?? defaultLog;
+  const now = options.now ?? new Date(), log = options.log ?? defaultLog, bulk = await batchIsBulk(db, batchId);
   const next = { step: sql`${catalogChunks.step} + 1`, stepKnown: true, dispatchedAt: now, taskName: null, leaseUntil: null };
   const lapsed = await db.update(catalogChunks).set({ ...next, status: "queued" })
     .where(and(eq(catalogChunks.batchId, batchId), eq(catalogChunks.status, "running"), leaseLapsed(now))).returning();
@@ -134,7 +167,7 @@ export async function recoverBatchChunks(db: Db, enqueue: Enqueue, batchId: stri
     for (const chunk of chunks) {
       log("chunk recovered", { batchId, chunkId: chunk.id, stage: chunk.stage, step: chunk.step, reason });
       // A failed enqueue keeps the new step and dispatched_at, so the lost-task rule queues it again in 30 minutes.
-      await tryEnqueueChunk(enqueue, { ...chunk, batchId }, log);
+      await tryEnqueueChunk(enqueue, { ...chunk, batchId }, log, {}, bulk);
     }
   }
   const dispatched = await dispatchChunks(db, enqueue, batchId, options);

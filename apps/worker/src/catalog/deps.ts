@@ -7,13 +7,14 @@ import { classifyProductType } from "@catalog/core/catalog/qa/classify";
 import type { RepairOwnDefects } from "@catalog/core/catalog/qa/triage";
 import { repairOwnDefects, type QaRepairContext } from "./qa-stage";
 import type { ProductType } from "@catalog/core/catalog/types";
-import { MattingClient, matteFor } from "@catalog/core/catalog/matte";
+import { MattingClient, mattingClientFromEnv, matteFor } from "@catalog/core/catalog/matte";
 import { prepare, renderAllChannels } from "@catalog/core/catalog/render";
 import { createUpscaler, upscaleConfigFromEnv } from "@catalog/core/catalog/upscale";
 import type { ResolvedPolicy } from "@catalog/core/catalog/types";
 import * as storage from "@catalog/core/storage";
 import { DISPATCH_DEADLINE_SEC, enqueueTask } from "@catalog/core/tasks";
 import { log as structuredLog, toSeverity } from "@catalog/core/log";
+import { positiveIntEnv } from "@catalog/core/concurrency";
 /** One structured JSON line (core/log.ts): a `severity` field picks the severity, INFO when absent. */
 export function catalogLog(message: string, fields: Record<string,unknown> = {}): void {
   structuredLog(toSeverity(fields?.severity) ?? "INFO", message, fields);
@@ -35,17 +36,25 @@ export interface CatalogDeps {
   heartbeat?: (renew: () => Promise<boolean>) => () => void;
   /** Spec 15 E1: the delivery's time budget; absent reads CATALOG_CHUNK_TIME_BUDGET_MS (default 480 s). */
   chunkTimeBudgetMs?: number;
-  /** Spec 15 E5: the per-batch window; absent reads CATALOG_CHUNK_WINDOW (default 8). */
+  /** Spec 15 E5: the per-batch window for every batch; absent uses the batch class's (spec 16: operator or bulk). */
   chunkWindow?: number;
+  /** Spec 16: photos worked on at once inside one delivery; absent reads CATALOG_PHOTO_CONCURRENCY (default 1). */
+  photoConcurrency?: number;
+}
+/** Spec 16: `CATALOG_PHOTO_CONCURRENCY`, the photos one chunk delivery works on at once (default 1, today). */
+export function photoConcurrency(env: NodeJS.ProcessEnv = process.env): number {
+  return positiveIntEnv(env.CATALOG_PHOTO_CONCURRENCY, 1);
 }
 let sharedMatting: MattingClient | undefined;
 // Default rows are check-then-insert; once per process is enough.
 let defaultsEnsured = false;
 export function workerCatalogDeps(db: Db): CatalogDeps {
-  sharedMatting ??= new MattingClient({services:[{baseUrl:process.env.MATTING_URL ?? "http://localhost:8081",target:"cpu"},...(process.env.MATTING_GPU_URL ? [{baseUrl:process.env.MATTING_GPU_URL,target:"gpu" as const}]:[])]});
+  // Spec 16: the CPU service, every GPU service of MATTING_GPU_URLS (or MATTING_GPU_URL) and UPSCALE_URL.
+  sharedMatting ??= mattingClientFromEnv(process.env);
   const matting = sharedMatting;
   // Spec 11: UPSCALE_MODEL (unset: off) and UPSCALE_MIN_SCALE (default 1.5) reach every render of the worker, the
-  // auto-resolve ladder included; the upscaler uses the GPU matting service through the same client and breaker.
+  // auto-resolve ladder included; the upscaler uses the service UPSCALE_URL names (spec 16; unset: the GPU service)
+  // through the same client and its breakers.
   const upscaler = createUpscaler(matting,upscaleConfigFromEnv());
   const render: typeof renderAllChannels = upscaler ? (p,m,channels,ctx)=>renderAllChannels(p,m,channels,{upscaler,...ctx}) : renderAllChannels;
   return {db,storage,matting,enqueue:enqueueTask,fetch,now:()=>new Date(),log:catalogLog,prepare,matteFor,renderAllChannels:render,judgeOutput,classifyProductType,repairOwnDefects,

@@ -14,6 +14,7 @@ import { recordCostEvent, type CostEventInput } from "@catalog/core/cost-events"
 import { qaCallCost } from "@catalog/core/catalog/cost";
 import { flagReason, type ChannelId, type ResolvedPolicy, type OutputFlag } from "@catalog/core/catalog/types";
 import type { CatalogDeps } from "./deps";
+import { eachLimit } from "@catalog/core/concurrency";
 import type { BackoffBudget } from "@catalog/core/llm/openrouter";
 
 type Batch = typeof catalogBatches.$inferSelect;
@@ -121,8 +122,11 @@ const clean = (sentence: string | undefined, fallback: string) => sentence && !M
  * dimensions take the strictest score across the photo's channels, so one defect gives one consistent
  * result everywhere. Then `triageProduct` turns the problems into notes, drops and the few hard holds.
  */
-/** Spec 15 E1: `shouldStop` is asked before each photo group; `onPhoto` runs inside each group's final write. */
-export interface QaStageOptions { shouldStop?: ()=>boolean; onPhoto?: (tx:CatalogDeps["db"])=>Promise<void> }
+/**
+ * Spec 15 E1: `shouldStop` is asked before each photo group; `onPhoto` runs inside each group's final write.
+ * Spec 16: `photoConcurrency` photo groups are judged at once (default 1); started groups finish after a stop.
+ */
+export interface QaStageOptions { shouldStop?: ()=>boolean; onPhoto?: (tx:CatalogDeps["db"])=>Promise<void>; photoConcurrency?: number }
 export async function runQaStage(deps:CatalogDeps,batch:Batch,sources:Source[],policy:ResolvedPolicy,underClaim:UnderClaim,chunkId?:string,options:QaStageOptions={}):Promise<{complete:boolean}> {
  if(!sources.length) return {complete:true};
  const onPhoto=options.onPhoto ?? (async()=>{});
@@ -130,15 +134,14 @@ export async function runQaStage(deps:CatalogDeps,batch:Batch,sources:Source[],p
  // A needs_attention output from render (small_source) is judged too, so a note never publishes an unseen image.
  const rows=candidates.filter(row=>row.status==="staged" || (!!row.stagingUri && !row.flags.some(flag=>NOT_JUDGED.has(flag))));
  const groups=sources.map(source=>rows.filter(row=>row.sourceImageId===source.id)).filter(group=>group.length);
- for(const group of groups) {
-  // A stop between groups: the continuation judges only rows without scores, then triages.
-  if(options.shouldStop?.()) return {complete:false};
+ // A stop between groups: the continuation judges only rows without scores, then triages.
+ const notStarted=await eachLimit(groups,options.photoConcurrency ?? 1,async group=>{
   await underClaim(async()=>{});
   const first=group[0]!,source=sources.find(s=>s.id===first.sourceImageId)!;
   const [product]=await deps.db.select().from(catalogProducts).where(eq(catalogProducts.id,source.productId));
-  if(!product) continue;
+  if(!product) return;
   if(!sampledForQa(product.identifier,policy.qaSampleRate)) {
-   await underClaim(async tx=>{for(const row of group) await tx.update(catalogOutputs).set({flags:[...new Set([...row.flags,"qa_sampled_out" as const])],reason:row.reason ?? flagDetails("qa_sampled_out").why,updatedAt:deps.now()}).where(eq(catalogOutputs.id,row.id));await onPhoto(tx);});continue;
+   await underClaim(async tx=>{for(const row of group) await tx.update(catalogOutputs).set({flags:[...new Set([...row.flags,"qa_sampled_out" as const])],reason:row.reason ?? flagDetails("qa_sampled_out").why,updatedAt:deps.now()}).where(eq(catalogOutputs.id,row.id));await onPhoto(tx);});return;
   }
   try {
    const cap=await checkCatalogCaps(deps.db,{batchId:batch.id,now:deps.now()});
@@ -215,7 +218,8 @@ export async function runQaStage(deps:CatalogDeps,batch:Batch,sources:Source[],p
    if(!(error instanceof CatalogQaCapError)) throw error;
    await underClaim(async tx=>{for(const row of group) await tx.update(catalogOutputs).set({status:"needs_attention",flags:[...new Set<OutputFlag>([...row.flags,"qa_cap"])],reason:qaCapReason,updatedAt:deps.now()}).where(eq(catalogOutputs.id,row.id));await onPhoto(tx);});
   }
- }
+ },()=>!!options.shouldStop?.());
+ if(notStarted!==null) return {complete:false};
  for(const productId of new Set(sources.map(source=>source.productId))) await applyTriage(deps,batch,productId,underClaim,policy);
  return {complete:true};
 }

@@ -121,6 +121,20 @@ describe("enqueueTask", () => {
     expect(reqs[0]!.task.httpRequest.oidcToken).toEqual(reqs[1]!.task.httpRequest.oidcToken);
   });
 
+  it("spec 16: sends a bulk batch's chunk and publish tasks to TASKS_BULK_QUEUE when set; operator and other routes stay", async () => {
+    const { client, createTask } = fakeClient();
+    const split = { ...env, TASKS_INGEST_QUEUE: "catalog-ingest", TASKS_BULK_QUEUE: "catalog-bulk" };
+    await enqueueTask("/tasks/catalog/chunk", { chunkId: "c1" }, { env: split, client, bulk: true, taskId: "chunk-c1-matte-0" });
+    await enqueueTask("/tasks/catalog/publish", { batchId: "b1" }, { env: split, client, bulk: true });
+    await enqueueTask("/tasks/catalog/chunk", { chunkId: "c2" }, { env: split, client });
+    await enqueueTask("/tasks/catalog/finalize", { batchId: "b1" }, { env: split, client, bulk: true });
+    await enqueueTask("/tasks/catalog/ingest", { batchId: "b1" }, { env: split, client, bulk: true });
+    await enqueueTask("/tasks/catalog/chunk", { chunkId: "c3" }, { env, client, bulk: true });
+    const queues = createTask.mock.calls.map(([req]) => (req as { parent: string }).parent.split("/").at(-1));
+    expect(queues).toEqual(["catalog-bulk", "catalog-bulk", "catalog", "catalog", "catalog-ingest", "catalog"]);
+    expect((createTask.mock.calls[0]![0] as { task: BuiltTask }).task.name).toBe("projects/image-links-agent/locations/asia-south1/queues/catalog-bulk/tasks/chunk-c1-matte-0");
+  });
+
   it("keeps ingest tasks on TASKS_QUEUE (or the default) when TASKS_INGEST_QUEUE is unset", async () => {
     const { client, createTask } = fakeClient();
     await enqueueTask("/tasks/catalog/ingest", { batchId: "b1" }, { env, client });

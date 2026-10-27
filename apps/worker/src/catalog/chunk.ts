@@ -7,7 +7,9 @@ import { batchPrefix, derivedPath, publicObjectPath, publicUrl, stagingPath } fr
 import { planProduct, shotGeometry, trimRules, UnsupportedSourceError, type Matte } from "@catalog/core/catalog/render";
 import { renderKey, renderKeys, rerenderedKey } from "@catalog/core/catalog/pipeline/publish";
 import { catalogLlmDeps, CatalogQaCapError, limitDeliveryBackoff, runQaStage, spendCapHit } from "./qa-stage";
-import { CHUNK_HEARTBEAT_MS, CHUNK_LEASE_MS, CHUNK_MAX_STALLS, CHUNK_STALLED_REASON, chunkTimeBudgetMs, chunkWindow, dispatchChunks, leaseLapsed, tryEnqueueChunk } from "@catalog/core/catalog/pipeline/dispatch";
+import { CHUNK_HEARTBEAT_MS, CHUNK_LEASE_MS, CHUNK_MAX_STALLS, CHUNK_STALLED_REASON, chunkTimeBudgetMs, dispatchChunks, isBulkBatch, leaseLapsed, tryEnqueueChunk } from "@catalog/core/catalog/pipeline/dispatch";
+import { eachLimit, positiveIntEnv, serialLock } from "@catalog/core/concurrency";
+import { isCpuUpscalerId } from "@catalog/core/catalog/upscale";
 import { recordCostEvents, type CostEventInput } from "@catalog/core/cost-events";
 import { matteCallUsd } from "@catalog/core/catalog/cost";
 import type { CostOutcome } from "@catalog/core/db/schema";
@@ -23,7 +25,7 @@ import { DISPATCH_DEADLINE_SEC } from "@catalog/core/tasks";
 import { resolvePhoto } from "./auto-resolve";
 import { recordCost } from "@catalog/core/spend";
 import type { HandleOptions, HandleResult } from "../server";
-import { enqueueFinalize, refreshBatchProgress, type CatalogDeps } from "./deps";
+import { enqueueFinalize, photoConcurrency, refreshBatchProgress, type CatalogDeps } from "./deps";
 
 /** The first wait matches the matting breaker's cool-down, so the retry reaches a half-open service. */
 export const MATTE_RETRY_WAIT_MS = BREAKER_COOLDOWN_MS;
@@ -48,6 +50,14 @@ export const defaultHeartbeat = (renew:()=>Promise<boolean>) => {
   timer.unref?.();
   return ()=>clearInterval(timer);
 };
+
+/**
+ * Spec 16: the vCPU-seconds one second of a delivery uses, `WORKER_CPU / WORKER_CONCURRENCY` (deploy.sh passes
+ * both; defaults 2 and 2, today's worker shape).
+ */
+export function computeVcpuPerSecond(env: NodeJS.ProcessEnv = process.env): number {
+  return positiveIntEnv(env.WORKER_CPU, 2)/positiveIntEnv(env.WORKER_CONCURRENCY, 2);
+}
 
 /** The delivery's deps with each slow call timed into `steps` (the calls themselves are unchanged). */
 function timedDeps(deps:CatalogDeps,steps:DeliverySteps):CatalogDeps {
@@ -110,7 +120,13 @@ export async function handleChunkTask(rawDeps: CatalogDeps, body: Record<string,
   const ownsClaim = () => and(eq(catalogChunks.id,chunk!.id),eq(catalogChunks.taskName,claim),eq(catalogChunks.stage,chunk!.stage),eq(catalogChunks.status,"running"));
   // Ownership changes lock this same row. Keep compute/downloads outside these small write sections.
   // Every write also renews the lease (spec 15 E2), but never past the delivery's own deadline.
-  async function underClaim<T>(write:(db:CatalogDeps["db"])=>Promise<T>):Promise<T> {
+  // Spec 16: photos run in parallel, but their writes take turns (they lock the same chunk row anyway), so one
+  // delivery holds at most one pool connection for writes and a lost claim stops every photo's next write.
+  const writeTurn = serialLock();
+  function underClaim<T>(write:(db:CatalogDeps["db"])=>Promise<T>):Promise<T> {
+    return writeTurn(()=>claimWrite(write));
+  }
+  async function claimWrite<T>(write:(db:CatalogDeps["db"])=>Promise<T>):Promise<T> {
     if (lost) throw new Error(OWNERSHIP_CHANGED);
     const t0 = Date.now();
     try {
@@ -199,6 +215,13 @@ export async function handleChunkTask(rawDeps: CatalogDeps, body: Record<string,
     limitDeliveryBackoff(batch,deadlineAt-QA_BACKOFF_DEADLINE_MARGIN_MS,deps.now);
     // Spec 15 E1: the index of the product to resume at when the budget stopped this delivery (null: finished).
     let stopAt: number | null = null;
+    // Spec 16: a product's photos are worked on `photoLimit` at a time. The budget is asked before each photo
+    // starts (`outOfTime` then stops the rest; started photos finish); one photo's error stops new photos and is
+    // rethrown once the started ones are done.
+    const photoLimit = deps.photoConcurrency ?? photoConcurrency();
+    let outOfTime = false;
+    const eachPhoto = <T>(items:readonly T[],fn:(item:T)=>Promise<void>) => eachLimit(items,photoLimit,fn,()=>outOfTime);
+    const startPhoto = () => { if (!budgetLeft()) outOfTime = true; return !outOfTime; };
     products: for (const [index,productId] of chunk.productIds.entries()) {
       if (index < fromProduct) continue;
       if (!budgetLeft()) { stopAt = index; break; }
@@ -253,7 +276,7 @@ export async function handleChunkTask(rawDeps: CatalogDeps, body: Record<string,
       }
       // Threshold, floor, mode and sampling follow the product's policy; the judge stays the batch's (4.4).
       if(chunk.stage==="qa") {
-        const qa=await runQaStage(deps,batch,sources,productPolicy,underClaim,chunk.id,{shouldStop:()=>!budgetLeft(),onPhoto:photoDone});
+        const qa=await runQaStage(deps,batch,sources,productPolicy,underClaim,chunk.id,{shouldStop:()=>!budgetLeft(),onPhoto:photoDone,photoConcurrency:photoLimit});
         if(!qa.complete) { stopAt = index; break; }
         continue;
       }
@@ -269,7 +292,7 @@ export async function handleChunkTask(rawDeps: CatalogDeps, body: Record<string,
       }
       if (chunk.stage === "matte") {
         const live = await deps.db.select().from(catalogOutputs).where(and(eq(catalogOutputs.productId,productId),eq(catalogOutputs.isLive,true)));
-        for (const source of sources) {
+        await eachPhoto(sources,async source=>{
           for (const channel of batch.channels) {
             const keys = renderKeys({sourceSha256:source.sha256,channel,n:source.n,policyKey:`default|${productPolicy.matteModel}`}), key = keys[0]!;
             if (live.some(o=>o.channel===channel && o.n===source.n && keys.includes(o.renderKey))) continue;
@@ -279,12 +302,12 @@ export async function handleChunkTask(rawDeps: CatalogDeps, body: Record<string,
             await underClaim(async tx=>tx.insert(catalogOutputs).values({batchId:batch.id,productId,sourceImageId:source.id,channel,n:source.n,canvasW:0,canvasH:0,scale:0,placedX:0,placedY:0,renderKey:key,objectPath:path,publicUrl:publicUrl(deps.storage.getPublicBucketName(),path),status:chart ? "skipped":"pending",flags:chart ? ["chart_image"]:source.flags.filter(flag=>flag==="type_unknown" || flag==="transparent"),reason:chart ? flagReason("chart_image"):null}));
           }
           const pending = await deps.db.select().from(catalogOutputs).where(and(eq(catalogOutputs.sourceImageId,source.id),eq(catalogOutputs.batchId,batch.id),eq(catalogOutputs.status,"pending")));
-          if (!pending.length || source.matteUri) continue;
+          if (!pending.length || source.matteUri) return;
           // Spec 15 E1: a matted photo is saved (matteUri), so the continuation starts at this photo.
-          if (!budgetLeft()) { stopAt = index; break products; }
+          if (!startPhoto()) return;
           try {
             const mattePath = derivedPath(derivedPrefix(source),product.pathKey,source.n,"matte"), gs = deps.storage.toGsUri(deps.storage.getBucketName(),mattePath), cached = await deps.storage.headObject(gs);
-            if (cached.exists) { await underClaim(async tx=>{await tx.update(catalogSourceImages).set({matteUri:gs,status:"matted"}).where(eq(catalogSourceImages.id,source.id));await photoDone(tx);}); continue; }
+            if (cached.exists) { await underClaim(async tx=>{await tx.update(catalogSourceImages).set({matteUri:gs,status:"matted"}).where(eq(catalogSourceImages.id,source.id));await photoDone(tx);}); return; }
             const raw = await deps.storage.downloadBuffer(source.rawUri);
             let conversionFailure:unknown;
             let p:Awaited<ReturnType<CatalogDeps["prepare"]>>;
@@ -299,7 +322,7 @@ export async function handleChunkTask(rawDeps: CatalogDeps, body: Record<string,
                 await tx.update(catalogOutputs).set({status:"skipped",flags:["chart_image"],reason:flagReason("chart_image"),updatedAt:deps.now()}).where(and(eq(catalogOutputs.sourceImageId,source.id),eq(catalogOutputs.batchId,batch.id),eq(catalogOutputs.status,"pending")));
                 await photoDone(tx);
               });
-              continue;
+              return;
             }
             await underClaim(async()=>{});
             let matte = await deps.matteFor(p,deps.matting,productPolicy.matteModel,{},trace); mattingMs += matte.ms;
@@ -328,7 +351,8 @@ export async function handleChunkTask(rawDeps: CatalogDeps, body: Record<string,
               note(matteRow(productId,source.id,next,++matteCalls,next.source==="model" ? "ok":"failed"));
               return next.source==="model" ? next:null;
             }});
-            steps.guard += Date.now()-guardStart-(steps.matte-matteBefore);
+            // With photos in parallel the matte total also holds other photos' calls, so this is an estimate.
+            steps.guard += Math.max(0,Date.now()-guardStart-(steps.matte-matteBefore));
             if (resolved.actions.length) deps.log("catalog matte guard",{batchId:batch.id,sourceImageId:source.id,steps:resolved.actions.map(a=>`${a.step}:${a.result}`),passthrough:resolved.passthrough});
             if (resolved.soleStripRecovered) deps.log("catalog sole strip recovered",{batchId:batch.id,sourceImageId:source.id,pixels:resolved.soleStripRecovered});
             matte = resolved.matte;
@@ -348,11 +372,13 @@ export async function handleChunkTask(rawDeps: CatalogDeps, body: Record<string,
             await underClaim(async tx=>tx.update(catalogSourceImages).set({status:"failed",error}).where(eq(catalogSourceImages.id,source.id)));
             await underClaim(async tx=>{await tx.update(catalogOutputs).set({status:"failed",reason:error,error,updatedAt:deps.now()}).where(and(eq(catalogOutputs.sourceImageId,source.id),eq(catalogOutputs.batchId,batch.id),eq(catalogOutputs.status,"pending")));await photoDone(tx);});
           }
-        }
+        });
+        if (outOfTime) { stopAt = index; break products; }
       } else if(chunk.stage==="render") {
-        const prepared: { source: typeof sources[number]; p: Awaited<ReturnType<CatalogDeps["prepare"]>>; matte: Matte }[] = [];
+        // In source order (the product plan reads the shots in order), whichever photo finishes first.
+        const ready: ({ source: typeof sources[number]; p: Awaited<ReturnType<CatalogDeps["prepare"]>>; matte: Matte } | undefined)[] = new Array(sources.length);
         const productOutputs = await deps.db.select().from(catalogOutputs).where(and(eq(catalogOutputs.batchId,batch.id),eq(catalogOutputs.productId,productId),eq(catalogOutputs.status,"pending")));
-        for (const source of sources) {
+        await eachPhoto(sources.map((source,at)=>({source,at})),async ({source,at})=>{
           const pending = await deps.db.select().from(catalogOutputs).where(and(eq(catalogOutputs.sourceImageId,source.id),eq(catalogOutputs.batchId,batch.id),eq(catalogOutputs.status,"pending")));
           let matteUri = source.matteUri;
           // Unchanged angles still take part in the product-wide plan (one canvas per channel, Styli's uniform scale).
@@ -360,24 +386,26 @@ export async function handleChunkTask(rawDeps: CatalogDeps, body: Record<string,
             const [old] = await deps.db.select().from(catalogSourceImages).where(and(eq(catalogSourceImages.productId,productId),eq(catalogSourceImages.sha256,source.sha256),eq(catalogSourceImages.isCurrent,true)));
             matteUri ??= old?.matteUri ?? null;
           }
-          if ((!pending.length && !productOutputs.length) || !matteUri) continue;
+          if ((!pending.length && !productOutputs.length) || !matteUri) return;
           // Spec 15 E1: staged outputs are skipped and the plan is rebuilt from the stored mattes, so a stop here is safe.
-          if (!budgetLeft()) { stopAt = index; break products; }
+          if (!startPhoto()) return;
           try {
             const p = await deps.prepare((await deps.storage.downloadBuffer(source.rawUri)).buf,source.originalName,b=>deps.matting.convert(b,trace));
             const alpha = await sharp((await deps.storage.downloadBuffer(matteUri)).buf).toColourspace("b-w").raw().toBuffer();
-            prepared.push({source,p,matte:{alpha,width:p.width,height:p.height,model:source.matteModel ?? productPolicy.matteModel,ms:source.matteMs ?? 0,source:source.flags.includes("alpha_source") ? "alpha_source":"model",target:null,sentLongSide:null}});
+            ready[at] = {source,p,matte:{alpha,width:p.width,height:p.height,model:source.matteModel ?? productPolicy.matteModel,ms:source.matteMs ?? 0,source:source.flags.includes("alpha_source") ? "alpha_source":"model",target:null,sentLongSide:null}};
           } catch(error) {
             await underClaim(async tx=>tx.update(catalogOutputs).set({status:"failed",reason:error instanceof Error ? error.message : String(error),updatedAt:deps.now()}).where(and(eq(catalogOutputs.sourceImageId,source.id),eq(catalogOutputs.batchId,batch.id),eq(catalogOutputs.status,"pending"))));
           }
-        }
+        });
+        if (outOfTime) { stopAt = index; break products; }
+        const prepared = ready.filter(entry=>entry!==undefined);
         const geometry = prepared.flatMap(({p,matte})=>{const shot=shotGeometry(matte.alpha,p.width,p.height,{rgb:p.rgb,...trimRules(product.productType,matte)});return shot ? [shot]:[];});
         const productPlan = (c:keyof typeof CHANNELS) => geometry.length ? planProduct(CHANNELS[c],geometry):undefined;
         const uniformScale = productPlan("styli")?.uniformScale;
-        for (const {source,p,matte} of prepared) {
+        await eachPhoto(prepared,async ({source,p,matte})=>{
           const outputs = await deps.db.select().from(catalogOutputs).where(and(eq(catalogOutputs.sourceImageId,source.id),eq(catalogOutputs.batchId,batch.id),eq(catalogOutputs.status,"pending")));
           // 05 rule 3 plus: a product held in a hand does not rest on a floor, so it gets no contact shadow.
-          if (outputs.length && !budgetLeft()) { stopAt = index; break products; }
+          if (outputs.length && !startPhoto()) return;
           const shadowAllowed = shadowSynthesisAllowed(product.productType,source.flags) && !heldInHand(p,matte.alpha).held;
           for (const output of outputs) try {
             const path = stagingPath(prefix,product.pathKey,output.channel,source.n), uri = deps.storage.toGsUri(deps.storage.getBucketName(),path), head = await deps.storage.headObject(uri);
@@ -386,12 +414,14 @@ export async function handleChunkTask(rawDeps: CatalogDeps, body: Record<string,
             const rendered = (await deps.renderAllChannels(p,matte,[output.channel],{shotNumber:source.n,productType:product.productType ?? "other",synthesiseShadow:shadowAllowed,identifier:product.identifier,publicObjectPath:output.objectPath,canvas:productPlan(output.channel)?.canvas,...(output.channel==="styli" ? {uniformScale}:{}),trace:{batchId:batch.id,productId}}))[output.channel];
             renderMs += +deps.now()-renderStart;
             // Ledger: worker time per output (ms only; the per-chunk compute row carries the money) without the
-            // photo's one GPU upscale call, which gets its own row priced at the GPU service rate (an output
-            // that reused the x2 image records no upscale row and no upscale time).
+            // photo's one upscale call, which gets its own row priced at the rate of the service that made it (spec 16:
+            // the CPU service when the upscaler id says so, else the GPU; an output that reused the x2 image records
+            // no upscale row and no upscale time).
             const upscaleMs = rendered.upscale && !rendered.upscale.reused ? rendered.upscale.ms : 0;
             steps.upscale += upscaleMs; steps.render -= upscaleMs;
             note({productId,sourceImageId:source.id,outputId:output.id,channel:output.channel,stage:"render",kind:"render",engine:"worker",ms:Math.max(0,+deps.now()-renderStart-upscaleMs),usd:0,outcome:rendered.status==="failed" ? "failed":"ok"});
-            if (upscaleMs) note({productId,sourceImageId:source.id,outputId:output.id,channel:output.channel,stage:"upscale",kind:"upscale_call",engine:"gpu",ms:upscaleMs,...matteCallUsd("gpu",upscaleMs)});
+            const upscaleTarget = rendered.upscale && isCpuUpscalerId(rendered.upscale.model) ? "cpu":"gpu";
+            if (upscaleMs) note({productId,sourceImageId:source.id,outputId:output.id,channel:output.channel,stage:"upscale",kind:"upscale_call",engine:upscaleTarget,ms:upscaleMs,...matteCallUsd(upscaleTarget,upscaleMs)});
             // Spec 11: the per-image upscale time, for the cost record (the call time is inside renderMs too; one call per photo,
             // so an output that reused the photo's x2 image records 0). An upscaled
             // output's render_key names the upscaler (a redelivered render whose row already says `upscaled` keeps its key, and
@@ -419,11 +449,12 @@ export async function handleChunkTask(rawDeps: CatalogDeps, body: Record<string,
             deps.log("catalog auto-resolve failed",{batchId:batch.id,sourceImageId:source.id,error:error instanceof Error ? error.message:String(error)});
           }
           if (outputs.length) await underClaim(photoDone);
-        }
+        });
+        if (outOfTime) { stopAt = index; break products; }
       }
     }
     const changedOutputs = await deps.db.select({id:catalogOutputs.id}).from(catalogOutputs).where(and(eq(catalogOutputs.batchId,batch.id),inArray(catalogOutputs.productId,chunk.productIds)));
-    const wall = changedOutputs.length ? Math.max(0,(+deps.now()-+started)/1000)*2:0, usd = wall*Number(process.env.COMPUTE_USD_PER_VCPU_SECOND ?? 0);
+    const wall = changedOutputs.length ? Math.max(0,(+deps.now()-+started)/1000)*computeVcpuPerSecond():0, usd = wall*Number(process.env.COMPUTE_USD_PER_VCPU_SECOND ?? 0);
     await underClaim(async tx=>{
     await tx.update(catalogBatches).set({cost:sql`${catalogBatches.cost} || jsonb_build_object('mattingMs',(${catalogBatches.cost}->>'mattingMs')::numeric+${mattingMs}::numeric,'renderMs',(${catalogBatches.cost}->>'renderMs')::numeric+${renderMs}::numeric,'computeVcpuSeconds',(${catalogBatches.cost}->>'computeVcpuSeconds')::numeric+${wall}::numeric,'computeUsd',(${catalogBatches.cost}->>'computeUsd')::numeric+${usd}::numeric)`}).where(eq(catalogBatches.id,batch.id));
     await recordCost(tx,{brandSlug:batch.brandSlug,batchId:batch.id,engine:"catalog_compute",costUsd:usd});
@@ -473,8 +504,10 @@ export async function handleChunkTask(rawDeps: CatalogDeps, body: Record<string,
   }
   /** Queues the chunk's new step; a failed enqueue is left to the sweep (the lost-task rule, 30 minutes). */
   async function dispatchNext(next:NonNullable<typeof chunk>,extra:Record<string,unknown> = {}) {
-    await tryEnqueueChunk(deps.enqueue,next,deps.log,extra);
+    await tryEnqueueChunk(deps.enqueue,next,deps.log,extra,bulk());
   }
+  /** Spec 16: a bulk batch's chunk and publish tasks go to the bulk queue (when one is configured). */
+  function bulk():boolean { return !!batch && isBulkBatch(batch); }
   /** Terminal: the chunk fails, its pending outputs fail with `outputReason`, the batch moves on. False when not the owner. */
   async function failChunk(error:string,outputReason:string):Promise<boolean> {
     const failed = await deps.db.update(catalogChunks).set({status:"failed",taskName:null,leaseUntil:null,error,finishedAt:deps.now()}).where(ownsClaim()).returning({id:catalogChunks.id});
@@ -484,10 +517,10 @@ export async function handleChunkTask(rawDeps: CatalogDeps, body: Record<string,
     return true;
   }
   async function finish() {
-    for (const productId of chunk!.productIds) await deps.enqueue("/tasks/catalog/publish",{batchId:chunk!.batchId,productId},{taskId:`publish-${chunk!.batchId}-${productId}-chunk`});
+    for (const productId of chunk!.productIds) await deps.enqueue("/tasks/catalog/publish",{batchId:chunk!.batchId,productId},{taskId:`publish-${chunk!.batchId}-${productId}-chunk`,...(bulk() ? {bulk:true}:{})});
     const chunks = await deps.db.select().from(catalogChunks).where(eq(catalogChunks.batchId,chunk!.batchId));
     if (chunks.every(c=>c.status==="done" || c.status==="failed")) { await deps.db.update(catalogBatches).set({status:"publishing"}).where(and(eq(catalogBatches.id,chunk!.batchId),inArray(catalogBatches.status,["matting","rendering","qa"]))); await enqueueFinalize(deps,chunk!.batchId); }
     // Spec 15 E5: a finished chunk frees a slot in the batch's window.
-    else await dispatchChunks(deps.db,deps.enqueue,chunk!.batchId,{now:deps.now(),log:deps.log,window:deps.chunkWindow ?? chunkWindow()});
+    else await dispatchChunks(deps.db,deps.enqueue,chunk!.batchId,{now:deps.now(),log:deps.log,...(deps.chunkWindow ? {window:deps.chunkWindow}:{})});
   }
 }

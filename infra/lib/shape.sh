@@ -41,7 +41,6 @@ shape_defaults() {
   WORKER_CPU=${WORKER_CPU:-2}
   WORKER_MEMORY=${WORKER_MEMORY:-2Gi}
   WORKER_CONCURRENCY=${WORKER_CONCURRENCY:-2}
-  WORKER_DB_POOL_MAX=${WORKER_DB_POOL_MAX:-2}
   WEB_MAX_INSTANCES=3
   WEB_CPU=1
   WEB_DB_POOL_MAX=2
@@ -76,10 +75,22 @@ shape_defaults() {
   # Which matting service upscales: gpu (spec 11) or cpu (spec 16, the GPUs then do only cut-outs).
   UPSCALE_SERVICE=${UPSCALE_SERVICE:-gpu}
   MATTE_INFLIGHT_PER_INSTANCE=${MATTE_INFLIGHT_PER_INSTANCE:-4}
-  # Read by the worker and the web once spec 16 F3 is merged; harmless before.
+  # Spec 16 F3, read by the worker (and the bulk values by the web).
   CATALOG_PHOTO_CONCURRENCY=${CATALOG_PHOTO_CONCURRENCY:-1}
   CATALOG_BULK_WINDOW=${CATALOG_BULK_WINDOW:-8}
   BULK_BATCH_PRODUCTS=${BULK_BATCH_PRODUCTS:-100}
+  # AI check pacing per worker instance (spec 16 F3); empty means no cap (today).
+  LLM_INFLIGHT_PER_INSTANCE=${LLM_INFLIGHT_PER_INSTANCE:-}
+  # Worker pool per instance. One photo at a time: one connection per in-flight task (2, today). Several photos
+  # at once: a delivery's writes take turns on one connection, and its reads, lease renewals and AI cost rows
+  # need a second, so 2 per in-flight task (4 at concurrency 2). The budget check below still has the last word.
+  if [ -z "${WORKER_DB_POOL_MAX:-}" ]; then
+    if [[ "$CATALOG_PHOTO_CONCURRENCY$WORKER_CONCURRENCY" =~ ^[0-9]+$ ]] && [ "$CATALOG_PHOTO_CONCURRENCY" -gt 1 ]; then
+      WORKER_DB_POOL_MAX=$((WORKER_CONCURRENCY * 2))
+    else
+      WORKER_DB_POOL_MAX=2
+    fi
+  fi
   # Cloud Run CPU quota in asia-south1 is 200 vCPU; keep 10 spare.
   CPU_QUOTA_LIMIT=190
 }
@@ -106,6 +117,7 @@ shape_check() {
   [[ "$WORKER_MEMORY" =~ ^[1-9][0-9]*Gi$ ]] || shape_fail "WORKER_MEMORY must look like 4Gi, got '$WORKER_MEMORY'"
   [[ "$GPU_MEMORY" =~ ^[1-9][0-9]*Gi$ ]] || shape_fail "GPU_MEMORY must look like 32Gi, got '$GPU_MEMORY'"
   [[ -z "$GPU_MEM_LIMIT_BYTES" || "$GPU_MEM_LIMIT_BYTES" =~ ^[1-9][0-9]*$ ]] || shape_fail "GPU_MEM_LIMIT_BYTES must be a byte count such as 6442450944"
+  [[ -z "$LLM_INFLIGHT_PER_INSTANCE" || "$LLM_INFLIGHT_PER_INSTANCE" =~ ^[1-9][0-9]*$ ]] || shape_fail "LLM_INFLIGHT_PER_INSTANCE must be empty or a whole number such as 6"
   case "$UPSCALE_SERVICE" in gpu|cpu) ;; *) shape_fail "UPSCALE_SERVICE must be gpu or cpu, got '$UPSCALE_SERVICE'" ;; esac
 
   # Connections: every service at max instances, every pool full, inside what ila-pg allows.

@@ -44,7 +44,7 @@ import { batchPrefix } from "@catalog/core/catalog/naming";
 import { lockProducts } from "@catalog/core/catalog/products";
 import { pollUntilEnd } from "@catalog/core/catalog/load/poll";
 import { planChunks } from "@catalog/core/catalog/pipeline/plan-chunks";
-import { chunkImages, dispatchChunks } from "@catalog/core/catalog/pipeline/dispatch";
+import { chunkImages, dispatchChunks, LOAD_BATCH_NAME_PREFIX } from "@catalog/core/catalog/pipeline/dispatch";
 import { cleanupTestBatches } from "@catalog/core/catalog/test-cleanup";
 import { CHANNEL_IDS, type ChannelId } from "@catalog/core/catalog/types";
 import * as storage from "@catalog/core/storage";
@@ -96,7 +96,7 @@ async function realProducts() {
 async function createBatch(db: Db, run: string, label: string, channels: ChannelId[]) {
   const [brand] = await db.select().from(brandMaster).where(eq(brandMaster.slug, BRAND));
   if (!brand) throw new Error(`The test brand ${BRAND} is missing. Run the migrate job first.`);
-  const [batch] = await db.insert(catalogBatches).values({ brandSlug: BRAND, brandName: brand.name, name: `catalog-test load ${run} ${label}`, isTest: true, createdBy: "catalog-test@opptra.com", productType: "auto", channels, options: DEFAULT_BATCH_OPTIONS }).returning();
+  const [batch] = await db.insert(catalogBatches).values({ brandSlug: BRAND, brandName: brand.name, name: `${LOAD_BATCH_NAME_PREFIX}${run} ${label}`, isTest: true, createdBy: "catalog-test@opptra.com", productType: "auto", channels, options: DEFAULT_BATCH_OPTIONS }).returning();
   return batch!;
 }
 

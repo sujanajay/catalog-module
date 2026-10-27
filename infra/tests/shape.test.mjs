@@ -16,7 +16,7 @@ const NAMES = ['DB_MAX_CONNECTIONS', 'WORKER_MAX_INSTANCES', 'WORKER_CPU', 'WORK
   'WORKER_DB_POOL_MAX', 'TASKS_MAX_DISPATCHES', 'BULK_MAX_DISPATCHES', 'INGEST_MAX_DISPATCHES',
   'MATTING_CPU_MAX_INSTANCES', 'GPU_MAX_INSTANCES', 'GPU_CPU', 'GPU_MEMORY', 'GPU_CONCURRENCY', 'MAX_RESIDENT_SESSIONS',
   'GPU_MEM_LIMIT_BYTES', 'UPSCALE_SERVICE', 'MATTE_INFLIGHT_PER_INSTANCE', 'CATALOG_PHOTO_CONCURRENCY',
-  'CATALOG_BULK_WINDOW', 'BULK_BATCH_PRODUCTS'];
+  'CATALOG_BULK_WINDOW', 'BULK_BATCH_PRODUCTS', 'LLM_INFLIGHT_PER_INSTANCE'];
 const OUT = [...NAMES, 'CATALOG_DB_TOTAL', 'CATALOG_DB_LIMIT', 'SLOTS_TOTAL', 'SLOTS_CAPACITY', 'CPU_TOTAL'];
 
 // The usd() helper and the two price defaults, taken from deploy.sh so the test follows the script.
@@ -61,13 +61,13 @@ const cases = [
     expect: {STATUS: '0', WORKER_MAX_INSTANCES: '4', WORKER_CPU: '2', WORKER_MEMORY: '2Gi', WORKER_CONCURRENCY: '2',
       TASKS_MAX_DISPATCHES: '6', BULK_MAX_DISPATCHES: '0', INGEST_MAX_DISPATCHES: '2', MATTING_CPU_MAX_INSTANCES: '20',
       GPU_MAX_INSTANCES: '3', GPU_CPU: '4', GPU_MEMORY: '16Gi', GPU_CONCURRENCY: '1', MAX_RESIDENT_SESSIONS: '1',
-      GPU_MEM_LIMIT_BYTES: '', UPSCALE_SERVICE: 'gpu', CATALOG_DB_TOTAL: '16', CATALOG_DB_LIMIT: '18', CPU_TOTAL: '99',
+      GPU_MEM_LIMIT_BYTES: '', UPSCALE_SERVICE: 'gpu', WORKER_DB_POOL_MAX: '2', LLM_INFLIGHT_PER_INSTANCE: '', CATALOG_DB_TOTAL: '16', CATALOG_DB_LIMIT: '18', CPU_TOTAL: '99',
       COMPUTE: '0.0000265', GPU_PRICE: '0.00034884'},
   },
   {
     label: 'F2 run values fit on db-custom-2-7680',
     env: F2, live: '400',
-    expect: {STATUS: '0', CATALOG_DB_TOTAL: '56', CATALOG_DB_LIMIT: '393', SLOTS_TOTAL: '48', SLOTS_CAPACITY: '48',
+    expect: {STATUS: '0', WORKER_DB_POOL_MAX: '4', CATALOG_DB_TOTAL: '104', CATALOG_DB_LIMIT: '393', SLOTS_TOTAL: '48', SLOTS_CAPACITY: '48',
       CPU_TOTAL: '171', COMPUTE: '0.0000265', GPU_PRICE: '0.00047364'},
   },
   {label: 'F2 budget before the tier change', env: F2, live: '25', expect: {STATUS: '1'}, error: /ila-pg allows 25 now/},
@@ -78,6 +78,10 @@ const cases = [
   {label: 'gpu shape', env: {GPU_CPU: '2', GPU_MEMORY: '64Gi'}, expect: {STATUS: '1'}, error: /GPU_CPU must be 4 to 8[\s\S]*GPU_MEMORY must be 16Gi to 32Gi/},
   {label: 'not a number', env: {WORKER_MAX_INSTANCES: 'many'}, expect: {STATUS: '1'}, error: /WORKER_MAX_INSTANCES must be a whole number/},
   {label: 'upscale service', env: {UPSCALE_SERVICE: 'tpu'}, expect: {STATUS: '1'}, error: /UPSCALE_SERVICE must be gpu or cpu/},
+  // Spec 16 F3: photos at once double the worker pool, which today's db-f1-micro cannot hold.
+  {label: 'photos at once before the tier change', env: {CATALOG_PHOTO_CONCURRENCY: '4'}, expect: {STATUS: '1', WORKER_DB_POOL_MAX: '4'}, error: /catalog connections 24 exceed the budget 18/},
+  {label: 'explicit worker pool wins', env: {...F2, WORKER_DB_POOL_MAX: '3'}, live: '400', expect: {STATUS: '0', WORKER_DB_POOL_MAX: '3', CATALOG_DB_TOTAL: '80'}},
+  {label: 'AI check pacing', env: {LLM_INFLIGHT_PER_INSTANCE: 'six'}, expect: {STATUS: '1'}, error: /LLM_INFLIGHT_PER_INSTANCE must be empty or a whole number/},
 ];
 
 for (const c of cases) {

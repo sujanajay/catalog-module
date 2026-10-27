@@ -20,6 +20,9 @@ import { log } from "./log";
  * publish tasks on TASKS_QUEUE. Unset, every route uses TASKS_QUEUE (the old single-queue behaviour).
  * Both queues target the same worker URL with the same OIDC token.
  *
+ * Spec 16: a bulk batch's chunk and publish tasks (`bulk: true`) go to TASKS_BULK_QUEUE when it is set, so an
+ * operator's small batch keeps the slots of TASKS_QUEUE to itself. Unset, they stay on TASKS_QUEUE.
+ *
  * Local dev (`TASKS_INLINE=1`): POSTs the same body straight to the worker, fire-and-forget,
  * so the caller (a web request) is not blocked on the task.
  */
@@ -37,6 +40,9 @@ export type TaskRoute = (typeof TASK_ROUTES)[number];
 
 /** Routes that run on the ingest queue (TASKS_INGEST_QUEUE) when it is configured. */
 export const INGEST_TASK_ROUTES: readonly TaskRoute[] = ["/tasks/catalog/ingest"];
+
+/** Routes that run on the bulk queue (TASKS_BULK_QUEUE) for a bulk batch, when it is configured (spec 16). */
+export const BULK_TASK_ROUTES: readonly TaskRoute[] = ["/tasks/catalog/chunk", "/tasks/catalog/publish"];
 
 /** Minimal surface of `CloudTasksClient` we use - lets tests pass a fake. */
 export type TasksClientLike = Pick<CloudTasksClient, "createTask">;
@@ -56,6 +62,8 @@ export interface EnqueueTaskOptions {
   delaySec?: number;
   /** Cloud Tasks task id (letters, digits, "-", "_"; at most 500 characters) for deduplication. */
   taskId?: string;
+  /** Spec 16: the task belongs to a bulk batch (the bulk queue when configured). */
+  bulk?: boolean;
   /** Overrides for tests. */
   env?: NodeJS.ProcessEnv;
   retry?: RetryOptions;
@@ -108,9 +116,13 @@ export function tasksConfigFromEnv(env: NodeJS.ProcessEnv = process.env): TasksC
   };
 }
 
-/** The queue a route's tasks go to: the ingest queue for ingest routes when set, else TASKS_QUEUE. */
-export function queueForRoute(route: TaskRoute, env: NodeJS.ProcessEnv = process.env): string {
+/**
+ * The queue a route's tasks go to: the ingest queue for ingest routes when set, the bulk queue for a bulk
+ * batch's chunk and publish tasks when set, else TASKS_QUEUE.
+ */
+export function queueForRoute(route: TaskRoute, env: NodeJS.ProcessEnv = process.env, bulk = false): string {
   if (INGEST_TASK_ROUTES.includes(route) && env.TASKS_INGEST_QUEUE) return env.TASKS_INGEST_QUEUE;
+  if (bulk && BULK_TASK_ROUTES.includes(route) && env.TASKS_BULK_QUEUE) return env.TASKS_BULK_QUEUE;
   return env.TASKS_QUEUE || DEFAULT_TASKS_QUEUE;
 }
 
@@ -186,7 +198,7 @@ export async function enqueueTask(route: TaskRoute, body: Record<string, unknown
     return "inline";
   }
 
-  const cfg = { ...tasksConfigFromEnv(env), queue: queueForRoute(route, env) };
+  const cfg = { ...tasksConfigFromEnv(env), queue: queueForRoute(route, env, opts.bulk) };
   const request = buildTaskRequest(route, body, cfg, opts);
   const name = (request.task as HttpTask).name;
   const create = async () => {
