@@ -1,12 +1,12 @@
 "use client";
 import type { BrandOption } from "@catalog/core/catalog/brands";
-import type { ProductType } from "@catalog/core/catalog/types";
+import { PASTE_INPUT_KINDS, type ProductType } from "@catalog/core/catalog/types";
 import { useCallback, useState } from "react";
 import Uploader, { type LocalUpload } from "./Uploader";
 import PasteBox from "./PasteBox";
 import InputList, { type ServerInput } from "./InputList";
 /** Inputs the paste box adds (pasted links and Google links). */
-const PASTE_KINDS = ["url_list", "google_sheet", "drive_folder"];
+const PASTE_KINDS: readonly string[] = PASTE_INPUT_KINDS;
 /** `batchId`, `onInputCount` and `onRemoved` feed the input list (spec 14b F3): what the batch holds, with Remove. */
 export default function WizardStep1({brands,brandSlug,name,productType,locked,email,setBrand,setName,setProductType,ensureBatch,onUploadsBusy,onLinksBusy,onAdded,batchId,onInputCount,onRemoved}: {brands:BrandOption[];brandSlug:string;name:string;productType:ProductType;locked:boolean;email:string;setBrand(value:string):void;setName(value:string):void;setProductType(value:ProductType):void;ensureBatch():Promise<string>;onUploadsBusy(value:boolean):void;onLinksBusy(value:boolean):void;onAdded():void;batchId?:string|null;onInputCount?(count:number):void;onRemoved?():void}) {
  const [local,setLocal] = useState<LocalUpload[]>([]);

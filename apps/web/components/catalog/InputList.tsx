@@ -1,6 +1,7 @@
 "use client";
 import { useEffect, useRef, useState } from "react";
 import { batchUrl, wizardApi } from "./wizard-client";
+import { PASTE_INPUT_KINDS } from "@catalog/core/catalog/types";
 import { FailedUploadStatus, NewBatchLink, UPLOAD_FAILED, uploadFailureOf, type LocalUpload, type UploadFailure } from "./Uploader";
 
 /** A batch input as `GET /api/catalog/batches/[id]` returns it (one catalog_uploads row). */
@@ -15,7 +16,7 @@ export const DID_NOT_FINISH = "Upload did not finish. Add the file again or remo
 export const uploadingWord = (progress: number) => `Uploading ${progress}%`;
 
 /** Pasted links and Google links are removed through `/links`; files through `/uploads` (as `LINK_KINDS` on the server). */
-const LINK_KINDS = ["url_list", "google_sheet", "drive_folder"];
+const LINK_KINDS: readonly string[] = PASTE_INPUT_KINDS;
 const KIND_WORDS: Record<string, string> = { image: "Photo", zip: "Zip", sheet: "Links sheet", product_list: "Product list", google_sheet: "Google Sheet", drive_folder: "Drive folder", url_list: "Pasted links" };
 const kindOfName = (name: string) => /\.zip$/i.test(name) ? "zip" : /\.(csv|xls[xm])$/i.test(name) ? "sheet" : "image";
 

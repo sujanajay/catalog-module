@@ -11,8 +11,6 @@ import { urlFileName } from "./links-sheet";
 import { fetchableUrl, parsePastedLinks, type PastedTable } from "./url-list";
 import type { Detected, IngestDeps } from "./types";
 
-/** Spec 04's url_list sentence; since 14b F2 the paste readback (pasteReadback) replaces it. */
-export const URL_LIST_SENTENCE = "We will download them when you start. No sharing needed.";
 export const DRIVE_FOLDER_OK = "Drive folder found. We will copy its files when you start.";
 export const NOTHING_TO_CHECK = "Paste a Google Sheet link, a Google Drive folder link, or image links one per line.";
 

@@ -32,6 +32,8 @@ export const ROLES = ["admin","operator","viewer"] as const;
 export type ChannelId = (typeof CHANNEL_IDS)[number];
 export type BatchStatus = (typeof BATCH_STATUSES)[number];
 export type UploadKind = (typeof UPLOAD_KINDS)[number];
+/** Inputs added through the paste box (pasted image links and Google links); every other kind is a file. */
+export const PASTE_INPUT_KINDS: readonly UploadKind[] = ["url_list", "google_sheet", "drive_folder"];
 export type OutputStatus = (typeof OUTPUT_STATUSES)[number];
 export type LinkStatus = (typeof LINK_STATUSES)[number];
 export type SheetStatus = (typeof SHEET_STATUSES)[number];

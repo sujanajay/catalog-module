@@ -84,7 +84,7 @@ export function handOffError(err: unknown): HttpError {
  */
 export async function ingestBatch(id: string) {
   const batch = await queryBatch(id);
-  if (!["draft", "ingesting"].includes(batch.status)) throw new HttpError(409, "This batch has already started. Make a new batch to add more photos.");
+  if (!["draft", "ingesting"].includes(batch.status)) throw new HttpError(409, BATCH_STARTED);
   // A removed input (spec 14b F3) is neither collected nor waited for.
   const all = await db().select().from(catalogUploads).where(and(eq(catalogUploads.batchId, id), ne(catalogUploads.status, "removed")));
   if (!all.length) throw badRequest("Add photos or a links sheet before continuing.");

@@ -1,6 +1,6 @@
 import { and, desc, eq, gt, inArray, isNull, ne, sql } from "drizzle-orm";
 import { brandMaster, catalogBatches, catalogUploads, type CatalogBatch } from "@catalog/core/db/schema";
-import { CHANNEL_IDS, IDENTIFIER_MODES, PRECEDENCES, PRODUCT_TYPES, type BatchCounts, type BatchOptions, type ChannelId, type ProductType, type UploadKind } from "@catalog/core/catalog/types";
+import { CHANNEL_IDS, IDENTIFIER_MODES, PRECEDENCES, PRODUCT_TYPES, PASTE_INPUT_KINDS, type BatchCounts, type BatchOptions, type ChannelId, type ProductType } from "@catalog/core/catalog/types";
 import { db, type Db } from "../db";
 import { deriveBatchState } from "@catalog/core/catalog/pipeline/status";
 import { TEST_BRAND } from "@catalog/core/catalog/brands";
@@ -15,22 +15,24 @@ export async function queryBatch(id: string): Promise<CatalogBatch> {
   if (!batch) throw new HttpError(404, BATCH_NOT_FOUND);
   return batch;
 }
+/** The refusal for a batch that has started (release C words it by status, 14c F8). */
+export const BATCH_STARTED = "This batch has already started. Make a new batch to add more photos.";
 export async function assertDraft(id: string): Promise<CatalogBatch> {
   const batch = await queryBatch(id);
-  if (batch.status !== "draft") throw new HttpError(409, "This batch has already started. Make a new batch to add more photos.");
+  if (batch.status !== "draft") throw new HttpError(409, BATCH_STARTED);
   return batch;
 }
 type Transaction = Parameters<Parameters<Db["transaction"]>[0]>[0];
 export async function draftForUpdate(tx: Transaction, id: string): Promise<CatalogBatch> {
   const [batch] = await tx.select().from(catalogBatches).where(eq(catalogBatches.id, id)).for("update");
   if (!batch) throw new HttpError(404, BATCH_NOT_FOUND);
-  if (batch.status !== "draft") throw new HttpError(409, "This batch has already started. Make a new batch to add more photos.");
+  if (batch.status !== "draft") throw new HttpError(409, BATCH_STARTED);
   return batch;
 }
 /** The answer for an upload id that is not an input of this batch, or not of the route's kind. */
 export const INPUT_NOT_FOUND = "This input is not part of this batch. Reload this page.";
 /** Inputs added through the paste box (`/links` routes); every other kind is a file (`/uploads` routes). */
-export const LINK_KINDS: readonly UploadKind[] = ["url_list", "google_sheet", "drive_folder"];
+export const LINK_KINDS = PASTE_INPUT_KINDS;
 /**
  * A merge-only write to `counts`: only the named keys change, so a worker write to other keys made in
  * between is never lost. Spec 14b F3 needs it for `previewReady`; the general web-tier form is F6 (14c).
@@ -38,8 +40,6 @@ export const LINK_KINDS: readonly UploadKind[] = ["url_list", "google_sheet", "d
 export function mergeCounts(patch: Partial<BatchCounts>) {
   return sql`${catalogBatches.counts} || ${JSON.stringify(patch)}::jsonb`;
 }
-/** The refusal for a batch that has started (release C words it by status, 14c F8). */
-export const BATCH_STARTED = "This batch has already started. Make a new batch to add more photos.";
 /**
  * The reopen of F8 (spec 14c section 3.4), written for POST /retry-links (spec 14b F5 part 1): a batch
  * that failed before Start (`failed`, `startedAt` null) returns to `draft` with `failReason` cleared
