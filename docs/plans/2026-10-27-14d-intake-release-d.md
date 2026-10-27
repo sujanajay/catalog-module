@@ -22,8 +22,11 @@ the dashboard (Your unfinished batches).
 - [x] F12: drafts expire after `DRAFT_EXPIRY_DAYS` (14, worker env via `infra/deploy.sh`); "Expired after
       <N> days with no activity" in `deriveBatchState`; one INFO line per ingest delivery.
 - [x] `groupBatch` timing at 2,000 products measured (tier 2, PGlite) and reported.
-- [ ] Code review and simplify passes.
-- [ ] Gates: lint, typecheck, test, intake browser scenarios, web build.
+- [x] Release C's final commits merged in (normal merge, no rebase); placing attempt id threaded through
+      the chunks.
+- [x] Code review and simplify passes (review fixes: cancel between chunks, stale non-final links on a
+      new run, retry-links attempt history, hand-off page read inside the revert guard).
+- [x] Gates: lint, typecheck, test (1,438 passed), intake browser scenarios (7 passed), web build.
 - [ ] PR D opened (ship step, by the manager), merged by the owner.
 - [ ] Deployed (worker with or before web); tier 5 smoke green.
 - [ ] Live verification of 14d section 9 (Test Brand only, quiet check first) and cleanup.
@@ -41,6 +44,10 @@ the dashboard (Your unfinished batches).
 5. A placing continuation travels on the existing `/tasks/catalog/ingest` route with `place: "<cursor>"`
    and the claiming delivery's body, so the lease token is the same; continuations are named tasks
    (hashed), so a retried delivery never queues a chunk twice. A retried chunk re-runs with zero copies
-   (sha256 skip) rather than reading a stored cursor.
+   (sha256 skip) rather than reading a stored cursor. After merging release C's placing attempt id, each
+   placing delivery runs under its own attempt: the write between chunks sets `placed` and
+   `placingClaim.next` and releases the attempt, a continuation resumes only at `next`, and a redelivered
+   grouping or chunk task whose hand-off already happened only queues the continuation again (it never
+   regroups mid-chain).
 6. `ingest-more` carries `after` (the last upload id handed) besides `{ batchId, run }`, so pages follow the
    upload id order and every upload is queued once.
