@@ -6,6 +6,8 @@ import { afterEach, expect, it, vi } from "vitest";
 import { renderToReport, validateRenderUpload } from "./catalog-local";
 import { CHANNEL_IDS } from "@catalog/core/catalog/types";
 
+// Full-size renders are CPU-bound (about 20 s alone); with three other test workers busy they pass 30 s.
+vi.setConfig({ testTimeout: 120_000 });
 afterEach(() => { vi.unstubAllEnvs(); vi.restoreAllMocks(); });
 
 it("refuses non-test, public-bucket, and mismatched-bucket uploads before storage access", () => {
