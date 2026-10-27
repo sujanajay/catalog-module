@@ -5,7 +5,7 @@ Catalog module, spec 14, release A of four. Execute with `docs/specs/00-executio
 conventions, shared data model, copy register) and section 8 (shared fixtures, harness and live rules)
 before this file. Source of truth: `docs/SPEC.md`. Depends on 02, 04 and 06 (merged) and on no other
 release of spec 14; this is the first. Branch `feat/catalog-14a-intake-truth`, worktree
-`C:\Users\Sujan AH\Desktop\catalog-module-wt\14a-intake-truth`. Deploys `catalog-web` only (no worker
+`C:\Users\Sujan Ajay\Desktop\catalog-module-wt\14a-intake-truth`. Deploys `catalog-web` only (no worker
 change, no migration). Approval: approved by the owner on 2026-10-27 (parent section 11, decision 4).
 This release ships as one PR, called PR A in the text below.
 

@@ -91,6 +91,14 @@ configuration. Access is by Google sign-in with three roles (admin, operator, vi
   deployed URL; guardrails so nothing fails or breaks silently.
 - Delivery model: numbered specs executed in order by a manager agent that delegates to subagents, one
   worktree per workstream, merge via PR, deploy, report "Ready for the next spec". No human input in between.
+- Intake resilience (owner, 2026-10-27, spec 14 section 11): spec 14 ships as four releases A, B, C, D in
+  that order (14a to 14d), with the must set F1, F2, F3, F4, F5 (visible part), F6, F8, F9 approved. One
+  extra migration is allowed, `0003_intake_states.sql` in release B (states `removed`, `cancelled`); the
+  no-migration alternative is rejected. An untouched draft is cancelled after `DRAFT_EXPIRY_DAYS` = 14.
+  The BHPC product key (Option Id or Unicommerce Code) is asked of the operator once and recorded in the
+  brand's notes before any real BHPC batch; test drafts 574f2025 and 09dd86f2 are cancelled either way.
+  The batch creator gets an email when a long collection finishes (F14, release D); its one-time
+  Workspace step by the owner is release D's single open item.
 
 ## Requirements register
 
