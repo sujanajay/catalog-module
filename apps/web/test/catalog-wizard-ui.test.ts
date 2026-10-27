@@ -99,11 +99,11 @@ describe("wizard steps 2 and 3 while collecting (F6 release A)", () => {
   it("step 2 renders the polled count and the leaving line, never 0 of 0 products", () => {
     const html = renderToStaticMarkup(createElement(ToastProvider, null, createElement(CatalogWizard, { brands: [{ slug: "uspa", name: "USPA" }] as never, shareEmail: "", initialBatch: resumed })));
     expect(html).toContain('aria-current="step">Check what we found');
-    expect(html).toContain(`40 of 287 files copied from your links. ${LEAVING_LINE}`);
+    expect(html).toContain(`Downloading photos 40 of 287. ${LEAVING_LINE}`);
     expect(html).not.toContain("0 of 0 products");expect(html).not.toContain("Processing starts by itself");
   });
   it("step 3 uses the same polled text; the fixed sentences only before a count or once stalled", () => {
-    expect(wizardCollectingText(state, 287, STEP3_COLLECTING_TEXT)).toBe(`40 of 287 files copied from your links. ${LEAVING_LINE}`);
+    expect(wizardCollectingText(state, 287, STEP3_COLLECTING_TEXT)).toBe(`Downloading photos 40 of 287. ${LEAVING_LINE}`);
     expect(wizardCollectingText(null, null, STEP3_COLLECTING_TEXT)).toBe(`Collecting files. Continue when the grouping is ready. ${LEAVING_LINE}`);
     expect(wizardCollectingText({ ...state, stalled: true }, 287, STEP2_COLLECTING_TEXT)).toBe(`${STEP2_COLLECTING_TEXT} ${LEAVING_LINE}`);
     expect(wizardCollectingText(deriveBatchState({ status: "draft", counts: EMPTY_BATCH_COUNTS }), null, STEP2_COLLECTING_TEXT)).not.toMatch(/0 of 0/);
@@ -119,7 +119,7 @@ describe("wizard steps 2 and 3 while collecting (F6 release A)", () => {
   });
   it("a collecting batch whose files are not listed yet shows the fixed sentence, never 0 of 0", () => {
     const listing = deriveBatchState({ status: "ingesting", counts: { ...EMPTY_BATCH_COUNTS, collected: 0, collectTotal: 0 }, source: "links" });
-    expect(listing.text).toBe("0 of 0 files copied from your links");
+    expect(listing.text).toBe("Downloading photos");
     expect(wizardCollectingText(listing, 0, STEP2_COLLECTING_TEXT)).toBe(`${STEP2_COLLECTING_TEXT} ${LEAVING_LINE}`);
     expect(wizardCollectingText(listing, null, STEP3_COLLECTING_TEXT)).toBe(`${STEP3_COLLECTING_TEXT} ${LEAVING_LINE}`);
   });

@@ -286,7 +286,7 @@ it("a ready draft says created, carries Continue setting up and says its tabs ha
 it("a draft still collecting keeps its state text, the button and the draft paragraph; a viewer gets no button",async()=>{
  await setBatch({status:"ingesting",updatedAt:new Date(),counts:{collected:3,collectTotal:10}});
  let html=await batchPage();
- expect(html).toContain("3 of 10 files copied");expect(html).not.toContain(DRAFT_READY_TEXT);
+ expect(html).toContain("Checking your uploaded files 3 of 10");expect(html).not.toContain(DRAFT_READY_TEXT);
  expect(html).toContain(`href="/catalog/new?batch=${batchId}">${CONTINUE_SETTING_UP}</a>`);expect(html).toContain(HOW_THIS_WORKS_DRAFT);
  expect(html).toMatch(/ · Noon · (<!-- -->)?created /);
  vi.stubEnv("DEV_USER_EMAIL","viewer@opptra.com");
@@ -374,7 +374,7 @@ it("GET /catalog/new?batch= of a draft renders the wizard at its step",async()=>
  html=await render(newPage({batch:batchId}));expect(html).toContain('aria-current="step">Check what we found</li>');
  await setBatch({status:"ingesting",updatedAt:new Date(),counts:{previewReady:false,collected:40,collectTotal:287}});
  html=await render(newPage({batch:batchId}));
- expect(html).toContain('aria-current="step">Check what we found</li>');expect(html).toContain("40 of 287 files copied from your zip.");expect(html).not.toContain("0 of 0 products");
+ expect(html).toContain('aria-current="step">Check what we found</li>');expect(html).toContain("Unpacking your zip 40 of 287.");expect(html).not.toContain("0 of 0 products");
  await addUpload("pending");
  expect(await render(newPage({batch:batchId}))).toContain('aria-current="step">Brand and files</li>');
 });

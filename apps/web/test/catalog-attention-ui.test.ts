@@ -108,7 +108,7 @@ describe("batch copy for the real state of the batch", () => {
     expect(batchSource(["google_sheet"])).toBe("Google Sheet");
     expect(batchSource(["drive_folder", "zip"])).toBe("Drive folder");
     const banner = text(renderToStaticMarkup(createElement(BatchBanner, { status: "ingesting", counts: { ...EMPTY_BATCH_COUNTS, collected: 3, collectTotal: 10 }, source: batchSource(["image"]) })));
-    expect(banner).toContain("3 of 10 files copied from your upload");
+    expect(banner).toContain("Checking your uploaded files 3 of 10");
     expect(collectingText("upload")).toBe("Checking your uploaded files. You can close this page. Open this batch again from the batch list and press Continue setting up when it is ready.");
     for (const source of ["upload", "zip", "links", "Google Sheet"] as const) expect(collectingText(source)).not.toContain("Drive folder");
     expect(collectingText("zip")).toBe("Unpacking your zip. You can close this page. Open this batch again from the batch list and press Continue setting up when it is ready.");
