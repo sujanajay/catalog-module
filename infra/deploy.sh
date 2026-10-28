@@ -19,7 +19,9 @@
 # is env with today's live shape as defaults (SHAPE_DEFAULTS in infra/lib/shape.sh), so a run with no env changes no
 # capacity; a shape change is a change to that table.
 # Env overrides: SKIP_BUILD=1 (reuse the images tagged with the current commit; also the rollback
-# path: check out an older commit and run SKIP_BUILD=1 bash infra/deploy.sh).
+# path: check out an older commit and run SKIP_BUILD=1 bash infra/deploy.sh). A commit from before 2026-10-28 has
+# the old small defaults and lowers queues before its first gate: run it with the live shape as env (the
+# SHAPE_DEFAULTS rows of this commit), or prefer bash infra/deploy.sh --rollback <service> for traffic only.
 # CATALOG_LOCAL_SMOKE=1 runs the smoke in-process on this machine instead of the Cloud Run job
 # (needs database and GCS access and REAL_DATA_DIR).
 # CATALOG_PREVIEW=1 (infra/deploy-preview.sh): the preview stack, plus the GPU service of this commit as a no-traffic

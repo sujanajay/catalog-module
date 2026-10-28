@@ -65,10 +65,10 @@ test('registry entries: regions, probes, timeouts, preview behaviour, GPU knobs'
   // Probes sized per service: the CPU service gets its default model, 1 warm call and 1 round at its concurrency
   // (CPU calls take 25 to 71 s); the GPU service the full probe of every model, 5 rounds at the shape concurrency.
   assert.deepEqual(cpu.slice(1, 8), ['catalog-matting', 'asia-south1', 'ar/matting:t', '420', '1', '1', '0']);
-  assert.equal(cpu[9], 'bash infra/lib/services.sh probe-matting birefnet-general 1 1');
+  assert.equal(cpu[9], 'bash infra/lib/services.sh probe-matting 420 birefnet-general 1 1');
   assert.deepEqual(gpu.slice(1, 8), ['catalog-matting-gpu', 'asia-southeast1', 'ar/matting-gpu:t', '600', '1', '1', '1']);
   assert.equal(gpu[8], 'MAX_RESIDENT_SESSIONS=1,INFERENCE_LOCK_SCOPE=session', 'a set GPU knob reaches the service, an unset one does not');
-  assert.equal(gpu[9], 'bash infra/lib/services.sh probe-matting birefnet-general,birefnet-general-lite,birefnet-hrsod,bria-rmbg 2 5',
+  assert.equal(gpu[9], 'bash infra/lib/services.sh probe-matting 600 birefnet-general,birefnet-general-lite,birefnet-hrsod,bria-rmbg 2 5',
     'the GPU probe measures every served model at the shape concurrency');
   assert.deepEqual(worker.slice(1, 6), ['catalog-worker', 'asia-south1', 'ar/worker:t', '1800', '1']);
   assert.match(worker[9], /probe-worker$/);
@@ -80,10 +80,14 @@ test('registry entries: regions, probes, timeouts, preview behaviour, GPU knobs'
   assert.equal(pgpu[6], '0', 'the preview never shifts GPU traffic');
 });
 
-test('a matting probe passes its registry row and the URL the gate appends to check-matting.sh', () => {
-  const r = run('probe-args', `${vars}\nbash() { echo "$*"; }\nservice_catalog_matting\nprobe_matting "\${SVC_PROBE[@]:3}" https://candidate---m.run.app`);
+test('a matting probe passes its registry row, the gate timeout and the appended URL to check-matting.sh', () => {
+  // The services.sh CLI as the gate runs it (the registry row plus the tag URL). An exported bash function stands in
+  // for the nested `bash infra/check-matting.sh` and prints its call; the outer call uses the real bash.
+  const r = run('probe-args', `${vars}\nservice_catalog_matting
+bash() { echo "PROBE_TASK_TIMEOUT=$PROBE_TASK_TIMEOUT $*"; }; export -f bash
+command bash "\${SVC_PROBE[@]:1}" https://candidate---m.run.app`);
   assert.equal(r.status, 0, r.err);
-  assert.equal(r.out.trim(), 'infra/check-matting.sh --probe https://candidate---m.run.app --models birefnet-general --concurrency 1 --rounds 1');
+  assert.equal(r.out.trim(), 'PROBE_TASK_TIMEOUT=420 infra/check-matting.sh --probe https://candidate---m.run.app --models birefnet-general --concurrency 1 --rounds 1');
 });
 
 test('spec 17 3.3.2 GPU knobs reach catalog-matting-gpu only when set, one per candidate', () => {

@@ -59,6 +59,21 @@ try {
   assert.match(probe.calls, /run jobs execute catalog-check-matting --region=asia-south1 --wait/);
   console.log('PASS --probe runs the probe as catalog-check-matting');
 
+  // Run by the deploy gate: the job ends when the gate gives up, so it never runs on after a gate timeout.
+  process.env.PROBE_TASK_TIMEOUT = '420';
+  try {
+    const gated = run(['--probe', tagUrl, '--models', 'birefnet-general', '--concurrency', '1', '--rounds', '1']);
+    assert.equal(gated.status, 0, gated.stderr);
+    assert.equal(gated.flags['--task-timeout'], '420s');
+    process.env.PROBE_TASK_TIMEOUT = '7m';
+    const bad = run(['--probe', tagUrl]);
+    assert.notEqual(bad.status, 0);
+    assert.match(bad.stderr, /PROBE_TASK_TIMEOUT must be a number of seconds/);
+  } finally {
+    delete process.env.PROBE_TASK_TIMEOUT;
+  }
+  console.log('PASS a gated probe job times out with the gate');
+
   gpuImage('abc1234');
   const check = run([]);
   assert.equal(check.status, 0, check.stderr);
