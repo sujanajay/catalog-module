@@ -612,7 +612,7 @@ to the same standard by uploading it again.
 |---|---|---|
 | 1 | Cropping SPEC amendments A1 to A4, with the three fixes of the crops focus page; approved on their own | Owner |
 | 2 | Generation SPEC amendments A5 to A8 and the models table, with the mode B clause allowing one approved brand-model reference; approved on their own | Owner |
-| 3 | The contract exception, typed by the owner and committed in its own docs change before any build work: the execution protocol (section 11, L260-263) lets only specs 02 and 03 ship a database migration; spec 12 needs its migration `0003_shot_set.sql` and additive changes to the 02 contracts. Without it the build is blocked | Owner |
+| 3 | The contract exception, typed by the owner and committed in its own docs change before any build work: the execution protocol (section 11, L260-263) lets only specs 02 and 03 ship a database migration; spec 12 needs its migration `0005_shot_set.sql` and additive changes to the 02 contracts. Without it the build is blocked | Owner |
 | 4 | A ranked generator bench per brand and category: the primary pair of section 4 first, then the bench entries section 4 names (other vendors' image models, open-weight models on our own GPU, other frontier models), each with its own approval row; a standing bake-off on the golden set; hosted services only as a last resort behind a switch (spec 12, 1.5 and 5.4) | Owner |
 | 5 | Written no-training position from each bench vendor before its first live run | Vendors; owner asks |
 | 6 | Brand rights for model reference photos and their face embeddings, from the brand's own photos and website, per brand and per site | Owner, brands |

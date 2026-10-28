@@ -40,7 +40,7 @@ never touch `main`, never call OpenRouter live, never create or change GCP resou
 
 - [ ] The spec file exists, its number is the next one not yet merged, and the previous spec's
       "Ready for the next spec" report exists in the session or in `docs/solutions/`.
-- [ ] `git -C "C:\Users\Sujan AH\Desktop\catalog-module" status --short` on `main` is clean and
+- [ ] `git -C "C:\Users\Sujan Ajay\Desktop\catalog-module" status --short` on `main` is clean and
       `main` is up to date with `origin/main`.
 - [ ] `pnpm install --frozen-lockfile && pnpm lint && pnpm typecheck && pnpm test` pass on `main`
       (from spec 02 on; before 02 there is no code).
@@ -62,13 +62,13 @@ and reports (section 10).
 - Feature branch: `feat/catalog-<nn>-<slug>` from `main`, where `<nn>` is the spec number and
   `<slug>` is the spec file name without the number, for example
   `feat/catalog-02-scaffold-and-foundations`. The full list is in `docs/specs/README.md`.
-- Feature worktree: `C:\Users\Sujan AH\Desktop\catalog-module-wt\<nn>-<slug>`. Create it from the
+- Feature worktree: `C:\Users\Sujan Ajay\Desktop\catalog-module-wt\<nn>-<slug>`. Create it from the
   main checkout with
-  `git worktree add -b feat/catalog-<nn>-<slug> "C:\Users\Sujan AH\Desktop\catalog-module-wt\<nn>-<slug>" main`.
+  `git worktree add -b feat/catalog-<nn>-<slug> "C:\Users\Sujan Ajay\Desktop\catalog-module-wt\<nn>-<slug>" main`.
 - Builder worktrees (one per workstream that touches different files than the others): branch
   `feat/catalog-<nn>-<slug>--<workstream>` from the feature branch (two dashes, not a slash: git
   cannot hold a branch `X` and a branch `X/sub` at the same time), path
-  `C:\Users\Sujan AH\Desktop\catalog-module-wt\<nn>-<slug>-<workstream>`. Workstreams that touch
+  `C:\Users\Sujan Ajay\Desktop\catalog-module-wt\<nn>-<slug>-<workstream>`. Workstreams that touch
   the same files run one after the other in the feature worktree instead.
 - Builders commit on their branch with conventional messages. The integration subagent merges them
   into the feature branch with `git merge --no-ff`. Nothing is force-pushed, ever.
@@ -259,8 +259,12 @@ data set). Nothing else is asked.
   gcloud config.
 - A spec contract cannot be met without changing a contract from 02 or 03 (02 defines the shared
   types, tables, paths, routes and helpers; 03 defines roles and sign-in; 04 to 09 consume them).
-  A change to a contract defined in 02 or 03 is proposed in the report, never made silently, and
-  no spec other than 02 and 03 ships a migration.
+  A change to a contract defined in 02 or 03 is proposed in the report, never made silently. No spec
+  other than 02 and 03 ships a migration, except a spec whose section 0 lists an additive migration and
+  the 02 contracts it extends and whose owner approval is recorded in the decisions log (granted: 0002
+  cost events, 0003 intake states, 0004 chunk leases, spec 12 `0005_shot_set.sql`, spec 13
+  `0006_scene.sql`). Such a migration is numbered after the latest one on `origin/main` at merge time and
+  never rewrites or drops existing rows or columns. Owner approval: Sujan, 2026-10-28.
 - A real-data test would write outside `catalog-test/` or would modify a Supabase object.
 - A public object write or delete would fall outside the prefix of the product the worker holds
   the lock for (`assertWithinProduct` throws; the task fails loudly and is reported).

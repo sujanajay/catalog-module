@@ -52,7 +52,7 @@ Words used here (defined once):
 
 ## 1. The six initiatives, in order
 
-Shared building blocks (migration 0003, the bench, the fidelity gate, Brand DNA, the eval programme) are built
+Shared building blocks (migration 0005, the bench, the fidelity gate, Brand DNA, the eval programme) are built
 once, inside the first initiative that cannot run without them.
 
 ### Initiative 1. See the gaps (apparel, report mode)
@@ -61,7 +61,7 @@ once, inside the first initiative that cannot run without them.
 the five shots (front model, full length, close-up, back, head-and-shoulders) exist, which are missing, and which
 on-model photo has the head cut. Nothing on any listing changes.
 
-- **Builds:** spec 12 section 1 (the whole additive migration 0003; bench and Brand DNA tables land empty),
+- **Builds:** spec 12 section 1 (the whole additive migration 0005; bench and Brand DNA tables land empty),
   2.1-2.3 (shot roles, head-cut, garment-type ladder), sheet columns from 8.4, shot-type evals, Ops panel "Shots
   each marketplace asks for". Workstreams A, B, H (sheet), K (Products tab), J (role evals).
 - **Switch and rollout:** `SHOT_SET_MODE=report`, the default (S12 L664-669). Live for all brands once the role

@@ -172,7 +172,7 @@ request, the builder fetches current docs through Context7 (00 section 4).
 
 ## 1. Data model additions
 
-One additive migration after spec 12's `0003_shot_set.sql` (`drizzle/0004_scene.sql`, drizzle-kit from `schema.ts`).
+One additive migration after spec 12's `0005_shot_set.sql` (`drizzle/0006_scene.sql`, drizzle-kit from `schema.ts`).
 
 ### 1.1 `brand_style_profile.body.scene` (table from spec 12 s1.6)
 

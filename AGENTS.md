@@ -19,7 +19,7 @@
 - Live OpenRouter calls only in Cloud Run jobs gated by LIVE_SMOKE=1. All other tests mock OpenRouter.
 - Keep costs low: Cloud Run min-instances 0, Cloud SQL db-f1-micro, no always-on resources.
 - Use subagents for independent workstreams; one git worktree per workstream
-  (C:\Users\Sujan AH\Desktop\catalog-module-wt\<nn>-<slug>); merge via PR.
+  (C:\Users\Sujan Ajay\Desktop\catalog-module-wt\<nn>-<slug>); merge via PR.
 - Conventional commit messages (feat:, fix:, chore:, docs:). Never commit directly to main.
   Never add an agent name as co-author.
 - No em dashes anywhere (code, docs, UI text, commits). Use "-".
