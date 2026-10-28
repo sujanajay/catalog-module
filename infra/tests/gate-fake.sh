@@ -2,6 +2,7 @@
 # Fake gcloud: logs every call (one line each) to $LOG and answers from the scenario variables:
 #   EXISTS=0 the service is not found; DESCRIBE_ERROR=1 describe fails with another error;
 #   DEPLOY_ERROR=<text> the deploy fails with that text; LIVE_MATCH=1 the live revision has this image and env;
+#   LIVE_ENV=<env> the live plain env (default: the desired SVC_ENV);
 #   LIVE_FP=<hash> the live DEPLOY_ARGS_SHA (other flags at the last deploy; default: the current flags);
 #   LIVE_DIGEST=<digest> the live revision's image digest (default $DIGEST, the image being deployed);
 #   SHIFT_ERROR=1 update-traffic --to-revisions fails; ROLLBACK_TAGGED=1 $NEW is live and $OLD carries the previous tag;
@@ -26,7 +27,7 @@ gate_gcloud() {
     "run revisions describe")
       local env='[{"name":"OTHER","value":"x"}]'
       if [ "${LIVE_MATCH:-0}" = 1 ]; then
-        env=$(node -e 'console.log(JSON.stringify(process.argv[1].split(",").map((p) => ({name: p.split("=")[0], value: p.slice(p.indexOf("=") + 1)})).concat([{name: "DB_PASSWORD", valueFrom: {secretKeyRef: {name: "s", key: "latest"}}}])))' "$SVC_ENV,DEPLOY_ARGS_SHA=${LIVE_FP:-$(gate_fingerprint)}")
+        env=$(node -e 'console.log(JSON.stringify(process.argv[1].split(",").map((p) => ({name: p.split("=")[0], value: p.slice(p.indexOf("=") + 1)})).concat([{name: "DB_PASSWORD", valueFrom: {secretKeyRef: {name: "s", key: "latest"}}}])))' "${LIVE_ENV:-$SVC_ENV},DEPLOY_ARGS_SHA=${LIVE_FP:-$(gate_fingerprint)}")
       fi
       printf '%s\r\n' '{"spec":{"containers":[{"env":'"$env"'}]},"status":{"imageDigest":"asia-south1-docker.pkg.dev/p/apps/test@'"${LIVE_DIGEST:-$DIGEST}"'"}}' ;;
     "run services update-traffic")

@@ -114,11 +114,13 @@ service_catalog_web() {
 # ---- Probes. Each runs as its own process (bash infra/lib/services.sh probe-<kind> ... <url>), exits non-zero on
 # any failure and never prints a token. ----
 
-# GET <url><path> with the operator's identity token; fails on anything but 200. Retries cover a cold start.
+# GET <url><path> with the operator's identity token; fails on anything but a final 200. Same-host redirects are
+# followed (the web home page redirects to /catalog; curl keeps the token only on the same host). Retries cover a
+# cold start.
 probe_get() {
   local url=$1 code token
   token=$(gcloud auth print-identity-token | tr -d '\r') || { echo "probe: no identity token (gcloud auth login)" >&2; return 1; }
-  code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 60 --retry 5 --retry-delay 5 --retry-all-errors \
+  code=$(curl -sS -L --max-redirs 5 -o /dev/null -w '%{http_code}' --max-time 60 --retry 5 --retry-delay 5 --retry-all-errors \
     -H "Authorization: Bearer $token" "$url") || code=000
   echo "probe: GET $url -> $code"
   [ "$code" = 200 ]
@@ -135,7 +137,9 @@ probe_worker() {
   local url=$1 run
   probe_get "$url/health" || return 1
   if [ "${CATALOG_LOCAL_SMOKE:-0}" = 1 ]; then
-    pnpm --filter @catalog/worker build && pnpm catalog:smoke
+    # Against this deploy's matting candidates too, not the URLs in the local environment.
+    pnpm --filter @catalog/worker build \
+      && MATTING_URL=$SMOKE_MATTING_URL MATTING_GPU_URL=$SMOKE_MATTING_GPU_URL WORKER_URL=$url pnpm catalog:smoke
     return
   fi
   run=$(node -e 'console.log(require("crypto").randomUUID())')

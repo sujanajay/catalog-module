@@ -10,8 +10,8 @@
 #      to), move all traffic to exactly the probed revision (--to-revisions, never --to-latest, so a revision created
 #      meanwhile can never take traffic unprobed), drop a stale candidate tag, print "==> <name>: live (<revision>)".
 #   5. Fail: traffic stays where it was; print the probe output, the rollback line, return non-zero.
-# SKIP when the live revision already runs the same image digest with the same env, unless GATE_FORCE=1 (deploy.sh
-# sets it for the worker when a matting service changed, so the smoke still runs). The env carries DEPLOY_ARGS_SHA,
+# SKIP when the live revision already runs the same image digest with the same env, unless GATE_FORCE=1 (an operator
+# override; deploy.sh re-runs the worker's smoke after a matting change through the worker's env). The env carries DEPLOY_ARGS_SHA,
 # a hash of every other deploy flag, so a flag-only change (concurrency, CPU) is not skipped.
 #
 # After a call: GATE_URL (the service URL), GATE_TAG_URL (the candidate URL, or the service URL on SKIP or when

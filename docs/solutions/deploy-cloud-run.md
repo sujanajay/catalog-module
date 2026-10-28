@@ -90,11 +90,18 @@ deploy.sh. A lesson in a document is not a guard; these are the guards.
   models and concurrency; the worker probe is `/health` on the tag URL, then the tier 5 smoke with
   the matting and worker tag URLs (`infra/catalog-test-jobs.sh` takes `MATTING_URL`,
   `MATTING_GPU_URL` and `WORKER_URL` from the environment when set); the web probe is `/health`
-  and `/` with the operator's identity token through IAP.
+  and `/` with the operator's identity token through IAP. `/` redirects to `/catalog`, so probes
+  follow same-host redirects and need a final 200.
 - SKIP: a service whose live revision has the same image digest and the same plain env values is
   not redeployed. The env carries `DEPLOY_ARGS_SHA`, a hash of every other deploy flag, so a change
-  to concurrency, CPU or instances alone is still deployed. When a matting service changed, the
-  worker is never SKIP, so the smoke always runs against new matting revisions.
+  to concurrency, CPU or instances alone is still deployed. The worker's env carries
+  `SMOKED_MATTING_REVISIONS=<cpu>/<gpu>`, the matting revisions its smoke ran against, so a new
+  matting revision always re-runs the smoke, also on a re-run after a failed smoke (a flag such as
+  "matting changed in this run" would be 0 on that re-run and SKIP the worker untested).
+  `GATE_FORCE=1 bash infra/deploy.sh` deploys and probes every service anyway.
+- Traffic is pinned to a named revision, so a hand-made `gcloud run services update` on a gated
+  service creates a revision that takes no traffic. Ship changes through deploy.sh (or follow a
+  hand update with `update-traffic --to-revisions <new>=100` after checking it).
 - Queue slots for the worker are set right after the worker gate passes, so a later web failure
   never leaves them on the old values.
 - The smoke never hangs on a broken cut-out service: `SMOKE_CUTOUT_READY_MS` (default 300000) is a

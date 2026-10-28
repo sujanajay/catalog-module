@@ -332,18 +332,19 @@ done
 # candidate's tag URL, and only a passing candidate takes traffic. A failure stops here: that service keeps its
 # live revision and later services are not touched; services this run already moved are listed with their rollback
 # lines. The tier 5 smoke is the worker's probe, so it runs on the new worker image against the new matting
-# candidates (and runs even when the worker itself is unchanged, if a matting service changed). It never calls
-# OpenRouter and writes only under catalog-test/.
+# candidates. The worker's env names the matting revisions it was smoked against (SMOKED_MATTING_REVISIONS), so a
+# new matting revision always re-runs the smoke, also on a re-run after a failed smoke. It never calls OpenRouter
+# and writes only under catalog-test/. GATE_FORCE=1 bash infra/deploy.sh deploys and probes every service even when
+# its live revision matches.
 # shellcheck source=lib/services.sh
 source infra/lib/services.sh
 # shellcheck source=lib/gate.sh
 source infra/lib/gate.sh
 MATTING_URL=""; MATTING_GPU_URL=""; MATTING_PROBE_URL=""; MATTING_GPU_PROBE_URL=""
-MATTING_CHANGED=0
+MATTING_REVISION=""
 SHIFTED=()
 for SERVICE in "${SERVICES[@]}"; do
   GATE_STATUS=0
-  GATE_FORCE=0; [ "$SERVICE" = catalog-worker ] && GATE_FORCE=$MATTING_CHANGED
   deploy_service "$SERVICE" || GATE_STATUS=$?
   if [ "$SERVICE" = catalog-matting-gpu ] && [ "$GATE_STATUS" = 75 ]; then
     echo "WARN: GPU quota refused; worker will use CPU. Request NVIDIA L4 (no zonal redundancy) quota in $GPU_REGION for project $PROJECT at https://console.cloud.google.com/iam-admin/quotas?project=$PROJECT" >&2
@@ -355,13 +356,10 @@ for SERVICE in "${SERVICES[@]}"; do
     fi
     exit 1
   fi
-  if [ "$GATE_CHANGED" = 1 ]; then
-    [ "$SVC_SHIFT" = 1 ] && SHIFTED+=("$SVC_NAME")
-    case "$SERVICE" in catalog-matting|catalog-matting-gpu) MATTING_CHANGED=1 ;; esac
-  fi
+  if [ "$GATE_CHANGED" = 1 ] && [ "$SVC_SHIFT" = 1 ]; then SHIFTED+=("$SVC_NAME"); fi
   case "$SERVICE" in
     catalog-matting)
-      MATTING_URL=$GATE_URL; MATTING_PROBE_URL=$GATE_TAG_URL
+      MATTING_URL=$GATE_URL; MATTING_PROBE_URL=$GATE_TAG_URL; MATTING_REVISION=$GATE_REVISION
       WORKER_ENV+=",MATTING_URL=$MATTING_URL"
       ;;
     catalog-matting-gpu)
@@ -372,6 +370,9 @@ for SERVICE in "${SERVICES[@]}"; do
         if [ "${CATALOG_PREVIEW:-0}" = 1 ]; then MATTING_GPU_URL=$GATE_TAG_URL; fi
         WORKER_ENV+=",MATTING_GPU_URL=$MATTING_GPU_URL"
       fi
+      # The matting revisions (CPU/GPU) the worker's smoke runs against. A new one changes the worker's env, so the
+      # worker gate never SKIPs a smoke the serving matting revisions have not passed.
+      WORKER_ENV+=",SMOKED_MATTING_REVISIONS=$MATTING_REVISION/$GATE_REVISION"
       # Spec 11 4.5: the upscaler runs on the GPU service, so the flag reaches the worker only with a GPU URL.
       # Spec 16 3.1.3: with UPSCALE_SERVICE=cpu the CPU cut-out service upscales (it serves /upscale) and the worker
       # sends /upscale to it through UPSCALE_URL, so no GPU URL is needed.
