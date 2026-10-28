@@ -119,13 +119,22 @@ export function qaReportEntry(o: Output): Record<string, unknown> | null {
 }
 type LinkOutput = Pick<Output, "productId" | "batchId" | "channel" | "n" | "status" | "isLive" | "publicUrl">;
 /**
+ * An output that waits with its held product for the operator (spec 17 3.1.1): its product is held
+ * (`change = 'pending_attention'`, in `heldIds`) and the output is neither delivered (verified and live) nor
+ * ended on its own (skipped, failed). The one definition of "waiting" used by deliveredLinks and by the
+ * load driver's classifyOutputs, so a held product's good outputs are never counted as lost work.
+ */
+export function isHeldSibling(output: { productId: string; status: string; isLive: boolean }, heldIds: ReadonlySet<string>): boolean {
+  return heldIds.has(output.productId) && !(output.status === "verified" && output.isLive) && output.status !== "skipped" && output.status !== "failed";
+}
+/**
  * The links a batch delivers and the ones it does not (spec 06 Details): `held` counts this batch's
  * images of held products (waiting for a decision, not delivered); `carried` lists the earlier
  * batches' live links the sheet keeps in their place. Both Details lines count delivered links only.
  */
 export function deliveredLinks(input: { batchId: string; channels: readonly ChannelId[]; heldProductIds: ReadonlySet<string>; outputs: readonly LinkOutput[] }): { held: number; carried: string[] } {
   const key = (o: LinkOutput) => `${o.productId}|${o.channel}|${o.n}`;
-  const waiting = input.outputs.filter(o => o.batchId === input.batchId && input.heldProductIds.has(o.productId) && !(o.status === "verified" && o.isLive) && o.status !== "skipped" && o.status !== "failed");
+  const waiting = input.outputs.filter(o => o.batchId === input.batchId && isHeldSibling(o, input.heldProductIds));
   const keys = new Set(waiting.map(key));
   const carried = input.outputs.filter(o => o.isLive && o.batchId !== input.batchId && input.channels.includes(o.channel) && keys.has(key(o))).map(o => o.publicUrl);
   return { held: waiting.length, carried };

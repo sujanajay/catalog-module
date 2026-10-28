@@ -70,13 +70,13 @@ describe("timing math", () => {
     expect(againstTarget(t(0), new Date(t(0).getTime() + 121 * 60_000)).withinTarget).toBe(false);
   });
   it("classifies every output and lists the silent ones", () => {
-    const base = { channel: "noon", n: 1, productId: "p" };
+    const base = { channel: "noon", n: 1, productId: "p", decision: null, isLive: false };
     const c = classifyOutputs([
       { ...base, id: "1", status: "verified", reason: null },
       { ...base, id: "2", status: "failed", reason: "Uploaded file could not be read back from the public link" },
       { ...base, id: "3", status: "failed", reason: null },
       { ...base, id: "4", status: "staged", reason: null },
-    ]);
+    ], new Set());
     expect(c.byStatus).toEqual({ verified: 1, failed: 2, staged: 1 });
     expect(c.failed.map(f => f.id)).toEqual(["2"]);
     expect(c.silent.map(s => s.id)).toEqual(["3", "4"]);

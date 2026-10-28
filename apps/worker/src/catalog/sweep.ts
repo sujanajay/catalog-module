@@ -10,6 +10,7 @@ import { catalogBatches } from "@catalog/core/db/schema";
 import { enqueueTask } from "@catalog/core/tasks";
 import { log } from "@catalog/core/log";
 import { PROCESSING_STATUSES, recoverBatchChunks } from "@catalog/core/catalog/pipeline/dispatch";
+import { runInvariants } from "@catalog/core/catalog/invariants/run";
 import { enqueueFinalize, finalizeEnqueueExpired } from "./deps";
 
 /** No progress for this long fails the batch (2 hours, from the plan). */
@@ -86,6 +87,9 @@ export async function handleSweep(deps: SweepDeps, _body: Record<string, unknown
   // processing batch's window. A live lease and a recently queued task are never touched.
   const processing=await deps.db.select({id:catalogBatches.id}).from(catalogBatches).where(inArray(catalogBatches.status,PROCESSING_STATUSES));
   for(const batch of processing) await recoverBatchChunks(deps.db,deps.enqueue ?? enqueueTask,batch.id,{now,...(deps.window ? {window:deps.window}:{})});
+  // Spec 17 3.1.3: the invariants, every sweep (10 minutes). A failed check run never stops the sweep.
+  // Spec 17 3.1.3: the invariants never stop the sweep, but a failed run is an ERROR (the checks went blind).
+  try { await runInvariants(deps.db, log, now); } catch (error) { log("ERROR", "invariants run failed", { error: error instanceof Error ? error.message : String(error) }); }
   const cutoff = new Date(now.getTime() - SWEEP_STALE_MS).toISOString();
   const statuses = sql.join(
     SWEEPABLE_STATUSES.map((s) => sql`${s}`),

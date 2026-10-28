@@ -1,0 +1,40 @@
+{
+  "displayName": "Some images were left half-finished (silent outputs)",
+  "documentation": {
+    "content": "A finished batch has images that were neither published, held for the operator with a reason, skipped, nor failed with a reason, so they were lost without a word. The check runs every 10 minutes. Open Logs Explorer for the catalog-worker service and search for \"invariant\" with id silent_outputs: the sample field lists up to 5 of the image ids, and the admin Ops page shows how many there are. Do not change a delivered batch by hand; report the batch ids, because fixing them is the owner's decision.",
+    "mimeType": "text/markdown",
+    "subject": "Some images were left half-finished (silent outputs)"
+  },
+  "userLabels": {
+    "app": "catalog"
+  },
+  "conditions": [
+    {
+      "displayName": "silent outputs found, more than 0 in 15 minutes",
+      "conditionThreshold": {
+        "filter": "metric.type=\"logging.googleapis.com/user/catalog/silent_outputs\" AND resource.type=\"cloud_run_revision\"",
+        "aggregations": [
+          {
+            "alignmentPeriod": "900s",
+            "perSeriesAligner": "ALIGN_SUM",
+            "crossSeriesReducer": "REDUCE_SUM"
+          }
+        ],
+        "comparison": "COMPARISON_GT",
+        "thresholdValue": 0,
+        "duration": "0s",
+        "trigger": {
+          "count": 1
+        }
+      }
+    }
+  ],
+  "combiner": "OR",
+  "enabled": true,
+  "notificationChannels": [
+    "__CATALOG_EMAIL_CHANNEL__"
+  ],
+  "alertStrategy": {
+    "autoClose": "3600s"
+  }
+}

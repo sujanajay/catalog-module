@@ -15,7 +15,8 @@ import { batchCostAttribution, batchCostByEngine, batchCostByStage, brandCostTot
 import { db, type Db } from "../db";
 import { log } from "@catalog/core/log";
 import { withoutModelNames } from "./redact";
-import { ACTIVE_STATUSES, type ChunkCount } from "./ops-copy";
+import { GoogleAuth } from "google-auth-library";
+import { ACTIVE_STATUSES, type ChunkCount, type HealthSummary } from "./ops-copy";
 
 export const ACTIVE_LIMIT = 10;
 export const FAILURE_LIMIT = 20;
@@ -198,4 +199,63 @@ export function batchCostDetail(batchId: string, conn: Db = db(), now: Date = ne
     const attribution = await batchCostAttribution(tx, batchId, { top: 10 });
     return { batch, stages, engines, attribution, readAt: now };
   })));
+}
+
+// Spec 17 3.1.5: the health lines. The invariants run (sweep, every 10 minutes) keeps silentOutputs,
+// heldSiblings and slowestChunkMs on catalog_batches.counts; this reads them back (one small aggregate over
+// the batches, then one chunk row on the batch_id index).
+export async function healthSummary(conn: Db = db()): Promise<HealthSummary> {
+  const [sums] = await conn
+    .select({ silent: sql<string>`coalesce(sum((${catalogBatches.counts}->>'silentOutputs')::numeric), 0)`, held: sql<string>`coalesce(sum((${catalogBatches.counts}->>'heldSiblings')::numeric), 0)` })
+    .from(catalogBatches)
+    .where(or(sql`${catalogBatches.counts}->>'silentOutputs' IS NOT NULL`, sql`${catalogBatches.counts}->>'heldSiblings' IS NOT NULL`));
+  const slowMs = sql<string>`(${catalogBatches.counts}->>'slowestChunkMs')::numeric`;
+  const [slowBatch] = await conn
+    .select({ id: catalogBatches.id, ms: slowMs })
+    .from(catalogBatches)
+    .where(and(inArray(catalogBatches.status, [...ACTIVE_STATUSES]), sql`coalesce(${slowMs}, 0) > 0`))
+    .orderBy(sql`${slowMs} desc`)
+    .limit(1);
+  let slowest: HealthSummary["slowest"] = null;
+  if (slowBatch) {
+    const [chunk] = await conn.select({ stage: catalogChunks.stage }).from(catalogChunks)
+      .where(and(eq(catalogChunks.batchId, slowBatch.id), eq(catalogChunks.status, "running")))
+      .orderBy(catalogChunks.startedAt).limit(1);
+    if (chunk) slowest = { stage: chunk.stage, ms: Number(slowBatch.ms), batchId: slowBatch.id };
+  }
+  return { silentOutputs: Number(sums?.silent ?? 0), heldSiblings: Number(sums?.held ?? 0), slowest };
+}
+
+/** The GPU cut-out service (infra/deploy.sh GPU_REGION). */
+export const GPU_SERVICE_PATH = "projects/image-links-agent/locations/asia-southeast1/services/catalog-matting-gpu";
+/** The tag a deploy gives the revision it is trying before it takes traffic (spec 17 3.2.2). */
+export const CANDIDATE_TAG = "candidate";
+export type CloudRunRead = (path: string) => Promise<unknown>;
+let cloudRunRead: CloudRunRead | null = null;
+/** Tests only: replace the Cloud Run Admin API read (undefined restores the real one). */
+export function setCloudRunReadForTests(read: CloudRunRead | undefined): void {
+  cloudRunRead = read ?? null;
+}
+const defaultCloudRunRead: CloudRunRead = async (path) => {
+  // Off Cloud Run (local runs, tests) there are no credentials to read with.
+  if (!process.env.K_SERVICE) throw new Error("not running on Cloud Run");
+  const auth = new GoogleAuth({ scopes: "https://www.googleapis.com/auth/cloud-platform" });
+  return (await auth.fetch(`https://run.googleapis.com/v2/${path}`, { signal: AbortSignal.timeout(5_000) })).data;
+};
+
+/**
+ * The GPU service's revision tagged `candidate`, or null when there is none; undefined when Cloud Run could not
+ * be read (a missing permission, or not on Cloud Run). The answer, a failure included, is kept STAGE_TTL_MS.
+ */
+export function gpuCandidateRevision(now: Date = new Date()): Promise<string | null | undefined> {
+  return rememberCost("gpu-candidate", +now, STAGE_TTL_MS, async () => {
+    try {
+      const service = (await (cloudRunRead ?? defaultCloudRunRead)(GPU_SERVICE_PATH)) as { trafficStatuses?: { tag?: string; revision?: string }[] } | null;
+      const candidate = service?.trafficStatuses?.find((t) => t.tag === CANDIDATE_TAG);
+      return candidate ? (candidate.revision?.split("/").pop() ?? CANDIDATE_TAG) : null;
+    } catch (error) {
+      log("WARNING", "ops report read failed", { what: "gpu candidate", error: error instanceof Error ? error.message : String(error) });
+      return undefined;
+    }
+  });
 }

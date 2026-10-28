@@ -63,6 +63,45 @@ afterEach(async () => {
 });
 
 describe("handleSweep (PGlite)", () => {
+  it("runs the invariants after the chunk recovery (spec 17 3.1.3): a silent output on a done batch is logged and counted", async () => {
+    const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const done = await insertBatch("done", 1);
+    const product = randomUUID(), source = randomUUID();
+    await db.execute(sql`INSERT INTO catalog_products (id, brand_slug, is_test, product_key, path_key, identifier) VALUES (${product}, 'uspa', true, 'INV1', 'inv1', 'inv1')`);
+    await db.execute(sql`INSERT INTO catalog_batch_products (batch_id, product_id, change) VALUES (${done}, ${product}, 'new')`);
+    await db.execute(sql`INSERT INTO catalog_source_images (id, batch_id, product_id, n, sha256, original_name, raw_uri, mime) VALUES (${source}, ${done}, ${product}, 1, 'x', 'x.jpg', 'gs://a/x.jpg', 'image/jpeg')`);
+    await db.execute(sql`INSERT INTO catalog_outputs (batch_id, product_id, source_image_id, channel, n, canvas_w, canvas_h, scale, placed_x, placed_y, render_key, object_path, public_url, status)
+      VALUES (${done}, ${product}, ${source}, 'noon', 1, 1, 1, 1, 0, 0, 'k', 'catalog-test/x.jpg', 'https://x/catalog-test/x.jpg', 'pending')`);
+    await handleSweep({ db, enqueue: vi.fn(async () => "task"), releaseLocks, now: () => NOW }, {});
+    const line = error.mock.calls.map(([l]) => JSON.parse(String(l)) as Row).find((l) => l.message === "invariant");
+    expect(line).toMatchObject({ severity: "ERROR", id: "silent_outputs", violations: 1 });
+    const [row] = await rows(db, sql`SELECT counts FROM catalog_batches WHERE id = ${done}`);
+    expect(row!.counts).toMatchObject({ silentOutputs: 1 });
+  });
+
+  it("still sweeps when the invariants cannot run, and says so at ERROR (the checks went blind)", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const stale = await insertBatch("matting", 5);
+    await insertLockedProducts(stale, 2);
+    // Every invariant query groups with array_agg; nothing else the sweep runs does.
+    const dialect = (db as unknown as { dialect: { sqlToQuery: (q: unknown) => { sql: string } } }).dialect;
+    const broken = new Proxy(db, {
+      get(target, prop, receiver) {
+        if (prop !== "execute") return Reflect.get(target, prop, receiver);
+        return (q: Parameters<Db["execute"]>[0]) => {
+          if (dialect.sqlToQuery(q).sql.includes("array_agg")) return Promise.reject(new Error("invariants table missing"));
+          return target.execute(q);
+        };
+      },
+    });
+    await handleSweep({ db: broken, enqueue: vi.fn(async () => "task"), releaseLocks, now: () => NOW }, {});
+    expect(await batch(stale)).toMatchObject({ status: "failed", error: SWEEP_ERROR });
+    expect(await locked(stale)).toBe(0);
+    const lines = error.mock.calls.map(([l]) => JSON.parse(String(l)) as Row);
+    expect(lines.find((l) => l.message === "invariants run failed")).toMatchObject({ severity: "ERROR", error: "invariants table missing" });
+  });
+
   it("writes the sweep sentence to counts.failReason too, so the batch page shows the reason, and keeps the other counts", async () => {
     vi.spyOn(console, "warn").mockImplementation(() => undefined);
     vi.spyOn(console, "error").mockImplementation(() => undefined);

@@ -13,7 +13,9 @@
 #                  purpose: the eval, smoke, load and QA-check jobs fail on purpose in tests and
 #                  must never send an alert email.
 #   alert policies one per infra/monitoring/policies/*.json, matched by displayName; the
-#                  placeholder __CATALOG_EMAIL_CHANNEL__ is replaced with the channel at run time
+#                  placeholder __CATALOG_EMAIL_CHANNEL__ is replaced with the channel at run time.
+#                  11 silent outputs and 12 slow chunk (spec 17 3.1.3) read the "invariant" log line the
+#                  sweep writes every 10 minutes (log metrics catalog/silent_outputs and catalog/slow_chunk)
 #   dashboard      "Catalog ops" from infra/monitoring/dashboard.json
 #
 # gcloud tracks: notification channels exist only as "gcloud beta monitoring channels" (there is no
