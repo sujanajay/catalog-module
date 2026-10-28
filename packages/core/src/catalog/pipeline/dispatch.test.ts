@@ -5,7 +5,7 @@ import type { Db } from "../../db/client";
 import { createTestDb } from "../../db/testing";
 import { catalogBatches, catalogChunks, EMPTY_BATCH_COUNTS } from "../../db/schema";
 import { chunkTaskId } from "../../tasks";
-import { chunkTimeBudgetMs, chunkWindow, CHUNK_TIME_BUDGET_MS, dispatchChunks, enqueueChunk, isBulkBatch, LOAD_BATCH_NAME_PREFIX, recoverBatchChunks, windowFor } from "./dispatch";
+import { chunkTimeBudgetMs, chunkWindow, CHUNK_TIME_BUDGET_MS, dispatchChunks, enqueueChunk, isBulkBatch, LOAD_BATCH_NAME_PREFIX, recoverBatchChunks, redispatchUnstartedChunks, REDISPATCHED_TASK, windowFor } from "./dispatch";
 
 let db: Db, close: () => Promise<void>;
 beforeAll(async () => { ({ db, close } = await createTestDb()); }, 60_000);
@@ -142,21 +142,47 @@ describe("recoverBatchChunks (E4)", () => {
     const set = (i: number, patch: Partial<typeof catalogChunks.$inferInsert>) => db.update(catalogChunks).set(patch).where(eq(catalogChunks.id, rows[i]!.id));
     await set(0, { status: "running", startedAt: at(-5 * 3600_000), leaseUntil: at(10 * 60_000), dispatchedAt: at(-5 * 3600_000) }); // live lease (renewed), 5 h old
     await set(1, { status: "running", startedAt: at(-300_000), leaseUntil: at(-1_000), dispatchedAt: at(-300_000), step: 2 }); // lapsed
-    await set(2, { status: "queued", dispatchedAt: at(-10 * 60_000) }); // waiting 10 min
+    await set(2, { status: "queued", dispatchedAt: at(-5 * 60_000) }); // waiting 5 min
     await set(3, { status: "queued", dispatchedAt: at(-31 * 60_000), step: 1 }); // lost
     await set(4, { status: "running", startedAt: at(-10 * 60_000), leaseUntil: null, dispatchedAt: at(-10 * 60_000), stepKnown: false }); // pre-0004 claim, 10 min
     const result = await recoverBatchChunks(db, queue.enqueue, batchId, { now: T0, window: 5, log });
-    expect(result).toEqual({ lapsed: 1, lost: 1, dispatched: 0 });
+    expect(result).toEqual({ lapsed: 1, lost: 1, unstarted: 0, dispatched: 0 });
     expect(queue.tasks.map((t) => t.taskId).sort()).toEqual([chunkTaskId(rows[1]!.id, "matte", 3), chunkTaskId(rows[3]!.id, "matte", 2)].sort());
     expect(log).toHaveBeenCalledWith("chunk recovered", expect.objectContaining({ chunkId: rows[1]!.id, reason: "lease_lapsed", step: 3 }));
     expect(log).toHaveBeenCalledWith("chunk recovered", expect.objectContaining({ chunkId: rows[3]!.id, reason: "task_lost", step: 2 }));
     // The same minute: nothing more.
-    expect(await recoverBatchChunks(db, queue.enqueue, batchId, { now: at(30_000), window: 5, log })).toEqual({ lapsed: 0, lost: 0, dispatched: 0 });
+    expect(await recoverBatchChunks(db, queue.enqueue, batchId, { now: at(30_000), window: 5, log })).toEqual({ lapsed: 0, lost: 0, unstarted: 0, dispatched: 0 });
     // A pre-0004 claim keeps its 960 s lease: untouched at 10 min, recovered at 17 min.
     expect((await recoverBatchChunks(db, queue.enqueue, batchId, { now: at(7 * 60_000), window: 5, log })).lapsed).toBe(1);
     const [legacy] = await db.select().from(catalogChunks).where(eq(catalogChunks.id, rows[4]!.id));
     expect(legacy).toMatchObject({ status: "queued", step: 1, stepKnown: true });
     const [live] = await db.select().from(catalogChunks).where(eq(catalogChunks.id, rows[0]!.id));
     expect(live).toMatchObject({ status: "running", step: 0 });
+  });
+});
+
+describe("redispatchUnstartedChunks (spec 17 G4)", () => {
+  it("re-sends a step whose task never started after 6 min, once per step; leaves a step that ran, a recent one and a running one alone", async () => {
+    const batchId = await batchWith(4, "unstarted"), queue = fakeQueue(), log = vi.fn();
+    const rows = (await db.select().from(catalogChunks).where(eq(catalogChunks.batchId, batchId))).sort((x, y) => x.index - y.index);
+    const set = (i: number, patch: Partial<typeof catalogChunks.$inferInsert>) => db.update(catalogChunks).set(patch).where(eq(catalogChunks.id, rows[i]!.id));
+    await set(0, { status: "queued", step: 1, startedAt: at(-10 * 60_000), dispatchedAt: at(-7 * 60_000) }); // handed off 7 min ago, task never started
+    await set(1, { status: "queued", step: 1, startedAt: at(-7 * 60_000), dispatchedAt: at(-9 * 60_000) }); // its step ran and failed: its own retry is due
+    await set(2, { status: "queued", dispatchedAt: at(-5 * 60_000) }); // waiting 5 min
+    await set(3, { status: "running", taskName: "alive", startedAt: at(-60_000), leaseUntil: at(60_000), dispatchedAt: at(-20 * 60_000) });
+    expect(await redispatchUnstartedChunks(db, queue.enqueue, batchId, { now: T0, log })).toBe(1);
+    expect(queue.tasks.map((t) => t.taskId)).toEqual([chunkTaskId(rows[0]!.id, "matte", 2)]);
+    expect(log).toHaveBeenCalledWith("chunk recovered", expect.objectContaining({ chunkId: rows[0]!.id, reason: "task_not_started", step: 2 }));
+    const [resent] = await db.select().from(catalogChunks).where(eq(catalogChunks.id, rows[0]!.id));
+    expect(resent).toMatchObject({ status: "queued", step: 2, taskName: REDISPATCHED_TASK, dispatchedAt: T0 });
+    // Twice at once, or again 7 min later: the re-sent step is not re-sent (the 5-min one now is).
+    expect(await redispatchUnstartedChunks(db, queue.enqueue, batchId, { now: T0, log })).toBe(0);
+    expect(await redispatchUnstartedChunks(db, queue.enqueue, batchId, { now: at(7 * 60_000), log })).toBe(1);
+    expect(queue.tasks.map((t) => t.taskId)).toEqual([chunkTaskId(rows[0]!.id, "matte", 2), chunkTaskId(rows[2]!.id, "matte", 1)]);
+    expect((await db.select().from(catalogChunks).where(eq(catalogChunks.id, rows[1]!.id)))[0]).toMatchObject({ step: 1, taskName: null });
+    // The 30-minute lost-task rule still covers a re-sent step whose new task is lost too.
+    await recoverBatchChunks(db, queue.enqueue, batchId, { now: at(31 * 60_000), window: 4, log });
+    expect(queue.tasks.map((t) => t.taskId)).toContain(chunkTaskId(rows[0]!.id, "matte", 3));
+    expect((await db.select().from(catalogChunks).where(eq(catalogChunks.id, rows[0]!.id)))[0]).toMatchObject({ step: 3, taskName: null });
   });
 });
