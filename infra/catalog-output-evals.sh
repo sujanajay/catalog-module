@@ -28,6 +28,8 @@ JOB=catalog-output-evals
 # Pin this project for every gcloud call without touching global gcloud config.
 export CLOUDSDK_CORE_PROJECT=$PROJECT
 cd "$(dirname "$0")/.."
+# cli_args: the --args value for "gcloud run jobs execute" (unique tokens, "^|^" separator).
+source infra/lib/cli-args.sh
 
 WORKER_SA=catalog-worker@$PROJECT.iam.gserviceaccount.com
 ASSETS_BUCKET=image-links-agent-assets
@@ -79,9 +81,10 @@ run() {
   local live=0 env_flags=()
   if [ "${1:-}" = "--live" ]; then live=1; shift; fi
   [ "$live" = 1 ] && env_flags+=(--update-env-vars=LIVE_SMOKE=1)
-  # gcloud list escaping (gcloud topic escaping): "^|^" makes "|" the separator.
+  # Each "--flag value" travels as one "--flag=value" token: gcloud refuses a repeated value inside --args
+  # ("--limit 3 --bakeoff-sample 3" gave '"3" cannot be specified multiple times'). The CLI reads both forms.
   local joined
-  joined=$(printf '%s|' run "$@"); joined="^|^${joined%|}"
+  joined=$(cli_args run "$@") || exit 2
   echo "==> $JOB: EXECUTE run $* $([ "$live" = 1 ] && echo '(LIVE_SMOKE=1, live judge calls)')"
   MSYS2_ARG_CONV_EXCL='--args=' gcloud run jobs execute "$JOB" --region="$REGION" --args="$joined" "${env_flags[@]}" --wait
   echo "Report: gs://$ASSETS_BUCKET/catalog-test/evals/<run>/report.html; the run id and the summary line are in the job log:"
