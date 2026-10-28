@@ -114,8 +114,9 @@ deploy.sh. A lesson in a document is not a guard; these are the guards.
   A preview that needs the GPU image builds with `cloudbuild.yaml` instead of
   `infra/cloudbuild-preview.yaml`.
 - GPU knobs (spec 17 3.3.2): `CUDNN_CONV_ALGO_SEARCH`, `CUDNN_CONV_USE_MAX_WORKSPACE` and
-  `INFERENCE_LOCK_SCOPE` reach `catalog-matting-gpu` only when set in the environment of the deploy
-  (unset: not passed, the service default), so a candidate rung can move one knob per deploy.
+  `INFERENCE_LOCK_SCOPE` reach `catalog-matting-gpu` only when set (unset: not passed, the service
+  default), so a candidate rung can move one knob per deploy. `infra/lib/shape.sh` (G3) defaults
+  `INFERENCE_LOCK_SCOPE` to `global`, so that one is always passed.
 - Jobs step: besides the QA, eval, scale and output-eval jobs, deploy.sh prepares the
   `catalog-invariants` job (spec 17 G1) through `CATALOG_TEST_JOBS=invariants infra/catalog-test-jobs.sh`,
   with the worker image and the live worker's service account, env and VPC. Deployed, never executed.
@@ -131,8 +132,10 @@ older to protect).
 
 Open on the first gated deploy (not verifiable offline): catalog-web now has `GET /health`
 (`{ok: true}`, no database call), but IAP must still accept the operator's identity token on the tag URL;
-the matting probes need `infra/check-matting.sh --probe` (spec 17 G3) and fail loudly until it
-exists; the worker smoke calls the matting tag URLs with an ID token whose audience is that tag URL.
+the matting probes run `infra/check-matting.sh --probe <tag URL> --models <GPU_MATTE_MODELS>
+--concurrency <n>` as a Cloud Run job (default 5 rounds per model), and whether the CPU probe fits its
+300 s limit (job start, cold start, four models on CPU) is unmeasured; a timeout fails safe (traffic
+stays). The worker smoke calls the matting tag URLs with an ID token whose audience is that tag URL.
 
 ## Rollback
 One service, seconds, no build and no smoke: `bash infra/deploy.sh --rollback <service> [revision]`
