@@ -34,11 +34,12 @@ export const MATTE_RETRY_POLL_MS = 15_000;
 export const MATTE_RETRY_MARGIN_MS = 60_000;
 /** Spec 15 E1: the QA back-off never waits into the last two minutes before the request deadline. */
 export const QA_BACKOFF_DEADLINE_MARGIN_MS = 120_000;
-/** Same-step retries that wait for a live lease to lapse (503 "busy") before a copy answers "duplicate". The queue
- * (back-off 10 s doubling, at most 60 s, spec 17 G4) sends retries 1-4 at about +10, +30, +70 and +130 s; a crashed
- * holder's lease lapses within 120 s, so retryCount 4 is the first that can claim, and every earlier one must wait. */
-export const LAST_QUEUE_RETRY = 4;
-export const CHUNK_BUSY_RETRIES = LAST_QUEUE_RETRY;
+/**
+ * Spec 15 E3 threshold (the fifth real error of one task fails the chunk), counted by this code in the batch's
+ * `counts.chunkErrors` (spec 17 G4). Not X-CloudTasks-TaskRetryCount: that also counts 429 and 503 attempts
+ * that never reached this handler, so with unlimited queue retries one error after a 429 storm would fail a chunk.
+ */
+export const CHUNK_MAX_ERRORS = 5;
 const OWNERSHIP_CHANGED = "Chunk ownership changed.";
 
 /** Where a delivery's time went, for the `chunk delivery` line (spec 15 E7). */
@@ -197,8 +198,10 @@ export async function handleChunkTask(rawDeps: CatalogDeps, body: Record<string,
   if (!claimed) {
     const [now] = await deps.db.select().from(catalogChunks).where(eq(catalogChunks.id,chunk.id));
     if (!now || now.stage !== chunk.stage || now.step !== chunk.step) return answer(200,"stale");
-    // The same task's own retry after a crash waits for the lease to lapse; any other copy drops itself.
-    if (now.status === "running" && bodyStep !== undefined && (opts.retryCount ?? 0) < CHUNK_BUSY_RETRIES) return answer(503,"busy");
+    // A copy of the chunk's current task waits (503) while the holder's lease is live: it claims once the lease
+    // lapses (a crashed holder), or answers stale once the holder moved the step on. The lease ends by the deadline,
+    // so the wait is bounded; the retry count is not used, as it also counts 429s (spec 17 G4).
+    if (now.status === "running" && bodyStep !== undefined) return answer(503,"busy");
     return answer(200,"duplicate");
   }
   chunk = claimed;
@@ -496,8 +499,9 @@ export async function handleChunkTask(rawDeps: CatalogDeps, body: Record<string,
     if (lost || reason === OWNERSHIP_CHANGED) return answer(200,"lost");
     // Terminal (the chunk is marked failed below) is ERROR, a retried attempt WARNING: the alert counts ERROR only.
     // An Error object is passed whole, so a terminal line carries its stack for Error Reporting (the line shows its message).
-    const terminal = (opts.retryCount ?? 0) >= LAST_QUEUE_RETRY;
-    deps.log("chunk failed",{severity:terminal ? "ERROR":"WARNING",batchId:chunk.batchId,chunkId:chunk.id,stage:chunk.stage,attempt:chunk.attempt,retryCount:opts.retryCount ?? 0,error:error instanceof Error ? error:reason});
+    const errors = await recordError();
+    const terminal = errors >= CHUNK_MAX_ERRORS;
+    deps.log("chunk failed",{severity:terminal ? "ERROR":"WARNING",batchId:chunk.batchId,chunkId:chunk.id,stage:chunk.stage,attempt:chunk.attempt,errors,retryCount:opts.retryCount ?? 0,error:error instanceof Error ? error:reason});
     if (terminal) {
       if (!(await failChunk(reason,`Processing stopped after repeated errors: ${reason}`))) return answer(200,"lost");
       return answer(200,"failed");
@@ -520,6 +524,15 @@ export async function handleChunkTask(rawDeps: CatalogDeps, body: Record<string,
   async function resendUnstarted() {
     try { await redispatchUnstartedChunks(deps.db,deps.enqueue,chunk!.batchId,{now:deps.now(),log:deps.log}); }
     catch (error) { deps.log("chunk redispatch failed",{severity:"WARNING",batchId:chunk!.batchId,error:error instanceof Error ? error.message:String(error)}); }
+  }
+  /** Counts this real error against the chunk's current task (stage, step) in one atomic write; returns the count. */
+  async function recordError():Promise<number> {
+    const {id,stage,step} = chunk!, entry = sql`${catalogBatches.counts}->'chunkErrors'->${id}::text`;
+    const errors = sql`CASE WHEN ${entry}->>'stage' = ${stage}::text AND (${entry}->>'step')::int = ${step}::int THEN (${entry}->>'errors')::int + 1 ELSE 1 END`;
+    const [row] = await deps.db.update(catalogBatches)
+      .set({counts:sql`${catalogBatches.counts} || jsonb_build_object('chunkErrors',coalesce(${catalogBatches.counts}->'chunkErrors','{}'::jsonb) || jsonb_build_object(${id}::text,jsonb_build_object('stage',${stage}::text,'step',${step}::int,'errors',${errors})))`})
+      .where(eq(catalogBatches.id,chunk!.batchId)).returning({errors:sql<number>`(${entry}->>'errors')::int`});
+    return row?.errors ?? 1;
   }
   /** Spec 16: a bulk batch's chunk and publish tasks go to the bulk queue (when one is configured). */
   function bulk():boolean { return !!batch && isBulkBatch(batch); }

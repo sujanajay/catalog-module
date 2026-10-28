@@ -116,6 +116,11 @@ export interface BatchCounts {
    * `failReason` here, step 1 shows it above the inputs, and the next hand-off to collecting clears it.
    */
   fixReason?: string | null;
+  /**
+   * Spec 17 G4: real errors each chunk's current task (stage, step) threw, keyed by chunk id and counted by the
+   * worker. The chunk fails at CHUNK_MAX_ERRORS; a new step starts again at 1. Optional (no migration).
+   */
+  chunkErrors?: Record<string, { stage: string; step: number; errors: number }>;
 }
 /** Intake phases (spec 14c F6). The first five are collecting, `placing` follows, the last two end intake. */
 export const INTAKE_PHASES = ["uploading", "downloading", "reading", "unpacking", "checking", "placing", "ready", "needs_input"] as const;

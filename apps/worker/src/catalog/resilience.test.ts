@@ -202,7 +202,7 @@ describe("E2: heartbeat lease", () => {
       w.set(T0 + t);
       expect(await live.renew()).toBe(true);
       expect(await handleChunkTask(w.deps, live.body)).toEqual({ httpStatus: 503, outcome: "busy" });
-      expect(await handleChunkTask(w.deps, live.body, { retryCount: 4 })).toEqual({ httpStatus: 200, outcome: "duplicate" });
+      expect(await handleChunkTask(w.deps, live.body, { retryCount: 10 })).toEqual({ httpStatus: 503, outcome: "busy" });
     }
     expect((await row(id)).taskName).toBe(holder);
     w.set(T0 + DEADLINE_MS);
@@ -219,9 +219,10 @@ describe("E2: heartbeat lease", () => {
     w.set(T0 + 60_000);
     await live.renew();
     w.set(T0 + 60_000 + 119_000);
-    expect((await handleChunkTask(w.deps, live.body, { retryCount: 4 })).outcome).toBe("duplicate");
+    // Spec 17 G4: a retry count inflated by 429s still waits (busy), so the crashed holder's task is never dropped.
+    expect(await handleChunkTask(w.deps, live.body, { retryCount: 10 })).toEqual({ httpStatus: 503, outcome: "busy" });
     w.set(T0 + 60_000 + 121_000);
-    expect((await handleChunkTask(w.deps, live.body, { retryCount: 1 })).httpStatus).toBe(200);
+    expect((await handleChunkTask(w.deps, live.body, { retryCount: 11 })).httpStatus).toBe(200);
     live.release();
     expect(await live.result).toEqual({ httpStatus: 200, outcome: "lost" });
     expect(await row(id)).toMatchObject({ stage: "render", status: "queued" });
@@ -239,13 +240,13 @@ describe("E2: heartbeat lease", () => {
 });
 
 describe("E3: one live task per chunk", () => {
-  it("other-step copies arriving while a delivery is live answer 200 and change nothing; a same-step copy past its retries is a duplicate", async () => {
+  it("other-step copies arriving while a delivery is live answer 200 and change nothing; a same-step copy waits (busy) at any retry count", async () => {
     const w = world(), s = await seed(w, "e3-copies", [[1]]), id = s.chunks[0]!.id;
     const live = await liveDelivery(w, id);
     const before = await row(id);
     expect(await w.deliver({ chunkId: id, stage: "matte", step: 5 })).toEqual({ httpStatus: 200, outcome: "stale" });
     expect(await w.deliver({ chunkId: id, stage: "render", step: 0 })).toEqual({ httpStatus: 200, outcome: "stale" });
-    expect(await w.deliver(live.body, { retryCount: 4 })).toEqual({ httpStatus: 200, outcome: "duplicate" });
+    expect(await w.deliver(live.body, { retryCount: 10 })).toEqual({ httpStatus: 503, outcome: "busy" });
     expect(await w.deliver({ chunkId: id })).toEqual({ httpStatus: 200, outcome: "stale" });
     expect(await row(id)).toEqual(before);
     expect(w.queue).toHaveLength(0);
