@@ -74,7 +74,7 @@ describe("handleSweep (PGlite)", () => {
       VALUES (${done}, ${product}, ${source}, 'noon', 1, 1, 1, 1, 0, 0, 'k', 'catalog-test/x.jpg', 'https://x/catalog-test/x.jpg', 'pending')`);
     await handleSweep({ db, enqueue: vi.fn(async () => "task"), releaseLocks, now: () => NOW }, {});
     const line = error.mock.calls.map(([l]) => JSON.parse(String(l)) as Row).find((l) => l.message === "invariant");
-    expect(line).toMatchObject({ severity: "ERROR", id: "silent_outputs", violations: 1 });
+    expect(line).toMatchObject({ severity: "ERROR", id: "silent_outputs", violations: 1, batches: [{ batchId: done, violations: 1 }], batchCount: 1 });
     const [row] = await rows(db, sql`SELECT counts FROM catalog_batches WHERE id = ${done}`);
     expect(row!.counts).toMatchObject({ silentOutputs: 1 });
   });

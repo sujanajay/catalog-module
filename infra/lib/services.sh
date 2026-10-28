@@ -114,7 +114,8 @@ service_catalog_web() {
     --max-instances="$WEB_MAX_INSTANCES" --timeout=300 "${NET[@]}" --set-secrets="$SECRETS"
     --labels=app=catalog,component=web)
   SVC_ENV=$WEB_ENV
-  SVC_PROBE=(bash infra/lib/services.sh probe-web)
+  # Through IAP as the smoke's identity (the worker's service account, which the catalog-test-smoke job runs as).
+  SVC_PROBE=(env "WEB_PROBE_SA=$WORKER_SA" bash infra/lib/services.sh probe-web)
   SVC_PROBE_TIMEOUT=300
   SVC_DEPLOY=1
   SVC_SHIFT=1
@@ -124,16 +125,57 @@ service_catalog_web() {
 # ---- Probes. Each runs as its own process (bash infra/lib/services.sh probe-<kind> ... <url>), exits non-zero on
 # any failure and never prints a token. ----
 
-# GET <url><path> with the operator's identity token; fails on anything but a final 200. Same-host redirects are
-# followed (the web home page redirects to /catalog; curl keeps the token only on the same host). Retries cover a
-# cold start.
+# GET <url> with a bearer token (default: the operator's identity token, which plain Cloud Run IAM accepts); fails on
+# anything but a final 200 on the same host. Redirects are followed (the web home page redirects to /catalog; curl
+# keeps the token only on the same host), but a final page on another host fails: an IAP 302 to Google's sign-in page
+# would otherwise end in a 200 there. Retries cover a cold start. The header goes to curl on stdin (-K -), so the token
+# is never on a command line.
 probe_get() {
-  local url=$1 code token
-  token=$(gcloud auth print-identity-token | tr -d '\r') || { echo "probe: no identity token (gcloud auth login)" >&2; return 1; }
-  code=$(curl -sS -L --max-redirs 5 -o /dev/null -w '%{http_code}' --max-time 60 --retry 5 --retry-delay 5 --retry-all-errors \
-    -H "Authorization: Bearer $token" "$url") || code=000
+  local url=$1 token=${2:-} out code final host
+  if [ -z "$token" ]; then
+    token=$(gcloud auth print-identity-token | tr -d '\r') || { echo "probe: no identity token (gcloud auth login)" >&2; return 1; }
+  fi
+  # The token is written into a curl config line, so it must be a plain token (no quote, backslash or space).
+  [[ "$token" =~ ^[A-Za-z0-9._~+/=-]+$ ]] || { echo "probe: the token is not a plain bearer token" >&2; return 1; }
+  out=$(printf 'header = "Authorization: Bearer %s"\n' "$token" \
+    | curl -sS -K - -L --max-redirs 5 -o /dev/null -w '%{http_code} %{url_effective}' --max-time 60 --retry 5 --retry-delay 5 --retry-all-errors \
+      "$url") || out=000
+  code=${out%% *}; final=${out#* }
+  host=${url#https://}; host=${host%%/*}
   echo "probe: GET $url -> $code"
-  [ "$code" = 200 ]
+  [ "$code" = 200 ] || return 1
+  case "$final" in
+    "https://$host" | "https://$host/"*) ;;
+    *) echo "probe: GET $url ended on another host (${final%%\?*}), not on the service" >&2; return 1 ;;
+  esac
+}
+
+# A token IAP accepts. catalog-web uses IAP's Google-managed OAuth client, so IAP refuses the operator's own tokens
+# (the gcloud identity token is minted for gcloud's OAuth client, which is not on IAP's programmatic allowlist; both it
+# and the user access token got 401 on 2026-10-28). It accepts a service account's OAuth access token with the openid
+# and email scopes when that account holds roles/iap.httpsResourceAccessor (docs.cloud.google.com/iap/docs/
+# authentication-howto, "Authenticate a service account"). An access token has no audience, so the candidate tag URL
+# works as well as the service URL. infra/bootstrap.sh grants both sides: the accessor role to the service account and
+# Service Account Token Creator on it to the operator who runs the deploy. See docs/solutions/catalog-iap.md.
+# The token comes from the IAM Credentials API (generateAccessToken) with exactly those two scopes: the installed
+# gcloud (SDK 579) has no --scopes flag on print-access-token, and its impersonated tokens carry its own scope list.
+# Both tokens travel on curl's stdin (-K -), never on a command line, and are never printed; on failure only the HTTP
+# status of the IAM Credentials call is shown (403: the Token Creator grant is missing; 401: log in again).
+iap_token() {
+  local sa=$1 caller out token code
+  caller=$(gcloud auth print-access-token | tr -d '\r') || caller=
+  [ -n "$caller" ] || { echo "probe: no access token (gcloud auth login)" >&2; return 1; }
+  out=$(printf 'header = "Authorization: Bearer %s"\nheader = "Content-Type: application/json"\n' "$caller" \
+    | curl -sS -K - -X POST --max-time 30 -w '\n%{http_code}' \
+      --data '{"scope":["openid","https://www.googleapis.com/auth/userinfo.email"],"lifetime":"900s"}' \
+      "https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/$sa:generateAccessToken" 2>/dev/null) || out=$'\n000'
+  code=${out##*$'\n'}
+  token=$(printf '%s' "${out%$'\n'*}" | node -e 'let s="";process.stdin.on("data",(d)=>s+=d).on("end",()=>{try{process.stdout.write(JSON.parse(s).accessToken||"")}catch{}})') || token=
+  if [ "$code" != 200 ] || [ -z "$token" ]; then
+    echo "probe: cannot mint an IAP token as $sa (IAM Credentials HTTP $code; 403 means the operator lacks roles/iam.serviceAccountTokenCreator on it: run bash infra/bootstrap.sh; 401 means gcloud auth login)" >&2
+    return 1
+  fi
+  printf '%s' "$token"
 }
 
 # Spec 17 3.3.1 (G3): the matting probe measures the candidate with the models, concurrency and rounds its registry
@@ -161,10 +203,14 @@ probe_worker() {
   echo "probe: smoke passed (evidence: gs://image-links-agent-assets/catalog-test/smoke/linux-$run/smoke/)"
 }
 
-# /health and the home page through IAP with the operator's identity.
+# /health and the home page through IAP as WEB_PROBE_SA (spec 17 3.2.3: the existing smoke identity). The service
+# account is outside the opptra.com domain, so the home page renders the app's refusal line with HTTP 200 (app/layout);
+# the probe shows IAP lets the gate through and the server renders, not that a person may use the catalog.
 probe_web() {
-  local url=$1
-  probe_get "$url/health" && probe_get "$url/"
+  local url=$1 token
+  [ -n "${WEB_PROBE_SA:-}" ] || { echo "probe: WEB_PROBE_SA is not set" >&2; return 1; }
+  token=$(iap_token "$WEB_PROBE_SA") || return 1
+  probe_get "$url/health" "$token" && probe_get "$url/" "$token"
 }
 
 if [ "${BASH_SOURCE[0]}" = "$0" ]; then

@@ -7,7 +7,7 @@ import { createTestDb } from "../../db/testing";
 import { catalogBatches, catalogBatchProducts, catalogChunks, catalogOutputs, catalogProducts, catalogSourceImages } from "../../db/schema";
 import type { BatchStatus, ChangeKind, OutputStatus } from "../types";
 import { CHECKS } from "./checks";
-import { runInvariants } from "./run";
+import { BATCH_LIST_SIZE, runInvariants } from "./run";
 import { classifyOutputs } from "../load/classify";
 
 let db: Db, close: () => Promise<void>;
@@ -21,8 +21,8 @@ const NOW = new Date("2026-10-28T12:00:00Z");
 const ago = (min: number) => new Date(+NOW - min * 60_000);
 let seq = 0;
 
-async function batch(status: BatchStatus) {
-  const [b] = await db.insert(catalogBatches).values({ brandSlug: "test_brand", brandName: "Test", name: `b${++seq}`, status, isTest: true, createdBy: "t@opptra.com", channels: ["noon"] }).returning();
+async function batch(status: BatchStatus, isTest = true) {
+  const [b] = await db.insert(catalogBatches).values({ brandSlug: "test_brand", brandName: "Test", name: `b${++seq}`, status, isTest, createdBy: "t@opptra.com", channels: ["noon"] }).returning();
   return b!;
 }
 async function product(batchId: string, change: ChangeKind) {
@@ -151,8 +151,44 @@ describe("runInvariants", () => {
     expect(silent[2]).toMatchObject({ id: "silent_outputs", violations: 7, severity: "ERROR" });
     expect(silent[2].sample).toHaveLength(5);
     for (const id of silent[2].sample) expect(ids).toContain(id);
+    expect(silent[2]).toMatchObject({ batches: [{ batchId: b.id, test: true, violations: 7 }], batchCount: 1 });
     const ok = log.mock.calls.find(([, , f]) => f.id === "slow_chunk")!;
-    expect(ok).toEqual(["INFO", "invariant", { id: "slow_chunk", violations: 0, sample: [], severity: "WARNING" }]);
+    expect(ok).toEqual(["INFO", "invariant", { id: "slow_chunk", violations: 0, sample: [], batches: [], batchCount: 0, severity: "WARNING" }]);
+  });
+
+  it("names the violating batches per check, most violations first, with the test flag so delivered work stands out", async () => {
+    const delivered = await batch("done", false), test = await batch("done");
+    const dp = await product(delivered.id, "new"), tp = await product(test.id, "new");
+    await output(delivered.id, dp, "pending");
+    for (let i = 0; i < 3; i++) await output(test.id, tp, "pending");
+    const working = await batch("matting", false);
+    const stale = await chunk(working.id, { status: "running", startedMin: 20, leaseMin: 10 });
+    const log = vi.fn();
+    const r = await runInvariants(db, log, NOW);
+    const silent = r.results.find(x => x.id === "silent_outputs")!;
+    expect(silent).toMatchObject({ violations: 4, batchCount: 2, batches: [{ batchId: test.id, test: true, violations: 3 }, { batchId: delivered.id, test: false, violations: 1 }] });
+    expect(r.results.find(x => x.id === "stale_running_chunk")).toMatchObject({ sample: [stale.id], batches: [{ batchId: working.id, test: false, violations: 1 }], batchCount: 1 });
+    expect(log.mock.calls.find(([, , f]) => f.id === "silent_outputs")![2].batches).toEqual(silent.batches);
+    // The grouping by batch keeps each batch's own silentOutputs count.
+    const counts = async (id: string) => (await db.select({ counts: catalogBatches.counts }).from(catalogBatches).where(eq(catalogBatches.id, id)))[0]!.counts as unknown as Record<string, number>;
+    expect(await counts(test.id)).toMatchObject({ silentOutputs: 3 });
+    expect(await counts(delivered.id)).toMatchObject({ silentOutputs: 1 });
+    // Scoped to one batch, only that batch is named.
+    expect((await run(delivered.id)).results.find(x => x.id === "silent_outputs")).toMatchObject({ violations: 1, batches: [{ batchId: delivered.id, test: false, violations: 1 }], batchCount: 1 });
+  });
+
+  it("lists at most BATCH_LIST_SIZE batches and still counts them all", async () => {
+    let last = "";
+    for (let i = 0; i < BATCH_LIST_SIZE + 2; i++) { const b = await batch("done"); await output(b.id, await product(b.id, "new"), "pending"); last = b.id; }
+    // The last batch created gets a second violation: it is listed first however the ids sort, never cut.
+    const p = (await db.select({ id: catalogBatchProducts.productId }).from(catalogBatchProducts).where(eq(catalogBatchProducts.batchId, last)))[0]!.id;
+    const src = (await db.select({ id: catalogSourceImages.id }).from(catalogSourceImages).where(eq(catalogSourceImages.batchId, last)))[0]!.id;
+    await output(last, { id: p, sourceId: src }, "pending");
+    const silent = (await run()).results.find(x => x.id === "silent_outputs")!;
+    expect(silent.violations).toBe(BATCH_LIST_SIZE + 3);
+    expect(silent.batchCount).toBe(BATCH_LIST_SIZE + 2);
+    expect(silent.batches).toHaveLength(BATCH_LIST_SIZE);
+    expect(silent.batches[0]).toEqual({ batchId: last, test: true, violations: 2 });
   });
 
   it("scopes to one batch and keeps silentOutputs, heldSiblings and slowestChunkMs on its counts, back to 0 when fixed", async () => {

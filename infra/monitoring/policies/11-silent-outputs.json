@@ -1,7 +1,7 @@
 {
   "displayName": "Some images were left half-finished (silent outputs)",
   "documentation": {
-    "content": "A finished batch has images that were neither published, held for the operator with a reason, skipped, nor failed with a reason, so they were lost without a word. The check runs every 10 minutes. Open Logs Explorer for the catalog-worker service and search for \"invariant\" with id silent_outputs: the sample field lists up to 5 of the image ids, and the admin Ops page shows how many there are. Do not change a delivered batch by hand; report the batch ids, because fixing them is the owner's decision.",
+    "content": "A finished batch has images that were neither published, held for the operator with a reason, skipped, nor failed with a reason, so they were lost without a word. The check runs every 10 minutes. Open Logs Explorer for the catalog-worker service and search for \"invariant\" with id silent_outputs: the batches field lists the batches with lost images (batchId, test, violations; test true is a test batch, not delivered work), the sample field lists up to 5 of the image ids, and the admin Ops page shows how many there are. Do not change a delivered batch by hand; report the batch ids, because fixing them is the owner's decision.",
     "mimeType": "text/markdown",
     "subject": "Some images were left half-finished (silent outputs)"
   },
