@@ -75,3 +75,36 @@ it("preserves previous live records and generation when a real storage generatio
   expect(pair!.notes).not.toContain("replaced but unverified");
   expect(await db.select().from(catalogProductEvents).where(eq(catalogProductEvents.batchId, s.batch.id))).toEqual([]);
 });
+
+it("gap B: a copy that fails on the second of four outputs leaves one verified, three failed with the reason, product failed, zero staged", async () => {
+  const name = "gap-b";
+  const [batch] = await db.insert(catalogBatches).values({ brandSlug: "anta", brandName: "Anta", name, isTest: true, createdBy: "test@opptra.com", channels: ["noon"] }).returning();
+  const [product] = await db.insert(catalogProducts).values({ brandSlug: "anta", isTest: true, productKey: name, pathKey: name, identifier: name, lockBatchId: batch!.id }).returning();
+  await db.insert(catalogBatchProducts).values({ batchId: batch!.id, productId: product!.id, change: "new" });
+  const sources = await db.insert(catalogSourceImages).values([1, 2, 3, 4].map(n => ({ batchId: batch!.id, productId: product!.id, n, sha256: `s${n}`, originalName: `${n}.jpg`, rawUri: `gs://assets/${n}.jpg`, mime: "image/jpeg" }))).returning();
+  const jpeg = Buffer.from([255, 216, 255, 0]);
+  await db.insert(catalogOutputs).values(sources.map(s => {
+    const objectPath = `catalog-test/anta/${name}/noon/${name}_${s.n}.jpg`;
+    return { batchId: batch!.id, productId: product!.id, sourceImageId: s.id, channel: "noon" as const, n: s.n, canvasW: 800, canvasH: 1000, scale: 1, placedX: 0, placedY: 0, bytes: 4, objectPath, publicUrl: `https://storage.googleapis.com/public/${objectPath}`, renderKey: `k${s.n}`, crc32c: "crc", stagingUri: `gs://assets/staged-${s.n}.jpg`, status: "staged" as const, qaScores: { verdict: "pass" } };
+  }));
+  let copies = 0;
+  const deps: PublishDeps = {
+    db, now: () => new Date("2026-01-02T00:00:00Z"), sleep: async () => {},
+    fetch: vi.fn(async () => new Response(jpeg, { status: 200, headers: { "x-goog-generation": "1", "content-type": "image/jpeg", "content-length": "4" } })),
+    storage: {
+      getPublicBucketName: () => "public",
+      headObject: async () => ({ exists: false, size: null, contentType: null, generation: null, crc32c: null }),
+      stageCopyToPublic: vi.fn(async () => { if (++copies === 2) throw new Error("Storage refused the copy"); return { generation: "1", crc32c: "crc" }; }),
+      deletePublicObject: vi.fn(async () => true), setCustomTime: vi.fn(async () => {}),
+    },
+  };
+  expect(await publishProduct(deps, batch!.id, product!.id)).toMatchObject({ outcome: "failed" });
+  const rows = await db.select().from(catalogOutputs).where(eq(catalogOutputs.batchId, batch!.id));
+  expect(rows.filter(o => o.status === "verified")).toHaveLength(1);
+  const failed = rows.filter(o => o.status === "failed");
+  expect(failed).toHaveLength(3);
+  for (const o of failed) expect(o).toMatchObject({ reason: "Storage refused the copy", error: "Storage refused the copy" });
+  expect(rows.filter(o => o.status === "staged")).toEqual([]);
+  const [pair] = await db.select().from(catalogBatchProducts).where(eq(catalogBatchProducts.batchId, batch!.id));
+  expect(pair!.change).toBe("failed");
+});

@@ -143,6 +143,9 @@ export async function publishProduct(deps: PublishDeps, batchId: string, product
         break;
       }
     }
+    // Spec 17 3.1.2 (gap B): a copy failed and the loop stopped, so the product ends `failed`; its outputs
+    // still `staged` in this batch end with the same reason, so a failed product has no staged leftovers.
+    if (failure) await tx.update(catalogOutputs).set({status:"failed",reason:failure,error:failure,updatedAt:now}).where(and(eq(catalogOutputs.batchId,batchId),eq(catalogOutputs.productId,productId),eq(catalogOutputs.status,"staged")));
     const removed: Output[] = [];
     if (!failure) for (const target of plan.deletes) {
       await deps.storage.deletePublicObject(target.objectPath,productPrefix(product.brandSlug,product.pathKey,product.isTest),{ifGenerationMatch:target.ifGenerationMatch});

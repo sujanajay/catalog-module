@@ -13,7 +13,9 @@ import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { and, count, eq, isNotNull, notInArray } from "drizzle-orm";
 import type { Db } from "@catalog/core/db/client";
 import { createTestDb } from "@catalog/core/db/testing";
-import { catalogChunks, catalogOutputs, catalogSourceImages } from "@catalog/core/db/schema";
+import { catalogBatches, catalogBatchProducts, catalogChunks, catalogOutputs, catalogSourceImages } from "@catalog/core/db/schema";
+import { classifyOutputs, completionLine } from "@catalog/core/catalog/load/classify";
+import { runInvariants } from "@catalog/core/catalog/invariants/run";
 import { dispatchChunks, LOAD_BATCH_NAME_PREFIX } from "@catalog/core/catalog/pipeline/dispatch";
 import { handleChunkTask } from "./chunk";
 import { F2_SHAPE, simulate, type ModelBatch } from "./scale-model";
@@ -163,6 +165,33 @@ describe("F4 part 2: the real handlers drain a bulk batch and an operator batch 
       expect(bulkBefore).toBeLessThan(bulk.chunks.length / 2);
       // Photos really ran at once.
       expect(w.peakMatte()).toBeGreaterThan(1);
+
+      // Spec 17 section 7, one hold: the publish route is skipped here, so publishing is stood in for by
+      // setting every output verified, except one product held for the operator (one forced needs_attention).
+      // Its other outputs stay staged as held siblings: the load report counts them apart, silent stays 0.
+      const heldProduct = operator.chunks[0]!.productIds[0]!;
+      await db.update(catalogOutputs).set({ status: "verified", isLive: true }).where(and(eq(catalogOutputs.batchId, operator.batch.id), notInArray(catalogOutputs.productId, [heldProduct])));
+      const [forced] = await db.select({ id: catalogOutputs.id }).from(catalogOutputs).where(and(eq(catalogOutputs.batchId, operator.batch.id), eq(catalogOutputs.productId, heldProduct))).limit(1);
+      await db.update(catalogOutputs).set({ status: "needs_attention", reason: "Check the edge." }).where(eq(catalogOutputs.id, forced!.id));
+      await db.update(catalogBatchProducts).set({ change: "pending_attention" }).where(and(eq(catalogBatchProducts.batchId, operator.batch.id), eq(catalogBatchProducts.productId, heldProduct)));
+      await db.update(catalogBatches).set({ status: "done" }).where(eq(catalogBatches.id, operator.batch.id));
+      const pairs = await db.select().from(catalogBatchProducts).where(eq(catalogBatchProducts.batchId, operator.batch.id));
+      const classified = classifyOutputs(await db.select().from(catalogOutputs).where(eq(catalogOutputs.batchId, operator.batch.id)), new Set(pairs.filter((p) => p.change === "pending_attention").map((p) => p.productId)));
+      expect(classified.heldSiblings.length).toBeGreaterThan(0);
+      expect(classified.silent).toEqual([]);
+      expect(completionLine(classified)).toBe(`Held with the product (waiting for the operator): ${classified.heldSiblings.length}. Silent outputs (must be none): 0.`);
+      const now = new Date();
+      const scoped = await runInvariants(db, vi.fn(), now, { batchId: operator.batch.id });
+      expect(scoped.counts.silent_outputs).toBe(0);
+      expect(scoped.results.filter((r) => r.severity === "ERROR" && r.violations > 0)).toEqual([]);
+
+      // One slow chunk: a bulk chunk of a still-processing batch running for 11 minutes while the batch's finished chunks took seconds.
+      const [slow] = await db.select({ id: catalogChunks.id }).from(catalogChunks).where(eq(catalogChunks.batchId, bulk.batch.id)).limit(1);
+      await db.update(catalogChunks).set({ status: "running", startedAt: new Date(+now - 11 * MIN), finishedAt: null }).where(eq(catalogChunks.id, slow!.id));
+      await db.update(catalogBatches).set({ status: "rendering" }).where(eq(catalogBatches.id, bulk.batch.id)); // the check watches processing batches only
+      const slowRun = await runInvariants(db, vi.fn(), now, { batchId: bulk.batch.id });
+      expect(slowRun.counts.slow_chunk).toBe(1);
+      expect(slowRun.results.find((r) => r.id === "slow_chunk")!.sample).toEqual([slow!.id]);
     } finally { vi.unstubAllEnvs(); }
   }, Math.max(180_000, products * 2_000));
 });

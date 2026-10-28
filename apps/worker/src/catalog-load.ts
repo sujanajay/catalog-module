@@ -36,7 +36,8 @@ import { closeDb, getDb, type Db } from "@catalog/core/db/client";
 import { brandMaster, catalogBatches, catalogBatchProducts, catalogChunks, catalogOutputs, catalogProductEvents, catalogProducts, catalogSourceImages, catalogUploads, DEFAULT_BATCH_OPTIONS, spendDays } from "@catalog/core/db/schema";
 import { channel } from "@catalog/core/catalog/channels";
 import { uploadObjectPath } from "@catalog/core/catalog/ingest/local-files";
-import { classifyOutputs } from "@catalog/core/catalog/load/classify";
+import { classifyOutputs, completionLine } from "@catalog/core/catalog/load/classify";
+import { runInvariants, type InvariantResult } from "@catalog/core/catalog/invariants/run";
 import { FULL_LOAD_OPTIONS, groupSourceFiles, replicateOptions, zipGroups, type LoadOption } from "@catalog/core/catalog/load/replicate";
 import { alterOnePixelRow, planReupload, reuploadSampleSize, type ReuploadPlan } from "@catalog/core/catalog/load/reupload";
 import { againstTarget, formatDuration, perMinute, percentile, stageWindows, type ChunkSample } from "@catalog/core/catalog/load/timing";
@@ -49,6 +50,7 @@ import { cleanupTestBatches } from "@catalog/core/catalog/test-cleanup";
 import { CHANNEL_IDS, type ChannelId } from "@catalog/core/catalog/types";
 import * as storage from "@catalog/core/storage";
 import { describeError } from "@catalog/core/retry";
+import { log as logLine } from "@catalog/core/log";
 import { enqueueTask } from "@catalog/core/tasks";
 import { buildZip } from "../../../packages/core/test-fixtures/catalog/ingest-a/builders";
 import { recheckBatch } from "./catalog/recheck-batch";
@@ -190,7 +192,8 @@ async function metrics(db: Db, batchId: string, samples: ChunkSample[], collectM
   const [b] = await db.select().from(catalogBatches).where(eq(catalogBatches.id, batchId));
   const outputs = await db.select().from(catalogOutputs).where(eq(catalogOutputs.batchId, batchId));
   const sources = await db.select({ matteMs: catalogSourceImages.matteMs }).from(catalogSourceImages).where(eq(catalogSourceImages.batchId, batchId));
-  const pairs = await db.select({ change: catalogBatchProducts.change }).from(catalogBatchProducts).where(eq(catalogBatchProducts.batchId, batchId));
+  const pairs = await db.select({ productId: catalogBatchProducts.productId, change: catalogBatchProducts.change }).from(catalogBatchProducts).where(eq(catalogBatchProducts.batchId, batchId));
+  const chunkRows = await db.select({ id: catalogChunks.id, startedAt: catalogChunks.startedAt, finishedAt: catalogChunks.finishedAt, status: catalogChunks.status }).from(catalogChunks).where(eq(catalogChunks.batchId, batchId));
   const spend = await db.select({ engine: spendDays.engine, costUsd: sql<number>`sum(${spendDays.costUsd})`, calls: sql<number>`sum(${spendDays.calls})` }).from(spendDays).where(eq(spendDays.batchId, batchId)).groupBy(spendDays.engine);
   const published = outputs.filter(o => o.publishedAt).map(o => ({ at: o.publishedAt!.getTime(), productId: o.productId }));
   const publishStart = published.length ? Math.min(...published.map(p => p.at)) : null, publishEnd = published.length ? Math.max(...published.map(p => p.at)) : null;
@@ -199,7 +202,14 @@ async function metrics(db: Db, batchId: string, samples: ChunkSample[], collectM
   const total = b!.startedAt ? againstTarget(b!.startedAt, end) : null;
   const windows = stageWindows(samples);
   const matte = sources.map(s => s.matteMs).filter((v): v is number => v !== null);
-  const classified = classifyOutputs(outputs);
+  // Spec 17 3.1.1: a held product's good outputs wait with it (held siblings); only silent outputs fail the pass.
+  const classified = classifyOutputs(outputs, new Set(pairs.filter(p => p.change === "pending_attention").map(p => p.productId)));
+  const chunkMs = chunkDurations(samples, chunkRows);
+  // Spec 17 3.1.4: the production invariants, scoped to this batch; an ERROR violation fails the pass.
+  let invariants: InvariantResult[];
+  let invariantsError: string | null = null;
+  try { invariants = (await runInvariants(db, logLine, new Date(), { batchId })).results; }
+  catch (error) { invariants = []; invariantsError = error instanceof Error ? error.message : String(error); }
   const changes = pairs.reduce<Record<string, number>>((acc, p) => ({ ...acc, [p.change]: (acc[p.change] ?? 0) + 1 }), {});
   const paidProducts = pairs.filter(p => p.change !== "unchanged").length;
   const spendUsd = spend.reduce((s, r) => s + Number(r.costUsd), 0);
@@ -212,8 +222,22 @@ async function metrics(db: Db, batchId: string, samples: ChunkSample[], collectM
     productsPublishedPerMinute: perMinute(new Set(published.map(p => p.productId)).size, publishMs),
     spend: spend.map(r => ({ engine: r.engine, usd: Number(r.costUsd), calls: Number(r.calls) })),
     usdPerPaidProduct: paidProducts ? spendUsd / paidProducts : null,
-    outputsByStatus: classified.byStatus, errorsByReason: classified.errorsByReason, failed: classified.failed, silent: classified.silent, changes,
+    chunkMs: { count: chunkMs.length, p50: percentile(chunkMs, 50), p95: percentile(chunkMs, 95), max: chunkMs.length ? Math.max(...chunkMs) : null },
+    outputsByStatus: classified.byStatus, errorsByReason: classified.errorsByReason, failed: classified.failed, heldSiblings: classified.heldSiblings, silent: classified.silent, changes, invariants, invariantsError,
   };
+}
+
+/**
+ * Spec 17 3.4.3: each finished chunk's time, from the first start the polls saw (a chunk's row is reused
+ * from stage to stage, so its started_at moves) to its final finished_at.
+ */
+function chunkDurations(samples: readonly ChunkSample[], rows: readonly { id: string; startedAt: Date | null; finishedAt: Date | null; status: string }[]): number[] {
+  const first = new Map<string, number>();
+  for (const sample of samples) for (const c of sample.chunks) if (c.startedAt) first.set(c.id, Math.min(first.get(c.id) ?? Infinity, c.startedAt.getTime()));
+  return rows.flatMap(r => {
+    const start = Math.min(first.get(r.id) ?? Infinity, r.startedAt?.getTime() ?? Infinity);
+    return r.status === "done" && r.finishedAt && Number.isFinite(start) ? [Math.max(0, r.finishedAt.getTime() - start)] : [];
+  });
 }
 
 /** The overwrite contract at scale: same URLs, new generation for the altered shot, the rest unchanged, the dropped shot gone. */
@@ -260,13 +284,15 @@ async function checkReupload(db: Db, runA: string, reupload: string, plan: Reupl
 
 function markdown(report: Record<string, unknown>, passes: Record<string, Awaited<ReturnType<typeof metrics>> & { recheck?: string; reupload?: Awaited<ReturnType<typeof checkReupload>> }>) {
   const ms = (v: number | null | undefined) => (v === null || v === undefined ? "-" : formatDuration(v));
+  const secs = (v: number | null) => (v === null ? "-" : `${Math.round(v / 1000)} s`);
   const lines = [`# Load run ${String(report.run)}`, "", `Options: ${String(report.options)}. Brand: ${BRAND} (test batches only). Target: 2 hours per batch.`, ""];
-  lines.push("| Pass | Status | Wall time | Within 2 h | Collect | Matte | Render | QA | Publish | Finalize | matte_ms p50/p95 | Products published per minute | Re-check |", "|---|---|---|---|---|---|---|---|---|---|---|---|---|");
+  lines.push("| Pass | Status | Wall time | Within 2 h | Collect | Matte | Render | QA | Publish | Finalize | matte_ms p50/p95 | Chunk time median / p95 / max | Products published per minute | Re-check |", "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|");
   for (const [name, p] of Object.entries(passes)) {
-    lines.push(`| ${name} | ${p.status} | ${ms(p.wallMs)} | ${p.withinTarget ? "yes" : "no"} | ${ms(p.stagesMs.collect)} | ${ms(p.stagesMs.matte)} | ${ms(p.stagesMs.render)} | ${ms(p.stagesMs.qa)} | ${ms(p.stagesMs.publish)} | ${ms(p.stagesMs.finalize)} | ${p.matteMs.p50 ?? "-"} / ${p.matteMs.p95 ?? "-"} | ${p.productsPublishedPerMinute ?? "-"} | ${p.recheck ?? "-"} |`);
+    lines.push(`| ${name} | ${p.status} | ${ms(p.wallMs)} | ${p.withinTarget ? "yes" : "no"} | ${ms(p.stagesMs.collect)} | ${ms(p.stagesMs.matte)} | ${ms(p.stagesMs.render)} | ${ms(p.stagesMs.qa)} | ${ms(p.stagesMs.publish)} | ${ms(p.stagesMs.finalize)} | ${p.matteMs.p50 ?? "-"} / ${p.matteMs.p95 ?? "-"} | ${secs(p.chunkMs.p50)} / ${secs(p.chunkMs.p95)} / ${secs(p.chunkMs.max)} | ${p.productsPublishedPerMinute ?? "-"} | ${p.recheck ?? "-"} |`);
   }
   for (const [name, p] of Object.entries(passes)) {
-    lines.push("", `## ${name}`, "", `Outputs by status: ${JSON.stringify(p.outputsByStatus)}. Changes: ${JSON.stringify(p.changes)}.`, `Spend: ${JSON.stringify(p.spend)}; USD per changed product: ${p.usdPerPaidProduct?.toFixed(4) ?? "-"}.`, `Errors by reason: ${JSON.stringify(p.errorsByReason)}.`, `Silent outputs (must be none): ${p.silent.length}.`);
+    lines.push("", `## ${name}`, "", `Outputs by status: ${JSON.stringify(p.outputsByStatus)}. Changes: ${JSON.stringify(p.changes)}.`, `Spend: ${JSON.stringify(p.spend)}; USD per changed product: ${p.usdPerPaidProduct?.toFixed(4) ?? "-"}.`, `Errors by reason: ${JSON.stringify(p.errorsByReason)}.`, completionLine(p),
+      (p.invariantsError ? `Invariants could not run: ${p.invariantsError}.` : `Invariants: ${p.invariants.map(i => `${i.id} ${i.violations}${i.violations ? ` (${i.severity}${i.sample.length ? `, e.g. ${i.sample.join(", ")}` : ""})` : ""}`).join("; ")}.`));
     for (const f of p.failed) lines.push(`- failed ${f.channel} ${f.n} (${f.productId}): ${f.reason}`);
     if (p.reupload) lines.push(`Re-upload: ${p.reupload.sampled} products, ${p.reupload.droppedLinksGone} dropped links answer 404, ${p.reupload.problems.length} contract problems.`, ...p.reupload.problems.slice(0, 50).map(x => `- ${x}`));
   }
@@ -333,7 +359,7 @@ async function main() {
       recheck = `${r.summary.ok} of ${r.summary.total} OK`;
       if (!r.summary.passed) passed = false;
     }
-    if (!ended || m.status !== "done" || m.silent.length) passed = false;
+    if (!ended || m.status !== "done" || m.silent.length || m.invariantsError || m.invariants.some(i => i.severity === "ERROR" && i.violations > 0)) passed = false;
     log("pass finished", { label, batchId: batch.id, status: m.status, wall: m.wallMs === null ? null : formatDuration(m.wallMs), recheck });
     return { ...m, recheck };
   };

@@ -1,0 +1,40 @@
+{
+  "displayName": "One chunk is far slower than the rest",
+  "documentation": {
+    "content": "A piece of batch work has been running more than 3 times as long as the finished pieces of the same batch, and more than 10 minutes. Its lease is still alive, so nothing else will pick it up. Open Logs Explorer for the catalog-worker service and search for \"invariant\" with id slow_chunk: the sample field lists the chunk ids. Then search for \"chunk delivery\" with that chunk id and read its outcome, attempt and msPerStep fields. The admin Ops page shows the slowest running chunk.",
+    "mimeType": "text/markdown",
+    "subject": "One chunk is far slower than the rest"
+  },
+  "userLabels": {
+    "app": "catalog"
+  },
+  "conditions": [
+    {
+      "displayName": "slow chunk found, more than 0 in 15 minutes",
+      "conditionThreshold": {
+        "filter": "metric.type=\"logging.googleapis.com/user/catalog/slow_chunk\" AND resource.type=\"cloud_run_revision\"",
+        "aggregations": [
+          {
+            "alignmentPeriod": "900s",
+            "perSeriesAligner": "ALIGN_SUM",
+            "crossSeriesReducer": "REDUCE_SUM"
+          }
+        ],
+        "comparison": "COMPARISON_GT",
+        "thresholdValue": 0,
+        "duration": "0s",
+        "trigger": {
+          "count": 1
+        }
+      }
+    }
+  ],
+  "combiner": "OR",
+  "enabled": true,
+  "notificationChannels": [
+    "__CATALOG_EMAIL_CHANNEL__"
+  ],
+  "alertStrategy": {
+    "autoClose": "3600s"
+  }
+}

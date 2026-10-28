@@ -1,0 +1,5 @@
+{
+  "name": "catalog/silent_outputs",
+  "description": "The invariants run (sweep, every 10 minutes) found outputs of an ended batch that neither ended nor wait with a held product.",
+  "filter": "resource.type=\"cloud_run_revision\" AND resource.labels.service_name=~\"^catalog-\" AND jsonPayload.message=\"invariant\" AND jsonPayload.id=\"silent_outputs\" AND jsonPayload.violations>0"
+}

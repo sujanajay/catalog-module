@@ -131,3 +131,33 @@ export function hintText(h: { matteExtraCalls: number; judgeCalls: number; upsca
   ].filter(Boolean);
   return parts.join(", ");
 }
+
+/** Spec 17 3.1.5 and section 5: the four health lines on the Ops page, from the latest invariants run and Cloud Run. */
+export const HEALTH_TITLE = "Checks";
+export const HEALTH_WORDS = {
+  silent: "Silent outputs",
+  held: "Held with the product (waiting for the operator)",
+  slowest: "Slowest running chunk",
+  gpu: "GPU candidate revision",
+  none: "none",
+} as const;
+export interface HealthSummary {
+  silentOutputs: number;
+  heldSiblings: number;
+  slowest: { stage: ChunkStage; ms: number; batchId: string } | null;
+}
+
+/**
+ * "Silent outputs: 0", "Held with the product (waiting for the operator): 12",
+ * "Slowest running chunk: cut-out, 14 min (batch 1a2b3c4d)" and "GPU candidate revision: <revision or none>".
+ * `gpuCandidate` is undefined when Cloud Run could not be read.
+ */
+export function healthLines(h: HealthSummary, gpuCandidate: string | null | undefined): string[] {
+  const slowest = h.slowest ? `${CHUNK_STAGE_WORDS[h.slowest.stage]}, ${Math.round(h.slowest.ms / 60_000)} min (batch ${h.slowest.batchId.slice(0, 8)})` : HEALTH_WORDS.none;
+  return [
+    `${HEALTH_WORDS.silent}: ${h.silentOutputs}`,
+    `${HEALTH_WORDS.held}: ${h.heldSiblings}`,
+    `${HEALTH_WORDS.slowest}: ${slowest}`,
+    `${HEALTH_WORDS.gpu}: ${gpuCandidate === undefined ? REPORT_UNAVAILABLE : gpuCandidate ?? HEALTH_WORDS.none}`,
+  ];
+}

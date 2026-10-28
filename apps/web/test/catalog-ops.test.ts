@@ -14,11 +14,11 @@ import type { Role } from "@catalog/core/catalog/types";
 import { setDbForTests, type Db } from "../lib/db";
 import { resetUserDeps, setUserDeps } from "../lib/user";
 import { ForbiddenError } from "../lib/errors";
-import { activeBatches, recentFailures, resetOpsCostCache, batchChunkSummary, batchStageCost, costOverview, opsCostCacheSize, CACHE_MAX_ENTRIES } from "../lib/catalog/ops";
+import { activeBatches, recentFailures, resetOpsCostCache, batchChunkSummary, batchStageCost, costOverview, opsCostCacheSize, CACHE_MAX_ENTRIES, gpuCandidateRevision, healthSummary, setCloudRunReadForTests, GPU_SERVICE_PATH } from "../lib/catalog/ops";
 import { batchCostLine } from "../lib/catalog/cost";
 import CostLine from "../components/catalog/CostLine";
 import { randomUUID } from "node:crypto";
-import { chunkProgressText, fullCostParts, fullCostText, logsUrl, money, REPORT_UNAVAILABLE } from "../lib/catalog/ops-copy";
+import { chunkProgressText, fullCostParts, fullCostText, healthLines, logsUrl, money, REPORT_UNAVAILABLE } from "../lib/catalog/ops-copy";
 import { showOpsMenuItem } from "../lib/people-copy";
 import DetailsTab from "../components/catalog/DetailsTab";
 import OpsPage from "../app/catalog/ops/page";
@@ -43,9 +43,10 @@ beforeEach(async () => {
   vi.stubEnv("INR_PER_USD", "85");
   vi.stubEnv("DAILY_SPEND_CAP_USD", "10");
   setUserDeps({ roleLookup: async () => role });
+  setCloudRunReadForTests(async () => ({ trafficStatuses: [{ tag: "", revision: "catalog-matting-gpu-00007-abc", percent: 100 }] }));
   await db.delete(catalogCostEvents); await db.delete(catalogOutputs); await db.delete(catalogSourceImages); await db.delete(catalogProducts); await db.delete(catalogBatches);
 });
-afterEach(() => { resetUserDeps(); vi.unstubAllEnvs(); });
+afterEach(() => { resetUserDeps(); setCloudRunReadForTests(undefined); vi.unstubAllEnvs(); });
 
 /** A running batch with one product, one photo on two channels, three chunks and ledger rows with model ids as engines. */
 async function world() {
@@ -191,6 +192,44 @@ describe("batch page and Details", () => {
     expect(html).toContain("Last problem recorded for this batch: No progress for 2 hours. Start the batch again.");
     expect(logsUrl(batch.id)).toBe(`https://console.cloud.google.com/logs/query;query=labels.batchId%3D%22${batch.id}%22;duration=P7D?project=image-links-agent`);
     expect(html).toContain(`href="${logsUrl(batch.id)}"`);
+    expect(html).not.toMatch(MODEL_WORDS);
+  });
+});
+
+describe("health lines (spec 17 3.1.5)", () => {
+  it("sums silent outputs and held siblings from the batch counts and names the slowest running chunk of an active batch", async () => {
+    const { batch } = await world();
+    await db.insert(catalogBatches).values({ name: "Old", brandSlug: "uspa", brandName: "USPA", channels: ["noon"], createdBy: "a@opptra.com", status: "done", counts: { ...EMPTY_BATCH_COUNTS, silentOutputs: 2, heldSiblings: 5 } as typeof EMPTY_BATCH_COUNTS });
+    await db.update(catalogBatches).set({ counts: { ...EMPTY_BATCH_COUNTS, heldSiblings: 3, slowestChunkMs: 14 * 60_000 } as typeof EMPTY_BATCH_COUNTS }).where(eq(catalogBatches.id, batch.id));
+    const h = await healthSummary(db);
+    expect(h).toEqual({ silentOutputs: 2, heldSiblings: 8, slowest: { stage: "render", ms: 14 * 60_000, batchId: batch.id } });
+    expect(healthLines(h, null)).toEqual([
+      "Silent outputs: 2",
+      "Held with the product (waiting for the operator): 8",
+      `Slowest running chunk: image making, 14 min (batch ${batch.id.slice(0, 8)})`,
+      "GPU candidate revision: none",
+    ]);
+  });
+
+  it("says none when nothing is slow, and shows the candidate revision from Cloud Run, or the plain sentence when it cannot be read", async () => {
+    expect(healthLines(await healthSummary(db), "catalog-matting-gpu-00008-xyz")).toEqual([
+      "Silent outputs: 0", "Held with the product (waiting for the operator): 0", "Slowest running chunk: none", "GPU candidate revision: catalog-matting-gpu-00008-xyz",
+    ]);
+    const read = vi.fn(async () => ({ trafficStatuses: [{ revision: "catalog-matting-gpu-00007-abc", percent: 100 }, { tag: "candidate", revision: "catalog-matting-gpu-00008-xyz", percent: 0 }] }));
+    setCloudRunReadForTests(read);
+    expect(await gpuCandidateRevision(NOW)).toBe("catalog-matting-gpu-00008-xyz");
+    expect(read).toHaveBeenCalledWith(GPU_SERVICE_PATH);
+    resetOpsCostCache();
+    setCloudRunReadForTests(async () => { throw new Error("PERMISSION_DENIED"); });
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    expect(await gpuCandidateRevision(NOW)).toBeUndefined();
+    expect(healthLines(await healthSummary(db), undefined)[3]).toBe(`GPU candidate revision: ${REPORT_UNAVAILABLE}`);
+  });
+
+  it("the Ops page shows the four lines with no model id", async () => {
+    await world();
+    const html = await render(OpsPage({ searchParams: Promise.resolve({}) }));
+    for (const text of ["Silent outputs: 0", "Held with the product (waiting for the operator): 0", "Slowest running chunk: none", "GPU candidate revision: none"]) expect(html).toContain(text);
     expect(html).not.toMatch(MODEL_WORDS);
   });
 });

@@ -7,8 +7,8 @@ import AutoRefresh from "@/components/AutoRefresh";
 import { when } from "@/components/ui";
 import { db } from "@/lib/db";
 import { requireRole } from "@/lib/user";
-import { activeBatches, batchCostDetail, costOverview, lifetimeBrandCost, recentBatches, recentFailures, COST_TTL_MS } from "@/lib/catalog/ops";
-import { REPORT_UNAVAILABLE, AGENCY_REFERENCE, chunkGaveUpText, chunkProgressText, chunkTotal, COST_STAGE_WORDS, hintText, logsUrl, money, OPS_HREF, OPS_REFRESH_MS, statusWord } from "@/lib/catalog/ops-copy";
+import { activeBatches, batchCostDetail, costOverview, gpuCandidateRevision, healthSummary, lifetimeBrandCost, recentBatches, recentFailures, COST_TTL_MS } from "@/lib/catalog/ops";
+import { REPORT_UNAVAILABLE, AGENCY_REFERENCE, HEALTH_TITLE, healthLines, chunkGaveUpText, chunkProgressText, chunkTotal, COST_STAGE_WORDS, hintText, logsUrl, money, OPS_HREF, OPS_REFRESH_MS, statusWord } from "@/lib/catalog/ops-copy";
 
 export const dynamic = "force-dynamic";
 
@@ -53,6 +53,7 @@ export default async function OpsPage({ searchParams }: { searchParams: Promise<
   const rate = inrPerUsdFromEnv();
   // In sequence on purpose: the page holds at most one of the web instance's two pooled connections.
   const active = await activeBatches(conn, now);
+  const health = healthLines(await healthSummary(conn), await gpuCandidateRevision(now));
   const failures = await recentFailures(conn, now);
   const overviewRead = await costOverview(conn, now);
   const overview = overviewRead.ok ? overviewRead.value : null;
@@ -72,6 +73,11 @@ export default async function OpsPage({ searchParams }: { searchParams: Promise<
         </div>
       </div>
       <AutoRefresh active={!lifetime} ms={OPS_REFRESH_MS} />
+
+      <section>
+        <h2>{HEALTH_TITLE}</h2>
+        <ul>{health.map(line => <li key={line}>{line}</li>)}</ul>
+      </section>
 
       <section>
         <h2>Running now</h2>
