@@ -75,6 +75,13 @@ describe("buildTaskRequest", () => {
     expect(DISPATCH_DEADLINE_SEC).toBe(900);
   });
 
+  it("a tag URL keeps the tag as the target and the service URL as the OIDC audience", () => {
+    const tagged = tasksConfigFromEnv({ ...env, WORKER_URL: "https://candidate---catalog-worker-qtoctgoxqa-el.a.run.app/" });
+    const task = buildTaskRequest("/tasks/catalog/chunk", {}, tagged).task as BuiltTask;
+    expect(task.httpRequest.url).toBe("https://candidate---catalog-worker-qtoctgoxqa-el.a.run.app/tasks/catalog/chunk");
+    expect(task.httpRequest.oidcToken).toEqual({ serviceAccountEmail: env.WORKER_SA_EMAIL, audience: "https://catalog-worker-qtoctgoxqa-el.a.run.app" });
+  });
+
   it("taskId becomes task.name under the queue path", () => {
     const req = buildTaskRequest("/tasks/catalog/chunk", {}, cfg, { taskId: "chunk-b1_3-render" });
     expect((req.task as BuiltTask).name).toBe(`${QUEUE}/tasks/chunk-b1_3-render`);

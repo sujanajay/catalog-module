@@ -1,12 +1,13 @@
 // OIDC check for Cloud Tasks deliveries and Cloud Scheduler calls: the bearer token must be a
-// Google-signed ID token for audience WORKER_URL, issued to WORKER_SA_EMAIL (verified email).
+// Google-signed ID token for the service URL of WORKER_URL, issued to WORKER_SA_EMAIL (verified email).
 import type { OAuth2Client } from "google-auth-library";
+import { cloudRunAudience } from "@catalog/core/cloud-run";
 
 export type IdTokenVerifier = Pick<OAuth2Client, "verifyIdToken">;
 
 export interface AuthConfig {
   verifier: IdTokenVerifier;
-  /** Expected audience (WORKER_URL, trailing slash stripped). */
+  /** Expected audience (the service URL of WORKER_URL). */
   audience?: string;
   /** Expected token email (WORKER_SA_EMAIL). */
   serviceAccountEmail?: string;
@@ -19,7 +20,7 @@ export type AuthResult = { ok: true } | { ok: false; status: 401 | 403 | 500; me
 export function authConfigFromEnv(verifier: IdTokenVerifier, env: NodeJS.ProcessEnv = process.env): AuthConfig {
   return {
     verifier,
-    audience: env.WORKER_URL?.replace(/\/+$/, "") || undefined,
+    audience: env.WORKER_URL ? cloudRunAudience(env.WORKER_URL.replace(/\/+$/, "")) : undefined,
     serviceAccountEmail: env.WORKER_SA_EMAIL || undefined,
     skip: env.SKIP_OIDC === "1",
   };

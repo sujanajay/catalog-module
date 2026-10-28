@@ -5,6 +5,7 @@ import type { Matte, Prepared } from "./render";
 import { BG_TOLERANCE } from "./compliance";
 import { UPSCALE_RETRY_DELAY_MS, UPSCALE_TIMEOUT_MS } from "./upscale";
 import { log } from "../log";
+import { cloudRunAudience } from "../cloud-run";
 
 export interface MattingService { baseUrl: string; target: "cpu" | "gpu" }
 /**
@@ -191,7 +192,7 @@ export class MattingClient {
         signal.addEventListener("abort", onAbort, { once: true });
       });
       try {
-        const token = await Promise.race([this.token(s.baseUrl), aborted]);
+        const token = await Promise.race([this.token(cloudRunAudience(s.baseUrl)), aborted]);
         signal.throwIfAborted();
         headers.set("Authorization", `Bearer ${token}`);
       } finally { signal.removeEventListener("abort", onAbort); }

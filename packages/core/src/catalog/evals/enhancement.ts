@@ -26,6 +26,7 @@ import { CHANNELS, MAX_UPSCALE, type ChannelSpec, type Size } from "../channels"
 import { NO_CUT, safeBoxFor, type BBox } from "../render";
 import { sharpenAfterEnlarge } from "../enhance";
 import { upscaleUpload } from "../upscale";
+import { cloudRunAudience } from "../../cloud-run";
 import { borderMedian, decodeRaster, delta, dilate, dropSpecks, erode, lumaAt, maskCount, SPECK_PX, type Mask } from "./image";
 import type { Raster } from "./types";
 
@@ -358,7 +359,7 @@ export class UpscaleClient {
   private async headers(contentType?: string): Promise<Headers> {
     const url = new URL(this.baseUrl), headers = new Headers();
     const local = url.protocol === "http:" && ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname);
-    if (!local) headers.set("Authorization", `Bearer ${await this.token(this.baseUrl)}`);
+    if (!local) headers.set("Authorization", `Bearer ${await this.token(cloudRunAudience(this.baseUrl))}`);
     if (contentType) headers.set("Content-Type", contentType);
     return headers;
   }

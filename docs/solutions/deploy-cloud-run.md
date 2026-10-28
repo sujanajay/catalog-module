@@ -138,7 +138,14 @@ Open on the first gated deploy (not verifiable offline): catalog-web now has `GE
 (`{ok: true}`, no database call), but IAP must still accept the operator's identity token on the tag URL;
 the matting probes run `infra/check-matting.sh --probe <tag URL> --models <m> --concurrency <n>
 --rounds <k>` as a Cloud Run job. 2026-10-28: the first gated deploy measured the CPU probe (four models,
-5 rounds) at 21 min against 300 s, so it was resized as above; a timeout fails safe (traffic stays). The worker smoke calls the matting tag URLs with an ID token whose audience is that tag URL.
+5 rounds) at 21 min against 300 s, so it was resized as above; a timeout fails safe (traffic stays). 2026-10-28, third gated deploy: the worker smoke got 401 from Cloud Run (in 0 s, no request reached
+the container) on every call to the matting tag URLs, because the ID token's audience was the tag URL. Cloud Run
+checks `aud` against the service URL, also for a tag URL, so every TS caller now derives the audience with
+`cloudRunAudience(url)` (packages/core/src/cloud-run.ts: `https://<tag>---<host>` becomes `https://<host>`), the same
+rule as the Python probe's `audience_for`. Note: a service has two URLs (`<service>-<project number>.<region>.run.app`
+and `<service>-<hash>-<region code>.a.run.app`; not verified whether Cloud Run accepts both as `aud`), and the worker's own check
+(apps/worker/src/auth.ts) compares with the service URL of its own WORKER_URL (number form), so a task enqueued with a hash-form tag WORKER_URL
+could pass Cloud Run and still get the worker's 401. The smoke runs its tasks inline, so it is not affected.
 
 ## Rollback
 One service, seconds, no build and no smoke: `bash infra/deploy.sh --rollback <service> [revision]`
