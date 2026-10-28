@@ -136,8 +136,8 @@ The normal `cloudbuild.yaml` also builds both images.
 
 Current deployment is conservatively 16 GiB, one resident session per service, intra-op threads 4, concurrency 1,
 CPU 4 vCPU/max 20, GPU L4/4 vCPU/16 GiB/max 3, both min instances 0 and timeout 300s. GPU uses
-instance-based billing (`--no-cpu-throttling`) as Cloud Run requires. An 8 GiB/two-session LRU
-configuration is not assumed to fit without measurements.
+instance-based billing (`--no-cpu-throttling`) as Cloud Run requires. Any shape beyond that (more resident
+sessions, an arena cap, the session lock) is fitted from the measured table in "Measured on L4" below.
 
 Build `2c0b868c-a590-4e8a-b187-e288f89ef079` measured four eager sessions at
 4,622,376 KiB resident and startup 15,239 ms. Real general inference completed in 13,130 ms;
@@ -165,9 +165,9 @@ for headroom; this short smoke does not establish sustained or all-model peak me
   Spec 16 runs the GPU service at 3 and the CPU service at 1.
 - On the GPU every cut-out session gets the CUDA option `arena_extend_strategy=kSameAsRequested`, and
   `gpu_mem_limit` when `GPU_MEM_LIMIT_BYTES` is set (spec 16: 6 GiB, so 3 sessions stay under 18 GiB of the L4's
-  24 GB). This is the guard against the 822 MB arena failure above. Whether three sessions fit is measured in the
-  first GPU run after deploy (`session_ready ... resident=` lines and `/health` `gpuMemory`); the fallback is
-  `MAX_RESIDENT_SESSIONS=2`.
+  24 GB). This is the guard against the 822 MB arena failure above. On 2026-10-27 that shape failed every
+  bria-rmbg call (its arena grew past the 6 GiB cap at 1024 px) and was rolled back to one resident session; spec 17
+  replaces "measure in the first run after deploy" with the probe and the refusals below.
 - `INFERENCE_LOCK` is held only around ONNX session runs (each session's `inner_session` is wrapped so its `run`
   takes the lock; rembg 2.0.85 calls it inside `predict`) and around loading or evicting a session. Decode,
   rembg's resize and post-processing, the resize back and the PNG encode run outside it, so with
@@ -203,6 +203,49 @@ bootstrap. Region-aware checks retain the existing private-service IAM pattern. 
 refusal permits CPU-only continuation; other errors stop. Refused GPU deployment never forwards
 an older GPU URL into the worker's replacement environment. No production deployment occurs
 before the human's separate merge decision.
+
+### Spec 17: knobs, health and the probe (2026-10-28)
+
+Each knob is an env var whose unset value is the behaviour before spec 17, so one candidate moves one knob:
+
+- `CUDNN_CONV_ALGO_SEARCH` (`DEFAULT | HEURISTIC | EXHAUSTIVE`) and `CUDNN_CONV_USE_MAX_WORKSPACE` (`0 | 1`) are passed
+  to the CUDA provider of every cut-out session when set, as the upscaler already does. Unset keeps ONNX Runtime's
+  defaults (EXHAUSTIVE, maximum workspace since 1.14). A value outside the list stops the service at startup.
+- `INFERENCE_LOCK_SCOPE` (`global`, default, or `session`). With `session` each cut-out session has its own run lock,
+  so two different models may run at once (ONNX sessions are thread-safe for `run`); loads, evictions and upscale
+  tiles keep the global lock, but a load may then overlap another model's run, so the probe measures it before it
+  goes live.
+- `/health` adds `residentModels` (same as `resident`), `arenaBytesByModel` (empty: ONNX Runtime's Python API 1.23
+  exposes no per-session arena statistics), `candidate` (Cloud Run's `K_REVISION`), `lockScope`, `instanceId` (random
+  per process) and `loadsByModel` (cut-out session loads since start). `/health?fresh=1` reads `gpuMemory` past its
+  10 s cache.
+
+The probe (`bash infra/check-matting.sh --probe <url> --models <list> --concurrency <n> --rounds <k>`, run as the
+Cloud Run job `catalog-check-matting`) calls one URL, usually the GPU candidate's tag URL (the ID token's audience is
+the service URL, also for a tag URL): per model one warm call at 1024 px, then `n` calls at once for `k` rounds,
+then the switching order birefnet-general, bria-rmbg, birefnet-general-lite, birefnet-hrsod, birefnet-general, with
+`/health?fresh=1` before the first call (the baseline) and after every step. It prints `model | peak VRAM used (MiB) |
+p50 ms | p95 ms | non-200 | loads`, writes the JSON report to
+`gs://image-links-agent-assets/catalog-test/probe/<execution>/probe.json` and fails on any non-200, on a `/health` it
+cannot read (or one without `instanceId`, `loadsByModel` or, on the GPU, `gpuMemory`), and on more than one load of a
+model on one instance while that instance keeps every probed model resident (`maxResident` at least the number of
+models). With fewer resident sessions the switching order must reload, so loads are reported, not failed; today's
+shape (one resident) therefore passes when every call answers 200. Loads are counted from the baseline, so loads
+before the probe do not count; they come from each instance's `loadsByModel`, so run the probe against a revision
+with max-instances 1 (or read the per-instance rows in the JSON) to see every instance. p50 and p95 are client-side
+times of the measured rounds (warm and switching calls excluded). Peak VRAM is `nvidia-smi` for the whole card after
+the step, so it includes the CUDA context and every resident model: the per-model peaks for `infra/lib/shape.sh` come
+from a one-resident run (the previous model is released before the next loads), where they include the context
+once. `shape.sh` adds `GPU_CUDA_OVERHEAD_MIB` on top, which counts the context again: deliberately conservative.
+
+## Measured on L4
+
+Filled by the first probe run (`infra/check-matting.sh --probe`, spec 17 3.3.4): one table per candidate rung, with
+the date, the revision (`candidate`) and the knobs it ran with. No numbers are recorded yet; nothing here is an
+estimate. The measured peaks go into `GPU_MODEL_PEAK_MIB_*` and `GPU_MEASURED_ON` in `infra/lib/shape.sh`, whose
+refusals then fit the shape: a cap below a model's peak + 512 MiB, more resident memory than 22,528 MiB, or a listed
+model with no peak ("measure first: run infra/check-matting.sh --probe"). Today's shape (one resident, no cap, the
+global lock) is not asked for measurements.
 
 ## Host verification limitations
 

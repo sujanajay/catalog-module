@@ -1,10 +1,26 @@
 #!/usr/bin/env bash
+# Runtime check of the deployed matting services, run as the Cloud Run job catalog-check-matting.
+#   bash infra/check-matting.sh
+#       checks the CPU and GPU services the worker uses (OIDC, /health, /convert, /matte).
+#   bash infra/check-matting.sh --probe <url> [--models a,b] [--concurrency n] [--rounds k]
+#       spec 17 3.3.1: measures one service URL (usually the GPU candidate's tag URL) with
+#       services/matting/tests/cloudrun_check.py --probe: per model a warm 1024 px call, then n calls at once for
+#       k rounds, then the switching order. Prints the table and writes the JSON report to
+#       gs://image-links-agent-assets/catalog-test/probe/<execution>/. Fails on any non-200 or a reload.
 set -euo pipefail
 export CLOUDSDK_CORE_PROJECT=image-links-agent
 cd "$(dirname "$0")/.."
+PROBE_ARGS=()
+if [ "${1:-}" = "--probe" ]; then
+  shift
+  [ $# -ge 1 ] || { echo "usage: $0 --probe <url> [--models a,b] [--concurrency n] [--rounds k]" >&2; exit 2; }
+  PROBE_ARGS=(--probe "$@")
+fi
 TEMP_DIR=$(mktemp -d)
-trap 'rm -f "$TEMP_DIR/worker.json" "$TEMP_DIR/cpu.json" "$TEMP_DIR/gpu.json" "$TEMP_DIR/flags.json"; rmdir "$TEMP_DIR"' EXIT
+trap 'rm -f "$TEMP_DIR/worker.json" "$TEMP_DIR/cpu.json" "$TEMP_DIR/gpu.json" "$TEMP_DIR/flags.json" "$TEMP_DIR/probe.json"; rmdir "$TEMP_DIR"' EXIT
 native_path() { cygpath -m "$1" 2>/dev/null || printf '%s\n' "$1"; }
+# The probe's arguments as JSON for the job's --args (an empty list for the runtime check).
+node -e 'console.log(JSON.stringify(process.argv.slice(1)))' -- ${PROBE_ARGS[@]+"${PROBE_ARGS[@]}"} > "$TEMP_DIR/probe.json"
 gcloud run services describe catalog-worker --region=asia-south1 --format='json(spec.template.spec.containers[0].env)' > "$TEMP_DIR/worker.json"
 gcloud run services describe catalog-matting --region=asia-south1 --format='json(status.url,status.latestReadyRevisionName,status.latestCreatedRevisionName,spec.template.spec.containers[0].image)' > "$TEMP_DIR/cpu.json"
 HAS_GPU=$(node -e 'const fs=require("fs"); const v=JSON.parse(fs.readFileSync(process.argv[1],"utf8")); console.log((v.spec?.template?.spec?.containers?.[0]?.env??[]).some(e=>e.name==="MATTING_GPU_URL"&&e.value)?"1":"0")' "$(native_path "$TEMP_DIR/worker.json")")
@@ -30,16 +46,18 @@ function service(target, configured) {
   if (!image?.startsWith(expected) || !/^[a-f0-9]{7,40}$/.test(image.slice(expected.length))) throw Error(target + ' service image must have a commit tag');
   return {url, image, version: image.slice(expected.length)};
 }
+const probe = read('probe');
 const cpu = service('cpu', env.MATTING_URL);
-const gpu = env.MATTING_GPU_URL ? service('gpu', env.MATTING_GPU_URL) : null;
+// The probe takes the CPU image only to run the job; the GPU revision it measures may be a newer candidate.
+const gpu = env.MATTING_GPU_URL && !probe.length ? service('gpu', env.MATTING_GPU_URL) : null;
 if (gpu && gpu.version !== cpu.version) throw Error('CPU and GPU deployment versions differ');
 const variables = { MATTING_URL: cpu.url, CPU_VERSION: cpu.version };
 if (gpu) Object.assign(variables, { MATTING_GPU_URL: gpu.url, GPU_VERSION: gpu.version });
 const flags = {
   '--image': cpu.image, '--command': ['python'],
-  '--args': ['-c', fs.readFileSync('services/matting/tests/cloudrun_check.py', 'utf8')],
+  '--args': ['-c', fs.readFileSync('services/matting/tests/cloudrun_check.py', 'utf8'), ...probe],
   '--region': 'asia-south1', '--service-account': 'catalog-worker@image-links-agent.iam.gserviceaccount.com',
-  '--tasks': 1, '--parallelism': 1, '--max-retries': 0, '--task-timeout': '600s',
+  '--tasks': 1, '--parallelism': 1, '--max-retries': 0, '--task-timeout': probe.length ? '3600s' : '600s',
   '--cpu': '1', '--memory': '512Mi', '--set-env-vars': variables, '--clear-secrets': true, '--labels': { app: 'catalog', component: 'job' },
 };
 fs.writeFileSync(path.join(dir, 'flags.json'), JSON.stringify(flags));

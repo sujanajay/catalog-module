@@ -61,7 +61,14 @@ export const FLOODFILL_TOLERANCE = 24;
 // Border seeds use the tighter tolerance; propagation permits compression noise.
 const SEED_TOLERANCE = BG_TOLERANCE;
 type Breaker = { state: "closed" | "open" | "half-open"; failures: number; openedAt: number | null };
-interface ServiceState extends MattingService { breaker: Breaker; models: ModelInfo[]; default: string; version: string | null; checkedAt: number; upscale: UpscaleHealth | null; inflight: number; waiters: (() => void)[] }
+/** The failing call behind a breaker failure: its model (absent for /health) and HTTP status (null without one). */
+interface FailureCause { model?: string; status: number | null }
+/**
+ * `modelFailures`: spec 17 3.3.5, failed cut-out calls in a row per model on this service, so a model that always
+ * fails is seen while another model keeps the service's breaker closed. Counting only: the breaker decides.
+ */
+interface ServiceState extends MattingService { breaker: Breaker; modelFailures: Map<string, number>; models: ModelInfo[]; default: string; version: string | null; checkedAt: number; upscale: UpscaleHealth | null; inflight: number; waiters: (() => void)[] }
+const failureStatus = (err: unknown): number | null => (err instanceof UnavailableError && err.status !== undefined ? err.status : null);
 /** The `upscale` section of a /health body, or null when absent or malformed (a malformed section never fails matting). */
 export function parseUpscaleHealth(value: unknown): UpscaleHealth | null {
   if (!value || typeof value !== "object") return null;
@@ -97,7 +104,7 @@ export class MattingClient {
     if (opts.services.filter((s) => s.target === "cpu").length !== 1) throw new Error("MATTING_URL is required for background removal, and only one CPU matting service is supported.");
     const urls = opts.services.map((s) => normaliseUrl(s.baseUrl));
     if (new Set(urls).size !== urls.length) throw new Error("Each matting service URL may be listed once.");
-    this.states = opts.services.map((s) => ({ ...s, baseUrl: normaliseUrl(s.baseUrl), breaker: { state: "closed", failures: 0, openedAt: null }, models: [], default: "", version: null, checkedAt: -Infinity, upscale: null, inflight: 0, waiters: [] }));
+    this.states = opts.services.map((s) => ({ ...s, baseUrl: normaliseUrl(s.baseUrl), breaker: { state: "closed", failures: 0, openedAt: null }, modelFailures: new Map(), models: [], default: "", version: null, checkedAt: -Infinity, upscale: null, inflight: 0, waiters: [] }));
     const upscaleUrl = normaliseUrl((opts.upscaleUrl === undefined ? process.env.UPSCALE_URL : opts.upscaleUrl) ?? "");
     const firstGpu = this.states.find((s) => s.target === "gpu") ?? null;
     const named = upscaleUrl ? this.states.find((s) => s.baseUrl === upscaleUrl) ?? null : null;
@@ -133,6 +140,10 @@ export class MattingClient {
   get breakers(): Partial<Record<"cpu" | "gpu", Breaker>> { return Object.fromEntries([...this.states].reverse().map((s) => [s.target, s.breaker])); }
   /** Every GPU service's breaker, in the configured order. */
   get gpuBreakers(): Breaker[] { return this.states.filter((s) => s.target === "gpu").map((s) => s.breaker); }
+  /** Spec 17 3.3.5: failed cut-out calls in a row per (service, model), in the configured service order. */
+  get modelFailures(): { service: "cpu" | "gpu"; model: string; failures: number }[] {
+    return this.states.flatMap((s) => [...s.modelFailures].map(([model, failures]) => ({ service: s.target, model, failures })));
+  }
   /** The service /upscale goes to: "cpu" when UPSCALE_URL names the CPU cut-out service, otherwise "gpu". */
   get upscaleTarget(): "cpu" | "gpu" { return this.upscaleState?.target ?? "gpu"; }
   /** Waits for a free in-flight place on a GPU service (spec 16 3.1.5); the CPU service is not limited here. */
@@ -142,20 +153,28 @@ export class MattingClient {
     s.inflight++;
     return () => { s.inflight--; s.waiters.shift()?.(); };
   }
-  private transition(s: ServiceState, state: Breaker["state"]): void {
+  /** `cause`: the call that opened the breaker; its model and status join the line (spec 17 3.3.5). */
+  private transition(s: ServiceState, state: Breaker["state"], cause?: FailureCause): void {
     if (s.breaker.state === state) return;
     s.breaker.state = state;
     // Process-wide (the worker shares one client), so the line names no batch.
-    log(state === "open" ? "WARNING" : "INFO", "matting_breaker", { service: s.target, state });
+    log(state === "open" ? "WARNING" : "INFO", "matting_breaker", { service: s.target, state, ...(cause && { model: cause.model, status: cause.status }) });
   }
   private available(s: ServiceState): boolean {
     if (s.breaker.state === "open" && Date.now() - s.breaker.openedAt! >= BREAKER_COOLDOWN_MS) this.transition(s, "half-open");
     return s.breaker.state !== "open";
   }
-  private failure(s: ServiceState): void {
+  private failure(s: ServiceState, err: unknown, model?: string): void {
+    const cause: FailureCause = { model, status: failureStatus(err) };
+    if (cause.model) {
+      const failures = (s.modelFailures.get(cause.model) ?? 0) + 1;
+      s.modelFailures.set(cause.model, failures);
+      // Seen once per run of failures, also while other models keep the service's breaker closed.
+      if (failures === BREAKER_FAILURES) log("WARNING", "matting_model_failing", { service: s.target, model: cause.model, status: cause.status, failures });
+    }
     s.breaker.failures++;
     if (s.breaker.failures >= BREAKER_FAILURES || s.breaker.state === "half-open") {
-      s.breaker.openedAt = Date.now(); this.transition(s, "open");
+      s.breaker.openedAt = Date.now(); this.transition(s, "open", cause);
     }
   }
   private async call(s: ServiceState, endpoint: string, init: RequestInit = {}, timeoutMs = this.opts.timeoutMs ?? MATTING_TIMEOUT_MS, trace?: MattingTrace): Promise<Response> {
@@ -192,7 +211,7 @@ export class MattingClient {
         const h = await (await this.call(s, "/health")).json() as { ok: boolean; models: ModelInfo[]; default: string; version: string; upscale?: unknown };
         if (!h.ok || !Array.isArray(h.models) || h.models.some((m) => !m.id || m.target !== s.target || (m.inputSize !== "native" && (!Number.isInteger(m.inputSize) || m.inputSize <= 0)))) throw new Error("Invalid matting health response.");
         s.models = h.models; s.default = h.default; s.version = h.version; s.upscale = parseUpscaleHealth(h.upscale); s.checkedAt = Date.now();
-      } catch { this.failure(s); }
+      } catch (err) { this.failure(s, err); }
     }));
     // Several GPU services serve the same models; each model id is listed once.
     const models = this.states.flatMap((s) => s.models).filter((m, i, all) => all.findIndex((x) => x.id === m.id && x.target === m.target) === i);
@@ -269,7 +288,7 @@ export class MattingClient {
       catch (err) {
         if (err instanceof Error && /request rejected/.test(err.message)) throw err;
         if (err instanceof UnavailableError && err.status === 429 && ++busy < MATTE_BUSY_TRIES) { await this.sleep(busyWaitMs()); continue; }
-        this.failure(s); failed.add(s);
+        this.failure(s, err, chosen); failed.add(s);
         if (busy >= MATTE_BUSY_TRIES) break;
       }
     }
@@ -278,7 +297,7 @@ export class MattingClient {
       try { return await this.matteOn(s, prepared, chosen, opts, trace); }
       catch (err) {
         if (err instanceof Error && /request rejected/.test(err.message)) throw err;
-        this.failure(s);
+        this.failure(s, err, chosen);
       }
     }
     throw new UnavailableError("Background removal services are unavailable.");
@@ -303,7 +322,7 @@ export class MattingClient {
     const upscaled = sharp(mask.alpha, { raw: { width: mask.width, height: mask.height, channels: 1 } }).resize(framed.w, framed.h, { fit: "fill", kernel: "lanczos3" });
     const fitted = pad ? sharp(await upscaled.extract({ left: pad, top: pad, width: prepared.width, height: prepared.height }).toColourspace("b-w").raw().toBuffer(), { raw: { width: prepared.width, height: prepared.height, channels: 1 } }) : upscaled;
     const alpha = await fitted.blur(1).toColourspace("b-w").raw().toBuffer();
-    s.breaker.failures = 0; s.breaker.openedAt = null; this.transition(s, "closed");
+    s.breaker.failures = 0; s.breaker.openedAt = null; s.modelFailures.delete(chosen); this.transition(s, "closed");
     return { alpha, width: prepared.width, height: prepared.height, model: chosen, ms: Number(response.headers.get("x-ms") ?? 0), source: "model", target: s.target, sentLongSide };
   }  async convert(buf: Buffer, trace?: MattingTrace): Promise<Buffer> {
     const body = new FormData(); body.set("file", new Blob([new Uint8Array(buf)]), "source.heic");

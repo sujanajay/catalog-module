@@ -72,9 +72,10 @@ describe("matting client", () => {
     gpu.state.fail = true;
     for (let i = 0; i < BREAKER_FAILURES; i++) expect((await matteFor(prepared(), client)).target).toBe("cpu");
     expect(client.breakers.gpu?.state).toBe("open"); expect(client.breaker.state).toBe("closed");
-    // Log contract: key `message` (never `event`), WARNING when open, no batchId (the breaker is process-wide).
-    const opened = vi.mocked(console.warn).mock.calls.map(([line]) => JSON.parse(String(line)) as Record<string, unknown>);
-    expect(opened).toEqual([{ severity: "WARNING", message: "matting_breaker", service: "gpu", state: "open" }]);
+    // Log contract: key `message` (never `event`), WARNING when open, no batchId (the breaker is process-wide), and
+    // (spec 17 3.3.5) the model and status of the call that opened it.
+    const opened = vi.mocked(console.warn).mock.calls.map(([line]) => JSON.parse(String(line)) as Record<string, unknown>).filter((l) => l.message === "matting_breaker");
+    expect(opened).toEqual([{ severity: "WARNING", message: "matting_breaker", service: "gpu", state: "open", model: "general", status: 503 }]);
     cpu.state.fail = true;
     for (let i = 0; i < BREAKER_FAILURES; i++) expect((await matteFor(prepared(), client)).source).toBe("floodfill");
     expect(client.breaker.state).toBe("open");
@@ -85,6 +86,32 @@ describe("matting client", () => {
     expect((await matteFor(prepared(), client)).target).toBe("gpu"); expect(client.breakers.gpu).toMatchObject({ state: "closed", failures: 0, openedAt: null });
     const recovered = vi.mocked(console.info).mock.calls.map(([line]) => JSON.parse(String(line)) as Record<string, unknown>).filter((l) => l.message === "matting_breaker" && l.service === "gpu");
     expect(recovered).toEqual([{ severity: "INFO", message: "matting_breaker", service: "gpu", state: "half-open" }, { severity: "INFO", message: "matting_breaker", service: "gpu", state: "closed" }]);
+  });
+  it("counts failures per (service, model) while another model keeps the service healthy (spec 17 3.3.5)", async () => {
+    const cpu = await service("cpu", ["general", "bria"]), gpu = await service("gpu", ["general", "bria"]);
+    const client = new MattingClient({ services: [cpu, gpu] });
+    const warnings = () => vi.mocked(console.warn).mock.calls.map(([line]) => JSON.parse(String(line)) as Record<string, unknown>);
+    // bria always fails on the GPU (500), general always works: the GPU breaker never opens, bria still falls back.
+    for (let i = 0; i < BREAKER_FAILURES + 1; i++) {
+      gpu.state.statuses.push(500);
+      expect((await client.matte(prepared(), "bria")).target).toBe("cpu");
+      expect((await client.matte(prepared(), "general")).target).toBe("gpu");
+    }
+    expect(client.breakers.gpu).toMatchObject({ state: "closed", failures: 0 });
+    expect(client.modelFailures).toEqual([{ service: "gpu", model: "bria", failures: BREAKER_FAILURES + 1 }]);
+    expect(warnings()).toEqual([{ severity: "WARNING", message: "matting_model_failing", service: "gpu", model: "bria", status: 500, failures: BREAKER_FAILURES }]);
+    // A success of that model on that service clears its count.
+    expect((await client.matte(prepared(), "bria")).target).toBe("gpu");
+    expect(client.modelFailures).toEqual([]);
+  });
+  it("names the model and a missing status when a timeout opens the breaker", async () => {
+    const cpu = await service("cpu"), gpu = await service("gpu");
+    gpu.state.delayMs = 3000;
+    const client = new MattingClient({ services: [cpu, gpu], timeoutMs: 1000 });
+    await client.health();
+    for (let i = 0; i < BREAKER_FAILURES; i++) expect((await client.matte(prepared(), "general")).target).toBe("cpu");
+    const opened = vi.mocked(console.warn).mock.calls.map(([line]) => JSON.parse(String(line)) as Record<string, unknown>).filter((l) => l.message === "matting_breaker");
+    expect(opened).toEqual([{ severity: "WARNING", message: "matting_breaker", service: "gpu", state: "open", model: "general", status: null }]);
   });
   it("takes the GPU services in turn (spec 16 3.1.5)", async () => {
     const cpu = await service("cpu"), a = await service("gpu"), b = await service("gpu");

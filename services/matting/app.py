@@ -6,6 +6,7 @@ import logging
 import math
 import os
 import time
+import uuid
 from contextlib import asynccontextmanager
 import shutil
 import subprocess
@@ -94,7 +95,18 @@ MAX_INPUT_BYTES = int(os.getenv("MAX_INPUT_BYTES", "40000000"))
 MAX_RESIDENT_SESSIONS = max(1, int(os.getenv("MAX_RESIDENT_SESSIONS", "1") or "1"))
 # Caps each GPU cut-out session's CUDA arena so one model cannot grow into another's memory. Unset: no cap.
 GPU_MEM_LIMIT_BYTES = os.getenv("GPU_MEM_LIMIT_BYTES", "").strip()
+# Spec 17 3.3.2: cuDNN convolution options on GPU cut-out sessions, the same ones the upscaler sets. Unset keeps
+# ONNX Runtime's defaults (EXHAUSTIVE search, maximum workspace), which is today's behaviour.
+CUDNN_CONV_ALGO_SEARCH = os.getenv("CUDNN_CONV_ALGO_SEARCH", "").strip()
+CUDNN_CONV_USE_MAX_WORKSPACE = os.getenv("CUDNN_CONV_USE_MAX_WORKSPACE", "").strip()
+# Spec 17 3.3.2: global (default) = one cut-out run at a time on the instance; session = one run at a time per
+# session, so two different models may run at once (ONNX sessions are thread-safe for run). Loads and evictions
+# always take the global lock.
+INFERENCE_LOCK_SCOPE = os.getenv("INFERENCE_LOCK_SCOPE", "global").strip() or "global"
 SESSIONS = OrderedDict()
+# Cut-out session loads since this process started, by model; with INSTANCE_ID the probe counts loads per instance.
+LOADS = {}
+INSTANCE_ID = uuid.uuid4().hex[:12]
 # Spec 16 3.1.2: held only around ONNX session runs and around loading or evicting a session. Decode, resize,
 # normalisation, mask post-processing and PNG encode run outside it, so with concurrency 2 one request's CPU work
 # overlaps the other's inference.
@@ -102,13 +114,15 @@ INFERENCE_LOCK = Lock()
 
 
 class LockedRun:
-    """Wraps an ONNX InferenceSession so only `run` takes INFERENCE_LOCK; every other attribute passes through."""
+    """Wraps an ONNX InferenceSession so only `run` takes `lock` (INFERENCE_LOCK, or the session's own lock when
+    INFERENCE_LOCK_SCOPE=session); every other attribute passes through."""
 
-    def __init__(self, inner):
+    def __init__(self, inner, lock):
         self._inner = inner
+        self._lock = lock
 
     def run(self, *args, **kwargs):
-        with INFERENCE_LOCK:
+        with self._lock:
             return self._inner.run(*args, **kwargs)
 
     def __getattr__(self, name):
@@ -120,6 +134,12 @@ def load_sessions():
         raise ValueError("MATTE_TARGET must be cpu or gpu")
     if not MODELS or any(name not in INPUT_SIZES for name in MODELS) or DEFAULT_MODEL not in MODELS:
         raise ValueError("MATTE_MODELS and DEFAULT_MATTE_MODEL must select baked models")
+    if CUDNN_CONV_ALGO_SEARCH not in ("", "DEFAULT", "HEURISTIC", "EXHAUSTIVE"):
+        raise ValueError("CUDNN_CONV_ALGO_SEARCH must be DEFAULT, HEURISTIC or EXHAUSTIVE")
+    if CUDNN_CONV_USE_MAX_WORKSPACE not in ("", "0", "1"):
+        raise ValueError("CUDNN_CONV_USE_MAX_WORKSPACE must be 0 or 1")
+    if INFERENCE_LOCK_SCOPE not in ("global", "session"):
+        raise ValueError("INFERENCE_LOCK_SCOPE must be global or session")
     model_home = Path(os.getenv("U2NET_HOME", os.getenv("REMBG_HOME", "/models")))
     for name in MODELS:
         if not (model_home / "models" / name / f"{name}.onnx").is_file():
@@ -129,10 +149,16 @@ def load_sessions():
 
 def cuda_options():
     """CUDA provider options for a cut-out session (ONNX Runtime CUDA EP docs, read 2026-10-27): the arena grows by
-    what is asked, not the next power of two, and GPU_MEM_LIMIT_BYTES caps it when set."""
+    what is asked, not the next power of two, and GPU_MEM_LIMIT_BYTES caps it when set. The cuDNN options (read
+    2026-10-28: cudnn_conv_algo_search EXHAUSTIVE | HEURISTIC | DEFAULT, default EXHAUSTIVE;
+    cudnn_conv_use_max_workspace default 1 since ORT 1.14, 0 clamps the workspace to 32 MB) are passed only when set."""
     options = {"arena_extend_strategy": "kSameAsRequested"}
     if GPU_MEM_LIMIT_BYTES:
         options["gpu_mem_limit"] = GPU_MEM_LIMIT_BYTES
+    if CUDNN_CONV_ALGO_SEARCH:
+        options["cudnn_conv_algo_search"] = CUDNN_CONV_ALGO_SEARCH
+    if CUDNN_CONV_USE_MAX_WORKSPACE:
+        options["cudnn_conv_use_max_workspace"] = CUDNN_CONV_USE_MAX_WORKSPACE
     return options
 
 
@@ -150,7 +176,8 @@ def create_session(model):
         raise RuntimeError(f"{model}: CUDAExecutionProvider unavailable; refusing CPU-labelled-as-GPU service")
     # rembg's predict calls inner_session.run between its own resize and post-processing; only that run takes the lock.
     if not isinstance(session.inner_session, LockedRun):
-        session.inner_session = LockedRun(session.inner_session)
+        session.inner_session = LockedRun(session.inner_session, INFERENCE_LOCK if INFERENCE_LOCK_SCOPE == "global" else Lock())
+    LOADS[model] = LOADS.get(model, 0) + 1
     status = Path("/proc/self/status")
     memory = [line for line in status.read_text().splitlines() if line.startswith(("VmRSS:", "VmHWM:"))] if status.exists() else []
     logger.info("session_ready model=%s target=%s providers=%s memory=%s resident=%d", model, TARGET, actual, memory, len(SESSIONS) + 1)
@@ -160,7 +187,8 @@ def create_session(model):
 def session_for(model):
     """The session for `model`, loading it when it is not resident. When MAX_RESIDENT_SESSIONS are loaded, the least
     recently used one is released (and its workspace collected) before the new one loads. Holds INFERENCE_LOCK while
-    it looks up, evicts and loads, so a load never overlaps an inference. A request that already holds an evicted
+    it looks up, evicts and loads, so with INFERENCE_LOCK_SCOPE=global a load never overlaps an inference (with
+    session, runs of other models take their own locks and may overlap a load). A request that already holds an evicted
     session finishes with it; its memory goes when that request ends."""
     with INFERENCE_LOCK:
         if model in SESSIONS:
@@ -177,12 +205,13 @@ GPU_MEMORY_TTL_S = 10.0
 _gpu_memory = {"at": -math.inf, "value": None}
 
 
-def gpu_memory():
-    """Used and total VRAM of GPU 0 in MiB from nvidia-smi, or None (CPU target, no nvidia-smi, any failure). Cached 10 s."""
+def gpu_memory(fresh=False):
+    """Used and total VRAM of GPU 0 in MiB from nvidia-smi, or None (CPU target, no nvidia-smi, any failure). Cached 10 s
+    unless `fresh` (the probe reads it after every step)."""
     if TARGET != "gpu":
         return None
     now = time.monotonic()
-    if now - _gpu_memory["at"] < GPU_MEMORY_TTL_S:
+    if not fresh and now - _gpu_memory["at"] < GPU_MEMORY_TTL_S:
         return _gpu_memory["value"]
     value = None
     tool = shutil.which("nvidia-smi")
@@ -225,9 +254,13 @@ def read_upload(file):
 
 
 @app.get("/health")
-def health():
+def health(fresh: bool = False):
+    resident = list(SESSIONS)
+    # ONNX Runtime's Python API (1.23) exposes no per-session arena statistics, so arenaBytesByModel stays empty
+    # until it does; gpuMemory is the card-wide figure the probe reads instead.
     return {"ok": True, "models": [{"id": name, "inputSize": INPUT_SIZES[name], "target": TARGET} for name in MODELS], "default": DEFAULT_MODEL, "version": os.getenv("GIT_SHA", "dev"), "upscale": upscale_health(),
-            "resident": list(SESSIONS), "maxResident": MAX_RESIDENT_SESSIONS, "gpuMemory": gpu_memory()}
+            "resident": resident, "residentModels": resident, "maxResident": MAX_RESIDENT_SESSIONS, "gpuMemory": gpu_memory(fresh), "arenaBytesByModel": {},
+            "candidate": os.getenv("K_REVISION") or None, "lockScope": INFERENCE_LOCK_SCOPE, "instanceId": INSTANCE_ID, "loadsByModel": dict(LOADS)}
 
 
 @app.post("/matte")
