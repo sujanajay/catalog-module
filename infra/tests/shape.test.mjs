@@ -1,5 +1,6 @@
 // Run with node infra/tests/shape.test.mjs. Offline: no gcloud, no provider calls.
-// Spec 16 3.2: infra/lib/shape.sh gives today's shape by default, accepts the F2 run values, and refuses a shape
+// Spec 16 3.2: infra/lib/shape.sh gives today's live shape by default (the preview a smaller worker), env still
+// wins, it accepts the F2 run values and the pre-F2 rollback shape, and refuses a shape
 // that does not fit (connection budget, what ila-pg allows now, queue slots, the asia-south1 CPU quota, the L4
 // quota and shape). Also checks the price defaults deploy.sh derives from the shape. Spec 17 3.3.3: GPU memory
 // arithmetic from the measured peak table (F2 refused once bria-rmbg's peak is in it, today's live shape passes,
@@ -32,8 +33,8 @@ const pick = (prefix) => {
 const prices = [pick('usd() {'), pick('if [ -z "${COMPUTE_USD_PER_VCPU_SECOND:-}"'), pick('COMPUTE_USD_PER_VCPU_SECOND=${COMPUTE_USD_PER_VCPU_SECOND:-'),
   pick('if [ -z "${PRICE_MATTE_GPU_USD_PER_SECOND:-}"'), pick('PRICE_MATTE_GPU_USD_PER_SECOND=${PRICE_MATTE_GPU_USD_PER_SECOND:-')].join('\n');
 
-function run(env, live = '25') {
-  const clean = Object.fromEntries(Object.entries(process.env).filter(([k]) => !NAMES.includes(k) && !k.startsWith('GPU_MODEL_PEAK_MIB_') && !k.startsWith('COMPUTE_USD') && !k.startsWith('PRICE_MATTE')));
+function run(env, live = '400') {
+  const clean = Object.fromEntries(Object.entries(process.env).filter(([k]) => !NAMES.includes(k) && k !== 'CATALOG_PREVIEW' && !k.startsWith('GPU_MODEL_PEAK_MIB_') && !k.startsWith('COMPUTE_USD') && !k.startsWith('PRICE_MATTE')));
   const script = `set -euo pipefail
 source infra/lib/shape.sh
 shape_defaults
@@ -68,33 +69,58 @@ const F2_FITTED = {...F2, ...FITS_FOUR, MAX_RESIDENT_SESSIONS: '4', GPU_MEM_LIMI
 // Today's live shape (spec 17 section 8): spec 16's F2 for worker and queues, the pre-F2 GPU (4 vCPU, 16Gi,
 // concurrency 1, 1 resident, no cap).
 const LIVE = {...F2, GPU_CPU: '4', GPU_MEMORY: '16Gi', GPU_CONCURRENCY: '1', MAX_RESIDENT_SESSIONS: '1', GPU_MEM_LIMIT_BYTES: ''};
+// The live production shape as read from the services on 2026-10-28 (deploy run 1, sections 1 and 4: worker
+// 24 x 4 vCPU/4Gi concurrency 2 with DB_POOL_MAX=4 and the budget max=400, queues 8 / 36 / 4, CPU matting max 16,
+// GPU 3 x 4 vCPU/16Gi concurrency 1 with 1 resident and no cap, upscale on the CPU service) plus spec 16 section 8's
+// F2 values for the rest. A deploy with no env must resolve to exactly this.
+const RECORDED_LIVE = {
+  DB_MAX_CONNECTIONS: '400', WORKER_MAX_INSTANCES: '24', WORKER_CPU: '4', WORKER_MEMORY: '4Gi', WORKER_CONCURRENCY: '2',
+  WORKER_DB_POOL_MAX: '4', TASKS_MAX_DISPATCHES: '8', BULK_MAX_DISPATCHES: '36', INGEST_MAX_DISPATCHES: '4',
+  MATTING_CPU_MAX_INSTANCES: '16', GPU_MAX_INSTANCES: '3', GPU_CPU: '4', GPU_MEMORY: '16Gi', GPU_CONCURRENCY: '1',
+  MAX_RESIDENT_SESSIONS: '1', GPU_MEM_LIMIT_BYTES: '', UPSCALE_SERVICE: 'cpu', MATTE_INFLIGHT_PER_INSTANCE: '4',
+  CATALOG_PHOTO_CONCURRENCY: '4', CATALOG_BULK_WINDOW: '30', BULK_BATCH_PRODUCTS: '100', LLM_INFLIGHT_PER_INSTANCE: '6',
+  CUDNN_CONV_ALGO_SEARCH: '', CUDNN_CONV_USE_MAX_WORKSPACE: '', INFERENCE_LOCK_SCOPE: 'global',
+  GPU_MATTE_MODELS: 'birefnet-general,birefnet-general-lite,birefnet-hrsod,bria-rmbg', GPU_UPSCALE_MODELS: 'realesrgan-x2plus,swinir-x2',
+  GPU_MEASURED_ON: '', GPU_CUDA_OVERHEAD_MIB: '2048',
+};
+// The shape before F2 (the rollback line in shape.sh): fits today's old db-f1-micro (25 connections).
+const PRE_F2 = {WORKER_MAX_INSTANCES: '4', WORKER_CPU: '2', WORKER_MEMORY: '2Gi', TASKS_MAX_DISPATCHES: '6', BULK_MAX_DISPATCHES: '0',
+  INGEST_MAX_DISPATCHES: '2', DB_MAX_CONNECTIONS: '25', MATTING_CPU_MAX_INSTANCES: '20', UPSCALE_SERVICE: 'gpu',
+  CATALOG_PHOTO_CONCURRENCY: '1', CATALOG_BULK_WINDOW: '8', LLM_INFLIGHT_PER_INSTANCE: ''};
 
 const cases = [
   {
-    label: 'defaults are today',
+    label: 'no env resolves to the recorded live shape',
     env: {},
-    expect: {STATUS: '0', WORKER_MAX_INSTANCES: '4', WORKER_CPU: '2', WORKER_MEMORY: '2Gi', WORKER_CONCURRENCY: '2',
-      TASKS_MAX_DISPATCHES: '6', BULK_MAX_DISPATCHES: '0', INGEST_MAX_DISPATCHES: '2', MATTING_CPU_MAX_INSTANCES: '20',
-      GPU_MAX_INSTANCES: '3', GPU_CPU: '4', GPU_MEMORY: '16Gi', GPU_CONCURRENCY: '1', MAX_RESIDENT_SESSIONS: '1',
-      GPU_MEM_LIMIT_BYTES: '', UPSCALE_SERVICE: 'gpu', WORKER_DB_POOL_MAX: '2', LLM_INFLIGHT_PER_INSTANCE: '', CATALOG_DB_TOTAL: '16', CATALOG_DB_LIMIT: '18', CPU_TOTAL: '99',
-      COMPUTE: '0.0000265', GPU_PRICE: '0.00034884'},
+    expect: {...RECORDED_LIVE, STATUS: '0', CATALOG_DB_TOTAL: '104', CATALOG_DB_LIMIT: '393', SLOTS_TOTAL: '48', SLOTS_CAPACITY: '48',
+      CPU_TOTAL: '171', COMPUTE: '0.0000265', GPU_PRICE: '0.00034884'},
   },
+  {label: 'every shape name is in the live record', env: {}, expect: Object.fromEntries(NAMES.map((n) => [n, RECORDED_LIVE[n]]))},
+  {label: 'env still wins over a row, also an explicit "" (no AI check cap)', env: {TASKS_MAX_DISPATCHES: '14', BULK_MAX_DISPATCHES: '30', LLM_INFLIGHT_PER_INSTANCE: ''},
+    expect: {STATUS: '0', TASKS_MAX_DISPATCHES: '14', BULK_MAX_DISPATCHES: '30', INGEST_MAX_DISPATCHES: '4', LLM_INFLIGHT_PER_INSTANCE: ''}},
+  {label: 'preview: the same per-instance shape on 4 workers, no bulk queue', env: {CATALOG_PREVIEW: '1'},
+    expect: {...RECORDED_LIVE, STATUS: '0', WORKER_MAX_INSTANCES: '4', TASKS_MAX_DISPATCHES: '6', BULK_MAX_DISPATCHES: '0', INGEST_MAX_DISPATCHES: '2',
+      SLOTS_TOTAL: '8', SLOTS_CAPACITY: '8', CATALOG_DB_TOTAL: '24', CPU_TOTAL: '91'}},
+  {label: 'preview rows yield to env', env: {CATALOG_PREVIEW: '1', WORKER_MAX_INSTANCES: '6', TASKS_MAX_DISPATCHES: '10'},
+    expect: {STATUS: '0', WORKER_MAX_INSTANCES: '6', TASKS_MAX_DISPATCHES: '10', BULK_MAX_DISPATCHES: '0'}},
+  {label: 'the pre-F2 rollback shape fits db-f1-micro', env: PRE_F2, live: '25',
+    expect: {STATUS: '0', WORKER_DB_POOL_MAX: '2', CATALOG_DB_TOTAL: '16', CATALOG_DB_LIMIT: '18', CPU_TOTAL: '99', SLOTS_TOTAL: '8', GPU_PRICE: '0.00034884'}},
   {
     label: 'F2 run values fit on db-custom-2-7680 (GPU part fitted to the measured table)',
     env: F2_FITTED, live: '400',
     expect: {STATUS: '0', WORKER_DB_POOL_MAX: '4', CATALOG_DB_TOTAL: '104', CATALOG_DB_LIMIT: '393', SLOTS_TOTAL: '48', SLOTS_CAPACITY: '48',
       CPU_TOTAL: '171', COMPUTE: '0.0000265', GPU_PRICE: '0.00047364'},
   },
-  {label: 'F2 budget before the tier change', env: F2, live: '25', expect: {STATUS: '1'}, error: /ila-pg allows 25 now/},
-  {label: 'connection budget', env: {WORKER_MAX_INSTANCES: '10', TASKS_MAX_DISPATCHES: '6'}, expect: {STATUS: '1'}, error: /catalog connections 28 exceed the budget 18/},
-  {label: 'slots', env: {TASKS_MAX_DISPATCHES: '8'}, expect: {STATUS: '1'}, error: /queue slots 8 \+ 0 \+ 2 = 10 exceed/},
+  {label: 'the live shape before the tier change', env: {}, live: '25', expect: {STATUS: '1'}, error: /DB_MAX_CONNECTIONS=400 but ila-pg allows 25 now/},
+  {label: 'connection budget', env: {...PRE_F2, WORKER_MAX_INSTANCES: '10'}, live: '25', expect: {STATUS: '1'}, error: /catalog connections 28 exceed the budget 18/},
+  {label: 'slots', env: {...PRE_F2, TASKS_MAX_DISPATCHES: '8'}, live: '25', expect: {STATUS: '1'}, error: /queue slots 8 \+ 0 \+ 2 = 10 exceed/},
   {label: 'cpu quota', env: {...F2_FITTED, WORKER_MAX_INSTANCES: '30', TASKS_MAX_DISPATCHES: '20'}, live: '400', expect: {STATUS: '1'}, error: /vCPU at max instances 195 exceeds 190/},
   {label: 'gpu quota', env: {GPU_MAX_INSTANCES: '4'}, expect: {STATUS: '1'}, error: /exceeds the L4 quota of 3/},
   {label: 'gpu shape', env: {GPU_CPU: '2', GPU_MEMORY: '64Gi'}, expect: {STATUS: '1'}, error: /GPU_CPU must be 4 to 8[\s\S]*GPU_MEMORY must be 16Gi to 32Gi/},
   {label: 'not a number', env: {WORKER_MAX_INSTANCES: 'many'}, expect: {STATUS: '1'}, error: /WORKER_MAX_INSTANCES must be a whole number/},
   {label: 'upscale service', env: {UPSCALE_SERVICE: 'tpu'}, expect: {STATUS: '1'}, error: /UPSCALE_SERVICE must be gpu or cpu/},
   // Spec 16 F3: photos at once double the worker pool, which today's db-f1-micro cannot hold.
-  {label: 'photos at once before the tier change', env: {CATALOG_PHOTO_CONCURRENCY: '4'}, expect: {STATUS: '1', WORKER_DB_POOL_MAX: '4'}, error: /catalog connections 24 exceed the budget 18/},
+  {label: 'photos at once before the tier change', env: {...PRE_F2, CATALOG_PHOTO_CONCURRENCY: '4'}, live: '25', expect: {STATUS: '1', WORKER_DB_POOL_MAX: '4'}, error: /catalog connections 24 exceed the budget 18/},
   {label: 'explicit worker pool wins', env: {...F2_FITTED, WORKER_DB_POOL_MAX: '3'}, live: '400', expect: {STATUS: '0', WORKER_DB_POOL_MAX: '3', CATALOG_DB_TOTAL: '80'}},
   {label: 'AI check pacing', env: {LLM_INFLIGHT_PER_INSTANCE: 'six'}, expect: {STATUS: '1'}, error: /LLM_INFLIGHT_PER_INSTANCE must be empty or a whole number/},
   // Spec 17 3.3.3.

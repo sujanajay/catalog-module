@@ -23,6 +23,11 @@ calls in flight). Everything else (worker CPU, database, publish, GCS) has more 
 - The shape: `infra/lib/shape.sh` holds every number with today's value as default and the refusals (connection
   budget, what ila-pg allows now, queue slots, the 190 of 200 vCPU line in asia-south1, the L4 quota and shape).
   `infra/tests/shape.test.mjs` runs it offline.
+- The defaults (`SHAPE_DEFAULTS`) must equal the live production shape. On 2026-10-28 they still held the pre-F2
+  shape, so a plain `bash infra/deploy.sh` cut catalog-bulk from 36 slots to 1 and catalog-ingest from 4 to 2 before
+  its first gate. Now a shape change is a change to that table in the PR that deploys it, and a rollback of the
+  shape is explicit env (the pre-F2 line in shape.sh), no longer a run with no env. Queue slots change only after
+  the worker gate (`infra/lib/queues.sh`), so a deploy that stops at a gate leaves the live queues as they were.
 - The database tier: `infra/sql-tier.sh`, check-then-change, `CONFIRM_RESTART=1` required. Default max_connections
   by tier (Cloud SQL flags doc, read 2026-10-27): db-f1-micro 25, db-g1-small 50, 3.75 to <6 GB 100, 6 to <7.5 GB
   200, 7.5 to <15 GB 400. deploy.sh reads the live tier (or a `max_connections` flag) and refuses a

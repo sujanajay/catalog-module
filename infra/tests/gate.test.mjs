@@ -62,11 +62,14 @@ test('registry entries: regions, probes, timeouts, preview behaviour, GPU knobs'
   let r = run('entries', `${vars}\nINFERENCE_LOCK_SCOPE=session\nfor s in "\${SERVICES[@]}"; do show "$s"; done`);
   assert.equal(r.status, 0, r.err);
   const [cpu, gpu, worker, web] = lines(r.out.trim()).map((l) => l.split('|'));
-  assert.deepEqual(cpu.slice(1, 8), ['catalog-matting', 'asia-south1', 'ar/matting:t', '300', '1', '1', '0']);
-  assert.match(cpu[9], /^bash infra\/lib\/services\.sh probe-matting birefnet-general,birefnet-general-lite,birefnet-hrsod,bria-rmbg 1$/);
+  // Probes sized per service: the CPU service gets its default model, 1 warm call and 1 round at its concurrency
+  // (CPU calls take 25 to 71 s); the GPU service the full probe of every model, 5 rounds at the shape concurrency.
+  assert.deepEqual(cpu.slice(1, 8), ['catalog-matting', 'asia-south1', 'ar/matting:t', '420', '1', '1', '0']);
+  assert.equal(cpu[9], 'bash infra/lib/services.sh probe-matting birefnet-general 1 1');
   assert.deepEqual(gpu.slice(1, 8), ['catalog-matting-gpu', 'asia-southeast1', 'ar/matting-gpu:t', '600', '1', '1', '1']);
   assert.equal(gpu[8], 'MAX_RESIDENT_SESSIONS=1,INFERENCE_LOCK_SCOPE=session', 'a set GPU knob reaches the service, an unset one does not');
-  assert.match(gpu[9], / 2$/, 'the GPU probe uses the shape concurrency');
+  assert.equal(gpu[9], 'bash infra/lib/services.sh probe-matting birefnet-general,birefnet-general-lite,birefnet-hrsod,bria-rmbg 2 5',
+    'the GPU probe measures every served model at the shape concurrency');
   assert.deepEqual(worker.slice(1, 6), ['catalog-worker', 'asia-south1', 'ar/worker:t', '1800', '1']);
   assert.match(worker[9], /probe-worker$/);
   assert.deepEqual(web.slice(1, 6), ['catalog-web', 'asia-south1', 'ar/web:t', '300', '1']);
@@ -75,6 +78,12 @@ test('registry entries: regions, probes, timeouts, preview behaviour, GPU knobs'
   const [pcpu, pgpu] = lines(r.out.trim()).map((l) => l.split('|'));
   assert.equal(pcpu[5], '0', 'the preview reuses catalog-matting');
   assert.equal(pgpu[6], '0', 'the preview never shifts GPU traffic');
+});
+
+test('a matting probe passes its registry row and the URL the gate appends to check-matting.sh', () => {
+  const r = run('probe-args', `${vars}\nbash() { echo "$*"; }\nservice_catalog_matting\nprobe_matting "\${SVC_PROBE[@]:3}" https://candidate---m.run.app`);
+  assert.equal(r.status, 0, r.err);
+  assert.equal(r.out.trim(), 'infra/check-matting.sh --probe https://candidate---m.run.app --models birefnet-general --concurrency 1 --rounds 1');
 });
 
 test('spec 17 3.3.2 GPU knobs reach catalog-matting-gpu only when set, one per candidate', () => {
@@ -251,7 +260,7 @@ test('deploy.sh: gate loop after migrate and queues, before jobs and monitoring;
   const deploy = fs.readFileSync(path.join(root, 'infra/deploy.sh'), 'utf8');
   const at = (s) => { const i = deploy.indexOf(s); assert.ok(i >= 0, `${s} not in deploy.sh`); return i; };
   const order = ['shape_check "$SQL_CONNECTION_LIMIT"', 'echo "==> build $TAG"', 'echo "==> migrate"',
-    'gcloud tasks queues create', 'deploy_service "$SERVICE"', 'echo "==> jobs"', 'echo "==> monitoring"'].map(at);
+    '\nqueues_create_missing', 'deploy_service "$SERVICE"', 'echo "==> jobs"', 'echo "==> monitoring"'].map(at);
   assert.deepEqual(order, [...order].sort((a, b) => a - b));
   assert.ok(!deploy.includes('gcloud run deploy'), 'every service deploy goes through the gate');
   assert.ok(!/^bash infra\/catalog-smoke-linux\.sh/m.test(deploy), 'the smoke runs inside the worker gate');

@@ -1,12 +1,77 @@
-# Spec 16 3.2: the shape of the catalog services as env, with today's values as defaults, and the checks that
+# Spec 16 3.2: the shape of the catalog services as env, with today's live shape as defaults, and the checks that
 # refuse a shape that does not fit before anything is changed. Sourced by infra/deploy.sh (and infra/sql-tier.sh
 # for tier_max_connections). Pure bash and arithmetic, no gcloud, so infra/tests/shape.test.mjs runs it offline.
-#
-# F2 run values (docs/specs/16-throughput.md section 8):
-#   WORKER_MAX_INSTANCES=24 WORKER_CPU=4 WORKER_MEMORY=4Gi TASKS_MAX_DISPATCHES=8 BULK_MAX_DISPATCHES=36
-#   INGEST_MAX_DISPATCHES=4 DB_MAX_CONNECTIONS=400 MATTING_CPU_MAX_INSTANCES=16 GPU_CPU=8 GPU_MEMORY=32Gi
-#   GPU_CONCURRENCY=2 MAX_RESIDENT_SESSIONS=3 GPU_MEM_LIMIT_BYTES=6442450944 UPSCALE_SERVICE=cpu
-#   CATALOG_PHOTO_CONCURRENCY=4 CATALOG_BULK_WINDOW=30 LLM_INFLIGHT_PER_INSTANCE=6 (the worker pool then becomes 4)
+
+# The defaults: today's live production shape, one row per env name. `bash infra/deploy.sh` with no env re-applies
+# exactly this, so it must always equal what runs (2026-10-28: a run with older, smaller defaults cut catalog-bulk
+# from 36 slots to 1 before its first gate). A shape change ships by changing its row here in the PR that deploys
+# it; env is for trying a shape, and an env name that is set (even to "") wins over its row.
+# Spec 17 section 8: spec 16's F2 for the worker and the queues (docs/specs/16-throughput.md section 8) and the
+# pre-F2 GPU (4 vCPU, 16Gi, concurrency 1, 1 resident, no cap; F2's GPU values were rolled back on 2026-10-27), as
+# read from the live services on 2026-10-28.
+# The shape before F2, for a rollback: WORKER_MAX_INSTANCES=4 WORKER_CPU=2 WORKER_MEMORY=2Gi TASKS_MAX_DISPATCHES=6
+#   BULK_MAX_DISPATCHES=0 INGEST_MAX_DISPATCHES=2 DB_MAX_CONNECTIONS=25 MATTING_CPU_MAX_INSTANCES=20
+#   UPSCALE_SERVICE=gpu CATALOG_PHOTO_CONCURRENCY=1 CATALOG_BULK_WINDOW=8 LLM_INFLIGHT_PER_INSTANCE=
+SHAPE_DEFAULTS=(
+  # What Postgres allows on ila-pg: the default of its tier db-custom-2-7680 (ila-pg sets no max_connections flag).
+  # Lower it, and deploy, before infra/sql-tier.sh moves to a smaller tier (docs/solutions/db-connection-budget.md).
+  DB_MAX_CONNECTIONS=400
+  WORKER_MAX_INSTANCES=24
+  WORKER_CPU=4
+  WORKER_MEMORY=4Gi
+  WORKER_CONCURRENCY=2
+  # Queue slots, main + bulk + ingest = the worker's 24 x 2. The ingest queue (new-batch setup) keeps its slots free
+  # of batch processing; the bulk queue (spec 16, big batches) is created only when BULK_MAX_DISPATCHES > 0.
+  TASKS_MAX_DISPATCHES=8
+  BULK_MAX_DISPATCHES=36
+  INGEST_MAX_DISPATCHES=4
+  # CPU cut-out service catalog-matting (asia-south1, 4 vCPU each).
+  MATTING_CPU_MAX_INSTANCES=16
+  # GPU cut-out service catalog-matting-gpu (asia-southeast1, one L4 each; the L4 quota there is 3).
+  GPU_MAX_INSTANCES=3
+  GPU_CPU=4
+  GPU_MEMORY=16Gi
+  GPU_CONCURRENCY=1
+  MAX_RESIDENT_SESSIONS=1
+  GPU_MEM_LIMIT_BYTES=
+  # Spec 17 3.3.2 knobs of the GPU service; empty keeps ONNX Runtime's defaults, global keeps one run at a time.
+  CUDNN_CONV_ALGO_SEARCH=
+  CUDNN_CONV_USE_MAX_WORKSPACE=
+  INFERENCE_LOCK_SCOPE=global
+  # The cut-out models the GPU service serves (its MATTE_MODELS; unset there means all four).
+  GPU_MATTE_MODELS=birefnet-general,birefnet-general-lite,birefnet-hrsod,bria-rmbg
+  # Which matting service upscales: gpu (spec 11) or cpu (spec 16, the GPUs then do only cut-outs).
+  UPSCALE_SERVICE=cpu
+  # The upscalers stay resident once used, so with UPSCALE_SERVICE=gpu both count on top of the cut-outs.
+  GPU_UPSCALE_MODELS=realesrgan-x2plus,swinir-x2
+  # CUDA context and library handles outside the model arenas (spec 17 3.3.3).
+  GPU_CUDA_OVERHEAD_MIB=2048
+  MATTE_INFLIGHT_PER_INSTANCE=4
+  # Spec 16 F3, read by the worker (and the bulk values by the web).
+  CATALOG_PHOTO_CONCURRENCY=4
+  CATALOG_BULK_WINDOW=30
+  BULK_BATCH_PRODUCTS=100
+  # AI check pacing per worker instance (spec 16 F3); "" means no cap.
+  LLM_INFLIGHT_PER_INSTANCE=6
+)
+# The preview stack (CATALOG_PREVIEW=1, infra/deploy-preview.sh) runs the same per-instance shape on fewer worker
+# instances and without a bulk queue, so a branch never takes the production worker's share of the asia-south1 CPU
+# quota and never creates catalog-preview-bulk. These rows come first; the rest come from SHAPE_DEFAULTS.
+PREVIEW_SHAPE_DEFAULTS=(
+  WORKER_MAX_INSTANCES=4
+  TASKS_MAX_DISPATCHES=6
+  BULK_MAX_DISPATCHES=0
+  INGEST_MAX_DISPATCHES=2
+)
+
+# shape_fill NAME=value ...: gives each NAME that is unset its value; a NAME that is set (also to "") keeps its own.
+shape_fill() {
+  local row name
+  for row in "$@"; do
+    name=${row%%=*}
+    [ -n "${!name+x}" ] || printf -v "$name" '%s' "${row#*=}"
+  done
+}
 
 # The default max_connections of a Cloud SQL for PostgreSQL tier (docs.cloud.google.com/sql/docs/postgres/flags,
 # read 2026-10-27): tiny 25, small 50, then by memory: 3.75 to <6 GB 100, 6 to <7.5 GB 200, 7.5 to <15 GB 400,
@@ -31,16 +96,14 @@ tier_max_connections() {
   esac
 }
 
+# shape_defaults: the shape from env and the rows above, plus the fixed numbers the checks below use.
 shape_defaults() {
-  # Database connection budget (docs/solutions/db-connection-budget.md). DB_MAX_CONNECTIONS is what Postgres allows
-  # on ila-pg (the tier's default; ila-pg sets no max_connections flag); raise it only after infra/sql-tier.sh.
-  DB_MAX_CONNECTIONS=${DB_MAX_CONNECTIONS:-25}
+  if [ "${CATALOG_PREVIEW:-0}" = 1 ]; then shape_fill "${PREVIEW_SHAPE_DEFAULTS[@]}"; fi
+  shape_fill "${SHAPE_DEFAULTS[@]}"
+  # Database connection budget (docs/solutions/db-connection-budget.md): Postgres keeps 3 for superusers, and the
+  # earlier ila apps are assumed to hold 4.
   DB_RESERVED_CONNECTIONS=3
   ILA_DB_SHARE=4
-  WORKER_MAX_INSTANCES=${WORKER_MAX_INSTANCES:-4}
-  WORKER_CPU=${WORKER_CPU:-2}
-  WORKER_MEMORY=${WORKER_MEMORY:-2Gi}
-  WORKER_CONCURRENCY=${WORKER_CONCURRENCY:-2}
   WEB_MAX_INSTANCES=3
   WEB_CPU=1
   WEB_DB_POOL_MAX=2
@@ -48,40 +111,9 @@ shape_defaults() {
   JOB_DB_POOL_MAX=1
   # vCPU kept for the Cloud Run jobs (load, recheck, QA check, evals, migrate, smoke) in the CPU quota check.
   JOBS_CPU_BUDGET=8
-  # Queue slots. The ingest queue (new-batch setup) keeps its slots free of batch processing; the bulk queue
-  # (spec 16, big batches) is created only when BULK_MAX_DISPATCHES > 0. Unset TASKS_MAX_DISPATCHES takes what is
-  # left of the worker's capacity, as before (4 x 2 - 2 = 6).
-  INGEST_MAX_DISPATCHES=${INGEST_MAX_DISPATCHES:-2}
-  BULK_MAX_DISPATCHES=${BULK_MAX_DISPATCHES:-0}
-  if [ -z "${TASKS_MAX_DISPATCHES:-}" ]; then
-    # Only from whole numbers; anything else is reported by shape_check instead of failing in the arithmetic.
-    if [[ "$WORKER_MAX_INSTANCES$WORKER_CONCURRENCY$INGEST_MAX_DISPATCHES$BULK_MAX_DISPATCHES" =~ ^[0-9]+$ ]]; then
-      TASKS_MAX_DISPATCHES=$((WORKER_MAX_INSTANCES * WORKER_CONCURRENCY - INGEST_MAX_DISPATCHES - BULK_MAX_DISPATCHES))
-    else
-      TASKS_MAX_DISPATCHES=unset
-    fi
-  fi
-  # CPU cut-out service catalog-matting (asia-south1, 4 vCPU each).
-  MATTING_CPU_MAX_INSTANCES=${MATTING_CPU_MAX_INSTANCES:-20}
+  # The CPU cut-out service's vCPU per instance and the L4 quota in asia-southeast1.
   MATTING_CPU_VCPU=4
-  # GPU cut-out service catalog-matting-gpu (asia-southeast1, one L4 each; the L4 quota there is 3).
   GPU_QUOTA=3
-  GPU_MAX_INSTANCES=${GPU_MAX_INSTANCES:-3}
-  GPU_CPU=${GPU_CPU:-4}
-  GPU_MEMORY=${GPU_MEMORY:-16Gi}
-  GPU_CONCURRENCY=${GPU_CONCURRENCY:-1}
-  MAX_RESIDENT_SESSIONS=${MAX_RESIDENT_SESSIONS:-1}
-  GPU_MEM_LIMIT_BYTES=${GPU_MEM_LIMIT_BYTES:-}
-  # Spec 17 3.3.2 knobs of the GPU service; empty keeps ONNX Runtime's defaults, global keeps one run at a time.
-  CUDNN_CONV_ALGO_SEARCH=${CUDNN_CONV_ALGO_SEARCH:-}
-  CUDNN_CONV_USE_MAX_WORKSPACE=${CUDNN_CONV_USE_MAX_WORKSPACE:-}
-  INFERENCE_LOCK_SCOPE=${INFERENCE_LOCK_SCOPE:-global}
-  # The cut-out models the GPU service serves (its MATTE_MODELS; unset there means all four).
-  GPU_MATTE_MODELS=${GPU_MATTE_MODELS:-birefnet-general,birefnet-general-lite,birefnet-hrsod,bria-rmbg}
-  # Which matting service upscales: gpu (spec 11) or cpu (spec 16, the GPUs then do only cut-outs).
-  UPSCALE_SERVICE=${UPSCALE_SERVICE:-gpu}
-  # The upscalers stay resident once used, so with UPSCALE_SERVICE=gpu both count on top of the cut-outs.
-  GPU_UPSCALE_MODELS=${GPU_UPSCALE_MODELS:-realesrgan-x2plus,swinir-x2}
   # Spec 17 3.3.3: measured GPU memory in MiB, one row per model (GPU_MODEL_PEAK_MIB_ + the id in capitals with "_"
   # for "-"), copied from the one-resident probe table in services/matting/README.md "Measured on L4"
   # (infra/check-matting.sh --probe; card-wide, so each includes the CUDA context once, on top of
@@ -93,18 +125,10 @@ shape_defaults() {
   GPU_MODEL_PEAK_MIB_BRIA_RMBG=${GPU_MODEL_PEAK_MIB_BRIA_RMBG:-}
   GPU_MODEL_PEAK_MIB_REALESRGAN_X2PLUS=${GPU_MODEL_PEAK_MIB_REALESRGAN_X2PLUS:-}
   GPU_MODEL_PEAK_MIB_SWINIR_X2=${GPU_MODEL_PEAK_MIB_SWINIR_X2:-}
-  # CUDA context and library handles outside the model arenas, and what one L4 offers (24 GB, about 22.5 GB usable).
-  GPU_CUDA_OVERHEAD_MIB=${GPU_CUDA_OVERHEAD_MIB:-2048}
+  # What one L4 offers (24 GB, about 22.5 GB usable).
   GPU_USABLE_MIB=22528
-  MATTE_INFLIGHT_PER_INSTANCE=${MATTE_INFLIGHT_PER_INSTANCE:-4}
-  # Spec 16 F3, read by the worker (and the bulk values by the web).
-  CATALOG_PHOTO_CONCURRENCY=${CATALOG_PHOTO_CONCURRENCY:-1}
-  CATALOG_BULK_WINDOW=${CATALOG_BULK_WINDOW:-8}
-  BULK_BATCH_PRODUCTS=${BULK_BATCH_PRODUCTS:-100}
-  # AI check pacing per worker instance (spec 16 F3); empty means no cap (today).
-  LLM_INFLIGHT_PER_INSTANCE=${LLM_INFLIGHT_PER_INSTANCE:-}
-  # Worker pool per instance. One photo at a time: one connection per in-flight task (2, today). Several photos
-  # at once: a delivery's writes take turns on one connection, and its reads, lease renewals and AI cost rows
+  # Worker pool per instance. One photo at a time: one connection per in-flight task (2). Several photos at once
+  # (today): a delivery's writes take turns on one connection, and its reads, lease renewals and AI cost rows
   # need a second, so 2 per in-flight task (4 at concurrency 2). The budget check below still has the last word.
   if [ -z "${WORKER_DB_POOL_MAX:-}" ]; then
     if [[ "$CATALOG_PHOTO_CONCURRENCY$WORKER_CONCURRENCY" =~ ^[0-9]+$ ]] && [ "$CATALOG_PHOTO_CONCURRENCY" -gt 1 ]; then

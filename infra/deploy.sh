@@ -16,7 +16,8 @@
 # Usage (Git Bash, from the repo root): bash infra/deploy.sh
 #        bash infra/deploy.sh --rollback <service> [revision]   all traffic back to the previous revision, seconds
 # Spec 16: the service shape (instances, CPU, queue slots, connection budget, GPU service, which service upscales)
-# is env with today's values as defaults; see infra/lib/shape.sh for the names and the F2 run values.
+# is env with today's live shape as defaults (SHAPE_DEFAULTS in infra/lib/shape.sh), so a run with no env changes no
+# capacity; a shape change is a change to that table.
 # Env overrides: SKIP_BUILD=1 (reuse the images tagged with the current commit; also the rollback
 # path: check out an older commit and run SKIP_BUILD=1 bash infra/deploy.sh).
 # CATALOG_LOCAL_SMOKE=1 runs the smoke in-process on this machine instead of the Cloud Run job
@@ -286,46 +287,11 @@ fi
 
 
 # --- 5. Queues the new revisions will use ----------------------------------------------
-# Check-then-create the queues the env points at before any service can go live: the ingest queue always, so a
-# deploy never sends ingest tasks to a missing queue, and the main queue on preview (bootstrap.sh makes it otherwise).
-ENSURE_QUEUES="$QUEUE-ingest:$INGEST_MAX_DISPATCHES"
-[ "${CATALOG_PREVIEW:-0}" = 1 ] && ENSURE_QUEUES="$QUEUE:$TASKS_MAX_DISPATCHES $ENSURE_QUEUES"
-# gcloud 589 prints short queue names from list while older releases print the full
-# projects/.../queues/<name>; compare basenames so both match (docs/solutions/gcloud-list-names.md).
-EXISTING_QUEUES=$(gcv tasks queues list --location="$REGION" --format='value(name)' | sed 's#.*/##')
-# Spec 17 G4: a chunk queue (main and bulk) never drops a task on a burst of 429 or 503 (a worker with no free
-# instance answers 429 before the app runs). It keeps retrying for 30 minutes, at most a minute apart
-# (10, 20, 40, then every 60 s), whatever the attempt count; the handler is safe under repeats. The main queue also
-# carries publish and finalize, and the bulk queue publish: both idempotent, so they get the same retry (a failure
-# that repeats, such as finalize's exports mismatch, retries for the full 30 minutes).
-CHUNK_QUEUE_RETRY=(--max-attempts=-1 --max-retry-duration=1800s --min-backoff=10s --max-backoff=60s --max-doublings=3)
-# Spec 16 3.2.3: the bulk queue. Created only when it has slots; an existing one is never deleted. Its slots never
-# exceed what the running worker takes: lowered before the worker deploy, raised after it. With no bulk slots it
-# keeps 1, so a backlog left from a bigger shape drains slowly instead of flooding a smaller worker (the env no
-# longer names it, so it gets no new tasks).
-BULK_QUEUE_EXISTS=0; grep -qxF "$BULK_QUEUE" <<<"$EXISTING_QUEUES" && BULK_QUEUE_EXISTS=1
-BULK_QUEUE_SLOTS=$BULK_MAX_DISPATCHES; [ "$BULK_QUEUE_SLOTS" -gt 0 ] || BULK_QUEUE_SLOTS=1
-if [ "$BULK_QUEUE_EXISTS" = 1 ]; then
-  BULK_NOW=$(gcv tasks queues describe "$BULK_QUEUE" --location="$REGION" --format='value(rateLimits.maxConcurrentDispatches)')
-  if [ -n "$BULK_NOW" ] && [ "$BULK_NOW" -gt "$BULK_QUEUE_SLOTS" ]; then
-    gcloud tasks queues update "$BULK_QUEUE" --location="$REGION" --max-concurrent-dispatches="$BULK_QUEUE_SLOTS" "${CHUNK_QUEUE_RETRY[@]}" >/dev/null
-    echo "==> tasks queue $BULK_QUEUE: max-concurrent-dispatches lowered to $BULK_QUEUE_SLOTS before the worker deploy"
-  fi
-elif [ "$BULK_MAX_DISPATCHES" -gt 0 ]; then
-  ENSURE_QUEUES+=" $BULK_QUEUE:$BULK_MAX_DISPATCHES"
-fi
-for Q in $ENSURE_QUEUES; do
-  # The ingest queue keeps its 5 attempts; the chunk queues get CHUNK_QUEUE_RETRY.
-  RETRY=(--max-attempts=5 --min-backoff=10s); [ "${Q%%:*}" = "$QUEUE-ingest" ] || RETRY=("${CHUNK_QUEUE_RETRY[@]}")
-  if grep -qxF "${Q%%:*}" <<<"$EXISTING_QUEUES"; then
-    # Idempotent: keep the parallelism within the worker's capacity (connection budget above).
-    gcloud tasks queues update "${Q%%:*}" --location="$REGION" --max-concurrent-dispatches="${Q##*:}" "${RETRY[@]}" >/dev/null
-    echo "==> tasks queue ${Q%%:*}: exists, max-concurrent-dispatches ${Q##*:}"
-  else
-    gcloud tasks queues create "${Q%%:*}" --location="$REGION" \
-      --max-concurrent-dispatches="${Q##*:}" "${RETRY[@]}" >/dev/null
-  fi
-done
+# Only the missing ones are created here (infra/lib/queues.sh), so the new revisions never send tasks to a queue
+# that does not exist. The slots of existing queues change only once the new worker is live (section 6).
+# shellcheck source=lib/queues.sh
+source infra/lib/queues.sh
+queues_create_missing
 
 # --- 6. Services, one at a time behind the deploy gate (spec 17 3.2) ---------------------
 # Each service in the registry (infra/lib/services.sh) goes up as a no-traffic candidate, its probe runs against the
@@ -385,16 +351,9 @@ for SERVICE in "${SERVICES[@]}"; do
       if [ -n "$UPSCALE_MODEL" ]; then WORKER_ENV+=",UPSCALE_MODEL=$UPSCALE_MODEL"; WEB_ENV+=",UPSCALE_MODEL=$UPSCALE_MODEL"; fi
       ;;
     catalog-worker)
-      # Queue slots for the worker now live, right away, so a later gate's failure never strands them.
-      if [ "${CATALOG_PREVIEW:-0}" != 1 ]; then
-        # Idempotent: keep the queue's parallelism equal to the worker's capacity (connection budget above).
-        gcloud tasks queues update "$QUEUE" --location="$REGION" --max-concurrent-dispatches="$TASKS_MAX_DISPATCHES" "${CHUNK_QUEUE_RETRY[@]}" >/dev/null
-        echo "==> tasks queue $QUEUE: max-concurrent-dispatches $TASKS_MAX_DISPATCHES"
-      fi
-      if [ "$BULK_QUEUE_EXISTS" = 1 ]; then
-        gcloud tasks queues update "$BULK_QUEUE" --location="$REGION" --max-concurrent-dispatches="$BULK_QUEUE_SLOTS" "${CHUNK_QUEUE_RETRY[@]}" >/dev/null
-        echo "==> tasks queue $BULK_QUEUE: max-concurrent-dispatches $BULK_QUEUE_SLOTS"
-      fi
+      # Queue slots for the worker now live, right away, so a later gate's failure never strands them. Never
+      # before: a deploy that stops at a gate leaves the live worker's queues as they were.
+      queues_apply_shape
       ;;
   esac
 done
