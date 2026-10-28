@@ -443,7 +443,8 @@ L331), `crop_min_px` and `crop_min_px_no_upscaler` (crop size bar), `ai_disclosu
 only; `xmp_and_sheet`: also "yes" in the links sheet's "AI-made" column for that channel; default `xmp`
 until a channel publishes a rule), `status` (`confirmed,assumed,proposed`), `updated_by`, `updated_at`.
 Seeded check-then-insert by `ensureChannelPolicies` (the `ensureDefaultPolicies` pattern, `qa/policy.ts:35`),
-never overwriting a row. Admin-only `PUT /api/catalog/channel-policy/[channel]/[department]` edits a row; the
+never overwriting a row. Spec 18 adds the channel policy columns `text_on_image` and `infographic_slot`
+(owner decision, 2026-10-28). Admin-only `PUT /api/catalog/channel-policy/[channel]/[department]` edits a row; the
 Ops page shows both tables read-only. A product whose audience is a kids age band uses the `kids` rows
 whatever its garment; a multipack uses the `multipack` rows.
 
@@ -1779,6 +1780,11 @@ missing. Nothing here is used until you approve it.", a summary strip ("Logos: 3
 "Brand words: 4 approved", "Models: 2 approved", "Look: version 2 approved", "Scenes: version 1 approved",
 "Kids look: version 1 approved"), and the tabs "Logos and marks", "Brand words", "Models", "Look",
 "Scenes", "Kids look", "Delete".
+
+A further tab, "Brand voice", is announced here and defined and built by spec 18 (infographic images), not by
+this spec (owner decision, 2026-10-28): the brand's keyword family (for example sports and running, lifestyle,
+kids fashion), its brand colours, a font picked from a safe list, where the logo goes, and the default
+infographic layout. Nothing on "Brand voice" is read by any check or image maker of this spec.
 
 - **Logos and marks** and **Brand words**: 9.6.
 - **Models** (audience switch "Women", "Men", "Kids", each with its count of approved packs; "Add photos",
