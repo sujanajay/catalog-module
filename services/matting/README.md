@@ -240,12 +240,74 @@ once. `shape.sh` adds `GPU_CUDA_OVERHEAD_MIB` on top, which counts the context a
 
 ## Measured on L4
 
-Filled by the first probe run (`infra/check-matting.sh --probe`, spec 17 3.3.4): one table per candidate rung, with
-the date, the revision (`candidate`) and the knobs it ran with. No numbers are recorded yet; nothing here is an
-estimate. The measured peaks go into `GPU_MODEL_PEAK_MIB_*` and `GPU_MEASURED_ON` in `infra/lib/shape.sh`, whose
-refusals then fit the shape: a cap below a model's peak + 512 MiB, more resident memory than 22,528 MiB, or a listed
-model with no peak ("measure first: run infra/check-matting.sh --probe"). Today's shape (one resident, no cap, the
-global lock) is not asked for measurements.
+Measured 2026-10-28 with `infra/check-matting.sh --probe` (spec 17 3.3.4), image `matting-gpu:ea22854`, one L4,
+4 vCPU, 16 GiB, 1024 px probe image, the global lock. Peak VRAM is `nvidia-smi` for the whole card after each step
+(CUDA context included). p50 and p95 are client times from the probe job in asia-south1 to the service in
+asia-southeast1 (upload, inference, PNG back), measured rounds only. Loads are per instance from the baseline; with
+fewer resident sessions than models the switching order must reload, so loads are reported, not failed. JSON reports:
+`gs://image-links-agent-assets/catalog-test/probe/gpu17-*/probe.json`.
+
+Rung 1, the live revision `catalog-matting-gpu-00033-mug` (1 resident, no cap, ONNX Runtime's cuDNN defaults:
+EXHAUSTIVE, maximum workspace), service URL. Concurrency 1, 20 rounds, one instance:
+
+| model | peak VRAM used (MiB) | p50 ms | p95 ms | non-200 | loads |
+|---|---:|---:|---:|---:|---:|
+| birefnet-general | 13694 | 758 | 890 | 0 | 2 |
+| birefnet-general-lite | 10840 | 517 | 586 | 0 | 2 |
+| birefnet-hrsod | 13694 | 804 | 823 | 0 | 2 |
+| bria-rmbg | 12422 | 728 | 786 | 0 | 2 |
+
+Rung 1, same revision, concurrency 2, 10 rounds (the service takes one request per instance, so a second instance
+started during the run; p95 includes the queueing):
+
+| model | peak VRAM used (MiB) | p50 ms | p95 ms | non-200 | loads |
+|---|---:|---:|---:|---:|---:|
+| birefnet-general | 13694 | 801 | 1459 | 0 | 2 |
+| birefnet-general-lite | 10840 | 566 | 920 | 0 | 2 |
+| birefnet-hrsod | 13694 | 858 | 1523 | 0 | 2 |
+| bria-rmbg | 12422 | 776 | 1471 | 0 | 1 |
+
+Rung 2, candidate `catalog-matting-gpu-00036-tag` (rung 1 + `CUDNN_CONV_ALGO_SEARCH=HEURISTIC`,
+`CUDNN_CONV_USE_MAX_WORKSPACE=0`, max 1 instance, no traffic). Concurrency 1, 20 rounds:
+
+| model | peak VRAM used (MiB) | p50 ms | p95 ms | non-200 | loads |
+|---|---:|---:|---:|---:|---:|
+| birefnet-general | 13704 | 759 | 823 | 0 | 2 |
+| birefnet-general-lite | 10842 | 461 | 524 | 0 | 2 |
+| birefnet-hrsod | 13696 | 749 | 872 | 0 | 2 |
+| bria-rmbg | 12424 | 725 | 847 | 0 | 2 |
+
+The cuDNN knob moved no memory (within 10 MiB) and cut p50 by 0 to 11% (general-lite most). So the arena is the
+model's activations at 1024 px, not the cuDNN workspace. Each model's arena grows on its second call: the first call
+leaves about 9.1 GiB on the card (general), the second about 13.7 GiB, then it stays flat.
+
+Rung 3, candidate `catalog-matting-gpu-00037-nef` (rung 2 + `MAX_RESIDENT_SESSIONS=2`, no cap, max 1 instance, no
+traffic). Concurrency 1, 20 rounds, all four models:
+
+| model | peak VRAM used (MiB) | p50 ms | p95 ms | non-200 | loads |
+|---|---:|---:|---:|---:|---:|
+| birefnet-general | 18008 | 769 | 901 | 0 | 2 |
+| birefnet-general-lite | 19938 | 476 | 600 | 0 | 2 |
+| birefnet-hrsod | 19930 | 776 | 833 | 0 | 2 |
+| bria-rmbg | 21634 | 722 | 794 | 0 | 1 |
+
+Rung 3, every pair of models resident together, both run for at least 10 rounds (card total after the pair's
+steps): general + lite 19,938; general + hrsod 18,008; general + bria-rmbg 21,328; lite + hrsod 19,930; lite +
+bria-rmbg 19,764; hrsod + bria-rmbg 21,634 MiB. All calls answered 200. Two resident models take far less than the
+sum of their one-resident peaks (general + hrsod: 18,008, not 26,000), so the one-resident peaks in `shape.sh`
+overstate what a second model adds; `shape.sh` keeps them (it refuses rung 3: 2 x 13,704 + 2,048 = 29,456 MiB), and
+the worst measured pair leaves about 900 MiB under the 22,528 MiB line.
+
+Rung 4 (all four resident) does not fit: by the one-resident peaks 4 x 13,704 + 2,048 = 56,864 MiB, and by the pairs
+a second model adds 4,304 to 7,938 MiB to the first one's peak, so four would need about 13,704 + 3 x 6,000 MiB,
+over the card. Rung 5 needs rung 4. Rung 6 (two GPU services
+split by model group) was not built: it needs a second service and the owner's go-ahead (spec 17 owner decision 3).
+
+The measured peaks (the larger of rungs 1 and 2) are `GPU_MODEL_PEAK_MIB_*` with `GPU_MEASURED_ON=2026-10-28` in
+`infra/lib/shape.sh`, whose refusals fit the shape: a cap below a model's peak + 512 MiB (the 2026-10-27 F2 shape:
+6,144 MiB is below bria-rmbg's 12,424 + 512), more resident memory than 22,528 MiB, or a listed model with no peak
+("measure first: run infra/check-matting.sh --probe"). Today's shape (one resident, no cap, the global lock) is not
+asked for measurements. The upscalers were not measured (they run on the CPU service).
 
 ## Host verification limitations
 
