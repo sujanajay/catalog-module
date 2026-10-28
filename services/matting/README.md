@@ -295,12 +295,15 @@ Rung 3, every pair of models resident together, both run for at least 10 rounds 
 steps): general + lite 19,938; general + hrsod 18,008; general + bria-rmbg 21,328; lite + hrsod 19,930; lite +
 bria-rmbg 19,764; hrsod + bria-rmbg 21,634 MiB. All calls answered 200. Two resident models take far less than the
 sum of their one-resident peaks (general + hrsod: 18,008, not 26,000), so the one-resident peaks in `shape.sh`
-overstate what a second model adds; `shape.sh` keeps them (it refuses rung 3: 2 x 13,704 + 2,048 = 29,456 MiB), and
-the worst measured pair leaves about 900 MiB under the 22,528 MiB line.
+overstate what a second model adds in the probe. But the probe under-covers real traffic: the spec 10 eval run
+against this candidate (`evals-20261028170223-eb3fd5`, real golden photos, the bake-off switching all four models)
+got 8 HTTP 500s in 349 calls, each an ONNX BFC arena allocation failure in birefnet-general or birefnet-hrsod while
+another model was resident. Rung 3 is therefore not safe, and `shape.sh` keeps the one-resident peaks and refuses
+it (2 x 13,704 + 2,048 = 29,456 MiB).
 
-Rung 4 (all four resident) does not fit: by the one-resident peaks 4 x 13,704 + 2,048 = 56,864 MiB, and by the pairs
-a second model adds 4,304 to 7,938 MiB to the first one's peak, so four would need about 13,704 + 3 x 6,000 MiB,
-over the card. Rung 5 needs rung 4. Rung 6 (two GPU services
+Rung 4 (all four resident) does not fit: by the one-resident peaks 4 x 13,704 + 2,048 = 56,864 MiB; even by the probe
+pairs a second model adds 4,304 to 7,938 MiB to the first one's peak, so four would need about 13,704 + 3 x 6,000
+MiB, over the card, and two already failed under real traffic. Rung 5 needs rung 4. Rung 6 (two GPU services
 split by model group) was not built: it needs a second service and the owner's go-ahead (spec 17 owner decision 3).
 
 The measured peaks (the larger of rungs 1 and 2) are `GPU_MODEL_PEAK_MIB_*` with `GPU_MEASURED_ON=2026-10-28` in
