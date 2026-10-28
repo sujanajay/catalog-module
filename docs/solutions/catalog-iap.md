@@ -37,6 +37,45 @@ binding first, so the next run is SKIP without the WARN.
 - The migrate job logs `migrate: admin sujan@opptra.com seeded` on the first run and nothing about the
   admin afterwards (`ON CONFLICT DO NOTHING`).
 
+## The deploy gate through IAP (spec 17 3.2.3)
+Symptom (2026-10-28, fourth gated deploy): the web probe got `GET <candidate tag URL>/health -> 401` in 2 s.
+Reproduced read only the same day, printing HTTP codes only: on both the live URL and the candidate tag URL, no
+token gives 302 (to Google sign-in, so IAP fronts tag URLs too), and the operator's `gcloud auth
+print-identity-token` and `gcloud auth print-access-token` both give 401, although the operator holds
+`roles/iap.httpsResourceAccessor`.
+
+Cause: catalog-web uses IAP's Google-managed OAuth client. The IAP programmatic access guide
+(docs.cloud.google.com/iap/docs/authentication-howto, read 2026-10-28) says that with that client and no
+allowlisted programmatic OAuth clients, "you cannot use OAuth 2.0 client-based programmatic access"; a user's ID
+token is for some OAuth client (gcloud's), so it is refused. Service accounts can still use a self-signed JWT or an
+OAuth access token with the `openid` and `userinfo.email` scopes, once the account is on the IAP access list.
+Allowlisting gcloud's client instead would need IAP settings rights (`roles/iap.admin`), which the operator lacks.
+
+Fix: the probe runs as the smoke's identity, catalog-worker@ (the catalog-test-smoke job runs as it).
+`infra/lib/services.sh` (`iap_token`) asks the IAM Credentials API `generateAccessToken` for catalog-worker@ with
+exactly those two scopes (the installed gcloud has no `--scopes` on `print-access-token`) and sends it as
+`Authorization: Bearer`. An access token has no audience, so the tag URL needs nothing special (a self-signed JWT
+would need `aud` = the exact URL or `https://<host>/*`, per host). Tokens go to curl on stdin and are never printed.
+
+Grants (in `infra/bootstrap.sh`, applied by the next bootstrap run, idempotent):
+- `roles/iap.httpsResourceAccessor` for `serviceAccount:catalog-worker@` at project level. Resource level on
+  catalog-web needs `roles/iap.admin` (above). Side effect: catalog-worker@ may also pass IAP on the earlier
+  ila-web; nothing in the worker calls it. In catalog-web the account is outside opptra.com, so the app is
+  expected to show its refusal line (app/layout.tsx renders it with HTTP 200; not yet seen live): the home-page
+  probe shows IAP and the server work, not a person's access.
+- `roles/iam.serviceAccountTokenCreator` on catalog-worker@ (resource level, never project level, which would
+  reach every service account in the project) for the account running bootstrap (`gcloud config get-value
+  account`). Another operator who deploys needs the same grant: run bootstrap once as that account. With
+  `auth/impersonate_service_account` set in gcloud, the probe's caller is that service account, not this account.
+New IAM grants can take a few minutes to apply: a deploy right after bootstrap may still get 401 or 403 and stop
+safely (traffic unchanged); re-run it a few minutes later.
+If the first live run still gets 401 with the access token, the documented fallback is a self-signed JWT for the same
+service account (IAM Credentials `signJwt`, `iss` = `sub` = the account, `aud` = `https://<tag host>/*`, `exp` within
+1 hour); it needs the same Token Creator grant.
+Verify after bootstrap: `gcloud iam service-accounts get-iam-policy catalog-worker@image-links-agent.iam.gserviceaccount.com`
+lists the operator under Token Creator, and `node infra/tests/gate.test.mjs` passes offline. The first gated deploy
+after bootstrap is the live proof (`probe: GET <tag URL>/health -> 200`).
+
 ## Git Bash rewrites "/projects/..." inside --set-env-vars
 Symptom (found while building, reproduced with node.exe): `IAP_AUDIENCE=/projects/<n>/locations/...`
 passed in `--set-env-vars` arrived as `C:/Users/<user>/AppData/Local/Programs/Git/projects/<n>/...`.

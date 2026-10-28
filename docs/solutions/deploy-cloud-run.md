@@ -94,7 +94,10 @@ deploy.sh. A lesson in a document is not a guard; these are the guards.
   gate's, so a killed gate never leaves the job running. The worker probe is `/health` on the tag URL, then the tier 5 smoke with
   the matting and worker tag URLs (`infra/catalog-test-jobs.sh` takes `MATTING_URL`,
   `MATTING_GPU_URL` and `WORKER_URL` from the environment when set); the web probe is `/health`
-  and `/` with the operator's identity token through IAP. `/` redirects to `/catalog`, so probes
+  and `/` through IAP as catalog-worker@ (the smoke's identity), with a service account access token
+  (docs/solutions/catalog-iap.md, "The deploy gate through IAP"). That account is outside opptra.com, so the
+  home page shows only the app's refusal line: the probe proves IAP and the server render, not the catalog pages.
+  A final page on another host (an IAP redirect to Google sign-in) fails the probe. `/` redirects to `/catalog`, so probes
   follow same-host redirects and need a final 200.
 - SKIP: a service whose live revision has the same image digest and the same plain env values is
   not redeployed. The env carries `DEPLOY_ARGS_SHA`, a hash of every other deploy flag, so a change
@@ -135,7 +138,8 @@ when the service does not exist yet, so the gate creates a new service without i
 older to protect).
 
 Open on the first gated deploy (not verifiable offline): catalog-web now has `GET /health`
-(`{ok: true}`, no database call), but IAP must still accept the operator's identity token on the tag URL;
+(`{ok: true}`, no database call). 2026-10-28, fourth gated deploy: IAP refused the operator's identity token (401
+in 2 s, also on the live URL), so the web probe now runs as a service account (catalog-iap.md);
 the matting probes run `infra/check-matting.sh --probe <tag URL> --models <m> --concurrency <n>
 --rounds <k>` as a Cloud Run job. 2026-10-28: the first gated deploy measured the CPU probe (four models,
 5 rounds) at 21 min against 300 s, so it was resized as above; a timeout fails safe (traffic stays). 2026-10-28, third gated deploy: the worker smoke got 401 from Cloud Run (in 0 s, no request reached

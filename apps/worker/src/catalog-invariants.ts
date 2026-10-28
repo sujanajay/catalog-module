@@ -1,6 +1,8 @@
 // catalog-invariants job (spec 17 3.1.3; esbuild entry "catalog-invariants", Cloud Run job catalog-invariants
 // prepared by infra/catalog-test-jobs.sh with CATALOG_TEST_JOBS=invariants). Runs every invariant once, on
-// demand, the same way the sweep does every 10 minutes, and prints one line per check plus a summary.
+// demand, the same way the sweep does every 10 minutes, and prints one line per check plus a summary. Each line
+// and each summary entry names the violating batches (batchId, test flag, count), so violations are reported per
+// batch and test batches can be told apart from delivered ones.
 //
 //   node dist/catalog-invariants.js [--batch <id>]     (env fallback: INVARIANTS_BATCH)
 //
@@ -21,7 +23,7 @@ async function main() {
   try {
     const { results } = await runInvariants(getDb(), log, new Date(), batchId ? { batchId } : {});
     const broken = results.filter(r => r.severity === "ERROR" && r.violations > 0);
-    log(broken.length ? "ERROR" : "INFO", "invariants summary", { batchId: batchId ?? null, results: results.map(r => ({ id: r.id, violations: r.violations, severity: r.severity })) });
+    log(broken.length ? "ERROR" : "INFO", "invariants summary", { batchId: batchId ?? null, results: results.map(r => ({ id: r.id, violations: r.violations, severity: r.severity, batches: r.batches, batchCount: r.batchCount })) });
     if (broken.length) process.exitCode = 1;
   } finally {
     await closeDb();

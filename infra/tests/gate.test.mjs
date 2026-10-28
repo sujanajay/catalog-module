@@ -73,6 +73,7 @@ test('registry entries: regions, probes, timeouts, preview behaviour, GPU knobs'
   assert.deepEqual(worker.slice(1, 6), ['catalog-worker', 'asia-south1', 'ar/worker:t', '1800', '1']);
   assert.match(worker[9], /probe-worker$/);
   assert.deepEqual(web.slice(1, 6), ['catalog-web', 'asia-south1', 'ar/web:t', '300', '1']);
+  assert.equal(web[9], 'env WEB_PROBE_SA=w bash infra/lib/services.sh probe-web', 'the web probe runs as the smoke identity');
   r = run('entries-preview', `${vars}\nCATALOG_PREVIEW=1\nshow catalog-matting; show catalog-matting-gpu`);
   assert.equal(r.status, 0, r.err);
   const [pcpu, pgpu] = lines(r.out.trim()).map((l) => l.split('|'));
@@ -281,8 +282,51 @@ test('deploy.sh: gate loop after migrate and queues, before jobs and monitoring;
 
 test('probes follow same-host redirects (the web home page redirects to /catalog)', () => {
   const services = fs.readFileSync(path.join(root, 'infra/lib/services.sh'), 'utf8');
-  assert.match(services, /curl -sS -L --max-redirs 5 /);
+  assert.match(services, /curl -sS -K - -L --max-redirs 5 /);
   assert.match(fs.readFileSync(path.join(root, 'apps/web/app/page.tsx'), 'utf8'), /redirect\("\/catalog"\)/);
+});
+
+// Fake gcloud and curl for the probe CLI (exported bash functions; no network). The IAM Credentials call answers
+// with the service account's token only for the right service account and scopes; the probe GETs answer 200 only to
+// that token, so the operator's identity token (which IAP refuses) fails.
+const probeFakes = `gcloud() { case "$*" in "auth print-access-token") echo USER_ACCESS ;; "auth print-identity-token") echo USER_ID ;; *) return 1 ;; esac; }
+curl() { local cfg url="" a; cfg=$(cat); for a in "$@"; do case "$a" in https://*) url=$a ;; esac; done
+  echo "curl $url" >> "$LOG"
+  case "$url" in
+    *iamcredentials.googleapis.com*)
+      if [[ "$cfg" == *"Bearer USER_ACCESS"* && "$url" == */serviceAccounts/w:generateAccessToken && "$*" == *'"openid","https://www.googleapis.com/auth/userinfo.email"'* ]]; then
+        printf '{"accessToken":"SA_TOKEN","expireTime":"x"}\\n200'
+      else printf '{"error":{"code":403}}\\n403'; fi ;;
+    *) if [ -n "\${SIGN_IN_REDIRECT:-}" ]; then printf '200 https://accounts.google.com/v3/signin?x=1'
+       elif [[ "$cfg" == *"Bearer SA_TOKEN"* ]]; then printf '200 %s' "$url"; else printf '401 %s' "$url"; fi ;;
+  esac; }
+export -f gcloud curl`;
+
+test('the web probe passes IAP as the smoke identity (service account access token), never the operator token', () => {
+  let r = run('probe-web', `${vars}\nservice_catalog_web\n${probeFakes}\n"\${SVC_PROBE[@]}" ${TAG_URL}`);
+  assert.equal(r.status, 0, r.err + r.out);
+  assert.deepEqual(lines(r.out.trim()), [`probe: GET ${TAG_URL}/health -> 200`, `probe: GET ${TAG_URL}/ -> 200`]);
+  assert.ok(!/SA_TOKEN|USER_ACCESS|USER_ID/.test(r.out + r.err), 'no token is ever printed');
+  assert.ok(r.calls.includes('curl https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/w:generateAccessToken'));
+  // Without the service account, or when the token cannot be minted (no Token Creator grant), the probe fails.
+  r = run('probe-web-no-sa', `${probeFakes}\nbash infra/lib/services.sh probe-web ${TAG_URL}`);
+  assert.notEqual(r.status, 0);
+  assert.match(r.err, /WEB_PROBE_SA is not set/);
+  r = run('probe-web-denied', `${probeFakes}\nWEB_PROBE_SA=other bash infra/lib/services.sh probe-web ${TAG_URL}`);
+  assert.notEqual(r.status, 0);
+  assert.match(r.err, /cannot mint an IAP token as other \(IAM Credentials HTTP 403; .*roles\/iam\.serviceAccountTokenCreator/);
+  assert.ok(!r.calls.some((c) => c.includes('/health')), 'no GET without an IAP token');
+  // A 200 that ends on another host (IAP sending the probe to Google sign-in) is not the service answering.
+  r = run('probe-web-sign-in', `${probeFakes}\nSIGN_IN_REDIRECT=1 WEB_PROBE_SA=w bash infra/lib/services.sh probe-web ${TAG_URL}`);
+  assert.notEqual(r.status, 0);
+  assert.match(r.err, /ended on another host \(https:\/\/accounts\.google\.com\/v3\/signin\)/);
+});
+
+test('bootstrap grants the web probe its IAP access and the operator Token Creator on catalog-worker only', () => {
+  const bootstrap = fs.readFileSync(path.join(root, 'infra/bootstrap.sh'), 'utf8').split('\n');
+  assert.ok(bootstrap.includes('project_binding "serviceAccount:$WORKER" roles/iap.httpsResourceAccessor'));
+  assert.ok(bootstrap.some((l) => /sa_binding "\$WORKER" "user:\$OPERATOR" roles\/iam\.serviceAccountTokenCreator no-fallback/.test(l)),
+    'on the worker service account, never falling back to project level');
 });
 
 test('G1 infra: the jobs step prepares catalog-invariants; catalog-web gets run.viewer at project level', () => {

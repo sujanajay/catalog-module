@@ -1,7 +1,7 @@
 {
   "displayName": "One chunk is far slower than the rest",
   "documentation": {
-    "content": "A piece of batch work has been running more than 3 times as long as the finished pieces of the same batch, and more than 10 minutes. Its lease is still alive, so nothing else will pick it up. Open Logs Explorer for the catalog-worker service and search for \"invariant\" with id slow_chunk: the sample field lists the chunk ids. Then search for \"chunk delivery\" with that chunk id and read its outcome, attempt and msPerStep fields. The admin Ops page shows the slowest running chunk.",
+    "content": "A piece of batch work has been running more than 3 times as long as the finished pieces of the same batch, and more than 10 minutes. Its lease is still alive, so nothing else will pick it up. Open Logs Explorer for the catalog-worker service and search for \"invariant\" with id slow_chunk: the sample field lists the chunk ids and the batches field their batches (batchId, test, violations). Then search for \"chunk delivery\" with that chunk id and read its outcome, attempt and msPerStep fields. The admin Ops page shows the slowest running chunk.",
     "mimeType": "text/markdown",
     "subject": "One chunk is far slower than the rest"
   },

@@ -8,12 +8,21 @@ import type { LogFields, Severity } from "../../log";
 import { CHECKS, type InvariantSeverity } from "./checks";
 
 export type InvariantLog = (severity: Severity, message: string, fields?: LogFields) => void;
-export interface InvariantResult { id: string; severity: InvariantSeverity; violations: number; sample: string[] }
+/** One batch's share of a check's violations; `test` is catalog_batches.is_test (a test batch, not delivered work). */
+export interface InvariantBatch { batchId: string; test: boolean; violations: number }
+/**
+ * `sample` is up to SAMPLE_SIZE row ids (outputs or chunks, whatever the check counts), taken from the batches with
+ * the most violations first, so it can all come from one batch; `batches` names the violating
+ * batches, most violations first, up to BATCH_LIST_SIZE of `batchCount`, so a violation can be reported per batch and
+ * told apart as test or delivered.
+ */
+export interface InvariantResult { id: string; severity: InvariantSeverity; violations: number; sample: string[]; batches: InvariantBatch[]; batchCount: number }
 export interface InvariantRun { counts: Record<string, number>; results: InvariantResult[] }
 /** The batch counts keys this run owns. */
 export const INVARIANT_COUNT_KEYS = ["silentOutputs", "heldSiblings", "slowestChunkMs"] as const;
 type CountKey = (typeof INVARIANT_COUNT_KEYS)[number];
 export const SAMPLE_SIZE = 5;
+export const BATCH_LIST_SIZE = 20;
 
 type Row = Record<string, unknown>;
 const rowsOf = (result: unknown): Row[] => {
@@ -30,15 +39,17 @@ const heldSiblingsSql = () => sql`
 
 /**
  * Runs all checks; `batchId` scopes them (and the counts written) to one batch. One log line per check:
- * message "invariant", fields id, violations, sample (up to 5 ids) and severity; the line is written at the
+ * message "invariant", fields id, violations, sample (up to 5 row ids), batches (the violating batches with their
+ * test flag and count, most first, up to 20), batchCount and severity; the line is written at the
  * check's severity when it is violated and at INFO when it holds. Each check runs once, grouped by batch, so
  * the per-batch silentOutputs count comes from the same query as the silent_outputs check.
  */
 export async function runInvariants(db: Db, log: InvariantLog, now: Date, options: { batchId?: string } = {}): Promise<InvariantRun> {
   const batchId = options.batchId ?? null;
-  const byBatch = async (query: SQL) => rowsOf(await db.execute(sql`SELECT s.batch_id, count(*)::int AS n, (array_agg(s.id::text ORDER BY s.id))[1:${SAMPLE_SIZE}::int] AS sample
-    FROM (${query}) AS s WHERE ${batchId}::uuid IS NULL OR s.batch_id = ${batchId}::uuid GROUP BY s.batch_id ORDER BY s.batch_id`))
-    .map(r => ({ batchId: String(r.batch_id), n: Number(r.n), sample: ((r.sample as string[] | null) ?? []).map(String) }));
+  const byBatch = async (query: SQL) => rowsOf(await db.execute(sql`SELECT s.batch_id, coalesce(b.is_test, false) AS is_test, count(*)::int AS n, (array_agg(s.id::text ORDER BY s.id))[1:${SAMPLE_SIZE}::int] AS sample
+    FROM (${query}) AS s LEFT JOIN catalog_batches AS b ON b.id = s.batch_id
+    WHERE ${batchId}::uuid IS NULL OR s.batch_id = ${batchId}::uuid GROUP BY s.batch_id, b.is_test ORDER BY count(*) DESC, s.batch_id`))
+    .map(r => ({ batchId: String(r.batch_id), test: r.is_test === true, n: Number(r.n), sample: ((r.sample as string[] | null) ?? []).map(String) }));
   const counts: Record<string, number> = {}, results: InvariantResult[] = [];
   const per = new Map<string, Record<CountKey, number>>();
   const put = (id: string, key: CountKey, n: number) => { const v = per.get(id) ?? { silentOutputs: 0, heldSiblings: 0, slowestChunkMs: 0 }; v[key] = n; per.set(id, v); };
@@ -47,8 +58,9 @@ export async function runInvariants(db: Db, log: InvariantLog, now: Date, option
     const violations = rows.reduce((sum, r) => sum + r.n, 0), sample = rows.flatMap(r => r.sample).slice(0, SAMPLE_SIZE);
     if (check.id === "silent_outputs") for (const r of rows) put(r.batchId, "silentOutputs", r.n);
     counts[check.id] = violations;
-    results.push({ id: check.id, severity: check.severity, violations, sample });
-    log(violations ? check.severity : "INFO", "invariant", { id: check.id, violations, sample, severity: check.severity });
+    const batches = rows.slice(0, BATCH_LIST_SIZE).map(r => ({ batchId: r.batchId, test: r.test, violations: r.n })), batchCount = rows.length;
+    results.push({ id: check.id, severity: check.severity, violations, sample, batches, batchCount });
+    log(violations ? check.severity : "INFO", "invariant", { id: check.id, violations, sample, batches, batchCount, severity: check.severity });
   }
   for (const r of await byBatch(heldSiblingsSql())) put(r.batchId, "heldSiblings", r.n);
   const slowest = sql`SELECT s.batch_id, max(s.ms)::bigint AS ms FROM (

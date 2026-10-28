@@ -200,8 +200,8 @@ project_binding() { # member role
   fi
 }
 
-sa_binding() { # target-sa member role ; falls back to project level if denied
-  local target="$1" member="$2" role="$3" policy
+sa_binding() { # target-sa member role [no-fallback] ; falls back to project level if denied, unless no-fallback
+  local target="$1" member="$2" role="$3" fallback="${4:-}" policy
   policy=$(gcv iam service-accounts get-iam-policy "$target" --project="$PROJECT" \
     --flatten='bindings[].members' \
     --format='csv[no-heading](bindings.role,bindings.members)' 2>/dev/null || true)
@@ -217,6 +217,10 @@ sa_binding() { # target-sa member role ; falls back to project level if denied
   create "SA binding on $target: $role -> $member"
   if ! retry gcloud iam service-accounts add-iam-policy-binding "$target" --project="$PROJECT" \
       --member="$member" --role="$role" >/dev/null; then
+    if [ "$fallback" = no-fallback ]; then
+      needs_human "SA binding on $target: $role -> $member was denied; a project-level grant would reach every service account, so grant it on $target by hand"
+      return 0
+    fi
     warn "resource-level binding denied; falling back to project level for $role -> $member"
     project_binding "$member" "$role"
   fi
@@ -408,6 +412,21 @@ sa_binding "$WEB" "serviceAccount:$WEB" roles/iam.serviceAccountTokenCreator
 sa_binding "$WORKER" "serviceAccount:$WORKER" roles/iam.serviceAccountTokenCreator
 sa_binding "$WORKER" "serviceAccount:$WEB" roles/iam.serviceAccountUser
 sa_binding "$WORKER" "serviceAccount:$WORKER" roles/iam.serviceAccountUser
+# Spec 17 3.2.3: deploy.sh's web gate probes the catalog-web candidate through IAP as the smoke's identity
+# (catalog-worker@, which the catalog-test-smoke job runs as). IAP's Google-managed OAuth client refuses the operator's
+# own tokens, so the probe mints an access token for catalog-worker@ (infra/lib/services.sh iap_token). Two grants:
+# - catalog-worker@ may pass IAP. Project level: the resource-level IAP policy on catalog-web needs roles/iap.admin,
+#   which the operator does not hold (docs/solutions/catalog-iap.md). It also covers the earlier ila-web, which the
+#   worker never calls; the app still refuses the account (outside opptra.com).
+# - The operator running bootstrap may mint tokens for catalog-worker@ only (never project level: that would reach
+#   every service account in the project, including the earlier app's).
+project_binding "serviceAccount:$WORKER" roles/iap.httpsResourceAccessor
+OPERATOR=$(gcv config get-value account 2>/dev/null)
+case "$OPERATOR" in
+  "") needs_human "no active gcloud account; the web gate's token grant on $WORKER was not checked" ;;
+  *.gserviceaccount.com) sa_binding "$WORKER" "serviceAccount:$OPERATOR" roles/iam.serviceAccountTokenCreator no-fallback ;;
+  *) sa_binding "$WORKER" "user:$OPERATOR" roles/iam.serviceAccountTokenCreator no-fallback ;;
+esac
 # catalog-matting@ gets no bucket or database rights (it receives bytes and returns bytes).
 
 # storage.objectViewer lets `gcloud builds submit` read the uploaded source.
