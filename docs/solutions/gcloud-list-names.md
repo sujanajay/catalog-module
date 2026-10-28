@@ -21,7 +21,7 @@ were updated; worker, web and jobs were not.
 Never compare `list` output against a full resource name. Strip each listed name to its basename
 (`| sed 's#.*/##'`, after the CRLF strip) and compare with `grep -qxF "<short name>"`, which works
 for both forms. A failed list still stops the script (`set -o pipefail`), so a permission error is
-never mistaken for "missing". Applied in `infra/deploy.sh` (tasks queues) and
+never mistaken for "missing". Applied in `infra/lib/queues.sh` (tasks queues) and
 `infra/test-render-pool.sh` (worker pool). Checks that already use `describe`, or filter on a field
 that is always short (`metadata.name` for Cloud Run jobs, `config.name` for services, Cloud SQL
 user names), needed no change.

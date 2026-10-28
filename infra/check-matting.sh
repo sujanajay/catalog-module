@@ -47,6 +47,9 @@ function service(target, configured) {
   return {url, image, version: image.slice(expected.length)};
 }
 const probe = read('probe');
+// A probe run by the deploy gate ends when the gate gives up (PROBE_TASK_TIMEOUT, seconds); by hand, at most an hour.
+const taskTimeout = process.env.PROBE_TASK_TIMEOUT || '3600';
+if (!/^[1-9][0-9]*$/.test(taskTimeout)) throw Error('PROBE_TASK_TIMEOUT must be a number of seconds');
 const cpu = service('cpu', env.MATTING_URL);
 // The probe takes the CPU image only to run the job; the GPU revision it measures may be a newer candidate.
 const gpu = env.MATTING_GPU_URL && !probe.length ? service('gpu', env.MATTING_GPU_URL) : null;
@@ -57,7 +60,7 @@ const flags = {
   '--image': cpu.image, '--command': ['python'],
   '--args': ['-c', fs.readFileSync('services/matting/tests/cloudrun_check.py', 'utf8'), ...probe],
   '--region': 'asia-south1', '--service-account': 'catalog-worker@image-links-agent.iam.gserviceaccount.com',
-  '--tasks': 1, '--parallelism': 1, '--max-retries': 0, '--task-timeout': probe.length ? '3600s' : '600s',
+  '--tasks': 1, '--parallelism': 1, '--max-retries': 0, '--task-timeout': probe.length ? taskTimeout + 's' : '600s',
   '--cpu': '1', '--memory': '512Mi', '--set-env-vars': variables, '--clear-secrets': true, '--labels': { app: 'catalog', component: 'job' },
 };
 fs.writeFileSync(path.join(dir, 'flags.json'), JSON.stringify(flags));

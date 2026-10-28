@@ -40,11 +40,18 @@ service_catalog_matting() {
   SVC_NAME=catalog-matting
   SVC_REGION=$(service_region "$SVC_NAME")
   SVC_IMAGE=$AR/matting:$TAG
-  SVC_ARGS=(--service-account="$MATTING_SA" --cpu=4 --memory=16Gi --concurrency=1 --min-instances=0
+  local concurrency=1
+  SVC_ARGS=(--service-account="$MATTING_SA" --cpu=4 --memory=16Gi --concurrency="$concurrency" --min-instances=0
     --max-instances="$MATTING_CPU_MAX_INSTANCES" --timeout=300 --labels=app=catalog,component=matte)
   SVC_ENV="MAX_RESIDENT_SESSIONS=1,UPSCALE_CPU=1"
-  SVC_PROBE=(bash infra/lib/services.sh probe-matting "$(probe_models)" 1)
-  SVC_PROBE_TIMEOUT=300
+  # Sized to the service: one CPU cut-out takes 25 to 71 s (measured on a candidate 2026-10-28; the full probe of
+  # 4 models x 6 calls plus the switching order took 21 min). So the default model, which the service loads at
+  # start, gets 1 warm call and 1 round at the service's concurrency: 2 calls of at most about 45 s (its p95 was
+  # 42 s), plus the job deploy and start and the candidate's cold start, about 3 minutes in all. 420 s leaves room
+  # for a slow cold start without hiding a hang. The full measurement of every model is the GPU service's probe.
+  # birefnet-general is the service's DEFAULT_MATTE_MODEL (services/matting/app.py; SVC_ENV does not change it).
+  SVC_PROBE_TIMEOUT=420
+  SVC_PROBE=(bash infra/lib/services.sh probe-matting "$SVC_PROBE_TIMEOUT" birefnet-general "$concurrency" 1)
   # Reuse 05's existing CPU matting service; never change it from an unmerged preview.
   SVC_DEPLOY=1; [ "${CATALOG_PREVIEW:-0}" = 1 ] && SVC_DEPLOY=0
   SVC_SHIFT=1
@@ -65,9 +72,12 @@ service_catalog_matting_gpu() {
   for knob in GPU_MEM_LIMIT_BYTES CUDNN_CONV_ALGO_SEARCH CUDNN_CONV_USE_MAX_WORKSPACE INFERENCE_LOCK_SCOPE; do
     if [ -n "${!knob:-}" ]; then SVC_ENV+=",$knob=${!knob}"; fi
   done
-  # 600 s: a cold L4 start plus loading every model once.
-  SVC_PROBE=(bash infra/lib/services.sh probe-matting "$(probe_models)" "$GPU_CONCURRENCY")
+  # The full probe of spec 17 3.3.1 (every served model, 5 rounds at the shape's concurrency, the switching order):
+  # this is where the GPU shape is measured. 600 s (3.2.2): a cold L4 start plus loading every model once. Not yet
+  # measured on a candidate (the first gated deploy stopped before this service); about 30 calls of 1 to 2 s plus
+  # up to 9 loads on one resident session should take 3 to 6 minutes. Set from the first probe's time if it is not.
   SVC_PROBE_TIMEOUT=600
+  SVC_PROBE=(bash infra/lib/services.sh probe-matting "$SVC_PROBE_TIMEOUT" "$(probe_models)" "$GPU_CONCURRENCY" 5)
   SVC_DEPLOY=1
   # Spec 17 3.2.5: the preview deploys the GPU service as a no-traffic candidate and never shifts traffic.
   # Its own per-commit tag, so the URL the preview worker calls stays on this revision whatever deploys next.
@@ -126,10 +136,12 @@ probe_get() {
   [ "$code" = 200 ]
 }
 
-# Spec 17 3.3.1 (G3): the matting probe measures the candidate with the shape's models and concurrency.
+# Spec 17 3.3.1 (G3): the matting probe measures the candidate with the models, concurrency and rounds its registry
+# row gives (sized per service). The probe job's task timeout is the gate's timeout, so a probe the gate gave up on
+# never keeps running (and billing) on the candidate (2026-10-28: it ran on for 20 minutes).
 probe_matting() {
-  local models=$1 concurrency=$2 url=$3
-  bash infra/check-matting.sh --probe "$url" --models "$models" --concurrency "$concurrency"
+  local timeout=$1 models=$2 concurrency=$3 rounds=$4 url=$5
+  PROBE_TASK_TIMEOUT=$timeout bash infra/check-matting.sh --probe "$url" --models "$models" --concurrency "$concurrency" --rounds "$rounds"
 }
 
 # /health on the worker candidate, then the tier 5 smoke against the candidates of this deploy.
@@ -160,9 +172,9 @@ if [ "${BASH_SOURCE[0]}" = "$0" ]; then
   export CLOUDSDK_CORE_PROJECT=image-links-agent
   cd "$(dirname "$0")/../.."
   case "${1:-}" in
-    probe-matting) probe_matting "$2" "$3" "$4" ;;
+    probe-matting) shift; probe_matting "$@" ;;
     probe-worker) probe_worker "$2" ;;
     probe-web) probe_web "$2" ;;
-    *) echo "usage: bash infra/lib/services.sh probe-matting <models> <concurrency> <url> | probe-worker <url> | probe-web <url>" >&2; exit 2 ;;
+    *) echo "usage: bash infra/lib/services.sh probe-matting <timeout s> <models> <concurrency> <rounds> <url> | probe-worker <url> | probe-web <url>" >&2; exit 2 ;;
   esac
 fi

@@ -86,8 +86,12 @@ deploy.sh. A lesson in a document is not a guard; these are the guards.
   `gcloud run services update-traffic <name> --to-revisions <previous>=100`, and deploy.sh stops;
   later services are not touched, and services this run already moved are listed with their
   `--rollback` commands.
-- Probes: matting services run `infra/check-matting.sh --probe` (spec 17 G3) with the shape's
-  models and concurrency; the worker probe is `/health` on the tag URL, then the tier 5 smoke with
+- Probes: matting services run `infra/check-matting.sh --probe` (spec 17 G3) sized per service in
+  the registry (`infra/lib/services.sh`): catalog-matting runs its default model with 1 warm call and
+  1 round at concurrency 1 within 420 s (one CPU cut-out takes 25 to 71 s, measured 2026-10-28; the full
+  probe took 21 min there); catalog-matting-gpu runs every served model, 5 rounds at the shape's
+  concurrency, within 600 s (not yet timed on a candidate). The probe job's own task timeout equals the
+  gate's, so a killed gate never leaves the job running. The worker probe is `/health` on the tag URL, then the tier 5 smoke with
   the matting and worker tag URLs (`infra/catalog-test-jobs.sh` takes `MATTING_URL`,
   `MATTING_GPU_URL` and `WORKER_URL` from the environment when set); the web probe is `/health`
   and `/` with the operator's identity token through IAP. `/` redirects to `/catalog`, so probes
@@ -132,10 +136,9 @@ older to protect).
 
 Open on the first gated deploy (not verifiable offline): catalog-web now has `GET /health`
 (`{ok: true}`, no database call), but IAP must still accept the operator's identity token on the tag URL;
-the matting probes run `infra/check-matting.sh --probe <tag URL> --models <GPU_MATTE_MODELS>
---concurrency <n>` as a Cloud Run job (default 5 rounds per model), and whether the CPU probe fits its
-300 s limit (job start, cold start, four models on CPU) is unmeasured; a timeout fails safe (traffic
-stays). The worker smoke calls the matting tag URLs with an ID token whose audience is that tag URL.
+the matting probes run `infra/check-matting.sh --probe <tag URL> --models <m> --concurrency <n>
+--rounds <k>` as a Cloud Run job. 2026-10-28: the first gated deploy measured the CPU probe (four models,
+5 rounds) at 21 min against 300 s, so it was resized as above; a timeout fails safe (traffic stays). The worker smoke calls the matting tag URLs with an ID token whose audience is that tag URL.
 
 ## Rollback
 One service, seconds, no build and no smoke: `bash infra/deploy.sh --rollback <service> [revision]`

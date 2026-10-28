@@ -1,6 +1,6 @@
 // Run with node infra/tests/gcloud-list-names.test.mjs. No provider calls.
 // gcloud list prints short resource names on newer SDKs (589) and full projects/... names on older
-// ones. The check-then-create in deploy.sh (tasks queues) and test-render-pool.sh (worker pool)
+// ones. The check-then-create of the queues (infra/lib/queues.sh) and test-render-pool.sh (worker pool)
 // must treat both forms, with or without CRLF, as "exists" and never call create for them.
 import fs from 'node:fs';
 import os from 'node:os';
@@ -14,13 +14,6 @@ import {gitBashPath} from '../../packages/core/src/git-bash.ts';
 const infra = path.resolve(import.meta.dirname, '..');
 const bash = process.env.CATALOG_BASH || gitBashPath();
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'catalog-list-names-'));
-
-// The queue block of deploy.sh, from ENSURE_QUEUES= to the end of its for loop.
-const deploy = fs.readFileSync(path.join(infra, 'deploy.sh'), 'utf8').split(/\r?\n/);
-const start = deploy.findIndex((l) => l.startsWith('ENSURE_QUEUES='));
-const end = deploy.findIndex((l, i) => i > start && l === 'done');
-assert.ok(start >= 0 && end > start, 'Queue block not found in deploy.sh');
-const queueBlock = deploy.slice(start, end + 1).join('\n');
 
 // Fake gcloud: logs each call, prints $LIST for list, fails list when LIST_FAIL=1.
 const fake = `gcloud() {
@@ -44,28 +37,25 @@ const queueScript = `set -euo pipefail
 ${fake}
 gcv() { gcloud "$@" | tr -d '\\r'; }
 PROJECT=image-links-agent REGION=asia-south1 QUEUE=catalog INGEST_MAX_DISPATCHES=4 TASKS_MAX_DISPATCHES=8 BULK_MAX_DISPATCHES=0 BULK_QUEUE=catalog-bulk
-${queueBlock}`;
+source "$INFRA/lib/queues.sh"
+queues_create_missing`;
 
 const queueCases = [
   {label: 'queues-short-names', list: 'catalog\\ncatalog-ingest\\ngeneration\\n', creates: 0},
   {label: 'queues-full-names', list: `${full('catalog')}\\n${full('catalog-ingest')}\\n`, creates: 0},
   {label: 'queues-crlf', list: 'catalog\\r\\ncatalog-ingest\\r\\n', creates: 0},
-  {label: 'queues-preview-short', list: 'catalog\\ncatalog-ingest\\n', preview: '1', creates: 0},
   {label: 'queues-ingest-missing', list: 'catalog\\ncatalog-ingest-old\\n', creates: 1},
   {label: 'queues-ingest-missing-full', list: `${full('catalog')}\\n`, creates: 1},
   {label: 'queues-list-fails', list: '', fail: '1', status: 1, creates: 0},
 ];
 try {
   for (const c of queueCases) {
-    const r = run(c.label, queueScript, {LIST: c.list, LIST_FAIL: c.fail || '0', CATALOG_PREVIEW: c.preview || '0'});
+    const r = run(c.label, queueScript, {LIST: c.list, LIST_FAIL: c.fail || '0', INFRA: infra.replaceAll('\\', '/')});
     assert.equal(r.status, c.status ?? 0, c.label + '\n' + r.stderr);
     const creates = r.calls.filter((a) => a.startsWith('tasks queues create'));
     assert.equal(creates.length, c.creates, c.label + ' create calls: ' + creates.join(' | '));
     if (c.creates) assert.match(creates[0], /^tasks queues create catalog-ingest /, c.label);
-    if (!c.status) {
-      const updates = r.calls.filter((a) => a.startsWith('tasks queues update'));
-      assert.equal(updates.length + creates.length, c.preview ? 2 : 1, c.label + ' queue calls');
-    }
+    assert.ok(!r.calls.some((a) => a.startsWith('tasks queues update')), c.label + ': an existing queue is never changed before the worker is live');
     console.log('PASS ' + c.label);
   }
 
