@@ -344,3 +344,114 @@ def test_json_formatter_keeps_a_traceback_as_stack_trace(service):
     assert "RuntimeError: library failure" in line["stack_trace"]
     plain = logging.getLogger("matting").makeRecord("matting", logging.INFO, __file__, 1, "sessions_ready", (), None)
     assert "stack_trace" not in json.loads(module.JsonFormatter().format(plain))
+
+
+# Spec 17 3.3.2: one GPU knob per candidate, each behind an env var whose unset value is today's behaviour.
+def reimport(monkeypatch, **env):
+    for name, value in env.items():
+        monkeypatch.setenv(name, value)
+    sys.modules.pop("app", None)
+    return importlib.import_module("app")
+
+
+def gpu_providers(module, create):
+    create.side_effect = lambda *args, **kwargs: SimpleNamespace(inner_session=SimpleNamespace(get_providers=lambda: ["CUDAExecutionProvider", "CPUExecutionProvider"]))
+    module.TARGET = "gpu"
+    module.create_session("bria-rmbg")
+    return create.call_args.kwargs["providers"]
+
+
+def test_cudnn_options_reach_the_cut_out_provider_tuple(service, monkeypatch):
+    _, _, create, _ = service
+    module = reimport(monkeypatch, CUDNN_CONV_ALGO_SEARCH="HEURISTIC", CUDNN_CONV_USE_MAX_WORKSPACE="0")
+    assert gpu_providers(module, create) == [("CUDAExecutionProvider", {"arena_extend_strategy": "kSameAsRequested", "cudnn_conv_algo_search": "HEURISTIC",
+                                                                        "cudnn_conv_use_max_workspace": "0"}), "CPUExecutionProvider"]
+
+
+def test_cudnn_options_unset_keep_onnx_defaults(service, monkeypatch):
+    _, _, create, _ = service
+    monkeypatch.delenv("CUDNN_CONV_ALGO_SEARCH", raising=False)
+    monkeypatch.delenv("CUDNN_CONV_USE_MAX_WORKSPACE", raising=False)
+    module = reimport(monkeypatch)
+    options = gpu_providers(module, create)[0][1]
+    assert "cudnn_conv_algo_search" not in options and "cudnn_conv_use_max_workspace" not in options
+    assert module.INFERENCE_LOCK_SCOPE == "global"
+
+
+@pytest.mark.parametrize(("name", "value", "message"), [("CUDNN_CONV_ALGO_SEARCH", "FAST", "CUDNN_CONV_ALGO_SEARCH"),
+                                                         ("CUDNN_CONV_USE_MAX_WORKSPACE", "2", "CUDNN_CONV_USE_MAX_WORKSPACE"),
+                                                         ("INFERENCE_LOCK_SCOPE", "model", "INFERENCE_LOCK_SCOPE")])
+def test_a_bad_knob_value_refuses_to_start(service, monkeypatch, name, value, message):
+    module = reimport(monkeypatch, **{name: value})
+    with pytest.raises(ValueError, match=message):
+        module.load_sessions()
+
+
+def concurrent_runs(client, module, create, remove, models):
+    """Sends one request per entry of `models` at once, every model already resident; returns the peak of overlapping
+    runs and whether each load happened under the global lock."""
+    module.SESSIONS.clear()
+    loads_under_lock = []
+    runs = counting_sessions(create, module, loads_under_lock)
+    for model in dict.fromkeys(models):
+        module.session_for(model)
+    remove.side_effect = lambda image, session, **kwargs: (session.inner_session.run(None, {}), ImageOps.invert(image.convert("L")))[1]
+    with ThreadPoolExecutor(max_workers=len(models)) as pool:
+        statuses = list(pool.map(lambda m: client.post(f"/matte?model={m}", files={"file": ("s.png", image_bytes())}).status_code, models))
+    assert statuses == [200] * len(models)
+    return runs["peak"], loads_under_lock
+
+
+def test_session_lock_scope_lets_two_models_run_at_once(service, monkeypatch):
+    _, _, create, remove = service
+    module = reimport(monkeypatch, INFERENCE_LOCK_SCOPE="session", MAX_RESIDENT_SESSIONS="2")
+    with TestClient(module.app) as client:
+        peak, loads_under_lock = concurrent_runs(client, module, create, remove, ["birefnet-general", "bria-rmbg"] * 3)
+    # Two sessions, six requests: at most one run per session, so exactly two at once.
+    assert peak == 2
+    assert loads_under_lock == [True, True]
+
+
+def test_session_lock_scope_keeps_one_run_per_session(service, monkeypatch):
+    _, _, create, remove = service
+    module = reimport(monkeypatch, INFERENCE_LOCK_SCOPE="session")
+    with TestClient(module.app) as client:
+        peak, _ = concurrent_runs(client, module, create, remove, ["birefnet-general"] * 4)
+    assert peak == 1
+
+
+def test_global_lock_scope_runs_one_at_a_time_across_models(service, monkeypatch):
+    _, _, create, remove = service
+    module = reimport(monkeypatch, INFERENCE_LOCK_SCOPE="global", MAX_RESIDENT_SESSIONS="2")
+    with TestClient(module.app) as client:
+        peak, _ = concurrent_runs(client, module, create, remove, ["birefnet-general", "bria-rmbg"] * 2)
+    assert peak == 1
+
+
+def test_health_reports_resident_models_candidate_and_loads(service, monkeypatch):
+    client, module, _, _ = service
+    health = client.get("/health").json()
+    assert health["residentModels"] == health["resident"] == ["birefnet-general"]
+    assert health["arenaBytesByModel"] == {}
+    assert health["candidate"] is None
+    assert health["lockScope"] == "global"
+    assert health["loadsByModel"] == {"birefnet-general": 1}
+    assert len(health["instanceId"]) == 12
+    monkeypatch.setenv("K_REVISION", "catalog-matting-gpu-00042-abc")
+    assert client.post("/matte?model=bria-rmbg", files={"file": ("a.png", image_bytes())}).status_code == 200
+    health = client.get("/health").json()
+    assert health["candidate"] == "catalog-matting-gpu-00042-abc"
+    assert health["residentModels"] == ["bria-rmbg"]
+    assert health["loadsByModel"] == {"birefnet-general": 1, "bria-rmbg": 1}
+
+
+def test_fresh_health_reads_gpu_memory_past_the_cache(service, monkeypatch):
+    client, module, _, _ = service
+    monkeypatch.setattr(module, "TARGET", "gpu")
+    monkeypatch.setattr(module, "_gpu_memory", {"at": -float("inf"), "value": None})
+    monkeypatch.setattr(module.shutil, "which", lambda name: "/usr/bin/nvidia-smi")
+    used = iter(["1000, 23034\n", "7000, 23034\n", "9000, 23034\n"])
+    monkeypatch.setattr(module.subprocess, "run", lambda *a, **k: SimpleNamespace(stdout=next(used)))
+    assert client.get("/health").json()["gpuMemory"]["usedMiB"] == 1000
+    assert client.get("/health").json()["gpuMemory"]["usedMiB"] == 1000  # cached
+    assert client.get("/health?fresh=1").json()["gpuMemory"]["usedMiB"] == 7000

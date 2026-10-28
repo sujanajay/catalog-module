@@ -17,6 +17,19 @@ jobs:
       - run: pnpm lint
       - run: pnpm typecheck
       - run: pnpm test
+      # Offline infra tests (shape refusals, the check-matting probe, monitoring, ...): bash and node only, no GCP.
+      - name: Infra tests
+        run: for t in infra/tests/*.test.mjs; do echo "== $t"; node "$t"; done
+      # Matting service tests with mocked inference; the image builds run them too, here they run on every PR.
+      # rembg and onnxruntime are left out (the tests stub both); every other pin comes from requirements-cpu.txt.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Matting service tests
+        run: |
+          grep -vE '^(rembg|onnxruntime)' services/matting/requirements-cpu.txt > "$RUNNER_TEMP/matting-requirements.txt"
+          pip install -r "$RUNNER_TEMP/matting-requirements.txt" -r services/matting/requirements-test.txt
+          python -m pytest services/matting/tests -q
       # Intake browser scenarios (spec 14 section 8.3): local harness, no GCP, no deployed service.
       - name: Install Chromium for the browser tests
         run: pnpm --filter @catalog/web exec playwright install --with-deps chromium
