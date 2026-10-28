@@ -1,14 +1,15 @@
 import { CloudTasksClient } from "@google-cloud/tasks";
 import { retryTransient, type RetryOptions } from "./retry";
 import { log } from "./log";
+import { cloudRunAudience } from "./cloud-run";
 
 /**
  * Generic Cloud Tasks enqueue for the catalog worker.
  *
  * Production: creates an HTTP task on `projects/{GCP_PROJECT}/locations/{REGION}/queues/{TASKS_QUEUE}`
  * that POSTs the JSON body to `${WORKER_URL}${route}` with an OIDC token for WORKER_SA_EMAIL
- * (audience WORKER_URL). A `taskId` becomes the task name, so a re-enqueue of the same chunk or
- * publish is deduplicated by the queue.
+ * (audience: the service URL of WORKER_URL, also for a tag URL; see cloudRunAudience). A `taskId`
+ * becomes the task name, so a re-enqueue of the same chunk or publish is deduplicated by the queue.
  *
  * The client library marks CreateTask non-idempotent and so never retries it. A named task is
  * idempotent (a repeat answers ALREADY_EXISTS, which counts as success), so a named createTask is
@@ -165,7 +166,7 @@ export function buildTaskRequest(
       url: `${cfg.workerUrl}${route}`,
       headers: { "Content-Type": "application/json" },
       body: Buffer.from(JSON.stringify(body)).toString("base64"),
-      oidcToken: { serviceAccountEmail: cfg.serviceAccountEmail, audience: cfg.workerUrl },
+      oidcToken: { serviceAccountEmail: cfg.serviceAccountEmail, audience: cloudRunAudience(cfg.workerUrl) },
     },
     dispatchDeadline: { seconds: DISPATCH_DEADLINE_SEC },
   };

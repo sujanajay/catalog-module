@@ -221,4 +221,10 @@ describe("UpscaleClient", () => {
     expect(new Headers(seen[1]!.init.headers).get("content-type")).toBe("image/png");
     await expect(client.upscale(Buffer.from([1]), "down")).rejects.toMatchObject({ status: 503 });
   });
+  it("asks for the ID token for the service URL when the base URL is a tag URL", async () => {
+    const audiences: string[] = [];
+    const fetchMock = (async () => new Response(JSON.stringify({ ok: true }), { status: 200 })) as typeof fetch;
+    await new UpscaleClient({ baseUrl: "https://candidate---catalog-matting-gpu-qtoctgoxqa-as.a.run.app", fetch: fetchMock, idToken: async a => { audiences.push(a); return "tok"; } }).health();
+    expect(audiences).toEqual(["https://catalog-matting-gpu-qtoctgoxqa-as.a.run.app"]);
+  });
 });

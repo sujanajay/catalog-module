@@ -175,6 +175,17 @@ describe("matting client", () => {
     await new MattingClient({ services: [{ baseUrl: "https://cpu.example", target: "cpu" }, { baseUrl: "https://gpu.example", target: "gpu" }], fetch: fakeFetch, idToken: async (a) => { audiences.push(a); return "fake"; } }).health();
     expect(audiences.sort()).toEqual(["https://cpu.example", "https://gpu.example"]);
   });
+  it("asks for the ID token for the service URL when MATTING_URL is a candidate tag URL (spec 17 deploy 3)", async () => {
+    const audiences: string[] = [], called: string[] = [];
+    const tagged = "https://candidate---catalog-matting-qtoctgoxqa-el.a.run.app";
+    const request = vi.fn<typeof fetch>(async (input) => {
+      called.push(String(input));
+      return Response.json({ ok: true, models: [{ id: "general", inputSize: 1024, target: "cpu" }], default: "general", version: "test" });
+    });
+    await mattingClientFromEnv({ MATTING_URL: tagged }, { fetch: request, idToken: async (a) => { audiences.push(a); return "fake"; } }).health();
+    expect(called).toEqual([`${tagged}/health`]);
+    expect(audiences).toEqual(["https://catalog-matting-qtoctgoxqa-el.a.run.app"]);
+  });
   it("finishes healthy CPU discovery when GPU token acquisition never resolves", async () => {
     const request = vi.fn<typeof fetch>(async () => Response.json({ ok: true, models: [{ id: "general", inputSize: 64, target: "cpu" }], default: "general", version: "cpu" }));
     const client = new MattingClient({
