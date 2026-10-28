@@ -1,8 +1,9 @@
 // Spec 15 (release E): how chunk tasks are queued and recovered. One live task per chunk, named by its step
 // (`chunkTaskId`); at most `window` chunks of one batch queued or running at once; a sweep that recovers only
-// dead chunks (a lapsed lease, or a task lost for 30 minutes). Shared by the web (Start) and the worker
-// (chunk hand-off and finish, the sweep, the load tool).
-import { and, asc, count, eq, inArray, isNotNull, isNull, lt, notInArray, sql, type SQL } from "drizzle-orm";
+// dead chunks (a lapsed lease, or a task lost for 30 minutes), plus spec 17 G4's re-send of a step whose task never
+// started within 6 minutes. Shared by the web (Start) and the worker (chunk hand-off and finish, the sweep, the
+// load tool).
+import { and, asc, count, eq, inArray, isNotNull, isNull, lt, notInArray, or, sql, type SQL } from "drizzle-orm";
 import type { Db } from "../../db/client";
 import { catalogBatches, catalogChunks } from "../../db/schema";
 import { log as structuredLog, toSeverity } from "../../log";
@@ -17,6 +18,14 @@ export const CHUNK_LEASE_MS = 120_000;
 export const CHUNK_HEARTBEAT_MS = 30_000;
 /** A queued chunk whose task was queued this long ago and never ran is re-dispatched. */
 export const CHUNK_QUEUED_STALE_MS = 30 * 60_000;
+/**
+ * Spec 17 G4: a step whose task has not started this long after it was queued is sent again, once per step.
+ * Above the normal queue wait under load (2026-10-27 run: median 34 s, p95 275 s between a hand-off and the
+ * next delivery's start), and short enough that a lost task's chunk still ends within 2 x the median chunk time.
+ */
+export const CHUNK_UNSTARTED_STALE_MS = 6 * 60_000;
+/** `task_name` of a queued chunk whose step `redispatchUnstartedChunks` sent again: that step is not re-sent twice. */
+export const REDISPATCHED_TASK = "redispatched";
 /** Deliveries in a row that finish no photo before the chunk fails. */
 export const CHUNK_MAX_STALLS = 3;
 /** Chunks of one batch queued or running at once: the queue's 6 slots plus 2, so a freed slot always finds a task. */
@@ -144,7 +153,7 @@ export async function dispatchChunks(db: Db, enqueue: Enqueue, batchId: string, 
   return picked.length;
 }
 
-export interface RecoveryResult { lapsed: number; lost: number; dispatched: number }
+export interface RecoveryResult { lapsed: number; lost: number; unstarted: number; dispatched: number }
 
 /**
  * The sweep's per-batch rules (also the Start resume path): a running chunk whose lease lapsed, or a queued chunk
@@ -166,6 +175,33 @@ export async function recoverBatchChunks(db: Db, enqueue: Enqueue, batchId: stri
       await tryEnqueueChunk(enqueue, { ...chunk, batchId }, log, {}, bulk);
     }
   }
+  const unstarted = await redispatchUnstartedChunks(db, enqueue, batchId, { now, log });
   const dispatched = await dispatchChunks(db, enqueue, batchId, options);
-  return { lapsed: lapsed.length, lost: lost.length, dispatched };
+  return { lapsed: lapsed.length, lost: lost.length, unstarted, dispatched };
+}
+
+/**
+ * Spec 17 G4: a queued step whose task never started within `CHUNK_UNSTARTED_STALE_MS` (Cloud Tasks may drop a
+ * created task after a run of 429s) gets the next step and a new task, once per step; the 30-minute rule covers the
+ * rest. "Never started" means `started_at` is older than `dispatched_at`, so a step that ran and waits for its own
+ * retry is left alone, and so is a row from before 0004 (its step-less tasks may adopt it). A second caller at the
+ * same time matches nothing, and the old task, if it was only slow, answers "stale". Returns the number re-sent.
+ */
+export async function redispatchUnstartedChunks(db: Db, enqueue: Enqueue, batchId: string, options: Pick<DispatchOptions, "now" | "log"> = {}): Promise<number> {
+  const now = options.now ?? new Date(), log = options.log ?? defaultLog;
+  const resent = await db.update(catalogChunks)
+    .set({ step: sql`${catalogChunks.step} + 1`, stepKnown: true, dispatchedAt: now, taskName: REDISPATCHED_TASK, leaseUntil: null })
+    .where(and(eq(catalogChunks.batchId, batchId), eq(catalogChunks.status, "queued"), isNull(catalogChunks.taskName), eq(catalogChunks.stepKnown, true),
+      inArray(catalogChunks.batchId, db.select({ id: catalogBatches.id }).from(catalogBatches).where(and(eq(catalogBatches.id, batchId), inArray(catalogBatches.status, PROCESSING_STATUSES)))),
+      lt(catalogChunks.dispatchedAt, new Date(+now - CHUNK_UNSTARTED_STALE_MS)),
+      or(isNull(catalogChunks.startedAt), lt(catalogChunks.startedAt, catalogChunks.dispatchedAt))))
+    .returning();
+  if (!resent.length) return 0;
+  const bulk = await batchIsBulk(db, batchId);
+  for (const chunk of resent) {
+    log("chunk recovered", { batchId, chunkId: chunk.id, stage: chunk.stage, step: chunk.step, reason: "task_not_started" });
+    // A failed enqueue keeps the new step and the marker, so the 30-minute lost-task rule queues it again.
+    await tryEnqueueChunk(enqueue, { ...chunk, batchId }, log, {}, bulk);
+  }
+  return resent.length;
 }

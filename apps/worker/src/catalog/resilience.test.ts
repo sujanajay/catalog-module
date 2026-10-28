@@ -6,7 +6,7 @@ import type { Db } from "@catalog/core/db/client";
 import { createTestDb } from "@catalog/core/db/testing";
 import { catalogBatches, catalogBatchProducts, catalogChunks, catalogCostEvents, catalogOutputs, catalogProducts, catalogSourceImages, EMPTY_BATCH_COUNTS } from "@catalog/core/db/schema";
 import * as storage from "@catalog/core/storage";
-import { CHUNK_STALLED_REASON, dispatchChunks } from "@catalog/core/catalog/pipeline/dispatch";
+import { CHUNK_QUEUED_STALE_MS, CHUNK_STALLED_REASON, CHUNK_UNSTARTED_STALE_MS, dispatchChunks } from "@catalog/core/catalog/pipeline/dispatch";
 import { chunkTaskId, DISPATCH_DEADLINE_SEC } from "@catalog/core/tasks";
 import type { ChannelId } from "@catalog/core/catalog/types";
 import { refreshBatchProgress, workerCatalogDeps, type CatalogDeps } from "./deps";
@@ -279,20 +279,22 @@ describe("E3: one live task per chunk", () => {
 describe("E4: the sweep recovers only dead chunks", () => {
   const sweep = (w: World) => handleSweep({ db, enqueue: w.deps.enqueue, releaseLocks: async () => 0, now: w.deps.now, window: 8 }, {});
 
-  it("leaves a waiting task and a live lease alone, re-dispatches a lost task once at 31 min, and the old task then answers stale", async () => {
+  it("leaves a waiting task and a live lease alone, re-dispatches a task that never started once, and the old task then answers stale", async () => {
     const w = world(), s = await seed(w, "e4-sweep", [[1], [1]]);
     const [held, waiting] = s.chunks.map((c) => c.id);
     await db.update(catalogChunks).set({ status: "running", taskName: "alive", startedAt: new Date(T0 - 5 * 3600_000), leaseUntil: new Date(T0 + 3600_000), dispatchedAt: new Date(T0 - 5 * 3600_000) }).where(eq(catalogChunks.id, held!));
-    await db.update(catalogChunks).set({ dispatchedAt: new Date(T0 - 10 * 60_000) }).where(eq(catalogChunks.id, waiting!));
+    await db.update(catalogChunks).set({ dispatchedAt: new Date(T0 - 5 * 60_000) }).where(eq(catalogChunks.id, waiting!));
     await sweep(w);
     expect(w.queue).toHaveLength(0);
     expect(await row(waiting!)).toMatchObject({ step: 0, status: "queued" });
+    // The sweep covers every batch in the shared test database; keep only this batch's tasks.
+    const own = () => w.queue.filter((t) => t.body.chunkId === held || t.body.chunkId === waiting).map((t) => t.taskId);
     w.set(T0 + 21 * 60_000);
     await sweep(w);
-    expect(w.queue.map((t) => t.taskId)).toEqual([chunkTaskId(waiting!, "matte", 1)]);
+    expect(own()).toEqual([chunkTaskId(waiting!, "matte", 1)]);
     w.set(T0 + 21 * 60_000 + 30_000);
     await sweep(w);
-    expect(w.queue).toHaveLength(1);
+    expect(own()).toHaveLength(1);
     expect(await row(held!)).toMatchObject({ status: "running", taskName: "alive", step: 0 });
     expect(await w.deliver({ chunkId: waiting!, stage: "matte", step: 0 })).toEqual({ httpStatus: 200, outcome: "stale" });
   }, 60_000);
@@ -383,6 +385,98 @@ describe("E4: the sweep recovers only dead chunks", () => {
     }
     expect(finished).toBeGreaterThanOrEqual(140); // of 150 chunks
   }, 600_000);
+});
+
+describe("G4 (spec 17): a task the queue dropped after a successful enqueue", () => {
+  // Stage times and the queue wait are scaled to batch d9469ed5 (2026-10-27): 8 photos, median chunk span 390 s.
+  const WAIT_MS = 43_000;
+  const timed = (w: World) => { w.slow("matteFor", () => 15_000); w.slow("renderAllChannels", () => 20_000); w.slow("judgeOutput", () => 3_000); };
+  /** Runs one chunk's tasks in order, each after the queue wait; returns its span (first delivery start to last end). */
+  async function runChunk(w: World, id: string, delivered: Task[] = []): Promise<number> {
+    let start: number | undefined;
+    for (let i = 0; i < 20 && (await row(id)).status !== "done"; i++) {
+      const at = w.queue.findIndex((t) => t.body.chunkId === id);
+      expect(at, "the chunk has a task").toBeGreaterThanOrEqual(0);
+      const [task] = w.queue.splice(at, 1);
+      w.advance(WAIT_MS);
+      start ??= w.clock();
+      delivered.push(task!);
+      await w.deliver(task!.body, { retryCount: task!.retryCount });
+    }
+    expect((await row(id)).status).toBe("done");
+    return w.clock() - start!;
+  }
+
+  it("the dropped render task is re-sent at the first delivery end after 6 min, and the chunk ends within 2 x the median chunk time", async () => {
+    // The median, from healthy chunks run one at a time (window 1, so no task waits while another chunk runs).
+    const healthy = world(), h = await seed(healthy, "g4-median", [[8], [8], [8]]);
+    timed(healthy); healthy.deps.chunkWindow = 1;
+    await dispatchChunks(db, healthy.deps.enqueue, h.batch.id, { window: 1, now: healthy.deps.now() });
+    const spans: number[] = [];
+    for (const c of h.chunks) spans.push(await runChunk(healthy, c.id));
+    const median = [...spans].sort((a, b) => a - b)[1]!;
+    expect(median).toBeGreaterThan(300_000);
+
+    const w = world(), s = await seed(w, "g4-dropped", [[8], [8]]), [lost, peer] = s.chunks.map((c) => c.id) as [string, string];
+    timed(w);
+    await dispatchChunks(db, w.deps.enqueue, s.batch.id, { window: 8, now: w.deps.now() });
+    // The matte step of the tail chunk ends and queues its render step: the enqueue succeeds.
+    const matteTask = w.queue.splice(w.queue.findIndex((t) => t.body.chunkId === lost), 1)[0]!;
+    w.advance(WAIT_MS);
+    const start = w.clock();
+    expect(await w.deliver(matteTask.body)).toEqual({ httpStatus: 200, outcome: "done" });
+    const matteEnd = w.clock();
+    const dropped = chunkTaskId(lost, "render", 1);
+    expect(w.queue.map((t) => t.taskId)).toContain(dropped);
+    // Cloud Tasks then deletes it after its 429 retries: no error reaches the worker, nothing is logged.
+    w.queue.splice(w.queue.findIndex((t) => t.taskId === dropped), 1);
+    expect(w.log).not.toHaveBeenCalledWith("chunk dispatch failed", expect.anything());
+    // Another chunk of the batch ends a delivery 10 s after the 6-minute mark (a big batch ends one every few seconds).
+    w.set(matteEnd + CHUNK_UNSTARTED_STALE_MS + 10_000 - 120_000);
+    const peerTask = w.queue.splice(w.queue.findIndex((t) => t.body.chunkId === peer), 1)[0]!;
+    await w.deliver(peerTask.body);
+    expect(w.clock()).toBe(matteEnd + CHUNK_UNSTARTED_STALE_MS + 10_000);
+    expect(w.log).toHaveBeenCalledWith("chunk recovered", expect.objectContaining({ chunkId: lost, stage: "render", step: 2, reason: "task_not_started" }));
+    expect(w.queue.map((t) => t.taskId)).toContain(chunkTaskId(lost, "render", 2));
+    // The re-sent step runs; the chunk is done long before the 30-minute rule, within 2 x the median.
+    const delivered: Task[] = [];
+    await runChunk(w, lost, delivered);
+    const span = w.clock() - start;
+    expect(span).toBeLessThanOrEqual(2 * median);
+    expect(span).toBeLessThan(CHUNK_QUEUED_STALE_MS);
+    expect(deliveries(w).filter((d) => d.chunkId === lost).map((d) => [d.stage, d.step, d.outcome])).toEqual([["matte", 0, "done"], ["render", 2, "done"], ["qa", 3, "done"]]);
+
+    // Idempotent: the "dropped" task turning up late, and a second delivery of every task the chunk ran, answer 200
+    // (a done chunk answers "done") and change nothing.
+    const counts = () => [w.deps.matteFor, w.deps.renderAllChannels, w.deps.judgeOutput].map((fn) => vi.mocked(fn).mock.calls.length);
+    const before = await row(lost), calls = counts();
+    for (const body of [{ chunkId: lost, stage: "render", step: 1 }, ...[matteTask, ...delivered].map((t) => t.body)]) expect(await w.deliver(body)).toEqual({ httpStatus: 200, outcome: "done" });
+    expect(await row(lost)).toEqual(before);
+    expect(counts()).toEqual(calls);
+    expect(w.queue.filter((t) => t.body.chunkId === lost)).toHaveLength(0);
+  }, 120_000);
+
+  it("a step is re-sent only once, and a duplicate delivery of the re-sent task while it runs is a no-op", async () => {
+    const w = world(), s = await seed(w, "g4-duplicate", [[2]]), id = s.chunks[0]!.id;
+    const sweep = () => handleSweep({ db, enqueue: w.deps.enqueue, releaseLocks: async () => 0, now: w.deps.now, window: 8 }, {});
+    await dispatchChunks(db, w.deps.enqueue, s.batch.id, { window: 8, now: w.deps.now() });
+    // The first matte task is lost before it ever starts: the sweep 10 min later re-sends the step once.
+    w.queue.splice(0, w.queue.length);
+    w.advance(10 * 60_000);
+    await sweep();
+    w.advance(10 * 60_000);
+    await sweep();
+    // The sweep covers every batch in the shared test database; keep only this chunk's tasks.
+    expect(w.queue.filter((t) => t.body.chunkId === id).map((t) => t.taskId)).toEqual([chunkTaskId(id, "matte", 1)]);
+    // A copy of the re-sent task arrives while the first copy holds the chunk: it waits (busy), then finds the step done.
+    const live = await liveDelivery(w, id);
+    expect(await handleChunkTask(w.deps, live.body)).toEqual({ httpStatus: 503, outcome: "busy" });
+    live.release();
+    expect((await live.result).httpStatus).toBe(200);
+    expect(await handleChunkTask(w.deps, live.body, { retryCount: 1 })).toEqual({ httpStatus: 200, outcome: "stale" });
+    expect(w.deps.matteFor).toHaveBeenCalledTimes(2);
+    expect(await row(id)).toMatchObject({ stage: "render", status: "queued", step: 2 });
+  }, 60_000);
 });
 
 describe("E5: a window per batch", () => {

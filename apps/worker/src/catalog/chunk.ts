@@ -7,7 +7,7 @@ import { batchPrefix, derivedPath, publicObjectPath, publicUrl, stagingPath } fr
 import { planProduct, shotGeometry, trimRules, UnsupportedSourceError, type Matte } from "@catalog/core/catalog/render";
 import { renderKey, renderKeys, rerenderedKey } from "@catalog/core/catalog/pipeline/publish";
 import { catalogLlmDeps, CatalogQaCapError, limitDeliveryBackoff, runQaStage, spendCapHit } from "./qa-stage";
-import { CHUNK_HEARTBEAT_MS, CHUNK_LEASE_MS, CHUNK_MAX_STALLS, CHUNK_STALLED_REASON, chunkTimeBudgetMs, dispatchChunks, isBulkBatch, leaseLapsed, tryEnqueueChunk } from "@catalog/core/catalog/pipeline/dispatch";
+import { CHUNK_HEARTBEAT_MS, CHUNK_LEASE_MS, CHUNK_MAX_STALLS, CHUNK_STALLED_REASON, chunkTimeBudgetMs, dispatchChunks, isBulkBatch, leaseLapsed, redispatchUnstartedChunks, tryEnqueueChunk } from "@catalog/core/catalog/pipeline/dispatch";
 import { eachLimit, positiveIntEnv, serialLock } from "@catalog/core/concurrency";
 import { isCpuUpscalerId } from "@catalog/core/catalog/upscale";
 import { recordCostEvents, type CostEventInput } from "@catalog/core/cost-events";
@@ -35,8 +35,8 @@ export const MATTE_RETRY_MARGIN_MS = 60_000;
 /** Spec 15 E1: the QA back-off never waits into the last two minutes before the request deadline. */
 export const QA_BACKOFF_DEADLINE_MARGIN_MS = 120_000;
 /** Same-step retries that wait for a live lease to lapse (503 "busy") before a copy answers "duplicate". The queue
- * (5 attempts, back-off 10 s doubling) sends retries 1-4 at about +10, +30, +70 and +150 s; a crashed holder's lease
- * lapses within 120 s, so only the last attempt (retryCount 4) can claim, and every earlier one must wait. */
+ * (back-off 10 s doubling, at most 60 s, spec 17 G4) sends retries 1-4 at about +10, +30, +70 and +130 s; a crashed
+ * holder's lease lapses within 120 s, so retryCount 4 is the first that can claim, and every earlier one must wait. */
 export const LAST_QUEUE_RETRY = 4;
 export const CHUNK_BUSY_RETRIES = LAST_QUEUE_RETRY;
 const OWNERSHIP_CHANGED = "Chunk ownership changed.";
@@ -508,9 +508,18 @@ export async function handleChunkTask(rawDeps: CatalogDeps, body: Record<string,
   } finally {
     stopHeartbeat();
   }
-  /** Queues the chunk's new step; a failed enqueue is left to the sweep (the lost-task rule, 30 minutes). */
+  /**
+   * Queues the chunk's new step; a failed enqueue is left to the sweep (the lost-task rule, 30 minutes). Spec 17 G4:
+   * then re-sends any step of the batch whose task never started, so a dropped task waits minutes, not 30.
+   */
   async function dispatchNext(next:NonNullable<typeof chunk>,extra:Record<string,unknown> = {}) {
     await tryEnqueueChunk(deps.enqueue,next,deps.log,extra,bulk());
+    await resendUnstarted();
+  }
+  /** Spec 17 G4: this delivery's own work is saved, so a failure here is logged and never fails the delivery. */
+  async function resendUnstarted() {
+    try { await redispatchUnstartedChunks(deps.db,deps.enqueue,chunk!.batchId,{now:deps.now(),log:deps.log}); }
+    catch (error) { deps.log("chunk redispatch failed",{severity:"WARNING",batchId:chunk!.batchId,error:error instanceof Error ? error.message:String(error)}); }
   }
   /** Spec 16: a bulk batch's chunk and publish tasks go to the bulk queue (when one is configured). */
   function bulk():boolean { return !!batch && isBulkBatch(batch); }
@@ -526,7 +535,10 @@ export async function handleChunkTask(rawDeps: CatalogDeps, body: Record<string,
     for (const productId of chunk!.productIds) await deps.enqueue("/tasks/catalog/publish",{batchId:chunk!.batchId,productId},{taskId:`publish-${chunk!.batchId}-${productId}-chunk`,...(bulk() ? {bulk:true}:{})});
     const chunks = await deps.db.select().from(catalogChunks).where(eq(catalogChunks.batchId,chunk!.batchId));
     if (chunks.every(c=>c.status==="done" || c.status==="failed")) { await deps.db.update(catalogBatches).set({status:"publishing"}).where(and(eq(catalogBatches.id,chunk!.batchId),inArray(catalogBatches.status,["matting","rendering","qa"]))); await enqueueFinalize(deps,chunk!.batchId); }
-    // Spec 15 E5: a finished chunk frees a slot in the batch's window.
-    else await dispatchChunks(deps.db,deps.enqueue,chunk!.batchId,{now:deps.now(),log:deps.log,...(deps.chunkWindow ? {window:deps.chunkWindow}:{})});
+    // Spec 15 E5: a finished chunk frees a slot in the batch's window. Spec 17 G4: a dropped task is re-sent first.
+    else {
+      await resendUnstarted();
+      await dispatchChunks(deps.db,deps.enqueue,chunk!.batchId,{now:deps.now(),log:deps.log,...(deps.chunkWindow ? {window:deps.chunkWindow}:{})});
+    }
   }
 }

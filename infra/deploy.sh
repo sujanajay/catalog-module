@@ -357,6 +357,12 @@ ENSURE_QUEUES="$QUEUE-ingest:$INGEST_MAX_DISPATCHES"
 # gcloud 589 prints short queue names from list while older releases print the full
 # projects/.../queues/<name>; compare basenames so both match (docs/solutions/gcloud-list-names.md).
 EXISTING_QUEUES=$(gcv tasks queues list --location="$REGION" --format='value(name)' | sed 's#.*/##')
+# Spec 17 G4: a chunk queue (main and bulk) never drops a task on a burst of 429 or 503 (a worker with no free
+# instance answers 429 before the app runs). It keeps retrying for 30 minutes, at most a minute apart
+# (10, 20, 40, then every 60 s), whatever the attempt count; the handler is safe under repeats. The main queue also
+# carries publish and finalize, and the bulk queue publish: both idempotent, so they get the same retry (a failure
+# that repeats, such as finalize's exports mismatch, retries for the full 30 minutes).
+CHUNK_QUEUE_RETRY=(--max-attempts=-1 --max-retry-duration=1800s --min-backoff=10s --max-backoff=60s --max-doublings=3)
 # Spec 16 3.2.3: the bulk queue. Created only when it has slots; an existing one is never deleted. Its slots never
 # exceed what the running worker takes: lowered before the worker deploy, raised after it. With no bulk slots it
 # keeps 1, so a backlog left from a bigger shape drains slowly instead of flooding a smaller worker (the env no
@@ -366,20 +372,22 @@ BULK_QUEUE_SLOTS=$BULK_MAX_DISPATCHES; [ "$BULK_QUEUE_SLOTS" -gt 0 ] || BULK_QUE
 if [ "$BULK_QUEUE_EXISTS" = 1 ]; then
   BULK_NOW=$(gcv tasks queues describe "$BULK_QUEUE" --location="$REGION" --format='value(rateLimits.maxConcurrentDispatches)')
   if [ -n "$BULK_NOW" ] && [ "$BULK_NOW" -gt "$BULK_QUEUE_SLOTS" ]; then
-    gcloud tasks queues update "$BULK_QUEUE" --location="$REGION" --max-concurrent-dispatches="$BULK_QUEUE_SLOTS" >/dev/null
+    gcloud tasks queues update "$BULK_QUEUE" --location="$REGION" --max-concurrent-dispatches="$BULK_QUEUE_SLOTS" "${CHUNK_QUEUE_RETRY[@]}" >/dev/null
     echo "==> tasks queue $BULK_QUEUE: max-concurrent-dispatches lowered to $BULK_QUEUE_SLOTS before the worker deploy"
   fi
 elif [ "$BULK_MAX_DISPATCHES" -gt 0 ]; then
   ENSURE_QUEUES+=" $BULK_QUEUE:$BULK_MAX_DISPATCHES"
 fi
 for Q in $ENSURE_QUEUES; do
+  # The ingest queue keeps its 5 attempts; the chunk queues get CHUNK_QUEUE_RETRY.
+  RETRY=(--max-attempts=5 --min-backoff=10s); [ "${Q%%:*}" = "$QUEUE-ingest" ] || RETRY=("${CHUNK_QUEUE_RETRY[@]}")
   if grep -qxF "${Q%%:*}" <<<"$EXISTING_QUEUES"; then
     # Idempotent: keep the parallelism within the worker's capacity (connection budget above).
-    gcloud tasks queues update "${Q%%:*}" --location="$REGION" --max-concurrent-dispatches="${Q##*:}" >/dev/null
+    gcloud tasks queues update "${Q%%:*}" --location="$REGION" --max-concurrent-dispatches="${Q##*:}" "${RETRY[@]}" >/dev/null
     echo "==> tasks queue ${Q%%:*}: exists, max-concurrent-dispatches ${Q##*:}"
   else
     gcloud tasks queues create "${Q%%:*}" --location="$REGION" \
-      --max-concurrent-dispatches="${Q##*:}" --max-attempts=5 --min-backoff=10s >/dev/null
+      --max-concurrent-dispatches="${Q##*:}" "${RETRY[@]}" >/dev/null
   fi
 done
 gcloud run deploy "$WORKER_SERVICE" --quiet --image="$AR/worker:$TAG" --service-account="$WORKER_SA" \
@@ -388,11 +396,11 @@ gcloud run deploy "$WORKER_SERVICE" --quiet --image="$AR/worker:$TAG" --service-
   --set-secrets="$WORKER_SECRETS" --set-env-vars="$WORKER_ENV" --labels=app=catalog,component=worker
 if [ "${CATALOG_PREVIEW:-0}" != 1 ]; then
   # Idempotent: keep the queue's parallelism equal to the worker's capacity (connection budget above).
-  gcloud tasks queues update "$QUEUE" --location="$REGION" --max-concurrent-dispatches="$TASKS_MAX_DISPATCHES" >/dev/null
+  gcloud tasks queues update "$QUEUE" --location="$REGION" --max-concurrent-dispatches="$TASKS_MAX_DISPATCHES" "${CHUNK_QUEUE_RETRY[@]}" >/dev/null
   echo "==> tasks queue $QUEUE: max-concurrent-dispatches $TASKS_MAX_DISPATCHES"
 fi
 if [ "$BULK_QUEUE_EXISTS" = 1 ]; then
-  gcloud tasks queues update "$BULK_QUEUE" --location="$REGION" --max-concurrent-dispatches="$BULK_QUEUE_SLOTS" >/dev/null
+  gcloud tasks queues update "$BULK_QUEUE" --location="$REGION" --max-concurrent-dispatches="$BULK_QUEUE_SLOTS" "${CHUNK_QUEUE_RETRY[@]}" >/dev/null
   echo "==> tasks queue $BULK_QUEUE: max-concurrent-dispatches $BULK_QUEUE_SLOTS"
 fi
 

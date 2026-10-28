@@ -347,8 +347,9 @@ if gcloud tasks queues describe "$QUEUE" --location="$REGION" --project="$PROJEC
   skip "tasks queue $QUEUE"
 else
   create "tasks queue $QUEUE"
+  # Spec 17 G4: the chunk retry of deploy.sh's CHUNK_QUEUE_RETRY (deploy.sh also applies it to an existing queue).
   gcloud tasks queues create "$QUEUE" --project="$PROJECT" --location="$REGION" \
-    --max-concurrent-dispatches=20 --max-attempts=5 --min-backoff=10s >/dev/null
+    --max-concurrent-dispatches=20 --max-attempts=-1 --max-retry-duration=1800s --min-backoff=10s --max-backoff=60s --max-doublings=3 >/dev/null
 fi
 if gcloud tasks queues describe "$INGEST_QUEUE" --location="$REGION" --project="$PROJECT" >/dev/null 2>&1; then
   skip "tasks queue $INGEST_QUEUE"
