@@ -50,6 +50,7 @@ import { handlePublishTask } from "./catalog/publish";
 import { handleFinalizeTask } from "./catalog/finalize";
 import { cannedQa, liveQaEnabled } from "./catalog/qa-mock";
 import { changeOnePixel } from "./catalog-real-fixtures";
+import { parseArgs } from "./catalog-output-evals-args";
 
 const USAGE = `Usage: catalog:output-evals <command>
   build-golden [--build <golden-build.json>] [--out <golden-manifest.json>] [--root name=path ...]
@@ -63,18 +64,6 @@ const FIXTURES = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../
 /** Every direct storage call of the eval path retries transient network errors (five attempts). */
 const gcs = withEvalRetry(storage);
 
-function parseArgs(argv: string[]) {
-  const words: string[] = [], flags: Record<string, string | string[] | true> = {};
-  for (let i = 0; i < argv.length; i++) {
-    const a = argv[i]!;
-    if (!a.startsWith("--")) { words.push(a); continue; }
-    const key = a.slice(2), next = argv[i + 1];
-    const value: string | true = next === undefined || next.startsWith("--") ? true : (i++, next);
-    const prior = flags[key];
-    flags[key] = prior === undefined ? value : [...(Array.isArray(prior) ? prior : [String(prior)]), String(value)];
-  }
-  return { words, flags };
-}
 const str = (v: string | string[] | true | undefined) => (typeof v === "string" ? v : undefined);
 const print = (value: unknown) => console.info(typeof value === "string" ? value : JSON.stringify(value, null, 2));
 const runId = () => `${new Date().toISOString().replace(/[-:T]/g, "").slice(0, 14)}-${randomUUID().slice(0, 6)}`;

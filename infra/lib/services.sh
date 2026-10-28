@@ -141,7 +141,7 @@ probe_get() {
 # never keeps running (and billing) on the candidate (2026-10-28: it ran on for 20 minutes).
 probe_matting() {
   local timeout=$1 models=$2 concurrency=$3 rounds=$4 url=$5
-  PROBE_TASK_TIMEOUT=$timeout bash infra/check-matting.sh --probe "$url" --models "$models" --concurrency "$concurrency" --rounds "$rounds"
+  PROBE_TASK_TIMEOUT=$timeout bash infra/check-matting.sh --probe "$url" --models="$models" --concurrency="$concurrency" --rounds="$rounds"
 }
 
 # /health on the worker candidate, then the tier 5 smoke against the candidates of this deploy.

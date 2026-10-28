@@ -52,7 +52,8 @@ try {
   gpuImage('def5678');
   const probe = run(['--probe', tagUrl, '--models', 'bria-rmbg', '--concurrency', '2', '--rounds', '3']);
   assert.equal(probe.status, 0, probe.stderr);
-  assert.deepEqual(probe.flags['--args'], ['-c', script, '--probe', tagUrl, '--models', 'bria-rmbg', '--concurrency', '2', '--rounds', '3']);
+  // One --option=value item per option: gcloud refuses a repeated item in --args (see the next case).
+  assert.deepEqual(probe.flags['--args'], ['-c', script, '--probe', tagUrl, '--models=bria-rmbg', '--concurrency=2', '--rounds=3']);
   assert.equal(probe.flags['--task-timeout'], '3600s');
   assert.equal(probe.flags['--image'], `${ar}matting:abc1234`);
   assert.match(probe.calls, /run jobs deploy catalog-check-matting/);
@@ -65,6 +66,10 @@ try {
     const gated = run(['--probe', tagUrl, '--models', 'birefnet-general', '--concurrency', '1', '--rounds', '1']);
     assert.equal(gated.status, 0, gated.stderr);
     assert.equal(gated.flags['--task-timeout'], '420s');
+    // The CPU gate's probe (services.sh): "1" twice made gcloud refuse the job on 2026-10-28. Every item is unique.
+    const args = gated.flags['--args'];
+    assert.deepEqual(args.slice(2), ['--probe', tagUrl, '--models=birefnet-general', '--concurrency=1', '--rounds=1']);
+    assert.equal(new Set(args).size, args.length);
     process.env.PROBE_TASK_TIMEOUT = '7m';
     const bad = run(['--probe', tagUrl]);
     assert.notEqual(bad.status, 0);
@@ -72,7 +77,31 @@ try {
   } finally {
     delete process.env.PROBE_TASK_TIMEOUT;
   }
-  console.log('PASS a gated probe job times out with the gate');
+  console.log('PASS a gated probe job times out with the gate and passes repeated values as unique items');
+
+  // The form the gate passes (--option=value, services.sh), a model list as one item (a flags-file list is not split
+  // on commas) and the URL after the options: the URL still goes first, each option once.
+  const listed = run(['--probe', '--models=birefnet-general,bria-rmbg', '--rounds=1', '--concurrency', '1', tagUrl]);
+  assert.equal(listed.status, 0, listed.stderr);
+  assert.deepEqual(listed.flags['--args'].slice(2), ['--probe', tagUrl, '--models=birefnet-general,bria-rmbg', '--rounds=1', '--concurrency=1']);
+  console.log('PASS --option=value, a model list and a trailing URL keep one item each');
+
+  // Anything that could repeat an item or that the probe would refuse only after a job deploy is refused before gcloud.
+  for (const [args, error] of [
+    [['--probe', tagUrl, '--rounds', '1', '--rounds', '2'], /the probe option --rounds is given twice/],
+    [['--probe', tagUrl, '--rounds=1', '--rounds', '1'], /the probe option --rounds is given twice/],
+    [['--probe', tagUrl, '--models', '--rounds', '1'], /--models needs a value/],
+    [['--probe', tagUrl, '--rounds'], /--rounds needs a value/],
+    [['--probe', tagUrl, '--conc', '1'], /unknown probe option --conc/],
+    [['--probe', tagUrl, tagUrl], /one probe URL only/],
+    [['--probe', '--rounds', '1'], /usage: .* --probe <url>/],
+  ]) {
+    const refused = run(args);
+    assert.equal(refused.status, 2, args.join(' '));
+    assert.match(refused.stderr, error);
+    assert.equal(refused.calls, '');
+  }
+  console.log('PASS repeated, unknown or valueless probe options are refused before gcloud');
 
   gpuImage('abc1234');
   const check = run([]);

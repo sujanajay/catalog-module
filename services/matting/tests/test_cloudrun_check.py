@@ -220,6 +220,14 @@ def test_probe_asks_for_a_token_for_the_service_audience(monkeypatch):
     assert code == 0 and seen == ["https://svc-abc.a.run.app"]
 
 
+def test_probe_reads_the_option_equals_value_items_the_job_passes():
+    # infra/check-matting.sh sends each option as one --option=value item (gcloud refuses a repeated item in --args).
+    args = probe.parse_probe_args(["--probe", "https://candidate---svc-abc.a.run.app", "--models=birefnet-general,bria-rmbg",
+                                   "--concurrency=1", "--rounds=1"])
+    assert args.models == ["birefnet-general", "bria-rmbg"] and args.concurrency == 1 and args.rounds == 1
+    assert args.url == "https://candidate---svc-abc.a.run.app"
+
+
 @pytest.mark.parametrize("args", [["--models", "u2net"], ["--concurrency", "0"], ["--rounds", "500"], ["--run", "../escape"]])
 def test_probe_refuses_bad_arguments(args):
     with pytest.raises(probe.CheckFailure):

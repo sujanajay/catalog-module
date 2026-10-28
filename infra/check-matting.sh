@@ -2,7 +2,7 @@
 # Runtime check of the deployed matting services, run as the Cloud Run job catalog-check-matting.
 #   bash infra/check-matting.sh
 #       checks the CPU and GPU services the worker uses (OIDC, /health, /convert, /matte).
-#   bash infra/check-matting.sh --probe <url> [--models a,b] [--concurrency n] [--rounds k]
+#   bash infra/check-matting.sh --probe <url> [--models a,b] [--concurrency n] [--rounds k] [--run name]
 #       spec 17 3.3.1: measures one service URL (usually the GPU candidate's tag URL) with
 #       services/matting/tests/cloudrun_check.py --probe: per model a warm 1024 px call, then n calls at once for
 #       k rounds, then the switching order. Prints the table and writes the JSON report to
@@ -10,11 +10,33 @@
 set -euo pipefail
 export CLOUDSDK_CORE_PROJECT=image-links-agent
 cd "$(dirname "$0")/.."
+# The probe's arguments for the job's --args. gcloud treats --args as a set: it refuses any item that appears twice,
+# also in a --flags-file list (UpdateAction in googlecloudsdk/calliope/arg_parsers.py), so "--concurrency 1 --rounds 1"
+# failed the deploy gate on 2026-10-28 with '"1" cannot be specified multiple times'. Each option therefore travels
+# as one "--option=value" item (argparse in cloudrun_check.py reads it the same way), each option at most once, and
+# the URL once: every item is unique by construction. Anything else is refused here, before any gcloud call.
 PROBE_ARGS=()
 if [ "${1:-}" = "--probe" ]; then
   shift
-  [ $# -ge 1 ] || { echo "usage: $0 --probe <url> [--models a,b] [--concurrency n] [--rounds k]" >&2; exit 2; }
-  PROBE_ARGS=(--probe "$@")
+  usage="usage: $0 --probe <url> [--models a,b] [--concurrency n] [--rounds k] [--run name]"
+  [ $# -ge 1 ] || { echo "$usage" >&2; exit 2; }
+  url="" seen=" " options=()
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --models|--concurrency|--rounds|--run)
+        [ $# -ge 2 ] && [[ $2 != --* ]] || { echo "ERROR: $1 needs a value" >&2; echo "$usage" >&2; exit 2; }
+        name=$1 value=$2; shift 2 ;;
+      --models=*|--concurrency=*|--rounds=*|--run=*) name=${1%%=*} value=${1#*=}; shift ;;
+      -*) echo "ERROR: unknown probe option $1" >&2; echo "$usage" >&2; exit 2 ;;
+      *) [ -z "$url" ] || { echo "ERROR: one probe URL only (got $url and $1)" >&2; exit 2; }
+         url=$1; shift; continue ;;
+    esac
+    [[ $seen != *" $name "* ]] || { echo "ERROR: the probe option $name is given twice" >&2; exit 2; }
+    seen+="$name "
+    options+=("$name=$value")
+  done
+  [ -n "$url" ] || { echo "$usage" >&2; exit 2; }
+  PROBE_ARGS=(--probe "$url" ${options[@]+"${options[@]}"})
 fi
 TEMP_DIR=$(mktemp -d)
 trap 'rm -f "$TEMP_DIR/worker.json" "$TEMP_DIR/cpu.json" "$TEMP_DIR/gpu.json" "$TEMP_DIR/flags.json" "$TEMP_DIR/probe.json"; rmdir "$TEMP_DIR"' EXIT
