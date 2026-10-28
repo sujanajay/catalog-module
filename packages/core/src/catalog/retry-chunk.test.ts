@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { CHUNK_RETRY_BUDGET_MS, COLD_START_BUDGET_MS, retryDelayMs, runUntilSettled, waitForCutOutDefault } from "./retry-chunk";
+import { CHUNK_RETRY_BUDGET_MS, COLD_START_BUDGET_MS, cutOutReadyBudgetMs, retryDelayMs, runUntilSettled, waitForCutOutDefault } from "./retry-chunk";
 
 /** A fake clock whose sleep advances time, so the budgets are exercised without waiting. */
 function fakeClock() {
@@ -62,7 +62,26 @@ describe("waitForCutOutDefault", () => {
 
   it("fails after 5 minutes without a default", async () => {
     const clock = fakeClock();
-    await expect(waitForCutOutDefault({ health: async () => ({ default: "" }) }, clock)).rejects.toThrow(/did not report a default within 300 seconds/);
+    await expect(waitForCutOutDefault({ health: async () => ({ default: "" }) }, clock)).rejects.toThrow(/the cut-out service did not become ready within 300 seconds/);
     expect(clock.now()).toBeLessThanOrEqual(COLD_START_BUDGET_MS);
+  });
+
+  it("cuts off a health call that hangs at the ceiling instead of waiting on it", async () => {
+    const started = Date.now();
+    const hung = { health: () => new Promise<{ default: string }>(() => {}) };
+    await expect(waitForCutOutDefault(hung, { budgetMs: 50, log: vi.fn() })).rejects.toThrow(/the cut-out service did not become ready within 0 seconds \(health check still running at the ceiling\)/);
+    expect(Date.now() - started).toBeLessThan(5_000);
+  });
+});
+
+describe("cutOutReadyBudgetMs", () => {
+  it("is 300 s by default and SMOKE_CUTOUT_READY_MS when set", () => {
+    expect(cutOutReadyBudgetMs({})).toBe(300_000);
+    expect(cutOutReadyBudgetMs({ SMOKE_CUTOUT_READY_MS: "" })).toBe(300_000);
+    expect(cutOutReadyBudgetMs({ SMOKE_CUTOUT_READY_MS: "120000" })).toBe(120_000);
+  });
+
+  it("refuses a value that is not a positive whole number", () => {
+    for (const bad of ["0", "-1", "5m", "1.5"]) expect(() => cutOutReadyBudgetMs({ SMOKE_CUTOUT_READY_MS: bad })).toThrow(/SMOKE_CUTOUT_READY_MS must be a whole number/);
   });
 });

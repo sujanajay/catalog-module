@@ -54,8 +54,21 @@ export async function runUntilSettled<T extends TaskResult>(
 }
 
 /**
+ * The smoke's ceiling on the cut-out readiness wait (spec 17 3.2.4): SMOKE_CUTOUT_READY_MS, default 300 s.
+ * Throws on anything but a positive whole number, so a typo never turns into an endless wait.
+ */
+export function cutOutReadyBudgetMs(env: Record<string, string | undefined> = process.env): number {
+  const raw = env.SMOKE_CUTOUT_READY_MS;
+  if (raw === undefined || raw === "") return COLD_START_BUDGET_MS;
+  if (!/^[1-9][0-9]*$/.test(raw)) throw new Error(`SMOKE_CUTOUT_READY_MS must be a whole number of milliseconds, got "${raw}".`);
+  return Number(raw);
+}
+
+/**
  * Polls the cut-out services' health until they report a default model, with the same backoff, so
- * a cold start is waited out once before the first chunk and its duration shows in the log.
+ * a cold start is waited out once before the first chunk and its duration shows in the log. The
+ * budget is a hard ceiling: a health call still running at the budget is cut off too, so the wait
+ * never outlives it.
  */
 export async function waitForCutOutDefault(matting: { health(): Promise<{ default: string }> }, opts: RetryClock = {}): Promise<number> {
   const now = opts.now ?? Date.now, sleep = opts.sleep ?? realSleep, log = opts.log ?? defaultLog;
@@ -64,7 +77,12 @@ export async function waitForCutOutDefault(matting: { health(): Promise<{ defaul
   for (let retry = 0; ; retry++) {
     let reason: string | undefined;
     try {
-      if ((await matting.health()).default) {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const ceiling = new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error("health check still running at the ceiling")), Math.max(0, budget - (now() - started)));
+      });
+      const health = await Promise.race([matting.health(), ceiling]).finally(() => clearTimeout(timer));
+      if (health.default) {
         const elapsedMs = now() - started;
         log("cut-out service warm", { elapsedMs, checks: retry + 1 });
         return elapsedMs;
@@ -72,7 +90,7 @@ export async function waitForCutOutDefault(matting: { health(): Promise<{ defaul
       reason = "no default reported yet";
     } catch (error) { reason = error instanceof Error ? error.message : String(error); }
     const waitMs = retryDelayMs(retry), elapsedMs = now() - started;
-    if (elapsedMs + waitMs > budget) throw new Error(`The cut-out service did not report a default within ${Math.round(budget / 1000)} seconds (${reason}).`);
+    if (elapsedMs + waitMs > budget) throw new Error(`Smoke stopped: the cut-out service did not become ready within ${Math.round(budget / 1000)} seconds (${reason}).`);
     log("cut-out service not warm yet", { check: retry + 1, reason, waitMs, elapsedMs });
     await sleep(waitMs);
   }

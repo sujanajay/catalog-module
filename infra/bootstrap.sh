@@ -399,6 +399,9 @@ for SA in "$WEB" "$WORKER"; do
 done
 secret_binding "$OPENROUTER_SECRET" "serviceAccount:$WORKER" roles/secretmanager.secretAccessor
 project_binding "serviceAccount:$WORKER" roles/run.invoker
+# Spec 17 G1: the Ops page reads Cloud Run service status (the GPU candidate revision). Project level, because
+# resource-level IAM on Cloud Run services may be denied (AGENTS.md). Read only.
+project_binding "serviceAccount:$WEB" roles/run.viewer
 
 sa_binding "$WEB" "serviceAccount:$WEB" roles/iam.serviceAccountTokenCreator
 # The catalog-eval job (contact-sheet, report) runs as catalog-worker@ and signs URLs through signBlob.

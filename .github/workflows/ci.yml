@@ -17,9 +17,10 @@ jobs:
       - run: pnpm lint
       - run: pnpm typecheck
       - run: pnpm test
-      # Offline infra tests (shape refusals, the check-matting probe, monitoring, ...): bash and node only, no GCP.
+      # Offline infra tests (fake gcloud, no GCP): the deploy gate, shape refusals, the check-matting probe,
+      # monitoring, queue names. Any failing file fails the step.
       - name: Infra tests
-        run: for t in infra/tests/*.test.mjs; do echo "== $t"; node "$t"; done
+        run: for t in infra/tests/*.test.mjs; do echo "== $t"; node "$t" || exit 1; done
       # Matting service tests with mocked inference; the image builds run them too, here they run on every PR.
       # rembg and onnxruntime are left out (the tests stub both); every other pin comes from requirements-cpu.txt.
       - uses: actions/setup-python@v5

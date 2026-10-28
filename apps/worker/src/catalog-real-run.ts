@@ -14,7 +14,7 @@ import { batchPrefix, productPrefix, assertTestPrefix } from "@catalog/core/cata
 import { lockProducts } from "@catalog/core/catalog/products";
 import { planChunks } from "@catalog/core/catalog/pipeline/plan-chunks";
 import { cleanupTestBatches } from "@catalog/core/catalog/test-cleanup";
-import { runUntilSettled, waitForCutOutDefault } from "@catalog/core/catalog/retry-chunk";
+import { cutOutReadyBudgetMs, runUntilSettled, waitForCutOutDefault } from "@catalog/core/catalog/retry-chunk";
 import { pinnedFetch } from "@catalog/core/safe-url";
 import { PUBLIC_CACHE_WINDOW_MS } from "@catalog/core/catalog/pipeline/verify";
 import * as storage from "@catalog/core/storage";
@@ -52,8 +52,9 @@ export async function runRealFixture(db: Db, fixture: RealFixture, out: string, 
   const snapshots: { label: string; rows: CatalogOutput[] }[] = [];
   let failure: unknown;
   try {
-    // The stack scales to zero; wait out a cold cut-out service once before the first chunk.
-    await waitForCutOutDefault(base.matting);
+    // The stack scales to zero; wait out a cold cut-out service once before the first chunk, at most
+    // SMOKE_CUTOUT_READY_MS (300 s by default), so a broken cut-out service fails the smoke instead of hanging it.
+    await waitForCutOutDefault(base.matting, { budgetMs: cutOutReadyBudgetMs() });
     const first = await batch(fixture.shots, fixture.urls, [...CHANNEL_IDS], "first");
     const original = await live(first);
     const pairs = await db.select().from(catalogBatchProducts).where(eq(catalogBatchProducts.batchId, first.id));
