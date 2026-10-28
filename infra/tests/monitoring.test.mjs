@@ -295,7 +295,16 @@ try {
         seen++;
       });
     }
-    assert.equal(seen, 9, 'deploy commands found');
+    assert.equal(seen, 5, 'job deploy commands found');
+    // Spec 17: the services deploy through the gate, with their flags in the registry (infra/lib/services.sh).
+    const registry = fs.readFileSync(path.join(infra, 'lib/services.sh'), 'utf8');
+    for (const [fn, component] of [['catalog_matting', 'matte'], ['catalog_matting_gpu', 'matte-gpu'], ['catalog_worker', 'worker'], ['catalog_web', 'web']]) {
+      const start = registry.indexOf(`service_${fn}() {`);
+      assert.ok(start >= 0, `services.sh: service_${fn} missing`);
+      const body = registry.slice(start, registry.indexOf('\n}\n', start));
+      assert.ok(body.includes(`--labels=app=catalog,component=${component}`), `services.sh: ${fn} lacks component=${component}`);
+      seen++;
+    }
     assert.match(fs.readFileSync(path.join(infra, 'check-matting.sh'), 'utf8'), /'--labels': \{ app: 'catalog', component: 'job' \}/);
     assert.match(fs.readFileSync(path.join(infra, 'catalog-test-jobs.sh'), 'utf8'), /labels:\{app:'catalog',component:'job'\}/);
     console.log('PASS labels on ' + seen + ' deploy commands plus check-matting and catalog-test-jobs');

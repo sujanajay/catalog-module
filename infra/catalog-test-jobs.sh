@@ -5,6 +5,10 @@
 # "smoke", which needs only the worker image. "invariants" prepares the job catalog-invariants (spec 17
 # 3.1.3): the same checks the sweep runs every 10 minutes, on demand, with the worker image
 # (gcloud run jobs execute catalog-invariants --region=asia-south1 [--update-env-vars=INVARIANTS_BATCH=<id>]).
+# Spec 17 3.2.4: the smoke tests the candidates of the deploy in progress. When MATTING_URL is set, the job takes
+# MATTING_URL, MATTING_GPU_URL (empty: no GPU) and WORKER_URL from the environment (the tag URLs infra/deploy.sh's
+# gate passes); only when run by hand without them does it copy the matting URLs from the deployed catalog-worker.
+# The smoke job's timeout is 1500 s (spec 17 3.2.4), inside the worker gate's 1800 s probe timeout.
 set -euo pipefail
 export CLOUDSDK_CORE_PROJECT=image-links-agent
 cd "$(dirname "$0")/.."
@@ -26,13 +30,21 @@ tmp_dir=$(mktemp -d)
 trap 'rm -f -- "$tmp_dir/worker.json" "$tmp_dir/smoke.json" "$tmp_dir/real.json" "$tmp_dir/cleanup.json" "$tmp_dir/invariants.json" "$tmp_dir/existing.json"; rmdir "$tmp_dir"' EXIT
 # Environment references only. Mounted DB credentials are never read locally.
 gcloud run services describe catalog-worker --region=asia-south1 --format=json > "$tmp_dir/worker.json"
-node --input-type=commonjs - "$tmp_dir" "$TAG" "$CATALOG_TEST_RUN" $JOBS <<'NODE'
+SMOKE_URLS_FROM_ENV=0
+if [ -n "${MATTING_URL:-}" ]; then SMOKE_URLS_FROM_ENV=1; fi
+node --input-type=commonjs - "$tmp_dir" "$TAG" "$CATALOG_TEST_RUN" "$SMOKE_URLS_FROM_ENV" "${MATTING_URL:-}" "${MATTING_GPU_URL:-}" "${WORKER_URL:-}" $JOBS <<'NODE'
 const fs=require('node:fs'),assert=require('node:assert/strict');
-const [dir,tag,run,...kinds]=process.argv.slice(2);
+const [dir,tag,run,fromEnv,mattingUrl,mattingGpuUrl,workerUrl,...kinds]=process.argv.slice(2);
 const worker=JSON.parse(fs.readFileSync(`${dir}/worker.json`));
 const source=worker.spec.template.spec.containers[0].env;
-const names=['GCP_PROJECT','REGION','BUCKET','PUBLIC_BUCKET','DB_HOST','DB_NAME','DB_USER','MATTING_URL','MATTING_GPU_URL'];
-const env=source.filter(e=>names.includes(e.name));
+const urlNames=['MATTING_URL','MATTING_GPU_URL','WORKER_URL'];
+const names=['GCP_PROJECT','REGION','BUCKET','PUBLIC_BUCKET','DB_HOST','DB_NAME','DB_USER',...urlNames];
+const env=source.filter(e=>names.includes(e.name) && (fromEnv!=='1' || !urlNames.includes(e.name)));
+if(fromEnv==='1') {
+  for(const [name,value] of [['MATTING_URL',mattingUrl],['MATTING_GPU_URL',mattingGpuUrl],['WORKER_URL',workerUrl]]) {
+    if(value) { assert.match(value,/^https:\/\/[a-z0-9.-]+\.run\.app$/,`${name} must be a Cloud Run URL`); env.push({name,value}); }
+  }
+}
 for(const name of names.filter(n=>n!=='MATTING_GPU_URL')) assert(env.find(e=>e.name===name && e.value),`Missing worker ${name}`);
 const password=source.find(e=>e.name==='DB_PASSWORD');
 assert.equal(password?.valueFrom?.secretKeyRef?.name,'catalog-db-password');
@@ -47,7 +59,8 @@ for(const kind of kinds) {
   const command=test?['/bin/sh']:['node'];
   const args=kind==='invariants'?['dist/catalog-invariants.js']:test?['-ec',`mkdir -p /tmp/catalog-data; tar -xf /catalog-input/anta.tar -C /tmp/catalog-data; tar -xf /catalog-input/french-connection.tar -C /tmp/catalog-data; ${kind==='real'?"exec pnpm test:real -t 'anta:'":"exec node dist/catalog-smoke.js"}`]:['dist/catalog-smoke.js','--cleanup-batches'];
   const container={image,command,args,resources:{limits:{cpu:'2',memory:'4Gi'}},env:[...env]};
-  const task={serviceAccountName:'catalog-worker@image-links-agent.iam.gserviceaccount.com',maxRetries:0,timeoutSeconds:kind==='real'?'10800':kind==='invariants'?'600':'3600',containers:[container]};
+  const timeoutSeconds={real:'10800',invariants:'600',smoke:'1500'}[kind]??'3600';
+  const task={serviceAccountName:'catalog-worker@image-links-agent.iam.gserviceaccount.com',maxRetries:0,timeoutSeconds,containers:[container]};
   if(test) {
     container.env.push({name:'REAL_DATA_DIR',value:'/tmp/catalog-data'},{name:'CATALOG_REAL_OUT',value:'/catalog-evidence'},{name:'REAL_DATA',value:'1'});
     container.volumeMounts=[{name:'input',mountPath:'/catalog-input'},{name:'evidence',mountPath:'/catalog-evidence'}];

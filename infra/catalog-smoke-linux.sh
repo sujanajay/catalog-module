@@ -12,7 +12,7 @@ const assert=require('node:assert/strict');
 const [tag,json]=process.argv.slice(2),job=JSON.parse(json),spec=job.spec.template.spec,task=spec.template.spec;
 assert.equal(task.containers.length,1);
 assert.equal(task.containers[0].image,`asia-south1-docker.pkg.dev/image-links-agent/apps/worker:${tag}`,'Smoke job must use the exact current commit image.');
-assert.equal(spec.taskCount,1);assert.equal(spec.parallelism,1);assert.equal(task.maxRetries,0);assert.equal(Number(task.timeoutSeconds),3600);
+assert.equal(spec.taskCount,1);assert.equal(spec.parallelism,1);assert.equal(task.maxRetries,0);assert.equal(Number(task.timeoutSeconds),1500);
 assert.equal(task.serviceAccountName,'catalog-worker@image-links-agent.iam.gserviceaccount.com');
 assert.deepEqual(task.containers[0].command,['/bin/sh']);
 assert.deepEqual(task.containers[0].args,['-ec','mkdir -p /tmp/catalog-data; tar -xf /catalog-input/anta.tar -C /tmp/catalog-data; tar -xf /catalog-input/french-connection.tar -C /tmp/catalog-data; exec node dist/catalog-smoke.js'],'The job must run the actual smoke entry.');

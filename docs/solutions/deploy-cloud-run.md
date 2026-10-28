@@ -16,8 +16,8 @@ The worker is unaffected because it ships real node_modules via `pnpm deploy --p
 ## Redeploy and "Setting IAM Policy"
 `gcloud run deploy --no-allow-unauthenticated` re-applies service-level IAM on every deploy.
 deploy.sh passes `--no-allow-unauthenticated` only when the service does not exist yet and
-`--invoker-iam-check` afterwards (keeps the service private without touching IAM). Both
-`catalog-worker` and `catalog-web` use this `auth_flag` pattern.
+`--invoker-iam-check` afterwards (keeps the service private without touching IAM). Every service
+in the registry gets this through the deploy gate (`gate_deploy_args` in `infra/lib/gate.sh`).
 
 ## The real cause of the earlier "hang": an interactive prompt
 `gcloud run deploy --iap` needs `cloudresourcemanager.googleapis.com`; when it is disabled gcloud asks
@@ -30,7 +30,9 @@ The operator roles (roles/editor + projectIamAdmin + serviceAccountAdmin) may no
 resource-level IAM on Cloud Run services. Grants that would normally sit on a service are made at
 project level instead (for example `roles/run.invoker` for `catalog-worker@`, used for matting and
 Cloud Scheduler calls). From 03, the `domain:opptra.com` IAP access grant is tried at resource level
-first and falls back to project level with a WARN line.
+first and falls back to project level with a WARN line. Spec 17 G1 (2026-10-28): `catalog-web@` gets
+`roles/run.viewer` at project level (infra/bootstrap.sh, `project_binding`), read only, so the Ops page
+can read Cloud Run service status and show the GPU candidate revision.
 
 ## Windows / Git Bash
 - Run the scripts from Git Bash: `bash infra/deploy.sh` in the repo root.
@@ -63,6 +65,74 @@ deploy.sh reads the address of type `PRIVATE` from `gcloud sql instances describ
 (`ipAddresses.filter("type:PRIVATE")`), not `ipAddresses[0]`: with a public IP enabled the first
 entry is the public one, which the services cannot reach with `--vpc-egress=private-ranges-only`.
 
+## The deploy gate (spec 17 G2, 2026-10-28)
+Why: on 2026-10-27 the smoke ran before any service was updated and copied the matting URLs from the
+old worker, so it tested the old GPU revision; the broken GPU shape reached production traffic, and
+the next deploy's smoke waited on the broken service for up to 3600 s, so the rollback had to bypass
+deploy.sh. A lesson in a document is not a guard; these are the guards.
+
+- Registry: `infra/lib/services.sh` lists the services in deploy order (`catalog-matting`,
+  `catalog-matting-gpu`, `catalog-worker`, `catalog-web`). Each has one `service_<name>` function
+  (region, image, flags, env, probe, probe timeout) and one probe. Adding a service is one name in
+  `SERVICES`, one function and one probe; deploy.sh changes only when another service must read
+  the new one's URL (as the worker reads the matting URLs).
+- Gate: `deploy_service <name>` in `infra/lib/gate.sh` deploys a no-traffic revision tagged
+  `candidate`, reads its tag URL from `status.traffic[].url` where `tag=candidate`, runs the probe
+  against that URL under a hard timeout (GPU 600 s, worker 1800 s, others 300 s), and only then
+  tags the outgoing revision `previous` and moves all traffic to exactly the probed revision
+  (`--to-revisions <candidate>=100`, never `--to-latest`, which could hand traffic to a revision
+  created meanwhile that no probe saw), printing `==> <name>: live (<revision>)`. On a failed
+  probe the traffic stays where it was, the probe output is printed with the line
+  `gcloud run services update-traffic <name> --to-revisions <previous>=100`, and deploy.sh stops;
+  later services are not touched, and services this run already moved are listed with their
+  `--rollback` commands.
+- Probes: matting services run `infra/check-matting.sh --probe` (spec 17 G3) with the shape's
+  models and concurrency; the worker probe is `/health` on the tag URL, then the tier 5 smoke with
+  the matting and worker tag URLs (`infra/catalog-test-jobs.sh` takes `MATTING_URL`,
+  `MATTING_GPU_URL` and `WORKER_URL` from the environment when set); the web probe is `/health`
+  and `/` with the operator's identity token through IAP.
+- SKIP: a service whose live revision has the same image digest and the same plain env values is
+  not redeployed. The env carries `DEPLOY_ARGS_SHA`, a hash of every other deploy flag, so a change
+  to concurrency, CPU or instances alone is still deployed. When a matting service changed, the
+  worker is never SKIP, so the smoke always runs against new matting revisions.
+- Queue slots for the worker are set right after the worker gate passes, so a later web failure
+  never leaves them on the old values.
+- The smoke never hangs on a broken cut-out service: `SMOKE_CUTOUT_READY_MS` (default 300000) is a
+  hard ceiling on the readiness wait, past it the smoke fails with "the cut-out service did not
+  become ready", and the smoke job's own timeout is 1500 s (was 3600 s).
+- Preview: `CATALOG_PREVIEW=1` builds the GPU image too and deploys it as a no-traffic candidate of
+  `catalog-matting-gpu` (probed, never shifted) under its own tag `preview-<sha>`, so a later deploy
+  that moves `candidate` never changes what the preview worker calls; the preview worker calls that
+  tag URL.
+  A preview that needs the GPU image builds with `cloudbuild.yaml` instead of
+  `infra/cloudbuild-preview.yaml`.
+- GPU knobs (spec 17 3.3.2): `CUDNN_CONV_ALGO_SEARCH`, `CUDNN_CONV_USE_MAX_WORKSPACE` and
+  `INFERENCE_LOCK_SCOPE` reach `catalog-matting-gpu` only when set in the environment of the deploy
+  (unset: not passed, the service default), so a candidate rung can move one knob per deploy.
+- Jobs step: besides the QA, eval, scale and output-eval jobs, deploy.sh prepares the
+  `catalog-invariants` job (spec 17 G1) through `CATALOG_TEST_JOBS=invariants infra/catalog-test-jobs.sh`,
+  with the worker image and the live worker's service account, env and VPC. Deployed, never executed.
+- Offline proof: `node infra/tests/gate.test.mjs` (fake gcloud). CI runs every `infra/tests/*.test.mjs`.
+
+Cloud Run facts used (docs.cloud.google.com/run/docs/rollouts-rollbacks-traffic-migration, read
+2026-10-28): `gcloud run deploy --no-traffic --tag <tag>` gives the new revision its own URL
+`https://<tag>---<service>-<hash>.a.run.app` without serving traffic; a tag names one revision, so
+the next `--tag candidate` moves it and at most one candidate exists; `update-traffic
+--to-revisions <rev>=100` routes at once without new health checks. `--no-traffic` cannot be used
+when the service does not exist yet, so the gate creates a new service without it (there is nothing
+older to protect).
+
+Open on the first gated deploy (not verifiable offline): catalog-web now has `GET /health`
+(`{ok: true}`, no database call), but IAP must still accept the operator's identity token on the tag URL;
+the matting probes need `infra/check-matting.sh --probe` (spec 17 G3) and fail loudly until it
+exists; the worker smoke calls the matting tag URLs with an ID token whose audience is that tag URL.
+
 ## Rollback
-deploy.sh tags images with the git short SHA. To roll back, check out the previous commit and run
-`SKIP_BUILD=1 bash infra/deploy.sh`.
+One service, seconds, no build and no smoke: `bash infra/deploy.sh --rollback <service> [revision]`
+moves all traffic to the given revision, by default the one the gate tagged `previous` when it last
+moved traffic (the revision that served before; never a candidate that failed its probe). Without
+that tag it refuses and asks for a revision name. It runs
+`gcloud run services update-traffic <service> --to-revisions <revision>=100`.
+
+Code: deploy.sh tags images with the git short SHA. To roll back, check out the previous source and
+run `SKIP_BUILD=1 bash infra/deploy.sh` (safe now: the gate never hangs on a broken live service).

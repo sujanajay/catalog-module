@@ -1,22 +1,28 @@
 #!/usr/bin/env bash
-# Order: preflight checks, build the images on Cloud Build, run DB migrations as the catalog-migrate
-# Cloud Run job (additive; also seeds the first admin and the test brand test_brand), run the tier 5
-# per-brand smoke on the just-built worker image as the Cloud Run job catalog-test-smoke, then
-# deploy catalog-matting (CPU and GPU), catalog-worker and catalog-web (all private), IAP access,
-# CORS, the catalog-qa-check, catalog-eval, catalog-load and catalog-recheck jobs (same worker
-# image, deployed but not executed), print the URLs and set up the alerts (infra/monitoring.sh,
-# a failure there only warns). A failing smoke (any failed_compliance or overwrite assertion) stops the script before any service is updated. Migrations run before the
-# smoke because the new image's smoke needs the migrated schema and the seeded test brand.
-# Idempotent; re-run to ship a commit.
+# Order (spec 17 3.2.5): preflight checks and shape refusals, build the images on Cloud Build, run DB migrations as
+# the catalog-migrate Cloud Run job (additive; also seeds the first admin and the test brand test_brand), make sure
+# the task queues exist, then each service of the registry (infra/lib/services.sh: catalog-matting,
+# catalog-matting-gpu, catalog-worker, catalog-web, all private) through the deploy gate (infra/lib/gate.sh):
+# a no-traffic candidate, its probe against the candidate's tag URL, then the traffic shift. The worker's probe is
+# the tier 5 per-brand smoke (Cloud Run job catalog-test-smoke) on the new worker image against the new matting
+# candidates. A failing probe stops the script: that service keeps its live revision, later services are not
+# touched, and the rollback line is printed. Then queue slots, IAP access, CORS, the catalog-qa-check,
+# catalog-eval, catalog-load and catalog-recheck jobs (same worker image, deployed but not executed), the URLs and
+# the alerts (infra/monitoring.sh, a failure there only warns). Migrations run before the smoke because the new
+# image's smoke needs the migrated schema and the seeded test brand.
+# Idempotent; re-run to ship a commit (a service whose live revision has the same image digest and env is SKIP).
 # Run infra/bootstrap.sh first.
 #
 # Usage (Git Bash, from the repo root): bash infra/deploy.sh
+#        bash infra/deploy.sh --rollback <service> [revision]   all traffic back to the previous revision, seconds
 # Spec 16: the service shape (instances, CPU, queue slots, connection budget, GPU service, which service upscales)
 # is env with today's values as defaults; see infra/lib/shape.sh for the names and the F2 run values.
 # Env overrides: SKIP_BUILD=1 (reuse the images tagged with the current commit; also the rollback
 # path: check out an older commit and run SKIP_BUILD=1 bash infra/deploy.sh).
 # CATALOG_LOCAL_SMOKE=1 runs the smoke in-process on this machine instead of the Cloud Run job
 # (needs database and GCS access and REAL_DATA_DIR).
+# CATALOG_PREVIEW=1 (infra/deploy-preview.sh): the preview stack, plus the GPU service of this commit as a no-traffic
+# candidate of catalog-matting-gpu (probed, traffic never shifted) that the preview worker calls.
 set -euo pipefail
 
 PROJECT=image-links-agent
@@ -27,6 +33,18 @@ export CLOUDSDK_CORE_PROJECT=$PROJECT
 cd "$(dirname "$0")/.."
 
 gcv() { gcloud "$@" | tr -d '\r'; }
+
+# --- Rollback: one service back to its previous revision, no build, no smoke ------------------
+if [ "${1:-}" = --rollback ]; then
+  [ -n "${2:-}" ] || { echo "usage: bash infra/deploy.sh --rollback <service> [revision]" >&2; exit 2; }
+  # shellcheck source=lib/services.sh
+  source infra/lib/services.sh
+  # shellcheck source=lib/gate.sh
+  source infra/lib/gate.sh
+  rollback_service "$2" "${3:-}"
+  exit
+fi
+[ $# -eq 0 ] || { echo "usage: bash infra/deploy.sh | bash infra/deploy.sh --rollback <service> [revision]" >&2; exit 2; }
 
 TAG=$(git rev-parse --short HEAD)
 AR=$REGION-docker.pkg.dev/$PROJECT/apps
@@ -79,33 +97,7 @@ if [ -n "$(git status --porcelain)" ]; then
   exit 1
 fi
 
-# --- 2. Build ------------------------------------------------------------------------
-echo "==> build $TAG"
-if [ "${SKIP_BUILD:-0}" != 1 ]; then
-  IMAGES=(worker web)
-  if [ "${CATALOG_PREVIEW:-0}" != 1 ]; then IMAGES+=(matting matting-gpu); fi
-  BUILD_NEEDED=0
-  for image in "${IMAGES[@]}"; do
-    if IMAGE_CHECK=$(gcloud artifacts docker images describe "$AR/$image:$TAG" 2>&1); then
-      :
-    elif grep -qiE 'NOT_FOUND|not found|does not exist' <<<"$IMAGE_CHECK"; then
-      BUILD_NEEDED=1
-    else
-      printf '%s\n' "$IMAGE_CHECK" >&2
-      echo "ERROR: cannot check existing images; stopping before a paid build" >&2
-      exit 1
-    fi
-  done
-  if [ "$BUILD_NEEDED" = 1 ]; then
-    gcloud builds submit --config "$BUILD_CONFIG" --substitutions="_AR=$AR,_TAG=$TAG" .
-  else
-    echo "==> build: SKIP (images for $TAG already exist)"
-  fi
-else
-  echo "SKIP_BUILD=1: reusing worker, web, matting and matting-gpu images tagged $TAG"
-fi
-
-# --- 3. Environment ------------------------------------------------------------------
+# --- 2. Environment and shape refusals ------------------------------------------------
 ENV_VARS="GCP_PROJECT=$PROJECT,REGION=$REGION,BUCKET=image-links-agent-assets,PUBLIC_BUCKET=image-links-agent-public"
 ENV_VARS+=",DB_HOST=$DB_HOST,DB_NAME=catalog,DB_USER=catalog_app"
 ENV_VARS+=",TASKS_QUEUE=$QUEUE,WORKER_URL=$WORKER_URL,WORKER_SA_EMAIL=$WORKER_SA"
@@ -242,6 +234,35 @@ WORKER_SECRETS="$SECRETS,$OPENROUTER_SECRET_REF"
 JOB_SECRETS="$SECRETS,$OPENROUTER_SECRET_REF"
 NET=(--region="$REGION" --network=ila-vpc --subnet=ila-subnet --vpc-egress=private-ranges-only)
 
+# --- 3. Build (after every refusal above, so a shape that does not fit never pays for a build) ---
+echo "==> build $TAG"
+if [ "${SKIP_BUILD:-0}" != 1 ]; then
+  # The preview builds the GPU image too (spec 17 3.2.5: its GPU candidate); the CPU matting service is reused.
+  IMAGES=(worker web matting-gpu)
+  if [ "${CATALOG_PREVIEW:-0}" != 1 ]; then IMAGES+=(matting); fi
+  BUILD_NEEDED=0
+  for image in "${IMAGES[@]}"; do
+    if IMAGE_CHECK=$(gcloud artifacts docker images describe "$AR/$image:$TAG" 2>&1); then
+      :
+    elif grep -qiE 'NOT_FOUND|not found|does not exist' <<<"$IMAGE_CHECK"; then
+      BUILD_NEEDED=1
+      # infra/cloudbuild-preview.yaml builds only worker and web; the full build makes the GPU image as well.
+      if [ "$image" = matting-gpu ]; then BUILD_CONFIG=cloudbuild.yaml; fi
+    else
+      printf '%s\n' "$IMAGE_CHECK" >&2
+      echo "ERROR: cannot check existing images; stopping before a paid build" >&2
+      exit 1
+    fi
+  done
+  if [ "$BUILD_NEEDED" = 1 ]; then
+    gcloud builds submit --config "$BUILD_CONFIG" --substitutions="_AR=$AR,_TAG=$TAG" .
+  else
+    echo "==> build: SKIP (images for $TAG already exist)"
+  fi
+else
+  echo "SKIP_BUILD=1: reusing worker, web, matting and matting-gpu images tagged $TAG"
+fi
+
 # --- 4. Migrations -------------------------------------------------------------------
 echo "==> migrate"
 if [ "${CATALOG_PREVIEW:-0}" != 1 ]; then
@@ -263,95 +284,10 @@ else
   echo "==> migrate: SKIP (preview uses the existing schema)"
 fi
 
-# --- 5. Smoke gate (tier 5, from 06 on) --------------------------------------------
-# Runs on the just-built worker image before any service is updated; a non-zero exit stops the
-# deploy. The job never calls OpenRouter and writes only under catalog-test/.
-echo "==> smoke"
-if [ "${CATALOG_LOCAL_SMOKE:-0}" = 1 ]; then
-  pnpm --filter @catalog/worker build
-  pnpm catalog:smoke
-else
-  SMOKE_RUN=$(node -e 'console.log(require("crypto").randomUUID())')
-  CATALOG_TEST_RUN=$SMOKE_RUN CATALOG_TEST_JOBS=smoke bash infra/catalog-test-jobs.sh
-  bash infra/catalog-smoke-linux.sh
-  echo "==> smoke: passed (evidence: $ASSETS_BUCKET/catalog-test/smoke/linux-$SMOKE_RUN/smoke/)"
-fi
 
-# --no-allow-unauthenticated re-sets service IAM on every deploy; pass it only when creating the
-# service and --invoker-iam-check afterwards (keeps it private without touching IAM).
-# See docs/solutions/deploy-cloud-run.md.
-auth_flag() {
-  if gcloud run services describe "$1" --region="${2:-$REGION}" --format='value(metadata.name)' >/dev/null 2>&1; then
-    echo "--invoker-iam-check"
-  else
-    echo "--no-allow-unauthenticated"
-  fi
-}
-
-echo "==> matting CPU"
-# Spec 16 3.2.4: one resident cut-out model, and /upscale served (UPSCALE_CPU=1). The upscaler loads only when a
-# call comes, and calls come only when the worker's UPSCALE_URL names this service (UPSCALE_SERVICE=cpu), or from
-# the preview stack and the fidelity gate, so serving it costs nothing otherwise.
-if [ "${CATALOG_PREVIEW:-0}" != 1 ]; then
-  gcloud run deploy catalog-matting --quiet --image="$AR/matting:$TAG" \
-    --service-account="$MATTING_SA" --region="$REGION" "$(auth_flag catalog-matting "$REGION")" \
-    --cpu=4 --memory=16Gi --concurrency=1 --min-instances=0 --max-instances="$MATTING_CPU_MAX_INSTANCES" --timeout=300 \
-    --set-env-vars="MAX_RESIDENT_SESSIONS=1,UPSCALE_CPU=1" \
-    --labels=app=catalog,component=matte
-fi
-MATTING_URL=$(gcv run services describe catalog-matting --region="$REGION" --format='value(status.url)')
-[ -n "$MATTING_URL" ] || { echo "ERROR: CPU matting service has no URL" >&2; exit 1; }
-WORKER_ENV+=",MATTING_URL=$MATTING_URL"
-
-echo "==> matting GPU"
-# Spec 16 3.1: resident cut-out models and the CUDA arena cap per model.
-GPU_ENV="MAX_RESIDENT_SESSIONS=$MAX_RESIDENT_SESSIONS"
-if [ -n "$GPU_MEM_LIMIT_BYTES" ]; then GPU_ENV+=",GPU_MEM_LIMIT_BYTES=$GPU_MEM_LIMIT_BYTES"; fi
-# A failed update can leave an older service running. Only this successful deployment supplies
-# its URL; --set-env-vars below replaces the worker environment, clearing any stale GPU URL.
-MATTING_GPU_URL=""
-if [ "${CATALOG_PREVIEW:-0}" = 1 ]; then
-  # Reuse 05's existing matting endpoints; never change them from an unmerged preview.
-  # Read it from JSON: newer gcloud SDKs (589) reject the filter() transform in --format=value.
-  WORKER_JSON=$(gcv run services describe catalog-worker --region="$REGION" --format=json)
-  MATTING_GPU_URL=$(node -e '
-    const svc = JSON.parse(require("fs").readFileSync(0, "utf8"));
-    const env = svc?.spec?.template?.spec?.containers?.[0]?.env ?? [];
-    console.log(env.find((e) => e.name === "MATTING_GPU_URL")?.value ?? "");
-  ' <<<"$WORKER_JSON")
-  if [ -n "$MATTING_GPU_URL" ]; then WORKER_ENV+=",MATTING_GPU_URL=$MATTING_GPU_URL"; fi
-elif GPU_ERR=$(gcloud run deploy catalog-matting-gpu --quiet --image="$AR/matting-gpu:$TAG" \
-  --service-account="$MATTING_SA" --region="$GPU_REGION" "$(auth_flag catalog-matting-gpu "$GPU_REGION")" \
-  --gpu=1 --gpu-type=nvidia-l4 --no-gpu-zonal-redundancy --no-cpu-throttling \
-  --cpu="$GPU_CPU" --memory="$GPU_MEMORY" --concurrency="$GPU_CONCURRENCY" --min-instances=0 \
-  --max-instances="$GPU_MAX_INSTANCES" --timeout=300 --set-env-vars="$GPU_ENV" \
-  --labels=app=catalog,component=matte-gpu 2>&1); then
-  MATTING_GPU_URL=$(gcv run services describe catalog-matting-gpu --region="$GPU_REGION" --format='value(status.url)')
-  [ -n "$MATTING_GPU_URL" ] || { echo "ERROR: GPU matting service has no URL" >&2; exit 1; }
-  WORKER_ENV+=",MATTING_GPU_URL=$MATTING_GPU_URL"
-elif grep -qiE 'quota|RESOURCE_EXHAUSTED' <<<"$GPU_ERR"; then
-  printf '%s\n' "$GPU_ERR" >&2
-  echo "WARN: GPU quota refused; worker will use CPU. Request NVIDIA L4 (no zonal redundancy) quota in $GPU_REGION for project $PROJECT at https://console.cloud.google.com/iam-admin/quotas?project=$PROJECT" >&2
-else
-  printf '%s\n' "$GPU_ERR" >&2
-  echo "ERROR: GPU deployment failed for a reason other than quota; stopping" >&2
-  exit 1
-fi
-# Spec 11 4.5: the upscaler runs on the GPU service, so the flag reaches the worker only with a GPU URL.
-# Spec 16 3.1.3: with UPSCALE_SERVICE=cpu the CPU cut-out service upscales (it serves /upscale, above) and the worker
-# sends /upscale to it through UPSCALE_URL, so no GPU URL is needed.
-if [ "$UPSCALE_SERVICE" = cpu ]; then
-  if [ -n "$UPSCALE_MODEL" ]; then WORKER_ENV+=",UPSCALE_URL=$MATTING_URL"; fi
-elif [ -n "$UPSCALE_MODEL" ] && [ -z "$MATTING_GPU_URL" ]; then
-  echo "WARN: UPSCALE_MODEL=$UPSCALE_MODEL ignored: no GPU matting service URL; the render keeps the plain path" >&2
-  UPSCALE_MODEL=""
-fi
-if [ -n "$UPSCALE_MODEL" ]; then WORKER_ENV+=",UPSCALE_MODEL=$UPSCALE_MODEL"; WEB_ENV+=",UPSCALE_MODEL=$UPSCALE_MODEL"; fi
-
-# --- 6. Worker -----------------------------------------------------------------------
-echo "==> worker"
-# Check-then-create the queues the env points at: the ingest queue always, so a deploy never sends
-# ingest tasks to a missing queue, and the main queue on preview (bootstrap.sh makes it otherwise).
+# --- 5. Queues the new revisions will use ----------------------------------------------
+# Check-then-create the queues the env points at before any service can go live: the ingest queue always, so a
+# deploy never sends ingest tasks to a missing queue, and the main queue on preview (bootstrap.sh makes it otherwise).
 ENSURE_QUEUES="$QUEUE-ingest:$INGEST_MAX_DISPATCHES"
 [ "${CATALOG_PREVIEW:-0}" = 1 ] && ENSURE_QUEUES="$QUEUE:$TASKS_MAX_DISPATCHES $ENSURE_QUEUES"
 # gcloud 589 prints short queue names from list while older releases print the full
@@ -390,32 +326,79 @@ for Q in $ENSURE_QUEUES; do
       --max-concurrent-dispatches="${Q##*:}" "${RETRY[@]}" >/dev/null
   fi
 done
-gcloud run deploy "$WORKER_SERVICE" --quiet --image="$AR/worker:$TAG" --service-account="$WORKER_SA" \
-  "$(auth_flag "$WORKER_SERVICE")" --cpu="$WORKER_CPU" --memory="$WORKER_MEMORY" --concurrency="$WORKER_CONCURRENCY" \
-  --min-instances=0 --max-instances="$WORKER_MAX_INSTANCES" --timeout=900 "${NET[@]}" \
-  --set-secrets="$WORKER_SECRETS" --set-env-vars="$WORKER_ENV" --labels=app=catalog,component=worker
-if [ "${CATALOG_PREVIEW:-0}" != 1 ]; then
-  # Idempotent: keep the queue's parallelism equal to the worker's capacity (connection budget above).
-  gcloud tasks queues update "$QUEUE" --location="$REGION" --max-concurrent-dispatches="$TASKS_MAX_DISPATCHES" "${CHUNK_QUEUE_RETRY[@]}" >/dev/null
-  echo "==> tasks queue $QUEUE: max-concurrent-dispatches $TASKS_MAX_DISPATCHES"
-fi
-if [ "$BULK_QUEUE_EXISTS" = 1 ]; then
-  gcloud tasks queues update "$BULK_QUEUE" --location="$REGION" --max-concurrent-dispatches="$BULK_QUEUE_SLOTS" "${CHUNK_QUEUE_RETRY[@]}" >/dev/null
-  echo "==> tasks queue $BULK_QUEUE: max-concurrent-dispatches $BULK_QUEUE_SLOTS"
-fi
 
-# --- 7. Web --------------------------------------------------------------------------
-# Private (only IAP's service agent may invoke it; never --allow-unauthenticated) and behind IAP with
-# the Google-managed OAuth client: no OAuth client, consent screen or secret of ours.
-# MSYS2_ARG_CONV_EXCL: Git Bash would rewrite the "/projects/..." audience inside --set-env-vars into a
-# Windows path (C:/.../Git/projects/...). Excluding only that flag keeps the conversion the gcloud
-# launcher itself needs (MSYS_NO_PATHCONV=1 would break it).
-echo "==> web"
-MSYS2_ARG_CONV_EXCL='--set-env-vars=' \
-gcloud run deploy "$WEB_SERVICE" --quiet --image="$AR/web:$TAG" --service-account="$WEB_SA" \
-  "$(auth_flag "$WEB_SERVICE")" --iap --cpu=1 --memory=1Gi \
-  --min-instances=0 --max-instances="$WEB_MAX_INSTANCES" --timeout=300 "${NET[@]}" \
-  --set-secrets="$SECRETS" --set-env-vars="$WEB_ENV" --labels=app=catalog,component=web
+# --- 6. Services, one at a time behind the deploy gate (spec 17 3.2) ---------------------
+# Each service in the registry (infra/lib/services.sh) goes up as a no-traffic candidate, its probe runs against the
+# candidate's tag URL, and only a passing candidate takes traffic. A failure stops here: that service keeps its
+# live revision and later services are not touched; services this run already moved are listed with their rollback
+# lines. The tier 5 smoke is the worker's probe, so it runs on the new worker image against the new matting
+# candidates (and runs even when the worker itself is unchanged, if a matting service changed). It never calls
+# OpenRouter and writes only under catalog-test/.
+# shellcheck source=lib/services.sh
+source infra/lib/services.sh
+# shellcheck source=lib/gate.sh
+source infra/lib/gate.sh
+MATTING_URL=""; MATTING_GPU_URL=""; MATTING_PROBE_URL=""; MATTING_GPU_PROBE_URL=""
+MATTING_CHANGED=0
+SHIFTED=()
+for SERVICE in "${SERVICES[@]}"; do
+  GATE_STATUS=0
+  GATE_FORCE=0; [ "$SERVICE" = catalog-worker ] && GATE_FORCE=$MATTING_CHANGED
+  deploy_service "$SERVICE" || GATE_STATUS=$?
+  if [ "$SERVICE" = catalog-matting-gpu ] && [ "$GATE_STATUS" = 75 ]; then
+    echo "WARN: GPU quota refused; worker will use CPU. Request NVIDIA L4 (no zonal redundancy) quota in $GPU_REGION for project $PROJECT at https://console.cloud.google.com/iam-admin/quotas?project=$PROJECT" >&2
+  elif [ "$GATE_STATUS" != 0 ]; then
+    echo "ERROR: deploy stopped at $SERVICE; the services after it were not changed" >&2
+    if [ ${#SHIFTED[@]} -gt 0 ]; then
+      echo "Already live from this run (each passed its own probe); to undo one:" >&2
+      for S in "${SHIFTED[@]}"; do echo "  bash infra/deploy.sh --rollback $S" >&2; done
+    fi
+    exit 1
+  fi
+  if [ "$GATE_CHANGED" = 1 ]; then
+    [ "$SVC_SHIFT" = 1 ] && SHIFTED+=("$SVC_NAME")
+    case "$SERVICE" in catalog-matting|catalog-matting-gpu) MATTING_CHANGED=1 ;; esac
+  fi
+  case "$SERVICE" in
+    catalog-matting)
+      MATTING_URL=$GATE_URL; MATTING_PROBE_URL=$GATE_TAG_URL
+      WORKER_ENV+=",MATTING_URL=$MATTING_URL"
+      ;;
+    catalog-matting-gpu)
+      if [ "$GATE_STATUS" = 0 ]; then
+        MATTING_GPU_PROBE_URL=$GATE_TAG_URL
+        # The live worker calls the service URL; the preview worker calls the GPU candidate it was deployed with.
+        MATTING_GPU_URL=$GATE_URL
+        if [ "${CATALOG_PREVIEW:-0}" = 1 ]; then MATTING_GPU_URL=$GATE_TAG_URL; fi
+        WORKER_ENV+=",MATTING_GPU_URL=$MATTING_GPU_URL"
+      fi
+      # Spec 11 4.5: the upscaler runs on the GPU service, so the flag reaches the worker only with a GPU URL.
+      # Spec 16 3.1.3: with UPSCALE_SERVICE=cpu the CPU cut-out service upscales (it serves /upscale) and the worker
+      # sends /upscale to it through UPSCALE_URL, so no GPU URL is needed.
+      if [ "$UPSCALE_SERVICE" = cpu ]; then
+        if [ -n "$UPSCALE_MODEL" ]; then WORKER_ENV+=",UPSCALE_URL=$MATTING_URL"; fi
+      elif [ -n "$UPSCALE_MODEL" ] && [ -z "$MATTING_GPU_URL" ]; then
+        echo "WARN: UPSCALE_MODEL=$UPSCALE_MODEL ignored: no GPU matting service URL; the render keeps the plain path" >&2
+        UPSCALE_MODEL=""
+      fi
+      if [ -n "$UPSCALE_MODEL" ]; then WORKER_ENV+=",UPSCALE_MODEL=$UPSCALE_MODEL"; WEB_ENV+=",UPSCALE_MODEL=$UPSCALE_MODEL"; fi
+      ;;
+    catalog-worker)
+      # Queue slots for the worker now live, right away, so a later gate's failure never strands them.
+      if [ "${CATALOG_PREVIEW:-0}" != 1 ]; then
+        # Idempotent: keep the queue's parallelism equal to the worker's capacity (connection budget above).
+        gcloud tasks queues update "$QUEUE" --location="$REGION" --max-concurrent-dispatches="$TASKS_MAX_DISPATCHES" "${CHUNK_QUEUE_RETRY[@]}" >/dev/null
+        echo "==> tasks queue $QUEUE: max-concurrent-dispatches $TASKS_MAX_DISPATCHES"
+      fi
+      if [ "$BULK_QUEUE_EXISTS" = 1 ]; then
+        gcloud tasks queues update "$BULK_QUEUE" --location="$REGION" --max-concurrent-dispatches="$BULK_QUEUE_SLOTS" "${CHUNK_QUEUE_RETRY[@]}" >/dev/null
+        echo "==> tasks queue $BULK_QUEUE: max-concurrent-dispatches $BULK_QUEUE_SLOTS"
+      fi
+      ;;
+  esac
+done
+
+# --- Web access: IAP and CORS --------------------------------------------------------
 
 IAP_ENABLED=$(gcv run services describe "$WEB_SERVICE" --region="$REGION" \
   --format='value(metadata.annotations."run.googleapis.com/iap-enabled")')
@@ -505,6 +488,12 @@ if [ "${CATALOG_PREVIEW:-0}" != 1 ]; then
   # 10: the output-quality eval suite (same image, OpenRouter key for the judge, LIVE_SMOKE only per
   # execution). Deployed here, never executed here: bash infra/catalog-output-evals.sh run [--live]
   EVALS_JOB_IMAGE="$AR/worker:$TAG" EVALS_JOB_ENV="$(job_env)" EVALS_JOB_SECRETS="$JOB_SECRETS"     bash infra/catalog-output-evals.sh deploy
+  # Spec 17 3.1.3 (G1): catalog-invariants, the sweep's checks on demand. Same worker image, and the service
+  # account, env and VPC copied from the live catalog-worker, as for the smoke job; check-then-create/update.
+  # Deployed, never executed here: gcloud run jobs execute catalog-invariants --region=asia-south1
+  # MATTING_URL= keeps the script on the live worker's URLs; CATALOG_TEST_RUN is required by the script, unused here.
+  CATALOG_TEST_RUN=$(node -e 'console.log(require("crypto").randomUUID())') CATALOG_TEST_JOBS=invariants MATTING_URL= \
+    bash infra/catalog-test-jobs.sh
 else
   echo "==> jobs: SKIP (preview never changes the shared jobs)"
 fi
