@@ -87,7 +87,7 @@ test('a matting probe passes its registry row, the gate timeout and the appended
 bash() { echo "PROBE_TASK_TIMEOUT=$PROBE_TASK_TIMEOUT $*"; }; export -f bash
 command bash "\${SVC_PROBE[@]:1}" https://candidate---m.run.app`);
   assert.equal(r.status, 0, r.err);
-  assert.equal(r.out.trim(), 'PROBE_TASK_TIMEOUT=420 infra/check-matting.sh --probe https://candidate---m.run.app --models birefnet-general --concurrency 1 --rounds 1');
+  assert.equal(r.out.trim(), 'PROBE_TASK_TIMEOUT=420 infra/check-matting.sh --probe https://candidate---m.run.app --models=birefnet-general --concurrency=1 --rounds=1');
 });
 
 test('spec 17 3.3.2 GPU knobs reach catalog-matting-gpu only when set, one per candidate', () => {
