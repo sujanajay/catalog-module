@@ -499,8 +499,9 @@ export async function handleChunkTask(rawDeps: CatalogDeps, body: Record<string,
     if (lost || reason === OWNERSHIP_CHANGED) return answer(200,"lost");
     // Terminal (the chunk is marked failed below) is ERROR, a retried attempt WARNING: the alert counts ERROR only.
     // An Error object is passed whole, so a terminal line carries its stack for Error Reporting (the line shows its message).
-    const errors = await recordError();
-    const terminal = errors >= CHUNK_MAX_ERRORS;
+    // A count that cannot be saved (the database is down too) is not terminal: the failure is still logged and retried.
+    const errors = await recordError().catch(()=>null);
+    const terminal = errors !== null && errors >= CHUNK_MAX_ERRORS;
     deps.log("chunk failed",{severity:terminal ? "ERROR":"WARNING",batchId:chunk.batchId,chunkId:chunk.id,stage:chunk.stage,attempt:chunk.attempt,errors,retryCount:opts.retryCount ?? 0,error:error instanceof Error ? error:reason});
     if (terminal) {
       if (!(await failChunk(reason,`Processing stopped after repeated errors: ${reason}`))) return answer(200,"lost");
