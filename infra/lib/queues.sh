@@ -10,7 +10,6 @@
 #                          this call; those tasks meet 429 and the queue's retry sends them again (G4 below).
 # A bulk queue left from a bigger shape stays (it is never deleted) at 1 slot once BULK_MAX_DISPATCHES is 0: the env
 # no longer names it, so it gets no new tasks, and a backlog in it drains slowly instead of flooding the worker.
-# Every queue gcloud call is here, with the slots of the shape; tests replace gcloud and gcv with fake functions.
 
 # Spec 17 G4: a chunk queue (main and bulk) never drops a task on a burst of 429 or 503 (a worker with no free
 # instance answers 429 before the app runs). It keeps retrying for 30 minutes, at most a minute apart
@@ -38,11 +37,11 @@ queues_shape() {
   fi
 }
 
-# queue_call <create|update> <name> <slots> <kind>
 queue_call() {
+  local verb=$1 name=$2 slots=$3 kind=$4
   local -a retry=("${CHUNK_QUEUE_RETRY[@]}")
-  [ "$4" = ingest ] && retry=("${INGEST_QUEUE_RETRY[@]}")
-  gcloud tasks queues "$1" "$2" --location="$REGION" --max-concurrent-dispatches="$3" "${retry[@]}" >/dev/null
+  [ "$kind" = ingest ] && retry=("${INGEST_QUEUE_RETRY[@]}")
+  gcloud tasks queues "$verb" "$name" --location="$REGION" --max-concurrent-dispatches="$slots" "${retry[@]}" >/dev/null
 }
 
 queues_create_missing() {
@@ -54,7 +53,6 @@ queues_create_missing() {
     read -r name slots kind <<<"$line"
     queue_exists "$name" && continue
     queue_call create "$name" "$slots" "$kind"
-    QUEUES_EXISTING+=$'\n'$name
     echo "==> tasks queue $name: CREATE, max-concurrent-dispatches $slots"
   done
 }

@@ -92,10 +92,10 @@ const cases = [
   {
     label: 'no env resolves to the recorded live shape',
     env: {},
-    expect: {...RECORDED_LIVE, STATUS: '0', CATALOG_DB_TOTAL: '104', CATALOG_DB_LIMIT: '393', SLOTS_TOTAL: '48', SLOTS_CAPACITY: '48',
+    // Every shape name, so a new name without a recorded live value fails here.
+    expect: {...Object.fromEntries(NAMES.map((n) => [n, RECORDED_LIVE[n]])), STATUS: '0', CATALOG_DB_TOTAL: '104', CATALOG_DB_LIMIT: '393', SLOTS_TOTAL: '48', SLOTS_CAPACITY: '48',
       CPU_TOTAL: '171', COMPUTE: '0.0000265', GPU_PRICE: '0.00034884'},
   },
-  {label: 'every shape name is in the live record', env: {}, expect: Object.fromEntries(NAMES.map((n) => [n, RECORDED_LIVE[n]]))},
   {label: 'env still wins over a row, also an explicit "" (no AI check cap)', env: {TASKS_MAX_DISPATCHES: '14', BULK_MAX_DISPATCHES: '30', LLM_INFLIGHT_PER_INSTANCE: ''},
     expect: {STATUS: '0', TASKS_MAX_DISPATCHES: '14', BULK_MAX_DISPATCHES: '30', INGEST_MAX_DISPATCHES: '4', LLM_INFLIGHT_PER_INSTANCE: ''}},
   {label: 'preview: the same per-instance shape on 4 workers, no bulk queue', env: {CATALOG_PREVIEW: '1'},

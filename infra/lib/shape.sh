@@ -96,7 +96,6 @@ tier_max_connections() {
   esac
 }
 
-# shape_defaults: the shape from env and the rows above, plus the fixed numbers the checks below use.
 shape_defaults() {
   if [ "${CATALOG_PREVIEW:-0}" = 1 ]; then shape_fill "${PREVIEW_SHAPE_DEFAULTS[@]}"; fi
   shape_fill "${SHAPE_DEFAULTS[@]}"
@@ -111,7 +110,6 @@ shape_defaults() {
   JOB_DB_POOL_MAX=1
   # vCPU kept for the Cloud Run jobs (load, recheck, QA check, evals, migrate, smoke) in the CPU quota check.
   JOBS_CPU_BUDGET=8
-  # The CPU cut-out service's vCPU per instance and the L4 quota in asia-southeast1.
   MATTING_CPU_VCPU=4
   GPU_QUOTA=3
   # Spec 17 3.3.3: measured GPU memory in MiB, one row per model (GPU_MODEL_PEAK_MIB_ + the id in capitals with "_"
