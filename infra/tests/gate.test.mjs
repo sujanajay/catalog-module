@@ -258,22 +258,12 @@ test('deploy.sh: gate loop after migrate and queues, before jobs and monitoring;
   assert.match(deploy, /\[ "\$\{1:-\}" = --rollback \]/);
   assert.ok(!deploy.includes('--to-latest'), 'traffic only ever moves to a probed revision');
   // A re-run after a failed smoke must not SKIP the worker: the worker env names the matting revisions it was smoked
-  // against, set after both matting gates and before the worker gate.
+  // against, set after both matting gates and before the worker gate, so the env-change path (tested above) deploys it.
   const loop = deploy.slice(at('for SERVICE in "${SERVICES[@]}"'), at('# --- Web access'));
   assert.match(loop, /MATTING_REVISION=\$GATE_REVISION/);
   assert.match(loop, /WORKER_ENV\+=",SMOKED_MATTING_REVISIONS=\$MATTING_REVISION\/\$GATE_REVISION"/);
   assert.ok(loop.indexOf('SMOKED_MATTING_REVISIONS') < loop.indexOf('catalog-worker)'));
   assert.ok(!/^\s*GATE_FORCE=/m.test(deploy), 'deploy.sh never resets the operator GATE_FORCE override');
-});
-
-test('the worker SKIPs on an unchanged env and deploys when the smoked matting revisions change', () => {
-  let r = run('smoked-same', 'service_test_svc() { SVC_NAME=test-svc; SVC_REGION=asia-south1; SVC_IMAGE=x; SVC_ARGS=(); SVC_ENV="A=1,SMOKED_MATTING_REVISIONS=m1/g1"; SVC_PROBE=(true); SVC_PROBE_TIMEOUT=5; SVC_DEPLOY=1; SVC_SHIFT=1; SVC_QUOTA_OPTIONAL=0; }; deploy_service test-svc', {LIVE_MATCH: '1'});
-  assert.equal(r.status, 0, r.err);
-  assert.ok(!r.calls.some((c) => c.startsWith('run deploy test-svc')), 'same matting revisions: SKIP');
-  // The fake's live env is the desired env with the old revisions (LIVE_ENV): a new matting revision deploys.
-  r = run('smoked-new', 'service_test_svc() { SVC_NAME=test-svc; SVC_REGION=asia-south1; SVC_IMAGE=x; SVC_ARGS=(); SVC_ENV="A=1,SMOKED_MATTING_REVISIONS=m2/g1"; SVC_PROBE=(true); SVC_PROBE_TIMEOUT=5; SVC_DEPLOY=1; SVC_SHIFT=1; SVC_QUOTA_OPTIONAL=0; }; deploy_service test-svc', {LIVE_MATCH: '1', LIVE_ENV: 'A=1,SMOKED_MATTING_REVISIONS=m1/g1'});
-  assert.equal(r.status, 0, r.err);
-  assert.ok(r.calls.some((c) => c.startsWith('run deploy test-svc')), 'a new matting revision re-runs the worker gate');
 });
 
 test('probes follow same-host redirects (the web home page redirects to /catalog)', () => {
