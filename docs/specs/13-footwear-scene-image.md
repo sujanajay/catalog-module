@@ -48,22 +48,27 @@ first-class part of this spec, not an afterthought. Prototype v2
 except where the 2026-10-28 amendments change the step 4 card, the product page button and the Scenes tab; there
 this spec's wording wins until the prototype is updated (12.3 Q19 to Q21).
 
-Non-goals: no "four options" variant; no scene image as image 1 and no change to the brand photos' order, pixels or
-links; no route for a brand-supplied lifestyle photo (it keeps today's hold, `matte-guard.ts:1030`; 12.3 Q6); no
-infographics, holdout cells or revenue figures; no new screen of this spec's own (the flow fits the wizard, the
-batch page's "Needs me" tab, the product page, the links sheet and spec 12's Brand DNA page, 2.5, 1.6); no bulk
-approve; no free editing by a reviewer (a reviewer's note is never sent to a generator, 3.7); no free-text scene
-description from the operator (a scene hint is a value picked from the brand's approved list, never typed text,
-owner decision, 2026-10-28; 1.1). Framing is legs-only
-(or below the face for bags) by default; a frame shows a face only when the brand's scene profile names an approved
-model of that brand from Brand DNA (spec 12 s9, Models tab), and that face is checked against the
-model's registry embeddings (G5, 5.6). Kids products are in scope on both routes. By default a kids frame is a
-composite still life or a legs-only (or feet-only; bags held at the waist) scene with no face, head or body above
-the knee or waist and no adult in it. A child is shown as a person only when the profile names an approved kids
-model of that brand (never a synthetic child), G5 confirms the identity, and the channel's `kids` policy row allows
-on-model photos; the kids modesty and styling rules always apply (owner decision 2026-10-27; 1.1, 5.1, 7.2, spec 12
-s3.6). A hosted scene service (a vendor API that builds the scene around a product) is never the default; it is a
-documented last resort behind a flag, used only for the composite background (3.6).
+Non-goals: no "four options" variant; no scene image as image 1 and no change to the brand photos' order,
+pixels or links; no route for a brand-supplied lifestyle photo (it keeps today's hold, `matte-guard.ts:1030`;
+12.3 Q6); no infographics, holdout cells or revenue figures; no new screen of this spec's own (the flow fits
+the wizard, the batch page's "Needs me" tab, the product page, the links sheet and spec 12's Brand DNA page,
+2.5, 1.6); no bulk approve; no free editing by a reviewer (a reviewer's note is never sent to a generator,
+3.7); no free-text scene description from the operator (a scene hint is a value picked from the brand's
+approved list, never typed text, owner decision, 2026-10-28; 1.1). **No scene image shows a face, for any
+audience, on any route or scene kind (4a, 4b, 4c)**: shoes are framed legs-only or feet-only, bags below the
+face and head (owner's "no face for any audience", 2026-10-28, applied to every route of initiative 4, scene
+kinds 4a, 4b, 4c). The 2026-10-27 allowance of a registered brand model's face is not withdrawn: it is
+initiative 5's face routing, built only after spec 12 section 9 (shipping plan 2026-10-28, initiative 5). The
+registered-model face machinery described in this spec (`Person.face = 'registered_model'`, `framingWithFace`,
+G5 and G6 on scene frames, the registered-model exit cells of 8.2, "Show the face of" on the Scenes tab) is
+reserved and not built in V1 (1.1). Kids products are in scope on both routes. By default a kids frame is a
+composite still life or a legs-only (or feet-only; bags held at the waist) scene with no face, head or body
+above the knee or waist and no adult in it. (Reserved, not built in V1, see above:) a child is shown as a
+person only when the profile names an approved kids model of that brand (never a synthetic child), G5 confirms
+the identity, and the channel's `kids` policy row allows on-model photos; the kids modesty and styling rules
+always apply (owner decision 2026-10-27; 1.1, 5.1, 7.2, spec 12 s3.6). A hosted scene service (a vendor API
+that builds the scene around a product) is never the default; it is a documented last resort behind a flag,
+used only for the composite background (3.6).
 
 ### 0.2 Words
 
@@ -97,8 +102,8 @@ office, street, beach) that picks the setting of the scene; the brand approves w
 DNA Scenes tab (owner decision, 2026-10-28; 1.1). **Scene kind 4a, 4b, 4c:** what a scene image shows: 4a a still
 life (the composite route, shoes and bags), 4b worn footwear (the full route, legs or feet only), 4c a carried bag
 (the full route, a handbag, shoulder bag or clutch carried in a hand, on a forearm or on a shoulder, no face and no
-head); the letters are also the rollout order (owner decision, 2026-10-28; 9.0). A kind is not a route: a 4b or
-4c product still falls back to the composite as in 2.3.
+head); the letters are also the rollout order (owner decision, 2026-10-28; 9.0). No kind shows a face, for any
+audience (0.1). A kind is not a route: a 4b or 4c product still falls back to the composite as in 2.3.
 
 ### 0.3 What this spec takes from spec 12 (not re-specified here)
 
@@ -135,10 +140,9 @@ edits below apply to the text spec 12 leaves.
    > a lifestyle, worn or carried photo;
    > only by generators on the brand and category's bench, each approved by the owner in writing (spec 12); for
    > every audience and product type under the modesty, styling and scene rules of the brand's style profile;
-   > legs-only or below the face unless the profile names an approved model of the brand, whose face is then
-   > checked against the brand's model registry; a child is shown as a person only with an approved kids model of
-   > that brand (never a synthetic child), only where the channel's kids policy row allows on-model photos, and
-   > always under the kids modesty and styling rules; otherwise kids scenes show legs or feet only; full generation
+   > legs-only, feet-only or below the face and head (carried bags); no scene image shows a face, for any
+   > audience (owner decision, 2026-10-28); kids scenes show legs or feet only (bags held at the waist), always
+   > under the kids modesty and styling rules; full generation
    > first and a still life of the brand's own cut-out pixels as the fallback or by choice; always gated by the
    > spec 12 checks plus the scene checks; a frame that fails a check is never published; flagged `generated`;
    > placed after every brand photo and never as image 1; every scene image of the internal test run is checked
@@ -163,8 +167,8 @@ edits below apply to the text spec 12 leaves.
 6. L805 (Data model heading): add "and the spec 12 and spec 13 migrations" to the specs that ship migrations.
 7. Decisions log (after L54): "Spec 13 (owner, 2026-10-26, amended twice on 2026-10-27): one scene image per
    footwear and bag style-colour, new products first and live pages on request; studio on-legs photos count as
-   present; every product may take both routes, full first, and the checks decide; legs-only by default, a
-   registered brand model's face only where the brand profile allows it; women's covered legs may be framed above
+   present; every product may take both routes, full first, and the checks decide; legs-only, and since
+   2026-10-28 no face for any audience in any scene image; women's covered legs may be framed above
    the knee; kids under their own modesty and styling rules, legs or feet only or a still life by default, a child
    shown as a person only with an approved kids model of that brand (never a synthetic child), checked by G5, and
    only where the channel's kids policy row allows on-model photos; Brand DNA keeps kids models like adult ones
@@ -239,13 +243,15 @@ export const SceneEntry = z.object({ worn: z.string().min(1).nullable(), framing
   bareFeet: z.object({ adults: z.boolean(), kids: z.boolean() }),
   carry: z.string().min(1).nullable(),        // bags only (scene kind 4c): how the bag is carried; null for shoes
   defaultHint: z.enum(HINT_KEYS),             // the hint whose scene is `worn` / `stillLife` above
-  hints: z.record(z.enum(HINT_KEYS),          // the brand-approved other hints: keys in HINTS_BY_SUBCATEGORY
-    z.object({ worn: z.string().min(1).nullable(), stillLife: z.string().min(1) })) }); // for the entry, not defaultHint
-export const Person = z.object({ face: z.enum(["never","registered_model"]),
+  hints: z.partialRecord(z.enum(HINT_KEYS),   // brand-approved other hints (a subset: zod 4 z.record over an
+    // enum key requires every key, so partialRecord); keys checked against the subcategory by the superRefine below
+    z.object({ worn: z.string().min(1).nullable(), stillLife: z.string().min(1) })) });
+export const Person = z.object({ face: z.literal("never"),   // V1: no face for any audience (0.1);
+                                                             // "registered_model" is reserved, not built in V1
   referenceModelId: z.string().uuid().nullable(),        // spec 12 reference_model, approved, same brand;
                                                          // for `kids` an approved kids model (checked on Approve, 1.6)
   framingWithFace: z.enum(FRAMINGS).nullable() })         // used instead of entry.framing when face is allowed
-  .refine(p => p.face === "never" || (p.referenceModelId !== null && p.framingWithFace !== null));
+  .refine(p => p.referenceModelId === null && p.framingWithFace === null);   // both null in V1
 export const SceneProfile = z.object({
   enabled: z.boolean(), routes: z.object({ full: z.boolean(), composite: z.boolean() }),
   routePreference: z.enum(["full_first","composite_first"]),
@@ -256,7 +262,14 @@ export const SceneProfile = z.object({
     bagArms: z.literal("long_sleeve"),
     kids: z.object({ legs: z.literal("knee_covered_except_pool_beach"), torso: z.literal("covered"),
       noSwimwearOrUnderwear: z.literal(true), poses: z.literal("everyday") }) }),
-  person: z.record(z.enum(AUDIENCES), Person) });
+  person: z.record(z.enum(AUDIENCES), Person) })
+  .superRefine((p, ctx) => { for (const [sub, e] of Object.entries(p.subcategories)) {
+    const ok = HINTS_BY_SUBCATEGORY[sub as (typeof SUBCATEGORIES)[number]];
+    if (!ok.includes(e.defaultHint)) ctx.addIssue({ code: "custom", path: ["subcategories", sub, "defaultHint"],
+      message: "hint not offered for this type" });
+    for (const k of Object.keys(e.hints ?? {})) if (!ok.includes(k as SceneHint) || k === e.defaultHint)
+      ctx.addIssue({ code: "custom", path: ["subcategories", sub, "hints", k], message: "hint not allowed here" });
+  } });
 export const DEFAULT_SCENE_PROFILE: z.infer<typeof SceneProfile>;   // DD4 F4, enabled: false
 ```
 
@@ -267,7 +280,7 @@ sunrise / track edge), loafer and lace-up comfort (cafe terrace or marble lobby 
 pool deck or boardwalk / wooden decking), slipper (bedroom rug / rug), handbag and shoulder (`shoulder_to_hip`, hotel
 lobby or cafe / marble side table), clutch (`waist_held`, evening lobby / marble console), with DD4 F4's styling
 column. `forbidden`: readable text or signs, other brands or logos, real landmarks or recognisable skylines, alcohol,
-religious buildings, flags, faces other than an allowed registered model's. `aboveKneeWhenCovered: true` (owner
+religious buildings, flags, any face. `aboveKneeWhenCovered: true` (owner
 decision). `routePreference: "full_first"`.
 
 Scene hints and carrying (owner decision, 2026-10-28). Each entry's `worn` and `stillLife` are the scene of its
@@ -276,8 +289,12 @@ life sentence. A hint is a value: the operator (2.5) or a sheet's `scene_hint` c
 the approved sentence, and no operator text ever reaches a generator. A hint key outside the entry's approved
 ones, or outside `HINTS_BY_SUBCATEGORY`, is never used: the product falls back to `defaultHint` with the note
 "Scene hint <label> is not used for this brand's <type>; the usual scene was used." Kids and unknown audience use
-only hints in `KIDS_HINTS`: `playground` when the entry approves it, else the first approved hint in `KIDS_HINTS`,
-else the still life of `defaultHint`. `DEFAULT_SCENE_PROFILE` sets `defaultHint` to match DD4 F4's row (sneaker
+only hints in `KIDS_HINTS`: an operator- or sheet-picked hint that is in `KIDS_HINTS` and approved is used;
+otherwise `playground` when the entry approves it, else the first approved hint in `KIDS_HINTS`. When none
+qualifies (for example a kids clutch, whose `evening` and `cafe` are not kids hints), the product makes a still
+life on the neutral kids still life sentence "a painted wooden bench" (never `defaultHint`'s when it is outside
+`KIDS_HINTS`), with the note "Scene image limited to a still life: no scene for children is set for this
+type." `DEFAULT_SCENE_PROFILE` sets `defaultHint` to match DD4 F4's row (sneaker
 `street`, running `track`, loafer `cafe`, lace-up comfort `office`, football `pitch`, boot `street`, sandal and
 slide `poolside`, slipper `home`, handbag and shoulder `cafe`, clutch `evening`) and fills `hints` for every other
 key of `HINTS_BY_SUBCATEGORY` with one sentence pair in DD4 F4's style, for example office (worn: "a modern office
@@ -287,11 +304,13 @@ edge"; still life: "a flat stone on short grass"), beach (worn: "firm wet sand a
 driftwood plank on sand"), playground (worn: "a school-day playground with a soft rubber surface"; still life: "a
 painted wooden bench"). The vocabulary itself (`SCENE_HINTS`, `HINTS_BY_SUBCATEGORY`, `KIDS_HINTS`) is code; which
 hints a brand uses, its default and every sentence are profile data, edited and approved on the Scenes tab (1.6).
+The split between code vocabulary and profile data, the hint list per subcategory and the added keys `pitch`,
+`evening` and `home` are (writer's proposal, owner to confirm) (12.3 Q21).
 `carry` is the 4c carrying sentence for bag entries and null for shoes: handbag "held by its handles in one hand
 or hooked over the forearm", shoulder "on one shoulder, the strap hanging straight, one hand resting on it",
 clutch "held in one hand at the waist". The framing stays the entry's (`shoulder_to_hip` for handbag and
-shoulder, `waist_held` for clutch); a carried bag never shows a face or a head, whatever `person` says for the
-audience (owner decision, 2026-10-28: no face for any audience in 4c).
+shoulder, `waist_held` for clutch); a carried bag never shows a face or a head (owner decision, 2026-10-28: no
+face for any audience in 4c, which the 0.1 rule extends to every kind).
 
 Kids (the audience block the detected audience `kids` or `unknown` selects, 2.2): `styling.kids` per entry in plain
 everyday clothes for the age (for example "knee-length shorts or long trousers, plain ankle socks, a school-day or
@@ -301,8 +320,10 @@ swimwear or underwear; everyday standing, walking or seated poses only) and `kid
 nightlife, bars or cafes at night, adult fashion poses, make-up, high heels on a child, any setting with adults
 only. By default a kids frame shows no child as a person: whatever the entry's framing, the kids block uses
 `legs_only` or `feet_only` for shoes and `waist_held` for bags (no face, head or body above the knee or waist), with
-one child and no adult in the frame. `person` defaults to `face: "never"` for every audience. A brand that wants a
-registered model's face in its scenes sets it per audience on the profile, which an admin approves like any profile
+one child and no adult in the frame. `person` is `face: "never"` for every audience and cannot be set otherwise
+in V1 (0.1). Reserved, not built in V1: a brand that wants a
+registered model's face in its scenes would set it per audience on the profile, which an admin approves like
+any profile
 change (1.6). For `kids` the named model must be an approved kids model of the same brand (spec 12 s9,
 Models tab, kids); the frame then uses `framingWithFace`, the kids modesty, styling and `kidsForbidden` rules still
 apply, one child and no adult is in the frame, the face is checked by G5 (5.6), and the frame is sent only to
@@ -356,8 +377,12 @@ until a per-channel scope is needed (12.3 Q9).
   2026-10-28): `scene_choice text not null default 'none'` (`none | worn_or_carried | still_life`), `scene_hint
   text null` (a `SCENE_HINTS` key; null means the entry's `defaultHint`), `scene_choice_by text null` (`default`
   (from `options.scene.tickDefault`), `sheet`, `tick` (changed on step 4), `product_page`) and `scene_choice_note
-  text null` (why a choice was lowered or a sheet value not read, 2.5). Written at Start from step 4 and never by
-  the worker except to lower a choice to the product's ceiling at plan time (2.1). Nothing is made for a product
+  text null` (why a choice was lowered or a sheet value not read, 2.5). Ingest writes `scene_choice`,
+  `scene_hint`, `scene_choice_by = 'sheet'` and `scene_choice_note` from the sheet's `scene` and `scene_hint`
+  columns when it creates the row (`ingest/index.ts`, the worker side that parses links sheets); Start writes
+  the step 4 tick list's final values (`tick` or `default` provenance where the operator or `tickDefault`
+  changed them); the worker otherwise only lowers a choice to the product's ceiling at plan time (2.1).
+  Nothing is made for a product
   whose `scene_choice` is `none`. A product's ceiling is its brand's `lifestyle_scope` (1.2) and the live scene
   kinds (9.0): a choice is never stored above it.
 - Private files through spec 12's `derivedPath(prefix, pathKey, n, <suffix>)` (`naming.ts:133`): `scene` (accepted
@@ -444,10 +469,9 @@ The scene part of a profile is edited and approved on spec 12's Brand DNA page (
   stays disabled with the reason), "Never in a scene" (the forbidden list, never empty), a fixed "Kids" card that
   cannot be edited (the kids
   framing, modesty and forbidden rules of 1.1, and "Products we cannot place by audience are treated as kids."),
-  and "Show the face of" per audience (men, women, unisex, kids), each offering the brand's approved models of that
-  audience (kids: only kids models; unisex: adult models) or "Nobody (legs only)", the default. Help under it: "A
-  kids model can be picked here; kids scenes then show that child on marketplaces that take photos of children on a
-  model. Otherwise kids scenes show legs or feet only." Warnings before "Approve": every null worn scene ("<Type>: no
+  and, reserved and not built in V1 (0.1), "Show the face of" per audience; in V1 the tab shows instead the fixed
+  line "Scene images never show a face: shoes legs or feet only, bags below the head." Warnings before
+  "Approve": every null worn scene ("<Type>: no
   worn scene. Only a still life will be made."), neither route on, and a face without the brand's likeness
   permission. zod validation plus a database check that every named model is approved, of the same brand and of the
   right audience. "Approve" makes a new version (`approved_by` recorded) and lists it under "Versions".
@@ -477,7 +501,7 @@ run again at plan time, after detection, on every ticked product.
 | # | Rule | Result and note |
 |---|---|---|
 | 1 | `SCENE_ENABLED` env not `1`, or product type not `footwear` / `bag_accessory` | no step, no note |
-| 1a | `scene_choice = 'none'` on the product's batch row: not ticked on step 4, `no` or blank in the sheet's `scene` column with the batch default `none`, and not asked for from the product page (owner decision, 2026-10-28) | no step and no sheet note; the product page reads "Scene image: not asked for" |
+| 1a | `scene_choice = 'none'` on the product's batch row: not ticked on step 4, `no` or blank in the sheet's `scene` column with the batch default `none`, and not asked for from the product page (owner decision, 2026-10-28) | no step and no sheet note (writer's proposal, owner to confirm); the product page reads "Scene image: not asked for" |
 | 1b | `scene_choice` above the ceiling at plan time (the brand's `lifestyle_scope` changed after Start, or the product's scene kind is not live, 9.0) | lowered, never raised: `worn_or_carried` becomes `still_life` with "Scene image limited to a still life: the brand's permission covers a still life only." (or "...: worn scenes for this type are not switched on yet."); with a `none` ceiling, rule 3's sentence (owner decision, 2026-10-28) |
 | 2 | No approved profile, `scene.enabled` false, or the brand and category's bench (spec 12 s5.4) has no approved, enabled entry for use `scene_full` or `scene_background` | "No scene image: scene images are switched off for this brand." |
 | 3 | No valid `brand_rights` row with `lifestyle_scope` other than `none` | "No scene image: the brand's written permission for generated images is not on record." |
@@ -547,12 +571,12 @@ Spec 12 s3.5's re-insert, for LS: a later batch for the product carries the curr
 the new batch (same `n`, `sha256`, `raw_uri`, `kind`, `derivation`, `scene`) when rules 2 to 5 still pass, every
 `referenceShas` entry is still a current brand source, and the profile version and rights row are still approved
 and valid. The review decision carries with it. Carry-forward does not read the later batch's `scene_choice`: a
-product left unticked in a later batch keeps its live scene image (rule 1a only stops a new one being made; owner
-decision, 2026-10-28). No generator call; an unchanged `render_key` keeps the
+product left unticked in a later batch keeps its live scene image (rule 1a only stops a new one being made;
+(writer's proposal, owner to confirm)). No generator call; an unchanged `render_key` keeps the
 live outputs (`pipeline/publish.ts:67`). Otherwise the ladder runs again (only when the product is ticked in this
 batch) or the LS is retired (7.6). The row must exist in every
 batch that touches the product: `planPublish` deletes live outputs whose `n` has no source in the batch
-(`pipeline/publish.ts:63`) and `publishProduct` marks absent sources not current (`pipeline/publish.ts:170`).
+(`pipeline/publish.ts:67`) and `publishProduct` marks absent sources not current (`pipeline/publish.ts:170`).
 
 ### 2.5 Operator flow
 
@@ -607,7 +631,8 @@ step 4 is the scene tick list, and leaving it alone makes no scene image (owner 
      identifier, a tick box "Scene image", a "Scene" select with the brand's approved hints for the product's type
      ("Usual: <label>" first; before detection, when the type is not known yet, only "Usual"), and, when the
      product's ceiling allows both and the row is ticked, a select "Worn or carried" / "Still life" ("Worn or
-     carried" first). Above the rows: "Tick all" (ticks every enabled row at its ceiling with its usual hint) and
+     carried" first; this per-row select is (writer's proposal, owner to confirm)). Above the rows: "Tick all"
+     (ticks every enabled row at its ceiling with its usual hint) and
      "Untick all". A row whose ceiling is `none`, or that is already known to need none, has its tick box disabled
      with a plain reason on the row: "Not allowed for this brand: no permission on record.", "Scene images are
      switched off for this brand.", "Already has a worn photo." or "Already has a scene image." A row whose
@@ -663,7 +688,8 @@ step 4 is the scene tick list, and leaving it alone makes no scene image (owner 
      Y."); per photo "Something is wrong" (key N) and "Replace photo <n>" ("Upload a real lifestyle or worn photo. It
      becomes a brand photo and the scene image is retired.", 7.6). Keys J and K move to the next and previous card.
    - "Something is wrong" opens "What is wrong? (pick all that apply)" with the scene reasons of 8.2 (full route
-     eight, nine for a carried bag, owner decision, 2026-10-28; composite two), "Which photo shows it right?" under each product reason (the brand photos as thumbnails),
+     eight, nine for a carried bag, owner decision, 2026-10-28; composite two), "Which photo shows it right?"
+     under each product reason (the brand photos as thumbnails),
      "Where?" under the logo reason (Front, Back, Chest, Sleeve, Collar, Hem, Pocket, Label, or Anywhere), "Anything
      to add? (optional)" (at most 200 characters), a live "We will ask for:" preview of the correction sentences and
      of anything refused (refusal copy of spec 12 s7.6), and the buttons "Fix and try again",
@@ -835,7 +861,8 @@ route 0.1066 + 0.139 = about 0.25 USD (composite 2 x 0.1066 = about 0.21 USD), s
 USD a round. As in spec 12 s7.6, the allowance assumes one fix round for one in five scene images
 until the test run measures the rate: eligible products x 20% x 0.25 USD = 0.05 USD per eligible product, stored as
 `options.scene.fixAllowanceUsd`. So the scene cap is **0.81 USD per eligible product** (0.76 for the ladder plus 0.05
-for fixes), and the step 4 "Most it can cost" line shows eligible x 0.81 (2.5). A fix round is offered only while
+for fixes), and the step 4 "Most it can cost" line shows ticked eligible products x 0.81 (2.5; owner decision,
+2026-10-28). A fix round is offered only while
 the batch's remaining scene spend covers 0.25 USD; it is one number, never a second cap the operator sets.
 
 Before every attempt the stage calls spec 12's `checkGenerateCaps` with `capUsd` = the lower of the batch's
@@ -870,11 +897,13 @@ shows it right?", `<where>` the "Where?" choice):
 | `modest` | "The clothing is not modest enough for the audience" | "Dress the person as the brand's rules say: <the audience block's styling sentence>." | yes | no |
 | `forbidden` | "Something from the brand's never-in-a-scene list is in it" | "The scene has none of the items on the brand's never-in-a-scene list." | yes | yes |
 | `real` | "It does not look like a real photo" | "Give the product a natural size, a shadow under it and the scene's light." | yes | yes |
-| `carry` | carried bags (4c) only: "The bag does not sit right in the hand (size or strap)" (owner decision, 2026-10-28) | "Make the bag the natural size for the hand holding it, as in photo <n>, with each strap or handle unbroken from one end to the other." | carried bags | no |
+| `carry` | carried bags (4c) only: "The bag does not sit right in the hand (size or strap)" (writer's proposal, owner to confirm) | "Make the bag the natural size for the hand holding it, as in photo <n>, with each strap or handle unbroken from one end to the other." | carried bags | no |
 
-When the profile shows a registered model's face for the audience, the `framing` reason reads "It shows someone other
-than the brand's model, or the framing is wrong" and its sentence is the 3.3 framing sentence for `framingWithFace`
-(12.3 Q14). A composite only asks scene reasons, because its product pixels are pasted back unchanged (4.5).
+Reserved, not built in V1 (0.1): when a profile could show a registered model's face, the `framing` reason would
+read "It shows someone other than the brand's model, or the framing is wrong" with the 3.3 sentence for
+`framingWithFace` (12.3 Q14). A carried bag (4c) always uses the bags `framing` reason and sentence (owner
+decision, 2026-10-28). A composite only asks scene reasons, because its product pixels are pasted back
+unchanged (4.5).
 
 **The note.** "Anything to add? (optional)", at most 200 characters, is read by spec 12's one judge call with a
 closed output: it may only add corrections from the table above (with a photo number or a "Where?" area), or return
@@ -1098,8 +1127,8 @@ it is a judge question, and a "no" or a pass below confidence 0.7 from either fa
 
 | Check | How | Fails as |
 |---|---|---|
-| S5a no face pixels | `/measure/parse` (spec 12 s6.1) labels no pixel of the frame `face`, and S1 runs with `face = 'never'` whatever `person` names (no face for any audience); the head is out of the frame (no `nose`, eye or ear keypoint at 0.3 or more, 5.1) | `scene_framing` |
-| S5b hand and bag scale | code: the bag's `productBox` height against the forearm (elbow to wrist keypoints of `/measure/people`) of the carrying arm must lie inside the subcategory's band (initial bands set from the golden set's labelled 4c frames, stored as data with the other scene bars; a frame where no elbow and wrist score 0.3 or more is judged by the question alone); judge: "Is the bag a believable size for the hand and arm holding it, compared with the brand photos?" | `scene_carry` |
+| S5a no face pixels | `/measure/parse` (spec 12 s6.1) labels no pixel of the frame `face`, and S1 runs with `face = 'never'` (no face for any audience); the head is out of the frame (no `nose`, eye or ear keypoint at 0.3 or more, 5.1); the zero-pixel tolerance is (writer's proposal, owner to confirm), confirmed on the golden set | `scene_framing` |
+| S5b hand and bag scale | code ((writer's proposal, owner to confirm)): the bag's `productBox` height against the forearm (elbow to wrist keypoints of `/measure/people`) of the carrying arm must lie inside the subcategory's band (initial bands set from the golden set's labelled 4c frames, stored as data with the other scene bars; a frame where no elbow and wrist score 0.3 or more is judged by the question alone); judge: "Is the bag a believable size for the hand and arm holding it, compared with the brand photos?" | `scene_carry` |
 | S5c strap continuity | judge: "Does each strap, handle or chain run unbroken from one attachment point to the other, never through a hand, arm or body, with the same number of straps as in the brand photos?" | `scene_carry` |
 | S5d hardware unchanged | judge, against every reference that shows it: "Are the clasp, buckles, zips, rings, studs and chain the same in number, shape, place and metal colour as in the brand photos?" (G1 to G4 still compare the product as a whole) | `scene_carry` |
 
@@ -1168,13 +1197,14 @@ test proves the flag never holds LS.
 
 LS `n` is the next free made number from spec 12's `MADE_N_BASE` (101), kept for life, so its public path never
 collides with a brand shot. Its `position` on every channel is last: spec 12 s8.1's order gains the rule "role `ls`
-comes after every other source", so it is never image 1 (a product with no usable brand photo has no LS, rule 7). On
+comes after every other source except a spec 18 infographic (role `ig`), which comes after LS", so it is never
+image 1 (a product with no usable brand photo has no LS, rule 7). On
 a channel where no brand photo of the product is published or kept live, the LS output is `skipped`: "Not added: a
 scene image is never the first image, and no product photo is on this marketplace yet." When the brand adds a photo,
 the next batch only changes positions (2.4); LS keeps its `n` and link. The per-product scene choice (1.3)
 decides only which products get a scene image, never where it goes: slots, positions, caps and the publish rules
 of 7.1 to 7.7 are unchanged, and the carried-bag kind (4c) publishes exactly like any LS (owner decision,
-2026-10-28).
+2026-10-28). At a channel's cap, a spec 18 infographic yields before the scene image (spec 18 s5.1, s12.2 Q5).
 
 ### 7.2 Caps
 
@@ -1283,7 +1313,8 @@ the table the sheet page lists "To re-submit in this version:" with each `scene_
 re-submit in this version.". The per-channel "<Channel> shots" and "<Channel> missing" columns stay (Details
 worksheet allowed). A channel whose policy `ai_disclosure` is `xmp_and_sheet` (spec 12 s1.4) also gets its
 "<Channel> AI-made" column, "yes" on rows with a live LS there. After a spot check publishes a scene image the batch
-page shows "The links sheet was updated after review on <date>. Download it again." on older versions. `report-v<k>.json` gains `scene: { eligible, ticked: {tick, sheet, product_page, default} /* owner decision,
+page shows "The links sheet was updated after review on <date>. Download it again." on older versions.
+`report-v<k>.json` gains `scene: { eligible, ticked: {tick, sheet, product_page, default} /* owner decision,
 2026-10-28 */, byKind: {'4a', '4b', '4c'}, skipped: {<reason>: n},
 full: {accepted, notMade}, composite: {accepted, notMade}, reused, attempts, usd, usdPerAccepted, notSent: {<channel>:
 n}, resubmit: {<channel>: n}, spot: {checked, allGood, fixed, removed, expired}, fix: {rounds, published, refused:
@@ -1316,8 +1347,9 @@ every brand at once.
   publish yes): **full route**, eight: same product (`same`), logos and text intact (`logo`), same colour
   (`colour`), shape intact, bags with strap count and hardware (`shape`), framing within the rule (`framing`),
   modest clothing for the audience (`modest`), scene free of the forbidden list (`forbidden`), looks like a real
-  photo (`real`); a **carried bag** (4c) adds a ninth, the bag sits right in the hand (`carry`, owner decision,
-  2026-10-28); **composite**, two: `forbidden` and `real` (no face and the product's place are code-checked, 4.5,
+  photo (`real`); a **carried bag** (4c) adds a ninth, the bag sits right in the hand (`carry`, (writer's
+  proposal, owner to confirm));
+  **composite**, two: `forbidden` and `real` (no face and the product's place are code-checked, 4.5,
   5.1). The operator words and correction sentences are in 3.7.
 - **Exit, earned in the internal test run (9.1), program-wide per route and per cell.** `scene_full` exits for a
   cell when the program has at least 150 labelled LS across at least 3 brands meeting the 8.1 bars, with zero false
@@ -1326,14 +1358,17 @@ every brand at once.
   under kids), at least 10 labels each, kids cells at least 30; plus the named cells, at least 10 labels each: bags
   with one or two views; one-photo products; embellished or transparent products; frames with a registered adult
   model's face; and frames with a kids model's face (at least 30), each only when a live brand's profile can produce
-  it. **Carried bags, per brand** (owner decision, 2026-10-28): unlike the other cells, the "bags carried" cell
+  it (registered-model cells are reserved, not built in V1, 0.1). **Carried bags, per brand** (4c is the owner
+  decision, 2026-10-28; the per-brand cell and its 10 labels are (writer's proposal, owner to confirm)): unlike
+  the other cells, the "bags carried" cell
   is kept per brand, because how a brand's bags are carried and how they hang differs most between brands: each
   brand whose inflow has handbags, shoulder bags or clutches has its own cell of 4c frames (`evidence` key
   `carried_bag:<brand_slug>` on the `scene_full` row), at least 10 labels like the other named cells (kids bags
   count under the kids cells too), with zero false passes on S1, S2,
   S5a to S5d and G1 to G4 within it, and its own relapse (a `same`, `logo`, `shape`, `framing` or `carry` reason
   found on a carried bag of that brand relapses that brand's cell only, besides the audience x subcategory cell).
-  `scene_composite` exits program-wide on its own 20 or more labels meeting the same bars (settles 12.3 Q3). **Uncovered cells after the test run:** a
+  `scene_composite` exits program-wide on its own 20 or more labels meeting the same bars (settles 12.3 Q3).
+  **Uncovered cells after the test run:** a
   cell the test run did not cover stays "Checked by a person": every LS in it waits for one person (`why = cell`).
   The labels from those live batches (one person per frame; never labels of fixed frames) count towards that
   cell's numbers like test-run labels (its own count and the zero-false-pass rule; the program-wide numbers and
@@ -1400,7 +1435,8 @@ image only on request (9.4). Stop rules apply throughout (9.5).
   sheet's `scene` column or asked for from the product page (1.3, 2.5). Switching it on never makes a scene image
   for a product nobody selected.
 - **Rollout order of the scene kinds:** 4a still life (composite, shoes and bags) first, then 4b worn footwear
-  (legs or feet only), then 4c carried bags (5.8). The env `SCENE_KINDS` (comma list of `4a`, `4b`, `4c`; unset
+  (legs or feet only), then 4c carried bags (5.8) (order: owner decision, 2026-10-28). The env `SCENE_KINDS`
+  ((writer's proposal, owner to confirm); comma list of `4a`, `4b`, `4c`; unset
   means `4a`) names the live kinds and is set in the deploy env like `SCENE_ENABLED`. A product whose kind is not
   live is lowered to a still life at its ceiling (2.1 rule 1b, `routeBy = 'rollout'`) and its tick list row says
   "Worn scenes for this type are not switched on yet." (2.5). The next kind is added once the previous kind's
@@ -1433,7 +1469,8 @@ in the coverage cells of 8.2 that the hash missed (kids, unknown audience, bags 
 products, embellished or transparent products, every subcategory the brand sells, and frames with a registered adult
 or kids model where the profile names one), plus enough products run with `scene_choice = 'still_life'` that the
 composite route reaches its own labels (8.2); `options.scene.sample` records the rule. Because nothing is made
-unless selected (owner decision, 2026-10-28), every test batch ticks all its eligible sampled products explicitly:
+unless selected (owner decision, 2026-10-28), every test batch ticks all its eligible sampled products explicitly
+(writer's proposal, owner to confirm):
 each one's `scene_choice` is written at batch start (`worn_or_carried` at the product's ceiling, `still_life` for
 the composite share, `scene_choice_by = 'tick'`), never left to the default;
 every carried bag of the sample counts towards its brand's "bags carried" cell (8.2), and each brand's sample
@@ -1512,7 +1549,8 @@ inventory count's section D (live and stocked) is only the ceiling on how many s
 
 After each batch of a brand (test or live), stopping at the first that applies: (1) any false pass on G1, G2, G5 or
 paste-back; (2) on S1 or S2, or on any kids frame's S2, or on S5a to S5d of a carried bag (pausing only that
-brand's "bags carried" cell; owner decision, 2026-10-28); (3) on S3; (4) S4 or crop failures over 10% of attempts; (5)
+brand's "bags carried" cell; owner decision, 2026-10-28); (3) on S3; (4) S4 or crop failures over 10% of
+attempts; (5)
 realism or false holds above 15%; (6) cost per accepted above 0.40 USD. A stop pauses only that brand, or only the
 coverage cell where it happened when the cell is a whole audience or subcategory (for example kids for that brand);
 fixes go to prompts, profile versions, bench rankings or thresholds and are re-run on the golden set by the eval job
@@ -1770,7 +1808,8 @@ reference):
 - [ ] No model, vendor, detector or check name on any page, card, note, sheet or toast (banned-names test plus a
       manual pass over the step 4 card, the spot-check card, the fix panel and the sheet).
 - [ ] Counts and cost on the start screen: step 4 shows how many ticked products get a scene image and about how
-      much it costs, and the figures change as rows are ticked; "Details" shows the most it can cost and how many are skipped as already worn.
+      much it costs, and the figures change as rows are ticked; "Details" shows the most it can cost and how
+      many are skipped as already worn.
 - [ ] Nothing new to learn for a batch with no missing scene image: step 4, the batch page and the sheet look as
       today apart from "Scene images: none needed."
 - [ ] Keyboard spot checks work end to end (Y, N, J, K).
@@ -1894,8 +1933,8 @@ re-submission counts, the UX acceptance results, and the 12.3 questions still op
     7.2). A synthetic child is never shown above the knee or waist; the `unknown` audience never shows a face.
 11. Q11. With a face allowed, `full_length` framing makes a shoe small in the frame (the locator's 2% floor still
     applies, 3.5). Default: allowed for bags and offered for shoes; the test run's per-cell scorecard decides
-    whether shoe profiles keep it. Since 2026-10-28 (owner decision, Q20) a carried bag never shows a face, so
-    for bags this default no longer applies; it stays offered for shoes only.
+    whether shoe profiles keep it. Since 2026-10-28 no scene image shows a face for any audience (0.1, Q22), so
+    `full_length` with a face is reserved and not offered in V1.
 12. Q12. Which hosted scene service, if any, gets a bench row for the last-resort rung (business case section 4 lists
     the candidates). Default: none; the flag stays off until the owner approves one in writing.
 13. Q13. Children's face data in Brand DNA: the owner accepts storing it (2026-10-27). A legal confirmation under the
@@ -1910,8 +1949,8 @@ re-submission counts, the UX acceptance results, and the 12.3 questions still op
 16. Q16. Settled (2026-10-27): the prototype copy now follows owner decision 3 (Scenes tab help and Kids card,
     Kids look note, Models kids note, spot-check note "Kids: legs or feet only, no face." only for a kids frame
     without a kids model; 1.6, 2.5).
-17. Q17. Settled (2026-10-27): the step 4 "Most it can cost" line is eligible x 0.81 (3.6, the cap with its fix
-    allowance), in this spec and in the prototype.
+17. Q17. Settled (2026-10-27, amended 2026-10-28): the step 4 "Most it can cost" line is ticked eligible
+    products x 0.81 (3.6, the cap with its fix allowance), in this spec and in the prototype.
 18. Q18. Pre-set "yes" answers are gone (reasons appear only after "Something is wrong"), so labels are no longer
     anchored by shown check results; the gate verdict stays hidden until the person answers (8.2). A blind share of
     spot checks for learning (idea 3b) is a later phase.
@@ -1929,7 +1968,13 @@ re-submission counts, the UX acceptance results, and the 12.3 questions still op
     `waist_held`) with its own checks S5a to S5d (5.8), its own spot-check reason `carry`, its own exit cell per
     brand ("bags carried", 8.2) and its own Ops line (11.2). Rollout order: 4a still life, then 4b worn footwear
     (legs or feet only), then 4c carried bags (9.0). Reason: Ashish made "a model holding the bag" P1 on
-    2026-10-27 (transcript L114, L142-146). No face for any audience in 4c.
+    2026-10-27 (transcript L114, L142-146). No face for any audience in 4c (and, by 0.1, in every kind). The
+    owner decision is the route 4c itself; its own reason `carry`, the per-brand cell and the S5a to S5d details
+    are (writer's proposal, owner to confirm).
+22. Q22. No face for any audience in any scene image (4a, 4b, 4c): the review applied the owner's 2026-10-28
+    words to every route, which retires for scene images the 2026-10-27 allowance of a registered brand model's
+    face (Q10, Q11, Q14 become reserved). Confirm, or allow registered-model faces for shoes again? Default: no
+    face anywhere (owner to confirm).
 21. Q21. Settled (owner decision, 2026-10-28): scene hints are a short fixed vocabulary per subcategory
     (`SCENE_HINTS`, `HINTS_BY_SUBCATEGORY`, `KIDS_HINTS`, 1.1), with brand-approved subsets, a usual hint per type
     and the scene sentences kept as profile data on the Brand DNA Scenes tab (1.6). The operator picks a hint; it is

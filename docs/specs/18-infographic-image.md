@@ -5,8 +5,10 @@ Written 2026-10-28 from the approved plan (initiative 7) and the 27 Oct meeting 
 Catalog module, spec 18. Execute with `docs/specs/00-execution-protocol.md`. Source of truth: `docs/SPEC.md`,
 amended by this spec in the words of 0.5. Depends on 04 (ingestion, sheets), 05 (render, matting), 06 (chunks,
 publish, sheet, finalize), 07 (attention, decisions), 10 (eval job) and **12** (`docs/specs/12-apparel-shot-set.md`,
-initiative 1 merged; see 0.3 and 0.4). Uses spec 13 (`docs/specs/13-footwear-scene-image.md`) only where its
-contracts are on `main` (placement after the scene image, `composeOnCanvas`, `pasteBackEqual`). Branch
+initiative 1 merged; the Brand DNA page shell, built here if initiative 3 is absent; spec 12's spot-check card,
+initiative 2, unless the owner types yes to G-lite; see 0.3 and 0.4). Uses spec 13
+(`docs/specs/13-footwear-scene-image.md`) only where its contracts are on `main` (placement after the scene image,
+`max_images`, `composeOnCanvas`, `pasteBackEqual`; each has a fallback in 0.3). Branch
 `feat/catalog-18-infographic-image`, worktree `C:\Users\Sujan Ajay\Desktop\catalog-module-wt\18-infographic-image`.
 Deploys `catalog-worker` and `catalog-web` through `infra/deploy.sh`; no new service and no new job.
 
@@ -42,7 +44,8 @@ text badly (research 2026-10-28, section 4).
 Nine rules carry this spec (PLAN C, first-principles decisions 1 to 9, as they apply here):
 
 1. **Text is composed by code, never drawn by an image model.** The text layer is SVG rendered by code with a
-   font file we ship; the product pixels are the brand's own cut-out. V1 makes no paid call of any kind.
+   font file we ship; the product pixels are the brand's own cut-out. Making an infographic makes no paid call
+   of any kind; only a new product brought by an image link goes through today's pipeline and its costs (2.4).
 2. **The module never invents facts.** Every word on the image comes from the business's sheet, exactly as typed
    (byte for byte), after deterministic checks: at most 40 characters, no price, no word on the forbidden list.
 3. **Marketplace rules are data.** Whether a channel takes text on an image, where an infographic may sit and
@@ -51,16 +54,20 @@ Nine rules carry this spec (PLAN C, first-principles decisions 1 to 9, as they a
 4. **Sheet-driven, live products first.** A new infographic batch is a normal batch whose input is a highlights
    sheet read through the existing sheet ingestion. The products' current photos are carried into the batch, so
    nothing already live changes except the new image.
-5. **Never image 1.** The infographic takes the last slot the channel's `max_images` allows, after every brand
-   photo, made photo and scene image. A channel whose row says no text on images gets none, and the sheet says why.
+5. **Never image 1.** The infographic comes after every brand photo, made photo and scene image, at the next free
+   position, and only if that position is within the channel's cap (`max_images`, `infographic_slot`, 5.1). A
+   channel whose row says no text on images gets none, and the sheet says why.
 6. **The product is never covered.** The product mask (the cut-out we already have) is kept clear of every panel,
    letter and logo, with a margin, and this is proved by code on every image.
 7. **Review is for layout only.** Text correctness is checked by code; a person checks layout on the existing
    spot-check card, one person per image, until the brand has 50 clean infographics in a row; then 1 in 20.
 8. **Arabic is V2.** The text is a separate layer from the start, so an Arabic variant is a second render, not a
    redesign (section 10).
-9. **Order of dependencies, not priorities.** This spec needs spec 12 initiative 1 and the Brand DNA page shell;
-   it does not need paid generation, so it can ship before initiative 3 by building the shell itself (0.4).
+9. **Order of dependencies, not priorities.** This spec needs spec 12 initiative 1, the Brand DNA page shell and
+   spec 12's spot-check card (initiative 2, unless the owner types yes to the G-lite card shell); it does not
+   need paid generation, so it can ship before initiative 3 by building the Brand DNA shell itself (0.4). A run
+   over about 50 live products also needs initiative 6's request path, or the owner's typed yes that this spec's
+   carry (2.4) stands in for it (0.4, PLAN E Phase C).
 
 Non-goals (V1):
 - No image model anywhere: no generated background, no generated text, no generated callout (V2 may add a
@@ -115,7 +122,7 @@ live outputs are kept (2.4, 5.3). **Switch:** `INFOGRAPHIC_ENABLED`, the deploy 
 | S12 s8.1, s8.3, s8.4 order, change, sheet | order by `position`, `ls` last; `change` precedence; "What to do" column; "Details" worksheet | `ig` after `ls`; `infographic_added`; "<Channel> infographic" column (5.1, 5.4) |
 | S12 s9.2, s9.6 Brand DNA page and Logos tab | the page `/catalog/brands/[slug]/dna`, admin only, tab pattern, "Add a logo file", approve and retire | the "Brand voice" tab (section 7) |
 | S12 s11.5 evaluation programme | the nightly job, regression set, planted defects, Ops panels | the `infographic` check group (9.4) |
-| S13 s1.5 channel policy | `max_images` (Trendyol 8, Amazon 9, Shein 10, VogaCloset 10, others null) | read for placement (5.1) |
+| S13 s1.5 channel policy | `max_images` (Trendyol 8, Amazon 9, Shein 10, VogaCloset 10, others null) | read for placement (5.1); if spec 13 has not shipped `0006_scene.sql`, this spec's migration adds `max_images` with the same type and seed (`ADD COLUMN IF NOT EXISTS`, check-then-insert seed) and spec 13's migration skips it at its merge (reviewer's proposal, owner to confirm, 12.2 Q17) |
 | S13 s4.2, s4.5 | `composeOnCanvas`, `pasteBackEqual` | used for the product layer and check T8 (3.7, 4) |
 
 If a contract in this table is not on `main` when spec 18 runs, spec 18 stops and reports it (00 section 11),
@@ -148,6 +155,10 @@ except the two named fallbacks of 0.4 (the Brand DNA shell and, if the owner agr
       arrives with initiative 2. If it is not merged, the default is to wait (`Blocked: spec 12 s7.1-s7.5 card not
       on main`); the alternative the owner may type is workstream G-lite, which builds exactly those contracts at
       spec 12's paths (`ReviewCard.tsx`, `catalog/shotset/review.ts`) and nothing of 7.6 (12.2 Q7).
+- [ ] **Runs over about 50 live products.** PLAN E Phase C puts spec 12 initiative 6's request path before any
+      infographic run over about 50 live products. The test run (8.2, about 50 products, `isTest`) needs nothing
+      more. Before the first live highlights batch above 50 rows: initiative 6 merged, or the owner's typed yes
+      that this spec's carry (2.4, 5.3) stands in for it (12.2 Q18). Default: wait.
 - [ ] **G12, highlights sheet columns agreed** with Naaz and Taranum and typed by the owner: the columns of 2.1
       (proposal PLAN G item 3). The parser is built from the agreed list; any change is a spec edit.
 - [ ] **G9, text-on-image rows approved as data** by the owner with the assumed rows marked (1.4). Soft: the seed
@@ -187,21 +198,23 @@ same paragraphs first; the edits below apply to the text they leave.
 8. **R21 L182**: append "Spec 18 infographics are checked by a person per brand until that brand's exit (50 clean
    in a row), then spot-checked 1 in 20."
 9. **Data model heading L830 [L805]**: add "and spec 18's `0007_infographic.sql`" to the list specs 12 and 13 leave.
-10. **Models table L464**: no change. The infographic uses no model; add one row: `| Infographic text (spec 18) |
+10. **Models table L464**: no existing row changes. The infographic uses no model; add one row: `| Infographic
+    text (spec 18) |
     none: SVG composed by code, rendered with resvg-js from shipped font files, composited with sharp |
     catalog-worker | render time only, in the cost ledger (stage render, engine catalog_compute) |`
 11. **Decisions log** (after the last entry): "Spec 18 (owner, <date of typed yes>): infographic images for the
     products the business lists in a highlights sheet (identifier, optional image link, highlight 1 to 3 of at
     most 40 characters each, optional layout and channels); text composed by code exactly as typed, never drawn by
-    an image model, no price and no forbidden word; no person in an infographic; never image 1, last slot within the
+    an image model, no price and no forbidden word; no person in an infographic; never image 1, the next free
+    position within the
     channel's maximum; text-on-image rules per channel are data marked documented, assumed or reported by sellers,
     Noon and Namshi a plain text band with no logo; layouts bottom band, side panel and split in the brand's colours
     and font; the product never covered (proved by code); one person checks layout until the brand has 50 clean in
     a row, then 1 in 20, with relapse; switch `INFOGRAPHIC_ENABLED` off at deploy, enabled per brand; test run on
-    <brand>; V1 makes no paid call."
+    <brand>; making an infographic makes no paid call."
 
-Spec 12 and 13 text this spec needs changed (the manager applies them in the same docs PR; listed so nothing is
-silently assumed):
+Spec 12 and 13 text this spec needs changed (listed so nothing is silently assumed; applied to specs 12 and 13 in
+the docs PR of 2026-10-28 by the review, and the protocol s11 note names 0007 to 0009 as awaiting G0b):
 - S12 s9.2: the tab list gains "Brand voice" after "Kids look"; the summary strip gains "Brand voice: version <k>
   approved".
 - S12 s9.6: the Logos tab notice "Logos are used only to check made photos. They are never given to the photo
@@ -216,19 +229,20 @@ silently assumed):
 
 | Workstream | Worktree suffix | Files owned | Depends on |
 |---|---|---|---|
-| A data and policy | `-a-data` | `drizzle/0007_infographic.sql`, `db/schema.ts`, `types.ts`, `infographic/types.ts`, `infographic/voice.ts` (zod), the channel policy and text rule seeds | spec 12 initiative 1 merged, G0b |
-| B intake | `-b-intake` | `ingest/highlights-sheet.ts` (new), `ingest/detect-step.ts` (sheet kind), `infographic/rows.ts` (validation), `infographic/text-rules.ts`, `infographic/carry.ts`, `infographic/base.ts`, `apps/web/components/catalog/WizardStep2.tsx` (sheet kind line) | A |
+| A data and policy | `-a-data` | `drizzle/0007_infographic.sql`, `db/schema.ts`, `types.ts`, `infographic/types.ts`, `infographic/voice.ts` (zod), `infographic/contrast.ts` (used by the voice schema and T4), the channel policy and text rule seeds | spec 12 initiative 1 merged, G0b |
+| B intake | `-b-intake` | `ingest/highlights-sheet.ts` (new), `ingest/detect-step.ts` (sheet kind), `ingest/links-sheet.ts`, `ingest/google-sheet.ts` and `apps/web/lib/catalog/preview.ts` (the `highlight1` test inside column detection, 2.2), `infographic/rows.ts` (validation), `infographic/text-rules.ts`, `infographic/carry.ts`, `infographic/base.ts`, `apps/web/components/catalog/WizardStep2.tsx` (sheet kind line) | A |
 | C compose | `-c-compose` | `infographic/layout.ts`, `fit.ts`, `svg.ts`, `compose.ts`, `packages/core/assets/fonts/*`, `render.ts` (`renderInfographic`; `composeOnCanvas` if spec 13 is not merged), `apps/worker/src/catalog/infographic-stage.ts`, chunk dispatch in `apps/worker/src/catalog/chunk.ts` | A (B fakes C's contract) |
-| D checks | `-d-checks` | `infographic/checks.ts` (T1 to T9), `infographic/contrast.ts`, `compliance.ts` (the `ig` skip list) | A, C contract |
-| E publish and sheet | `-e-publish` | `pipeline/publish.ts` (placement 5.1), `pipeline/report.ts`, `sheet.ts` ("<Channel> infographic"), `decisions.ts` ("Remove infographic") | A, C |
-| F operator flow and review | `-f-ui` | the step 4 card in `WizardStep4.tsx`, the Products tab statuses, the infographic card variant in `ReviewCard.tsx` and `AttentionProductCard.tsx`, the product page section, the Brand voice tab (`apps/web/app/catalog/brands/[slug]/dna/voice.tsx`), `public/catalog/templates/highlights.xlsx`, operator guide | A, D, E contracts; spec 12 card and page shells |
+| D checks | `-d-checks` | `infographic/checks.ts` (T1 to T9), `compliance.ts` (the `ig` skip list) | A, C contract |
+| E publish and sheet | `-e-publish` | `pipeline/publish.ts` (placement 5.1, carried-source coverage 5.3), `pipeline/report.ts`, `sheet.ts` ("<Channel> infographic"), `infographic/remove.ts` (`removeInfographic`, 5.3) | A, C |
+| F operator flow and review | `-f-ui` | the step 4 card in `WizardStep4.tsx`, the Products tab statuses, the infographic card variant in `ReviewCard.tsx` and `AttentionProductCard.tsx`, the product page section, the Brand voice tab (`apps/web/app/catalog/brands/[slug]/dna/voice.tsx`), the template route `apps/web/app/api/catalog/brands/[slug]/highlights-template/route.ts` (2.1), operator guide | A, D, E contracts; spec 12 card and page shells |
 | I-lite Brand DNA shell (only if initiative 3 is not merged) | `-i-shell` | `apps/web/app/catalog/brands/[slug]/dna/page.tsx`, Logos tab (manual add, approve, retire), the page's admin guard | A |
 | G-lite card shell (only on the owner's typed yes, 0.4) | `-g-card` | spec 12 s7.1 to s7.5 contracts at spec 12 paths, nothing of s7.6 | A |
 | H evals and ops | `-h-evals` | `evals/infographic.ts`, the layout regression set and planted defects, the nightly group, the Ops "Infographics" block, `docs/handover/` notes | C, D, E |
 
 Hot files (one owner at a time; spec 12 and 13 owners merge first and this spec rebases): chunk dispatch
 (`apps/worker/src/catalog/chunk.ts`), `render.ts`, `pipeline/publish.ts`, `pipeline/report.ts`, `sheet.ts`,
-`ingest/detect-step.ts`, `WizardStep4.tsx`, the attention card, the Ops page, the Brand DNA page.
+`ingest/detect-step.ts`, `ingest/links-sheet.ts`, `WizardStep4.tsx`, the attention card, the Ops page, the Brand
+DNA page.
 
 Before using sharp's composite and raw output, `@resvg/resvg-js`, opentype.js, ExcelJS or drizzle migrations, the
 builder fetches current docs through Context7 (00 section 4). Read for this spec on 2026-10-28 through Context7:
@@ -295,8 +309,9 @@ The composed source row (`catalog_source_images`): `kind = 'composed'`, `role = 
 canvas 1792x2400 at `derivedPath(prefix, pathKey, n, "ig")` (`naming.ts:133`), used by the card and the product
 page; `sha256` of that PNG; `derivation = { type: "compose", infographicId, composeKey, layoutVersion }`. The matte,
 render and QA stages skip role `ig` (3.1). Each channel image is a normal `catalog_outputs` row with `n`,
-`position`, flags `infographic`, `compliance.infographic` (the 4 check results in words and numbers) and
-`qa_scores = { kind: "infographic", checks }`, so no `ig` output is ever "unjudged" (`pipeline/publish.ts:107`).
+`position`, flags `infographic`, `compliance.infographic` (the T1 to T9 results of section 4 in words and
+numbers) and `qa_scores = { kind: "infographic", checks }`, so no `ig` output is ever "unjudged"
+(`pipeline/publish.ts:111`).
 
 ### 1.3 Brand voice: `brand_style_profile.body.voice` (table from S12 s1.6)
 
@@ -341,7 +356,13 @@ infographics until a later spec needs them):
 | `text_on_image_source` | text null | URL or document reference, with the date it was read |
 | `infographic_slot` | int null, check `>= 2` | the last position at which an infographic is placed; null = no limit beyond `max_images` (5.1) |
 | `infographic_style` | text `branded,plain_band`, default `branded` | `plain_band`: bottom band only, solid band, text only (3.6) |
+| `infographic_style_status` | text `documented,assumed,seller_reported`, default `assumed` | what the style value rests on |
 | `infographic_logo` | boolean default true | may the brand's logo show on this channel's infographic |
+| `infographic_logo_status` | text `documented,assumed,seller_reported`, default `assumed` | what the logo value rests on |
+| `infographic_rules_source` | text null | source of the style and logo values, with the date it was read |
+
+`allowed` and `assumed_allowed` behave the same; `assumed_allowed` says the channel manager has not confirmed
+the value yet (G9), and `text_on_image_status` says what the value rests on.
 
 Seed (check-then-insert through `ensureChannelPolicies`, filling only nulls, never overwriting an owner's value).
 Every row is from research 2026-10-28, section 1; "[DOC]", "[3P]" and "[NOT FOUND]" there map to `documented`,
@@ -358,6 +379,11 @@ Every row is from research 2026-10-28, section 1; "[DOC]", "[3P]" and "[NOT FOUN
 | styli | assumed_allowed | assumed | not found; managed by the Styli account team (section 1) | branded | true |
 | centrepoint | assumed_allowed | assumed | not found; vendor-managed (section 1) | branded | true |
 | sixthstreet | assumed_allowed | assumed | not found (section 1) | branded | true |
+
+Style and logo status seed: noon both `documented` (section 1, Noon: "No logos, watermarks, unwanted text";
+"Only photographs are permitted"); namshi both `assumed` (section 1, Namshi, treated as noon); amazon logo
+`seller_reported` (section 1, Amazon, eComEngine "text, graphics, logos"), style `assumed`; every other channel
+both `assumed` (section 1, not found). `infographic_rules_source` carries the same section reference.
 
 `infographic_slot` is null on every row (12.2 Q4 asks about Amazon, where sellers report that the first 7 of up to 9
 images show, research 2026-10-28, section 1, Amazon, "Counts"). Noon's "only photographs" rule is why its rows start
@@ -429,16 +455,23 @@ only), so "Highlight 1", "highlight_1" and "HIGHLIGHT-1" are the same column.
 | `channels` | no | channel names as in SPEC L224 (Noon, Namshi, Trendyol, Styli, Centrepoint, 6thStreet, VogaCloset, Shein, Amazon), separated by `,` or `;`; limits this product's infographic to those channels among the ticked ones |
 
 There is no price column, no description column and no free-form notes column. Extra columns are ignored and listed
-once ("Columns not used: <names>."). A downloadable template with these headers, one example row and an
-instructions sheet (the 2.3 rules in plain words, and "Words this brand uses: <keyword family>" filled per brand
-when downloaded from the product's brand page) is served at `/catalog/templates/highlights.xlsx`; the operator
-guide links it.
+once ("Columns not used: <names>."). A template with these headers, one example row and an instructions sheet
+(the 2.3 rules in plain words, and "Words this brand uses: <keyword family>" from the brand's approved Brand
+voice, or that line left out when none is approved) is generated per brand by
+`GET /api/catalog/brands/[slug]/highlights-template` (operator and admin). Links "Download the highlights
+template for <brand>" sit on the brand page and on wizard step 1 once a brand is picked. The operator guide
+links a generic copy without brand words. The template is not served under `/catalog/templates`, which is spec
+20's listing-files page.
 
 ### 2.2 Detection as a third sheet kind
 
 `ingest/detect-step.ts` reads every sheet as today. A sheet whose header row (found by the SPEC L268 rule) contains
 `highlight1` is read as a **highlights sheet**, whatever else it contains; its `image_link` column is never read as
-a shot column. "Check what we found" shows "Sheet `<name>`: identifier column `<header>`, <h> highlight columns,
+a shot column. The `highlight1` test runs inside column detection itself (`ingest/links-sheet.ts` detectColumns,
+`ingest/google-sheet.ts` and `apps/web/lib/catalog/preview.ts`), before URL-column detection, and records
+`detected.kind = 'highlights'` with no URL columns, so neither the links-sheet reader nor the product-list kind
+ever reads the sheet for shots. "Check what we found" shows "Sheet `<name>`: identifier column `<header>`, <h>
+highlight columns,
 read as highlights sheet" with Change (the kind is a real control, as SPEC L275-276 says for the other two kinds).
 A batch takes at most one highlights sheet (a second one: "Use one highlights sheet per batch. <name> was not
 read."). A highlights sheet can sit beside photo uploads or a links sheet in the same batch; the photos then belong
@@ -452,7 +485,10 @@ model takes part in detection, matching or validation (SPEC L85-87); all of it i
 
 `checkHighlightRow(row, ctx)` in `infographic/rows.ts`, in this order; every failure is collected (not first-stop),
 stored in `problems`, shown in step 2 and step 4 "Details", and written to the links sheet "Details" worksheet with
-the row number. Nothing is corrected silently.
+the row number. Nothing is corrected silently. Channels are ticked on step 3, so the checks run in two passes:
+step 2 runs every rule except the channel-scope part of rule 7 and the "not ticked" part of rule 9; those run
+after step 3 and appear in the step 4 card as "<n> rows changed after you picked marketplaces:" with their
+sentences. A channel not ticked only drops that channel for the row, never the whole row.
 
 1. **Identifier.** Empty: "Row <r>: no identifier." Duplicated in the sheet: the first row is used and the others
    get "Row <r>: <identifier> appears again in row <first>; the first row is used." (SPEC L277-278 rule).
@@ -497,21 +533,30 @@ the row number. Nothing is corrected silently.
   batch (the existing lock rule); it is never skipped silently.
 
 **Carrying current photos (`infographic/carry.ts`).** `planPublish` deletes a live output whose `n` has no source
-row in the batch (`pipeline/publish.ts:63`), so a batch that brings no photo for a product would delete its live
+row in the batch (`pipeline/publish.ts:67`), so a batch that brings no photo for a product would delete its live
 images. For every matched product without new photos in the batch, the batch re-inserts each current source of the
 product (brand, and spec 12 and 13 made sources by their own carry rules, S12 s3.5, S13 s2.4) as a source row of the
 batch with the same `n`, `sha256`, `raw_uri`, `matte_uri`, `kind`, `role`, `detection` and `derivation`, status
-`matted` (no download, no matte call). The render stage then finds a live output with the same key and makes
-nothing (`apps/worker/src/catalog/chunk.ts:306-307`), so brand outputs stay `kept` and are not copied again. A
+`matted` (no download, no matte call), marked `derivation.carried = true`. Live outputs made under an earlier
+`CHANNEL_RULES_VERSION` or matte policy do not match today's `renderKeys`, so the render key alone is not
+enough: in the matte-stage skip (`apps/worker/src/catalog/chunk.ts:299-307`) and in `missingPairs`
+(`pipeline/publish.ts:95-99`), a carried source counts as covered on a channel when a live output exists at that
+channel and `n` whose source sha256 equals the carried sha256, whatever its render key. No output is created for
+a carried source on a ticked channel where the product has no live output at that `n` (the infographic is then
+not added there, 4.3 "no product photo is on this marketplace yet"). Brand outputs stay `kept`, are not
+rendered, judged or copied again, and the product's `change` stays `unchanged` for them. A
 product that also has new photos in the batch follows today's overwrite rule for its photos (SPEC R14), and its
 infographic is composed from the new current set. The carry runs in the collect step, before grouping is shown,
 so step 4 counts are exact. Spec 12 initiative 6 ("already live, on request") shares this function.
 
 **Batch behaviour.** A highlights-sheet batch (`options.infographic.sheetDriven`) makes infographics and nothing
-else new: spec 12's shot-set planning runs in report mode only (no crop, no generation; `options.shotSet` absent),
-and spec 13's scene step is off (`options.scene.mode = 'off'`), so a highlights batch never spends on paid calls.
-Carried made photos and scene images stay as they are. A new product brought by an image link is processed by the
-normal pipeline (matte, render, QA judge), whose costs are today's.
+else new: spec 12's shot-set planning runs in report mode only (no crop, no generation; `options.shotSet` absent;
+its report goes to "Details" only), and spec 13's scene step makes nothing (`options.scene.tickDefault = 'none'`
+and every product's `scene_choice` stays `none`, spec 13 s1.3), so matched products cost no paid call. Step 4
+of a highlights batch does not render spec 12's "Extra shots" card or spec 13's "Scene images" card and its
+"More options" scene choice, so no tick or cost line is shown that the batch would ignore. Carried made photos
+and scene images stay as they are. A new product brought by an image link is processed by the normal pipeline
+(matte, render, QA judge), whose costs are today's and are shown on step 4.
 
 **Base photo (`infographic/base.ts`).** The base is one current brand source of the product with no person, chosen
 in this order:
@@ -552,9 +597,13 @@ right without reading. The flow adds no screen of its own. A batch with no highl
 5. **Plan on step 4** (`WizardStep4.tsx`): one card "Infographics", shown only when the batch has a highlights
    sheet, with no input on it:
    - first line, bold: "Infographics: 42 products carry highlights. Each gets one infographic, shown last.";
-   - second line, by the brand's phase (6.2): "A person checks each one until this brand has 50 good ones in a
-     row." or "They go live once they pass our checks. We check 1 in 20 by hand.";
-   - third line: "The words come from your sheet exactly as typed. No extra cost.";
+   - second line, by the brand's phase (6.2): `brand_new` "A person checks each one until this brand has 50 good
+     ones in a row."; `spot` "They go live once they pass our checks. We check 1 in 20 by hand."; `test_run`
+     "Test run: a person checks every infographic."; `paused` "Automatic publishing is paused: a person checks
+     each one before it goes live."; `relapse` "A person checks each one again until this brand has 50 good ones
+     in a row.";
+   - third line: "The words come from your sheet exactly as typed. Infographics cost nothing extra." and, when
+     new products come by image link, "<d> new products are processed as usual: about <x> USD.";
    - when the brand's voice is not approved: "Infographics are switched off for this brand. An admin switches them
      on in the brand's Brand DNA page, Brand voice tab." (and no infographic is planned);
    - "Details" (closed): "<b> rows were left out:" with the 2.3 sentences; "<c> products have no photo without a
@@ -643,7 +692,8 @@ Per channel, in this order, the first layout whose text fits (3.5) and whose che
    `bottom_band`; otherwise `split`, `bottom_band`, `side_panel`.
 A requested layout that did not fit falls back to the auto order and the product page and Details note say "Made
 with the <used> layout: the <requested> layout did not fit on <Channel>." (`infographic_layout_retry` signal).
-No layout fits on any ticked channel: not made, `does_not_fit`.
+No layout fits on any ticked channel: not made, `does_not_fit` when T7 (text size) was the last failure on
+every layout, `product_small` when T8 (b) was.
 
 ### 3.5 Text fitting (`infographic/fit.ts`, code only)
 
@@ -736,10 +786,12 @@ estimate with it (8.2).
 | T5 | Logo present when the brand asks | when the voice names a logo and the channel allows it: the logo layer is non-empty, its sha equals the approved mark version's file, its width is at least 6% of the canvas width, and it is inside S | `ig_logo_missing` |
 | T6 | No forbidden word or price | the 2.3 rule 7 match, run again on the stored texts with the rules enabled at compose time | `ig_forbidden_word` |
 | T7 | Readable size | font size at least `IG_MIN_FONT_PX` (3.5) | `ig_does_not_fit` (try the next layout) |
-| T8 | Product unchanged and large enough | (a) `pasteBackEqual` (spec 13 s4.5) between the product layer and the scaled cut-out: every pixel with placed alpha 255 has exactly the cut-out's RGB; (b) the product box's share of the canvas area is at least 0.6 of its share in the same source's plain output on that channel (from that output's `canvas`, `scale`, `placed`), so an infographic never shrinks the product by more than 40% | (a) `ig_product_changed`; (b) `ig_product_small` (try the next layout) |
+| T8 | Product unchanged and large enough | (a) `pasteBackEqual` (spec 13 s4.5) between the product layer and the scaled cut-out: every pixel with placed alpha 255 has exactly the cut-out's RGB; (b) the product box's long side as a share of the canvas's matching side is at least 0.6 of the same share in that source's plain output on that channel (from that output's `canvas`, `scale`, `placed`), a linear bar: an area bar would reject most mid-aspect products, because the plain render fills the whole safe box | (a) `ig_product_changed`; (b) `ig_product_small` (try the next layout) |
 | T9 | Output rules | `checkOutput` with the `ig` skip list (3.7) passes; the output is not at position 1 (5.1) | the compliance code |
 
-T7 and T8 (b) send the composition to the next layout of 3.4; every other failure ends that channel's image.
+T7 and T8 (b) send the composition to the next layout of 3.4; every other failure ends that channel's image
+only (output `skipped`, note "Not added: <the product sentence of 4.3 for that reason>"). The product is
+`not_made` with that reason only when no channel produced an image. A T9 failure is a `code_fault`.
 A check that cannot run (a font file missing, a buffer that cannot be decoded) is a failure, never a pass.
 
 ### 4.2 Why a person does not check the words
@@ -755,8 +807,9 @@ An infographic that fails is never published, never waits on a card and never ho
 - `no_base_photo` "this product has no photo without a person, and infographics use a product-only photo."
 - `base_unusable` "the product photo is too small or its cut-out is not clean enough to place text beside it."
 - `does_not_fit` "the highlights are too long to fit at a readable size. Shorten them in your sheet."
+- `product_small` "the product would be too small next to the highlights. Try fewer or shorter highlights."
 - `brand_off` "infographics are switched off for this brand."
-- `code_fault` (any T1, T2, T3, T5 or T8 (a) failure; event alerted, 11.2) "our fault: we make it again by
+- `code_fault` (any T1, T2, T3, T5, T8 (a) or T9 failure; event alerted, 11.2) "our fault: we make it again by
   ourselves." Once the fault is fixed, the product's next batch composes it again with no operator action; there is
   no "Try again" for a code fault.
 - `low_contrast` (T4 at compose time, which approval should prevent) "the brand's text and panel colours are too
@@ -776,7 +829,7 @@ Per channel (output `skipped`, sheet note "<Channel> img <n>: <sentence>", or "<
 - past `infographic_slot` (5.1): "Not added: on this marketplace an infographic would sit after the photos shoppers
   see."
 - no layout fits on this channel: "Not added: the highlights are too long to fit on <Channel>. Shorten them in your
-  sheet."
+  sheet." (or, after T8 (b), "Not added: the product would be too small next to the text on <Channel>.")
 A product made on some channels and not added on others is `ready` or `live` with those notes.
 
 ## 5. Placement, publish, carry, links sheet, product page
@@ -791,15 +844,15 @@ gains "then role `ig`"). It never moves another image, never takes position 1 (a
 the channel gets none, 4.3), and brand photos are never dropped for it. When both a scene image and an infographic
 would pass the cap, the scene image keeps its slot and the infographic is not added (default, 12.2 Q5). A
 channel whose `text_on_image` is `not_allowed`, or that the row's `channels` leaves out, gets an output row with
-status `skipped` and its sentence, so `missingPairs` (`pipeline/publish.ts:91`) never fires for `ig`.
+status `skipped` and its sentence, so `missingPairs` (`pipeline/publish.ts:95`) never fires for `ig`.
 
 ### 5.2 Publish, change, lock
 
 - `planPublish` receives the composed source like any source, so a live infographic's outputs are not deleted when
-  it is carried (`pipeline/publish.ts:63`). A `ready` infographic's outputs are `staged` with the infographic
+  it is carried (`pipeline/publish.ts:67`). A `ready` infographic's outputs are `staged` with the infographic
   `qa_scores` and publish with the product in one publish.
 - **Waiting for a person.** While `state = in_review`, its outputs are `needs_attention` with no decision; the hold
-  test of `publishProduct` (`pipeline/publish.ts:107-108`) gains the clause `igPending(o) = source(o).role === 'ig'
+  test of `publishProduct` (`pipeline/publish.ts:111-112`) gains the clause `igPending(o) = source(o).role === 'ig'
   && infographic.state in ('composing','checking','in_review') && o.decision === null`, joined to spec 12's
   `madePending` (S12 s6.3) the way spec 13's `lsPending` is. Pending infographic outputs hold nothing, are not good
   shots and are not copied; carried brand photos stay live and the product's `change` is `pending_review` ("Brand
@@ -821,19 +874,32 @@ status `skipped` and its sentence, so `missingPairs` (`pipeline/publish.ts:91`) 
   `derivation`) when the new `compose_key` equals the stored one: the base photo is still current, the current
   highlights row is the same, the voice profile version, font sha, logo mark version, `INFOGRAPHIC_LAYOUT_VERSION`
   and the channel rows read are unchanged. Its outputs keep their keys and nothing is copied. The answer it got
-  (6.2) carries with it.
+  (6.2) carries with it. A carried composed source gets no new output rows, and its live outputs carry the key
+  `sha256(compose_key | channel | n)`, which `renderKeys` never produces, so `missingPairs`
+  (`pipeline/publish.ts:95-99`) counts a (role `ig` source, channel) pair as covered when a live output at that
+  channel and `n` has that key, or when the batch holds an output row for it. The carry also writes a `skipped`
+  output row with the stored sentence for every ticked channel where the previous version was not added.
 - **New version.** Any difference makes a new composition: same `n` (so the same public link), `version + 1`, all
   checks again, the review rule of 6.2 again; the output `render_key` is `sha256(compose_key | channel | n)`, so the
   publish overwrites the bytes at the same link and `change` is `updated`. Causes: a new sheet row for the product
   (event `infographic_updated`, the older row `superseded`), a replaced base photo (the next current base by 2.4),
   a new voice version (applies on the product's next batch only; nothing re-composes on approve, 12.2 Q15), or a new
   layout version (applies on the next batch; the nightly eval shows the diff first, 9.4).
-- **Removal.** A sheet row with layout `none`, or "Remove infographic" on the product page (operator or admin; the
-  product must not be locked: "Locked by a running batch" otherwise): decision `remove` on every infographic
-  output of the product through the decisions path, a publish under the re-taken lock that deletes those objects
-  inside the product's prefix, the source not current, `state = not_made` (`removed`), event
-  `infographic_retired`, `change = shots_removed`, note "Infographic removed by <a person | the highlights sheet>."
-  The private files stay.
+- **Removal**, two routes. `applyDecision` accepts only undecided outputs (`decisions.ts:44-51`), and publishing
+  an older batch again would delete photos a newer batch added (`pipeline/publish.ts:67`), so neither route goes
+  through the decisions path:
+  - A sheet row with layout `none`: the batch does not carry the composed source, so `planPublish`'s existing
+    delete rule (no source at that `n`) deletes its live outputs on the batch's ticked channels inside the
+    product prefix. The note says "Infographic removed by the highlights sheet on <channels>. Marketplaces not
+    ticked keep it until a batch ticks them."
+  - "Remove infographic" on the product page (operator or admin): `removeInfographic(productId, actor)` in
+    `infographic/remove.ts`, under the product row lock and refused while `lock_batch_id` is set ("Locked by a
+    running batch"), deletes only the live role `ig` outputs with `deletePublicObject` inside
+    `assertWithinProduct`, marks them skipped and not live, sets the composed source not current, writes
+    `infographic_retired` and enqueues finalize for a new sheet version; it never calls `publishProduct` for an
+    older batch.
+  Both end with `state = not_made` (`removed`), `change = shots_removed` and the note "Infographic removed by <a
+  person | the highlights sheet>." The private files stay.
 - **Base gone.** When the base source is no longer current and no other base qualifies, the infographic is retired
   in the publish that removes the base, with "Infographic removed: its product photo was removed."
 
@@ -868,12 +934,20 @@ Products tab statuses (one per product, S12 s2.4 pattern):
 | "Infographic live" | `live` on at least one channel | none |
 | "No infographic: <short reason>" | `not_made` | "Open" (product page) |
 
+Short reasons: `no_base_photo` "no product-only photo", `base_unusable` "photo not usable", `does_not_fit`
+"highlights too long", `product_small` "product too small", `brand_off` "off for this brand", `code_fault` "our
+fault, we retry", `low_contrast` "colours too close", `forbidden_word` "word not allowed", `spot_check_expired`
+"check not done in time", `removed` "removed", `superseded` "replaced by a newer row".
+
 Product page section "Infographic" (`apps/web/app/catalog/products/[brand]/[key]/page.tsx`), only for a product
 that has or had one: the status line ("Infographic: being made", "being checked", "waiting for a spot check", "live",
 "not made", "removed"); the highlights as stored ("From your highlights sheet, row <r> of <sheet>, <date>"); per
 channel a thumbnail with "Live", "Not added: <sentence>" or "Waiting"; "Layout: <words>" and any fallback note;
 "Version <k>" with the earlier versions under "Earlier versions" (thumbnail, highlights, date); "Remove infographic"
-(5.3). Under "Show how this product was worked out": the base photo with "Base photo: photo <n> (<how it was
+(5.3), which first asks "Remove this infographic from <channels>? Its links stop working at once. Re-submit this
+product's images on <channels> afterwards so the marketplace drops it." with "Remove" and "Cancel"; afterwards
+the status line reads "Infographic: removed. Re-submit images on <channels>." Under "Show how this product was
+worked out": the base photo with "Base photo: photo <n> (<how it was
 chosen>)", and each check in words ("Words exactly as in your sheet", "Text inside the marketplace's safe area",
 "Product not covered", "Contrast 7.2", "Logo placed").
 
@@ -972,12 +1046,16 @@ only (0.4).
 - "Font": a select of the five fonts of 3.6, each shown as a sample line in that font ("Cushioned footbed").
 - "Logo": "Which logo" (the brand's approved logo or wordmark files from "Logos and marks"; only uploaded files are
   offered) and "Where" ("Top left", "Top right", "Bottom left", "Bottom right", "No logo"). Help: "Never shown on
-  Noon or Namshi, which do not allow logos on images."
+  Noon or Namshi, which do not allow logos on images." With no uploaded file: "No logo file yet. Add one on Logos
+  and marks." with a link, and "Where" fixed to "No logo".
 - "Default layout": "Choose for each product (recommended)", "Bottom band", "Side panel", "Split"; "Panel side":
   "Right", "Left".
 - "Preview": the three layouts rendered by the real engine on the brand's most recent product photo that qualifies
   as a base (2.4), with the sample highlights "Cushioned footbed", "Breathable canvas upper", "Rubber sole", on a 3:4
-  and a 1:1 canvas (no ledger row; a preview is never stored as an output).
+  and a 1:1 canvas (no ledger row; a preview is never stored as an output). While rendering: "Making the
+  preview...". With no qualifying base photo, the layouts show on a neutral sample cut-out shipped with the code,
+  with the line "Shown on a sample product: this brand has no product photo without a person yet, so its products
+  get no infographic."
 - "Approve": zod validation (1.3) plus the database checks; makes a new `brand_style_profile` version with
   `approved_by` (event `brand_dna_approved`, signal `voice_versioned`) and lists it under "Versions". Warnings before
   approve: no logo chosen ("Infographics will have no logo."), the switch off.
@@ -1066,7 +1144,9 @@ above 5 s per image: fix before the next batch.
   infographic at position 2 or later.
 - Carry: a highlights-only batch for a live product re-inserts every current source with the same `n` and sha,
   renders nothing for them, deletes nothing, and the publish copies only the infographic outputs; the batch has no
-  shot-set generation and no scene step.
+  shot-set generation and no scene step (`tickDefault = 'none'`, no "Scene images" or "Extra shots" card); live
+  outputs made under an older `CHANNEL_RULES_VERSION` and another matte model give zero renders, zero QA calls and
+  zero copies.
 - Layout geometry, for all nine channels and all three layouts: S, regions and gutters from 3.3; the product fits
   0.92 of its region and never above 1.5x; Styli bottom-centre.
 - Fitting: the largest size that fits; the floor per channel (Noon 30, Trendyol 34, Amazon 56, Centrepoint 84);
@@ -1082,7 +1162,8 @@ above 5 s per image: fix before the next batch.
   character changed, one dropped, two highlights swapped, a straight quote turned curly, a trailing space added,
   a `.notdef` glyph), T4 (4.49 fails, 4.5 passes, computed exactly), T5 (logo asked and missing, wrong sha, too
   small, outside S), T6 (a rule enabled after intake), T7, T8 (a) (one product pixel changed by one level fails;
-  blended edge pixels are not compared) and (b) (a product shrunk past 0.6 of its plain share), T9 (position 1
+  blended edge pixels are not compared) and (b) (a product's long-side share below 0.6 of its plain share; a
+  square-canvas shoe pair and an upright bag at aspect 0.7 to 1.3 pass in `bottom_band`), T9 (position 1
   refused; the `ig` skip list exactly the four codes; other roles unchanged on existing fixtures).
 - Plain band: Noon and Namshi get `bottom_band` only, no logo, no bullet, no shape; a row asking for `side_panel` is
   made as a band there and as a side panel elsewhere, with the fallback note.
@@ -1092,8 +1173,10 @@ above 5 s per image: fix before the next batch.
 - Publish and change: `infographic_added` precedence; `pending_review` while waiting, brand photos live, lock
   released at finalize; "All good" re-takes the lock and publishes only the infographic inside the product prefix
   and the batch's channels; 409 after a newer batch, then `superseded`; carry with an equal `compose_key` copies
-  nothing; a new sheet row makes version 2 at the same `n` and link with `change = updated`; removal deletes only
-  that product's infographic objects and records `infographic_retired`.
+  nothing and a second batch ends `unchanged`, not `pending_attention`; a new sheet row makes version 2 at the
+  same `n` and link with `change = updated`; removal by layout `none` and by `removeInfographic` deletes only
+  that product's infographic objects and records `infographic_retired`, and a photo n=3 a newer batch added stays
+  live.
 - Review: the sample is 1 in 20 within 1 point over 10,000 synthetic product ids and stable per id; `review_all`,
   `paused` and `relapse` always go to a person; the run counts to 50 and exits; a non-`words` reason resets and, in
   an automatic brand, relapses; `words` neither counts nor resets; "Try another layout" twice then only removal; the
@@ -1272,7 +1355,7 @@ against 3.8, the first live highlights batches and their re-submission counts, t
 | 2 | Where the words come from | The business's highlights sheet only, exactly as typed, at most 40 characters, no price, forbidden words as data (PLAN C2, G3) |
 | 3 | Input path | A highlights sheet through the existing sheet ingestion, live products first; current photos carried unchanged (PLAN C4) |
 | 4 | Output | The links sheet: the infographic at its position in the image columns and in "<Channel> infographic", plus the product page (MEET 59; PLAN C, R3) |
-| 5 | Placement | Never image 1; the last slot `max_images` allows, after every other image; per-channel rows as data (PLAN C5) |
+| 5 | Placement | Never image 1; after every other image at the next free position, within `max_images` and `infographic_slot`; per-channel rows as data (PLAN C5) |
 | 6 | Noon and Namshi | `assumed_allowed`, plain text band over the unchanged product photo, no logo, until the channel manager answers (PLAN G2; research 2026-10-28, section 1) |
 | 7 | Other channels | `assumed_allowed` with the status the research supports (1.4) |
 | 8 | Review | Layout only, on spec 12's card, one person per image; per-brand exit after 50 clean in a row, then 1 in 20; relapse (PLAN C6) |
@@ -1312,6 +1395,11 @@ against 3.8, the first live highlights batches and their re-submission counts, t
     infographic of the brand at once (which would make every one a re-submit)?
 16. Q16. Stop rule 4 pull-back: the module lists live infographics per channel; removing them from a portal stays
     manual. Enough, or does the business want a bulk "remove all infographics on <Channel>" admin action?
+17. Q17. If spec 13 has not shipped when this spec merges, this spec's migration adds `max_images` (0.3) so
+    placement can respect channel caps. Accept, or make spec 13's migration a hard prerequisite? Default: add it
+    here (reviewer's proposal).
+18. Q18. Live highlights batches over about 50 products before spec 12 initiative 6 is merged: wait (default),
+    or accept this spec's carry as the request path (0.4)?
 
 ### 12.3 Prototype screens that need changes
 

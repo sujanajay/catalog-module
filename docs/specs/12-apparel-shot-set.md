@@ -323,6 +323,7 @@ join would let `planPublish` delete a made photo. The per-kind detail varies and
 // catalog/shotset/types.ts
 export const SHOT_ROLES = ["fm","fl","fc","bh","hs","bl","fw","bw","dt","pk","fb","ls","flat","chart","other"] as const;
 export const SOURCE_KINDS = ["brand","derived","generated"] as const;
+// Spec 18 (its migration 0007) adds SOURCE_KINDS `composed` and SHOT_ROLES `ig`; this spec does not add them.
 export const HEAD_STATES = ["full","none","cut","na"] as const;
 export const DEPARTMENTS = ["tops","knit_sweat","outerwear","dresses_jumpsuits","bottoms","active_top","active_bottom",
   "lingerie_underwear","sleep_lounge","swimwear","multipack","kids","unknown"] as const;   // 3.6
@@ -443,8 +444,9 @@ L331), `crop_min_px` and `crop_min_px_no_upscaler` (crop size bar), `ai_disclosu
 only; `xmp_and_sheet`: also "yes" in the links sheet's "AI-made" column for that channel; default `xmp`
 until a channel publishes a rule), `status` (`confirmed,assumed,proposed`), `updated_by`, `updated_at`.
 Seeded check-then-insert by `ensureChannelPolicies` (the `ensureDefaultPolicies` pattern, `qa/policy.ts:35`),
-never overwriting a row. Spec 18 adds the channel policy columns `text_on_image` and `infographic_slot`
-(owner decision, 2026-10-28). Admin-only `PUT /api/catalog/channel-policy/[channel]/[department]` edits a row; the
+never overwriting a row. Spec 18 adds the channel policy columns `text_on_image` (with its status and source),
+`infographic_slot`, `infographic_style` and `infographic_logo` (each with its status) (spec 18 s1.4; owner
+decision, 2026-10-28). Admin-only `PUT /api/catalog/channel-policy/[channel]/[department]` edits a row; the
 Ops page shows both tables read-only. A product whose audience is a kids age band uses the `kids` rows
 whatever its garment; a multipack uses the `multipack` rows.
 
@@ -822,7 +824,9 @@ Amber lines, first level, shown only when they need the operator before Start (o
 
 "More options" (closed by default; shown only when making is possible for the batch): a tick box "Do not make
 new photos for this batch" with the help "Only cuts from bigger photos are done." (sets `generate` false), and
-spec 13's scene choice "Make them (recommended)", "Still life only", "Not this time".
+spec 13's scene choice "Only the products I tick" (the default), "Every product that can have one", "A still
+life for every product that can have one" (`options.scene.tickDefault`, spec 13 s2.5). A highlights-sheet batch
+(spec 18) shows neither the "Extra shots" card nor spec 13's "Scene images" card.
 
 If detection could not run (daily cap, model unavailable), the card reads "We could not check this batch
 yet. It will be checked after you start; only cuts from bigger photos will be done." and making is off for
@@ -1666,7 +1670,8 @@ reviewer_fix` and `fix_round` (5.3); every request and refusal writes a `catalog
 
 `position` per output is written by the plan stage: the channel's required roles in its order, each filled
 by the first live-able source of that role (brand before derived before generated, then lowest `n`), then
-every other source by `n`, then role `ls` after all others (spec 13). Rules: position 1 is never a source
+every other source by `n`, then role `ls` after all others (spec 13), then role `ig` after all others (spec 18).
+Rules: position 1 is never a source
 with `cut_state` other than `ok` when any uncut source of the channel's image-1 role for the product's
 department exists (1.4: for example `fm` or `fl` for tops, `fw` or `fl` for bottoms, `pk` for a multipack,
 `flat` for kids, lingerie and swimwear); a size chart keeps today's handling (`chart_image`). In `report` mode positions equal today's `n` order. A change in order with no new image is
@@ -1779,9 +1784,10 @@ itself from the brand's photos and website. You confirm what is right, remove wh
 missing. Nothing here is used until you approve it.", a summary strip ("Logos: 3 approved, 2 suggestions",
 "Brand words: 4 approved", "Models: 2 approved", "Look: version 2 approved", "Scenes: version 1 approved",
 "Kids look: version 1 approved"), and the tabs "Logos and marks", "Brand words", "Models", "Look",
-"Scenes", "Kids look", "Delete".
+"Scenes", "Kids look", "Brand voice" (spec 18), "Delete"; the summary strip gains "Brand voice: version <k>
+approved" (or "Brand voice: not set") once spec 18 ships.
 
-A further tab, "Brand voice", is announced here and defined and built by spec 18 (infographic images), not by
+The "Brand voice" tab is announced here and defined and built by spec 18 (infographic images), not by
 this spec (owner decision, 2026-10-28): the brand's keyword family (for example sports and running, lifestyle,
 kids fashion), its brand colours, a font picked from a safe list, where the logo goes, and the default
 infographic layout. Nothing on "Brand voice" is read by any check or image maker of this spec.
@@ -1896,7 +1902,9 @@ brand's rights row ends, the brand leaves or the brand asks.
 ### 9.6 Logos and marks, brand words (used only by checks; new)
 
 - **Logos and marks** tab: the fixed notice "Logos are used only to check made photos. They are never given
-  to the photo maker, so a logo is never added to a product that does not have one."; "Add a logo file";
+  to the photo maker, so a logo is never added to a product that does not have one. An approved logo file may
+  also be placed by code on the brand's infographics (spec 18); it is never given to an image maker." (the
+  second sentence once spec 18 ships; owner to confirm, spec 18 s12.2 Q9); "Add a logo file";
   "Suggestions (<n>)" with "Cut from the logo areas of the brand's own photos and grouped by look.": one row
   per candidate `brand_dna_mark` with three example crops, "Seen on <n> products", a "Name" field
   ("For example: Cat logo"), "This is a logo" and "Not a logo" ("Not a logo" sets `rejected`; it is not

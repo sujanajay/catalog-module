@@ -80,24 +80,37 @@ sellers, blogs) or `assumed` (the writer's inference, or nothing public found). 
 | SPEC / spec 06 | `SheetSpec` and `SheetRow` (`sheet.ts:10-27`), links by channel in shot order, `writeLinksXlsx`, `fillProductListWorkbook` (the pattern of filling a supplied workbook), finalize's claim, attempt paths and snapshot check (`apps/worker/src/catalog/finalize.ts`), `exportPath` and `batchPrefix` (`naming.ts:108,143`), `report-v<k>.json` `exports` | the fill step inside finalize, `exports.templateFills` in the report, the Details block |
 | Spec 12 initiative 1 | detection outputs on `catalog_products` (department, audience, garment length), links placed by `position` (s8.4), the "Details" worksheet (s8.4), `catalog_channel_policy` with `recommended_count` and its admin `PUT` route pattern (s1.4) | template matching on department; image minimum read from the template or the policy |
 | Spec 13 (optional) | `catalog_products.subcategory` and `audience` (s1.3) | template matching on subcategory when present |
-| Spec 19 V1 | product facts: per product and attribute a value (or `unknown`), a source, a confidence and the evidence | facts read through bindings (4.5) |
-| Spec 19 V2 (optional) | channel vocabulary map: canonical value to channel value per channel, category and attribute, with a status | enum cells mapped through it (4.5) |
+| Spec 19 V1 | `readProductFacts`, `ProductFactsRecord`, `FactValue` with its `trusted` flag, `FACTS_CONTRACT_VERSION = 1` (spec 19 s6.6) | facts read through bindings (4.5) |
+| Spec 19 V2 (optional) | `mapFactsToChannel` and `ChannelFactValue` (spec 19 s6.6, s9.6): channel value per channel, channel category and attribute, with its `mapping` status and `reason` | enum cells mapped through it (4.5) |
 
-**Assumed spec 19 contract** (spec 19 is written in parallel; if its merged names differ, spec 20 adapts to
-spec 19 and records the mapping in its report):
+**Spec 19 contract taken** (spec 19 s6.6 owns it; quoted here so this spec reads alone; spec 19 wins on any
+difference, and a change there bumps `FACTS_CONTRACT_VERSION`):
 
 ```ts
-// from packages/core/src/catalog/facts/ (spec 19 V1)
-export interface ProductFact { productId: string; attribute: string;          // canonical key, e.g. "sleeve_length"
-  value: string | null;                                                       // null = unknown
-  source: "photo" | "brand_sheet" | "operator" | "master";
-  confidence: number;                                                         // 0..1; 1 for brand_sheet, operator, master
-  needsConfirmation: boolean; evidence: unknown; version: string }
-export function getProductFacts(db: Db, productIds: string[]): Promise<Map<string, ProductFact[]>>;
-// spec 19 V2
-export function mapToChannel(db: Db, q: { channel: ChannelId; category: string; attribute: string;
-  value: string }): Promise<{ value: string; status: "documented" | "seller_reported" | "assumed" } | null>;
+// packages/core/src/catalog/facts/contract.ts (spec 19 V1)
+export const FACTS_CONTRACT_VERSION = 1;
+export interface FactValue { attribute: Attribute; status: FactStatus; source: FactSource;
+  valueKey: string | null; valueText: string | null; value: unknown | null;
+  label: string | null; confidence: number | null; trusted: boolean;
+  vocabularyVersion: number; evidence: { photoN?: number; sheet?: string; row?: number } }
+export interface ProductFactsRecord { productId: string; brandSlug: string; identifier: string;
+  optionIdStyleColor: string | null; group: DepartmentGroup; facts: Partial<Record<Attribute, FactValue>> }
+export function readProductFacts(db: Db, productIds: string[]): Promise<ProductFactsRecord[]>;
+// spec 19 V2; declared in V1 and throws "not built" until V2 ships
+export interface ChannelFactValue { attribute: Attribute; channelValue: string | null;
+  channelValueId: string | null;
+  mapping: "documented" | "confirmed" | "seller_reported" | "assumed" | "none";
+  reason: "ok" | "unknown_fact" | "not_trusted" | "no_mapping" | "assumed_mapping" }
+export function mapFactsToChannel(record: ProductFactsRecord, channel: ChannelId,
+  channelCategory: string): Promise<ChannelFactValue[]>;
 ```
+
+Spec 20 reads facts only through `readProductFacts`, never from the facts tables. The fill checks
+`FACTS_CONTRACT_VERSION === 1` at start; any other value makes every fill of the run `failed` with "The product
+facts format changed; this spec must be updated." and the links sheet is unaffected. V2 vocabulary is in use
+only when `mapFactsToChannel` does not throw "not built" (checked once per fill). Two status scales exist and
+are never mixed: the template evidence status of 0.2 (`documented`, `seller_reported`, `assumed`) and the
+vocabulary `mapping` of spec 19.
 
 Preconditions (manager checks, 00 section 2; any missing item is `Blocked:` in the report):
 - [ ] **G0b, migration grant.** 00 section 11 lists the granted additive migrations (0002 to 0004, spec 12
@@ -111,7 +124,8 @@ Preconditions (manager checks, 00 section 2; any missing item is `Blocked:` in t
       category the next batches carry, obtained from the person named in section 12, and the owner's typed
       choice of the two V1 channels (expected noon and Namshi; Amazon third if its flat file arrives). A
       channel without a template on record is simply not filled; G10 is hard per channel.
-- [ ] Spec 19 V1 merged, with `getProductFacts` (or its merged name) on `main`. Spec 12 initiative 1 merged.
+- [ ] Spec 19 V1 merged, with `readProductFacts` and `FACTS_CONTRACT_VERSION = 1` on `main`. Spec 12
+      initiative 1 merged.
 - [ ] **Golden fill partner.** Naaz agrees to hand-fill one real batch per V1 channel in the same template
       version (6.2). Without it the spec can merge but cannot leave the internal phase.
 
@@ -157,7 +171,7 @@ copy of facts or detection.
 | Workstream | Worktree suffix | Files owned | Depends on |
 |---|---|---|---|
 | A data and registry | `-a-data` | `db/schema.ts`, `drizzle/0009_listing_templates.sql`, `templates/types.ts` (zod), `templates/registry.ts`, `types.ts` (`EVENT_KINDS`), `naming.ts` (`templateSourcePath`) | G0b |
-| B parsers | `-b-parse` | `templates/parse/index.ts`, `parse/nis.ts`, `parse/amazon-flat.ts`, `parse/generic.ts`, `parse/csv.ts`, `templates/bind.ts` (proposed bindings) | A |
+| B parsers | `-b-parse` | `templates/parse/index.ts`, `parse/nis.ts`, `parse/generic.ts`, `parse/csv.ts`, `parse/xml-validations.ts` (3.2), `templates/bind.ts` (proposed bindings); `parse/amazon-flat.ts` only once the Amazon flat file is on record as `.xlsx` (G10 for Amazon; until then `amazon_flat_file` is a reserved `source_kind`) | A |
 | C fill and validation | `-c-fill` | `templates/match.ts`, `templates/fill.ts`, `templates/validate.ts`, `templates/write.ts`, `pipeline/report.ts` (`templateFills`), `sheet.ts` (Details block), `apps/worker/src/catalog/finalize.ts` (fill step) | A, B contracts, spec 19 |
 | D admin and operator UI | `-d-ui` | `apps/web/app/catalog/templates/page.tsx` and `[id]/page.tsx` (new), `apps/web/app/api/catalog/templates/**` (new), batch page downloads and "Make files again", `apps/web/app/catalog/ops/page.tsx` ("Template fills") | A, C contracts |
 | E evals and docs | `-e-evals` | `templates/compare.ts`, `pnpm catalog:template-compare` script, parse regression set, `docs/handover/catalog-for-the-operator.md` section, monitoring-guide query | B, C |
@@ -172,7 +186,8 @@ reads `dataValidations` unless told to ignore them; worksheets are walked with `
 
 ## 1. Marketplace templates on record (evidence, 2026-10-28)
 
-Every row keeps the research labels. Where nothing is public, the channel manager holds the template (G10).
+Every row keeps the research labels (`docs/plans/proposals/2026-10-28-marketplace-rules-research.md`, section 2 for
+templates, section 1 for image rules). Where nothing is public, the channel manager holds the template (G10).
 
 | Channel | Template | Per category? | Image columns | Programmatic read | Status |
 |---|---|---|---|---|---|
@@ -203,7 +218,10 @@ columns; re-running it is a no-op.
 `id uuid pk`, `channel text not null` (a `CHANNEL_IDS` value), `template_key text not null` (slug, for example
 `noon-fashion-tshirts`), `label text not null` (operator-facing, for example "noon T-shirts"), `applies_to
 jsonb not null` (`TemplateMatch[]`, 4.2), `source_kind text not null` (`nis_xlsx`, `amazon_flat_file`,
-`generic_xlsx`, `csv`; V2 adds `trendyol_api`, `amazon_ptd`), `owner text not null` (who supplied it and keeps
+`generic_xlsx`, `csv`; V2 adds `trendyol_api`, `amazon_ptd`), `channel_category text null` (the channel's own
+category or product type for this file, for example Amazon `SHIRT` or a Trendyol category id; passed as
+`channelCategory` to spec 19's `mapFactsToChannel` in V2; null means V1 lists only), `owner text not null`
+(who supplied it and keeps
 it current, a role or name, for example "noon channel manager"), `status text not null default 'draft'`
 (`draft`, `active`, `retired`), `active_version int null`, `created_by`, `created_at`, `updated_at`; unique
 (`channel`, `template_key`). Two `active` rows of one channel may not share a `TemplateMatch` of equal
@@ -222,9 +240,9 @@ null`, `columns jsonb not null`, `image_rules jsonb not null`, `evidence_status 
 // packages/core/src/catalog/templates/types.ts
 export const COLUMN_TYPES = ["text","number","url","enum","multi_enum","date","boolean"] as const;
 export const BINDING_KINDS = ["brand","identifier","option_id","opptra_sku","ean","size","colour_master",
-  "image","image_list","fact","constant","parent_key","blank"] as const;
-export const NEVER_FILLED = ["price","stock","offer","shipping","tax"] as const;   // a column tagged with one
-                                                                                  // of these is always blank
+  "channel_sku","image","image_list","fact","constant","parent_key","blank"] as const;
+export const NEVER_FILLED = ["price","stock","offer","shipping","tax"] as const;   // a column with
+                                                    // `commercial` set to one of these is always blank
 export const Allowed = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("list"), values: z.array(z.string()).min(1),
     caseSensitive: z.boolean() }),                                // from a dropdown or Valid Values tab
@@ -232,13 +250,13 @@ export const Allowed = z.discriminatedUnion("kind", [
 export const Binding = z.discriminatedUnion("kind", [
   z.object({ kind: z.enum(["brand","identifier","option_id","opptra_sku","ean","size","colour_master",
     "parent_key"]) }),
+  z.object({ kind: z.literal("channel_sku"), key: z.enum(SKU_CHANNEL_KEYS) }),   // sku_map.channel_ids[key]
   z.object({ kind: z.literal("image"), position: z.number().int().min(1) }),     // 1 = image 1 of the channel
   z.object({ kind: z.literal("image_list"), from: z.number().int().min(1), max: z.number().int().min(1),
     separator: z.string() }),                                                    // noon: "," in one cell
   z.object({ kind: z.literal("fact"), attribute: z.string() }),                  // spec 19 canonical key
   z.object({ kind: z.literal("constant"), value: z.string(), why: z.string().min(1) }),
-  z.object({ kind: z.literal("blank"), reason: z.enum(["not_held","never_filled","arabic","admin"]),
-    tag: z.enum(NEVER_FILLED).optional() }) ]);
+  z.object({ kind: z.literal("blank"), reason: z.enum(["not_held","never_filled","arabic","admin"]) }) ]);
 export const TemplateColumn = z.object({
   key: z.string(),                       // stable id: the template's attribute name when it has one, else the header
   header: z.string(), sheet: z.string(), col: z.number().int().min(1),
@@ -247,19 +265,31 @@ export const TemplateColumn = z.object({
   type: z.enum(COLUMN_TYPES), allowed: Allowed.nullable(),
   maxLength: z.number().int().positive().nullable(), example: z.string().nullable(),
   level: z.enum(["parent","child","both"]), language: z.enum(["en","ar","none"]),
+  commercial: z.enum(NEVER_FILLED).nullable(),        // set by the parser and bind.ts, never by PUT (3.1)
   binding: Binding, bindingConfirmed: z.boolean(),     // false until an admin confirms (3.3)
   status: z.enum(["documented","seller_reported","assumed"]), note: z.string().nullable() });
 export const TemplateLayout = z.object({ dataSheet: z.string(), headerRow: z.number().int().min(1),
   keyRow: z.number().int().min(1).nullable(),          // a row of attribute names (Amazon), if any
   firstDataRow: z.number().int().min(1), variantModel: z.enum(["single","parent_child","size_rows"]),
   extraTabsAllowed: z.boolean(),                       // false: "Needs you" goes to a side file (4.7)
-  sizeAxis: z.string().nullable() });
+  sizeAxis: z.string().nullable(),
+  status: z.enum(["documented","seller_reported","assumed"]), // extraTabsAllowed starts `assumed` (11.2 Q2)
+  note: z.string().nullable() });
 export const ImageRules = z.object({ min: z.number().int().min(0), max: z.number().int().min(1),
+  minStrength: z.enum(["required","recommended"]),     // recommended: under min is a check, not a blocker
   minFrom: z.enum(["template","channel_policy","admin"]), urlPattern: z.string().nullable(),
   status: z.enum(["documented","seller_reported","assumed"]) });
 ```
 
+`SKU_CHANNEL_KEYS` is the existing list of `sku_map.channel_ids` keys (`db/schema.ts`, for example
+`noon_ae`, `namshi_ae`, `amazon`, `trendyol`, `styli_sku`). Approval refuses any column whose `commercial` is
+set and whose binding is not `blank` with `never_filled`; the draft `PUT` cannot change `commercial`.
+
 ### 2.3 `catalog_template_fills`
+
+Fill rows, their issue rows and `template_fill_failed` events are written only inside finalize's final
+commit transaction (the one that sets `status = 'done'` under `claimWhere`), so an attempt that ends with
+`snapshot_changed` or an expired claim leaves no rows, and its retry with the same `k` inserts cleanly.
 
 `id uuid pk`, `batch_id uuid not null` (fk), `channel text not null`, `template_version_id uuid not null`
 (fk), `export_k int not null` (the links sheet version `k` the fill belongs to), `file_uri text null`,
@@ -328,7 +358,7 @@ Routes (admin only unless noted; zod-validated; the `catalog_channel_policy` `PU
 `GET /api/catalog/templates` (any signed-in role), `POST /api/catalog/templates` (create a registry row),
 `POST /api/catalog/templates/[id]/versions` (body: the uploaded object path; parses, stores a `draft`
 version, returns the column spec), `PUT /api/catalog/templates/[id]/versions/[version]` (draft only:
-bindings, `required`, allowed lists, image rules, layout, notes), `POST .../approve`,
+bindings, `required`, allowed lists, image rules, layout, notes; never `commercial`), `POST .../approve`,
 `POST /api/catalog/templates/[id]/retire`. An approved version answers 409 to `PUT`.
 
 ### 3.2 Parsers (`templates/parse/`, one per `source_kind`, versioned `PARSER_VERSION`)
@@ -336,6 +366,18 @@ bindings, `required`, allowed lists, image rules, layout, notes), `POST .../appr
 Each parser returns `{ layout, columns, imageRules, warnings }` with every column `bindingConfirmed: false`.
 Unknown layouts never throw silently: a parser that cannot find a header row returns a warning and lets the
 admin set `headerRow`, `firstDataRow` and `dataSheet` by hand on step 3.
+
+Rules shared by the xlsx parsers:
+- **Dropdowns stored as extensions.** ExcelJS 4.4.0 reads only standard `dataValidations`; dropdowns that
+  point at another sheet are often stored as `x14:dataValidations` in the worksheet `extLst`, which ExcelJS
+  skips on load and drops on write. `parse/xml-validations.ts` reads each data sheet's raw XML from the zip
+  and takes allowed lists from both places. When any `x14` validation exists, the version carries the
+  warning "This file loses some dropdowns when we fill it. Check one upload with the channel manager first."
+- **Size cap.** ExcelJS expands every validation range into one entry per cell. The parser counts the
+  expanded cells before a full load; above `TEMPLATE_MAX_VALIDATION_CELLS` (200,000, data in code, assumed)
+  the upload is refused on step 2 with "This file has dropdowns over whole columns. Ask the channel manager
+  for a version limited to the rows you use, or delete the empty rows and upload again." Fills run only on
+  approved versions under the cap, so finalize never loads an unbounded file.
 
 - **`nis_xlsx` (noon, documented layout; details assumed until the file is in hand).** Finds the data sheet
   and the instructions tab ("With Instructions" download). `required` from the header cell fill: red =
@@ -345,10 +387,12 @@ admin set `headerRow`, `firstDataRow` and `dataSheet` by hand on step 3.
   descriptions from the instructions tab where a column's header matches. `variantModel: parent_child`,
   `sizeAxis` from the column whose header contains "size" with a list validation. `language` from header
   suffixes (EN, AR). `imageRules`: the image URL column on the parent row, `image_list` binding with
-  separator ",", `min` 3 (noon recommends at least 3 images, documented on the image requirements page
+  separator ",", `min` 3 with `minStrength: recommended` (noon recommends at least 3 images, documented on
+  the image requirements page, research file section 1, noon:
   https://supportagent.noon.partners/portal/en/kb/articles/image-requirements-and-rejection-reasons-for-the-seller-sku-12-3-2024),
   `urlPattern` null with the ".JPEG" note (1).
-- **`amazon_flat_file` (seller-reported layout).** The template tab has a row of labels and a row of
+- **`amazon_flat_file` (seller-reported layout; built only when G10 for Amazon delivers an `.xlsx`).** The
+  template tab has a row of labels and a row of
   attribute names (`keyRow`); `key` is the attribute name. `Valid Values` tab gives allowed lists per
   attribute; a "Data Definitions" tab, when present, gives required flags (`requiredFrom: instructions`).
   `variantModel: parent_child` when `parent_child` and `relationship_type` columns exist. Image columns
@@ -365,18 +409,23 @@ admin set `headerRow`, `firstDataRow` and `dataSheet` by hand on step 3.
 ### 3.3 Proposed bindings (`templates/bind.ts`) and confirmation
 
 A seed dictionary proposes a binding per column by header or attribute name, case- and space-insensitive:
-seller SKU, partner SKU, `item_sku`, "style code" to `identifier` or `option_id` (the admin picks which the
-channel uses; noon's partner SKU is the product code in the warehouse join, so `identifier` is proposed);
-barcode, EAN, GTIN to `ean`; brand, `brand_name` to `brand`; size to `size`; colour to `fact colour_family`
-when spec 19 has it, else `colour_master` (`sku_map.color`); image columns to `image` or `image_list`;
+seller SKU, partner SKU, `item_sku`, "style code" to `channel_sku` with the channel's `sku_map.channel_ids`
+key when the masters hold that key for the brand (for example `noon_ae` on a noon file), else `identifier` or
+`option_id` (the admin picks which the channel uses; noon's partner SKU is the product code in the warehouse
+join, so `identifier` is the fallback); barcode, EAN, GTIN to `ean`; brand, `brand_name` to `brand`; size to
+`size`; colour to `fact` (`brand_colour_name` when the column wants the brand's own colour name,
+`colour_family` when it has a family list; the admin picks), else `colour_master` (`sku_map.color`); image
+columns to `image` or `image_list`;
 parent SKU to `parent_key`; any header containing price, MRP, stock, quantity, offer, sale, shipping, VAT,
-HSN or tax to `blank` with `never_filled`; an Arabic column to `blank` with `arabic`; a header matching a
+HSN or tax to `blank` with `never_filled` and `commercial` set; an Arabic column to `blank` with `arabic`; a
+header matching a
 spec 19 attribute key or synonym to `fact`. Everything else is `blank` `not_held`. Nothing is used until an
 admin confirms every binding ("Looks right"); an unconfirmed binding blocks approval.
 
 ### 3.4 Activation and versions
 
-On approve: zod validation of the full version; every `fact` binding names an attribute spec 19 knows; every
+On approve: zod validation of the full version; every `fact` binding names an attribute in spec 19's exported
+`ATTRIBUTES`; every
 `vocabulary` reference names an attribute spec 19 V2 knows, or the column falls back to its `list`; no other
 `active` template of the same channel has a `TemplateMatch` of equal specificity that overlaps ("noon
 T-shirts already covers Apparel, tops. Make this one more specific or retire the other."). Retiring a
@@ -389,11 +438,13 @@ required, changed allowed list) before approval.
 ### 4.1 When it runs
 
 Inside finalize (`apps/worker/src/catalog/finalize.ts`), after `buildReport` and before `writeLinksXlsx`:
-`buildTemplateFills(tx, batch, sheet)` reads the batch's products, their facts (`getProductFacts`), the
+`buildTemplateFills(tx, batch, sheet)` reads the batch's products, their facts (`readProductFacts`, after the
+`FACTS_CONTRACT_VERSION` check of 0.3), the
 `sku_map` rows of their `opptra_sku_ids` and the active template versions in the **same repeatable-read
 transaction** as `buildReport`, so the fill and the links sheet show the same state. Files are written to
-the attempt path (2.5) with the links sheet, so an expired attempt never overwrites a newer one. The
-template checks are passed to the links sheet writer for the Details block (4.9).
+the attempt path (2.5) with the links sheet, so an expired attempt never overwrites a newer one; their rows
+are written only in the final commit (2.3). The template checks are passed to the links sheet writer for the
+Details block (4.9).
 
 A fill never fails finalize: an exception in one fill is caught, the fill row gets `status = 'failed'` with
 the error, event `template_fill_failed`, and finalize continues; the links sheet, the filled product list
@@ -430,6 +481,7 @@ Ask an admin to add one."). One file per (channel, template) with at least one p
 | `brand` | `brand_master.name` | value not in the column's allowed list (`not_allowed`, value left blank) |
 | `identifier`, `option_id` | the product row, written as text (`numFmt "@"`, as `sheet.ts` does) | never |
 | `opptra_sku`, `ean`, `size` | the child row's `sku_map` values; on a single row, the value only when the product has exactly one | missing (`required_blank` if required) |
+| `channel_sku` | the child row's `sku_map.channel_ids[key]`; on a single row only when the product has exactly one size | missing (`required_blank` if required) |
 | `colour_master` | `sku_map.color` when every size row agrees | rows disagree or missing |
 | `image`, `image_list` | 4.6 | 4.6 |
 | `fact` | 4.5 | 4.5 |
@@ -443,22 +495,24 @@ outside an allowed list is never written; the cell is blank and shaded with the 
 
 ### 4.5 Facts and channel vocabulary
 
-For a `fact` binding, the product's spec 19 fact with that attribute is used:
-- `value` null (unknown) or no fact: blank; `required_blank` when required.
-- `source` `brand_sheet`, `operator` or `master`: written.
-- `source` `photo`: written when `confidence` is at least `write_bar` and `needsConfirmation` is false;
-  written and shaded amber with `low_confidence` when `confidence` is at least `write_bar` but below
-  `check_bar` or `needsConfirmation` is true; blank below `write_bar` (`required_blank` or nothing).
-  `write_bar` 0.85 and `check_bar` 0.95 are data in `model_policy` (category `templates`, the
-  `ensureDefaultPolicies` pattern, `qa/policy.ts:35`), so the owner can raise them without a deploy; the
-  golden fill (6.2) sets their final values.
-- For a column with `allowed`: the value is passed through spec 19 V2's `mapToChannel` when the vocabulary
-  exists; a mapped value with status `assumed` is written and shaded amber. Without a map row, the canonical
-  value is written only when it equals an allowed value exactly (case per `caseSensitive`); otherwise the
-  cell is blank with `no_channel_word`: "We know '<value>' for <attribute>, but <Channel> has no matching word
-  on record. Pick one from the list." The module never guesses a mapping ("half sleeve" is never written as
-  "short sleeve" until a map row says so; research section 3, plan B4).
-- A `multi_enum` column takes every mapped value joined by the template's separator.
+For a `fact` binding, the `FactValue` of that attribute in the product's `ProductFactsRecord` is used. Spec 19
+decides trust (s6.6, s7.3); spec 20 keeps no confidence bars of its own:
+- No fact, status `unknown` or `conflict`: blank; `required_blank` when required, else `low_confidence`
+  (`check`) for `conflict` with "The photos and the brand's sheet disagree. Check the product page's Facts
+  section."
+- `trusted` true: the value is written (`valueText` for free text, `label` mapped as below for lists).
+- `trusted` false (a found fact of an attribute that is not yet trusted, or an unconfirmed one): blank and
+  shaded amber with `low_confidence` and the value we hold in the issue: "We think '<label>' from the photos,
+  but this is not checked yet. Confirm it on the product page or type it here." Never written into the cell.
+- For a column with `allowed`: in V2, `mapFactsToChannel(record, channel, channel_category)` is called once per
+  product; `channelValue` is written only when `mapping` is `documented` or `confirmed`; for `assumed`,
+  `seller_reported` or `none` the cell is blank and shaded with the `reason` in words. Without V2 (or with no
+  `channel_category`), the label is written only when it equals an allowed value exactly (case per
+  `caseSensitive`); otherwise the cell is blank with `no_channel_word`: "We know '<value>' for <attribute>, but
+  <Channel> has no matching word on record. Pick one from the list." The module never guesses a mapping ("half
+  sleeve" is never written as "short sleeve" until a confirmed or documented map row says so; research file
+  section 3, plan B4).
+- A `multi_enum` column takes every written value joined by the template's separator.
 
 ### 4.6 Images
 
@@ -467,7 +521,9 @@ Image cells come only from the published links of that channel for that product,
 `image_list` takes links `from` to `from + max - 1` joined by `separator`. Empty positions (removed or
 missing) are skipped, never shifted silently: a product whose links have gaps gets a `check` issue. Fewer
 live links than `imageRules.min` (from the template, else the channel policy's `recommended_count`):
-`too_few_images` blocker ("<n> photos; <Channel> asks for at least <m>."). More links than the template's
+`too_few_images`, a blocker when `minStrength` is `required` ("<n> photos; <Channel> asks for at least <m>.")
+and a `check` when it is `recommended` ("<n> photos; <Channel> recommends at least <m>."). More links than the
+template's
 image columns hold: the first ones are written and `too_many_images` is a `check` issue ("Photos <a> to <b>
 did not fit in this file."). A `needs_attention` product (SPEC: previous live links shown) uses the same live
 links as the links sheet. When `urlPattern` is set, a link that does not match is written and shaded.
@@ -477,11 +533,33 @@ links as the links sheet. When `urlPattern` is set, a link that does not match i
 The fill loads the approved version's source file with ExcelJS and writes values into the data sheet from
 `firstDataRow`, so the channel's own headers, instruction tabs, dropdowns and colours stay as the
 marketplace made them; rows already holding example data are cleared first (values only). Shading uses
-solid fills on data cells only: blocker light red `FFFFC7CE`, check amber `FFFFEB9C`. A **"Needs you"** tab
-is added as the last tab when `extraTabsAllowed` is true, else written to the side file: first line "<n>
-cells need you on <m> products. Fill or check each one, then upload this file in <Channel>."; then one row
-per issue: Row, Cell, Identifier, Column, Problem, What to do, Must fix (yes for blockers). Sorted by row then
-column. A file with no issue gets the line "Nothing needs you in this file." The output is always `.xlsx`.
+solid fills on data cells only: blocker light red `FFFFC7CE`, check amber `FFFFEB9C`. A loaded template's
+cells share cached style objects (ExcelJS 4.4.0 reuses one style per `styleId`, and `cell.fill = ...` mutates
+it in place), so shading always assigns a fresh object, `cell.style = { ...cell.style, fill: { type:
+'pattern', pattern: 'solid', fgColor: { argb } } }`, never `cell.fill = ...`. A **"Needs you"** tab is added
+as the last tab when `extraTabsAllowed` is true, else written to the side file "<Channel> listing file - needs
+you.xlsx": first line "<n> cells need you on <m> products. Fill or check each one, then upload this file in
+<Channel>."; then one row per issue: Row, Cell, Identifier, Column, Problem, What to do, Must fix (yes for
+blockers). Sorted by row then column. A file with no issue gets the line "Nothing needs you in this file." The
+output is always `.xlsx`.
+
+"What to do" per issue kind (fact-bound issues end with "Or correct it on the product page and press Make
+files again, so the next file has it."):
+
+| Kind | Problem | What to do |
+|---|---|---|
+| `required_blank` | "<Column> is required and we do not hold it." | "Type the value from the brand's data." |
+| `not_allowed` | "'<value>' is not in <Channel>'s list for <Column>." | "Pick the right word from the dropdown." |
+| `too_long` | "<n> characters; the limit is <m>." | "Shorten it to <m> characters." |
+| `no_channel_word` | "We know '<value>', but <Channel> has no matching word on record." | "Pick one from the list." |
+| `low_confidence` | "We think '<value>' from the photos, but it is not checked yet." | "Look at the photo; type it if right, or the right value." |
+| `needs_sizes` | "No sizes on record for this product." | "Add one row per size." |
+| `too_few_images` | "<n> photos; <Channel> asks for (or recommends) at least <m>." | "Add photos in a new batch, or upload with fewer if the marketplace allows." |
+| `too_many_images` | "Photos <a> to <b> did not fit in this file." | "Nothing to do unless you want different photos in the file." |
+| `binding_unconfirmed` | "This column's source is not confirmed yet." | "Ask an admin to confirm it on the listing files page." |
+| image gap (`check`) | "Image <n> is missing on <Channel>, later images moved up." | "Check the image order before upload." |
+
+Typing into a downloaded file is not kept by the module: "Make files again" starts from a new copy.
 
 A tier 1 round-trip test (8.1) proves, per parser fixture, that load and write keep every sheet, header,
 list validation and header fill; if a real template loses a feature in the round trip (for example macros
@@ -491,11 +569,15 @@ or extension lists), the version's `layout.notes` records it and the step 3 page
 ### 4.8 Validation and the independent re-read (`templates/validate.ts`)
 
 Issues are collected while filling. Then the written buffer is read back with a fresh ExcelJS workbook and
-every data row is checked against the column spec with no database: required columns empty, values outside
-the allowed list, lengths over the limit, image counts under the minimum, type checks (`url` starts with
-`https://`, `number` parses). The re-read issue list must equal the collected list (by cell and kind); any
-difference adds a `reread_mismatch` issue and marks the fill `failed` (the file is still stored for
-debugging, but not offered for download). This mirrors the links sheet's independent re-check (SPEC R24).
+every data row is checked against the column spec with no database. Issue kinds are of two classes:
+**file-checkable** (`required_blank`, `too_long`, `too_few_images`, `too_many_images`, type checks: `url` starts
+with `https://`, `number` parses, and any written value outside the allowed list) and **context** kinds that
+need facts, masters or bindings (`low_confidence`, `no_channel_word`, `needs_sizes`, `binding_unconfirmed`,
+image gaps, and a `not_allowed` value that was left blank). The re-read must (a) find exactly the collected
+file-checkable issues (by cell and kind), and (b) find every shaded cell carrying at least one collected issue
+of either class and every collected issue with a cell shaded. Any difference adds a `reread_mismatch` issue
+and marks the fill `failed` (the file is still stored for debugging, but not offered for download). This
+mirrors the links sheet's independent re-check (SPEC R24).
 
 ### 4.9 Details worksheet and report
 
@@ -508,8 +590,10 @@ the file could not be made. <short error>. The links sheet is not affected." `re
 ### 4.10 Batch page and product page
 
 Batch page Overview, downloads: after "Download filled product list", one link per done fill: "Download
-<Channel> listing file (<label>)", with "<n> cells need you" or "Ready to upload" under it. Help line: "Fill
-the shaded cells, then upload the file in the marketplace's portal. The module never sends it." A failed
+<Channel> listing file (<label>)", with "<n> cells need you" or "Ready to upload" under it; when the fill
+has a side file, a second link "Download the list of cells that need you (<Channel>)". Help line: "Fill the
+red cells and check the amber ones, then upload the file in the marketplace's portal. The module never sends
+it. Making the files again starts from a new copy, so changes you typed in an earlier file are not kept." A failed
 fill shows "<Channel> listing file: could not be made. The links sheet is fine." A `no_template` line lists
 the product types without a file. "Make files again" (operator and admin) appears when at least one fill
 exists and every product's `last_batch_id` is this batch; otherwise its place shows "Some products were
@@ -543,9 +627,12 @@ values normalised by trimming, case per column type, URLs exactly):
 - **Wrong:** a cell the module filled whose value differs from Naaz's. **Zero allowed.**
 - **Blank:** a cell Naaz filled and the module left blank. Allowed; reported per column as coverage.
 - **Extra:** a cell the module filled that Naaz left blank. Shown to Naaz; counted as wrong if she says so.
-A wrong value is fixed at its root (binding, master, fact bar, vocabulary row) and the compare re-run. The
-result (cells, filled, wrong, blank, extra, per column) goes into the 00 section 10 report and becomes a
-fixture of the eval (8.3). The final `write_bar` and `check_bar` are the lowest values with zero wrong.
+- **Coverage:** filled cells as a share of the cells Naaz filled, counting only columns that are not
+  `commercial` and not Arabic. The owner sets the minimum per channel (11.2 Q9; proposed 60%, assumed). A
+  channel below it may still go live only on the owner's typed yes, recorded in the report.
+A wrong value is fixed at its root (binding, master, spec 19 fact or trust, vocabulary row) and the compare
+re-run. The result (cells, filled, wrong, blank, extra, coverage, per column) goes into the 00 section 10
+report and becomes a fixture of the eval (8.3).
 
 ### 6.3 Live
 
@@ -579,31 +666,41 @@ not part of this spec.
 
 ### 8.1 Tier 1 (`pnpm test`)
 
-- Schema: zod accepts each parser fixture's spec; `blank` with `never_filled` cannot be rebound on a column
-  tagged price, stock, offer, shipping or tax; approval refuses an unconfirmed binding, an unknown fact
-  attribute and an overlapping match of equal specificity.
+- Schema: zod accepts each parser fixture's spec; approval refuses a column with `commercial` set whose
+  binding is not `blank` `never_filled`, and the draft `PUT` cannot change `commercial`; approval refuses an
+  unconfirmed binding, an unknown fact attribute and an overlapping match of equal specificity.
+- Contract: a stubbed `FACTS_CONTRACT_VERSION` of 2 fails every fill with its sentence and leaves the links
+  sheet unchanged; `mapFactsToChannel` throwing "not built" means V1 list rules.
 - Parsers on synthetic fixtures built in the test with ExcelJS: a NIS-like file (red, green, grey header
   fills, an instructions tab, list validations pointing at a hidden sheet, EN and AR headers, a size column);
   an Amazon-like flat file (labels row, attribute row, Valid Values tab, image locator columns, parent-child
-  columns); a generic file (`*` and "mandatory" markers); a CSV. Each gives the expected spec exactly. A
-  `.xls` or `.xlsm` upload is refused with its sentence.
-- Round trip: load, fill and re-read keep every sheet, header, header fill and list validation of each fixture.
+  columns, only once that parser is built); a generic file (`*` and "mandatory" markers); a CSV; a
+  hand-built file with `x14:dataValidations` in `extLst`; a file with a whole-column list validation (refused
+  by the size cap). Each gives the expected spec exactly. A `.xls` or `.xlsm` upload is refused with its
+  sentence.
+- Round trip: load, fill and re-read keep every sheet, header, header fill and list validation of each
+  fixture, with validations counted in the source XML, not only through ExcelJS.
+- Shared styles: on a fixture whose data rows share one `styleId`, shading one cell leaves its neighbours and
+  the header row unchanged.
 - Match: most specific template wins; no candidate gives `no_template`; a retired template is never used.
 - Rows: `single`, `parent_child` and `size_rows` with 0, 1 and 4 `sku_map` sizes; `needs_sizes` on 0;
   parent-only and child-only columns land on the right rows.
 - Values: every 4.4 binding; text cells for 13-digit identifiers; no placeholder text in any data cell; a
   too-long value written, never truncated, and shaded; an out-of-list brand left blank with its issue.
-- Facts: unknown, brand sheet, operator and photo facts on both sides of `write_bar` and `check_bar`,
-  `needsConfirmation`; with a V2 map row (documented and assumed) and without one; "half sleeve" never becomes
-  "short sleeve" without a map row; `multi_enum` joining.
+- Facts: `unknown`, `conflict`, trusted and untrusted facts of each source; an untrusted fact is never
+  written; with a V2 mapping of each status (only `documented` and `confirmed` written) and without V2;
+  "half sleeve" never becomes "short sleeve" without such a row; `multi_enum` joining; `channel_sku` from
+  `sku_map.channel_ids`; `too_few_images` blocker versus `check` by `minStrength`.
 - Images: link order equals `SheetRow.links[channel]`; `image_list` joining and `max`; gaps; under the minimum;
   over the columns; `urlPattern`.
 - Writing: shading colours on data cells only; the "Needs you" tab (or side file when `extraTabsAllowed` is
   false) lists exactly the collected issues; "Nothing needs you in this file." when none.
-- Re-read: a planted mismatch (a cell changed after writing) gives `reread_mismatch` and a failed fill.
+- Re-read: a planted mismatch (a cell changed after writing) gives `reread_mismatch` and a failed fill; a
+  fill with every context kind and no change passes.
 - Finalize: a throwing fill leaves the links sheet, the filled product list, the re-check and `status =
   'done'` unchanged; files land under the attempt path; `exports.templateFills` is written; the Details block
-  is present; the CSV is unchanged and `compareXlsxCsv` still passes.
+  is present; the CSV is unchanged and `compareXlsxCsv` still passes; an attempt ending `snapshot_changed`
+  leaves no fill rows and its retry with the same `k` succeeds.
 - Banned-names test (spec 07) over every new UI string, the "Needs you" tab and the Details block.
 - No outbound HTTP: the fill module and the parsers make no network call (a fetch spy throws).
 
@@ -636,12 +733,13 @@ as an admin and checks the Ops block renders; no fill is written by the smoke.
 1. [ ] G0b approval typed by the owner and committed; migration applied by `catalog-migrate`; re-run is a
        no-op; `pnpm lint && pnpm typecheck && pnpm test` green.
 2. [ ] SPEC.md carries the 0.4 amendments verbatim.
-3. [ ] Spec 19 V1 contract used through its merged names (mapping recorded in the report if they differ).
+3. [ ] Spec 19 V1 contract used only through `readProductFacts` with `FACTS_CONTRACT_VERSION = 1`; no
+       untrusted fact written into any file.
 4. [ ] `/catalog/templates` and its routes work for an admin; operators and viewers read only.
 5. [ ] Each V1 template uploaded, parsed, bindings confirmed with Naaz, approved; evidence status recorded.
 6. [ ] Every 8.1 and 8.2 case passes; the parse regression set holds every approved version.
-7. [ ] Golden fill per V1 channel: zero wrong values; blank and extra counts per column in the report;
-       `write_bar` and `check_bar` recorded.
+7. [ ] Golden fill per V1 channel: zero wrong values; coverage at or above the owner's minimum (or the
+       owner's typed yes recorded); blank and extra counts per column in the report.
 8. [ ] One real batch per V1 channel fills on finalize, with the "Needs you" tab, shading, the Details block
        and `exports.templateFills`.
 9. [ ] One real portal upload per V1 channel done by the operator from the filled file; the portal's answer
@@ -676,7 +774,8 @@ as an admin and checks the Ops block renders; no fill is written by the smoke.
 ### 11.1 Settled
 
 1. Fill, never submit; no marketplace write API in this spec (plan C decision 7, Sujan's brief 2026-10-28).
-2. Templates, columns, bindings, bars and vocabulary are data, changeable by an admin without a deploy; every
+2. Templates, columns, bindings and vocabulary are data, changeable by an admin without a deploy; trust in a
+   fact is spec 19's (s6.6), never a spec 20 bar; every
    marketplace claim carries its evidence status (plan C decision 3).
 3. Unknown stays blank; the module never guesses a value or a vocabulary mapping (plan C decision 2, B4).
 4. The fill runs inside finalize and never fails it; the links sheet stays the primary deliverable.
@@ -694,14 +793,22 @@ as an admin and checks the Ops block renders; no fill is written by the smoke.
 4. Q4. noon's help page says image links "ending .JPEG"; module links end `.jpg` and are pasted into noon
    today. Default: write them as they are; confirm with the noon channel manager.
 5. Q5. Size rows from `sku_map` (warehouse brands) versus a parent row only. Default: `sku_map` when present
-   (an existing master, 4.3), `needs_sizes` otherwise. Confirm that noon partner SKU per size equals the
-   Opptra SKU.
+   (an existing master, 4.3), `needs_sizes` otherwise. Confirm whether noon's partner SKU per size is
+   `sku_map.channel_ids.noon_ae` (checked first) or the Opptra SKU.
 6. Q6. Which column is the seller SKU per channel (product code, style-colour id or Opptra SKU)? Default: the
    admin binds it per template on step 3 with Naaz; the golden fill proves it.
 7. Q7. Who owns keeping templates current when a marketplace changes them? Default: the channel manager named
    as `owner`, with the admin uploading the new version.
 8. Q8. Ashish's own templates (R11): are they marketplace files or an internal master sheet? Default: treated
-   as `generic_xlsx` templates of their channel once he shares them.
+   as `generic_xlsx` templates of their channel once he shares them. An internal sheet with no channel cannot
+   be registered (`channel` must be a `CHANNEL_IDS` value); that would need a spec change.
+9. Q9. Minimum coverage per channel at the golden fill (6.2), so "nothing else required" (R10) is measured.
+   Default: 60% of the non-commercial, non-Arabic cells Naaz fills (assumed); below it, live only on the
+   owner's typed yes.
+10. Q10. Who holds the admin role for template onboarding, and may an operator (Naaz) upload and edit a draft
+    version with approval kept admin-only? Default: admin only, as written in 3.1.
+11. Q11. Which marketplaces' `sku_map.channel_ids` keys are the seller SKU on their listing files (3.3)?
+    Default: proposed by `bind.ts`, confirmed by the admin with Naaz, proved by the golden fill.
 
 ## 12. Templates to obtain, and from whom (gate G10)
 

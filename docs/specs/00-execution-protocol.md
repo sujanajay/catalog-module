@@ -264,7 +264,9 @@ data set). Nothing else is asked.
   the 02 contracts it extends and whose owner approval is recorded in the decisions log (granted: 0002
   cost events, 0003 intake states, 0004 chunk leases, spec 12 `0005_shot_set.sql`, spec 13
   `0006_scene.sql`). Such a migration is numbered after the latest one on `origin/main` at merge time and
-  never rewrites or drops existing rows or columns. Owner approval: Sujan, 2026-10-28.
+  never rewrites or drops existing rows or columns. Owner approval: Sujan, 2026-10-28. Specs 18, 19 and 20
+  name `0007_infographic.sql`, `0008_product_facts.sql` and `0009_listing_templates.sql`; they are not on the
+  granted list and wait for the owner's typed yes (gate G0b).
 - A real-data test would write outside `catalog-test/` or would modify a Supabase object.
 - A public object write or delete would fall outside the prefix of the product the worker holds
   the lock for (`assertWithinProduct` throws; the task fails loudly and is reported).
