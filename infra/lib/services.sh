@@ -88,7 +88,7 @@ service_catalog_upscale() {
   SVC_IMAGE=$AR/matting:$TAG
   SVC_ARGS=(--service-account="$MATTING_SA" --cpu="$UPSCALE_CPU_VCPU" --memory="$UPSCALE_MEMORY" --concurrency="$UPSCALE_CONCURRENCY"
     --min-instances=0 --max-instances="$UPSCALE_MAX_INSTANCES" --timeout="$UPSCALE_TIMEOUT_S" --labels=app=catalog,component=upscale)
-  SVC_ENV="MAX_RESIDENT_SESSIONS=1,UPSCALE_CPU=1,PRELOAD_MATTE=0,ORT_INTRA_OP_THREADS=$UPSCALE_THREADS,UPSCALE_MAX_PIXELS=$UPSCALE_MAX_PIXELS"
+  SVC_ENV="MAX_RESIDENT_SESSIONS=1,UPSCALE_CPU=1,PRELOAD_MATTE=0,ORT_INTRA_OP_THREADS=$UPSCALE_THREADS,UPSCALE_MAX_PIXELS=$UPSCALE_MAX_PIXELS,UPSCALE_MAX_PIXELS_X4=$UPSCALE_MAX_PIXELS_X4"
   SVC_QUOTA_OPTIONAL=0
   SVC_SKIP_REASON=""
   local size p95 budget=0 first=${UPSCALE_SIZES%%,*}
@@ -101,7 +101,7 @@ service_catalog_upscale() {
     SVC_DEPLOY=1; SVC_SHIFT=0
     SVC_TAG=measure-${UPSCALE_CPU_VCPU}c-${UPSCALE_THREADS}t-${UPSCALE_CONCURRENCY}r
     SVC_PROBE_TIMEOUT=$((300 + 4 * UPSCALE_TIMEOUT_S))
-    SVC_PROBE=(bash infra/lib/services.sh probe-upscale "$SVC_PROBE_TIMEOUT" "$(probe_upscale_model)" "$first" 1 1 "$UPSCALE_TIMEOUT_S")
+    SVC_PROBE=(bash infra/lib/services.sh probe-upscale "$SVC_PROBE_TIMEOUT" "$(probe_upscale_model)" "$first" 1 1 "$UPSCALE_TIMEOUT_S" 0)
     return 0
   fi
   if [ "${UPSCALE_SERVICE:-cpu}" != dedicated ]; then
@@ -119,7 +119,11 @@ service_catalog_upscale() {
     budget=$((budget + 4 * p95 + 4 * $(awk -v p="$p95" -v r="${UPSCALE_X4_TIME_RATIO:-1}" 'BEGIN{v = p * r; c = int(v); if (c < v) c++; print c}')))
   done
   SVC_PROBE_TIMEOUT=$((300 + budget))
-  SVC_PROBE=(bash infra/lib/services.sh probe-upscale "$SVC_PROBE_TIMEOUT" "$(probe_upscale_model)" "$UPSCALE_SIZES" "$UPSCALE_CONCURRENCY" 1 "$UPSCALE_TIMEOUT_S")
+  # 2026-10-29 review P2-1: the gate also fails when the measured x4 p95 is above UPSCALE_X4_TIME_RATIO x the x2 p95 at
+  # any size, since the x4 cap (UPSCALE_MAX_PIXELS_X4) is sized on that ratio. 0 (no x4 model) checks nothing.
+  local x4_ratio=0
+  [ "${UPSCALE_MODEL_X4:-swinir-x4}" = off ] || x4_ratio=${UPSCALE_X4_TIME_RATIO:-1.3}
+  SVC_PROBE=(bash infra/lib/services.sh probe-upscale "$SVC_PROBE_TIMEOUT" "$(probe_upscale_model)" "$UPSCALE_SIZES" "$UPSCALE_CONCURRENCY" 1 "$UPSCALE_TIMEOUT_S" "$x4_ratio")
   SVC_DEPLOY=1; SVC_SHIFT=1
   # Like catalog-matting: the preview reuses the live service and never changes it.
   [ "${CATALOG_PREVIEW:-0}" = 1 ] && SVC_DEPLOY=0
@@ -274,9 +278,9 @@ probe_matting() {
 # Spec 18 H1: the upscale probe (cloudrun_check.py --probe-upscale through infra/check-matting.sh) with the sizes,
 # concurrency, rounds and per-call timeout the registry row gives; the job ends with the gate, as for probe_matting.
 probe_upscale() {
-  local timeout=$1 model=$2 sizes=$3 concurrency=$4 rounds=$5 call_timeout=$6 url=$7
+  local timeout=$1 model=$2 sizes=$3 concurrency=$4 rounds=$5 call_timeout=$6 x4_ratio=$7 url=$8
   PROBE_TASK_TIMEOUT=$timeout bash infra/check-matting.sh --probe-upscale "$url" --model="$model" --sizes="$sizes" \
-    --concurrency="$concurrency" --rounds="$rounds" --timeout="$call_timeout"
+    --concurrency="$concurrency" --rounds="$rounds" --timeout="$call_timeout" --x4-ratio="$x4_ratio"
 }
 
 # /health on the worker candidate, then the tier 5 smoke against the candidates of this deploy.
@@ -315,6 +319,6 @@ if [ "${BASH_SOURCE[0]}" = "$0" ]; then
     probe-upscale) shift; probe_upscale "$@" ;;
     probe-worker) probe_worker "$2" ;;
     probe-web) probe_web "$2" ;;
-    *) echo "usage: bash infra/lib/services.sh probe-matting <timeout s> <models> <concurrency> <rounds> <url> | probe-upscale <timeout s> <model> <sizes> <concurrency> <rounds> <call timeout s> <url> | probe-worker <url> | probe-web <url>" >&2; exit 2 ;;
+    *) echo "usage: bash infra/lib/services.sh probe-matting <timeout s> <models> <concurrency> <rounds> <url> | probe-upscale <timeout s> <model> <sizes> <concurrency> <rounds> <call timeout s> <x4 time ratio, 0 for none> <url> | probe-worker <url> | probe-web <url>" >&2; exit 2 ;;
   esac
 fi

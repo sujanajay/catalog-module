@@ -105,8 +105,8 @@ test('catalog-upscale: the matting image sized by the UPSCALE_* rows, only the u
   // 300 s for the job and cold start + 4 x p95 per size and model (warm call and one round, 2 x p95 each; x4 at 1.3 x
   // the x2 p95, rounded up): 300 + 520 + 676 + 1320 + 1716.
   assert.deepEqual(f.slice(1, 8), ['catalog-upscale', 'asia-south1', 'ar/matting:t', '4532', '1', '1', '0']);
-  assert.equal(f[8], 'MAX_RESIDENT_SESSIONS=1,UPSCALE_CPU=1,PRELOAD_MATTE=0,ORT_INTRA_OP_THREADS=4,UPSCALE_MAX_PIXELS=6400000');
-  assert.equal(f[9], 'bash infra/lib/services.sh probe-upscale 4532 swinir-x2,swinir-x4 800x1200,1600x1600 1 1 1740');
+  assert.equal(f[8], 'MAX_RESIDENT_SESSIONS=1,UPSCALE_CPU=1,PRELOAD_MATTE=0,ORT_INTRA_OP_THREADS=4,UPSCALE_MAX_PIXELS=8000000,UPSCALE_MAX_PIXELS_X4=6400000');
+  assert.equal(f[9], 'bash infra/lib/services.sh probe-upscale 4532 swinir-x2,swinir-x4 800x1200,1600x1600 1 1 1740 1.3');
   assert.deepEqual(rest.slice(0, -1), ['--service-account=m', '--cpu=4', '--memory=16Gi', '--concurrency=1', '--min-instances=0',
     '--max-instances=16', '--timeout=1740', '--labels=app=catalog,component=upscale']);
   assert.equal(rest.at(-1), 'TAG=|SKIP=', 'the dedicated service uses the candidate tag');
@@ -117,7 +117,7 @@ test('catalog-upscale: env shape reaches the flags and the thread count', () => 
 UPSCALE_P95_S_8C_8T_2CONC_800x1200=90; UPSCALE_P95_S_8C_8T_2CONC_1600x1600=250\n${upscaleArgs}`);
   assert.equal(r.status, 0, r.err);
   const [row, ...rest] = lines(r.out.trim());
-  assert.match(row, /,ORT_INTRA_OP_THREADS=8,UPSCALE_MAX_PIXELS=6400000\|bash infra\/lib\/services.sh probe-upscale 3428 swinir-x2,swinir-x4 800x1200,1600x1600 2 1 700$/);
+  assert.match(row, /,ORT_INTRA_OP_THREADS=8,UPSCALE_MAX_PIXELS=8000000,UPSCALE_MAX_PIXELS_X4=6400000\|bash infra\/lib\/services.sh probe-upscale 3428 swinir-x2,swinir-x4 800x1200,1600x1600 2 1 700 1.3$/);
   assert.ok(['--cpu=8', '--memory=32Gi', '--concurrency=2', '--max-instances=8', '--timeout=700'].every((a) => rest.includes(a)), rest.join(' '));
 });
 
@@ -130,7 +130,7 @@ test('catalog-upscale: measure mode is a no-traffic candidate per shape; preview
   // 300 + 4 x 1740.
   assert.deepEqual(f.slice(5, 8), ['1', '0', '0'], 'deployed, never shifted');
   assert.equal(f[4], '7260');
-  assert.equal(f[9], 'bash infra/lib/services.sh probe-upscale 7260 swinir-x2,swinir-x4 800x1200 1 1 1740');
+  assert.equal(f[9], 'bash infra/lib/services.sh probe-upscale 7260 swinir-x2,swinir-x4 800x1200 1 1 1740 0');
   assert.equal(out.at(-1), 'TAG=measure-8c-8t-2r|SKIP=', 'each rung keeps its own tag URL');
   r = run('upscale-preview', `${vars}\n${measured}\nCATALOG_PREVIEW=1\n${upscaleArgs}`);
   f = lines(r.out.trim())[0].split('|');
@@ -164,7 +164,7 @@ bash() { echo "PROBE_TASK_TIMEOUT=$PROBE_TASK_TIMEOUT $*"; }; export -f bash
 command bash "\${SVC_PROBE[@]:1}" https://candidate---u.run.app`);
   assert.equal(r.status, 0, r.err);
   assert.equal(r.out.trim(), 'PROBE_TASK_TIMEOUT=4532 infra/check-matting.sh --probe-upscale https://candidate---u.run.app --model=swinir-x2,swinir-x4 '
-    + '--sizes=800x1200,1600x1600 --concurrency=1 --rounds=1 --timeout=1740');
+    + '--sizes=800x1200,1600x1600 --concurrency=1 --rounds=1 --timeout=1740 --x4-ratio=1.3');
 });
 
 test('deploy.sh: the worker gets catalog-upscale only with UPSCALE_SERVICE=dedicated; cpu keeps catalog-matting', () => {
@@ -178,7 +178,7 @@ test('deploy.sh: the worker gets catalog-upscale only with UPSCALE_SERVICE=dedic
   const services = fs.readFileSync(path.join(root, 'infra/lib/services.sh'), 'utf8');
   assert.match(services, /^MATTING_TIMEOUT_S=300$/m);
   assert.equal((services.match(/--timeout="\$MATTING_TIMEOUT_S"/g) ?? []).length, 2, 'both matting services use it');
-  assert.match(loop, /elif \[ "\$UPSCALE_SERVICE" = dedicated \]; then[\s\S]*?WORKER_ENV\+=",UPSCALE_URL=\$UPSCALE_SERVICE_URL,UPSCALE_TIMEOUT_S=\$UPSCALE_TIMEOUT_S,UPSCALE_MAX_PIXELS=\$UPSCALE_MAX_PIXELS"/);
+  assert.match(loop, /elif \[ "\$UPSCALE_SERVICE" = dedicated \]; then[\s\S]*?WORKER_ENV\+=",UPSCALE_URL=\$UPSCALE_SERVICE_URL,UPSCALE_TIMEOUT_S=\$UPSCALE_TIMEOUT_S,UPSCALE_MAX_PIXELS=\$UPSCALE_MAX_PIXELS,UPSCALE_MAX_PIXELS_X4=\$UPSCALE_MAX_PIXELS_X4"/);
   assert.ok(loop.indexOf('catalog-upscale)') < loop.indexOf('catalog-matting-gpu)'), 'the URL is known before the worker env is completed');
   assert.ok(!/UPSCALE_URL=\$GATE_TAG_URL/.test(loop), 'the worker never calls a measure candidate');
 });

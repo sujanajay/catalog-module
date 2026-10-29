@@ -248,7 +248,10 @@ UPSCALE_MIN_SCALE=${UPSCALE_MIN_SCALE:-1}
 case "$UPSCALE_MODEL" in ""|swinir-x2) ;; *) echo "UPSCALE_MODEL must be swinir-x2 or off" >&2; exit 1 ;; esac
 case "$UPSCALE_MODEL_X4" in ""|swinir-x4) ;; *) echo "UPSCALE_MODEL_X4 must be swinir-x4 or off" >&2; exit 1 ;; esac
 [[ "$UPSCALE_MIN_SCALE" =~ ^[0-9]+([.][0-9]+)?$ ]] && awk -v s="$UPSCALE_MIN_SCALE" 'BEGIN{exit !(s>=1)}'   || { echo "UPSCALE_MIN_SCALE must be a number of at least 1, such as 1.5" >&2; exit 1; }
+# 2026-10-29 review P2-6: the web records the threshold on each batch it starts (options.enlargement.minScale, read by
+# the enlarged_without_upscaler invariant), so both get the same value.
 WORKER_ENV+=",UPSCALE_MIN_SCALE=$UPSCALE_MIN_SCALE"
+WEB_ENV+=",UPSCALE_MIN_SCALE=$UPSCALE_MIN_SCALE"
 # UPSCALE_MODEL itself is added to the worker and the web after the GPU matting step below, and only when that
 # step yields MATTING_GPU_URL.
 # 03: the web verifies the IAP JWT against this exact audience and accepts only this domain.
@@ -399,7 +402,7 @@ for SERVICE in "${SERVICES[@]}"; do
           echo "ERROR: UPSCALE_SERVICE=dedicated but catalog-upscale has no URL; the worker was not changed" >&2
           exit 1
         fi
-        if [ -n "$UPSCALE_MODEL" ]; then WORKER_ENV+=",UPSCALE_URL=$UPSCALE_SERVICE_URL,UPSCALE_TIMEOUT_S=$UPSCALE_TIMEOUT_S,UPSCALE_MAX_PIXELS=$UPSCALE_MAX_PIXELS"; fi
+        if [ -n "$UPSCALE_MODEL" ]; then WORKER_ENV+=",UPSCALE_URL=$UPSCALE_SERVICE_URL,UPSCALE_TIMEOUT_S=$UPSCALE_TIMEOUT_S,UPSCALE_MAX_PIXELS=$UPSCALE_MAX_PIXELS,UPSCALE_MAX_PIXELS_X4=$UPSCALE_MAX_PIXELS_X4"; fi
       elif [ -n "$UPSCALE_MODEL" ] && [ -z "$MATTING_GPU_URL" ]; then
         echo "WARN: UPSCALE_MODEL=$UPSCALE_MODEL ignored: no GPU matting service URL; the render keeps the plain path" >&2
         UPSCALE_MODEL=""
