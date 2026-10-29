@@ -84,17 +84,8 @@ export function workerCatalogDeps(db: Db): CatalogDeps {
 }
 // Keep execution ownership through the Cloud Tasks deadline, plus a short termination grace.
 export const CATALOG_TASK_LEASE_MS=(DISPATCH_DEADLINE_SEC+60)*1000;
-export const FINALIZE_ENQUEUE_LEASE_MS = 120_000;
-export function finalizeEnqueueExpired(now:number) {
-  return sql`CASE WHEN coalesce(${catalogBatches.counts}->>'finalizeEnqueuedAt','') ~ '^[0-9]+$' THEN (${catalogBatches.counts}->>'finalizeEnqueuedAt')::numeric <= ${now-FINALIZE_ENQUEUE_LEASE_MS} ELSE true END`;
-}
-export async function enqueueFinalize(deps: Pick<CatalogDeps,"db"|"enqueue"> & Partial<Pick<CatalogDeps,"now">>, batchId:string, delaySec?:number): Promise<void> {
-  const now=+(deps.now?.() ?? new Date());
-  const rows = await deps.db.update(catalogBatches).set({updatedAt:sql`${catalogBatches.updatedAt}`,counts:sql`${catalogBatches.counts} || jsonb_build_object('finalizePending',true,'finalizeEnqueuedAt',${now}::numeric)`}).where(and(eq(catalogBatches.id,batchId),sql`(NOT coalesce((${catalogBatches.counts}->>'finalizePending')::boolean,false) OR ${finalizeEnqueueExpired(now)})`)).returning({id:catalogBatches.id});
-  if (!rows.length) return;
-  try { await deps.enqueue("/tasks/catalog/finalize",{batchId}, delaySec ? {delaySec}:{}); }
-  catch(error) { await deps.db.update(catalogBatches).set({updatedAt:sql`${catalogBatches.updatedAt}`,counts:sql`jsonb_set(${catalogBatches.counts}, '{finalizePending}', 'false')`}).where(and(eq(catalogBatches.id,batchId),sql`${catalogBatches.counts}->>'finalizeEnqueuedAt' = ${String(now)}`)); throw error; }
-}
+// Spec 18 H4: the one finalize request lives in core, so the web's Add SKU ids route asks the same way.
+export { enqueueFinalize, FINALIZE_ENQUEUE_LEASE_MS, finalizeEnqueueExpired, finalizePendingFlag } from "@catalog/core/catalog/finalize-request";
 /** Spec 15 E7: the newest samples of the images made that the batch page's measured time is read from. */
 export const PROCESSING_RATE_SAMPLES = 5;
 export async function refreshBatchProgress(db:Db,batchId:string,now:Date=new Date()):Promise<void> {

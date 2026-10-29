@@ -49,14 +49,34 @@ export function canvasOk(id: ChannelId, w: number, h: number): boolean {
   return w >= min.w && h >= min.h && w <= target.w && h <= target.h && Math.abs(h - (w * target.h) / target.w) <= 1;
 }
 
+/** Spec 18 H4: waits before the two retries of a link whose GET failed on the network, a 5xx or a 429. */
+export const LINK_RETRY_DELAYS_MS: readonly number[] = [2_000, 5_000];
+export interface LinkRetry { delaysMs?: readonly number[]; sleep?: (ms: number) => Promise<void> }
+const pause = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms));
+const retryableStatus = (status: number) => status === 429 || status >= 500;
+
+/** The GET, retried only on a network error, a 5xx or a 429; the last answer or error is what the check sees. */
+async function getWithRetry(url: string, fetchFn: typeof fetch, retry: LinkRetry): Promise<Response> {
+  const delays = retry.delaysMs ?? LINK_RETRY_DELAYS_MS, sleep = retry.sleep ?? pause;
+  for (let attempt = 0; ; attempt++) {
+    const last = attempt >= delays.length;
+    let response: Response;
+    try { response = await fetchFn(url, { headers: { "Cache-Control": "no-cache" } }); }
+    catch (error) { if (last) throw error; await sleep(delays[attempt]!); continue; }
+    if (last || !retryableStatus(response.status)) return response;
+    await response.body?.cancel();
+    await sleep(delays[attempt]!);
+  }
+}
+
 /** One link: plain GET, then status, type, signature, size, generation, canvas, density and sRGB profile. */
-export async function checkLink(target: LinkTarget, fetchFn: typeof fetch = fetch): Promise<LinkResult> {
+export async function checkLink(target: LinkTarget, fetchFn: typeof fetch = fetch, retry: LinkRetry = {}): Promise<LinkResult> {
   const result: LinkResult = { ...target, status: "failed", http: null, bytes: null, width: null, height: null, generation: null, problem: "" };
   const problems = urlProblems(target.url);
   if (target.hyperlinkOk === false) problems.push("not_a_hyperlink");
   if (problems.includes("invalid_url")) { result.problem = problems.join("; "); return result; }
   try {
-    const response = await fetchFn(target.url, { headers: { "Cache-Control": "no-cache" } });
+    const response = await getWithRetry(target.url, fetchFn, retry);
     result.http = response.status;
     result.generation = response.headers.get("x-goog-generation");
     if (response.status !== 200) { await response.body?.cancel(); problems.push("http_status"); }
@@ -88,11 +108,11 @@ export async function checkLink(target: LinkTarget, fetchFn: typeof fetch = fetc
 }
 
 /** Checks every target with bounded concurrency; a URL seen before is `duplicate_url` and not fetched again. */
-export async function recheckLinks(targets: readonly LinkTarget[], options: { fetch?: typeof fetch; concurrency?: number } = {}): Promise<LinkResult[]> {
+export async function recheckLinks(targets: readonly LinkTarget[], options: { fetch?: typeof fetch; concurrency?: number; retry?: LinkRetry } = {}): Promise<LinkResult[]> {
   const seen = new Set<string>();
   const firsts = targets.map(t => { const dup = seen.has(t.url); seen.add(t.url); return dup; });
   return mapLimit(targets.map((t, i) => ({ t, dup: firsts[i]! })), Math.max(1, Math.floor(options.concurrency ?? RECHECK_CONCURRENCY)), async ({ t, dup }) => {
-    if (!dup) return checkLink(t, options.fetch);
+    if (!dup) return checkLink(t, options.fetch, options.retry);
     return { ...t, status: "failed", http: null, bytes: null, width: null, height: null, generation: null, problem: "duplicate_url" } as LinkResult;
   });
 }

@@ -1,4 +1,5 @@
 import { applySkuMap } from "@catalog/core/catalog/decisions";
+import { enqueueFinalize } from "@catalog/core/catalog/finalize-request";
 import { readSheetTable } from "@catalog/core/catalog/ingest/links-sheet";
 import { enqueueTask } from "@catalog/core/tasks";
 import { db } from "../db";
@@ -16,7 +17,9 @@ export async function addSkuMap(batchId: string, file: File, actor: string) {
   const table = await readSheetTable(Buffer.from(await file.arrayBuffer()), file.name);
   return decisionAction(async () => {
     const result = await applySkuMap(db(), { batchId, rows: [table.header, ...table.rows], actor });
-    await enqueueTask("/tasks/catalog/finalize", { batchId });
+    // Spec 18 H4: a done batch is finalized again only on request; new SKU ids ask for a fresh links sheet
+    // through the one stored request (counts.finalizePending), with its dedupe and failed-batch guard.
+    await enqueueFinalize({ db: db(), enqueue: enqueueTask }, batchId, undefined, { reopen: true });
     return result;
   });
 }

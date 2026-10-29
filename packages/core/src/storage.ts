@@ -1,6 +1,7 @@
 import type { Readable } from "node:stream";
 import { Storage, type CopyResponse } from "@google-cloud/storage";
 import { assertTestPrefix, assertWithinProduct, productPrefix } from "@catalog/core/catalog/naming";
+import { eachLimit } from "./concurrency";
 
 /**
  * GCS helpers for the private bucket (BUCKET, default image-links-agent-assets) and the public
@@ -412,23 +413,35 @@ export async function setCustomTime(gsUri: string, when: Date): Promise<void> {
  * Delete every current and noncurrent generation under a `catalog-test/` prefix (either bucket).
  * Returns the number of deleted generations; bucket soft-delete policy is unchanged.
  * The only bulk delete in the codebase.
+ *
+ * Spec 18 H4: deletes run TEST_DELETE_CONCURRENCY at a time (one at a time took 13 minutes for 19,241
+ * generations). Every listed name and generation is checked before the first delete starts; after a
+ * failed delete no new one starts, the started ones finish, and the error is thrown. `onListed` sees the
+ * count of listed generations before any delete.
  */
-export async function deleteTestObjects(gsPrefixUri: string): Promise<number> {
+export const TEST_DELETE_CONCURRENCY = 32;
+
+export async function deleteTestObjects(gsPrefixUri: string, options: { onListed?: (count: number) => void; concurrency?: number } = {}): Promise<number> {
   const { bucket, path } = parseGsUri(gsPrefixUri);
   assertTestPrefix(path);
   const b = getStorage().bucket(bucket);
   const [files] = await b.getFiles({ prefix: path, autoPaginate: true, versions: true });
-  let deleted = 0;
-  for (const f of files) {
+  const targets = files.map((f) => {
     assertTestPrefix(f.name);
     const generation = f.metadata.generation;
     if (generation === undefined) throw new Error("A versioned test-object listing did not include its generation.");
+    return { name: f.name, generation };
+  });
+  options.onListed?.(targets.length);
+  let deleted = 0;
+  await eachLimit(targets, options.concurrency ?? TEST_DELETE_CONCURRENCY, async ({ name, generation }) => {
+    assertTestPrefix(name);
     try {
-      await withStorageRetry(f.name, () => b.file(f.name, { generation }).delete());
+      await withStorageRetry(name, () => b.file(name, { generation }).delete());
       deleted++;
     } catch (err) {
       if (!isNotFound(err)) throw err;
     }
-  }
+  });
   return deleted;
 }
