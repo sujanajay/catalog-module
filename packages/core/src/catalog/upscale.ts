@@ -18,10 +18,6 @@ export const UPSCALER_VERSION = "1";
 export const DEFAULT_UPSCALE_MIN_SCALE = 1.5;
 /** The service always returns exactly this factor (POST /upscale?scale=2). */
 export const UPSCALE_FACTOR = 2;
-/** One upscale request; Real-ESRGAN x2 on an 800x1200 crop takes seconds on the L4, so this only bounds a stuck call. */
-export const UPSCALE_TIMEOUT_MS = 60_000;
-/** One retry after a 503 (the GPU service starting or busy), after this wait. */
-export const UPSCALE_RETRY_DELAY_MS = 5_000;
 
 export interface UpscaleConfig { model: string | null; minScale: number; /** Which matting service upscales (spec 16 3.1.3); absent is the GPU service. */ target?: UpscaleTarget }
 /** The matting service that answers /upscale: the GPU service (spec 11) or the CPU cut-out service (spec 16). */
@@ -96,22 +92,6 @@ export interface Upscaler {
   readonly minScale: number;
   /** `trace` names the batch and product for the service's log lines (MattingTrace headers). */
   upscale(image: Buffer, contentType: "image/png" | "image/jpeg", trace?: { batchId?: string | undefined; productId?: string | undefined }): Promise<{ jpeg: Buffer; ms: number }>;
-}
-
-/** The client method this module uses (MattingClient.upscale), so tests can pass a fake. */
-export interface UpscaleClient {
-  /** The service the client sends /upscale to (MattingClient.upscaleTarget); absent is the GPU service. */
-  readonly upscaleTarget?: UpscaleTarget;
-  upscale(image: Buffer, opts: { model: string; contentType: "image/png" | "image/jpeg" }, trace?: { batchId?: string | undefined; productId?: string | undefined }): Promise<{ jpeg: Buffer; ms: number; model: string }>;
-}
-
-/** The worker's upscaler, or null when UPSCALE_MODEL is unset (the default). */
-export function createUpscaler(client: UpscaleClient, config: UpscaleConfig): Upscaler | null {
-  const model = config.model;
-  if (!model) return null;
-  // The client knows which service it really calls; the config's target is only the env reading of the same choice.
-  const id = upscalerId(model, client.upscaleTarget ?? config.target ?? "gpu");
-  return { model: id, minScale: config.minScale, upscale: async (image, contentType, trace) => { const r = await client.upscale(image, { model, contentType }, trace); return { jpeg: r.jpeg, ms: r.ms }; } };
 }
 
 /** Spec 18: the render asked for an x2 image no enlarge task stored (or one that did not match the photo). */

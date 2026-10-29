@@ -55,8 +55,8 @@ SHAPE_DEFAULTS=(
   GPU_MATTE_MODELS=birefnet-general,birefnet-general-lite,birefnet-hrsod,bria-rmbg
   # Which service upscales: gpu (spec 11), cpu (spec 16: the CPU cut-out service catalog-matting) or dedicated
   # (spec 18: catalog-upscale, sized by the UPSCALE_* rows below). cpu is what runs today; the enlarge stage calls
-  # either through its own task (spec 18 H3, ENLARGE_CLIENT_WIRED=1 in shape_defaults), and dedicated is refused until
-  # the measured table below has rows for its shape.
+  # either through its own task (spec 18 H3; ENLARGE_CLIENT_WIRED, default 1), and dedicated is refused until the
+  # measured table below has rows for its shape.
   UPSCALE_SERVICE=cpu
   # Spec 18: the dedicated CPU enlargement service catalog-upscale (asia-south1, the catalog-matting image, only the
   # upscaler loaded). Deployed only with UPSCALE_SERVICE=dedicated or UPSCALE_MEASURE=1. UPSCALE_THREADS is its ONNX
@@ -168,10 +168,12 @@ shape_defaults() {
   # Rung 1 of a brand-new catalog-upscale serves the service URL (Cloud Run cannot create a service with --no-traffic);
   # later rungs are no-traffic candidates. Not a shape row: a mode for one run.
   UPSCALE_MEASURE=${UPSCALE_MEASURE:-0}
-  # Spec 18 H3: 1, the enlarge stage calls the upscale service through its own task (apps/worker/src/catalog/enlarge.ts,
-  # packages/core/src/catalog/enlarge.ts) and the render reads the stored x2 only. A fact of the code, not a shape
-  # choice, so env cannot set it.
-  ENLARGE_CLIENT_WIRED=1
+  # Spec 18 H3: 1 when the worker image deployed has the enlarge stage (it calls the upscale service through its own
+  # task, apps/worker/src/catalog/enlarge.ts and packages/core/src/catalog/enlarge.ts, and its render reads the stored
+  # x2 only). 1 by default since H3. It stays a flag so a deploy (or rollback) of an older worker image, whose render
+  # still calls the upscaler through the matting client that refuses catalog-upscale, sets ENLARGE_CLIENT_WIRED=0 and
+  # shape_check refuses UPSCALE_SERVICE=dedicated for it.
+  ENLARGE_CLIENT_WIRED=${ENLARGE_CLIENT_WIRED:-1}
   # The photo sizes the probe measures (width x height); the largest by pixels sets the timeout check.
   UPSCALE_SIZES=${UPSCALE_SIZES-800x1200,1600x1600}
   # Spec 18 H1: measured p95 in whole seconds (rounded up) of one POST /upscale (swinir-x2) per photo size, one row
@@ -224,7 +226,7 @@ shape_check() {
       INGEST_MAX_DISPATCHES BULK_MAX_DISPATCHES TASKS_MAX_DISPATCHES MATTING_CPU_MAX_INSTANCES GPU_MAX_INSTANCES \
       GPU_CPU GPU_CONCURRENCY MAX_RESIDENT_SESSIONS MATTE_INFLIGHT_PER_INSTANCE CATALOG_PHOTO_CONCURRENCY \
       CATALOG_BULK_WINDOW BULK_BATCH_PRODUCTS GPU_CUDA_OVERHEAD_MIB UPSCALE_CPU_VCPU UPSCALE_CONCURRENCY UPSCALE_MAX_INSTANCES \
-      UPSCALE_THREADS UPSCALE_TIMEOUT_S UPSCALE_MAX_PIXELS; do
+      UPSCALE_THREADS UPSCALE_TIMEOUT_S UPSCALE_MAX_PIXELS ENLARGE_MAX_DISPATCHES ENLARGE_BULK_MAX_DISPATCHES; do
     value=${!name}
     if ! [[ "$value" =~ ^[0-9]+$ ]]; then shape_fail "$name must be a whole number, got '$value'"; return 1; fi
   done
@@ -357,7 +359,7 @@ upscale_check() {
   fi
   [ "$UPSCALE_SERVICE" = dedicated ] || return 0
   if [ "$ENLARGE_CLIENT_WIRED" != 1 ]; then
-    shape_fail "UPSCALE_SERVICE=dedicated waits for spec 18 H3: the render does not call catalog-upscale through the enlarge stage yet (ENLARGE_CLIENT_WIRED=0 in infra/lib/shape.sh), and the matting client refuses a dedicated UPSCALE_URL, so every enlargement would fall back to Lanczos; keep UPSCALE_SERVICE=cpu"
+    shape_fail "UPSCALE_SERVICE=dedicated needs a worker image with the spec 18 H3 enlarge stage (ENLARGE_CLIENT_WIRED=$ENLARGE_CLIENT_WIRED says this one has none): its render would ask the matting client for catalog-upscale, which it refuses; keep UPSCALE_SERVICE=cpu"
     return 0
   fi
   # Spec 18 3.3.1: the enlarge lanes never send more at once than catalog-upscale serves at once.

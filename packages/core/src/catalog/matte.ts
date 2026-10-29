@@ -2,7 +2,7 @@ import sharp from "sharp";
 import type { Size } from "./channels";
 import type { Matte, Prepared } from "./render";
 import { BG_TOLERANCE } from "./compliance";
-import { gpuUrlsFromEnv, UPSCALE_RETRY_DELAY_MS, UPSCALE_TIMEOUT_MS } from "./upscale";
+import { gpuUrlsFromEnv } from "./upscale";
 import { log } from "../log";
 import { bearerFor, googleIdTokenFor, raceAbort, type IdTokenFor } from "../id-token";
 
@@ -29,9 +29,8 @@ export interface MattingClientOptions {
    * Spec 16 3.1.3: the base URL of the service that answers /upscale. Absent reads `UPSCALE_URL` from the
    * environment; unset or empty keeps the first GPU service (spec 11). Spec 18 H2: an URL that matches none of
    * `services` is the dedicated CPU upscale service catalog-upscale. This client never calls it (no /health, no
-   * breaker): its upscaleTarget is "cpu" (the `+cpu` render keys) and upscale() refuses, because the enlarge stage
-   * (enlarge.ts, spec 18 H3) serves it. infra/lib/shape.sh refuses UPSCALE_SERVICE=dedicated until H3 sets
-   * ENLARGE_CLIENT_WIRED=1.
+   * breaker): its upscaleTarget is "cpu" (the `+cpu` render keys). Spec 18 H3: only the enlarge task calls an upscale
+   * service (enlarge.ts); this client never does.
    */
   upscaleUrl?: string | null;
   /** Spec 16 3.1.5: cut-out calls in flight per GPU service from this process (default MATTE_INFLIGHT_PER_INSTANCE). */
@@ -88,16 +87,17 @@ function modelSendLongSide(inputSize: ModelInfo["inputSize"], source: Size): num
 }
 export interface MatteOptions { padFraction?: number }
 class UnavailableError extends Error { constructor(message: string, readonly status?: number) { super(message); } }
-/** The upscaler could not be used (not listed as available, breaker open, 503 twice, timeout, bad request); the render falls back to Lanczos. */
-export class UpscaleUnavailableError extends Error {}
-export interface UpscaleOptions { model: string; contentType: "image/png" | "image/jpeg"; timeoutMs?: number; retryDelayMs?: number; sleep?: (ms: number) => Promise<void> }
 export class UnknownMatteModelError extends Error {}
 
 export class MattingClient {
   private readonly states: ServiceState[];
   private readonly request: typeof fetch;
   private readonly token: IdTokenFor;
-  /** The service /upscale goes to (spec 16 3.1.3); null without a GPU service and without a matching UPSCALE_URL. */
+  /**
+   * The matting service that serves /upscale (spec 16 3.1.3), for upscaleTarget and health().upscale only: spec 18 H3
+   * moved every upscale call to the enlarge task (enlarge.ts), so this client never calls /upscale. Null without a GPU
+   * service and without a matching UPSCALE_URL.
+   */
   private readonly upscaleState: ServiceState | null;
   /** Spec 18 H2: UPSCALE_URL names no matting service, so it is catalog-upscale, which only the enlarge stage calls. */
   private readonly dedicatedUpscale: boolean;
@@ -125,21 +125,6 @@ export class MattingClient {
   }
   /** Compatibility view is the required CPU breaker; use breakers for both targets. */
   get breaker(): Breaker { return this.states.find((s) => s.target === "cpu")!.breaker; }
-  /**
-   * Spec 11 assumption 9: the upscaler's own breaker. Upscale failures never touch the matting breakers; after
-   * BREAKER_FAILURES consecutive failures the upscaler is skipped for BREAKER_COOLDOWN_MS, closed again by a success.
-   */
-  readonly upscaleBreaker: { failures: number; openedAt: number | null } = { failures: 0, openedAt: null };
-  private upscaleAvailable(): boolean {
-    const b = this.upscaleBreaker;
-    if (b.openedAt !== null && Date.now() - b.openedAt >= BREAKER_COOLDOWN_MS) { b.openedAt = null; b.failures = BREAKER_FAILURES - 1; }
-    return b.openedAt === null;
-  }
-  private upscaleFailure(): void {
-    const b = this.upscaleBreaker;
-    b.failures++;
-    if (b.failures >= BREAKER_FAILURES) b.openedAt = Date.now();
-  }
   /** The first service of each target; with several GPU services see `gpuBreakers`. */
   get breakers(): Partial<Record<"cpu" | "gpu", Breaker>> { return Object.fromEntries([...this.states].reverse().map((s) => [s.target, s.breaker])); }
   /** Every GPU service's breaker, in the configured order. */
@@ -210,41 +195,6 @@ export class MattingClient {
     // Several GPU services serve the same models; each model id is listed once.
     const models = this.states.flatMap((s) => s.models).filter((m, i, all) => all.findIndex((x) => x.id === m.id && x.target === m.target) === i);
     return { ok: this.states.some((s) => s.models.length > 0), models, default: this.states.find((s) => s.target === "cpu")!.default, versions: { cpu: this.states.find((s) => s.target === "cpu")?.version ?? null, gpu: this.states.find((s) => s.target === "gpu" && s.version)?.version ?? null }, upscale: this.upscaleState?.upscale ?? null };
-  }
-  /**
-   * POST /upscale?model=<id>&scale=2 on the upscale service (spec 11; spec 16 3.1.3: the GPU service, or the CPU
-   * cut-out service when UPSCALE_URL names it, which serves /upscale with UPSCALE_CPU=1): the body is the image
-   * bytes, the answer a JPEG of exactly twice the size. Only a model that service's /health lists as available at
-   * scale 2 is asked for. Same auth, base URL as matting: an open matting breaker of that service or an open upscale breaker skips the call, one retry follows a
-   * 503 after `retryDelayMs`, and only a final failure of the service (not a rejected request, 400 or 413)
-   * counts, once, towards the upscale breaker (never the matting one). Throws UpscaleUnavailableError; the render
-   * then uses Lanczos.
-   */
-  async upscale(image: Buffer, opts: UpscaleOptions, trace?: MattingTrace): Promise<{ jpeg: Buffer; ms: number; model: string }> {
-    if (this.dedicatedUpscale) throw new UpscaleUnavailableError("Enlargement on catalog-upscale is served by the enlarge stage, not the matting client.");
-    const s = this.upscaleState;
-    if (!s) throw new UpscaleUnavailableError("No matting service is configured for upscaling.");
-    const h = await this.health();
-    if (!h.upscale?.models.some((m) => m.id === opts.model && m.available && m.scale === 2)) throw new UpscaleUnavailableError(`The ${s.target.toUpperCase()} service does not list this upscaler as available.`);
-    const sleep = opts.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
-    let last: unknown;
-    for (let attempt = 0; attempt < 2; attempt++) {
-      if (!this.available(s) || !this.upscaleAvailable()) throw new UpscaleUnavailableError(`The ${s.target.toUpperCase()} service is paused after repeated failures.`);
-      const started = Date.now();
-      try {
-        const response = await this.call(s, `/upscale?model=${encodeURIComponent(opts.model)}&scale=2`, { method: "POST", body: new Uint8Array(image), headers: { "content-type": opts.contentType } }, opts.timeoutMs ?? UPSCALE_TIMEOUT_MS, trace);
-        const jpeg = Buffer.from(await response.arrayBuffer());
-        const ms = Number(response.headers.get("x-upscale-ms"));
-        this.upscaleBreaker.failures = 0; this.upscaleBreaker.openedAt = null;
-        return { jpeg, ms: Number.isFinite(ms) && ms > 0 ? ms : Date.now() - started, model: response.headers.get("x-upscale-model") ?? opts.model };
-      } catch (err) {
-        last = err;
-        if (attempt === 0 && err instanceof UnavailableError && err.status === 503) { await sleep(opts.retryDelayMs ?? UPSCALE_RETRY_DELAY_MS); continue; }
-        break;
-      }
-    }
-    if (!(last instanceof Error && /request rejected/.test(last.message))) this.upscaleFailure();
-    throw new UpscaleUnavailableError(`Upscale failed: ${last instanceof Error ? last.message : String(last)}`);
   }
   sendLongSide(model: string, source: Size): number {
     const info = [...this.states].sort((a, b) => Number(b.target === "gpu") - Number(a.target === "gpu")).flatMap((s) => s.models).find((m) => m.id === model);

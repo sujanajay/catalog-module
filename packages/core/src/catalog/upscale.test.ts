@@ -1,11 +1,11 @@
 import sharp from "sharp";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { CHANNELS } from "./channels";
-import { MattingClient, parseUpscaleHealth, UpscaleUnavailableError } from "./matte";
+import { MattingClient, parseUpscaleHealth } from "./matte";
 import { enlargementNeeds, planCanvas, planProduct, renderKeyInputs, renderSource, shotGeometry, trimRules, type Matte, type Prepared } from "./render";
 import { analyseBackground } from "./shadow";
 import { enlargeCutout, sharpenAfterEnlarge } from "./enhance";
-import { createUpscaler, DEFAULT_UPSCALE_MIN_SCALE, gpuUrlsFromEnv, otherTargetUpscalerId, primeSourceX2, shouldUpscale, storedUpscaler, StoredEnlargementMissingError, upscaleConfigFromEnv, upscaledRgb, upscalerId, upscalerKey, upscaleTargetFromEnv, UPSCALER_VERSION, type Upscaler } from "./upscale";
+import { DEFAULT_UPSCALE_MIN_SCALE, gpuUrlsFromEnv, otherTargetUpscalerId, primeSourceX2, shouldUpscale, storedUpscaler, StoredEnlargementMissingError, upscaleConfigFromEnv, upscaledRgb, upscalerId, upscalerKey, upscaleTargetFromEnv, UPSCALER_VERSION, type Upscaler } from "./upscale";
 import { configuredUpscalerId, renderKey, renderKeys, rerenderedKey, upscaledRenderKey } from "./pipeline/publish";
 import { upscaledNotes } from "./pipeline/report";
 import { flagDetails } from "./qa/reasons";
@@ -47,9 +47,6 @@ describe("upscale decision", () => {
     expect(upscaleConfigFromEnv({ UPSCALE_MODEL: MODEL, UPSCALE_MIN_SCALE: "1.8" })).toEqual({ model: MODEL, minScale: 1.8 });
     expect(upscaleConfigFromEnv({ UPSCALE_MODEL: MODEL, UPSCALE_MIN_SCALE: "0.5" }).minScale).toBe(1.5);
     expect(upscaleConfigFromEnv({ UPSCALE_MODEL: MODEL, UPSCALE_MIN_SCALE: "abc" }).minScale).toBe(1.5);
-    const client = { upscale: vi.fn() };
-    expect(createUpscaler(client, { model: null, minScale: 1.5 })).toBeNull();
-    expect(createUpscaler(client, { model: MODEL, minScale: 1.5 })).toMatchObject({ model: MODEL, minScale: 1.5 });
   });
   it("triggers only above the threshold, never at it", () => {
     expect(shouldUpscale(1.5, 1.5)).toBe(false);
@@ -107,7 +104,7 @@ describe("render with the upscaler", () => {
     const { prepared, matte } = fixture();
     const plain = await renderSource({ prepared, matte, channel: "trendyol", shotNumber: 2, productType: "other" });
     expect(plain.flags).not.toContain("upscaled"); expect(plain.flags).not.toContain("enlargement_failed"); expect(plain.upscale).toBeUndefined();
-    const failing = fakeUpscaler(2, new UpscaleUnavailableError("Upscale failed: Background removal service returned 503."));
+    const failing = fakeUpscaler(2, new Error("Upscale failed: Background removal service returned 503."));
     const held = await renderSource({ prepared, matte, channel: "trendyol", shotNumber: 2, productType: "other", upscaler: failing, trace: { batchId: "b1", productId: "p1" } });
     expect(failing.calls).toHaveLength(1);
     expect(held.flags).not.toContain("upscaled"); expect(held.upscale).toBeUndefined();
@@ -215,11 +212,10 @@ describe("upscaled flag copy", () => {
   });
 });
 
-describe("matting client upscale", () => {
+describe("matting client upscale target (spec 18 H3: the client never calls /upscale)", () => {
   type Route = (init: RequestInit & { signal: AbortSignal }) => Promise<Response> | Response;
   const health = (target: "cpu" | "gpu", upscale?: unknown) => Response.json({ ok: true, models: [{ id: "general", inputSize: 64, target }], default: "general", version: target, ...(upscale === undefined ? {} : { upscale }) });
   const listed = { models: [{ id: MODEL, available: true, scale: 2 }, { id: "swinir-x2", available: false, scale: 2 }], default: MODEL };
-  async function jpeg2x(body: BodyInit | null | undefined) { const meta = await sharp(Buffer.from(body as Uint8Array)).metadata(); return sharp({ create: { width: meta.width! * 2, height: meta.height! * 2, channels: 3, background: "green" } }).jpeg().toBuffer(); }
   function client(upscaleRoute: Route, opts: { gpu?: boolean; upscale?: unknown } = {}) {
     const calls: string[] = [];
     const fetch = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
@@ -230,71 +226,21 @@ describe("matting client upscale", () => {
     const c = new MattingClient({ services: [{ baseUrl: "http://127.0.0.1:1", target: "cpu" }, ...(opts.gpu === false ? [] : [{ baseUrl: "http://127.0.0.1:2", target: "gpu" as const }])], fetch });
     return { c, calls };
   }
-  const image = () => sharp({ create: { width: 10, height: 6, channels: 3, background: "white" } }).png().toBuffer();
-
-  it("types the health upscale section and posts the image to the GPU service", async () => {
+  it("types the health upscale section of the GPU service", async () => {
     expect(parseUpscaleHealth(undefined)).toBeNull();
     expect(parseUpscaleHealth({ models: [{ id: MODEL, available: true, scale: 2 }, { id: "", available: true, scale: 2 }, { id: "x", available: "yes", scale: 2 }] })).toEqual({ models: [{ id: MODEL, available: true, scale: 2 }], default: null });
-    let seen: { type: string | null; url?: string } = { type: null };
-    const { c, calls } = client(async init => { seen = { type: new Headers(init.headers).get("content-type") }; return new Response(new Uint8Array(await jpeg2x(init.body)), { headers: { "content-type": "image/jpeg", "x-upscale-model": MODEL, "x-upscale-ms": "321" } }); });
+    const { c, calls } = client(() => new Response("{}", { status: 500 }));
     expect((await c.health()).upscale).toEqual(listed);
-    const r = await c.upscale(await image(), { model: MODEL, contentType: "image/png" });
-    expect(r).toMatchObject({ model: MODEL, ms: 321 });
-    const meta = await sharp(r.jpeg).metadata(); expect([meta.width, meta.height]).toEqual([20, 12]);
-    expect(seen.type).toBe("image/png");
-    expect(calls.filter(u => u.includes("/upscale"))).toEqual([`http://127.0.0.1:2/upscale?model=${MODEL}&scale=2`]);
+    expect(calls.filter(u => u.includes("/upscale"))).toEqual([]);
+    expect("upscale" in c).toBe(false);
   });
-  it("never asks without a GPU service or for a model the service does not list as available", async () => {
-    const route = vi.fn(() => new Response("{}", { status: 500 }));
-    await expect(client(route, { gpu: false }).c.upscale(await image(), { model: MODEL, contentType: "image/png" })).rejects.toBeInstanceOf(UpscaleUnavailableError);
-    await expect(client(route).c.upscale(await image(), { model: "swinir-x2", contentType: "image/png" })).rejects.toBeInstanceOf(UpscaleUnavailableError);
-    await expect(client(route, { upscale: undefined }).c.upscale(await image(), { model: MODEL, contentType: "image/png" })).rejects.toBeInstanceOf(UpscaleUnavailableError);
-    expect(route).not.toHaveBeenCalled();
-  });
-  it("retries a 503 once after the wait, then gives up and counts one breaker failure", async () => {
-    const sleep = vi.fn(async () => undefined);
-    let n = 0;
-    const ok = client(async init => (++n === 1 ? Response.json({ error: "busy" }, { status: 503 }) : new Response(new Uint8Array(await jpeg2x(init.body)))));
-    await expect(ok.c.upscale(await image(), { model: MODEL, contentType: "image/png", sleep })).resolves.toMatchObject({ model: MODEL });
-    expect(sleep).toHaveBeenCalledWith(5000); expect(n).toBe(2);
-    const down = client(() => Response.json({ error: "unavailable" }, { status: 503 }));
-    await expect(down.c.upscale(await image(), { model: MODEL, contentType: "image/png", sleep })).rejects.toBeInstanceOf(UpscaleUnavailableError);
-    expect(down.calls.filter(u => u.includes("/upscale"))).toHaveLength(2);
-    expect(down.c.upscaleBreaker.failures).toBe(1); expect(down.c.breakers.gpu!.failures).toBe(0);
-    // A rejected request (too large) is not the service's fault: no retry, no breaker failure.
-    const big = client(() => Response.json({ error: "too large" }, { status: 413 }));
-    await expect(big.c.upscale(await image(), { model: MODEL, contentType: "image/png", sleep })).rejects.toBeInstanceOf(UpscaleUnavailableError);
-    expect(big.calls.filter(u => u.includes("/upscale"))).toHaveLength(1); expect(big.c.upscaleBreaker.failures).toBe(0);
-    // Repeated service failures open the upscale breaker only: the call is skipped, matting is untouched.
-    for (let i = 1; i < 5; i++) await expect(down.c.upscale(await image(), { model: MODEL, contentType: "image/png", sleep })).rejects.toBeInstanceOf(UpscaleUnavailableError);
-    expect(down.c.upscaleBreaker.openedAt).not.toBeNull(); expect(down.c.breakers.gpu!.state).toBe("closed");
-    const before = down.calls.filter(u => u.includes("/upscale")).length;
-    await expect(down.c.upscale(await image(), { model: MODEL, contentType: "image/png", sleep })).rejects.toThrow("paused");
-    expect(down.calls.filter(u => u.includes("/upscale"))).toHaveLength(before);
-  });
-  it("times out without a retry and skips the call while the GPU breaker is open", async () => {
-    const hang: Route = init => new Promise((_, reject) => init.signal.addEventListener("abort", () => reject(init.signal.reason)));
-    const slow = client(hang);
-    await expect(slow.c.upscale(await image(), { model: MODEL, contentType: "image/png", timeoutMs: 30 })).rejects.toBeInstanceOf(UpscaleUnavailableError);
-    expect(slow.calls.filter(u => u.includes("/upscale"))).toHaveLength(1);
-    slow.c.breakers.gpu!.state = "open"; slow.c.breakers.gpu!.openedAt = Date.now();
-    await expect(slow.c.upscale(await image(), { model: MODEL, contentType: "image/png", timeoutMs: 30 })).rejects.toThrow("paused");
-    expect(slow.calls.filter(u => u.includes("/upscale"))).toHaveLength(1);
-  });
-  it("sends /upscale to the CPU cut-out service when UPSCALE_URL names it (spec 16 3.1.3)", async () => {
-    const calls: string[] = [];
-    const fetch = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
-      const u = String(url); calls.push(u);
-      if (u.endsWith("/health")) return health(u.includes(":2") ? "gpu" : "cpu", listed);
-      return new Response(new Uint8Array(await jpeg2x(init!.body)), { headers: { "x-upscale-ms": "6100" } });
-    }) as unknown as typeof globalThis.fetch;
+  it("the upscale target is the CPU cut-out service when UPSCALE_URL names it (spec 16 3.1.3)", async () => {
+    const fetch = vi.fn(async (url: string | URL | Request) => health(String(url).includes(":2") ? "gpu" : "cpu", listed)) as unknown as typeof globalThis.fetch;
     const services = [{ baseUrl: "http://127.0.0.1:1", target: "cpu" as const }, { baseUrl: "http://127.0.0.1:2", target: "gpu" as const }];
     const cpu = new MattingClient({ services, fetch, upscaleUrl: "http://127.0.0.1:1/" });
     expect(cpu.upscaleTarget).toBe("cpu");
-    await expect(cpu.upscale(await image(), { model: MODEL, contentType: "image/png" })).resolves.toMatchObject({ ms: 6100 });
-    expect(calls.filter(u => u.includes("/upscale"))).toEqual([`http://127.0.0.1:1/upscale?model=${MODEL}&scale=2`]);
     // The worker's upscaler carries the CPU id, so its render_key differs from a GPU-made image's.
-    expect(createUpscaler(cpu, { model: MODEL, minScale: 1.5 })!.model).toBe(`${MODEL}+cpu`);
+    expect(upscalerId(MODEL, cpu.upscaleTarget)).toBe(`${MODEL}+cpu`);
     // Unset keeps the GPU service; spec 18 H2: an URL that names no matting service is the dedicated CPU service.
     expect(new MattingClient({ services, fetch, upscaleUrl: null }).upscaleTarget).toBe("gpu");
     expect(new MattingClient({ services, fetch, upscaleUrl: "https://elsewhere.example" }).upscaleTarget).toBe("cpu");
@@ -302,23 +248,20 @@ describe("matting client upscale", () => {
     // Without a GPU service, the CPU service named by UPSCALE_URL still upscales.
     expect(new MattingClient({ services: [services[0]!], fetch, upscaleUrl: "http://127.0.0.1:1" }).upscaleTarget).toBe("cpu");
   });
-  it("never calls the dedicated CPU service when UPSCALE_URL names no matting service: the enlarge stage does (spec 18 H2)", async () => {
+  it("never reads the dedicated CPU service when UPSCALE_URL names no matting service: the enlarge stage calls it (spec 18 H2)", async () => {
     const calls: string[] = [];
-    const fetch = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+    const fetch = vi.fn(async (url: string | URL | Request) => {
       const u = String(url); calls.push(u);
-      if (u.endsWith("/health")) return health(u.includes(":2") ? "gpu" : "cpu", u.includes(":3") ? listed : undefined);
-      return new Response(new Uint8Array(await jpeg2x(init!.body)), { headers: { "x-upscale-ms": "90000" } });
+      return health(u.includes(":2") ? "gpu" : "cpu", u.includes(":3") ? listed : undefined);
     }) as unknown as typeof globalThis.fetch;
     const services = [{ baseUrl: "http://127.0.0.1:1", target: "cpu" as const }, { baseUrl: "http://127.0.0.1:2", target: "gpu" as const }];
     const c = new MattingClient({ services, fetch, upscaleUrl: "http://127.0.0.1:3/" });
-    // Its render keys stay the CPU ones; the call itself is an explicit refusal, never a request.
+    // Its render keys stay the CPU ones.
     expect(c.upscaleTarget).toBe("cpu");
-    expect(createUpscaler(c, { model: MODEL, minScale: 1.5 })!.model).toBe(`${MODEL}+cpu`);
-    await expect(c.upscale(await image(), { model: MODEL, contentType: "image/png" })).rejects.toThrow("served by the enlarge stage");
-    // No /health fan-out to it and no breaker state: the cut-out services alone.
+    expect(upscalerId(MODEL, c.upscaleTarget)).toBe(`${MODEL}+cpu`);
+    // No /health fan-out to it: the cut-out services alone.
     expect((await c.health()).models.map((m) => m.target).sort()).toEqual(["cpu", "gpu"]);
     expect(calls.some((u) => u.includes(":3"))).toBe(false);
-    expect(c.upscaleBreaker).toEqual({ failures: 0, openedAt: null });
   });
   it("one parser for the GPU URLs (matting client and upscale target)", () => {
     expect(gpuUrlsFromEnv({})).toEqual([]);
@@ -339,21 +282,6 @@ describe("matting client upscale", () => {
     expect(configuredUpscalerId({ UPSCALE_MODEL: MODEL, UPSCALE_URL: "https://cpu.example", MATTING_URL: "https://cpu.example" })).toBe(`${MODEL}+cpu`);
     expect(configuredUpscalerId({ UPSCALE_MODEL: MODEL })).toBe(MODEL);
     expect(configuredUpscalerId({})).toBeNull();
-  });
-  it("falls back to the plain bytes in the render on a 503 and on a timeout", async () => {
-    const { prepared, matte } = fixture();
-    const plain = await renderSource({ prepared, matte, channel: "trendyol", shotNumber: 1, productType: "other" });
-    const down = client(() => Response.json({ error: "unavailable" }, { status: 503 }));
-    const viaClient = (c: MattingClient, extra: { timeoutMs?: number } = {}): Upscaler => ({ model: MODEL, minScale: 1.5, upscale: async (img, contentType) => c.upscale(img, { model: MODEL, contentType, sleep: async () => undefined, ...extra }) });
-    const a = await renderSource({ prepared, matte, channel: "trendyol", shotNumber: 1, productType: "other", upscaler: viaClient(down.c) });
-    const hang = client(init => new Promise((_, reject) => init.signal.addEventListener("abort", () => reject(init.signal.reason))));
-    const b = await renderSource({ prepared, matte, channel: "trendyol", shotNumber: 1, productType: "other", upscaler: viaClient(hang.c, { timeoutMs: 30 }) });
-    for (const out of [a, b]) { expect(out.flags).not.toContain("upscaled"); expect(out.upscale).toBeUndefined(); expect(out.jpeg!.equals(plain.jpeg!)).toBe(true); }
-    expect(warn).toHaveBeenCalledTimes(2);
-    // The worker's upscaler goes through the same client.
-    const ok = client(async init => new Response(new Uint8Array(await jpeg2x(init.body)), { headers: { "x-upscale-ms": "7" } }));
-    const up = await renderSource({ prepared, matte, channel: "trendyol", shotNumber: 1, productType: "other", upscaler: createUpscaler(ok.c, { model: MODEL, minScale: 1.5 }) });
-    expect(up.flags).toContain("upscaled"); expect(up.upscale).toEqual({ model: MODEL, ms: 7 });
   });
 });
 

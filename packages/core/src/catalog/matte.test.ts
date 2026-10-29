@@ -294,13 +294,12 @@ describe("per-call trace headers", () => {
     });
     return { seen, client: new MattingClient({ services: [{ baseUrl: "http://cpu.local", target: "cpu" }, { baseUrl: "http://gpu.local", target: "gpu" }], fetch, idToken: async () => "token" }) };
   }
-  it("sends x-catalog-batch and x-catalog-product on /matte, /convert and /upscale, and not on /health", async () => {
+  it("sends x-catalog-batch and x-catalog-product on /matte and /convert, and not on /health", async () => {
     const { seen, client } = recorder(), trace = { batchId: "b1", productId: "p1" };
     expect((await matteFor(prepared(), client, "general", {}, trace)).source).toBe("model");
     await client.convert(Buffer.from([1]), trace);
-    await client.upscale(Buffer.from([1]), { model: "x2", contentType: "image/jpeg" }, trace);
     const traced = seen.filter((s) => s.path !== "/health");
-    expect(traced.map((s) => s.path)).toEqual(["/matte", "/convert", "/upscale"]);
+    expect(traced.map((s) => s.path)).toEqual(["/matte", "/convert"]);
     expect(traced.every((s) => s.batch === "b1" && s.product === "p1")).toBe(true);
     expect(seen.filter((s) => s.path === "/health").every((s) => s.batch === null && s.product === null)).toBe(true);
   });

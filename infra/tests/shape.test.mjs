@@ -36,8 +36,8 @@ const pick = (prefix) => {
 const prices = [pick('usd() {'), pick('if [ -z "${COMPUTE_USD_PER_VCPU_SECOND:-}"'), pick('COMPUTE_USD_PER_VCPU_SECOND=${COMPUTE_USD_PER_VCPU_SECOND:-'),
   pick('if [ -z "${PRICE_MATTE_GPU_USD_PER_SECOND:-}"'), pick('PRICE_MATTE_GPU_USD_PER_SECOND=${PRICE_MATTE_GPU_USD_PER_SECOND:-')].join('\n');
 
-// ENLARGE_CLIENT_WIRED is a fact of the code that env cannot set (shape_defaults assigns it, 1 since spec 18 H3); a
-// case may still set it after shape_defaults through `wired`.
+// ENLARGE_CLIENT_WIRED defaults to 1 since spec 18 H3 (env 0 marks an older worker image); a case may also set it to 1
+// after shape_defaults through `wired`.
 function run(env, live = '400') {
   const {WIRED: wired, ...rest} = env;
   env = rest;
@@ -177,10 +177,12 @@ const cases = [
   {label: 'knob values', env: {INFERENCE_LOCK_SCOPE: 'model', CUDNN_CONV_ALGO_SEARCH: 'FAST', CUDNN_CONV_USE_MAX_WORKSPACE: '2'}, expect: {STATUS: '1'},
     error: /INFERENCE_LOCK_SCOPE must be global or session[\s\S]*CUDNN_CONV_ALGO_SEARCH must be[\s\S]*CUDNN_CONV_USE_MAX_WORKSPACE must be/},
   // Spec 18 H1: catalog-upscale is refused until its shape is measured, and sized by the measurements.
-  {label: 'spec 18 H3: the enlarge stage is wired in shape_defaults, so a measured dedicated shape is not refused for it', env: {...DEDICATED, WIRED: '', MATTING_CPU_MAX_INSTANCES: '4'},
+  {label: 'spec 18 H3: the enlarge stage is wired by default, so a measured dedicated shape is not refused for it', env: {...DEDICATED, WIRED: '', MATTING_CPU_MAX_INSTANCES: '4'},
     expect: {STATUS: '0', CPU_TOTAL: '187', UPSCALE_VCPU_TOTAL: '64'}},
-  {label: 'env cannot unset the wired enlarge stage', env: {...DEDICATED, WIRED: '', ENLARGE_CLIENT_WIRED: '0', MATTING_CPU_MAX_INSTANCES: '4'},
-    expect: {STATUS: '0', CPU_TOTAL: '187'}},
+  {label: 'a worker image without the enlarge stage (ENLARGE_CLIENT_WIRED=0) refuses dedicated', env: {...DEDICATED, WIRED: '', ENLARGE_CLIENT_WIRED: '0', MATTING_CPU_MAX_INSTANCES: '4'},
+    expect: {STATUS: '1'}, error: /UPSCALE_SERVICE=dedicated needs a worker image with the spec 18 H3 enlarge stage \(ENLARGE_CLIENT_WIRED=0 says this one has none\)/},
+  {label: 'the enlarge slot rows are whole numbers (an empty one is refused, never read as 0)', env: {ENLARGE_MAX_DISPATCHES: ''}, expect: {STATUS: '1'}, error: /ENLARGE_MAX_DISPATCHES must be a whole number, got ''/},
+  {label: 'the bulk enlarge slot row is a whole number', env: {ENLARGE_BULK_MAX_DISPATCHES: 'twelve'}, expect: {STATUS: '1'}, error: /ENLARGE_BULK_MAX_DISPATCHES must be a whole number, got 'twelve'/},
   {label: 'a measured p95 that is not a whole number names its row', env: {...DEDICATED, MATTING_CPU_MAX_INSTANCES: '4', UPSCALE_P95_S_4C_4T_1CONC_1600x1600: '329.4'}, expect: {STATUS: '1'},
     error: /^ERROR: UPSCALE_P95_S_4C_4T_1CONC_1600x1600=329.4 must be a whole number of seconds \(rounded up\), such as 331\n$/},
   {label: 'dedicated upscale with nothing measured is refused: measure first', env: {WIRED: '1', UPSCALE_SERVICE: 'dedicated', MATTING_CPU_MAX_INSTANCES: '4'}, expect: {STATUS: '1'},
