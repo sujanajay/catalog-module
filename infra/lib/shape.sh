@@ -66,6 +66,10 @@ SHAPE_DEFAULTS=(
   UPSCALE_MAX_INSTANCES=16
   UPSCALE_THREADS=4
   UPSCALE_TIMEOUT_S=840
+  # Spec 18 3.1.5 / 13: the largest photo (width x height, before the 2x) catalog-upscale takes. Larger photos are
+  # refused by the service (400) and held by the worker with enlargement_failed before any call, never a crash.
+  # 24000000 is the service's own default (services/matting/app.py); lowered when the largest size cannot fit 840 s.
+  UPSCALE_MAX_PIXELS=24000000
   # The upscalers stay resident once used, so with UPSCALE_SERVICE=gpu both count on top of the cut-outs.
   GPU_UPSCALE_MODELS=realesrgan-x2plus,swinir-x2
   # CUDA context and library handles outside the model arenas (spec 17 3.3.3).
@@ -174,6 +178,16 @@ shape_defaults() {
   UPSCALE_P95_S_8C_8T_1CONC_1600x1600=${UPSCALE_P95_S_8C_8T_1CONC_1600x1600-}
   UPSCALE_P95_S_8C_8T_2CONC_800x1200=${UPSCALE_P95_S_8C_8T_2CONC_800x1200-}
   UPSCALE_P95_S_8C_8T_2CONC_1600x1600=${UPSCALE_P95_S_8C_8T_2CONC_1600x1600-}
+  # Spec 18 3.1.5: the measured p50 in whole seconds (rounded up), same naming, same probe and date. It sets the queue
+  # rate rule; empty = not measured, and the p95 of the same size then stands in (slower, so a safe bound).
+  UPSCALE_P50_S_4C_4T_1CONC_800x1200=${UPSCALE_P50_S_4C_4T_1CONC_800x1200-}
+  UPSCALE_P50_S_4C_4T_1CONC_1600x1600=${UPSCALE_P50_S_4C_4T_1CONC_1600x1600-}
+  UPSCALE_P50_S_4C_4T_2CONC_800x1200=${UPSCALE_P50_S_4C_4T_2CONC_800x1200-}
+  UPSCALE_P50_S_4C_4T_2CONC_1600x1600=${UPSCALE_P50_S_4C_4T_2CONC_1600x1600-}
+  UPSCALE_P50_S_8C_8T_1CONC_800x1200=${UPSCALE_P50_S_8C_8T_1CONC_800x1200-}
+  UPSCALE_P50_S_8C_8T_1CONC_1600x1600=${UPSCALE_P50_S_8C_8T_1CONC_1600x1600-}
+  UPSCALE_P50_S_8C_8T_2CONC_800x1200=${UPSCALE_P50_S_8C_8T_2CONC_800x1200-}
+  UPSCALE_P50_S_8C_8T_2CONC_1600x1600=${UPSCALE_P50_S_8C_8T_2CONC_1600x1600-}
   # The worker's task deadline is 900 s; the upscale call waits UPSCALE_TIMEOUT_S + 30 s, so 840 is the most.
   UPSCALE_TIMEOUT_MAX_S=840
   # Worker pool per instance. One photo at a time: one connection per in-flight task (2). Several photos at once
@@ -200,13 +214,13 @@ shape_check() {
       INGEST_MAX_DISPATCHES BULK_MAX_DISPATCHES TASKS_MAX_DISPATCHES MATTING_CPU_MAX_INSTANCES GPU_MAX_INSTANCES \
       GPU_CPU GPU_CONCURRENCY MAX_RESIDENT_SESSIONS MATTE_INFLIGHT_PER_INSTANCE CATALOG_PHOTO_CONCURRENCY \
       CATALOG_BULK_WINDOW BULK_BATCH_PRODUCTS GPU_CUDA_OVERHEAD_MIB UPSCALE_CPU_VCPU UPSCALE_CONCURRENCY UPSCALE_MAX_INSTANCES \
-      UPSCALE_THREADS UPSCALE_TIMEOUT_S; do
+      UPSCALE_THREADS UPSCALE_TIMEOUT_S UPSCALE_MAX_PIXELS; do
     value=${!name}
     if ! [[ "$value" =~ ^[0-9]+$ ]]; then shape_fail "$name must be a whole number, got '$value'"; return 1; fi
   done
   for name in WORKER_MAX_INSTANCES WORKER_CONCURRENCY WORKER_DB_POOL_MAX INGEST_MAX_DISPATCHES TASKS_MAX_DISPATCHES \
       MATTING_CPU_MAX_INSTANCES GPU_MAX_INSTANCES GPU_CONCURRENCY MAX_RESIDENT_SESSIONS MATTE_INFLIGHT_PER_INSTANCE \
-      CATALOG_PHOTO_CONCURRENCY CATALOG_BULK_WINDOW BULK_BATCH_PRODUCTS UPSCALE_CONCURRENCY UPSCALE_MAX_INSTANCES UPSCALE_THREADS; do
+      CATALOG_PHOTO_CONCURRENCY CATALOG_BULK_WINDOW BULK_BATCH_PRODUCTS UPSCALE_CONCURRENCY UPSCALE_MAX_INSTANCES UPSCALE_THREADS UPSCALE_MAX_PIXELS; do
     [ "${!name}" -ge 1 ] || shape_fail "$name must be at least 1"
   done
   # Cloud Tasks takes a rate above 0 and at most 500 per second.
@@ -271,6 +285,12 @@ upscale_deployed() { [ "$UPSCALE_SERVICE" = dedicated ] || [ "$UPSCALE_MEASURE" 
 # upscale_p95 <size>: the measured p95 in seconds of the current UPSCALE_CPU_VCPU/THREADS/CONCURRENCY shape, or nothing.
 upscale_p95() {
   local name="UPSCALE_P95_S_${UPSCALE_CPU_VCPU}C_${UPSCALE_THREADS}T_${UPSCALE_CONCURRENCY}CONC_$1"
+  printf '%s' "${!name:-}"
+}
+
+# upscale_p50 <size>: the measured p50 in seconds of the current shape, or nothing.
+upscale_p50() {
+  local name="UPSCALE_P50_S_${UPSCALE_CPU_VCPU}C_${UPSCALE_THREADS}T_${UPSCALE_CONCURRENCY}CONC_$1"
   printf '%s' "${!name:-}"
 }
 
@@ -346,13 +366,15 @@ upscale_check() {
   elif [ "$UPSCALE_TIMEOUT_S" -lt "$worst" ]; then
     shape_fail "UPSCALE_TIMEOUT_S=$UPSCALE_TIMEOUT_S is below 2 x the measured p95 of $largest ($(upscale_p95 "$largest") s, measured $UPSCALE_MEASURED_ON); set it to at least $worst"
   fi
-  # Spec 18 3.1.5: the queue rate never exceeds what the instances finish per second. The table keeps p95 rows only,
-  # so the p95 of the smallest size (the usual photo) stands in for the spec's p50: a little conservative.
-  local smallest capacity
+  # Spec 18 3.1.5, the queue rate: ENLARGE_DISPATCHES_PER_SECOND <= UPSCALE_MAX_INSTANCES x UPSCALE_CONCURRENCY / p50,
+  # at the smallest size (the usual photo). Without a measured p50 the p95 of that size stands in (a safe bound).
+  local smallest capacity seconds stat=p50
   smallest=$(upscale_smallest_size)
-  capacity=$(awk -v n="$((UPSCALE_MAX_INSTANCES * UPSCALE_CONCURRENCY))" -v s="$(upscale_p95 "$smallest")" 'BEGIN{printf "%.4f", n / s}')
+  seconds=$(upscale_p50 "$smallest")
+  [[ "$seconds" =~ ^[1-9][0-9]*$ ]] || { seconds=$(upscale_p95 "$smallest"); stat=p95; }
+  capacity=$(awk -v n="$((UPSCALE_MAX_INSTANCES * UPSCALE_CONCURRENCY))" -v s="$seconds" 'BEGIN{printf "%.4f", n / s}')
   if awk -v r="$ENLARGE_DISPATCHES_PER_SECOND" -v c="$capacity" 'BEGIN{exit !(r > c)}'; then
-    shape_fail "ENLARGE_DISPATCHES_PER_SECOND=$ENLARGE_DISPATCHES_PER_SECOND exceeds what catalog-upscale finishes: $UPSCALE_MAX_INSTANCES x $UPSCALE_CONCURRENCY / p95 $(upscale_p95 "$smallest") s of $smallest = $capacity per second"
+    shape_fail "ENLARGE_DISPATCHES_PER_SECOND=$ENLARGE_DISPATCHES_PER_SECOND exceeds what catalog-upscale finishes: $UPSCALE_MAX_INSTANCES x $UPSCALE_CONCURRENCY / $stat $seconds s of $smallest = $capacity per second"
   fi
 }
 

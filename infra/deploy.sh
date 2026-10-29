@@ -371,7 +371,7 @@ for SERVICE in "${SERVICES[@]}"; do
           echo "ERROR: UPSCALE_SERVICE=dedicated but catalog-upscale has no URL; the worker was not changed" >&2
           exit 1
         fi
-        if [ -n "$UPSCALE_MODEL" ]; then WORKER_ENV+=",UPSCALE_URL=$UPSCALE_SERVICE_URL,UPSCALE_TIMEOUT_S=$UPSCALE_TIMEOUT_S"; fi
+        if [ -n "$UPSCALE_MODEL" ]; then WORKER_ENV+=",UPSCALE_URL=$UPSCALE_SERVICE_URL,UPSCALE_TIMEOUT_S=$UPSCALE_TIMEOUT_S,UPSCALE_MAX_PIXELS=$UPSCALE_MAX_PIXELS"; fi
       elif [ -n "$UPSCALE_MODEL" ] && [ -z "$MATTING_GPU_URL" ]; then
         echo "WARN: UPSCALE_MODEL=$UPSCALE_MODEL ignored: no GPU matting service URL; the render keeps the plain path" >&2
         UPSCALE_MODEL=""

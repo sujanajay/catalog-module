@@ -104,7 +104,7 @@ test('catalog-upscale: the matting image sized by the UPSCALE_* rows, only the u
   const f = row.split('|');
   // 300 s for the job and cold start + 4 x p95 per size (warm call and one round, 2 x p95 each): 300 + 520 + 1320.
   assert.deepEqual(f.slice(1, 8), ['catalog-upscale', 'asia-south1', 'ar/matting:t', '2140', '1', '1', '0']);
-  assert.equal(f[8], 'MAX_RESIDENT_SESSIONS=1,UPSCALE_CPU=1,PRELOAD_MATTE=0,ORT_INTRA_OP_THREADS=4');
+  assert.equal(f[8], 'MAX_RESIDENT_SESSIONS=1,UPSCALE_CPU=1,PRELOAD_MATTE=0,ORT_INTRA_OP_THREADS=4,UPSCALE_MAX_PIXELS=24000000');
   assert.equal(f[9], 'bash infra/lib/services.sh probe-upscale 2140 swinir-x2 800x1200,1600x1600 1 1 840');
   assert.deepEqual(rest.slice(0, -1), ['--service-account=m', '--cpu=4', '--memory=16Gi', '--concurrency=1', '--min-instances=0',
     '--max-instances=16', '--timeout=840', '--labels=app=catalog,component=upscale']);
@@ -116,7 +116,7 @@ test('catalog-upscale: env shape reaches the flags and the thread count', () => 
 UPSCALE_P95_S_8C_8T_2CONC_800x1200=90; UPSCALE_P95_S_8C_8T_2CONC_1600x1600=250\n${upscaleArgs}`);
   assert.equal(r.status, 0, r.err);
   const [row, ...rest] = lines(r.out.trim());
-  assert.match(row, /,ORT_INTRA_OP_THREADS=8\|bash infra\/lib\/services.sh probe-upscale 1660 swinir-x2 800x1200,1600x1600 2 1 700$/);
+  assert.match(row, /,ORT_INTRA_OP_THREADS=8,UPSCALE_MAX_PIXELS=24000000\|bash infra\/lib\/services.sh probe-upscale 1660 swinir-x2 800x1200,1600x1600 2 1 700$/);
   assert.ok(['--cpu=8', '--memory=32Gi', '--concurrency=2', '--max-instances=8', '--timeout=700'].every((a) => rest.includes(a)), rest.join(' '));
 });
 
@@ -171,7 +171,7 @@ test('deploy.sh: the worker gets catalog-upscale only with UPSCALE_SERVICE=dedic
   assert.match(loop, /catalog-upscale\)\n[\s\S]*?UPSCALE_SERVICE_URL=\$GATE_URL/);
   assert.match(loop, /if \[ "\$UPSCALE_SERVICE" = cpu \]; then\n\s+if \[ -n "\$UPSCALE_MODEL" \]; then WORKER_ENV\+=",UPSCALE_URL=\$MATTING_URL"; fi/,
     'rollback: UPSCALE_SERVICE=cpu still means the CPU cut-out service');
-  assert.match(loop, /elif \[ "\$UPSCALE_SERVICE" = dedicated \]; then[\s\S]*?WORKER_ENV\+=",UPSCALE_URL=\$UPSCALE_SERVICE_URL,UPSCALE_TIMEOUT_S=\$UPSCALE_TIMEOUT_S"/);
+  assert.match(loop, /elif \[ "\$UPSCALE_SERVICE" = dedicated \]; then[\s\S]*?WORKER_ENV\+=",UPSCALE_URL=\$UPSCALE_SERVICE_URL,UPSCALE_TIMEOUT_S=\$UPSCALE_TIMEOUT_S,UPSCALE_MAX_PIXELS=\$UPSCALE_MAX_PIXELS"/);
   assert.ok(loop.indexOf('catalog-upscale)') < loop.indexOf('catalog-matting-gpu)'), 'the URL is known before the worker env is completed');
   assert.ok(!/UPSCALE_URL=\$GATE_TAG_URL/.test(loop), 'the worker never calls a measure candidate');
 });

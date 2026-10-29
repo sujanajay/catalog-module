@@ -22,7 +22,7 @@ const NAMES = ['DB_MAX_CONNECTIONS', 'WORKER_MAX_INSTANCES', 'WORKER_CPU', 'WORK
   'CATALOG_BULK_WINDOW', 'BULK_BATCH_PRODUCTS', 'LLM_INFLIGHT_PER_INSTANCE', 'CUDNN_CONV_ALGO_SEARCH', 'CUDNN_CONV_USE_MAX_WORKSPACE',
   'INFERENCE_LOCK_SCOPE', 'GPU_MATTE_MODELS', 'GPU_UPSCALE_MODELS', 'GPU_MEASURED_ON', 'GPU_CUDA_OVERHEAD_MIB',
   'UPSCALE_CPU_VCPU', 'UPSCALE_MEMORY', 'UPSCALE_CONCURRENCY', 'UPSCALE_MAX_INSTANCES', 'UPSCALE_THREADS', 'UPSCALE_TIMEOUT_S',
-  'ENLARGE_MAX_DISPATCHES', 'ENLARGE_BULK_MAX_DISPATCHES', 'ENLARGE_DISPATCHES_PER_SECOND'];
+  'UPSCALE_MAX_PIXELS', 'ENLARGE_MAX_DISPATCHES', 'ENLARGE_BULK_MAX_DISPATCHES', 'ENLARGE_DISPATCHES_PER_SECOND'];
 const PEAKS = ['GPU_MODEL_PEAK_MIB_BIREFNET_GENERAL', 'GPU_MODEL_PEAK_MIB_BIREFNET_GENERAL_LITE', 'GPU_MODEL_PEAK_MIB_BIREFNET_HRSOD', 'GPU_MODEL_PEAK_MIB_BRIA_RMBG'];
 const OUT = [...NAMES, ...PEAKS, 'UPSCALE_MEASURE', 'UPSCALE_MEASURED_ON', 'UPSCALE_VCPU_TOTAL', 'CATALOG_DB_TOTAL', 'CATALOG_DB_LIMIT', 'SLOTS_TOTAL', 'SLOTS_CAPACITY', 'CPU_TOTAL'];
 
@@ -97,7 +97,7 @@ const RECORDED_LIVE = {
   // Spec 18: catalog-upscale is not deployed yet (UPSCALE_SERVICE=cpu); its rows are the shape the ladder starts from.
   UPSCALE_CPU_VCPU: '4', UPSCALE_MEMORY: '16Gi', UPSCALE_CONCURRENCY: '1', UPSCALE_MAX_INSTANCES: '16', UPSCALE_THREADS: '4', UPSCALE_TIMEOUT_S: '840',
   // Spec 18 3.3.1: the enlarge lanes, and worker concurrency 3 to give them their slots (not live until H3 deploys).
-  ENLARGE_MAX_DISPATCHES: '4', ENLARGE_BULK_MAX_DISPATCHES: '12', ENLARGE_DISPATCHES_PER_SECOND: '0.1',
+  UPSCALE_MAX_PIXELS: '24000000', ENLARGE_MAX_DISPATCHES: '4', ENLARGE_BULK_MAX_DISPATCHES: '12', ENLARGE_DISPATCHES_PER_SECOND: '0.1',
 };
 // The shape before F2 (the rollback line in shape.sh): fits today's old db-f1-micro (25 connections).
 // Spec 18 test fixture, not a measurement: catalog-upscale at 4 vCPU / 4 threads / concurrency 1 with p95 rows.
@@ -204,6 +204,10 @@ const cases = [
     error: /enlarge slots 4 \+ 13 exceed what catalog-upscale serves at once \(16 x 1\)/},
   {label: 'an enlarge rate above what the measured instances finish is refused', env: {...DEDICATED, MATTING_CPU_MAX_INSTANCES: '4', ENLARGE_DISPATCHES_PER_SECOND: '0.5'}, expect: {STATUS: '1'},
     error: /ENLARGE_DISPATCHES_PER_SECOND=0.5 exceeds what catalog-upscale finishes: 16 x 1 \/ p95 130 s of 800x1200 = 0.1231 per second/},
+  {label: 'the enlarge rate rule uses the measured p50 when there is one (instances x concurrency / p50)', env: {...DEDICATED, MATTING_CPU_MAX_INSTANCES: '4', UPSCALE_P50_S_4C_4T_1CONC_800x1200: '100', ENLARGE_DISPATCHES_PER_SECOND: '0.17'}, expect: {STATUS: '1'},
+    error: /ENLARGE_DISPATCHES_PER_SECOND=0.17 exceeds what catalog-upscale finishes: 16 x 1 \/ p50 100 s of 800x1200 = 0.1600 per second/},
+  {label: 'a rate within instances x concurrency / p50 passes even above the p95 bound', env: {...DEDICATED, MATTING_CPU_MAX_INSTANCES: '4', UPSCALE_P50_S_4C_4T_1CONC_800x1200: '100', ENLARGE_DISPATCHES_PER_SECOND: '0.15'}, expect: {STATUS: '0'}},
+  {label: 'UPSCALE_MAX_PIXELS must be a whole number of at least 1', env: {UPSCALE_MAX_PIXELS: '0'}, expect: {STATUS: '1'}, error: /UPSCALE_MAX_PIXELS must be at least 1/},
   {label: 'the enlarge rate must be a number above 0', env: {ENLARGE_DISPATCHES_PER_SECOND: '0'}, expect: {STATUS: '1'}, error: /ENLARGE_DISPATCHES_PER_SECOND must be a number above 0 and at most 500/},
   {label: 'no enlarge lanes (the rollback) fits concurrency 2', env: NO_ENLARGE, expect: {STATUS: '0', SLOTS_TOTAL: '48', SLOTS_CAPACITY: '48', CATALOG_DB_TOTAL: '104'}},
   {label: 'no probe sizes is refused, not treated as all measured', env: {...DEDICATED, MATTING_CPU_MAX_INSTANCES: '4', UPSCALE_SIZES: ''}, expect: {STATUS: '1'}, error: /UPSCALE_SIZES must list the probe sizes/},
