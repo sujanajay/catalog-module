@@ -72,15 +72,18 @@ export async function handleSweep(deps: SweepDeps, _body: Record<string, unknown
     .returning({ id: catalogBatches.id });
   for (const e of expired) log("INFO", "draft expired", { batchId: e.id, days });
 
-  // Recover a committed enqueue intent before the normal stale-batch failure check.
-  const pending=await deps.db.select({id:catalogBatches.id}).from(catalogBatches).where(and(
-    inArray(catalogBatches.status,[...SWEEPABLE_STATUSES,"done"]),
-    or(
-      and(sql`coalesce((${catalogBatches.counts}->>'finalizePending')::boolean,false)`,finalizeEnqueueExpired(+now)),
+  // Recover a committed enqueue intent before the normal stale-batch failure check. Spec 18 H4: a done batch
+  // is recovered only while it carries a pending request (a re-open whose task was lost), never for a stale
+  // claim or an old enqueue time alone, so a finished batch is not finalized again.
+  const pendingRequest=sql`coalesce((${catalogBatches.counts}->>'finalizePending')::boolean,false)`;
+  const pending=await deps.db.select({id:catalogBatches.id}).from(catalogBatches).where(or(
+    and(inArray(catalogBatches.status,[...SWEEPABLE_STATUSES]),or(
+      and(pendingRequest,finalizeEnqueueExpired(+now)),
       sql`${catalogBatches.counts}->>'finalizeClaim' IS NOT NULL AND
         CASE WHEN coalesce(${catalogBatches.counts}->>'finalizeClaimUntil','') ~ '^[0-9]+$'
         THEN (${catalogBatches.counts}->>'finalizeClaimUntil')::numeric <= ${+now} ELSE true END`,
-    ),
+    )),
+    and(eq(catalogBatches.status,"done"),pendingRequest,finalizeEnqueueExpired(+now)),
   ));
   for(const batch of pending) await enqueueFinalize({db:deps.db,enqueue:deps.enqueue ?? enqueueTask,now:()=>now},batch.id);
   // Spec 15 E4: recover only dead chunks (a lapsed lease, or a task lost for 30 minutes) and top up each

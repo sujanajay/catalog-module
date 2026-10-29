@@ -11,6 +11,40 @@ const reply = (body: Buffer, headers: Record<string, string> = {}, status = 200)
 const url = "https://storage.googleapis.com/b/catalog-test/test_brand/abc/noon/abc_1.jpg";
 const target = { url, identifier: "ABC", channel: "noon" as const, n: 1 };
 
+describe("spec 18 H4: link check retries", () => {
+  const answers = (...steps: (number | Error)[]) => {
+    const jpegPromise = noonJpeg();
+    return vi.fn(async () => {
+      const step = steps.shift() ?? 200;
+      if (step instanceof Error) throw step;
+      return step === 200 ? new Response(new Uint8Array(await jpegPromise), { headers: { "content-type": "image/jpeg", "x-goog-generation": "111" } }) : new Response("busy", { status: step });
+    });
+  };
+  it("retries a network error, a 5xx and a 429 twice, waiting 2 s then 5 s", async () => {
+    for (const first of [new TypeError("fetch failed"), 503, 429]) {
+      const sleep = vi.fn(async () => {}), f = answers(first, 500);
+      const r = await checkLink(target, f, { sleep });
+      expect(r).toMatchObject({ status: "ok", http: 200, problem: "" });
+      expect(f).toHaveBeenCalledTimes(3);
+      expect(sleep.mock.calls).toEqual([[2000], [5000]]);
+    }
+  });
+  it("reports the last answer after two retries", async () => {
+    const sleep = vi.fn(async () => {});
+    expect((await checkLink(target, answers(503, 503, 502), { sleep })).problem).toBe("http_status");
+    expect((await checkLink(target, answers(503, 503, 502), { sleep })).http).toBe(502);
+    expect((await checkLink(target, answers(new TypeError("a"), new TypeError("b"), new TypeError("reset")), { sleep })).problem).toBe("fetch_error: reset");
+  });
+  it("never retries a 404 or a 403", async () => {
+    for (const status of [404, 403]) {
+      const sleep = vi.fn(async () => {}), f = answers(status);
+      expect((await checkLink(target, f, { sleep })).problem).toBe("http_status");
+      expect(f).toHaveBeenCalledOnce();
+      expect(sleep).not.toHaveBeenCalled();
+    }
+  });
+});
+
 describe("re-check classification", () => {
   it("passes a compliant link at the recorded generation", async () => {
     const r = await checkLink({ ...target, expectedGeneration: "111" }, reply(await noonJpeg()));
@@ -28,7 +62,7 @@ describe("re-check classification", () => {
     expect(await problem(target, reply(Buffer.from("not a jpeg")))).toBe("not_jpeg_bytes");
     expect(await problem({ ...target, channel: "styli" })).toBe("wrong_dimensions; wrong_density");
     expect(await problem(target, reply(await sharp({ create: { width: 1080, height: 1480, channels: 3, background: "#E0E0E0" } }).withDensity(72).jpeg().toBuffer()))).toBe("no_srgb_profile");
-    expect(await problem(target, vi.fn(async () => { throw new TypeError("fetch failed"); }))).toBe("fetch_error: fetch failed");
+    expect((await checkLink(target, vi.fn(async () => { throw new TypeError("fetch failed"); }), { delaysMs: [0, 0] })).problem).toBe("fetch_error: fetch failed");
   });
   it("flags a duplicate URL without fetching it twice, and counts sheet problems in the total", async () => {
     const f = reply(await noonJpeg());

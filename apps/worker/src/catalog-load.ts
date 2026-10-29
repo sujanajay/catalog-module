@@ -20,7 +20,9 @@
 // Passes: a = Run A (P1 channels), reupload = one altered photo and one dropped shot on a sample of
 // Run A's products, b = Run B (the same options through all nine channels).
 // Evidence: load-report.json and load-report.md in CATALOG_REAL_OUT/<run>/, written even when a pass
-// fails (its error is recorded under passErrors). Every poll retries transient database errors and a
+// fails (its error is recorded under passErrors), and recheck-<batchId>.csv (every re-checked link) beside
+// them; the report keeps the failed links grouped by problem. The report is written before the cleanup
+// starts and again with its outcome. Every poll retries transient database errors and a
 // poll that still fails is logged and retried at the next interval, so one failed query never ends
 // a pass. Cleanup of every batch it made (both buckets under catalog-test/, then the rows) runs at
 // the end unless --keep; it first waits (up to each batch's pass deadline) for a batch that is still
@@ -53,8 +55,14 @@ import { describeError } from "@catalog/core/retry";
 import { log as logLine } from "@catalog/core/log";
 import { enqueueTask } from "@catalog/core/tasks";
 import { buildZip } from "../../../packages/core/test-fixtures/catalog/ingest-a/builders";
+import { recheckCsv } from "@catalog/core/catalog/recheck/check";
 import { recheckBatch } from "./catalog/recheck-batch";
+import { recheckEvidence, reportThenCleanup, type RecheckEvidence } from "./catalog/load-report";
+import { installWarningLog } from "./runtime";
 import { dataRoot } from "./catalog-real-fixtures";
+
+/** "kept" (--keep), "pending" (written before the cleanup ran), or what the cleanup did. */
+type CleanupOutcome = "kept" | "pending" | { leftBehind: { batchId: string; status: string | null }[]; cleaned?: string[]; objects?: number; kept?: string[]; ms?: number; error?: string };
 
 /** One tenth of Run A's 2,700 options: the default for the first go-live run. */
 const DEFAULT_OPTIONS = 270;
@@ -282,7 +290,7 @@ async function checkReupload(db: Db, runA: string, reupload: string, plan: Reupl
   return { sampled: plan.options.length, droppedLinksGone: gone, problems };
 }
 
-function markdown(report: Record<string, unknown>, passes: Record<string, Awaited<ReturnType<typeof metrics>> & { recheck?: string; reupload?: Awaited<ReturnType<typeof checkReupload>> }>) {
+function markdown(report: Record<string, unknown>, passes: Record<string, Awaited<ReturnType<typeof metrics>> & { recheck?: string; recheckDetail?: RecheckEvidence | null; reupload?: Awaited<ReturnType<typeof checkReupload>> }>) {
   const ms = (v: number | null | undefined) => (v === null || v === undefined ? "-" : formatDuration(v));
   const secs = (v: number | null) => (v === null ? "-" : `${Math.round(v / 1000)} s`);
   const lines = [`# Load run ${String(report.run)}`, "", `Options: ${String(report.options)}. Brand: ${BRAND} (test batches only). Target: 2 hours per batch.`, ""];
@@ -295,7 +303,16 @@ function markdown(report: Record<string, unknown>, passes: Record<string, Awaite
       (p.invariantsError ? `Invariants could not run: ${p.invariantsError}.` : `Invariants: ${p.invariants.map(i => `${i.id} ${i.violations}${i.violations ? ` (${i.severity}${i.sample.length ? `, e.g. ${i.sample.join(", ")}` : ""})` : ""}`).join("; ")}.`));
     for (const f of p.failed) lines.push(`- failed ${f.channel} ${f.n} (${f.productId}): ${f.reason}`);
     if (p.reupload) lines.push(`Re-upload: ${p.reupload.sampled} products, ${p.reupload.droppedLinksGone} dropped links answer 404, ${p.reupload.problems.length} contract problems.`, ...p.reupload.problems.slice(0, 50).map(x => `- ${x}`));
+    const rc = p.recheckDetail;
+    if (rc) {
+      lines.push(`Re-check: ${rc.line}${rc.csv ? ` (every link in ${rc.csv})` : ""}.`);
+      for (const [problem, g] of Object.entries(rc.failuresByProblem)) lines.push(`- ${problem}: ${g.count} links, e.g. ${g.links.slice(0, 3).map(l => `${l.identifier} ${l.channel ?? "-"} ${l.n ?? "-"} (http ${l.http ?? "-"})`).join(", ")}`);
+      for (const sp of rc.sheetProblems) lines.push(`- sheet ${sp.problem}: ${sp.detail}`);
+    }
   }
+  const c = report.cleanup as CleanupOutcome | undefined;
+  if (c && typeof c === "object" && c.cleaned) lines.push("", `Cleanup: ${c.cleaned.length} batches, ${c.objects ?? 0} objects in ${ms(c.ms)}${c.error ? `; failed: ${c.error}` : ""}.`);
+  else if (c === "pending") lines.push("", "Cleanup: not finished when this report was written.");
   const errors = Object.entries((report.passErrors ?? {}) as Record<string, string>);
   if (errors.length) lines.push("", "## Pass errors", "", ...errors.map(([name, error]) => `- ${name}: ${error}`));
   const left = (report.cleanup as { leftBehind?: { batchId: string; status: string | null }[] } | undefined)?.leftBehind ?? [];
@@ -323,6 +340,7 @@ async function noOtherRunPreflight(db: Db) {
 }
 
 async function main() {
+  installWarningLog(logLine);
   const { values } = parseArgs({ options: { options: { type: "string" }, passes: { type: "string" }, "reupload-sample": { type: "string" }, "timeout-min": { type: "string" }, keep: { type: "boolean" } } });
   const count = Number(values.options ?? process.env.LOAD_OPTIONS ?? DEFAULT_OPTIONS);
   if (!Number.isInteger(count) || count < 1 || count > FULL_LOAD_OPTIONS) throw new Error(`--options must be a whole number from 1 to ${FULL_LOAD_OPTIONS}.`);
@@ -353,15 +371,20 @@ async function main() {
     const samples: ChunkSample[] = [];
     const ended = await waitForEnd(db, batch.id, deadline, samples);
     const m = await metrics(db, batch.id, samples, collectMs, ended);
-    let recheck = "not run";
+    let recheck = "not run", recheckDetail: RecheckEvidence | null = null;
     if (ended && m.status === "done") {
       const r = await recheckBatch(db, batch.id);
       recheck = `${r.summary.ok} of ${r.summary.total} OK`;
       if (!r.summary.passed) passed = false;
+      // Spec 18 H4: every link's result goes to recheck-<batchId>.csv next to the report; the report keeps the
+      // failures grouped by problem.
+      const csv = `recheck-${batch.id}.csv`;
+      const written = await writeFile(path.join(out, csv), recheckCsv(r.results, r.problems)).then(() => true, error => { console.error(`${csv} not written: ${describeError(error)}`); return false; });
+      recheckDetail = recheckEvidence(r, written ? csv : null);
     }
     if (!ended || m.status !== "done" || m.silent.length || m.invariantsError || m.invariants.some(i => i.severity === "ERROR" && i.violations > 0)) passed = false;
-    log("pass finished", { label, batchId: batch.id, status: m.status, wall: m.wallMs === null ? null : formatDuration(m.wallMs), recheck });
-    return { ...m, recheck };
+    log("pass finished", { label, batchId: batch.id, status: m.status, wall: m.wallMs === null ? null : formatDuration(m.wallMs), recheck, recheckFailures: recheckDetail ? Object.fromEntries(Object.entries(recheckDetail.failuresByProblem).map(([k, v]) => [k, v.count])) : null });
+    return { ...m, recheck, recheckDetail };
   };
   // A pass that throws is recorded and the run goes on. A later pass is skipped while an earlier
   // batch may still be running, since it would find the same products locked.
@@ -395,19 +418,38 @@ async function main() {
     }
   } finally {
     if (keep) log("cleanup skipped (--keep)", { batchIds });
-    else if (batchIds.length) {
+    // Spec 18 H4: the report is written before the cleanup starts (a slow or killed cleanup keeps the
+    // evidence) and written again with the cleanup's outcome.
+    const report: { run: string; options: number; passes: Pass[]; passed: boolean; batchIds: string[]; passErrors: Record<string, string>; cleanup: CleanupOutcome; results: typeof results } =
+      { run, options: count, passes, passed, batchIds, passErrors, cleanup: keep ? "kept" : batchIds.length ? "pending" : { leftBehind }, results };
+    const writeReport = async (r: typeof report) => {
+      r.passed = passed;
+      await writeFile(path.join(out, "load-report.json"), JSON.stringify(r, null, 2)).catch(error => console.error(`load-report.json not written: ${describeError(error)}`));
+      await writeFile(path.join(out, "load-report.md"), markdown(r, results)).catch(error => console.error(`load-report.md not written: ${describeError(error)}`));
+      log("report written", { out, passed, cleanup: typeof r.cleanup === "string" ? r.cleanup : "done" });
+    };
+    const cleanup = async (): Promise<CleanupOutcome> => {
       const idle: string[] = [];
       for (const batchId of batchIds) {
         const w = await waitForIdle(db, batchId, deadlines.get(batchId) ?? Date.now()).catch(error => ({ ended: false, status: `unknown (${describeError(error)})` }));
         if (w.ended) idle.push(batchId); else leftBehind.push({ batchId, status: w.status });
       }
-      if (idle.length) await attempt("cleanup", async () => log("cleanup", { batchIds: idle, ...await cleanupTestBatches(db, storage, idle) }));
+      const outcome: Exclude<CleanupOutcome, string> = { leftBehind, cleaned: idle, objects: 0, ms: 0 };
+      if (idle.length) {
+        const started = Date.now();
+        log("cleanup started", { batchIds: idle });
+        await attempt("cleanup", async () => {
+          const result = await cleanupTestBatches(db, storage, idle, new Date(), { onListed: (prefix, objects) => log("cleanup listed", { prefix, objects }) });
+          outcome.objects = result.objects; outcome.kept = result.kept;
+        });
+        outcome.ms = Date.now() - started;
+        if (passErrors.cleanup) outcome.error = passErrors.cleanup;
+        log("cleanup finished", { batchIds: idle, objects: outcome.objects, ms: outcome.ms, ...(outcome.error ? { error: outcome.error } : {}) });
+      }
       if (leftBehind.length) log("cleanup left batches behind: still running at their deadline; clean up after they end", { leftBehind, command: `node dist/catalog-smoke.js --cleanup-batches ${leftBehind.map(b => b.batchId).join(",")}` });
-    }
-    const report = { run, options: count, passes, passed, batchIds, passErrors, cleanup: keep ? "kept" : { leftBehind }, results };
-    await writeFile(path.join(out, "load-report.json"), JSON.stringify(report, null, 2)).catch(error => console.error(`load-report.json not written: ${describeError(error)}`));
-    await writeFile(path.join(out, "load-report.md"), markdown(report, results)).catch(error => console.error(`load-report.md not written: ${describeError(error)}`));
-    log("report written", { out, passed });
+      return outcome;
+    };
+    await reportThenCleanup(report, { write: writeReport, ...(!keep && batchIds.length ? { cleanup } : {}) });
     if (!passed) process.exitCode = 1;
     await closeDb();
   }

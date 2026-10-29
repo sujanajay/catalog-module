@@ -1,4 +1,4 @@
-import { and, count, eq, isNotNull, max, or, sql } from "drizzle-orm";
+import { and, count, eq, isNotNull, max, ne, or, sql } from "drizzle-orm";
 import type { Db } from "@catalog/core/db/client";
 import { catalogBatches, catalogBatchProducts, catalogChunks, catalogOutputs, catalogSourceImages } from "@catalog/core/db/schema";
 import { ensureDefaultPolicies, resolvePolicy } from "@catalog/core/catalog/qa/policy";
@@ -75,9 +75,16 @@ export const FINALIZE_ENQUEUE_LEASE_MS = 120_000;
 export function finalizeEnqueueExpired(now:number) {
   return sql`CASE WHEN coalesce(${catalogBatches.counts}->>'finalizeEnqueuedAt','') ~ '^[0-9]+$' THEN (${catalogBatches.counts}->>'finalizeEnqueuedAt')::numeric <= ${now-FINALIZE_ENQUEUE_LEASE_MS} ELSE true END`;
 }
-export async function enqueueFinalize(deps: Pick<CatalogDeps,"db"|"enqueue"> & Partial<Pick<CatalogDeps,"now">>, batchId:string, delaySec?:number): Promise<void> {
+/**
+ * Asks for one finalize. Spec 18 H4: never for a failed batch, and for a done batch only with `reopen` (a
+ * change after done) or when a request is already pending (a lost task re-sent). While a request is pending
+ * and its enqueue is recent, nothing more is queued.
+ */
+export async function enqueueFinalize(deps: Pick<CatalogDeps,"db"|"enqueue"> & Partial<Pick<CatalogDeps,"now">>, batchId:string, delaySec?:number, options:{reopen?:boolean}={}): Promise<void> {
   const now=+(deps.now?.() ?? new Date());
-  const rows = await deps.db.update(catalogBatches).set({updatedAt:sql`${catalogBatches.updatedAt}`,counts:sql`${catalogBatches.counts} || jsonb_build_object('finalizePending',true,'finalizeEnqueuedAt',${now}::numeric)`}).where(and(eq(catalogBatches.id,batchId),sql`(NOT coalesce((${catalogBatches.counts}->>'finalizePending')::boolean,false) OR ${finalizeEnqueueExpired(now)})`)).returning({id:catalogBatches.id});
+  const pending=sql`coalesce((${catalogBatches.counts}->>'finalizePending')::boolean,false)`;
+  const open=options.reopen ? sql`true`:sql`(${catalogBatches.status} <> 'done' OR ${pending})`;
+  const rows = await deps.db.update(catalogBatches).set({updatedAt:sql`${catalogBatches.updatedAt}`,counts:sql`${catalogBatches.counts} || jsonb_build_object('finalizePending',true,'finalizeEnqueuedAt',${now}::numeric)`}).where(and(eq(catalogBatches.id,batchId),ne(catalogBatches.status,"failed"),open,sql`(NOT ${pending} OR ${finalizeEnqueueExpired(now)})`)).returning({id:catalogBatches.id});
   if (!rows.length) return;
   try { await deps.enqueue("/tasks/catalog/finalize",{batchId}, delaySec ? {delaySec}:{}); }
   catch(error) { await deps.db.update(catalogBatches).set({updatedAt:sql`${catalogBatches.updatedAt}`,counts:sql`jsonb_set(${catalogBatches.counts}, '{finalizePending}', 'false')`}).where(and(eq(catalogBatches.id,batchId),sql`${catalogBatches.counts}->>'finalizeEnqueuedAt' = ${String(now)}`)); throw error; }

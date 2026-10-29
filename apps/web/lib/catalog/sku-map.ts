@@ -16,7 +16,8 @@ export async function addSkuMap(batchId: string, file: File, actor: string) {
   const table = await readSheetTable(Buffer.from(await file.arrayBuffer()), file.name);
   return decisionAction(async () => {
     const result = await applySkuMap(db(), { batchId, rows: [table.header, ...table.rows], actor });
-    await enqueueTask("/tasks/catalog/finalize", { batchId });
+    // Spec 18 H4: a done batch is finalized again only on request; new SKU ids ask for a fresh links sheet.
+    await enqueueTask("/tasks/catalog/finalize", { batchId, reopen: true });
     return result;
   });
 }
