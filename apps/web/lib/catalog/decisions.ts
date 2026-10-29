@@ -12,7 +12,8 @@ export async function decisionAction<T>(action: () => Promise<T>): Promise<T> {
   try {
     return await action();
   } catch (error) {
-    if (error instanceof CatalogDecisionError) throw new HttpError(error.status, error.message);
+    // The plain warning carries its channels to the caller (decidePhoto answers it as its own 409 body).
+    if (error instanceof CatalogDecisionError && !(error instanceof CatalogPlainWarning)) throw new HttpError(error.status, error.message);
     throw error;
   }
 }

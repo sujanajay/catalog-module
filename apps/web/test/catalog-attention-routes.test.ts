@@ -8,6 +8,10 @@ import { resetUserDeps } from "../lib/user";
 import { POST as decide } from "../app/api/catalog/outputs/[id]/decision/route";
 import { POST as label,GET as labels } from "../app/api/catalog/batches/[id]/eval-labels/route";
 import { POST as replacement } from "../app/api/catalog/outputs/[id]/replacement/route";
+import { POST as retryEnlargementRoute } from "../app/api/catalog/outputs/[id]/retry-enlargement/route";
+import { catalogEnlargements,catalogProductEvents } from "@catalog/core/db/schema";
+import { flagDetails } from "@catalog/core/catalog/qa/reasons";
+import { plainWarningText,TRY_AGAIN_LABEL,TRY_AGAIN_STATUS,TRY_AGAIN_TOAST } from "../lib/catalog/copy";
 import { POST as replacementComplete } from "../app/api/catalog/outputs/[id]/replacement/complete/route";
 import { POST as skuMapPost } from "../app/api/catalog/batches/[id]/sku-map/route";
 vi.mock(import("@catalog/core/tasks"),async original=>({...await original(),enqueueTask:vi.fn(async()=>"task")}));
@@ -90,4 +94,44 @@ it("admin keeps a held photo of a finished batch with Use as is (quality gate 2:
  const after=await db.select().from(catalogOutputs).where(eq(catalogOutputs.sourceImageId,s!.id));
  expect(after.find(o=>o.id===held.id)).toMatchObject({status:"staged",decision:"use_as_is",decidedBy:"a@opptra.com"});
  expect(after.filter(o=>o.id!==held.id).map(o=>[o.channel,o.status,o.decision])).toEqual(expect.arrayContaining([["noon","staged",null],["styli","skipped",null]]));
+});
+/** T59 (spec 18 lifecycle 3.6): the held photo could not be enlarged; its row failed for good. */
+async function heldForEnlargement(){
+ await db.update(catalogOutputs).set({flags:["enlargement_failed"],scale:2.4,qaScores:null}).where(eq(catalogOutputs.id,id));
+ const [o]=await db.select().from(catalogOutputs).where(eq(catalogOutputs.id,id));
+ await db.insert(catalogEnlargements).values({batchId,productId:o!.productId,sourceImageId:o!.sourceImageId,upscaler:"swinir-x2+cpu",factor:2,scale:2.4,outW:2400,outH:2400,route:"direct",pixelHash:"p",identityHash:"i",status:"failed",attempts:8,error:"The upscaler could not enlarge this photo.",errorKind:"bad_input"});
+ return o!;
+}
+it("T59: Use as is on a photo that could not be enlarged answers the plain warning; with acceptPlain it is staged and recorded",async()=>{
+ await heldForEnlargement();
+ let r=await decide(req({decision:"use_as_is"}),{params:Promise.resolve({id})});
+ expect(r.status).toBe(409);expect(await r.json()).toEqual({error:"plain_warning",channels:["noon"]});
+ expect((await db.select().from(catalogOutputs).where(eq(catalogOutputs.id,id)))[0]).toMatchObject({status:"needs_attention",decision:null});
+ r=await decide(req({decision:"use_as_is",acceptPlain:true}),{params:Promise.resolve({id})});
+ expect(r.status).toBe(200);expect(await r.json()).toMatchObject({outputIds:[id]});
+ expect((await db.select().from(catalogOutputs).where(eq(catalogOutputs.id,id)))[0]).toMatchObject({status:"staged",decision:"use_as_is",flags:["enlargement_failed"]});
+ expect((await db.select().from(catalogProductEvents).where(eq(catalogProductEvents.batchId,batchId))).map(e=>e.kind)).toContain("plain_accepted");
+ // A body that is not a boolean is refused before any change.
+ r=await decide(req({decision:"use_as_is",acceptPlain:"yes"}),{params:Promise.resolve({id})});expect(r.status).toBe(400);
+});
+it("T59: Try again is operator only, answers 409 when nothing failed, and queues the photo's failed rows with a parked render",async()=>{
+ vi.stubEnv("DEV_USER_EMAIL","v@opptra.com");
+ let r=await retryEnlargementRoute(req({}),{params:Promise.resolve({id})});
+ expect(r.status).toBe(403);expect(await r.json()).toEqual({error:"You can view this but not change it. Ask an admin for the operator role."});
+ vi.stubEnv("DEV_USER_EMAIL","a@opptra.com");
+ r=await retryEnlargementRoute(req({}),{params:Promise.resolve({id})});
+ expect(r.status).toBe(409);expect(await r.json()).toEqual({error:"Nothing to try again."});
+ await heldForEnlargement();
+ vi.mocked(enqueueTask).mockClear();
+ r=await retryEnlargementRoute(req({}),{params:Promise.resolve({id})});
+ expect(r.status).toBe(200);expect(await r.json()).toMatchObject({batchId,outputIds:[id],rows:1,retries:1});
+ expect((await db.select().from(catalogEnlargements).where(eq(catalogEnlargements.batchId,batchId))).map(row=>[row.status,row.attempts,row.sends])).toEqual([["queued",0,1]]);
+ expect((await db.select().from(catalogOutputs).where(eq(catalogOutputs.id,id)))[0]).toMatchObject({status:"pending",flags:[]});
+ expect(vi.mocked(enqueueTask).mock.calls.map(c=>c[0])).toEqual(["/tasks/catalog/enlarge"]);
+ r=await retryEnlargementRoute(req({}),{params:Promise.resolve({id})});expect(r.status).toBe(409);
+});
+it("T59: the enlargement copy names no model",async()=>{
+ const words=[plainWarningText(["Noon","Styli"]),TRY_AGAIN_LABEL,TRY_AGAIN_STATUS,TRY_AGAIN_TOAST,...Object.values(flagDetails("enlargement_failed"))].join(" ");
+ expect(words).not.toMatch(/swinir|realesrgan|esrgan|x2|x4|model/i);
+ expect(plainWarningText(["Noon","Styli"])).toBe("This photo could not be enlarged. If you use it as it is, the Noon and Styli images will be stretched and may look soft. Use it anyway?");
 });
