@@ -12,6 +12,7 @@
 # The shape before F2, for a rollback: WORKER_MAX_INSTANCES=4 WORKER_CPU=2 WORKER_MEMORY=2Gi TASKS_MAX_DISPATCHES=6
 #   BULK_MAX_DISPATCHES=0 INGEST_MAX_DISPATCHES=2 DB_MAX_CONNECTIONS=25 MATTING_CPU_MAX_INSTANCES=20
 #   UPSCALE_SERVICE=gpu CATALOG_PHOTO_CONCURRENCY=1 CATALOG_BULK_WINDOW=8 LLM_INFLIGHT_PER_INSTANCE=
+#   WORKER_CONCURRENCY=2 ENLARGE_MAX_DISPATCHES=0 ENLARGE_BULK_MAX_DISPATCHES=0 (spec 18: no enlarge queue)
 SHAPE_DEFAULTS=(
   # What Postgres allows on ila-pg: the default of its tier db-custom-2-7680 (ila-pg sets no max_connections flag).
   # Lower it, and deploy, before infra/sql-tier.sh moves to a smaller tier (docs/solutions/db-connection-budget.md).
@@ -19,12 +20,24 @@ SHAPE_DEFAULTS=(
   WORKER_MAX_INSTANCES=24
   WORKER_CPU=4
   WORKER_MEMORY=4Gi
-  WORKER_CONCURRENCY=2
-  # Queue slots, main + bulk + ingest = the worker's 24 x 2. The ingest queue (new-batch setup) keeps its slots free
-  # of batch processing; the bulk queue (spec 16, big batches) is created only when BULK_MAX_DISPATCHES > 0.
+  # Spec 18 3.3.1: 2 -> 3 so the enlarge lanes get their own slots without taking any from the chunk queues (the
+  # DB budget below allows it: 24 x 6 + 6 + 2 = 152 of 393). An enlarge task mostly waits on catalog-upscale.
+  WORKER_CONCURRENCY=3
+  # Queue slots, main + bulk + ingest + enlarge + enlarge bulk = 64 of the worker's 24 x 3. The ingest queue
+  # (new-batch setup) keeps its slots free of batch processing; the bulk queue (spec 16, big batches) is created only
+  # when BULK_MAX_DISPATCHES > 0.
   TASKS_MAX_DISPATCHES=8
   BULK_MAX_DISPATCHES=36
   INGEST_MAX_DISPATCHES=4
+  # Spec 18 3.3.1: the enlarge lanes (operator <queue>-enlarge, bulk <queue>-enlarge-bulk, created only when
+  # ENLARGE_BULK_MAX_DISPATCHES > 0). One slot is one enlargement waiting on the upscaler, so together they never
+  # exceed what catalog-upscale serves at once (UPSCALE_MAX_INSTANCES x UPSCALE_CONCURRENCY, checked below).
+  # ENLARGE_DISPATCHES_PER_SECOND paces new enlargements; 0.1/s is the conservative start until the measured table
+  # exists (shape_check refuses a rate above what the measured p95 serves). ENLARGE_MAX_DISPATCHES=0 means no enlarge
+  # lanes: the worker gets no TASKS_ENLARGE_QUEUE and enlarge tasks share the chunk queues (the rollback line above).
+  ENLARGE_MAX_DISPATCHES=4
+  ENLARGE_BULK_MAX_DISPATCHES=12
+  ENLARGE_DISPATCHES_PER_SECOND=0.1
   # CPU cut-out service catalog-matting (asia-south1, 4 vCPU each).
   MATTING_CPU_MAX_INSTANCES=16
   # GPU cut-out service catalog-matting-gpu (asia-southeast1, one L4 each; the L4 quota there is 3).
@@ -73,6 +86,8 @@ PREVIEW_SHAPE_DEFAULTS=(
   TASKS_MAX_DISPATCHES=6
   BULK_MAX_DISPATCHES=0
   INGEST_MAX_DISPATCHES=2
+  ENLARGE_MAX_DISPATCHES=2
+  ENLARGE_BULK_MAX_DISPATCHES=0
 )
 
 # shape_fill NAME=value ...: gives each NAME that is unset its value; a NAME that is set (also to "") keeps its own.
@@ -194,6 +209,10 @@ shape_check() {
       CATALOG_PHOTO_CONCURRENCY CATALOG_BULK_WINDOW BULK_BATCH_PRODUCTS UPSCALE_CONCURRENCY UPSCALE_MAX_INSTANCES UPSCALE_THREADS; do
     [ "${!name}" -ge 1 ] || shape_fail "$name must be at least 1"
   done
+  # Cloud Tasks takes a rate above 0 and at most 500 per second.
+  if ! [[ "$ENLARGE_DISPATCHES_PER_SECOND" =~ ^[0-9]+([.][0-9]+)?$ ]] || ! awk -v r="$ENLARGE_DISPATCHES_PER_SECOND" 'BEGIN{exit !(r>0 && r<=500)}'; then
+    shape_fail "ENLARGE_DISPATCHES_PER_SECOND must be a number above 0 and at most 500, such as 0.1, got '$ENLARGE_DISPATCHES_PER_SECOND'"
+  fi
   case "$WORKER_CPU" in 1|2|4|6|8) ;; *) shape_fail "WORKER_CPU must be 1, 2, 4, 6 or 8 (Cloud Run), got $WORKER_CPU" ;; esac
   [[ "$WORKER_MEMORY" =~ ^[1-9][0-9]*Gi$ ]] || shape_fail "WORKER_MEMORY must look like 4Gi, got '$WORKER_MEMORY'"
   [[ "$GPU_MEMORY" =~ ^[1-9][0-9]*Gi$ ]] || shape_fail "GPU_MEMORY must look like 32Gi, got '$GPU_MEMORY'"
@@ -213,10 +232,11 @@ shape_check() {
   fi
   # Slots: the queues never hand out more tasks at once than the worker can take, so a big batch waits in the
   # queue instead of meeting 429 "no available instance" and burning retry attempts.
-  SLOTS_TOTAL=$((TASKS_MAX_DISPATCHES + BULK_MAX_DISPATCHES + INGEST_MAX_DISPATCHES))
+  # The enlarge lanes (spec 18) count too: an enlarge task holds a worker slot while it waits on the upscaler.
+  SLOTS_TOTAL=$((TASKS_MAX_DISPATCHES + BULK_MAX_DISPATCHES + INGEST_MAX_DISPATCHES + ENLARGE_MAX_DISPATCHES + ENLARGE_BULK_MAX_DISPATCHES))
   SLOTS_CAPACITY=$((WORKER_MAX_INSTANCES * WORKER_CONCURRENCY))
   if [ "$SLOTS_TOTAL" -gt "$SLOTS_CAPACITY" ]; then
-    shape_fail "queue slots $TASKS_MAX_DISPATCHES + $BULK_MAX_DISPATCHES + $INGEST_MAX_DISPATCHES = $SLOTS_TOTAL exceed the worker's $WORKER_MAX_INSTANCES x $WORKER_CONCURRENCY = $SLOTS_CAPACITY"
+    shape_fail "queue slots $TASKS_MAX_DISPATCHES + $BULK_MAX_DISPATCHES + $INGEST_MAX_DISPATCHES + enlarge $ENLARGE_MAX_DISPATCHES + $ENLARGE_BULK_MAX_DISPATCHES = $SLOTS_TOTAL exceed the worker's $WORKER_MAX_INSTANCES x $WORKER_CONCURRENCY = $SLOTS_CAPACITY"
   fi
   # CPU quota in asia-south1 (the GPU service counts in asia-southeast1), with catalog-upscale when it is deployed.
   UPSCALE_VCPU_TOTAL=0
@@ -264,6 +284,16 @@ upscale_largest_size() {
   printf '%s' "$largest"
 }
 
+# The size in UPSCALE_SIZES with the fewest pixels.
+upscale_smallest_size() {
+  local size smallest="" fewest=0 w h
+  for size in ${UPSCALE_SIZES//,/ }; do
+    w=${size%x*}; h=${size#*x}
+    if [ -z "$smallest" ] || [ $((w * h)) -lt "$fewest" ]; then fewest=$((w * h)); smallest=$size; fi
+  done
+  printf '%s' "$smallest"
+}
+
 # Spec 18 H1, called by shape_check (its shape_fail and ok): the catalog-upscale shape. Cloud Run's CPU and memory
 # pairs always; when it upscales for the worker (dedicated), a measured p95 for every probe size at exactly this
 # (vCPU, threads, concurrency) and a request timeout of at least twice the largest size's p95.
@@ -296,6 +326,10 @@ upscale_check() {
     return 0
   fi
   [ "$UPSCALE_SERVICE" = dedicated ] || return 0
+  # Spec 18 3.3.1: the enlarge lanes never send more at once than catalog-upscale serves at once.
+  if [ $((ENLARGE_MAX_DISPATCHES + ENLARGE_BULK_MAX_DISPATCHES)) -gt $((UPSCALE_MAX_INSTANCES * UPSCALE_CONCURRENCY)) ]; then
+    shape_fail "enlarge slots $ENLARGE_MAX_DISPATCHES + $ENLARGE_BULK_MAX_DISPATCHES exceed what catalog-upscale serves at once ($UPSCALE_MAX_INSTANCES x $UPSCALE_CONCURRENCY); lower ENLARGE_MAX_DISPATCHES or ENLARGE_BULK_MAX_DISPATCHES"
+  fi
   for size in ${UPSCALE_SIZES//,/ }; do
     p95=$(upscale_p95 "$size")
     [[ "$p95" =~ ^[1-9][0-9]*$ ]] || missing+=" $size"
@@ -311,6 +345,14 @@ upscale_check() {
     shape_fail "catalog-upscale at $UPSCALE_CPU vCPU, $UPSCALE_THREADS threads, concurrency $UPSCALE_CONCURRENCY needs a timeout of 2 x p95 $(upscale_p95 "$largest") s = $worst s for $largest, over the $UPSCALE_TIMEOUT_MAX_S s the worker's task allows; measure a faster shape or lower UPSCALE_MAX_PIXELS"
   elif [ "$UPSCALE_TIMEOUT_S" -lt "$worst" ]; then
     shape_fail "UPSCALE_TIMEOUT_S=$UPSCALE_TIMEOUT_S is below 2 x the measured p95 of $largest ($(upscale_p95 "$largest") s, measured $UPSCALE_MEASURED_ON); set it to at least $worst"
+  fi
+  # Spec 18 3.1.5: the queue rate never exceeds what the instances finish per second. The table keeps p95 rows only,
+  # so the p95 of the smallest size (the usual photo) stands in for the spec's p50: a little conservative.
+  local smallest capacity
+  smallest=$(upscale_smallest_size)
+  capacity=$(awk -v n="$((UPSCALE_MAX_INSTANCES * UPSCALE_CONCURRENCY))" -v s="$(upscale_p95 "$smallest")" 'BEGIN{printf "%.4f", n / s}')
+  if awk -v r="$ENLARGE_DISPATCHES_PER_SECOND" -v c="$capacity" 'BEGIN{exit !(r > c)}'; then
+    shape_fail "ENLARGE_DISPATCHES_PER_SECOND=$ENLARGE_DISPATCHES_PER_SECOND exceeds what catalog-upscale finishes: $UPSCALE_MAX_INSTANCES x $UPSCALE_CONCURRENCY / p95 $(upscale_p95 "$smallest") s of $smallest = $capacity per second"
   fi
 }
 

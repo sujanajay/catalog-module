@@ -133,7 +133,7 @@ BQ_PROJECT=${BQ_PROJECT:-image-links-agent}
 shape_defaults
 shape_check "$SQL_CONNECTION_LIMIT" || exit 1
 echo "==> connection budget: catalog $CATALOG_DB_TOTAL of $CATALOG_DB_LIMIT (ila-pg $SQL_TIER_LIVE allows $SQL_CONNECTION_LIMIT)"
-echo "==> shape: worker $WORKER_MAX_INSTANCES x ${WORKER_CPU} vCPU/$WORKER_MEMORY; slots $TASKS_MAX_DISPATCHES + bulk $BULK_MAX_DISPATCHES + ingest $INGEST_MAX_DISPATCHES of $SLOTS_CAPACITY; asia-south1 vCPU $CPU_TOTAL of $CPU_QUOTA_LIMIT; GPU $GPU_MAX_INSTANCES x ${GPU_CPU} vCPU/$GPU_MEMORY concurrency $GPU_CONCURRENCY, $MAX_RESIDENT_SESSIONS resident; upscale on $UPSCALE_SERVICE"
+echo "==> shape: worker $WORKER_MAX_INSTANCES x ${WORKER_CPU} vCPU/$WORKER_MEMORY; slots $TASKS_MAX_DISPATCHES + bulk $BULK_MAX_DISPATCHES + ingest $INGEST_MAX_DISPATCHES + enlarge $ENLARGE_MAX_DISPATCHES + $ENLARGE_BULK_MAX_DISPATCHES at ${ENLARGE_DISPATCHES_PER_SECOND}/s of $SLOTS_CAPACITY; asia-south1 vCPU $CPU_TOTAL of $CPU_QUOTA_LIMIT; GPU $GPU_MAX_INSTANCES x ${GPU_CPU} vCPU/$GPU_MEMORY concurrency $GPU_CONCURRENCY, $MAX_RESIDENT_SESSIONS resident; upscale on $UPSCALE_SERVICE"
 if upscale_deployed; then
   echo "==> shape: catalog-upscale $UPSCALE_MAX_INSTANCES x ${UPSCALE_CPU} vCPU/$UPSCALE_MEMORY, $UPSCALE_THREADS threads, concurrency $UPSCALE_CONCURRENCY, timeout ${UPSCALE_TIMEOUT_S} s$([ "$UPSCALE_MEASURE" = 1 ] && echo " (measure: no-traffic candidate)")"
 fi
@@ -150,6 +150,10 @@ if [ -n "$LLM_INFLIGHT_PER_INSTANCE" ]; then WORKER_ENV+=",LLM_INFLIGHT_PER_INST
 # The bulk queue (spec 16 3.2.3): only when it has slots; without it the env is absent and every task uses $QUEUE.
 BULK_QUEUE=$QUEUE-bulk
 if [ "$BULK_MAX_DISPATCHES" -gt 0 ]; then WORKER_ENV+=",TASKS_BULK_QUEUE=$BULK_QUEUE"; fi
+# Spec 18 3.3.1: the enlarge lanes, each only when it has slots; without one its tasks use the chunk queue of the
+# batch's class (packages/core/src/tasks.ts queueForRoute).
+if [ "$ENLARGE_MAX_DISPATCHES" -gt 0 ]; then WORKER_ENV+=",TASKS_ENLARGE_QUEUE=$QUEUE-enlarge"; fi
+if [ "$ENLARGE_BULK_MAX_DISPATCHES" -gt 0 ]; then WORKER_ENV+=",TASKS_ENLARGE_BULK_QUEUE=$QUEUE-enlarge-bulk"; fi
 # Jobs get the worker environment with the job pool size (budget above).
 job_env() { printf '%s' "${WORKER_ENV/DB_POOL_MAX=$WORKER_DB_POOL_MAX,/DB_POOL_MAX=$JOB_DB_POOL_MAX,}"; }
 # Compute spend: the worker records cost.computeUsd = vCPU-seconds * COMPUTE_USD_PER_VCPU_SECOND

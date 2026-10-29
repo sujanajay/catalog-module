@@ -21,7 +21,8 @@ const NAMES = ['DB_MAX_CONNECTIONS', 'WORKER_MAX_INSTANCES', 'WORKER_CPU', 'WORK
   'GPU_MEM_LIMIT_BYTES', 'UPSCALE_SERVICE', 'MATTE_INFLIGHT_PER_INSTANCE', 'CATALOG_PHOTO_CONCURRENCY',
   'CATALOG_BULK_WINDOW', 'BULK_BATCH_PRODUCTS', 'LLM_INFLIGHT_PER_INSTANCE', 'CUDNN_CONV_ALGO_SEARCH', 'CUDNN_CONV_USE_MAX_WORKSPACE',
   'INFERENCE_LOCK_SCOPE', 'GPU_MATTE_MODELS', 'GPU_UPSCALE_MODELS', 'GPU_MEASURED_ON', 'GPU_CUDA_OVERHEAD_MIB',
-  'UPSCALE_CPU', 'UPSCALE_MEMORY', 'UPSCALE_CONCURRENCY', 'UPSCALE_MAX_INSTANCES', 'UPSCALE_THREADS', 'UPSCALE_TIMEOUT_S'];
+  'UPSCALE_CPU', 'UPSCALE_MEMORY', 'UPSCALE_CONCURRENCY', 'UPSCALE_MAX_INSTANCES', 'UPSCALE_THREADS', 'UPSCALE_TIMEOUT_S',
+  'ENLARGE_MAX_DISPATCHES', 'ENLARGE_BULK_MAX_DISPATCHES', 'ENLARGE_DISPATCHES_PER_SECOND'];
 const PEAKS = ['GPU_MODEL_PEAK_MIB_BIREFNET_GENERAL', 'GPU_MODEL_PEAK_MIB_BIREFNET_GENERAL_LITE', 'GPU_MODEL_PEAK_MIB_BIREFNET_HRSOD', 'GPU_MODEL_PEAK_MIB_BRIA_RMBG'];
 const OUT = [...NAMES, ...PEAKS, 'UPSCALE_MEASURE', 'UPSCALE_MEASURED_ON', 'UPSCALE_VCPU_TOTAL', 'CATALOG_DB_TOTAL', 'CATALOG_DB_LIMIT', 'SLOTS_TOTAL', 'SLOTS_CAPACITY', 'CPU_TOTAL'];
 
@@ -53,7 +54,10 @@ echo "STATUS=$status"`;
   return {vars, stderr: r.stderr};
 }
 
+// Spec 16's F2 and the shapes before spec 18 had concurrency 2 and no enlarge lanes.
+const NO_ENLARGE = {WORKER_CONCURRENCY: '2', ENLARGE_MAX_DISPATCHES: '0', ENLARGE_BULK_MAX_DISPATCHES: '0'};
 const F2 = {
+  ...NO_ENLARGE,
   WORKER_MAX_INSTANCES: '24', WORKER_CPU: '4', WORKER_MEMORY: '4Gi', TASKS_MAX_DISPATCHES: '8', BULK_MAX_DISPATCHES: '36',
   INGEST_MAX_DISPATCHES: '4', DB_MAX_CONNECTIONS: '400', MATTING_CPU_MAX_INSTANCES: '16', GPU_CPU: '8', GPU_MEMORY: '32Gi',
   GPU_CONCURRENCY: '2', MAX_RESIDENT_SESSIONS: '3', GPU_MEM_LIMIT_BYTES: '6442450944', UPSCALE_SERVICE: 'cpu',
@@ -82,8 +86,8 @@ const LIVE = {...F2, GPU_CPU: '4', GPU_MEMORY: '16Gi', GPU_CONCURRENCY: '1', MAX
 // GPU 3 x 4 vCPU/16Gi concurrency 1 with 1 resident and no cap, upscale on the CPU service) plus spec 16 section 8's
 // F2 values for the rest. A deploy with no env must resolve to exactly this.
 const RECORDED_LIVE = {
-  DB_MAX_CONNECTIONS: '400', WORKER_MAX_INSTANCES: '24', WORKER_CPU: '4', WORKER_MEMORY: '4Gi', WORKER_CONCURRENCY: '2',
-  WORKER_DB_POOL_MAX: '4', TASKS_MAX_DISPATCHES: '8', BULK_MAX_DISPATCHES: '36', INGEST_MAX_DISPATCHES: '4',
+  DB_MAX_CONNECTIONS: '400', WORKER_MAX_INSTANCES: '24', WORKER_CPU: '4', WORKER_MEMORY: '4Gi', WORKER_CONCURRENCY: '3',
+  WORKER_DB_POOL_MAX: '6', TASKS_MAX_DISPATCHES: '8', BULK_MAX_DISPATCHES: '36', INGEST_MAX_DISPATCHES: '4',
   MATTING_CPU_MAX_INSTANCES: '16', GPU_MAX_INSTANCES: '3', GPU_CPU: '4', GPU_MEMORY: '16Gi', GPU_CONCURRENCY: '1',
   MAX_RESIDENT_SESSIONS: '1', GPU_MEM_LIMIT_BYTES: '', UPSCALE_SERVICE: 'cpu', MATTE_INFLIGHT_PER_INSTANCE: '4',
   CATALOG_PHOTO_CONCURRENCY: '4', CATALOG_BULK_WINDOW: '30', BULK_BATCH_PRODUCTS: '100', LLM_INFLIGHT_PER_INSTANCE: '6',
@@ -92,11 +96,13 @@ const RECORDED_LIVE = {
   GPU_MEASURED_ON: '2026-10-28', GPU_CUDA_OVERHEAD_MIB: '2048',
   // Spec 18: catalog-upscale is not deployed yet (UPSCALE_SERVICE=cpu); its rows are the shape the ladder starts from.
   UPSCALE_CPU: '4', UPSCALE_MEMORY: '16Gi', UPSCALE_CONCURRENCY: '1', UPSCALE_MAX_INSTANCES: '16', UPSCALE_THREADS: '4', UPSCALE_TIMEOUT_S: '840',
+  // Spec 18 3.3.1: the enlarge lanes, and worker concurrency 3 to give them their slots (not live until H3 deploys).
+  ENLARGE_MAX_DISPATCHES: '4', ENLARGE_BULK_MAX_DISPATCHES: '12', ENLARGE_DISPATCHES_PER_SECOND: '0.1',
 };
 // The shape before F2 (the rollback line in shape.sh): fits today's old db-f1-micro (25 connections).
 // Spec 18 test fixture, not a measurement: catalog-upscale at 4 vCPU / 4 threads / concurrency 1 with p95 rows.
 const DEDICATED = {UPSCALE_SERVICE: 'dedicated', UPSCALE_MEASURED_ON: '2026-10-30', UPSCALE_P95_S_4C_4T_1CONC_800x1200: '130', UPSCALE_P95_S_4C_4T_1CONC_1600x1600: '330'};
-const PRE_F2 = {WORKER_MAX_INSTANCES: '4', WORKER_CPU: '2', WORKER_MEMORY: '2Gi', TASKS_MAX_DISPATCHES: '6', BULK_MAX_DISPATCHES: '0',
+const PRE_F2 = {...NO_ENLARGE, WORKER_MAX_INSTANCES: '4', WORKER_CPU: '2', WORKER_MEMORY: '2Gi', TASKS_MAX_DISPATCHES: '6', BULK_MAX_DISPATCHES: '0',
   INGEST_MAX_DISPATCHES: '2', DB_MAX_CONNECTIONS: '25', MATTING_CPU_MAX_INSTANCES: '20', UPSCALE_SERVICE: 'gpu',
   CATALOG_PHOTO_CONCURRENCY: '1', CATALOG_BULK_WINDOW: '8', LLM_INFLIGHT_PER_INSTANCE: ''};
 
@@ -105,14 +111,14 @@ const cases = [
     label: 'no env resolves to the recorded live shape',
     env: {},
     // Every shape name, so a new name without a recorded live value fails here.
-    expect: {...Object.fromEntries(NAMES.map((n) => [n, RECORDED_LIVE[n]])), ...MEASURED, STATUS: '0', CATALOG_DB_TOTAL: '104', CATALOG_DB_LIMIT: '393', SLOTS_TOTAL: '48', SLOTS_CAPACITY: '48',
+    expect: {...Object.fromEntries(NAMES.map((n) => [n, RECORDED_LIVE[n]])), ...MEASURED, STATUS: '0', CATALOG_DB_TOTAL: '152', CATALOG_DB_LIMIT: '393', SLOTS_TOTAL: '64', SLOTS_CAPACITY: '72',
       CPU_TOTAL: '171', COMPUTE: '0.0000265', GPU_PRICE: '0.00034884', UPSCALE_MEASURE: '0', UPSCALE_MEASURED_ON: '', UPSCALE_VCPU_TOTAL: '0'},
   },
   {label: 'env still wins over a row, also an explicit "" (no AI check cap)', env: {TASKS_MAX_DISPATCHES: '14', BULK_MAX_DISPATCHES: '30', LLM_INFLIGHT_PER_INSTANCE: ''},
     expect: {STATUS: '0', TASKS_MAX_DISPATCHES: '14', BULK_MAX_DISPATCHES: '30', INGEST_MAX_DISPATCHES: '4', LLM_INFLIGHT_PER_INSTANCE: ''}},
-  {label: 'preview: the same per-instance shape on 4 workers, no bulk queue', env: {CATALOG_PREVIEW: '1'},
+  {label: 'preview: the same per-instance shape on 4 workers, no bulk queue and no bulk enlarge lane', env: {CATALOG_PREVIEW: '1'},
     expect: {...RECORDED_LIVE, STATUS: '0', WORKER_MAX_INSTANCES: '4', TASKS_MAX_DISPATCHES: '6', BULK_MAX_DISPATCHES: '0', INGEST_MAX_DISPATCHES: '2',
-      SLOTS_TOTAL: '8', SLOTS_CAPACITY: '8', CATALOG_DB_TOTAL: '24', CPU_TOTAL: '91'}},
+      ENLARGE_MAX_DISPATCHES: '2', ENLARGE_BULK_MAX_DISPATCHES: '0', SLOTS_TOTAL: '10', SLOTS_CAPACITY: '12', CATALOG_DB_TOTAL: '32', CPU_TOTAL: '91'}},
   {label: 'preview rows yield to env', env: {CATALOG_PREVIEW: '1', WORKER_MAX_INSTANCES: '6', TASKS_MAX_DISPATCHES: '10'},
     expect: {STATUS: '0', WORKER_MAX_INSTANCES: '6', TASKS_MAX_DISPATCHES: '10', BULK_MAX_DISPATCHES: '0'}},
   {label: 'the pre-F2 rollback shape fits db-f1-micro', env: PRE_F2, live: '25',
@@ -125,7 +131,7 @@ const cases = [
   },
   {label: 'the live shape before the tier change', env: {}, live: '25', expect: {STATUS: '1'}, error: /DB_MAX_CONNECTIONS=400 but ila-pg allows 25 now/},
   {label: 'connection budget', env: {...PRE_F2, WORKER_MAX_INSTANCES: '10'}, live: '25', expect: {STATUS: '1'}, error: /catalog connections 28 exceed the budget 18/},
-  {label: 'slots', env: {...PRE_F2, TASKS_MAX_DISPATCHES: '8'}, live: '25', expect: {STATUS: '1'}, error: /queue slots 8 \+ 0 \+ 2 = 10 exceed/},
+  {label: 'slots', env: {...PRE_F2, TASKS_MAX_DISPATCHES: '8'}, live: '25', expect: {STATUS: '1'}, error: /queue slots 8 \+ 0 \+ 2 \+ enlarge 0 \+ 0 = 10 exceed/},
   {label: 'cpu quota', env: {...F2_FITTED, WORKER_MAX_INSTANCES: '30', TASKS_MAX_DISPATCHES: '20'}, live: '400', expect: {STATUS: '1'}, error: /vCPU at max instances 195 exceeds 190/},
   {label: 'gpu quota', env: {GPU_MAX_INSTANCES: '4'}, expect: {STATUS: '1'}, error: /exceeds the L4 quota of 3/},
   {label: 'gpu shape', env: {GPU_CPU: '2', GPU_MEMORY: '64Gi'}, expect: {STATUS: '1'}, error: /GPU_CPU must be 4 to 8[\s\S]*GPU_MEMORY must be 16Gi to 32Gi/},
@@ -190,6 +196,16 @@ const cases = [
   {label: 'upscale shape values', env: {UPSCALE_THREADS: '8', UPSCALE_MEMORY: '32Gi', UPSCALE_CONCURRENCY: '5', UPSCALE_MEASURE: 'yes'}, expect: {STATUS: '1'},
     error: /UPSCALE_MEASURE must be 0 or 1[\s\S]*UPSCALE_MEMORY must be 2Gi to 16Gi with 4 vCPU[\s\S]*UPSCALE_THREADS=8 exceeds UPSCALE_CPU=4[\s\S]*UPSCALE_CONCURRENCY must be at most 4/},
   {label: 'upscale CPU must be a Cloud Run size', env: {UPSCALE_CPU: '3'}, expect: {STATUS: '1'}, error: /UPSCALE_CPU must be 1, 2, 4, 6 or 8/},
+  // Spec 18 3.3.1: the enlarge lanes.
+  {label: 'the enlarge lanes need concurrency 3: at 2 they exceed the worker slots', env: {WORKER_CONCURRENCY: '2'}, expect: {STATUS: '1'},
+    error: /queue slots 8 \+ 36 \+ 4 \+ enlarge 4 \+ 12 = 64 exceed the worker's 24 x 2 = 48/},
+  {label: 'concurrency 3 fits the DB budget at photo concurrency 4', env: {}, expect: {STATUS: '0', WORKER_DB_POOL_MAX: '6', CATALOG_DB_TOTAL: '152'}},
+  {label: 'enlarge slots above what catalog-upscale serves are refused', env: {...DEDICATED, MATTING_CPU_MAX_INSTANCES: '4', ENLARGE_BULK_MAX_DISPATCHES: '13'}, expect: {STATUS: '1'},
+    error: /enlarge slots 4 \+ 13 exceed what catalog-upscale serves at once \(16 x 1\)/},
+  {label: 'an enlarge rate above what the measured instances finish is refused', env: {...DEDICATED, MATTING_CPU_MAX_INSTANCES: '4', ENLARGE_DISPATCHES_PER_SECOND: '0.5'}, expect: {STATUS: '1'},
+    error: /ENLARGE_DISPATCHES_PER_SECOND=0.5 exceeds what catalog-upscale finishes: 16 x 1 \/ p95 130 s of 800x1200 = 0.1231 per second/},
+  {label: 'the enlarge rate must be a number above 0', env: {ENLARGE_DISPATCHES_PER_SECOND: '0'}, expect: {STATUS: '1'}, error: /ENLARGE_DISPATCHES_PER_SECOND must be a number above 0 and at most 500/},
+  {label: 'no enlarge lanes (the rollback) fits concurrency 2', env: NO_ENLARGE, expect: {STATUS: '0', SLOTS_TOTAL: '48', SLOTS_CAPACITY: '48', CATALOG_DB_TOTAL: '104'}},
   {label: 'no probe sizes is refused, not treated as all measured', env: {...DEDICATED, MATTING_CPU_MAX_INSTANCES: '4', UPSCALE_SIZES: ''}, expect: {STATUS: '1'}, error: /UPSCALE_SIZES must list the probe sizes/},
 ];
 
