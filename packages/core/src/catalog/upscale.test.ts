@@ -5,7 +5,7 @@ import { MattingClient, parseUpscaleHealth } from "./matte";
 import { enlargementFactors, enlargementNeeds, planCanvas, planProduct, renderKeyInputs, renderSource, shotEnlargementRegion, shotGeometry, trimRules, type Matte, type Prepared } from "./render";
 import { analyseBackground } from "./shadow";
 import { enlargeCutout } from "./enhance";
-import { DEFAULT_UPSCALE_MIN_SCALE, enlargeRegion, ENLARGE_REGION_MARGIN_PX, formatRegion, gpuUrlsFromEnv, hasSourceX2, LEGACY_UPSCALE_MIN_SCALE, parseRegion, UPSCALE_X4_MIN_SCALE, upscalerFactor, upscalersFor, otherTargetUpscalerId, primeSourceX2, shouldUpscale, storedUpscaler, StoredEnlargementMissingError, upscaleConfigFromEnv, upscaledRgb, upscalerId, upscalerKey, upscaleTargetFromEnv, UPSCALER_VERSION, type Upscaler } from "./upscale";
+import { DEFAULT_UPSCALE_MAX_PIXELS, DEFAULT_UPSCALE_MIN_SCALE, enlargeRegion, ENLARGE_REGION_MARGIN_PX, formatRegion, gpuUrlsFromEnv, hasSourceX2, LEGACY_UPSCALE_MIN_SCALE, parseRegion, UPSCALE_X4_MIN_SCALE, upscaleFactorFor, upscaleMaxPixels, upscalerFactor, upscalersFor, otherTargetUpscalerId, primeSourceX2, shouldUpscale, sourceX2, storedUpscaler, StoredEnlargementMissingError, upscaleConfigFromEnv, upscaledRgb, upscalerId, upscalerKey, upscaleTargetFromEnv, UPSCALER_VERSION, type Upscaler } from "./upscale";
 import { configuredUpscalerId, renderKey, renderKeys, rerenderedKey, upscaledRenderKey } from "./pipeline/publish";
 import { upscaledNotes } from "./pipeline/report";
 import { flagDetails } from "./qa/reasons";
@@ -424,4 +424,63 @@ describe("spec 18 quality: AI enlargement above 1.0x, x2/x4 routing, crop before
     expect(enlargementFactors(["noon"], [shot(one)], "other", LEGACY_UPSCALE_MIN_SCALE, true)).toEqual([[]]);
     expect(enlargementFactors(["noon", "trendyol"], [shot(one)], "other", DEFAULT_UPSCALE_MIN_SCALE, true)).toEqual([[2, 4]]);
   });
+});
+
+describe("2026-10-29 review fixes: per-model caps, one band rule, region edges, stored images decoded per crop", () => {
+  const shot = (f: ReturnType<typeof fixture>) => ({ width: f.prepared.width, height: f.prepared.height, rgb: f.prepared.rgb, alpha: f.matte.alpha, model: f.matte.model });
+  const CAPS = { UPSCALE_MAX_PIXELS: "8000000", UPSCALE_MAX_PIXELS_X4: "6400000" };
+  it("P1-3: each model has its own cap; the x4 cap falls back to the x2 cap, both to the service default", () => {
+    expect([upscaleMaxPixels(2, CAPS), upscaleMaxPixels(4, CAPS)]).toEqual([8_000_000, 6_400_000]);
+    expect([upscaleMaxPixels(2, { UPSCALE_MAX_PIXELS: "8000000" }), upscaleMaxPixels(4, { UPSCALE_MAX_PIXELS: "8000000" })]).toEqual([8_000_000, 8_000_000]);
+    expect([upscaleMaxPixels(2, {}), upscaleMaxPixels(4, { UPSCALE_MAX_PIXELS_X4: "x" })]).toEqual([DEFAULT_UPSCALE_MAX_PIXELS, DEFAULT_UPSCALE_MAX_PIXELS]);
+  });
+  it("P1-3, the reproduced case: a 2500 px square product in a 2700 px photo on Centrepoint at 1.2x is a 6.57 MP x2 job, inside the x2 cap", () => {
+    // The fixture's first 8 columns are a soft edge below the box threshold, so the box seen is 2500 x 2500 at (100, 100).
+    const big = fixture(2700, 2700, { x: 92, y: 100, w: 2508, h: 2500 });
+    const plan = planCanvas(CHANNELS.centrepoint, { x: 100, y: 100, w: 2500, h: 2500 }, { w: 2700, h: 2700 }, {});
+    expect(plan.scale).toBeCloseTo(1.2, 2);
+    expect(enlargementFactors(["centrepoint"], [shot(big)], "other", DEFAULT_UPSCALE_MIN_SCALE, true)).toEqual([[2]]);
+    const region = shotEnlargementRegion(shot(big), "other")!;
+    expect(region).toEqual({ x: 68, y: 68, w: 2564, h: 2564 });
+    expect(region.w * region.h).toBe(6_574_096);
+    // Above the x4 cap (the one shared cap that held it), inside the x2 cap its job uses.
+    expect(region.w * region.h).toBeGreaterThan(upscaleMaxPixels(4, CAPS));
+    expect(region.w * region.h).toBeLessThanOrEqual(upscaleMaxPixels(2, CAPS));
+  }, 60_000);
+  it("P2-11: one band rule for the matte stage and the render; a UPSCALE_MODEL_X4 that is not an x4 model is no x4 model", () => {
+    expect([upscaleFactorFor(1.2, true), upscaleFactorFor(2, true), upscaleFactorFor(2 + 1e-12, true), upscaleFactorFor(2.01, true), upscaleFactorFor(3, false)]).toEqual([2, 2, 2, 4, 2]);
+    expect(upscaleConfigFromEnv({ UPSCALE_MODEL: MODEL, UPSCALE_MODEL_X4: MODEL_X4 }).x4Model).toBe(MODEL_X4);
+    for (const typo of ["swinir-4x", "swinir-x2", "off", ""]) expect(upscaleConfigFromEnv({ UPSCALE_MODEL: MODEL, UPSCALE_MODEL_X4: typo }).x4Model, typo).toBeNull();
+  });
+  it("P2-10: the region is the union of differing boxes plus the margin, clamped at 0 and at the photo's width and height", () => {
+    const plain = { x: 10, y: 40, w: 100, h: 50 }, judged = { x: 30, y: 20, w: 150, h: 60 };
+    expect(enlargeRegion([plain, judged], 400, 300)).toEqual({ x: 0, y: 0, w: 180 + 32, h: 90 + 32 });
+    expect(enlargeRegion([{ x: 300, y: 200, w: 90, h: 95 }], 400, 300)).toEqual({ x: 268, y: 168, w: 132, h: 132 });
+    expect(enlargeRegion([{ x: 0, y: 0, w: 400, h: 300 }], 400, 300)).toEqual({ x: 0, y: 0, w: 400, h: 300 });
+    expect(enlargeRegion([], 400, 300)).toBeNull();
+    // The judged (relaxed cut) box and the plain box differ; the region holds both.
+    const one = fixture();
+    const boxes = [false, true].map((judgedCut) => shotGeometry(one.matte.alpha, 800, 1200, { rgb: one.prepared.rgb, judgedCut, ...trimRules("other", one.matte) })!.box);
+    const region = shotEnlargementRegion(shot(one), "other")!;
+    for (const box of boxes) expect(region.x <= box.x && region.y <= box.y && region.x + region.w >= box.x + box.w && region.y + region.h >= box.y + box.h).toBe(true);
+  });
+  it("P2-8: a primed stored image stays a JPEG and is decoded for each crop, with the same output as before", async () => {
+    const { prepared, matte } = fixture(500, 700, { x: 50, y: 50, w: 400, h: 600 });
+    const region = shotEnlargementRegion(shot({ prepared, matte }), "other")!;
+    const x2 = storedUpscaler(upscalerId(MODEL, "cpu"), DEFAULT_UPSCALE_MIN_SCALE);
+    const jpeg = await sharp(prepared.rgb, { raw: { width: 500, height: 700, channels: 3 } }).extract({ left: region.x, top: region.y, width: region.w, height: region.h }).resize(region.w * 2, region.h * 2, { kernel: "nearest" }).jpeg({ quality: 95, chromaSubsampling: "4:4:4" }).toBuffer();
+    expect(await primeSourceX2(x2, prepared.rgb, 500, jpeg, region)).toBe(true);
+    const primed = (await sourceX2(x2, prepared.rgb, 500).result)!;
+    expect(primed.rgb).toBeUndefined(); expect(primed.jpeg).toBe(jpeg);
+    const crop = { x: 60, y: 60, w: 300, h: 400 }, to = { w: 450, h: 600 };
+    const first = await upscaledRgb(x2, prepared.rgb, 500, crop, to), second = await upscaledRgb(x2, prepared.rgb, 500, crop, to);
+    const decoded = await sharp(jpeg).removeAlpha().toColourspace("srgb").raw().toBuffer();
+    const expected = await sharp(decoded, { raw: { width: region.w * 2, height: region.h * 2, channels: 3 } }).extract({ left: (crop.x - region.x) * 2, top: (crop.y - region.y) * 2, width: crop.w * 2, height: crop.h * 2 }).resize(to.w, to.h, { fit: "fill", kernel: "lanczos3" }).raw().toBuffer();
+    expect(first!.rgb.equals(expected)).toBe(true);
+    expect(second!.rgb.equals(expected)).toBe(true);
+    // A JPEG that does not decode is no image: the crop fails (the render then holds), it never throws.
+    const bad = storedUpscaler(upscalerId(MODEL, "cpu"), DEFAULT_UPSCALE_MIN_SCALE), other = fixture(500, 700, { x: 50, y: 50, w: 400, h: 600 });
+    expect(await primeSourceX2(bad, other.prepared.rgb, 500, Buffer.concat([jpeg.subarray(0, 600)]), region)).toBe(true);
+    expect(await upscaledRgb(bad, other.prepared.rgb, 500, crop, to)).toBeNull();
+  }, 60_000);
 });

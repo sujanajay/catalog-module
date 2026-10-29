@@ -137,7 +137,7 @@ describe("spec 18 H3: the enlarge task", () => {
       expect(p).toMatchObject({ x2Uri: `gs://assets/${path}`, x2Model: ID, x2Error: null, x2ClaimedAt: null });
       expect(path).toMatch(/^catalog-test\/test_brand\/.+\/derived\/.+\.swinir-x2-cpu\.x2\.jpg$/);
       // Spec 18 quality: the region of the prepared photo the image was made from rides along.
-      expect(w.metadata.get(p.x2Uri!)).toEqual({ sourceSha256: p.sha256, upscaler: ID, region: expect.stringMatching(/^\d+,\d+,\d+,\d+$/) });
+      expect(w.metadata.get(p.x2Uri!)).toEqual({ sourceSha256: p.sha256, upscaler: ID, region: expect.stringMatching(/^\d+,\d+,\d+,\d+$/), matte: p.matteUri });
       const meta = await sharp(w.objects.get(p.x2Uri!)!).metadata();
       expect(meta.width).toBeGreaterThan(0);
     }
@@ -158,11 +158,11 @@ describe("spec 18 H3: the enlarge task", () => {
     expect(reads.mock.calls.map(([uri]) => uri)).toEqual(expect.arrayContaining(photos.map((p) => p.x2Uri)));
     expect(service.call).toHaveBeenCalledTimes(2);
     // A stored image made from other bytes counts as missing: nothing is primed (the render holds what needs it).
-    expect(await primeStoredEnlargement(w.deps, { id: photos[0]!.id, sha256: "other", x2Uri: photos[0]!.x2Uri, x2Model: ID }, {} as Prepared)).toBe(false);
+    expect(await primeStoredEnlargement(w.deps, { id: photos[0]!.id, sha256: "other", x2Uri: photos[0]!.x2Uri, x2Model: ID, matteUri: photos[0]!.matteUri }, {} as Prepared)).toBe(false);
     // So does one made by another upscaler than the configured one by its record or by its metadata.
-    expect(await primeStoredEnlargement(w.deps, { id: photos[0]!.id, sha256: photos[0]!.sha256, x2Uri: photos[0]!.x2Uri, x2Model: "realesrgan-x2plus" }, {} as Prepared)).toBe(false);
+    expect(await primeStoredEnlargement(w.deps, { id: photos[0]!.id, sha256: photos[0]!.sha256, x2Uri: photos[0]!.x2Uri, x2Model: "realesrgan-x2plus", matteUri: photos[0]!.matteUri }, {} as Prepared)).toBe(false);
     w.metadata.set(photos[0]!.x2Uri!, { sourceSha256: photos[0]!.sha256, upscaler: "realesrgan-x2plus" });
-    expect(await primeStoredEnlargement(w.deps, { id: photos[0]!.id, sha256: photos[0]!.sha256, x2Uri: photos[0]!.x2Uri, x2Model: ID }, {} as Prepared)).toBe(false);
+    expect(await primeStoredEnlargement(w.deps, { id: photos[0]!.id, sha256: photos[0]!.sha256, x2Uri: photos[0]!.x2Uri, x2Model: ID, matteUri: photos[0]!.matteUri }, {} as Prepared)).toBe(false);
   }, 60_000);
 
   it("a stored image already there (a lost answer) is reused without a call; one from another upscaler is made again", async () => {
@@ -640,6 +640,170 @@ describe("spec 18 quality: one photo's x2 and x4 images, one service call per de
     expect(service.call).toHaveBeenCalledTimes(2);
     // A job whose x4 image is missing primes only the x2 one (the render then holds what needs the x4).
     w.objects.delete(x4Uri); w.metadata.delete(x4Uri);
-    expect(await primeStoredEnlargement(w.deps, { id: done.id, sha256: done.sha256, x2Uri: done.x2Uri, x2Model: done.x2Model }, { rgb: Buffer.alloc(3 * 4), width: 2 } as Prepared)).toBe(false);
+    expect(await primeStoredEnlargement(w.deps, { id: done.id, sha256: done.sha256, x2Uri: done.x2Uri, x2Model: done.x2Model, matteUri: done.matteUri }, { rgb: Buffer.alloc(3 * 4), width: 2 } as Prepared)).toBe(false);
   }, 120_000);
+});
+
+describe("2026-10-29 review fixes: no hold for a gap a re-run closes", () => {
+  /** The latest render task of the chunk, delivered. */
+  const renderNow = async (w: FakeWorld, chunkId: string) => handleChunkTask(w.deps, chunkTasks(w, chunkId).filter((t) => t.body.stage === "render").at(-1)!.body);
+  const outputsOf = (batchId: string) => db.select().from(catalogOutputs).where(eq(catalogOutputs.batchId, batchId)).orderBy(catalogOutputs.channel);
+  /** A cut-out of the photo's centre (the product box `inset` px inside every edge) as the stored matte PNG. */
+  async function boxMatte(width: number, height: number, inset: number): Promise<Buffer> {
+    const alpha = Buffer.alloc(width * height);
+    for (let y = inset; y < height - inset; y++) alpha.fill(255, y * width + inset, y * width + width - inset);
+    return sharp(alpha, { raw: { width, height, channels: 1 } }).png().toBuffer();
+  }
+
+  it("P1-1: the ladder replaces the cut-out of a region-cropped photo (Trendyol above 2x): the stored image is never reused for the new matte, the render re-queues it and renders upscaled, never held", async () => {
+    const { w, service } = enlargingWorld();
+    realRender(w);
+    const s = await matteStage(w, "p1-1-ladder", ["trendyol"], 1);
+    let [photo] = await photosOf(s.batch.id);
+    // The first cut-out finds the product inside the frame, so the upscaler sees only its box plus the margin.
+    const p = await w.deps.prepare(w.objects.get(photo!.rawUri)!, photo!.originalName, async (b) => b);
+    w.objects.set(photo!.matteUri!, await boxMatte(p.width, p.height, 60));
+    expect(await handleEnlargeTask(w.deps, bodyOf(w, photo!.id))).toMatchObject({ outcome: "done" });
+    [photo] = await photosOf(s.batch.id);
+    const first = w.metadata.get(photo!.x2Uri!)!;
+    expect(parseRegion(first.region)).toEqual({ x: 28, y: 28, w: p.width - 56, h: p.height - 56 });
+    expect(first.matte).toBe(photo!.matteUri);
+    // The judge flags product_removed and the ladder's second cut-out (or the pass-through) wins: its box is the whole
+    // frame, larger than the stored region, and it becomes the photo's matte (auto-resolve.ts: .matte2.png).
+    const secondUri = photo!.matteUri!.replace(/\.matte[^/]*\.png$/, ".matte2.png");
+    w.objects.set(secondUri, await sharp(Buffer.alloc(p.width * p.height, 255), { raw: { width: p.width, height: p.height, channels: 1 } }).png().toBuffer());
+    await db.update(catalogSourceImages).set({ matteUri: secondUri }).where(eq(catalogSourceImages.id, photo!.id));
+    // A re-render primes nothing for the new cut-out (the old image's region misses its crops)...
+    expect(await primeStoredEnlargement(w.deps, { ...photo!, matteUri: secondUri }, p)).toBe(false);
+    // ...and the render's check queues the enlargement again and parks: no output is held.
+    expect(await renderNow(w, s.chunks[0]!.id)).toMatchObject({ httpStatus: 200 });
+    expect(w.deliveries().at(-1)).toMatchObject({ outcome: "enlarging" });
+    expect((await photosOf(s.batch.id))[0]).toMatchObject({ x2Model: ID, x2Uri: null, x2Attempts: 0, x2Error: null });
+    expect((await outputsOf(s.batch.id)).map((o) => o.status)).toEqual(["pending"]);
+    // The enlarge task never reuses the old region's image: it makes a new one from the new cut-out's region.
+    const chunk = await chunkRow(db, s.chunks[0]!.id);
+    const task = enlargeTasks(w).at(-1)!;
+    expect(task.body.round).toBe(chunk.step);
+    expect(await handleEnlargeTask(w.deps, task.body)).toMatchObject({ outcome: "done" });
+    expect(service.call).toHaveBeenCalledTimes(2);
+    const remade = (await photosOf(s.batch.id))[0]!;
+    expect(w.metadata.get(remade.x2Uri!)).toMatchObject({ region: `0,0,${p.width},${p.height}`, matte: secondUri });
+    // The render now makes the output from it: upscaled, not held, and the check is satisfied (no second re-queue).
+    expect(await renderNow(w, s.chunks[0]!.id)).toMatchObject({ httpStatus: 200 });
+    const [out] = await outputsOf(s.batch.id);
+    expect(out!.flags).toContain("upscaled");
+    expect(out!.flags).not.toContain("enlargement_failed");
+    expect(service.call).toHaveBeenCalledTimes(2);
+  }, 120_000);
+
+  it("P1-1: a retry of the enlarge task after the matte changed makes the image again instead of reusing the stale one", async () => {
+    const { w, service } = enlargingWorld();
+    const s = await matteStage(w, "p1-1-retry", ["trendyol"], 1);
+    const [photo] = await photosOf(s.batch.id);
+    const p = await w.deps.prepare(w.objects.get(photo!.rawUri)!, photo!.originalName, async (b) => b);
+    w.objects.set(photo!.matteUri!, await boxMatte(p.width, p.height, 60));
+    expect(await handleEnlargeTask(w.deps, bodyOf(w, photo!.id))).toMatchObject({ outcome: "done" });
+    // The matte changes and the photo is queued again (the render's check), with the old object still at its path.
+    const secondUri = photo!.matteUri!.replace(/\.matte[^/]*\.png$/, ".matte2.png");
+    w.objects.set(secondUri, await boxMatte(p.width, p.height, 20));
+    await db.update(catalogSourceImages).set({ matteUri: secondUri, x2Uri: null }).where(eq(catalogSourceImages.id, photo!.id));
+    expect(await handleEnlargeTask(w.deps, bodyOf(w, photo!.id))).toMatchObject({ outcome: "done" });
+    expect(service.call).toHaveBeenCalledTimes(2);
+    const uri = (await photosOf(s.batch.id))[0]!.x2Uri!;
+    expect(w.metadata.get(uri)).toMatchObject({ region: `0,0,${p.width},${p.height}`, matte: secondUri });
+  }, 60_000);
+
+  it("P1-2: a batch whose matte stage ran with the old 1.5 threshold: a 1.0-1.5x photo the matte stage never queued is queued at the render, not held", async () => {
+    // Full-size fake photos: noon takes them to about 1.48x, inside 1.0-1.5x.
+    const w = fakeWorld(db, 1, { imageScale: 1 }), service = fakeService(2);
+    w.deps.upscaler = storedUpscaler(ID, 1.5); w.deps.enlarge = service.call;
+    realRender(w);
+    // Below the old threshold the matte stage queues nothing.
+    const s = await matteStage(w, "p1-2-threshold", ["noon"], 1);
+    expect((await photosOf(s.batch.id))[0]).toMatchObject({ x2Model: null });
+    expect((await chunkRow(db, s.chunks[0]!.id)).taskName).toBeNull();
+    // The new build (threshold 1.0) lands before the render.
+    w.deps.upscaler = storedUpscaler(ID, 1);
+    expect(await renderNow(w, s.chunks[0]!.id)).toMatchObject({ httpStatus: 200 });
+    expect(w.deliveries().at(-1)).toMatchObject({ outcome: "enlarging" });
+    expect((await photosOf(s.batch.id))[0]).toMatchObject({ x2Model: ID, x2Uri: null });
+    expect(await handleEnlargeTask(w.deps, enlargeTasks(w).at(-1)!.body)).toMatchObject({ outcome: "done" });
+    expect(await renderNow(w, s.chunks[0]!.id)).toMatchObject({ httpStatus: 200 });
+    const [out] = await outputsOf(s.batch.id);
+    expect(out!.scale).toBeGreaterThan(1); expect(out!.scale).toBeLessThanOrEqual(1.5);
+    expect(out!.flags).toContain("upscaled"); expect(out!.flags).not.toContain("enlargement_failed");
+    expect(service.call).toHaveBeenCalledTimes(1);
+  }, 120_000);
+
+  it("P1-2: x4 routing switched on after the matte stage: an above-2.0x photo queued for x2 only gets its x4 image at the render, not held", async () => {
+    const w = fakeWorld(db, 1, { imageScale: 0.5 }), service = fakeService();
+    w.deps.upscaler = storedUpscaler(ID, 1); w.deps.enlarge = service.call;
+    realRender(w);
+    const s = await matteStage(w, "p1-2-x4", ["trendyol"], 1);
+    const [photo] = await photosOf(s.batch.id);
+    expect(photo!.x2Model).toBe(ID);
+    expect(await handleEnlargeTask(w.deps, bodyOf(w, photo!.id))).toMatchObject({ outcome: "done" });
+    // UPSCALE_MODEL_X4 goes on between the matte stage and the render.
+    w.deps.upscalerX4 = storedUpscaler(ID4, 1);
+    expect(await renderNow(w, s.chunks[0]!.id)).toMatchObject({ httpStatus: 200 });
+    expect(w.deliveries().at(-1)).toMatchObject({ outcome: "enlarging" });
+    expect((await photosOf(s.batch.id))[0]).toMatchObject({ x2Model: ID4, x2Uri: null, x2Attempts: 0 });
+    expect(await handleEnlargeTask(w.deps, enlargeTasks(w).at(-1)!.body)).toMatchObject({ outcome: "done" });
+    expect(service.call.mock.calls.map((c) => c[2]!.upscaler)).toEqual([ID, ID4]);
+    expect(await renderNow(w, s.chunks[0]!.id)).toMatchObject({ httpStatus: 200 });
+    const [out] = await outputsOf(s.batch.id);
+    expect(out!.scale).toBeGreaterThan(2);
+    expect(out!.flags).toContain("upscaled"); expect(out!.flags).not.toContain("enlargement_failed");
+    expect((await photosOf(s.batch.id))[0]!.x2Uri).toMatch(/\.swinir-x4-cpu\.x4\.jpg$/);
+  }, 120_000);
+
+  it("P1-3 and P2-5: each model's own cap; the x4 image above its cap fails for good after the x2 image is stored, and only the x4 channel is held", async () => {
+    const env = { x2: process.env.UPSCALE_MAX_PIXELS, x4: process.env.UPSCALE_MAX_PIXELS_X4 };
+    try {
+      const w = fakeWorld(db, 1, { imageScale: 0.5 }), service = fakeService();
+      w.deps.upscaler = storedUpscaler(ID, 1); w.deps.upscalerX4 = storedUpscaler(ID4, 1); w.deps.enlarge = service.call;
+      realRender(w);
+      const s = await matteStage(w, "p1-3-caps", ["trendyol", "noon"], 1);
+      const [photo] = await photosOf(s.batch.id);
+      expect(photo!.x2Model).toBe(`${ID},${ID4}`);
+      // The photo's region (the whole photo here) lies between the two caps.
+      const p = await w.deps.prepare(w.objects.get(photo!.rawUri)!, photo!.originalName, async (b) => b);
+      process.env.UPSCALE_MAX_PIXELS = String(p.width * p.height); process.env.UPSCALE_MAX_PIXELS_X4 = String(p.width * p.height - 1);
+      expect(await handleEnlargeTask(w.deps, bodyOf(w, photo!.id))).toMatchObject({ httpStatus: 503, outcome: "next_image" });
+      expect(await handleEnlargeTask(w.deps, bodyOf(w, photo!.id))).toMatchObject({ httpStatus: 200, outcome: "failed" });
+      // One call: the x2 image fits its own cap; the x4 image is refused before any call.
+      expect(service.call.mock.calls.map((c) => c[2]!.upscaler)).toEqual([ID]);
+      const settled = (await photosOf(s.batch.id))[0]!;
+      expect(settled).toMatchObject({ x2Model: `${ID},${ID4}`, x2Attempts: ENLARGE_TASK_MAX_ATTEMPTS, x2ClaimedAt: null });
+      expect(settled.x2Uri).toMatch(/\.swinir-x2-cpu\.x2\.jpg$/);
+      expect(settled.x2Error).toMatch(/above the \d+ the upscale service takes for a 4x enlargement/);
+      expect(w.log.mock.calls.filter(([m, f]) => m === "enlargement failed" && f?.severity === "ERROR" && f?.partial === true)).toHaveLength(1);
+      // The render makes noon from the x2 image and holds only Trendyol (above 2.0x, it needs the x4 image): a true
+      // terminal failure, not re-queued.
+      expect(await renderNow(w, s.chunks[0]!.id)).toMatchObject({ httpStatus: 200 });
+      expect(w.deliveries().at(-1)!.outcome).not.toBe("enlarging");
+      const outs = await outputsOf(s.batch.id);
+      expect(outs.map((o) => [o.channel, o.flags.includes("upscaled"), o.flags.includes("enlargement_failed")])).toEqual([["noon", true, false], ["trendyol", false, true]]);
+      expect(service.call).toHaveBeenCalledTimes(1);
+    } finally {
+      for (const [key, value] of [["UPSCALE_MAX_PIXELS", env.x2], ["UPSCALE_MAX_PIXELS_X4", env.x4]] as const) if (value === undefined) delete process.env[key]; else process.env[key] = value;
+    }
+  }, 120_000);
+
+  it("P2-3: a delivery that read the images before another stored the x2 image checks again under its claim and makes only the x4 image", async () => {
+    const w = fakeWorld(db, 1, { imageScale: 0.5 }), service = fakeService();
+    w.deps.upscaler = storedUpscaler(ID, 1); w.deps.upscalerX4 = storedUpscaler(ID4, 1); w.deps.enlarge = service.call;
+    const s = await matteStage(w, "p2-3-race", ["trendyol", "noon"], 1);
+    const [photo] = await photosOf(s.batch.id);
+    expect(await handleEnlargeTask(w.deps, bodyOf(w, photo!.id))).toMatchObject({ outcome: "next_image" });
+    const x2Uri = `gs://assets/${enlargedPath(batchPrefix("test_brand", s.batch.id, true), await pathKeyOf(photo!.productId), photo!.n, ID)}`;
+    // The second delivery's first read of the x2 object is from before it was stored.
+    const head = w.deps.storage.headObject;
+    let stale = true;
+    w.deps.storage.headObject = (async (uri: string) => { if (uri === x2Uri && stale) { stale = false; return { exists: false, size: null, contentType: null, generation: null, crc32c: null }; } return head(uri); }) as typeof head;
+    expect(await handleEnlargeTask(w.deps, bodyOf(w, photo!.id))).toMatchObject({ httpStatus: 200, outcome: "done" });
+    expect(stale).toBe(false);
+    expect(service.call.mock.calls.map((c) => c[2]!.upscaler)).toEqual([ID, ID4]);
+    expect(await upscaleRows(s.batch.id)).toEqual(["ok", "ok"]);
+  }, 60_000);
 });

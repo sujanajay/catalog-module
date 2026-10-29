@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import sharp from "sharp";
-import { and, eq, inArray, isNotNull, isNull, notInArray, or, sql } from "drizzle-orm";
+import { and, eq, inArray, isNull, notInArray, or, sql } from "drizzle-orm";
 import { catalogBatches, catalogChunks, catalogOutputs, catalogProducts, catalogSourceImages } from "@catalog/core/db/schema";
 import { CHANNELS } from "@catalog/core/catalog/channels";
 import { batchPrefix, derivedPath, publicObjectPath, publicUrl, stagingPath } from "@catalog/core/catalog/naming";
@@ -8,9 +8,9 @@ import { planProduct, shotGeometry, trimRules, UnsupportedSourceError, type Enla
 import { renderKey, renderKeys, rerenderedKey } from "@catalog/core/catalog/pipeline/publish";
 import { catalogLlmDeps, CatalogQaCapError, limitDeliveryBackoff, runQaStage, spendCapHit } from "./qa-stage";
 import { CHUNK_HEARTBEAT_MS, CHUNK_LEASE_MS, CHUNK_MAX_STALLS, CHUNK_STALLED_REASON, chunkTimeBudgetMs, isBulkBatch, leaseLapsed, notParked, redispatchUnstartedChunks, tryEnqueueChunk } from "@catalog/core/catalog/pipeline/dispatch";
-import { chunkHasQueuedEnlargement, ENLARGE_TASK_MAX_ATTEMPTS, ENLARGING_TASK, enqueueEnlargements, jobForRoute, jobOnRoute, photosOfChunk, queuedPhotosOfChunk, unparkSettledChunks, type EnlargementRoute } from "@catalog/core/catalog/pipeline/enlargement";
+import { chunkHasQueuedEnlargement, ENLARGE_TASK_MAX_ATTEMPTS, ENLARGING_TASK, enqueueEnlargements, queuedPhotosOfChunk, unparkSettledChunks } from "@catalog/core/catalog/pipeline/enlargement";
 import type { EnlargeTaskBody } from "@catalog/core/tasks";
-import { derivedPrefixFor, handleEnlargeTask, loadShotFromMatte, primeStoredEnlargement, queueEnlargements, routeOf } from "./enlarge";
+import { derivedPrefixFor, enlargementGaps, handleEnlargeTask, loadShotFromMatte, primeStoredEnlargement, queueEnlargements, routeOf, type EnlargementGap } from "./enlarge";
 import { eachLimit, positiveIntEnv, serialLock } from "@catalog/core/concurrency";
 import { isCpuUpscalerId } from "@catalog/core/catalog/upscale";
 import { recordCostEvents, type CostEventInput } from "@catalog/core/cost-events";
@@ -245,12 +245,13 @@ export async function handleChunkTask(rawDeps: CatalogDeps, body: Record<string,
     }
     const prefix = batchPrefix(batch.brandSlug,batch.id,batch.isTest);
     limitDeliveryBackoff(batch,deadlineAt-QA_BACKOFF_DEADLINE_MARGIN_MS,deps.now);
-    // UPSCALE_MODEL or UPSCALE_MODEL_X4 changed since this chunk's photos were enlarged. Their images (or failures)
-    // belong to other upscalers: they are queued again for the configured ones and the chunk parks, so the render
-    // never holds them for it and never renders with another model's image.
-    const route = routeOf(deps);
-    if (chunk.stage === "render" && route) {
-      const requeued = await requeueOtherUpscaler(route);
+    // Before the render: every photo gets the enlargement the render will need (enlargementGaps). A job of other
+    // upscalers (UPSCALE_MODEL or UPSCALE_MODEL_X4 changed), a photo the matte stage did not queue (another build,
+    // threshold or x4 route: 2026-10-29 review P1-2), or a stored image cut for a matte the ladder has replaced since
+    // (P1-1) is queued again and the chunk parks, so the render never holds it for a gap a re-run closes and never
+    // renders with another model's or another region's image.
+    if (chunk.stage === "render" && routeOf(deps)) {
+      const requeued = await requeueEnlargementGaps();
       if (requeued === "lost") return answer(200,"lost");
       if (requeued === "parked") {
         await topUpWindow(deps,batch.id);
@@ -567,23 +568,29 @@ export async function handleChunkTask(rawDeps: CatalogDeps, body: Record<string,
     stopHeartbeat();
   }
   /**
-   * The chunk's photos with pending outputs whose enlargement job names an upscaler outside `route` (made, failed or
-   * queued under it) are queued again on `route` (jobForRoute: each image keeps its factor; next round: the step the
-   * park takes), and the chunk
-   * parks under its own lock while any of them is still queued, as the matte stage's park does. "none": nothing to
-   * re-queue, or every re-queued photo settled before the park (the render goes on).
+   * The chunk's photos the render would need an enlargement for and has none (enlargementGaps, per product from
+   * `fromProduct` on, the products this delivery renders) are queued again with the job they need (next round: the
+   * step the park takes; a photo still queued has its task sent again), and the chunk parks under its own lock while
+   * any of them is still queued, as the matte stage's park does. "none": nothing to re-queue, or every re-queued photo
+   * settled before the park (the render goes on).
    */
-  async function requeueOtherUpscaler(route:EnlargementRoute):Promise<"none"|"parked"|"lost"> {
-    const pendingOutput = sql`EXISTS (SELECT 1 FROM ${catalogOutputs} WHERE ${catalogOutputs.sourceImageId} = ${catalogSourceImages.id} AND ${catalogOutputs.batchId} = ${catalogSourceImages.batchId} AND ${catalogOutputs.status} = 'pending')`;
-    const candidates = await photosOfChunk(deps.db,chunk!,and(isNotNull(catalogSourceImages.x2Model),pendingOutput)!);
-    const jobs = candidates.length ? await deps.db.select({id:catalogSourceImages.id,x2Model:catalogSourceImages.x2Model}).from(catalogSourceImages).where(inArray(catalogSourceImages.id,candidates.map(p=>p.id))) : [];
-    const moved = new Map(jobs.filter(j=>!jobOnRoute(j.x2Model,route)).map(j=>[j.id,{from:j.x2Model!,to:jobForRoute(j.x2Model,route) ?? route.x2}]));
-    const photos = candidates.filter(p=>moved.has(p.id));
-    if (!photos.length) return "none";
+  async function requeueEnlargementGaps():Promise<"none"|"parked"|"lost"> {
+    const gaps:EnlargementGap[] = [];
+    for (const [index,productId] of chunk!.productIds.entries()) {
+      if (index < fromProduct) continue;
+      const [product] = await deps.db.select().from(catalogProducts).where(eq(catalogProducts.id,productId));
+      if (!product || product.lockBatchId !== batch!.id) continue;
+      const all = await deps.db.select().from(catalogSourceImages).where(and(eq(catalogSourceImages.productId,productId),eq(catalogSourceImages.batchId,batch!.id))).orderBy(catalogSourceImages.n);
+      const replaced = new Set(all.flatMap(s=>s.replacesId ? [s.replacesId]:[]));
+      const sources = all.filter(s=>!replaced.has(s.id) && (!chunk!.sourceImageIds?.length || chunk!.sourceImageIds.includes(s.id)));
+      gaps.push(...await enlargementGaps(deps,{batch:batch!,product,sources,trace:{batchId:batch!.id,productId}}));
+    }
+    if (!gaps.length) return "none";
     await underClaim(async tx=>{
-      for (const p of photos) { const {from,to} = moved.get(p.id)!; await tx.update(catalogSourceImages).set({x2Model:to,x2Uri:null,x2Error:null,x2Attempts:0,x2ClaimedAt:null}).where(and(eq(catalogSourceImages.id,p.id),eq(catalogSourceImages.x2Model,from))); }
+      for (const g of gaps) if (g.reason !== "queued") await tx.update(catalogSourceImages).set({x2Model:g.to,x2Uri:null,x2Error:null,x2Attempts:0,x2ClaimedAt:null}).where(and(eq(catalogSourceImages.id,g.id),g.from === null ? isNull(catalogSourceImages.x2Model):eq(catalogSourceImages.x2Model,g.from)));
     });
-    deps.log("catalog enlargement requeued",{severity:"WARNING",batchId:chunk!.batchId,chunkId:chunk!.id,photos:photos.length,reason:"another upscaler"});
+    const photos = gaps.map(g=>({id:g.id,productId:g.productId}));
+    deps.log("catalog enlargement requeued",{severity:"WARNING",batchId:chunk!.batchId,chunkId:chunk!.id,photos:photos.length,reasons:[...new Set(gaps.map(g=>g.reason))]});
     await enqueueEnlargements(deps.enqueue,chunk!.batchId,photos,chunk!.step+1,{log:deps.log,chunkId:chunk!.id,...(bulk() ? {bulk:true}:{})});
     const [result] = await deps.db.transaction(async tx=>{
       const [mine] = await tx.select({id:catalogChunks.id}).from(catalogChunks).where(ownsClaim()).for("update");

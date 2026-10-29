@@ -6,7 +6,7 @@ import { ALPHA_BBOX_THRESHOLD, analyseBackground, borderPixels, shadowLayer } fr
 import { anchorBounds, BG_TOLERANCE, checkOutput, type Measured } from "./compliance";
 import { enlargeCutout } from "./enhance";
 import { plainFailures } from "./qa/reasons";
-import { enlargeRegion, hasSourceX2, shouldUpscale, upscaledRgb, upscalerKey, upscalersFor, UPSCALE_X4_MIN_SCALE, type EnlargeRegion, type UpscaleFactor, type Upscaler } from "./upscale";
+import { enlargeRegion, hasSourceX2, shouldUpscale, upscaledRgb, upscaleFactorFor, upscalerKey, upscalersFor, type EnlargeRegion, type UpscaleFactor, type Upscaler } from "./upscale";
 
 export interface Prepared { width: number; height: number; rgb: Buffer; alphaSource: Buffer | null; background: { uniform: boolean; color: [number, number, number]; stdev: number }; flags: OutputFlag[]; sourceMime: string }
 export interface Matte { alpha: Buffer; width: number; height: number; model: string; ms: number; source: "model" | "alpha_source" | "floodfill"; target: "cpu" | "gpu" | null; sentLongSide: number | null }
@@ -533,7 +533,7 @@ export function enlargementFactors(channels: readonly ChannelId[], shots: readon
     for (const { spec, canvas } of canvases) for (const g of [plain[i], judged[i]]) {
       if (!g) continue;
       const scale = planCanvas(spec, g.box, { w: s.width, h: s.height }, { canvas, cut: g.cut, trimRoom: g.trimRoom }).scale;
-      if (shouldUpscale(scale, minScale)) factors.add(x4 && scale > UPSCALE_X4_MIN_SCALE + 1e-9 ? 4 : 2);
+      if (shouldUpscale(scale, minScale)) factors.add(upscaleFactorFor(scale, x4));
     }
     return [...factors].sort((a, b) => a - b);
   });

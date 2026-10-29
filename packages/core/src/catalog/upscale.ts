@@ -77,14 +77,30 @@ export function upscaleTargetFromEnv(env: NodeJS.ProcessEnv = process.env): Upsc
 /**
  * `UPSCALE_MODEL` (unset or empty: off), `UPSCALE_MODEL_X4` (unset, empty or "off": no x4 model; ignored when
  * UPSCALE_MODEL is off), `UPSCALE_MIN_SCALE` (default 1.0; a value that is not a number of at least 1 keeps the
- * default) and the target from `UPSCALE_URL`.
+ * default) and the target from `UPSCALE_URL`. A `UPSCALE_MODEL_X4` that is not a served x4 model
+ * (UPSCALE_MODEL_FACTORS) counts as no x4 model: the x2 model then makes every enlargement, so a mistyped value never
+ * names x2-scale images as the x4 band's.
  */
 export function upscaleConfigFromEnv(env: NodeJS.ProcessEnv = process.env): UpscaleConfig {
   const model = env.UPSCALE_MODEL?.trim() || null;
   const x4 = env.UPSCALE_MODEL_X4?.trim();
   const raw = env.UPSCALE_MIN_SCALE?.trim(), parsed = raw ? Number(raw) : NaN;
   const target = upscaleTargetFromEnv(env);
-  return { model, x4Model: model && x4 && x4 !== "off" ? x4 : null, minScale: Number.isFinite(parsed) && parsed >= 1 ? parsed : DEFAULT_UPSCALE_MIN_SCALE, ...(target === "cpu" ? { target } : {}) };
+  return { model, x4Model: model && x4 && UPSCALE_MODEL_FACTORS[x4] === 4 ? x4 : null, minScale: Number.isFinite(parsed) && parsed >= 1 ? parsed : DEFAULT_UPSCALE_MIN_SCALE, ...(target === "cpu" ? { target } : {}) };
+}
+
+/** The service's own default for the largest image it takes (services/matting/app.py), when no cap is set. */
+export const DEFAULT_UPSCALE_MAX_PIXELS = 24_000_000;
+/**
+ * Spec 18 quality (2026-10-29 review P1-3): the largest image (width x height, before the model's scale) the upscale
+ * service takes for a model of `factor`. Each model has its own cap, sized to the timeout by its own time per pixel
+ * (infra/lib/shape.sh): `UPSCALE_MAX_PIXELS` for the x2 model, `UPSCALE_MAX_PIXELS_X4` for the x4 model (unset:
+ * `UPSCALE_MAX_PIXELS`). Unset, the service's default. The service applies the same caps (app.py).
+ */
+export function upscaleMaxPixels(factor: UpscaleFactor, env: NodeJS.ProcessEnv = process.env): number {
+  const read = (raw: string | undefined): number | null => { const v = Number(raw?.trim()); return raw?.trim() && Number.isInteger(v) && v > 0 ? v : null; };
+  const x2 = read(env.UPSCALE_MAX_PIXELS) ?? DEFAULT_UPSCALE_MAX_PIXELS;
+  return factor === 4 ? read(env.UPSCALE_MAX_PIXELS_X4) ?? x2 : x2;
 }
 
 /**
@@ -153,6 +169,15 @@ export function storedUpscaler(id: string, minScale: number): Upscaler {
 export const factorOf = (upscaler: Upscaler): UpscaleFactor => upscaler.factor ?? UPSCALE_FACTOR;
 
 /**
+ * Spec 18 quality: the one band rule. The model scale that makes an enlargement of `scale` (already above the
+ * threshold): 4 above UPSCALE_X4_MIN_SCALE when an x4 model is configured (`x4`), else 2. The matte stage's decision
+ * (render.ts enlargementFactors) and the render's choice (upscalersFor) both read it.
+ */
+export function upscaleFactorFor(scale: number, x4: boolean): UpscaleFactor {
+  return x4 && scale > UPSCALE_X4_MIN_SCALE + 1e-9 ? 4 : 2;
+}
+
+/**
  * Spec 18 quality: which upscalers may make the colour of an enlargement of `scale`, best first. Above
  * UPSCALE_X4_MIN_SCALE only the x4 model (x2 plus a Lanczos stretch is what the bake-off replaced); at or below it the
  * x2 model, then the x4 model (x4 plus a Lanczos downscale is still a faithful enlargement, so a photo the matte stage
@@ -161,7 +186,7 @@ export const factorOf = (upscaler: Upscaler): UpscaleFactor => upscaler.factor ?
  */
 export function upscalersFor(scale: number, x2: Upscaler, x4: Upscaler | null | undefined): Upscaler[] {
   if (!x4) return [x2];
-  return scale > UPSCALE_X4_MIN_SCALE + 1e-9 ? [x4] : [x2, x4];
+  return upscaleFactorFor(scale, true) === 4 ? [x4] : [x2, x4];
 }
 
 /** A rectangle of the prepared photo, in its pixels. */
@@ -204,10 +229,20 @@ export async function upscaleUpload(rgb: Buffer, width: number, height: number, 
 }
 
 /**
- * The upscaled colour of one region of a source photo (raw RGB, exactly `factor` times the region in both axes; the
- * whole photo when the service made it inline) and the service time.
+ * The upscaled colour of one region of a source photo (exactly `factor` times the region in both axes; the whole photo
+ * when the service made it inline) and the service time. 2026-10-29 review P2-8: a stored image stays the JPEG it was
+ * stored as (`jpeg`) and is decoded for each crop (sourcePixels), so a product's primed x4 images (48 B per region
+ * pixel once decoded) never all sit in the worker's memory at once; an image a service call made inline keeps its
+ * pixels (`rgb`).
  */
-export interface SourceX2 { rgb: Buffer; width: number; height: number; ms: number; factor: UpscaleFactor; region: EnlargeRegion }
+export interface SourceX2 { rgb?: Buffer; jpeg?: Buffer; width: number; height: number; ms: number; factor: UpscaleFactor; region: EnlargeRegion }
+/** The raw RGB of an upscaled image: its pixels, or its stored JPEG decoded (the same decode for every crop). */
+async function sourcePixels(x2: SourceX2): Promise<Buffer> {
+  if (x2.rgb) return x2.rgb;
+  const out = await sharp(x2.jpeg!).removeAlpha().toColourspace("srgb").raw().toBuffer({ resolveWithObject: true });
+  if (out.info.width !== x2.width || out.info.height !== x2.height || out.info.channels !== 3) throw new Error("The stored enlargement could not be read as RGB.");
+  return out.data;
+}
 /**
  * One x2 image per source photo (spec 11 assumption 3): the first channel that needs it starts the call (or, in the
  * worker, finds the stored image primeSourceX2 put here), every other channel and every auto-resolve re-render of the
@@ -231,9 +266,10 @@ export async function primeSourceX2(upscaler: Upscaler, rgb: Buffer, width: numb
   const height = rgb.length / 3 / width, f = factorOf(upscaler);
   const r = region ?? { x: 0, y: 0, w: width, h: height };
   if (!regionContains({ x: 0, y: 0, w: width, h: height }, r)) return false;
-  const out = await sharp(x2Jpeg).removeAlpha().toColourspace("srgb").raw().toBuffer({ resolveWithObject: true });
-  if (out.info.width !== r.w * f || out.info.height !== r.h * f || out.info.channels !== 3) return false;
-  cacheFor(upscaler).set(rgb, Promise.resolve({ rgb: out.data, width: out.info.width, height: out.info.height, ms: 0, factor: f, region: r }));
+  // The header only: the pixels are decoded for each crop (sourcePixels), which also refuses a JPEG that does not decode.
+  const meta = await sharp(x2Jpeg).metadata();
+  if (meta.width !== r.w * f || meta.height !== r.h * f) return false;
+  cacheFor(upscaler).set(rgb, Promise.resolve({ jpeg: x2Jpeg, width: r.w * f, height: r.h * f, ms: 0, factor: f, region: r }));
   return true;
 }
 /** True when this upscaler has an image (primed, or a call under way) for the prepared photo whose colour is `rgb`. */
@@ -272,7 +308,7 @@ export async function upscaledRgb(upscaler: Upscaler, rgb: Buffer, sourceWidth: 
   try {
     const f = x2.factor, r = x2.region;
     if (!regionContains(r, crop)) throw new Error(`The crop ${formatRegion(crop)} lies outside the enlarged region ${formatRegion(r)}.`);
-    const out = await sharp(x2.rgb, { raw: { width: x2.width, height: x2.height, channels: 3 } }).extract({ left: (crop.x - r.x) * f, top: (crop.y - r.y) * f, width: crop.w * f, height: crop.h * f }).resize(target.w, target.h, { fit: "fill", kernel: "lanczos3" }).raw().toBuffer();
+    const out = await sharp(await sourcePixels(x2), { raw: { width: x2.width, height: x2.height, channels: 3 } }).extract({ left: (crop.x - r.x) * f, top: (crop.y - r.y) * f, width: crop.w * f, height: crop.h * f }).resize(target.w, target.h, { fit: "fill", kernel: "lanczos3" }).raw().toBuffer();
     if (out.length !== target.w * target.h * 3) throw new Error("The upscaled image could not be read as RGB.");
     return { rgb: out, ms: x2.ms, reused };
   } catch (error) {
