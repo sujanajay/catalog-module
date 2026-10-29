@@ -198,7 +198,7 @@ shape picked from it passes `shape_check`. As shipped:
 3.3.1 Queues (`infra/lib/queues.sh`): a new kind `enlarge` with two lanes, operator `<queue>-enlarge` and bulk
 `<queue>-enlarge-bulk` (bulk batches as `isBulkBatch` decides), each with `--max-dispatches-per-second` from
 `ENLARGE_DISPATCHES_PER_SECOND`, and retry by attempt count: `--max-attempts=8 --min-backoff=30s
---max-backoff=300s`. Their slots count in `SLOTS_TOTAL`. `WORKER_CONCURRENCY` 2 -> 3 proposed, refused by
+--max-backoff=300s` (9 since spec 18 quality, 3.6: one more delivery for the x4 image of a job). Their slots count in `SLOTS_TOTAL`. `WORKER_CONCURRENCY` 2 -> 3 proposed, refused by
 `shape_check` if the DB budget disagrees. `infra/tests/queues.test.mjs` asserts both lanes, their rate and retry.
 
 3.3.2 Tasks (`packages/core/src/tasks.ts`): route `/tasks/catalog/enlarge`, task id
@@ -257,7 +257,8 @@ counts `enlargeTotal`, `enlargeDone`, `enlargeFailed`. Ops page (admin) lines "E
 written at Start (absent when `UPSCALE_MODEL=off`).
 
 3.3.7 Invariant `enlarged_without_upscaler` (ERROR) in `invariants/checks.ts`: an output that is verified, has
-scale > 1.5, has no `upscaled` flag, in a batch with `options.enlargement`. Older batches made with the silent
+scale > 1.5, has no `upscaled` flag, in a batch with `options.enlargement`. Spec 18 quality (3.6): the threshold is
+the batch's own `options.enlargement.minScale` (1.0 from then on; absent on older batches, which keep 1.5). Older batches made with the silent
 fallback have no `options.enlargement` and stay as they are. PGlite fixtures: one violating, one satisfying, one
 older batch ignored.
 
@@ -304,6 +305,64 @@ contract change (owner decision 3). `migration-0005.test.ts` applies 0000 to 000
 - Spec 17 step 7 cleanup (operator batch `616a7386-8fe9-4a2c-b929-2e7f7dafa791`, speed batch
   `8628295f-1582-47ac-ac40-cca81d8c5e8d`) and an invariants run; spec 17's final section 10 report ("Blocked: 150
   photos/min not reached"); spec 17 worktree removal.
+
+### 3.6 Quality: AI enlargement above 1.0x, x2/x4 routing, crop before upscaling (2026-10-29)
+
+Owner, 2026-10-29: "The output image quality is so shitty ... It's pixelated ... make sure, in a reliable way, we're
+able to fix it." Reliability first; more time is acceptable. Owner decisions kept: a terminal enlargement failure
+holds the product with `enlargement_failed`, never a silent plain resize; the dedicated `catalog-upscale` stays at
+16 x 4 vCPU, 4 threads, concurrency 1.
+
+3.6.1 Threshold. The upscaler makes every enlargement with scale > 1.0 (`DEFAULT_UPSCALE_MIN_SCALE` 1.0,
+`UPSCALE_MIN_SCALE` default 1 in `deploy.sh`; it was 1.5). The 1.0 to 1.5 band is held with `enlargement_failed`
+on failure like any other enlargement, and `enlarged_without_upscaler` covers it (3.3.7).
+
+3.6.2 Models. SwinIR-S lightweight x4 (`002_lightweightSR_DIV2K_s64w8_SwinIR-S_x4.pth`, Apache-2.0, sha256
+`09fad24e32ae62722e1a055efde9921328f4137981bab0a42a4a3a806306c58e`) is served beside SwinIR-S x2 as `swinir-x4`
+(ONNX export sha256 `f477a052...`, `UPSCALE_MODEL_VERSIONS`). No Real-ESRGAN model is served. The weights are baked
+into the matting image at build time from their pinned URL and sha256 (the Dockerfile's `upscale-models` stage), as
+the x2 weights are, so no bucket upload step is needed. `UPSCALER_VERSION` 1 -> 2 (no more residual sharpening, the
+crop and the x4 model change the bytes), so upscaled outputs re-render once.
+
+3.6.3 Routing (decided from `.runs/2026-10-29-18-quality-bakeoff.md`, ground-truth downscale-then-enlarge):
+
+| scale | PSNR dB x2 / x4 | SSIM x2 / x4 | deltaE x2 / x4 |
+|---|---|---|---|
+| 1.2x | 29.56 / 28.13 | 0.873 / 0.867 | 0.63 / 1.51 |
+| 1.5x | 26.29 / 25.27 | 0.792 / 0.788 | 0.63 / 1.51 |
+| 2.0x | 23.92 / 23.42 | 0.704 / 0.690 | 0.63 / 1.35 |
+
+x4 is not at least as good as x2 at or below 2.0x on any metric, so one x4 call per photo was not chosen. The route:
+1.0 < s <= 2.0 uses the x2 image (Lanczos to the exact size), s > 2.0 one x4 pass then a Lanczos downscale. AI output
+is never sharpened. One image per photo per model: the matte stage (`enlargementFactors`) decides which models a
+photo needs across all its channels, and every channel and re-render of that photo reuses them. In the x2 band the
+render may use the x4 image when the photo has no x2 image (a uniform scale may place a photo lower than the matte
+stage planned); above 2.0x only x4 is used. `UPSCALE_MODEL_X4=off` sends every enlargement to the x2 model.
+
+3.6.4 One job per photo, no migration. `x2_model` holds the photo's job: the upscalerIds it needs joined by `,`, x2
+first (a single id keeps its meaning). `x2_uri` is the first image's object, set once every image of the job is
+stored; the others sit beside it (`enlargedSibling`, suffix `.<upscaler>.x<factor>.jpg`). The x2_* columns keep the
+job's state (queued, done, failed, attempts, claim). Each enlarge delivery makes at most one image (one service call,
+so each call has the whole delivery deadline); when another image of the job is still missing it answers 503
+`next_image` without counting an attempt, and the queue's retry makes the next one (the lanes' max-attempts 8 -> 9).
+`requeueOtherUpscaler` moves a job whose ids are not the configured route to it (`jobForRoute`, each image keeps its
+factor).
+
+3.6.5 Crop before upscaling. The enlarge task sends only the product's region: the union of `shotGeometry`'s box with
+and without the judged-cut rule (every crop the render may draw lies inside it) plus 32 px (`ENLARGE_REGION_MARGIN_PX`,
+the service's tile overlap), clamped to the photo (`shotEnlargementRegion`). It is stored on the object as `region`
+("x,y,w,h"); an image without it is the whole photo (images made before). The render cuts each crop out at
+(crop - region) x factor, so the matte stays aligned; a crop outside the region is never used (next candidate, else
+`enlargement_failed`). Tested exactly: a nearest-neighbour fake upscaler gives byte-identical outputs from the region
+and from the whole photo, at x2 and x4. With no product found, or no stored matte, the whole photo is sent.
+
+3.6.6 Shape (`infra/lib/shape.sh` `upscale_check`). `UPSCALE_X4_TIME_RATIO` 1.3 (x4 over x2 on the same image: 1.04
+in the Cloud Run bake-off, 1.193 on a 4-thread laptop with a worst pair of 1.283). Timeout rule on the slower model:
+2 x ceil(`UPSCALE_MAX_PIXELS` / 1e6 x 104.17 s x 1.3) <= `UPSCALE_TIMEOUT_S`, so `UPSCALE_MAX_PIXELS` 8,000,000 ->
+6,400,000 (2 x 867 = 1734 s <= 1740 s); it now bounds the product region, not the photo. Memory rule: 4096 MiB
+resident + 160 B per input pixel (measured about 86 B locally) <= 80% of `UPSCALE_MEMORY`: 5073 MiB of 16 GiB. The
+deploy gate's probe calls both models (`--model=swinir-x2,swinir-x4`) and requires each to be its exact scale and
+byte-identical on a rerun; its budget adds the x4 calls at 1.3 x the x2 p95.
 
 ## 4. Data and state changes
 
@@ -352,7 +411,9 @@ table and `shape_check` agree. The live shape at the start of this spec is spec 
 
 Chosen shape (2026-10-29, from the ladder in `services/matting/README.md` "Measured on CPU"; PR "measured table +
 shape defaults"): `UPSCALE_SERVICE=dedicated`, `UPSCALE_CPU_VCPU=4`, `UPSCALE_THREADS=4`, `UPSCALE_CONCURRENCY=1`,
-`UPSCALE_MAX_INSTANCES=16`, `UPSCALE_MEMORY=16Gi`, `UPSCALE_TIMEOUT_S=1740` and `UPSCALE_MAX_PIXELS=8000000` (fixed
+`UPSCALE_MAX_INSTANCES=16`, `UPSCALE_MEMORY=16Gi`, `UPSCALE_TIMEOUT_S=1740` and `UPSCALE_MAX_PIXELS=8000000` (6400000
+since spec 18 quality, 3.6.6, with `UPSCALE_X4_TIME_RATIO=1.3`, `UPSCALE_RESIDENT_MIB=4096`,
+`UPSCALE_X4_BYTES_PER_PIXEL=160`, `UPSCALE_MODEL_X4=swinir-x4` and `UPSCALE_MIN_SCALE=1`; fixed
 after the PR review of 2026-10-29: the enlarge task sends the whole photo, so the timeout must cover the largest photo
 the service takes, not only the probe sizes; 2 x 8 MP x 104.2 s per MP, the slowest measured p95 per pixel, = 1668 s
 <= 1740 s, and shape_check refuses a pair that does not fit; the enlarge task's dispatch deadline is 1800 s, the Cloud

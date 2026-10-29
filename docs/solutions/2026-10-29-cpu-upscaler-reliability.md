@@ -73,6 +73,12 @@ not fixed". Same pattern as spec 17: a note, not a guard.
 | Two deliveries of one photo must not both pay. | In-flight claim `x2_claimed_at` (migration 0005) taken before the service call, held for the dispatch deadline; the loser answers 503 `in_flight`; the success write is guarded on `x2_uri IS NULL`, so a late writer adds no write and no cost row. | `packages/core/drizzle/0005_enlargement.sql`, `apps/worker/src/catalog/enlarge.ts`, `enlarge.test.ts` |
 | The stored image must say which model made it. | The x2 object key names the upscaler (`<pathKey>_<n>.<upscaler>.x2.jpg`) and its metadata carries `sourceSha256` and `upscaler`; an image of another upscaler is re-queued at the render stage, never primed. | `packages/core/src/catalog/naming.ts` (`enlargedPath`), `apps/worker/src/catalog/enlarge.ts`, `apps/worker/src/catalog/chunk.ts` (`requeueOtherUpscaler`) |
 | Measuring must not touch production services. | `UPSCALE_MEASURE=1 bash infra/deploy.sh` deploys only `catalog-upscale` as a tagged candidate; gate tests cover it. | `infra/deploy.sh`, `infra/lib/gate.sh`, `infra/tests/gate.test.mjs` |
+| Quality (spec 18 3.6): a 1.2x Lanczos stretch is visibly soft, and x2 plus a Lanczos stretch to 3x looks pixelated. | The upscaler makes every enlargement above 1.0x (`UPSCALE_MIN_SCALE` 1); above 2.0x one x4 pass then a Lanczos downscale; AI output is never sharpened. Render tests at 1.2x, 1.5x (x2) and 2.5x (x4); a 1.2x failure holds. | `packages/core/src/catalog/upscale.ts` (`upscalersFor`), `render.ts`, `enhance.ts`, `upscale.test.ts` |
+| Choose a model by measuring against ground truth, not by "one call is simpler". | The x2/x4 split was chosen because x4 lost to x2 on PSNR, SSIM and deltaE at 1.2x, 1.5x and 2.0x in the bake-off (`.runs/2026-10-29-18-quality-bakeoff.md`); the numbers are in spec 18 3.6.3. | `docs/specs/18-reliable-enlargement.md` |
+| The threshold lives in one place per batch. | The invariant reads the batch's `options.enlargement.minScale` (older batches: 1.5), so a batch made at 1.0 is checked at 1.0. | `packages/core/src/catalog/invariants/checks.ts`, `invariants.test.ts` |
+| A second image per photo must not need a migration or a longer call. | The job is the comma list in `x2_model`; each delivery makes one image and hands the next to the queue with 503 `next_image`, not counted as an attempt; the lanes' max-attempts 8 -> 9 for that hand-off. | `apps/worker/src/catalog/enlarge.ts`, `packages/core/src/catalog/pipeline/enlargement.ts`, `infra/lib/queues.sh`, `enlarge.test.ts` |
+| Crop before upscaling must keep the matte aligned exactly. | The stored image carries its `region`; the render cuts at (crop - region) x factor and refuses a crop outside it. A nearest-neighbour fake proves the region path byte-identical to the whole-photo path at x2 and x4. | `packages/core/src/catalog/upscale.ts`, `render.ts` (`shotEnlargementRegion`), `upscale.test.ts` |
+| The shape must hold for the slowest model and its output memory. | `UPSCALE_X4_TIME_RATIO` (1.3) in the timeout rule, so `UPSCALE_MAX_PIXELS` 6.4 MP; a memory rule (4096 MiB + 160 B per input pixel <= 80% of `UPSCALE_MEMORY`); the deploy probe times x4 and checks its rerun is byte-identical. | `infra/lib/shape.sh`, `infra/lib/services.sh`, `infra/tests/shape.test.mjs`, `gate.test.mjs`, `services/matting/tests/cloudrun_check.py` |
 
 ## Decisions recorded in the reviews
 
@@ -118,6 +124,11 @@ model changes, which is an owner decision.
   only when it is named.
 
 ## Still open
+
+- Spec 18 quality: the x4 time ratio (1.3) and the x4 memory figure are from a laptop and the bake-off; the first
+  deploy's gate probe times x4 on the real shape. Replace `UPSCALE_X4_TIME_RATIO` with a measured x4 p95 row then.
+- Spec 18 quality: the swinir-x4 ONNX hash `f477a052` was exported locally with the pinned tools (they reproduce the
+  x2 hash exactly); the first Cloud Build prints its own, which must match `UPSCALE_MODEL_VERSIONS`.
 
 - The measured CPU table ("Measured on CPU" in `services/matting/README.md`) and the shape picked from it come
   from the spec 18 section 9 live run.
