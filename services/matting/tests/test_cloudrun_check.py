@@ -388,7 +388,7 @@ def test_upscale_sizes_parsing():
 
 
 @pytest.mark.parametrize("args", [["--model", "esrgan-x4"], ["--model", "realesrgan-x2plus"], ["--model", "swinir-x2,esrgan-x4"], ["--model", ","], ["--concurrency", "0"], ["--rounds", "51"], ["--timeout", "5"],
-                                  ["--bucket", "image-links-agent-public"], ["--run", "../x"]])
+                                  ["--bucket", "image-links-agent-public"], ["--run", "../x"], ["--x4-ratio", "0.5"], ["--x4-ratio", "-1"]])
 def test_upscale_probe_refuses_bad_arguments(args):
     with pytest.raises(probe.CheckFailure):
         probe.parse_upscale_args(["--probe-upscale", "https://svc-abc.a.run.app", *args])
@@ -440,3 +440,23 @@ def test_upscale_probe_times_x2_and_x4_and_checks_each_reruns_identically(fake_u
 def test_upscale_probe_fails_an_x4_that_does_not_rerun_identically(fake_upscale):
     code, reports = run_upscale_probe(fake_upscale(mode="noisy").url, "--model=swinir-x4", "--sizes", "64x96", "--rounds", "1", *BUCKET)
     assert code == 1 and "swinir-x4 64x96: 2 different outputs for the same input" in reports[0][1]["failures"]
+
+
+def test_x4_ratio_check_fails_an_x4_slower_than_the_ratio_allows():
+    # 2026-10-29 review P2-1: the x4 cap assumes x4 takes at most UPSCALE_X4_TIME_RATIO x the x2 time; the gate's probe
+    # measures it at each size probed on both models.
+    def row(model, scale, size, p95):
+        return {"model": model, "scale": scale, "size": size, "p95S": p95}
+    rows = [row("swinir-x2", 2, "800x1200", 100.0), row("swinir-x4", 4, "800x1200", 125.0),
+            row("swinir-x2", 2, "1600x1600", 200.0), row("swinir-x4", 4, "1600x1600", 300.0), row("swinir-x4", 4, "64x96", 9.0)]
+    failures = probe.x4_ratio_failures(rows, 1.3)
+    assert len(failures) == 1 and failures[0].startswith("swinir-x4 1600x1600: p95 300.0 s is 1.50 x the swinir-x2 p95 200.0 s")
+    assert "UPSCALE_X4_TIME_RATIO=1.3" in failures[0] and "UPSCALE_MAX_PIXELS_X4" in failures[0]
+    assert probe.x4_ratio_failures(rows, 0) == []
+    assert probe.x4_ratio_failures(rows, 1.5) == []
+
+
+def test_upscale_probe_reads_the_x4_ratio_the_gate_passes():
+    args = probe.parse_upscale_args(["--probe-upscale", "https://svc-abc.a.run.app", "--model=swinir-x2,swinir-x4", "--x4-ratio=1.3"])
+    assert args.x4_ratio == 1.3
+    assert probe.parse_upscale_args(["--probe-upscale", "https://svc-abc.a.run.app"]).x4_ratio == 0

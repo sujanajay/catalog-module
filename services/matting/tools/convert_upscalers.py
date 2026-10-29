@@ -37,6 +37,11 @@ SWINIR_ARCH_SHA256 = "9e143898679ebeebc5d2fc94ad1b89c38aa4a4d43da4e0fcba0f93e476
 SWINIR_TILE = 384  # a multiple of the SwinIR window size (8)
 OPSET = 17
 
+# 2026-10-29 review P2-7: the first 8 hex of each export's sha256, as packages/core/src/catalog/upscale.ts
+# UPSCALE_MODEL_VERSIONS names it in every render key. A build that exports other bytes fails here, so no output can
+# carry a key naming an export that did not make it (tests/test_upscale.py checks both lists agree).
+EXPORT_SHA256_PREFIX = {"swinir-x2": "9f4a3f85", "swinir-x4": "f477a052"}
+
 
 def fetch(url, sha256, folder):
     target = folder / url.rsplit("/", 1)[1]
@@ -106,6 +111,9 @@ def export(model_id, model, tile, scale, out_dir):
         raise SystemExit(f"{model_id}: ONNX output differs from PyTorch by {difference}")
     digest = hashlib.sha256(target.read_bytes()).hexdigest()
     print(f"exported {model_id} tile={tile} scale={scale} max_abs_diff={difference:.2e} sha256={digest}", flush=True)
+    if not digest.startswith(EXPORT_SHA256_PREFIX[model_id]):
+        raise SystemExit(f"{model_id}: export sha256 {digest} does not start with the pinned {EXPORT_SHA256_PREFIX[model_id]}; "
+                         "a new export needs a new pin here and in UPSCALE_MODEL_VERSIONS (packages/core/src/catalog/upscale.ts)")
     return {"file": target.name, "tile": tile, "scale": scale, "sha256": digest}
 
 

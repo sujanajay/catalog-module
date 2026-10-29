@@ -365,7 +365,15 @@ UPSCALE_MODELS = tuple(UPSCALE_SCALES)
 # A JPEG side is at most 65535 px; the answer must stay below it.
 UPSCALE_MAX_OUTPUT_SIDE = 65500
 UPSCALE_OVERLAP = 32
+# The largest input (width x height) per model scale (2026-10-29 review P1-3): each model is sized to the timeout by
+# its own time per pixel (infra/lib/shape.sh). UPSCALE_MAX_PIXELS for the x2 model, UPSCALE_MAX_PIXELS_X4 for the x4
+# model (unset: UPSCALE_MAX_PIXELS). The worker refuses the same regions before any call.
 UPSCALE_MAX_PIXELS = int(os.getenv("UPSCALE_MAX_PIXELS", "24000000"))
+UPSCALE_MAX_PIXELS_X4 = int(os.getenv("UPSCALE_MAX_PIXELS_X4") or UPSCALE_MAX_PIXELS)
+
+
+def upscale_max_pixels(model):
+    return UPSCALE_MAX_PIXELS_X4 if UPSCALE_SCALES[model] == 4 else UPSCALE_MAX_PIXELS
 UPSCALERS = {}
 UPSCALE_FAILED = {}
 
@@ -566,8 +574,8 @@ async def upscale(request: Request, model: str | None = None, scale: str | None 
         image, icc = decode_rgb(data)
     except (UnidentifiedImageError, OSError, ValueError, Image.DecompressionBombError):
         return upscale_error("not a PNG or JPEG file", 400)
-    if image.width * image.height > UPSCALE_MAX_PIXELS:
-        return upscale_error(f"image exceeds {UPSCALE_MAX_PIXELS} pixels for upscaling", 400)
+    if image.width * image.height > upscale_max_pixels(chosen):
+        return upscale_error(f"image exceeds {upscale_max_pixels(chosen)} pixels for a {UPSCALE_SCALES[chosen]}x upscale", 400)
     if max(image.width, image.height) * UPSCALE_SCALES[chosen] > UPSCALE_MAX_OUTPUT_SIDE:
         return upscale_error(f"image side exceeds {UPSCALE_MAX_OUTPUT_SIDE // UPSCALE_SCALES[chosen]} px for a {UPSCALE_SCALES[chosen]}x upscale", 400)
     try:

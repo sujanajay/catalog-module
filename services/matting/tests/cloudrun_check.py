@@ -450,6 +450,25 @@ class UpscaleProbe:
                 + [f"{self.model}: {problem}" for problem in dict.fromkeys(self.problems)])
 
 
+def x4_ratio_failures(rows, ratio):
+    """2026-10-29 review P2-1: the x4 cap (infra/lib/shape.sh UPSCALE_MAX_PIXELS_X4) assumes the x4 model takes at most
+    `ratio` (UPSCALE_X4_TIME_RATIO) times the x2 model's time. At each size probed on both, an x4 p95 above that fails
+    the probe, with the ratio measured. 0 checks nothing."""
+    if not ratio:
+        return []
+    by_size = {}
+    for r in rows:
+        if r["p95S"] is not None:
+            by_size.setdefault(r["size"], {})[r["scale"]] = r
+    out = []
+    for size, pair in by_size.items():
+        x2, x4 = pair.get(2), pair.get(4)
+        if x2 and x4 and x4["p95S"] > x2["p95S"] * ratio:
+            out.append(f"{x4['model']} {size}: p95 {x4['p95S']} s is {x4['p95S'] / x2['p95S']:.2f} x the {x2['model']} p95 {x2['p95S']} s, "
+                       f"above UPSCALE_X4_TIME_RATIO={ratio:g}; raise it and lower UPSCALE_MAX_PIXELS_X4 to fit the timeout (infra/lib/shape.sh)")
+    return out
+
+
 def upscale_markdown(rows):
     def cell(value):
         return "-" if value is None else str(value)
@@ -468,6 +487,7 @@ def parse_upscale_args(argv):
     parser.add_argument("--concurrency", type=int, default=1)
     parser.add_argument("--rounds", type=int, default=3)
     parser.add_argument("--timeout", type=int, default=900)
+    parser.add_argument("--x4-ratio", dest="x4_ratio", type=float, default=0.0)
     parser.add_argument("--bucket", default="")
     parser.add_argument("--run", default="")
     args = parser.parse_args(argv)
@@ -478,6 +498,7 @@ def parse_upscale_args(argv):
             f"--model must list served upscalers ({', '.join(UPSCALE_PROBE_MODELS)})")
     require(1 <= args.concurrency <= 8 and 1 <= args.rounds <= 50, "--concurrency must be 1 to 8 and --rounds 1 to 50")
     require(30 <= args.timeout <= 3600, "--timeout must be 30 to 3600 seconds")
+    require(args.x4_ratio == 0 or args.x4_ratio >= 1, "--x4-ratio must be 0 (no check) or at least 1")
     require(args.bucket in ("", PROBE_BUCKET), f"--bucket may only name {PROBE_BUCKET}")
     require(re.fullmatch(r"https://[a-z0-9.-]+\.run\.app|http://(localhost|127\.0\.0\.1):[0-9]+", args.url) is not None, "probe URL must be a run.app or local URL")
     require(not args.run or re.fullmatch(r"[A-Za-z0-9._-]{1,80}", args.run) is not None, "--run must be a short name")
@@ -501,6 +522,7 @@ def probe_upscale_main(argv, token_for=None, report_writer=None, now=None):
         failures += probe.failures(model_rows)
         steps += [{"model": model, **step} for step in probe.steps]
         service.update(probe.service)
+    failures += x4_ratio_failures(rows, args.x4_ratio)
     report = {"run": run, "url": args.url, "startedAt": started.isoformat(), "models": args.models,
               "sizes": [f"{w}x{h}" for w, h in args.sizes], "concurrency": args.concurrency, "rounds": args.rounds,
               "timeoutS": args.timeout, "service": service, "rows": rows, "steps": steps, "passed": not failures, "failures": failures}

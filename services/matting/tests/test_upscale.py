@@ -164,6 +164,18 @@ def test_too_many_pixels(enabled, monkeypatch):
     assert post(enabled[0], encoded(checker(11, 10))).status_code == 400
 
 
+def test_each_model_has_its_own_pixel_cap(enabled, monkeypatch):
+    # 2026-10-29 review P1-3: the x4 cap (sized for the slower model) never refuses an x2 image that fits the x2 cap.
+    monkeypatch.setattr(enabled[1], "UPSCALE_MAX_PIXELS", 200)
+    monkeypatch.setattr(enabled[1], "UPSCALE_MAX_PIXELS_X4", 100)
+    image = encoded(checker(15, 10))
+    assert post(enabled[0], image, "model=swinir-x2&scale=2").status_code == 200
+    refused = post(enabled[0], image, "model=swinir-x4&scale=4")
+    assert refused.status_code == 400
+    assert refused.json() == {"error": "image exceeds 100 pixels for a 4x upscale"}
+    assert post(enabled[0], encoded(checker(15, 14)), "model=swinir-x2&scale=2").status_code == 400
+
+
 @pytest.mark.parametrize("fmt,content_type", [("PNG", "image/png"), ("JPEG", "image/jpeg")])
 def test_upscale_returns_exact_2x_jpeg(enabled, fmt, content_type):
     source = Image.new("RGB", (37, 23), (200, 120, 40))
@@ -363,3 +375,16 @@ def test_x4_model_with_a_2x_output_is_not_served(enabled, monkeypatch):
     monkeypatch.setattr(module, "create_upscale_session", lambda model: FakeSession(scale=2))
     assert post(client, encoded(checker()), "model=swinir-x4&scale=4").status_code == 503
     assert "swinir-x4" in module.UPSCALE_FAILED
+
+
+def test_the_build_pins_the_export_hashes_the_render_keys_name():
+    # 2026-10-29 review P2-7: the Dockerfile's converter fails the build on an export whose sha256 does not start with
+    # its pin, and the render key names the same pin. Both lists must agree (read as text: the converter needs torch).
+    root = Path(__file__).resolve().parents[3]
+    import re
+    converter = (root / "services/matting/tools/convert_upscalers.py").read_text(encoding="utf-8")
+    core = (root / "packages/core/src/catalog/upscale.ts").read_text(encoding="utf-8")
+    pins = dict(re.findall(r'"(swinir-x[24])": "([0-9a-f]{8})"', re.search(r"EXPORT_SHA256_PREFIX = \{[^}]*\}", converter).group(0)))
+    keys = dict(re.findall(r'"(swinir-x[24])": "([0-9a-f]{8})"', re.search(r"UPSCALE_MODEL_VERSIONS[^=]*= \{[^}]*\}", core).group(0)))
+    assert pins == keys and sorted(pins) == UPSCALE_IDS
+    assert "digest.startswith(EXPORT_SHA256_PREFIX[model_id])" in converter

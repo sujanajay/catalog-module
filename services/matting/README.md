@@ -29,7 +29,8 @@ model has one scale (swinir-x2 2, swinir-x4 4); a model and scale that disagree 
 its model. Alpha is dropped and only RGB is upscaled; an embedded ICC profile is carried over; EXIF is
 not, and orientation is not applied, so callers send upright pixels (as they do for `/matte`).
 Errors are JSON `{"error": "..."}`: 400 for a bad image, unknown model, unsupported scale, more
-than `UPSCALE_MAX_PIXELS` (default 24,000,000) input pixels or an output side above 65,500 px (the JPEG limit);
+than the model's pixel cap (`UPSCALE_MAX_PIXELS` for swinir-x2, `UPSCALE_MAX_PIXELS_X4` for swinir-x4, unset: the x2
+cap; default 24,000,000) input pixels or an output side above 65,500 px (the JPEG limit);
 413 over 40,000,000 bytes; 503 when the model is unavailable (CPU target, missing file, failed load or failed
 determinism check); 500 for an unexpected inference error. Omitting both selects `health.upscale.default`.
 
@@ -61,7 +62,9 @@ swinir-x2 export of Cloud Build `bf4d6276-e221-4e92-8d18-7c30cc121198` has the s
 2026-10-29 with the same pinned tools (which reproduce the x2 sha256 above exactly), has
 `f477a052442d29a47719fed951d26c7c6b1d67476ca9f4bd33a2604454fb03dd`. Their first 8 hex are
 `UPSCALE_MODEL_VERSIONS` in `packages/core/src/catalog/upscale.ts` (part of render_key), so a changed export
-must bump that map; the next Cloud Build prints both in its `upscale-models` stage, to be checked against these.
+must bump that map. The converter pins the same 8 hex (`EXPORT_SHA256_PREFIX` in `tools/convert_upscalers.py`) and
+fails the build on any other export, so no render key can name an export that did not make the output; a pytest checks
+both lists agree.
 Only the ONNX files (about 11 MB each) reach the runtime images, under `/upscale-models`, read-only. Nothing is
 downloaded at request time.
 
@@ -83,8 +86,9 @@ no maximum cuDNN workspace). Estimated L4 use is about 1 to 2 GB for SwinIR at 3
 BiRefNet session, well inside 24 GB; this is an estimate, not a measurement. Measured on a Windows laptop CPU
 (2026-10-29, 4 threads, through the service code): swinir-x4 at 1200x1600 took 199 s with a peak commit of 2851 MiB
 (2685 MiB after loading, so about 86 B per input pixel for the x4 output and its buffers); x4 over x2 on the same
-800x1200 image took 1.193x (pairs 1.283 and 1.133), and the 2026-10-29 bake-off on Cloud Run measured 1.04 (51.0 s
-against 49.2 s). Both models gave byte-identical outputs on a rerun and at 4 and 8 threads.
+800x1200 image took 1.193x (pairs 1.283 and 1.133), and the 2026-10-29 bake-off (also laptop runs) timed x4 at
+about the x2 time on the same region (51.0 s against 49.2 s). No Cloud Run x4 time exists yet; the deploy gate's
+probe now fails an x4 p95 above `UPSCALE_X4_TIME_RATIO` x the x2 p95 at each size. Both models gave byte-identical outputs on a rerun and at 4 and 8 threads.
 
 ## Versions and offline models
 
@@ -413,12 +417,15 @@ per call, so the next probe change should log both. `infra/lib/shape.sh` therefo
 runs, not proven deterministic on every host.
 
 The shape chosen (spec 18 section 8, spec 18 quality): 16 x 4 vCPU, 16 GiB, 4 threads, concurrency 1,
-`UPSCALE_TIMEOUT_S=1740` with `UPSCALE_MAX_PIXELS=6400000` (8,000,000 before the x4 model).
+`UPSCALE_TIMEOUT_S=1740`, and one pixel cap per model (2026-10-29 review): `UPSCALE_MAX_PIXELS=8000000` for x2 and
+`UPSCALE_MAX_PIXELS_X4=6400000` for x4. A single shared 6.4 MP cap held real x2 regions it could fit (a 2500 px product
+on Centrepoint at 1.2x crops to 2564 x 2564 = 6.57 MP).
 
 | rule (infra/lib/shape.sh upscale_check) | arithmetic | result |
 |---|---|---|
-| timeout covers the largest image on the slower model (x4) | 2 x ceil(6.4 MP x 104.17 s per MP x 1.3) = 2 x 867 s | 1734 s <= 1740 s |
-| the same at the old 8 MP limit | 2 x ceil(8 MP x 104.17 x 1.3) = 2 x 1084 s | 2168 s, refused |
+| timeout covers the largest x2 image | 2 x ceil(8 MP x 104.17 s per MP) = 2 x 834 s | 1668 s <= 1740 s |
+| timeout covers the largest x4 image | 2 x ceil(6.4 MP x 104.17 s per MP x 1.3) = 2 x 867 s | 1734 s <= 1740 s |
+| x4 at the x2 cap of 8 MP | 2 x ceil(8 MP x 104.17 x 1.3) = 2 x 1084 s | 2168 s, refused |
 | x4 memory of the largest image under 80% of 16 GiB | 4096 MiB resident + 6.4 MP x 160 B | 5073 MiB <= 13107 MiB |
 | x4 output size (sharp's default input limit 268,402,689 px) | 6.4 MP x 16 | 102.4 MP |
 | deploy probe budget, both models, both sizes | 300 + 4 x (100 + 130) + 4 x (216 + 281) | 3208 s |
