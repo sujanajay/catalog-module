@@ -129,13 +129,18 @@ keys change once, by design).
 
 3.1.5 `infra/lib/shape.sh` gains rows `UPSCALE_MAX_INSTANCES`, `UPSCALE_CPU_VCPU`, `UPSCALE_MEMORY`,
 `UPSCALE_CONCURRENCY`, `UPSCALE_THREADS`, `UPSCALE_TIMEOUT_S`, `UPSCALE_MAX_PIXELS`, `ENLARGE_DISPATCHES_PER_SECOND`
-and the measured table as data (`UPSCALE_MEASURED_ON`, `UPSCALE_P50_MS_<size>_<vcpu>_<threads>_<conc>`,
-`UPSCALE_P95_MS_...`; empty = not measured). Refusals, each printed by `shape_check` with the numbers:
+and the measured table as data (`UPSCALE_MEASURED_ON`, `UPSCALE_P50_S_<vcpu>C_<threads>T_<conc>CONC_<WxH>` and
+`UPSCALE_P95_S_<vcpu>C_<threads>T_<conc>CONC_<WxH>`, for example `UPSCALE_P95_S_4C_4T_1CONC_1600x1600`, in whole
+seconds rounded up; empty = not measured, a value that is not a whole number is refused). As shipped: the vCPU row
+is `UPSCALE_CPU_VCPU`, because `UPSCALE_CPU=1` stays the matting service's switch for serving `/upscale`.
+Refusals, each printed by `shape_check` with the numbers:
 - a shape whose (vCPU, threads, concurrency) has no measured row is refused with "measure first: run
   infra/check-matting.sh --probe-upscale";
 - `UPSCALE_TIMEOUT_S >= 2 x p95(largest size)` and `UPSCALE_TIMEOUT_S <= 840` (the worker task deadline is 900 s,
   `DISPATCH_DEADLINE_SEC`; the client adds 30 s, 3.2.3);
-- queue rate: `ENLARGE_DISPATCHES_PER_SECOND <= UPSCALE_MAX_INSTANCES x UPSCALE_CONCURRENCY / p50 (s)`;
+- queue rate: `ENLARGE_DISPATCHES_PER_SECOND <= UPSCALE_MAX_INSTANCES x UPSCALE_CONCURRENCY / p50 (s)` (as shipped:
+  the p95 of the same size stands in while p50 is empty; the enlarge lanes' slots are at most `UPSCALE_MAX_INSTANCES
+  x UPSCALE_CONCURRENCY`);
 - CPU quota: `WORKER_MAX_INSTANCES x WORKER_CPU (96) + MATTING_CPU_MAX_INSTANCES x MATTING_CPU_VCPU +
   UPSCALE_MAX_INSTANCES x UPSCALE_CPU_VCPU + WEB_MAX_INSTANCES x WEB_CPU + JOBS_CPU_BUDGET (11 together) <= 190`
   (`CPU_QUOTA_LIMIT`).
@@ -146,12 +151,13 @@ unmeasured upscale shape is refused by name; a timeout under 2 x p95 or over 840
 
 ### 3.2 H2: dedicated service `catalog-upscale`
 
-3.2.1 Registry row `service_catalog_upscale` in `infra/lib/services.sh`, between `catalog-matting-gpu` and
-`catalog-worker` in `SERVICES` (the worker reads its URL): image `matting:$TAG` (the same image as
+3.2.1 Registry row `service_catalog_upscale` in `infra/lib/services.sh`, before `catalog-worker` in `SERVICES`
+(the worker reads its URL; as shipped the order is `catalog-matting`, `catalog-upscale`, `catalog-matting-gpu`,
+`catalog-worker`, `catalog-web`): image `matting:$TAG` (the same image as
 `catalog-matting`), region asia-south1, env `UPSCALE_CPU=1,PRELOAD_MATTE=0,ORT_INTRA_OP_THREADS=$UPSCALE_THREADS`,
 `--cpu`, `--memory`, `--concurrency`, `--timeout=$UPSCALE_TIMEOUT_S`, `--max-instances`, `--min-instances=0` from
-`shape.sh`; gate probe `infra/check-matting.sh --probe-upscale` at concurrency `UPSCALE_CONCURRENCY`, one round, the
-800x1200 size. `PRELOAD_MATTE` is a new env in `app.py`: `0` skips loading any cut-out model at start, so the service
+`shape.sh`; gate probe `infra/check-matting.sh --probe-upscale` at concurrency `UPSCALE_CONCURRENCY`, one round (as
+shipped: every size of `UPSCALE_SIZES`, 800x1200 and 1600x1600, not 800x1200 only; stricter). `PRELOAD_MATTE` is a new env in `app.py`: `0` skips loading any cut-out model at start, so the service
 holds only the upscaler. Unset keeps today's behaviour.
 
 3.2.2 `infra/deploy.sh`: the worker gets `UPSCALE_URL=<gate url of catalog-upscale>`; the line
@@ -162,16 +168,30 @@ holds only the upscaler. Unset keeps today's behaviour.
 3.2.3 New client `packages/core/src/catalog/enlarge.ts`:
 - ID token for the service URL (audience = service URL, also for candidate tag URLs, as fixed in #116), through one
   shared `idTokenFor(audience)` helper extracted from `matte.ts` and used by both clients.
-- Timeout = `UPSCALE_TIMEOUT_S + 30 s` (client > server > measured p99).
-- Retries with backoff (10 s, 20 s, 40 s, then 60 s) on 429, 503, other 5xx and timeout, while the remaining task
-  deadline allows another full timeout; then it throws `EnlargeFailedError` with the last status.
+- Timeout = `UPSCALE_TIMEOUT_S + 30 s` (client > server > measured p99). As shipped, each attempt's timeout is
+  clamped to the time left before the task deadline, and no attempt starts with less than 60 s left
+  (`ENLARGE_ATTEMPT_FLOOR_MS`). `deploy.sh` sets `UPSCALE_TIMEOUT_S` on the worker for every `UPSCALE_SERVICE`
+  (cpu and gpu from `MATTING_TIMEOUT_S`, 300), so the default env never trips the deadline guard.
+- Retries with backoff (10 s, 20 s, 40 s, then 60 s, with jitter) on 429, 503, other 5xx and timeout, while the
+  remaining task deadline allows another attempt; then it throws. As shipped the errors are typed subclasses of
+  `EnlargeError` (busy, timeout, server, bad input, rejected, model unavailable) instead of one
+  `EnlargeFailedError`.
 - No `/health` call, no breaker. A 4xx other than 429 is not retried.
 - Returns `{ jpeg, ms, model }`; the model id stays in logs and `x2_model` only.
 Tests (vitest, fake fetch and fake clock): retry on 429, 503, 500 and timeout; no retry on 400; stops inside the
 deadline; the timeout equals the env plus 30 s; no `/health` request is ever made.
 
 3.2.4 Rollout: deployed first as a no-traffic candidate for H1's ladder; traffic only after the table exists and the
-shape picked from it passes `shape_check`.
+shape picked from it passes `shape_check`. As shipped:
+- Measure mode: `UPSCALE_MEASURE=1 bash infra/deploy.sh` deploys only `catalog-upscale` (builds only the matting
+  image if missing, skips migrations and queues, leaves the other services and the worker's env as they are,
+  prints the candidate URL and the probe command, then stops). Each rung is tagged
+  `measure-<cpu>c-<threads>t-<concurrency>r`. Rung 1 of a brand-new service serves its service URL, because Cloud
+  Run cannot create a service with `--no-traffic`; nothing calls it. `measure-*` revisions are never tagged
+  `previous`, never count as a SKIP match, and `--rollback` goes to one only when it is named.
+- `UPSCALE_SERVICE` takes `gpu`, `cpu` or `dedicated`; the default stays `cpu` until the measured-table PR sets
+  `dedicated`. `ENLARGE_CLIENT_WIRED` (shape.sh, 1 since H3) refuses `dedicated` when 0, so the service can never
+  take traffic before the durable enlarge client exists.
 
 ### 3.3 H3: durable enlargement between cut-out and render
 
@@ -190,13 +210,21 @@ shape picked from it passes `shape_check`.
    verify the reply is exactly 2x in both axes.
 3. Upload JPEG q95 4:4:4 (`UPSCALE_UPLOAD_JPEG`) with metadata `sourceSha256` and `upscaler` (the `upscalerId`) to
    `<batchPrefix>/derived/<pathKey>/<pathKey>_<n>.<upscaler>.x2.jpg` in the private assets bucket (the key names the
-   upscaler, so another model's image is another object; 2026-10-29 review). New
+   upscaler, so another model's image is another object; 2026-10-29 review; as shipped `<upscaler>` is the upscaler
+   id lower-cased with anything outside `a-z0-9.-` replaced by `-`). A stored image of another upscaler is re-queued
+   at the render stage for the configured one (`requeueOtherUpscaler` in `chunk.ts`), never primed. New
    `enlargedPath(prefix, pathKey, n, upscaler)` in `naming.ts` next to `derivedPath`.
 4. Write `x2_uri`, `x2_model`, clear `x2_error`; one cost ledger row (stage `upscale`, kind `upscale_call`, engine
    `cpu`, the service ms).
 5. On failure: increment `x2_attempts`, write `x2_error`, answer 503 so Cloud Tasks retries, until the attempt count
    reaches the queue cap (8); then mark the photo failed (`x2_error` kept, `x2_uri` null), log ERROR
-   `enlargement_failed` with batch, product, source image, attempts and last status.
+   `enlargement_failed` with batch, product, source image, attempts and last status. As shipped: only deliveries
+   that reached the handler count (`x2_attempts = LEAST(8, x2_attempts + 1)`); the queue's retry count, which also
+   counts 429s answered before the app ran, is not used. The log message is `enlargement failed`. Bad input, a photo
+   over `UPSCALE_MAX_PIXELS`, a reply that is not exactly 2x and an unsupported source fail at once.
+   In-flight claim (as shipped, review fix): before the service call the delivery sets `x2_claimed_at`; a second
+   delivery while the claim holds (the task's dispatch deadline) answers 503 `in_flight`; the success write is
+   guarded on `x2_uri IS NULL`, so a late writer adds no write and no cost row.
 6. Settle the chunk gate (3.3.4) in both the done and the terminal-failed case.
 Tests (PGlite + fakes): idempotent on a second delivery (no second service call); retry then success; 8 failures then
 failed with ERROR log; the object path; the cost row; settle on the last photo dispatches the parked chunk exactly
@@ -207,7 +235,11 @@ from the cut-out box (a superset of the render's decision, so the render never n
 A needed photo is marked queued and its task enqueued. At the stage advance (matte -> render) the render chunk is
 parked with the sentinel `task_name='enlarging'` (precedent `REDISPATCHED_TASK` in `pipeline/dispatch.ts`) until every
 photo of the chunk is settled; the last enlarge settles it atomically and calls `dispatchChunks`. A chunk with no
-needed photo advances as today. `recoverBatchChunks` re-sends stale enlarge tasks with the next round number. Chunk
+needed photo advances as today. `recoverBatchChunks` re-sends stale enlarge tasks with the next round number. As
+shipped, the stale rule is lane-aware: every enlarge delivery of a batch refreshes `progress_at` on every parked chunk
+of that batch, and queued photos are sent again only when the batch's enlarge lane was quiet for `ENLARGE_STALE_MS`
+(30 minutes), so a long but moving paced lane is never duplicated. The need is decided per product over the
+product's canvas (`enlargementNeeds`), not per photo box; the per-photo superset over-flagged noon. Chunk
 stages stay `matte -> render -> qa`: adding a stage would change a CHECK constraint and the whole chunk model; the
 sentinel gate avoids that.
 
@@ -233,7 +265,9 @@ older batch ignored.
 H1 table in place of `upscaleMs: 7_000`) and the parked render chunk, so the local scale test predicts the CPU time.
 
 3.3.9 Per-photo state: migration `0005` on `catalog_source_images` adds `x2_uri text`, `x2_model text`,
-`x2_error text`, `x2_attempts integer not null default 0` (mirrors `matte_uri` / `matte_model`). Owner-approved
+`x2_error text`, `x2_attempts integer not null default 0` (mirrors `matte_uri` / `matte_model`), and, as shipped,
+`x2_claimed_at timestamptz` (the in-flight claim of 3.3.3 step 5; folded into `0005_enlargement.sql` before release,
+no 0006). Owner-approved
 contract change (owner decision 3). `migration-0005.test.ts` applies 0000 to 0005 on PGlite and checks the columns.
 
 ### 3.4 H4: open bugs (reproduction test first, then fix)
@@ -273,7 +307,7 @@ contract change (owner decision 3). `migration-0005.test.ts` applies 0000 to 000
 
 ## 4. Data and state changes
 
-Migration `0005` (3.3.9). Object path `<batchPrefix>/derived/<pathKey>/<pathKey>_<n>.<upscaler>.x2.jpg` in the private assets
+Migration `0005` (3.3.9, with `x2_claimed_at`). Object path `<batchPrefix>/derived/<pathKey>/<pathKey>_<n>.<upscaler>.x2.jpg` in the private assets
 bucket (never public, never raw, inside the batch prefix). `catalog_batches.counts` gains `enlargeTotal`,
 `enlargeDone`, `enlargeFailed`; `catalog_batches.options` gains `enlargement`. A chunk row may carry
 `task_name='enlarging'` while parked. New flag `enlargement_failed` in `OUTPUT_FLAGS`. Cloud Run: service
@@ -307,8 +341,10 @@ enlargement settles before its render chunk runs; one forced terminal failure gi
 
 New env, all with today's behaviour as default unless noted: `ORT_INTRA_OP_THREADS` (4), `PRELOAD_MATTE` (unset =
 load as today), `UPSCALE_TIMEOUT_S`, `UPSCALE_MAX_INSTANCES`, `UPSCALE_CPU_VCPU`, `UPSCALE_MEMORY`,
-`UPSCALE_CONCURRENCY`, `UPSCALE_THREADS`, `UPSCALE_MAX_PIXELS`, `ENLARGE_DISPATCHES_PER_SECOND`,
-`UPSCALE_MEASURED_ON` and the `UPSCALE_P50_MS_*` / `UPSCALE_P95_MS_*` rows. Changed: the worker's `UPSCALE_URL` names
+`UPSCALE_CONCURRENCY`, `UPSCALE_THREADS`, `UPSCALE_MAX_PIXELS` (24,000,000), `ENLARGE_DISPATCHES_PER_SECOND`,
+`UPSCALE_MEASURED_ON` and the `UPSCALE_P50_S_*` / `UPSCALE_P95_S_*` rows (whole seconds, 3.1.5). As shipped also:
+`UPSCALE_MEASURE` (0 or 1, measure mode, 3.2.4), `ENLARGE_CLIENT_WIRED` (shape.sh, 1), `UPSCALE_TIMEOUT_MAX_S` (840,
+a constant), `UPSCALE_SERVICE=dedicated` as a third value, `MATTING_TIMEOUT_S` (300, services.sh). Changed: the worker's `UPSCALE_URL` names
 `catalog-upscale`; `MATTING_CPU_MAX_INSTANCES` 16 -> 4 and `WORKER_CONCURRENCY` 2 -> 3 as proposed, each only if the
 table and `shape_check` agree. The live shape at the start of this spec is spec 17's (shape.sh `SHAPE_DEFAULTS` at
 999ada0).

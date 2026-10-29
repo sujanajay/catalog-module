@@ -198,11 +198,24 @@ agent name as co-author.
 3. Merge with `gh pr merge --squash --delete-branch` (squash keeps one conventional commit per spec).
 4. If the spec says deploy: from the main checkout on `main`, `git pull`, then
    `bash infra/bootstrap.sh` (must end with all SKIP on a second run) and `bash infra/deploy.sh`.
-   deploy.sh is the only place that deploys; builders never run it. Services are `catalog-web`,
-   `catalog-worker`, `catalog-matting`; jobs are `catalog-migrate`, `catalog-qa-check`,
-   `catalog-eval`. deploy.sh prints `WEB_URL`.
-5. Tier 5 runs inside deploy.sh (from spec 06 on). Read the smoke report it prints. If deploy.sh
-   stopped on a `failed_compliance`, nothing was deployed: fix, re-run the gates, deploy again.
+   deploy.sh is the only place that deploys; builders never run it. Every Cloud Run service deploys
+   through `deploy_service` (`infra/lib/gate.sh`, spec 17): a no-traffic candidate tagged `candidate`,
+   the service's probe against the tag URL with a hard timeout, and traffic only when the probe
+   passes; a failed probe leaves traffic where it was and stops the deploy. The registry
+   (`infra/lib/services.sh`, in this order) names each service's probe:
+   - `catalog-matting`: `probe-matting` (`infra/check-matting.sh --probe`, one model, one round);
+   - `catalog-upscale`: `probe-upscale` (`infra/check-matting.sh --probe-upscale`, every probe size at the
+     shape's concurrency; deployed only with `UPSCALE_SERVICE=dedicated`, or as a never-shifted
+     `measure-*` candidate with `UPSCALE_MEASURE=1`, spec 18);
+   - `catalog-matting-gpu`: `probe-matting` with every served model at the shape's concurrency;
+   - `catalog-worker`: `/health` 200 on the tag URL, then the tier 5 smoke against the candidates;
+   - `catalog-web`: `probe-web` (`/health` and the home page through IAP).
+   Rollback of a live service is `bash infra/deploy.sh --rollback <name>` (traffic back to the
+   revision tagged `previous`, seconds, no build). Jobs are `catalog-migrate`, `catalog-qa-check`,
+   `catalog-eval`, `catalog-invariants` and the test jobs. deploy.sh prints `WEB_URL`.
+5. Tier 5 runs inside the worker's gate (from spec 17 on; inside deploy.sh from spec 06). Read the
+   smoke report it prints. If deploy.sh stopped on a `failed_compliance` or any gate, the services
+   after it were not changed: fix, re-run the gates, deploy again.
 6. If anything non-obvious happened (a permission that had to be granted at project level, a flag
    that behaved differently, a Windows path issue, a restore of a previous object generation),
    write it to `docs/solutions/<topic>.md` in a follow-up `docs:` PR. Never edit CHANGELOG or
@@ -269,6 +282,15 @@ data set). Nothing else is asked.
 - A service that an output depends on is never called inline from a chunk delivery (spec 18): such a call is
   its own durable task with its own queue, retries and settled state, and the chunk waits for it. A design that
   would need the inline call stops and is reported, never shipped with a silent fallback.
+- An infra or shape change (`infra/*.sh`, `infra/lib/shape.sh` defaults, queue settings, service flags) ships in
+  its own PR, never inside a feature PR (spec 17).
+- A GPU shape goes live only through a probed no-traffic candidate (`deploy_service` and its probe), with the
+  measured numbers in `services/matting/README.md` and `infra/lib/shape.sh`; never on production traffic first
+  (spec 17).
+- A `docs/solutions/` entry names the check it added (test, refusal, invariant, alert or probe, with its file) or
+  the ticket for it. A learning without a check is not finished (spec 17).
+- One spec per PR, one stream per PR where the spec splits into streams: a bundle of specs in one PR is a
+  blocking rule violation (spec 17).
 
 ## 12. Process behaviours to keep
 
