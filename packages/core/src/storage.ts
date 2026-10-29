@@ -189,14 +189,16 @@ const CREATED_SKEW_MS = 60_000;
 
 /**
  * Upload to `BUCKET` at `path`; returns the gs:// URI. `sha256` is stored as the object's custom
- * metadata `sha256` (headObject returns it), so a later copy of the same bytes can be skipped.
+ * metadata `sha256` (headObject returns it), so a later copy of the same bytes can be skipped. `metadata` adds
+ * other custom metadata (spec 18: the stored enlargement names its source and upscaler); headObject returns it all.
  */
-export async function uploadBuffer(path: string, buf: Buffer, mime: string, options: { cacheControl?: string; sha256?: string } = {}): Promise<string> {
+export async function uploadBuffer(path: string, buf: Buffer, mime: string, options: { cacheControl?: string; sha256?: string; metadata?: Record<string, string> } = {}): Promise<string> {
   const bucket = getBucketName();
   const objectPath = path.replace(/^\/+/, "");
+  const custom = { ...options.metadata, ...(options.sha256 === undefined ? {} : { sha256: options.sha256 }) };
   const metadata = {
     ...(options.cacheControl === undefined ? {} : { cacheControl: options.cacheControl }),
-    ...(options.sha256 === undefined ? {} : { metadata: { sha256: options.sha256 } }),
+    ...(Object.keys(custom).length ? { metadata: custom } : {}),
   };
   await withStorageRetry(objectPath, () =>
       getStorage().bucket(bucket).file(objectPath).save(buf, { contentType: mime, resumable: false, ...(Object.keys(metadata).length ? { metadata } : {}) }),
@@ -250,6 +252,14 @@ export interface ObjectHead {
   crc32c: string | null;
   /** The custom metadata `sha256` uploadBuffer wrote, when the object carries it. */
   sha256?: string;
+  /** Every custom metadata value that is a string (uploadBuffer's `metadata` and `sha256`), when there is any. */
+  metadata?: Record<string, string>;
+}
+
+function customMetadata(raw: unknown): { metadata?: Record<string, string> } {
+  if (!raw || typeof raw !== "object") return {};
+  const entries = Object.entries(raw as Record<string, unknown>).filter((e): e is [string, string] => typeof e[1] === "string");
+  return entries.length ? { metadata: Object.fromEntries(entries) } : {};
 }
 
 /** Metadata of one object; `exists: false` (other fields null) when it is not there. */
@@ -265,6 +275,7 @@ export async function headObject(gsUri: string): Promise<ObjectHead> {
       generation: meta.generation === undefined ? null : String(meta.generation),
       crc32c: typeof meta.crc32c === "string" ? meta.crc32c : null,
       ...(typeof meta.metadata?.sha256 === "string" ? { sha256: meta.metadata.sha256 } : {}),
+      ...customMetadata(meta.metadata),
     };
   } catch (err) {
     if (isNotFound(err)) return { exists: false, size: null, contentType: null, generation: null, crc32c: null };

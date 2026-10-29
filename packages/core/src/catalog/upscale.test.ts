@@ -2,7 +2,7 @@ import sharp from "sharp";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { CHANNELS } from "./channels";
 import { MattingClient, parseUpscaleHealth, UpscaleUnavailableError } from "./matte";
-import { planCanvas, renderKeyInputs, renderSource, type Matte, type Prepared } from "./render";
+import { enlargementNeeds, planCanvas, planProduct, renderKeyInputs, renderSource, shotGeometry, trimRules, type Matte, type Prepared } from "./render";
 import { analyseBackground } from "./shadow";
 import { enlargeCutout, sharpenAfterEnlarge } from "./enhance";
 import { createUpscaler, DEFAULT_UPSCALE_MIN_SCALE, otherTargetUpscalerId, primeSourceX2, shouldUpscale, storedUpscaler, StoredEnlargementMissingError, upscaleConfigFromEnv, upscaledRgb, upscalerId, upscalerKey, upscaleTargetFromEnv, UPSCALER_VERSION, type Upscaler } from "./upscale";
@@ -347,5 +347,36 @@ describe("matting client upscale", () => {
     const ok = client(async init => new Response(new Uint8Array(await jpeg2x(init.body)), { headers: { "x-upscale-ms": "7" } }));
     const up = await renderSource({ prepared, matte, channel: "trendyol", shotNumber: 1, productType: "other", upscaler: createUpscaler(ok.c, { model: MODEL, minScale: 1.5 }) });
     expect(up.flags).toContain("upscaled"); expect(up.upscale).toEqual({ model: MODEL, ms: 7 });
+  });
+});
+
+describe("spec 18: enlargementNeeds, decided at the matte stage", () => {
+  const shot = (f: ReturnType<typeof fixture>) => ({ width: f.prepared.width, height: f.prepared.height, rgb: f.prepared.rgb, alpha: f.matte.alpha, model: f.matte.model });
+  it("is a superset of the render's decision on the product's canvas, with and without the judged cut", async () => {
+    // Two shots of one product: a small product inside the frame and one cut at every edge (the largest canvas).
+    const shots = [fixture(400, 600, { x: 100, y: 150, w: 200, h: 300 }), fixture(600, 600, { x: 0, y: 0, w: 600, h: 600 })];
+    const channels = ["trendyol", "noon", "styli", "amazon"] as const;
+    const needs = enlargementNeeds(channels, shots.map(shot), "other", DEFAULT_UPSCALE_MIN_SCALE);
+    const geometry = shots.flatMap(({ prepared, matte }) => { const g = shotGeometry(matte.alpha, prepared.width, prepared.height, { rgb: prepared.rgb, ...trimRules("other", matte) }); return g ? [g] : []; });
+    let used = 0;
+    for (const [i, { prepared, matte }] of shots.entries()) for (const ch of channels) {
+      const canvas = planProduct(CHANNELS[ch], geometry).canvas;
+      for (const ctx of [{ canvas }, { canvas, judgedCut: true }]) {
+        const up = fakeUpscaler();
+        await renderSource({ prepared, matte, channel: ch, shotNumber: i + 1, productType: "other", upscaler: up, ...ctx });
+        if (up.calls.length) { used++; expect(needs[i], `shot ${i + 1} on ${ch} ${JSON.stringify(ctx)}`).toBe(true); }
+      }
+    }
+    expect(used).toBeGreaterThan(0);
+  }, 120_000);
+  it("is false where no channel enlarges past the threshold: noon's own canvas, a large photo, no product found", () => {
+    const one = fixture();
+    expect(enlargementNeeds(["trendyol"], [shot(one)], "other", DEFAULT_UPSCALE_MIN_SCALE)).toEqual([true]);
+    // Noon picks a canvas that keeps this photo at 1.5x or less (the render test above): nothing to enlarge.
+    expect(enlargementNeeds(["noon"], [shot(one)], "other", DEFAULT_UPSCALE_MIN_SCALE)).toEqual([false]);
+    expect(enlargementNeeds(["noon", "trendyol"], [shot(one)], "other", DEFAULT_UPSCALE_MIN_SCALE)).toEqual([true]);
+    const big = fixture(2400, 3600, { x: 300, y: 300, w: 1800, h: 3000 });
+    expect(enlargementNeeds(Object.keys(CHANNELS) as (keyof typeof CHANNELS)[], [shot(big)], "other", DEFAULT_UPSCALE_MIN_SCALE)).toEqual([false]);
+    expect(enlargementNeeds(["trendyol"], [{ ...shot(one), alpha: Buffer.alloc(one.matte.alpha.length) }, shot(big)], "other", DEFAULT_UPSCALE_MIN_SCALE)).toEqual([false, false]);
   });
 });

@@ -146,12 +146,12 @@ describe("recoverBatchChunks (E4)", () => {
     await set(3, { status: "queued", dispatchedAt: at(-31 * 60_000), step: 1 }); // lost
     await set(4, { status: "running", startedAt: at(-10 * 60_000), leaseUntil: null, dispatchedAt: at(-10 * 60_000), stepKnown: false }); // pre-0004 claim, 10 min
     const result = await recoverBatchChunks(db, queue.enqueue, batchId, { now: T0, window: 5, log });
-    expect(result).toEqual({ lapsed: 1, lost: 1, unstarted: 0, dispatched: 0 });
+    expect(result).toEqual({ lapsed: 1, lost: 1, unstarted: 0, dispatched: 0, enlarge: 0 });
     expect(queue.tasks.map((t) => t.taskId).sort()).toEqual([chunkTaskId(rows[1]!.id, "matte", 3), chunkTaskId(rows[3]!.id, "matte", 2)].sort());
     expect(log).toHaveBeenCalledWith("chunk recovered", expect.objectContaining({ chunkId: rows[1]!.id, reason: "lease_lapsed", step: 3 }));
     expect(log).toHaveBeenCalledWith("chunk recovered", expect.objectContaining({ chunkId: rows[3]!.id, reason: "task_lost", step: 2 }));
     // The same minute: nothing more.
-    expect(await recoverBatchChunks(db, queue.enqueue, batchId, { now: at(30_000), window: 5, log })).toEqual({ lapsed: 0, lost: 0, unstarted: 0, dispatched: 0 });
+    expect(await recoverBatchChunks(db, queue.enqueue, batchId, { now: at(30_000), window: 5, log })).toEqual({ lapsed: 0, lost: 0, unstarted: 0, dispatched: 0, enlarge: 0 });
     // A pre-0004 claim keeps its 960 s lease: untouched at 10 min, recovered at 17 min.
     expect((await recoverBatchChunks(db, queue.enqueue, batchId, { now: at(7 * 60_000), window: 5, log })).lapsed).toBe(1);
     const [legacy] = await db.select().from(catalogChunks).where(eq(catalogChunks.id, rows[4]!.id));
