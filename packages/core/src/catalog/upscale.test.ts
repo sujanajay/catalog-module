@@ -5,7 +5,7 @@ import { MattingClient, parseUpscaleHealth, UpscaleUnavailableError } from "./ma
 import { planCanvas, renderKeyInputs, renderSource, type Matte, type Prepared } from "./render";
 import { analyseBackground } from "./shadow";
 import { enlargeCutout, sharpenAfterEnlarge } from "./enhance";
-import { createUpscaler, DEFAULT_UPSCALE_MIN_SCALE, otherTargetUpscalerId, shouldUpscale, upscaleConfigFromEnv, upscaledRgb, upscalerId, upscalerKey, upscaleTargetFromEnv, UPSCALER_VERSION, type Upscaler } from "./upscale";
+import { createUpscaler, DEFAULT_UPSCALE_MIN_SCALE, gpuUrlsFromEnv, otherTargetUpscalerId, shouldUpscale, upscaleConfigFromEnv, upscaledRgb, upscalerId, upscalerKey, upscaleTargetFromEnv, UPSCALER_VERSION, type Upscaler } from "./upscale";
 import { configuredUpscalerId, renderKey, renderKeys, rerenderedKey, upscaledRenderKey } from "./pipeline/publish";
 import { upscaledNotes } from "./pipeline/report";
 import { flagDetails } from "./qa/reasons";
@@ -277,7 +277,7 @@ describe("matting client upscale", () => {
     // Without a GPU service, the CPU service named by UPSCALE_URL still upscales.
     expect(new MattingClient({ services: [services[0]!], fetch, upscaleUrl: "http://127.0.0.1:1" }).upscaleTarget).toBe("cpu");
   });
-  it("sends /upscale to the dedicated CPU service when UPSCALE_URL names no matting service (spec 18 H2)", async () => {
+  it("never calls the dedicated CPU service when UPSCALE_URL names no matting service: the enlarge stage does (spec 18 H2)", async () => {
     const calls: string[] = [];
     const fetch = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
       const u = String(url); calls.push(u);
@@ -286,13 +286,20 @@ describe("matting client upscale", () => {
     }) as unknown as typeof globalThis.fetch;
     const services = [{ baseUrl: "http://127.0.0.1:1", target: "cpu" as const }, { baseUrl: "http://127.0.0.1:2", target: "gpu" as const }];
     const c = new MattingClient({ services, fetch, upscaleUrl: "http://127.0.0.1:3/" });
+    // Its render keys stay the CPU ones; the call itself is an explicit refusal, never a request.
     expect(c.upscaleTarget).toBe("cpu");
-    await expect(c.upscale(await image(), { model: MODEL, contentType: "image/png" })).resolves.toMatchObject({ ms: 90000 });
-    expect(calls.filter(u => u.includes("/upscale"))).toEqual([`http://127.0.0.1:3/upscale?model=${MODEL}&scale=2`]);
-    expect(calls).toContain("http://127.0.0.1:3/health");
-    // It is no cut-out service: the cut-out model list and the breakers stay those of the matting services.
-    expect((await c.health()).models.map((m) => m.target).sort()).toEqual(["cpu", "gpu"]);
     expect(createUpscaler(c, { model: MODEL, minScale: 1.5 })!.model).toBe(`${MODEL}+cpu`);
+    await expect(c.upscale(await image(), { model: MODEL, contentType: "image/png" })).rejects.toThrow("served by the enlarge stage");
+    // No /health fan-out to it and no breaker state: the cut-out services alone.
+    expect((await c.health()).models.map((m) => m.target).sort()).toEqual(["cpu", "gpu"]);
+    expect(calls.some((u) => u.includes(":3"))).toBe(false);
+    expect(c.upscaleBreaker).toEqual({ failures: 0, openedAt: null });
+  });
+  it("one parser for the GPU URLs (matting client and upscale target)", () => {
+    expect(gpuUrlsFromEnv({})).toEqual([]);
+    expect(gpuUrlsFromEnv({ MATTING_GPU_URL: "https://gpu.example/" })).toEqual(["https://gpu.example"]);
+    expect(gpuUrlsFromEnv({ MATTING_GPU_URLS: " https://a.example/, ,https://b.example,https://a.example", MATTING_GPU_URL: "https://ignored.example" }))
+      .toEqual(["https://a.example", "https://b.example"]);
   });
   it("reads the target from UPSCALE_URL against MATTING_URL", () => {
     expect(upscaleTargetFromEnv({})).toBe("gpu");
