@@ -7,6 +7,7 @@ import { authConfigFromEnv } from "./auth";
 import { handleIngestMoreTask, handleIngestTask, workerIngestDeps } from "./catalog/ingest";
 import { workerCatalogDeps } from "./catalog/deps";
 import { handleChunkTask } from "./catalog/chunk";
+import { handleEnlargeTask } from "./catalog/enlarge";
 import { handlePublishTask } from "./catalog/publish";
 import { handleFinalizeTask } from "./catalog/finalize";
 import { draftExpiryDaysFromEnv, handleSweep } from "./catalog/sweep";
@@ -49,6 +50,7 @@ const routes: ServerDeps["routes"] = {
   "/tasks/catalog/ingest": (body) => handleIngestTask({ db: getDb(), ingest: ingestDeps }, body),
   "/tasks/catalog/ingest-more": (body) => handleIngestMoreTask({ db: getDb(), ingest: ingestDeps }, body),
   "/tasks/catalog/chunk": (body, opts) => handleChunkTask(workerCatalogDeps(getDb()), body, opts),
+  "/tasks/catalog/enlarge": (body, opts) => handleEnlargeTask(workerCatalogDeps(getDb()), body, opts),
   "/tasks/catalog/publish": (body) => handlePublishTask(workerCatalogDeps(getDb()), body),
   "/tasks/catalog/finalize": (body) => handleFinalizeTask(workerCatalogDeps(getDb()), body),
 };

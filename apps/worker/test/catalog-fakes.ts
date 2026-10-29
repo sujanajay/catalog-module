@@ -23,6 +23,8 @@ export function fakeWorld(db: Db, delayMs = 1, options: { imageScale?: number } 
   const scale = options.imageScale ?? 1;
   const objects = new Map<string, Buffer>();
   const uploads = new Map<string, number>();
+  // Spec 18: the custom metadata uploadBuffer wrote (the stored enlargement names its source and upscaler).
+  const metadata = new Map<string, Record<string, string>>();
   const tasks: QueuedTask[] = [], names = new Set<string>();
   const log = vi.fn<CatalogDeps["log"]>();
   let inMatte = 0, peakMatte = 0;
@@ -38,9 +40,9 @@ export function fakeWorld(db: Db, delayMs = 1, options: { imageScale?: number } 
     ...base, sleep: async () => {}, now: () => new Date(), log, enqueue: enqueue as unknown as CatalogDeps["enqueue"], heartbeat: () => () => {},
     resolvePolicy: vi.fn<CatalogDeps["resolvePolicy"]>(async () => ({ matteModel: "fixture", qaModel: "test/judge", threshold: 75, floor: 60, qaMode: "per_source", qaSampleRate: 1, source: "default" })),
     storage: { ...storage, getBucketName: () => "assets", getPublicBucketName: () => "public",
-      uploadBuffer: async (path: string, buf: Buffer) => { const uri = `gs://assets/${path}`; objects.set(uri, buf); uploads.set(uri, (uploads.get(uri) ?? 0) + 1); return uri; },
+      uploadBuffer: async (path: string, buf: Buffer, _mime: string, opts: { metadata?: Record<string, string> } = {}) => { const uri = `gs://assets/${path}`; objects.set(uri, buf); uploads.set(uri, (uploads.get(uri) ?? 0) + 1); if (opts.metadata) metadata.set(uri, opts.metadata); else metadata.delete(uri); return uri; },
       downloadBuffer: async (uri: string) => { await pause(delayMs); const buf = objects.get(uri); if (!buf) throw new Error(`No object ${uri}`); return { buf, mime: "image/jpeg" }; },
-      headObject: async (uri: string) => { const buf = objects.get(uri); return buf ? { exists: true, size: buf.length, contentType: "image/jpeg", generation: "1", crc32c: "c" } : { exists: false, size: null, contentType: null, generation: null, crc32c: null }; } } as unknown as CatalogDeps["storage"],
+      headObject: async (uri: string) => { const buf = objects.get(uri), meta = metadata.get(uri); return buf ? { exists: true, size: buf.length, contentType: "image/jpeg", generation: "1", crc32c: "c", ...(meta ? { metadata: meta } : {}) } : { exists: false, size: null, contentType: null, generation: null, crc32c: null }; } } as unknown as CatalogDeps["storage"],
     matting: { ...base.matting, health: vi.fn(async () => ({ ok: true, models: [{ id: "fixture", inputSize: 1024, target: "cpu" }], default: "fixture", versions: { cpu: null, gpu: null } })), convert: base.matting.convert.bind(base.matting) } as unknown as CatalogDeps["matting"],
     // Each photo has its own size (from its fourth byte), so a product plan that misses a photo would differ.
     prepare: vi.fn(async (buf: Buffer) => { await pause(delayMs); if (buf[3] === 0xee) { const { UnsupportedSourceError } = await import("@catalog/core/catalog/render"); throw new UnsupportedSourceError("corrupt"); } const width = Math.round((600 + (buf[3] ?? 0) * 4) * scale), height = Math.round(800 * scale); return { width, height, rgb: Buffer.alloc(width * height * 3, 128), alphaSource: null, background: { uniform: true, color: [255, 255, 255] as [number, number, number], stdev: 0 }, flags: [], sourceMime: "image/jpeg" }; }) as unknown as CatalogDeps["prepare"],
@@ -49,7 +51,7 @@ export function fakeWorld(db: Db, delayMs = 1, options: { imageScale?: number } 
     judgeOutput: vi.fn<CatalogDeps["judgeOutput"]>(async (input) => { await pause(delayMs); return { scores: { complete_product: 95, same_product: 95, edge_quality: 95, background_clean: 95, no_text_or_watermark: 95, orientation_ok: 95, product_intact: 95, placement_ok: 95, overall: 95 }, verdict: "pass", reasons: [], isCollage: false, costUsd: 0, calls: 0, usage: {}, model: input.model, flags: [] }; }),
   };
   const deliveries = (outcome?: string) => log.mock.calls.filter(([message, fields]) => message === "chunk delivery" && (!outcome || fields?.outcome === outcome)).map(([, fields]) => fields!);
-  return { deps, objects, uploads, tasks, log, enqueue, deliveries, peakMatte: () => peakMatte };
+  return { deps, objects, uploads, metadata, tasks, log, enqueue, deliveries, peakMatte: () => peakMatte };
 }
 export type FakeWorld = ReturnType<typeof fakeWorld>;
 

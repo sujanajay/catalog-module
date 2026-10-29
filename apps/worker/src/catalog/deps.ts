@@ -9,7 +9,9 @@ import { repairOwnDefects, type QaRepairContext } from "./qa-stage";
 import type { ProductType } from "@catalog/core/catalog/types";
 import { MattingClient, mattingClientFromEnv, matteFor } from "@catalog/core/catalog/matte";
 import { prepare, renderAllChannels } from "@catalog/core/catalog/render";
-import { createUpscaler, upscaleConfigFromEnv } from "@catalog/core/catalog/upscale";
+import { storedUpscaler, upscaleConfigFromEnv, upscalerId, type Upscaler } from "@catalog/core/catalog/upscale";
+import { ENLARGE_TASK_MAX_ATTEMPTS } from "@catalog/core/catalog/pipeline/enlargement";
+import { workerEnlargeCall, type EnlargeCall } from "./enlarge";
 import type { ResolvedPolicy } from "@catalog/core/catalog/types";
 import * as storage from "@catalog/core/storage";
 import { DISPATCH_DEADLINE_SEC, enqueueTask } from "@catalog/core/tasks";
@@ -40,6 +42,14 @@ export interface CatalogDeps {
   chunkWindow?: number;
   /** Spec 16: photos worked on at once inside one delivery; absent reads CATALOG_PHOTO_CONCURRENCY (default 1). */
   photoConcurrency?: number;
+  /**
+   * Spec 18: the render's upscaler (the one renderAllChannels is bound to). Set, the matte stage decides which photos
+   * need an x2 image and queues their enlarge tasks, the render waits for them and primes it from the stored images.
+   * Absent or null (UPSCALE_MODEL off): no enlargement stage, the plain path everywhere.
+   */
+  upscaler?: Upscaler | null;
+  /** Spec 18: the enlarge task's one service call; absent, the enlarge task does nothing (upscaler off). */
+  enlarge?: EnlargeCall;
 }
 /** Spec 16: `CATALOG_PHOTO_CONCURRENCY`, the photos one chunk delivery works on at once (default 1, today). */
 export function photoConcurrency(env: NodeJS.ProcessEnv = process.env): number {
@@ -53,11 +63,14 @@ export function workerCatalogDeps(db: Db): CatalogDeps {
   sharedMatting ??= mattingClientFromEnv(process.env);
   const matting = sharedMatting;
   // Spec 11: UPSCALE_MODEL (unset: off) and UPSCALE_MIN_SCALE (default 1.5) reach every render of the worker, the
-  // auto-resolve ladder included; the upscaler uses the service UPSCALE_URL names (spec 16; unset: the GPU service)
-  // through the same client and its breakers.
-  const upscaler = createUpscaler(matting,upscaleConfigFromEnv());
+  // auto-resolve ladder included. Spec 18: the render never calls the upscale service. Its upscaler is the stored one
+  // (the x2 images the enlarge tasks made, primed per photo), named like the service that makes them (UPSCALE_URL, spec
+  // 16; unset: the GPU service), so render keys stay `u:<model>@<hash>`; the enlarge task calls that service.
+  const config = upscaleConfigFromEnv();
+  const upscaler = config.model ? storedUpscaler(upscalerId(config.model, matting.upscaleTarget), config.minScale) : null;
   const render: typeof renderAllChannels = upscaler ? (p,m,channels,ctx)=>renderAllChannels(p,m,channels,{upscaler,...ctx}) : renderAllChannels;
   return {db,storage,matting,enqueue:enqueueTask,fetch,now:()=>new Date(),log:catalogLog,prepare,matteFor,renderAllChannels:render,judgeOutput,classifyProductType,repairOwnDefects,
+    upscaler,...(config.model ? {enlarge:workerEnlargeCall(config.model)}:{}),
     resolvePolicy:async(brandSlug,category)=> {
       if (!defaultsEnsured) {
         const health = await matting.health();
@@ -96,8 +109,12 @@ export async function refreshBatchProgress(db:Db,batchId:string,now:Date=new Dat
   const [prepared]=await db.select({n:count()}).from(catalogSourceImages).where(and(eq(catalogSourceImages.batchId,batchId),or(isNotNull(catalogSourceImages.matteUri),eq(catalogSourceImages.status,"failed"),sql`${catalogSourceImages.flags} @> '["chart_image"]'::jsonb`,
     sql`${catalogSourceImages.id} IN (WITH moved AS MATERIALIZED (SELECT p.product_id::uuid AS product_id, c.source_image_ids FROM ${catalogChunks} c CROSS JOIN LATERAL jsonb_array_elements_text(c.product_ids) AS p(product_id) WHERE c.batch_id = ${batchId} AND (c.stage <> 'matte' OR c.status IN ('done','failed'))) SELECT si.id FROM moved JOIN ${catalogSourceImages} si ON si.product_id = moved.product_id WHERE si.batch_id = ${batchId} AND (moved.source_image_ids IS NULL OR jsonb_array_length(moved.source_image_ids) = 0 OR moved.source_image_ids @> jsonb_build_array(si.id)))`)));
   const [last]=await db.select({at:max(catalogChunks.progressAt)}).from(catalogChunks).where(eq(catalogChunks.batchId,batchId));
+  // Spec 18: the photos queued for an x2 image (x2_model set), those stored and those failed (pipeline/enlargement.ts).
+  const [x2]=await db.select({total:sql<number>`count(*) FILTER (WHERE ${catalogSourceImages.x2Model} IS NOT NULL)::int`,done:sql<number>`count(*) FILTER (WHERE ${catalogSourceImages.x2Uri} IS NOT NULL)::int`,
+    failed:sql<number>`count(*) FILTER (WHERE ${catalogSourceImages.x2Model} IS NOT NULL AND ${catalogSourceImages.x2Uri} IS NULL AND ${catalogSourceImages.x2Attempts} >= ${ENLARGE_TASK_MAX_ATTEMPTS})::int`}).from(catalogSourceImages).where(eq(catalogSourceImages.batchId,batchId));
   const total=(status:string)=>groups.find(g=>g.status===status)?.n ?? 0;
-  const patch={verified:total("verified"),needsAttention:total("needs_attention"),failed:total("failed"),skipped:total("skipped"),staged:total("staged"),attentionProducts:held?.n ?? 0,prepared:prepared?.n ?? 0,progressAt:last?.at ? new Date(last.at).toISOString():null};
+  const patch={verified:total("verified"),needsAttention:total("needs_attention"),failed:total("failed"),skipped:total("skipped"),staged:total("staged"),attentionProducts:held?.n ?? 0,prepared:prepared?.n ?? 0,progressAt:last?.at ? new Date(last.at).toISOString():null,
+    ...(x2?.total ? {enlargeTotal:x2.total,enlargeDone:x2.done,enlargeFailed:x2.failed}:{})};
   const made=patch.verified+patch.needsAttention+patch.failed+patch.skipped+patch.staged;
   // The samples are read and written under the row lock, so two deliveries ending together both count.
   await db.transaction(async tx=>{
