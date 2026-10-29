@@ -139,17 +139,23 @@ export const HEALTH_WORDS = {
   held: "Held with the product (waiting for the operator)",
   slowest: "Slowest running chunk",
   gpu: "GPU candidate revision",
+  enlargeWaiting: "Enlargements waiting",
+  enlargeFailed: "Enlargements failed",
   none: "none",
 } as const;
 export interface HealthSummary {
   silentOutputs: number;
   heldSiblings: number;
   slowest: { stage: ChunkStage; ms: number; batchId: string } | null;
+  /** Spec 18: photos of active batches still waiting for their enlargement, and those whose enlargement failed. */
+  enlargeWaiting: number;
+  enlargeFailed: number;
 }
 
 /**
  * "Silent outputs: 0", "Held with the product (waiting for the operator): 12",
- * "Slowest running chunk: cut-out, 14 min (batch 1a2b3c4d)" and "GPU candidate revision: <revision or none>".
+ * "Slowest running chunk: cut-out, 14 min (batch 1a2b3c4d)", "GPU candidate revision: <revision or none>", and (spec 18)
+ * "Enlargements waiting: 4" and "Enlargements failed: 0".
  * `gpuCandidate` is undefined when Cloud Run could not be read.
  */
 export function healthLines(h: HealthSummary, gpuCandidate: string | null | undefined): string[] {
@@ -159,5 +165,7 @@ export function healthLines(h: HealthSummary, gpuCandidate: string | null | unde
     `${HEALTH_WORDS.held}: ${h.heldSiblings}`,
     `${HEALTH_WORDS.slowest}: ${slowest}`,
     `${HEALTH_WORDS.gpu}: ${gpuCandidate === undefined ? REPORT_UNAVAILABLE : gpuCandidate ?? HEALTH_WORDS.none}`,
+    `${HEALTH_WORDS.enlargeWaiting}: ${h.enlargeWaiting}`,
+    `${HEALTH_WORDS.enlargeFailed}: ${h.enlargeFailed}`,
   ];
 }

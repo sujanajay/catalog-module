@@ -202,18 +202,21 @@ describe("health lines (spec 17 3.1.5)", () => {
     await db.insert(catalogBatches).values({ name: "Old", brandSlug: "uspa", brandName: "USPA", channels: ["noon"], createdBy: "a@opptra.com", status: "done", counts: { ...EMPTY_BATCH_COUNTS, silentOutputs: 2, heldSiblings: 5 } as typeof EMPTY_BATCH_COUNTS });
     await db.update(catalogBatches).set({ counts: { ...EMPTY_BATCH_COUNTS, heldSiblings: 3, slowestChunkMs: 14 * 60_000 } as typeof EMPTY_BATCH_COUNTS }).where(eq(catalogBatches.id, batch.id));
     const h = await healthSummary(db);
-    expect(h).toEqual({ silentOutputs: 2, heldSiblings: 8, slowest: { stage: "render", ms: 14 * 60_000, batchId: batch.id } });
+    expect(h).toEqual({ silentOutputs: 2, heldSiblings: 8, slowest: { stage: "render", ms: 14 * 60_000, batchId: batch.id }, enlargeWaiting: 0, enlargeFailed: 0 });
     expect(healthLines(h, null)).toEqual([
       "Silent outputs: 2",
       "Held with the product (waiting for the operator): 8",
       `Slowest running chunk: image making, 14 min (batch ${batch.id.slice(0, 8)})`,
       "GPU candidate revision: none",
+      "Enlargements waiting: 0",
+      "Enlargements failed: 0",
     ]);
   });
 
   it("says none when nothing is slow, and shows the candidate revision from Cloud Run, or the plain sentence when it cannot be read", async () => {
     expect(healthLines(await healthSummary(db), "catalog-matting-gpu-00008-xyz")).toEqual([
       "Silent outputs: 0", "Held with the product (waiting for the operator): 0", "Slowest running chunk: none", "GPU candidate revision: catalog-matting-gpu-00008-xyz",
+      "Enlargements waiting: 0", "Enlargements failed: 0",
     ]);
     const read = vi.fn(async () => ({ trafficStatuses: [{ revision: "catalog-matting-gpu-00007-abc", percent: 100 }, { tag: "candidate", revision: "catalog-matting-gpu-00008-xyz", percent: 0 }] }));
     setCloudRunReadForTests(read);
@@ -224,6 +227,20 @@ describe("health lines (spec 17 3.1.5)", () => {
     vi.spyOn(console, "warn").mockImplementation(() => undefined);
     expect(await gpuCandidateRevision(NOW)).toBeUndefined();
     expect(healthLines(await healthSummary(db), undefined)[3]).toBe(`GPU candidate revision: ${REPORT_UNAVAILABLE}`);
+  });
+
+  it("spec 18: counts the enlargements waiting and failed in active batches only, with no model id", async () => {
+    const { batch } = await world();
+    const [product] = await db.insert(catalogProducts).values({ brandSlug: "uspa", isTest: false, productKey: "X2", pathKey: "x-2", identifier: "X-2" }).returning();
+    const photo = (n: number, extra: Partial<typeof catalogSourceImages.$inferInsert>) => ({ productId: product!.id, batchId: batch.id, n, sha256: `x2-${n}`, originalName: `X-2_${n}.jpg`, rawUri: "gs://b/r", mime: "image/jpeg", ...extra });
+    await db.insert(catalogSourceImages).values([photo(1, { x2Model: "swinir-x2+cpu" }), photo(2, { x2Model: "swinir-x2+cpu", x2Attempts: 3 }), photo(3, { x2Model: "swinir-x2+cpu", x2Attempts: 8 }), photo(4, { x2Model: "swinir-x2+cpu", x2Uri: "gs://b/x2.jpg" })]);
+    const h = await healthSummary(db);
+    expect(h).toMatchObject({ enlargeWaiting: 2, enlargeFailed: 1 });
+    const lines = healthLines(h, null);
+    expect(lines.slice(4)).toEqual(["Enlargements waiting: 2", "Enlargements failed: 1"]);
+    expect(lines.join(" ")).not.toMatch(/swinir|realesrgan/);
+    await db.update(catalogBatches).set({ status: "done" }).where(eq(catalogBatches.id, batch.id));
+    expect(await healthSummary(db)).toMatchObject({ enlargeWaiting: 0, enlargeFailed: 0 });
   });
 
   it("the Ops page shows the four lines with no model id", async () => {
