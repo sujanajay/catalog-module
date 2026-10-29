@@ -65,11 +65,16 @@ export const X2_METADATA = { sourceSha256: "sourceSha256", upscaler: "upscaler" 
 /**
  * Spec 18 3.3.5, the render side: primes the upscaler's cache with the photo's stored x2 image, so every render of
  * this prepared photo (channels, auto-resolve) uses it without a service call. Without a stored image, or with one
- * that is not exactly 2x the photo, nothing is primed and the render holds what needs it (`enlargement_failed`).
+ * that was made from other bytes (its `sourceSha256`) or is not exactly 2x the photo, nothing is primed and the render holds what needs it (`enlargement_failed`).
  */
-export async function primeStoredEnlargement(deps: Pick<CatalogDeps, "upscaler" | "storage" | "log">, source: { id: string; x2Uri: string | null }, p: Prepared): Promise<boolean> {
+export async function primeStoredEnlargement(deps: Pick<CatalogDeps, "upscaler" | "storage" | "log">, source: { id: string; sha256: string; x2Uri: string | null }, p: Prepared): Promise<boolean> {
   if (!deps.upscaler || !source.x2Uri) return false;
   try {
+    const head = await deps.storage.headObject(source.x2Uri);
+    if (head.metadata?.[X2_METADATA.sourceSha256] !== source.sha256) {
+      deps.log("catalog enlargement missing", { severity: "WARNING", sourceImageId: source.id, reason: head.exists ? "stored image was made from other bytes" : "stored image not found" });
+      return false;
+    }
     const primed = await primeSourceX2(deps.upscaler, p.rgb, p.width, (await deps.storage.downloadBuffer(source.x2Uri)).buf);
     if (!primed) deps.log("catalog enlargement missing", { severity: "WARNING", sourceImageId: source.id, reason: "stored image is not 2x the photo" });
     return primed;

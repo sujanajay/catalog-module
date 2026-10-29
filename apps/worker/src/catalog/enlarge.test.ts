@@ -8,6 +8,7 @@ import type { Db } from "@catalog/core/db/client";
 import { createTestDb } from "@catalog/core/db/testing";
 import { catalogBatches, catalogChunks, catalogCostEvents, catalogOutputs, catalogProducts, catalogSourceImages } from "@catalog/core/db/schema";
 import { batchPrefix, enlargedPath } from "@catalog/core/catalog/naming";
+import type { Prepared } from "@catalog/core/catalog/render";
 import { sourceX2, storedUpscaler, upscalerId } from "@catalog/core/catalog/upscale";
 import { classifyOutputs } from "@catalog/core/catalog/load/classify";
 import { ENLARGEMENT_FAILED_SENTENCE } from "@catalog/core/catalog/types";
@@ -15,7 +16,7 @@ import { EnlargeBadInputError, EnlargeBusyError } from "@catalog/core/catalog/en
 import { ENLARGE_TASK_MAX_ATTEMPTS, ENLARGING_TASK } from "@catalog/core/catalog/pipeline/enlargement";
 import { enlargeTaskId } from "@catalog/core/tasks";
 import { currentChunkTask, deliverChunkToEnd, handleChunkTask } from "./chunk";
-import { handleEnlargeTask, type EnlargeCall } from "./enlarge";
+import { handleEnlargeTask, type EnlargeCall, primeStoredEnlargement } from "./enlarge";
 import { chunkRow, fakeWorld, seedBatch, type FakeWorld } from "../../test/catalog-fakes";
 
 let db: Db, close: () => Promise<void>;
@@ -118,6 +119,8 @@ describe("spec 18 H3: the enlarge task", () => {
     expect((await handleChunkTask(w.deps, await currentChunkTask(db, chunk.id))).httpStatus).toBe(200);
     expect(reads.mock.calls.map(([uri]) => uri)).toEqual(expect.arrayContaining(photos.map((p) => p.x2Uri)));
     expect(service.call).toHaveBeenCalledTimes(2);
+    // A stored image made from other bytes counts as missing: nothing is primed (the render holds what needs it).
+    expect(await primeStoredEnlargement(w.deps, { id: photos[0]!.id, sha256: "other", x2Uri: photos[0]!.x2Uri }, {} as Prepared)).toBe(false);
   }, 60_000);
 
   it("a stored image already there (a lost answer) is reused without a call; one from another upscaler is made again", async () => {
