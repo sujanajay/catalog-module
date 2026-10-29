@@ -5,11 +5,11 @@
 // load tool).
 import { and, asc, count, eq, inArray, isNotNull, isNull, lt, notInArray, or, sql, type SQL } from "drizzle-orm";
 import type { Db } from "../../db/client";
-import { catalogBatches, catalogChunks, catalogSourceImages } from "../../db/schema";
+import { catalogBatches, catalogChunks } from "../../db/schema";
 import { log as structuredLog, toSeverity } from "../../log";
-import { chunkTaskId, DISPATCH_DEADLINE_SEC, enlargeTaskId, type EnlargeTaskBody, type enqueueTask } from "../../tasks";
+import { chunkTaskId, DISPATCH_DEADLINE_SEC, type enqueueTask } from "../../tasks";
 import { positiveIntEnv } from "../../concurrency";
-import { chunkHasQueuedEnlargement, ENLARGE_STALE_MS, ENLARGING_TASK, photoEnlargementQueued } from "./enlargement";
+import { enqueueEnlargements, ENLARGE_STALE_MS, ENLARGING_TASK, queuedPhotosOfChunk, unparkSettledChunks } from "./enlargement";
 
 /** A delivery starts no new photo after this much of its time (the request deadline is 900 s). */
 export const CHUNK_TIME_BUDGET_MS = 480_000;
@@ -191,28 +191,22 @@ export async function recoverBatchChunks(db: Db, enqueue: Enqueue, batchId: stri
 /**
  * Spec 18: the recovery of parked chunks (recoverBatchChunks). A parked chunk with no queued photo is unparked (the
  * settle that should have done it is the only writer, so this is a safety net). One whose progress_at is older than
- * ENLARGE_STALE_MS (no enlarge delivery of the batch refreshed it: the batch's enlarge lane is quiet) takes the next step, and each queued photo's task is sent again
- * as round `step`, so the new task never collides with the old name. Returns the number of tasks sent.
+ * ENLARGE_STALE_MS (no enlarge delivery of the batch refreshed it: the batch's enlarge lane is quiet) takes the next
+ * step, and each queued photo's task is sent again as round `step`, so the new task never collides with the old name.
+ * Returns the number of tasks sent.
  */
 export async function resendStaleEnlargements(db: Db, enqueue: Enqueue, batchId: string, options: Pick<DispatchOptions, "now" | "log"> & { bulk?: boolean } = {}): Promise<number> {
   const now = options.now ?? new Date(), log = options.log ?? defaultLog;
   const parked = and(eq(catalogChunks.batchId, batchId), eq(catalogChunks.status, "queued"), eq(catalogChunks.taskName, ENLARGING_TASK));
-  const unparked = await db.update(catalogChunks).set({ taskName: null, dispatchedAt: null }).where(and(parked, sql`NOT ${chunkHasQueuedEnlargement()}`)).returning({ id: catalogChunks.id });
-  for (const chunk of unparked) log("chunk recovered", { batchId, chunkId: chunk.id, reason: "enlargement_settled" });
+  const unparked = await unparkSettledChunks(db, { batchId }, now);
+  for (const chunkId of unparked) log("chunk recovered", { batchId, chunkId, reason: "enlargement_settled" });
   const stale = await db.update(catalogChunks).set({ step: sql`${catalogChunks.step} + 1`, progressAt: now })
     .where(and(parked, or(isNull(catalogChunks.progressAt), lt(catalogChunks.progressAt, new Date(+now - ENLARGE_STALE_MS))))).returning();
   let sent = 0;
   for (const chunk of stale) {
-    if (!chunk.productIds.length) continue;
-    const photos = await db.select({ id: catalogSourceImages.id, productId: catalogSourceImages.productId }).from(catalogSourceImages)
-      .where(and(eq(catalogSourceImages.batchId, batchId), inArray(catalogSourceImages.productId, chunk.productIds), photoEnlargementQueued(),
-        chunk.sourceImageIds?.length ? inArray(catalogSourceImages.id, chunk.sourceImageIds) : undefined));
+    const photos = await queuedPhotosOfChunk(db, chunk);
     log("chunk recovered", { batchId, chunkId: chunk.id, stage: chunk.stage, step: chunk.step, reason: "enlargement_stale", photos: photos.length });
-    for (const photo of photos) {
-      const body: EnlargeTaskBody = { batchId, productId: photo.productId, sourceImageId: photo.id, round: chunk.step };
-      try { await enqueue("/tasks/catalog/enlarge", { ...body }, { taskId: enlargeTaskId(photo.id, chunk.step), ...(options.bulk ? { bulk: true } : {}) }); sent++; }
-      catch (error) { log("enlarge dispatch failed", { severity: "WARNING", batchId, chunkId: chunk.id, sourceImageId: photo.id, error: error instanceof Error ? error.message : String(error) }); }
-    }
+    sent += await enqueueEnlargements(enqueue, batchId, photos, chunk.step, { log, chunkId: chunk.id, ...(options.bulk ? { bulk: true } : {}) });
   }
   return sent;
 }

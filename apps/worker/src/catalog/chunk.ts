@@ -1,16 +1,16 @@
 import { randomUUID } from "node:crypto";
 import sharp from "sharp";
-import { and, eq, inArray, isNull, notInArray, or, sql } from "drizzle-orm";
+import { and, eq, inArray, isNotNull, isNull, ne, notInArray, or, sql } from "drizzle-orm";
 import { catalogBatches, catalogChunks, catalogOutputs, catalogProducts, catalogSourceImages } from "@catalog/core/db/schema";
 import { CHANNELS } from "@catalog/core/catalog/channels";
 import { batchPrefix, derivedPath, publicObjectPath, publicUrl, stagingPath } from "@catalog/core/catalog/naming";
-import { enlargementNeeds, planProduct, shotGeometry, trimRules, UnsupportedSourceError, type EnlargementShot, type Matte } from "@catalog/core/catalog/render";
+import { planProduct, shotGeometry, trimRules, UnsupportedSourceError, type EnlargementShot, type Matte } from "@catalog/core/catalog/render";
 import { renderKey, renderKeys, rerenderedKey } from "@catalog/core/catalog/pipeline/publish";
 import { catalogLlmDeps, CatalogQaCapError, limitDeliveryBackoff, runQaStage, spendCapHit } from "./qa-stage";
 import { CHUNK_HEARTBEAT_MS, CHUNK_LEASE_MS, CHUNK_MAX_STALLS, CHUNK_STALLED_REASON, chunkTimeBudgetMs, dispatchChunks, isBulkBatch, leaseLapsed, notParked, redispatchUnstartedChunks, tryEnqueueChunk } from "@catalog/core/catalog/pipeline/dispatch";
-import { chunkHasQueuedEnlargement, ENLARGE_TASK_MAX_ATTEMPTS, ENLARGING_TASK, photoEnlargementQueued } from "@catalog/core/catalog/pipeline/enlargement";
-import { enlargeTaskId, type EnlargeTaskBody } from "@catalog/core/tasks";
-import { derivedPrefixFor, handleEnlargeTask, primeStoredEnlargement } from "./enlarge";
+import { chunkHasQueuedEnlargement, ENLARGE_TASK_MAX_ATTEMPTS, ENLARGING_TASK, enqueueEnlargements, photosOfChunk, queuedPhotosOfChunk, unparkSettledChunks } from "@catalog/core/catalog/pipeline/enlargement";
+import type { EnlargeTaskBody } from "@catalog/core/tasks";
+import { derivedPrefixFor, handleEnlargeTask, loadShotFromMatte, primeStoredEnlargement, queueEnlargements } from "./enlarge";
 import { eachLimit, positiveIntEnv, serialLock } from "@catalog/core/concurrency";
 import { isCpuUpscalerId } from "@catalog/core/catalog/upscale";
 import { recordCostEvents, type CostEventInput } from "@catalog/core/cost-events";
@@ -102,14 +102,13 @@ export async function deliverChunkToEnd(deps:CatalogDeps,chunkId:string,each:(de
 async function enlargeInProcess(deps:CatalogDeps,chunkId:string):Promise<boolean> {
   const [chunk] = await deps.db.select().from(catalogChunks).where(and(eq(catalogChunks.id,chunkId),eq(catalogChunks.taskName,ENLARGING_TASK)));
   if (!chunk) return false;
-  const photos = chunk.productIds.length ? await deps.db.select({id:catalogSourceImages.id,productId:catalogSourceImages.productId}).from(catalogSourceImages)
-    .where(and(eq(catalogSourceImages.batchId,chunk.batchId),inArray(catalogSourceImages.productId,chunk.productIds),photoEnlargementQueued(),chunk.sourceImageIds?.length ? inArray(catalogSourceImages.id,chunk.sourceImageIds):undefined)) : [];
+  const photos = await queuedPhotosOfChunk(deps.db,chunk);
   for (const photo of photos) {
     const body:EnlargeTaskBody = {batchId:chunk.batchId,productId:photo.productId,sourceImageId:photo.id,round:chunk.step};
     for (let retryCount=0; retryCount<ENLARGE_TASK_MAX_ATTEMPTS; retryCount++) if ((await handleEnlargeTask(deps,{...body},{retryCount})).httpStatus!==503) break;
   }
   // Nothing queued is left: the last settle unparked it (a photo no task can settle any more is unparked here).
-  await deps.db.update(catalogChunks).set({taskName:null,dispatchedAt:null}).where(and(eq(catalogChunks.id,chunkId),eq(catalogChunks.taskName,ENLARGING_TASK),sql`NOT ${chunkHasQueuedEnlargement()}`));
+  await unparkSettledChunks(deps.db,[chunkId],deps.now());
   return true;
 }
 
@@ -246,6 +245,17 @@ export async function handleChunkTask(rawDeps: CatalogDeps, body: Record<string,
     }
     const prefix = batchPrefix(batch.brandSlug,batch.id,batch.isTest);
     limitDeliveryBackoff(batch,deadlineAt-QA_BACKOFF_DEADLINE_MARGIN_MS,deps.now);
+    // Review #8: UPSCALE_MODEL changed since this chunk's photos were enlarged. Their x2 images (or failures) belong to
+    // another upscaler: they are queued again for the configured one and the chunk parks, so the render never holds
+    // them for it and never renders with the other model's image.
+    if (chunk.stage === "render" && deps.upscaler) {
+      const requeued = await requeueOtherUpscaler(deps.upscaler.model);
+      if (requeued === "lost") return answer(200,"lost");
+      if (requeued === "parked") {
+        await dispatchChunks(deps.db,deps.enqueue,batch.id,{now:deps.now(),log:deps.log,...(deps.chunkWindow ? {window:deps.chunkWindow}:{})});
+        return answer(200,"done","enlarging");
+      }
+    }
     // Spec 15 E1: the index of the product to resume at when the budget stopped this delivery (null: finished).
     let stopAt: number | null = null;
     // Spec 16: a product's photos are worked on `photoLimit` at a time. The budget is asked before each photo
@@ -409,7 +419,7 @@ export async function handleChunkTask(rawDeps: CatalogDeps, body: Record<string,
           }
         });
         if (outOfTime) { stopAt = index; break products; }
-        if (deps.upscaler) await queueEnlargements(product,sources,shots,productPolicy.matteModel,trace);
+        if (deps.upscaler) await queueEnlargements(deps,{upscaler:deps.upscaler,batch,product,sources,shots,matteModel:productPolicy.matteModel,trace,write:underClaim,bulk:bulk()});
       } else if(chunk.stage==="render") {
         // In source order (the product plan reads the shots in order), whichever photo finishes first.
         const ready: ({ source: typeof sources[number]; p: Awaited<ReturnType<CatalogDeps["prepare"]>>; matte: Matte } | undefined)[] = new Array(sources.length);
@@ -426,10 +436,9 @@ export async function handleChunkTask(rawDeps: CatalogDeps, body: Record<string,
           // Spec 15 E1: staged outputs are skipped and the plan is rebuilt from the stored mattes, so a stop here is safe.
           if (!startPhoto()) return;
           try {
-            const p = await deps.prepare((await deps.storage.downloadBuffer(source.rawUri)).buf,source.originalName,b=>deps.matting.convert(b,trace));
+            const {p,alpha} = await loadShotFromMatte(deps,source,matteUri,trace);
             // Spec 18: the photo's stored x2 image (its enlarge task made it before this stage); no service call here.
             await primeStoredEnlargement(deps,source,p);
-            const alpha = await sharp((await deps.storage.downloadBuffer(matteUri)).buf).toColourspace("b-w").raw().toBuffer();
             ready[at] = {source,p,matte:{alpha,width:p.width,height:p.height,model:source.matteModel ?? productPolicy.matteModel,ms:source.matteMs ?? 0,source:source.flags.includes("alpha_source") ? "alpha_source":"model",target:null,sentLongSide:null}};
           } catch(error) {
             await underClaim(async tx=>tx.update(catalogOutputs).set({status:"failed",reason:error instanceof Error ? error.message : String(error),updatedAt:deps.now()}).where(and(eq(catalogOutputs.productId,productId),eq(catalogOutputs.sourceImageId,source.id),eq(catalogOutputs.batchId,batch.id),eq(catalogOutputs.status,"pending"))));
@@ -557,48 +566,27 @@ export async function handleChunkTask(rawDeps: CatalogDeps, body: Record<string,
     stopHeartbeat();
   }
   /**
-   * Spec 18 3.3.4: once a product's photos are cut out, decides which need an x2 image (enlargementNeeds over every shot
-   * of the product with a matte, as the render plans them) and queues their enlarge tasks (round 0, the batch's enlarge
-   * lane). The photo is marked queued (x2_model) before its task is sent; a send that fails is left to the parked
-   * chunk's recovery (ENLARGE_STALE_MS). A photo marked queued by an earlier delivery has its task sent again (the same
-   * name, so Cloud Tasks keeps one).
+   * Review #8: the chunk's photos with pending outputs whose enlargement belongs to another upscaler than `model` (made,
+   * failed or queued under it) are queued again for `model` (next round: the step the park takes), and the chunk
+   * parks under its own lock while any of them is still queued, as the matte stage's park does. "none": nothing to
+   * re-queue, or every re-queued photo settled before the park (the render goes on).
    */
-  async function queueEnlargements(product:{id:string;productType:string|null},sources:{id:string}[],shots:Map<string,EnlargementShot>,matteModel:string,trace:MattingTrace) {
-    const upscaler = deps.upscaler!;
-    if (!sources.length) return;
-    const rows = await deps.db.select().from(catalogSourceImages).where(inArray(catalogSourceImages.id,sources.map(s=>s.id)));
-    const pending = new Set((await deps.db.select({id:catalogOutputs.sourceImageId}).from(catalogOutputs).where(and(eq(catalogOutputs.batchId,batch!.id),eq(catalogOutputs.productId,product.id),eq(catalogOutputs.status,"pending")))).map(o=>o.id));
-    const open = rows.filter(r=>pending.has(r.id) && r.matteUri && !r.x2Uri && !r.flags.includes("chart_image"));
-    const send = open.filter(r=>r.x2Model && r.x2Attempts < ENLARGE_TASK_MAX_ATTEMPTS).map(r=>r.id);
-    const undecided = open.filter(r=>!r.x2Model);
-    if (undecided.length) {
-      // Every shot of the product with a matte takes part (fewer shots could only give a smaller canvas): this
-      // delivery's in memory, the others from their stored matte (or the unchanged angle's earlier one).
-      const all:{id:string;shot:EnlargementShot}[] = [];
-      for (const row of rows) {
-        const kept = shots.get(row.id);
-        if (kept) { all.push({id:row.id,shot:kept}); continue; }
-        let matteUri = row.matteUri;
-        if (!matteUri) { const [old] = await deps.db.select({matteUri:catalogSourceImages.matteUri}).from(catalogSourceImages).where(and(eq(catalogSourceImages.productId,product.id),eq(catalogSourceImages.sha256,row.sha256),eq(catalogSourceImages.isCurrent,true))); matteUri = old?.matteUri ?? null; }
-        if (!matteUri || row.flags.includes("chart_image")) continue;
-        try {
-          const p = await deps.prepare((await deps.storage.downloadBuffer(row.rawUri)).buf,row.originalName,b=>deps.matting.convert(b,trace));
-          const alpha = await sharp((await deps.storage.downloadBuffer(matteUri)).buf).toColourspace("b-w").raw().toBuffer();
-          all.push({id:row.id,shot:{width:p.width,height:p.height,rgb:p.rgb,alpha,model:row.matteModel ?? matteModel}});
-        } catch (error) { deps.log("catalog enlargement decision skipped a shot",{severity:"WARNING",batchId:batch!.id,sourceImageId:row.id,error:error instanceof Error ? error.message:String(error)}); }
-      }
-      const needs = enlargementNeeds(batch!.channels,all.map(a=>a.shot),product.productType as Parameters<typeof enlargementNeeds>[2],upscaler.minScale);
-      const needed = new Set(all.filter((_,i)=>needs[i]).map(a=>a.id));
-      const queue = undecided.filter(r=>needed.has(r.id)).map(r=>r.id);
-      if (queue.length) await underClaim(async tx=>tx.update(catalogSourceImages).set({x2Model:upscaler.model,x2Error:null}).where(and(inArray(catalogSourceImages.id,queue),sql`${catalogSourceImages.x2Model} IS NULL`)));
-      send.push(...queue);
-    }
-    for (const sourceImageId of send) {
-      const body:EnlargeTaskBody = {batchId:batch!.id,productId:product.id,sourceImageId,round:0};
-      try { await deps.enqueue("/tasks/catalog/enlarge",{...body},{taskId:enlargeTaskId(sourceImageId,0),...(bulk() ? {bulk:true}:{})}); }
-      catch (error) { deps.log("enlarge dispatch failed",{severity:"WARNING",batchId:batch!.id,productId:product.id,sourceImageId,error:error instanceof Error ? error.message:String(error)}); }
-    }
-    if (send.length) deps.log("catalog enlargement queued",{batchId:batch!.id,productId:product.id,photos:send.length});
+  async function requeueOtherUpscaler(model:string):Promise<"none"|"parked"|"lost"> {
+    const pendingOutput = sql`EXISTS (SELECT 1 FROM ${catalogOutputs} WHERE ${catalogOutputs.sourceImageId} = ${catalogSourceImages.id} AND ${catalogOutputs.batchId} = ${catalogSourceImages.batchId} AND ${catalogOutputs.status} = 'pending')`;
+    const photos = await photosOfChunk(deps.db,chunk!,and(isNotNull(catalogSourceImages.x2Model),ne(catalogSourceImages.x2Model,model),pendingOutput)!);
+    if (!photos.length) return "none";
+    await underClaim(async tx=>tx.update(catalogSourceImages).set({x2Model:model,x2Uri:null,x2Error:null,x2Attempts:0,x2ClaimedAt:null}).where(and(inArray(catalogSourceImages.id,photos.map(p=>p.id)),ne(catalogSourceImages.x2Model,model))));
+    deps.log("catalog enlargement requeued",{severity:"WARNING",batchId:chunk!.batchId,chunkId:chunk!.id,photos:photos.length,reason:"another upscaler"});
+    await enqueueEnlargements(deps.enqueue,chunk!.batchId,photos,chunk!.step+1,{log:deps.log,chunkId:chunk!.id,...(bulk() ? {bulk:true}:{})});
+    const [result] = await deps.db.transaction(async tx=>{
+      const [mine] = await tx.select({id:catalogChunks.id}).from(catalogChunks).where(ownsClaim()).for("update");
+      if (!mine) return ["lost" as const];
+      const [waiting] = await tx.select({id:catalogChunks.id}).from(catalogChunks).where(and(eq(catalogChunks.id,chunk!.id),chunkHasQueuedEnlargement()));
+      if (!waiting) return ["none" as const];
+      const parked = await tx.update(catalogChunks).set({status:"queued",taskName:ENLARGING_TASK,leaseUntil:null,step:sql`${catalogChunks.step}+1`,dispatchedAt:null,attempt:0,progressAt:deps.now()}).where(ownsClaim()).returning({id:catalogChunks.id});
+      return [parked.length ? "parked" as const : "lost" as const];
+    });
+    return result!;
   }
   /**
    * Queues the chunk's new step; a failed enqueue is left to the sweep (the lost-task rule, 30 minutes). Spec 17 G4:

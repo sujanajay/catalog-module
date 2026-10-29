@@ -400,11 +400,13 @@ export const catalogSourceImages = pgTable(
     // Spec 18 (migration 0005): the photo's stored enlargement, made once by the enlarge task. x2_model is set when
     // the photo is queued (the upscaler id asked for) and becomes the id that made x2_uri; null: no enlargement
     // needed. x2_attempts counts the failed tries; at ENLARGE_MAX_ATTEMPTS with x2_uri null the photo failed
-    // (x2_error says why). Mirrors matte_uri / matte_model.
+    // (x2_error says why). Mirrors matte_uri / matte_model. x2_claimed_at: the in-flight claim of the delivery calling
+    // the upscale service now (live for the task's dispatch deadline), so a second live delivery never calls or bills.
     x2Uri: text("x2_uri"),
     x2Model: text("x2_model"),
     x2Error: text("x2_error"),
     x2Attempts: integer("x2_attempts").notNull().default(0),
+    x2ClaimedAt: tsNull("x2_claimed_at"),
     flags: jsonb("flags").$type<OutputFlag[]>().notNull().default([]),
     status: text("status", { enum: SOURCE_IMAGE_STATUSES }).notNull().default("pending"),
     error: text("error"),

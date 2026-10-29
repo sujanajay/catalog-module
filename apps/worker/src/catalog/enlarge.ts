@@ -4,6 +4,10 @@
 // UPSCALE_URL names) and stores it in the private bucket at enlargedPath (never public); the render primes it and
 // never calls the service. States and the render gate: core catalog/pipeline/enlargement.ts.
 // - The stored image is already there (same source and upscaler in its metadata): done, no call.
+// - Another live delivery of the photo holds its in-flight claim (x2_claimed_at, ENLARGE_CLAIM_MS): 503, no attempt
+//   counted, no call; the retry finds the stored image or the claim gone. The success write is guarded on x2_uri still
+//   null, so a late second writer neither overwrites the photo nor writes a second cost row.
+// - The configured upscaler (UPSCALE_MODEL) makes and names the image, also for a photo queued under another one.
 // - A retryable failure (busy, timeout, a server error, a storage or decode hiccup) counts an attempt, records the
 //   reason and answers 503, so Cloud Tasks retries with the lane's back-off.
 // - The last attempt (ENLARGE_TASK_MAX_ATTEMPTS, counted in x2_attempts: only deliveries that reached this handler)
@@ -15,14 +19,14 @@
 // Every write of the photo's state locks the chunks holding the product first and unparks the chunk whose last queued
 // photo it settled, in the same transaction; the batch's window is topped up after it.
 import sharp from "sharp";
-import { and, eq, sql } from "drizzle-orm";
-import { catalogBatches, catalogChunks, catalogProducts, catalogSourceImages } from "@catalog/core/db/schema";
+import { and, eq, inArray, isNull, lt, or, sql } from "drizzle-orm";
+import { catalogBatches, catalogChunks, catalogOutputs, catalogProducts, catalogSourceImages } from "@catalog/core/db/schema";
 import { batchPrefix, enlargedPath } from "@catalog/core/catalog/naming";
-import { UnsupportedSourceError, type Prepared } from "@catalog/core/catalog/render";
-import { gpuUrlsFromEnv, isCpuUpscalerId, primeSourceX2, UPSCALE_FACTOR, upscaleUpload } from "@catalog/core/catalog/upscale";
+import { enlargementNeeds, UnsupportedSourceError, type EnlargementShot, type Prepared } from "@catalog/core/catalog/render";
+import { gpuUrlsFromEnv, isCpuUpscalerId, primeSourceX2, UPSCALE_FACTOR, upscaleUpload, type Upscaler } from "@catalog/core/catalog/upscale";
 import { ENLARGE_TASK_MARGIN_MS, EnlargeError, enlargeTimeoutMs, enlargeViaService, type EnlargeDeps, type EnlargeResult } from "@catalog/core/catalog/enlarge";
 import { DISPATCH_DEADLINE_SEC } from "@catalog/core/tasks";
-import { ENLARGE_TASK_MAX_ATTEMPTS, ENLARGING_TASK, lockProductChunks, photoEnlargementState, unparkSettledChunks } from "@catalog/core/catalog/pipeline/enlargement";
+import { ENLARGE_CLAIM_MS, ENLARGE_TASK_MAX_ATTEMPTS, ENLARGING_TASK, enqueueEnlargements, lockProductChunks, photoEnlargementState, unparkSettledChunks } from "@catalog/core/catalog/pipeline/enlargement";
 import { dispatchChunks } from "@catalog/core/catalog/pipeline/dispatch";
 import { recordCostEvents, type CostEventInput } from "@catalog/core/cost-events";
 import { matteCallUsd } from "@catalog/core/catalog/cost";
@@ -73,14 +77,21 @@ export const X2_METADATA = { sourceSha256: "sourceSha256", upscaler: "upscaler" 
 /**
  * Spec 18 3.3.5, the render side: primes the upscaler's cache with the photo's stored x2 image, so every render of
  * this prepared photo (channels, auto-resolve) uses it without a service call. Without a stored image, or with one
- * that was made from other bytes (its `sourceSha256`) or is not exactly 2x the photo, nothing is primed and the render holds what needs it (`enlargement_failed`).
+ * that was made from other bytes (its `sourceSha256`), by another upscaler than the configured one (`x2_model` or the
+ * object's `upscaler`), or is not exactly 2x the photo, nothing is primed and the render holds what needs it
+ * (`enlargement_failed`). The render stage re-queues an image of another upscaler before it gets here
+ * (requeueOtherUpscaler), so that case only arises when UPSCALE_MODEL changes during the render itself.
  */
-export async function primeStoredEnlargement(deps: Pick<CatalogDeps, "upscaler" | "storage" | "log">, source: { id: string; sha256: string; x2Uri: string | null }, p: Prepared): Promise<boolean> {
+export async function primeStoredEnlargement(deps: Pick<CatalogDeps, "upscaler" | "storage" | "log">, source: { id: string; sha256: string; x2Uri: string | null; x2Model: string | null }, p: Prepared): Promise<boolean> {
   if (!deps.upscaler || !source.x2Uri) return false;
   try {
+    if (source.x2Model !== deps.upscaler.model) {
+      deps.log("catalog enlargement missing", { severity: "WARNING", sourceImageId: source.id, reason: "stored image was made by another upscaler" });
+      return false;
+    }
     const head = await deps.storage.headObject(source.x2Uri);
-    if (head.metadata?.[X2_METADATA.sourceSha256] !== source.sha256) {
-      deps.log("catalog enlargement missing", { severity: "WARNING", sourceImageId: source.id, reason: head.exists ? "stored image was made from other bytes" : "stored image not found" });
+    if (head.metadata?.[X2_METADATA.sourceSha256] !== source.sha256 || head.metadata?.[X2_METADATA.upscaler] !== deps.upscaler.model) {
+      deps.log("catalog enlargement missing", { severity: "WARNING", sourceImageId: source.id, reason: !head.exists ? "stored image not found" : head.metadata?.[X2_METADATA.sourceSha256] !== source.sha256 ? "stored image was made from other bytes" : "stored image was made by another upscaler" });
       return false;
     }
     const primed = await primeSourceX2(deps.upscaler, p.rgb, p.width, (await deps.storage.downloadBuffer(source.x2Uri)).buf);
@@ -92,7 +103,72 @@ export async function primeStoredEnlargement(deps: Pick<CatalogDeps, "upscaler" 
   }
 }
 
-/** settle's answer when the failure write found the photo already done by another delivery. */
+/**
+ * A photo prepared from its raw copy, with its stored matte as alpha: what the render stage and the enlargement
+ * decision both read for a shot cut out in an earlier delivery.
+ */
+export async function loadShotFromMatte(deps: Pick<CatalogDeps, "prepare" | "storage" | "matting">, source: { rawUri: string; originalName: string }, matteUri: string, trace: MattingTrace): Promise<{ p: Prepared; alpha: Buffer }> {
+  const p = await deps.prepare((await deps.storage.downloadBuffer(source.rawUri)).buf, source.originalName, (b) => deps.matting.convert(b, trace));
+  const alpha = await sharp((await deps.storage.downloadBuffer(matteUri)).buf).toColourspace("b-w").raw().toBuffer();
+  return { p, alpha };
+}
+
+export interface QueueEnlargementsInput {
+  upscaler: Upscaler;
+  batch: Pick<typeof catalogBatches.$inferSelect, "id" | "channels">;
+  product: Pick<typeof catalogProducts.$inferSelect, "id" | "productType">;
+  /** The photos of the product this chunk holds. */
+  sources: { id: string }[];
+  /** The shots cut out in this delivery, by photo id (the others are loaded from their stored matte). */
+  shots: Map<string, EnlargementShot>;
+  matteModel: string;
+  trace: MattingTrace;
+  /** The chunk delivery's write under its claim. */
+  write: <T>(fn: (db: CatalogDeps["db"]) => Promise<T>) => Promise<T>;
+  bulk: boolean;
+}
+
+/**
+ * Spec 18 3.3.4: once a product's photos are cut out, decides which need an x2 image (enlargementNeeds over every shot
+ * of the product with a matte, as the render plans them) and queues their enlarge tasks (round 0, the batch's enlarge
+ * lane). The photo is marked queued (x2_model) before its task is sent; a send that fails is left to the parked
+ * chunk's recovery (ENLARGE_STALE_MS). A photo marked queued by an earlier delivery has its task sent again (the same
+ * name, so Cloud Tasks keeps one).
+ */
+export async function queueEnlargements(deps: CatalogDeps, input: QueueEnlargementsInput): Promise<void> {
+  const { upscaler, batch, product, sources, shots } = input;
+  if (!sources.length) return;
+  const rows = await deps.db.select().from(catalogSourceImages).where(inArray(catalogSourceImages.id, sources.map((s) => s.id)));
+  const pending = new Set((await deps.db.select({ id: catalogOutputs.sourceImageId }).from(catalogOutputs).where(and(eq(catalogOutputs.batchId, batch.id), eq(catalogOutputs.productId, product.id), eq(catalogOutputs.status, "pending")))).map((o) => o.id));
+  const open = rows.filter((r) => pending.has(r.id) && r.matteUri && !r.x2Uri && !r.flags.includes("chart_image"));
+  const send = open.filter((r) => photoEnlargementState(r) === "queued");
+  const undecided = open.filter((r) => !r.x2Model);
+  if (undecided.length) {
+    // Every shot of the product with a matte takes part (fewer shots could only give a smaller canvas): this
+    // delivery's in memory, the others from their stored matte (or the unchanged angle's earlier one).
+    const all: { id: string; shot: EnlargementShot }[] = [];
+    for (const row of rows) {
+      const kept = shots.get(row.id);
+      if (kept) { all.push({ id: row.id, shot: kept }); continue; }
+      let matteUri = row.matteUri;
+      if (!matteUri) { const [old] = await deps.db.select({ matteUri: catalogSourceImages.matteUri }).from(catalogSourceImages).where(and(eq(catalogSourceImages.productId, product.id), eq(catalogSourceImages.sha256, row.sha256), eq(catalogSourceImages.isCurrent, true))); matteUri = old?.matteUri ?? null; }
+      if (!matteUri || row.flags.includes("chart_image")) continue;
+      try {
+        const { p, alpha } = await loadShotFromMatte(deps, row, matteUri, input.trace);
+        all.push({ id: row.id, shot: { width: p.width, height: p.height, rgb: p.rgb, alpha, model: row.matteModel ?? input.matteModel } });
+      } catch (error) { deps.log("catalog enlargement decision skipped a shot", { severity: "WARNING", batchId: batch.id, sourceImageId: row.id, error: error instanceof Error ? error.message : String(error) }); }
+    }
+    const needs = enlargementNeeds(batch.channels, all.map((a) => a.shot), product.productType, upscaler.minScale);
+    const needed = new Set(all.filter((_, i) => needs[i]).map((a) => a.id));
+    const queue = undecided.filter((r) => needed.has(r.id));
+    if (queue.length) await input.write(async (tx) => tx.update(catalogSourceImages).set({ x2Model: upscaler.model, x2Error: null }).where(and(inArray(catalogSourceImages.id, queue.map((r) => r.id)), isNull(catalogSourceImages.x2Model))));
+    send.push(...queue);
+  }
+  await enqueueEnlargements(deps.enqueue, batch.id, send.map((r) => ({ id: r.id, productId: product.id })), 0, { log: deps.log, ...(input.bulk ? { bulk: true } : {}) });
+  if (send.length) deps.log("catalog enlargement queued", { batchId: batch.id, productId: product.id, photos: send.length });
+}
+
+/** settle's answer when the photo write found the photo already done by another delivery. */
 const SETTLED_ELSEWHERE = -1;
 /** Failures no retry can fix: the photo is failed at once. */
 class TerminalEnlargeFailure extends Error {}
@@ -118,19 +194,32 @@ export async function handleEnlargeTask(deps: CatalogDeps, body: Record<string, 
   const upscaler = deps.upscaler, call = deps.enlarge;
   // UPSCALE_MODEL was switched off after this photo was queued: no enlargement is wanted any more (the plain path).
   if (!upscaler || !call) { await settle({ x2Model: null }); return answer(200, "off"); }
-  const id = photo.x2Model ?? upscaler.model;
+  // Review #8: the configured upscaler makes the image and names it (x2_model, the object's key and metadata), also for
+  // a photo queued under another one before UPSCALE_MODEL changed, so the record and the bytes always agree.
+  const id = upscaler.model;
+  // This delivery holds the photo's in-flight claim (set below, cleared by its settle).
+  let claimed = false;
   // Spec 18 3.3.4, lane-aware: a delivery shows the batch's enlarge lane is moving, so every parked chunk of the batch
   // counts it as progress (not only the chunks holding this product). Tasks still waiting in the paced FIFO behind this
   // one are then never sent again; ENLARGE_STALE_MS means "the batch's lane has been quiet that long".
   await deps.db.update(catalogChunks).set({ progressAt: deps.now() }).where(and(eq(catalogChunks.batchId, batchId), eq(catalogChunks.taskName, ENLARGING_TASK)));
   try {
     const prefix = batchPrefix(batch.brandSlug, batch.id, batch.isTest);
-    const path = enlargedPath(derivedPrefixFor(deps.storage, prefix, photo), product.pathKey, photo.n), uri = deps.storage.toGsUri(deps.storage.getBucketName(), path);
+    const path = enlargedPath(derivedPrefixFor(deps.storage, prefix, photo), product.pathKey, photo.n, id), uri = deps.storage.toGsUri(deps.storage.getBucketName(), path);
     const head = await deps.storage.headObject(uri);
     if (head.exists && head.metadata?.[X2_METADATA.sourceSha256] === photo.sha256 && head.metadata?.[X2_METADATA.upscaler] === id) {
-      await settle({ x2Uri: uri, x2Model: id, x2Error: null });
+      if (await settle({ x2Uri: uri, x2Model: id, x2Error: null }) === SETTLED_ELSEWHERE) return answer(200, "settled");
       return answer(200, "done", { reused: true });
     }
+    // Review #7: the in-flight claim. One guarded row update (no chunk lock held): a second live delivery (Cloud Tasks
+    // at least once, or a re-sent round landing beside the first) answers 503 without a call or an attempt counted.
+    if (!(await claim())) {
+      // Lost to a delivery that has stored the image meanwhile: settled, not in flight.
+      const [now] = await deps.db.select({ x2Uri: catalogSourceImages.x2Uri }).from(catalogSourceImages).where(eq(catalogSourceImages.id, sourceImageId));
+      if (now?.x2Uri) { await settle({}); return answer(200, "settled"); }
+      return answer(503, "in_flight");
+    }
+    claimed = true;
     let p: Prepared;
     try { p = await deps.prepare((await deps.storage.downloadBuffer(photo.rawUri)).buf, photo.originalName, (b) => deps.matting.convert(b, { batchId, productId })); }
     catch (error) { if (error instanceof UnsupportedSourceError) throw new TerminalEnlargeFailure(error.message); throw error; }
@@ -158,13 +247,14 @@ export async function handleEnlargeTask(deps: CatalogDeps, body: Record<string, 
     }
     // The service's own JPEG (quality 95, 4:4:4), stored as it came.
     await deps.storage.uploadBuffer(path, result.jpeg, "image/jpeg", { metadata: { [X2_METADATA.sourceSha256]: photo.sha256, [X2_METADATA.upscaler]: id } });
-    await settle({ x2Uri: uri, x2Model: id, x2Error: null });
+    // Another delivery stored the image first (only after this one's claim lapsed): no second write, no second cost row.
+    if (await settle({ x2Uri: uri, x2Model: id, x2Error: null, x2ClaimedAt: null }) === SETTLED_ELSEWHERE) return answer(200, "settled");
     deps.log("catalog upscale", { ...fields, upscaleMs: result.ms, attempts: photo.x2Attempts + 1 });
     return answer(200, "done");
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error);
     const terminal = error instanceof TerminalEnlargeFailure;
-    const attempts = await settle({ x2Error: reason.slice(0, 500) }, terminal);
+    const attempts = await settle({ x2Error: reason.slice(0, 500), ...(claimed ? { x2ClaimedAt: null } : {}) }, terminal);
     // Another delivery stored the image meanwhile: nothing failed.
     if (attempts === SETTLED_ELSEWHERE) return answer(200, "settled");
     if (attempts >= ENLARGE_TASK_MAX_ATTEMPTS) {
@@ -180,13 +270,24 @@ export async function handleEnlargeTask(deps: CatalogDeps, body: Record<string, 
     return { batchId: batch!.id, brandSlug: batch!.brandSlug, isTest: batch!.isTest, productId: photo!.productId, sourceImageId: photo!.id, stage: "upscale", kind: "upscale_call", engine: target, ms, ...matteCallUsd(target, ms), attempt: photo!.x2Attempts + 1, outcome, at: deps.now() };
   }
 
+  /** Takes the photo's in-flight claim: free, or lapsed (its holder's delivery is past its deadline). */
+  async function claim(): Promise<boolean> {
+    const now = deps.now();
+    const [row] = await deps.db.update(catalogSourceImages).set({ x2ClaimedAt: now })
+      .where(and(eq(catalogSourceImages.id, sourceImageId as string), isNull(catalogSourceImages.x2Uri),
+        or(isNull(catalogSourceImages.x2ClaimedAt), lt(catalogSourceImages.x2ClaimedAt, new Date(+now - ENLARGE_CLAIM_MS)))))
+      .returning({ id: catalogSourceImages.id });
+    return !!row;
+  }
+
   /**
    * One write of the photo's state under the product's chunk locks, the cost rows of this delivery and the gate:
-   * `patch` set (done), or a failed attempt counted (`failure`: the reason in `patch.x2Error`; `terminal` fails the
-   * photo at once). Returns the photo's attempts after the write (SETTLED_ELSEWHERE when another delivery stored the
-   * image first). Then the window is topped up and the progress kept.
+   * `patch` set (done: only while x2_uri is still null), or a failed attempt counted (`failure`: the reason in
+   * `patch.x2Error`; `terminal` fails the photo at once). Returns the photo's attempts after the write
+   * (SETTLED_ELSEWHERE when another delivery stored the image first: nothing written, the cost rows dropped). Then the
+   * window is topped up and the progress kept.
    */
-  async function settle(patch: Partial<Pick<typeof catalogSourceImages.$inferInsert, "x2Uri" | "x2Model" | "x2Error">>, terminal = false): Promise<number> {
+  async function settle(patch: Partial<Pick<typeof catalogSourceImages.$inferInsert, "x2Uri" | "x2Model" | "x2Error" | "x2ClaimedAt">>, terminal = false): Promise<number> {
     const failure = !("x2Uri" in patch) && "x2Error" in patch;
     const now = deps.now();
     const { attempts, unparked } = await deps.db.transaction(async (tx) => {
@@ -195,8 +296,11 @@ export async function handleEnlargeTask(deps: CatalogDeps, body: Record<string, 
       if (failure) {
         // Only deliveries that reached this handler count (never the queue's retry count, see the header).
         const next = terminal ? sql`${ENLARGE_TASK_MAX_ATTEMPTS}::int` : sql`LEAST(${ENLARGE_TASK_MAX_ATTEMPTS}::int, ${catalogSourceImages.x2Attempts} + 1)`;
-        const [row] = await tx.update(catalogSourceImages).set({ x2Attempts: next, x2Error: patch.x2Error ?? null }).where(and(eq(catalogSourceImages.id, sourceImageId as string), sql`${catalogSourceImages.x2Uri} IS NULL`)).returning({ attempts: catalogSourceImages.x2Attempts });
+        const [row] = await tx.update(catalogSourceImages).set({ ...patch, x2Attempts: next, x2Error: patch.x2Error ?? null }).where(and(eq(catalogSourceImages.id, sourceImageId as string), isNull(catalogSourceImages.x2Uri))).returning({ attempts: catalogSourceImages.x2Attempts });
         attempts = row?.attempts ?? SETTLED_ELSEWHERE;
+      } else if ("x2Uri" in patch) {
+        const [row] = await tx.update(catalogSourceImages).set(patch).where(and(eq(catalogSourceImages.id, sourceImageId as string), isNull(catalogSourceImages.x2Uri))).returning({ id: catalogSourceImages.id });
+        if (!row) { ledger.splice(0); attempts = SETTLED_ELSEWHERE; }
       } else if (Object.keys(patch).length) {
         await tx.update(catalogSourceImages).set(patch).where(eq(catalogSourceImages.id, sourceImageId as string));
       }

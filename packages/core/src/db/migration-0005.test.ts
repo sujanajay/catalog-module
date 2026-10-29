@@ -1,5 +1,5 @@
 // Tier 2 (PGlite): 0005_enlargement.sql (spec 18 section 3.3.9) applied over a database at 0004 that holds photos
-// in flight, as on the live database during rollout: 0000 to 0005 apply, the four columns exist with their
+// in flight, as on the live database during rollout: 0000 to 0005 apply, the five columns exist with their
 // defaults, older rows read as "no enlargement needed", and a second run changes nothing.
 import { copyFile, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -39,7 +39,7 @@ afterAll(async () => {
 });
 
 describe("0005_enlargement.sql", () => {
-  it("adds x2_uri, x2_model, x2_error and x2_attempts; old rows read as not needed; a second run changes nothing", async () => {
+  it("adds x2_uri, x2_model, x2_error, x2_attempts and x2_claimed_at; old rows read as not needed; a second run changes nothing", async () => {
     const [batch] = await rows<{ id: string }>(sql`insert into catalog_batches (brand_slug, brand_name, name, created_by, status) values ('test_brand', 'Test Brand', 'b', 't', 'rendering') returning id`);
     const [product] = await rows<{ id: string }>(sql`insert into catalog_products (brand_slug, is_test, product_key, path_key, identifier) values ('test_brand', true, 'p', 'p', 'p') returning id`);
     await db.execute(sql`insert into catalog_source_images (product_id, batch_id, n, sha256, original_name, raw_uri, mime, matte_uri) values (${product!.id}, ${batch!.id}, 1, 'abc', 'p_1.jpg', 'gs://a/p_1.jpg', 'image/jpeg', 'gs://a/m.png')`);
@@ -53,12 +53,13 @@ describe("0005_enlargement.sql", () => {
     const columns = await rows<{ column_name: string; data_type: string; is_nullable: string; column_default: string | null }>(sql`select column_name, data_type, is_nullable, column_default from information_schema.columns where table_name = 'catalog_source_images' and column_name like 'x2_%' order by column_name`);
     expect(columns.map((c) => [c.column_name, c.data_type, c.is_nullable, c.column_default])).toEqual([
       ["x2_attempts", "integer", "NO", "0"],
+      ["x2_claimed_at", "timestamp with time zone", "YES", null],
       ["x2_error", "text", "YES", null],
       ["x2_model", "text", "YES", null],
       ["x2_uri", "text", "YES", null],
     ]);
-    const [old] = await rows<{ x2_uri: string | null; x2_model: string | null; x2_error: string | null; x2_attempts: number; matte_uri: string }>(sql`select * from catalog_source_images`);
-    expect(old).toMatchObject({ x2_uri: null, x2_model: null, x2_error: null, x2_attempts: 0, matte_uri: "gs://a/m.png" });
+    const [old] = await rows<{ x2_uri: string | null; x2_model: string | null; x2_error: string | null; x2_attempts: number; x2_claimed_at: string | null; matte_uri: string }>(sql`select * from catalog_source_images`);
+    expect(old).toMatchObject({ x2_uri: null, x2_model: null, x2_error: null, x2_attempts: 0, x2_claimed_at: null, matte_uri: "gs://a/m.png" });
 
     await db.execute(sql`update catalog_source_images set x2_model = 'swinir-x2+cpu', x2_attempts = 2`);
     const file = await readFile(path.join(resolveMigrationsFolder(), "0005_enlargement.sql"), "utf8");

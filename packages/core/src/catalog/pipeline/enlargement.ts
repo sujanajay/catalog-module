@@ -14,6 +14,7 @@
 import { and, asc, eq, inArray, sql, type SQL } from "drizzle-orm";
 import type { Db } from "../../db/client";
 import { catalogChunks, catalogSourceImages } from "../../db/schema";
+import { DISPATCH_DEADLINE_SEC, enlargeTaskId, type EnlargeTaskBody, type enqueueTask } from "../../tasks";
 
 /** Attempts of one photo's enlargement before it is failed: the enlarge lanes' max-attempts (infra/lib/queues.sh). */
 export const ENLARGE_TASK_MAX_ATTEMPTS = 8;
@@ -27,6 +28,11 @@ export const ENLARGE_TASK_MAX_ATTEMPTS = 8;
  * answered before the app) or their enqueue failed.
  */
 export const ENLARGE_STALE_MS = 30 * 60_000;
+/**
+ * How long a delivery's in-flight claim on a photo (x2_claimed_at) holds: the task's dispatch deadline, after which
+ * Cloud Tasks has given up on that delivery and a new one may call the service.
+ */
+export const ENLARGE_CLAIM_MS = DISPATCH_DEADLINE_SEC * 1000;
 /** `task_name` of a chunk parked at the render stage until its photos' enlargements settle. */
 export const ENLARGING_TASK = "enlarging";
 
@@ -42,17 +48,27 @@ export function enlargementOptionFromEnv(env: NodeJS.ProcessEnv = process.env): 
   return model && model !== "off" ? { model } : null;
 }
 
-/** The photos of the current catalog_chunks row (in an UPDATE or SELECT of catalog_chunks) still queued for enlargement. */
-export function chunkHasQueuedEnlargement(): SQL {
-  return sql`EXISTS (SELECT 1 FROM catalog_source_images si WHERE si.batch_id = "catalog_chunks"."batch_id"
-    AND si.product_id::text IN (SELECT jsonb_array_elements_text("catalog_chunks"."product_ids"))
-    AND ("catalog_chunks"."source_image_ids" IS NULL OR jsonb_array_length("catalog_chunks"."source_image_ids") = 0 OR "catalog_chunks"."source_image_ids" @> jsonb_build_array(si.id))
-    AND si.x2_model IS NOT NULL AND si.x2_uri IS NULL AND si.x2_attempts < ${ENLARGE_TASK_MAX_ATTEMPTS})`;
-}
-
-/** A photo queued for enlargement (not yet done or failed). */
+/**
+ * A photo queued for enlargement (not yet done or failed): the one definition of "queued", used in a select of
+ * catalog_source_images and inside chunkHasQueuedEnlargement. photoEnlargementState is its TypeScript twin.
+ */
 export function photoEnlargementQueued(): SQL {
   return sql`${catalogSourceImages.x2Model} IS NOT NULL AND ${catalogSourceImages.x2Uri} IS NULL AND ${catalogSourceImages.x2Attempts} < ${ENLARGE_TASK_MAX_ATTEMPTS}`;
+}
+
+/**
+ * The photos of the current catalog_chunks row (in an UPDATE or SELECT of catalog_chunks): its products' photos, or
+ * only its own photo list when it has one.
+ */
+function photoOfCurrentChunk(): SQL {
+  return sql`${catalogSourceImages.batchId} = "catalog_chunks"."batch_id"
+    AND ${catalogSourceImages.productId}::text IN (SELECT jsonb_array_elements_text("catalog_chunks"."product_ids"))
+    AND ("catalog_chunks"."source_image_ids" IS NULL OR jsonb_array_length("catalog_chunks"."source_image_ids") = 0 OR "catalog_chunks"."source_image_ids" @> jsonb_build_array(${catalogSourceImages.id}))`;
+}
+
+/** True for the current catalog_chunks row while one of its photos is queued for enlargement. */
+export function chunkHasQueuedEnlargement(): SQL {
+  return sql`EXISTS (SELECT 1 FROM ${catalogSourceImages} WHERE ${photoOfCurrentChunk()} AND ${photoEnlargementQueued()})`;
 }
 
 export type PhotoEnlargementState = "not_needed" | "queued" | "done" | "failed";
@@ -60,6 +76,32 @@ export function photoEnlargementState(row: { x2Model: string | null; x2Uri: stri
   if (row.x2Uri) return "done";
   if (!row.x2Model) return "not_needed";
   return row.x2Attempts >= ENLARGE_TASK_MAX_ATTEMPTS ? "failed" : "queued";
+}
+
+/** The photos of `chunk` (its products' photos, or only its own photo list) that match `where`. */
+export async function photosOfChunk(db: Pick<Db, "select">, chunk: { batchId: string; productIds: string[]; sourceImageIds: string[] | null }, where: SQL): Promise<{ id: string; productId: string }[]> {
+  if (!chunk.productIds.length) return [];
+  return db.select({ id: catalogSourceImages.id, productId: catalogSourceImages.productId }).from(catalogSourceImages)
+    .where(and(eq(catalogSourceImages.batchId, chunk.batchId), inArray(catalogSourceImages.productId, chunk.productIds), where,
+      chunk.sourceImageIds?.length ? inArray(catalogSourceImages.id, chunk.sourceImageIds) : undefined));
+}
+/** The photos of `chunk` still queued for enlargement. */
+export function queuedPhotosOfChunk(db: Pick<Db, "select">, chunk: { batchId: string; productIds: string[]; sourceImageIds: string[] | null }): Promise<{ id: string; productId: string }[]> {
+  return photosOfChunk(db, chunk, photoEnlargementQueued());
+}
+
+/**
+ * Sends one enlarge task per photo as `round` (enlargeTaskId: a name Cloud Tasks keeps once). A failed send is logged
+ * and left to the parked chunk's recovery (resendStaleEnlargements). Returns the number sent.
+ */
+export async function enqueueEnlargements(enqueue: typeof enqueueTask, batchId: string, photos: { id: string; productId: string }[], round: number, options: { bulk?: boolean; log: (message: string, fields?: Record<string, unknown>) => void; chunkId?: string }): Promise<number> {
+  let sent = 0;
+  for (const photo of photos) {
+    const body: EnlargeTaskBody = { batchId, productId: photo.productId, sourceImageId: photo.id, round };
+    try { await enqueue("/tasks/catalog/enlarge", { ...body }, { taskId: enlargeTaskId(photo.id, round), ...(options.bulk ? { bulk: true } : {}) }); sent++; }
+    catch (error) { options.log("enlarge dispatch failed", { severity: "WARNING", batchId, ...(options.chunkId ? { chunkId: options.chunkId } : {}), productId: photo.productId, sourceImageId: photo.id, error: error instanceof Error ? error.message : String(error) }); }
+  }
+  return sent;
 }
 
 /**
@@ -74,13 +116,15 @@ export async function lockProductChunks(tx: Tx, batchId: string, productId: stri
 }
 
 /**
- * Unparks the parked chunks among `chunkIds` that have no queued photo left; call under lockProductChunks, after the
- * photo write. Returns the ids unparked (ordinary waiting chunks now, dispatched by the next dispatchChunks).
+ * Unparks the parked chunks in `scope` (chunk ids, or every chunk of a batch) that have no queued photo left: the one
+ * unpark rule. The settle calls it under lockProductChunks after its photo write; the recovery sweep and the in-process
+ * runner call it as a safety net. Returns the ids unparked (ordinary waiting chunks now, dispatched by the next
+ * dispatchChunks).
  */
-export async function unparkSettledChunks(tx: Tx, chunkIds: string[], now: Date): Promise<string[]> {
-  if (!chunkIds.length) return [];
+export async function unparkSettledChunks(tx: Tx, scope: string[] | { batchId: string }, now: Date): Promise<string[]> {
+  if (Array.isArray(scope) && !scope.length) return [];
   const rows = await tx.update(catalogChunks).set({ taskName: null, dispatchedAt: null, progressAt: now })
-    .where(and(inArray(catalogChunks.id, chunkIds), eq(catalogChunks.status, "queued"), eq(catalogChunks.taskName, ENLARGING_TASK), sql`NOT ${chunkHasQueuedEnlargement()}`))
+    .where(and(Array.isArray(scope) ? inArray(catalogChunks.id, scope) : eq(catalogChunks.batchId, scope.batchId), eq(catalogChunks.status, "queued"), eq(catalogChunks.taskName, ENLARGING_TASK), sql`NOT ${chunkHasQueuedEnlargement()}`))
     .returning({ id: catalogChunks.id });
   return rows.map((row) => row.id);
 }

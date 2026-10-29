@@ -45,7 +45,7 @@ export interface ResolvePhotoInput {
 export interface ResolveResult { actions: AutoAction[]; fixed: Set<string> }
 
 /** Spec 18: a photo prepared again gets its stored x2 image primed, so a re-render never asks a service for it. */
-async function preparePrimed(deps: CatalogDeps, source: Pick<typeof catalogSourceImages.$inferSelect,"id"|"rawUri"|"originalName"|"sha256"|"x2Uri">, trace: {batchId:string;productId:string}): Promise<Prepared> {
+export async function preparePrimed(deps: CatalogDeps, source: Pick<typeof catalogSourceImages.$inferSelect,"id"|"rawUri"|"originalName"|"sha256"|"x2Uri"|"x2Model">, trace: {batchId:string;productId:string}): Promise<Prepared> {
   const p = await deps.prepare((await deps.storage.downloadBuffer(source.rawUri)).buf,source.originalName,b=>deps.matting.convert(b,trace));
   await primeStoredEnlargement(deps,source,p);
   return p;
