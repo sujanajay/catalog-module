@@ -69,6 +69,12 @@ describe("enlargeViaService", () => {
     expect(s.calls.some((c) => c.url.endsWith("/health"))).toBe(false);
   });
 
+  it("spec 18 quality: asks for the x4 model at scale 4", async () => {
+    const s = fakeService(["ok"]);
+    await enlargeViaService({ url: URL_, jpeg: JPEG, model: "swinir-x4", scale: 4 }, s.deps);
+    expect(s.calls[0]!.url).toBe(`${URL_}/upscale?model=swinir-x4&scale=4`);
+  });
+
   it("uses the service URL as the audience also for a candidate tag URL, and no token on localhost", async () => {
     const s = fakeService(["ok"]);
     await enlargeViaService({ url: "https://measure-4c-4t-1r---catalog-upscale-abc-el.a.run.app", jpeg: JPEG, model: "swinir-x2" }, s.deps);

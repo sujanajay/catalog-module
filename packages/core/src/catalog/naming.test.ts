@@ -7,6 +7,7 @@ import {
   brandSlug,
   derivedPath,
   enlargedPath,
+  enlargedSibling,
   normalizeKey,
   parseShotName,
   productPrefix,
@@ -43,6 +44,12 @@ describe("naming helpers", () => {
     expect(enlargedPath(prefix, "ABC123", 2, "swinir-x2+cpu")).not.toMatch(/\/raw\/|^catalog\//);
     // The key names the upscaler, so another model's image is another object.
     expect(enlargedPath(prefix, "ABC123", 2, "realesrgan-x2plus")).toBe(`${prefix}/derived/ABC123/ABC123_2.realesrgan-x2plus.x2.jpg`);
+    // Spec 18 quality: the x4 image of the same photo sits beside the x2 one, found from it.
+    const x2 = `gs://assets/${enlargedPath(prefix, "ABC123", 2, "swinir-x2+cpu")}`, x4 = `gs://assets/${enlargedPath(prefix, "ABC123", 2, "swinir-x4+cpu", 4)}`;
+    expect(x4).toBe(`gs://assets/${prefix}/derived/ABC123/ABC123_2.swinir-x4-cpu.x4.jpg`);
+    expect(enlargedSibling(x2, { upscaler: "swinir-x2+cpu", factor: 2 }, { upscaler: "swinir-x4+cpu", factor: 4 })).toBe(x4);
+    expect(enlargedSibling(x4, { upscaler: "swinir-x4+cpu", factor: 4 }, { upscaler: "swinir-x2+cpu", factor: 2 })).toBe(x2);
+    expect(enlargedSibling(x2, { upscaler: "swinir-x4+cpu", factor: 4 }, { upscaler: "swinir-x2+cpu", factor: 2 })).toBeNull();
   });
 
   it("publicUrl has no spaces and round-trips through URL", () => {

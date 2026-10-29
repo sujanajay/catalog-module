@@ -7,9 +7,9 @@ import { and, eq } from "drizzle-orm";
 import type { Db } from "@catalog/core/db/client";
 import { createDbFromPglite, createTestDb } from "@catalog/core/db/testing";
 import { catalogBatches, catalogChunks, catalogCostEvents, catalogOutputs, catalogProducts, catalogSourceImages } from "@catalog/core/db/schema";
-import { batchPrefix, enlargedPath } from "@catalog/core/catalog/naming";
+import { batchPrefix, enlargedPath, enlargedSibling } from "@catalog/core/catalog/naming";
 import { renderAllChannels, type Prepared } from "@catalog/core/catalog/render";
-import { sourceX2, storedUpscaler, upscalerId } from "@catalog/core/catalog/upscale";
+import { parseRegion, sourceX2, storedUpscaler, upscalerFactor, upscalerId } from "@catalog/core/catalog/upscale";
 import { classifyOutputs } from "@catalog/core/catalog/load/classify";
 import { DEFAULT_UPSCALE_TIMEOUT_S, ENLARGE_CLIENT_MARGIN_MS, ENLARGE_TASK_MARGIN_MS, EnlargeBadInputError, EnlargeBusyError } from "@catalog/core/catalog/enlarge";
 import { ENLARGE_CLAIM_MS, ENLARGE_STALE_MS, ENLARGE_TASK_MAX_ATTEMPTS, ENLARGING_TASK } from "@catalog/core/catalog/pipeline/enlargement";
@@ -25,15 +25,18 @@ const bucketEnv = { BUCKET: process.env.BUCKET, PUBLIC_BUCKET: process.env.PUBLI
 beforeAll(async () => { process.env.BUCKET = "assets"; process.env.PUBLIC_BUCKET = "public"; ({ db, client, close } = await createTestDb()); }, 60_000);
 afterAll(async () => { for (const [key, value] of Object.entries(bucketEnv)) if (value === undefined) delete process.env[key]; else process.env[key] = value; await close(); });
 
-const ID = upscalerId("swinir-x2", "cpu");
-/** A fake upscale service: a JPEG of `factor` times the uploaded image, or the next queued failure. */
-function fakeService(factor = 2) {
+const ID = upscalerId("swinir-x2", "cpu"), ID4 = upscalerId("swinir-x4", "cpu");
+/**
+ * A fake upscale service: a JPEG of `factor` times the uploaded image (default: the scale of the model the call asks
+ * for), or the next queued failure.
+ */
+function fakeService(factor?: number) {
   const failures: Error[] = [];
-  const call = vi.fn<EnlargeCall>(async (jpeg) => {
+  const call = vi.fn<EnlargeCall>(async (jpeg, _trace, opts) => {
     const next = failures.shift();
     if (next) throw next;
-    const meta = await sharp(jpeg).metadata();
-    return { jpeg: await sharp({ create: { width: meta.width! * factor, height: meta.height! * factor, channels: 3, background: { r: 0, g: 200, b: 0 } } }).jpeg({ quality: 95, chromaSubsampling: "4:4:4" }).toBuffer(), ms: 90_000, model: "swinir-x2", attempts: 1 };
+    const meta = await sharp(jpeg).metadata(), f = factor ?? upscalerFactor(opts?.upscaler ?? ID);
+    return { jpeg: await sharp({ create: { width: meta.width! * f, height: meta.height! * f, channels: 3, background: { r: 0, g: 200, b: 0 } } }).jpeg({ quality: 95, chromaSubsampling: "4:4:4" }).toBuffer(), ms: 90_000, model: f === 4 ? "swinir-x4" : "swinir-x2", attempts: 1 };
   });
   return { call, failures };
 }
@@ -65,7 +68,7 @@ function holdFirstCall(w: FakeWorld) {
 const upscaleRows = async (batchId: string) => (await db.select().from(catalogCostEvents).where(and(eq(catalogCostEvents.batchId, batchId), eq(catalogCostEvents.kind, "upscale_call")))).map((r) => r.outcome);
 /** The real render with the worker's stored upscaler, as deps.ts wires it (renderSource decides upscaled or the hold). */
 function realRender(w: FakeWorld) {
-  w.deps.renderAllChannels = (p, m, channels, ctx) => renderAllChannels(p, m, channels, { upscaler: w.deps.upscaler!, ...ctx });
+  w.deps.renderAllChannels = (p, m, channels, ctx) => renderAllChannels(p, m, channels, { upscaler: w.deps.upscaler!, upscalerX4: w.deps.upscalerX4 ?? null, ...ctx });
 }
 /** Records, at each render chunk task enqueued, the chunk's photos still queued for enlargement (must be none). */
 function watchRenderEnqueues(w: FakeWorld, batchId: string) {
@@ -133,7 +136,8 @@ describe("spec 18 H3: the enlarge task", () => {
       const path = enlargedPath(batchPrefix("test_brand", s.batch.id, true), await pathKeyOf(p.productId), p.n, ID);
       expect(p).toMatchObject({ x2Uri: `gs://assets/${path}`, x2Model: ID, x2Error: null, x2ClaimedAt: null });
       expect(path).toMatch(/^catalog-test\/test_brand\/.+\/derived\/.+\.swinir-x2-cpu\.x2\.jpg$/);
-      expect(w.metadata.get(p.x2Uri!)).toEqual({ sourceSha256: p.sha256, upscaler: ID });
+      // Spec 18 quality: the region of the prepared photo the image was made from rides along.
+      expect(w.metadata.get(p.x2Uri!)).toEqual({ sourceSha256: p.sha256, upscaler: ID, region: expect.stringMatching(/^\d+,\d+,\d+,\d+$/) });
       const meta = await sharp(w.objects.get(p.x2Uri!)!).metadata();
       expect(meta.width).toBeGreaterThan(0);
     }
@@ -255,6 +259,11 @@ describe("spec 18 H3: the enlarge task", () => {
       expect(Date.now() + timeoutMs).toBeLessThanOrEqual(started + ENLARGE_DISPATCH_DEADLINE_SEC * 1000 - ENLARGE_TASK_MARGIN_MS + 1_000);
     } finally { timeouts.mockRestore(); }
     expect((await photosOf(s.batch.id))[0]!.x2Uri).not.toBeNull();
+    // Spec 18 quality: the call's upscaler id picks the model and scale (the CPU suffix never reaches the service).
+    const seen4: string[] = [];
+    const fetch4 = vi.fn(async (url: string | URL | Request) => { seen4.push(String(url)); return new Response("busy", { status: 429 }); }) as unknown as typeof globalThis.fetch;
+    await workerEnlargeCall("swinir-x2", { UPSCALE_URL: "http://localhost:8099" }, { fetch: fetch4, idToken: async () => "t" })(Buffer.from([1]), {}, { upscaler: ID4 }).catch(() => undefined);
+    expect(seen4).toEqual(["http://localhost:8099/upscale?model=swinir-x4&scale=4"]);
   }, 60_000);
 
   it("lane-aware recovery: a delivery for one product refreshes every parked chunk of the batch, so paced tasks are not sent twice", async () => {
@@ -483,7 +492,7 @@ describe("spec 18 review #8: UPSCALE_MODEL changed after a photo was enlarged", 
     const made = (await photosOf(s.batch.id))[0]!;
     expect(made.x2Uri).toMatch(/\.realesrgan-x2plus-cpu\.x2\.jpg$/);
     expect(made.x2Uri).not.toBe(old.x2Uri);
-    expect(w.metadata.get(made.x2Uri!)).toEqual({ sourceSha256: made.sha256, upscaler: NEW });
+    expect(w.metadata.get(made.x2Uri!)).toMatchObject({ sourceSha256: made.sha256, upscaler: NEW });
     // The render now runs with the new image: upscaled, not held.
     const next = chunkTasks(w, s.chunks[0]!.id).filter((t) => t.body.stage === "render").at(-1)!;
     expect(await handleChunkTask(w.deps, next.body)).toMatchObject({ httpStatus: 200 });
@@ -586,5 +595,51 @@ describe("spec 18 section 7: a batch through the queue with one forced terminal 
     expect(w.log.mock.calls.filter(([m, f]) => m === "enlargement failed" && f?.severity === "ERROR")).toHaveLength(1);
     const c = classifyOutputs(outputs.map((o) => ({ ...o, status: o.status === "staged" ? "verified" : o.status })), new Set([failing]));
     expect(c.silent).toEqual([]);
+  }, 120_000);
+});
+
+describe("spec 18 quality: one photo's x2 and x4 images, one service call per delivery", () => {
+  it("a photo enlarged below and above 2.0x gets one x2 and one x4 image, each made once and stored with its region; the render uses both", async () => {
+    const w = fakeWorld(db, 1, { imageScale: 0.5 }), service = fakeService();
+    w.deps.upscaler = storedUpscaler(ID, 1); w.deps.upscalerX4 = storedUpscaler(ID4, 1); w.deps.enlarge = service.call;
+    realRender(w);
+    const s = await matteStage(w, "q-x2-x4", ["trendyol", "noon"], 1);
+    const [photo] = await photosOf(s.batch.id);
+    // Trendyol takes this photo far above 2.0x (x4), noon to 1.5x or less (x2): one job, x2 first.
+    expect(photo!.x2Model).toBe(`${ID},${ID4}`);
+    // The first delivery makes the x2 image, then answers 503 next_image without counting an attempt.
+    expect(await handleEnlargeTask(w.deps, bodyOf(w, photo!.id))).toMatchObject({ httpStatus: 503, outcome: "next_image" });
+    expect((await photosOf(s.batch.id))[0]).toMatchObject({ x2Uri: null, x2Attempts: 0, x2ClaimedAt: null, x2Model: `${ID},${ID4}` });
+    expect((await chunkRow(db, s.chunks[0]!.id)).taskName).toBe(ENLARGING_TASK);
+    // The retry makes the x4 image and settles the job.
+    expect(await handleEnlargeTask(w.deps, bodyOf(w, photo!.id))).toMatchObject({ httpStatus: 200, outcome: "done" });
+    expect(service.call.mock.calls.map((c) => c[2]!.upscaler)).toEqual([ID, ID4]);
+    const done = (await photosOf(s.batch.id))[0]!;
+    const x2Path = enlargedPath(batchPrefix("test_brand", s.batch.id, true), await pathKeyOf(done.productId), done.n, ID);
+    expect(done.x2Uri).toBe(`gs://assets/${x2Path}`);
+    const x4Uri = enlargedSibling(done.x2Uri!, { upscaler: ID, factor: 2 }, { upscaler: ID4, factor: 4 })!;
+    expect(x4Uri).toMatch(/\.swinir-x4-cpu\.x4\.jpg$/);
+    for (const [uri, id, f] of [[done.x2Uri!, ID, 2], [x4Uri, ID4, 4]] as const) {
+      const meta = w.metadata.get(uri)!, region = parseRegion(meta.region)!;
+      expect(meta).toMatchObject({ sourceSha256: done.sha256, upscaler: id });
+      const size = await sharp(w.objects.get(uri)!).metadata();
+      expect([size.width, size.height]).toEqual([region.w * f, region.h * f]);
+    }
+    // A duplicate delivery calls nothing.
+    expect(await handleEnlargeTask(w.deps, bodyOf(w, photo!.id))).toMatchObject({ httpStatus: 200, outcome: "settled" });
+    expect(service.call).toHaveBeenCalledTimes(2);
+    expect(await upscaleRows(s.batch.id)).toEqual(["ok", "ok"]);
+    // The render primes both images and makes every output from them: no call, nothing held.
+    const reads = vi.spyOn(w.deps.storage, "downloadBuffer");
+    const render = chunkTasks(w, s.chunks[0]!.id).filter((t) => t.body.stage === "render").at(-1)!;
+    expect(await handleChunkTask(w.deps, render.body)).toMatchObject({ httpStatus: 200 });
+    expect(reads.mock.calls.map(([uri]) => uri)).toEqual(expect.arrayContaining([done.x2Uri, x4Uri]));
+    const outputs = await db.select().from(catalogOutputs).where(eq(catalogOutputs.batchId, s.batch.id));
+    expect(outputs).toHaveLength(2);
+    for (const o of outputs) { expect(o.flags, o.channel).toContain("upscaled"); expect(o.flags).not.toContain("enlargement_failed"); }
+    expect(service.call).toHaveBeenCalledTimes(2);
+    // A job whose x4 image is missing primes only the x2 one (the render then holds what needs the x4).
+    w.objects.delete(x4Uri); w.metadata.delete(x4Uri);
+    expect(await primeStoredEnlargement(w.deps, { id: done.id, sha256: done.sha256, x2Uri: done.x2Uri, x2Model: done.x2Model }, { rgb: Buffer.alloc(3 * 4), width: 2 } as Prepared)).toBe(false);
   }, 120_000);
 });

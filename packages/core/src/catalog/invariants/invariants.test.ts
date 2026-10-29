@@ -159,6 +159,25 @@ describe("invariant checks", () => {
     await db.update(catalogOutputs).set({ flags: ["upscaled"] }).where(eq(catalogOutputs.id, plain.id));
     expect((await run()).counts.enlarged_without_upscaler).toBe(0);
   });
+
+  it("enlarged_without_upscaler, spec 18 quality: a batch started at the 1.0x threshold violates at 1.2x without `upscaled`; 1.0x exactly and a 1.2x hold do not", async () => {
+    const b = await batch("done");
+    await db.update(catalogBatches).set({ options: { ...b.options, enlargement: { model: "swinir-x2", x4Model: "swinir-x4", minScale: 1 } } }).where(eq(catalogBatches.id, b.id));
+    const p = await product(b.id, "new");
+    const enlarged = async (status: OutputStatus, scale: number, flags: string[]) => {
+      const o = await output(b.id, p, status, status === "needs_attention" ? { reason: "This photo could not be enlarged." } : {});
+      await db.update(catalogOutputs).set({ scale, flags: flags as typeof o.flags }).where(eq(catalogOutputs.id, o.id));
+      return o;
+    };
+    const plain = await enlarged("verified", 1.2, []);
+    await enlarged("verified", 1.2, ["upscaled"]);
+    await enlarged("needs_attention", 1.2, ["enlargement_failed"]);
+    await enlarged("verified", 1, []);
+    await enlarged("verified", 0.6, []);
+    const r = await run();
+    expect(r.counts.enlarged_without_upscaler).toBe(1);
+    expect(r.results.find(x => x.id === "enlarged_without_upscaler")!.sample).toEqual([plain.id]);
+  });
 });
 
 describe("runInvariants", () => {

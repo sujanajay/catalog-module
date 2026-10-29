@@ -2,10 +2,10 @@ import sharp from "sharp";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { CHANNELS } from "./channels";
 import { MattingClient, parseUpscaleHealth } from "./matte";
-import { enlargementNeeds, planCanvas, planProduct, renderKeyInputs, renderSource, shotGeometry, trimRules, type Matte, type Prepared } from "./render";
+import { enlargementFactors, enlargementNeeds, planCanvas, planProduct, renderKeyInputs, renderSource, shotEnlargementRegion, shotGeometry, trimRules, type Matte, type Prepared } from "./render";
 import { analyseBackground } from "./shadow";
-import { enlargeCutout, sharpenAfterEnlarge } from "./enhance";
-import { DEFAULT_UPSCALE_MIN_SCALE, gpuUrlsFromEnv, otherTargetUpscalerId, primeSourceX2, shouldUpscale, storedUpscaler, StoredEnlargementMissingError, upscaleConfigFromEnv, upscaledRgb, upscalerId, upscalerKey, upscaleTargetFromEnv, UPSCALER_VERSION, type Upscaler } from "./upscale";
+import { enlargeCutout } from "./enhance";
+import { DEFAULT_UPSCALE_MIN_SCALE, enlargeRegion, ENLARGE_REGION_MARGIN_PX, formatRegion, gpuUrlsFromEnv, hasSourceX2, LEGACY_UPSCALE_MIN_SCALE, parseRegion, UPSCALE_X4_MIN_SCALE, upscalerFactor, upscalersFor, otherTargetUpscalerId, primeSourceX2, shouldUpscale, storedUpscaler, StoredEnlargementMissingError, upscaleConfigFromEnv, upscaledRgb, upscalerId, upscalerKey, upscaleTargetFromEnv, UPSCALER_VERSION, type Upscaler } from "./upscale";
 import { configuredUpscalerId, renderKey, renderKeys, rerenderedKey, upscaledRenderKey } from "./pipeline/publish";
 import { upscaledNotes } from "./pipeline/report";
 import { flagDetails } from "./qa/reasons";
@@ -14,7 +14,7 @@ import { INFORMATION_FLAGS as EVAL_INFORMATION_FLAGS } from "./evals/attention";
 import { RENDER_FLAGS } from "./auto-resolve";
 import { ENLARGEMENT_FAILED_SENTENCE, flagReason, UPSCALED_SENTENCE } from "./types";
 
-const MODEL = "realesrgan-x2plus";
+const MODEL = "swinir-x2", MODEL_X4 = "swinir-x4";
 /** An 800x1200 photo with a 400x600 product: Trendyol (exactly 1200x1800) enlarges it 3x. */
 function fixture(width = 800, height = 1200, box = { x: 200, y: 300, w: 400, h: 600 }): { prepared: Prepared; matte: Matte } {
   const rgb = Buffer.alloc(width * height * 3, 255), alpha = Buffer.alloc(width * height);
@@ -26,9 +26,9 @@ function fixture(width = 800, height = 1200, box = { x: 200, y: 300, w: 400, h: 
   return { prepared: { width, height, rgb, alphaSource: null, background: analyseBackground(rgb, width, height), flags: [], sourceMime: "image/png" }, matte: { alpha, width, height, model: "synthetic", ms: 0, source: "model", target: "cpu", sentLongSide: null } };
 }
 /** A fake upscaler answering a solid green JPEG of exactly `factor` times the sent image. */
-function fakeUpscaler(factor = 2, fail?: Error): Upscaler & { calls: { w: number; h: number; type: string }[] } {
+function fakeUpscaler(factor = 2, fail?: Error, model = MODEL, serves: 2 | 4 = 2): Upscaler & { calls: { w: number; h: number; type: string }[] } {
   const calls: { w: number; h: number; type: string }[] = [];
-  return { model: MODEL, minScale: DEFAULT_UPSCALE_MIN_SCALE, calls, async upscale(image, type) {
+  return { model, minScale: DEFAULT_UPSCALE_MIN_SCALE, factor: serves, calls, async upscale(image, type) {
     const meta = await sharp(image).metadata(); calls.push({ w: meta.width!, h: meta.height!, type });
     if (fail) throw fail;
     return { jpeg: await sharp({ create: { width: meta.width! * factor, height: meta.height! * factor, channels: 3, background: { r: 0, g: 200, b: 0 } } }).jpeg({ quality: 95 }).toBuffer(), ms: 42 };
@@ -41,12 +41,17 @@ beforeEach(() => { vi.spyOn(console, "info").mockImplementation(() => undefined)
 afterEach(() => vi.restoreAllMocks());
 
 describe("upscale decision", () => {
-  it("is off unless UPSCALE_MODEL names a model, with a 1.5 default threshold", () => {
-    expect(upscaleConfigFromEnv({})).toEqual({ model: null, minScale: 1.5 });
-    expect(upscaleConfigFromEnv({ UPSCALE_MODEL: "  ", UPSCALE_MIN_SCALE: "" })).toEqual({ model: null, minScale: 1.5 });
-    expect(upscaleConfigFromEnv({ UPSCALE_MODEL: MODEL, UPSCALE_MIN_SCALE: "1.8" })).toEqual({ model: MODEL, minScale: 1.8 });
-    expect(upscaleConfigFromEnv({ UPSCALE_MODEL: MODEL, UPSCALE_MIN_SCALE: "0.5" }).minScale).toBe(1.5);
-    expect(upscaleConfigFromEnv({ UPSCALE_MODEL: MODEL, UPSCALE_MIN_SCALE: "abc" }).minScale).toBe(1.5);
+  it("is off unless UPSCALE_MODEL names a model, with a 1.0 default threshold (spec 18 quality: every enlargement)", () => {
+    expect(DEFAULT_UPSCALE_MIN_SCALE).toBe(1);
+    expect(upscaleConfigFromEnv({})).toEqual({ model: null, x4Model: null, minScale: 1 });
+    expect(upscaleConfigFromEnv({ UPSCALE_MODEL: "  ", UPSCALE_MIN_SCALE: "" })).toEqual({ model: null, x4Model: null, minScale: 1 });
+    expect(upscaleConfigFromEnv({ UPSCALE_MODEL: MODEL, UPSCALE_MIN_SCALE: "1.8" })).toEqual({ model: MODEL, x4Model: null, minScale: 1.8 });
+    expect(upscaleConfigFromEnv({ UPSCALE_MODEL: MODEL, UPSCALE_MIN_SCALE: "0.5" }).minScale).toBe(1);
+    expect(upscaleConfigFromEnv({ UPSCALE_MODEL: MODEL, UPSCALE_MIN_SCALE: "abc" }).minScale).toBe(1);
+    // The x4 model only rides with an x2 model; "off" or empty is none.
+    expect(upscaleConfigFromEnv({ UPSCALE_MODEL: MODEL, UPSCALE_MODEL_X4: MODEL_X4 }).x4Model).toBe(MODEL_X4);
+    for (const x4 of ["off", " ", ""]) expect(upscaleConfigFromEnv({ UPSCALE_MODEL: MODEL, UPSCALE_MODEL_X4: x4 }).x4Model).toBeNull();
+    expect(upscaleConfigFromEnv({ UPSCALE_MODEL_X4: MODEL_X4 }).x4Model).toBeNull();
   });
   it("triggers only above the threshold, never at it", () => {
     expect(shouldUpscale(1.5, 1.5)).toBe(false);
@@ -120,10 +125,11 @@ describe("render with the upscaler", () => {
     // A wrong-size answer is a failure too.
     const wrong = await renderSource({ prepared, matte, channel: "trendyol", shotNumber: 2, productType: "other", upscaler: fakeUpscaler(3) });
     expect(wrong.flags).not.toContain("upscaled"); expect(wrong.flags).toContain("enlargement_failed");
-    // Noon caps this photo at 1.5x: the upscaler is never asked and nothing is flagged.
-    const unused = fakeUpscaler(), noon = await renderSource({ prepared, matte, channel: "noon", shotNumber: 2, productType: "other", upscaler: unused });
+    // Noon caps this photo at 1.5x: with the threshold of 1.5 (before spec 18 quality) the upscaler is never asked and
+    // nothing is flagged.
+    const unused = { ...fakeUpscaler(), minScale: LEGACY_UPSCALE_MIN_SCALE }, noon = await renderSource({ prepared, matte, channel: "noon", shotNumber: 2, productType: "other", upscaler: unused });
     const noonPlain = await renderSource({ prepared, matte, channel: "noon", shotNumber: 2, productType: "other" });
-    expect(noon.plan.scale).toBeLessThanOrEqual(1.5); expect(unused.calls).toHaveLength(0);
+    expect(noon.plan.scale).toBeLessThanOrEqual(1.5); expect(unused.calls).toHaveLength(0); expect(noon.flags).not.toContain("upscaled");
     expect(noon.flags).toEqual(noonPlain.flags); expect(noon.bytes).toBe(noonPlain.bytes);
   });
   it("spec 18: the stored upscaler never calls a service; a primed x2 image makes the upscaled output, an unprimed photo is held", async () => {
@@ -158,9 +164,9 @@ describe("render with the upscaler", () => {
     const mixed = await enlargeCutout({ rgba, rgb: prepared.rgb, width: prepared.width, height: prepared.height, crop, to: size, upscaled: enlarged!.rgb });
     const alpha = async (png: Buffer) => sharp(png).extractChannel(3).raw().toBuffer();
     expect((await alpha(mixed)).equals(await alpha(plain))).toBe(true);
-    // The colour is the upscaler's, sharpened only on opaque pixels with the residual factor (3x / 2 = 1.5x).
-    const colour = (await sharp(mixed).raw().toBuffer()), sharpened = await sharpenAfterEnlarge(enlarged!.rgb, size, 1.5), a = await alpha(plain);
-    for (const i of [0, Math.floor(size.w * size.h / 2), size.w * size.h - 1]) for (let c = 0; c < 3; c++) expect(colour[i * 4 + c]).toBe((a[i] === 255 ? sharpened : enlarged!.rgb)[i * 3 + c]);
+    // Spec 18 quality: the colour is the upscaler's, never sharpened (the old residual sharpening is gone).
+    const colour = (await sharp(mixed).raw().toBuffer());
+    for (let i = 0; i < size.w * size.h; i++) for (let c = 0; c < 3; c++) if (colour[i * 4 + c] !== enlarged!.rgb[i * 3 + c]) expect.fail(`pixel ${i} channel ${c} differs`);
   });
 });
 
@@ -171,8 +177,12 @@ describe("render_key", () => {
     expect(renderKey({ ...input, upscaler: null })).toBe(plain);
     expect(renderKey({ ...input, upscaler: MODEL })).toBe(upscaledRenderKey(plain, MODEL));
     expect(renderKey({ ...input, upscaler: MODEL })).not.toBe(plain);
-    expect(renderKey({ ...input, upscaler: "swinir-x2" })).not.toBe(renderKey({ ...input, upscaler: MODEL }));
-    expect(upscalerKey(MODEL)).toBe(`u:${MODEL}@e828354d:${UPSCALER_VERSION}`);
+    expect(renderKey({ ...input, upscaler: MODEL_X4 })).not.toBe(renderKey({ ...input, upscaler: MODEL }));
+    expect(UPSCALER_VERSION).toBe("2");
+    expect(upscalerKey(MODEL)).toBe(`u:${MODEL}@9f4a3f85:${UPSCALER_VERSION}`);
+    expect(upscalerKey(MODEL_X4)).toBe(`u:${MODEL_X4}@f477a052:${UPSCALER_VERSION}`);
+    // Spec 18 quality: with the x4 model configured, an output upscaled by either model counts as unchanged.
+    expect(renderKeys(input, [MODEL, MODEL_X4])).toEqual([plain, upscaledRenderKey(plain, MODEL), upscaledRenderKey(plain, `${MODEL}+cpu`), upscaledRenderKey(plain, MODEL_X4), upscaledRenderKey(plain, `${MODEL_X4}+cpu`)]);
     expect(renderKeys(input, null)).toEqual([plain]);
     // Spec 16: an image the same model made on the other service (GPU or CPU) also counts as unchanged.
     expect(renderKeys(input, MODEL)).toEqual([plain, upscaledRenderKey(plain, MODEL), upscaledRenderKey(plain, `${MODEL}+cpu`)]);
@@ -186,7 +196,7 @@ describe("render_key", () => {
     // Spec 16 3.1.3: the GPU id keeps today's key byte for byte; the CPU id gets its own; a row upscaled before and
     // re-made on the CPU takes the CPU key from its recomputed plain key.
     expect(upscalerId(MODEL, "gpu")).toBe(MODEL);
-    expect(upscalerKey(`${MODEL}+cpu`)).toBe(`u:${MODEL}@e828354d:${UPSCALER_VERSION}:cpu`);
+    expect(upscalerKey(`${MODEL}+cpu`)).toBe(`u:${MODEL}@9f4a3f85:${UPSCALER_VERSION}:cpu`);
     expect(otherTargetUpscalerId(`${MODEL}+cpu`)).toBe(MODEL);
     const cpuUp = upscaledRenderKey(plain, `${MODEL}+cpu`);
     expect(cpuUp).not.toBe(up);
@@ -194,7 +204,7 @@ describe("render_key", () => {
     expect(rerenderedKey({ renderKey: plain, flags: [] }, `${MODEL}+cpu`, recompute)).toBe(cpuUp);
     const k = { sourceSha256: "abc", channel: "trendyol" as const, rulesVersion: "7", policyId: "p", policyUpdatedAt: "t", n: 1 };
     expect(renderKeyInputs(k)).toBe("abc|trendyol|7|p+t|1");
-    expect(renderKeyInputs({ ...k, upscaler: MODEL })).toBe(`abc|trendyol|7|p+t|1|u:${MODEL}@e828354d:1`);
+    expect(renderKeyInputs({ ...k, upscaler: MODEL })).toBe(`abc|trendyol|7|p+t|1|u:${MODEL}@9f4a3f85:${UPSCALER_VERSION}`);
   });
 });
 
@@ -215,7 +225,7 @@ describe("upscaled flag copy", () => {
 describe("matting client upscale target (spec 18 H3: the client never calls /upscale)", () => {
   type Route = (init: RequestInit & { signal: AbortSignal }) => Promise<Response> | Response;
   const health = (target: "cpu" | "gpu", upscale?: unknown) => Response.json({ ok: true, models: [{ id: "general", inputSize: 64, target }], default: "general", version: target, ...(upscale === undefined ? {} : { upscale }) });
-  const listed = { models: [{ id: MODEL, available: true, scale: 2 }, { id: "swinir-x2", available: false, scale: 2 }], default: MODEL };
+  const listed = { models: [{ id: MODEL, available: true, scale: 2 }, { id: MODEL_X4, available: false, scale: 4 }], default: MODEL };
   function client(upscaleRoute: Route, opts: { gpu?: boolean; upscale?: unknown } = {}) {
     const calls: string[] = [];
     const fetch = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
@@ -278,7 +288,7 @@ describe("matting client upscale target (spec 18 H3: the client never calls /ups
     const dedicated = { UPSCALE_MODEL: MODEL, UPSCALE_URL: "https://catalog-upscale-abc-el.a.run.app", MATTING_URL: "https://cpu.example", MATTING_GPU_URL: "https://gpu.example" };
     expect(upscaleTargetFromEnv(dedicated)).toBe("cpu");
     expect(configuredUpscalerId(dedicated)).toBe(`${MODEL}+cpu`);
-    expect(upscaleConfigFromEnv({ UPSCALE_MODEL: MODEL, UPSCALE_URL: "https://cpu.example", MATTING_URL: "https://cpu.example" })).toEqual({ model: MODEL, minScale: 1.5, target: "cpu" });
+    expect(upscaleConfigFromEnv({ UPSCALE_MODEL: MODEL, UPSCALE_URL: "https://cpu.example", MATTING_URL: "https://cpu.example" })).toEqual({ model: MODEL, x4Model: null, minScale: 1, target: "cpu" });
     expect(configuredUpscalerId({ UPSCALE_MODEL: MODEL, UPSCALE_URL: "https://cpu.example", MATTING_URL: "https://cpu.example" })).toBe(`${MODEL}+cpu`);
     expect(configuredUpscalerId({ UPSCALE_MODEL: MODEL })).toBe(MODEL);
     expect(configuredUpscalerId({})).toBeNull();
@@ -307,11 +317,111 @@ describe("spec 18: enlargementNeeds, decided at the matte stage", () => {
   it("is false where no channel enlarges past the threshold: noon's own canvas, a large photo, no product found", () => {
     const one = fixture();
     expect(enlargementNeeds(["trendyol"], [shot(one)], "other", DEFAULT_UPSCALE_MIN_SCALE)).toEqual([true]);
-    // Noon picks a canvas that keeps this photo at 1.5x or less (the render test above): nothing to enlarge.
-    expect(enlargementNeeds(["noon"], [shot(one)], "other", DEFAULT_UPSCALE_MIN_SCALE)).toEqual([false]);
-    expect(enlargementNeeds(["noon", "trendyol"], [shot(one)], "other", DEFAULT_UPSCALE_MIN_SCALE)).toEqual([true]);
+    // Noon picks a canvas that keeps this photo at 1.5x or less (the render test above): nothing to enlarge with the
+    // old 1.5 threshold, the x2 image with spec 18 quality's 1.0.
+    expect(enlargementNeeds(["noon"], [shot(one)], "other", LEGACY_UPSCALE_MIN_SCALE)).toEqual([false]);
+    expect(enlargementNeeds(["noon"], [shot(one)], "other", DEFAULT_UPSCALE_MIN_SCALE)).toEqual([true]);
+    expect(enlargementNeeds(["noon", "trendyol"], [shot(one)], "other", LEGACY_UPSCALE_MIN_SCALE)).toEqual([true]);
     const big = fixture(2400, 3600, { x: 300, y: 300, w: 1800, h: 3000 });
-    expect(enlargementNeeds(Object.keys(CHANNELS) as (keyof typeof CHANNELS)[], [shot(big)], "other", DEFAULT_UPSCALE_MIN_SCALE)).toEqual([false]);
-    expect(enlargementNeeds(["trendyol"], [{ ...shot(one), alpha: Buffer.alloc(one.matte.alpha.length) }, shot(big)], "other", DEFAULT_UPSCALE_MIN_SCALE)).toEqual([false, false]);
+    expect(enlargementNeeds(Object.keys(CHANNELS) as (keyof typeof CHANNELS)[], [shot(big)], "other", LEGACY_UPSCALE_MIN_SCALE)).toEqual([false]);
+    // Spec 18 quality: from 1.0x, the largest canvases (up to 3000x3000) enlarge even this 1800x3000 box a little.
+    expect(enlargementNeeds(Object.keys(CHANNELS) as (keyof typeof CHANNELS)[], [shot(big)], "other", DEFAULT_UPSCALE_MIN_SCALE)).toEqual([true]);
+    expect(enlargementNeeds(["trendyol"], [{ ...shot(one), alpha: Buffer.alloc(one.matte.alpha.length) }, shot(big)], "other", LEGACY_UPSCALE_MIN_SCALE)).toEqual([false, false]);
+  });
+});
+
+describe("spec 18 quality: AI enlargement above 1.0x, x2/x4 routing, crop before upscaling", () => {
+  const shot = (f: ReturnType<typeof fixture>) => ({ width: f.prepared.width, height: f.prepared.height, rgb: f.prepared.rgb, alpha: f.matte.alpha, model: f.matte.model });
+  /** Trendyol (1200x1800) enlarges a 2:3 product box `1200 / w` times. */
+  const at = (scale: number) => { const w = Math.round(1200 / scale), h = w * 1.5; return fixture(w + 200, h + 300, { x: 100, y: 150, w, h }); };
+  /** A nearest-neighbour `f`x of `region` of a prepared photo, as a lossless PNG: every source pixel becomes f x f. */
+  async function nearest(rgb: Buffer, width: number, region: { x: number; y: number; w: number; h: number }, f: number): Promise<Buffer> {
+    const out = Buffer.alloc(region.w * f * region.h * f * 3);
+    for (let y = 0; y < region.h * f; y++) for (let x = 0; x < region.w * f; x++) {
+      const from = ((region.y + Math.floor(y / f)) * width + region.x + Math.floor(x / f)) * 3;
+      rgb.copy(out, (y * region.w * f + x) * 3, from, from + 3);
+    }
+    return sharp(out, { raw: { width: region.w * f, height: region.h * f, channels: 3 } }).png().toBuffer();
+  }
+
+  it("routes 1.0 < s <= 2.0 to x2 (x4 only as a fallback) and s > 2.0 to x4; without x4 the x2 makes every enlargement", () => {
+    const x2 = fakeUpscaler(), x4 = fakeUpscaler(4, undefined, MODEL_X4, 4);
+    expect(UPSCALE_X4_MIN_SCALE).toBe(2);
+    expect(upscalersFor(1.2, x2, x4)).toEqual([x2, x4]);
+    expect(upscalersFor(2, x2, x4)).toEqual([x2, x4]);
+    expect(upscalersFor(2.01, x2, x4)).toEqual([x4]);
+    expect(upscalersFor(3, x2, null)).toEqual([x2]);
+    expect([upscalerFactor(MODEL), upscalerFactor(`${MODEL}+cpu`), upscalerFactor(MODEL_X4), upscalerFactor(`${MODEL_X4}+cpu`)]).toEqual([2, 2, 4, 4]);
+  });
+  it("the render uses x2 at 1.2x and 1.5x and x4 at 2.5x, one call per photo per model, and flags it upscaled", async () => {
+    for (const [scale, model] of [[1.2, MODEL], [1.5, MODEL], [2.5, MODEL_X4]] as const) {
+      const { prepared, matte } = at(scale), x2 = fakeUpscaler(), x4 = fakeUpscaler(4, undefined, MODEL_X4, 4);
+      const outs = [];
+      for (const n of [1, 2]) outs.push(await renderSource({ prepared, matte, channel: "trendyol", shotNumber: n, productType: "other", upscaler: x2, upscalerX4: x4 }));
+      expect(outs[0]!.plan.scale).toBeCloseTo(scale, 2);
+      for (const out of outs) { expect(out.flags).toContain("upscaled"); expect(out.flags).not.toContain("enlargement_failed"); expect(out.upscale?.model).toBe(model); }
+      expect([x2.calls.length, x4.calls.length], `${scale}x`).toEqual(model === MODEL ? [1, 0] : [0, 1]);
+      expect(outs[1]!.upscale?.reused).toBe(true);
+    }
+  });
+  it("holds a 1.2x enlargement with enlargement_failed when the upscaler fails or no image is stored: never a silent plain resize", async () => {
+    const { prepared, matte } = at(1.2);
+    const failing = fakeUpscaler(2, new Error("Upscale failed: 503."));
+    const held = await renderSource({ prepared, matte, channel: "trendyol", shotNumber: 1, productType: "other", upscaler: failing });
+    expect(held.plan.scale).toBeCloseTo(1.2, 2);
+    expect(held.flags).toContain("enlargement_failed"); expect(held.flags).not.toContain("upscaled"); expect(holdsAtRender(held.flags)).toBe(true);
+    const unprimed = await renderSource({ ...at(1.2), channel: "trendyol", shotNumber: 1, productType: "other", upscaler: storedUpscaler(upscalerId(MODEL, "cpu"), DEFAULT_UPSCALE_MIN_SCALE), upscalerX4: storedUpscaler(upscalerId(MODEL_X4, "cpu"), DEFAULT_UPSCALE_MIN_SCALE) });
+    expect(unprimed.flags).toContain("enlargement_failed");
+    // With the old 1.5 threshold the same photo took the plain path, unflagged: what spec 18 quality removes.
+    const legacy = await renderSource({ ...at(1.2), channel: "trendyol", shotNumber: 1, productType: "other", upscaler: { ...fakeUpscaler(), minScale: LEGACY_UPSCALE_MIN_SCALE } });
+    expect(legacy.flags).not.toContain("enlargement_failed"); expect(legacy.flags).not.toContain("upscaled");
+  });
+  it("the x4 image stands in at or below 2.0x when no x2 image exists (a uniform scale may place a photo lower than planned)", async () => {
+    const { prepared, matte } = at(1.5), x2 = storedUpscaler(upscalerId(MODEL, "cpu"), DEFAULT_UPSCALE_MIN_SCALE), x4 = storedUpscaler(upscalerId(MODEL_X4, "cpu"), DEFAULT_UPSCALE_MIN_SCALE);
+    expect(await primeSourceX2(x4, prepared.rgb, prepared.width, await nearest(prepared.rgb, prepared.width, { x: 0, y: 0, w: prepared.width, h: prepared.height }, 4))).toBe(true);
+    expect(hasSourceX2(x2, prepared.rgb)).toBe(false);
+    const out = await renderSource({ prepared, matte, channel: "trendyol", shotNumber: 1, productType: "other", upscaler: x2, upscalerX4: x4 });
+    expect(out.flags).toContain("upscaled"); expect(out.upscale?.model).toBe(`${MODEL_X4}+cpu`);
+    // Above 2.0x the x2 image alone never makes the output.
+    const big = at(3), y2 = storedUpscaler(upscalerId(MODEL, "cpu"), DEFAULT_UPSCALE_MIN_SCALE), y4 = storedUpscaler(upscalerId(MODEL_X4, "cpu"), DEFAULT_UPSCALE_MIN_SCALE);
+    expect(await primeSourceX2(y2, big.prepared.rgb, big.prepared.width, await nearest(big.prepared.rgb, big.prepared.width, { x: 0, y: 0, w: big.prepared.width, h: big.prepared.height }, 2))).toBe(true);
+    expect((await renderSource({ ...big, channel: "trendyol", shotNumber: 1, productType: "other", upscaler: y2, upscalerX4: y4 })).flags).toContain("enlargement_failed");
+  }, 60_000);
+  it("matte alignment is exact: an image of the product region gives byte for byte the output of an image of the whole photo, at x2 and x4", async () => {
+    for (const [scale, model, f] of [[1.5, MODEL, 2], [3, MODEL_X4, 4]] as const) {
+      const one = at(scale), { prepared, matte } = one;
+      const region = shotEnlargementRegion(shot(one), "other")!;
+      const box = shotGeometry(matte.alpha, prepared.width, prepared.height, { rgb: prepared.rgb, ...trimRules("other", matte) })!.box;
+      // The product box plus the margin, inside the photo, and well short of the whole photo.
+      expect(region).toEqual(enlargeRegion([box], prepared.width, prepared.height));
+      expect(region.x).toBe(Math.max(0, box.x - ENLARGE_REGION_MARGIN_PX)); expect(region.w * region.h).toBeLessThan(prepared.width * prepared.height);
+      expect(parseRegion(formatRegion(region))).toEqual(region);
+      const render = async (r: typeof region) => {
+        const x2 = storedUpscaler(upscalerId(MODEL, "cpu"), DEFAULT_UPSCALE_MIN_SCALE), x4 = storedUpscaler(upscalerId(MODEL_X4, "cpu"), DEFAULT_UPSCALE_MIN_SCALE);
+        expect(await primeSourceX2(f === 4 ? x4 : x2, prepared.rgb, prepared.width, await nearest(prepared.rgb, prepared.width, r, f), r)).toBe(true);
+        return renderSource({ prepared, matte, channel: "trendyol", shotNumber: 1, productType: "other", upscaler: x2, upscalerX4: x4 });
+      };
+      const whole = await render({ x: 0, y: 0, w: prepared.width, h: prepared.height }), cropped = await render(region);
+      expect(cropped.flags).toContain("upscaled"); expect(cropped.upscale?.model).toBe(`${model}+cpu`);
+      expect(cropped.jpeg!.equals(whole.jpeg!), `${scale}x`).toBe(true);
+      // An image whose region misses the crop is never used: the output is held.
+      const missed = await render({ x: 0, y: 0, w: 50, h: 50 });
+      expect(missed.flags).toContain("enlargement_failed"); expect(missed.flags).not.toContain("upscaled");
+    }
+  }, 120_000);
+  it("refuses a stored image that is not the model's scale times its region, or whose region lies outside the photo", async () => {
+    const { prepared } = at(1.5), x4 = storedUpscaler(upscalerId(MODEL_X4, "cpu"), DEFAULT_UPSCALE_MIN_SCALE), r = { x: 10, y: 10, w: 100, h: 120 };
+    expect(await primeSourceX2(x4, prepared.rgb, prepared.width, await nearest(prepared.rgb, prepared.width, r, 2), r)).toBe(false);
+    expect(await primeSourceX2(x4, prepared.rgb, prepared.width, await nearest(prepared.rgb, prepared.width, r, 4), { ...r, x: prepared.width - 50 })).toBe(false);
+    expect(await primeSourceX2(x4, prepared.rgb, prepared.width, await nearest(prepared.rgb, prepared.width, r, 4), r)).toBe(true);
+    for (const bad of ["", "1,2,3", "1,2,0,4", "-1,0,4,4", "a,b,c,d"]) expect(parseRegion(bad)).toBeNull();
+  });
+  it("enlargementFactors: the x2 image up to 2.0x and the x4 image above, per photo across its channels", () => {
+    const one = fixture();
+    expect(enlargementFactors(["trendyol"], [shot(one)], "other", DEFAULT_UPSCALE_MIN_SCALE, true)).toEqual([[4]]);
+    expect(enlargementFactors(["trendyol"], [shot(one)], "other", DEFAULT_UPSCALE_MIN_SCALE, false)).toEqual([[2]]);
+    expect(enlargementFactors(["noon"], [shot(one)], "other", DEFAULT_UPSCALE_MIN_SCALE, true)).toEqual([[2]]);
+    expect(enlargementFactors(["noon"], [shot(one)], "other", LEGACY_UPSCALE_MIN_SCALE, true)).toEqual([[]]);
+    expect(enlargementFactors(["noon", "trendyol"], [shot(one)], "other", DEFAULT_UPSCALE_MIN_SCALE, true)).toEqual([[2, 4]]);
   });
 });
