@@ -94,9 +94,8 @@ export class MattingClient {
   private readonly request: typeof fetch;
   private readonly token: IdTokenFor;
   /**
-   * The matting service that serves /upscale (spec 16 3.1.3), for upscaleTarget and health().upscale only: spec 18 H3
-   * moved every upscale call to the enlarge task (enlarge.ts), so this client never calls /upscale. Null without a GPU
-   * service and without a matching UPSCALE_URL.
+   * The matting service that serves /upscale (spec 16 3.1.3), for upscaleTarget and health().upscale only. Null
+   * without a GPU service and without a matching UPSCALE_URL.
    */
   private readonly upscaleState: ServiceState | null;
   /** Spec 18 H2: UPSCALE_URL names no matting service, so it is catalog-upscale, which only the enlarge stage calls. */

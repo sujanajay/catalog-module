@@ -27,12 +27,12 @@ import { gpuUrlsFromEnv, isCpuUpscalerId, primeSourceX2, UPSCALE_FACTOR, upscale
 import { ENLARGE_TASK_MARGIN_MS, EnlargeError, enlargeTimeoutMs, enlargeViaService, type EnlargeDeps, type EnlargeResult } from "@catalog/core/catalog/enlarge";
 import { DISPATCH_DEADLINE_SEC } from "@catalog/core/tasks";
 import { ENLARGE_CLAIM_MS, ENLARGE_TASK_MAX_ATTEMPTS, ENLARGING_TASK, enqueueEnlargements, lockProductChunks, photoEnlargementState, unparkSettledChunks } from "@catalog/core/catalog/pipeline/enlargement";
-import { dispatchChunks } from "@catalog/core/catalog/pipeline/dispatch";
+import { positiveIntEnv } from "@catalog/core/concurrency";
 import { recordCostEvents, type CostEventInput } from "@catalog/core/cost-events";
 import { matteCallUsd } from "@catalog/core/catalog/cost";
 import type { MattingTrace } from "@catalog/core/catalog/matte";
 import type { HandleOptions, HandleResult } from "../server";
-import { refreshBatchProgress, type CatalogDeps } from "./deps";
+import { refreshBatchProgress, topUpWindow, type CatalogDeps } from "./deps";
 
 /**
  * The service call the handler makes: one attempt, the x2 JPEG as the service answered it. `deadlineAt` (epoch ms) is
@@ -42,10 +42,9 @@ import { refreshBatchProgress, type CatalogDeps } from "./deps";
 export type EnlargeCall = (jpeg: Buffer, trace: MattingTrace, opts?: { deadlineAt?: number }) => Promise<EnlargeResult>;
 
 /** The largest photo (width x height) the upscale service takes (`UPSCALE_MAX_PIXELS`, its default 24,000,000). */
-export const DEFAULT_UPSCALE_MAX_PIXELS = 24_000_000;
-export function upscaleMaxPixels(env: NodeJS.ProcessEnv = process.env): number {
-  const n = Number(env.UPSCALE_MAX_PIXELS?.trim());
-  return Number.isInteger(n) && n > 0 ? n : DEFAULT_UPSCALE_MAX_PIXELS;
+const DEFAULT_UPSCALE_MAX_PIXELS = 24_000_000;
+function upscaleMaxPixels(env: NodeJS.ProcessEnv = process.env): number {
+  return positiveIntEnv(env.UPSCALE_MAX_PIXELS?.trim(), DEFAULT_UPSCALE_MAX_PIXELS);
 }
 
 /**
@@ -194,9 +193,9 @@ export async function handleEnlargeTask(deps: CatalogDeps, body: Record<string, 
   const upscaler = deps.upscaler, call = deps.enlarge;
   // UPSCALE_MODEL was switched off after this photo was queued: no enlargement is wanted any more (the plain path).
   if (!upscaler || !call) { await settle({ x2Model: null }); return answer(200, "off"); }
-  // Review #8: the configured upscaler makes the image and names it (x2_model, the object's key and metadata), also for
+  // The configured upscaler makes the image and names it (x2_model, the object's key and metadata), also for
   // a photo queued under another one before UPSCALE_MODEL changed, so the record and the bytes always agree.
-  const id = upscaler.model;
+  const upscalerId = upscaler.model;
   // This delivery holds the photo's in-flight claim (set below, cleared by its settle).
   let claimed = false;
   // Spec 18 3.3.4, lane-aware: a delivery shows the batch's enlarge lane is moving, so every parked chunk of the batch
@@ -205,13 +204,13 @@ export async function handleEnlargeTask(deps: CatalogDeps, body: Record<string, 
   await deps.db.update(catalogChunks).set({ progressAt: deps.now() }).where(and(eq(catalogChunks.batchId, batchId), eq(catalogChunks.taskName, ENLARGING_TASK)));
   try {
     const prefix = batchPrefix(batch.brandSlug, batch.id, batch.isTest);
-    const path = enlargedPath(derivedPrefixFor(deps.storage, prefix, photo), product.pathKey, photo.n, id), uri = deps.storage.toGsUri(deps.storage.getBucketName(), path);
+    const path = enlargedPath(derivedPrefixFor(deps.storage, prefix, photo), product.pathKey, photo.n, upscalerId), uri = deps.storage.toGsUri(deps.storage.getBucketName(), path);
     const head = await deps.storage.headObject(uri);
-    if (head.exists && head.metadata?.[X2_METADATA.sourceSha256] === photo.sha256 && head.metadata?.[X2_METADATA.upscaler] === id) {
-      if (await settle({ x2Uri: uri, x2Model: id, x2Error: null }) === SETTLED_ELSEWHERE) return answer(200, "settled");
+    if (head.exists && head.metadata?.[X2_METADATA.sourceSha256] === photo.sha256 && head.metadata?.[X2_METADATA.upscaler] === upscalerId) {
+      if (await settle({ x2Uri: uri, x2Model: upscalerId, x2Error: null }) === SETTLED_ELSEWHERE) return answer(200, "settled");
       return answer(200, "done", { reused: true });
     }
-    // Review #7: the in-flight claim. One guarded row update (no chunk lock held): a second live delivery (Cloud Tasks
+    // The in-flight claim. One guarded row update (no chunk lock held): a second live delivery (Cloud Tasks
     // at least once, or a re-sent round landing beside the first) answers 503 without a call or an attempt counted.
     if (!(await claim())) {
       // Lost to a delivery that has stored the image meanwhile: settled, not in flight.
@@ -234,21 +233,21 @@ export async function handleEnlargeTask(deps: CatalogDeps, body: Record<string, 
     catch (error) {
       if (error instanceof EnlargeError) {
         const ms = +deps.now() - t0;
-        if (ms > 0 && error.kind !== "rejected") ledger.push(costRow(id, ms, "failed"));
+        if (ms > 0 && error.kind !== "rejected") ledger.push(costRow(upscalerId, ms, "failed"));
         // A refused image never passes on a retry; a refused call (identity, route) may once the deploy is fixed.
         if (error.kind === "bad_input") throw new TerminalEnlargeFailure(error.message);
       }
       throw error;
     }
-    ledger.push(costRow(id, result.ms, "ok"));
+    ledger.push(costRow(upscalerId, result.ms, "ok"));
     const meta = await sharp(result.jpeg).metadata();
     if (meta.width !== p.width * UPSCALE_FACTOR || meta.height !== p.height * UPSCALE_FACTOR) {
       throw new TerminalEnlargeFailure(`The upscale service answered ${meta.width}x${meta.height} for a ${p.width}x${p.height} photo, not exactly 2x.`);
     }
     // The service's own JPEG (quality 95, 4:4:4), stored as it came.
-    await deps.storage.uploadBuffer(path, result.jpeg, "image/jpeg", { metadata: { [X2_METADATA.sourceSha256]: photo.sha256, [X2_METADATA.upscaler]: id } });
+    await deps.storage.uploadBuffer(path, result.jpeg, "image/jpeg", { metadata: { [X2_METADATA.sourceSha256]: photo.sha256, [X2_METADATA.upscaler]: upscalerId } });
     // Another delivery stored the image first (only after this one's claim lapsed): no second write, no second cost row.
-    if (await settle({ x2Uri: uri, x2Model: id, x2Error: null, x2ClaimedAt: null }) === SETTLED_ELSEWHERE) return answer(200, "settled");
+    if (await settle({ x2Uri: uri, x2Model: upscalerId, x2Error: null, x2ClaimedAt: null }) === SETTLED_ELSEWHERE) return answer(200, "settled");
     deps.log("catalog upscale", { ...fields, upscaleMs: result.ms, attempts: photo.x2Attempts + 1 });
     return answer(200, "done");
   } catch (error) {
@@ -258,7 +257,7 @@ export async function handleEnlargeTask(deps: CatalogDeps, body: Record<string, 
     // Another delivery stored the image meanwhile: nothing failed.
     if (attempts === SETTLED_ELSEWHERE) return answer(200, "settled");
     if (attempts >= ENLARGE_TASK_MAX_ATTEMPTS) {
-      deps.log("enlargement failed", { severity: "ERROR", ...fields, attempts, retryCount: opts.retryCount ?? 0, model: id, error: reason });
+      deps.log("enlargement failed", { severity: "ERROR", ...fields, attempts, retryCount: opts.retryCount ?? 0, model: upscalerId, error: reason });
       return answer(200, "failed");
     }
     deps.log("enlargement retry", { severity: "WARNING", ...fields, attempts, retryCount: opts.retryCount ?? 0, error: reason });
@@ -309,7 +308,7 @@ export async function handleEnlargeTask(deps: CatalogDeps, body: Record<string, 
     });
     for (const chunkId of unparked) deps.log("chunk enlarged", { batchId, chunkId });
     if (unparked.length || !failure || attempts >= ENLARGE_TASK_MAX_ATTEMPTS) {
-      await dispatchChunks(deps.db, deps.enqueue, batchId as string, { now: deps.now(), log: deps.log, ...(deps.chunkWindow ? { window: deps.chunkWindow } : {}) });
+      await topUpWindow(deps, batchId as string);
       await refreshBatchProgress(deps.db, batchId as string, deps.now());
     }
     return attempts;

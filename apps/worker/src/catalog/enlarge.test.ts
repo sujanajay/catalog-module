@@ -155,7 +155,7 @@ describe("spec 18 H3: the enlarge task", () => {
     expect(service.call).toHaveBeenCalledTimes(2);
     // A stored image made from other bytes counts as missing: nothing is primed (the render holds what needs it).
     expect(await primeStoredEnlargement(w.deps, { id: photos[0]!.id, sha256: "other", x2Uri: photos[0]!.x2Uri, x2Model: ID }, {} as Prepared)).toBe(false);
-    // So does one made by another upscaler than the configured one (review #8), by its record or by its metadata.
+    // So does one made by another upscaler than the configured one by its record or by its metadata.
     expect(await primeStoredEnlargement(w.deps, { id: photos[0]!.id, sha256: photos[0]!.sha256, x2Uri: photos[0]!.x2Uri, x2Model: "realesrgan-x2plus" }, {} as Prepared)).toBe(false);
     w.metadata.set(photos[0]!.x2Uri!, { sourceSha256: photos[0]!.sha256, upscaler: "realesrgan-x2plus" });
     expect(await primeStoredEnlargement(w.deps, { id: photos[0]!.id, sha256: photos[0]!.sha256, x2Uri: photos[0]!.x2Uri, x2Model: ID }, {} as Prepared)).toBe(false);
@@ -242,7 +242,7 @@ describe("spec 18 H3: the enlarge task", () => {
     }) as unknown as typeof globalThis.fetch;
     const timeouts = vi.spyOn(AbortSignal, "timeout");
     try {
-      // The delivery started 5 s before the call (reads, download, prepare): the old guard then made no call at all.
+      // The delivery started 5 s before the call (reads, download, prepare).
       const started = Date.now() - 5_000;
       let first = true;
       w.deps.now = () => { if (first) { first = false; return new Date(started); } return new Date(); };
@@ -274,7 +274,7 @@ describe("spec 18 H3: the enlarge task", () => {
       expect(row.taskName).toBe(ENLARGING_TASK);
       expect(+row.progressAt!).toBeGreaterThanOrEqual(before);
     }
-    // Two minutes later (past where the old progress would have been stale): nothing is sent again.
+    // Two minutes later: nothing is sent again.
     const sent = enlargeTasks(w).length;
     expect(await resendStaleEnlargements(db, w.deps.enqueue, s.batch.id, { now: new Date(Date.now() + 2 * 60_000) })).toBe(0);
     // Once the batch's lane was quiet for ENLARGE_STALE_MS, the two waiting photos are sent as the next round.

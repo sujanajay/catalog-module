@@ -41,7 +41,7 @@ describe("naming helpers", () => {
     expect(enlargedPath(prefix, "ABC123", 2, "swinir-x2+cpu")).toBe(`${prefix}/derived/ABC123/ABC123_2.swinir-x2-cpu.x2.jpg`);
     expect(derivedPath(prefix, "ABC123", 2, "matte")).toBe(`${prefix}/derived/ABC123/ABC123_2.matte.png`);
     expect(enlargedPath(prefix, "ABC123", 2, "swinir-x2+cpu")).not.toMatch(/\/raw\/|^catalog\//);
-    // Review #8: the key names the upscaler, so another model's image is another object.
+    // The key names the upscaler, so another model's image is another object.
     expect(enlargedPath(prefix, "ABC123", 2, "realesrgan-x2plus")).toBe(`${prefix}/derived/ABC123/ABC123_2.realesrgan-x2plus.x2.jpg`);
   });
 

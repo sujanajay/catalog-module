@@ -7,7 +7,7 @@ import { batchPrefix, derivedPath, publicObjectPath, publicUrl, stagingPath } fr
 import { planProduct, shotGeometry, trimRules, UnsupportedSourceError, type EnlargementShot, type Matte } from "@catalog/core/catalog/render";
 import { renderKey, renderKeys, rerenderedKey } from "@catalog/core/catalog/pipeline/publish";
 import { catalogLlmDeps, CatalogQaCapError, limitDeliveryBackoff, runQaStage, spendCapHit } from "./qa-stage";
-import { CHUNK_HEARTBEAT_MS, CHUNK_LEASE_MS, CHUNK_MAX_STALLS, CHUNK_STALLED_REASON, chunkTimeBudgetMs, dispatchChunks, isBulkBatch, leaseLapsed, notParked, redispatchUnstartedChunks, tryEnqueueChunk } from "@catalog/core/catalog/pipeline/dispatch";
+import { CHUNK_HEARTBEAT_MS, CHUNK_LEASE_MS, CHUNK_MAX_STALLS, CHUNK_STALLED_REASON, chunkTimeBudgetMs, isBulkBatch, leaseLapsed, notParked, redispatchUnstartedChunks, tryEnqueueChunk } from "@catalog/core/catalog/pipeline/dispatch";
 import { chunkHasQueuedEnlargement, ENLARGE_TASK_MAX_ATTEMPTS, ENLARGING_TASK, enqueueEnlargements, photosOfChunk, queuedPhotosOfChunk, unparkSettledChunks } from "@catalog/core/catalog/pipeline/enlargement";
 import type { EnlargeTaskBody } from "@catalog/core/tasks";
 import { derivedPrefixFor, handleEnlargeTask, loadShotFromMatte, primeStoredEnlargement, queueEnlargements } from "./enlarge";
@@ -28,7 +28,7 @@ import { DISPATCH_DEADLINE_SEC } from "@catalog/core/tasks";
 import { resolvePhoto } from "./auto-resolve";
 import { recordCost } from "@catalog/core/spend";
 import type { HandleOptions, HandleResult } from "../server";
-import { enqueueFinalize, photoConcurrency, refreshBatchProgress, type CatalogDeps } from "./deps";
+import { enqueueFinalize, photoConcurrency, refreshBatchProgress, topUpWindow, type CatalogDeps } from "./deps";
 
 /** The first wait matches the matting breaker's cool-down, so the retry reaches a half-open service. */
 export const MATTE_RETRY_WAIT_MS = BREAKER_COOLDOWN_MS;
@@ -245,14 +245,14 @@ export async function handleChunkTask(rawDeps: CatalogDeps, body: Record<string,
     }
     const prefix = batchPrefix(batch.brandSlug,batch.id,batch.isTest);
     limitDeliveryBackoff(batch,deadlineAt-QA_BACKOFF_DEADLINE_MARGIN_MS,deps.now);
-    // Review #8: UPSCALE_MODEL changed since this chunk's photos were enlarged. Their x2 images (or failures) belong to
+    // UPSCALE_MODEL changed since this chunk's photos were enlarged. Their x2 images (or failures) belong to
     // another upscaler: they are queued again for the configured one and the chunk parks, so the render never holds
     // them for it and never renders with the other model's image.
     if (chunk.stage === "render" && deps.upscaler) {
       const requeued = await requeueOtherUpscaler(deps.upscaler.model);
       if (requeued === "lost") return answer(200,"lost");
       if (requeued === "parked") {
-        await dispatchChunks(deps.db,deps.enqueue,batch.id,{now:deps.now(),log:deps.log,...(deps.chunkWindow ? {window:deps.chunkWindow}:{})});
+        await topUpWindow(deps,batch.id);
         return answer(200,"done","enlarging");
       }
     }
@@ -539,7 +539,7 @@ export async function handleChunkTask(rawDeps: CatalogDeps, body: Record<string,
         // Its slot is free for the batch's next chunk; the enlarge task that settles its last photo queues it again.
         outcome = "enlarging";
         await resendUnstarted();
-        await dispatchChunks(deps.db,deps.enqueue,batch.id,{now:deps.now(),log:deps.log,...(deps.chunkWindow ? {window:deps.chunkWindow}:{})});
+        await topUpWindow(deps,batch.id);
       } else await dispatchNext(advanced);
     } else { const completed = await deps.db.update(catalogChunks).set({status:"done",taskName:null,leaseUntil:null,finishedAt:deps.now()}).where(ownsClaim()).returning({id:catalogChunks.id}); if (!completed.length) return answer(200,"lost"); await finish(); }
     deps.log("chunk delivered",{batchId:batch.id,chunkId:chunk.id,stage:chunk.stage,attempt:chunk.attempt,durationMs:+deps.now()-+started,mattingMs,renderMs});
@@ -566,7 +566,7 @@ export async function handleChunkTask(rawDeps: CatalogDeps, body: Record<string,
     stopHeartbeat();
   }
   /**
-   * Review #8: the chunk's photos with pending outputs whose enlargement belongs to another upscaler than `model` (made,
+   * The chunk's photos with pending outputs whose enlargement belongs to another upscaler than `model` (made,
    * failed or queued under it) are queued again for `model` (next round: the step the park takes), and the chunk
    * parks under its own lock while any of them is still queued, as the matte stage's park does. "none": nothing to
    * re-queue, or every re-queued photo settled before the park (the render goes on).
@@ -627,7 +627,7 @@ export async function handleChunkTask(rawDeps: CatalogDeps, body: Record<string,
     // Spec 15 E5: a finished chunk frees a slot in the batch's window. Spec 17 G4: a dropped task is re-sent first.
     else {
       await resendUnstarted();
-      await dispatchChunks(deps.db,deps.enqueue,chunk!.batchId,{now:deps.now(),log:deps.log,...(deps.chunkWindow ? {window:deps.chunkWindow}:{})});
+      await topUpWindow(deps,chunk!.batchId);
     }
   }
 }

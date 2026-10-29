@@ -29,7 +29,7 @@ export interface ModelShape {
 export const F2_UPSCALE_MS = 7_000;
 /**
  * Spec 18 3.3.8: one upscale's time, `UPSCALE_P50_S` (whole seconds, the measured p50 of the H1 table, infra/lib/shape.sh
- * UPSCALE_P50_S_* rows); unset or invalid keeps the F2 calibration's 7 s. The 2026-10-29 load measured about 121 s on CPU.
+ * UPSCALE_P50_S_* rows); unset or invalid keeps the F2 calibration's 7 s.
  */
 export function upscaleP50Ms(env: NodeJS.ProcessEnv = process.env): number {
   const s = Number(env.UPSCALE_P50_S?.trim());

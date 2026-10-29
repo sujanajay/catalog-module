@@ -85,7 +85,7 @@ describe("spec 18 3.3.8: the enlarge queue in the model", () => {
     expect(r.enlarge.unparks).toBe(r.enlarge.parks);
     expect(r.mattedTwice).toBe(0);
     expect(r.maxActiveChunks.bulk).toBeLessThanOrEqual(h3.bulkWindow);
-    // About 500 enlargements at 0.1 per second: at least 80 minutes, against 12 to 15 with the old inline 7 s.
+    // About 500 enlargements at 0.1 per second: at least 80 minutes.
     expect(r.drainedAtMs.bulk! / MIN).toBeGreaterThan(80);
     expect(Number.isFinite(r.drainedAtMs.bulk!)).toBe(true);
   }, 120_000);

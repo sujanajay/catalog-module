@@ -11,6 +11,7 @@ import { MattingClient, mattingClientFromEnv, matteFor } from "@catalog/core/cat
 import { prepare, renderAllChannels } from "@catalog/core/catalog/render";
 import { storedUpscaler, upscaleConfigFromEnv, upscalerId, type Upscaler } from "@catalog/core/catalog/upscale";
 import { ENLARGE_TASK_MAX_ATTEMPTS } from "@catalog/core/catalog/pipeline/enlargement";
+import { dispatchChunks } from "@catalog/core/catalog/pipeline/dispatch";
 import { workerEnlargeCall, type EnlargeCall } from "./enlarge";
 import type { ResolvedPolicy } from "@catalog/core/catalog/types";
 import * as storage from "@catalog/core/storage";
@@ -86,6 +87,10 @@ export function workerCatalogDeps(db: Db): CatalogDeps {
 export const CATALOG_TASK_LEASE_MS=(DISPATCH_DEADLINE_SEC+60)*1000;
 // Spec 18 H4: the one finalize request lives in core, so the web's Add SKU ids route asks the same way.
 export { enqueueFinalize, FINALIZE_ENQUEUE_LEASE_MS, finalizeEnqueueExpired, finalizePendingFlag } from "@catalog/core/catalog/finalize-request";
+/** Tops up the batch's chunk window (dispatchChunks) with the delivery's clock, log and window override. */
+export function topUpWindow(deps: Pick<CatalogDeps, "db" | "enqueue" | "now" | "log" | "chunkWindow">, batchId: string): Promise<number> {
+  return dispatchChunks(deps.db, deps.enqueue, batchId, { now: deps.now(), log: deps.log, ...(deps.chunkWindow ? { window: deps.chunkWindow } : {}) });
+}
 /** Spec 15 E7: the newest samples of the images made that the batch page's measured time is read from. */
 export const PROCESSING_RATE_SAMPLES = 5;
 export async function refreshBatchProgress(db:Db,batchId:string,now:Date=new Date()):Promise<void> {

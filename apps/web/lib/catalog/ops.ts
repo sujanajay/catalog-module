@@ -10,7 +10,7 @@
 // read only when asked for.
 import { and, desc, eq, gte, inArray, isNotNull, or, sql } from "drizzle-orm";
 import { catalogBatches, catalogChunks, catalogSourceImages } from "@catalog/core/db/schema";
-import { ENLARGE_TASK_MAX_ATTEMPTS } from "@catalog/core/catalog/pipeline/enlargement";
+import { photoEnlargementFailed, photoEnlargementQueued } from "@catalog/core/catalog/pipeline/enlargement";
 import type { BatchStatus } from "@catalog/core/catalog/types";
 import { batchCostAttribution, batchCostByEngine, batchCostByStage, brandCostTotals, dayCostTotals, BRAND_REPORT_DAYS } from "@catalog/core/catalog/cost-report";
 import { db, type Db } from "../db";
@@ -227,8 +227,8 @@ export async function healthSummary(conn: Db = db()): Promise<HealthSummary> {
   // Spec 18: the photos of active batches by enlargement state (pipeline/enlargement.ts), on the batch_id index.
   const [x2] = await conn
     .select({
-      waiting: sql<string>`count(*) FILTER (WHERE ${catalogSourceImages.x2Model} IS NOT NULL AND ${catalogSourceImages.x2Uri} IS NULL AND ${catalogSourceImages.x2Attempts} < ${ENLARGE_TASK_MAX_ATTEMPTS})`,
-      failed: sql<string>`count(*) FILTER (WHERE ${catalogSourceImages.x2Model} IS NOT NULL AND ${catalogSourceImages.x2Uri} IS NULL AND ${catalogSourceImages.x2Attempts} >= ${ENLARGE_TASK_MAX_ATTEMPTS})`,
+      waiting: sql<string>`count(*) FILTER (WHERE ${photoEnlargementQueued()})`,
+      failed: sql<string>`count(*) FILTER (WHERE ${photoEnlargementFailed()})`,
     })
     .from(catalogSourceImages)
     .where(inArray(catalogSourceImages.batchId, conn.select({ id: catalogBatches.id }).from(catalogBatches).where(inArray(catalogBatches.status, [...ACTIVE_STATUSES]))));

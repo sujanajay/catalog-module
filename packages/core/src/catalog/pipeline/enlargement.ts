@@ -56,6 +56,11 @@ export function photoEnlargementQueued(): SQL {
   return sql`${catalogSourceImages.x2Model} IS NOT NULL AND ${catalogSourceImages.x2Uri} IS NULL AND ${catalogSourceImages.x2Attempts} < ${ENLARGE_TASK_MAX_ATTEMPTS}`;
 }
 
+/** A photo whose enlargement failed (every attempt spent, no x2 image): photoEnlargementState's "failed". */
+export function photoEnlargementFailed(): SQL {
+  return sql`${catalogSourceImages.x2Model} IS NOT NULL AND ${catalogSourceImages.x2Uri} IS NULL AND ${catalogSourceImages.x2Attempts} >= ${ENLARGE_TASK_MAX_ATTEMPTS}`;
+}
+
 /**
  * The photos of the current catalog_chunks row (in an UPDATE or SELECT of catalog_chunks): its products' photos, or
  * only its own photo list when it has one.
