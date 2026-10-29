@@ -212,7 +212,7 @@ shape picked from it passes `shape_check`. As shipped:
    `<batchPrefix>/derived/<pathKey>/<pathKey>_<n>.<upscaler>.x2.jpg` in the private assets bucket (the key names the
    upscaler, so another model's image is another object; 2026-10-29 review; as shipped `<upscaler>` is the upscaler
    id lower-cased with anything outside `a-z0-9.-` replaced by `-`). A stored image of another upscaler is re-queued
-   at the render stage for the configured one (`requeueOtherUpscaler` in `chunk.ts`), never primed. New
+   at the render stage for the configured one (`requeueEnlargementGaps` in `chunk.ts`), never primed. New
    `enlargedPath(prefix, pathKey, n, upscaler)` in `naming.ts` next to `derivedPath`.
 4. Write `x2_uri`, `x2_model`, clear `x2_error`; one cost ledger row (stage `upscale`, kind `upscale_call`, engine
    `cpu`, the service ms).
@@ -345,7 +345,7 @@ stored; the others sit beside it (`enlargedSibling`, suffix `.<upscaler>.x<facto
 job's state (queued, done, failed, attempts, claim). Each enlarge delivery makes at most one image (one service call,
 so each call has the whole delivery deadline); when another image of the job is still missing it answers 503
 `next_image` without counting an attempt, and the queue's retry makes the next one (the lanes' max-attempts 8 -> 9).
-`requeueOtherUpscaler` moves a job whose ids are not the configured route to it (`jobForRoute`, each image keeps its
+`requeueEnlargementGaps` moves a job whose ids are not the configured route to it (`jobForRoute`, each image keeps its
 factor).
 
 3.6.5 Crop before upscaling. The enlarge task sends only the product's region: the union of `shotGeometry`'s box with
@@ -356,13 +356,29 @@ the service's tile overlap), clamped to the photo (`shotEnlargementRegion`). It 
 `enlargement_failed`). Tested exactly: a nearest-neighbour fake upscaler gives byte-identical outputs from the region
 and from the whole photo, at x2 and x4. With no product found, or no stored matte, the whole photo is sent.
 
-3.6.6 Shape (`infra/lib/shape.sh` `upscale_check`). `UPSCALE_X4_TIME_RATIO` 1.3 (x4 over x2 on the same image: 1.04
-in the Cloud Run bake-off, 1.193 on a 4-thread laptop with a worst pair of 1.283). Timeout rule on the slower model:
-2 x ceil(`UPSCALE_MAX_PIXELS` / 1e6 x 104.17 s x 1.3) <= `UPSCALE_TIMEOUT_S`, so `UPSCALE_MAX_PIXELS` 8,000,000 ->
-6,400,000 (2 x 867 = 1734 s <= 1740 s); it now bounds the product region, not the photo. Memory rule: 4096 MiB
-resident + 160 B per input pixel (measured about 86 B locally) <= 80% of `UPSCALE_MEMORY`: 5073 MiB of 16 GiB. The
-deploy gate's probe calls both models (`--model=swinir-x2,swinir-x4`) and requires each to be its exact scale and
-byte-identical on a rerun; its budget adds the x4 calls at 1.3 x the x2 p95.
+3.6.6 Shape (`infra/lib/shape.sh` `upscale_check`). `UPSCALE_X4_TIME_RATIO` 1.3 (x4 over x2 on the same image: about
+1.0 in the bake-off and 1.193 on a 4-thread laptop with a worst pair of 1.283; both laptop runs, no Cloud Run x4 time
+exists yet). Each model has its own pixel cap (2026-10-29 review), checked against the timeout with its own time per
+pixel: x2 2 x ceil(`UPSCALE_MAX_PIXELS` / 1e6 x 104.17 s) <= `UPSCALE_TIMEOUT_S`, so `UPSCALE_MAX_PIXELS` 8,000,000
+(1668 s); x4 2 x ceil(`UPSCALE_MAX_PIXELS_X4` / 1e6 x 104.17 s x 1.3) <= `UPSCALE_TIMEOUT_S`, so
+`UPSCALE_MAX_PIXELS_X4` 6,400,000 (2 x 867 = 1734 s <= 1740 s). The caps bound the product region, not the photo. One
+shared 6.4 MP cap was refused in review: a 2500 px product on Centrepoint at 1.2x crops to 6.57 MP and was held,
+although x2 fits it. Memory rule per cap: 4096 MiB resident + 160 B per input pixel (measured about 86 B locally) <=
+80% of `UPSCALE_MEMORY`: about 5317 MiB at 8 MP, of 16 GiB. The worker and the service apply the same caps
+(`upscaleMaxPixels`, `app.py upscale_max_pixels`). The deploy gate's probe calls both models
+(`--model=swinir-x2,swinir-x4`) and requires each to be its exact scale and byte-identical on a rerun; its budget
+adds the x4 calls at 1.3 x the x2 p95, and `--x4-ratio` fails the gate when an x4 p95 exceeds 1.3 x the x2 p95 at a
+size.
+
+3.6.7 Stored-image identity and gaps (2026-10-29 review). A stored enlarged image is reused only when it was made from
+the same source sha256, by the same upscaler, from the same matte (`matte` metadata, the matte URI) and the same crop
+region. A second matte or a passthrough repair changes the region, so the old image is stale: the enlarge task makes
+a new one, never holds and never reuses the old one. At the render stage the chunk lists every gap a re-run could
+close (a photo whose job is off the current route, does not cover the needed models, is still queued, or is done
+with a stale or missing image) and re-queues it before it parks, so a deploy mid-batch, a threshold change or
+switching x4 on enqueues the missing enlargements instead of holding. Only a job that failed after all its attempts
+holds the product (`enlargement_failed`). When x2 was stored and x4 then failed terminally, the stored x2 image is
+kept, so channels that need only x2 still render.
 
 ## 4. Data and state changes
 
@@ -411,7 +427,7 @@ table and `shape_check` agree. The live shape at the start of this spec is spec 
 
 Chosen shape (2026-10-29, from the ladder in `services/matting/README.md` "Measured on CPU"; PR "measured table +
 shape defaults"): `UPSCALE_SERVICE=dedicated`, `UPSCALE_CPU_VCPU=4`, `UPSCALE_THREADS=4`, `UPSCALE_CONCURRENCY=1`,
-`UPSCALE_MAX_INSTANCES=16`, `UPSCALE_MEMORY=16Gi`, `UPSCALE_TIMEOUT_S=1740` and `UPSCALE_MAX_PIXELS=8000000` (6400000
+`UPSCALE_MAX_INSTANCES=16`, `UPSCALE_MEMORY=16Gi`, `UPSCALE_TIMEOUT_S=1740` and `UPSCALE_MAX_PIXELS=8000000` (x2; `UPSCALE_MAX_PIXELS_X4=6400000` for x4
 since spec 18 quality, 3.6.6, with `UPSCALE_X4_TIME_RATIO=1.3`, `UPSCALE_RESIDENT_MIB=4096`,
 `UPSCALE_X4_BYTES_PER_PIXEL=160`, `UPSCALE_MODEL_X4=swinir-x4` and `UPSCALE_MIN_SCALE=1`; fixed
 after the PR review of 2026-10-29: the enlarge task sends the whole photo, so the timeout must cover the largest photo
@@ -516,9 +532,15 @@ Known risks, stated, not solved here:
 - Throughput on CPU: about 2 minutes per 800x1200 photo x 16 slots is about 8 photos per minute of enlargement; 880
   such photos take about 2 hours; 7,000 products are in the order of days. Reported; the GPU follow-up fixes speed.
 - One enlargement must fit one task delivery (at most 30 minutes, the Cloud Tasks maximum): `UPSCALE_MAX_PIXELS` is
-  sized to the timeout (8 MP on 2026-10-29), and larger photos are held with a reason before any call. The estimate
+  sized to the timeout per model (x2 8 MP, x4 6.4 MP on 2026-10-29), and larger regions are held with a reason before
+  any call. The estimate
   is extrapolated from two probe sizes (0.96 and 2.56 MP); a probe at the largest size would confirm it.
 - Older batches made with the silent fallback stay as they are; the invariant is scoped by `options.enlargement`.
+- The queue rate rule and the attempt count assume one x2 call per photo (2026-10-29 review, left as is): x4 and two-call
+  photos mean a backlog and slower batches, not overload; when 503s or 429s use up the queue's attempts first, the
+  photo waits for the 60 min stale re-send, which is slower but never a hold.
+- Worker memory for stored x4 images (48 B per region pixel, all photos of a product primed at once) is in no shape
+  rule; the stored JPEG is now decoded per crop only, and the worst case was not measured.
 
 Later options:
 - A GPU upscaler once the L4 quota allows it (a quota increase is the owner's call): the same queue and stored x2,
