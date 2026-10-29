@@ -15,6 +15,35 @@ import { verifyPublicSettled } from "@catalog/core/catalog/pipeline/verify";
 import { recheckSheet } from "@catalog/core/catalog/recheck/index";
 import { localFixture, sheetFixture } from "./catalog-real-fixtures";
 import { runRealFixture, type VerificationManifest } from "./catalog-real-run";
+import { enlargementOptionFromEnv } from "@catalog/core/catalog/pipeline/enlargement";
+import { faultFetch, upscaleBadInputRule, type FaultRule } from "@catalog/core/catalog/load/fault-rules";
+import type { Db } from "@catalog/core/db/client";
+import { workerCatalogDeps } from "./catalog/deps";
+import { cannedQa } from "./catalog/qa-mock";
+import { workerEnlargeCall, workerEnlargeProbe } from "./catalog/enlarge";
+import { runEnlargementSmoke } from "./catalog/enlargement-smoke";
+
+/**
+ * Spec 18 lifecycle (plan 7b): the enlargement case, when the upscaler is on. The x4 and x2 fixtures through the
+ * deployed catalog-upscale, the x4 photo's calls answered 8 x 400 in process (the fault-proxy rule under the client),
+ * held, then made by Try again. The batch is cleaned up; the brand-level enlarged objects stay under catalog-test/.
+ */
+async function enlargementCase(db: Db, run: string, brand: { slug: string; name: string }) {
+  const route = enlargementOptionFromEnv();
+  if (!route) return { status: "skipped", reason: "The upscaler is off (UPSCALE_MODEL)." };
+  const rules: FaultRule[] = [];
+  const deps = { ...workerCatalogDeps(db), ...cannedQa, enlarge: workerEnlargeCall(route.model, process.env, { fetch: faultFetch(rules, fetch) }), enlargeProbe: workerEnlargeProbe(process.env) };
+  let batchId: string | undefined;
+  try {
+    const evidence = await runEnlargementSmoke({ deps, route, brandSlug: brand.slug, brandName: brand.name, name: `catalog-test-enlarge-${run}`, channels: ["trendyol"], faultOn: route.x4Model ? "x4" : "x2",
+      fault: (productId) => rules.push(upscaleBadInputRule(productId)), backoffMs: 10_000, budgetMs: Number(process.env.SMOKE_ENLARGE_BUDGET_MS ?? 45 * 60_000), log: (line) => console.info(`smoke: enlargement: ${line}`) });
+    batchId = evidence.batchId;
+    return { status: "passed", ...evidence };
+  } finally {
+    const [made] = await db.select({ id: catalogBatches.id }).from(catalogBatches).where(inArray(catalogBatches.name, [`catalog-test-enlarge-${run}`]));
+    if (made ?? batchId) console.info(JSON.stringify({ enlargementCleanup: await cleanupTestBatches(db, storage, [made?.id ?? batchId!]) }));
+  }
+}
 
 async function main() {
   const [mode, file] = process.argv.slice(2);
@@ -63,8 +92,10 @@ async function main() {
       evidence.push(await runRealFixture(db,fixture,path.join(out,brand.slug),fileURLToPath(import.meta.url)));
       console.info(`smoke: ${brand.name}: passed`);
     }
-    await writeFile(path.join(out,"summary.json"),JSON.stringify({run,passed:evidence.map(e=>e.brand),evidence,skipped},null,2));
     assert(evidence.length,"No actual brand has an available real image set. Smoke did not run.");
+    const enlargement=await enlargementCase(db,run,{slug:evidence[0]!.slug,name:evidence[0]!.brand});
+    console.info(`smoke: enlargement: ${enlargement.status}`);
+    await writeFile(path.join(out,"summary.json"),JSON.stringify({run,passed:evidence.map(e=>e.brand),evidence,skipped,enlargement},null,2));
     await writeFile(path.join(out,"report.html"),`<!doctype html><meta charset="utf-8"><title>Per-brand catalog smoke</title><h1>Per-brand catalog smoke</h1><ul>${evidence.map(e=>`<li><a href="${e.slug}/report.html">${e.brand}</a>: passed, ${e.first.verified} verified, ${e.changed} changed, ${e.removed} removed; cleanup ${e.cleanup}; quality check: ${e.qa}</li>`).join("")}</ul><h2>Skipped (no real image set)</h2><ul>${skipped.map(s=>`<li>${s.brand}: skipped</li>`).join("")}</ul>`);
     console.info(JSON.stringify({run,out,passed:evidence.map(e=>e.brand),skipped:skipped.map(s=>s.brand),evidence}));
   } finally {await closeDb();}

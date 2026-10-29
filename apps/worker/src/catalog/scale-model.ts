@@ -67,7 +67,7 @@ export interface ModelReport {
   judge: { calls: number; rateLimited: number; failedAfterRetries: number };
   renderOverlapsMatteMs: Record<string, number>;
   /** Spec 18: enlarge tasks run, chunks parked and unparked, and renders that started with an enlargement unsettled (must be 0). */
-  enlarge: { tasks: number; parks: number; unparks: number; renderedEarly: number; maxQueueDepth: Record<"operator" | "bulk", number> };
+  enlarge: { tasks: number; parks: number; unparks: number; renderedEarly: number; /** The most chunks parked at once. */ maxParked: number; maxQueueDepth: Record<"operator" | "bulk", number> };
 }
 
 /** A seeded random source (mulberry32), so a run is repeatable. */

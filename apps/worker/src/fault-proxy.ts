@@ -37,7 +37,9 @@ function startFaultProxy(target: string, port: number, initial: FaultRule[]): ht
         res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify(rules));
         return;
       }
-      const rule = pickFault(rules, { method, path: requestPath }, counters);
+      const reqHeaders: Record<string, string> = {};
+      for (const [k, v] of Object.entries(req.headers)) if (typeof v === "string") reqHeaders[k] = v;
+      const rule = pickFault(rules, { method, path: requestPath, headers: reqHeaders }, counters);
       if (rule) log({ event: "fault", rule: rule.name, method, path: requestPath.split("?")[0], action: rule.action });
       if (rule?.action.hang) return;
       if (rule?.action.delayMs) await new Promise(resolve => setTimeout(resolve, rule.action.delayMs));

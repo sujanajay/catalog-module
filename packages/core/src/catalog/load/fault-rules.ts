@@ -17,6 +17,8 @@ export interface FaultRule {
   method?: string;
   /** Regular expression tested against the request path (with query). */
   path: string;
+  /** Match only requests carrying this header value (for example one product's trace header, x-catalog-product). */
+  header?: { name: string; value: string };
   /** Fire on every `every`-th matching call (1 = every call). Default 1. */
   every?: number;
   /** Fire on this share (0..1) of matching calls, decided by `random`. Ignored when `every` is set. */
@@ -26,7 +28,7 @@ export interface FaultRule {
   action: FaultAction;
 }
 
-export interface FaultRequest { method: string; path: string }
+export interface FaultRequest { method: string; path: string; /** Lower-case header names. */ headers?: Record<string, string | undefined> }
 
 /** Matching state per rule: how many calls matched (counted before the decision). */
 export type FaultCounters = Map<string, number>;
@@ -39,6 +41,7 @@ export function pickFault(rules: readonly FaultRule[], req: FaultRequest, counte
   for (const rule of rules) {
     if (rule.method && rule.method.toUpperCase() !== req.method.toUpperCase()) continue;
     if (!new RegExp(rule.path).test(req.path)) continue;
+    if (rule.header && req.headers?.[rule.header.name.toLowerCase()] !== rule.header.value) continue;
     const seen = (counters.get(rule.name) ?? 0) + 1;
     counters.set(rule.name, seen);
     if (rule.limit !== undefined && seen > rule.limit) continue;
@@ -59,7 +62,32 @@ export const FAULT_SCENARIOS: Record<string, FaultRule[]> = {
   lock_sweeper: [{ name: "matte_hang", method: "POST", path: "^/matte", action: { hang: true } }],
   openrouter_down: [{ name: "chat_500", method: "POST", path: "/chat/completions", action: { status: 500 } }],
   supabase_broken_link: [{ name: "link_404", method: "GET", path: ".*", limit: 1, action: { status: 404 } }],
+  // Spec 18 lifecycle (the enlargement smoke): 8 x 400 on the x4 calls, then forwarded (a Try again succeeds).
+  upscale_bad_input: [{ name: "upscale_400", method: "POST", path: "^/upscale\\?.*scale=4", limit: 8, action: { status: 400 } }],
 };
+
+/** Spec 18 lifecycle (the enlargement smoke): one product's `/upscale` answers 400 (bad input) 8 times, then is forwarded. */
+export function upscaleBadInputRule(productId: string, times = 8): FaultRule {
+  return { name: "upscale_400_one_photo", method: "POST", path: "^/upscale", header: { name: "x-catalog-product", value: productId }, limit: times, action: { status: 400 } };
+}
+
+/**
+ * The same rules in process: a fetch that answers a matching request as the proxy would (a status, a delay, a held
+ * request) and forwards everything else to `inner`. The enlargement smoke puts it under the worker's upscale client.
+ */
+export function faultFetch(rules: readonly FaultRule[], inner: typeof fetch): typeof fetch {
+  const counters: FaultCounters = new Map();
+  return (async (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
+    const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url);
+    const headers: Record<string, string> = {};
+    new Headers(init?.headers).forEach((value, key) => { headers[key] = value; });
+    const rule = pickFault(rules, { method: init?.method ?? "GET", path: `${url.pathname}${url.search}`, headers }, counters);
+    if (rule?.action.hang) return new Promise<Response>(() => {});
+    if (rule?.action.delayMs) await new Promise(resolve => setTimeout(resolve, rule.action.delayMs));
+    if (rule?.action.status) return new Response(`fault-proxy: ${rule.name}`, { status: rule.action.status, headers: { "content-type": "text/plain" } });
+    return inner(input, init);
+  }) as typeof fetch;
+}
 
 /** Parse and check a rules list (from a JSON file or the proxy's control endpoint). */
 export function parseFaultRules(value: unknown): FaultRule[] {
