@@ -70,17 +70,29 @@ retry() {
   done
 }
 
-# Exit 0 when the JSON object on stdin has key $2 equal to the JSON in file $1 (key order ignored).
+# json_key_matches <json> <file> <key>: compares key <key> of the JSON text <json> (gcloud output) with the JSON in
+# <file> as a set: object key order, array order (lifecycle rules, matchesPrefix) and whitespace are ignored.
+# Exit 0 when equal; 1 when they differ, with both sides printed in canonical form so an UPDATE says what differed;
+# 2 when either side is not JSON. The gcloud output reaches node through the environment, not a pipe or an argument.
 json_key_matches() {
-  node -e '
+  JSON_CURRENT=$1 node -e '
     const fs = require("fs");
-    const canon = (v) => Array.isArray(v) ? v.map(canon)
+    const canon = (v) => Array.isArray(v) ? v.map(canon).sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)))
       : v && typeof v === "object" ? Object.fromEntries(Object.keys(v).sort().map((k) => [k, canon(v[k])])) : v;
-    const raw = fs.readFileSync(0, "utf8").trim();
-    const cur = (JSON.parse(raw || "null") ?? {})[process.argv[2]] ?? null;
-    const want = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
-    process.exit(JSON.stringify(canon(cur)) === JSON.stringify(canon(want)) ? 0 : 1);
-  ' "$1" "$2"
+    let cur, want;
+    try {
+      cur = (JSON.parse(process.env.JSON_CURRENT.replace(/^﻿/, "").trim() || "null") ?? {})[process.argv[2]] ?? null;
+      want = JSON.parse(fs.readFileSync(process.argv[1], "utf8").replace(/^﻿/, ""));
+    } catch (e) {
+      console.error(`[bootstrap]        cannot compare: ${e.message}`);
+      process.exit(2);
+    }
+    const [a, b] = [JSON.stringify(canon(cur)), JSON.stringify(canon(want))];
+    if (a === b) process.exit(0);
+    console.log(`[bootstrap]        live: ${a}`);
+    console.log(`[bootstrap]        file: ${b}`);
+    process.exit(1);
+  ' "$2" "$3"
 }
 
 command -v node >/dev/null || die "node is required (used to compare JSON configs)"
@@ -270,16 +282,22 @@ bucket_binding() { # bucket member role
   fi
 }
 
-# Lifecycle from a JSON file; SKIP when the bucket already has exactly that configuration.
+# Lifecycle from a JSON file; SKIP when the bucket already has that configuration (the same rule set). A describe
+# that fails, or output that is not JSON, stops the run instead of rewriting the lifecycle: before 2026-10-29 both
+# counted as a difference (docs/solutions/infra-bootstrap.md).
 ensure_lifecycle() { # bucket file
-  local bucket="$1" file="$2"
-  if gcv storage buckets describe "$bucket" --project="$PROJECT" --format='json(lifecycle_config)' \
-      | json_key_matches "$file" lifecycle_config; then
-    skip "lifecycle on $bucket ($file)"
-  else
-    update "lifecycle on $bucket from $file"
-    gcloud storage buckets update "$bucket" --project="$PROJECT" --lifecycle-file="$file" >/dev/null
-  fi
+  local bucket="$1" file="$2" current detail status=0
+  current=$(gcv storage buckets describe "$bucket" --project="$PROJECT" --format='json(lifecycle_config)') \
+    || die "cannot read the lifecycle of $bucket (gcloud storage buckets describe failed); nothing was changed"
+  detail=$(json_key_matches "$current" "$file" lifecycle_config) || status=$?
+  case "$status" in
+    0) skip "lifecycle on $bucket ($file)" ;;
+    1)
+      update "lifecycle on $bucket from $file"
+      printf '%s\n' "$detail"
+      gcloud storage buckets update "$bucket" --project="$PROJECT" --lifecycle-file="$file" >/dev/null ;;
+    *) die "cannot compare the lifecycle of $bucket with $file (not JSON); nothing was changed" ;;
+  esac
 }
 
 # CORS from infra/cors.json only when the bucket has none: deploy.sh narrows the origin to the web

@@ -28,9 +28,27 @@ an org policy or BigQuery rights in another project).
 - IAM existence checks use `get-iam-policy --flatten=bindings[].members
   --format='csv[no-heading](bindings.role,bindings.members)'` and an exact line match, rather than
   `--filter` on member strings with `:`/`@`.
-- Lifecycle configs are compared as JSON (key order ignored, via node) against the file, so a re-run
-  is SKIP and an edited file is applied as UPDATE. `gcloud storage buckets describe
-  --format='json(lifecycle_config)'` prints `null` when the bucket has no lifecycle.
+- Lifecycle configs are compared as JSON against the file as a rule set (object key order, array order of
+  rules and `matchesPrefix`, whitespace and CRLF ignored, via node), so a re-run is SKIP and an edited file
+  is applied as UPDATE, with both canonical sides printed under the UPDATE line. `gcloud storage buckets
+  describe --format='json(lifecycle_config)'` prints `null` when the bucket has no lifecycle. A describe
+  that fails, or output that is not JSON, stops the run (exit 1) and changes nothing
+  (`infra/tests/bootstrap-lifecycle.test.mjs`).
+- **The assets lifecycle was rewritten on every bootstrap run (found 2026-10-29).** Until then a describe
+  that failed or printed anything but the expected JSON counted as "different", so the run printed
+  `UPDATE lifecycle on gs://image-links-agent-assets` and re-applied `infra/lifecycle-assets.json`, which
+  has not changed since spec 02. The admin activity audit log (`resource.type="gcs_bucket"`, method
+  `storage.buckets.update`) shows exactly four bucket updates in the six days before 2026-10-29, all on
+  `image-links-agent-assets`, all gcloud 589 from the operator's laptop, each a few minutes before a
+  deploy: 2026-10-28 13:52:49Z (interactive terminal, no agent name), 15:42:39Z and 16:39:46Z, and
+  2026-10-29 08:22:00Z (the bootstrap run of the spec 18 production deploy, which logged that UPDATE).
+  Nothing else updated the bucket between them, so the "unknown origin" lifecycle change of 2026-10-28
+  13:52Z (spec 18 section 13 owner item) is this bootstrap re-apply, with the repo file's content: it
+  was on the assets bucket, not the public one (the public bucket has no update in that window), and it
+  changed nothing in effect. The exact false difference was not reproduced afterwards: on 2026-10-29
+  the old comparison returned SKIP for both buckets against their live output, and 30 piped runs gave
+  no failure. The new comparison prints both sides on any UPDATE and refuses unreadable output, so a
+  repeat now names its cause instead of rewriting the lifecycle.
 - GCS lifecycle conditions match only by prefix (`matchesPrefix`) or suffix (`matchesSuffix`), never by
   a folder in the middle of the name. Rules for `/uploads/`, `/derived/` and `/staging/` under
   `catalog/<brand>/<batch>/` therefore cannot be written as conditions; `lifecycle-assets.json` only

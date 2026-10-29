@@ -27,8 +27,9 @@
 # CATALOG_PREVIEW=1 (infra/deploy-preview.sh): the preview stack, plus the GPU service of this commit as a no-traffic
 # candidate of catalog-matting-gpu (probed, traffic never shifted) that the preview worker calls.
 # Spec 18: UPSCALE_SERVICE=dedicated sends the worker's enlargements to catalog-upscale (the enlarge task, spec 18 H3;
-# the matting client refuses a dedicated UPSCALE_URL). shape.sh refuses it until its shape is measured;
-# UPSCALE_SERVICE=cpu (today, and the rollback) keeps them on catalog-matting.
+# the matting client refuses a dedicated UPSCALE_URL); the default since 2026-10-29 (16 x 4 vCPU, measured), and
+# shape.sh refuses it for an unmeasured shape. UPSCALE_SERVICE=cpu (the rollback, and required with UPSCALE_MEASURE=1)
+# keeps them on catalog-matting.
 # UPSCALE_MEASURE=1 with UPSCALE_CPU_VCPU, UPSCALE_THREADS, UPSCALE_CONCURRENCY and UPSCALE_MAX_INSTANCES deploys ONLY
 # catalog-upscale, as a candidate of that shape (tag measure-<cpu>c-<threads>t-<concurrency>r): it builds only the
 # matting image if missing, skips migrations and queues, reuses every other service as it is, never rebuilds the

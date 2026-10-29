@@ -60,7 +60,7 @@ source infra/lib/shape.sh; shape_defaults
 show() { "service_\${1//-/_}"; echo "$1|$SVC_NAME|$SVC_REGION|$SVC_IMAGE|$SVC_PROBE_TIMEOUT|$SVC_DEPLOY|$SVC_SHIFT|$SVC_QUOTA_OPTIONAL|$SVC_ENV|\${SVC_PROBE[*]}"; }`;
 
 test('registry entries: regions, probes, timeouts, preview behaviour, GPU knobs', () => {
-  let r = run('entries', `${vars}\nINFERENCE_LOCK_SCOPE=session\nfor s in "\${SERVICES[@]}"; do show "$s"; done`);
+  let r = run('entries', `${vars}\nUPSCALE_SERVICE=cpu; INFERENCE_LOCK_SCOPE=session\nfor s in "\${SERVICES[@]}"; do show "$s"; done`);
   assert.equal(r.status, 0, r.err);
   const [cpu, upscale, gpu, worker, web] = lines(r.out.trim()).map((l) => l.split('|'));
   assert.deepEqual(upscale.slice(1, 7), ['catalog-upscale', 'asia-south1', 'ar/matting:t', '0', 'skip', '0'], 'not deployed while UPSCALE_SERVICE=cpu');
@@ -105,9 +105,9 @@ test('catalog-upscale: the matting image sized by the UPSCALE_* rows, only the u
   // 300 s for the job and cold start + 4 x p95 per size (warm call and one round, 2 x p95 each): 300 + 520 + 1320.
   assert.deepEqual(f.slice(1, 8), ['catalog-upscale', 'asia-south1', 'ar/matting:t', '2140', '1', '1', '0']);
   assert.equal(f[8], 'MAX_RESIDENT_SESSIONS=1,UPSCALE_CPU=1,PRELOAD_MATTE=0,ORT_INTRA_OP_THREADS=4,UPSCALE_MAX_PIXELS=24000000');
-  assert.equal(f[9], 'bash infra/lib/services.sh probe-upscale 2140 swinir-x2 800x1200,1600x1600 1 1 840');
+  assert.equal(f[9], 'bash infra/lib/services.sh probe-upscale 2140 swinir-x2 800x1200,1600x1600 1 1 480');
   assert.deepEqual(rest.slice(0, -1), ['--service-account=m', '--cpu=4', '--memory=16Gi', '--concurrency=1', '--min-instances=0',
-    '--max-instances=16', '--timeout=840', '--labels=app=catalog,component=upscale']);
+    '--max-instances=16', '--timeout=480', '--labels=app=catalog,component=upscale']);
   assert.equal(rest.at(-1), 'TAG=|SKIP=', 'the dedicated service uses the candidate tag');
 });
 
@@ -125,15 +125,15 @@ test('catalog-upscale: measure mode is a no-traffic candidate per shape; preview
   assert.equal(r.status, 0, r.err);
   let out = lines(r.out.trim());
   let f = out[0].split('|');
-  // One warm call and one call of the first size, each within the service timeout, plus 300 s: 300 + 2 x 840.
+  // One warm call and one call of the first size, each within the service timeout, plus 300 s: 300 + 2 x 480.
   assert.deepEqual(f.slice(5, 8), ['1', '0', '0'], 'deployed, never shifted');
-  assert.equal(f[4], '1980');
-  assert.equal(f[9], 'bash infra/lib/services.sh probe-upscale 1980 swinir-x2 800x1200 1 1 840');
+  assert.equal(f[4], '1260');
+  assert.equal(f[9], 'bash infra/lib/services.sh probe-upscale 1260 swinir-x2 800x1200 1 1 480');
   assert.equal(out.at(-1), 'TAG=measure-8c-8t-2r|SKIP=', 'each rung keeps its own tag URL');
   r = run('upscale-preview', `${vars}\n${measured}\nCATALOG_PREVIEW=1\n${upscaleArgs}`);
   f = lines(r.out.trim())[0].split('|');
   assert.deepEqual(f.slice(5, 7), ['0', '1'], 'the preview reuses the live catalog-upscale');
-  r = run('upscale-preview-measure', `${vars}\nCATALOG_PREVIEW=1; UPSCALE_MEASURE=1\n${upscaleArgs}`);
+  r = run('upscale-preview-measure', `${vars}\nUPSCALE_SERVICE=cpu; CATALOG_PREVIEW=1; UPSCALE_MEASURE=1\n${upscaleArgs}`);
   assert.equal(lines(r.out.trim())[0].split('|')[5], 'skip', 'the preview never measures');
   r = run('upscale-gpu', `${vars}\nUPSCALE_SERVICE=gpu\n${upscaleArgs}`);
   out = lines(r.out.trim());
@@ -162,7 +162,7 @@ bash() { echo "PROBE_TASK_TIMEOUT=$PROBE_TASK_TIMEOUT $*"; }; export -f bash
 command bash "\${SVC_PROBE[@]:1}" https://candidate---u.run.app`);
   assert.equal(r.status, 0, r.err);
   assert.equal(r.out.trim(), 'PROBE_TASK_TIMEOUT=2140 infra/check-matting.sh --probe-upscale https://candidate---u.run.app --model=swinir-x2 '
-    + '--sizes=800x1200,1600x1600 --concurrency=1 --rounds=1 --timeout=840');
+    + '--sizes=800x1200,1600x1600 --concurrency=1 --rounds=1 --timeout=480');
 });
 
 test('deploy.sh: the worker gets catalog-upscale only with UPSCALE_SERVICE=dedicated; cpu keeps catalog-matting', () => {
@@ -196,7 +196,7 @@ deploy_service catalog-upscale; upscale_measure_summary`, {EXISTS: '0', CAND_TAG
   assert.ok(!r.calls.some((c) => c.includes('update-traffic')), 'a measure rung never moves traffic or tags');
   assert.ok(r.out.includes('NOTE: catalog-upscale was created by this rung, so this first revision serves the service URL'), r.out);
   assert.ok(lines(r.out).includes(`UPSCALE_CANDIDATE_URL=${TAG_URL}`));
-  assert.ok(lines(r.out).includes(`==> measure it: bash infra/check-matting.sh --probe-upscale ${TAG_URL} --model=swinir-x2 --sizes=800x1200,1600x1600 --concurrency=1 --rounds=3 --timeout=840`), r.out);
+  assert.ok(lines(r.out).includes(`==> measure it: bash infra/check-matting.sh --probe-upscale ${TAG_URL} --model=swinir-x2 --sizes=800x1200,1600x1600 --concurrency=1 --rounds=3 --timeout=480`), r.out);
   assert.match(r.out, /a measure rung never needs a new worker image/);
 });
 

@@ -22,7 +22,7 @@ const bash = process.env.CATALOG_BASH || gitBashPath();
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'catalog-queues-'));
 const RETRY = '--max-attempts=-1 --max-retry-duration=1800s --min-backoff=10s --max-backoff=60s --max-doublings=3';
 const INGEST_RETRY = '--max-attempts=5 --min-backoff=10s';
-const ENLARGE_RETRY = '--max-dispatches-per-second=0.1 --max-attempts=8 --max-retry-duration=0s --min-backoff=30s --max-backoff=300s --max-doublings=3';
+const ENLARGE_RETRY = '--max-dispatches-per-second=0.075 --max-attempts=8 --max-retry-duration=0s --min-backoff=30s --max-backoff=300s --max-doublings=3';
 // The shape names a caller's shell could carry into the run; each run starts without them.
 const SHAPE_ENV = ['TASKS_MAX_DISPATCHES', 'BULK_MAX_DISPATCHES', 'INGEST_MAX_DISPATCHES', 'WORKER_MAX_INSTANCES', 'WORKER_CONCURRENCY', 'CATALOG_PREVIEW',
   'ENLARGE_MAX_DISPATCHES', 'ENLARGE_BULK_MAX_DISPATCHES', 'ENLARGE_DISPATCHES_PER_SECOND'];
@@ -66,7 +66,7 @@ test('no env: before the services only the new enlarge lanes are created; after 
 
 test('spec 18: both enlarge lanes carry the rate and the retry by attempts; env changes the rate and the slots', () => {
   const env = {ENLARGE_DISPATCHES_PER_SECOND: '0.25', ENLARGE_MAX_DISPATCHES: '2', ENLARGE_BULK_MAX_DISPATCHES: '6'};
-  const retry = ENLARGE_RETRY.replace('=0.1', '=0.25');
+  const retry = ENLARGE_RETRY.replace('=0.075', '=0.25');
   assert.deepEqual(run('queues_apply_shape', {existing: LIVE_QUEUES, env}).filter((c) => c.includes('-enlarge')), [
     update('catalog-enlarge', 2, retry), update('catalog-enlarge-bulk', 6, retry),
   ]);

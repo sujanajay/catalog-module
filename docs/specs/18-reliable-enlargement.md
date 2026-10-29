@@ -349,6 +349,22 @@ a constant), `UPSCALE_SERVICE=dedicated` as a third value, `MATTING_TIMEOUT_S` (
 table and `shape_check` agree. The live shape at the start of this spec is spec 17's (shape.sh `SHAPE_DEFAULTS` at
 999ada0).
 
+Chosen shape (2026-10-29, from the ladder in `services/matting/README.md` "Measured on CPU"; PR "measured table +
+shape defaults"): `UPSCALE_SERVICE=dedicated`, `UPSCALE_CPU_VCPU=4`, `UPSCALE_THREADS=4`, `UPSCALE_CONCURRENCY=1`,
+`UPSCALE_MAX_INSTANCES=16`, `UPSCALE_MEMORY=16Gi`, `UPSCALE_TIMEOUT_S=480` (>= 2 x 216, <= 840),
+`MATTING_CPU_MAX_INSTANCES=4` (asia-south1 vCPU 96 + 16 + 64 + 11 = 187 of 190), `ENLARGE_DISPATCHES_PER_SECOND=0.075`
+per lane (Cloud Tasks paces each queue on its own, so the operator and bulk lanes together dispatch 0.15/s <= 16 x 1 /
+p50 99 s = 0.16/s; shape_check counts the rate once per lane with slots), `ENLARGE_CLIENT_WIRED=1`. New refusal:
+`UPSCALE_CONCURRENCY` above 1 for the dedicated service, because concurrency 2 gave non-identical outputs (ladder rungs
+2 and 4). Measured rows (`UPSCALE_MEASURED_ON=2026-10-29`, whole seconds rounded up, p50 / p95):
+
+| shape (vCPU, threads, conc) | 800x1200 | 1600x1600 | deterministic |
+|---|---|---|---|
+| 4C 4T 1CONC (chosen) | 99 / 100 | 215 / 216 | yes |
+| 4C 4T 2CONC | 126 / 260 | 494 / 521 | no |
+| 8C 8T 1CONC | 78 / 80 | 159 / 165 | yes, same bytes as 4 threads |
+| 8C 8T 2CONC | 79 / 103 | 168 / 342 | no |
+
 ## 9. Live verification (after the H4, H1+H2 and H3 deploys)
 
 Step 0, read-only: `gcloud auth print-access-token` works (the manager starts `gcloud auth login` itself and asks the
@@ -448,8 +464,9 @@ Later options:
 
 - [ ] H4 merged and live: load driver recheck grouped by reason with the CSV; finalize idempotent; the 13-minute wait
       explained and fixed; the MaxListeners warning gone; `docs/solutions/bucket-retention.md` written.
-- [ ] H1 merged: `--probe-upscale` exists; the README holds "Measured on CPU" with the ladder; shape.sh refuses an
+- [x] H1 merged: `--probe-upscale` exists; the README holds "Measured on CPU" with the ladder; shape.sh refuses an
       unmeasured shape, a timeout outside its bounds, a queue rate above capacity and a shape over 190 vCPU.
+      Measured table and shape defaults: 2026-10-29, section 8.
 - [ ] H2 merged and live: `catalog-upscale` takes traffic through the gate; the worker's `UPSCALE_URL` names it;
       `enlarge.ts` has retries, timeout = server + 30 s, no `/health`, no breaker.
 - [ ] H3 merged and live: migration 0005 applied; enlargement runs as durable tasks; the render reads stored x2 only;

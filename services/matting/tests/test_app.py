@@ -528,3 +528,26 @@ def test_cpu_limit_reads_the_cgroup_quota(service, monkeypatch):
     assert module.cpu_limit() == 4
     monkeypatch.setattr(module, "Path", lambda p: Fake("max 100000\n") if p == "/sys/fs/cgroup/cpu.max" else real(p))
     assert module.cpu_limit() >= 1
+
+
+def test_cpu_limit_falls_back_to_the_cgroup_v1_quota(service, monkeypatch):
+    # No cgroup v2 quota (cpu.max absent or "max"): the cgroup v1 CFS quota over its period is the limit.
+    _, module, _, _ = service
+    files = {"/sys/fs/cgroup/cpu.max": "max 100000\n", "/sys/fs/cgroup/cpu/cpu.cfs_quota_us": "400000\n",
+             "/sys/fs/cgroup/cpu/cpu.cfs_period_us": "100000\n"}
+
+    class Fake:
+        def __init__(self, path):
+            self.path = path
+
+        def read_text(self):
+            if self.path not in files:
+                raise OSError("absent")
+            return files[self.path]
+    monkeypatch.setattr(module, "Path", Fake)
+    assert module.cpu_limit() == 4
+    files["/sys/fs/cgroup/cpu/cpu.cfs_quota_us"] = "-1\n"
+    assert module.cpu_limit() >= 1
+    del files["/sys/fs/cgroup/cpu.max"]
+    files["/sys/fs/cgroup/cpu/cpu.cfs_quota_us"] = "200000\n"
+    assert module.cpu_limit() == 2
