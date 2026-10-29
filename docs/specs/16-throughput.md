@@ -74,6 +74,12 @@ options `arena_extend_strategy=kSameAsRequested` and, when `GPU_MEM_LIMIT_BYTES`
 model cannot grow into another's memory (README: the 822 MB arena failure). Unset keeps today's options.
 `/health` adds `resident` (loaded model ids, most recent last), `maxResident` and `gpuMemory` (`usedMiB`,
 `totalMiB` from `nvidia-smi`, or null when it cannot be read; cached 10 s).
+- Correction (spec 17, 2026-10-28): whether three models fit one L4 was left to "the first GPU run after deploy",
+  and that run was production: the 3-resident, 6 GiB-cap shape failed every bria-rmbg call on 2026-10-27. A GPU
+  shape is now measured first, per model and concurrency, on a no-traffic candidate (spec 17 section 3.3.1, the
+  probe `infra/check-matting.sh --probe`); the numbers are in `services/matting/README.md` "Measured on L4" and
+  `infra/lib/shape.sh` refuses a shape they do not fit. Measured: one model needs 10.8 to 13.7 GB of about 22.5 GB,
+  so one model stays resident. See `docs/solutions/2026-10-27-gpu-shape-and-staged-siblings.md`.
 - Acceptance (pytest): with `MAX_RESIDENT_SESSIONS=3`, models A, B, C, A, D load 4 sessions and leave
   `[C, A, D]`; with the default 1 the existing "releases previous session before loading" tests pass unchanged;
   on the GPU target the provider list carries the CUDA option tuple with `kSameAsRequested` and the limit;
@@ -89,8 +95,11 @@ photo's inference.
   while the fake pre- and post-processing of two requests do overlap (peak 2); a load never overlaps a run.
 
 3.1.3 The upscaler leaves the GPU. The worker sends `/upscale` to the service named by `UPSCALE_URL` (env). At F2
-it is the CPU cut-out service `catalog-matting`, which already serves `/upscale` when `UPSCALE_CPU=1` (spec 11
-CPU smoke, 5.9 to 7.8 s per photo on 4 vCPU). Unset keeps today's GPU path. `UPSCALE_URL` must equal one of the
+it is the CPU cut-out service `catalog-matting`, which already serves `/upscale` when `UPSCALE_CPU=1`. (Correction,
+spec 18: the "5.9 to 7.8 s per photo on 4 vCPU" first written here came from one photo at a time in the spec 11
+smoke; under load on 2026-10-29 one 800x1200 photo took about 121 s. The measured CPU numbers are the table
+"Measured on CPU" in `services/matting/README.md`; spec 18 moved the upscaler to its own service,
+`catalog-upscale`, called from a durable task, never inline.) Unset keeps today's GPU path. `UPSCALE_URL` must equal one of the
 configured matting service URLs; any other value logs one WARNING `upscale_url_unknown` and keeps the GPU path.
 The client checks that service's `/health` `upscale` section, uses that service's breaker and keeps the separate
 upscale breaker. The render key carries the target only when it is not the GPU: `u:<model>@<export>:<version>`
@@ -144,7 +153,8 @@ tested offline):
   flags doc, read 2026-10-27), so the budget is never raised before the tier is;
 - slots: `TASKS_MAX_DISPATCHES + BULK_MAX_DISPATCHES + INGEST_MAX_DISPATCHES <= WORKER_MAX_INSTANCES x
   WORKER_CONCURRENCY`;
-- CPU quota in asia-south1: worker max x CPU + CPU cut-out max x 4 + web 3 x 1 + jobs 8 is at most 190 of 200;
+- CPU quota in asia-south1: worker max x CPU + CPU cut-out max x 4 + web 3 x 1 + jobs 8 is at most 190
+  (`CPU_QUOTA_LIMIT`: the 200 vCPU quota less 10 spare; every budget in this spec is 190, not 200);
 - GPU shape: `GPU_MAX_INSTANCES <= 3` (today's L4 quota), CPU 4 to 8, memory 16Gi to 32Gi (Cloud Run GPU doc,
   read 2026-10-27: L4 needs at least 4 CPU and 16 GiB, 8 CPU and 32 GiB recommended).
 
@@ -240,7 +250,7 @@ run are compared in the report.
 | `DB_MAX_CONNECTIONS` / `SQL_TIER` | 25 / db-f1-micro | 400 / db-custom-2-7680 |
 | `MATTING_CPU_MAX_INSTANCES` | 20 | 16 |
 | `GPU_MAX_INSTANCES` / `GPU_CPU` / `GPU_MEMORY` / `GPU_CONCURRENCY` | 3 / 4 / 16Gi / 1 | 3 / 8 / 32Gi / 2 |
-| `MAX_RESIDENT_SESSIONS` / `GPU_MEM_LIMIT_BYTES` | 1 / unset | 3 / 6442450944 |
+| `MAX_RESIDENT_SESSIONS` / `GPU_MEM_LIMIT_BYTES` | 1 / unset | 3 / 6442450944 (failed live 2026-10-27 and rolled back; refused by `shape.sh` since spec 17; live: 1 / unset) |
 | `UPSCALE_SERVICE` | gpu | cpu |
 | `MATTE_INFLIGHT_PER_INSTANCE` | 4 | 4 |
 | `LLM_INFLIGHT_PER_INSTANCE` (F3) | unset | 6 |
@@ -248,7 +258,7 @@ run are compared in the report.
 `CATALOG_CHUNK_WINDOW` (8) and `CATALOG_CHUNK_IMAGES` (10) are E's and unchanged here.
 
 Connection budget at the run values: worker 24 x 4 = 96 (the pool doubles with photos at once, decision 17), web
-3 x 2 = 6, jobs 2 x 1 = 2, total 104 of 400 - 3 reserved - 4 ila = 393. CPU quota in asia-south1: 24 x 4 + 16 x 4 + 3 + 8 = 171 of 200. The GPU service's 8 vCPU
+3 x 2 = 6, jobs 2 x 1 = 2, total 104 of 400 - 3 reserved - 4 ila = 393. CPU quota in asia-south1: 24 x 4 + 16 x 4 + 3 + 8 = 171 of 190 (the 200 vCPU quota less 10 spare). The GPU service's 8 vCPU
 count against asia-southeast1.
 
 The F2 deploy command (Git Bash, repo root):
@@ -272,8 +282,8 @@ $g="$env:LOCALAPPDATA\Google\Cloud SDK\google-cloud-sdk\bin\gcloud.cmd"
 & $g run services describe catalog-matting --region=asia-south1
 & $g sql instances describe ila-pg --format="value(settings.tier)"
 ```
-If the L4 quota in asia-southeast1 is not 3 or the Cloud Run CPU quota in asia-south1 is not 200, recompute
-section 8 before going on. Read the Cloud SQL asia-south1 price for the new tier and put it in the report.
+If the L4 quota in asia-southeast1 is not 3 or the Cloud Run CPU quota in asia-south1 is not 200 (of which the
+shape may use 190), recompute section 8 before going on. Read the Cloud SQL asia-south1 price for the new tier and put it in the report.
 
 Step 1: PR F merged, F1 deploy (`bash infra/deploy.sh`, defaults), tier 5 smoke green. Then the spec 11 fidelity
 gate once with `UPSCALE_SERVICE=cpu` on the preview stack (the existing `catalog-output-evals` job).
@@ -288,8 +298,12 @@ Step 4, the 200-product Test Brand speed test (quiet window, same quiet check, r
 if an operator starts work): `bash infra/catalog-scale-jobs.sh load 200 b` with the 4 P1 channels. 200 products
 are about 1,000 photos; at 3.4 photos/s about 5 min steady plus about 7 min warm-up and tail, so about 12 to 15
 min, cost about USD 3. Pass:
-- every product published or held with a reason, none lost or doubled;
-- at least 150 photos a minute over the best 3 minutes;
+- every product published or held with a reason, none lost or doubled. Outputs "held with the product" (the good
+  images of a product held for the operator stay `staged` by design) are expected and counted apart from silent
+  outputs; only silent outputs fail (spec 17 section 3.1.1, `classifyOutputs` with holds);
+- at least 150 photos a minute over the best 3 minutes (a photo is one source photo, not one output);
+- the last chunk finishes within 2 x the median chunk time (spec 17 section 3.4.3; the load report prints the
+  chunk time median, p95 and max);
 - zero 504 on chunk tasks, zero "Chunk ownership changed", zero database connection errors (53300);
 - at most 3 model loads per GPU instance after warm-up (`session_ready` log lines);
 - no `upscale_complete` line from `catalog-matting-gpu`; the upscale lines come from `catalog-matting`;
@@ -301,10 +315,13 @@ photos per minute, the limiting stage and the re-estimate for 2,000 and 7,000.
 
 - Order: F1 deploy (behaviour-neutral defaults), the fidelity gate, the database tier, the F2 deploy, the speed
   test.
-- Rollback of the shape: `bash infra/deploy.sh` with no overrides restores today's shape (min-instances 0, 6 + 2
-  slots, one resident model, upscale on the GPU). The `catalog-bulk` queue stays but receives no new tasks once
-  `TASKS_BULK_QUEUE` is absent; deploy.sh lowers it to 1 slot before the worker shrinks, so a backlog left in it
-  drains slowly instead of flooding the smaller worker.
+- Rollback of a service (spec 17 gate, corrected 2026-10-29): `bash infra/deploy.sh --rollback <name>` moves all
+  traffic back to the revision tagged `previous` in seconds, with no build and no smoke.
+- Rollback of the shape (corrected 2026-10-29): `bash infra/deploy.sh` with no overrides no longer restores the
+  pre-F2 shape. Since 2026-10-28 (#114) the defaults in `infra/lib/shape.sh` (`SHAPE_DEFAULTS`) equal the live
+  production shape, so a run with no env changes nothing; going back to the pre-F2 shape is explicit env (the
+  pre-F2 line in `shape.sh`), deployed through the gate. The `catalog-bulk` queue stays but receives no new tasks
+  once `TASKS_BULK_QUEUE` is absent; queue slots change only after the worker gate passes.
 - Rollback of the code: per 00 section 6, `SKIP_BUILD=1 bash infra/deploy.sh` from a checkout of the previous
   commit.
 - Rollback of the tier: `CONFIRM_RESTART=1 SQL_TIER=db-f1-micro bash infra/sql-tier.sh` in a quiet window, only
@@ -408,6 +425,11 @@ Decisions of the F3 and F4 builder (2026-10-27, owner not available):
 - [x] F3 and F4 built on E (merged into the F branch); every acceptance item of sections 3.3 and 3.4 green, except
   grouped writes (deferred, decision 15) and the plus or minus 10% time bands (decision 22).
 - [ ] PR F merged after PR E; F1 deployed with the tier 5 smoke green; the fidelity gate on the CPU upscale passes.
-- [ ] Database tier changed in a quiet window; F2 deployed; re-runs show SKIP or the same values.
-- [ ] The 200-product speed test passes section 9 step 4; cleanup confirmed; report written.
-- [ ] `docs/solutions/throughput.md` merged.
+  (PR F merged and deployed, live since 2026-10-27 at fc5e886. Not ticked: no fidelity gate result on the CPU
+  upscale was recorded, and the CPU upscaler never served a photo in production; spec 18 replaces that path.)
+- [x] Database tier changed in a quiet window; F2 deployed; re-runs show SKIP or the same values. (ila-pg on
+  db-custom-2-7680; the F2 worker and queue shape is live; the GPU part was rolled back to one resident model.)
+- [ ] The 200-product speed test passes section 9 step 4; cleanup confirmed; report written. (Not passed. The
+  2026-10-27 run failed on the GPU shape; the spec 17 run of 2026-10-29 reached 57.3 photos a minute over the best
+  3 minutes, 20.4 over the whole batch, against the bar of 150; limiting stage the CPU upscaler, spec 18.)
+- [x] `docs/solutions/throughput.md` merged.

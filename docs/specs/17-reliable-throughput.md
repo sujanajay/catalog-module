@@ -432,17 +432,48 @@ split for 7,000 products; a per-operator-batch reservation of GPU in-flight slot
 
 ## 14. Done when
 
-- [ ] G1 merged and live: held siblings and silent outputs are separate numbers; gap B closed; invariants run
-      every 10 minutes; policies 11 and 12 exist; Ops shows the four lines.
-- [ ] G2 merged: every service deploys as a no-traffic candidate, is probed, then takes traffic; the smoke tests
-      the candidates and cannot hang; `deploy.sh --rollback <name>` works; offline tests green.
-- [ ] G3 merged: the README holds a measured table per model at concurrency 1 and 2; shape.sh refuses the 10-27
+- [x] G1 merged and live: held siblings and silent outputs are separate numbers; gap B closed; invariants run
+      every 10 minutes; policies 11 and 12 exist; Ops shows the four lines. (#109, live at ea22854.)
+- [x] G2 merged: every service deploys as a no-traffic candidate, is probed, then takes traffic; the smoke tests
+      the candidates and cannot hang; `deploy.sh --rollback <name>` works; offline tests green. (#112, with #114 to
+      #117 from its first use; `--rollback` is covered by the offline tests and was not needed live.)
+- [x] G3 merged: the README holds a measured table per model at concurrency 1 and 2; shape.sh refuses the 10-27
       F2 shape and any unmeasured model; the chosen rung is live through the gate with its probe table and, where
-      required, its evals result in the report.
-- [ ] G4 merged: the tail chunk's cause is named from the logs and its fix is tested; the load report prints
-      chunk time median, p95 and max.
+      required, its evals result in the report. (#108 code, #118 measured on L4; rung 1 stays live, rung 2 not
+      shifted because its eval had no rung 1 baseline, rung 3 failed under real traffic, rungs 4 and 5 do not fit.)
+- [x] G4 merged: the tail chunk's cause is named from the logs and its fix is tested; the load report prints
+      chunk time median, p95 and max. (#110: a render task deleted by Cloud Tasks after five 429s; unlimited chunk
+      queue retries for 30 minutes and a 6-minute re-send of an unstarted step.)
 - [ ] Section 9 steps 1 to 7 done; the report states photos per minute for 200 products, the 2,000 and 7,000
-      projections, and the pass or fail of every reliability item.
-- [ ] G5 merged: solutions entry with the learning -> check table; protocol sections 9 and 11 updated; spec 16
-      corrected; the owner's plain-language status doc; handoff written; memory lines saved.
+      projections, and the pass or fail of every reliability item. (Steps 0 to 6 done; step 7 cleanup is done in
+      the spec 18 close-out. See "Outcome" below.)
+- [x] G5 merged: solutions entry with the learning -> check table; protocol sections 9 and 11 updated; spec 16
+      corrected; the owner's plain-language status doc; handoff written; memory lines saved. (Docs in the spec 18
+      H5 PR: `docs/solutions/2026-10-27-gpu-shape-and-staged-siblings.md`,
+      `docs/plans/2026-10-28-post-deploy-status.md`; the handoff and memory lines are the manager's.)
 - [ ] The final report ends "Ready for the next spec: 18 <title to be chosen>" or "Blocked: <exact thing>".
+      (Owner decision 6 of spec 18: it ends "Blocked: 150 photos/min not reached"; written in the spec 18
+      close-out.)
+
+### Outcome (2026-10-29)
+
+- Speed test (section 9 step 5), 2026-10-29, execution `catalog-load-tdcxb`, batch `8628295f`: 200 products, 935
+  source photos, 46 min wall. 20.4 photos a minute over the whole batch, 28.9 steady, 57.3 over the best 3
+  minutes. The bar of 150 photos a minute was not met. Reliability held: zero silent outputs, zero ERROR
+  invariants, every product published or held with a reason (323 held siblings), zero HTTP 500 from the GPU
+  service, one load per model per GPU instance. Projections at the whole-batch and best-3-minute rates: 2,000
+  products 7 h 38 m to 2 h 43 m; 7,000 products 26 h 42 m to 9 h 31 m.
+- Limiting stage: the render, and inside it the CPU upscaler (935 of 935 enlargements fell back to a plain resize
+  after 60 s timeouts and breaker pauses). Follow-up: spec 18, reliable enlargement on CPU.
+- Operator-first (step 6), batch `616a7386`: finished in 11.0 minutes while the load ran (pass); first image
+  about 7 m 39 s after start (limit 5 minutes, likely fail: only chunk-level timestamps exist).
+- Deviations:
+  - E3 "busy always": a same-step copy that meets a live lease now always answers busy, at any retry count (spec 15
+    E3 said busy below 3 retries, then duplicate). The queue's retry count also counts 429s that never reached the
+    app, so it no longer decides anything; a chunk fails on its own recorded errors (G4).
+  - G4 window: batch d9469ed5 ran 19:11Z to 20:02Z, not 18:10Z to 19:15Z as section 3.4.1 says.
+  - The load driver made all 9 channels, not the 4 P1 channels of step 5 (about 2.25 x the render work per photo).
+  - The driver's re-check exited 1 (7,270 of 8,010 OK) while the worker's own re-check passed 8,010 of 8,010;
+    the per-link reasons were discarded, so it is unproven (fixed for next time in spec 18 H4).
+- Step 7 cleanup (operator batch `616a7386`, speed batch `8628295f`) and the second invariants run are pending
+  and are done in the spec 18 close-out.

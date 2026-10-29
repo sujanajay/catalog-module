@@ -38,13 +38,20 @@ kept as they were, so older filters still match. The alert filters match these e
 | `catalog_qa: quality check unavailable` | WARNING | batchId |
 | `matting_breaker` | WARNING when open, INFO otherwise | state, service (no batchId: the breaker is shared by the whole process) |
 | `spend cap hit` | WARNING | batchId, reason "$X of $Y" |
+| `invariant` (spec 17) | the check's severity when violated (ERROR or WARNING), else INFO | id, violations, sample (up to 5 ids), batches, batchCount, severity |
+| `enlargement failed` (spec 18) | ERROR (a photo's enlargement spent its 8 attempts; the product is held with `enlargement_failed`) | batchId, productId, sourceImageId, n, round, attempts, retryCount, model, error |
+| `process warning` (spec 18) | WARNING (a Node process warning such as MaxListenersExceededWarning; the first 5 of each kind, then one per 1,000) | warning, detail, seen, stack, emitter, event, listeners |
+| `cleanup started` / `cleanup listed` / `cleanup finished` (spec 18, load driver job) | INFO | batchIds; prefix, objects (listed); objects, ms, error (finished) |
 
 Success lines at INFO: `batch started`, `chunk delivered`, `product published`, `batch finalized`.
+`enlargement failed` is not excluded from `catalog/error_logs`, so it emails through policy 9. `process warning` and
+the cleanup lines send no email (WARNING and INFO; the cleanup lines come from the `catalog-load` job, and alerts
+cover services only).
 The worker sends `x-catalog-batch` and `x-catalog-product` headers on each matting call, and the
 Python matting service logs JSON with those ids.
 
-## Metrics and the ten alert policies
-Seven log-based metrics (on `cloud_run_revision`):
+## Metrics and the twelve alert policies
+Nine log-based metrics (on `cloud_run_revision`; `catalog/silent_outputs` and `catalog/slow_chunk` added by spec 17 for policies 11 and 12):
 - `catalog/chunk_failed_terminal`: `chunk failed` at ERROR (the last attempt).
 - `catalog/batch_failed`: `batch failed` at ERROR only, or `batch swept`. An upload with no photos
   logs `batch failed` at WARNING and sends nothing.
@@ -73,6 +80,8 @@ only, not jobs, so the smoke, eval and load jobs never send emails.
 | 8 | Database connections high | Cloud SQL `ila-pg` backends > 20 for 5 min (the limit is 25) |
 | 9 | Error in the logs | error_logs > 0 in 5 min |
 | 10 | A chunk task ran out of time | chunk_timeout > 0 in 15 min |
+| 11 | Some images were left half-finished (silent outputs) | silent_outputs > 0 in 15 min (spec 17: the `invariant` line with id `silent_outputs` and violations > 0) |
+| 12 | One chunk is far slower than the rest | slow_chunk > 0 in 15 min (spec 17: the `invariant` line with id `slow_chunk`) |
 
 Policy 9's metric excludes the messages of policies 1 to 5 so one failure sends one email, not two. Policy 5
 is a failure-type event (held products result), not a spending warning. 503 is left out of
