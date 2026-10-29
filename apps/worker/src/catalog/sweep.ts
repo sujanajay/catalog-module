@@ -6,10 +6,11 @@ import { and, eq, inArray, isNull, lt, or, sql } from "drizzle-orm";
 import type { BatchStatus } from "@catalog/core/catalog/types";
 import type { Db } from "@catalog/core/db/client";
 import type { HandleResult } from "../server";
-import { catalogBatches } from "@catalog/core/db/schema";
+import { catalogBatches, catalogChunks } from "@catalog/core/db/schema";
 import { enqueueTask } from "@catalog/core/tasks";
 import { log } from "@catalog/core/log";
-import { PROCESSING_STATUSES, recoverBatchChunks } from "@catalog/core/catalog/pipeline/dispatch";
+import { recoverBatchChunks } from "@catalog/core/catalog/pipeline/dispatch";
+import { ENLARGING_TASK } from "@catalog/core/catalog/pipeline/enlargement";
 import { runInvariants } from "@catalog/core/catalog/invariants/run";
 import { enqueueFinalize, finalizeEnqueueExpired, finalizePendingFlag } from "./deps";
 
@@ -43,6 +44,8 @@ export interface SweepDeps {
   window?: number;
   /** Defaults to DEFAULT_DRAFT_EXPIRY_DAYS. */
   draftExpiryDays?: number;
+  /** Spec 18 lifecycle F34: the worker's rollback switch (UPSCALE_MODEL=off): queued enlargements released, parked chunks unparked. */
+  enlargementOff?: boolean;
 }
 
 function rowsOf(result: unknown): Record<string, unknown>[] {
@@ -83,9 +86,13 @@ export async function handleSweep(deps: SweepDeps, _body: Record<string, unknown
   ));
   for(const batch of pending) await enqueueFinalize({db:deps.db,enqueue:deps.enqueue ?? enqueueTask,now:()=>now},batch.id);
   // Spec 15 E4: recover only dead chunks (a lapsed lease, or a task lost for 30 minutes) and top up each
-  // processing batch's window. A live lease and a recently queued task are never touched.
-  const processing=await deps.db.select({id:catalogBatches.id}).from(catalogBatches).where(inArray(catalogBatches.status,PROCESSING_STATUSES));
-  for(const batch of processing) await recoverBatchChunks(deps.db,deps.enqueue ?? enqueueTask,batch.id,{now,...(deps.window ? {window:deps.window}:{})});
+  // processing batch's window. A live lease and a recently queued task are never touched. Spec 18 lifecycle 3.8:
+  // every live batch (not failed or cancelled, done included: an operator retry or a replacement) with a queued or
+  // running chunk is recovered, so no chunk of a live batch is ever without an owner; the window top-up stays
+  // processing-only (dispatchChunks checks).
+  const live=await deps.db.selectDistinct({id:catalogBatches.id}).from(catalogBatches).innerJoin(catalogChunks,eq(catalogChunks.batchId,catalogBatches.id))
+    .where(and(sql`${catalogBatches.status} NOT IN ('failed','cancelled','draft')`,inArray(catalogChunks.status,["queued","running"])));
+  for(const batch of live) await recoverBatchChunks(deps.db,deps.enqueue ?? enqueueTask,batch.id,{now,...(deps.window ? {window:deps.window}:{}),...(deps.enlargementOff ? {enlargementOff:true}:{})});
   // Spec 17 3.1.3: the invariants, every sweep (10 minutes). A failed check run never stops the sweep.
   // Spec 17 3.1.3: the invariants never stop the sweep, but a failed run is an ERROR (the checks went blind).
   try { await runInvariants(deps.db, log, now); } catch (error) { log("ERROR", "invariants run failed", { error: error instanceof Error ? error.message : String(error) }); }
@@ -102,10 +109,13 @@ export async function handleSweep(deps: SweepDeps, _body: Record<string, unknown
       SET status = 'failed', error = ${SWEEP_ERROR},
         counts = b.counts || jsonb_build_object('failReason', ${SWEEP_ERROR}::text), updated_at = now()
       WHERE b.status IN (${statuses})
+        -- Spec 18 lifecycle 3.8: a batch waiting on an enlargement (a parked chunk) is owned by the lifecycle, never swept.
+        AND NOT EXISTS (SELECT 1 FROM catalog_chunks AS c WHERE c.batch_id = b.id AND c.status = 'queued' AND c.task_name = ${ENLARGING_TASK})
         AND GREATEST(
           b.updated_at,
           (SELECT max(c.started_at) FROM catalog_chunks AS c WHERE c.batch_id = b.id),
-          (SELECT max(c.finished_at) FROM catalog_chunks AS c WHERE c.batch_id = b.id)
+          (SELECT max(c.finished_at) FROM catalog_chunks AS c WHERE c.batch_id = b.id),
+          (SELECT max(c.progress_at) FROM catalog_chunks AS c WHERE c.batch_id = b.id)
         ) < ${cutoff}::timestamptz
       RETURNING b.id
     `);

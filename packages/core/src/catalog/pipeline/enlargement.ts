@@ -56,7 +56,6 @@ export const ENLARGING_TASK = "enlarging";
 /** The sentence of an identity that kept changing (F59); model-free. */
 export const IDENTITY_UNSTABLE_SENTENCE = "This photo could not be prepared the same way twice.";
 
-type Tx = Pick<Db, "select" | "update" | "insert" | "execute">;
 type Log = (message: string, fields?: Record<string, unknown>) => void;
 
 /** What Start records on the batch (options.enlargement): the batch's pinned route (I9). */

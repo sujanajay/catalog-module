@@ -7,7 +7,8 @@
 // database or a network; scale.test.ts runs the real handlers for the duplicate-work and ownership checks.
 // Spec 18 3.3.8: with `enlarge` set, a photo's upscale is its own task on the enlarge lanes (slots, a dispatch rate,
 // the upscale service's slots) queued at the matte stage, and a chunk whose matte stage leaves one waiting parks at
-// the render stage (its window slot freed) until the last one settles; the render then calls nothing.
+// the render stage (its window slot freed) until the last one settles; the render then calls nothing. Spec 18
+// lifecycle: one task per wanted identity (a photo needing both bands has two), a parked chunk holds no slot.
 import { bestMinutesRate, imagesPerMinuteBy5Min, stageTaskMs } from "@catalog/core/catalog/load/throughput";
 
 export interface ModelShape {
@@ -19,7 +20,7 @@ export interface ModelShape {
   cpuService: { instances: number; upscaleMs: number; cutoutMs: number };
   upscaleShare: number;
   /** Spec 18: the enlarge lanes and the upscale service's slots; absent, the render upscales inline (spec 16). */
-  enlarge?: { operatorSlots: number; bulkSlots: number; ratePerSecond: number; serviceSlots: number };
+  enlarge?: { operatorSlots: number; bulkSlots: number; ratePerSecond: number; serviceSlots: number; /** Spec 18 lifecycle: wanted identities (one task each) per enlarged photo; default 1. */ identitiesPerPhoto?: number };
   judge: { callsPerPhoto: number; medianMs: number; sigma: number; rate429: number; backoffMs: number; retries: number };
   worker: { matteCpuMs: number; renderCpuMsPerImage: number; qaCpuMs: number; writeMs: number };
   publishMsPerProduct: number;
@@ -239,7 +240,7 @@ export async function simulate(shape: ModelShape, batches: readonly ModelBatch[]
       await cpuFor(shape.worker.matteCpuMs * 0.2);
       await write(); await write();
       matted.set(key, (matted.get(key) ?? 0) + 1);
-      if (shape.enlarge && rnd() < shape.upscaleShare) enlargeLater(c);
+      if (shape.enlarge && rnd() < shape.upscaleShare) for (let i = 0; i < (shape.enlarge.identitiesPerPhoto ?? 1); i++) enlargeLater(c);
     } else if (c.stage === "render") {
       if (shape.enlarge) { if ((c.waitingX2 ?? 0) > 0) enlargeReport.renderedEarly += 1; }
       else if (rnd() < shape.upscaleShare) { await cpuService.take(); await clock.sleep(shape.cpuService.upscaleMs); cpuService.give(); }

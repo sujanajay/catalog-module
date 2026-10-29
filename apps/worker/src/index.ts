@@ -8,6 +8,7 @@ import { handleIngestMoreTask, handleIngestTask, workerIngestDeps } from "./cata
 import { workerCatalogDeps } from "./catalog/deps";
 import { handleChunkTask } from "./catalog/chunk";
 import { handleEnlargeTask } from "./catalog/enlarge";
+import { upscaleConfigFromEnv } from "@catalog/core/catalog/upscale";
 import { handlePublishTask } from "./catalog/publish";
 import { handleFinalizeTask } from "./catalog/finalize";
 import { draftExpiryDaysFromEnv, handleSweep } from "./catalog/sweep";
@@ -49,7 +50,7 @@ const ingestDeps = workerIngestDeps();
 const routes: ServerDeps["routes"] = {
   // The DB handle is taken lazily inside each handler so /health works before the DB is reachable.
   "/tasks/catalog/sync-master": (body) => handleSyncMaster({ db: getDb(), bq: lazyBigQuery, env: process.env }, body),
-  "/tasks/catalog/sweep": (body) => handleSweep({ db: getDb(), releaseLocks, draftExpiryDays: draftExpiryDaysFromEnv(process.env) }, body),
+  "/tasks/catalog/sweep": (body) => handleSweep({ db: getDb(), releaseLocks, draftExpiryDays: draftExpiryDaysFromEnv(process.env), enlargementOff: !upscaleConfigFromEnv().model }, body),
   "/tasks/catalog/ingest": (body) => handleIngestTask({ db: getDb(), ingest: ingestDeps }, body),
   "/tasks/catalog/ingest-more": (body) => handleIngestMoreTask({ db: getDb(), ingest: ingestDeps }, body),
   "/tasks/catalog/chunk": (body, opts) => handleChunkTask(workerCatalogDeps(getDb()), body, opts),

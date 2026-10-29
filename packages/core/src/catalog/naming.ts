@@ -109,6 +109,15 @@ export function batchPrefix(brandSlug: string, batchId: string, isTest: boolean)
   return `${rootPrefix(isTest)}/${brandSlug}/${batchId}`;
 }
 
+/**
+ * Spec 18 lifecycle 3.1: `<root>/<brand>` in the private bucket, the prefix of every stored enlargement. Not per batch:
+ * the object key is the identity (the photo's pixels, the upscaler with its export hash, the scale), so a second
+ * batch of the same photo, a replacement with the same bytes or a re-wanted row finds the object without a call.
+ */
+export function enlargementPrefix(brandSlug: string, isTest: boolean): string {
+  return `${rootPrefix(isTest)}/${brandSlug}`;
+}
+
 /** `<root>/<brand>/<pathKey>/` in the public bucket (always ends with "/"). */
 export function productPrefix(brandSlug: string, pathKey: string, isTest: boolean): string {
   return `${rootPrefix(isTest)}/${brandSlug}/${pathKey}/`;
@@ -137,7 +146,7 @@ export function derivedPath(prefix: string, pathKey: string, n: number, kind: st
 /**
  * Spec 18 lifecycle 3.1: `<prefix>/derived/<pathKey>/<pathKey>_<n>.<upscaler slug>.s<scale>.<identity hash>.jpg`, the
  * stored enlargement of one identity (the whole prepared photo, enlarged by the upscaler at the effective scale) next
- * to its matte, in the private assets bucket. Never public, never raw, inside the batch prefix. The upscaler is its
+ * under the brand's enlargement prefix (enlargementPrefix), in the private assets bucket. Never public, never raw. The upscaler is its
  * identity id with the export hash (`swinir-x2+cpu@f477a052`), lower case, anything but letters, digits, dots and
  * dashes as a dash. Same identity, same key: a re-delivery, a re-wanted row or a second batch of the same photo finds
  * the object. The metadata names the identity too (validateEnlargedObject).

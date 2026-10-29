@@ -5,7 +5,7 @@ import { MattingClient, parseUpscaleHealth } from "./matte";
 import { enlargementFactors, enlargementNeeds, planCanvas, planProduct, renderKeyInputs, renderSource, shotEnlargementRegion, shotGeometry, trimRules, type Matte, type Prepared } from "./render";
 import { analyseBackground } from "./shadow";
 import { enlargeCutout } from "./enhance";
-import { DEFAULT_UPSCALE_MAX_PIXELS, DEFAULT_UPSCALE_MIN_SCALE, enlargeRegion, enlargedBox, enlargementStateOf, EnlargementNotReadyError, ENLARGE_REGION_MARGIN_PX, gpuUrlsFromEnv, hasSourceX2, LEGACY_UPSCALE_MIN_SCALE, markEnlargementTerminal, markEnlargementUnwanted, UPSCALE_X4_MIN_SCALE, upscaleFactorFor, upscaleMaxPixels, upscalerFactor, upscalersFor, otherTargetUpscalerId, primeSourceX2, shouldUpscale, sourceX2, storedUpscaler, StoredEnlargementMissingError, upscaleConfigFromEnv, upscaledRgb, upscalerId, upscalerKey, upscaleTargetFromEnv, UPSCALER_VERSION, type Upscaler } from "./upscale";
+import { DEFAULT_UPSCALE_MAX_PIXELS, DEFAULT_UPSCALE_MIN_SCALE, enlargeRegion, enlargedBox, enlargementStateOf, EnlargementNotReadyError, gpuUrlsFromEnv, hasSourceX2, LEGACY_UPSCALE_MIN_SCALE, markEnlargementTerminal, markEnlargementUnwanted, UPSCALE_X4_MIN_SCALE, upscaleFactorFor, upscaleMaxPixels, upscalerFactor, upscalersFor, otherTargetUpscalerId, primeSourceX2, shouldUpscale, sourceX2, storedUpscaler, StoredEnlargementMissingError, upscaleConfigFromEnv, upscaledRgb, upscalerId, upscalerKey, upscaleTargetFromEnv, UPSCALER_VERSION, type Upscaler } from "./upscale";
 import { configuredUpscalerId, renderKey, renderKeys, rerenderedKey, upscaledRenderKey } from "./pipeline/publish";
 import { upscaledNotes } from "./pipeline/report";
 import { flagDetails } from "./qa/reasons";

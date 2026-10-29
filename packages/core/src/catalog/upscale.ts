@@ -87,7 +87,8 @@ export function upscaleTargetFromEnv(env: NodeJS.ProcessEnv = process.env): Upsc
  * names x2-scale images as the x4 band's.
  */
 export function upscaleConfigFromEnv(env: NodeJS.ProcessEnv = process.env): UpscaleConfig {
-  const model = env.UPSCALE_MODEL?.trim() || null;
+  // "off" is the rollback switch (spec 18 lifecycle F34): no upscaler, the plain path.
+  const model = env.UPSCALE_MODEL?.trim() && env.UPSCALE_MODEL.trim() !== "off" ? env.UPSCALE_MODEL.trim() : null;
   const x4 = env.UPSCALE_MODEL_X4?.trim();
   const raw = env.UPSCALE_MIN_SCALE?.trim(), parsed = raw ? Number(raw) : NaN;
   const target = upscaleTargetFromEnv(env);
