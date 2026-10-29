@@ -18,7 +18,7 @@ import { classifyOutputs, completionLine } from "@catalog/core/catalog/load/clas
 import { runInvariants } from "@catalog/core/catalog/invariants/run";
 import { dispatchChunks, LOAD_BATCH_NAME_PREFIX } from "@catalog/core/catalog/pipeline/dispatch";
 import { handleChunkTask } from "./chunk";
-import { F2_SHAPE, simulate, type ModelBatch } from "./scale-model";
+import { F2_SHAPE, F2_UPSCALE_MS, simulate, upscaleP50Ms, type ModelBatch, type ModelShape } from "./scale-model";
 import { fakeWorld, seedBatch, type FakeWorld, type QueuedTask } from "../../test/catalog-fakes";
 
 const MIN = 60_000;
@@ -65,6 +65,30 @@ describe("F4 part 1: the model at the F2 shape", () => {
     expect(r.drainedAtMs.bulk! / MIN).toBeLessThan(15 * 1.1);
     expect(r.bestThreeMinutesPhotosPerMinute).toBeGreaterThanOrEqual(150);
   }, 60_000);
+});
+
+describe("spec 18 3.3.8: the enlarge queue in the model", () => {
+  it("UPSCALE_P50_S sets one upscale's time; unset keeps the F2 calibration's 7 s", () => {
+    expect(upscaleP50Ms({})).toBe(F2_UPSCALE_MS);
+    expect(upscaleP50Ms({ UPSCALE_P50_S: "121" })).toBe(121_000);
+    expect(upscaleP50Ms({ UPSCALE_P50_S: "x" })).toBe(F2_UPSCALE_MS);
+  });
+
+  it("200 products on CPU (121 s per enlargement): every enlargement settles before its render, every parked chunk is unparked once, the time shows", async () => {
+    // The H3 shape: concurrency 3, the enlarge lanes 4 + 12 at 0.1 per second, catalog-upscale 16 x 1.
+    const h3: ModelShape = { ...F2_SHAPE, workerConcurrency: 3, cpuService: { ...F2_SHAPE.cpuService, upscaleMs: 121_000 }, enlarge: { operatorSlots: 4, bulkSlots: 12, ratePerSecond: 0.1, serviceSlots: 16 } };
+    const batches: ModelBatch[] = [{ name: "bulk", products: 200, photosPerProduct: 5, channels: 4, startAtMs: 0, bulk: true }];
+    const r = await simulate(h3, batches);
+    expect(r.enlarge.tasks).toBeGreaterThan(400);
+    expect(r.enlarge.renderedEarly).toBe(0);
+    expect(r.enlarge.parks).toBeGreaterThan(0);
+    expect(r.enlarge.unparks).toBe(r.enlarge.parks);
+    expect(r.mattedTwice).toBe(0);
+    expect(r.maxActiveChunks.bulk).toBeLessThanOrEqual(h3.bulkWindow);
+    // About 500 enlargements at 0.1 per second: at least 80 minutes, against 12 to 15 with the old inline 7 s.
+    expect(r.drainedAtMs.bulk! / MIN).toBeGreaterThan(80);
+    expect(Number.isFinite(r.drainedAtMs.bulk!)).toBe(true);
+  }, 120_000);
 });
 
 // ------------------------------------------------------------------------------------------------------------

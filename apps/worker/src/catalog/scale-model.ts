@@ -5,6 +5,9 @@
 // Cloud Run's 10 s pending window then 429, the client's wait-and-retry and the CPU fallback after the third busy
 // answer), the CPU upscale service, the judge (long tail, 429 with back-off) and publish. It never touches a
 // database or a network; scale.test.ts runs the real handlers for the duplicate-work and ownership checks.
+// Spec 18 3.3.8: with `enlarge` set, a photo's upscale is its own task on the enlarge lanes (slots, a dispatch rate,
+// the upscale service's slots) queued at the matte stage, and a chunk whose matte stage leaves one waiting parks at
+// the render stage (its window slot freed) until the last one settles; the render then calls nothing.
 import { bestMinutesRate, imagesPerMinuteBy5Min, stageTaskMs } from "@catalog/core/catalog/load/throughput";
 
 export interface ModelShape {
@@ -15,9 +18,22 @@ export interface ModelShape {
   gpu: { instances: number; concurrency: number; inferenceMs: number; lockGapMs: number; prePostMs: number; guardShare: number; coldStartMs: number; modelLoadMs: number; models: number; pendingMs: number; busyTries: number };
   cpuService: { instances: number; upscaleMs: number; cutoutMs: number };
   upscaleShare: number;
+  /** Spec 18: the enlarge lanes and the upscale service's slots; absent, the render upscales inline (spec 16). */
+  enlarge?: { operatorSlots: number; bulkSlots: number; ratePerSecond: number; serviceSlots: number };
   judge: { callsPerPhoto: number; medianMs: number; sigma: number; rate429: number; backoffMs: number; retries: number };
   worker: { matteCpuMs: number; renderCpuMsPerImage: number; qaCpuMs: number; writeMs: number };
   publishMsPerProduct: number;
+}
+
+/** The upscale p50 the F2 calibration assumed (spec 16), when UPSCALE_P50_S is unset. */
+export const F2_UPSCALE_MS = 7_000;
+/**
+ * Spec 18 3.3.8: one upscale's time, `UPSCALE_P50_S` (whole seconds, the measured p50 of the H1 table, infra/lib/shape.sh
+ * UPSCALE_P50_S_* rows); unset or invalid keeps the F2 calibration's 7 s. The 2026-10-29 load measured about 121 s on CPU.
+ */
+export function upscaleP50Ms(env: NodeJS.ProcessEnv = process.env): number {
+  const s = Number(env.UPSCALE_P50_S?.trim());
+  return Number.isFinite(s) && s > 0 ? s * 1000 : F2_UPSCALE_MS;
 }
 
 /** The F2 run shape of spec 16 section 8 with the plan's constants (section 1.2 of the plan). */
@@ -26,7 +42,7 @@ export const F2_SHAPE: ModelShape = {
   photoConcurrency: 4, chunkPhotos: 10, operatorWindow: 8, bulkWindow: 30, bulkBatchProducts: 100,
   budgetMs: 480_000, deadlineMs: 900_000,
   gpu: { instances: 3, concurrency: 2, inferenceMs: 650, lockGapMs: 130, prePostMs: 300, guardShare: 0.15, coldStartMs: 120_000, modelLoadMs: 6_000, models: 3, pendingMs: 420_000, busyTries: 3 },
-  cpuService: { instances: 16, upscaleMs: 7_000, cutoutMs: 12_000 },
+  cpuService: { instances: 16, upscaleMs: upscaleP50Ms(), cutoutMs: 12_000 },
   upscaleShare: 0.5,
   judge: { callsPerPhoto: 1.23, medianMs: 5_500, sigma: 0.45, rate429: 0.05, backoffMs: 4_000, retries: 3 },
   worker: { matteCpuMs: 3_000, renderCpuMsPerImage: 750, qaCpuMs: 300, writeMs: 40 },
@@ -49,6 +65,8 @@ export interface ModelReport {
   gpu: { calls: number; busy429: number; cpuFallbacks: number; modelLoads: number };
   judge: { calls: number; rateLimited: number; failedAfterRetries: number };
   renderOverlapsMatteMs: Record<string, number>;
+  /** Spec 18: enlarge tasks run, chunks parked and unparked, and renders that started with an enlargement unsettled (must be 0). */
+  enlarge: { tasks: number; parks: number; unparks: number; renderedEarly: number; maxQueueDepth: Record<"operator" | "bulk", number> };
 }
 
 /** A seeded random source (mulberry32), so a run is repeatable. */
@@ -106,7 +124,7 @@ class Places {
   }
 }
 
-interface Chunk { batch: BatchState; index: number; photos: { product: number; model: number }[]; stage: "matte" | "render" | "qa" | "done"; cursor: number; dispatched: boolean; startedAt?: number }
+interface Chunk { batch: BatchState; index: number; photos: { product: number; model: number }[]; stage: "matte" | "render" | "qa" | "done"; cursor: number; dispatched: boolean; startedAt?: number; waitingX2?: number; parked?: boolean }
 interface BatchState { spec: ModelBatch; bulk: boolean; chunks: Chunk[]; active: number; maxActive: number; publishLeft: number; firstImageAt?: number; drainedAt?: number; matteSpan: [number, number]; renderSpan: [number, number] }
 interface Task { batch: BatchState; run: () => Promise<void> }
 
@@ -121,6 +139,36 @@ export async function simulate(shape: ModelShape, batches: readonly ModelBatch[]
   const durations: Record<string, number[]> = { matte: [], render: [], qa: [], publish: [] };
   const imagesAt: number[] = [];
   const report = { gpu: { calls: 0, busy429: 0, cpuFallbacks: 0, modelLoads: 0 }, judge: { calls: 0, rateLimited: 0, failedAfterRetries: 0 }, handOffs: 0, maxDeliveryMs: 0 };
+  const enlargeReport = { tasks: 0, parks: 0, unparks: 0, renderedEarly: 0 };
+  // Spec 18: the enlarge lanes (FIFO, slots, at most ratePerSecond dispatches) and the upscale service's slots.
+  type Lane = { slots: number; fifo: (() => Promise<void>)[]; running: number; nextAt: number; timer: boolean; maxDepth: number };
+  const lane = (slots: number): Lane => ({ slots, fifo: [], running: 0, nextAt: 0, timer: false, maxDepth: 0 });
+  const lanes = { operator: lane(shape.enlarge?.operatorSlots ?? 0), bulk: lane(shape.enlarge?.bulkSlots ?? 0) };
+  const upscaleService = new Places(shape.enlarge?.serviceSlots ?? 1, clock);
+  const pumpLane = (l: Lane) => {
+    while (l.running < l.slots && l.fifo.length) {
+      if (clock.now < l.nextAt) {
+        if (!l.timer) { l.timer = true; void clock.sleep(l.nextAt - clock.now).then(() => { l.timer = false; pumpLane(l); }); }
+        return;
+      }
+      l.nextAt = clock.now + 1000 / shape.enlarge!.ratePerSecond;
+      const run = l.fifo.shift()!; l.running += 1;
+      void run().then(() => { l.running -= 1; pumpLane(l); });
+    }
+  };
+  const enlargeLater = (c: Chunk) => {
+    c.waitingX2 = (c.waitingX2 ?? 0) + 1;
+    const l = c.batch.bulk ? lanes.bulk : lanes.operator;
+    l.fifo.push(async () => {
+      await upscaleService.take(); await clock.sleep(shape.cpuService.upscaleMs); upscaleService.give();
+      enlargeReport.tasks += 1;
+      c.waitingX2! -= 1;
+      // The last settle unparks the chunk: an ordinary waiting chunk again, dispatched in index order.
+      if (c.parked && c.waitingX2 === 0) { c.parked = false; c.dispatched = false; enlargeReport.unparks += 1; dispatchChunks(c.batch); }
+    });
+    l.maxDepth = Math.max(l.maxDepth, l.fifo.length);
+    pumpLane(l);
+  };
   const matted = new Map<string, number>();
   const lognormal = (median: number, sigma: number) => { const u = Math.max(1e-9, rnd()), v = rnd(); return median * Math.exp(sigma * Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v)); };
 
@@ -191,8 +239,10 @@ export async function simulate(shape: ModelShape, batches: readonly ModelBatch[]
       await cpuFor(shape.worker.matteCpuMs * 0.2);
       await write(); await write();
       matted.set(key, (matted.get(key) ?? 0) + 1);
+      if (shape.enlarge && rnd() < shape.upscaleShare) enlargeLater(c);
     } else if (c.stage === "render") {
-      if (rnd() < shape.upscaleShare) { await cpuService.take(); await clock.sleep(shape.cpuService.upscaleMs); cpuService.give(); }
+      if (shape.enlarge) { if ((c.waitingX2 ?? 0) > 0) enlargeReport.renderedEarly += 1; }
+      else if (rnd() < shape.upscaleShare) { await cpuService.take(); await clock.sleep(shape.cpuService.upscaleMs); cpuService.give(); }
       for (let ch = 0; ch < c.batch.spec.channels; ch++) { await cpuFor(shape.worker.renderCpuMsPerImage); await write(); imagesAt.push(clock.now); }
       c.batch.firstImageAt ??= clock.now;
     } else {
@@ -226,6 +276,12 @@ export async function simulate(shape: ModelShape, batches: readonly ModelBatch[]
     if (span) span[1] = Math.max(span[1], clock.now);
     if (c.cursor < c.photos.length) { report.handOffs += 1; enqueue({ batch: c.batch, run: () => deliver(c) }); return; }
     c.cursor = 0;
+    if (stage === "matte" && (c.waitingX2 ?? 0) > 0) {
+      // Spec 18: parked at the render stage, its window slot freed for the batch's next chunk.
+      c.stage = "render"; c.parked = true; c.batch.active -= 1; enlargeReport.parks += 1;
+      dispatchChunks(c.batch);
+      return;
+    }
     if (stage !== "qa") { c.stage = stage === "matte" ? "render" : "qa"; enqueue({ batch: c.batch, run: () => deliver(c) }); return; }
     c.stage = "done"; c.batch.active -= 1;
     for (let n = new Set(c.photos.map((p) => p.product)).size; n > 0; n--) enqueue({ batch: c.batch, run: () => publish(c.batch) });
@@ -272,5 +328,6 @@ export async function simulate(shape: ModelShape, batches: readonly ModelBatch[]
     maxDeliveryMs: report.maxDeliveryMs, handOffs: report.handOffs,
     gpu: report.gpu, judge: report.judge,
     renderOverlapsMatteMs: by((b) => Math.max(0, Math.min(b.matteSpan[1], b.renderSpan[1]) - Math.max(b.matteSpan[0], b.renderSpan[0]))),
+    enlarge: { ...enlargeReport, maxQueueDepth: { operator: lanes.operator.maxDepth, bulk: lanes.bulk.maxDepth } },
   };
 }

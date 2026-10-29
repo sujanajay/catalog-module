@@ -6,9 +6,11 @@ import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { and, eq } from "drizzle-orm";
 import type { Db } from "@catalog/core/db/client";
 import { createTestDb } from "@catalog/core/db/testing";
-import { catalogBatches, catalogChunks, catalogCostEvents, catalogProducts, catalogSourceImages } from "@catalog/core/db/schema";
+import { catalogBatches, catalogChunks, catalogCostEvents, catalogOutputs, catalogProducts, catalogSourceImages } from "@catalog/core/db/schema";
 import { batchPrefix, enlargedPath } from "@catalog/core/catalog/naming";
-import { storedUpscaler, upscalerId } from "@catalog/core/catalog/upscale";
+import { sourceX2, storedUpscaler, upscalerId } from "@catalog/core/catalog/upscale";
+import { classifyOutputs } from "@catalog/core/catalog/load/classify";
+import { ENLARGEMENT_FAILED_SENTENCE } from "@catalog/core/catalog/types";
 import { EnlargeBadInputError, EnlargeBusyError } from "@catalog/core/catalog/enlarge";
 import { ENLARGE_TASK_MAX_ATTEMPTS, ENLARGING_TASK } from "@catalog/core/catalog/pipeline/enlargement";
 import { enlargeTaskId } from "@catalog/core/tasks";
@@ -224,4 +226,54 @@ describe("spec 18 H3: the enlarge task", () => {
     expect((await photosOf(s.batch.id)).every((p) => p.x2Uri)).toBe(true);
     expect((await db.select().from(catalogChunks).where(eq(catalogChunks.id, s.chunks[0]!.id)))[0]!.taskName).toBeNull();
   }, 60_000);
+});
+
+describe("spec 18 section 7: a batch through the queue with one forced terminal failure", () => {
+  it("every enlargement settles before its render, each parked chunk's render is queued once, the failed product is held with enlargement_failed and nothing is silent", async () => {
+    const { w } = enlargingWorld();
+    const s = await seedBatch(db, w, "h3-section-7", [[2, 1], [2]], { channels: ["trendyol"] });
+    const failing = s.chunks[0]!.productIds[1]!;
+    // The service fails every call for one product (busy, so each photo goes through all its attempts).
+    const ok = w.deps.enlarge!;
+    w.deps.enlarge = vi.fn<EnlargeCall>(async (jpeg, trace) => { if (trace.productId === failing) throw new EnlargeBusyError(503, 1); return ok(jpeg, trace); });
+    // The fake render stands in for renderSource's decision: the photo's primed x2 image, or the hold.
+    const base = w.deps.renderAllChannels;
+    w.deps.renderAllChannels = async (p, m, channels, ctx) => {
+      const out = await base(p, m, channels, ctx), x2 = await sourceX2(w.deps.upscaler!, p.rgb, p.width).result;
+      for (const ch of channels) { out[ch]!.flags = [...out[ch]!.flags, x2 ? "upscaled" : "enlargement_failed"]; if (!x2) out[ch]!.notes = [ENLARGEMENT_FAILED_SENTENCE]; }
+      return out;
+    };
+    const renderedEarly: string[] = [];
+    const deliverChunk = async (body: Record<string, unknown>) => {
+      if (body.stage === "render") {
+        const chunk = await chunkRow(db, body.chunkId as string);
+        const waiting = (await db.select().from(catalogSourceImages).where(eq(catalogSourceImages.batchId, s.batch.id))).filter((x) => chunk.productIds.includes(x.productId) && x.x2Model && !x.x2Uri && x.x2Attempts < ENLARGE_TASK_MAX_ATTEMPTS);
+        if (waiting.length) renderedEarly.push(chunk.id);
+      }
+      return handleChunkTask(w.deps, body);
+    };
+    // Start: the window takes both chunks; then drain the queue in order, a 503 goes to the back with its retry count.
+    const { dispatchChunks } = await import("@catalog/core/catalog/pipeline/dispatch");
+    await dispatchChunks(db, w.deps.enqueue, s.batch.id, { window: 2 });
+    for (let i = 0, guard = 0; i < w.tasks.length && guard < 400; i++, guard++) {
+      const task = w.tasks[i]!;
+      if (task.route === "/tasks/catalog/chunk") await deliverChunk(task.body);
+      else if (task.route === "/tasks/catalog/enlarge") {
+        const r = await handleEnlargeTask(w.deps, task.body, { retryCount: task.retryCount });
+        if (r.httpStatus === 503) w.tasks.push({ ...task, retryCount: task.retryCount + 1 });
+      }
+    }
+    expect(renderedEarly).toEqual([]);
+    for (const chunk of s.chunks) {
+      expect((await chunkRow(db, chunk.id)).status).toBe("done");
+      expect(w.tasks.filter((t) => t.route === "/tasks/catalog/chunk" && t.body.chunkId === chunk.id && t.body.stage === "render")).toHaveLength(1);
+    }
+    const outputs = await db.select().from(catalogOutputs).where(eq(catalogOutputs.batchId, s.batch.id));
+    const held = outputs.filter((o) => o.productId === failing), made = outputs.filter((o) => o.productId !== failing);
+    expect(held.map((o) => [o.status, o.flags.includes("enlargement_failed"), (o.reason ?? "").includes("could not be enlarged")])).toEqual([["needs_attention", true, true]]);
+    expect(made.every((o) => o.status === "staged" && o.flags.includes("upscaled"))).toBe(true);
+    expect(w.log.mock.calls.filter(([m, f]) => m === "enlargement failed" && f?.severity === "ERROR")).toHaveLength(1);
+    const c = classifyOutputs(outputs.map((o) => ({ ...o, status: o.status === "staged" ? "verified" : o.status })), new Set([failing]));
+    expect(c.silent).toEqual([]);
+  }, 120_000);
 });
