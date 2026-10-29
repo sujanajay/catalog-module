@@ -28,6 +28,16 @@ export const ENLARGING_TASK = "enlarging";
 
 type Tx = Pick<Db, "select" | "update" | "execute">;
 
+/**
+ * Spec 18: what Start records on the batch (options.enlargement) when the upscaler is on (`UPSCALE_MODEL` set and not
+ * "off"): the batch is made with the enlargement stage, which scopes the enlarged_without_upscaler invariant. Null when
+ * off; a batch from before the stage has none.
+ */
+export function enlargementOptionFromEnv(env: NodeJS.ProcessEnv = process.env): { model: string } | null {
+  const model = env.UPSCALE_MODEL?.trim();
+  return model && model !== "off" ? { model } : null;
+}
+
 /** The photos of the current catalog_chunks row (in an UPDATE or SELECT of catalog_chunks) still queued for enlargement. */
 export function chunkHasQueuedEnlargement(): SQL {
   return sql`EXISTS (SELECT 1 FROM catalog_source_images si WHERE si.batch_id = "catalog_chunks"."batch_id"
