@@ -9,8 +9,8 @@
 // 413) and an auth or route refusal (401, 403, 404) are never retried. Not wired into the render yet (spec 18 H3 calls
 // it from the durable enlargement task).
 import { Agent, fetch as undiciFetch } from "undici";
-import { TRACE_HEADERS, type MattingTrace } from "./matte";
-import { bearerFor, googleIdTokenFor, type IdTokenFor } from "../id-token";
+import { setTraceHeaders, type MattingTrace } from "./matte";
+import { bearerFor, googleIdTokenFor, raceAbort, type IdTokenFor } from "../id-token";
 import { DISPATCH_DEADLINE_SEC } from "../tasks";
 
 /** The client waits this much longer than the service may run, so the service's own timeout always comes first. */
@@ -144,17 +144,6 @@ const defaultFetch: typeof fetch = (input, init) => {
   return undiciFetch(input as string, { ...(init as object), dispatcher: enlargeAgent }) as unknown as Promise<Response>;
 };
 
-/** `work`, or the signal's reason as soon as it aborts: minting an ID token never outlives the attempt (as matte.ts). */
-async function raceAbort<T>(work: Promise<T>, signal: AbortSignal): Promise<T> {
-  signal.throwIfAborted();
-  let onAbort!: () => void;
-  const aborted = new Promise<never>((_, reject) => {
-    onAbort = () => reject(signal.reason);
-    signal.addEventListener("abort", onAbort, { once: true });
-  });
-  try { return await Promise.race([work, aborted]); } finally { signal.removeEventListener("abort", onAbort); }
-}
-
 /** The ID token could not be minted (the metadata server); a retryable server error. */
 class TokenMintError extends Error {}
 
@@ -174,8 +163,7 @@ async function attemptOnce(req: EnlargeRequest, timeoutMs: number, attempts: num
   const callerAborted = () => req.signal?.aborted === true;
   try {
     const headers = new Headers({ "content-type": "image/jpeg" });
-    if (req.trace?.batchId) headers.set(TRACE_HEADERS.batchId, req.trace.batchId);
-    if (req.trace?.productId) headers.set(TRACE_HEADERS.productId, req.trace.productId);
+    setTraceHeaders(headers, req.trace);
     const minted = bearerFor(base, deps.idToken).catch((error: unknown) => { throw new TokenMintError(error instanceof Error ? error.name : "error"); });
     const bearer = await raceAbort(minted, signal);
     if (bearer) headers.set("Authorization", bearer);

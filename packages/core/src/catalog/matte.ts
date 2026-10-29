@@ -4,8 +4,7 @@ import type { Matte, Prepared } from "./render";
 import { BG_TOLERANCE } from "./compliance";
 import { gpuUrlsFromEnv, UPSCALE_RETRY_DELAY_MS, UPSCALE_TIMEOUT_MS } from "./upscale";
 import { log } from "../log";
-import { cloudRunAudience } from "../cloud-run";
-import { googleIdTokenFor } from "../id-token";
+import { bearerFor, googleIdTokenFor, raceAbort, type IdTokenFor } from "../id-token";
 
 export interface MattingService { baseUrl: string; target: "cpu" | "gpu" }
 /**
@@ -14,7 +13,7 @@ export interface MattingService { baseUrl: string; target: "cpu" | "gpu" }
  */
 export interface MattingTrace { batchId?: string | undefined; productId?: string | undefined }
 export const TRACE_HEADERS = { batchId: "x-catalog-batch", productId: "x-catalog-product" } as const;
-function setTraceHeaders(headers: Headers, trace: MattingTrace | undefined): void {
+export function setTraceHeaders(headers: Headers, trace: MattingTrace | undefined): void {
   if (trace?.batchId) headers.set(TRACE_HEADERS.batchId, trace.batchId);
   if (trace?.productId) headers.set(TRACE_HEADERS.productId, trace.productId);
 }
@@ -24,7 +23,7 @@ export interface UpscaleModelInfo { id: string; available: boolean; scale: numbe
 /** The /health `upscale` section: absent on a service without /upscale (the CPU service). */
 export interface UpscaleHealth { models: UpscaleModelInfo[]; default: string | null }
 export interface MattingClientOptions {
-  services: MattingService[]; fetch?: typeof fetch; idToken?: (audience: string) => Promise<string>;
+  services: MattingService[]; fetch?: typeof fetch; idToken?: IdTokenFor;
   model?: string; timeoutMs?: number;
   /**
    * Spec 16 3.1.3: the base URL of the service that answers /upscale. Absent reads `UPSCALE_URL` from the
@@ -97,7 +96,7 @@ export class UnknownMatteModelError extends Error {}
 export class MattingClient {
   private readonly states: ServiceState[];
   private readonly request: typeof fetch;
-  private readonly token: (audience: string) => Promise<string>;
+  private readonly token: IdTokenFor;
   /** The service /upscale goes to (spec 16 3.1.3); null without a GPU service and without a matching UPSCALE_URL. */
   private readonly upscaleState: ServiceState | null;
   /** Spec 18 H2: UPSCALE_URL names no matting service, so it is catalog-upscale, which only the enlarge stage calls. */
@@ -184,22 +183,12 @@ export class MattingClient {
   }
   private async call(s: ServiceState, endpoint: string, init: RequestInit = {}, timeoutMs = this.opts.timeoutMs ?? MATTING_TIMEOUT_MS, trace?: MattingTrace): Promise<Response> {
     const signal = AbortSignal.timeout(timeoutMs);
-    const url = new URL(s.baseUrl);
-    const local = url.protocol === "http:" && ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname);
     const headers = new Headers(init.headers);
     setTraceHeaders(headers, trace);
-    if (!local) {
+    const bearer = await raceAbort(bearerFor(s.baseUrl, this.token), signal);
+    if (bearer) {
       signal.throwIfAborted();
-      let onAbort!: () => void;
-      const aborted = new Promise<never>((_, reject) => {
-        onAbort = () => reject(signal.reason);
-        signal.addEventListener("abort", onAbort, { once: true });
-      });
-      try {
-        const token = await Promise.race([this.token(cloudRunAudience(s.baseUrl)), aborted]);
-        signal.throwIfAborted();
-        headers.set("Authorization", `Bearer ${token}`);
-      } finally { signal.removeEventListener("abort", onAbort); }
+      headers.set("Authorization", bearer);
     }
     const response = await this.request(`${s.baseUrl}${endpoint}`, { ...init, headers, signal });
     if (!response.ok) {
