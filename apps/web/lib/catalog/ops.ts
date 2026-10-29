@@ -8,9 +8,10 @@
 // cost so far kept STAGE_TTL_MS); the cost sections are kept for COST_TTL_MS per web instance
 // (rememberCost), run in a read-only transaction with a statement timeout, and lifetime brand totals are
 // read only when asked for.
-import { and, desc, eq, gte, inArray, isNotNull, or, sql } from "drizzle-orm";
-import { catalogBatches, catalogChunks, catalogSourceImages } from "@catalog/core/db/schema";
-import { photoEnlargementFailed, photoEnlargementQueued } from "@catalog/core/catalog/pipeline/enlargement";
+import { and, count, desc, eq, gte, inArray, isNotNull, notInArray, or, sql } from "drizzle-orm";
+import { catalogBatches, catalogChunks, catalogEnlargements, catalogOutputs } from "@catalog/core/db/schema";
+import { enlargementFailed, enlargementQueued } from "@catalog/core/catalog/pipeline/enlargement";
+import { ENLARGEMENT_WAITING_LONG_MS } from "@catalog/core/catalog/invariants/checks";
 import type { BatchStatus } from "@catalog/core/catalog/types";
 import { batchCostAttribution, batchCostByEngine, batchCostByStage, brandCostTotals, dayCostTotals, BRAND_REPORT_DAYS } from "@catalog/core/catalog/cost-report";
 import { db, type Db } from "../db";
@@ -224,15 +225,24 @@ export async function healthSummary(conn: Db = db()): Promise<HealthSummary> {
       .orderBy(catalogChunks.startedAt).limit(1);
     if (chunk) slowest = { stage: chunk.stage, ms: Number(slowBatch.ms), batchId: slowBatch.id };
   }
-  // Spec 18: the photos of active batches by enlargement state (pipeline/enlargement.ts), on the batch_id index.
+  // Spec 18 lifecycle 3.7: the wanted enlargements of live batches (not failed or cancelled) by state
+  // (pipeline/enlargement.ts), those waiting more than 20 h (information, never a failure), the outputs an operator
+  // used as they are after the plain warning, and the running batches started before the stage (the plain path).
+  const live = conn.select({ id: catalogBatches.id }).from(catalogBatches).where(notInArray(catalogBatches.status, ["failed", "cancelled", "draft"]));
   const [x2] = await conn
     .select({
-      waiting: sql<string>`count(*) FILTER (WHERE ${photoEnlargementQueued()})`,
-      failed: sql<string>`count(*) FILTER (WHERE ${photoEnlargementFailed()})`,
+      waiting: sql<string>`count(*) FILTER (WHERE ${enlargementQueued()})`,
+      failed: sql<string>`count(*) FILTER (WHERE ${enlargementFailed()})`,
+      long: sql<string>`count(*) FILTER (WHERE ${enlargementQueued()} AND ${catalogEnlargements.createdAt} < ${new Date(Date.now() - ENLARGEMENT_WAITING_LONG_MS)})`,
     })
-    .from(catalogSourceImages)
-    .where(inArray(catalogSourceImages.batchId, conn.select({ id: catalogBatches.id }).from(catalogBatches).where(inArray(catalogBatches.status, [...ACTIVE_STATUSES]))));
-  return { silentOutputs: Number(sums?.silent ?? 0), heldSiblings: Number(sums?.held ?? 0), slowest, enlargeWaiting: Number(x2?.waiting ?? 0), enlargeFailed: Number(x2?.failed ?? 0) };
+    .from(catalogEnlargements)
+    .where(inArray(catalogEnlargements.batchId, live));
+  const [plain] = await conn.select({ n: count() }).from(catalogOutputs)
+    .where(and(inArray(catalogOutputs.batchId, live), eq(catalogOutputs.decision, "use_as_is"), sql`${catalogOutputs.flags} @> '["enlargement_failed"]'::jsonb`));
+  const [before] = await conn.select({ n: count() }).from(catalogBatches)
+    .where(and(inArray(catalogBatches.status, [...ACTIVE_STATUSES]), sql`${catalogBatches.options}->'enlargement' IS NULL`));
+  return { silentOutputs: Number(sums?.silent ?? 0), heldSiblings: Number(sums?.held ?? 0), slowest, enlargeWaiting: Number(x2?.waiting ?? 0), enlargeFailed: Number(x2?.failed ?? 0),
+    enlargeWaitingLong: Number(x2?.long ?? 0), plainAccepted: Number(plain?.n ?? 0), startedBeforeEnlargement: Number(before?.n ?? 0) };
 }
 
 /** The GPU cut-out service (infra/deploy.sh GPU_REGION). */

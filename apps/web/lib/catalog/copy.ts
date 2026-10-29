@@ -12,6 +12,15 @@ export const HAND_OFF_FAILED = "The upload could not be handed to processing. Em
 // with a page that is not JSON, such as the load balancer's HTML timeout page.
 export const PLATFORM_TIMEOUT = "The server did not answer in time. Your files are safe. Reload this page to continue.";
 export const PLATFORM_ERROR = "This did not finish. Reload this page and try again.";
+/** Spec 18 lifecycle 3.6: the warning before "Use as is" on a photo that could not be enlarged (never names a model). */
+export function plainWarningText(channelLabels: readonly string[]): string {
+  return `This photo could not be enlarged. If you use it as it is, the ${listAnd(channelLabels)} images will be stretched and may look soft. Use it anyway?`;
+}
+export const PLAIN_WARNING_ACCEPT = "Use anyway";
+export const PLAIN_WARNING_CANCEL = "Cancel";
+export const TRY_AGAIN_LABEL = "Try again";
+export const TRY_AGAIN_TOAST = "Enlarging this photo again. It comes back here if it fails again.";
+export const TRY_AGAIN_STATUS = "Enlarging again";
 /** The sentence for a non-JSON answer: the timeout one for 502, 503 and 504, the general one otherwise. */
 export const platformErrorText = (status: number) => (status === 502 || status === 503 || status === 504 ? PLATFORM_TIMEOUT : PLATFORM_ERROR);
 
