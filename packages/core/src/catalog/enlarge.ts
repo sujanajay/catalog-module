@@ -2,9 +2,9 @@
 // Unlike the render's upscale path through MattingClient (upscale.ts), it never reads /health and has no breaker:
 // a slow or busy service is waited for and retried, never switched off. Its timeout is the service's own request
 // timeout plus 30 s (UPSCALE_TIMEOUT_S, set by infra/deploy.sh from infra/lib/shape.sh, which sizes it from the
-// measured p95), so the client never gives up on a call the service is still allowed to finish. Retries back off
+// measured p95 and the largest photo the service takes), so the client never gives up on a call the service is still allowed to finish. Retries back off
 // exponentially on busy (429, Cloud Run's 503), timeout, transport errors and other 5xx. Every attempt ends by the
-// caller's deadline (by default the task's: DISPATCH_DEADLINE_SEC from the call): its timeout is clamped to the time
+// caller's deadline (by default the enlarge task's: ENLARGE_DISPATCH_DEADLINE_SEC from the call): its timeout is clamped to the time
 // left, and no attempt starts with less than ENLARGE_ATTEMPT_FLOOR_MS left. The service's own "upscale model
 // unavailable" 503 is no busy answer: it is retried once, after 60 s. A bad image (400, 413) and an auth or route
 // refusal (401, 403, 404) are never retried. Spec 18 H3 calls it from the durable enlargement task, one attempt per
@@ -12,18 +12,18 @@
 import { Agent, fetch as undiciFetch } from "undici";
 import { setTraceHeaders, type MattingTrace } from "./matte";
 import { bearerFor, googleIdTokenFor, raceAbort, type IdTokenFor } from "../id-token";
-import { DISPATCH_DEADLINE_SEC } from "../tasks";
+import { ENLARGE_DISPATCH_DEADLINE_SEC } from "../tasks";
 
 /** The client waits this much longer than the service may run, so the service's own timeout always comes first. */
 export const ENLARGE_CLIENT_MARGIN_MS = 30_000;
 /** What the task keeps after the call has given up: writing its outcome before the dispatch deadline. */
 export const ENLARGE_TASK_MARGIN_MS = 30_000;
 /**
- * The service's request timeout when UPSCALE_TIMEOUT_S is unset or invalid, and the most it may be: the task's
- * dispatch deadline minus both margins (900 - 30 - 30 = 840 s). infra/lib/shape.sh UPSCALE_TIMEOUT_MAX_S must equal it
- * (a test reads both).
+ * The service's request timeout when UPSCALE_TIMEOUT_S is unset or invalid, and the most it may be: the enlarge
+ * task's dispatch deadline minus both margins (1800 - 30 - 30 = 1740 s). infra/lib/shape.sh UPSCALE_TIMEOUT_MAX_S must
+ * equal it (a test reads both).
  */
-export const DEFAULT_UPSCALE_TIMEOUT_S = DISPATCH_DEADLINE_SEC - (ENLARGE_CLIENT_MARGIN_MS + ENLARGE_TASK_MARGIN_MS) / 1000;
+export const DEFAULT_UPSCALE_TIMEOUT_S = ENLARGE_DISPATCH_DEADLINE_SEC - (ENLARGE_CLIENT_MARGIN_MS + ENLARGE_TASK_MARGIN_MS) / 1000;
 /** The wait before the one retry after the service said its upscale model is unavailable (it may still be loading). */
 export const ENLARGE_UNAVAILABLE_RETRY_MS = 60_000;
 /** Spec 18 3.2.3 backoff between attempts: 10 s, 20 s, 40 s, then 60 s, each with up to 50% jitter off. */
@@ -37,7 +37,7 @@ export const ENLARGE_MAX_ATTEMPTS = 5;
  */
 export const ENLARGE_ATTEMPT_FLOOR_MS = 60_000;
 
-/** The service's request timeout in seconds from `UPSCALE_TIMEOUT_S` (a whole number from 1 to 840; else 840). */
+/** The service's request timeout in seconds from `UPSCALE_TIMEOUT_S` (a whole number from 1 to 1740; else 1740). */
 export function upscaleServerTimeoutS(env: NodeJS.ProcessEnv = process.env): number {
   const n = Number(env.UPSCALE_TIMEOUT_S?.trim());
   return Number.isInteger(n) && n >= 1 && n <= DEFAULT_UPSCALE_TIMEOUT_S ? n : DEFAULT_UPSCALE_TIMEOUT_S;
@@ -99,7 +99,7 @@ export interface EnlargeRequest {
   /**
    * Epoch ms after which no attempt may still be running (any margin the caller needs after the call is already taken
    * off). Each attempt's timeout is clamped to the time left, and none starts with less than ENLARGE_ATTEMPT_FLOOR_MS
-   * left. Default: the task's dispatch deadline counted from this call, now + DISPATCH_DEADLINE_SEC -
+   * left. Default: the enlarge task's dispatch deadline counted from this call, now + ENLARGE_DISPATCH_DEADLINE_SEC -
    * ENLARGE_TASK_MARGIN_MS; a caller that knows when its task started passes its own.
    */
   deadlineAt?: number;
@@ -142,7 +142,7 @@ const defaultSleep = (ms: number, signal?: AbortSignal): Promise<void> => new Pr
 let sharedIdToken: IdTokenFor | null = null;
 /**
  * The default fetch's dispatcher: undici's own headers and body timeouts (300 s each by default) are off, so an
- * attempt's only limit is its AbortSignal timeout (the service's timeout + 30 s, up to 870 s). Without it fetch gives up
+ * attempt's only limit is its AbortSignal timeout (the service's timeout + 30 s, up to 1770 s). Without it fetch gives up
  * on a slow enlargement at 300 s while the service keeps working on it. As safe-url.ts pinnedFetch does.
  */
 let enlargeAgent: Agent | undefined;
@@ -204,7 +204,7 @@ export async function enlargeViaService(req: EnlargeRequest, deps: EnlargeDeps =
   const io = { fetch: deps.fetch ?? defaultFetch, idToken: deps.idToken ?? (sharedIdToken ??= googleIdTokenFor()), now };
   const requestedMs = req.timeoutMs ?? enlargeTimeoutMs();
   const maxAttempts = Math.max(1, req.maxAttempts ?? ENLARGE_MAX_ATTEMPTS);
-  const deadlineAt = req.deadlineAt ?? now() + DISPATCH_DEADLINE_SEC * 1000 - ENLARGE_TASK_MARGIN_MS;
+  const deadlineAt = req.deadlineAt ?? now() + ENLARGE_DISPATCH_DEADLINE_SEC * 1000 - ENLARGE_TASK_MARGIN_MS;
   // The attempt's timeout: the requested one, or the time left before the deadline when that is shorter (the task's
   // deadline already counts the time spent before the call: reads, download, prepare). A clamped attempt may give up
   // on a call the service is still allowed to finish; that beats never calling at all (2026-10-29 review, P0).

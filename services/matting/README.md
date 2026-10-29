@@ -347,7 +347,10 @@ deploy still runs its two-size probe), and `--rollback` returns to a measure run
 CPU quota: asia-south1 allows 190 of its 200 vCPU here. On 2026-10-29 the shape counted 171 (worker 24 x 4,
 catalog-matting 16 x 4, web and jobs 11), so the ladder ran with `UPSCALE_MAX_INSTANCES` at most 4 at 4 vCPU
 (171 + 16 = 187) and at most 2 at 8 vCPU (171 + 16 = 187). The dedicated shape chosen from it (spec 18 section 8)
-lowers `MATTING_CPU_MAX_INSTANCES` from 16 to 4: 96 + 16 + 16 x 4 + 11 = 187.
+lowers `MATTING_CPU_MAX_INSTANCES` from 16 to 4: 96 + 16 + 16 x 4 + 11 = 187. A measure rung deploys a candidate
+of the same service while the live revision keeps its own max instances, so once the dedicated shape is live
+`shape_check` counts both (`UPSCALE_LIVE_VCPU`, 64): with 3 vCPU to spare, a new rung needs a smaller live
+`UPSCALE_MAX_INSTANCES` first.
 
 How the ladder was run (2026-10-29, the shape defaults then had `UPSCALE_SERVICE=cpu`; since the dedicated shape is
 the default, a measure run must say `UPSCALE_SERVICE=cpu` too, because measure mode refuses `dedicated`. It still
@@ -360,7 +363,7 @@ UPSCALE_SERVICE=cpu UPSCALE_MEASURE=1 UPSCALE_CPU_VCPU=4 UPSCALE_THREADS=4 UPSCA
 UPSCALE_SERVICE=cpu UPSCALE_MEASURE=1 UPSCALE_CPU_VCPU=8 UPSCALE_THREADS=8 UPSCALE_CONCURRENCY=1 UPSCALE_MAX_INSTANCES=2 bash infra/deploy.sh
 UPSCALE_SERVICE=cpu UPSCALE_MEASURE=1 UPSCALE_CPU_VCPU=8 UPSCALE_THREADS=8 UPSCALE_CONCURRENCY=2 UPSCALE_MAX_INSTANCES=2 bash infra/deploy.sh
 # The probe deploy.sh prints for a rung (its candidate URL and its concurrency filled in; the ladder ran with the
-# 840 s timeout of that day, today's default prints 480):
+# 840 s timeout of that day, today's default prints 1740):
 bash infra/check-matting.sh --probe-upscale <candidate URL> --model=swinir-x2 --sizes=800x1200,1600x1600 --concurrency=<1 or 2> --rounds=3 --timeout=840
 ```
 
@@ -401,8 +404,11 @@ per call, so the next probe change should log both. `infra/lib/shape.sh` therefo
 1 for the dedicated service ("measure and prove determinism before raising"). Concurrency 1 is deterministic in these
 runs, not proven deterministic on every host.
 
-The shape chosen (spec 18 section 8): 16 x 4 vCPU, 4 threads, concurrency 1, `UPSCALE_TIMEOUT_S=480` (at least
-2 x p95 of 1600x1600 = 432 s, at most 840 s). Per photo, 4 vCPU costs 4 x 99 = 396 vCPU-s against 8 x 77.4 = 619 for
+The shape chosen (spec 18 section 8): 16 x 4 vCPU, 4 threads, concurrency 1, `UPSCALE_TIMEOUT_S=1740` with
+`UPSCALE_MAX_PIXELS=8000000`. The timeout must cover the largest photo the service takes, not only the probe sizes:
+SwinIR is tiled, so time grows with pixels, and the slowest measured p95 per pixel (100 s for 0.96 MP, 104.2 s per
+MP) gives 2 x 834 s = 1668 s for 8 MP. 1740 s is the most one enlarge task allows (its 1800 s dispatch deadline less
+two 30 s margins); the 24 MP service default would need about 5000 s. Per photo, 4 vCPU costs 4 x 99 = 396 vCPU-s against 8 x 77.4 = 619 for
 8 vCPU, and within the same 64 vCPU 16 x 4 finishes about 1.5x the photos per hour of 8 x 8 (about 580 against 370
 photos of 800x1200 per hour). The enlarge queue rate follows: 2 lanes x `ENLARGE_DISPATCHES_PER_SECOND` 0.075 =
 0.15 per second <= 16 x 1 / p50 99 s = 0.16.

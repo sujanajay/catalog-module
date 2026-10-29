@@ -55,12 +55,12 @@ const test = (name, fn) => tests.push([name, fn]);
 
 test('no env: before the services only the new enlarge lanes are created; after the worker gate every queue gets its shape slots', () => {
   assert.deepEqual(run('queues_create_missing', {existing: LIVE_QUEUES}), [
-    create('catalog-enlarge', 4, ENLARGE_RETRY), create('catalog-enlarge-bulk', 12, ENLARGE_RETRY),
+    create('catalog-enlarge', 4, ENLARGE_RETRY), create('catalog-enlarge-bulk', 10, ENLARGE_RETRY),
   ]);
   assert.deepEqual(run('queues_create_missing', {existing: [...LIVE_QUEUES, 'catalog-enlarge', 'catalog-enlarge-bulk']}), []);
   assert.deepEqual(run('queues_apply_shape', {existing: LIVE_QUEUES}), [
     update('catalog', 8), update('catalog-ingest', 4, INGEST_RETRY), update('catalog-bulk', 36),
-    update('catalog-enlarge', 4, ENLARGE_RETRY), update('catalog-enlarge-bulk', 12, ENLARGE_RETRY),
+    update('catalog-enlarge', 4, ENLARGE_RETRY), update('catalog-enlarge-bulk', 10, ENLARGE_RETRY),
   ]);
 });
 
@@ -80,7 +80,7 @@ test('spec 18: both enlarge lanes carry the rate and the retry by attempts; env 
 
 test('no env: a queue update is never below the shape value', () => {
   const calls = run('queues_create_missing; queues_apply_shape', {existing: LIVE_QUEUES});
-  const live = {'catalog': 8, 'catalog-bulk': 36, 'catalog-ingest': 4, 'catalog-enlarge': 4, 'catalog-enlarge-bulk': 12};
+  const live = {'catalog': 8, 'catalog-bulk': 36, 'catalog-ingest': 4, 'catalog-enlarge': 4, 'catalog-enlarge-bulk': 10};
   for (const c of calls.filter((l) => l.startsWith("tasks queues update"))) {
     const [, name, slots] = /^tasks queues update (\S+) .*--max-concurrent-dispatches=(\d+)/.exec(c);
     assert.ok(Number(slots) >= live[name], `${name} lowered to ${slots}, below its shape value ${live[name]}`);
@@ -90,7 +90,7 @@ test('no env: a queue update is never below the shape value', () => {
 test('a fresh stack: the missing queues are created at their shape slots with their retry', () => {
   assert.deepEqual(run('queues_create_missing', {existing: ['generation']}), [
     create('catalog', 8), create('catalog-ingest', 4, INGEST_RETRY), create('catalog-bulk', 36),
-    create('catalog-enlarge', 4, ENLARGE_RETRY), create('catalog-enlarge-bulk', 12, ENLARGE_RETRY),
+    create('catalog-enlarge', 4, ENLARGE_RETRY), create('catalog-enlarge-bulk', 10, ENLARGE_RETRY),
   ]);
 });
 

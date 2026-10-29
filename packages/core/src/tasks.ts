@@ -96,8 +96,19 @@ export const DEFAULT_GCP_PROJECT = "image-links-agent";
 export const DEFAULT_REGION = "asia-south1";
 export const DEFAULT_TASKS_QUEUE = "catalog";
 
-/** Matches the worker's Cloud Run --timeout (900 s); the 10-minute default can cut off slow chunks. */
+/** The dispatch deadline of every task but an enlargement; the 10-minute default can cut off slow chunks. */
 export const DISPATCH_DEADLINE_SEC = 900;
+/**
+ * Spec 18 (2026-10-29 review P1): the dispatch deadline of an enlargement task (ENLARGE_TASK_ROUTES), the most Cloud
+ * Tasks allows for an HTTP task (30 minutes), so one call on the CPU upscaler can take the largest photo it accepts
+ * (infra/lib/shape.sh UPSCALE_MAX_PIXELS). The worker's Cloud Run --timeout matches it (infra/lib/services.sh).
+ */
+export const ENLARGE_DISPATCH_DEADLINE_SEC = 1800;
+
+/** The dispatch deadline of a route's tasks: ENLARGE_DISPATCH_DEADLINE_SEC for an enlargement, else DISPATCH_DEADLINE_SEC. */
+export function dispatchDeadlineSec(route: TaskRoute): number {
+  return ENLARGE_TASK_ROUTES.includes(route) ? ENLARGE_DISPATCH_DEADLINE_SEC : DISPATCH_DEADLINE_SEC;
+}
 
 const TASK_ID_RE = /^[A-Za-z0-9_-]{1,500}$/;
 
@@ -193,7 +204,7 @@ export function buildTaskRequest(
       body: Buffer.from(JSON.stringify(body)).toString("base64"),
       oidcToken: { serviceAccountEmail: cfg.serviceAccountEmail, audience: cloudRunAudience(cfg.workerUrl) },
     },
-    dispatchDeadline: { seconds: DISPATCH_DEADLINE_SEC },
+    dispatchDeadline: { seconds: dispatchDeadlineSec(route) },
   };
   if (opts.taskId !== undefined) {
     assertTaskId(opts.taskId);

@@ -25,7 +25,7 @@ import { batchPrefix, enlargedPath } from "@catalog/core/catalog/naming";
 import { enlargementNeeds, UnsupportedSourceError, type EnlargementShot, type Prepared } from "@catalog/core/catalog/render";
 import { gpuUrlsFromEnv, isCpuUpscalerId, primeSourceX2, UPSCALE_FACTOR, upscaleUpload, type Upscaler } from "@catalog/core/catalog/upscale";
 import { ENLARGE_TASK_MARGIN_MS, EnlargeError, enlargeTimeoutMs, enlargeViaService, type EnlargeDeps, type EnlargeResult } from "@catalog/core/catalog/enlarge";
-import { DISPATCH_DEADLINE_SEC } from "@catalog/core/tasks";
+import { ENLARGE_DISPATCH_DEADLINE_SEC } from "@catalog/core/tasks";
 import { ENLARGE_CLAIM_MS, ENLARGE_TASK_MAX_ATTEMPTS, ENLARGING_TASK, enqueueEnlargements, lockProductChunks, photoEnlargementState, unparkSettledChunks } from "@catalog/core/catalog/pipeline/enlargement";
 import { positiveIntEnv } from "@catalog/core/concurrency";
 import { recordCostEvents, type CostEventInput } from "@catalog/core/cost-events";
@@ -36,12 +36,16 @@ import { refreshBatchProgress, topUpWindow, type CatalogDeps } from "./deps";
 
 /**
  * The service call the handler makes: one attempt, the x2 JPEG as the service answered it. `deadlineAt` (epoch ms) is
- * the delivery's own deadline: the delivery's start plus DISPATCH_DEADLINE_SEC (the Cloud Tasks dispatch deadline),
+ * the delivery's own deadline: the delivery's start plus ENLARGE_DISPATCH_DEADLINE_SEC (its Cloud Tasks dispatch deadline),
  * less ENLARGE_TASK_MARGIN_MS for the settle; the attempt's timeout is clamped to it.
  */
 export type EnlargeCall = (jpeg: Buffer, trace: MattingTrace, opts?: { deadlineAt?: number }) => Promise<EnlargeResult>;
 
-/** The largest photo (width x height) the upscale service takes (`UPSCALE_MAX_PIXELS`, its default 24,000,000). */
+/**
+ * The largest photo (width x height) the upscale service takes (`UPSCALE_MAX_PIXELS`; infra/deploy.sh sets it for
+ * catalog-upscale from infra/lib/shape.sh, sized so the largest photo fits the service timeout; unset, the service's
+ * own default 24,000,000).
+ */
 const DEFAULT_UPSCALE_MAX_PIXELS = 24_000_000;
 function upscaleMaxPixels(env: NodeJS.ProcessEnv = process.env): number {
   return positiveIntEnv(env.UPSCALE_MAX_PIXELS?.trim(), DEFAULT_UPSCALE_MAX_PIXELS);
@@ -50,7 +54,7 @@ function upscaleMaxPixels(env: NodeJS.ProcessEnv = process.env): number {
 /**
  * The worker's service call: the service UPSCALE_URL names (catalog-upscale, or the CPU cut-out service), else the
  * first GPU matting service, as the matting client picks it. One attempt per task delivery: the queue retries. The
- * attempt waits UPSCALE_TIMEOUT_S + 30 s (840 s + 30 s when unset), clamped to the delivery's deadline. `deps` is for
+ * attempt waits UPSCALE_TIMEOUT_S + 30 s (1740 s + 30 s when unset), clamped to the delivery's deadline. `deps` is for
  * tests (a fake fetch and token).
  */
 export function workerEnlargeCall(model: string, env: NodeJS.ProcessEnv = process.env, deps: EnlargeDeps = {}): EnlargeCall {
@@ -228,7 +232,7 @@ export async function handleEnlargeTask(deps: CatalogDeps, body: Record<string, 
     let result: EnlargeResult;
     // The model-unavailable 503 is not terminal here: it counts an attempt and the queue retries with its back-off,
     // so a model still loading passes and a deploy problem holds the photo after ENLARGE_TASK_MAX_ATTEMPTS.
-    const deadlineAt = started + DISPATCH_DEADLINE_SEC * 1000 - ENLARGE_TASK_MARGIN_MS;
+    const deadlineAt = started + ENLARGE_DISPATCH_DEADLINE_SEC * 1000 - ENLARGE_TASK_MARGIN_MS;
     try { result = await call(await upscaleUpload(p.rgb, p.width, p.height), { batchId, productId }, { deadlineAt }); }
     catch (error) {
       if (error instanceof EnlargeError) {

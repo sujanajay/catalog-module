@@ -143,12 +143,16 @@ service_catalog_matting_gpu() {
   SVC_QUOTA_OPTIONAL=1
 }
 
+# The worker's Cloud Run request timeout: the longest dispatch deadline of its tasks, the enlarge task's 1800 s
+# (ENLARGE_DISPATCH_DEADLINE_SEC in packages/core/src/tasks.ts; every other task has 900 s and its own time budget).
+WORKER_TIMEOUT_S=1800
+
 service_catalog_worker() {
   SVC_NAME=$WORKER_SERVICE
   SVC_REGION=$(service_region "$SVC_NAME")
   SVC_IMAGE=$AR/worker:$TAG
   SVC_ARGS=(--service-account="$WORKER_SA" --cpu="$WORKER_CPU" --memory="$WORKER_MEMORY"
-    --concurrency="$WORKER_CONCURRENCY" --min-instances=0 --max-instances="$WORKER_MAX_INSTANCES" --timeout=900
+    --concurrency="$WORKER_CONCURRENCY" --min-instances=0 --max-instances="$WORKER_MAX_INSTANCES" --timeout="$WORKER_TIMEOUT_S"
     "${NET[@]}" --set-secrets="$WORKER_SECRETS" --labels=app=catalog,component=worker)
   SVC_ENV=$WORKER_ENV
   # The smoke runs on the matting candidates of this deploy (their tag URLs) and names the worker candidate.

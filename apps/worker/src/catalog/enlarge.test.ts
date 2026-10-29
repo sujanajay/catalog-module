@@ -14,7 +14,7 @@ import { classifyOutputs } from "@catalog/core/catalog/load/classify";
 import { DEFAULT_UPSCALE_TIMEOUT_S, ENLARGE_CLIENT_MARGIN_MS, ENLARGE_TASK_MARGIN_MS, EnlargeBadInputError, EnlargeBusyError } from "@catalog/core/catalog/enlarge";
 import { ENLARGE_CLAIM_MS, ENLARGE_STALE_MS, ENLARGE_TASK_MAX_ATTEMPTS, ENLARGING_TASK } from "@catalog/core/catalog/pipeline/enlargement";
 import { recoverBatchChunks, resendStaleEnlargements } from "@catalog/core/catalog/pipeline/dispatch";
-import { DISPATCH_DEADLINE_SEC, enlargeTaskId } from "@catalog/core/tasks";
+import { ENLARGE_DISPATCH_DEADLINE_SEC, enlargeTaskId } from "@catalog/core/tasks";
 import { currentChunkTask, deliverChunkToEnd, handleChunkTask } from "./chunk";
 import { derivedPrefixFor, handleEnlargeTask, type EnlargeCall, primeStoredEnlargement, workerEnlargeCall } from "./enlarge";
 import { preparePrimed } from "./auto-resolve";
@@ -125,7 +125,7 @@ describe("spec 18 H3: the enlarge task", () => {
     expect(await handleEnlargeTask(w.deps, bodyOf(w, two!.id))).toMatchObject({ httpStatus: 200, outcome: "done" });
     expect(service.call).toHaveBeenCalledTimes(2);
     // The call gets the delivery's own deadline: its start plus the dispatch deadline, less the client margin.
-    const left = service.call.mock.calls[0]![2]!.deadlineAt! - Date.now(), budget = DISPATCH_DEADLINE_SEC * 1000 - ENLARGE_TASK_MARGIN_MS;
+    const left = service.call.mock.calls[0]![2]!.deadlineAt! - Date.now(), budget = ENLARGE_DISPATCH_DEADLINE_SEC * 1000 - ENLARGE_TASK_MARGIN_MS;
     expect(left).toBeLessThanOrEqual(budget);
     expect(left).toBeGreaterThan(budget - 60_000);
     const photos = await photosOf(s.batch.id);
@@ -252,7 +252,7 @@ describe("spec 18 H3: the enlarge task", () => {
       expect(seen[0]).toBe("http://localhost:8099/upscale?model=swinir-x2&scale=2");
       const timeoutMs = timeouts.mock.calls.map(([ms]) => ms).at(-1)!;
       expect(timeoutMs).toBeLessThan(DEFAULT_UPSCALE_TIMEOUT_S * 1000 + ENLARGE_CLIENT_MARGIN_MS);
-      expect(Date.now() + timeoutMs).toBeLessThanOrEqual(started + DISPATCH_DEADLINE_SEC * 1000 - ENLARGE_TASK_MARGIN_MS + 1_000);
+      expect(Date.now() + timeoutMs).toBeLessThanOrEqual(started + ENLARGE_DISPATCH_DEADLINE_SEC * 1000 - ENLARGE_TASK_MARGIN_MS + 1_000);
     } finally { timeouts.mockRestore(); }
     expect((await photosOf(s.batch.id))[0]!.x2Uri).not.toBeNull();
   }, 60_000);

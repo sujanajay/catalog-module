@@ -1,8 +1,11 @@
 import { afterEach, describe, expect, expectTypeOf, it, vi } from "vitest";
+import fs from "node:fs";
+import { fileURLToPath } from "node:url";
 import {
   buildTaskRequest,
   chunkTaskId,
   DISPATCH_DEADLINE_SEC,
+  ENLARGE_DISPATCH_DEADLINE_SEC,
   ENLARGE_TASK_ROUTES,
   enlargeTaskId,
   enqueueTask,
@@ -74,8 +77,17 @@ describe("buildTaskRequest", () => {
     expect(task.httpRequest.headers["Content-Type"]).toBe("application/json");
     expect(JSON.parse(Buffer.from(task.httpRequest.body, "base64").toString())).toEqual(body);
     expect(task.httpRequest.oidcToken).toEqual({ serviceAccountEmail: env.WORKER_SA_EMAIL, audience: WORKER });
-    expect(task.dispatchDeadline).toEqual({ seconds: DISPATCH_DEADLINE_SEC });
+    // An enlargement gets the Cloud Tasks maximum (30 minutes), every other task 900 s.
+    expect(task.dispatchDeadline).toEqual({ seconds: ENLARGE_TASK_ROUTES.includes(route) ? ENLARGE_DISPATCH_DEADLINE_SEC : DISPATCH_DEADLINE_SEC });
     expect(DISPATCH_DEADLINE_SEC).toBe(900);
+    expect(ENLARGE_DISPATCH_DEADLINE_SEC).toBe(1800);
+  });
+
+  it("the worker's Cloud Run timeout covers the longest dispatch deadline (infra/lib/services.sh WORKER_TIMEOUT_S)", () => {
+    const services = fs.readFileSync(fileURLToPath(new URL("../../../infra/lib/services.sh", import.meta.url)), "utf8");
+    const row = /^WORKER_TIMEOUT_S=(\d+)\s*$/m.exec(services);
+    expect(row, "WORKER_TIMEOUT_S= in infra/lib/services.sh").not.toBeNull();
+    expect(Number(row![1])).toBe(Math.max(DISPATCH_DEADLINE_SEC, ENLARGE_DISPATCH_DEADLINE_SEC));
   });
 
   it("a tag URL keeps the tag as the target and the service URL as the OIDC audience", () => {
