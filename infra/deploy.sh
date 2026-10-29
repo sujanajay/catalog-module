@@ -396,18 +396,18 @@ for SERVICE in "${SERVICES[@]}"; do
       # reads the stored x2 and the matting client refuses a dedicated UPSCALE_URL. On cpu and gpu the enlarge task
       # learns the matting service's own timeout the same way (each attempt is also clamped to the task's deadline).
       if [ "$UPSCALE_SERVICE" = cpu ]; then
-        if [ -n "$UPSCALE_MODEL" ]; then WORKER_ENV+=",UPSCALE_URL=$MATTING_URL,UPSCALE_TIMEOUT_S=$MATTING_TIMEOUT_S"; fi
+        if [ -n "$UPSCALE_MODEL" ]; then WORKER_ENV+=",UPSCALE_URL=$MATTING_URL,UPSCALE_TIMEOUT_S=$MATTING_TIMEOUT_S,UPSCALE_COLD_START_S=$UPSCALE_COLD_START_S"; fi
       elif [ "$UPSCALE_SERVICE" = dedicated ]; then
         if [ -z "$UPSCALE_SERVICE_URL" ]; then
           echo "ERROR: UPSCALE_SERVICE=dedicated but catalog-upscale has no URL; the worker was not changed" >&2
           exit 1
         fi
-        if [ -n "$UPSCALE_MODEL" ]; then WORKER_ENV+=",UPSCALE_URL=$UPSCALE_SERVICE_URL,UPSCALE_TIMEOUT_S=$UPSCALE_TIMEOUT_S,UPSCALE_MAX_PIXELS=$UPSCALE_MAX_PIXELS,UPSCALE_MAX_PIXELS_X4=$UPSCALE_MAX_PIXELS_X4"; fi
+        if [ -n "$UPSCALE_MODEL" ]; then WORKER_ENV+=",UPSCALE_URL=$UPSCALE_SERVICE_URL,UPSCALE_TIMEOUT_S=$UPSCALE_TIMEOUT_S,UPSCALE_COLD_START_S=$UPSCALE_COLD_START_S,UPSCALE_MAX_PIXELS=$UPSCALE_MAX_PIXELS,UPSCALE_MAX_PIXELS_X4=$UPSCALE_MAX_PIXELS_X4"; fi
       elif [ -n "$UPSCALE_MODEL" ] && [ -z "$MATTING_GPU_URL" ]; then
         echo "WARN: UPSCALE_MODEL=$UPSCALE_MODEL ignored: no GPU matting service URL; the render keeps the plain path" >&2
         UPSCALE_MODEL=""
       elif [ -n "$UPSCALE_MODEL" ]; then
-        WORKER_ENV+=",UPSCALE_TIMEOUT_S=$MATTING_TIMEOUT_S"
+        WORKER_ENV+=",UPSCALE_TIMEOUT_S=$MATTING_TIMEOUT_S,UPSCALE_COLD_START_S=$UPSCALE_COLD_START_S"
       fi
       if [ -n "$UPSCALE_MODEL" ]; then WORKER_ENV+=",UPSCALE_MODEL=$UPSCALE_MODEL,UPSCALE_MODEL_X4=${UPSCALE_MODEL_X4:-off}"; WEB_ENV+=",UPSCALE_MODEL=$UPSCALE_MODEL,UPSCALE_MODEL_X4=${UPSCALE_MODEL_X4:-off}"; fi
       ;;

@@ -19,12 +19,13 @@
 # 5 attempts.
 CHUNK_QUEUE_RETRY=(--max-attempts=-1 --max-retry-duration=1800s --min-backoff=10s --max-backoff=60s --max-doublings=3)
 INGEST_QUEUE_RETRY=(--max-attempts=5 --min-backoff=10s)
-# Spec 18 3.3.1: an enlarge lane retries by attempt count: 9 deliveries, the 8 attempts the handler counts (it writes
-# the terminal failure on the last one, ENLARGE_TASK_MAX_ATTEMPTS) plus the one hand-off of a photo whose job has an x2
-# and an x4 image (spec 18 quality: the 503 "next_image" after the first image, not counted as an attempt),
-# 30 s to 300 s apart, with no time limit (0s), and is paced by
-# ENLARGE_DISPATCHES_PER_SECOND so a burst of new enlargements never meets a cold upscaler all at once.
-ENLARGE_QUEUE_RETRY=(--max-attempts=9 --max-retry-duration=0s --min-backoff=30s --max-backoff=300s --max-doublings=3)
+# Spec 18 lifecycle 3.8: an enlarge lane never drops a task. The handler alone decides when a row is terminal (it
+# counts attempts and timeouts on the row and answers 200 then), and a wait (service down or paused, a tile hand-off,
+# a cold start) answers 503 without counting, for as long as it lasts. So unlimited attempts (-1, the API's
+# "unlimited attempts"; the chunk queue uses the same form) and no time limit (0s, up to the task retention limit),
+# 30 s to 900 s apart (30, 60, 120, 240, 480, then 900 s), paced by ENLARGE_DISPATCHES_PER_SECOND so a burst of new
+# enlargements never meets a cold upscaler all at once. The sweep re-sends a lost task (ENLARGE_STALE_MS).
+ENLARGE_QUEUE_RETRY=(--max-attempts=-1 --max-retry-duration=0s --min-backoff=30s --max-backoff=900s --max-doublings=5)
 
 # The queue names that exist in the region, one per line. gcloud 589 prints short names from list while older
 # releases print the full projects/.../queues/<name>; keep basenames so both match (docs/solutions/gcloud-list-names.md).

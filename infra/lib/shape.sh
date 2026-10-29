@@ -82,6 +82,10 @@ SHAPE_DEFAULTS=(
   UPSCALE_MAX_INSTANCES=16
   UPSCALE_THREADS=4
   UPSCALE_TIMEOUT_S=1740
+  # Spec 18 lifecycle 3.7 (F57): the worker's health probe of the upscaler waits UPSCALE_COLD_START_S + 60 s, so a
+  # scale-to-zero service that loads its model on start answers before the probe gives up. 120 s until the gate
+  # measures the cold start; at most UPSCALE_TIMEOUT_S.
+  UPSCALE_COLD_START_S=120
   # Spec 18 3.1.5 / 13: the largest image (width x height, before the 2x or 4x) catalog-upscale takes, one cap per
   # model (2026-10-29 review P1-3: one cap sized for x4 held x2 jobs that fit). Larger ones are refused by the service
   # (400) and held by the worker with enlargement_failed before any call, never a crash. The enlarge task sends only
@@ -234,6 +238,9 @@ shape_defaults() {
   # The enlarge task's dispatch deadline is 1800 s (ENLARGE_DISPATCH_DEADLINE_SEC, the Cloud Tasks maximum for an HTTP
   # task); the upscale call waits UPSCALE_TIMEOUT_S + 30 s and the settle keeps 30 s, so 1740 is the most.
   UPSCALE_TIMEOUT_MAX_S=1740
+  # The worker's output limit for one enlarged image, every route (packages/core/src/catalog/pipeline/enlargement.ts
+  # ENLARGE_MAX_OUTPUT_PIXELS); a constant of the code, not a knob.
+  ENLARGE_MAX_OUTPUT_PIXELS=64000000
   # Spec 18 quality: the x4 model's time over the x2 model's on the same image, rounded up. The p95 rows above are of
   # swinir-x2; an x4 call on the same input takes this many times as long. No Cloud Run x4 time exists yet: every
   # figure so far is from a laptop (2026-10-29). The bake-off timed x4 at about the x2 time (800x1200, 4 threads, back
@@ -281,13 +288,13 @@ shape_check() {
       INGEST_MAX_DISPATCHES BULK_MAX_DISPATCHES TASKS_MAX_DISPATCHES MATTING_CPU_MAX_INSTANCES GPU_MAX_INSTANCES \
       GPU_CPU GPU_CONCURRENCY MAX_RESIDENT_SESSIONS MATTE_INFLIGHT_PER_INSTANCE CATALOG_PHOTO_CONCURRENCY \
       CATALOG_BULK_WINDOW BULK_BATCH_PRODUCTS GPU_CUDA_OVERHEAD_MIB UPSCALE_CPU_VCPU UPSCALE_CONCURRENCY UPSCALE_MAX_INSTANCES \
-      UPSCALE_THREADS UPSCALE_TIMEOUT_S UPSCALE_MAX_PIXELS UPSCALE_MAX_PIXELS_X4 UPSCALE_LIVE_VCPU ENLARGE_MAX_DISPATCHES ENLARGE_BULK_MAX_DISPATCHES; do
+      UPSCALE_THREADS UPSCALE_TIMEOUT_S UPSCALE_COLD_START_S UPSCALE_MAX_PIXELS UPSCALE_MAX_PIXELS_X4 UPSCALE_LIVE_VCPU ENLARGE_MAX_DISPATCHES ENLARGE_BULK_MAX_DISPATCHES; do
     value=${!name}
     if ! [[ "$value" =~ ^[0-9]+$ ]]; then shape_fail "$name must be a whole number, got '$value'"; return 1; fi
   done
   for name in WORKER_MAX_INSTANCES WORKER_CONCURRENCY WORKER_DB_POOL_MAX INGEST_MAX_DISPATCHES TASKS_MAX_DISPATCHES \
       MATTING_CPU_MAX_INSTANCES GPU_MAX_INSTANCES GPU_CONCURRENCY MAX_RESIDENT_SESSIONS MATTE_INFLIGHT_PER_INSTANCE \
-      CATALOG_PHOTO_CONCURRENCY CATALOG_BULK_WINDOW BULK_BATCH_PRODUCTS UPSCALE_CONCURRENCY UPSCALE_MAX_INSTANCES UPSCALE_THREADS UPSCALE_MAX_PIXELS UPSCALE_MAX_PIXELS_X4; do
+      CATALOG_PHOTO_CONCURRENCY CATALOG_BULK_WINDOW BULK_BATCH_PRODUCTS UPSCALE_CONCURRENCY UPSCALE_MAX_INSTANCES UPSCALE_THREADS UPSCALE_COLD_START_S UPSCALE_MAX_PIXELS UPSCALE_MAX_PIXELS_X4; do
     [ "${!name}" -ge 1 ] || shape_fail "$name must be at least 1"
   done
   # Cloud Tasks takes a rate above 0 and at most 500 per second.
@@ -296,6 +303,13 @@ shape_check() {
   fi
   case "$WORKER_CPU" in 1|2|4|6|8) ;; *) shape_fail "WORKER_CPU must be 1, 2, 4, 6 or 8 (Cloud Run), got $WORKER_CPU" ;; esac
   [[ "$WORKER_MEMORY" =~ ^[1-9][0-9]*Gi$ ]] || shape_fail "WORKER_MEMORY must look like 4Gi, got '$WORKER_MEMORY'"
+  # Spec 18 lifecycle 3.2: the worker decodes an enlarged image of at most ENLARGE_MAX_OUTPUT_PIXELS (64,000,000, 3 B
+  # each as RGB) and holds about two copies while it stitches or validates; with WORKER_CONCURRENCY deliveries at once
+  # that stays within half the worker's memory (the rest is Node, the render and the cut-outs).
+  if [[ "$WORKER_MEMORY" =~ ^[1-9][0-9]*Gi$ ]]; then
+    local enlarge_mib=$((3 * ENLARGE_MAX_OUTPUT_PIXELS * 2 * WORKER_CONCURRENCY / 1048576)) half_mib=$((${WORKER_MEMORY%Gi} * 512))
+    [ "$enlarge_mib" -le "$half_mib" ] || shape_fail "WORKER_CONCURRENCY=$WORKER_CONCURRENCY with WORKER_MEMORY=$WORKER_MEMORY: $WORKER_CONCURRENCY enlarged images of up to $ENLARGE_MAX_OUTPUT_PIXELS pixels need about $enlarge_mib MiB, above half the worker's memory ($half_mib MiB). Raise WORKER_MEMORY or lower WORKER_CONCURRENCY"
+  fi
   [[ "$GPU_MEMORY" =~ ^[1-9][0-9]*Gi$ ]] || shape_fail "GPU_MEMORY must look like 32Gi, got '$GPU_MEMORY'"
   [[ -z "$GPU_MEM_LIMIT_BYTES" || "$GPU_MEM_LIMIT_BYTES" =~ ^[1-9][0-9]*$ ]] || shape_fail "GPU_MEM_LIMIT_BYTES must be a byte count such as 6442450944"
   [[ -z "$LLM_INFLIGHT_PER_INSTANCE" || "$LLM_INFLIGHT_PER_INSTANCE" =~ ^[1-9][0-9]*$ ]] || shape_fail "LLM_INFLIGHT_PER_INSTANCE must be empty or a whole number such as 6"
@@ -418,6 +432,7 @@ upscale_check() {
   [ "$UPSCALE_CONCURRENCY" -le 4 ] || shape_fail "UPSCALE_CONCURRENCY must be at most 4 (tiles run one at a time per instance), got $UPSCALE_CONCURRENCY"
   [ "$UPSCALE_TIMEOUT_S" -ge 60 ] && [ "$UPSCALE_TIMEOUT_S" -le "$UPSCALE_TIMEOUT_MAX_S" ] \
     || shape_fail "UPSCALE_TIMEOUT_S must be 60 to $UPSCALE_TIMEOUT_MAX_S s (the enlarge task's deadline is 1800 s, the client waits 30 s longer and the settle keeps 30 s), got $UPSCALE_TIMEOUT_S"
+  [ "$UPSCALE_COLD_START_S" -le "$UPSCALE_TIMEOUT_S" ] || shape_fail "UPSCALE_COLD_START_S=$UPSCALE_COLD_START_S is above UPSCALE_TIMEOUT_S=$UPSCALE_TIMEOUT_S (a cold start longer than a call cannot be waited for)"
   [ -n "${UPSCALE_SIZES//[, ]/}" ] || { shape_fail "UPSCALE_SIZES must list the probe sizes, such as 800x1200,1600x1600"; return 0; }
   for size in ${UPSCALE_SIZES//,/ }; do
     [[ "$size" =~ ^[1-9][0-9]*x[1-9][0-9]*$ ]] || { shape_fail "UPSCALE_SIZES must list sizes such as 800x1200,1600x1600, got '$UPSCALE_SIZES'"; return 0; }
