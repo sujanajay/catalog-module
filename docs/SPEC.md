@@ -55,6 +55,18 @@ configuration. Access is by Google sign-in with three roles (admin, operator, vi
   output with a reason (`enlargement_failed`); a plain resize never stands in. The x2 image is made by its own
   durable task (`/tasks/catalog/enlarge`, the `catalog-upscale` service) before the render, which only reads
   the stored image.
+- Enlargement contract (spec 18 lifecycle, 2026-10-30). Pinned route: a batch uses the enlargement route
+  recorded at Start (`options.enlargement`: the x2 and x4 models and the threshold) for its whole life; only
+  `UPSCALE_MODEL=off` overrides it. Tri-state readiness: for every photo the render, the ladder, the flush cut
+  and QA get `ready` (a stored image of the exact identity: prepared pixels, upscaler with its export hash,
+  scale), `terminal` (the enlargement failed) or `not ready` (waiting); not ready is never a verdict, only
+  terminal holds the product. Bounded attempts: per identity at most 8 counted upscaler failures and 24
+  unexplained failures while the service is up, and at most 3 identity changes per photo, then terminal.
+  Unbounded patience: waits (busy, down, paused, quota, in flight) never count and never fail anything; the
+  queue retries without limit at most 15 minutes apart, and a batch may wait 20 hours or more. Operator-accepted
+  plain outputs: "Use as is" on a held photo only after a warning that names the channels whose images will be
+  stretched; the output keeps `enlargement_failed` as the record and the invariant counts it as accepted, never
+  as an error. "Try again" queues the failed enlargement once more with fresh counters.
 - No Styli enlargement cap (owner decision 2026-10-22, replacing the 2026-10-21 size floor of 741 px with
   the upscaler and 1,482 px without): any amount of enlargement is fine and a product cut at the photo
   edge is made on Styli like any other photo. No channel skips a photo because it needs more

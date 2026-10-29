@@ -195,81 +195,91 @@ shape picked from it passes `shape_check`. As shipped:
 
 ### 3.3 H3: durable enlargement between cut-out and render
 
-3.3.1 Queues (`infra/lib/queues.sh`): a new kind `enlarge` with two lanes, operator `<queue>-enlarge` and bulk
-`<queue>-enlarge-bulk` (bulk batches as `isBulkBatch` decides), each with `--max-dispatches-per-second` from
-`ENLARGE_DISPATCHES_PER_SECOND`, and retry by attempt count: `--max-attempts=8 --min-backoff=30s
---max-backoff=300s` (9 since spec 18 quality, 3.6: one more delivery for the x4 image of a job). Their slots count in `SLOTS_TOTAL`. `WORKER_CONCURRENCY` 2 -> 3 proposed, refused by
-`shape_check` if the DB budget disagrees. `infra/tests/queues.test.mjs` asserts both lanes, their rate and retry.
+3.3.1 Queues (`infra/lib/queues.sh`): a kind `enlarge` with two lanes, operator `<queue>-enlarge` and bulk
+`<queue>-enlarge-bulk` (bulk batches as `isBulkBatch` decides), each paced by `--max-dispatches-per-second` from
+`ENLARGE_DISPATCHES_PER_SECOND`. A lane never drops a task: `--max-attempts=-1 --max-retry-duration=0s
+--min-backoff=30s --max-backoff=900s --max-doublings=5`. The handler alone decides when an enlargement is terminal
+(3.3.3); a wait answers 503 and the queue retries every 15 minutes at most, for as long as it takes. Their slots count
+in `SLOTS_TOTAL`. `infra/tests/queues.test.mjs` asserts both lanes, their rate and retry.
 
-3.3.2 Tasks (`packages/core/src/tasks.ts`): route `/tasks/catalog/enlarge`, task id
-`enlarge-<sourceImageId>-<round>`, body `{ batchId, productId, sourceImageId }`.
+3.3.2 Tasks (`packages/core/src/tasks.ts`): route `/tasks/catalog/enlarge`, one task per enlargement row, task id
+`enlarge-<enlargementId>-<sends>` (`sends` grows on every re-send, so a re-send never meets a used name), body
+`{ batchId, productId, enlargementId }`.
 
-3.3.3 Worker handler `apps/worker/src/catalog/enlarge.ts`:
-1. Head the target object (idempotent): if it exists with the expected metadata, write done and settle (step 5).
-2. Else download raw, prepare (the same `prepare` the render uses, so the sizes match), call the service (3.2.3),
-   verify the reply is exactly 2x in both axes.
-3. Upload JPEG q95 4:4:4 (`UPSCALE_UPLOAD_JPEG`) with metadata `sourceSha256` and `upscaler` (the `upscalerId`) to
-   `<batchPrefix>/derived/<pathKey>/<pathKey>_<n>.<upscaler>.x2.jpg` in the private assets bucket (the key names the
-   upscaler, so another model's image is another object; 2026-10-29 review; as shipped `<upscaler>` is the upscaler
-   id lower-cased with anything outside `a-z0-9.-` replaced by `-`). A stored image of another upscaler is re-queued
-   at the render stage for the configured one (`requeueEnlargementGaps` in `chunk.ts`), never primed. New
-   `enlargedPath(prefix, pathKey, n, upscaler)` in `naming.ts` next to `derivedPath`.
-4. Write `x2_uri`, `x2_model`, clear `x2_error`; one cost ledger row (stage `upscale`, kind `upscale_call`, engine
-   `cpu`, the service ms).
-5. On failure: increment `x2_attempts`, write `x2_error`, answer 503 so Cloud Tasks retries, until the attempt count
-   reaches the queue cap (8); then mark the photo failed (`x2_error` kept, `x2_uri` null), log ERROR
-   `enlargement_failed` with batch, product, source image, attempts and last status. As shipped: only deliveries
-   that reached the handler count (`x2_attempts = LEAST(8, x2_attempts + 1)`); the queue's retry count, which also
-   counts 429s answered before the app ran, is not used. The log message is `enlargement failed`. Bad input, a photo
-   over `UPSCALE_MAX_PIXELS`, a reply that is not exactly 2x and an unsupported source fail at once.
-   In-flight claim (as shipped, review fix): before the service call the delivery sets `x2_claimed_at`; a second
-   delivery while the claim holds (the task's dispatch deadline) answers 503 `in_flight`; the success write is
-   guarded on `x2_uri IS NULL`, so a late writer adds no write and no cost row.
-6. Settle the chunk gate (3.3.4) in both the done and the terminal-failed case.
-Tests (PGlite + fakes): idempotent on a second delivery (no second service call); retry then success; 8 failures then
-failed with ERROR log; the object path; the cost row; settle on the last photo dispatches the parked chunk exactly
-once under two concurrent last deliveries.
+3.3.3 Identity and rows. An enlarged image is identified by the prepared pixels (sha256 over the bytes the service
+receives plus the size), the upscaler (its id with the export hash) and the effective scale; it always covers the whole
+prepared photo, so no matte change, ladder step or judged cut changes it. One table, `catalog_enlargements`
+(migration 0006), holds one row per identity a batch wants for a photo: `status` `queued`, `done` or `failed`;
+`wanted` (false once released); the counters `attempts`, `timeouts`, `delays`, `probe_timeouts`,
+`identity_releases`, `sends`, `retries`; the claim; `tiles_done`; `uri`, `error`, `error_kind`. Rows are per batch,
+objects per identity: `<brand prefix>/derived/<pathKey>/<pathKey>_<n>.<upscaler>.s<scale>.<identity>.jpg` in the
+private assets bucket (`enlargedPath`), tiles beside it, metadata naming the identity. A second batch of the same photo
+finds the object and makes no call. One validator, `validateEnlargedObject`, judges every stored object (the identity
+in the metadata, a JPEG that decodes, exactly the row's `out_w x out_h`); the handler and the render use it, so they
+never disagree. The route of one identity (`enlargementRouteFor`): `direct` (one call), `tiles` (a photo above the
+model's pixel cap, cut into overlapping tiles, one call and one object each, stitched in the worker), `downscale` or
+`downscale_tiles` (a photo whose output would exceed `ENLARGE_MAX_OUTPUT_PIXELS`, 64 MP: shrunk first, as long as the
+effective scale still meets the need), or none (too large for the need: held with the size sentence before any call).
 
-3.3.4 `apps/worker/src/catalog/chunk.ts`, matte stage: `enlargementNeeded(channels, box, size)` is computed per photo
-from the cut-out box (a superset of the render's decision, so the render never needs a photo that was not enlarged).
-A needed photo is marked queued and its task enqueued. At the stage advance (matte -> render) the render chunk is
-parked with the sentinel `task_name='enlarging'` (precedent `REDISPATCHED_TASK` in `pipeline/dispatch.ts`) until every
-photo of the chunk is settled; the last enlarge settles it atomically and calls `dispatchChunks`. A chunk with no
-needed photo advances as today. `recoverBatchChunks` re-sends stale enlarge tasks with the next round number. As
-shipped, the stale rule is lane-aware: every enlarge delivery of a batch refreshes `progress_at` on every parked chunk
-of that batch, and queued photos are sent again only when the batch's enlarge lane was quiet for `ENLARGE_STALE_MS`
-(30 minutes), so a long but moving paced lane is never duplicated. The need is decided per product over the
-product's canvas (`enlargementNeeds`), not per photo box; the per-photo superset over-flagged noon. Chunk
-stages stay `matte -> render -> qa`: adding a stage would change a CHECK constraint and the whole chunk model; the
-sentinel gate avoids that.
+Worker handler `apps/worker/src/catalog/enlarge.ts` (`handleEnlargeTask`, the only writer of `done` and `failed`):
+1. A row that is missing, not `queued` or released, or a failed or cancelled batch: 200, nothing to do. A done batch
+   still runs (Try again and replacements on a done batch).
+2. `UPSCALE_MODEL=off` on this worker: the product's queued rows are released and its chunks unparked, no call.
+3. Prepare the photo as the render does. A storage or matting outage is a wait (503, no count); a raw file that does
+   not decode counts. A prepared pixel hash that differs from the row's releases the row (`identity_changed`) and
+   unparks the product's chunks, so the next render wants the new identity; after 3 release events for the photo in
+   the batch the row fails instead ("This photo could not be prepared the same way twice.").
+4. An object that exists and passes the validator settles `done` without a call; one that fails it counts an attempt
+   and is made again.
+5. Claim the row (a live claim of another delivery answers 503 `in_flight`), probe `/health` with a timeout of
+   `UPSCALE_COLD_START_S` + 60 s (a cold start passes; after 3 probe timeouts in a row the call is made anyway), then
+   make the next unit of work (the whole image, or at least one tile).
+6. Settle under the product's chunk locks: a valid reply is uploaded and `done`; a counted failure (bad input, a
+   rejection, the service's own error, a reply the validator refuses) is `attempts+1`, terminal at 8; an unexplained
+   failure (a timeout, a reset, a 5xx without the service's body) is `timeouts+1`, terminal at 24, unless a re-probe
+   positively proves the service absent (connection refused, DNS, its own 503 body), which makes it a wait. Waits
+   (busy, unavailable, in flight, more tiles) never count. A terminal row logs ERROR `enlargement failed`. Every settle
+   unparks the chunks with no wanted queued row left and enqueues them (or tops up the window of a processing batch).
 
-3.3.5 Render stage: the render loads the stored x2 and primes the upscale cache (`sourceX2` in `upscale.ts`, keyed by
-the prepared photo) with it; it makes no service call. The stored x2 must be exactly 2x the prepared size and its
-`sourceSha256` must match, else it counts as missing. A needed enlargement that is failed or missing gives the new
-flag `enlargement_failed` on the output, which holds the product (`needs_attention`). Flag copy, model-free, in
+3.3.4 Reconcile and park (`chunk.ts`, `reconcileEnlargements`). At the end of the matte stage and per product in the
+render loop, the product's wanted identities are computed from its prepared photos, the batch's pinned route
+(`options.enlargement`, recorded at Start: model, x4 model, threshold) and the channel plan: wanted rows are upserted
+(an existing row keeps its status, so a failed row stays terminal and a done row is reused), rows of photos that no
+longer want an image (decided, replaced) or whose identity is no longer planned are released, and the tasks of
+wanted queued rows are sent. A photo that still wants an image but was not prepared in this delivery keeps its rows.
+A product with a queued row is skipped by the render; the chunk then parks (`task_name='enlarging'`,
+`dispatched_at` set) and holds no window slot. A chunk is parked exactly while one of its photos has a wanted queued
+row.
+
+3.3.5 Readiness (`primeReadiness`). Right after a photo is prepared (render, ladder, flush cut), its wanted rows decide
+one of three answers per candidate upscaler: `ready` (a done row whose object passes the validator, primed into the
+upscale cache on that exact prepared buffer), `terminal` (a failed row), or not ready (queued, an object that went
+missing or fails the validator: the row goes back to `queued` and is sent again, or a storage error). Not ready is
+never a verdict: the render answers 503 without counting a chunk error, the ladder records the step as skipped. Only
+`terminal` gives the flag `enlargement_failed`, which holds the product (`needs_attention`). Flag copy, model-free, in
 `qa/reasons.ts`: "This photo could not be enlarged to this marketplace's size. Try again, or ask the brand for a
-larger photo." The WARNING fallback path (`upscale failed; used the plain enlargement`) is removed; the plain path
-remains only when `UPSCALE_MODEL=off`.
+larger photo." No plain resize stands in for a failed enlargement; the plain path remains only when
+`UPSCALE_MODEL=off`.
 
 3.3.6 Batch status copy "Enlarging photos x of y" (`packages/core/src/catalog/pipeline/status.ts`) from the batch
-counts `enlargeTotal`, `enlargeDone`, `enlargeFailed`. Ops page (admin) lines "Enlargements waiting: N" and
-"Enlargements failed: N" (`ops.ts`, copy in `ops-copy.ts`). The batch option `options.enlargement = { model }` is
-written at Start (absent when `UPSCALE_MODEL=off`).
+counts `enlargeTotal`, `enlargeDone`, `enlargeFailed`, counted from the wanted rows. Ops page (admin) lines
+"Enlargements waiting", "Enlargements failed", "waiting more than 20 h", "plain accepted" and "started before
+enlargement" (`ops.ts`, copy in `ops-copy.ts`). The batch option `options.enlargement = { model, x4Model, minScale }`
+is written at Start (absent when `UPSCALE_MODEL=off`) and pins the route for the batch's whole life.
 
-3.3.7 Invariant `enlarged_without_upscaler` (ERROR) in `invariants/checks.ts`: an output that is verified, has
-scale > 1.5, has no `upscaled` flag, in a batch with `options.enlargement`. Spec 18 quality (3.6): the threshold is
-the batch's own `options.enlargement.minScale` (1.0 from then on; absent on older batches, which keep 1.5). Older batches made with the silent
-fallback have no `options.enlargement` and stay as they are. PGlite fixtures: one violating, one satisfying, one
-older batch ignored.
+3.3.7 Invariants in `invariants/checks.ts`: `enlarged_without_upscaler` (ERROR): an output that is staged or
+verified, has a scale above the batch's `options.enlargement.minScale`, has no `upscaled` flag, in a batch with
+`options.enlargement`, unless the operator accepted it plain ("Use as is" after the warning, 3.6.4).
+`plain_accepted_outputs` (INFO) counts those. `parked_chunk_quiet` (WARNING): a parked chunk with no enlarge delivery
+for twice `ENLARGE_STALE_MS`. `enlargement_waiting_long` (INFO): wanted queued rows older than 20 h (visibility, never
+a failure). Older batches made before the stage have no `options.enlargement` and stay as they are.
 
 3.3.8 `apps/worker/src/catalog/scale-model.ts` learns the enlarge queue (its lanes, rate and the measured ms from the
 H1 table in place of `upscaleMs: 7_000`) and the parked render chunk, so the local scale test predicts the CPU time.
 
-3.3.9 Per-photo state: migration `0005` on `catalog_source_images` adds `x2_uri text`, `x2_model text`,
-`x2_error text`, `x2_attempts integer not null default 0` (mirrors `matte_uri` / `matte_model`), and, as shipped,
-`x2_claimed_at timestamptz` (the in-flight claim of 3.3.3 step 5; folded into `0005_enlargement.sql` before release,
-no 0006). Owner-approved
-contract change (owner decision 3). `migration-0005.test.ts` applies 0000 to 0005 on PGlite and checks the columns.
+3.3.9 State: migration `0006` adds `catalog_enlargements` (3.3.3) and the product event kinds
+`enlargement_retried` and `plain_accepted`; it is additive. The `x2_*` columns of migration `0005` on
+`catalog_source_images` remain, nullable and unused (a later cleanup may drop them).
 
 ### 3.4 H4: open bugs (reproduction test first, then fix)
 
@@ -339,22 +349,20 @@ photo needs across all its channels, and every channel and re-render of that pho
 render may use the x4 image when the photo has no x2 image (a uniform scale may place a photo lower than the matte
 stage planned); above 2.0x only x4 is used. `UPSCALE_MODEL_X4=off` sends every enlargement to the x2 model.
 
-3.6.4 One job per photo, no migration. `x2_model` holds the photo's job: the upscalerIds it needs joined by `,`, x2
-first (a single id keeps its meaning). `x2_uri` is the first image's object, set once every image of the job is
-stored; the others sit beside it (`enlargedSibling`, suffix `.<upscaler>.x<factor>.jpg`). The x2_* columns keep the
-job's state (queued, done, failed, attempts, claim). Each enlarge delivery makes at most one image (one service call,
-so each call has the whole delivery deadline); when another image of the job is still missing it answers 503
-`next_image` without counting an attempt, and the queue's retry makes the next one (the lanes' max-attempts 8 -> 9).
-`requeueEnlargementGaps` moves a job whose ids are not the configured route to it (`jobForRoute`, each image keeps its
-factor).
+3.6.4 Operator actions on a held photo. "Try again" (`retryEnlargement` in core `decisions.ts`, route
+`POST /api/catalog/outputs/[id]/retry-enlargement`): the photo's failed rows go back to `queued` with their counters
+reset, its held outputs to `pending`, a one-photo render chunk is parked, and the tasks are sent; the ordinary path
+then enlarges, renders, judges and publishes (a done batch re-opens, `finalize-reopen.md`). No cap on clicks; each is
+logged (`enlargement_retried`). "Use as is" on a photo held with `enlargement_failed` answers 409 `plain_warning`
+with the channels until the operator confirms: "This photo could not be enlarged. If you use it as it is, the
+<channels> images will be stretched and may look soft. Use it anyway?". On "Use anyway" the decision applies as
+usual, the flag stays as the record, and a `plain_accepted` event is written. "Remove" and "Replace" release the
+photo's rows and unpark its chunks.
 
-3.6.5 Crop before upscaling. The enlarge task sends only the product's region: the union of `shotGeometry`'s box with
-and without the judged-cut rule (every crop the render may draw lies inside it) plus 32 px (`ENLARGE_REGION_MARGIN_PX`,
-the service's tile overlap), clamped to the photo (`shotEnlargementRegion`). It is stored on the object as `region`
-("x,y,w,h"); an image without it is the whole photo (images made before). The render cuts each crop out at
-(crop - region) x factor, so the matte stays aligned; a crop outside the region is never used (next candidate, else
-`enlargement_failed`). Tested exactly: a nearest-neighbour fake upscaler gives byte-identical outputs from the region
-and from the whole photo, at x2 and x4. With no product found, or no stored matte, the whole photo is sent.
+3.6.5 Whole photo, not a crop. The enlarge task sends the whole prepared photo, so the stored image does not depend on
+the matte: every crop the render, the ladder or the judged cut draws is cut from it at `out_w / width` and
+`out_h / height`, aligned with the matte within half an output pixel. `shotEnlargementRegion` still gives the shot
+geometry; it is no longer an input of the identity.
 
 3.6.6 Shape (`infra/lib/shape.sh` `upscale_check`). `UPSCALE_X4_TIME_RATIO` 1.3 (x4 over x2 on the same image: about
 1.0 in the bake-off and 1.193 on a 4-thread laptop with a worst pair of 1.283; both laptop runs, no Cloud Run x4 time
@@ -370,23 +378,20 @@ although x2 fits it. Memory rule per cap: 4096 MiB resident + 160 B per input pi
 adds the x4 calls at 1.3 x the x2 p95, and `--x4-ratio` fails the gate when an x4 p95 exceeds 1.3 x the x2 p95 at a
 size.
 
-3.6.7 Stored-image identity and gaps (2026-10-29 review). A stored enlarged image is reused only when it was made from
-the same source sha256, by the same upscaler, from the same matte (`matte` metadata, the matte URI) and the same crop
-region. A second matte or a passthrough repair changes the region, so the old image is stale: the enlarge task makes
-a new one, never holds and never reuses the old one. At the render stage the chunk lists every gap a re-run could
-close (a photo whose job is off the current route, does not cover the needed models, is still queued, or is done
-with a stale or missing image) and re-queues it before it parks, so a deploy mid-batch, a threshold change or
-switching x4 on enqueues the missing enlargements instead of holding. Only a job that failed after all its attempts
-holds the product (`enlargement_failed`). When x2 was stored and x4 then failed terminally, the stored x2 image is
-kept, so channels that need only x2 still render.
+3.6.7 Stored-image identity. A stored image is reused only under its own identity (3.3.3): the same prepared
+pixels, the same upscaler with its export hash, the same effective scale. A changed prepare, a replaced photo or the
+rollback switch makes a new identity and releases the old row; it never resets a row. A failed row wanted again stays
+failed (only Try again resets it); a done row wanted again is reused after the validator accepts its object.
 
 ## 4. Data and state changes
 
-Migration `0005` (3.3.9, with `x2_claimed_at`). Object path `<batchPrefix>/derived/<pathKey>/<pathKey>_<n>.<upscaler>.x2.jpg` in the private assets
-bucket (never public, never raw, inside the batch prefix). `catalog_batches.counts` gains `enlargeTotal`,
-`enlargeDone`, `enlargeFailed`; `catalog_batches.options` gains `enlargement`. A chunk row may carry
-`task_name='enlarging'` while parked. New flag `enlargement_failed` in `OUTPUT_FLAGS`. Cloud Run: service
-`catalog-upscale`. Cloud Tasks: `<queue>-enlarge` and `<queue>-enlarge-bulk`. Invariant `enlarged_without_upscaler`.
+Migration `0005` (`x2_*` columns, unused since 0006) and migration `0006` (table `catalog_enlargements`, the event
+kinds `enlargement_retried` and `plain_accepted`), both additive. Objects
+`<brand prefix>/derived/<pathKey>/<pathKey>_<n>.<upscaler>.s<scale>.<identity>.jpg` (and `.tile-<i>.jpg`) in the
+private assets bucket, kept at least 180 days (never public, never raw). `catalog_batches.counts` has
+`enlargeTotal`, `enlargeDone`, `enlargeFailed`; `catalog_batches.options` has `enlargement` (the pinned route). A
+chunk row carries `task_name='enlarging'` while parked. Flag `enlargement_failed` in `OUTPUT_FLAGS`. Cloud Run:
+service `catalog-upscale`. Cloud Tasks: `<queue>-enlarge` and `<queue>-enlarge-bulk`. Invariants of 3.3.7.
 
 ## 5. Copy
 
@@ -482,18 +487,22 @@ and the report ends "Blocked: <what failed and the evidence>".
 
 Order:
 0. Preconditions: `git pull` on main; copy worktree-only `.runs` reports to the main `.runs`; gcloud token and `gh`
-   signed in; disk space check (removing the spec 17 worktrees early frees several GB).
+   signed in; disk space check.
 1. Spec 18 doc PR (H5 part 1). Merge.
 2. PR H4 (a, b, d, e, c diagnosis) -> deploy via the gate.
 3. PR H1+H2 -> candidate service no-traffic -> probe ladder -> PR "measured table + shape defaults" -> deploy,
    traffic to `catalog-upscale`.
-4. PR H3 -> deploy via the gate -> tier 5 smoke in the gate.
-5. Section 9 step 4.
+4. PR H3 and the lifecycle (PR #125: migration 0006, the enlargement table, readiness, Try again, the plain warning)
+   -> deploy via the gate, whose smoke runs the enlargement case (an x4 and an x2 photo, one held by an injected
+   fault, then Try again).
+5. Section 9 step 4, in an owner-approved quiet window.
 6. PR H5 part 2, spec 17 step 7 cleanup, final reports, worktrees, handoff, memory lines.
 Rollback per layer: a service by `gcloud run services update-traffic <name> --to-revisions <previous>=100`
 (`deploy.sh --rollback <name>`); code by `SKIP_BUILD=1 bash infra/deploy.sh` from the previous commit; enlargement
-off by `UPSCALE_MODEL=off` (the plain path, no flag, the invariant does not apply because `options.enlargement` is
-not written). Migration 0005 only adds nullable or defaulted columns, so older code runs on it; it is never reversed.
+off by `UPSCALE_MODEL=off` (the worker releases queued rows and renders plain; outputs above the threshold are then
+plain on purpose and `enlarged_without_upscaler` reports them). A batch started before the lifecycle has no recorded
+route and runs the plain path, reported on Ops as "started before enlargement". Migrations 0005 and 0006 only add
+columns, a table and event kinds, so older code runs on them; they are never reversed.
 
 ## 11. How the manager runs this spec (binding, as spec 17 section 11)
 
@@ -531,24 +540,19 @@ fails after three attempts.
 Known risks, stated, not solved here:
 - Throughput on CPU: about 2 minutes per 800x1200 photo x 16 slots is about 8 photos per minute of enlargement; 880
   such photos take about 2 hours; 7,000 products are in the order of days. Reported; the GPU follow-up fixes speed.
-- One enlargement must fit one task delivery (at most 30 minutes, the Cloud Tasks maximum): `UPSCALE_MAX_PIXELS` is
-  sized to the timeout per model (x2 8 MP, x4 6.4 MP on 2026-10-29), and larger regions are held with a reason before
-  any call. The estimate
-  is extrapolated from two probe sizes (0.96 and 2.56 MP); a probe at the largest size would confirm it.
+  Waits never fail anything: a batch can wait 20 hours or more for its enlargements.
+- The real limit is the Cloud Run CPU quota in asia-south1 (190 vCPU, 187 assigned). The request text is in
+  `docs/solutions/2026-10-29-cpu-upscaler-reliability.md`; until it is granted, a full upscaler fleet is a wait.
+- A very large photo with a small product (above 64 MP divided by the needed scale squared) is held with the size
+  sentence, although a crop could serve it; every brand source seen so far is at most 1.2 MP.
+- `UPSCALE_COLD_START_S` is 120 s until the gate measures the cold start; a slower cold start costs probe timeouts
+  (after 3 the call is made anyway), never a failure.
 - Older batches made with the silent fallback stay as they are; the invariant is scoped by `options.enlargement`.
-- The queue rate rule and the attempt count assume one x2 call per photo (2026-10-29 review, left as is): x4 and two-call
-  photos mean a backlog and slower batches, not overload; when 503s or 429s use up the queue's attempts first, the
-  photo waits for the 60 min stale re-send, which is slower but never a hold.
-- Worker memory for stored x4 images (48 B per region pixel, all photos of a product primed at once) is in no shape
-  rule; the stored JPEG is now decoded per crop only, and the worst case was not measured.
 
 Later options:
-- A GPU upscaler once the L4 quota allows it (a quota increase is the owner's call): the same queue and stored x2,
+- A GPU upscaler once the L4 quota allows it (a quota increase is the owner's call): the same queue and table,
   `UPSCALE_URL` pointing to a GPU service, measured with the same probe.
-- Client-side tiling: the worker cuts a large photo into tiles and sends several smaller calls, so no single call
-  approaches the task deadline and a 1600x1600 photo is never held for size.
-- Owner-only items: the quota form only if the measured shape needs more than 190 vCPU; cancelling the two BHPC
-  drafts (alert 11); the bucket lifecycle change of unknown origin (reset to the repo file or explain).
+- Owner-only items: the CPU quota request; cancelling the two BHPC drafts (alert 11).
 
 ## 14. Done when
 
@@ -558,10 +562,12 @@ Later options:
       unmeasured shape, a timeout outside its bounds, a queue rate above capacity and a shape over 190 vCPU.
       Measured table and shape defaults: 2026-10-29, section 8.
 - [ ] H2 merged and live: `catalog-upscale` takes traffic through the gate; the worker's `UPSCALE_URL` names it;
-      `enlarge.ts` has retries, timeout = server + 30 s, no `/health`, no breaker.
-- [ ] H3 merged and live: migration 0005 applied; enlargement runs as durable tasks; the render reads stored x2 only;
-      `enlargement_failed` holds the product; no plain fallback outside `UPSCALE_MODEL=off`; "Enlarging photos x of
-      y" and the Ops lines show; invariant `enlarged_without_upscaler` runs.
+      `enlarge.ts` calls it with timeout = server + 30 s and a cold-start-tolerant health probe, no breaker.
+- [ ] H3 and the lifecycle merged and live: migration 0006 applied; one row per identity in `catalog_enlargements`,
+      made by durable tasks that never drop; the render honours readiness (ready, terminal, not ready);
+      `enlargement_failed` holds the product only after the bounded attempts; Try again and the plain warning work;
+      no plain fallback outside `UPSCALE_MODEL=off` and operator-accepted plain outputs; "Enlarging photos x of y"
+      and the Ops lines show; the invariants of 3.3.7 run; the gate's smoke passes its enlargement case.
 - [ ] Section 9 done: every reliability item passed, with wall time, photos per minute and the 2,000 and 7,000
       projections reported; cleanup confirmed; invariants zero ERROR.
 - [ ] H5 merged: protocol sections 9 and 11, SPEC.md contract change, spec 16 3.1.3, spec 17 G5 leftovers and its
