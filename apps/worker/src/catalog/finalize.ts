@@ -24,18 +24,33 @@ export async function handleFinalizeTask(deps:CatalogDeps,body:Record<string,unk
       if(!batch) return {outcome:"not_found"} as const;
       if(batch.status==="failed") return {outcome:"stopped"} as const;
       const state=batch.counts as typeof batch.counts & {finalizeClaim?:string;finalizeClaimUntil?:number};
-      // Spec 18 H4: a done batch is finalized again only on a request (a decision or a change after done set
-      // finalizePending, or the caller asked with reopen). A repeated task is a no-op, so the counts written after
-      // done (the load driver's re-check) stay.
-      if(batch.status==="done" && !state.finalizePending && body.reopen!==true) return {outcome:"already_done"} as const;
+      // Spec 18 H4: a done batch is finalized again only on a request, the stored finalizePending flag
+      // (enqueueFinalize with reopen: an operator decision, Add SKU ids, a changed late delivery). A repeated task
+      // is a no-op, so the counts written after done (the load driver's re-check) stay.
+      if(batch.status==="done" && !state.finalizePending) return {outcome:"already_done"} as const;
       if(state.finalizeClaim && Number(state.finalizeClaimUntil)>+deps.now()) return {outcome:"busy"} as const;
+      const done=batch.status==="done";
       const chunks = await tx.select().from(catalogChunks).where(eq(catalogChunks.batchId,batchId));
       const pairs = await tx.select({pair:catalogBatchProducts,product:catalogProducts}).from(catalogBatchProducts).innerJoin(catalogProducts,eq(catalogProducts.id,catalogBatchProducts.productId)).where(eq(catalogBatchProducts.batchId,batchId));
       const sources = await tx.select().from(catalogSourceImages).where(eq(catalogSourceImages.batchId,batchId));
-      if(chunks.some(c=>c.status!=="done" && c.status!=="failed") || pairs.some(({pair,product})=>sources.some(s=>s.productId===product.id) && product.lastBatchId!==batchId && pair.change!=="pending_attention" && pair.change!=="failed")) {
-        // Not ready: the request is handed on (re-queued below), so the pending flag is cleared here.
+      const chunksRunning=chunks.some(c=>c.status!=="done" && c.status!=="failed");
+      const unpublished=pairs.filter(({pair,product})=>sources.some(s=>s.productId===product.id) && product.lastBatchId!==batchId && pair.change!=="pending_attention" && pair.change!=="failed");
+      // A done batch: a product a later batch published (its lastBatchId is another batch and this batch holds no
+      // lock on it) keeps its old links in the re-issued sheet, so it does not hold the finalize up.
+      const moved=done ? unpublished.filter(({product})=>product.lockBatchId!==batchId):[];
+      const pairsPending=unpublished.length>moved.length;
+      if(moved.length) deps.log("finalize keeps earlier links of products a later batch published",{severity:"WARNING",batchId,products:moved.map(({product})=>({productId:product.id,identifier:product.identifier,lastBatchId:product.lastBatchId}))});
+      if(chunksRunning || pairsPending) {
+        if(done && chunksRunning) {
+          // A done batch with a running chunk (a replacement photo): the request stays pending and is re-queued.
+          await tx.update(catalogBatches).set({updatedAt:sql`${catalogBatches.updatedAt}`,counts:sql`${catalogBatches.counts} - 'finalizeClaim' - 'finalizeClaimUntil' - 'finalizeEnqueuedAt'`}).where(eq(catalogBatches.id,batchId));
+          return {outcome:"not_ready",requeue:true,reopen:true} as const;
+        }
+        // Not ready. A batch still running hands the request on (re-queued below). A done batch blocked only by a
+        // product still being published is not re-queued: that publish asks again when it lands.
         await tx.update(catalogBatches).set({updatedAt:sql`${catalogBatches.updatedAt}`,counts:sql`(${catalogBatches.counts} - 'finalizeClaim' - 'finalizeClaimUntil' - 'finalizeEnqueuedAt') || '{"finalizePending":false}'::jsonb`}).where(eq(catalogBatches.id,batchId));
-        return {outcome:"not_ready",reopen:batch.status==="done"} as const;
+        if(done) deps.log("finalize of a done batch waits for a product publish",{severity:"WARNING",batchId,products:unpublished.map(({product})=>({productId:product.id,identifier:product.identifier,lastBatchId:product.lastBatchId}))});
+        return {outcome:"not_ready",requeue:!done,reopen:false} as const;
       }
       // The pending flag (and its enqueue time) stays until the done write, so the publishes and sweeps that
       // run meanwhile see a finalize already on its way and queue no second one.
@@ -43,7 +58,7 @@ export async function handleFinalizeTask(deps:CatalogDeps,body:Record<string,unk
       return {outcome:"claimed",batch} as const;
     });
     if(acquired.outcome!=="claimed") {
-      if(acquired.outcome==="not_ready") await enqueueFinalize(deps,batchId,30,{reopen:acquired.reopen});
+      if(acquired.outcome==="not_ready" && acquired.requeue) await enqueueFinalize(deps,batchId,30,{reopen:acquired.reopen});
       return {httpStatus:acquired.outcome==="busy" ? 503:200,outcome:acquired.outcome};
     }
     const batch=acquired.batch;

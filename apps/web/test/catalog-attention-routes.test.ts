@@ -11,6 +11,9 @@ import { POST as replacement } from "../app/api/catalog/outputs/[id]/replacement
 import { POST as replacementComplete } from "../app/api/catalog/outputs/[id]/replacement/complete/route";
 import { POST as skuMapPost } from "../app/api/catalog/batches/[id]/sku-map/route";
 vi.mock(import("@catalog/core/tasks"),async original=>({...await original(),enqueueTask:vi.fn(async()=>"task")}));
+vi.mock(import("@catalog/core/catalog/finalize-request"),async original=>{const module=await original();return {...module,enqueueFinalize:vi.fn(module.enqueueFinalize)};});
+import { enqueueTask } from "@catalog/core/tasks";
+import { enqueueFinalize } from "@catalog/core/catalog/finalize-request";
 // Only the replacement route signs a URL here; no storage call leaves the test.
 vi.mock(import("@catalog/core/storage"),async original=>({...await original(),getBucketName:()=>"private",signedPutUrl:vi.fn(async()=>"https://signed.example/put")}));
 import { SKU_MAP_MAX_BYTES,SKU_MAP_TOO_LARGE } from "../lib/catalog/sku-map";
@@ -56,6 +59,10 @@ it("operator SKU mapping fills ids from a csv and lists unmatched rows",async()=
  expect(r.status).toBe(200);expect(await r.json()).toEqual({added:2,matched:1,unmatched:["NOPE"]});
  expect((await db.select().from(catalogProducts))[0]!.opptraSkuIds).toEqual(["SKU1","SKU2"]);
  expect((await db.select().from(skuMap)).map(row=>row.source)).toEqual(["manual","manual"]);
+ // Spec 18 H4: one re-open representation, the stored flag; the task body is only the batch id.
+ expect(vi.mocked(enqueueFinalize)).toHaveBeenCalledWith(expect.objectContaining({enqueue:enqueueTask}),batchId,undefined,{reopen:true});
+ expect(vi.mocked(enqueueTask)).toHaveBeenCalledWith("/tasks/catalog/finalize",{batchId},{});
+ expect((await db.select().from(catalogBatches).where(eq(catalogBatches.id,batchId)))[0]!.counts.finalizePending).toBe(true);
 });
 it("a malformed output id answers 400 instead of a database error",async()=>{
  const r=await decide(req({decision:"use_as_is"}),{params:Promise.resolve({id:"not-a-uuid"})});expect(r.status).toBe(400);

@@ -1,4 +1,4 @@
-import { and, count, eq, isNotNull, max, ne, or, sql } from "drizzle-orm";
+import { and, count, eq, isNotNull, max, or, sql } from "drizzle-orm";
 import type { Db } from "@catalog/core/db/client";
 import { catalogBatches, catalogBatchProducts, catalogChunks, catalogOutputs, catalogSourceImages } from "@catalog/core/db/schema";
 import { ensureDefaultPolicies, resolvePolicy } from "@catalog/core/catalog/qa/policy";
@@ -71,24 +71,8 @@ export function workerCatalogDeps(db: Db): CatalogDeps {
 }
 // Keep execution ownership through the Cloud Tasks deadline, plus a short termination grace.
 export const CATALOG_TASK_LEASE_MS=(DISPATCH_DEADLINE_SEC+60)*1000;
-export const FINALIZE_ENQUEUE_LEASE_MS = 120_000;
-export function finalizeEnqueueExpired(now:number) {
-  return sql`CASE WHEN coalesce(${catalogBatches.counts}->>'finalizeEnqueuedAt','') ~ '^[0-9]+$' THEN (${catalogBatches.counts}->>'finalizeEnqueuedAt')::numeric <= ${now-FINALIZE_ENQUEUE_LEASE_MS} ELSE true END`;
-}
-/**
- * Asks for one finalize. Spec 18 H4: never for a failed batch, and for a done batch only with `reopen` (a
- * change after done) or when a request is already pending (a lost task re-sent). While a request is pending
- * and its enqueue is recent, nothing more is queued.
- */
-export async function enqueueFinalize(deps: Pick<CatalogDeps,"db"|"enqueue"> & Partial<Pick<CatalogDeps,"now">>, batchId:string, delaySec?:number, options:{reopen?:boolean}={}): Promise<void> {
-  const now=+(deps.now?.() ?? new Date());
-  const pending=sql`coalesce((${catalogBatches.counts}->>'finalizePending')::boolean,false)`;
-  const open=options.reopen ? sql`true`:sql`(${catalogBatches.status} <> 'done' OR ${pending})`;
-  const rows = await deps.db.update(catalogBatches).set({updatedAt:sql`${catalogBatches.updatedAt}`,counts:sql`${catalogBatches.counts} || jsonb_build_object('finalizePending',true,'finalizeEnqueuedAt',${now}::numeric)`}).where(and(eq(catalogBatches.id,batchId),ne(catalogBatches.status,"failed"),open,sql`(NOT ${pending} OR ${finalizeEnqueueExpired(now)})`)).returning({id:catalogBatches.id});
-  if (!rows.length) return;
-  try { await deps.enqueue("/tasks/catalog/finalize",{batchId}, delaySec ? {delaySec}:{}); }
-  catch(error) { await deps.db.update(catalogBatches).set({updatedAt:sql`${catalogBatches.updatedAt}`,counts:sql`jsonb_set(${catalogBatches.counts}, '{finalizePending}', 'false')`}).where(and(eq(catalogBatches.id,batchId),sql`${catalogBatches.counts}->>'finalizeEnqueuedAt' = ${String(now)}`)); throw error; }
-}
+// Spec 18 H4: the one finalize request lives in core, so the web's Add SKU ids route asks the same way.
+export { enqueueFinalize, FINALIZE_ENQUEUE_LEASE_MS, finalizeEnqueueExpired } from "@catalog/core/catalog/finalize-request";
 /** Spec 15 E7: the newest samples of the images made that the batch page's measured time is read from. */
 export const PROCESSING_RATE_SAMPLES = 5;
 export async function refreshBatchProgress(db:Db,batchId:string,now:Date=new Date()):Promise<void> {

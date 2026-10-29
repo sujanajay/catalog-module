@@ -5,6 +5,12 @@ After a load run, `catalog-test-cleanup` deletes every generation under the run'
 both buckets (`deleteTestObjects`, `packages/core/src/storage.ts`). Can deleted test objects still be found in
 the public bucket, and does anything have to be done about them?
 
+## What this note describes
+This note describes the bucket configuration the repo files set (`infra/bootstrap.sh`,
+`infra/lifecycle-public.json`, `infra/lifecycle-assets.json`). It is not a reading of the live buckets. Spec 18
+section 13 lists a live lifecycle change of unknown origin as open (reset it to the repo file or explain it), so
+the live rules may differ from what is written here until that is settled.
+
 ## How the public bucket keeps old bytes
 - **Object versioning is on.** `infra/bootstrap.sh` turns it on for `image-links-agent-public` (check-then-update).
   Overwriting or deleting a live object without a generation keeps the old bytes as a noncurrent version.
@@ -20,11 +26,22 @@ the public bucket, and does anything have to be done about them?
 object nor any noncurrent version stays listable. What stays:
 - soft-deleted copies of every deleted generation, for 7 days, visible only with
   `gcloud storage ls --soft-deleted`; they expire on their own;
-- nothing else from the cleanup itself. A noncurrent version can only remain if it was created after the
-  listing (a delivery still running when cleanup started); the 30-day and 4-newer rules remove it.
+- nothing else from the cleanup itself, with one gap: a delivery still running when cleanup listed the prefix can
+  write a new object after the listing. That object is a live generation, and neither lifecycle rule ever removes
+  a live generation (the 30-day rule needs `isLive: false`; the 4-newer rule needs 4 newer versions, which a test
+  object never gets). Run the cleanup again after the run's deliveries have stopped; the check below shows it.
 
 Production objects under `catalog/` are never touched: `assertTestPrefix` guards the prefix and every listed name
 before the first delete starts.
+
+## The assets bucket
+The private bucket `image-links-agent-assets` is shared with the earlier app. Bootstrap sets only its lifecycle
+(`infra/lifecycle-assets.json`): an object under `catalog/` or `catalog-test/` is deleted 180 days after its custom
+time (`daysSinceCustomTime: 180`). The worker sets the custom time when it retires an object (a superseded raw
+photo, `setCustomTime`), so an object with no custom time is never removed by this rule. The repo files never turn
+versioning on or off for this bucket and never check it, so its versioning state is whatever the shared bucket
+already had; if it is on, `deleteTestObjects` still removes every generation because it lists with
+`versions: true`.
 
 ## The check
 Spec 17 step 7 (and the spec 18 load's cleanup step) confirms the empty listing of the run's prefixes after

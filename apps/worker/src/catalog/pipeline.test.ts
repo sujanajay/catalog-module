@@ -67,7 +67,7 @@ async function seed(w:ReturnType<typeof world>,name:string,options:{productId?:s
   return {batch:batch!,product,chunk:chunk!};
 }
 async function run(w:ReturnType<typeof world>,s:Awaited<ReturnType<typeof seed>>) {expect((await handleChunkTask(w.deps,await currentChunkTask(db,s.chunk.id))).httpStatus).toBe(200);expect((await handleChunkTask(w.deps,await currentChunkTask(db,s.chunk.id))).httpStatus).toBe(200);expect((await handleChunkTask(w.deps,await currentChunkTask(db,s.chunk.id))).httpStatus).toBe(200);return handlePublishTask(w.deps,{batchId:s.batch.id,productId:s.product.id});}
-it("does not finalize initial new rows, publishes, checks exports, then increments export versions",async()=>{const w=world(),s=await seed(w,"first");expect((await handleFinalizeTask(w.deps,{batchId:s.batch.id})).outcome).toBe("not_ready");expect((await run(w,s)).outcome).toBe("published");expect((await handleFinalizeTask(w.deps,{batchId:s.batch.id})).outcome).toBe("done");const [batch]=await db.select().from(catalogBatches).where(eq(catalogBatches.id,s.batch.id));expect(batch!.counts).toMatchObject({latestExport:1,recheckOk:1,recheckTotal:1,verified:1});expect(deriveBatchState(batch!).state).toBe("ready");expect((await handleFinalizeTask(w.deps,{batchId:s.batch.id})).outcome).toBe("already_done");expect((await handleFinalizeTask(w.deps,{batchId:s.batch.id,reopen:true})).outcome).toBe("done");const [again]=await db.select().from(catalogBatches).where(eq(catalogBatches.id,s.batch.id));expect(again!.sheetXlsxUri).toContain("links-v2.xlsx");expect(w.copy).toHaveBeenCalledTimes(1);},60_000);
+it("does not finalize initial new rows, publishes, checks exports, then increments export versions",async()=>{const w=world(),s=await seed(w,"first");expect((await handleFinalizeTask(w.deps,{batchId:s.batch.id})).outcome).toBe("not_ready");expect((await run(w,s)).outcome).toBe("published");expect((await handleFinalizeTask(w.deps,{batchId:s.batch.id})).outcome).toBe("done");const [batch]=await db.select().from(catalogBatches).where(eq(catalogBatches.id,s.batch.id));expect(batch!.counts).toMatchObject({latestExport:1,recheckOk:1,recheckTotal:1,verified:1});expect(deriveBatchState(batch!).state).toBe("ready");expect((await handleFinalizeTask(w.deps,{batchId:s.batch.id})).outcome).toBe("already_done");await enqueueFinalize(w.deps,s.batch.id,undefined,{reopen:true});expect((await handleFinalizeTask(w.deps,{batchId:s.batch.id})).outcome).toBe("done");const [again]=await db.select().from(catalogBatches).where(eq(catalogBatches.id,s.batch.id));expect(again!.sheetXlsxUri).toContain("links-v2.xlsx");expect(w.copy).toHaveBeenCalledTimes(1);},60_000);
 it("redelivery repeats no finished matte, render or copy; identical reupload keeps generations",async()=>{const w=world(),s=await seed(w,"repeat");await run(w,s);await handleChunkTask(w.deps,await currentChunkTask(db,s.chunk.id));await handlePublishTask(w.deps,{batchId:s.batch.id,productId:s.product.id});expect(w.deps.matteFor).toHaveBeenCalledTimes(1);expect(w.deps.renderAllChannels).toHaveBeenCalledTimes(1);expect(w.copy).toHaveBeenCalledTimes(1);const next=await seed(w,"repeat2",{productId:s.product.id});await run(w,next);expect(w.deps.matteFor).toHaveBeenCalledTimes(1);expect(w.deps.renderAllChannels).toHaveBeenCalledTimes(1);expect(w.copy).toHaveBeenCalledTimes(1);const [pair]=await db.select().from(catalogBatchProducts).where(eq(catalogBatchProducts.batchId,next.batch.id));expect(pair!.change).toBe("unchanged");},60_000);
 it("replaces a changed source even when its rendered JPEG bytes match the live image",async()=>{
   const w=world(),first=await seed(w,"same-jpeg",{shots:["source-one"]});
@@ -749,7 +749,7 @@ it("spec07 SKU mapping adds ids and bumps the export to links-v<k+1>",async()=>{
  await db.insert(catalogProductAliases).values({brandSlug:"anta",isTest:true,productId:s.product.id,aliasKey:"SKUMAP",kind:"identifier"}).onConflictDoNothing();
  expect(await applySkuMap(db,{batchId:s.batch.id,rows:[["identifier","opptra_sku_id"],["sku-map","OPP-1;OPP-2"],["nope","OPP-3"]],actor:"operator@opptra.com"})).toMatchObject({added:2,matched:1,unmatched:["NOPE"]});
  // The web's "Add SKU ids" asks for the re-open (apps/web/lib/catalog/sku-map.ts).
- expect((await handleFinalizeTask(w.deps,{batchId:s.batch.id,reopen:true})).outcome).toBe("done");
+ await enqueueFinalize(w.deps,s.batch.id,undefined,{reopen:true});expect((await handleFinalizeTask(w.deps,{batchId:s.batch.id})).outcome).toBe("done");
  const [again]=await db.select().from(catalogBatches).where(eq(catalogBatches.id,s.batch.id));
  expect(again!.sheetXlsxUri).toContain("links-v2.xlsx");
  expect((await db.select().from(catalogProducts).where(eq(catalogProducts.id,s.product.id)))[0]!.opptraSkuIds).toEqual(["OPP-1","OPP-2"]);
@@ -1010,5 +1010,74 @@ describe("spec 18 H4: finalize runs once per batch",()=>{
     await db.update(catalogBatches).set({status:"done"}).where(eq(catalogBatches.id,s.batch.id));
     expect((await handleChunkTask(w.deps,await currentChunkTask(db,s.chunk.id))).httpStatus).toBe(200);
     expect((await batchRow(s.batch.id)).status).toBe("done");
+  },60_000);
+  it("a re-open of a done batch whose product a later batch published finalizes once, keeps the old links and warns",async()=>{
+    const w=world(),log=vi.fn();w.deps.log=log;
+    const b1=await seed(w,"moved-b1");await run(w,b1);
+    expect((await handleFinalizeTask(w.deps,{batchId:b1.batch.id})).outcome).toBe("done");
+    const b2=await seed(w,"moved-b2",{productId:b1.product.id,shots:["changed"]});
+    expect((await run(w,b2)).outcome).toBe("published");
+    expect((await db.select().from(catalogProducts).where(eq(catalogProducts.id,b1.product.id)))[0]!.lastBatchId).toBe(b2.batch.id);
+    await enqueueFinalize(w.deps,b1.batch.id,undefined,{reopen:true});
+    vi.mocked(w.deps.enqueue).mockClear();
+    expect((await handleFinalizeTask(w.deps,{batchId:b1.batch.id})).outcome).toBe("done");
+    expect(finalizeCalls(w)).toHaveLength(0);
+    expect(log).toHaveBeenCalledWith("finalize keeps earlier links of products a later batch published",expect.objectContaining({severity:"WARNING",batchId:b1.batch.id,products:[expect.objectContaining({productId:b1.product.id,lastBatchId:b2.batch.id})]}));
+    const after=await batchRow(b1.batch.id);
+    expect(after.counts.finalizePending).toBe(false);expect(after.sheetXlsxUri).toContain("links-v2.xlsx");
+    expect((await handleFinalizeTask(w.deps,{batchId:b1.batch.id})).outcome).toBe("already_done");
+  },60_000);
+  it("the sweep re-sends a lost re-open of a done batch exactly once, and finalize then writes the fresh sheet",async()=>{
+    const w=world(),s=await seed(w,"finalize-sweep-reopen");await run(w,s);
+    expect((await handleFinalizeTask(w.deps,{batchId:s.batch.id})).outcome).toBe("done");
+    await db.update(catalogBatches).set({counts:sql`${catalogBatches.counts} || jsonb_build_object('finalizePending',true,'finalizeEnqueuedAt',${+w.deps.now()-1_000_000}::numeric)`}).where(eq(catalogBatches.id,s.batch.id));
+    vi.mocked(w.deps.enqueue).mockClear();
+    await handleSweep({db,enqueue:w.deps.enqueue,releaseLocks:async()=>0,now:w.deps.now},{});
+    expect(finalizeCalls(w).filter(([,body])=>(body as {batchId:string}).batchId===s.batch.id)).toEqual([["/tasks/catalog/finalize",{batchId:s.batch.id},{}]]);
+    expect(await handleFinalizeTask(w.deps,{batchId:s.batch.id})).toEqual({httpStatus:200,outcome:"done"});
+    expect((await batchRow(s.batch.id)).sheetXlsxUri).toContain("links-v2.xlsx");
+  },60_000);
+  it("a re-open of a done batch with a running chunk re-queues once after 30 s and keeps the request",async()=>{
+    const w=world(),s=await seed(w,"finalize-done-chunk");await run(w,s);
+    expect((await handleFinalizeTask(w.deps,{batchId:s.batch.id})).outcome).toBe("done");
+    // A replacement photo's one-source chunk is still running.
+    await db.insert(catalogChunks).values({batchId:s.batch.id,index:1,stage:"matte",productIds:[s.product.id]});
+    await enqueueFinalize(w.deps,s.batch.id,undefined,{reopen:true});
+    vi.mocked(w.deps.enqueue).mockClear();
+    expect((await handleFinalizeTask(w.deps,{batchId:s.batch.id})).outcome).toBe("not_ready");
+    expect(finalizeCalls(w)).toEqual([["/tasks/catalog/finalize",{batchId:s.batch.id},{delaySec:30}]]);
+    const after=await batchRow(s.batch.id);
+    expect(after.counts.finalizePending).toBe(true);expect(after.status).toBe("done");expect(after.sheetXlsxUri).toContain("links-v1.xlsx");
+  },60_000);
+  it("a re-open whose enqueue fails keeps its request for the sweep",async()=>{
+    const w=world(),s=await seed(w,"finalize-enqueue-fails");await run(w,s);
+    expect((await handleFinalizeTask(w.deps,{batchId:s.batch.id})).outcome).toBe("done");
+    const failing=vi.fn(async()=>{throw new Error("Cloud Tasks unavailable");});
+    await expect(enqueueFinalize({...w.deps,enqueue:failing},s.batch.id,undefined,{reopen:true})).rejects.toThrow("Cloud Tasks unavailable");
+    const after=await batchRow(s.batch.id);
+    expect(after.counts.finalizePending).toBe(true);
+    expect((after.counts as typeof after.counts & {finalizeEnqueuedAt?:number}).finalizeEnqueuedAt).toBeUndefined();
+    vi.mocked(w.deps.enqueue).mockClear();
+    await handleSweep({db,enqueue:w.deps.enqueue,releaseLocks:async()=>0,now:w.deps.now},{});
+    expect(finalizeCalls(w).filter(([,body])=>(body as {batchId:string}).batchId===s.batch.id)).toHaveLength(1);
+  },60_000);
+  it("only a publish that changed content re-opens a done batch; unchanged and failed publishes do not",async()=>{
+    const w=world(),first=await seed(w,"changed-first");await run(w,first);
+    expect((await handleFinalizeTask(w.deps,{batchId:first.batch.id})).outcome).toBe("done");
+    // A late delivery reaches a batch already marked done (a decision re-locked the product to it).
+    const late=async(name:string,shots:string[])=>{const s=await seed(w,name,{productId:first.product.id,shots});for(let i=0;i<3;i++) await handleChunkTask(w.deps,await currentChunkTask(db,s.chunk.id));await db.update(catalogBatches).set({status:"done",counts:sql`(${catalogBatches.counts} - 'finalizeEnqueuedAt') || '{"finalizePending":false}'::jsonb`}).where(eq(catalogBatches.id,s.batch.id));vi.mocked(w.deps.enqueue).mockClear();return s;};
+    const same=await late("changed-same",["sha"]);
+    expect((await handlePublishTask(w.deps,{batchId:same.batch.id,productId:first.product.id})).outcome).toBe("published");
+    expect((await db.select().from(catalogBatchProducts).where(eq(catalogBatchProducts.batchId,same.batch.id)))[0]!.change).toBe("unchanged");
+    expect(finalizeCalls(w)).toHaveLength(0);
+    await db.update(catalogProducts).set({lockBatchId:null}).where(eq(catalogProducts.id,first.product.id));
+    const changed=await late("changed-real",["fresh"]);
+    expect((await handlePublishTask(w.deps,{batchId:changed.batch.id,productId:first.product.id})).outcome).toBe("published");
+    expect(finalizeCalls(w)).toHaveLength(1);
+    await db.update(catalogProducts).set({lockBatchId:null}).where(eq(catalogProducts.id,first.product.id));
+    const broken=await late("changed-failed",["broken"]);
+    w.deps.fetch=vi.fn(async()=>new Response(new Uint8Array(jpeg),{headers:{"content-type":"text/plain","content-length":"4","x-goog-generation":"wrong"}}));
+    expect((await handlePublishTask(w.deps,{batchId:broken.batch.id,productId:first.product.id})).outcome).toBe("failed");
+    expect(finalizeCalls(w)).toHaveLength(0);
   },60_000);
 });
