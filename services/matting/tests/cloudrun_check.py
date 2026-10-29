@@ -298,17 +298,20 @@ def probe_main(argv, token_for=None, report_writer=None, now=None):
 
 # ---------------------------------------------------------------------------------------------
 # Spec 18 H1: the upscale probe. Calls POST /upscale on one service URL (usually a catalog-upscale candidate's tag URL)
-# with a synthetic JPEG of each size: one warm call (loads the model, not measured), then `concurrency` calls at once
-# for `rounds` rounds. Reads /health before (vCPU, threads) and after each warm call (the model's tile). Each answer
-# must be a JPEG of exactly twice the size, and every answer for one size must have the same bytes (the upscaler is
-# deterministic), so the sha256 column also shows whether a thread count changes the output. Prints the table
-# `size | vCPU | threads | tile | conc | p50 s | p95 s | max s | non-200 | output sha256`, writes the JSON report to
+# for each model (--model, a comma list; spec 18 quality: swinir-x2 and swinir-x4) with a synthetic JPEG of each size:
+# one warm call (loads the model, not measured), then `concurrency` calls at once for `rounds` rounds. Reads /health
+# before (vCPU, threads) and after each warm call (the model's tile). Each answer must be a JPEG of exactly the model's
+# scale (2x or 4x) of the size, and every answer for one model and size must have the same bytes (the upscaler is
+# deterministic; the warm call and one round already make a rerun), so the sha256 column also shows whether a thread
+# count changes the output. Prints the table
+# `model | size | vCPU | threads | tile | conc | p50 s | p95 s | max s | non-200 | output sha256`, writes the JSON report to
 # gs://image-links-agent-assets/catalog-test/probe/<run>/upscale.json when --bucket names that bucket, and exits
 # non-zero on any non-200, wrong size, differing output or unreadable /health.
-UPSCALE_PROBE_MODELS = ("realesrgan-x2plus", "swinir-x2")
+# The served upscalers and their fixed scale (services/matting/app.py UPSCALE_SCALES).
+UPSCALE_PROBE_MODELS = {"swinir-x2": 2, "swinir-x4": 4}
 UPSCALE_PROBE_SIZES = "800x1200,1600x1600"
-# One 3200x3200 JPEG at quality 95 is a few MB; the check limit leaves room.
-UPSCALE_RESPONSE_LIMIT = 64_000_000
+# One 6400x6400 JPEG (1600x1600 at 4x) at quality 95 is a few tens of MB; the check limit leaves room.
+UPSCALE_RESPONSE_LIMIT = 160_000_000
 
 
 def parse_sizes(text):
@@ -339,16 +342,16 @@ def upscale_image(width, height):
     return encoded.getvalue()
 
 
-def timed_upscale(url, token, model, data, size, timeout):
+def timed_upscale(url, token, model, data, size, timeout, scale=2):
     """One /upscale call: (status, client seconds, sha256 of the answer or None). A transport failure or timeout counts
-    as status 0; an answer that is not a JPEG of exactly twice `size` counts as status -1."""
+    as status 0; an answer that is not a JPEG of exactly `scale` times `size` counts as status -1."""
     started = time.perf_counter()
     digest = None
     try:
-        headers, body = request(f"{url}/upscale?model={urllib.parse.quote(model)}&scale=2", token, data, "image/jpeg", timeout, UPSCALE_RESPONSE_LIMIT)
+        headers, body = request(f"{url}/upscale?model={urllib.parse.quote(model)}&scale={scale}", token, data, "image/jpeg", timeout, UPSCALE_RESPONSE_LIMIT)
         try:
             with Image.open(io.BytesIO(body)) as answer:
-                ok = headers.get_content_type() == "image/jpeg" and answer.format == "JPEG" and answer.size == (size[0] * 2, size[1] * 2)
+                ok = headers.get_content_type() == "image/jpeg" and answer.format == "JPEG" and answer.size == (size[0] * scale, size[1] * scale)
         except Exception:  # noqa: BLE001 - an unreadable answer is a failed call; no detail is printed
             ok = False
         status, digest = (200, hashlib.sha256(body).hexdigest()) if ok else (-1, None)
@@ -384,6 +387,7 @@ class UpscaleProbe:
     def __init__(self, url, token, model, sizes, timeout):
         # `token`: None (a local URL), a token, or a callable that returns the current one (RefreshingToken).
         self.url, self.token_source, self.model, self.timeout = url, token, model, timeout
+        self.scale = UPSCALE_PROBE_MODELS.get(model, 2)
         self.sizes = {size: {"data": upscale_image(*size), "s": [], "statuses": [], "sha256": set()} for size in sizes}
         self.service = {}
         self.steps = []
@@ -415,7 +419,7 @@ class UpscaleProbe:
         entry = self.sizes[size]
         token = self.token
         with ThreadPoolExecutor(max_workers=count) as pool:
-            results = list(pool.map(lambda _: timed_upscale(self.url, token, self.model, entry["data"], size, self.timeout), range(count)))
+            results = list(pool.map(lambda _: timed_upscale(self.url, token, self.model, entry["data"], size, self.timeout, self.scale), range(count)))
         entry["statuses"].extend(status for status, _, _ in results)
         entry["sha256"].update(digest for _, _, digest in results if digest)
         if measured:
@@ -433,7 +437,7 @@ class UpscaleProbe:
         out = []
         for (width, height), entry in self.sizes.items():
             digests = sorted(entry["sha256"])
-            out.append({"size": f"{width}x{height}", "vcpu": self.service.get("vcpu"), "threads": self.service.get("threads"),
+            out.append({"model": self.model, "scale": self.scale, "size": f"{width}x{height}", "vcpu": self.service.get("vcpu"), "threads": self.service.get("threads"),
                         "tile": self.service.get("tile"), "concurrency": concurrency, "p50S": seconds(percentile(entry["s"], 0.5)),
                         "p95S": seconds(percentile(entry["s"], 0.95)), "maxS": seconds(max(entry["s"], default=None)),
                         "non200": sum(1 for status in entry["statuses"] if status != 200), "calls": len(entry["statuses"]),
@@ -441,17 +445,17 @@ class UpscaleProbe:
         return out
 
     def failures(self, rows):
-        return ([f"{r['size']}: {r['non200']} non-200" for r in rows if r["non200"]]
-                + [f"{r['size']}: {r['distinctOutputs']} different outputs for the same input" for r in rows if r["distinctOutputs"] > 1]
-                + list(dict.fromkeys(self.problems)))
+        return ([f"{r['model']} {r['size']}: {r['non200']} non-200" for r in rows if r["non200"]]
+                + [f"{r['model']} {r['size']}: {r['distinctOutputs']} different outputs for the same input" for r in rows if r["distinctOutputs"] > 1]
+                + [f"{self.model}: {problem}" for problem in dict.fromkeys(self.problems)])
 
 
 def upscale_markdown(rows):
     def cell(value):
         return "-" if value is None else str(value)
-    lines = ["| size | vCPU | threads | tile | conc | p50 s | p95 s | max s | non-200 | output sha256 |",
-             "|---|---:|---:|---:|---:|---:|---:|---:|---:|---|"]
-    lines += [f"| {r['size']} | {cell(r['vcpu'])} | {cell(r['threads'])} | {cell(r['tile'])} | {r['concurrency']} | {cell(r['p50S'])} | "
+    lines = ["| model | size | vCPU | threads | tile | conc | p50 s | p95 s | max s | non-200 | output sha256 |",
+             "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---|"]
+    lines += [f"| {r['model']} | {r['size']} | {cell(r['vcpu'])} | {cell(r['threads'])} | {cell(r['tile'])} | {r['concurrency']} | {cell(r['p50S'])} | "
               f"{cell(r['p95S'])} | {cell(r['maxS'])} | {r['non200']} | {cell(r['outputSha256'] and r['outputSha256'][:16])} |" for r in rows]
     return "\n".join(lines)
 
@@ -469,7 +473,9 @@ def parse_upscale_args(argv):
     args = parser.parse_args(argv)
     args.url = args.url.rstrip("/")
     args.sizes = parse_sizes(args.sizes)
-    require(args.model in UPSCALE_PROBE_MODELS, "--model must be a served upscaler (realesrgan-x2plus or swinir-x2)")
+    args.models = list(dict.fromkeys(m.strip() for m in args.model.split(",") if m.strip()))
+    require(bool(args.models) and all(m in UPSCALE_PROBE_MODELS for m in args.models),
+            f"--model must list served upscalers ({', '.join(UPSCALE_PROBE_MODELS)})")
     require(1 <= args.concurrency <= 8 and 1 <= args.rounds <= 50, "--concurrency must be 1 to 8 and --rounds 1 to 50")
     require(30 <= args.timeout <= 3600, "--timeout must be 30 to 3600 seconds")
     require(args.bucket in ("", PROBE_BUCKET), f"--bucket may only name {PROBE_BUCKET}")
@@ -485,13 +491,19 @@ def probe_upscale_main(argv, token_for=None, report_writer=None, now=None):
     token = None if args.url.startswith("http://") else RefreshingToken(lambda: (token_for or identity_token)(audience))
     started = now or datetime.datetime.now(datetime.timezone.utc)
     run = args.run or os.environ.get("CLOUD_RUN_EXECUTION") or started.strftime("%Y%m%dT%H%M%SZ")
-    probe = UpscaleProbe(args.url, token, args.model, args.sizes, args.timeout)
-    probe.run(args.concurrency, args.rounds)
-    rows = probe.rows(args.concurrency)
-    failures = probe.failures(rows)
-    report = {"run": run, "url": args.url, "startedAt": started.isoformat(), "model": args.model, "sizes": [r["size"] for r in rows],
-              "concurrency": args.concurrency, "rounds": args.rounds, "timeoutS": args.timeout, "service": probe.service,
-              "rows": rows, "steps": probe.steps, "passed": not failures, "failures": failures}
+    rows, failures, steps, service = [], [], [], {}
+    # One model after the other (the service runs one tile at a time; a concurrency 1 shape must never see two models).
+    for model in args.models:
+        probe = UpscaleProbe(args.url, token, model, args.sizes, args.timeout)
+        probe.run(args.concurrency, args.rounds)
+        model_rows = probe.rows(args.concurrency)
+        rows += model_rows
+        failures += probe.failures(model_rows)
+        steps += [{"model": model, **step} for step in probe.steps]
+        service.update(probe.service)
+    report = {"run": run, "url": args.url, "startedAt": started.isoformat(), "models": args.models,
+              "sizes": [f"{w}x{h}" for w, h in args.sizes], "concurrency": args.concurrency, "rounds": args.rounds,
+              "timeoutS": args.timeout, "service": service, "rows": rows, "steps": steps, "passed": not failures, "failures": failures}
     print(upscale_markdown(rows), flush=True)
     location = (report_writer or write_report)(run, report, "upscale.json") if args.bucket else None
     print(json.dumps({"probe": run, "passed": not failures, "failures": failures, "report": location}), flush=True)

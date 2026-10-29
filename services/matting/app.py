@@ -358,8 +358,12 @@ def convert(file: UploadFile):
 # ---------------------------------------------------------------------------------------------
 # Upscaling. Fixed-tile ONNX models converted at image build time (tools/convert_upscalers.py).
 # Loaded lazily on first use and then kept resident; matting session switches never release them.
-UPSCALE_MODELS = ("realesrgan-x2plus", "swinir-x2")  # preference order for the default
-UPSCALE_SCALE = 2
+# Spec 18 quality (2026-10-29 bake-off): SwinIR-S lightweight x2 for enlargements up to 2x and its x4 sibling above.
+# Each model has one fixed scale; a request names the model and its scale. The first one is the default.
+UPSCALE_SCALES = {"swinir-x2": 2, "swinir-x4": 4}
+UPSCALE_MODELS = tuple(UPSCALE_SCALES)
+# A JPEG side is at most 65535 px; the answer must stay below it.
+UPSCALE_MAX_OUTPUT_SIDE = 65500
 UPSCALE_OVERLAP = 32
 UPSCALE_MAX_PIXELS = int(os.getenv("UPSCALE_MAX_PIXELS", "24000000"))
 UPSCALERS = {}
@@ -389,7 +393,7 @@ def upscale_default():
 
 
 def upscale_health():
-    models = [{"id": model, "available": upscale_available(model), "scale": UPSCALE_SCALE} for model in UPSCALE_MODELS]
+    models = [{"id": model, "available": upscale_available(model), "scale": UPSCALE_SCALES[model]} for model in UPSCALE_MODELS]
     return {"models": models, "default": upscale_default()}
 
 
@@ -416,7 +420,7 @@ def create_upscale_session(model):
 class Upscaler:
     """Runs one fixed-size NCHW float32 tile at a time; the tile size comes from the ONNX input."""
 
-    def __init__(self, session):
+    def __init__(self, session, scale=2):
         self.session = session
         model_input = session.get_inputs()[0]
         self.input_name = model_input.name
@@ -424,6 +428,7 @@ class Upscaler:
         if not isinstance(tile, int) or tile != model_input.shape[3] or tile <= 2 * UPSCALE_OVERLAP:
             raise RuntimeError("upscale model must have a fixed square tile input")
         self.tile = tile
+        self.scale = scale
 
     def run(self, batch):
         return self.session.run(None, {self.input_name: batch})[0]
@@ -442,11 +447,11 @@ def load_upscaler(model):
         raise UpscaleUnavailable(model)
     started = time.perf_counter()
     try:
-        upscaler = Upscaler(create_upscale_session(model))
+        upscaler = Upscaler(create_upscale_session(model), UPSCALE_SCALES[model])
         # Determinism self-check: identical input must give identical bytes, or the model is not served.
         first = upscaler.run(probe_tile(upscaler.tile))
         second = upscaler.run(probe_tile(upscaler.tile))
-        if first.shape != (1, 3, upscaler.tile * UPSCALE_SCALE, upscaler.tile * UPSCALE_SCALE):
+        if first.shape != (1, 3, upscaler.tile * upscaler.scale, upscaler.tile * upscaler.scale):
             raise RuntimeError("unexpected output shape")
         if first.tobytes() != second.tobytes():
             raise RuntimeError("non-deterministic output")
@@ -459,7 +464,7 @@ def load_upscaler(model):
     return upscaler
 
 
-def upscale_array(rgb, run, tile, overlap=UPSCALE_OVERLAP, scale=UPSCALE_SCALE):
+def upscale_array(rgb, run, tile, overlap=UPSCALE_OVERLAP, scale=2):
     """Upscale an HxWx3 uint8 array by `scale` with fixed tiles.
 
     Each tile carries `overlap` pixels of context on every side (reflection beyond the image edge)
@@ -534,22 +539,27 @@ def run_upscale(model, image):
             return upscaler.run(batch)
 
     started = time.perf_counter()
-    pixels = upscale_array(np.asarray(image, dtype=np.uint8), locked_tile, upscaler.tile)
+    pixels = upscale_array(np.asarray(image, dtype=np.uint8), locked_tile, upscaler.tile, scale=upscaler.scale)
     elapsed = int((time.perf_counter() - started) * 1000)
     logger.info("upscale_complete model=%s target=%s size=%dx%d ms=%d", model, TARGET, image.width, image.height, elapsed, extra={"fields": {"model": model, "target": TARGET, "ms": elapsed}})
     return Image.fromarray(pixels, "RGB"), elapsed
 
 
 @app.post("/upscale")
-async def upscale(request: Request, model: str | None = None, scale: str = str(UPSCALE_SCALE)):
+async def upscale(request: Request, model: str | None = None, scale: str | None = None):
     if model is not None and model not in UPSCALE_MODELS:
         return JSONResponse({"error": f"unknown model {model}", "models": list(UPSCALE_MODELS)}, status_code=400)
-    if scale != str(UPSCALE_SCALE):
-        return upscale_error(f"unsupported scale {scale}; only {UPSCALE_SCALE} is supported", 400)
+    # Each model has one scale. Without a model, the scale picks it (2 when neither is given); a pair that disagrees
+    # is refused, so a client never receives another factor than it asked for.
+    by_scale = {str(factor): name for name, factor in UPSCALE_SCALES.items()}
+    if scale is not None and scale not in by_scale:
+        return upscale_error(f"unsupported scale {scale}; supported: {', '.join(sorted(by_scale))}", 400)
+    if model is not None and scale is not None and str(UPSCALE_SCALES[model]) != scale:
+        return upscale_error(f"unsupported scale {scale} for {model}; it upscales {UPSCALE_SCALES[model]}x", 400)
     data, error = await read_upscale_body(request)
     if error is not None:
         return error
-    chosen = model or upscale_default()
+    chosen = model or (by_scale[scale] if scale is not None else upscale_default())
     if chosen is None or not upscale_available(chosen):
         return upscale_error(f"upscale model {chosen or 'default'} unavailable", 503)
     try:
@@ -558,6 +568,8 @@ async def upscale(request: Request, model: str | None = None, scale: str = str(U
         return upscale_error("not a PNG or JPEG file", 400)
     if image.width * image.height > UPSCALE_MAX_PIXELS:
         return upscale_error(f"image exceeds {UPSCALE_MAX_PIXELS} pixels for upscaling", 400)
+    if max(image.width, image.height) * UPSCALE_SCALES[chosen] > UPSCALE_MAX_OUTPUT_SIDE:
+        return upscale_error(f"image side exceeds {UPSCALE_MAX_OUTPUT_SIDE // UPSCALE_SCALES[chosen]} px for a {UPSCALE_SCALES[chosen]}x upscale", 400)
     try:
         result, elapsed = await run_in_threadpool(run_upscale, chosen, image)
     except UpscaleUnavailable:
@@ -571,4 +583,4 @@ async def upscale(request: Request, model: str | None = None, scale: str = str(U
     if icc:
         options["icc_profile"] = icc
     result.save(output, format="JPEG", **options)
-    return Response(output.getvalue(), media_type="image/jpeg", headers={"X-Upscale-Model": chosen, "X-Upscale-Ms": str(elapsed)})
+    return Response(output.getvalue(), media_type="image/jpeg", headers={"X-Upscale-Model": chosen, "X-Upscale-Scale": str(UPSCALE_SCALES[chosen]), "X-Upscale-Ms": str(elapsed)})
