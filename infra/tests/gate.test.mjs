@@ -112,16 +112,16 @@ test('catalog-upscale: the matting image sized by the UPSCALE_* rows, only the u
 });
 
 test('catalog-upscale: env shape reaches the flags and the thread count', () => {
-  const r = run('upscale-shape', `${vars}\n${measured}\nUPSCALE_CPU=8; UPSCALE_THREADS=8; UPSCALE_MEMORY=32Gi; UPSCALE_CONCURRENCY=2; UPSCALE_MAX_INSTANCES=8; UPSCALE_TIMEOUT_S=700
+  const r = run('upscale-shape', `${vars}\n${measured}\nUPSCALE_CPU_VCPU=8; UPSCALE_THREADS=8; UPSCALE_MEMORY=32Gi; UPSCALE_CONCURRENCY=2; UPSCALE_MAX_INSTANCES=8; UPSCALE_TIMEOUT_S=700
 UPSCALE_P95_S_8C_8T_2CONC_800x1200=90; UPSCALE_P95_S_8C_8T_2CONC_1600x1600=250\n${upscaleArgs}`);
   assert.equal(r.status, 0, r.err);
   const [row, ...rest] = lines(r.out.trim());
-  assert.match(row, /\|ORT_INTRA_OP_THREADS=8\|bash infra\/lib\/services.sh probe-upscale 1660 swinir-x2 800x1200,1600x1600 2 1 700$/);
+  assert.match(row, /,ORT_INTRA_OP_THREADS=8\|bash infra\/lib\/services.sh probe-upscale 1660 swinir-x2 800x1200,1600x1600 2 1 700$/);
   assert.ok(['--cpu=8', '--memory=32Gi', '--concurrency=2', '--max-instances=8', '--timeout=700'].every((a) => rest.includes(a)), rest.join(' '));
 });
 
 test('catalog-upscale: measure mode is a no-traffic candidate per shape; preview reuses; cpu skips', () => {
-  let r = run('upscale-measure', `${vars}\nUPSCALE_MEASURE=1; UPSCALE_CPU=8; UPSCALE_THREADS=8; UPSCALE_CONCURRENCY=2\n${upscaleArgs}`);
+  let r = run('upscale-measure', `${vars}\nUPSCALE_MEASURE=1; UPSCALE_CPU_VCPU=8; UPSCALE_THREADS=8; UPSCALE_CONCURRENCY=2\n${upscaleArgs}`);
   assert.equal(r.status, 0, r.err);
   let out = lines(r.out.trim());
   let f = out[0].split('|');

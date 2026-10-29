@@ -70,7 +70,7 @@ service_catalog_upscale() {
   SVC_NAME=catalog-upscale
   SVC_REGION=$(service_region "$SVC_NAME")
   SVC_IMAGE=$AR/matting:$TAG
-  SVC_ARGS=(--service-account="$MATTING_SA" --cpu="$UPSCALE_CPU" --memory="$UPSCALE_MEMORY" --concurrency="$UPSCALE_CONCURRENCY"
+  SVC_ARGS=(--service-account="$MATTING_SA" --cpu="$UPSCALE_CPU_VCPU" --memory="$UPSCALE_MEMORY" --concurrency="$UPSCALE_CONCURRENCY"
     --min-instances=0 --max-instances="$UPSCALE_MAX_INSTANCES" --timeout="$UPSCALE_TIMEOUT_S" --labels=app=catalog,component=upscale)
   SVC_ENV="MAX_RESIDENT_SESSIONS=1,UPSCALE_CPU=1,PRELOAD_MATTE=0,ORT_INTRA_OP_THREADS=$UPSCALE_THREADS"
   SVC_QUOTA_OPTIONAL=0
@@ -81,7 +81,7 @@ service_catalog_upscale() {
     # infra/check-matting.sh --probe-upscale. The gate only shows it answers: one warm call and one call of the first
     # probe size, each within the service timeout, plus about 5 minutes for the probe job and the cold start.
     SVC_DEPLOY=1; SVC_SHIFT=0
-    SVC_TAG=measure-${UPSCALE_CPU}c-${UPSCALE_THREADS}t-${UPSCALE_CONCURRENCY}r
+    SVC_TAG=measure-${UPSCALE_CPU_VCPU}c-${UPSCALE_THREADS}t-${UPSCALE_CONCURRENCY}r
     SVC_PROBE_TIMEOUT=$((300 + 2 * UPSCALE_TIMEOUT_S))
     SVC_PROBE=(bash infra/lib/services.sh probe-upscale "$SVC_PROBE_TIMEOUT" "$(probe_upscale_model)" "$first" 1 1 "$UPSCALE_TIMEOUT_S")
     return 0

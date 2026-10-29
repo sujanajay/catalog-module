@@ -21,7 +21,7 @@ const NAMES = ['DB_MAX_CONNECTIONS', 'WORKER_MAX_INSTANCES', 'WORKER_CPU', 'WORK
   'GPU_MEM_LIMIT_BYTES', 'UPSCALE_SERVICE', 'MATTE_INFLIGHT_PER_INSTANCE', 'CATALOG_PHOTO_CONCURRENCY',
   'CATALOG_BULK_WINDOW', 'BULK_BATCH_PRODUCTS', 'LLM_INFLIGHT_PER_INSTANCE', 'CUDNN_CONV_ALGO_SEARCH', 'CUDNN_CONV_USE_MAX_WORKSPACE',
   'INFERENCE_LOCK_SCOPE', 'GPU_MATTE_MODELS', 'GPU_UPSCALE_MODELS', 'GPU_MEASURED_ON', 'GPU_CUDA_OVERHEAD_MIB',
-  'UPSCALE_CPU', 'UPSCALE_MEMORY', 'UPSCALE_CONCURRENCY', 'UPSCALE_MAX_INSTANCES', 'UPSCALE_THREADS', 'UPSCALE_TIMEOUT_S',
+  'UPSCALE_CPU_VCPU', 'UPSCALE_MEMORY', 'UPSCALE_CONCURRENCY', 'UPSCALE_MAX_INSTANCES', 'UPSCALE_THREADS', 'UPSCALE_TIMEOUT_S',
   'ENLARGE_MAX_DISPATCHES', 'ENLARGE_BULK_MAX_DISPATCHES', 'ENLARGE_DISPATCHES_PER_SECOND'];
 const PEAKS = ['GPU_MODEL_PEAK_MIB_BIREFNET_GENERAL', 'GPU_MODEL_PEAK_MIB_BIREFNET_GENERAL_LITE', 'GPU_MODEL_PEAK_MIB_BIREFNET_HRSOD', 'GPU_MODEL_PEAK_MIB_BRIA_RMBG'];
 const OUT = [...NAMES, ...PEAKS, 'UPSCALE_MEASURE', 'UPSCALE_MEASURED_ON', 'UPSCALE_VCPU_TOTAL', 'CATALOG_DB_TOTAL', 'CATALOG_DB_LIMIT', 'SLOTS_TOTAL', 'SLOTS_CAPACITY', 'CPU_TOTAL'];
@@ -95,7 +95,7 @@ const RECORDED_LIVE = {
   GPU_MATTE_MODELS: 'birefnet-general,birefnet-general-lite,birefnet-hrsod,bria-rmbg', GPU_UPSCALE_MODELS: 'realesrgan-x2plus,swinir-x2',
   GPU_MEASURED_ON: '2026-10-28', GPU_CUDA_OVERHEAD_MIB: '2048',
   // Spec 18: catalog-upscale is not deployed yet (UPSCALE_SERVICE=cpu); its rows are the shape the ladder starts from.
-  UPSCALE_CPU: '4', UPSCALE_MEMORY: '16Gi', UPSCALE_CONCURRENCY: '1', UPSCALE_MAX_INSTANCES: '16', UPSCALE_THREADS: '4', UPSCALE_TIMEOUT_S: '840',
+  UPSCALE_CPU_VCPU: '4', UPSCALE_MEMORY: '16Gi', UPSCALE_CONCURRENCY: '1', UPSCALE_MAX_INSTANCES: '16', UPSCALE_THREADS: '4', UPSCALE_TIMEOUT_S: '840',
   // Spec 18 3.3.1: the enlarge lanes, and worker concurrency 3 to give them their slots (not live until H3 deploys).
   ENLARGE_MAX_DISPATCHES: '4', ENLARGE_BULK_MAX_DISPATCHES: '12', ENLARGE_DISPATCHES_PER_SECOND: '0.1',
 };
@@ -173,29 +173,29 @@ const cases = [
     error: /INFERENCE_LOCK_SCOPE must be global or session[\s\S]*CUDNN_CONV_ALGO_SEARCH must be[\s\S]*CUDNN_CONV_USE_MAX_WORKSPACE must be/},
   // Spec 18 H1: catalog-upscale is refused until its shape is measured, and sized by the measurements.
   {label: 'dedicated upscale with nothing measured is refused: measure first', env: {UPSCALE_SERVICE: 'dedicated', MATTING_CPU_MAX_INSTANCES: '4'}, expect: {STATUS: '1'},
-    error: /^ERROR: measure first: run infra\/check-matting.sh --probe-upscale \(no measured p95 for UPSCALE_CPU=4 UPSCALE_THREADS=4 UPSCALE_CONCURRENCY=1 at 800x1200 1600x1600; UPSCALE_P95_S_\* in infra\/lib\/shape.sh\)\n$/},
+    error: /^ERROR: measure first: run infra\/check-matting.sh --probe-upscale \(no measured p95 for UPSCALE_CPU_VCPU=4 UPSCALE_THREADS=4 UPSCALE_CONCURRENCY=1 at 800x1200 1600x1600; UPSCALE_P95_S_\* in infra\/lib\/shape.sh\)\n$/},
   {label: 'dedicated upscale with a measured shape fits beside a smaller CPU cut-out service', env: {...DEDICATED, MATTING_CPU_MAX_INSTANCES: '4'},
     expect: {STATUS: '0', CPU_TOTAL: '187', UPSCALE_VCPU_TOTAL: '64'}},
   {label: 'dedicated upscale 16 x 4 beside catalog-matting 16 x 4 exceeds the CPU quota', env: DEDICATED, expect: {STATUS: '1', CPU_TOTAL: '235'},
     error: /vCPU at max instances 235 exceeds 190 of the 200 vCPU quota \(worker 96 \+ catalog-matting 64 \+ catalog-upscale 64 \+ web and jobs 11\); lower /},
   {label: 'a row for another concurrency does not count', env: {...DEDICATED, MATTING_CPU_MAX_INSTANCES: '4', UPSCALE_CONCURRENCY: '2'}, expect: {STATUS: '1'},
-    error: /measure first: run infra\/check-matting.sh --probe-upscale \(no measured p95 for UPSCALE_CPU=4 UPSCALE_THREADS=4 UPSCALE_CONCURRENCY=2 at 800x1200 1600x1600;/},
-  {label: 'a row for another thread count does not count', env: {...DEDICATED, MATTING_CPU_MAX_INSTANCES: '4', UPSCALE_CPU: '8', UPSCALE_MAX_INSTANCES: '8'}, expect: {STATUS: '1'},
-    error: /no measured p95 for UPSCALE_CPU=8 UPSCALE_THREADS=4 UPSCALE_CONCURRENCY=1/},
+    error: /measure first: run infra\/check-matting.sh --probe-upscale \(no measured p95 for UPSCALE_CPU_VCPU=4 UPSCALE_THREADS=4 UPSCALE_CONCURRENCY=2 at 800x1200 1600x1600;/},
+  {label: 'a row for another thread count does not count', env: {...DEDICATED, MATTING_CPU_MAX_INSTANCES: '4', UPSCALE_CPU_VCPU: '8', UPSCALE_MAX_INSTANCES: '8'}, expect: {STATUS: '1'},
+    error: /no measured p95 for UPSCALE_CPU_VCPU=8 UPSCALE_THREADS=4 UPSCALE_CONCURRENCY=1/},
   {label: 'the timeout must be at least 2 x the p95 of the largest size', env: {...DEDICATED, MATTING_CPU_MAX_INSTANCES: '4', UPSCALE_TIMEOUT_S: '600'}, expect: {STATUS: '1'},
     error: /UPSCALE_TIMEOUT_S=600 is below 2 x the measured p95 of 1600x1600 \(330 s, measured 2026-10-30\); set it to at least 660/},
   {label: 'a shape too slow for the worker task deadline is refused', env: {...DEDICATED, MATTING_CPU_MAX_INSTANCES: '4', UPSCALE_P95_S_4C_4T_1CONC_1600x1600: '500'}, expect: {STATUS: '1'},
     error: /needs a timeout of 2 x p95 500 s = 1000 s for 1600x1600, over the 840 s the worker's task allows; measure a faster shape or lower UPSCALE_MAX_PIXELS/},
   {label: 'the timeout is at most 840 s', env: {UPSCALE_TIMEOUT_S: '900'}, expect: {STATUS: '1'}, error: /UPSCALE_TIMEOUT_S must be 60 to 840 s \(the worker's task deadline is 900 s/},
   {label: 'measured rows need their probe date', env: {...DEDICATED, MATTING_CPU_MAX_INSTANCES: '4', UPSCALE_MEASURED_ON: ''}, expect: {STATUS: '1'}, error: /UPSCALE_MEASURED_ON must be the date/},
-  {label: 'measure mode deploys an unmeasured candidate when it fits the quota', env: {UPSCALE_MEASURE: '1', UPSCALE_CPU: '8', UPSCALE_THREADS: '8', UPSCALE_MAX_INSTANCES: '2'},
+  {label: 'measure mode deploys an unmeasured candidate when it fits the quota', env: {UPSCALE_MEASURE: '1', UPSCALE_CPU_VCPU: '8', UPSCALE_THREADS: '8', UPSCALE_MAX_INSTANCES: '2'},
     expect: {STATUS: '0', UPSCALE_MEASURE: '1', UPSCALE_SERVICE: 'cpu', CPU_TOTAL: '187', UPSCALE_VCPU_TOTAL: '16'}},
   {label: 'measure mode still counts the candidate against the CPU quota', env: {UPSCALE_MEASURE: '1'}, expect: {STATUS: '1', CPU_TOTAL: '235'}, error: /lower WORKER_MAX_INSTANCES, MATTING_CPU_MAX_INSTANCES or UPSCALE_MAX_INSTANCES/},
   {label: 'measure mode keeps the worker on its upscaler', env: {UPSCALE_MEASURE: '1', UPSCALE_SERVICE: 'dedicated', UPSCALE_MAX_INSTANCES: '1'}, expect: {STATUS: '1'},
     error: /UPSCALE_MEASURE=1 deploys catalog-upscale as a no-traffic candidate; keep the worker on UPSCALE_SERVICE=cpu/},
   {label: 'upscale shape values', env: {UPSCALE_THREADS: '8', UPSCALE_MEMORY: '32Gi', UPSCALE_CONCURRENCY: '5', UPSCALE_MEASURE: 'yes'}, expect: {STATUS: '1'},
-    error: /UPSCALE_MEASURE must be 0 or 1[\s\S]*UPSCALE_MEMORY must be 2Gi to 16Gi with 4 vCPU[\s\S]*UPSCALE_THREADS=8 exceeds UPSCALE_CPU=4[\s\S]*UPSCALE_CONCURRENCY must be at most 4/},
-  {label: 'upscale CPU must be a Cloud Run size', env: {UPSCALE_CPU: '3'}, expect: {STATUS: '1'}, error: /UPSCALE_CPU must be 1, 2, 4, 6 or 8/},
+    error: /UPSCALE_MEASURE must be 0 or 1[\s\S]*UPSCALE_MEMORY must be 2Gi to 16Gi with 4 vCPU[\s\S]*UPSCALE_THREADS=8 exceeds UPSCALE_CPU_VCPU=4[\s\S]*UPSCALE_CONCURRENCY must be at most 4/},
+  {label: 'upscale CPU must be a Cloud Run size', env: {UPSCALE_CPU_VCPU: '3'}, expect: {STATUS: '1'}, error: /UPSCALE_CPU_VCPU must be 1, 2, 4, 6 or 8/},
   // Spec 18 3.3.1: the enlarge lanes.
   {label: 'the enlarge lanes need concurrency 3: at 2 they exceed the worker slots', env: {WORKER_CONCURRENCY: '2'}, expect: {STATUS: '1'},
     error: /queue slots 8 \+ 36 \+ 4 \+ enlarge 4 \+ 12 = 64 exceed the worker's 24 x 2 = 48/},

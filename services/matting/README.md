@@ -333,7 +333,7 @@ The probe: deploy a no-traffic candidate of one shape, then time it.
 
 ```bash
 # Git Bash, repo root. One rung: a candidate tagged measure-<cpu>c-<threads>t-<concurrency>r, traffic untouched.
-UPSCALE_MEASURE=1 UPSCALE_CPU=4 UPSCALE_THREADS=4 UPSCALE_CONCURRENCY=1 UPSCALE_MAX_INSTANCES=1 bash infra/deploy.sh
+UPSCALE_MEASURE=1 UPSCALE_CPU_VCPU=4 UPSCALE_THREADS=4 UPSCALE_CONCURRENCY=1 UPSCALE_MAX_INSTANCES=1 bash infra/deploy.sh
 # deploy.sh prints UPSCALE_CANDIDATE_URL and the line below with it filled in.
 bash infra/check-matting.sh --probe-upscale <candidate URL> --sizes=800x1200,1600x1600 --concurrency=1 --rounds=3 --timeout=840
 ```

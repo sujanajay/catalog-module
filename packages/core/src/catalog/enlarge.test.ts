@@ -62,7 +62,7 @@ describe("enlargeViaService", () => {
     const s = fakeService([429, 503, 500, "throw", "ok"]);
     const r = await enlargeViaService({ url: URL_, jpeg: JPEG, model: "swinir-x2" }, s.deps);
     expect(r.attempts).toBe(5);
-    expect(s.sleeps).toEqual([5_000, 10_000, 20_000, 40_000]);
+    expect(s.sleeps).toEqual([10_000, 20_000, 40_000, 60_000]);
   });
 
   it("never retries a bad image or a refused call", async () => {
@@ -81,7 +81,7 @@ describe("enlargeViaService", () => {
     expect(error).toBeInstanceOf(EnlargeBusyError);
     expect(error).toMatchObject({ kind: "busy", status: 503, retryable: true, attempts: 3 });
     expect(s.calls).toHaveLength(3);
-    expect(s.sleeps).toEqual([5_000, 10_000]);
+    expect(s.sleeps).toEqual([10_000, 20_000]);
   });
 
   it("times out an attempt at its timeout, as a retryable timeout", async () => {
@@ -93,14 +93,14 @@ describe("enlargeViaService", () => {
   });
 
   it("starts an attempt only when it fits whole before the deadline", async () => {
-    // 100 s attempts, a deadline 120 s away; the fake clock moves only with the backoff waits. Retry 1: 5 + 100 = 105
-    // s fits; retry 2: 5 + 10 + 100 = 115 s fits; retry 3: 15 + 20 + 100 = 135 s does not, so the busy error stands.
+    // 100 s attempts, a deadline 150 s away; the fake clock moves only with the backoff waits. Retry 1: 10 + 100 = 110
+    // s fits; retry 2: 10 + 20 + 100 = 130 s fits; retry 3: 30 + 40 + 100 = 170 s does not, so the busy error stands.
     const s = fakeService([503]);
-    const deadlineAt = s.now() + 120_000;
+    const deadlineAt = s.now() + 150_000;
     const error = await enlargeViaService({ url: URL_, jpeg: JPEG, model: "swinir-x2", timeoutMs: 100_000, deadlineAt, maxAttempts: 10 }, s.deps).catch((e: unknown) => e);
     expect(error).toBeInstanceOf(EnlargeBusyError);
     expect(s.calls).toHaveLength(3);
-    expect(s.sleeps).toEqual([5_000, 10_000]);
+    expect(s.sleeps).toEqual([10_000, 20_000]);
     // A deadline that cannot fit even one attempt makes no call at all.
     const late = fakeService(["ok"]);
     const none = await enlargeViaService({ url: URL_, jpeg: JPEG, model: "swinir-x2", timeoutMs: 100_000, deadlineAt: late.now() + 50_000 }, late.deps).catch((e: unknown) => e);
@@ -135,9 +135,9 @@ describe("enlargement timeouts", () => {
     expect(enlargeTimeoutMs({})).toBe(870_000);
   });
 
-  it("backs off exponentially with up to half off for jitter, capped at 120 s", () => {
-    expect([1, 2, 3, 4, 5, 6, 7].map((a) => enlargeBackoffMs(a, 0))).toEqual([5_000, 10_000, 20_000, 40_000, 80_000, 120_000, 120_000]);
-    expect(enlargeBackoffMs(1, 1)).toBe(2_500);
-    expect(enlargeBackoffMs(3, 0.5)).toBe(15_000);
+  it("backs off exponentially with up to half off for jitter, capped at 60 s (10, 20, 40, 60)", () => {
+    expect([1, 2, 3, 4, 5, 6, 7].map((a) => enlargeBackoffMs(a, 0))).toEqual([10_000, 20_000, 40_000, 60_000, 60_000, 60_000, 60_000]);
+    expect(enlargeBackoffMs(1, 1)).toBe(5_000);
+    expect(enlargeBackoffMs(3, 0.5)).toBe(30_000);
   });
 });
