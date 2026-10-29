@@ -314,10 +314,11 @@ asked for measurements. The upscalers were not measured (they run on the CPU ser
 
 ## Measured on CPU
 
-Spec 18 H1. Not measured yet. Spec 16 assumed 5.9 to 7.8 s per 800x1200 photo; on 2026-10-29 one took about 121 s
-on the 4 vCPU catalog-matting service under load, so nothing is sized from an estimate: the dedicated enlargement
-service `catalog-upscale` is refused by `infra/lib/shape.sh` ("measure first") until its shape has a row here and in
-`UPSCALE_P95_S_*` there.
+Spec 18 H1. Measured on Cloud Run on 2026-10-29 (the ladder below). Spec 16 assumed 5.9 to 7.8 s per 800x1200
+photo; on 2026-10-29 one took about 121 s on the 4 vCPU catalog-matting service under load, so nothing is sized from
+an estimate: the dedicated enlargement service `catalog-upscale` is refused by `infra/lib/shape.sh` ("measure first")
+unless its shape has a row here and in `UPSCALE_P95_S_*` / `UPSCALE_P50_S_*` there (whole seconds, rounded up, with
+`UPSCALE_MEASURED_ON=2026-10-29`).
 
 Knobs (each env var's unset value is the behaviour before spec 18):
 
@@ -325,9 +326,13 @@ Knobs (each env var's unset value is the behaviour before spec 18):
   upscalers. `catalog-upscale` sets it from `UPSCALE_THREADS`.
 - `PRELOAD_MATTE` (default 1): 0 loads no cut-out model at start, so `catalog-upscale` holds only the upscaler (a
   `/matte` call there would still load its model on demand).
-- `/health` adds `vcpu` (the container's cgroup CPU quota, else the CPUs it may run on), `threads`, `preloadMatte`
-  and `upscaleTiles` (the tile of each loaded upscaler). `/health` never takes the inference lock, so it answers
-  while an upscale runs.
+- `/health` adds `vcpu` (the container's cgroup v2 CPU quota, else the cgroup v1 quota, else the CPUs it may run
+  on), `threads`, `preloadMatte` and `upscaleTiles` (the tile of each loaded upscaler). `/health` never takes the
+  inference lock, so it answers while an upscale runs. Caveat: on 2026-10-29 the 4 vCPU revisions reported `vcpu` 8
+  (no quota was visible in the container, so it fell back to the host's CPUs), and the probe copies that value into
+  its vCPU column. `vcpu` is informational only: the configured `--cpu`, `UPSCALE_CPU_VCPU` in `infra/lib/shape.sh`,
+  is the source of truth, and the table below gives the configured value. The cgroup v1 fallback was added after the
+  ladder and is not yet verified on Cloud Run.
 
 The probe: deploy a candidate of one shape, then time it. `UPSCALE_MEASURE=1 bash infra/deploy.sh` deploys ONLY
 `catalog-upscale`: it builds only the matting image (if this commit has none), skips migrations and queues, reuses
@@ -339,19 +344,26 @@ serves the service URL, because Cloud Run cannot create a service with `--no-tra
 gate never tags a measure rung `previous`, never treats a live measure rung as a SKIP match (the first dedicated
 deploy still runs its two-size probe), and `--rollback` returns to a measure rung only when it is named.
 
-CPU quota: asia-south1 allows 190 of its 200 vCPU here, and today's shape already counts 171 (worker 24 x 4,
-catalog-matting 16 x 4, web and jobs 11). With the defaults (`UPSCALE_MAX_INSTANCES=16` at 4 vCPU) a rung would count
-171 + 16 x 4 = 235 and `shape.sh` refuses it, so the ladder runs with `UPSCALE_MAX_INSTANCES` at most 4 at 4 vCPU
-(171 + 16 = 187) and at most 2 at 8 vCPU (171 + 16 = 187). The final dedicated shape lowers
-`MATTING_CPU_MAX_INSTANCES` from 16 to 4 (123 + 16 x 4 = 187).
+CPU quota: asia-south1 allows 190 of its 200 vCPU here. On 2026-10-29 the shape counted 171 (worker 24 x 4,
+catalog-matting 16 x 4, web and jobs 11), so the ladder ran with `UPSCALE_MAX_INSTANCES` at most 4 at 4 vCPU
+(171 + 16 = 187) and at most 2 at 8 vCPU (171 + 16 = 187). The dedicated shape chosen from it (spec 18 section 8)
+lowers `MATTING_CPU_MAX_INSTANCES` from 16 to 4: 96 + 16 + 16 x 4 + 11 = 187. A measure rung deploys a candidate
+of the same service while the live revision keeps its own max instances, so once the dedicated shape is live
+`shape_check` counts both (`UPSCALE_LIVE_VCPU`, 64): with 3 vCPU to spare, a new rung needs a smaller live
+`UPSCALE_MAX_INSTANCES` first.
+
+How the ladder was run (2026-10-29, the shape defaults then had `UPSCALE_SERVICE=cpu`; since the dedicated shape is
+the default, a measure run must say `UPSCALE_SERVICE=cpu` too, because measure mode refuses `dedicated`. It still
+changes only `catalog-upscale`: the worker's env is not rebuilt, so it keeps calling what its `UPSCALE_URL` names):
 
 ```bash
 # Git Bash, repo root. The four rungs (one at a time; each prints UPSCALE_CANDIDATE_URL and its probe line).
-UPSCALE_MEASURE=1 UPSCALE_CPU_VCPU=4 UPSCALE_THREADS=4 UPSCALE_CONCURRENCY=1 UPSCALE_MAX_INSTANCES=4 bash infra/deploy.sh
-UPSCALE_MEASURE=1 UPSCALE_CPU_VCPU=4 UPSCALE_THREADS=4 UPSCALE_CONCURRENCY=2 UPSCALE_MAX_INSTANCES=4 bash infra/deploy.sh
-UPSCALE_MEASURE=1 UPSCALE_CPU_VCPU=8 UPSCALE_THREADS=8 UPSCALE_CONCURRENCY=1 UPSCALE_MAX_INSTANCES=2 bash infra/deploy.sh
-UPSCALE_MEASURE=1 UPSCALE_CPU_VCPU=8 UPSCALE_THREADS=8 UPSCALE_CONCURRENCY=2 UPSCALE_MAX_INSTANCES=2 bash infra/deploy.sh
-# The probe deploy.sh prints for a rung (its candidate URL and its concurrency filled in):
+UPSCALE_SERVICE=cpu UPSCALE_MEASURE=1 UPSCALE_CPU_VCPU=4 UPSCALE_THREADS=4 UPSCALE_CONCURRENCY=1 UPSCALE_MAX_INSTANCES=4 bash infra/deploy.sh
+UPSCALE_SERVICE=cpu UPSCALE_MEASURE=1 UPSCALE_CPU_VCPU=4 UPSCALE_THREADS=4 UPSCALE_CONCURRENCY=2 UPSCALE_MAX_INSTANCES=4 bash infra/deploy.sh
+UPSCALE_SERVICE=cpu UPSCALE_MEASURE=1 UPSCALE_CPU_VCPU=8 UPSCALE_THREADS=8 UPSCALE_CONCURRENCY=1 UPSCALE_MAX_INSTANCES=2 bash infra/deploy.sh
+UPSCALE_SERVICE=cpu UPSCALE_MEASURE=1 UPSCALE_CPU_VCPU=8 UPSCALE_THREADS=8 UPSCALE_CONCURRENCY=2 UPSCALE_MAX_INSTANCES=2 bash infra/deploy.sh
+# The probe deploy.sh prints for a rung (its candidate URL and its concurrency filled in; the ladder ran with the
+# 840 s timeout of that day, today's default prints 1740):
 bash infra/check-matting.sh --probe-upscale <candidate URL> --model=swinir-x2 --sizes=800x1200,1600x1600 --concurrency=<1 or 2> --rounds=3 --timeout=840
 ```
 
@@ -368,9 +380,38 @@ size must have the same bytes (the output sha256; a thread count that changes it
 JSON report goes to `gs://image-links-agent-assets/catalog-test/probe/<execution>/upscale.json`. Ladder: 4 vCPU / 4
 threads and 8 vCPU / 8 threads, each at concurrency 1 and 2, both sizes.
 
-| size | vCPU | threads | tile | conc | p50 s | p95 s | max s | non-200 | output sha256 |
-|---|---:|---:|---:|---:|---:|---:|---:|---:|---|
-| not measured yet | | | | | | | | | |
+2026-10-29, model swinir-x2, tile 384, one warm call then 3 rounds per size (4 calls per size at concurrency 1, 7 at
+concurrency 2). vCPU is the configured `--cpu` (`/health` reported 8 on the 4 vCPU rungs, see the caveat above).
+JSON: `gs://image-links-agent-assets/catalog-test/probe/<execution>/upscale.json`.
+
+| rung | size | vCPU | threads | tile | conc | p50 s | p95 s | max s | non-200 | output sha256 | probe execution |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---|---|
+| 1 | 800x1200 | 4 | 4 | 384 | 1 | 99.0 | 99.5 | 99.5 | 0 | f730fb0abc8cd7ba987a96cd0485a1c4d888f420edbf4ac082b603d7ece370c9 | catalog-check-matting-92wz6 |
+| 1 | 1600x1600 | 4 | 4 | 384 | 1 | 215.0 | 215.6 | 215.6 | 0 | b8fbeeefdb0eb4250058dc3fe59a98d238f2939de7b94de1694d05d8219a493c | catalog-check-matting-92wz6 |
+| 2 | 800x1200 | 4 | 4 | 384 | 2 | 125.6 | 259.6 | 259.6 | 0 | NOT deterministic: 2 distinct outputs in 7 calls | catalog-check-matting-mgkgs |
+| 2 | 1600x1600 | 4 | 4 | 384 | 2 | 493.3 | 520.8 | 520.8 | 0 | NOT deterministic: 2 distinct outputs in 7 calls | catalog-check-matting-mgkgs |
+| 3 | 800x1200 | 8 | 8 | 384 | 1 | 77.4 | 79.2 | 79.2 | 0 | f730fb0abc8cd7ba987a96cd0485a1c4d888f420edbf4ac082b603d7ece370c9 | catalog-check-matting-bqqdn |
+| 3 | 1600x1600 | 8 | 8 | 384 | 1 | 158.7 | 164.3 | 164.3 | 0 | b8fbeeefdb0eb4250058dc3fe59a98d238f2939de7b94de1694d05d8219a493c | catalog-check-matting-bqqdn |
+| 4 | 800x1200 | 8 | 8 | 384 | 2 | 78.3 | 102.4 | 102.4 | 0 | NOT deterministic: 2 distinct outputs in 7 calls | catalog-check-matting-6h62d |
+| 4 | 1600x1600 | 8 | 8 | 384 | 2 | 167.3 | 341.4 | 341.4 | 0 | NOT deterministic: 2 distinct outputs in 7 calls | catalog-check-matting-6h62d |
+
+Determinism: rungs 1 and 3 gave one output per size, the same bytes at 4 and 8 threads, so the thread count does not
+change the output and `UPSCALER_VERSION` needs no bump. Rungs 2 and 4 (container concurrency 2) gave two different
+outputs for the same input, and the rung 2 gate probe (catalog-check-matting-lkkds) already did so on two sequential
+calls that landed on two instances. Cause not proven: the leading guess is instances on different host CPUs (a
+different SIMD path in ONNX Runtime rounds floats differently); the probe records neither the sha256 nor the instance
+per call, so the next probe change should log both. `infra/lib/shape.sh` therefore refuses `UPSCALE_CONCURRENCY` above
+1 for the dedicated service ("measure and prove determinism before raising"). Concurrency 1 is deterministic in these
+runs, not proven deterministic on every host.
+
+The shape chosen (spec 18 section 8): 16 x 4 vCPU, 4 threads, concurrency 1, `UPSCALE_TIMEOUT_S=1740` with
+`UPSCALE_MAX_PIXELS=8000000`. The timeout must cover the largest photo the service takes, not only the probe sizes:
+SwinIR is tiled, so time grows with pixels, and the slowest measured p95 per pixel (100 s for 0.96 MP, 104.2 s per
+MP) gives 2 x 834 s = 1668 s for 8 MP. 1740 s is the most one enlarge task allows (its 1800 s dispatch deadline less
+two 30 s margins); the 24 MP service default would need about 5000 s. Per photo, 4 vCPU costs 4 x 99 = 396 vCPU-s against 8 x 77.4 = 619 for
+8 vCPU, and within the same 64 vCPU 16 x 4 finishes about 1.5x the photos per hour of 8 x 8 (about 580 against 370
+photos of 800x1200 per hour). The enlarge queue rate follows: 2 lanes x `ENLARGE_DISPATCHES_PER_SECOND` 0.075 =
+0.15 per second <= 16 x 1 / p50 99 s = 0.16.
 
 ## Host verification limitations
 

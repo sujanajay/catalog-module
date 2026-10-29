@@ -343,11 +343,33 @@ New env, all with today's behaviour as default unless noted: `ORT_INTRA_OP_THREA
 load as today), `UPSCALE_TIMEOUT_S`, `UPSCALE_MAX_INSTANCES`, `UPSCALE_CPU_VCPU`, `UPSCALE_MEMORY`,
 `UPSCALE_CONCURRENCY`, `UPSCALE_THREADS`, `UPSCALE_MAX_PIXELS` (24,000,000), `ENLARGE_DISPATCHES_PER_SECOND`,
 `UPSCALE_MEASURED_ON` and the `UPSCALE_P50_S_*` / `UPSCALE_P95_S_*` rows (whole seconds, 3.1.5). As shipped also:
-`UPSCALE_MEASURE` (0 or 1, measure mode, 3.2.4), `ENLARGE_CLIENT_WIRED` (shape.sh, 1), `UPSCALE_TIMEOUT_MAX_S` (840,
-a constant), `UPSCALE_SERVICE=dedicated` as a third value, `MATTING_TIMEOUT_S` (300, services.sh). Changed: the worker's `UPSCALE_URL` names
+`UPSCALE_MEASURE` (0 or 1, measure mode, 3.2.4), `ENLARGE_CLIENT_WIRED` (shape.sh, 1), `UPSCALE_TIMEOUT_MAX_S` (1740,
+a constant: the enlarge task's 1800 s dispatch deadline less 30 s for the client and 30 s for the settle),
+`UPSCALE_LIVE_VCPU` (the live catalog-upscale's vCPU, counted beside a measure rung), `UPSCALE_SERVICE=dedicated` as a third value, `MATTING_TIMEOUT_S` (300, services.sh). Changed: the worker's `UPSCALE_URL` names
 `catalog-upscale`; `MATTING_CPU_MAX_INSTANCES` 16 -> 4 and `WORKER_CONCURRENCY` 2 -> 3 as proposed, each only if the
 table and `shape_check` agree. The live shape at the start of this spec is spec 17's (shape.sh `SHAPE_DEFAULTS` at
 999ada0).
+
+Chosen shape (2026-10-29, from the ladder in `services/matting/README.md` "Measured on CPU"; PR "measured table +
+shape defaults"): `UPSCALE_SERVICE=dedicated`, `UPSCALE_CPU_VCPU=4`, `UPSCALE_THREADS=4`, `UPSCALE_CONCURRENCY=1`,
+`UPSCALE_MAX_INSTANCES=16`, `UPSCALE_MEMORY=16Gi`, `UPSCALE_TIMEOUT_S=1740` and `UPSCALE_MAX_PIXELS=8000000` (fixed
+after the PR review of 2026-10-29: the enlarge task sends the whole photo, so the timeout must cover the largest photo
+the service takes, not only the probe sizes; 2 x 8 MP x 104.2 s per MP, the slowest measured p95 per pixel, = 1668 s
+<= 1740 s, and shape_check refuses a pair that does not fit; the enlarge task's dispatch deadline is 1800 s, the Cloud
+Tasks maximum, and the worker's Cloud Run timeout matches it), `MATTING_CPU_MAX_INSTANCES=4` (asia-south1 vCPU 96 + 16
++ 64 + 11 = 187 of 190), `ENLARGE_MAX_DISPATCHES=4` and `ENLARGE_BULK_MAX_DISPATCHES=10` (with the preview's 2, which
+calls the same live catalog-upscale, 16 = 16 x 1), `ENLARGE_DISPATCHES_PER_SECOND=0.075`
+per lane (Cloud Tasks paces each queue on its own, so the operator and bulk lanes together dispatch 0.15/s <= 16 x 1 /
+p50 99 s = 0.16/s; shape_check counts the rate once per lane with slots), `ENLARGE_CLIENT_WIRED=1`. New refusal:
+`UPSCALE_CONCURRENCY` above 1 for the dedicated service, because concurrency 2 gave non-identical outputs (ladder rungs
+2 and 4). Measured rows (`UPSCALE_MEASURED_ON=2026-10-29`, whole seconds rounded up, p50 / p95):
+
+| shape (vCPU, threads, conc) | 800x1200 | 1600x1600 | deterministic |
+|---|---|---|---|
+| 4C 4T 1CONC (chosen) | 99 / 100 | 215 / 216 | yes |
+| 4C 4T 2CONC | 126 / 260 | 494 / 521 | no |
+| 8C 8T 1CONC | 78 / 80 | 159 / 165 | yes, same bytes as 4 threads |
+| 8C 8T 2CONC | 79 / 103 | 168 / 342 | no |
 
 ## 9. Live verification (after the H4, H1+H2 and H3 deploys)
 
@@ -432,8 +454,9 @@ fails after three attempts.
 Known risks, stated, not solved here:
 - Throughput on CPU: about 2 minutes per 800x1200 photo x 16 slots is about 8 photos per minute of enlargement; 880
   such photos take about 2 hours; 7,000 products are in the order of days. Reported; the GPU follow-up fixes speed.
-- A single 1600x1600 enlargement past about 14 minutes cannot fit a 900 s task: then `UPSCALE_MAX_PIXELS` is lowered
-  and larger photos are held with a reason.
+- One enlargement must fit one task delivery (at most 30 minutes, the Cloud Tasks maximum): `UPSCALE_MAX_PIXELS` is
+  sized to the timeout (8 MP on 2026-10-29), and larger photos are held with a reason before any call. The estimate
+  is extrapolated from two probe sizes (0.96 and 2.56 MP); a probe at the largest size would confirm it.
 - Older batches made with the silent fallback stay as they are; the invariant is scoped by `options.enlargement`.
 
 Later options:
@@ -448,8 +471,9 @@ Later options:
 
 - [ ] H4 merged and live: load driver recheck grouped by reason with the CSV; finalize idempotent; the 13-minute wait
       explained and fixed; the MaxListeners warning gone; `docs/solutions/bucket-retention.md` written.
-- [ ] H1 merged: `--probe-upscale` exists; the README holds "Measured on CPU" with the ladder; shape.sh refuses an
+- [x] H1 merged: `--probe-upscale` exists; the README holds "Measured on CPU" with the ladder; shape.sh refuses an
       unmeasured shape, a timeout outside its bounds, a queue rate above capacity and a shape over 190 vCPU.
+      Measured table and shape defaults: 2026-10-29, section 8.
 - [ ] H2 merged and live: `catalog-upscale` takes traffic through the gate; the worker's `UPSCALE_URL` names it;
       `enlarge.ts` has retries, timeout = server + 30 s, no `/health`, no breaker.
 - [ ] H3 merged and live: migration 0005 applied; enlargement runs as durable tasks; the render reads stored x2 only;

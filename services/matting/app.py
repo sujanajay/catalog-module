@@ -218,12 +218,21 @@ _gpu_memory = {"at": -math.inf, "value": None}
 
 
 def cpu_limit():
-    """The vCPU this container may use: the cgroup v2 quota (cpu.max, which Cloud Run sets from --cpu), else the CPUs
-    the process may run on. None when neither can be read."""
+    """The vCPU this container may use: the cgroup v2 quota (cpu.max), else the cgroup v1 quota (cpu.cfs_quota_us over
+    cpu.cfs_period_us), else the CPUs the process may run on. None when none can be read. Informational only: on
+    2026-10-29 a 4 vCPU Cloud Run revision reported 8 here (no quota visible, so the host's CPUs); the configured
+    --cpu (UPSCALE_CPU_VCPU in infra/lib/shape.sh) is the source of truth."""
     try:
         quota, period = Path("/sys/fs/cgroup/cpu.max").read_text().split()[:2]
         if quota != "max":
             return round(int(quota) / int(period), 2)
+    except (OSError, ValueError):
+        pass
+    try:
+        quota = int(Path("/sys/fs/cgroup/cpu/cpu.cfs_quota_us").read_text().strip())
+        period = int(Path("/sys/fs/cgroup/cpu/cpu.cfs_period_us").read_text().strip())
+        if quota > 0 and period > 0:
+            return round(quota / period, 2)
     except (OSError, ValueError):
         pass
     try:

@@ -9,7 +9,9 @@ the public bucket, and does anything have to be done about them?
 This note describes the bucket configuration the repo files set (`infra/bootstrap.sh`,
 `infra/lifecycle-public.json`, `infra/lifecycle-assets.json`). It is not a reading of the live buckets. Spec 18
 section 13 lists a live lifecycle change of unknown origin as open (reset it to the repo file or explain it), so
-the live rules may differ from what is written here until that is settled.
+the live rules may differ from what is written here until that is settled. 2026-10-29: explained in
+`docs/solutions/infra-bootstrap.md` (bootstrap re-applied `infra/lifecycle-assets.json` to the assets bucket on
+every run); both buckets' live lifecycles read that day equal the repo files.
 
 ## How the public bucket keeps old bytes
 - **Object versioning is on.** `infra/bootstrap.sh` turns it on for `image-links-agent-public` (check-then-update).

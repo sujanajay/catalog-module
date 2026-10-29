@@ -7,7 +7,7 @@ import {
   EnlargeModelUnavailableError, EnlargeRejectedError, EnlargeServerError, enlargeTimeoutMs, EnlargeTimeoutError, enlargeViaService, upscaleServerTimeoutS,
   type EnlargeDeps,
 } from "./enlarge";
-import { DISPATCH_DEADLINE_SEC } from "../tasks";
+import { ENLARGE_DISPATCH_DEADLINE_SEC } from "../tasks";
 
 // The default fetch is undici's with a dispatcher whose own timeouts are off; tests that pass no fetch reach this fake.
 const undici = vi.hoisted(() => {
@@ -120,17 +120,18 @@ describe("enlargeViaService", () => {
     }
   });
 
-  it("the deadline defaults to the task's dispatch deadline from the call; the attempt cap is only a second limit", async () => {
-    // 400 s attempts: the first fits the default 870 s, the retry (10 s + 400 s more) does too, a third does not.
+  it("the deadline defaults to the enlarge task's dispatch deadline from the call; the attempt cap is only a second limit", async () => {
+    // 400 s attempts within the default 1770 s: 0-400, 410-810, 830-1230, 1270-1670; a fifth would start after a 60 s
+    // wait with 40 s left, under ENLARGE_ATTEMPT_FLOOR_MS.
     const s = fakeService([503]);
     const started = s.now();
     const error = await enlargeViaService({ url: URL_, jpeg: JPEG, model: "swinir-x2", timeoutMs: 400_000, maxAttempts: 10 }, {
       ...s.deps, fetch: (async (url: string, init: RequestInit) => { s.advance(400_000); return s.deps.fetch!(url, init); }) as unknown as typeof fetch,
     }).catch((e: unknown) => e);
     expect(error).toBeInstanceOf(EnlargeBusyError);
-    expect(s.calls).toHaveLength(2);
-    expect(s.now() - started).toBeLessThanOrEqual(DISPATCH_DEADLINE_SEC * 1000 - ENLARGE_TASK_MARGIN_MS);
-    // With today's default timeout (870 s, longer than the 870 s left) the attempt is clamped to the time left, and a
+    expect(s.calls).toHaveLength(4);
+    expect(s.now() - started).toBeLessThanOrEqual(ENLARGE_DISPATCH_DEADLINE_SEC * 1000 - ENLARGE_TASK_MARGIN_MS);
+    // With today's default timeout (1770 s, as long as the 1770 s left) the attempt is clamped to the time left, and a
     // busy answer is retried while at least ENLARGE_ATTEMPT_FLOOR_MS is left (2026-10-29 review, P0).
     const one = fakeService([503]);
     const only = await enlargeViaService({ url: URL_, jpeg: JPEG, model: "swinir-x2", maxAttempts: 3 }, one.deps).catch((e: unknown) => e);
@@ -252,13 +253,13 @@ describe("enlargement timeouts", () => {
   it("the client waits the service timeout plus 30 s", () => {
     expect(upscaleServerTimeoutS({})).toBe(DEFAULT_UPSCALE_TIMEOUT_S);
     expect(upscaleServerTimeoutS({ UPSCALE_TIMEOUT_S: "660" })).toBe(660);
-    for (const bad of ["0", "900", "6.5", "ten", ""]) expect(upscaleServerTimeoutS({ UPSCALE_TIMEOUT_S: bad })).toBe(840);
+    for (const bad of ["0", "1800", "6.5", "ten", ""]) expect(upscaleServerTimeoutS({ UPSCALE_TIMEOUT_S: bad })).toBe(1740);
     expect(enlargeTimeoutMs({ UPSCALE_TIMEOUT_S: "660" })).toBe(690_000);
-    expect(enlargeTimeoutMs({})).toBe(870_000);
+    expect(enlargeTimeoutMs({})).toBe(1_770_000);
   });
 
-  it("the service timeout's ceiling comes from the task deadline and equals infra/lib/shape.sh UPSCALE_TIMEOUT_MAX_S", () => {
-    expect(DEFAULT_UPSCALE_TIMEOUT_S).toBe(840);
+  it("the service timeout's ceiling comes from the enlarge task deadline and equals infra/lib/shape.sh UPSCALE_TIMEOUT_MAX_S", () => {
+    expect(DEFAULT_UPSCALE_TIMEOUT_S).toBe(1740);
     const shape = fs.readFileSync(fileURLToPath(new URL("../../../../infra/lib/shape.sh", import.meta.url)), "utf8");
     const row = /^\s*UPSCALE_TIMEOUT_MAX_S=(\d+)\s*$/m.exec(shape);
     expect(row, "UPSCALE_TIMEOUT_MAX_S= in infra/lib/shape.sh").not.toBeNull();

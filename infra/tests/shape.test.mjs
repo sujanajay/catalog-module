@@ -4,7 +4,11 @@
 // that does not fit (connection budget, what ila-pg allows now, queue slots, the asia-south1 CPU quota, the L4
 // quota and shape). Also checks the price defaults deploy.sh derives from the shape. Spec 17 3.3.3: GPU memory
 // arithmetic from the measured peak table (the peaks measured on the L4 on 2026-10-28 are the defaults: the F2 shape
-// and two or four resident models are refused, today's live shape passes, an unmeasured model is refused).
+// and two or four resident models are refused, today's live shape passes, an unmeasured model is refused). Spec 18
+// section 8: the default is the dedicated catalog-upscale shape measured on 2026-10-29 (16 x 4 vCPU, 4 threads,
+// concurrency 1, CPU cut-out max 4, 0.075/s per enlarge lane); concurrency above 1 is refused. 2026-10-29 review:
+// the timeout (1740 s) must cover the largest photo the service takes (UPSCALE_MAX_PIXELS 8 MP), the preview's enlarge
+// lane shares the live catalog-upscale's slots, and a measure rung counts the live catalog-upscale beside it.
 import fs from 'node:fs';
 import path from 'node:path';
 import assert from 'node:assert/strict';
@@ -24,7 +28,7 @@ const NAMES = ['DB_MAX_CONNECTIONS', 'WORKER_MAX_INSTANCES', 'WORKER_CPU', 'WORK
   'UPSCALE_CPU_VCPU', 'UPSCALE_MEMORY', 'UPSCALE_CONCURRENCY', 'UPSCALE_MAX_INSTANCES', 'UPSCALE_THREADS', 'UPSCALE_TIMEOUT_S',
   'UPSCALE_MAX_PIXELS', 'ENLARGE_MAX_DISPATCHES', 'ENLARGE_BULK_MAX_DISPATCHES', 'ENLARGE_DISPATCHES_PER_SECOND'];
 const PEAKS = ['GPU_MODEL_PEAK_MIB_BIREFNET_GENERAL', 'GPU_MODEL_PEAK_MIB_BIREFNET_GENERAL_LITE', 'GPU_MODEL_PEAK_MIB_BIREFNET_HRSOD', 'GPU_MODEL_PEAK_MIB_BRIA_RMBG'];
-const OUT = [...NAMES, ...PEAKS, 'UPSCALE_MEASURE', 'UPSCALE_MEASURED_ON', 'UPSCALE_VCPU_TOTAL', 'CATALOG_DB_TOTAL', 'CATALOG_DB_LIMIT', 'SLOTS_TOTAL', 'SLOTS_CAPACITY', 'CPU_TOTAL'];
+const OUT = [...NAMES, ...PEAKS, 'UPSCALE_MEASURE', 'UPSCALE_MEASURED_ON', 'UPSCALE_VCPU_TOTAL', 'UPSCALE_LIVE_VCPU', 'CATALOG_DB_TOTAL', 'CATALOG_DB_LIMIT', 'SLOTS_TOTAL', 'SLOTS_CAPACITY', 'CPU_TOTAL'];
 
 // The usd() helper and the two price defaults, taken from deploy.sh so the test follows the script.
 const deploy = fs.readFileSync(path.join(root, 'infra/deploy.sh'), 'utf8').split(/\r?\n/);
@@ -93,20 +97,24 @@ const LIVE = {...F2, GPU_CPU: '4', GPU_MEMORY: '16Gi', GPU_CONCURRENCY: '1', MAX
 const RECORDED_LIVE = {
   DB_MAX_CONNECTIONS: '400', WORKER_MAX_INSTANCES: '24', WORKER_CPU: '4', WORKER_MEMORY: '4Gi', WORKER_CONCURRENCY: '3',
   WORKER_DB_POOL_MAX: '6', TASKS_MAX_DISPATCHES: '8', BULK_MAX_DISPATCHES: '36', INGEST_MAX_DISPATCHES: '4',
-  MATTING_CPU_MAX_INSTANCES: '16', GPU_MAX_INSTANCES: '3', GPU_CPU: '4', GPU_MEMORY: '16Gi', GPU_CONCURRENCY: '1',
-  MAX_RESIDENT_SESSIONS: '1', GPU_MEM_LIMIT_BYTES: '', UPSCALE_SERVICE: 'cpu', MATTE_INFLIGHT_PER_INSTANCE: '4',
+  MATTING_CPU_MAX_INSTANCES: '4', GPU_MAX_INSTANCES: '3', GPU_CPU: '4', GPU_MEMORY: '16Gi', GPU_CONCURRENCY: '1',
+  MAX_RESIDENT_SESSIONS: '1', GPU_MEM_LIMIT_BYTES: '', UPSCALE_SERVICE: 'dedicated', MATTE_INFLIGHT_PER_INSTANCE: '4',
   CATALOG_PHOTO_CONCURRENCY: '4', CATALOG_BULK_WINDOW: '30', BULK_BATCH_PRODUCTS: '100', LLM_INFLIGHT_PER_INSTANCE: '6',
   CUDNN_CONV_ALGO_SEARCH: '', CUDNN_CONV_USE_MAX_WORKSPACE: '', INFERENCE_LOCK_SCOPE: 'global',
   GPU_MATTE_MODELS: 'birefnet-general,birefnet-general-lite,birefnet-hrsod,bria-rmbg', GPU_UPSCALE_MODELS: 'realesrgan-x2plus,swinir-x2',
   GPU_MEASURED_ON: '2026-10-28', GPU_CUDA_OVERHEAD_MIB: '2048',
-  // Spec 18: catalog-upscale is not deployed yet (UPSCALE_SERVICE=cpu); its rows are the shape the ladder starts from.
-  UPSCALE_CPU_VCPU: '4', UPSCALE_MEMORY: '16Gi', UPSCALE_CONCURRENCY: '1', UPSCALE_MAX_INSTANCES: '16', UPSCALE_THREADS: '4', UPSCALE_TIMEOUT_S: '840',
-  // Spec 18 3.3.1: the enlarge lanes, and worker concurrency 3 to give them their slots (not live until H3 deploys).
-  UPSCALE_MAX_PIXELS: '24000000', ENLARGE_MAX_DISPATCHES: '4', ENLARGE_BULK_MAX_DISPATCHES: '12', ENLARGE_DISPATCHES_PER_SECOND: '0.1',
+  // Spec 18 section 8: catalog-upscale upscales for the worker, the shape chosen from the 2026-10-29 ladder.
+  UPSCALE_CPU_VCPU: '4', UPSCALE_MEMORY: '16Gi', UPSCALE_CONCURRENCY: '1', UPSCALE_MAX_INSTANCES: '16', UPSCALE_THREADS: '4', UPSCALE_TIMEOUT_S: '1740',
+  // Spec 18 3.3.1: the enlarge lanes, and worker concurrency 3 to give them their slots. 2 lanes x 0.075 = 0.15/s.
+  // 4 + 10 + the preview's 2 = 16 slots of catalog-upscale. 8 MP: 2 x 8 x 104.2 s per MP = 1668 s <= 1740 s.
+  UPSCALE_MAX_PIXELS: '8000000', ENLARGE_MAX_DISPATCHES: '4', ENLARGE_BULK_MAX_DISPATCHES: '10', ENLARGE_DISPATCHES_PER_SECOND: '0.075',
 };
 // The shape before F2 (the rollback line in shape.sh): fits today's old db-f1-micro (25 connections).
-// Spec 18 test fixture, not a measurement: catalog-upscale at 4 vCPU / 4 threads / concurrency 1 with p95 rows.
-const DEDICATED = {WIRED: '1', UPSCALE_SERVICE: 'dedicated', UPSCALE_MEASURED_ON: '2026-10-30', UPSCALE_P95_S_4C_4T_1CONC_800x1200: '130', UPSCALE_P95_S_4C_4T_1CONC_1600x1600: '330'};
+// Spec 18 test fixture, not a measurement: catalog-upscale at 4 vCPU / 4 threads / concurrency 1 with p95 rows only
+// (the p50 rows blanked, so the p95 stands in), a timeout, a largest photo and a per-lane rate that fit them
+// (3 MP x 135.4 s per MP = 407 s, 2 x 407 = 814 <= 840).
+const DEDICATED = {WIRED: '1', UPSCALE_SERVICE: 'dedicated', UPSCALE_MEASURED_ON: '2026-10-30', UPSCALE_P95_S_4C_4T_1CONC_800x1200: '130', UPSCALE_P95_S_4C_4T_1CONC_1600x1600: '330',
+  UPSCALE_P50_S_4C_4T_1CONC_800x1200: '', UPSCALE_P50_S_4C_4T_1CONC_1600x1600: '', UPSCALE_TIMEOUT_S: '840', UPSCALE_MAX_PIXELS: '3000000', ENLARGE_DISPATCHES_PER_SECOND: '0.06'};
 const PRE_F2 = {...NO_ENLARGE, WORKER_MAX_INSTANCES: '4', WORKER_CPU: '2', WORKER_MEMORY: '2Gi', TASKS_MAX_DISPATCHES: '6', BULK_MAX_DISPATCHES: '0',
   INGEST_MAX_DISPATCHES: '2', DB_MAX_CONNECTIONS: '25', MATTING_CPU_MAX_INSTANCES: '20', UPSCALE_SERVICE: 'gpu',
   CATALOG_PHOTO_CONCURRENCY: '1', CATALOG_BULK_WINDOW: '8', LLM_INFLIGHT_PER_INSTANCE: ''};
@@ -116,14 +124,14 @@ const cases = [
     label: 'no env resolves to the recorded live shape',
     env: {},
     // Every shape name, so a new name without a recorded live value fails here.
-    expect: {...Object.fromEntries(NAMES.map((n) => [n, RECORDED_LIVE[n]])), ...MEASURED, STATUS: '0', CATALOG_DB_TOTAL: '152', CATALOG_DB_LIMIT: '393', SLOTS_TOTAL: '64', SLOTS_CAPACITY: '72',
-      CPU_TOTAL: '171', COMPUTE: '0.0000265', GPU_PRICE: '0.00034884', UPSCALE_MEASURE: '0', UPSCALE_MEASURED_ON: '', UPSCALE_VCPU_TOTAL: '0'},
+    expect: {...Object.fromEntries(NAMES.map((n) => [n, RECORDED_LIVE[n]])), ...MEASURED, STATUS: '0', CATALOG_DB_TOTAL: '152', CATALOG_DB_LIMIT: '393', SLOTS_TOTAL: '62', SLOTS_CAPACITY: '72',
+      CPU_TOTAL: '187', COMPUTE: '0.0000265', GPU_PRICE: '0.00034884', UPSCALE_MEASURE: '0', UPSCALE_MEASURED_ON: '2026-10-29', UPSCALE_VCPU_TOTAL: '64', UPSCALE_LIVE_VCPU: '64'},
   },
   {label: 'env still wins over a row, also an explicit "" (no AI check cap)', env: {TASKS_MAX_DISPATCHES: '14', BULK_MAX_DISPATCHES: '30', LLM_INFLIGHT_PER_INSTANCE: ''},
     expect: {STATUS: '0', TASKS_MAX_DISPATCHES: '14', BULK_MAX_DISPATCHES: '30', INGEST_MAX_DISPATCHES: '4', LLM_INFLIGHT_PER_INSTANCE: ''}},
   {label: 'preview: the same per-instance shape on 4 workers, no bulk queue and no bulk enlarge lane', env: {CATALOG_PREVIEW: '1'},
     expect: {...RECORDED_LIVE, STATUS: '0', WORKER_MAX_INSTANCES: '4', TASKS_MAX_DISPATCHES: '6', BULK_MAX_DISPATCHES: '0', INGEST_MAX_DISPATCHES: '2',
-      ENLARGE_MAX_DISPATCHES: '2', ENLARGE_BULK_MAX_DISPATCHES: '0', SLOTS_TOTAL: '10', SLOTS_CAPACITY: '12', CATALOG_DB_TOTAL: '32', CPU_TOTAL: '91'}},
+      ENLARGE_MAX_DISPATCHES: '2', ENLARGE_BULK_MAX_DISPATCHES: '0', SLOTS_TOTAL: '10', SLOTS_CAPACITY: '12', CATALOG_DB_TOTAL: '32', CPU_TOTAL: '107'}},
   {label: 'preview rows yield to env', env: {CATALOG_PREVIEW: '1', WORKER_MAX_INSTANCES: '6', TASKS_MAX_DISPATCHES: '10'},
     expect: {STATUS: '0', WORKER_MAX_INSTANCES: '6', TASKS_MAX_DISPATCHES: '10', BULK_MAX_DISPATCHES: '0'}},
   {label: 'the pre-F2 rollback shape fits db-f1-micro', env: PRE_F2, live: '25',
@@ -185,25 +193,49 @@ const cases = [
   {label: 'the bulk enlarge slot row is a whole number', env: {ENLARGE_BULK_MAX_DISPATCHES: 'twelve'}, expect: {STATUS: '1'}, error: /ENLARGE_BULK_MAX_DISPATCHES must be a whole number, got 'twelve'/},
   {label: 'a measured p95 that is not a whole number names its row', env: {...DEDICATED, MATTING_CPU_MAX_INSTANCES: '4', UPSCALE_P95_S_4C_4T_1CONC_1600x1600: '329.4'}, expect: {STATUS: '1'},
     error: /^ERROR: UPSCALE_P95_S_4C_4T_1CONC_1600x1600=329.4 must be a whole number of seconds \(rounded up\), such as 331\n$/},
-  {label: 'dedicated upscale with nothing measured is refused: measure first', env: {WIRED: '1', UPSCALE_SERVICE: 'dedicated', MATTING_CPU_MAX_INSTANCES: '4'}, expect: {STATUS: '1'},
+  {label: 'dedicated upscale with nothing measured is refused: measure first', env: {WIRED: '1', UPSCALE_SERVICE: 'dedicated', MATTING_CPU_MAX_INSTANCES: '4',
+    UPSCALE_MEASURED_ON: '', UPSCALE_P95_S_4C_4T_1CONC_800x1200: '', UPSCALE_P95_S_4C_4T_1CONC_1600x1600: ''}, expect: {STATUS: '1'},
     error: /^ERROR: measure first: run infra\/check-matting.sh --probe-upscale \(no measured p95 for UPSCALE_CPU_VCPU=4 UPSCALE_THREADS=4 UPSCALE_CONCURRENCY=1 at 800x1200 1600x1600; UPSCALE_P95_S_\* in infra\/lib\/shape.sh\)\n$/},
   {label: 'dedicated upscale with a measured shape fits beside a smaller CPU cut-out service', env: {...DEDICATED, MATTING_CPU_MAX_INSTANCES: '4'},
     expect: {STATUS: '0', CPU_TOTAL: '187', UPSCALE_VCPU_TOTAL: '64'}},
-  {label: 'dedicated upscale 16 x 4 beside catalog-matting 16 x 4 exceeds the CPU quota', env: DEDICATED, expect: {STATUS: '1', CPU_TOTAL: '235'},
+  {label: 'dedicated upscale 16 x 4 beside catalog-matting 16 x 4 exceeds the CPU quota', env: {...DEDICATED, MATTING_CPU_MAX_INSTANCES: '16'}, expect: {STATUS: '1', CPU_TOTAL: '235'},
     error: /vCPU at max instances 235 exceeds 190 of the 200 vCPU quota \(worker 96 \+ catalog-matting 64 \+ catalog-upscale 64 \+ web and jobs 11\); lower /},
-  {label: 'a row for another concurrency does not count', env: {...DEDICATED, MATTING_CPU_MAX_INSTANCES: '4', UPSCALE_CONCURRENCY: '2'}, expect: {STATUS: '1'},
-    error: /measure first: run infra\/check-matting.sh --probe-upscale \(no measured p95 for UPSCALE_CPU_VCPU=4 UPSCALE_THREADS=4 UPSCALE_CONCURRENCY=2 at 800x1200 1600x1600;/},
+  // Spec 18 section 8: the 2026-10-29 ladder gave two different outputs at concurrency 2 (rungs 2 and 4), so it is
+  // refused although its rows are measured.
+  {label: 'dedicated upscale at concurrency 2 is refused although measured: its outputs were not identical', env: {UPSCALE_CONCURRENCY: '2'}, expect: {STATUS: '1'},
+    error: /^ERROR: UPSCALE_CONCURRENCY=2 is refused: concurrency 2 produced non-identical outputs on 2026-10-29 \(ladder rungs 2 and 4\); measure and prove determinism before raising\n$/},
+  {label: 'measure mode may still run concurrency 2 to prove determinism (live catalog-upscale not yet deployed)', env: {UPSCALE_MEASURE: '1', UPSCALE_SERVICE: 'cpu', UPSCALE_CONCURRENCY: '2', UPSCALE_LIVE_VCPU: '0'},
+    expect: {STATUS: '0', CPU_TOTAL: '187', UPSCALE_VCPU_TOTAL: '64'}},
+  // 2026-10-29 review P2: the candidate runs beside the live revision, which keeps its own max instances.
+  {label: 'a measure rung beside the live dedicated catalog-upscale counts both and is refused', env: {UPSCALE_MEASURE: '1', UPSCALE_SERVICE: 'cpu', UPSCALE_MAX_INSTANCES: '1'},
+    expect: {STATUS: '1', CPU_TOTAL: '191', UPSCALE_VCPU_TOTAL: '68', UPSCALE_LIVE_VCPU: '64'},
+    error: /vCPU at max instances 191 exceeds 190 of the 200 vCPU quota \(worker 96 \+ catalog-matting 16 \+ catalog-upscale 68 \+ web and jobs 11\);.*the live revision's 64 vCPU: deploy a smaller live UPSCALE_MAX_INSTANCES first/},
+  {label: 'a normal deploy does not count the live catalog-upscale twice', env: {UPSCALE_LIVE_VCPU: '64'}, expect: {STATUS: '0', CPU_TOTAL: '187', UPSCALE_VCPU_TOTAL: '64'}},
+  {label: 'the measured default needs at least 2 x p95(1600x1600) 216 s', env: {UPSCALE_TIMEOUT_S: '431'}, expect: {STATUS: '1'},
+    error: /UPSCALE_TIMEOUT_S=431 is below 2 x the measured p95 of 1600x1600 \(216 s, measured 2026-10-29\); set it to at least 432/},
+  {label: 'the measured 8 vCPU / 8 threads rows count for that shape (8 x 8 vCPU, 4 + 2 + preview 2 enlarge slots, 2 x 0.05 <= 8 / 78 s)', env: {UPSCALE_CPU_VCPU: '8', UPSCALE_THREADS: '8', UPSCALE_MAX_INSTANCES: '8',
+    ENLARGE_BULK_MAX_DISPATCHES: '2', ENLARGE_DISPATCHES_PER_SECOND: '0.05'}, expect: {STATUS: '0', CPU_TOTAL: '187', UPSCALE_VCPU_TOTAL: '64'}},
   {label: 'a row for another thread count does not count', env: {...DEDICATED, MATTING_CPU_MAX_INSTANCES: '4', UPSCALE_CPU_VCPU: '8', UPSCALE_MAX_INSTANCES: '8'}, expect: {STATUS: '1'},
     error: /no measured p95 for UPSCALE_CPU_VCPU=8 UPSCALE_THREADS=4 UPSCALE_CONCURRENCY=1/},
   {label: 'the timeout must be at least 2 x the p95 of the largest size', env: {...DEDICATED, MATTING_CPU_MAX_INSTANCES: '4', UPSCALE_TIMEOUT_S: '600'}, expect: {STATUS: '1'},
     error: /UPSCALE_TIMEOUT_S=600 is below 2 x the measured p95 of 1600x1600 \(330 s, measured 2026-10-30\); set it to at least 660/},
-  {label: 'a shape too slow for the worker task deadline is refused', env: {...DEDICATED, MATTING_CPU_MAX_INSTANCES: '4', UPSCALE_P95_S_4C_4T_1CONC_1600x1600: '500'}, expect: {STATUS: '1'},
-    error: /needs a timeout of 2 x p95 500 s = 1000 s for 1600x1600, over the 840 s the worker's task allows; measure a faster shape or lower UPSCALE_MAX_PIXELS/},
-  {label: 'the timeout is at most 840 s', env: {UPSCALE_TIMEOUT_S: '900'}, expect: {STATUS: '1'}, error: /UPSCALE_TIMEOUT_S must be 60 to 840 s \(the worker's task deadline is 900 s/},
+  {label: 'a shape too slow for the enlarge task deadline is refused', env: {...DEDICATED, MATTING_CPU_MAX_INSTANCES: '4', UPSCALE_P95_S_4C_4T_1CONC_1600x1600: '900'}, expect: {STATUS: '1'},
+    error: /needs a timeout of 2 x p95 900 s = 1800 s for 1600x1600, over the 1740 s the enlarge task allows; measure a faster shape/},
+  {label: 'the timeout is at most 1740 s', env: {UPSCALE_TIMEOUT_S: '1800'}, expect: {STATUS: '1'}, error: /UPSCALE_TIMEOUT_S must be 60 to 1740 s \(the enlarge task's deadline is 1800 s/},
+  // 2026-10-29 review P1: the timeout must cover the largest photo the service takes, not only the probe sizes.
+  {label: 'the largest accepted photo must fit the timeout: 9 MP needs 2 x 938 s at 104.2 s per MP', env: {UPSCALE_MAX_PIXELS: '9000000'}, expect: {STATUS: '1'},
+    error: /^ERROR: UPSCALE_MAX_PIXELS=9000000 needs a timeout of 2 x about 938 s = 1876 s \(the slowest measured p95, 104\.1667 s per megapixel, measured 2026-10-29\), above UPSCALE_TIMEOUT_S=1740: such photos would time out on every attempt and be held\. Raise UPSCALE_TIMEOUT_S \(at most 1740\) or lower UPSCALE_MAX_PIXELS to at most 8351997\n$/},
+  {label: 'the 24 MP service default would need about 5000 s, more than one task delivery', env: {UPSCALE_MAX_PIXELS: '24000000'}, expect: {STATUS: '1'},
+    error: /UPSCALE_MAX_PIXELS=24000000 needs a timeout of 2 x about 2501 s = 5002 s/},
+  {label: 'the 2026-10-29 shape (timeout 480) with the 24 MP default is refused', env: {UPSCALE_TIMEOUT_S: '480', UPSCALE_MAX_PIXELS: '24000000'}, expect: {STATUS: '1'},
+    error: /above UPSCALE_TIMEOUT_S=480: such photos would time out on every attempt and be held\. Raise UPSCALE_TIMEOUT_S \(at most 1740\) or lower UPSCALE_MAX_PIXELS to at most 2303999/},
+  {label: 'a smaller largest photo fits a shorter timeout', env: {UPSCALE_TIMEOUT_S: '480', UPSCALE_MAX_PIXELS: '2300000'}, expect: {STATUS: '0'}},
+  {label: 'the slowest size per pixel sets the estimate (here the larger one)', env: {...DEDICATED, MATTING_CPU_MAX_INSTANCES: '4', UPSCALE_P95_S_4C_4T_1CONC_1600x1600: '400'}, expect: {STATUS: '1'},
+    error: /needs a timeout of 2 x about 469 s = 938 s \(the slowest measured p95, 156\.2500 s per megapixel/},
   {label: 'measured rows need their probe date', env: {...DEDICATED, MATTING_CPU_MAX_INSTANCES: '4', UPSCALE_MEASURED_ON: ''}, expect: {STATUS: '1'}, error: /UPSCALE_MEASURED_ON must be the date/},
-  {label: 'measure mode deploys an unmeasured candidate when it fits the quota', env: {UPSCALE_MEASURE: '1', UPSCALE_CPU_VCPU: '8', UPSCALE_THREADS: '8', UPSCALE_MAX_INSTANCES: '2'},
+  {label: 'measure mode deploys an unmeasured candidate when it fits the quota (live on cpu)', env: {UPSCALE_MEASURE: '1', UPSCALE_SERVICE: 'cpu', UPSCALE_LIVE_VCPU: '0', MATTING_CPU_MAX_INSTANCES: '16', UPSCALE_CPU_VCPU: '8', UPSCALE_THREADS: '8', UPSCALE_MAX_INSTANCES: '2'},
     expect: {STATUS: '0', UPSCALE_MEASURE: '1', UPSCALE_SERVICE: 'cpu', CPU_TOTAL: '187', UPSCALE_VCPU_TOTAL: '16'}},
-  {label: 'measure mode still counts the candidate against the CPU quota', env: {UPSCALE_MEASURE: '1'}, expect: {STATUS: '1', CPU_TOTAL: '235'}, error: /lower WORKER_MAX_INSTANCES, MATTING_CPU_MAX_INSTANCES or UPSCALE_MAX_INSTANCES/},
+  {label: 'measure mode still counts the candidate against the CPU quota', env: {UPSCALE_MEASURE: '1', UPSCALE_SERVICE: 'cpu', UPSCALE_LIVE_VCPU: '0', MATTING_CPU_MAX_INSTANCES: '16'}, expect: {STATUS: '1', CPU_TOTAL: '235'}, error: /lower WORKER_MAX_INSTANCES, MATTING_CPU_MAX_INSTANCES or UPSCALE_MAX_INSTANCES/},
   {label: 'measure mode keeps the worker on its upscaler', env: {UPSCALE_MEASURE: '1', UPSCALE_SERVICE: 'dedicated', UPSCALE_MAX_INSTANCES: '1'}, expect: {STATUS: '1'},
     error: /UPSCALE_MEASURE=1 deploys catalog-upscale as a no-traffic candidate; keep the worker on UPSCALE_SERVICE=cpu/},
   {label: 'upscale shape values', env: {UPSCALE_THREADS: '8', UPSCALE_MEMORY: '32Gi', UPSCALE_CONCURRENCY: '5', UPSCALE_MEASURE: 'yes'}, expect: {STATUS: '1'},
@@ -211,15 +243,21 @@ const cases = [
   {label: 'upscale CPU must be a Cloud Run size', env: {UPSCALE_CPU_VCPU: '3'}, expect: {STATUS: '1'}, error: /UPSCALE_CPU_VCPU must be 1, 2, 4, 6 or 8/},
   // Spec 18 3.3.1: the enlarge lanes.
   {label: 'the enlarge lanes need concurrency 3: at 2 they exceed the worker slots', env: {WORKER_CONCURRENCY: '2'}, expect: {STATUS: '1'},
-    error: /queue slots 8 \+ 36 \+ 4 \+ enlarge 4 \+ 12 = 64 exceed the worker's 24 x 2 = 48/},
+    error: /queue slots 8 \+ 36 \+ 4 \+ enlarge 4 \+ 10 = 62 exceed the worker's 24 x 2 = 48/},
   {label: 'concurrency 3 fits the DB budget at photo concurrency 4', env: {}, expect: {STATUS: '0', WORKER_DB_POOL_MAX: '6', CATALOG_DB_TOTAL: '152'}},
-  {label: 'enlarge slots above what catalog-upscale serves are refused', env: {...DEDICATED, MATTING_CPU_MAX_INSTANCES: '4', ENLARGE_BULK_MAX_DISPATCHES: '13'}, expect: {STATUS: '1'},
-    error: /enlarge slots 4 \+ 13 exceed what catalog-upscale serves at once \(16 x 1\)/},
+  {label: 'enlarge slots above what catalog-upscale serves are refused, the preview lane counted', env: {...DEDICATED, MATTING_CPU_MAX_INSTANCES: '4', ENLARGE_BULK_MAX_DISPATCHES: '11'}, expect: {STATUS: '1'},
+    error: /enlarge slots 4 \+ 11 \+ the preview stack's 2 = 17 exceed what catalog-upscale serves at once \(16 x 1\)/},
+  // 2026-10-29 review P2: the preview calls the live catalog-upscale, so production's lanes count against it too.
+  {label: 'a preview enlarge lane above the slots production leaves is refused', env: {CATALOG_PREVIEW: '1', ENLARGE_MAX_DISPATCHES: '3'}, expect: {STATUS: '1'},
+    error: /enlarge slots 3 \+ 0 \+ the production stack's 14 = 17 exceed what catalog-upscale serves at once \(16 x 1\)/},
   {label: 'an enlarge rate above what the measured instances finish is refused', env: {...DEDICATED, MATTING_CPU_MAX_INSTANCES: '4', ENLARGE_DISPATCHES_PER_SECOND: '0.5'}, expect: {STATUS: '1'},
-    error: /ENLARGE_DISPATCHES_PER_SECOND=0.5 exceeds what catalog-upscale finishes: 16 x 1 \/ p95 130 s of 800x1200 = 0.1231 per second/},
-  {label: 'the enlarge rate rule uses the measured p50 when there is one (instances x concurrency / p50)', env: {...DEDICATED, MATTING_CPU_MAX_INSTANCES: '4', UPSCALE_P50_S_4C_4T_1CONC_800x1200: '100', ENLARGE_DISPATCHES_PER_SECOND: '0.17'}, expect: {STATUS: '1'},
-    error: /ENLARGE_DISPATCHES_PER_SECOND=0.17 exceeds what catalog-upscale finishes: 16 x 1 \/ p50 100 s of 800x1200 = 0.1600 per second/},
-  {label: 'a rate within instances x concurrency / p50 passes even above the p95 bound', env: {...DEDICATED, MATTING_CPU_MAX_INSTANCES: '4', UPSCALE_P50_S_4C_4T_1CONC_800x1200: '100', ENLARGE_DISPATCHES_PER_SECOND: '0.15'}, expect: {STATUS: '0'}},
+    error: /ENLARGE_DISPATCHES_PER_SECOND=0.5 x 2 enlarge lanes = 1.0000 per second exceeds what catalog-upscale finishes: 16 x 1 \/ p95 130 s of 800x1200 = 0.1231 per second/},
+  {label: 'the enlarge rate rule uses the measured p50 when there is one (lanes x rate <= instances x concurrency / p50)', env: {...DEDICATED, MATTING_CPU_MAX_INSTANCES: '4', UPSCALE_P50_S_4C_4T_1CONC_800x1200: '100', ENLARGE_DISPATCHES_PER_SECOND: '0.09'}, expect: {STATUS: '1'},
+    error: /ENLARGE_DISPATCHES_PER_SECOND=0.09 x 2 enlarge lanes = 0.1800 per second exceeds what catalog-upscale finishes: 16 x 1 \/ p50 100 s of 800x1200 = 0.1600 per second/},
+  {label: 'a rate within instances x concurrency / p50 passes even above the p95 bound', env: {...DEDICATED, MATTING_CPU_MAX_INSTANCES: '4', UPSCALE_P50_S_4C_4T_1CONC_800x1200: '100', ENLARGE_DISPATCHES_PER_SECOND: '0.08'}, expect: {STATUS: '0'}},
+  {label: 'one enlarge lane counts the rate once', env: {...DEDICATED, UPSCALE_P50_S_4C_4T_1CONC_800x1200: '100', ENLARGE_BULK_MAX_DISPATCHES: '0', ENLARGE_DISPATCHES_PER_SECOND: '0.16'}, expect: {STATUS: '0'}},
+  {label: 'the measured default rate is two lanes within 16 / 99 s', env: {ENLARGE_DISPATCHES_PER_SECOND: '0.081'}, expect: {STATUS: '1'},
+    error: /ENLARGE_DISPATCHES_PER_SECOND=0.081 x 2 enlarge lanes = 0.1620 per second exceeds what catalog-upscale finishes: 16 x 1 \/ p50 99 s of 800x1200 = 0.1616 per second/},
   {label: 'UPSCALE_MAX_PIXELS must be a whole number of at least 1', env: {UPSCALE_MAX_PIXELS: '0'}, expect: {STATUS: '1'}, error: /UPSCALE_MAX_PIXELS must be at least 1/},
   {label: 'the enlarge rate must be a number above 0', env: {ENLARGE_DISPATCHES_PER_SECOND: '0'}, expect: {STATUS: '1'}, error: /ENLARGE_DISPATCHES_PER_SECOND must be a number above 0 and at most 500/},
   {label: 'no enlarge lanes (the rollback) fits concurrency 2', env: NO_ENLARGE, expect: {STATUS: '0', SLOTS_TOTAL: '48', SLOTS_CAPACITY: '48', CATALOG_DB_TOTAL: '104'}},

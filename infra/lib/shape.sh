@@ -13,6 +13,9 @@
 #   BULK_MAX_DISPATCHES=0 INGEST_MAX_DISPATCHES=2 DB_MAX_CONNECTIONS=25 MATTING_CPU_MAX_INSTANCES=20
 #   UPSCALE_SERVICE=gpu CATALOG_PHOTO_CONCURRENCY=1 CATALOG_BULK_WINDOW=8 LLM_INFLIGHT_PER_INSTANCE=
 #   WORKER_CONCURRENCY=2 ENLARGE_MAX_DISPATCHES=0 ENLARGE_BULK_MAX_DISPATCHES=0 (spec 18: no enlarge queue)
+# The shape before the spec 18 measured table (enlargement back on catalog-matting), for a rollback:
+#   UPSCALE_SERVICE=cpu MATTING_CPU_MAX_INSTANCES=16 UPSCALE_TIMEOUT_S=840 ENLARGE_DISPATCHES_PER_SECOND=0.1
+#   ENLARGE_BULK_MAX_DISPATCHES=12 UPSCALE_MAX_PIXELS=24000000
 SHAPE_DEFAULTS=(
   # What Postgres allows on ila-pg: the default of its tier db-custom-2-7680 (ila-pg sets no max_connections flag).
   # Lower it, and deploy, before infra/sql-tier.sh moves to a smaller tier (docs/solutions/db-connection-budget.md).
@@ -23,7 +26,7 @@ SHAPE_DEFAULTS=(
   # Spec 18 3.3.1: 2 -> 3 so the enlarge lanes get their own slots without taking any from the chunk queues (the
   # DB budget below allows it: 24 x 6 + 6 + 2 = 152 of 393). An enlarge task mostly waits on catalog-upscale.
   WORKER_CONCURRENCY=3
-  # Queue slots, main + bulk + ingest + enlarge + enlarge bulk = 64 of the worker's 24 x 3. The ingest queue
+  # Queue slots, main + bulk + ingest + enlarge + enlarge bulk = 62 of the worker's 24 x 3. The ingest queue
   # (new-batch setup) keeps its slots free of batch processing; the bulk queue (spec 16, big batches) is created only
   # when BULK_MAX_DISPATCHES > 0.
   TASKS_MAX_DISPATCHES=8
@@ -31,15 +34,19 @@ SHAPE_DEFAULTS=(
   INGEST_MAX_DISPATCHES=4
   # Spec 18 3.3.1: the enlarge lanes (operator <queue>-enlarge, bulk <queue>-enlarge-bulk, created only when
   # ENLARGE_BULK_MAX_DISPATCHES > 0). One slot is one enlargement waiting on the upscaler, so together they never
-  # exceed what catalog-upscale serves at once (UPSCALE_MAX_INSTANCES x UPSCALE_CONCURRENCY, checked below).
-  # ENLARGE_DISPATCHES_PER_SECOND paces new enlargements; 0.1/s is the conservative start until the measured table
-  # exists (shape_check refuses a rate above what the measured p95 serves). ENLARGE_MAX_DISPATCHES=0 means no enlarge
-  # lanes: the worker gets no TASKS_ENLARGE_QUEUE and enlarge tasks share the chunk queues (the rollback line above).
+  # exceed what catalog-upscale serves at once (UPSCALE_MAX_INSTANCES x UPSCALE_CONCURRENCY, checked below), together
+  # with the preview stack's enlarge lane, which calls the same live catalog-upscale: 4 + 10 + preview 2 = 16 x 1.
+  # ENLARGE_DISPATCHES_PER_SECOND paces new enlargements on each lane (Cloud Tasks applies it per queue, so both
+  # lanes together dispatch twice it). Spec 18 3.1.5: lanes x rate <= UPSCALE_MAX_INSTANCES x UPSCALE_CONCURRENCY /
+  # p50(800x1200) = 16 x 1 / 99 s = 0.1616/s, so 2 x 0.075 = 0.15/s (measured 2026-10-29). ENLARGE_MAX_DISPATCHES=0
+  # means no enlarge lanes: the worker gets no TASKS_ENLARGE_QUEUE and enlarge tasks share the chunk queues (the
+  # rollback line above).
   ENLARGE_MAX_DISPATCHES=4
-  ENLARGE_BULK_MAX_DISPATCHES=12
-  ENLARGE_DISPATCHES_PER_SECOND=0.1
-  # CPU cut-out service catalog-matting (asia-south1, 4 vCPU each).
-  MATTING_CPU_MAX_INSTANCES=16
+  ENLARGE_BULK_MAX_DISPATCHES=10
+  ENLARGE_DISPATCHES_PER_SECOND=0.075
+  # CPU cut-out service catalog-matting (asia-south1, 4 vCPU each). Spec 18: 16 -> 4 to give catalog-upscale its
+  # 64 vCPU (96 + 16 + 64 + 11 = 187 of 190); the GPU does the cut-outs, the CPU cut-out is a fallback.
+  MATTING_CPU_MAX_INSTANCES=4
   # GPU cut-out service catalog-matting-gpu (asia-southeast1, one L4 each; the L4 quota there is 3).
   GPU_MAX_INSTANCES=3
   GPU_CPU=4
@@ -54,26 +61,35 @@ SHAPE_DEFAULTS=(
   # The cut-out models the GPU service serves (its MATTE_MODELS; unset there means all four).
   GPU_MATTE_MODELS=birefnet-general,birefnet-general-lite,birefnet-hrsod,bria-rmbg
   # Which service upscales: gpu (spec 11), cpu (spec 16: the CPU cut-out service catalog-matting) or dedicated
-  # (spec 18: catalog-upscale, sized by the UPSCALE_* rows below). cpu is what runs today; the enlarge stage calls
-  # either through its own task (spec 18 H3; ENLARGE_CLIENT_WIRED, default 1), and dedicated is refused until the
-  # measured table below has rows for its shape.
-  UPSCALE_SERVICE=cpu
+  # (spec 18: catalog-upscale, sized by the UPSCALE_* rows below). The enlarge stage calls either through its own
+  # task (spec 18 H3; ENLARGE_CLIENT_WIRED, default 1), and dedicated is refused for a shape without measured rows.
+  # Spec 18 section 8: dedicated, 16 x 4 vCPU, 4 threads, concurrency 1, from the 2026-10-29 ladder.
+  UPSCALE_SERVICE=dedicated
   # Spec 18: the dedicated CPU enlargement service catalog-upscale (asia-south1, the catalog-matting image, only the
   # upscaler loaded). Deployed only with UPSCALE_SERVICE=dedicated or UPSCALE_MEASURE=1. UPSCALE_THREADS is its ONNX
   # Runtime intra-op thread count; UPSCALE_TIMEOUT_S its Cloud Run request timeout (the client waits 30 s longer).
-  # The asia-south1 CPU quota (190 of 200) holds today's 171 vCPU plus at most 16 more: the ladder runs with
-  # UPSCALE_MAX_INSTANCES at most 4 at 4 vCPU or at most 2 at 8 vCPU (16 x 4 = 64 gives 235 and is refused), and the
-  # final dedicated shape lowers MATTING_CPU_MAX_INSTANCES from 16 to 4 (123 + 16 x 4 = 187).
+  # The asia-south1 CPU quota (190 of 200): with MATTING_CPU_MAX_INSTANCES=4 the rest is 123 vCPU, so 16 x 4 gives
+  # 187. A measure rung runs beside the live catalog-upscale (UPSCALE_LIVE_VCPU below), so with 16 x 4 live there is
+  # no room for one: lower the live UPSCALE_MAX_INSTANCES first (shape_check counts both).
+  # 4 vCPU over 8: 8 vCPU is only about 1.3x faster per call (78 s against 99 s p50 at 800x1200), so 16 x 4 finishes
+  # more photos per second than the 8 x 8 the quota allows. Concurrency 1: concurrency 2 gave non-identical outputs
+  # (refused by upscale_check). Timeout 1740 s, the most the enlarge task allows (its 1800 s dispatch deadline, the
+  # Cloud Tasks maximum, less 30 s for the client and 30 s for the settle). It must cover the largest photo the
+  # service takes, not only the probe sizes: 2 x UPSCALE_MAX_PIXELS x the slowest measured p95 per pixel (100 s for
+  # 800x1200, 104.2 s per MP) = 2 x 834 s = 1668 s <= 1740 s (upscale_check).
   UPSCALE_CPU_VCPU=4
   UPSCALE_MEMORY=16Gi
   UPSCALE_CONCURRENCY=1
   UPSCALE_MAX_INSTANCES=16
   UPSCALE_THREADS=4
-  UPSCALE_TIMEOUT_S=840
+  UPSCALE_TIMEOUT_S=1740
   # Spec 18 3.1.5 / 13: the largest photo (width x height, before the 2x) catalog-upscale takes. Larger photos are
   # refused by the service (400) and held by the worker with enlargement_failed before any call, never a crash.
-  # 24000000 is the service's own default (services/matting/app.py); lowered when the largest size cannot fit 840 s.
-  UPSCALE_MAX_PIXELS=24000000
+  # The enlarge task sends the whole prepared photo, and a photo of any size may need the x2 when its product is
+  # small in the frame, so this, not the probe sizes, sets the longest call. SwinIR is tiled, so time grows with
+  # pixels; 8 MP at 2 x the slowest measured p95 per pixel fits the 1740 s timeout (above). 24 MP (the service's own
+  # default) would need about 5000 s, more than one Cloud Tasks delivery (30 minutes) can wait.
+  UPSCALE_MAX_PIXELS=8000000
   # The upscalers stay resident once used, so with UPSCALE_SERVICE=gpu both count on top of the cut-outs.
   GPU_UPSCALE_MODELS=realesrgan-x2plus,swinir-x2
   # CUDA context and library handles outside the model arenas (spec 17 3.3.3).
@@ -104,6 +120,14 @@ shape_fill() {
   for row in "$@"; do
     name=${row%%=*}
     [ -n "${!name+x}" ] || printf -v "$name" '%s' "${row#*=}"
+  done
+}
+
+# shape_row ARRAY NAME: the value of NAME's row in ARRAY (SHAPE_DEFAULTS or PREVIEW_SHAPE_DEFAULTS), or nothing.
+shape_row() {
+  local rows="$1[@]" row
+  for row in "${!rows}"; do
+    if [ "${row%%=*}" = "$2" ]; then printf '%s' "${row#*=}"; return 0; fi
   done
 }
 
@@ -179,29 +203,41 @@ shape_defaults() {
   # Spec 18 H1: measured p95 in whole seconds (rounded up) of one POST /upscale (swinir-x2) per photo size, one row
   # per catalog-upscale shape: UPSCALE_P95_S_<UPSCALE_CPU_VCPU>C_<UPSCALE_THREADS>T_<UPSCALE_CONCURRENCY>CONC_<size>, copied
   # from the probe table in services/matting/README.md "Measured on CPU" with UPSCALE_MEASURED_ON, the probe's date.
-  # Empty = not measured yet. Like the GPU peaks, a name that is set (also to "") wins. The ladder (4 vCPU / 4 threads,
-  # 8 / 8, concurrency 1 and 2, both sizes) fills these rows in the PR that makes catalog-upscale live.
-  UPSCALE_MEASURED_ON=${UPSCALE_MEASURED_ON-}
-  UPSCALE_P95_S_4C_4T_1CONC_800x1200=${UPSCALE_P95_S_4C_4T_1CONC_800x1200-}
-  UPSCALE_P95_S_4C_4T_1CONC_1600x1600=${UPSCALE_P95_S_4C_4T_1CONC_1600x1600-}
-  UPSCALE_P95_S_4C_4T_2CONC_800x1200=${UPSCALE_P95_S_4C_4T_2CONC_800x1200-}
-  UPSCALE_P95_S_4C_4T_2CONC_1600x1600=${UPSCALE_P95_S_4C_4T_2CONC_1600x1600-}
-  UPSCALE_P95_S_8C_8T_1CONC_800x1200=${UPSCALE_P95_S_8C_8T_1CONC_800x1200-}
-  UPSCALE_P95_S_8C_8T_1CONC_1600x1600=${UPSCALE_P95_S_8C_8T_1CONC_1600x1600-}
-  UPSCALE_P95_S_8C_8T_2CONC_800x1200=${UPSCALE_P95_S_8C_8T_2CONC_800x1200-}
-  UPSCALE_P95_S_8C_8T_2CONC_1600x1600=${UPSCALE_P95_S_8C_8T_2CONC_1600x1600-}
+  # Empty = not measured yet. Like the GPU peaks, a name that is set (also to "") wins. 2026-10-29: the ladder on
+  # Cloud Run (SwinIR x2, tile 384, 3 rounds; JSON under catalog-test/probe/). The concurrency 2 rows are kept as
+  # measured, but their outputs were not identical, so upscale_check refuses UPSCALE_CONCURRENCY above 1.
+  UPSCALE_MEASURED_ON=${UPSCALE_MEASURED_ON-2026-10-29}
+  UPSCALE_P95_S_4C_4T_1CONC_800x1200=${UPSCALE_P95_S_4C_4T_1CONC_800x1200-100}
+  UPSCALE_P95_S_4C_4T_1CONC_1600x1600=${UPSCALE_P95_S_4C_4T_1CONC_1600x1600-216}
+  UPSCALE_P95_S_4C_4T_2CONC_800x1200=${UPSCALE_P95_S_4C_4T_2CONC_800x1200-260}
+  UPSCALE_P95_S_4C_4T_2CONC_1600x1600=${UPSCALE_P95_S_4C_4T_2CONC_1600x1600-521}
+  UPSCALE_P95_S_8C_8T_1CONC_800x1200=${UPSCALE_P95_S_8C_8T_1CONC_800x1200-80}
+  UPSCALE_P95_S_8C_8T_1CONC_1600x1600=${UPSCALE_P95_S_8C_8T_1CONC_1600x1600-165}
+  UPSCALE_P95_S_8C_8T_2CONC_800x1200=${UPSCALE_P95_S_8C_8T_2CONC_800x1200-103}
+  UPSCALE_P95_S_8C_8T_2CONC_1600x1600=${UPSCALE_P95_S_8C_8T_2CONC_1600x1600-342}
   # Spec 18 3.1.5: the measured p50 in whole seconds (rounded up), same naming, same probe and date. It sets the queue
   # rate rule; empty = not measured, and the p95 of the same size then stands in (slower, so a safe bound).
-  UPSCALE_P50_S_4C_4T_1CONC_800x1200=${UPSCALE_P50_S_4C_4T_1CONC_800x1200-}
-  UPSCALE_P50_S_4C_4T_1CONC_1600x1600=${UPSCALE_P50_S_4C_4T_1CONC_1600x1600-}
-  UPSCALE_P50_S_4C_4T_2CONC_800x1200=${UPSCALE_P50_S_4C_4T_2CONC_800x1200-}
-  UPSCALE_P50_S_4C_4T_2CONC_1600x1600=${UPSCALE_P50_S_4C_4T_2CONC_1600x1600-}
-  UPSCALE_P50_S_8C_8T_1CONC_800x1200=${UPSCALE_P50_S_8C_8T_1CONC_800x1200-}
-  UPSCALE_P50_S_8C_8T_1CONC_1600x1600=${UPSCALE_P50_S_8C_8T_1CONC_1600x1600-}
-  UPSCALE_P50_S_8C_8T_2CONC_800x1200=${UPSCALE_P50_S_8C_8T_2CONC_800x1200-}
-  UPSCALE_P50_S_8C_8T_2CONC_1600x1600=${UPSCALE_P50_S_8C_8T_2CONC_1600x1600-}
-  # The worker's task deadline is 900 s; the upscale call waits UPSCALE_TIMEOUT_S + 30 s, so 840 is the most.
-  UPSCALE_TIMEOUT_MAX_S=840
+  UPSCALE_P50_S_4C_4T_1CONC_800x1200=${UPSCALE_P50_S_4C_4T_1CONC_800x1200-99}
+  UPSCALE_P50_S_4C_4T_1CONC_1600x1600=${UPSCALE_P50_S_4C_4T_1CONC_1600x1600-215}
+  UPSCALE_P50_S_4C_4T_2CONC_800x1200=${UPSCALE_P50_S_4C_4T_2CONC_800x1200-126}
+  UPSCALE_P50_S_4C_4T_2CONC_1600x1600=${UPSCALE_P50_S_4C_4T_2CONC_1600x1600-494}
+  UPSCALE_P50_S_8C_8T_1CONC_800x1200=${UPSCALE_P50_S_8C_8T_1CONC_800x1200-78}
+  UPSCALE_P50_S_8C_8T_1CONC_1600x1600=${UPSCALE_P50_S_8C_8T_1CONC_1600x1600-159}
+  UPSCALE_P50_S_8C_8T_2CONC_800x1200=${UPSCALE_P50_S_8C_8T_2CONC_800x1200-79}
+  UPSCALE_P50_S_8C_8T_2CONC_1600x1600=${UPSCALE_P50_S_8C_8T_2CONC_1600x1600-168}
+  # The enlarge task's dispatch deadline is 1800 s (ENLARGE_DISPATCH_DEADLINE_SEC, the Cloud Tasks maximum for an HTTP
+  # task); the upscale call waits UPSCALE_TIMEOUT_S + 30 s and the settle keeps 30 s, so 1740 is the most.
+  UPSCALE_TIMEOUT_MAX_S=1740
+  # Spec 18 P2 (2026-10-29 review): the vCPU the live catalog-upscale takes at max instances, counted beside a measure
+  # rung (UPSCALE_MEASURE=1 deploys a candidate of the same service while the live revision keeps serving). From the
+  # rows, which are the live shape; set it (also to 0) only when the live service differs from them, such as before
+  # the first deploy of UPSCALE_SERVICE=dedicated.
+  if [ -z "${UPSCALE_LIVE_VCPU+x}" ]; then
+    UPSCALE_LIVE_VCPU=0
+    if [ "$(shape_row SHAPE_DEFAULTS UPSCALE_SERVICE)" = dedicated ]; then
+      UPSCALE_LIVE_VCPU=$(( $(shape_row SHAPE_DEFAULTS UPSCALE_MAX_INSTANCES) * $(shape_row SHAPE_DEFAULTS UPSCALE_CPU_VCPU) ))
+    fi
+  fi
   # Worker pool per instance. One photo at a time: one connection per in-flight task (2). Several photos at once
   # (today): a delivery's writes take turns on one connection, and its reads, lease renewals and AI cost rows
   # need a second, so 2 per in-flight task (4 at concurrency 2). The budget check below still has the last word.
@@ -226,7 +262,7 @@ shape_check() {
       INGEST_MAX_DISPATCHES BULK_MAX_DISPATCHES TASKS_MAX_DISPATCHES MATTING_CPU_MAX_INSTANCES GPU_MAX_INSTANCES \
       GPU_CPU GPU_CONCURRENCY MAX_RESIDENT_SESSIONS MATTE_INFLIGHT_PER_INSTANCE CATALOG_PHOTO_CONCURRENCY \
       CATALOG_BULK_WINDOW BULK_BATCH_PRODUCTS GPU_CUDA_OVERHEAD_MIB UPSCALE_CPU_VCPU UPSCALE_CONCURRENCY UPSCALE_MAX_INSTANCES \
-      UPSCALE_THREADS UPSCALE_TIMEOUT_S UPSCALE_MAX_PIXELS ENLARGE_MAX_DISPATCHES ENLARGE_BULK_MAX_DISPATCHES; do
+      UPSCALE_THREADS UPSCALE_TIMEOUT_S UPSCALE_MAX_PIXELS UPSCALE_LIVE_VCPU ENLARGE_MAX_DISPATCHES ENLARGE_BULK_MAX_DISPATCHES; do
     value=${!name}
     if ! [[ "$value" =~ ^[0-9]+$ ]]; then shape_fail "$name must be a whole number, got '$value'"; return 1; fi
   done
@@ -265,11 +301,14 @@ shape_check() {
     shape_fail "queue slots $TASKS_MAX_DISPATCHES + $BULK_MAX_DISPATCHES + $INGEST_MAX_DISPATCHES + enlarge $ENLARGE_MAX_DISPATCHES + $ENLARGE_BULK_MAX_DISPATCHES = $SLOTS_TOTAL exceed the worker's $WORKER_MAX_INSTANCES x $WORKER_CONCURRENCY = $SLOTS_CAPACITY"
   fi
   # CPU quota in asia-south1 (the GPU service counts in asia-southeast1), with catalog-upscale when it is deployed.
+  # A measure rung's candidate runs beside the live catalog-upscale revision (each revision has its own max
+  # instances), so both count.
   UPSCALE_VCPU_TOTAL=0
   if upscale_deployed; then UPSCALE_VCPU_TOTAL=$((UPSCALE_MAX_INSTANCES * UPSCALE_CPU_VCPU)); fi
+  if [ "$UPSCALE_MEASURE" = 1 ]; then UPSCALE_VCPU_TOTAL=$((UPSCALE_VCPU_TOTAL + UPSCALE_LIVE_VCPU)); fi
   CPU_TOTAL=$((WORKER_MAX_INSTANCES * WORKER_CPU + MATTING_CPU_MAX_INSTANCES * MATTING_CPU_VCPU + UPSCALE_VCPU_TOTAL + WEB_MAX_INSTANCES * WEB_CPU + JOBS_CPU_BUDGET))
   if [ "$CPU_TOTAL" -gt "$CPU_QUOTA_LIMIT" ]; then
-    shape_fail "asia-south1 vCPU at max instances $CPU_TOTAL exceeds $CPU_QUOTA_LIMIT of the 200 vCPU quota (worker $((WORKER_MAX_INSTANCES * WORKER_CPU)) + catalog-matting $((MATTING_CPU_MAX_INSTANCES * MATTING_CPU_VCPU)) + catalog-upscale $UPSCALE_VCPU_TOTAL + web and jobs $((WEB_MAX_INSTANCES * WEB_CPU + JOBS_CPU_BUDGET))); lower WORKER_MAX_INSTANCES, MATTING_CPU_MAX_INSTANCES or UPSCALE_MAX_INSTANCES"
+    shape_fail "asia-south1 vCPU at max instances $CPU_TOTAL exceeds $CPU_QUOTA_LIMIT of the 200 vCPU quota (worker $((WORKER_MAX_INSTANCES * WORKER_CPU)) + catalog-matting $((MATTING_CPU_MAX_INSTANCES * MATTING_CPU_VCPU)) + catalog-upscale $UPSCALE_VCPU_TOTAL + web and jobs $((WEB_MAX_INSTANCES * WEB_CPU + JOBS_CPU_BUDGET))); lower WORKER_MAX_INSTANCES, MATTING_CPU_MAX_INSTANCES or UPSCALE_MAX_INSTANCES$([ "$UPSCALE_MEASURE" = 1 ] && [ "$UPSCALE_LIVE_VCPU" -gt 0 ] && echo " (catalog-upscale counts the measure candidate and the live revision's $UPSCALE_LIVE_VCPU vCPU: deploy a smaller live UPSCALE_MAX_INSTANCES first)")"
   fi
   # GPU: today's L4 quota, and Cloud Run's L4 shape (at least 4 CPU and 16 GiB; 8 CPU and 32 GiB recommended).
   [ "$GPU_MAX_INSTANCES" -le "$GPU_QUOTA" ] || shape_fail "GPU_MAX_INSTANCES=$GPU_MAX_INSTANCES exceeds the L4 quota of $GPU_QUOTA (no quota requests: owner decision 2026-10-27)"
@@ -316,6 +355,17 @@ upscale_largest_size() {
   printf '%s' "$largest"
 }
 
+# The slowest measured p95 per megapixel over UPSCALE_SIZES (seconds, 4 decimals) of the current shape. Needs a
+# whole-number p95 for every size (upscale_check checks that first).
+upscale_seconds_per_mp() {
+  local size w h worst=0
+  for size in ${UPSCALE_SIZES//,/ }; do
+    w=${size%x*}; h=${size#*x}
+    worst=$(awk -v p="$(upscale_p95 "$size")" -v n="$((w * h))" -v m="$worst" 'BEGIN{v = p / n * 1000000; printf "%.4f", (v > m ? v : m)}')
+  done
+  printf '%s' "$worst"
+}
+
 # The size in UPSCALE_SIZES with the fewest pixels.
 upscale_smallest_size() {
   local size smallest="" fewest=0 w h
@@ -348,7 +398,7 @@ upscale_check() {
   [ "$UPSCALE_THREADS" -le "$UPSCALE_CPU_VCPU" ] || shape_fail "UPSCALE_THREADS=$UPSCALE_THREADS exceeds UPSCALE_CPU_VCPU=$UPSCALE_CPU_VCPU (more ONNX threads than vCPU only contend); use at most $UPSCALE_CPU_VCPU"
   [ "$UPSCALE_CONCURRENCY" -le 4 ] || shape_fail "UPSCALE_CONCURRENCY must be at most 4 (tiles run one at a time per instance), got $UPSCALE_CONCURRENCY"
   [ "$UPSCALE_TIMEOUT_S" -ge 60 ] && [ "$UPSCALE_TIMEOUT_S" -le "$UPSCALE_TIMEOUT_MAX_S" ] \
-    || shape_fail "UPSCALE_TIMEOUT_S must be 60 to $UPSCALE_TIMEOUT_MAX_S s (the worker's task deadline is 900 s and the client waits 30 s longer), got $UPSCALE_TIMEOUT_S"
+    || shape_fail "UPSCALE_TIMEOUT_S must be 60 to $UPSCALE_TIMEOUT_MAX_S s (the enlarge task's deadline is 1800 s, the client waits 30 s longer and the settle keeps 30 s), got $UPSCALE_TIMEOUT_S"
   [ -n "${UPSCALE_SIZES//[, ]/}" ] || { shape_fail "UPSCALE_SIZES must list the probe sizes, such as 800x1200,1600x1600"; return 0; }
   for size in ${UPSCALE_SIZES//,/ }; do
     [[ "$size" =~ ^[1-9][0-9]*x[1-9][0-9]*$ ]] || { shape_fail "UPSCALE_SIZES must list sizes such as 800x1200,1600x1600, got '$UPSCALE_SIZES'"; return 0; }
@@ -358,13 +408,27 @@ upscale_check() {
     return 0
   fi
   [ "$UPSCALE_SERVICE" = dedicated ] || return 0
+  if [ "$UPSCALE_CONCURRENCY" -gt 1 ]; then
+    shape_fail "UPSCALE_CONCURRENCY=$UPSCALE_CONCURRENCY is refused: concurrency 2 produced non-identical outputs on 2026-10-29 (ladder rungs 2 and 4); measure and prove determinism before raising"
+    return 0
+  fi
   if [ "$ENLARGE_CLIENT_WIRED" != 1 ]; then
     shape_fail "UPSCALE_SERVICE=dedicated needs a worker image with the spec 18 H3 enlarge stage (ENLARGE_CLIENT_WIRED=$ENLARGE_CLIENT_WIRED says this one has none): its render would ask the matting client for catalog-upscale, which it refuses; keep UPSCALE_SERVICE=cpu"
     return 0
   fi
-  # Spec 18 3.3.1: the enlarge lanes never send more at once than catalog-upscale serves at once.
-  if [ $((ENLARGE_MAX_DISPATCHES + ENLARGE_BULK_MAX_DISPATCHES)) -gt $((UPSCALE_MAX_INSTANCES * UPSCALE_CONCURRENCY)) ]; then
-    shape_fail "enlarge slots $ENLARGE_MAX_DISPATCHES + $ENLARGE_BULK_MAX_DISPATCHES exceed what catalog-upscale serves at once ($UPSCALE_MAX_INSTANCES x $UPSCALE_CONCURRENCY); lower ENLARGE_MAX_DISPATCHES or ENLARGE_BULK_MAX_DISPATCHES"
+  # Spec 18 3.3.1: the enlarge lanes never send more at once than catalog-upscale serves at once. The production and
+  # preview stacks both call the one live catalog-upscale, so the other stack's lanes (from its rows) count too: with
+  # concurrency 1 there is no slack, and a busy answer costs a photo one of its attempts.
+  local other other_name
+  if [ "${CATALOG_PREVIEW:-0}" = 1 ]; then
+    other_name=production
+    other=$(( $(shape_row SHAPE_DEFAULTS ENLARGE_MAX_DISPATCHES) + $(shape_row SHAPE_DEFAULTS ENLARGE_BULK_MAX_DISPATCHES) ))
+  else
+    other_name=preview
+    other=$(( $(shape_row PREVIEW_SHAPE_DEFAULTS ENLARGE_MAX_DISPATCHES) + $(shape_row PREVIEW_SHAPE_DEFAULTS ENLARGE_BULK_MAX_DISPATCHES) ))
+  fi
+  if [ $((ENLARGE_MAX_DISPATCHES + ENLARGE_BULK_MAX_DISPATCHES + other)) -gt $((UPSCALE_MAX_INSTANCES * UPSCALE_CONCURRENCY)) ]; then
+    shape_fail "enlarge slots $ENLARGE_MAX_DISPATCHES + $ENLARGE_BULK_MAX_DISPATCHES + the $other_name stack's $other = $((ENLARGE_MAX_DISPATCHES + ENLARGE_BULK_MAX_DISPATCHES + other)) exceed what catalog-upscale serves at once ($UPSCALE_MAX_INSTANCES x $UPSCALE_CONCURRENCY); lower ENLARGE_MAX_DISPATCHES or ENLARGE_BULK_MAX_DISPATCHES"
   fi
   for size in ${UPSCALE_SIZES//,/ }; do
     p95=$(upscale_p95 "$size")
@@ -384,19 +448,36 @@ upscale_check() {
   largest=$(upscale_largest_size)
   worst=$(( 2 * $(upscale_p95 "$largest") ))
   if [ "$worst" -gt "$UPSCALE_TIMEOUT_MAX_S" ]; then
-    shape_fail "catalog-upscale at $UPSCALE_CPU_VCPU vCPU, $UPSCALE_THREADS threads, concurrency $UPSCALE_CONCURRENCY needs a timeout of 2 x p95 $(upscale_p95 "$largest") s = $worst s for $largest, over the $UPSCALE_TIMEOUT_MAX_S s the worker's task allows; measure a faster shape or lower UPSCALE_MAX_PIXELS"
+    shape_fail "catalog-upscale at $UPSCALE_CPU_VCPU vCPU, $UPSCALE_THREADS threads, concurrency $UPSCALE_CONCURRENCY needs a timeout of 2 x p95 $(upscale_p95 "$largest") s = $worst s for $largest, over the $UPSCALE_TIMEOUT_MAX_S s the enlarge task allows; measure a faster shape"
   elif [ "$UPSCALE_TIMEOUT_S" -lt "$worst" ]; then
     shape_fail "UPSCALE_TIMEOUT_S=$UPSCALE_TIMEOUT_S is below 2 x the measured p95 of $largest ($(upscale_p95 "$largest") s, measured $UPSCALE_MEASURED_ON); set it to at least $worst"
   fi
+  # 2026-10-29 review P1: the largest photo the service takes (UPSCALE_MAX_PIXELS), not only the probe sizes, must
+  # finish within the timeout, or it times out on every attempt and is held. Its p95 is estimated from the slowest
+  # measured p95 per pixel of the probe sizes (tiled, so time grows with pixels; the smallest size carries the most
+  # fixed cost per pixel, a safe bound for larger photos), with the same 2x margin.
+  local per_mp est need fits
+  per_mp=$(upscale_seconds_per_mp)
+  est=$(awk -v p="$UPSCALE_MAX_PIXELS" -v r="$per_mp" 'BEGIN{v = p / 1000000 * r; c = int(v); if (c < v) c++; print c}')
+  need=$((2 * est))
+  if [ "$need" -gt "$UPSCALE_TIMEOUT_S" ]; then
+    fits=$(awk -v t="$UPSCALE_TIMEOUT_S" -v r="$per_mp" 'BEGIN{printf "%d", t / 2 / r * 1000000}')
+    shape_fail "UPSCALE_MAX_PIXELS=$UPSCALE_MAX_PIXELS needs a timeout of 2 x about $est s = $need s (the slowest measured p95, $per_mp s per megapixel, measured $UPSCALE_MEASURED_ON), above UPSCALE_TIMEOUT_S=$UPSCALE_TIMEOUT_S: such photos would time out on every attempt and be held. Raise UPSCALE_TIMEOUT_S (at most $UPSCALE_TIMEOUT_MAX_S) or lower UPSCALE_MAX_PIXELS to at most $fits"
+  fi
   # Spec 18 3.1.5, the queue rate: ENLARGE_DISPATCHES_PER_SECOND <= UPSCALE_MAX_INSTANCES x UPSCALE_CONCURRENCY / p50,
   # at the smallest size (the usual photo). Without a measured p50 the p95 of that size stands in (a safe bound).
-  local smallest capacity seconds stat=p50
+  # Cloud Tasks paces each queue on its own, so the rate counts once per enlarge lane that has slots.
+  local smallest capacity seconds stat=p50 lanes=0 total
+  [ "$ENLARGE_MAX_DISPATCHES" -gt 0 ] && lanes=$((lanes + 1))
+  [ "$ENLARGE_BULK_MAX_DISPATCHES" -gt 0 ] && lanes=$((lanes + 1))
+  [ "$lanes" -gt 0 ] || return 0
   smallest=$(upscale_smallest_size)
   seconds=$(upscale_p50 "$smallest")
   [[ "$seconds" =~ ^[1-9][0-9]*$ ]] || { seconds=$(upscale_p95 "$smallest"); stat=p95; }
   capacity=$(awk -v n="$((UPSCALE_MAX_INSTANCES * UPSCALE_CONCURRENCY))" -v s="$seconds" 'BEGIN{printf "%.4f", n / s}')
-  if awk -v r="$ENLARGE_DISPATCHES_PER_SECOND" -v c="$capacity" 'BEGIN{exit !(r > c)}'; then
-    shape_fail "ENLARGE_DISPATCHES_PER_SECOND=$ENLARGE_DISPATCHES_PER_SECOND exceeds what catalog-upscale finishes: $UPSCALE_MAX_INSTANCES x $UPSCALE_CONCURRENCY / $stat $seconds s of $smallest = $capacity per second"
+  total=$(awk -v r="$ENLARGE_DISPATCHES_PER_SECOND" -v l="$lanes" 'BEGIN{printf "%.4f", r * l}')
+  if awk -v t="$total" -v c="$capacity" 'BEGIN{exit !(t > c)}'; then
+    shape_fail "ENLARGE_DISPATCHES_PER_SECOND=$ENLARGE_DISPATCHES_PER_SECOND x $lanes enlarge lanes = $total per second exceeds what catalog-upscale finishes: $UPSCALE_MAX_INSTANCES x $UPSCALE_CONCURRENCY / $stat $seconds s of $smallest = $capacity per second"
   fi
 }
 

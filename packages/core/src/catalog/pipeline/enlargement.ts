@@ -14,7 +14,7 @@
 import { and, asc, eq, inArray, sql, type SQL } from "drizzle-orm";
 import type { Db } from "../../db/client";
 import { catalogChunks, catalogSourceImages } from "../../db/schema";
-import { DISPATCH_DEADLINE_SEC, enlargeTaskId, type EnlargeTaskBody, type enqueueTask } from "../../tasks";
+import { ENLARGE_DISPATCH_DEADLINE_SEC, enlargeTaskId, type EnlargeTaskBody, type enqueueTask } from "../../tasks";
 
 /** Attempts of one photo's enlargement before it is failed: the enlarge lanes' max-attempts (infra/lib/queues.sh). */
 export const ENLARGE_TASK_MAX_ATTEMPTS = 8;
@@ -23,16 +23,16 @@ export const ENLARGE_TASK_MAX_ATTEMPTS = 8;
  * round). Every enlarge delivery of the batch refreshes the progress_at of every parked chunk of the batch, not only
  * the chunks holding its product: tasks wait in the paced lane (ENLARGE_DISPATCHES_PER_SECOND), so a chunk's own photos
  * may not reach the worker for a long time while the lane works through earlier ones. While any task of the batch is
- * delivered, nothing is sent again; once none was for 30 minutes (one attempt plus the longest queue back-off, 300 s,
- * is under 20), the remaining tasks are taken as lost: the queue gave up on them (its max-attempts also counts 429s
- * answered before the app) or their enqueue failed.
+ * delivered, nothing is sent again; once none was for 60 minutes (one attempt, at most ENLARGE_DISPATCH_DEADLINE_SEC
+ * = 30 minutes, plus the longest queue back-off, 300 s, is 35), the remaining tasks are taken as lost: the queue gave
+ * up on them (its max-attempts also counts 429s answered before the app) or their enqueue failed.
  */
-export const ENLARGE_STALE_MS = 30 * 60_000;
+export const ENLARGE_STALE_MS = 60 * 60_000;
 /**
- * How long a delivery's in-flight claim on a photo (x2_claimed_at) holds: the task's dispatch deadline, after which
- * Cloud Tasks has given up on that delivery and a new one may call the service.
+ * How long a delivery's in-flight claim on a photo (x2_claimed_at) holds: the enlarge task's dispatch deadline, after
+ * which Cloud Tasks has given up on that delivery and a new one may call the service.
  */
-export const ENLARGE_CLAIM_MS = DISPATCH_DEADLINE_SEC * 1000;
+export const ENLARGE_CLAIM_MS = ENLARGE_DISPATCH_DEADLINE_SEC * 1000;
 /** `task_name` of a chunk parked at the render stage until its photos' enlargements settle. */
 export const ENLARGING_TASK = "enlarging";
 
