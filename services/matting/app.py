@@ -291,7 +291,8 @@ def health(fresh: bool = False):
             "candidate": os.getenv("K_REVISION") or None, "lockScope": INFERENCE_LOCK_SCOPE, "instanceId": INSTANCE_ID, "loadsByModel": dict(LOADS),
             "vcpu": cpu_limit(), "threads": int(ORT_INTRA_OP_THREADS) if ORT_INTRA_OP_THREADS.isdigit() else None, "preloadMatte": PRELOAD_MATTE == "1",
             # The tile of each loaded upscaler (from its ONNX input); a model that has not loaded yet is absent.
-            "upscaleTiles": {model: upscaler.tile for model, upscaler in UPSCALERS.items()}}
+            # A copy: a first /upscale may add a model while this iterates (health never takes INFERENCE_LOCK).
+            "upscaleTiles": {model: upscaler.tile for model, upscaler in list(UPSCALERS.items())}}
 
 
 @app.post("/matte")

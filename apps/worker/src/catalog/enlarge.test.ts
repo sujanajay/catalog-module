@@ -12,9 +12,9 @@ import type { Prepared } from "@catalog/core/catalog/render";
 import { sourceX2, storedUpscaler, upscalerId } from "@catalog/core/catalog/upscale";
 import { classifyOutputs } from "@catalog/core/catalog/load/classify";
 import { ENLARGEMENT_FAILED_SENTENCE } from "@catalog/core/catalog/types";
-import { EnlargeBadInputError, EnlargeBusyError } from "@catalog/core/catalog/enlarge";
+import { ENLARGE_CLIENT_MARGIN_MS, EnlargeBadInputError, EnlargeBusyError } from "@catalog/core/catalog/enlarge";
 import { ENLARGE_TASK_MAX_ATTEMPTS, ENLARGING_TASK } from "@catalog/core/catalog/pipeline/enlargement";
-import { enlargeTaskId } from "@catalog/core/tasks";
+import { DISPATCH_DEADLINE_SEC, enlargeTaskId } from "@catalog/core/tasks";
 import { currentChunkTask, deliverChunkToEnd, handleChunkTask } from "./chunk";
 import { handleEnlargeTask, type EnlargeCall, primeStoredEnlargement } from "./enlarge";
 import { chunkRow, fakeWorld, seedBatch, type FakeWorld } from "../../test/catalog-fakes";
@@ -94,6 +94,10 @@ describe("spec 18 H3: the enlarge task", () => {
     expect((await chunkRow(db, s.chunks[0]!.id)).taskName).toBe(ENLARGING_TASK);
     expect(await handleEnlargeTask(w.deps, bodyOf(w, two!.id))).toMatchObject({ httpStatus: 200, outcome: "done" });
     expect(service.call).toHaveBeenCalledTimes(2);
+    // The call gets the delivery's own deadline: its start plus the dispatch deadline, less the client margin.
+    const left = service.call.mock.calls[0]![2]!.deadlineAt! - Date.now(), budget = DISPATCH_DEADLINE_SEC * 1000 - ENLARGE_CLIENT_MARGIN_MS;
+    expect(left).toBeLessThanOrEqual(budget);
+    expect(left).toBeGreaterThan(budget - 60_000);
     const photos = await photosOf(s.batch.id);
     for (const p of photos) {
       const path = enlargedPath(batchPrefix("test_brand", s.batch.id, true), await pathKeyOf(p.productId), p.n);

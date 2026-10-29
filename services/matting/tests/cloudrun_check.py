@@ -363,13 +363,35 @@ def seconds(value):
     return None if value is None else round(value, 1)
 
 
+# Google ID tokens live one hour; a ladder probe (several sizes, rounds at 2 x p95 each) can run longer.
+TOKEN_MAX_AGE_S = 50 * 60
+
+
+class RefreshingToken:
+    """The probe's ID token, minted again once it is older than TOKEN_MAX_AGE_S. Never printed."""
+
+    def __init__(self, mint, clock=time.monotonic):
+        self.mint, self.clock = mint, clock
+        self.value, self.minted_at = mint(), clock()
+
+    def __call__(self):
+        if self.clock() - self.minted_at >= TOKEN_MAX_AGE_S:
+            self.value, self.minted_at = self.mint(), self.clock()
+        return self.value
+
+
 class UpscaleProbe:
     def __init__(self, url, token, model, sizes, timeout):
-        self.url, self.token, self.model, self.timeout = url, token, model, timeout
+        # `token`: None (a local URL), a token, or a callable that returns the current one (RefreshingToken).
+        self.url, self.token_source, self.model, self.timeout = url, token, model, timeout
         self.sizes = {size: {"data": upscale_image(*size), "s": [], "statuses": [], "sha256": set()} for size in sizes}
         self.service = {}
         self.steps = []
         self.problems = []
+
+    @property
+    def token(self):
+        return self.token_source() if callable(self.token_source) else self.token_source
 
     def health(self, step):
         try:
@@ -391,8 +413,9 @@ class UpscaleProbe:
 
     def calls(self, size, count, measured):
         entry = self.sizes[size]
+        token = self.token
         with ThreadPoolExecutor(max_workers=count) as pool:
-            results = list(pool.map(lambda _: timed_upscale(self.url, self.token, self.model, entry["data"], size, self.timeout), range(count)))
+            results = list(pool.map(lambda _: timed_upscale(self.url, token, self.model, entry["data"], size, self.timeout), range(count)))
         entry["statuses"].extend(status for status, _, _ in results)
         entry["sha256"].update(digest for _, _, digest in results if digest)
         if measured:
@@ -458,7 +481,8 @@ def parse_upscale_args(argv):
 def probe_upscale_main(argv, token_for=None, report_writer=None, now=None):
     """Runs the upscale probe and returns the exit code. Tokens never reach stdout."""
     args = parse_upscale_args(argv)
-    token = None if args.url.startswith("http://") else (token_for or identity_token)(audience_for(args.url))
+    audience = audience_for(args.url)
+    token = None if args.url.startswith("http://") else RefreshingToken(lambda: (token_for or identity_token)(audience))
     started = now or datetime.datetime.now(datetime.timezone.utc)
     run = args.run or os.environ.get("CLOUD_RUN_EXECUTION") or started.strftime("%Y%m%dT%H%M%SZ")
     probe = UpscaleProbe(args.url, token, args.model, args.sizes, args.timeout)

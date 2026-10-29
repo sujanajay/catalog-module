@@ -329,14 +329,35 @@ Knobs (each env var's unset value is the behaviour before spec 18):
   and `upscaleTiles` (the tile of each loaded upscaler). `/health` never takes the inference lock, so it answers
   while an upscale runs.
 
-The probe: deploy a no-traffic candidate of one shape, then time it.
+The probe: deploy a candidate of one shape, then time it. `UPSCALE_MEASURE=1 bash infra/deploy.sh` deploys ONLY
+`catalog-upscale`: it builds only the matting image (if this commit has none), skips migrations and queues, reuses
+catalog-matting, catalog-matting-gpu, catalog-worker and catalog-web as they are, never rebuilds the worker's env,
+prints the candidate URL and the probe command, and stops before the worker and web gates. A measure rung never needs a
+new worker image, and the worker keeps calling whatever its `UPSCALE_URL` names. Each rung is tagged
+`measure-<cpu>c-<threads>t-<concurrency>r`, so every rung keeps its own URL. Rung 1 of a brand-new `catalog-upscale`
+serves the service URL, because Cloud Run cannot create a service with `--no-traffic`; nothing calls it. The deploy
+gate never tags a measure rung `previous`, never treats a live measure rung as a SKIP match (the first dedicated
+deploy still runs its two-size probe), and `--rollback` returns to a measure rung only when it is named.
+
+CPU quota: asia-south1 allows 190 of its 200 vCPU here, and today's shape already counts 171 (worker 24 x 4,
+catalog-matting 16 x 4, web and jobs 11). With the defaults (`UPSCALE_MAX_INSTANCES=16` at 4 vCPU) a rung would count
+171 + 16 x 4 = 235 and `shape.sh` refuses it, so the ladder runs with `UPSCALE_MAX_INSTANCES` at most 4 at 4 vCPU
+(171 + 16 = 187) and at most 2 at 8 vCPU (171 + 16 = 187). The final dedicated shape lowers
+`MATTING_CPU_MAX_INSTANCES` from 16 to 4 (123 + 16 x 4 = 187).
 
 ```bash
-# Git Bash, repo root. One rung: a candidate tagged measure-<cpu>c-<threads>t-<concurrency>r, traffic untouched.
-UPSCALE_MEASURE=1 UPSCALE_CPU_VCPU=4 UPSCALE_THREADS=4 UPSCALE_CONCURRENCY=1 UPSCALE_MAX_INSTANCES=1 bash infra/deploy.sh
-# deploy.sh prints UPSCALE_CANDIDATE_URL and the line below with it filled in.
-bash infra/check-matting.sh --probe-upscale <candidate URL> --sizes=800x1200,1600x1600 --concurrency=1 --rounds=3 --timeout=840
+# Git Bash, repo root. The four rungs (one at a time; each prints UPSCALE_CANDIDATE_URL and its probe line).
+UPSCALE_MEASURE=1 UPSCALE_CPU_VCPU=4 UPSCALE_THREADS=4 UPSCALE_CONCURRENCY=1 UPSCALE_MAX_INSTANCES=4 bash infra/deploy.sh
+UPSCALE_MEASURE=1 UPSCALE_CPU_VCPU=4 UPSCALE_THREADS=4 UPSCALE_CONCURRENCY=2 UPSCALE_MAX_INSTANCES=4 bash infra/deploy.sh
+UPSCALE_MEASURE=1 UPSCALE_CPU_VCPU=8 UPSCALE_THREADS=8 UPSCALE_CONCURRENCY=1 UPSCALE_MAX_INSTANCES=2 bash infra/deploy.sh
+UPSCALE_MEASURE=1 UPSCALE_CPU_VCPU=8 UPSCALE_THREADS=8 UPSCALE_CONCURRENCY=2 UPSCALE_MAX_INSTANCES=2 bash infra/deploy.sh
+# The probe deploy.sh prints for a rung (its candidate URL and its concurrency filled in):
+bash infra/check-matting.sh --probe-upscale <candidate URL> --model=swinir-x2 --sizes=800x1200,1600x1600 --concurrency=<1 or 2> --rounds=3 --timeout=840
 ```
+
+`UPSCALE_SERVICE=dedicated` (the worker's enlargements on `catalog-upscale`) waits for spec 18 H3: the matting client
+refuses a dedicated `UPSCALE_URL` (the enlarge stage, `packages/core/src/catalog/enlarge.ts`, calls it), so
+`shape.sh` refuses dedicated until the H3 PR sets `ENLARGE_CLIENT_WIRED=1`.
 
 It runs `services/matting/tests/cloudrun_check.py --probe-upscale` as the Cloud Run job `catalog-check-matting`: per
 size one warm call (it loads the model; not measured), then `concurrency` calls at once for `rounds` rounds, with a

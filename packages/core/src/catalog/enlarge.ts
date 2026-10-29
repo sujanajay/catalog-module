@@ -3,16 +3,28 @@
 // a slow or busy service is waited for and retried, never switched off. Its timeout is the service's own request
 // timeout plus 30 s (UPSCALE_TIMEOUT_S, set by infra/deploy.sh from infra/lib/shape.sh, which sizes it from the
 // measured p95), so the client never gives up on a call the service is still allowed to finish. Retries back off
-// exponentially on busy (429, 503), timeout, transport errors and other 5xx, and start only while the caller's
-// deadline still fits a whole attempt. A bad image (400, 413) and an auth or route refusal (401, 403, 404) are never
-// retried. Not wired into the render yet (spec 18 H3 calls it from the durable enlargement task).
+// exponentially on busy (429, Cloud Run's 503), timeout, transport errors and other 5xx, and start only while the
+// caller's deadline (by default the task's: DISPATCH_DEADLINE_SEC from the call) still fits a whole attempt. The
+// service's own "upscale model unavailable" 503 is no busy answer: it is retried once, after 60 s. A bad image (400,
+// 413) and an auth or route refusal (401, 403, 404) are never retried. Not wired into the render yet (spec 18 H3 calls
+// it from the durable enlargement task).
+import { Agent, fetch as undiciFetch } from "undici";
 import { TRACE_HEADERS, type MattingTrace } from "./matte";
 import { bearerFor, googleIdTokenFor, type IdTokenFor } from "../id-token";
+import { DISPATCH_DEADLINE_SEC } from "../tasks";
 
-/** The service's request timeout when UPSCALE_TIMEOUT_S is unset or invalid: the most shape.sh allows. */
-export const DEFAULT_UPSCALE_TIMEOUT_S = 840;
 /** The client waits this much longer than the service may run, so the service's own timeout always comes first. */
 export const ENLARGE_CLIENT_MARGIN_MS = 30_000;
+/** What the task keeps after the call has given up: writing its outcome before the dispatch deadline. */
+export const ENLARGE_TASK_MARGIN_MS = 30_000;
+/**
+ * The service's request timeout when UPSCALE_TIMEOUT_S is unset or invalid, and the most it may be: the task's
+ * dispatch deadline minus both margins (900 - 30 - 30 = 840 s). infra/lib/shape.sh UPSCALE_TIMEOUT_MAX_S must equal it
+ * (a test reads both).
+ */
+export const DEFAULT_UPSCALE_TIMEOUT_S = DISPATCH_DEADLINE_SEC - (ENLARGE_CLIENT_MARGIN_MS + ENLARGE_TASK_MARGIN_MS) / 1000;
+/** The wait before the one retry after the service said its upscale model is unavailable (it may still be loading). */
+export const ENLARGE_UNAVAILABLE_RETRY_MS = 60_000;
 /** Spec 18 3.2.3 backoff between attempts: 10 s, 20 s, 40 s, then 60 s, each with up to 50% jitter off. */
 export const ENLARGE_BACKOFF_BASE_MS = 10_000;
 export const ENLARGE_BACKOFF_MAX_MS = 60_000;
@@ -30,7 +42,7 @@ export function enlargeTimeoutMs(env: NodeJS.ProcessEnv = process.env): number {
   return upscaleServerTimeoutS(env) * 1000 + ENLARGE_CLIENT_MARGIN_MS;
 }
 
-export type EnlargeErrorKind = "busy" | "timeout" | "bad_input" | "rejected" | "server";
+export type EnlargeErrorKind = "busy" | "unavailable" | "timeout" | "bad_input" | "rejected" | "server";
 
 /** Every failure of enlargeViaService. `retryable` says whether a later attempt (now or in a retried task) may pass. */
 export class EnlargeError extends Error {
@@ -39,9 +51,17 @@ export class EnlargeError extends Error {
     this.name = new.target.name;
   }
 }
-/** 429 or 503: every instance is working, or the service is starting. */
+/** 429 or Cloud Run's 503: every instance is working, or the service is starting. */
 export class EnlargeBusyError extends EnlargeError {
   constructor(status: number, attempts: number) { super(`The enlargement service is busy (${status}).`, "busy", status, true, attempts); }
+}
+/**
+ * The service's own 503 "upscale model <id> unavailable" (services/matting/app.py): the model is not served there or
+ * failed to load. Not busy: retried once within a call after ENLARGE_UNAVAILABLE_RETRY_MS, and never by a later task
+ * (a deploy problem, like a refusal).
+ */
+export class EnlargeModelUnavailableError extends EnlargeError {
+  constructor(attempts: number) { super("The enlargement service cannot serve this upscale model (503).", "unavailable", 503, false, attempts); }
 }
 /** No answer within the attempt's timeout. */
 export class EnlargeTimeoutError extends EnlargeError {
@@ -70,9 +90,13 @@ export interface EnlargeRequest {
   timeoutMs?: number;
   /** Aborts the call and every retry (the task is ending); the abort reason is thrown as it is. */
   signal?: AbortSignal;
-  /** Epoch ms after which no attempt may still be running; an attempt starts only if it fits whole. Default: none. */
+  /**
+   * Epoch ms after which no attempt may still be running; an attempt starts only if it fits whole. Default: the task's
+   * dispatch deadline counted from this call, now + DISPATCH_DEADLINE_SEC - ENLARGE_CLIENT_MARGIN_MS; a caller that
+   * knows when its task started passes its own.
+   */
   deadlineAt?: number;
-  /** Attempts at most (default ENLARGE_MAX_ATTEMPTS). */
+  /** Attempts at most (default ENLARGE_MAX_ATTEMPTS), a secondary cap after the deadline. */
   maxAttempts?: number;
   trace?: MattingTrace;
 }
@@ -109,6 +133,37 @@ const defaultSleep = (ms: number, signal?: AbortSignal): Promise<void> => new Pr
 });
 
 let sharedIdToken: IdTokenFor | null = null;
+/**
+ * The default fetch's dispatcher: undici's own headers and body timeouts (300 s each by default) are off, so an
+ * attempt's only limit is its AbortSignal timeout (the service's timeout + 30 s, up to 870 s). Without it fetch gives up
+ * on a slow enlargement at 300 s while the service keeps working on it. As safe-url.ts pinnedFetch does.
+ */
+let enlargeAgent: Agent | undefined;
+const defaultFetch: typeof fetch = (input, init) => {
+  enlargeAgent ??= new Agent({ headersTimeout: 0, bodyTimeout: 0 });
+  return undiciFetch(input as string, { ...(init as object), dispatcher: enlargeAgent }) as unknown as Promise<Response>;
+};
+
+/** `work`, or the signal's reason as soon as it aborts: minting an ID token never outlives the attempt (as matte.ts). */
+async function raceAbort<T>(work: Promise<T>, signal: AbortSignal): Promise<T> {
+  signal.throwIfAborted();
+  let onAbort!: () => void;
+  const aborted = new Promise<never>((_, reject) => {
+    onAbort = () => reject(signal.reason);
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+  try { return await Promise.race([work, aborted]); } finally { signal.removeEventListener("abort", onAbort); }
+}
+
+/** The ID token could not be minted (the metadata server); a retryable server error. */
+class TokenMintError extends Error {}
+
+/** True for the service's own "upscale model <id> unavailable" 503 (app.py upscale_error), not Cloud Run's busy 503. */
+async function isModelUnavailable(response: Response): Promise<boolean> {
+  try {
+    return /upscale model \S+ unavailable/.test(await response.text());
+  } catch { return false; }
+}
 
 /** One attempt: the answer, or a typed EnlargeError. The caller's abort is rethrown as its reason. */
 async function attemptOnce(req: EnlargeRequest, timeoutMs: number, attempts: number, deps: Required<Pick<EnlargeDeps, "fetch" | "idToken" | "now">>): Promise<EnlargeResult> {
@@ -121,10 +176,11 @@ async function attemptOnce(req: EnlargeRequest, timeoutMs: number, attempts: num
     const headers = new Headers({ "content-type": "image/jpeg" });
     if (req.trace?.batchId) headers.set(TRACE_HEADERS.batchId, req.trace.batchId);
     if (req.trace?.productId) headers.set(TRACE_HEADERS.productId, req.trace.productId);
-    const bearer = await bearerFor(base, deps.idToken);
-    signal.throwIfAborted();
+    const minted = bearerFor(base, deps.idToken).catch((error: unknown) => { throw new TokenMintError(error instanceof Error ? error.name : "error"); });
+    const bearer = await raceAbort(minted, signal);
     if (bearer) headers.set("Authorization", bearer);
     const response = await deps.fetch(`${base}/upscale?model=${encodeURIComponent(req.model)}&scale=2`, { method: "POST", body: new Uint8Array(req.jpeg), headers, signal });
+    if (response.status === 503 && await isModelUnavailable(response)) throw new EnlargeModelUnavailableError(attempts);
     if (response.status === 429 || response.status === 503) throw new EnlargeBusyError(response.status, attempts);
     if (response.status === 400 || response.status === 413) throw new EnlargeBadInputError(response.status, attempts);
     if (response.status >= 500) throw new EnlargeServerError(`HTTP ${response.status}`, response.status, attempts);
@@ -137,6 +193,7 @@ async function attemptOnce(req: EnlargeRequest, timeoutMs: number, attempts: num
     if (callerAborted()) throw req.signal!.reason;
     if (error instanceof EnlargeError) throw error;
     if (timeout.aborted) throw new EnlargeTimeoutError(timeoutMs, attempts);
+    if (error instanceof TokenMintError) throw new EnlargeServerError("no ID token", null, attempts);
     throw new EnlargeServerError(error instanceof Error ? error.name : "transport error", null, attempts);
   }
 }
@@ -149,21 +206,32 @@ export async function enlargeViaService(req: EnlargeRequest, deps: EnlargeDeps =
   const now = deps.now ?? Date.now;
   const sleep = deps.sleep ?? defaultSleep;
   const random = deps.random ?? Math.random;
-  const io = { fetch: deps.fetch ?? fetch, idToken: deps.idToken ?? (sharedIdToken ??= googleIdTokenFor()), now };
+  const io = { fetch: deps.fetch ?? defaultFetch, idToken: deps.idToken ?? (sharedIdToken ??= googleIdTokenFor()), now };
   const timeoutMs = req.timeoutMs ?? enlargeTimeoutMs();
   const maxAttempts = Math.max(1, req.maxAttempts ?? ENLARGE_MAX_ATTEMPTS);
-  if (req.deadlineAt !== undefined && now() + timeoutMs > req.deadlineAt) {
+  const deadlineAt = req.deadlineAt ?? now() + DISPATCH_DEADLINE_SEC * 1000 - ENLARGE_CLIENT_MARGIN_MS;
+  if (now() + timeoutMs > deadlineAt) {
     throw new EnlargeTimeoutError(timeoutMs, 0);
   }
+  let unavailableRetried = false;
   for (let attempt = 1; ; attempt++) {
     try {
       return await attemptOnce(req, timeoutMs, attempt, io);
     } catch (error) {
-      if (!(error instanceof EnlargeError) || !error.retryable || attempt >= maxAttempts) throw error;
-      const wait = enlargeBackoffMs(attempt, random());
+      if (!(error instanceof EnlargeError) || attempt >= maxAttempts) throw error;
+      let wait: number;
+      if (error instanceof EnlargeModelUnavailableError) {
+        // Once, after 60 s (a model still loading); a second refusal stands.
+        if (unavailableRetried) throw error;
+        unavailableRetried = true;
+        wait = ENLARGE_UNAVAILABLE_RETRY_MS;
+      } else {
+        if (!error.retryable) throw error;
+        wait = enlargeBackoffMs(attempt, random());
+      }
       // Never start an attempt that could not run to its full timeout: an abandoned call keeps running on the
       // service and holds its slot (2026-10-29).
-      if (req.deadlineAt !== undefined && now() + wait + timeoutMs > req.deadlineAt) throw error;
+      if (now() + wait + timeoutMs > deadlineAt) throw error;
       await sleep(wait, req.signal);
     }
   }

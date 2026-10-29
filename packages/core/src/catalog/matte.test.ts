@@ -40,6 +40,21 @@ beforeEach(() => { vi.spyOn(console, "info").mockImplementation(() => undefined)
 afterEach(async () => { vi.restoreAllMocks(); await Promise.all(servers.splice(0).map((s) => new Promise<void>((r) => s.close(() => r())))); });
 
 describe("matting client", () => {
+  it("spec 18 H2: a slow catalog-upscale (UPSCALE_URL naming no matting service) never delays a cut-out", async () => {
+    const cpu = await service("cpu"), gpu = await service("gpu");
+    // A dedicated upscale service whose /health never answers.
+    let reached = 0;
+    const slow = createServer(() => { reached++; });
+    await new Promise<void>((resolve) => slow.listen(0, "127.0.0.1", resolve)); servers.push(slow);
+    const upscaleUrl = `http://127.0.0.1:${(slow.address() as { port: number }).port}`;
+    const client = new MattingClient({ services: [cpu, gpu], upscaleUrl, timeoutMs: 60_000 });
+    const started = Date.now();
+    expect((await client.matte(prepared(), "general")).target).toBe("gpu");
+    expect(Date.now() - started).toBeLessThan(10_000);
+    expect(reached).toBe(0);
+    expect(client.upscaleTarget).toBe("cpu");
+    slow.closeAllConnections();
+  });
   it("prefers GPU, sizes its PNG by health and upscales the mask to source dimensions", async () => {
     const cpu = await service("cpu", ["general", "cpu-only"]), gpu = await service("gpu");
     const client = new MattingClient({ services: [cpu, gpu] });

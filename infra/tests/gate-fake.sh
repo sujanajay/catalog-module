@@ -5,20 +5,23 @@
 #   LIVE_FP=<hash> the live DEPLOY_ARGS_SHA (other flags at the last deploy; default: the current flags);
 #   LIVE_DIGEST=<digest> the live revision's image digest (default $DIGEST, the image being deployed);
 #   SHIFT_ERROR=1 update-traffic --to-revisions fails; ROLLBACK_TAGGED=1 $NEW is live and $OLD carries the previous tag;
-#   WARN_ON_STDERR=1 describe also prints a warning on stderr (which must never reach the parsed JSON).
+#   WARN_ON_STDERR=1 describe also prints a warning on stderr (which must never reach the parsed JSON);
+#   MEASURE_LIVE=1 $OLD also carries the tag measure-4c-4t-1r (a spec 18 ladder rung).
 # After "run deploy" ($STATE/deployed) the description lists the candidate tag ($CAND_TAG) on the new revision.
 gate_gcloud() {
   printf '%s\n' "$*" >> "$LOG"
+  local measure=""
+  if [ "${MEASURE_LIVE:-0}" = 1 ]; then measure=',{"revisionName":"'"$OLD"'","percent":0,"tag":"measure-4c-4t-1r","url":"https://measure-4c-4t-1r---test-svc-abc-el.a.run.app"}'; fi
   case "$1 $2 $3" in
     "run services describe")
       if [ "${WARN_ON_STDERR:-0}" = 1 ]; then echo "WARNING: an update to the Google Cloud CLI is available" >&2; fi
       if [ "${DESCRIBE_ERROR:-0}" = 1 ]; then echo "ERROR: PERMISSION_DENIED mocked" >&2; return 1; fi
       if [ -f "$STATE/deployed" ]; then
-        printf '%s\r\n' '{"status":{"url":"'"$URL"'","traffic":[{"revisionName":"'"$OLD"'","percent":100},{"revisionName":"'"$NEW"'","percent":0,"tag":"'"${CAND_TAG:-candidate}"'","url":"'"$TAG_URL"'"}]}}'
+        printf '%s\r\n' '{"status":{"url":"'"$URL"'","traffic":[{"revisionName":"'"$OLD"'","percent":100},{"revisionName":"'"$NEW"'","percent":0,"tag":"'"${CAND_TAG:-candidate}"'","url":"'"$TAG_URL"'"}'"$measure"']}}'
       elif [ "${ROLLBACK_TAGGED:-0}" = 1 ]; then
-        printf '%s\r\n' '{"status":{"url":"'"$URL"'","traffic":[{"revisionName":"'"$NEW"'","percent":100,"tag":"candidate"},{"revisionName":"'"$OLD"'","percent":0,"tag":"previous"}]}}'
+        printf '%s\r\n' '{"status":{"url":"'"$URL"'","traffic":[{"revisionName":"'"$NEW"'","percent":100,"tag":"candidate"},{"revisionName":"'"$OLD"'","percent":0,"tag":"previous"}'"$measure"']}}'
       elif [ "${EXISTS:-1}" = 1 ]; then
-        printf '%s\r\n' '{"status":{"url":"'"$URL"'","traffic":[{"revisionName":"'"$OLD"'","percent":100}]}}'
+        printf '%s\r\n' '{"status":{"url":"'"$URL"'","traffic":[{"revisionName":"'"$OLD"'","percent":100}'"$measure"']}}'
       else
         echo "ERROR: (gcloud.run.services.describe) Cannot find service [$4]" >&2; return 1
       fi ;;
@@ -31,7 +34,7 @@ gate_gcloud() {
       printf '%s\r\n' '{"spec":{"containers":[{"env":'"$env"'}]},"status":{"imageDigest":"asia-south1-docker.pkg.dev/p/apps/test@'"${LIVE_DIGEST:-$DIGEST}"'"}}' ;;
     "run services update-traffic")
       if [ "${SHIFT_ERROR:-0}" = 1 ] && [[ "$*" == *--to-revisions* ]]; then echo "ERROR: shift mocked" >&2; return 1; fi ;;
-    "run deploy test-svc"|"run deploy catalog-matting"|"run deploy catalog-matting-gpu")
+    "run deploy test-svc"|"run deploy catalog-matting"|"run deploy catalog-matting-gpu"|"run deploy catalog-upscale")
       if [ -n "${DEPLOY_ERROR:-}" ]; then echo "$DEPLOY_ERROR" >&2; return 1; fi
       touch "$STATE/deployed" ;;
     *) ;;

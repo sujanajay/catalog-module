@@ -17,8 +17,9 @@ import { and, eq, sql } from "drizzle-orm";
 import { catalogBatches, catalogChunks, catalogProducts, catalogSourceImages } from "@catalog/core/db/schema";
 import { batchPrefix, enlargedPath } from "@catalog/core/catalog/naming";
 import { UnsupportedSourceError, type Prepared } from "@catalog/core/catalog/render";
-import { isCpuUpscalerId, primeSourceX2, UPSCALE_FACTOR, upscaleUpload } from "@catalog/core/catalog/upscale";
-import { EnlargeError, enlargeTimeoutMs, enlargeViaService, type EnlargeResult } from "@catalog/core/catalog/enlarge";
+import { gpuUrlsFromEnv, isCpuUpscalerId, primeSourceX2, UPSCALE_FACTOR, upscaleUpload } from "@catalog/core/catalog/upscale";
+import { ENLARGE_CLIENT_MARGIN_MS, EnlargeError, enlargeTimeoutMs, enlargeViaService, type EnlargeResult } from "@catalog/core/catalog/enlarge";
+import { DISPATCH_DEADLINE_SEC } from "@catalog/core/tasks";
 import { ENLARGE_TASK_MAX_ATTEMPTS, ENLARGING_TASK, lockProductChunks, photoEnlargementState, unparkSettledChunks } from "@catalog/core/catalog/pipeline/enlargement";
 import { dispatchChunks } from "@catalog/core/catalog/pipeline/dispatch";
 import { recordCostEvents, type CostEventInput } from "@catalog/core/cost-events";
@@ -27,8 +28,11 @@ import type { MattingTrace } from "@catalog/core/catalog/matte";
 import type { HandleOptions, HandleResult } from "../server";
 import { refreshBatchProgress, type CatalogDeps } from "./deps";
 
-/** The service call the handler makes: one attempt, the x2 JPEG as the service answered it. */
-export type EnlargeCall = (jpeg: Buffer, trace: MattingTrace) => Promise<EnlargeResult>;
+/**
+ * The service call the handler makes: one attempt, the x2 JPEG as the service answered it. `deadlineAt` (epoch ms) is
+ * the delivery's own deadline: the task's start plus DISPATCH_DEADLINE_SEC, less the client margin.
+ */
+export type EnlargeCall = (jpeg: Buffer, trace: MattingTrace, opts?: { deadlineAt?: number }) => Promise<EnlargeResult>;
 
 /** The largest photo (width x height) the upscale service takes (`UPSCALE_MAX_PIXELS`, its default 24,000,000). */
 export const DEFAULT_UPSCALE_MAX_PIXELS = 24_000_000;
@@ -42,11 +46,10 @@ export function upscaleMaxPixels(env: NodeJS.ProcessEnv = process.env): number {
  * first GPU matting service, as the matting client picks it. One attempt per task delivery: the queue retries.
  */
 export function workerEnlargeCall(model: string, env: NodeJS.ProcessEnv = process.env): EnlargeCall {
-  const gpu = (env.MATTING_GPU_URLS?.trim() ? env.MATTING_GPU_URLS.split(",") : [env.MATTING_GPU_URL ?? ""]).map((u) => u.trim()).find(Boolean) ?? "";
-  const url = env.UPSCALE_URL?.trim() || gpu;
-  return (jpeg, trace) => {
+  const url = env.UPSCALE_URL?.trim() || gpuUrlsFromEnv(env)[0] || "";
+  return (jpeg, trace, opts = {}) => {
     if (!url) throw new EnlargeError("No upscale service is configured (UPSCALE_URL).", "rejected", null, false, 0);
-    return enlargeViaService({ url, jpeg, model, timeoutMs: enlargeTimeoutMs(env), maxAttempts: 1, trace });
+    return enlargeViaService({ url, jpeg, model, timeoutMs: enlargeTimeoutMs(env), maxAttempts: 1, trace, ...(opts.deadlineAt ? { deadlineAt: opts.deadlineAt } : {}) });
   };
 }
 
@@ -128,7 +131,10 @@ export async function handleEnlargeTask(deps: CatalogDeps, body: Record<string, 
     if (p.width * p.height > limit) throw new TerminalEnlargeFailure(`The photo has ${p.width * p.height} pixels, above the ${limit} the upscale service takes.`);
     const t0 = +deps.now();
     let result: EnlargeResult;
-    try { result = await call(await upscaleUpload(p.rgb, p.width, p.height), { batchId, productId }); }
+    // The model-unavailable 503 is not terminal here: it counts an attempt and the queue retries with its back-off,
+    // so a model still loading passes and a deploy problem holds the photo after ENLARGE_TASK_MAX_ATTEMPTS.
+    const deadlineAt = started + DISPATCH_DEADLINE_SEC * 1000 - ENLARGE_CLIENT_MARGIN_MS;
+    try { result = await call(await upscaleUpload(p.rgb, p.width, p.height), { batchId, productId }, { deadlineAt }); }
     catch (error) {
       if (error instanceof EnlargeError) {
         const ms = +deps.now() - t0;

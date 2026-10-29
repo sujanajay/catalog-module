@@ -13,6 +13,10 @@
 # SKIP when the live revision already runs the same image digest with the same env, unless GATE_FORCE=1 (an operator
 # override; deploy.sh re-runs the worker's smoke after a matting change through the worker's env). The env carries DEPLOY_ARGS_SHA,
 # a hash of every other deploy flag, so a flag-only change (concurrency, CPU) is not skipped.
+# Spec 18 measure rungs (tag measure-*, UPSCALE_MEASURE=1): rung 1 of a brand-new catalog-upscale serves the service
+# URL, because Cloud Run cannot create a service with --no-traffic. A live revision that carries a measure-* tag is
+# therefore never a SKIP match (the first real deploy of that shape still runs its own probe), never tagged "previous"
+# when traffic moves on, and never the default target of --rollback (name it to return to it).
 #
 # After a call: GATE_URL (the service URL), GATE_TAG_URL (the candidate URL, or the service URL on SKIP or when
 # reused), GATE_REVISION (the revision the gate deployed or found live), GATE_PREVIOUS (the revision that served
@@ -41,6 +45,13 @@ gate_json() {
 # The revision serving the most traffic (the one a rollback returns to), from a service description.
 gate_previous_revision() {
   gate_json '(j?.status?.traffic ?? []).filter((t) => t.percent > 0).sort((x, y) => y.percent - x.percent)[0]?.revisionName'
+}
+
+# gate_measure_tagged <revision> < service description: 0 when that revision carries a measure-* tag (a spec 18 ladder
+# rung, deployed only to be measured).
+gate_measure_tagged() {
+  [ -n "$1" ] || return 1
+  [ "$(gate_json '(j?.status?.traffic ?? []).some((t) => t.revisionName === a[0] && String(t.tag ?? "").startsWith("measure-")) ? 1 : 0' "$1")" = 1 ]
 }
 
 # The exact rollback line the spec names, plus where to run it.
@@ -141,7 +152,12 @@ deploy_service() {
 
   fingerprint=$(gate_fingerprint)
   env="$SVC_ENV,DEPLOY_ARGS_SHA=$fingerprint"
-  if [ -n "$previous" ] && [ "${GATE_FORCE:-0}" != 1 ] && gate_matches_live "$previous" "$env"; then
+  local previous_measure=0
+  if gate_measure_tagged "$previous" <<<"$service_json"; then
+    previous_measure=1
+    echo "==> $SVC_NAME: the live revision $previous is a measure rung; deploying and probing, never SKIP"
+  fi
+  if [ -n "$previous" ] && [ "$previous_measure" = 0 ] && [ "${GATE_FORCE:-0}" != 1 ] && gate_matches_live "$previous" "$env"; then
     GATE_URL=$(gate_json 'j?.status?.url' <<<"$service_json")
     GATE_TAG_URL=$GATE_URL; GATE_REVISION=$previous
     echo "==> $SVC_NAME: SKIP (live revision $previous already runs this image and env)"
@@ -197,8 +213,11 @@ deploy_service() {
     echo "==> $SVC_NAME: candidate ($GATE_REVISION) passed; traffic not shifted"
     return 0
   fi
-  # The revision serving now is what deploy.sh --rollback returns to, never a candidate that failed its probe.
-  if [ -n "$previous" ] && [ "$previous" != "$GATE_REVISION" ]; then
+  # The revision serving now is what deploy.sh --rollback returns to, never a candidate that failed its probe, and
+  # never a measure rung (it served only because the service was new).
+  if [ "$previous_measure" = 1 ]; then
+    echo "==> $SVC_NAME: $previous is a measure rung; not tagged $PREVIOUS_TAG"
+  elif [ -n "$previous" ] && [ "$previous" != "$GATE_REVISION" ]; then
     gate_gcloud run services update-traffic "$SVC_NAME" --region="$SVC_REGION" --update-tags="$PREVIOUS_TAG=$previous" --quiet >/dev/null || {
       gate_fail "could not tag $previous as $PREVIOUS_TAG; traffic was not changed"
       return 1
@@ -230,6 +249,11 @@ rollback_service() {
   live=$(gate_previous_revision <<<"$service_json")
   if [ -z "$target" ]; then
     target=$(gate_json '(j?.status?.traffic ?? []).find((t) => t.tag === a[0])?.revisionName' "$PREVIOUS_TAG" <<<"$service_json")
+    # A measure rung (spec 18) never served real calls; it is a target only when named.
+    if gate_measure_tagged "$target" <<<"$service_json"; then
+      echo "ERROR: $name: $target is a measure rung (measure-* tag), not a revision that served the worker; name it to return to it: bash infra/deploy.sh --rollback $name $target" >&2
+      return 1
+    fi
   fi
   if [ -z "$target" ] || [ "$target" = "$live" ]; then
     echo "ERROR: $name: no earlier revision tagged $PREVIOUS_TAG to roll back to (live: ${live:-none}); name one: bash infra/deploy.sh --rollback $name <revision>" >&2

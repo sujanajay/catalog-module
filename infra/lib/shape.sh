@@ -54,12 +54,16 @@ SHAPE_DEFAULTS=(
   # The cut-out models the GPU service serves (its MATTE_MODELS; unset there means all four).
   GPU_MATTE_MODELS=birefnet-general,birefnet-general-lite,birefnet-hrsod,bria-rmbg
   # Which service upscales: gpu (spec 11), cpu (spec 16: the CPU cut-out service catalog-matting) or dedicated
-  # (spec 18: catalog-upscale, sized by the UPSCALE_* rows below). cpu is what runs today; dedicated is refused until
+  # (spec 18: catalog-upscale, sized by the UPSCALE_* rows below). cpu is what runs today; the enlarge stage calls
+  # either through its own task (spec 18 H3, ENLARGE_CLIENT_WIRED=1 in shape_defaults), and dedicated is refused until
   # the measured table below has rows for its shape.
   UPSCALE_SERVICE=cpu
   # Spec 18: the dedicated CPU enlargement service catalog-upscale (asia-south1, the catalog-matting image, only the
   # upscaler loaded). Deployed only with UPSCALE_SERVICE=dedicated or UPSCALE_MEASURE=1. UPSCALE_THREADS is its ONNX
   # Runtime intra-op thread count; UPSCALE_TIMEOUT_S its Cloud Run request timeout (the client waits 30 s longer).
+  # The asia-south1 CPU quota (190 of 200) holds today's 171 vCPU plus at most 16 more: the ladder runs with
+  # UPSCALE_MAX_INSTANCES at most 4 at 4 vCPU or at most 2 at 8 vCPU (16 x 4 = 64 gives 235 and is refused), and the
+  # final dedicated shape lowers MATTING_CPU_MAX_INSTANCES from 16 to 4 (123 + 16 x 4 = 187).
   UPSCALE_CPU_VCPU=4
   UPSCALE_MEMORY=16Gi
   UPSCALE_CONCURRENCY=1
@@ -158,10 +162,16 @@ shape_defaults() {
   GPU_MODEL_PEAK_MIB_SWINIR_X2=${GPU_MODEL_PEAK_MIB_SWINIR_X2-}
   # What one L4 offers (24 GB, about 22.5 GB usable).
   GPU_USABLE_MIB=22528
-  # Spec 18 H1: UPSCALE_MEASURE=1 deploys catalog-upscale as a no-traffic candidate of the UPSCALE_* shape (tag
+  # Spec 18 H1: UPSCALE_MEASURE=1 deploys only catalog-upscale, as a candidate of the UPSCALE_* shape (tag
   # measure-<cpu>c-<threads>t-<concurrency>r) for infra/check-matting.sh --probe-upscale, without asking for a measured
-  # row; the worker keeps its upscaler (UPSCALE_SERVICE cpu or gpu). Not a shape row: a mode for one run.
+  # row. No other service, image, migration or worker env changes, so a measure rung never needs a new worker image.
+  # Rung 1 of a brand-new catalog-upscale serves the service URL (Cloud Run cannot create a service with --no-traffic);
+  # later rungs are no-traffic candidates. Not a shape row: a mode for one run.
   UPSCALE_MEASURE=${UPSCALE_MEASURE:-0}
+  # Spec 18 H3: 1, the enlarge stage calls the upscale service through its own task (apps/worker/src/catalog/enlarge.ts,
+  # packages/core/src/catalog/enlarge.ts) and the render reads the stored x2 only. A fact of the code, not a shape
+  # choice, so env cannot set it.
+  ENLARGE_CLIENT_WIRED=1
   # The photo sizes the probe measures (width x height); the largest by pixels sets the timeout check.
   UPSCALE_SIZES=${UPSCALE_SIZES-800x1200,1600x1600}
   # Spec 18 H1: measured p95 in whole seconds (rounded up) of one POST /upscale (swinir-x2) per photo size, one row
@@ -318,7 +328,7 @@ upscale_smallest_size() {
 # pairs always; when it upscales for the worker (dedicated), a measured p95 for every probe size at exactly this
 # (vCPU, threads, concurrency) and a request timeout of at least twice the largest size's p95.
 upscale_check() {
-  local gib size p95 missing="" largest worst
+  local gib size p95 missing="" invalid=0 largest worst
   case "$UPSCALE_CPU_VCPU" in 1|2|4|6|8) ;; *) shape_fail "UPSCALE_CPU_VCPU must be 1, 2, 4, 6 or 8 (Cloud Run), got $UPSCALE_CPU_VCPU"; return 0 ;; esac
   if [[ "$UPSCALE_MEMORY" =~ ^([1-9][0-9]*)Gi$ ]]; then
     gib=${BASH_REMATCH[1]}
@@ -346,14 +356,24 @@ upscale_check() {
     return 0
   fi
   [ "$UPSCALE_SERVICE" = dedicated ] || return 0
+  if [ "$ENLARGE_CLIENT_WIRED" != 1 ]; then
+    shape_fail "UPSCALE_SERVICE=dedicated waits for spec 18 H3: the render does not call catalog-upscale through the enlarge stage yet (ENLARGE_CLIENT_WIRED=0 in infra/lib/shape.sh), and the matting client refuses a dedicated UPSCALE_URL, so every enlargement would fall back to Lanczos; keep UPSCALE_SERVICE=cpu"
+    return 0
+  fi
   # Spec 18 3.3.1: the enlarge lanes never send more at once than catalog-upscale serves at once.
   if [ $((ENLARGE_MAX_DISPATCHES + ENLARGE_BULK_MAX_DISPATCHES)) -gt $((UPSCALE_MAX_INSTANCES * UPSCALE_CONCURRENCY)) ]; then
     shape_fail "enlarge slots $ENLARGE_MAX_DISPATCHES + $ENLARGE_BULK_MAX_DISPATCHES exceed what catalog-upscale serves at once ($UPSCALE_MAX_INSTANCES x $UPSCALE_CONCURRENCY); lower ENLARGE_MAX_DISPATCHES or ENLARGE_BULK_MAX_DISPATCHES"
   fi
   for size in ${UPSCALE_SIZES//,/ }; do
     p95=$(upscale_p95 "$size")
-    [[ "$p95" =~ ^[1-9][0-9]*$ ]] || missing+=" $size"
+    if [ -z "$p95" ]; then
+      missing+=" $size"
+    elif ! [[ "$p95" =~ ^[1-9][0-9]*$ ]]; then
+      shape_fail "UPSCALE_P95_S_${UPSCALE_CPU_VCPU}C_${UPSCALE_THREADS}T_${UPSCALE_CONCURRENCY}CONC_$size=$p95 must be a whole number of seconds (rounded up), such as 331"
+      invalid=1
+    fi
   done
+  [ "$invalid" = 0 ] || return 0
   if [ -n "$missing" ]; then
     shape_fail "measure first: run infra/check-matting.sh --probe-upscale (no measured p95 for UPSCALE_CPU_VCPU=$UPSCALE_CPU_VCPU UPSCALE_THREADS=$UPSCALE_THREADS UPSCALE_CONCURRENCY=$UPSCALE_CONCURRENCY at$missing; UPSCALE_P95_S_* in infra/lib/shape.sh)"
     return 0

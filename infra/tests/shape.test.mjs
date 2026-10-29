@@ -36,11 +36,16 @@ const pick = (prefix) => {
 const prices = [pick('usd() {'), pick('if [ -z "${COMPUTE_USD_PER_VCPU_SECOND:-}"'), pick('COMPUTE_USD_PER_VCPU_SECOND=${COMPUTE_USD_PER_VCPU_SECOND:-'),
   pick('if [ -z "${PRICE_MATTE_GPU_USD_PER_SECOND:-}"'), pick('PRICE_MATTE_GPU_USD_PER_SECOND=${PRICE_MATTE_GPU_USD_PER_SECOND:-')].join('\n');
 
+// ENLARGE_CLIENT_WIRED is a fact of the code that env cannot set (shape_defaults assigns it, 1 since spec 18 H3); a
+// case may still set it after shape_defaults through `wired`.
 function run(env, live = '400') {
-  const clean = Object.fromEntries(Object.entries(process.env).filter(([k]) => !NAMES.includes(k) && k !== 'CATALOG_PREVIEW' && !k.startsWith('GPU_MODEL_PEAK_MIB_') && !k.startsWith('UPSCALE_') && !k.startsWith('COMPUTE_USD') && !k.startsWith('PRICE_MATTE')));
+  const {WIRED: wired, ...rest} = env;
+  env = rest;
+  const clean = Object.fromEntries(Object.entries(process.env).filter(([k]) => !NAMES.includes(k) && k !== 'CATALOG_PREVIEW' && !k.startsWith('GPU_MODEL_PEAK_MIB_') && !k.startsWith('UPSCALE_') && !k.startsWith('COMPUTE_USD') && !k.startsWith('PRICE_MATTE') && k !== 'ENLARGE_CLIENT_WIRED'));
   const script = `set -euo pipefail
 source infra/lib/shape.sh
 shape_defaults
+${wired ? 'ENLARGE_CLIENT_WIRED=1' : ''}
 status=0
 shape_check "${live}" || status=$?
 ${prices}
@@ -101,7 +106,7 @@ const RECORDED_LIVE = {
 };
 // The shape before F2 (the rollback line in shape.sh): fits today's old db-f1-micro (25 connections).
 // Spec 18 test fixture, not a measurement: catalog-upscale at 4 vCPU / 4 threads / concurrency 1 with p95 rows.
-const DEDICATED = {UPSCALE_SERVICE: 'dedicated', UPSCALE_MEASURED_ON: '2026-10-30', UPSCALE_P95_S_4C_4T_1CONC_800x1200: '130', UPSCALE_P95_S_4C_4T_1CONC_1600x1600: '330'};
+const DEDICATED = {WIRED: '1', UPSCALE_SERVICE: 'dedicated', UPSCALE_MEASURED_ON: '2026-10-30', UPSCALE_P95_S_4C_4T_1CONC_800x1200: '130', UPSCALE_P95_S_4C_4T_1CONC_1600x1600: '330'};
 const PRE_F2 = {...NO_ENLARGE, WORKER_MAX_INSTANCES: '4', WORKER_CPU: '2', WORKER_MEMORY: '2Gi', TASKS_MAX_DISPATCHES: '6', BULK_MAX_DISPATCHES: '0',
   INGEST_MAX_DISPATCHES: '2', DB_MAX_CONNECTIONS: '25', MATTING_CPU_MAX_INSTANCES: '20', UPSCALE_SERVICE: 'gpu',
   CATALOG_PHOTO_CONCURRENCY: '1', CATALOG_BULK_WINDOW: '8', LLM_INFLIGHT_PER_INSTANCE: ''};
@@ -172,7 +177,13 @@ const cases = [
   {label: 'knob values', env: {INFERENCE_LOCK_SCOPE: 'model', CUDNN_CONV_ALGO_SEARCH: 'FAST', CUDNN_CONV_USE_MAX_WORKSPACE: '2'}, expect: {STATUS: '1'},
     error: /INFERENCE_LOCK_SCOPE must be global or session[\s\S]*CUDNN_CONV_ALGO_SEARCH must be[\s\S]*CUDNN_CONV_USE_MAX_WORKSPACE must be/},
   // Spec 18 H1: catalog-upscale is refused until its shape is measured, and sized by the measurements.
-  {label: 'dedicated upscale with nothing measured is refused: measure first', env: {UPSCALE_SERVICE: 'dedicated', MATTING_CPU_MAX_INSTANCES: '4'}, expect: {STATUS: '1'},
+  {label: 'spec 18 H3: the enlarge stage is wired in shape_defaults, so a measured dedicated shape is not refused for it', env: {...DEDICATED, WIRED: '', MATTING_CPU_MAX_INSTANCES: '4'},
+    expect: {STATUS: '0', CPU_TOTAL: '187', UPSCALE_VCPU_TOTAL: '64'}},
+  {label: 'env cannot unset the wired enlarge stage', env: {...DEDICATED, WIRED: '', ENLARGE_CLIENT_WIRED: '0', MATTING_CPU_MAX_INSTANCES: '4'},
+    expect: {STATUS: '0', CPU_TOTAL: '187'}},
+  {label: 'a measured p95 that is not a whole number names its row', env: {...DEDICATED, MATTING_CPU_MAX_INSTANCES: '4', UPSCALE_P95_S_4C_4T_1CONC_1600x1600: '329.4'}, expect: {STATUS: '1'},
+    error: /^ERROR: UPSCALE_P95_S_4C_4T_1CONC_1600x1600=329.4 must be a whole number of seconds \(rounded up\), such as 331\n$/},
+  {label: 'dedicated upscale with nothing measured is refused: measure first', env: {WIRED: '1', UPSCALE_SERVICE: 'dedicated', MATTING_CPU_MAX_INSTANCES: '4'}, expect: {STATUS: '1'},
     error: /^ERROR: measure first: run infra\/check-matting.sh --probe-upscale \(no measured p95 for UPSCALE_CPU_VCPU=4 UPSCALE_THREADS=4 UPSCALE_CONCURRENCY=1 at 800x1200 1600x1600; UPSCALE_P95_S_\* in infra\/lib\/shape.sh\)\n$/},
   {label: 'dedicated upscale with a measured shape fits beside a smaller CPU cut-out service', env: {...DEDICATED, MATTING_CPU_MAX_INSTANCES: '4'},
     expect: {STATUS: '0', CPU_TOTAL: '187', UPSCALE_VCPU_TOTAL: '64'}},
