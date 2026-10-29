@@ -3,8 +3,8 @@
 // wins, it accepts the F2 run values and the pre-F2 rollback shape, and refuses a shape
 // that does not fit (connection budget, what ila-pg allows now, queue slots, the asia-south1 CPU quota, the L4
 // quota and shape). Also checks the price defaults deploy.sh derives from the shape. Spec 17 3.3.3: GPU memory
-// arithmetic from the measured peak table (F2 refused once bria-rmbg's peak is in it, today's live shape passes,
-// an unmeasured model refused).
+// arithmetic from the measured peak table (the peaks measured on the L4 on 2026-10-28 are the defaults: the F2 shape
+// and two or four resident models are refused, today's live shape passes, an unmeasured model is refused).
 import fs from 'node:fs';
 import path from 'node:path';
 import assert from 'node:assert/strict';
@@ -21,7 +21,8 @@ const NAMES = ['DB_MAX_CONNECTIONS', 'WORKER_MAX_INSTANCES', 'WORKER_CPU', 'WORK
   'GPU_MEM_LIMIT_BYTES', 'UPSCALE_SERVICE', 'MATTE_INFLIGHT_PER_INSTANCE', 'CATALOG_PHOTO_CONCURRENCY',
   'CATALOG_BULK_WINDOW', 'BULK_BATCH_PRODUCTS', 'LLM_INFLIGHT_PER_INSTANCE', 'CUDNN_CONV_ALGO_SEARCH', 'CUDNN_CONV_USE_MAX_WORKSPACE',
   'INFERENCE_LOCK_SCOPE', 'GPU_MATTE_MODELS', 'GPU_UPSCALE_MODELS', 'GPU_MEASURED_ON', 'GPU_CUDA_OVERHEAD_MIB'];
-const OUT = [...NAMES, 'CATALOG_DB_TOTAL', 'CATALOG_DB_LIMIT', 'SLOTS_TOTAL', 'SLOTS_CAPACITY', 'CPU_TOTAL'];
+const PEAKS = ['GPU_MODEL_PEAK_MIB_BIREFNET_GENERAL', 'GPU_MODEL_PEAK_MIB_BIREFNET_GENERAL_LITE', 'GPU_MODEL_PEAK_MIB_BIREFNET_HRSOD', 'GPU_MODEL_PEAK_MIB_BRIA_RMBG'];
+const OUT = [...NAMES, ...PEAKS, 'CATALOG_DB_TOTAL', 'CATALOG_DB_LIMIT', 'SLOTS_TOTAL', 'SLOTS_CAPACITY', 'CPU_TOTAL'];
 
 // The usd() helper and the two price defaults, taken from deploy.sh so the test follows the script.
 const deploy = fs.readFileSync(path.join(root, 'infra/deploy.sh'), 'utf8').split(/\r?\n/);
@@ -58,7 +59,13 @@ const F2 = {
   CATALOG_PHOTO_CONCURRENCY: '4', CATALOG_BULK_WINDOW: '30',
 };
 
-// Test fixtures, not measurements: peaks in MiB as the probe table would give them.
+// The peaks measured on the L4 on 2026-10-28 (services/matting/README.md "Measured on L4"), shape.sh's defaults.
+const MEASURED = {GPU_MEASURED_ON: '2026-10-28', GPU_MODEL_PEAK_MIB_BIREFNET_GENERAL: '13704', GPU_MODEL_PEAK_MIB_BIREFNET_GENERAL_LITE: '10842',
+  GPU_MODEL_PEAK_MIB_BIREFNET_HRSOD: '13696', GPU_MODEL_PEAK_MIB_BRIA_RMBG: '12424'};
+// An empty row marks a model as not measured (a name that is set, also to "", wins over the default).
+const UNMEASURED = {GPU_MEASURED_ON: '', GPU_MODEL_PEAK_MIB_BIREFNET_GENERAL: '', GPU_MODEL_PEAK_MIB_BIREFNET_GENERAL_LITE: '',
+  GPU_MODEL_PEAK_MIB_BIREFNET_HRSOD: '', GPU_MODEL_PEAK_MIB_BRIA_RMBG: ''};
+// Test fixtures, not measurements: smaller peaks than the L4 gave, to test the arithmetic on shapes that fit.
 const FITS_6GIB = {GPU_MEASURED_ON: '2026-10-29', GPU_MODEL_PEAK_MIB_BIREFNET_GENERAL: '4600', GPU_MODEL_PEAK_MIB_BIREFNET_GENERAL_LITE: '3000',
   GPU_MODEL_PEAK_MIB_BIREFNET_HRSOD: '4700', GPU_MODEL_PEAK_MIB_BRIA_RMBG: '5400'};
 const BRIA_OVER_6GIB = {...FITS_6GIB, GPU_MODEL_PEAK_MIB_BRIA_RMBG: '7400'};
@@ -81,7 +88,7 @@ const RECORDED_LIVE = {
   CATALOG_PHOTO_CONCURRENCY: '4', CATALOG_BULK_WINDOW: '30', BULK_BATCH_PRODUCTS: '100', LLM_INFLIGHT_PER_INSTANCE: '6',
   CUDNN_CONV_ALGO_SEARCH: '', CUDNN_CONV_USE_MAX_WORKSPACE: '', INFERENCE_LOCK_SCOPE: 'global',
   GPU_MATTE_MODELS: 'birefnet-general,birefnet-general-lite,birefnet-hrsod,bria-rmbg', GPU_UPSCALE_MODELS: 'realesrgan-x2plus,swinir-x2',
-  GPU_MEASURED_ON: '', GPU_CUDA_OVERHEAD_MIB: '2048',
+  GPU_MEASURED_ON: '2026-10-28', GPU_CUDA_OVERHEAD_MIB: '2048',
 };
 // The shape before F2 (the rollback line in shape.sh): fits today's old db-f1-micro (25 connections).
 const PRE_F2 = {WORKER_MAX_INSTANCES: '4', WORKER_CPU: '2', WORKER_MEMORY: '2Gi', TASKS_MAX_DISPATCHES: '6', BULK_MAX_DISPATCHES: '0',
@@ -93,7 +100,7 @@ const cases = [
     label: 'no env resolves to the recorded live shape',
     env: {},
     // Every shape name, so a new name without a recorded live value fails here.
-    expect: {...Object.fromEntries(NAMES.map((n) => [n, RECORDED_LIVE[n]])), STATUS: '0', CATALOG_DB_TOTAL: '104', CATALOG_DB_LIMIT: '393', SLOTS_TOTAL: '48', SLOTS_CAPACITY: '48',
+    expect: {...Object.fromEntries(NAMES.map((n) => [n, RECORDED_LIVE[n]])), ...MEASURED, STATUS: '0', CATALOG_DB_TOTAL: '104', CATALOG_DB_LIMIT: '393', SLOTS_TOTAL: '48', SLOTS_CAPACITY: '48',
       CPU_TOTAL: '171', COMPUTE: '0.0000265', GPU_PRICE: '0.00034884'},
   },
   {label: 'env still wins over a row, also an explicit "" (no AI check cap)', env: {TASKS_MAX_DISPATCHES: '14', BULK_MAX_DISPATCHES: '30', LLM_INFLIGHT_PER_INSTANCE: ''},
@@ -124,15 +131,20 @@ const cases = [
   {label: 'explicit worker pool wins', env: {...F2_FITTED, WORKER_DB_POOL_MAX: '3'}, live: '400', expect: {STATUS: '0', WORKER_DB_POOL_MAX: '3', CATALOG_DB_TOTAL: '80'}},
   {label: 'AI check pacing', env: {LLM_INFLIGHT_PER_INSTANCE: 'six'}, expect: {STATUS: '1'}, error: /LLM_INFLIGHT_PER_INSTANCE must be empty or a whole number/},
   // Spec 17 3.3.3.
-  {label: "today's live shape passes with no peak measured", env: LIVE, live: '400', expect: {STATUS: '0', INFERENCE_LOCK_SCOPE: 'global', GPU_CUDA_OVERHEAD_MIB: '2048'}},
-  {label: 'the 2026-10-27 F2 shape is refused once the bria-rmbg peak is in the table', env: {...F2, ...BRIA_OVER_6GIB}, live: '400', expect: {STATUS: '1'},
-    error: /GPU_MEM_LIMIT_BYTES=6442450944 \(6144 MiB\) is below bria-rmbg's measured peak 7400 MiB \+ 512 MiB \(measured 2026-10-29\)/},
+  {label: "today's live shape passes", env: LIVE, live: '400', expect: {STATUS: '0', INFERENCE_LOCK_SCOPE: 'global', GPU_CUDA_OVERHEAD_MIB: '2048', ...MEASURED}},
+  {label: "today's live shape passes with no peak measured", env: {...LIVE, ...UNMEASURED}, live: '400', expect: {STATUS: '0'}},
+  {label: 'the 2026-10-27 F2 shape is refused by the measured peaks', env: F2, live: '400', expect: {STATUS: '1', ...MEASURED},
+    error: /GPU_MEM_LIMIT_BYTES=6442450944 \(6144 MiB\) is below bria-rmbg's measured peak 12424 MiB \+ 512 MiB \(measured 2026-10-28\)/},
+  {label: 'two resident without a cap are refused by the measured peaks (2 x 13704 + 2048)', env: {...LIVE, MAX_RESIDENT_SESSIONS: '2'}, live: '400', expect: {STATUS: '1'},
+    error: /GPU memory 2 sessions x 13704 MiB \+ 2048 MiB CUDA \+ 0 MiB upscalers = 29456 MiB exceeds the L4's 22528 MiB/},
+  {label: 'four resident are refused by the measured peaks', env: {...LIVE, MAX_RESIDENT_SESSIONS: '4'}, live: '400', expect: {STATUS: '1'},
+    error: /GPU memory 4 sessions x 13704 MiB \+ 2048 MiB CUDA \+ 0 MiB upscalers = 56864 MiB exceeds/},
   {label: 'F2 with an unmeasured model is refused', env: {...F2, ...FITS_6GIB, GPU_MODEL_PEAK_MIB_BIREFNET_HRSOD: ''}, live: '400', expect: {STATUS: '1'},
     error: /^ERROR: measure first: run infra\/check-matting.sh --probe \(no measured GPU peak for birefnet-hrsod;/},
-  {label: 'nothing measured: two resident is refused', env: {MAX_RESIDENT_SESSIONS: '2', UPSCALE_SERVICE: 'cpu'}, expect: {STATUS: '1'},
+  {label: 'nothing measured: two resident is refused', env: {...UNMEASURED, MAX_RESIDENT_SESSIONS: '2', UPSCALE_SERVICE: 'cpu'}, expect: {STATUS: '1'},
     error: /measure first: run infra\/check-matting.sh --probe \(no measured GPU peak for birefnet-general birefnet-general-lite birefnet-hrsod bria-rmbg;/},
-  {label: 'nothing measured: a cap alone is refused', env: {GPU_MEM_LIMIT_BYTES: '6442450944', UPSCALE_SERVICE: 'cpu'}, expect: {STATUS: '1'}, error: /measure first/},
-  {label: 'nothing measured: the session lock is refused', env: {INFERENCE_LOCK_SCOPE: 'session', UPSCALE_SERVICE: 'cpu'}, expect: {STATUS: '1'}, error: /measure first/},
+  {label: 'nothing measured: a cap alone is refused', env: {...UNMEASURED, GPU_MEM_LIMIT_BYTES: '6442450944', UPSCALE_SERVICE: 'cpu'}, expect: {STATUS: '1'}, error: /measure first/},
+  {label: 'nothing measured: the session lock is refused', env: {...UNMEASURED, INFERENCE_LOCK_SCOPE: 'session', UPSCALE_SERVICE: 'cpu'}, expect: {STATUS: '1'}, error: /measure first/},
   {label: 'only the served models need a peak', env: {...LIVE, MAX_RESIDENT_SESSIONS: '2', GPU_MATTE_MODELS: 'bria-rmbg', GPU_MEASURED_ON: '2026-10-29', GPU_MODEL_PEAK_MIB_BRIA_RMBG: '7400'}, live: '400', expect: {STATUS: '0'}},
   {label: 'upscalers on the GPU need their peaks too', env: {...LIVE, ...FITS_6GIB, MAX_RESIDENT_SESSIONS: '2', UPSCALE_SERVICE: 'gpu'}, live: '400', expect: {STATUS: '1'},
     error: /no measured GPU peak for realesrgan-x2plus swinir-x2;/},

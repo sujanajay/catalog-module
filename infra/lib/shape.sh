@@ -116,13 +116,16 @@ shape_defaults() {
   # for "-"), copied from the one-resident probe table in services/matting/README.md "Measured on L4"
   # (infra/check-matting.sh --probe; card-wide, so each includes the CUDA context once, on top of
   # GPU_CUDA_OVERHEAD_MIB: conservative) together with its date. Empty = not measured yet. A new model is a new row.
-  GPU_MEASURED_ON=${GPU_MEASURED_ON:-}
-  GPU_MODEL_PEAK_MIB_BIREFNET_GENERAL=${GPU_MODEL_PEAK_MIB_BIREFNET_GENERAL:-}
-  GPU_MODEL_PEAK_MIB_BIREFNET_GENERAL_LITE=${GPU_MODEL_PEAK_MIB_BIREFNET_GENERAL_LITE:-}
-  GPU_MODEL_PEAK_MIB_BIREFNET_HRSOD=${GPU_MODEL_PEAK_MIB_BIREFNET_HRSOD:-}
-  GPU_MODEL_PEAK_MIB_BRIA_RMBG=${GPU_MODEL_PEAK_MIB_BRIA_RMBG:-}
-  GPU_MODEL_PEAK_MIB_REALESRGAN_X2PLUS=${GPU_MODEL_PEAK_MIB_REALESRGAN_X2PLUS:-}
-  GPU_MODEL_PEAK_MIB_SWINIR_X2=${GPU_MODEL_PEAK_MIB_SWINIR_X2:-}
+  # Like the shape rows, a name that is set (also to "") wins, so "" marks a model as unmeasured.
+  # 2026-10-28, L4 1024 px, one resident (the larger of rung 1, default cuDNN, and rung 2, HEURISTIC with no maximum
+  # workspace; the knob moved no memory). The upscalers were not measured (UPSCALE_SERVICE=cpu).
+  GPU_MEASURED_ON=${GPU_MEASURED_ON-2026-10-28}
+  GPU_MODEL_PEAK_MIB_BIREFNET_GENERAL=${GPU_MODEL_PEAK_MIB_BIREFNET_GENERAL-13704}
+  GPU_MODEL_PEAK_MIB_BIREFNET_GENERAL_LITE=${GPU_MODEL_PEAK_MIB_BIREFNET_GENERAL_LITE-10842}
+  GPU_MODEL_PEAK_MIB_BIREFNET_HRSOD=${GPU_MODEL_PEAK_MIB_BIREFNET_HRSOD-13696}
+  GPU_MODEL_PEAK_MIB_BRIA_RMBG=${GPU_MODEL_PEAK_MIB_BRIA_RMBG-12424}
+  GPU_MODEL_PEAK_MIB_REALESRGAN_X2PLUS=${GPU_MODEL_PEAK_MIB_REALESRGAN_X2PLUS-}
+  GPU_MODEL_PEAK_MIB_SWINIR_X2=${GPU_MODEL_PEAK_MIB_SWINIR_X2-}
   # What one L4 offers (24 GB, about 22.5 GB usable).
   GPU_USABLE_MIB=22528
   # Worker pool per instance. One photo at a time: one connection per in-flight task (2). Several photos at once
