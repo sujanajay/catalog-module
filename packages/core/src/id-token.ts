@@ -32,3 +32,14 @@ export async function bearerFor(url: string, idToken: IdTokenFor): Promise<strin
   if (isLocalUrl(url)) return null;
   return `Bearer ${await idToken(cloudRunAudience(url))}`;
 }
+
+/** `work`, or the signal's reason as soon as it aborts: minting an ID token never outlives the call it is for. */
+export async function raceAbort<T>(work: Promise<T>, signal: AbortSignal): Promise<T> {
+  signal.throwIfAborted();
+  let onAbort!: () => void;
+  const aborted = new Promise<never>((_, reject) => {
+    onAbort = () => reject(signal.reason);
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+  try { return await Promise.race([work, aborted]); } finally { signal.removeEventListener("abort", onAbort); }
+}
