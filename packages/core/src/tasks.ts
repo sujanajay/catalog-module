@@ -24,6 +24,10 @@ import { cloudRunAudience } from "./cloud-run";
  * Spec 16: a bulk batch's chunk and publish tasks (`bulk: true`) go to TASKS_BULK_QUEUE when it is set, so an
  * operator's small batch keeps the slots of TASKS_QUEUE to itself. Unset, they stay on TASKS_QUEUE.
  *
+ * Spec 18 3.3.2: an enlargement task (`/tasks/catalog/enlarge`, one per photo and round, enlargeTaskId) goes to its
+ * own lane, TASKS_ENLARGE_QUEUE for an operator batch and TASKS_ENLARGE_BULK_QUEUE for a bulk batch, so a slow
+ * upscaler never holds a chunk queue's slots. A lane that is not set falls back to the chunk queue of the same class.
+ *
  * Local dev (`TASKS_INLINE=1`): POSTs the same body straight to the worker, fire-and-forget,
  * so the caller (a web request) is not blocked on the task.
  */
@@ -36,6 +40,7 @@ export const TASK_ROUTES = [
   "/tasks/catalog/chunk",
   "/tasks/catalog/publish",
   "/tasks/catalog/finalize",
+  "/tasks/catalog/enlarge",
 ] as const;
 
 export type TaskRoute = (typeof TASK_ROUTES)[number];
@@ -45,6 +50,12 @@ export const INGEST_TASK_ROUTES: readonly TaskRoute[] = ["/tasks/catalog/ingest"
 
 /** Routes that run on the bulk queue (TASKS_BULK_QUEUE) for a bulk batch, when it is configured (spec 16). */
 export const BULK_TASK_ROUTES: readonly TaskRoute[] = ["/tasks/catalog/chunk", "/tasks/catalog/publish"];
+
+/** Spec 18: routes that run on the enlarge lanes (TASKS_ENLARGE_QUEUE, TASKS_ENLARGE_BULK_QUEUE) when configured. */
+export const ENLARGE_TASK_ROUTES: readonly TaskRoute[] = ["/tasks/catalog/enlarge"];
+
+/** The body of one enlargement task: the photo, and the round that sent it (0 first, then the recovery's). */
+export interface EnlargeTaskBody { batchId: string; productId: string; sourceImageId: string; round: number }
 
 /** Minimal surface of `CloudTasksClient` we use - lets tests pass a fake. */
 export type TasksClientLike = Pick<CloudTasksClient, "createTask">;
@@ -99,6 +110,15 @@ export function chunkTaskId(chunkId: string, stage: string, step: number): strin
   return `chunk-${chunkId}-${stage}-${step}`;
 }
 
+/**
+ * Spec 18 3.3.2: the id of a photo's enlargement task, `enlarge-<sourceImageId>-<round>`. The first send is round 0;
+ * the recovery's re-send of a photo still waiting takes a higher round, so it never meets the queue's deduplication
+ * of the earlier task, and a repeat of the same round is deduplicated.
+ */
+export function enlargeTaskId(sourceImageId: string, round: number): string {
+  return `enlarge-${sourceImageId}-${round}`;
+}
+
 /** gRPC code ALREADY_EXISTS: a task with this name exists or ran recently (deduplicated). */
 const GRPC_ALREADY_EXISTS = 6;
 
@@ -119,11 +139,16 @@ export function tasksConfigFromEnv(env: NodeJS.ProcessEnv = process.env): TasksC
 }
 
 /**
- * The queue a route's tasks go to: the ingest queue for ingest routes when set, the bulk queue for a bulk
- * batch's chunk and publish tasks when set, else TASKS_QUEUE.
+ * The queue a route's tasks go to: the ingest queue for ingest routes when set, the enlarge lane of the batch's class
+ * for enlargement tasks when set (else that class's chunk queue), the bulk queue for a bulk batch's chunk and publish
+ * tasks when set, else TASKS_QUEUE.
  */
 export function queueForRoute(route: TaskRoute, env: NodeJS.ProcessEnv = process.env, bulk = false): string {
   if (INGEST_TASK_ROUTES.includes(route) && env.TASKS_INGEST_QUEUE) return env.TASKS_INGEST_QUEUE;
+  if (ENLARGE_TASK_ROUTES.includes(route)) {
+    const lane = bulk ? env.TASKS_ENLARGE_BULK_QUEUE : env.TASKS_ENLARGE_QUEUE;
+    return lane || queueForRoute("/tasks/catalog/chunk", env, bulk);
+  }
   if (bulk && BULK_TASK_ROUTES.includes(route) && env.TASKS_BULK_QUEUE) return env.TASKS_BULK_QUEUE;
   return env.TASKS_QUEUE || DEFAULT_TASKS_QUEUE;
 }
