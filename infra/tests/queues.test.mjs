@@ -7,7 +7,8 @@
 //   5 attempts, and bootstrap.sh creates the main queue with the same retry;
 // - spec 16 3.2.3: a bulk queue left from a bigger shape keeps 1 slot; the preview stack gets no bulk queue;
 // - spec 18 3.3.1: the enlarge lanes <queue>-enlarge and <queue>-enlarge-bulk, paced by ENLARGE_DISPATCHES_PER_SECOND
-//   and retried by attempt count (8, 30 s to 300 s), are created before the services and set after the worker gate.
+//   and never dropping a task (spec 18 lifecycle 3.8, T58: unlimited attempts, no time limit, 30 s to 900 s apart),
+//   are created before the services and set after the worker gate.
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
