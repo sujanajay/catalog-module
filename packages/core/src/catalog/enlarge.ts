@@ -13,9 +13,9 @@ import { bearerFor, googleIdTokenFor, type IdTokenFor } from "../id-token";
 export const DEFAULT_UPSCALE_TIMEOUT_S = 840;
 /** The client waits this much longer than the service may run, so the service's own timeout always comes first. */
 export const ENLARGE_CLIENT_MARGIN_MS = 30_000;
-/** Exponential backoff between attempts: 5 s, 10 s, 20 s, ... capped at 120 s, each with up to 50% jitter off. */
-export const ENLARGE_BACKOFF_BASE_MS = 5_000;
-export const ENLARGE_BACKOFF_MAX_MS = 120_000;
+/** Spec 18 3.2.3 backoff between attempts: 10 s, 20 s, 40 s, then 60 s, each with up to 50% jitter off. */
+export const ENLARGE_BACKOFF_BASE_MS = 10_000;
+export const ENLARGE_BACKOFF_MAX_MS = 60_000;
 /** Attempts at most when the caller gives no deadline. */
 export const ENLARGE_MAX_ATTEMPTS = 5;
 

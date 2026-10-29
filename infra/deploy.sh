@@ -28,7 +28,7 @@
 # candidate of catalog-matting-gpu (probed, traffic never shifted) that the preview worker calls.
 # Spec 18: UPSCALE_SERVICE=dedicated sends the worker's /upscale calls to catalog-upscale (refused by shape.sh until its
 # shape is measured); UPSCALE_SERVICE=cpu (today, and the rollback) keeps them on catalog-matting.
-# UPSCALE_MEASURE=1 with UPSCALE_CPU, UPSCALE_THREADS, UPSCALE_CONCURRENCY and UPSCALE_MAX_INSTANCES deploys
+# UPSCALE_MEASURE=1 with UPSCALE_CPU_VCPU, UPSCALE_THREADS, UPSCALE_CONCURRENCY and UPSCALE_MAX_INSTANCES deploys
 # catalog-upscale as a no-traffic candidate of that shape (tag measure-<cpu>c-<threads>t-<concurrency>r) for
 # infra/check-matting.sh --probe-upscale; the worker keeps its upscaler.
 set -euo pipefail
@@ -135,7 +135,7 @@ shape_check "$SQL_CONNECTION_LIMIT" || exit 1
 echo "==> connection budget: catalog $CATALOG_DB_TOTAL of $CATALOG_DB_LIMIT (ila-pg $SQL_TIER_LIVE allows $SQL_CONNECTION_LIMIT)"
 echo "==> shape: worker $WORKER_MAX_INSTANCES x ${WORKER_CPU} vCPU/$WORKER_MEMORY; slots $TASKS_MAX_DISPATCHES + bulk $BULK_MAX_DISPATCHES + ingest $INGEST_MAX_DISPATCHES of $SLOTS_CAPACITY; asia-south1 vCPU $CPU_TOTAL of $CPU_QUOTA_LIMIT; GPU $GPU_MAX_INSTANCES x ${GPU_CPU} vCPU/$GPU_MEMORY concurrency $GPU_CONCURRENCY, $MAX_RESIDENT_SESSIONS resident; upscale on $UPSCALE_SERVICE"
 if upscale_deployed; then
-  echo "==> shape: catalog-upscale $UPSCALE_MAX_INSTANCES x ${UPSCALE_CPU} vCPU/$UPSCALE_MEMORY, $UPSCALE_THREADS threads, concurrency $UPSCALE_CONCURRENCY, timeout ${UPSCALE_TIMEOUT_S} s$([ "$UPSCALE_MEASURE" = 1 ] && echo " (measure: no-traffic candidate)")"
+  echo "==> shape: catalog-upscale $UPSCALE_MAX_INSTANCES x ${UPSCALE_CPU_VCPU} vCPU/$UPSCALE_MEMORY, $UPSCALE_THREADS threads, concurrency $UPSCALE_CONCURRENCY, timeout ${UPSCALE_TIMEOUT_S} s$([ "$UPSCALE_MEASURE" = 1 ] && echo " (measure: no-traffic candidate)")"
 fi
 # Semicolons, not commas: the value travels inside --set-env-vars. The load driver re-checks it.
 DB_CONNECTION_BUDGET="max=$DB_MAX_CONNECTIONS;reserved=$DB_RESERVED_CONNECTIONS;ila=$ILA_DB_SHARE"
