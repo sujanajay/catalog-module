@@ -18,7 +18,7 @@ export const CLEANED_UP_ERROR = "This test batch was cleaned up. Only its spend 
  * row is marked `options.cleanedUp` (hidden from the batch list). Run cleanup again on a later
  * day to remove the row and its spend history.
  */
-export async function cleanupTestBatches(db:Db,deps:Pick<typeof storage,"deleteTestObjects"|"getBucketName"|"getPublicBucketName">,batchIds:string[],now:Date=new Date()):Promise<CleanupResult> {
+export async function cleanupTestBatches(db:Db,deps:Pick<typeof storage,"deleteTestObjects"|"getBucketName"|"getPublicBucketName">,batchIds:string[],now:Date=new Date(),options:{onListed?:(gsPrefixUri:string,count:number)=>void}={}):Promise<CleanupResult> {
   const wanted=[...new Set(batchIds)];
   if(!wanted.length) return {objects:0,kept:[]};
   const batches=await db.select().from(catalogBatches).where(inArray(catalogBatches.id,wanted));
@@ -38,8 +38,10 @@ export async function cleanupTestBatches(db:Db,deps:Pick<typeof storage,"deleteT
     assertTestPrefix(productPrefix(p.brandSlug,p.pathKey,true));
   }
   let objects=0;
-  for(const prefix of prefixes) objects+=await deps.deleteTestObjects(storage.toGsUri(deps.getBucketName(),prefix));
-  for(const p of products) objects+=await deps.deleteTestObjects(storage.toGsUri(deps.getPublicBucketName(),productPrefix(p.brandSlug,p.pathKey,true)));
+  // Spec 18 H4: `onListed` reports each prefix's listed count before its deletes start.
+  const remove=(uri:string)=>options.onListed ? deps.deleteTestObjects(uri,{onListed:count=>options.onListed!(uri,count)}):deps.deleteTestObjects(uri);
+  for(const prefix of prefixes) objects+=await remove(storage.toGsUri(deps.getBucketName(),prefix));
+  for(const p of products) objects+=await remove(storage.toGsUri(deps.getPublicBucketName(),productPrefix(p.brandSlug,p.pathKey,true)));
   let kept:string[]=[];
   await db.transaction(async tx=> {
     const spentToday=await tx.selectDistinct({batchId:spendDays.batchId}).from(spendDays).where(and(inArray(spendDays.batchId,wanted),eq(spendDays.day,utcDay(now)),gt(spendDays.costUsd,0)));

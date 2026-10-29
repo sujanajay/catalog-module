@@ -20,6 +20,7 @@ import {
   signedUrl,
   stageCopyToPublic,
   STORAGE_RETRIES,
+  TEST_DELETE_CONCURRENCY,
   toGsUri,
   uploadBuffer,
   type StorageLike,
@@ -374,6 +375,43 @@ describe("GCS operations (fake client)", () => {
       expect(await deleteTestObjects("gs://image-links-agent-public/catalog-test/run1/")).toBe(2);
       expect(getFiles).toHaveBeenCalledWith({ prefix: "catalog-test/run1/", autoPaginate: true, versions: true });
       expect(del).toHaveBeenCalledTimes(3);
+    });
+
+    // Spec 18 H4: one delete at a time took 13 minutes for 19,241 generations in a load run.
+    it("deletes in parallel, bounded, and deletes every listed generation", async () => {
+      const N = 200, names = Array.from({ length: N }, (_, i) => `catalog-test/run1/p${i}.jpg`), remaining = new Set(names);
+      let inFlight = 0, peak = 0;
+      const file = vi.fn((name: string, options?: { generation?: string }) => ({
+        delete: async () => {
+          expect(options?.generation).toBe("7");
+          inFlight++; peak = Math.max(peak, inFlight);
+          await new Promise(resolve => setTimeout(resolve, 2));
+          inFlight--; remaining.delete(name);
+          return [{}];
+        },
+      }));
+      setStorageClient({ bucket: () => ({ getFiles: async () => [names.map(name => ({ name, metadata: { generation: "7" } }))], file }) } as unknown as StorageLike);
+      const listed = vi.fn();
+      expect(await deleteTestObjects("gs://image-links-agent-public/catalog-test/run1/", { onListed: listed })).toBe(N);
+      expect(listed).toHaveBeenCalledWith(N);
+      expect(remaining.size).toBe(0);
+      expect(peak).toBeGreaterThan(1);
+      expect(peak).toBeLessThanOrEqual(TEST_DELETE_CONCURRENCY);
+    });
+
+    it("refuses the whole listing before any delete when one name is outside catalog-test/", async () => {
+      const remove = vi.fn(async () => [{}]);
+      setStorageClient({ bucket: () => ({ getFiles: async () => [[{ name: "catalog-test/run1/a.jpg", metadata: { generation: "1" } }, { name: "catalog/uspa/a.jpg", metadata: { generation: "2" } }]], file: () => ({ delete: remove }) }) } as unknown as StorageLike);
+      await expect(deleteTestObjects("gs://image-links-agent-public/catalog-test/run1/")).rejects.toThrow(/catalog-test/);
+      expect(remove).not.toHaveBeenCalled();
+    });
+
+    it("starts no new delete after one fails, and throws that error", async () => {
+      let started = 0;
+      const names = Array.from({ length: 100 }, (_, i) => `catalog-test/run1/p${i}.jpg`);
+      setStorageClient({ bucket: () => ({ getFiles: async () => [names.map(name => ({ name, metadata: { generation: "1" } }))], file: () => ({ delete: async () => { started++; if (started === 1) throw apiError(403, "denied"); await new Promise(resolve => setTimeout(resolve, 2)); return [{}]; } }) }) } as unknown as StorageLike);
+      await expect(deleteTestObjects("gs://image-links-agent-public/catalog-test/run1/", { concurrency: 4 })).rejects.toThrow(/denied/);
+      expect(started).toBeLessThanOrEqual(4);
     });
   });
 });
