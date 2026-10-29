@@ -46,7 +46,7 @@ describe("0004_chunk_leases.sql", () => {
 
     await runMigrations(db, resolveMigrationsFolder());
     const applied = await rows<{ n: number }>(sql`select count(*)::int as n from drizzle.__drizzle_migrations`);
-    expect(applied[0]!.n).toBe(5);
+    expect(applied[0]!.n).toBe(JSON.parse(await readFile(path.join(resolveMigrationsFolder(), "meta", "_journal.json"), "utf8")).entries.length);
 
     const old = await rows<{ status: string; task_name: string | null; attempt: number; step: number; step_known: boolean; lease_until: string | null; dispatched_at: string; stalls: number }>(sql`select * from catalog_chunks order by index`);
     expect(old.map((r) => [r.status, r.task_name, r.attempt, r.step, r.step_known, r.lease_until, new Date(r.dispatched_at).toISOString(), r.stalls])).toEqual([
