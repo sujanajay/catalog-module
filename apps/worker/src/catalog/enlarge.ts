@@ -1,9 +1,15 @@
 // Spec 18 H3: POST /tasks/catalog/enlarge, one photo's enlargement as its own task (body EnlargeTaskBody, task id
 // enlarge-<sourceImageId>-<round>), queued by the matte stage (chunk.ts) on the enlarge lane of the batch's class.
-// It makes the photo's x2 image once on the upscale service (enlargeViaService, catalog-upscale or the service
-// UPSCALE_URL names) and stores it in the private bucket at enlargedPath (never public); the render primes it and
+// It makes the photo's upscaled images once on the upscale service (enlargeViaService, catalog-upscale or the service
+// UPSCALE_URL names) and stores them in the private bucket at enlargedPath (never public); the render primes them and
 // never calls the service. States and the render gate: core catalog/pipeline/enlargement.ts.
-// - The stored image is already there (same source and upscaler in its metadata): done, no call.
+// Spec 18 quality: the photo's job (x2_model) names one image per model it needs, the x2 image (enlargements up to
+// 2.0x) and the x4 image (above 2.0x). Each delivery makes at most one image (one service call, so one call always has
+// the whole delivery deadline); when another image of the job is still missing it answers 503 "next_image" without
+// counting an attempt, and the queue's retry makes the next one. The upscaler sees only the product's region of the
+// photo (shotEnlargementRegion: the product box plus a margin, from the photo's own matte), recorded on the object as
+// `region`, so the render cuts each channel's crop out of it at exactly the right place.
+// - Every image of the job is already there (same source and upscaler in its metadata): done, no call.
 // - Another live delivery of the photo holds its in-flight claim (x2_claimed_at, ENLARGE_CLAIM_MS): 503, no attempt
 //   counted, no call; the retry finds the stored image or the claim gone. The success write is guarded on x2_uri still
 //   null, so a late second writer neither overwrites the photo nor writes a second cost row.
@@ -21,12 +27,12 @@
 import sharp from "sharp";
 import { and, eq, inArray, isNull, lt, or, sql } from "drizzle-orm";
 import { catalogBatches, catalogChunks, catalogOutputs, catalogProducts, catalogSourceImages } from "@catalog/core/db/schema";
-import { batchPrefix, enlargedPath } from "@catalog/core/catalog/naming";
-import { enlargementNeeds, UnsupportedSourceError, type EnlargementShot, type Prepared } from "@catalog/core/catalog/render";
-import { gpuUrlsFromEnv, isCpuUpscalerId, primeSourceX2, UPSCALE_FACTOR, upscaleUpload, type Upscaler } from "@catalog/core/catalog/upscale";
+import { batchPrefix, enlargedPath, enlargedSibling } from "@catalog/core/catalog/naming";
+import { enlargementFactors, shotEnlargementRegion, UnsupportedSourceError, type EnlargementShot, type Prepared } from "@catalog/core/catalog/render";
+import { formatRegion, gpuUrlsFromEnv, isCpuUpscalerId, parseRegion, primeSourceX2, upscalerFactor, upscalerModel, upscaleUpload, type Upscaler } from "@catalog/core/catalog/upscale";
 import { ENLARGE_TASK_MARGIN_MS, EnlargeError, enlargeTimeoutMs, enlargeViaService, type EnlargeDeps, type EnlargeResult } from "@catalog/core/catalog/enlarge";
 import { ENLARGE_DISPATCH_DEADLINE_SEC } from "@catalog/core/tasks";
-import { ENLARGE_CLAIM_MS, ENLARGE_TASK_MAX_ATTEMPTS, ENLARGING_TASK, enqueueEnlargements, lockProductChunks, photoEnlargementState, unparkSettledChunks } from "@catalog/core/catalog/pipeline/enlargement";
+import { ENLARGE_CLAIM_MS, ENLARGE_TASK_MAX_ATTEMPTS, ENLARGING_TASK, enlargementJob, enqueueEnlargements, jobForRoute, jobOnRoute, jobUpscalers, lockProductChunks, photoEnlargementState, unparkSettledChunks, type EnlargementRoute } from "@catalog/core/catalog/pipeline/enlargement";
 import { positiveIntEnv } from "@catalog/core/concurrency";
 import { recordCostEvents, type CostEventInput } from "@catalog/core/cost-events";
 import { matteCallUsd } from "@catalog/core/catalog/cost";
@@ -35,11 +41,12 @@ import type { HandleOptions, HandleResult } from "../server";
 import { refreshBatchProgress, topUpWindow, type CatalogDeps } from "./deps";
 
 /**
- * The service call the handler makes: one attempt, the x2 JPEG as the service answered it. `deadlineAt` (epoch ms) is
- * the delivery's own deadline: the delivery's start plus ENLARGE_DISPATCH_DEADLINE_SEC (its Cloud Tasks dispatch deadline),
- * less ENLARGE_TASK_MARGIN_MS for the settle; the attempt's timeout is clamped to it.
+ * The service call the handler makes: one attempt, the upscaled JPEG as the service answered it. `deadlineAt` (epoch
+ * ms) is the delivery's own deadline: the delivery's start plus ENLARGE_DISPATCH_DEADLINE_SEC (its Cloud Tasks dispatch
+ * deadline), less ENLARGE_TASK_MARGIN_MS for the settle; the attempt's timeout is clamped to it. `upscaler` is the
+ * upscalerId of the image to make (its model and scale go to the service; default the configured UPSCALE_MODEL).
  */
-export type EnlargeCall = (jpeg: Buffer, trace: MattingTrace, opts?: { deadlineAt?: number }) => Promise<EnlargeResult>;
+export type EnlargeCall = (jpeg: Buffer, trace: MattingTrace, opts?: { deadlineAt?: number; upscaler?: string }) => Promise<EnlargeResult>;
 
 /**
  * The largest photo (width x height) the upscale service takes (`UPSCALE_MAX_PIXELS`; infra/deploy.sh sets it for
@@ -47,6 +54,8 @@ export type EnlargeCall = (jpeg: Buffer, trace: MattingTrace, opts?: { deadlineA
  * own default 24,000,000).
  */
 const DEFAULT_UPSCALE_MAX_PIXELS = 24_000_000;
+/** The longest side a JPEG answer may have (services/matting/app.py UPSCALE_MAX_OUTPUT_SIDE). */
+const UPSCALE_MAX_OUTPUT_SIDE = 65_500;
 function upscaleMaxPixels(env: NodeJS.ProcessEnv = process.env): number {
   return positiveIntEnv(env.UPSCALE_MAX_PIXELS?.trim(), DEFAULT_UPSCALE_MAX_PIXELS);
 }
@@ -54,15 +63,22 @@ function upscaleMaxPixels(env: NodeJS.ProcessEnv = process.env): number {
 /**
  * The worker's service call: the service UPSCALE_URL names (catalog-upscale, or the CPU cut-out service), else the
  * first GPU matting service, as the matting client picks it. One attempt per task delivery: the queue retries. The
- * attempt waits UPSCALE_TIMEOUT_S + 30 s (1740 s + 30 s when unset), clamped to the delivery's deadline. `deps` is for
- * tests (a fake fetch and token).
+ * attempt waits UPSCALE_TIMEOUT_S + 30 s (1740 s + 30 s when unset), clamped to the delivery's deadline. The model and
+ * scale come from the call's upscaler id (`opts.upscaler`), else `model` (default UPSCALE_MODEL). `deps` is for tests (a
+ * fake fetch and token).
  */
-export function workerEnlargeCall(model: string, env: NodeJS.ProcessEnv = process.env, deps: EnlargeDeps = {}): EnlargeCall {
+export function workerEnlargeCall(model: string = process.env.UPSCALE_MODEL?.trim() || "swinir-x2", env: NodeJS.ProcessEnv = process.env, deps: EnlargeDeps = {}): EnlargeCall {
   const url = env.UPSCALE_URL?.trim() || gpuUrlsFromEnv(env)[0] || "";
   return (jpeg, trace, opts = {}) => {
     if (!url) throw new EnlargeError("No upscale service is configured (UPSCALE_URL).", "rejected", null, false, 0);
-    return enlargeViaService({ url, jpeg, model, timeoutMs: enlargeTimeoutMs(env), maxAttempts: 1, trace, ...(opts.deadlineAt ? { deadlineAt: opts.deadlineAt } : {}) }, deps);
+    const id = opts.upscaler ?? model;
+    return enlargeViaService({ url, jpeg, model: upscalerModel(id), scale: upscalerFactor(id), timeoutMs: enlargeTimeoutMs(env), maxAttempts: 1, trace, ...(opts.deadlineAt ? { deadlineAt: opts.deadlineAt } : {}) }, deps);
   };
+}
+
+/** Spec 18 quality: the configured route (the x2 and x4 upscalerIds) of the worker's upscalers. */
+export function routeOf(deps: Pick<CatalogDeps, "upscaler" | "upscalerX4">): EnlargementRoute | null {
+  return deps.upscaler ? { x2: deps.upscaler.model, x4: deps.upscalerX4?.model ?? null } : null;
 }
 
 /**
@@ -74,36 +90,60 @@ export function derivedPrefixFor(storage: CatalogDeps["storage"], prefix: string
   return source.replacesId && source.rawUri.startsWith(replacementRoot) ? `${prefix}/replacements-${source.id}` : prefix;
 }
 
-/** Metadata on the stored x2 image: the photo it was made from and the upscaler that made it. */
-export const X2_METADATA = { sourceSha256: "sourceSha256", upscaler: "upscaler" } as const;
+/**
+ * Metadata on a stored image: the photo it was made from, the upscaler that made it and (spec 18 quality) the region
+ * of the prepared photo it was made from ("x,y,w,h"; absent on images made from the whole photo before).
+ */
+export const X2_METADATA = { sourceSha256: "sourceSha256", upscaler: "upscaler", region: "region" } as const;
+
+/** The stored image of each upscaler of the photo's job, beside x2_uri (the first one's object). */
+export function jobImageUris(x2Uri: string, x2Model: string | null): { upscaler: string; uri: string }[] {
+  const ids = jobUpscalers(x2Model);
+  if (!ids.length) return [];
+  const first = { upscaler: ids[0]!, factor: upscalerFactor(ids[0]!) };
+  return ids.flatMap((id) => {
+    const uri = id === first.upscaler ? x2Uri : enlargedSibling(x2Uri, first, { upscaler: id, factor: upscalerFactor(id) });
+    return uri ? [{ upscaler: id, uri }] : [];
+  });
+}
 
 /**
- * Spec 18 3.3.5, the render side: primes the upscaler's cache with the photo's stored x2 image, so every render of
- * this prepared photo (channels, auto-resolve) uses it without a service call. Without a stored image, or with one
- * that was made from other bytes (its `sourceSha256`), by another upscaler than the configured one (`x2_model` or the
- * object's `upscaler`), or is not exactly 2x the photo, nothing is primed and the render holds what needs it
- * (`enlargement_failed`). The render stage re-queues an image of another upscaler before it gets here
- * (requeueOtherUpscaler), so that case only arises when UPSCALE_MODEL changes during the render itself.
+ * Spec 18 3.3.5, the render side: primes the upscalers' caches with the photo's stored images (spec 18 quality: one
+ * per model of its job, x2 and x4), so every render of this prepared photo (channels, auto-resolve) uses them without a
+ * service call. An image that is missing, was made from other bytes (its `sourceSha256`), by another upscaler than the
+ * configured ones (`x2_model` or the object's `upscaler`), from a region outside the photo, or is not exactly its
+ * model's scale times its region, is not primed, and the render holds what needs it (`enlargement_failed`). The render
+ * stage re-queues a job of another upscaler before it gets here (requeueOtherUpscaler), so that case only arises when
+ * UPSCALE_MODEL or UPSCALE_MODEL_X4 changes during the render itself. True when every image of the job was primed.
  */
-export async function primeStoredEnlargement(deps: Pick<CatalogDeps, "upscaler" | "storage" | "log">, source: { id: string; sha256: string; x2Uri: string | null; x2Model: string | null }, p: Prepared): Promise<boolean> {
-  if (!deps.upscaler || !source.x2Uri) return false;
-  try {
-    if (source.x2Model !== deps.upscaler.model) {
-      deps.log("catalog enlargement missing", { severity: "WARNING", sourceImageId: source.id, reason: "stored image was made by another upscaler" });
-      return false;
-    }
-    const head = await deps.storage.headObject(source.x2Uri);
-    if (head.metadata?.[X2_METADATA.sourceSha256] !== source.sha256 || head.metadata?.[X2_METADATA.upscaler] !== deps.upscaler.model) {
-      deps.log("catalog enlargement missing", { severity: "WARNING", sourceImageId: source.id, reason: !head.exists ? "stored image not found" : head.metadata?.[X2_METADATA.sourceSha256] !== source.sha256 ? "stored image was made from other bytes" : "stored image was made by another upscaler" });
-      return false;
-    }
-    const primed = await primeSourceX2(deps.upscaler, p.rgb, p.width, (await deps.storage.downloadBuffer(source.x2Uri)).buf);
-    if (!primed) deps.log("catalog enlargement missing", { severity: "WARNING", sourceImageId: source.id, reason: "stored image is not 2x the photo" });
-    return primed;
-  } catch (error) {
-    deps.log("catalog enlargement missing", { severity: "WARNING", sourceImageId: source.id, error: error instanceof Error ? error.message : String(error) });
+export async function primeStoredEnlargement(deps: Pick<CatalogDeps, "upscaler" | "upscalerX4" | "storage" | "log">, source: { id: string; sha256: string; x2Uri: string | null; x2Model: string | null }, p: Prepared): Promise<boolean> {
+  const route = routeOf(deps);
+  if (!route || !source.x2Uri) return false;
+  if (!jobOnRoute(source.x2Model, route)) {
+    deps.log("catalog enlargement missing", { severity: "WARNING", sourceImageId: source.id, reason: "stored image was made by another upscaler" });
     return false;
   }
+  const images = jobImageUris(source.x2Uri, source.x2Model);
+  let primedAll = images.length === jobUpscalers(source.x2Model).length;
+  for (const { upscaler: id, uri } of images) {
+    const upscaler = id === deps.upscaler!.model ? deps.upscaler! : deps.upscalerX4!;
+    try {
+      const head = await deps.storage.headObject(uri);
+      if (head.metadata?.[X2_METADATA.sourceSha256] !== source.sha256 || head.metadata?.[X2_METADATA.upscaler] !== id) {
+        deps.log("catalog enlargement missing", { severity: "WARNING", sourceImageId: source.id, upscaler: id, reason: !head.exists ? "stored image not found" : head.metadata?.[X2_METADATA.sourceSha256] !== source.sha256 ? "stored image was made from other bytes" : "stored image was made by another upscaler" });
+        primedAll = false;
+        continue;
+      }
+      const regionText = head.metadata?.[X2_METADATA.region];
+      const region = regionText ? parseRegion(regionText) : null;
+      const primed = (!regionText || region) && await primeSourceX2(upscaler, p.rgb, p.width, (await deps.storage.downloadBuffer(uri)).buf, region);
+      if (!primed) { deps.log("catalog enlargement missing", { severity: "WARNING", sourceImageId: source.id, upscaler: id, reason: "stored image does not match the photo's region at the model's scale" }); primedAll = false; }
+    } catch (error) {
+      deps.log("catalog enlargement missing", { severity: "WARNING", sourceImageId: source.id, upscaler: id, error: error instanceof Error ? error.message : String(error) });
+      primedAll = false;
+    }
+  }
+  return primedAll;
 }
 
 /**
@@ -118,6 +158,8 @@ export async function loadShotFromMatte(deps: Pick<CatalogDeps, "prepare" | "sto
 
 export interface QueueEnlargementsInput {
   upscaler: Upscaler;
+  /** Spec 18 quality: the x4 upscaler, when configured (deps.upscalerX4). */
+  upscalerX4?: Upscaler | null;
   batch: Pick<typeof catalogBatches.$inferSelect, "id" | "channels">;
   product: Pick<typeof catalogProducts.$inferSelect, "id" | "productType">;
   /** The photos of the product this chunk holds. */
@@ -132,14 +174,16 @@ export interface QueueEnlargementsInput {
 }
 
 /**
- * Spec 18 3.3.4: once a product's photos are cut out, decides which need an x2 image (enlargementNeeds over every shot
- * of the product with a matte, as the render plans them) and queues their enlarge tasks (round 0, the batch's enlarge
- * lane). The photo is marked queued (x2_model) before its task is sent; a send that fails is left to the parked
- * chunk's recovery (ENLARGE_STALE_MS). A photo marked queued by an earlier delivery has its task sent again (the same
- * name, so Cloud Tasks keeps one).
+ * Spec 18 3.3.4: once a product's photos are cut out, decides which need an upscaled image and which (spec 18 quality:
+ * enlargementFactors over every shot of the product with a matte, as the render plans them: the x2 image for channels
+ * up to 2.0x, the x4 image above) and queues their enlarge tasks (round 0, the batch's enlarge lane). The photo is
+ * marked queued (x2_model, the job: one upscalerId per image) before its task is sent; a send that fails is left to
+ * the parked chunk's recovery (ENLARGE_STALE_MS). A photo marked queued by an earlier delivery has its task sent again
+ * (the same name, so Cloud Tasks keeps one).
  */
 export async function queueEnlargements(deps: CatalogDeps, input: QueueEnlargementsInput): Promise<void> {
   const { upscaler, batch, product, sources, shots } = input;
+  const route: EnlargementRoute = { x2: upscaler.model, x4: input.upscalerX4?.model ?? null };
   if (!sources.length) return;
   const rows = await deps.db.select().from(catalogSourceImages).where(inArray(catalogSourceImages.id, sources.map((s) => s.id)));
   const pending = new Set((await deps.db.select({ id: catalogOutputs.sourceImageId }).from(catalogOutputs).where(and(eq(catalogOutputs.batchId, batch.id), eq(catalogOutputs.productId, product.id), eq(catalogOutputs.status, "pending")))).map((o) => o.id));
@@ -161,10 +205,12 @@ export async function queueEnlargements(deps: CatalogDeps, input: QueueEnlargeme
         all.push({ id: row.id, shot: { width: p.width, height: p.height, rgb: p.rgb, alpha, model: row.matteModel ?? input.matteModel } });
       } catch (error) { deps.log("catalog enlargement decision skipped a shot", { severity: "WARNING", batchId: batch.id, sourceImageId: row.id, error: error instanceof Error ? error.message : String(error) }); }
     }
-    const needs = enlargementNeeds(batch.channels, all.map((a) => a.shot), product.productType, upscaler.minScale);
-    const needed = new Set(all.filter((_, i) => needs[i]).map((a) => a.id));
-    const queue = undecided.filter((r) => needed.has(r.id));
-    if (queue.length) await input.write(async (tx) => tx.update(catalogSourceImages).set({ x2Model: upscaler.model, x2Error: null }).where(and(inArray(catalogSourceImages.id, queue.map((r) => r.id)), isNull(catalogSourceImages.x2Model))));
+    const factors = enlargementFactors(batch.channels, all.map((a) => a.shot), product.productType, upscaler.minScale, !!route.x4);
+    const jobs = new Map(all.flatMap((a, i) => { const job = enlargementJob(factors[i]!, route); return job ? [[a.id, job] as const] : []; }));
+    const queue = undecided.filter((r) => jobs.has(r.id));
+    if (queue.length) await input.write(async (tx) => {
+      for (const r of queue) await tx.update(catalogSourceImages).set({ x2Model: jobs.get(r.id)!, x2Error: null }).where(and(eq(catalogSourceImages.id, r.id), isNull(catalogSourceImages.x2Model)));
+    });
     send.push(...queue);
   }
   await enqueueEnlargements(deps.enqueue, batch.id, send.map((r) => ({ id: r.id, productId: product.id })), 0, { log: deps.log, ...(input.bulk ? { bulk: true } : {}) });
@@ -194,12 +240,14 @@ export async function handleEnlargeTask(deps: CatalogDeps, body: Record<string, 
   const ledger: CostEventInput[] = [];
   // Already settled (a duplicate, or a round sent again): settle the gate again, which changes nothing or unparks.
   if (photoEnlargementState(photo) !== "queued") { await settle({}); return answer(200, "settled"); }
-  const upscaler = deps.upscaler, call = deps.enlarge;
+  const route = routeOf(deps), call = deps.enlarge;
   // UPSCALE_MODEL was switched off after this photo was queued: no enlargement is wanted any more (the plain path).
-  if (!upscaler || !call) { await settle({ x2Model: null }); return answer(200, "off"); }
-  // The configured upscaler makes the image and names it (x2_model, the object's key and metadata), also for
-  // a photo queued under another one before UPSCALE_MODEL changed, so the record and the bytes always agree.
-  const upscalerId = upscaler.model;
+  if (!route || !call) { await settle({ x2Model: null }); return answer(200, "off"); }
+  // The configured upscalers make the images and name them (x2_model, the objects' keys and metadata), also for a
+  // photo queued under other ones before UPSCALE_MODEL or UPSCALE_MODEL_X4 changed (each image keeps its factor), so
+  // the record and the bytes always agree.
+  const job = jobOnRoute(photo.x2Model, route) ? photo.x2Model! : jobForRoute(photo.x2Model, route) ?? route.x2;
+  const ids = jobUpscalers(job);
   // This delivery holds the photo's in-flight claim (set below, cleared by its settle).
   let claimed = false;
   // Spec 18 3.3.4, lane-aware: a delivery shows the batch's enlarge lane is moving, so every parked chunk of the batch
@@ -207,13 +255,19 @@ export async function handleEnlargeTask(deps: CatalogDeps, body: Record<string, 
   // one are then never sent again; ENLARGE_STALE_MS means "the batch's lane has been quiet that long".
   await deps.db.update(catalogChunks).set({ progressAt: deps.now() }).where(and(eq(catalogChunks.batchId, batchId), eq(catalogChunks.taskName, ENLARGING_TASK)));
   try {
-    const prefix = batchPrefix(batch.brandSlug, batch.id, batch.isTest);
-    const path = enlargedPath(derivedPrefixFor(deps.storage, prefix, photo), product.pathKey, photo.n, upscalerId), uri = deps.storage.toGsUri(deps.storage.getBucketName(), path);
-    const head = await deps.storage.headObject(uri);
-    if (head.exists && head.metadata?.[X2_METADATA.sourceSha256] === photo.sha256 && head.metadata?.[X2_METADATA.upscaler] === upscalerId) {
-      if (await settle({ x2Uri: uri, x2Model: upscalerId, x2Error: null }) === SETTLED_ELSEWHERE) return answer(200, "settled");
+    const prefix = batchPrefix(batch.brandSlug, batch.id, batch.isTest), derived = derivedPrefixFor(deps.storage, prefix, photo);
+    const images = ids.map((id) => { const path = enlargedPath(derived, product.pathKey, photo.n, id, upscalerFactor(id)); return { id, path, uri: deps.storage.toGsUri(deps.storage.getBucketName(), path) }; });
+    const stored = async (image: { uri: string; id: string }) => {
+      const head = await deps.storage.headObject(image.uri);
+      return head.exists && head.metadata?.[X2_METADATA.sourceSha256] === photo.sha256 && head.metadata?.[X2_METADATA.upscaler] === image.id;
+    };
+    const missing = [];
+    for (const image of images) if (!(await stored(image))) missing.push(image);
+    if (!missing.length) {
+      if (await settle({ x2Uri: images[0]!.uri, x2Model: job, x2Error: null }) === SETTLED_ELSEWHERE) return answer(200, "settled");
       return answer(200, "done", { reused: true });
     }
+    const target = missing[0]!, upscalerId = target.id, factor = upscalerFactor(upscalerId);
     // The in-flight claim. One guarded row update (no chunk lock held): a second live delivery (Cloud Tasks
     // at least once, or a re-sent round landing beside the first) answers 503 without a call or an attempt counted.
     if (!(await claim())) {
@@ -223,17 +277,25 @@ export async function handleEnlargeTask(deps: CatalogDeps, body: Record<string, 
       return answer(503, "in_flight");
     }
     claimed = true;
-    let p: Prepared;
-    try { p = await deps.prepare((await deps.storage.downloadBuffer(photo.rawUri)).buf, photo.originalName, (b) => deps.matting.convert(b, { batchId, productId })); }
+    let p: Prepared, alpha: Buffer | null = null;
+    try {
+      if (photo.matteUri) ({ p, alpha } = await loadShotFromMatte(deps, photo, photo.matteUri, { batchId, productId }));
+      else p = await deps.prepare((await deps.storage.downloadBuffer(photo.rawUri)).buf, photo.originalName, (b) => deps.matting.convert(b, { batchId, productId }));
+    }
     catch (error) { if (error instanceof UnsupportedSourceError) throw new TerminalEnlargeFailure(error.message); throw error; }
+    // Spec 18 quality: only the product's region (its box plus a margin) goes to the upscaler; the whole photo when the
+    // matte finds no product (the render fails that shot anyway) or is not stored.
+    const region = (alpha && alpha.length === p.width * p.height ? shotEnlargementRegion({ width: p.width, height: p.height, rgb: p.rgb, alpha, model: photo.matteModel ?? "" }, product.productType) : null)
+      ?? { x: 0, y: 0, w: p.width, h: p.height };
     const limit = upscaleMaxPixels();
-    if (p.width * p.height > limit) throw new TerminalEnlargeFailure(`The photo has ${p.width * p.height} pixels, above the ${limit} the upscale service takes.`);
+    if (region.w * region.h > limit) throw new TerminalEnlargeFailure(`The photo's product region has ${region.w * region.h} pixels, above the ${limit} the upscale service takes.`);
+    if (Math.max(region.w, region.h) * factor > UPSCALE_MAX_OUTPUT_SIDE) throw new TerminalEnlargeFailure(`The photo's product region is ${region.w}x${region.h}; ${factor}x of it is more than a JPEG holds.`);
     const t0 = +deps.now();
     let result: EnlargeResult;
     // The model-unavailable 503 is not terminal here: it counts an attempt and the queue retries with its back-off,
     // so a model still loading passes and a deploy problem holds the photo after ENLARGE_TASK_MAX_ATTEMPTS.
     const deadlineAt = started + ENLARGE_DISPATCH_DEADLINE_SEC * 1000 - ENLARGE_TASK_MARGIN_MS;
-    try { result = await call(await upscaleUpload(p.rgb, p.width, p.height), { batchId, productId }, { deadlineAt }); }
+    try { result = await call(await upscaleUpload(p.rgb, p.width, p.height, region), { batchId, productId }, { deadlineAt, upscaler: upscalerId }); }
     catch (error) {
       if (error instanceof EnlargeError) {
         const ms = +deps.now() - t0;
@@ -245,14 +307,20 @@ export async function handleEnlargeTask(deps: CatalogDeps, body: Record<string, 
     }
     ledger.push(costRow(upscalerId, result.ms, "ok"));
     const meta = await sharp(result.jpeg).metadata();
-    if (meta.width !== p.width * UPSCALE_FACTOR || meta.height !== p.height * UPSCALE_FACTOR) {
-      throw new TerminalEnlargeFailure(`The upscale service answered ${meta.width}x${meta.height} for a ${p.width}x${p.height} photo, not exactly 2x.`);
+    if (meta.width !== region.w * factor || meta.height !== region.h * factor) {
+      throw new TerminalEnlargeFailure(`The upscale service answered ${meta.width}x${meta.height} for a ${region.w}x${region.h} region, not exactly ${factor}x.`);
     }
-    // The service's own JPEG (quality 95, 4:4:4), stored as it came.
-    await deps.storage.uploadBuffer(path, result.jpeg, "image/jpeg", { metadata: { [X2_METADATA.sourceSha256]: photo.sha256, [X2_METADATA.upscaler]: upscalerId } });
-    // Another delivery stored the image first (only after this one's claim lapsed): no second write, no second cost row.
-    if (await settle({ x2Uri: uri, x2Model: upscalerId, x2Error: null, x2ClaimedAt: null }) === SETTLED_ELSEWHERE) return answer(200, "settled");
-    deps.log("catalog upscale", { ...fields, upscaleMs: result.ms, attempts: photo.x2Attempts + 1 });
+    // The service's own JPEG (quality 95, 4:4:4), stored as it came, with the region it was made from.
+    await deps.storage.uploadBuffer(target.path, result.jpeg, "image/jpeg", { metadata: { [X2_METADATA.sourceSha256]: photo.sha256, [X2_METADATA.upscaler]: upscalerId, [X2_METADATA.region]: formatRegion(region) } });
+    deps.log("catalog upscale", { ...fields, upscaler: upscalerId, region: formatRegion(region), photo: `${p.width}x${p.height}`, upscaleMs: result.ms, attempts: photo.x2Attempts + 1 });
+    // Spec 18 quality: another image of the job is still missing. The claim goes and the queue's retry makes it (one
+    // service call per delivery); no attempt is counted, since nothing failed.
+    if (missing.length > 1) {
+      if (await settle({ x2Model: job, x2ClaimedAt: null }) === SETTLED_ELSEWHERE) return answer(200, "settled");
+      return answer(503, "next_image", { upscaler: upscalerId, remaining: missing.length - 1 });
+    }
+    // Another delivery stored the job first (only after this one's claim lapsed): no second write, no second cost row.
+    if (await settle({ x2Uri: images[0]!.uri, x2Model: job, x2Error: null, x2ClaimedAt: null }) === SETTLED_ELSEWHERE) return answer(200, "settled");
     return answer(200, "done");
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error);
@@ -261,7 +329,7 @@ export async function handleEnlargeTask(deps: CatalogDeps, body: Record<string, 
     // Another delivery stored the image meanwhile: nothing failed.
     if (attempts === SETTLED_ELSEWHERE) return answer(200, "settled");
     if (attempts >= ENLARGE_TASK_MAX_ATTEMPTS) {
-      deps.log("enlargement failed", { severity: "ERROR", ...fields, attempts, retryCount: opts.retryCount ?? 0, model: upscalerId, error: reason });
+      deps.log("enlargement failed", { severity: "ERROR", ...fields, attempts, retryCount: opts.retryCount ?? 0, model: job, error: reason });
       return answer(200, "failed");
     }
     deps.log("enlargement retry", { severity: "WARNING", ...fields, attempts, retryCount: opts.retryCount ?? 0, error: reason });
@@ -292,6 +360,8 @@ export async function handleEnlargeTask(deps: CatalogDeps, body: Record<string, 
    */
   async function settle(patch: Partial<Pick<typeof catalogSourceImages.$inferInsert, "x2Uri" | "x2Model" | "x2Error" | "x2ClaimedAt">>, terminal = false): Promise<number> {
     const failure = !("x2Uri" in patch) && "x2Error" in patch;
+    // A partial write (spec 18 quality: one image of the job stored, another still missing) is guarded like a done one.
+    const partial = !failure && !("x2Uri" in patch) && "x2ClaimedAt" in patch;
     const now = deps.now();
     const { attempts, unparked } = await deps.db.transaction(async (tx) => {
       const chunks = await lockProductChunks(tx as unknown as CatalogDeps["db"], batchId as string, productId as string);
@@ -301,7 +371,7 @@ export async function handleEnlargeTask(deps: CatalogDeps, body: Record<string, 
         const next = terminal ? sql`${ENLARGE_TASK_MAX_ATTEMPTS}::int` : sql`LEAST(${ENLARGE_TASK_MAX_ATTEMPTS}::int, ${catalogSourceImages.x2Attempts} + 1)`;
         const [row] = await tx.update(catalogSourceImages).set({ ...patch, x2Attempts: next, x2Error: patch.x2Error ?? null }).where(and(eq(catalogSourceImages.id, sourceImageId as string), isNull(catalogSourceImages.x2Uri))).returning({ attempts: catalogSourceImages.x2Attempts });
         attempts = row?.attempts ?? SETTLED_ELSEWHERE;
-      } else if ("x2Uri" in patch) {
+      } else if ("x2Uri" in patch || partial) {
         const [row] = await tx.update(catalogSourceImages).set(patch).where(and(eq(catalogSourceImages.id, sourceImageId as string), isNull(catalogSourceImages.x2Uri))).returning({ id: catalogSourceImages.id });
         if (!row) { ledger.splice(0); attempts = SETTLED_ELSEWHERE; }
       } else if (Object.keys(patch).length) {
@@ -311,7 +381,7 @@ export async function handleEnlargeTask(deps: CatalogDeps, body: Record<string, 
       return { attempts, unparked: await unparkSettledChunks(tx as unknown as CatalogDeps["db"], chunks, now) };
     });
     for (const chunkId of unparked) deps.log("chunk enlarged", { batchId, chunkId });
-    if (unparked.length || !failure || attempts >= ENLARGE_TASK_MAX_ATTEMPTS) {
+    if (unparked.length || (!failure && !partial) || attempts >= ENLARGE_TASK_MAX_ATTEMPTS) {
       await topUpWindow(deps, batchId as string);
       await refreshBatchProgress(deps.db, batchId as string, deps.now());
     }

@@ -4,7 +4,7 @@
 // Adding a check is adding one object here; runInvariants (run.ts) runs, logs and counts every one.
 import { sql, type SQL } from "drizzle-orm";
 import { PROCESSING_STATUSES } from "../pipeline/dispatch";
-import { DEFAULT_UPSCALE_MIN_SCALE } from "../upscale";
+import { LEGACY_UPSCALE_MIN_SCALE } from "../upscale";
 
 export type InvariantSeverity = "ERROR" | "WARNING";
 export interface InvariantCheck {
@@ -77,11 +77,15 @@ export const CHECKS: readonly InvariantCheck[] = [
   },
   {
     id: "enlarged_without_upscaler",
-    sentence: "In a batch made with the enlargement stage, no verified output is enlarged more than 1.5x without the upscaler (a plain resize never stands in).",
+    sentence: "In a batch made with the enlargement stage, no verified output is enlarged past the batch's upscaler threshold (1.0x since spec 18 quality, 1.5x before) without the upscaler (a plain resize never stands in).",
     severity: "ERROR",
     // Spec 18: batches started before the stage (no options.enlargement) kept the old silent fallback and are left as they are.
+    // Spec 18 quality: the threshold is the one the batch was started with (options.enlargement.minScale, 1.0 since the
+    // change); a batch from before it has none and keeps 1.5. The 1e-6 slack covers the real column's rounding.
     sql: () => sql`SELECT o.id, o.batch_id FROM catalog_outputs AS o JOIN catalog_batches AS b ON b.id = o.batch_id
       WHERE jsonb_typeof(b.options->'enlargement') = 'object' AND o.status = 'verified'
-        AND o.scale > ${DEFAULT_UPSCALE_MIN_SCALE}::real AND NOT (o.flags @> '["upscaled"]'::jsonb)`,
+        AND o.scale > (CASE WHEN jsonb_typeof(b.options->'enlargement'->'minScale') = 'number'
+          THEN (b.options->'enlargement'->>'minScale')::real ELSE ${LEGACY_UPSCALE_MIN_SCALE}::real END) + 1e-6
+        AND NOT (o.flags @> '["upscaled"]'::jsonb)`,
   },
 ];

@@ -30,7 +30,8 @@ import { cloudRunAudience } from "../../cloud-run";
 import { borderMedian, decodeRaster, delta, dilate, dropSpecks, erode, lumaAt, maskCount, SPECK_PX, type Mask } from "./image";
 import type { Raster } from "./types";
 
-export const ENHANCEMENT_CANDIDATES: readonly string[] = ["realesrgan-x2plus", "swinir-x2"];
+/** The x2 upscalers the spec 11 gate compares at UPSCALE_SCALE (spec 18 quality: the service serves no Real-ESRGAN model). */
+export const ENHANCEMENT_CANDIDATES: readonly string[] = ["swinir-x2"];
 export const BASELINE_METHOD = "baseline";
 export const UPSCALE_SCALE = 2;
 export const QUALIFYING_LONG_SIDE_PX = 1600;

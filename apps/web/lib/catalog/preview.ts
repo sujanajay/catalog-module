@@ -64,6 +64,11 @@ export async function patchDetected(id: string, value: unknown) {
   return { collecting: true };
 }
 type PlannedSource = { productId: string; n: number; sha256: string };
+/** The upscalers whose outputs the worker keeps (UPSCALE_MODEL and, spec 18 quality, UPSCALE_MODEL_X4); null when off. */
+function configuredUpscaleModels(): string[] | null {
+  const config = upscaleConfigFromEnv();
+  return config.model ? [config.model, ...(config.x4Model ? [config.x4Model] : [])] : null;
+}
 /**
  * A live output and the photo it was made from (sha256). `workerMatteModel`: the cut-out model the worker will use
  * for this product in this batch (matteModelFor), or null when that cannot be known before the batch runs.
@@ -75,7 +80,7 @@ type LiveOutput = { productId: string; n: number; channel: ChannelId; sha256: st
  * sha256, today's CHANNEL_RULES_VERSION, the cut-out model it will use, plain or upscaled). Anything in doubt is
  * counted, so the count may be higher than what is made but never lower.
  */
-export function plannedImages(sources: readonly PlannedSource[], channels: readonly ChannelId[], live: readonly LiveOutput[], upscaleModel: string | null = upscaleConfigFromEnv().model): { outputs: number; sourcesToMake: number } {
+export function plannedImages(sources: readonly PlannedSource[], channels: readonly ChannelId[], live: readonly LiveOutput[], upscaleModel: string | readonly string[] | null = configuredUpscaleModels()): { outputs: number; sourcesToMake: number } {
   const current = (o: LiveOutput) => o.workerMatteModel !== null && renderKeys({ sourceSha256: o.sha256, channel: o.channel, n: o.n, policyKey: `default|${o.workerMatteModel}` }, upscaleModel).includes(o.renderKey);
   let outputs = 0, sourcesToMake = 0;
   for (const source of sources) {

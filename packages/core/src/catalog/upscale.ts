@@ -1,25 +1,55 @@
-// Spec 11 (render integration): a learned 2x upscale of the product colour, used only where a channel's plan
-// enlarges a photo beyond UPSCALE_MIN_SCALE (today the exact-size channels, such as Trendyol 1200x1800 from an
-// 800x1200 source, and a variable canvas held at its minimum by a small photo). Off unless UPSCALE_MODEL names a
-// model. Spec 18: the worker's render never calls the service. The enlarge task makes the photo's x2 image once and
-// stores it; the render primes this module's cache with the stored bytes (primeSourceX2) and its upscaler
-// (storedUpscaler) answers every other request with StoredEnlargementMissingError. A missing or failed x2 leaves
-// `upscaled` off and the render flags `enlargement_failed` (render.ts), which holds the output: a plain resize never
-// stands in, except with UPSCALE_MODEL=off, where no upscaler exists and the plain path is the only one. The model
-// id never reaches operator copy: the flag sentences are model-free (types.ts) and the id lives only in render_key,
-// x2_model and engineering logs.
+// Spec 11 (render integration): a learned upscale of the product colour, used wherever a channel's plan enlarges a
+// photo beyond UPSCALE_MIN_SCALE. Off unless UPSCALE_MODEL names a model. Spec 18: the worker's render never calls the
+// service. The enlarge task makes the photo's upscaled images once and stores them; the render primes this module's
+// cache with the stored bytes (primeSourceX2) and its upscalers (storedUpscaler) answer every other request with
+// StoredEnlargementMissingError. A missing or failed image leaves `upscaled` off and the render flags
+// `enlargement_failed` (render.ts), which holds the output: a plain resize never stands in, except with
+// UPSCALE_MODEL=off, where no upscaler exists and the plain path is the only one. The model id never reaches operator
+// copy: the flag sentences are model-free (types.ts) and the id lives only in render_key, x2_model and engineering logs.
+//
+// Spec 18 quality (2026-10-29 bake-off, owner: "pixelated"): every enlargement above 1.0x uses the upscaler (it was
+// 1.5x). Up to 2.0x the x2 model (UPSCALE_MODEL, SwinIR-S x2) makes the colour, then Lanczos to the product size; above
+// 2.0x one x4 pass (UPSCALE_MODEL_X4, SwinIR-S x4), then a Lanczos downscale, replacing x2 plus a Lanczos stretch plus
+// an unsharp mask. AI output is never sharpened. x2 stays below 2.0x because it was more faithful there on the ground
+// truth set (+1.0 to +1.4 dB PSNR, deltaE 0.63 against 1.35 to 1.51), so a photo used on both sides of 2.0x gets one
+// image of each model, each made once and shared by every channel of the photo. The upscaler sees only the product's
+// box plus a margin (enlargeRegion), not the whole photo; the stored image records that region, and the render cuts
+// each channel's crop out of it at the model's scale.
 import sharp from "sharp";
 import type { Size } from "./channels";
 import { log } from "../log";
 
-/** Bumped when the request or the recombination changes; part of render_key when the upscaler was used. */
-export const UPSCALER_VERSION = "1";
-/** The enlargement above which the upscaler is used when UPSCALE_MODEL is set (equal to MAX_UPSCALE, the variable canvases' cap). */
-export const DEFAULT_UPSCALE_MIN_SCALE = 1.5;
-/** The service always returns exactly this factor (POST /upscale?scale=2). */
+/**
+ * Bumped when the request or the recombination changes; part of render_key when the upscaler was used. 2: the product
+ * region instead of the whole photo, x4 above 2.0x, no sharpening of the upscaler's colour (spec 18 quality).
+ */
+export const UPSCALER_VERSION = "2";
+/** The enlargement above which the upscaler is used when UPSCALE_MODEL is set: every enlargement (spec 18 quality; 1.5 before). */
+export const DEFAULT_UPSCALE_MIN_SCALE = 1.0;
+/** The threshold batches made before spec 18 quality used (options.enlargement without minScale). */
+export const LEGACY_UPSCALE_MIN_SCALE = 1.5;
+/** Above this enlargement the x4 model makes the colour (when UPSCALE_MODEL_X4 is set); at or below it the x2 model. */
+export const UPSCALE_X4_MIN_SCALE = 2.0;
+/** The scale of the x2 model; the default for an upscaler that names none. */
 export const UPSCALE_FACTOR = 2;
+/** The factors the service's models upscale by (services/matting/app.py UPSCALE_SCALES). */
+export type UpscaleFactor = 2 | 4;
+/** Each served model's fixed scale. */
+export const UPSCALE_MODEL_FACTORS: Readonly<Record<string, UpscaleFactor>> = { "swinir-x2": 2, "swinir-x4": 4 };
+/**
+ * The margin (source px) around the product box that the upscaler also sees. The service tiles with 32 px of real
+ * context around every kept pixel (UPSCALE_OVERLAP in services/matting/app.py) and reflects the image beyond its edge;
+ * with this margin no pixel the render uses lies within 32 px of the region's edge, so it sees real context there too.
+ */
+export const ENLARGE_REGION_MARGIN_PX = 32;
 
-export interface UpscaleConfig { model: string | null; minScale: number; /** Which matting service upscales (spec 16 3.1.3); absent is the GPU service. */ target?: UpscaleTarget }
+export interface UpscaleConfig {
+  model: string | null;
+  /** Spec 18 quality: the x4 model used above UPSCALE_X4_MIN_SCALE (UPSCALE_MODEL_X4); null: the x2 model everywhere. */
+  x4Model?: string | null;
+  minScale: number;
+  /** Which matting service upscales (spec 16 3.1.3); absent is the GPU service. */ target?: UpscaleTarget;
+}
 /** The matting service that answers /upscale: the GPU service (spec 11) or the CPU cut-out service (spec 16). */
 export type UpscaleTarget = "cpu" | "gpu";
 
@@ -44,12 +74,17 @@ export function upscaleTargetFromEnv(env: NodeJS.ProcessEnv = process.env): Upsc
   return gpuUrlsFromEnv(env).includes(url) ? "gpu" : "cpu";
 }
 
-/** `UPSCALE_MODEL` (unset or empty: off), `UPSCALE_MIN_SCALE` (default 1.5; a value that is not a number of at least 1 keeps the default) and the target from `UPSCALE_URL`. */
+/**
+ * `UPSCALE_MODEL` (unset or empty: off), `UPSCALE_MODEL_X4` (unset, empty or "off": no x4 model; ignored when
+ * UPSCALE_MODEL is off), `UPSCALE_MIN_SCALE` (default 1.0; a value that is not a number of at least 1 keeps the
+ * default) and the target from `UPSCALE_URL`.
+ */
 export function upscaleConfigFromEnv(env: NodeJS.ProcessEnv = process.env): UpscaleConfig {
   const model = env.UPSCALE_MODEL?.trim() || null;
+  const x4 = env.UPSCALE_MODEL_X4?.trim();
   const raw = env.UPSCALE_MIN_SCALE?.trim(), parsed = raw ? Number(raw) : NaN;
   const target = upscaleTargetFromEnv(env);
-  return { model, minScale: Number.isFinite(parsed) && parsed >= 1 ? parsed : DEFAULT_UPSCALE_MIN_SCALE, ...(target === "cpu" ? { target } : {}) };
+  return { model, x4Model: model && x4 && x4 !== "off" ? x4 : null, minScale: Number.isFinite(parsed) && parsed >= 1 ? parsed : DEFAULT_UPSCALE_MIN_SCALE, ...(target === "cpu" ? { target } : {}) };
 }
 
 /**
@@ -66,7 +101,7 @@ export function shouldUpscale(scale: number, minScale: number): boolean {
  * upscale-models stage, recorded in services/matting/README.md). Bumped whenever an export changes, so the outputs
  * it made re-render once; a redeploy with the same export keeps every key.
  */
-export const UPSCALE_MODEL_VERSIONS: Readonly<Record<string, string>> = { "realesrgan-x2plus": "e828354d", "swinir-x2": "9f4a3f85" };
+export const UPSCALE_MODEL_VERSIONS: Readonly<Record<string, string>> = { "swinir-x2": "9f4a3f85", "swinir-x4": "f477a052" };
 /**
  * The upscaler id that goes into render_key and the render result: the model id for the GPU service (spec 11, so
  * every key made there stays the same) and `<model>+cpu` for the CPU service (spec 16 3.1.3: CPU and GPU float
@@ -79,17 +114,23 @@ export function upscalerId(model: string, target: UpscaleTarget = "gpu"): string
 export function isCpuUpscalerId(id: string): boolean { return id.endsWith(CPU_UPSCALER_SUFFIX); }
 /** The id of the same model on the other service, for the keys a live output may carry (renderKeys). */
 export function otherTargetUpscalerId(id: string): string { return isCpuUpscalerId(id) ? id.slice(0, -CPU_UPSCALER_SUFFIX.length) : upscalerId(id, "cpu"); }
+/** The model id of an upscalerId (without the "+cpu" suffix): what the service is asked for. */
+export function upscalerModel(id: string): string { return isCpuUpscalerId(id) ? id.slice(0, -CPU_UPSCALER_SUFFIX.length) : id; }
+/** The scale of an upscalerId's model (UPSCALE_MODEL_FACTORS; 2 for a model it does not list). */
+export function upscalerFactor(id: string): UpscaleFactor { return UPSCALE_MODEL_FACTORS[upscalerModel(id)] ?? UPSCALE_FACTOR; }
 /** The render_key part that names the upscaler (an upscalerId), its export and the recombination; present only when the upscaler was used. */
 export const upscalerKey = (id: string): string => {
   const cpu = isCpuUpscalerId(id), model = cpu ? id.slice(0, -CPU_UPSCALER_SUFFIX.length) : id;
   return `u:${model}@${UPSCALE_MODEL_VERSIONS[model] ?? "unknown"}:${UPSCALER_VERSION}${cpu ? ":cpu" : ""}`;
 };
 
-/** What the render needs: one 2x JPEG for one image. Throws on any failure. */
+/** What the render needs: one upscaled JPEG for one image (`factor` times its size). Throws on any failure. */
 export interface Upscaler {
   /** The upscalerId (model id, plus "+cpu" on the CPU service): what render_key and the logs carry. */
   readonly model: string;
   readonly minScale: number;
+  /** The model's scale; absent is 2 (UPSCALE_FACTOR). */
+  readonly factor?: UpscaleFactor;
   /** `trace` names the batch and product for the service's log lines (MattingTrace headers). */
   upscale(image: Buffer, contentType: "image/png" | "image/jpeg", trace?: { batchId?: string | undefined; productId?: string | undefined }): Promise<{ jpeg: Buffer; ms: number }>;
 }
@@ -105,7 +146,47 @@ export class StoredEnlargementMissingError extends Error {
  * `enlargement_failed`. `id` is an upscalerId (the model, plus "+cpu" when a CPU service makes the stored images).
  */
 export function storedUpscaler(id: string, minScale: number): Upscaler {
-  return { model: id, minScale, upscale: async () => { throw new StoredEnlargementMissingError(); } };
+  return { model: id, minScale, factor: upscalerFactor(id), upscale: async () => { throw new StoredEnlargementMissingError(); } };
+}
+
+/** The scale of an Upscaler (2 when it names none). */
+export const factorOf = (upscaler: Upscaler): UpscaleFactor => upscaler.factor ?? UPSCALE_FACTOR;
+
+/**
+ * Spec 18 quality: which upscalers may make the colour of an enlargement of `scale`, best first. Above
+ * UPSCALE_X4_MIN_SCALE only the x4 model (x2 plus a Lanczos stretch is what the bake-off replaced); at or below it the
+ * x2 model, then the x4 model (x4 plus a Lanczos downscale is still a faithful enlargement, so a photo the matte stage
+ * planned only above 2.0x and the render places lower, as a uniform scale may, is not held). Without an x4 model the
+ * x2 model makes every enlargement.
+ */
+export function upscalersFor(scale: number, x2: Upscaler, x4: Upscaler | null | undefined): Upscaler[] {
+  if (!x4) return [x2];
+  return scale > UPSCALE_X4_MIN_SCALE + 1e-9 ? [x4] : [x2, x4];
+}
+
+/** A rectangle of the prepared photo, in its pixels. */
+export interface EnlargeRegion { x: number; y: number; w: number; h: number }
+/**
+ * The part of a `width` x `height` photo the upscaler sees: the union of `boxes` (the product's box as the render may
+ * place it) grown by ENLARGE_REGION_MARGIN_PX on every side, inside the photo. Null without a box.
+ */
+export function enlargeRegion(boxes: readonly EnlargeRegion[], width: number, height: number, margin = ENLARGE_REGION_MARGIN_PX): EnlargeRegion | null {
+  if (!boxes.length) return null;
+  const x0 = Math.max(0, Math.min(...boxes.map((b) => b.x)) - margin), y0 = Math.max(0, Math.min(...boxes.map((b) => b.y)) - margin);
+  const x1 = Math.min(width, Math.max(...boxes.map((b) => b.x + b.w)) + margin), y1 = Math.min(height, Math.max(...boxes.map((b) => b.y + b.h)) + margin);
+  return x1 > x0 && y1 > y0 ? { x: x0, y: y0, w: x1 - x0, h: y1 - y0 } : null;
+}
+/** True when `inner` lies inside `outer`. */
+export const regionContains = (outer: EnlargeRegion, inner: EnlargeRegion): boolean =>
+  inner.x >= outer.x && inner.y >= outer.y && inner.x + inner.w <= outer.x + outer.w && inner.y + inner.h <= outer.y + outer.h;
+/** "x,y,w,h", the stored image's `region` metadata. */
+export const formatRegion = (r: EnlargeRegion): string => `${r.x},${r.y},${r.w},${r.h}`;
+/** The `region` metadata back as a region; null when it is not four whole numbers with a positive size. */
+export function parseRegion(text: string | null | undefined): EnlargeRegion | null {
+  const parts = (text ?? "").split(",").map((v) => Number(v));
+  if (parts.length !== 4 || parts.some((v) => !Number.isInteger(v) || v < 0)) return null;
+  const [x, y, w, h] = parts as [number, number, number, number];
+  return w > 0 && h > 0 ? { x, y, w, h } : null;
 }
 
 /** Ids for the logs; never shown to an operator. */
@@ -117,12 +198,16 @@ export interface UpscaleTrace { batchId?: string | undefined; productId?: string
  * far below what the x2 model or the fidelity gate's bars resolve, and the sources are JPEGs already.
  */
 export const UPSCALE_UPLOAD_JPEG = { quality: 95, chromaSubsampling: "4:4:4" } as const;
-export async function upscaleUpload(rgb: Buffer, width: number, height: number): Promise<Buffer> {
-  return sharp(rgb, { raw: { width, height, channels: 3 } }).jpeg(UPSCALE_UPLOAD_JPEG).toBuffer();
+export async function upscaleUpload(rgb: Buffer, width: number, height: number, region?: EnlargeRegion | null): Promise<Buffer> {
+  const image = sharp(rgb, { raw: { width, height, channels: 3 } });
+  return (region ? image.extract({ left: region.x, top: region.y, width: region.w, height: region.h }) : image).jpeg(UPSCALE_UPLOAD_JPEG).toBuffer();
 }
 
-/** The x2 colour of a whole source photo (raw RGB, exactly twice the source in both axes) and the service time. */
-export interface SourceX2 { rgb: Buffer; width: number; height: number; ms: number }
+/**
+ * The upscaled colour of one region of a source photo (raw RGB, exactly `factor` times the region in both axes; the
+ * whole photo when the service made it inline) and the service time.
+ */
+export interface SourceX2 { rgb: Buffer; width: number; height: number; ms: number; factor: UpscaleFactor; region: EnlargeRegion }
 /**
  * One x2 image per source photo (spec 11 assumption 3): the first channel that needs it starts the call (or, in the
  * worker, finds the stored image primeSourceX2 put here), every other channel and every auto-resolve re-render of the
@@ -136,29 +221,35 @@ function cacheFor(upscaler: Upscaler): WeakMap<Buffer, Promise<SourceX2 | null>>
   return perUpscaler;
 }
 /**
- * Spec 18 3.3.5: primes the x2 image of the prepared photo whose colour is `rgb` (`width` wide) from its stored JPEG.
- * Returns false and primes nothing when the image is not exactly twice the photo in both axes (it then counts as
- * missing). `ms` is 0: the service time and its cost row belong to the enlarge task, not to the render.
+ * Spec 18 3.3.5: primes the upscaled image of the prepared photo whose colour is `rgb` (`width` wide) from its stored
+ * JPEG, made from `region` of the photo (the whole photo when absent: images stored before spec 18 quality). Returns
+ * false and primes nothing when the region does not lie in the photo or the image is not exactly the upscaler's
+ * factor times the region in both axes (it then counts as missing). `ms` is 0: the service time and its cost row
+ * belong to the enlarge task, not to the render.
  */
-export async function primeSourceX2(upscaler: Upscaler, rgb: Buffer, width: number, x2Jpeg: Buffer): Promise<boolean> {
-  const height = rgb.length / 3 / width;
+export async function primeSourceX2(upscaler: Upscaler, rgb: Buffer, width: number, x2Jpeg: Buffer, region?: EnlargeRegion | null): Promise<boolean> {
+  const height = rgb.length / 3 / width, f = factorOf(upscaler);
+  const r = region ?? { x: 0, y: 0, w: width, h: height };
+  if (!regionContains({ x: 0, y: 0, w: width, h: height }, r)) return false;
   const out = await sharp(x2Jpeg).removeAlpha().toColourspace("srgb").raw().toBuffer({ resolveWithObject: true });
-  if (out.info.width !== width * UPSCALE_FACTOR || out.info.height !== height * UPSCALE_FACTOR || out.info.channels !== 3) return false;
-  cacheFor(upscaler).set(rgb, Promise.resolve({ rgb: out.data, width: out.info.width, height: out.info.height, ms: 0 }));
+  if (out.info.width !== r.w * f || out.info.height !== r.h * f || out.info.channels !== 3) return false;
+  cacheFor(upscaler).set(rgb, Promise.resolve({ rgb: out.data, width: out.info.width, height: out.info.height, ms: 0, factor: f, region: r }));
   return true;
 }
+/** True when this upscaler has an image (primed, or a call under way) for the prepared photo whose colour is `rgb`. */
+export function hasSourceX2(upscaler: Upscaler, rgb: Buffer): boolean { return cacheFor(upscaler).has(rgb); }
 export function sourceX2(upscaler: Upscaler, rgb: Buffer, width: number, trace: UpscaleTrace = {}): { result: Promise<SourceX2 | null>; reused: boolean } {
   const perUpscaler = cacheFor(upscaler);
   const cached = perUpscaler.get(rgb);
   if (cached) return { result: cached, reused: true };
   const result = (async (): Promise<SourceX2 | null> => {
-    const started = Date.now(), height = rgb.length / 3 / width;
+    const started = Date.now(), height = rgb.length / 3 / width, f = factorOf(upscaler);
     try {
       const reply = await upscaler.upscale(await upscaleUpload(rgb, width, height), "image/jpeg", { batchId: trace.batchId, productId: trace.productId });
       const out = await sharp(reply.jpeg).removeAlpha().toColourspace("srgb").raw().toBuffer({ resolveWithObject: true });
-      if (out.info.width !== width * UPSCALE_FACTOR || out.info.height !== height * UPSCALE_FACTOR || out.info.channels !== 3) throw new Error(`The upscale service returned ${out.info.width} x ${out.info.height} for a ${width} x ${height} photo.`);
+      if (out.info.width !== width * f || out.info.height !== height * f || out.info.channels !== 3) throw new Error(`The upscale service returned ${out.info.width} x ${out.info.height} for a ${width} x ${height} photo.`);
       log("INFO", "catalog_upscale", { ...trace, model: upscaler.model, ms: reply.ms, wallMs: Date.now() - started, source: `${width}x${height}` });
-      return { rgb: out.data, width: out.info.width, height: out.info.height, ms: reply.ms };
+      return { rgb: out.data, width: out.info.width, height: out.info.height, ms: reply.ms, factor: f, region: { x: 0, y: 0, w: width, h: height } };
     } catch (error) {
       log("WARNING", "catalog enlargement missing", { ...trace, model: upscaler.model, wallMs: Date.now() - started, error: error instanceof Error ? error.message : String(error) });
       return null;
@@ -169,17 +260,19 @@ export function sourceX2(upscaler: Upscaler, rgb: Buffer, width: number, trace: 
 }
 
 /**
- * The colour of `crop` (in a `sourceWidth`-wide RGB buffer) enlarged to `target`: cut at doubled coordinates from
- * the photo's one x2 image (sourceX2) and taken to `target` with Lanczos3 (up or down). Returns raw RGB (3 bytes per
- * pixel), the service time and whether the x2 image was shared with an earlier output, or null on any failure (the
- * render then flags `enlargement_failed`).
+ * The colour of `crop` (in a `sourceWidth`-wide RGB buffer) enlarged to `target`: cut from the photo's one image of
+ * this upscaler (sourceX2) at the crop's coordinates inside the image's region times the model's factor, and taken to
+ * `target` with Lanczos3 (up or down). Returns raw RGB (3 bytes per pixel), the service time and whether the image
+ * was shared with an earlier output, or null on any failure, a crop outside the image's region included (the render
+ * then tries its next upscaler or flags `enlargement_failed`).
  */
 export async function upscaledRgb(upscaler: Upscaler, rgb: Buffer, sourceWidth: number, crop: { x: number; y: number; w: number; h: number }, target: Size, trace: UpscaleTrace = {}): Promise<{ rgb: Buffer; ms: number; reused: boolean } | null> {
   const { result, reused } = sourceX2(upscaler, rgb, sourceWidth, trace), x2 = await result;
   if (!x2) return null;
   try {
-    const f = UPSCALE_FACTOR;
-    const out = await sharp(x2.rgb, { raw: { width: x2.width, height: x2.height, channels: 3 } }).extract({ left: crop.x * f, top: crop.y * f, width: crop.w * f, height: crop.h * f }).resize(target.w, target.h, { fit: "fill", kernel: "lanczos3" }).raw().toBuffer();
+    const f = x2.factor, r = x2.region;
+    if (!regionContains(r, crop)) throw new Error(`The crop ${formatRegion(crop)} lies outside the enlarged region ${formatRegion(r)}.`);
+    const out = await sharp(x2.rgb, { raw: { width: x2.width, height: x2.height, channels: 3 } }).extract({ left: (crop.x - r.x) * f, top: (crop.y - r.y) * f, width: crop.w * f, height: crop.h * f }).resize(target.w, target.h, { fit: "fill", kernel: "lanczos3" }).raw().toBuffer();
     if (out.length !== target.w * target.h * 3) throw new Error("The upscaled image could not be read as RGB.");
     return { rgb: out, ms: x2.ms, reused };
   } catch (error) {

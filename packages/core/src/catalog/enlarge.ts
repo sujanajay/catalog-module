@@ -1,4 +1,4 @@
-// Spec 18 H2: the client of the dedicated CPU enlargement service catalog-upscale (POST /upscale?model=<id>&scale=2).
+// Spec 18 H2: the client of the dedicated CPU enlargement service catalog-upscale (POST /upscale?model=<id>&scale=<2 or 4>).
 // Unlike the render's upscale path through MattingClient (upscale.ts), it never reads /health and has no breaker:
 // a slow or busy service is waited for and retried, never switched off. Its timeout is the service's own request
 // timeout plus 30 s (UPSCALE_TIMEOUT_S, set by infra/deploy.sh from infra/lib/shape.sh, which sizes it from the
@@ -92,6 +92,8 @@ export interface EnlargeRequest {
   /** The upload: JPEG bytes (quality 95, 4:4:4 as upscaleUpload makes them). */
   jpeg: Buffer;
   model: string;
+  /** The model's scale (2 or 4, spec 18 quality); default 2. */
+  scale?: number;
   /** One attempt's timeout; default enlargeTimeoutMs() (UPSCALE_TIMEOUT_S + 30 s). Clamped to the time left before `deadlineAt`. */
   timeoutMs?: number;
   /** Aborts the call and every retry (the task is ending); the abort reason is thrown as it is. */
@@ -174,7 +176,7 @@ async function attemptOnce(req: EnlargeRequest, timeoutMs: number, attempts: num
     const minted = bearerFor(base, deps.idToken).catch((error: unknown) => { throw new TokenMintError(error instanceof Error ? error.name : "error"); });
     const bearer = await raceAbort(minted, signal);
     if (bearer) headers.set("Authorization", bearer);
-    const response = await deps.fetch(`${base}/upscale?model=${encodeURIComponent(req.model)}&scale=2`, { method: "POST", body: new Uint8Array(req.jpeg), headers, signal });
+    const response = await deps.fetch(`${base}/upscale?model=${encodeURIComponent(req.model)}&scale=${req.scale ?? 2}`, { method: "POST", body: new Uint8Array(req.jpeg), headers, signal });
     if (response.status === 503 && await isModelUnavailable(response)) throw new EnlargeModelUnavailableError(attempts);
     if (response.status === 429 || response.status === 503) throw new EnlargeBusyError(response.status, attempts);
     if (response.status === 400 || response.status === 413) throw new EnlargeBadInputError(response.status, attempts);

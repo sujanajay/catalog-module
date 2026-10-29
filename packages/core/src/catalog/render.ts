@@ -6,7 +6,7 @@ import { ALPHA_BBOX_THRESHOLD, analyseBackground, borderPixels, shadowLayer } fr
 import { anchorBounds, BG_TOLERANCE, checkOutput, type Measured } from "./compliance";
 import { enlargeCutout } from "./enhance";
 import { plainFailures } from "./qa/reasons";
-import { shouldUpscale, upscaledRgb, upscalerKey, type Upscaler } from "./upscale";
+import { enlargeRegion, hasSourceX2, shouldUpscale, upscaledRgb, upscalerKey, upscalersFor, UPSCALE_X4_MIN_SCALE, type EnlargeRegion, type UpscaleFactor, type Upscaler } from "./upscale";
 
 export interface Prepared { width: number; height: number; rgb: Buffer; alphaSource: Buffer | null; background: { uniform: boolean; color: [number, number, number]; stdev: number }; flags: OutputFlag[]; sourceMime: string }
 export interface Matte { alpha: Buffer; width: number; height: number; model: string; ms: number; source: "model" | "alpha_source" | "floodfill"; target: "cpu" | "gpu" | null; sentLongSide: number | null }
@@ -21,7 +21,8 @@ export interface RenderInput { prepared: Prepared; matte: Matte; channel: Channe
   /** false drops a shadow kept from the source photo (07 4.6a `source_shadow_off`); absent keeps it where it can be measured. */ keepSourceShadow?: boolean;
   /** An extra move (canvas px) after the anchor rule, the computed `reshift` repair; clamped so the product stays on the canvas. */ anchorShift?: { dx: number; dy: number };
   /** The quality loop's floor for this render (the `reencode` repair goes below JPEG_QUALITY_MIN); absent is JPEG_QUALITY_MIN. */ jpegQualityMin?: number;
-  /** Spec 11: the GPU upscaler, used when the plan enlarges beyond its `minScale`; absent or null is the plain Lanczos path. */ upscaler?: Upscaler | null;
+  /** Spec 11: the (x2) upscaler, used when the plan enlarges beyond its `minScale`; absent or null is the plain Lanczos path. */ upscaler?: Upscaler | null;
+  /** Spec 18 quality: the x4 upscaler, used above UPSCALE_X4_MIN_SCALE (upscalersFor); absent or null: the x2 upscaler everywhere. */ upscalerX4?: Upscaler | null;
   /** Ids for the upscale log lines; never shown to an operator. */ trace?: { batchId?: string; productId?: string } }
 /**
  * `upscale`: set only when the upscaler made this output's colour (flag `upscaled`); `model` goes into render_key, never
@@ -504,21 +505,51 @@ export interface EnlargementShot { width: number; height: number; rgb: Buffer; a
 
 /**
  * Spec 18 3.3.4: which shots of one product may need the upscaler on any of `channels`, decided at the matte stage
- * once the product's photos are cut out, so each x2 image is made by the enlarge task before the render. A superset of
+ * once the product's photos are cut out, so each image is made by the enlarge task before the render. A superset of
  * renderSource's decision (shouldUpscale on the plan's scale) as the render stage and auto-resolve plan it: the
  * product's one canvas per channel (planProduct over the shots' geometry, as chunk.ts does), each shot planned on it
  * with and without the judge's relaxed cut rule, with no uniform scale and no smaller fit, which only lower the scale.
  * `shots` should hold every shot of the product that has a matte: fewer shots can only give a smaller canvas. A shot
- * with no product found needs nothing (the render fails it). A render that still needs an x2 image no task made is
+ * with no product found needs nothing (the render fails it). A render that still needs an image no task made is
  * held with `enlargement_failed`, never silent.
  */
 export function enlargementNeeds(channels: readonly ChannelId[], shots: readonly EnlargementShot[], productType: ProductType | null | undefined, minScale: number): boolean[] {
+  return enlargementFactors(channels, shots, productType, minScale, false).map((factors) => factors.length > 0);
+}
+
+/**
+ * Spec 18 quality: the models each shot needs (enlargementNeeds' superset, per channel): 4 for a plan above
+ * UPSCALE_X4_MIN_SCALE when `x4` (an x4 model is configured), else 2. A lower scale at the render (a uniform scale, a
+ * smaller fit) can move a channel from the x4 band into the x2 band; the render then uses the x4 image
+ * (upscalersFor), so a photo is never held for that.
+ */
+export function enlargementFactors(channels: readonly ChannelId[], shots: readonly EnlargementShot[], productType: ProductType | null | undefined, minScale: number, x4: boolean): UpscaleFactor[][] {
   const geometry = (s: EnlargementShot, judgedCut: boolean) => shotGeometry(s.alpha, s.width, s.height, { rgb: s.rgb, judgedCut, ...trimRules(productType, s) });
   const plain = shots.map((s) => geometry(s, false)), judged = shots.map((s) => geometry(s, true));
   const found = plain.filter((g): g is ShotGeometry => g !== null);
   const canvases = channels.map((id) => ({ spec: channel(id), canvas: found.length ? planProduct(channel(id), found).canvas : undefined }));
-  return shots.map((s, i) => canvases.some(({ spec, canvas }) => [plain[i], judged[i]].some((g) =>
-    !!g && shouldUpscale(planCanvas(spec, g.box, { w: s.width, h: s.height }, { canvas, cut: g.cut, trimRoom: g.trimRoom }).scale, minScale))));
+  return shots.map((s, i) => {
+    const factors = new Set<UpscaleFactor>();
+    for (const { spec, canvas } of canvases) for (const g of [plain[i], judged[i]]) {
+      if (!g) continue;
+      const scale = planCanvas(spec, g.box, { w: s.width, h: s.height }, { canvas, cut: g.cut, trimRoom: g.trimRoom }).scale;
+      if (shouldUpscale(scale, minScale)) factors.add(x4 && scale > UPSCALE_X4_MIN_SCALE + 1e-9 ? 4 : 2);
+    }
+    return [...factors].sort((a, b) => a - b);
+  });
+}
+
+/**
+ * Spec 18 quality, crop before upscaling: the part of one shot the upscaler sees. Every crop the render may draw of
+ * this shot lies inside the product's box (planCanvas' sourceCrop is cutFillCrop of the box), and the box is
+ * shotGeometry's, with or without the judge's relaxed cut rule; the region is the union of both boxes plus
+ * ENLARGE_REGION_MARGIN_PX (enlargeRegion). Deterministic from the photo and its matte, so the enlarge task and a
+ * re-render agree. Null when no product is found (the render fails that shot anyway).
+ */
+export function shotEnlargementRegion(shot: EnlargementShot, productType: ProductType | null | undefined): EnlargeRegion | null {
+  const boxes = [false, true].map((judgedCut) => shotGeometry(shot.alpha, shot.width, shot.height, { rgb: shot.rgb, judgedCut, ...trimRules(productType, shot) })?.box)
+    .filter((b): b is BBox => !!b);
+  return enlargeRegion(boxes, shot.width, shot.height);
 }
 
 /**
@@ -617,10 +648,10 @@ export async function renderSource(input: RenderInput): Promise<RenderOutput> {
     const to = { w: product.w, h: product.h };
     const needsUpscaler = !!input.upscaler && shouldUpscale(plan.scale, input.upscaler.minScale);
     const enlarged = input.upscaler && needsUpscaler
-      ? await upscaledRgb(input.upscaler, p.rgb, p.width, crop, to, { ...input.trace, identifier: input.identifier, shot: shotNumber, channel: spec.id })
+      ? await routedUpscale(upscalersFor(plan.scale, input.upscaler, input.upscalerX4), p, crop, to, { ...input.trace, identifier: input.identifier, shot: shotNumber, channel: spec.id })
       : null;
     const cutout = await enlargeCutout({ rgba, rgb: p.rgb, width: p.width, height: p.height, crop, to, ...(enlarged ? { upscaled: enlarged.rgb } : {}) });
-    if (enlarged && input.upscaler) { result.flags.push("upscaled"); result.upscale = { model: input.upscaler.model, ms: enlarged.ms, ...(enlarged.reused ? { reused: true as const } : {}) }; }
+    if (enlarged) { result.flags.push("upscaled"); result.upscale = { model: enlarged.model, ms: enlarged.ms, ...(enlarged.reused ? { reused: true as const } : {}) }; }
     else if (needsUpscaler) { result.flags.push("enlargement_failed"); result.notes.push(ENLARGEMENT_FAILED_SENTENCE); }
     // Styli's guide is judged on the product as it is seen (visibleAnchorShift); the shadow and the mask follow the move.
     if (spec.anchor === "bottom-centre") {
@@ -681,6 +712,20 @@ export async function renderSource(input: RenderInput): Promise<RenderOutput> {
     result.notes.push(`The image we made did not meet ${spec.label}'s rules: ${plainFailures(result.compliance.failures, spec.label)}.`); return result; }
   result.jpeg = jpeg; result.status = "ok";
   return result;
+}
+
+/**
+ * Spec 18 quality: the colour of `crop` from the first of `candidates` (upscalersFor, best first) that holds an image
+ * of this photo covering the crop; without any image yet (a render outside the worker, which calls its service), the
+ * first candidate's call. Null when none can make it: the render flags `enlargement_failed`.
+ */
+async function routedUpscale(candidates: Upscaler[], p: Prepared, crop: BBox, to: Size, trace: Parameters<typeof upscaledRgb>[5]): Promise<{ rgb: Buffer; ms: number; reused: boolean; model: string } | null> {
+  const ready = candidates.filter((u) => hasSourceX2(u, p.rgb));
+  for (const upscaler of ready.length ? ready : candidates.slice(0, 1)) {
+    const out = await upscaledRgb(upscaler, p.rgb, p.width, crop, to, trace);
+    if (out) return { ...out, model: upscaler.model };
+  }
+  return null;
 }
 
 export async function renderAllChannels(prepared: Prepared, matte: Matte, channels: ChannelId[], ctx: Omit<RenderInput, "prepared" | "matte" | "channel">): Promise<Record<ChannelId, RenderOutput>> {

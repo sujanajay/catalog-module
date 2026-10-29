@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import sharp from "sharp";
-import { and, eq, inArray, isNotNull, isNull, ne, notInArray, or, sql } from "drizzle-orm";
+import { and, eq, inArray, isNotNull, isNull, notInArray, or, sql } from "drizzle-orm";
 import { catalogBatches, catalogChunks, catalogOutputs, catalogProducts, catalogSourceImages } from "@catalog/core/db/schema";
 import { CHANNELS } from "@catalog/core/catalog/channels";
 import { batchPrefix, derivedPath, publicObjectPath, publicUrl, stagingPath } from "@catalog/core/catalog/naming";
@@ -8,9 +8,9 @@ import { planProduct, shotGeometry, trimRules, UnsupportedSourceError, type Enla
 import { renderKey, renderKeys, rerenderedKey } from "@catalog/core/catalog/pipeline/publish";
 import { catalogLlmDeps, CatalogQaCapError, limitDeliveryBackoff, runQaStage, spendCapHit } from "./qa-stage";
 import { CHUNK_HEARTBEAT_MS, CHUNK_LEASE_MS, CHUNK_MAX_STALLS, CHUNK_STALLED_REASON, chunkTimeBudgetMs, isBulkBatch, leaseLapsed, notParked, redispatchUnstartedChunks, tryEnqueueChunk } from "@catalog/core/catalog/pipeline/dispatch";
-import { chunkHasQueuedEnlargement, ENLARGE_TASK_MAX_ATTEMPTS, ENLARGING_TASK, enqueueEnlargements, photosOfChunk, queuedPhotosOfChunk, unparkSettledChunks } from "@catalog/core/catalog/pipeline/enlargement";
+import { chunkHasQueuedEnlargement, ENLARGE_TASK_MAX_ATTEMPTS, ENLARGING_TASK, enqueueEnlargements, jobForRoute, jobOnRoute, photosOfChunk, queuedPhotosOfChunk, unparkSettledChunks, type EnlargementRoute } from "@catalog/core/catalog/pipeline/enlargement";
 import type { EnlargeTaskBody } from "@catalog/core/tasks";
-import { derivedPrefixFor, handleEnlargeTask, loadShotFromMatte, primeStoredEnlargement, queueEnlargements } from "./enlarge";
+import { derivedPrefixFor, handleEnlargeTask, loadShotFromMatte, primeStoredEnlargement, queueEnlargements, routeOf } from "./enlarge";
 import { eachLimit, positiveIntEnv, serialLock } from "@catalog/core/concurrency";
 import { isCpuUpscalerId } from "@catalog/core/catalog/upscale";
 import { recordCostEvents, type CostEventInput } from "@catalog/core/cost-events";
@@ -245,11 +245,12 @@ export async function handleChunkTask(rawDeps: CatalogDeps, body: Record<string,
     }
     const prefix = batchPrefix(batch.brandSlug,batch.id,batch.isTest);
     limitDeliveryBackoff(batch,deadlineAt-QA_BACKOFF_DEADLINE_MARGIN_MS,deps.now);
-    // UPSCALE_MODEL changed since this chunk's photos were enlarged. Their x2 images (or failures) belong to
-    // another upscaler: they are queued again for the configured one and the chunk parks, so the render never holds
-    // them for it and never renders with the other model's image.
-    if (chunk.stage === "render" && deps.upscaler) {
-      const requeued = await requeueOtherUpscaler(deps.upscaler.model);
+    // UPSCALE_MODEL or UPSCALE_MODEL_X4 changed since this chunk's photos were enlarged. Their images (or failures)
+    // belong to other upscalers: they are queued again for the configured ones and the chunk parks, so the render
+    // never holds them for it and never renders with another model's image.
+    const route = routeOf(deps);
+    if (chunk.stage === "render" && route) {
+      const requeued = await requeueOtherUpscaler(route);
       if (requeued === "lost") return answer(200,"lost");
       if (requeued === "parked") {
         await topUpWindow(deps,batch.id);
@@ -419,7 +420,7 @@ export async function handleChunkTask(rawDeps: CatalogDeps, body: Record<string,
           }
         });
         if (outOfTime) { stopAt = index; break products; }
-        if (deps.upscaler) await queueEnlargements(deps,{upscaler:deps.upscaler,batch,product,sources,shots,matteModel:productPolicy.matteModel,trace,write:underClaim,bulk:bulk()});
+        if (deps.upscaler) await queueEnlargements(deps,{upscaler:deps.upscaler,upscalerX4:deps.upscalerX4 ?? null,batch,product,sources,shots,matteModel:productPolicy.matteModel,trace,write:underClaim,bulk:bulk()});
       } else if(chunk.stage==="render") {
         // In source order (the product plan reads the shots in order), whichever photo finishes first.
         const ready: ({ source: typeof sources[number]; p: Awaited<ReturnType<CatalogDeps["prepare"]>>; matte: Matte } | undefined)[] = new Array(sources.length);
@@ -566,16 +567,22 @@ export async function handleChunkTask(rawDeps: CatalogDeps, body: Record<string,
     stopHeartbeat();
   }
   /**
-   * The chunk's photos with pending outputs whose enlargement belongs to another upscaler than `model` (made,
-   * failed or queued under it) are queued again for `model` (next round: the step the park takes), and the chunk
+   * The chunk's photos with pending outputs whose enlargement job names an upscaler outside `route` (made, failed or
+   * queued under it) are queued again on `route` (jobForRoute: each image keeps its factor; next round: the step the
+   * park takes), and the chunk
    * parks under its own lock while any of them is still queued, as the matte stage's park does. "none": nothing to
    * re-queue, or every re-queued photo settled before the park (the render goes on).
    */
-  async function requeueOtherUpscaler(model:string):Promise<"none"|"parked"|"lost"> {
+  async function requeueOtherUpscaler(route:EnlargementRoute):Promise<"none"|"parked"|"lost"> {
     const pendingOutput = sql`EXISTS (SELECT 1 FROM ${catalogOutputs} WHERE ${catalogOutputs.sourceImageId} = ${catalogSourceImages.id} AND ${catalogOutputs.batchId} = ${catalogSourceImages.batchId} AND ${catalogOutputs.status} = 'pending')`;
-    const photos = await photosOfChunk(deps.db,chunk!,and(isNotNull(catalogSourceImages.x2Model),ne(catalogSourceImages.x2Model,model),pendingOutput)!);
+    const candidates = await photosOfChunk(deps.db,chunk!,and(isNotNull(catalogSourceImages.x2Model),pendingOutput)!);
+    const jobs = candidates.length ? await deps.db.select({id:catalogSourceImages.id,x2Model:catalogSourceImages.x2Model}).from(catalogSourceImages).where(inArray(catalogSourceImages.id,candidates.map(p=>p.id))) : [];
+    const moved = new Map(jobs.filter(j=>!jobOnRoute(j.x2Model,route)).map(j=>[j.id,{from:j.x2Model!,to:jobForRoute(j.x2Model,route) ?? route.x2}]));
+    const photos = candidates.filter(p=>moved.has(p.id));
     if (!photos.length) return "none";
-    await underClaim(async tx=>tx.update(catalogSourceImages).set({x2Model:model,x2Uri:null,x2Error:null,x2Attempts:0,x2ClaimedAt:null}).where(and(inArray(catalogSourceImages.id,photos.map(p=>p.id)),ne(catalogSourceImages.x2Model,model))));
+    await underClaim(async tx=>{
+      for (const p of photos) { const {from,to} = moved.get(p.id)!; await tx.update(catalogSourceImages).set({x2Model:to,x2Uri:null,x2Error:null,x2Attempts:0,x2ClaimedAt:null}).where(and(eq(catalogSourceImages.id,p.id),eq(catalogSourceImages.x2Model,from))); }
+    });
     deps.log("catalog enlargement requeued",{severity:"WARNING",batchId:chunk!.batchId,chunkId:chunk!.id,photos:photos.length,reason:"another upscaler"});
     await enqueueEnlargements(deps.enqueue,chunk!.batchId,photos,chunk!.step+1,{log:deps.log,chunkId:chunk!.id,...(bulk() ? {bulk:true}:{})});
     const [result] = await deps.db.transaction(async tx=>{

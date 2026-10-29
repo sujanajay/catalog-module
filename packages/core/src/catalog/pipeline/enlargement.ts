@@ -15,8 +15,9 @@ import { and, asc, eq, inArray, sql, type SQL } from "drizzle-orm";
 import type { Db } from "../../db/client";
 import { catalogChunks, catalogSourceImages } from "../../db/schema";
 import { ENLARGE_DISPATCH_DEADLINE_SEC, enlargeTaskId, type EnlargeTaskBody, type enqueueTask } from "../../tasks";
+import { upscaleConfigFromEnv, upscalerFactor } from "../upscale";
 
-/** Attempts of one photo's enlargement before it is failed: the enlarge lanes' max-attempts (infra/lib/queues.sh). */
+/** Attempts of one photo's enlargement before it is failed: the enlarge lanes' max-attempts (infra/lib/queues.sh) less the one next_image hand-off. */
 export const ENLARGE_TASK_MAX_ATTEMPTS = 8;
 /**
  * A parked chunk whose batch's enlarge lane has been quiet this long has its queued photos' tasks sent again (next
@@ -38,14 +39,59 @@ export const ENLARGING_TASK = "enlarging";
 
 type Tx = Pick<Db, "select" | "update" | "execute">;
 
+/** What Start records on the batch (options.enlargement). */
+export interface EnlargementOption {
+  model: string;
+  /** Spec 18 quality: the x4 model above 2.0x, when configured. */
+  x4Model?: string;
+  /** Spec 18 quality: the scale above which the batch's enlargements use the upscaler; absent (older batches) is 1.5. */
+  minScale?: number;
+}
 /**
  * Spec 18: what Start records on the batch (options.enlargement) when the upscaler is on (`UPSCALE_MODEL` set and not
- * "off"): the batch is made with the enlargement stage, which scopes the enlarged_without_upscaler invariant. Null when
- * off; a batch from before the stage has none.
+ * "off"): the batch is made with the enlargement stage, which scopes the enlarged_without_upscaler invariant, at the
+ * threshold it was made with (`minScale`). Null when off; a batch from before the stage has none.
  */
-export function enlargementOptionFromEnv(env: NodeJS.ProcessEnv = process.env): { model: string } | null {
+export function enlargementOptionFromEnv(env: NodeJS.ProcessEnv = process.env): EnlargementOption | null {
   const model = env.UPSCALE_MODEL?.trim();
-  return model && model !== "off" ? { model } : null;
+  if (!model || model === "off") return null;
+  const config = upscaleConfigFromEnv(env);
+  return { model, ...(config.x4Model ? { x4Model: config.x4Model } : {}), minScale: config.minScale };
+}
+
+/**
+ * Spec 18 quality: one photo's enlargement job, the upscalerIds of the images it needs (one per model, x2 first), as
+ * x2_model holds it: the ids joined by ENLARGEMENT_JOB_SEPARATOR. A single id is the job of a photo that needs one
+ * image, as before spec 18 quality. The x2_* columns hold the job's state (queued, done, failed, attempts, in-flight
+ * claim); x2_uri, once set, is the first image's object, and every other image of the job sits beside it
+ * (enlargedSibling), each made once by the enlarge task (at most one service call per delivery).
+ */
+export const ENLARGEMENT_JOB_SEPARATOR = ",";
+/** The upscalerIds of a job (x2_model); empty when the photo needs none. */
+export function jobUpscalers(x2Model: string | null | undefined): string[] {
+  return (x2Model ?? "").split(ENLARGEMENT_JOB_SEPARATOR).map((id) => id.trim()).filter(Boolean);
+}
+/** The configured upscalerIds: the x2 one and, when set, the x4 one. */
+export interface EnlargementRoute { x2: string; x4: string | null }
+/**
+ * The job (x2_model value) for the `factors` a photo needs on `route`: the x4 image when the factor is 4 and an x4
+ * model is configured, else the x2 image. Null for no factor.
+ */
+export function enlargementJob(factors: readonly number[], route: EnlargementRoute): string | null {
+  const ids = [...new Set(factors.map((f) => (f === 4 && route.x4 ? route.x4 : route.x2)))].sort((a, b) => (a === route.x2 ? -1 : b === route.x2 ? 1 : 0));
+  return ids.length ? ids.join(ENLARGEMENT_JOB_SEPARATOR) : null;
+}
+/** True when every image of the job is one the route makes. */
+export function jobOnRoute(x2Model: string | null | undefined, route: EnlargementRoute): boolean {
+  const ids = jobUpscalers(x2Model);
+  return ids.length > 0 && ids.every((id) => id === route.x2 || id === route.x4);
+}
+/**
+ * The same job on `route` (UPSCALE_MODEL or UPSCALE_MODEL_X4 changed): each image keeps its factor (upscalerFactor of
+ * its id) and takes the route's model for it.
+ */
+export function jobForRoute(x2Model: string | null | undefined, route: EnlargementRoute): string | null {
+  return enlargementJob(jobUpscalers(x2Model).map(upscalerFactor), route);
 }
 
 /**

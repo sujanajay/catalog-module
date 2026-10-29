@@ -80,9 +80,10 @@ export interface BatchOptions {
   /**
    * Spec 18 3.3.6: written at Start when the upscaler is on (UPSCALE_MODEL set, not `off`): every photo this batch
    * enlarges beyond UPSCALE_MIN_SCALE goes through the upscaler or is held (invariant enlarged_without_upscaler).
-   * Absent on batches from before spec 18 and when the upscaler is off. The model id is engineering only.
+   * Absent on batches from before spec 18 and when the upscaler is off. The model id is engineering only. Spec 18
+   * quality: `minScale` is the batch's threshold (absent on older batches: 1.5) and `x4Model` the model above 2.0x.
    */
-  enlargement?: { model: string } | null;
+  enlargement?: { model: string; x4Model?: string; minScale?: number } | null;
 }
 
 export interface BatchCounts {

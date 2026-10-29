@@ -49,6 +49,11 @@ export interface CatalogDeps {
    * Absent or null (UPSCALE_MODEL off): no enlargement stage, the plain path everywhere.
    */
   upscaler?: Upscaler | null;
+  /**
+   * Spec 18 quality: the x4 upscaler (UPSCALE_MODEL_X4), used above 2.0x; the render's routing and the enlarge job
+   * name it beside `upscaler` (the x2 one). Absent or null: the x2 upscaler makes every enlargement.
+   */
+  upscalerX4?: Upscaler | null;
   /** Spec 18: the enlarge task's one service call; absent, the enlarge task does nothing (upscaler off). */
   enlarge?: EnlargeCall;
 }
@@ -63,15 +68,17 @@ export function workerCatalogDeps(db: Db): CatalogDeps {
   // Spec 16: the CPU service, every GPU service of MATTING_GPU_URLS (or MATTING_GPU_URL) and UPSCALE_URL.
   sharedMatting ??= mattingClientFromEnv(process.env);
   const matting = sharedMatting;
-  // Spec 11: UPSCALE_MODEL (unset: off) and UPSCALE_MIN_SCALE (default 1.5) reach every render of the worker, the
+  // Spec 11: UPSCALE_MODEL (unset: off) and UPSCALE_MIN_SCALE (default 1.0 since spec 18 quality) reach every render of the worker, the
   // auto-resolve ladder included. Spec 18: the render never calls the upscale service. Its upscaler is the stored one
   // (the x2 images the enlarge tasks made, primed per photo), named like the service that makes them (UPSCALE_URL, spec
   // 16; unset: the GPU service), so render keys stay `u:<model>@<hash>`; the enlarge task calls that service.
   const config = upscaleConfigFromEnv();
   const upscaler = config.model ? storedUpscaler(upscalerId(config.model, matting.upscaleTarget), config.minScale) : null;
-  const render: typeof renderAllChannels = upscaler ? (p,m,channels,ctx)=>renderAllChannels(p,m,channels,{upscaler,...ctx}) : renderAllChannels;
+  // Spec 18 quality: the x4 model above 2.0x (UPSCALE_MODEL_X4), stored and primed like the x2 one.
+  const upscalerX4 = upscaler && config.x4Model ? storedUpscaler(upscalerId(config.x4Model, matting.upscaleTarget), config.minScale) : null;
+  const render: typeof renderAllChannels = upscaler ? (p,m,channels,ctx)=>renderAllChannels(p,m,channels,{upscaler,upscalerX4,...ctx}) : renderAllChannels;
   return {db,storage,matting,enqueue:enqueueTask,fetch,now:()=>new Date(),log:catalogLog,prepare,matteFor,renderAllChannels:render,judgeOutput,classifyProductType,repairOwnDefects,
-    upscaler,...(config.model ? {enlarge:workerEnlargeCall(config.model)}:{}),
+    upscaler,upscalerX4,...(config.model ? {enlarge:workerEnlargeCall()}:{}),
     resolvePolicy:async(brandSlug,category)=> {
       if (!defaultsEnsured) {
         const health = await matting.health();
