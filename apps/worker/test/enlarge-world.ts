@@ -168,7 +168,7 @@ export async function drain(w: FakeWorld, options: { max?: number; skip?: (task:
   return seen;
 }
 /** The batch a queued task belongs to (a chunk task names its chunk). */
-async function batchOfTask(db: Db, task: QueuedTask): Promise<string | null> {
+export async function batchOfTask(db: Db, task: QueuedTask): Promise<string | null> {
   if (typeof task.body.batchId === "string") return task.body.batchId;
   if (typeof task.body.chunkId !== "string") return null;
   const [chunk] = await db.select({ batchId: catalogChunks.batchId }).from(catalogChunks).where(eq(catalogChunks.id, task.body.chunkId));

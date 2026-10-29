@@ -10,7 +10,8 @@ import type { ChannelId } from "@catalog/core/catalog/types";
 import type { EnqueueTaskOptions, TaskRoute } from "@catalog/core/tasks";
 import { workerCatalogDeps, type CatalogDeps } from "../src/catalog/deps";
 
-export interface QueuedTask { route: TaskRoute; taskId: string; body: Record<string, unknown>; bulk: boolean; retryCount: number }
+/** `notBefore`: the task's schedule time when it was sent with a delay (only the state-machine model honours it). */
+export interface QueuedTask { route: TaskRoute; taskId: string; body: Record<string, unknown>; bulk: boolean; retryCount: number; notBefore?: Date }
 
 const pause = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
@@ -33,7 +34,7 @@ export function fakeWorld(db: Db, delayMs = 1, options: { imageScale?: number } 
     // Cloud Tasks refuses a name that exists or ran recently; enqueueTask treats that as success.
     if (opts.taskId && names.has(opts.taskId)) return opts.taskId;
     if (opts.taskId) names.add(opts.taskId);
-    tasks.push({ route, taskId: opts.taskId ?? `anon-${tasks.length}`, body, bulk: !!opts.bulk, retryCount: 0 });
+    tasks.push({ route, taskId: opts.taskId ?? `anon-${tasks.length}`, body, bulk: !!opts.bulk, retryCount: 0, ...(opts.delaySec ? { notBefore: new Date(+deps.now() + opts.delaySec * 1000) } : {}) });
     return opts.taskId ?? "task";
   });
   const deps: CatalogDeps = {
