@@ -74,24 +74,28 @@ SHAPE_DEFAULTS=(
   # 4 vCPU over 8: 8 vCPU is only about 1.3x faster per call (78 s against 99 s p50 at 800x1200), so 16 x 4 finishes
   # more photos per second than the 8 x 8 the quota allows. Concurrency 1: concurrency 2 gave non-identical outputs
   # (refused by upscale_check). Timeout 1740 s, the most the enlarge task allows (its 1800 s dispatch deadline, the
-  # Cloud Tasks maximum, less 30 s for the client and 30 s for the settle). It must cover the largest photo the
-  # service takes, not only the probe sizes: 2 x UPSCALE_MAX_PIXELS x the slowest measured p95 per pixel (100 s for
-  # 800x1200, 104.2 s per MP) = 2 x 834 s = 1668 s <= 1740 s (upscale_check).
+  # Cloud Tasks maximum, less 30 s for the client and 30 s for the settle). It must cover the largest photo region the
+  # service takes, not only the probe sizes, on the slower model (spec 18 quality: the x4 model, UPSCALE_X4_TIME_RATIO
+  # times the x2 time): 2 x UPSCALE_MAX_PIXELS x the slowest measured p95 per pixel (100 s for 800x1200, 104.17 s per
+  # MP) x 1.3 = 2 x 867 s = 1734 s <= 1740 s (upscale_check).
   UPSCALE_CPU_VCPU=4
   UPSCALE_MEMORY=16Gi
   UPSCALE_CONCURRENCY=1
   UPSCALE_MAX_INSTANCES=16
   UPSCALE_THREADS=4
   UPSCALE_TIMEOUT_S=1740
-  # Spec 18 3.1.5 / 13: the largest photo (width x height, before the 2x) catalog-upscale takes. Larger photos are
+  # Spec 18 3.1.5 / 13: the largest image (width x height, before the 2x or 4x) catalog-upscale takes. Larger ones are
   # refused by the service (400) and held by the worker with enlargement_failed before any call, never a crash.
-  # The enlarge task sends the whole prepared photo, and a photo of any size may need the x2 when its product is
-  # small in the frame, so this, not the probe sizes, sets the longest call. SwinIR is tiled, so time grows with
-  # pixels; 8 MP at 2 x the slowest measured p95 per pixel fits the 1740 s timeout (above). 24 MP (the service's own
-  # default) would need about 5000 s, more than one Cloud Tasks delivery (30 minutes) can wait.
-  UPSCALE_MAX_PIXELS=8000000
+  # Spec 18 quality: the enlarge task sends only the product's region of the prepared photo (its box plus 32 px), so
+  # this bounds the region, not the photo; it sets the longest call, not the probe sizes. SwinIR is tiled, so time
+  # grows with pixels; 6.4 MP at 2 x the slowest measured p95 per pixel x UPSCALE_X4_TIME_RATIO fits the 1740 s
+  # timeout (above; 8 MP did before the x4 model). A region needs enlarging only when it is smaller than the channel's
+  # canvas (3000x3000 = 9 MP at most), so 6.4 MP holds only a product filling most of the largest canvas. Memory at
+  # 6.4 MP on x4: about 4096 MiB resident plus 160 B per input pixel = 5120 MiB, inside UPSCALE_MEMORY (upscale_check).
+  # 24 MP (the service's own default) would need about 6500 s, more than one Cloud Tasks delivery (30 minutes) waits.
+  UPSCALE_MAX_PIXELS=6400000
   # The upscalers stay resident once used, so with UPSCALE_SERVICE=gpu both count on top of the cut-outs.
-  GPU_UPSCALE_MODELS=realesrgan-x2plus,swinir-x2
+  GPU_UPSCALE_MODELS=swinir-x2,swinir-x4
   # CUDA context and library handles outside the model arenas (spec 17 3.3.3).
   GPU_CUDA_OVERHEAD_MIB=2048
   MATTE_INFLIGHT_PER_INSTANCE=4
@@ -182,8 +186,8 @@ shape_defaults() {
   GPU_MODEL_PEAK_MIB_BIREFNET_GENERAL_LITE=${GPU_MODEL_PEAK_MIB_BIREFNET_GENERAL_LITE-10842}
   GPU_MODEL_PEAK_MIB_BIREFNET_HRSOD=${GPU_MODEL_PEAK_MIB_BIREFNET_HRSOD-13696}
   GPU_MODEL_PEAK_MIB_BRIA_RMBG=${GPU_MODEL_PEAK_MIB_BRIA_RMBG-12424}
-  GPU_MODEL_PEAK_MIB_REALESRGAN_X2PLUS=${GPU_MODEL_PEAK_MIB_REALESRGAN_X2PLUS-}
   GPU_MODEL_PEAK_MIB_SWINIR_X2=${GPU_MODEL_PEAK_MIB_SWINIR_X2-}
+  GPU_MODEL_PEAK_MIB_SWINIR_X4=${GPU_MODEL_PEAK_MIB_SWINIR_X4-}
   # What one L4 offers (24 GB, about 22.5 GB usable).
   GPU_USABLE_MIB=22528
   # Spec 18 H1: UPSCALE_MEASURE=1 deploys only catalog-upscale, as a candidate of the UPSCALE_* shape (tag
@@ -228,6 +232,18 @@ shape_defaults() {
   # The enlarge task's dispatch deadline is 1800 s (ENLARGE_DISPATCH_DEADLINE_SEC, the Cloud Tasks maximum for an HTTP
   # task); the upscale call waits UPSCALE_TIMEOUT_S + 30 s and the settle keeps 30 s, so 1740 is the most.
   UPSCALE_TIMEOUT_MAX_S=1740
+  # Spec 18 quality: the x4 model's time over the x2 model's on the same image, rounded up. The p95 rows above are of
+  # swinir-x2; an x4 call on the same input takes this many times as long. Measured 2026-10-29: 1.04 on Cloud Run
+  # (the bake-off's slowest pair, 51.0 s / 49.2 s) and 1.193 on a 4-thread laptop at 800x1200 (pairs 1.283 and
+  # 1.133); 1.3 covers the slowest pair seen. Replace it with the x4 p95 once the gate's probe has timed x4 on the
+  # measured shape (check-matting.sh --probe-upscale --model=swinir-x2,swinir-x4).
+  UPSCALE_X4_TIME_RATIO=${UPSCALE_X4_TIME_RATIO-1.3}
+  # Spec 18 quality: catalog-upscale memory, from the 2026-10-29 local measure of swinir-x4 through the service code
+  # (peak commit 2685 MiB after load, 2851 MiB at 1200x1600: about 86 B per input pixel, the output 16x the input):
+  # the resident part (both sessions, Python, ONNX Runtime arenas) rounded up to 4096 MiB, and 160 B per input pixel
+  # (the float32 input and padding, the uint8 x4 output, its JPEG), almost twice what was measured.
+  UPSCALE_RESIDENT_MIB=${UPSCALE_RESIDENT_MIB-4096}
+  UPSCALE_X4_BYTES_PER_PIXEL=${UPSCALE_X4_BYTES_PER_PIXEL-160}
   # Spec 18 P2 (2026-10-29 review): the vCPU the live catalog-upscale takes at max instances, counted beside a measure
   # rung (UPSCALE_MEASURE=1 deploys a candidate of the same service while the live revision keeps serving). From the
   # rows, which are the live shape; set it (also to 0) only when the live service differs from them, such as before
@@ -452,17 +468,32 @@ upscale_check() {
   elif [ "$UPSCALE_TIMEOUT_S" -lt "$worst" ]; then
     shape_fail "UPSCALE_TIMEOUT_S=$UPSCALE_TIMEOUT_S is below 2 x the measured p95 of $largest ($(upscale_p95 "$largest") s, measured $UPSCALE_MEASURED_ON); set it to at least $worst"
   fi
-  # 2026-10-29 review P1: the largest photo the service takes (UPSCALE_MAX_PIXELS), not only the probe sizes, must
+  # 2026-10-29 review P1: the largest image the service takes (UPSCALE_MAX_PIXELS), not only the probe sizes, must
   # finish within the timeout, or it times out on every attempt and is held. Its p95 is estimated from the slowest
   # measured p95 per pixel of the probe sizes (tiled, so time grows with pixels; the smallest size carries the most
-  # fixed cost per pixel, a safe bound for larger photos), with the same 2x margin.
-  local per_mp est need fits
+  # fixed cost per pixel, a safe bound for larger photos), with the same 2x margin. Spec 18 quality: on the slower
+  # model, so times UPSCALE_X4_TIME_RATIO when the x4 model is served (UPSCALE_MODEL_X4, default swinir-x4).
+  local per_mp est need fits ratio=1 model="x2"
+  if [ "${UPSCALE_MODEL_X4:-swinir-x4}" != off ]; then
+    [[ "$UPSCALE_X4_TIME_RATIO" =~ ^[0-9]+([.][0-9]+)?$ ]] && awk -v r="$UPSCALE_X4_TIME_RATIO" 'BEGIN{exit !(r >= 1)}' \
+      || { shape_fail "UPSCALE_X4_TIME_RATIO must be a number of at least 1 (the x4 model's time over the x2 model's), got '$UPSCALE_X4_TIME_RATIO'"; return 0; }
+    ratio=$UPSCALE_X4_TIME_RATIO; model="x4 ($UPSCALE_X4_TIME_RATIO x the x2 time)"
+  fi
   per_mp=$(upscale_seconds_per_mp)
-  est=$(awk -v p="$UPSCALE_MAX_PIXELS" -v r="$per_mp" 'BEGIN{v = p / 1000000 * r; c = int(v); if (c < v) c++; print c}')
+  est=$(awk -v p="$UPSCALE_MAX_PIXELS" -v r="$per_mp" -v x="$ratio" 'BEGIN{v = p / 1000000 * r * x; c = int(v); if (c < v) c++; print c}')
   need=$((2 * est))
   if [ "$need" -gt "$UPSCALE_TIMEOUT_S" ]; then
-    fits=$(awk -v t="$UPSCALE_TIMEOUT_S" -v r="$per_mp" 'BEGIN{printf "%d", t / 2 / r * 1000000}')
-    shape_fail "UPSCALE_MAX_PIXELS=$UPSCALE_MAX_PIXELS needs a timeout of 2 x about $est s = $need s (the slowest measured p95, $per_mp s per megapixel, measured $UPSCALE_MEASURED_ON), above UPSCALE_TIMEOUT_S=$UPSCALE_TIMEOUT_S: such photos would time out on every attempt and be held. Raise UPSCALE_TIMEOUT_S (at most $UPSCALE_TIMEOUT_MAX_S) or lower UPSCALE_MAX_PIXELS to at most $fits"
+    fits=$(awk -v t="$UPSCALE_TIMEOUT_S" -v r="$per_mp" -v x="$ratio" 'BEGIN{printf "%d", t / 2 / r / x * 1000000}')
+    shape_fail "UPSCALE_MAX_PIXELS=$UPSCALE_MAX_PIXELS needs a timeout of 2 x about $est s = $need s on the $model model (the slowest measured p95, $per_mp s per megapixel, measured $UPSCALE_MEASURED_ON), above UPSCALE_TIMEOUT_S=$UPSCALE_TIMEOUT_S: such images would time out on every attempt and be held. Raise UPSCALE_TIMEOUT_S (at most $UPSCALE_TIMEOUT_MAX_S) or lower UPSCALE_MAX_PIXELS to at most $fits"
+  fi
+  # Spec 18 quality: the largest image's x4 working set fits the instance (an out-of-memory restart fails every
+  # attempt of that photo). Kept under 80% of UPSCALE_MEMORY. The x2 model needs less (a quarter of the output).
+  local mem_mib work_mib
+  [ -n "${gib:-}" ] || return 0
+  mem_mib=$((gib * 1024))
+  work_mib=$(awk -v p="$UPSCALE_MAX_PIXELS" -v b="$UPSCALE_X4_BYTES_PER_PIXEL" -v r="$UPSCALE_RESIDENT_MIB" 'BEGIN{v = r + p * b / 1048576; c = int(v); if (c < v) c++; print c}')
+  if [ $((work_mib * 10)) -gt $((mem_mib * 8)) ]; then
+    shape_fail "UPSCALE_MAX_PIXELS=$UPSCALE_MAX_PIXELS needs about $work_mib MiB on the x4 model ($UPSCALE_RESIDENT_MIB MiB resident + $UPSCALE_X4_BYTES_PER_PIXEL B per input pixel), more than 80% of UPSCALE_MEMORY=$UPSCALE_MEMORY; raise UPSCALE_MEMORY or lower UPSCALE_MAX_PIXELS"
   fi
   # Spec 18 3.1.5, the queue rate: ENLARGE_DISPATCHES_PER_SECOND <= UPSCALE_MAX_INSTANCES x UPSCALE_CONCURRENCY / p50,
   # at the smallest size (the usual photo). Without a measured p50 the p95 of that size stands in (a safe bound).

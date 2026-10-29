@@ -69,8 +69,15 @@ service_catalog_matting() {
   SVC_QUOTA_OPTIONAL=0
 }
 
-# The upscaler the catalog-upscale probes call (deploy.sh's UPSCALE_MODEL; off still probes the default).
-probe_upscale_model() { echo "${UPSCALE_MODEL:-swinir-x2}"; }
+# The upscalers the catalog-upscale probes call, one after the other: deploy.sh's UPSCALE_MODEL (enlargements up to
+# 2x) and UPSCALE_MODEL_X4 (above 2x); off still probes the default of each, so the gate always times x4 on Cloud Run
+# and checks that it reruns byte-identically at the shape's threads (spec 18 quality).
+probe_upscale_model() {
+  local x2=${UPSCALE_MODEL:-swinir-x2} x4=${UPSCALE_MODEL_X4:-swinir-x4}
+  [ "$x2" = off ] && x2=swinir-x2
+  [ "$x4" = off ] && x4=swinir-x4
+  echo "$x2,$x4"
+}
 
 service_catalog_upscale() {
   # Spec 18 H2: the dedicated CPU enlargement service. The catalog-matting image with only the upscaler loaded
@@ -93,7 +100,7 @@ service_catalog_upscale() {
     # it, since the worker's UPSCALE_URL is not changed by a measure run.
     SVC_DEPLOY=1; SVC_SHIFT=0
     SVC_TAG=measure-${UPSCALE_CPU_VCPU}c-${UPSCALE_THREADS}t-${UPSCALE_CONCURRENCY}r
-    SVC_PROBE_TIMEOUT=$((300 + 2 * UPSCALE_TIMEOUT_S))
+    SVC_PROBE_TIMEOUT=$((300 + 4 * UPSCALE_TIMEOUT_S))
     SVC_PROBE=(bash infra/lib/services.sh probe-upscale "$SVC_PROBE_TIMEOUT" "$(probe_upscale_model)" "$first" 1 1 "$UPSCALE_TIMEOUT_S")
     return 0
   fi
@@ -102,11 +109,14 @@ service_catalog_upscale() {
     SVC_SKIP_REASON="UPSCALE_SERVICE=${UPSCALE_SERVICE:-cpu}; the worker does not call it"
     return 0
   fi
-  # Sized from the measured table (shape_check has refused a shape without a p95 for every size): per size a warm
-  # call and one round at the shape's concurrency, 2 x p95 each, plus 300 s for the probe job and the cold start.
+  # Sized from the measured table (shape_check has refused a shape without a p95 for every size): per model (x2 and
+  # x4) and size a warm call and one round at the shape's concurrency, 2 x p95 each, plus 300 s for the probe job and
+  # the cold start. The table holds x2 p95s; the x4 budget is the x2 p95 times UPSCALE_X4_TIME_RATIO (infra/lib/shape.sh,
+  # 1.3, the slowest x4/x2 pair measured on 2026-10-29), rounded up.
   for size in ${UPSCALE_SIZES//,/ }; do
     p95=$(upscale_p95 "$size")
-    budget=$((budget + 4 * ${p95:-$UPSCALE_TIMEOUT_S}))
+    p95=${p95:-$UPSCALE_TIMEOUT_S}
+    budget=$((budget + 4 * p95 + 4 * $(awk -v p="$p95" -v r="${UPSCALE_X4_TIME_RATIO:-1}" 'BEGIN{v = p * r; c = int(v); if (c < v) c++; print c}')))
   done
   SVC_PROBE_TIMEOUT=$((300 + budget))
   SVC_PROBE=(bash infra/lib/services.sh probe-upscale "$SVC_PROBE_TIMEOUT" "$(probe_upscale_model)" "$UPSCALE_SIZES" "$UPSCALE_CONCURRENCY" 1 "$UPSCALE_TIMEOUT_S")

@@ -7,11 +7,12 @@
 #       services/matting/tests/cloudrun_check.py --probe: per model a warm 1024 px call, then n calls at once for
 #       k rounds, then the switching order. Prints the table and writes the JSON report to
 #       gs://image-links-agent-assets/catalog-test/probe/<execution>/. Fails on any non-200 or a reload.
-#   bash infra/check-matting.sh --probe-upscale <url> [--model swinir-x2] [--sizes 800x1200,1600x1600]
+#   bash infra/check-matting.sh --probe-upscale <url> [--model swinir-x2,swinir-x4] [--sizes 800x1200,1600x1600]
 #                               [--concurrency n] [--rounds k] [--timeout s] [--run name]
 #       spec 18 H1: times POST /upscale on one service URL (usually a catalog-upscale candidate's tag URL) with
-#       cloudrun_check.py --probe-upscale: per size a warm call, then n calls at once for k rounds. Prints
-#       size | vCPU | threads | tile | conc | p50 s | p95 s | max s | non-200 | output sha256 and writes
+#       cloudrun_check.py --probe-upscale: per model (one after the other; spec 18 quality: the gate probes x2 and x4)
+#       and size a warm call, then n calls at once for k rounds. Prints
+#       model | size | vCPU | threads | tile | conc | p50 s | p95 s | max s | non-200 | output sha256 and writes
 #       gs://image-links-agent-assets/catalog-test/probe/<execution>/upscale.json. --timeout is the per-call client
 #       timeout (default 900 s). Fails on any non-200, a wrong size or differing output for the same input.
 set -euo pipefail
