@@ -18,9 +18,10 @@ export const HARD_HOLD_FLAGS: ReadonlySet<OutputFlag> = new Set<OutputFlag>(["di
 /**
  * Flags that make the render stage stage an output as `needs_attention` (held before the judge). At the render
  * stage `leftover_background` can only come from the matte stage (a busy background, busyBackgroundHold); the
- * judge raises it later, in the QA stage.
+ * judge raises it later, in the QA stage. Spec 18: `enlargement_failed` (the photo needed the upscaler and has no
+ * stored enlargement) holds too, so a plain resize never stands in.
  */
-export const RENDER_HOLD_FLAGS: ReadonlySet<OutputFlag> = new Set<OutputFlag>(["small_source", "fallback_matte", "leftover_background"]);
+export const RENDER_HOLD_FLAGS: ReadonlySet<OutputFlag> = new Set<OutputFlag>(["small_source", "fallback_matte", "leftover_background", "enlargement_failed"]);
 export const holdsAtRender = (flags: readonly OutputFlag[]) => flags.some(flag => RENDER_HOLD_FLAGS.has(flag));
 /**
  * Left out with a note, never held: a size chart or text-only image (the judge's `chart` view) is
@@ -33,7 +34,7 @@ export const UNCHECKED_FLAGS: ReadonlySet<OutputFlag> = new Set<OutputFlag>(["qa
 export const problemFlags = (flags: readonly OutputFlag[]) => flags.filter(flag => !INFORMATION_FLAGS.has(flag));
 
 export type AutoAction = "none" | "note" | "drop" | "hold";
-export type HoldCause = "wrong_item" | "collage" | "unusable" | "corrupt" | "unchecked" | "photo_one" | "every_photo" | "not_publishable" | "code_fault";
+export type HoldCause = "wrong_item" | "collage" | "unusable" | "corrupt" | "unchecked" | "photo_one" | "every_photo" | "not_publishable" | "code_fault" | "not_enlarged";
 export interface TriageOutput {
   id: string; n: number; channel: ChannelId; status: string; flags: readonly OutputFlag[];
   decision: string | null; stagingUri: string | null;
@@ -74,6 +75,8 @@ export function triageProduct(outputs: readonly TriageOutput[], keptLive: readon
     if (!problems.length) { result.set(o.id, {action:o.status === "needs_attention" ? "hold" : "none",flags:[]}); continue; }
     if (problems.includes("different_product")) { hold("wrong_item"); continue; }
     if (problems.includes("collage")) { hold("collage"); continue; }
+    // Spec 18 owner decision 1: an enlargement that failed holds the product with its reason; never dropped or noted.
+    if (problems.includes("enlargement_failed")) { hold("not_enlarged"); continue; }
     // The background could not be removed (code-detected `leftover_background`, busyBackgroundHold): a hard hold.
     if (problems.includes("leftover_background") && busyBackgroundHold(o.compliance)) { hold("unusable"); continue; }
     if (problems.some(flag => UNCHECKED_FLAGS.has(flag))) { hold("unchecked"); continue; }

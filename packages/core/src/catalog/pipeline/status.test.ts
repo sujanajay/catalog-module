@@ -78,6 +78,11 @@ describe("spec 15 E7: true processing progress",()=>{
   it("says how many photos are prepared while the cut-out runs",()=>{
     expect(text("matting",counts({prepared:340,progressAt:iso(9)}),10)).toBe(`Preparing photos 340 of 1,400 · 0 of 5,600 images made · about 38 to 57 min left. ${CLOSE_PAGE_TEXT}`);
   });
+  it("spec 18: says how many photos are enlarged while their enlargements run, and drops it once all are settled",()=>{
+    expect(text("rendering",counts({prepared:1400,enlargeTotal:120,enlargeDone:30,enlargeFailed:2,progressAt:iso(9)} as Partial<typeof EMPTY_BATCH_COUNTS>),10)).toBe(`Enlarging photos 32 of 120 · 0 of 5,600 images made · about 38 to 57 min left. ${CLOSE_PAGE_TEXT}`);
+    expect(text("matting",counts({prepared:340,enlargeTotal:12,enlargeDone:0,enlargeFailed:0,progressAt:iso(9)} as Partial<typeof EMPTY_BATCH_COUNTS>),10)).toMatch(/^Preparing photos 340 of 1,400 · Enlarging photos 0 of 12 · /);
+    expect(text("rendering",counts({prepared:1400,enlargeTotal:120,enlargeDone:118,enlargeFailed:2,progressAt:iso(9)} as Partial<typeof EMPTY_BATCH_COUNTS>),10)).not.toContain("Enlarging");
+  });
   it("drops the preparing part once every photo is prepared, and for a batch from before release E",()=>{
     expect(text("rendering",counts({prepared:1400,staged:120,progressAt:iso(9)} as Partial<typeof EMPTY_BATCH_COUNTS>),10)).toBe(`120 of 5,600 images made · about 38 to 57 min left. ${CLOSE_PAGE_TEXT}`);
     expect(text("rendering",counts({staged:120,progressAt:iso(9)} as Partial<typeof EMPTY_BATCH_COUNTS>),10)).toBe(`120 of 5,600 images made · about 38 to 57 min left. ${CLOSE_PAGE_TEXT}`);

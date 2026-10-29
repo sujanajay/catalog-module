@@ -1,4 +1,4 @@
-import { flagReason, UPSCALED_SENTENCE, type OutputFlag } from "../types";
+import { ENLARGEMENT_FAILED_WHAT, ENLARGEMENT_FAILED_WHY, flagReason, UPSCALED_SENTENCE, type OutputFlag } from "../types";
 import { CHANNELS } from "../channels";
 export interface ReasonContext { /** The code-detected `leftover_background` (a busy background held at the matte stage, busyBackgroundHold). */ busy?: boolean; n?: number; k?: number; channel?: string; w?: number; h?: number; min?: number; /** A fixed canvas's delivered size (spec 11 4.1). */ deliverW?: number; deliverH?: number; failures?: string; error?: string }
 export interface FlagDetails { why: string; whatToDo: string }
@@ -62,6 +62,7 @@ export function flagDetails(flag: OutputFlag | "failed", ctx: ReasonContext = {}
     fallback_matte:["The background was removed with the simple method because the cut-out service was unavailable.",'Check the edges. "Use as is" keeps it.'],
     transparent:["This product looks transparent or glass; the cut-out may need a look.",'Compare the two images. "Use as is" keeps it.'],
     upscaled:[UPSCALED_SENTENCE,"Nothing to do."],
+    enlargement_failed:[ENLARGEMENT_FAILED_WHY,ENLARGEMENT_FAILED_WHAT],
     qa_unavailable:["The quality check could not read this image.",'Please look at it yourself. "Use as is" keeps it.'],
     qa_cap:["Quality check paused: the spending limit was reached.","Look at this image yourself, or raise the limit and start a new batch."],
     type_unknown:["We could not tell what kind of product this is, so the general treatment was used.","If the images look wrong, start a new batch with the product type chosen by hand."],
@@ -80,7 +81,7 @@ export function flagDetails(flag: OutputFlag | "failed", ctx: ReasonContext = {}
   return {why:flagReason(flag as OutputFlag),whatToDo:"Check the original photo and replace it if needed."};
 }
 export function shortClause(flag: OutputFlag | "failed", ctx: ReasonContext = {}): string {
-  const clauses: Partial<Record<OutputFlag | "failed",string>> = {complete_product:"looks cut at the frame edge",different_product:"looks like a different product from the others",failed:"could not be read",low_resolution:`is too small for ${ctx.channel ?? "this marketplace"}`,small_source:"is too small",text_or_watermark:"carries text or a watermark",collage:"combines several photos",halo:"has a rough edge",product_removed:"lost part of the product in the cut-out",chart_image:"is a size chart or text-only image",leftover_background:"still shows some background",orientation:"looks rotated",placement:`sits differently from the other angles on ${ctx.channel ?? "this marketplace"}`,fallback_matte:"was cut out with the simple method",transparent:"looks transparent or glass",qa_unavailable:"could not be checked",qa_cap:"was not checked because the spending limit was reached",failed_compliance:`did not meet ${ctx.channel ?? "this marketplace"}'s rules`};
+  const clauses: Partial<Record<OutputFlag | "failed",string>> = {complete_product:"looks cut at the frame edge",different_product:"looks like a different product from the others",failed:"could not be read",low_resolution:`is too small for ${ctx.channel ?? "this marketplace"}`,small_source:"is too small",text_or_watermark:"carries text or a watermark",collage:"combines several photos",halo:"has a rough edge",product_removed:"lost part of the product in the cut-out",chart_image:"is a size chart or text-only image",leftover_background:"still shows some background",orientation:"looks rotated",placement:`sits differently from the other angles on ${ctx.channel ?? "this marketplace"}`,enlargement_failed:`could not be enlarged to ${ctx.channel ?? "this marketplace"}'s size`,fallback_matte:"was cut out with the simple method",transparent:"looks transparent or glass",qa_unavailable:"could not be checked",qa_cap:"was not checked because the spending limit was reached",failed_compliance:`did not meet ${ctx.channel ?? "this marketplace"}'s rules`};
   return clauses[flag] ?? "needs a look";
 }
 /**
@@ -90,7 +91,7 @@ export function shortClause(flag: OutputFlag | "failed", ctx: ReasonContext = {}
  * not listed (information notes) keep their order after it.
  */
 export const FLAG_SEVERITY: readonly (OutputFlag | "failed")[] = [
-  "failed", "different_product", "collage", "chart_image", "product_removed", "small_source", "failed_compliance",
+  "failed", "different_product", "collage", "chart_image", "product_removed", "small_source", "enlargement_failed", "failed_compliance",
   "leftover_background", "halo", "fallback_matte", "placement", "text_or_watermark", "orientation",
   "qa_unavailable", "qa_cap", "complete_product", "transparent",
 ];

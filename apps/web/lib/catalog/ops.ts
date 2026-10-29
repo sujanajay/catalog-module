@@ -9,7 +9,8 @@
 // (rememberCost), run in a read-only transaction with a statement timeout, and lifetime brand totals are
 // read only when asked for.
 import { and, desc, eq, gte, inArray, isNotNull, or, sql } from "drizzle-orm";
-import { catalogBatches, catalogChunks } from "@catalog/core/db/schema";
+import { catalogBatches, catalogChunks, catalogSourceImages } from "@catalog/core/db/schema";
+import { photoEnlargementFailed, photoEnlargementQueued } from "@catalog/core/catalog/pipeline/enlargement";
 import type { BatchStatus } from "@catalog/core/catalog/types";
 import { batchCostAttribution, batchCostByEngine, batchCostByStage, brandCostTotals, dayCostTotals, BRAND_REPORT_DAYS } from "@catalog/core/catalog/cost-report";
 import { db, type Db } from "../db";
@@ -223,7 +224,15 @@ export async function healthSummary(conn: Db = db()): Promise<HealthSummary> {
       .orderBy(catalogChunks.startedAt).limit(1);
     if (chunk) slowest = { stage: chunk.stage, ms: Number(slowBatch.ms), batchId: slowBatch.id };
   }
-  return { silentOutputs: Number(sums?.silent ?? 0), heldSiblings: Number(sums?.held ?? 0), slowest };
+  // Spec 18: the photos of active batches by enlargement state (pipeline/enlargement.ts), on the batch_id index.
+  const [x2] = await conn
+    .select({
+      waiting: sql<string>`count(*) FILTER (WHERE ${photoEnlargementQueued()})`,
+      failed: sql<string>`count(*) FILTER (WHERE ${photoEnlargementFailed()})`,
+    })
+    .from(catalogSourceImages)
+    .where(inArray(catalogSourceImages.batchId, conn.select({ id: catalogBatches.id }).from(catalogBatches).where(inArray(catalogBatches.status, [...ACTIVE_STATUSES]))));
+  return { silentOutputs: Number(sums?.silent ?? 0), heldSiblings: Number(sums?.held ?? 0), slowest, enlargeWaiting: Number(x2?.waiting ?? 0), enlargeFailed: Number(x2?.failed ?? 0) };
 }
 
 /** The GPU cut-out service (infra/deploy.sh GPU_REGION). */

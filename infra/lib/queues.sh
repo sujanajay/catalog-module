@@ -1,5 +1,5 @@
 # The Cloud Tasks queues of a stack and their slots (spec 16 3.2.3, spec 17 G4). Sourced by infra/deploy.sh after
-# the shape (infra/lib/shape.sh: TASKS_, BULK_ and INGEST_MAX_DISPATCHES). Two steps, so a deploy never takes
+# the shape (infra/lib/shape.sh: TASKS_, BULK_, INGEST_ and, spec 18, ENLARGE_ and ENLARGE_BULK_MAX_DISPATCHES). Two steps, so a deploy never takes
 # slots away from the live worker before the new worker is live (2026-10-28: a run that stopped at its first gate
 # had already cut catalog-bulk from 36 to 1 and catalog-ingest from 4 to 2):
 #   queues_create_missing  before the services: creates each queue the new revisions' env names that does not
@@ -19,6 +19,10 @@
 # 5 attempts.
 CHUNK_QUEUE_RETRY=(--max-attempts=-1 --max-retry-duration=1800s --min-backoff=10s --max-backoff=60s --max-doublings=3)
 INGEST_QUEUE_RETRY=(--max-attempts=5 --min-backoff=10s)
+# Spec 18 3.3.1: an enlarge lane retries by attempt count: 8 attempts (the handler writes the terminal failure on the
+# last one, ENLARGE_MAX_ATTEMPTS), 30 s to 300 s apart, with no time limit (0s), and is paced by
+# ENLARGE_DISPATCHES_PER_SECOND so a burst of new enlargements never meets a cold upscaler all at once.
+ENLARGE_QUEUE_RETRY=(--max-attempts=8 --max-retry-duration=0s --min-backoff=30s --max-backoff=300s --max-doublings=3)
 
 # The queue names that exist in the region, one per line. gcloud 589 prints short names from list while older
 # releases print the full projects/.../queues/<name>; keep basenames so both match (docs/solutions/gcloud-list-names.md).
@@ -28,12 +32,19 @@ queues_read_existing() {
 }
 queue_exists() { grep -qxF "$1" <<<"$QUEUES_EXISTING"; }
 
-# The stack's queues as "<name> <slots> <chunk|ingest>" lines, from the shape. Needs queues_read_existing first.
+# The stack's queues as "<name> <slots> <chunk|ingest|enlarge>" lines, from the shape. Needs queues_read_existing
+# first. A bulk queue or enlarge lane left from a bigger shape keeps 1 slot (never deleted, as above).
 queues_shape() {
   echo "$QUEUE $TASKS_MAX_DISPATCHES chunk"
   echo "$QUEUE-ingest $INGEST_MAX_DISPATCHES ingest"
   if [ "$BULK_MAX_DISPATCHES" -gt 0 ]; then echo "$BULK_QUEUE $BULK_MAX_DISPATCHES chunk"
   elif queue_exists "$BULK_QUEUE"; then echo "$BULK_QUEUE 1 chunk"
+  fi
+  if [ "$ENLARGE_MAX_DISPATCHES" -gt 0 ]; then echo "$QUEUE-enlarge $ENLARGE_MAX_DISPATCHES enlarge"
+  elif queue_exists "$QUEUE-enlarge"; then echo "$QUEUE-enlarge 1 enlarge"
+  fi
+  if [ "$ENLARGE_BULK_MAX_DISPATCHES" -gt 0 ]; then echo "$QUEUE-enlarge-bulk $ENLARGE_BULK_MAX_DISPATCHES enlarge"
+  elif queue_exists "$QUEUE-enlarge-bulk"; then echo "$QUEUE-enlarge-bulk 1 enlarge"
   fi
 }
 
@@ -41,6 +52,7 @@ queue_call() {
   local verb=$1 name=$2 slots=$3 kind=$4
   local -a retry=("${CHUNK_QUEUE_RETRY[@]}")
   [ "$kind" = ingest ] && retry=("${INGEST_QUEUE_RETRY[@]}")
+  [ "$kind" = enlarge ] && retry=(--max-dispatches-per-second="$ENLARGE_DISPATCHES_PER_SECOND" "${ENLARGE_QUEUE_RETRY[@]}")
   gcloud tasks queues "$verb" "$name" --location="$REGION" --max-concurrent-dispatches="$slots" "${retry[@]}" >/dev/null
 }
 

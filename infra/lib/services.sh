@@ -23,6 +23,9 @@
 # infra/tests/gate.test.mjs runs them offline; only the probes below call gcloud, each as its own process.
 
 SERVICES=(catalog-matting catalog-upscale catalog-matting-gpu catalog-worker catalog-web)
+# The Cloud Run request timeout of the matting services (CPU and GPU). Spec 18 H3: with UPSCALE_SERVICE=cpu or gpu the
+# worker's enlarge task calls /upscale there and learns it as UPSCALE_TIMEOUT_S (infra/deploy.sh).
+MATTING_TIMEOUT_S=300
 
 # The region of a service by name, also for deploy.sh --rollback (which sets nothing else).
 service_region() {
@@ -49,7 +52,7 @@ service_catalog_matting() {
   SVC_IMAGE=$AR/matting:$TAG
   local concurrency=1
   SVC_ARGS=(--service-account="$MATTING_SA" --cpu=4 --memory=16Gi --concurrency="$concurrency" --min-instances=0
-    --max-instances="$MATTING_CPU_MAX_INSTANCES" --timeout=300 --labels=app=catalog,component=matte)
+    --max-instances="$MATTING_CPU_MAX_INSTANCES" --timeout="$MATTING_TIMEOUT_S" --labels=app=catalog,component=matte)
   SVC_ENV="MAX_RESIDENT_SESSIONS=1,UPSCALE_CPU=1"
   # Sized to the service: one CPU cut-out takes 25 to 71 s (measured on a candidate 2026-10-28; the full probe of
   # 4 models x 6 calls plus the switching order took 21 min). So the default model, which the service loads at
@@ -78,7 +81,7 @@ service_catalog_upscale() {
   SVC_IMAGE=$AR/matting:$TAG
   SVC_ARGS=(--service-account="$MATTING_SA" --cpu="$UPSCALE_CPU_VCPU" --memory="$UPSCALE_MEMORY" --concurrency="$UPSCALE_CONCURRENCY"
     --min-instances=0 --max-instances="$UPSCALE_MAX_INSTANCES" --timeout="$UPSCALE_TIMEOUT_S" --labels=app=catalog,component=upscale)
-  SVC_ENV="MAX_RESIDENT_SESSIONS=1,UPSCALE_CPU=1,PRELOAD_MATTE=0,ORT_INTRA_OP_THREADS=$UPSCALE_THREADS"
+  SVC_ENV="MAX_RESIDENT_SESSIONS=1,UPSCALE_CPU=1,PRELOAD_MATTE=0,ORT_INTRA_OP_THREADS=$UPSCALE_THREADS,UPSCALE_MAX_PIXELS=$UPSCALE_MAX_PIXELS"
   SVC_QUOTA_OPTIONAL=0
   SVC_SKIP_REASON=""
   local size p95 budget=0 first=${UPSCALE_SIZES%%,*}
@@ -121,7 +124,7 @@ service_catalog_matting_gpu() {
   SVC_IMAGE=$AR/matting-gpu:$TAG
   SVC_ARGS=(--service-account="$MATTING_SA" --gpu=1 --gpu-type=nvidia-l4 --no-gpu-zonal-redundancy --no-cpu-throttling
     --cpu="$GPU_CPU" --memory="$GPU_MEMORY" --concurrency="$GPU_CONCURRENCY" --min-instances=0
-    --max-instances="$GPU_MAX_INSTANCES" --timeout=300 --labels=app=catalog,component=matte-gpu)
+    --max-instances="$GPU_MAX_INSTANCES" --timeout="$MATTING_TIMEOUT_S" --labels=app=catalog,component=matte-gpu)
   SVC_ENV="MAX_RESIDENT_SESSIONS=$MAX_RESIDENT_SESSIONS"
   local knob
   for knob in GPU_MEM_LIMIT_BYTES CUDNN_CONV_ALGO_SEARCH CUDNN_CONV_USE_MAX_WORKSPACE INFERENCE_LOCK_SCOPE; do

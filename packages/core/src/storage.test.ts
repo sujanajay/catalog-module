@@ -179,7 +179,14 @@ describe("GCS operations (fake client)", () => {
     await uploadBuffer("catalog/uspa/b1/raw/A/A_1.jpg", Buffer.from("x"), "image/jpeg", { sha256: "ab12" });
     expect(save).toHaveBeenCalledWith(Buffer.from("x"), { contentType: "image/jpeg", resumable: false, metadata: { metadata: { sha256: "ab12" } } });
     getMetadata.mockResolvedValueOnce([{ size: "1", contentType: "image/jpeg", generation: "7", crc32c: "c==", metadata: { sha256: "ab12" } }]);
-    expect(await headObject("gs://b/p.jpg")).toEqual({ exists: true, size: 1, contentType: "image/jpeg", generation: "7", crc32c: "c==", sha256: "ab12" });
+    expect(await headObject("gs://b/p.jpg")).toEqual({ exists: true, size: 1, contentType: "image/jpeg", generation: "7", crc32c: "c==", sha256: "ab12", metadata: { sha256: "ab12" } });
+  });
+
+  it("spec 18: uploadBuffer stores other custom metadata next to sha256 and headObject returns every string value", async () => {
+    await uploadBuffer("catalog/uspa/b1/derived/A/A_1.x2.jpg", Buffer.from("x"), "image/jpeg", { metadata: { sourceSha256: "s1", upscaler: "swinir-x2+cpu" } });
+    expect(save).toHaveBeenCalledWith(Buffer.from("x"), { contentType: "image/jpeg", resumable: false, metadata: { metadata: { sourceSha256: "s1", upscaler: "swinir-x2+cpu" } } });
+    getMetadata.mockResolvedValueOnce([{ size: "1", contentType: "image/jpeg", generation: "7", crc32c: "c==", metadata: { sourceSha256: "s1", upscaler: "swinir-x2+cpu", n: 3 } }]);
+    expect(await headObject("gs://b/p.jpg")).toEqual({ exists: true, size: 1, contentType: "image/jpeg", generation: "7", crc32c: "c==", metadata: { sourceSha256: "s1", upscaler: "swinir-x2+cpu" } });
   });
 
   it("readRange and createRangeStream pass an inclusive end", async () => {

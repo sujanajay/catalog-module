@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { deliveredLinks } from "../pipeline/report";
 import { classifyOutputs, completionLine, type OutputLike } from "./classify";
+import { ENLARGEMENT_FAILED_SENTENCE } from "../types";
 
 const out = (id: string, productId: string, status: string, extra: Partial<OutputLike> = {}): OutputLike =>
   ({ id, productId, status, reason: null, channel: "noon", n: 1, decision: null, isLive: false, ...extra });
@@ -17,6 +18,16 @@ describe("classifyOutputs with holds (spec 17 3.1.1)", () => {
     expect(c.silent).toEqual([]);
     expect(c.ended).toBe(2);
     expect(completionLine(c)).toBe("Held with the product (waiting for the operator): 2. Silent outputs (must be none): 0.");
+  });
+
+  it("spec 18: an output held with enlargement_failed is a hold that ended, never silent; its staged siblings wait with it", () => {
+    const c = classifyOutputs([
+      out("e1", "big", "needs_attention", { channel: "trendyol", reason: ENLARGEMENT_FAILED_SENTENCE }),
+      out("e2", "big", "staged"),
+    ], new Set(["big"]));
+    expect(c.silent).toEqual([]);
+    expect(c.ended).toBe(1);
+    expect(c.heldSiblings.map(s => s.id)).toEqual(["e2"]);
   });
 
   it("a staged output on a product that is not held is silent", () => {

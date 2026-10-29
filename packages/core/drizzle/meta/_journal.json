@@ -36,6 +36,13 @@
       "when": 1793088888478,
       "tag": "0004_chunk_leases",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1793251364512,
+      "tag": "0005_enlargement",
+      "breakpoints": true
     }
   ]
 }

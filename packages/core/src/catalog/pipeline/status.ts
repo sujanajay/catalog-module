@@ -123,6 +123,8 @@ export function waitText(images: number): string {
 export const ANOTHER_BATCH_RUNNING = "Another batch is running; yours may wait behind it.";
 export const CLOSE_PAGE_TEXT = "You can close this page and come back; nothing stops.";
 export const STARTING_SERVICES_TEXT = "Starting the image services. The first pictures usually take a minute or two on the first batch after a quiet spell.";
+/** Spec 18: the enlargement step's progress words, "Enlarging photos 3 of 12". Never names a model. */
+export const enlargingText = (settled: number, total: number) => `Enlarging photos ${num(settled)} of ${num(total)}`;
 /** Spec 15 E7: the starting line shows only this long after Start, and only before any photo is prepared. */
 export const STARTING_SERVICES_MS = 5 * 60_000;
 /** Spec 15 E7: a processing batch with no finished photo for this long gets the stall sentence. */
@@ -234,7 +236,10 @@ function derive(input: BatchStateInput): BatchState {
     const madeText = `${fmt(done)} of ${fmt(planned)} ${plural(planned, "image", "images")} made${notMade(c)}${left ? ` · ${left}` : ""}.`;
     const preparing = chunked && c.prepared !== undefined && c.prepared < c.sources;
     const starting = status === "matting" && (c.prepared ?? done) === 0 && (startedMs === null || now - startedMs < STARTING_SERVICES_MS);
-    const text = [preparing ? `Preparing photos ${fmt(c.prepared!)} of ${fmt(c.sources)} · ${madeText}` : madeText, CLOSE_PAGE_TEXT,
+    // Spec 18: photos waiting for their enlargement (made, or failed and held, counts as settled).
+    const enlarged = (c.enlargeDone ?? 0) + (c.enlargeFailed ?? 0), enlarging = chunked && (c.enlargeTotal ?? 0) > enlarged;
+    const steps = `${preparing ? `Preparing photos ${fmt(c.prepared!)} of ${fmt(c.sources)} · ` : ""}${enlarging ? `${enlargingText(enlarged, c.enlargeTotal!)} · ` : ""}`;
+    const text = [`${steps}${madeText}`, CLOSE_PAGE_TEXT,
       ...(stalled ? [processingStalledText(Math.floor(quietMs / 60_000))] : []), ...(starting ? [STARTING_SERVICES_TEXT] : [])].join(" ");
     return { ...result, state: "processing", pill: "Processing", made: done, total: planned, progress: planned ? Math.min(1, done / planned) : 0, listPill: `Processing ${fmt(done)} of ${fmt(planned)}`, eta,...(status === "qa" ? {qualityLine:"Quality check running"}:{}), text };
   }

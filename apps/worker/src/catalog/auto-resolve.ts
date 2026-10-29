@@ -8,6 +8,7 @@ import { strictestChannel } from "@catalog/core/catalog/qa/policy";
 import { heldInHand, isBusyBackground, passthroughMatte, passthroughProductLoss, PASSTHROUGH_PRODUCT_LOSS_MAX } from "@catalog/core/catalog/matte-guard";
 import type { ChannelId, OutputFlag, ResolvedPolicy } from "@catalog/core/catalog/types";
 import type { CatalogDeps } from "./deps";
+import { primeStoredEnlargement } from "./enlarge";
 import { renderKey, rerenderedKey } from "@catalog/core/catalog/pipeline/publish";
 import { recordCostEvents } from "@catalog/core/cost-events";
 import { matteCallUsd } from "@catalog/core/catalog/cost";
@@ -43,6 +44,12 @@ export interface ResolvePhotoInput {
 }
 export interface ResolveResult { actions: AutoAction[]; fixed: Set<string> }
 
+/** Spec 18: a photo prepared again gets its stored x2 image primed, so a re-render never asks a service for it. */
+export async function preparePrimed(deps: CatalogDeps, source: Pick<typeof catalogSourceImages.$inferSelect,"id"|"rawUri"|"originalName"|"sha256"|"x2Uri"|"x2Model">, trace: {batchId:string;productId:string}): Promise<Prepared> {
+  const p = await deps.prepare((await deps.storage.downloadBuffer(source.rawUri)).buf,source.originalName,b=>deps.matting.convert(b,trace));
+  await primeStoredEnlargement(deps,source,p);
+  return p;
+}
 const ok = (r: RenderOutput | undefined | null): r is RenderOutput & { jpeg: Buffer } => !!r && r.status === "ok" && r.compliance.ok && !!r.jpeg;
 const codes = (r: RenderOutput) => r.compliance.failures.map(f => f.split(":")[0]).join(",") || r.notes.join("; ") || r.status;
 /** The context the first render used, read back from the row: one canvas per product, Styli's size kept. */
@@ -77,7 +84,7 @@ export async function resolvePhoto(deps: CatalogDeps, input: ResolvePhotoInput):
   if (!input.failing.length) return {actions:[],fixed:new Set()};
   // Ids for the matting service's log lines (x-catalog-batch / x-catalog-product) and the upscale log.
   const trace = {batchId:input.batch.id,productId:product.id};
-  const p = input.prepared ?? await deps.prepare((await deps.storage.downloadBuffer(source.rawUri)).buf,source.originalName,b=>deps.matting.convert(b,trace));
+  const p = input.prepared ?? await preparePrimed(deps,source,trace);
   const first = input.matte ?? await storedMatte(deps,source,p,input.policy.matteModel);
   if (!first) return {actions:[],fixed:new Set()};
   let second: Matte | null | undefined;
@@ -247,7 +254,7 @@ export async function flushCutPhoto(deps: CatalogDeps, input: FlushCutInput): Pr
   const done = async (action: AutoAction) => { await recordActions(deps,input,input.outputs,[action]); return action; };
   if (!input.outputs.length) return {step:"flush_cut",trigger,result:"skipped",channels,rejudged:false,detail:"nothing to re-make"};
   const {source,product} = input, trace = {batchId:input.batch.id,productId:product.id};
-  const p = input.prepared ?? await deps.prepare((await deps.storage.downloadBuffer(source.rawUri)).buf,source.originalName,b=>deps.matting.convert(b,trace));
+  const p = input.prepared ?? await preparePrimed(deps,source,trace);
   const matte = input.matte ?? await storedMatte(deps,source,p,input.policy.matteModel);
   if (!matte) return done({step:"flush_cut",trigger,result:"skipped",channels,rejudged:false,detail:"no cut-out stored"});
   // Only a side the first render did not already place flush is worth a re-render.

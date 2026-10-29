@@ -26,10 +26,9 @@
 # (needs database and GCS access and REAL_DATA_DIR).
 # CATALOG_PREVIEW=1 (infra/deploy-preview.sh): the preview stack, plus the GPU service of this commit as a no-traffic
 # candidate of catalog-matting-gpu (probed, traffic never shifted) that the preview worker calls.
-# Spec 18: UPSCALE_SERVICE=dedicated sends the worker's enlargements to catalog-upscale. shape.sh refuses it until the
-# render calls catalog-upscale through the enlarge stage (spec 18 H3 sets ENLARGE_CLIENT_WIRED=1; the matting client
-# refuses a dedicated UPSCALE_URL) and its shape is measured; UPSCALE_SERVICE=cpu (today, and the rollback) keeps them
-# on catalog-matting.
+# Spec 18: UPSCALE_SERVICE=dedicated sends the worker's enlargements to catalog-upscale (the enlarge task, spec 18 H3;
+# the matting client refuses a dedicated UPSCALE_URL). shape.sh refuses it until its shape is measured;
+# UPSCALE_SERVICE=cpu (today, and the rollback) keeps them on catalog-matting.
 # UPSCALE_MEASURE=1 with UPSCALE_CPU_VCPU, UPSCALE_THREADS, UPSCALE_CONCURRENCY and UPSCALE_MAX_INSTANCES deploys ONLY
 # catalog-upscale, as a candidate of that shape (tag measure-<cpu>c-<threads>t-<concurrency>r): it builds only the
 # matting image if missing, skips migrations and queues, reuses every other service as it is, never rebuilds the
@@ -139,7 +138,7 @@ BQ_PROJECT=${BQ_PROJECT:-image-links-agent}
 shape_defaults
 shape_check "$SQL_CONNECTION_LIMIT" || exit 1
 echo "==> connection budget: catalog $CATALOG_DB_TOTAL of $CATALOG_DB_LIMIT (ila-pg $SQL_TIER_LIVE allows $SQL_CONNECTION_LIMIT)"
-echo "==> shape: worker $WORKER_MAX_INSTANCES x ${WORKER_CPU} vCPU/$WORKER_MEMORY; slots $TASKS_MAX_DISPATCHES + bulk $BULK_MAX_DISPATCHES + ingest $INGEST_MAX_DISPATCHES of $SLOTS_CAPACITY; asia-south1 vCPU $CPU_TOTAL of $CPU_QUOTA_LIMIT; GPU $GPU_MAX_INSTANCES x ${GPU_CPU} vCPU/$GPU_MEMORY concurrency $GPU_CONCURRENCY, $MAX_RESIDENT_SESSIONS resident; upscale on $UPSCALE_SERVICE"
+echo "==> shape: worker $WORKER_MAX_INSTANCES x ${WORKER_CPU} vCPU/$WORKER_MEMORY; slots $TASKS_MAX_DISPATCHES + bulk $BULK_MAX_DISPATCHES + ingest $INGEST_MAX_DISPATCHES + enlarge $ENLARGE_MAX_DISPATCHES + $ENLARGE_BULK_MAX_DISPATCHES at ${ENLARGE_DISPATCHES_PER_SECOND}/s of $SLOTS_CAPACITY; asia-south1 vCPU $CPU_TOTAL of $CPU_QUOTA_LIMIT; GPU $GPU_MAX_INSTANCES x ${GPU_CPU} vCPU/$GPU_MEMORY concurrency $GPU_CONCURRENCY, $MAX_RESIDENT_SESSIONS resident; upscale on $UPSCALE_SERVICE"
 if upscale_deployed; then
   echo "==> shape: catalog-upscale $UPSCALE_MAX_INSTANCES x ${UPSCALE_CPU_VCPU} vCPU/$UPSCALE_MEMORY, $UPSCALE_THREADS threads, concurrency $UPSCALE_CONCURRENCY, timeout ${UPSCALE_TIMEOUT_S} s$([ "$UPSCALE_MEASURE" = 1 ] && echo " (measure: no-traffic candidate)")"
 fi
@@ -162,6 +161,10 @@ if [ -n "$LLM_INFLIGHT_PER_INSTANCE" ]; then WORKER_ENV+=",LLM_INFLIGHT_PER_INST
 # The bulk queue (spec 16 3.2.3): only when it has slots; without it the env is absent and every task uses $QUEUE.
 BULK_QUEUE=$QUEUE-bulk
 if [ "$BULK_MAX_DISPATCHES" -gt 0 ]; then WORKER_ENV+=",TASKS_BULK_QUEUE=$BULK_QUEUE"; fi
+# Spec 18 3.3.1: the enlarge lanes, each only when it has slots; without one its tasks use the chunk queue of the
+# batch's class (packages/core/src/tasks.ts queueForRoute).
+if [ "$ENLARGE_MAX_DISPATCHES" -gt 0 ]; then WORKER_ENV+=",TASKS_ENLARGE_QUEUE=$QUEUE-enlarge"; fi
+if [ "$ENLARGE_BULK_MAX_DISPATCHES" -gt 0 ]; then WORKER_ENV+=",TASKS_ENLARGE_BULK_QUEUE=$QUEUE-enlarge-bulk"; fi
 # Jobs get the worker environment with the job pool size (budget above).
 job_env() { printf '%s' "${WORKER_ENV/DB_POOL_MAX=$WORKER_DB_POOL_MAX,/DB_POOL_MAX=$JOB_DB_POOL_MAX,}"; }
 # Compute spend: the worker records cost.computeUsd = vCPU-seconds * COMPUTE_USD_PER_VCPU_SECOND
@@ -380,20 +383,22 @@ for SERVICE in "${SERVICES[@]}"; do
       # Spec 16 3.1.3: with UPSCALE_SERVICE=cpu the CPU cut-out service upscales (it serves /upscale) and the worker
       # sends /upscale to it through UPSCALE_URL, so no GPU URL is needed.
       # Spec 18 H2: with UPSCALE_SERVICE=dedicated the worker sends /upscale to catalog-upscale and learns its timeout
-      # (the client waits UPSCALE_TIMEOUT_S + 30 s). Depends on spec 18 H3: the render must call it through the enlarge
-      # stage (enlarge.ts), since the matting client refuses a dedicated UPSCALE_URL; shape.sh refuses dedicated until
-      # H3 sets ENLARGE_CLIENT_WIRED=1.
+      # (the client waits UPSCALE_TIMEOUT_S + 30 s). Spec 18 H3: the enlarge task calls it (enlarge.ts); the render
+      # reads the stored x2 and the matting client refuses a dedicated UPSCALE_URL. On cpu and gpu the enlarge task
+      # learns the matting service's own timeout the same way (each attempt is also clamped to the task's deadline).
       if [ "$UPSCALE_SERVICE" = cpu ]; then
-        if [ -n "$UPSCALE_MODEL" ]; then WORKER_ENV+=",UPSCALE_URL=$MATTING_URL"; fi
+        if [ -n "$UPSCALE_MODEL" ]; then WORKER_ENV+=",UPSCALE_URL=$MATTING_URL,UPSCALE_TIMEOUT_S=$MATTING_TIMEOUT_S"; fi
       elif [ "$UPSCALE_SERVICE" = dedicated ]; then
         if [ -z "$UPSCALE_SERVICE_URL" ]; then
           echo "ERROR: UPSCALE_SERVICE=dedicated but catalog-upscale has no URL; the worker was not changed" >&2
           exit 1
         fi
-        if [ -n "$UPSCALE_MODEL" ]; then WORKER_ENV+=",UPSCALE_URL=$UPSCALE_SERVICE_URL,UPSCALE_TIMEOUT_S=$UPSCALE_TIMEOUT_S"; fi
+        if [ -n "$UPSCALE_MODEL" ]; then WORKER_ENV+=",UPSCALE_URL=$UPSCALE_SERVICE_URL,UPSCALE_TIMEOUT_S=$UPSCALE_TIMEOUT_S,UPSCALE_MAX_PIXELS=$UPSCALE_MAX_PIXELS"; fi
       elif [ -n "$UPSCALE_MODEL" ] && [ -z "$MATTING_GPU_URL" ]; then
         echo "WARN: UPSCALE_MODEL=$UPSCALE_MODEL ignored: no GPU matting service URL; the render keeps the plain path" >&2
         UPSCALE_MODEL=""
+      elif [ -n "$UPSCALE_MODEL" ]; then
+        WORKER_ENV+=",UPSCALE_TIMEOUT_S=$MATTING_TIMEOUT_S"
       fi
       if [ -n "$UPSCALE_MODEL" ]; then WORKER_ENV+=",UPSCALE_MODEL=$UPSCALE_MODEL"; WEB_ENV+=",UPSCALE_MODEL=$UPSCALE_MODEL"; fi
       ;;

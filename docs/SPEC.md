@@ -51,7 +51,10 @@ configuration. Access is by Google sign-in with three roles (admin, operator, vi
   enlargement exceeds `UPSCALE_MIN_SCALE` (1.5); its outputs carry the information flag `upscaled`,
   never a hold. Decided by the owner 2026-10-21: the upscaler is on by default (`swinir-x2`, deploy.sh;
   `UPSCALE_MODEL=off` turns it off) for every channel wherever a photo is enlarged beyond 1.5x. No paid
-  image API without a separate owner yes.
+  image API without a separate owner yes. Spec 18 (owner 2026-10-29): an enlargement that fails holds the
+  output with a reason (`enlargement_failed`); a plain resize never stands in. The x2 image is made by its own
+  durable task (`/tasks/catalog/enlarge`, the `catalog-upscale` service) before the render, which only reads
+  the stored image.
 - No Styli enlargement cap (owner decision 2026-10-22, replacing the 2026-10-21 size floor of 741 px with
   the upscaler and 1,482 px without): any amount of enlargement is fine and a product cut at the photo
   edge is made on Styli like any other photo. No channel skips a photo because it needs more
@@ -206,11 +209,12 @@ tall. Common: JPEG 4:4:4, sRGB with ICC, quality 90 stepping down to 70 until <=
 applied then stripped, JFIF density set. Adaptive canvas: the largest size between min and target that
 keeps upscaling <= 1.5x; below that, the min canvas with a `low_resolution` flag; a fixed canvas (Styli,
 Centrepoint, Trendyol) is filled whatever the enlargement and flagged `low_resolution` the same way. The
-flag is information only and never a skip on any channel (owner 2026-10-22: no Styli enlargement cap); a
-photo is made even if the upscale call fails, with the soft note. Any enlargement (scale > 1)
-is followed by a conservative unsharp mask on the RGB only (spec 11); an enlargement past
-`UPSCALE_MIN_SCALE` (1.5) goes through the x2 upscaler when `UPSCALE_MODEL` is set, Lanczos otherwise
-(spec 11; `render_key` carries the upscaler id and version).
+flag is information only and never a skip on any channel (owner 2026-10-22: no Styli enlargement cap). Any
+enlargement (scale > 1) is followed by a conservative unsharp mask on the RGB only (spec 11); an enlargement
+past `UPSCALE_MIN_SCALE` (1.5) goes through the x2 upscaler when `UPSCALE_MODEL` is set, Lanczos otherwise
+(spec 11; `render_key` carries the upscaler id and version). Spec 18: an enlargement that fails holds the
+output with a reason (`enlargement_failed`, needs attention); a plain resize never stands in. The photo's x2
+image comes from the enlarge task (stored under the batch's derived prefix) and the render calls no service.
 
 Spec 05 clarifications approved by the owner: adaptive canvases retain the target aspect and meet
 both listed minimum dimensions, even when the minimum has a different aspect (Trendyol's effective

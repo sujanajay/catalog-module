@@ -189,8 +189,9 @@ shape picked from it passes `shape_check`.
 2. Else download raw, prepare (the same `prepare` the render uses, so the sizes match), call the service (3.2.3),
    verify the reply is exactly 2x in both axes.
 3. Upload JPEG q95 4:4:4 (`UPSCALE_UPLOAD_JPEG`) with metadata `sourceSha256` and `upscaler` (the `upscalerId`) to
-   `<batchPrefix>/derived/<pathKey>/<pathKey>_<n>.x2.jpg` in the private assets bucket. New
-   `enlargedPath(prefix, pathKey, n)` in `naming.ts` next to `derivedPath`.
+   `<batchPrefix>/derived/<pathKey>/<pathKey>_<n>.<upscaler>.x2.jpg` in the private assets bucket (the key names the
+   upscaler, so another model's image is another object; 2026-10-29 review). New
+   `enlargedPath(prefix, pathKey, n, upscaler)` in `naming.ts` next to `derivedPath`.
 4. Write `x2_uri`, `x2_model`, clear `x2_error`; one cost ledger row (stage `upscale`, kind `upscale_call`, engine
    `cpu`, the service ms).
 5. On failure: increment `x2_attempts`, write `x2_error`, answer 503 so Cloud Tasks retries, until the attempt count
@@ -272,7 +273,7 @@ contract change (owner decision 3). `migration-0005.test.ts` applies 0000 to 000
 
 ## 4. Data and state changes
 
-Migration `0005` (3.3.9). Object path `<batchPrefix>/derived/<pathKey>/<pathKey>_<n>.x2.jpg` in the private assets
+Migration `0005` (3.3.9). Object path `<batchPrefix>/derived/<pathKey>/<pathKey>_<n>.<upscaler>.x2.jpg` in the private assets
 bucket (never public, never raw, inside the batch prefix). `catalog_batches.counts` gains `enlargeTotal`,
 `enlargeDone`, `enlargeFailed`; `catalog_batches.options` gains `enlargement`. A chunk row may carry
 `task_name='enlarging'` while parked. New flag `enlargement_failed` in `OUTPUT_FLAGS`. Cloud Run: service

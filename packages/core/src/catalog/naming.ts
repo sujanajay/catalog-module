@@ -134,6 +134,17 @@ export function derivedPath(prefix: string, pathKey: string, n: number, kind: st
   return `${prefix}/derived/${pathKey}/${shotStem(pathKey, n)}.${kind}.png`;
 }
 
+/**
+ * Spec 18 3.3.3: `<prefix>/derived/<pathKey>/<pathKey>_<n>.<upscaler>.x2.jpg`, the stored enlargement (the upscaler's 2x
+ * image of the prepared photo) next to its matte, in the private assets bucket. Never public, never raw, inside the
+ * batch prefix. The key names the upscaler (its upscalerId, lower case, anything but letters, digits, dots and dashes
+ * as a dash: `swinir-x2+cpu` is `swinir-x2-cpu`), so an image made by one model is never read as another's.
+ */
+export function enlargedPath(prefix: string, pathKey: string, n: number, upscaler: string): string {
+  const slug = upscaler.toLowerCase().replace(/[^a-z0-9.-]+/g, "-");
+  return `${prefix}/derived/${pathKey}/${shotStem(pathKey, n)}.${slug}.x2.jpg`;
+}
+
 /** `<prefix>/staging/<pathKey>/<channel>/<pathKey>_<n>.jpg`. */
 export function stagingPath(prefix: string, pathKey: string, channel: ChannelId, n: number): string {
   return `${prefix}/staging/${pathKey}/${channel}/${shotStem(pathKey, n)}.jpg`;

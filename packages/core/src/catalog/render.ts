@@ -1,7 +1,7 @@
 import sharp from "sharp";
 import { fileTypeFromBuffer } from "file-type";
 import { backgroundFor, channel, CUT_BAND_NOTE_START, DETAIL_SHOT_BBOX_FRACTION, JPEG_QUALITY_MIN, JPEG_QUALITY_START, JPEG_QUALITY_STEP, MAX_OUTPUT_BYTES, MAX_UPSCALE, MIN_SOURCE_LONG_SIDE_PX, type ChannelSpec, type Size } from "./channels";
-import type { ChannelId, OutputFlag, ProductType } from "./types";
+import { ENLARGEMENT_FAILED_SENTENCE, type ChannelId, type OutputFlag, type ProductType } from "./types";
 import { ALPHA_BBOX_THRESHOLD, analyseBackground, borderPixels, shadowLayer } from "./shadow";
 import { anchorBounds, BG_TOLERANCE, checkOutput, type Measured } from "./compliance";
 import { enlargeCutout } from "./enhance";
@@ -499,6 +499,28 @@ export function planProduct(spec: ChannelSpec, shots: { box: BBox; source: Size;
   return { uniformScale: fits.length ? Math.min(...fits) : 1, canvas: canvas.w ? canvas : spec.targetCanvas };
 }
 
+/** One shot of a product as enlargementNeeds reads it: the prepared photo's size and colour, and its matte. */
+export interface EnlargementShot { width: number; height: number; rgb: Buffer; alpha: Buffer; model: string }
+
+/**
+ * Spec 18 3.3.4: which shots of one product may need the upscaler on any of `channels`, decided at the matte stage
+ * once the product's photos are cut out, so each x2 image is made by the enlarge task before the render. A superset of
+ * renderSource's decision (shouldUpscale on the plan's scale) as the render stage and auto-resolve plan it: the
+ * product's one canvas per channel (planProduct over the shots' geometry, as chunk.ts does), each shot planned on it
+ * with and without the judge's relaxed cut rule, with no uniform scale and no smaller fit, which only lower the scale.
+ * `shots` should hold every shot of the product that has a matte: fewer shots can only give a smaller canvas. A shot
+ * with no product found needs nothing (the render fails it). A render that still needs an x2 image no task made is
+ * held with `enlargement_failed`, never silent.
+ */
+export function enlargementNeeds(channels: readonly ChannelId[], shots: readonly EnlargementShot[], productType: ProductType | null | undefined, minScale: number): boolean[] {
+  const geometry = (s: EnlargementShot, judgedCut: boolean) => shotGeometry(s.alpha, s.width, s.height, { rgb: s.rgb, judgedCut, ...trimRules(productType, s) });
+  const plain = shots.map((s) => geometry(s, false)), judged = shots.map((s) => geometry(s, true));
+  const found = plain.filter((g): g is ShotGeometry => g !== null);
+  const canvases = channels.map((id) => ({ spec: channel(id), canvas: found.length ? planProduct(channel(id), found).canvas : undefined }));
+  return shots.map((s, i) => canvases.some(({ spec, canvas }) => [plain[i], judged[i]].some((g) =>
+    !!g && shouldUpscale(planCanvas(spec, g.box, { w: s.width, h: s.height }, { canvas, cut: g.cut, trimRoom: g.trimRoom }).scale, minScale))));
+}
+
 /**
  * The check accepts the product's lowest row on the guide or one row above it (nothing seen may cross into the
  * margin), so where a fade lies below that row it goes one row above the guide: the JPEG encode may then show one more
@@ -588,14 +610,18 @@ export async function renderSource(input: RenderInput): Promise<RenderOutput> {
     // Spec 11: beyond the upscaler's threshold the colour comes from the GPU upscaler (the whole photo x2 once, shared by
     // every channel of the photo, then this crop at doubled coordinates and Lanczos3 to the product size). The plain path is Lanczos3 plus a conservative sharpen of the colour (never the alpha) when the product is
     // enlarged; on the upscaled path the same sharpening runs on the upscaler's colour with the residual factor
-    // (enlargement / 2) and the alpha stays the Lanczos3 alpha. Any upscale failure leaves `upscaled` null: the plain
-    // path, byte for byte, with no flag (enhance.ts enlargeCutout).
+    // (enlargement / 2) and the alpha stays the Lanczos3 alpha. Spec 18: an enlargement the upscaler should have made
+    // and did not (no stored x2 image, or a failed one) flags `enlargement_failed`, which holds the output with its
+    // reason; the image below is the plain path, kept only for the operator to look at. Without an upscaler
+    // (UPSCALE_MODEL=off) no enlargement is needed and the plain path has no flag.
     const to = { w: product.w, h: product.h };
-    const enlarged = input.upscaler && shouldUpscale(plan.scale, input.upscaler.minScale)
+    const needsUpscaler = !!input.upscaler && shouldUpscale(plan.scale, input.upscaler.minScale);
+    const enlarged = input.upscaler && needsUpscaler
       ? await upscaledRgb(input.upscaler, p.rgb, p.width, crop, to, { ...input.trace, identifier: input.identifier, shot: shotNumber, channel: spec.id })
       : null;
     const cutout = await enlargeCutout({ rgba, rgb: p.rgb, width: p.width, height: p.height, crop, to, ...(enlarged ? { upscaled: enlarged.rgb } : {}) });
     if (enlarged && input.upscaler) { result.flags.push("upscaled"); result.upscale = { model: input.upscaler.model, ms: enlarged.ms, ...(enlarged.reused ? { reused: true as const } : {}) }; }
+    else if (needsUpscaler) { result.flags.push("enlargement_failed"); result.notes.push(ENLARGEMENT_FAILED_SENTENCE); }
     // Styli's guide is judged on the product as it is seen (visibleAnchorShift); the shadow and the mask follow the move.
     if (spec.anchor === "bottom-centre") {
       const shift = await visibleAnchorShift(cutout, product, plan.safeBox, plan, rgbColor, cut);

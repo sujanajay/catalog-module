@@ -163,7 +163,10 @@ describe("catalog wizard authorization and contracts",()=>{
     expect((await patch(request("PATCH",{channels:["noon","styli"]}),ctx(id))).status).toBe(200);
     const shown=await (await preview(request("GET"),ctx(id))).json();expect(shown.ready).toBe(true);expect(shown.estimate).toBeNull();expect(shown.groupedBy).toBe("Grouped by folder name");expect(shown.groups[0].files[0]).toMatchObject({n:1,originalName:"ABC123/ABC123_1.heic",width:1200,height:1600});expect(shown.groups[0].firstPhotoUrl).toContain("thumb.example");expect(shown.counts.outputs).toBe(2);
     const info=vi.spyOn(console,"info").mockImplementation(()=>{});
-    const response=await start(request("POST",{previewAt:shown.previewAt}),ctx(id));expect(response.status).toBe(200);expect(await response.json()).toMatchObject({id,status:"matting"});
+    const upscaleModel=process.env.UPSCALE_MODEL;process.env.UPSCALE_MODEL="swinir-x2";
+    const response=await start(request("POST",{previewAt:shown.previewAt}),ctx(id));if(upscaleModel===undefined) delete process.env.UPSCALE_MODEL; else process.env.UPSCALE_MODEL=upscaleModel;expect(response.status).toBe(200);expect(await response.json()).toMatchObject({id,status:"matting"});
+    // Spec 18: started with the upscaler on, the batch is made with the enlargement stage.
+    expect((await db.select().from(catalogBatches).where(eq(catalogBatches.id,id)))[0]!.options).toMatchObject({enlargement:{model:"swinir-x2"}});
     const lines=info.mock.calls.map(([line])=>{try{return JSON.parse(String(line)) as Record<string,unknown>;}catch{return {};}});info.mockRestore();
     expect(lines.filter(l=>l.message==="batch started")).toEqual([expect.objectContaining({severity:"INFO",batchId:id,products:1,sources:1,outputs:2,chunks:1,"logging.googleapis.com/labels":{app:"catalog",batchId:id}})]);
     const chunks=(await db.select().from(catalogChunks)).filter((c)=>c.batchId===id);expect(chunks).toHaveLength(1);expect(chunks[0]).toMatchObject({stage:"matte",status:"queued"});expect(chunks[0]!.dispatchedAt).not.toBeNull();expect(enqueueTask).toHaveBeenCalledWith("/tasks/catalog/chunk",{chunkId:chunks[0]!.id,stage:"matte",step:0},{taskId:`chunk-${chunks[0]!.id}-matte-0`});

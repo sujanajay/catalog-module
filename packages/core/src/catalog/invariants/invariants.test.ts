@@ -44,8 +44,8 @@ async function chunk(batchId: string, v: { status: "queued" | "running" | "done"
 const run = (batchId?: string) => runInvariants(db, vi.fn(), NOW, batchId ? { batchId } : {});
 
 describe("invariant checks", () => {
-  it("the table has the five checks of spec 17 with their severities", () => {
-    expect(CHECKS.map(c => [c.id, c.severity])).toEqual([["silent_outputs", "ERROR"], ["held_without_reason", "ERROR"], ["stale_running_chunk", "WARNING"], ["slow_chunk", "WARNING"], ["done_batch_with_open_chunk", "ERROR"]]);
+  it("the table has the five checks of spec 17 and spec 18's enlargement check with their severities", () => {
+    expect(CHECKS.map(c => [c.id, c.severity])).toEqual([["silent_outputs", "ERROR"], ["held_without_reason", "ERROR"], ["stale_running_chunk", "WARNING"], ["slow_chunk", "WARNING"], ["done_batch_with_open_chunk", "ERROR"], ["enlarged_without_upscaler", "ERROR"]]);
     for (const c of CHECKS) expect(c.sentence.length).toBeGreaterThan(20);
   });
 
@@ -134,6 +134,30 @@ describe("invariant checks", () => {
     expect((await run()).counts.done_batch_with_open_chunk).toBe(0);
     await chunk(b.id, { status: "queued" });
     expect((await run()).counts.done_batch_with_open_chunk).toBe(1);
+  });
+
+  it("enlarged_without_upscaler: a verified output enlarged past 1.5x without `upscaled` in a batch with the stage violates; upscaled, held, small and older batches do not", async () => {
+    const withStage = await batch("done");
+    await db.update(catalogBatches).set({ options: { ...withStage.options, enlargement: { model: "swinir-x2" } } }).where(eq(catalogBatches.id, withStage.id));
+    const p = await product(withStage.id, "new");
+    const enlarged = async (status: OutputStatus, scale: number, flags: string[]) => {
+      const o = await output(withStage.id, p, status, status === "needs_attention" ? { reason: "This photo could not be enlarged." } : {});
+      await db.update(catalogOutputs).set({ scale, flags: flags as typeof o.flags }).where(eq(catalogOutputs.id, o.id));
+      return o;
+    };
+    const plain = await enlarged("verified", 2.25, []);
+    await enlarged("verified", 2.25, ["upscaled"]);
+    await enlarged("needs_attention", 2.25, ["enlargement_failed"]);
+    await enlarged("verified", 1.5, []);
+    // An older batch (started before the stage) made with the silent fallback is ignored.
+    const older = await batch("done"), q = await product(older.id, "new");
+    const old = await output(older.id, q, "verified");
+    await db.update(catalogOutputs).set({ scale: 3 }).where(eq(catalogOutputs.id, old.id));
+    const r = await run();
+    expect(r.counts.enlarged_without_upscaler).toBe(1);
+    expect(r.results.find(x => x.id === "enlarged_without_upscaler")!.sample).toEqual([plain.id]);
+    await db.update(catalogOutputs).set({ flags: ["upscaled"] }).where(eq(catalogOutputs.id, plain.id));
+    expect((await run()).counts.enlarged_without_upscaler).toBe(0);
   });
 });
 

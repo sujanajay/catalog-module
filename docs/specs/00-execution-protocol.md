@@ -266,6 +266,9 @@ data set). Nothing else is asked.
   the lock for (`assertWithinProduct` throws; the task fails loudly and is reported).
 - Cost: a tier 3, 5 or 6 run would exceed the daily QA cap (`DAILY_SPEND_CAP_USD`) or would need
   always-on resources.
+- A service that an output depends on is never called inline from a chunk delivery (spec 18): such a call is
+  its own durable task with its own queue, retries and settled state, and the chunk waits for it. A design that
+  would need the inline call stops and is reported, never shipped with a silent fallback.
 
 ## 12. Process behaviours to keep
 

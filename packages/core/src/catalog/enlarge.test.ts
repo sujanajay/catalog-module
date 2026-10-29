@@ -3,7 +3,7 @@ import fs from "node:fs";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
-  DEFAULT_UPSCALE_TIMEOUT_S, ENLARGE_CLIENT_MARGIN_MS, ENLARGE_UNAVAILABLE_RETRY_MS, EnlargeBadInputError, EnlargeBusyError, enlargeBackoffMs, EnlargeError,
+  DEFAULT_UPSCALE_TIMEOUT_S, ENLARGE_ATTEMPT_FLOOR_MS, ENLARGE_TASK_MARGIN_MS, ENLARGE_UNAVAILABLE_RETRY_MS, EnlargeBadInputError, EnlargeBusyError, enlargeBackoffMs, EnlargeError,
   EnlargeModelUnavailableError, EnlargeRejectedError, EnlargeServerError, enlargeTimeoutMs, EnlargeTimeoutError, enlargeViaService, upscaleServerTimeoutS,
   type EnlargeDeps,
 } from "./enlarge";
@@ -129,12 +129,13 @@ describe("enlargeViaService", () => {
     }).catch((e: unknown) => e);
     expect(error).toBeInstanceOf(EnlargeBusyError);
     expect(s.calls).toHaveLength(2);
-    expect(s.now() - started).toBeLessThanOrEqual(DISPATCH_DEADLINE_SEC * 1000 - ENLARGE_CLIENT_MARGIN_MS);
-    // With today's default timeout (870 s) only the one attempt fits: no retry inside a task.
+    expect(s.now() - started).toBeLessThanOrEqual(DISPATCH_DEADLINE_SEC * 1000 - ENLARGE_TASK_MARGIN_MS);
+    // With today's default timeout (870 s, longer than the 870 s left) the attempt is clamped to the time left, and a
+    // busy answer is retried while at least ENLARGE_ATTEMPT_FLOOR_MS is left (2026-10-29 review, P0).
     const one = fakeService([503]);
-    const only = await enlargeViaService({ url: URL_, jpeg: JPEG, model: "swinir-x2" }, one.deps).catch((e: unknown) => e);
-    expect(only).toMatchObject({ kind: "busy", attempts: 1 });
-    expect(one.calls).toHaveLength(1);
+    const only = await enlargeViaService({ url: URL_, jpeg: JPEG, model: "swinir-x2", maxAttempts: 3 }, one.deps).catch((e: unknown) => e);
+    expect(only).toMatchObject({ kind: "busy", attempts: 3 });
+    expect(one.calls).toHaveLength(3);
   });
 
   it("the service's own model-unavailable 503 is not busy: one retry after 60 s, then a typed non-retryable error", async () => {
@@ -177,20 +178,28 @@ describe("enlargeViaService", () => {
     expect(s.calls).toHaveLength(2);
   });
 
-  it("starts an attempt only when it fits whole before the deadline", async () => {
-    // 100 s attempts, a deadline 150 s away; the fake clock moves only with the backoff waits. Retry 1: 10 + 100 = 110
-    // s fits; retry 2: 10 + 20 + 100 = 130 s fits; retry 3: 30 + 40 + 100 = 170 s does not, so the busy error stands.
-    const s = fakeService([503]);
-    const deadlineAt = s.now() + 150_000;
-    const error = await enlargeViaService({ url: URL_, jpeg: JPEG, model: "swinir-x2", timeoutMs: 100_000, deadlineAt, maxAttempts: 10 }, s.deps).catch((e: unknown) => e);
-    expect(error).toBeInstanceOf(EnlargeBusyError);
-    expect(s.calls).toHaveLength(3);
-    expect(s.sleeps).toEqual([10_000, 20_000]);
-    // A deadline that cannot fit even one attempt makes no call at all.
+  it("clamps each attempt's timeout to the time left and starts none with less than the floor left", async () => {
+    // 100 s attempts, a deadline 150 s away; the fake clock moves only with the backoff waits. Attempt 2 starts at 10 s
+    // (140 s left), 3 at 30 s (120 s), 4 at 70 s (80 s left: clamped to 80 s); after the next 60 s wait only 20 s would
+    // be left, below the 60 s floor, so the busy error stands.
+    const timeouts = vi.spyOn(AbortSignal, "timeout");
+    try {
+      const s = fakeService([503]);
+      const deadlineAt = s.now() + 150_000;
+      const error = await enlargeViaService({ url: URL_, jpeg: JPEG, model: "swinir-x2", timeoutMs: 100_000, deadlineAt, maxAttempts: 10 }, s.deps).catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(EnlargeBusyError);
+      expect(s.calls).toHaveLength(4);
+      expect(s.sleeps).toEqual([10_000, 20_000, 40_000]);
+      expect(timeouts.mock.calls.map(([ms]) => ms)).toEqual([100_000, 100_000, 100_000, 80_000]);
+    } finally { timeouts.mockRestore(); }
+    // Less than the floor left before the deadline: no call at all.
     const late = fakeService(["ok"]);
-    const none = await enlargeViaService({ url: URL_, jpeg: JPEG, model: "swinir-x2", timeoutMs: 100_000, deadlineAt: late.now() + 50_000 }, late.deps).catch((e: unknown) => e);
+    const none = await enlargeViaService({ url: URL_, jpeg: JPEG, model: "swinir-x2", timeoutMs: 100_000, deadlineAt: late.now() + ENLARGE_ATTEMPT_FLOOR_MS - 1 }, late.deps).catch((e: unknown) => e);
     expect(none).toBeInstanceOf(EnlargeTimeoutError);
     expect(late.calls).toHaveLength(0);
+    // The floor and above: one call, its timeout the time left.
+    const edge = fakeService(["ok"]);
+    await expect(enlargeViaService({ url: URL_, jpeg: JPEG, model: "swinir-x2", timeoutMs: 100_000, deadlineAt: edge.now() + ENLARGE_ATTEMPT_FLOOR_MS }, edge.deps)).resolves.toMatchObject({ attempts: 1 });
   });
 
   it("rethrows the caller's abort as it is and stops retrying", async () => {

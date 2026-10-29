@@ -355,9 +355,10 @@ UPSCALE_MEASURE=1 UPSCALE_CPU_VCPU=8 UPSCALE_THREADS=8 UPSCALE_CONCURRENCY=2 UPS
 bash infra/check-matting.sh --probe-upscale <candidate URL> --model=swinir-x2 --sizes=800x1200,1600x1600 --concurrency=<1 or 2> --rounds=3 --timeout=840
 ```
 
-`UPSCALE_SERVICE=dedicated` (the worker's enlargements on `catalog-upscale`) waits for spec 18 H3: the matting client
-refuses a dedicated `UPSCALE_URL` (the enlarge stage, `packages/core/src/catalog/enlarge.ts`, calls it), so
-`shape.sh` refuses dedicated until the H3 PR sets `ENLARGE_CLIENT_WIRED=1`.
+`UPSCALE_SERVICE=dedicated` (the worker's enlargements on `catalog-upscale`) needs a worker image with the spec 18 H3
+enlarge stage (`apps/worker/src/catalog/enlarge.ts` calls the service through `packages/core/src/catalog/enlarge.ts`;
+the render reads the stored x2 only). `ENLARGE_CLIENT_WIRED` defaults to 1; a deploy of an older worker image sets it
+to 0 and `shape.sh` then refuses dedicated.
 
 It runs `services/matting/tests/cloudrun_check.py --probe-upscale` as the Cloud Run job `catalog-check-matting`: per
 size one warm call (it loads the model; not measured), then `concurrency` calls at once for `rounds` rounds, with a

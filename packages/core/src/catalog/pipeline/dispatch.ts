@@ -9,6 +9,7 @@ import { catalogBatches, catalogChunks } from "../../db/schema";
 import { log as structuredLog, toSeverity } from "../../log";
 import { chunkTaskId, DISPATCH_DEADLINE_SEC, type enqueueTask } from "../../tasks";
 import { positiveIntEnv } from "../../concurrency";
+import { enqueueEnlargements, ENLARGE_STALE_MS, ENLARGING_TASK, queuedPhotosOfChunk, unparkSettledChunks } from "./enlargement";
 
 /** A delivery starts no new photo after this much of its time (the request deadline is 900 s). */
 export const CHUNK_TIME_BUDGET_MS = 480_000;
@@ -28,6 +29,10 @@ export const CHUNK_UNSTARTED_STALE_MS = 6 * 60_000;
 export const REDISPATCHED_TASK = "redispatched";
 /** Deliveries in a row that finish no photo before the chunk fails. */
 export const CHUNK_MAX_STALLS = 3;
+/** A chunk that is not parked for its photos' enlargements (spec 18, pipeline/enlargement.ts). */
+export function notParked(): SQL {
+  return or(isNull(catalogChunks.taskName), sql`${catalogChunks.taskName} <> ${ENLARGING_TASK}`)!;
+}
 /** Chunks of one batch queued or running at once: the queue's 6 slots plus 2, so a freed slot always finds a task. */
 export const DEFAULT_CHUNK_WINDOW = 8;
 /** The lease of a claim written before migration 0004 (no lease_until): the deadline plus a minute. */
@@ -140,7 +145,7 @@ export async function dispatchChunks(db: Db, enqueue: Enqueue, batchId: string, 
     const room = window - (active?.n ?? 0);
     if (room <= 0) return [];
     const waiting = await tx.select({ id: catalogChunks.id }).from(catalogChunks)
-      .where(and(eq(catalogChunks.batchId, batchId), isNull(catalogChunks.dispatchedAt), eq(catalogChunks.status, "queued")))
+      .where(and(eq(catalogChunks.batchId, batchId), isNull(catalogChunks.dispatchedAt), eq(catalogChunks.status, "queued"), notParked()))
       .orderBy(asc(catalogChunks.index)).limit(room).for("update", { skipLocked: true });
     if (!waiting.length) return [];
     return tx.update(catalogChunks).set({ dispatchedAt: now }).where(inArray(catalogChunks.id, waiting.map((row) => row.id))).returning();
@@ -153,13 +158,15 @@ export async function dispatchChunks(db: Db, enqueue: Enqueue, batchId: string, 
   return picked.length;
 }
 
-export interface RecoveryResult { lapsed: number; lost: number; unstarted: number; dispatched: number }
+export interface RecoveryResult { lapsed: number; lost: number; unstarted: number; dispatched: number; /** Spec 18: enlarge tasks sent again for parked chunks. */ enlarge?: number }
 
 /**
  * The sweep's per-batch rules (also the Start resume path): a running chunk whose lease lapsed, or a queued chunk
  * whose task was queued more than 30 minutes ago, gets the next step and a new task (the old task, if it is only
  * slow, then answers "stale"); then the window is topped up. A live lease and a recently queued task are never
- * touched. Each rule is one guarded update, so a second run at the same time changes nothing.
+ * touched. Each rule is one guarded update, so a second run at the same time changes nothing. Spec 18: a chunk parked
+ * for its photos' enlargements whose batch saw no enlarge delivery for ENLARGE_STALE_MS gets the next step (still parked) and its
+ * queued photos' tasks again, named by that step; one with no queued photo left is unparked.
  */
 export async function recoverBatchChunks(db: Db, enqueue: Enqueue, batchId: string, options: DispatchOptions = {}): Promise<RecoveryResult> {
   const now = options.now ?? new Date(), log = options.log ?? defaultLog, bulk = await batchIsBulk(db, batchId);
@@ -176,8 +183,32 @@ export async function recoverBatchChunks(db: Db, enqueue: Enqueue, batchId: stri
     }
   }
   const unstarted = await redispatchUnstartedChunks(db, enqueue, batchId, { now, log });
+  const enlarge = await resendStaleEnlargements(db, enqueue, batchId, { now, log, bulk });
   const dispatched = await dispatchChunks(db, enqueue, batchId, options);
-  return { lapsed: lapsed.length, lost: lost.length, unstarted, dispatched };
+  return { lapsed: lapsed.length, lost: lost.length, unstarted, dispatched, enlarge };
+}
+
+/**
+ * Spec 18: the recovery of parked chunks (recoverBatchChunks). A parked chunk with no queued photo is unparked (the
+ * settle that should have done it is the only writer, so this is a safety net). One whose progress_at is older than
+ * ENLARGE_STALE_MS (no enlarge delivery of the batch refreshed it: the batch's enlarge lane is quiet) takes the next
+ * step, and each queued photo's task is sent again as round `step`, so the new task never collides with the old name.
+ * Returns the number of tasks sent.
+ */
+export async function resendStaleEnlargements(db: Db, enqueue: Enqueue, batchId: string, options: Pick<DispatchOptions, "now" | "log"> & { bulk?: boolean } = {}): Promise<number> {
+  const now = options.now ?? new Date(), log = options.log ?? defaultLog;
+  const parked = and(eq(catalogChunks.batchId, batchId), eq(catalogChunks.status, "queued"), eq(catalogChunks.taskName, ENLARGING_TASK));
+  const unparked = await unparkSettledChunks(db, { batchId }, now);
+  for (const chunkId of unparked) log("chunk recovered", { batchId, chunkId, reason: "enlargement_settled" });
+  const stale = await db.update(catalogChunks).set({ step: sql`${catalogChunks.step} + 1`, progressAt: now })
+    .where(and(parked, or(isNull(catalogChunks.progressAt), lt(catalogChunks.progressAt, new Date(+now - ENLARGE_STALE_MS))))).returning();
+  let sent = 0;
+  for (const chunk of stale) {
+    const photos = await queuedPhotosOfChunk(db, chunk);
+    log("chunk recovered", { batchId, chunkId: chunk.id, stage: chunk.stage, step: chunk.step, reason: "enlargement_stale", photos: photos.length });
+    sent += await enqueueEnlargements(enqueue, batchId, photos, chunk.step, { log, chunkId: chunk.id, ...(options.bulk ? { bulk: true } : {}) });
+  }
+  return sent;
 }
 
 /**
