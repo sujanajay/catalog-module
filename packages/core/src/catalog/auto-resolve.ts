@@ -18,7 +18,7 @@ export const JUDGED_DEFECT_FLAGS: ReadonlySet<OutputFlag> = new Set<OutputFlag>(
 /** Every defect we produced: the judge's output flags, a failed channel rule and a placement failure. */
 export const OWN_DEFECT_FLAGS: ReadonlySet<OutputFlag> = new Set<OutputFlag>([...JUDGED_DEFECT_FLAGS, "failed_compliance", "placement"]);
 /** Flags the renderer sets; a re-render replaces them with its own. */
-export const RENDER_FLAGS: ReadonlySet<OutputFlag> = new Set<OutputFlag>(["low_resolution", "no_shadow_source", "shadow_synthesised", "passthrough", "fallback_matte", "failed_compliance", "cut_in_source", "alpha_source", "small_source", "matte_passthrough", "upscaled"]);
+export const RENDER_FLAGS: ReadonlySet<OutputFlag> = new Set<OutputFlag>(["low_resolution", "no_shadow_source", "shadow_synthesised", "passthrough", "fallback_matte", "failed_compliance", "cut_in_source", "alpha_source", "small_source", "matte_passthrough", "upscaled", "enlargement_failed"]);
 
 /**
  * The judge saw the brand's photo cut at its own frame edge: the `complete_product` flag, or a

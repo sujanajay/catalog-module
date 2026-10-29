@@ -1,7 +1,7 @@
 import sharp from "sharp";
 import { fileTypeFromBuffer } from "file-type";
 import { backgroundFor, channel, CUT_BAND_NOTE_START, DETAIL_SHOT_BBOX_FRACTION, JPEG_QUALITY_MIN, JPEG_QUALITY_START, JPEG_QUALITY_STEP, MAX_OUTPUT_BYTES, MAX_UPSCALE, MIN_SOURCE_LONG_SIDE_PX, type ChannelSpec, type Size } from "./channels";
-import type { ChannelId, OutputFlag, ProductType } from "./types";
+import { ENLARGEMENT_FAILED_SENTENCE, type ChannelId, type OutputFlag, type ProductType } from "./types";
 import { ALPHA_BBOX_THRESHOLD, analyseBackground, borderPixels, shadowLayer } from "./shadow";
 import { anchorBounds, BG_TOLERANCE, checkOutput, type Measured } from "./compliance";
 import { enlargeCutout } from "./enhance";
@@ -588,14 +588,18 @@ export async function renderSource(input: RenderInput): Promise<RenderOutput> {
     // Spec 11: beyond the upscaler's threshold the colour comes from the GPU upscaler (the whole photo x2 once, shared by
     // every channel of the photo, then this crop at doubled coordinates and Lanczos3 to the product size). The plain path is Lanczos3 plus a conservative sharpen of the colour (never the alpha) when the product is
     // enlarged; on the upscaled path the same sharpening runs on the upscaler's colour with the residual factor
-    // (enlargement / 2) and the alpha stays the Lanczos3 alpha. Any upscale failure leaves `upscaled` null: the plain
-    // path, byte for byte, with no flag (enhance.ts enlargeCutout).
+    // (enlargement / 2) and the alpha stays the Lanczos3 alpha. Spec 18: an enlargement the upscaler should have made
+    // and did not (no stored x2 image, or a failed one) flags `enlargement_failed`, which holds the output with its
+    // reason; the image below is the plain path, kept only for the operator to look at. Without an upscaler
+    // (UPSCALE_MODEL=off) no enlargement is needed and the plain path has no flag.
     const to = { w: product.w, h: product.h };
-    const enlarged = input.upscaler && shouldUpscale(plan.scale, input.upscaler.minScale)
+    const needsUpscaler = !!input.upscaler && shouldUpscale(plan.scale, input.upscaler.minScale);
+    const enlarged = input.upscaler && needsUpscaler
       ? await upscaledRgb(input.upscaler, p.rgb, p.width, crop, to, { ...input.trace, identifier: input.identifier, shot: shotNumber, channel: spec.id })
       : null;
     const cutout = await enlargeCutout({ rgba, rgb: p.rgb, width: p.width, height: p.height, crop, to, ...(enlarged ? { upscaled: enlarged.rgb } : {}) });
     if (enlarged && input.upscaler) { result.flags.push("upscaled"); result.upscale = { model: input.upscaler.model, ms: enlarged.ms, ...(enlarged.reused ? { reused: true as const } : {}) }; }
+    else if (needsUpscaler) { result.flags.push("enlargement_failed"); result.notes.push(ENLARGEMENT_FAILED_SENTENCE); }
     // Styli's guide is judged on the product as it is seen (visibleAnchorShift); the shadow and the mask follow the move.
     if (spec.anchor === "bottom-centre") {
       const shift = await visibleAnchorShift(cutout, product, plan.safeBox, plan, rgbColor, cut);

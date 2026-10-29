@@ -3,7 +3,10 @@ import { CHANNEL_IDS } from "./types";
 import {
   assertTestPrefix,
   assertWithinProduct,
+  batchPrefix,
   brandSlug,
+  derivedPath,
+  enlargedPath,
   normalizeKey,
   parseShotName,
   productPrefix,
@@ -31,6 +34,13 @@ describe("naming helpers", () => {
       expect(p).not.toMatch(/_v\d/);
     }
     expect(publicObjectPath("uspa", "ABC123", "noon", 1, true)).toMatch(/^catalog-test\//);
+  });
+
+  it("spec 18: the stored enlargement sits next to the matte under the batch prefix, never under raw or the public layout", () => {
+    const prefix = batchPrefix("uspa", "b1", true);
+    expect(enlargedPath(prefix, "ABC123", 2)).toBe(`${prefix}/derived/ABC123/ABC123_2.x2.jpg`);
+    expect(derivedPath(prefix, "ABC123", 2, "matte")).toBe(`${prefix}/derived/ABC123/ABC123_2.matte.png`);
+    expect(enlargedPath(prefix, "ABC123", 2)).not.toMatch(/\/raw\/|^catalog\//);
   });
 
   it("publicUrl has no spaces and round-trips through URL", () => {

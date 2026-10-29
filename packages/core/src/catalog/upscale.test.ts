@@ -5,14 +5,14 @@ import { MattingClient, parseUpscaleHealth, UpscaleUnavailableError } from "./ma
 import { planCanvas, renderKeyInputs, renderSource, type Matte, type Prepared } from "./render";
 import { analyseBackground } from "./shadow";
 import { enlargeCutout, sharpenAfterEnlarge } from "./enhance";
-import { createUpscaler, DEFAULT_UPSCALE_MIN_SCALE, otherTargetUpscalerId, shouldUpscale, upscaleConfigFromEnv, upscaledRgb, upscalerId, upscalerKey, upscaleTargetFromEnv, UPSCALER_VERSION, type Upscaler } from "./upscale";
+import { createUpscaler, DEFAULT_UPSCALE_MIN_SCALE, otherTargetUpscalerId, primeSourceX2, shouldUpscale, storedUpscaler, StoredEnlargementMissingError, upscaleConfigFromEnv, upscaledRgb, upscalerId, upscalerKey, upscaleTargetFromEnv, UPSCALER_VERSION, type Upscaler } from "./upscale";
 import { configuredUpscalerId, renderKey, renderKeys, rerenderedKey, upscaledRenderKey } from "./pipeline/publish";
 import { upscaledNotes } from "./pipeline/report";
 import { flagDetails } from "./qa/reasons";
-import { INFORMATION_FLAGS } from "./qa/triage";
+import { holdsAtRender, INFORMATION_FLAGS } from "./qa/triage";
 import { INFORMATION_FLAGS as EVAL_INFORMATION_FLAGS } from "./evals/attention";
 import { RENDER_FLAGS } from "./auto-resolve";
-import { flagReason, UPSCALED_SENTENCE } from "./types";
+import { ENLARGEMENT_FAILED_SENTENCE, flagReason, UPSCALED_SENTENCE } from "./types";
 
 const MODEL = "realesrgan-x2plus";
 /** An 800x1200 photo with a 400x600 product: Trendyol (exactly 1200x1800) enlarges it 3x. */
@@ -98,32 +98,57 @@ describe("render with the upscaler", () => {
     expect(await sharp(sent[0]!).metadata()).toMatchObject({ format: "jpeg", chromaSubsampling: "4:4:4", width: 800, height: 1200 });
     expect(trendyol.upscale).toEqual({ model: MODEL, ms: 42 }); expect(centrepoint.upscale).toEqual({ model: MODEL, ms: 42, reused: true });
     expect(again.jpeg!.equals(trendyol.jpeg!)).toBe(true);
-    // A failed call is not retried for the photo's other channels: they all take the plain path.
+    // A failed call is not retried for the photo's other channels: they are all held (spec 18).
     const { prepared: p2, matte: m2 } = fixture(), failing = fakeUpscaler(2, new Error("down"));
-    for (const channel of ["trendyol", "centrepoint"] as const) expect((await renderSource({ prepared: p2, matte: m2, channel, shotNumber: 1, productType: "other", upscaler: failing })).flags).not.toContain("upscaled");
+    for (const channel of ["trendyol", "centrepoint"] as const) expect((await renderSource({ prepared: p2, matte: m2, channel, shotNumber: 1, productType: "other", upscaler: failing })).flags).toContain("enlargement_failed");
     expect(failing.calls).toHaveLength(1);
   });
-  it("keeps the plain path, byte for byte, when the upscaler is off, below the threshold or failing", async () => {
+  it("spec 18: off keeps the plain path with no flag; a failing or wrong-size upscaler holds the output with enlargement_failed, never a silent plain resize", async () => {
     const { prepared, matte } = fixture();
     const plain = await renderSource({ prepared, matte, channel: "trendyol", shotNumber: 2, productType: "other" });
-    expect(plain.flags).not.toContain("upscaled"); expect(plain.upscale).toBeUndefined();
+    expect(plain.flags).not.toContain("upscaled"); expect(plain.flags).not.toContain("enlargement_failed"); expect(plain.upscale).toBeUndefined();
     const failing = fakeUpscaler(2, new UpscaleUnavailableError("Upscale failed: Background removal service returned 503."));
-    const fellBack = await renderSource({ prepared, matte, channel: "trendyol", shotNumber: 2, productType: "other", upscaler: failing, trace: { batchId: "b1", productId: "p1" } });
+    const held = await renderSource({ prepared, matte, channel: "trendyol", shotNumber: 2, productType: "other", upscaler: failing, trace: { batchId: "b1", productId: "p1" } });
     expect(failing.calls).toHaveLength(1);
-    expect(fellBack.flags).not.toContain("upscaled"); expect(fellBack.upscale).toBeUndefined();
-    expect(fellBack.jpeg!.equals(plain.jpeg!)).toBe(true);
+    expect(held.flags).not.toContain("upscaled"); expect(held.upscale).toBeUndefined();
+    expect(held.flags).toContain("enlargement_failed");
+    expect(holdsAtRender(held.flags)).toBe(true);
+    expect(held.notes).toContain(ENLARGEMENT_FAILED_SENTENCE);
+    // The plain image stays only for the operator to look at; the hold keeps it out of the sheet.
+    expect(held.jpeg!.equals(plain.jpeg!)).toBe(true);
     expect(warn).toHaveBeenCalledTimes(1);
     const line = String(warn.mock.calls[0]![0]);
-    expect(JSON.parse(line)).toMatchObject({ batchId: "b1", productId: "p1", shot: 2, channel: "trendyol" });
-    expect(line).not.toContain(MODEL);
+    expect(JSON.parse(line)).toMatchObject({ message: "catalog enlargement missing", batchId: "b1", productId: "p1", shot: 2, channel: "trendyol" });
+    expect(line).not.toContain("plain enlargement");
     // A wrong-size answer is a failure too.
     const wrong = await renderSource({ prepared, matte, channel: "trendyol", shotNumber: 2, productType: "other", upscaler: fakeUpscaler(3) });
-    expect(wrong.flags).not.toContain("upscaled"); expect(wrong.jpeg!.equals(plain.jpeg!)).toBe(true);
-    // Noon caps this photo at 1.5x: the upscaler is never asked.
+    expect(wrong.flags).not.toContain("upscaled"); expect(wrong.flags).toContain("enlargement_failed");
+    // Noon caps this photo at 1.5x: the upscaler is never asked and nothing is flagged.
     const unused = fakeUpscaler(), noon = await renderSource({ prepared, matte, channel: "noon", shotNumber: 2, productType: "other", upscaler: unused });
     const noonPlain = await renderSource({ prepared, matte, channel: "noon", shotNumber: 2, productType: "other" });
     expect(noon.plan.scale).toBeLessThanOrEqual(1.5); expect(unused.calls).toHaveLength(0);
     expect(noon.flags).toEqual(noonPlain.flags); expect(noon.bytes).toBe(noonPlain.bytes);
+  });
+  it("spec 18: the stored upscaler never calls a service; a primed x2 image makes the upscaled output, an unprimed photo is held", async () => {
+    const { prepared, matte } = fixture(), stored = storedUpscaler(upscalerId(MODEL, "cpu"), DEFAULT_UPSCALE_MIN_SCALE);
+    const x2 = await sharp({ create: { width: 1600, height: 2400, channels: 3, background: { r: 0, g: 200, b: 0 } } }).jpeg({ quality: 95, chromaSubsampling: "4:4:4" }).toBuffer();
+    expect(await primeSourceX2(stored, prepared.rgb, prepared.width, x2)).toBe(true);
+    const out = await renderSource({ prepared, matte, channel: "trendyol", shotNumber: 2, productType: "other", upscaler: stored });
+    expect(out.flags).toContain("upscaled"); expect(out.flags).not.toContain("enlargement_failed");
+    expect(out.upscale).toMatchObject({ model: `${MODEL}+cpu`, ms: 0 });
+    const [r, g, b] = await pixel(out.jpeg!, 600, 900);
+    expect(g).toBeGreaterThan(150); expect(r).toBeLessThan(60); expect(b).toBeLessThan(60);
+    // The same bytes through an inline upscaler give the same image: the stored path changes nothing but who calls.
+    const inline = await renderSource({ ...fixture(), channel: "trendyol", shotNumber: 2, productType: "other", upscaler: fakeUpscaler() });
+    expect(out.jpeg!.equals(inline.jpeg!)).toBe(true);
+    // Another prepared photo (its own buffer) has no stored image: held, and no service exists to call.
+    const other = fixture();
+    const missing = await renderSource({ prepared: other.prepared, matte: other.matte, channel: "trendyol", shotNumber: 2, productType: "other", upscaler: stored });
+    expect(missing.flags).toContain("enlargement_failed"); expect(missing.flags).not.toContain("upscaled");
+    await expect(stored.upscale(Buffer.alloc(1), "image/jpeg")).rejects.toBeInstanceOf(StoredEnlargementMissingError);
+    // A stored image that is not exactly 2x the prepared photo is refused (it counts as missing).
+    const odd = await sharp({ create: { width: 1601, height: 2400, channels: 3, background: { r: 0, g: 0, b: 0 } } }).jpeg().toBuffer();
+    expect(await primeSourceX2(stored, other.prepared.rgb, other.prepared.width, odd)).toBe(false);
   });
   it("recombines the upscaled colour with the plain Lanczos alpha, unchanged", async () => {
     const { prepared, matte } = fixture(), crop = { x: 200, y: 300, w: 400, h: 600 }, size = { w: 1200, h: 1800 };

@@ -18,7 +18,7 @@ export const OUTPUT_FLAGS = [
   "orientation","placement",
   "qa_unavailable","qa_cap","qa_sampled_out","type_unknown",
   "shadow_synthesised","transparent","upscaled","cut_in_source","auto_dropped",
-  "product_removed","chart_image","matte_passthrough",
+  "product_removed","chart_image","matte_passthrough","enlargement_failed",
 ] as const;
 export const DECISIONS = ["use_as_is","remove","replaced"] as const;
 export const QA_MODES = ["per_source","per_output"] as const;
@@ -44,6 +44,14 @@ export type Precedence = (typeof PRECEDENCES)[number];
 export type OutputFlag = (typeof OUTPUT_FLAGS)[number];
 /** Spec 11: the sheet note and reason of the `upscaled` information flag (the colour was enlarged by the GPU upscaler). Model-free. */
 export const UPSCALED_SENTENCE = "Enlarged with a quality pass to meet this marketplace's size.";
+/**
+ * Spec 18 section 5: the sentence of `enlargement_failed`, a photo that needed the upscaler to reach a channel's size
+ * and could not get it (the enlargement task failed, or its stored image is missing). The output is held with this
+ * reason; a plain resize never stands in. Model-free.
+ */
+export const ENLARGEMENT_FAILED_WHY = "This photo could not be enlarged to this marketplace's size.";
+export const ENLARGEMENT_FAILED_WHAT = "Try again, or ask the brand for a larger photo.";
+export const ENLARGEMENT_FAILED_SENTENCE = `${ENLARGEMENT_FAILED_WHY} ${ENLARGEMENT_FAILED_WHAT}`;
 export type Decision = (typeof DECISIONS)[number];
 export type QaMode = (typeof QA_MODES)[number];
 export type PolicySource = (typeof POLICY_SOURCES)[number];
@@ -69,6 +77,12 @@ export interface BatchOptions {
   cleanedUp?: boolean;                     // test batch cleaned up while its spend still counts today; hidden from the list
   /** Set when the sweep cancelled an untouched draft (spec 14d F12): when, and after how many days. */
   expired?: { at: string; days: number } | null;
+  /**
+   * Spec 18 3.3.6: written at Start when the upscaler is on (UPSCALE_MODEL set, not `off`): every photo this batch
+   * enlarges beyond UPSCALE_MIN_SCALE goes through the upscaler or is held (invariant enlarged_without_upscaler).
+   * Absent on batches from before spec 18 and when the upscaler is off. The model id is engineering only.
+   */
+  enlargement?: { model: string } | null;
 }
 
 export interface BatchCounts {
@@ -121,6 +135,13 @@ export interface BatchCounts {
    * worker. The chunk fails at CHUNK_MAX_ERRORS; a new step starts again at 1. Optional (no migration).
    */
   chunkErrors?: Record<string, { stage: string; step: number; errors: number }>;
+  /**
+   * Spec 18 3.3.6, kept by refreshBatchProgress: photos of the batch that need a stored enlargement, those that have
+   * it, and those whose enlargement failed for good. Optional (no migration): absent reads as no enlargement.
+   */
+  enlargeTotal?: number;
+  enlargeDone?: number;
+  enlargeFailed?: number;
 }
 /** Intake phases (spec 14c F6). The first five are collecting, `placing` follows, the last two end intake. */
 export const INTAKE_PHASES = ["uploading", "downloading", "reading", "unpacking", "checking", "placing", "ready", "needs_input"] as const;
@@ -202,6 +223,7 @@ const REASONS: Partial<Record<OutputFlag, (ctx?: Ctx) => string>> = {
   auto_dropped: () =>
     "This photo was left out automatically: it could not be made cleanly and this product has enough other good photos. Nothing to do.",
   upscaled: () => `${UPSCALED_SENTENCE} Nothing to do.`,
+  enlargement_failed: () => ENLARGEMENT_FAILED_SENTENCE,
 };
 
 /** Used for flags whose sentences arrive with 07 (QA). */
