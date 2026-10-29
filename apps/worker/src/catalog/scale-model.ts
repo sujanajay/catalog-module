@@ -140,7 +140,9 @@ export async function simulate(shape: ModelShape, batches: readonly ModelBatch[]
   const durations: Record<string, number[]> = { matte: [], render: [], qa: [], publish: [] };
   const imagesAt: number[] = [];
   const report = { gpu: { calls: 0, busy429: 0, cpuFallbacks: 0, modelLoads: 0 }, judge: { calls: 0, rateLimited: 0, failedAfterRetries: 0 }, handOffs: 0, maxDeliveryMs: 0 };
-  const enlargeReport = { tasks: 0, parks: 0, unparks: 0, renderedEarly: 0 };
+  // `maxParked`: the most chunks parked at once (a parked chunk holds no window slot, so it may exceed the window).
+  const enlargeReport = { tasks: 0, parks: 0, unparks: 0, renderedEarly: 0, maxParked: 0 };
+  let parked = 0;
   // Spec 18: the enlarge lanes (FIFO, slots, at most ratePerSecond dispatches) and the upscale service's slots.
   type Lane = { slots: number; fifo: (() => Promise<void>)[]; running: number; nextAt: number; timer: boolean; maxDepth: number };
   const lane = (slots: number): Lane => ({ slots, fifo: [], running: 0, nextAt: 0, timer: false, maxDepth: 0 });
@@ -165,7 +167,7 @@ export async function simulate(shape: ModelShape, batches: readonly ModelBatch[]
       enlargeReport.tasks += 1;
       c.waitingX2! -= 1;
       // The last settle unparks the chunk: an ordinary waiting chunk again, dispatched in index order.
-      if (c.parked && c.waitingX2 === 0) { c.parked = false; c.dispatched = false; enlargeReport.unparks += 1; dispatchChunks(c.batch); }
+      if (c.parked && c.waitingX2 === 0) { c.parked = false; c.dispatched = false; enlargeReport.unparks += 1; parked -= 1; dispatchChunks(c.batch); }
     });
     l.maxDepth = Math.max(l.maxDepth, l.fifo.length);
     pumpLane(l);
@@ -279,7 +281,7 @@ export async function simulate(shape: ModelShape, batches: readonly ModelBatch[]
     c.cursor = 0;
     if (stage === "matte" && (c.waitingX2 ?? 0) > 0) {
       // Spec 18: parked at the render stage, its window slot freed for the batch's next chunk.
-      c.stage = "render"; c.parked = true; c.batch.active -= 1; enlargeReport.parks += 1;
+      c.stage = "render"; c.parked = true; c.batch.active -= 1; enlargeReport.parks += 1; enlargeReport.maxParked = Math.max(enlargeReport.maxParked, ++parked);
       dispatchChunks(c.batch);
       return;
     }
