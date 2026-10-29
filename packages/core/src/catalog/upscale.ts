@@ -26,12 +26,16 @@ export type UpscaleTarget = "cpu" | "gpu";
 
 const normalisedUrl = (url: string | undefined): string => (url ?? "").trim().replace(/\/+$/, "");
 /**
- * Spec 16 3.1.3: `UPSCALE_URL` equal to `MATTING_URL` (the CPU cut-out service) moves the upscaler to the CPU; unset,
- * empty or any other value keeps the GPU service, as the matting client does.
+ * Spec 16 3.1.3: `UPSCALE_URL` equal to `MATTING_URL` (the CPU cut-out service) moves the upscaler to the CPU. Spec 18
+ * H2: so does any other URL that is not a GPU matting service (`MATTING_GPU_URLS`, else `MATTING_GPU_URL`), which is
+ * the dedicated CPU service catalog-upscale; same model and export on CPU, so it keeps the `+cpu` render keys. Unset,
+ * empty or a GPU service URL keeps the GPU service, as the matting client does.
  */
 export function upscaleTargetFromEnv(env: NodeJS.ProcessEnv = process.env): UpscaleTarget {
   const url = normalisedUrl(env.UPSCALE_URL);
-  return url && url === normalisedUrl(env.MATTING_URL) ? "cpu" : "gpu";
+  if (!url) return "gpu";
+  const gpus = (env.MATTING_GPU_URLS?.trim() ? env.MATTING_GPU_URLS.split(",") : [env.MATTING_GPU_URL ?? ""]).map(normalisedUrl).filter(Boolean);
+  return gpus.includes(url) ? "gpu" : "cpu";
 }
 
 /** `UPSCALE_MODEL` (unset or empty: off), `UPSCALE_MIN_SCALE` (default 1.5; a value that is not a number of at least 1 keeps the default) and the target from `UPSCALE_URL`. */

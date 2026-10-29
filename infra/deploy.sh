@@ -2,7 +2,7 @@
 # Order (spec 17 3.2.5): preflight checks and shape refusals, build the images on Cloud Build, run DB migrations as
 # the catalog-migrate Cloud Run job (additive; also seeds the first admin and the test brand test_brand), make sure
 # the task queues exist, then each service of the registry (infra/lib/services.sh: catalog-matting,
-# catalog-matting-gpu, catalog-worker, catalog-web, all private) through the deploy gate (infra/lib/gate.sh):
+# catalog-upscale, catalog-matting-gpu, catalog-worker, catalog-web, all private) through the deploy gate (infra/lib/gate.sh):
 # a no-traffic candidate, its probe against the candidate's tag URL, then the traffic shift. The worker's probe is
 # the tier 5 per-brand smoke (Cloud Run job catalog-test-smoke) on the new worker image against the new matting
 # candidates. A failing probe stops the script: that service keeps its live revision, later services are not
@@ -26,6 +26,11 @@
 # (needs database and GCS access and REAL_DATA_DIR).
 # CATALOG_PREVIEW=1 (infra/deploy-preview.sh): the preview stack, plus the GPU service of this commit as a no-traffic
 # candidate of catalog-matting-gpu (probed, traffic never shifted) that the preview worker calls.
+# Spec 18: UPSCALE_SERVICE=dedicated sends the worker's /upscale calls to catalog-upscale (refused by shape.sh until its
+# shape is measured); UPSCALE_SERVICE=cpu (today, and the rollback) keeps them on catalog-matting.
+# UPSCALE_MEASURE=1 with UPSCALE_CPU, UPSCALE_THREADS, UPSCALE_CONCURRENCY and UPSCALE_MAX_INSTANCES deploys
+# catalog-upscale as a no-traffic candidate of that shape (tag measure-<cpu>c-<threads>t-<concurrency>r) for
+# infra/check-matting.sh --probe-upscale; the worker keeps its upscaler.
 set -euo pipefail
 
 PROJECT=image-links-agent
@@ -129,6 +134,9 @@ shape_defaults
 shape_check "$SQL_CONNECTION_LIMIT" || exit 1
 echo "==> connection budget: catalog $CATALOG_DB_TOTAL of $CATALOG_DB_LIMIT (ila-pg $SQL_TIER_LIVE allows $SQL_CONNECTION_LIMIT)"
 echo "==> shape: worker $WORKER_MAX_INSTANCES x ${WORKER_CPU} vCPU/$WORKER_MEMORY; slots $TASKS_MAX_DISPATCHES + bulk $BULK_MAX_DISPATCHES + ingest $INGEST_MAX_DISPATCHES of $SLOTS_CAPACITY; asia-south1 vCPU $CPU_TOTAL of $CPU_QUOTA_LIMIT; GPU $GPU_MAX_INSTANCES x ${GPU_CPU} vCPU/$GPU_MEMORY concurrency $GPU_CONCURRENCY, $MAX_RESIDENT_SESSIONS resident; upscale on $UPSCALE_SERVICE"
+if upscale_deployed; then
+  echo "==> shape: catalog-upscale $UPSCALE_MAX_INSTANCES x ${UPSCALE_CPU} vCPU/$UPSCALE_MEMORY, $UPSCALE_THREADS threads, concurrency $UPSCALE_CONCURRENCY, timeout ${UPSCALE_TIMEOUT_S} s$([ "$UPSCALE_MEASURE" = 1 ] && echo " (measure: no-traffic candidate)")"
+fi
 # Semicolons, not commas: the value travels inside --set-env-vars. The load driver re-checks it.
 DB_CONNECTION_BUDGET="max=$DB_MAX_CONNECTIONS;reserved=$DB_RESERVED_CONNECTIONS;ila=$ILA_DB_SHARE"
 DB_CONNECTION_BUDGET+=";worker=${WORKER_MAX_INSTANCES}x$WORKER_DB_POOL_MAX;web=${WEB_MAX_INSTANCES}x$WEB_DB_POOL_MAX;jobs=${MAX_CONCURRENT_JOBS}x$JOB_DB_POOL_MAX"
@@ -308,7 +316,7 @@ queues_create_missing
 source infra/lib/services.sh
 # shellcheck source=lib/gate.sh
 source infra/lib/gate.sh
-MATTING_URL=""; MATTING_GPU_URL=""; MATTING_PROBE_URL=""; MATTING_GPU_PROBE_URL=""
+MATTING_URL=""; MATTING_GPU_URL=""; MATTING_PROBE_URL=""; MATTING_GPU_PROBE_URL=""; UPSCALE_SERVICE_URL=""; UPSCALE_CANDIDATE_URL=""
 MATTING_REVISION=""
 SHIFTED=()
 for SERVICE in "${SERVICES[@]}"; do
@@ -330,6 +338,12 @@ for SERVICE in "${SERVICES[@]}"; do
       MATTING_URL=$GATE_URL; MATTING_PROBE_URL=$GATE_TAG_URL; MATTING_REVISION=$GATE_REVISION
       WORKER_ENV+=",MATTING_URL=$MATTING_URL"
       ;;
+    catalog-upscale)
+      # The live worker calls the service URL (the preview reuses the live service the same way); a measure
+      # candidate is only probed, so only its tag URL is kept.
+      UPSCALE_SERVICE_URL=$GATE_URL
+      if [ "$UPSCALE_MEASURE" = 1 ] && [ "$SVC_DEPLOY" = 1 ]; then UPSCALE_CANDIDATE_URL=$GATE_TAG_URL; fi
+      ;;
     catalog-matting-gpu)
       if [ "$GATE_STATUS" = 0 ]; then
         MATTING_GPU_PROBE_URL=$GATE_TAG_URL
@@ -344,8 +358,16 @@ for SERVICE in "${SERVICES[@]}"; do
       # Spec 11 4.5: the upscaler runs on the GPU service, so the flag reaches the worker only with a GPU URL.
       # Spec 16 3.1.3: with UPSCALE_SERVICE=cpu the CPU cut-out service upscales (it serves /upscale) and the worker
       # sends /upscale to it through UPSCALE_URL, so no GPU URL is needed.
+      # Spec 18 H2: with UPSCALE_SERVICE=dedicated the worker sends /upscale to catalog-upscale and learns its timeout
+      # (the client waits UPSCALE_TIMEOUT_S + 30 s).
       if [ "$UPSCALE_SERVICE" = cpu ]; then
         if [ -n "$UPSCALE_MODEL" ]; then WORKER_ENV+=",UPSCALE_URL=$MATTING_URL"; fi
+      elif [ "$UPSCALE_SERVICE" = dedicated ]; then
+        if [ -z "$UPSCALE_SERVICE_URL" ]; then
+          echo "ERROR: UPSCALE_SERVICE=dedicated but catalog-upscale has no URL; the worker was not changed" >&2
+          exit 1
+        fi
+        if [ -n "$UPSCALE_MODEL" ]; then WORKER_ENV+=",UPSCALE_URL=$UPSCALE_SERVICE_URL,UPSCALE_TIMEOUT_S=$UPSCALE_TIMEOUT_S"; fi
       elif [ -n "$UPSCALE_MODEL" ] && [ -z "$MATTING_GPU_URL" ]; then
         echo "WARN: UPSCALE_MODEL=$UPSCALE_MODEL ignored: no GPU matting service URL; the render keeps the plain path" >&2
         UPSCALE_MODEL=""
@@ -466,6 +488,11 @@ echo "WORKER_URL=$WORKER_URL"
 echo "MATTING_URL=$MATTING_URL"
 echo "MATTING_GPU_URL=${MATTING_GPU_URL:-not configured}"
 echo "UPSCALE_MODEL=${UPSCALE_MODEL:-off} (on $UPSCALE_SERVICE)"
+if [ -n "$UPSCALE_CANDIDATE_URL" ]; then
+  # Spec 18 H1: the ladder probe for this rung (both sizes, this shape's concurrency).
+  echo "UPSCALE_CANDIDATE_URL=$UPSCALE_CANDIDATE_URL"
+  echo "==> measure it: bash infra/check-matting.sh --probe-upscale $UPSCALE_CANDIDATE_URL --sizes=$UPSCALE_SIZES --concurrency=$UPSCALE_CONCURRENCY --rounds=3 --timeout=$UPSCALE_TIMEOUT_S"
+fi
 
 # --- 10. Monitoring --------------------------------------------------------------------
 # Email alerts, log-based metrics and the "Catalog ops" dashboard (infra/monitoring.sh, check-then-

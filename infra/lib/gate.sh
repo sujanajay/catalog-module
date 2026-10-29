@@ -112,6 +112,10 @@ deploy_service() {
   "$fn"
   GATE_URL=""; GATE_TAG_URL=""; GATE_REVISION=""; GATE_PREVIOUS=""; GATE_CHANGED=0
   tag=${SVC_TAG:-$CANDIDATE_TAG}
+  if [ "$SVC_DEPLOY" = skip ]; then
+    echo "==> $SVC_NAME: not deployed (${SVC_SKIP_REASON:-not used by this deploy})"
+    return 0
+  fi
 
   # Only "not found" means a new service; any other describe failure stops here, so a passing gcloud hiccup never
   # turns into a deploy without --no-traffic.
@@ -129,7 +133,7 @@ deploy_service() {
 
   if [ "$SVC_DEPLOY" != 1 ]; then
     [ "$exists" = 1 ] && GATE_URL=$(gate_json 'j?.status?.url' <<<"$service_json")
-    [ -n "$GATE_URL" ] || { echo "ERROR: $SVC_NAME is reused but has no URL" >&2; return 1; }
+    [ -n "$GATE_URL" ] || { echo "ERROR: $SVC_NAME is reused as it is but does not exist yet; deploy it from main first (bash infra/deploy.sh)" >&2; return 1; }
     GATE_TAG_URL=$GATE_URL; GATE_REVISION=$previous
     echo "==> $SVC_NAME: reused as it is ($previous)"
     return 0

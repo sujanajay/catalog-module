@@ -4,6 +4,7 @@ import json
 import logging
 import io
 import sys
+import threading
 import time
 import weakref
 from concurrent.futures import ThreadPoolExecutor
@@ -455,3 +456,75 @@ def test_fresh_health_reads_gpu_memory_past_the_cache(service, monkeypatch):
     assert client.get("/health").json()["gpuMemory"]["usedMiB"] == 1000
     assert client.get("/health").json()["gpuMemory"]["usedMiB"] == 1000  # cached
     assert client.get("/health?fresh=1").json()["gpuMemory"]["usedMiB"] == 7000
+
+
+# Spec 18 H1: thread count and preload are env knobs whose defaults are the behaviour before spec 18.
+def test_ort_intra_op_threads_reach_cut_out_and_upscale_sessions(service, monkeypatch, tmp_path):
+    _, _, create, _ = service
+    module = reimport(monkeypatch, ORT_INTRA_OP_THREADS="8")
+    module.create_session("bria-rmbg")
+    assert create.call_args.kwargs["sess_opts"].intra_op_num_threads == 8
+    seen = {}
+    monkeypatch.setattr(module, "ort", SimpleNamespace(SessionOptions=SimpleNamespace,
+                                                       InferenceSession=lambda path, sess_options, providers: seen.update(options=sess_options) or SimpleNamespace()))
+    monkeypatch.setenv("UPSCALE_HOME", str(tmp_path))
+    module.create_upscale_session("swinir-x2")
+    assert seen["options"].intra_op_num_threads == 8 and seen["options"].use_deterministic_compute is True
+
+
+def test_preload_matte_0_loads_no_cut_out_model(service, monkeypatch):
+    _, _, create, _ = service
+    create.reset_mock()
+    module = reimport(monkeypatch, PRELOAD_MATTE="0", ORT_INTRA_OP_THREADS="8")
+    with TestClient(module.app) as client:
+        health = client.get("/health").json()
+        assert create.call_count == 0 and list(module.SESSIONS) == []
+        assert health["preloadMatte"] is False and health["threads"] == 8 and health["residentModels"] == []
+        assert health["upscaleTiles"] == {}
+        # A cut-out call still works there; it loads its model on demand.
+        assert client.post("/matte?model=bria-rmbg", files={"file": ("a.png", image_bytes())}).status_code == 200
+        assert create.call_count == 1
+
+
+def test_health_reports_the_defaults_threads_and_vcpu(service):
+    client, module, _, _ = service
+    health = client.get("/health").json()
+    assert health["threads"] == 4 and health["preloadMatte"] is True
+    assert health["vcpu"] is None or health["vcpu"] > 0
+
+
+@pytest.mark.parametrize(("name", "value", "message"), [("ORT_INTRA_OP_THREADS", "0", "ORT_INTRA_OP_THREADS"), ("ORT_INTRA_OP_THREADS", "four", "ORT_INTRA_OP_THREADS"),
+                                                         ("PRELOAD_MATTE", "yes", "PRELOAD_MATTE")])
+def test_a_bad_thread_or_preload_value_refuses_to_start(service, monkeypatch, name, value, message):
+    module = reimport(monkeypatch, **{name: value})
+    with pytest.raises(ValueError, match=message):
+        module.load_sessions()
+
+
+def test_health_never_waits_for_the_inference_lock(service):
+    # A long upscale holds INFERENCE_LOCK per tile; /health must still answer (the worker and the probe read it).
+    client, module, _, _ = service
+    result = {}
+    with module.INFERENCE_LOCK:
+        reader = threading.Thread(target=lambda: result.update(status=client.get("/health").status_code), daemon=True)
+        reader.start()
+        reader.join(timeout=10)
+    assert result.get("status") == 200
+
+
+def test_cpu_limit_reads_the_cgroup_quota(service, monkeypatch):
+    _, module, _, _ = service
+    real = module.Path
+
+    class Fake:
+        def __init__(self, text):
+            self.text = text
+
+        def read_text(self):
+            if self.text is None:
+                raise OSError("absent")
+            return self.text
+    monkeypatch.setattr(module, "Path", lambda p: Fake("400000 100000\n") if p == "/sys/fs/cgroup/cpu.max" else real(p))
+    assert module.cpu_limit() == 4
+    monkeypatch.setattr(module, "Path", lambda p: Fake("max 100000\n") if p == "/sys/fs/cgroup/cpu.max" else real(p))
+    assert module.cpu_limit() >= 1

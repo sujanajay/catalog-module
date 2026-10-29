@@ -103,6 +103,12 @@ CUDNN_CONV_USE_MAX_WORKSPACE = os.getenv("CUDNN_CONV_USE_MAX_WORKSPACE", "").str
 # session, so two different models may run at once (ONNX sessions are thread-safe for run). Loads and evictions
 # always take the global lock.
 INFERENCE_LOCK_SCOPE = os.getenv("INFERENCE_LOCK_SCOPE", "global").strip() or "global"
+# Spec 18 H1: ONNX Runtime intra-op threads for every session (cut-outs and upscalers). 4 (the default) is the value
+# before spec 18; the probe measures 4 and 8 on 4 and 8 vCPU before a shape uses it.
+ORT_INTRA_OP_THREADS = os.getenv("ORT_INTRA_OP_THREADS", "4").strip() or "4"
+# Spec 18 H2: 1 (the default) loads the default cut-out model at start. 0 loads none, so the dedicated upscale service
+# (catalog-upscale) holds only the upscaler; a /matte call there would still load its model on demand.
+PRELOAD_MATTE = os.getenv("PRELOAD_MATTE", "1").strip() or "1"
 SESSIONS = OrderedDict()
 # Cut-out session loads since this process started, by model; with INSTANCE_ID the probe counts loads per instance.
 LOADS = {}
@@ -140,10 +146,16 @@ def load_sessions():
         raise ValueError("CUDNN_CONV_USE_MAX_WORKSPACE must be 0 or 1")
     if INFERENCE_LOCK_SCOPE not in ("global", "session"):
         raise ValueError("INFERENCE_LOCK_SCOPE must be global or session")
+    if not ORT_INTRA_OP_THREADS.isdigit() or not 1 <= int(ORT_INTRA_OP_THREADS) <= 64:
+        raise ValueError("ORT_INTRA_OP_THREADS must be a whole number from 1 to 64")
+    if PRELOAD_MATTE not in ("0", "1"):
+        raise ValueError("PRELOAD_MATTE must be 0 or 1")
     model_home = Path(os.getenv("U2NET_HOME", os.getenv("REMBG_HOME", "/models")))
     for name in MODELS:
         if not (model_home / "models" / name / f"{name}.onnx").is_file():
             raise RuntimeError(f"baked model missing: {name}; rebuild the image, runtime downloads are disabled")
+    if PRELOAD_MATTE == "0":
+        return {}
     return {DEFAULT_MODEL: create_session(DEFAULT_MODEL)}
 
 
@@ -166,7 +178,7 @@ def create_session(model):
     # rembg passes a providers list through to onnxruntime.InferenceSession unchanged, so a (name, options) tuple works.
     providers = [("CUDAExecutionProvider", cuda_options()), "CPUExecutionProvider"] if TARGET == "gpu" else ["CPUExecutionProvider"]
     options = ort.SessionOptions()
-    options.intra_op_num_threads = 4
+    options.intra_op_num_threads = int(ORT_INTRA_OP_THREADS)
     if TARGET == "cpu":
         options.enable_cpu_mem_arena = False
         options.enable_mem_pattern = False
@@ -203,6 +215,21 @@ def session_for(model):
 
 GPU_MEMORY_TTL_S = 10.0
 _gpu_memory = {"at": -math.inf, "value": None}
+
+
+def cpu_limit():
+    """The vCPU this container may use: the cgroup v2 quota (cpu.max, which Cloud Run sets from --cpu), else the CPUs
+    the process may run on. None when neither can be read."""
+    try:
+        quota, period = Path("/sys/fs/cgroup/cpu.max").read_text().split()[:2]
+        if quota != "max":
+            return round(int(quota) / int(period), 2)
+    except (OSError, ValueError):
+        pass
+    try:
+        return len(os.sched_getaffinity(0))
+    except (AttributeError, OSError):
+        return os.cpu_count()
 
 
 def gpu_memory(fresh=False):
@@ -255,12 +282,16 @@ def read_upload(file):
 
 @app.get("/health")
 def health(fresh: bool = False):
+    # Spec 18 H1: never takes INFERENCE_LOCK (it reads dicts and files only), so it answers while an upscale runs.
     resident = list(SESSIONS)
     # ONNX Runtime's Python API (1.23) exposes no per-session arena statistics, so arenaBytesByModel stays empty
     # until it does; gpuMemory is the card-wide figure the probe reads instead.
     return {"ok": True, "models": [{"id": name, "inputSize": INPUT_SIZES[name], "target": TARGET} for name in MODELS], "default": DEFAULT_MODEL, "version": os.getenv("GIT_SHA", "dev"), "upscale": upscale_health(),
             "resident": resident, "residentModels": resident, "maxResident": MAX_RESIDENT_SESSIONS, "gpuMemory": gpu_memory(fresh), "arenaBytesByModel": {},
-            "candidate": os.getenv("K_REVISION") or None, "lockScope": INFERENCE_LOCK_SCOPE, "instanceId": INSTANCE_ID, "loadsByModel": dict(LOADS)}
+            "candidate": os.getenv("K_REVISION") or None, "lockScope": INFERENCE_LOCK_SCOPE, "instanceId": INSTANCE_ID, "loadsByModel": dict(LOADS),
+            "vcpu": cpu_limit(), "threads": int(ORT_INTRA_OP_THREADS) if ORT_INTRA_OP_THREADS.isdigit() else None, "preloadMatte": PRELOAD_MATTE == "1",
+            # The tile of each loaded upscaler (from its ONNX input); a model that has not loaded yet is absent.
+            "upscaleTiles": {model: upscaler.tile for model, upscaler in UPSCALERS.items()}}
 
 
 @app.post("/matte")
@@ -356,7 +387,7 @@ def create_upscale_session(model):
     path = upscale_home() / f"{model}.onnx"
     options = ort.SessionOptions()
     options.use_deterministic_compute = True
-    options.intra_op_num_threads = 4
+    options.intra_op_num_threads = int(ORT_INTRA_OP_THREADS)
     if TARGET == "gpu":
         # HEURISTIC picks the same cuDNN algorithm for the same shapes on every run and restart;
         # the default EXHAUSTIVE benchmarks at load time and can pick a different one.

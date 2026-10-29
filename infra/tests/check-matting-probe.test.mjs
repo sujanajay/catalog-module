@@ -103,6 +103,35 @@ try {
   }
   console.log('PASS repeated, unknown or valueless probe options are refused before gcloud');
 
+  // Spec 18 H1: --probe-upscale runs cloudrun_check.py --probe-upscale as the same job, always writing its report.
+  const upscaleUrl = 'https://measure-4c-4t---catalog-upscale-abc-el.a.run.app';
+  const up = run(['--probe-upscale', upscaleUrl, '--model', 'swinir-x2', '--sizes', '800x1200,1600x1600', '--concurrency', '1', '--rounds', '1', '--timeout=870']);
+  assert.equal(up.status, 0, up.stderr);
+  assert.deepEqual(up.flags['--args'], ['-c', script, '--probe-upscale', upscaleUrl, '--model=swinir-x2', '--sizes=800x1200,1600x1600',
+    '--concurrency=1', '--rounds=1', '--timeout=870', '--bucket=image-links-agent-assets']);
+  assert.equal(new Set(up.flags['--args']).size, up.flags['--args'].length, 'every item unique (concurrency 1 and rounds 1 as --option=value)');
+  assert.equal(up.flags['--task-timeout'], '7200s', 'by hand the upscale probe gets two hours');
+  assert.equal(up.flags['--image'], `${ar}matting:abc1234`);
+  process.env.PROBE_TASK_TIMEOUT = '1980';
+  try {
+    assert.equal(run(['--probe-upscale', upscaleUrl]).flags['--task-timeout'], '1980s', 'the gate timeout wins');
+  } finally {
+    delete process.env.PROBE_TASK_TIMEOUT;
+  }
+  for (const [args, error] of [
+    [['--probe-upscale', upscaleUrl, '--models', 'bria-rmbg'], /unknown probe option --models/],
+    [['--probe-upscale', upscaleUrl, '--sizes=800x1200', '--sizes', '1600x1600'], /the probe option --sizes is given twice/],
+    [['--probe-upscale', upscaleUrl, '--timeout'], /--timeout needs a value/],
+    [['--probe', tagUrl, '--sizes', '800x1200'], /unknown probe option --sizes/],
+    [['--probe-upscale'], /usage: .* --probe-upscale <url>/],
+  ]) {
+    const refused = run(args);
+    assert.equal(refused.status, 2, args.join(' '));
+    assert.match(refused.stderr, error);
+    assert.equal(refused.calls, '');
+  }
+  console.log('PASS --probe-upscale runs the upscale probe as catalog-check-matting with unique items and its own options');
+
   gpuImage('abc1234');
   const check = run([]);
   assert.equal(check.status, 0, check.stderr);

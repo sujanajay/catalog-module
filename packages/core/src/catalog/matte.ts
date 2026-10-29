@@ -1,11 +1,11 @@
 import sharp from "sharp";
-import { GoogleAuth } from "google-auth-library";
 import type { Size } from "./channels";
 import type { Matte, Prepared } from "./render";
 import { BG_TOLERANCE } from "./compliance";
 import { UPSCALE_RETRY_DELAY_MS, UPSCALE_TIMEOUT_MS } from "./upscale";
 import { log } from "../log";
 import { cloudRunAudience } from "../cloud-run";
+import { googleIdTokenFor } from "../id-token";
 
 export interface MattingService { baseUrl: string; target: "cpu" | "gpu" }
 /**
@@ -27,9 +27,9 @@ export interface MattingClientOptions {
   services: MattingService[]; fetch?: typeof fetch; idToken?: (audience: string) => Promise<string>;
   model?: string; timeoutMs?: number;
   /**
-   * Spec 16 3.1.3: the base URL of the service that answers /upscale; it must equal one of `services`. Absent reads
-   * `UPSCALE_URL` from the environment; unset or empty keeps the first GPU service (spec 11). An URL that matches
-   * no service logs one WARNING `upscale_url_unknown` and keeps the GPU service.
+   * Spec 16 3.1.3: the base URL of the service that answers /upscale. Absent reads `UPSCALE_URL` from the
+   * environment; unset or empty keeps the first GPU service (spec 11). Spec 18 H2: an URL that matches none of
+   * `services` is the dedicated CPU upscale service catalog-upscale, used only for /upscale (target "cpu").
    */
   upscaleUrl?: string | null;
   /** Spec 16 3.1.5: cut-out calls in flight per GPU service from this process (default MATTE_INFLIGHT_PER_INSTANCE). */
@@ -109,16 +109,14 @@ export class MattingClient {
     const upscaleUrl = normaliseUrl((opts.upscaleUrl === undefined ? process.env.UPSCALE_URL : opts.upscaleUrl) ?? "");
     const firstGpu = this.states.find((s) => s.target === "gpu") ?? null;
     const named = upscaleUrl ? this.states.find((s) => s.baseUrl === upscaleUrl) ?? null : null;
-    if (upscaleUrl && !named) log("WARNING", "upscale_url_unknown", { detail: "UPSCALE_URL matches no matting service; the GPU service upscales" });
-    this.upscaleState = named ?? firstGpu;
+    // Spec 18 H2: an URL that is no matting service is the dedicated CPU upscale service (catalog-upscale). It gets its
+    // own state (own /health and breaker) and is never used for cut-outs.
+    const dedicated: ServiceState | null = upscaleUrl && !named ? { baseUrl: upscaleUrl, target: "cpu", breaker: { state: "closed", failures: 0, openedAt: null }, modelFailures: new Map(), models: [], default: "", version: null, checkedAt: -Infinity, upscale: null, inflight: 0, waiters: [] } : null;
+    this.upscaleState = named ?? dedicated ?? firstGpu;
     this.inflightLimit = opts.inflightPerService ?? MATTE_INFLIGHT_PER_INSTANCE;
     this.sleep = opts.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
     this.request = opts.fetch ?? fetch;
-    const auth = new GoogleAuth();
-    this.token = opts.idToken ?? (async (audience) => {
-      const client = await auth.getIdTokenClient(audience);
-      return client.idTokenProvider.fetchIdToken(audience);
-    });
+    this.token = opts.idToken ?? googleIdTokenFor();
   }
   /** Compatibility view is the required CPU breaker; use breakers for both targets. */
   get breaker(): Breaker { return this.states.find((s) => s.target === "cpu")!.breaker; }
@@ -206,7 +204,8 @@ export class MattingClient {
   }
   /** `upscale` is the GPU service's /health `upscale` section (null without a GPU service or without the section). */
   async health(): Promise<{ ok: boolean; models: ModelInfo[]; default: string; versions: Record<"cpu" | "gpu", string | null>; upscale?: UpscaleHealth | null }> {
-    await Promise.all(this.states.map(async (s) => {
+    const checked = this.upscaleState && !this.states.includes(this.upscaleState) ? [...this.states, this.upscaleState] : this.states;
+    await Promise.all(checked.map(async (s) => {
       if (Date.now() - s.checkedAt < HEALTH_TTL_MS || !this.available(s)) return;
       try {
         const h = await (await this.call(s, "/health")).json() as { ok: boolean; models: ModelInfo[]; default: string; version: string; upscale?: unknown };

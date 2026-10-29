@@ -12,7 +12,9 @@
 #   SVC_ENV            the --set-env-vars value (compared with the live revision for SKIP)
 #   SVC_PROBE          array: the probe command; the gate appends the candidate's tag URL and runs it under timeout
 #   SVC_PROBE_TIMEOUT  seconds before the probe is killed and counts as failed
-#   SVC_DEPLOY         1 to deploy; 0 to reuse the live service as it is (the preview never changes catalog-matting)
+#   SVC_DEPLOY         1 to deploy; 0 to reuse the live service as it is (the preview never changes catalog-matting);
+#                      skip when this run does not use the service at all (catalog-upscale unless UPSCALE_SERVICE=dedicated
+#                      or UPSCALE_MEASURE=1); SVC_SKIP_REASON says why
 #   SVC_SHIFT          1 to move traffic to a passing candidate; 0 to leave it a no-traffic candidate (preview GPU)
 #   SVC_TAG            optional: the candidate tag (default candidate)
 #   SVC_QUOTA_OPTIONAL 1 when a quota refusal on first creation only warns (the GPU service; the worker then uses CPU)
@@ -20,7 +22,7 @@
 # The registry functions are pure bash (they read deploy.sh's variables and call nothing), so
 # infra/tests/gate.test.mjs runs them offline; only the probes below call gcloud, each as its own process.
 
-SERVICES=(catalog-matting catalog-matting-gpu catalog-worker catalog-web)
+SERVICES=(catalog-matting catalog-upscale catalog-matting-gpu catalog-worker catalog-web)
 
 # The region of a service by name, also for deploy.sh --rollback (which sets nothing else).
 service_region() {
@@ -56,6 +58,51 @@ service_catalog_matting() {
   SVC_DEPLOY=1; [ "${CATALOG_PREVIEW:-0}" = 1 ] && SVC_DEPLOY=0
   SVC_SHIFT=1
   SVC_QUOTA_OPTIONAL=0
+}
+
+# The upscaler the catalog-upscale probes call (deploy.sh's UPSCALE_MODEL; off still probes the default).
+probe_upscale_model() { echo "${UPSCALE_MODEL:-swinir-x2}"; }
+
+service_catalog_upscale() {
+  # Spec 18 H2: the dedicated CPU enlargement service. The catalog-matting image with only the upscaler loaded
+  # (PRELOAD_MATTE=0; UPSCALE_CPU=1 here is the service's switch that lets it upscale on CPU, not the shape's vCPU
+  # count), sized by the UPSCALE_* rows of infra/lib/shape.sh, which refuse a shape that has not been measured.
+  SVC_NAME=catalog-upscale
+  SVC_REGION=$(service_region "$SVC_NAME")
+  SVC_IMAGE=$AR/matting:$TAG
+  SVC_ARGS=(--service-account="$MATTING_SA" --cpu="$UPSCALE_CPU" --memory="$UPSCALE_MEMORY" --concurrency="$UPSCALE_CONCURRENCY"
+    --min-instances=0 --max-instances="$UPSCALE_MAX_INSTANCES" --timeout="$UPSCALE_TIMEOUT_S" --labels=app=catalog,component=upscale)
+  SVC_ENV="MAX_RESIDENT_SESSIONS=1,UPSCALE_CPU=1,PRELOAD_MATTE=0,ORT_INTRA_OP_THREADS=$UPSCALE_THREADS"
+  SVC_QUOTA_OPTIONAL=0
+  SVC_SKIP_REASON=""
+  local size p95 budget=0 first=${UPSCALE_SIZES%%,*}
+  if [ "${UPSCALE_MEASURE:-0}" = 1 ] && [ "${CATALOG_PREVIEW:-0}" != 1 ]; then
+    # Spec 18 H1, the ladder: a no-traffic candidate per shape, its own tag so every rung keeps its URL for
+    # infra/check-matting.sh --probe-upscale. The gate only shows it answers: one warm call and one call of the first
+    # probe size, each within the service timeout, plus about 5 minutes for the probe job and the cold start.
+    SVC_DEPLOY=1; SVC_SHIFT=0
+    SVC_TAG=measure-${UPSCALE_CPU}c-${UPSCALE_THREADS}t-${UPSCALE_CONCURRENCY}r
+    SVC_PROBE_TIMEOUT=$((300 + 2 * UPSCALE_TIMEOUT_S))
+    SVC_PROBE=(bash infra/lib/services.sh probe-upscale "$SVC_PROBE_TIMEOUT" "$(probe_upscale_model)" "$first" 1 1 "$UPSCALE_TIMEOUT_S")
+    return 0
+  fi
+  if [ "${UPSCALE_SERVICE:-cpu}" != dedicated ]; then
+    SVC_DEPLOY=skip; SVC_SHIFT=0; SVC_PROBE=(); SVC_PROBE_TIMEOUT=0
+    SVC_SKIP_REASON="UPSCALE_SERVICE=${UPSCALE_SERVICE:-cpu}; the worker does not call it"
+    return 0
+  fi
+  # Sized from the measured table (shape_check has refused a shape without a p95 for every size): per size a warm
+  # call and one round at the shape's concurrency, 2 x p95 each, plus 300 s for the probe job and the cold start.
+  for size in ${UPSCALE_SIZES//,/ }; do
+    p95=$(upscale_p95 "$size")
+    budget=$((budget + 4 * ${p95:-$UPSCALE_TIMEOUT_S}))
+  done
+  SVC_PROBE_TIMEOUT=$((300 + budget))
+  SVC_PROBE=(bash infra/lib/services.sh probe-upscale "$SVC_PROBE_TIMEOUT" "$(probe_upscale_model)" "$UPSCALE_SIZES" "$UPSCALE_CONCURRENCY" 1 "$UPSCALE_TIMEOUT_S")
+  SVC_DEPLOY=1; SVC_SHIFT=1
+  # Like catalog-matting: the preview reuses the live service and never changes it.
+  [ "${CATALOG_PREVIEW:-0}" = 1 ] && SVC_DEPLOY=0
+  return 0
 }
 
 service_catalog_matting_gpu() {
@@ -186,6 +233,14 @@ probe_matting() {
   PROBE_TASK_TIMEOUT=$timeout bash infra/check-matting.sh --probe "$url" --models="$models" --concurrency="$concurrency" --rounds="$rounds"
 }
 
+# Spec 18 H1: the upscale probe (cloudrun_check.py --probe-upscale through infra/check-matting.sh) with the sizes,
+# concurrency, rounds and per-call timeout the registry row gives; the job ends with the gate, as for probe_matting.
+probe_upscale() {
+  local timeout=$1 model=$2 sizes=$3 concurrency=$4 rounds=$5 call_timeout=$6 url=$7
+  PROBE_TASK_TIMEOUT=$timeout bash infra/check-matting.sh --probe-upscale "$url" --model="$model" --sizes="$sizes" \
+    --concurrency="$concurrency" --rounds="$rounds" --timeout="$call_timeout"
+}
+
 # /health on the worker candidate, then the tier 5 smoke against the candidates of this deploy.
 probe_worker() {
   local url=$1 run
@@ -219,8 +274,9 @@ if [ "${BASH_SOURCE[0]}" = "$0" ]; then
   cd "$(dirname "$0")/../.."
   case "${1:-}" in
     probe-matting) shift; probe_matting "$@" ;;
+    probe-upscale) shift; probe_upscale "$@" ;;
     probe-worker) probe_worker "$2" ;;
     probe-web) probe_web "$2" ;;
-    *) echo "usage: bash infra/lib/services.sh probe-matting <timeout s> <models> <concurrency> <rounds> <url> | probe-worker <url> | probe-web <url>" >&2; exit 2 ;;
+    *) echo "usage: bash infra/lib/services.sh probe-matting <timeout s> <models> <concurrency> <rounds> <url> | probe-upscale <timeout s> <model> <sizes> <concurrency> <rounds> <call timeout s> <url> | probe-worker <url> | probe-web <url>" >&2; exit 2 ;;
   esac
 fi

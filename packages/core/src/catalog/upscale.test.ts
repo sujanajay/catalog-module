@@ -270,17 +270,39 @@ describe("matting client upscale", () => {
     expect(calls.filter(u => u.includes("/upscale"))).toEqual([`http://127.0.0.1:1/upscale?model=${MODEL}&scale=2`]);
     // The worker's upscaler carries the CPU id, so its render_key differs from a GPU-made image's.
     expect(createUpscaler(cpu, { model: MODEL, minScale: 1.5 })!.model).toBe(`${MODEL}+cpu`);
-    // Unset keeps the GPU service; an URL that names no service warns once and keeps it too.
+    // Unset keeps the GPU service; spec 18 H2: an URL that names no matting service is the dedicated CPU service.
     expect(new MattingClient({ services, fetch, upscaleUrl: null }).upscaleTarget).toBe("gpu");
-    expect(new MattingClient({ services, fetch, upscaleUrl: "https://elsewhere.example" }).upscaleTarget).toBe("gpu");
-    expect(warn.mock.calls.map((call: unknown[]) => (JSON.parse(String(call[0])) as { message: string }).message)).toEqual(["upscale_url_unknown"]);
+    expect(new MattingClient({ services, fetch, upscaleUrl: "https://elsewhere.example" }).upscaleTarget).toBe("cpu");
+    expect(warn).not.toHaveBeenCalled();
     // Without a GPU service, the CPU service named by UPSCALE_URL still upscales.
     expect(new MattingClient({ services: [services[0]!], fetch, upscaleUrl: "http://127.0.0.1:1" }).upscaleTarget).toBe("cpu");
+  });
+  it("sends /upscale to the dedicated CPU service when UPSCALE_URL names no matting service (spec 18 H2)", async () => {
+    const calls: string[] = [];
+    const fetch = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      const u = String(url); calls.push(u);
+      if (u.endsWith("/health")) return health(u.includes(":2") ? "gpu" : "cpu", u.includes(":3") ? listed : undefined);
+      return new Response(new Uint8Array(await jpeg2x(init!.body)), { headers: { "x-upscale-ms": "90000" } });
+    }) as unknown as typeof globalThis.fetch;
+    const services = [{ baseUrl: "http://127.0.0.1:1", target: "cpu" as const }, { baseUrl: "http://127.0.0.1:2", target: "gpu" as const }];
+    const c = new MattingClient({ services, fetch, upscaleUrl: "http://127.0.0.1:3/" });
+    expect(c.upscaleTarget).toBe("cpu");
+    await expect(c.upscale(await image(), { model: MODEL, contentType: "image/png" })).resolves.toMatchObject({ ms: 90000 });
+    expect(calls.filter(u => u.includes("/upscale"))).toEqual([`http://127.0.0.1:3/upscale?model=${MODEL}&scale=2`]);
+    expect(calls).toContain("http://127.0.0.1:3/health");
+    // It is no cut-out service: the cut-out model list and the breakers stay those of the matting services.
+    expect((await c.health()).models.map((m) => m.target).sort()).toEqual(["cpu", "gpu"]);
+    expect(createUpscaler(c, { model: MODEL, minScale: 1.5 })!.model).toBe(`${MODEL}+cpu`);
   });
   it("reads the target from UPSCALE_URL against MATTING_URL", () => {
     expect(upscaleTargetFromEnv({})).toBe("gpu");
     expect(upscaleTargetFromEnv({ UPSCALE_URL: "https://cpu.example/", MATTING_URL: "https://cpu.example" })).toBe("cpu");
-    expect(upscaleTargetFromEnv({ UPSCALE_URL: "https://gpu.example", MATTING_URL: "https://cpu.example" })).toBe("gpu");
+    expect(upscaleTargetFromEnv({ UPSCALE_URL: "https://gpu.example", MATTING_URL: "https://cpu.example", MATTING_GPU_URL: "https://gpu.example/" })).toBe("gpu");
+    expect(upscaleTargetFromEnv({ UPSCALE_URL: "https://gpu-b.example", MATTING_GPU_URLS: "https://gpu-a.example, https://gpu-b.example", MATTING_GPU_URL: "https://ignored.example" })).toBe("gpu");
+    // Spec 18 H2: the dedicated CPU service catalog-upscale (no matting service) keeps the CPU render keys.
+    const dedicated = { UPSCALE_MODEL: MODEL, UPSCALE_URL: "https://catalog-upscale-abc-el.a.run.app", MATTING_URL: "https://cpu.example", MATTING_GPU_URL: "https://gpu.example" };
+    expect(upscaleTargetFromEnv(dedicated)).toBe("cpu");
+    expect(configuredUpscalerId(dedicated)).toBe(`${MODEL}+cpu`);
     expect(upscaleConfigFromEnv({ UPSCALE_MODEL: MODEL, UPSCALE_URL: "https://cpu.example", MATTING_URL: "https://cpu.example" })).toEqual({ model: MODEL, minScale: 1.5, target: "cpu" });
     expect(configuredUpscalerId({ UPSCALE_MODEL: MODEL, UPSCALE_URL: "https://cpu.example", MATTING_URL: "https://cpu.example" })).toBe(`${MODEL}+cpu`);
     expect(configuredUpscalerId({ UPSCALE_MODEL: MODEL })).toBe(MODEL);
