@@ -8,6 +8,10 @@ export const FINALIZE_ENQUEUE_LEASE_MS = 120_000;
 export function finalizeEnqueueExpired(now:number) {
   return sql`CASE WHEN coalesce(${catalogBatches.counts}->>'finalizeEnqueuedAt','') ~ '^[0-9]+$' THEN (${catalogBatches.counts}->>'finalizeEnqueuedAt')::numeric <= ${now-FINALIZE_ENQUEUE_LEASE_MS} ELSE true END`;
 }
+/** True while a finalize request is stored on the batch (`counts.finalizePending`). */
+export function finalizePendingFlag() {
+  return sql`coalesce((${catalogBatches.counts}->>'finalizePending')::boolean,false)`;
+}
 export interface FinalizeRequestDeps { db: Db; enqueue: typeof enqueueTask; now?: () => Date }
 /**
  * Asks for one finalize (spec 18 H4). A request is the stored `counts.finalizePending` flag, never a task body
@@ -18,7 +22,7 @@ export interface FinalizeRequestDeps { db: Db; enqueue: typeof enqueueTask; now?
  */
 export async function enqueueFinalize(deps: FinalizeRequestDeps, batchId:string, delaySec?:number, options:{reopen?:boolean}={}): Promise<void> {
   const now=+(deps.now?.() ?? new Date());
-  const pending=sql`coalesce((${catalogBatches.counts}->>'finalizePending')::boolean,false)`;
+  const pending=finalizePendingFlag();
   const open=options.reopen ? sql`true`:sql`(${catalogBatches.status} <> 'done' OR ${pending})`;
   // The row is read under its lock first, so a failed enqueue can put back the enqueue time it replaced.
   const claimed=await deps.db.transaction(async tx=>{

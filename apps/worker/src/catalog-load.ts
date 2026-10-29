@@ -290,7 +290,7 @@ async function checkReupload(db: Db, runA: string, reupload: string, plan: Reupl
   return { sampled: plan.options.length, droppedLinksGone: gone, problems };
 }
 
-function markdown(report: Record<string, unknown>, passes: Record<string, Awaited<ReturnType<typeof metrics>> & { recheck?: string; recheckDetail?: RecheckEvidence | null; reupload?: Awaited<ReturnType<typeof checkReupload>> }>) {
+function markdown(report: Record<string, unknown> & { cleanup?: CleanupOutcome }, passes: Record<string, Awaited<ReturnType<typeof metrics>> & { recheck?: string; recheckDetail?: RecheckEvidence | null; reupload?: Awaited<ReturnType<typeof checkReupload>> }>) {
   const ms = (v: number | null | undefined) => (v === null || v === undefined ? "-" : formatDuration(v));
   const secs = (v: number | null) => (v === null ? "-" : `${Math.round(v / 1000)} s`);
   const lines = [`# Load run ${String(report.run)}`, "", `Options: ${String(report.options)}. Brand: ${BRAND} (test batches only). Target: 2 hours per batch.`, ""];
@@ -310,12 +310,12 @@ function markdown(report: Record<string, unknown>, passes: Record<string, Awaite
       for (const sp of rc.sheetProblems) lines.push(`- sheet ${sp.problem}: ${sp.detail}`);
     }
   }
-  const c = report.cleanup as CleanupOutcome | undefined;
+  const c = report.cleanup;
   if (c && typeof c === "object" && c.cleaned) lines.push("", `Cleanup: ${c.cleaned.length} batches, ${c.objects ?? 0} objects in ${ms(c.ms)}${c.error ? `; failed: ${c.error}` : ""}.`);
   else if (c === "pending") lines.push("", "Cleanup: not finished when this report was written.");
   const errors = Object.entries((report.passErrors ?? {}) as Record<string, string>);
   if (errors.length) lines.push("", "## Pass errors", "", ...errors.map(([name, error]) => `- ${name}: ${error}`));
-  const left = (report.cleanup as { leftBehind?: { batchId: string; status: string | null }[] } | undefined)?.leftBehind ?? [];
+  const left = c && typeof c === "object" ? c.leftBehind : [];
   if (left.length) lines.push("", "## Left behind by cleanup", "", ...left.map(b => `- ${b.batchId} (${b.status ?? "unknown"}): clean up with node dist/catalog-smoke.js --cleanup-batches ${b.batchId}`));
   lines.push("", "Cloud Run instance counts and queue depth: read from Cloud Monitoring for the run window and paste here.");
   return lines.join("\n") + "\n";

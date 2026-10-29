@@ -72,7 +72,7 @@ export function workerCatalogDeps(db: Db): CatalogDeps {
 // Keep execution ownership through the Cloud Tasks deadline, plus a short termination grace.
 export const CATALOG_TASK_LEASE_MS=(DISPATCH_DEADLINE_SEC+60)*1000;
 // Spec 18 H4: the one finalize request lives in core, so the web's Add SKU ids route asks the same way.
-export { enqueueFinalize, FINALIZE_ENQUEUE_LEASE_MS, finalizeEnqueueExpired } from "@catalog/core/catalog/finalize-request";
+export { enqueueFinalize, FINALIZE_ENQUEUE_LEASE_MS, finalizeEnqueueExpired, finalizePendingFlag } from "@catalog/core/catalog/finalize-request";
 /** Spec 15 E7: the newest samples of the images made that the batch page's measured time is read from. */
 export const PROCESSING_RATE_SAMPLES = 5;
 export async function refreshBatchProgress(db:Db,batchId:string,now:Date=new Date()):Promise<void> {
