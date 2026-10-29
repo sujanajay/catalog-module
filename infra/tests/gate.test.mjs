@@ -46,22 +46,24 @@ const lines = (text) => text.split('\n');
 const tests = [];
 const test = (name, fn) => tests.push([name, fn]);
 
-test('registry lists the four services in order, each with a registry function', () => {
+test('registry lists the five services in order, each with a registry function', () => {
   const r = run('registry', `printf '%s\\n' "\${SERVICES[@]}"; for s in "\${SERVICES[@]}"; do declare -F "service_\${s//-/_}" >/dev/null || echo "missing $s"; done`);
   assert.equal(r.status, 0, r.err);
-  assert.deepEqual(lines(r.out.trim()), ['catalog-matting', 'catalog-matting-gpu', 'catalog-worker', 'catalog-web']);
+  assert.deepEqual(lines(r.out.trim()), ['catalog-matting', 'catalog-upscale', 'catalog-matting-gpu', 'catalog-worker', 'catalog-web']);
 });
 
 const vars = `AR=ar; TAG=t; MATTING_SA=m; WORKER_SA=w; WEB_SA=web; MATTING_CPU_MAX_INSTANCES=20; GPU_CPU=4; GPU_MEMORY=16Gi
 GPU_CONCURRENCY=2; GPU_MAX_INSTANCES=3; MAX_RESIDENT_SESSIONS=1; GPU_MEM_LIMIT_BYTES=; WORKER_SERVICE=catalog-worker
 WEB_SERVICE=catalog-web; WORKER_CPU=2; WORKER_MEMORY=2Gi; WORKER_CONCURRENCY=2; WORKER_MAX_INSTANCES=4; WEB_MAX_INSTANCES=3
 NET=(--region=asia-south1 --network=ila-vpc); WORKER_SECRETS=s; SECRETS=s; WORKER_ENV=W=1; WEB_ENV=X=1
+source infra/lib/shape.sh; shape_defaults
 show() { "service_\${1//-/_}"; echo "$1|$SVC_NAME|$SVC_REGION|$SVC_IMAGE|$SVC_PROBE_TIMEOUT|$SVC_DEPLOY|$SVC_SHIFT|$SVC_QUOTA_OPTIONAL|$SVC_ENV|\${SVC_PROBE[*]}"; }`;
 
 test('registry entries: regions, probes, timeouts, preview behaviour, GPU knobs', () => {
   let r = run('entries', `${vars}\nINFERENCE_LOCK_SCOPE=session\nfor s in "\${SERVICES[@]}"; do show "$s"; done`);
   assert.equal(r.status, 0, r.err);
-  const [cpu, gpu, worker, web] = lines(r.out.trim()).map((l) => l.split('|'));
+  const [cpu, upscale, gpu, worker, web] = lines(r.out.trim()).map((l) => l.split('|'));
+  assert.deepEqual(upscale.slice(1, 7), ['catalog-upscale', 'asia-south1', 'ar/matting:t', '0', 'skip', '0'], 'not deployed while UPSCALE_SERVICE=cpu');
   // Probes sized per service: the CPU service gets its default model, 1 warm call and 1 round at its concurrency
   // (CPU calls take 25 to 71 s); the GPU service the full probe of every model, 5 rounds at the shape concurrency.
   assert.deepEqual(cpu.slice(1, 8), ['catalog-matting', 'asia-south1', 'ar/matting:t', '420', '1', '1', '0']);
@@ -89,6 +91,171 @@ bash() { echo "PROBE_TASK_TIMEOUT=$PROBE_TASK_TIMEOUT $*"; }; export -f bash
 command bash "\${SVC_PROBE[@]:1}" https://candidate---m.run.app`);
   assert.equal(r.status, 0, r.err);
   assert.equal(r.out.trim(), 'PROBE_TASK_TIMEOUT=420 infra/check-matting.sh --probe https://candidate---m.run.app --models=birefnet-general --concurrency=1 --rounds=1');
+});
+
+// Spec 18 H2: catalog-upscale. The measured fixture below is a test value, not a measurement.
+const measured = `UPSCALE_SERVICE=dedicated; UPSCALE_MEASURED_ON=2026-10-30; UPSCALE_P95_S_4C_4T_1CONC_800x1200=130; UPSCALE_P95_S_4C_4T_1CONC_1600x1600=330`;
+const upscaleArgs = `show catalog-upscale; printf '%s\\n' "\${SVC_ARGS[@]}"; echo "TAG=\${SVC_TAG:-}|SKIP=\${SVC_SKIP_REASON:-}"`;
+
+test('catalog-upscale: the matting image sized by the UPSCALE_* rows, only the upscaler loaded, probe sized from the table', () => {
+  const r = run('upscale-dedicated', `${vars}\n${measured}\n${upscaleArgs}`);
+  assert.equal(r.status, 0, r.err);
+  const [row, ...rest] = lines(r.out.trim());
+  const f = row.split('|');
+  // 300 s for the job and cold start + 4 x p95 per size (warm call and one round, 2 x p95 each): 300 + 520 + 1320.
+  assert.deepEqual(f.slice(1, 8), ['catalog-upscale', 'asia-south1', 'ar/matting:t', '2140', '1', '1', '0']);
+  assert.equal(f[8], 'MAX_RESIDENT_SESSIONS=1,UPSCALE_CPU=1,PRELOAD_MATTE=0,ORT_INTRA_OP_THREADS=4');
+  assert.equal(f[9], 'bash infra/lib/services.sh probe-upscale 2140 swinir-x2 800x1200,1600x1600 1 1 840');
+  assert.deepEqual(rest.slice(0, -1), ['--service-account=m', '--cpu=4', '--memory=16Gi', '--concurrency=1', '--min-instances=0',
+    '--max-instances=16', '--timeout=840', '--labels=app=catalog,component=upscale']);
+  assert.equal(rest.at(-1), 'TAG=|SKIP=', 'the dedicated service uses the candidate tag');
+});
+
+test('catalog-upscale: env shape reaches the flags and the thread count', () => {
+  const r = run('upscale-shape', `${vars}\n${measured}\nUPSCALE_CPU_VCPU=8; UPSCALE_THREADS=8; UPSCALE_MEMORY=32Gi; UPSCALE_CONCURRENCY=2; UPSCALE_MAX_INSTANCES=8; UPSCALE_TIMEOUT_S=700
+UPSCALE_P95_S_8C_8T_2CONC_800x1200=90; UPSCALE_P95_S_8C_8T_2CONC_1600x1600=250\n${upscaleArgs}`);
+  assert.equal(r.status, 0, r.err);
+  const [row, ...rest] = lines(r.out.trim());
+  assert.match(row, /,ORT_INTRA_OP_THREADS=8\|bash infra\/lib\/services.sh probe-upscale 1660 swinir-x2 800x1200,1600x1600 2 1 700$/);
+  assert.ok(['--cpu=8', '--memory=32Gi', '--concurrency=2', '--max-instances=8', '--timeout=700'].every((a) => rest.includes(a)), rest.join(' '));
+});
+
+test('catalog-upscale: measure mode is a no-traffic candidate per shape; preview reuses; cpu skips', () => {
+  let r = run('upscale-measure', `${vars}\nUPSCALE_MEASURE=1; UPSCALE_CPU_VCPU=8; UPSCALE_THREADS=8; UPSCALE_CONCURRENCY=2\n${upscaleArgs}`);
+  assert.equal(r.status, 0, r.err);
+  let out = lines(r.out.trim());
+  let f = out[0].split('|');
+  // One warm call and one call of the first size, each within the service timeout, plus 300 s: 300 + 2 x 840.
+  assert.deepEqual(f.slice(5, 8), ['1', '0', '0'], 'deployed, never shifted');
+  assert.equal(f[4], '1980');
+  assert.equal(f[9], 'bash infra/lib/services.sh probe-upscale 1980 swinir-x2 800x1200 1 1 840');
+  assert.equal(out.at(-1), 'TAG=measure-8c-8t-2r|SKIP=', 'each rung keeps its own tag URL');
+  r = run('upscale-preview', `${vars}\n${measured}\nCATALOG_PREVIEW=1\n${upscaleArgs}`);
+  f = lines(r.out.trim())[0].split('|');
+  assert.deepEqual(f.slice(5, 7), ['0', '1'], 'the preview reuses the live catalog-upscale');
+  r = run('upscale-preview-measure', `${vars}\nCATALOG_PREVIEW=1; UPSCALE_MEASURE=1\n${upscaleArgs}`);
+  assert.equal(lines(r.out.trim())[0].split('|')[5], 'skip', 'the preview never measures');
+  r = run('upscale-gpu', `${vars}\nUPSCALE_SERVICE=gpu\n${upscaleArgs}`);
+  out = lines(r.out.trim());
+  assert.equal(out[0].split('|')[5], 'skip');
+  assert.equal(out.at(-1), 'TAG=|SKIP=UPSCALE_SERVICE=gpu; the worker does not call it');
+});
+
+test('a skipped service is not deployed, not described, and leaves no URL', () => {
+  const r = run('skip-service', `${vars}\nservice_test_svc() { SVC_NAME=test-svc; SVC_REGION=asia-south1; SVC_DEPLOY=skip; SVC_SKIP_REASON="not used"; SVC_SHIFT=0; }
+deploy_service test-svc; echo "URL=$GATE_URL|CHANGED=$GATE_CHANGED"`);
+  assert.equal(r.status, 0, r.err);
+  assert.ok(r.out.includes('==> test-svc: not deployed (not used)'), r.out);
+  assert.ok(r.out.includes('URL=|CHANGED=0'));
+  assert.deepEqual(r.calls, [], 'no gcloud call at all');
+});
+
+test('a reused service that does not exist yet says how to create it', () => {
+  const r = run('reuse-missing', `service_test_svc() { SVC_NAME=test-svc; SVC_REGION=asia-south1; SVC_DEPLOY=0; SVC_SHIFT=1; }; deploy_service test-svc`, {EXISTS: '0'});
+  assert.equal(r.status, 1);
+  assert.match(r.err, /test-svc is reused as it is but does not exist yet; deploy it from main first \(bash infra\/deploy.sh\)/);
+});
+
+test('an upscale probe passes its registry row, the gate timeout and the appended URL to check-matting.sh', () => {
+  const r = run('upscale-probe-args', `${vars}\n${measured}\nservice_catalog_upscale
+bash() { echo "PROBE_TASK_TIMEOUT=$PROBE_TASK_TIMEOUT $*"; }; export -f bash
+command bash "\${SVC_PROBE[@]:1}" https://candidate---u.run.app`);
+  assert.equal(r.status, 0, r.err);
+  assert.equal(r.out.trim(), 'PROBE_TASK_TIMEOUT=2140 infra/check-matting.sh --probe-upscale https://candidate---u.run.app --model=swinir-x2 '
+    + '--sizes=800x1200,1600x1600 --concurrency=1 --rounds=1 --timeout=840');
+});
+
+test('deploy.sh: the worker gets catalog-upscale only with UPSCALE_SERVICE=dedicated; cpu keeps catalog-matting', () => {
+  const deploy = fs.readFileSync(path.join(root, 'infra/deploy.sh'), 'utf8');
+  const loop = deploy.slice(deploy.indexOf('for SERVICE in "${SERVICES[@]}"'), deploy.indexOf('# --- Web access'));
+  assert.match(loop, /catalog-upscale\)\n[\s\S]*?UPSCALE_SERVICE_URL=\$GATE_URL/);
+  assert.match(loop, /if \[ "\$UPSCALE_SERVICE" = cpu \]; then\n\s+if \[ -n "\$UPSCALE_MODEL" \]; then WORKER_ENV\+=",UPSCALE_URL=\$MATTING_URL"; fi/,
+    'rollback: UPSCALE_SERVICE=cpu still means the CPU cut-out service');
+  assert.match(loop, /elif \[ "\$UPSCALE_SERVICE" = dedicated \]; then[\s\S]*?WORKER_ENV\+=",UPSCALE_URL=\$UPSCALE_SERVICE_URL,UPSCALE_TIMEOUT_S=\$UPSCALE_TIMEOUT_S"/);
+  assert.ok(loop.indexOf('catalog-upscale)') < loop.indexOf('catalog-matting-gpu)'), 'the URL is known before the worker env is completed');
+  assert.ok(!/UPSCALE_URL=\$GATE_TAG_URL/.test(loop), 'the worker never calls a measure candidate');
+});
+
+// The real catalog-upscale registry row, with the probe replaced by $PROBE (the real one starts a Cloud Run job).
+const fakeUpscaleProbe = `eval "orig_$(declare -f service_catalog_upscale)"
+service_catalog_upscale() { orig_service_catalog_upscale; SVC_PROBE=(bash -c "$PROBE" probe); }`;
+
+test('measure mode on a brand-new catalog-upscale: rung 1 is created with its measure tag, probed, never shifted', () => {
+  const r = run('upscale-measure-new', `${vars}\nUPSCALE_MEASURE=1\n${fakeUpscaleProbe}
+deploy_service catalog-upscale; upscale_measure_summary`, {EXISTS: '0', CAND_TAG: 'measure-4c-4t-1r'});
+  assert.equal(r.status, 0, r.err);
+  const deploy = r.calls.find((c) => c.startsWith('run deploy catalog-upscale'));
+  assert.match(deploy, / --no-allow-unauthenticated --tag measure-4c-4t-1r$/);
+  assert.ok(!deploy.includes('--no-traffic'), 'Cloud Run cannot create a service with --no-traffic');
+  assert.ok(r.out.includes(`probe got ${TAG_URL}`), r.out);
+  assert.ok(!r.calls.some((c) => c.includes('update-traffic')), 'a measure rung never moves traffic or tags');
+  assert.ok(r.out.includes('NOTE: catalog-upscale was created by this rung, so this first revision serves the service URL'), r.out);
+  assert.ok(lines(r.out).includes(`UPSCALE_CANDIDATE_URL=${TAG_URL}`));
+  assert.ok(lines(r.out).includes(`==> measure it: bash infra/check-matting.sh --probe-upscale ${TAG_URL} --model=swinir-x2 --sizes=800x1200,1600x1600 --concurrency=1 --rounds=3 --timeout=840`), r.out);
+  assert.match(r.out, /a measure rung never needs a new worker image/);
+});
+
+test('a live revision with a measure-* tag is never a SKIP match and never tagged previous', () => {
+  // Same image, env and flags as the live revision (LIVE_MATCH), but the live revision is a measure rung.
+  const r = run('measure-live', 'deploy_service test-svc', {LIVE_MATCH: '1', MEASURE_LIVE: '1'});
+  assert.equal(r.status, 0, r.err);
+  assert.ok(r.out.includes(`==> test-svc: the live revision ${OLD} is a measure rung; deploying and probing, never SKIP`), r.out);
+  assert.ok(!r.calls.some((c) => c.startsWith(`run revisions describe`)), 'no SKIP comparison at all');
+  assert.ok(r.out.includes(`probe got ${TAG_URL}`), 'the first real deploy runs its own probe');
+  assert.ok(!r.calls.some((c) => c.includes('--update-tags=previous=')), 'a measure rung is no rollback target');
+  assert.ok(r.calls.includes(`run services update-traffic test-svc --region=asia-south1 --to-revisions=${NEW}=100 --quiet`));
+  assert.ok(r.out.includes(`==> test-svc: ${OLD} is a measure rung; not tagged previous`));
+});
+
+test('rollback never defaults to a measure rung; naming it explicitly works', () => {
+  let r = run('rollback-measure', 'rollback_service test-svc', {ROLLBACK_TAGGED: '1', MEASURE_LIVE: '1'});
+  assert.equal(r.status, 1);
+  assert.match(r.err, new RegExp(`${OLD} is a measure rung \\(measure-\\* tag\\), not a revision that served the worker; name it to return to it: bash infra/deploy.sh --rollback test-svc ${OLD}`));
+  assert.ok(!r.calls.some((c) => c.includes('update-traffic')));
+  r = run('rollback-measure-named', `rollback_service test-svc ${OLD}`, {ROLLBACK_TAGGED: '1', MEASURE_LIVE: '1'});
+  assert.equal(r.status, 0, r.err);
+  assert.ok(r.calls.includes(`run services update-traffic test-svc --region=asia-south1 --to-revisions=${OLD}=100 --quiet`));
+});
+
+test('deploy.sh service loop with UPSCALE_MEASURE=1 while the live worker uses catalog-upscale: only catalog-upscale changes', () => {
+  const deploy = fs.readFileSync(path.join(root, 'infra/deploy.sh'), 'utf8');
+  const loop = deploy.slice(deploy.indexOf('MATTING_URL=""; MATTING_GPU_URL=""'), deploy.indexOf('# --- Web access'));
+  const loopFile = path.join(dir, 'measure-loop.sh');
+  fs.writeFileSync(loopFile, loop);
+  const live = 'W=1,MATTING_URL=https://catalog-matting-abc-el.a.run.app,UPSCALE_URL=https://catalog-upscale-abc-el.a.run.app,UPSCALE_TIMEOUT_S=700';
+  const r = run('measure-loop', `${vars}\nUPSCALE_MEASURE=1; MEASURE_ONLY=1; WORKER_ENV='${live}'; WEB_ENV=X=1
+${fakeUpscaleProbe}
+queues_apply_shape() { echo "QUEUES CHANGED"; }
+trap 'echo "WORKER_ENV_AT_EXIT=$WORKER_ENV|WEB_ENV_AT_EXIT=$WEB_ENV"' EXIT
+source "${loopFile.replaceAll('\\', '/')}"
+echo "AFTER THE LOOP"`, {CAND_TAG: 'measure-4c-4t-1r'});
+  assert.equal(r.status, 0, r.err);
+  assert.ok(r.out.includes('==> catalog-matting: reused as it is'), r.out);
+  assert.ok(r.calls.some((c) => c.startsWith('run deploy catalog-upscale ')));
+  for (const service of ['catalog-matting', 'catalog-matting-gpu', 'catalog-worker', 'catalog-web']) {
+    assert.ok(!r.calls.some((c) => c.startsWith(`run deploy ${service} `)), `${service} is not deployed`);
+  }
+  assert.ok(!r.calls.some((c) => / catalog-(matting-gpu|worker|web) /.test(` ${c} `)), 'the worker, web and GPU services are not even read');
+  assert.ok(!r.calls.some((c) => c.includes('update-traffic')));
+  assert.ok(!r.out.includes('QUEUES CHANGED') && !r.out.includes('AFTER THE LOOP'), 'the run stops after the catalog-upscale gate');
+  // The loop only ever appends the reused catalog-matting URL to its local copy; no upscaler setting is touched and the
+  // worker is never deployed with it.
+  const atExit = lines(r.out).find((l) => l.startsWith('WORKER_ENV_AT_EXIT='));
+  assert.equal(atExit, `WORKER_ENV_AT_EXIT=${live},MATTING_URL=${URL}|WEB_ENV_AT_EXIT=X=1`, 'the worker upscaler env is never rebuilt');
+  assert.ok(r.out.includes(`UPSCALE_CANDIDATE_URL=${TAG_URL}`));
+});
+
+test('measure mode reuses every other registry service as it is', () => {
+  const r = run('measure-registry', `${vars}\nUPSCALE_MEASURE=1\nfor s in "\${SERVICES[@]}"; do show "$s"; done`);
+  assert.equal(r.status, 0, r.err);
+  assert.deepEqual(lines(r.out.trim()).map((l) => l.split('|')[5]), ['0', '1', '0', '0', '0']);
+});
+
+test('bootstrap: the worker may invoke catalog-upscale through its project-level run.invoker grant', () => {
+  const bootstrap = fs.readFileSync(path.join(root, 'infra/bootstrap.sh'), 'utf8');
+  const at = bootstrap.indexOf('project_binding "serviceAccount:$WORKER" roles/run.invoker');
+  assert.ok(at >= 0);
+  assert.match(bootstrap.slice(Math.max(0, at - 600), at), /catalog-upscale/, 'the grant says it covers catalog-upscale');
 });
 
 test('spec 17 3.3.2 GPU knobs reach catalog-matting-gpu only when set, one per candidate', () => {
@@ -265,7 +432,7 @@ test('deploy.sh: gate loop after migrate and queues, before jobs and monitoring;
   const deploy = fs.readFileSync(path.join(root, 'infra/deploy.sh'), 'utf8');
   const at = (s) => { const i = deploy.indexOf(s); assert.ok(i >= 0, `${s} not in deploy.sh`); return i; };
   const order = ['shape_check "$SQL_CONNECTION_LIMIT"', 'echo "==> build $TAG"', 'echo "==> migrate"',
-    '\nqueues_create_missing', 'deploy_service "$SERVICE"', 'echo "==> jobs"', 'echo "==> monitoring"'].map(at);
+    '\n  queues_create_missing', 'deploy_service "$SERVICE"', 'echo "==> jobs"', 'echo "==> monitoring"'].map(at);
   assert.deepEqual(order, [...order].sort((a, b) => a - b));
   assert.ok(!deploy.includes('gcloud run deploy'), 'every service deploy goes through the gate');
   assert.ok(!/^bash infra\/catalog-smoke-linux\.sh/m.test(deploy), 'the smoke runs inside the worker gate');

@@ -2,7 +2,7 @@
 # Order (spec 17 3.2.5): preflight checks and shape refusals, build the images on Cloud Build, run DB migrations as
 # the catalog-migrate Cloud Run job (additive; also seeds the first admin and the test brand test_brand), make sure
 # the task queues exist, then each service of the registry (infra/lib/services.sh: catalog-matting,
-# catalog-matting-gpu, catalog-worker, catalog-web, all private) through the deploy gate (infra/lib/gate.sh):
+# catalog-upscale, catalog-matting-gpu, catalog-worker, catalog-web, all private) through the deploy gate (infra/lib/gate.sh):
 # a no-traffic candidate, its probe against the candidate's tag URL, then the traffic shift. The worker's probe is
 # the tier 5 per-brand smoke (Cloud Run job catalog-test-smoke) on the new worker image against the new matting
 # candidates. A failing probe stops the script: that service keeps its live revision, later services are not
@@ -26,6 +26,17 @@
 # (needs database and GCS access and REAL_DATA_DIR).
 # CATALOG_PREVIEW=1 (infra/deploy-preview.sh): the preview stack, plus the GPU service of this commit as a no-traffic
 # candidate of catalog-matting-gpu (probed, traffic never shifted) that the preview worker calls.
+# Spec 18: UPSCALE_SERVICE=dedicated sends the worker's enlargements to catalog-upscale. shape.sh refuses it until the
+# render calls catalog-upscale through the enlarge stage (spec 18 H3 sets ENLARGE_CLIENT_WIRED=1; the matting client
+# refuses a dedicated UPSCALE_URL) and its shape is measured; UPSCALE_SERVICE=cpu (today, and the rollback) keeps them
+# on catalog-matting.
+# UPSCALE_MEASURE=1 with UPSCALE_CPU_VCPU, UPSCALE_THREADS, UPSCALE_CONCURRENCY and UPSCALE_MAX_INSTANCES deploys ONLY
+# catalog-upscale, as a candidate of that shape (tag measure-<cpu>c-<threads>t-<concurrency>r): it builds only the
+# matting image if missing, skips migrations and queues, reuses every other service as it is, never rebuilds the
+# worker's env, prints the candidate URL and the infra/check-matting.sh --probe-upscale command, and stops before the
+# worker and web gates. A measure rung never needs a new worker image. Rung 1 of a brand-new catalog-upscale serves the
+# service URL (Cloud Run cannot create with --no-traffic); nothing calls it. Quota: with today's shape (171 of 190 vCPU)
+# a rung fits with UPSCALE_MAX_INSTANCES at most 4 at 4 vCPU, or at most 2 at 8 vCPU.
 set -euo pipefail
 
 PROJECT=image-links-agent
@@ -129,6 +140,15 @@ shape_defaults
 shape_check "$SQL_CONNECTION_LIMIT" || exit 1
 echo "==> connection budget: catalog $CATALOG_DB_TOTAL of $CATALOG_DB_LIMIT (ila-pg $SQL_TIER_LIVE allows $SQL_CONNECTION_LIMIT)"
 echo "==> shape: worker $WORKER_MAX_INSTANCES x ${WORKER_CPU} vCPU/$WORKER_MEMORY; slots $TASKS_MAX_DISPATCHES + bulk $BULK_MAX_DISPATCHES + ingest $INGEST_MAX_DISPATCHES of $SLOTS_CAPACITY; asia-south1 vCPU $CPU_TOTAL of $CPU_QUOTA_LIMIT; GPU $GPU_MAX_INSTANCES x ${GPU_CPU} vCPU/$GPU_MEMORY concurrency $GPU_CONCURRENCY, $MAX_RESIDENT_SESSIONS resident; upscale on $UPSCALE_SERVICE"
+if upscale_deployed; then
+  echo "==> shape: catalog-upscale $UPSCALE_MAX_INSTANCES x ${UPSCALE_CPU_VCPU} vCPU/$UPSCALE_MEMORY, $UPSCALE_THREADS threads, concurrency $UPSCALE_CONCURRENCY, timeout ${UPSCALE_TIMEOUT_S} s$([ "$UPSCALE_MEASURE" = 1 ] && echo " (measure: no-traffic candidate)")"
+fi
+# Spec 18 H1: a measure run changes only catalog-upscale (the preview never measures).
+MEASURE_ONLY=0
+if [ "$UPSCALE_MEASURE" = 1 ] && [ "${CATALOG_PREVIEW:-0}" != 1 ]; then
+  MEASURE_ONLY=1
+  echo "==> measure mode: only catalog-upscale is deployed; no other service, migration, queue or worker env changes"
+fi
 # Semicolons, not commas: the value travels inside --set-env-vars. The load driver re-checks it.
 DB_CONNECTION_BUDGET="max=$DB_MAX_CONNECTIONS;reserved=$DB_RESERVED_CONNECTIONS;ila=$ILA_DB_SHARE"
 DB_CONNECTION_BUDGET+=";worker=${WORKER_MAX_INSTANCES}x$WORKER_DB_POOL_MAX;web=${WEB_MAX_INSTANCES}x$WEB_DB_POOL_MAX;jobs=${MAX_CONCURRENT_JOBS}x$JOB_DB_POOL_MAX"
@@ -243,6 +263,8 @@ if [ "${SKIP_BUILD:-0}" != 1 ]; then
   # The preview builds the GPU image too (spec 17 3.2.5: its GPU candidate); the CPU matting service is reused.
   IMAGES=(worker web matting-gpu)
   if [ "${CATALOG_PREVIEW:-0}" != 1 ]; then IMAGES+=(matting); fi
+  # A measure run deploys only catalog-upscale, the matting image.
+  if [ "$MEASURE_ONLY" = 1 ]; then IMAGES=(matting); fi
   BUILD_NEEDED=0
   for image in "${IMAGES[@]}"; do
     if IMAGE_CHECK=$(gcloud artifacts docker images describe "$AR/$image:$TAG" 2>&1); then
@@ -268,7 +290,9 @@ fi
 
 # --- 4. Migrations -------------------------------------------------------------------
 echo "==> migrate"
-if [ "${CATALOG_PREVIEW:-0}" != 1 ]; then
+if [ "$MEASURE_ONLY" = 1 ]; then
+  echo "==> migrate: SKIP (UPSCALE_MEASURE=1 changes only catalog-upscale)"
+elif [ "${CATALOG_PREVIEW:-0}" != 1 ]; then
   MIGRATION_JOB=$(gcv run jobs list --region="$REGION" --filter='metadata.name=catalog-migrate' --format=json)
   if node -e '
     const jobs = JSON.parse(require("fs").readFileSync(0, "utf8"));
@@ -293,7 +317,9 @@ fi
 # that does not exist. The slots of existing queues change only once the new worker is live (section 6).
 # shellcheck source=lib/queues.sh
 source infra/lib/queues.sh
-queues_create_missing
+if [ "$MEASURE_ONLY" = 1 ]; then echo "==> queues: SKIP (UPSCALE_MEASURE=1 changes only catalog-upscale)"; else
+  queues_create_missing
+fi
 
 # --- 6. Services, one at a time behind the deploy gate (spec 17 3.2) ---------------------
 # Each service in the registry (infra/lib/services.sh) goes up as a no-traffic candidate, its probe runs against the
@@ -308,7 +334,7 @@ queues_create_missing
 source infra/lib/services.sh
 # shellcheck source=lib/gate.sh
 source infra/lib/gate.sh
-MATTING_URL=""; MATTING_GPU_URL=""; MATTING_PROBE_URL=""; MATTING_GPU_PROBE_URL=""
+MATTING_URL=""; MATTING_GPU_URL=""; MATTING_PROBE_URL=""; MATTING_GPU_PROBE_URL=""; UPSCALE_SERVICE_URL=""
 MATTING_REVISION=""
 SHIFTED=()
 for SERVICE in "${SERVICES[@]}"; do
@@ -330,6 +356,15 @@ for SERVICE in "${SERVICES[@]}"; do
       MATTING_URL=$GATE_URL; MATTING_PROBE_URL=$GATE_TAG_URL; MATTING_REVISION=$GATE_REVISION
       WORKER_ENV+=",MATTING_URL=$MATTING_URL"
       ;;
+    catalog-upscale)
+      # The live worker calls the service URL (the preview reuses the live service the same way). A measure run stops
+      # here: its candidate is only probed, and the worker and web gates (and the worker env) are never reached.
+      UPSCALE_SERVICE_URL=$GATE_URL
+      if [ "$MEASURE_ONLY" = 1 ]; then
+        upscale_measure_summary
+        exit 0
+      fi
+      ;;
     catalog-matting-gpu)
       if [ "$GATE_STATUS" = 0 ]; then
         MATTING_GPU_PROBE_URL=$GATE_TAG_URL
@@ -344,8 +379,18 @@ for SERVICE in "${SERVICES[@]}"; do
       # Spec 11 4.5: the upscaler runs on the GPU service, so the flag reaches the worker only with a GPU URL.
       # Spec 16 3.1.3: with UPSCALE_SERVICE=cpu the CPU cut-out service upscales (it serves /upscale) and the worker
       # sends /upscale to it through UPSCALE_URL, so no GPU URL is needed.
+      # Spec 18 H2: with UPSCALE_SERVICE=dedicated the worker sends /upscale to catalog-upscale and learns its timeout
+      # (the client waits UPSCALE_TIMEOUT_S + 30 s). Depends on spec 18 H3: the render must call it through the enlarge
+      # stage (enlarge.ts), since the matting client refuses a dedicated UPSCALE_URL; shape.sh refuses dedicated until
+      # H3 sets ENLARGE_CLIENT_WIRED=1.
       if [ "$UPSCALE_SERVICE" = cpu ]; then
         if [ -n "$UPSCALE_MODEL" ]; then WORKER_ENV+=",UPSCALE_URL=$MATTING_URL"; fi
+      elif [ "$UPSCALE_SERVICE" = dedicated ]; then
+        if [ -z "$UPSCALE_SERVICE_URL" ]; then
+          echo "ERROR: UPSCALE_SERVICE=dedicated but catalog-upscale has no URL; the worker was not changed" >&2
+          exit 1
+        fi
+        if [ -n "$UPSCALE_MODEL" ]; then WORKER_ENV+=",UPSCALE_URL=$UPSCALE_SERVICE_URL,UPSCALE_TIMEOUT_S=$UPSCALE_TIMEOUT_S"; fi
       elif [ -n "$UPSCALE_MODEL" ] && [ -z "$MATTING_GPU_URL" ]; then
         echo "WARN: UPSCALE_MODEL=$UPSCALE_MODEL ignored: no GPU matting service URL; the render keeps the plain path" >&2
         UPSCALE_MODEL=""

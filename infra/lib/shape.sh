@@ -40,8 +40,24 @@ SHAPE_DEFAULTS=(
   INFERENCE_LOCK_SCOPE=global
   # The cut-out models the GPU service serves (its MATTE_MODELS; unset there means all four).
   GPU_MATTE_MODELS=birefnet-general,birefnet-general-lite,birefnet-hrsod,bria-rmbg
-  # Which matting service upscales: gpu (spec 11) or cpu (spec 16, the GPUs then do only cut-outs).
+  # Which service upscales: gpu (spec 11), cpu (spec 16: the CPU cut-out service catalog-matting) or dedicated
+  # (spec 18: catalog-upscale, sized by the UPSCALE_* rows below). cpu is what runs today; dedicated is refused until
+  # the render calls catalog-upscale through the enlarge stage (spec 18 H3 sets ENLARGE_CLIENT_WIRED=1 in
+  # shape_defaults; until then the matting client refuses a dedicated UPSCALE_URL and every enlargement would fall back
+  # to Lanczos) and until the measured table below has rows for its shape.
   UPSCALE_SERVICE=cpu
+  # Spec 18: the dedicated CPU enlargement service catalog-upscale (asia-south1, the catalog-matting image, only the
+  # upscaler loaded). Deployed only with UPSCALE_SERVICE=dedicated or UPSCALE_MEASURE=1. UPSCALE_THREADS is its ONNX
+  # Runtime intra-op thread count; UPSCALE_TIMEOUT_S its Cloud Run request timeout (the client waits 30 s longer).
+  # The asia-south1 CPU quota (190 of 200) holds today's 171 vCPU plus at most 16 more: the ladder runs with
+  # UPSCALE_MAX_INSTANCES at most 4 at 4 vCPU or at most 2 at 8 vCPU (16 x 4 = 64 gives 235 and is refused), and the
+  # final dedicated shape lowers MATTING_CPU_MAX_INSTANCES from 16 to 4 (123 + 16 x 4 = 187).
+  UPSCALE_CPU_VCPU=4
+  UPSCALE_MEMORY=16Gi
+  UPSCALE_CONCURRENCY=1
+  UPSCALE_MAX_INSTANCES=16
+  UPSCALE_THREADS=4
+  UPSCALE_TIMEOUT_S=840
   # The upscalers stay resident once used, so with UPSCALE_SERVICE=gpu both count on top of the cut-outs.
   GPU_UPSCALE_MODELS=realesrgan-x2plus,swinir-x2
   # CUDA context and library handles outside the model arenas (spec 17 3.3.3).
@@ -128,6 +144,33 @@ shape_defaults() {
   GPU_MODEL_PEAK_MIB_SWINIR_X2=${GPU_MODEL_PEAK_MIB_SWINIR_X2-}
   # What one L4 offers (24 GB, about 22.5 GB usable).
   GPU_USABLE_MIB=22528
+  # Spec 18 H1: UPSCALE_MEASURE=1 deploys only catalog-upscale, as a candidate of the UPSCALE_* shape (tag
+  # measure-<cpu>c-<threads>t-<concurrency>r) for infra/check-matting.sh --probe-upscale, without asking for a measured
+  # row. No other service, image, migration or worker env changes, so a measure rung never needs a new worker image.
+  # Rung 1 of a brand-new catalog-upscale serves the service URL (Cloud Run cannot create a service with --no-traffic);
+  # later rungs are no-traffic candidates. Not a shape row: a mode for one run.
+  UPSCALE_MEASURE=${UPSCALE_MEASURE:-0}
+  # Spec 18 H3: 1 once the render calls catalog-upscale through the enlarge stage (packages/core/src/catalog/enlarge.ts).
+  # A fact of the code, not a shape choice, so env cannot set it; the H3 PR changes this line.
+  ENLARGE_CLIENT_WIRED=0
+  # The photo sizes the probe measures (width x height); the largest by pixels sets the timeout check.
+  UPSCALE_SIZES=${UPSCALE_SIZES-800x1200,1600x1600}
+  # Spec 18 H1: measured p95 in whole seconds (rounded up) of one POST /upscale (swinir-x2) per photo size, one row
+  # per catalog-upscale shape: UPSCALE_P95_S_<UPSCALE_CPU_VCPU>C_<UPSCALE_THREADS>T_<UPSCALE_CONCURRENCY>CONC_<size>, copied
+  # from the probe table in services/matting/README.md "Measured on CPU" with UPSCALE_MEASURED_ON, the probe's date.
+  # Empty = not measured yet. Like the GPU peaks, a name that is set (also to "") wins. The ladder (4 vCPU / 4 threads,
+  # 8 / 8, concurrency 1 and 2, both sizes) fills these rows in the PR that makes catalog-upscale live.
+  UPSCALE_MEASURED_ON=${UPSCALE_MEASURED_ON-}
+  UPSCALE_P95_S_4C_4T_1CONC_800x1200=${UPSCALE_P95_S_4C_4T_1CONC_800x1200-}
+  UPSCALE_P95_S_4C_4T_1CONC_1600x1600=${UPSCALE_P95_S_4C_4T_1CONC_1600x1600-}
+  UPSCALE_P95_S_4C_4T_2CONC_800x1200=${UPSCALE_P95_S_4C_4T_2CONC_800x1200-}
+  UPSCALE_P95_S_4C_4T_2CONC_1600x1600=${UPSCALE_P95_S_4C_4T_2CONC_1600x1600-}
+  UPSCALE_P95_S_8C_8T_1CONC_800x1200=${UPSCALE_P95_S_8C_8T_1CONC_800x1200-}
+  UPSCALE_P95_S_8C_8T_1CONC_1600x1600=${UPSCALE_P95_S_8C_8T_1CONC_1600x1600-}
+  UPSCALE_P95_S_8C_8T_2CONC_800x1200=${UPSCALE_P95_S_8C_8T_2CONC_800x1200-}
+  UPSCALE_P95_S_8C_8T_2CONC_1600x1600=${UPSCALE_P95_S_8C_8T_2CONC_1600x1600-}
+  # The worker's task deadline is 900 s; the upscale call waits UPSCALE_TIMEOUT_S + 30 s, so 840 is the most.
+  UPSCALE_TIMEOUT_MAX_S=840
   # Worker pool per instance. One photo at a time: one connection per in-flight task (2). Several photos at once
   # (today): a delivery's writes take turns on one connection, and its reads, lease renewals and AI cost rows
   # need a second, so 2 per in-flight task (4 at concurrency 2). The budget check below still has the last word.
@@ -151,13 +194,14 @@ shape_check() {
   for name in DB_MAX_CONNECTIONS WORKER_MAX_INSTANCES WORKER_CPU WORKER_CONCURRENCY WORKER_DB_POOL_MAX \
       INGEST_MAX_DISPATCHES BULK_MAX_DISPATCHES TASKS_MAX_DISPATCHES MATTING_CPU_MAX_INSTANCES GPU_MAX_INSTANCES \
       GPU_CPU GPU_CONCURRENCY MAX_RESIDENT_SESSIONS MATTE_INFLIGHT_PER_INSTANCE CATALOG_PHOTO_CONCURRENCY \
-      CATALOG_BULK_WINDOW BULK_BATCH_PRODUCTS GPU_CUDA_OVERHEAD_MIB; do
+      CATALOG_BULK_WINDOW BULK_BATCH_PRODUCTS GPU_CUDA_OVERHEAD_MIB UPSCALE_CPU_VCPU UPSCALE_CONCURRENCY UPSCALE_MAX_INSTANCES \
+      UPSCALE_THREADS UPSCALE_TIMEOUT_S; do
     value=${!name}
     if ! [[ "$value" =~ ^[0-9]+$ ]]; then shape_fail "$name must be a whole number, got '$value'"; return 1; fi
   done
   for name in WORKER_MAX_INSTANCES WORKER_CONCURRENCY WORKER_DB_POOL_MAX INGEST_MAX_DISPATCHES TASKS_MAX_DISPATCHES \
       MATTING_CPU_MAX_INSTANCES GPU_MAX_INSTANCES GPU_CONCURRENCY MAX_RESIDENT_SESSIONS MATTE_INFLIGHT_PER_INSTANCE \
-      CATALOG_PHOTO_CONCURRENCY CATALOG_BULK_WINDOW BULK_BATCH_PRODUCTS; do
+      CATALOG_PHOTO_CONCURRENCY CATALOG_BULK_WINDOW BULK_BATCH_PRODUCTS UPSCALE_CONCURRENCY UPSCALE_MAX_INSTANCES UPSCALE_THREADS; do
     [ "${!name}" -ge 1 ] || shape_fail "$name must be at least 1"
   done
   case "$WORKER_CPU" in 1|2|4|6|8) ;; *) shape_fail "WORKER_CPU must be 1, 2, 4, 6 or 8 (Cloud Run), got $WORKER_CPU" ;; esac
@@ -165,7 +209,8 @@ shape_check() {
   [[ "$GPU_MEMORY" =~ ^[1-9][0-9]*Gi$ ]] || shape_fail "GPU_MEMORY must look like 32Gi, got '$GPU_MEMORY'"
   [[ -z "$GPU_MEM_LIMIT_BYTES" || "$GPU_MEM_LIMIT_BYTES" =~ ^[1-9][0-9]*$ ]] || shape_fail "GPU_MEM_LIMIT_BYTES must be a byte count such as 6442450944"
   [[ -z "$LLM_INFLIGHT_PER_INSTANCE" || "$LLM_INFLIGHT_PER_INSTANCE" =~ ^[1-9][0-9]*$ ]] || shape_fail "LLM_INFLIGHT_PER_INSTANCE must be empty or a whole number such as 6"
-  case "$UPSCALE_SERVICE" in gpu|cpu) ;; *) shape_fail "UPSCALE_SERVICE must be gpu or cpu, got '$UPSCALE_SERVICE'" ;; esac
+  case "$UPSCALE_SERVICE" in gpu|cpu|dedicated) ;; *) shape_fail "UPSCALE_SERVICE must be gpu, cpu or dedicated, got '$UPSCALE_SERVICE'" ;; esac
+  case "$UPSCALE_MEASURE" in 0|1) ;; *) shape_fail "UPSCALE_MEASURE must be 0 or 1, got '$UPSCALE_MEASURE'" ;; esac
 
   # Connections: every service at max instances, every pool full, inside what ila-pg allows.
   CATALOG_DB_LIMIT=$((DB_MAX_CONNECTIONS - DB_RESERVED_CONNECTIONS - ILA_DB_SHARE))
@@ -183,10 +228,12 @@ shape_check() {
   if [ "$SLOTS_TOTAL" -gt "$SLOTS_CAPACITY" ]; then
     shape_fail "queue slots $TASKS_MAX_DISPATCHES + $BULK_MAX_DISPATCHES + $INGEST_MAX_DISPATCHES = $SLOTS_TOTAL exceed the worker's $WORKER_MAX_INSTANCES x $WORKER_CONCURRENCY = $SLOTS_CAPACITY"
   fi
-  # CPU quota in asia-south1 (the GPU service counts in asia-southeast1).
-  CPU_TOTAL=$((WORKER_MAX_INSTANCES * WORKER_CPU + MATTING_CPU_MAX_INSTANCES * MATTING_CPU_VCPU + WEB_MAX_INSTANCES * WEB_CPU + JOBS_CPU_BUDGET))
+  # CPU quota in asia-south1 (the GPU service counts in asia-southeast1), with catalog-upscale when it is deployed.
+  UPSCALE_VCPU_TOTAL=0
+  if upscale_deployed; then UPSCALE_VCPU_TOTAL=$((UPSCALE_MAX_INSTANCES * UPSCALE_CPU_VCPU)); fi
+  CPU_TOTAL=$((WORKER_MAX_INSTANCES * WORKER_CPU + MATTING_CPU_MAX_INSTANCES * MATTING_CPU_VCPU + UPSCALE_VCPU_TOTAL + WEB_MAX_INSTANCES * WEB_CPU + JOBS_CPU_BUDGET))
   if [ "$CPU_TOTAL" -gt "$CPU_QUOTA_LIMIT" ]; then
-    shape_fail "asia-south1 vCPU at max instances $CPU_TOTAL exceeds $CPU_QUOTA_LIMIT of the 200 vCPU quota"
+    shape_fail "asia-south1 vCPU at max instances $CPU_TOTAL exceeds $CPU_QUOTA_LIMIT of the 200 vCPU quota (worker $((WORKER_MAX_INSTANCES * WORKER_CPU)) + catalog-matting $((MATTING_CPU_MAX_INSTANCES * MATTING_CPU_VCPU)) + catalog-upscale $UPSCALE_VCPU_TOTAL + web and jobs $((WEB_MAX_INSTANCES * WEB_CPU + JOBS_CPU_BUDGET))); lower WORKER_MAX_INSTANCES, MATTING_CPU_MAX_INSTANCES or UPSCALE_MAX_INSTANCES"
   fi
   # GPU: today's L4 quota, and Cloud Run's L4 shape (at least 4 CPU and 16 GiB; 8 CPU and 32 GiB recommended).
   [ "$GPU_MAX_INSTANCES" -le "$GPU_QUOTA" ] || shape_fail "GPU_MAX_INSTANCES=$GPU_MAX_INSTANCES exceeds the L4 quota of $GPU_QUOTA (no quota requests: owner decision 2026-10-27)"
@@ -204,7 +251,87 @@ shape_check() {
     shape_fail "GPU_CONCURRENCY=$GPU_CONCURRENCY exceeds MAX_RESIDENT_SESSIONS=$MAX_RESIDENT_SESSIONS with INFERENCE_LOCK_SCOPE=session"
   fi
   gpu_memory_check
+  upscale_check
   return $ok
+}
+
+# 0 when this deploy runs catalog-upscale: as the worker's upscaler (dedicated) or as a candidate being measured.
+upscale_deployed() { [ "$UPSCALE_SERVICE" = dedicated ] || [ "$UPSCALE_MEASURE" = 1 ]; }
+
+# upscale_p95 <size>: the measured p95 in seconds of the current UPSCALE_CPU_VCPU/THREADS/CONCURRENCY shape, or nothing.
+upscale_p95() {
+  local name="UPSCALE_P95_S_${UPSCALE_CPU_VCPU}C_${UPSCALE_THREADS}T_${UPSCALE_CONCURRENCY}CONC_$1"
+  printf '%s' "${!name:-}"
+}
+
+# The size in UPSCALE_SIZES with the most pixels.
+upscale_largest_size() {
+  local size largest="" most=0 w h
+  for size in ${UPSCALE_SIZES//,/ }; do
+    w=${size%x*}; h=${size#*x}
+    if [ $((w * h)) -gt "$most" ]; then most=$((w * h)); largest=$size; fi
+  done
+  printf '%s' "$largest"
+}
+
+# Spec 18 H1, called by shape_check (its shape_fail and ok): the catalog-upscale shape. Cloud Run's CPU and memory
+# pairs always; when it upscales for the worker (dedicated), a measured p95 for every probe size at exactly this
+# (vCPU, threads, concurrency) and a request timeout of at least twice the largest size's p95.
+upscale_check() {
+  local gib size p95 missing="" invalid=0 largest worst
+  case "$UPSCALE_CPU_VCPU" in 1|2|4|6|8) ;; *) shape_fail "UPSCALE_CPU_VCPU must be 1, 2, 4, 6 or 8 (Cloud Run), got $UPSCALE_CPU_VCPU"; return 0 ;; esac
+  if [[ "$UPSCALE_MEMORY" =~ ^([1-9][0-9]*)Gi$ ]]; then
+    gib=${BASH_REMATCH[1]}
+    # Cloud Run's memory per CPU (docs.cloud.google.com/run/docs/configuring/services/memory-limits, read 2026-10-29).
+    case "$UPSCALE_CPU_VCPU" in
+      1) [ "$gib" -le 4 ] || shape_fail "UPSCALE_MEMORY=$UPSCALE_MEMORY is more than Cloud Run allows for 1 vCPU (4Gi)" ;;
+      2) [ "$gib" -le 8 ] || shape_fail "UPSCALE_MEMORY=$UPSCALE_MEMORY is more than Cloud Run allows for 2 vCPU (8Gi)" ;;
+      4) [ "$gib" -ge 2 ] && [ "$gib" -le 16 ] || shape_fail "UPSCALE_MEMORY must be 2Gi to 16Gi with 4 vCPU (Cloud Run), got $UPSCALE_MEMORY" ;;
+      6) [ "$gib" -ge 4 ] && [ "$gib" -le 24 ] || shape_fail "UPSCALE_MEMORY must be 4Gi to 24Gi with 6 vCPU (Cloud Run), got $UPSCALE_MEMORY" ;;
+      8) [ "$gib" -ge 4 ] && [ "$gib" -le 32 ] || shape_fail "UPSCALE_MEMORY must be 4Gi to 32Gi with 8 vCPU (Cloud Run), got $UPSCALE_MEMORY" ;;
+    esac
+  else
+    shape_fail "UPSCALE_MEMORY must look like 16Gi, got '$UPSCALE_MEMORY'"
+  fi
+  [ "$UPSCALE_THREADS" -le "$UPSCALE_CPU_VCPU" ] || shape_fail "UPSCALE_THREADS=$UPSCALE_THREADS exceeds UPSCALE_CPU_VCPU=$UPSCALE_CPU_VCPU (more ONNX threads than vCPU only contend); use at most $UPSCALE_CPU_VCPU"
+  [ "$UPSCALE_CONCURRENCY" -le 4 ] || shape_fail "UPSCALE_CONCURRENCY must be at most 4 (tiles run one at a time per instance), got $UPSCALE_CONCURRENCY"
+  [ "$UPSCALE_TIMEOUT_S" -ge 60 ] && [ "$UPSCALE_TIMEOUT_S" -le "$UPSCALE_TIMEOUT_MAX_S" ] \
+    || shape_fail "UPSCALE_TIMEOUT_S must be 60 to $UPSCALE_TIMEOUT_MAX_S s (the worker's task deadline is 900 s and the client waits 30 s longer), got $UPSCALE_TIMEOUT_S"
+  [ -n "${UPSCALE_SIZES//[, ]/}" ] || { shape_fail "UPSCALE_SIZES must list the probe sizes, such as 800x1200,1600x1600"; return 0; }
+  for size in ${UPSCALE_SIZES//,/ }; do
+    [[ "$size" =~ ^[1-9][0-9]*x[1-9][0-9]*$ ]] || { shape_fail "UPSCALE_SIZES must list sizes such as 800x1200,1600x1600, got '$UPSCALE_SIZES'"; return 0; }
+  done
+  if [ "$UPSCALE_MEASURE" = 1 ] && [ "$UPSCALE_SERVICE" = dedicated ]; then
+    shape_fail "UPSCALE_MEASURE=1 deploys catalog-upscale as a no-traffic candidate; keep the worker on UPSCALE_SERVICE=cpu (or gpu) while measuring"
+    return 0
+  fi
+  [ "$UPSCALE_SERVICE" = dedicated ] || return 0
+  if [ "$ENLARGE_CLIENT_WIRED" != 1 ]; then
+    shape_fail "UPSCALE_SERVICE=dedicated waits for spec 18 H3: the render does not call catalog-upscale through the enlarge stage yet (ENLARGE_CLIENT_WIRED=0 in infra/lib/shape.sh), and the matting client refuses a dedicated UPSCALE_URL, so every enlargement would fall back to Lanczos; keep UPSCALE_SERVICE=cpu"
+    return 0
+  fi
+  for size in ${UPSCALE_SIZES//,/ }; do
+    p95=$(upscale_p95 "$size")
+    if [ -z "$p95" ]; then
+      missing+=" $size"
+    elif ! [[ "$p95" =~ ^[1-9][0-9]*$ ]]; then
+      shape_fail "UPSCALE_P95_S_${UPSCALE_CPU_VCPU}C_${UPSCALE_THREADS}T_${UPSCALE_CONCURRENCY}CONC_$size=$p95 must be a whole number of seconds (rounded up), such as 331"
+      invalid=1
+    fi
+  done
+  [ "$invalid" = 0 ] || return 0
+  if [ -n "$missing" ]; then
+    shape_fail "measure first: run infra/check-matting.sh --probe-upscale (no measured p95 for UPSCALE_CPU_VCPU=$UPSCALE_CPU_VCPU UPSCALE_THREADS=$UPSCALE_THREADS UPSCALE_CONCURRENCY=$UPSCALE_CONCURRENCY at$missing; UPSCALE_P95_S_* in infra/lib/shape.sh)"
+    return 0
+  fi
+  [[ "$UPSCALE_MEASURED_ON" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] || shape_fail "UPSCALE_MEASURED_ON must be the date of the probe the p95 rows come from, such as 2026-10-30"
+  largest=$(upscale_largest_size)
+  worst=$(( 2 * $(upscale_p95 "$largest") ))
+  if [ "$worst" -gt "$UPSCALE_TIMEOUT_MAX_S" ]; then
+    shape_fail "catalog-upscale at $UPSCALE_CPU_VCPU vCPU, $UPSCALE_THREADS threads, concurrency $UPSCALE_CONCURRENCY needs a timeout of 2 x p95 $(upscale_p95 "$largest") s = $worst s for $largest, over the $UPSCALE_TIMEOUT_MAX_S s the worker's task allows; measure a faster shape or lower UPSCALE_MAX_PIXELS"
+  elif [ "$UPSCALE_TIMEOUT_S" -lt "$worst" ]; then
+    shape_fail "UPSCALE_TIMEOUT_S=$UPSCALE_TIMEOUT_S is below 2 x the measured p95 of $largest ($(upscale_p95 "$largest") s, measured $UPSCALE_MEASURED_ON); set it to at least $worst"
+  fi
 }
 
 # gpu_model_peak <model id>: the measured peak in MiB from the GPU_MODEL_PEAK_MIB_* table, or nothing.

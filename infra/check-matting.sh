@@ -7,6 +7,13 @@
 #       services/matting/tests/cloudrun_check.py --probe: per model a warm 1024 px call, then n calls at once for
 #       k rounds, then the switching order. Prints the table and writes the JSON report to
 #       gs://image-links-agent-assets/catalog-test/probe/<execution>/. Fails on any non-200 or a reload.
+#   bash infra/check-matting.sh --probe-upscale <url> [--model swinir-x2] [--sizes 800x1200,1600x1600]
+#                               [--concurrency n] [--rounds k] [--timeout s] [--run name]
+#       spec 18 H1: times POST /upscale on one service URL (usually a catalog-upscale candidate's tag URL) with
+#       cloudrun_check.py --probe-upscale: per size a warm call, then n calls at once for k rounds. Prints
+#       size | vCPU | threads | tile | conc | p50 s | p95 s | max s | non-200 | output sha256 and writes
+#       gs://image-links-agent-assets/catalog-test/probe/<execution>/upscale.json. --timeout is the per-call client
+#       timeout (default 900 s). Fails on any non-200, a wrong size or differing output for the same input.
 set -euo pipefail
 export CLOUDSDK_CORE_PROJECT=image-links-agent
 cd "$(dirname "$0")/.."
@@ -16,27 +23,54 @@ cd "$(dirname "$0")/.."
 # as one "--option=value" item (argparse in cloudrun_check.py reads it the same way), each option at most once, and
 # the URL once: every item is unique by construction. Anything else is refused here, before any gcloud call.
 PROBE_ARGS=()
-if [ "${1:-}" = "--probe" ]; then
-  shift
-  usage="usage: $0 --probe <url> [--models a,b] [--concurrency n] [--rounds k] [--run name]"
+# A probe run by hand ends after an hour (the upscale probe, slower per call, after two); the gate sets its own.
+DEFAULT_TASK_TIMEOUT=3600
+if [ "${1:-}" = "--probe" ] || [ "${1:-}" = "--probe-upscale" ]; then
+  mode=$1; shift
+  if [ "$mode" = --probe ]; then
+    allowed=" --models --concurrency --rounds --run "
+    usage="usage: $0 --probe <url> [--models a,b] [--concurrency n] [--rounds k] [--run name]"
+  else
+    allowed=" --model --sizes --concurrency --rounds --timeout --run "
+    usage="usage: $0 --probe-upscale <url> [--model id] [--sizes WxH,WxH] [--concurrency n] [--rounds k] [--timeout s] [--run name]"
+    DEFAULT_TASK_TIMEOUT=7200
+  fi
   [ $# -ge 1 ] || { echo "$usage" >&2; exit 2; }
   url="" seen=" " options=()
   while [ $# -gt 0 ]; do
     case "$1" in
-      --models|--concurrency|--rounds|--run)
+      --*=*) name=${1%%=*} value=${1#*=}; shift ;;
+      --*)
+        name=$1
+        [[ $allowed == *" $name "* ]] || { echo "ERROR: unknown probe option $1" >&2; echo "$usage" >&2; exit 2; }
         [ $# -ge 2 ] && [[ $2 != --* ]] || { echo "ERROR: $1 needs a value" >&2; echo "$usage" >&2; exit 2; }
-        name=$1 value=$2; shift 2 ;;
-      --models=*|--concurrency=*|--rounds=*|--run=*) name=${1%%=*} value=${1#*=}; shift ;;
+        value=$2; shift 2 ;;
       -*) echo "ERROR: unknown probe option $1" >&2; echo "$usage" >&2; exit 2 ;;
       *) [ -z "$url" ] || { echo "ERROR: one probe URL only (got $url and $1)" >&2; exit 2; }
          url=$1; shift; continue ;;
     esac
+    [[ $allowed == *" $name "* ]] || { echo "ERROR: unknown probe option $name" >&2; echo "$usage" >&2; exit 2; }
     [[ $seen != *" $name "* ]] || { echo "ERROR: the probe option $name is given twice" >&2; exit 2; }
     seen+="$name "
     options+=("$name=$value")
   done
   [ -n "$url" ] || { echo "$usage" >&2; exit 2; }
-  PROBE_ARGS=(--probe "$url" ${options[@]+"${options[@]}"})
+  # The upscale probe's sizes and per-call timeout are checked here too (as cloudrun_check.py does), so a typo fails in
+  # a second instead of after the job deploy and a cold start.
+  for option in ${options[@]+"${options[@]}"}; do
+    case "$option" in
+      --sizes=*)
+        [[ "${option#--sizes=}" =~ ^[1-9][0-9]*[xX][1-9][0-9]*(,[1-9][0-9]*[xX][1-9][0-9]*)*$ ]] \
+          || { echo "ERROR: --sizes must list sizes such as 800x1200,1600x1600, got '${option#--sizes=}'" >&2; exit 2; } ;;
+      --timeout=*)
+        value=${option#--timeout=}
+        [[ "$value" =~ ^[1-9][0-9]*$ ]] && [ "$value" -ge 30 ] && [ "$value" -le 3600 ] \
+          || { echo "ERROR: --timeout must be a whole number of seconds from 30 to 3600, got '$value'" >&2; exit 2; } ;;
+    esac
+  done
+  PROBE_ARGS=("$mode" "$url" ${options[@]+"${options[@]}"})
+  # The upscale probe always writes its JSON report (catalog-test/probe/<execution>/upscale.json).
+  if [ "$mode" = --probe-upscale ]; then PROBE_ARGS+=(--bucket=image-links-agent-assets); fi
 fi
 TEMP_DIR=$(mktemp -d)
 trap 'rm -f "$TEMP_DIR/worker.json" "$TEMP_DIR/cpu.json" "$TEMP_DIR/gpu.json" "$TEMP_DIR/flags.json" "$TEMP_DIR/probe.json"; rmdir "$TEMP_DIR"' EXIT
@@ -51,7 +85,7 @@ if [ "${HAS_GPU//$'\r'/}" = 1 ]; then
 else
   printf 'null\n' > "$TEMP_DIR/gpu.json"
 fi
-node - "$(native_path "$TEMP_DIR")" <<'NODE'
+DEFAULT_TASK_TIMEOUT=$DEFAULT_TASK_TIMEOUT node - "$(native_path "$TEMP_DIR")" <<'NODE'
 const fs = require('fs');
 const path = require('path');
 const dir = process.argv[2];
@@ -69,8 +103,8 @@ function service(target, configured) {
   return {url, image, version: image.slice(expected.length)};
 }
 const probe = read('probe');
-// A probe run by the deploy gate ends when the gate gives up (PROBE_TASK_TIMEOUT, seconds); by hand, at most an hour.
-const taskTimeout = process.env.PROBE_TASK_TIMEOUT || '3600';
+// A probe run by the deploy gate ends when the gate gives up (PROBE_TASK_TIMEOUT, seconds); by hand, DEFAULT_TASK_TIMEOUT.
+const taskTimeout = process.env.PROBE_TASK_TIMEOUT || process.env.DEFAULT_TASK_TIMEOUT;
 if (!/^[1-9][0-9]*$/.test(taskTimeout)) throw Error('PROBE_TASK_TIMEOUT must be a number of seconds');
 const cpu = service('cpu', env.MATTING_URL);
 // The probe takes the CPU image only to run the job; the GPU revision it measures may be a newer candidate.

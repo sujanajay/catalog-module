@@ -402,6 +402,10 @@ for SA in "$WEB" "$WORKER"; do
   secret_binding "$DB_SECRET" "serviceAccount:$SA" roles/secretmanager.secretAccessor
 done
 secret_binding "$OPENROUTER_SECRET" "serviceAccount:$WORKER" roles/secretmanager.secretAccessor
+# Spec 18 H2: project level, so this one grant also lets the worker (and the probe job catalog-check-matting, which
+# runs as catalog-worker@) invoke catalog-upscale, including its candidate tag URLs, without a resource-level binding
+# on a service that does not exist yet when bootstrap runs (resource-level IAM on Cloud Run may be denied, AGENTS.md;
+# docs/solutions/infra-bootstrap.md). Check-then-create through project_binding.
 project_binding "serviceAccount:$WORKER" roles/run.invoker
 # Spec 17 G1: the Ops page reads Cloud Run service status (the GPU candidate revision). Project level, because
 # resource-level IAM on Cloud Run services may be denied (AGENTS.md). Read only.

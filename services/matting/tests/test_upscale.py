@@ -299,3 +299,11 @@ def test_upscale_log_line_carries_the_batch_and_ms(enabled, caplog):
     [line] = [json.loads(formatter.format(r)) for r in caplog.records if r.getMessage().startswith("upscale_complete")]
     assert line["severity"] == "INFO" and line["batchId"] == "b1" and line["productId"] == "p1"
     assert line["model"] == "realesrgan-x2plus" and line["ms"] == int(response.headers["x-upscale-ms"])
+
+
+def test_health_reports_the_tile_of_a_loaded_upscaler(enabled):
+    # Spec 18 H1: the probe reads the tile from /health once the warm call has loaded the model.
+    client = enabled[0]
+    assert client.get("/health").json()["upscaleTiles"] == {}
+    assert post(client, encoded(checker()), "model=swinir-x2&scale=2").status_code == 200
+    assert client.get("/health").json()["upscaleTiles"] == {"swinir-x2": TILE}

@@ -1,11 +1,10 @@
 import sharp from "sharp";
-import { GoogleAuth } from "google-auth-library";
 import type { Size } from "./channels";
 import type { Matte, Prepared } from "./render";
 import { BG_TOLERANCE } from "./compliance";
-import { UPSCALE_RETRY_DELAY_MS, UPSCALE_TIMEOUT_MS } from "./upscale";
+import { gpuUrlsFromEnv, UPSCALE_RETRY_DELAY_MS, UPSCALE_TIMEOUT_MS } from "./upscale";
 import { log } from "../log";
-import { cloudRunAudience } from "../cloud-run";
+import { bearerFor, googleIdTokenFor, raceAbort, type IdTokenFor } from "../id-token";
 
 export interface MattingService { baseUrl: string; target: "cpu" | "gpu" }
 /**
@@ -14,7 +13,7 @@ export interface MattingService { baseUrl: string; target: "cpu" | "gpu" }
  */
 export interface MattingTrace { batchId?: string | undefined; productId?: string | undefined }
 export const TRACE_HEADERS = { batchId: "x-catalog-batch", productId: "x-catalog-product" } as const;
-function setTraceHeaders(headers: Headers, trace: MattingTrace | undefined): void {
+export function setTraceHeaders(headers: Headers, trace: MattingTrace | undefined): void {
   if (trace?.batchId) headers.set(TRACE_HEADERS.batchId, trace.batchId);
   if (trace?.productId) headers.set(TRACE_HEADERS.productId, trace.productId);
 }
@@ -24,12 +23,15 @@ export interface UpscaleModelInfo { id: string; available: boolean; scale: numbe
 /** The /health `upscale` section: absent on a service without /upscale (the CPU service). */
 export interface UpscaleHealth { models: UpscaleModelInfo[]; default: string | null }
 export interface MattingClientOptions {
-  services: MattingService[]; fetch?: typeof fetch; idToken?: (audience: string) => Promise<string>;
+  services: MattingService[]; fetch?: typeof fetch; idToken?: IdTokenFor;
   model?: string; timeoutMs?: number;
   /**
-   * Spec 16 3.1.3: the base URL of the service that answers /upscale; it must equal one of `services`. Absent reads
-   * `UPSCALE_URL` from the environment; unset or empty keeps the first GPU service (spec 11). An URL that matches
-   * no service logs one WARNING `upscale_url_unknown` and keeps the GPU service.
+   * Spec 16 3.1.3: the base URL of the service that answers /upscale. Absent reads `UPSCALE_URL` from the
+   * environment; unset or empty keeps the first GPU service (spec 11). Spec 18 H2: an URL that matches none of
+   * `services` is the dedicated CPU upscale service catalog-upscale. This client never calls it (no /health, no
+   * breaker): its upscaleTarget is "cpu" (the `+cpu` render keys) and upscale() refuses, because the enlarge stage
+   * (enlarge.ts, spec 18 H3) serves it. infra/lib/shape.sh refuses UPSCALE_SERVICE=dedicated until H3 sets
+   * ENLARGE_CLIENT_WIRED=1.
    */
   upscaleUrl?: string | null;
   /** Spec 16 3.1.5: cut-out calls in flight per GPU service from this process (default MATTE_INFLIGHT_PER_INSTANCE). */
@@ -94,9 +96,11 @@ export class UnknownMatteModelError extends Error {}
 export class MattingClient {
   private readonly states: ServiceState[];
   private readonly request: typeof fetch;
-  private readonly token: (audience: string) => Promise<string>;
+  private readonly token: IdTokenFor;
   /** The service /upscale goes to (spec 16 3.1.3); null without a GPU service and without a matching UPSCALE_URL. */
   private readonly upscaleState: ServiceState | null;
+  /** Spec 18 H2: UPSCALE_URL names no matting service, so it is catalog-upscale, which only the enlarge stage calls. */
+  private readonly dedicatedUpscale: boolean;
   private readonly inflightLimit: number;
   private readonly sleep: (ms: number) => Promise<void>;
   /** Round-robin position over the GPU services. */
@@ -109,16 +113,15 @@ export class MattingClient {
     const upscaleUrl = normaliseUrl((opts.upscaleUrl === undefined ? process.env.UPSCALE_URL : opts.upscaleUrl) ?? "");
     const firstGpu = this.states.find((s) => s.target === "gpu") ?? null;
     const named = upscaleUrl ? this.states.find((s) => s.baseUrl === upscaleUrl) ?? null : null;
-    if (upscaleUrl && !named) log("WARNING", "upscale_url_unknown", { detail: "UPSCALE_URL matches no matting service; the GPU service upscales" });
-    this.upscaleState = named ?? firstGpu;
+    // Spec 18 H2: an URL that is no matting service is the dedicated CPU upscale service (catalog-upscale). It joins
+    // neither health() (which every matte() awaits, so a slow catalog-upscale would delay every cut-out) nor any
+    // breaker; the enlarge stage calls it (enlarge.ts).
+    this.dedicatedUpscale = Boolean(upscaleUrl && !named);
+    this.upscaleState = named ?? (this.dedicatedUpscale ? null : firstGpu);
     this.inflightLimit = opts.inflightPerService ?? MATTE_INFLIGHT_PER_INSTANCE;
     this.sleep = opts.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
     this.request = opts.fetch ?? fetch;
-    const auth = new GoogleAuth();
-    this.token = opts.idToken ?? (async (audience) => {
-      const client = await auth.getIdTokenClient(audience);
-      return client.idTokenProvider.fetchIdToken(audience);
-    });
+    this.token = opts.idToken ?? googleIdTokenFor();
   }
   /** Compatibility view is the required CPU breaker; use breakers for both targets. */
   get breaker(): Breaker { return this.states.find((s) => s.target === "cpu")!.breaker; }
@@ -145,8 +148,8 @@ export class MattingClient {
   get modelFailures(): { service: "cpu" | "gpu"; model: string; failures: number }[] {
     return this.states.flatMap((s) => [...s.modelFailures].map(([model, failures]) => ({ service: s.target, model, failures })));
   }
-  /** The service /upscale goes to: "cpu" when UPSCALE_URL names the CPU cut-out service, otherwise "gpu". */
-  get upscaleTarget(): "cpu" | "gpu" { return this.upscaleState?.target ?? "gpu"; }
+  /** The service /upscale goes to: "cpu" when UPSCALE_URL names the CPU cut-out service or catalog-upscale, otherwise "gpu". */
+  get upscaleTarget(): "cpu" | "gpu" { return this.dedicatedUpscale ? "cpu" : this.upscaleState?.target ?? "gpu"; }
   /** Waits for a free in-flight place on a GPU service (spec 16 3.1.5); the CPU service is not limited here. */
   private async acquire(s: ServiceState): Promise<() => void> {
     const limit = s.target === "gpu" ? this.inflightLimit : Infinity;
@@ -180,22 +183,12 @@ export class MattingClient {
   }
   private async call(s: ServiceState, endpoint: string, init: RequestInit = {}, timeoutMs = this.opts.timeoutMs ?? MATTING_TIMEOUT_MS, trace?: MattingTrace): Promise<Response> {
     const signal = AbortSignal.timeout(timeoutMs);
-    const url = new URL(s.baseUrl);
-    const local = url.protocol === "http:" && ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname);
     const headers = new Headers(init.headers);
     setTraceHeaders(headers, trace);
-    if (!local) {
+    const bearer = await raceAbort(bearerFor(s.baseUrl, this.token), signal);
+    if (bearer) {
       signal.throwIfAborted();
-      let onAbort!: () => void;
-      const aborted = new Promise<never>((_, reject) => {
-        onAbort = () => reject(signal.reason);
-        signal.addEventListener("abort", onAbort, { once: true });
-      });
-      try {
-        const token = await Promise.race([this.token(cloudRunAudience(s.baseUrl)), aborted]);
-        signal.throwIfAborted();
-        headers.set("Authorization", `Bearer ${token}`);
-      } finally { signal.removeEventListener("abort", onAbort); }
+      headers.set("Authorization", bearer);
     }
     const response = await this.request(`${s.baseUrl}${endpoint}`, { ...init, headers, signal });
     if (!response.ok) {
@@ -228,6 +221,7 @@ export class MattingClient {
    * then uses Lanczos.
    */
   async upscale(image: Buffer, opts: UpscaleOptions, trace?: MattingTrace): Promise<{ jpeg: Buffer; ms: number; model: string }> {
+    if (this.dedicatedUpscale) throw new UpscaleUnavailableError("Enlargement on catalog-upscale is served by the enlarge stage, not the matting client.");
     const s = this.upscaleState;
     if (!s) throw new UpscaleUnavailableError("No matting service is configured for upscaling.");
     const h = await this.health();
@@ -339,8 +333,7 @@ const normaliseUrl = (url: string): string => url.trim().replace(/\/+$/, "");
  * `MATTE_INFLIGHT_PER_INSTANCE`.
  */
 export function mattingClientFromEnv(env: NodeJS.ProcessEnv = process.env, extra: Omit<MattingClientOptions, "services" | "upscaleUrl" | "inflightPerService"> = {}): MattingClient {
-  const gpuUrls = (env.MATTING_GPU_URLS?.trim() ? env.MATTING_GPU_URLS.split(",") : [env.MATTING_GPU_URL ?? ""]).map(normaliseUrl).filter(Boolean);
-  const services: MattingService[] = [{ baseUrl: env.MATTING_URL?.trim() || "http://localhost:8081", target: "cpu" }, ...[...new Set(gpuUrls)].map((baseUrl) => ({ baseUrl, target: "gpu" as const }))];
+  const services: MattingService[] = [{ baseUrl: env.MATTING_URL?.trim() || "http://localhost:8081", target: "cpu" }, ...gpuUrlsFromEnv(env).map((baseUrl) => ({ baseUrl, target: "gpu" as const }))];
   return new MattingClient({ ...extra, services, upscaleUrl: env.UPSCALE_URL ?? null, inflightPerService: positiveInt(env.MATTE_INFLIGHT_PER_INSTANCE, 4) });
 }
 

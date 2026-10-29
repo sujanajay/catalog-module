@@ -1,5 +1,6 @@
 import argparse
 import datetime
+import hashlib
 import io
 import json
 import math
@@ -29,15 +30,15 @@ def require(condition, message):
         raise CheckFailure(message)
 
 
-def request(url, token=None, data=None, content_type=None):
+def request(url, token=None, data=None, content_type=None, timeout=TIMEOUT, limit=8_000_000):
     headers = {}
     if token:
         headers["Authorization"] = "Bearer " + token
     if content_type:
         headers["Content-Type"] = content_type
-    with urllib.request.urlopen(urllib.request.Request(url, data=data, headers=headers), timeout=TIMEOUT) as response:
-        body = response.read(8_000_001)
-        require(len(body) <= 8_000_000, "response exceeds check limit")
+    with urllib.request.urlopen(urllib.request.Request(url, data=data, headers=headers), timeout=timeout) as response:
+        body = response.read(limit + 1)
+        require(len(body) <= limit, "response exceeds check limit")
         return response.headers, body
 
 
@@ -247,9 +248,9 @@ def access_token():
         return json.loads(response.read(65536))["access_token"]
 
 
-def write_report(run, report):
+def write_report(run, report, file="probe.json"):
     """Uploads the JSON report through the Cloud Storage JSON API with the job's own service account."""
-    name = f"{PROBE_PREFIX}/{run}/probe.json"
+    name = f"{PROBE_PREFIX}/{run}/{file}"
     url = f"https://storage.googleapis.com/upload/storage/v1/b/{PROBE_BUCKET}/o?uploadType=media&name=" + urllib.parse.quote(name, safe="")
     req = urllib.request.Request(url, data=json.dumps(report, indent=2).encode(), method="POST",
                                  headers={"Authorization": "Bearer " + access_token(), "Content-Type": "application/json"})
@@ -295,7 +296,211 @@ def probe_main(argv, token_for=None, report_writer=None, now=None):
     return 1 if failures else 0
 
 
+# ---------------------------------------------------------------------------------------------
+# Spec 18 H1: the upscale probe. Calls POST /upscale on one service URL (usually a catalog-upscale candidate's tag URL)
+# with a synthetic JPEG of each size: one warm call (loads the model, not measured), then `concurrency` calls at once
+# for `rounds` rounds. Reads /health before (vCPU, threads) and after each warm call (the model's tile). Each answer
+# must be a JPEG of exactly twice the size, and every answer for one size must have the same bytes (the upscaler is
+# deterministic), so the sha256 column also shows whether a thread count changes the output. Prints the table
+# `size | vCPU | threads | tile | conc | p50 s | p95 s | max s | non-200 | output sha256`, writes the JSON report to
+# gs://image-links-agent-assets/catalog-test/probe/<run>/upscale.json when --bucket names that bucket, and exits
+# non-zero on any non-200, wrong size, differing output or unreadable /health.
+UPSCALE_PROBE_MODELS = ("realesrgan-x2plus", "swinir-x2")
+UPSCALE_PROBE_SIZES = "800x1200,1600x1600"
+# One 3200x3200 JPEG at quality 95 is a few MB; the check limit leaves room.
+UPSCALE_RESPONSE_LIMIT = 64_000_000
+
+
+def parse_sizes(text):
+    """'800x1200,1600x1600' -> [(800, 1200), (1600, 1600)]: width x height, each 64 to 4000 px, each size once."""
+    sizes = []
+    for item in (part.strip().lower() for part in text.split(",")):
+        match = re.fullmatch(r"([1-9][0-9]{1,3})x([1-9][0-9]{1,3})", item)
+        require(match is not None, "--sizes must look like 800x1200,1600x1600")
+        size = (int(match.group(1)), int(match.group(2)))
+        require(all(64 <= side <= 4000 for side in size), "--sizes sides must be 64 to 4000 px")
+        require(size not in sizes, "--sizes lists a size twice")
+        sizes.append(size)
+    return sizes
+
+
+def upscale_image(width, height):
+    """A deterministic product-like JPEG: a soft background, a garment-sized shape with stripes and a detail, quality 92.
+    Inference time does not depend on the content (fixed tiles); the content only has to be a real photo-sized JPEG."""
+    image = Image.linear_gradient("L").resize((width, height)).convert("RGB")
+    draw = ImageDraw.Draw(image)
+    box = (width // 5, height // 8, width * 4 // 5, height * 7 // 8)
+    draw.rounded_rectangle(box, radius=max(4, width // 20), fill="#3a4f7a")
+    for y in range(box[1], box[3], max(4, height // 60)):
+        draw.line((box[0], y, box[2], y), fill="#c9a227", width=max(1, height // 400))
+    draw.ellipse((width * 2 // 5, height // 3, width * 3 // 5, height // 2), fill="#f2f2f2", outline="#111111", width=3)
+    encoded = io.BytesIO()
+    image.save(encoded, format="JPEG", quality=92)
+    return encoded.getvalue()
+
+
+def timed_upscale(url, token, model, data, size, timeout):
+    """One /upscale call: (status, client seconds, sha256 of the answer or None). A transport failure or timeout counts
+    as status 0; an answer that is not a JPEG of exactly twice `size` counts as status -1."""
+    started = time.perf_counter()
+    digest = None
+    try:
+        headers, body = request(f"{url}/upscale?model={urllib.parse.quote(model)}&scale=2", token, data, "image/jpeg", timeout, UPSCALE_RESPONSE_LIMIT)
+        try:
+            with Image.open(io.BytesIO(body)) as answer:
+                ok = headers.get_content_type() == "image/jpeg" and answer.format == "JPEG" and answer.size == (size[0] * 2, size[1] * 2)
+        except Exception:  # noqa: BLE001 - an unreadable answer is a failed call; no detail is printed
+            ok = False
+        status, digest = (200, hashlib.sha256(body).hexdigest()) if ok else (-1, None)
+    except urllib.error.HTTPError as error:
+        status = error.code
+    except Exception:  # noqa: BLE001 - any failure is a non-200 for the probe; no detail is printed
+        status = 0
+    return status, time.perf_counter() - started, digest
+
+
+def seconds(value):
+    return None if value is None else round(value, 1)
+
+
+# Google ID tokens live one hour; a ladder probe (several sizes, rounds at 2 x p95 each) can run longer.
+TOKEN_MAX_AGE_S = 50 * 60
+
+
+class RefreshingToken:
+    """The probe's ID token, minted again once it is older than TOKEN_MAX_AGE_S. Never printed."""
+
+    def __init__(self, mint, clock=time.monotonic):
+        self.mint, self.clock = mint, clock
+        self.value, self.minted_at = mint(), clock()
+
+    def __call__(self):
+        if self.clock() - self.minted_at >= TOKEN_MAX_AGE_S:
+            self.value, self.minted_at = self.mint(), self.clock()
+        return self.value
+
+
+class UpscaleProbe:
+    def __init__(self, url, token, model, sizes, timeout):
+        # `token`: None (a local URL), a token, or a callable that returns the current one (RefreshingToken).
+        self.url, self.token_source, self.model, self.timeout = url, token, model, timeout
+        self.sizes = {size: {"data": upscale_image(*size), "s": [], "statuses": [], "sha256": set()} for size in sizes}
+        self.service = {}
+        self.steps = []
+        self.problems = []
+
+    @property
+    def token(self):
+        return self.token_source() if callable(self.token_source) else self.token_source
+
+    def health(self, step):
+        try:
+            _, body = request(self.url + "/health", self.token)
+            health = json.loads(body)
+        except Exception:  # noqa: BLE001 - recorded as a probe failure; no detail is printed
+            self.problems.append(f"health unreadable after {step}")
+            self.steps.append({"step": step, "health": None})
+            return
+        listed = next((m for m in (health.get("upscale") or {}).get("models", []) if m.get("id") == self.model), {})
+        if not listed.get("available"):
+            self.problems.append(f"{self.model} is not available on the service at {step}")
+        tile = (health.get("upscaleTiles") or {}).get(self.model)
+        self.service.update(vcpu=health.get("vcpu"), threads=health.get("threads"), candidate=health.get("candidate"),
+                            preloadMatte=health.get("preloadMatte"), instanceId=health.get("instanceId"))
+        if tile is not None:
+            self.service["tile"] = tile
+        self.steps.append({"step": step, "instance": health.get("instanceId"), "tile": tile})
+
+    def calls(self, size, count, measured):
+        entry = self.sizes[size]
+        token = self.token
+        with ThreadPoolExecutor(max_workers=count) as pool:
+            results = list(pool.map(lambda _: timed_upscale(self.url, token, self.model, entry["data"], size, self.timeout), range(count)))
+        entry["statuses"].extend(status for status, _, _ in results)
+        entry["sha256"].update(digest for _, _, digest in results if digest)
+        if measured:
+            entry["s"].extend(s for status, s, _ in results if status == 200)
+
+    def run(self, concurrency, rounds):
+        self.health("baseline")
+        for size in self.sizes:
+            self.calls(size, 1, measured=False)
+            self.health(f"warm {size[0]}x{size[1]}")
+            for _ in range(rounds):
+                self.calls(size, concurrency, measured=True)
+
+    def rows(self, concurrency):
+        out = []
+        for (width, height), entry in self.sizes.items():
+            digests = sorted(entry["sha256"])
+            out.append({"size": f"{width}x{height}", "vcpu": self.service.get("vcpu"), "threads": self.service.get("threads"),
+                        "tile": self.service.get("tile"), "concurrency": concurrency, "p50S": seconds(percentile(entry["s"], 0.5)),
+                        "p95S": seconds(percentile(entry["s"], 0.95)), "maxS": seconds(max(entry["s"], default=None)),
+                        "non200": sum(1 for status in entry["statuses"] if status != 200), "calls": len(entry["statuses"]),
+                        "outputSha256": digests[0] if len(digests) == 1 else None, "distinctOutputs": len(digests)})
+        return out
+
+    def failures(self, rows):
+        return ([f"{r['size']}: {r['non200']} non-200" for r in rows if r["non200"]]
+                + [f"{r['size']}: {r['distinctOutputs']} different outputs for the same input" for r in rows if r["distinctOutputs"] > 1]
+                + list(dict.fromkeys(self.problems)))
+
+
+def upscale_markdown(rows):
+    def cell(value):
+        return "-" if value is None else str(value)
+    lines = ["| size | vCPU | threads | tile | conc | p50 s | p95 s | max s | non-200 | output sha256 |",
+             "|---|---:|---:|---:|---:|---:|---:|---:|---:|---|"]
+    lines += [f"| {r['size']} | {cell(r['vcpu'])} | {cell(r['threads'])} | {cell(r['tile'])} | {r['concurrency']} | {cell(r['p50S'])} | "
+              f"{cell(r['p95S'])} | {cell(r['maxS'])} | {r['non200']} | {cell(r['outputSha256'] and r['outputSha256'][:16])} |" for r in rows]
+    return "\n".join(lines)
+
+
+def parse_upscale_args(argv):
+    parser = argparse.ArgumentParser(prog="cloudrun_check.py --probe-upscale")
+    parser.add_argument("--probe-upscale", dest="url", required=True)
+    parser.add_argument("--model", default="swinir-x2")
+    parser.add_argument("--sizes", default=UPSCALE_PROBE_SIZES)
+    parser.add_argument("--concurrency", type=int, default=1)
+    parser.add_argument("--rounds", type=int, default=3)
+    parser.add_argument("--timeout", type=int, default=900)
+    parser.add_argument("--bucket", default="")
+    parser.add_argument("--run", default="")
+    args = parser.parse_args(argv)
+    args.url = args.url.rstrip("/")
+    args.sizes = parse_sizes(args.sizes)
+    require(args.model in UPSCALE_PROBE_MODELS, "--model must be a served upscaler (realesrgan-x2plus or swinir-x2)")
+    require(1 <= args.concurrency <= 8 and 1 <= args.rounds <= 50, "--concurrency must be 1 to 8 and --rounds 1 to 50")
+    require(30 <= args.timeout <= 3600, "--timeout must be 30 to 3600 seconds")
+    require(args.bucket in ("", PROBE_BUCKET), f"--bucket may only name {PROBE_BUCKET}")
+    require(re.fullmatch(r"https://[a-z0-9.-]+\.run\.app|http://(localhost|127\.0\.0\.1):[0-9]+", args.url) is not None, "probe URL must be a run.app or local URL")
+    require(not args.run or re.fullmatch(r"[A-Za-z0-9._-]{1,80}", args.run) is not None, "--run must be a short name")
+    return args
+
+
+def probe_upscale_main(argv, token_for=None, report_writer=None, now=None):
+    """Runs the upscale probe and returns the exit code. Tokens never reach stdout."""
+    args = parse_upscale_args(argv)
+    audience = audience_for(args.url)
+    token = None if args.url.startswith("http://") else RefreshingToken(lambda: (token_for or identity_token)(audience))
+    started = now or datetime.datetime.now(datetime.timezone.utc)
+    run = args.run or os.environ.get("CLOUD_RUN_EXECUTION") or started.strftime("%Y%m%dT%H%M%SZ")
+    probe = UpscaleProbe(args.url, token, args.model, args.sizes, args.timeout)
+    probe.run(args.concurrency, args.rounds)
+    rows = probe.rows(args.concurrency)
+    failures = probe.failures(rows)
+    report = {"run": run, "url": args.url, "startedAt": started.isoformat(), "model": args.model, "sizes": [r["size"] for r in rows],
+              "concurrency": args.concurrency, "rounds": args.rounds, "timeoutS": args.timeout, "service": probe.service,
+              "rows": rows, "steps": probe.steps, "passed": not failures, "failures": failures}
+    print(upscale_markdown(rows), flush=True)
+    location = (report_writer or write_report)(run, report, "upscale.json") if args.bucket else None
+    print(json.dumps({"probe": run, "passed": not failures, "failures": failures, "report": location}), flush=True)
+    return 1 if failures else 0
+
+
 def main():
+    if any(arg == "--probe-upscale" or arg.startswith("--probe-upscale=") for arg in sys.argv[1:]):
+        sys.exit(probe_upscale_main(sys.argv[1:]))
     if "--probe" in sys.argv[1:]:
         sys.exit(probe_main(sys.argv[1:]))
     check("cpu", os.environ["MATTING_URL"], os.environ["CPU_VERSION"])
