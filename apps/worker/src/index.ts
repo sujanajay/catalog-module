@@ -11,10 +11,13 @@ import { handlePublishTask } from "./catalog/publish";
 import { handleFinalizeTask } from "./catalog/finalize";
 import { draftExpiryDaysFromEnv, handleSweep } from "./catalog/sweep";
 import { handleSyncMaster } from "./catalog/sync-master";
-import { defaultMigrationsDir } from "./runtime";
+import { log } from "@catalog/core/log";
+import { defaultMigrationsDir, installWarningLog } from "./runtime";
 import { createServer, type ServerDeps } from "./server";
 
 defaultMigrationsDir();
+// Spec 18 H4: a warning flood (MaxListenersExceededWarning) names its emitter with a stack in the logs.
+installWarningLog(log);
 
 const port = Number(process.env.PORT) || 8080;
 const auth = authConfigFromEnv(new OAuth2Client());

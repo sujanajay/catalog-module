@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { and, eq, inArray, sql } from "drizzle-orm";
+import { and, eq, inArray, ne, sql } from "drizzle-orm";
 import { catalogBatches, catalogBatchProducts, catalogChunks, catalogProducts, catalogSourceImages, catalogUploads } from "@catalog/core/db/schema";
 import { batchPrefix, exportPath, sanitizeSegment } from "@catalog/core/catalog/naming";
 import { buildReport, readIngestReport, splitRecheck, workbookCsvSheets, type ExportPaths } from "@catalog/core/catalog/pipeline/report";
@@ -24,17 +24,41 @@ export async function handleFinalizeTask(deps:CatalogDeps,body:Record<string,unk
       if(!batch) return {outcome:"not_found"} as const;
       if(batch.status==="failed") return {outcome:"stopped"} as const;
       const state=batch.counts as typeof batch.counts & {finalizeClaim?:string;finalizeClaimUntil?:number};
+      // Spec 18 H4: a done batch is finalized again only on a request, the stored finalizePending flag
+      // (enqueueFinalize with reopen: an operator decision, Add SKU ids, a changed late delivery). A repeated task
+      // is a no-op, so the counts written after done (the load driver's re-check) stay.
+      if(batch.status==="done" && !state.finalizePending) return {outcome:"already_done"} as const;
       if(state.finalizeClaim && Number(state.finalizeClaimUntil)>+deps.now()) return {outcome:"busy"} as const;
-      await tx.update(catalogBatches).set({updatedAt:sql`${catalogBatches.updatedAt}`,counts:sql`(${catalogBatches.counts} - 'finalizeClaim' - 'finalizeClaimUntil' - 'finalizeEnqueuedAt') || '{"finalizePending":false}'::jsonb`}).where(eq(catalogBatches.id,batchId));
+      const done=batch.status==="done";
       const chunks = await tx.select().from(catalogChunks).where(eq(catalogChunks.batchId,batchId));
       const pairs = await tx.select({pair:catalogBatchProducts,product:catalogProducts}).from(catalogBatchProducts).innerJoin(catalogProducts,eq(catalogProducts.id,catalogBatchProducts.productId)).where(eq(catalogBatchProducts.batchId,batchId));
       const sources = await tx.select().from(catalogSourceImages).where(eq(catalogSourceImages.batchId,batchId));
-      if(chunks.some(c=>c.status!=="done" && c.status!=="failed") || pairs.some(({pair,product})=>sources.some(s=>s.productId===product.id) && product.lastBatchId!==batchId && pair.change!=="pending_attention" && pair.change!=="failed")) return {outcome:"not_ready"} as const;
-      await tx.update(catalogBatches).set({counts:sql`${catalogBatches.counts} || jsonb_build_object('finalizeClaim',${claim}::text,'finalizeClaimUntil',${leaseUntil}::numeric)`}).where(eq(catalogBatches.id,batchId));
+      const chunksRunning=chunks.some(c=>c.status!=="done" && c.status!=="failed");
+      const unpublished=pairs.filter(({pair,product})=>sources.some(s=>s.productId===product.id) && product.lastBatchId!==batchId && pair.change!=="pending_attention" && pair.change!=="failed");
+      // A done batch: a product a later batch published (its lastBatchId is another batch and this batch holds no
+      // lock on it) keeps its old links in the re-issued sheet, so it does not hold the finalize up.
+      const moved=done ? unpublished.filter(({product})=>product.lockBatchId!==batchId):[];
+      const pairsPending=unpublished.length>moved.length;
+      if(moved.length) deps.log("finalize keeps earlier links of products a later batch published",{severity:"WARNING",batchId,products:moved.map(({product})=>({productId:product.id,identifier:product.identifier,lastBatchId:product.lastBatchId}))});
+      if(chunksRunning || pairsPending) {
+        if(done && chunksRunning) {
+          // A done batch with a running chunk (a replacement photo): the request stays pending and is re-queued.
+          await tx.update(catalogBatches).set({updatedAt:sql`${catalogBatches.updatedAt}`,counts:sql`${catalogBatches.counts} - 'finalizeClaim' - 'finalizeClaimUntil' - 'finalizeEnqueuedAt'`}).where(eq(catalogBatches.id,batchId));
+          return {outcome:"not_ready",requeue:true,reopen:true} as const;
+        }
+        // Not ready. A batch still running hands the request on (re-queued below). A done batch blocked only by a
+        // product still being published is not re-queued: that publish asks again when it lands.
+        await tx.update(catalogBatches).set({updatedAt:sql`${catalogBatches.updatedAt}`,counts:sql`(${catalogBatches.counts} - 'finalizeClaim' - 'finalizeClaimUntil' - 'finalizeEnqueuedAt') || '{"finalizePending":false}'::jsonb`}).where(eq(catalogBatches.id,batchId));
+        if(done) deps.log("finalize of a done batch waits for a product publish",{severity:"WARNING",batchId,products:unpublished.map(({product})=>({productId:product.id,identifier:product.identifier,lastBatchId:product.lastBatchId}))});
+        return {outcome:"not_ready",requeue:!done,reopen:false} as const;
+      }
+      // The pending flag (and its enqueue time) stays until the done write, so the publishes and sweeps that
+      // run meanwhile see a finalize already on its way and queue no second one.
+      await tx.update(catalogBatches).set({updatedAt:sql`${catalogBatches.updatedAt}`,counts:sql`(${catalogBatches.counts} - 'finalizeClaim' - 'finalizeClaimUntil') || jsonb_build_object('finalizePending',true,'finalizeClaim',${claim}::text,'finalizeClaimUntil',${leaseUntil}::numeric)`}).where(eq(catalogBatches.id,batchId));
       return {outcome:"claimed",batch} as const;
     });
     if(acquired.outcome!=="claimed") {
-      if(acquired.outcome==="not_ready") await enqueueFinalize(deps,batchId,30);
+      if(acquired.outcome==="not_ready" && acquired.requeue) await enqueueFinalize(deps,batchId,30,{reopen:acquired.reopen});
       return {httpStatus:acquired.outcome==="busy" ? 503:200,outcome:acquired.outcome};
     }
     const batch=acquired.batch;
@@ -79,7 +103,10 @@ export async function handleFinalizeTask(deps:CatalogDeps,body:Record<string,unk
       current.batch.counts=cleanCounts(current.batch.counts);current.report.counts=current.batch.counts;
       // Network work may outlive a decision or publication. Commit only the snapshot we checked.
       if(snapshotOf(current)!==snapshot) return "snapshot_changed";
-      await tx.update(catalogBatches).set({counts,cost:initial.batch.cost,status:"done",finishedAt:deps.now(),sheetXlsxUri:paths.xlsx,sheetCsvUri:paths.csv,reportUri:paths.report,error:null}).where(claimWhere);
+      // A first finalize writes done only while the batch is not done yet (the claim guards a re-opened done batch).
+      const reopened=batch.status==="done";
+      const written=await tx.update(catalogBatches).set({counts,cost:initial.batch.cost,status:"done",finishedAt:deps.now(),sheetXlsxUri:paths.xlsx,sheetCsvUri:paths.csv,reportUri:paths.report,error:null}).where(reopened ? claimWhere:and(claimWhere,ne(catalogBatches.status,"done"))).returning({id:catalogBatches.id});
+      if(!written.length) return "snapshot_changed";
       await releaseLocks(tx as unknown as CatalogDeps["db"],batchId);
       return "done";
     });

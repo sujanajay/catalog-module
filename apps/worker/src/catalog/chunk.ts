@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import sharp from "sharp";
-import { and, eq, inArray, isNull, or, sql } from "drizzle-orm";
+import { and, eq, inArray, isNull, notInArray, or, sql } from "drizzle-orm";
 import { catalogBatches, catalogChunks, catalogOutputs, catalogProducts, catalogSourceImages } from "@catalog/core/db/schema";
 import { CHANNELS } from "@catalog/core/catalog/channels";
 import { batchPrefix, derivedPath, publicObjectPath, publicUrl, stagingPath } from "@catalog/core/catalog/naming";
@@ -486,7 +486,8 @@ export async function handleChunkTask(rawDeps: CatalogDeps, body: Record<string,
       if (chunk.stage === "matte") await deps.db.update(catalogBatches).set({status:"rendering"}).where(and(eq(catalogBatches.id,batch.id),eq(catalogBatches.status,"matting")));
       else {
         const remaining=await deps.db.select().from(catalogChunks).where(eq(catalogChunks.batchId,batch.id));
-        if(remaining.every(row=>row.stage==="qa" || row.status==="done" || row.status==="failed")) await deps.db.update(catalogBatches).set({status:"qa"}).where(eq(catalogBatches.id,batch.id));
+        // Spec 18 H4: a late delivery never moves a finished (done or failed) batch back to qa.
+        if(remaining.every(row=>row.stage==="qa" || row.status==="done" || row.status==="failed")) await deps.db.update(catalogBatches).set({status:"qa"}).where(and(eq(catalogBatches.id,batch.id),notInArray(catalogBatches.status,["done","failed"])));
       }
       await dispatchNext(advanced);
     } else { const completed = await deps.db.update(catalogChunks).set({status:"done",taskName:null,leaseUntil:null,finishedAt:deps.now()}).where(ownsClaim()).returning({id:catalogChunks.id}); if (!completed.length) return answer(200,"lost"); await finish(); }

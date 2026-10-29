@@ -77,7 +77,11 @@ export async function releaseLocks(db: Db, batchId: string): Promise<number> {
   return (await db.update(catalogProducts).set({ lockBatchId: null }).where(and(eq(catalogProducts.lockBatchId,batchId), inArray(catalogProducts.id,completed))).returning({ id: catalogProducts.id })).length;
 }
 /** `batch` (brand and test flag, for the worker's cost ledger row) is present whenever the batch was read. */
-export async function publishProduct(deps: PublishDeps, batchId: string, productId: string): Promise<{ outcome: string; batch?: { brandSlug: string; isTest: boolean } }> {
+/**
+ * `changed`: this call published a real content change (new, updated, reordered or removed shots). An unchanged
+ * or failed publish is not a change (spec 18 H4: only a change re-opens a done batch).
+ */
+export async function publishProduct(deps: PublishDeps, batchId: string, productId: string): Promise<{ outcome: string; batch?: { brandSlug: string; isTest: boolean }; changed?: boolean }> {
   return deps.db.transaction(async tx => {
     const [product] = await tx.select().from(catalogProducts).where(eq(catalogProducts.id,productId)).for("update");
     if (!product || product.lockBatchId !== batchId) return { outcome: "not_locked" };
@@ -181,7 +185,7 @@ export async function publishProduct(deps: PublishDeps, batchId: string, product
     const notes = [failure ? `Some images could not be published: ${failure}. ${liveNotes}` : "", removed.length ? `photos ${removed.map(o=>o.n).join(" and ")} removed in batch ${batch.name}` : "",...outputs.filter(o=>o.decision === "use_as_is" && o.reason).map(outputNote),...outputs.filter(o=>o.status === "skipped" && o.reason).map(outputNote)].filter(Boolean).join("; ");
     await tx.update(catalogBatchProducts).set({change,notes}).where(where);
     await tx.update(catalogProducts).set({lastBatchId:batchId}).where(eq(catalogProducts.id,productId));
-    return { outcome: failure ? "failed" : "published", batch: found };
+    return { outcome: failure ? "failed" : "published", batch: found, changed: !failure && change !== "unchanged" };
   });
 }
 /** The upscalerId the worker's env selects (UPSCALE_MODEL on the service UPSCALE_URL names), or null when off. */
