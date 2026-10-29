@@ -65,7 +65,8 @@ retry() {
   until "$@"; do
     n=$((n + 1))
     if [ "$n" -ge "$max" ]; then return 1; fi
-    log "retry $n/$max in $((n * 5))s: $*"
+    # stderr, so a retried command's output can be captured: current=$(retry gcv ...).
+    log "retry $n/$max in $((n * 5))s: $*" >&2
     sleep $((n * 5))
   done
 }
@@ -81,8 +82,8 @@ json_key_matches() {
       : v && typeof v === "object" ? Object.fromEntries(Object.keys(v).sort().map((k) => [k, canon(v[k])])) : v;
     let cur, want;
     try {
-      cur = (JSON.parse(process.env.JSON_CURRENT.replace(/^﻿/, "").trim() || "null") ?? {})[process.argv[2]] ?? null;
-      want = JSON.parse(fs.readFileSync(process.argv[1], "utf8").replace(/^﻿/, ""));
+      cur = (JSON.parse(process.env.JSON_CURRENT.replace(/^\uFEFF/, "").trim() || "null") ?? {})[process.argv[2]] ?? null;
+      want = JSON.parse(fs.readFileSync(process.argv[1], "utf8").replace(/^\uFEFF/, ""));
     } catch (e) {
       console.error(`[bootstrap]        cannot compare: ${e.message}`);
       process.exit(2);
@@ -282,12 +283,12 @@ bucket_binding() { # bucket member role
   fi
 }
 
-# Lifecycle from a JSON file; SKIP when the bucket already has that configuration (the same rule set). A describe
-# that fails, or output that is not JSON, stops the run instead of rewriting the lifecycle: before 2026-10-29 both
-# counted as a difference (docs/solutions/infra-bootstrap.md).
+# Lifecycle from a JSON file; SKIP when the bucket already has that configuration (the same rule set). The describe
+# is retried (a transient network or token hiccup); one that still fails, or output that is not JSON, stops the run
+# instead of rewriting the lifecycle: before 2026-10-29 both counted as a difference (docs/solutions/infra-bootstrap.md).
 ensure_lifecycle() { # bucket file
   local bucket="$1" file="$2" current detail status=0
-  current=$(gcv storage buckets describe "$bucket" --project="$PROJECT" --format='json(lifecycle_config)') \
+  current=$(retry gcv storage buckets describe "$bucket" --project="$PROJECT" --format='json(lifecycle_config)') \
     || die "cannot read the lifecycle of $bucket (gcloud storage buckets describe failed); nothing was changed"
   detail=$(json_key_matches "$current" "$file" lifecycle_config) || status=$?
   case "$status" in
