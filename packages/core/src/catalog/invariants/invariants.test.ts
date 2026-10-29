@@ -138,7 +138,7 @@ describe("invariant checks", () => {
 
   it("enlarged_without_upscaler: a verified output enlarged past 1.5x without `upscaled` in a batch with the stage violates; upscaled, held, small and older batches do not", async () => {
     const withStage = await batch("done");
-    await db.update(catalogBatches).set({ options: { enlargement: { model: "swinir-x2" } } }).where(eq(catalogBatches.id, withStage.id));
+    await db.update(catalogBatches).set({ options: { ...withStage.options, enlargement: { model: "swinir-x2" } } }).where(eq(catalogBatches.id, withStage.id));
     const p = await product(withStage.id, "new");
     const enlarged = async (status: OutputStatus, scale: number, flags: string[]) => {
       const o = await output(withStage.id, p, status, status === "needs_attention" ? { reason: "This photo could not be enlarged." } : {});
