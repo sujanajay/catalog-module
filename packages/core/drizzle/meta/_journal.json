@@ -43,6 +43,13 @@
       "when": 1793251364512,
       "tag": "0005_enlargement",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1793302793914,
+      "tag": "0006_enlargements",
+      "breakpoints": true
     }
   ]
 }

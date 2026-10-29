@@ -135,26 +135,26 @@ export function derivedPath(prefix: string, pathKey: string, n: number, kind: st
 }
 
 /**
- * Spec 18 3.3.3: `<prefix>/derived/<pathKey>/<pathKey>_<n>.<upscaler>.x2.jpg`, the stored enlargement (the upscaler's 2x
- * image of the prepared photo) next to its matte, in the private assets bucket. Never public, never raw, inside the
- * batch prefix. The key names the upscaler (its upscalerId, lower case, anything but letters, digits, dots and dashes
- * as a dash: `swinir-x2+cpu` is `swinir-x2-cpu`), so an image made by one model is never read as another's. Spec 18
- * quality: `factor` is the model's scale (`.x4.jpg` for the x4 model's image); both images of a photo sit side by side.
+ * Spec 18 lifecycle 3.1: `<prefix>/derived/<pathKey>/<pathKey>_<n>.<upscaler slug>.s<scale>.<identity hash>.jpg`, the
+ * stored enlargement of one identity (the whole prepared photo, enlarged by the upscaler at the effective scale) next
+ * to its matte, in the private assets bucket. Never public, never raw, inside the batch prefix. The upscaler is its
+ * identity id with the export hash (`swinir-x2+cpu@f477a052`), lower case, anything but letters, digits, dots and
+ * dashes as a dash. Same identity, same key: a re-delivery, a re-wanted row or a second batch of the same photo finds
+ * the object. The metadata names the identity too (validateEnlargedObject).
  */
-export function enlargedPath(prefix: string, pathKey: string, n: number, upscaler: string, factor = 2): string {
-  return `${prefix}/derived/${pathKey}/${shotStem(pathKey, n)}${enlargedSuffix(upscaler, factor)}`;
+export function enlargedPath(prefix: string, pathKey: string, n: number, upscaler: string, scale: number, identityHash: string): string {
+  return `${prefix}/derived/${pathKey}/${shotStem(pathKey, n)}.${upscalerSlug(upscaler)}.s${scaleLabel(scale)}.${identityHash}.jpg`;
 }
-/** The end of an enlargedPath that names the upscaler and its factor: `.<upscaler slug>.x<factor>.jpg`. */
-export function enlargedSuffix(upscaler: string, factor = 2): string {
-  return `.${upscaler.toLowerCase().replace(/[^a-z0-9.-]+/g, "-")}.x${factor}.jpg`;
+/** Spec 18 lifecycle 3.2 tile route: tile `i` of an enlargement, `<enlargedPath key>.tile-<i>.jpg`. */
+export function enlargedTilePath(key: string, i: number): string {
+  return `${key}.tile-${i}.jpg`;
 }
-/**
- * The stored image of `to` (upscaler and factor) beside `uri`, the stored image of `from` of the same photo
- * (enlargedPath: the same folder and stem). Null when `uri` does not end as `from`'s image does.
- */
-export function enlargedSibling(uri: string, from: { upscaler: string; factor: number }, to: { upscaler: string; factor: number }): string | null {
-  const suffix = enlargedSuffix(from.upscaler, from.factor);
-  return uri.endsWith(suffix) ? `${uri.slice(0, -suffix.length)}${enlargedSuffix(to.upscaler, to.factor)}` : null;
+function upscalerSlug(upscaler: string): string {
+  return upscaler.toLowerCase().replace(/[^a-z0-9.-]+/g, "-");
+}
+/** The scale as a key part: an integer as is (`2`), a fraction to 3 decimals without trailing zeros (`3.333`). */
+function scaleLabel(scale: number): string {
+  return String(Number(scale.toFixed(3)));
 }
 
 /** `<prefix>/staging/<pathKey>/<channel>/<pathKey>_<n>.jpg`. */

@@ -6,7 +6,7 @@ import { ALPHA_BBOX_THRESHOLD, analyseBackground, borderPixels, shadowLayer } fr
 import { anchorBounds, BG_TOLERANCE, checkOutput, type Measured } from "./compliance";
 import { enlargeCutout } from "./enhance";
 import { plainFailures } from "./qa/reasons";
-import { enlargeRegion, hasSourceX2, shouldUpscale, upscaledRgb, upscaleFactorFor, upscalerKey, upscalersFor, type EnlargeRegion, type UpscaleFactor, type Upscaler } from "./upscale";
+import { enlargeRegion, enlargementStateOf, EnlargementNotReadyError, shouldUpscale, upscaledRgb, upscaleFactorFor, upscalerKey, upscalersFor, type EnlargeRegion, type UpscaleFactor, type Upscaler } from "./upscale";
 
 export interface Prepared { width: number; height: number; rgb: Buffer; alphaSource: Buffer | null; background: { uniform: boolean; color: [number, number, number]; stdev: number }; flags: OutputFlag[]; sourceMime: string }
 export interface Matte { alpha: Buffer; width: number; height: number; model: string; ms: number; source: "model" | "alpha_source" | "floodfill"; target: "cpu" | "gpu" | null; sentLongSide: number | null }
@@ -524,18 +524,32 @@ export function enlargementNeeds(channels: readonly ChannelId[], shots: readonly
  * (upscalersFor), so a photo is never held for that.
  */
 export function enlargementFactors(channels: readonly ChannelId[], shots: readonly EnlargementShot[], productType: ProductType | null | undefined, minScale: number, x4: boolean): UpscaleFactor[][] {
+  return enlargementPlan(channels, shots, productType, minScale, x4).map((needs) => needs.map((n) => n.factor));
+}
+/** One model band a shot needs (enlargementPlan): the factor, the largest planned scale in it and the channels that need it. */
+export interface EnlargementNeed { factor: UpscaleFactor; maxScale: number; channels: ChannelId[] }
+/**
+ * Spec 18 lifecycle 3.2 and 3.5: enlargementFactors with, per factor, the largest planned scale of the shot in that
+ * band (the route's neededScale before the slack) and the channels that need it (named in a size refusal). The same
+ * superset of the render's decision as enlargementFactors, which reads it.
+ */
+export function enlargementPlan(channels: readonly ChannelId[], shots: readonly EnlargementShot[], productType: ProductType | null | undefined, minScale: number, x4: boolean): EnlargementNeed[][] {
   const geometry = (s: EnlargementShot, judgedCut: boolean) => shotGeometry(s.alpha, s.width, s.height, { rgb: s.rgb, judgedCut, ...trimRules(productType, s) });
   const plain = shots.map((s) => geometry(s, false)), judged = shots.map((s) => geometry(s, true));
   const found = plain.filter((g): g is ShotGeometry => g !== null);
-  const canvases = channels.map((id) => ({ spec: channel(id), canvas: found.length ? planProduct(channel(id), found).canvas : undefined }));
+  const canvases = channels.map((id) => ({ id, spec: channel(id), canvas: found.length ? planProduct(channel(id), found).canvas : undefined }));
   return shots.map((s, i) => {
-    const factors = new Set<UpscaleFactor>();
-    for (const { spec, canvas } of canvases) for (const g of [plain[i], judged[i]]) {
+    const needs = new Map<UpscaleFactor, EnlargementNeed>();
+    for (const { id, spec, canvas } of canvases) for (const g of [plain[i], judged[i]]) {
       if (!g) continue;
       const scale = planCanvas(spec, g.box, { w: s.width, h: s.height }, { canvas, cut: g.cut, trimRoom: g.trimRoom }).scale;
-      if (shouldUpscale(scale, minScale)) factors.add(upscaleFactorFor(scale, x4));
+      if (!shouldUpscale(scale, minScale)) continue;
+      const factor = upscaleFactorFor(scale, x4), need = needs.get(factor) ?? { factor, maxScale: 0, channels: [] };
+      need.maxScale = Math.max(need.maxScale, scale);
+      if (!need.channels.includes(id)) need.channels.push(id);
+      needs.set(factor, need);
     }
-    return [...factors].sort((a, b) => a - b);
+    return [...needs.values()].sort((a, b) => a.factor - b.factor);
   });
 }
 
@@ -648,7 +662,7 @@ export async function renderSource(input: RenderInput): Promise<RenderOutput> {
     const to = { w: product.w, h: product.h };
     const needsUpscaler = !!input.upscaler && shouldUpscale(plan.scale, input.upscaler.minScale);
     const enlarged = input.upscaler && needsUpscaler
-      ? await routedUpscale(upscalersFor(plan.scale, input.upscaler, input.upscalerX4), p, crop, to, { ...input.trace, identifier: input.identifier, shot: shotNumber, channel: spec.id })
+      ? await routedUpscale(upscalersFor(plan.scale, input.upscaler, input.upscalerX4), p, crop, to, plan.scale, { ...input.trace, identifier: input.identifier, shot: shotNumber, channel: spec.id })
       : null;
     const cutout = await enlargeCutout({ rgba, rgb: p.rgb, width: p.width, height: p.height, crop, to, ...(enlarged ? { upscaled: enlarged.rgb } : {}) });
     if (enlarged) { result.flags.push("upscaled"); result.upscale = { model: enlarged.model, ms: enlarged.ms, ...(enlarged.reused ? { reused: true as const } : {}) }; }
@@ -715,17 +729,29 @@ export async function renderSource(input: RenderInput): Promise<RenderOutput> {
 }
 
 /**
- * Spec 18 quality: the colour of `crop` from the first of `candidates` (upscalersFor, best first) that holds an image
- * of this photo covering the crop; without any image yet (a render outside the worker, which calls its service), the
- * first candidate's call. Null when none can make it: the render flags `enlargement_failed`.
+ * Spec 18 lifecycle 3.3, the tri-state over the crop's candidate list (upscalersFor, best first): the first candidate
+ * whose image is ready makes the colour. Otherwise a candidate without an entry means not ready (a stored upscaler:
+ * EnlargementNotReadyError, transient; one that calls its service, outside the worker: its call); every candidate
+ * terminal (or terminal and unwanted) means null, and the render flags `enlargement_failed`; every candidate unwanted
+ * (the batch wants none of them, a ladder variant across a band, F8b) throws not ready, not transient. Only a terminal
+ * entry can produce the flag (I4).
  */
-async function routedUpscale(candidates: Upscaler[], p: Prepared, crop: BBox, to: Size, trace: Parameters<typeof upscaledRgb>[5]): Promise<{ rgb: Buffer; ms: number; reused: boolean; model: string } | null> {
-  const ready = candidates.filter((u) => hasSourceX2(u, p.rgb));
-  for (const upscaler of ready.length ? ready : candidates.slice(0, 1)) {
-    const out = await upscaledRgb(upscaler, p.rgb, p.width, crop, to, trace);
-    if (out) return { ...out, model: upscaler.model };
+async function routedUpscale(candidates: Upscaler[], p: Prepared, crop: BBox, to: Size, planScale: number, trace: Parameters<typeof upscaledRgb>[5]): Promise<{ rgb: Buffer; ms: number; reused: boolean; model: string } | null> {
+  const states = candidates.map((u) => ({ u, state: enlargementStateOf(u, p.rgb, planScale) }));
+  for (const { u, state } of states) {
+    if (state !== "ready") continue;
+    const out = await upscaledRgb(u, p.rgb, p.width, crop, to, trace);
+    if (out) return { ...out, model: u.model };
   }
-  return null;
+  const missing = states.filter((s) => s.state === "missing");
+  const inline = missing.find((s) => !s.u.stored);
+  if (inline) {
+    const out = await upscaledRgb(inline.u, p.rgb, p.width, crop, to, trace);
+    return out ? { ...out, model: inline.u.model } : null;
+  }
+  if (missing.length) throw new EnlargementNotReadyError("The enlargement of this photo is not ready yet.", true);
+  if (states.some((s) => s.state === "terminal" || (s.state === "ready" && !s.u.stored))) return null;
+  throw new EnlargementNotReadyError("This batch wants no enlargement of this photo at this scale.", false);
 }
 
 export async function renderAllChannels(prepared: Prepared, matte: Matte, channels: ChannelId[], ctx: Omit<RenderInput, "prepared" | "matte" | "channel">): Promise<Record<ChannelId, RenderOutput>> {

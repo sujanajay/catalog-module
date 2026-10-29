@@ -7,7 +7,7 @@ import {
   brandSlug,
   derivedPath,
   enlargedPath,
-  enlargedSibling,
+  enlargedTilePath,
   normalizeKey,
   parseShotName,
   productPrefix,
@@ -37,19 +37,16 @@ describe("naming helpers", () => {
     expect(publicObjectPath("uspa", "ABC123", "noon", 1, true)).toMatch(/^catalog-test\//);
   });
 
-  it("spec 18: the stored enlargement sits next to the matte under the batch prefix, never under raw or the public layout", () => {
+  it("spec 18 lifecycle: the stored enlargement is keyed by identity, next to the matte under the batch prefix, never raw or public", () => {
     const prefix = batchPrefix("uspa", "b1", true);
-    expect(enlargedPath(prefix, "ABC123", 2, "swinir-x2+cpu")).toBe(`${prefix}/derived/ABC123/ABC123_2.swinir-x2-cpu.x2.jpg`);
+    const key = enlargedPath(prefix, "ABC123", 2, "swinir-x2+cpu@9f4a3f85", 2, "0123456789abcdef");
+    expect(key).toBe(`${prefix}/derived/ABC123/ABC123_2.swinir-x2-cpu-9f4a3f85.s2.0123456789abcdef.jpg`);
     expect(derivedPath(prefix, "ABC123", 2, "matte")).toBe(`${prefix}/derived/ABC123/ABC123_2.matte.png`);
-    expect(enlargedPath(prefix, "ABC123", 2, "swinir-x2+cpu")).not.toMatch(/\/raw\/|^catalog\//);
-    // The key names the upscaler, so another model's image is another object.
-    expect(enlargedPath(prefix, "ABC123", 2, "realesrgan-x2plus")).toBe(`${prefix}/derived/ABC123/ABC123_2.realesrgan-x2plus.x2.jpg`);
-    // Spec 18 quality: the x4 image of the same photo sits beside the x2 one, found from it.
-    const x2 = `gs://assets/${enlargedPath(prefix, "ABC123", 2, "swinir-x2+cpu")}`, x4 = `gs://assets/${enlargedPath(prefix, "ABC123", 2, "swinir-x4+cpu", 4)}`;
-    expect(x4).toBe(`gs://assets/${prefix}/derived/ABC123/ABC123_2.swinir-x4-cpu.x4.jpg`);
-    expect(enlargedSibling(x2, { upscaler: "swinir-x2+cpu", factor: 2 }, { upscaler: "swinir-x4+cpu", factor: 4 })).toBe(x4);
-    expect(enlargedSibling(x4, { upscaler: "swinir-x4+cpu", factor: 4 }, { upscaler: "swinir-x2+cpu", factor: 2 })).toBe(x2);
-    expect(enlargedSibling(x2, { upscaler: "swinir-x4+cpu", factor: 4 }, { upscaler: "swinir-x2+cpu", factor: 2 })).toBeNull();
+    expect(key).not.toMatch(/\/raw\/|^catalog\//);
+    // A fractional effective scale (the downscale route) is written to 3 decimals; the identity hash keeps keys apart.
+    expect(enlargedPath(prefix, "ABC123", 2, "swinir-x4+cpu@f477a052", 3.3333, "fedcba9876543210")).toBe(`${prefix}/derived/ABC123/ABC123_2.swinir-x4-cpu-f477a052.s3.333.fedcba9876543210.jpg`);
+    expect(enlargedPath(prefix, "ABC123", 2, "swinir-x2+cpu@9f4a3f85", 2, "1111111111111111")).not.toBe(key);
+    expect(enlargedTilePath(key, 3)).toBe(`${key}.tile-3.jpg`);
   });
 
   it("publicUrl has no spaces and round-trips through URL", () => {

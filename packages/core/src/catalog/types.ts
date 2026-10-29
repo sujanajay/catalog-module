@@ -26,7 +26,10 @@ export const POLICY_SOURCES = ["bakeoff","default","pending","manual"] as const;
 export const EVAL_LABELS = ["pass","flag"] as const;
 export const ALIAS_KINDS = ["identifier","opptra_sku","option_id","channel_id","manual"] as const;
 export const EVENT_KINDS = ["created","overwritten","shots_removed","channel_added","unchanged","reordered",
-  "sku_ids_added","alias_added","removed_photo","replacement_uploaded","restored","removed"] as const;
+  "sku_ids_added","alias_added","removed_photo","replacement_uploaded","restored","removed",
+  // Spec 18 enlargement lifecycle (migration 0006): an operator "Try again" on a failed enlargement, and an operator
+  // "Use as is" that accepted plain (not enlarged) outputs after the warning.
+  "enlargement_retried","plain_accepted"] as const;
 export const ROLES = ["admin","operator","viewer"] as const;
 
 export type ChannelId = (typeof CHANNEL_IDS)[number];
@@ -50,7 +53,7 @@ export const UPSCALED_SENTENCE = "Enlarged with a quality pass to meet this mark
  * reason; a plain resize never stands in. Model-free.
  */
 export const ENLARGEMENT_FAILED_WHY = "This photo could not be enlarged to this marketplace's size.";
-export const ENLARGEMENT_FAILED_WHAT = "Try again, or ask the brand for a larger photo.";
+export const ENLARGEMENT_FAILED_WHAT = "Try again, use it as it is after the warning, replace the photo, or ask the brand for a larger one.";
 export const ENLARGEMENT_FAILED_SENTENCE = `${ENLARGEMENT_FAILED_WHY} ${ENLARGEMENT_FAILED_WHAT}`;
 export type Decision = (typeof DECISIONS)[number];
 export type QaMode = (typeof QA_MODES)[number];

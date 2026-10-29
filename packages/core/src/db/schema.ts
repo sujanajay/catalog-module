@@ -16,6 +16,7 @@ import {
   numeric,
   pgTable,
   primaryKey,
+  real,
   text,
   timestamp,
   uniqueIndex,
@@ -58,6 +59,10 @@ export const SHADOW_MODES = ["preserve_only", "preserve_else_synthesise"] as con
 export const UPLOAD_STATUSES = ["pending", "uploaded", "collected", "failed", "removed"] as const;
 export const SOURCE_IMAGE_STATUSES = ["pending", "prepared", "matted", "failed", "unsupported"] as const;
 export const CHUNK_STAGES = ["matte", "render", "qa"] as const;
+/** Spec 18 lifecycle (0006): an enlargement row's state. Nothing else. */
+export const ENLARGEMENT_STATUSES = ["queued", "done", "failed"] as const;
+/** Spec 18 lifecycle 3.2: how one identity is made; `none` is the size refusal (no route can make it). */
+export const ENLARGEMENT_ROUTES = ["direct", "tiles", "downscale", "downscale_tiles", "none"] as const;
 export const CHUNK_STATUSES = ["queued", "running", "done", "failed"] as const;
 /** spend_days.engine values. Re-exported by spend.ts as part of its contract. */
 export const SPEND_ENGINES = ["catalog_qa", "catalog_compute"] as const;
@@ -517,6 +522,58 @@ export const catalogChunks = pgTable(
   ],
 );
 
+/**
+ * Spec 18 enlargement lifecycle (migration 0006): one row per (batch, photo, identity) the batch wants, written only
+ * by the lifecycle (core pipeline/enlargement.ts and the worker's catalog/enlarge.ts). The identity is the prepared
+ * pixels, the upscaler with its export hash and the effective scale (identity_hash); the object is shared by identity
+ * across batches. `wanted` false is a released row (status kept). attempts and timeouts are the two counted budgets,
+ * delays only visibility; identity_releases counts release events with identity_changed. The x2_* columns of
+ * catalog_source_images (0005) are no longer read.
+ */
+export const catalogEnlargements = pgTable(
+  "catalog_enlargements",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    batchId: uuid("batch_id")
+      .notNull()
+      .references(() => catalogBatches.id, { onDelete: "cascade" }),
+    productId: uuid("product_id").notNull(),
+    sourceImageId: uuid("source_image_id").notNull(),
+    upscaler: text("upscaler").notNull(),
+    factor: integer("factor").notNull(),
+    scale: real("scale").notNull(),
+    outW: integer("out_w").notNull(),
+    outH: integer("out_h").notNull(),
+    route: text("route", { enum: ENLARGEMENT_ROUTES }).notNull(),
+    pixelHash: text("pixel_hash").notNull(),
+    identityHash: text("identity_hash").notNull(),
+    status: text("status", { enum: ENLARGEMENT_STATUSES }).notNull().default("queued"),
+    wanted: boolean("wanted").notNull().default(true),
+    attempts: integer("attempts").notNull().default(0),
+    timeouts: integer("timeouts").notNull().default(0),
+    delays: integer("delays").notNull().default(0),
+    probeTimeouts: integer("probe_timeouts").notNull().default(0),
+    identityReleases: integer("identity_releases").notNull().default(0),
+    sends: integer("sends").notNull().default(0),
+    retries: integer("retries").notNull().default(0),
+    claimedAt: tsNull("claimed_at"),
+    claimToken: text("claim_token"),
+    tilesDone: integer("tiles_done").notNull().default(0),
+    uri: text("uri"),
+    error: text("error"),
+    errorKind: text("error_kind"),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (t) => [
+    index("catalog_enlargements_batch_id_idx").on(t.batchId),
+    index("catalog_enlargements_source_image_id_idx").on(t.sourceImageId),
+    uniqueIndex("catalog_enlargements_identity_uq").on(t.batchId, t.sourceImageId, t.identityHash),
+    enumCheck("catalog_enlargements", "status", t.status, ENLARGEMENT_STATUSES),
+    enumCheck("catalog_enlargements", "route", t.route, ENLARGEMENT_ROUTES),
+  ],
+);
+
 export const catalogEvalLabels = pgTable(
   "catalog_eval_labels",
   {
@@ -658,6 +715,7 @@ export type CatalogProductEvent = typeof catalogProductEvents.$inferSelect;
 export type CatalogSourceImage = typeof catalogSourceImages.$inferSelect;
 export type CatalogOutput = typeof catalogOutputs.$inferSelect;
 export type CatalogChunk = typeof catalogChunks.$inferSelect;
+export type CatalogEnlargement = typeof catalogEnlargements.$inferSelect;
 export type CatalogEvalLabel = typeof catalogEvalLabels.$inferSelect;
 export type CatalogEvalJudgement = typeof catalogEvalJudgements.$inferSelect;
 export type SpendDay = typeof spendDays.$inferSelect;

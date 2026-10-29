@@ -5,8 +5,12 @@
 import { sql, type SQL } from "drizzle-orm";
 import { PROCESSING_STATUSES } from "../pipeline/dispatch";
 import { LEGACY_UPSCALE_MIN_SCALE } from "../upscale";
+import { ENLARGE_STALE_MS, ENLARGING_TASK } from "../pipeline/enlargement";
 
-export type InvariantSeverity = "ERROR" | "WARNING";
+/** INFO (spec 18 lifecycle): a count for Ops, never a violation of the pipeline's rules. */
+export type InvariantSeverity = "ERROR" | "WARNING" | "INFO";
+/** Spec 18 lifecycle 3.8: a wanted enlargement queued this long is shown on Ops as waiting long (information only). */
+export const ENLARGEMENT_WAITING_LONG_MS = 20 * 60 * 60_000;
 export interface InvariantCheck {
   id: string;
   sentence: string;
@@ -86,6 +90,31 @@ export const CHECKS: readonly InvariantCheck[] = [
       WHERE jsonb_typeof(b.options->'enlargement') = 'object' AND o.status = 'verified'
         AND o.scale > (CASE WHEN jsonb_typeof(b.options->'enlargement'->'minScale') = 'number'
           THEN (b.options->'enlargement'->>'minScale')::real ELSE ${LEGACY_UPSCALE_MIN_SCALE}::real END) + 1e-6
-        AND NOT (o.flags @> '["upscaled"]'::jsonb)`,
+        AND NOT (o.flags @> '["upscaled"]'::jsonb)
+        AND NOT (o.decision = 'use_as_is' AND o.flags @> '["enlargement_failed"]'::jsonb)`,
+  },
+  {
+    id: "plain_accepted_outputs",
+    sentence: "Outputs the operator chose to use as they are after the plain warning (a failed enlargement): counted, never an error.",
+    severity: "INFO",
+    // Spec 18 lifecycle 3.6, I5(a): the only way a plain image above the threshold is staged; enlarged_without_upscaler excludes these.
+    sql: () => sql`SELECT o.id, o.batch_id FROM catalog_outputs AS o WHERE o.decision = 'use_as_is' AND o.flags @> '["enlargement_failed"]'::jsonb`,
+  },
+  {
+    id: "parked_chunk_quiet",
+    sentence: "No chunk waiting for its photos' enlargements has gone 2 hours without an enlarge delivery or a re-send (the recovery is not running).",
+    severity: "WARNING",
+    // Spec 18 lifecycle 3.8: every enlarge delivery of the batch and every stale re-send refresh progress_at, so this fires only when neither runs.
+    sql: (now) => sql`SELECT c.id, c.batch_id FROM catalog_chunks AS c JOIN catalog_batches AS b ON b.id = c.batch_id
+      WHERE b.status NOT IN ('failed', 'cancelled') AND c.status = 'queued' AND c.task_name = ${ENLARGING_TASK}
+        AND coalesce(c.progress_at, c.created_at) < ${at(now)} - ${(2 * ENLARGE_STALE_MS) / 1000}::int * interval '1 second'`,
+  },
+  {
+    id: "enlargement_waiting_long",
+    sentence: "Enlargements still being made after 20 hours: information only (a long wait is normal, nothing fails for time).",
+    severity: "INFO",
+    sql: (now) => sql`SELECT e.id, e.batch_id FROM catalog_enlargements AS e JOIN catalog_batches AS b ON b.id = e.batch_id
+      WHERE b.status NOT IN ('failed', 'cancelled') AND e.wanted AND e.status = 'queued'
+        AND e.created_at < ${at(now)} - ${ENLARGEMENT_WAITING_LONG_MS / 1000}::int * interval '1 second'`,
   },
 ];

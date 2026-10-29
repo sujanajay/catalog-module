@@ -163,16 +163,16 @@ describe("enqueueTask", () => {
   it("spec 18: enlargement tasks go to the enlarge lane of the batch's class; an unset lane falls back to that class's chunk queue", async () => {
     const { client, createTask } = fakeClient();
     const lanes = { ...env, TASKS_BULK_QUEUE: "catalog-bulk", TASKS_ENLARGE_QUEUE: "catalog-enlarge", TASKS_ENLARGE_BULK_QUEUE: "catalog-enlarge-bulk" };
-    const body = { batchId: "b1", productId: "p1", sourceImageId: "s1", round: 0 };
-    await enqueueTask("/tasks/catalog/enlarge", body, { env: lanes, client, taskId: enlargeTaskId("s1", 0) });
-    await enqueueTask("/tasks/catalog/enlarge", body, { env: lanes, client, bulk: true, taskId: enlargeTaskId("s1", 1) });
+    const body = { batchId: "b1", productId: "p1", enlargementId: "e1" };
+    await enqueueTask("/tasks/catalog/enlarge", body, { env: lanes, client, taskId: enlargeTaskId("e1", 0) });
+    await enqueueTask("/tasks/catalog/enlarge", body, { env: lanes, client, bulk: true, taskId: enlargeTaskId("e1", 1) });
     await enqueueTask("/tasks/catalog/enlarge", body, { env: { ...env, TASKS_BULK_QUEUE: "catalog-bulk" }, client, bulk: true });
     await enqueueTask("/tasks/catalog/enlarge", body, { env: { ...env, TASKS_BULK_QUEUE: "catalog-bulk" }, client });
     await enqueueTask("/tasks/catalog/chunk", { chunkId: "c1" }, { env: lanes, client });
     const queues = createTask.mock.calls.map(([req]) => (req as { parent: string }).parent.split("/").at(-1));
     expect(queues).toEqual(["catalog-enlarge", "catalog-enlarge-bulk", "catalog-bulk", "catalog", "catalog"]);
     const first = (createTask.mock.calls[0]![0] as { task: BuiltTask }).task;
-    expect(first.name).toBe("projects/image-links-agent/locations/asia-south1/queues/catalog-enlarge/tasks/enlarge-s1-0");
+    expect(first.name).toBe("projects/image-links-agent/locations/asia-south1/queues/catalog-enlarge/tasks/enlarge-e1-0");
     expect(first.httpRequest.url).toBe(`${WORKER}/tasks/catalog/enlarge`);
     expect(JSON.parse(Buffer.from(first.httpRequest.body, "base64").toString())).toEqual(body);
     expect(enlargeTaskId("11111111-2222-3333-4444-555555555555", 12)).toBe("enlarge-11111111-2222-3333-4444-555555555555-12");

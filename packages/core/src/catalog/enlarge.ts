@@ -9,6 +9,11 @@
 // unavailable" 503 is no busy answer: it is retried once, after 60 s. A bad image (400, 413) and an auth or route
 // refusal (401, 403, 404) are never retried. Spec 18 H3 calls it from the durable enlargement task, one attempt per
 // task delivery.
+// Spec 18 enlargement lifecycle 3.4: every failure says what it proves. `ownBody` is true when the answer carried the
+// service's own JSON error body (app.py `{"error": ...}`): the service itself answered. `transport` names a failure
+// before any answer: "refused" and "dns" prove the service absent, "reset" and "other" prove nothing (a crash-shaped
+// failure). probeUpscaleHealth reads /health the same way, for the handler's probe before a call and its re-probe after
+// an unexplained failure.
 import { Agent, fetch as undiciFetch } from "undici";
 import { setTraceHeaders, type MattingTrace } from "./matte";
 import { bearerFor, googleIdTokenFor, raceAbort, type IdTokenFor } from "../id-token";
@@ -50,8 +55,14 @@ export function enlargeTimeoutMs(env: NodeJS.ProcessEnv = process.env): number {
 
 export type EnlargeErrorKind = "busy" | "unavailable" | "timeout" | "bad_input" | "rejected" | "server";
 
+/** A failure before any answer: refused or a DNS error (the service is absent), a reset or another transport error. */
+export type EnlargeTransport = "refused" | "dns" | "reset" | "other";
 /** Every failure of enlargeViaService. `retryable` says whether a later attempt (now or in a retried task) may pass. */
 export class EnlargeError extends Error {
+  /** Spec 18 lifecycle: the answer carried the service's own JSON error body. */
+  ownBody = false;
+  /** Spec 18 lifecycle: the transport failure before any answer, when there was one. */
+  transport: EnlargeTransport | null = null;
   constructor(message: string, readonly kind: EnlargeErrorKind, readonly status: number | null, readonly retryable: boolean, readonly attempts: number) {
     super(message);
     this.name = new.target.name;
@@ -156,11 +167,27 @@ const defaultFetch: typeof fetch = (input, init) => {
 /** The ID token could not be minted (the metadata server); a retryable server error. */
 class TokenMintError extends Error {}
 
-/** True for the service's own "upscale model <id> unavailable" 503 (app.py upscale_error), not Cloud Run's busy 503. */
-async function isModelUnavailable(response: Response): Promise<boolean> {
+/**
+ * True for an answer with the service's own JSON error body (app.py: `{"error": ...}`), such as its "upscale model <id>
+ * unavailable" 503; Cloud Run's own 503 (no instance) and a proxy's 5xx carry none.
+ */
+async function hasOwnBody(response: Response): Promise<boolean> {
   try {
-    return /upscale model \S+ unavailable/.test(await response.text());
+    const body = JSON.parse(await response.text()) as unknown;
+    return !!body && typeof body === "object" && typeof (body as { error?: unknown }).error === "string";
   } catch { return false; }
+}
+/** The transport failure under a fetch error (undici puts the system error in `cause`). */
+export function transportOf(error: unknown): EnlargeTransport {
+  const codes: string[] = [];
+  for (let e: unknown = error, depth = 0; e && typeof e === "object" && depth < 4; e = (e as { cause?: unknown }).cause, depth++) {
+    const code = (e as { code?: unknown }).code;
+    if (typeof code === "string") codes.push(code);
+  }
+  if (codes.includes("ECONNREFUSED")) return "refused";
+  if (codes.some((c) => c === "ENOTFOUND" || c === "EAI_AGAIN" || c === "EAI_NONAME")) return "dns";
+  if (codes.some((c) => c === "ECONNRESET" || c === "UND_ERR_SOCKET" || c === "EPIPE" || c === "UND_ERR_CLOSED")) return "reset";
+  return "other";
 }
 
 /** One attempt: the answer, or a typed EnlargeError. The caller's abort is rethrown as its reason. */
@@ -177,10 +204,10 @@ async function attemptOnce(req: EnlargeRequest, timeoutMs: number, attempts: num
     const bearer = await raceAbort(minted, signal);
     if (bearer) headers.set("Authorization", bearer);
     const response = await deps.fetch(`${base}/upscale?model=${encodeURIComponent(req.model)}&scale=${req.scale ?? 2}`, { method: "POST", body: new Uint8Array(req.jpeg), headers, signal });
-    if (response.status === 503 && await isModelUnavailable(response)) throw new EnlargeModelUnavailableError(attempts);
+    if (response.status === 503 && await hasOwnBody(response)) throw withOwnBody(new EnlargeModelUnavailableError(attempts));
     if (response.status === 429 || response.status === 503) throw new EnlargeBusyError(response.status, attempts);
     if (response.status === 400 || response.status === 413) throw new EnlargeBadInputError(response.status, attempts);
-    if (response.status >= 500) throw new EnlargeServerError(`HTTP ${response.status}`, response.status, attempts);
+    if (response.status >= 500) { const own = await hasOwnBody(response); throw own ? withOwnBody(new EnlargeServerError(`HTTP ${response.status}`, response.status, attempts)) : new EnlargeServerError(`HTTP ${response.status}`, response.status, attempts); }
     if (!response.ok) throw new EnlargeRejectedError(response.status, attempts);
     const jpeg = Buffer.from(await response.arrayBuffer());
     if (!jpeg.length) throw new EnlargeServerError("empty answer", response.status, attempts);
@@ -191,7 +218,42 @@ async function attemptOnce(req: EnlargeRequest, timeoutMs: number, attempts: num
     if (error instanceof EnlargeError) throw error;
     if (timeout.aborted) throw new EnlargeTimeoutError(timeoutMs, attempts);
     if (error instanceof TokenMintError) throw new EnlargeServerError("no ID token", null, attempts);
-    throw new EnlargeServerError(error instanceof Error ? error.name : "transport error", null, attempts);
+    const failure = new EnlargeServerError(error instanceof Error ? error.name : "transport error", null, attempts);
+    failure.transport = transportOf(error);
+    throw failure;
+  }
+}
+function withOwnBody<E extends EnlargeError>(error: E): E { error.ownBody = true; return error; }
+
+/**
+ * Spec 18 lifecycle 3.4 step 7 and 9, what one GET /health proves about the upscale service and `model`:
+ * - "ok": it answered 200 and lists the model as available (or does not list models: an older service).
+ * - "absent": positive proof it cannot serve now: connection refused, a DNS error, its own 503 body, or a 200 that
+ *   lists the model as unavailable (not loaded, paused).
+ * - "busy": 429 (every instance is working: the service is up).
+ * - "no_instance": a 503 or another 5xx without its own body (Cloud Run could not give an instance): proves nothing.
+ * - "timeout": no answer within `timeoutMs` (a cold start may take that long): proves nothing.
+ * - "unknown": any other answer or failure: proves nothing.
+ */
+export type UpscaleProbe = "ok" | "absent" | "busy" | "no_instance" | "timeout" | "unknown";
+export async function probeUpscaleHealth(req: { url: string; model: string; timeoutMs: number }, deps: Pick<EnlargeDeps, "fetch" | "idToken"> = {}): Promise<UpscaleProbe> {
+  const base = req.url.trim().replace(/\/+$/, ""), timeout = AbortSignal.timeout(req.timeoutMs);
+  const fetchFn = deps.fetch ?? defaultFetch, idToken = deps.idToken ?? (sharedIdToken ??= googleIdTokenFor());
+  try {
+    const headers = new Headers();
+    const bearer = await raceAbort(bearerFor(base, idToken), timeout);
+    if (bearer) headers.set("Authorization", bearer);
+    const response = await fetchFn(`${base}/health`, { method: "GET", headers, signal: timeout });
+    if (response.status === 429) return "busy";
+    if (response.status >= 500) return response.status === 503 && await hasOwnBody(response) ? "absent" : "no_instance";
+    if (!response.ok) return "unknown";
+    const body = await response.json().catch(() => null) as { upscale?: { models?: { id?: unknown; available?: unknown }[] } } | null;
+    const listed = body?.upscale?.models?.find((m) => m.id === req.model);
+    return listed && listed.available === false ? "absent" : "ok";
+  } catch (error) {
+    if (timeout.aborted) return "timeout";
+    const transport = transportOf(error);
+    return transport === "refused" || transport === "dns" ? "absent" : "unknown";
   }
 }
 

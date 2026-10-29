@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   DEFAULT_UPSCALE_TIMEOUT_S, ENLARGE_ATTEMPT_FLOOR_MS, ENLARGE_TASK_MARGIN_MS, ENLARGE_UNAVAILABLE_RETRY_MS, EnlargeBadInputError, EnlargeBusyError, enlargeBackoffMs, EnlargeError,
-  EnlargeModelUnavailableError, EnlargeRejectedError, EnlargeServerError, enlargeTimeoutMs, EnlargeTimeoutError, enlargeViaService, upscaleServerTimeoutS,
+  EnlargeModelUnavailableError, EnlargeRejectedError, EnlargeServerError, enlargeTimeoutMs, EnlargeTimeoutError, enlargeViaService, probeUpscaleHealth, transportOf, upscaleServerTimeoutS,
   type EnlargeDeps,
 } from "./enlarge";
 import { ENLARGE_DISPATCH_DEADLINE_SEC } from "../tasks";
@@ -40,7 +40,8 @@ function fakeService(answers: Answer[]) {
     // The service's own 503 (app.py upscale_error); a plain 503 below is Cloud Run's busy answer.
     if (answer === "unavailable") return Response.json({ error: "upscale model swinir-x2 unavailable" }, { status: 503 });
     if (answer === "ok") return new Response(new Uint8Array(X2), { headers: { "content-type": "image/jpeg", "x-upscale-ms": "118000", "x-upscale-model": "swinir-x2" } });
-    return Response.json({ error: "x" }, { status: answer });
+    // A numbered answer carries no service body (Cloud Run's own 503, a proxy's 5xx, a plain 4xx).
+    return new Response("upstream answer", { status: answer });
   }) as unknown as typeof globalThis.fetch;
   const sleeps: number[] = [];
   let clock = 1_000_000;
@@ -276,5 +277,32 @@ describe("enlargement timeouts", () => {
     expect([1, 2, 3, 4, 5, 6, 7].map((a) => enlargeBackoffMs(a, 0))).toEqual([10_000, 20_000, 40_000, 60_000, 60_000, 60_000, 60_000]);
     expect(enlargeBackoffMs(1, 1)).toBe(5_000);
     expect(enlargeBackoffMs(3, 0.5)).toBe(30_000);
+  });
+});
+
+describe("spec 18 lifecycle 3.4: what a failure and a health probe prove", () => {
+  const sys = (code: string) => Object.assign(new TypeError("fetch failed"), { cause: Object.assign(new Error(code), { code }) });
+  it("a transport failure names refused, dns, reset or other; an answer with the service's own JSON body is marked", async () => {
+    expect([transportOf(sys("ECONNREFUSED")), transportOf(sys("ENOTFOUND")), transportOf(sys("EAI_AGAIN")), transportOf(sys("ECONNRESET")), transportOf(new TypeError("x"))]).toEqual(["refused", "dns", "dns", "reset", "other"]);
+    const refused = await enlargeViaService({ url: URL_, jpeg: JPEG, model: "swinir-x2", maxAttempts: 1 }, { idToken: async () => "t", fetch: (async () => { throw sys("ECONNREFUSED"); }) as unknown as typeof fetch }).catch((e: unknown) => e);
+    expect(refused).toMatchObject({ kind: "server", transport: "refused", ownBody: false });
+    const own = await enlargeViaService({ url: URL_, jpeg: JPEG, model: "swinir-x2", maxAttempts: 1 }, { idToken: async () => "t", fetch: (async () => Response.json({ error: "upscale failed" }, { status: 500 })) as unknown as typeof fetch }).catch((e: unknown) => e);
+    expect(own).toMatchObject({ kind: "server", ownBody: true, transport: null });
+    const bare = await enlargeViaService({ url: URL_, jpeg: JPEG, model: "swinir-x2", maxAttempts: 1 }, fakeService([502]).deps).catch((e: unknown) => e);
+    expect(bare).toMatchObject({ kind: "server", ownBody: false });
+    const paused = await enlargeViaService({ url: URL_, jpeg: JPEG, model: "swinir-x2", maxAttempts: 1 }, { idToken: async () => "t", fetch: (async () => Response.json({ error: "paused" }, { status: 503 })) as unknown as typeof fetch }).catch((e: unknown) => e);
+    expect(paused).toMatchObject({ kind: "unavailable", ownBody: true });
+  });
+  it("probeUpscaleHealth: only refused, dns, the service's own 503 or an unavailable model prove absence", async () => {
+    const probe = (answer: (url: string, init: RequestInit) => Promise<Response>, timeoutMs = 1000) => probeUpscaleHealth({ url: URL_, model: "swinir-x2", timeoutMs }, { idToken: async () => "t", fetch: answer as unknown as typeof fetch });
+    expect(await probe(async () => Response.json({ ok: true, upscale: { models: [{ id: "swinir-x2", available: true }] } }))).toBe("ok");
+    expect(await probe(async () => Response.json({ ok: true, upscale: { models: [{ id: "swinir-x2", available: false }] } }))).toBe("absent");
+    expect(await probe(async () => Response.json({ error: "paused" }, { status: 503 }))).toBe("absent");
+    expect(await probe(async () => new Response("no instance", { status: 503 }))).toBe("no_instance");
+    expect(await probe(async () => new Response("busy", { status: 429 }))).toBe("busy");
+    expect(await probe(async () => { throw sys("ECONNREFUSED"); })).toBe("absent");
+    expect(await probe(async () => { throw sys("ENOTFOUND"); })).toBe("absent");
+    expect(await probe(async () => { throw sys("ECONNRESET"); })).toBe("unknown");
+    expect(await probe((_url, init) => new Promise<Response>((_, reject) => init.signal!.addEventListener("abort", () => reject(init.signal!.reason), { once: true })), 20)).toBe("timeout");
   });
 });
