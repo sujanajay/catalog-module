@@ -1,6 +1,6 @@
 import sharp from "sharp";
-import { eq } from "drizzle-orm";
-import { catalogBatches, catalogOutputs, catalogProducts, catalogSourceImages } from "@catalog/core/db/schema";
+import { and, eq } from "drizzle-orm";
+import { catalogBatches, catalogEnlargements, catalogOutputs, catalogProducts, catalogSourceImages } from "@catalog/core/db/schema";
 import { batchPrefix, stagingPath } from "@catalog/core/catalog/naming";
 import { shotGeometry, type Matte, type Prepared, type RenderInput, type RenderMeasured, type RenderOutput } from "@catalog/core/catalog/render";
 import { actionsOn, autoActionsOf, diagnoseOutput, failuresOf, LadderStopped, MAX_REJUDGES_PER_PHOTO, MAX_REPAIRS_PER_OUTPUT, measuredOf, ownDefects, RENDER_FLAGS, variantOf, withAutoActions, type AutoAction, type AutoActionKind, type Repair, type RenderVariant } from "@catalog/core/catalog/auto-resolve";
@@ -8,7 +8,9 @@ import { strictestChannel } from "@catalog/core/catalog/qa/policy";
 import { heldInHand, isBusyBackground, passthroughMatte, passthroughProductLoss, PASSTHROUGH_PRODUCT_LOSS_MAX } from "@catalog/core/catalog/matte-guard";
 import type { ChannelId, OutputFlag, ResolvedPolicy } from "@catalog/core/catalog/types";
 import type { CatalogDeps } from "./deps";
-import { primeStoredEnlargement } from "./enlarge";
+import { batchEnlargement, primeReadiness } from "./enlarge";
+import { pixelHashOf } from "@catalog/core/catalog/pipeline/enlargement";
+import { EnlargementNotReadyError } from "@catalog/core/catalog/upscale";
 import { renderKey, rerenderedKey } from "@catalog/core/catalog/pipeline/publish";
 import { recordCostEvents } from "@catalog/core/cost-events";
 import { matteCallUsd } from "@catalog/core/catalog/cost";
@@ -44,13 +46,26 @@ export interface ResolvePhotoInput {
 }
 export interface ResolveResult { actions: AutoAction[]; fixed: Set<string> }
 
-/** Spec 18: a photo prepared again gets its stored x2 image primed, so a re-render never asks a service for it. */
-export async function preparePrimed(deps: CatalogDeps, source: Pick<typeof catalogSourceImages.$inferSelect,"id"|"rawUri"|"originalName"|"sha256"|"x2Uri"|"x2Model"|"matteUri">, trace: {batchId:string;productId:string}): Promise<Prepared> {
+/**
+ * Spec 18 lifecycle 3.3: a photo prepared again gets its readiness set from the batch's rows (primeReadiness), so a
+ * re-render uses the stored enlargement, holds a terminal one and is not ready (never a plain resize) otherwise. Only
+ * rows made from these very pixels count (a changed prepare is not ready, F43).
+ */
+export async function preparePrimed(deps: CatalogDeps, input: { batch: Batch; source: Source; underClaim: UnderClaim }, trace: {batchId:string;productId:string}): Promise<Prepared> {
+  const {batch,source} = input;
   const p = await deps.prepare((await deps.storage.downloadBuffer(source.rawUri)).buf,source.originalName,b=>deps.matting.convert(b,trace));
-  await primeStoredEnlargement(deps,source,p);
+  const be = batchEnlargement(deps,batch);
+  if (be) {
+    const hash = pixelHashOf(p.rgb,p.width,p.height);
+    const rows = (await deps.db.select().from(catalogEnlargements).where(and(eq(catalogEnlargements.batchId,batch.id),eq(catalogEnlargements.sourceImageId,source.id),eq(catalogEnlargements.wanted,true)))).filter(r=>r.pixelHash === hash);
+    await primeReadiness(deps,{be,batch,photos:[{source,p}],rows,write:input.underClaim});
+  }
   return p;
 }
-const ok = (r: RenderOutput | undefined | null): r is RenderOutput & { jpeg: Buffer } => !!r && r.status === "ok" && r.compliance.ok && !!r.jpeg;
+/** The render context of the batch's pinned route (the plain path when it has none on this worker). */
+const routeContext = (deps: CatalogDeps, batch: Batch): Partial<RenderInput> => { const be = batchEnlargement(deps,batch); return {upscaler:be?.x2 ?? null,upscalerX4:be?.x4 ?? null} as Partial<RenderInput>; };
+// Spec 18 lifecycle 3.7: an image held for its enlargement is never an answer the ladder can accept.
+const ok = (r: RenderOutput | undefined | null): r is RenderOutput & { jpeg: Buffer } => !!r && r.status === "ok" && r.compliance.ok && !!r.jpeg && !r.flags.includes("enlargement_failed");
 const codes = (r: RenderOutput) => r.compliance.failures.map(f => f.split(":")[0]).join(",") || r.notes.join("; ") || r.status;
 /** The context the first render used, read back from the row: one canvas per product, Styli's size kept. */
 const rowContext = (o: Output): Partial<RenderInput> => ({...(o.canvasW > 0 && o.canvasH > 0 ? {canvas:{w:o.canvasW,h:o.canvasH}}:{}),...(o.channel === "styli" && o.scale > 0 ? {uniformScale:o.scale}:{})});
@@ -84,9 +99,10 @@ export async function resolvePhoto(deps: CatalogDeps, input: ResolvePhotoInput):
   if (!input.failing.length) return {actions:[],fixed:new Set()};
   // Ids for the matting service's log lines (x-catalog-batch / x-catalog-product) and the upscale log.
   const trace = {batchId:input.batch.id,productId:product.id};
-  const p = input.prepared ?? await preparePrimed(deps,source,trace);
+  const p = input.prepared ?? await preparePrimed(deps,{batch:input.batch,source,underClaim},trace);
   const first = input.matte ?? await storedMatte(deps,source,p,input.policy.matteModel);
   if (!first) return {actions:[],fixed:new Set()};
+  const route = routeContext(deps,input.batch);
   let second: Matte | null | undefined;
   const secondModel = input.policy.matteModelSecond;
   const secondPossible = !!secondModel && secondModel !== first.model && first.source !== "alpha_source";
@@ -111,7 +127,7 @@ export async function resolvePhoto(deps: CatalogDeps, input: ResolvePhotoInput):
   const render = async (o: Output, v: RenderVariant): Promise<RenderOutput> => {
     const matte = v.matte === "second" ? (await secondMatte())! : v.matte === "passthrough" ? passthroughFor() : first;
     await underClaim(async()=>{});
-    return (await deps.renderAllChannels(p,matte,[o.channel],{shotNumber:source.n,productType:product.productType ?? "other",identifier:product.identifier,publicObjectPath:o.objectPath,...contextFor(o),...variantOptions(v,input.shadowAllowed),...(input.judgedCut ? {judgedCut:true}:{}),trace}))[o.channel];
+    return (await deps.renderAllChannels(p,matte,[o.channel],{shotNumber:source.n,productType:product.productType ?? "other",identifier:product.identifier,publicObjectPath:o.objectPath,...contextFor(o),...variantOptions(v,input.shadowAllowed),...(input.judgedCut ? {judgedCut:true}:{}),...route,trace}))[o.channel];
   };
   const states = new Map<string, OutputState>();
   for (const o of input.outputs) states.set(o.id,{o,variant:variantOf(o.compliance),render:null,failures:failuresOf(o.compliance),measured:measuredOf(o.compliance),tried:actionsOn(o.compliance,o.channel).map(a=>a.step),attempts:0,target:input.failing.some(f=>f.id===o.id)});
@@ -122,6 +138,13 @@ export async function resolvePhoto(deps: CatalogDeps, input: ResolvePhotoInput):
   // The flags the planner answers: the trigger, then whatever the judge still sees after a round.
   let currentTrigger: OutputFlag[] = [...trigger];
   let verdict = null as RejudgeVerdict | null, judgedChannel = null as ChannelId | null, rejudges = 0, changedSinceJudge = true, stopped = false;
+  // Spec 18 lifecycle F8b, F52: a variant that needs an enlargement the batch did not make (not ready) ends the ladder;
+  // the step is recorded skipped, no matte is persisted and every output keeps its first image and hold.
+  let notReady = false;
+  const tryRender = async (o: Output, v: RenderVariant, step: AutoActionKind, channels: ChannelId[]): Promise<RenderOutput | null> => {
+    try { return await render(o,v); }
+    catch (error) { if (!(error instanceof EnlargementNotReadyError)) throw error; record(step,"skipped",channels,"enlargement not ready"); notReady = stopped = true; return null; }
+  };
   // Compliance failing: the latest render (or the row, before any) breaks a channel rule.
   const failing = (st: OutputState) => st.render ? !ok(st.render) : st.failures.length > 0 || st.o.flags.includes("failed_compliance");
   const judgePending = () => judgeTrigger && !(verdict?.passed);
@@ -130,7 +153,8 @@ export async function resolvePhoto(deps: CatalogDeps, input: ResolvePhotoInput):
   const adopt = (st: OutputState, v: RenderVariant, r: RenderOutput) => { st.variant = v; st.render = r; st.measured = r.compliance.measured ?? st.measured; };
   const renderStep = async (st: OutputState, repair: Repair): Promise<void> => {
     st.attempts++; st.tried.push(repair.step);
-    const r = await render(st.o,repair.variant);
+    const r = await tryRender(st.o,repair.variant,repair.step,[st.o.channel]);
+    if (!r) return;
     adopt(st,repair.variant,r);
     record(repair.step,ok(r) ? "passed":"failed",[st.o.channel],ok(r) ? repair.why:`${repair.why}; ${codes(r)}`);
     changedSinceJudge = true;
@@ -138,7 +162,7 @@ export async function resolvePhoto(deps: CatalogDeps, input: ResolvePhotoInput):
   // Render-level repairs, one channel at a time, until each target passes its rules or has nothing left to try.
   const renderRound = async (): Promise<void> => {
     for (const st of targets()) {
-      while ((failing(st) || judgePending()) && st.attempts < MAX_REPAIRS_PER_OUTPUT) {
+      while (!stopped && (failing(st) || judgePending()) && st.attempts < MAX_REPAIRS_PER_OUTPUT) {
         const next = diag(st).find(r=>r.scope === "output");
         if (!next) break;
         await renderStep(st,next);
@@ -175,7 +199,8 @@ export async function resolvePhoto(deps: CatalogDeps, input: ResolvePhotoInput):
     const results: string[] = [];
     for (const st of all) {
       const v: RenderVariant = {...st.variant,matte:repair.variant.matte};
-      const r = await render(st.o,v);
+      const r = await tryRender(st.o,v,repair.step,all.map(x=>x.o.channel));
+      if (!r) return true;
       adopt(st,v,r);
       results.push(`${st.o.channel}: ${ok(r) ? "ok":codes(r)}`);
     }
@@ -185,6 +210,7 @@ export async function resolvePhoto(deps: CatalogDeps, input: ResolvePhotoInput):
   };
   for (;;) {
     await renderRound();
+    if (stopped) break;
     await rejudgeRound();
     if (stopped) break;
     const done = targets().every(st=>!failing(st) && st.render) && !judgePending();
@@ -192,6 +218,7 @@ export async function resolvePhoto(deps: CatalogDeps, input: ResolvePhotoInput):
     if (!(await matteRound())) break;
     if (stopped) break;
   }
+  if (notReady) { await recordActions(deps,input,input.outputs,actions); return {actions,fixed:new Set()}; }
   const written = [...states.values()].filter(st=>st.render && ok(st.render) && !judgePending());
   if (!written.length) { await recordActions(deps,input,input.outputs,actions); return {actions,fixed:new Set()}; }
   // A channel the matte change broke and no repair mended keeps its first image; the record says so.
@@ -254,7 +281,7 @@ export async function flushCutPhoto(deps: CatalogDeps, input: FlushCutInput): Pr
   const done = async (action: AutoAction) => { await recordActions(deps,input,input.outputs,[action]); return action; };
   if (!input.outputs.length) return {step:"flush_cut",trigger,result:"skipped",channels,rejudged:false,detail:"nothing to re-make"};
   const {source,product} = input, trace = {batchId:input.batch.id,productId:product.id};
-  const p = input.prepared ?? await preparePrimed(deps,source,trace);
+  const p = input.prepared ?? await preparePrimed(deps,{batch:input.batch,source,underClaim:input.underClaim},trace);
   const matte = input.matte ?? await storedMatte(deps,source,p,input.policy.matteModel);
   if (!matte) return done({step:"flush_cut",trigger,result:"skipped",channels,rejudged:false,detail:"no cut-out stored"});
   // Only a side the first render did not already place flush is worth a re-render.
@@ -267,7 +294,13 @@ export async function flushCutPhoto(deps: CatalogDeps, input: FlushCutInput): Pr
   for (const o of input.outputs) {
     await input.underClaim(async()=>{});
     // The output's own repairs so far (a smaller fit, a shadow taken off) stay with it.
-    const r = (await deps.renderAllChannels(p,matte,[o.channel],{shotNumber:source.n,productType:product.productType ?? "other",identifier:product.identifier,publicObjectPath:o.objectPath,...contextFor(o),...variantOptions(variantOf(o.compliance),shadowAllowed),judgedCut:true,trace}))[o.channel];
+    let r: RenderOutput;
+    try { r = (await deps.renderAllChannels(p,matte,[o.channel],{shotNumber:source.n,productType:product.productType ?? "other",identifier:product.identifier,publicObjectPath:o.objectPath,...contextFor(o),...variantOptions(variantOf(o.compliance),shadowAllowed),judgedCut:true,...routeContext(deps,input.batch),trace}))[o.channel]; }
+    catch (error) {
+      // Spec 18 lifecycle F10: not ready is a skip, never a failure of the QA delivery.
+      if (error instanceof EnlargementNotReadyError) return done({step:"flush_cut",trigger,result:"skipped",channels,rejudged:false,detail:"enlargement not ready"});
+      throw error;
+    }
     if (!r.flags.includes("cut_in_source")) return done({step:"flush_cut",trigger,result:"failed",channels,rejudged:false,detail:"no cut edge found"});
     if (!ok(r)) return done({step:"flush_cut",trigger,result:"failed",channels,rejudged:false,detail:`${o.channel}: ${codes(r)}`});
     renders.set(o.id,r);
