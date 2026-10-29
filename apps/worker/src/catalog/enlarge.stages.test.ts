@@ -186,6 +186,10 @@ describe("identity (I1)", () => {
     const byId = (x: [string, boolean, string], y: [string, boolean, string]) => x[0].localeCompare(y[0]);
     expect(again.rows.map((r) => [r.id, r.wanted, r.status] as [string, boolean, string]).sort(byId)).toEqual(([[bad!.id, true, "failed"], [good!.id, true, "done"]] as [string, boolean, string][]).sort(byId));
     expect(again).toMatchObject({ queued: false, terminal: 1 });
+    // A render with nothing of these photos to prepare (T40 found it): a wanted photo without a shot keeps its rows,
+    // so a held photo's failed row stays for Try again.
+    await reconcileEnlargements(e.w.deps, { be, batch, product, shots: [], scope, wanted: new Set(scope), mode: "queue", write });
+    expect((await rowsOf(db, s.batch.id)).every((r) => r.wanted)).toBe(true);
     expect(e.service.paid(bad!.productId)).toBe(ENLARGE_ATTEMPTS + 1);
   }, 120_000);
 

@@ -171,7 +171,8 @@ export interface ReconcileResult { rows: CatalogEnlargement[]; queued: boolean; 
  * Spec 18 lifecycle 3.5: brings the product's rows to the batch's wanted set. Upserts the wanted rows (`wanted=true`,
  * status and counters untouched when the row exists: a failed row stays terminal, a done row is reused, F44; a
  * released queued row wanted again gets `sends+1`, a fresh task name, because its earlier task may have run and
- * Cloud Tasks refuses a used name), releases every other wanted row of the photos in `scope` (a replaced photo, an identity no longer planned) and, in
+ * Cloud Tasks refuses a used name), releases every other wanted row of the photos in `scope` that are no longer wanted
+ * or were prepared here (a replaced photo, an identity no longer planned; a wanted photo not prepared keeps its rows) and, in
  * mode "queue", sends the task of every wanted queued row with its current `sends` (Cloud Tasks deduplicates a
  * repeat). Returns the wanted rows as they are now.
  */
@@ -186,7 +187,10 @@ export async function reconcileEnlargements(deps: CatalogDeps, input: ReconcileI
   } else {
     rows = await input.write(async (tx) => {
       const kept = target.length ? await tx.insert(catalogEnlargements).values(target.map((r) => ({ ...r, createdAt: now, updatedAt: now }))).onConflictDoUpdate({ target: [catalogEnlargements.batchId, catalogEnlargements.sourceImageId, catalogEnlargements.identityHash], set: { wanted: true, updatedAt: now, sends: sql`CASE WHEN NOT ${catalogEnlargements.wanted} AND ${catalogEnlargements.status} = 'queued' THEN ${catalogEnlargements.sends} + 1 ELSE ${catalogEnlargements.sends} END` } }).returning() : [];
-      const released = await releaseEnlargements(tx, { batchId: batch.id, productId: product.id, sourceImageIds: input.scope, keepIds: kept.map((r) => r.id) }, now);
+      // A photo this delivery did not prepare (nothing of it to render, its matte unreadable) has no fresh plan: its
+      // rows stay as they are while it still wants an image (a held photo keeps its failed row for Try again).
+      const releasable = input.scope.filter((id) => !input.wanted.has(id) || input.shots.some((shot) => shot.source.id === id));
+      const released = await releaseEnlargements(tx, { batchId: batch.id, productId: product.id, sourceImageIds: releasable, keepIds: kept.map((r) => r.id) }, now);
       if (released.length) deps.log("enlargement released", { batchId: batch.id, productId: product.id, rows: released.length, reason: "not_wanted" });
       return kept;
     });
