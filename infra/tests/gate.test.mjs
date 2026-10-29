@@ -176,6 +176,81 @@ test('deploy.sh: the worker gets catalog-upscale only with UPSCALE_SERVICE=dedic
   assert.ok(!/UPSCALE_URL=\$GATE_TAG_URL/.test(loop), 'the worker never calls a measure candidate');
 });
 
+// The real catalog-upscale registry row, with the probe replaced by $PROBE (the real one starts a Cloud Run job).
+const fakeUpscaleProbe = `eval "orig_$(declare -f service_catalog_upscale)"
+service_catalog_upscale() { orig_service_catalog_upscale; SVC_PROBE=(bash -c "$PROBE" probe); }`;
+
+test('measure mode on a brand-new catalog-upscale: rung 1 is created with its measure tag, probed, never shifted', () => {
+  const r = run('upscale-measure-new', `${vars}\nUPSCALE_MEASURE=1\n${fakeUpscaleProbe}
+deploy_service catalog-upscale; upscale_measure_summary`, {EXISTS: '0', CAND_TAG: 'measure-4c-4t-1r'});
+  assert.equal(r.status, 0, r.err);
+  const deploy = r.calls.find((c) => c.startsWith('run deploy catalog-upscale'));
+  assert.match(deploy, / --no-allow-unauthenticated --tag measure-4c-4t-1r$/);
+  assert.ok(!deploy.includes('--no-traffic'), 'Cloud Run cannot create a service with --no-traffic');
+  assert.ok(r.out.includes(`probe got ${TAG_URL}`), r.out);
+  assert.ok(!r.calls.some((c) => c.includes('update-traffic')), 'a measure rung never moves traffic or tags');
+  assert.ok(r.out.includes('NOTE: catalog-upscale was created by this rung, so this first revision serves the service URL'), r.out);
+  assert.ok(lines(r.out).includes(`UPSCALE_CANDIDATE_URL=${TAG_URL}`));
+  assert.ok(lines(r.out).includes(`==> measure it: bash infra/check-matting.sh --probe-upscale ${TAG_URL} --model=swinir-x2 --sizes=800x1200,1600x1600 --concurrency=1 --rounds=3 --timeout=840`), r.out);
+  assert.match(r.out, /a measure rung never needs a new worker image/);
+});
+
+test('a live revision with a measure-* tag is never a SKIP match and never tagged previous', () => {
+  // Same image, env and flags as the live revision (LIVE_MATCH), but the live revision is a measure rung.
+  const r = run('measure-live', 'deploy_service test-svc', {LIVE_MATCH: '1', MEASURE_LIVE: '1'});
+  assert.equal(r.status, 0, r.err);
+  assert.ok(r.out.includes(`==> test-svc: the live revision ${OLD} is a measure rung; deploying and probing, never SKIP`), r.out);
+  assert.ok(!r.calls.some((c) => c.startsWith(`run revisions describe`)), 'no SKIP comparison at all');
+  assert.ok(r.out.includes(`probe got ${TAG_URL}`), 'the first real deploy runs its own probe');
+  assert.ok(!r.calls.some((c) => c.includes('--update-tags=previous=')), 'a measure rung is no rollback target');
+  assert.ok(r.calls.includes(`run services update-traffic test-svc --region=asia-south1 --to-revisions=${NEW}=100 --quiet`));
+  assert.ok(r.out.includes(`==> test-svc: ${OLD} is a measure rung; not tagged previous`));
+});
+
+test('rollback never defaults to a measure rung; naming it explicitly works', () => {
+  let r = run('rollback-measure', 'rollback_service test-svc', {ROLLBACK_TAGGED: '1', MEASURE_LIVE: '1'});
+  assert.equal(r.status, 1);
+  assert.match(r.err, new RegExp(`${OLD} is a measure rung \\(measure-\\* tag\\), not a revision that served the worker; name it to return to it: bash infra/deploy.sh --rollback test-svc ${OLD}`));
+  assert.ok(!r.calls.some((c) => c.includes('update-traffic')));
+  r = run('rollback-measure-named', `rollback_service test-svc ${OLD}`, {ROLLBACK_TAGGED: '1', MEASURE_LIVE: '1'});
+  assert.equal(r.status, 0, r.err);
+  assert.ok(r.calls.includes(`run services update-traffic test-svc --region=asia-south1 --to-revisions=${OLD}=100 --quiet`));
+});
+
+test('deploy.sh service loop with UPSCALE_MEASURE=1 while the live worker uses catalog-upscale: only catalog-upscale changes', () => {
+  const deploy = fs.readFileSync(path.join(root, 'infra/deploy.sh'), 'utf8');
+  const loop = deploy.slice(deploy.indexOf('MATTING_URL=""; MATTING_GPU_URL=""'), deploy.indexOf('# --- Web access'));
+  const loopFile = path.join(dir, 'measure-loop.sh');
+  fs.writeFileSync(loopFile, loop);
+  const live = 'W=1,MATTING_URL=https://catalog-matting-abc-el.a.run.app,UPSCALE_URL=https://catalog-upscale-abc-el.a.run.app,UPSCALE_TIMEOUT_S=700';
+  const r = run('measure-loop', `${vars}\nUPSCALE_MEASURE=1; MEASURE_ONLY=1; WORKER_ENV='${live}'; WEB_ENV=X=1
+${fakeUpscaleProbe}
+queues_apply_shape() { echo "QUEUES CHANGED"; }
+trap 'echo "WORKER_ENV_AT_EXIT=$WORKER_ENV|WEB_ENV_AT_EXIT=$WEB_ENV"' EXIT
+source "${loopFile.replaceAll('\\', '/')}"
+echo "AFTER THE LOOP"`, {CAND_TAG: 'measure-4c-4t-1r'});
+  assert.equal(r.status, 0, r.err);
+  assert.ok(r.out.includes('==> catalog-matting: reused as it is'), r.out);
+  assert.ok(r.calls.some((c) => c.startsWith('run deploy catalog-upscale ')));
+  for (const service of ['catalog-matting', 'catalog-matting-gpu', 'catalog-worker', 'catalog-web']) {
+    assert.ok(!r.calls.some((c) => c.startsWith(`run deploy ${service} `)), `${service} is not deployed`);
+  }
+  assert.ok(!r.calls.some((c) => / catalog-(matting-gpu|worker|web) /.test(` ${c} `)), 'the worker, web and GPU services are not even read');
+  assert.ok(!r.calls.some((c) => c.includes('update-traffic')));
+  assert.ok(!r.out.includes('QUEUES CHANGED') && !r.out.includes('AFTER THE LOOP'), 'the run stops after the catalog-upscale gate');
+  // The loop only ever appends the reused catalog-matting URL to its local copy; no upscaler setting is touched and the
+  // worker is never deployed with it.
+  const atExit = lines(r.out).find((l) => l.startsWith('WORKER_ENV_AT_EXIT='));
+  assert.equal(atExit, `WORKER_ENV_AT_EXIT=${live},MATTING_URL=${URL}|WEB_ENV_AT_EXIT=X=1`, 'the worker upscaler env is never rebuilt');
+  assert.ok(r.out.includes(`UPSCALE_CANDIDATE_URL=${TAG_URL}`));
+});
+
+test('measure mode reuses every other registry service as it is', () => {
+  const r = run('measure-registry', `${vars}\nUPSCALE_MEASURE=1\nfor s in "\${SERVICES[@]}"; do show "$s"; done`);
+  assert.equal(r.status, 0, r.err);
+  assert.deepEqual(lines(r.out.trim()).map((l) => l.split('|')[5]), ['0', '1', '0', '0', '0']);
+});
+
 test('bootstrap: the worker may invoke catalog-upscale through its project-level run.invoker grant', () => {
   const bootstrap = fs.readFileSync(path.join(root, 'infra/bootstrap.sh'), 'utf8');
   const at = bootstrap.indexOf('project_binding "serviceAccount:$WORKER" roles/run.invoker');
@@ -357,7 +432,7 @@ test('deploy.sh: gate loop after migrate and queues, before jobs and monitoring;
   const deploy = fs.readFileSync(path.join(root, 'infra/deploy.sh'), 'utf8');
   const at = (s) => { const i = deploy.indexOf(s); assert.ok(i >= 0, `${s} not in deploy.sh`); return i; };
   const order = ['shape_check "$SQL_CONNECTION_LIMIT"', 'echo "==> build $TAG"', 'echo "==> migrate"',
-    '\nqueues_create_missing', 'deploy_service "$SERVICE"', 'echo "==> jobs"', 'echo "==> monitoring"'].map(at);
+    '\n  queues_create_missing', 'deploy_service "$SERVICE"', 'echo "==> jobs"', 'echo "==> monitoring"'].map(at);
   assert.deepEqual(order, [...order].sort((a, b) => a - b));
   assert.ok(!deploy.includes('gcloud run deploy'), 'every service deploy goes through the gate');
   assert.ok(!/^bash infra\/catalog-smoke-linux\.sh/m.test(deploy), 'the smoke runs inside the worker gate');

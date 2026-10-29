@@ -122,6 +122,10 @@ try {
     [['--probe-upscale', upscaleUrl, '--models', 'bria-rmbg'], /unknown probe option --models/],
     [['--probe-upscale', upscaleUrl, '--sizes=800x1200', '--sizes', '1600x1600'], /the probe option --sizes is given twice/],
     [['--probe-upscale', upscaleUrl, '--timeout'], /--timeout needs a value/],
+    [['--probe-upscale', upscaleUrl, '--sizes=800*1200'], /--sizes must list sizes such as 800x1200,1600x1600, got '800\*1200'/],
+    [['--probe-upscale', upscaleUrl, '--sizes', '800x1200,'], /--sizes must list sizes/],
+    [['--probe-upscale', upscaleUrl, '--timeout=5'], /--timeout must be a whole number of seconds from 30 to 3600, got '5'/],
+    [['--probe-upscale', upscaleUrl, '--timeout', '8.5'], /--timeout must be a whole number of seconds from 30 to 3600, got '8.5'/],
     [['--probe', tagUrl, '--sizes', '800x1200'], /unknown probe option --sizes/],
     [['--probe-upscale'], /usage: .* --probe-upscale <url>/],
   ]) {

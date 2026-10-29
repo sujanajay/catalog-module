@@ -32,6 +32,11 @@ service_region() {
   esac
 }
 
+# Spec 18 H1: 0 when this run only measures catalog-upscale (UPSCALE_MEASURE=1, not the preview). Every other service
+# is then reused as it is (SVC_DEPLOY=0), and deploy.sh stops after the catalog-upscale gate, so the worker's env is
+# never rebuilt and a measure rung never needs a new worker image.
+upscale_measure_run() { [ "${UPSCALE_MEASURE:-0}" = 1 ] && [ "${CATALOG_PREVIEW:-0}" != 1 ]; }
+
 # The cut-out models the probes measure: the shape's GPU_MATTE_MODELS (infra/lib/shape.sh), all four by default.
 probe_models() { echo "${GPU_MATTE_MODELS:-birefnet-general,birefnet-general-lite,birefnet-hrsod,bria-rmbg}"; }
 
@@ -54,8 +59,9 @@ service_catalog_matting() {
   # birefnet-general is the service's DEFAULT_MATTE_MODEL (services/matting/app.py; SVC_ENV does not change it).
   SVC_PROBE_TIMEOUT=420
   SVC_PROBE=(bash infra/lib/services.sh probe-matting "$SVC_PROBE_TIMEOUT" birefnet-general "$concurrency" 1)
-  # Reuse 05's existing CPU matting service; never change it from an unmerged preview.
+  # Reuse 05's existing CPU matting service; never change it from an unmerged preview or a measure run.
   SVC_DEPLOY=1; [ "${CATALOG_PREVIEW:-0}" = 1 ] && SVC_DEPLOY=0
+  if upscale_measure_run; then SVC_DEPLOY=0; fi
   SVC_SHIFT=1
   SVC_QUOTA_OPTIONAL=0
 }
@@ -76,10 +82,12 @@ service_catalog_upscale() {
   SVC_QUOTA_OPTIONAL=0
   SVC_SKIP_REASON=""
   local size p95 budget=0 first=${UPSCALE_SIZES%%,*}
-  if [ "${UPSCALE_MEASURE:-0}" = 1 ] && [ "${CATALOG_PREVIEW:-0}" != 1 ]; then
+  if upscale_measure_run; then
     # Spec 18 H1, the ladder: a no-traffic candidate per shape, its own tag so every rung keeps its URL for
     # infra/check-matting.sh --probe-upscale. The gate only shows it answers: one warm call and one call of the first
     # probe size, each within the service timeout, plus about 5 minutes for the probe job and the cold start.
+    # Rung 1 of a brand-new service serves the service URL (Cloud Run cannot create with --no-traffic); nothing calls
+    # it, since the worker's UPSCALE_URL is not changed by a measure run.
     SVC_DEPLOY=1; SVC_SHIFT=0
     SVC_TAG=measure-${UPSCALE_CPU_VCPU}c-${UPSCALE_THREADS}t-${UPSCALE_CONCURRENCY}r
     SVC_PROBE_TIMEOUT=$((300 + 2 * UPSCALE_TIMEOUT_S))
@@ -125,7 +133,7 @@ service_catalog_matting_gpu() {
   # up to 9 loads on one resident session should take 3 to 6 minutes. Set from the first probe's time if it is not.
   SVC_PROBE_TIMEOUT=600
   SVC_PROBE=(bash infra/lib/services.sh probe-matting "$SVC_PROBE_TIMEOUT" "$(probe_models)" "$GPU_CONCURRENCY" 5)
-  SVC_DEPLOY=1
+  SVC_DEPLOY=1; if upscale_measure_run; then SVC_DEPLOY=0; fi
   # Spec 17 3.2.5: the preview deploys the GPU service as a no-traffic candidate and never shifts traffic.
   # Its own per-commit tag, so the URL the preview worker calls stays on this revision whatever deploys next.
   SVC_SHIFT=1; [ "${CATALOG_PREVIEW:-0}" = 1 ] && { SVC_SHIFT=0; SVC_TAG=preview-$TAG; }
@@ -146,7 +154,7 @@ service_catalog_worker() {
   # Spec 3.2.2 says 300 s for non-GPU services, but the tier 5 smoke inside this probe takes about 10 minutes
   # (2026-10-21: 10.5 min) and is bounded by its own job timeout of 1500 s (3.2.4). 300 s for /health plus 1500 s.
   SVC_PROBE_TIMEOUT=1800
-  SVC_DEPLOY=1
+  SVC_DEPLOY=1; if upscale_measure_run; then SVC_DEPLOY=0; fi
   SVC_SHIFT=1
   SVC_QUOTA_OPTIONAL=0
 }
@@ -164,9 +172,22 @@ service_catalog_web() {
   # Through IAP as the smoke's identity (the worker's service account, which the catalog-test-smoke job runs as).
   SVC_PROBE=(env "WEB_PROBE_SA=$WORKER_SA" bash infra/lib/services.sh probe-web)
   SVC_PROBE_TIMEOUT=300
-  SVC_DEPLOY=1
+  SVC_DEPLOY=1; if upscale_measure_run; then SVC_DEPLOY=0; fi
   SVC_SHIFT=1
   SVC_QUOTA_OPTIONAL=0
+}
+
+# Spec 18 H1: what a measure run (UPSCALE_MEASURE=1) prints after the catalog-upscale gate, before deploy.sh stops.
+# Reads the gate's results (GATE_TAG_URL, GATE_PREVIOUS, GATE_CHANGED) and the UPSCALE_* shape.
+upscale_measure_summary() {
+  echo "==> measure mode: only catalog-upscale changed. catalog-matting, catalog-matting-gpu, catalog-worker and catalog-web"
+  echo "    were not touched and the worker's env was not rebuilt, so a measure rung never needs a new worker image."
+  if [ "$GATE_CHANGED" = 1 ] && [ -z "$GATE_PREVIOUS" ]; then
+    echo "NOTE: catalog-upscale was created by this rung, so this first revision serves the service URL (Cloud Run cannot"
+    echo "      create a service with --no-traffic). Nothing calls it: the worker's UPSCALE_URL is unchanged."
+  fi
+  echo "UPSCALE_CANDIDATE_URL=$GATE_TAG_URL"
+  echo "==> measure it: bash infra/check-matting.sh --probe-upscale $GATE_TAG_URL --model=$(probe_upscale_model) --sizes=$UPSCALE_SIZES --concurrency=$UPSCALE_CONCURRENCY --rounds=3 --timeout=$UPSCALE_TIMEOUT_S"
 }
 
 # ---- Probes. Each runs as its own process (bash infra/lib/services.sh probe-<kind> ... <url>), exits non-zero on

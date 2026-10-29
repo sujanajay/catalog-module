@@ -395,6 +395,25 @@ def test_upscale_probe_refuses_bad_arguments(args):
         probe.parse_upscale_args(["--probe-upscale", "https://example.com"])
 
 
+def test_upscale_probe_mints_the_token_again_after_50_minutes():
+    minted, now = [], [0.0]
+
+    def mint():
+        minted.append(now[0])
+        return f"tok{len(minted)}"
+    token = probe.RefreshingToken(mint, clock=lambda: now[0])
+    assert token() == "tok1"
+    now[0] = 49 * 60
+    assert token() == "tok1" and len(minted) == 1
+    now[0] = 50 * 60
+    assert token() == "tok2" and minted == [0.0, 3000]
+    up = probe.UpscaleProbe("http://127.0.0.1:1", token, "swinir-x2", [(64, 96)], 30)
+    assert up.token == "tok2"
+    now[0] = 101 * 60
+    assert up.token == "tok3"
+    assert probe.UpscaleProbe("http://127.0.0.1:1", None, "swinir-x2", [(64, 96)], 30).token is None
+
+
 def test_upscale_probe_asks_for_a_token_for_the_service_audience(monkeypatch):
     seen = []
     monkeypatch.setattr(probe.UpscaleProbe, "run", lambda self, concurrency, rounds: None)
