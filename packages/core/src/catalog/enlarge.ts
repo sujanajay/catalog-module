@@ -3,11 +3,12 @@
 // a slow or busy service is waited for and retried, never switched off. Its timeout is the service's own request
 // timeout plus 30 s (UPSCALE_TIMEOUT_S, set by infra/deploy.sh from infra/lib/shape.sh, which sizes it from the
 // measured p95), so the client never gives up on a call the service is still allowed to finish. Retries back off
-// exponentially on busy (429, Cloud Run's 503), timeout, transport errors and other 5xx, and start only while the
-// caller's deadline (by default the task's: DISPATCH_DEADLINE_SEC from the call) still fits a whole attempt. The
-// service's own "upscale model unavailable" 503 is no busy answer: it is retried once, after 60 s. A bad image (400,
-// 413) and an auth or route refusal (401, 403, 404) are never retried. Not wired into the render yet (spec 18 H3 calls
-// it from the durable enlargement task).
+// exponentially on busy (429, Cloud Run's 503), timeout, transport errors and other 5xx. Every attempt ends by the
+// caller's deadline (by default the task's: DISPATCH_DEADLINE_SEC from the call): its timeout is clamped to the time
+// left, and no attempt starts with less than ENLARGE_ATTEMPT_FLOOR_MS left. The service's own "upscale model
+// unavailable" 503 is no busy answer: it is retried once, after 60 s. A bad image (400, 413) and an auth or route
+// refusal (401, 403, 404) are never retried. Spec 18 H3 calls it from the durable enlargement task, one attempt per
+// task delivery.
 import { Agent, fetch as undiciFetch } from "undici";
 import { setTraceHeaders, type MattingTrace } from "./matte";
 import { bearerFor, googleIdTokenFor, raceAbort, type IdTokenFor } from "../id-token";
@@ -30,6 +31,11 @@ export const ENLARGE_BACKOFF_BASE_MS = 10_000;
 export const ENLARGE_BACKOFF_MAX_MS = 60_000;
 /** Attempts at most when the caller gives no deadline. */
 export const ENLARGE_MAX_ATTEMPTS = 5;
+/**
+ * The shortest attempt worth starting: with less time left before the caller's deadline the call is not made and a
+ * timeout is thrown (no attempt counted on the service). Above it, an attempt's timeout is clamped to the time left.
+ */
+export const ENLARGE_ATTEMPT_FLOOR_MS = 60_000;
 
 /** The service's request timeout in seconds from `UPSCALE_TIMEOUT_S` (a whole number from 1 to 840; else 840). */
 export function upscaleServerTimeoutS(env: NodeJS.ProcessEnv = process.env): number {
@@ -86,14 +92,15 @@ export interface EnlargeRequest {
   /** The upload: JPEG bytes (quality 95, 4:4:4 as upscaleUpload makes them). */
   jpeg: Buffer;
   model: string;
-  /** One attempt's timeout; default enlargeTimeoutMs() (UPSCALE_TIMEOUT_S + 30 s). */
+  /** One attempt's timeout; default enlargeTimeoutMs() (UPSCALE_TIMEOUT_S + 30 s). Clamped to the time left before `deadlineAt`. */
   timeoutMs?: number;
   /** Aborts the call and every retry (the task is ending); the abort reason is thrown as it is. */
   signal?: AbortSignal;
   /**
-   * Epoch ms after which no attempt may still be running; an attempt starts only if it fits whole. Default: the task's
-   * dispatch deadline counted from this call, now + DISPATCH_DEADLINE_SEC - ENLARGE_CLIENT_MARGIN_MS; a caller that
-   * knows when its task started passes its own.
+   * Epoch ms after which no attempt may still be running (any margin the caller needs after the call is already taken
+   * off). Each attempt's timeout is clamped to the time left, and none starts with less than ENLARGE_ATTEMPT_FLOOR_MS
+   * left. Default: the task's dispatch deadline counted from this call, now + DISPATCH_DEADLINE_SEC -
+   * ENLARGE_TASK_MARGIN_MS; a caller that knows when its task started passes its own.
    */
   deadlineAt?: number;
   /** Attempts at most (default ENLARGE_MAX_ATTEMPTS), a secondary cap after the deadline. */
@@ -195,16 +202,18 @@ export async function enlargeViaService(req: EnlargeRequest, deps: EnlargeDeps =
   const sleep = deps.sleep ?? defaultSleep;
   const random = deps.random ?? Math.random;
   const io = { fetch: deps.fetch ?? defaultFetch, idToken: deps.idToken ?? (sharedIdToken ??= googleIdTokenFor()), now };
-  const timeoutMs = req.timeoutMs ?? enlargeTimeoutMs();
+  const requestedMs = req.timeoutMs ?? enlargeTimeoutMs();
   const maxAttempts = Math.max(1, req.maxAttempts ?? ENLARGE_MAX_ATTEMPTS);
-  const deadlineAt = req.deadlineAt ?? now() + DISPATCH_DEADLINE_SEC * 1000 - ENLARGE_CLIENT_MARGIN_MS;
-  if (now() + timeoutMs > deadlineAt) {
-    throw new EnlargeTimeoutError(timeoutMs, 0);
-  }
+  const deadlineAt = req.deadlineAt ?? now() + DISPATCH_DEADLINE_SEC * 1000 - ENLARGE_TASK_MARGIN_MS;
+  // The attempt's timeout: the requested one, or the time left before the deadline when that is shorter (the task's
+  // deadline already counts the time spent before the call: reads, download, prepare). A clamped attempt may give up
+  // on a call the service is still allowed to finish; that beats never calling at all (2026-10-29 review, P0).
+  const attemptMs = (): number => Math.min(requestedMs, deadlineAt - now());
+  if (attemptMs() < Math.min(requestedMs, ENLARGE_ATTEMPT_FLOOR_MS)) throw new EnlargeTimeoutError(Math.max(0, attemptMs()), 0);
   let unavailableRetried = false;
   for (let attempt = 1; ; attempt++) {
     try {
-      return await attemptOnce(req, timeoutMs, attempt, io);
+      return await attemptOnce(req, attemptMs(), attempt, io);
     } catch (error) {
       if (!(error instanceof EnlargeError) || attempt >= maxAttempts) throw error;
       let wait: number;
@@ -217,9 +226,9 @@ export async function enlargeViaService(req: EnlargeRequest, deps: EnlargeDeps =
         if (!error.retryable) throw error;
         wait = enlargeBackoffMs(attempt, random());
       }
-      // Never start an attempt that could not run to its full timeout: an abandoned call keeps running on the
-      // service and holds its slot (2026-10-29).
-      if (now() + wait + timeoutMs > deadlineAt) throw error;
+      // Never start an attempt shorter than the floor after the wait: an abandoned call keeps running on the service
+      // and holds its slot (2026-10-29).
+      if (deadlineAt - (now() + wait) < Math.min(requestedMs, ENLARGE_ATTEMPT_FLOOR_MS)) throw error;
       await sleep(wait, req.signal);
     }
   }

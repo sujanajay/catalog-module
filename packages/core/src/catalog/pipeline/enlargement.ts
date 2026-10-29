@@ -18,9 +18,13 @@ import { catalogChunks, catalogSourceImages } from "../../db/schema";
 /** Attempts of one photo's enlargement before it is failed: the enlarge lanes' max-attempts (infra/lib/queues.sh). */
 export const ENLARGE_TASK_MAX_ATTEMPTS = 8;
 /**
- * A parked chunk that saw no enlargement attempt this long has its queued photos' tasks sent again (next round).
- * Each attempt refreshes the parked chunk's progress_at, and one attempt plus the longest queue back-off (300 s) is
- * under 20 minutes, so a photo whose task is still alive is never sent twice by this rule.
+ * A parked chunk whose batch's enlarge lane has been quiet this long has its queued photos' tasks sent again (next
+ * round). Every enlarge delivery of the batch refreshes the progress_at of every parked chunk of the batch, not only
+ * the chunks holding its product: tasks wait in the paced lane (ENLARGE_DISPATCHES_PER_SECOND), so a chunk's own photos
+ * may not reach the worker for a long time while the lane works through earlier ones. While any task of the batch is
+ * delivered, nothing is sent again; once none was for 30 minutes (one attempt plus the longest queue back-off, 300 s,
+ * is under 20), the remaining tasks are taken as lost: the queue gave up on them (its max-attempts also counts 429s
+ * answered before the app) or their enqueue failed.
  */
 export const ENLARGE_STALE_MS = 30 * 60_000;
 /** `task_name` of a chunk parked at the render stage until its photos' enlargements settle. */

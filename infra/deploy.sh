@@ -384,9 +384,10 @@ for SERVICE in "${SERVICES[@]}"; do
       # sends /upscale to it through UPSCALE_URL, so no GPU URL is needed.
       # Spec 18 H2: with UPSCALE_SERVICE=dedicated the worker sends /upscale to catalog-upscale and learns its timeout
       # (the client waits UPSCALE_TIMEOUT_S + 30 s). Spec 18 H3: the enlarge task calls it (enlarge.ts); the render
-      # reads the stored x2 and the matting client refuses a dedicated UPSCALE_URL.
+      # reads the stored x2 and the matting client refuses a dedicated UPSCALE_URL. On cpu and gpu the enlarge task
+      # learns the matting service's own timeout the same way (each attempt is also clamped to the task's deadline).
       if [ "$UPSCALE_SERVICE" = cpu ]; then
-        if [ -n "$UPSCALE_MODEL" ]; then WORKER_ENV+=",UPSCALE_URL=$MATTING_URL"; fi
+        if [ -n "$UPSCALE_MODEL" ]; then WORKER_ENV+=",UPSCALE_URL=$MATTING_URL,UPSCALE_TIMEOUT_S=$MATTING_TIMEOUT_S"; fi
       elif [ "$UPSCALE_SERVICE" = dedicated ]; then
         if [ -z "$UPSCALE_SERVICE_URL" ]; then
           echo "ERROR: UPSCALE_SERVICE=dedicated but catalog-upscale has no URL; the worker was not changed" >&2
@@ -396,6 +397,8 @@ for SERVICE in "${SERVICES[@]}"; do
       elif [ -n "$UPSCALE_MODEL" ] && [ -z "$MATTING_GPU_URL" ]; then
         echo "WARN: UPSCALE_MODEL=$UPSCALE_MODEL ignored: no GPU matting service URL; the render keeps the plain path" >&2
         UPSCALE_MODEL=""
+      elif [ -n "$UPSCALE_MODEL" ]; then
+        WORKER_ENV+=",UPSCALE_TIMEOUT_S=$MATTING_TIMEOUT_S"
       fi
       if [ -n "$UPSCALE_MODEL" ]; then WORKER_ENV+=",UPSCALE_MODEL=$UPSCALE_MODEL"; WEB_ENV+=",UPSCALE_MODEL=$UPSCALE_MODEL"; fi
       ;;

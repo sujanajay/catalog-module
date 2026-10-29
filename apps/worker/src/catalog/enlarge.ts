@@ -6,10 +6,12 @@
 // - The stored image is already there (same source and upscaler in its metadata): done, no call.
 // - A retryable failure (busy, timeout, a server error, a storage or decode hiccup) counts an attempt, records the
 //   reason and answers 503, so Cloud Tasks retries with the lane's back-off.
-// - The last attempt (ENLARGE_TASK_MAX_ATTEMPTS, by x2_attempts or X-CloudTasks-TaskRetryCount, whichever is higher)
+// - The last attempt (ENLARGE_TASK_MAX_ATTEMPTS, counted in x2_attempts: only deliveries that reached this handler)
 //   or a failure no retry can fix (a photo above UPSCALE_MAX_PIXELS, a refused image, a wrong-size answer) writes the
 //   failure, logs ERROR "enlargement failed" and answers 200: the render then holds the photo's enlarged outputs with
-//   `enlargement_failed`. A plain resize never stands in.
+//   `enlargement_failed`. A plain resize never stands in. X-CloudTasks-TaskRetryCount is not used: it also counts 429s
+//   answered before the app ran (spec 17 G4), so a task the queue gives up on is left to the parked chunk's recovery,
+//   which sends it again as the next round with x2_attempts kept (resendStaleEnlargements).
 // Every write of the photo's state locks the chunks holding the product first and unparks the chunk whose last queued
 // photo it settled, in the same transaction; the batch's window is topped up after it.
 import sharp from "sharp";
@@ -18,7 +20,7 @@ import { catalogBatches, catalogChunks, catalogProducts, catalogSourceImages } f
 import { batchPrefix, enlargedPath } from "@catalog/core/catalog/naming";
 import { UnsupportedSourceError, type Prepared } from "@catalog/core/catalog/render";
 import { gpuUrlsFromEnv, isCpuUpscalerId, primeSourceX2, UPSCALE_FACTOR, upscaleUpload } from "@catalog/core/catalog/upscale";
-import { ENLARGE_CLIENT_MARGIN_MS, EnlargeError, enlargeTimeoutMs, enlargeViaService, type EnlargeResult } from "@catalog/core/catalog/enlarge";
+import { ENLARGE_TASK_MARGIN_MS, EnlargeError, enlargeTimeoutMs, enlargeViaService, type EnlargeDeps, type EnlargeResult } from "@catalog/core/catalog/enlarge";
 import { DISPATCH_DEADLINE_SEC } from "@catalog/core/tasks";
 import { ENLARGE_TASK_MAX_ATTEMPTS, ENLARGING_TASK, lockProductChunks, photoEnlargementState, unparkSettledChunks } from "@catalog/core/catalog/pipeline/enlargement";
 import { dispatchChunks } from "@catalog/core/catalog/pipeline/dispatch";
@@ -30,7 +32,8 @@ import { refreshBatchProgress, type CatalogDeps } from "./deps";
 
 /**
  * The service call the handler makes: one attempt, the x2 JPEG as the service answered it. `deadlineAt` (epoch ms) is
- * the delivery's own deadline: the task's start plus DISPATCH_DEADLINE_SEC, less the client margin.
+ * the delivery's own deadline: the delivery's start plus DISPATCH_DEADLINE_SEC (the Cloud Tasks dispatch deadline),
+ * less ENLARGE_TASK_MARGIN_MS for the settle; the attempt's timeout is clamped to it.
  */
 export type EnlargeCall = (jpeg: Buffer, trace: MattingTrace, opts?: { deadlineAt?: number }) => Promise<EnlargeResult>;
 
@@ -43,13 +46,15 @@ export function upscaleMaxPixels(env: NodeJS.ProcessEnv = process.env): number {
 
 /**
  * The worker's service call: the service UPSCALE_URL names (catalog-upscale, or the CPU cut-out service), else the
- * first GPU matting service, as the matting client picks it. One attempt per task delivery: the queue retries.
+ * first GPU matting service, as the matting client picks it. One attempt per task delivery: the queue retries. The
+ * attempt waits UPSCALE_TIMEOUT_S + 30 s (840 s + 30 s when unset), clamped to the delivery's deadline. `deps` is for
+ * tests (a fake fetch and token).
  */
-export function workerEnlargeCall(model: string, env: NodeJS.ProcessEnv = process.env): EnlargeCall {
+export function workerEnlargeCall(model: string, env: NodeJS.ProcessEnv = process.env, deps: EnlargeDeps = {}): EnlargeCall {
   const url = env.UPSCALE_URL?.trim() || gpuUrlsFromEnv(env)[0] || "";
   return (jpeg, trace, opts = {}) => {
     if (!url) throw new EnlargeError("No upscale service is configured (UPSCALE_URL).", "rejected", null, false, 0);
-    return enlargeViaService({ url, jpeg, model, timeoutMs: enlargeTimeoutMs(env), maxAttempts: 1, trace, ...(opts.deadlineAt ? { deadlineAt: opts.deadlineAt } : {}) });
+    return enlargeViaService({ url, jpeg, model, timeoutMs: enlargeTimeoutMs(env), maxAttempts: 1, trace, ...(opts.deadlineAt ? { deadlineAt: opts.deadlineAt } : {}) }, deps);
   };
 }
 
@@ -114,8 +119,10 @@ export async function handleEnlargeTask(deps: CatalogDeps, body: Record<string, 
   // UPSCALE_MODEL was switched off after this photo was queued: no enlargement is wanted any more (the plain path).
   if (!upscaler || !call) { await settle({ x2Model: null }); return answer(200, "off"); }
   const id = photo.x2Model ?? upscaler.model;
-  // The parked chunk waits on this photo: an attempt is progress, so its recovery does not send the task again.
-  await deps.db.update(catalogChunks).set({ progressAt: deps.now() }).where(and(eq(catalogChunks.batchId, batchId), eq(catalogChunks.taskName, ENLARGING_TASK), sql`${catalogChunks.productIds} @> jsonb_build_array(${productId}::text)`));
+  // Spec 18 3.3.4, lane-aware: a delivery shows the batch's enlarge lane is moving, so every parked chunk of the batch
+  // counts it as progress (not only the chunks holding this product). Tasks still waiting in the paced FIFO behind this
+  // one are then never sent again; ENLARGE_STALE_MS means "the batch's lane has been quiet that long".
+  await deps.db.update(catalogChunks).set({ progressAt: deps.now() }).where(and(eq(catalogChunks.batchId, batchId), eq(catalogChunks.taskName, ENLARGING_TASK)));
   try {
     const prefix = batchPrefix(batch.brandSlug, batch.id, batch.isTest);
     const path = enlargedPath(derivedPrefixFor(deps.storage, prefix, photo), product.pathKey, photo.n), uri = deps.storage.toGsUri(deps.storage.getBucketName(), path);
@@ -133,7 +140,7 @@ export async function handleEnlargeTask(deps: CatalogDeps, body: Record<string, 
     let result: EnlargeResult;
     // The model-unavailable 503 is not terminal here: it counts an attempt and the queue retries with its back-off,
     // so a model still loading passes and a deploy problem holds the photo after ENLARGE_TASK_MAX_ATTEMPTS.
-    const deadlineAt = started + DISPATCH_DEADLINE_SEC * 1000 - ENLARGE_CLIENT_MARGIN_MS;
+    const deadlineAt = started + DISPATCH_DEADLINE_SEC * 1000 - ENLARGE_TASK_MARGIN_MS;
     try { result = await call(await upscaleUpload(p.rgb, p.width, p.height), { batchId, productId }, { deadlineAt }); }
     catch (error) {
       if (error instanceof EnlargeError) {
@@ -181,12 +188,13 @@ export async function handleEnlargeTask(deps: CatalogDeps, body: Record<string, 
    */
   async function settle(patch: Partial<Pick<typeof catalogSourceImages.$inferInsert, "x2Uri" | "x2Model" | "x2Error">>, terminal = false): Promise<number> {
     const failure = !("x2Uri" in patch) && "x2Error" in patch;
-    const now = deps.now(), retries = (opts.retryCount ?? 0) + 1;
+    const now = deps.now();
     const { attempts, unparked } = await deps.db.transaction(async (tx) => {
       const chunks = await lockProductChunks(tx as unknown as CatalogDeps["db"], batchId as string, productId as string);
       let attempts = photo!.x2Attempts;
       if (failure) {
-        const next = terminal ? sql`${ENLARGE_TASK_MAX_ATTEMPTS}::int` : sql`LEAST(${ENLARGE_TASK_MAX_ATTEMPTS}::int, GREATEST(${catalogSourceImages.x2Attempts} + 1, ${retries}::int))`;
+        // Only deliveries that reached this handler count (never the queue's retry count, see the header).
+        const next = terminal ? sql`${ENLARGE_TASK_MAX_ATTEMPTS}::int` : sql`LEAST(${ENLARGE_TASK_MAX_ATTEMPTS}::int, ${catalogSourceImages.x2Attempts} + 1)`;
         const [row] = await tx.update(catalogSourceImages).set({ x2Attempts: next, x2Error: patch.x2Error ?? null }).where(and(eq(catalogSourceImages.id, sourceImageId as string), sql`${catalogSourceImages.x2Uri} IS NULL`)).returning({ attempts: catalogSourceImages.x2Attempts });
         attempts = row?.attempts ?? SETTLED_ELSEWHERE;
       } else if (Object.keys(patch).length) {

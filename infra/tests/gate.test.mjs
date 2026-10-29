@@ -169,8 +169,13 @@ test('deploy.sh: the worker gets catalog-upscale only with UPSCALE_SERVICE=dedic
   const deploy = fs.readFileSync(path.join(root, 'infra/deploy.sh'), 'utf8');
   const loop = deploy.slice(deploy.indexOf('for SERVICE in "${SERVICES[@]}"'), deploy.indexOf('# --- Web access'));
   assert.match(loop, /catalog-upscale\)\n[\s\S]*?UPSCALE_SERVICE_URL=\$GATE_URL/);
-  assert.match(loop, /if \[ "\$UPSCALE_SERVICE" = cpu \]; then\n\s+if \[ -n "\$UPSCALE_MODEL" \]; then WORKER_ENV\+=",UPSCALE_URL=\$MATTING_URL"; fi/,
-    'rollback: UPSCALE_SERVICE=cpu still means the CPU cut-out service');
+  assert.match(loop, /if \[ "\$UPSCALE_SERVICE" = cpu \]; then\n\s+if \[ -n "\$UPSCALE_MODEL" \]; then WORKER_ENV\+=",UPSCALE_URL=\$MATTING_URL,UPSCALE_TIMEOUT_S=\$MATTING_TIMEOUT_S"; fi/,
+    'rollback: UPSCALE_SERVICE=cpu still means the CPU cut-out service, with its own timeout');
+  // Spec 18 H3 review (P0): the gpu branch also tells the enlarge task the matting service's timeout.
+  assert.match(loop, /elif \[ -n "\$UPSCALE_MODEL" \]; then\n\s+WORKER_ENV\+=",UPSCALE_TIMEOUT_S=\$MATTING_TIMEOUT_S"/);
+  const services = fs.readFileSync(path.join(root, 'infra/lib/services.sh'), 'utf8');
+  assert.match(services, /^MATTING_TIMEOUT_S=300$/m);
+  assert.equal((services.match(/--timeout="\$MATTING_TIMEOUT_S"/g) ?? []).length, 2, 'both matting services use it');
   assert.match(loop, /elif \[ "\$UPSCALE_SERVICE" = dedicated \]; then[\s\S]*?WORKER_ENV\+=",UPSCALE_URL=\$UPSCALE_SERVICE_URL,UPSCALE_TIMEOUT_S=\$UPSCALE_TIMEOUT_S,UPSCALE_MAX_PIXELS=\$UPSCALE_MAX_PIXELS"/);
   assert.ok(loop.indexOf('catalog-upscale)') < loop.indexOf('catalog-matting-gpu)'), 'the URL is known before the worker env is completed');
   assert.ok(!/UPSCALE_URL=\$GATE_TAG_URL/.test(loop), 'the worker never calls a measure candidate');

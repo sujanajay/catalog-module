@@ -165,7 +165,7 @@ export interface RecoveryResult { lapsed: number; lost: number; unstarted: numbe
  * whose task was queued more than 30 minutes ago, gets the next step and a new task (the old task, if it is only
  * slow, then answers "stale"); then the window is topped up. A live lease and a recently queued task are never
  * touched. Each rule is one guarded update, so a second run at the same time changes nothing. Spec 18: a chunk parked
- * for its photos' enlargements that saw no attempt for ENLARGE_STALE_MS gets the next step (still parked) and its
+ * for its photos' enlargements whose batch saw no enlarge delivery for ENLARGE_STALE_MS gets the next step (still parked) and its
  * queued photos' tasks again, named by that step; one with no queued photo left is unparked.
  */
 export async function recoverBatchChunks(db: Db, enqueue: Enqueue, batchId: string, options: DispatchOptions = {}): Promise<RecoveryResult> {
@@ -191,7 +191,7 @@ export async function recoverBatchChunks(db: Db, enqueue: Enqueue, batchId: stri
 /**
  * Spec 18: the recovery of parked chunks (recoverBatchChunks). A parked chunk with no queued photo is unparked (the
  * settle that should have done it is the only writer, so this is a safety net). One whose progress_at is older than
- * ENLARGE_STALE_MS (no enlarge attempt refreshed it) takes the next step, and each queued photo's task is sent again
+ * ENLARGE_STALE_MS (no enlarge delivery of the batch refreshed it: the batch's enlarge lane is quiet) takes the next step, and each queued photo's task is sent again
  * as round `step`, so the new task never collides with the old name. Returns the number of tasks sent.
  */
 export async function resendStaleEnlargements(db: Db, enqueue: Enqueue, batchId: string, options: Pick<DispatchOptions, "now" | "log"> & { bulk?: boolean } = {}): Promise<number> {

@@ -12,11 +12,12 @@ import type { Prepared } from "@catalog/core/catalog/render";
 import { sourceX2, storedUpscaler, upscalerId } from "@catalog/core/catalog/upscale";
 import { classifyOutputs } from "@catalog/core/catalog/load/classify";
 import { ENLARGEMENT_FAILED_SENTENCE } from "@catalog/core/catalog/types";
-import { ENLARGE_CLIENT_MARGIN_MS, EnlargeBadInputError, EnlargeBusyError } from "@catalog/core/catalog/enlarge";
-import { ENLARGE_TASK_MAX_ATTEMPTS, ENLARGING_TASK } from "@catalog/core/catalog/pipeline/enlargement";
+import { DEFAULT_UPSCALE_TIMEOUT_S, ENLARGE_CLIENT_MARGIN_MS, ENLARGE_TASK_MARGIN_MS, EnlargeBadInputError, EnlargeBusyError } from "@catalog/core/catalog/enlarge";
+import { ENLARGE_STALE_MS, ENLARGE_TASK_MAX_ATTEMPTS, ENLARGING_TASK } from "@catalog/core/catalog/pipeline/enlargement";
+import { resendStaleEnlargements } from "@catalog/core/catalog/pipeline/dispatch";
 import { DISPATCH_DEADLINE_SEC, enlargeTaskId } from "@catalog/core/tasks";
 import { currentChunkTask, deliverChunkToEnd, handleChunkTask } from "./chunk";
-import { handleEnlargeTask, type EnlargeCall, primeStoredEnlargement } from "./enlarge";
+import { handleEnlargeTask, type EnlargeCall, primeStoredEnlargement, workerEnlargeCall } from "./enlarge";
 import { chunkRow, fakeWorld, seedBatch, type FakeWorld } from "../../test/catalog-fakes";
 
 let db: Db, close: () => Promise<void>;
@@ -95,7 +96,7 @@ describe("spec 18 H3: the enlarge task", () => {
     expect(await handleEnlargeTask(w.deps, bodyOf(w, two!.id))).toMatchObject({ httpStatus: 200, outcome: "done" });
     expect(service.call).toHaveBeenCalledTimes(2);
     // The call gets the delivery's own deadline: its start plus the dispatch deadline, less the client margin.
-    const left = service.call.mock.calls[0]![2]!.deadlineAt! - Date.now(), budget = DISPATCH_DEADLINE_SEC * 1000 - ENLARGE_CLIENT_MARGIN_MS;
+    const left = service.call.mock.calls[0]![2]!.deadlineAt! - Date.now(), budget = DISPATCH_DEADLINE_SEC * 1000 - ENLARGE_TASK_MARGIN_MS;
     expect(left).toBeLessThanOrEqual(budget);
     expect(left).toBeGreaterThan(budget - 60_000);
     const photos = await photosOf(s.batch.id);
@@ -176,13 +177,76 @@ describe("spec 18 H3: the enlarge task", () => {
     expect(ledger.every((r) => r.outcome === "failed")).toBe(true);
   }, 60_000);
 
-  it("the queue's last attempt (X-CloudTasks-TaskRetryCount 7) is terminal even when fewer attempts reached the handler", async () => {
+  it("only deliveries that reached the handler count: a high X-CloudTasks-TaskRetryCount (429s before the app) never fails a photo early", async () => {
     const { w, service } = enlargingWorld();
     const s = await matteStage(w, "h3-header", ["trendyol"], 1);
     const [photo] = await photosOf(s.batch.id);
-    service.failures.push(new EnlargeBusyError(503, 1));
-    expect(await handleEnlargeTask(w.deps, bodyOf(w, photo!.id), { retryCount: ENLARGE_TASK_MAX_ATTEMPTS - 1 })).toMatchObject({ httpStatus: 200, outcome: "failed" });
+    for (let i = 0; i < ENLARGE_TASK_MAX_ATTEMPTS; i++) service.failures.push(new EnlargeBusyError(503, 1));
+    // The queue's last attempt by its own count, but the first that reached this handler: 503, one attempt counted.
+    expect(await handleEnlargeTask(w.deps, bodyOf(w, photo!.id), { retryCount: ENLARGE_TASK_MAX_ATTEMPTS - 1 })).toMatchObject({ httpStatus: 503, outcome: "retry" });
+    expect((await photosOf(s.batch.id))[0]).toMatchObject({ x2Attempts: 1, x2Uri: null });
+    // The queue gave up on that task: the photo stays queued and the parked chunk stays parked for its recovery,
+    // which sends the next round with the attempts kept (below, eight real attempts in all before the failure).
+    expect((await chunkRow(db, s.chunks[0]!.id)).taskName).toBe(ENLARGING_TASK);
+    const answers: number[] = [];
+    for (let round = 1; round < ENLARGE_TASK_MAX_ATTEMPTS; round++) answers.push((await handleEnlargeTask(w.deps, { ...bodyOf(w, photo!.id), round }, { retryCount: 50 + round })).httpStatus);
+    expect(answers).toEqual([...Array(ENLARGE_TASK_MAX_ATTEMPTS - 2).fill(503), 200]);
+    expect(service.call).toHaveBeenCalledTimes(ENLARGE_TASK_MAX_ATTEMPTS);
     expect((await photosOf(s.batch.id))[0]!.x2Attempts).toBe(ENLARGE_TASK_MAX_ATTEMPTS);
+  }, 60_000);
+
+  it("on the default env (no UPSCALE_TIMEOUT_S) the worker's call reaches the service once, its timeout clamped below the delivery's deadline", async () => {
+    const { w } = enlargingWorld();
+    const s = await matteStage(w, "h3-default-env", ["trendyol"], 1);
+    const [photo] = await photosOf(s.batch.id);
+    // The real client of the worker (workerEnlargeCall) with an env that names only the service, against a fake fetch.
+    const seen: string[] = [];
+    const fetch = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      seen.push(String(url));
+      const meta = await sharp(Buffer.from(init!.body as Uint8Array)).metadata();
+      const jpeg = await sharp({ create: { width: meta.width! * 2, height: meta.height! * 2, channels: 3, background: { r: 1, g: 2, b: 3 } } }).jpeg().toBuffer();
+      return new Response(new Uint8Array(jpeg), { headers: { "content-type": "image/jpeg", "x-upscale-ms": "5000" } });
+    }) as unknown as typeof globalThis.fetch;
+    const timeouts = vi.spyOn(AbortSignal, "timeout");
+    try {
+      // The delivery started 5 s before the call (reads, download, prepare): the old guard then made no call at all.
+      const started = Date.now() - 5_000;
+      let first = true;
+      w.deps.now = () => { if (first) { first = false; return new Date(started); } return new Date(); };
+      w.deps.enlarge = workerEnlargeCall("swinir-x2", { UPSCALE_URL: "http://localhost:8099" }, { fetch, idToken: async () => "t" });
+      expect(await handleEnlargeTask(w.deps, bodyOf(w, photo!.id))).toMatchObject({ httpStatus: 200, outcome: "done" });
+      expect(fetch).toHaveBeenCalledTimes(1);
+      expect(seen[0]).toBe("http://localhost:8099/upscale?model=swinir-x2&scale=2");
+      const timeoutMs = timeouts.mock.calls.map(([ms]) => ms).at(-1)!;
+      expect(timeoutMs).toBeLessThan(DEFAULT_UPSCALE_TIMEOUT_S * 1000 + ENLARGE_CLIENT_MARGIN_MS);
+      expect(Date.now() + timeoutMs).toBeLessThanOrEqual(started + DISPATCH_DEADLINE_SEC * 1000 - ENLARGE_TASK_MARGIN_MS + 1_000);
+    } finally { timeouts.mockRestore(); }
+    expect((await photosOf(s.batch.id))[0]!.x2Uri).not.toBeNull();
+  }, 60_000);
+
+  it("lane-aware recovery: a delivery for one product refreshes every parked chunk of the batch, so paced tasks are not sent twice", async () => {
+    const { w } = enlargingWorld();
+    const s = await seedBatch(db, w, "h3-lane", [[1], [1], [1]], { channels: ["trendyol"] });
+    for (const chunk of s.chunks) expect((await handleChunkTask(w.deps, await currentChunkTask(db, chunk.id))).httpStatus).toBe(200);
+    for (const chunk of s.chunks) expect((await chunkRow(db, chunk.id)).taskName).toBe(ENLARGING_TASK);
+    const old = new Date(Date.now() - ENLARGE_STALE_MS + 60_000);
+    await db.update(catalogChunks).set({ progressAt: old }).where(eq(catalogChunks.batchId, s.batch.id));
+    // Product A's task reaches the worker; the tasks of B and C still wait in the paced lane.
+    const a = s.chunks[0]!.productIds[0]!, photoA = (await photosOf(s.batch.id)).find((p) => p.productId === a)!;
+    const before = Date.now();
+    expect(await handleEnlargeTask(w.deps, bodyOf(w, photoA.id))).toMatchObject({ outcome: "done" });
+    expect((await chunkRow(db, s.chunks[0]!.id)).taskName).toBeNull();
+    for (const chunk of s.chunks.slice(1)) {
+      const row = await chunkRow(db, chunk.id);
+      expect(row.taskName).toBe(ENLARGING_TASK);
+      expect(+row.progressAt!).toBeGreaterThanOrEqual(before);
+    }
+    // Two minutes later (past where the old progress would have been stale): nothing is sent again.
+    const sent = enlargeTasks(w).length;
+    expect(await resendStaleEnlargements(db, w.deps.enqueue, s.batch.id, { now: new Date(Date.now() + 2 * 60_000) })).toBe(0);
+    // Once the batch's lane was quiet for ENLARGE_STALE_MS, the two waiting photos are sent as the next round.
+    expect(await resendStaleEnlargements(db, w.deps.enqueue, s.batch.id, { now: new Date(Date.now() + ENLARGE_STALE_MS + 60_000) })).toBe(2);
+    expect(enlargeTasks(w).length).toBe(sent + 2);
   }, 60_000);
 
   it("failures no retry fixes fail at once: a refused image, a photo above UPSCALE_MAX_PIXELS (no call), a wrong-size answer", async () => {
