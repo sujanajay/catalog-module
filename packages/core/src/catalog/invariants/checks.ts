@@ -4,6 +4,7 @@
 // Adding a check is adding one object here; runInvariants (run.ts) runs, logs and counts every one.
 import { sql, type SQL } from "drizzle-orm";
 import { PROCESSING_STATUSES } from "../pipeline/dispatch";
+import { DEFAULT_UPSCALE_MIN_SCALE } from "../upscale";
 
 export type InvariantSeverity = "ERROR" | "WARNING";
 export interface InvariantCheck {
@@ -73,5 +74,14 @@ export const CHECKS: readonly InvariantCheck[] = [
     severity: "ERROR",
     sql: () => sql`SELECT c.id, c.batch_id FROM catalog_chunks AS c JOIN catalog_batches AS b ON b.id = c.batch_id
       WHERE b.status = 'done' AND c.status NOT IN ('done', 'failed')`,
+  },
+  {
+    id: "enlarged_without_upscaler",
+    sentence: "In a batch made with the enlargement stage, no verified output is enlarged more than 1.5x without the upscaler (a plain resize never stands in).",
+    severity: "ERROR",
+    // Spec 18: batches started before the stage (no options.enlargement) kept the old silent fallback and are left as they are.
+    sql: () => sql`SELECT o.id, o.batch_id FROM catalog_outputs AS o JOIN catalog_batches AS b ON b.id = o.batch_id
+      WHERE jsonb_typeof(b.options->'enlargement') = 'object' AND o.status = 'verified'
+        AND o.scale > ${DEFAULT_UPSCALE_MIN_SCALE}::real AND NOT (o.flags @> '["upscaled"]'::jsonb)`,
   },
 ];
