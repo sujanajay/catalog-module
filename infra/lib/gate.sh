@@ -18,6 +18,12 @@
 # therefore never a SKIP match (the first real deploy of that shape still runs its own probe), never tagged "previous"
 # when traffic moves on, and never the default target of --rollback (name it to return to it).
 #
+# Service-level max instances (run.googleapis.com/maxScale on the service, gcloud --max): Cloud Run caps a service at
+# the lower of it and the revision's --max-instances, and gcloud run deploy --max-instances sets only the revision.
+# Whenever this gate leaves a revision serving (after a traffic shift, or on SKIP), it sets the service-level max to
+# SVC_MAX when it differs (gcloud run services update --max: no new revision, traffic unchanged). A candidate that
+# does not take traffic (SVC_SHIFT=0: measure rungs, the preview GPU) and a reused service never change it.
+#
 # After a call: GATE_URL (the service URL), GATE_TAG_URL (the candidate URL, or the service URL on SKIP or when
 # reused), GATE_REVISION (the revision the gate deployed or found live), GATE_PREVIOUS (the revision that served
 # before), GATE_CHANGED (1 when a new revision was deployed).
@@ -71,6 +77,20 @@ gate_fail() {
   gate_rollback_line "$SVC_NAME" "$GATE_PREVIOUS" "$SVC_REGION"
 }
 
+# gate_service_max [service description]: set the service-level max instances to SVC_MAX when it differs (see the
+# header). Without a description it updates unconditionally (the update is idempotent). Nothing when SVC_MAX is unset.
+gate_service_max() {
+  [ -n "${SVC_MAX:-}" ] || return 0
+  local live=""
+  [ -n "${1:-}" ] && live=$(gate_json 'j?.metadata?.annotations?.["run.googleapis.com/maxScale"]' <<<"$1")
+  [ "$live" = "$SVC_MAX" ] && return 0
+  echo "==> $SVC_NAME: service max instances ${live:-unset} -> $SVC_MAX (no new revision, traffic unchanged)"
+  gate_gcloud run services update "$SVC_NAME" --region="$SVC_REGION" --max="$SVC_MAX" --quiet >/dev/null && return 0
+  echo "ERROR: $SVC_NAME: could not set the service max instances to $SVC_MAX (now ${live:-unknown}); this step changed no revision or traffic." >&2
+  echo "Set it by hand: gcloud run services update $SVC_NAME --region=$SVC_REGION --max=$SVC_MAX" >&2
+  return 1
+}
+
 # The flags deploy_service passes to gcloud run deploy, one per line (also used by the tests).
 gate_deploy_args() {
   local exists=$1 fingerprint=$2
@@ -119,7 +139,7 @@ deploy_service() {
   local -a args
   fn=service_${name//-/_}
   declare -F "$fn" >/dev/null || { echo "ERROR: $name is not in the service registry (infra/lib/services.sh)" >&2; return 1; }
-  SVC_TAG=""
+  SVC_TAG=""; SVC_MAX=""
   "$fn"
   GATE_URL=""; GATE_TAG_URL=""; GATE_REVISION=""; GATE_PREVIOUS=""; GATE_CHANGED=0
   tag=${SVC_TAG:-$CANDIDATE_TAG}
@@ -161,6 +181,7 @@ deploy_service() {
     GATE_URL=$(gate_json 'j?.status?.url' <<<"$service_json")
     GATE_TAG_URL=$GATE_URL; GATE_REVISION=$previous
     echo "==> $SVC_NAME: SKIP (live revision $previous already runs this image and env)"
+    gate_service_max "$service_json" || return 1
     return 0
   fi
 
@@ -230,12 +251,14 @@ deploy_service() {
   echo "==> $SVC_NAME: live ($GATE_REVISION)"
   # The deploy moved the candidate tag to the new revision; one left on any other revision is stale. Traffic has
   # moved already, so a failure here only warns.
-  if service_json=$(gate_describe run services describe "$SVC_NAME" --region="$SVC_REGION") \
+  service_json=$(gate_describe run services describe "$SVC_NAME" --region="$SVC_REGION") || service_json=""
+  if [ -n "$service_json" ] \
       && [ -n "$(gate_json '(j?.status?.traffic ?? []).find((t) => t.tag === a[0] && t.revisionName !== a[1])?.revisionName' \
         "$CANDIDATE_TAG" "$GATE_REVISION" <<<"$service_json")" ]; then
     gate_gcloud run services update-traffic "$SVC_NAME" --region="$SVC_REGION" --remove-tags="$CANDIDATE_TAG" --quiet >/dev/null \
       || echo "WARN: $SVC_NAME: could not remove the stale $CANDIDATE_TAG tag" >&2
   fi
+  gate_service_max "$service_json" || return 1
   return 0
 }
 

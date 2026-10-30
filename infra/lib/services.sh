@@ -10,6 +10,8 @@
 #   SVC_IMAGE          the image to deploy
 #   SVC_ARGS           array: every other gcloud run deploy flag (service account, shape, network, secrets, labels)
 #   SVC_ENV            the --set-env-vars value (compared with the live revision for SKIP)
+#   SVC_MAX            the service-level max instances (gcloud --max), the same value as the revision's
+#                      --max-instances; the gate sets it once the revision serves (the lower of the two wins)
 #   SVC_PROBE          array: the probe command; the gate appends the candidate's tag URL and runs it under timeout
 #   SVC_PROBE_TIMEOUT  seconds before the probe is killed and counts as failed
 #   SVC_DEPLOY         1 to deploy; 0 to reuse the live service as it is (the preview never changes catalog-matting);
@@ -61,6 +63,7 @@ service_catalog_matting() {
   local concurrency=1
   SVC_ARGS=(--service-account="$MATTING_SA" --cpu=4 --memory=16Gi --concurrency="$concurrency" --min-instances=0
     --max-instances="$MATTING_CPU_MAX_INSTANCES" --timeout="$MATTING_TIMEOUT_S" --labels=app=catalog,component=matte)
+  SVC_MAX=$MATTING_CPU_MAX_INSTANCES
   SVC_ENV="MAX_RESIDENT_SESSIONS=1,UPSCALE_CPU=1"
   # Sized to the service: one CPU cut-out takes 25 to 71 s (measured on a candidate 2026-10-28; the full probe of
   # 4 models x 6 calls plus the switching order took 21 min). So the default model, which the service loads at
@@ -99,6 +102,7 @@ service_catalog_upscale() {
   SVC_IMAGE=$AR/matting:$TAG
   SVC_ARGS=(--service-account="$MATTING_SA" --cpu="$UPSCALE_CPU_VCPU" --memory="$UPSCALE_MEMORY" --concurrency="$UPSCALE_CONCURRENCY"
     --min-instances=0 --max-instances="$UPSCALE_MAX_INSTANCES" --timeout="$UPSCALE_TIMEOUT_S" --labels=app=catalog,component=upscale)
+  SVC_MAX=$UPSCALE_MAX_INSTANCES
   SVC_ENV="MAX_RESIDENT_SESSIONS=1,UPSCALE_CPU=1,PRELOAD_MATTE=0,ORT_INTRA_OP_THREADS=$UPSCALE_THREADS,UPSCALE_MAX_PIXELS=$UPSCALE_MAX_PIXELS,UPSCALE_MAX_PIXELS_X4=$UPSCALE_MAX_PIXELS_X4"
   SVC_QUOTA_OPTIONAL=0
   SVC_SKIP_REASON=""
@@ -160,6 +164,7 @@ service_catalog_matting_gpu() {
   SVC_ARGS=(--service-account="$MATTING_SA" --gpu=1 --gpu-type=nvidia-l4 --no-gpu-zonal-redundancy --no-cpu-throttling
     --cpu="$GPU_CPU" --memory="$GPU_MEMORY" --concurrency="$GPU_CONCURRENCY" --min-instances=0
     --max-instances="$GPU_MAX_INSTANCES" --timeout="$MATTING_TIMEOUT_S" --labels=app=catalog,component=matte-gpu)
+  SVC_MAX=$GPU_MAX_INSTANCES
   SVC_ENV="MAX_RESIDENT_SESSIONS=$MAX_RESIDENT_SESSIONS"
   local knob
   for knob in GPU_MEM_LIMIT_BYTES CUDNN_CONV_ALGO_SEARCH CUDNN_CONV_USE_MAX_WORKSPACE INFERENCE_LOCK_SCOPE; do
@@ -189,6 +194,7 @@ service_catalog_worker() {
   SVC_ARGS=(--service-account="$WORKER_SA" --cpu="$WORKER_CPU" --memory="$WORKER_MEMORY"
     --concurrency="$WORKER_CONCURRENCY" --min-instances=0 --max-instances="$WORKER_MAX_INSTANCES" --timeout="$WORKER_TIMEOUT_S"
     "${NET[@]}" --set-secrets="$WORKER_SECRETS" --labels=app=catalog,component=worker)
+  SVC_MAX=$WORKER_MAX_INSTANCES
   SVC_ENV=$WORKER_ENV
   # The smoke runs on the matting candidates of this deploy (their tag URLs) and names the worker candidate.
   SVC_PROBE=(env "SMOKE_MATTING_URL=${MATTING_PROBE_URL:-}" "SMOKE_MATTING_GPU_URL=${MATTING_GPU_PROBE_URL:-}"
@@ -210,6 +216,7 @@ service_catalog_web() {
   SVC_ARGS=(--service-account="$WEB_SA" --iap --cpu=1 --memory=1Gi --min-instances=0
     --max-instances="$WEB_MAX_INSTANCES" --timeout=300 "${NET[@]}" --set-secrets="$SECRETS"
     --labels=app=catalog,component=web)
+  SVC_MAX=$WEB_MAX_INSTANCES
   SVC_ENV=$WEB_ENV
   # Through IAP as the smoke's identity (the worker's service account, which the catalog-test-smoke job runs as).
   SVC_PROBE=(env "WEB_PROBE_SA=$WORKER_SA" bash infra/lib/services.sh probe-web)

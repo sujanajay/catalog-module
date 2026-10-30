@@ -7,21 +7,24 @@
 #   SHIFT_ERROR=1 update-traffic --to-revisions fails; ROLLBACK_TAGGED=1 $NEW is live and $OLD carries the previous tag;
 #   WARN_ON_STDERR=1 describe also prints a warning on stderr (which must never reach the parsed JSON);
 #   MEASURE_LIVE=1 $OLD also carries the tag measure-4c-4t-1r (a spec 18 ladder rung).
+#   SERVICE_MAX=<n> the service-level max instances (run.googleapis.com/maxScale; default unset);
+#   MAX_ERROR=1 run services update --max fails.
 # After "run deploy" ($STATE/deployed) the description lists the candidate tag ($CAND_TAG) on the new revision.
 gate_gcloud() {
   printf '%s\n' "$*" >> "$LOG"
-  local measure=""
+  local measure="" meta=""
+  if [ -n "${SERVICE_MAX:-}" ]; then meta='"metadata":{"annotations":{"run.googleapis.com/maxScale":"'"$SERVICE_MAX"'"}},'; fi
   if [ "${MEASURE_LIVE:-0}" = 1 ]; then measure=',{"revisionName":"'"$OLD"'","percent":0,"tag":"measure-4c-4t-1r","url":"https://measure-4c-4t-1r---test-svc-abc-el.a.run.app"}'; fi
   case "$1 $2 $3" in
     "run services describe")
       if [ "${WARN_ON_STDERR:-0}" = 1 ]; then echo "WARNING: an update to the Google Cloud CLI is available" >&2; fi
       if [ "${DESCRIBE_ERROR:-0}" = 1 ]; then echo "ERROR: PERMISSION_DENIED mocked" >&2; return 1; fi
       if [ -f "$STATE/deployed" ]; then
-        printf '%s\r\n' '{"status":{"url":"'"$URL"'","traffic":[{"revisionName":"'"$OLD"'","percent":100},{"revisionName":"'"$NEW"'","percent":0,"tag":"'"${CAND_TAG:-candidate}"'","url":"'"$TAG_URL"'"}'"$measure"']}}'
+        printf '%s\r\n' '{'"$meta"'"status":{"url":"'"$URL"'","traffic":[{"revisionName":"'"$OLD"'","percent":100},{"revisionName":"'"$NEW"'","percent":0,"tag":"'"${CAND_TAG:-candidate}"'","url":"'"$TAG_URL"'"}'"$measure"']}}'
       elif [ "${ROLLBACK_TAGGED:-0}" = 1 ]; then
-        printf '%s\r\n' '{"status":{"url":"'"$URL"'","traffic":[{"revisionName":"'"$NEW"'","percent":100,"tag":"candidate"},{"revisionName":"'"$OLD"'","percent":0,"tag":"previous"}'"$measure"']}}'
+        printf '%s\r\n' '{'"$meta"'"status":{"url":"'"$URL"'","traffic":[{"revisionName":"'"$NEW"'","percent":100,"tag":"candidate"},{"revisionName":"'"$OLD"'","percent":0,"tag":"previous"}'"$measure"']}}'
       elif [ "${EXISTS:-1}" = 1 ]; then
-        printf '%s\r\n' '{"status":{"url":"'"$URL"'","traffic":[{"revisionName":"'"$OLD"'","percent":100}'"$measure"']}}'
+        printf '%s\r\n' '{'"$meta"'"status":{"url":"'"$URL"'","traffic":[{"revisionName":"'"$OLD"'","percent":100}'"$measure"']}}'
       else
         echo "ERROR: (gcloud.run.services.describe) Cannot find service [$4]" >&2; return 1
       fi ;;
@@ -32,6 +35,8 @@ gate_gcloud() {
         env=$(node -e 'console.log(JSON.stringify(process.argv[1].split(",").map((p) => ({name: p.split("=")[0], value: p.slice(p.indexOf("=") + 1)})).concat([{name: "DB_PASSWORD", valueFrom: {secretKeyRef: {name: "s", key: "latest"}}}])))' "$SVC_ENV,DEPLOY_ARGS_SHA=${LIVE_FP:-$(gate_fingerprint)}")
       fi
       printf '%s\r\n' '{"spec":{"containers":[{"env":'"$env"'}]},"status":{"imageDigest":"asia-south1-docker.pkg.dev/p/apps/test@'"${LIVE_DIGEST:-$DIGEST}"'"}}' ;;
+    "run services update")
+      if [ "${MAX_ERROR:-0}" = 1 ]; then echo "ERROR: update mocked" >&2; return 1; fi ;;
     "run services update-traffic")
       if [ "${SHIFT_ERROR:-0}" = 1 ] && [[ "$*" == *--to-revisions* ]]; then echo "ERROR: shift mocked" >&2; return 1; fi ;;
     "run deploy test-svc"|"run deploy catalog-matting"|"run deploy catalog-matting-gpu"|"run deploy catalog-upscale")
@@ -48,6 +53,6 @@ service_test_svc() {
   SVC_ENV="A=1,B=two"
   SVC_PROBE=(bash -c "$PROBE" probe)
   SVC_PROBE_TIMEOUT=${PROBE_TIMEOUT:-30}
-  SVC_DEPLOY=1; SVC_SHIFT=${SHIFT:-1}; SVC_QUOTA_OPTIONAL=${QUOTA_OPTIONAL:-0}
+  SVC_DEPLOY=1; SVC_SHIFT=${SHIFT:-1}; SVC_QUOTA_OPTIONAL=${QUOTA_OPTIONAL:-0}; SVC_MAX=${TEST_MAX:-}
   if [ -n "${CAND_TAG:-}" ]; then SVC_TAG=$CAND_TAG; fi
 }
