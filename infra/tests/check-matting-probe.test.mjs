@@ -144,7 +144,15 @@ try {
   const gpu = run(['--probe-upscale', upscaleUrl, '--determinism-calls=12', '--determinism-seconds=600']);
   assert.equal(gpu.status, 0, gpu.stderr);
   assert.deepEqual(gpu.flags['--args'].slice(4), ['--determinism-calls=12', '--determinism-seconds=600', '--bucket=image-links-agent-assets']);
+  // The cap timeout check (2026-10-31): the gate passes both caps; the ratio option is gone.
+  const capped = run(['--probe-upscale', upscaleUrl, '--x2-max-pixels=5400000', '--x4-max-pixels=4900000']);
+  assert.equal(capped.status, 0, capped.stderr);
+  assert.deepEqual(capped.flags['--args'].slice(4), ['--x2-max-pixels=5400000', '--x4-max-pixels=4900000', '--bucket=image-links-agent-assets']);
   for (const [args, error] of [
+    [['--x4-max-pixels=4.9'], /--x4-max-pixels must be a whole number of pixels from 0 \(no check\) to 100000000, got '4.9'/],
+    [['--x4-max-pixels=100000001'], /--x4-max-pixels must be a whole number of pixels from 0 \(no check\) to 100000000, got '100000001'/],
+    [['--x2-max-pixels=-1'], /--x2-max-pixels must be a whole number of pixels from 0 \(no check\) to 100000000, got '-1'/],
+    [['--x4-ratio=1.3'], /unknown probe option --x4-ratio/],
     [['--determinism-calls=1'], /--determinism-calls must be 0 \(none\) or 2 to 16, got '1'/],
     [['--determinism-calls=17'], /--determinism-calls must be 0 \(none\) or 2 to 16, got '17'/],
     [['--cold-start-max=-5'], /--cold-start-max must be a whole number of seconds from 0 \(none\) to 3600, got '-5'/],
