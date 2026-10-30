@@ -35,8 +35,9 @@
 # matting image if missing, skips migrations and queues, reuses every other service as it is, never rebuilds the
 # worker's env, prints the candidate URL and the infra/check-matting.sh --probe-upscale command, and stops before the
 # worker and web gates. A measure rung never needs a new worker image. Rung 1 of a brand-new catalog-upscale serves the
-# service URL (Cloud Run cannot create with --no-traffic); nothing calls it. Quota: with today's shape (171 of 190 vCPU)
-# a rung fits with UPSCALE_MAX_INSTANCES at most 4 at 4 vCPU, or at most 2 at 8 vCPU.
+# service URL (Cloud Run cannot create with --no-traffic); nothing calls it. Quota: the live catalog-upscale counts beside
+# the rung (shape.sh UPSCALE_LIVE_VCPU), and with today's shape (374 of 376 vCPU) there is no room for one: lower the
+# live UPSCALE_MAX_INSTANCES first.
 set -euo pipefail
 
 PROJECT=image-links-agent
@@ -139,7 +140,7 @@ BQ_PROJECT=${BQ_PROJECT:-image-links-agent}
 shape_defaults
 shape_check "$SQL_CONNECTION_LIMIT" || exit 1
 echo "==> connection budget: catalog $CATALOG_DB_TOTAL of $CATALOG_DB_LIMIT (ila-pg $SQL_TIER_LIVE allows $SQL_CONNECTION_LIMIT)"
-echo "==> shape: worker $WORKER_MAX_INSTANCES x ${WORKER_CPU} vCPU/$WORKER_MEMORY; slots $TASKS_MAX_DISPATCHES + bulk $BULK_MAX_DISPATCHES + ingest $INGEST_MAX_DISPATCHES + enlarge $ENLARGE_MAX_DISPATCHES + $ENLARGE_BULK_MAX_DISPATCHES at ${ENLARGE_DISPATCHES_PER_SECOND}/s of $SLOTS_CAPACITY; asia-south1 vCPU $CPU_TOTAL of $CPU_QUOTA_LIMIT; GPU $GPU_MAX_INSTANCES x ${GPU_CPU} vCPU/$GPU_MEMORY concurrency $GPU_CONCURRENCY, $MAX_RESIDENT_SESSIONS resident; upscale on $UPSCALE_SERVICE"
+echo "==> shape: worker $WORKER_MAX_INSTANCES x ${WORKER_CPU} vCPU/$WORKER_MEMORY; slots $TASKS_MAX_DISPATCHES + bulk $BULK_MAX_DISPATCHES + ingest $INGEST_MAX_DISPATCHES + enlarge $ENLARGE_MAX_DISPATCHES at ${ENLARGE_DISPATCHES_PER_SECOND}/s + $ENLARGE_BULK_MAX_DISPATCHES at ${ENLARGE_BULK_DISPATCHES_PER_SECOND}/s of $SLOTS_CAPACITY; asia-south1 vCPU $CPU_TOTAL of $CPU_QUOTA_LIMIT, memory ${MEMORY_TOTAL_GIB:-?} of $MEMORY_QUOTA_LIMIT_GIB GiB; GPU $GPU_MAX_INSTANCES x ${GPU_CPU} vCPU/$GPU_MEMORY concurrency $GPU_CONCURRENCY, $MAX_RESIDENT_SESSIONS resident; upscale on $UPSCALE_SERVICE"
 if upscale_deployed; then
   echo "==> shape: catalog-upscale $UPSCALE_MAX_INSTANCES x ${UPSCALE_CPU_VCPU} vCPU/$UPSCALE_MEMORY, $UPSCALE_THREADS threads, concurrency $UPSCALE_CONCURRENCY, timeout ${UPSCALE_TIMEOUT_S} s$([ "$UPSCALE_MEASURE" = 1 ] && echo " (measure: no-traffic candidate)")"
 fi

@@ -359,6 +359,12 @@ of the same service while the live revision keeps its own max instances, so once
 `shape_check` counts both (`UPSCALE_LIVE_VCPU`, 64): with 3 vCPU to spare, a new rung needs a smaller live
 `UPSCALE_MAX_INSTANCES` first.
 
+Since 2026-10-30 the asia-south1 quotas are 400 vCPU and 800 GiB, and `catalog-upscale` runs 50 x 4 vCPU / 8Gi (spec
+18 section 8, scale-out). `shape_check` now counts every service in the region at max instances, for CPU and for
+memory: both catalog stacks, the jobs and 24 vCPU / 24 GiB for the other apps (ila, npd). With 374 of 376 vCPU used,
+a measure rung beside the live 200 vCPU (`UPSCALE_LIVE_VCPU`, and `UPSCALE_LIVE_GIB` 400) still needs a smaller live
+`UPSCALE_MAX_INSTANCES` first.
+
 How the ladder was run (2026-10-29, the shape defaults then had `UPSCALE_SERVICE=cpu`; since the dedicated shape is
 the default, a measure run must say `UPSCALE_SERVICE=cpu` too, because measure mode refuses `dedicated`. It still
 changes only `catalog-upscale`: the worker's env is not rebuilt, so it keeps calling what its `UPSCALE_URL` names):
@@ -426,7 +432,7 @@ on Centrepoint at 1.2x crops to 2564 x 2564 = 6.57 MP).
 | timeout covers the largest x2 image | 2 x ceil(8 MP x 104.17 s per MP) = 2 x 834 s | 1668 s <= 1740 s |
 | timeout covers the largest x4 image | 2 x ceil(6.4 MP x 104.17 s per MP x 1.3) = 2 x 867 s | 1734 s <= 1740 s |
 | x4 at the x2 cap of 8 MP | 2 x ceil(8 MP x 104.17 x 1.3) = 2 x 1084 s | 2168 s, refused |
-| x4 memory of the largest image under 80% of 16 GiB | 4096 MiB resident + 6.4 MP x 160 B | 5073 MiB <= 13107 MiB |
+| x4 memory of the largest image under 80% of 8 GiB (16 GiB until 2026-10-30) | 4096 MiB resident + 6.4 MP x 160 B | 5073 MiB <= 6553 MiB |
 | x4 output size (sharp's default input limit 268,402,689 px) | 6.4 MP x 16 | 102.4 MP |
 | deploy probe budget, both models, both sizes | 300 + 4 x (100 + 130) + 4 x (216 + 281) | 3208 s |
 
@@ -438,7 +444,9 @@ limit bounds the region; a region needs enlarging only when it is smaller than t
 MP service default would need about 6500 s. Per photo, 4 vCPU costs 4 x 99 = 396 vCPU-s against 8 x 77.4 = 619 for
 8 vCPU, and within the same 64 vCPU 16 x 4 finishes about 1.5x the photos per hour of 8 x 8 (about 580 against 370
 photos of 800x1200 per hour). The enlarge queue rate follows: 2 lanes x `ENLARGE_DISPATCHES_PER_SECOND` 0.075 =
-0.15 per second <= 16 x 1 / p50 99 s = 0.16.
+0.15 per second <= 16 x 1 / p50 99 s = 0.16. Since the 2026-10-30 scale-out (50 instances, live hourly p99 memory 2.9
+GiB, so 8Gi each): the bulk lane has 44 slots at its own `ENLARGE_BULK_DISPATCHES_PER_SECOND` 0.42 and the operator
+lanes (production and preview) 0.04 each; the sum, 0.50 per second, is within 50 x 1 / 99 s = 0.505.
 
 ## Host verification limitations
 
