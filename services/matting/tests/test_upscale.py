@@ -380,7 +380,11 @@ def test_x4_model_with_a_2x_output_is_not_served(enabled, monkeypatch):
 def test_the_build_pins_the_export_hashes_the_render_keys_name():
     # 2026-10-29 review P2-7: the Dockerfile's converter fails the build on an export whose sha256 does not start with
     # its pin, and the render key names the same pin. Both lists must agree (read as text: the converter needs torch).
-    root = Path(__file__).resolve().parents[3]
+    # The image copies only services/matting, so the repo root and packages/core are absent there; CI checks from the repo.
+    parents = Path(__file__).resolve().parents
+    root = parents[3] if len(parents) > 3 else None
+    if root is None or not (root / "packages/core/src/catalog/upscale.ts").is_file():
+        pytest.skip("repo file not in the image; checked by CI from the repo")
     import re
     converter = (root / "services/matting/tools/convert_upscalers.py").read_text(encoding="utf-8")
     core = (root / "packages/core/src/catalog/upscale.ts").read_text(encoding="utf-8")
