@@ -76,6 +76,15 @@ export function enlargementOptionFromEnv(env: NodeJS.ProcessEnv = process.env): 
   const config = upscaleConfigFromEnv(env);
   return { model, ...(config.x4Model ? { x4Model: config.x4Model } : {}), minScale: config.minScale };
 }
+/**
+ * The options Start writes on the batch (web Start, start.ts, and the load driver, catalog/load-start.ts): the
+ * enlargement route pinned from the env when the upscaler is on, the options unchanged when it is off. One function so
+ * every starter makes its batches the same way (a batch without options.enlargement takes the plain path).
+ */
+export function startedBatchOptions<O extends { enlargement?: EnlargementOption | null }>(options: O, env: NodeJS.ProcessEnv = process.env): O {
+  const enlargement = enlargementOptionFromEnv(env);
+  return enlargement ? { ...options, enlargement } : options;
+}
 /** A batch's pinned route (I9): options.enlargement, or null for a batch started before the stage (the plain path). */
 export interface PinnedRoute { model: string; x4Model: string | null; minScale: number }
 export function routeFor(batch: { options: { enlargement?: EnlargementOption | null } | null }): PinnedRoute | null {

@@ -6,7 +6,7 @@ import { buildPreview } from "@catalog/core/catalog/ingest/index";
 import * as storage from "@catalog/core/storage";
 import { enqueueTask } from "@catalog/core/tasks";
 import { chunkImages, dispatchChunks, recoverBatchChunks } from "@catalog/core/catalog/pipeline/dispatch";
-import { enlargementOptionFromEnv } from "@catalog/core/catalog/pipeline/enlargement";
+import { startedBatchOptions } from "@catalog/core/catalog/pipeline/enlargement";
 import { log } from "@catalog/core/log";
 import { db } from "../db";
 import { badRequest, HttpError } from "../errors";
@@ -65,8 +65,7 @@ export async function startBatch(id: string, value: unknown, _actor: string) {
     const rows = [];
     for (let at = 0; at < values.length; at += START_INSERT_ROWS) rows.push(...await tx.insert(catalogChunks).values(values.slice(at, at + START_INSERT_ROWS)).returning());
     // Spec 18: a batch started with the upscaler on is made with the enlargement stage (the invariant's scope).
-    const enlargement = enlargementOptionFromEnv();
-    await tx.update(catalogBatches).set({status:"matting",startedAt:new Date(),updatedAt:new Date(),...(enlargement ? {options:{...current.options,enlargement}}:{}),counts:{...current.counts,products:products.length,sources:sources.length,outputs:sources.length*batch.channels.length,newProducts:preview.overwrite.newProducts,existingProducts:preview.overwrite.existingProducts.length,shotsToRemove:preview.overwrite.existingProducts.reduce((n,p)=>n+p.shotsToRemove.length,0)}}).where(eq(catalogBatches.id,id));
+    await tx.update(catalogBatches).set({status:"matting",startedAt:new Date(),updatedAt:new Date(),options:startedBatchOptions(current.options),counts:{...current.counts,products:products.length,sources:sources.length,outputs:sources.length*batch.channels.length,newProducts:preview.overwrite.newProducts,existingProducts:preview.overwrite.existingProducts.length,shotsToRemove:preview.overwrite.existingProducts.reduce((n,p)=>n+p.shotsToRemove.length,0)}}).where(eq(catalogBatches.id,id));
     return rows;
   });
   // Spec 15 E5: only the batch's window of chunks is queued now; each finished chunk queues the next.
