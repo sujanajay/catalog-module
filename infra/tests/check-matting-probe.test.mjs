@@ -136,6 +136,24 @@ try {
   }
   console.log('PASS --probe-upscale runs the upscale probe as catalog-check-matting with unique items and its own options');
 
+  // Spec 18 gate (plan 7.2): the determinism round and the cold-start limit travel to cloudrun_check.py as given.
+  const gated = run(['--probe-upscale', upscaleUrl, '--determinism-calls=12', '--cold-start-max', '120']);
+  assert.equal(gated.status, 0, gated.stderr);
+  assert.deepEqual(gated.flags['--args'].slice(4), ['--determinism-calls=12', '--cold-start-max=120', '--bucket=image-links-agent-assets']);
+  for (const [args, error] of [
+    [['--determinism-calls=1'], /--determinism-calls must be 0 \(none\) or 2 to 16, got '1'/],
+    [['--determinism-calls=17'], /--determinism-calls must be 0 \(none\) or 2 to 16, got '17'/],
+    [['--cold-start-max=-5'], /--cold-start-max must be a whole number of seconds from 0 \(none\) to 3600, got '-5'/],
+    [['--cold-start-max=3601'], /--cold-start-max must be a whole number of seconds from 0 \(none\) to 3600, got '3601'/],
+    [['--determinism-calls=12', '--determinism-calls=12'], /the probe option --determinism-calls is given twice/],
+  ]) {
+    const refused = run(['--probe-upscale', upscaleUrl, ...args]);
+    assert.equal(refused.status, 2, args.join(' '));
+    assert.match(refused.stderr, error);
+    assert.equal(refused.calls, '');
+  }
+  console.log('PASS --probe-upscale passes the gate\'s determinism round and cold-start limit and refuses bad values');
+
   gpuImage('abc1234');
   const check = run([]);
   assert.equal(check.status, 0, check.stderr);

@@ -184,6 +184,8 @@ def test_upscale_returns_exact_2x_jpeg(enabled, fmt, content_type):
     assert response.headers["content-type"] == "image/jpeg"
     assert response.headers["x-upscale-model"] == "swinir-x2"
     assert int(response.headers["x-upscale-ms"]) >= 0
+    # Spec 18 gate (7.2): the probe maps each answer to the instance that made it.
+    assert response.headers["x-instance-id"] == enabled[1].INSTANCE_ID == enabled[0].get("/health").json()["instanceId"]
     result = Image.open(io.BytesIO(response.content))
     assert result.format == "JPEG" and result.mode == "RGB" and result.size == (74, 46)
     assert [layer[1:3] for layer in result.layer] == [(1, 1)] * 3, "4:4:4, no chroma subsampling"

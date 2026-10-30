@@ -113,6 +113,9 @@ SESSIONS = OrderedDict()
 # Cut-out session loads since this process started, by model; with INSTANCE_ID the probe counts loads per instance.
 LOADS = {}
 INSTANCE_ID = uuid.uuid4().hex[:12]
+# Spec 18 gate (7.2): the process start, so the upscale probe can tell a fresh instance (a cold start it timed) from a
+# warm one (uptimeS in /health is below the time the probe waited only on a fresh instance).
+STARTED_AT = time.monotonic()
 # Spec 16 3.1.2: held only around ONNX session runs and around loading or evicting a session. Decode, resize,
 # normalisation, mask post-processing and PNG encode run outside it, so with concurrency 2 one request's CPU work
 # overlaps the other's inference.
@@ -297,7 +300,7 @@ def health(fresh: bool = False):
     # until it does; gpuMemory is the card-wide figure the probe reads instead.
     return {"ok": True, "models": [{"id": name, "inputSize": INPUT_SIZES[name], "target": TARGET} for name in MODELS], "default": DEFAULT_MODEL, "version": os.getenv("GIT_SHA", "dev"), "upscale": upscale_health(),
             "resident": resident, "residentModels": resident, "maxResident": MAX_RESIDENT_SESSIONS, "gpuMemory": gpu_memory(fresh), "arenaBytesByModel": {},
-            "candidate": os.getenv("K_REVISION") or None, "lockScope": INFERENCE_LOCK_SCOPE, "instanceId": INSTANCE_ID, "loadsByModel": dict(LOADS),
+            "candidate": os.getenv("K_REVISION") or None, "lockScope": INFERENCE_LOCK_SCOPE, "instanceId": INSTANCE_ID, "uptimeS": round(time.monotonic() - STARTED_AT, 1), "loadsByModel": dict(LOADS),
             "vcpu": cpu_limit(), "threads": int(ORT_INTRA_OP_THREADS) if ORT_INTRA_OP_THREADS.isdigit() else None, "preloadMatte": PRELOAD_MATTE == "1",
             # The tile of each loaded upscaler (from its ONNX input); a model that has not loaded yet is absent.
             # A copy: a first /upscale may add a model while this iterates (health never takes INFERENCE_LOCK).
@@ -591,4 +594,6 @@ async def upscale(request: Request, model: str | None = None, scale: str | None 
     if icc:
         options["icc_profile"] = icc
     result.save(output, format="JPEG", **options)
-    return Response(output.getvalue(), media_type="image/jpeg", headers={"X-Upscale-Model": chosen, "X-Upscale-Scale": str(UPSCALE_SCALES[chosen]), "X-Upscale-Ms": str(elapsed)})
+    # X-Instance-Id: the spec 18 gate's determinism round (7.2) maps each answer to the instance that made it.
+    return Response(output.getvalue(), media_type="image/jpeg", headers={"X-Upscale-Model": chosen, "X-Upscale-Scale": str(UPSCALE_SCALES[chosen]), "X-Upscale-Ms": str(elapsed),
+                                                                         "X-Instance-Id": INSTANCE_ID})

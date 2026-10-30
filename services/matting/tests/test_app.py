@@ -438,6 +438,8 @@ def test_health_reports_resident_models_candidate_and_loads(service, monkeypatch
     assert health["lockScope"] == "global"
     assert health["loadsByModel"] == {"birefnet-general": 1}
     assert len(health["instanceId"]) == 12
+    # Spec 18 gate (7.2): seconds since the process started (the probe's fresh-instance check for the cold start).
+    assert isinstance(health["uptimeS"], float) and health["uptimeS"] >= 0
     monkeypatch.setenv("K_REVISION", "catalog-matting-gpu-00042-abc")
     assert client.post("/matte?model=bria-rmbg", files={"file": ("a.png", image_bytes())}).status_code == 200
     health = client.get("/health").json()
