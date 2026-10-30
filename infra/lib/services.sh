@@ -29,7 +29,9 @@
 # by the web's decision API). The new web works with the old worker: it only adds what the old worker never writes
 # (Try again needs a failed enlargement row, which only the new worker makes). If the web gate fails, the worker is
 # not deployed either.
-SERVICES=(catalog-matting catalog-upscale catalog-matting-gpu catalog-web catalog-worker)
+# Spec 18 GPU upscaler (2026-10-30): catalog-upscale-gpu goes right after catalog-upscale, so the worker env knows both
+# upscalers' URLs before the web and the worker are deployed.
+SERVICES=(catalog-matting catalog-upscale catalog-upscale-gpu catalog-matting-gpu catalog-web catalog-worker)
 # The Cloud Run request timeout of the matting services (CPU and GPU). Spec 18 H3: with UPSCALE_SERVICE=cpu or gpu the
 # worker's enlarge task calls /upscale there and learns it as UPSCALE_TIMEOUT_S (infra/deploy.sh).
 MATTING_TIMEOUT_S=300
@@ -41,6 +43,8 @@ UPSCALE_DETERMINISM_CALLS=12
 service_region() {
   case "$1" in
     catalog-matting-gpu) echo "${GPU_REGION:-asia-southeast1}" ;;
+    # Spec 18 GPU upscaler: its own region (owner 2026-10-30), from the UPSCALE_GPU_REGION row of infra/lib/shape.sh.
+    catalog-upscale-gpu) echo "${UPSCALE_GPU_REGION:-asia-south2}" ;;
     *) echo "${REGION:-asia-south1}" ;;
   esac
 }
@@ -151,6 +155,59 @@ service_catalog_upscale() {
     "$UPSCALE_TIMEOUT_S" "$x4_ratio" "$calls" "$cold")
   SVC_DEPLOY=1; SVC_SHIFT=1
   # Like catalog-matting: the preview reuses the live service and never changes it.
+  [ "${CATALOG_PREVIEW:-0}" = 1 ] && SVC_DEPLOY=0
+  return 0
+}
+
+# Spec 18 GPU upscaler: the seconds the GPU determinism round keeps sending (cloudrun_check.py --determinism-seconds)
+# until a second instance answers. A round of 12 GPU calls ends in about 10 s; a fresh GPU instance took 42 to 92 s
+# to answer on 2026-10-30, so 600 s leaves room for Cloud Run to start one under the load.
+UPSCALE_GPU_DETERMINISM_SECONDS=600
+
+service_catalog_upscale_gpu() {
+  # Spec 18 GPU upscaler (owner 2026-10-30): the dedicated GPU enlargement service in its own region. The matting-gpu
+  # image with only the upscaler loaded (PRELOAD_MATTE=0; the GPU image serves /upscale on CUDA), sized by the
+  # UPSCALE_GPU_* rows of infra/lib/shape.sh, which refuse an unmeasured shape. The same pixel caps as catalog-upscale,
+  # so a photo's route (whole or tiles) never depends on which upscaler makes it. The worker invokes it through its
+  # project-level run.invoker grant (infra/bootstrap.sh), which covers every region.
+  SVC_NAME=catalog-upscale-gpu
+  SVC_REGION=$(service_region "$SVC_NAME")
+  SVC_IMAGE=$AR/matting-gpu:$TAG
+  SVC_ARGS=(--service-account="$MATTING_SA" --gpu=1 --gpu-type="$UPSCALE_GPU_TYPE" --no-gpu-zonal-redundancy --no-cpu-throttling
+    --cpu="$UPSCALE_GPU_CPU" --memory="$UPSCALE_GPU_MEMORY" --concurrency="$UPSCALE_GPU_CONCURRENCY" --min-instances=0
+    --max-instances="$UPSCALE_GPU_MAX_INSTANCES" --timeout="$UPSCALE_GPU_TIMEOUT_S" --labels=app=catalog,component=upscale-gpu)
+  SVC_MAX=$UPSCALE_GPU_MAX_INSTANCES
+  SVC_ENV="MAX_RESIDENT_SESSIONS=1,PRELOAD_MATTE=0,UPSCALE_MAX_PIXELS=$UPSCALE_MAX_PIXELS,UPSCALE_MAX_PIXELS_X4=$UPSCALE_MAX_PIXELS_X4"
+  SVC_SKIP_REASON=""
+  # A quota refusal on first creation only warns while the CPU upscaler takes the new batches (the worker then gets no
+  # GPU URL); with UPSCALE_TARGET=gpu it stops the deploy.
+  SVC_QUOTA_OPTIONAL=1; [ "${UPSCALE_TARGET:-cpu}" = gpu ] && SVC_QUOTA_OPTIONAL=0
+  if [ "${UPSCALE_GPU_SERVICE:-0}" != 1 ] || upscale_measure_run; then
+    SVC_DEPLOY=skip; SVC_SHIFT=0; SVC_PROBE=(); SVC_PROBE_TIMEOUT=0
+    SVC_SKIP_REASON="UPSCALE_GPU_SERVICE=${UPSCALE_GPU_SERVICE:-0}"
+    if upscale_measure_run; then SVC_SKIP_REASON="a measure run changes only catalog-upscale"; fi
+    return 0
+  fi
+  # The gate (plan 7.2 as for catalog-upscale): both models, both sizes, a warm call and 3 rounds at the shape's
+  # concurrency (each call 2 x p95 at most, x4 at UPSCALE_GPU_X4_TIME_RATIO x it), the x4/x2 bound, and the
+  # determinism round of UPSCALE_DETERMINISM_CALLS calls of 800x1200 per model across at least 2 instances, kept going
+  # for up to UPSCALE_GPU_DETERMINISM_SECONDS. No cold-start limit: the probe's way of timing one (a long call holds
+  # the warm instance while /health waits for a new one) cannot work when a call takes a second, so the cold start is
+  # measured by hand on a scaled-to-zero service and recorded as UPSCALE_GPU_COLD_START_S (services/matting/README.md).
+  local size p95 x4 budget=0 cold=$UPSCALE_GPU_COLD_START_S
+  for size in ${UPSCALE_SIZES//,/ }; do
+    p95=$(upscale_gpu_p95 "$size"); p95=${p95:-$UPSCALE_GPU_TIMEOUT_S}
+    x4=$(UPSCALE_X4_TIME_RATIO=$UPSCALE_GPU_X4_TIME_RATIO upscale_x4_seconds "$p95")
+    budget=$((budget + 4 * 2 * (p95 + x4)))
+  done
+  # The first call of each model may meet a cold start and the model's load.
+  budget=$((budget + 2 * 2 * cold))
+  budget=$((budget + 2 * (UPSCALE_GPU_DETERMINISM_SECONDS + 2 * cold)))
+  SVC_PROBE_TIMEOUT=$((300 + budget))
+  SVC_PROBE=(env "UPSCALE_DETERMINISM_SECONDS=$UPSCALE_GPU_DETERMINISM_SECONDS" bash infra/lib/services.sh probe-upscale "$SVC_PROBE_TIMEOUT"
+    "$(probe_upscale_model)" "$UPSCALE_SIZES" "$UPSCALE_GPU_CONCURRENCY" 3 "$UPSCALE_GPU_TIMEOUT_S" "$UPSCALE_GPU_X4_TIME_RATIO" "$UPSCALE_DETERMINISM_CALLS" 0)
+  SVC_DEPLOY=1; SVC_SHIFT=1
+  # The preview reuses the live service and never changes it, like catalog-upscale.
   [ "${CATALOG_PREVIEW:-0}" = 1 ] && SVC_DEPLOY=0
   return 0
 }
@@ -310,6 +367,9 @@ probe_upscale() {
   local gate=()
   # Spec 18 gate (plan 7.2): the determinism round and the cold start, only when the registry row asks for them.
   [ "$determinism_calls" = 0 ] || gate+=(--determinism-calls="$determinism_calls")
+  # Spec 18 GPU upscaler: the catalog-upscale-gpu row keeps its determinism round going (env, so the CPU rows keep
+  # their arguments).
+  [ "${UPSCALE_DETERMINISM_SECONDS:-0}" = 0 ] || gate+=(--determinism-seconds="$UPSCALE_DETERMINISM_SECONDS")
   [ "$cold_start_max" = 0 ] || gate+=(--cold-start-max="$cold_start_max")
   PROBE_TASK_TIMEOUT=$timeout bash infra/check-matting.sh --probe-upscale "$url" --model="$model" --sizes="$sizes" \
     --concurrency="$concurrency" --rounds="$rounds" --timeout="$call_timeout" --x4-ratio="$x4_ratio" ${gate[@]+"${gate[@]}"}

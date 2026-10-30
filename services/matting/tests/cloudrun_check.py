@@ -336,6 +336,10 @@ VISUAL_MAX_ABS = 8
 VISUAL_MIN_PSNR_DB = 60.0
 DETERMINISM_SIZE = (800, 1200)
 DETERMINISM_ATTEMPTS = 3
+# Spec 18 GPU upscaler (2026-10-30): with --determinism-seconds s the round keeps going past DETERMINISM_ATTEMPTS until
+# 2 instances answered or s seconds passed, at most this many rounds. A GPU round of 12 calls ends in about 10 s, long
+# before Cloud Run starts a second GPU instance (42 to 92 s measured), so 3 rounds alone stayed on one instance.
+DETERMINISM_MAX_ROUNDS = 200
 # A 429 (no instance free within Cloud Run's queue time) is retried after this many seconds, at most this many times.
 BUSY_RETRY_S = 10
 BUSY_RETRIES = 30
@@ -595,12 +599,17 @@ class UpscaleProbe:
             entry["bodies"] = {}
         return entry["judged"]
 
-    def determinism_round(self, count, size=DETERMINISM_SIZE, sleep=time.sleep):
+    def determinism_round(self, count, size=DETERMINISM_SIZE, sleep=time.sleep, seconds_budget=0, clock=time.monotonic):
         """Spec 18 gate (plan 7.2): `count` calls of one image at once, until at least 2 instances answered (at most
-        DETERMINISM_ATTEMPTS rounds). Every call keeps its sha256 and instance id."""
+        DETERMINISM_ATTEMPTS rounds, or more while fewer than `seconds_budget` seconds passed, up to
+        DETERMINISM_MAX_ROUNDS). Every call keeps its sha256 and instance id."""
         data, label = upscale_image(*size), f"{self.model} {size[0]}x{size[1]} determinism"
         answers, calls, bodies = [], [], {}
-        for attempt in range(1, DETERMINISM_ATTEMPTS + 1):
+        began = clock()
+        for attempt in range(1, DETERMINISM_MAX_ROUNDS + 1):
+            if attempt > DETERMINISM_ATTEMPTS and clock() - began >= seconds_budget:
+                attempt -= 1
+                break
             token = self.token
             with ThreadPoolExecutor(max_workers=count) as pool:
                 results = list(pool.map(lambda _: upscale_until_served(self.url, token, self.model, data, size, self.timeout, self.scale, sleep), range(count)))
@@ -614,7 +623,7 @@ class UpscaleProbe:
         if non200:
             failures.insert(0, f"{label}: {non200} non-200")
         if summary["instances"] < 2:
-            failures.append(f"{label}: {summary['instances']} instance(s) answered in {DETERMINISM_ATTEMPTS} rounds of {count} calls; at least 2 are needed")
+            failures.append(f"{label}: {summary['instances']} instance(s) answered in {attempt} rounds of {count} calls; at least 2 are needed")
         self.determinism = {"model": self.model, "size": f"{size[0]}x{size[1]}", "callsPerRound": count, "rounds": attempt, "calls": calls,
                             **summary, "passed": not failures, "failures": failures}
         return self.determinism
@@ -726,6 +735,7 @@ def parse_upscale_args(argv):
     parser.add_argument("--timeout", type=int, default=900)
     parser.add_argument("--x4-ratio", dest="x4_ratio", type=float, default=0.0)
     parser.add_argument("--determinism-calls", dest="determinism_calls", type=int, default=0)
+    parser.add_argument("--determinism-seconds", dest="determinism_seconds", type=int, default=0)
     parser.add_argument("--cold-start-max", dest="cold_start_max", type=int, default=0)
     parser.add_argument("--bucket", default="")
     parser.add_argument("--run", default="")
@@ -739,6 +749,7 @@ def parse_upscale_args(argv):
     require(30 <= args.timeout <= 3600, "--timeout must be 30 to 3600 seconds")
     require(args.x4_ratio == 0 or args.x4_ratio >= 1, "--x4-ratio must be 0 (no check) or at least 1")
     require(args.determinism_calls == 0 or 2 <= args.determinism_calls <= 16, "--determinism-calls must be 0 (none) or 2 to 16")
+    require(0 <= args.determinism_seconds <= 3600, "--determinism-seconds must be 0 (3 rounds only) to 3600 seconds")
     require(0 <= args.cold_start_max <= 3600, "--cold-start-max must be 0 (none) to 3600 seconds")
     require(args.bucket in ("", PROBE_BUCKET), f"--bucket may only name {PROBE_BUCKET}")
     require(re.fullmatch(r"https://[a-z0-9.-]+\.run\.app|http://(localhost|127\.0\.0\.1):[0-9]+", args.url) is not None, "probe URL must be a run.app or local URL")
@@ -763,7 +774,7 @@ def probe_upscale_main(argv, token_for=None, report_writer=None, now=None, sleep
         probe = UpscaleProbe(args.url, token, model, args.sizes, args.timeout)
         probe.run(args.concurrency, args.rounds)
         if args.determinism_calls:
-            determinism.append(probe.determinism_round(args.determinism_calls, sleep=sleep))
+            determinism.append(probe.determinism_round(args.determinism_calls, sleep=sleep, seconds_budget=args.determinism_seconds))
         model_rows = probe.rows(args.concurrency)
         rows += model_rows
         failures += probe.failures(model_rows)

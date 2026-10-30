@@ -65,6 +65,16 @@ export interface EnlargementOption {
   x4Model?: string;
   /** The scale above which the batch's enlargements use the upscaler; absent (older batches) is 1.5. */
   minScale?: number;
+  /**
+   * Spec 18 GPU upscaler: "gpu" pins the batch to the GPU upscaler (catalog-upscale-gpu, UPSCALE_GPU_URL); absent, the
+   * worker's own target (UPSCALE_URL: catalog-upscale, the `+cpu` ids). Pinned at Start like the model, so switching
+   * UPSCALE_TARGET never moves a running batch and one batch never mixes CPU and GPU images.
+   */
+  target?: "gpu";
+}
+/** Spec 18 GPU upscaler: true when Start pins new batches to the GPU upscaler (`UPSCALE_TARGET=gpu`). */
+export function gpuTargetFromEnv(env: NodeJS.ProcessEnv = process.env): boolean {
+  return env.UPSCALE_TARGET?.trim() === "gpu";
 }
 /**
  * What Start records on the batch (options.enlargement) when the upscaler is on (`UPSCALE_MODEL` set and not "off"):
@@ -74,7 +84,7 @@ export function enlargementOptionFromEnv(env: NodeJS.ProcessEnv = process.env): 
   const model = env.UPSCALE_MODEL?.trim();
   if (!model || model === "off") return null;
   const config = upscaleConfigFromEnv(env);
-  return { model, ...(config.x4Model ? { x4Model: config.x4Model } : {}), minScale: config.minScale };
+  return { model, ...(config.x4Model ? { x4Model: config.x4Model } : {}), minScale: config.minScale, ...(gpuTargetFromEnv(env) ? { target: "gpu" as const } : {}) };
 }
 /**
  * The options Start writes on the batch (web Start, start.ts, and the load driver, catalog/load-start.ts): the
@@ -86,11 +96,11 @@ export function startedBatchOptions<O extends { enlargement?: EnlargementOption 
   return enlargement ? { ...options, enlargement } : options;
 }
 /** A batch's pinned route (I9): options.enlargement, or null for a batch started before the stage (the plain path). */
-export interface PinnedRoute { model: string; x4Model: string | null; minScale: number }
+export interface PinnedRoute { model: string; x4Model: string | null; minScale: number; /** "gpu": catalog-upscale-gpu; null: the worker's UPSCALE_URL target. */ target: "gpu" | null }
 export function routeFor(batch: { options: { enlargement?: EnlargementOption | null } | null }): PinnedRoute | null {
   const e = batch.options?.enlargement;
   if (!e || typeof e !== "object" || !e.model) return null;
-  return { model: e.model, x4Model: e.x4Model ?? null, minScale: typeof e.minScale === "number" ? e.minScale : LEGACY_UPSCALE_MIN_SCALE };
+  return { model: e.model, x4Model: e.x4Model ?? null, minScale: typeof e.minScale === "number" ? e.minScale : LEGACY_UPSCALE_MIN_SCALE, target: e.target === "gpu" ? "gpu" : null };
 }
 
 /** The upscaler identity id (I1): the upscalerId with the model's export hash, `swinir-x2+cpu@9f4a3f85`. */

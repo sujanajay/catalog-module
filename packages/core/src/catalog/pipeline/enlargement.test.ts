@@ -11,7 +11,7 @@ import { catalogBatches, catalogChunks, catalogEnlargements, catalogProducts, ca
 import { dispatchChunks, recoverBatchChunks } from "./dispatch";
 import {
   effectiveScale, enlargedDims, enlargedMetadata, enlargementRouteFor, ENLARGE_MAX_OUTPUT_PIXELS, ENLARGE_SEND_SLOW_MS, ENLARGE_SEND_WARN, ENLARGE_STALE_MS,
-  ENLARGING_TASK, identityOf, lockProductChunks, pixelHashOf, releaseEnlargements, routeFor, tilesFor, unparkSettledChunks, upscalerIdentityId, validateEnlargedObject,
+  ENLARGING_TASK, enlargementOptionFromEnv, identityOf, lockProductChunks, pixelHashOf, releaseEnlargements, routeFor, tilesFor, unparkSettledChunks, upscalerIdentityId, validateEnlargedObject,
 } from "./enlargement";
 
 const env = { UPSCALE_MAX_PIXELS: "8000000", UPSCALE_MAX_PIXELS_X4: "6400000" } as NodeJS.ProcessEnv;
@@ -74,8 +74,18 @@ describe("spec 18 lifecycle 3.2: identity and the size arithmetic", () => {
 
   it("routeFor reads the batch's pinned route; a batch from before the stage has none", () => {
     expect(routeFor({ options: {} })).toBeNull();
-    expect(routeFor({ options: { enlargement: { model: "swinir-x2" } } })).toEqual({ model: "swinir-x2", x4Model: null, minScale: 1.5 });
-    expect(routeFor({ options: { enlargement: { model: "swinir-x2", x4Model: "swinir-x4", minScale: 1 } } })).toEqual({ model: "swinir-x2", x4Model: "swinir-x4", minScale: 1 });
+    expect(routeFor({ options: { enlargement: { model: "swinir-x2" } } })).toEqual({ model: "swinir-x2", x4Model: null, minScale: 1.5, target: null });
+    expect(routeFor({ options: { enlargement: { model: "swinir-x2", x4Model: "swinir-x4", minScale: 1 } } })).toEqual({ model: "swinir-x2", x4Model: "swinir-x4", minScale: 1, target: null });
+    // Spec 18 GPU upscaler: a batch started with UPSCALE_TARGET=gpu keeps the GPU for its whole life.
+    expect(routeFor({ options: { enlargement: { model: "swinir-x2", x4Model: "swinir-x4", minScale: 1, target: "gpu" } } })).toEqual({ model: "swinir-x2", x4Model: "swinir-x4", minScale: 1, target: "gpu" });
+  });
+
+  it("GPU upscaler: Start pins target gpu only with UPSCALE_TARGET=gpu; cpu or unset pins none (the worker's UPSCALE_URL target)", () => {
+    const env = { UPSCALE_MODEL: "swinir-x2", UPSCALE_MODEL_X4: "swinir-x4", UPSCALE_MIN_SCALE: "1" };
+    expect(enlargementOptionFromEnv(env)).toEqual({ model: "swinir-x2", x4Model: "swinir-x4", minScale: 1 });
+    expect(enlargementOptionFromEnv({ ...env, UPSCALE_TARGET: "cpu" })).toEqual({ model: "swinir-x2", x4Model: "swinir-x4", minScale: 1 });
+    expect(enlargementOptionFromEnv({ ...env, UPSCALE_TARGET: "gpu" })).toEqual({ model: "swinir-x2", x4Model: "swinir-x4", minScale: 1, target: "gpu" });
+    expect(enlargementOptionFromEnv({ ...env, UPSCALE_MODEL: "off", UPSCALE_TARGET: "gpu" })).toBeNull();
   });
 });
 

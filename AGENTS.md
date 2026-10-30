@@ -3,7 +3,9 @@
   Executable specs live in docs/specs/ and are run through docs/specs/00-execution-protocol.md
   (open a spec, say "execute").
 - GCP project image-links-agent, region asia-south1. Use gcloud only; every infra change goes in
-  infra/*.sh, idempotent (check-then-create), re-runnable.
+  infra/*.sh, idempotent (check-then-create), re-runnable. One exception (owner approved 2026-10-30):
+  the GPU upscaler catalog-upscale-gpu runs in its own region (UPSCALE_GPU_REGION, asia-south2), where its
+  RTX PRO 6000 GPUs were measured. Everything else stays in asia-south1.
 - The operator's gcloud default project is NOT this one. Scripts must export
   CLOUDSDK_CORE_PROJECT=image-links-agent rather than changing global gcloud config.
 - Never print, read, or log secret values. Secrets come from Secret Manager env mounts only.

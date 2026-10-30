@@ -140,6 +140,9 @@ shape_defaults
 shape_check "$SQL_CONNECTION_LIMIT" || exit 1
 echo "==> connection budget: catalog $CATALOG_DB_TOTAL of $CATALOG_DB_LIMIT (ila-pg $SQL_TIER_LIVE allows $SQL_CONNECTION_LIMIT)"
 echo "==> shape: worker $WORKER_MAX_INSTANCES x ${WORKER_CPU} vCPU/$WORKER_MEMORY; slots $TASKS_MAX_DISPATCHES + bulk $BULK_MAX_DISPATCHES + ingest $INGEST_MAX_DISPATCHES + enlarge $ENLARGE_MAX_DISPATCHES + $ENLARGE_BULK_MAX_DISPATCHES at ${ENLARGE_DISPATCHES_PER_SECOND}/s of $SLOTS_CAPACITY; asia-south1 vCPU $CPU_TOTAL of $CPU_QUOTA_LIMIT; GPU $GPU_MAX_INSTANCES x ${GPU_CPU} vCPU/$GPU_MEMORY concurrency $GPU_CONCURRENCY, $MAX_RESIDENT_SESSIONS resident; upscale on $UPSCALE_SERVICE"
+if upscale_gpu_deployed; then
+  echo "==> shape: catalog-upscale-gpu $UPSCALE_GPU_MAX_INSTANCES x $UPSCALE_GPU_TYPE ($UPSCALE_GPU_CPU vCPU/$UPSCALE_GPU_MEMORY) in $UPSCALE_GPU_REGION, concurrency $UPSCALE_GPU_CONCURRENCY, timeout ${UPSCALE_GPU_TIMEOUT_S} s; new batches enlarge on $UPSCALE_TARGET"
+fi
 if upscale_deployed; then
   echo "==> shape: catalog-upscale $UPSCALE_MAX_INSTANCES x ${UPSCALE_CPU_VCPU} vCPU/$UPSCALE_MEMORY, $UPSCALE_THREADS threads, concurrency $UPSCALE_CONCURRENCY, timeout ${UPSCALE_TIMEOUT_S} s$([ "$UPSCALE_MEASURE" = 1 ] && echo " (measure: no-traffic candidate)")"
 fi
@@ -346,7 +349,7 @@ fi
 source infra/lib/services.sh
 # shellcheck source=lib/gate.sh
 source infra/lib/gate.sh
-MATTING_URL=""; MATTING_GPU_URL=""; MATTING_PROBE_URL=""; MATTING_GPU_PROBE_URL=""; UPSCALE_SERVICE_URL=""
+MATTING_URL=""; MATTING_GPU_URL=""; MATTING_PROBE_URL=""; MATTING_GPU_PROBE_URL=""; UPSCALE_SERVICE_URL=""; UPSCALE_GPU_SERVICE_URL=""
 MATTING_REVISION=""
 SHIFTED=()
 for SERVICE in "${SERVICES[@]}"; do
@@ -354,6 +357,8 @@ for SERVICE in "${SERVICES[@]}"; do
   deploy_service "$SERVICE" || GATE_STATUS=$?
   if [ "$SERVICE" = catalog-matting-gpu ] && [ "$GATE_STATUS" = 75 ]; then
     echo "WARN: GPU quota refused; worker will use CPU. Request NVIDIA L4 (no zonal redundancy) quota in $GPU_REGION for project $PROJECT at https://console.cloud.google.com/iam-admin/quotas?project=$PROJECT" >&2
+  elif [ "$SERVICE" = catalog-upscale-gpu ] && [ "$GATE_STATUS" = 75 ]; then
+    echo "WARN: $UPSCALE_GPU_TYPE quota refused in $UPSCALE_GPU_REGION; the worker gets no GPU upscaler and new batches stay on catalog-upscale (UPSCALE_TARGET=cpu)" >&2
   elif [ "$GATE_STATUS" != 0 ]; then
     echo "ERROR: deploy stopped at $SERVICE; the services after it were not changed" >&2
     if [ ${#SHIFTED[@]} -gt 0 ]; then
@@ -375,6 +380,15 @@ for SERVICE in "${SERVICES[@]}"; do
       if [ "$MEASURE_ONLY" = 1 ]; then
         upscale_measure_summary
         exit 0
+      fi
+      ;;
+    catalog-upscale-gpu)
+      # Spec 18 GPU upscaler: the worker always learns the GPU upscaler when it is deployed (not only with
+      # UPSCALE_TARGET=gpu), so batches pinned to it keep enlarging after a switch back to cpu. The worker calls the
+      # service URL; the preview reuses the live service the same way.
+      if [ "$GATE_STATUS" = 0 ] && [ "$SVC_DEPLOY" != skip ]; then
+        UPSCALE_GPU_SERVICE_URL=$GATE_URL
+        if [ -n "$UPSCALE_MODEL" ]; then WORKER_ENV+=",UPSCALE_GPU_URL=$UPSCALE_GPU_SERVICE_URL,UPSCALE_GPU_TIMEOUT_S=$UPSCALE_GPU_TIMEOUT_S,UPSCALE_GPU_COLD_START_S=$UPSCALE_GPU_COLD_START_S"; fi
       fi
       ;;
     catalog-matting-gpu)
@@ -410,6 +424,15 @@ for SERVICE in "${SERVICES[@]}"; do
         WORKER_ENV+=",UPSCALE_TIMEOUT_S=$MATTING_TIMEOUT_S,UPSCALE_COLD_START_S=$UPSCALE_COLD_START_S"
       fi
       if [ -n "$UPSCALE_MODEL" ]; then WORKER_ENV+=",UPSCALE_MODEL=$UPSCALE_MODEL,UPSCALE_MODEL_X4=${UPSCALE_MODEL_X4:-off}"; WEB_ENV+=",UPSCALE_MODEL=$UPSCALE_MODEL,UPSCALE_MODEL_X4=${UPSCALE_MODEL_X4:-off}"; fi
+      # Spec 18 GPU upscaler: UPSCALE_TARGET reaches every starter (the web's Start and the load job through the
+      # worker env), which pins it on each new batch. gpu needs the GPU upscaler's URL on the worker.
+      if [ -n "$UPSCALE_MODEL" ]; then
+        if [ "$UPSCALE_TARGET" = gpu ] && [ -z "$UPSCALE_GPU_SERVICE_URL" ]; then
+          echo "ERROR: UPSCALE_TARGET=gpu but catalog-upscale-gpu has no URL; the web and the worker were not changed" >&2
+          exit 1
+        fi
+        WORKER_ENV+=",UPSCALE_TARGET=$UPSCALE_TARGET"; WEB_ENV+=",UPSCALE_TARGET=$UPSCALE_TARGET"
+      fi
       ;;
     catalog-worker)
       # Queue slots for the worker now live, right away, so a later gate's failure never strands them. Never
@@ -525,6 +548,7 @@ echo "WORKER_URL=$WORKER_URL"
 echo "MATTING_URL=$MATTING_URL"
 echo "MATTING_GPU_URL=${MATTING_GPU_URL:-not configured}"
 echo "UPSCALE_MODEL=${UPSCALE_MODEL:-off} UPSCALE_MODEL_X4=${UPSCALE_MODEL_X4:-off} (on $UPSCALE_SERVICE)"
+echo "UPSCALE_GPU_URL=${UPSCALE_GPU_SERVICE_URL:-not configured}; new batches enlarge on ${UPSCALE_TARGET}"
 
 # --- 10. Monitoring --------------------------------------------------------------------
 # Email alerts, log-based metrics and the "Catalog ops" dashboard (infra/monitoring.sh, check-then-
