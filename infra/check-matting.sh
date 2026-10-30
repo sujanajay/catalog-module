@@ -136,7 +136,10 @@ const flags = {
   '--args': ['-c', fs.readFileSync('services/matting/tests/cloudrun_check.py', 'utf8'), ...probe],
   '--region': 'asia-south1', '--service-account': 'catalog-worker@image-links-agent.iam.gserviceaccount.com',
   '--tasks': 1, '--parallelism': 1, '--max-retries': 0, '--task-timeout': probe.length ? taskTimeout + 's' : '600s',
-  '--cpu': '1', '--memory': '512Mi', '--set-env-vars': variables, '--clear-secrets': true, '--labels': { app: 'catalog', component: 'job' },
+  // 1Gi, not 512Mi: on 2026-10-30 the upscale probe was OOM-killed comparing two 6400x6400 x4 outputs. The comparison
+  // now peaks at about 7 bytes per pixel (cloudrun_check.py pixel_difference: 371 MiB measured with the interpreter),
+  // but the bodies of each distinct output of a size stay in memory too, and --sizes may ask for larger images.
+  '--cpu': '1', '--memory': '1Gi', '--set-env-vars': variables, '--clear-secrets': true, '--labels': { app: 'catalog', component: 'job' },
 };
 fs.writeFileSync(path.join(dir, 'flags.json'), JSON.stringify(flags));
 NODE

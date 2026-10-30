@@ -414,24 +414,52 @@ def upscale_until_served(url, token, model, data, size, timeout, scale, sleep=ti
     return timed_upscale(url, token, model, data, size, timeout, scale)
 
 
+# pixel_difference compares bands of about this many pixels at a time, so its temporary arrays stay about 3 MB each at
+# any image size.
+DIFFERENCE_BAND_PIXELS = 1 << 18
+
+
+def rgb_image(image):
+    """The decoded image in RGB (a JPEG answer already is; anything else is converted)."""
+    image.load()
+    return image if image.mode == "RGB" else image.convert("RGB")
+
+
 def pixel_difference(first, second):
     """Two decoded JPEGs compared per 8-bit channel: the largest and mean absolute difference, the share of pixels with
-    any difference, and the PSNR (None when identical)."""
+    any difference, and the PSNR (None when identical).
+    Memory (2026-10-30, a 6400x6400 x4 pair OOM-killed the 512 MiB probe job): Pillow cannot decode a JPEG in parts, so
+    each image is decoded once in full. The first is copied band by band into one uint8 array (3 bytes per pixel) and
+    its decoded image (4 bytes per pixel in Pillow) is freed before the second is decoded; the two are then compared
+    band by band with small integer arrays. The peak is about 7 bytes per pixel: measured on a 6400x6400 pair of 16 MB
+    JPEGs, 371 MiB for the whole process (80 MiB before the call) against 905 MiB when both decodes, their RGB copies
+    and full-size arrays were held at once."""
     import numpy as np  # the service image has numpy; imported here so the matte probe does not need it
 
     with Image.open(io.BytesIO(first)) as a, Image.open(io.BytesIO(second)) as b:
-        pa, pb = np.asarray(a.convert("RGB")), np.asarray(b.convert("RGB"))
-    if pa.shape != pb.shape:
+        same_size = a.size == b.size
+    if not same_size:
         return {"sameSize": False, "maxAbs": 255, "meanAbs": None, "sharePixels": None, "psnrDb": 0.0}
-    # In stripes of rows, so a 6400x6400 pair fits the probe job's 512 MiB.
+    with Image.open(io.BytesIO(first)) as opened:
+        width, height = opened.size
+        band = max(1, DIFFERENCE_BAND_PIXELS // width)
+        reference = np.empty((height, width, 3), dtype=np.uint8)
+        decoded = rgb_image(opened)
+        for top in range(0, height, band):
+            reference[top:top + band] = np.asarray(decoded.crop((0, top, width, min(height, top + band))))
+        del decoded
     largest, total, squares, differing = 0, 0, 0, 0
-    for top in range(0, pa.shape[0], 256):
-        diff = np.abs(pa[top:top + 256].astype(np.int16) - pb[top:top + 256].astype(np.int16))
-        largest = max(largest, int(diff.max()))
-        total += int(diff.sum())
-        squares += int((diff.astype(np.int64) ** 2).sum())
-        differing += int((diff.max(axis=2) > 0).sum())
-    values, pixels = pa.size, pa.shape[0] * pa.shape[1]
+    with Image.open(io.BytesIO(second)) as opened:
+        decoded = rgb_image(opened)
+        for top in range(0, height, band):
+            other = np.asarray(decoded.crop((0, top, width, min(height, top + band)))).astype(np.int32)
+            diff = np.abs(other - reference[top:top + band])
+            largest = max(largest, int(diff.max()))
+            total += int(diff.sum(dtype=np.int64))
+            squares += int(np.square(diff).sum(dtype=np.int64))
+            differing += int(np.count_nonzero(diff.max(axis=2)))
+        del decoded
+    values, pixels = reference.size, height * width
     mse = squares / values
     return {"sameSize": True, "maxAbs": largest, "meanAbs": round(total / values, 5), "sharePixels": round(differing / pixels, 6),
             "psnrDb": None if mse == 0 else round(10 * math.log10(255 ** 2 / mse), 2)}
@@ -511,12 +539,13 @@ class UpscaleProbe:
         # `token`: None (a local URL), a token, or a callable that returns the current one (RefreshingToken).
         self.url, self.token_source, self.model, self.timeout = url, token, model, timeout
         self.scale = UPSCALE_PROBE_MODELS.get(model, 2)
-        self.sizes = {size: {"data": upscale_image(*size), "s": [], "answers": []} for size in sizes}
+        # Per size: the bodies of its distinct outputs (sha256 -> bytes) until it is judged, then its judgement. Only the
+        # size being probed holds bodies, so at most one input's distinct outputs are in memory at once.
+        self.sizes = {size: {"data": upscale_image(*size), "s": [], "answers": [], "bodies": {}, "judged": None} for size in sizes}
         self.service = {}
         self.steps = []
         self.problems = []
         self.determinism = None
-        self.bodies = {}
 
     @property
     def token(self):
@@ -545,7 +574,7 @@ class UpscaleProbe:
         token = self.token
         with ThreadPoolExecutor(max_workers=count) as pool:
             results = list(pool.map(lambda _: timed_upscale(self.url, token, self.model, entry["data"], size, self.timeout, self.scale), range(count)))
-        entry["answers"].extend(keep_bodies(results, self.bodies))
+        entry["answers"].extend(keep_bodies(results, entry["bodies"]))
         if measured:
             entry["s"].extend(a.seconds for a in results if a.status == 200)
 
@@ -556,21 +585,31 @@ class UpscaleProbe:
             self.health(f"warm {size[0]}x{size[1]}")
             for _ in range(rounds):
                 self.calls(size, concurrency, measured=True)
+            self.judge(size)
+
+    def judge(self, size):
+        """Compares this size's outputs once, then drops their bodies (each call keeps only its sha256)."""
+        entry = self.sizes[size]
+        if entry["judged"] is None:
+            entry["judged"] = judge_outputs(f"{self.model} {size[0]}x{size[1]}", entry["answers"], entry["bodies"])
+            entry["bodies"] = {}
+        return entry["judged"]
 
     def determinism_round(self, count, size=DETERMINISM_SIZE, sleep=time.sleep):
         """Spec 18 gate (plan 7.2): `count` calls of one image at once, until at least 2 instances answered (at most
         DETERMINISM_ATTEMPTS rounds). Every call keeps its sha256 and instance id."""
         data, label = upscale_image(*size), f"{self.model} {size[0]}x{size[1]} determinism"
-        answers, calls = [], []
+        answers, calls, bodies = [], [], {}
         for attempt in range(1, DETERMINISM_ATTEMPTS + 1):
             token = self.token
             with ThreadPoolExecutor(max_workers=count) as pool:
                 results = list(pool.map(lambda _: upscale_until_served(self.url, token, self.model, data, size, self.timeout, self.scale, sleep), range(count)))
-            answers += keep_bodies(results, self.bodies)
+            answers += keep_bodies(results, bodies)
             calls += [{"attempt": attempt, "status": a.status, "s": seconds(a.seconds), "instance": a.instance, "sha256": a.digest} for a in results]
             if len({a.instance for a in answers if a.status == 200 and a.instance}) >= 2:
                 break
-        summary, failures = judge_outputs(label, answers, self.bodies)
+        summary, failures = judge_outputs(label, answers, bodies)
+        bodies.clear()
         non200 = sum(1 for a in answers if a.status != 200)
         if non200:
             failures.insert(0, f"{label}: {non200} non-200")
@@ -583,7 +622,7 @@ class UpscaleProbe:
     def rows(self, concurrency):
         out = []
         for (width, height), entry in self.sizes.items():
-            summary, failures = judge_outputs(f"{self.model} {width}x{height}", entry["answers"], self.bodies)
+            summary, failures = self.judge((width, height))
             digests = sorted(summary["outputs"])
             statuses = [a.status for a in entry["answers"]]
             out.append({"model": self.model, "scale": self.scale, "size": f"{width}x{height}", "vcpu": self.service.get("vcpu"), "threads": self.service.get("threads"),
