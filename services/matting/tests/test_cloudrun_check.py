@@ -546,38 +546,46 @@ def test_pixel_difference_in_bands_equals_the_full_image_comparison(monkeypatch,
 
 PEAK_MEMORY_CHILD = r"""
 import importlib.util, json, sys
+
+
+def peak_bytes():
+    if sys.platform == "win32":
+        import ctypes
+        from ctypes import wintypes
+
+        class Counters(ctypes.Structure):
+            _fields_ = [("cb", wintypes.DWORD), ("PageFaultCount", wintypes.DWORD)] + [
+                (name, ctypes.c_size_t) for name in ("PeakWorkingSetSize", "WorkingSetSize", "QuotaPeakPagedPoolUsage",
+                                                     "QuotaPagedPoolUsage", "QuotaPeakNonPagedPoolUsage",
+                                                     "QuotaNonPagedPoolUsage", "PagefileUsage", "PeakPagefileUsage")]
+
+        counters = Counters(cb=ctypes.sizeof(Counters))
+        process = ctypes.windll.kernel32.GetCurrentProcess
+        process.restype = wintypes.HANDLE
+        ctypes.windll.psapi.GetProcessMemoryInfo.argtypes = [wintypes.HANDLE, ctypes.c_void_p, wintypes.DWORD]
+        ctypes.windll.psapi.GetProcessMemoryInfo(process(), ctypes.byref(counters), counters.cb)
+        return counters.PeakWorkingSetSize
+    import resource
+    return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * (1 if sys.platform == "darwin" else 1024)
+
+
 spec = importlib.util.spec_from_file_location("cloudrun_check", sys.argv[1])
 probe = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(probe)
+import numpy  # noqa: F401 - imported by pixel_difference; counted in the baseline, not in the comparison
 first, second = open(sys.argv[2], "rb").read(), open(sys.argv[3], "rb").read()
+before = peak_bytes()
 difference = probe.pixel_difference(first, second)
-if sys.platform == "win32":
-    import ctypes
-    from ctypes import wintypes
-
-    class Counters(ctypes.Structure):
-        _fields_ = [("cb", wintypes.DWORD), ("PageFaultCount", wintypes.DWORD)] + [
-            (name, ctypes.c_size_t) for name in ("PeakWorkingSetSize", "WorkingSetSize", "QuotaPeakPagedPoolUsage",
-                                                 "QuotaPagedPoolUsage", "QuotaPeakNonPagedPoolUsage", "QuotaNonPagedPoolUsage",
-                                                 "PagefileUsage", "PeakPagefileUsage")]
-
-    counters = Counters(cb=ctypes.sizeof(Counters))
-    process = ctypes.windll.kernel32.GetCurrentProcess
-    process.restype = wintypes.HANDLE
-    ctypes.windll.psapi.GetProcessMemoryInfo.argtypes = [wintypes.HANDLE, ctypes.c_void_p, wintypes.DWORD]
-    ctypes.windll.psapi.GetProcessMemoryInfo(process(), ctypes.byref(counters), counters.cb)
-    peak = counters.PeakWorkingSetSize
-else:
-    import resource
-    peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * (1 if sys.platform == "darwin" else 1024)
-print(json.dumps({"difference": difference, "peakBytes": peak}))
+print(json.dumps({"difference": difference, "baselineBytes": before, "peakBytes": peak_bytes()}))
 """
 
 
-def test_pixel_difference_of_a_6400x6400_pair_stays_well_under_the_probe_job_memory(tmp_path):
+def test_pixel_difference_of_a_6400x6400_pair_needs_at_most_one_decode_and_one_compact_copy(tmp_path):
     """2026-10-30: comparing two 6400x6400 x4 outputs (1600x1600 at 4x) that differ by cross-instance float noise
-    OOM-killed the 512 MiB probe job. The comparison runs in a fresh process; its peak resident memory (interpreter,
-    numpy, Pillow and both JPEG bodies included) must stay well under 512 MiB."""
+    OOM-killed the 512 MiB probe job (the old comparison peaked at about 21 bytes per pixel, 905 MiB in all). Pillow
+    cannot decode a JPEG in parts, so one decode (4 bytes per pixel) plus one uint8 copy (3) is the floor. In a fresh
+    process, the comparison must add at most 9 bytes per pixel to the peak resident memory, and the whole process
+    (interpreter, numpy, Pillow and both JPEG bodies) must stay under 512 MiB. The probe job has 1Gi for the bodies."""
     import subprocess
     import sys
     import numpy as np
@@ -599,8 +607,11 @@ def test_pixel_difference_of_a_6400x6400_pair_stays_well_under_the_probe_job_mem
     result = json.loads(done.stdout.strip().splitlines()[-1])
     difference = result["difference"]
     assert difference["sameSize"] is True and 0 < difference["maxAbs"] <= 255 and difference["sharePixels"] > 0
-    print(f"peak resident memory: {result['peakBytes'] / 2 ** 20:.0f} MiB")
-    assert result["peakBytes"] < 400 * 2 ** 20
+    added = result["peakBytes"] - result["baselineBytes"]
+    measured = f"baseline {result['baselineBytes'] / 2 ** 20:.0f} MiB, peak {result['peakBytes'] / 2 ** 20:.0f} MiB, {added / side ** 2:.2f} bytes per pixel"
+    print(measured)
+    assert added < 9 * side * side, measured
+    assert result["peakBytes"] < 512 * 2 ** 20, measured
 
 
 def answer(digest, instance):
