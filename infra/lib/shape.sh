@@ -17,17 +17,21 @@
 # The shape before the spec 18 measured table (enlargement back on catalog-matting), for a rollback:
 #   UPSCALE_SERVICE=cpu MATTING_CPU_MAX_INSTANCES=16 UPSCALE_TIMEOUT_S=840 ENLARGE_DISPATCHES_PER_SECOND=0.1
 #   ENLARGE_BULK_MAX_DISPATCHES=12 UPSCALE_MAX_PIXELS=24000000
+# The shape before the 2026-10-30 scale-out (asia-south1 quota 200 vCPU / 400 GiB), for a rollback:
+#   WORKER_MAX_INSTANCES=24 ENLARGE_BULK_MAX_DISPATCHES=10 ENLARGE_DISPATCHES_PER_SECOND=0.075
+#   ENLARGE_BULK_DISPATCHES_PER_SECOND=0.075 UPSCALE_MEMORY=16Gi UPSCALE_MAX_INSTANCES=16
 SHAPE_DEFAULTS=(
   # What Postgres allows on ila-pg: the default of its tier db-custom-2-7680 (ila-pg sets no max_connections flag).
   # Lower it, and deploy, before infra/sql-tier.sh moves to a smaller tier (docs/solutions/db-connection-budget.md).
   DB_MAX_CONNECTIONS=400
-  WORKER_MAX_INSTANCES=24
+  # Spec 18 scale-out (2026-10-30): 24 -> 32 so the worker's slots cover the wider enlarge bulk lane (below).
+  WORKER_MAX_INSTANCES=32
   WORKER_CPU=4
   WORKER_MEMORY=4Gi
   # Spec 18 3.3.1: 2 -> 3 so the enlarge lanes get their own slots without taking any from the chunk queues (the
-  # DB budget below allows it: 24 x 6 + 6 + 2 = 152 of 393). An enlarge task mostly waits on catalog-upscale.
+  # DB budget below allows it: 32 x 6 + 6 + 2 = 200 of 393). An enlarge task mostly waits on catalog-upscale.
   WORKER_CONCURRENCY=3
-  # Queue slots, main + bulk + ingest + enlarge + enlarge bulk = 62 of the worker's 24 x 3. The ingest queue
+  # Queue slots, main + bulk + ingest + enlarge + enlarge bulk = 96 of the worker's 32 x 3. The ingest queue
   # (new-batch setup) keeps its slots free of batch processing; the bulk queue (spec 16, big batches) is created only
   # when BULK_MAX_DISPATCHES > 0.
   TASKS_MAX_DISPATCHES=8
@@ -36,17 +40,20 @@ SHAPE_DEFAULTS=(
   # Spec 18 3.3.1: the enlarge lanes (operator <queue>-enlarge, bulk <queue>-enlarge-bulk, created only when
   # ENLARGE_BULK_MAX_DISPATCHES > 0). One slot is one enlargement waiting on the upscaler, so together they never
   # exceed what catalog-upscale serves at once (UPSCALE_MAX_INSTANCES x UPSCALE_CONCURRENCY, checked below), together
-  # with the preview stack's enlarge lane, which calls the same live catalog-upscale: 4 + 10 + preview 2 = 16 x 1.
-  # ENLARGE_DISPATCHES_PER_SECOND paces new enlargements on each lane (Cloud Tasks applies it per queue, so both
-  # lanes together dispatch twice it). Spec 18 3.1.5: lanes x rate <= UPSCALE_MAX_INSTANCES x UPSCALE_CONCURRENCY /
-  # p50(800x1200) = 16 x 1 / 99 s = 0.1616/s, so 2 x 0.075 = 0.15/s (measured 2026-10-29). ENLARGE_MAX_DISPATCHES=0
-  # means no enlarge lanes: the worker gets no TASKS_ENLARGE_QUEUE and enlarge tasks share the chunk queues (the
-  # rollback line above).
+  # with the preview stack's enlarge lane, which calls the same live catalog-upscale: 4 + 44 + preview 2 = 50 x 1.
+  # ENLARGE_DISPATCHES_PER_SECOND paces new enlargements on each operator lane (this stack's and the preview's) and
+  # ENLARGE_BULK_DISPATCHES_PER_SECOND on the bulk lane; Cloud Tasks applies a rate per queue, so the SUM over every
+  # lane with slots, both stacks, must stay within what catalog-upscale finishes (spec 18 3.1.5): UPSCALE_MAX_INSTANCES
+  # x UPSCALE_CONCURRENCY / p50(800x1200) = 50 x 1 / 99 s = 0.5051/s, and 2 x 0.04 + 0.42 = 0.50/s. Each lane's rate is
+  # about its slots / p50 (4 / 99 s, 44 / 99 s), so no lane is held back by another's share.
+  # ENLARGE_MAX_DISPATCHES=0 means no enlarge lanes: the worker gets no TASKS_ENLARGE_QUEUE and enlarge tasks share the
+  # chunk queues (the rollback line above).
   ENLARGE_MAX_DISPATCHES=4
-  ENLARGE_BULK_MAX_DISPATCHES=10
-  ENLARGE_DISPATCHES_PER_SECOND=0.075
+  ENLARGE_BULK_MAX_DISPATCHES=44
+  ENLARGE_DISPATCHES_PER_SECOND=0.04
+  ENLARGE_BULK_DISPATCHES_PER_SECOND=0.42
   # CPU cut-out service catalog-matting (asia-south1, 4 vCPU each). Spec 18: 16 -> 4 to give catalog-upscale its
-  # 64 vCPU (96 + 16 + 64 + 11 = 187 of 190); the GPU does the cut-outs, the CPU cut-out is a fallback.
+  # vCPU; the GPU does the cut-outs, the CPU cut-out is a fallback.
   MATTING_CPU_MAX_INSTANCES=4
   # GPU cut-out service catalog-matting-gpu (asia-southeast1, one L4 each; the L4 quota there is 3).
   GPU_MAX_INSTANCES=3
@@ -64,13 +71,16 @@ SHAPE_DEFAULTS=(
   # Which service upscales: gpu (spec 11), cpu (spec 16: the CPU cut-out service catalog-matting) or dedicated
   # (spec 18: catalog-upscale, sized by the UPSCALE_* rows below). The enlarge stage calls either through its own
   # task (spec 18 H3; ENLARGE_CLIENT_WIRED, default 1), and dedicated is refused for a shape without measured rows.
-  # Spec 18 section 8: dedicated, 16 x 4 vCPU, 4 threads, concurrency 1, from the 2026-10-29 ladder.
+  # Spec 18 section 8: dedicated, 4 vCPU, 4 threads, concurrency 1, from the 2026-10-29 ladder; 50 instances since the
+  # 2026-10-30 scale-out.
   UPSCALE_SERVICE=dedicated
   # Spec 18: the dedicated CPU enlargement service catalog-upscale (asia-south1, the catalog-matting image, only the
   # upscaler loaded). Deployed only with UPSCALE_SERVICE=dedicated or UPSCALE_MEASURE=1. UPSCALE_THREADS is its ONNX
   # Runtime intra-op thread count; UPSCALE_TIMEOUT_S its Cloud Run request timeout (the client waits 30 s longer).
-  # The asia-south1 CPU quota (190 of 200): with MATTING_CPU_MAX_INSTANCES=4 the rest is 123 vCPU, so 16 x 4 gives
-  # 187. A measure rung runs beside the live catalog-upscale (UPSCALE_LIVE_VCPU below), so with 16 x 4 live there is
+  # The asia-south1 quotas (400 vCPU and 800 GiB, granted 2026-10-30; shape_check counts every service in the region,
+  # see CPU_QUOTA_VCPU): CPU binds, 50 x 4 = 200 vCPU gives 398 of 400. Memory 16Gi -> 8Gi (2026-10-30): the live p99
+  # was 2.9 GiB and the largest x4 working set below is 5073 MiB, under 80% of 8 GiB; 50 x 8 = 400 GiB, 654 of 800 in
+  # all. A measure rung runs beside the live catalog-upscale (UPSCALE_LIVE_VCPU below), so with 50 x 4 live there is
   # no room for one: lower the live UPSCALE_MAX_INSTANCES first (shape_check counts both).
   # 4 vCPU over 8: 8 vCPU is only about 1.3x faster per call (78 s against 99 s p50 at 800x1200), so 16 x 4 finishes
   # more photos per second than the 8 x 8 the quota allows. Concurrency 1: concurrency 2 gave non-identical outputs
@@ -78,9 +88,9 @@ SHAPE_DEFAULTS=(
   # Cloud Tasks maximum, less 30 s for the client and 30 s for the settle). It must cover the largest photo region the
   # service takes for each model, not only the probe sizes (upscale_check): 2 x the model's cap x its time per pixel.
   UPSCALE_CPU_VCPU=4
-  UPSCALE_MEMORY=16Gi
+  UPSCALE_MEMORY=8Gi
   UPSCALE_CONCURRENCY=1
-  UPSCALE_MAX_INSTANCES=16
+  UPSCALE_MAX_INSTANCES=50
   UPSCALE_THREADS=4
   UPSCALE_TIMEOUT_S=1740
   # Spec 18 lifecycle 3.7 (F57): the worker's health probe of the upscaler waits UPSCALE_COLD_START_S + 60 s, so a
@@ -201,9 +211,25 @@ shape_defaults() {
   WEB_DB_POOL_MAX=2
   MAX_CONCURRENT_JOBS=2
   JOB_DB_POOL_MAX=1
-  # vCPU kept for the Cloud Run jobs (load, recheck, QA check, evals, migrate, smoke) in the CPU quota check.
+  # vCPU and GiB kept for the Cloud Run jobs (load, recheck, QA check, evals, migrate, smoke; 2 vCPU / 4Gi each, 4 at
+  # once) in the quota checks.
   JOBS_CPU_BUDGET=8
+  JOBS_MEMORY_GIB=16
   MATTING_CPU_VCPU=4
+  MATTING_CPU_MEMORY_GIB=16
+  WEB_MEMORY_GIB=1
+  # The asia-south1 Cloud Run quotas (CpuAllocPerProjectRegion, MemAllocPerProjectRegion): 400 vCPU and 800 GiB,
+  # granted 2026-10-30 (`gcloud beta quotas preferences list`). Google checks a single service's max against them at
+  # deploy, never the sum; when live allocation reaches the quota, new instances fail to start (a busy answer that
+  # costs an enlargement an attempt). So shape_check refuses a shape whose services, all at max instances, could
+  # exceed them: this stack, the other catalog stack (preview or production, from its rows), the catalog jobs and
+  # OTHER_APPS_*: what the other apps in the region can take at their max, read 2026-10-30 (ila-web 3 x 1 vCPU/1Gi,
+  # ila-worker 5 x 1/1Gi, ila jobs 2/1.5Gi, npd-ui 2 x 1/0.5Gi, 7 npd jobs 7/4.5Gi, gcc-asn-bot and noon-asn-api-test
+  # 2/4Gi each: 23 vCPU and 23 GiB), rounded up. Raise a quota here only once `grantedValue` shows it.
+  CPU_QUOTA_VCPU=400
+  MEMORY_QUOTA_GIB=800
+  OTHER_APPS_VCPU=24
+  OTHER_APPS_MEMORY_GIB=24
   GPU_QUOTA=3
   # Spec 17 3.3.3: measured GPU memory in MiB, one row per model (GPU_MODEL_PEAK_MIB_ + the id in capitals with "_"
   # for "-"), copied from the one-resident probe table in services/matting/README.md "Measured on L4"
@@ -283,10 +309,19 @@ shape_defaults() {
   # rung (UPSCALE_MEASURE=1 deploys a candidate of the same service while the live revision keeps serving). From the
   # rows, which are the live shape; set it (also to 0) only when the live service differs from them, such as before
   # the first deploy of UPSCALE_SERVICE=dedicated.
+  # UPSCALE_LIVE_GIB is the same for memory.
   if [ -z "${UPSCALE_LIVE_VCPU+x}" ]; then
     UPSCALE_LIVE_VCPU=0
     if [ "$(shape_row SHAPE_DEFAULTS UPSCALE_SERVICE)" = dedicated ]; then
       UPSCALE_LIVE_VCPU=$(( $(shape_row SHAPE_DEFAULTS UPSCALE_MAX_INSTANCES) * $(shape_row SHAPE_DEFAULTS UPSCALE_CPU_VCPU) ))
+    fi
+  fi
+  if [ -z "${UPSCALE_LIVE_GIB+x}" ]; then
+    UPSCALE_LIVE_GIB=0
+    if [ "$(shape_row SHAPE_DEFAULTS UPSCALE_SERVICE)" = dedicated ]; then
+      local live_mem
+      live_mem=$(shape_row SHAPE_DEFAULTS UPSCALE_MEMORY)
+      UPSCALE_LIVE_GIB=$(( $(shape_row SHAPE_DEFAULTS UPSCALE_MAX_INSTANCES) * ${live_mem%Gi} ))
     fi
   fi
   # Worker pool per instance. One photo at a time: one connection per in-flight task (2). Several photos at once
@@ -299,8 +334,9 @@ shape_defaults() {
       WORKER_DB_POOL_MAX=2
     fi
   fi
-  # Cloud Run CPU quota in asia-south1 is 200 vCPU; keep 10 spare.
-  CPU_QUOTA_LIMIT=190
+  # What the catalog may use of the asia-south1 quotas: the rest is OTHER_APPS_* (above).
+  CPU_QUOTA_LIMIT=$((CPU_QUOTA_VCPU - OTHER_APPS_VCPU))
+  MEMORY_QUOTA_LIMIT_GIB=$((MEMORY_QUOTA_GIB - OTHER_APPS_MEMORY_GIB))
   # Spec 18 GPU upscaler: the GPU upscaler's region has its own Cloud Run quotas (200 vCPU and 400 GiB per region,
   # read 2026-10-30; nothing else of ours runs in asia-south2), kept 10 vCPU and 16 GiB spare like asia-south1. The
   # per-type GPU quota (no zonal redundancy) there: 3 RTX PRO 6000, granted automatically on the first deploy
@@ -327,7 +363,8 @@ shape_defaults() {
 }
 
 # shape_check [live_connection_limit]: prints every problem to stderr and returns 1 if there is any. Sets
-# CATALOG_DB_LIMIT, CATALOG_DB_TOTAL, SLOTS_TOTAL, SLOTS_CAPACITY and CPU_TOTAL for the caller's summary lines.
+# CATALOG_DB_LIMIT, CATALOG_DB_TOTAL, SLOTS_TOTAL, SLOTS_CAPACITY, CPU_TOTAL and MEMORY_TOTAL_GIB for the caller's
+# summary lines.
 # live_connection_limit is the max_connections ila-pg allows now (empty skips that check).
 shape_check() {
   local live=${1:-} ok=0 name value gib
@@ -348,9 +385,12 @@ shape_check() {
     [ "${!name}" -ge 1 ] || shape_fail "$name must be at least 1"
   done
   # Cloud Tasks takes a rate above 0 and at most 500 per second.
-  if ! [[ "$ENLARGE_DISPATCHES_PER_SECOND" =~ ^[0-9]+([.][0-9]+)?$ ]] || ! awk -v r="$ENLARGE_DISPATCHES_PER_SECOND" 'BEGIN{exit !(r>0 && r<=500)}'; then
-    shape_fail "ENLARGE_DISPATCHES_PER_SECOND must be a number above 0 and at most 500, such as 0.1, got '$ENLARGE_DISPATCHES_PER_SECOND'"
-  fi
+  for name in ENLARGE_DISPATCHES_PER_SECOND ENLARGE_BULK_DISPATCHES_PER_SECOND; do
+    value=${!name}
+    if ! [[ "$value" =~ ^[0-9]+([.][0-9]+)?$ ]] || ! awk -v r="$value" 'BEGIN{exit !(r>0 && r<=500)}'; then
+      shape_fail "$name must be a number above 0 and at most 500, such as 0.1, got '$value'"; return 1
+    fi
+  done
   case "$WORKER_CPU" in 1|2|4|6|8) ;; *) shape_fail "WORKER_CPU must be 1, 2, 4, 6 or 8 (Cloud Run), got $WORKER_CPU" ;; esac
   [[ "$WORKER_MEMORY" =~ ^[1-9][0-9]*Gi$ ]] || shape_fail "WORKER_MEMORY must look like 4Gi, got '$WORKER_MEMORY'"
   # Spec 18 lifecycle 3.2: the worker decodes an enlarged image of at most ENLARGE_MAX_OUTPUT_PIXELS (64,000,000, 3 B
@@ -390,15 +430,45 @@ shape_check() {
   # instances), so both count.
   # Each *_MAX_INSTANCES here is both the revision max and the service-level max: the gate sets the service's --max
   # to the same value (gate_service_max, infra/lib/gate.sh), so this count is what the services can really reach.
-  UPSCALE_VCPU_TOTAL=0
-  if upscale_deployed; then UPSCALE_VCPU_TOTAL=$((UPSCALE_MAX_INSTANCES * UPSCALE_CPU_VCPU)); fi
-  if [ "$UPSCALE_MEASURE" = 1 ]; then UPSCALE_VCPU_TOTAL=$((UPSCALE_VCPU_TOTAL + UPSCALE_LIVE_VCPU)); fi
-  CPU_TOTAL=$((WORKER_MAX_INSTANCES * WORKER_CPU + MATTING_CPU_MAX_INSTANCES * MATTING_CPU_VCPU + UPSCALE_VCPU_TOTAL + WEB_MAX_INSTANCES * WEB_CPU + JOBS_CPU_BUDGET))
+  # 2026-10-30: the other catalog stack's worker and web (production when this is the preview, the preview otherwise),
+  # from its rows, count too: catalog-matting and catalog-upscale are shared and counted once, here.
+  local other_worker other_vcpu other_gib other_label
+  if [ "${CATALOG_PREVIEW:-0}" = 1 ]; then
+    other_label=production
+    other_worker=$(shape_row SHAPE_DEFAULTS WORKER_MAX_INSTANCES)
+  else
+    other_label=preview
+    other_worker=$(shape_row PREVIEW_SHAPE_DEFAULTS WORKER_MAX_INSTANCES)
+  fi
+  gib=$(shape_row SHAPE_DEFAULTS WORKER_MEMORY)
+  other_vcpu=$((other_worker * $(shape_row SHAPE_DEFAULTS WORKER_CPU) + WEB_MAX_INSTANCES * WEB_CPU))
+  other_gib=$((other_worker * ${gib%Gi} + WEB_MAX_INSTANCES * WEB_MEMORY_GIB))
+  UPSCALE_VCPU_TOTAL=0; UPSCALE_GIB_TOTAL=0
+  if upscale_deployed; then
+    UPSCALE_VCPU_TOTAL=$((UPSCALE_MAX_INSTANCES * UPSCALE_CPU_VCPU))
+    [[ "$UPSCALE_MEMORY" =~ ^[1-9][0-9]*Gi$ ]] && UPSCALE_GIB_TOTAL=$((UPSCALE_MAX_INSTANCES * ${UPSCALE_MEMORY%Gi}))
+  fi
+  if [ "$UPSCALE_MEASURE" = 1 ]; then
+    UPSCALE_VCPU_TOTAL=$((UPSCALE_VCPU_TOTAL + UPSCALE_LIVE_VCPU)); UPSCALE_GIB_TOTAL=$((UPSCALE_GIB_TOTAL + UPSCALE_LIVE_GIB))
+  fi
+  local measure_note=""
+  if [ "$UPSCALE_MEASURE" = 1 ] && [ "$UPSCALE_LIVE_VCPU" -gt 0 ]; then
+    measure_note=" (catalog-upscale counts the measure candidate and the live revision's $UPSCALE_LIVE_VCPU vCPU / $UPSCALE_LIVE_GIB GiB: deploy a smaller live UPSCALE_MAX_INSTANCES first)"
+  fi
+  CPU_TOTAL=$((WORKER_MAX_INSTANCES * WORKER_CPU + MATTING_CPU_MAX_INSTANCES * MATTING_CPU_VCPU + UPSCALE_VCPU_TOTAL + WEB_MAX_INSTANCES * WEB_CPU + JOBS_CPU_BUDGET + other_vcpu))
   if [ "$CPU_TOTAL" -gt "$CPU_QUOTA_LIMIT" ]; then
-    shape_fail "asia-south1 vCPU at max instances $CPU_TOTAL exceeds $CPU_QUOTA_LIMIT of the 200 vCPU quota (worker $((WORKER_MAX_INSTANCES * WORKER_CPU)) + catalog-matting $((MATTING_CPU_MAX_INSTANCES * MATTING_CPU_VCPU)) + catalog-upscale $UPSCALE_VCPU_TOTAL + web and jobs $((WEB_MAX_INSTANCES * WEB_CPU + JOBS_CPU_BUDGET))); lower WORKER_MAX_INSTANCES, MATTING_CPU_MAX_INSTANCES or UPSCALE_MAX_INSTANCES$([ "$UPSCALE_MEASURE" = 1 ] && [ "$UPSCALE_LIVE_VCPU" -gt 0 ] && echo " (catalog-upscale counts the measure candidate and the live revision's $UPSCALE_LIVE_VCPU vCPU: deploy a smaller live UPSCALE_MAX_INSTANCES first)")"
+    shape_fail "asia-south1 vCPU at max instances $CPU_TOTAL exceeds $CPU_QUOTA_LIMIT of the $CPU_QUOTA_VCPU vCPU quota, $OTHER_APPS_VCPU kept for the other apps (worker $((WORKER_MAX_INSTANCES * WORKER_CPU)) + catalog-matting $((MATTING_CPU_MAX_INSTANCES * MATTING_CPU_VCPU)) + catalog-upscale $UPSCALE_VCPU_TOTAL + web and jobs $((WEB_MAX_INSTANCES * WEB_CPU + JOBS_CPU_BUDGET)) + the $other_label stack $other_vcpu); lower WORKER_MAX_INSTANCES, MATTING_CPU_MAX_INSTANCES or UPSCALE_MAX_INSTANCES$measure_note"
+  fi
+  # 2026-10-30: the same for memory (catalog-matting is 16Gi per instance, services.sh). Not checked before, when the
+  # sum at max instances (439 GiB) was already above the 400 GiB quota.
+  if [[ "$WORKER_MEMORY" =~ ^[1-9][0-9]*Gi$ ]]; then
+    MEMORY_TOTAL_GIB=$((WORKER_MAX_INSTANCES * ${WORKER_MEMORY%Gi} + MATTING_CPU_MAX_INSTANCES * MATTING_CPU_MEMORY_GIB + UPSCALE_GIB_TOTAL + WEB_MAX_INSTANCES * WEB_MEMORY_GIB + JOBS_MEMORY_GIB + other_gib))
+    if [ "$MEMORY_TOTAL_GIB" -gt "$MEMORY_QUOTA_LIMIT_GIB" ]; then
+      shape_fail "asia-south1 memory at max instances $MEMORY_TOTAL_GIB GiB exceeds $MEMORY_QUOTA_LIMIT_GIB of the $MEMORY_QUOTA_GIB GiB quota, $OTHER_APPS_MEMORY_GIB kept for the other apps (worker $((WORKER_MAX_INSTANCES * ${WORKER_MEMORY%Gi})) + catalog-matting $((MATTING_CPU_MAX_INSTANCES * MATTING_CPU_MEMORY_GIB)) + catalog-upscale $UPSCALE_GIB_TOTAL + web and jobs $((WEB_MAX_INSTANCES * WEB_MEMORY_GIB + JOBS_MEMORY_GIB)) + the $other_label stack $other_gib); lower UPSCALE_MEMORY or a *_MAX_INSTANCES$measure_note"
+    fi
   fi
   # GPU: today's L4 quota, and Cloud Run's L4 shape (at least 4 CPU and 16 GiB; 8 CPU and 32 GiB recommended).
-  [ "$GPU_MAX_INSTANCES" -le "$GPU_QUOTA" ] || shape_fail "GPU_MAX_INSTANCES=$GPU_MAX_INSTANCES exceeds the L4 quota of $GPU_QUOTA (no quota requests: owner decision 2026-10-27)"
+  [ "$GPU_MAX_INSTANCES" -le "$GPU_QUOTA" ] || shape_fail "GPU_MAX_INSTANCES=$GPU_MAX_INSTANCES exceeds the L4 quota of $GPU_QUOTA; request more first (gcloud beta quotas preferences create; the owner allows quota requests since 2026-10-30) and raise GPU_QUOTA once it is granted"
   [ "$GPU_CPU" -ge 4 ] && [ "$GPU_CPU" -le 8 ] || shape_fail "GPU_CPU must be 4 to 8 for one L4, got $GPU_CPU"
   gib=${GPU_MEMORY%Gi}
   if [[ "$gib" =~ ^[0-9]+$ ]]; then
@@ -580,20 +650,29 @@ upscale_check() {
   # Spec 18 GPU upscaler: with UPSCALE_TARGET=gpu new batches enlarge on catalog-upscale-gpu and catalog-upscale only
   # finishes the batches started on it; its slot rule above still holds, the rate follows the GPU (upscale_gpu_check).
   [ "${UPSCALE_TARGET:-cpu}" = cpu ] || return 0
-  # Spec 18 3.1.5, the queue rate: ENLARGE_DISPATCHES_PER_SECOND <= UPSCALE_MAX_INSTANCES x UPSCALE_CONCURRENCY / p50,
-  # at the smallest size (the usual photo). Without a measured p50 the p95 of that size stands in (a safe bound).
-  # Cloud Tasks paces each queue on its own, so the rate counts once per enlarge lane that has slots.
-  local smallest capacity seconds stat=p50 lanes=0 total
-  [ "$ENLARGE_MAX_DISPATCHES" -gt 0 ] && lanes=$((lanes + 1))
-  [ "$ENLARGE_BULK_MAX_DISPATCHES" -gt 0 ] && lanes=$((lanes + 1))
-  [ "$lanes" -gt 0 ] || return 0
+  # Spec 18 3.1.5, the queue rate: the SUM of the rates of every enlarge lane that calls catalog-upscale <=
+  # UPSCALE_MAX_INSTANCES x UPSCALE_CONCURRENCY / p50, at the smallest size (the usual photo). Without a measured p50 the
+  # p95 of that size stands in (a safe bound). Cloud Tasks paces each queue on its own, so each lane with slots counts
+  # its own rate: the operator lanes ENLARGE_DISPATCHES_PER_SECOND, the bulk lanes ENLARGE_BULK_DISPATCHES_PER_SECOND,
+  # this stack's and the other stack's (from its rows; the rates are shared rows).
+  local smallest capacity seconds stat=p50 operator=0 bulk=0 total
+  [ "$ENLARGE_MAX_DISPATCHES" -gt 0 ] && operator=$((operator + 1))
+  [ "$ENLARGE_BULK_MAX_DISPATCHES" -gt 0 ] && bulk=$((bulk + 1))
+  if [ "${CATALOG_PREVIEW:-0}" = 1 ]; then
+    [ "$(shape_row SHAPE_DEFAULTS ENLARGE_MAX_DISPATCHES)" -gt 0 ] && operator=$((operator + 1))
+    [ "$(shape_row SHAPE_DEFAULTS ENLARGE_BULK_MAX_DISPATCHES)" -gt 0 ] && bulk=$((bulk + 1))
+  else
+    [ "$(shape_row PREVIEW_SHAPE_DEFAULTS ENLARGE_MAX_DISPATCHES)" -gt 0 ] && operator=$((operator + 1))
+    [ "$(shape_row PREVIEW_SHAPE_DEFAULTS ENLARGE_BULK_MAX_DISPATCHES)" -gt 0 ] && bulk=$((bulk + 1))
+  fi
+  [ $((operator + bulk)) -gt 0 ] || return 0
   smallest=$(upscale_smallest_size)
   seconds=$(upscale_p50 "$smallest")
   [[ "$seconds" =~ ^[1-9][0-9]*$ ]] || { seconds=$(upscale_p95 "$smallest"); stat=p95; }
   capacity=$(awk -v n="$((UPSCALE_MAX_INSTANCES * UPSCALE_CONCURRENCY))" -v s="$seconds" 'BEGIN{printf "%.4f", n / s}')
-  total=$(awk -v r="$ENLARGE_DISPATCHES_PER_SECOND" -v l="$lanes" 'BEGIN{printf "%.4f", r * l}')
+  total=$(awk -v r="$ENLARGE_DISPATCHES_PER_SECOND" -v o="$operator" -v b="$ENLARGE_BULK_DISPATCHES_PER_SECOND" -v k="$bulk" 'BEGIN{printf "%.4f", r * o + b * k}')
   if awk -v t="$total" -v c="$capacity" 'BEGIN{exit !(t > c)}'; then
-    shape_fail "ENLARGE_DISPATCHES_PER_SECOND=$ENLARGE_DISPATCHES_PER_SECOND x $lanes enlarge lanes = $total per second exceeds what catalog-upscale finishes: $UPSCALE_MAX_INSTANCES x $UPSCALE_CONCURRENCY / $stat $seconds s of $smallest = $capacity per second"
+    shape_fail "enlarge rates ENLARGE_DISPATCHES_PER_SECOND=$ENLARGE_DISPATCHES_PER_SECOND x $operator operator lanes + ENLARGE_BULK_DISPATCHES_PER_SECOND=$ENLARGE_BULK_DISPATCHES_PER_SECOND x $bulk bulk lanes = $total per second exceed what catalog-upscale finishes: $UPSCALE_MAX_INSTANCES x $UPSCALE_CONCURRENCY / $stat $seconds s of $smallest = $capacity per second"
   fi
 }
 
@@ -706,17 +785,27 @@ upscale_gpu_check() {
   if [ $((ENLARGE_MAX_DISPATCHES + ENLARGE_BULK_MAX_DISPATCHES + other)) -gt "$serves" ]; then
     shape_fail "enlarge slots $ENLARGE_MAX_DISPATCHES + $ENLARGE_BULK_MAX_DISPATCHES + the other stack's $other = $((ENLARGE_MAX_DISPATCHES + ENLARGE_BULK_MAX_DISPATCHES + other)) exceed what catalog-upscale-gpu serves at once ($UPSCALE_GPU_MAX_INSTANCES x $UPSCALE_GPU_CONCURRENCY); lower ENLARGE_MAX_DISPATCHES or ENLARGE_BULK_MAX_DISPATCHES"
   fi
-  local lanes=0 smallest seconds stat=p50 capacity total
-  [ "$ENLARGE_MAX_DISPATCHES" -gt 0 ] && lanes=$((lanes + 1))
-  [ "$ENLARGE_BULK_MAX_DISPATCHES" -gt 0 ] && lanes=$((lanes + 1))
-  [ "$lanes" -gt 0 ] || return 0
+  # The rate, as upscale_check counts it for the CPU: the SUM over every lane with slots, both stacks (the rates are
+  # shared rows), the operator lanes at ENLARGE_DISPATCHES_PER_SECOND and the bulk lanes at
+  # ENLARGE_BULK_DISPATCHES_PER_SECOND.
+  local operator=0 bulk=0 smallest seconds stat=p50 capacity total
+  [ "$ENLARGE_MAX_DISPATCHES" -gt 0 ] && operator=$((operator + 1))
+  [ "$ENLARGE_BULK_MAX_DISPATCHES" -gt 0 ] && bulk=$((bulk + 1))
+  if [ "${CATALOG_PREVIEW:-0}" = 1 ]; then
+    [ "$(shape_row SHAPE_DEFAULTS ENLARGE_MAX_DISPATCHES)" -gt 0 ] && operator=$((operator + 1))
+    [ "$(shape_row SHAPE_DEFAULTS ENLARGE_BULK_MAX_DISPATCHES)" -gt 0 ] && bulk=$((bulk + 1))
+  else
+    [ "$(shape_row PREVIEW_SHAPE_DEFAULTS ENLARGE_MAX_DISPATCHES)" -gt 0 ] && operator=$((operator + 1))
+    [ "$(shape_row PREVIEW_SHAPE_DEFAULTS ENLARGE_BULK_MAX_DISPATCHES)" -gt 0 ] && bulk=$((bulk + 1))
+  fi
+  [ $((operator + bulk)) -gt 0 ] || return 0
   smallest=$(upscale_smallest_size)
   seconds=$(upscale_gpu_p50 "$smallest")
   [[ "$seconds" =~ ^[1-9][0-9]*$ ]] || { seconds=$(upscale_gpu_p95 "$smallest"); stat=p95; }
   capacity=$(awk -v n="$serves" -v s="$seconds" 'BEGIN{printf "%.4f", n / s}')
-  total=$(awk -v r="$ENLARGE_DISPATCHES_PER_SECOND" -v l="$lanes" 'BEGIN{printf "%.4f", r * l}')
+  total=$(awk -v r="$ENLARGE_DISPATCHES_PER_SECOND" -v o="$operator" -v b="$ENLARGE_BULK_DISPATCHES_PER_SECOND" -v k="$bulk" 'BEGIN{printf "%.4f", r * o + b * k}')
   if awk -v t="$total" -v c="$capacity" 'BEGIN{exit !(t > c)}'; then
-    shape_fail "ENLARGE_DISPATCHES_PER_SECOND=$ENLARGE_DISPATCHES_PER_SECOND x $lanes enlarge lanes = $total per second exceeds what catalog-upscale-gpu finishes: $UPSCALE_GPU_MAX_INSTANCES x $UPSCALE_GPU_CONCURRENCY / $stat $seconds s of $smallest = $capacity per second"
+    shape_fail "enlarge rates ENLARGE_DISPATCHES_PER_SECOND=$ENLARGE_DISPATCHES_PER_SECOND x $operator operator lanes + ENLARGE_BULK_DISPATCHES_PER_SECOND=$ENLARGE_BULK_DISPATCHES_PER_SECOND x $bulk bulk lanes = $total per second exceed what catalog-upscale-gpu finishes: $UPSCALE_GPU_MAX_INSTANCES x $UPSCALE_GPU_CONCURRENCY / $stat $seconds s of $smallest = $capacity per second"
   fi
 }
 
