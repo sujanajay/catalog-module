@@ -14,7 +14,7 @@ import { afterUnpark, batchEnlargement, derivedPrefixFor, handleEnlargeTask, loa
 import { eachLimit, positiveIntEnv, serialLock } from "@catalog/core/concurrency";
 import { EnlargementNotReadyError, isCpuUpscalerId } from "@catalog/core/catalog/upscale";
 import { recordCostEvents, type CostEventInput } from "@catalog/core/cost-events";
-import { matteCallUsd } from "@catalog/core/catalog/cost";
+import { matteCallUsd, upscaleCallUsd } from "@catalog/core/catalog/cost";
 import type { CostOutcome } from "@catalog/core/db/schema";
 import { checkCatalogCaps } from "@catalog/core/catalog/qa/caps";
 import { shadowSynthesisAllowed } from "@catalog/core/catalog/qa/policy";
@@ -477,7 +477,7 @@ export async function handleChunkTask(rawDeps: CatalogDeps, body: Record<string,
             steps.upscale += upscaleMs; steps.render -= upscaleMs;
             note({productId,sourceImageId:source.id,outputId:output.id,channel:output.channel,stage:"render",kind:"render",engine:"worker",ms:Math.max(0,+deps.now()-renderStart-upscaleMs),usd:0,outcome:rendered.status==="failed" ? "failed":"ok"});
             const upscaleTarget = rendered.upscale && isCpuUpscalerId(rendered.upscale.model) ? "cpu":"gpu";
-            if (upscaleMs) note({productId,sourceImageId:source.id,outputId:output.id,channel:output.channel,stage:"upscale",kind:"upscale_call",engine:upscaleTarget,ms:upscaleMs,...matteCallUsd(upscaleTarget,upscaleMs)});
+            if (upscaleMs) note({productId,sourceImageId:source.id,outputId:output.id,channel:output.channel,stage:"upscale",kind:"upscale_call",engine:upscaleTarget,ms:upscaleMs,...upscaleCallUsd(upscaleTarget,upscaleMs)});
             // Spec 11: the per-image upscale time, for the cost record (the call time is inside renderMs too; one call per photo,
             // so an output that reused the photo's x2 image records 0). An upscaled
             // output's render_key names the upscaler (a redelivered render whose row already says `upscaled` keeps its key, and

@@ -54,6 +54,16 @@ export const DEFAULT_PRICE_MATTE_CPU_USD_PER_SECOND = 0.000136;
  * silently) or a GPU cut-out attempt that failed before the CPU service answered.
  */
 export const DEFAULT_PRICE_MATTE_GPU_USD_PER_SECOND = 0.00034884;
+/**
+ * USD per second of the GPU upscale service (catalog-upscale-gpu, asia-south2, one NVIDIA RTX PRO 6000 with
+ * --no-gpu-zonal-redundancy, --no-cpu-throttling so instance-based billing, --cpu=20 --memory=80Gi).
+ * Must match PRICE_UPSCALE_GPU_USD_PER_SECOND in infra/deploy.sh; this default is used when the env var is missing.
+ * Source: Google Cloud Billing price catalog, read 2026-10-30, region Delhi (asia-south2), Cloud Run instance-based
+ * billing: RTX PRO 6000 non-zonal redundancy USD 0.00043826 per second, CPU USD 0.0000216 per vCPU-second, memory
+ * USD 0.0000024 per GiB-second. 0.00043826 + 20 * 0.0000216 + 80 * 0.0000024 = 0.00043826 + 0.000432 + 0.000192
+ * = 0.00106226. Like the matting rates it prices the service-reported seconds of a call, so it is a lower bound.
+ */
+export const DEFAULT_PRICE_UPSCALE_GPU_USD_PER_SECOND = 0.00106226;
 /** The matting-service target of a cut-out or upscale call; null is the worker's own simple cut-out. */
 export type MatteTarget = "cpu" | "gpu" | null;
 /** PRICE_MATTE_CPU_USD_PER_SECOND and PRICE_MATTE_GPU_USD_PER_SECOND; missing or invalid values use the documented defaults. */
@@ -61,7 +71,7 @@ export function mattePricesFromEnv(env: NodeJS.ProcessEnv = process.env): { cpu:
  return {cpu:positive(env.PRICE_MATTE_CPU_USD_PER_SECOND) ?? DEFAULT_PRICE_MATTE_CPU_USD_PER_SECOND,gpu:positive(env.PRICE_MATTE_GPU_USD_PER_SECOND) ?? DEFAULT_PRICE_MATTE_GPU_USD_PER_SECOND};
 }
 /**
- * What `ms` of a matting-service call cost on `target` (the ledger's matte_call and upscale_call rows).
+ * What `ms` of a matting-service call cost on `target` (the ledger's matte_call rows; upscaleCallUsd for upscale_call).
  * A call the worker answered itself (floodfill, alpha_source) is free. `estimated` is true when the
  * rate came from the code default rather than the environment, so the Ops page can say so.
  */
@@ -70,6 +80,18 @@ export function matteCallUsd(target: MatteTarget, ms: number, env: NodeJS.Proces
  const configured = positive(target === "gpu" ? env.PRICE_MATTE_GPU_USD_PER_SECOND : env.PRICE_MATTE_CPU_USD_PER_SECOND);
  const rate = configured ?? (target === "gpu" ? DEFAULT_PRICE_MATTE_GPU_USD_PER_SECOND : DEFAULT_PRICE_MATTE_CPU_USD_PER_SECOND);
  return {usd:ms/1000*rate,estimated:configured === null};
+}
+/**
+ * What `ms` of an upscale call cost on `target` (the ledger's upscale_call rows). A CPU upscale is priced like a CPU
+ * matting call. A GPU upscale is made on catalog-upscale-gpu when the worker knows that service (UPSCALE_GPU_URL set,
+ * the route enlarge.ts upscaleRouteFor takes) and is priced at PRICE_UPSCALE_GPU_USD_PER_SECOND; without it the call
+ * went to the L4 matting service (spec 11) and is priced like a GPU matting call.
+ */
+export function upscaleCallUsd(target: "cpu" | "gpu", ms: number, env: NodeJS.ProcessEnv = process.env): { usd: number; estimated: boolean } {
+ if (target === "cpu" || !env.UPSCALE_GPU_URL?.trim()) return matteCallUsd(target, ms, env);
+ if (!Number.isFinite(ms) || ms <= 0) return {usd:0,estimated:false};
+ const configured = positive(env.PRICE_UPSCALE_GPU_USD_PER_SECOND);
+ return {usd:ms/1000*(configured ?? DEFAULT_PRICE_UPSCALE_GPU_USD_PER_SECOND),estimated:configured === null};
 }
 /** Operator copy when no rupee rate is configured; never names the env var (spec 07 4.11). */
 export const RUPEES_NOT_CONFIGURED = "Cost in rupees is not configured yet";

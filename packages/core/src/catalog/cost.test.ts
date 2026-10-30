@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { COMPUTE_VCPU_SECONDS_PER_OUTPUT_ESTIMATE, costLine, DEFAULT_COMPUTE_USD_PER_VCPU_SECOND, DEFAULT_PRICE_MATTE_CPU_USD_PER_SECOND, DEFAULT_PRICE_MATTE_GPU_USD_PER_SECOND, estimateCost, inrAmount, matteCallUsd, mattePricesFromEnv, QA_USD_PER_CHECK_ESTIMATE, QA_USD_PER_CHECK_FALLBACK, qaCallCost, usdAmount } from "./cost";
+import { COMPUTE_VCPU_SECONDS_PER_OUTPUT_ESTIMATE, costLine, DEFAULT_COMPUTE_USD_PER_VCPU_SECOND, DEFAULT_PRICE_MATTE_CPU_USD_PER_SECOND, DEFAULT_PRICE_MATTE_GPU_USD_PER_SECOND, DEFAULT_PRICE_UPSCALE_GPU_USD_PER_SECOND, estimateCost, inrAmount, matteCallUsd, mattePricesFromEnv, QA_USD_PER_CHECK_ESTIMATE, QA_USD_PER_CHECK_FALLBACK, qaCallCost, upscaleCallUsd, usdAmount } from "./cost";
 describe("matting service prices (cost ledger)",()=>{
  it("prices the 4 vCPU, 16 GiB CPU service at the asia-south1 request-based rate and the GPU service at the asia-southeast1 L4 instance rate, the same defaults deploy.sh sets",()=>{
   expect(DEFAULT_PRICE_MATTE_CPU_USD_PER_SECOND).toBeCloseTo(4*0.000024+16*0.0000025,12);
@@ -21,6 +21,28 @@ describe("matting service prices (cost ledger)",()=>{
   expect(matteCallUsd("gpu",1000,{})).toEqual({usd:DEFAULT_PRICE_MATTE_GPU_USD_PER_SECOND,estimated:true});
   expect(matteCallUsd(null,5000,{})).toEqual({usd:0,estimated:false});
   expect(matteCallUsd("cpu",NaN,{})).toEqual({usd:0,estimated:false});
+ });
+ it("prices the GPU upscaler (RTX PRO 6000, 20 vCPU, 80 GiB, asia-south2 instance rate) apart from the L4 matting service, the same default deploy.sh sets",()=>{
+  expect(DEFAULT_PRICE_UPSCALE_GPU_USD_PER_SECOND).toBeCloseTo(0.00043826+20*0.0000216+80*0.0000024,12);
+  expect(DEFAULT_PRICE_UPSCALE_GPU_USD_PER_SECOND).not.toBe(DEFAULT_PRICE_MATTE_GPU_USD_PER_SECOND);
+  const deploy=readFileSync(new URL("../../../../infra/deploy.sh",import.meta.url),"utf8");
+  expect(deploy).toContain(`PRICE_UPSCALE_GPU_USD_PER_SECOND=\${PRICE_UPSCALE_GPU_USD_PER_SECOND:-${DEFAULT_PRICE_UPSCALE_GPU_USD_PER_SECOND}}`);
+  expect(deploy).toContain(`WORKER_ENV+=",PRICE_UPSCALE_GPU_USD_PER_SECOND=$PRICE_UPSCALE_GPU_USD_PER_SECOND"`);
+ });
+ it("prices a GPU upscale made on catalog-upscale-gpu at the GPU upscale rate, never the L4 matting rate",()=>{
+  const gpuService={UPSCALE_GPU_URL:"https://catalog-upscale-gpu.example"};
+  const l4={PRICE_MATTE_GPU_USD_PER_SECOND:"0.00034884"};
+  expect(upscaleCallUsd("gpu",2000,{...gpuService,...l4})).toEqual({usd:2*DEFAULT_PRICE_UPSCALE_GPU_USD_PER_SECOND,estimated:true});
+  expect(upscaleCallUsd("gpu",2000,{...gpuService,...l4,PRICE_UPSCALE_GPU_USD_PER_SECOND:"0.00106226"}).usd).toBeCloseTo(0.00212452,12);
+  expect(upscaleCallUsd("gpu",2000,{...gpuService,...l4,PRICE_UPSCALE_GPU_USD_PER_SECOND:"0.00106226"}).estimated).toBe(false);
+  expect(upscaleCallUsd("gpu",2000,{...gpuService,PRICE_UPSCALE_GPU_USD_PER_SECOND:"abc"})).toEqual({usd:2*DEFAULT_PRICE_UPSCALE_GPU_USD_PER_SECOND,estimated:true});
+  expect(upscaleCallUsd("gpu",0,gpuService)).toEqual({usd:0,estimated:false});
+ });
+ it("prices a CPU upscale like a CPU matting call and a GPU upscale without catalog-upscale-gpu (the L4 matting service) like a GPU matting call",()=>{
+  const env={PRICE_MATTE_CPU_USD_PER_SECOND:"0.0002",PRICE_MATTE_GPU_USD_PER_SECOND:"0.001",PRICE_UPSCALE_GPU_USD_PER_SECOND:"0.005"};
+  expect(upscaleCallUsd("cpu",2000,{...env,UPSCALE_GPU_URL:"https://catalog-upscale-gpu.example"})).toEqual({usd:0.0004,estimated:false});
+  expect(upscaleCallUsd("gpu",500,env)).toEqual({usd:0.0005,estimated:false});
+  expect(upscaleCallUsd("gpu",500,{...env,UPSCALE_GPU_URL:"  "})).toEqual({usd:0.0005,estimated:false});
  });
 });
 describe("catalog cost",()=>{
