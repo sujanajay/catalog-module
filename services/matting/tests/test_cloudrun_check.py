@@ -504,6 +504,105 @@ def test_pixel_difference_reports_max_mean_share_and_psnr():
     assert probe.pixel_difference(lossless(base), lossless(base[:20]))["sameSize"] is False
 
 
+def full_image_difference(first, second):
+    """The comparison before the 2026-10-30 OOM fix: both images decoded and held in full. The reference for equality."""
+    import math
+    import numpy as np
+    with Image.open(io.BytesIO(first)) as a, Image.open(io.BytesIO(second)) as b:
+        pa, pb = np.asarray(a.convert("RGB")).astype(np.int64), np.asarray(b.convert("RGB")).astype(np.int64)
+    if pa.shape != pb.shape:
+        return {"sameSize": False, "maxAbs": 255, "meanAbs": None, "sharePixels": None, "psnrDb": 0.0}
+    diff = np.abs(pa - pb)
+    mse = int((diff ** 2).sum()) / pa.size
+    return {"sameSize": True, "maxAbs": int(diff.max()), "meanAbs": round(int(diff.sum()) / pa.size, 5),
+            "sharePixels": round(int((diff.max(axis=2) > 0).sum()) / (pa.shape[0] * pa.shape[1]), 6),
+            "psnrDb": None if mse == 0 else round(10 * math.log10(255 ** 2 / mse), 2)}
+
+
+def jpeg(array, quality=95):
+    encoded = io.BytesIO()
+    Image.fromarray(array).save(encoded, format="JPEG", quality=quality)
+    return encoded.getvalue()
+
+
+@pytest.mark.parametrize("band_pixels", [1, 100, 1000, 1 << 20])
+def test_pixel_difference_in_bands_equals_the_full_image_comparison(monkeypatch, band_pixels):
+    import numpy as np
+    # Bands of 1 row, a few rows (not dividing the height) and the whole image give the same numbers.
+    monkeypatch.setattr(probe, "DIFFERENCE_BAND_PIXELS", band_pixels)
+    rng = np.random.default_rng(18)
+    base = rng.integers(0, 256, (97, 61, 3), dtype=np.uint8)
+    noise = np.clip(base.astype(np.int16) + rng.integers(-3, 4, base.shape), 0, 255).astype(np.uint8)
+    seam = base.copy()
+    seam[:, 30] = 255 - seam[:, 30]
+    gray = Image.fromarray(base).convert("L")
+    gray_bytes = io.BytesIO()
+    gray.save(gray_bytes, format="JPEG", quality=90)
+    pairs = [(jpeg(base), jpeg(noise)), (jpeg(base), jpeg(base)), (jpeg(base), jpeg(seam)), (lossless(base), lossless(noise)),
+             (jpeg(base), gray_bytes.getvalue()), (jpeg(base), jpeg(base[:50]))]
+    for first, second in pairs:
+        assert probe.pixel_difference(first, second) == full_image_difference(first, second)
+
+
+PEAK_MEMORY_CHILD = r"""
+import importlib.util, json, sys
+spec = importlib.util.spec_from_file_location("cloudrun_check", sys.argv[1])
+probe = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(probe)
+first, second = open(sys.argv[2], "rb").read(), open(sys.argv[3], "rb").read()
+difference = probe.pixel_difference(first, second)
+if sys.platform == "win32":
+    import ctypes
+    from ctypes import wintypes
+
+    class Counters(ctypes.Structure):
+        _fields_ = [("cb", wintypes.DWORD), ("PageFaultCount", wintypes.DWORD)] + [
+            (name, ctypes.c_size_t) for name in ("PeakWorkingSetSize", "WorkingSetSize", "QuotaPeakPagedPoolUsage",
+                                                 "QuotaPagedPoolUsage", "QuotaPeakNonPagedPoolUsage", "QuotaNonPagedPoolUsage",
+                                                 "PagefileUsage", "PeakPagefileUsage")]
+
+    counters = Counters(cb=ctypes.sizeof(Counters))
+    process = ctypes.windll.kernel32.GetCurrentProcess
+    process.restype = wintypes.HANDLE
+    ctypes.windll.psapi.GetProcessMemoryInfo.argtypes = [wintypes.HANDLE, ctypes.c_void_p, wintypes.DWORD]
+    ctypes.windll.psapi.GetProcessMemoryInfo(process(), ctypes.byref(counters), counters.cb)
+    peak = counters.PeakWorkingSetSize
+else:
+    import resource
+    peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * (1 if sys.platform == "darwin" else 1024)
+print(json.dumps({"difference": difference, "peakBytes": peak}))
+"""
+
+
+def test_pixel_difference_of_a_6400x6400_pair_stays_well_under_the_probe_job_memory(tmp_path):
+    """2026-10-30: comparing two 6400x6400 x4 outputs (1600x1600 at 4x) that differ by cross-instance float noise
+    OOM-killed the 512 MiB probe job. The comparison runs in a fresh process; its peak resident memory (interpreter,
+    numpy, Pillow and both JPEG bodies included) must stay well under 512 MiB."""
+    import subprocess
+    import sys
+    import numpy as np
+    side = 6400
+    ramp = np.linspace(0, 255, side, dtype=np.float32)
+    photo = np.empty((side, side, 3), dtype=np.uint8)
+    photo[..., 0] = ramp[None, :]
+    photo[..., 1] = ramp[:, None]
+    photo[..., 2] = 128
+    first = jpeg(photo)
+    photo[::97, ::89] ^= 3  # isolated pixels a few levels off, like the measured cross-instance noise
+    second = jpeg(photo)
+    del photo
+    (tmp_path / "a.jpg").write_bytes(first)
+    (tmp_path / "b.jpg").write_bytes(second)
+    script = Path(__file__).with_name("cloudrun_check.py")
+    done = subprocess.run([sys.executable, "-c", PEAK_MEMORY_CHILD, str(script), str(tmp_path / "a.jpg"), str(tmp_path / "b.jpg")],
+                          capture_output=True, text=True, timeout=600, check=True)
+    result = json.loads(done.stdout.strip().splitlines()[-1])
+    difference = result["difference"]
+    assert difference["sameSize"] is True and 0 < difference["maxAbs"] <= 255 and difference["sharePixels"] > 0
+    print(f"peak resident memory: {result['peakBytes'] / 2 ** 20:.0f} MiB")
+    assert result["peakBytes"] < 400 * 2 ** 20
+
+
 def answer(digest, instance):
     return probe.UpscaleAnswer(200, 1.0, digest, instance)
 
@@ -535,6 +634,25 @@ def test_upscale_probe_records_the_instance_of_every_answer_and_passes_identical
     assert list(row["outputs"].values()) == [["up01", "up02"]]
     assert len(row["callLog"]) == 3 and {c["instance"] for c in row["callLog"]} == {"up01", "up02"}
     assert all(c["sha256"] == row["outputSha256"] for c in row["callLog"])
+
+
+def test_upscale_probe_keeps_one_body_per_distinct_output_and_drops_them_once_a_size_is_judged(fake_upscale, monkeypatch):
+    fake = fake_upscale(mode="visible", instances=("up01", "up02"))
+    up = probe.UpscaleProbe(fake.url, None, "swinir-x2", [(64, 96), (80, 80)], 30)
+    kept, real_judge = [], probe.judge_outputs
+
+    def judge(label, answers, bodies):
+        kept.append((label, len(answers), sorted(bodies)))
+        return real_judge(label, answers, bodies)
+    monkeypatch.setattr(probe, "judge_outputs", judge)
+    up.run(2, 1)
+    # Each size was judged right after its calls, with one body per distinct sha256, and no body is left afterwards.
+    assert [label for label, _, _ in kept] == ["swinir-x2 64x96", "swinir-x2 80x80"]
+    for (label, calls, digests), entry in zip(kept, up.sizes.values()):
+        assert calls == 3 and digests == sorted({a.digest for a in entry["answers"]}) and len(digests) == 2
+        assert entry["bodies"] == {} and all(a.body is None and len(a.digest) == 64 for a in entry["answers"])
+    rows = up.rows(2)
+    assert [r["distinctOutputs"] for r in rows] == [2, 2] and all(r["outputFailures"] for r in rows)
 
 
 def test_upscale_probe_fails_a_visible_difference_between_instances(fake_upscale):
