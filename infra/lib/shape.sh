@@ -13,6 +13,7 @@
 #   BULK_MAX_DISPATCHES=0 INGEST_MAX_DISPATCHES=2 DB_MAX_CONNECTIONS=25 MATTING_CPU_MAX_INSTANCES=20
 #   UPSCALE_SERVICE=gpu CATALOG_PHOTO_CONCURRENCY=1 CATALOG_BULK_WINDOW=8 LLM_INFLIGHT_PER_INSTANCE=
 #   WORKER_CONCURRENCY=2 ENLARGE_MAX_DISPATCHES=0 ENLARGE_BULK_MAX_DISPATCHES=0 (spec 18: no enlarge queue)
+#   UPSCALE_GPU_SERVICE=0 (spec 18 GPU upscaler: spec 11's GPU path and catalog-upscale-gpu both use the plain ids)
 # The shape before the spec 18 measured table (enlargement back on catalog-matting), for a rollback:
 #   UPSCALE_SERVICE=cpu MATTING_CPU_MAX_INSTANCES=16 UPSCALE_TIMEOUT_S=840 ENLARGE_DISPATCHES_PER_SECOND=0.1
 #   ENLARGE_BULK_MAX_DISPATCHES=12 UPSCALE_MAX_PIXELS=24000000
@@ -110,6 +111,30 @@ SHAPE_DEFAULTS=(
   # would need about 6500 s, more than one Cloud Tasks delivery (30 minutes) waits.
   UPSCALE_MAX_PIXELS=8000000
   UPSCALE_MAX_PIXELS_X4=6400000
+  # Spec 18 GPU upscaler (owner 2026-10-30: AI enlargement on GPUs in a second region, asia-south2; speed matters a lot,
+  # cost does not, reliability stays the must-have). UPSCALE_TARGET is where Start pins a new batch's enlargements: cpu
+  # (catalog-upscale, the `+cpu` upscaler ids) or gpu (catalog-upscale-gpu, the plain ids). Each batch keeps the target
+  # it started with (options.enlargement.target), so cpu is the rollback switch for new batches and never moves a
+  # running one; the GPU service stays deployed for batches already on it. UPSCALE_GPU_SERVICE=1 deploys
+  # catalog-upscale-gpu (the matting-gpu image, only the upscaler loaded) and gives the worker its URL either way.
+  UPSCALE_TARGET=cpu
+  UPSCALE_GPU_SERVICE=1
+  # One NVIDIA RTX PRO 6000 (Blackwell, 96 GB) per instance in asia-south2, no zonal redundancy: Google granted 3 on
+  # the first deploy (2026-10-30). Cloud Run needs at least 20 vCPU and 80 GiB with this GPU. Concurrency 4: the
+  # requests queue on the service's inference lock (one tile at a time), so 4 at once only overlap decode and encode
+  # with inference; measured deterministic (services/matting/README.md "Measured on RTX PRO 6000"). Timeout 300 s:
+  # the slowest measured call is a few seconds, and the largest image the caps allow about 20 s (upscale_gpu_check).
+  UPSCALE_GPU_REGION=asia-south2
+  UPSCALE_GPU_TYPE=nvidia-rtx-pro-6000
+  UPSCALE_GPU_CPU=20
+  UPSCALE_GPU_MEMORY=80Gi
+  UPSCALE_GPU_MAX_INSTANCES=3
+  UPSCALE_GPU_CONCURRENCY=4
+  UPSCALE_GPU_TIMEOUT_S=300
+  # The worker's health probe of the GPU upscaler waits UPSCALE_GPU_COLD_START_S + 60 s. Measured by hand on
+  # 2026-10-30 (a fresh instance, image pulled, CUDA up and the first model loaded): 42 s typical, 91.5 s the
+  # slowest seen; 180 is about twice that (services/matting/README.md "Measured on RTX PRO 6000").
+  UPSCALE_GPU_COLD_START_S=180
   # The upscalers stay resident once used, so with UPSCALE_SERVICE=gpu both count on top of the cut-outs.
   GPU_UPSCALE_MODELS=swinir-x2,swinir-x4
   # CUDA context and library handles outside the model arenas (spec 17 3.3.3).
@@ -312,6 +337,29 @@ shape_defaults() {
   # What the catalog may use of the asia-south1 quotas: the rest is OTHER_APPS_* (above).
   CPU_QUOTA_LIMIT=$((CPU_QUOTA_VCPU - OTHER_APPS_VCPU))
   MEMORY_QUOTA_LIMIT_GIB=$((MEMORY_QUOTA_GIB - OTHER_APPS_MEMORY_GIB))
+  # Spec 18 GPU upscaler: the GPU upscaler's region has its own Cloud Run quotas (200 vCPU and 400 GiB per region,
+  # read 2026-10-30; nothing else of ours runs in asia-south2), kept 10 vCPU and 16 GiB spare like asia-south1. The
+  # per-type GPU quota (no zonal redundancy) there: 3 RTX PRO 6000, granted automatically on the first deploy
+  # (2026-10-30). A granted increase (infra/request-gpu-upscale-quota.sh) raises it here first.
+  UPSCALE_GPU_REGION_CPU_LIMIT=${UPSCALE_GPU_REGION_CPU_LIMIT-190}
+  UPSCALE_GPU_REGION_MEMORY_GIB_LIMIT=${UPSCALE_GPU_REGION_MEMORY_GIB_LIMIT-384}
+  UPSCALE_GPU_QUOTA=${UPSCALE_GPU_QUOTA-3}
+  # Measured p95 and p50 in whole seconds (rounded up) of one POST /upscale per photo size, model swinir-x2, one row per
+  # GPU type and concurrency: UPSCALE_GPU_P95_S_<UPSCALE_GPU_TYPE in capitals, "_" for "-">_<conc>CONC_<size>, from
+  # infra/check-matting.sh --probe-upscale on the candidate (services/matting/README.md "Measured on RTX PRO 6000"),
+  # with UPSCALE_GPU_MEASURED_ON. Empty = not measured: upscale_gpu_check refuses the shape ("measure first").
+  # UPSCALE_GPU_X4_TIME_RATIO is the x4 over x2 p95 bound the gate's probe enforces (measured at most 2.3 at 800x1200,
+  # where both are about a second and one slow call moves the p95).
+  UPSCALE_GPU_MEASURED_ON=${UPSCALE_GPU_MEASURED_ON-2026-10-30}
+  UPSCALE_GPU_P95_S_NVIDIA_RTX_PRO_6000_1CONC_800x1200=${UPSCALE_GPU_P95_S_NVIDIA_RTX_PRO_6000_1CONC_800x1200-2}
+  UPSCALE_GPU_P95_S_NVIDIA_RTX_PRO_6000_1CONC_1600x1600=${UPSCALE_GPU_P95_S_NVIDIA_RTX_PRO_6000_1CONC_1600x1600-3}
+  UPSCALE_GPU_P50_S_NVIDIA_RTX_PRO_6000_1CONC_800x1200=${UPSCALE_GPU_P50_S_NVIDIA_RTX_PRO_6000_1CONC_800x1200-2}
+  UPSCALE_GPU_P50_S_NVIDIA_RTX_PRO_6000_1CONC_1600x1600=${UPSCALE_GPU_P50_S_NVIDIA_RTX_PRO_6000_1CONC_1600x1600-3}
+  UPSCALE_GPU_P95_S_NVIDIA_RTX_PRO_6000_4CONC_800x1200=${UPSCALE_GPU_P95_S_NVIDIA_RTX_PRO_6000_4CONC_800x1200-4}
+  UPSCALE_GPU_P95_S_NVIDIA_RTX_PRO_6000_4CONC_1600x1600=${UPSCALE_GPU_P95_S_NVIDIA_RTX_PRO_6000_4CONC_1600x1600-7}
+  UPSCALE_GPU_P50_S_NVIDIA_RTX_PRO_6000_4CONC_800x1200=${UPSCALE_GPU_P50_S_NVIDIA_RTX_PRO_6000_4CONC_800x1200-4}
+  UPSCALE_GPU_P50_S_NVIDIA_RTX_PRO_6000_4CONC_1600x1600=${UPSCALE_GPU_P50_S_NVIDIA_RTX_PRO_6000_4CONC_1600x1600-7}
+  UPSCALE_GPU_X4_TIME_RATIO=${UPSCALE_GPU_X4_TIME_RATIO-3}
 }
 
 # shape_check [live_connection_limit]: prints every problem to stderr and returns 1 if there is any. Sets
@@ -325,7 +373,9 @@ shape_check() {
       INGEST_MAX_DISPATCHES BULK_MAX_DISPATCHES TASKS_MAX_DISPATCHES MATTING_CPU_MAX_INSTANCES GPU_MAX_INSTANCES \
       GPU_CPU GPU_CONCURRENCY MAX_RESIDENT_SESSIONS MATTE_INFLIGHT_PER_INSTANCE CATALOG_PHOTO_CONCURRENCY \
       CATALOG_BULK_WINDOW BULK_BATCH_PRODUCTS GPU_CUDA_OVERHEAD_MIB UPSCALE_CPU_VCPU UPSCALE_CONCURRENCY UPSCALE_MAX_INSTANCES \
-      UPSCALE_THREADS UPSCALE_TIMEOUT_S UPSCALE_COLD_START_S UPSCALE_MAX_PIXELS UPSCALE_MAX_PIXELS_X4 UPSCALE_LIVE_VCPU ENLARGE_MAX_DISPATCHES ENLARGE_BULK_MAX_DISPATCHES; do
+      UPSCALE_THREADS UPSCALE_TIMEOUT_S UPSCALE_COLD_START_S UPSCALE_MAX_PIXELS UPSCALE_MAX_PIXELS_X4 UPSCALE_LIVE_VCPU ENLARGE_MAX_DISPATCHES ENLARGE_BULK_MAX_DISPATCHES \
+      UPSCALE_GPU_CPU UPSCALE_GPU_MAX_INSTANCES UPSCALE_GPU_CONCURRENCY UPSCALE_GPU_TIMEOUT_S UPSCALE_GPU_COLD_START_S UPSCALE_GPU_QUOTA \
+      UPSCALE_GPU_REGION_CPU_LIMIT UPSCALE_GPU_REGION_MEMORY_GIB_LIMIT; do
     value=${!name}
     if ! [[ "$value" =~ ^[0-9]+$ ]]; then shape_fail "$name must be a whole number, got '$value'"; return 1; fi
   done
@@ -355,6 +405,8 @@ shape_check() {
   [[ -z "$LLM_INFLIGHT_PER_INSTANCE" || "$LLM_INFLIGHT_PER_INSTANCE" =~ ^[1-9][0-9]*$ ]] || shape_fail "LLM_INFLIGHT_PER_INSTANCE must be empty or a whole number such as 6"
   case "$UPSCALE_SERVICE" in gpu|cpu|dedicated) ;; *) shape_fail "UPSCALE_SERVICE must be gpu, cpu or dedicated, got '$UPSCALE_SERVICE'" ;; esac
   case "$UPSCALE_MEASURE" in 0|1) ;; *) shape_fail "UPSCALE_MEASURE must be 0 or 1, got '$UPSCALE_MEASURE'" ;; esac
+  case "$UPSCALE_TARGET" in cpu|gpu) ;; *) shape_fail "UPSCALE_TARGET must be cpu or gpu, got '$UPSCALE_TARGET'" ;; esac
+  case "$UPSCALE_GPU_SERVICE" in 0|1) ;; *) shape_fail "UPSCALE_GPU_SERVICE must be 0 or 1, got '$UPSCALE_GPU_SERVICE'" ;; esac
 
   # Connections: every service at max instances, every pool full, inside what ila-pg allows.
   CATALOG_DB_LIMIT=$((DB_MAX_CONNECTIONS - DB_RESERVED_CONNECTIONS - ILA_DB_SHARE))
@@ -432,6 +484,7 @@ shape_check() {
   fi
   gpu_memory_check
   upscale_check
+  upscale_gpu_check
   return $ok
 }
 
@@ -594,6 +647,9 @@ upscale_check() {
     fi
   done
   [ -n "$mem_mib" ] || return 0
+  # Spec 18 GPU upscaler: with UPSCALE_TARGET=gpu new batches enlarge on catalog-upscale-gpu and catalog-upscale only
+  # finishes the batches started on it; its slot rule above still holds, the rate follows the GPU (upscale_gpu_check).
+  [ "${UPSCALE_TARGET:-cpu}" = cpu ] || return 0
   # Spec 18 3.1.5, the queue rate: the SUM of the rates of every enlarge lane that calls catalog-upscale <=
   # UPSCALE_MAX_INSTANCES x UPSCALE_CONCURRENCY / p50, at the smallest size (the usual photo). Without a measured p50 the
   # p95 of that size stands in (a safe bound). Cloud Tasks paces each queue on its own, so each lane with slots counts
@@ -617,6 +673,139 @@ upscale_check() {
   total=$(awk -v r="$ENLARGE_DISPATCHES_PER_SECOND" -v o="$operator" -v b="$ENLARGE_BULK_DISPATCHES_PER_SECOND" -v k="$bulk" 'BEGIN{printf "%.4f", r * o + b * k}')
   if awk -v t="$total" -v c="$capacity" 'BEGIN{exit !(t > c)}'; then
     shape_fail "enlarge rates ENLARGE_DISPATCHES_PER_SECOND=$ENLARGE_DISPATCHES_PER_SECOND x $operator operator lanes + ENLARGE_BULK_DISPATCHES_PER_SECOND=$ENLARGE_BULK_DISPATCHES_PER_SECOND x $bulk bulk lanes = $total per second exceed what catalog-upscale finishes: $UPSCALE_MAX_INSTANCES x $UPSCALE_CONCURRENCY / $stat $seconds s of $smallest = $capacity per second"
+  fi
+}
+
+# The measured-table name part of a GPU type: nvidia-rtx-pro-6000 -> NVIDIA_RTX_PRO_6000.
+upscale_gpu_type_key() { local t=${UPSCALE_GPU_TYPE^^}; printf '%s' "${t//-/_}"; }
+
+# upscale_gpu_p95 <size> / upscale_gpu_p50 <size>: the measured seconds of the current GPU type and concurrency, or nothing.
+upscale_gpu_p95() {
+  local name="UPSCALE_GPU_P95_S_$(upscale_gpu_type_key)_${UPSCALE_GPU_CONCURRENCY}CONC_$1"
+  printf '%s' "${!name:-}"
+}
+upscale_gpu_p50() {
+  local name="UPSCALE_GPU_P50_S_$(upscale_gpu_type_key)_${UPSCALE_GPU_CONCURRENCY}CONC_$1"
+  printf '%s' "${!name:-}"
+}
+
+# 0 when this deploy runs catalog-upscale-gpu (not in a measure run, which changes only catalog-upscale).
+upscale_gpu_deployed() { [ "$UPSCALE_GPU_SERVICE" = 1 ] && [ "$UPSCALE_MEASURE" != 1 ]; }
+
+# Spec 18 GPU upscaler, called by shape_check (its shape_fail and ok): the catalog-upscale-gpu shape. Cloud Run's GPU
+# shapes, the per-type GPU quota and the CPU and memory quotas of its region; a measured p95 for every probe size at
+# exactly this (type, concurrency); a timeout that covers twice the largest probe size and the largest image the caps
+# allow; and, with UPSCALE_TARGET=gpu, enlarge lanes and a rate sized to the GPU instances.
+upscale_gpu_check() {
+  if [ "$UPSCALE_TARGET" = gpu ]; then
+    [ "$UPSCALE_GPU_SERVICE" = 1 ] || { shape_fail "UPSCALE_TARGET=gpu needs UPSCALE_GPU_SERVICE=1 (catalog-upscale-gpu deployed and its URL on the worker)"; return 0; }
+    [ "$ENLARGE_CLIENT_WIRED" = 1 ] || { shape_fail "UPSCALE_TARGET=gpu needs a worker image with the spec 18 enlarge stage (ENLARGE_CLIENT_WIRED=1)"; return 0; }
+  fi
+  [ "$UPSCALE_GPU_SERVICE" = 1 ] || return 0
+  # Spec 11's GPU path names its images with the same plain ids; two GPU upscalers must never share them.
+  if [ "$UPSCALE_SERVICE" = gpu ]; then
+    shape_fail "UPSCALE_SERVICE=gpu (the cut-out GPU upscales, spec 11) cannot run beside catalog-upscale-gpu: both make the plain upscaler ids. Set UPSCALE_GPU_SERVICE=0 with it"
+    return 0
+  fi
+  local gib
+  if [[ "$UPSCALE_GPU_MEMORY" =~ ^([1-9][0-9]*)Gi$ ]]; then gib=${BASH_REMATCH[1]}; else shape_fail "UPSCALE_GPU_MEMORY must look like 80Gi, got '$UPSCALE_GPU_MEMORY'"; return 0; fi
+  # Cloud Run's GPU shapes (docs.cloud.google.com/run/docs/configuring/services/gpu, read 2026-10-30).
+  case "$UPSCALE_GPU_TYPE" in
+    nvidia-rtx-pro-6000)
+      [ "$UPSCALE_GPU_CPU" -ge 20 ] || shape_fail "UPSCALE_GPU_CPU must be at least 20 with an RTX PRO 6000 (Cloud Run), got $UPSCALE_GPU_CPU"
+      [ "$gib" -ge 80 ] || shape_fail "UPSCALE_GPU_MEMORY must be at least 80Gi with an RTX PRO 6000 (Cloud Run), got $UPSCALE_GPU_MEMORY" ;;
+    nvidia-l4)
+      [ "$UPSCALE_GPU_CPU" -ge 4 ] && [ "$UPSCALE_GPU_CPU" -le 8 ] || shape_fail "UPSCALE_GPU_CPU must be 4 to 8 with an L4, got $UPSCALE_GPU_CPU"
+      [ "$gib" -ge 16 ] && [ "$gib" -le 32 ] || shape_fail "UPSCALE_GPU_MEMORY must be 16Gi to 32Gi with an L4, got $UPSCALE_GPU_MEMORY" ;;
+    *) shape_fail "UPSCALE_GPU_TYPE must be nvidia-rtx-pro-6000 or nvidia-l4, got '$UPSCALE_GPU_TYPE'"; return 0 ;;
+  esac
+  [ "$UPSCALE_GPU_MAX_INSTANCES" -ge 1 ] || shape_fail "UPSCALE_GPU_MAX_INSTANCES must be at least 1"
+  [ "$UPSCALE_GPU_CONCURRENCY" -ge 1 ] && [ "$UPSCALE_GPU_CONCURRENCY" -le 4 ] || shape_fail "UPSCALE_GPU_CONCURRENCY must be 1 to 4 (tiles run one at a time per instance), got $UPSCALE_GPU_CONCURRENCY"
+  # Quotas. The GPU region must not be asia-south1, whose CPU sum above does not count this service (and which offers
+  # neither GPU to this project). An L4 in the cut-out GPU's region shares its L4 quota.
+  if [ "$UPSCALE_GPU_REGION" = "${REGION:-asia-south1}" ]; then
+    shape_fail "UPSCALE_GPU_REGION=$UPSCALE_GPU_REGION is the main region; the GPU upscaler runs in its own region (asia-south2), whose quotas are counted here"
+  fi
+  if [ "$UPSCALE_GPU_TYPE" = nvidia-l4 ] && [ "$UPSCALE_GPU_REGION" = "${GPU_REGION:-asia-southeast1}" ]; then
+    [ $((UPSCALE_GPU_MAX_INSTANCES + GPU_MAX_INSTANCES)) -le "$GPU_QUOTA" ] || shape_fail "UPSCALE_GPU_MAX_INSTANCES=$UPSCALE_GPU_MAX_INSTANCES + the cut-out GPU's $GPU_MAX_INSTANCES exceed the L4 quota of $GPU_QUOTA in $UPSCALE_GPU_REGION"
+  else
+    [ "$UPSCALE_GPU_MAX_INSTANCES" -le "$UPSCALE_GPU_QUOTA" ] || shape_fail "UPSCALE_GPU_MAX_INSTANCES=$UPSCALE_GPU_MAX_INSTANCES exceeds the $UPSCALE_GPU_TYPE quota of $UPSCALE_GPU_QUOTA in $UPSCALE_GPU_REGION (no zonal redundancy); file infra/request-gpu-upscale-quota.sh and raise UPSCALE_GPU_QUOTA once granted"
+  fi
+  [ $((UPSCALE_GPU_MAX_INSTANCES * UPSCALE_GPU_CPU)) -le "$UPSCALE_GPU_REGION_CPU_LIMIT" ] \
+    || shape_fail "catalog-upscale-gpu at max instances takes $((UPSCALE_GPU_MAX_INSTANCES * UPSCALE_GPU_CPU)) vCPU, above $UPSCALE_GPU_REGION_CPU_LIMIT of the $UPSCALE_GPU_REGION quota"
+  [ $((UPSCALE_GPU_MAX_INSTANCES * gib)) -le "$UPSCALE_GPU_REGION_MEMORY_GIB_LIMIT" ] \
+    || shape_fail "catalog-upscale-gpu at max instances takes $((UPSCALE_GPU_MAX_INSTANCES * gib)) GiB, above $UPSCALE_GPU_REGION_MEMORY_GIB_LIMIT GiB of the $UPSCALE_GPU_REGION quota"
+  [ "$UPSCALE_GPU_TIMEOUT_S" -ge 60 ] && [ "$UPSCALE_GPU_TIMEOUT_S" -le "$UPSCALE_TIMEOUT_MAX_S" ] \
+    || shape_fail "UPSCALE_GPU_TIMEOUT_S must be 60 to $UPSCALE_TIMEOUT_MAX_S s (the enlarge task's deadline), got $UPSCALE_GPU_TIMEOUT_S"
+  [ "$UPSCALE_GPU_COLD_START_S" -ge 1 ] && [ "$UPSCALE_GPU_COLD_START_S" -le "$UPSCALE_GPU_TIMEOUT_S" ] \
+    || shape_fail "UPSCALE_GPU_COLD_START_S must be 1 to UPSCALE_GPU_TIMEOUT_S=$UPSCALE_GPU_TIMEOUT_S, got $UPSCALE_GPU_COLD_START_S"
+  [[ "$UPSCALE_GPU_X4_TIME_RATIO" =~ ^[0-9]+([.][0-9]+)?$ ]] && awk -v r="$UPSCALE_GPU_X4_TIME_RATIO" 'BEGIN{exit !(r >= 1)}' \
+    || { shape_fail "UPSCALE_GPU_X4_TIME_RATIO must be a number of at least 1, got '$UPSCALE_GPU_X4_TIME_RATIO'"; return 0; }
+  # The measured table (no probe sizes is refused by upscale_check).
+  [ -n "${UPSCALE_SIZES//[, ]/}" ] || return 0
+  local size p95 missing="" largest worst=0 w h per_mp=0 cap est
+  for size in ${UPSCALE_SIZES//,/ }; do
+    p95=$(upscale_gpu_p95 "$size")
+    if [ -z "$p95" ]; then missing+=" $size"; continue; fi
+    [[ "$p95" =~ ^[1-9][0-9]*$ ]] || { shape_fail "UPSCALE_GPU_P95_S_$(upscale_gpu_type_key)_${UPSCALE_GPU_CONCURRENCY}CONC_$size=$p95 must be a whole number of seconds (rounded up)"; return 0; }
+    w=${size%x*}; h=${size#*x}
+    per_mp=$(awk -v p="$p95" -v n="$((w * h))" -v m="$per_mp" 'BEGIN{v = p / n * 1000000; printf "%.4f", (v > m ? v : m)}')
+  done
+  if [ -n "$missing" ]; then
+    shape_fail "measure first: run infra/check-matting.sh --probe-upscale on catalog-upscale-gpu (no measured p95 for UPSCALE_GPU_TYPE=$UPSCALE_GPU_TYPE UPSCALE_GPU_CONCURRENCY=$UPSCALE_GPU_CONCURRENCY at$missing; UPSCALE_GPU_P95_S_* in infra/lib/shape.sh)"
+    return 0
+  fi
+  [[ "$UPSCALE_GPU_MEASURED_ON" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] || shape_fail "UPSCALE_GPU_MEASURED_ON must be the date of the probe the GPU rows come from, such as 2026-10-30"
+  largest=$(upscale_largest_size)
+  worst=$((2 * $(upscale_gpu_p95 "$largest")))
+  [ "$UPSCALE_GPU_TIMEOUT_S" -ge "$worst" ] || shape_fail "UPSCALE_GPU_TIMEOUT_S=$UPSCALE_GPU_TIMEOUT_S is below 2 x the measured GPU p95 of $largest ($(upscale_gpu_p95 "$largest") s); set it to at least $worst"
+  # The worker sends the GPU the same regions as the CPU (one cap per model, UPSCALE_MAX_PIXELS and _X4), so the
+  # largest of each must finish within the GPU timeout too, at the slowest measured p95 per megapixel (x4 at
+  # UPSCALE_GPU_X4_TIME_RATIO times it), twice over.
+  local pair cap_name ratio
+  local -a caps=("UPSCALE_MAX_PIXELS|1")
+  [ "${UPSCALE_MODEL_X4:-swinir-x4}" = off ] || caps+=("UPSCALE_MAX_PIXELS_X4|$UPSCALE_GPU_X4_TIME_RATIO")
+  for pair in "${caps[@]}"; do
+    IFS='|' read -r cap_name ratio <<< "$pair"
+    cap=${!cap_name}
+    est=$(awk -v p="$cap" -v r="$per_mp" -v x="$ratio" 'BEGIN{v = p / 1000000 * r * x; c = int(v); if (c < v) c++; print c}')
+    [ $((2 * est)) -le "$UPSCALE_GPU_TIMEOUT_S" ] || shape_fail "$cap_name=$cap needs a GPU timeout of 2 x about $est s = $((2 * est)) s ($per_mp s per megapixel measured $UPSCALE_GPU_MEASURED_ON), above UPSCALE_GPU_TIMEOUT_S=$UPSCALE_GPU_TIMEOUT_S"
+  done
+  [ "$UPSCALE_TARGET" = gpu ] || return 0
+  # Spec 18 GPU upscaler, the lanes: with UPSCALE_TARGET=gpu new batches enlarge on the GPU, so the enlarge lanes of
+  # both stacks never send more at once than catalog-upscale-gpu serves at once (a busy answer costs a photo one of its
+  # attempts), and their rate stays within what it finishes at the smallest size's p50 (the p95 when no p50).
+  local other
+  if [ "${CATALOG_PREVIEW:-0}" = 1 ]; then
+    other=$(( $(shape_row SHAPE_DEFAULTS ENLARGE_MAX_DISPATCHES) + $(shape_row SHAPE_DEFAULTS ENLARGE_BULK_MAX_DISPATCHES) ))
+  else
+    other=$(( $(shape_row PREVIEW_SHAPE_DEFAULTS ENLARGE_MAX_DISPATCHES) + $(shape_row PREVIEW_SHAPE_DEFAULTS ENLARGE_BULK_MAX_DISPATCHES) ))
+  fi
+  local serves=$((UPSCALE_GPU_MAX_INSTANCES * UPSCALE_GPU_CONCURRENCY))
+  if [ $((ENLARGE_MAX_DISPATCHES + ENLARGE_BULK_MAX_DISPATCHES + other)) -gt "$serves" ]; then
+    shape_fail "enlarge slots $ENLARGE_MAX_DISPATCHES + $ENLARGE_BULK_MAX_DISPATCHES + the other stack's $other = $((ENLARGE_MAX_DISPATCHES + ENLARGE_BULK_MAX_DISPATCHES + other)) exceed what catalog-upscale-gpu serves at once ($UPSCALE_GPU_MAX_INSTANCES x $UPSCALE_GPU_CONCURRENCY); lower ENLARGE_MAX_DISPATCHES or ENLARGE_BULK_MAX_DISPATCHES"
+  fi
+  # The rate, as upscale_check counts it for the CPU: the SUM over every lane with slots, both stacks (the rates are
+  # shared rows), the operator lanes at ENLARGE_DISPATCHES_PER_SECOND and the bulk lanes at
+  # ENLARGE_BULK_DISPATCHES_PER_SECOND.
+  local operator=0 bulk=0 smallest seconds stat=p50 capacity total
+  [ "$ENLARGE_MAX_DISPATCHES" -gt 0 ] && operator=$((operator + 1))
+  [ "$ENLARGE_BULK_MAX_DISPATCHES" -gt 0 ] && bulk=$((bulk + 1))
+  if [ "${CATALOG_PREVIEW:-0}" = 1 ]; then
+    [ "$(shape_row SHAPE_DEFAULTS ENLARGE_MAX_DISPATCHES)" -gt 0 ] && operator=$((operator + 1))
+    [ "$(shape_row SHAPE_DEFAULTS ENLARGE_BULK_MAX_DISPATCHES)" -gt 0 ] && bulk=$((bulk + 1))
+  else
+    [ "$(shape_row PREVIEW_SHAPE_DEFAULTS ENLARGE_MAX_DISPATCHES)" -gt 0 ] && operator=$((operator + 1))
+    [ "$(shape_row PREVIEW_SHAPE_DEFAULTS ENLARGE_BULK_MAX_DISPATCHES)" -gt 0 ] && bulk=$((bulk + 1))
+  fi
+  [ $((operator + bulk)) -gt 0 ] || return 0
+  smallest=$(upscale_smallest_size)
+  seconds=$(upscale_gpu_p50 "$smallest")
+  [[ "$seconds" =~ ^[1-9][0-9]*$ ]] || { seconds=$(upscale_gpu_p95 "$smallest"); stat=p95; }
+  capacity=$(awk -v n="$serves" -v s="$seconds" 'BEGIN{printf "%.4f", n / s}')
+  total=$(awk -v r="$ENLARGE_DISPATCHES_PER_SECOND" -v o="$operator" -v b="$ENLARGE_BULK_DISPATCHES_PER_SECOND" -v k="$bulk" 'BEGIN{printf "%.4f", r * o + b * k}')
+  if awk -v t="$total" -v c="$capacity" 'BEGIN{exit !(t > c)}'; then
+    shape_fail "enlarge rates ENLARGE_DISPATCHES_PER_SECOND=$ENLARGE_DISPATCHES_PER_SECOND x $operator operator lanes + ENLARGE_BULK_DISPATCHES_PER_SECOND=$ENLARGE_BULK_DISPATCHES_PER_SECOND x $bulk bulk lanes = $total per second exceed what catalog-upscale-gpu finishes: $UPSCALE_GPU_MAX_INSTANCES x $UPSCALE_GPU_CONCURRENCY / $stat $seconds s of $smallest = $capacity per second"
   fi
 }
 

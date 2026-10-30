@@ -18,7 +18,7 @@ import { catalogBatches, catalogChunks, catalogEnlargements, catalogOutputs, cat
 import { enlargedPath, enlargedTilePath, enlargementPrefix } from "@catalog/core/catalog/naming";
 import { CHANNELS } from "@catalog/core/catalog/channels";
 import { enlargementPlan, UnsupportedSourceError, type EnlargementShot, type Prepared } from "@catalog/core/catalog/render";
-import { EnlargementNotReadyError, gpuUrlsFromEnv, isCpuUpscalerId, markEnlargementTerminal, markEnlargementUnwanted, primeSourceX2, storedUpscaler, upscaleMaxPixels, upscalerFactor, upscalerId, upscalerModel, upscaleUpload, UPSCALE_MODEL_VERSIONS, type UpscaleFactor, type Upscaler } from "@catalog/core/catalog/upscale";
+import { EnlargementNotReadyError, gpuUrlsFromEnv, isCpuUpscalerId, upscaleTargetFromEnv, markEnlargementTerminal, markEnlargementUnwanted, primeSourceX2, storedUpscaler, upscaleMaxPixels, upscalerFactor, upscalerId, upscalerModel, upscaleUpload, UPSCALE_MODEL_VERSIONS, type UpscaleFactor, type Upscaler } from "@catalog/core/catalog/upscale";
 import { ENLARGE_TASK_MARGIN_MS, EnlargeError, enlargeTimeoutMs, enlargeViaService, probeUpscaleHealth, type EnlargeDeps, type EnlargeResult, type UpscaleProbe } from "@catalog/core/catalog/enlarge";
 import { ENLARGE_DISPATCH_DEADLINE_SEC } from "@catalog/core/tasks";
 import {
@@ -45,19 +45,33 @@ export type EnlargeProbe = (upscaler: string, opts?: { timeoutMs?: number }) => 
 
 /**
  * The worker's service call: the service UPSCALE_URL names (catalog-upscale, or the CPU cut-out service), else the
- * first GPU matting service, as the matting client picks it. One attempt per task delivery: the queue retries. The
- * attempt waits UPSCALE_TIMEOUT_S + 30 s, clamped to the delivery's deadline. The model and scale come from the
+ * first GPU matting service, as the matting client picks it. Spec 18 GPU upscaler: the call goes where the row's
+ * upscaler id is made (upscaleRouteFor): a `+cpu` id to UPSCALE_URL, any other id to UPSCALE_GPU_URL
+ * (catalog-upscale-gpu), with that service's own timeout. One attempt per task delivery: the queue retries. The
+ * attempt waits the service's timeout + 30 s, clamped to the delivery's deadline. The model and scale come from the
  * call's upscaler id (`opts.upscaler`), else `model`. `deps` is for tests (a fake fetch and token).
  */
 export function workerEnlargeCall(model: string = process.env.UPSCALE_MODEL?.trim() || "swinir-x2", env: NodeJS.ProcessEnv = process.env, deps: EnlargeDeps = {}): EnlargeCall {
-  const url = upscaleUrl(env);
   return (jpeg, trace, opts = {}) => {
-    if (!url) throw new EnlargeError("No upscale service is configured (UPSCALE_URL).", "rejected", null, false, 0);
-    const id = opts.upscaler ?? model;
-    return enlargeViaService({ url, jpeg, model: upscalerModel(id), scale: upscalerFactor(id), timeoutMs: enlargeTimeoutMs(env), maxAttempts: 1, trace, ...(opts.deadlineAt ? { deadlineAt: opts.deadlineAt } : {}) }, deps);
+    const id = opts.upscaler ?? model, route = upscaleRouteFor(id, env);
+    if (!route.url) throw new EnlargeError(`No upscale service is configured for ${isCpuUpscalerId(id) ? "UPSCALE_URL" : "UPSCALE_GPU_URL"}.`, "rejected", null, false, 0);
+    return enlargeViaService({ url: route.url, jpeg, model: upscalerModel(id), scale: upscalerFactor(id), timeoutMs: enlargeTimeoutMs(route.env), maxAttempts: 1, trace, ...(opts.deadlineAt ? { deadlineAt: opts.deadlineAt } : {}) }, deps);
   };
 }
 const upscaleUrl = (env: NodeJS.ProcessEnv): string => env.UPSCALE_URL?.trim() || gpuUrlsFromEnv(env)[0] || "";
+/**
+ * Spec 18 GPU upscaler: the service that makes (and the env that times) an upscaler id. A `+cpu` id goes to UPSCALE_URL
+ * with UPSCALE_TIMEOUT_S and UPSCALE_COLD_START_S. Any other id is a GPU image: UPSCALE_GPU_URL (catalog-upscale-gpu)
+ * with UPSCALE_GPU_TIMEOUT_S and UPSCALE_GPU_COLD_START_S; without one, UPSCALE_URL only when that is itself a GPU
+ * service (spec 11, UPSCALE_SERVICE=gpu), else no URL: a GPU id is never made on a CPU service, its row waits
+ * ("absent") until a worker that knows the GPU service takes it.
+ */
+export function upscaleRouteFor(id: string, env: NodeJS.ProcessEnv = process.env): { url: string; env: NodeJS.ProcessEnv } {
+  if (isCpuUpscalerId(id)) return { url: upscaleUrl(env), env };
+  const gpu = env.UPSCALE_GPU_URL?.trim().replace(/\/+$/, "");
+  if (gpu) return { url: gpu, env: { ...env, UPSCALE_TIMEOUT_S: env.UPSCALE_GPU_TIMEOUT_S?.trim() || undefined, UPSCALE_COLD_START_S: env.UPSCALE_GPU_COLD_START_S?.trim() || undefined } };
+  return { url: upscaleTargetFromEnv(env) === "gpu" ? upscaleUrl(env) : "", env };
+}
 /** The measured cold start of the upscale service (infra/lib/shape.sh UPSCALE_COLD_START_S), 120 s until measured. */
 export const DEFAULT_UPSCALE_COLD_START_S = 120;
 /** The probe's timeout (3.4 step 7): the cold start plus 60 s, so a scale-to-zero start passes. */
@@ -65,11 +79,13 @@ export function upscaleProbeTimeoutMs(env: NodeJS.ProcessEnv = process.env): num
   const s = Number(env.UPSCALE_COLD_START_S);
   return ((Number.isFinite(s) && s > 0 ? s : DEFAULT_UPSCALE_COLD_START_S) + 60) * 1000;
 }
-/** The worker's probe: GET <upscale>/health for the row's model (probeUpscaleHealth classifies the answer). */
+/** The worker's probe: GET <upscale>/health for the row's model, on the row's service (upscaleRouteFor). */
 export function workerEnlargeProbe(env: NodeJS.ProcessEnv = process.env, deps: EnlargeDeps = {}): EnlargeProbe {
-  const url = upscaleUrl(env);
   // The timeout is the cold start's, or the time the caller's delivery has left when that is shorter (3.10).
-  return async (upscaler, opts = {}) => (url ? probeUpscaleHealth({ url, model: upscalerModel(upscaler), timeoutMs: Math.min(upscaleProbeTimeoutMs(env), opts.timeoutMs ?? Infinity) }, deps) : "absent");
+  return async (upscaler, opts = {}) => {
+    const route = upscaleRouteFor(upscaler, env);
+    return route.url ? probeUpscaleHealth({ url: route.url, model: upscalerModel(upscaler), timeoutMs: Math.min(upscaleProbeTimeoutMs(route.env), opts.timeoutMs ?? Infinity) }, deps) : "absent";
+  };
 }
 
 /**
@@ -104,13 +120,16 @@ export interface BatchEnlargement { route: PinnedRoute; x2: Upscaler; x4: Upscal
 /**
  * The batch's enlargement as this worker serves it: null when the batch was started before the stage (no recorded
  * route: the plain path, F1) or the worker's rollback switch is on (UPSCALE_MODEL=off: no `enlarge` call, F34).
- * The route is the batch's, never the worker's env (F2, F3); the upscalerIds carry the service target (`+cpu`).
+ * The route is the batch's, never the worker's env (F2, F3); the upscalerIds carry the service target (`+cpu`), the
+ * batch's pinned GPU target included.
  */
 export function batchEnlargement(deps: Pick<CatalogDeps, "enlarge" | "matting">, batch: Pick<typeof catalogBatches.$inferSelect, "options">): BatchEnlargement | null {
   if (!deps.enlarge) return null;
   const route = routeFor(batch);
   if (!route) return null;
-  const target = deps.matting.upscaleTarget;
+  // Spec 18 GPU upscaler: a batch pinned to the GPU upscaler at Start keeps it; any other keeps the worker's UPSCALE_URL
+  // target, so changing UPSCALE_TARGET never moves a running batch between CPU and GPU images.
+  const target = route.target === "gpu" ? "gpu" : deps.matting.upscaleTarget;
   return { route, x2: sharedStoredUpscaler(upscalerId(route.model, target), route.minScale), x4: route.x4Model ? sharedStoredUpscaler(upscalerId(route.x4Model, target), route.minScale) : null };
 }
 /** The upscaler identity (I1) of an upscalerId on this worker: the id with its model's export hash. */

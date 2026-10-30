@@ -384,6 +384,42 @@ pixels, the same upscaler with its export hash, the same effective scale. A chan
 rollback switch makes a new identity and releases the old row; it never resets a row. A failed row wanted again stays
 failed (only Try again resets it); a done row wanted again is reused after the validator accepts its object.
 
+### 3.7 GPU upscaler `catalog-upscale-gpu` (2026-10-30)
+
+Owner decision 2026-10-30: AI enlargement may run on GPUs in asia-south2; speed matters a lot, cost does not,
+reliability is a must. The CPU `catalog-upscale` stays as the rollback switch.
+
+3.7.1 Service. `catalog-upscale-gpu` in `UPSCALE_GPU_REGION` (asia-south2, the one service outside asia-south1;
+AGENTS.md), image `matting-gpu`, one RTX PRO 6000 per instance, 20 vCPU, 80 GiB, concurrency 4, max instances 3 (the
+granted quota), timeout 300 s, min instances 0. Measured numbers: `services/matting/README.md` "Measured on RTX PRO
+6000" (about 1 s per 800x1200 x2 photo, byte-identical across instances, cold start about 42 s). The deploy gate
+probes it with both models at concurrency 4, 3 rounds, and a 600 s determinism budget so the round reaches several
+instances.
+
+3.7.2 Routing. `UPSCALE_TARGET` (cpu or gpu, default cpu) picks where new batches enlarge. Start pins it in
+`options.enlargement.target` ("gpu", or absent for the worker's CPU `UPSCALE_URL`), so flipping the switch never moves
+a running batch, and a batch never mixes CPU and GPU outputs. The upscaler ids differ (`swinir-x2+cpu` on CPU, plain
+`swinir-x2` on GPU), so their stored images, render keys and identities never collide; a stored image of the other
+upscaler is an `another_upscaler` gap and is re-made on the batch's own target, as before. The worker sends a `+cpu` id to
+`UPSCALE_URL` and a plain id to `UPSCALE_GPU_URL` with its own `UPSCALE_GPU_TIMEOUT_S` (300) and
+`UPSCALE_GPU_COLD_START_S` (180); with no GPU URL a plain id is refused ("rejected"), never made on CPU. The worker's
+project-level `roles/run.invoker` covers the service in asia-south2.
+
+3.7.3 Shape. `shape_check` refuses the GPU service without measured rows for its GPU type, a shape outside the GPU
+type's limits (RTX PRO 6000 at least 20 vCPU and 80 GiB; L4 4 to 8 vCPU and 16 to 32 GiB), concurrency above 4, max
+instances above `UPSCALE_GPU_QUOTA`, a timeout below 2 x the largest p95, `UPSCALE_TARGET=gpu` without the service,
+and, with the target on gpu, enlarge slots (operator, bulk and preview lanes) above instances x concurrency or a
+summed lane rate (both stacks, as for the CPU) above what the GPU p50 serves. Flip shape (tested):
+`UPSCALE_TARGET=gpu ENLARGE_MAX_DISPATCHES=2 ENLARGE_BULK_MAX_DISPATCHES=8 ENLARGE_DISPATCHES_PER_SECOND=0.5
+ENLARGE_BULK_DISPATCHES_PER_SECOND=2` (slots 2 + 8 + preview 2 = 12 = 3 x 4; rates 0.5 x 2 operator lanes + 2 = 3/s
+= 12 / p50 4 s).
+
+3.7.4 Rollout. Deploy with `UPSCALE_TARGET=cpu` (the service is live, the worker knows its URL, no batch uses it).
+Flip by deploying with the flip shape once no load or operator batch is running. Roll back by deploying with
+`UPSCALE_TARGET=cpu`: batches started on GPU finish on GPU; new ones enlarge on CPU. `UPSCALE_GPU_SERVICE=0` removes
+the service from the deploy (only with the target on cpu). More GPUs: `infra/request-gpu-upscale-quota.sh` (6 GPUs),
+then raise `UPSCALE_GPU_QUOTA` and `UPSCALE_GPU_MAX_INSTANCES`.
+
 ## 4. Data and state changes
 
 Migration `0005` (`x2_*` columns, unused since 0006) and migration `0006` (table `catalog_enlargements`, the event
@@ -571,8 +607,8 @@ Known risks, stated, not solved here:
 - Older batches made with the silent fallback stay as they are; the invariant is scoped by `options.enlargement`.
 
 Later options:
-- A GPU upscaler once the L4 quota allows it (a quota increase is the owner's call): the same queue and table,
-  `UPSCALE_URL` pointing to a GPU service, measured with the same probe.
+- A GPU upscaler: built on 2026-10-30 as `catalog-upscale-gpu` on RTX PRO 6000 in asia-south2 (3.7), with the same
+  queues and table and its own URL, measured with the same probe.
 - Owner-only items: the CPU quota request; cancelling the two BHPC drafts (alert 11).
 
 ## 14. Done when

@@ -20,7 +20,9 @@
 #       Spec 18 gate (plan 7.2): --cold-start-max s times the first /health 200 on a fresh instance before anything else
 #       and fails above s (UPSCALE_COLD_START_S); --determinism-calls n sends n calls of one 800x1200 image at once per
 #       model, records sha256 and instance id per call, and fails on fewer than 2 instances or a visible difference
-#       between instances (cloudrun_check.py VISUAL_MAX_ABS, VISUAL_MIN_PSNR_DB).
+#       between instances (cloudrun_check.py VISUAL_MAX_ABS, VISUAL_MIN_PSNR_DB). --determinism-seconds s keeps those
+#       rounds going past 3 until 2 instances answered or s seconds passed (a GPU round ends before a second instance
+#       starts).
 set -euo pipefail
 export CLOUDSDK_CORE_PROJECT=image-links-agent
 cd "$(dirname "$0")/.."
@@ -38,8 +40,8 @@ if [ "${1:-}" = "--probe" ] || [ "${1:-}" = "--probe-upscale" ]; then
     allowed=" --models --concurrency --rounds --run "
     usage="usage: $0 --probe <url> [--models a,b] [--concurrency n] [--rounds k] [--run name]"
   else
-    allowed=" --model --sizes --concurrency --rounds --timeout --x4-ratio --determinism-calls --cold-start-max --run "
-    usage="usage: $0 --probe-upscale <url> [--model id] [--sizes WxH,WxH] [--concurrency n] [--rounds k] [--timeout s] [--x4-ratio r] [--determinism-calls n] [--cold-start-max s] [--run name]"
+    allowed=" --model --sizes --concurrency --rounds --timeout --x4-ratio --determinism-calls --determinism-seconds --cold-start-max --run "
+    usage="usage: $0 --probe-upscale <url> [--model id] [--sizes WxH,WxH] [--concurrency n] [--rounds k] [--timeout s] [--x4-ratio r] [--determinism-calls n] [--determinism-seconds s] [--cold-start-max s] [--run name]"
     DEFAULT_TASK_TIMEOUT=7200
   fi
   [ $# -ge 1 ] || { echo "$usage" >&2; exit 2; }
@@ -81,6 +83,10 @@ if [ "${1:-}" = "--probe" ] || [ "${1:-}" = "--probe-upscale" ]; then
         value=${option#--determinism-calls=}
         [[ "$value" =~ ^[0-9]+$ ]] && { [ "$value" -eq 0 ] || { [ "$value" -ge 2 ] && [ "$value" -le 16 ]; }; } \
           || { echo "ERROR: --determinism-calls must be 0 (none) or 2 to 16, got '$value'" >&2; exit 2; } ;;
+      --determinism-seconds=*)
+        value=${option#--determinism-seconds=}
+        [[ "$value" =~ ^[0-9]+$ ]] && [ "$value" -le 3600 ] \
+          || { echo "ERROR: --determinism-seconds must be a whole number of seconds from 0 (3 rounds only) to 3600, got '$value'" >&2; exit 2; } ;;
       --cold-start-max=*)
         value=${option#--cold-start-max=}
         [[ "$value" =~ ^[0-9]+$ ]] && [ "$value" -le 3600 ] \

@@ -319,6 +319,49 @@ The measured peaks (the larger of rungs 1 and 2) are `GPU_MODEL_PEAK_MIB_*` with
 ("measure first: run infra/check-matting.sh --probe"). Today's shape (one resident, no cap, the global lock) is not
 asked for measurements. The upscalers were not measured (they run on the CPU service).
 
+## Measured on RTX PRO 6000
+
+Spec 18 GPU upscaler (owner approved 2026-10-30: enlargement on GPUs in asia-south2; speed matters, reliability is a
+must). The dedicated service `catalog-upscale-gpu` runs the `matting-gpu` image (CUDA 12.8, cuDNN 9, ONNX Runtime GPU
+1.23.2) on one NVIDIA RTX PRO 6000 (Blackwell) per instance in asia-south2: 20 vCPU, 80 GiB (the Cloud Run minimum
+for this GPU), no zonal redundancy, no CPU throttling, `MAX_RESIDENT_SESSIONS=1`, `PRELOAD_MATTE=0`. The models load
+on Blackwell with the CUDA provider; no fallback to L4 was needed. `infra/lib/shape.sh` refuses the service without
+its measured rows (`UPSCALE_GPU_P95_S_*` / `UPSCALE_GPU_P50_S_*`, whole seconds rounded up,
+`UPSCALE_GPU_MEASURED_ON=2026-10-30`).
+
+Measured 2026-10-30 with `infra/check-matting.sh --probe-upscale` (job `catalog-check-matting`, banded comparison of
+#129), seconds per photo end to end from the job in asia-south1, p50 / p95:
+
+| model | size | concurrency 1 | concurrency 4 (chosen) |
+|---|---|---|---|
+| swinir-x2 | 800x1200 | 1.1 / 1.2 | 3.3 / 3.4 |
+| swinir-x2 | 1600x1600 | 2.1 / 2.3 | 6.7 / 6.9 |
+| swinir-x4 | 800x1200 | 1.4 / 2.8 | 2.0 / 2.8 |
+| swinir-x4 | 1600x1600 | 2.6 / 2.9 | 3.9 / 7.1 |
+
+Runs `gpu18-rtx-probe1` (execution `catalog-check-matting-rxfs8`) and `gpu18-rtx-probe2-c4` (execution
+`catalog-check-matting-26w29`). Inference alone is about 0.8 s for an 800x1200 x2 photo; the GPU runs one tile at a
+time under the inference lock, so concurrency 4 queues requests on the instance (latency rises, throughput per
+instance stays about one photo per second at 800x1200). The output matches a Lanczos resize at 43.2 dB PSNR (a sanity
+check that the model works, not a quality gate).
+
+Determinism: byte-identical outputs within and across instances and across two revisions (4 instances; sha256
+prefixes x2 800 `44b4359b23355ffb`, x2 1600 `948fd06e4e168ff9`, x4 800 `de3f015e185a44e9`, x4 1600
+`b7af22c3d791da47`). Unlike CPU concurrency 2, GPU concurrency 4 stays deterministic, because inference is serialised
+by the lock and cuDNN runs with deterministic, heuristic algorithm choice. The probe's x2 determinism round could stay
+on one instance when calls take a second; `--determinism-seconds` keeps it running until the budget ends (the deploy
+gate passes 600) so it reaches other instances.
+
+Cold start (scaled to zero, then one call): `/health` answered after 41.9 s (instance uptime 1.3 s, so most of it is
+the GPU instance start), the first x2 call took 0.5 s more, the first x4 3.1 s, and a warm x2 1.3 s. Two fresh
+instances during the probe answered their first call after 42 s and 91.5 s end to end. `UPSCALE_GPU_COLD_START_S` is
+180 (about twice the slowest). The probe's hold method for the cold start cannot work when a call takes about one
+second, so the deploy gate passes cold start 0 for this service and these numbers are measured by hand.
+
+Quota: Google granted 3 GPUs (3000 milli GPU, `NvidiaRtxPro6000GpuAllocNoZonalRedundancyPerProjectRegion`) in
+asia-south2 on the first deploy. `UPSCALE_GPU_MAX_INSTANCES=3`, `UPSCALE_GPU_CONCURRENCY=4`; the increase to 6 GPUs is
+`infra/request-gpu-upscale-quota.sh`.
+
 ## Measured on CPU
 
 Spec 18 H1. Measured on Cloud Run on 2026-10-29 (the ladder below). Spec 16 assumed 5.9 to 7.8 s per 800x1200

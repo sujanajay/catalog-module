@@ -87,8 +87,11 @@ export interface BatchOptions {
    * enlarges beyond UPSCALE_MIN_SCALE goes through the upscaler or is held (invariant enlarged_without_upscaler).
    * Absent on batches from before spec 18 and when the upscaler is off. The model id is engineering only. Spec 18
    * quality: `minScale` is the batch's threshold (absent on older batches: 1.5) and `x4Model` the model above 2.0x.
+   * Spec 18 GPU upscaler (2026-10-30): `target` "gpu" when Start ran with UPSCALE_TARGET=gpu, so every enlargement of
+   * the batch is made on catalog-upscale-gpu; absent, the worker's UPSCALE_URL service as before. One batch never
+   * mixes CPU and GPU images.
    */
-  enlargement?: { model: string; x4Model?: string; minScale?: number } | null;
+  enlargement?: { model: string; x4Model?: string; minScale?: number; target?: "gpu" } | null;
 }
 
 export interface BatchCounts {

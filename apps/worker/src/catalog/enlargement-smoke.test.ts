@@ -36,7 +36,8 @@ describe("T56: the enlargement smoke on fakes", () => {
     const e = enlargeWorld(db);
     const { calls, service } = fakeUpscaleService();
     const rules: FaultRule[] = [];
-    const env = { UPSCALE_URL: "https://upscale.test", UPSCALE_TIMEOUT_S: "60", UPSCALE_COLD_START_S: "20" };
+    // The world's ids are plain (GPU) ids, so the client routes them to UPSCALE_GPU_URL (upscaleRouteFor).
+    const env = { UPSCALE_GPU_URL: "https://upscale.test", UPSCALE_GPU_TIMEOUT_S: "60", UPSCALE_GPU_COLD_START_S: "20" };
     const clientDeps = { fetch: faultFetch(rules, service), idToken: async () => "token" };
     e.w.deps.enlarge = workerEnlargeCall("swinir-x2", env, clientDeps);
     e.w.deps.enlargeProbe = workerEnlargeProbe(env, clientDeps);

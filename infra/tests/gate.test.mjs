@@ -46,10 +46,10 @@ const lines = (text) => text.split('\n');
 const tests = [];
 const test = (name, fn) => tests.push([name, fn]);
 
-test('registry lists the five services in order, each with a registry function; the web before the worker (spec 18 final check: the plain warning is live before any hold)', () => {
+test('registry lists the six services in order, each with a registry function; the web before the worker (spec 18 final check: the plain warning is live before any hold)', () => {
   const r = run('registry', `printf '%s\\n' "\${SERVICES[@]}"; for s in "\${SERVICES[@]}"; do declare -F "service_\${s//-/_}" >/dev/null || echo "missing $s"; done`);
   assert.equal(r.status, 0, r.err);
-  assert.deepEqual(lines(r.out.trim()), ['catalog-matting', 'catalog-upscale', 'catalog-matting-gpu', 'catalog-web', 'catalog-worker']);
+  assert.deepEqual(lines(r.out.trim()), ['catalog-matting', 'catalog-upscale', 'catalog-upscale-gpu', 'catalog-matting-gpu', 'catalog-web', 'catalog-worker']);
 });
 
 const vars = `AR=ar; TAG=t; MATTING_SA=m; WORKER_SA=w; WEB_SA=web; MATTING_CPU_MAX_INSTANCES=20; GPU_CPU=4; GPU_MEMORY=16Gi
@@ -62,7 +62,8 @@ show() { "service_\${1//-/_}"; echo "$1|$SVC_NAME|$SVC_REGION|$SVC_IMAGE|$SVC_PR
 test('registry entries: regions, probes, timeouts, preview behaviour, GPU knobs', () => {
   let r = run('entries', `${vars}\nUPSCALE_SERVICE=cpu; INFERENCE_LOCK_SCOPE=session\nfor s in "\${SERVICES[@]}"; do show "$s"; done`);
   assert.equal(r.status, 0, r.err);
-  const [cpu, upscale, gpu, web, worker] = lines(r.out.trim()).map((l) => l.split('|'));
+  const [cpu, upscale, upscaleGpu, gpu, web, worker] = lines(r.out.trim()).map((l) => l.split('|'));
+  assert.deepEqual(upscaleGpu.slice(1, 6), ['catalog-upscale-gpu', 'asia-south2', 'ar/matting-gpu:t', '3292', '1'], 'deployed in its own region by default');
   assert.deepEqual(upscale.slice(1, 7), ['catalog-upscale', 'asia-south1', 'ar/matting:t', '0', 'skip', '0'], 'not deployed while UPSCALE_SERVICE=cpu');
   // Probes sized per service: the CPU service gets its default model, 1 warm call and 1 round at its concurrency
   // (CPU calls take 25 to 71 s); the GPU service the full probe of every model, 5 rounds at the shape concurrency.
@@ -270,14 +271,71 @@ echo "AFTER THE LOOP"`, {CAND_TAG: 'measure-4c-4t-1r'});
 test('measure mode reuses every other registry service as it is', () => {
   const r = run('measure-registry', `${vars}\nUPSCALE_MEASURE=1\nfor s in "\${SERVICES[@]}"; do show "$s"; done`);
   assert.equal(r.status, 0, r.err);
-  assert.deepEqual(lines(r.out.trim()).map((l) => l.split('|')[5]), ['0', '1', '0', '0', '0']);
+  assert.deepEqual(lines(r.out.trim()).map((l) => l.split('|')[5]), ['0', '1', 'skip', '0', '0', '0']);
 });
 
 test('bootstrap: the worker may invoke catalog-upscale through its project-level run.invoker grant', () => {
   const bootstrap = fs.readFileSync(path.join(root, 'infra/bootstrap.sh'), 'utf8');
   const at = bootstrap.indexOf('project_binding "serviceAccount:$WORKER" roles/run.invoker');
   assert.ok(at >= 0);
-  assert.match(bootstrap.slice(Math.max(0, at - 600), at), /catalog-upscale/, 'the grant says it covers catalog-upscale');
+  assert.match(bootstrap.slice(Math.max(0, at - 900), at), /catalog-upscale/, 'the grant says it covers catalog-upscale');
+  // Spec 18 GPU upscaler: one project-level grant covers every region, so catalog-upscale-gpu in asia-south2 too.
+  assert.match(bootstrap.slice(Math.max(0, at - 900), at), /catalog-upscale-gpu[\s\S]*asia-south2/, 'the grant says it covers the GPU upscaler region');
+});
+
+// Spec 18 GPU upscaler (2026-10-30): catalog-upscale-gpu, the RTX PRO 6000 shape measured on 2026-10-30.
+const gpuArgs = `show catalog-upscale-gpu; printf '%s\\n' "\${SVC_ARGS[@]}"; echo "SKIP=\${SVC_SKIP_REASON:-}"`;
+test('catalog-upscale-gpu: the matting-gpu image in asia-south2 on one RTX PRO 6000, only the upscaler loaded, probe from the table', () => {
+  const r = run('upscale-gpu', `${vars}\n${gpuArgs}`);
+  assert.equal(r.status, 0, r.err);
+  const [row, ...rest] = lines(r.out.trim());
+  const f = row.split('|');
+  // 300 + per size 4 x 2 x (p95 + ceil(p95 x 3)): 800x1200 8 x (4 + 12) = 128, 1600x1600 8 x (7 + 21) = 224; the first
+  // call per model may meet a cold start, 2 x 2 x 180 = 720; the determinism rounds, 2 x (600 + 2 x 180) = 1920.
+  assert.deepEqual(f.slice(1, 8), ['catalog-upscale-gpu', 'asia-south2', 'ar/matting-gpu:t', '3292', '1', '1', '1']);
+  assert.equal(f[8], 'MAX_RESIDENT_SESSIONS=1,PRELOAD_MATTE=0,UPSCALE_MAX_PIXELS=8000000,UPSCALE_MAX_PIXELS_X4=6400000');
+  assert.equal(f[9], 'env UPSCALE_DETERMINISM_SECONDS=600 bash infra/lib/services.sh probe-upscale 3292 swinir-x2,swinir-x4 800x1200,1600x1600 4 3 300 3 12 0');
+  assert.deepEqual(rest.slice(0, -1), ['--service-account=m', '--gpu=1', '--gpu-type=nvidia-rtx-pro-6000', '--no-gpu-zonal-redundancy', '--no-cpu-throttling',
+    '--cpu=20', '--memory=80Gi', '--concurrency=4', '--min-instances=0', '--max-instances=3', '--timeout=300', '--labels=app=catalog,component=upscale-gpu']);
+});
+
+test('catalog-upscale-gpu: a quota refusal only warns while new batches stay on the CPU; with UPSCALE_TARGET=gpu it stops', () => {
+  let r = run('upscale-gpu-optional', `${vars}\nshow catalog-upscale-gpu`);
+  assert.equal(r.out.trim().split('|')[8 - 1], '1');
+  r = run('upscale-gpu-required', `${vars}\nUPSCALE_TARGET=gpu\nshow catalog-upscale-gpu`);
+  assert.equal(r.out.trim().split('|')[7], '0');
+});
+
+test('catalog-upscale-gpu: off skips it; the preview reuses it; a measure run skips it', () => {
+  let r = run('upscale-gpu-off', `${vars}\nUPSCALE_GPU_SERVICE=0\n${gpuArgs}`);
+  assert.equal(r.status, 0, r.err);
+  let out = lines(r.out.trim());
+  assert.deepEqual(out[0].split('|').slice(5, 7), ['skip', '0']);
+  assert.equal(out.at(-1), 'SKIP=UPSCALE_GPU_SERVICE=0');
+  r = run('upscale-gpu-preview', `${vars}\nCATALOG_PREVIEW=1\nshow catalog-upscale-gpu`);
+  assert.deepEqual(r.out.trim().split('|').slice(5, 7), ['0', '1'], 'the preview reuses the live GPU upscaler');
+  r = run('upscale-gpu-measure', `${vars}\nUPSCALE_MEASURE=1\n${gpuArgs}`);
+  out = lines(r.out.trim());
+  assert.equal(out[0].split('|')[5], 'skip');
+  assert.equal(out.at(-1), 'SKIP=a measure run changes only catalog-upscale');
+});
+
+test('catalog-upscale-gpu probe: the determinism seconds reach check-matting.sh, the CPU rows keep their arguments', () => {
+  const r = run('upscale-gpu-probe-args', `${vars}\nservice_catalog_upscale_gpu
+bash() { echo "PROBE_TASK_TIMEOUT=$PROBE_TASK_TIMEOUT $*"; }; export -f bash
+command "\${SVC_PROBE[@]:2}" https://candidate---g.run.app`, {UPSCALE_DETERMINISM_SECONDS: '600'});
+  assert.equal(r.status, 0, r.err);
+  assert.equal(r.out.trim(), 'PROBE_TASK_TIMEOUT=3292 infra/check-matting.sh --probe-upscale https://candidate---g.run.app --model=swinir-x2,swinir-x4 '
+    + '--sizes=800x1200,1600x1600 --concurrency=4 --rounds=3 --timeout=300 --x4-ratio=3 --determinism-calls=12 --determinism-seconds=600');
+});
+
+test('deploy.sh: the worker always learns the GPU upscaler; UPSCALE_TARGET reaches the web and the worker; gpu without a URL stops', () => {
+  const deploy = fs.readFileSync(path.join(root, 'infra/deploy.sh'), 'utf8').replace(/\r/g, '');
+  const loop = deploy.slice(deploy.indexOf('for SERVICE in "${SERVICES[@]}"'), deploy.indexOf('# --- Web access'));
+  assert.match(loop, /catalog-upscale-gpu\)\n[\s\S]*?UPSCALE_GPU_SERVICE_URL=\$GATE_URL[\s\S]*?UPSCALE_GPU_URL=\$UPSCALE_GPU_SERVICE_URL,UPSCALE_GPU_TIMEOUT_S=\$UPSCALE_GPU_TIMEOUT_S,UPSCALE_GPU_COLD_START_S=\$UPSCALE_GPU_COLD_START_S/);
+  assert.match(loop, /UPSCALE_TARGET=gpu but catalog-upscale-gpu has no URL[\s\S]*?exit 1[\s\S]*?WORKER_ENV\+=",UPSCALE_TARGET=\$UPSCALE_TARGET"; WEB_ENV\+=",UPSCALE_TARGET=\$UPSCALE_TARGET"/);
+  assert.ok(loop.indexOf('catalog-upscale-gpu)') < loop.indexOf('catalog-matting-gpu)'), 'the GPU URL is known before the worker env is completed');
+  assert.match(loop, /catalog-upscale-gpu \] && \[ "\$GATE_STATUS" = 75 \]/, 'a quota refusal of the optional GPU upscaler only warns');
 });
 
 test('spec 17 3.3.2 GPU knobs reach catalog-matting-gpu only when set, one per candidate', () => {
@@ -537,12 +595,12 @@ test('registry: every service sets SVC_MAX to exactly its revision --max-instanc
 for s in "\${SERVICES[@]}"; do "service_\${s//-/_}"; m=""; for a in "\${SVC_ARGS[@]}"; do [[ $a == --max-instances=* ]] && m=\${a#--max-instances=}; done; echo "$s|$SVC_MAX|$m"; done`);
   assert.equal(r.status, 0, r.err);
   const rows = lines(r.out.trim()).map((l) => l.split('|'));
-  assert.deepEqual(rows.map((x) => x[0]), ['catalog-matting', 'catalog-upscale', 'catalog-matting-gpu', 'catalog-web', 'catalog-worker']);
+  assert.deepEqual(rows.map((x) => x[0]), ['catalog-matting', 'catalog-upscale', 'catalog-upscale-gpu', 'catalog-matting-gpu', 'catalog-web', 'catalog-worker']);
   for (const [name, svcMax, revMax] of rows) {
     assert.match(svcMax, /^[1-9]\d*$/, `${name} has a service-level max`);
     assert.equal(svcMax, revMax, `${name}: the service-level max equals the revision max`);
   }
-  assert.deepEqual(rows.map((x) => x[1]), ['20', '50', '3', '3', '4'], 'from MATTING_CPU_, UPSCALE_, GPU_, WEB_ and WORKER_MAX_INSTANCES');
+  assert.deepEqual(rows.map((x) => x[1]), ['20', '50', '3', '3', '3', '4'], 'from MATTING_CPU_, UPSCALE_, UPSCALE_GPU_, GPU_, WEB_ and WORKER_MAX_INSTANCES');
 });
 
 const maxUpdate = (n) => `run services update test-svc --region=asia-south1 --max=${n} --quiet`;

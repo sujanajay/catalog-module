@@ -696,6 +696,25 @@ def test_determinism_round_repeats_then_fails_when_one_instance_answers(fake_ups
     assert "swinir-x2 800x1200 determinism: 1 instance(s) answered in 3 rounds of 2 calls; at least 2 are needed" in reports[0][1]["failures"]
 
 
+def test_determinism_round_keeps_going_for_its_seconds_budget_when_one_instance_answers(fake_upscale):
+    fake = fake_upscale(instances=("up01",))
+    up = probe.UpscaleProbe(fake.url, None, "swinir-x2", [(64, 96)], 30)
+    ticks = iter(range(0, 10_000, 10))
+    entry = up.determinism_round(2, size=(64, 96), sleep=lambda s: None, seconds_budget=50, clock=lambda: next(ticks))
+    # 3 rounds always, then one more per check while under 50 s (10, 20, 30, 40); the 50 s check stops it.
+    assert entry["rounds"] == 7 and len(entry["calls"]) == 14 and entry["passed"] is False
+    assert entry["failures"] == ["swinir-x2 64x96 determinism: 1 instance(s) answered in 7 rounds of 2 calls; at least 2 are needed"]
+    # Without a budget it stops after DETERMINISM_ATTEMPTS rounds, as before.
+    assert up.determinism_round(2, size=(64, 96), sleep=lambda s: None)["rounds"] == probe.DETERMINISM_ATTEMPTS
+
+
+def test_upscale_probe_takes_determinism_seconds_and_refuses_a_bad_value():
+    assert probe.parse_upscale_args(["--probe-upscale", "https://x.run.app", "--determinism-seconds=300"]).determinism_seconds == 300
+    assert probe.parse_upscale_args(["--probe-upscale", "https://x.run.app"]).determinism_seconds == 0
+    with pytest.raises(probe.CheckFailure):
+        probe.parse_upscale_args(["--probe-upscale", "https://x.run.app", "--determinism-seconds=4000"])
+
+
 def test_determinism_round_fails_a_visible_cross_instance_difference(fake_upscale):
     fake = fake_upscale(mode="visible", instances=("up01", "up02"))
     code, reports = run_upscale_probe(fake.url, "--model=swinir-x4", "--sizes", "64x96", "--rounds", "1", "--determinism-calls=2", *BUCKET)

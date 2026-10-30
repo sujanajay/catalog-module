@@ -32,7 +32,7 @@ const NAMES = ['DB_MAX_CONNECTIONS', 'WORKER_MAX_INSTANCES', 'WORKER_CPU', 'WORK
   'UPSCALE_CPU_VCPU', 'UPSCALE_MEMORY', 'UPSCALE_CONCURRENCY', 'UPSCALE_MAX_INSTANCES', 'UPSCALE_THREADS', 'UPSCALE_TIMEOUT_S', 'UPSCALE_COLD_START_S',
   'UPSCALE_MAX_PIXELS', 'UPSCALE_MAX_PIXELS_X4', 'ENLARGE_MAX_DISPATCHES', 'ENLARGE_BULK_MAX_DISPATCHES', 'ENLARGE_DISPATCHES_PER_SECOND', 'ENLARGE_BULK_DISPATCHES_PER_SECOND'];
 const PEAKS = ['GPU_MODEL_PEAK_MIB_BIREFNET_GENERAL', 'GPU_MODEL_PEAK_MIB_BIREFNET_GENERAL_LITE', 'GPU_MODEL_PEAK_MIB_BIREFNET_HRSOD', 'GPU_MODEL_PEAK_MIB_BRIA_RMBG'];
-const OUT = [...NAMES, ...PEAKS, 'UPSCALE_MEASURE', 'UPSCALE_MEASURED_ON', 'UPSCALE_VCPU_TOTAL', 'UPSCALE_LIVE_VCPU', 'UPSCALE_GIB_TOTAL', 'UPSCALE_LIVE_GIB', 'CATALOG_DB_TOTAL', 'CATALOG_DB_LIMIT', 'SLOTS_TOTAL', 'SLOTS_CAPACITY', 'CPU_TOTAL', 'MEMORY_TOTAL_GIB', 'CPU_QUOTA_LIMIT', 'MEMORY_QUOTA_LIMIT_GIB'];
+const OUT = [...NAMES, ...PEAKS, 'UPSCALE_TARGET', 'UPSCALE_GPU_SERVICE', 'UPSCALE_GPU_TYPE', 'UPSCALE_GPU_REGION', 'UPSCALE_MEASURE', 'UPSCALE_MEASURED_ON', 'UPSCALE_VCPU_TOTAL', 'UPSCALE_LIVE_VCPU', 'UPSCALE_GIB_TOTAL', 'UPSCALE_LIVE_GIB', 'CATALOG_DB_TOTAL', 'CATALOG_DB_LIMIT', 'SLOTS_TOTAL', 'SLOTS_CAPACITY', 'CPU_TOTAL', 'MEMORY_TOTAL_GIB', 'CPU_QUOTA_LIMIT', 'MEMORY_QUOTA_LIMIT_GIB'];
 
 // The usd() helper and the two price defaults, taken from deploy.sh so the test follows the script.
 const deploy = fs.readFileSync(path.join(root, 'infra/deploy.sh'), 'utf8').split(/\r?\n/);
@@ -125,8 +125,10 @@ const RECORDED_LIVE = {
 const DEDICATED = {WIRED: '1', UPSCALE_SERVICE: 'dedicated', UPSCALE_MEASURED_ON: '2026-10-30', UPSCALE_P95_S_4C_4T_1CONC_800x1200: '130', UPSCALE_P95_S_4C_4T_1CONC_1600x1600: '330',
   UPSCALE_P50_S_4C_4T_1CONC_800x1200: '', UPSCALE_P50_S_4C_4T_1CONC_1600x1600: '', UPSCALE_TIMEOUT_S: '840', UPSCALE_MAX_PIXELS: '2300000', UPSCALE_MAX_PIXELS_X4: '2300000', ENLARGE_DISPATCHES_PER_SECOND: '0.06',
   ENLARGE_BULK_DISPATCHES_PER_SECOND: '0.26'};
+// Spec 18 GPU upscaler: the shape that sends new batches to catalog-upscale-gpu (3 x RTX PRO 6000, concurrency 4).
+const GPU_FLIP = {UPSCALE_TARGET: 'gpu', ENLARGE_MAX_DISPATCHES: '2', ENLARGE_BULK_MAX_DISPATCHES: '8', ENLARGE_DISPATCHES_PER_SECOND: '0.5', ENLARGE_BULK_DISPATCHES_PER_SECOND: '2'};
 const PRE_F2 = {...NO_ENLARGE, WORKER_MAX_INSTANCES: '4', WORKER_CPU: '2', WORKER_MEMORY: '2Gi', TASKS_MAX_DISPATCHES: '6', BULK_MAX_DISPATCHES: '0',
-  INGEST_MAX_DISPATCHES: '2', DB_MAX_CONNECTIONS: '25', MATTING_CPU_MAX_INSTANCES: '20', UPSCALE_SERVICE: 'gpu',
+  INGEST_MAX_DISPATCHES: '2', DB_MAX_CONNECTIONS: '25', MATTING_CPU_MAX_INSTANCES: '20', UPSCALE_SERVICE: 'gpu', UPSCALE_GPU_SERVICE: '0',
   CATALOG_PHOTO_CONCURRENCY: '1', CATALOG_BULK_WINDOW: '8', LLM_INFLIGHT_PER_INSTANCE: ''};
 
 const cases = [
@@ -198,10 +200,10 @@ const cases = [
   {label: 'nothing measured: a cap alone is refused', env: {...UNMEASURED, GPU_MEM_LIMIT_BYTES: '6442450944', UPSCALE_SERVICE: 'cpu'}, expect: {STATUS: '1'}, error: /measure first/},
   {label: 'nothing measured: the session lock is refused', env: {...UNMEASURED, INFERENCE_LOCK_SCOPE: 'session', UPSCALE_SERVICE: 'cpu'}, expect: {STATUS: '1'}, error: /measure first/},
   {label: 'only the served models need a peak', env: {...LIVE, MAX_RESIDENT_SESSIONS: '2', GPU_MATTE_MODELS: 'bria-rmbg', GPU_MEASURED_ON: '2026-10-29', GPU_MODEL_PEAK_MIB_BRIA_RMBG: '7400'}, live: '400', expect: {STATUS: '0'}},
-  {label: 'upscalers on the GPU need their peaks too', env: {...LIVE, ...FITS_6GIB, MAX_RESIDENT_SESSIONS: '2', UPSCALE_SERVICE: 'gpu'}, live: '400', expect: {STATUS: '1'},
+  {label: 'upscalers on the GPU need their peaks too', env: {...LIVE, ...FITS_6GIB, MAX_RESIDENT_SESSIONS: '2', UPSCALE_SERVICE: 'gpu', UPSCALE_GPU_SERVICE: '0'}, live: '400', expect: {STATUS: '1'},
     error: /no measured GPU peak for swinir-x2 swinir-x4;/},
   {label: 'four resident fit with measured peaks and no cap', env: {...LIVE, ...FITS_FOUR, MAX_RESIDENT_SESSIONS: '4'}, live: '400', expect: {STATUS: '0'}},
-  {label: 'four resident at bria-rmbg size do not fit', env: {...LIVE, ...BRIA_OVER_6GIB, MAX_RESIDENT_SESSIONS: '4', UPSCALE_SERVICE: 'gpu', GPU_MODEL_PEAK_MIB_SWINIR_X4: '2000', GPU_MODEL_PEAK_MIB_SWINIR_X2: '1500'}, live: '400', expect: {STATUS: '1'},
+  {label: 'four resident at bria-rmbg size do not fit', env: {...LIVE, ...BRIA_OVER_6GIB, MAX_RESIDENT_SESSIONS: '4', UPSCALE_SERVICE: 'gpu', UPSCALE_GPU_SERVICE: '0', GPU_MODEL_PEAK_MIB_SWINIR_X4: '2000', GPU_MODEL_PEAK_MIB_SWINIR_X2: '1500'}, live: '400', expect: {STATUS: '1'},
     error: /GPU memory 4 sessions x 7400 MiB \+ 2048 MiB CUDA \+ 3500 MiB upscalers = 35148 MiB exceeds the L4's 22528 MiB/},
   {label: 'F2 with peaks under the cap still does not fit: 3 resident + 1 evicted mid-run x 6 GiB', env: {...F2, ...FITS_6GIB}, live: '400', expect: {STATUS: '1'},
     error: /GPU memory 4 sessions x 6144 MiB \+ 2048 MiB CUDA \+ 0 MiB upscalers = 26624 MiB exceeds/},
@@ -313,6 +315,32 @@ const cases = [
   {label: 'the enlarge rate must be a number above 0', env: {ENLARGE_DISPATCHES_PER_SECOND: '0'}, expect: {STATUS: '1'}, error: /ENLARGE_DISPATCHES_PER_SECOND must be a number above 0 and at most 500/},
   {label: 'no enlarge lanes (the rollback) fits concurrency 2', env: NO_ENLARGE, expect: {STATUS: '0', SLOTS_TOTAL: '48', SLOTS_CAPACITY: '64', CATALOG_DB_TOTAL: '136'}},
   {label: 'no probe sizes is refused, not treated as all measured', env: {...DEDICATED, MATTING_CPU_MAX_INSTANCES: '4', UPSCALE_SIZES: ''}, expect: {STATUS: '1'}, error: /UPSCALE_SIZES must list the probe sizes/},
+  // Spec 18 GPU upscaler (2026-10-30): catalog-upscale-gpu, 3 x RTX PRO 6000 in asia-south2 at concurrency 4, measured.
+  {label: 'GPU upscaler: the default deploys it while new batches stay on the CPU', env: {}, expect: {STATUS: '0', UPSCALE_TARGET: 'cpu', UPSCALE_GPU_SERVICE: '1', UPSCALE_GPU_TYPE: 'nvidia-rtx-pro-6000', UPSCALE_GPU_REGION: 'asia-south2'}},
+  {label: 'GPU upscaler: the flip shape (lanes 2 + 8 + the preview 2 = 12 = 3 x 4; 0.5/s x 2 operator lanes + 2/s bulk = 3/s <= 12 / p50 4 s) passes, the CPU rate rule no longer binds',
+    env: GPU_FLIP, expect: {STATUS: '0'}},
+  {label: 'GPU upscaler: the same rates with new batches on the CPU are refused by the CPU rule',
+    env: {...GPU_FLIP, UPSCALE_TARGET: 'cpu'}, expect: {STATUS: '1'}, error: /exceed what catalog-upscale finishes/},
+  {label: 'GPU upscaler: today\'s lanes are more than the GPU serves at once', env: {UPSCALE_TARGET: 'gpu'}, expect: {STATUS: '1'},
+    error: /enlarge slots 4 \+ 44 \+ the other stack's 2 = 50 exceed what catalog-upscale-gpu serves at once \(3 x 4\)/},
+  {label: 'GPU upscaler: rates summing above what the GPU finishes are refused', env: {...GPU_FLIP, ENLARGE_BULK_DISPATCHES_PER_SECOND: '3'}, expect: {STATUS: '1'},
+    error: /enlarge rates ENLARGE_DISPATCHES_PER_SECOND=0.5 x 2 operator lanes \+ ENLARGE_BULK_DISPATCHES_PER_SECOND=3 x 1 bulk lanes = 4.0000 per second exceed what catalog-upscale-gpu finishes: 3 x 4 \/ p50 4 s of 800x1200 = 3.0000 per second/},
+  {label: 'GPU upscaler: UPSCALE_TARGET=gpu needs the service', env: {UPSCALE_TARGET: 'gpu', UPSCALE_GPU_SERVICE: '0'}, expect: {STATUS: '1'}, error: /UPSCALE_TARGET=gpu needs UPSCALE_GPU_SERVICE=1/},
+  {label: 'GPU upscaler: an unknown target is refused', env: {UPSCALE_TARGET: 'tpu'}, expect: {STATUS: '1'}, error: /UPSCALE_TARGET must be cpu or gpu, got 'tpu'/},
+  {label: 'GPU upscaler: more instances than the RTX quota are refused', env: {UPSCALE_GPU_MAX_INSTANCES: '4'}, expect: {STATUS: '1'},
+    error: /UPSCALE_GPU_MAX_INSTANCES=4 exceeds the nvidia-rtx-pro-6000 quota of 3 in asia-south2/},
+  {label: 'GPU upscaler: a granted quota of 6 allows 6 (120 vCPU, 480 GiB is above the region memory)', env: {UPSCALE_GPU_QUOTA: '6', UPSCALE_GPU_MAX_INSTANCES: '6'}, expect: {STATUS: '1'},
+    error: /catalog-upscale-gpu at max instances takes 480 GiB, above 384 GiB of the asia-south2 quota/},
+  {label: 'GPU upscaler: Cloud Run\'s RTX PRO 6000 shape (at least 20 vCPU and 80Gi)', env: {UPSCALE_GPU_CPU: '8', UPSCALE_GPU_MEMORY: '32Gi'}, expect: {STATUS: '1'},
+    error: /UPSCALE_GPU_CPU must be at least 20 with an RTX PRO 6000[\s\S]*UPSCALE_GPU_MEMORY must be at least 80Gi with an RTX PRO 6000/},
+  {label: 'GPU upscaler: an unmeasured concurrency is refused', env: {UPSCALE_GPU_CONCURRENCY: '2'}, expect: {STATUS: '1'},
+    error: /measure first: run infra\/check-matting.sh --probe-upscale on catalog-upscale-gpu \(no measured p95 for UPSCALE_GPU_TYPE=nvidia-rtx-pro-6000 UPSCALE_GPU_CONCURRENCY=2 at 800x1200 1600x1600/},
+  {label: 'GPU upscaler: the timeout must cover the largest x4 image the caps allow', env: {UPSCALE_GPU_TIMEOUT_S: '100'}, expect: {STATUS: '1'},
+    error: /UPSCALE_MAX_PIXELS_X4=6400000 needs a GPU timeout of 2 x about 8[01] s = 16[02] s \(4.1667 s per megapixel measured 2026-10-30\), above UPSCALE_GPU_TIMEOUT_S=100/},
+  {label: 'GPU upscaler: never in the main region', env: {UPSCALE_GPU_REGION: 'asia-south1'}, expect: {STATUS: '1'}, error: /UPSCALE_GPU_REGION=asia-south1 is the main region/},
+  {label: 'GPU upscaler: an L4 beside the cut-out GPU shares its L4 quota', env: {UPSCALE_GPU_TYPE: 'nvidia-l4', UPSCALE_GPU_REGION: 'asia-southeast1', UPSCALE_GPU_CPU: '8', UPSCALE_GPU_MEMORY: '32Gi', UPSCALE_GPU_MAX_INSTANCES: '1', UPSCALE_GPU_CONCURRENCY: '1', UPSCALE_GPU_P95_S_NVIDIA_L4_1CONC_800x1200: '3', UPSCALE_GPU_P95_S_NVIDIA_L4_1CONC_1600x1600: '6'}, expect: {STATUS: '1'},
+    error: /UPSCALE_GPU_MAX_INSTANCES=1 \+ the cut-out GPU's 3 exceed the L4 quota of 3 in asia-southeast1/},
+  {label: 'GPU upscaler: spec 11\'s GPU path cannot run beside it', env: {UPSCALE_SERVICE: 'gpu'}, expect: {STATUS: '1'}, error: /UPSCALE_SERVICE=gpu \(the cut-out GPU upscales, spec 11\) cannot run beside catalog-upscale-gpu/},
 ];
 
 for (const c of cases) {

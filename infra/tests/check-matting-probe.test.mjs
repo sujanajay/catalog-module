@@ -140,12 +140,17 @@ try {
   const gated = run(['--probe-upscale', upscaleUrl, '--determinism-calls=12', '--cold-start-max', '120']);
   assert.equal(gated.status, 0, gated.stderr);
   assert.deepEqual(gated.flags['--args'].slice(4), ['--determinism-calls=12', '--cold-start-max=120', '--bucket=image-links-agent-assets']);
+  // Spec 18 GPU upscaler: the determinism round's seconds budget travels the same way.
+  const gpu = run(['--probe-upscale', upscaleUrl, '--determinism-calls=12', '--determinism-seconds=600']);
+  assert.equal(gpu.status, 0, gpu.stderr);
+  assert.deepEqual(gpu.flags['--args'].slice(4), ['--determinism-calls=12', '--determinism-seconds=600', '--bucket=image-links-agent-assets']);
   for (const [args, error] of [
     [['--determinism-calls=1'], /--determinism-calls must be 0 \(none\) or 2 to 16, got '1'/],
     [['--determinism-calls=17'], /--determinism-calls must be 0 \(none\) or 2 to 16, got '17'/],
     [['--cold-start-max=-5'], /--cold-start-max must be a whole number of seconds from 0 \(none\) to 3600, got '-5'/],
     [['--cold-start-max=3601'], /--cold-start-max must be a whole number of seconds from 0 \(none\) to 3600, got '3601'/],
     [['--determinism-calls=12', '--determinism-calls=12'], /the probe option --determinism-calls is given twice/],
+    [['--determinism-seconds=3601'], /--determinism-seconds must be a whole number of seconds from 0 \(3 rounds only\) to 3600, got '3601'/],
   ]) {
     const refused = run(['--probe-upscale', upscaleUrl, ...args]);
     assert.equal(refused.status, 2, args.join(' '));

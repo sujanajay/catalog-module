@@ -16,7 +16,7 @@ import { chunkRow } from "../../test/catalog-fakes";
 import {
   batchOf, chunksOf, corruptObject, deliverChunk, deliverWithDeadline, enlargeBody, enlargeTasks, enlargeUntilSettled, enlargeWorld, outputsOf, photosOf, rowsOf, seedEnlargeBatch, sweep, upscaleCosts, type EnlargeWorld,
 } from "../../test/enlarge-world";
-import { clearMadeImages, handleEnlargeTask, upscaleProbeTimeoutMs, workerEnlargeCall, workerEnlargeProbe } from "./enlarge";
+import { batchEnlargement, clearMadeImages, handleEnlargeTask, upscaleProbeTimeoutMs, upscaleRouteFor, workerEnlargeCall, workerEnlargeProbe } from "./enlarge";
 import { ENLARGE_DISPATCH_DEADLINE_SEC } from "@catalog/core/tasks";
 import { ENLARGE_CLAIM_MS, ENLARGE_MAX_IDENTITY_CHANGES } from "@catalog/core/catalog/pipeline/enlargement";
 
@@ -222,7 +222,7 @@ describe("handler: outages delay, failures count", () => {
     expect(upscaleProbeTimeoutMs({ UPSCALE_COLD_START_S: "20" })).toBe(80_000);
     expect(upscaleProbeTimeoutMs({})).toBe(180_000);
     const fetch = vi.fn<typeof globalThis.fetch>(async (_url, init) => { await new Promise((r) => setTimeout(r, 30)); expect(init?.signal?.aborted).toBe(false); return Response.json({ upscale: { models: [{ id: "swinir-x2", available: true }] } }); });
-    expect(await workerEnlargeProbe({ UPSCALE_URL: "https://upscale.test", UPSCALE_COLD_START_S: "20" }, { fetch, idToken: async () => "" })("swinir-x2")).toBe("ok");
+    expect(await workerEnlargeProbe({ UPSCALE_URL: "https://upscale.test", UPSCALE_COLD_START_S: "20" }, { fetch, idToken: async () => "" })("swinir-x2+cpu")).toBe("ok");
     // Cold start: one delivery, the probe passes, done.
     const cold = await parked("t62-cold");
     cold.service.state.mode = "coldStart";
@@ -583,9 +583,47 @@ describe("final check: a paid call is counted before it is made", () => {
     const e = await parked("fc-real-client");
     const row = e.rows[0]!;
     const fetch = vi.fn(async () => new Response("The request failed because either the HTTP response was malformed or connection to the instance had an error.", { status: 503 }));
-    e.w.deps.enlarge = workerEnlargeCall("swinir-x2", { UPSCALE_URL: "https://catalog-upscale-abc-el.a.run.app" }, { fetch: fetch as unknown as typeof globalThis.fetch, idToken: async () => "t" });
+    e.w.deps.enlarge = workerEnlargeCall("swinir-x2", { UPSCALE_GPU_URL: "https://catalog-upscale-gpu-abc-em.a.run.app" }, { fetch: fetch as unknown as typeof globalThis.fetch, idToken: async () => "t" });
     expect(await handleEnlargeTask(e.w.deps, enlargeBody(row))).toMatchObject({ httpStatus: 503, outcome: "retry" });
     expect(await rowNow(row.id)).toMatchObject({ timeouts: 1, errorKind: "unexplained" });
     expect(ENLARGE_CLAIM_MS).toBe(ENLARGE_DISPATCH_DEADLINE_SEC * 1000);
   }, 60_000);
+});
+
+describe("spec 18 GPU upscaler: each image is made where its upscaler id says, and a batch keeps its target", () => {
+  const CPU = "https://catalog-upscale-abc-el.a.run.app", GPU = "https://catalog-upscale-gpu-abc-em.a.run.app";
+  const env = { UPSCALE_URL: CPU, UPSCALE_TIMEOUT_S: "1740", UPSCALE_COLD_START_S: "120", UPSCALE_GPU_URL: `${GPU}/`, UPSCALE_GPU_TIMEOUT_S: "300", UPSCALE_GPU_COLD_START_S: "180" };
+
+  it("a +cpu id goes to UPSCALE_URL with its timing; any other id to UPSCALE_GPU_URL with the GPU's", () => {
+    expect(upscaleRouteFor("swinir-x2+cpu", env)).toMatchObject({ url: CPU, env: { UPSCALE_TIMEOUT_S: "1740", UPSCALE_COLD_START_S: "120" } });
+    expect(upscaleRouteFor("swinir-x4", env)).toMatchObject({ url: GPU, env: { UPSCALE_TIMEOUT_S: "300", UPSCALE_COLD_START_S: "180" } });
+    expect(upscaleProbeTimeoutMs(upscaleRouteFor("swinir-x2", env).env)).toBe(240_000);
+  });
+
+  it("a GPU id is never made on a CPU service: without UPSCALE_GPU_URL it has no service unless UPSCALE_URL is a GPU matting service", async () => {
+    const { UPSCALE_GPU_URL: _gone, ...noGpu } = env;
+    expect(upscaleRouteFor("swinir-x2", noGpu).url).toBe("");
+    expect(upscaleRouteFor("swinir-x2", { ...noGpu, MATTING_GPU_URL: CPU }).url).toBe(CPU);
+    const fetch = vi.fn<typeof globalThis.fetch>();
+    expect(await workerEnlargeProbe(noGpu, { fetch, idToken: async () => "" })("swinir-x2")).toBe("absent");
+    expect(() => workerEnlargeCall("swinir-x2", noGpu, { fetch, idToken: async () => "" })(Buffer.from("x"), {})).toThrow(/UPSCALE_GPU_URL/);
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it("the probe asks the row's service for the row's model", async () => {
+    const seen: string[] = [];
+    const fetch = vi.fn<typeof globalThis.fetch>(async (url) => { seen.push(String(url)); return Response.json({ upscale: { models: [{ id: "swinir-x2", available: true }, { id: "swinir-x4", available: true }] } }); });
+    const probe = workerEnlargeProbe(env, { fetch, idToken: async () => "" });
+    expect(await probe("swinir-x4")).toBe("ok");
+    expect(await probe("swinir-x2+cpu")).toBe("ok");
+    expect(seen.map((u) => new URL(u).origin)).toEqual([GPU, CPU]);
+  });
+
+  it("a batch pinned to the GPU at Start gets the plain ids whatever the worker's UPSCALE_URL target; an unpinned batch keeps the worker's", () => {
+    const deps = { enlarge: (async () => { throw new Error("unused"); }) as never, matting: { upscaleTarget: "cpu" } as never };
+    const pinned = batchEnlargement(deps, { options: { enlargement: { model: "swinir-x2", x4Model: "swinir-x4", minScale: 1, target: "gpu" } } } as never);
+    expect([pinned?.x2.model, pinned?.x4?.model]).toEqual(["swinir-x2", "swinir-x4"]);
+    const legacy = batchEnlargement(deps, { options: { enlargement: { model: "swinir-x2", x4Model: "swinir-x4", minScale: 1 } } } as never);
+    expect([legacy?.x2.model, legacy?.x4?.model]).toEqual(["swinir-x2+cpu", "swinir-x4+cpu"]);
+  });
 });
