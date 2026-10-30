@@ -112,18 +112,19 @@ const RECORDED_LIVE = {
   UPSCALE_CPU_VCPU: '4', UPSCALE_MEMORY: '8Gi', UPSCALE_CONCURRENCY: '1', UPSCALE_MAX_INSTANCES: '50', UPSCALE_THREADS: '4', UPSCALE_TIMEOUT_S: '1740', UPSCALE_COLD_START_S: '120',
   // Spec 18 3.3.1: the enlarge lanes, and worker concurrency 3 to give them their slots. 2 operator lanes (this stack
   // and the preview) x 0.04 + the bulk lane's 0.42 = 0.50/s <= 50 / 99 s. 4 + 44 + the preview's 2 = 50 slots of
-  // catalog-upscale. 2026-10-29 review P1-3, one cap per model: x2 8 MP x
-  // 104.17 s per MP = 834 s, 2 x 834 = 1668 s <= 1740 s; x4 4.9 MP x 104.17 s x 1.7 = 868 s, 2 x 868 = 1736 s; memory
-  // 4096 MiB + 8 MP x 160 B = 5317 MiB <= 80% of 8 GiB (6553 MiB).
-  UPSCALE_MAX_PIXELS: '8000000', UPSCALE_MAX_PIXELS_X4: '4900000', ENLARGE_MAX_DISPATCHES: '4', ENLARGE_BULK_MAX_DISPATCHES: '44', ENLARGE_DISPATCHES_PER_SECOND: '0.04', ENLARGE_BULK_DISPATCHES_PER_SECOND: '0.42',
+  // catalog-upscale. 2026-10-29 review P1-3, one cap per model (2026-10-31: at the Cloud Run time ratios): x2 5.4 MP x
+  // 104.17 s per MP x 1.52 = 856 s, 2 x 856 = 1712 s <= 1740 s; x4 4.9 MP x 104.17 s x 1.7 = 868 s, 2 x 868 = 1736 s;
+  // memory 4096 MiB + 5.4 MP x 160 B = 4920 MiB <= 80% of 8 GiB (6553 MiB).
+  UPSCALE_MAX_PIXELS: '5400000', UPSCALE_MAX_PIXELS_X4: '4900000', ENLARGE_MAX_DISPATCHES: '4', ENLARGE_BULK_MAX_DISPATCHES: '44', ENLARGE_DISPATCHES_PER_SECOND: '0.04', ENLARGE_BULK_DISPATCHES_PER_SECOND: '0.42',
 };
 // The shape before F2 (the rollback line in shape.sh): fits today's old db-f1-micro (25 connections).
 // Spec 18 test fixture, not a measurement: catalog-upscale at 4 vCPU / 4 threads / concurrency 1 with p95 rows only
 // (the p50 rows blanked, so the p95 stands in), a timeout, a largest photo and a per-lane rate that fit them
-// (x2 2.3 MP x 135.4 s per MP = 312 s, 2 x 312 = 624 <= 840; x4 1.8 MP x 135.4 s x the x4 ratio 1.7 = 415 s, 2 x 415 = 830 <= 840).
+// (x2 2.0 MP x 135.4 s per MP x the x2 ratio 1.52 = 412 s, 2 x 412 = 824 <= 840; x4 1.8 MP x 135.4 s x the x4 ratio 1.7 =
+// 415 s, 2 x 415 = 830 <= 840).
 // Rates: 2 operator lanes x 0.06 + the bulk lane's 0.26 = 0.38 <= 50 / 130 s = 0.3846.
 const DEDICATED = {WIRED: '1', UPSCALE_SERVICE: 'dedicated', UPSCALE_MEASURED_ON: '2026-10-30', UPSCALE_P95_S_4C_4T_1CONC_800x1200: '130', UPSCALE_P95_S_4C_4T_1CONC_1600x1600: '330',
-  UPSCALE_P50_S_4C_4T_1CONC_800x1200: '', UPSCALE_P50_S_4C_4T_1CONC_1600x1600: '', UPSCALE_TIMEOUT_S: '840', UPSCALE_MAX_PIXELS: '2300000', UPSCALE_MAX_PIXELS_X4: '1800000', ENLARGE_DISPATCHES_PER_SECOND: '0.06',
+  UPSCALE_P50_S_4C_4T_1CONC_800x1200: '', UPSCALE_P50_S_4C_4T_1CONC_1600x1600: '', UPSCALE_TIMEOUT_S: '840', UPSCALE_MAX_PIXELS: '2000000', UPSCALE_MAX_PIXELS_X4: '1800000', ENLARGE_DISPATCHES_PER_SECOND: '0.06',
   ENLARGE_BULK_DISPATCHES_PER_SECOND: '0.26'};
 // Spec 18 GPU upscaler: the shape that sends new batches to catalog-upscale-gpu (3 x RTX PRO 6000, concurrency 4).
 const GPU_FLIP = {UPSCALE_TARGET: 'gpu', ENLARGE_MAX_DISPATCHES: '2', ENLARGE_BULK_MAX_DISPATCHES: '8', ENLARGE_DISPATCHES_PER_SECOND: '0.5', ENLARGE_BULK_DISPATCHES_PER_SECOND: '2'};
@@ -255,28 +256,33 @@ const cases = [
   // 2026-10-29 review P1: the timeout must cover the largest photo the service takes, not only the probe sizes.
   // 2026-10-29 review P1-3: one cap per model, each at its own time per pixel. x2: the slowest measured p95 per MP;
   // x4: UPSCALE_X4_TIME_RATIO (1.7) times it.
-  {label: 'the default caps: x2 8 MP (2 x 834 s) and x4 4.9 MP (2 x 868 s) both fit 1740 s', env: {}, expect: {STATUS: '0', UPSCALE_MAX_PIXELS: '8000000', UPSCALE_MAX_PIXELS_X4: '4900000'}},
-  {label: 'the reproduced case: a 2500 px product on Centrepoint at 1.2x is a 2564 x 2564 region (6,574,096 px), above the x4 cap and inside the x2 cap',
-    env: {UPSCALE_MAX_PIXELS: String(2564 * 2564)}, expect: {STATUS: '0'}},
+  {label: 'the default caps: x2 5.4 MP (2 x 856 s) and x4 4.9 MP (2 x 868 s) both fit 1740 s', env: {}, expect: {STATUS: '0', UPSCALE_MAX_PIXELS: '5400000', UPSCALE_MAX_PIXELS_X4: '4900000'}},
+  // 2026-10-31: the 2500 px Centrepoint product at 1.2x (a 2564 x 2564 region, 6,574,096 px) is above both caps at the
+  // Cloud Run x2 time; the worker makes it in tiles under the cap, and a cap that size is refused.
+  {label: 'the reproduced case is above the x2 cap at the measured x2 time: a 6.57 MP x2 cap is refused', env: {UPSCALE_MAX_PIXELS: String(2564 * 2564)}, expect: {STATUS: '1'},
+    error: /^ERROR: UPSCALE_MAX_PIXELS=6574096 needs a timeout of 2 x about 1041 s = 2082 s on the x2 \(1\.52 x the rows' time\) model/},
+  {label: 'the 8 MP x2 cap of 2026-10-29 no longer fits at 1.52', env: {UPSCALE_MAX_PIXELS: '8000000'}, expect: {STATUS: '1'},
+    error: /^ERROR: UPSCALE_MAX_PIXELS=8000000 needs a timeout of 2 x about 1267 s = 2534 s on the x2/},
+  {label: 'the x2 time ratio must be a number of at least 1', env: {UPSCALE_X2_TIME_RATIO: '0.9'}, expect: {STATUS: '1'}, error: /UPSCALE_X2_TIME_RATIO must be a number of at least 1/},
   {label: 'the x4 cap must fit the timeout on x4: 5 MP needs 2 x 886 s at 104.2 s per MP x 1.7', env: {UPSCALE_MAX_PIXELS_X4: '5000000'}, expect: {STATUS: '1'},
     error: /^ERROR: UPSCALE_MAX_PIXELS_X4=5000000 needs a timeout of 2 x about 886 s = 1772 s on the x4 \(1\.7 x the x2 time\) model \(the slowest measured p95, 104\.1667 s per megapixel, measured 2026-10-29\), above UPSCALE_TIMEOUT_S=1740: such images would time out on every attempt and be held\. Raise UPSCALE_TIMEOUT_S \(at most 1740\) or lower UPSCALE_MAX_PIXELS_X4 to at most 49129\d\d\n$/},
   {label: 'the 6.4 MP x4 cap of 2026-10-29 no longer fits at 1.7', env: {UPSCALE_MAX_PIXELS_X4: '6400000'}, expect: {STATUS: '1'}, error: /^ERROR: UPSCALE_MAX_PIXELS_X4=6400000 needs a timeout of 2 x about 1134 s = 2268 s on the x4/},
   {label: 'one shared 8 MP cap is refused for the x4 model', env: {UPSCALE_MAX_PIXELS_X4: '8000000'}, expect: {STATUS: '1'}, error: /^ERROR: UPSCALE_MAX_PIXELS_X4=8000000 needs a timeout of 2 x about 1417 s = 2834 s on the x4/},
-  {label: 'the x2 cap is timed on the x2 model, never on x4: 9 MP needs 2 x 938 s', env: {UPSCALE_MAX_PIXELS: '9000000'}, expect: {STATUS: '1'},
-    error: /^ERROR: UPSCALE_MAX_PIXELS=9000000 needs a timeout of 2 x about 938 s = 1876 s on the x2 model .* lower UPSCALE_MAX_PIXELS to at most 8351997\n$/},
+  {label: 'the x2 cap is timed on the x2 model, never on x4: 6 MP needs 2 x 951 s', env: {UPSCALE_MAX_PIXELS: '6000000'}, expect: {STATUS: '1'},
+    error: /^ERROR: UPSCALE_MAX_PIXELS=6000000 needs a timeout of 2 x about 951 s = 1902 s on the x2 \(1\.52 x the rows' time\) model .* lower UPSCALE_MAX_PIXELS to at most 549\d{4}\n$/},
   {label: 'without the x4 model its cap is not checked', env: {UPSCALE_MODEL_X4: 'off', UPSCALE_MAX_PIXELS_X4: '99000000'}, expect: {STATUS: '0'}},
   {label: 'the x4 time ratio must be a number of at least 1', env: {UPSCALE_X4_TIME_RATIO: '0.9'}, expect: {STATUS: '1'}, error: /UPSCALE_X4_TIME_RATIO must be a number of at least 1/},
   {label: 'a higher measured x4 ratio needs a smaller x4 cap and leaves the x2 cap alone', env: {UPSCALE_X4_TIME_RATIO: '1.8'}, expect: {STATUS: '1'}, error: /^ERROR: UPSCALE_MAX_PIXELS_X4=4900000 needs a timeout of 2 x about 919 s = 1838 s on the x4 \(1\.8 x the x2 time\) model[^\n]*\n$/},
-  {label: 'the 24 MP service default would need about 5000 s on x2, more than one task delivery', env: {UPSCALE_MAX_PIXELS: '24000000'}, expect: {STATUS: '1'},
-    error: /UPSCALE_MAX_PIXELS=24000000 needs a timeout of 2 x about 2501 s = 5002 s on the x2 model/},
+  {label: 'the 24 MP service default would need about 7600 s on x2, more than one task delivery', env: {UPSCALE_MAX_PIXELS: '24000000'}, expect: {STATUS: '1'},
+    error: /UPSCALE_MAX_PIXELS=24000000 needs a timeout of 2 x about 380\d s = 760\d s on the x2/},
   {label: 'the 2026-10-29 shape (timeout 480) with the 24 MP default is refused', env: {UPSCALE_TIMEOUT_S: '480', UPSCALE_MAX_PIXELS: '24000000'}, expect: {STATUS: '1'},
-    error: /above UPSCALE_TIMEOUT_S=480: such images would time out on every attempt and be held\. Raise UPSCALE_TIMEOUT_S \(at most 1740\) or lower UPSCALE_MAX_PIXELS to at most 230\d{4}\n/},
-  {label: 'smaller caps fit a shorter timeout', env: {UPSCALE_TIMEOUT_S: '480', UPSCALE_MAX_PIXELS: '2200000', UPSCALE_MAX_PIXELS_X4: '1300000'}, expect: {STATUS: '0'}},
+    error: /above UPSCALE_TIMEOUT_S=480: such images would time out on every attempt and be held\. Raise UPSCALE_TIMEOUT_S \(at most 1740\) or lower UPSCALE_MAX_PIXELS to at most 151\d{4}\n/},
+  {label: 'smaller caps fit a shorter timeout', env: {UPSCALE_TIMEOUT_S: '480', UPSCALE_MAX_PIXELS: '1500000', UPSCALE_MAX_PIXELS_X4: '1300000'}, expect: {STATUS: '0'}},
   {label: 'the slowest size per pixel sets the estimate (here the larger one)', env: {...DEDICATED, MATTING_CPU_MAX_INSTANCES: '4', UPSCALE_P95_S_4C_4T_1CONC_1600x1600: '400'}, expect: {STATUS: '1'},
-    error: /^ERROR: UPSCALE_MAX_PIXELS_X4=1800000 needs a timeout of 2 x about 479 s = 958 s on the x4 \(1\.7 x the x2 time\) model \(the slowest measured p95, 156\.2500 s per megapixel/},
+    error: /^ERROR: UPSCALE_MAX_PIXELS=2000000 needs a timeout of 2 x about 475 s = 950 s on the x2[^\n]*156\.2500 s per megapixel[^\n]*\nERROR: UPSCALE_MAX_PIXELS_X4=1800000 needs a timeout of 2 x about 479 s = 958 s on the x4 \(1\.7 x the x2 time\) model \(the slowest measured p95, 156\.2500 s per megapixel/},
   // Spec 18 quality: each cap's working set (4096 MiB resident + 160 B per input pixel, the x4 model's) under 80% of memory.
-  {label: 'each cap\'s working set must fit 80% of the memory: 8 MP needs 5317 MiB and 4.9 MP 4844 MiB, 4Gi is too small', env: {UPSCALE_MEMORY: '4Gi'}, expect: {STATUS: '1'},
-    error: /^ERROR: UPSCALE_MAX_PIXELS=8000000 needs about 5317 MiB \(4096 MiB resident \+ 160 B per input pixel\), more than 80% of UPSCALE_MEMORY=4Gi; raise UPSCALE_MEMORY or lower UPSCALE_MAX_PIXELS\nERROR: UPSCALE_MAX_PIXELS_X4=4900000 needs about 4844 MiB \(4096 MiB resident \+ 160 B per input pixel\), more than 80% of UPSCALE_MEMORY=4Gi; raise UPSCALE_MEMORY or lower UPSCALE_MAX_PIXELS_X4\n$/},
+  {label: 'each cap\'s working set must fit 80% of the memory: 5.4 MP needs 4920 MiB and 4.9 MP 4844 MiB, 4Gi is too small', env: {UPSCALE_MEMORY: '4Gi'}, expect: {STATUS: '1'},
+    error: /^ERROR: UPSCALE_MAX_PIXELS=5400000 needs about 4920 MiB \(4096 MiB resident \+ 160 B per input pixel\), more than 80% of UPSCALE_MEMORY=4Gi; raise UPSCALE_MEMORY or lower UPSCALE_MAX_PIXELS\nERROR: UPSCALE_MAX_PIXELS_X4=4900000 needs about 4844 MiB \(4096 MiB resident \+ 160 B per input pixel\), more than 80% of UPSCALE_MEMORY=4Gi; raise UPSCALE_MEMORY or lower UPSCALE_MAX_PIXELS_X4\n$/},
   {label: '8Gi holds both working sets', env: {UPSCALE_MEMORY: '8Gi'}, expect: {STATUS: '0'}},
   {label: 'UPSCALE_MAX_PIXELS_X4 must be a whole number of at least 1', env: {UPSCALE_MAX_PIXELS_X4: '0'}, expect: {STATUS: '1'}, error: /UPSCALE_MAX_PIXELS_X4 must be at least 1/},
   {label: 'measured rows need their probe date', env: {...DEDICATED, MATTING_CPU_MAX_INSTANCES: '4', UPSCALE_MEASURED_ON: ''}, expect: {STATUS: '1'}, error: /UPSCALE_MEASURED_ON must be the date/},

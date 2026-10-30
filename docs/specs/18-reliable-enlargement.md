@@ -510,11 +510,12 @@ what they allow, same per-call shape (4 vCPU, 4 threads, concurrency 1, so the m
   <= 800 - 24 = 776. CPU binds; memory has room.
 Rollback values are the comment line above `SHAPE_DEFAULTS` in `infra/lib/shape.sh`.
 
-x4 timeout gate (2026-10-31): the deploy gate checks the x4 property, not a ratio: it fails when 2 x
-`UPSCALE_MAX_PIXELS_X4` x the x4 p95 per MP is above the timeout (p95 per size over the rounds and the 12 determinism
-calls, the service's own time, one slow call of 10 or more set aside); the ratio of one x4 call over one x2 call
-refused a healthy revision at 1.51. Measured x4 reached 151 s per MP, so `UPSCALE_X4_TIME_RATIO` 1.3 -> 1.7 and
-`UPSCALE_MAX_PIXELS_X4` 6.4 -> 4.9 MP (x4 regions are at most about 2.5 MP in practice).
+Cap timeout gate (2026-10-31): the deploy gate checks each pixel cap against the timeout, not a ratio: it fails when
+2 x the cap x that model's p95 per MP is above the timeout (p95 per size over the rounds and the 12 determinism calls,
+the service's own time, one slow call of 10 or more set aside); the ratio of one x4 call over one x2 call refused a
+healthy revision at 1.51. Measured Cloud Run x2 reached 158 s per MP and x4 151 s per MP, so `UPSCALE_MAX_PIXELS` 8 ->
+5.4 MP with a new `UPSCALE_X2_TIME_RATIO` 1.52, and `UPSCALE_MAX_PIXELS_X4` 6.4 -> 4.9 MP with `UPSCALE_X4_TIME_RATIO`
+1.3 -> 1.7. A region above a cap is made in tiles (worker and service read the same variables).
 
 ## 9. Live verification (after the H4, H1+H2 and H3 deploys)
 

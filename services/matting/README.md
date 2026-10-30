@@ -470,17 +470,18 @@ per call, so the next probe change should log both. `infra/lib/shape.sh` therefo
 runs, not proven deterministic on every host.
 
 The shape chosen (spec 18 section 8, spec 18 quality): 16 x 4 vCPU, 16 GiB, 4 threads, concurrency 1,
-`UPSCALE_TIMEOUT_S=1740`, and one pixel cap per model (2026-10-29 review): `UPSCALE_MAX_PIXELS=8000000` for x2 and
-`UPSCALE_MAX_PIXELS_X4=4900000` for x4 (6.4 MP until 2026-10-31, when Cloud Run x4 times showed 2 x 6.4 MP x 151 s per
-MP = 1936 s did not fit). A single shared 6.4 MP cap held real x2 regions it could fit (a 2500 px product on
-Centrepoint at 1.2x crops to 2564 x 2564 = 6.57 MP).
+`UPSCALE_TIMEOUT_S=1740`, and one pixel cap per model (2026-10-29 review): `UPSCALE_MAX_PIXELS=5400000` for x2 and
+`UPSCALE_MAX_PIXELS_X4=4900000` for x4 (8 MP and 6.4 MP until 2026-10-31, when Cloud Run gate times showed x2 at up
+to 158 s per MP and x4 at up to 151 s per MP, so 2 x 8 x 158 = 2533 s and 2 x 6.4 x 151 = 1936 s did not fit). A
+region above its model's cap is made in tiles under the cap by the worker, never held for its size.
 
 | rule (infra/lib/shape.sh upscale_check) | arithmetic | result |
 |---|---|---|
-| timeout covers the largest x2 image | 2 x ceil(8 MP x 104.17 s per MP) = 2 x 834 s | 1668 s <= 1740 s |
+| timeout covers the largest x2 image | 2 x ceil(5.4 MP x 104.17 s per MP x 1.52) = 2 x 856 s | 1712 s <= 1740 s |
+| the same on the measured x2 calls (deploy gate) | 2 x 5.4 MP x the x2 p95 per MP (158.33 s on 2026-10-30) = 1710 s | at most 161.1 s per MP |
 | timeout covers the largest x4 image | 2 x ceil(4.9 MP x 104.17 s per MP x 1.7) = 2 x 868 s | 1736 s <= 1740 s |
 | the same on the measured x4 calls (deploy gate) | 2 x 4.9 MP x the x4 p95 per MP (151.25 s on 2026-10-30) = 1482 s | at most 177.5 s per MP |
-| x4 at the x2 cap of 8 MP | 2 x ceil(8 MP x 104.17 x 1.7) = 2 x 1417 s | 2834 s, refused |
+| x4 at an 8 MP cap | 2 x ceil(8 MP x 104.17 x 1.7) = 2 x 1417 s | 2834 s, refused |
 | x4 memory of the largest image under 80% of 8 GiB (16 GiB until 2026-10-30) | 4096 MiB resident + 4.9 MP x 160 B | 4844 MiB <= 6553 MiB |
 | x4 output size (sharp's default input limit 268,402,689 px) | 4.9 MP x 16 | 78.4 MP |
 | deploy probe budget, both models, both sizes | 300 + 4 x (100 + 130) + 4 x (216 + 281) | 3208 s |

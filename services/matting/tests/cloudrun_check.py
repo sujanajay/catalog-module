@@ -316,9 +316,10 @@ def probe_main(argv, token_for=None, report_writer=None, now=None):
 #                           and instance id; repeated up to 3 times until at least 2 instances answered. Fails when
 #                           fewer than 2 instances answered, on any non-200, on two outputs from one instance, or on
 #                           outputs from two instances that differ visibly.
-#   --x4-max-pixels p       the x4 timeout check (x4_timeout_check): the largest x4 image the service takes (p pixels,
-#                           UPSCALE_MAX_PIXELS_X4) must finish within --timeout (the service's request timeout) with
-#                           X4_TIMEOUT_MARGIN to spare, at the x4 model's slowest measured p95 seconds per megapixel.
+#   --x2-max-pixels p       the cap timeout check (cap_timeout_check), per model: the largest image the service takes
+#   --x4-max-pixels p       for it (p pixels, UPSCALE_MAX_PIXELS and UPSCALE_MAX_PIXELS_X4) must finish within --timeout
+#                           (the service's request timeout) with CAP_TIMEOUT_MARGIN to spare, at that model's slowest
+#                           measured p95 seconds per megapixel.
 # Prints the table `model | size | vCPU | threads | tile | conc | p50 s | p95 s | max s | non-200 | output sha256` and
 # the determinism and cold-start lines, writes the JSON report to
 # gs://image-links-agent-assets/catalog-test/probe/<run>/upscale.json when --bucket names that bucket, and exits
@@ -350,10 +351,12 @@ BUSY_RETRIES = 30
 COLD_START_ATTEMPTS = 3
 # How long the occupying call runs before /health is sent, so it holds its instance first.
 COLD_START_HOLD_S = 5
-# The x4 timeout check (2026-10-31, replaces the x4/x2 ratio of two single calls, which refused a healthy revision at
+# The cap timeout check (2026-10-31, replaces the x4/x2 ratio of two single calls, which refused a healthy revision at
 # 1.51 when one x2 call was the fastest on record; .runs/2026-10-30-18-cpu-scale.md). The margin is shape.sh's: a
 # service timeout covers twice the p95 of the largest image it takes.
-X4_TIMEOUT_MARGIN = 2
+CAP_TIMEOUT_MARGIN = 2
+# Per scale: the pixel cap's variable (infra/lib/shape.sh) and the static time ratio that sizes it there.
+CAP_VARIABLES = {2: ("UPSCALE_MAX_PIXELS", "UPSCALE_X2_TIME_RATIO"), 4: ("UPSCALE_MAX_PIXELS_X4", "UPSCALE_X4_TIME_RATIO")}
 # A size with at least this many timed calls sets its slowest call aside before taking the p95 (timing_p95), so one
 # slow call (a noisy neighbour, one slow host) cannot fail the gate while two slow calls in 13 still can.
 TIMING_TRIM_MIN_CALLS = 10
@@ -730,50 +733,56 @@ def timing_p95(values):
     return percentile(ordered, 0.95)
 
 
-def x4_timeout_check(timings, max_pixels, timeout, margin=X4_TIMEOUT_MARGIN):
-    """The property the x4 cap needs (spec 18 3.6.6, infra/lib/shape.sh upscale_check): the largest image the service
-    takes for the x4 model, `max_pixels` (UPSCALE_MAX_PIXELS_X4), finishes within the service timeout `timeout` with
-    `margin` to spare. Its time is estimated as shape.sh does: the slowest measured p95 seconds per megapixel over the
-    probe sizes (the smallest size carries the most fixed cost per pixel, a safe bound for larger images) times its
-    megapixels. The p95 per size is timing_p95 over every timed call of that size (the rounds and the determinism
-    round), on the service's own inference time (UpscaleAnswer.work_seconds).
+def cap_timeout_check(timings, caps, timeout, margin=CAP_TIMEOUT_MARGIN):
+    """The property each pixel cap needs (spec 18 3.6.6, infra/lib/shape.sh upscale_check): the largest image the
+    service takes for a model of scale s, `caps[s]` (UPSCALE_MAX_PIXELS for x2, UPSCALE_MAX_PIXELS_X4 for x4), finishes
+    within the service timeout `timeout` with `margin` to spare. Its time is estimated as shape.sh does: the slowest
+    measured p95 seconds per megapixel over the probe sizes (the smallest size carries the most fixed cost per pixel, a
+    safe bound for larger images) times its megapixels. The p95 per size is timing_p95 over every timed call of that
+    size (the rounds and the determinism round), on the service's own inference time (UpscaleAnswer.work_seconds).
     This replaces the 2026-10-29 x4/x2 ratio check (one x4 call over one x2 call), which tested an assumption of the
     static sizing instead of the property, and whose two single calls could land on different hosts: a fast x2 call
-    alone failed a healthy revision at 1.51 (2026-10-30). The x4/x2 median ratio is reported for the static
-    UPSCALE_X4_TIME_RATIO, never judged.
-    `timings`: {model: {(width, height): [seconds, ...]}}. Returns (report entry or None when max_pixels is 0, failures)."""
-    if not max_pixels:
+    alone failed a healthy revision at 1.51 (2026-10-30). The x4/x2 median ratio is reported, never judged.
+    `timings`: {model: {(width, height): [seconds, ...]}}; `caps`: {scale: pixels}, 0 or absent checks nothing for that
+    scale. Returns (report entry or None when no cap is checked, failures)."""
+    caps = {scale: pixels for scale, pixels in caps.items() if pixels}
+    if not caps:
         return None, []
-    x4_models = [m for m in timings if UPSCALE_PROBE_MODELS.get(m) == 4]
     x2_models = [m for m in timings if UPSCALE_PROBE_MODELS.get(m) == 2]
-    entry = {"maxPixels": max_pixels, "timeoutS": timeout, "margin": margin, "models": []}
+    entry = {"timeoutS": timeout, "margin": margin, "caps": {f"x{s}": p for s, p in sorted(caps.items())}, "models": []}
     failures = []
-    if not any(any(timings[m].values()) for m in x4_models):
-        failures.append(f"x4 timeout check: no x4 call was timed, so UPSCALE_MAX_PIXELS_X4={max_pixels} is not shown to fit the {timeout} s timeout")
-    for model in x4_models:
-        sizes = []
-        for (width, height), values in timings[model].items():
-            if not values:
+    for scale, max_pixels in sorted(caps.items()):
+        variable, ratio = CAP_VARIABLES[scale]
+        models = [m for m in timings if UPSCALE_PROBE_MODELS.get(m) == scale]
+        if not any(any(timings[m].values()) for m in models):
+            failures.append(f"x{scale} timeout check: no x{scale} call was timed, so {variable}={max_pixels} is not shown to fit the {timeout} s timeout")
+        for model in models:
+            sizes = []
+            for (width, height), values in timings[model].items():
+                if not values:
+                    continue
+                megapixels = width * height / 1_000_000
+                p95 = timing_p95(values)
+                median = statistics.median(values)
+                size = {"size": f"{width}x{height}", "calls": len(values), "p50S": seconds(median), "p95S": seconds(p95),
+                        "maxS": seconds(max(values)), "sPerMp": round(p95 / megapixels, 2)}
+                if scale == 4:
+                    x2_median = next((statistics.median(timings[m][(width, height)]) for m in x2_models if timings[m].get((width, height))), None)
+                    size["x4OverX2Median"] = round(median / x2_median, 3) if x2_median else None
+                sizes.append(size)
+            if not sizes:
                 continue
-            megapixels = width * height / 1_000_000
-            p95 = timing_p95(values)
-            x2_median = next((statistics.median(timings[m].get((width, height))) for m in x2_models if timings[m].get((width, height))), None)
-            median = statistics.median(values)
-            sizes.append({"size": f"{width}x{height}", "calls": len(values), "p50S": seconds(median), "p95S": seconds(p95),
-                          "maxS": seconds(max(values)), "sPerMp": round(p95 / megapixels, 2),
-                          "x4OverX2Median": round(median / x2_median, 3) if x2_median else None})
-        if not sizes:
-            continue
-        worst = max(sizes, key=lambda s: s["sPerMp"])
-        estimate = worst["sPerMp"] * max_pixels / 1_000_000
-        need = margin * estimate
-        fits = int(timeout / margin / worst["sPerMp"] * 1_000_000)
-        entry["models"].append({"model": model, "sizes": sizes, "worstSize": worst["size"], "sPerMp": worst["sPerMp"],
-                                "estimateS": seconds(estimate), "needS": seconds(need), "fitsMaxPixels": fits, "passed": need <= timeout})
-        if need > timeout:
-            failures.append(f"{model}: UPSCALE_MAX_PIXELS_X4={max_pixels} needs {margin:g} x {estimate:.0f} s = {need:.0f} s at the slowest measured "
-                            f"p95 of {worst['sPerMp']} s per MP ({worst['size']}, {worst['calls']} calls), above the {timeout} s timeout; "
-                            f"lower UPSCALE_MAX_PIXELS_X4 to at most {fits} and raise UPSCALE_X4_TIME_RATIO to match (infra/lib/shape.sh)")
+            worst = max(sizes, key=lambda s: s["sPerMp"])
+            estimate = worst["sPerMp"] * max_pixels / 1_000_000
+            need = margin * estimate
+            fits = int(timeout / margin / worst["sPerMp"] * 1_000_000)
+            entry["models"].append({"model": model, "scale": scale, "maxPixels": max_pixels, "sizes": sizes, "worstSize": worst["size"],
+                                    "sPerMp": worst["sPerMp"], "estimateS": seconds(estimate), "needS": seconds(need), "fitsMaxPixels": fits,
+                                    "passed": need <= timeout})
+            if need > timeout:
+                failures.append(f"{model}: {variable}={max_pixels} needs {margin:g} x {estimate:.0f} s = {need:.0f} s at the slowest measured "
+                                f"p95 of {worst['sPerMp']} s per MP ({worst['size']}, {worst['calls']} calls), above the {timeout} s timeout; "
+                                f"lower {variable} to at most {fits} and raise {ratio} to match (infra/lib/shape.sh)")
     entry["passed"] = not failures
     return entry, failures
 
@@ -804,6 +813,7 @@ def parse_upscale_args(argv):
     parser.add_argument("--concurrency", type=int, default=1)
     parser.add_argument("--rounds", type=int, default=3)
     parser.add_argument("--timeout", type=int, default=900)
+    parser.add_argument("--x2-max-pixels", dest="x2_max_pixels", type=int, default=0)
     parser.add_argument("--x4-max-pixels", dest="x4_max_pixels", type=int, default=0)
     parser.add_argument("--determinism-calls", dest="determinism_calls", type=int, default=0)
     parser.add_argument("--determinism-seconds", dest="determinism_seconds", type=int, default=0)
@@ -818,6 +828,7 @@ def parse_upscale_args(argv):
             f"--model must list served upscalers ({', '.join(UPSCALE_PROBE_MODELS)})")
     require(1 <= args.concurrency <= 8 and 1 <= args.rounds <= 50, "--concurrency must be 1 to 8 and --rounds 1 to 50")
     require(30 <= args.timeout <= 3600, "--timeout must be 30 to 3600 seconds")
+    require(0 <= args.x2_max_pixels <= 100_000_000, "--x2-max-pixels must be 0 (no check) to 100000000 pixels")
     require(0 <= args.x4_max_pixels <= 100_000_000, "--x4-max-pixels must be 0 (no check) to 100000000 pixels")
     require(args.determinism_calls == 0 or 2 <= args.determinism_calls <= 16, "--determinism-calls must be 0 (none) or 2 to 16")
     require(0 <= args.determinism_seconds <= 3600, "--determinism-seconds must be 0 (3 rounds only) to 3600 seconds")
@@ -852,19 +863,19 @@ def probe_upscale_main(argv, token_for=None, report_writer=None, now=None, sleep
         steps += [{"model": model, **step} for step in probe.steps]
         service.update(probe.service)
         timings[model] = probe.work
-    x4_timeout, x4_failures = x4_timeout_check(timings, args.x4_max_pixels, args.timeout)
-    failures += x4_failures
+    cap_timeout, cap_failures = cap_timeout_check(timings, {2: args.x2_max_pixels, 4: args.x4_max_pixels}, args.timeout)
+    failures += cap_failures
     report = {"run": run, "url": args.url, "startedAt": started.isoformat(), "models": args.models,
               "sizes": [f"{w}x{h}" for w, h in args.sizes], "concurrency": args.concurrency, "rounds": args.rounds,
               "timeoutS": args.timeout, "service": service, "rows": rows, "steps": steps, "determinism": determinism,
-              "coldStart": cold_start, "x4Timeout": x4_timeout, "visualLimit": {"maxAbs": VISUAL_MAX_ABS, "minPsnrDb": VISUAL_MIN_PSNR_DB},
+              "coldStart": cold_start, "capTimeout": cap_timeout, "visualLimit": {"maxAbs": VISUAL_MAX_ABS, "minPsnrDb": VISUAL_MIN_PSNR_DB},
               "passed": not failures, "failures": failures}
     print(upscale_markdown(rows), flush=True)
     for entry in determinism:
         print(determinism_line(entry), flush=True)
-    for entry in (x4_timeout or {}).get("models", []):
-        print(f"x4 timeout {entry['model']}: {x4_timeout['margin']:g} x {entry['sPerMp']} s per MP ({entry['worstSize']} p95) x "
-              f"{x4_timeout['maxPixels'] / 1_000_000:g} MP = {entry['needS']} s (timeout {x4_timeout['timeoutS']} s): "
+    for entry in (cap_timeout or {}).get("models", []):
+        print(f"cap timeout {entry['model']}: {cap_timeout['margin']:g} x {entry['sPerMp']} s per MP ({entry['worstSize']} p95) x "
+              f"{entry['maxPixels'] / 1_000_000:g} MP = {entry['needS']} s (timeout {cap_timeout['timeoutS']} s): "
               f"{'passed' if entry['passed'] else 'FAILED'}", flush=True)
     if cold_start:
         print(f"UPSCALE_COLD_START_S measured: {cold_start['coldStartS'] if cold_start['coldStartS'] is not None else 'not measured'} s "

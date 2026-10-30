@@ -120,7 +120,7 @@ service_catalog_upscale() {
     SVC_DEPLOY=1; SVC_SHIFT=0
     SVC_TAG=measure-${UPSCALE_CPU_VCPU}c-${UPSCALE_THREADS}t-${UPSCALE_CONCURRENCY}r
     SVC_PROBE_TIMEOUT=$((300 + 4 * UPSCALE_TIMEOUT_S))
-    SVC_PROBE=(bash infra/lib/services.sh probe-upscale "$SVC_PROBE_TIMEOUT" "$(probe_upscale_model)" "$first" 1 1 "$UPSCALE_TIMEOUT_S" 0 0 0)
+    SVC_PROBE=(bash infra/lib/services.sh probe-upscale "$SVC_PROBE_TIMEOUT" "$(probe_upscale_model)" "$first" 1 1 "$UPSCALE_TIMEOUT_S" 0 0 0 0)
     return 0
   fi
   if [ "${UPSCALE_SERVICE:-cpu}" != dedicated ]; then
@@ -147,13 +147,14 @@ service_catalog_upscale() {
   budget=$((budget + 3 * (5 + 2 * cold) + p95_det))
   budget=$((budget + 3 * (2 * cold + waves * p95_det + waves * $(upscale_x4_seconds "$p95_det"))))
   SVC_PROBE_TIMEOUT=$((300 + budget))
-  # The x4 timeout check (2026-10-31, replaces the x4/x2 ratio of two single calls): the gate fails when the x4 cap
-  # (UPSCALE_MAX_PIXELS_X4) does not fit UPSCALE_TIMEOUT_S twice over at the x4 model's slowest measured p95 per MP,
-  # over the rounds and the determinism calls (cloudrun_check.py x4_timeout_check). 0 (no x4 model) checks nothing.
+  # The cap timeout check (2026-10-31, replaces the x4/x2 ratio of two single calls): the gate fails when a model's
+  # pixel cap (UPSCALE_MAX_PIXELS for x2, UPSCALE_MAX_PIXELS_X4 for x4) does not fit UPSCALE_TIMEOUT_S twice over at
+  # that model's slowest measured p95 per MP, over the rounds and the determinism calls (cloudrun_check.py
+  # cap_timeout_check). 0 (no x4 model) checks nothing for x4.
   local x4_cap=0
   [ "${UPSCALE_MODEL_X4:-swinir-x4}" = off ] || x4_cap=$UPSCALE_MAX_PIXELS_X4
   SVC_PROBE=(bash infra/lib/services.sh probe-upscale "$SVC_PROBE_TIMEOUT" "$(probe_upscale_model)" "$UPSCALE_SIZES" "$UPSCALE_CONCURRENCY" 1
-    "$UPSCALE_TIMEOUT_S" "$x4_cap" "$calls" "$cold")
+    "$UPSCALE_TIMEOUT_S" "$UPSCALE_MAX_PIXELS" "$x4_cap" "$calls" "$cold")
   SVC_DEPLOY=1; SVC_SHIFT=1
   # Like catalog-matting: the preview reuses the live service and never changes it.
   [ "${CATALOG_PREVIEW:-0}" = 1 ] && SVC_DEPLOY=0
@@ -207,7 +208,7 @@ service_catalog_upscale_gpu() {
   budget=$((budget + 2 * (UPSCALE_GPU_DETERMINISM_SECONDS + 2 * cold)))
   SVC_PROBE_TIMEOUT=$((300 + budget))
   SVC_PROBE=(env "UPSCALE_DETERMINISM_SECONDS=$UPSCALE_GPU_DETERMINISM_SECONDS" bash infra/lib/services.sh probe-upscale "$SVC_PROBE_TIMEOUT"
-    "$(probe_upscale_model)" "$UPSCALE_SIZES" "$UPSCALE_GPU_CONCURRENCY" 3 "$UPSCALE_GPU_TIMEOUT_S" "$x4_cap" "$UPSCALE_DETERMINISM_CALLS" 0)
+    "$(probe_upscale_model)" "$UPSCALE_SIZES" "$UPSCALE_GPU_CONCURRENCY" 3 "$UPSCALE_GPU_TIMEOUT_S" "$UPSCALE_MAX_PIXELS" "$x4_cap" "$UPSCALE_DETERMINISM_CALLS" 0)
   SVC_DEPLOY=1; SVC_SHIFT=1
   # The preview reuses the live service and never changes it, like catalog-upscale.
   [ "${CATALOG_PREVIEW:-0}" = 1 ] && SVC_DEPLOY=0
@@ -365,7 +366,8 @@ probe_matting() {
 # Spec 18 H1: the upscale probe (cloudrun_check.py --probe-upscale through infra/check-matting.sh) with the sizes,
 # concurrency, rounds and per-call timeout the registry row gives; the job ends with the gate, as for probe_matting.
 probe_upscale() {
-  local timeout=$1 model=$2 sizes=$3 concurrency=$4 rounds=$5 call_timeout=$6 x4_max_pixels=$7 determinism_calls=$8 cold_start_max=$9 url=${10}
+  local timeout=$1 model=$2 sizes=$3 concurrency=$4 rounds=$5 call_timeout=$6 x2_max_pixels=$7 x4_max_pixels=$8 determinism_calls=$9
+  local cold_start_max=${10} url=${11}
   local gate=()
   # Spec 18 gate (plan 7.2): the determinism round and the cold start, only when the registry row asks for them.
   [ "$determinism_calls" = 0 ] || gate+=(--determinism-calls="$determinism_calls")
@@ -374,7 +376,7 @@ probe_upscale() {
   [ "${UPSCALE_DETERMINISM_SECONDS:-0}" = 0 ] || gate+=(--determinism-seconds="$UPSCALE_DETERMINISM_SECONDS")
   [ "$cold_start_max" = 0 ] || gate+=(--cold-start-max="$cold_start_max")
   PROBE_TASK_TIMEOUT=$timeout bash infra/check-matting.sh --probe-upscale "$url" --model="$model" --sizes="$sizes" \
-    --concurrency="$concurrency" --rounds="$rounds" --timeout="$call_timeout" --x4-max-pixels="$x4_max_pixels" ${gate[@]+"${gate[@]}"}
+    --concurrency="$concurrency" --rounds="$rounds" --timeout="$call_timeout" --x2-max-pixels="$x2_max_pixels" --x4-max-pixels="$x4_max_pixels" ${gate[@]+"${gate[@]}"}
 }
 
 # /health on the worker candidate, then the tier 5 smoke against the candidates of this deploy.

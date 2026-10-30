@@ -408,7 +408,7 @@ def test_upscale_sizes_parsing():
 
 
 @pytest.mark.parametrize("args", [["--model", "esrgan-x4"], ["--model", "realesrgan-x2plus"], ["--model", "swinir-x2,esrgan-x4"], ["--model", ","], ["--concurrency", "0"], ["--rounds", "51"], ["--timeout", "5"],
-                                  ["--bucket", "image-links-agent-public"], ["--run", "../x"], ["--x4-max-pixels", "-1"], ["--x4-max-pixels", "100000001"]])
+                                  ["--bucket", "image-links-agent-public"], ["--run", "../x"], ["--x4-max-pixels", "-1"], ["--x4-max-pixels", "100000001"], ["--x2-max-pixels", "-1"], ["--x2-max-pixels", "100000001"]])
 def test_upscale_probe_refuses_bad_arguments(args):
     with pytest.raises(probe.CheckFailure):
         probe.parse_upscale_args(["--probe-upscale", "https://svc-abc.a.run.app", *args])
@@ -479,8 +479,8 @@ def test_timing_p95_sets_aside_one_slow_call_only_with_enough_calls():
 def test_x4_timeout_check_passes_one_slow_outlier():
     # 12 calls near the measured 123 to 145 s and one call at 300 s (a noisy neighbour): set aside, the gate passes.
     x4 = [124.0, 126.0, 128.0, 129.0, 130.0, 131.0, 133.0, 135.0, 137.0, 140.0, 142.0, 145.2, 300.0]
-    entry, failures = probe.x4_timeout_check({"swinir-x2": {SMALL: [96.4] * 13, LARGE: [199.1]}, "swinir-x4": {SMALL: x4, LARGE: [248.9]}},
-                                             4_900_000, 1740)
+    entry, failures = probe.cap_timeout_check({"swinir-x2": {SMALL: [96.4] * 13, LARGE: [199.1]}, "swinir-x4": {SMALL: x4, LARGE: [248.9]}},
+                                             {4: 4_900_000}, 1740)
     assert failures == [] and entry["passed"] is True
     [model] = entry["models"]
     # The second slowest, 145.2 s, over 0.96 MP; the 1600x1600 call (97 s per MP) is not the worst.
@@ -491,7 +491,7 @@ def test_x4_timeout_check_passes_one_slow_outlier():
 
 def test_x4_timeout_check_fails_a_consistently_slow_x4():
     # Every call at 180 s: 187.5 s per MP x 4.9 MP x 2 = 1838 s, above 1740 s.
-    entry, failures = probe.x4_timeout_check({"swinir-x4": {SMALL: [180.0] * 13, LARGE: [250.0]}}, 4_900_000, 1740)
+    entry, failures = probe.cap_timeout_check({"swinir-x4": {SMALL: [180.0] * 13, LARGE: [250.0]}}, {4: 4_900_000}, 1740)
     assert entry["passed"] is False and len(failures) == 1
     assert failures[0] == ("swinir-x4: UPSCALE_MAX_PIXELS_X4=4900000 needs 2 x 919 s = 1838 s at the slowest measured p95 of 187.5 s per MP "
                            "(800x1200, 13 calls), above the 1740 s timeout; lower UPSCALE_MAX_PIXELS_X4 to at most 4640000 and raise "
@@ -500,7 +500,7 @@ def test_x4_timeout_check_fails_a_consistently_slow_x4():
 
 def test_x4_timeout_check_fails_two_slow_calls_in_thirteen():
     # Two slow calls are a tail, not an outlier: the second slowest (185 s) is judged.
-    _, failures = probe.x4_timeout_check({"swinir-x4": {SMALL: [130.0] * 11 + [185.0, 190.0]}}, 4_900_000, 1740)
+    _, failures = probe.cap_timeout_check({"swinir-x4": {SMALL: [130.0] * 11 + [185.0, 190.0]}}, {4: 4_900_000}, 1740)
     assert len(failures) == 1 and "192.71 s per MP" in failures[0]
 
 
@@ -508,14 +508,14 @@ def test_x4_timeout_check_on_the_refused_revision_and_the_old_cap():
     # 2026-10-30 (.runs/2026-10-30-18-cpu-scale.md): x4 145.2 s at 800x1200 against x2 96.4 s, ratio 1.51, refused. The
     # property itself: 151.25 s per MP fits 4.9 MP (2 x 741 s) but not the old 6.4 MP cap (2 x 968 s > 1740 s).
     timings = {"swinir-x2": {SMALL: [96.4], LARGE: [199.1]}, "swinir-x4": {SMALL: [145.2], LARGE: [248.9]}}
-    assert probe.x4_timeout_check(timings, 4_900_000, 1740)[1] == []
-    [failure] = probe.x4_timeout_check(timings, 6_400_000, 1740)[1]
+    assert probe.cap_timeout_check(timings, {4: 4_900_000}, 1740)[1] == []
+    [failure] = probe.cap_timeout_check(timings, {4: 6_400_000}, 1740)[1]
     assert failure.startswith("swinir-x4: UPSCALE_MAX_PIXELS_X4=6400000 needs 2 x 968 s = 1936 s")
 
 
 def test_x4_timeout_check_needs_a_timed_x4_call_and_off_checks_nothing():
-    assert probe.x4_timeout_check({"swinir-x4": {SMALL: [500.0]}}, 0, 1740) == (None, [])
-    entry, failures = probe.x4_timeout_check({"swinir-x2": {SMALL: [96.0]}}, 4_900_000, 1740)
+    assert probe.cap_timeout_check({"swinir-x4": {SMALL: [500.0]}}, {4: 0}, 1740) == (None, [])
+    entry, failures = probe.cap_timeout_check({"swinir-x2": {SMALL: [96.0]}}, {4: 4_900_000}, 1740)
     assert failures == ["x4 timeout check: no x4 call was timed, so UPSCALE_MAX_PIXELS_X4=4900000 is not shown to fit the 1740 s timeout"]
 
 
@@ -527,11 +527,11 @@ def test_upscale_probe_times_the_x4_check_on_the_service_time_of_rounds_and_dete
                                       "--determinism-calls=2", "--timeout=60", "--x4-max-pixels=100000", *BUCKET)
     report = reports[0][1]
     assert code == 0, report["failures"]
-    [model] = report["x4Timeout"]["models"]
+    [model] = report["capTimeout"]["models"]
     assert [(s["size"], s["calls"], s["p95S"]) for s in model["sizes"]] == [("64x96", 1, 1.2), ("800x1200", 2, 1.2)]
     assert model["worstSize"] == "64x96" and model["sPerMp"] == 195.31 and model["needS"] == 39.1 and model["passed"] is True
     assert report["determinism"][1]["calls"][0]["serverS"] == 1.2
-    assert "x4 timeout swinir-x4: 2 x 195.31 s per MP (64x96 p95) x 0.1 MP = 39.1 s (timeout 60 s): passed" in capsys.readouterr().out
+    assert "cap timeout swinir-x4: 2 x 195.31 s per MP (64x96 p95) x 0.1 MP = 39.1 s (timeout 60 s): passed" in capsys.readouterr().out
     # The same service with a 30 s timeout: 39.1 s does not fit, the probe fails with the cap that would.
     code, reports = run_upscale_probe(fake.url, "--model=swinir-x2,swinir-x4", "--sizes", "64x96", "--rounds", "1",
                                       "--timeout=30", "--x4-max-pixels=100000", *BUCKET)
@@ -542,17 +542,64 @@ def test_upscale_probe_times_the_x4_check_on_the_service_time_of_rounds_and_dete
 def test_upscale_probe_without_the_service_time_uses_the_client_time(fake_upscale):
     fake = fake_upscale()
     code, reports = run_upscale_probe(fake.url, "--model=swinir-x4", "--sizes", "64x96", "--rounds", "1", "--x4-max-pixels=100000", *BUCKET)
-    [model] = reports[0][1]["x4Timeout"]["models"]
+    [model] = reports[0][1]["capTimeout"]["models"]
     [row] = reports[0][1]["rows"]
     assert code == 0 and row["callLog"][0]["serverS"] is None
     # The one measured call's client time (the row's p95) is the check's p95.
     assert model["sizes"][0]["calls"] == 1 and model["sizes"][0]["p95S"] == row["p95S"] and model["sPerMp"] > 0
 
 
+def test_x2_cap_check_passes_one_slow_outlier():
+    # The x2 cap gets the same rule: 12 calls across the measured 96 to 152 s range and one at 400 s, set aside. The
+    # second slowest, 152 s (158.33 s per MP, the slowest x2 gate call on record), fits 5.4 MP: 2 x 855 = 1710 s.
+    x2 = [96.4, 100.0, 102.3, 105.0, 110.0, 117.5, 120.0, 125.0, 129.0, 135.0, 140.0, 152.0, 400.0]
+    entry, failures = probe.cap_timeout_check({"swinir-x2": {SMALL: x2, LARGE: [265.9]}}, {2: 5_400_000}, 1740)
+    assert failures == [] and entry["passed"] is True
+    [model] = entry["models"]
+    assert (model["scale"], model["worstSize"], model["sPerMp"], model["needS"]) == (2, "800x1200", 158.33, 1710.0)
+
+
+def test_x2_cap_check_fails_a_consistently_slow_x2():
+    # Every x2 call at 170 s: 177.08 s per MP x 5.4 MP x 2 = 1912 s, above 1740 s.
+    entry, failures = probe.cap_timeout_check({"swinir-x2": {SMALL: [170.0] * 13, LARGE: [300.0]}, "swinir-x4": {SMALL: [130.0] * 13}},
+                                              {2: 5_400_000, 4: 4_900_000}, 1740)
+    assert entry["passed"] is False and len(failures) == 1
+    assert failures[0].startswith("swinir-x2: UPSCALE_MAX_PIXELS=5400000 needs 2 x 956 s = 1912 s at the slowest measured p95 of 177.08 s per MP "
+                                  "(800x1200, 13 calls), above the 1740 s timeout; lower UPSCALE_MAX_PIXELS to at most 4913")
+    assert failures[0].endswith("and raise UPSCALE_X2_TIME_RATIO to match (infra/lib/shape.sh)")
+    # The x4 model at 135.42 s per MP fits its own cap; each cap is judged on its own model.
+    assert [m["passed"] for m in entry["models"]] == [False, True]
+
+
+def test_x2_cap_check_on_the_slowest_x2_gate_call_and_the_old_cap():
+    # 00005-fec (2026-10-30): x2 152 s at 800x1200 in one call. 158.33 s per MP fits 5.4 MP but not the old 8 MP cap
+    # (2 x 1267 s = 2533 s > 1740 s).
+    timings = {"swinir-x2": {SMALL: [152.0], LARGE: [241.0]}}
+    assert probe.cap_timeout_check(timings, {2: 5_400_000}, 1740)[1] == []
+    [failure] = probe.cap_timeout_check(timings, {2: 8_000_000}, 1740)[1]
+    assert failure.startswith("swinir-x2: UPSCALE_MAX_PIXELS=8000000 needs 2 x 1267 s = 2533 s")
+    assert probe.cap_timeout_check({"swinir-x4": {SMALL: [130.0]}}, {2: 5_400_000}, 1740)[1] == [
+        "x2 timeout check: no x2 call was timed, so UPSCALE_MAX_PIXELS=5400000 is not shown to fit the 1740 s timeout"]
+
+
+def test_upscale_probe_checks_both_caps_the_gate_passes(fake_upscale, capsys):
+    fake = fake_upscale(instances=("up01", "up02"), work_ms=lambda path, count: 1200 if "x4" in path else 600)
+    code, reports = run_upscale_probe(fake.url, "--model=swinir-x2,swinir-x4", "--sizes", "64x96", "--rounds", "1", "--timeout=60",
+                                      "--x2-max-pixels=100000", "--x4-max-pixels=100000", *BUCKET)
+    report = reports[0][1]
+    assert code == 0, report["failures"]
+    assert report["capTimeout"]["caps"] == {"x2": 100000, "x4": 100000}
+    assert [(m["model"], m["sPerMp"], m["needS"]) for m in report["capTimeout"]["models"]] == [("swinir-x2", 97.66, 19.5), ("swinir-x4", 195.31, 39.1)]
+    out = capsys.readouterr().out
+    assert "cap timeout swinir-x2: 2 x 97.66 s per MP (64x96 p95) x 0.1 MP = 19.5 s (timeout 60 s): passed" in out
+
+
 def test_upscale_probe_reads_the_x4_cap_the_gate_passes():
-    args = probe.parse_upscale_args(["--probe-upscale", "https://svc-abc.a.run.app", "--model=swinir-x2,swinir-x4", "--x4-max-pixels=4900000"])
-    assert args.x4_max_pixels == 4_900_000
-    assert probe.parse_upscale_args(["--probe-upscale", "https://svc-abc.a.run.app"]).x4_max_pixels == 0
+    args = probe.parse_upscale_args(["--probe-upscale", "https://svc-abc.a.run.app", "--model=swinir-x2,swinir-x4", "--x2-max-pixels=5400000",
+                                     "--x4-max-pixels=4900000"])
+    assert (args.x2_max_pixels, args.x4_max_pixels) == (5_400_000, 4_900_000)
+    default = probe.parse_upscale_args(["--probe-upscale", "https://svc-abc.a.run.app"])
+    assert (default.x2_max_pixels, default.x4_max_pixels) == (0, 0)
 
 
 # Spec 18 gate (plan 7.2, 2026-10-30 finding 1): outputs of the same input from different instances may differ by float
