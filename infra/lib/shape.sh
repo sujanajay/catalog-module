@@ -336,6 +336,8 @@ shape_check() {
   # CPU quota in asia-south1 (the GPU service counts in asia-southeast1), with catalog-upscale when it is deployed.
   # A measure rung's candidate runs beside the live catalog-upscale revision (each revision has its own max
   # instances), so both count.
+  # Each *_MAX_INSTANCES here is both the revision max and the service-level max: the gate sets the service's --max
+  # to the same value (gate_service_max, infra/lib/gate.sh), so this count is what the services can really reach.
   UPSCALE_VCPU_TOTAL=0
   if upscale_deployed; then UPSCALE_VCPU_TOTAL=$((UPSCALE_MAX_INSTANCES * UPSCALE_CPU_VCPU)); fi
   if [ "$UPSCALE_MEASURE" = 1 ]; then UPSCALE_VCPU_TOTAL=$((UPSCALE_VCPU_TOTAL + UPSCALE_LIVE_VCPU)); fi

@@ -529,6 +529,70 @@ test('G1 infra: the jobs step prepares catalog-invariants; catalog-web gets run.
     'through the idempotent project_binding helper, not a resource-level binding');
 });
 
+// 2026-10-30: every catalog service carried a service-level max (run.googleapis.com/maxScale) left from its first
+// deploy, below the revision max the shape sets (catalog-upscale 4 vs 16), and the lower one wins. The gate now sets
+// the service-level max to the revision max, with gcloud run services update --max (no new revision, no traffic move).
+test('registry: every service sets SVC_MAX to exactly its revision --max-instances', () => {
+  const r = run('max-registry', `${vars}\n${measured}
+for s in "\${SERVICES[@]}"; do "service_\${s//-/_}"; m=""; for a in "\${SVC_ARGS[@]}"; do [[ $a == --max-instances=* ]] && m=\${a#--max-instances=}; done; echo "$s|$SVC_MAX|$m"; done`);
+  assert.equal(r.status, 0, r.err);
+  const rows = lines(r.out.trim()).map((l) => l.split('|'));
+  assert.deepEqual(rows.map((x) => x[0]), ['catalog-matting', 'catalog-upscale', 'catalog-matting-gpu', 'catalog-web', 'catalog-worker']);
+  for (const [name, svcMax, revMax] of rows) {
+    assert.match(svcMax, /^[1-9]\d*$/, `${name} has a service-level max`);
+    assert.equal(svcMax, revMax, `${name}: the service-level max equals the revision max`);
+  }
+  assert.deepEqual(rows.map((x) => x[1]), ['20', '16', '3', '3', '4'], 'from MATTING_CPU_, UPSCALE_, GPU_, WEB_ and WORKER_MAX_INSTANCES');
+});
+
+const maxUpdate = (n) => `run services update test-svc --region=asia-south1 --max=${n} --quiet`;
+
+test('after the traffic shift the service-level max is raised to the revision max, with --max only', () => {
+  const r = run('max-shift', 'deploy_service test-svc', {TEST_MAX: '16', SERVICE_MAX: '4'});
+  assert.equal(r.status, 0, r.err);
+  const shift = r.calls.indexOf(`run services update-traffic test-svc --region=asia-south1 --to-revisions=${NEW}=100 --quiet`);
+  const update = r.calls.indexOf(maxUpdate(16));
+  assert.ok(update > shift && shift >= 0, r.calls.join('\n'));
+  assert.ok(lines(r.out).includes('==> test-svc: service max instances 4 -> 16 (no new revision, traffic unchanged)'), r.out);
+  const updates = r.calls.filter((c) => c.startsWith('run services update '));
+  assert.equal(updates.length, 1);
+  assert.ok(!/--max-instances|--image|--tag|--no-traffic|--to-/.test(updates[0]), 'nothing that makes a revision or moves traffic');
+});
+
+test('the service-level max is not touched when it already matches, and is set when unset', () => {
+  let r = run('max-same', 'deploy_service test-svc', {TEST_MAX: '16', SERVICE_MAX: '16'});
+  assert.equal(r.status, 0, r.err);
+  assert.ok(!r.calls.some((c) => c.startsWith('run services update ')), r.calls.join('\n'));
+  r = run('max-unset', 'deploy_service test-svc', {TEST_MAX: '3'});
+  assert.equal(r.status, 0, r.err);
+  assert.ok(r.calls.includes(maxUpdate(3)));
+  assert.ok(lines(r.out).includes('==> test-svc: service max instances unset -> 3 (no new revision, traffic unchanged)'), r.out);
+});
+
+test('SKIP still brings the service-level max to the revision max, without a deploy or a traffic change', () => {
+  const r = run('max-skip', 'deploy_service test-svc', {TEST_MAX: '24', SERVICE_MAX: '10', LIVE_MATCH: '1'});
+  assert.equal(r.status, 0, r.err);
+  assert.ok(r.out.includes('SKIP (live revision'), r.out);
+  assert.ok(r.calls.includes(maxUpdate(24)));
+  assert.ok(!r.calls.some((c) => c.startsWith('run deploy') || c.includes('update-traffic')));
+});
+
+test('no traffic shift, no service-level change: a failed probe and a no-shift candidate leave the cap alone', () => {
+  let r = run('max-fail', 'deploy_service test-svc', {TEST_MAX: '16', SERVICE_MAX: '4', PROBE: 'exit 3'});
+  assert.equal(r.status, 1);
+  assert.ok(!r.calls.some((c) => c.startsWith('run services update ')));
+  r = run('max-noshift', 'deploy_service test-svc', {TEST_MAX: '16', SERVICE_MAX: '4', SHIFT: '0'});
+  assert.equal(r.status, 0, r.err);
+  assert.ok(!r.calls.some((c) => c.startsWith('run services update ')), 'a measure rung or preview candidate never changes the live cap');
+});
+
+test('a failed service-level update fails the gate with the command to run by hand', () => {
+  const r = run('max-error', 'deploy_service test-svc', {TEST_MAX: '16', SERVICE_MAX: '4', MAX_ERROR: '1'});
+  assert.equal(r.status, 1);
+  assert.ok(r.err.includes('ERROR: test-svc: could not set the service max instances to 16 (now 4)'), r.err);
+  assert.ok(lines(r.err).includes('Set it by hand: gcloud run services update test-svc --region=asia-south1 --max=16'), r.err);
+});
+
 let failed = 0;
 try {
   for (const [name, fn] of tests) {
