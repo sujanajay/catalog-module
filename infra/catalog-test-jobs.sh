@@ -9,6 +9,8 @@
 # MATTING_URL, MATTING_GPU_URL (empty: no GPU) and WORKER_URL from the environment (the tag URLs infra/deploy.sh's
 # gate passes); only when run by hand without them does it copy the matting URLs from the deployed catalog-worker.
 # The smoke job's timeout is 1500 s (spec 17 3.2.4), inside the worker gate's 1800 s probe timeout.
+# Spec 18: the smoke job also gets the worker's UPSCALE_* env, so its enlargement case runs (never skipped while the
+# upscaler is on).
 set -euo pipefail
 export CLOUDSDK_CORE_PROJECT=image-links-agent
 cd "$(dirname "$0")/.."
@@ -50,6 +52,15 @@ const password=source.find(e=>e.name==='DB_PASSWORD');
 assert.equal(password?.valueFrom?.secretKeyRef?.name,'catalog-db-password');
 assert(password.valueFrom.secretKeyRef.key,'Missing password secret version reference');
 env.push(password,{name:'DB_POOL_MAX',value:'1'}); // job pool: docs/solutions/db-connection-budget.md
+// Spec 18 (plan 7.2, worker gate 7b): the smoke's enlargement case runs only with the upscaler on, so the smoke job gets
+// every UPSCALE_* setting of the worker (deploy.sh sets them from infra/lib/shape.sh and the catalog-upscale gate; at
+// the worker gate the describe above shows the candidate's template). Plain values only, never a secret reference.
+const upscale=source.filter(e=>e.name.startsWith('UPSCALE_') && typeof e.value==='string' && !e.valueFrom);
+const upscaleModel=upscale.find(e=>e.name==='UPSCALE_MODEL')?.value;
+if(upscaleModel && upscaleModel!=='off') {
+  const url=upscale.find(e=>e.name==='UPSCALE_URL')?.value;
+  assert.match(url??'',/^https:\/\/[a-z0-9.-]+\.run\.app$/,'The worker has UPSCALE_MODEL but no Cloud Run UPSCALE_URL');
+}
 const bucket='image-links-agent-assets';
 const input='catalog-test/render-05-1792340617303-555901/inputs';
 const volume=(name,prefix,readOnly)=>({name,csi:{driver:'gcsfuse.run.googleapis.com',readOnly,volumeAttributes:{bucketName:bucket,mountOptions:`only-dir=${prefix},uid=1000,gid=1000`}}});
@@ -58,7 +69,7 @@ for(const kind of kinds) {
   const image=`asia-south1-docker.pkg.dev/image-links-agent/apps/${kind==='real'?'catalog-real':'worker'}:${tag}`;
   const command=test?['/bin/sh']:['node'];
   const args=kind==='invariants'?['dist/catalog-invariants.js']:test?['-ec',`mkdir -p /tmp/catalog-data; tar -xf /catalog-input/anta.tar -C /tmp/catalog-data; tar -xf /catalog-input/french-connection.tar -C /tmp/catalog-data; ${kind==='real'?"exec pnpm test:real -t 'anta:'":"exec node dist/catalog-smoke.js"}`]:['dist/catalog-smoke.js','--cleanup-batches'];
-  const container={image,command,args,resources:{limits:{cpu:'2',memory:'4Gi'}},env:[...env]};
+  const container={image,command,args,resources:{limits:{cpu:'2',memory:'4Gi'}},env:[...env,...(kind==='smoke'?upscale:[])]};
   const timeoutSeconds={real:'10800',invariants:'600',smoke:'1500'}[kind]??'3600';
   const task={serviceAccountName:'catalog-worker@image-links-agent.iam.gserviceaccount.com',maxRetries:0,timeoutSeconds,containers:[container]};
   if(test) {

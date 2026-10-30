@@ -301,17 +301,47 @@ def probe_main(argv, token_for=None, report_writer=None, now=None):
 # for each model (--model, a comma list; spec 18 quality: swinir-x2 and swinir-x4) with a synthetic JPEG of each size:
 # one warm call (loads the model, not measured), then `concurrency` calls at once for `rounds` rounds. Reads /health
 # before (vCPU, threads) and after each warm call (the model's tile). Each answer must be a JPEG of exactly the model's
-# scale (2x or 4x) of the size, and every answer for one model and size must have the same bytes (the upscaler is
-# deterministic; the warm call and one round already make a rerun), so the sha256 column also shows whether a thread
-# count changes the output. Prints the table
-# `model | size | vCPU | threads | tile | conc | p50 s | p95 s | max s | non-200 | output sha256`, writes the JSON report to
+# scale (2x or 4x) of the size. Every answer records its sha256 and the instance that made it (the X-Instance-Id
+# header). Answers for one model and size from ONE instance must have the same bytes (the upscaler is deterministic at
+# a fixed thread count; the warm call and one round already make a rerun). Answers from DIFFERENT instances may differ
+# by float rounding on different CPU platforms (measured on 2026-10-30, .runs/2026-10-30-18-post-deploy-fixes.md), so
+# those are compared pixel by pixel and fail only when the difference could be visible (see VISUAL_MAX_ABS).
+# Spec 18 gate (plan 7.2), when the gate asks for them:
+#   --cold-start-max s      first, before anything warms the candidate: one long /upscale call holds an instance
+#                           (concurrency 1), then GET /health is timed until 200. It counts only when /health came from
+#                           an instance that started while the probe waited (its uptimeS is below the wait), up to 3
+#                           tries; fails when not measured or above s (UPSCALE_COLD_START_S in infra/lib/shape.sh).
+#   --determinism-calls n   per model, n calls of the same 800x1200 image at once (429 retried), each with its sha256
+#                           and instance id; repeated up to 3 times until at least 2 instances answered. Fails when
+#                           fewer than 2 instances answered, on any non-200, on two outputs from one instance, or on
+#                           outputs from two instances that differ visibly.
+# Prints the table `model | size | vCPU | threads | tile | conc | p50 s | p95 s | max s | non-200 | output sha256` and
+# the determinism and cold-start lines, writes the JSON report to
 # gs://image-links-agent-assets/catalog-test/probe/<run>/upscale.json when --bucket names that bucket, and exits
-# non-zero on any non-200, wrong size, differing output or unreadable /health.
+# non-zero on any failure above or an unreadable /health.
 # The served upscalers and their fixed scale (services/matting/app.py UPSCALE_SCALES).
 UPSCALE_PROBE_MODELS = {"swinir-x2": 2, "swinir-x4": 4}
 UPSCALE_PROBE_SIZES = "800x1200,1600x1600"
 # One 6400x6400 JPEG (1600x1600 at 4x) at quality 95 is a few tens of MB; the check limit leaves room.
 UPSCALE_RESPONSE_LIMIT = 160_000_000
+# The visual threshold for outputs of the same input from two instances (8-bit RGB after JPEG decode). Two outputs are
+# visually identical when no channel of any pixel differs by more than VISUAL_MAX_ABS levels and the PSNR is at least
+# VISUAL_MIN_PSNR_DB. Measured on live catalog-upscale on 2026-10-30 (800x1200, 12 calls per model, 4 instances, one
+# of which gives other bytes): x2 max 1/255 in 40 of 3.8 M pixels, PSNR 98 dB; x4 max 3/255 in 387 of 15.4 M pixels,
+# PSNR 93 dB, with no sign bias (float rounding on another CPU platform). The limits sit well above that and well below
+# any real defect: 8/255 (3%) on isolated pixels is invisible on a photo, while a seam, a wrong tile or a dropped
+# overlap is tens of levels; 60 dB is 20 dB above the ~40 dB where a difference starts to show, and a broad shift (a
+# colour cast of even 3 levels everywhere is about 39 dB) fails it although its max is small.
+VISUAL_MAX_ABS = 8
+VISUAL_MIN_PSNR_DB = 60.0
+DETERMINISM_SIZE = (800, 1200)
+DETERMINISM_ATTEMPTS = 3
+# A 429 (no instance free within Cloud Run's queue time) is retried after this many seconds, at most this many times.
+BUSY_RETRY_S = 10
+BUSY_RETRIES = 30
+COLD_START_ATTEMPTS = 3
+# How long the occupying call runs before /health is sent, so it holds its instance first.
+COLD_START_HOLD_S = 5
 
 
 def parse_sizes(text):
@@ -342,11 +372,22 @@ def upscale_image(width, height):
     return encoded.getvalue()
 
 
+class UpscaleAnswer:
+    """One /upscale call. status: 200, the HTTP error, 0 for a transport failure or timeout, -1 for an answer that is
+    not a JPEG of exactly `scale` times `size`. instance: the X-Instance-Id header (None from a revision before it)."""
+
+    def __init__(self, status, seconds, digest=None, instance=None, body=None):
+        self.status, self.seconds, self.digest, self.instance, self.body = status, seconds, digest, instance, body
+
+    def __iter__(self):
+        # (status, seconds, digest), as callers before the instance id unpacked it.
+        return iter((self.status, self.seconds, self.digest))
+
+
 def timed_upscale(url, token, model, data, size, timeout, scale=2):
-    """One /upscale call: (status, client seconds, sha256 of the answer or None). A transport failure or timeout counts
-    as status 0; an answer that is not a JPEG of exactly `scale` times `size` counts as status -1."""
+    """One /upscale call as an UpscaleAnswer."""
     started = time.perf_counter()
-    digest = None
+    digest = instance = kept = None
     try:
         headers, body = request(f"{url}/upscale?model={urllib.parse.quote(model)}&scale={scale}", token, data, "image/jpeg", timeout, UPSCALE_RESPONSE_LIMIT)
         try:
@@ -354,12 +395,90 @@ def timed_upscale(url, token, model, data, size, timeout, scale=2):
                 ok = headers.get_content_type() == "image/jpeg" and answer.format == "JPEG" and answer.size == (size[0] * scale, size[1] * scale)
         except Exception:  # noqa: BLE001 - an unreadable answer is a failed call; no detail is printed
             ok = False
-        status, digest = (200, hashlib.sha256(body).hexdigest()) if ok else (-1, None)
+        instance = headers.get("X-Instance-Id")
+        status, digest, kept = (200, hashlib.sha256(body).hexdigest(), body) if ok else (-1, None, None)
     except urllib.error.HTTPError as error:
         status = error.code
     except Exception:  # noqa: BLE001 - any failure is a non-200 for the probe; no detail is printed
         status = 0
-    return status, time.perf_counter() - started, digest
+    return UpscaleAnswer(status, time.perf_counter() - started, digest, instance, kept)
+
+
+def upscale_until_served(url, token, model, data, size, timeout, scale, sleep=time.sleep):
+    """timed_upscale, retrying a 429 (every instance busy) BUSY_RETRIES times, BUSY_RETRY_S apart."""
+    for _ in range(BUSY_RETRIES):
+        answer = timed_upscale(url, token, model, data, size, timeout, scale)
+        if answer.status != 429:
+            return answer
+        sleep(BUSY_RETRY_S)
+    return timed_upscale(url, token, model, data, size, timeout, scale)
+
+
+def pixel_difference(first, second):
+    """Two decoded JPEGs compared per 8-bit channel: the largest and mean absolute difference, the share of pixels with
+    any difference, and the PSNR (None when identical)."""
+    import numpy as np  # the service image has numpy; imported here so the matte probe does not need it
+
+    with Image.open(io.BytesIO(first)) as a, Image.open(io.BytesIO(second)) as b:
+        pa, pb = np.asarray(a.convert("RGB")), np.asarray(b.convert("RGB"))
+    if pa.shape != pb.shape:
+        return {"sameSize": False, "maxAbs": 255, "meanAbs": None, "sharePixels": None, "psnrDb": 0.0}
+    # In stripes of rows, so a 6400x6400 pair fits the probe job's 512 MiB.
+    largest, total, squares, differing = 0, 0, 0, 0
+    for top in range(0, pa.shape[0], 256):
+        diff = np.abs(pa[top:top + 256].astype(np.int16) - pb[top:top + 256].astype(np.int16))
+        largest = max(largest, int(diff.max()))
+        total += int(diff.sum())
+        squares += int((diff.astype(np.int64) ** 2).sum())
+        differing += int((diff.max(axis=2) > 0).sum())
+    values, pixels = pa.size, pa.shape[0] * pa.shape[1]
+    mse = squares / values
+    return {"sameSize": True, "maxAbs": largest, "meanAbs": round(total / values, 5), "sharePixels": round(differing / pixels, 6),
+            "psnrDb": None if mse == 0 else round(10 * math.log10(255 ** 2 / mse), 2)}
+
+
+def visually_identical(difference):
+    return difference["maxAbs"] <= VISUAL_MAX_ABS and (difference["psnrDb"] is None or difference["psnrDb"] >= VISUAL_MIN_PSNR_DB)
+
+
+def keep_bodies(answers, bodies):
+    """Moves each answer's bytes into `bodies` (one copy per sha256), so a probe keeps one body per distinct output."""
+    for answer in answers:
+        if answer.body is not None:
+            bodies.setdefault(answer.digest, answer.body)
+            answer.body = None
+    return answers
+
+
+def judge_outputs(label, answers, bodies):
+    """Compares the successful answers for one input (`bodies`: sha256 -> bytes). Returns (summary, failures): one
+    instance with two outputs fails (a race inside one process); outputs only from different instances are compared
+    pixel by pixel and fail when not visually identical."""
+    outputs = {}
+    for answer in answers:
+        if answer.status == 200 and answer.digest:
+            outputs.setdefault(answer.digest, {"instances": set()})["instances"].add(answer.instance)
+    by_instance = {}
+    for digest, entry in outputs.items():
+        for instance in entry["instances"]:
+            if instance is not None:
+                by_instance.setdefault(instance, set()).add(digest)
+    failures = [f"{label}: instance {instance} gave {len(digests)} different outputs for the same input"
+                for instance, digests in sorted(by_instance.items()) if len(digests) > 1]
+    pairs = []
+    digests = sorted(outputs)
+    for i, first in enumerate(digests):
+        for second in digests[i + 1:]:
+            difference = pixel_difference(bodies[first], bodies[second])
+            pairs.append({"a": first, "b": second, **difference, "visuallyIdentical": visually_identical(difference)})
+    worst = max(pairs, key=lambda p: (p["maxAbs"], -(p["psnrDb"] or 1000.0)), default=None)
+    if worst and not worst["visuallyIdentical"]:
+        failures.append(f"{label}: outputs from different instances differ visibly (max {worst['maxAbs']}/255, PSNR {worst['psnrDb']} dB; "
+                        f"the limit is {VISUAL_MAX_ABS}/255 and {VISUAL_MIN_PSNR_DB:g} dB)")
+    summary = {"distinctOutputs": len(outputs), "instances": len({a.instance for a in answers if a.status == 200 and a.instance}),
+               "outputs": {digest: sorted(i or "unknown" for i in entry["instances"]) for digest, entry in outputs.items()},
+               "pairs": pairs, "worst": worst and {k: worst[k] for k in ("maxAbs", "meanAbs", "sharePixels", "psnrDb")}}
+    return summary, failures
 
 
 def seconds(value):
@@ -383,19 +502,25 @@ class RefreshingToken:
         return self.value
 
 
+def current_token(source):
+    return source() if callable(source) else source
+
+
 class UpscaleProbe:
     def __init__(self, url, token, model, sizes, timeout):
         # `token`: None (a local URL), a token, or a callable that returns the current one (RefreshingToken).
         self.url, self.token_source, self.model, self.timeout = url, token, model, timeout
         self.scale = UPSCALE_PROBE_MODELS.get(model, 2)
-        self.sizes = {size: {"data": upscale_image(*size), "s": [], "statuses": [], "sha256": set()} for size in sizes}
+        self.sizes = {size: {"data": upscale_image(*size), "s": [], "answers": []} for size in sizes}
         self.service = {}
         self.steps = []
         self.problems = []
+        self.determinism = None
+        self.bodies = {}
 
     @property
     def token(self):
-        return self.token_source() if callable(self.token_source) else self.token_source
+        return current_token(self.token_source)
 
     def health(self, step):
         try:
@@ -420,10 +545,9 @@ class UpscaleProbe:
         token = self.token
         with ThreadPoolExecutor(max_workers=count) as pool:
             results = list(pool.map(lambda _: timed_upscale(self.url, token, self.model, entry["data"], size, self.timeout, self.scale), range(count)))
-        entry["statuses"].extend(status for status, _, _ in results)
-        entry["sha256"].update(digest for _, _, digest in results if digest)
+        entry["answers"].extend(keep_bodies(results, self.bodies))
         if measured:
-            entry["s"].extend(s for status, s, _ in results if status == 200)
+            entry["s"].extend(a.seconds for a in results if a.status == 200)
 
     def run(self, concurrency, rounds):
         self.health("baseline")
@@ -433,21 +557,87 @@ class UpscaleProbe:
             for _ in range(rounds):
                 self.calls(size, concurrency, measured=True)
 
+    def determinism_round(self, count, size=DETERMINISM_SIZE, sleep=time.sleep):
+        """Spec 18 gate (plan 7.2): `count` calls of one image at once, until at least 2 instances answered (at most
+        DETERMINISM_ATTEMPTS rounds). Every call keeps its sha256 and instance id."""
+        data, label = upscale_image(*size), f"{self.model} {size[0]}x{size[1]} determinism"
+        answers, calls = [], []
+        for attempt in range(1, DETERMINISM_ATTEMPTS + 1):
+            token = self.token
+            with ThreadPoolExecutor(max_workers=count) as pool:
+                results = list(pool.map(lambda _: upscale_until_served(self.url, token, self.model, data, size, self.timeout, self.scale, sleep), range(count)))
+            answers += keep_bodies(results, self.bodies)
+            calls += [{"attempt": attempt, "status": a.status, "s": seconds(a.seconds), "instance": a.instance, "sha256": a.digest} for a in results]
+            if len({a.instance for a in answers if a.status == 200 and a.instance}) >= 2:
+                break
+        summary, failures = judge_outputs(label, answers, self.bodies)
+        non200 = sum(1 for a in answers if a.status != 200)
+        if non200:
+            failures.insert(0, f"{label}: {non200} non-200")
+        if summary["instances"] < 2:
+            failures.append(f"{label}: {summary['instances']} instance(s) answered in {DETERMINISM_ATTEMPTS} rounds of {count} calls; at least 2 are needed")
+        self.determinism = {"model": self.model, "size": f"{size[0]}x{size[1]}", "callsPerRound": count, "rounds": attempt, "calls": calls,
+                            **summary, "passed": not failures, "failures": failures}
+        return self.determinism
+
     def rows(self, concurrency):
         out = []
         for (width, height), entry in self.sizes.items():
-            digests = sorted(entry["sha256"])
+            summary, failures = judge_outputs(f"{self.model} {width}x{height}", entry["answers"], self.bodies)
+            digests = sorted(summary["outputs"])
+            statuses = [a.status for a in entry["answers"]]
             out.append({"model": self.model, "scale": self.scale, "size": f"{width}x{height}", "vcpu": self.service.get("vcpu"), "threads": self.service.get("threads"),
                         "tile": self.service.get("tile"), "concurrency": concurrency, "p50S": seconds(percentile(entry["s"], 0.5)),
                         "p95S": seconds(percentile(entry["s"], 0.95)), "maxS": seconds(max(entry["s"], default=None)),
-                        "non200": sum(1 for status in entry["statuses"] if status != 200), "calls": len(entry["statuses"]),
-                        "outputSha256": digests[0] if len(digests) == 1 else None, "distinctOutputs": len(digests)})
+                        "non200": sum(1 for status in statuses if status != 200), "calls": len(statuses),
+                        "outputSha256": digests[0] if len(digests) == 1 else None, "distinctOutputs": len(digests),
+                        "instances": summary["instances"], "outputs": summary["outputs"], "difference": summary["worst"], "outputFailures": failures,
+                        "callLog": [{"status": a.status, "s": seconds(a.seconds), "instance": a.instance, "sha256": a.digest} for a in entry["answers"]]})
         return out
 
     def failures(self, rows):
         return ([f"{r['model']} {r['size']}: {r['non200']} non-200" for r in rows if r["non200"]]
-                + [f"{r['model']} {r['size']}: {r['distinctOutputs']} different outputs for the same input" for r in rows if r["distinctOutputs"] > 1]
+                + [failure for r in rows for failure in r["outputFailures"]]
+                + (self.determinism["failures"] if self.determinism else [])
                 + [f"{self.model}: {problem}" for problem in dict.fromkeys(self.problems)])
+
+
+def measure_cold_start(url, token_source, model, size, timeout, limit_s, hold_s=COLD_START_HOLD_S, sleep=time.sleep):
+    """Spec 18 gate (plan 7.2): the time from GET /health to its 200 on a fresh instance. A long /upscale call first
+    holds an instance (concurrency 1), so /health needs another one; the wait counts only when that instance started
+    while the probe waited (its uptimeS is below the wait). Up to COLD_START_ATTEMPTS tries, each holding one more
+    instance (a warm idle instance takes the next hold). Returns the report entry and the failures."""
+    scale, data = UPSCALE_PROBE_MODELS.get(model, 2), upscale_image(*size)
+    holds, attempts, measured = [], [], None
+    with ThreadPoolExecutor(max_workers=COLD_START_ATTEMPTS) as pool:
+        for attempt in range(1, COLD_START_ATTEMPTS + 1):
+            token = current_token(token_source)
+            holds.append(pool.submit(timed_upscale, url, token, model, data, size, timeout, scale))
+            sleep(hold_s)
+            started = time.perf_counter()
+            try:
+                _, body = request(url + "/health", token, timeout=max(TIMEOUT, 2 * limit_s))
+                health = json.loads(body)
+                waited = time.perf_counter() - started
+                uptime = health.get("uptimeS")
+                fresh = isinstance(uptime, (int, float)) and uptime <= waited
+                attempts.append({"attempt": attempt, "waitS": seconds(waited), "instance": health.get("instanceId"), "uptimeS": uptime, "fresh": fresh})
+            except Exception:  # noqa: BLE001 - recorded as an unmeasured try; no detail is printed
+                attempts.append({"attempt": attempt, "waitS": seconds(time.perf_counter() - started), "instance": None, "uptimeS": None, "fresh": False, "error": True})
+                fresh, waited = False, None
+            if fresh:
+                measured = waited
+                break
+        held = [h.result() for h in holds]
+    entry = {"model": model, "size": f"{size[0]}x{size[1]}", "coldStartS": seconds(measured), "limitS": limit_s, "attempts": attempts,
+             "holds": [{"status": a.status, "s": seconds(a.seconds), "instance": a.instance} for a in held]}
+    failures = []
+    if measured is None:
+        failures.append(f"cold start not measured: no /health in {COLD_START_ATTEMPTS} tries came from a fresh instance")
+    elif measured > limit_s:
+        failures.append(f"cold start {measured:.1f} s is above UPSCALE_COLD_START_S={limit_s} (infra/lib/shape.sh); raise it to the measured value")
+    entry["passed"] = not failures
+    return entry, failures
 
 
 def x4_ratio_failures(rows, ratio):
@@ -479,6 +669,14 @@ def upscale_markdown(rows):
     return "\n".join(lines)
 
 
+def determinism_line(entry):
+    worst = entry["worst"]
+    difference = "byte-identical" if not worst else (f"max {worst['maxAbs']}/255, mean {worst['meanAbs']}, {worst['sharePixels'] * 100:.3f}% of pixels, "
+                                                       f"PSNR {worst['psnrDb']} dB")
+    return (f"determinism {entry['model']} {entry['size']}: {len(entry['calls'])} calls, {entry['instances']} instances, "
+            f"{entry['distinctOutputs']} distinct outputs ({difference}): {'passed' if entry['passed'] else 'FAILED'}")
+
+
 def parse_upscale_args(argv):
     parser = argparse.ArgumentParser(prog="cloudrun_check.py --probe-upscale")
     parser.add_argument("--probe-upscale", dest="url", required=True)
@@ -488,6 +686,8 @@ def parse_upscale_args(argv):
     parser.add_argument("--rounds", type=int, default=3)
     parser.add_argument("--timeout", type=int, default=900)
     parser.add_argument("--x4-ratio", dest="x4_ratio", type=float, default=0.0)
+    parser.add_argument("--determinism-calls", dest="determinism_calls", type=int, default=0)
+    parser.add_argument("--cold-start-max", dest="cold_start_max", type=int, default=0)
     parser.add_argument("--bucket", default="")
     parser.add_argument("--run", default="")
     args = parser.parse_args(argv)
@@ -499,24 +699,32 @@ def parse_upscale_args(argv):
     require(1 <= args.concurrency <= 8 and 1 <= args.rounds <= 50, "--concurrency must be 1 to 8 and --rounds 1 to 50")
     require(30 <= args.timeout <= 3600, "--timeout must be 30 to 3600 seconds")
     require(args.x4_ratio == 0 or args.x4_ratio >= 1, "--x4-ratio must be 0 (no check) or at least 1")
+    require(args.determinism_calls == 0 or 2 <= args.determinism_calls <= 16, "--determinism-calls must be 0 (none) or 2 to 16")
+    require(0 <= args.cold_start_max <= 3600, "--cold-start-max must be 0 (none) to 3600 seconds")
     require(args.bucket in ("", PROBE_BUCKET), f"--bucket may only name {PROBE_BUCKET}")
     require(re.fullmatch(r"https://[a-z0-9.-]+\.run\.app|http://(localhost|127\.0\.0\.1):[0-9]+", args.url) is not None, "probe URL must be a run.app or local URL")
     require(not args.run or re.fullmatch(r"[A-Za-z0-9._-]{1,80}", args.run) is not None, "--run must be a short name")
     return args
 
 
-def probe_upscale_main(argv, token_for=None, report_writer=None, now=None):
+def probe_upscale_main(argv, token_for=None, report_writer=None, now=None, sleep=time.sleep):
     """Runs the upscale probe and returns the exit code. Tokens never reach stdout."""
     args = parse_upscale_args(argv)
     audience = audience_for(args.url)
     token = None if args.url.startswith("http://") else RefreshingToken(lambda: (token_for or identity_token)(audience))
     started = now or datetime.datetime.now(datetime.timezone.utc)
     run = args.run or os.environ.get("CLOUD_RUN_EXECUTION") or started.strftime("%Y%m%dT%H%M%SZ")
-    rows, failures, steps, service = [], [], [], {}
+    rows, failures, steps, service, determinism, cold_start = [], [], [], {}, [], None
+    # First, before any call warms the candidate (spec 18 gate, plan 7.2).
+    if args.cold_start_max:
+        cold_start, cold_failures = measure_cold_start(args.url, token, args.models[0], DETERMINISM_SIZE, args.timeout, args.cold_start_max, sleep=sleep)
+        failures += cold_failures
     # One model after the other (the service runs one tile at a time; a concurrency 1 shape must never see two models).
     for model in args.models:
         probe = UpscaleProbe(args.url, token, model, args.sizes, args.timeout)
         probe.run(args.concurrency, args.rounds)
+        if args.determinism_calls:
+            determinism.append(probe.determinism_round(args.determinism_calls, sleep=sleep))
         model_rows = probe.rows(args.concurrency)
         rows += model_rows
         failures += probe.failures(model_rows)
@@ -525,8 +733,15 @@ def probe_upscale_main(argv, token_for=None, report_writer=None, now=None):
     failures += x4_ratio_failures(rows, args.x4_ratio)
     report = {"run": run, "url": args.url, "startedAt": started.isoformat(), "models": args.models,
               "sizes": [f"{w}x{h}" for w, h in args.sizes], "concurrency": args.concurrency, "rounds": args.rounds,
-              "timeoutS": args.timeout, "service": service, "rows": rows, "steps": steps, "passed": not failures, "failures": failures}
+              "timeoutS": args.timeout, "service": service, "rows": rows, "steps": steps, "determinism": determinism,
+              "coldStart": cold_start, "visualLimit": {"maxAbs": VISUAL_MAX_ABS, "minPsnrDb": VISUAL_MIN_PSNR_DB},
+              "passed": not failures, "failures": failures}
     print(upscale_markdown(rows), flush=True)
+    for entry in determinism:
+        print(determinism_line(entry), flush=True)
+    if cold_start:
+        print(f"UPSCALE_COLD_START_S measured: {cold_start['coldStartS'] if cold_start['coldStartS'] is not None else 'not measured'} s "
+              f"(limit {cold_start['limitS']} s): {'passed' if cold_start['passed'] else 'FAILED'}", flush=True)
     location = (report_writer or write_report)(run, report, "upscale.json") if args.bucket else None
     print(json.dumps({"probe": run, "passed": not failures, "failures": failures, "report": location}), flush=True)
     return 1 if failures else 0

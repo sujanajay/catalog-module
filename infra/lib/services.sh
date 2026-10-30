@@ -31,6 +31,9 @@ SERVICES=(catalog-matting catalog-upscale catalog-matting-gpu catalog-web catalo
 # The Cloud Run request timeout of the matting services (CPU and GPU). Spec 18 H3: with UPSCALE_SERVICE=cpu or gpu the
 # worker's enlarge task calls /upscale there and learns it as UPSCALE_TIMEOUT_S (infra/deploy.sh).
 MATTING_TIMEOUT_S=300
+# Spec 18 gate (plan 7.2): the calls of the same 800x1200 image the catalog-upscale probe sends at once per model, each
+# with its sha256 and instance id; the gate needs at least 2 instances among them.
+UPSCALE_DETERMINISM_CALLS=12
 
 # The region of a service by name, also for deploy.sh --rollback (which sets nothing else).
 service_region() {
@@ -77,6 +80,9 @@ service_catalog_matting() {
 # The upscalers the catalog-upscale probes call, one after the other: deploy.sh's UPSCALE_MODEL (enlargements up to
 # 2x) and UPSCALE_MODEL_X4 (above 2x); off still probes the default of each, so the gate always times x4 on Cloud Run
 # and checks that it reruns byte-identically at the shape's threads (spec 18 quality).
+# The x4 seconds for an x2 p95: times UPSCALE_X4_TIME_RATIO (infra/lib/shape.sh), rounded up.
+upscale_x4_seconds() { awk -v p="$1" -v r="${UPSCALE_X4_TIME_RATIO:-1}" 'BEGIN{v = p * r; c = int(v); if (c < v) c++; print c}'; }
+
 probe_upscale_model() {
   local x2=${UPSCALE_MODEL:-swinir-x2} x4=${UPSCALE_MODEL_X4:-swinir-x4}
   [ "$x2" = off ] && x2=swinir-x2
@@ -106,7 +112,7 @@ service_catalog_upscale() {
     SVC_DEPLOY=1; SVC_SHIFT=0
     SVC_TAG=measure-${UPSCALE_CPU_VCPU}c-${UPSCALE_THREADS}t-${UPSCALE_CONCURRENCY}r
     SVC_PROBE_TIMEOUT=$((300 + 4 * UPSCALE_TIMEOUT_S))
-    SVC_PROBE=(bash infra/lib/services.sh probe-upscale "$SVC_PROBE_TIMEOUT" "$(probe_upscale_model)" "$first" 1 1 "$UPSCALE_TIMEOUT_S" 0)
+    SVC_PROBE=(bash infra/lib/services.sh probe-upscale "$SVC_PROBE_TIMEOUT" "$(probe_upscale_model)" "$first" 1 1 "$UPSCALE_TIMEOUT_S" 0 0 0)
     return 0
   fi
   if [ "${UPSCALE_SERVICE:-cpu}" != dedicated ]; then
@@ -121,14 +127,24 @@ service_catalog_upscale() {
   for size in ${UPSCALE_SIZES//,/ }; do
     p95=$(upscale_p95 "$size")
     p95=${p95:-$UPSCALE_TIMEOUT_S}
-    budget=$((budget + 4 * p95 + 4 * $(awk -v p="$p95" -v r="${UPSCALE_X4_TIME_RATIO:-1}" 'BEGIN{v = p * r; c = int(v); if (c < v) c++; print c}')))
+    budget=$((budget + 4 * p95 + 4 * $(upscale_x4_seconds "$p95")))
   done
+  # Spec 18 gate (plan 7.2): the cold start, timed first (up to 3 tries of a 5 s hold and a /health wait of at most
+  # 2 x UPSCALE_COLD_START_S, then the hold calls finish, one 800x1200 x2 call), and the determinism round: per model
+  # up to 3 rounds of UPSCALE_DETERMINISM_CALLS calls of 800x1200 at once, each round a cold start plus one p95 per 4
+  # calls (the plan's round assumes at least 4 instances; fewer than that queue as 429s, which are retried).
+  local cold=${UPSCALE_COLD_START_S:-120} calls=$UPSCALE_DETERMINISM_CALLS p95_det waves
+  p95_det=$(upscale_p95 800x1200); p95_det=${p95_det:-$UPSCALE_TIMEOUT_S}
+  waves=$(((calls + 3) / 4))
+  budget=$((budget + 3 * (5 + 2 * cold) + p95_det))
+  budget=$((budget + 3 * (2 * cold + waves * p95_det + waves * $(upscale_x4_seconds "$p95_det"))))
   SVC_PROBE_TIMEOUT=$((300 + budget))
   # 2026-10-29 review P2-1: the gate also fails when the measured x4 p95 is above UPSCALE_X4_TIME_RATIO x the x2 p95 at
   # any size, since the x4 cap (UPSCALE_MAX_PIXELS_X4) is sized on that ratio. 0 (no x4 model) checks nothing.
   local x4_ratio=0
   [ "${UPSCALE_MODEL_X4:-swinir-x4}" = off ] || x4_ratio=${UPSCALE_X4_TIME_RATIO:-1.3}
-  SVC_PROBE=(bash infra/lib/services.sh probe-upscale "$SVC_PROBE_TIMEOUT" "$(probe_upscale_model)" "$UPSCALE_SIZES" "$UPSCALE_CONCURRENCY" 1 "$UPSCALE_TIMEOUT_S" "$x4_ratio")
+  SVC_PROBE=(bash infra/lib/services.sh probe-upscale "$SVC_PROBE_TIMEOUT" "$(probe_upscale_model)" "$UPSCALE_SIZES" "$UPSCALE_CONCURRENCY" 1
+    "$UPSCALE_TIMEOUT_S" "$x4_ratio" "$calls" "$cold")
   SVC_DEPLOY=1; SVC_SHIFT=1
   # Like catalog-matting: the preview reuses the live service and never changes it.
   [ "${CATALOG_PREVIEW:-0}" = 1 ] && SVC_DEPLOY=0
@@ -283,9 +299,13 @@ probe_matting() {
 # Spec 18 H1: the upscale probe (cloudrun_check.py --probe-upscale through infra/check-matting.sh) with the sizes,
 # concurrency, rounds and per-call timeout the registry row gives; the job ends with the gate, as for probe_matting.
 probe_upscale() {
-  local timeout=$1 model=$2 sizes=$3 concurrency=$4 rounds=$5 call_timeout=$6 x4_ratio=$7 url=$8
+  local timeout=$1 model=$2 sizes=$3 concurrency=$4 rounds=$5 call_timeout=$6 x4_ratio=$7 determinism_calls=$8 cold_start_max=$9 url=${10}
+  local gate=()
+  # Spec 18 gate (plan 7.2): the determinism round and the cold start, only when the registry row asks for them.
+  [ "$determinism_calls" = 0 ] || gate+=(--determinism-calls="$determinism_calls")
+  [ "$cold_start_max" = 0 ] || gate+=(--cold-start-max="$cold_start_max")
   PROBE_TASK_TIMEOUT=$timeout bash infra/check-matting.sh --probe-upscale "$url" --model="$model" --sizes="$sizes" \
-    --concurrency="$concurrency" --rounds="$rounds" --timeout="$call_timeout" --x4-ratio="$x4_ratio"
+    --concurrency="$concurrency" --rounds="$rounds" --timeout="$call_timeout" --x4-ratio="$x4_ratio" ${gate[@]+"${gate[@]}"}
 }
 
 # /health on the worker candidate, then the tier 5 smoke against the candidates of this deploy.
@@ -324,6 +344,6 @@ if [ "${BASH_SOURCE[0]}" = "$0" ]; then
     probe-upscale) shift; probe_upscale "$@" ;;
     probe-worker) probe_worker "$2" ;;
     probe-web) probe_web "$2" ;;
-    *) echo "usage: bash infra/lib/services.sh probe-matting <timeout s> <models> <concurrency> <rounds> <url> | probe-upscale <timeout s> <model> <sizes> <concurrency> <rounds> <call timeout s> <x4 time ratio, 0 for none> <url> | probe-worker <url> | probe-web <url>" >&2; exit 2 ;;
+    *) echo "usage: bash infra/lib/services.sh probe-matting <timeout s> <models> <concurrency> <rounds> <url> | probe-upscale <timeout s> <model> <sizes> <concurrency> <rounds> <call timeout s> <x4 time ratio, 0 for none> <determinism calls, 0 for none> <cold start limit s, 0 for none> <url> | probe-worker <url> | probe-web <url>" >&2; exit 2 ;;
   esac
 fi
