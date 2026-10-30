@@ -11,7 +11,7 @@ import { completeReplacement, startReplacement } from "@catalog/core/catalog/dec
 import { enqueueChunk, tryEnqueueChunk } from "@catalog/core/catalog/pipeline/dispatch";
 import { renderAllChannels } from "@catalog/core/catalog/render";
 import { upscalerFactor } from "@catalog/core/catalog/upscale";
-import { EnlargeBadInputError, EnlargeBusyError, EnlargeError, EnlargeModelUnavailableError, EnlargeTimeoutError, type UpscaleProbe } from "@catalog/core/catalog/enlarge";
+import { EnlargeBadInputError, EnlargeBusyError, EnlargeError, EnlargeModelUnavailableError, EnlargeTimeoutError, enlargeViaService, type UpscaleProbe } from "@catalog/core/catalog/enlarge";
 import type { EnlargementOption } from "@catalog/core/catalog/pipeline/enlargement";
 import { releaseLocks } from "@catalog/core/catalog/pipeline/publish";
 import type { ChannelId } from "@catalog/core/catalog/types";
@@ -24,13 +24,22 @@ import { handleSweep } from "../src/catalog/sweep";
 import { repairOwnDefects } from "../src/catalog/qa-stage";
 import { fakeWorld, seedBatch, type FakeWorld, type QueuedTask } from "./catalog-fakes";
 
-export type ServiceMode = "ok" | "busy" | "down" | "paused" | "unavailable" | "wrongSize" | "slow" | "badInput" | "healthyButHangs" | "crashOnThisInput" | "coldStart" | "probeTimesOut" | "saturated";
-export interface ServiceCall { upscaler: string; productId: string; w: number; h: number; mode: ServiceMode; ok: boolean }
+export type ServiceMode = "ok" | "busy" | "down" | "paused" | "unavailable" | "wrongSize" | "slow" | "badInput" | "healthyButHangs" | "crashOnThisInput" | "coldStart" | "probeTimesOut" | "saturated" | "crash503" | "crash500" | "noInstance";
+/** One call that reached the service; `handled` is false when no instance did any work (Cloud Run refused it, the service was absent). */
+export interface ServiceCall { upscaler: string; productId: string; w: number; h: number; mode: ServiceMode; ok: boolean; handled: boolean }
+/** Cloud Run's own answers (docs.cloud.google.com/run/docs/troubleshooting), read 2026-10-30. */
+export const CLOUD_RUN_CRASH_503 = "The request failed because either the HTTP response was malformed or connection to the instance had an error.";
+export const CLOUD_RUN_MEMORY_500 = "While handling this request, the container instance was found to be using too much memory and was terminated.";
+export const CLOUD_RUN_NO_INSTANCE_500 = "The request was aborted because there was no available instance.";
+/** A Cloud Run answer as the real client classifies it (core enlargeViaService over a fake fetch). */
+async function cloudRunAnswer(status: number, body: string): Promise<never> {
+  throw await enlargeViaService({ url: "https://catalog-upscale-abc-el.a.run.app", jpeg: Buffer.from([0xff, 0xd8, 0xff, 0xd9]), model: "swinir-x2", maxAttempts: 1 }, { idToken: async () => "t", fetch: (async () => new Response(body, { status })) as unknown as typeof fetch }).catch((e: unknown) => e);
+}
 
 /** The test clock: deps.now reads it; `tick` moves it (minutes). Starts at the real time so database defaults agree. */
 export function testClock(start = Date.now()) {
   let t = start;
-  return { now: () => new Date(t), tick: (minutes: number) => { t += minutes * 60_000; }, at: () => t };
+  return { now: () => new Date(t), tick: (minutes: number) => { t += minutes * 60_000; }, at: () => t, set: (ms: number) => { t = ms; } };
 }
 export type TestClock = ReturnType<typeof testClock>;
 
@@ -46,22 +55,44 @@ function transportError(transport: "refused" | "reset"): EnlargeError {
  * by `mode`: busy (429), down (connection refused), paused / unavailable (the service's own 503), wrongSize (factor 3),
  * slow (10 minutes of clock, then ok), badInput (400), healthyButHangs (no answer: timeout), crashOnThisInput (a reset
  * for the products in `poison`, others ok), coldStart / probeTimesOut / saturated (the probe answers differently,
- * calls succeed). `shortBy` answers N px short on the width (an invalid object). The probe answers by mode, unless
- * `probe` overrides it.
+ * calls succeed), crash503 / crash500 (Cloud Run's answers when the instance handling a `poison` product is killed:
+ * a 503 "connection to the instance had an error", a 500 for memory; others ok), noInstance (Cloud Run's 500 "no
+ * available instance": never handled). `shortBy` answers N px short on the width (an invalid object). The probe
+ * answers by mode, unless `probe` overrides it.
+ *
+ * The delivery's wall clock (final check 2026-10-30): `callMs` and `probeMs` move the test clock by that long per call
+ * or probe (a probe longer than its timeout answers "timeout" at its timeout); `hangUntilDeadline` makes a call run
+ * until its `deadlineAt` and then time out, as the real client does. While `killAt` is set (deliverWithDeadline), a
+ * call or probe that would still run at that instant moves the clock there and never returns: Cloud Run killed the
+ * request mid-call (`killed` resolves).
  */
 export function fakeUpscale(clock: TestClock) {
-  const state = { mode: "ok" as ServiceMode, poison: new Set<string>(), probe: null as UpscaleProbe | null, shortBy: 0, hold: null as Promise<void> | null, badWhen: null as ((upload: { w: number; h: number }) => boolean) | null, colour: 200, calls: [] as ServiceCall[], probes: 0 };
+  const state = { mode: "ok" as ServiceMode, poison: new Set<string>(), probe: null as UpscaleProbe | null, shortBy: 0, hold: null as Promise<void> | null, badWhen: null as ((upload: { w: number; h: number }) => boolean) | null, colour: 200, calls: [] as ServiceCall[], probes: 0,
+    callMs: 0, probeMs: 0, hangUntilDeadline: false, killAt: null as number | null, onKill: null as (() => void) | null };
+  /** Moves the clock by `ms`, or to the kill instant and never returns when the delivery is killed first. */
+  const spend = async (ms: number) => {
+    if (state.killAt !== null && clock.at() + ms >= state.killAt) { clock.set(state.killAt); state.onKill?.(); await new Promise(() => {}); }
+    clock.set(clock.at() + ms);
+  };
   const call = vi.fn<EnlargeCall>(async (jpeg, trace, opts) => {
     const meta = await sharp(jpeg).metadata(), id = opts?.upscaler ?? "swinir-x2", mode = state.mode;
     const productId = String(trace.productId ?? "");
-    const record = (ok: boolean) => state.calls.push({ upscaler: id, productId, w: meta.width!, h: meta.height!, mode, ok });
+    const record = (ok: boolean, handled = true) => state.calls.push({ upscaler: id, productId, w: meta.width!, h: meta.height!, mode, ok, handled });
     if (state.hold) { const hold = state.hold; state.hold = null; await hold; }
-    if (state.poison.has(productId)) { record(false); throw transportError("reset"); }
+    if (state.hangUntilDeadline) { record(false); await spend(Math.max(0, (opts?.deadlineAt ?? clock.at()) - clock.at())); throw new EnlargeTimeoutError(Math.max(0, (opts?.deadlineAt ?? 0) - clock.at()), 1); }
+    if (state.callMs) { state.calls.push({ upscaler: id, productId, w: meta.width!, h: meta.height!, mode, ok: false, handled: true }); const at = state.calls.length - 1; await spend(state.callMs); state.calls.splice(at, 1); }
+    if (state.poison.has(productId)) {
+      record(false);
+      if (mode === "crash503") return cloudRunAnswer(503, CLOUD_RUN_CRASH_503);
+      if (mode === "crash500") return cloudRunAnswer(500, CLOUD_RUN_MEMORY_500);
+      throw transportError("reset");
+    }
     if (state.badWhen?.({ w: meta.width!, h: meta.height! })) { record(false); throw new EnlargeBadInputError(400, 1); }
     switch (mode) {
-      case "busy": record(false); throw new EnlargeBusyError(429, 1);
-      case "down": record(false); throw transportError("refused");
-      case "paused": case "unavailable": { record(false); const e = new EnlargeModelUnavailableError(1); e.ownBody = true; throw e; }
+      case "busy": record(false, false); throw new EnlargeBusyError(429, 1);
+      case "noInstance": record(false, false); return cloudRunAnswer(500, CLOUD_RUN_NO_INSTANCE_500);
+      case "down": record(false, false); throw transportError("refused");
+      case "paused": case "unavailable": { record(false, false); const e = new EnlargeModelUnavailableError(1); e.ownBody = true; throw e; }
       case "badInput": record(false); throw new EnlargeBadInputError(400, 1);
       case "healthyButHangs": record(false); throw new EnlargeTimeoutError(480_000, 1);
       case "slow": clock.tick(10); break;
@@ -72,12 +103,17 @@ export function fakeUpscale(clock: TestClock) {
     const out = await sharp({ create: { width: meta.width! * f - state.shortBy, height: meta.height! * f, channels: 3, background: { r: 0, g: state.colour, b: 0 } } }).jpeg({ quality: 90 }).toBuffer();
     return { jpeg: out, ms: 90_000, model: f === 4 ? "swinir-x4" : "swinir-x2", attempts: 1 };
   });
-  const probe = vi.fn<EnlargeProbe>(async () => {
+  const probe = vi.fn<EnlargeProbe>(async (_upscaler, opts) => {
     state.probes++;
+    if (state.probeMs) {
+      const timeoutMs = opts?.timeoutMs ?? Infinity;
+      await spend(Math.min(state.probeMs, timeoutMs));
+      if (state.probeMs > timeoutMs) return "timeout";
+    }
     if (state.probe) return state.probe;
     switch (state.mode) {
       case "down": case "paused": case "unavailable": return "absent";
-      case "busy": return "no_instance";
+      case "busy": case "noInstance": return "no_instance";
       case "probeTimesOut": return "timeout";
       case "saturated": return "busy";
       default: return "ok";
@@ -137,6 +173,19 @@ export async function seedEnlargeBatch(db: Db, w: FakeWorld, name: string, layou
   if (route) await db.update(catalogBatches).set({ options: { ...s.batch.options, enlargement: route } }).where(eq(catalogBatches.id, s.batch.id));
   const [batch] = await db.select().from(catalogBatches).where(eq(catalogBatches.id, s.batch.id));
   return { ...s, batch: batch! };
+}
+
+/**
+ * One enlarge delivery under its Cloud Run request deadline (ENLARGE_DISPATCH_DEADLINE_SEC from now, or `killAfterMs`):
+ * when the fake service's clock passes it mid-call or mid-probe, the request is killed there (504 `killed`) and the
+ * handler never continues, as on Cloud Run.
+ */
+export async function deliverWithDeadline(e: { w: FakeWorld; clock: TestClock; service: FakeUpscale }, body: Record<string, unknown>, killAfterMs = 1_800_000): Promise<HandleResult> {
+  const state = e.service.state;
+  let killed!: () => void;
+  const kill = new Promise<HandleResult>((resolve) => { killed = () => resolve({ httpStatus: 504, outcome: "killed" }); });
+  state.killAt = e.clock.at() + killAfterMs; state.onKill = killed;
+  try { return await Promise.race([handleEnlargeTask(e.w.deps, body), kill]); } finally { state.killAt = null; state.onKill = null; }
 }
 
 /** Delivers one queued task to its real handler. */
@@ -237,8 +286,14 @@ export async function seedSecondBatch(db: Db, w: FakeWorld, first: { batch: type
  * The operator's "Replace photo" as the web does it: the signed upload, the bytes, completeReplacement, then the new
  * one-photo matte chunk and any chunk the release unparked (direct ones) are sent.
  */
+let replacements = 0;
+/**
+ * Each replacement is a different file: the same bytes uploaded twice for one shot of one batch hit the unique index
+ * (product, n, sha256, batch) in completeReplacement, a known gap outside spec 18 (final check 2026-10-30).
+ */
 export async function replacePhoto(db: Db, w: FakeWorld, outputId: string, now: () => Date) {
-  const bytes = await sharp({ create: { width: 640, height: 820, channels: 3, background: { r: 90, g: 60, b: 30 } } }).jpeg().toBuffer();
+  const k = replacements++;
+  const bytes = await sharp({ create: { width: 640, height: 820, channels: 3, background: { r: 90 + (k % 120), g: 60 + (Math.floor(k / 120) % 120), b: 30 } } }).jpeg().toBuffer();
   const storage = { ...w.deps.storage, signedPutUrl: async () => "https://signed.test/put" } as unknown as Parameters<typeof startReplacement>[0]["storage"];
   const { uploadId } = await startReplacement({ db, storage, now }, { outputId, name: "new.jpg", size: bytes.length, mime: "image/jpeg" });
   const [upload] = await db.select().from(catalogUploads).where(eq(catalogUploads.id, uploadId));

@@ -14,6 +14,8 @@ import {
 } from "@catalog/core/catalog/pipeline/enlargement";
 import { DIMENSION_FLAGS } from "@catalog/core/catalog/qa/judge";
 import type { QueuedTask } from "../../test/catalog-fakes";
+import type { HandleResult } from "../server";
+import { clearMadeImages } from "./enlarge";
 import {
   batchOf, batchOfTask, chunksOf, corruptObject, deliver, enlargeBody, enlargeWorld, outputsOf, replacePhoto, rowsOf, seedEnlargeBatch, startChunks, sweep, type EnlargeWorld, type ServiceMode,
 } from "../../test/enlarge-world";
@@ -49,7 +51,12 @@ function lcg(seed: number) {
 }
 
 type Seeded = Awaited<ReturnType<typeof seedEnlargeBatch>>;
-interface Arm { renderHang: boolean; callHang: boolean; complianceFail: boolean; productRemoved: boolean; jitter: boolean; enqueueFail: boolean; onHang?: (() => void) | undefined }
+/**
+ * `callKill` (final check 2026-10-30): the next service call reaches the service and the delivery's request is killed
+ * in the middle of it (Cloud Run's request timeout, the worker's instance gone): the handler never continues.
+ * `uploadFail`: every upload of the next made image is refused (403) within its delivery.
+ */
+interface Arm { renderHang: boolean; callHang: boolean; callKill: boolean; uploadFail: boolean; complianceFail: boolean; productRemoved: boolean; jitter: boolean; enqueueFail: boolean; onHang?: (() => void) | undefined }
 interface Model {
   e: EnlargeWorld; s: Seeded; rnd: () => number; off: boolean; arm: Arm;
   /** Rows whose stored object an event broke on purpose (excluded from check d until the row is made again). */
@@ -88,9 +95,23 @@ function armWorld(e: EnlargeWorld, arm: Arm) {
   }) as typeof prepare;
   const call = e.w.deps.enlarge!;
   e.w.deps.enlarge = (async (...args: Parameters<typeof call>) => {
-    if (arm.callHang) { arm.callHang = false; arm.onHang?.(); return new Promise(() => {}); }
+    // callHang: the worker dies with the call in flight; callKill: the request is killed at its deadline mid-call. Either
+    // way the request was sent and the handler cannot know whether an instance billed it, so the next claim writes a
+    // cost row for it (3.10): the model records it as a call that reached the service, which check (f) counts.
+    if (arm.callHang || arm.callKill) {
+      arm.callHang = false;
+      arm.callKill = false;
+      e.service.state.calls.push({ upscaler: args[2]?.upscaler ?? "swinir-x2", productId: String(args[1].productId ?? ""), w: 0, h: 0, mode: e.service.state.mode, ok: false, handled: true });
+      arm.onHang?.();
+      return new Promise(() => {});
+    }
     return call(...args);
   }) as typeof call;
+  const upload = e.w.deps.storage.uploadBuffer;
+  e.w.deps.storage.uploadBuffer = (async (...args: Parameters<typeof upload>) => {
+    if (arm.uploadFail && args[0].includes("/derived/")) throw Object.assign(new Error("Forbidden"), { code: 403 });
+    return upload(...args);
+  }) as typeof upload;
   const enqueue = e.w.deps.enqueue;
   e.w.deps.enqueue = (async (...args: Parameters<typeof enqueue>) => {
     // Spec 18 scope: a lost enlarge or chunk send (the stale re-send and the lost-task rule recover them). A lost
@@ -114,6 +135,7 @@ async function deliverNext(m: Model): Promise<boolean> {
     tasks.splice(i, 1);
     const result = await raceHang(m, task);
     if (result === "hung") return true;
+    if (task.route === "/tasks/catalog/enlarge") m.arm.uploadFail = false;
     if (process.env.ENLARGE_MODEL_TRACE) console.info(`  DELIVER ${task.route.split("/").pop()}:${String(task.body.chunkId ?? task.body.enlargementId ?? task.body.productId ?? "").slice(0, 4)} -> ${result.httpStatus} ${result.outcome ?? ""} :: ${(await rowsOf(db, m.s.batch.id)).map((r) => `${r.sourceImageId.slice(0, 4)}:${r.identityHash.slice(0, 4)}:${r.status}/${r.wanted ? "w" : "r"}/a${r.attempts}`).join(" ")} ;; ${(await outputsOf(db, m.s.batch.id)).map((o) => `${o.sourceImageId.slice(0, 4)}:${o.status}/${o.flags.join("+")}`).join(" ")}`);
     if (result.httpStatus >= 500) {
       task.retryCount++;
@@ -124,25 +146,31 @@ async function deliverNext(m: Model): Promise<boolean> {
   }
   return false;
 }
-/** A delivery that may hang (an armed render or service call): returns "hung" when it does, the answer otherwise. */
+/** A delivery that may hang (an armed render or service call, a kill mid-call): returns "hung" when it does, the answer otherwise. */
 async function raceHang(m: Model, task: QueuedTask) {
-  const armed = m.arm.renderHang || m.arm.callHang;
-  const delivery = task.route === "/tasks/catalog/enlarge" ? deliverEnlarge(m, task.body.enlargementId as string, () => deliver(m.e.w, task)) : deliver(m.e.w, task);
-  if (!armed) return delivery;
+  const armed = m.arm.renderHang || m.arm.callHang || m.arm.callKill;
   // A hung delivery stops where the fault was armed (the render or the service call never returns): move on then.
-  const hung = new Promise<"hung">((resolve) => { m.arm.onHang = () => resolve("hung"); });
-  try { return await Promise.race([delivery, hung]); } finally { m.arm.onHang = undefined; }
+  const hung = armed ? new Promise<"hung">((resolve) => { m.arm.onHang = () => resolve("hung"); }) : null;
+  const run = (): Promise<HandleResult | "hung"> => (hung ? Promise.race([deliver(m.e.w, task), hung]) : deliver(m.e.w, task));
+  try { return task.route === "/tasks/catalog/enlarge" ? await deliverEnlarge(m, task.body.enlargementId as string, run) : await run(); } finally { m.arm.onHang = undefined; }
 }
-/** An enlarge delivery with check (k) (no paid call without a counter) and check (l) (no call-free loop). */
-async function deliverEnlarge(m: Model, rowId: string, run: () => ReturnType<typeof handleEnlargeTask>) {
+/**
+ * An enlarge delivery with check (k) (no paid call without a counter: a call an instance handled leaves the row with
+ * more progress or a higher count, also when the delivery was killed in the middle of it) and check (l) (no call-free
+ * loop).
+ */
+async function deliverEnlarge<R extends HandleResult | "hung">(m: Model, rowId: string, run: () => Promise<R>): Promise<R> {
   const read = async () => (await db.select().from(catalogEnlargements).where(eq(catalogEnlargements.id, rowId)))[0];
-  const before = await read(), calls = m.e.service.state.calls.length, mode = m.e.service.state.mode;
+  const handled = () => m.e.service.state.calls.filter((c) => c.handled).length;
+  const before = await read(), calls = handled(), mode = m.e.service.state.mode;
   const result = await run();
   const after = await read();
-  if (before && after && m.e.service.state.calls.length > calls && !["down", "paused"].includes(mode)) {
+  const outcome = result === "hung" ? "hung" : result.outcome;
+  if (before && after && handled() > calls && !["down", "paused"].includes(mode)) {
     const progress = (r: typeof before) => r.attempts + r.timeouts + r.tilesDone + (r.status === "done" ? 1 : 0);
-    expect(progress(after), `(k) row ${rowId} made a call without a counter (${result.outcome})`).toBeGreaterThan(progress(before));
+    expect(progress(after), `(k) row ${rowId} made a call without a counter (${outcome})`).toBeGreaterThan(progress(before));
   }
+  if (result === "hung") return result;
   const streak = result.outcome === "in_flight" ? (m.inFlight.get(rowId) ?? 0) + 1 : 0;
   m.inFlight.set(rowId, streak);
   expect(streak, `(l) row ${rowId} answered in_flight ${streak} times in a row`).toBeLessThanOrEqual(IN_FLIGHT_BOUND);
@@ -159,7 +187,7 @@ async function afterDecision(m: Model, result: Awaited<ReturnType<typeof applyDe
   for (const chunk of result.unparked ?? []) if (chunk.direct) await tryEnqueueChunk(m.e.w.deps.enqueue, chunk, m.e.w.deps.log);
 }
 
-const MODES: ServiceMode[] = ["ok", "busy", "down", "paused", "wrongSize", "badInput", "healthyButHangs", "slow", "crashOnThisInput", "coldStart", "probeTimesOut", "saturated"];
+const MODES: ServiceMode[] = ["ok", "busy", "down", "paused", "wrongSize", "badInput", "healthyButHangs", "slow", "crashOnThisInput", "coldStart", "probeTimesOut", "saturated", "crash503", "crash500", "noInstance"];
 /** The events and their weights. */
 const EVENTS_TABLE: [number, string, (m: Model) => Promise<void>][] = [
   [30, "deliverNext", async (m) => { await deliverNext(m); }],
@@ -169,6 +197,8 @@ const EVENTS_TABLE: [number, string, (m: Model) => Promise<void>][] = [
   }],
   [2, "crashEnlargeAfter(claim)", async (m) => { m.arm.callHang = true; await deliverNext(m); m.arm.callHang = false; }],
   [2, "crashRenderAfter(patch)", async (m) => { m.arm.renderHang = true; await deliverNext(m); m.arm.renderHang = false; }],
+  [2, "killAtDeadline(midCall)", async (m) => { m.arm.callKill = true; await deliverNext(m); m.arm.callKill = false; }],
+  [2, "uploadError", async (m) => { m.arm.uploadFail = true; }],
   [0.4, "flip(off)", async (m) => { if (m.off) return; m.off = true; m.e.w.deps.enlarge = undefined; await sweep(db, m.e.w, { enlargementOff: true }).catch(decided); }],
   [2, "judgeProductRemoved", async (m) => { m.arm.productRemoved = true; }],
   [2, "complianceFail", async (m) => { m.arm.complianceFail = true; }],
@@ -189,7 +219,7 @@ const EVENTS_TABLE: [number, string, (m: Model) => Promise<void>][] = [
     const mode = pick(m, MODES)!;
     m.e.service.state.mode = mode;
     m.e.service.state.poison.clear();
-    if (mode === "crashOnThisInput" || mode === "saturated") {
+    if (mode === "crashOnThisInput" || mode === "saturated" || mode === "crash503" || mode === "crash500") {
       // The generator pairs saturated with a poison input; a crash on this input is one product.
       const product = pick(m, m.s.chunks.flatMap((c) => c.productIds))!;
       m.e.service.state.poison.add(product);
@@ -282,7 +312,7 @@ async function quiet(batchId: string, e: EnlargeWorld) {
 /** Deliver everything until quiet, sweeping with time travel up to 48 h, the service `ok`. */
 async function settle(m: Model) {
   m.e.service.state.mode = "ok"; m.e.service.state.poison.clear(); m.e.service.state.probe = null;
-  m.arm.renderHang = m.arm.callHang = m.arm.enqueueFail = false;
+  m.arm.renderHang = m.arm.callHang = m.arm.callKill = m.arm.uploadFail = m.arm.enqueueFail = false;
   for (let hours = 0; hours <= 48; hours += 0.5) {
     for (let n = 0; n < 400 && (await deliverNext(m)); n++) await check(m);
     if (await quiet(m.s.batch.id, m.e)) break;
@@ -293,8 +323,9 @@ async function settle(m: Model) {
 
 async function runSequence(seed: number) {
   const rnd = lcg(seed);
+  clearMadeImages();
   const e = enlargeWorld(db);
-  const arm: Arm = { renderHang: false, callHang: false, complianceFail: false, productRemoved: false, jitter: false, enqueueFail: false };
+  const arm: Arm = { renderHang: false, callHang: false, callKill: false, uploadFail: false, complianceFail: false, productRemoved: false, jitter: false, enqueueFail: false };
   armWorld(e, arm);
   const s = await seedEnlargeBatch(db, e.w, `t40-${seed}`, [[1, 1], [1]]);
   const m: Model = { e, s, rnd, off: false, arm, broken: new Set(), inFlight: new Map(), trail: [] };
@@ -345,7 +376,7 @@ describe("T39: end to end through the queue", () => {
     const terminal = s.chunks[0]!.productIds[1]!;
     e.service.state.mode = "crashOnThisInput";
     e.service.state.poison.add(terminal);
-    const m: Model = { e, s, rnd: lcg(39), off: false, arm: { renderHang: false, callHang: false, complianceFail: false, productRemoved: false, jitter: false, enqueueFail: false }, broken: new Set(), inFlight: new Map(), trail: [] };
+    const m: Model = { e, s, rnd: lcg(39), off: false, arm: { renderHang: false, callHang: false, callKill: false, uploadFail: false, complianceFail: false, productRemoved: false, jitter: false, enqueueFail: false }, broken: new Set(), inFlight: new Map(), trail: [] };
     await startChunks(db, e.w, s.chunks.map((c) => c.id));
     for (let hours = 0; hours <= 48; hours += 0.5) {
       for (let n = 0; n < 400 && (await deliverNext(m)); n++) await check(m);

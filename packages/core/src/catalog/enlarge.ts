@@ -3,7 +3,7 @@
 // a slow or busy service is waited for and retried, never switched off. Its timeout is the service's own request
 // timeout plus 30 s (UPSCALE_TIMEOUT_S, set by infra/deploy.sh from infra/lib/shape.sh, which sizes it from the
 // measured p95 and the largest photo the service takes), so the client never gives up on a call the service is still allowed to finish. Retries back off
-// exponentially on busy (429, Cloud Run's 503), timeout, transport errors and other 5xx. Every attempt ends by the
+// exponentially on busy (429, Cloud Run's own no-instance 500 or 503), timeout, transport errors and other 5xx. Every attempt ends by the
 // caller's deadline (by default the enlarge task's: ENLARGE_DISPATCH_DEADLINE_SEC from the call): its timeout is clamped to the time
 // left, and no attempt starts with less than ENLARGE_ATTEMPT_FLOOR_MS left. The service's own "upscale model
 // unavailable" 503 is no busy answer: it is retried once, after 60 s. A bad image (400, 413) and an auth or route
@@ -68,10 +68,22 @@ export class EnlargeError extends Error {
     this.name = new.target.name;
   }
 }
-/** 429 or Cloud Run's 503: every instance is working, or the service is starting. */
+/**
+ * Cloud Run refused the request before any instance handled it: a 429 (the service never answers 429 itself), or a
+ * 500 or 503 whose body is Cloud Run's own "no available instance", "maximum container instance limit" or "instance
+ * could not start" text (CLOUD_RUN_NOT_HANDLED). No upscale work was done, so it is a delay that never counts.
+ */
 export class EnlargeBusyError extends EnlargeError {
   constructor(status: number, attempts: number) { super(`The enlargement service is busy (${status}).`, "busy", status, true, attempts); }
 }
+/**
+ * Spec 18 lifecycle 3.4 step 9, positive proof that no instance handled the request: the answer texts Cloud Run sends
+ * itself when it aborts a request before an instance takes it (docs.cloud.google.com/run/docs/troubleshooting, read
+ * 2026-10-30: 429 and 500 "The request was aborted because there was no available instance", 503 "...has reached its
+ * maximum container instance limit", 500 "...the instance could not start successfully"). A 500 or 503 with any other
+ * body (an instance killed for memory, "connection to the instance had an error") reached an instance: unexplained.
+ */
+export const CLOUD_RUN_NOT_HANDLED = /no available instance|maximum container instance limit|instance could not start/i;
 /**
  * The service's own 503 "upscale model <id> unavailable" (services/matting/app.py): the model is not served there or
  * failed to load. Not busy: retried once within a call after ENLARGE_UNAVAILABLE_RETRY_MS, and never by a later task
@@ -172,10 +184,16 @@ class TokenMintError extends Error {}
  * unavailable" 503; Cloud Run's own 503 (no instance) and a proxy's 5xx carry none.
  */
 async function hasOwnBody(response: Response): Promise<boolean> {
+  return (await answerBody(response)).own;
+}
+/** The answer's body once: whether it is the service's own JSON error body, and its text (for CLOUD_RUN_NOT_HANDLED). */
+async function answerBody(response: Response): Promise<{ own: boolean; text: string }> {
+  let text = "";
+  try { text = await response.text(); } catch { return { own: false, text }; }
   try {
-    const body = JSON.parse(await response.text()) as unknown;
-    return !!body && typeof body === "object" && typeof (body as { error?: unknown }).error === "string";
-  } catch { return false; }
+    const body = JSON.parse(text) as unknown;
+    return { own: !!body && typeof body === "object" && typeof (body as { error?: unknown }).error === "string", text };
+  } catch { return { own: false, text }; }
 }
 /** The transport failure under a fetch error (undici puts the system error in `cause`). */
 export function transportOf(error: unknown): EnlargeTransport {
@@ -204,10 +222,16 @@ async function attemptOnce(req: EnlargeRequest, timeoutMs: number, attempts: num
     const bearer = await raceAbort(minted, signal);
     if (bearer) headers.set("Authorization", bearer);
     const response = await deps.fetch(`${base}/upscale?model=${encodeURIComponent(req.model)}&scale=${req.scale ?? 2}`, { method: "POST", body: new Uint8Array(req.jpeg), headers, signal });
-    if (response.status === 503 && await hasOwnBody(response)) throw withOwnBody(new EnlargeModelUnavailableError(attempts));
-    if (response.status === 429 || response.status === 503) throw new EnlargeBusyError(response.status, attempts);
+    if (response.status === 429) throw new EnlargeBusyError(response.status, attempts);
     if (response.status === 400 || response.status === 413) throw new EnlargeBadInputError(response.status, attempts);
-    if (response.status >= 500) { const own = await hasOwnBody(response); throw own ? withOwnBody(new EnlargeServerError(`HTTP ${response.status}`, response.status, attempts)) : new EnlargeServerError(`HTTP ${response.status}`, response.status, attempts); }
+    if (response.status >= 500) {
+      const body = await answerBody(response);
+      if (response.status === 503 && body.own) throw withOwnBody(new EnlargeModelUnavailableError(attempts));
+      // Spec 18 lifecycle 3.4 step 9: Cloud Run's own refusal (no instance took the request) is busy; any other 5xx
+      // without the service's body (an instance killed by this input: memory, a crash) is a server failure.
+      if (!body.own && CLOUD_RUN_NOT_HANDLED.test(body.text)) throw new EnlargeBusyError(response.status, attempts);
+      throw body.own ? withOwnBody(new EnlargeServerError(`HTTP ${response.status}`, response.status, attempts)) : new EnlargeServerError(`HTTP ${response.status}`, response.status, attempts);
+    }
     if (!response.ok) throw new EnlargeRejectedError(response.status, attempts);
     const jpeg = Buffer.from(await response.arrayBuffer());
     if (!jpeg.length) throw new EnlargeServerError("empty answer", response.status, attempts);

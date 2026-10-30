@@ -164,6 +164,36 @@ describe("identity (I1)", () => {
     expect((await outputsOf(db, s.batch.id))[0]!.flags).toContain("upscaled");
   }, 120_000);
 
+  it("T45b (F43, final check): prepare changed between the handler and the render: the render wants the new identity, releases the made one, never pairs them; one more call, then upscaled", async () => {
+    const e = enlargeWorld(db);
+    const s = await seedEnlargeBatch(db, e.w, "t45b", [[1]]);
+    await deliverChunk(db, e.w, s.chunks[0]!.id);
+    const [made] = await rowsOf(db, s.batch.id);
+    expect(await handleEnlargeTask(e.w.deps, enlargeBody(made!))).toMatchObject({ httpStatus: 200, outcome: "done" });
+    expect(e.service.paid()).toBe(1);
+    // From now on the photo prepares to other pixels (a library or decoder change after the handler made the image).
+    const prepare = e.w.deps.prepare;
+    e.w.deps.prepare = (async (...args: Parameters<typeof prepare>) => { const p = await prepare(...args); p.rgb = Buffer.alloc(p.rgb.length, 99); return p; }) as typeof prepare;
+    const render = e.w.deps.renderAllChannels;
+    const used: (string | undefined)[] = [];
+    e.w.deps.renderAllChannels = (async (p, m, channels, ctx) => { const out = await render(p, m, channels, ctx); for (const c of channels) if (out[c]!.flags.includes("upscaled")) used.push(p.rgb[0] === 99 ? "new" : "old"); return out; }) as typeof render;
+    await drain(e.w, { only: { db, batchId: s.batch.id } });
+    const rows = await rowsOf(db, s.batch.id);
+    // The made row (old pixels) is no longer wanted; the wanted row is the new identity, made by its own call.
+    expect(await rowNow(made!.id)).toMatchObject({ wanted: false, status: "done" });
+    const wanted = rows.filter((r) => r.wanted);
+    expect(wanted).toHaveLength(1);
+    expect(wanted[0]).toMatchObject({ status: "done" });
+    expect(wanted[0]!.pixelHash).not.toBe(made!.pixelHash);
+    expect(e.service.paid()).toBe(2);
+    // Every upscaled render used the new pixels: the old image was never paired with the new photo.
+    expect(used.length).toBeGreaterThan(0);
+    expect(used.every((u) => u === "new")).toBe(true);
+    const [out] = await outputsOf(db, s.batch.id);
+    expect(out!.flags).toContain("upscaled"); expect(out!.flags).not.toContain("enlargement_failed");
+    expect((await invariants(s.batch.id, e.clock.now())).enlarged_without_upscaler).toBe(0);
+  }, 120_000);
+
   it("T46 (F44): a failed row released and wanted again stays failed (hold kept); a done row released and wanted again is reused", async () => {
     const e = enlargeWorld(db);
     const s = await seedEnlargeBatch(db, e.w, "t46", [[2]]);
@@ -263,6 +293,45 @@ describe("the stages", () => {
     expect((await chunkRow(db, retry.chunkId)).status).not.toBe("failed");
     const outs = await outputsOf(db, s.batch.id);
     expect(outs.every((o) => o.flags.includes("upscaled") && !o.flags.includes("enlargement_failed"))).toBe(true);
+  }, 180_000);
+
+  it("T22b (F22, final check): a crash after a held output's image is staged and before its status is written: the redelivery renders it again (readiness decides anew), never the staged-object shortcut", async () => {
+    const e = enlargeWorld(db);
+    const s = await seedEnlargeBatch(db, e.w, "t22b", [[1]]);
+    await deliverChunk(db, e.w, s.chunks[0]!.id);
+    const [row] = await rowsOf(db, s.batch.id);
+    e.service.state.mode = "badInput";
+    await enlargeUntilSettled(e.w, row!);
+    expect(await rowNow(row!.id)).toMatchObject({ status: "failed" });
+    const paid = e.service.paid();
+    // The delivery dies between the staging upload (chunk.ts: upload) and the status write: the head after the upload
+    // never returns. The output has its patch (flags with enlargement_failed, bytes) and its staged object.
+    const render = e.w.deps.renderAllChannels, upload = e.w.deps.storage.uploadBuffer, head = e.w.deps.storage.headObject;
+    let renders = 0, uploaded: string | null = null, hung = false;
+    e.w.deps.renderAllChannels = (async (...args: Parameters<typeof render>) => { renders++; return render(...args); }) as typeof render;
+    e.w.deps.storage.uploadBuffer = (async (...args: Parameters<typeof upload>) => { const r = await upload(...args); if (args[0].includes("/staging/")) uploaded ??= args[0]; return r; }) as typeof upload;
+    e.w.deps.storage.headObject = (async (...args: Parameters<typeof head>) => {
+      if (uploaded && !hung && args[0].endsWith(uploaded)) { hung = true; await new Promise(() => {}); }
+      return head(...args);
+    }) as typeof head;
+    void deliverChunk(db, e.w, s.chunks[0]!.id);
+    while (!hung) await new Promise((r) => setTimeout(r, 5));
+    const [mid] = await outputsOf(db, s.batch.id);
+    expect(mid).toMatchObject({ status: "pending" });
+    expect(mid!.flags).toContain("enlargement_failed");
+    const staged = await head(e.w.deps.storage.toGsUri(e.w.deps.storage.getBucketName(), uploaded!));
+    expect(staged.exists).toBe(true);
+    expect(mid!.bytes).toBe(staged.size);
+    expect(renders).toBe(1);
+    // The lease lapses, the sweep re-sends the step, and the redelivery renders the held output again.
+    e.clock.tick(3);
+    await sweep(db, e.w);
+    expect(await deliverChunk(db, e.w, s.chunks[0]!.id)).toMatchObject({ httpStatus: 200 });
+    expect(renders).toBe(2);
+    const [out] = await outputsOf(db, s.batch.id);
+    expect(out).toMatchObject({ status: "needs_attention" });
+    expect(out!.flags).toContain("enlargement_failed");
+    expect(e.service.paid()).toBe(paid);
   }, 180_000);
 
   it("T23 (F23): storage heads failing during render deliveries are a dependency wait: 503 without a chunk error, then upscaled; no flag ever written", async () => {
@@ -549,12 +618,17 @@ describe("size routes (3.2)", () => {
     e.w.deps.enlargeTileBudgetMs = 10 ** 9;
     const upload = e.w.deps.storage.uploadBuffer;
     let tilesUp = 0;
-    e.w.deps.storage.uploadBuffer = (async (...args: Parameters<typeof upload>) => { if (args[0].includes(".tile-") && ++tilesUp === 3) throw new Error("crash"); return upload(...args); }) as typeof upload;
-    expect(await handleEnlargeTask(e.w.deps, enlargeBody(row!))).toMatchObject({ httpStatus: 503 });
-    expect((await rowNow(row!.id)).tilesDone).toBe(2);
+    // A real crash: the worker dies while the third tile is being stored (the delivery never returns).
+    let crashed = false;
+    e.w.deps.storage.uploadBuffer = (async (...args: Parameters<typeof upload>) => { if (args[0].includes(".tile-") && ++tilesUp === 3) { crashed = true; await new Promise(() => {}); } return upload(...args); }) as typeof upload;
+    void handleEnlargeTask(e.w.deps, enlargeBody(row!));
+    while (!crashed) await new Promise((r) => setTimeout(r, 5));
+    // Two tiles stored and given back; the third tile's call was counted before it was made (3.10).
+    expect(await rowNow(row!.id)).toMatchObject({ tilesDone: 2, timeouts: 1 });
+    e.clock.tick(31);
     expect(await handleEnlargeTask(e.w.deps, enlargeBody(row!))).toMatchObject({ outcome: "done" });
     expect(e.service.paid()).toBe(4);
-    expect(await rowNow(row!.id)).toMatchObject({ attempts: 0, tilesDone: 3 });
+    expect(await rowNow(row!.id)).toMatchObject({ attempts: 0, timeouts: 1, tilesDone: 3 });
     // A deterministic 400 on one tile counts on the identity: terminal at 8, the sentence names the tile.
     const f = enlargeWorld(db);
     bigPhotos(f, 4000, 4000, { w: 400, h: 400 });
@@ -607,7 +681,7 @@ describe("size routes (3.2)", () => {
     await deliverChunk(db, e.w, s.chunks[0]!.id);
     const row = (await rowsOf(db, s.batch.id)).find((r) => r.factor === 4)!;
     expect(row).toMatchObject({ route: "none", status: "failed", errorKind: "no_route" });
-    expect(row.error).toMatch(/^This photo is too large to enlarge as much as trendyol needs\.$/);
+    expect(row.error).toBe("This photo is too large to enlarge as much as Trendyol needs."); // the channel label, never its id
     expect(row.error).not.toMatch(/swinir/);
     // 6000x6000 at x2: a need of 1.2 (1.26 with slack) is served by downscale_tiles; 1.4 (1.47) holds.
     const served = enlargementRouteFor(6000, 6000, 2, 1.2 * 1.05);

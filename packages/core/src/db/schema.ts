@@ -559,6 +559,12 @@ export const catalogEnlargements = pgTable(
     claimedAt: tsNull("claimed_at"),
     claimToken: text("claim_token"),
     tilesDone: integer("tiles_done").notNull().default(0),
+    /**
+     * Spec 18 lifecycle 3.10 (0007): when this row's current paid call started. Written with `timeouts + 1` before the
+     * call (the call is counted before it is made) and cleared by its settle; a later delivery that finds it set knows
+     * the call's delivery ended without a settle (killed at its deadline, its worker gone) and writes its cost row.
+     */
+    callStartedAt: tsNull("call_started_at"),
     uri: text("uri"),
     error: text("error"),
     errorKind: text("error_kind"),

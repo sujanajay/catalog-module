@@ -14,9 +14,11 @@ import { retryEnlargement } from "@catalog/core/catalog/decisions";
 import { enlargeTaskId } from "@catalog/core/tasks";
 import { chunkRow } from "../../test/catalog-fakes";
 import {
-  batchOf, chunksOf, corruptObject, deliverChunk, enlargeBody, enlargeTasks, enlargeUntilSettled, enlargeWorld, outputsOf, photosOf, rowsOf, seedEnlargeBatch, sweep, upscaleCosts, type EnlargeWorld,
+  batchOf, chunksOf, corruptObject, deliverChunk, deliverWithDeadline, enlargeBody, enlargeTasks, enlargeUntilSettled, enlargeWorld, outputsOf, photosOf, rowsOf, seedEnlargeBatch, sweep, upscaleCosts, type EnlargeWorld,
 } from "../../test/enlarge-world";
-import { handleEnlargeTask, upscaleProbeTimeoutMs, workerEnlargeProbe } from "./enlarge";
+import { clearMadeImages, handleEnlargeTask, upscaleProbeTimeoutMs, workerEnlargeCall, workerEnlargeProbe } from "./enlarge";
+import { ENLARGE_DISPATCH_DEADLINE_SEC } from "@catalog/core/tasks";
+import { ENLARGE_CLAIM_MS, ENLARGE_MAX_IDENTITY_CHANGES } from "@catalog/core/catalog/pipeline/enlargement";
 
 let db: Db, close: () => Promise<void>;
 const saved: Record<string, string | undefined> = {};
@@ -95,16 +97,23 @@ describe("handler: claims, duplicates and crashes", () => {
     expect(e.service.call).toHaveBeenCalledTimes(2);
   }, 60_000);
 
-  it("T20 (F20): a crash after the upload: the next delivery finds the object, no call, done, one cost row", async () => {
+  it("T20 (F20): a real crash after the upload (the worker dies, nothing settles): after the claim lapses the next delivery finds the object, no call, done, and the lost call's cost row is written", async () => {
     const e = await parked("t20");
     const row = e.rows[0]!;
     const upload = e.w.deps.storage.uploadBuffer;
     let crashed = false;
-    e.w.deps.storage.uploadBuffer = (async (...args: Parameters<typeof upload>) => { const uri = await upload(...args); if (!crashed && args[0].includes("/derived/") && args[0].endsWith(".jpg")) { crashed = true; throw new Error("crash after upload"); } return uri; }) as typeof upload;
-    expect(await handleEnlargeTask(e.w.deps, enlargeBody(row))).toMatchObject({ httpStatus: 503 });
+    // The process dies right after the object is written: the delivery never returns and nothing after it runs.
+    e.w.deps.storage.uploadBuffer = (async (...args: Parameters<typeof upload>) => { const uri = await upload(...args); if (!crashed && args[0].includes("/derived/") && args[0].endsWith(".jpg")) { crashed = true; await new Promise(() => {}); } return uri; }) as typeof upload;
+    void handleEnlargeTask(e.w.deps, enlargeBody(row));
+    while (!crashed) await new Promise((r) => setTimeout(r, 5));
+    expect(await rowNow(row.id)).toMatchObject({ status: "queued", timeouts: 1 });
+    expect((await rowNow(row.id)).callStartedAt).not.toBeNull();
+    e.clock.tick(31);
     expect(await handleEnlargeTask(e.w.deps, enlargeBody(row))).toMatchObject({ httpStatus: 200, outcome: "done" });
     expect(e.service.paid()).toBe(1);
-    expect((await upscaleCosts(db, e.s.batch.id)).length).toBe(1);
+    const costs = await upscaleCosts(db, e.s.batch.id);
+    expect(costs.map((c) => c.outcome)).toEqual(["ok"]);
+    expect((await rowNow(row.id)).callStartedAt).toBeNull();
   }, 60_000);
 });
 
@@ -256,12 +265,13 @@ describe("handler: outages delay, failures count", () => {
     await corruptObject(e.w, a!.uri!);
     e.w.objects.set(b!.uri!, Buffer.from("not a jpeg"));
     const { handleChunkTask, currentChunkTask } = await import("./chunk");
-    // The render refuses both (primeReadiness): attempts+1, back to queued, sent again, the chunk parks.
+    // The render refuses both (primeReadiness): back to queued, sent again, the chunk parks; nothing counted yet.
     expect(await handleChunkTask(e.w.deps, await currentChunkTask(db, e.s.chunks[0]!.id))).toMatchObject({ httpStatus: 200 });
-    expect((await rowsOf(db, e.s.batch.id)).map((r) => [r.status, r.attempts, r.errorKind])).toEqual([["queued", 1, "invalid_object"], ["queued", 1, "invalid_object"]]);
+    expect((await rowsOf(db, e.s.batch.id)).map((r) => [r.status, r.attempts, r.errorKind])).toEqual([["queued", 0, "invalid_object"], ["queued", 0, "invalid_object"]]);
     expect(await chunkRow(db, e.s.chunks[0]!.id)).toMatchObject({ taskName: ENLARGING_TASK });
-    // The handler finds the refused object at its key and makes it again.
+    // The handler finds the refused object at its key, counts the one refusal (final check P2: once, not twice) and makes it again.
     for (const row of [a!, b!]) expect(await handleEnlargeTask(e.w.deps, enlargeBody(row))).toMatchObject({ outcome: "done" });
+    expect((await rowsOf(db, e.s.batch.id)).map((r) => [r.status, r.attempts])).toEqual([["done", 1], ["done", 1]]);
     expect(e.service.paid()).toBe(4);
     expect(await handleChunkTask(e.w.deps, await currentChunkTask(db, e.s.chunks[0]!.id))).toMatchObject({ httpStatus: 200 });
     expect((await outputsOf(db, e.s.batch.id)).every((o) => o.flags.includes("upscaled"))).toBe(true);
@@ -391,5 +401,191 @@ describe("sweep and re-send", () => {
     expect(await rowNow(row.id)).toMatchObject({ status: "queued", wanted: true });
     expect((await batchOf(db, e.s.batch.id)).status).not.toBe("failed");
     expect(await handleEnlargeTask(e.w.deps, enlargeBody(row))).toMatchObject({ outcome: "done" });
+  }, 60_000);
+});
+
+/**
+ * Final check 2026-10-30 (.runs/2026-10-30-18-final-check-*.md): every paid call is counted before it is made, so no
+ * path that skips the settle (a request killed at its deadline, a slow re-probe, an upload error, a crashed instance's
+ * bodiless 5xx) repeats it uncounted; only positive proof that no instance handled it gives the count back.
+ */
+describe("final check: a paid call is counted before it is made", () => {
+  it("P0-1: a poison input that kills its instance (Cloud Run's bodiless 503 and 500, through the real client) is terminal at 24 with exactly 24 paid calls; it never loops as busy", async () => {
+    for (const mode of ["crash503", "crash500"] as const) {
+      const e = await parked(`fc-${mode}`, { layout: [[1], [1]] });
+      const [poison, good] = e.rows;
+      e.service.state.mode = mode; e.service.state.poison.add(poison!.productId);
+      for (let i = 0; i < 60 && (await rowNow(poison!.id)).status === "queued"; i++) { await handleEnlargeTask(e.w.deps, enlargeBody(poison!)); e.clock.tick(15); }
+      expect(await rowNow(poison!.id)).toMatchObject({ status: "failed", attempts: 0, timeouts: ENLARGE_MAX_TIMEOUTS });
+      expect(e.service.paid(poison!.productId)).toBe(ENLARGE_MAX_TIMEOUTS);
+      expect((await upscaleCosts(db, e.s.batch.id)).length).toBe(ENLARGE_MAX_TIMEOUTS);
+      expect((await enlargeUntilSettled(e.w, good!)).at(-1)).toMatchObject({ outcome: "done" });
+    }
+  }, 240_000);
+
+  it("P1-3: Cloud Run's 'no available instance' 500 (through the real client) is busy: never counted, also on a forced call, done after", async () => {
+    const e = await parked("fc-no-instance");
+    const row = e.rows[0]!;
+    e.service.state.mode = "noInstance"; e.service.state.probe = "ok";
+    for (let i = 0; i < 40; i++) { expect(await handleEnlargeTask(e.w.deps, enlargeBody(row))).toMatchObject({ httpStatus: 503, outcome: "busy" }); e.clock.tick(15); }
+    // Forced (three probe timeouts in a row): the call is made without a probe and still meets no instance.
+    e.service.state.probe = "timeout";
+    for (let i = 0; i < 3; i++) expect(await handleEnlargeTask(e.w.deps, enlargeBody(row))).toMatchObject({ outcome: "probe_timeout" });
+    for (let i = 0; i < 30; i++) expect(await handleEnlargeTask(e.w.deps, enlargeBody(row))).toMatchObject({ httpStatus: 503, outcome: "busy" });
+    expect(await rowNow(row.id)).toMatchObject({ status: "queued", attempts: 0, timeouts: 0 });
+    e.service.state.mode = "ok"; e.service.state.probe = null;
+    expect(await handleEnlargeTask(e.w.deps, enlargeBody(row))).toMatchObject({ outcome: "done" });
+  }, 120_000);
+
+  it("P0 (deadline): a delivery killed at its 1800 s deadline in the middle of the call has already counted it; repeated kills end at 24 with exactly 24 paid calls and a cost row each", async () => {
+    const e = await parked("fc-kill");
+    const row = e.rows[0]!;
+    // Every call runs past the request's end (the worker's request timeout kills it mid-call).
+    e.service.state.callMs = 31 * 60_000;
+    expect(await deliverWithDeadline(e, enlargeBody(row))).toMatchObject({ httpStatus: 504, outcome: "killed" });
+    const first = await rowNow(row.id);
+    expect(first).toMatchObject({ status: "queued", timeouts: 1 });
+    expect(first.callStartedAt).not.toBeNull();
+    let deliveries = 1;
+    while ((await rowNow(row.id)).status === "queued" && deliveries < 60) {
+      e.clock.tick(1); // Cloud Tasks retries after its back-off; the claim (30 min) has lapsed with the request.
+      const result = await deliverWithDeadline(e, enlargeBody(row));
+      deliveries++;
+      if (result.outcome !== "killed") { expect(result).toMatchObject({ httpStatus: 200, outcome: "failed" }); break; }
+    }
+    const settled = await rowNow(row.id);
+    expect(settled).toMatchObject({ status: "failed", timeouts: ENLARGE_MAX_TIMEOUTS, attempts: 0 });
+    expect(settled.error).toMatch(/^The enlargement did not finish 24 times\./);
+    expect(e.service.paid()).toBe(ENLARGE_MAX_TIMEOUTS);
+    expect(deliveries).toBe(ENLARGE_MAX_TIMEOUTS + 1);
+    // Each lost call's cost row is written by the delivery after it.
+    expect((await upscaleCosts(db, e.s.batch.id)).length).toBe(ENLARGE_MAX_TIMEOUTS);
+    expect(e.w.log.mock.calls.filter(([m]) => m === "enlargement call lost")).toHaveLength(ENLARGE_MAX_TIMEOUTS);
+  }, 240_000);
+
+  it("P1-2: a call that times out at the deadline and a cold re-probe (180 s): the re-probe is clamped to the time left, the failure counts, the delivery answers before it is killed", async () => {
+    const e = await parked("fc-reprobe");
+    const row = e.rows[0]!;
+    e.service.state.hangUntilDeadline = true;
+    e.service.state.probeMs = 180_000;
+    const started = e.clock.at();
+    const result = await deliverWithDeadline(e, enlargeBody(row));
+    expect(result).toMatchObject({ httpStatus: 503, outcome: "retry" });
+    expect(e.clock.at() - started).toBeLessThan(ENLARGE_DISPATCH_DEADLINE_SEC * 1000);
+    expect(await rowNow(row.id)).toMatchObject({ status: "queued", timeouts: 1, claimToken: null });
+    expect((await rowNow(row.id)).callStartedAt).toBeNull();
+  }, 60_000);
+
+  it("P1-1: a probe answer other than a timeout resets the probe-timeout count (consecutive), so a busy fleet never forces a counted call", async () => {
+    const e = await parked("fc-probe-reset");
+    const row = e.rows[0]!;
+    e.service.state.mode = "busy";
+    for (const answer of ["timeout", "timeout", "ok", "timeout", "timeout", "busy", "timeout"] as const) {
+      e.service.state.probe = answer;
+      await handleEnlargeTask(e.w.deps, enlargeBody(row));
+    }
+    // Never three in a row: not forced.
+    expect((await rowNow(row.id)).probeTimeouts).toBe(1);
+    // Three in a row force the call; the fleet answers 429 to it for hours: busy, never counted.
+    e.service.state.probe = "timeout";
+    for (let i = 0; i < 2; i++) await handleEnlargeTask(e.w.deps, enlargeBody(row));
+    expect((await rowNow(row.id)).probeTimeouts).toBe(3);
+    for (let i = 0; i < 40; i++) { expect(await handleEnlargeTask(e.w.deps, enlargeBody(row))).toMatchObject({ httpStatus: 503, outcome: "busy" }); e.clock.tick(15); }
+    expect(await rowNow(row.id)).toMatchObject({ status: "queued", attempts: 0, timeouts: 0 });
+    // A re-probe that answers resets the count too.
+    e.service.state.mode = "healthyButHangs"; e.service.state.probe = "ok";
+    expect(await handleEnlargeTask(e.w.deps, enlargeBody(row))).toMatchObject({ outcome: "retry" });
+    expect(await rowNow(row.id)).toMatchObject({ timeouts: 1, probeTimeouts: 0 });
+  }, 120_000);
+
+  it("rows 45-66 P1-2: an upload refused after a paid call is counted; the made image is stored by the next delivery without another call; a refusal that never ends is terminal at 24 with one paid call", async () => {
+    clearMadeImages();
+    const e = await parked("fc-upload");
+    const row = e.rows[0]!;
+    const upload = e.w.deps.storage.uploadBuffer;
+    let refuse = 2;
+    e.w.deps.storage.uploadBuffer = (async (...args: Parameters<typeof upload>) => { if (args[0].includes("/derived/") && refuse-- > 0) throw Object.assign(new Error("Forbidden"), { code: 403 }); return upload(...args); }) as typeof upload;
+    // Two refusals then a pass inside one delivery's tries: done, one call.
+    expect(await handleEnlargeTask(e.w.deps, enlargeBody(row))).toMatchObject({ outcome: "done" });
+    expect(e.service.paid()).toBe(1);
+    expect(await rowNow(row.id)).toMatchObject({ status: "done", timeouts: 0 });
+    // Refused for good: each delivery counts; only the first one calls the service.
+    clearMadeImages();
+    const f = await parked("fc-upload-forever");
+    const bad = f.rows[0]!;
+    const up = f.w.deps.storage.uploadBuffer;
+    f.w.deps.storage.uploadBuffer = (async (...args: Parameters<typeof up>) => { if (args[0].includes("/derived/")) throw Object.assign(new Error("Forbidden"), { code: 403 }); return up(...args); }) as typeof up;
+    const results = await enlargeUntilSettled(f.w, bad, 60);
+    expect(results.at(-1)).toMatchObject({ outcome: "failed" });
+    expect(await rowNow(bad.id)).toMatchObject({ status: "failed", timeouts: ENLARGE_MAX_TIMEOUTS, errorKind: "upload" });
+    expect(f.service.paid()).toBe(1);
+    expect(results).toHaveLength(ENLARGE_MAX_TIMEOUTS);
+  }, 240_000);
+
+  it("rows 45-66 P2-2: a convert or raw-read refusal that waiting cannot change (4xx) counts bad_source; a 5xx only delays", async () => {
+    const e = await parked("fc-convert", { layout: [[1], [1]] });
+    const [refused, down] = e.rows;
+    const prepare = e.w.deps.prepare;
+    e.w.deps.prepare = (async (buf, name, convert) => { await convert(buf); return prepare(buf, name, convert); }) as typeof prepare;
+    let status = 403;
+    e.w.deps.matting.convert = (async () => { throw new Error(`Background removal request rejected (${status}).`); }) as typeof e.w.deps.matting.convert;
+    const results = await enlargeUntilSettled(e.w, refused!);
+    expect(results.at(-1)).toMatchObject({ outcome: "failed" });
+    expect(await rowNow(refused!.id)).toMatchObject({ status: "failed", attempts: ENLARGE_TASK_MAX_ATTEMPTS, errorKind: "bad_source" });
+    status = 503;
+    e.w.deps.matting.convert = (async () => { throw Object.assign(new Error("Background removal service returned 503."), { status: 503 }); }) as typeof e.w.deps.matting.convert;
+    for (let i = 0; i < 12; i++) expect(await handleEnlargeTask(e.w.deps, enlargeBody(down!))).toMatchObject({ httpStatus: 503, outcome: "unavailable" });
+    expect(await rowNow(down!.id)).toMatchObject({ status: "queued", attempts: 0 });
+  }, 120_000);
+
+  it("rows 01-22 P1-4: the stale re-send is per lane: a batch whose tasks wait behind another batch's on the same lane is not re-sent while the lane moves", async () => {
+    const a = await parked("fc-lane-a");
+    const b = await parked("fc-lane-b", { world: a });
+    a.service.state.mode = "busy";
+    // Only batch A's task is delivered for 70 minutes (B's wait behind it in the queue).
+    for (let m = 0; m < 70; m += 10) { await handleEnlargeTask(a.w.deps, enlargeBody(a.rows[0]!)); a.clock.tick(10); await sweep(db, a.w); }
+    expect((await rowsOf(db, b.s.batch.id)).map((r) => r.sends)).toEqual([0]);
+    // The lane goes quiet for an hour: B is re-sent.
+    a.clock.tick(61);
+    await sweep(db, a.w);
+    expect((await rowsOf(db, b.s.batch.id)).map((r) => r.sends)).toEqual([1]);
+  }, 120_000);
+
+  it("rows 45-66 P2: an old-format enlarge task ({sourceImageId, round}) answers 200 so the queue drops it", async () => {
+    const e = await parked("fc-old-format");
+    expect(await handleEnlargeTask(e.w.deps, { batchId: e.s.batch.id, sourceImageId: e.rows[0]!.sourceImageId, round: 0 })).toMatchObject({ httpStatus: 200, outcome: "stale_format" });
+    expect(e.service.paid()).toBe(0);
+  }, 60_000);
+
+  it("system P2-1: a prepare with a new result every time cannot cycle: after 3 identity releases the next identity is born failed and the photo is held", async () => {
+    const e = enlargeWorld(db);
+    const prepare = e.w.deps.prepare;
+    let n = 0;
+    e.w.deps.prepare = (async (...args: Parameters<typeof prepare>) => { const p = await prepare(...args); p.rgb = Buffer.alloc(p.rgb.length, 100 + (n++ % 50)); return p; }) as typeof prepare;
+    const s = await seedEnlargeBatch(db, e.w, "fc-identity", [[1]]);
+    const { handleChunkTask, currentChunkTask } = await import("./chunk");
+    const chunkId = s.chunks[0]!.id;
+    await handleChunkTask(e.w.deps, await currentChunkTask(db, chunkId));
+    for (let round = 0; round < 10; round++) {
+      for (const row of (await rowsOf(db, s.batch.id)).filter((r) => r.wanted && r.status === "queued")) await handleEnlargeTask(e.w.deps, enlargeBody(row));
+      await handleChunkTask(e.w.deps, await currentChunkTask(db, chunkId));
+    }
+    const rows = await rowsOf(db, s.batch.id);
+    expect(rows.reduce((t, r) => t + r.identityReleases, 0)).toBe(ENLARGE_MAX_IDENTITY_CHANGES);
+    expect(rows.filter((r) => r.wanted && r.status === "queued")).toEqual([]);
+    expect(rows.filter((r) => r.wanted).map((r) => [r.status, r.errorKind])).toEqual([["failed", "identity_unstable"]]);
+    expect(rows.length).toBeLessThanOrEqual(ENLARGE_MAX_IDENTITY_CHANGES + 2);
+    expect((await outputsOf(db, s.batch.id)).map((o) => [o.status, o.flags.includes("enlargement_failed")])).toEqual([["needs_attention", true]]);
+    expect(e.service.paid()).toBe(0);
+  }, 120_000);
+
+  it("the real client's 503 crash answer through workerEnlargeCall reaches the handler as unexplained (counted), not busy", async () => {
+    const e = await parked("fc-real-client");
+    const row = e.rows[0]!;
+    const fetch = vi.fn(async () => new Response("The request failed because either the HTTP response was malformed or connection to the instance had an error.", { status: 503 }));
+    e.w.deps.enlarge = workerEnlargeCall("swinir-x2", { UPSCALE_URL: "https://catalog-upscale-abc-el.a.run.app" }, { fetch: fetch as unknown as typeof globalThis.fetch, idToken: async () => "t" });
+    expect(await handleEnlargeTask(e.w.deps, enlargeBody(row))).toMatchObject({ httpStatus: 503, outcome: "retry" });
+    expect(await rowNow(row.id)).toMatchObject({ timeouts: 1, errorKind: "unexplained" });
+    expect(ENLARGE_CLAIM_MS).toBe(ENLARGE_DISPATCH_DEADLINE_SEC * 1000);
   }, 60_000);
 });

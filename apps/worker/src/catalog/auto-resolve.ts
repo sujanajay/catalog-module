@@ -1,6 +1,6 @@
 import sharp from "sharp";
-import { and, eq } from "drizzle-orm";
-import { catalogBatches, catalogEnlargements, catalogOutputs, catalogProducts, catalogSourceImages } from "@catalog/core/db/schema";
+import { eq } from "drizzle-orm";
+import { catalogBatches, catalogOutputs, catalogProducts, catalogSourceImages } from "@catalog/core/db/schema";
 import { batchPrefix, stagingPath } from "@catalog/core/catalog/naming";
 import { shotGeometry, type Matte, type Prepared, type RenderInput, type RenderMeasured, type RenderOutput } from "@catalog/core/catalog/render";
 import { actionsOn, autoActionsOf, diagnoseOutput, failuresOf, LadderStopped, MAX_REJUDGES_PER_PHOTO, MAX_REPAIRS_PER_OUTPUT, measuredOf, ownDefects, RENDER_FLAGS, variantOf, withAutoActions, type AutoAction, type AutoActionKind, type Repair, type RenderVariant } from "@catalog/core/catalog/auto-resolve";
@@ -8,7 +8,7 @@ import { strictestChannel } from "@catalog/core/catalog/qa/policy";
 import { heldInHand, isBusyBackground, passthroughMatte, passthroughProductLoss, PASSTHROUGH_PRODUCT_LOSS_MAX } from "@catalog/core/catalog/matte-guard";
 import type { ChannelId, OutputFlag, ResolvedPolicy } from "@catalog/core/catalog/types";
 import type { CatalogDeps } from "./deps";
-import { batchEnlargement, primeReadiness } from "./enlarge";
+import { batchEnlargement, primeReadiness, wantedRowsOfPixels } from "./enlarge";
 import { pixelHashOf } from "@catalog/core/catalog/pipeline/enlargement";
 import { EnlargementNotReadyError } from "@catalog/core/catalog/upscale";
 import { renderKey, rerenderedKey } from "@catalog/core/catalog/pipeline/publish";
@@ -56,8 +56,7 @@ export async function preparePrimed(deps: CatalogDeps, input: { batch: Batch; so
   const p = await deps.prepare((await deps.storage.downloadBuffer(source.rawUri)).buf,source.originalName,b=>deps.matting.convert(b,trace));
   const be = batchEnlargement(deps,batch);
   if (be) {
-    const hash = pixelHashOf(p.rgb,p.width,p.height);
-    const rows = (await deps.db.select().from(catalogEnlargements).where(and(eq(catalogEnlargements.batchId,batch.id),eq(catalogEnlargements.sourceImageId,source.id),eq(catalogEnlargements.wanted,true)))).filter(r=>r.pixelHash === hash);
+    const rows = await wantedRowsOfPixels(deps.db,batch.id,source.id,pixelHashOf(p.rgb,p.width,p.height));
     await primeReadiness(deps,{be,batch,photos:[{source,p}],rows,write:input.underClaim});
   }
   return p;

@@ -26,7 +26,9 @@ const URL_ = "https://catalog-upscale-abc-el.a.run.app";
 const JPEG = Buffer.from([0xff, 0xd8, 0xff, 0xd9]);
 const X2 = Buffer.from([0xff, 0xd8, 1, 2, 3, 0xff, 0xd9]);
 
-type Answer = number | "ok" | "hang" | "throw" | "unavailable";
+type Answer = number | "ok" | "hang" | "throw" | "unavailable" | "full";
+/** Cloud Run's own 503 when every instance is taken (docs.cloud.google.com/run/docs/troubleshooting): no instance handled it. */
+const CLOUD_RUN_FULL_503 = "The Cloud Run service probably has reached its maximum container instance limit. Consider increasing this limit.";
 /** A fake fetch answering one entry of `answers` per call (the last repeats); records every call. */
 function fakeService(answers: Answer[]) {
   const calls: { url: string; init: RequestInit }[] = [];
@@ -39,8 +41,9 @@ function fakeService(answers: Answer[]) {
     if (answer === "throw") throw new TypeError("fetch failed");
     // The service's own 503 (app.py upscale_error); a plain 503 below is Cloud Run's busy answer.
     if (answer === "unavailable") return Response.json({ error: "upscale model swinir-x2 unavailable" }, { status: 503 });
+    if (answer === "full") return new Response(CLOUD_RUN_FULL_503, { status: 503 });
     if (answer === "ok") return new Response(new Uint8Array(X2), { headers: { "content-type": "image/jpeg", "x-upscale-ms": "118000", "x-upscale-model": "swinir-x2" } });
-    // A numbered answer carries no service body (Cloud Run's own 503, a proxy's 5xx, a plain 4xx).
+    // A numbered answer carries no service body and no Cloud Run refusal text (an instance that died, a proxy's 5xx, a plain 4xx).
     return new Response("upstream answer", { status: answer });
   }) as unknown as typeof globalThis.fetch;
   const sleeps: number[] = [];
@@ -106,6 +109,23 @@ describe("enlargeViaService", () => {
     expect(undici.fetch.mock.calls[1]![1].dispatcher).toBe(undici.agents[0]);
   });
 
+  it("final check P0-1: a 5xx that reached an instance (killed for memory, a broken connection) is a server failure, never busy; only Cloud Run's own refusal texts and 429 are busy", async () => {
+    const answer = async (status: number, body: string) => enlargeViaService({ url: URL_, jpeg: JPEG, model: "swinir-x2", maxAttempts: 1 }, { idToken: async () => "t", fetch: (async () => new Response(body, { status })) as unknown as typeof fetch }).catch((e: unknown) => e);
+    // Reached an instance: a crash on this input (Cloud Run troubleshooting: 503 "connection to the instance had an
+    // error", 500 or 503 when the container exceeded its memory, an empty body, the service's own timeout).
+    for (const [status, body] of [[503, "The request failed because either the HTTP response was malformed or connection to the instance had an error."], [503, ""], [500, "While handling this request, the container instance was found to be using too much memory and was terminated."], [500, ""], [504, "The request has been terminated because it has reached the maximum request timeout."]] as const) {
+      const error = await answer(status, body);
+      expect(error, `${status} ${body}`).toBeInstanceOf(EnlargeServerError);
+      expect(error).toMatchObject({ kind: "server", status, ownBody: false });
+    }
+    // Never reached an instance: Cloud Run's own refusals.
+    for (const [status, body] of [[429, ""], [429, "The request was aborted because there was no available instance."], [500, "The request was aborted because there was no available instance."], [503, CLOUD_RUN_FULL_503], [500, "The request failed because the instance could not start successfully."]] as const) {
+      const error = await answer(status, body);
+      expect(error, `${status} ${body}`).toBeInstanceOf(EnlargeBusyError);
+      expect(error).toMatchObject({ kind: "busy", status });
+    }
+  });
+
   it("never retries a bad image or a refused call", async () => {
     for (const [status, type] of [[400, EnlargeBadInputError], [413, EnlargeBadInputError], [401, EnlargeRejectedError], [403, EnlargeRejectedError], [404, EnlargeRejectedError]] as const) {
       const s = fakeService([status, "ok"]);
@@ -117,8 +137,8 @@ describe("enlargeViaService", () => {
   });
 
   it("gives up after the attempt cap with the last typed error", async () => {
-    for (const status of [503, 429]) {
-      const s = fakeService([status]);
+    for (const [answer, status] of [["full", 503], [429, 429]] as const) {
+      const s = fakeService([answer]);
       const error = await enlargeViaService({ url: URL_, jpeg: JPEG, model: "swinir-x2", timeoutMs: 60_000, maxAttempts: 3 }, s.deps).catch((e: unknown) => e);
       expect(error).toBeInstanceOf(EnlargeBusyError);
       expect(error).toMatchObject({ kind: "busy", status, retryable: true, attempts: 3 });
@@ -130,7 +150,7 @@ describe("enlargeViaService", () => {
   it("the deadline defaults to the enlarge task's dispatch deadline from the call; the attempt cap is only a second limit", async () => {
     // 400 s attempts within the default 1770 s: 0-400, 410-810, 830-1230, 1270-1670; a fifth would start after a 60 s
     // wait with 40 s left, under ENLARGE_ATTEMPT_FLOOR_MS.
-    const s = fakeService([503]);
+    const s = fakeService(["full"]);
     const started = s.now();
     const error = await enlargeViaService({ url: URL_, jpeg: JPEG, model: "swinir-x2", timeoutMs: 400_000, maxAttempts: 10 }, {
       ...s.deps, fetch: (async (url: string, init: RequestInit) => { s.advance(400_000); return s.deps.fetch!(url, init); }) as unknown as typeof fetch,
@@ -140,7 +160,7 @@ describe("enlargeViaService", () => {
     expect(s.now() - started).toBeLessThanOrEqual(ENLARGE_DISPATCH_DEADLINE_SEC * 1000 - ENLARGE_TASK_MARGIN_MS);
     // With today's default timeout (1770 s, as long as the 1770 s left) the attempt is clamped to the time left, and a
     // busy answer is retried while at least ENLARGE_ATTEMPT_FLOOR_MS is left (2026-10-29 review, P0).
-    const one = fakeService([503]);
+    const one = fakeService(["full"]);
     const only = await enlargeViaService({ url: URL_, jpeg: JPEG, model: "swinir-x2", maxAttempts: 3 }, one.deps).catch((e: unknown) => e);
     expect(only).toMatchObject({ kind: "busy", attempts: 3 });
     expect(one.calls).toHaveLength(3);
@@ -192,7 +212,7 @@ describe("enlargeViaService", () => {
     // be left, below the 60 s floor, so the busy error stands.
     const timeouts = vi.spyOn(AbortSignal, "timeout");
     try {
-      const s = fakeService([503]);
+      const s = fakeService(["full"]);
       const deadlineAt = s.now() + 150_000;
       const error = await enlargeViaService({ url: URL_, jpeg: JPEG, model: "swinir-x2", timeoutMs: 100_000, deadlineAt, maxAttempts: 10 }, s.deps).catch((e: unknown) => e);
       expect(error).toBeInstanceOf(EnlargeBusyError);

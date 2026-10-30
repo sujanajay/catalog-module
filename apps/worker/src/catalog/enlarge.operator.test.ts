@@ -272,12 +272,17 @@ function secondCutOut(e: EnlargeWorld, second: (p: { width: number; height: numb
 const boxAlpha = (p: { width: number; height: number }, inset: number) => { const a = Buffer.alloc(p.width * p.height, 0); for (let y = inset; y < p.height - inset; y++) a.fill(255, y * p.width + inset, y * p.width + p.width - inset); return a; };
 
 describe("judges honour readiness (3.3)", () => {
-  it("T8 (F8): a render-stage compliance failure repaired by a variant: the variant is upscaled from the stored image, no enlargement_failed", async () => {
+  it("T8 (F8): a render-stage compliance failure repaired by a variant that changes the product's size (refit): the variant is upscaled from the stored image, no enlargement_failed, no second call", async () => {
+    // The render-stage ladder answers only `failed_compliance` (chunk.ts), and diagnoseOutput adds the matte steps only
+    // for the judge's flags (halo, leftover_background, product_removed): a matte change cannot happen at the render
+    // stage (final check 2026-10-30). The variant that changes the enlargement need there is a refit (a smaller fit).
     const e = enlargeWorld(db);
     const render = e.w.deps.renderAllChannels;
+    const fits: (number | undefined)[] = [];
     e.w.deps.renderAllChannels = (async (p, m, channels, ctx) => {
+      fits.push(ctx?.fitScale);
       const out = await render(p, m, channels, ctx);
-      if (ctx?.jpegQualityMin === undefined) for (const c of channels) out[c] = { ...out[c]!, flags: [...out[c]!.flags, "failed_compliance"], compliance: { ...out[c]!.compliance, ok: false, failures: ["bytes: The file is over 2 MB."] } };
+      if (ctx?.fitScale === undefined) for (const c of channels) out[c] = { ...out[c]!, flags: [...out[c]!.flags, "failed_compliance"], compliance: { ...out[c]!.compliance, ok: false, failures: ["inside_safe_box: The product leaves the safe box."] } };
       return out;
     }) as typeof render;
     const s = await seedEnlargeBatch(db, e.w, "t8", [[1]]);
@@ -285,7 +290,10 @@ describe("judges honour readiness (3.3)", () => {
     await drain(e.w, only(s));
     const [out] = await outputsOf(db, s.batch.id);
     expect(out!.flags).toContain("upscaled"); expect(out!.flags).not.toContain("enlargement_failed");
-    expect(autoActionsOf(out!.compliance).some((a) => a.step === "reencode" && a.result === "passed")).toBe(true);
+    expect(autoActionsOf(out!.compliance).find((a) => a.step === "refit")).toMatchObject({ result: "passed" });
+    // The refit rendered at a smaller fit, from the one stored image (one paid call for the photo).
+    expect(fits.some((f) => f !== undefined && f < 1)).toBe(true);
+    expect(["staged", "verified"]).toContain(out!.status);
     expect(e.service.paid()).toBe(1);
   }, 180_000);
 
@@ -299,7 +307,13 @@ describe("judges honour readiness (3.3)", () => {
     const [out] = await outputsOf(db, s.batch.id);
     expect(autoActionsOf(out!.compliance).some((a) => a.step === "second_matte" && a.result === "passed")).toBe(true);
     expect(out!.flags).toContain("upscaled"); expect(out!.flags).not.toContain("enlargement_failed");
-    expect((await photosOf(db, s.batch.id))[0]!.matteUri).toMatch(/second|matte2|\.png$/);
+    // The second cut-out is persisted (its own object, its model), replacing the first.
+    const [photo] = await photosOf(db, s.batch.id);
+    expect(photo!.matteUri).toMatch(/\.matte2\.png$/);
+    expect(photo!.matteModel).toBe("second");
+    expect(e.w.objects.has(photo!.matteUri!)).toBe(true);
+    // The judge looked once, then once more after the repair (the re-judge); no redelivery judged it again.
+    expect(vi.mocked(e.w.deps.judgeOutput).mock.calls).toHaveLength(2);
     expect(e.service.paid()).toBe(1);
   }, 180_000);
 
@@ -310,19 +324,22 @@ describe("judges honour readiness (3.3)", () => {
     judgeFlagsOnce(e, ["product_removed"]);
     const s = await seedEnlargeBatch(db, e.w, "t50", [[1]], { route: { model: "swinir-x2", x4Model: "swinir-x4", minScale: 1 } });
     await startChunks(db, e.w, s.chunks.map((c) => c.id));
-    const matteBefore = async () => (await photosOf(db, s.batch.id))[0]!.matteUri;
     await drain(e.w, { ...only(s), onDelivery: async () => {} });
     const [out] = await outputsOf(db, s.batch.id);
     const steps = autoActionsOf(out!.compliance);
-    const skipped = steps.find((a) => a.result === "skipped" && a.detail === "enlargement not ready");
-    if (skipped) {
-      expect(["second_matte", "matte_passthrough"]).toContain(skipped.step);
-      expect(await matteBefore()).not.toMatch(/second/);
-    } else {
-      // The second cut-out stayed inside the planned bands: it is served by the stored image (never a plain resize).
-      expect(out!.flags).toContain("upscaled");
-    }
-    expect(out!.flags.includes("upscaled") || out!.status === "needs_attention").toBe(true);
+    // The band crossing is forced (final check 2026-10-30): the second cut-out's need is above 2.0x and the batch made
+    // only the x2 image, so the step is skipped as not ready and the ladder stops there.
+    expect(steps).toEqual([expect.objectContaining({ step: "second_matte", result: "skipped", detail: "enlargement not ready" })]);
+    // No matte persisted after the skip: the photo keeps its first cut-out (object and model).
+    const [photo] = await photosOf(db, s.batch.id);
+    expect(photo!.matteUri).toMatch(/\.png$/);
+    expect(photo!.matteUri).not.toMatch(/\.matte(2|-whole)\.png$/);
+    expect(photo!.matteModel).toBe("fixture");
+    // The first image is kept and the output held for the judge's flag; never a plain resize, never a second call.
+    expect(out!.status).toBe("needs_attention");
+    expect(out!.flags).toEqual(expect.arrayContaining(["product_removed", "upscaled"]));
+    expect(out!.flags).not.toContain("enlargement_failed");
+    expect(e.service.paid()).toBe(1);
     expect((await runInvariants(db, () => {}, e.clock.now(), { batchId: s.batch.id })).counts.enlarged_without_upscaler).toBe(0);
   }, 180_000);
 
