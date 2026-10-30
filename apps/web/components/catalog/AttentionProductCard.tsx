@@ -93,7 +93,7 @@ function PhotoRow({ item, photo, state, canAct, channels, onDecided }: RowProps)
               <div className="acts">
                 <button className="btn sm ok" disabled={busy || decided} onClick={() => decide("use_as_is")}>Use as is</button>
                 <button className="btn sm ghost" disabled={busy || decided} onClick={() => (photo.liveObjectExists ? setConfirming(true) : decide("remove"))}>Remove this photo</button>
-                {notEnlarged && <button className="btn sm ghost" disabled={busy || decided} onClick={() => void tryAgain()}>{TRY_AGAIN_LABEL}</button>}
+                {notEnlarged && photo.canRetry && <button className="btn sm ghost" disabled={busy || decided} onClick={() => void tryAgain()}>{TRY_AGAIN_LABEL}</button>}
                 <button className="btn sm ghost" disabled={busy || decided} onClick={() => setReplacing(true)}>Replace photo {photo.n}</button>
               </div>
             )}

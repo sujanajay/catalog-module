@@ -11,6 +11,10 @@ import { POST as replacement } from "../app/api/catalog/outputs/[id]/replacement
 import { POST as retryEnlargementRoute } from "../app/api/catalog/outputs/[id]/retry-enlargement/route";
 import { catalogEnlargements,catalogProductEvents } from "@catalog/core/db/schema";
 import { flagDetails } from "@catalog/core/catalog/qa/reasons";
+import { listAttention } from "@catalog/core/catalog/attention";
+import { RETRY_STOPPED_BATCH } from "@catalog/core/catalog/decisions";
+import { catalogChunks } from "@catalog/core/db/schema";
+import { ENLARGEMENT_FAILED_WHAT, ENLARGEMENT_FAILED_WHAT_NO_RETRY } from "@catalog/core/catalog/types";
 import { plainWarningText,TRY_AGAIN_LABEL,TRY_AGAIN_STATUS,TRY_AGAIN_TOAST } from "../lib/catalog/copy";
 import { POST as replacementComplete } from "../app/api/catalog/outputs/[id]/replacement/complete/route";
 import { POST as skuMapPost } from "../app/api/catalog/batches/[id]/sku-map/route";
@@ -129,6 +133,39 @@ it("T59: Try again is operator only, answers 409 when nothing failed, and queues
  expect((await db.select().from(catalogOutputs).where(eq(catalogOutputs.id,id)))[0]).toMatchObject({status:"pending",flags:[]});
  expect(vi.mocked(enqueueTask).mock.calls.map(c=>c[0])).toEqual(["/tasks/catalog/enlarge"]);
  r=await retryEnlargementRoute(req({}),{params:Promise.resolve({id})});expect(r.status).toBe(409);
+});
+it("final check P1 (F14): Try again on a batch that has stopped answers 409 with the reason and changes nothing (no pending output, no parked chunk, no product lock)",async()=>{
+ const held=await heldForEnlargement();
+ for(const status of ["failed","cancelled"] as const){
+  await db.update(catalogBatches).set({status}).where(eq(catalogBatches.id,batchId));
+  vi.mocked(enqueueTask).mockClear();
+  const r=await retryEnlargementRoute(req({}),{params:Promise.resolve({id})});
+  expect(r.status).toBe(409);expect(await r.json()).toEqual({error:RETRY_STOPPED_BATCH});
+  expect((await db.select().from(catalogOutputs).where(eq(catalogOutputs.id,id)))[0]).toMatchObject({status:"needs_attention",flags:["enlargement_failed"],stagingUri:"gs://private/staged"});
+  expect((await db.select().from(catalogEnlargements).where(eq(catalogEnlargements.batchId,batchId))).map(row=>row.status)).toEqual(["failed"]);
+  expect(await db.select().from(catalogChunks).where(eq(catalogChunks.batchId,batchId))).toEqual([]);
+  expect((await db.select().from(catalogProducts).where(eq(catalogProducts.id,held.productId)))[0]!.lockBatchId).toBeNull();
+  expect(vi.mocked(enqueueTask)).not.toHaveBeenCalled();
+ }
+});
+it("final check P1 (F28): the card of a photo too large to enlarge says why and offers no Try again; a retryable one offers it; a stopped batch offers none",async()=>{
+ const held=await heldForEnlargement();
+ const sign=async(uri:string)=>`https://signed/${uri}`;
+ const photoOf=async()=>(await listAttention(db,batchId,sign))[0]!.photos[0]!;
+ let photo=await photoOf();
+ expect(photo).toMatchObject({canRetry:true,whatToDo:ENLARGEMENT_FAILED_WHAT});
+ // A size refusal (route none): its own sentence with the channel's label, and the actions that can run.
+ await db.update(catalogEnlargements).set({route:"none",error:"This photo is too large to enlarge as much as Noon needs.",errorKind:"no_route",attempts:0}).where(eq(catalogEnlargements.sourceImageId,held.sourceImageId));
+ photo=await photoOf();
+ expect(photo.canRetry).toBe(false);
+ expect(photo.why).toContain("This photo is too large to enlarge as much as Noon needs.");
+ expect(photo.whatToDo).toBe(ENLARGEMENT_FAILED_WHAT_NO_RETRY);
+ expect(photo.whatToDo).not.toMatch(/try again/i);
+ const r=await retryEnlargementRoute(req({}),{params:Promise.resolve({id})});expect(r.status).toBe(409);
+ // A retryable photo on a stopped batch: no Try again either.
+ await db.update(catalogEnlargements).set({route:"direct",errorKind:"bad_input"}).where(eq(catalogEnlargements.sourceImageId,held.sourceImageId));
+ await db.update(catalogBatches).set({status:"failed"}).where(eq(catalogBatches.id,batchId));
+ expect(await photoOf()).toMatchObject({canRetry:false,whatToDo:ENLARGEMENT_FAILED_WHAT_NO_RETRY});
 });
 it("T59: the enlargement copy names no model",async()=>{
  const words=[plainWarningText(["Noon","Styli"]),TRY_AGAIN_LABEL,TRY_AGAIN_STATUS,TRY_AGAIN_TOAST,...Object.values(flagDetails("enlargement_failed"))].join(" ");

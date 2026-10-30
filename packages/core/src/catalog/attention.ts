@@ -1,14 +1,15 @@
 import { and, asc, eq, inArray, isNull } from "drizzle-orm";
 import type { Db } from "../db/client";
-import { catalogBatches,catalogOutputs,catalogProducts,catalogSourceImages } from "../db/schema";
+import { catalogBatches,catalogEnlargements,catalogOutputs,catalogProducts,catalogSourceImages } from "../db/schema";
 import { channel } from "./channels";
-import type { ChannelId,OutputFlag } from "./types";
+import { ENLARGEMENT_FAILED_WHAT_NO_RETRY,type ChannelId,type OutputFlag } from "./types";
 import { strictestChannel } from "./qa/policy";
 import { MAX_REASONS_PER_PHOTO,bySeverity,flagDetails,problemLine,severityRank } from "./qa/reasons";
 import { INFORMATION_FLAGS } from "./qa/triage";
 import { actionsOn, busyBackgroundHold, failuresOf, OWN_DEFECT_FLAGS } from "./auto-resolve";
 import { plainFailures, triedSentence } from "./qa/reasons";
-export interface AttentionPhoto { n:number;channel:ChannelId;outputId:string;outputIds:string[];originalUrl:string;outputUrl:string|null;why:string;whatToDo:string;liveObjectExists:boolean;liveChannels:ChannelId[];failed:boolean;flags:OutputFlag[] }
+/** `canRetry`: "Try again" can run for this photo (spec 18 lifecycle 3.6): it is held for its enlargement, its batch is not stopped and a call can make one of its failed identities (a size refusal cannot). */
+export interface AttentionPhoto { n:number;channel:ChannelId;outputId:string;outputIds:string[];originalUrl:string;outputUrl:string|null;why:string;whatToDo:string;liveObjectExists:boolean;liveChannels:ChannelId[];failed:boolean;flags:OutputFlag[];canRetry:boolean }
 export interface AttentionProduct { productId:string;identifier:string;totalShots:number;problemLine:string;photos:AttentionPhoto[] }
 const information = INFORMATION_FLAGS;
 const local = (flag:OutputFlag)=>flag==="placement" || flag==="failed_compliance" || flag==="low_resolution";
@@ -18,10 +19,13 @@ export async function listAttention(db:Db,batchId:string,sign:(uri:string)=>Prom
  const rows=await db.select({output:catalogOutputs,source:catalogSourceImages,identifier:catalogProducts.identifier}).from(catalogOutputs).innerJoin(catalogSourceImages,eq(catalogOutputs.sourceImageId,catalogSourceImages.id)).innerJoin(catalogProducts,eq(catalogOutputs.productId,catalogProducts.id)).where(and(eq(catalogOutputs.batchId,batchId),isNull(catalogOutputs.decision),inArray(catalogOutputs.status,["needs_attention","failed"]))).orderBy(asc(catalogProducts.identifier),asc(catalogOutputs.n),asc(catalogOutputs.channel));
  if(!rows.length)return [];
  const ids=[...new Set(rows.map(r=>r.output.productId))];
- const [live,sources]=await Promise.all([
+ const [live,sources,enlargements]=await Promise.all([
  db.select({productId:catalogOutputs.productId,n:catalogOutputs.n,channel:catalogOutputs.channel}).from(catalogOutputs).where(and(inArray(catalogOutputs.productId,ids),eq(catalogOutputs.isLive,true),inArray(catalogOutputs.channel,batch.channels))),
- db.select({productId:catalogSourceImages.productId,n:catalogSourceImages.n}).from(catalogSourceImages).where(and(eq(catalogSourceImages.batchId,batchId),inArray(catalogSourceImages.productId,ids)))
+ db.select({productId:catalogSourceImages.productId,n:catalogSourceImages.n}).from(catalogSourceImages).where(and(eq(catalogSourceImages.batchId,batchId),inArray(catalogSourceImages.productId,ids))),
+ // Spec 18 lifecycle 3.6 (final check 2026-10-30): the photo's failed enlargements say why it was held and whether Try again can run.
+ db.select({sourceImageId:catalogEnlargements.sourceImageId,route:catalogEnlargements.route,error:catalogEnlargements.error,errorKind:catalogEnlargements.errorKind}).from(catalogEnlargements).where(and(eq(catalogEnlargements.batchId,batchId),inArray(catalogEnlargements.productId,ids),eq(catalogEnlargements.wanted,true),eq(catalogEnlargements.status,"failed")))
  ]);
+ const stopped=batch.status==="failed"||batch.status==="cancelled";
  const groups=new Map<string,typeof rows>();
  for(const row of rows){
   // Every held output stays listed, even one carrying only information flags (a row held before a
@@ -46,7 +50,13 @@ export async function listAttention(db:Db,batchId:string,sign:(uri:string)=>Prom
   const tried=OWN_DEFECT_FLAGS.has(flag as OutputFlag)&&!context.busy?triedSentence(actionsOn(o.compliance,o.channel).filter(a=>a.result!=="skipped").map(a=>a.step)):"";
   const main=flagDetails(flag,context),others=[...problemFlags.filter(f=>f!==flag).slice(0,MAX_REASONS_PER_PHOTO-1),...flags.filter(f=>information.has(f))].map(f=>flagDetails(f,context));
   const liveChannels=[...new Set(live.filter(l=>l.productId===o.productId&&l.n===o.n&&(siblings.length>1||!flags.every(local)||l.channel===o.channel)).map(l=>l.channel))];
-  const photo:AttentionPhoto={n:o.n,channel:o.channel,outputId:o.id,outputIds:siblings.map(r=>r.output.id),originalUrl:await sign(row.source.rawUri),outputUrl:o.stagingUri?await sign(o.stagingUri):null,why:[main.why,tried,...others.map(d=>d.why)].filter(Boolean).join(" "),whatToDo:main.whatToDo,liveObjectExists:liveChannels.length>0,liveChannels,failed:siblings.some(r=>r.output.status==="failed"),flags};
+  // A photo held for its enlargement: a size refusal (route none) or an unstable prepare says so in its own words, and
+  // Try again is offered only when a call can make one of its failed identities and the batch still runs.
+  const failedRows=flags.includes("enlargement_failed")?enlargements.filter(e=>e.sourceImageId===o.sourceImageId):[];
+  const canRetry=!stopped&&failedRows.some(e=>e.route!=="none");
+  const own=flag==="enlargement_failed"?(failedRows.find(e=>e.route==="none")??failedRows.find(e=>e.errorKind==="identity_unstable")):undefined;
+  const leadWhy=own?.error??main.why,leadWhat=flag==="enlargement_failed"&&!canRetry?ENLARGEMENT_FAILED_WHAT_NO_RETRY:main.whatToDo;
+  const photo:AttentionPhoto={n:o.n,channel:o.channel,outputId:o.id,outputIds:siblings.map(r=>r.output.id),originalUrl:await sign(row.source.rawUri),outputUrl:o.stagingUri?await sign(o.stagingUri):null,why:[leadWhy,tried,...others.map(d=>d.why)].filter(Boolean).join(" "),whatToDo:leadWhat,liveObjectExists:liveChannels.length>0,liveChannels,failed:siblings.some(r=>r.output.status==="failed"),flags,canRetry};
   const product=products.get(o.productId)??{productId:o.productId,identifier:row.identifier,totalShots:new Set(sources.filter(s=>s.productId===o.productId).map(s=>s.n)).size,problemLine:"",photos:[]};
   product.photos.push(photo);products.set(o.productId,product);
  }

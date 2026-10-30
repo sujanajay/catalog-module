@@ -55,6 +55,8 @@ export const UPSCALED_SENTENCE = "Enlarged with a quality pass to meet this mark
 export const ENLARGEMENT_FAILED_WHY = "This photo could not be enlarged to this marketplace's size.";
 export const ENLARGEMENT_FAILED_WHAT = "Try again, use it as it is after the warning, replace the photo, or ask the brand for a larger one.";
 export const ENLARGEMENT_FAILED_SENTENCE = `${ENLARGEMENT_FAILED_WHY} ${ENLARGEMENT_FAILED_WHAT}`;
+/** What to do when "Try again" cannot run (a size refusal, or a batch that has stopped): the card offers no Try again. */
+export const ENLARGEMENT_FAILED_WHAT_NO_RETRY = "Use it as it is after the warning, replace the photo, or ask the brand for a different one.";
 export type Decision = (typeof DECISIONS)[number];
 export type QaMode = (typeof QA_MODES)[number];
 export type PolicySource = (typeof POLICY_SOURCES)[number];

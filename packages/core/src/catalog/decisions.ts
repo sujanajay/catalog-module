@@ -21,6 +21,8 @@ type Tx = Parameters<Parameters<Db["transaction"]>[0]>[0];
 export class CatalogDecisionError extends Error {
   constructor(readonly status: 400 | 404 | 409, message: string) { super(message); this.name = "CatalogDecisionError"; }
 }
+/** "Try again" on a batch that has stopped (failed or cancelled): nothing would run it (final check 2026-10-30). */
+export const RETRY_STOPPED_BATCH = "This batch has stopped, so the enlargement cannot run again here. Use the photo as it is, replace it, remove it, or start a new batch with this product.";
 /** The code of the "Use as is" warning on a photo that could not be enlarged (spec 18 lifecycle 3.6). */
 export const PLAIN_WARNING = "plain_warning";
 /**
@@ -159,6 +161,10 @@ export async function retryEnlargement(db: Db, enqueue: typeof enqueueTask, inpu
   const now = input.now ?? new Date(), log = input.log ?? (() => {});
   const result = await db.transaction(async tx => {
     const target = await readOutput(tx, input.outputId);
+    // Final check 2026-10-30: a stopped batch runs nothing again (its enlarge tasks answer `stopped`, its chunks are
+    // never recovered), so a retry there would leave the outputs pending, the chunk parked and the product locked to it.
+    const [owner] = await tx.select({ status: catalogBatches.status }).from(catalogBatches).where(eq(catalogBatches.id, target.batchId)).for("share");
+    if (!owner || owner.status === "failed" || owner.status === "cancelled") throw new CatalogDecisionError(409, RETRY_STOPPED_BATCH);
     await lockProduct(tx, target);
     const outputs = (await tx.select().from(catalogOutputs).where(and(eq(catalogOutputs.batchId, target.batchId), eq(catalogOutputs.sourceImageId, target.sourceImageId))).orderBy(catalogOutputs.id).for("update"))
       .filter(o => o.decision === null && o.flags.includes("enlargement_failed"));
