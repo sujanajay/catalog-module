@@ -32,7 +32,7 @@ const base = [
 const upscale = [
   {name: 'UPSCALE_MIN_SCALE', value: '1'}, {name: 'UPSCALE_URL', value: upscaleUrl},
   {name: 'UPSCALE_TIMEOUT_S', value: '1740'}, {name: 'UPSCALE_COLD_START_S', value: '120'},
-  {name: 'UPSCALE_MAX_PIXELS', value: '8000000'}, {name: 'UPSCALE_MAX_PIXELS_X4', value: '6400000'},
+  {name: 'UPSCALE_MAX_PIXELS', value: '8000000'}, {name: 'UPSCALE_MAX_PIXELS_X4', value: '4900000'},
   {name: 'UPSCALE_MODEL', value: 'swinir-x2'}, {name: 'UPSCALE_MODEL_X4', value: 'swinir-x4'},
 ];
 const writeWorker = (env) => fs.writeFileSync(path.join(dir, 'worker.json'), JSON.stringify({spec: {template: {spec: {containers: [{env}]}}}}));

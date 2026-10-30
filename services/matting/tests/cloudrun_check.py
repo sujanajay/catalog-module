@@ -6,6 +6,7 @@ import json
 import math
 import os
 import re
+import statistics
 import sys
 import time
 import urllib.error
@@ -315,6 +316,9 @@ def probe_main(argv, token_for=None, report_writer=None, now=None):
 #                           and instance id; repeated up to 3 times until at least 2 instances answered. Fails when
 #                           fewer than 2 instances answered, on any non-200, on two outputs from one instance, or on
 #                           outputs from two instances that differ visibly.
+#   --x4-max-pixels p       the x4 timeout check (x4_timeout_check): the largest x4 image the service takes (p pixels,
+#                           UPSCALE_MAX_PIXELS_X4) must finish within --timeout (the service's request timeout) with
+#                           X4_TIMEOUT_MARGIN to spare, at the x4 model's slowest measured p95 seconds per megapixel.
 # Prints the table `model | size | vCPU | threads | tile | conc | p50 s | p95 s | max s | non-200 | output sha256` and
 # the determinism and cold-start lines, writes the JSON report to
 # gs://image-links-agent-assets/catalog-test/probe/<run>/upscale.json when --bucket names that bucket, and exits
@@ -346,6 +350,13 @@ BUSY_RETRIES = 30
 COLD_START_ATTEMPTS = 3
 # How long the occupying call runs before /health is sent, so it holds its instance first.
 COLD_START_HOLD_S = 5
+# The x4 timeout check (2026-10-31, replaces the x4/x2 ratio of two single calls, which refused a healthy revision at
+# 1.51 when one x2 call was the fastest on record; .runs/2026-10-30-18-cpu-scale.md). The margin is shape.sh's: a
+# service timeout covers twice the p95 of the largest image it takes.
+X4_TIMEOUT_MARGIN = 2
+# A size with at least this many timed calls sets its slowest call aside before taking the p95 (timing_p95), so one
+# slow call (a noisy neighbour, one slow host) cannot fail the gate while two slow calls in 13 still can.
+TIMING_TRIM_MIN_CALLS = 10
 
 
 def parse_sizes(text):
@@ -378,20 +389,33 @@ def upscale_image(width, height):
 
 class UpscaleAnswer:
     """One /upscale call. status: 200, the HTTP error, 0 for a transport failure or timeout, -1 for an answer that is
-    not a JPEG of exactly `scale` times `size`. instance: the X-Instance-Id header (None from a revision before it)."""
+    not a JPEG of exactly `scale` times `size`. instance: the X-Instance-Id header (None from a revision before it).
+    server_seconds: the service's own inference time (the X-Upscale-Ms header; None when absent or unreadable)."""
 
-    def __init__(self, status, seconds, digest=None, instance=None, body=None):
+    def __init__(self, status, seconds, digest=None, instance=None, body=None, server_seconds=None):
         self.status, self.seconds, self.digest, self.instance, self.body = status, seconds, digest, instance, body
+        self.server_seconds = server_seconds
 
     def __iter__(self):
         # (status, seconds, digest), as callers before the instance id unpacked it.
         return iter((self.status, self.seconds, self.digest))
 
+    @property
+    def work_seconds(self):
+        """The call's time for the timeout check: the service's inference time, which a cold start, a 429 queue or the
+        upload never inflate (the determinism round's calls mostly start new instances), else the client's time."""
+        return self.server_seconds if self.server_seconds is not None else self.seconds
+
+
+def server_seconds(headers):
+    value = headers.get("X-Upscale-Ms")
+    return int(value) / 1000 if value is not None and re.fullmatch(r"[0-9]{1,9}", value.strip()) else None
+
 
 def timed_upscale(url, token, model, data, size, timeout, scale=2):
     """One /upscale call as an UpscaleAnswer."""
     started = time.perf_counter()
-    digest = instance = kept = None
+    digest = instance = kept = served = None
     try:
         headers, body = request(f"{url}/upscale?model={urllib.parse.quote(model)}&scale={scale}", token, data, "image/jpeg", timeout, UPSCALE_RESPONSE_LIMIT)
         try:
@@ -401,11 +425,12 @@ def timed_upscale(url, token, model, data, size, timeout, scale=2):
             ok = False
         instance = headers.get("X-Instance-Id")
         status, digest, kept = (200, hashlib.sha256(body).hexdigest(), body) if ok else (-1, None, None)
+        served = server_seconds(headers) if ok else None
     except urllib.error.HTTPError as error:
         status = error.code
     except Exception:  # noqa: BLE001 - any failure is a non-200 for the probe; no detail is printed
         status = 0
-    return UpscaleAnswer(status, time.perf_counter() - started, digest, instance, kept)
+    return UpscaleAnswer(status, time.perf_counter() - started, digest, instance, kept, served)
 
 
 def upscale_until_served(url, token, model, data, size, timeout, scale, sleep=time.sleep):
@@ -550,6 +575,8 @@ class UpscaleProbe:
         self.steps = []
         self.problems = []
         self.determinism = None
+        # Per size: the work_seconds of every measured 200 (the rounds and the determinism round, not the warm call).
+        self.work = {}
 
     @property
     def token(self):
@@ -581,6 +608,7 @@ class UpscaleProbe:
         entry["answers"].extend(keep_bodies(results, entry["bodies"]))
         if measured:
             entry["s"].extend(a.seconds for a in results if a.status == 200)
+            self.work.setdefault(size, []).extend(a.work_seconds for a in results if a.status == 200)
 
     def run(self, concurrency, rounds):
         self.health("baseline")
@@ -614,7 +642,9 @@ class UpscaleProbe:
             with ThreadPoolExecutor(max_workers=count) as pool:
                 results = list(pool.map(lambda _: upscale_until_served(self.url, token, self.model, data, size, self.timeout, self.scale, sleep), range(count)))
             answers += keep_bodies(results, bodies)
-            calls += [{"attempt": attempt, "status": a.status, "s": seconds(a.seconds), "instance": a.instance, "sha256": a.digest} for a in results]
+            self.work.setdefault(size, []).extend(a.work_seconds for a in results if a.status == 200)
+            calls += [{"attempt": attempt, "status": a.status, "s": seconds(a.seconds), "serverS": seconds(a.server_seconds), "instance": a.instance,
+                       "sha256": a.digest} for a in results]
             if len({a.instance for a in answers if a.status == 200 and a.instance}) >= 2:
                 break
         summary, failures = judge_outputs(label, answers, bodies)
@@ -640,7 +670,8 @@ class UpscaleProbe:
                         "non200": sum(1 for status in statuses if status != 200), "calls": len(statuses),
                         "outputSha256": digests[0] if len(digests) == 1 else None, "distinctOutputs": len(digests),
                         "instances": summary["instances"], "outputs": summary["outputs"], "difference": summary["worst"], "outputFailures": failures,
-                        "callLog": [{"status": a.status, "s": seconds(a.seconds), "instance": a.instance, "sha256": a.digest} for a in entry["answers"]]})
+                        "callLog": [{"status": a.status, "s": seconds(a.seconds), "serverS": seconds(a.server_seconds), "instance": a.instance, "sha256": a.digest}
+                                    for a in entry["answers"]]})
         return out
 
     def failures(self, rows):
@@ -688,23 +719,63 @@ def measure_cold_start(url, token_source, model, size, timeout, limit_s, hold_s=
     return entry, failures
 
 
-def x4_ratio_failures(rows, ratio):
-    """2026-10-29 review P2-1: the x4 cap (infra/lib/shape.sh UPSCALE_MAX_PIXELS_X4) assumes the x4 model takes at most
-    `ratio` (UPSCALE_X4_TIME_RATIO) times the x2 model's time. At each size probed on both, an x4 p95 above that fails
-    the probe, with the ratio measured. 0 checks nothing."""
-    if not ratio:
-        return []
-    by_size = {}
-    for r in rows:
-        if r["p95S"] is not None:
-            by_size.setdefault(r["size"], {})[r["scale"]] = r
-    out = []
-    for size, pair in by_size.items():
-        x2, x4 = pair.get(2), pair.get(4)
-        if x2 and x4 and x4["p95S"] > x2["p95S"] * ratio:
-            out.append(f"{x4['model']} {size}: p95 {x4['p95S']} s is {x4['p95S'] / x2['p95S']:.2f} x the {x2['model']} p95 {x2['p95S']} s, "
-                       f"above UPSCALE_X4_TIME_RATIO={ratio:g}; raise it and lower UPSCALE_MAX_PIXELS_X4 to fit the timeout (infra/lib/shape.sh)")
-    return out
+def timing_p95(values):
+    """The p95 the x4 timeout check judges: nearest-rank, after setting aside the single slowest call when a size has at
+    least TIMING_TRIM_MIN_CALLS calls. With the gate's 13 x4 calls at 800x1200 (1 round + 12 determinism calls) it is
+    the second slowest: one outlier passes, two slow calls (15%, a real tail) or a slow model fail. Fewer calls are
+    judged whole (a single call is its own p95). None for no values."""
+    ordered = sorted(values)
+    if len(ordered) >= TIMING_TRIM_MIN_CALLS:
+        ordered = ordered[:-1]
+    return percentile(ordered, 0.95)
+
+
+def x4_timeout_check(timings, max_pixels, timeout, margin=X4_TIMEOUT_MARGIN):
+    """The property the x4 cap needs (spec 18 3.6.6, infra/lib/shape.sh upscale_check): the largest image the service
+    takes for the x4 model, `max_pixels` (UPSCALE_MAX_PIXELS_X4), finishes within the service timeout `timeout` with
+    `margin` to spare. Its time is estimated as shape.sh does: the slowest measured p95 seconds per megapixel over the
+    probe sizes (the smallest size carries the most fixed cost per pixel, a safe bound for larger images) times its
+    megapixels. The p95 per size is timing_p95 over every timed call of that size (the rounds and the determinism
+    round), on the service's own inference time (UpscaleAnswer.work_seconds).
+    This replaces the 2026-10-29 x4/x2 ratio check (one x4 call over one x2 call), which tested an assumption of the
+    static sizing instead of the property, and whose two single calls could land on different hosts: a fast x2 call
+    alone failed a healthy revision at 1.51 (2026-10-30). The x4/x2 median ratio is reported for the static
+    UPSCALE_X4_TIME_RATIO, never judged.
+    `timings`: {model: {(width, height): [seconds, ...]}}. Returns (report entry or None when max_pixels is 0, failures)."""
+    if not max_pixels:
+        return None, []
+    x4_models = [m for m in timings if UPSCALE_PROBE_MODELS.get(m) == 4]
+    x2_models = [m for m in timings if UPSCALE_PROBE_MODELS.get(m) == 2]
+    entry = {"maxPixels": max_pixels, "timeoutS": timeout, "margin": margin, "models": []}
+    failures = []
+    if not any(any(timings[m].values()) for m in x4_models):
+        failures.append(f"x4 timeout check: no x4 call was timed, so UPSCALE_MAX_PIXELS_X4={max_pixels} is not shown to fit the {timeout} s timeout")
+    for model in x4_models:
+        sizes = []
+        for (width, height), values in timings[model].items():
+            if not values:
+                continue
+            megapixels = width * height / 1_000_000
+            p95 = timing_p95(values)
+            x2_median = next((statistics.median(timings[m].get((width, height))) for m in x2_models if timings[m].get((width, height))), None)
+            median = statistics.median(values)
+            sizes.append({"size": f"{width}x{height}", "calls": len(values), "p50S": seconds(median), "p95S": seconds(p95),
+                          "maxS": seconds(max(values)), "sPerMp": round(p95 / megapixels, 2),
+                          "x4OverX2Median": round(median / x2_median, 3) if x2_median else None})
+        if not sizes:
+            continue
+        worst = max(sizes, key=lambda s: s["sPerMp"])
+        estimate = worst["sPerMp"] * max_pixels / 1_000_000
+        need = margin * estimate
+        fits = int(timeout / margin / worst["sPerMp"] * 1_000_000)
+        entry["models"].append({"model": model, "sizes": sizes, "worstSize": worst["size"], "sPerMp": worst["sPerMp"],
+                                "estimateS": seconds(estimate), "needS": seconds(need), "fitsMaxPixels": fits, "passed": need <= timeout})
+        if need > timeout:
+            failures.append(f"{model}: UPSCALE_MAX_PIXELS_X4={max_pixels} needs {margin:g} x {estimate:.0f} s = {need:.0f} s at the slowest measured "
+                            f"p95 of {worst['sPerMp']} s per MP ({worst['size']}, {worst['calls']} calls), above the {timeout} s timeout; "
+                            f"lower UPSCALE_MAX_PIXELS_X4 to at most {fits} and raise UPSCALE_X4_TIME_RATIO to match (infra/lib/shape.sh)")
+    entry["passed"] = not failures
+    return entry, failures
 
 
 def upscale_markdown(rows):
@@ -733,7 +804,7 @@ def parse_upscale_args(argv):
     parser.add_argument("--concurrency", type=int, default=1)
     parser.add_argument("--rounds", type=int, default=3)
     parser.add_argument("--timeout", type=int, default=900)
-    parser.add_argument("--x4-ratio", dest="x4_ratio", type=float, default=0.0)
+    parser.add_argument("--x4-max-pixels", dest="x4_max_pixels", type=int, default=0)
     parser.add_argument("--determinism-calls", dest="determinism_calls", type=int, default=0)
     parser.add_argument("--determinism-seconds", dest="determinism_seconds", type=int, default=0)
     parser.add_argument("--cold-start-max", dest="cold_start_max", type=int, default=0)
@@ -747,7 +818,7 @@ def parse_upscale_args(argv):
             f"--model must list served upscalers ({', '.join(UPSCALE_PROBE_MODELS)})")
     require(1 <= args.concurrency <= 8 and 1 <= args.rounds <= 50, "--concurrency must be 1 to 8 and --rounds 1 to 50")
     require(30 <= args.timeout <= 3600, "--timeout must be 30 to 3600 seconds")
-    require(args.x4_ratio == 0 or args.x4_ratio >= 1, "--x4-ratio must be 0 (no check) or at least 1")
+    require(0 <= args.x4_max_pixels <= 100_000_000, "--x4-max-pixels must be 0 (no check) to 100000000 pixels")
     require(args.determinism_calls == 0 or 2 <= args.determinism_calls <= 16, "--determinism-calls must be 0 (none) or 2 to 16")
     require(0 <= args.determinism_seconds <= 3600, "--determinism-seconds must be 0 (3 rounds only) to 3600 seconds")
     require(0 <= args.cold_start_max <= 3600, "--cold-start-max must be 0 (none) to 3600 seconds")
@@ -764,7 +835,7 @@ def probe_upscale_main(argv, token_for=None, report_writer=None, now=None, sleep
     token = None if args.url.startswith("http://") else RefreshingToken(lambda: (token_for or identity_token)(audience))
     started = now or datetime.datetime.now(datetime.timezone.utc)
     run = args.run or os.environ.get("CLOUD_RUN_EXECUTION") or started.strftime("%Y%m%dT%H%M%SZ")
-    rows, failures, steps, service, determinism, cold_start = [], [], [], {}, [], None
+    rows, failures, steps, service, determinism, cold_start, timings = [], [], [], {}, [], None, {}
     # First, before any call warms the candidate (spec 18 gate, plan 7.2).
     if args.cold_start_max:
         cold_start, cold_failures = measure_cold_start(args.url, token, args.models[0], DETERMINISM_SIZE, args.timeout, args.cold_start_max, sleep=sleep)
@@ -780,15 +851,21 @@ def probe_upscale_main(argv, token_for=None, report_writer=None, now=None, sleep
         failures += probe.failures(model_rows)
         steps += [{"model": model, **step} for step in probe.steps]
         service.update(probe.service)
-    failures += x4_ratio_failures(rows, args.x4_ratio)
+        timings[model] = probe.work
+    x4_timeout, x4_failures = x4_timeout_check(timings, args.x4_max_pixels, args.timeout)
+    failures += x4_failures
     report = {"run": run, "url": args.url, "startedAt": started.isoformat(), "models": args.models,
               "sizes": [f"{w}x{h}" for w, h in args.sizes], "concurrency": args.concurrency, "rounds": args.rounds,
               "timeoutS": args.timeout, "service": service, "rows": rows, "steps": steps, "determinism": determinism,
-              "coldStart": cold_start, "visualLimit": {"maxAbs": VISUAL_MAX_ABS, "minPsnrDb": VISUAL_MIN_PSNR_DB},
+              "coldStart": cold_start, "x4Timeout": x4_timeout, "visualLimit": {"maxAbs": VISUAL_MAX_ABS, "minPsnrDb": VISUAL_MIN_PSNR_DB},
               "passed": not failures, "failures": failures}
     print(upscale_markdown(rows), flush=True)
     for entry in determinism:
         print(determinism_line(entry), flush=True)
+    for entry in (x4_timeout or {}).get("models", []):
+        print(f"x4 timeout {entry['model']}: {x4_timeout['margin']:g} x {entry['sPerMp']} s per MP ({entry['worstSize']} p95) x "
+              f"{x4_timeout['maxPixels'] / 1_000_000:g} MP = {entry['needS']} s (timeout {x4_timeout['timeoutS']} s): "
+              f"{'passed' if entry['passed'] else 'FAILED'}", flush=True)
     if cold_start:
         print(f"UPSCALE_COLD_START_S measured: {cold_start['coldStartS'] if cold_start['coldStartS'] is not None else 'not measured'} s "
               f"(limit {cold_start['limitS']} s): {'passed' if cold_start['passed'] else 'FAILED'}", flush=True)

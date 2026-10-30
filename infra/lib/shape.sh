@@ -79,8 +79,8 @@ SHAPE_DEFAULTS=(
   # Runtime intra-op thread count; UPSCALE_TIMEOUT_S its Cloud Run request timeout (the client waits 30 s longer).
   # The asia-south1 quotas (400 vCPU and 800 GiB, granted 2026-10-30; shape_check counts every service in the region,
   # see CPU_QUOTA_VCPU): CPU binds, 50 x 4 = 200 vCPU gives 398 of 400. Memory 16Gi -> 8Gi (2026-10-30): the live p99
-  # was 2.9 GiB and the largest x4 working set below is 5073 MiB, under 80% of 8 GiB; 50 x 8 = 400 GiB, 654 of 800 in
-  # all. A measure rung runs beside the live catalog-upscale (UPSCALE_LIVE_VCPU below), so with 50 x 4 live there is
+  # was 2.9 GiB and the largest x4 working set below is 4844 MiB (5073 MiB at 6.4 MP until 2026-10-31), under 80% of
+  # 8 GiB; 50 x 8 = 400 GiB, 654 of 800 in all. A measure rung runs beside the live catalog-upscale (UPSCALE_LIVE_VCPU below), so with 50 x 4 live there is
   # no room for one: lower the live UPSCALE_MAX_INSTANCES first (shape_check counts both).
   # 4 vCPU over 8: 8 vCPU is only about 1.3x faster per call (78 s against 99 s p50 at 800x1200), so 16 x 4 finishes
   # more photos per second than the 8 x 8 the quota allows. Concurrency 1: concurrency 2 gave non-identical outputs
@@ -104,13 +104,15 @@ SHAPE_DEFAULTS=(
   # SwinIR is tiled, so time grows with pixels; each cap is 2 x the cap x the model's own time per pixel <= the 1740 s
   # timeout (upscale_check). x2 (UPSCALE_MAX_PIXELS): the slowest measured p95 per pixel, 104.17 s per MP (100 s for
   # 800x1200), so 2 x ceil(8 x 104.17) = 1668 s <= 1740 s. x4 (UPSCALE_MAX_PIXELS_X4): that time x
-  # UPSCALE_X4_TIME_RATIO (1.3 until the gate's probe times x4 on Cloud Run), so 2 x ceil(6.4 x 104.17 x 1.3) = 1734 s.
+  # UPSCALE_X4_TIME_RATIO (1.7), so 2 x ceil(4.9 x 104.17 x 1.7) = 1736 s. 6.4 MP until 2026-10-31: the gate's probe
+  # timed x4 on Cloud Run at up to 151 s per MP (145.2 s at 800x1200), and 2 x 6.4 x 151 = 1936 s did not fit; the
+  # gate checks this directly on every deploy (cloudrun_check.py x4_timeout_check).
   # An x4 region is small in practice: x4 runs only above 2.0x, so its region is at most about half the largest canvas
   # side (3000 px), about 2.5 MP. Memory at each cap: about 4096 MiB resident plus 160 B per input pixel (the x4
   # model's working set, more than x2 needs), inside UPSCALE_MEMORY (upscale_check). 24 MP (the service's own default)
   # would need about 6500 s, more than one Cloud Tasks delivery (30 minutes) waits.
   UPSCALE_MAX_PIXELS=8000000
-  UPSCALE_MAX_PIXELS_X4=6400000
+  UPSCALE_MAX_PIXELS_X4=4900000
   # Spec 18 GPU upscaler (owner 2026-10-30: AI enlargement on GPUs in a second region, asia-south2; speed matters a lot,
   # cost does not, reliability stays the must-have). UPSCALE_TARGET is where Start pins a new batch's enlargements: cpu
   # (catalog-upscale, the `+cpu` upscaler ids) or gpu (catalog-upscale-gpu, the plain ids). Each batch keeps the target
@@ -292,13 +294,13 @@ shape_defaults() {
   # The worker's output limit for one enlarged image, every route (packages/core/src/catalog/pipeline/enlargement.ts
   # ENLARGE_MAX_OUTPUT_PIXELS); a constant of the code, not a knob.
   ENLARGE_MAX_OUTPUT_PIXELS=64000000
-  # Spec 18 quality: the x4 model's time over the x2 model's on the same image, rounded up. The p95 rows above are of
-  # swinir-x2; an x4 call on the same input takes this many times as long. No Cloud Run x4 time exists yet: every
-  # figure so far is from a laptop (2026-10-29). The bake-off timed x4 at about the x2 time (800x1200, 4 threads, back
-  # to back: x2 100.5 / 97.6 s, x4 97.2 / 99.9 s, ratio about 1.0); the quality fix's local runs gave 1.193 (pairs
-  # 1.283 and 1.133). 1.3 covers the slowest pair seen. Replace it with the x4 p95 once the gate's probe has timed x4
-  # on the measured shape (check-matting.sh --probe-upscale --model=swinir-x2,swinir-x4).
-  UPSCALE_X4_TIME_RATIO=${UPSCALE_X4_TIME_RATIO-1.3}
+  # Spec 18 quality: the x4 model's time per megapixel over the x2 rows' (the slowest measured p95 per MP above), used
+  # to size UPSCALE_MAX_PIXELS_X4 here and the probe job's budget (services.sh); the deploy gate does not compare it,
+  # it checks the x4 cap against the timeout on the measured x4 calls (cloudrun_check.py x4_timeout_check). 1.3 until
+  # 2026-10-31, from laptop runs (pairs 1.0 to 1.283). The gate probes on Cloud Run (2026-10-30, five candidates, x4
+  # at 800x1200 one call each) timed 123.2 to 145.2 s, 128 to 151 s per MP: up to 1.45 x 104.17. 1.7 keeps about 17%
+  # over the slowest seen, so a candidate as slow as the slowest seen still passes the gate's check at the cap.
+  UPSCALE_X4_TIME_RATIO=${UPSCALE_X4_TIME_RATIO-1.7}
   # Spec 18 quality: catalog-upscale memory, from the 2026-10-29 local measure of swinir-x4 through the service code
   # (peak commit 2685 MiB after load, 2851 MiB at 1200x1600: about 86 B per input pixel, the output 16x the input):
   # the resident part (both sessions, Python, ONNX Runtime arenas) rounded up to 4096 MiB, and 160 B per input pixel

@@ -87,8 +87,11 @@ BiRefNet session, well inside 24 GB; this is an estimate, not a measurement. Mea
 (2026-10-29, 4 threads, through the service code): swinir-x4 at 1200x1600 took 199 s with a peak commit of 2851 MiB
 (2685 MiB after loading, so about 86 B per input pixel for the x4 output and its buffers); x4 over x2 on the same
 800x1200 image took 1.193x (pairs 1.283 and 1.133), and the 2026-10-29 bake-off (also laptop runs) timed x4 at
-about the x2 time on the same region (51.0 s against 49.2 s). No Cloud Run x4 time exists yet; the deploy gate's
-probe now fails an x4 p95 above `UPSCALE_X4_TIME_RATIO` x the x2 p95 at each size. Both models gave byte-identical outputs on a rerun and at 4 and 8 threads.
+about the x2 time on the same region (51.0 s against 49.2 s). Since 2026-10-31 the deploy gate's probe checks the
+x4 cap directly (`--x4-max-pixels`): 2 x `UPSCALE_MAX_PIXELS_X4` x the x4 model's slowest measured p95 seconds per MP
+must fit the timeout, over the rounds and the 12 determinism calls on the service's own time (`X-Upscale-Ms`), with
+one slow call of 10 or more set aside. It replaced a ratio of one x4 call over one x2 call, which refused a healthy
+revision at 1.51 on 2026-10-30. Both models gave byte-identical outputs on a rerun and at 4 and 8 threads.
 
 ## Versions and offline models
 
@@ -425,8 +428,9 @@ bash infra/check-matting.sh --probe-upscale <candidate URL> --model=swinir-x2 --
 
 Spec 18 quality: the probe now takes `--model=swinir-x2,swinir-x4` (the deploy gate always passes both), times each
 model in turn and requires each model's answers to be its exact scale and byte-identical on a rerun. The p95 rows
-are of swinir-x2; until a probe has timed x4 on the shape, `UPSCALE_X4_TIME_RATIO` (1.3, the slowest pair measured)
-scales them for x4.
+are of swinir-x2; `UPSCALE_X4_TIME_RATIO` (1.7 since 2026-10-31: Cloud Run gate probes timed x4 at up to 1.45 x the
+x2 rows' time per MP) scales them for x4 when shape.sh sizes the x4 cap, and the gate checks that cap on the measured
+x4 calls.
 
 `UPSCALE_SERVICE=dedicated` (the worker's enlargements on `catalog-upscale`) needs a worker image with the spec 18 H3
 enlarge stage (`apps/worker/src/catalog/enlarge.ts` calls the service through `packages/core/src/catalog/enlarge.ts`;
@@ -467,16 +471,18 @@ runs, not proven deterministic on every host.
 
 The shape chosen (spec 18 section 8, spec 18 quality): 16 x 4 vCPU, 16 GiB, 4 threads, concurrency 1,
 `UPSCALE_TIMEOUT_S=1740`, and one pixel cap per model (2026-10-29 review): `UPSCALE_MAX_PIXELS=8000000` for x2 and
-`UPSCALE_MAX_PIXELS_X4=6400000` for x4. A single shared 6.4 MP cap held real x2 regions it could fit (a 2500 px product
-on Centrepoint at 1.2x crops to 2564 x 2564 = 6.57 MP).
+`UPSCALE_MAX_PIXELS_X4=4900000` for x4 (6.4 MP until 2026-10-31, when Cloud Run x4 times showed 2 x 6.4 MP x 151 s per
+MP = 1936 s did not fit). A single shared 6.4 MP cap held real x2 regions it could fit (a 2500 px product on
+Centrepoint at 1.2x crops to 2564 x 2564 = 6.57 MP).
 
 | rule (infra/lib/shape.sh upscale_check) | arithmetic | result |
 |---|---|---|
 | timeout covers the largest x2 image | 2 x ceil(8 MP x 104.17 s per MP) = 2 x 834 s | 1668 s <= 1740 s |
-| timeout covers the largest x4 image | 2 x ceil(6.4 MP x 104.17 s per MP x 1.3) = 2 x 867 s | 1734 s <= 1740 s |
-| x4 at the x2 cap of 8 MP | 2 x ceil(8 MP x 104.17 x 1.3) = 2 x 1084 s | 2168 s, refused |
-| x4 memory of the largest image under 80% of 8 GiB (16 GiB until 2026-10-30) | 4096 MiB resident + 6.4 MP x 160 B | 5073 MiB <= 6553 MiB |
-| x4 output size (sharp's default input limit 268,402,689 px) | 6.4 MP x 16 | 102.4 MP |
+| timeout covers the largest x4 image | 2 x ceil(4.9 MP x 104.17 s per MP x 1.7) = 2 x 868 s | 1736 s <= 1740 s |
+| the same on the measured x4 calls (deploy gate) | 2 x 4.9 MP x the x4 p95 per MP (151.25 s on 2026-10-30) = 1482 s | at most 177.5 s per MP |
+| x4 at the x2 cap of 8 MP | 2 x ceil(8 MP x 104.17 x 1.7) = 2 x 1417 s | 2834 s, refused |
+| x4 memory of the largest image under 80% of 8 GiB (16 GiB until 2026-10-30) | 4096 MiB resident + 4.9 MP x 160 B | 4844 MiB <= 6553 MiB |
+| x4 output size (sharp's default input limit 268,402,689 px) | 4.9 MP x 16 | 78.4 MP |
 | deploy probe budget, both models, both sizes | 300 + 4 x (100 + 130) + 4 x (216 + 281) | 3208 s |
 
 The timeout must cover the largest image the service takes, not only the probe sizes: SwinIR is tiled, so time grows
