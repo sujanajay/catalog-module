@@ -210,6 +210,17 @@ PRICE_MATTE_GPU_USD_PER_SECOND=${PRICE_MATTE_GPU_USD_PER_SECOND:-0.00034884}
 [[ "$PRICE_MATTE_CPU_USD_PER_SECOND" =~ ^[0-9]+([.][0-9]+)?$ ]] || { echo "PRICE_MATTE_CPU_USD_PER_SECOND must be a number such as 0.000136" >&2; exit 1; }
 [[ "$PRICE_MATTE_GPU_USD_PER_SECOND" =~ ^[0-9]+([.][0-9]+)?$ ]] || { echo "PRICE_MATTE_GPU_USD_PER_SECOND must be a number such as 0.00034884" >&2; exit 1; }
 WORKER_ENV+=",PRICE_MATTE_CPU_USD_PER_SECOND=$PRICE_MATTE_CPU_USD_PER_SECOND,PRICE_MATTE_GPU_USD_PER_SECOND=$PRICE_MATTE_GPU_USD_PER_SECOND"
+# GPU upscale spend: the worker prices an upscale call made on catalog-upscale-gpu (UPSCALE_GPU_URL set) at this rate;
+# CPU upscales keep PRICE_MATTE_CPU_USD_PER_SECOND and a GPU upscale without UPSCALE_GPU_URL (the L4 matting service)
+# keeps PRICE_MATTE_GPU_USD_PER_SECOND. Keep it equal to DEFAULT_PRICE_UPSCALE_GPU_USD_PER_SECOND in
+# packages/core/src/catalog/cost.ts. Source: Google Cloud Billing price catalog, read 2026-10-30. catalog-upscale-gpu:
+# asia-south2, one NVIDIA RTX PRO 6000 without zonal redundancy, instance-based billing, --cpu=20 --memory=80Gi
+# (the UPSCALE_GPU_* rows of infra/lib/shape.sh): RTX PRO 6000 non-zonal USD 0.00043826 per second, CPU USD 0.0000216
+# per vCPU-second, memory USD 0.0000024 per GiB-second, so 0.00043826 + 20 * 0.0000216 + 80 * 0.0000024 = 0.00106226
+# per second. Re-check if that service's GPU type, shape, region, billing mode or zonal redundancy changes.
+PRICE_UPSCALE_GPU_USD_PER_SECOND=${PRICE_UPSCALE_GPU_USD_PER_SECOND:-0.00106226}
+[[ "$PRICE_UPSCALE_GPU_USD_PER_SECOND" =~ ^[0-9]+([.][0-9]+)?$ ]] || { echo "PRICE_UPSCALE_GPU_USD_PER_SECOND must be a number such as 0.00106226" >&2; exit 1; }
+WORKER_ENV+=",PRICE_UPSCALE_GPU_USD_PER_SECOND=$PRICE_UPSCALE_GPU_USD_PER_SECOND"
 # 07: the QA judge and its spend caps. Override from the shell like BQ_PROJECT, e.g.
 # INR_PER_USD=83.5 bash infra/deploy.sh. CATALOG_QA_DEFAULT_MODEL is engineering config only; it is
 # never shown to the operator. It has no leading "/", so Git Bash leaves it alone.

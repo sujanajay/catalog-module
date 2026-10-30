@@ -121,6 +121,9 @@ by service seconds on the CPU or GPU service. They are env vars set in `infra/de
 `COMPUTE_USD_PER_VCPU_SECOND`. The values were checked against cloud.google.com/run/pricing by the
 ledger workstream; see the comment in `infra/deploy.sh` for the numbers and the date they were
 checked. Re-check them there when Google changes its prices.
+A GPU upscale made on catalog-upscale-gpu (RTX PRO 6000, asia-south2, worker env `UPSCALE_GPU_URL` set) has its own
+rate, `PRICE_UPSCALE_GPU_USD_PER_SECOND` (USD 0.00106226 per second, from the Cloud Billing price catalog on
+2026-10-30), so it is never priced at the L4 matting rate.
 
 ## Cloud Run labels
 `deploy.sh` adds `app=catalog,component=worker|web|matte|matte-gpu|job` to every service and job

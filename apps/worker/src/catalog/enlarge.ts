@@ -28,7 +28,7 @@ import {
 } from "@catalog/core/catalog/pipeline/enlargement";
 import { isBulkBatch, tryEnqueueChunk } from "@catalog/core/catalog/pipeline/dispatch";
 import { recordCostEvents, type CostEventInput } from "@catalog/core/cost-events";
-import { matteCallUsd } from "@catalog/core/catalog/cost";
+import { upscaleCallUsd } from "@catalog/core/catalog/cost";
 import type { MattingTrace } from "@catalog/core/catalog/matte";
 import type { HandleOptions, HandleResult } from "../server";
 import { refreshBatchProgress, topUpWindow, type CatalogDeps } from "./deps";
@@ -596,7 +596,7 @@ export async function handleEnlargeTask(deps: CatalogDeps, body: Record<string, 
   }
   function costRow(ms: number, outcome: "ok" | "failed", _tile?: number): CostEventInput {
     const target = isCpuUpscalerId(row!.upscaler) ? "cpu" : "gpu";
-    return { batchId: batch!.id, brandSlug: batch!.brandSlug, isTest: batch!.isTest, productId: productId as string, sourceImageId: row!.sourceImageId, stage: "upscale", kind: "upscale_call", engine: target, ms, ...matteCallUsd(target, ms), attempt: row!.attempts + row!.timeouts + 1, outcome, at: deps.now() };
+    return { batchId: batch!.id, brandSlug: batch!.brandSlug, isTest: batch!.isTest, productId: productId as string, sourceImageId: row!.sourceImageId, stage: "upscale", kind: "upscale_call", engine: target, ms, ...upscaleCallUsd(target, ms), attempt: row!.attempts + row!.timeouts + 1, outcome, at: deps.now() };
   }
   /** The guard of a write: the claim when held, else the row still queued. */
   function guard() {

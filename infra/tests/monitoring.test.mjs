@@ -249,6 +249,15 @@ try {
       assert.match(m.filter, /^resource\.type="cloud_run_revision" AND resource\.labels\.service_name=~"\^catalog-" AND /);
       assert.doesNotMatch(m.filter, /jsonPayload\.(event|msg)\b/, 'log contract uses message');
     }
+    // Spec 18 GPU upscaler: every alert log metric also counts catalog-upscale-gpu (and every other deployed service),
+    // so its errors reach the same alerts as the rest of the catalog services.
+    const deployed = fs.readFileSync(path.join(infra, 'lib', 'services.sh'), 'utf8').match(/^SERVICES=\(([^)]*)\)/m)[1].trim().split(/\s+/);
+    assert.ok(deployed.includes('catalog-upscale-gpu'), 'services.sh deploys catalog-upscale-gpu');
+    for (const m of metrics) {
+      const services = new RegExp(m.filter.match(/resource\.labels\.service_name=~"([^"]+)"/)[1]);
+      assert.match('catalog-upscale-gpu', services, m.name + ' counts catalog-upscale-gpu');
+      for (const s of deployed) assert.match(s, services, `${m.name} counts ${s}`);
+    }
     // Log contract (PR #89): "batch failed" is ERROR for real faults and WARNING for cause no_photos
     // (an operator input mistake), so only the ERROR ones and the sweeper count towards an email.
     const batchFailed = metrics.find((m) => m.name === 'catalog/batch_failed').filter;
