@@ -15,12 +15,13 @@ from PIL import Image, ImageOps
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-UPSCALE_IDS = ["realesrgan-x2plus", "swinir-x2"]
+UPSCALE_IDS = ["swinir-x2", "swinir-x4"]
+SCALES = {"swinir-x2": 2, "swinir-x4": 4}
 TILE = 96  # small fixed tile keeps the stub fast; overlap 32 leaves a 32 px core
 
 
-def nearest(batch):
-    return batch.repeat(2, axis=2).repeat(2, axis=3)
+def nearest(batch, scale=2):
+    return batch.repeat(scale, axis=2).repeat(scale, axis=3)
 
 
 def blurred(batch):
@@ -36,8 +37,9 @@ def blurred(batch):
 
 
 class FakeSession:
-    def __init__(self, tile=TILE, infer=nearest):
-        self.tile, self.infer, self.calls = tile, infer, 0
+    def __init__(self, tile=TILE, infer=nearest, scale=2):
+        self.tile, self.calls = tile, 0
+        self.infer = infer if infer is not nearest else (lambda batch: nearest(batch, scale))
 
     def get_inputs(self):
         return [SimpleNamespace(name="input", shape=[1, 3, self.tile, self.tile])]
@@ -73,7 +75,7 @@ def service(monkeypatch, tmp_path):
 
     def create(model):
         sessions.append(model)
-        return FakeSession()
+        return FakeSession(scale=SCALES[model])
 
     monkeypatch.setattr(module, "create_upscale_session", create)
     with TestClient(module.app) as client:
@@ -97,23 +99,23 @@ def checker(width=50, height=30):
     return Image.fromarray(rng.integers(0, 256, (height, width, 3), dtype=np.uint8), "RGB")
 
 
-def post(client, data, query="model=realesrgan-x2plus&scale=2", content_type="image/png"):
+def post(client, data, query="model=swinir-x2&scale=2", content_type="image/png"):
     return client.post(f"/upscale?{query}", content=data, headers={"content-type": content_type})
 
 
 def test_health_keeps_existing_fields_and_reports_cpu_unavailable(service):
     health = service[0].get("/health").json()
     assert health["ok"] is True and health["default"] == "birefnet-general" and len(health["models"]) == 4
-    assert health["upscale"] == {"models": [{"id": name, "available": False, "scale": 2} for name in UPSCALE_IDS], "default": None}
+    assert health["upscale"] == {"models": [{"id": name, "available": False, "scale": SCALES[name]} for name in UPSCALE_IDS], "default": None}
 
 
 def test_health_reports_available_models_when_enabled(enabled):
     upscale = enabled[0].get("/health").json()["upscale"]
-    assert upscale == {"models": [{"id": name, "available": True, "scale": 2} for name in UPSCALE_IDS], "default": "realesrgan-x2plus"}
+    assert upscale == {"models": [{"id": name, "available": True, "scale": SCALES[name]} for name in UPSCALE_IDS], "default": "swinir-x2"}
     assert enabled[2] == [], "health must not load models"
 
 
-@pytest.mark.parametrize("query", ["model=realesrgan-x2plus&scale=2", "model=swinir-x2&scale=2", "scale=2", ""])
+@pytest.mark.parametrize("query", ["model=swinir-x2&scale=2", "model=swinir-x4&scale=4", "scale=2", "scale=4", ""])
 def test_cpu_image_answers_503_for_every_model(service, query):
     response = post(service[0], encoded(checker()), query)
     assert response.status_code == 503
@@ -125,14 +127,16 @@ def test_missing_model_file_is_unavailable(enabled, tmp_path):
     (tmp_path / "upscale" / "swinir-x2.onnx").unlink()
     assert post(enabled[0], encoded(checker()), "model=swinir-x2&scale=2").status_code == 503
     models = enabled[0].get("/health").json()["upscale"]["models"]
-    assert [m["available"] for m in models] == [True, False]
+    assert [m["available"] for m in models] == [False, True]
 
 
 @pytest.mark.parametrize("query,message", [
     ("model=esrgan-x4&scale=2", "unknown model esrgan-x4"),
-    ("model=realesrgan-x2plus&scale=4", "unsupported scale 4; only 2 is supported"),
-    ("model=realesrgan-x2plus&scale=1", "unsupported scale 1; only 2 is supported"),
-    ("model=realesrgan-x2plus&scale=two", "unsupported scale two; only 2 is supported"),
+    ("model=realesrgan-x2plus&scale=2", "unknown model realesrgan-x2plus"),
+    ("model=swinir-x2&scale=4", "unsupported scale 4 for swinir-x2; it upscales 2x"),
+    ("model=swinir-x4&scale=2", "unsupported scale 2 for swinir-x4; it upscales 4x"),
+    ("model=swinir-x2&scale=1", "unsupported scale 1; supported: 2, 4"),
+    ("scale=two", "unsupported scale two; supported: 2, 4"),
 ])
 def test_route_validation(enabled, query, message):
     response = post(enabled[0], encoded(checker()), query)
@@ -160,13 +164,25 @@ def test_too_many_pixels(enabled, monkeypatch):
     assert post(enabled[0], encoded(checker(11, 10))).status_code == 400
 
 
+def test_each_model_has_its_own_pixel_cap(enabled, monkeypatch):
+    # 2026-10-29 review P1-3: the x4 cap (sized for the slower model) never refuses an x2 image that fits the x2 cap.
+    monkeypatch.setattr(enabled[1], "UPSCALE_MAX_PIXELS", 200)
+    monkeypatch.setattr(enabled[1], "UPSCALE_MAX_PIXELS_X4", 100)
+    image = encoded(checker(15, 10))
+    assert post(enabled[0], image, "model=swinir-x2&scale=2").status_code == 200
+    refused = post(enabled[0], image, "model=swinir-x4&scale=4")
+    assert refused.status_code == 400
+    assert refused.json() == {"error": "image exceeds 100 pixels for a 4x upscale"}
+    assert post(enabled[0], encoded(checker(15, 14)), "model=swinir-x2&scale=2").status_code == 400
+
+
 @pytest.mark.parametrize("fmt,content_type", [("PNG", "image/png"), ("JPEG", "image/jpeg")])
 def test_upscale_returns_exact_2x_jpeg(enabled, fmt, content_type):
     source = Image.new("RGB", (37, 23), (200, 120, 40))
     response = post(enabled[0], encoded(source, fmt), content_type=content_type)
     assert response.status_code == 200
     assert response.headers["content-type"] == "image/jpeg"
-    assert response.headers["x-upscale-model"] == "realesrgan-x2plus"
+    assert response.headers["x-upscale-model"] == "swinir-x2"
     assert int(response.headers["x-upscale-ms"]) >= 0
     result = Image.open(io.BytesIO(response.content))
     assert result.format == "JPEG" and result.mode == "RGB" and result.size == (74, 46)
@@ -193,7 +209,7 @@ def test_jpeg_is_quality_95_444(enabled, monkeypatch):
 def test_default_model_and_multipart(enabled):
     response = enabled[0].post("/upscale?scale=2", files={"file": ("a.png", encoded(checker()), "image/png")})
     assert response.status_code == 200
-    assert response.headers["x-upscale-model"] == "realesrgan-x2plus"
+    assert response.headers["x-upscale-model"] == "swinir-x2"
     assert Image.open(io.BytesIO(response.content)).size == (100, 60)
 
 
@@ -216,10 +232,11 @@ def test_rerun_is_byte_identical_and_model_stays_resident(enabled):
     second = post(client, data)
     assert first.status_code == second.status_code == 200
     assert first.content == second.content
-    assert sessions == ["realesrgan-x2plus"]
-    assert list(module.UPSCALERS) == ["realesrgan-x2plus"]
-    post(client, data, "model=swinir-x2&scale=2")
-    assert sessions == ["realesrgan-x2plus", "swinir-x2"]
+    assert sessions == ["swinir-x2"]
+    assert list(module.UPSCALERS) == ["swinir-x2"]
+    post(client, data, "model=swinir-x4&scale=4")
+    assert sessions == ["swinir-x2", "swinir-x4"]
+    assert list(module.UPSCALERS) == ["swinir-x2", "swinir-x4"]
 
 
 def test_load_failure_is_503_and_reported(enabled, monkeypatch):
@@ -232,7 +249,7 @@ def test_load_failure_is_503_and_reported(enabled, monkeypatch):
     response = post(client, encoded(checker()))
     assert response.status_code == 503 and set(response.json()) == {"error"}
     upscale = client.get("/health").json()["upscale"]
-    assert upscale["models"][0]["available"] is False and upscale["default"] == "swinir-x2"
+    assert upscale["models"][0]["available"] is False and upscale["default"] == "swinir-x4"
 
 
 def test_nondeterministic_model_is_not_served(enabled, monkeypatch):
@@ -240,7 +257,7 @@ def test_nondeterministic_model_is_not_served(enabled, monkeypatch):
     rng = np.random.default_rng()
     monkeypatch.setattr(module, "create_upscale_session", lambda model: FakeSession(infer=lambda b: nearest(b) + rng.random(1).astype(np.float32)))
     assert post(client, encoded(checker())).status_code == 503
-    assert "realesrgan-x2plus" in module.UPSCALE_FAILED
+    assert "swinir-x2" in module.UPSCALE_FAILED
 
 
 def test_inference_error_is_500_without_details(enabled, monkeypatch):
@@ -293,12 +310,12 @@ def test_constant_image_stays_constant_across_tiles(service):
 def test_upscale_log_line_carries_the_batch_and_ms(enabled, caplog):
     client, module = enabled[0], enabled[1]
     caplog.set_level(logging.INFO, logger="matting")
-    response = client.post("/upscale?model=realesrgan-x2plus&scale=2", content=encoded(checker()), headers={"content-type": "image/png", "x-catalog-batch": "b1", "x-catalog-product": "p1"})
+    response = client.post("/upscale?model=swinir-x2&scale=2", content=encoded(checker()), headers={"content-type": "image/png", "x-catalog-batch": "b1", "x-catalog-product": "p1"})
     assert response.status_code == 200
     formatter = module.JsonFormatter()
     [line] = [json.loads(formatter.format(r)) for r in caplog.records if r.getMessage().startswith("upscale_complete")]
     assert line["severity"] == "INFO" and line["batchId"] == "b1" and line["productId"] == "p1"
-    assert line["model"] == "realesrgan-x2plus" and line["ms"] == int(response.headers["x-upscale-ms"])
+    assert line["model"] == "swinir-x2" and line["ms"] == int(response.headers["x-upscale-ms"])
 
 
 def test_health_reports_the_tile_of_a_loaded_upscaler(enabled):
@@ -307,3 +324,67 @@ def test_health_reports_the_tile_of_a_loaded_upscaler(enabled):
     assert client.get("/health").json()["upscaleTiles"] == {}
     assert post(client, encoded(checker()), "model=swinir-x2&scale=2").status_code == 200
     assert client.get("/health").json()["upscaleTiles"] == {"swinir-x2": TILE}
+
+
+# Spec 18 quality: the x4 model (SwinIR-S x4) above 2x.
+@pytest.mark.parametrize("query", ["model=swinir-x4&scale=4", "model=swinir-x4", "scale=4"])
+def test_x4_returns_exact_4x_jpeg(enabled, query):
+    source = Image.new("RGB", (37, 23), (200, 120, 40))
+    response = post(enabled[0], encoded(source), query)
+    assert response.status_code == 200
+    assert response.headers["x-upscale-model"] == "swinir-x4" and response.headers["x-upscale-scale"] == "4"
+    result = Image.open(io.BytesIO(response.content))
+    assert result.format == "JPEG" and result.size == (148, 92)
+    assert [layer[1:3] for layer in result.layer] == [(1, 1)] * 3, "4:4:4, no chroma subsampling"
+    assert np.abs(np.asarray(result, dtype=np.int16) - np.array([200, 120, 40])).max() <= 2
+
+
+def test_x2_answer_says_its_scale(enabled):
+    response = post(enabled[0], encoded(checker()), "model=swinir-x2")
+    assert response.status_code == 200 and response.headers["x-upscale-scale"] == "2"
+    assert Image.open(io.BytesIO(response.content)).size == (100, 60)
+
+
+def test_x4_rerun_is_byte_identical(enabled):
+    client = enabled[0]
+    data = encoded(checker(130, 70))
+    first, second = post(client, data, "model=swinir-x4&scale=4"), post(client, data, "model=swinir-x4&scale=4")
+    assert first.status_code == second.status_code == 200 and first.content == second.content
+
+
+def test_x4_refuses_a_side_its_jpeg_cannot_hold(enabled, monkeypatch):
+    monkeypatch.setattr(enabled[1], "UPSCALE_MAX_OUTPUT_SIDE", 100)
+    assert post(enabled[0], encoded(checker(26, 10)), "model=swinir-x4&scale=4").status_code == 400
+    assert post(enabled[0], encoded(checker(25, 10)), "model=swinir-x4&scale=4").status_code == 200
+    assert enabled[2] == ["swinir-x4"]
+
+
+@pytest.mark.parametrize("size", [(1, 1), (33, 31), (130, 71)])
+def test_tiling_reassembles_exactly_at_4x(service, size):
+    module = service[1]
+    height, width = size
+    rgb = np.random.default_rng(height * 1000 + width).integers(0, 256, (height, width, 3), dtype=np.uint8)
+    session = FakeSession(scale=4)
+    out = module.upscale_array(rgb, lambda b: session.run(None, {"input": b})[0], TILE, scale=4)
+    assert out.shape == (height * 4, width * 4, 3)
+    assert np.array_equal(out, rgb.repeat(4, axis=0).repeat(4, axis=1))
+
+
+def test_x4_model_with_a_2x_output_is_not_served(enabled, monkeypatch):
+    client, module, _ = enabled
+    monkeypatch.setattr(module, "create_upscale_session", lambda model: FakeSession(scale=2))
+    assert post(client, encoded(checker()), "model=swinir-x4&scale=4").status_code == 503
+    assert "swinir-x4" in module.UPSCALE_FAILED
+
+
+def test_the_build_pins_the_export_hashes_the_render_keys_name():
+    # 2026-10-29 review P2-7: the Dockerfile's converter fails the build on an export whose sha256 does not start with
+    # its pin, and the render key names the same pin. Both lists must agree (read as text: the converter needs torch).
+    root = Path(__file__).resolve().parents[3]
+    import re
+    converter = (root / "services/matting/tools/convert_upscalers.py").read_text(encoding="utf-8")
+    core = (root / "packages/core/src/catalog/upscale.ts").read_text(encoding="utf-8")
+    pins = dict(re.findall(r'"(swinir-x[24])": "([0-9a-f]{8})"', re.search(r"EXPORT_SHA256_PREFIX = \{[^}]*\}", converter).group(0)))
+    keys = dict(re.findall(r'"(swinir-x[24])": "([0-9a-f]{8})"', re.search(r"UPSCALE_MODEL_VERSIONS[^=]*= \{[^}]*\}", core).group(0)))
+    assert pins == keys and sorted(pins) == UPSCALE_IDS
+    assert "digest.startswith(EXPORT_SHA256_PREFIX[model_id])" in converter

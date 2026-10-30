@@ -12,6 +12,8 @@ export default defineConfig(
       "**/drizzle/**",
       "services/**",
       ".claude/**",
+      // Spec 18: the bake-off scripts, kept as they ran (CommonJS run by node, not part of the build).
+      "apps/worker/src/catalog-output-evals/bake/**",
     ],
   },
   js.configs.recommended,

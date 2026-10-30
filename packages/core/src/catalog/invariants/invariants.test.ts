@@ -4,7 +4,8 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vites
 import { eq } from "drizzle-orm";
 import type { Db } from "../../db/client";
 import { createTestDb } from "../../db/testing";
-import { catalogBatches, catalogBatchProducts, catalogChunks, catalogOutputs, catalogProducts, catalogSourceImages } from "../../db/schema";
+import { catalogBatches, catalogBatchProducts, catalogChunks, catalogEnlargements, catalogOutputs, catalogProducts, catalogSourceImages } from "../../db/schema";
+import { ENLARGING_TASK } from "../pipeline/enlargement";
 import type { BatchStatus, ChangeKind, OutputStatus } from "../types";
 import { CHECKS } from "./checks";
 import { BATCH_LIST_SIZE, runInvariants } from "./run";
@@ -14,7 +15,7 @@ let db: Db, close: () => Promise<void>;
 beforeAll(async () => { ({ db, close } = await createTestDb()); }, 60_000);
 afterAll(async () => { await close(); });
 beforeEach(async () => {
-  await db.delete(catalogChunks); await db.delete(catalogOutputs); await db.delete(catalogSourceImages); await db.delete(catalogBatchProducts); await db.delete(catalogProducts); await db.delete(catalogBatches);
+  await db.delete(catalogEnlargements); await db.delete(catalogChunks); await db.delete(catalogOutputs); await db.delete(catalogSourceImages); await db.delete(catalogBatchProducts); await db.delete(catalogProducts); await db.delete(catalogBatches);
 });
 
 const NOW = new Date("2026-10-28T12:00:00Z");
@@ -44,8 +45,9 @@ async function chunk(batchId: string, v: { status: "queued" | "running" | "done"
 const run = (batchId?: string) => runInvariants(db, vi.fn(), NOW, batchId ? { batchId } : {});
 
 describe("invariant checks", () => {
-  it("the table has the five checks of spec 17 and spec 18's enlargement check with their severities", () => {
-    expect(CHECKS.map(c => [c.id, c.severity])).toEqual([["silent_outputs", "ERROR"], ["held_without_reason", "ERROR"], ["stale_running_chunk", "WARNING"], ["slow_chunk", "WARNING"], ["done_batch_with_open_chunk", "ERROR"], ["enlarged_without_upscaler", "ERROR"]]);
+  it("the table has the five checks of spec 17, spec 18's enlargement check and the lifecycle's three, with their severities", () => {
+    expect(CHECKS.map(c => [c.id, c.severity])).toEqual([["silent_outputs", "ERROR"], ["held_without_reason", "ERROR"], ["stale_running_chunk", "WARNING"], ["slow_chunk", "WARNING"], ["done_batch_with_open_chunk", "ERROR"], ["enlarged_without_upscaler", "ERROR"],
+      ["plain_accepted_outputs", "INFO"], ["parked_chunk_quiet", "WARNING"], ["enlargement_waiting_long", "INFO"]]);
     for (const c of CHECKS) expect(c.sentence.length).toBeGreaterThan(20);
   });
 
@@ -158,6 +160,54 @@ describe("invariant checks", () => {
     expect(r.results.find(x => x.id === "enlarged_without_upscaler")!.sample).toEqual([plain.id]);
     await db.update(catalogOutputs).set({ flags: ["upscaled"] }).where(eq(catalogOutputs.id, plain.id));
     expect((await run()).counts.enlarged_without_upscaler).toBe(0);
+  });
+
+  it("T57: plain_accepted_outputs counts outputs used as they are after the plain warning, which enlarged_without_upscaler then excludes; each fires only on its fixture", async () => {
+    const b = await batch("done");
+    await db.update(catalogBatches).set({ options: { ...b.options, enlargement: { model: "swinir-x2", minScale: 1 } } }).where(eq(catalogBatches.id, b.id));
+    const p = await product(b.id, "new");
+    const accepted = await output(b.id, p, "verified", { decision: "use_as_is" }), silent = await output(b.id, p, "verified");
+    await db.update(catalogOutputs).set({ scale: 2, flags: ["enlargement_failed"] }).where(eq(catalogOutputs.id, accepted.id));
+    await db.update(catalogOutputs).set({ scale: 2, flags: [] }).where(eq(catalogOutputs.id, silent.id));
+    const r = await run();
+    expect(r.counts.plain_accepted_outputs).toBe(1);
+    expect(r.results.find(x => x.id === "plain_accepted_outputs")!.sample).toEqual([accepted.id]);
+    expect(r.results.find(x => x.id === "enlarged_without_upscaler")!.sample).toEqual([silent.id]);
+    expect([r.counts.parked_chunk_quiet, r.counts.enlargement_waiting_long]).toEqual([0, 0]);
+  });
+
+  it("T57: parked_chunk_quiet fires on a parked chunk quiet for 2 h of a live batch; enlargement_waiting_long on a wanted queued row older than 20 h", async () => {
+    const b = await batch("rendering"), p = await product(b.id, "new"), cancelled = await batch("cancelled");
+    const [quiet] = await db.insert(catalogChunks).values({ batchId: b.id, index: ++seq, stage: "render", status: "queued", productIds: [p.id], taskName: ENLARGING_TASK, dispatchedAt: ago(200), progressAt: ago(121) }).returning();
+    await db.insert(catalogChunks).values({ batchId: b.id, index: ++seq, stage: "render", status: "queued", productIds: [p.id], taskName: ENLARGING_TASK, dispatchedAt: ago(200), progressAt: ago(119) });
+    await db.insert(catalogChunks).values({ batchId: cancelled.id, index: ++seq, stage: "render", status: "queued", productIds: [], taskName: ENLARGING_TASK, dispatchedAt: ago(500), progressAt: ago(500) });
+    const row = (identityHash: string, createdMin: number, extra: Partial<typeof catalogEnlargements.$inferInsert> = {}) => db.insert(catalogEnlargements).values({ batchId: b.id, productId: p.id, sourceImageId: p.sourceId, upscaler: "u@h", factor: 2, scale: 2, outW: 2, outH: 2, route: "direct", pixelHash: "p", identityHash, createdAt: ago(createdMin), ...extra }).returning();
+    const [long] = await row("a", 21 * 60);
+    await row("b", 19 * 60);
+    await row("c", 21 * 60, { status: "done" });
+    await row("d", 21 * 60, { wanted: false });
+    const r = await run();
+    expect(r.results.find(x => x.id === "parked_chunk_quiet")!.sample).toEqual([quiet!.id]);
+    expect(r.results.find(x => x.id === "enlargement_waiting_long")!.sample).toEqual([long!.id]);
+  });
+
+  it("enlarged_without_upscaler, spec 18 quality: a batch started at the 1.0x threshold violates at 1.2x without `upscaled`; 1.0x exactly and a 1.2x hold do not", async () => {
+    const b = await batch("done");
+    await db.update(catalogBatches).set({ options: { ...b.options, enlargement: { model: "swinir-x2", x4Model: "swinir-x4", minScale: 1 } } }).where(eq(catalogBatches.id, b.id));
+    const p = await product(b.id, "new");
+    const enlarged = async (status: OutputStatus, scale: number, flags: string[]) => {
+      const o = await output(b.id, p, status, status === "needs_attention" ? { reason: "This photo could not be enlarged." } : {});
+      await db.update(catalogOutputs).set({ scale, flags: flags as typeof o.flags }).where(eq(catalogOutputs.id, o.id));
+      return o;
+    };
+    const plain = await enlarged("verified", 1.2, []);
+    await enlarged("verified", 1.2, ["upscaled"]);
+    await enlarged("needs_attention", 1.2, ["enlargement_failed"]);
+    await enlarged("verified", 1, []);
+    await enlarged("verified", 0.6, []);
+    const r = await run();
+    expect(r.counts.enlarged_without_upscaler).toBe(1);
+    expect(r.results.find(x => x.id === "enlarged_without_upscaler")!.sample).toEqual([plain.id]);
   });
 });
 

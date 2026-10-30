@@ -2,7 +2,7 @@
 # Order (spec 17 3.2.5): preflight checks and shape refusals, build the images on Cloud Build, run DB migrations as
 # the catalog-migrate Cloud Run job (additive; also seeds the first admin and the test brand test_brand), make sure
 # the task queues exist, then each service of the registry (infra/lib/services.sh: catalog-matting,
-# catalog-upscale, catalog-matting-gpu, catalog-worker, catalog-web, all private) through the deploy gate (infra/lib/gate.sh):
+# catalog-upscale, catalog-matting-gpu, catalog-web, catalog-worker, all private) through the deploy gate (infra/lib/gate.sh):
 # a no-traffic candidate, its probe against the candidate's tag URL, then the traffic shift. The worker's probe is
 # the tier 5 per-brand smoke (Cloud Run job catalog-test-smoke) on the new worker image against the new matting
 # candidates. A failing probe stops the script: that service keeps its live revision, later services are not
@@ -230,20 +230,28 @@ if [ "$BULK_MAX_DISPATCHES" -gt 0 ]; then WEB_ENV+=",TASKS_BULK_QUEUE=$BULK_QUEU
 # jobs through WORKER_ENV (above) and the web here, so the estimate and recorded spend agree.
 WORKER_ENV+=",INR_PER_USD=$INR_PER_USD"
 WEB_ENV+=",INR_PER_USD=$INR_PER_USD,COMPUTE_USD_PER_VCPU_SECOND=$COMPUTE_USD_PER_VCPU_SECOND"
-# Spec 11: the GPU upscaler in the render. UPSCALE_MODEL names the model the GPU matting service runs at
-# POST /upscale (realesrgan-x2plus or swinir-x2). The default is swinir-x2 (owner decision 2026-10-21: on for
-# every channel wherever a photo is enlarged beyond UPSCALE_MIN_SCALE, and Styli judged on the x2 size), so a
-# redeploy never switches it off by accident (unset or empty gives swinir-x2). UPSCALE_MODEL=off turns it off, and
-# every render keeps the plain Lanczos path. UPSCALE_MIN_SCALE is the enlargement above which it is used
-# (default 1.5, the variable canvases' cap). Engineering config only, never shown to the operator. Override
-# from the shell like INR_PER_USD, e.g. UPSCALE_MODEL=off bash infra/deploy.sh. UPSCALE_MODEL reaches the
-# worker (render) and the web (the wizard's Styli size warning and step 4 count), so both use one threshold.
+# Spec 11: the upscaler in the render. UPSCALE_MODEL names the x2 model the upscale service runs at POST /upscale
+# (swinir-x2; spec 18 quality serves no Real-ESRGAN model). The default is swinir-x2 (owner decision 2026-10-21:
+# on for every channel wherever a photo is enlarged beyond UPSCALE_MIN_SCALE), so a redeploy never switches it off
+# by accident (unset or empty gives swinir-x2). UPSCALE_MODEL=off turns it off, and every render keeps the plain
+# Lanczos path. Spec 18 quality: UPSCALE_MODEL_X4 (default swinir-x4) makes the image of every photo enlarged above
+# 2.0x (one x4 pass, then a Lanczos downscale); off sends those to the x2 model too. UPSCALE_MIN_SCALE is the
+# enlargement above which the upscaler is used (default 1.0: every enlargement; it was 1.5 before spec 18 quality).
+# Engineering config only, never shown to the operator. Override from the shell like INR_PER_USD, e.g.
+# UPSCALE_MODEL=off bash infra/deploy.sh. UPSCALE_MODEL and UPSCALE_MODEL_X4 reach the worker (render) and the web
+# (the wizard's Styli size warning and step 4 count), so both use one threshold and one route.
 UPSCALE_MODEL=${UPSCALE_MODEL:-swinir-x2}
 if [ "$UPSCALE_MODEL" = off ]; then UPSCALE_MODEL=""; fi
-UPSCALE_MIN_SCALE=${UPSCALE_MIN_SCALE:-1.5}
-case "$UPSCALE_MODEL" in ""|realesrgan-x2plus|swinir-x2) ;; *) echo "UPSCALE_MODEL must be realesrgan-x2plus, swinir-x2 or off" >&2; exit 1 ;; esac
+UPSCALE_MODEL_X4=${UPSCALE_MODEL_X4:-swinir-x4}
+if [ "$UPSCALE_MODEL_X4" = off ]; then UPSCALE_MODEL_X4=""; fi
+UPSCALE_MIN_SCALE=${UPSCALE_MIN_SCALE:-1}
+case "$UPSCALE_MODEL" in ""|swinir-x2) ;; *) echo "UPSCALE_MODEL must be swinir-x2 or off" >&2; exit 1 ;; esac
+case "$UPSCALE_MODEL_X4" in ""|swinir-x4) ;; *) echo "UPSCALE_MODEL_X4 must be swinir-x4 or off" >&2; exit 1 ;; esac
 [[ "$UPSCALE_MIN_SCALE" =~ ^[0-9]+([.][0-9]+)?$ ]] && awk -v s="$UPSCALE_MIN_SCALE" 'BEGIN{exit !(s>=1)}'   || { echo "UPSCALE_MIN_SCALE must be a number of at least 1, such as 1.5" >&2; exit 1; }
+# 2026-10-29 review P2-6: the web records the threshold on each batch it starts (options.enlargement.minScale, read by
+# the enlarged_without_upscaler invariant), so both get the same value.
 WORKER_ENV+=",UPSCALE_MIN_SCALE=$UPSCALE_MIN_SCALE"
+WEB_ENV+=",UPSCALE_MIN_SCALE=$UPSCALE_MIN_SCALE"
 # UPSCALE_MODEL itself is added to the worker and the web after the GPU matting step below, and only when that
 # step yields MATTING_GPU_URL.
 # 03: the web verifies the IAP JWT against this exact audience and accepts only this domain.
@@ -388,20 +396,20 @@ for SERVICE in "${SERVICES[@]}"; do
       # reads the stored x2 and the matting client refuses a dedicated UPSCALE_URL. On cpu and gpu the enlarge task
       # learns the matting service's own timeout the same way (each attempt is also clamped to the task's deadline).
       if [ "$UPSCALE_SERVICE" = cpu ]; then
-        if [ -n "$UPSCALE_MODEL" ]; then WORKER_ENV+=",UPSCALE_URL=$MATTING_URL,UPSCALE_TIMEOUT_S=$MATTING_TIMEOUT_S"; fi
+        if [ -n "$UPSCALE_MODEL" ]; then WORKER_ENV+=",UPSCALE_URL=$MATTING_URL,UPSCALE_TIMEOUT_S=$MATTING_TIMEOUT_S,UPSCALE_COLD_START_S=$UPSCALE_COLD_START_S"; fi
       elif [ "$UPSCALE_SERVICE" = dedicated ]; then
         if [ -z "$UPSCALE_SERVICE_URL" ]; then
           echo "ERROR: UPSCALE_SERVICE=dedicated but catalog-upscale has no URL; the worker was not changed" >&2
           exit 1
         fi
-        if [ -n "$UPSCALE_MODEL" ]; then WORKER_ENV+=",UPSCALE_URL=$UPSCALE_SERVICE_URL,UPSCALE_TIMEOUT_S=$UPSCALE_TIMEOUT_S,UPSCALE_MAX_PIXELS=$UPSCALE_MAX_PIXELS"; fi
+        if [ -n "$UPSCALE_MODEL" ]; then WORKER_ENV+=",UPSCALE_URL=$UPSCALE_SERVICE_URL,UPSCALE_TIMEOUT_S=$UPSCALE_TIMEOUT_S,UPSCALE_COLD_START_S=$UPSCALE_COLD_START_S,UPSCALE_MAX_PIXELS=$UPSCALE_MAX_PIXELS,UPSCALE_MAX_PIXELS_X4=$UPSCALE_MAX_PIXELS_X4"; fi
       elif [ -n "$UPSCALE_MODEL" ] && [ -z "$MATTING_GPU_URL" ]; then
         echo "WARN: UPSCALE_MODEL=$UPSCALE_MODEL ignored: no GPU matting service URL; the render keeps the plain path" >&2
         UPSCALE_MODEL=""
       elif [ -n "$UPSCALE_MODEL" ]; then
-        WORKER_ENV+=",UPSCALE_TIMEOUT_S=$MATTING_TIMEOUT_S"
+        WORKER_ENV+=",UPSCALE_TIMEOUT_S=$MATTING_TIMEOUT_S,UPSCALE_COLD_START_S=$UPSCALE_COLD_START_S"
       fi
-      if [ -n "$UPSCALE_MODEL" ]; then WORKER_ENV+=",UPSCALE_MODEL=$UPSCALE_MODEL"; WEB_ENV+=",UPSCALE_MODEL=$UPSCALE_MODEL"; fi
+      if [ -n "$UPSCALE_MODEL" ]; then WORKER_ENV+=",UPSCALE_MODEL=$UPSCALE_MODEL,UPSCALE_MODEL_X4=${UPSCALE_MODEL_X4:-off}"; WEB_ENV+=",UPSCALE_MODEL=$UPSCALE_MODEL,UPSCALE_MODEL_X4=${UPSCALE_MODEL_X4:-off}"; fi
       ;;
     catalog-worker)
       # Queue slots for the worker now live, right away, so a later gate's failure never strands them. Never
@@ -516,7 +524,7 @@ echo "WEB_URL=$WEB_URL"
 echo "WORKER_URL=$WORKER_URL"
 echo "MATTING_URL=$MATTING_URL"
 echo "MATTING_GPU_URL=${MATTING_GPU_URL:-not configured}"
-echo "UPSCALE_MODEL=${UPSCALE_MODEL:-off} (on $UPSCALE_SERVICE)"
+echo "UPSCALE_MODEL=${UPSCALE_MODEL:-off} UPSCALE_MODEL_X4=${UPSCALE_MODEL_X4:-off} (on $UPSCALE_SERVICE)"
 
 # --- 10. Monitoring --------------------------------------------------------------------
 # Email alerts, log-based metrics and the "Catalog ops" dashboard (infra/monitoring.sh, check-then-

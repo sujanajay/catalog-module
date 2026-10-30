@@ -49,7 +49,7 @@ not fixed". Same pattern as spec 17: a note, not a guard.
 |---|---|
 | Measure before sizing. | No upscaler shape goes live until its p50 and p95 per photo size are a measured table. The 5.9 to 7.8 s figure is no longer used anywhere. |
 | Nothing in the hot path waits on a slow service. | The render never calls the upscaler. Each photo is enlarged by its own queued task, the 2x image is stored, and the render reads the stored bytes. The chunk waits (parked) until its photos are settled. |
-| Client timeout > server timeout > deadline, clamped per attempt. | The client waits longer than the service is allowed to run (`UPSCALE_TIMEOUT_S + 30 s`), the service timeout is at least 2 x the measured p95, and every attempt is clamped to the time left before the Cloud Tasks deadline (no attempt starts with less than 60 s left). No `/health` call, no breaker. |
+| Client timeout > server timeout > deadline, clamped per attempt. | The client waits longer than the service is allowed to run (`UPSCALE_TIMEOUT_S + 30 s`), the service timeout is at least 2 x the measured p95, and every attempt is clamped to the time left before the Cloud Tasks deadline (no attempt starts with less than 60 s left). The health probe waits `UPSCALE_COLD_START_S + 60 s`, so a cold start is never mistaken for an outage; no breaker. |
 | No silent degradation: hold with a reason. | A photo that needs enlargement ends `upscaled` or its product is held with `enlargement_failed` and an operator sentence. The plain path exists only when the upscaler is deliberately off (`UPSCALE_MODEL=off`). |
 | Capacity is arithmetic, refused by shape checks. | The CPU quota, the queue rate and the timeout bounds are computed in `infra/lib/shape.sh` and a shape that does not fit is refused before anything deploys. |
 
@@ -64,15 +64,27 @@ not fixed". Same pattern as spec 17: a note, not a guard.
 | A dedicated service must not take traffic before its client exists. | `ENLARGE_CLIENT_WIRED` in the shape: with 0, `UPSCALE_SERVICE=dedicated` is refused with the reason. It is 1 since H3 shipped the durable enlarge client. | `infra/lib/shape.sh`, `infra/tests/shape.test.mjs` |
 | CPU quota is shared by every service. | Refusal: worker + CPU cut-out + `catalog-upscale` (`UPSCALE_MAX_INSTANCES x UPSCALE_CPU_VCPU`) + web + jobs must be at most 190 vCPU, with the breakdown printed. | `infra/lib/shape.sh`, `infra/tests/shape.test.mjs` |
 | A queue must not send faster than the service can serve. | Refusal: `ENLARGE_DISPATCHES_PER_SECOND <= instances x concurrency / p50` (the p95 stands in when p50 is empty); enlarge lane slots at most `catalog-upscale` instances x concurrency. | `infra/lib/shape.sh`, `infra/lib/queues.sh`, `infra/tests/queues.test.mjs` |
-| `/health` must not wait behind the work. | The matting service's `/health` never takes the inference lock; the enlarge client never calls `/health` and has no breaker. | `services/matting/app.py`, `services/matting/tests/test_app.py` (`test_health_never_waits_for_the_inference_lock`), `packages/core/src/catalog/enlarge.ts` and its test |
-| An output-critical service must not be called inline from a chunk. | Enlargement is a durable Cloud Tasks task (`/tasks/catalog/enlarge`, operator and bulk lanes, 8 attempts, 30 to 300 s back-off); the render chunk is parked (`task_name='enlarging'`) until every photo settles; the render reads the stored x2 only. Protocol rule added. | `apps/worker/src/catalog/enlarge.ts`, `apps/worker/src/catalog/chunk.ts`, `packages/core/src/catalog/pipeline/enlargement.ts`, `docs/specs/00-execution-protocol.md` section 11 |
-| No silent plain resize. | A missing, failed or mismatched stored x2 gives the flag `enlargement_failed`, which holds the product; the WARNING fallback path is gone. | `packages/core/src/catalog/render.ts`, `packages/core/src/catalog/qa/reasons.ts`, `apps/worker/src/catalog/enlarge.test.ts` (through the real `renderAllChannels`) |
-| Silence must be caught in production too. | Invariant `enlarged_without_upscaler` (ERROR): a verified output with scale > 1.5 and no `upscaled` flag in a batch with `options.enlargement`. | `packages/core/src/catalog/invariants/checks.ts`, `invariants.test.ts` |
-| The queue's retry count also counts 429s answered before the app ran. | Only deliveries that reached the handler count: `x2_attempts = LEAST(8, x2_attempts + 1)`; the queue's retry count is not used for the terminal decision. | `apps/worker/src/catalog/enlarge.ts`, `enlarge.test.ts` |
-| A lost task must be re-sent, but a slow paced lane is not a lost task. | Lane-aware stale re-send: every enlarge delivery of a batch refreshes `progress_at` on every parked chunk of that batch; queued photos are sent again (next round) only when the batch's enlarge lane was quiet for `ENLARGE_STALE_MS` (60 min since the enlarge task deadline became 30 min; 30 min before). | `packages/core/src/catalog/pipeline/enlargement.ts`, `packages/core/src/catalog/pipeline/dispatch.ts`, `enlargement.test.ts` |
-| Two deliveries of one photo must not both pay. | In-flight claim `x2_claimed_at` (migration 0005) taken before the service call, held for the dispatch deadline; the loser answers 503 `in_flight`; the success write is guarded on `x2_uri IS NULL`, so a late writer adds no write and no cost row. | `packages/core/drizzle/0005_enlargement.sql`, `apps/worker/src/catalog/enlarge.ts`, `enlarge.test.ts` |
-| The stored image must say which model made it. | The x2 object key names the upscaler (`<pathKey>_<n>.<upscaler>.x2.jpg`) and its metadata carries `sourceSha256` and `upscaler`; an image of another upscaler is re-queued at the render stage, never primed. | `packages/core/src/catalog/naming.ts` (`enlargedPath`), `apps/worker/src/catalog/enlarge.ts`, `apps/worker/src/catalog/chunk.ts` (`requeueOtherUpscaler`) |
+| `/health` must not wait behind the work. | The matting service's `/health` never takes the inference lock; the enlarge handler's probe tolerates a cold start and, after 3 probe timeouts in a row, makes the call anyway. | `services/matting/app.py`, `services/matting/tests/test_app.py` (`test_health_never_waits_for_the_inference_lock`), `apps/worker/src/catalog/enlarge.ts` and `enlarge.test.ts` (T62) |
+| An output-critical service must not be called inline from a chunk. | Enlargement is a durable Cloud Tasks task per identity (`/tasks/catalog/enlarge`, operator and bulk lanes that never drop a task: unlimited attempts, 30 to 900 s back-off); the render chunk is parked (`task_name='enlarging'`) while one of its photos has a wanted queued row; the render reads stored images only. Protocol rule added. | `apps/worker/src/catalog/enlarge.ts`, `apps/worker/src/catalog/chunk.ts`, `packages/core/src/catalog/pipeline/enlargement.ts`, `infra/lib/queues.sh`, `docs/specs/00-execution-protocol.md` section 11 |
+| No silent plain resize. | Only a terminal enlargement gives the flag `enlargement_failed`, which holds the product; not ready makes the render wait, never fall back. The WARNING fallback path is gone. | `packages/core/src/catalog/render.ts`, `packages/core/src/catalog/qa/reasons.ts`, `apps/worker/src/catalog/enlarge.test.ts` (through the real `renderAllChannels`) |
+| Silence must be caught in production too. | Invariant `enlarged_without_upscaler` (ERROR): a staged or verified output above the batch's threshold without `upscaled` in a batch with `options.enlargement`, unless accepted plain by the operator; `plain_accepted_outputs` (INFO), `parked_chunk_quiet` (WARNING), `enlargement_waiting_long` (INFO). | `packages/core/src/catalog/invariants/checks.ts`, `invariants.test.ts` |
+| A lost task must be re-sent, but a slow paced lane is not a lost task. | Lane-aware stale re-send: every enlarge delivery of a batch refreshes `progress_at` on its parked chunks; a wanted queued row is sent again with `sends+1` (a new task id) only when the lane was quiet for `ENLARGE_STALE_MS` (60 min); after 20 sends the pace drops to 6 h with an ERROR line, never a failure. The sweep recovers every live batch with a queued or running chunk, done batches included. | `packages/core/src/catalog/pipeline/enlargement.ts`, `packages/core/src/catalog/pipeline/dispatch.ts`, `apps/worker/src/catalog/sweep.ts`, `enlarge.operator.test.ts` (T41) |
 | Measuring must not touch production services. | `UPSCALE_MEASURE=1 bash infra/deploy.sh` deploys only `catalog-upscale` as a tagged candidate; gate tests cover it. | `infra/deploy.sh`, `infra/lib/gate.sh`, `infra/tests/gate.test.mjs` |
+| Quality (spec 18 3.6): a 1.2x Lanczos stretch is visibly soft, and x2 plus a Lanczos stretch to 3x looks pixelated. | The upscaler makes every enlargement above 1.0x (`UPSCALE_MIN_SCALE` 1); above 2.0x one x4 pass then a Lanczos downscale; AI output is never sharpened. Render tests at 1.2x, 1.5x (x2) and 2.5x (x4); a 1.2x failure holds. | `packages/core/src/catalog/upscale.ts` (`upscalersFor`), `render.ts`, `enhance.ts`, `upscale.test.ts` |
+| Choose a model by measuring against ground truth, not by "one call is simpler". | The x2/x4 split was chosen because x4 lost to x2 on PSNR, SSIM and deltaE at 1.2x, 1.5x and 2.0x in the bake-off (`.runs/2026-10-29-18-quality-bakeoff.md`); the numbers are in spec 18 3.6.3. | `docs/specs/18-reliable-enlargement.md` |
+| The threshold lives in one place per batch. | The invariant reads the batch's `options.enlargement.minScale` (older batches: 1.5), so a batch made at 1.0 is checked at 1.0. | `packages/core/src/catalog/invariants/checks.ts`, `invariants.test.ts` |
+| The shape must hold for the slowest model and its output memory. | `UPSCALE_X4_TIME_RATIO` (1.3) in the timeout rule; a memory rule (4096 MiB + 160 B per input pixel <= 80% of `UPSCALE_MEMORY`); the deploy probe times x4, checks its rerun is byte-identical and (`--x4-ratio`) fails an x4 p95 above 1.3 x the x2 p95. | `infra/lib/shape.sh`, `infra/lib/services.sh`, `infra/tests/shape.test.mjs`, `gate.test.mjs`, `services/matting/tests/cloudrun_check.py` |
+| A cap sized for the slowest model holds work the faster model could do (2026-10-29 review: a 2500 px product on Centrepoint at 1.2x crops to 6.57 MP, over a shared 6.4 MP cap, and was held). | One pixel cap per model, each checked against the timeout with its own time per pixel: `UPSCALE_MAX_PIXELS` 8 MP for x2 (1668 s), `UPSCALE_MAX_PIXELS_X4` 6.4 MP for x4 (1734 s). The worker, the service and shape.sh read the same two variables. | `packages/core/src/catalog/upscale.ts` (`upscaleMaxPixels`), `services/matting/app.py`, `infra/lib/shape.sh`, tests |
+| A build pin that only a person compares is no pin. | The converter fails the build when an ONNX export's sha256 does not start with its pin, and a pytest checks the pins equal `UPSCALE_MODEL_VERSIONS`. | `services/matting/tools/convert_upscalers.py`, `services/matting/tests/test_upscale.py` |
+| I1 Identity: an image is (prepared pixels, upscaler with export hash, effective scale), always the whole photo. | `identityOf`, `pixelHashOf`, `enlargedPath` with the identity; one validator `validateEnlargedObject` for the handler and the render. | `packages/core/src/catalog/pipeline/enlargement.ts`, `naming.ts`; tests T4, T5, T7, T8, T10, T16, T20, T31, T38, T45, T48, T51-T53, T64 |
+| I2 One owner: only the lifecycle module writes `catalog_enlargements` and answers readiness. | `reconcileEnlargements`, `primeReadiness`, `handleEnlargeTask` are the only entry points; the comma job, `storedImageState` and `requeueEnlargementGaps` are gone. | `apps/worker/src/catalog/enlarge.ts`; tests T47, T63 |
+| I3 Completeness: every needed identity is done, queued with an owner, or failed after its bounds; a chunk is parked exactly while it has a wanted queued row. | Park and unpark in the settle's transaction; tiles and downscale routes so size alone never holds what a route can make. | `chunk.ts`, `pipeline/enlargement.ts` (`unparkSettledChunks`); tests T6, T28, T30, T33, T35, T53, T54, T68; the state-machine model T40 |
+| I4 Not ready is never a verdict. | Render answers 503 without a chunk error; the ladder and the flush cut record the step as skipped; only terminal gives `enlargement_failed`. | `upscale.ts` (`EnlargementNotReadyError`), `auto-resolve.ts`, `chunk.ts`; tests T8-T10, T22, T23, T29, T43, T50, T51, T54, T63 |
+| I5 No silent plain resize. | "Use as is" only after the plain warning (409 with the channels); the invariant excludes operator-accepted outputs and counts them. | `packages/core/src/catalog/decisions.ts`, `invariants/checks.ts`, `apps/web/lib/catalog/decisions.ts`; tests T13, T34, T59 |
+| I6 Bounded attempts, unbounded patience. | 8 counted attempts, 24 unexplained failures (counted unless a re-probe proves absence), 3 identity changes per photo; waits never count; queues retry without limit. | `apps/worker/src/catalog/enlarge.ts`, `infra/lib/queues.sh`; tests T4, T14, T15, T18, T19, T24-T27, T52, T53, T58, T61, T62, T66, T67 |
+| I7 A change of inputs is a new identity, never a reset. | Release (`wanted=false`, status kept) in the same transaction; a failed row wanted again stays failed; a wanted photo that a delivery did not prepare keeps its rows (found by T40). | `releaseEnlargements`, `reconcileEnlargements`; tests T11, T32, T34, T45, T46, T49, T64 |
+| I8 No deadlock, no stranded chunk, no time-based failure. | Unpark in the settle, direct enqueue on a non-processing batch, stale re-send, parked batches excluded from the 2 h no-progress rule, finalize re-queue at 10 min while parked. | `pipeline/dispatch.ts`, `sweep.ts`, `finalize.ts`; tests T12, T17, T19, T21, T24, T25, T27, T31, T36, T37, T41, T42, T44, T48, T55, T65, T68 |
+| I9 Pinned route. | `options.enlargement` written at Start and read by `routeFor(batch)`; only `UPSCALE_MODEL=off` overrides. | `packages/core/src/catalog/pipeline/enlargement.ts`; tests T1-T3 |
 
 ## Decisions recorded in the reviews
 
@@ -96,15 +108,20 @@ process warning becomes one structured WARNING line `process warning` with its s
 count (first 5 of each kind, then one per 1,000). `setMaxListeners` was not raised. The fix itself stays open
 until a live batch's `process warning` lines name the emitter.
 
-### The `requeueOtherUpscaler` race during a rolling deploy (low risk, open)
+### The CPU quota request (owner's call, not filed)
 
-`requeueOtherUpscaler` (`apps/worker/src/catalog/chunk.ts`) re-queues, at the render stage, a photo whose
-stored x2 was made by another upscaler than the worker's `UPSCALE_MODEL`. While a deploy changes `UPSCALE_MODEL`
-and the old and new worker revisions both serve for a short time, a render on one revision can re-queue a photo
-for its model and a render on the other revision can re-queue it back. Each round costs one extra enlargement;
-the photo is never primed with another model's bytes and never published silently, and the back and forth ends
-when the old revision stops serving. Accepted as low risk; open, with no ticket yet. It only arises when the
-model changes, which is an owner decision.
+The real limit of enlargement throughput is the Cloud Run CPU quota in asia-south1: 190 vCPU, of which 187 are
+assigned (16 x 4 for `catalog-upscale`, the CPU cut-out service at 4 instances, the worker, the web). Until it grows,
+a full upscaler fleet answers `busy` and batches wait; nothing fails. Text for the quota form (Google Cloud console,
+IAM and admin, Quotas, filter "Cloud Run Admin API", "CPU allocation, per region", region asia-south1):
+
+> Project image-links-agent, region asia-south1: please raise Cloud Run CPU allocation to 400 vCPU. We run a
+> CPU image upscaler (catalog-upscale, 4 vCPU per instance, concurrency 1, scale to zero) next to our catalog worker.
+> At 190 vCPU it is capped at 16 instances; 400 vCPU lets it scale to 32 instances and restores our cut-out service to
+> 16 instances. Usage is bursty (catalog batches), min instances are 0, so idle cost is zero.
+
+After the grant: `UPSCALE_MAX_INSTANCES` 32 and `MATTING_CPU_MAX_INSTANCES` 16 through `infra/lib/shape.sh` and its
+tests, with `CPU_QUOTA_LIMIT` (190 today, the share the shape may use) raised to match the grant.
 
 ### Measure mode semantics
 
@@ -119,9 +136,14 @@ model changes, which is an owner decision.
 
 ## Still open
 
+- Spec 18 quality: the x4 time ratio (1.3) and the x4 memory figure are from a laptop and the bake-off; the first
+  deploy's gate probe times x4 on the real shape. Replace `UPSCALE_X4_TIME_RATIO` with a measured x4 p95 row then.
+- Spec 18 quality: the swinir-x4 ONNX hash `f477a052` was exported locally with the pinned tools (they reproduce the
+  x2 hash exactly); the first Cloud Build now fails if its export differs, rather than only printing it.
+
 - The measured CPU table ("Measured on CPU" in `services/matting/README.md`) and the shape picked from it come
   from the spec 18 section 9 live run.
 - The MaxListeners emitter (above).
-- The `requeueOtherUpscaler` race (above).
+- The CPU quota request (above).
 - Throughput on CPU stays slow (about 2 minutes per 800x1200 photo); a GPU upscaler is the later lever (spec 18
   section 13).

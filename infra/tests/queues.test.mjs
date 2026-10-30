@@ -7,7 +7,8 @@
 //   5 attempts, and bootstrap.sh creates the main queue with the same retry;
 // - spec 16 3.2.3: a bulk queue left from a bigger shape keeps 1 slot; the preview stack gets no bulk queue;
 // - spec 18 3.3.1: the enlarge lanes <queue>-enlarge and <queue>-enlarge-bulk, paced by ENLARGE_DISPATCHES_PER_SECOND
-//   and retried by attempt count (8, 30 s to 300 s), are created before the services and set after the worker gate.
+//   and never dropping a task (spec 18 lifecycle 3.8, T58: unlimited attempts, no time limit, 30 s to 900 s apart),
+//   are created before the services and set after the worker gate.
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -22,7 +23,7 @@ const bash = process.env.CATALOG_BASH || gitBashPath();
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'catalog-queues-'));
 const RETRY = '--max-attempts=-1 --max-retry-duration=1800s --min-backoff=10s --max-backoff=60s --max-doublings=3';
 const INGEST_RETRY = '--max-attempts=5 --min-backoff=10s';
-const ENLARGE_RETRY = '--max-dispatches-per-second=0.075 --max-attempts=8 --max-retry-duration=0s --min-backoff=30s --max-backoff=300s --max-doublings=3';
+const ENLARGE_RETRY = '--max-dispatches-per-second=0.075 --max-attempts=-1 --max-retry-duration=0s --min-backoff=30s --max-backoff=900s --max-doublings=5';
 // The shape names a caller's shell could carry into the run; each run starts without them.
 const SHAPE_ENV = ['TASKS_MAX_DISPATCHES', 'BULK_MAX_DISPATCHES', 'INGEST_MAX_DISPATCHES', 'WORKER_MAX_INSTANCES', 'WORKER_CONCURRENCY', 'CATALOG_PREVIEW',
   'ENLARGE_MAX_DISPATCHES', 'ENLARGE_BULK_MAX_DISPATCHES', 'ENLARGE_DISPATCHES_PER_SECOND'];

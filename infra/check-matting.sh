@@ -7,13 +7,15 @@
 #       services/matting/tests/cloudrun_check.py --probe: per model a warm 1024 px call, then n calls at once for
 #       k rounds, then the switching order. Prints the table and writes the JSON report to
 #       gs://image-links-agent-assets/catalog-test/probe/<execution>/. Fails on any non-200 or a reload.
-#   bash infra/check-matting.sh --probe-upscale <url> [--model swinir-x2] [--sizes 800x1200,1600x1600]
-#                               [--concurrency n] [--rounds k] [--timeout s] [--run name]
+#   bash infra/check-matting.sh --probe-upscale <url> [--model swinir-x2,swinir-x4] [--sizes 800x1200,1600x1600]
+#                               [--concurrency n] [--rounds k] [--timeout s] [--x4-ratio r] [--run name]
 #       spec 18 H1: times POST /upscale on one service URL (usually a catalog-upscale candidate's tag URL) with
-#       cloudrun_check.py --probe-upscale: per size a warm call, then n calls at once for k rounds. Prints
-#       size | vCPU | threads | tile | conc | p50 s | p95 s | max s | non-200 | output sha256 and writes
+#       cloudrun_check.py --probe-upscale: per model (one after the other; spec 18 quality: the gate probes x2 and x4)
+#       and size a warm call, then n calls at once for k rounds. Prints
+#       model | size | vCPU | threads | tile | conc | p50 s | p95 s | max s | non-200 | output sha256 and writes
 #       gs://image-links-agent-assets/catalog-test/probe/<execution>/upscale.json. --timeout is the per-call client
-#       timeout (default 900 s). Fails on any non-200, a wrong size or differing output for the same input.
+#       timeout (default 900 s). Fails on any non-200, a wrong size or differing output for the same input, and, with
+#       --x4-ratio r above 0 (the deploy gate passes UPSCALE_X4_TIME_RATIO), on an x4 p95 above r x the x2 p95 at a size.
 set -euo pipefail
 export CLOUDSDK_CORE_PROJECT=image-links-agent
 cd "$(dirname "$0")/.."
@@ -31,8 +33,8 @@ if [ "${1:-}" = "--probe" ] || [ "${1:-}" = "--probe-upscale" ]; then
     allowed=" --models --concurrency --rounds --run "
     usage="usage: $0 --probe <url> [--models a,b] [--concurrency n] [--rounds k] [--run name]"
   else
-    allowed=" --model --sizes --concurrency --rounds --timeout --run "
-    usage="usage: $0 --probe-upscale <url> [--model id] [--sizes WxH,WxH] [--concurrency n] [--rounds k] [--timeout s] [--run name]"
+    allowed=" --model --sizes --concurrency --rounds --timeout --x4-ratio --run "
+    usage="usage: $0 --probe-upscale <url> [--model id] [--sizes WxH,WxH] [--concurrency n] [--rounds k] [--timeout s] [--x4-ratio r] [--run name]"
     DEFAULT_TASK_TIMEOUT=7200
   fi
   [ $# -ge 1 ] || { echo "$usage" >&2; exit 2; }
@@ -66,6 +68,10 @@ if [ "${1:-}" = "--probe" ] || [ "${1:-}" = "--probe-upscale" ]; then
         value=${option#--timeout=}
         [[ "$value" =~ ^[1-9][0-9]*$ ]] && [ "$value" -ge 30 ] && [ "$value" -le 3600 ] \
           || { echo "ERROR: --timeout must be a whole number of seconds from 30 to 3600, got '$value'" >&2; exit 2; } ;;
+      --x4-ratio=*)
+        value=${option#--x4-ratio=}
+        [[ "$value" =~ ^[0-9]+([.][0-9]+)?$ ]] && awk -v r="$value" 'BEGIN{exit !(r == 0 || r >= 1)}' \
+          || { echo "ERROR: --x4-ratio must be 0 (no check) or a number of at least 1, got '$value'" >&2; exit 2; } ;;
     esac
   done
   PROBE_ARGS=("$mode" "$url" ${options[@]+"${options[@]}"})

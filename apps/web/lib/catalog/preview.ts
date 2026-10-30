@@ -5,9 +5,8 @@ import { linkFailuresOf } from "@catalog/core/catalog/ingest/link-failures";
 import { isLinkReject } from "@catalog/core/catalog/ingest/link-reasons";
 import { buildPreview } from "@catalog/core/catalog/ingest/index";
 import type { Detected } from "@catalog/core/catalog/ingest/types";
-import { renderKeys } from "@catalog/core/catalog/pipeline/publish";
+import { configuredUpscalerIds, renderKeys } from "@catalog/core/catalog/pipeline/publish";
 import { resolvePolicy } from "@catalog/core/catalog/qa/policy";
-import { upscaleConfigFromEnv } from "@catalog/core/catalog/upscale";
 import type { ChannelId } from "@catalog/core/catalog/types";
 import * as storage from "@catalog/core/storage";
 import { db } from "../db";
@@ -75,7 +74,7 @@ type LiveOutput = { productId: string; n: number; channel: ChannelId; sha256: st
  * sha256, today's CHANNEL_RULES_VERSION, the cut-out model it will use, plain or upscaled). Anything in doubt is
  * counted, so the count may be higher than what is made but never lower.
  */
-export function plannedImages(sources: readonly PlannedSource[], channels: readonly ChannelId[], live: readonly LiveOutput[], upscaleModel: string | null = upscaleConfigFromEnv().model): { outputs: number; sourcesToMake: number } {
+export function plannedImages(sources: readonly PlannedSource[], channels: readonly ChannelId[], live: readonly LiveOutput[], upscaleModel: string | readonly string[] | null = configuredUpscalerIds()): { outputs: number; sourcesToMake: number } {
   const current = (o: LiveOutput) => o.workerMatteModel !== null && renderKeys({ sourceSha256: o.sha256, channel: o.channel, n: o.n, policyKey: `default|${o.workerMatteModel}` }, upscaleModel).includes(o.renderKey);
   let outputs = 0, sourcesToMake = 0;
   for (const source of sources) {

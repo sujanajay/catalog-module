@@ -125,6 +125,21 @@ const cases = [
     err: /cannot compare the lifecycle of gs:\/\/b with infra\/lifecycle-assets.json \(not JSON\); nothing was changed/},
 ];
 
+// Spec 18 lifecycle 3.1 (T58): the stored enlargements under <brand prefix>/derived/ are kept at least 180 days. Every
+// Delete rule of the assets bucket that can match such a key waits 180 days (by age or since the custom time, which
+// only a superseded raw object gets); a rule without a prefix matches every key.
+{
+  const assets = JSON.parse(fs.readFileSync(path.join(root, 'infra/lifecycle-assets.json'), 'utf8'));
+  const keys = ['catalog/acme/derived/p1/p1_1.swinir-x2-cpu-f477a052.s2.abc.jpg', 'catalog-test/acme/derived/p1/p1_1.swinir-x4.s4.abc.jpg.tile-0.jpg'];
+  for (const rule of assets.rule.filter((r) => r.action.type === 'Delete')) {
+    const c = rule.condition, prefixes = c.matchesPrefix ?? [''];
+    if (!keys.some((k) => prefixes.some((p) => k.startsWith(p)))) continue;
+    const wait = Math.max(c.age ?? 0, c.daysSinceCustomTime ?? 0);
+    assert.ok(wait >= 180, `an assets Delete rule can remove a stored enlargement before 180 days: ${JSON.stringify(rule)}`);
+  }
+  console.log('PASS stored enlargements (derived/) are kept at least 180 days');
+}
+
 // 2026-10-29 review P2: the BOM strip is written as an escape, never as the invisible character an editor may drop.
 assert.ok(!text.includes('\uFEFF'), 'infra/bootstrap.sh holds no literal byte order mark');
 assert.match(fn('json_key_matches'), /replace\(\/\^\\uFEFF\/, ""\)/);

@@ -111,7 +111,8 @@ interface Judged { row: Output; result: JudgeResult; role: "judge" | "recheck" }
 const MODEL_TEXT = /birefnet|bria|gemini|haiku|qwen|openrouter|google\/|anthropic\//i;
 const OWN_OUTPUT_FLAGS = new Set<OutputFlag>(OUTPUT_DIMENSIONS.map(d => DIMENSION_FLAGS[d]));
 /** Outputs that never get a (new) judge call: no verdict can change them, or one is already recorded. */
-const NOT_JUDGED = new Set<OutputFlag>(["failed_compliance", "qa_cap", "qa_unavailable"]);
+// Spec 18 lifecycle 3.7: an output held for its enlargement is not judged (its hold cannot change by a verdict).
+const NOT_JUDGED = new Set<OutputFlag>(["failed_compliance", "qa_cap", "qa_unavailable", "enlargement_failed"]);
 /** A judge sentence reaches the report and the attention card only when it names no model. */
 const clean = (sentence: string | undefined, fallback: string) => sentence && !MODEL_TEXT.test(sentence) ? sentence : fallback;
 
@@ -237,7 +238,8 @@ const JUDGE_TRIGGERS=new Set<OutputFlag>([...OWN_DEFECT_FLAGS].filter(flag=>flag
 export interface QaRepairContext { deps: CatalogDeps; batch: Batch; policy: ResolvedPolicy; productId: string; underClaim: UnderClaim }
 /** Outputs the re-render loop gets: our own defects, or a frame cut the judge saw (flushCutPhoto decides whether a side is new). */
 // A photo the matte stage held for a busy background (busyBackgroundHold) is a hard hold: nothing to re-make.
-export const repairable=(o:Output)=>o.decision===null && (o.status==="staged" || o.status==="needs_attention") && !busyBackgroundHold(o.compliance) && (o.flags.some(flag=>OWN_DEFECT_FLAGS.has(flag)) || judgeSawSourceCut(o.flags,o.qaScores));
+// Spec 18 lifecycle 3.7: nor is one held for its enlargement (no ladder churn on a hold the ladder cannot change).
+export const repairable=(o:Output)=>o.decision===null && (o.status==="staged" || o.status==="needs_attention") && !busyBackgroundHold(o.compliance) && !o.flags.includes("enlargement_failed") && (o.flags.some(flag=>OWN_DEFECT_FLAGS.has(flag)) || judgeSawSourceCut(o.flags,o.qaScores));
 export const repairOwnDefects:RepairOwnDefects<QaRepairContext>=async(candidates,{deps,batch,policy,productId,underClaim})=>{
  const fixed=new Set<string>();
  const read=()=>deps.db.select().from(catalogOutputs).where(and(eq(catalogOutputs.batchId,batch.id),eq(catalogOutputs.productId,productId),isNull(catalogOutputs.decision),inArray(catalogOutputs.status,["staged","needs_attention"])));

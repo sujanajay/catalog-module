@@ -7,8 +7,9 @@
 // and two or four resident models are refused, today's live shape passes, an unmeasured model is refused). Spec 18
 // section 8: the default is the dedicated catalog-upscale shape measured on 2026-10-29 (16 x 4 vCPU, 4 threads,
 // concurrency 1, CPU cut-out max 4, 0.075/s per enlarge lane); concurrency above 1 is refused. 2026-10-29 review:
-// the timeout (1740 s) must cover the largest photo the service takes (UPSCALE_MAX_PIXELS 8 MP), the preview's enlarge
-// lane shares the live catalog-upscale's slots, and a measure rung counts the live catalog-upscale beside it.
+// the timeout (1740 s) must cover the largest photo the service takes, the preview's enlarge lane shares the live
+// catalog-upscale's slots, and a measure rung counts the live catalog-upscale beside it. Spec 18 quality: the largest
+// image is timed on the x4 model (UPSCALE_X4_TIME_RATIO 1.3 x the x2 p95 per MP, so 6.4 MP) and must fit the memory.
 import fs from 'node:fs';
 import path from 'node:path';
 import assert from 'node:assert/strict';
@@ -25,8 +26,8 @@ const NAMES = ['DB_MAX_CONNECTIONS', 'WORKER_MAX_INSTANCES', 'WORKER_CPU', 'WORK
   'GPU_MEM_LIMIT_BYTES', 'UPSCALE_SERVICE', 'MATTE_INFLIGHT_PER_INSTANCE', 'CATALOG_PHOTO_CONCURRENCY',
   'CATALOG_BULK_WINDOW', 'BULK_BATCH_PRODUCTS', 'LLM_INFLIGHT_PER_INSTANCE', 'CUDNN_CONV_ALGO_SEARCH', 'CUDNN_CONV_USE_MAX_WORKSPACE',
   'INFERENCE_LOCK_SCOPE', 'GPU_MATTE_MODELS', 'GPU_UPSCALE_MODELS', 'GPU_MEASURED_ON', 'GPU_CUDA_OVERHEAD_MIB',
-  'UPSCALE_CPU_VCPU', 'UPSCALE_MEMORY', 'UPSCALE_CONCURRENCY', 'UPSCALE_MAX_INSTANCES', 'UPSCALE_THREADS', 'UPSCALE_TIMEOUT_S',
-  'UPSCALE_MAX_PIXELS', 'ENLARGE_MAX_DISPATCHES', 'ENLARGE_BULK_MAX_DISPATCHES', 'ENLARGE_DISPATCHES_PER_SECOND'];
+  'UPSCALE_CPU_VCPU', 'UPSCALE_MEMORY', 'UPSCALE_CONCURRENCY', 'UPSCALE_MAX_INSTANCES', 'UPSCALE_THREADS', 'UPSCALE_TIMEOUT_S', 'UPSCALE_COLD_START_S',
+  'UPSCALE_MAX_PIXELS', 'UPSCALE_MAX_PIXELS_X4', 'ENLARGE_MAX_DISPATCHES', 'ENLARGE_BULK_MAX_DISPATCHES', 'ENLARGE_DISPATCHES_PER_SECOND'];
 const PEAKS = ['GPU_MODEL_PEAK_MIB_BIREFNET_GENERAL', 'GPU_MODEL_PEAK_MIB_BIREFNET_GENERAL_LITE', 'GPU_MODEL_PEAK_MIB_BIREFNET_HRSOD', 'GPU_MODEL_PEAK_MIB_BRIA_RMBG'];
 const OUT = [...NAMES, ...PEAKS, 'UPSCALE_MEASURE', 'UPSCALE_MEASURED_ON', 'UPSCALE_VCPU_TOTAL', 'UPSCALE_LIVE_VCPU', 'CATALOG_DB_TOTAL', 'CATALOG_DB_LIMIT', 'SLOTS_TOTAL', 'SLOTS_CAPACITY', 'CPU_TOTAL'];
 
@@ -101,20 +102,22 @@ const RECORDED_LIVE = {
   MAX_RESIDENT_SESSIONS: '1', GPU_MEM_LIMIT_BYTES: '', UPSCALE_SERVICE: 'dedicated', MATTE_INFLIGHT_PER_INSTANCE: '4',
   CATALOG_PHOTO_CONCURRENCY: '4', CATALOG_BULK_WINDOW: '30', BULK_BATCH_PRODUCTS: '100', LLM_INFLIGHT_PER_INSTANCE: '6',
   CUDNN_CONV_ALGO_SEARCH: '', CUDNN_CONV_USE_MAX_WORKSPACE: '', INFERENCE_LOCK_SCOPE: 'global',
-  GPU_MATTE_MODELS: 'birefnet-general,birefnet-general-lite,birefnet-hrsod,bria-rmbg', GPU_UPSCALE_MODELS: 'realesrgan-x2plus,swinir-x2',
+  GPU_MATTE_MODELS: 'birefnet-general,birefnet-general-lite,birefnet-hrsod,bria-rmbg', GPU_UPSCALE_MODELS: 'swinir-x2,swinir-x4',
   GPU_MEASURED_ON: '2026-10-28', GPU_CUDA_OVERHEAD_MIB: '2048',
   // Spec 18 section 8: catalog-upscale upscales for the worker, the shape chosen from the 2026-10-29 ladder.
-  UPSCALE_CPU_VCPU: '4', UPSCALE_MEMORY: '16Gi', UPSCALE_CONCURRENCY: '1', UPSCALE_MAX_INSTANCES: '16', UPSCALE_THREADS: '4', UPSCALE_TIMEOUT_S: '1740',
+  UPSCALE_CPU_VCPU: '4', UPSCALE_MEMORY: '16Gi', UPSCALE_CONCURRENCY: '1', UPSCALE_MAX_INSTANCES: '16', UPSCALE_THREADS: '4', UPSCALE_TIMEOUT_S: '1740', UPSCALE_COLD_START_S: '120',
   // Spec 18 3.3.1: the enlarge lanes, and worker concurrency 3 to give them their slots. 2 lanes x 0.075 = 0.15/s.
-  // 4 + 10 + the preview's 2 = 16 slots of catalog-upscale. 8 MP: 2 x 8 x 104.2 s per MP = 1668 s <= 1740 s.
-  UPSCALE_MAX_PIXELS: '8000000', ENLARGE_MAX_DISPATCHES: '4', ENLARGE_BULK_MAX_DISPATCHES: '10', ENLARGE_DISPATCHES_PER_SECOND: '0.075',
+  // 4 + 10 + the preview's 2 = 16 slots of catalog-upscale. 2026-10-29 review P1-3, one cap per model: x2 8 MP x
+  // 104.17 s per MP = 834 s, 2 x 834 = 1668 s <= 1740 s; x4 6.4 MP x 104.17 s x 1.3 = 867 s, 2 x 867 = 1734 s; memory
+  // 4096 MiB + 8 MP x 160 B = 5317 MiB <= 80% of 16 GiB.
+  UPSCALE_MAX_PIXELS: '8000000', UPSCALE_MAX_PIXELS_X4: '6400000', ENLARGE_MAX_DISPATCHES: '4', ENLARGE_BULK_MAX_DISPATCHES: '10', ENLARGE_DISPATCHES_PER_SECOND: '0.075',
 };
 // The shape before F2 (the rollback line in shape.sh): fits today's old db-f1-micro (25 connections).
 // Spec 18 test fixture, not a measurement: catalog-upscale at 4 vCPU / 4 threads / concurrency 1 with p95 rows only
 // (the p50 rows blanked, so the p95 stands in), a timeout, a largest photo and a per-lane rate that fit them
-// (3 MP x 135.4 s per MP = 407 s, 2 x 407 = 814 <= 840).
+// (2.3 MP x 135.4 s per MP x the x4 ratio 1.3 = 405 s, 2 x 405 = 810 <= 840).
 const DEDICATED = {WIRED: '1', UPSCALE_SERVICE: 'dedicated', UPSCALE_MEASURED_ON: '2026-10-30', UPSCALE_P95_S_4C_4T_1CONC_800x1200: '130', UPSCALE_P95_S_4C_4T_1CONC_1600x1600: '330',
-  UPSCALE_P50_S_4C_4T_1CONC_800x1200: '', UPSCALE_P50_S_4C_4T_1CONC_1600x1600: '', UPSCALE_TIMEOUT_S: '840', UPSCALE_MAX_PIXELS: '3000000', ENLARGE_DISPATCHES_PER_SECOND: '0.06'};
+  UPSCALE_P50_S_4C_4T_1CONC_800x1200: '', UPSCALE_P50_S_4C_4T_1CONC_1600x1600: '', UPSCALE_TIMEOUT_S: '840', UPSCALE_MAX_PIXELS: '2300000', UPSCALE_MAX_PIXELS_X4: '2300000', ENLARGE_DISPATCHES_PER_SECOND: '0.06'};
 const PRE_F2 = {...NO_ENLARGE, WORKER_MAX_INSTANCES: '4', WORKER_CPU: '2', WORKER_MEMORY: '2Gi', TASKS_MAX_DISPATCHES: '6', BULK_MAX_DISPATCHES: '0',
   INGEST_MAX_DISPATCHES: '2', DB_MAX_CONNECTIONS: '25', MATTING_CPU_MAX_INSTANCES: '20', UPSCALE_SERVICE: 'gpu',
   CATALOG_PHOTO_CONCURRENCY: '1', CATALOG_BULK_WINDOW: '8', LLM_INFLIGHT_PER_INSTANCE: ''};
@@ -154,6 +157,13 @@ const cases = [
   {label: 'photos at once before the tier change', env: {...PRE_F2, CATALOG_PHOTO_CONCURRENCY: '4'}, live: '25', expect: {STATUS: '1', WORKER_DB_POOL_MAX: '4'}, error: /catalog connections 24 exceed the budget 18/},
   {label: 'explicit worker pool wins', env: {...F2_FITTED, WORKER_DB_POOL_MAX: '3'}, live: '400', expect: {STATUS: '0', WORKER_DB_POOL_MAX: '3', CATALOG_DB_TOTAL: '80'}},
   {label: 'AI check pacing', env: {LLM_INFLIGHT_PER_INSTANCE: 'six'}, expect: {STATUS: '1'}, error: /LLM_INFLIGHT_PER_INSTANCE must be empty or a whole number/},
+  // Spec 18 lifecycle (T58, F57): the probe's cold start, 120 s until the gate measures it, at most the call timeout.
+  {label: 'the upscaler cold start defaults to 120 s', env: LIVE, live: '400', expect: {STATUS: '0', UPSCALE_COLD_START_S: '120'}},
+  {label: 'a cold start above the call timeout is refused', env: {UPSCALE_COLD_START_S: '1800'}, expect: {STATUS: '1'}, error: /UPSCALE_COLD_START_S=1800 is above UPSCALE_TIMEOUT_S=1740/},
+  // Spec 18 lifecycle 3.2: WORKER_CONCURRENCY enlarged images of 64 MP, two copies of 3 B per pixel, within half the memory.
+  {label: 'the worker output limit fits the live worker (3 x 366 MiB within 2048 MiB)', env: LIVE, live: '400', expect: {STATUS: '0'}},
+  {label: 'the worker output limit refuses a worker too small for its concurrency', env: {WORKER_MEMORY: '2Gi', WORKER_CONCURRENCY: '3'}, expect: {STATUS: '1'},
+    error: /WORKER_CONCURRENCY=3 with WORKER_MEMORY=2Gi: 3 enlarged images of up to 64000000 pixels need about 1098 MiB, above half the worker's memory \(1024 MiB\)/},
   // Spec 17 3.3.3.
   {label: "today's live shape passes", env: LIVE, live: '400', expect: {STATUS: '0', INFERENCE_LOCK_SCOPE: 'global', GPU_CUDA_OVERHEAD_MIB: '2048', ...MEASURED}},
   {label: "today's live shape passes with no peak measured", env: {...LIVE, ...UNMEASURED}, live: '400', expect: {STATUS: '0'}},
@@ -171,9 +181,9 @@ const cases = [
   {label: 'nothing measured: the session lock is refused', env: {...UNMEASURED, INFERENCE_LOCK_SCOPE: 'session', UPSCALE_SERVICE: 'cpu'}, expect: {STATUS: '1'}, error: /measure first/},
   {label: 'only the served models need a peak', env: {...LIVE, MAX_RESIDENT_SESSIONS: '2', GPU_MATTE_MODELS: 'bria-rmbg', GPU_MEASURED_ON: '2026-10-29', GPU_MODEL_PEAK_MIB_BRIA_RMBG: '7400'}, live: '400', expect: {STATUS: '0'}},
   {label: 'upscalers on the GPU need their peaks too', env: {...LIVE, ...FITS_6GIB, MAX_RESIDENT_SESSIONS: '2', UPSCALE_SERVICE: 'gpu'}, live: '400', expect: {STATUS: '1'},
-    error: /no measured GPU peak for realesrgan-x2plus swinir-x2;/},
+    error: /no measured GPU peak for swinir-x2 swinir-x4;/},
   {label: 'four resident fit with measured peaks and no cap', env: {...LIVE, ...FITS_FOUR, MAX_RESIDENT_SESSIONS: '4'}, live: '400', expect: {STATUS: '0'}},
-  {label: 'four resident at bria-rmbg size do not fit', env: {...LIVE, ...BRIA_OVER_6GIB, MAX_RESIDENT_SESSIONS: '4', UPSCALE_SERVICE: 'gpu', GPU_MODEL_PEAK_MIB_REALESRGAN_X2PLUS: '2000', GPU_MODEL_PEAK_MIB_SWINIR_X2: '1500'}, live: '400', expect: {STATUS: '1'},
+  {label: 'four resident at bria-rmbg size do not fit', env: {...LIVE, ...BRIA_OVER_6GIB, MAX_RESIDENT_SESSIONS: '4', UPSCALE_SERVICE: 'gpu', GPU_MODEL_PEAK_MIB_SWINIR_X4: '2000', GPU_MODEL_PEAK_MIB_SWINIR_X2: '1500'}, live: '400', expect: {STATUS: '1'},
     error: /GPU memory 4 sessions x 7400 MiB \+ 2048 MiB CUDA \+ 3500 MiB upscalers = 35148 MiB exceeds the L4's 22528 MiB/},
   {label: 'F2 with peaks under the cap still does not fit: 3 resident + 1 evicted mid-run x 6 GiB', env: {...F2, ...FITS_6GIB}, live: '400', expect: {STATUS: '1'},
     error: /GPU memory 4 sessions x 6144 MiB \+ 2048 MiB CUDA \+ 0 MiB upscalers = 26624 MiB exceeds/},
@@ -223,15 +233,31 @@ const cases = [
     error: /needs a timeout of 2 x p95 900 s = 1800 s for 1600x1600, over the 1740 s the enlarge task allows; measure a faster shape/},
   {label: 'the timeout is at most 1740 s', env: {UPSCALE_TIMEOUT_S: '1800'}, expect: {STATUS: '1'}, error: /UPSCALE_TIMEOUT_S must be 60 to 1740 s \(the enlarge task's deadline is 1800 s/},
   // 2026-10-29 review P1: the timeout must cover the largest photo the service takes, not only the probe sizes.
-  {label: 'the largest accepted photo must fit the timeout: 9 MP needs 2 x 938 s at 104.2 s per MP', env: {UPSCALE_MAX_PIXELS: '9000000'}, expect: {STATUS: '1'},
-    error: /^ERROR: UPSCALE_MAX_PIXELS=9000000 needs a timeout of 2 x about 938 s = 1876 s \(the slowest measured p95, 104\.1667 s per megapixel, measured 2026-10-29\), above UPSCALE_TIMEOUT_S=1740: such photos would time out on every attempt and be held\. Raise UPSCALE_TIMEOUT_S \(at most 1740\) or lower UPSCALE_MAX_PIXELS to at most 8351997\n$/},
-  {label: 'the 24 MP service default would need about 5000 s, more than one task delivery', env: {UPSCALE_MAX_PIXELS: '24000000'}, expect: {STATUS: '1'},
-    error: /UPSCALE_MAX_PIXELS=24000000 needs a timeout of 2 x about 2501 s = 5002 s/},
+  // 2026-10-29 review P1-3: one cap per model, each at its own time per pixel. x2: the slowest measured p95 per MP;
+  // x4: UPSCALE_X4_TIME_RATIO (1.3) times it.
+  {label: 'the default caps: x2 8 MP (2 x 834 s) and x4 6.4 MP (2 x 867 s) both fit 1740 s', env: {}, expect: {STATUS: '0', UPSCALE_MAX_PIXELS: '8000000', UPSCALE_MAX_PIXELS_X4: '6400000'}},
+  {label: 'the reproduced case: a 2500 px product on Centrepoint at 1.2x is a 2564 x 2564 region (6,574,096 px), above the x4 cap and inside the x2 cap',
+    env: {UPSCALE_MAX_PIXELS: String(2564 * 2564)}, expect: {STATUS: '0'}},
+  {label: 'the x4 cap must fit the timeout on x4: 7 MP needs 2 x 948 s at 104.2 s per MP x 1.3', env: {UPSCALE_MAX_PIXELS_X4: '7000000'}, expect: {STATUS: '1'},
+    error: /^ERROR: UPSCALE_MAX_PIXELS_X4=7000000 needs a timeout of 2 x about 948 s = 1896 s on the x4 \(1\.3 x the x2 time\) model \(the slowest measured p95, 104\.1667 s per megapixel, measured 2026-10-29\), above UPSCALE_TIMEOUT_S=1740: such images would time out on every attempt and be held\. Raise UPSCALE_TIMEOUT_S \(at most 1740\) or lower UPSCALE_MAX_PIXELS_X4 to at most 642461\d\n$/},
+  {label: 'one shared 8 MP cap is refused for the x4 model', env: {UPSCALE_MAX_PIXELS_X4: '8000000'}, expect: {STATUS: '1'}, error: /^ERROR: UPSCALE_MAX_PIXELS_X4=8000000 needs a timeout of 2 x about 1084 s = 2168 s on the x4/},
+  {label: 'the x2 cap is timed on the x2 model, never on x4: 9 MP needs 2 x 938 s', env: {UPSCALE_MAX_PIXELS: '9000000'}, expect: {STATUS: '1'},
+    error: /^ERROR: UPSCALE_MAX_PIXELS=9000000 needs a timeout of 2 x about 938 s = 1876 s on the x2 model .* lower UPSCALE_MAX_PIXELS to at most 8351997\n$/},
+  {label: 'without the x4 model its cap is not checked', env: {UPSCALE_MODEL_X4: 'off', UPSCALE_MAX_PIXELS_X4: '99000000'}, expect: {STATUS: '0'}},
+  {label: 'the x4 time ratio must be a number of at least 1', env: {UPSCALE_X4_TIME_RATIO: '0.9'}, expect: {STATUS: '1'}, error: /UPSCALE_X4_TIME_RATIO must be a number of at least 1/},
+  {label: 'a higher measured x4 ratio needs a smaller x4 cap and leaves the x2 cap alone', env: {UPSCALE_X4_TIME_RATIO: '1.4'}, expect: {STATUS: '1'}, error: /^ERROR: UPSCALE_MAX_PIXELS_X4=6400000 needs a timeout of 2 x about 934 s = 1868 s on the x4 \(1\.4 x the x2 time\) model[^\n]*\n$/},
+  {label: 'the 24 MP service default would need about 5000 s on x2, more than one task delivery', env: {UPSCALE_MAX_PIXELS: '24000000'}, expect: {STATUS: '1'},
+    error: /UPSCALE_MAX_PIXELS=24000000 needs a timeout of 2 x about 2501 s = 5002 s on the x2 model/},
   {label: 'the 2026-10-29 shape (timeout 480) with the 24 MP default is refused', env: {UPSCALE_TIMEOUT_S: '480', UPSCALE_MAX_PIXELS: '24000000'}, expect: {STATUS: '1'},
-    error: /above UPSCALE_TIMEOUT_S=480: such photos would time out on every attempt and be held\. Raise UPSCALE_TIMEOUT_S \(at most 1740\) or lower UPSCALE_MAX_PIXELS to at most 2303999/},
-  {label: 'a smaller largest photo fits a shorter timeout', env: {UPSCALE_TIMEOUT_S: '480', UPSCALE_MAX_PIXELS: '2300000'}, expect: {STATUS: '0'}},
+    error: /above UPSCALE_TIMEOUT_S=480: such images would time out on every attempt and be held\. Raise UPSCALE_TIMEOUT_S \(at most 1740\) or lower UPSCALE_MAX_PIXELS to at most 230\d{4}\n/},
+  {label: 'smaller caps fit a shorter timeout', env: {UPSCALE_TIMEOUT_S: '480', UPSCALE_MAX_PIXELS: '2200000', UPSCALE_MAX_PIXELS_X4: '1700000'}, expect: {STATUS: '0'}},
   {label: 'the slowest size per pixel sets the estimate (here the larger one)', env: {...DEDICATED, MATTING_CPU_MAX_INSTANCES: '4', UPSCALE_P95_S_4C_4T_1CONC_1600x1600: '400'}, expect: {STATUS: '1'},
-    error: /needs a timeout of 2 x about 469 s = 938 s \(the slowest measured p95, 156\.2500 s per megapixel/},
+    error: /^ERROR: UPSCALE_MAX_PIXELS_X4=2300000 needs a timeout of 2 x about 468 s = 936 s on the x4 \(1\.3 x the x2 time\) model \(the slowest measured p95, 156\.2500 s per megapixel/},
+  // Spec 18 quality: each cap's working set (4096 MiB resident + 160 B per input pixel, the x4 model's) under 80% of memory.
+  {label: 'each cap\'s working set must fit 80% of the memory: 8 MP needs 5317 MiB and 6.4 MP 5073 MiB, 4Gi is too small', env: {UPSCALE_MEMORY: '4Gi'}, expect: {STATUS: '1'},
+    error: /^ERROR: UPSCALE_MAX_PIXELS=8000000 needs about 5317 MiB \(4096 MiB resident \+ 160 B per input pixel\), more than 80% of UPSCALE_MEMORY=4Gi; raise UPSCALE_MEMORY or lower UPSCALE_MAX_PIXELS\nERROR: UPSCALE_MAX_PIXELS_X4=6400000 needs about 5073 MiB \(4096 MiB resident \+ 160 B per input pixel\), more than 80% of UPSCALE_MEMORY=4Gi; raise UPSCALE_MEMORY or lower UPSCALE_MAX_PIXELS_X4\n$/},
+  {label: '8Gi holds both working sets', env: {UPSCALE_MEMORY: '8Gi'}, expect: {STATUS: '0'}},
+  {label: 'UPSCALE_MAX_PIXELS_X4 must be a whole number of at least 1', env: {UPSCALE_MAX_PIXELS_X4: '0'}, expect: {STATUS: '1'}, error: /UPSCALE_MAX_PIXELS_X4 must be at least 1/},
   {label: 'measured rows need their probe date', env: {...DEDICATED, MATTING_CPU_MAX_INSTANCES: '4', UPSCALE_MEASURED_ON: ''}, expect: {STATUS: '1'}, error: /UPSCALE_MEASURED_ON must be the date/},
   {label: 'measure mode deploys an unmeasured candidate when it fits the quota (live on cpu)', env: {UPSCALE_MEASURE: '1', UPSCALE_SERVICE: 'cpu', UPSCALE_LIVE_VCPU: '0', MATTING_CPU_MAX_INSTANCES: '16', UPSCALE_CPU_VCPU: '8', UPSCALE_THREADS: '8', UPSCALE_MAX_INSTANCES: '2'},
     expect: {STATUS: '0', UPSCALE_MEASURE: '1', UPSCALE_SERVICE: 'cpu', CPU_TOTAL: '187', UPSCALE_VCPU_TOTAL: '16'}},

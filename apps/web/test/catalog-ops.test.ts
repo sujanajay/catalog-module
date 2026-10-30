@@ -6,7 +6,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { eq } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { createTestDb } from "@catalog/core/db/testing";
-import { catalogBatches, catalogChunks, catalogCostEvents, catalogOutputs, catalogProducts, catalogSourceImages, EMPTY_BATCH_COUNTS } from "@catalog/core/db/schema";
+import { catalogBatches, catalogChunks, catalogCostEvents, catalogEnlargements, catalogOutputs, catalogProducts, catalogSourceImages, EMPTY_BATCH_COUNTS } from "@catalog/core/db/schema";
 import { recordCostEvents } from "@catalog/core/cost-events";
 import { batchCostAttribution, batchCostByStage } from "@catalog/core/catalog/cost-report";
 import { inrAmount, usdAmount } from "@catalog/core/catalog/cost";
@@ -202,7 +202,8 @@ describe("health lines (spec 17 3.1.5)", () => {
     await db.insert(catalogBatches).values({ name: "Old", brandSlug: "uspa", brandName: "USPA", channels: ["noon"], createdBy: "a@opptra.com", status: "done", counts: { ...EMPTY_BATCH_COUNTS, silentOutputs: 2, heldSiblings: 5 } as typeof EMPTY_BATCH_COUNTS });
     await db.update(catalogBatches).set({ counts: { ...EMPTY_BATCH_COUNTS, heldSiblings: 3, slowestChunkMs: 14 * 60_000 } as typeof EMPTY_BATCH_COUNTS }).where(eq(catalogBatches.id, batch.id));
     const h = await healthSummary(db);
-    expect(h).toEqual({ silentOutputs: 2, heldSiblings: 8, slowest: { stage: "render", ms: 14 * 60_000, batchId: batch.id }, enlargeWaiting: 0, enlargeFailed: 0 });
+    // The running batch has no pinned route (started before the enlargement stage): spec 18 counts it.
+    expect(h).toEqual({ silentOutputs: 2, heldSiblings: 8, slowest: { stage: "render", ms: 14 * 60_000, batchId: batch.id }, enlargeWaiting: 0, enlargeFailed: 0, enlargeWaitingLong: 0, plainAccepted: 0, startedBeforeEnlargement: 1 });
     expect(healthLines(h, null)).toEqual([
       "Silent outputs: 2",
       "Held with the product (waiting for the operator): 8",
@@ -210,6 +211,7 @@ describe("health lines (spec 17 3.1.5)", () => {
       "GPU candidate revision: none",
       "Enlargements waiting: 0",
       "Enlargements failed: 0",
+      "Running batches started before enlargement: 1",
     ]);
   });
 
@@ -229,18 +231,24 @@ describe("health lines (spec 17 3.1.5)", () => {
     expect(healthLines(await healthSummary(db), undefined)[3]).toBe(`GPU candidate revision: ${REPORT_UNAVAILABLE}`);
   });
 
-  it("spec 18: counts the enlargements waiting and failed in active batches only, with no model id", async () => {
+  it("spec 18: counts the wanted enlargements waiting and failed in live batches (done included, a Try again), long waits and plain accepts, with no model id", async () => {
     const { batch } = await world();
+    await db.update(catalogBatches).set({ options: { ...batch.options, enlargement: { model: "swinir-x2", minScale: 1.5 } } }).where(eq(catalogBatches.id, batch.id));
     const [product] = await db.insert(catalogProducts).values({ brandSlug: "uspa", isTest: false, productKey: "X2", pathKey: "x-2", identifier: "X-2" }).returning();
-    const photo = (n: number, extra: Partial<typeof catalogSourceImages.$inferInsert>) => ({ productId: product!.id, batchId: batch.id, n, sha256: `x2-${n}`, originalName: `X-2_${n}.jpg`, rawUri: "gs://b/r", mime: "image/jpeg", ...extra });
-    await db.insert(catalogSourceImages).values([photo(1, { x2Model: "swinir-x2+cpu" }), photo(2, { x2Model: "swinir-x2+cpu", x2Attempts: 3 }), photo(3, { x2Model: "swinir-x2+cpu", x2Attempts: 8 }), photo(4, { x2Model: "swinir-x2+cpu", x2Uri: "gs://b/x2.jpg" })]);
+    const photos = await db.insert(catalogSourceImages).values([1, 2, 3, 4, 5].map((n) => ({ productId: product!.id, batchId: batch.id, n, sha256: `x2-${n}`, originalName: `X-2_${n}.jpg`, rawUri: "gs://b/r", mime: "image/jpeg" }))).returning();
+    const row = (i: number, extra: Partial<typeof catalogEnlargements.$inferInsert>) => ({ batchId: batch.id, productId: product!.id, sourceImageId: photos[i]!.id, upscaler: "swinir-x2+cpu", factor: 2, scale: 1.8, outW: 1600, outH: 1600, route: "direct" as const, pixelHash: `p${i}`, identityHash: `i${i}`, ...extra });
+    await db.insert(catalogEnlargements).values([
+      row(0, {}), row(1, { attempts: 3, createdAt: new Date(Date.now() - 21 * 60 * 60_000) }), row(2, { status: "failed", attempts: 8 }), row(3, { status: "done" }), row(4, { wanted: false }),
+    ]);
     const h = await healthSummary(db);
-    expect(h).toMatchObject({ enlargeWaiting: 2, enlargeFailed: 1 });
+    expect(h).toMatchObject({ enlargeWaiting: 2, enlargeFailed: 1, enlargeWaitingLong: 1, startedBeforeEnlargement: 0 });
     const lines = healthLines(h, null);
-    expect(lines.slice(4)).toEqual(["Enlargements waiting: 2", "Enlargements failed: 1"]);
+    expect(lines.slice(4)).toEqual(["Enlargements waiting: 2", "Enlargements failed: 1", "Enlargements waiting more than 20 h: 1"]);
     expect(lines.join(" ")).not.toMatch(/swinir|realesrgan/);
     await db.update(catalogBatches).set({ status: "done" }).where(eq(catalogBatches.id, batch.id));
-    expect(await healthSummary(db)).toMatchObject({ enlargeWaiting: 0, enlargeFailed: 0 });
+    expect(await healthSummary(db)).toMatchObject({ enlargeWaiting: 2, enlargeFailed: 1 });
+    await db.update(catalogBatches).set({ status: "failed" }).where(eq(catalogBatches.id, batch.id));
+    expect(await healthSummary(db)).toMatchObject({ enlargeWaiting: 0, enlargeFailed: 0, enlargeWaitingLong: 0 });
   });
 
   it("the Ops page shows the four lines with no model id", async () => {

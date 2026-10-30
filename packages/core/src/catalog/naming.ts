@@ -109,6 +109,15 @@ export function batchPrefix(brandSlug: string, batchId: string, isTest: boolean)
   return `${rootPrefix(isTest)}/${brandSlug}/${batchId}`;
 }
 
+/**
+ * Spec 18 lifecycle 3.1: `<root>/<brand>` in the private bucket, the prefix of every stored enlargement. Not per batch:
+ * the object key is the identity (the photo's pixels, the upscaler with its export hash, the scale), so a second
+ * batch of the same photo, a replacement with the same bytes or a re-wanted row finds the object without a call.
+ */
+export function enlargementPrefix(brandSlug: string, isTest: boolean): string {
+  return `${rootPrefix(isTest)}/${brandSlug}`;
+}
+
 /** `<root>/<brand>/<pathKey>/` in the public bucket (always ends with "/"). */
 export function productPrefix(brandSlug: string, pathKey: string, isTest: boolean): string {
   return `${rootPrefix(isTest)}/${brandSlug}/${pathKey}/`;
@@ -135,14 +144,26 @@ export function derivedPath(prefix: string, pathKey: string, n: number, kind: st
 }
 
 /**
- * Spec 18 3.3.3: `<prefix>/derived/<pathKey>/<pathKey>_<n>.<upscaler>.x2.jpg`, the stored enlargement (the upscaler's 2x
- * image of the prepared photo) next to its matte, in the private assets bucket. Never public, never raw, inside the
- * batch prefix. The key names the upscaler (its upscalerId, lower case, anything but letters, digits, dots and dashes
- * as a dash: `swinir-x2+cpu` is `swinir-x2-cpu`), so an image made by one model is never read as another's.
+ * Spec 18 lifecycle 3.1: `<prefix>/derived/<pathKey>/<pathKey>_<n>.<upscaler slug>.s<scale>.<identity hash>.jpg`, the
+ * stored enlargement of one identity (the whole prepared photo, enlarged by the upscaler at the effective scale) next
+ * under the brand's enlargement prefix (enlargementPrefix), in the private assets bucket. Never public, never raw. The upscaler is its
+ * identity id with the export hash (`swinir-x2+cpu@f477a052`), lower case, anything but letters, digits, dots and
+ * dashes as a dash. Same identity, same key: a re-delivery, a re-wanted row or a second batch of the same photo finds
+ * the object. The metadata names the identity too (validateEnlargedObject).
  */
-export function enlargedPath(prefix: string, pathKey: string, n: number, upscaler: string): string {
-  const slug = upscaler.toLowerCase().replace(/[^a-z0-9.-]+/g, "-");
-  return `${prefix}/derived/${pathKey}/${shotStem(pathKey, n)}.${slug}.x2.jpg`;
+export function enlargedPath(prefix: string, pathKey: string, n: number, upscaler: string, scale: number, identityHash: string): string {
+  return `${prefix}/derived/${pathKey}/${shotStem(pathKey, n)}.${upscalerSlug(upscaler)}.s${scaleLabel(scale)}.${identityHash}.jpg`;
+}
+/** Spec 18 lifecycle 3.2 tile route: tile `i` of an enlargement, `<enlargedPath key>.tile-<i>.jpg`. */
+export function enlargedTilePath(key: string, i: number): string {
+  return `${key}.tile-${i}.jpg`;
+}
+function upscalerSlug(upscaler: string): string {
+  return upscaler.toLowerCase().replace(/[^a-z0-9.-]+/g, "-");
+}
+/** The scale as a key part: an integer as is (`2`), a fraction to 3 decimals without trailing zeros (`3.333`). */
+function scaleLabel(scale: number): string {
+  return String(Number(scale.toFixed(3)));
 }
 
 /** `<prefix>/staging/<pathKey>/<channel>/<pathKey>_<n>.jpg`. */

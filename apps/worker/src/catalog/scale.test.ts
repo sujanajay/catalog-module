@@ -89,6 +89,21 @@ describe("spec 18 3.3.8: the enlarge queue in the model", () => {
     expect(r.drainedAtMs.bulk! / MIN).toBeGreaterThan(80);
     expect(Number.isFinite(r.drainedAtMs.bulk!)).toBe(true);
   }, 120_000);
+
+  it("T60: one task per wanted identity (two bands, two tasks), parked chunks hold no window slot", async () => {
+    const shape = (identitiesPerPhoto: number): ModelShape => ({ ...F2_SHAPE, workerConcurrency: 3, cpuService: { ...F2_SHAPE.cpuService, upscaleMs: 121_000 }, enlarge: { operatorSlots: 4, bulkSlots: 12, ratePerSecond: 0.1, serviceSlots: 16, identitiesPerPhoto } });
+    const batches: ModelBatch[] = [{ name: "bulk", products: 100, photosPerProduct: 5, channels: 4, startAtMs: 0, bulk: true }];
+    const one = await simulate(shape(1), batches), two = await simulate(shape(2), batches);
+    expect(two.enlarge.tasks / one.enlarge.tasks).toBeGreaterThan(1.8);
+    expect(two.enlarge.tasks / one.enlarge.tasks).toBeLessThan(2.2);
+    for (const r of [one, two]) {
+      expect(r.enlarge.renderedEarly).toBe(0);
+      expect(r.enlarge.unparks).toBe(r.enlarge.parks);
+      expect(r.maxActiveChunks.bulk).toBeLessThanOrEqual(F2_SHAPE.bulkWindow);
+      // More chunks wait parked at once than the window holds: a parked chunk gave its slot back.
+      expect(r.enlarge.maxParked).toBeGreaterThan(F2_SHAPE.bulkWindow);
+    }
+  }, 240_000);
 });
 
 // ------------------------------------------------------------------------------------------------------------

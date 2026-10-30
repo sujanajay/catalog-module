@@ -141,6 +141,9 @@ export const HEALTH_WORDS = {
   gpu: "GPU candidate revision",
   enlargeWaiting: "Enlargements waiting",
   enlargeFailed: "Enlargements failed",
+  enlargeWaitingLong: "Enlargements waiting more than 20 h",
+  plainAccepted: "Photos used as they are after the enlargement warning",
+  startedBeforeEnlargement: "Running batches started before enlargement",
   none: "none",
 } as const;
 export interface HealthSummary {
@@ -150,6 +153,10 @@ export interface HealthSummary {
   /** Spec 18: photos of active batches still waiting for their enlargement, and those whose enlargement failed. */
   enlargeWaiting: number;
   enlargeFailed: number;
+  /** Spec 18 lifecycle 3.7: information only. */
+  enlargeWaitingLong?: number;
+  plainAccepted?: number;
+  startedBeforeEnlargement?: number;
 }
 
 /**
@@ -167,5 +174,8 @@ export function healthLines(h: HealthSummary, gpuCandidate: string | null | unde
     `${HEALTH_WORDS.gpu}: ${gpuCandidate === undefined ? REPORT_UNAVAILABLE : gpuCandidate ?? HEALTH_WORDS.none}`,
     `${HEALTH_WORDS.enlargeWaiting}: ${h.enlargeWaiting}`,
     `${HEALTH_WORDS.enlargeFailed}: ${h.enlargeFailed}`,
+    ...(h.enlargeWaitingLong ? [`${HEALTH_WORDS.enlargeWaitingLong}: ${h.enlargeWaitingLong}`] : []),
+    ...(h.plainAccepted ? [`${HEALTH_WORDS.plainAccepted}: ${h.plainAccepted}`] : []),
+    ...(h.startedBeforeEnlargement ? [`${HEALTH_WORDS.startedBeforeEnlargement}: ${h.startedBeforeEnlargement}`] : []),
   ];
 }

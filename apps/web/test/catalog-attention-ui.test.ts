@@ -12,14 +12,14 @@ import { renderKey, upscaledRenderKey } from "@catalog/core/catalog/pipeline/pub
 import { missingLine, skuAddedToast, unmatchedLine } from "../components/catalog/SkuMapModal";
 import { ToastProvider } from "../components/Toast";
 import { ViewerPreviewProvider } from "../components/ViewerPreview";
-import { batchSource, collectingText, estimateText, listAnd, readyText } from "../lib/catalog/copy";
+import { batchSource, collectingText, estimateText, listAnd, readyText, TRY_AGAIN_LABEL } from "../lib/catalog/copy";
 import type { AttentionProduct } from "../lib/catalog/products";
 
 const MODEL_WORDS = /gemini|claude|qwen|birefnet|rmbg|bria|inspyre|ben_custom|google\/|anthropic\//i;
 const wrap = (node: ReactNode) => renderToStaticMarkup(createElement(ViewerPreviewProvider, null, createElement(ToastProvider, null, node)));
 const item: AttentionProduct = {
   productId: "p1", identifier: "6W_ACHILLE_MEN_OD_BLACK", totalShots: 5, problemLine: "Photo 2: the model's hand looks cut at the frame edge.",
-  photos: [{ n: 2, channel: "noon", outputId: "o1", outputIds: ["o1", "o2"], originalUrl: "https://signed/raw", outputUrl: "https://signed/made", why: "Part of the product or model looks cut at the frame edge in the original photo.", whatToDo: "We never crop, so the made image shows the same thing.", liveObjectExists: true, liveChannels: ["noon", "styli"], failed: false, flags: ["complete_product"] }],
+  photos: [{ n: 2, channel: "noon", outputId: "o1", outputIds: ["o1", "o2"], originalUrl: "https://signed/raw", outputUrl: "https://signed/made", why: "Part of the product or model looks cut at the frame edge in the original photo.", whatToDo: "We never crop, so the made image shows the same thing.", liveObjectExists: true, liveChannels: ["noon", "styli"], failed: false, flags: ["complete_product"], canRetry: false }],
 };
 
 describe("needs attention card", () => {
@@ -39,6 +39,13 @@ describe("needs attention card", () => {
     expect(done).toContain("Resolved");
     expect(done).toContain("Sheet updated.");
     expect(done).not.toContain("Use as is");
+  });
+  it("final check (F28): Try again shows only for a photo held for its enlargement that can run again", () => {
+    const held = (canRetry: boolean): AttentionProduct => ({ ...item, photos: [{ ...item.photos[0]!, flags: ["enlargement_failed"], canRetry }] });
+    expect(wrap(createElement(AttentionProductCard, { item: held(true), canAct: true, channels: ["Noon"] }))).toContain(`>${TRY_AGAIN_LABEL}</button>`);
+    const refused = wrap(createElement(AttentionProductCard, { item: held(false), canAct: true, channels: ["Noon"] }));
+    expect(refused).not.toContain(`>${TRY_AGAIN_LABEL}</button>`);
+    for (const text of ["Use as is", "Remove this photo", "Replace photo 2"]) expect(refused).toContain(`>${text}</button>`);
   });
   it("counts the tab label down in the singular and plural", () => {
     expect(attentionLabel(3)).toBe("Needs attention (3 products)");

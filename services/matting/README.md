@@ -21,51 +21,56 @@ licence records. rembg itself is MIT. No custom sessions are included.
 
 ## Upscaling (`/upscale`)
 
-`POST /upscale?model=<id>&scale=2` takes raw image bytes (`image/jpeg` or `image/png`) as the request
+`POST /upscale?model=<id>&scale=<2 or 4>` takes raw image bytes (`image/jpeg` or `image/png`) as the request
 body; a multipart `file` field, as `/matte` takes, is also accepted. It returns `200 image/jpeg`
-(quality 95, 4:4:4) at exactly 2x the received pixel dimensions, with `X-Upscale-Model` (the model
-used) and `X-Upscale-Ms` (tiling plus inference, excluding a first-use model load). Only `scale=2`
-exists. Alpha is dropped and only RGB is upscaled; an embedded ICC profile is carried over; EXIF is
+(quality 95, 4:4:4) at exactly the model's scale times the received pixel dimensions, with `X-Upscale-Model` (the
+model used), `X-Upscale-Scale` and `X-Upscale-Ms` (tiling plus inference, excluding a first-use model load). Each
+model has one scale (swinir-x2 2, swinir-x4 4); a model and scale that disagree are refused, and a scale alone picks
+its model. Alpha is dropped and only RGB is upscaled; an embedded ICC profile is carried over; EXIF is
 not, and orientation is not applied, so callers send upright pixels (as they do for `/matte`).
-Errors are JSON `{"error": "..."}`: 400 for a bad image, unknown model, unsupported scale or more
-than `UPSCALE_MAX_PIXELS` (default 24,000,000) input pixels; 413 over 40,000,000 bytes; 503 when
-the model is unavailable (CPU target, missing file, failed load or failed determinism check); 500
-for an unexpected inference error. Omitting `model` selects `health.upscale.default`.
+Errors are JSON `{"error": "..."}`: 400 for a bad image, unknown model, unsupported scale, more
+than the model's pixel cap (`UPSCALE_MAX_PIXELS` for swinir-x2, `UPSCALE_MAX_PIXELS_X4` for swinir-x4, unset: the x2
+cap; default 24,000,000) input pixels or an output side above 65,500 px (the JPEG limit);
+413 over 40,000,000 bytes; 503 when the model is unavailable (CPU target, missing file, failed load or failed
+determinism check); 500 for an unexpected inference error. Omitting both selects `health.upscale.default`.
 
-`/health` adds `"upscale": {"models": [{"id", "available", "scale": 2}], "default": <id or null>}`;
+`/health` adds `"upscale": {"models": [{"id", "available", "scale"}], "default": <id or null>}`;
 the existing fields are unchanged. The CPU image reports every model unavailable and answers 503,
 because CPU inference takes tens of seconds per tile; `UPSCALE_CPU=1` enables CPU execution for
 tests and the Cloud Build smoke only.
 
 | Served id | Tile (input) | Licence | Source checkpoint (sha256) |
 |---|---:|---|---|
-| realesrgan-x2plus (default) | 512 | BSD-3-Clause | [RealESRGAN_x2plus.pth](https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.1/RealESRGAN_x2plus.pth) `49fafd45f8fd7aa8d31ab2a22d14d91b536c34494a5cfe31eb5d89c2fa266abb` |
-| swinir-x2 | 384 | Apache-2.0 | [002_lightweightSR_DIV2K_s64w8_SwinIR-S_x2.pth](https://github.com/JingyunLiang/SwinIR/releases/download/v0.0/002_lightweightSR_DIV2K_s64w8_SwinIR-S_x2.pth) `193b229909ca89cd8b55de9c9e7fce146ae759d59dfcd78d8feb9dd1d6fa0fd7` |
+| swinir-x2 (default) | 384 | Apache-2.0 | [002_lightweightSR_DIV2K_s64w8_SwinIR-S_x2.pth](https://github.com/JingyunLiang/SwinIR/releases/download/v0.0/002_lightweightSR_DIV2K_s64w8_SwinIR-S_x2.pth) `193b229909ca89cd8b55de9c9e7fce146ae759d59dfcd78d8feb9dd1d6fa0fd7` |
+| swinir-x4 | 384 | Apache-2.0 | [002_lightweightSR_DIV2K_s64w8_SwinIR-S_x4.pth](https://github.com/JingyunLiang/SwinIR/releases/download/v0.0/002_lightweightSR_DIV2K_s64w8_SwinIR-S_x4.pth) `09fad24e32ae62722e1a055efde9921328f4137981bab0a42a4a3a806306c58e` |
 
-Real-ESRGAN ([repository](https://github.com/xinntao/Real-ESRGAN), BSD-3-Clause) uses the RRDBNet
-architecture from BasicSR (Apache-2.0); `tools/convert_upscalers.py` reproduces it and loads the
-checkpoint's `params_ema` with strict key matching. SwinIR ([repository](https://github.com/JingyunLiang/SwinIR),
-Apache-2.0) is the classical lightweight x2 model (SwinIR-S, DIV2K); SwinIR publishes no lightweight
-real-world x2 checkpoint. Its architecture file is fetched from commit
+Spec 18 quality (2026-10-29): Real-ESRGAN x2plus is no longer served (it lost the spec 11 fidelity gate on every
+bar and nothing routes to it); the x4 model makes every enlargement above 2.0x in one pass. SwinIR
+([repository](https://github.com/JingyunLiang/SwinIR), Apache-2.0) is the classical lightweight model (SwinIR-S,
+DIV2K) at x2 and x4; SwinIR publishes no lightweight real-world checkpoint. Its architecture file is fetched from commit
 `6545850fbf8df298df73d81f3e8cba638787c8bd` (`models/network_swinir.py`, sha256
 `9e143898679ebeebc5d2fc94ad1b89c38aa4a4d43da4e0fcba0f93e476994913`) with the `lightweight_sr`
 hyperparameters from `main_test_swinir.py`; its three timm helpers are replaced by inference-time
 stand-ins (DropPath is the identity at inference).
 
 The Dockerfile's `upscale-models` stage (Python 3.12, `requirements-convert.txt`: PyTorch 2.9.1 CPU,
-onnx 1.19.1, ONNX Runtime 1.23.2) downloads the three files from those URLs, fails the build on any
+onnx 1.19.1, ONNX Runtime 1.23.2) downloads the files from those URLs, fails the build on any
 sha256 mismatch, exports fixed-shape fp32 ONNX (opset 17, TorchScript exporter), checks the ONNX
-output against PyTorch (max abs difference under 2e-3; measured 2.2e-4 and 1.0e-6) and runs it twice
-to require byte-identical output. The exports of Cloud Build `bf4d6276-e221-4e92-8d18-7c30cc121198` have the
-sha256 `e828354d9b32d1462f0fd421a513015c80ebd6985e3e394f7d86285c102d79dd` (realesrgan-x2plus) and
-`9f4a3f856ff12923e5b33f2965ed8ff7e360cb2f7ba9ed76ff04c59bf3021881` (swinir-x2); their first 8 hex are
+output against PyTorch (max abs difference under 2e-3) and runs it twice to require byte-identical output. The
+swinir-x2 export of Cloud Build `bf4d6276-e221-4e92-8d18-7c30cc121198` has the sha256
+`9f4a3f856ff12923e5b33f2965ed8ff7e360cb2f7ba9ed76ff04c59bf3021881`; the swinir-x4 export, made locally on
+2026-10-29 with the same pinned tools (which reproduce the x2 sha256 above exactly), has
+`f477a052442d29a47719fed951d26c7c6b1d67476ca9f4bd33a2604454fb03dd`. Their first 8 hex are
 `UPSCALE_MODEL_VERSIONS` in `packages/core/src/catalog/upscale.ts` (part of render_key), so a changed export
-must bump that map. Only the ONNX files (about 67 MB and 11 MB) reach the runtime
-images, under `/upscale-models`, read-only. Nothing is downloaded at request time.
+must bump that map. The converter pins the same 8 hex (`EXPORT_SHA256_PREFIX` in `tools/convert_upscalers.py`) and
+fails the build on any other export, so no render key can name an export that did not make the output; a pytest checks
+both lists agree.
+Only the ONNX files (about 11 MB each) reach the runtime images, under `/upscale-models`, read-only. Nothing is
+downloaded at request time.
 
 Tiling: the image is reflection-padded and cut into fixed tiles carrying 32 px of context on each
 side; only each tile's centre is kept, so tiles abut exactly with no blending. An 800x1200 photo is
-6 Real-ESRGAN tiles or 12 SwinIR tiles. Output is cropped to exactly 2x.
+12 SwinIR tiles at either scale. Output is cropped to exactly 2x or 4x.
 
 Determinism: fp32 throughout (fp16 was not adopted because its run-to-run determinism on the L4 has
 not been verified); `SessionOptions.use_deterministic_compute`; CUDA `cudnn_conv_algo_search=HEURISTIC`
@@ -77,11 +82,13 @@ check end to end over HTTP on CPU.
 
 Memory and speed: models load on first request and then stay resident; matting model switches do
 not release them. CUDA options cap each upscaler's arena at 6 GiB (`gpu_mem_limit`, kSameAsRequested,
-no maximum cuDNN workspace). Estimated L4 use is about 1.5 to 2.5 GB for Real-ESRGAN at 512 px tiles
-and 1 to 2 GB for SwinIR at 384 px, alongside one resident BiRefNet session, well inside 24 GB.
-Estimated L4 time for an 800x1200 photo is roughly 1 to 3 s per model, plus a one-off load and probe
-of a few seconds; these are estimates, not measurements. Measured on a Windows laptop CPU: one 512 px
-Real-ESRGAN tile took 25 to 29 s, one 384 px SwinIR tile 15 to 33 s.
+no maximum cuDNN workspace). Estimated L4 use is about 1 to 2 GB for SwinIR at 384 px, alongside one resident
+BiRefNet session, well inside 24 GB; this is an estimate, not a measurement. Measured on a Windows laptop CPU
+(2026-10-29, 4 threads, through the service code): swinir-x4 at 1200x1600 took 199 s with a peak commit of 2851 MiB
+(2685 MiB after loading, so about 86 B per input pixel for the x4 output and its buffers); x4 over x2 on the same
+800x1200 image took 1.193x (pairs 1.283 and 1.133), and the 2026-10-29 bake-off (also laptop runs) timed x4 at
+about the x2 time on the same region (51.0 s against 49.2 s). No Cloud Run x4 time exists yet; the deploy gate's
+probe now fails an x4 p95 above `UPSCALE_X4_TIME_RATIO` x the x2 p95 at each size. Both models gave byte-identical outputs on a rerun and at 4 and 8 threads.
 
 ## Versions and offline models
 
@@ -367,6 +374,11 @@ UPSCALE_SERVICE=cpu UPSCALE_MEASURE=1 UPSCALE_CPU_VCPU=8 UPSCALE_THREADS=8 UPSCA
 bash infra/check-matting.sh --probe-upscale <candidate URL> --model=swinir-x2 --sizes=800x1200,1600x1600 --concurrency=<1 or 2> --rounds=3 --timeout=840
 ```
 
+Spec 18 quality: the probe now takes `--model=swinir-x2,swinir-x4` (the deploy gate always passes both), times each
+model in turn and requires each model's answers to be its exact scale and byte-identical on a rerun. The p95 rows
+are of swinir-x2; until a probe has timed x4 on the shape, `UPSCALE_X4_TIME_RATIO` (1.3, the slowest pair measured)
+scales them for x4.
+
 `UPSCALE_SERVICE=dedicated` (the worker's enlargements on `catalog-upscale`) needs a worker image with the spec 18 H3
 enlarge stage (`apps/worker/src/catalog/enlarge.ts` calls the service through `packages/core/src/catalog/enlarge.ts`;
 the render reads the stored x2 only). `ENLARGE_CLIENT_WIRED` defaults to 1; a deploy of an older worker image sets it
@@ -404,11 +416,26 @@ per call, so the next probe change should log both. `infra/lib/shape.sh` therefo
 1 for the dedicated service ("measure and prove determinism before raising"). Concurrency 1 is deterministic in these
 runs, not proven deterministic on every host.
 
-The shape chosen (spec 18 section 8): 16 x 4 vCPU, 4 threads, concurrency 1, `UPSCALE_TIMEOUT_S=1740` with
-`UPSCALE_MAX_PIXELS=8000000`. The timeout must cover the largest photo the service takes, not only the probe sizes:
-SwinIR is tiled, so time grows with pixels, and the slowest measured p95 per pixel (100 s for 0.96 MP, 104.2 s per
-MP) gives 2 x 834 s = 1668 s for 8 MP. 1740 s is the most one enlarge task allows (its 1800 s dispatch deadline less
-two 30 s margins); the 24 MP service default would need about 5000 s. Per photo, 4 vCPU costs 4 x 99 = 396 vCPU-s against 8 x 77.4 = 619 for
+The shape chosen (spec 18 section 8, spec 18 quality): 16 x 4 vCPU, 16 GiB, 4 threads, concurrency 1,
+`UPSCALE_TIMEOUT_S=1740`, and one pixel cap per model (2026-10-29 review): `UPSCALE_MAX_PIXELS=8000000` for x2 and
+`UPSCALE_MAX_PIXELS_X4=6400000` for x4. A single shared 6.4 MP cap held real x2 regions it could fit (a 2500 px product
+on Centrepoint at 1.2x crops to 2564 x 2564 = 6.57 MP).
+
+| rule (infra/lib/shape.sh upscale_check) | arithmetic | result |
+|---|---|---|
+| timeout covers the largest x2 image | 2 x ceil(8 MP x 104.17 s per MP) = 2 x 834 s | 1668 s <= 1740 s |
+| timeout covers the largest x4 image | 2 x ceil(6.4 MP x 104.17 s per MP x 1.3) = 2 x 867 s | 1734 s <= 1740 s |
+| x4 at the x2 cap of 8 MP | 2 x ceil(8 MP x 104.17 x 1.3) = 2 x 1084 s | 2168 s, refused |
+| x4 memory of the largest image under 80% of 16 GiB | 4096 MiB resident + 6.4 MP x 160 B | 5073 MiB <= 13107 MiB |
+| x4 output size (sharp's default input limit 268,402,689 px) | 6.4 MP x 16 | 102.4 MP |
+| deploy probe budget, both models, both sizes | 300 + 4 x (100 + 130) + 4 x (216 + 281) | 3208 s |
+
+The timeout must cover the largest image the service takes, not only the probe sizes: SwinIR is tiled, so time grows
+with pixels, and the slowest measured p95 per pixel (100 s for 0.96 MP, 104.2 s per MP) is scaled by
+`UPSCALE_X4_TIME_RATIO` for the x4 model. Spec 18 quality sends only the product's region (its box plus 32 px), so the
+limit bounds the region; a region needs enlarging only when it is smaller than the channel's canvas (at most
+3000x3000). 1740 s is the most one enlarge task allows (its 1800 s dispatch deadline less two 30 s margins); the 24
+MP service default would need about 6500 s. Per photo, 4 vCPU costs 4 x 99 = 396 vCPU-s against 8 x 77.4 = 619 for
 8 vCPU, and within the same 64 vCPU 16 x 4 finishes about 1.5x the photos per hour of 8 x 8 (about 580 against 370
 photos of 800x1200 per hour). The enlarge queue rate follows: 2 lanes x `ENLARGE_DISPATCHES_PER_SECOND` 0.075 =
 0.15 per second <= 16 x 1 / p50 99 s = 0.16.

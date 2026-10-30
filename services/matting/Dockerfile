@@ -7,7 +7,7 @@ COPY requirements-convert.txt .
 RUN pip install -r requirements-convert.txt
 COPY tools/convert_upscalers.py .
 RUN python convert_upscalers.py /upscale-models /tmp/upscale-src && rm -rf /tmp/upscale-src \
-    && test -s /upscale-models/realesrgan-x2plus.onnx && test -s /upscale-models/swinir-x2.onnx
+    && test -s /upscale-models/swinir-x2.onnx && test -s /upscale-models/swinir-x4.onnx
 
 FROM python:3.12-slim AS cpu-deps
 ENV REMBG_HOME=/models U2NET_HOME=/models UPSCALE_HOME=/upscale-models PIP_NO_CACHE_DIR=1 OMP_NUM_THREADS=4

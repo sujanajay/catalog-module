@@ -2,14 +2,15 @@
 import { useState } from "react";
 import { channel } from "@catalog/core/catalog/channels";
 import type { AttentionPhoto, AttentionProduct } from "../../lib/catalog/products";
-import { listAnd, plural } from "../../lib/catalog/copy";
+import { listAnd, plainWarningText, plural, PLAIN_WARNING_ACCEPT, PLAIN_WARNING_CANCEL, TRY_AGAIN_LABEL, TRY_AGAIN_STATUS, TRY_AGAIN_TOAST } from "../../lib/catalog/copy";
+import type { ChannelId } from "@catalog/core/catalog/types";
 import { apiFetch, SessionEndedError } from "../../lib/fetch";
 import { ActionOnly } from "../ViewerPreview";
 import { useToast } from "../Toast";
 import ReplaceModal from "./ReplaceModal";
 
-/** open: needs a decision; done: decided (here or elsewhere); replacing: a replacement is queued. */
-export type PhotoState = "open" | "done" | "replacing";
+/** open: needs a decision; done: decided (here or elsewhere); replacing: a replacement is queued; retrying: the enlargement runs again. */
+export type PhotoState = "open" | "done" | "replacing" | "retrying";
 
 export const KEPT_TOAST = "Kept in the sheet";
 export const REMOVED_TOAST = "Removed. The sheet cell is empty with a note.";
@@ -24,22 +25,39 @@ function PhotoRow({ item, photo, state, canAct, channels, onDecided }: RowProps)
   const [busy, setBusy] = useState(false);
   const [confirming, setConfirming] = useState(false);
   const [replacing, setReplacing] = useState(false);
+  // Spec 18 lifecycle 3.6: the channels named by the plain warning, while it is shown.
+  const [plainWarning, setPlainWarning] = useState<ChannelId[] | null>(null);
   const [error, setError] = useState("");
+  const notEnlarged = photo.flags.includes("enlargement_failed");
   const toast = useToast();
   const label = channel(photo.channel).label;
   const decided = state !== "open";
 
-  async function decide(decision: "use_as_is" | "remove") {
+  async function decide(decision: "use_as_is" | "remove", acceptPlain = false) {
     setBusy(true); setError("");
     try {
-      const res = await apiFetch(`/api/catalog/outputs/${photo.outputId}/decision`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ decision }) });
-      const data = await res.json() as { outputIds?: string[]; error?: string };
+      const res = await apiFetch(`/api/catalog/outputs/${photo.outputId}/decision`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ decision, ...(acceptPlain ? { acceptPlain: true } : {}) }) });
+      const data = await res.json() as { outputIds?: string[]; error?: string; channels?: ChannelId[] };
+      if (res.status === 409 && data.error === "plain_warning") { setPlainWarning(data.channels ?? [photo.channel]); return; }
+      setPlainWarning(null);
       if (!res.ok) throw new Error(data.error ?? "This did not finish. Try again.");
       onDecided(data.outputIds?.length ? data.outputIds : [photo.outputId], "done");
       toast(decision === "use_as_is" ? KEPT_TOAST : REMOVED_TOAST);
     } catch (err) {
       if (!(err instanceof SessionEndedError)) setError(err instanceof Error ? err.message : "This did not finish. Try again.");
     } finally { setBusy(false); setConfirming(false); }
+  }
+  async function tryAgain() {
+    setBusy(true); setError("");
+    try {
+      const res = await apiFetch(`/api/catalog/outputs/${photo.outputId}/retry-enlargement`, { method: "POST" });
+      const data = await res.json() as { outputIds?: string[]; error?: string };
+      if (!res.ok) throw new Error(data.error ?? "This did not finish. Try again.");
+      onDecided(data.outputIds?.length ? data.outputIds : [photo.outputId], "retrying");
+      toast(TRY_AGAIN_TOAST);
+    } catch (err) {
+      if (!(err instanceof SessionEndedError)) setError(err instanceof Error ? err.message : "This did not finish. Try again.");
+    } finally { setBusy(false); }
   }
 
   return (
@@ -56,10 +74,17 @@ function PhotoRow({ item, photo, state, canAct, channels, onDecided }: RowProps)
         <b>{photo.why}</b>
         <p>{photo.whatToDo}{photo.liveObjectExists ? ` ${liveSentence(photo)}` : ""}</p>
         {state === "replacing" && <p role="status">Replacement in progress</p>}
+        {state === "retrying" && <p role="status">{TRY_AGAIN_STATUS}</p>}
         {canAct && (
           <ActionOnly>
             {error ? <p role="alert" className="err">{error}</p> : null}
-            {confirming ? (
+            {plainWarning ? (
+              <div className="acts" role="alertdialog" aria-label="Use the photo as it is">
+                <p>{plainWarningText(plainWarning.map(c => channel(c).label))}</p>
+                <button className="btn sm primary" disabled={busy} onClick={() => decide("use_as_is", true)}>{PLAIN_WARNING_ACCEPT}</button>
+                <button className="btn sm ghost" disabled={busy} onClick={() => setPlainWarning(null)}>{PLAIN_WARNING_CANCEL}</button>
+              </div>
+            ) : confirming ? (
               <div className="acts">
                 <button className="btn sm primary" disabled={busy} onClick={() => decide("remove")}>Remove anyway</button>
                 <button className="btn sm ghost" disabled={busy} onClick={() => setConfirming(false)}>Cancel</button>
@@ -68,6 +93,7 @@ function PhotoRow({ item, photo, state, canAct, channels, onDecided }: RowProps)
               <div className="acts">
                 <button className="btn sm ok" disabled={busy || decided} onClick={() => decide("use_as_is")}>Use as is</button>
                 <button className="btn sm ghost" disabled={busy || decided} onClick={() => (photo.liveObjectExists ? setConfirming(true) : decide("remove"))}>Remove this photo</button>
+                {notEnlarged && photo.canRetry && <button className="btn sm ghost" disabled={busy || decided} onClick={() => void tryAgain()}>{TRY_AGAIN_LABEL}</button>}
                 <button className="btn sm ghost" disabled={busy || decided} onClick={() => setReplacing(true)}>Replace photo {photo.n}</button>
               </div>
             )}

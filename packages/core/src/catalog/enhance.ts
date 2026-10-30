@@ -79,15 +79,13 @@ export interface EnlargeInput {
   /** The part of the photo to place. */ crop: CropBox;
   /** The placed product size on the canvas. */ to: Size;
   /**
-   * Spec 11: the colour of `crop` already enlarged to `to` by the GPU upscaler (x2, then Lanczos3 to `to`), raw
-   * 3-channel RGB. It replaces the Lanczos3 enlargement of the full photo in step 2; the sharpening then runs on it
-   * with the residual Lanczos factor (enlargement / 2). Absent: the plain path.
+   * Spec 11: the colour of `crop` already enlarged to `to` by the upscaler (its x2 or x4 image, then Lanczos3 to
+   * `to`), raw 3-channel RGB. It is the cut-out's colour as it is: spec 18 quality never sharpens the upscaler's
+   * output (the unsharp mask on a Lanczos stretch of the x2 image strengthened halos and JPEG noise). Absent: the plain
+   * path.
    */
   upscaled?: Buffer;
 }
-
-/** The fixed factor of the upscale service (POST /upscale?scale=2); the residual Lanczos factor is the enlargement over this. */
-export const UPSCALE_SERVICE_FACTOR = 2;
 
 /**
  * The cut-out of `crop` resized to `to` as a PNG with alpha, the one place a product is resized for a canvas.
@@ -106,10 +104,8 @@ export const UPSCALE_SERVICE_FACTOR = 2;
  *    of product next to it, keep their plain Lanczos colour, so no bright or dark rim appears on the new background;
  *    the short ramp fades the sharpening in further inside.
  *
- * With `upscaled` (spec 11), step 2 starts from the upscaler's colour instead of the Lanczos3 enlargement of the full
- * photo: every pixel of the cut-out takes that colour, plus the same alpha-weighted share of its sharpening with the
- * residual factor (enlargement / 2, so no sharpening once the x2 pass alone covers the enlargement), and the alpha
- * stays the plain Lanczos3 alpha of step 1, byte for byte.
+ * With `upscaled` (spec 11), every pixel of the cut-out takes the upscaler's colour instead, unsharpened (spec 18
+ * quality), and the alpha stays the plain Lanczos3 alpha of step 1, byte for byte.
  */
 export async function enlargeCutout(input: EnlargeInput): Promise<Buffer> {
   const { rgba, rgb, width, height, crop, to, upscaled } = input;
@@ -119,8 +115,12 @@ export async function enlargeCutout(input: EnlargeInput): Promise<Buffer> {
   if (!upscaled && !(scale > 1)) return resized.png().toBuffer();
   if (upscaled && upscaled.length !== to.w * to.h * 3) throw new Error("The upscaled colour does not match the product size.");
   const cutout = await resized.raw().toBuffer();
-  const base = upscaled ?? await sharp(rgb, { raw: { width, height, channels: 3 } }).extract(region).resize(to.w, to.h, { kernel: "lanczos3" }).raw().toBuffer();
-  const sharpened = await sharpenAfterEnlarge(base, to, upscaled ? scale / UPSCALE_SERVICE_FACTOR : scale);
+  if (upscaled) {
+    for (let i = 0, n = to.w * to.h; i < n; i++) for (let c = 0; c < 3; c++) cutout[i * 4 + c] = upscaled[i * 3 + c]!;
+    return sharp(cutout, { raw: { width: to.w, height: to.h, channels: 4 } }).png().toBuffer();
+  }
+  const base = await sharp(rgb, { raw: { width, height, channels: 3 } }).extract(region).resize(to.w, to.h, { kernel: "lanczos3" }).raw().toBuffer();
+  const sharpened = await sharpenAfterEnlarge(base, to, scale);
   const inner = innerAlpha(cutout, to, SHARPEN_EDGE_PX);
   for (let i = 0, n = to.w * to.h; i < n; i++) {
     // The share of the sharpening this pixel takes: none on the silhouette edge, so the sharpening of the old
@@ -128,7 +128,7 @@ export async function enlargeCutout(input: EnlargeInput): Promise<Buffer> {
     const weight = sharpenWeight(inner[i]!);
     for (let c = 0; c < 3; c++) {
       const delta = sharpened[i * 3 + c]! - base[i * 3 + c]!;
-      const start = upscaled ? upscaled[i * 3 + c]! : cutout[i * 4 + c]!;
+      const start = cutout[i * 4 + c]!;
       cutout[i * 4 + c] = weight && delta ? Math.max(0, Math.min(255, start + Math.round(delta * weight))) : start;
     }
   }

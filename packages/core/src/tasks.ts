@@ -24,7 +24,7 @@ import { cloudRunAudience } from "./cloud-run";
  * Spec 16: a bulk batch's chunk and publish tasks (`bulk: true`) go to TASKS_BULK_QUEUE when it is set, so an
  * operator's small batch keeps the slots of TASKS_QUEUE to itself. Unset, they stay on TASKS_QUEUE.
  *
- * Spec 18 3.3.2: an enlargement task (`/tasks/catalog/enlarge`, one per photo and round, enlargeTaskId) goes to its
+ * Spec 18 3.3.2: an enlargement task (`/tasks/catalog/enlarge`, one per enlargement row and send, enlargeTaskId) goes to its
  * own lane, TASKS_ENLARGE_QUEUE for an operator batch and TASKS_ENLARGE_BULK_QUEUE for a bulk batch, so a slow
  * upscaler never holds a chunk queue's slots. A lane that is not set falls back to the chunk queue of the same class.
  *
@@ -54,8 +54,11 @@ export const BULK_TASK_ROUTES: readonly TaskRoute[] = ["/tasks/catalog/chunk", "
 /** Spec 18: routes that run on the enlarge lanes (TASKS_ENLARGE_QUEUE, TASKS_ENLARGE_BULK_QUEUE) when configured. */
 export const ENLARGE_TASK_ROUTES: readonly TaskRoute[] = ["/tasks/catalog/enlarge"];
 
-/** The body of one enlargement task: the photo, and the round that sent it (0 first, then the recovery's). */
-export interface EnlargeTaskBody { batchId: string; productId: string; sourceImageId: string; round: number }
+/**
+ * Spec 18 lifecycle 3.4: the body of one enlargement task, one catalog_enlargements row (one identity of one photo of
+ * one batch). The send counter is in the task id (enlargeTaskId), not the body.
+ */
+export interface EnlargeTaskBody { batchId: string; productId: string; enlargementId: string }
 
 /** Minimal surface of `CloudTasksClient` we use - lets tests pass a fake. */
 export type TasksClientLike = Pick<CloudTasksClient, "createTask">;
@@ -122,12 +125,12 @@ export function chunkTaskId(chunkId: string, stage: string, step: number): strin
 }
 
 /**
- * Spec 18 3.3.2: the id of a photo's enlargement task, `enlarge-<sourceImageId>-<round>`. The first send is round 0;
- * the recovery's re-send of a photo still waiting takes a higher round, so it never meets the queue's deduplication
- * of the earlier task, and a repeat of the same round is deduplicated.
+ * Spec 18 lifecycle 3.4: the id of an enlargement row's task, `enlarge-<enlargementId>-<sends>`. A send with the
+ * row's current `sends` repeats the same id (Cloud Tasks deduplicates it); only the stale re-send bumps `sends`, so
+ * its task never meets the deduplication of the earlier one.
  */
-export function enlargeTaskId(sourceImageId: string, round: number): string {
-  return `enlarge-${sourceImageId}-${round}`;
+export function enlargeTaskId(enlargementId: string, sends: number): string {
+  return `enlarge-${enlargementId}-${sends}`;
 }
 
 /** gRPC code ALREADY_EXISTS: a task with this name exists or ran recently (deduplicated). */

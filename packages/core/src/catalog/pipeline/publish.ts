@@ -8,7 +8,7 @@ import { assertWithinProduct, productPrefix, publicObjectPath } from "../naming"
 import { lockProducts } from "../products";
 import type { ChannelId, EventKind } from "../types";
 import { verifyPublic } from "./verify";
-import { isCpuUpscalerId, otherTargetUpscalerId, upscaleConfigFromEnv, upscalerId, upscalerKey } from "../upscale";
+import { otherTargetUpscalerId, upscaleConfigFromEnv, upscalerId, upscalerKey } from "../upscale";
 export { lockProducts };
 export type Output = typeof catalogOutputs.$inferSelect;
 export type Source = typeof catalogSourceImages.$inferSelect;
@@ -35,8 +35,10 @@ export function rerenderedKey(row: { renderKey: string; flags: readonly string[]
   const was = row.flags.includes("upscaled");
   if (upscaleModel && !was) return upscaledRenderKey(row.renderKey, upscaleModel);
   // Spec 16 3.1.3: a row upscaled before (perhaps on the GPU) and re-made on the CPU service takes the CPU key, so
-  // CPU bytes never keep a GPU key. The plain key is recomputed because an upscaled key cannot be undone.
-  if (upscaleModel && was && isCpuUpscalerId(upscaleModel)) return upscaledRenderKey(plain(), upscaleModel);
+  // CPU bytes never keep a GPU key. Spec 18 quality: likewise a row upscaled before and re-made, perhaps by the other
+  // model (x2 or x4), takes the key of the model that made it now. The plain key is recomputed because an upscaled key
+  // cannot be undone.
+  if (upscaleModel && was) return upscaledRenderKey(plain(), upscaleModel);
   if (!upscaleModel && was) return plain();
   return row.renderKey;
 }
@@ -44,12 +46,14 @@ export function rerenderedKey(row: { renderKey: string; flags: readonly string[]
  * The keys a live output may carry and still match this render: the plain key and, when UPSCALE_MODEL is
  * set, the key of an output the upscaler made. Whether a render needs the upscaler is known only after its
  * plan, so an output made on the plain path (no enlargement beyond the threshold, or a fallback) and one
- * the upscaler made both count as unchanged. `upscaleModel` is an upscalerId; an output the same model made on the
- * other matting service (GPU or CPU, spec 16) also counts as unchanged, so moving the upscaler re-makes nothing.
+ * the upscaler made both count as unchanged. `upscaleModels` are upscalerIds (spec 18 quality: the x2 and the x4
+ * model, either may make an output); an output a model made on the other matting service (GPU or CPU, spec 16) also
+ * counts as unchanged, so moving the upscaler re-makes nothing.
  */
-export function renderKeys(input: Omit<Parameters<typeof renderKey>[0], "upscaler">, upscaleModel: string | null = configuredUpscalerId()): string[] {
+export function renderKeys(input: Omit<Parameters<typeof renderKey>[0], "upscaler">, upscaleModels: string | readonly string[] | null = configuredUpscalerIds()): string[] {
   const plain = renderKey(input);
-  return [plain, ...(upscaleModel ? [upscaledRenderKey(plain, upscaleModel), upscaledRenderKey(plain, otherTargetUpscalerId(upscaleModel))] : [])];
+  const models = upscaleModels === null ? [] : typeof upscaleModels === "string" ? [upscaleModels] : upscaleModels;
+  return [plain, ...models.flatMap((model) => [upscaledRenderKey(plain, model), upscaledRenderKey(plain, otherTargetUpscalerId(model))])];
 }
 /** One output's sheet note, "<Channel label> img <n>: <reason>" (spec 06 5.6). The publish step and the report write the same words, so the report's de-duplication finds them. */
 export function outputNote(o: Pick<Output, "channel" | "n" | "reason" | "decision" | "decidedBy">): string {
@@ -192,4 +196,9 @@ export async function publishProduct(deps: PublishDeps, batchId: string, product
 export function configuredUpscalerId(env: NodeJS.ProcessEnv = process.env): string | null {
   const config = upscaleConfigFromEnv(env);
   return config.model ? upscalerId(config.model, config.target) : null;
+}
+/** Spec 18 quality: every upscalerId the worker's env selects (the x2 model and, when set, the x4 model); empty when off. */
+export function configuredUpscalerIds(env: NodeJS.ProcessEnv = process.env): string[] {
+  const config = upscaleConfigFromEnv(env);
+  return config.model ? [config.model, ...(config.x4Model ? [config.x4Model] : [])].map((model) => upscalerId(model, config.target)) : [];
 }

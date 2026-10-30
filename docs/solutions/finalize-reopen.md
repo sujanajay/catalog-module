@@ -12,7 +12,10 @@ A finalize writes the links sheet, the report and the batch counts, then marks t
      `trigger`);
   2. Add SKU ids (`apps/web/lib/catalog/sku-map.ts`);
   3. a late delivery that changed a product's content (`publishProduct` returns `changed`: not `unchanged`,
-     not `failed`).
+     not `failed`). Spec 18 "Try again" on a held photo goes this way: `retryEnlargement` queues the photo's failed
+     enlargements again with a parked one-photo render chunk; when the enlargement is done the chunk is enqueued
+     directly (the batch is not processing), renders, is judged and publishes with `changed`, which re-opens the
+     batch.
 
 ## One representation of a request
 A request is the stored `counts.finalizePending` flag, written by `enqueueFinalize`
@@ -30,8 +33,10 @@ the sweep's "done + pending + expired" clause sends it again. A non-reopen reque
 and its caller retries.
 
 ## A done batch that is not ready
-- **A chunk of the batch is running** (a replacement photo): the request stays pending and is re-queued with a
-  30 s delay.
+- **A chunk of the batch is running** (a replacement photo, a Try again): the request stays pending and is re-queued
+  with a 30 s delay. When every unfinished chunk is parked on an enlargement (a wait of hours, not seconds), the
+  re-queue is every 10 minutes instead (`apps/worker/src/catalog/finalize.ts`), so a done batch waiting on an
+  enlargement makes 6 finalize tasks an hour, not 120.
 - **Only a product publish blocks**: the flag is cleared, a WARNING names the products, and nothing is re-queued.
   The publish that lands asks again.
 - **A product a later batch published** (its `lastBatchId` is another batch and this batch holds no lock on it)

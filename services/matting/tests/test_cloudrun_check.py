@@ -265,8 +265,8 @@ class FakeUpscale:
 
             def do_GET(self):
                 body = {"ok": True, "instanceId": "up01", "vcpu": 4, "threads": 4, "preloadMatte": False, "candidate": "catalog-upscale-00001-abc",
-                        "upscale": {"models": [{"id": "swinir-x2", "available": True, "scale": 2}], "default": "swinir-x2"},
-                        "upscaleTiles": {"swinir-x2": 384} if fake.loaded else {}}
+                        "upscale": {"models": [{"id": "swinir-x2", "available": True, "scale": 2}, {"id": "swinir-x4", "available": True, "scale": 4}], "default": "swinir-x2"},
+                        "upscaleTiles": {"swinir-x2": 384, "swinir-x4": 384} if fake.loaded else {}}
                 self.reply(200, json.dumps(body).encode(), "application/json")
 
             def do_POST(self):
@@ -278,7 +278,7 @@ class FakeUpscale:
                 if fake.mode == "busy":
                     return self.reply(503, b'{"error": "upscale model swinir-x2 unavailable"}', "application/json")
                 with Image.open(io.BytesIO(data)) as source:
-                    factor = 1 if fake.mode == "wrong-size" else 2
+                    factor = 1 if fake.mode == "wrong-size" else int(self.path.rsplit("scale=", 1)[1])
                     out = source.convert("RGB").resize((source.width * factor, source.height * factor), Image.Resampling.NEAREST)
                 if fake.mode == "noisy":
                     out.paste((count * 40 % 256, 0, 0), (0, 0, 16, 16))
@@ -329,15 +329,15 @@ def test_upscale_probe_measures_each_size_and_prints_the_table(fake_upscale, cap
         assert row["distinctOutputs"] == 1 and len(row["outputSha256"]) == 64
         assert row["p50S"] is not None and row["p95S"] >= row["p50S"] and row["maxS"] >= row["p95S"]
     out = capsys.readouterr().out.splitlines()
-    assert out[0] == "| size | vCPU | threads | tile | conc | p50 s | p95 s | max s | non-200 | output sha256 |"
-    assert out[2].startswith("| 64x96 | 4 | 4 | 384 | 2 | ") and out[2].endswith(f" | 0 | {rows['64x96']['outputSha256'][:16]} |")
+    assert out[0] == "| model | size | vCPU | threads | tile | conc | p50 s | p95 s | max s | non-200 | output sha256 |"
+    assert out[2].startswith("| swinir-x2 | 64x96 | 4 | 4 | 384 | 2 | ") and out[2].endswith(f" | 0 | {rows['64x96']['outputSha256'][:16]} |")
     assert json.loads(out[-1]) == {"probe": "up-run", "passed": True, "failures": [], "report": "gs://bucket/up-run/upscale.json"}
 
 
 def test_upscale_markdown_shows_missing_values_as_dashes():
-    rows = [{"size": "800x1200", "vcpu": None, "threads": 8, "tile": None, "concurrency": 1, "p50S": None, "p95S": None, "maxS": None,
+    rows = [{"model": "swinir-x4", "size": "800x1200", "vcpu": None, "threads": 8, "tile": None, "concurrency": 1, "p50S": None, "p95S": None, "maxS": None,
              "non200": 3, "outputSha256": None}]
-    assert probe.upscale_markdown(rows).splitlines()[2] == "| 800x1200 | - | 8 | - | 1 | - | - | - | 3 | - |"
+    assert probe.upscale_markdown(rows).splitlines()[2] == "| swinir-x4 | 800x1200 | - | 8 | - | 1 | - | - | - | 3 | - |"
 
 
 def test_upscale_probe_output_sha_is_stable_across_runs(fake_upscale):
@@ -349,8 +349,8 @@ def test_upscale_probe_output_sha_is_stable_across_runs(fake_upscale):
     assert probe.upscale_image(64, 96) == probe.upscale_image(64, 96)
 
 
-@pytest.mark.parametrize(("mode", "failure"), [("noisy", "64x96: 3 different outputs for the same input"), ("wrong-size", "64x96: 3 non-200"),
-                                                ("busy", "64x96: 3 non-200")])
+@pytest.mark.parametrize(("mode", "failure"), [("noisy", "swinir-x2 64x96: 3 different outputs for the same input"),
+                                                ("wrong-size", "swinir-x2 64x96: 3 non-200"), ("busy", "swinir-x2 64x96: 3 non-200")])
 def test_upscale_probe_fails_on_differing_output_wrong_size_or_non_200(fake_upscale, mode, failure):
     code, reports = run_upscale_probe(fake_upscale(mode=mode).url, "--sizes", "64x96", "--rounds", "2", *BUCKET)
     assert code == 1 and failure in reports[0][1]["failures"]
@@ -368,7 +368,8 @@ def test_upscale_probe_counts_an_unreachable_service(fake_upscale):
     fake.server.server_close()
     code, reports = run_upscale_probe(fake.url, "--sizes", "64x96", "--rounds", "1", *BUCKET)
     assert code == 1
-    assert reports[0][1]["failures"] == ["64x96: 2 non-200", "health unreadable after baseline", "health unreadable after warm 64x96"]
+    assert reports[0][1]["failures"] == ["swinir-x2 64x96: 2 non-200", "swinir-x2: health unreadable after baseline",
+                                         "swinir-x2: health unreadable after warm 64x96"]
 
 
 def test_upscale_probe_reads_the_option_equals_value_items_the_job_passes():
@@ -386,8 +387,8 @@ def test_upscale_sizes_parsing():
             probe.parse_sizes(bad)
 
 
-@pytest.mark.parametrize("args", [["--model", "esrgan-x4"], ["--concurrency", "0"], ["--rounds", "51"], ["--timeout", "5"],
-                                  ["--bucket", "image-links-agent-public"], ["--run", "../x"]])
+@pytest.mark.parametrize("args", [["--model", "esrgan-x4"], ["--model", "realesrgan-x2plus"], ["--model", "swinir-x2,esrgan-x4"], ["--model", ","], ["--concurrency", "0"], ["--rounds", "51"], ["--timeout", "5"],
+                                  ["--bucket", "image-links-agent-public"], ["--run", "../x"], ["--x4-ratio", "0.5"], ["--x4-ratio", "-1"]])
 def test_upscale_probe_refuses_bad_arguments(args):
     with pytest.raises(probe.CheckFailure):
         probe.parse_upscale_args(["--probe-upscale", "https://svc-abc.a.run.app", *args])
@@ -420,3 +421,42 @@ def test_upscale_probe_asks_for_a_token_for_the_service_audience(monkeypatch):
     code = probe.probe_upscale_main(["--probe-upscale", "https://candidate---catalog-upscale-abc.a.run.app", "--sizes", "64x96"],
                                     token_for=lambda audience: seen.append(audience) or "tok")
     assert code == 0 and seen == ["https://catalog-upscale-abc.a.run.app"]
+
+
+def test_upscale_probe_times_x2_and_x4_and_checks_each_reruns_identically(fake_upscale, capsys):
+    # Spec 18 quality: the gate probes both served models; each answer must be the model's own scale, and the warm
+    # call plus one round already compare two outputs of the same input per model.
+    fake = fake_upscale()
+    code, reports = run_upscale_probe(fake.url, "--model=swinir-x2,swinir-x4", "--sizes", "64x96", "--rounds", "1", *BUCKET)
+    assert code == 0
+    assert fake.calls == ["/upscale?model=swinir-x2&scale=2"] * 2 + ["/upscale?model=swinir-x4&scale=4"] * 2
+    report = reports[0][1]
+    assert report["models"] == ["swinir-x2", "swinir-x4"] and report["passed"] is True
+    assert [(r["model"], r["scale"], r["calls"], r["distinctOutputs"]) for r in report["rows"]] == [("swinir-x2", 2, 2, 1), ("swinir-x4", 4, 2, 1)]
+    out = capsys.readouterr().out.splitlines()
+    assert out[2].startswith("| swinir-x2 | 64x96 |") and out[3].startswith("| swinir-x4 | 64x96 |")
+
+
+def test_upscale_probe_fails_an_x4_that_does_not_rerun_identically(fake_upscale):
+    code, reports = run_upscale_probe(fake_upscale(mode="noisy").url, "--model=swinir-x4", "--sizes", "64x96", "--rounds", "1", *BUCKET)
+    assert code == 1 and "swinir-x4 64x96: 2 different outputs for the same input" in reports[0][1]["failures"]
+
+
+def test_x4_ratio_check_fails_an_x4_slower_than_the_ratio_allows():
+    # 2026-10-29 review P2-1: the x4 cap assumes x4 takes at most UPSCALE_X4_TIME_RATIO x the x2 time; the gate's probe
+    # measures it at each size probed on both models.
+    def row(model, scale, size, p95):
+        return {"model": model, "scale": scale, "size": size, "p95S": p95}
+    rows = [row("swinir-x2", 2, "800x1200", 100.0), row("swinir-x4", 4, "800x1200", 125.0),
+            row("swinir-x2", 2, "1600x1600", 200.0), row("swinir-x4", 4, "1600x1600", 300.0), row("swinir-x4", 4, "64x96", 9.0)]
+    failures = probe.x4_ratio_failures(rows, 1.3)
+    assert len(failures) == 1 and failures[0].startswith("swinir-x4 1600x1600: p95 300.0 s is 1.50 x the swinir-x2 p95 200.0 s")
+    assert "UPSCALE_X4_TIME_RATIO=1.3" in failures[0] and "UPSCALE_MAX_PIXELS_X4" in failures[0]
+    assert probe.x4_ratio_failures(rows, 0) == []
+    assert probe.x4_ratio_failures(rows, 1.5) == []
+
+
+def test_upscale_probe_reads_the_x4_ratio_the_gate_passes():
+    args = probe.parse_upscale_args(["--probe-upscale", "https://svc-abc.a.run.app", "--model=swinir-x2,swinir-x4", "--x4-ratio=1.3"])
+    assert args.x4_ratio == 1.3
+    assert probe.parse_upscale_args(["--probe-upscale", "https://svc-abc.a.run.app"]).x4_ratio == 0

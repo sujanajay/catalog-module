@@ -1,590 +1,591 @@
-// Tier 2 (PGlite + fakes): spec 18 H3, the durable enlargement stage. The matte stage queues one enlarge task per photo
-// the render may enlarge past the threshold and parks the chunk; each task makes and stores the photo's x2 image once
-// (or fails it after the attempts), and the last one settles the gate, which queues the render. The service is a fake.
+// Tier 2 (PGlite + fakes): the spec 18 enlargement lifecycle (docs/plans/2026-10-29-spec-18-enlargement-lifecycle.md
+// section 6), the handler and its service behaviour. Every test drives the real entry points (handleChunkTask,
+// handleEnlargeTask, handleSweep, recoverBatchChunks); the upscale service, its probe, GCS, Cloud Tasks and the judge are
+// fakes (test/enlarge-world.ts). No test writes catalog_enlargements directly. Test names start with their plan id.
 import sharp from "sharp";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
-import { and, eq } from "drizzle-orm";
+import { eq } from "drizzle-orm";
 import type { Db } from "@catalog/core/db/client";
-import { createDbFromPglite, createTestDb } from "@catalog/core/db/testing";
-import { catalogBatches, catalogChunks, catalogCostEvents, catalogOutputs, catalogProducts, catalogSourceImages } from "@catalog/core/db/schema";
-import { batchPrefix, enlargedPath } from "@catalog/core/catalog/naming";
-import { renderAllChannels, type Prepared } from "@catalog/core/catalog/render";
-import { sourceX2, storedUpscaler, upscalerId } from "@catalog/core/catalog/upscale";
-import { classifyOutputs } from "@catalog/core/catalog/load/classify";
-import { DEFAULT_UPSCALE_TIMEOUT_S, ENLARGE_CLIENT_MARGIN_MS, ENLARGE_TASK_MARGIN_MS, EnlargeBadInputError, EnlargeBusyError } from "@catalog/core/catalog/enlarge";
-import { ENLARGE_CLAIM_MS, ENLARGE_STALE_MS, ENLARGE_TASK_MAX_ATTEMPTS, ENLARGING_TASK } from "@catalog/core/catalog/pipeline/enlargement";
-import { recoverBatchChunks, resendStaleEnlargements } from "@catalog/core/catalog/pipeline/dispatch";
-import { ENLARGE_DISPATCH_DEADLINE_SEC, enlargeTaskId } from "@catalog/core/tasks";
-import { currentChunkTask, deliverChunkToEnd, handleChunkTask } from "./chunk";
-import { derivedPrefixFor, handleEnlargeTask, type EnlargeCall, primeStoredEnlargement, workerEnlargeCall } from "./enlarge";
-import { preparePrimed } from "./auto-resolve";
-import { chunkRow, fakeWorld, seedBatch, type FakeWorld } from "../../test/catalog-fakes";
+import { createTestDb } from "@catalog/core/db/testing";
+import { catalogEnlargements } from "@catalog/core/db/schema";
+import { ENLARGE_MAX_TIMEOUTS, ENLARGE_SEND_WARN, ENLARGE_TASK_MAX_ATTEMPTS, ENLARGING_TASK, IDENTITY_UNSTABLE_SENTENCE, tilesFor } from "@catalog/core/catalog/pipeline/enlargement";
+import { resendStaleEnlargements } from "@catalog/core/catalog/pipeline/dispatch";
+import { retryEnlargement } from "@catalog/core/catalog/decisions";
+import { enlargeTaskId } from "@catalog/core/tasks";
+import { chunkRow } from "../../test/catalog-fakes";
+import {
+  batchOf, chunksOf, corruptObject, deliverChunk, deliverWithDeadline, enlargeBody, enlargeTasks, enlargeUntilSettled, enlargeWorld, outputsOf, photosOf, rowsOf, seedEnlargeBatch, sweep, upscaleCosts, type EnlargeWorld,
+} from "../../test/enlarge-world";
+import { clearMadeImages, handleEnlargeTask, upscaleProbeTimeoutMs, workerEnlargeCall, workerEnlargeProbe } from "./enlarge";
+import { ENLARGE_DISPATCH_DEADLINE_SEC } from "@catalog/core/tasks";
+import { ENLARGE_CLAIM_MS, ENLARGE_MAX_IDENTITY_CHANGES } from "@catalog/core/catalog/pipeline/enlargement";
 
-let db: Db, client: Awaited<ReturnType<typeof createTestDb>>["client"], close: () => Promise<void>;
-const bucketEnv = { BUCKET: process.env.BUCKET, PUBLIC_BUCKET: process.env.PUBLIC_BUCKET };
-beforeAll(async () => { process.env.BUCKET = "assets"; process.env.PUBLIC_BUCKET = "public"; ({ db, client, close } = await createTestDb()); }, 60_000);
-afterAll(async () => { for (const [key, value] of Object.entries(bucketEnv)) if (value === undefined) delete process.env[key]; else process.env[key] = value; await close(); });
-
-const ID = upscalerId("swinir-x2", "cpu");
-/** A fake upscale service: a JPEG of `factor` times the uploaded image, or the next queued failure. */
-function fakeService(factor = 2) {
-  const failures: Error[] = [];
-  const call = vi.fn<EnlargeCall>(async (jpeg) => {
-    const next = failures.shift();
-    if (next) throw next;
-    const meta = await sharp(jpeg).metadata();
-    return { jpeg: await sharp({ create: { width: meta.width! * factor, height: meta.height! * factor, channels: 3, background: { r: 0, g: 200, b: 0 } } }).jpeg({ quality: 95, chromaSubsampling: "4:4:4" }).toBuffer(), ms: 90_000, model: "swinir-x2", attempts: 1 };
-  });
-  return { call, failures };
+let db: Db, close: () => Promise<void>;
+const saved: Record<string, string | undefined> = {};
+const ENV = ["BUCKET", "PUBLIC_BUCKET", "UPSCALE_MAX_PIXELS", "UPSCALE_MAX_PIXELS_X4"];
+beforeAll(async () => { for (const k of ENV) saved[k] = process.env[k]; process.env.BUCKET = "assets"; process.env.PUBLIC_BUCKET = "public"; process.env.UPSCALE_MAX_PIXELS = "8000000"; process.env.UPSCALE_MAX_PIXELS_X4 = "6400000"; ({ db, close } = await createTestDb()); }, 60_000);
+afterAll(async () => { for (const k of ENV) if (saved[k] === undefined) delete process.env[k]; else process.env[k] = saved[k]; await close(); });
+/** Runs `fn` with env overrides, restored after. */
+async function withEnv<T>(vars: Record<string, string>, fn: () => Promise<T>): Promise<T> {
+  const before = Object.fromEntries(Object.keys(vars).map((k) => [k, process.env[k]]));
+  Object.assign(process.env, vars);
+  try { return await fn(); } finally { for (const [k, v] of Object.entries(before)) if (v === undefined) delete process.env[k]; else process.env[k] = v; }
 }
-/** A world whose render enlarges: Trendyol (1200 x 1800, fixed) takes the fake 600 x 800-ish photos past 1.5x. */
-function enlargingWorld(factor = 2) {
-  const w = fakeWorld(db, 1, { imageScale: 0.5 }), service = fakeService(factor);
-  w.deps.upscaler = storedUpscaler(ID, 1.5);
-  w.deps.enlarge = service.call;
-  return { w, service };
+
+/** A batch (pinned x2 at 1.0) after its matte stage: one wanted queued row per photo, the chunk parked. */
+async function parked(name: string, options: { layout?: number[][]; world?: EnlargeWorld; channels?: ("trendyol" | "noon")[] } = {}) {
+  const e = options.world ?? enlargeWorld(db);
+  const s = await seedEnlargeBatch(db, e.w, name, options.layout ?? [[1]], { channels: options.channels ?? ["trendyol"] });
+  for (const c of s.chunks) expect(await deliverChunk(db, e.w, c.id)).toMatchObject({ httpStatus: 200 });
+  const rows = await rowsOf(db, s.batch.id);
+  return { ...e, s, rows };
 }
-const photosOf = (batchId: string) => db.select().from(catalogSourceImages).where(eq(catalogSourceImages.batchId, batchId)).orderBy(catalogSourceImages.n);
-const enlargeTasks = (w: FakeWorld) => w.tasks.filter((t) => t.route === "/tasks/catalog/enlarge");
-const chunkTasks = (w: FakeWorld, chunkId: string) => w.tasks.filter((t) => t.route === "/tasks/catalog/chunk" && t.body.chunkId === chunkId);
-async function matteStage(w: FakeWorld, name: string, channels: ("trendyol" | "noon")[] = ["trendyol"], shots = 2) {
-  const s = await seedBatch(db, w, name, [[shots]], { channels });
-  expect((await handleChunkTask(w.deps, await currentChunkTask(db, s.chunks[0]!.id))).httpStatus).toBe(200);
-  return s;
-}
-/** Holds the first service call until `release()`; later calls pass straight through. */
-function holdFirstCall(w: FakeWorld) {
-  let release!: () => void;
-  const held = new Promise<void>((resolve) => { release = resolve; });
-  const call = w.deps.enlarge!;
-  let first = true;
-  w.deps.enlarge = async (...args) => { if (first) { first = false; await held; } return call(...args); };
-  return { release };
-}
-/** The outcomes of the batch's upscale cost rows. */
-const upscaleRows = async (batchId: string) => (await db.select().from(catalogCostEvents).where(and(eq(catalogCostEvents.batchId, batchId), eq(catalogCostEvents.kind, "upscale_call")))).map((r) => r.outcome);
-/** The real render with the worker's stored upscaler, as deps.ts wires it (renderSource decides upscaled or the hold). */
-function realRender(w: FakeWorld) {
-  w.deps.renderAllChannels = (p, m, channels, ctx) => renderAllChannels(p, m, channels, { upscaler: w.deps.upscaler!, ...ctx });
-}
-/** Records, at each render chunk task enqueued, the chunk's photos still queued for enlargement (must be none). */
-function watchRenderEnqueues(w: FakeWorld, batchId: string) {
-  const early: string[] = [];
-  const enqueue = w.deps.enqueue;
-  w.deps.enqueue = (async (route, body, opts) => {
-    if (route === "/tasks/catalog/chunk" && body.stage === "render") {
-      const chunk = await chunkRow(db, body.chunkId as string);
-      const queued = (await photosOf(batchId)).filter((x) => chunk.productIds.includes(x.productId) && x.x2Model && !x.x2Uri && x.x2Attempts < ENLARGE_TASK_MAX_ATTEMPTS);
-      if (queued.length) early.push(chunk.id);
-    }
-    return enqueue(route, body, opts);
-  }) as typeof enqueue;
-  return early;
-}
-const pathKeyOf = async (productId: string) => (await db.select().from(catalogProducts).where(eq(catalogProducts.id, productId)))[0]!.pathKey;
-const bodyOf = (w: FakeWorld, sourceImageId: string) => enlargeTasks(w).find((t) => t.body.sourceImageId === sourceImageId)!.body;
+const rowNow = async (id: string) => (await db.select().from(catalogEnlargements).where(eq(catalogEnlargements.id, id)))[0]!;
+const errorLines = (e: EnlargeWorld, message: string) => e.w.log.mock.calls.filter(([m, f]) => m === message && f?.severity === "ERROR");
 
-describe("spec 18 H3: the matte stage queues enlargements and parks the chunk", () => {
-  it("queues one task per photo that needs it (round 0, the operator lane) and parks the chunk with no task and no slot", async () => {
-    const { w } = enlargingWorld();
-    const s = await matteStage(w, "h3-park");
-    const photos = await photosOf(s.batch.id);
-    expect(photos.map((p) => p.x2Model)).toEqual([ID, ID]);
-    expect(enlargeTasks(w).map((t) => [t.taskId, t.bulk, t.body])).toEqual(photos.map((p) => [enlargeTaskId(p.id, 0), false, { batchId: s.batch.id, productId: p.productId, sourceImageId: p.id, round: 0 }]));
-    const chunk = await chunkRow(db, s.chunks[0]!.id);
-    expect(chunk).toMatchObject({ stage: "render", status: "queued", taskName: ENLARGING_TASK, dispatchedAt: null });
-    expect(chunkTasks(w, chunk.id).filter((t) => t.body.stage === "render")).toEqual([]);
-    expect(w.deliveries().at(-1)).toMatchObject({ outcome: "enlarging" });
-    // A copy of a chunk task meets the parked chunk: it never claims it.
-    expect((await handleChunkTask(w.deps, { chunkId: chunk.id, stage: "render", step: chunk.step })).outcome).toBe("duplicate");
-    expect((await chunkRow(db, chunk.id)).taskName).toBe(ENLARGING_TASK);
-  }, 60_000);
-
-  it("a photo no channel enlarges past the threshold and the upscaler off queue nothing and advance as before", async () => {
-    // 1800 x 2400 photos: Trendyol's 1200 x 1800 needs no enlargement.
-    const w = fakeWorld(db, 1, { imageScale: 3 });
-    w.deps.upscaler = storedUpscaler(ID, 1.5); w.deps.enlarge = fakeService().call;
-    const s = await matteStage(w, "h3-large");
-    expect(enlargeTasks(w)).toEqual([]);
-    expect((await photosOf(s.batch.id)).map((p) => p.x2Model)).toEqual([null, null]);
-    expect(await chunkRow(db, s.chunks[0]!.id)).toMatchObject({ stage: "render", taskName: null });
-    const off = fakeWorld(db, 1, { imageScale: 0.5 });
-    const t = await matteStage(off, "h3-off");
-    expect(enlargeTasks(off)).toEqual([]);
-    expect(await chunkRow(db, t.chunks[0]!.id)).toMatchObject({ stage: "render", taskName: null });
-  }, 60_000);
-});
-
-describe("spec 18 H3: the enlarge task", () => {
-  it("stores the x2 image privately with its source and upscaler, writes the cost row, and the last photo queues the render", async () => {
-    const { w, service } = enlargingWorld();
-    const s = await matteStage(w, "h3-done");
-    const [one, two] = await photosOf(s.batch.id);
-    expect(await handleEnlargeTask(w.deps, bodyOf(w, one!.id))).toMatchObject({ httpStatus: 200, outcome: "done" });
-    expect((await chunkRow(db, s.chunks[0]!.id)).taskName).toBe(ENLARGING_TASK);
-    expect(await handleEnlargeTask(w.deps, bodyOf(w, two!.id))).toMatchObject({ httpStatus: 200, outcome: "done" });
-    expect(service.call).toHaveBeenCalledTimes(2);
-    // The call gets the delivery's own deadline: its start plus the dispatch deadline, less the client margin.
-    const left = service.call.mock.calls[0]![2]!.deadlineAt! - Date.now(), budget = ENLARGE_DISPATCH_DEADLINE_SEC * 1000 - ENLARGE_TASK_MARGIN_MS;
-    expect(left).toBeLessThanOrEqual(budget);
-    expect(left).toBeGreaterThan(budget - 60_000);
-    const photos = await photosOf(s.batch.id);
-    for (const p of photos) {
-      const path = enlargedPath(batchPrefix("test_brand", s.batch.id, true), await pathKeyOf(p.productId), p.n, ID);
-      expect(p).toMatchObject({ x2Uri: `gs://assets/${path}`, x2Model: ID, x2Error: null, x2ClaimedAt: null });
-      expect(path).toMatch(/^catalog-test\/test_brand\/.+\/derived\/.+\.swinir-x2-cpu\.x2\.jpg$/);
-      expect(w.metadata.get(p.x2Uri!)).toEqual({ sourceSha256: p.sha256, upscaler: ID });
-      const meta = await sharp(w.objects.get(p.x2Uri!)!).metadata();
-      expect(meta.width).toBeGreaterThan(0);
-    }
-    const ledger = await db.select().from(catalogCostEvents).where(and(eq(catalogCostEvents.batchId, s.batch.id), eq(catalogCostEvents.kind, "upscale_call")));
-    expect(ledger.map((r) => [r.stage, r.engine, r.ms, r.outcome])).toEqual([["upscale", "cpu", 90_000, "ok"], ["upscale", "cpu", 90_000, "ok"]]);
-    const chunk = await chunkRow(db, s.chunks[0]!.id);
-    expect(chunk).toMatchObject({ stage: "render", taskName: null });
-    expect(chunk.dispatchedAt).not.toBeNull();
-    expect(chunkTasks(w, chunk.id).at(-1)!.body).toMatchObject({ stage: "render", step: chunk.step });
-    const [batch] = await db.select().from(catalogBatches).where(eq(catalogBatches.id, s.batch.id));
-    expect(batch!.counts).toMatchObject({ enlargeTotal: 2, enlargeDone: 2, enlargeFailed: 0 });
-    // A duplicate delivery: nothing is called or written again.
-    expect(await handleEnlargeTask(w.deps, bodyOf(w, one!.id))).toMatchObject({ httpStatus: 200, outcome: "settled" });
-    expect(service.call).toHaveBeenCalledTimes(2);
-    // The render stage primes the stored images: the x2 objects are read, no service is called.
-    const reads = vi.spyOn(w.deps.storage, "downloadBuffer");
-    expect((await handleChunkTask(w.deps, await currentChunkTask(db, chunk.id))).httpStatus).toBe(200);
-    expect(reads.mock.calls.map(([uri]) => uri)).toEqual(expect.arrayContaining(photos.map((p) => p.x2Uri)));
-    expect(service.call).toHaveBeenCalledTimes(2);
-    // A stored image made from other bytes counts as missing: nothing is primed (the render holds what needs it).
-    expect(await primeStoredEnlargement(w.deps, { id: photos[0]!.id, sha256: "other", x2Uri: photos[0]!.x2Uri, x2Model: ID }, {} as Prepared)).toBe(false);
-    // So does one made by another upscaler than the configured one by its record or by its metadata.
-    expect(await primeStoredEnlargement(w.deps, { id: photos[0]!.id, sha256: photos[0]!.sha256, x2Uri: photos[0]!.x2Uri, x2Model: "realesrgan-x2plus" }, {} as Prepared)).toBe(false);
-    w.metadata.set(photos[0]!.x2Uri!, { sourceSha256: photos[0]!.sha256, upscaler: "realesrgan-x2plus" });
-    expect(await primeStoredEnlargement(w.deps, { id: photos[0]!.id, sha256: photos[0]!.sha256, x2Uri: photos[0]!.x2Uri, x2Model: ID }, {} as Prepared)).toBe(false);
-  }, 60_000);
-
-  it("a stored image already there (a lost answer) is reused without a call; one from another upscaler is made again", async () => {
-    const { w, service } = enlargingWorld();
-    const s = await matteStage(w, "h3-head", ["trendyol"], 1);
-    const [photo] = await photosOf(s.batch.id);
-    const uri = `gs://assets/${enlargedPath(batchPrefix("test_brand", s.batch.id, true), await pathKeyOf(photo!.productId), photo!.n, ID)}`;
-    w.objects.set(uri, Buffer.from("old")); w.metadata.set(uri, { sourceSha256: photo!.sha256, upscaler: "realesrgan-x2plus" });
-    expect(await handleEnlargeTask(w.deps, bodyOf(w, photo!.id))).toMatchObject({ outcome: "done" });
-    expect(service.call).toHaveBeenCalledTimes(1);
-    const t = await matteStage(w, "h3-head-reuse", ["trendyol"], 1);
-    const [again] = await photosOf(t.batch.id);
-    const uri2 = `gs://assets/${enlargedPath(batchPrefix("test_brand", t.batch.id, true), await pathKeyOf(again!.productId), again!.n, ID)}`;
-    w.objects.set(uri2, Buffer.from("kept")); w.metadata.set(uri2, { sourceSha256: again!.sha256, upscaler: ID });
-    expect(await handleEnlargeTask(w.deps, bodyOf(w, again!.id))).toMatchObject({ outcome: "done" });
-    expect(service.call).toHaveBeenCalledTimes(1);
-    expect((await photosOf(t.batch.id))[0]!.x2Uri).toBe(uri2);
-  }, 60_000);
-
-  it("a busy service is retried by the queue (503, one attempt counted), then the next attempt stores the image", async () => {
-    const { w, service } = enlargingWorld();
-    const s = await matteStage(w, "h3-retry", ["trendyol"], 1);
-    const [photo] = await photosOf(s.batch.id);
-    service.failures.push(new EnlargeBusyError(503, 1));
-    expect(await handleEnlargeTask(w.deps, bodyOf(w, photo!.id), { retryCount: 0 })).toMatchObject({ httpStatus: 503, outcome: "retry" });
-    expect((await photosOf(s.batch.id))[0]).toMatchObject({ x2Uri: null, x2Attempts: 1, x2Error: "The enlargement service is busy (503)." });
-    expect((await chunkRow(db, s.chunks[0]!.id)).taskName).toBe(ENLARGING_TASK);
-    expect(w.log).toHaveBeenCalledWith("enlargement retry", expect.objectContaining({ severity: "WARNING", attempts: 1 }));
-    expect(await handleEnlargeTask(w.deps, bodyOf(w, photo!.id), { retryCount: 1 })).toMatchObject({ httpStatus: 200, outcome: "done" });
-    expect((await chunkRow(db, s.chunks[0]!.id)).taskName).toBeNull();
-  }, 60_000);
-
-  it("eight failed attempts fail the photo for good: ERROR \"enlargement failed\", 200, and the gate settles", async () => {
-    const { w, service } = enlargingWorld();
-    const s = await matteStage(w, "h3-fail", ["trendyol"], 1);
-    const [photo] = await photosOf(s.batch.id);
-    for (let i = 0; i < ENLARGE_TASK_MAX_ATTEMPTS; i++) service.failures.push(new EnlargeBusyError(429, 1));
-    const answers = [];
-    for (let retryCount = 0; retryCount < ENLARGE_TASK_MAX_ATTEMPTS; retryCount++) answers.push((await handleEnlargeTask(w.deps, bodyOf(w, photo!.id), { retryCount })).httpStatus);
-    expect(answers).toEqual([...Array(ENLARGE_TASK_MAX_ATTEMPTS - 1).fill(503), 200]);
-    expect((await photosOf(s.batch.id))[0]).toMatchObject({ x2Uri: null, x2Attempts: ENLARGE_TASK_MAX_ATTEMPTS, x2Model: ID });
-    const errors = w.log.mock.calls.filter(([m, f]) => m === "enlargement failed" && f?.severity === "ERROR");
-    expect(errors).toHaveLength(1);
-    expect(await chunkRow(db, s.chunks[0]!.id)).toMatchObject({ taskName: null, stage: "render" });
-    const [batch] = await db.select().from(catalogBatches).where(eq(catalogBatches.id, s.batch.id));
-    expect(batch!.counts).toMatchObject({ enlargeTotal: 1, enlargeDone: 0, enlargeFailed: 1 });
-    // The failed calls cost service time: each wrote a failed ledger row.
-    const ledger = await db.select().from(catalogCostEvents).where(and(eq(catalogCostEvents.batchId, s.batch.id), eq(catalogCostEvents.kind, "upscale_call")));
-    expect(ledger.every((r) => r.outcome === "failed")).toBe(true);
-  }, 60_000);
-
-  it("only deliveries that reached the handler count: a high X-CloudTasks-TaskRetryCount (429s before the app) never fails a photo early", async () => {
-    const { w, service } = enlargingWorld();
-    const s = await matteStage(w, "h3-header", ["trendyol"], 1);
-    const [photo] = await photosOf(s.batch.id);
-    for (let i = 0; i < ENLARGE_TASK_MAX_ATTEMPTS; i++) service.failures.push(new EnlargeBusyError(503, 1));
-    // The queue's last attempt by its own count, but the first that reached this handler: 503, one attempt counted.
-    expect(await handleEnlargeTask(w.deps, bodyOf(w, photo!.id), { retryCount: ENLARGE_TASK_MAX_ATTEMPTS - 1 })).toMatchObject({ httpStatus: 503, outcome: "retry" });
-    expect((await photosOf(s.batch.id))[0]).toMatchObject({ x2Attempts: 1, x2Uri: null });
-    // The queue gave up on that task: the photo stays queued and the parked chunk stays parked for its recovery,
-    // which sends the next round with the attempts kept (below, eight real attempts in all before the failure).
-    expect((await chunkRow(db, s.chunks[0]!.id)).taskName).toBe(ENLARGING_TASK);
-    const answers: number[] = [];
-    for (let round = 1; round < ENLARGE_TASK_MAX_ATTEMPTS; round++) answers.push((await handleEnlargeTask(w.deps, { ...bodyOf(w, photo!.id), round }, { retryCount: 50 + round })).httpStatus);
-    expect(answers).toEqual([...Array(ENLARGE_TASK_MAX_ATTEMPTS - 2).fill(503), 200]);
-    expect(service.call).toHaveBeenCalledTimes(ENLARGE_TASK_MAX_ATTEMPTS);
-    expect((await photosOf(s.batch.id))[0]!.x2Attempts).toBe(ENLARGE_TASK_MAX_ATTEMPTS);
-  }, 60_000);
-
-  it("on the default env (no UPSCALE_TIMEOUT_S) the worker's call reaches the service once, its timeout clamped below the delivery's deadline", async () => {
-    const { w } = enlargingWorld();
-    const s = await matteStage(w, "h3-default-env", ["trendyol"], 1);
-    const [photo] = await photosOf(s.batch.id);
-    // The real client of the worker (workerEnlargeCall) with an env that names only the service, against a fake fetch.
-    const seen: string[] = [];
-    const fetch = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
-      seen.push(String(url));
-      const meta = await sharp(Buffer.from(init!.body as Uint8Array)).metadata();
-      const jpeg = await sharp({ create: { width: meta.width! * 2, height: meta.height! * 2, channels: 3, background: { r: 1, g: 2, b: 3 } } }).jpeg().toBuffer();
-      return new Response(new Uint8Array(jpeg), { headers: { "content-type": "image/jpeg", "x-upscale-ms": "5000" } });
-    }) as unknown as typeof globalThis.fetch;
-    const timeouts = vi.spyOn(AbortSignal, "timeout");
-    try {
-      // The delivery started 5 s before the call (reads, download, prepare).
-      const started = Date.now() - 5_000;
-      let first = true;
-      w.deps.now = () => { if (first) { first = false; return new Date(started); } return new Date(); };
-      w.deps.enlarge = workerEnlargeCall("swinir-x2", { UPSCALE_URL: "http://localhost:8099" }, { fetch, idToken: async () => "t" });
-      expect(await handleEnlargeTask(w.deps, bodyOf(w, photo!.id))).toMatchObject({ httpStatus: 200, outcome: "done" });
-      expect(fetch).toHaveBeenCalledTimes(1);
-      expect(seen[0]).toBe("http://localhost:8099/upscale?model=swinir-x2&scale=2");
-      const timeoutMs = timeouts.mock.calls.map(([ms]) => ms).at(-1)!;
-      expect(timeoutMs).toBeLessThan(DEFAULT_UPSCALE_TIMEOUT_S * 1000 + ENLARGE_CLIENT_MARGIN_MS);
-      expect(Date.now() + timeoutMs).toBeLessThanOrEqual(started + ENLARGE_DISPATCH_DEADLINE_SEC * 1000 - ENLARGE_TASK_MARGIN_MS + 1_000);
-    } finally { timeouts.mockRestore(); }
-    expect((await photosOf(s.batch.id))[0]!.x2Uri).not.toBeNull();
-  }, 60_000);
-
-  it("lane-aware recovery: a delivery for one product refreshes every parked chunk of the batch, so paced tasks are not sent twice", async () => {
-    const { w } = enlargingWorld();
-    const s = await seedBatch(db, w, "h3-lane", [[1], [1], [1]], { channels: ["trendyol"] });
-    for (const chunk of s.chunks) expect((await handleChunkTask(w.deps, await currentChunkTask(db, chunk.id))).httpStatus).toBe(200);
-    for (const chunk of s.chunks) expect((await chunkRow(db, chunk.id)).taskName).toBe(ENLARGING_TASK);
-    const old = new Date(Date.now() - ENLARGE_STALE_MS + 60_000);
-    await db.update(catalogChunks).set({ progressAt: old }).where(eq(catalogChunks.batchId, s.batch.id));
-    // Product A's task reaches the worker; the tasks of B and C still wait in the paced lane.
-    const a = s.chunks[0]!.productIds[0]!, photoA = (await photosOf(s.batch.id)).find((p) => p.productId === a)!;
-    const before = Date.now();
-    expect(await handleEnlargeTask(w.deps, bodyOf(w, photoA.id))).toMatchObject({ outcome: "done" });
-    expect((await chunkRow(db, s.chunks[0]!.id)).taskName).toBeNull();
-    for (const chunk of s.chunks.slice(1)) {
-      const row = await chunkRow(db, chunk.id);
-      expect(row.taskName).toBe(ENLARGING_TASK);
-      expect(+row.progressAt!).toBeGreaterThanOrEqual(before);
-    }
-    // Two minutes later: nothing is sent again.
-    const sent = enlargeTasks(w).length;
-    expect(await resendStaleEnlargements(db, w.deps.enqueue, s.batch.id, { now: new Date(Date.now() + 2 * 60_000) })).toBe(0);
-    // Once the batch's lane was quiet for ENLARGE_STALE_MS, the two waiting photos are sent as the next round.
-    expect(await resendStaleEnlargements(db, w.deps.enqueue, s.batch.id, { now: new Date(Date.now() + ENLARGE_STALE_MS + 60_000) })).toBe(2);
-    expect(enlargeTasks(w).length).toBe(sent + 2);
-  }, 60_000);
-
-  it("failures no retry fixes fail at once: a refused image, a photo above UPSCALE_MAX_PIXELS (no call), a wrong-size answer", async () => {
-    const bad = enlargingWorld();
-    const a = await matteStage(bad.w, "h3-bad", ["trendyol"], 1);
-    bad.service.failures.push(new EnlargeBadInputError(400, 1));
-    expect(await handleEnlargeTask(bad.w.deps, bodyOf(bad.w, (await photosOf(a.batch.id))[0]!.id))).toMatchObject({ httpStatus: 200, outcome: "failed" });
-    const big = enlargingWorld();
-    const b = await matteStage(big.w, "h3-big", ["trendyol"], 1);
-    vi.stubEnv("UPSCALE_MAX_PIXELS", "1000");
-    try { expect(await handleEnlargeTask(big.w.deps, bodyOf(big.w, (await photosOf(b.batch.id))[0]!.id))).toMatchObject({ httpStatus: 200, outcome: "failed" }); }
-    finally { vi.unstubAllEnvs(); }
-    expect(big.service.call).not.toHaveBeenCalled();
-    expect((await photosOf(b.batch.id))[0]!.x2Error).toMatch(/above the 1000 the upscale service takes/);
-    const odd = enlargingWorld(3);
-    const c = await matteStage(odd.w, "h3-odd", ["trendyol"], 1);
-    expect(await handleEnlargeTask(odd.w.deps, bodyOf(odd.w, (await photosOf(c.batch.id))[0]!.id))).toMatchObject({ httpStatus: 200, outcome: "failed" });
-    expect((await photosOf(c.batch.id))[0]).toMatchObject({ x2Uri: null, x2Attempts: ENLARGE_TASK_MAX_ATTEMPTS });
-    for (const s of [a, b, c]) expect((await chunkRow(db, s.chunks[0]!.id)).taskName).toBeNull();
-  }, 60_000);
-
-  it("two live deliveries of one photo: one claims, calls and bills; the other answers 503 with no call and no attempt; the gate settles once", async () => {
-    const { w, service } = enlargingWorld();
-    const s = await matteStage(w, "h3-race", ["trendyol"], 1);
-    const [photo] = await photosOf(s.batch.id);
-    const first = holdFirstCall(w);
-    const round0 = handleEnlargeTask(w.deps, bodyOf(w, photo!.id));
-    // The first delivery holds the photo's claim and waits in the service call.
-    await vi.waitFor(async () => expect((await photosOf(s.batch.id))[0]!.x2ClaimedAt).not.toBeNull());
-    expect(await handleEnlargeTask(w.deps, { ...bodyOf(w, photo!.id), round: 1 })).toMatchObject({ httpStatus: 503, outcome: "in_flight" });
-    expect((await photosOf(s.batch.id))[0]).toMatchObject({ x2Attempts: 0, x2Uri: null });
-    first.release();
-    expect(await round0).toMatchObject({ httpStatus: 200, outcome: "done" });
-    expect(service.call).toHaveBeenCalledTimes(1);
-    expect((await photosOf(s.batch.id))[0]).toMatchObject({ x2ClaimedAt: null, x2Attempts: 0 });
-    expect(await upscaleRows(s.batch.id)).toEqual(["ok"]);
-    expect(w.log.mock.calls.filter(([m]) => m === "chunk enlarged")).toHaveLength(1);
-    expect(chunkTasks(w, s.chunks[0]!.id).filter((t) => t.body.stage === "render")).toHaveLength(1);
-    // The queue retries the one that answered 503: the photo is done, nothing is called or billed again.
-    expect(await handleEnlargeTask(w.deps, { ...bodyOf(w, photo!.id), round: 1 })).toMatchObject({ httpStatus: 200, outcome: "settled" });
-    expect(service.call).toHaveBeenCalledTimes(1);
-  }, 60_000);
-
-  it("a delivery whose claim lapsed and finishes after another stored the image writes nothing: no second write, no second cost row", async () => {
-    const { w, service } = enlargingWorld();
-    const s = await matteStage(w, "h3-late", ["trendyol"], 1);
-    const [photo] = await photosOf(s.batch.id);
-    const first = holdFirstCall(w);
-    const late = handleEnlargeTask(w.deps, bodyOf(w, photo!.id));
-    await vi.waitFor(async () => expect((await photosOf(s.batch.id))[0]!.x2ClaimedAt).not.toBeNull());
-    // Its claim lapses (its delivery is past the dispatch deadline as far as anyone can tell); a re-sent round runs.
-    await db.update(catalogSourceImages).set({ x2ClaimedAt: new Date(Date.now() - ENLARGE_CLAIM_MS - 1_000) }).where(eq(catalogSourceImages.id, photo!.id));
-    expect(await handleEnlargeTask(w.deps, { ...bodyOf(w, photo!.id), round: 1 })).toMatchObject({ httpStatus: 200, outcome: "done" });
-    const stored = (await photosOf(s.batch.id))[0]!;
-    first.release();
-    expect(await late).toMatchObject({ httpStatus: 200, outcome: "settled" });
-    expect(service.call).toHaveBeenCalledTimes(2);
-    expect(await upscaleRows(s.batch.id)).toEqual(["ok"]);
-    expect((await photosOf(s.batch.id))[0]).toMatchObject({ x2Uri: stored.x2Uri, x2Model: ID, x2Attempts: 0 });
-    expect(w.log.mock.calls.filter(([m]) => m === "chunk enlarged")).toHaveLength(1);
-  }, 60_000);
-
-  it("with the upscaler switched off, a queued photo is settled as not needed and the chunk goes on with the plain path", async () => {
-    const { w } = enlargingWorld();
-    const s = await matteStage(w, "h3-switched-off", ["trendyol"], 1);
-    const [photo] = await photosOf(s.batch.id);
-    w.deps.upscaler = null; delete w.deps.enlarge;
-    expect(await handleEnlargeTask(w.deps, bodyOf(w, photo!.id))).toMatchObject({ httpStatus: 200, outcome: "off" });
-    expect((await photosOf(s.batch.id))[0]).toMatchObject({ x2Model: null, x2Uri: null });
-    expect((await chunkRow(db, s.chunks[0]!.id)).taskName).toBeNull();
-  }, 60_000);
-
-  it("in process (evals, real runs): deliverChunkToEnd runs the parked chunk's enlarge tasks and finishes the chunk", async () => {
-    const { w, service } = enlargingWorld();
-    const s = await seedBatch(db, w, "h3-in-process", [[2]], { channels: ["trendyol"] });
-    await deliverChunkToEnd(w.deps, s.chunks[0]!.id, async (deliver) => { await deliver(); });
-    expect(service.call).toHaveBeenCalledTimes(2);
-    expect((await chunkRow(db, s.chunks[0]!.id)).status).toBe("done");
-    expect((await photosOf(s.batch.id)).every((p) => p.x2Uri)).toBe(true);
-    expect((await db.select().from(catalogChunks).where(eq(catalogChunks.id, s.chunks[0]!.id)))[0]!.taskName).toBeNull();
-  }, 60_000);
-});
-
-describe("spec 18 3.3.3: the chunk gate under concurrent settles and park ordering", () => {
-  it("two different last photos of one product settled at once: the parked chunk is dispatched once and the sentinel cleared once, each settle locking the chunk first", async () => {
-    const { w, service } = enlargingWorld();
-    const s = await matteStage(w, "h3-gate-two-photos", ["trendyol"], 2);
-    const [one, two] = await photosOf(s.batch.id);
-    const early = watchRenderEnqueues(w, s.batch.id);
-    // Both deliveries reach the settle together: neither call returns before both are in flight.
-    let arrived = 0, open!: () => void;
-    const both = new Promise<void>((resolve) => { open = resolve; });
-    const call = service.call;
-    w.deps.enlarge = async (...args) => { if (++arrived === 2) open(); await both; return call(...args); };
-    // Every query of the settles, on the same database (drizzle's logger), to check the lock order.
-    const queries: string[] = [];
-    w.deps.db = createDbFromPglite(client, { logger: { logQuery: (q) => { queries.push(q); } } }).db;
-    const results = await Promise.all([handleEnlargeTask(w.deps, bodyOf(w, one!.id)), handleEnlargeTask(w.deps, bodyOf(w, two!.id))]);
-    expect(results.map((r) => r.outcome)).toEqual(["done", "done"]);
-    expect(w.log.mock.calls.filter(([m]) => m === "chunk enlarged")).toHaveLength(1);
-    expect(chunkTasks(w, s.chunks[0]!.id).filter((t) => t.body.stage === "render")).toHaveLength(1);
-    expect((await chunkRow(db, s.chunks[0]!.id)).taskName).toBeNull();
-    expect(early).toEqual([]);
-    // Each settle: lock the product's chunks (FOR UPDATE, in id order), then write the photo, then the guarded unpark.
-    const lock = (q: string) => /from "catalog_chunks"/.test(q) && /"product_ids" @> jsonb_build_array/.test(q) && /order by "catalog_chunks"."id" asc for update/i.test(q);
-    const photoWrite = (q: string) => /^update "catalog_source_images" set "x2_uri"/.test(q);
-    const unpark = (q: string) => /^update "catalog_chunks" set "task_name" = \$\d+, "dispatched_at"/.test(q) && /NOT EXISTS/.test(q);
-    const order = queries.filter((q) => lock(q) || photoWrite(q) || unpark(q)).map((q) => lock(q) ? "lock" : photoWrite(q) ? "write" : "unpark");
-    expect(order).toEqual(["lock", "write", "unpark", "lock", "write", "unpark"]);
-  }, 60_000);
-
-  it("one last photo in each of two products of the same chunk, settled at once: dispatched once, sentinel cleared once", async () => {
-    const { w, service } = enlargingWorld();
-    const s = await seedBatch(db, w, "h3-gate-two-products", [[1, 1]], { channels: ["trendyol"] });
-    expect((await handleChunkTask(w.deps, await currentChunkTask(db, s.chunks[0]!.id))).httpStatus).toBe(200);
-    expect((await chunkRow(db, s.chunks[0]!.id)).taskName).toBe(ENLARGING_TASK);
-    const photos = await photosOf(s.batch.id);
-    expect(new Set(photos.map((p) => p.productId)).size).toBe(2);
-    const early = watchRenderEnqueues(w, s.batch.id);
-    let arrived = 0, open!: () => void;
-    const both = new Promise<void>((resolve) => { open = resolve; });
-    const call = service.call;
-    w.deps.enlarge = async (...args) => { if (++arrived === 2) open(); await both; return call(...args); };
-    await Promise.all(photos.map((p) => handleEnlargeTask(w.deps, bodyOf(w, p.id))));
-    expect(w.log.mock.calls.filter(([m]) => m === "chunk enlarged")).toHaveLength(1);
-    expect(chunkTasks(w, s.chunks[0]!.id).filter((t) => t.body.stage === "render")).toHaveLength(1);
-    expect((await chunkRow(db, s.chunks[0]!.id)).taskName).toBeNull();
-    expect(early).toEqual([]);
-  }, 60_000);
-
-  it("a settle that lands before the park transaction: the chunk goes straight to its render and never parks", async () => {
-    const { w } = enlargingWorld();
-    // The enlarge tasks run inline the moment the matte stage sends them, so every photo is done before the park.
-    const enqueue = w.deps.enqueue;
-    w.deps.enqueue = (async (route, body, opts) => {
-      const id = await enqueue(route, body, opts);
-      if (route === "/tasks/catalog/enlarge") expect(await handleEnlargeTask(w.deps, { ...body })).toMatchObject({ outcome: "done" });
-      return id;
-    }) as typeof enqueue;
-    const s = await matteStage(w, "h3-settle-first", ["trendyol"], 2);
-    expect((await photosOf(s.batch.id)).every((p) => p.x2Uri)).toBe(true);
-    const chunk = await chunkRow(db, s.chunks[0]!.id);
-    expect(chunk).toMatchObject({ stage: "render", taskName: null });
-    expect(chunk.dispatchedAt).not.toBeNull();
-    expect(w.deliveries("enlarging")).toEqual([]);
-    expect(w.log.mock.calls.filter(([m]) => m === "chunk enlarged")).toHaveLength(0);
-    expect(chunkTasks(w, chunk.id).filter((t) => t.body.stage === "render")).toHaveLength(1);
-  }, 60_000);
-
-  it("an enlarge enqueue that fails leaves the photos queued and the chunk parked; the stale recovery sends them and the chunk goes on", async () => {
-    const { w } = enlargingWorld();
-    const enqueue = w.deps.enqueue;
-    w.deps.enqueue = (async (route, body, opts) => {
-      if (route === "/tasks/catalog/enlarge") throw new Error("Cloud Tasks unavailable");
-      return enqueue(route, body, opts);
-    }) as typeof enqueue;
-    const s = await matteStage(w, "h3-enqueue-fails", ["trendyol"], 2);
-    expect(enlargeTasks(w)).toEqual([]);
-    expect((await photosOf(s.batch.id)).map((p) => [p.x2Model, p.x2Uri])).toEqual([[ID, null], [ID, null]]);
-    expect(await chunkRow(db, s.chunks[0]!.id)).toMatchObject({ stage: "render", taskName: ENLARGING_TASK });
-    expect(w.log.mock.calls.filter(([m, f]) => m === "enlarge dispatch failed" && f?.severity === "WARNING")).toHaveLength(2);
-    w.deps.enqueue = enqueue;
-    // Within the stale window nothing is sent; past it the queued photos are sent as the next round.
-    expect((await recoverBatchChunks(db, w.deps.enqueue, s.batch.id, { now: new Date(Date.now() + 60_000) })).enlarge).toBe(0);
-    const recovered = await recoverBatchChunks(db, w.deps.enqueue, s.batch.id, { now: new Date(Date.now() + ENLARGE_STALE_MS + 60_000) });
-    expect(recovered.enlarge).toBe(2);
-    const step = (await chunkRow(db, s.chunks[0]!.id)).step;
-    expect(enlargeTasks(w).map((t) => t.body.round)).toEqual([step, step]);
-    for (const task of enlargeTasks(w)) expect(await handleEnlargeTask(w.deps, task.body)).toMatchObject({ outcome: "done" });
-    expect((await chunkRow(db, s.chunks[0]!.id)).taskName).toBeNull();
-    expect(chunkTasks(w, s.chunks[0]!.id).filter((t) => t.body.stage === "render")).toHaveLength(1);
-  }, 60_000);
-});
-
-describe("spec 18 review #8: UPSCALE_MODEL changed after a photo was enlarged", () => {
-  it("a stored x2 of another upscaler is re-queued for the configured one and the chunk parks: never held, never rendered with the other model", async () => {
-    const { w } = enlargingWorld();
-    realRender(w);
-    const s = await matteStage(w, "h3-model-flip", ["trendyol"], 1);
-    const [photo] = await photosOf(s.batch.id);
-    expect(await handleEnlargeTask(w.deps, bodyOf(w, photo!.id))).toMatchObject({ outcome: "done" });
-    const old = (await photosOf(s.batch.id))[0]!;
-    expect(old.x2Model).toBe(ID);
-    // The operator switches UPSCALE_MODEL before the render runs.
-    const NEW = upscalerId("realesrgan-x2plus", "cpu");
-    w.deps.upscaler = storedUpscaler(NEW, 1.5);
-    const reads = vi.spyOn(w.deps.storage, "downloadBuffer");
-    const render = chunkTasks(w, s.chunks[0]!.id).filter((t) => t.body.stage === "render").at(-1)!;
-    expect(await handleChunkTask(w.deps, render.body)).toMatchObject({ httpStatus: 200 });
-    expect(w.deliveries().at(-1)).toMatchObject({ outcome: "enlarging" });
-    const chunk = await chunkRow(db, s.chunks[0]!.id);
+describe("the matte stage queues, the handler makes, the settle unparks", () => {
+  it("one wanted queued row per photo, its task (enlarge-<id>-0), the chunk parked with dispatched_at set", async () => {
+    const e = await parked("park", { layout: [[2]] });
+    expect(e.rows.map((r) => [r.status, r.wanted, r.route, r.factor, r.sends])).toEqual([["queued", true, "direct", 2, 0], ["queued", true, "direct", 2, 0]]);
+    expect(enlargeTasks(e.w).map((t) => t.taskId).sort()).toEqual(e.rows.map((r) => enlargeTaskId(r.id, 0)).sort());
+    const chunk = await chunkRow(db, e.s.chunks[0]!.id);
     expect(chunk).toMatchObject({ stage: "render", status: "queued", taskName: ENLARGING_TASK });
-    expect((await photosOf(s.batch.id))[0]).toMatchObject({ x2Model: NEW, x2Uri: null, x2Attempts: 0 });
-    expect(reads.mock.calls.map(([uri]) => uri)).not.toContain(old.x2Uri);
-    const outputs = await db.select().from(catalogOutputs).where(eq(catalogOutputs.batchId, s.batch.id));
-    expect(outputs.map((o) => o.status)).toEqual(["pending"]);
-    // The new round's task makes the image with the configured upscaler, under its own key.
-    const task = enlargeTasks(w).at(-1)!;
-    expect(task.body.round).toBe(chunk.step);
-    expect(await handleEnlargeTask(w.deps, task.body)).toMatchObject({ outcome: "done" });
-    const made = (await photosOf(s.batch.id))[0]!;
-    expect(made.x2Uri).toMatch(/\.realesrgan-x2plus-cpu\.x2\.jpg$/);
-    expect(made.x2Uri).not.toBe(old.x2Uri);
-    expect(w.metadata.get(made.x2Uri!)).toEqual({ sourceSha256: made.sha256, upscaler: NEW });
-    // The render now runs with the new image: upscaled, not held.
-    const next = chunkTasks(w, s.chunks[0]!.id).filter((t) => t.body.stage === "render").at(-1)!;
-    expect(await handleChunkTask(w.deps, next.body)).toMatchObject({ httpStatus: 200 });
-    const [out] = await db.select().from(catalogOutputs).where(eq(catalogOutputs.batchId, s.batch.id));
-    expect(out!.flags).toContain("upscaled");
-    expect(out!.flags).not.toContain("enlargement_failed");
-    expect(reads.mock.calls.map(([uri]) => uri)).toContain(made.x2Uri);
+    expect(chunk.dispatchedAt).not.toBeNull();
+    expect(e.w.deliveries().at(-1)).toMatchObject({ outcome: "enlarging" });
   }, 60_000);
 });
 
-describe("spec 18: replacement prefixes and auto-resolve priming", () => {
-  it("derivedPrefixFor: an operator replacement (raw under replacements-) gets its own prefix; a redelivered shot and a plain photo keep the batch's", () => {
-    const { w } = enlargingWorld();
-    const prefix = "catalog-test/test_brand/b1";
-    expect(derivedPrefixFor(w.deps.storage, prefix, { id: "r1", replacesId: "p1", rawUri: `gs://assets/${prefix}/replacements-u9/A/A_1.jpg` })).toBe(`${prefix}/replacements-r1`);
-    expect(derivedPrefixFor(w.deps.storage, prefix, { id: "r2", replacesId: "p1", rawUri: `gs://assets/${prefix}/raw/A/1.jpg` })).toBe(prefix);
-    expect(derivedPrefixFor(w.deps.storage, prefix, { id: "p1", replacesId: null, rawUri: `gs://assets/${prefix}/replacements-u9/A/A_1.jpg` })).toBe(prefix);
-  });
-
-  it("a replacement photo's x2 image is stored under its own prefix, never over the replaced shot's", async () => {
-    const { w, service } = enlargingWorld();
-    const s = await matteStage(w, "h3-replacement", ["trendyol"], 1);
-    const [photo] = await photosOf(s.batch.id);
-    const prefix = batchPrefix("test_brand", s.batch.id, true), rawUri = `gs://assets/${prefix}/replacements-u1/${photo!.n}.jpg`;
-    w.objects.set(rawUri, w.objects.get(photo!.rawUri)!);
-    // The photo becomes an operator replacement of an older shot of the product (its raw copy under replacements-).
-    const [older] = await db.insert(catalogSourceImages).values({ batchId: s.batch.id, productId: photo!.productId, n: 9, sha256: "older", originalName: "old.jpg", rawUri: photo!.rawUri, mime: "image/jpeg" }).returning();
-    await db.update(catalogSourceImages).set({ replacesId: older!.id, rawUri }).where(eq(catalogSourceImages.id, photo!.id));
-    expect(await handleEnlargeTask(w.deps, bodyOf(w, photo!.id))).toMatchObject({ outcome: "done" });
-    const made = (await photosOf(s.batch.id)).find((p) => p.id === photo!.id)!;
-    expect(made.x2Uri).toBe(`gs://assets/${enlargedPath(`${prefix}/replacements-${photo!.id}`, await pathKeyOf(photo!.productId), photo!.n, ID)}`);
-    expect(service.call).toHaveBeenCalledTimes(1);
+describe("handler: claims, duplicates and crashes", () => {
+  it("T15 (F15): two concurrent deliveries make one call; the loser answers in_flight; attempts stay 0; the gate settles once", async () => {
+    const e = await parked("t15");
+    const row = e.rows[0]!;
+    let release!: () => void;
+    e.service.state.hold = new Promise<void>((r) => { release = r; });
+    const first = handleEnlargeTask(e.w.deps, enlargeBody(row));
+    while (!e.service.call.mock.calls.length) await new Promise((r) => setTimeout(r, 5));
+    const second = await handleEnlargeTask(e.w.deps, enlargeBody(row));
+    expect(second).toMatchObject({ httpStatus: 503, outcome: "in_flight" });
+    release();
+    expect(await first).toMatchObject({ httpStatus: 200, outcome: "done" });
+    expect(e.service.paid()).toBe(1);
+    expect((await upscaleCosts(db, e.s.batch.id)).length).toBe(1);
+    expect(await rowNow(row.id)).toMatchObject({ status: "done", attempts: 0, timeouts: 0 });
+    expect(e.w.tasks.filter((t) => t.route === "/tasks/catalog/chunk" && t.body.stage === "render")).toHaveLength(1);
   }, 60_000);
 
-  it("auto-resolve's re-render primes the stored x2 image: the photo is enlarged again with no service call", async () => {
-    const { w, service } = enlargingWorld();
-    const s = await matteStage(w, "h3-auto-resolve", ["trendyol"], 1);
-    const [photo] = await photosOf(s.batch.id);
-    expect(await handleEnlargeTask(w.deps, bodyOf(w, photo!.id))).toMatchObject({ outcome: "done" });
-    const stored = (await photosOf(s.batch.id))[0]!;
-    const upscale = vi.spyOn(w.deps.upscaler!, "upscale");
-    const p = await preparePrimed(w.deps, stored, { batchId: s.batch.id, productId: stored.productId });
-    const x2 = sourceX2(w.deps.upscaler!, p.rgb, p.width);
-    expect(x2.reused).toBe(true);
-    expect(await x2.result).toMatchObject({ width: p.width * 2, height: p.height * 2, ms: 0 });
-    expect(upscale).not.toHaveBeenCalled();
-    expect(service.call).toHaveBeenCalledTimes(1);
-    // Without the stored image nothing is primed: the render would hold, never call.
-    const bare = await preparePrimed(w.deps, { ...stored, x2Uri: null }, { batchId: s.batch.id, productId: stored.productId });
-    expect(await sourceX2(w.deps.upscaler!, bare.rgb, bare.width).result).toBeNull();
-    expect(service.call).toHaveBeenCalledTimes(1);
+  it("T16 (F16): a task delivered after the row settled answers settled, no write, no call, no cost row", async () => {
+    const e = await parked("t16");
+    const row = e.rows[0]!;
+    expect(await handleEnlargeTask(e.w.deps, enlargeBody(row))).toMatchObject({ outcome: "done" });
+    const before = await rowNow(row.id);
+    expect(await handleEnlargeTask(e.w.deps, enlargeBody(row))).toMatchObject({ httpStatus: 200, outcome: "settled" });
+    expect(await rowNow(row.id)).toEqual(before);
+    expect(e.service.paid()).toBe(1);
+    expect((await upscaleCosts(db, e.s.batch.id)).length).toBe(1);
+  }, 60_000);
+
+  it("T19 (F19): a crash after the claim: in_flight until the claim lapses (30 min), then the call; attempts 0 throughout", async () => {
+    const e = await parked("t19");
+    const row = e.rows[0]!;
+    e.service.state.hold = new Promise<void>(() => {});
+    void handleEnlargeTask(e.w.deps, enlargeBody(row));
+    while (!e.service.call.mock.calls.length) await new Promise((r) => setTimeout(r, 5));
+    const outcomes: string[] = [];
+    for (let m = 5; m <= 35; m += 5) { e.clock.tick(5); outcomes.push((await handleEnlargeTask(e.w.deps, enlargeBody(row))).outcome); expect((await rowNow(row.id)).attempts).toBe(0); }
+    expect(outcomes.slice(0, 5).every((o) => o === "in_flight")).toBe(true);
+    expect(outcomes.at(-1)).toBe("done");
+    expect(e.service.call).toHaveBeenCalledTimes(2);
+  }, 60_000);
+
+  it("T20 (F20): a real crash after the upload (the worker dies, nothing settles): after the claim lapses the next delivery finds the object, no call, done, and the lost call's cost row is written", async () => {
+    const e = await parked("t20");
+    const row = e.rows[0]!;
+    const upload = e.w.deps.storage.uploadBuffer;
+    let crashed = false;
+    // The process dies right after the object is written: the delivery never returns and nothing after it runs.
+    e.w.deps.storage.uploadBuffer = (async (...args: Parameters<typeof upload>) => { const uri = await upload(...args); if (!crashed && args[0].includes("/derived/") && args[0].endsWith(".jpg")) { crashed = true; await new Promise(() => {}); } return uri; }) as typeof upload;
+    void handleEnlargeTask(e.w.deps, enlargeBody(row));
+    while (!crashed) await new Promise((r) => setTimeout(r, 5));
+    expect(await rowNow(row.id)).toMatchObject({ status: "queued", timeouts: 1 });
+    expect((await rowNow(row.id)).callStartedAt).not.toBeNull();
+    e.clock.tick(31);
+    expect(await handleEnlargeTask(e.w.deps, enlargeBody(row))).toMatchObject({ httpStatus: 200, outcome: "done" });
+    expect(e.service.paid()).toBe(1);
+    const costs = await upscaleCosts(db, e.s.batch.id);
+    expect(costs.map((c) => c.outcome)).toEqual(["ok"]);
+    expect((await rowNow(row.id)).callStartedAt).toBeNull();
   }, 60_000);
 });
 
-describe("spec 18 section 7: a batch through the queue with one forced terminal failure", () => {
-  it("every enlargement settles before its render, each parked chunk's render is queued once, the failed product is held with enlargement_failed and nothing is silent", async () => {
-    const { w } = enlargingWorld();
-    const s = await seedBatch(db, w, "h3-section-7", [[2, 1], [2]], { channels: ["trendyol"] });
-    const failing = s.chunks[0]!.productIds[1]!;
-    // The service fails every call for one product (busy, so each photo goes through all its attempts).
-    const ok = w.deps.enlarge!;
-    w.deps.enlarge = vi.fn<EnlargeCall>(async (jpeg, trace) => { if (trace.productId === failing) throw new EnlargeBusyError(503, 1); return ok(jpeg, trace); });
-    // The real render (renderSource decides: the photo's primed x2 image, or the hold), with the stored upscaler. Its
-    // upscale() is reached only for a photo with nothing primed, and never calls a service (it throws).
-    realRender(w);
-    const upscale = vi.spyOn(w.deps.upscaler!, "upscale");
-    const renderedEarly: string[] = [];
-    const deliverChunk = async (body: Record<string, unknown>) => {
-      if (body.stage === "render") {
-        const chunk = await chunkRow(db, body.chunkId as string);
-        const waiting = (await db.select().from(catalogSourceImages).where(eq(catalogSourceImages.batchId, s.batch.id))).filter((x) => chunk.productIds.includes(x.productId) && x.x2Model && !x.x2Uri && x.x2Attempts < ENLARGE_TASK_MAX_ATTEMPTS);
-        if (waiting.length) renderedEarly.push(chunk.id);
-      }
-      return handleChunkTask(w.deps, body);
-    };
-    // Start: the window takes both chunks; then drain the queue in order, a 503 goes to the back with its retry count.
-    const { dispatchChunks } = await import("@catalog/core/catalog/pipeline/dispatch");
-    await dispatchChunks(db, w.deps.enqueue, s.batch.id, { window: 2 });
-    for (let i = 0, guard = 0; i < w.tasks.length && guard < 400; i++, guard++) {
-      const task = w.tasks[i]!;
-      if (task.route === "/tasks/catalog/chunk") await deliverChunk(task.body);
-      else if (task.route === "/tasks/catalog/enlarge") {
-        const r = await handleEnlargeTask(w.deps, task.body, { retryCount: task.retryCount });
-        if (r.httpStatus === 503) w.tasks.push({ ...task, retryCount: task.retryCount + 1 });
-      }
-    }
-    expect(renderedEarly).toEqual([]);
-    for (const chunk of s.chunks) {
-      expect((await chunkRow(db, chunk.id)).status).toBe("done");
-      expect(w.tasks.filter((t) => t.route === "/tasks/catalog/chunk" && t.body.chunkId === chunk.id && t.body.stage === "render")).toHaveLength(1);
-    }
-    const outputs = await db.select().from(catalogOutputs).where(eq(catalogOutputs.batchId, s.batch.id));
-    const held = outputs.filter((o) => o.productId === failing), made = outputs.filter((o) => o.productId !== failing);
-    expect(held.map((o) => [o.status, o.flags.includes("enlargement_failed"), (o.reason ?? "").includes("could not be enlarged")])).toEqual([["needs_attention", true, true]]);
-    expect(made.length).toBeGreaterThan(0);
-    expect(made.map((o) => [o.flags.includes("upscaled"), o.flags.includes("enlargement_failed")])).toEqual(made.map(() => [true, false]));
-    // The failed product is held at triage (needs_attention), and the render asked the stored upscaler only for the
-    // one photo with nothing primed: no service call from the render.
-    expect(upscale).toHaveBeenCalledTimes(1);
-    expect(w.log.mock.calls.filter(([m, f]) => m === "enlargement failed" && f?.severity === "ERROR")).toHaveLength(1);
-    const c = classifyOutputs(outputs.map((o) => ({ ...o, status: o.status === "staged" ? "verified" : o.status })), new Set([failing]));
-    expect(c.silent).toEqual([]);
+describe("handler: outages delay, failures count", () => {
+  it("T18 (F18): 40 busy answers then success: attempts 0, delays 40, done; never terminal", async () => {
+    const e = await parked("t18");
+    const row = e.rows[0]!;
+    e.service.state.mode = "busy"; e.service.state.probe = "ok";
+    for (let i = 0; i < 40; i++) { expect(await handleEnlargeTask(e.w.deps, enlargeBody(row))).toMatchObject({ httpStatus: 503, outcome: "busy" }); e.clock.tick(1); }
+    expect(await rowNow(row.id)).toMatchObject({ status: "queued", attempts: 0, timeouts: 0, delays: 40 });
+    e.service.state.mode = "ok"; e.service.state.probe = null;
+    expect(await handleEnlargeTask(e.w.deps, enlargeBody(row))).toMatchObject({ outcome: "done" });
+  }, 60_000);
+
+  it("T24 (F24, F49): a service that is healthy but never answers: one timeout per delivery, terminal at 24 with the sentence; the batch is never swept", async () => {
+    const e = await parked("t24");
+    const row = e.rows[0]!;
+    e.service.state.mode = "healthyButHangs";
+    const outcomes: string[] = [];
+    for (let i = 0; i < ENLARGE_MAX_TIMEOUTS; i++) { outcomes.push((await handleEnlargeTask(e.w.deps, enlargeBody(row))).outcome); e.clock.tick(10); await sweep(db, e.w); expect((await batchOf(db, e.s.batch.id)).status).not.toBe("failed"); }
+    expect(outcomes.slice(0, -1).every((o) => o === "retry")).toBe(true);
+    expect(outcomes.at(-1)).toBe("failed");
+    const settled = await rowNow(row.id);
+    expect(settled).toMatchObject({ status: "failed", attempts: 0, timeouts: ENLARGE_MAX_TIMEOUTS });
+    expect(settled.error).toMatch(/^The enlargement did not finish 24 times\./);
+    expect(e.service.paid()).toBe(ENLARGE_MAX_TIMEOUTS);
+    expect(errorLines(e, "enlargement failed")).toHaveLength(1);
+    // The chunk was unparked by the terminal settle; the render holds the photo with the flag.
+    expect(e.w.tasks.some((t) => t.route === "/tasks/catalog/chunk" && t.body.stage === "render")).toBe(true);
+    expect((await handleEnlargeTask(e.w.deps, enlargeBody(row))).outcome).toBe("settled");
+    expect(await deliverChunk(db, e.w, e.s.chunks[0]!.id)).toMatchObject({ httpStatus: 200 });
+    expect((await outputsOf(db, e.s.batch.id)).map((o) => [o.status, o.flags.includes("enlargement_failed")])).toEqual([["needs_attention", true]]);
   }, 120_000);
+
+  it("T25 (F25, F54): down 6 h, then paused 24 h, then up: attempts 0, delays only, no hold, never swept, done", async () => {
+    const e = await parked("t25");
+    const row = e.rows[0]!;
+    e.service.state.mode = "down";
+    for (let m = 0; m < 6 * 60; m += 10) { expect((await handleEnlargeTask(e.w.deps, enlargeBody(row))).httpStatus).toBe(503); e.clock.tick(10); await sweep(db, e.w); }
+    e.service.state.mode = "paused";
+    for (let m = 0; m < 24 * 60; m += 30) { expect((await handleEnlargeTask(e.w.deps, enlargeBody(row))).httpStatus).toBe(503); e.clock.tick(30); await sweep(db, e.w); }
+    const waiting = await rowNow(row.id);
+    expect(waiting).toMatchObject({ status: "queued", attempts: 0, timeouts: 0 });
+    expect(waiting.delays).toBeGreaterThan(0);
+    expect((await batchOf(db, e.s.batch.id)).status).not.toBe("failed");
+    e.service.state.mode = "ok";
+    expect(await handleEnlargeTask(e.w.deps, enlargeBody(row))).toMatchObject({ outcome: "done" });
+    expect(e.service.paid()).toBe(1);
+  }, 180_000);
+
+  it("T26 (F26): 429 / no instance for 3 h: delays only, done after", async () => {
+    const e = await parked("t26");
+    const row = e.rows[0]!;
+    e.service.state.mode = "busy";
+    for (let m = 0; m < 180; m += 10) { expect((await handleEnlargeTask(e.w.deps, enlargeBody(row))).httpStatus).toBe(503); e.clock.tick(10); await sweep(db, e.w); }
+    expect(await rowNow(row.id)).toMatchObject({ status: "queued", attempts: 0, timeouts: 0 });
+    expect((await batchOf(db, e.s.batch.id)).status).not.toBe("failed");
+    e.service.state.mode = "ok";
+    expect(await handleEnlargeTask(e.w.deps, enlargeBody(row))).toMatchObject({ outcome: "done" });
+  }, 120_000);
+
+  it("T29 (F29): a reply of the wrong size counts an attempt; terminal at 8 with an ERROR line", async () => {
+    const e = await parked("t29");
+    const row = e.rows[0]!;
+    e.service.state.mode = "wrongSize";
+    const results = await enlargeUntilSettled(e.w, row);
+    expect(results).toHaveLength(ENLARGE_TASK_MAX_ATTEMPTS);
+    expect(results.at(-1)).toMatchObject({ httpStatus: 200, outcome: "failed" });
+    expect(await rowNow(row.id)).toMatchObject({ status: "failed", attempts: ENLARGE_TASK_MAX_ATTEMPTS, errorKind: "invalid_reply" });
+    expect(errorLines(e, "enlargement failed")).toHaveLength(1);
+    expect(e.w.objects.has((await rowNow(row.id)).uri ?? "none")).toBe(false);
+  }, 60_000);
+
+  it("T61 (F56): a poison input with the service up (re-probe 200, 429, timeout): one timeout per delivery, terminal at 24, exactly 24 paid calls; the other photos done", async () => {
+    for (const reprobe of ["ok", "saturated", "timeout"] as const) {
+      const e = await parked(`t61-${reprobe}`, { layout: [[1], [1]] });
+      const [poison, good] = e.rows;
+      e.service.state.poison.add(poison!.productId);
+      if (reprobe === "saturated") e.service.state.mode = "saturated";
+      if (reprobe === "timeout") e.service.state.probe = "timeout";
+      for (let i = 0; i < 40 && (await rowNow(poison!.id)).status === "queued"; i++) await handleEnlargeTask(e.w.deps, enlargeBody(poison!));
+      const settled = await rowNow(poison!.id);
+      expect(settled).toMatchObject({ status: "failed", attempts: 0, timeouts: ENLARGE_MAX_TIMEOUTS });
+      expect(e.service.paid(poison!.productId)).toBe(ENLARGE_MAX_TIMEOUTS);
+      e.service.state.probe = null; e.service.state.mode = "ok";
+      expect((await enlargeUntilSettled(e.w, good!)).at(-1)).toMatchObject({ outcome: "done" });
+    }
+  }, 180_000);
+
+  it("T61 (F56 d): while the re-probe proves the service absent, a poison input only delays; once it answers, the next failure counts", async () => {
+    const e = await parked("t61-absent");
+    const row = e.rows[0]!;
+    e.service.state.poison.add(row.productId);
+    e.service.state.probe = "absent";
+    for (let i = 0; i < 10; i++) expect((await handleEnlargeTask(e.w.deps, enlargeBody(row))).httpStatus).toBe(503);
+    const waiting = await rowNow(row.id);
+    expect(waiting).toMatchObject({ status: "queued", timeouts: 0, attempts: 0 });
+    expect(waiting.delays).toBe(10);
+    e.service.state.probe = null;
+    expect(await handleEnlargeTask(e.w.deps, enlargeBody(row))).toMatchObject({ httpStatus: 503, outcome: "retry" });
+    expect((await rowNow(row.id)).timeouts).toBe(1);
+  }, 60_000);
+
+  it("T62 (F57): a cold start fits the probe timeout; three probe timeouts make the call without one; a forced call's failure counts", async () => {
+    // The probe waits the measured cold start plus 60 s.
+    expect(upscaleProbeTimeoutMs({ UPSCALE_COLD_START_S: "20" })).toBe(80_000);
+    expect(upscaleProbeTimeoutMs({})).toBe(180_000);
+    const fetch = vi.fn<typeof globalThis.fetch>(async (_url, init) => { await new Promise((r) => setTimeout(r, 30)); expect(init?.signal?.aborted).toBe(false); return Response.json({ upscale: { models: [{ id: "swinir-x2", available: true }] } }); });
+    expect(await workerEnlargeProbe({ UPSCALE_URL: "https://upscale.test", UPSCALE_COLD_START_S: "20" }, { fetch, idToken: async () => "" })("swinir-x2")).toBe("ok");
+    // Cold start: one delivery, the probe passes, done.
+    const cold = await parked("t62-cold");
+    cold.service.state.mode = "coldStart";
+    expect(await handleEnlargeTask(cold.w.deps, enlargeBody(cold.rows[0]!))).toMatchObject({ outcome: "done" });
+    // Probe always times out, calls succeed.
+    const slow = await parked("t62-probe");
+    const row = slow.rows[0]!;
+    slow.service.state.mode = "probeTimesOut";
+    for (const n of [1, 2, 3]) { expect(await handleEnlargeTask(slow.w.deps, enlargeBody(row))).toMatchObject({ httpStatus: 503, outcome: "probe_timeout" }); expect((await rowNow(row.id)).probeTimeouts).toBe(n); }
+    expect(slow.service.paid()).toBe(0);
+    expect(await handleEnlargeTask(slow.w.deps, enlargeBody(row))).toMatchObject({ outcome: "done" });
+    expect(await rowNow(row.id)).toMatchObject({ status: "done", probeTimeouts: 0 });
+    // Probe always times out, calls fail: each forced call's failure counts (a probe timeout proves nothing).
+    const dead = await parked("t62-dead");
+    const bad = dead.rows[0]!;
+    dead.service.state.probe = "timeout"; dead.service.state.mode = "healthyButHangs";
+    for (let i = 0; i < 40 && (await rowNow(bad.id)).status === "queued"; i++) await handleEnlargeTask(dead.w.deps, enlargeBody(bad));
+    expect(await rowNow(bad.id)).toMatchObject({ status: "failed", timeouts: ENLARGE_MAX_TIMEOUTS });
+    expect(dead.service.paid()).toBe(ENLARGE_MAX_TIMEOUTS);
+  }, 120_000);
+
+  it("T63 (F58): a reply 1 px short is refused before the upload; a service that always answers short is terminal at 8 and the render never primes it", async () => {
+    const e = await parked("t63-short");
+    const row = e.rows[0]!;
+    e.service.state.shortBy = 1;
+    const results = await enlargeUntilSettled(e.w, row);
+    expect(results.at(-1)).toMatchObject({ outcome: "failed" });
+    expect(await rowNow(row.id)).toMatchObject({ status: "failed", attempts: ENLARGE_TASK_MAX_ATTEMPTS, errorKind: "invalid_reply", uri: null });
+    const { handleChunkTask, currentChunkTask } = await import("./chunk");
+    expect(await handleChunkTask(e.w.deps, await currentChunkTask(db, e.s.chunks[0]!.id))).toMatchObject({ httpStatus: 200 });
+    const [out] = await outputsOf(db, e.s.batch.id);
+    expect(out!.flags).toContain("enlargement_failed");
+    expect(out!.flags).not.toContain("upscaled");
+  }, 60_000);
+
+  it("T63 (F58): a stored object 1 px short or undecodable is refused by the render and by the handler, counted, made again, done", async () => {
+    const e = await parked("t63-stored", { layout: [[2]] });
+    for (const row of e.rows) expect(await handleEnlargeTask(e.w.deps, enlargeBody(row))).toMatchObject({ outcome: "done" });
+    const [a, b] = await rowsOf(db, e.s.batch.id);
+    await corruptObject(e.w, a!.uri!);
+    e.w.objects.set(b!.uri!, Buffer.from("not a jpeg"));
+    const { handleChunkTask, currentChunkTask } = await import("./chunk");
+    // The render refuses both (primeReadiness): back to queued, sent again, the chunk parks; nothing counted yet.
+    expect(await handleChunkTask(e.w.deps, await currentChunkTask(db, e.s.chunks[0]!.id))).toMatchObject({ httpStatus: 200 });
+    expect((await rowsOf(db, e.s.batch.id)).map((r) => [r.status, r.attempts, r.errorKind])).toEqual([["queued", 0, "invalid_object"], ["queued", 0, "invalid_object"]]);
+    expect(await chunkRow(db, e.s.chunks[0]!.id)).toMatchObject({ taskName: ENLARGING_TASK });
+    // The handler finds the refused object at its key, counts the one refusal (final check P2: once, not twice) and makes it again.
+    for (const row of [a!, b!]) expect(await handleEnlargeTask(e.w.deps, enlargeBody(row))).toMatchObject({ outcome: "done" });
+    expect((await rowsOf(db, e.s.batch.id)).map((r) => [r.status, r.attempts])).toEqual([["done", 1], ["done", 1]]);
+    expect(e.service.paid()).toBe(4);
+    expect(await handleChunkTask(e.w.deps, await currentChunkTask(db, e.s.chunks[0]!.id))).toMatchObject({ httpStatus: 200 });
+    expect((await outputsOf(db, e.s.batch.id)).every((o) => o.flags.includes("upscaled"))).toBe(true);
+  }, 120_000);
+
+  it("T66 (F61): the convert step down for 2 h only delays; a deleted raw file counts bad_source and is terminal at 8", async () => {
+    const e = await parked("t66", { layout: [[1], [1]] });
+    const [up, gone] = e.rows;
+    const prepare = e.w.deps.prepare;
+    let outage = true;
+    e.w.deps.prepare = (async (buf, name, convert) => { await convert(buf); return prepare(buf, name, convert); }) as typeof prepare;
+    e.w.deps.matting.convert = (async (b: Buffer) => { if (outage) throw new Error("convert 503"); return b; }) as typeof e.w.deps.matting.convert;
+    for (let m = 0; m < 120; m += 10) { expect(await handleEnlargeTask(e.w.deps, enlargeBody(up!))).toMatchObject({ httpStatus: 503, outcome: "unavailable" }); e.clock.tick(10); }
+    expect(await rowNow(up!.id)).toMatchObject({ status: "queued", attempts: 0 });
+    outage = false;
+    expect(await handleEnlargeTask(e.w.deps, enlargeBody(up!))).toMatchObject({ outcome: "done" });
+    const photo = (await photosOf(db, e.s.batch.id)).find((p) => p.id === gone!.sourceImageId)!;
+    e.w.objects.delete(photo.rawUri);
+    const results = await enlargeUntilSettled(e.w, gone!);
+    expect(results.at(-1)).toMatchObject({ outcome: "failed" });
+    expect(await rowNow(gone!.id)).toMatchObject({ status: "failed", attempts: ENLARGE_TASK_MAX_ATTEMPTS, errorKind: "bad_source" });
+  }, 60_000);
+});
+
+describe("handler: routes", () => {
+  it("T6 (F6): the per-call cap lowered below the photo between the send and the delivery: the tile route, done, no hold", async () => {
+    const e = await parked("t6");
+    const row = e.rows[0]!;
+    expect(row.route).toBe("direct");
+    await withEnv({ UPSCALE_MAX_PIXELS: "80000" }, async () => {
+      e.w.deps.enlargeTileBudgetMs = 10 ** 9;
+      expect(await handleEnlargeTask(e.w.deps, enlargeBody(row))).toMatchObject({ httpStatus: 200, outcome: "done" });
+    });
+    const done = await rowNow(row.id);
+    const tiles = tilesFor(done.outW / 2, done.outH / 2, 80_000).length;
+    expect(tiles).toBeGreaterThan(1);
+    expect(done.tilesDone).toBe(tiles);
+    expect(e.service.paid()).toBe(tiles);
+    const meta = await sharp(e.w.objects.get(done.uri!)!).metadata();
+    expect([meta.width, meta.height]).toEqual([done.outW, done.outH]);
+    const { handleChunkTask, currentChunkTask } = await import("./chunk");
+    expect(await handleChunkTask(e.w.deps, await currentChunkTask(db, e.s.chunks[0]!.id))).toMatchObject({ httpStatus: 200 });
+    expect((await outputsOf(db, e.s.batch.id))[0]!.flags).toContain("upscaled");
+  }, 60_000);
+
+  it("T67 (F62): with no tile budget each delivery makes one tile and answers more_tiles; done after one delivery per tile", async () => {
+    await withEnv({ UPSCALE_MAX_PIXELS: "80000" }, async () => {
+      const e = await parked("t67");
+      const row = e.rows[0]!;
+      expect(row.route).toBe("tiles");
+      e.w.deps.enlargeTileBudgetMs = 0;
+      const outcomes = (await enlargeUntilSettled(e.w, row)).map((r) => r.outcome);
+      const tiles = tilesFor(row.outW / 2, row.outH / 2, 80_000).length;
+      expect(outcomes).toEqual([...Array(tiles - 1).fill("more_tiles"), "done"]);
+      expect(e.service.paid()).toBe(tiles);
+      expect(await rowNow(row.id)).toMatchObject({ status: "done", attempts: 0, tilesDone: tiles });
+    });
+  }, 60_000);
+});
+
+describe("handler: identity", () => {
+  it("T64 (F59): a prepare that alternates two colour handlings: three releases summed over two rows, then failed with the sentence; Try again resets; a stable prepare completes", async () => {
+    const e = enlargeWorld(db);
+    const prepare = e.w.deps.prepare;
+    let calls = 0, stable = false;
+    e.w.deps.prepare = (async (...args: Parameters<typeof prepare>) => { const p = await prepare(...args); if (!stable && calls++ % 2 === 1) p.rgb = Buffer.alloc(p.rgb.length, 140); return p; }) as typeof prepare;
+    const s = await seedEnlargeBatch(db, e.w, "t64", [[1]]);
+    const { handleChunkTask, currentChunkTask } = await import("./chunk");
+    const chunkId = s.chunks[0]!.id;
+    expect(await handleChunkTask(e.w.deps, await currentChunkTask(db, chunkId))).toMatchObject({ httpStatus: 200 });
+    let failed = false;
+    for (let round = 0; round < 12 && !failed; round++) {
+      for (const row of (await rowsOf(db, s.batch.id)).filter((r) => r.wanted && r.status === "queued")) await handleEnlargeTask(e.w.deps, enlargeBody(row));
+      const rows = await rowsOf(db, s.batch.id);
+      expect(rows.length).toBeLessThanOrEqual(2);
+      expect(rows.reduce((n, r) => n + r.identityReleases, 0)).toBeLessThanOrEqual(3);
+      failed = rows.some((r) => r.status === "failed");
+      if (!failed) await handleChunkTask(e.w.deps, await currentChunkTask(db, chunkId));
+    }
+    const rows = await rowsOf(db, s.batch.id);
+    expect(rows.reduce((n, r) => n + r.identityReleases, 0)).toBe(3);
+    expect(rows.find((r) => r.status === "failed")).toMatchObject({ error: IDENTITY_UNSTABLE_SENTENCE, errorKind: "identity_unstable" });
+    expect(e.service.paid()).toBe(0);
+    // The render holds the photo.
+    await handleChunkTask(e.w.deps, await currentChunkTask(db, chunkId));
+    const [held] = await outputsOf(db, s.batch.id);
+    expect(held!.flags).toContain("enlargement_failed");
+    // Try again resets the sum; a stable prepare then completes.
+    stable = true;
+    const retry = await retryEnlargement(db, e.w.deps.enqueue, { outputId: held!.id, actor: "op@opptra.com", now: e.clock.now() });
+    expect((await rowsOf(db, s.batch.id)).reduce((n, r) => n + r.identityReleases, 0)).toBe(0);
+    for (const row of (await rowsOf(db, s.batch.id)).filter((r) => r.wanted && r.status === "queued")) expect(await handleEnlargeTask(e.w.deps, enlargeBody(row))).toMatchObject({ outcome: "done" });
+    expect(await handleChunkTask(e.w.deps, await currentChunkTask(db, retry.chunkId))).toMatchObject({ httpStatus: 200 });
+    expect((await outputsOf(db, s.batch.id))[0]!.flags).toContain("upscaled");
+  }, 120_000);
+});
+
+describe("sweep and re-send", () => {
+  it("T17 (F17): parked chunks are not re-sent while any enlarge delivery of the batch continues; after a quiet hour they are; the old task then answers settled", async () => {
+    const e = await parked("t17", { layout: [[1], [1], [1]] });
+    const [busy, b, c] = e.rows;
+    expect((await chunksOf(db, e.s.batch.id)).every((ch) => ch.taskName === ENLARGING_TASK)).toBe(true);
+    e.service.state.mode = "busy";
+    for (let m = 0; m < 70; m += 10) { await handleEnlargeTask(e.w.deps, enlargeBody(busy!)); e.clock.tick(10); await sweep(db, e.w); }
+    expect((await rowsOf(db, e.s.batch.id)).map((r) => r.sends)).toEqual([0, 0, 0]);
+    e.clock.tick(61);
+    await sweep(db, e.w);
+    expect((await rowsOf(db, e.s.batch.id)).map((r) => r.sends)).toEqual([1, 1, 1]);
+    expect(enlargeTasks(e.w).map((t) => t.taskId)).toEqual(expect.arrayContaining([b, c].map((r) => enlargeTaskId(r!.id, 1))));
+    e.service.state.mode = "ok";
+    expect(await handleEnlargeTask(e.w.deps, enlargeBody(b!))).toMatchObject({ outcome: "done" });
+    expect(await handleEnlargeTask(e.w.deps, enlargeBody(b!))).toMatchObject({ outcome: "settled" });
+    expect((await batchOf(db, e.s.batch.id)).status).not.toBe("failed");
+  }, 120_000);
+
+  it("T27 (F27): tasks dropped before the handler for 25 re-send rounds: sends 25, ERROR from the 21st, the row still queued, then a delivery completes it", async () => {
+    const e = await parked("t27");
+    const row = e.rows[0]!;
+    const log = vi.fn();
+    for (let round = 1; round <= 25; round++) {
+      e.clock.tick(round > ENLARGE_SEND_WARN ? 6 * 60 + 1 : 61);
+      await resendStaleEnlargements(db, e.w.deps.enqueue, e.s.batch.id, { now: e.clock.now(), log });
+      expect((await rowNow(row.id)).sends).toBe(round);
+    }
+    const errors = log.mock.calls.filter(([m, f]) => m === "enlargement task cannot be delivered" && f?.severity === "ERROR");
+    expect(errors.map(([, f]) => f.sends)).toEqual([21, 22, 23, 24, 25]);
+    expect(await rowNow(row.id)).toMatchObject({ status: "queued", wanted: true });
+    expect((await batchOf(db, e.s.batch.id)).status).not.toBe("failed");
+    expect(await handleEnlargeTask(e.w.deps, enlargeBody(row))).toMatchObject({ outcome: "done" });
+  }, 60_000);
+});
+
+/**
+ * Final check 2026-10-30 (.runs/2026-10-30-18-final-check-*.md): every paid call is counted before it is made, so no
+ * path that skips the settle (a request killed at its deadline, a slow re-probe, an upload error, a crashed instance's
+ * bodiless 5xx) repeats it uncounted; only positive proof that no instance handled it gives the count back.
+ */
+describe("final check: a paid call is counted before it is made", () => {
+  it("P0-1: a poison input that kills its instance (Cloud Run's bodiless 503 and 500, through the real client) is terminal at 24 with exactly 24 paid calls; it never loops as busy", async () => {
+    for (const mode of ["crash503", "crash500"] as const) {
+      const e = await parked(`fc-${mode}`, { layout: [[1], [1]] });
+      const [poison, good] = e.rows;
+      e.service.state.mode = mode; e.service.state.poison.add(poison!.productId);
+      for (let i = 0; i < 60 && (await rowNow(poison!.id)).status === "queued"; i++) { await handleEnlargeTask(e.w.deps, enlargeBody(poison!)); e.clock.tick(15); }
+      expect(await rowNow(poison!.id)).toMatchObject({ status: "failed", attempts: 0, timeouts: ENLARGE_MAX_TIMEOUTS });
+      expect(e.service.paid(poison!.productId)).toBe(ENLARGE_MAX_TIMEOUTS);
+      expect((await upscaleCosts(db, e.s.batch.id)).length).toBe(ENLARGE_MAX_TIMEOUTS);
+      expect((await enlargeUntilSettled(e.w, good!)).at(-1)).toMatchObject({ outcome: "done" });
+    }
+  }, 240_000);
+
+  it("P1-3: Cloud Run's 'no available instance' 500 (through the real client) is busy: never counted, also on a forced call, done after", async () => {
+    const e = await parked("fc-no-instance");
+    const row = e.rows[0]!;
+    e.service.state.mode = "noInstance"; e.service.state.probe = "ok";
+    for (let i = 0; i < 40; i++) { expect(await handleEnlargeTask(e.w.deps, enlargeBody(row))).toMatchObject({ httpStatus: 503, outcome: "busy" }); e.clock.tick(15); }
+    // Forced (three probe timeouts in a row): the call is made without a probe and still meets no instance.
+    e.service.state.probe = "timeout";
+    for (let i = 0; i < 3; i++) expect(await handleEnlargeTask(e.w.deps, enlargeBody(row))).toMatchObject({ outcome: "probe_timeout" });
+    for (let i = 0; i < 30; i++) expect(await handleEnlargeTask(e.w.deps, enlargeBody(row))).toMatchObject({ httpStatus: 503, outcome: "busy" });
+    expect(await rowNow(row.id)).toMatchObject({ status: "queued", attempts: 0, timeouts: 0 });
+    e.service.state.mode = "ok"; e.service.state.probe = null;
+    expect(await handleEnlargeTask(e.w.deps, enlargeBody(row))).toMatchObject({ outcome: "done" });
+  }, 120_000);
+
+  it("P0 (deadline): a delivery killed at its 1800 s deadline in the middle of the call has already counted it; repeated kills end at 24 with exactly 24 paid calls and a cost row each", async () => {
+    const e = await parked("fc-kill");
+    const row = e.rows[0]!;
+    // Every call runs past the request's end (the worker's request timeout kills it mid-call).
+    e.service.state.callMs = 31 * 60_000;
+    expect(await deliverWithDeadline(e, enlargeBody(row))).toMatchObject({ httpStatus: 504, outcome: "killed" });
+    const first = await rowNow(row.id);
+    expect(first).toMatchObject({ status: "queued", timeouts: 1 });
+    expect(first.callStartedAt).not.toBeNull();
+    let deliveries = 1;
+    while ((await rowNow(row.id)).status === "queued" && deliveries < 60) {
+      e.clock.tick(1); // Cloud Tasks retries after its back-off; the claim (30 min) has lapsed with the request.
+      const result = await deliverWithDeadline(e, enlargeBody(row));
+      deliveries++;
+      if (result.outcome !== "killed") { expect(result).toMatchObject({ httpStatus: 200, outcome: "failed" }); break; }
+    }
+    const settled = await rowNow(row.id);
+    expect(settled).toMatchObject({ status: "failed", timeouts: ENLARGE_MAX_TIMEOUTS, attempts: 0 });
+    expect(settled.error).toMatch(/^The enlargement did not finish 24 times\./);
+    expect(e.service.paid()).toBe(ENLARGE_MAX_TIMEOUTS);
+    expect(deliveries).toBe(ENLARGE_MAX_TIMEOUTS + 1);
+    // Each lost call's cost row is written by the delivery after it.
+    expect((await upscaleCosts(db, e.s.batch.id)).length).toBe(ENLARGE_MAX_TIMEOUTS);
+    expect(e.w.log.mock.calls.filter(([m]) => m === "enlargement call lost")).toHaveLength(ENLARGE_MAX_TIMEOUTS);
+  }, 240_000);
+
+  it("P1-2: a call that times out at the deadline and a cold re-probe (180 s): the re-probe is clamped to the time left, the failure counts, the delivery answers before it is killed", async () => {
+    const e = await parked("fc-reprobe");
+    const row = e.rows[0]!;
+    e.service.state.hangUntilDeadline = true;
+    e.service.state.probeMs = 180_000;
+    const started = e.clock.at();
+    const result = await deliverWithDeadline(e, enlargeBody(row));
+    expect(result).toMatchObject({ httpStatus: 503, outcome: "retry" });
+    expect(e.clock.at() - started).toBeLessThan(ENLARGE_DISPATCH_DEADLINE_SEC * 1000);
+    expect(await rowNow(row.id)).toMatchObject({ status: "queued", timeouts: 1, claimToken: null });
+    expect((await rowNow(row.id)).callStartedAt).toBeNull();
+  }, 60_000);
+
+  it("P1-1: a probe answer other than a timeout resets the probe-timeout count (consecutive), so a busy fleet never forces a counted call", async () => {
+    const e = await parked("fc-probe-reset");
+    const row = e.rows[0]!;
+    e.service.state.mode = "busy";
+    for (const answer of ["timeout", "timeout", "ok", "timeout", "timeout", "busy", "timeout"] as const) {
+      e.service.state.probe = answer;
+      await handleEnlargeTask(e.w.deps, enlargeBody(row));
+    }
+    // Never three in a row: not forced.
+    expect((await rowNow(row.id)).probeTimeouts).toBe(1);
+    // Three in a row force the call; the fleet answers 429 to it for hours: busy, never counted.
+    e.service.state.probe = "timeout";
+    for (let i = 0; i < 2; i++) await handleEnlargeTask(e.w.deps, enlargeBody(row));
+    expect((await rowNow(row.id)).probeTimeouts).toBe(3);
+    for (let i = 0; i < 40; i++) { expect(await handleEnlargeTask(e.w.deps, enlargeBody(row))).toMatchObject({ httpStatus: 503, outcome: "busy" }); e.clock.tick(15); }
+    expect(await rowNow(row.id)).toMatchObject({ status: "queued", attempts: 0, timeouts: 0 });
+    // A re-probe that answers resets the count too.
+    e.service.state.mode = "healthyButHangs"; e.service.state.probe = "ok";
+    expect(await handleEnlargeTask(e.w.deps, enlargeBody(row))).toMatchObject({ outcome: "retry" });
+    expect(await rowNow(row.id)).toMatchObject({ timeouts: 1, probeTimeouts: 0 });
+  }, 120_000);
+
+  it("rows 45-66 P1-2: an upload refused after a paid call is counted; the made image is stored by the next delivery without another call; a refusal that never ends is terminal at 24 with one paid call", async () => {
+    clearMadeImages();
+    const e = await parked("fc-upload");
+    const row = e.rows[0]!;
+    const upload = e.w.deps.storage.uploadBuffer;
+    let refuse = 2;
+    e.w.deps.storage.uploadBuffer = (async (...args: Parameters<typeof upload>) => { if (args[0].includes("/derived/") && refuse-- > 0) throw Object.assign(new Error("Forbidden"), { code: 403 }); return upload(...args); }) as typeof upload;
+    // Two refusals then a pass inside one delivery's tries: done, one call.
+    expect(await handleEnlargeTask(e.w.deps, enlargeBody(row))).toMatchObject({ outcome: "done" });
+    expect(e.service.paid()).toBe(1);
+    expect(await rowNow(row.id)).toMatchObject({ status: "done", timeouts: 0 });
+    // Refused for good: each delivery counts; only the first one calls the service.
+    clearMadeImages();
+    const f = await parked("fc-upload-forever");
+    const bad = f.rows[0]!;
+    const up = f.w.deps.storage.uploadBuffer;
+    f.w.deps.storage.uploadBuffer = (async (...args: Parameters<typeof up>) => { if (args[0].includes("/derived/")) throw Object.assign(new Error("Forbidden"), { code: 403 }); return up(...args); }) as typeof up;
+    const results = await enlargeUntilSettled(f.w, bad, 60);
+    expect(results.at(-1)).toMatchObject({ outcome: "failed" });
+    expect(await rowNow(bad.id)).toMatchObject({ status: "failed", timeouts: ENLARGE_MAX_TIMEOUTS, errorKind: "upload" });
+    expect(f.service.paid()).toBe(1);
+    expect(results).toHaveLength(ENLARGE_MAX_TIMEOUTS);
+  }, 240_000);
+
+  it("rows 45-66 P2-2: a convert or raw-read refusal that waiting cannot change (4xx) counts bad_source; a 5xx only delays", async () => {
+    const e = await parked("fc-convert", { layout: [[1], [1]] });
+    const [refused, down] = e.rows;
+    const prepare = e.w.deps.prepare;
+    e.w.deps.prepare = (async (buf, name, convert) => { await convert(buf); return prepare(buf, name, convert); }) as typeof prepare;
+    let status = 403;
+    e.w.deps.matting.convert = (async () => { throw new Error(`Background removal request rejected (${status}).`); }) as typeof e.w.deps.matting.convert;
+    const results = await enlargeUntilSettled(e.w, refused!);
+    expect(results.at(-1)).toMatchObject({ outcome: "failed" });
+    expect(await rowNow(refused!.id)).toMatchObject({ status: "failed", attempts: ENLARGE_TASK_MAX_ATTEMPTS, errorKind: "bad_source" });
+    status = 503;
+    e.w.deps.matting.convert = (async () => { throw Object.assign(new Error("Background removal service returned 503."), { status: 503 }); }) as typeof e.w.deps.matting.convert;
+    for (let i = 0; i < 12; i++) expect(await handleEnlargeTask(e.w.deps, enlargeBody(down!))).toMatchObject({ httpStatus: 503, outcome: "unavailable" });
+    expect(await rowNow(down!.id)).toMatchObject({ status: "queued", attempts: 0 });
+  }, 120_000);
+
+  it("rows 01-22 P1-4: the stale re-send is per lane: a batch whose tasks wait behind another batch's on the same lane is not re-sent while the lane moves", async () => {
+    const a = await parked("fc-lane-a");
+    const b = await parked("fc-lane-b", { world: a });
+    a.service.state.mode = "busy";
+    // Only batch A's task is delivered for 70 minutes (B's wait behind it in the queue).
+    for (let m = 0; m < 70; m += 10) { await handleEnlargeTask(a.w.deps, enlargeBody(a.rows[0]!)); a.clock.tick(10); await sweep(db, a.w); }
+    expect((await rowsOf(db, b.s.batch.id)).map((r) => r.sends)).toEqual([0]);
+    // The lane goes quiet for an hour: B is re-sent.
+    a.clock.tick(61);
+    await sweep(db, a.w);
+    expect((await rowsOf(db, b.s.batch.id)).map((r) => r.sends)).toEqual([1]);
+  }, 120_000);
+
+  it("rows 45-66 P2: an old-format enlarge task ({sourceImageId, round}) answers 200 so the queue drops it", async () => {
+    const e = await parked("fc-old-format");
+    expect(await handleEnlargeTask(e.w.deps, { batchId: e.s.batch.id, sourceImageId: e.rows[0]!.sourceImageId, round: 0 })).toMatchObject({ httpStatus: 200, outcome: "stale_format" });
+    expect(e.service.paid()).toBe(0);
+  }, 60_000);
+
+  it("system P2-1: a prepare with a new result every time cannot cycle: after 3 identity releases the next identity is born failed and the photo is held", async () => {
+    const e = enlargeWorld(db);
+    const prepare = e.w.deps.prepare;
+    let n = 0;
+    e.w.deps.prepare = (async (...args: Parameters<typeof prepare>) => { const p = await prepare(...args); p.rgb = Buffer.alloc(p.rgb.length, 100 + (n++ % 50)); return p; }) as typeof prepare;
+    const s = await seedEnlargeBatch(db, e.w, "fc-identity", [[1]]);
+    const { handleChunkTask, currentChunkTask } = await import("./chunk");
+    const chunkId = s.chunks[0]!.id;
+    await handleChunkTask(e.w.deps, await currentChunkTask(db, chunkId));
+    for (let round = 0; round < 10; round++) {
+      for (const row of (await rowsOf(db, s.batch.id)).filter((r) => r.wanted && r.status === "queued")) await handleEnlargeTask(e.w.deps, enlargeBody(row));
+      await handleChunkTask(e.w.deps, await currentChunkTask(db, chunkId));
+    }
+    const rows = await rowsOf(db, s.batch.id);
+    expect(rows.reduce((t, r) => t + r.identityReleases, 0)).toBe(ENLARGE_MAX_IDENTITY_CHANGES);
+    expect(rows.filter((r) => r.wanted && r.status === "queued")).toEqual([]);
+    expect(rows.filter((r) => r.wanted).map((r) => [r.status, r.errorKind])).toEqual([["failed", "identity_unstable"]]);
+    expect(rows.length).toBeLessThanOrEqual(ENLARGE_MAX_IDENTITY_CHANGES + 2);
+    expect((await outputsOf(db, s.batch.id)).map((o) => [o.status, o.flags.includes("enlargement_failed")])).toEqual([["needs_attention", true]]);
+    expect(e.service.paid()).toBe(0);
+  }, 120_000);
+
+  it("the real client's 503 crash answer through workerEnlargeCall reaches the handler as unexplained (counted), not busy", async () => {
+    const e = await parked("fc-real-client");
+    const row = e.rows[0]!;
+    const fetch = vi.fn(async () => new Response("The request failed because either the HTTP response was malformed or connection to the instance had an error.", { status: 503 }));
+    e.w.deps.enlarge = workerEnlargeCall("swinir-x2", { UPSCALE_URL: "https://catalog-upscale-abc-el.a.run.app" }, { fetch: fetch as unknown as typeof globalThis.fetch, idToken: async () => "t" });
+    expect(await handleEnlargeTask(e.w.deps, enlargeBody(row))).toMatchObject({ httpStatus: 503, outcome: "retry" });
+    expect(await rowNow(row.id)).toMatchObject({ timeouts: 1, errorKind: "unexplained" });
+    expect(ENLARGE_CLAIM_MS).toBe(ENLARGE_DISPATCH_DEADLINE_SEC * 1000);
+  }, 60_000);
 });

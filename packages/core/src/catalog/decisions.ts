@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
-import { and, eq, inArray, sql } from "drizzle-orm";
+import { and, asc, eq, inArray, isNull, ne, sql } from "drizzle-orm";
 import type { Db } from "../db/client";
-import { brandMaster, catalogBatches, catalogBatchProducts, catalogChunks, catalogOutputs, catalogProductAliases, catalogProducts, catalogSourceImages, catalogUploads, skuMap } from "../db/schema";
+import { brandMaster, catalogBatches, catalogBatchProducts, catalogChunks, catalogEnlargements, catalogOutputs, catalogProductAliases, catalogProducts, catalogSourceImages, catalogUploads, skuMap } from "../db/schema";
 import type * as storage from "../storage";
 import { toGsUri } from "../storage";
 import { DEFAULT_MAX_BYTES } from "../safe-url";
@@ -10,13 +10,27 @@ import { recordEvent } from "./products";
 import { parseManualMapping } from "./sku-mapping";
 import { checkImage, imageFlags } from "./ingest/image-check";
 import { normalizeHeader } from "./ingest/links-sheet";
-import type { Decision, OutputFlag } from "./types";
+import type { ChannelId, Decision, OutputFlag } from "./types";
 import { INFORMATION_FLAGS } from "./qa/triage";
+import { ENLARGING_TASK, enqueueEnlargements, lockProductChunks, releaseEnlargements, unparkSettledChunks, type UnparkedChunk } from "./pipeline/enlargement";
+import type { enqueueTask } from "../tasks";
+import { isBulkBatch } from "./pipeline/dispatch";
 
 type Output = typeof catalogOutputs.$inferSelect;
 type Tx = Parameters<Parameters<Db["transaction"]>[0]>[0];
 export class CatalogDecisionError extends Error {
   constructor(readonly status: 400 | 404 | 409, message: string) { super(message); this.name = "CatalogDecisionError"; }
+}
+/** "Try again" on a batch that has stopped (failed or cancelled): nothing would run it (final check 2026-10-30). */
+export const RETRY_STOPPED_BATCH = "This batch has stopped, so the enlargement cannot run again here. Use the photo as it is, replace it, remove it, or start a new batch with this product.";
+/** The code of the "Use as is" warning on a photo that could not be enlarged (spec 18 lifecycle 3.6). */
+export const PLAIN_WARNING = "plain_warning";
+/**
+ * Spec 18 lifecycle 3.6 (owner, 2026-10-30: "Allow, with a clear warning"): "Use as is" on a scope with an output held
+ * for its enlargement answers 409 with the channels whose images would be stretched, unless the request accepts it.
+ */
+export class CatalogPlainWarning extends CatalogDecisionError {
+  constructor(readonly channels: ChannelId[]) { super(409, PLAIN_WARNING); this.name = "CatalogPlainWarning"; }
 }
 const undecided = (output: Output) => output.decision === null && (output.status === "needs_attention" || output.status === "failed");
 const channelFlag = (flag: OutputFlag) => flag === "placement" || flag === "failed_compliance" || flag === "low_resolution";
@@ -40,8 +54,22 @@ async function lockProduct(tx: Tx, output: Output): Promise<typeof catalogProduc
   if (product.lockBatchId && product.lockBatchId !== output.batchId) throw new CatalogDecisionError(409, "This product is being changed by another batch. Try again when it finishes.");
   return product;
 }
-export interface DecisionResult { batchId: string; productId: string; outputIds: string[]; decisionId: string }
-export async function applyDecision(db: Db, input: { outputId: string; decision: Extract<Decision, "use_as_is" | "remove">; actor: string; now?: Date }): Promise<DecisionResult> {
+/**
+ * Spec 18 lifecycle 3.6, Remove and Replace: once a photo has no undecided or pending output left in the batch, its
+ * enlargements are released and the product's chunks unparked (a parked chunk never waits on a thrown-away photo).
+ * Lock order: the product row (held by the caller), the product's chunks by id, the rows. Returns the chunks it
+ * unparked (the caller enqueues the `direct` ones after the commit).
+ */
+async function releasePhotoEnlargements(tx: Tx, input: { batchId: string; productId: string; sourceImageId: string; errorKind: string }, now: Date): Promise<UnparkedChunk[]> {
+  const db = tx as unknown as Db;
+  const [open] = await tx.select({ id: catalogOutputs.id }).from(catalogOutputs).where(and(eq(catalogOutputs.batchId, input.batchId), eq(catalogOutputs.sourceImageId, input.sourceImageId), isNull(catalogOutputs.decision), inArray(catalogOutputs.status, ["pending", "needs_attention", "failed"]))).limit(1);
+  if (open) return [];
+  const chunks = await lockProductChunks(db, input.batchId, input.productId);
+  const released = await releaseEnlargements(db, { batchId: input.batchId, sourceImageIds: [input.sourceImageId], errorKind: input.errorKind }, now);
+  return released.length ? unparkSettledChunks(db, input.batchId, chunks, now) : [];
+}
+export interface DecisionResult { batchId: string; productId: string; outputIds: string[]; decisionId: string; /** Spec 18 lifecycle: chunks unparked by a Remove (enqueue the `direct` ones). */ unparked?: UnparkedChunk[] }
+export async function applyDecision(db: Db, input: { outputId: string; decision: Extract<Decision, "use_as_is" | "remove">; actor: string; now?: Date; /** Spec 18 lifecycle 3.6: the operator accepted the plain warning. */ acceptPlain?: boolean }): Promise<DecisionResult> {
   if (input.decision !== "use_as_is" && input.decision !== "remove") throw new CatalogDecisionError(400, "Choose whether to keep or remove this photo.");
   return db.transaction(async tx => {
     const target = await readOutput(tx, input.outputId);
@@ -51,10 +79,16 @@ export async function applyDecision(db: Db, input: { outputId: string; decision:
     if (!undecided(current)) throw new CatalogDecisionError(409, "Already decided.");
     const scope = decisionScope(current, siblings), now = input.now ?? new Date();
     if (input.decision === "use_as_is" && scope.some(o => o.status === "failed")) throw new CatalogDecisionError(400, "Nothing was made from this photo. Remove it or replace it.");
+    // Spec 18 lifecycle 3.6: nothing stages a plain image of a photo that could not be enlarged without this click.
+    const plain = input.decision === "use_as_is" ? scope.filter(o => o.flags.includes("enlargement_failed")) : [];
+    if (plain.length && !input.acceptPlain) throw new CatalogPlainWarning([...new Set(plain.map(o => o.channel))]);
     await tx.update(catalogOutputs).set({ decision: input.decision, decidedBy: input.actor, decidedAt: now, status: input.decision === "remove" ? "skipped" : "staged", ...(input.decision === "remove" ? { reason: `Removed by ${input.actor}` } : {}), updatedAt: now }).where(inArray(catalogOutputs.id, scope.map(o => o.id)));
     await tx.update(catalogProducts).set({ lockBatchId: target.batchId, updatedAt: now }).where(eq(catalogProducts.id, target.productId));
     if (input.decision === "remove") await recordEvent(tx, { productId: target.productId, batchId: target.batchId, kind: "removed_photo", actor: input.actor, details: { n: target.n, channels: scope.map(o => o.channel) } });
-    return { batchId: target.batchId, productId: target.productId, outputIds: scope.map(o => o.id), decisionId: `${current.id}-${+now}` };
+    // The flag stays on each output as the record of why it is plain (the invariant excludes it, Ops counts it).
+    if (plain.length) await recordEvent(tx, { productId: target.productId, batchId: target.batchId, kind: "plain_accepted", actor: input.actor, details: { n: target.n, channels: [...new Set(plain.map(o => o.channel))] } });
+    const unparked = input.decision === "remove" ? await releasePhotoEnlargements(tx, { batchId: target.batchId, productId: target.productId, sourceImageId: target.sourceImageId, errorKind: "removed" }, now) : [];
+    return { batchId: target.batchId, productId: target.productId, outputIds: scope.map(o => o.id), decisionId: `${current.id}-${+now}`, ...(unparked.length ? { unparked } : {}) };
   });
 }
 
@@ -75,7 +109,7 @@ export async function startReplacement(deps: ReplacementDeps, input: { outputId:
   await deps.db.insert(catalogUploads).values({ id: uploadId, batchId: batch.id, kind: "image", name: input.name, mime: input.mime, sizeBytes: input.size, gcsUri: toGsUri(deps.storage.getBucketName(), path), detected: { replacementOutputId: output.id, replacementSourceId: output.sourceImageId } });
   return { uploadId, signedPutUrl };
 }
-export interface ReplacementResult { batchId: string; productId: string; sourceImageId: string; chunkId: string }
+export interface ReplacementResult { batchId: string; productId: string; sourceImageId: string; chunkId: string; /** Spec 18 lifecycle: chunks unparked by the old photo's release (enqueue the `direct` ones). */ unparked?: UnparkedChunk[] }
 export async function completeReplacement(deps: ReplacementDeps, input: { outputId: string; uploadId: string; actor: string }): Promise<ReplacementResult> {
   return deps.db.transaction(async tx => {
     const target = await readOutput(tx, input.outputId), product = await lockProduct(tx, target);
@@ -107,9 +141,56 @@ export async function completeReplacement(deps: ReplacementDeps, input: { output
     await tx.update(catalogProducts).set({ lockBatchId: output.batchId, updatedAt: now }).where(eq(catalogProducts.id, product.id));
     await recordEvent(tx, { productId: product.id, batchId: output.batchId, kind: "replacement_uploaded", actor: input.actor, details: { n: output.n, oldSha256: old!.sha256, newSha256: sha256 } });
     const [index] = await tx.select({ value: sql<number>`coalesce(max(${catalogChunks.index}), -1) + 1` }).from(catalogChunks).where(eq(catalogChunks.batchId, output.batchId));
+    // Spec 18 lifecycle F11, F32: the replaced photo's enlargements are released and the product's chunks unparked.
+    const unparked = await releasePhotoEnlargements(tx, { batchId: output.batchId, productId: product.id, sourceImageId: output.sourceImageId, errorKind: "replaced" }, now);
     const [chunk] = await tx.insert(catalogChunks).values({ batchId: output.batchId, index: Number(index!.value), stage: "matte", productIds: [product.id], sourceImageIds: [source!.id], status: "queued", attempt: 0, dispatchedAt: now }).returning();
-    return { batchId: output.batchId, productId: product.id, sourceImageId: source!.id, chunkId: chunk!.id };
+    return { batchId: output.batchId, productId: product.id, sourceImageId: source!.id, chunkId: chunk!.id, ...(unparked.length ? { unparked } : {}) };
   });
+}
+
+export interface RetryEnlargementResult { batchId: string; productId: string; chunkId: string; outputIds: string[]; rows: number; retries: number }
+/**
+ * Spec 18 lifecycle 3.6 "Try again" (not an output decision): in one transaction, lock the product, take the photo's
+ * undecided outputs held with `enlargement_failed`, require a failed wanted row that a call can make (a size refusal
+ * has no route to try again), reset those rows (queued, counters 0, the photo's identity releases 0, `retries+1`),
+ * reset the outputs to `pending` (judge scores cleared, the auto-action record kept, the flag and reason dropped), lock
+ * the product to the batch, insert a one-photo render chunk parked on the rows, record `enlargement_retried`, then
+ * send the rows' tasks. No cap on clicks: each is a human act, logged, and costs at most the rows' counted bounds.
+ */
+export async function retryEnlargement(db: Db, enqueue: typeof enqueueTask, input: { outputId: string; actor: string; now?: Date; log?: (message: string, fields?: Record<string, unknown>) => void }): Promise<RetryEnlargementResult> {
+  const now = input.now ?? new Date(), log = input.log ?? (() => {});
+  const result = await db.transaction(async tx => {
+    const target = await readOutput(tx, input.outputId);
+    // Final check 2026-10-30: a stopped batch runs nothing again (its enlarge tasks answer `stopped`, its chunks are
+    // never recovered), so a retry there would leave the outputs pending, the chunk parked and the product locked to it.
+    const [owner] = await tx.select({ status: catalogBatches.status }).from(catalogBatches).where(eq(catalogBatches.id, target.batchId)).for("share");
+    if (!owner || owner.status === "failed" || owner.status === "cancelled") throw new CatalogDecisionError(409, RETRY_STOPPED_BATCH);
+    await lockProduct(tx, target);
+    const outputs = (await tx.select().from(catalogOutputs).where(and(eq(catalogOutputs.batchId, target.batchId), eq(catalogOutputs.sourceImageId, target.sourceImageId))).orderBy(catalogOutputs.id).for("update"))
+      .filter(o => o.decision === null && o.flags.includes("enlargement_failed"));
+    if (!outputs.length) throw new CatalogDecisionError(409, "Nothing to try again.");
+    // Lock order: the product row, its chunks by id, then the rows.
+    await lockProductChunks(tx as unknown as Db, target.batchId, target.productId);
+    const failed = await tx.select().from(catalogEnlargements).where(and(eq(catalogEnlargements.batchId, target.batchId), eq(catalogEnlargements.sourceImageId, target.sourceImageId), eq(catalogEnlargements.wanted, true), eq(catalogEnlargements.status, "failed"), ne(catalogEnlargements.route, "none"))).orderBy(asc(catalogEnlargements.id)).for("update");
+    if (!failed.length) throw new CatalogDecisionError(409, "Nothing to try again.");
+    const rows = await tx.update(catalogEnlargements).set({ status: "queued", attempts: 0, timeouts: 0, probeTimeouts: 0, retries: sql`${catalogEnlargements.retries} + 1`, sends: sql`${catalogEnlargements.sends} + 1`, claimedAt: null, claimToken: null, tilesDone: 0, error: null, errorKind: null, updatedAt: now })
+      .where(inArray(catalogEnlargements.id, failed.map(r => r.id))).returning();
+    // F59: Try again resets the photo's identity-change count.
+    await tx.update(catalogEnlargements).set({ identityReleases: 0 }).where(and(eq(catalogEnlargements.batchId, target.batchId), eq(catalogEnlargements.sourceImageId, target.sourceImageId)));
+    for (const o of outputs) {
+      await tx.update(catalogOutputs).set({ status: "pending", qaScores: null, compliance: { ok: true, failures: [], ...(o.compliance?.auto_actions ? { auto_actions: o.compliance.auto_actions } : {}) } as Output["compliance"], flags: o.flags.filter(f => f !== "enlargement_failed"), reason: null, error: null, stagingUri: null, bytes: null, updatedAt: now }).where(eq(catalogOutputs.id, o.id));
+    }
+    await tx.update(catalogProducts).set({ lockBatchId: target.batchId, updatedAt: now }).where(eq(catalogProducts.id, target.productId));
+    const [index] = await tx.select({ value: sql<number>`coalesce(max(${catalogChunks.index}), -1) + 1` }).from(catalogChunks).where(eq(catalogChunks.batchId, target.batchId));
+    const [chunk] = await tx.insert(catalogChunks).values({ batchId: target.batchId, index: Number(index!.value), stage: "render", productIds: [target.productId], sourceImageIds: [target.sourceImageId], status: "queued", attempt: 0, step: 0, stepKnown: true, taskName: ENLARGING_TASK, dispatchedAt: now, progressAt: now }).returning();
+    const retries = Math.max(...rows.map(r => r.retries));
+    await recordEvent(tx, { productId: target.productId, batchId: target.batchId, kind: "enlargement_retried", actor: input.actor, details: { n: target.n, retries, channels: [...new Set(outputs.map(o => o.channel))] } });
+    return { batchId: target.batchId, productId: target.productId, chunkId: chunk!.id, outputIds: outputs.map(o => o.id), rows, retries };
+  });
+  const [batch] = await db.select().from(catalogBatches).where(eq(catalogBatches.id, result.batchId));
+  const bulk = !!batch && isBulkBatch(batch);
+  await enqueueEnlargements(enqueue, result.rows, { log, chunkId: result.chunkId, ...(bulk ? { bulk: true } : {}) });
+  return { batchId: result.batchId, productId: result.productId, chunkId: result.chunkId, outputIds: result.outputIds, rows: result.rows.length, retries: result.retries };
 }
 
 /** Accept the supported sheet headings, then reuse the normalised manual-map parser. */

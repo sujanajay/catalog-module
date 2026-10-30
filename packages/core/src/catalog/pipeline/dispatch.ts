@@ -5,11 +5,11 @@
 // load tool).
 import { and, asc, count, eq, inArray, isNotNull, isNull, lt, notInArray, or, sql, type SQL } from "drizzle-orm";
 import type { Db } from "../../db/client";
-import { catalogBatches, catalogChunks } from "../../db/schema";
+import { catalogBatches, catalogChunks, catalogEnlargements } from "../../db/schema";
 import { log as structuredLog, toSeverity } from "../../log";
 import { chunkTaskId, DISPATCH_DEADLINE_SEC, type enqueueTask } from "../../tasks";
 import { positiveIntEnv } from "../../concurrency";
-import { enqueueEnlargements, ENLARGE_STALE_MS, ENLARGING_TASK, queuedPhotosOfChunk, unparkSettledChunks } from "./enlargement";
+import { enqueueEnlargements, ENLARGE_SEND_SLOW_MS, ENLARGE_SEND_WARN, ENLARGE_STALE_MS, ENLARGING_TASK, queuedEnlargementsOfChunk, releaseEnlargements, unparkSettledChunks } from "./enlargement";
 
 /** A delivery starts no new photo after this much of its time (the request deadline is 900 s). */
 export const CHUNK_TIME_BUDGET_MS = 480_000;
@@ -141,7 +141,8 @@ export async function dispatchChunks(db: Db, enqueue: Enqueue, batchId: string, 
     if (!batch) return [];
     bulk = isBulkBatch(batch);
     const window = options.window ?? windowFor(bulk);
-    const [active] = await tx.select({ n: count() }).from(catalogChunks).where(and(eq(catalogChunks.batchId, batchId), isNotNull(catalogChunks.dispatchedAt), notInArray(catalogChunks.status, ["done", "failed"])));
+    // Spec 18 lifecycle 3.8: a parked chunk (dispatched_at set so older dispatches skip it) holds no slot.
+    const [active] = await tx.select({ n: count() }).from(catalogChunks).where(and(eq(catalogChunks.batchId, batchId), isNotNull(catalogChunks.dispatchedAt), notInArray(catalogChunks.status, ["done", "failed"]), notParked()));
     const room = window - (active?.n ?? 0);
     if (room <= 0) return [];
     const waiting = await tx.select({ id: catalogChunks.id }).from(catalogChunks)
@@ -159,22 +160,26 @@ export async function dispatchChunks(db: Db, enqueue: Enqueue, batchId: string, 
 }
 
 export interface RecoveryResult { lapsed: number; lost: number; unstarted: number; dispatched: number; /** Spec 18: enlarge tasks sent again for parked chunks. */ enlarge?: number }
+/** Spec 18 lifecycle: `enlargementOff` is the worker's rollback switch (UPSCALE_MODEL=off): queued rows are released and parked chunks unparked. */
+export interface RecoveryOptions extends DispatchOptions { enlargementOff?: boolean }
 
 /**
  * The sweep's per-batch rules (also the Start resume path): a running chunk whose lease lapsed, or a queued chunk
  * whose task was queued more than 30 minutes ago, gets the next step and a new task (the old task, if it is only
  * slow, then answers "stale"); then the window is topped up. A live lease and a recently queued task are never
- * touched. Each rule is one guarded update, so a second run at the same time changes nothing. Spec 18: a chunk parked
- * for its photos' enlargements whose batch saw no enlarge delivery for ENLARGE_STALE_MS gets the next step (still parked) and its
- * queued photos' tasks again, named by that step; one with no queued photo left is unparked.
+ * touched. Each rule is one guarded update, so a second run at the same time changes nothing. Spec 18 lifecycle 3.8:
+ * the sweep runs this for every live batch with a queued or running chunk (done ones too: an operator retry or a
+ * replacement), so no chunk of a live batch is ever without an owner; a parked chunk is never re-sent as a stage task
+ * (the lost-task rule skips it), its rows are re-sent instead (resendStaleEnlargements). The window top-up serves
+ * processing batches only (dispatchChunks).
  */
-export async function recoverBatchChunks(db: Db, enqueue: Enqueue, batchId: string, options: DispatchOptions = {}): Promise<RecoveryResult> {
+export async function recoverBatchChunks(db: Db, enqueue: Enqueue, batchId: string, options: RecoveryOptions = {}): Promise<RecoveryResult> {
   const now = options.now ?? new Date(), log = options.log ?? defaultLog, bulk = await batchIsBulk(db, batchId);
   const next = { step: sql`${catalogChunks.step} + 1`, stepKnown: true, dispatchedAt: now, taskName: null, leaseUntil: null };
   const lapsed = await db.update(catalogChunks).set({ ...next, status: "queued" })
     .where(and(eq(catalogChunks.batchId, batchId), eq(catalogChunks.status, "running"), leaseLapsed(now))).returning();
   const lost = await db.update(catalogChunks).set(next)
-    .where(and(eq(catalogChunks.batchId, batchId), eq(catalogChunks.status, "queued"), lt(catalogChunks.dispatchedAt, new Date(+now - CHUNK_QUEUED_STALE_MS)))).returning();
+    .where(and(eq(catalogChunks.batchId, batchId), eq(catalogChunks.status, "queued"), notParked(), lt(catalogChunks.dispatchedAt, new Date(+now - CHUNK_QUEUED_STALE_MS)))).returning();
   for (const [chunks, reason] of [[lapsed, "lease_lapsed"], [lost, "task_lost"]] as const) {
     for (const chunk of chunks) {
       log("chunk recovered", { batchId, chunkId: chunk.id, stage: chunk.stage, step: chunk.step, reason });
@@ -183,30 +188,45 @@ export async function recoverBatchChunks(db: Db, enqueue: Enqueue, batchId: stri
     }
   }
   const unstarted = await redispatchUnstartedChunks(db, enqueue, batchId, { now, log });
-  const enlarge = await resendStaleEnlargements(db, enqueue, batchId, { now, log, bulk });
+  const enlarge = await resendStaleEnlargements(db, enqueue, batchId, { now, log, bulk, ...(options.enlargementOff ? { off: true } : {}) });
   const dispatched = await dispatchChunks(db, enqueue, batchId, options);
   return { lapsed: lapsed.length, lost: lost.length, unstarted, dispatched, enlarge };
 }
 
 /**
- * Spec 18: the recovery of parked chunks (recoverBatchChunks). A parked chunk with no queued photo is unparked (the
- * settle that should have done it is the only writer, so this is a safety net). One whose progress_at is older than
- * ENLARGE_STALE_MS (no enlarge delivery of the batch refreshed it: the batch's enlarge lane is quiet) takes the next
- * step, and each queued photo's task is sent again as round `step`, so the new task never collides with the old name.
- * Returns the number of tasks sent.
+ * Spec 18 lifecycle 3.8, the recovery of parked chunks (recoverBatchChunks). A parked chunk with no wanted queued row
+ * is unparked (the settle that should have done it is the only writer, so this is a safety net; on a batch that is not
+ * processing it is enqueued directly). One whose progress_at is older than ENLARGE_STALE_MS (no enlarge delivery of the
+ * batch refreshed it: the lane is quiet) has its wanted queued rows sent again with `sends + 1`, a new task id; after
+ * ENLARGE_SEND_WARN sends of one row the pace drops to every ENLARGE_SEND_SLOW_MS and each re-send logs ERROR "enlargement
+ * task cannot be delivered". The row is never failed for it (re-queue, never fail). `off` (the rollback switch)
+ * releases the batch's queued rows first, so every parked chunk unparks to the plain path. Returns the tasks sent.
  */
-export async function resendStaleEnlargements(db: Db, enqueue: Enqueue, batchId: string, options: Pick<DispatchOptions, "now" | "log"> & { bulk?: boolean } = {}): Promise<number> {
-  const now = options.now ?? new Date(), log = options.log ?? defaultLog;
+export async function resendStaleEnlargements(db: Db, enqueue: Enqueue, batchId: string, options: Pick<DispatchOptions, "now" | "log"> & { bulk?: boolean; off?: boolean } = {}): Promise<number> {
+  const now = options.now ?? new Date(), log = options.log ?? defaultLog, bulk = options.bulk ?? false;
+  if (options.off) {
+    const released = await releaseEnlargements(db, { batchId, onlyQueued: true, errorKind: "off" }, now);
+    if (released.length) log("enlargement released", { batchId, rows: released.length, reason: "off" });
+  }
+  const unparked = await unparkSettledChunks(db, batchId, null, now);
+  for (const chunk of unparked) {
+    log("chunk recovered", { batchId, chunkId: chunk.id, reason: "enlargement_settled" });
+    if (chunk.direct) await tryEnqueueChunk(enqueue, chunk, log, {}, bulk);
+  }
   const parked = and(eq(catalogChunks.batchId, batchId), eq(catalogChunks.status, "queued"), eq(catalogChunks.taskName, ENLARGING_TASK));
-  const unparked = await unparkSettledChunks(db, { batchId }, now);
-  for (const chunkId of unparked) log("chunk recovered", { batchId, chunkId, reason: "enlargement_settled" });
-  const stale = await db.update(catalogChunks).set({ step: sql`${catalogChunks.step} + 1`, progressAt: now })
+  const stale = await db.update(catalogChunks).set({ progressAt: now })
     .where(and(parked, or(isNull(catalogChunks.progressAt), lt(catalogChunks.progressAt, new Date(+now - ENLARGE_STALE_MS))))).returning();
   let sent = 0;
   for (const chunk of stale) {
-    const photos = await queuedPhotosOfChunk(db, chunk);
-    log("chunk recovered", { batchId, chunkId: chunk.id, stage: chunk.stage, step: chunk.step, reason: "enlargement_stale", photos: photos.length });
-    sent += await enqueueEnlargements(enqueue, batchId, photos, chunk.step, { log, chunkId: chunk.id, ...(options.bulk ? { bulk: true } : {}) });
+    const rows = (await queuedEnlargementsOfChunk(db, chunk)).filter((row) => row.sends < ENLARGE_SEND_WARN || +row.updatedAt <= +now - ENLARGE_SEND_SLOW_MS);
+    log("chunk recovered", { batchId, chunkId: chunk.id, stage: chunk.stage, step: chunk.step, reason: "enlargement_stale", rows: rows.length });
+    for (const row of rows) {
+      const [bumped] = await db.update(catalogEnlargements).set({ sends: sql`${catalogEnlargements.sends} + 1`, updatedAt: now })
+        .where(and(eq(catalogEnlargements.id, row.id), eq(catalogEnlargements.sends, row.sends), eq(catalogEnlargements.status, "queued"), eq(catalogEnlargements.wanted, true))).returning();
+      if (!bumped) continue;
+      if (bumped.sends > ENLARGE_SEND_WARN) log("enlargement task cannot be delivered", { severity: "ERROR", batchId, chunkId: chunk.id, enlargementId: bumped.id, sourceImageId: bumped.sourceImageId, sends: bumped.sends });
+      sent += await enqueueEnlargements(enqueue, [bumped], { log, chunkId: chunk.id, ...(bulk ? { bulk: true } : {}) });
+    }
   }
   return sent;
 }
