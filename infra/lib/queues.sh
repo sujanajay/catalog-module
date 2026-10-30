@@ -23,8 +23,9 @@ INGEST_QUEUE_RETRY=(--max-attempts=5 --min-backoff=10s)
 # counts attempts and timeouts on the row and answers 200 then), and a wait (service down or paused, a tile hand-off,
 # a cold start) answers 503 without counting, for as long as it lasts. So unlimited attempts (-1, the API's
 # "unlimited attempts"; the chunk queue uses the same form) and no time limit (0s, up to the task retention limit),
-# 30 s to 900 s apart (30, 60, 120, 240, 480, then 900 s), paced by ENLARGE_DISPATCHES_PER_SECOND so a burst of new
-# enlargements never meets a cold upscaler all at once. The sweep re-sends a lost task (ENLARGE_STALE_MS).
+# 30 s to 900 s apart (30, 60, 120, 240, 480, then 900 s), paced by ENLARGE_DISPATCHES_PER_SECOND (the operator lane)
+# or ENLARGE_BULK_DISPATCHES_PER_SECOND (the bulk lane) so a burst of new enlargements never meets a cold upscaler all
+# at once. The sweep re-sends a lost task (ENLARGE_STALE_MS).
 ENLARGE_QUEUE_RETRY=(--max-attempts=-1 --max-retry-duration=0s --min-backoff=30s --max-backoff=900s --max-doublings=5)
 
 # The queue names that exist in the region, one per line. gcloud 589 prints short names from list while older
@@ -35,7 +36,7 @@ queues_read_existing() {
 }
 queue_exists() { grep -qxF "$1" <<<"$QUEUES_EXISTING"; }
 
-# The stack's queues as "<name> <slots> <chunk|ingest|enlarge>" lines, from the shape. Needs queues_read_existing
+# The stack's queues as "<name> <slots> <chunk|ingest|enlarge|enlarge-bulk>" lines, from the shape. Needs queues_read_existing
 # first. A bulk queue or enlarge lane left from a bigger shape keeps 1 slot (never deleted, as above).
 queues_shape() {
   echo "$QUEUE $TASKS_MAX_DISPATCHES chunk"
@@ -46,8 +47,8 @@ queues_shape() {
   if [ "$ENLARGE_MAX_DISPATCHES" -gt 0 ]; then echo "$QUEUE-enlarge $ENLARGE_MAX_DISPATCHES enlarge"
   elif queue_exists "$QUEUE-enlarge"; then echo "$QUEUE-enlarge 1 enlarge"
   fi
-  if [ "$ENLARGE_BULK_MAX_DISPATCHES" -gt 0 ]; then echo "$QUEUE-enlarge-bulk $ENLARGE_BULK_MAX_DISPATCHES enlarge"
-  elif queue_exists "$QUEUE-enlarge-bulk"; then echo "$QUEUE-enlarge-bulk 1 enlarge"
+  if [ "$ENLARGE_BULK_MAX_DISPATCHES" -gt 0 ]; then echo "$QUEUE-enlarge-bulk $ENLARGE_BULK_MAX_DISPATCHES enlarge-bulk"
+  elif queue_exists "$QUEUE-enlarge-bulk"; then echo "$QUEUE-enlarge-bulk 1 enlarge-bulk"
   fi
 }
 
@@ -56,6 +57,7 @@ queue_call() {
   local -a retry=("${CHUNK_QUEUE_RETRY[@]}")
   [ "$kind" = ingest ] && retry=("${INGEST_QUEUE_RETRY[@]}")
   [ "$kind" = enlarge ] && retry=(--max-dispatches-per-second="$ENLARGE_DISPATCHES_PER_SECOND" "${ENLARGE_QUEUE_RETRY[@]}")
+  [ "$kind" = enlarge-bulk ] && retry=(--max-dispatches-per-second="$ENLARGE_BULK_DISPATCHES_PER_SECOND" "${ENLARGE_QUEUE_RETRY[@]}")
   gcloud tasks queues "$verb" "$name" --location="$REGION" --max-concurrent-dispatches="$slots" "${retry[@]}" >/dev/null
 }
 

@@ -110,8 +110,8 @@ test('catalog-upscale: the matting image sized by the UPSCALE_* rows, only the u
   assert.deepEqual(f.slice(1, 8), ['catalog-upscale', 'asia-south1', 'ar/matting:t', '8808', '1', '1', '0']);
   assert.equal(f[8], 'MAX_RESIDENT_SESSIONS=1,UPSCALE_CPU=1,PRELOAD_MATTE=0,ORT_INTRA_OP_THREADS=4,UPSCALE_MAX_PIXELS=8000000,UPSCALE_MAX_PIXELS_X4=6400000');
   assert.equal(f[9], 'bash infra/lib/services.sh probe-upscale 8808 swinir-x2,swinir-x4 800x1200,1600x1600 1 1 1740 1.3 12 120');
-  assert.deepEqual(rest.slice(0, -1), ['--service-account=m', '--cpu=4', '--memory=16Gi', '--concurrency=1', '--min-instances=0',
-    '--max-instances=16', '--timeout=1740', '--labels=app=catalog,component=upscale']);
+  assert.deepEqual(rest.slice(0, -1), ['--service-account=m', '--cpu=4', '--memory=8Gi', '--concurrency=1', '--min-instances=0',
+    '--max-instances=50', '--timeout=1740', '--labels=app=catalog,component=upscale']);
   assert.equal(rest.at(-1), 'TAG=|SKIP=', 'the dedicated service uses the candidate tag');
 });
 
@@ -542,7 +542,7 @@ for s in "\${SERVICES[@]}"; do "service_\${s//-/_}"; m=""; for a in "\${SVC_ARGS
     assert.match(svcMax, /^[1-9]\d*$/, `${name} has a service-level max`);
     assert.equal(svcMax, revMax, `${name}: the service-level max equals the revision max`);
   }
-  assert.deepEqual(rows.map((x) => x[1]), ['20', '16', '3', '3', '4'], 'from MATTING_CPU_, UPSCALE_, GPU_, WEB_ and WORKER_MAX_INSTANCES');
+  assert.deepEqual(rows.map((x) => x[1]), ['20', '50', '3', '3', '4'], 'from MATTING_CPU_, UPSCALE_, GPU_, WEB_ and WORKER_MAX_INSTANCES');
 });
 
 const maxUpdate = (n) => `run services update test-svc --region=asia-south1 --max=${n} --quiet`;

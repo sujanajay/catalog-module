@@ -140,10 +140,11 @@ Refusals, each printed by `shape_check` with the numbers:
   `DISPATCH_DEADLINE_SEC`; the client adds 30 s, 3.2.3);
 - queue rate: `ENLARGE_DISPATCHES_PER_SECOND <= UPSCALE_MAX_INSTANCES x UPSCALE_CONCURRENCY / p50 (s)` (as shipped:
   the p95 of the same size stands in while p50 is empty; the enlarge lanes' slots are at most `UPSCALE_MAX_INSTANCES
-  x UPSCALE_CONCURRENCY`);
+  x UPSCALE_CONCURRENCY`; since 2026-10-30 the sum of every lane's rate is checked, section 8);
 - CPU quota: `WORKER_MAX_INSTANCES x WORKER_CPU (96) + MATTING_CPU_MAX_INSTANCES x MATTING_CPU_VCPU +
   UPSCALE_MAX_INSTANCES x UPSCALE_CPU_VCPU + WEB_MAX_INSTANCES x WEB_CPU + JOBS_CPU_BUDGET (11 together) <= 190`
-  (`CPU_QUOTA_LIMIT`).
+  (`CPU_QUOTA_LIMIT`; since 2026-10-30 the 400 vCPU quota with every service of the region counted, and a memory
+  check beside it, section 8).
 Proposed split, decided by the table: `MATTING_CPU_MAX_INSTANCES` 16 -> 4 (the GPU does cut-outs; the CPU cut-out is
 a fallback), upscale 16 x 4 vCPU or 8 x 8 vCPU: 96 + 16 + 64 + 11 = 187 <= 190. `infra/tests/shape.test.mjs`
 asserts: today's live shape plus 16 x 4 upscale is refused by the quota line; the proposed split passes; an
@@ -452,6 +453,26 @@ p50 99 s = 0.16/s; shape_check counts the rate once per lane with slots), `ENLAR
 | 4C 4T 2CONC | 126 / 260 | 494 / 521 | no |
 | 8C 8T 1CONC | 78 / 80 | 159 / 165 | yes, same bytes as 4 threads |
 | 8C 8T 2CONC | 79 / 103 | 168 / 342 | no |
+
+Scale-out (2026-10-30, owner-approved, applied during the live 200-product test). The live run was limited by the
+bulk lane (0.075/s and 10 slots: about 4 enlargements a minute, 16 instances never full). The asia-south1 Cloud Run
+quotas were raised to 400 vCPU and 800 GiB (both granted, `gcloud beta quotas preferences list`), and the shape grows to
+what they allow, same per-call shape (4 vCPU, 4 threads, concurrency 1, so the measured rows above still apply):
+- `UPSCALE_MAX_INSTANCES` 16 -> 50 and `UPSCALE_MEMORY` 16Gi -> 8Gi (the live hourly p99 was 2.9 GiB; the largest x4
+  working set, 5073 MiB, stays under 80% of 8 GiB);
+- `ENLARGE_BULK_MAX_DISPATCHES` 10 -> 44 (4 + 44 + the preview's 2 = 50 = 50 x 1);
+- the bulk lane gets its own rate, `ENLARGE_BULK_DISPATCHES_PER_SECOND=0.42`, and the operator lanes 0.075 -> 0.04: each
+  about its slots / p50 99 s. The rate refusal now checks the SUM over every lane with slots, both stacks:
+  `ENLARGE_DISPATCHES_PER_SECOND x operator lanes + ENLARGE_BULK_DISPATCHES_PER_SECOND x bulk lanes <=
+  UPSCALE_MAX_INSTANCES x UPSCALE_CONCURRENCY / p50`, here 2 x 0.04 + 0.42 = 0.50 <= 50 / 99 = 0.505;
+- `WORKER_MAX_INSTANCES` 24 -> 32 so the worker's slots cover every queue: 8 + 36 + 4 + 4 + 44 = 96 = 32 x 3
+  (`WORKER_CONCURRENCY` stays 3; connections 32 x 6 + 8 = 200 of 393);
+- the quota refusals count every service in the region at max instances: this stack, the other catalog stack (preview
+  or production, from its rows), the catalog jobs (8 vCPU, 16 GiB) and `OTHER_APPS_VCPU` / `OTHER_APPS_MEMORY_GIB` (24
+  each: ila, npd and the other jobs at their max). CPU: 128 + 16 + 200 + 11 + preview 19 = 374 <= 400 - 24 = 376. A
+  memory refusal is new (the old total, 439 GiB, was above the 400 GiB quota unnoticed): 128 + 64 + 400 + 19 + 19 = 630
+  <= 800 - 24 = 776. CPU binds; memory has room.
+Rollback values are the comment line above `SHAPE_DEFAULTS` in `infra/lib/shape.sh`.
 
 ## 9. Live verification (after the H4, H1+H2 and H3 deploys)
 

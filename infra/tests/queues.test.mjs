@@ -7,7 +7,7 @@
 //   5 attempts, and bootstrap.sh creates the main queue with the same retry;
 // - spec 16 3.2.3: a bulk queue left from a bigger shape keeps 1 slot; the preview stack gets no bulk queue;
 // - spec 18 3.3.1: the enlarge lanes <queue>-enlarge and <queue>-enlarge-bulk, paced by ENLARGE_DISPATCHES_PER_SECOND
-//   and never dropping a task (spec 18 lifecycle 3.8, T58: unlimited attempts, no time limit, 30 s to 900 s apart),
+//   and (the bulk lane, 2026-10-30) ENLARGE_BULK_DISPATCHES_PER_SECOND, and never dropping a task (spec 18 lifecycle 3.8, T58: unlimited attempts, no time limit, 30 s to 900 s apart),
 //   are created before the services and set after the worker gate.
 import fs from 'node:fs';
 import os from 'node:os';
@@ -23,10 +23,11 @@ const bash = process.env.CATALOG_BASH || gitBashPath();
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'catalog-queues-'));
 const RETRY = '--max-attempts=-1 --max-retry-duration=1800s --min-backoff=10s --max-backoff=60s --max-doublings=3';
 const INGEST_RETRY = '--max-attempts=5 --min-backoff=10s';
-const ENLARGE_RETRY = '--max-dispatches-per-second=0.075 --max-attempts=-1 --max-retry-duration=0s --min-backoff=30s --max-backoff=900s --max-doublings=5';
+const ENLARGE_RETRY = '--max-dispatches-per-second=0.04 --max-attempts=-1 --max-retry-duration=0s --min-backoff=30s --max-backoff=900s --max-doublings=5';
+const ENLARGE_BULK_RETRY = ENLARGE_RETRY.replace('=0.04', '=0.42');
 // The shape names a caller's shell could carry into the run; each run starts without them.
 const SHAPE_ENV = ['TASKS_MAX_DISPATCHES', 'BULK_MAX_DISPATCHES', 'INGEST_MAX_DISPATCHES', 'WORKER_MAX_INSTANCES', 'WORKER_CONCURRENCY', 'CATALOG_PREVIEW',
-  'ENLARGE_MAX_DISPATCHES', 'ENLARGE_BULK_MAX_DISPATCHES', 'ENLARGE_DISPATCHES_PER_SECOND'];
+  'ENLARGE_MAX_DISPATCHES', 'ENLARGE_BULK_MAX_DISPATCHES', 'ENLARGE_DISPATCHES_PER_SECOND', 'ENLARGE_BULK_DISPATCHES_PER_SECOND'];
 
 // Sources the shape and the queue lib as deploy.sh does, with `existing` as the queues of the region, runs `steps`
 // and returns the queue create and update calls in order.
@@ -56,32 +57,31 @@ const test = (name, fn) => tests.push([name, fn]);
 
 test('no env: before the services only the new enlarge lanes are created; after the worker gate every queue gets its shape slots', () => {
   assert.deepEqual(run('queues_create_missing', {existing: LIVE_QUEUES}), [
-    create('catalog-enlarge', 4, ENLARGE_RETRY), create('catalog-enlarge-bulk', 10, ENLARGE_RETRY),
+    create('catalog-enlarge', 4, ENLARGE_RETRY), create('catalog-enlarge-bulk', 44, ENLARGE_BULK_RETRY),
   ]);
   assert.deepEqual(run('queues_create_missing', {existing: [...LIVE_QUEUES, 'catalog-enlarge', 'catalog-enlarge-bulk']}), []);
   assert.deepEqual(run('queues_apply_shape', {existing: LIVE_QUEUES}), [
     update('catalog', 8), update('catalog-ingest', 4, INGEST_RETRY), update('catalog-bulk', 36),
-    update('catalog-enlarge', 4, ENLARGE_RETRY), update('catalog-enlarge-bulk', 10, ENLARGE_RETRY),
+    update('catalog-enlarge', 4, ENLARGE_RETRY), update('catalog-enlarge-bulk', 44, ENLARGE_BULK_RETRY),
   ]);
 });
 
-test('spec 18: both enlarge lanes carry the rate and the retry by attempts; env changes the rate and the slots', () => {
-  const env = {ENLARGE_DISPATCHES_PER_SECOND: '0.25', ENLARGE_MAX_DISPATCHES: '2', ENLARGE_BULK_MAX_DISPATCHES: '6'};
-  const retry = ENLARGE_RETRY.replace('=0.075', '=0.25');
+test('spec 18: each enlarge lane carries its own rate and the retry by attempts; env changes the rates and the slots', () => {
+  const env = {ENLARGE_DISPATCHES_PER_SECOND: '0.25', ENLARGE_BULK_DISPATCHES_PER_SECOND: '0.3', ENLARGE_MAX_DISPATCHES: '2', ENLARGE_BULK_MAX_DISPATCHES: '6'};
   assert.deepEqual(run('queues_apply_shape', {existing: LIVE_QUEUES, env}).filter((c) => c.includes('-enlarge')), [
-    update('catalog-enlarge', 2, retry), update('catalog-enlarge-bulk', 6, retry),
+    update('catalog-enlarge', 2, ENLARGE_RETRY.replace('=0.04', '=0.25')), update('catalog-enlarge-bulk', 6, ENLARGE_RETRY.replace('=0.04', '=0.3')),
   ]);
   // The rollback (no enlarge lanes): lanes that exist keep 1 slot; none is created.
   const off = {ENLARGE_MAX_DISPATCHES: '0', ENLARGE_BULK_MAX_DISPATCHES: '0'};
   assert.deepEqual(run('queues_create_missing', {existing: LIVE_QUEUES, env: off}), []);
   assert.deepEqual(run('queues_apply_shape', {existing: [...LIVE_QUEUES, 'catalog-enlarge', 'catalog-enlarge-bulk'], env: off}).filter((c) => c.includes('-enlarge')), [
-    update('catalog-enlarge', 1, ENLARGE_RETRY), update('catalog-enlarge-bulk', 1, ENLARGE_RETRY),
+    update('catalog-enlarge', 1, ENLARGE_RETRY), update('catalog-enlarge-bulk', 1, ENLARGE_BULK_RETRY),
   ]);
 });
 
 test('no env: a queue update is never below the shape value', () => {
   const calls = run('queues_create_missing; queues_apply_shape', {existing: LIVE_QUEUES});
-  const live = {'catalog': 8, 'catalog-bulk': 36, 'catalog-ingest': 4, 'catalog-enlarge': 4, 'catalog-enlarge-bulk': 10};
+  const live = {'catalog': 8, 'catalog-bulk': 36, 'catalog-ingest': 4, 'catalog-enlarge': 4, 'catalog-enlarge-bulk': 44};
   for (const c of calls.filter((l) => l.startsWith("tasks queues update"))) {
     const [, name, slots] = /^tasks queues update (\S+) .*--max-concurrent-dispatches=(\d+)/.exec(c);
     assert.ok(Number(slots) >= live[name], `${name} lowered to ${slots}, below its shape value ${live[name]}`);
@@ -91,7 +91,7 @@ test('no env: a queue update is never below the shape value', () => {
 test('a fresh stack: the missing queues are created at their shape slots with their retry', () => {
   assert.deepEqual(run('queues_create_missing', {existing: ['generation']}), [
     create('catalog', 8), create('catalog-ingest', 4, INGEST_RETRY), create('catalog-bulk', 36),
-    create('catalog-enlarge', 4, ENLARGE_RETRY), create('catalog-enlarge-bulk', 10, ENLARGE_RETRY),
+    create('catalog-enlarge', 4, ENLARGE_RETRY), create('catalog-enlarge-bulk', 44, ENLARGE_BULK_RETRY),
   ]);
 });
 
@@ -101,7 +101,7 @@ test('a smaller shape lowers queues only after the worker gate; a left bulk queu
   assert.deepEqual(run('queues_create_missing', {existing, env}), []);
   assert.deepEqual(run('queues_apply_shape', {existing, env}), [
     update('catalog', 6), update('catalog-ingest', 2, INGEST_RETRY), update('catalog-bulk', 1),
-    update('catalog-enlarge', 2, ENLARGE_RETRY), update('catalog-enlarge-bulk', 1, ENLARGE_RETRY),
+    update('catalog-enlarge', 2, ENLARGE_RETRY), update('catalog-enlarge-bulk', 1, ENLARGE_BULK_RETRY),
   ]);
   // Without a bulk queue and without bulk slots, none is created or changed.
   assert.deepEqual(run('queues_create_missing; queues_apply_shape', {existing: ['catalog', 'catalog-ingest', 'catalog-enlarge'], env}), [
