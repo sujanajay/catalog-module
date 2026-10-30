@@ -22,7 +22,12 @@
 # The registry functions are pure bash (they read deploy.sh's variables and call nothing), so
 # infra/tests/gate.test.mjs runs them offline; only the probes below call gcloud, each as its own process.
 
-SERVICES=(catalog-matting catalog-upscale catalog-matting-gpu catalog-worker catalog-web)
+# The web goes before the worker (spec 18 final check 2026-10-30): a worker that holds photos for a failed enlargement
+# must never be live behind a web that lets "Use as is" stage them without the plain warning (the warning is enforced
+# by the web's decision API). The new web works with the old worker: it only adds what the old worker never writes
+# (Try again needs a failed enlargement row, which only the new worker makes). If the web gate fails, the worker is
+# not deployed either.
+SERVICES=(catalog-matting catalog-upscale catalog-matting-gpu catalog-web catalog-worker)
 # The Cloud Run request timeout of the matting services (CPU and GPU). Spec 18 H3: with UPSCALE_SERVICE=cpu or gpu the
 # worker's enlarge task calls /upscale there and learns it as UPSCALE_TIMEOUT_S (infra/deploy.sh).
 MATTING_TIMEOUT_S=300

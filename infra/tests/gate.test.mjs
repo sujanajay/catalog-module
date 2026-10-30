@@ -46,10 +46,10 @@ const lines = (text) => text.split('\n');
 const tests = [];
 const test = (name, fn) => tests.push([name, fn]);
 
-test('registry lists the five services in order, each with a registry function', () => {
+test('registry lists the five services in order, each with a registry function; the web before the worker (spec 18 final check: the plain warning is live before any hold)', () => {
   const r = run('registry', `printf '%s\\n' "\${SERVICES[@]}"; for s in "\${SERVICES[@]}"; do declare -F "service_\${s//-/_}" >/dev/null || echo "missing $s"; done`);
   assert.equal(r.status, 0, r.err);
-  assert.deepEqual(lines(r.out.trim()), ['catalog-matting', 'catalog-upscale', 'catalog-matting-gpu', 'catalog-worker', 'catalog-web']);
+  assert.deepEqual(lines(r.out.trim()), ['catalog-matting', 'catalog-upscale', 'catalog-matting-gpu', 'catalog-web', 'catalog-worker']);
 });
 
 const vars = `AR=ar; TAG=t; MATTING_SA=m; WORKER_SA=w; WEB_SA=web; MATTING_CPU_MAX_INSTANCES=20; GPU_CPU=4; GPU_MEMORY=16Gi
@@ -62,7 +62,7 @@ show() { "service_\${1//-/_}"; echo "$1|$SVC_NAME|$SVC_REGION|$SVC_IMAGE|$SVC_PR
 test('registry entries: regions, probes, timeouts, preview behaviour, GPU knobs', () => {
   let r = run('entries', `${vars}\nUPSCALE_SERVICE=cpu; INFERENCE_LOCK_SCOPE=session\nfor s in "\${SERVICES[@]}"; do show "$s"; done`);
   assert.equal(r.status, 0, r.err);
-  const [cpu, upscale, gpu, worker, web] = lines(r.out.trim()).map((l) => l.split('|'));
+  const [cpu, upscale, gpu, web, worker] = lines(r.out.trim()).map((l) => l.split('|'));
   assert.deepEqual(upscale.slice(1, 7), ['catalog-upscale', 'asia-south1', 'ar/matting:t', '0', 'skip', '0'], 'not deployed while UPSCALE_SERVICE=cpu');
   // Probes sized per service: the CPU service gets its default model, 1 warm call and 1 round at its concurrency
   // (CPU calls take 25 to 71 s); the GPU service the full probe of every model, 5 rounds at the shape concurrency.

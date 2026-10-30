@@ -2,7 +2,7 @@
 # Order (spec 17 3.2.5): preflight checks and shape refusals, build the images on Cloud Build, run DB migrations as
 # the catalog-migrate Cloud Run job (additive; also seeds the first admin and the test brand test_brand), make sure
 # the task queues exist, then each service of the registry (infra/lib/services.sh: catalog-matting,
-# catalog-upscale, catalog-matting-gpu, catalog-worker, catalog-web, all private) through the deploy gate (infra/lib/gate.sh):
+# catalog-upscale, catalog-matting-gpu, catalog-web, catalog-worker, all private) through the deploy gate (infra/lib/gate.sh):
 # a no-traffic candidate, its probe against the candidate's tag URL, then the traffic shift. The worker's probe is
 # the tier 5 per-brand smoke (Cloud Run job catalog-test-smoke) on the new worker image against the new matting
 # candidates. A failing probe stops the script: that service keeps its live revision, later services are not
