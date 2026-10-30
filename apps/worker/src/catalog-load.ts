@@ -44,10 +44,8 @@ import { FULL_LOAD_OPTIONS, groupSourceFiles, replicateOptions, zipGroups, type 
 import { alterOnePixelRow, planReupload, reuploadSampleSize, type ReuploadPlan } from "@catalog/core/catalog/load/reupload";
 import { againstTarget, formatDuration, perMinute, percentile, stageWindows, type ChunkSample } from "@catalog/core/catalog/load/timing";
 import { batchPrefix } from "@catalog/core/catalog/naming";
-import { lockProducts } from "@catalog/core/catalog/products";
 import { pollUntilEnd } from "@catalog/core/catalog/load/poll";
-import { planChunks } from "@catalog/core/catalog/pipeline/plan-chunks";
-import { chunkImages, dispatchChunks, LOAD_BATCH_NAME_PREFIX } from "@catalog/core/catalog/pipeline/dispatch";
+import { LOAD_BATCH_NAME_PREFIX } from "@catalog/core/catalog/pipeline/dispatch";
 import { cleanupTestBatches } from "@catalog/core/catalog/test-cleanup";
 import { CHANNEL_IDS, type ChannelId } from "@catalog/core/catalog/types";
 import * as storage from "@catalog/core/storage";
@@ -57,6 +55,7 @@ import { enqueueTask } from "@catalog/core/tasks";
 import { buildZip } from "../../../packages/core/test-fixtures/catalog/ingest-a/builders";
 import { recheckCsv } from "@catalog/core/catalog/recheck/check";
 import { recheckBatch } from "./catalog/recheck-batch";
+import { startLoadBatch } from "./catalog/load-start";
 import { recheckEvidence, reportThenCleanup, type RecheckEvidence } from "./catalog/load-report";
 import { installWarningLog } from "./runtime";
 import { dataRoot } from "./catalog-real-fixtures";
@@ -143,27 +142,10 @@ async function collect(db: Db, batchId: string, uploadIds: string[], deadline: n
   return Date.now() - started;
 }
 
-/** "Start processing", as the web's start route does it: lock, plan chunks, queue the matte stage. */
+/** "Start processing", as the web's start route does it (catalog/load-start.ts, enlargement pinned). */
 async function start(db: Db, batchId: string) {
-  const [batch] = await db.select().from(catalogBatches).where(eq(catalogBatches.id, batchId));
-  const sources = await db.select({ id: catalogSourceImages.id, productId: catalogSourceImages.productId }).from(catalogSourceImages).where(eq(catalogSourceImages.batchId, batchId));
-  const productIds = (await db.select({ id: catalogBatchProducts.productId }).from(catalogBatchProducts).where(eq(catalogBatchProducts.batchId, batchId))).map(p => p.id);
-  const withPhotos = productIds.filter(id => sources.some(s => s.productId === id));
-  const plans = planChunks(withPhotos.map(productId => ({ productId, sourceCount: sources.filter(s => s.productId === productId).length })), chunkImages());
-  const chunks = await db.transaction(async tx => {
-    const locked = await lockProducts(tx as unknown as Db, batchId, productIds);
-    if (!locked.ok) throw new Error(`${locked.busy.length} products are locked by another batch.`);
-    const rows = [];
-    for (const [index, plan] of plans.entries()) {
-      const [chunk] = await tx.insert(catalogChunks).values({ batchId, index, stage: "matte", status: "queued", attempt: 0, productIds: plan.productIds, sourceImageIds: sources.filter(s => plan.productIds.includes(s.productId)).map(s => s.id) }).returning();
-      rows.push(chunk!);
-    }
-    await tx.update(catalogBatches).set({ status: "matting", startedAt: new Date(), updatedAt: new Date(), counts: { ...batch!.counts, products: productIds.length, sources: sources.length, outputs: sources.length * batch!.channels.length } }).where(eq(catalogBatches.id, batchId));
-    return rows;
-  });
-  // Spec 15 E5: the window queues the first chunks; each finished chunk queues the next.
-  await dispatchChunks(db, enqueueTask, batchId);
-  log("started", { batchId, chunks: chunks.length, sources: sources.length });
+  const { chunks, sources } = await startLoadBatch(db, batchId);
+  log("started", { batchId, chunks, sources });
 }
 
 /** Polls until the batch ends; every poll samples the chunks for the stage windows. */
