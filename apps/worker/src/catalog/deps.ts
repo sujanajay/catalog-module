@@ -27,7 +27,7 @@ export interface CatalogDeps {
   resolvePolicy: (brandSlug:string,category:string) => Promise<ResolvedPolicy>;
   judgeOutput: typeof judgeOutput; classifyProductType: typeof classifyProductType;
   prepare: typeof prepare; matteFor: typeof matteFor; renderAllChannels: typeof renderAllChannels;
-  /** Waits between cut-out retries (07 auto-resolve); absent uses a timer. Tests pass an instant one. */
+  /** Waits between cut-out retries (07 auto-resolve) and enlargement upload tries; absent uses a timer. Tests pass an instant one. */
   sleep?: (ms: number) => Promise<void>;
   /** The re-render-and-re-judge loop run before triage (qa/triage.ts); absent repairs nothing. */
   repairOwnDefects?: RepairOwnDefects<QaRepairContext>;
