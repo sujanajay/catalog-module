@@ -221,6 +221,19 @@ WORKER_ENV+=",PRICE_MATTE_CPU_USD_PER_SECOND=$PRICE_MATTE_CPU_USD_PER_SECOND,PRI
 PRICE_UPSCALE_GPU_USD_PER_SECOND=${PRICE_UPSCALE_GPU_USD_PER_SECOND:-0.00106226}
 [[ "$PRICE_UPSCALE_GPU_USD_PER_SECOND" =~ ^[0-9]+([.][0-9]+)?$ ]] || { echo "PRICE_UPSCALE_GPU_USD_PER_SECOND must be a number such as 0.00106226" >&2; exit 1; }
 WORKER_ENV+=",PRICE_UPSCALE_GPU_USD_PER_SECOND=$PRICE_UPSCALE_GPU_USD_PER_SECOND"
+# CPU upscale spend: the worker prices a `+cpu` upscale call made on catalog-upscale (UPSCALE_URL names no matting
+# service, UPSCALE_SERVICE=dedicated) at this rate; one made on catalog-matting (UPSCALE_URL=$MATTING_URL) keeps
+# PRICE_MATTE_CPU_USD_PER_SECOND. Keep it equal to DEFAULT_PRICE_UPSCALE_CPU_USD_PER_SECOND in
+# packages/core/src/catalog/cost.ts. Source: cloud.google.com/run/pricing, read 2026-10-31. catalog-upscale:
+# asia-south1 (Tier 1), request-based billing (no --no-cpu-throttling in infra/lib/services.sh), --cpu=$UPSCALE_CPU_VCPU
+# --memory=$UPSCALE_MEMORY (the UPSCALE_* rows of infra/lib/shape.sh, 4 vCPU/8Gi): CPU active USD 0.000024 per
+# vCPU-second, memory active USD 0.0000025 per GiB-second, so 4 * 0.000024 + 8 * 0.0000025 = 0.000116 per second.
+# Another shape gets its own default from UPSCALE_CPU_VCPU and UPSCALE_MEMORY; 4 vCPU/8Gi keeps 0.000116, equal to
+# cost.ts. Re-check if that service's region or billing mode changes.
+if [ -z "${PRICE_UPSCALE_CPU_USD_PER_SECOND:-}" ] && [ "$UPSCALE_CPU_VCPU/$UPSCALE_MEMORY" != 4/8Gi ]; then PRICE_UPSCALE_CPU_USD_PER_SECOND=$(usd "$UPSCALE_CPU_VCPU * 0.000024 + ${UPSCALE_MEMORY%Gi} * 0.0000025"); fi
+PRICE_UPSCALE_CPU_USD_PER_SECOND=${PRICE_UPSCALE_CPU_USD_PER_SECOND:-0.000116}
+[[ "$PRICE_UPSCALE_CPU_USD_PER_SECOND" =~ ^[0-9]+([.][0-9]+)?$ ]] || { echo "PRICE_UPSCALE_CPU_USD_PER_SECOND must be a number such as 0.000116" >&2; exit 1; }
+WORKER_ENV+=",PRICE_UPSCALE_CPU_USD_PER_SECOND=$PRICE_UPSCALE_CPU_USD_PER_SECOND"
 # 07: the QA judge and its spend caps. Override from the shell like BQ_PROJECT, e.g.
 # INR_PER_USD=83.5 bash infra/deploy.sh. CATALOG_QA_DEFAULT_MODEL is engineering config only; it is
 # never shown to the operator. It has no leading "/", so Git Bash leaves it alone.

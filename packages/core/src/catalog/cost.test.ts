@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { COMPUTE_VCPU_SECONDS_PER_OUTPUT_ESTIMATE, costLine, DEFAULT_COMPUTE_USD_PER_VCPU_SECOND, DEFAULT_PRICE_MATTE_CPU_USD_PER_SECOND, DEFAULT_PRICE_MATTE_GPU_USD_PER_SECOND, DEFAULT_PRICE_UPSCALE_GPU_USD_PER_SECOND, estimateCost, inrAmount, matteCallUsd, mattePricesFromEnv, QA_USD_PER_CHECK_ESTIMATE, QA_USD_PER_CHECK_FALLBACK, qaCallCost, upscaleCallUsd, usdAmount } from "./cost";
+import { COMPUTE_VCPU_SECONDS_PER_OUTPUT_ESTIMATE, costLine, DEFAULT_COMPUTE_USD_PER_VCPU_SECOND, DEFAULT_PRICE_MATTE_CPU_USD_PER_SECOND, DEFAULT_PRICE_MATTE_GPU_USD_PER_SECOND, DEFAULT_PRICE_UPSCALE_CPU_USD_PER_SECOND, DEFAULT_PRICE_UPSCALE_GPU_USD_PER_SECOND, estimateCost, inrAmount, matteCallUsd, mattePricesFromEnv, QA_USD_PER_CHECK_ESTIMATE, QA_USD_PER_CHECK_FALLBACK, qaCallCost, upscaleCallUsd, usdAmount } from "./cost";
 describe("matting service prices (cost ledger)",()=>{
  it("prices the 4 vCPU, 16 GiB CPU service at the asia-south1 request-based rate and the GPU service at the asia-southeast1 L4 instance rate, the same defaults deploy.sh sets",()=>{
   expect(DEFAULT_PRICE_MATTE_CPU_USD_PER_SECOND).toBeCloseTo(4*0.000024+16*0.0000025,12);
@@ -38,11 +38,41 @@ describe("matting service prices (cost ledger)",()=>{
   expect(upscaleCallUsd("gpu",2000,{...gpuService,PRICE_UPSCALE_GPU_USD_PER_SECOND:"abc"})).toEqual({usd:2*DEFAULT_PRICE_UPSCALE_GPU_USD_PER_SECOND,estimated:true});
   expect(upscaleCallUsd("gpu",0,gpuService)).toEqual({usd:0,estimated:false});
  });
- it("prices a CPU upscale like a CPU matting call and a GPU upscale without catalog-upscale-gpu (the L4 matting service) like a GPU matting call",()=>{
-  const env={PRICE_MATTE_CPU_USD_PER_SECOND:"0.0002",PRICE_MATTE_GPU_USD_PER_SECOND:"0.001",PRICE_UPSCALE_GPU_USD_PER_SECOND:"0.005"};
+ it("prices a CPU upscale on the CPU cut-out service like a CPU matting call and a GPU upscale without catalog-upscale-gpu (the L4 matting service) like a GPU matting call",()=>{
+  const env={PRICE_MATTE_CPU_USD_PER_SECOND:"0.0002",PRICE_MATTE_GPU_USD_PER_SECOND:"0.001",PRICE_UPSCALE_GPU_USD_PER_SECOND:"0.005",PRICE_UPSCALE_CPU_USD_PER_SECOND:"0.007"};
   expect(upscaleCallUsd("cpu",2000,{...env,UPSCALE_GPU_URL:"https://catalog-upscale-gpu.example"})).toEqual({usd:0.0004,estimated:false});
+  expect(upscaleCallUsd("cpu",2000,{...env,MATTING_URL:"https://catalog-matting.example",UPSCALE_URL:"https://catalog-matting.example/"})).toEqual({usd:0.0004,estimated:false});
   expect(upscaleCallUsd("gpu",500,env)).toEqual({usd:0.0005,estimated:false});
   expect(upscaleCallUsd("gpu",500,{...env,UPSCALE_GPU_URL:"  "})).toEqual({usd:0.0005,estimated:false});
+ });
+ it("prices the dedicated CPU upscaler (catalog-upscale, 4 vCPU, 8 GiB, asia-south1 request-based rate) apart from the CPU cut-out service, the same default deploy.sh sets",()=>{
+  expect(DEFAULT_PRICE_UPSCALE_CPU_USD_PER_SECOND).toBeCloseTo(4*0.000024+8*0.0000025,12);
+  expect(DEFAULT_PRICE_UPSCALE_CPU_USD_PER_SECOND).not.toBe(DEFAULT_PRICE_MATTE_CPU_USD_PER_SECOND);
+  const deploy=readFileSync(new URL("../../../../infra/deploy.sh",import.meta.url),"utf8");
+  expect(deploy).toContain(`PRICE_UPSCALE_CPU_USD_PER_SECOND=\${PRICE_UPSCALE_CPU_USD_PER_SECOND:-${DEFAULT_PRICE_UPSCALE_CPU_USD_PER_SECOND}}`);
+  expect(deploy).toContain(`WORKER_ENV+=",PRICE_UPSCALE_CPU_USD_PER_SECOND=$PRICE_UPSCALE_CPU_USD_PER_SECOND"`);
+ });
+ it("prices each upscale and cut-out route at its own service's rate",()=>{
+  // The live worker env: catalog-upscale (UPSCALE_URL names no matting service), catalog-upscale-gpu, the L4 matting service.
+  const live={MATTING_URL:"https://catalog-matting.example",MATTING_GPU_URLS:"https://catalog-matting-gpu.example",UPSCALE_URL:"https://catalog-upscale.example",UPSCALE_GPU_URL:"https://catalog-upscale-gpu.example",
+   PRICE_MATTE_CPU_USD_PER_SECOND:"0.0001",PRICE_MATTE_GPU_USD_PER_SECOND:"0.0003",PRICE_UPSCALE_GPU_USD_PER_SECOND:"0.001",PRICE_UPSCALE_CPU_USD_PER_SECOND:"0.0002"};
+  // CPU dedicated upscale (`+cpu` id on catalog-upscale).
+  expect(upscaleCallUsd("cpu",1000,live).usd).toBeCloseTo(0.0002,12);
+  expect(upscaleCallUsd("cpu",1000,live).estimated).toBe(false);
+  // GPU upscaler (catalog-upscale-gpu).
+  expect(upscaleCallUsd("gpu",1000,live).usd).toBeCloseTo(0.001,12);
+  // L4 matting upscale (a GPU upscale without catalog-upscale-gpu).
+  expect(upscaleCallUsd("gpu",1000,{...live,UPSCALE_GPU_URL:""}).usd).toBeCloseTo(0.0003,12);
+  // CPU and GPU cut-outs keep the matting rates.
+  expect(matteCallUsd("cpu",1000,live).usd).toBeCloseTo(0.0001,12);
+  expect(matteCallUsd("gpu",1000,live).usd).toBeCloseTo(0.0003,12);
+  // Without a configured rate the CPU dedicated upscale uses the code default, marked estimated; a bad value too.
+  const {PRICE_UPSCALE_CPU_USD_PER_SECOND:_,...noRate}=live;
+  expect(upscaleCallUsd("cpu",2000,noRate)).toEqual({usd:2*DEFAULT_PRICE_UPSCALE_CPU_USD_PER_SECOND,estimated:true});
+  expect(upscaleCallUsd("cpu",2000,{...live,PRICE_UPSCALE_CPU_USD_PER_SECOND:"abc"})).toEqual({usd:2*DEFAULT_PRICE_UPSCALE_CPU_USD_PER_SECOND,estimated:true});
+  expect(upscaleCallUsd("cpu",0,live)).toEqual({usd:0,estimated:false});
+  // UPSCALE_URL naming a GPU matting service (MATTING_GPU_URL when MATTING_GPU_URLS is unset) is not catalog-upscale.
+  expect(upscaleCallUsd("cpu",1000,{...live,MATTING_GPU_URLS:"",MATTING_GPU_URL:"https://catalog-upscale.example"}).usd).toBeCloseTo(0.0001,12);
  });
 });
 describe("catalog cost",()=>{

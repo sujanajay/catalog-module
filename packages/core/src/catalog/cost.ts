@@ -64,6 +64,16 @@ export const DEFAULT_PRICE_MATTE_GPU_USD_PER_SECOND = 0.00034884;
  * = 0.00106226. Like the matting rates it prices the service-reported seconds of a call, so it is a lower bound.
  */
 export const DEFAULT_PRICE_UPSCALE_GPU_USD_PER_SECOND = 0.00106226;
+/**
+ * USD per second of the dedicated CPU upscale service (catalog-upscale, asia-south1, deployed without
+ * --no-cpu-throttling so request-based billing, --cpu=4 --memory=8Gi, concurrency 1: the UPSCALE_CPU_VCPU and
+ * UPSCALE_MEMORY rows of infra/lib/shape.sh). Must match PRICE_UPSCALE_CPU_USD_PER_SECOND in infra/deploy.sh; this
+ * default is used when the env var is missing. Source: cloud.google.com/run/pricing, read 2026-10-31, "Services
+ * (Requests-based billing)", asia-south1 is Tier 1: CPU active USD 0.000024 per vCPU-second, memory active
+ * USD 0.0000025 per GiB-second. 4 * 0.000024 + 8 * 0.0000025 = 0.000096 + 0.00002 = 0.000116. Like the matting rates
+ * it prices the service-reported seconds of a call, so it is a lower bound.
+ */
+export const DEFAULT_PRICE_UPSCALE_CPU_USD_PER_SECOND = 0.000116;
 /** The matting-service target of a cut-out or upscale call; null is the worker's own simple cut-out. */
 export type MatteTarget = "cpu" | "gpu" | null;
 /** PRICE_MATTE_CPU_USD_PER_SECOND and PRICE_MATTE_GPU_USD_PER_SECOND; missing or invalid values use the documented defaults. */
@@ -81,17 +91,36 @@ export function matteCallUsd(target: MatteTarget, ms: number, env: NodeJS.Proces
  const rate = configured ?? (target === "gpu" ? DEFAULT_PRICE_MATTE_GPU_USD_PER_SECOND : DEFAULT_PRICE_MATTE_CPU_USD_PER_SECOND);
  return {usd:ms/1000*rate,estimated:configured === null};
 }
+const normalisedUrl = (url: string | undefined): string => (url ?? "").trim().replace(/\/+$/, "");
 /**
- * What `ms` of an upscale call cost on `target` (the ledger's upscale_call rows). A CPU upscale is priced like a CPU
- * matting call. A GPU upscale is made on catalog-upscale-gpu when the worker knows that service (UPSCALE_GPU_URL set,
- * the route enlarge.ts upscaleRouteFor takes) and is priced at PRICE_UPSCALE_GPU_USD_PER_SECOND; without it the call
- * went to the L4 matting service (spec 11) and is priced like a GPU matting call.
+ * Whether a `+cpu` upscale call went to the dedicated CPU upscale service catalog-upscale: UPSCALE_URL is set and names
+ * neither the CPU cut-out service (MATTING_URL, spec 16 3.1.3) nor a GPU matting service (MATTING_GPU_URLS, else
+ * MATTING_GPU_URL), the same rule as upscale.ts upscaleTargetFromEnv and the matting client's dedicatedUpscale.
+ */
+function cpuUpscaleOnDedicatedService(env: NodeJS.ProcessEnv): boolean {
+ const url = normalisedUrl(env.UPSCALE_URL);
+ if (!url) return false;
+ const gpu = env.MATTING_GPU_URLS?.trim() ? env.MATTING_GPU_URLS.split(",") : [env.MATTING_GPU_URL];
+ return ![env.MATTING_URL, ...gpu].map(normalisedUrl).includes(url);
+}
+/** `ms` of a call at the rate `value` configures, else at the code default `fallback` (then `estimated`). */
+function callUsd(ms: number, value: string | undefined, fallback: number): { usd: number; estimated: boolean } {
+ if (!Number.isFinite(ms) || ms <= 0) return {usd:0,estimated:false};
+ const configured = positive(value);
+ return {usd:ms/1000*(configured ?? fallback),estimated:configured === null};
+}
+/**
+ * What `ms` of an upscale call cost on `target` (the ledger's upscale_call rows). A CPU upscale made on catalog-upscale
+ * (UPSCALE_URL names no matting service) is priced at PRICE_UPSCALE_CPU_USD_PER_SECOND; one made on the CPU cut-out
+ * service (UPSCALE_URL equal to MATTING_URL) is priced like a CPU matting call. A GPU upscale is made on
+ * catalog-upscale-gpu when the worker knows that service (UPSCALE_GPU_URL set, the route enlarge.ts upscaleRouteFor
+ * takes) and is priced at PRICE_UPSCALE_GPU_USD_PER_SECOND; without it the call went to the L4 matting service
+ * (spec 11) and is priced like a GPU matting call.
  */
 export function upscaleCallUsd(target: "cpu" | "gpu", ms: number, env: NodeJS.ProcessEnv = process.env): { usd: number; estimated: boolean } {
- if (target === "cpu" || !env.UPSCALE_GPU_URL?.trim()) return matteCallUsd(target, ms, env);
- if (!Number.isFinite(ms) || ms <= 0) return {usd:0,estimated:false};
- const configured = positive(env.PRICE_UPSCALE_GPU_USD_PER_SECOND);
- return {usd:ms/1000*(configured ?? DEFAULT_PRICE_UPSCALE_GPU_USD_PER_SECOND),estimated:configured === null};
+ if (target === "cpu") return cpuUpscaleOnDedicatedService(env) ? callUsd(ms, env.PRICE_UPSCALE_CPU_USD_PER_SECOND, DEFAULT_PRICE_UPSCALE_CPU_USD_PER_SECOND) : matteCallUsd(target, ms, env);
+ if (!env.UPSCALE_GPU_URL?.trim()) return matteCallUsd(target, ms, env);
+ return callUsd(ms, env.PRICE_UPSCALE_GPU_USD_PER_SECOND, DEFAULT_PRICE_UPSCALE_GPU_USD_PER_SECOND);
 }
 /** Operator copy when no rupee rate is configured; never names the env var (spec 07 4.11). */
 export const RUPEES_NOT_CONFIGURED = "Cost in rupees is not configured yet";
