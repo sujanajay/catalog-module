@@ -14,7 +14,7 @@
 // catalog-upscale's slots, and a measure rung counts the live catalog-upscale beside it. Spec 18 quality: the largest
 // image is timed on the x4 model (UPSCALE_X4_TIME_RATIO 1.7 x the x2 p95 per MP, so 4.9 MP) and must fit the memory.
 // Spec 18 GPU upscaler (2026-10-31): the default target is gpu, with enlarge lanes sized to catalog-upscale-gpu
-// (2 + 8 + the preview's 2 = 12 = 3 x 4, 2 x 0.5 + 2 = 3/s = 12 / 4 s); UPSCALE_TARGET=cpu, the rollback, restores the
+// (2 + 12 + the preview's 2 = 16 = 4 x 4, 2 x 0.5 + 3 = 4/s = 16 / 4 s); UPSCALE_TARGET=cpu, the rollback, restores the
 // CPU lanes exactly (4 + 44, 0.04/s and 0.42/s). The CPU-path cases below set CPU.
 import fs from 'node:fs';
 import path from 'node:path';
@@ -117,10 +117,11 @@ const RECORDED_LIVE = {
   UPSCALE_CPU_VCPU: '4', UPSCALE_MEMORY: '8Gi', UPSCALE_CONCURRENCY: '1', UPSCALE_MAX_INSTANCES: '50', UPSCALE_THREADS: '4', UPSCALE_TIMEOUT_S: '1740', UPSCALE_COLD_START_S: '120',
   // Spec 18 3.3.1: the enlarge lanes, and worker concurrency 3 to give them their slots. Spec 18 GPU upscaler
   // (2026-10-31): new batches enlarge on catalog-upscale-gpu, so 2 operator lanes (this stack and the preview) x 0.5 +
-  // the bulk lane's 2 = 3/s <= 3 x 4 / 4 s, and 2 + 8 + the preview's 2 = 12 slots = 3 x 4. 2026-10-29 review P1-3, one cap per model (2026-10-31: at the Cloud Run time ratios): x2 5.4 MP x
+  // the bulk lane's 3 = 4/s <= 4 x 4 / 4 s, and 2 + 12 + the preview's 2 = 16 slots = 4 x 4 (4 GPU instances since
+  // 2026-10-31, the most the asia-south2 memory quota allows). 2026-10-29 review P1-3, one cap per model (2026-10-31: at the Cloud Run time ratios): x2 5.4 MP x
   // 104.17 s per MP x 1.52 = 856 s, 2 x 856 = 1712 s <= 1740 s; x4 4.9 MP x 104.17 s x 1.7 = 868 s, 2 x 868 = 1736 s;
   // memory 4096 MiB + 5.4 MP x 160 B = 4920 MiB <= 80% of 8 GiB (6553 MiB).
-  UPSCALE_MAX_PIXELS: '5400000', UPSCALE_MAX_PIXELS_X4: '4900000', ENLARGE_MAX_DISPATCHES: '2', ENLARGE_BULK_MAX_DISPATCHES: '8', ENLARGE_DISPATCHES_PER_SECOND: '0.5', ENLARGE_BULK_DISPATCHES_PER_SECOND: '2',
+  UPSCALE_MAX_PIXELS: '5400000', UPSCALE_MAX_PIXELS_X4: '4900000', ENLARGE_MAX_DISPATCHES: '2', ENLARGE_BULK_MAX_DISPATCHES: '12', ENLARGE_DISPATCHES_PER_SECOND: '0.5', ENLARGE_BULK_DISPATCHES_PER_SECOND: '3',
 };
 // Spec 18 GPU upscaler: the rollback, new batches back on catalog-upscale with the CPU lanes of ENLARGE_CPU_LANES
 // (2 operator lanes x 0.04 + the bulk lane's 0.42 = 0.50/s <= 50 / 99 s; 4 + 44 + the preview's 2 = 50 slots).
@@ -135,8 +136,8 @@ const CPU_LANES = {ENLARGE_MAX_DISPATCHES: '4', ENLARGE_BULK_MAX_DISPATCHES: '44
 const DEDICATED = {...CPU, WIRED: '1', UPSCALE_SERVICE: 'dedicated', UPSCALE_MEASURED_ON: '2026-10-30', UPSCALE_P95_S_4C_4T_1CONC_800x1200: '130', UPSCALE_P95_S_4C_4T_1CONC_1600x1600: '330',
   UPSCALE_P50_S_4C_4T_1CONC_800x1200: '', UPSCALE_P50_S_4C_4T_1CONC_1600x1600: '', UPSCALE_TIMEOUT_S: '840', UPSCALE_MAX_PIXELS: '2000000', UPSCALE_MAX_PIXELS_X4: '1800000', ENLARGE_DISPATCHES_PER_SECOND: '0.06',
   ENLARGE_BULK_DISPATCHES_PER_SECOND: '0.26'};
-// Spec 18 GPU upscaler: the shape that sends new batches to catalog-upscale-gpu (3 x RTX PRO 6000, concurrency 4).
-const GPU_FLIP = {UPSCALE_TARGET: 'gpu', ENLARGE_MAX_DISPATCHES: '2', ENLARGE_BULK_MAX_DISPATCHES: '8', ENLARGE_DISPATCHES_PER_SECOND: '0.5', ENLARGE_BULK_DISPATCHES_PER_SECOND: '2'};
+// Spec 18 GPU upscaler: the shape that sends new batches to catalog-upscale-gpu (4 x RTX PRO 6000, concurrency 4).
+const GPU_FLIP = {UPSCALE_TARGET: 'gpu', ENLARGE_MAX_DISPATCHES: '2', ENLARGE_BULK_MAX_DISPATCHES: '12', ENLARGE_DISPATCHES_PER_SECOND: '0.5', ENLARGE_BULK_DISPATCHES_PER_SECOND: '3'};
 const PRE_F2 = {...NO_ENLARGE, WORKER_MAX_INSTANCES: '4', WORKER_CPU: '2', WORKER_MEMORY: '2Gi', TASKS_MAX_DISPATCHES: '6', BULK_MAX_DISPATCHES: '0',
   INGEST_MAX_DISPATCHES: '2', DB_MAX_CONNECTIONS: '25', MATTING_CPU_MAX_INSTANCES: '20', UPSCALE_SERVICE: 'gpu', UPSCALE_GPU_SERVICE: '0', UPSCALE_TARGET: 'cpu',
   CATALOG_PHOTO_CONCURRENCY: '1', CATALOG_BULK_WINDOW: '8', LLM_INFLIGHT_PER_INSTANCE: ''};
@@ -146,7 +147,7 @@ const cases = [
     label: 'no env resolves to the recorded live shape',
     env: {},
     // Every shape name, so a new name without a recorded live value fails here.
-    expect: {...Object.fromEntries(NAMES.map((n) => [n, RECORDED_LIVE[n]])), ...MEASURED, STATUS: '0', CATALOG_DB_TOTAL: '200', CATALOG_DB_LIMIT: '393', SLOTS_TOTAL: '58', SLOTS_CAPACITY: '96',
+    expect: {...Object.fromEntries(NAMES.map((n) => [n, RECORDED_LIVE[n]])), ...MEASURED, STATUS: '0', CATALOG_DB_TOTAL: '200', CATALOG_DB_LIMIT: '393', SLOTS_TOTAL: '62', SLOTS_CAPACITY: '96',
       // vCPU 128 + 16 + 200 + 11 + the preview's 19 = 374 of 376; GiB 128 + 64 + 400 + 19 + 19 = 630 of 776.
       CPU_TOTAL: '374', CPU_QUOTA_LIMIT: '376', MEMORY_TOTAL_GIB: '630', MEMORY_QUOTA_LIMIT_GIB: '776', COMPUTE: '0.0000265', GPU_PRICE: '0.00034884',
       UPSCALE_CPU_PRICE: '0.000116',
@@ -333,35 +334,37 @@ const cases = [
   {label: 'the enlarge rate must be a number above 0', env: {ENLARGE_DISPATCHES_PER_SECOND: '0'}, expect: {STATUS: '1'}, error: /ENLARGE_DISPATCHES_PER_SECOND must be a number above 0 and at most 500/},
   {label: 'no enlarge lanes (the rollback) fits concurrency 2', env: NO_ENLARGE, expect: {STATUS: '0', SLOTS_TOTAL: '48', SLOTS_CAPACITY: '64', CATALOG_DB_TOTAL: '136'}},
   {label: 'no probe sizes is refused, not treated as all measured', env: {...DEDICATED, MATTING_CPU_MAX_INSTANCES: '4', UPSCALE_SIZES: ''}, expect: {STATUS: '1'}, error: /UPSCALE_SIZES must list the probe sizes/},
-  // Spec 18 GPU upscaler (2026-10-30): catalog-upscale-gpu, 3 x RTX PRO 6000 in asia-south2 at concurrency 4, measured.
+  // Spec 18 GPU upscaler (2026-10-30): catalog-upscale-gpu, 4 x RTX PRO 6000 (since 2026-10-31) in asia-south2 at concurrency 4, measured.
   {label: 'GPU upscaler: the default deploys it and sends new batches to it (2026-10-31)', env: {}, expect: {STATUS: '0', UPSCALE_TARGET: 'gpu', ...Object.fromEntries(Object.keys(CPU_LANES).map((n) => [n, GPU_FLIP[n]])), UPSCALE_GPU_SERVICE: '1', UPSCALE_GPU_TYPE: 'nvidia-rtx-pro-6000', UPSCALE_GPU_REGION: 'asia-south2'}},
-  {label: 'GPU upscaler: the flip shape (lanes 2 + 8 + the preview 2 = 12 = 3 x 4; 0.5/s x 2 operator lanes + 2/s bulk = 3/s <= 12 / p50 4 s) passes, the CPU rate rule no longer binds',
+  {label: 'GPU upscaler: the flip shape (lanes 2 + 12 + the preview 2 = 16 = 4 x 4; 0.5/s x 2 operator lanes + 3/s bulk = 4/s <= 16 / p50 4 s) passes, the CPU rate rule no longer binds',
     env: GPU_FLIP, expect: {STATUS: '0'}},
   {label: 'GPU upscaler: the same rates with new batches on the CPU are refused by the CPU rule',
     env: {...GPU_FLIP, UPSCALE_TARGET: 'cpu'}, expect: {STATUS: '1'}, error: /exceed what catalog-upscale finishes/},
   {label: 'GPU upscaler: the CPU lanes are more than the GPU serves at once', env: {...CPU_LANES, UPSCALE_TARGET: 'gpu'}, expect: {STATUS: '1'},
-    error: /enlarge slots 4 \+ 44 \+ the other stack's 2 = 50 exceed what catalog-upscale-gpu serves at once \(3 x 4\)/},
-  {label: 'GPU upscaler: rates summing above what the GPU finishes are refused', env: {...GPU_FLIP, ENLARGE_BULK_DISPATCHES_PER_SECOND: '3'}, expect: {STATUS: '1'},
-    error: /enlarge rates ENLARGE_DISPATCHES_PER_SECOND=0.5 x 2 operator lanes \+ ENLARGE_BULK_DISPATCHES_PER_SECOND=3 x 1 bulk lanes = 4.0000 per second exceed what catalog-upscale-gpu finishes: 3 x 4 \/ p50 4 s of 800x1200 = 3.0000 per second/},
+    error: /enlarge slots 4 \+ 44 \+ the other stack's 2 = 50 exceed what catalog-upscale-gpu serves at once \(4 x 4\)/},
+  {label: 'GPU upscaler: rates summing above what the GPU finishes are refused', env: {...GPU_FLIP, ENLARGE_BULK_DISPATCHES_PER_SECOND: '4'}, expect: {STATUS: '1'},
+    error: /enlarge rates ENLARGE_DISPATCHES_PER_SECOND=0.5 x 2 operator lanes \+ ENLARGE_BULK_DISPATCHES_PER_SECOND=4 x 1 bulk lanes = 5.0000 per second exceed what catalog-upscale-gpu finishes: 4 x 4 \/ p50 4 s of 800x1200 = 4.0000 per second/},
   {label: 'GPU upscaler rollback: UPSCALE_TARGET=cpu restores the CPU lanes exactly (4 + 44 slots, 0.04/s and 0.42/s), 96 of 96 worker slots',
     env: CPU, expect: {...CPU_LANES, STATUS: '0', UPSCALE_TARGET: 'cpu', UPSCALE_GPU_SERVICE: '1', SLOTS_TOTAL: '96', SLOTS_CAPACITY: '96'}},
   {label: 'GPU upscaler rollback: the preview with UPSCALE_TARGET=cpu keeps its 2-slot lane at the CPU rates, production\'s 48 counted',
     env: {...CPU, CATALOG_PREVIEW: '1'}, expect: {STATUS: '0', ENLARGE_MAX_DISPATCHES: '2', ENLARGE_BULK_MAX_DISPATCHES: '0', ENLARGE_DISPATCHES_PER_SECOND: '0.04', ENLARGE_BULK_DISPATCHES_PER_SECOND: '0.42'}},
   {label: 'GPU upscaler rollback: env still wins over a CPU lane row', env: {...CPU, ENLARGE_BULK_MAX_DISPATCHES: '40'},
     expect: {STATUS: '0', ENLARGE_MAX_DISPATCHES: '4', ENLARGE_BULK_MAX_DISPATCHES: '40', ENLARGE_BULK_DISPATCHES_PER_SECOND: '0.42'}},
-  {label: 'GPU upscaler: the preview on the default lanes counts production\'s 2 + 8 against the GPU', env: {CATALOG_PREVIEW: '1', ENLARGE_MAX_DISPATCHES: '3'}, expect: {STATUS: '1'},
-    error: /enlarge slots 3 \+ 0 \+ the other stack's 10 = 13 exceed what catalog-upscale-gpu serves at once \(3 x 4\)/},
-  {label: 'GPU upscaler: a wider default bulk lane is refused (12 = 3 x 4 is the most)', env: {ENLARGE_BULK_MAX_DISPATCHES: '9'}, expect: {STATUS: '1'},
-    error: /enlarge slots 2 \+ 9 \+ the other stack's 2 = 13 exceed what catalog-upscale-gpu serves at once \(3 x 4\)/},
-  {label: 'GPU upscaler: fewer GPU instances than the granted 3 do not cover the default lanes', env: {UPSCALE_GPU_MAX_INSTANCES: '2'}, expect: {STATUS: '1'},
-    error: /enlarge slots 2 \+ 8 \+ the other stack's 2 = 12 exceed what catalog-upscale-gpu serves at once \(2 x 4\)/},
+  {label: 'GPU upscaler: the preview on the default lanes counts production\'s 2 + 12 against the GPU', env: {CATALOG_PREVIEW: '1', ENLARGE_MAX_DISPATCHES: '3'}, expect: {STATUS: '1'},
+    error: /enlarge slots 3 \+ 0 \+ the other stack's 14 = 17 exceed what catalog-upscale-gpu serves at once \(4 x 4\)/},
+  {label: 'GPU upscaler: a wider default bulk lane is refused (16 = 4 x 4 is the most)', env: {ENLARGE_BULK_MAX_DISPATCHES: '13'}, expect: {STATUS: '1'},
+    error: /enlarge slots 2 \+ 13 \+ the other stack's 2 = 17 exceed what catalog-upscale-gpu serves at once \(4 x 4\)/},
+  {label: 'GPU upscaler: fewer GPU instances than the live 4 do not cover the default lanes', env: {UPSCALE_GPU_MAX_INSTANCES: '3'}, expect: {STATUS: '1'},
+    error: /enlarge slots 2 \+ 12 \+ the other stack's 2 = 16 exceed what catalog-upscale-gpu serves at once \(3 x 4\)/},
   {label: 'GPU upscaler: the default rates are at what the GPU finishes; a higher operator rate is refused', env: {ENLARGE_DISPATCHES_PER_SECOND: '0.6'}, expect: {STATUS: '1'},
-    error: /= 3.2000 per second exceed what catalog-upscale-gpu finishes: 3 x 4 \/ p50 4 s of 800x1200 = 3.0000 per second/},
+    error: /= 4.2000 per second exceed what catalog-upscale-gpu finishes: 4 x 4 \/ p50 4 s of 800x1200 = 4.0000 per second/},
   {label: 'GPU upscaler: UPSCALE_TARGET=gpu needs the service', env: {UPSCALE_TARGET: 'gpu', UPSCALE_GPU_SERVICE: '0'}, expect: {STATUS: '1'}, error: /UPSCALE_TARGET=gpu needs UPSCALE_GPU_SERVICE=1/},
   {label: 'GPU upscaler: an unknown target is refused', env: {UPSCALE_TARGET: 'tpu'}, expect: {STATUS: '1'}, error: /UPSCALE_TARGET must be cpu or gpu, got 'tpu'/},
-  {label: 'GPU upscaler: more instances than the RTX quota are refused', env: {UPSCALE_GPU_MAX_INSTANCES: '4'}, expect: {STATUS: '1'},
-    error: /UPSCALE_GPU_MAX_INSTANCES=4 exceeds the nvidia-rtx-pro-6000 quota of 3 in asia-south2/},
-  {label: 'GPU upscaler: a granted quota of 6 allows 6 (120 vCPU, 480 GiB is above the region memory)', env: {UPSCALE_GPU_QUOTA: '6', UPSCALE_GPU_MAX_INSTANCES: '6'}, expect: {STATUS: '1'},
+  {label: 'GPU upscaler: more instances than the RTX quota are refused', env: {UPSCALE_GPU_MAX_INSTANCES: '7'}, expect: {STATUS: '1'},
+    error: /UPSCALE_GPU_MAX_INSTANCES=7 exceeds the nvidia-rtx-pro-6000 quota of 6 in asia-south2/},
+  {label: 'GPU upscaler: 4 is the most the asia-south2 memory allows; 5 (400 GiB) is above 384 GiB', env: {UPSCALE_GPU_MAX_INSTANCES: '5'}, expect: {STATUS: '1'},
+    error: /^ERROR: catalog-upscale-gpu at max instances takes 400 GiB, above 384 GiB of the asia-south2 quota\n$/},
+  {label: 'GPU upscaler: the granted quota of 6 allows 6 (120 vCPU, 480 GiB is above the region memory until it is raised)', env: {UPSCALE_GPU_MAX_INSTANCES: '6'}, expect: {STATUS: '1'},
     error: /catalog-upscale-gpu at max instances takes 480 GiB, above 384 GiB of the asia-south2 quota/},
   {label: 'GPU upscaler: Cloud Run\'s RTX PRO 6000 shape (at least 20 vCPU and 80Gi)', env: {UPSCALE_GPU_CPU: '8', UPSCALE_GPU_MEMORY: '32Gi'}, expect: {STATUS: '1'},
     error: /UPSCALE_GPU_CPU must be at least 20 with an RTX PRO 6000[\s\S]*UPSCALE_GPU_MEMORY must be at least 80Gi with an RTX PRO 6000/},

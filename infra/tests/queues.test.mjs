@@ -24,10 +24,10 @@ const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'catalog-queues-'));
 const RETRY = '--max-attempts=-1 --max-retry-duration=1800s --min-backoff=10s --max-backoff=60s --max-doublings=3';
 const INGEST_RETRY = '--max-attempts=5 --min-backoff=10s';
 const enlargeRetry = (rate) => `--max-dispatches-per-second=${rate} --max-attempts=-1 --max-retry-duration=0s --min-backoff=30s --max-backoff=900s --max-doublings=5`;
-// Spec 18 GPU upscaler (2026-10-31): the default lanes are sized to catalog-upscale-gpu (2 slots at 0.5/s, bulk 8 at
-// 2/s); UPSCALE_TARGET=cpu, the rollback, restores the CPU lanes (4 at 0.04/s, bulk 44 at 0.42/s).
+// Spec 18 GPU upscaler (2026-10-31): the default lanes are sized to catalog-upscale-gpu (2 slots at 0.5/s, bulk 12 at
+// 3/s, 4 GPU instances); UPSCALE_TARGET=cpu, the rollback, restores the CPU lanes (4 at 0.04/s, bulk 44 at 0.42/s).
 const ENLARGE_RETRY = enlargeRetry('0.5');
-const ENLARGE_BULK_RETRY = enlargeRetry('2');
+const ENLARGE_BULK_RETRY = enlargeRetry('3');
 const CPU_ENLARGE_RETRY = enlargeRetry('0.04');
 const CPU_ENLARGE_BULK_RETRY = enlargeRetry('0.42');
 // The shape names a caller's shell could carry into the run; each run starts without them.
@@ -62,12 +62,12 @@ const test = (name, fn) => tests.push([name, fn]);
 
 test('no env: before the services only the new enlarge lanes are created; after the worker gate every queue gets its shape slots', () => {
   assert.deepEqual(run('queues_create_missing', {existing: LIVE_QUEUES}), [
-    create('catalog-enlarge', 2, ENLARGE_RETRY), create('catalog-enlarge-bulk', 8, ENLARGE_BULK_RETRY),
+    create('catalog-enlarge', 2, ENLARGE_RETRY), create('catalog-enlarge-bulk', 12, ENLARGE_BULK_RETRY),
   ]);
   assert.deepEqual(run('queues_create_missing', {existing: [...LIVE_QUEUES, 'catalog-enlarge', 'catalog-enlarge-bulk']}), []);
   assert.deepEqual(run('queues_apply_shape', {existing: LIVE_QUEUES}), [
     update('catalog', 8), update('catalog-ingest', 4, INGEST_RETRY), update('catalog-bulk', 36),
-    update('catalog-enlarge', 2, ENLARGE_RETRY), update('catalog-enlarge-bulk', 8, ENLARGE_BULK_RETRY),
+    update('catalog-enlarge', 2, ENLARGE_RETRY), update('catalog-enlarge-bulk', 12, ENLARGE_BULK_RETRY),
   ]);
 });
 
@@ -110,7 +110,7 @@ test('no env: a queue update is never below the shape value', () => {
 test('a fresh stack: the missing queues are created at their shape slots with their retry', () => {
   assert.deepEqual(run('queues_create_missing', {existing: ['generation']}), [
     create('catalog', 8), create('catalog-ingest', 4, INGEST_RETRY), create('catalog-bulk', 36),
-    create('catalog-enlarge', 2, ENLARGE_RETRY), create('catalog-enlarge-bulk', 8, ENLARGE_BULK_RETRY),
+    create('catalog-enlarge', 2, ENLARGE_RETRY), create('catalog-enlarge-bulk', 12, ENLARGE_BULK_RETRY),
   ]);
 });
 
