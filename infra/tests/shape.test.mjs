@@ -45,14 +45,15 @@ const pick = (prefix) => {
   return line;
 };
 const prices = [pick('usd() {'), pick('if [ -z "${COMPUTE_USD_PER_VCPU_SECOND:-}"'), pick('COMPUTE_USD_PER_VCPU_SECOND=${COMPUTE_USD_PER_VCPU_SECOND:-'),
-  pick('if [ -z "${PRICE_MATTE_GPU_USD_PER_SECOND:-}"'), pick('PRICE_MATTE_GPU_USD_PER_SECOND=${PRICE_MATTE_GPU_USD_PER_SECOND:-')].join('\n');
+  pick('if [ -z "${PRICE_MATTE_GPU_USD_PER_SECOND:-}"'), pick('PRICE_MATTE_GPU_USD_PER_SECOND=${PRICE_MATTE_GPU_USD_PER_SECOND:-'),
+  pick('if [ -z "${PRICE_UPSCALE_CPU_USD_PER_SECOND:-}"'), pick('PRICE_UPSCALE_CPU_USD_PER_SECOND=${PRICE_UPSCALE_CPU_USD_PER_SECOND:-')].join('\n');
 
 // ENLARGE_CLIENT_WIRED defaults to 1 since spec 18 H3 (env 0 marks an older worker image); a case may also set it to 1
 // after shape_defaults through `wired`.
 function run(env, live = '400') {
   const {WIRED: wired, ...rest} = env;
   env = rest;
-  const clean = Object.fromEntries(Object.entries(process.env).filter(([k]) => !NAMES.includes(k) && k !== 'CATALOG_PREVIEW' && !k.startsWith('GPU_MODEL_PEAK_MIB_') && !k.startsWith('UPSCALE_') && !k.startsWith('COMPUTE_USD') && !k.startsWith('PRICE_MATTE') && k !== 'ENLARGE_CLIENT_WIRED'));
+  const clean = Object.fromEntries(Object.entries(process.env).filter(([k]) => !NAMES.includes(k) && k !== 'CATALOG_PREVIEW' && !k.startsWith('GPU_MODEL_PEAK_MIB_') && !k.startsWith('UPSCALE_') && !k.startsWith('COMPUTE_USD') && !k.startsWith('PRICE_MATTE') && !k.startsWith('PRICE_UPSCALE') && k !== 'ENLARGE_CLIENT_WIRED'));
   const script = `set -euo pipefail
 source infra/lib/shape.sh
 shape_defaults
@@ -63,6 +64,7 @@ ${prices}
 ${OUT.map((n) => `echo "${n}=\${${n}:-}"`).join('\n')}
 echo "COMPUTE=$COMPUTE_USD_PER_VCPU_SECOND"
 echo "GPU_PRICE=$PRICE_MATTE_GPU_USD_PER_SECOND"
+echo "UPSCALE_CPU_PRICE=$PRICE_UPSCALE_CPU_USD_PER_SECOND"
 echo "STATUS=$status"`;
   const r = spawnSync(bash, ['-c', script], {cwd: root, env: {...clean, ...env}, encoding: 'utf8'});
   assert.equal(r.status, 0, r.stderr);
@@ -147,6 +149,7 @@ const cases = [
     expect: {...Object.fromEntries(NAMES.map((n) => [n, RECORDED_LIVE[n]])), ...MEASURED, STATUS: '0', CATALOG_DB_TOTAL: '200', CATALOG_DB_LIMIT: '393', SLOTS_TOTAL: '58', SLOTS_CAPACITY: '96',
       // vCPU 128 + 16 + 200 + 11 + the preview's 19 = 374 of 376; GiB 128 + 64 + 400 + 19 + 19 = 630 of 776.
       CPU_TOTAL: '374', CPU_QUOTA_LIMIT: '376', MEMORY_TOTAL_GIB: '630', MEMORY_QUOTA_LIMIT_GIB: '776', COMPUTE: '0.0000265', GPU_PRICE: '0.00034884',
+      UPSCALE_CPU_PRICE: '0.000116',
       UPSCALE_MEASURE: '0', UPSCALE_MEASURED_ON: '2026-10-29', UPSCALE_VCPU_TOTAL: '200', UPSCALE_LIVE_VCPU: '200', UPSCALE_GIB_TOTAL: '400', UPSCALE_LIVE_GIB: '400'},
   },
   {label: 'env still wins over a row, also an explicit "" (no AI check cap)', env: {TASKS_MAX_DISPATCHES: '14', BULK_MAX_DISPATCHES: '30', LLM_INFLIGHT_PER_INSTANCE: ''},
@@ -174,7 +177,8 @@ const cases = [
   {label: 'cpu quota: one catalog-upscale instance more than the 400 vCPU hold', env: {UPSCALE_MAX_INSTANCES: '51'}, expect: {STATUS: '1', CPU_TOTAL: '378', MEMORY_TOTAL_GIB: '638'},
     error: /^ERROR: asia-south1 vCPU at max instances 378 exceeds 376 of the 400 vCPU quota, 24 kept for the other apps \(worker 128 \+ catalog-matting 16 \+ catalog-upscale 204 \+ web and jobs 11 \+ the preview stack 19\); lower /},
   // 2026-10-30: memory was not checked; at 16Gi per catalog-upscale instance the shape would be far above the quota.
-  {label: 'memory quota: catalog-upscale at 16Gi does not fit 50 instances', env: {UPSCALE_MEMORY: '16Gi'}, expect: {STATUS: '1', CPU_TOTAL: '374', MEMORY_TOTAL_GIB: '1030'},
+  // The CPU upscale price follows catalog-upscale's shape: 4 * 0.000024 + 16 * 0.0000025 = 0.000136 per second.
+  {label: 'memory quota: catalog-upscale at 16Gi does not fit 50 instances', env: {UPSCALE_MEMORY: '16Gi'}, expect: {STATUS: '1', CPU_TOTAL: '374', MEMORY_TOTAL_GIB: '1030', UPSCALE_CPU_PRICE: '0.000136'},
     error: /^ERROR: asia-south1 memory at max instances 1030 GiB exceeds 776 of the 800 GiB quota, 24 kept for the other apps \(worker 128 \+ catalog-matting 64 \+ catalog-upscale 800 \+ web and jobs 19 \+ the preview stack 19\); lower UPSCALE_MEMORY or a \*_MAX_INSTANCES\n$/},
   {label: 'memory quota: the other apps keep their share', env: {UPSCALE_MEMORY: '12Gi'}, expect: {STATUS: '1', MEMORY_TOTAL_GIB: '830'}, error: /memory at max instances 830 GiB exceeds 776/},
   {label: 'gpu quota', env: {GPU_MAX_INSTANCES: '4'}, expect: {STATUS: '1'}, error: /exceeds the L4 quota of 3; request more first .*the owner allows quota requests since 2026-10-30/},
