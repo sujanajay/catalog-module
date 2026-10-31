@@ -23,6 +23,8 @@
 #   ENLARGE_BULK_DISPATCHES_PER_SECOND=0.075 UPSCALE_MEMORY=16Gi UPSCALE_MAX_INSTANCES=16
 # The shape before the GPU upscaler became the default (2026-10-31), for a rollback: UPSCALE_TARGET=cpu (the enlarge
 #   lanes then come from ENLARGE_CPU_LANES: 4 + 44 slots at 0.04/s and 0.42/s).
+# The shape before the fourth GPU upscaler instance (2026-10-31), for a rollback: UPSCALE_GPU_MAX_INSTANCES=3
+#   ENLARGE_BULK_MAX_DISPATCHES=8 ENLARGE_BULK_DISPATCHES_PER_SECOND=2
 SHAPE_DEFAULTS=(
   # What Postgres allows on ila-pg: the default of its tier db-custom-2-7680 (ila-pg sets no max_connections flag).
   # Lower it, and deploy, before infra/sql-tier.sh moves to a smaller tier (docs/solutions/db-connection-budget.md).
@@ -34,7 +36,8 @@ SHAPE_DEFAULTS=(
   # Spec 18 3.3.1: 2 -> 3 so the enlarge lanes get their own slots without taking any from the chunk queues (the
   # DB budget below allows it: 32 x 6 + 6 + 2 = 200 of 393). An enlarge task mostly waits on catalog-upscale.
   WORKER_CONCURRENCY=3
-  # Queue slots, main + bulk + ingest + enlarge + enlarge bulk = 96 of the worker's 32 x 3. The ingest queue
+  # Queue slots, main + bulk + ingest + enlarge + enlarge bulk = 62 of the worker's 32 x 3 (96 with the CPU lanes of
+  # ENLARGE_CPU_LANES). The ingest queue
   # (new-batch setup) keeps its slots free of batch processing; the bulk queue (spec 16, big batches) is created only
   # when BULK_MAX_DISPATCHES > 0.
   TASKS_MAX_DISPATCHES=8
@@ -48,15 +51,15 @@ SHAPE_DEFAULTS=(
   # applies a rate per queue, so the SUM over every lane with slots, both stacks, must stay within what that upscaler
   # finishes (spec 18 3.1.5). Each lane's rate is about its slots / p50, so no lane is held back by another's share.
   # These rows are for UPSCALE_TARGET=gpu (the default since 2026-10-31): catalog-upscale-gpu serves
-  # UPSCALE_GPU_MAX_INSTANCES x UPSCALE_GPU_CONCURRENCY = 3 x 4 = 12 at once, so 2 + 8 + the preview's 2 = 12, and it
-  # finishes 12 / p50(800x1200) 4 s = 3/s, so 2 x 0.5 + 2 = 3/s (upscale_gpu_check). With UPSCALE_TARGET=cpu the lanes
+  # UPSCALE_GPU_MAX_INSTANCES x UPSCALE_GPU_CONCURRENCY = 4 x 4 = 16 at once, so 2 + 12 + the preview's 2 = 16, and it
+  # finishes 16 / p50(800x1200) 4 s = 4/s, so 2 x 0.5 + 3 = 4/s (upscale_gpu_check). With UPSCALE_TARGET=cpu the lanes
   # come from ENLARGE_CPU_LANES below (the CPU shape, exactly as it ran before the switch).
   # ENLARGE_MAX_DISPATCHES=0 means no enlarge lanes: the worker gets no TASKS_ENLARGE_QUEUE and enlarge tasks share the
   # chunk queues (the rollback line above).
   ENLARGE_MAX_DISPATCHES=2
-  ENLARGE_BULK_MAX_DISPATCHES=8
+  ENLARGE_BULK_MAX_DISPATCHES=12
   ENLARGE_DISPATCHES_PER_SECOND=0.5
-  ENLARGE_BULK_DISPATCHES_PER_SECOND=2
+  ENLARGE_BULK_DISPATCHES_PER_SECOND=3
   # CPU cut-out service catalog-matting (asia-south1, 4 vCPU each). Spec 18: 16 -> 4 to give catalog-upscale its
   # vCPU; the GPU does the cut-outs, the CPU cut-out is a fallback.
   MATTING_CPU_MAX_INSTANCES=4
@@ -131,8 +134,9 @@ SHAPE_DEFAULTS=(
   # worker its URL either way.
   UPSCALE_TARGET=gpu
   UPSCALE_GPU_SERVICE=1
-  # One NVIDIA RTX PRO 6000 (Blackwell, 96 GB) per instance in asia-south2, no zonal redundancy: Google granted 3 on
-  # the first deploy (2026-10-30). Cloud Run needs at least 20 vCPU and 80 GiB with this GPU. Concurrency 4: the
+  # One NVIDIA RTX PRO 6000 (Blackwell, 96 GB) per instance in asia-south2, no zonal redundancy: 4 since 2026-10-31,
+  # the most the asia-south2 memory quota allows (4 x 80 = 320 of 384 GiB; 5 x 80 = 400 does not fit, see
+  # UPSCALE_GPU_REGION_MEMORY_GIB_LIMIT), within the granted GPU quota of 6. Cloud Run needs at least 20 vCPU and 80 GiB with this GPU. Concurrency 4: the
   # requests queue on the service's inference lock (one tile at a time), so 4 at once only overlap decode and encode
   # with inference; measured deterministic (services/matting/README.md "Measured on RTX PRO 6000"). Timeout 300 s:
   # the slowest measured call is a few seconds, and the largest image the caps allow about 20 s (upscale_gpu_check).
@@ -140,7 +144,7 @@ SHAPE_DEFAULTS=(
   UPSCALE_GPU_TYPE=nvidia-rtx-pro-6000
   UPSCALE_GPU_CPU=20
   UPSCALE_GPU_MEMORY=80Gi
-  UPSCALE_GPU_MAX_INSTANCES=3
+  UPSCALE_GPU_MAX_INSTANCES=4
   UPSCALE_GPU_CONCURRENCY=4
   UPSCALE_GPU_TIMEOUT_S=300
   # The worker's health probe of the GPU upscaler waits UPSCALE_GPU_COLD_START_S + 60 s. Measured by hand on
@@ -379,11 +383,12 @@ shape_defaults() {
   MEMORY_QUOTA_LIMIT_GIB=$((MEMORY_QUOTA_GIB - OTHER_APPS_MEMORY_GIB))
   # Spec 18 GPU upscaler: the GPU upscaler's region has its own Cloud Run quotas (200 vCPU and 400 GiB per region,
   # read 2026-10-30; nothing else of ours runs in asia-south2), kept 10 vCPU and 16 GiB spare like asia-south1. The
-  # per-type GPU quota (no zonal redundancy) there: 3 RTX PRO 6000, granted automatically on the first deploy
-  # (2026-10-30). A granted increase (infra/request-gpu-upscale-quota.sh) raises it here first.
+  # per-type GPU quota (no zonal redundancy) there: 6 RTX PRO 6000, granted 2026-10-31 (infra/request-gpu-upscale-quota.sh;
+  # 3 were granted automatically on the first deploy). 6 instances at 80 GiB need 480 GiB, above the 400 GiB memory
+  # quota: the owner files a memory quota raise for asia-south2 by hand, and then this memory limit is raised.
   UPSCALE_GPU_REGION_CPU_LIMIT=${UPSCALE_GPU_REGION_CPU_LIMIT-190}
   UPSCALE_GPU_REGION_MEMORY_GIB_LIMIT=${UPSCALE_GPU_REGION_MEMORY_GIB_LIMIT-384}
-  UPSCALE_GPU_QUOTA=${UPSCALE_GPU_QUOTA-3}
+  UPSCALE_GPU_QUOTA=${UPSCALE_GPU_QUOTA-6}
   # Measured p95 and p50 in whole seconds (rounded up) of one POST /upscale per photo size, model swinir-x2, one row per
   # GPU type and concurrency: UPSCALE_GPU_P95_S_<UPSCALE_GPU_TYPE in capitals, "_" for "-">_<conc>CONC_<size>, from
   # infra/check-matting.sh --probe-upscale on the candidate (services/matting/README.md "Measured on RTX PRO 6000"),

@@ -390,8 +390,8 @@ Owner decision 2026-10-30: AI enlargement may run on GPUs in asia-south2; speed 
 reliability is a must. The CPU `catalog-upscale` stays as the rollback switch.
 
 3.7.1 Service. `catalog-upscale-gpu` in `UPSCALE_GPU_REGION` (asia-south2, the one service outside asia-south1;
-AGENTS.md), image `matting-gpu`, one RTX PRO 6000 per instance, 20 vCPU, 80 GiB, concurrency 4, max instances 3 (the
-granted quota), timeout 300 s, min instances 0. Measured numbers: `services/matting/README.md` "Measured on RTX PRO
+AGENTS.md), image `matting-gpu`, one RTX PRO 6000 per instance, 20 vCPU, 80 GiB, concurrency 4, max instances 4 (3
+until 2026-10-31; 4 is the most the asia-south2 memory quota allows, the GPU quota is 6), timeout 300 s, min instances 0. Measured numbers: `services/matting/README.md` "Measured on RTX PRO
 6000" (about 1 s per 800x1200 x2 photo, byte-identical across instances, cold start about 42 s). The deploy gate
 probes it with both models at concurrency 4, 3 rounds, and a 600 s determinism budget so the round reaches several
 instances.
@@ -511,6 +511,7 @@ what they allow, same per-call shape (4 vCPU, 4 threads, concurrency 1, so the m
 Rollback values are the comment line above `SHAPE_DEFAULTS` in `infra/lib/shape.sh`.
 
 GPU default (2026-10-31, owner-approved after the CPU live test): `UPSCALE_TARGET=gpu`, so new batches enlarge on `catalog-upscale-gpu` with the flip lanes of 3.7.3 (2 + 8 + the preview's 2 = 12 = 3 x 4 slots, 2 x 0.5 + 2 = 3/s), and batches already pinned to the CPU (`+cpu` ids) finish there.
+Four GPU instances (2026-10-31, owner-approved): the GPU quota of 6 was granted, but 6 x 80 GiB is above the 400 GiB asia-south2 memory quota (`UPSCALE_GPU_REGION_MEMORY_GIB_LIMIT` 384), so `UPSCALE_GPU_MAX_INSTANCES` is 4 (320 GiB) and the lanes are 2 + 12 + the preview's 2 = 16 = 4 x 4 slots, 2 x 0.5 + 3 = 4/s = 16 / p50 4 s; worker slots 62 of 96. 6 instances follow the owner's memory quota request.
 Rollback: `UPSCALE_TARGET=cpu bash infra/deploy.sh` restores the CPU path exactly (target cpu and the CPU lanes of `ENLARGE_CPU_LANES`: 4 + 44 slots at 0.04/s and 0.42/s); batches started on the GPU finish on the GPU.
 
 Cap timeout gate (2026-10-31): the deploy gate checks each pixel cap against the timeout, not a ratio: it fails when

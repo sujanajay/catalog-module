@@ -297,7 +297,7 @@ test('catalog-upscale-gpu: the matting-gpu image in asia-south2 on one RTX PRO 6
   assert.equal(f[8], 'MAX_RESIDENT_SESSIONS=1,PRELOAD_MATTE=0,UPSCALE_MAX_PIXELS=5400000,UPSCALE_MAX_PIXELS_X4=4900000');
   assert.equal(f[9], 'env UPSCALE_DETERMINISM_SECONDS=600 bash infra/lib/services.sh probe-upscale 3292 swinir-x2,swinir-x4 800x1200,1600x1600 4 3 300 5400000 4900000 12 0');
   assert.deepEqual(rest.slice(0, -1), ['--service-account=m', '--gpu=1', '--gpu-type=nvidia-rtx-pro-6000', '--no-gpu-zonal-redundancy', '--no-cpu-throttling',
-    '--cpu=20', '--memory=80Gi', '--concurrency=4', '--min-instances=0', '--max-instances=3', '--timeout=300', '--labels=app=catalog,component=upscale-gpu']);
+    '--cpu=20', '--memory=80Gi', '--concurrency=4', '--min-instances=0', '--max-instances=4', '--timeout=300', '--labels=app=catalog,component=upscale-gpu']);
 });
 
 test('catalog-upscale-gpu: a quota refusal only warns while new batches stay on the CPU (UPSCALE_TARGET=cpu); with gpu, the default, it stops', () => {
@@ -603,7 +603,7 @@ for s in "\${SERVICES[@]}"; do "service_\${s//-/_}"; m=""; for a in "\${SVC_ARGS
     assert.match(svcMax, /^[1-9]\d*$/, `${name} has a service-level max`);
     assert.equal(svcMax, revMax, `${name}: the service-level max equals the revision max`);
   }
-  assert.deepEqual(rows.map((x) => x[1]), ['20', '50', '3', '3', '3', '4'], 'from MATTING_CPU_, UPSCALE_, UPSCALE_GPU_, GPU_, WEB_ and WORKER_MAX_INSTANCES');
+  assert.deepEqual(rows.map((x) => x[1]), ['20', '50', '4', '3', '3', '4'], 'from MATTING_CPU_, UPSCALE_, UPSCALE_GPU_, GPU_, WEB_ and WORKER_MAX_INSTANCES');
 });
 
 const maxUpdate = (n) => `run services update test-svc --region=asia-south1 --max=${n} --quiet`;
