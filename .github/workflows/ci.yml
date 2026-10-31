@@ -3,8 +3,11 @@ on:
   pull_request:
   push:
     branches: [main]
+# Independent jobs run in parallel: lint and typecheck, the unit tests in shards, the offline infra and matting tests,
+# and the intake browser scenarios. A run takes as long as its slowest job instead of the sum of every step.
 jobs:
-  check:
+  lint:
+    name: lint and typecheck
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -16,9 +19,37 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm lint
       - run: pnpm typecheck
-      - run: pnpm test
+
+  test:
+    name: unit tests (shard ${{ matrix.shard }}/4)
+    runs-on: ubuntu-latest
+    strategy:
+      # Every shard reports its own failures; one failing shard does not cancel the others.
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      # Vitest splits the test files over the shards (a stable hash of each path); together they run every file of
+      # `pnpm test`. T40's 200 sequences are 8 files (enlarge.model.t40-<n>.test.ts) so they spread over the shards.
+      - run: pnpm test --shard=${{ matrix.shard }}/4
+
+  infra-matting:
+    name: infra and matting tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
       # Offline infra tests (fake gcloud, no GCP): the deploy gate, shape refusals, the check-matting probe,
-      # monitoring, queue names. Any failing file fails the step.
+      # monitoring, queue names. Any failing file fails the step. They use node built-ins only (no pnpm install).
       - name: Infra tests
         run: for t in infra/tests/*.test.mjs; do echo "== $t"; node "$t" || exit 1; done
       # Matting service tests with mocked inference; the image builds run them too, here they run on every PR.
@@ -31,6 +62,18 @@ jobs:
           grep -vE '^(rembg|onnxruntime)' services/matting/requirements-cpu.txt > "$RUNNER_TEMP/matting-requirements.txt"
           pip install -r "$RUNNER_TEMP/matting-requirements.txt" -r services/matting/requirements-test.txt
           python -m pytest services/matting/tests -q
+
+  browser:
+    name: intake browser scenarios
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
       # Intake browser scenarios (spec 14 section 8.3): local harness, no GCP, no deployed service.
       - name: Install Chromium for the browser tests
         run: pnpm --filter @catalog/web exec playwright install --with-deps chromium

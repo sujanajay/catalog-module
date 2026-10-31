@@ -579,7 +579,7 @@ export async function handleEnlargeTask(deps: CatalogDeps, body: Record<string, 
       if (left <= 0) break;
       try { await within(deps.storage.uploadBuffer(objectKey, bytes, "image/jpeg", { metadata }), left); return true; }
       catch (error) { last = error; }
-      if (i + 1 < ENLARGE_UPLOAD_TRIES) await new Promise((r) => setTimeout(r, 200 * (i + 1)));
+      if (i + 1 < ENLARGE_UPLOAD_TRIES) await (deps.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms))))(200 * (i + 1));
     }
     keepMade(objectUri, bytes);
     deps.log("enlargement upload failed", { severity: "WARNING", batchId, productId, enlargementId, ...fields, error: message(last ?? "no time left") });
