@@ -991,3 +991,19 @@ Shape and infra changes: none to the service shape until the quota is granted (1
 | P1-C identity cap counts rows | Amended 3.1 `identity_releases`, 3.4 step 4, 3.9, 3.10, F59, T64, T40 (e): release events summed per (batch, photo), never reset by a re-want, reset by Try again |
 | `<session>` placeholder (cosmetic) | Removed from 7.3; the scripts live in the repo after unit 8 |
 | Plan status | FROZEN 2026-10-30 (top of the document) |
+
+## 10. Progress (milestones only; not a design change)
+
+- [x] Lifecycle built and merged: #125 (2026-10-30), with #126 to #129 from its first deploys.
+- [x] Deployed through the gate; the worker gate's smoke passed.
+- [x] Load driver pins `options.enlargement` at Start like the web: #128.
+- [x] Live test (7.3 reliability bar) PASS on CPU: load c90d496c, 8,415 of 8,415 `upscaled`; operator batch
+      0af259f9 finished in 75 min (`.runs/2026-10-30-18-load-5.md`). The deliberate faults of 7.3 were not run.
+- [x] Service-level max set on every deploy: #130. CPU scale-out to the granted quotas: #131.
+- [x] GPU upscaler `catalog-upscale-gpu` (RTX PRO 6000, asia-south2): #132, #133, #134; deployed 2026-10-31 at
+      747c854.
+- [x] GPU made the default target for new batches: #135, deployed 2026-10-31 at a26ad15; GPU check acc773a5 PASS
+      (5 products in 4 min 11 s).
+- [x] Close-out: test cleanup, invariants zero ERROR outside 09dd86f2, spec 18 section 14 and final reports, owner
+      status doc, solutions entry (`docs/solutions/2026-10-31-spec-18-live-lessons.md`).
+- [ ] A 200-product load on GPU: not run yet.

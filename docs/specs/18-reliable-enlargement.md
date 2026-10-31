@@ -623,20 +623,122 @@ Later options:
 
 ## 14. Done when
 
-- [ ] H4 merged and live: load driver recheck grouped by reason with the CSV; finalize idempotent; the 13-minute wait
-      explained and fixed; the MaxListeners warning gone; `docs/solutions/bucket-retention.md` written.
+- [x] H4 merged and live: load driver recheck grouped by reason with the CSV; finalize idempotent; the 13-minute wait
+      explained and fixed; the MaxListeners warning gone; `docs/solutions/bucket-retention.md` written. (#120, live
+      since 2026-10-30. Deviation: a MaxListenersExceededWarning is still seen; listed as a follow-up in
+      `docs/plans/2026-10-28-post-deploy-status.md`.)
 - [x] H1 merged: `--probe-upscale` exists; the README holds "Measured on CPU" with the ladder; shape.sh refuses an
       unmeasured shape, a timeout outside its bounds, a queue rate above capacity and a shape over 190 vCPU.
       Measured table and shape defaults: 2026-10-29, section 8.
-- [ ] H2 merged and live: `catalog-upscale` takes traffic through the gate; the worker's `UPSCALE_URL` names it;
-      `enlarge.ts` calls it with timeout = server + 30 s and a cold-start-tolerant health probe, no breaker.
-- [ ] H3 and the lifecycle merged and live: migration 0006 applied; one row per identity in `catalog_enlargements`,
+- [x] H2 merged and live: `catalog-upscale` takes traffic through the gate; the worker's `UPSCALE_URL` names it;
+      `enlarge.ts` calls it with timeout = server + 30 s and a cold-start-tolerant health probe, no breaker. (#121,
+      #124, #127, #129; scaled to 50 x 4 vCPU / 8Gi by #131; service-level max fixed by #130.)
+- [x] H3 and the lifecycle merged and live: migration 0006 applied; one row per identity in `catalog_enlargements`,
       made by durable tasks that never drop; the render honours readiness (ready, terminal, not ready);
       `enlargement_failed` holds the product only after the bounded attempts; Try again and the plain warning work;
       no plain fallback outside `UPSCALE_MODEL=off` and operator-accepted plain outputs; "Enlarging photos x of y"
-      and the Ops lines show; the invariants of 3.3.7 run; the gate's smoke passes its enlargement case.
-- [ ] Section 9 done: every reliability item passed, with wall time, photos per minute and the 2,000 and 7,000
-      projections reported; cleanup confirmed; invariants zero ERROR.
-- [ ] H5 merged: protocol sections 9 and 11, SPEC.md contract change, spec 16 3.1.3, spec 17 G5 leftovers and its
-      final report, solutions entry, handoff written, memory lines saved, worktrees removed.
-- [ ] The final report ends "Ready for the next spec: 19 <title to be chosen>" or "Blocked: <exact thing>".
+      and the Ops lines show; the invariants of 3.3.7 run; the gate's smoke passes its enlargement case. (#122, #125,
+      #128; the gate's smoke passed in the 747c854 and a26ad15 deploys.)
+- [x] Section 9 done: every reliability item passed, with wall time, photos per minute and the 2,000 and 7,000
+      projections reported; cleanup confirmed; invariants zero ERROR. (See "Outcome" below.)
+- [x] H5 merged: protocol sections 9 and 11, SPEC.md contract change, spec 16 3.1.3, spec 17 G5 leftovers and its
+      final report, solutions entry, handoff written, memory lines saved, worktrees removed. (#123 and the close-out
+      PR; the handoff, memory lines and worktree removal are the manager's.)
+- [x] The final report ends "Ready for the next spec: 19 <title to be chosen>" or "Blocked: <exact thing>". (Below.)
+- [x] Added 2026-10-30 (section 3.7): the GPU upscaler `catalog-upscale-gpu` on RTX PRO 6000 in asia-south2 merged
+      and live (#132, #133, #134), and the default target for new batches since 2026-10-31 (#135, deployed at
+      a26ad15). The CPU lanes stay for the rollback (`UPSCALE_TARGET=cpu bash infra/deploy.sh`).
+
+### Outcome (2026-10-31)
+
+- **Section 9 step 4, the 200-product load on CPU** (2026-10-30, execution `catalog-load-9wtg6`, batch `c90d496c`,
+  Test Brand, 200 products, 935 photos, all 9 channels, 8,415 outputs, 1,869 enlargements), with the 5-product
+  operator batch `0af259f9` started at minute 5.4 (60 outputs, 30 enlargements):
+
+  | Reliability item | Result |
+  |---|---|
+  | Every output with scale > 1.5 is `upscaled` or held with `enlargement_failed` | PASS: 8,415 of 8,415 and 60 of 60 `upscaled` (including all 3,247 `low_resolution`); 0 `enlargement_failed` |
+  | Zero silent outputs | PASS: 0 on both batches; `enlarged_without_upscaler` 0, `plain_accepted_outputs` 0 |
+  | Zero plain fallbacks | PASS: 0 retry, failed, lost, missing or upload-failed lines; every delivery direct |
+  | Zero holds caused by timeouts | PASS: all 82 holds are matting (81) or the Styli guide (1), the same 9 products as run 1 |
+  | Invariants zero ERROR on the batch | PASS: job `catalog-invariants-wrchz`, the only ERROR is `silent_outputs` on 09dd86f2 (excluded, owner item) |
+  | The operator-first batch finishes | PASS: 75 min 7 s, 60 of 60 live, re-check 60 of 60 |
+
+  - Wall time 8 h 16 min: about 1.9 photos per minute over the whole batch (935 photos).
+  - Enlargement rate: about 1.25 a minute while the hidden service-level max held catalog-upscale at 4 instances
+    (to 15:47 UTC), then about 4.4 a minute at 16 instances, bounded by the bulk lane's queue rate (0.075/s).
+  - Projections at 4.4 a minute (9.35 enlargements per product): 2,000 products about 71 h, 7,000 about 248 h. An
+    estimate at 16 fully used instances: about 45 h and 156 h.
+  - Attempt budget: 0 counted failures over the run; every pre-counted call was given back on settle.
+  - Cost (list prices, Cloud Monitoring instance time): about USD 56 to 58. catalog-upscale about USD 36, the worker
+    about USD 19, the ledger (matting, render, judge) USD 0.85.
+- **GPU check** (2026-10-31, after the GPU switch, live a26ad15, worker 00056-vah, catalog-upscale-gpu 00006-tud):
+  batch `acc773a5`, 5 products, Noon, Trendyol, Styli, Centrepoint, run alone:
+  - 4 min 11 s against 75 min for the CPU operator batch (which ran beside the load).
+  - 60 of 60 `upscaled`, all 30 enlargements on GPU upscaler ids, 0 CPU calls; 0 `enlargement_failed`, 0 plain
+    fallbacks, 0 silent outputs, 0 holds. Invariants job `catalog-invariants-7hb9r`: only the 09dd86f2 ERROR.
+  - Upscale call p50 1.61 s, p95 2.07 s; about 45 enlargements a minute warm on 1 of 3 instances; a 74 s cold start.
+  - Cost about USD 0.81, mostly GPU idle time before scale-down.
+  - A 200-product load on GPU has not been run; its speed is an estimate, not a measurement.
+- **Gate probes** (2026-10-31 deploy): CPU 4 vCPU p50 98.9 s (x2) and 129.8 s (x4) at 800x1200; GPU at concurrency 4
+  p50 3.2 s (x2) and 2.8 s (x4) at 800x1200; GPU outputs byte-identical across instances.
+- **Step 5 cleanup** (2026-10-31, `infra/catalog-test-cleanup.sh`):
+  - `catalog-test-cleanup-n5p7r`: c90d496c, a18a772d (together, they share 9 products), 0af259f9, 141569f6 and
+    c254c311 (its row was kept on 2026-10-30 for that day's spend): 19,638 objects, no row kept.
+  - `catalog-test-cleanup-bgtsr`: acc773a5, 185 objects; the row is kept, marked cleaned up, because it spent money
+    today (by design). A later run removes it.
+  - `catalog-test-cleanup-cgq77`: spec 17's 8628295f, 4 objects, no row kept.
+  - The listing of `catalog-test/test_brand/` shows none of these batch prefixes.
+  - Spec 17's operator batch 616a7386 is refused by the cleanup's own guard (its name does not start with
+    `catalog-test`; it was started by the owner). Nothing was deleted; it is left as it is (owner item).
+  - Invariants job `catalog-invariants-67p62` after the cleanup: zero ERROR outside 09dd86f2 (the only ERROR is
+    `silent_outputs` 2,012 on 09dd86f2; every other check 0).
+- Deviations:
+  - The load ran all 9 channels, not only the 4 P1 channels.
+  - The deliberate faults of plan 7.3 (pause the upscaler, redeploy the worker mid-run) were not run.
+  - The service-level max and the cap lift at 15:47 UTC changed the throughput profile mid-run.
+  - The cost ceiling of USD 40 (section 11) was lifted by the owner on 2026-10-30 ("We have no limits at all").
+
+### Final report (00 section 10)
+
+```
+Spec 18 Reliable enlargement: merged (PRs #119 to #135) and deployed to
+https://catalog-web-847405579637.asia-south1.run.app (main a26ad15, 2026-10-31).
+
+What shipped
+- Enlargement is its own durable stage: one row per identity, queued tasks with bounded attempts, delays never
+  counted, a product held with enlargement_failed and a reason only after the attempts; Try again and Use as is
+  (with the plain warning); never a silent plain resize.
+- catalog-upscale, a dedicated CPU upscaler (50 x 4 vCPU / 8Gi), measured shape, gate probes with determinism and
+  cold start.
+- catalog-upscale-gpu on RTX PRO 6000 in asia-south2, the default for new batches since 2026-10-31; each batch keeps
+  its target; UPSCALE_TARGET=cpu is the rollback.
+- Service-level max set on every deploy; finalize once; fast test cleanup; load recheck evidence.
+
+Test evidence
+- Tier 1+2: green in CI on every PR (vitest about 1,741 tests, infra tests, matting pytest).
+- Tier 3: n/a.
+- Tier 4: n/a.
+- Tier 5: per-brand smoke passed in the worker gates of the 747c854 and a26ad15 deploys (evidence under
+  catalog-test/smoke/linux-9577ba11-.../ and linux-70df1063-.../).
+- Tier 6: 200-product load c90d496c PASS on every reliability item (8,415 of 8,415 upscaled, 0 silent, 0 plain
+  fallbacks, 0 timeout holds, invariants clean except 09dd86f2), 8 h 16 min on CPU; operator batch 75 min on CPU,
+  4 min 11 s on GPU (acc773a5, 60 of 60 upscaled). Cleanup done; invariants zero ERROR outside 09dd86f2.
+
+Excluded and why
+- A 200-product load on GPU (not yet run; the GPU check covers reliability on 5 products).
+- The deliberate faults of plan 7.3 (not run).
+- The follow-ups listed in docs/plans/2026-10-28-post-deploy-status.md (none lost or hid an image).
+
+Contract changes proposed (02 or 03)
+- none
+
+Learnings written
+- docs/solutions/cloud-run-service-level-max.md, docs/solutions/2026-10-30-gpu-upscaler-rtx-pro-6000.md,
+  docs/solutions/2026-10-29-cpu-upscaler-reliability.md, docs/solutions/2026-10-31-spec-18-live-lessons.md
+
+Task board
+H4 done | H1 done | H2 done | H3 + lifecycle done | GPU upscaler done (default) | section 9 done | H5 done
+
+Ready for the next spec: 19 <title to be chosen>.
+```
