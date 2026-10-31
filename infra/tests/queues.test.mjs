@@ -23,11 +23,16 @@ const bash = process.env.CATALOG_BASH || gitBashPath();
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'catalog-queues-'));
 const RETRY = '--max-attempts=-1 --max-retry-duration=1800s --min-backoff=10s --max-backoff=60s --max-doublings=3';
 const INGEST_RETRY = '--max-attempts=5 --min-backoff=10s';
-const ENLARGE_RETRY = '--max-dispatches-per-second=0.04 --max-attempts=-1 --max-retry-duration=0s --min-backoff=30s --max-backoff=900s --max-doublings=5';
-const ENLARGE_BULK_RETRY = ENLARGE_RETRY.replace('=0.04', '=0.42');
+const enlargeRetry = (rate) => `--max-dispatches-per-second=${rate} --max-attempts=-1 --max-retry-duration=0s --min-backoff=30s --max-backoff=900s --max-doublings=5`;
+// Spec 18 GPU upscaler (2026-10-31): the default lanes are sized to catalog-upscale-gpu (2 slots at 0.5/s, bulk 8 at
+// 2/s); UPSCALE_TARGET=cpu, the rollback, restores the CPU lanes (4 at 0.04/s, bulk 44 at 0.42/s).
+const ENLARGE_RETRY = enlargeRetry('0.5');
+const ENLARGE_BULK_RETRY = enlargeRetry('2');
+const CPU_ENLARGE_RETRY = enlargeRetry('0.04');
+const CPU_ENLARGE_BULK_RETRY = enlargeRetry('0.42');
 // The shape names a caller's shell could carry into the run; each run starts without them.
 const SHAPE_ENV = ['TASKS_MAX_DISPATCHES', 'BULK_MAX_DISPATCHES', 'INGEST_MAX_DISPATCHES', 'WORKER_MAX_INSTANCES', 'WORKER_CONCURRENCY', 'CATALOG_PREVIEW',
-  'ENLARGE_MAX_DISPATCHES', 'ENLARGE_BULK_MAX_DISPATCHES', 'ENLARGE_DISPATCHES_PER_SECOND', 'ENLARGE_BULK_DISPATCHES_PER_SECOND'];
+  'ENLARGE_MAX_DISPATCHES', 'ENLARGE_BULK_MAX_DISPATCHES', 'ENLARGE_DISPATCHES_PER_SECOND', 'ENLARGE_BULK_DISPATCHES_PER_SECOND', 'UPSCALE_TARGET'];
 
 // Sources the shape and the queue lib as deploy.sh does, with `existing` as the queues of the region, runs `steps`
 // and returns the queue create and update calls in order.
@@ -57,19 +62,33 @@ const test = (name, fn) => tests.push([name, fn]);
 
 test('no env: before the services only the new enlarge lanes are created; after the worker gate every queue gets its shape slots', () => {
   assert.deepEqual(run('queues_create_missing', {existing: LIVE_QUEUES}), [
-    create('catalog-enlarge', 4, ENLARGE_RETRY), create('catalog-enlarge-bulk', 44, ENLARGE_BULK_RETRY),
+    create('catalog-enlarge', 2, ENLARGE_RETRY), create('catalog-enlarge-bulk', 8, ENLARGE_BULK_RETRY),
   ]);
   assert.deepEqual(run('queues_create_missing', {existing: [...LIVE_QUEUES, 'catalog-enlarge', 'catalog-enlarge-bulk']}), []);
   assert.deepEqual(run('queues_apply_shape', {existing: LIVE_QUEUES}), [
     update('catalog', 8), update('catalog-ingest', 4, INGEST_RETRY), update('catalog-bulk', 36),
-    update('catalog-enlarge', 4, ENLARGE_RETRY), update('catalog-enlarge-bulk', 44, ENLARGE_BULK_RETRY),
+    update('catalog-enlarge', 2, ENLARGE_RETRY), update('catalog-enlarge-bulk', 8, ENLARGE_BULK_RETRY),
+  ]);
+});
+
+test('spec 18 GPU upscaler: UPSCALE_TARGET=cpu (the rollback) sets the CPU enlarge lanes exactly as before the switch', () => {
+  const env = {UPSCALE_TARGET: 'cpu'};
+  assert.deepEqual(run('queues_create_missing', {existing: LIVE_QUEUES, env}), [
+    create('catalog-enlarge', 4, CPU_ENLARGE_RETRY), create('catalog-enlarge-bulk', 44, CPU_ENLARGE_BULK_RETRY),
+  ]);
+  assert.deepEqual(run('queues_apply_shape', {existing: [...LIVE_QUEUES, 'catalog-enlarge', 'catalog-enlarge-bulk'], env}).filter((c) => c.includes('-enlarge')), [
+    update('catalog-enlarge', 4, CPU_ENLARGE_RETRY), update('catalog-enlarge-bulk', 44, CPU_ENLARGE_BULK_RETRY),
+  ]);
+  // The preview's lane keeps its 2 slots and takes the CPU operator rate.
+  assert.deepEqual(run('queues_create_missing', {existing: ['catalog'], queue: 'catalog-preview', env: {...env, CATALOG_PREVIEW: '1'}}).filter((c) => c.includes('-enlarge')), [
+    create('catalog-preview-enlarge', 2, CPU_ENLARGE_RETRY),
   ]);
 });
 
 test('spec 18: each enlarge lane carries its own rate and the retry by attempts; env changes the rates and the slots', () => {
   const env = {ENLARGE_DISPATCHES_PER_SECOND: '0.25', ENLARGE_BULK_DISPATCHES_PER_SECOND: '0.3', ENLARGE_MAX_DISPATCHES: '2', ENLARGE_BULK_MAX_DISPATCHES: '6'};
   assert.deepEqual(run('queues_apply_shape', {existing: LIVE_QUEUES, env}).filter((c) => c.includes('-enlarge')), [
-    update('catalog-enlarge', 2, ENLARGE_RETRY.replace('=0.04', '=0.25')), update('catalog-enlarge-bulk', 6, ENLARGE_RETRY.replace('=0.04', '=0.3')),
+    update('catalog-enlarge', 2, enlargeRetry('0.25')), update('catalog-enlarge-bulk', 6, enlargeRetry('0.3')),
   ]);
   // The rollback (no enlarge lanes): lanes that exist keep 1 slot; none is created.
   const off = {ENLARGE_MAX_DISPATCHES: '0', ENLARGE_BULK_MAX_DISPATCHES: '0'};
@@ -81,7 +100,7 @@ test('spec 18: each enlarge lane carries its own rate and the retry by attempts;
 
 test('no env: a queue update is never below the shape value', () => {
   const calls = run('queues_create_missing; queues_apply_shape', {existing: LIVE_QUEUES});
-  const live = {'catalog': 8, 'catalog-bulk': 36, 'catalog-ingest': 4, 'catalog-enlarge': 4, 'catalog-enlarge-bulk': 44};
+  const live = {'catalog': 8, 'catalog-bulk': 36, 'catalog-ingest': 4, 'catalog-enlarge': 2, 'catalog-enlarge-bulk': 8};
   for (const c of calls.filter((l) => l.startsWith("tasks queues update"))) {
     const [, name, slots] = /^tasks queues update (\S+) .*--max-concurrent-dispatches=(\d+)/.exec(c);
     assert.ok(Number(slots) >= live[name], `${name} lowered to ${slots}, below its shape value ${live[name]}`);
@@ -91,7 +110,7 @@ test('no env: a queue update is never below the shape value', () => {
 test('a fresh stack: the missing queues are created at their shape slots with their retry', () => {
   assert.deepEqual(run('queues_create_missing', {existing: ['generation']}), [
     create('catalog', 8), create('catalog-ingest', 4, INGEST_RETRY), create('catalog-bulk', 36),
-    create('catalog-enlarge', 4, ENLARGE_RETRY), create('catalog-enlarge-bulk', 44, ENLARGE_BULK_RETRY),
+    create('catalog-enlarge', 2, ENLARGE_RETRY), create('catalog-enlarge-bulk', 8, ENLARGE_BULK_RETRY),
   ]);
 });
 

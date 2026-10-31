@@ -396,7 +396,7 @@ granted quota), timeout 300 s, min instances 0. Measured numbers: `services/matt
 probes it with both models at concurrency 4, 3 rounds, and a 600 s determinism budget so the round reaches several
 instances.
 
-3.7.2 Routing. `UPSCALE_TARGET` (cpu or gpu, default cpu) picks where new batches enlarge. Start pins it in
+3.7.2 Routing. `UPSCALE_TARGET` (cpu or gpu, default gpu since 2026-10-31, cpu before) picks where new batches enlarge. Start pins it in
 `options.enlargement.target` ("gpu", or absent for the worker's CPU `UPSCALE_URL`), so flipping the switch never moves
 a running batch, and a batch never mixes CPU and GPU outputs. The upscaler ids differ (`swinir-x2+cpu` on CPU, plain
 `swinir-x2` on GPU), so their stored images, render keys and identities never collide; a stored image of the other
@@ -509,6 +509,9 @@ what they allow, same per-call shape (4 vCPU, 4 threads, concurrency 1, so the m
   memory refusal is new (the old total, 439 GiB, was above the 400 GiB quota unnoticed): 128 + 64 + 400 + 19 + 19 = 630
   <= 800 - 24 = 776. CPU binds; memory has room.
 Rollback values are the comment line above `SHAPE_DEFAULTS` in `infra/lib/shape.sh`.
+
+GPU default (2026-10-31, owner-approved after the CPU live test): `UPSCALE_TARGET=gpu`, so new batches enlarge on `catalog-upscale-gpu` with the flip lanes of 3.7.3 (2 + 8 + the preview's 2 = 12 = 3 x 4 slots, 2 x 0.5 + 2 = 3/s), and batches already pinned to the CPU (`+cpu` ids) finish there.
+Rollback: `UPSCALE_TARGET=cpu bash infra/deploy.sh` restores the CPU path exactly (target cpu and the CPU lanes of `ENLARGE_CPU_LANES`: 4 + 44 slots at 0.04/s and 0.42/s); batches started on the GPU finish on the GPU.
 
 Cap timeout gate (2026-10-31): the deploy gate checks each pixel cap against the timeout, not a ratio: it fails when
 2 x the cap x that model's p95 per MP is above the timeout (p95 per size over the rounds and the 12 determinism calls,

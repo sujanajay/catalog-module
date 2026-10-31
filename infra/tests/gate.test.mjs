@@ -292,17 +292,20 @@ test('catalog-upscale-gpu: the matting-gpu image in asia-south2 on one RTX PRO 6
   const f = row.split('|');
   // 300 + per size 4 x 2 x (p95 + ceil(p95 x 3)): 800x1200 8 x (4 + 12) = 128, 1600x1600 8 x (7 + 21) = 224; the first
   // call per model may meet a cold start, 2 x 2 x 180 = 720; the determinism rounds, 2 x (600 + 2 x 180) = 1920.
-  assert.deepEqual(f.slice(1, 8), ['catalog-upscale-gpu', 'asia-south2', 'ar/matting-gpu:t', '3292', '1', '1', '1']);
+  // The last field is SVC_QUOTA_OPTIONAL: 0, since new batches enlarge on the GPU by default (2026-10-31).
+  assert.deepEqual(f.slice(1, 8), ['catalog-upscale-gpu', 'asia-south2', 'ar/matting-gpu:t', '3292', '1', '1', '0']);
   assert.equal(f[8], 'MAX_RESIDENT_SESSIONS=1,PRELOAD_MATTE=0,UPSCALE_MAX_PIXELS=5400000,UPSCALE_MAX_PIXELS_X4=4900000');
   assert.equal(f[9], 'env UPSCALE_DETERMINISM_SECONDS=600 bash infra/lib/services.sh probe-upscale 3292 swinir-x2,swinir-x4 800x1200,1600x1600 4 3 300 5400000 4900000 12 0');
   assert.deepEqual(rest.slice(0, -1), ['--service-account=m', '--gpu=1', '--gpu-type=nvidia-rtx-pro-6000', '--no-gpu-zonal-redundancy', '--no-cpu-throttling',
     '--cpu=20', '--memory=80Gi', '--concurrency=4', '--min-instances=0', '--max-instances=3', '--timeout=300', '--labels=app=catalog,component=upscale-gpu']);
 });
 
-test('catalog-upscale-gpu: a quota refusal only warns while new batches stay on the CPU; with UPSCALE_TARGET=gpu it stops', () => {
-  let r = run('upscale-gpu-optional', `${vars}\nshow catalog-upscale-gpu`);
+test('catalog-upscale-gpu: a quota refusal only warns while new batches stay on the CPU (UPSCALE_TARGET=cpu); with gpu, the default, it stops', () => {
+  let r = run('upscale-gpu-optional', `${vars}\nUPSCALE_TARGET=cpu\nshow catalog-upscale-gpu`);
   assert.equal(r.out.trim().split('|')[8 - 1], '1');
   r = run('upscale-gpu-required', `${vars}\nUPSCALE_TARGET=gpu\nshow catalog-upscale-gpu`);
+  assert.equal(r.out.trim().split('|')[7], '0');
+  r = run('upscale-gpu-default', `${vars}\nunset UPSCALE_TARGET\nshow catalog-upscale-gpu`);
   assert.equal(r.out.trim().split('|')[7], '0');
 });
 

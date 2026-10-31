@@ -183,7 +183,7 @@ service_catalog_upscale_gpu() {
   SVC_SKIP_REASON=""
   # A quota refusal on first creation only warns while the CPU upscaler takes the new batches (the worker then gets no
   # GPU URL); with UPSCALE_TARGET=gpu it stops the deploy.
-  SVC_QUOTA_OPTIONAL=1; [ "${UPSCALE_TARGET:-cpu}" = gpu ] && SVC_QUOTA_OPTIONAL=0
+  SVC_QUOTA_OPTIONAL=1; [ "${UPSCALE_TARGET:-gpu}" = gpu ] && SVC_QUOTA_OPTIONAL=0
   if [ "${UPSCALE_GPU_SERVICE:-0}" != 1 ] || upscale_measure_run; then
     SVC_DEPLOY=skip; SVC_SHIFT=0; SVC_PROBE=(); SVC_PROBE_TIMEOUT=0
     SVC_SKIP_REASON="UPSCALE_GPU_SERVICE=${UPSCALE_GPU_SERVICE:-0}"
