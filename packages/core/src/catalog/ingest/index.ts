@@ -28,6 +28,7 @@ import {
   catalogUploads,
   type CatalogUpload,
 } from "../../db/schema";
+import { eachLimit } from "../../concurrency";
 import { getBucketName, isRetryableStorageError, toGsUri } from "../../storage";
 import type { enqueueTask } from "../../tasks";
 import { log } from "../../log";
@@ -129,6 +130,37 @@ async function readStream(stream: Readable, maxBytes: number): Promise<Buffer | 
 
 type ZipReaders = Map<string, Promise<{ entryStream(entryPath: string): Readable }>>;
 
+/**
+ * Staged writes of one delivery, by object path. All sizes of a colour share the same photo links, so
+ * many items carry the same bytes; GCS allows about one write per second to one object and answers 429
+ * beyond it. Each staged object is therefore written at most once per delivery, and not at all when it
+ * is already there (the name is the sha256 of the bytes, so an existing object holds the same bytes).
+ */
+type StagedWrites = Map<string, Promise<string>>;
+
+function stageOnce(deps: IngestDeps, staged: StagedWrites, path: string, buf: Buffer, mime: string): Promise<string> {
+  let write = staged.get(path);
+  if (!write) {
+    write = (async () => {
+      const uri = toGsUri(getBucketName(), path);
+      return (await deps.storage.headObject(uri)).exists ? uri : deps.storage.uploadBuffer(path, buf, mime);
+    })();
+    staged.set(path, write);
+  }
+  return write;
+}
+
+/** The first of each group of indexes whose items share an itemKey (one result serves them all). */
+function firstPerKey(items: readonly SourceItem[], indexes: readonly number[]): number[] {
+  const seen = new Set<string>();
+  return indexes.filter((i) => {
+    const k = itemKey(items[i]!);
+    if (seen.has(k)) return false;
+    seen.add(k);
+    return true;
+  });
+}
+
 const defaultSleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
 /**
@@ -154,9 +186,9 @@ const isNotFound = (err: unknown) => [(err as { code?: unknown })?.code, (err as
 /**
  * Read one item: its bytes (our bucket, a zip entry streamed by range reads, or a link fetched with
  * fetchSourceUrl), sha256 and checkImage on the full bytes. Zip entries and fetched links are
- * stored content-addressed under derived/_ingest/, so a repeated call writes the same object.
+ * stored content-addressed under derived/_ingest/ through stageOnce, so the same bytes are written once.
  */
-async function readItem(item: SourceItem, deps: IngestDeps, ctx: { prefix: string; uploadId: string; zips: ZipReaders; priorAttempts?: Record<string, number> }): Promise<ItemResult> {
+async function readItem(item: SourceItem, deps: IngestDeps, ctx: { prefix: string; uploadId: string; zips: ZipReaders; staged: StagedWrites; priorAttempts?: Record<string, number> }): Promise<ItemResult> {
   const reject = collectRejectReason(item);
   if (reject) return { ok: false, reason: reject };
   const name = baseName(item);
@@ -192,7 +224,7 @@ async function readItem(item: SourceItem, deps: IngestDeps, ctx: { prefix: strin
   const sha256 = createHash("sha256").update(buf).digest("hex");
   const check = await checkImage(buf.subarray(0, SNIFF_BYTES), buf, name);
   if (!check.ok) return { ok: false, reason: check.message };
-  const uri = item.bytes.kind === "gcs" ? item.bytes.gsUri : await deps.storage.uploadBuffer(stagedPath(ctx.prefix, ctx.uploadId, sha256, check.ext), buf, check.mime);
+  const uri = item.bytes.kind === "gcs" ? item.bytes.gsUri : await stageOnce(deps, ctx.staged, stagedPath(ctx.prefix, ctx.uploadId, sha256, check.ext), buf, check.mime);
   return {
     ok: true, sha256, uri, mime: check.mime, ext: check.ext, width: check.width || null, height: check.height || null,
     size: buf.length, flags: imageFlags(check), ...(attempts !== null ? { attempts } : {}),
@@ -435,15 +467,25 @@ export async function runIngest(
   const start = Math.min(Math.max(0, Number(body.cursor ?? 0) || 0), total);
   const order = [...Array(total).keys()].map((k) => (start + k) % Math.max(total, 1));
   const unread = () => order.filter((i) => !manifest.results[itemKey(manifest.items[i]!)]);
-  const todo = unread().slice(0, deps.budgetItems ?? INGEST_BUDGET_ITEMS);
+  // Items sharing a link share one result, so each is read once: reading them side by side would fetch the
+  // same link and write the same staged object at once.
+  const todo = firstPerKey(manifest.items, unread()).slice(0, deps.budgetItems ?? INGEST_BUDGET_ITEMS);
   const zips: ZipReaders = new Map();
+  const staged: StagedWrites = new Map();
   const startedAt = clock().getTime();
-  await mapLimit(todo, ITEM_CONCURRENCY, async (i) => {
-    // The time budget (spec 14d F5 part 2): past it, no new item starts; the continuation reads the rest.
-    if (clock().getTime() - startedAt >= INGEST_TIME_BUDGET_MS) return;
-    const item = manifest.items[i]!;
-    manifest.results[itemKey(item)] = await readItem(item, deps, { prefix, uploadId: upload.id, zips, ...(manifest.priorAttempts ? { priorAttempts: manifest.priorAttempts } : {}) });
-  });
+  // An item that throws (a storage error past its retries) stops new items; what was read is still saved
+  // below before the error is rethrown, so the Cloud Tasks retry goes on from there instead of starting over.
+  let readError: { error: unknown } | null = null;
+  try {
+    await eachLimit(todo, ITEM_CONCURRENCY, async (i) => {
+      // The time budget (spec 14d F5 part 2): past it, no new item starts; the continuation reads the rest.
+      if (clock().getTime() - startedAt >= INGEST_TIME_BUDGET_MS) return;
+      const item = manifest.items[i]!;
+      manifest.results[itemKey(item)] = await readItem(item, deps, { prefix, uploadId: upload.id, zips, staged, ...(manifest.priorAttempts ? { priorAttempts: manifest.priorAttempts } : {}) });
+    });
+  } catch (error) {
+    readError = { error };
+  }
   // Cloud Tasks delivers at least once, so another delivery of this upload may have saved while this
   // one was reading: keep what it read, and count only what this save adds to the stored manifest.
   const stored = await loadJson<UploadManifest>(deps, manifestPath(prefix, upload.id));
@@ -457,6 +499,7 @@ export async function runIngest(
   }
   await saveJson(deps, manifestPath(prefix, upload.id), manifest);
   await bumpCollected(db, batch.id, doneCount(manifest) - doneCount(stored), total - (stored?.items.length ?? 0));
+  if (readError) throw readError.error;
   // The phase and a rate sample, read after the bump; a batch cancelled meanwhile stops here, with
   // no continuation and no upload marked collected.
   if (!(await collectProgress(db, batch.id, phase, clock()))) {
@@ -1224,10 +1267,12 @@ export async function collectOffline(input: {
     const listing = await listUpload(ci);
     const m: UploadManifest = { version: 1, ...listing, results: {} };
     const zips: ZipReaders = new Map();
+    const staged: StagedWrites = new Map();
+    const distinct = firstPerKey(m.items, [...m.items.keys()]).map((i) => m.items[i]!);
     let done = 0;
-    await mapLimit(m.items, ITEM_CONCURRENCY, async (item) => {
-      m.results[itemKey(item)] = await readItem(item, deps, { prefix, uploadId: upload.id, zips });
-      input.onProgress?.(++done, m.items.length);
+    await mapLimit(distinct, ITEM_CONCURRENCY, async (item) => {
+      m.results[itemKey(item)] = await readItem(item, deps, { prefix, uploadId: upload.id, zips, staged });
+      input.onProgress?.(++done, distinct.length);
     });
     rejected.push(...(listing.detected.rejected ?? []));
     manifests.set(upload.id, m);
