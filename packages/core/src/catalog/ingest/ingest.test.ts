@@ -1,4 +1,5 @@
 // Tier 2 (PGlite + fake storage, fake fetch, fake enqueue): the ingest run (spec 04, "Ingest run").
+import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { Readable } from "node:stream";
 import { and, eq, inArray, sql } from "drizzle-orm";
@@ -1187,5 +1188,100 @@ describe("automatic retry of transient link failures (spec 14d F5 part 2)", () =
     await runIngest(db, x.d, x.w.enqueued.at(-1)!.body as PlaceBody);
     expect(Object.keys((await x.manifest()).results).length).toBeGreaterThan(read);
     expect(INGEST_TIME_BUDGET_MS).toBe(600_000);
+  });
+});
+
+describe("links shared by many rows (all sizes of a colour share the same photos)", () => {
+  const SHARED = `${HOST}/shared`;
+  /** A pasted grid: one row per size, every size of a colour listing the colour's same photo links. */
+  async function sharedBatch(w: World, colours: string[], sizes: string[], photos: number) {
+    const lines = colours.flatMap((c) => sizes.map((s) => [`${c}_${s}`, ...Array.from({ length: photos }, (_, k) => `${SHARED}/${c}_${k + 1}.jpg`)].join("\t")));
+    const [b] = await db.insert(catalogBatches).values({
+      brandSlug: "test_brand", brandName: "Test Brand", name: "shared links", isTest: true, createdBy: "op@opptra.com", channels: [],
+      options: { identifierMode: "filename", precedence: "uploads_then_links", sheetColumns: null },
+    }).returning();
+    const [u] = await db.insert(catalogUploads).values({ batchId: b!.id, kind: "url_list", name: "Image links", sourceUrl: lines.join("\n"), gcsUri: null, status: "uploaded" }).returning();
+    const prefix = batchPrefix(b!.brandSlug, b!.id, true);
+    const manifest = () => JSON.parse(w.objects.get(`gs://${BUCKET}/${manifestPath(prefix, u!.id)}`)!.buf.toString("utf8")) as UploadManifest;
+    const stagedUploads = () => w.calls.uploads.filter((p) => p.includes(`/derived/_ingest/${u!.id}/`) && !p.endsWith("manifest.json"));
+    const fetchesOf = (url: string) => w.calls.fetches.filter((f) => f === `GET ${url}`).length;
+    return { batchId: b!.id, uploadId: u!.id, prefix, rows: colours.length * sizes.length * photos, manifest, stagedUploads, fetchesOf };
+  }
+  const uploadRow = async (id: string) => (await db.select().from(catalogUploads).where(eq(catalogUploads.id, id)))[0]!;
+
+  it("fetches and stages each shared link once and counts every row as collected", async () => {
+    const w = fakeWorld();
+    const colours = ["BLUE", "GREEN"], photos = 3;
+    for (const c of colours) for (let k = 1; k <= photos; k++) w.web.set(`${SHARED}/${c}_${k}.jpg`, await jpeg());
+    const x = await sharedBatch(w, colours, ["29-33", "30-33", "31-33", "32-33", "34-33"], photos);
+    await ingestAll(w, (await batchRow(x.batchId)) as CatalogBatch);
+
+    for (const c of colours) for (let k = 1; k <= photos; k++) expect(x.fetchesOf(`${SHARED}/${c}_${k}.jpg`)).toBe(1);
+    expect(x.stagedUploads()).toHaveLength(colours.length * photos);
+    const results = Object.values(x.manifest().results);
+    expect(results).toHaveLength(colours.length * photos);
+    expect(results.every((r) => r.ok)).toBe(true);
+    expect((await batchRow(x.batchId)).counts.collected).toBe(x.rows);
+    expect((await uploadRow(x.uploadId)).status).toBe("collected");
+  });
+
+  it("writes the same bytes under two different links once, and never rewrites an object already staged", async () => {
+    const w = fakeWorld();
+    const same = await jpeg(), other = await jpeg();
+    w.web.set(`${SHARED}/TWIN_1.jpg`, same);
+    w.web.set(`${SHARED}/TWIN_2.jpg`, same);
+    w.web.set(`${SHARED}/TWIN_3.jpg`, other);
+    const x = await sharedBatch(w, ["TWIN"], ["S"], 3);
+    // TWIN_3's bytes are already staged (a Cloud Tasks re-delivery, or an earlier run).
+    w.put(`${x.prefix}/derived/_ingest/${x.uploadId}/${createHash("sha256").update(other).digest("hex")}.jpg`, other);
+    await runIngest(db, deps(w), { batchId: x.batchId, uploadId: x.uploadId });
+
+    expect(x.stagedUploads()).toHaveLength(1);
+    const r = x.manifest().results;
+    const [one, two] = [r[`url:${SHARED}/TWIN_1.jpg`], r[`url:${SHARED}/TWIN_2.jpg`]] as { ok: true; uri: string }[];
+    expect(one!.uri).toBe(two!.uri);
+    expect(r[`url:${SHARED}/TWIN_3.jpg`]).toMatchObject({ ok: true });
+  });
+
+  it("an item budget counts links, not rows: one delivery collects every row of two shared links", async () => {
+    const w = fakeWorld();
+    w.web.set(`${SHARED}/LEFT_1.jpg`, await jpeg());
+    w.web.set(`${SHARED}/RIGHT_1.jpg`, await jpeg());
+    // The first two rows are LEFT's: a budget of two rows would never reach RIGHT.
+    const x = await sharedBatch(w, ["LEFT", "RIGHT"], ["S", "M", "L"], 1);
+    await runIngest(db, deps(w, 2), { batchId: x.batchId, uploadId: x.uploadId });
+    expect((await batchRow(x.batchId)).counts.collected).toBe(x.rows);
+    expect((await uploadRow(x.uploadId)).status).toBe("collected");
+  });
+
+  it("a storage error on one photo keeps what the delivery read, and the retry reads only the rest", async () => {
+    const w = fakeWorld();
+    const photos = 6;
+    const bufs = await Promise.all(Array.from({ length: photos }, () => jpeg()));
+    bufs.forEach((buf, k) => w.web.set(`${SHARED}/HEAVY_${k + 1}.jpg`, buf));
+    const x = await sharedBatch(w, ["HEAVY"], ["S", "M"], photos);
+    const busy = Object.assign(new Error("exceeded the rate limit for object mutation operations"), { code: 429 });
+    let failing = true;
+    const storage: IngestDeps["storage"] = {
+      ...w.storage,
+      uploadBuffer: async (path, buf, mime, opts) => {
+        if (failing && buf.equals(bufs[3]!)) throw busy;
+        return w.storage.uploadBuffer(path, buf, mime, opts);
+      },
+    };
+    const body = { batchId: x.batchId, uploadId: x.uploadId };
+    await expect(runIngest(db, { ...deps(w), storage }, body)).rejects.toThrow("rate limit");
+    const kept = x.manifest().results;
+    expect(Object.keys(kept)).toHaveLength(photos - 1);
+    expect(kept[`url:${SHARED}/HEAVY_4.jpg`]).toBeUndefined();
+    expect((await batchRow(x.batchId)).counts.collected).toBe(x.rows - 2);
+
+    // Cloud Tasks retries the same body: only the photo that failed is fetched again.
+    failing = false;
+    await runIngest(db, { ...deps(w), storage }, body);
+    expect(x.fetchesOf(`${SHARED}/HEAVY_4.jpg`)).toBe(2);
+    expect(x.fetchesOf(`${SHARED}/HEAVY_1.jpg`)).toBe(1);
+    expect(Object.values(x.manifest().results).every((r) => r.ok)).toBe(true);
+    expect((await uploadRow(x.uploadId)).status).toBe("collected");
   });
 });
