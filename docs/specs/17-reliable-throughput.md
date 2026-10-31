@@ -444,16 +444,17 @@ split for 7,000 products; a per-operator-batch reservation of GPU in-flight slot
 - [x] G4 merged: the tail chunk's cause is named from the logs and its fix is tested; the load report prints
       chunk time median, p95 and max. (#110: a render task deleted by Cloud Tasks after five 429s; unlimited chunk
       queue retries for 30 minutes and a 6-minute re-send of an unstarted step.)
-- [ ] Section 9 steps 1 to 7 done; the report states photos per minute for 200 products, the 2,000 and 7,000
-      projections, and the pass or fail of every reliability item. (Steps 0 to 6 done; step 7 cleanup is done in
-      the spec 18 close-out. See "Outcome" below.)
+- [x] Section 9 steps 1 to 7 done; the report states photos per minute for 200 products, the 2,000 and 7,000
+      projections, and the pass or fail of every reliability item. (Steps 0 to 6 done 2026-10-29; step 7 cleanup
+      done in the spec 18 close-out on 2026-10-31, except the owner-started 616a7386, which the cleanup guard
+      refuses. See "Outcome" below.)
 - [x] G5 merged: solutions entry with the learning -> check table; protocol sections 9 and 11 updated; spec 16
       corrected; the owner's plain-language status doc; handoff written; memory lines saved. (Docs in the spec 18
       H5 PR: `docs/solutions/2026-10-27-gpu-shape-and-staged-siblings.md`,
       `docs/plans/2026-10-28-post-deploy-status.md`; the handoff and memory lines are the manager's.)
-- [ ] The final report ends "Ready for the next spec: 18 <title to be chosen>" or "Blocked: <exact thing>".
+- [x] The final report ends "Ready for the next spec: 18 <title to be chosen>" or "Blocked: <exact thing>".
       (Owner decision 6 of spec 18: it ends "Blocked: 150 photos/min not reached"; written in the spec 18
-      close-out.)
+      close-out, below.)
 
 ### Outcome (2026-10-29)
 
@@ -475,5 +476,53 @@ split for 7,000 products; a per-operator-batch reservation of GPU in-flight slot
   - The load driver made all 9 channels, not the 4 P1 channels of step 5 (about 2.25 x the render work per photo).
   - The driver's re-check exited 1 (7,270 of 8,010 OK) while the worker's own re-check passed 8,010 of 8,010;
     the per-link reasons were discarded, so it is unproven (fixed for next time in spec 18 H4).
-- Step 7 cleanup (operator batch `616a7386`, speed batch `8628295f`) and the second invariants run are pending
-  and are done in the spec 18 close-out.
+- Step 7 cleanup and the second invariants run were done in the spec 18 close-out on 2026-10-31: speed batch
+  `8628295f` cleaned (`catalog-test-cleanup-cgq77`); invariants `catalog-invariants-67p62` zero ERROR outside
+  09dd86f2. Operator batch `616a7386` was refused by the cleanup's guard (its name does not start with
+  `catalog-test`; the owner started it), so it stays as it is and is an owner item.
+
+### Final report (00 section 10, written 2026-10-31)
+
+```
+Spec 17 Reliable throughput: merged (PRs #107 to #118) and deployed to
+https://catalog-web-847405579637.asia-south1.run.app (live since 2026-10-28, main ea22854; GPU shape #118).
+
+What shipped
+- G1 honest completion: held siblings and silent outputs are separate numbers; invariants every 10 minutes with
+  two new alerts; four Ops lines.
+- G2 one deploy gate for every Cloud Run service: no-traffic candidate, probe, then traffic; deploy.sh --rollback.
+- G3 the GPU measured on L4, then fitted: one resident cut-out model; shape.sh refuses unmeasured shapes.
+- G4 the tail chunk: a lost chunk task is recovered in about 6 minutes instead of 30.
+- G5 learnings, protocol updates and the owner's status doc (in the spec 18 H5 PR #123).
+
+Test evidence
+- Tier 1+2: green in CI on every PR.
+- Tier 3: n/a.
+- Tier 4: n/a.
+- Tier 5: per-brand smoke inside the worker gate on every deploy.
+- Tier 6: 200-product load 8628295f (935 photos, 9 channels, 46 min): 20.4 photos/min whole batch, 28.9 steady,
+  57.3 best 3 minutes; reliability held (0 silent outputs, 0 ERROR invariants, every product published or held with
+  a reason). Operator batch 616a7386 finished in 11.0 min (pass); first image about 7 m 39 s (limit 5, likely fail).
+  Cleanup of 8628295f and the second invariants run done 2026-10-31; 616a7386 refused by the cleanup guard
+  (not a catalog-test name), left for the owner.
+
+Excluded and why
+- The 150 photos/min bar: not reached. The limiting stage was the CPU upscaler inside the render (935 of 935
+  enlargements fell back to a plain resize then). Spec 18 fixed the reliability of that stage.
+- Since 2026-10-31 enlargement runs on the RTX PRO 6000 GPU upscaler (catalog-upscale-gpu, asia-south2), about
+  30 to 100 times faster per call than CPU: the 5-product operator batch took 4 min 11 s on GPU against 75 min on
+  CPU. That changes the speed picture, but no 200-product load has been measured on GPU yet, so the 150 photos/min
+  bar is still unproven.
+
+Contract changes proposed (02 or 03)
+- none
+
+Learnings written
+- docs/solutions/2026-10-27-gpu-shape-and-staged-siblings.md
+
+Task board
+G1 done | G2 done | G3 done | G4 done | G5 done | section 9 done (step 5 bar not met)
+
+Blocked: 150 photos/min not reached. Next: a 200-product load with enlargement on GPU, in an owner-approved quiet
+window, to measure photos per minute again.
+```
