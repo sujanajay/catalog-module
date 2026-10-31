@@ -170,6 +170,7 @@ UPSCALE_TARGET=cpu bash infra/deploy.sh
 5. **More GPU machines for enlargement.** The request for 6 RTX PRO 6000 cards in asia-south2 (instead of 3)
    shows as granted (6) in Google Cloud on 2026-10-31. Using them needs one small change and a deploy
    (`UPSCALE_GPU_MAX_INSTANCES` from 3 to 6), which waits for your OK. It costs nothing while idle.
+   Update 2026-10-31: raised to 4 now (the most the asia-south2 memory quota allows); 6 after your memory quota request.
 
 ## Follow-ups (known, not fixed in spec 18)
 

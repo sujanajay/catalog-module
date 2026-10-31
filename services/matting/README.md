@@ -362,8 +362,9 @@ instances during the probe answered their first call after 42 s and 91.5 s end t
 second, so the deploy gate passes cold start 0 for this service and these numbers are measured by hand.
 
 Quota: Google granted 3 GPUs (3000 milli GPU, `NvidiaRtxPro6000GpuAllocNoZonalRedundancyPerProjectRegion`) in
-asia-south2 on the first deploy. `UPSCALE_GPU_MAX_INSTANCES=3`, `UPSCALE_GPU_CONCURRENCY=4`; the increase to 6 GPUs is
-`infra/request-gpu-upscale-quota.sh`.
+asia-south2 on the first deploy, and 6 on 2026-10-31 (`infra/request-gpu-upscale-quota.sh`). `UPSCALE_GPU_MAX_INSTANCES=4`,
+`UPSCALE_GPU_CONCURRENCY=4`: 4 x 80 GiB = 320 GiB is the most the asia-south2 memory quota allows (384 of 400 GiB);
+6 instances wait for a memory quota raise there.
 
 Default since 2026-10-31: new batches enlarge on `catalog-upscale-gpu` (`UPSCALE_TARGET=gpu` in `infra/lib/shape.sh`).
 Rollback: `UPSCALE_TARGET=cpu bash infra/deploy.sh` sends new batches back to `catalog-upscale` with the CPU enlarge lanes; running batches keep their upscaler.
