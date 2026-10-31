@@ -13,13 +13,16 @@
 #   BULK_MAX_DISPATCHES=0 INGEST_MAX_DISPATCHES=2 DB_MAX_CONNECTIONS=25 MATTING_CPU_MAX_INSTANCES=20
 #   UPSCALE_SERVICE=gpu CATALOG_PHOTO_CONCURRENCY=1 CATALOG_BULK_WINDOW=8 LLM_INFLIGHT_PER_INSTANCE=
 #   WORKER_CONCURRENCY=2 ENLARGE_MAX_DISPATCHES=0 ENLARGE_BULK_MAX_DISPATCHES=0 (spec 18: no enlarge queue)
-#   UPSCALE_GPU_SERVICE=0 (spec 18 GPU upscaler: spec 11's GPU path and catalog-upscale-gpu both use the plain ids)
+#   UPSCALE_GPU_SERVICE=0 UPSCALE_TARGET=cpu (spec 18 GPU upscaler: spec 11's GPU path and catalog-upscale-gpu both use
+#   the plain ids)
 # The shape before the spec 18 measured table (enlargement back on catalog-matting), for a rollback:
 #   UPSCALE_SERVICE=cpu MATTING_CPU_MAX_INSTANCES=16 UPSCALE_TIMEOUT_S=840 ENLARGE_DISPATCHES_PER_SECOND=0.1
 #   ENLARGE_BULK_MAX_DISPATCHES=12 UPSCALE_MAX_PIXELS=24000000
 # The shape before the 2026-10-30 scale-out (asia-south1 quota 200 vCPU / 400 GiB), for a rollback:
 #   WORKER_MAX_INSTANCES=24 ENLARGE_BULK_MAX_DISPATCHES=10 ENLARGE_DISPATCHES_PER_SECOND=0.075
 #   ENLARGE_BULK_DISPATCHES_PER_SECOND=0.075 UPSCALE_MEMORY=16Gi UPSCALE_MAX_INSTANCES=16
+# The shape before the GPU upscaler became the default (2026-10-31), for a rollback: UPSCALE_TARGET=cpu (the enlarge
+#   lanes then come from ENLARGE_CPU_LANES: 4 + 44 slots at 0.04/s and 0.42/s).
 SHAPE_DEFAULTS=(
   # What Postgres allows on ila-pg: the default of its tier db-custom-2-7680 (ila-pg sets no max_connections flag).
   # Lower it, and deploy, before infra/sql-tier.sh moves to a smaller tier (docs/solutions/db-connection-budget.md).
@@ -39,19 +42,21 @@ SHAPE_DEFAULTS=(
   INGEST_MAX_DISPATCHES=4
   # Spec 18 3.3.1: the enlarge lanes (operator <queue>-enlarge, bulk <queue>-enlarge-bulk, created only when
   # ENLARGE_BULK_MAX_DISPATCHES > 0). One slot is one enlargement waiting on the upscaler, so together they never
-  # exceed what catalog-upscale serves at once (UPSCALE_MAX_INSTANCES x UPSCALE_CONCURRENCY, checked below), together
-  # with the preview stack's enlarge lane, which calls the same live catalog-upscale: 4 + 44 + preview 2 = 50 x 1.
-  # ENLARGE_DISPATCHES_PER_SECOND paces new enlargements on each operator lane (this stack's and the preview's) and
-  # ENLARGE_BULK_DISPATCHES_PER_SECOND on the bulk lane; Cloud Tasks applies a rate per queue, so the SUM over every
-  # lane with slots, both stacks, must stay within what catalog-upscale finishes (spec 18 3.1.5): UPSCALE_MAX_INSTANCES
-  # x UPSCALE_CONCURRENCY / p50(800x1200) = 50 x 1 / 99 s = 0.5051/s, and 2 x 0.04 + 0.42 = 0.50/s. Each lane's rate is
-  # about its slots / p50 (4 / 99 s, 44 / 99 s), so no lane is held back by another's share.
+  # exceed what the upscaler of new batches (UPSCALE_TARGET below) serves at once, together with the preview stack's
+  # enlarge lane, which calls the same live upscaler. ENLARGE_DISPATCHES_PER_SECOND paces new enlargements on each
+  # operator lane (this stack's and the preview's) and ENLARGE_BULK_DISPATCHES_PER_SECOND on the bulk lane; Cloud Tasks
+  # applies a rate per queue, so the SUM over every lane with slots, both stacks, must stay within what that upscaler
+  # finishes (spec 18 3.1.5). Each lane's rate is about its slots / p50, so no lane is held back by another's share.
+  # These rows are for UPSCALE_TARGET=gpu (the default since 2026-10-31): catalog-upscale-gpu serves
+  # UPSCALE_GPU_MAX_INSTANCES x UPSCALE_GPU_CONCURRENCY = 3 x 4 = 12 at once, so 2 + 8 + the preview's 2 = 12, and it
+  # finishes 12 / p50(800x1200) 4 s = 3/s, so 2 x 0.5 + 2 = 3/s (upscale_gpu_check). With UPSCALE_TARGET=cpu the lanes
+  # come from ENLARGE_CPU_LANES below (the CPU shape, exactly as it ran before the switch).
   # ENLARGE_MAX_DISPATCHES=0 means no enlarge lanes: the worker gets no TASKS_ENLARGE_QUEUE and enlarge tasks share the
   # chunk queues (the rollback line above).
-  ENLARGE_MAX_DISPATCHES=4
-  ENLARGE_BULK_MAX_DISPATCHES=44
-  ENLARGE_DISPATCHES_PER_SECOND=0.04
-  ENLARGE_BULK_DISPATCHES_PER_SECOND=0.42
+  ENLARGE_MAX_DISPATCHES=2
+  ENLARGE_BULK_MAX_DISPATCHES=8
+  ENLARGE_DISPATCHES_PER_SECOND=0.5
+  ENLARGE_BULK_DISPATCHES_PER_SECOND=2
   # CPU cut-out service catalog-matting (asia-south1, 4 vCPU each). Spec 18: 16 -> 4 to give catalog-upscale its
   # vCPU; the GPU does the cut-outs, the CPU cut-out is a fallback.
   MATTING_CPU_MAX_INSTANCES=4
@@ -117,12 +122,14 @@ SHAPE_DEFAULTS=(
   UPSCALE_MAX_PIXELS=5400000
   UPSCALE_MAX_PIXELS_X4=4900000
   # Spec 18 GPU upscaler (owner 2026-10-30: AI enlargement on GPUs in a second region, asia-south2; speed matters a lot,
-  # cost does not, reliability stays the must-have). UPSCALE_TARGET is where Start pins a new batch's enlargements: cpu
-  # (catalog-upscale, the `+cpu` upscaler ids) or gpu (catalog-upscale-gpu, the plain ids). Each batch keeps the target
-  # it started with (options.enlargement.target), so cpu is the rollback switch for new batches and never moves a
-  # running one; the GPU service stays deployed for batches already on it. UPSCALE_GPU_SERVICE=1 deploys
-  # catalog-upscale-gpu (the matting-gpu image, only the upscaler loaded) and gives the worker its URL either way.
-  UPSCALE_TARGET=cpu
+  # cost does not, reliability stays the must-have). UPSCALE_TARGET is where Start pins a new batch's enlargements: gpu
+  # (catalog-upscale-gpu, the plain upscaler ids; the default since 2026-10-31, owner-approved after the CPU live test)
+  # or cpu (catalog-upscale, the `+cpu` ids). Each batch keeps the target it started with (options.enlargement.target),
+  # so `UPSCALE_TARGET=cpu bash infra/deploy.sh` is the rollback switch for new batches (with the CPU lanes of
+  # ENLARGE_CPU_LANES) and never moves a running one; both services stay deployed for the batches already on them.
+  # UPSCALE_GPU_SERVICE=1 deploys catalog-upscale-gpu (the matting-gpu image, only the upscaler loaded) and gives the
+  # worker its URL either way.
+  UPSCALE_TARGET=gpu
   UPSCALE_GPU_SERVICE=1
   # One NVIDIA RTX PRO 6000 (Blackwell, 96 GB) per instance in asia-south2, no zonal redundancy: Google granted 3 on
   # the first deploy (2026-10-30). Cloud Run needs at least 20 vCPU and 80 GiB with this GPU. Concurrency 4: the
@@ -151,6 +158,17 @@ SHAPE_DEFAULTS=(
   BULK_BATCH_PRODUCTS=100
   # AI check pacing per worker instance (spec 16 F3); "" means no cap.
   LLM_INFLIGHT_PER_INSTANCE=6
+)
+# Spec 18 GPU upscaler: the enlarge lanes with UPSCALE_TARGET=cpu, the CPU shape that ran until 2026-10-31. They
+# exceed what catalog-upscale-gpu serves, and catalog-upscale-gpu's lanes would leave catalog-upscale mostly idle, so
+# the lanes follow the target. catalog-upscale serves UPSCALE_MAX_INSTANCES x UPSCALE_CONCURRENCY = 50 x 1 at once:
+# 4 + 44 + the preview's 2 = 50. It finishes 50 x 1 / p50(800x1200) = 50 / 99 s = 0.5051/s, and 2 x 0.04 + 0.42 =
+# 0.50/s (4 / 99 s, 44 / 99 s per lane). Env still wins over these rows.
+ENLARGE_CPU_LANES=(
+  ENLARGE_MAX_DISPATCHES=4
+  ENLARGE_BULK_MAX_DISPATCHES=44
+  ENLARGE_DISPATCHES_PER_SECOND=0.04
+  ENLARGE_BULK_DISPATCHES_PER_SECOND=0.42
 )
 # The preview stack (CATALOG_PREVIEW=1, infra/deploy-preview.sh) runs the same per-instance shape on fewer worker
 # instances and without a bulk queue, so a branch never takes the production worker's share of the asia-south1 CPU
@@ -181,6 +199,15 @@ shape_row() {
   done
 }
 
+# shape_main_row NAME: the production stack's row of NAME for this deploy's UPSCALE_TARGET (ENLARGE_CPU_LANES with
+# cpu, else SHAPE_DEFAULTS). Both stacks share the target, so the other stack's lanes are read with it.
+shape_main_row() {
+  local v=""
+  [ "${UPSCALE_TARGET:-}" = cpu ] && v=$(shape_row ENLARGE_CPU_LANES "$1")
+  [ -n "$v" ] || v=$(shape_row SHAPE_DEFAULTS "$1")
+  printf '%s' "$v"
+}
+
 # The default max_connections of a Cloud SQL for PostgreSQL tier (docs.cloud.google.com/sql/docs/postgres/flags,
 # read 2026-10-27): tiny 25, small 50, then by memory: 3.75 to <6 GB 100, 6 to <7.5 GB 200, 7.5 to <15 GB 400,
 # 15 to <30 GB 500, 30 to <60 GB 600, 60 to <120 GB 800, 120 GB and more 1,000. Prints nothing for an unknown tier.
@@ -205,7 +232,11 @@ tier_max_connections() {
 }
 
 shape_defaults() {
+  # The target first: the enlarge lanes follow it (ENLARGE_CPU_LANES with cpu). Preview rows, then the target's lanes,
+  # then the rest, each only where env has not set the name.
+  shape_fill "UPSCALE_TARGET=$(shape_row SHAPE_DEFAULTS UPSCALE_TARGET)"
   if [ "${CATALOG_PREVIEW:-0}" = 1 ]; then shape_fill "${PREVIEW_SHAPE_DEFAULTS[@]}"; fi
+  if [ "$UPSCALE_TARGET" = cpu ]; then shape_fill "${ENLARGE_CPU_LANES[@]}"; fi
   shape_fill "${SHAPE_DEFAULTS[@]}"
   # Database connection budget (docs/solutions/db-connection-budget.md): Postgres keeps 3 for superusers, and the
   # earlier ila apps are assumed to hold 4.
@@ -590,7 +621,7 @@ upscale_check() {
   local other other_name
   if [ "${CATALOG_PREVIEW:-0}" = 1 ]; then
     other_name=production
-    other=$(( $(shape_row SHAPE_DEFAULTS ENLARGE_MAX_DISPATCHES) + $(shape_row SHAPE_DEFAULTS ENLARGE_BULK_MAX_DISPATCHES) ))
+    other=$(( $(shape_main_row ENLARGE_MAX_DISPATCHES) + $(shape_main_row ENLARGE_BULK_MAX_DISPATCHES) ))
   else
     other_name=preview
     other=$(( $(shape_row PREVIEW_SHAPE_DEFAULTS ENLARGE_MAX_DISPATCHES) + $(shape_row PREVIEW_SHAPE_DEFAULTS ENLARGE_BULK_MAX_DISPATCHES) ))
@@ -661,7 +692,7 @@ upscale_check() {
   [ -n "$mem_mib" ] || return 0
   # Spec 18 GPU upscaler: with UPSCALE_TARGET=gpu new batches enlarge on catalog-upscale-gpu and catalog-upscale only
   # finishes the batches started on it; its slot rule above still holds, the rate follows the GPU (upscale_gpu_check).
-  [ "${UPSCALE_TARGET:-cpu}" = cpu ] || return 0
+  [ "$UPSCALE_TARGET" = cpu ] || return 0
   # Spec 18 3.1.5, the queue rate: the SUM of the rates of every enlarge lane that calls catalog-upscale <=
   # UPSCALE_MAX_INSTANCES x UPSCALE_CONCURRENCY / p50, at the smallest size (the usual photo). Without a measured p50 the
   # p95 of that size stands in (a safe bound). Cloud Tasks paces each queue on its own, so each lane with slots counts
@@ -671,8 +702,8 @@ upscale_check() {
   [ "$ENLARGE_MAX_DISPATCHES" -gt 0 ] && operator=$((operator + 1))
   [ "$ENLARGE_BULK_MAX_DISPATCHES" -gt 0 ] && bulk=$((bulk + 1))
   if [ "${CATALOG_PREVIEW:-0}" = 1 ]; then
-    [ "$(shape_row SHAPE_DEFAULTS ENLARGE_MAX_DISPATCHES)" -gt 0 ] && operator=$((operator + 1))
-    [ "$(shape_row SHAPE_DEFAULTS ENLARGE_BULK_MAX_DISPATCHES)" -gt 0 ] && bulk=$((bulk + 1))
+    [ "$(shape_main_row ENLARGE_MAX_DISPATCHES)" -gt 0 ] && operator=$((operator + 1))
+    [ "$(shape_main_row ENLARGE_BULK_MAX_DISPATCHES)" -gt 0 ] && bulk=$((bulk + 1))
   else
     [ "$(shape_row PREVIEW_SHAPE_DEFAULTS ENLARGE_MAX_DISPATCHES)" -gt 0 ] && operator=$((operator + 1))
     [ "$(shape_row PREVIEW_SHAPE_DEFAULTS ENLARGE_BULK_MAX_DISPATCHES)" -gt 0 ] && bulk=$((bulk + 1))
@@ -789,7 +820,7 @@ upscale_gpu_check() {
   # attempts), and their rate stays within what it finishes at the smallest size's p50 (the p95 when no p50).
   local other
   if [ "${CATALOG_PREVIEW:-0}" = 1 ]; then
-    other=$(( $(shape_row SHAPE_DEFAULTS ENLARGE_MAX_DISPATCHES) + $(shape_row SHAPE_DEFAULTS ENLARGE_BULK_MAX_DISPATCHES) ))
+    other=$(( $(shape_main_row ENLARGE_MAX_DISPATCHES) + $(shape_main_row ENLARGE_BULK_MAX_DISPATCHES) ))
   else
     other=$(( $(shape_row PREVIEW_SHAPE_DEFAULTS ENLARGE_MAX_DISPATCHES) + $(shape_row PREVIEW_SHAPE_DEFAULTS ENLARGE_BULK_MAX_DISPATCHES) ))
   fi
@@ -804,8 +835,8 @@ upscale_gpu_check() {
   [ "$ENLARGE_MAX_DISPATCHES" -gt 0 ] && operator=$((operator + 1))
   [ "$ENLARGE_BULK_MAX_DISPATCHES" -gt 0 ] && bulk=$((bulk + 1))
   if [ "${CATALOG_PREVIEW:-0}" = 1 ]; then
-    [ "$(shape_row SHAPE_DEFAULTS ENLARGE_MAX_DISPATCHES)" -gt 0 ] && operator=$((operator + 1))
-    [ "$(shape_row SHAPE_DEFAULTS ENLARGE_BULK_MAX_DISPATCHES)" -gt 0 ] && bulk=$((bulk + 1))
+    [ "$(shape_main_row ENLARGE_MAX_DISPATCHES)" -gt 0 ] && operator=$((operator + 1))
+    [ "$(shape_main_row ENLARGE_BULK_MAX_DISPATCHES)" -gt 0 ] && bulk=$((bulk + 1))
   else
     [ "$(shape_row PREVIEW_SHAPE_DEFAULTS ENLARGE_MAX_DISPATCHES)" -gt 0 ] && operator=$((operator + 1))
     [ "$(shape_row PREVIEW_SHAPE_DEFAULTS ENLARGE_BULK_MAX_DISPATCHES)" -gt 0 ] && bulk=$((bulk + 1))

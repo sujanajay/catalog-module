@@ -365,6 +365,9 @@ Quota: Google granted 3 GPUs (3000 milli GPU, `NvidiaRtxPro6000GpuAllocNoZonalRe
 asia-south2 on the first deploy. `UPSCALE_GPU_MAX_INSTANCES=3`, `UPSCALE_GPU_CONCURRENCY=4`; the increase to 6 GPUs is
 `infra/request-gpu-upscale-quota.sh`.
 
+Default since 2026-10-31: new batches enlarge on `catalog-upscale-gpu` (`UPSCALE_TARGET=gpu` in `infra/lib/shape.sh`).
+Rollback: `UPSCALE_TARGET=cpu bash infra/deploy.sh` sends new batches back to `catalog-upscale` with the CPU enlarge lanes; running batches keep their upscaler.
+
 ## Measured on CPU
 
 Spec 18 H1. Measured on Cloud Run on 2026-10-29 (the ladder below). Spec 16 assumed 5.9 to 7.8 s per 800x1200
