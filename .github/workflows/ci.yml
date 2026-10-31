@@ -36,9 +36,10 @@ jobs:
           node-version: 22
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      # Vitest splits the test files over the shards (a stable hash of each path); together they run every file of
-      # `pnpm test`. T40's 200 sequences are 8 files (enlarge.model.t40-<n>.test.ts) so they spread over the shards.
-      - run: pnpm test --shard=${{ matrix.shard }}/4
+      # `pnpm test` (vitest run), one shard of it: vitest splits the test files over the shards (a stable hash of each
+      # path), so together they run every file. T40's 200 sequences are 8 files (enlarge.model.t40-<n>.test.ts) so
+      # they spread over the shards. pnpm would read --shard as its own option, hence `pnpm exec vitest run`.
+      - run: pnpm exec vitest run --shard=${{ matrix.shard }}/4
 
   infra-matting:
     name: infra and matting tests
