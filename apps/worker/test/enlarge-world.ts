@@ -1,4 +1,4 @@
-// Test support for the spec 18 enlargement lifecycle (enlarge.test.ts, enlarge.model.test.ts): a fake upscale service
+// Test support for the spec 18 enlargement lifecycle (enlarge.test.ts, enlarge.model.test.ts and the T40 slices): a fake upscale service
 // and health probe driven by a mode, a clock the tests move (claims, the sweep, the back-off), a batch with its pinned
 // route, a generation-aware in-memory public bucket (publish and finalize run for real), and a queue driver that
 // delivers every task to its real handler (a 503 goes back to the end of the queue, as Cloud Tasks retries it).
