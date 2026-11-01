@@ -87,7 +87,7 @@ export async function notRefreshedChannels(db:Db,batchId:string):Promise<NotRefr
   // The newest live output per channel the batch does not make, read in the database (one row per channel).
   const latest = await db.selectDistinctOn([catalogOutputs.channel],{channel:catalogOutputs.channel,lastBatchId:catalogBatches.id,lastBatchName:catalogBatches.name}).from(catalogOutputs).innerJoin(catalogBatches,eq(catalogBatches.id,catalogOutputs.batchId))
     .where(and(inArray(catalogOutputs.productId,batchProductIds(db,batchId)),eq(catalogOutputs.isLive,true),inArray(catalogOutputs.channel,others)))
-    .orderBy(catalogOutputs.channel,desc(sql`coalesce(${catalogOutputs.publishedAt},${catalogOutputs.createdAt})`));
+    .orderBy(catalogOutputs.channel,desc(sql`coalesce(${catalogOutputs.publishedAt},${catalogOutputs.createdAt})`),asc(catalogOutputs.id));
   const byChannel=new Map(latest.map(r=>[r.channel,r]));
   return others.flatMap(c=>{ const r=byChannel.get(c); return r ? [{channel:c,lastBatchId:r.lastBatchId,lastBatchName:r.lastBatchName}]:[]; });
 }
@@ -159,14 +159,16 @@ export function splitRecheck(recheck: RecheckResult, carried: readonly string[])
 export async function buildReport(db:Db,batchId:string,extra:{recheck:RecheckResult;exports:ExportPaths;ingest?:IngestReport}):Promise<{sheet:SheetSpec;report:Record<string,unknown>;batch:CatalogBatch;carriedLinks:string[]}> {
   const [batch] = await db.select().from(catalogBatches).where(eq(catalogBatches.id,batchId));
   if(!batch) throw new Error("Batch not found.");
-  const pairs = await db.select({product:catalogProducts,pair:catalogBatchProducts}).from(catalogBatchProducts).innerJoin(catalogProducts,eq(catalogProducts.id,catalogBatchProducts.productId)).where(eq(catalogBatchProducts.batchId,batchId));
-  // Every output of the batch's products (this batch's and the live ones of earlier batches), in a fixed order, so
-  // the two builds of one finalize compare equal at any size (a large table scan can start mid-table).
+  // Every read below is in a fixed order, so the builds of one finalize (and of its resumed parts, whose snapshot hash
+  // is compared) are equal at any size: without ORDER BY a large scan can start mid-table, and a write that changes no
+  // value moves a row to the end.
+  const pairs = await db.select({product:catalogProducts,pair:catalogBatchProducts}).from(catalogBatchProducts).innerJoin(catalogProducts,eq(catalogProducts.id,catalogBatchProducts.productId)).where(eq(catalogBatchProducts.batchId,batchId)).orderBy(asc(catalogProducts.identifier),asc(catalogProducts.id));
+  // Every output of the batch's products (this batch's and the live ones of earlier batches).
   const outputs = await db.select().from(catalogOutputs).where(inArray(catalogOutputs.productId,batchProductIds(db,batchId))).orderBy(asc(catalogOutputs.createdAt),asc(catalogOutputs.id));
   const sources = await db.select().from(catalogSourceImages).where(eq(catalogSourceImages.batchId,batchId)).orderBy(asc(catalogSourceImages.productId),asc(catalogSourceImages.n),asc(catalogSourceImages.id));
-  const uploads = await db.select().from(catalogUploads).where(and(eq(catalogUploads.batchId,batchId),ne(catalogUploads.status,"removed")));
-  const events = await db.select().from(catalogProductEvents).where(eq(catalogProductEvents.batchId,batchId));
-  const chunks = await db.select().from(catalogChunks).where(eq(catalogChunks.batchId,batchId));
+  const uploads = await db.select().from(catalogUploads).where(and(eq(catalogUploads.batchId,batchId),ne(catalogUploads.status,"removed"))).orderBy(asc(catalogUploads.createdAt),asc(catalogUploads.id));
+  const events = await db.select().from(catalogProductEvents).where(eq(catalogProductEvents.batchId,batchId)).orderBy(asc(catalogProductEvents.at),asc(catalogProductEvents.id));
+  const chunks = await db.select().from(catalogChunks).where(eq(catalogChunks.batchId,batchId)).orderBy(asc(catalogChunks.index),asc(catalogChunks.id));
   // One pass each: per-product lookups never scan every output, photo or product again (25k products, 225k outputs).
   const outputsOf = groupBy(outputs,o=>o.productId), selected = outputs.filter(o=>o.batchId===batchId), selectedOf = groupBy(selected,o=>o.productId);
   const sourcesOf = groupBy(sources,s=>s.productId), uploadById = new Map(uploads.map(u=>[u.id,u]));

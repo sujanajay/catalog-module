@@ -139,10 +139,12 @@ export async function handleFinalizeTask(deps:CatalogDeps,body:Record<string,unk
     const deadlineAt=Math.max(started+budgetMs,+deps.now()+budgetMs/4);
     const part=await recheckSheetPart(sheetBytes,{fetch:deps.fetch,deadlineAt,now:()=>+deps.now(),...(resume ? {resume}:{})});
     if(!part.done) {
-      // Out of time: the part is saved, the claim given back with the resume marker, and the next request queued.
+      // Out of time: the part is saved, the claim given back with the resume marker, and the next request queued. The
+      // enqueue time is renewed with it, so the publishes and sweeps of a long re-check see a finalize on its way and
+      // queue no second chain next to this one.
       const saved:FinalizeState={attempt,k,snapshotHash,paths,progress:part.progress};
       await deps.storage.uploadBuffer(attemptPath(FINALIZE_STATE),Buffer.from(JSON.stringify(saved)),"application/json");
-      const handed=await deps.db.update(catalogBatches).set({updatedAt:sql`${catalogBatches.updatedAt}`,counts:sql`(${catalogBatches.counts} - 'finalizeClaim' - 'finalizeClaimUntil') || jsonb_build_object('finalizeResume',${attempt}::text)`}).where(claimWhere).returning({id:catalogBatches.id});
+      const handed=await deps.db.update(catalogBatches).set({updatedAt:sql`${catalogBatches.updatedAt}`,counts:sql`(${catalogBatches.counts} - 'finalizeClaim' - 'finalizeClaimUntil') || jsonb_build_object('finalizeResume',${attempt}::text,'finalizeEnqueuedAt',${+deps.now()}::numeric)`}).where(claimWhere).returning({id:catalogBatches.id});
       if(!handed.length) return {httpStatus:503,outcome:"snapshot_changed"};
       // One named task per part: a repeated delivery of this request queues the next part once. A failed enqueue
       // answers 503 (below), so this request's own retry goes on from the saved part.

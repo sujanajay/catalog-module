@@ -4,10 +4,10 @@
 // fakes (test/enlarge-world.ts). No test writes catalog_enlargements directly. Test names start with their plan id.
 import sharp from "sharp";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import type { Db } from "@catalog/core/db/client";
 import { createTestDb } from "@catalog/core/db/testing";
-import { catalogEnlargements } from "@catalog/core/db/schema";
+import { catalogBatches, catalogEnlargements } from "@catalog/core/db/schema";
 import { ENLARGE_MAX_TIMEOUTS, ENLARGE_SEND_WARN, ENLARGE_TASK_MAX_ATTEMPTS, ENLARGING_TASK, IDENTITY_UNSTABLE_SENTENCE, tilesFor } from "@catalog/core/catalog/pipeline/enlargement";
 import { resendStaleEnlargements } from "@catalog/core/catalog/pipeline/dispatch";
 import { retryEnlargement } from "@catalog/core/catalog/decisions";
@@ -17,6 +17,7 @@ import {
   batchOf, chunksOf, corruptObject, deliverChunk, deliverWithDeadline, enlargeBody, enlargeTasks, enlargeUntilSettled, enlargeWorld, outputsOf, photosOf, rowsOf, seedEnlargeBatch, sweep, upscaleCosts, type EnlargeWorld,
 } from "../../test/enlarge-world";
 import { batchEnlargement, clearMadeImages, handleEnlargeTask, upscaleProbeTimeoutMs, upscaleRouteFor, workerEnlargeCall, workerEnlargeProbe } from "./enlarge";
+import { PROGRESS_THROTTLE_MIN_OUTPUTS } from "./deps";
 import { ENLARGE_DISPATCH_DEADLINE_SEC } from "@catalog/core/tasks";
 import { ENLARGE_CLAIM_MS, ENLARGE_MAX_IDENTITY_CHANGES } from "@catalog/core/catalog/pipeline/enlargement";
 
@@ -52,6 +53,17 @@ describe("the matte stage queues, the handler makes, the settle unparks", () => 
     expect(chunk).toMatchObject({ stage: "render", status: "queued", taskName: ENLARGING_TASK });
     expect(chunk.dispatchedAt).not.toBeNull();
     expect(e.w.deliveries().at(-1)).toMatchObject({ outcome: "enlarging" });
+  }, 60_000);
+
+  it("a large batch whose chunk parks is counted exactly at once, though a count ran moments before", async () => {
+    const e = enlargeWorld(db);
+    const s = await seedEnlargeBatch(db, e.w, "park counts", [[1]], { channels: ["trendyol"] });
+    // A large batch counted a moment ago: an ordinary refresh now waits for the next interval.
+    await db.update(catalogBatches).set({ counts: sql`${catalogBatches.counts} || ${JSON.stringify({ outputs: PROGRESS_THROTTLE_MIN_OUTPUTS, progressRefreshedAt: e.w.deps.now().toISOString() })}::jsonb` }).where(eq(catalogBatches.id, s.batch.id));
+    expect(await deliverChunk(db, e.w, s.chunks[0]!.id)).toMatchObject({ httpStatus: 200 });
+    expect(e.w.deliveries().at(-1)).toMatchObject({ outcome: "enlarging" });
+    // The batch may wait hours for the enlargement: the page shows the parked photo now.
+    expect((await batchOf(db, s.batch.id)).counts).toMatchObject({ prepared: 1, enlargeTotal: 1, enlargeDone: 0 });
   }, 60_000);
 });
 

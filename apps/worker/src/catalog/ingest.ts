@@ -64,10 +64,13 @@ export async function handleIngestTask(deps: IngestTaskDeps, body: Record<string
     return { httpStatus: 200, outcome };
   } catch (err) {
     log("ERROR", "ingest task failed", { batchId, uploadId, ms: clock() - started, retryCount: opts.retryCount ?? null, error: err instanceof Error ? err : String(err) });
-    // The last attempt: Cloud Tasks drops the task after this answer, so the batch would wait forever.
+    // The last attempt: Cloud Tasks drops the task after this answer, so the batch would wait forever. A task of
+    // an earlier run (Try again started a newer one) leaves the batch alone and is acknowledged.
     if ((opts.retryCount ?? 0) >= INGEST_MAX_ATTEMPTS - 1) {
       try {
-        if (await (deps.failStopped ?? failStoppedIngest)(deps.db, batchId)) log("WARNING", "batch failed", { batchId, uploadId, cause: "ingest_out_of_attempts" });
+        const delivery = { uploadId, ...(cursor ? { cursor } : {}), ...(run ? { run } : {}) };
+        if (await (deps.failStopped ?? failStoppedIngest)(deps.db, batchId, delivery)) log("WARNING", "batch failed", { batchId, uploadId, cause: "ingest_out_of_attempts" });
+        else return { httpStatus: 200, outcome: "dropped: out of attempts, and the batch was not this task's to stop" };
       } catch (markErr) {
         log("ERROR", "ingest out of attempts: the batch could not be marked failed", { batchId, error: markErr instanceof Error ? markErr : String(markErr) });
       }

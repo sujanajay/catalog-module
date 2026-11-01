@@ -910,7 +910,9 @@ describe("placing in resumable chunks (spec 14d F7 part 2)", () => {
     placed.push(row.counts.placed ?? 0);
     expect(row).toMatchObject({ status: "ingesting", counts: { phase: "placing", placeTotal: 1000 } });
     expect(await sourcesOf(batch.id)).toEqual([]);
-    expect(w.objects.has(`gs://${BUCKET}/${prefixOf(batch)}/derived/_ingest/place-state.json`)).toBe(true);
+    // The plan is saved under its lease's own name.
+    const lease = createHash("sha256").update(deliveryToken({ uploadId, run: "r1" })).digest("hex").slice(0, 16);
+    expect(w.objects.has(`gs://${BUCKET}/${prefixOf(batch)}/derived/_ingest/place-state-${lease}.json`)).toBe(true);
 
     let deliveries = 1;
     for (let next = w.enqueued.at(-1); next?.body.place; next = w.enqueued.at(-1)) {
@@ -1070,7 +1072,7 @@ describe("placing in resumable chunks (spec 14d F7 part 2)", () => {
       ...w.storage,
       uploadBuffer: async (path, buf, mime, opts) => {
         if (path.endsWith("manifest.json")) manifestSaved = performance.now();
-        if (path.endsWith("place-state.json")) planSaved = performance.now();
+        if (/\/place-state-[0-9a-f]+\.json$/.test(path)) planSaved = performance.now();
         return w.storage.uploadBuffer(path, buf, mime, opts);
       },
     };
@@ -1235,12 +1237,90 @@ describe("grouping in resumable chunks (large batches)", () => {
   it("an ingest task out of attempts fails a collecting batch with the operator sentence; a cancelled one stays cancelled", async () => {
     const { w, batch, body } = await grouped("out of attempts", 4, 6700);
     await runIngest(db, { ...deps(w), productBudgetItems: 2 }, body);
-    expect(await failStoppedIngest(db, batch.id)).toBe(true);
+    expect(await failStoppedIngest(db, batch.id, w.enqueued.at(-1)!.body as GroupBody)).toBe(true);
     expect(await batchRow(batch.id)).toMatchObject({ status: "failed", counts: { failReason: INGEST_STOPPED_TEXT, placingClaim: null, phase: null, previewReady: false } });
     const other = await newBatch("cancelled out of attempts");
     await db.update(catalogBatches).set({ status: "cancelled" }).where(eq(catalogBatches.id, other.id));
-    expect(await failStoppedIngest(db, other.id)).toBe(false);
+    expect(await failStoppedIngest(db, other.id, { uploadId: "u1" })).toBe(false);
     expect((await batchRow(other.id)).status).toBe("cancelled");
+  });
+
+  it("a task of an earlier run out of attempts never fails the batch a newer run is collecting", async () => {
+    const { w, batch, uploadId, body } = await grouped("stale stop", 4, 6800);
+    const d = { ...deps(w), productBudgetItems: 2 };
+    await runIngest(db, d, body);
+    const stale = w.enqueued.at(-1)!.body as GroupBody;
+    // Try again: the web clears the lost lease and names the newer run (ingestBatch).
+    await db.update(catalogBatches).set({ counts: mergeCounts({ placingClaim: null, ingestRun: "stale stop 2" }) }).where(eq(catalogBatches.id, batch.id));
+    // Before the newer run claims: only a task of the newer run counts.
+    expect(await failStoppedIngest(db, batch.id, stale)).toBe(false);
+    expect(await failStoppedIngest(db, batch.id, body)).toBe(false);
+    const newer = { batchId: batch.id, uploadId, run: "stale stop 2" };
+    expect((await runIngest(db, d, newer)).outcome).toBe("grouped 2 of 4 products; continuing at 2");
+    // The newer run holds the lease: the earlier run's continuation is dropped, the batch keeps collecting.
+    expect(await failStoppedIngest(db, batch.id, stale)).toBe(false);
+    expect((await batchRow(batch.id)).status).toBe("ingesting");
+    expect(await failStoppedIngest(db, batch.id, w.enqueued.at(-1)!.body as GroupBody)).toBe(true);
+    expect((await batchRow(batch.id)).counts.failReason).toBe(INGEST_STOPPED_TEXT);
+  });
+
+  it("an earlier run frozen while it saves its grouping never breaks the newer run's chunks", async () => {
+    const { w, batch, uploadId, body } = await grouped("frozen group state", 4, 6900);
+    const d = { ...deps(w), productBudgetItems: 2 };
+    // The earlier run's grouping delivery stalls while it saves what it decided (a frozen instance).
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    let held = false;
+    const storage: IngestDeps["storage"] = {
+      ...w.storage,
+      uploadBuffer: async (path, buf, mime, opts) => {
+        if (!held && path.includes("/group-state")) {
+          held = true;
+          await gate;
+        }
+        return w.storage.uploadBuffer(path, buf, mime, opts);
+      },
+    };
+    const frozen = runIngest(db, { ...d, storage }, body);
+    while (!held) await new Promise((r) => setTimeout(r, 5));
+    // Try again clears the lost lease; the newer run claims it and groups its first chunk.
+    await db.update(catalogBatches).set({ counts: mergeCounts({ placingClaim: null }) }).where(eq(catalogBatches.id, batch.id));
+    expect((await runIngest(db, d, { batchId: batch.id, uploadId, run: "frozen group state 2" })).outcome).toBe("grouped 2 of 4 products; continuing at 2");
+    const next = w.enqueued.at(-1)!.body as GroupBody;
+    // The frozen delivery wakes, saves late and finds the lease gone.
+    release();
+    expect((await frozen).outcome).toBe("stopped: another delivery holds the placing lease");
+    expect((await runIngest(db, d, next)).outcome).toBe("preview ready: 4 products, 4 photos");
+  });
+
+  it("a product created and then left out in a chunk that crashed is still removed by the retry", async () => {
+    const w = fakeWorld();
+    const batch = await newBatch("crashed late spellings");
+    // The EAN file name resolves to the option id CRASH OPT, which is also the second file's key.
+    await db.insert(skuMap).values({
+      opptraSku: "CRASH_OPT_40", brand: "USPA", brandSlug: "uspa", line: "softline", source: "warehouse",
+      optionKey: "CRASHOPT", optionIdStyleColor: "CRASH OPT", ean: "8680000000098",
+    });
+    const uploadId = await folderUpload(w, batch, { "8680000000098_1.jpg": await jpeg(), "CRASH-OPT_1.jpg": await jpeg(), "CRZ_1.jpg": await jpeg() });
+    const real = (await vi.importActual<typeof import("../products")>("../products")).findOrCreateProduct;
+    let thrown = false;
+    // The database drops on the product after the two spellings met, before the chunk saved anything.
+    vi.mocked(findOrCreateProduct).mockImplementation(async (tx, input) => {
+      if (input.identifier === "CRZ" && !thrown) {
+        thrown = true;
+        throw new Error("Connection terminated unexpectedly");
+      }
+      return real(tx, input);
+    });
+    try {
+      await expect(runIngest(db, deps(w), { batchId: batch.id, uploadId })).rejects.toThrow("Connection terminated unexpectedly");
+    } finally {
+      vi.mocked(findOrCreateProduct).mockImplementation(real);
+    }
+    expect((await runIngest(db, deps(w), { batchId: batch.id, uploadId })).outcome).toBe("preview ready: 1 products, 1 photos");
+    const keys = (await db.select({ pathKey: catalogProducts.pathKey }).from(catalogProducts).where(eq(catalogProducts.brandSlug, "uspa"))).map((p) => p.pathKey);
+    expect(keys).not.toContain("8680000000098");
+    expect(await linkStatusesOf(batch.id)).toEqual({ CRZ: "ok" });
   });
 
   it("a grouping continuation under an older lease does nothing once a later run regrouped the batch", async () => {

@@ -567,7 +567,9 @@ export async function handleChunkTask(rawDeps: CatalogDeps, body: Record<string,
       } else await dispatchNext(advanced);
     } else { const completed = await deps.db.update(catalogChunks).set({status:"done",taskName:null,leaseUntil:null,finishedAt:deps.now()}).where(ownsClaim()).returning({id:catalogChunks.id}); if (!completed.length) return answer(200,"lost"); await finish(); }
     deps.log("chunk delivered",{batchId:batch.id,chunkId:chunk.id,stage:chunk.stage,attempt:chunk.attempt,durationMs:+deps.now()-+started,mattingMs,renderMs});
-    await refreshBatchProgress(deps.db,batch.id,deps.now());
+    // A chunk parked on an enlargement may leave the batch quiet for hours: its counts are written exact now, not
+    // with a later refresh of the interval (refreshBatchProgress).
+    await refreshBatchProgress(deps.db,batch.id,deps.now(),{force:outcome==="enlarging"});
     return answer(200,"done",outcome);
   } catch(error) {
     const reason = error instanceof Error ? error.message:String(error);
@@ -647,6 +649,8 @@ export async function handleChunkTask(rawDeps: CatalogDeps, body: Record<string,
     if (!failed.length) return false;
     if (chunk!.productIds.length) await deps.db.update(catalogOutputs).set({status:"failed",reason:outputReason,updatedAt:deps.now()}).where(and(eq(catalogOutputs.batchId,chunk!.batchId),inArray(catalogOutputs.productId,chunk!.productIds),eq(catalogOutputs.status,"pending")));
     await finish();
+    // The failed outputs show at once: no later delivery of this chunk counts them (refreshBatchProgress).
+    await refreshBatchProgress(deps.db,chunk!.batchId,deps.now(),{force:true});
     return true;
   }
   async function finish() {

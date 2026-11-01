@@ -111,10 +111,12 @@ export async function ingestBatch(id: string) {
   const now = new Date();
   const stalled = batch.status === "ingesting" && isCollectStalled(batch.updatedAt, now);
   const clearLost = stalled ? sql` || CASE WHEN ${placingClaimRenewedWithin(now, COLLECT_STALL_MS)} THEN '{}'::jsonb ELSE '{"placingClaim": null}'::jsonb END` : sql``;
-  const [handing] = await db().update(catalogBatches).set({ status: "ingesting", counts: sql`${mergeCounts({ previewReady: false, fixReason: null })}${clearLost}`, updatedAt: new Date() })
+  // `ingestRun` names this hand-off as the newest run, so a task of an earlier run that runs out of attempts
+  // never fails the batch this run collects (failStoppedIngest).
+  const run = randomUUID();
+  const [handing] = await db().update(catalogBatches).set({ status: "ingesting", counts: sql`${mergeCounts({ previewReady: false, fixReason: null, ingestRun: run })}${clearLost}`, updatedAt: new Date() })
     .where(and(eq(catalogBatches.id, id), inArray(catalogBatches.status, ["draft", "ingesting"]))).returning({ id: catalogBatches.id });
   if (!handing) throw new HttpError(409, notDraftText(await queryBatch(id)));
-  const run = randomUUID();
   let page = { ids: targets.map((u) => u.id), more: false };
   let handed = 0;
   try {

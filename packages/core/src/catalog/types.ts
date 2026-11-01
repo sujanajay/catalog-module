@@ -149,6 +149,11 @@ export interface BatchCounts {
    */
   fixReason?: string | null;
   /**
+   * The run id of the newest collection hand-off (ingestBatch). An ingest task of an earlier run that runs out of
+   * attempts does not fail the batch (failStoppedIngest). Optional (no migration): absent, any run counts.
+   */
+  ingestRun?: string | null;
+  /**
    * Spec 17 G4: real errors each chunk's current task (stage, step) threw, keyed by chunk id and counted by the
    * worker. The chunk fails at CHUNK_MAX_ERRORS; a new step starts again at 1. Optional (no migration).
    */

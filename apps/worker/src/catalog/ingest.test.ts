@@ -75,8 +75,12 @@ describe("handleIngestTask", () => {
       expect(await handleIngestTask({ db, ingest, run, failStopped }, { batchId: "b1", uploadId: "u1" }, retryCount === undefined ? {} : { retryCount })).toEqual({ httpStatus: 500, outcome: "error" });
     }
     expect(failStopped).not.toHaveBeenCalled();
-    expect(await handleIngestTask({ db, ingest, run, failStopped }, { batchId: "b1", uploadId: "u1" }, { retryCount: 4 })).toEqual({ httpStatus: 500, outcome: "error" });
-    expect(failStopped).toHaveBeenCalledWith(db, "b1");
+    expect(await handleIngestTask({ db, ingest, run, failStopped }, { batchId: "b1", uploadId: "u1", run: "r2", group: "4" }, { retryCount: 4 })).toEqual({ httpStatus: 500, outcome: "error" });
+    expect(failStopped).toHaveBeenCalledWith(db, "b1", { uploadId: "u1", run: "r2" });
+    // A task of an earlier run (Try again started another) leaves the batch alone and is acknowledged.
+    failStopped.mockResolvedValueOnce(false);
+    expect(await handleIngestTask({ db, ingest, run, failStopped }, { batchId: "b1", uploadId: "u1", run: "r1", cursor: "7" }, { retryCount: 4 })).toEqual({ httpStatus: 200, outcome: "dropped: out of attempts, and the batch was not this task's to stop" });
+    expect(failStopped).toHaveBeenLastCalledWith(db, "b1", { uploadId: "u1", cursor: "7", run: "r1" });
     errors.mockRestore();
     warnings.mockRestore();
   });

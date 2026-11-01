@@ -282,6 +282,9 @@ describe("ingest hand-off failures and stalled collecting",()=>{
     expect(ids).toHaveLength(2);
     for(const taskId of ids) expect(taskId).toMatch(new RegExp(`^ingest-${photo.id}-[0-9a-f-]{36}$`));
     expect(ids[0]).not.toBe(ids[1]);
+    // The batch names the newest run, so a task of the first hand-off never stops this one (failStoppedIngest).
+    const [row]=await db.select({counts:catalogBatches.counts}).from(catalogBatches).where(eq(catalogBatches.id,id));
+    expect(row!.counts.ingestRun).toBe((ingestCalls().at(-1)![1] as {run:string}).run);
     logged.mockRestore();
   });
   it("keeps the batch collecting once part of the hand-off reached the queue, and the next /ingest hands over the rest",async()=>{
