@@ -1,10 +1,27 @@
 import pg from "pg";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { checkBudget, formatBudget, parseBudget } from "./budget";
-import { connectWithRetry, isTooManyConnections, RetryingPool } from "./client";
+import { connectWithRetry, isTooManyConnections, poolConfigFromEnv, RetryingPool, WORKER_IDLE_TX_TIMEOUT_MS, WORKER_STATEMENT_TIMEOUT_MS, workerDbTimeoutDefaults } from "./client";
 
 const tooMany = () => Object.assign(new Error("remaining connection slots are reserved for roles with privileges of the pg_use_reserved_connections role"), { code: "53300" });
 const noSleep = () => Promise.resolve();
+
+describe("session timeouts", () => {
+  it("the worker defaults reach the pool config as statement_timeout and idle_in_transaction_session_timeout", () => {
+    const env: NodeJS.ProcessEnv = { DATABASE_URL: "postgres://u@h/d" };
+    expect(poolConfigFromEnv(env)).toEqual({ connectionString: "postgres://u@h/d", max: 5 });
+    workerDbTimeoutDefaults(env);
+    expect(poolConfigFromEnv(env)).toEqual({ connectionString: "postgres://u@h/d", max: 5, statement_timeout: WORKER_STATEMENT_TIMEOUT_MS, idle_in_transaction_session_timeout: WORKER_IDLE_TX_TIMEOUT_MS });
+    expect(poolConfigFromEnv({ DB_HOST: "h", DB_NAME: "d", DB_USER: "u", DB_STATEMENT_TIMEOUT_MS: "1000", DB_IDLE_TX_TIMEOUT_MS: "0" })).toMatchObject({ host: "h", statement_timeout: 1000 });
+    expect(poolConfigFromEnv({ DB_HOST: "h", DB_NAME: "d", DB_USER: "u", DB_IDLE_TX_TIMEOUT_MS: "0" })).not.toHaveProperty("idle_in_transaction_session_timeout");
+  });
+
+  it("an env value already set wins over the worker default", () => {
+    const env: NodeJS.ProcessEnv = { DB_STATEMENT_TIMEOUT_MS: "0" };
+    workerDbTimeoutDefaults(env);
+    expect(env).toEqual({ DB_STATEMENT_TIMEOUT_MS: "0", DB_IDLE_TX_TIMEOUT_MS: String(WORKER_IDLE_TX_TIMEOUT_MS) });
+  });
+});
 
 describe("isTooManyConnections", () => {
   it("matches SQLSTATE 53300 and the slot messages, nothing else", () => {

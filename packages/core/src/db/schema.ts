@@ -419,6 +419,9 @@ export const catalogSourceImages = pgTable(
   },
   (t) => [
     index("catalog_source_images_product_id_idx").on(t.productId),
+    // Migration 0008: a batch's photos (every step reads them by batch_id) and the same-photo lookups by sha256.
+    index("catalog_source_images_batch_id_idx").on(t.batchId),
+    index("catalog_source_images_sha256_idx").on(t.sha256),
     uniqueIndex("catalog_source_images_product_n_sha_batch_uq").on(t.productId, t.n, t.sha256, t.batchId),
     enumCheck("catalog_source_images", "status", t.status, SOURCE_IMAGE_STATUSES),
   ],
@@ -517,6 +520,8 @@ export const catalogChunks = pgTable(
   },
   (t) => [
     index("catalog_chunks_batch_id_idx").on(t.batchId),
+    // Migration 0008: the cross-batch reads by status (sweep, Ops) and by status and task (parked enlargement chunks).
+    index("catalog_chunks_status_task_name_idx").on(t.status, t.taskName),
     enumCheck("catalog_chunks", "stage", t.stage, CHUNK_STAGES),
     enumCheck("catalog_chunks", "status", t.status, CHUNK_STATUSES),
   ],

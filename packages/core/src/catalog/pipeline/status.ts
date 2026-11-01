@@ -35,11 +35,12 @@ export const cancelledText = (age: string) => `Cancelled ${age}`;
 /** A draft the sweep cancelled after `days` days without a write (spec 14d F12). */
 export const expiredText = (days: number) => `Expired after ${num(days)} ${plural(days, "day", "days")} with no activity`;
 /** The words of each phase while collecting or placing; a count "<done> of <total>" follows them. */
-export const PHASE_WORDS: Record<"downloading" | "reading" | "unpacking" | "checking" | "placing", string> = {
+export const PHASE_WORDS: Record<"downloading" | "reading" | "unpacking" | "checking" | "grouping" | "placing", string> = {
   downloading: "Downloading photos",
   reading: "Reading your sheet",
   unpacking: "Unpacking your zip",
   checking: "Checking your uploaded files",
+  grouping: "Sorting photos into products",
   placing: "Placing photos",
 };
 /** The collecting phase a batch's source implies, for rows written before the worker wrote `phase` (as `collectingText` picks today). */
@@ -49,11 +50,12 @@ export function sourcePhase(source: string | undefined): "downloading" | "unpack
 /** The phase whose words and count an `ingesting` batch shows: the stored one, else the source's. `ready` and `needs_input` while still `ingesting` are the end of placing. */
 export function shownPhase(phase: IntakePhase | null | undefined, source?: string): keyof typeof PHASE_WORDS {
   if (phase === "placing" || phase === "ready" || phase === "needs_input") return "placing";
-  if (phase === "downloading" || phase === "reading" || phase === "unpacking" || phase === "checking") return phase;
+  if (phase === "downloading" || phase === "reading" || phase === "unpacking" || phase === "checking" || phase === "grouping") return phase;
   return sourcePhase(source);
 }
-/** The done count and total of a phase: `placed` of `placeTotal` while placing, else `collected` of `collectTotal`. */
+/** The done count and total of a phase: `placed` of `placeTotal` while placing, `grouped` of `groupTotal` while grouping, else `collected` of `collectTotal`. */
 export function phaseCount(c: BatchCounts, phase: keyof typeof PHASE_WORDS): { done: number; total: number | null } {
+  if (phase === "grouping") return { done: c.grouped ?? 0, total: c.groupTotal ?? null };
   return phase === "placing" ? { done: c.placed ?? 0, total: c.placeTotal ?? null } : { done: c.collected, total: c.collectTotal };
 }
 /** Samples must be at least this far apart before a rate is measured. */

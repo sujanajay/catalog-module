@@ -2,7 +2,7 @@ import { costLine } from "../cost";
 import { QA_DIMENSIONS } from "../qa/judge";
 import { autoActionsOf } from "../auto-resolve";
 import { QA_CAP_BANNER } from "./status";
-import { and, eq, inArray, ne } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, ne, sql } from "drizzle-orm";
 import ExcelJS from "exceljs";
 import { buildCsv } from "../../csv";
 import type { Db } from "../../db/client";
@@ -69,15 +69,27 @@ export function upscaledNotes(outputs: readonly Pick<Output, "n" | "status" | "f
   });
 }
 export interface NotRefreshedChannel { channel: ChannelId; lastBatchId: string; lastBatchName: string }
+/** The product ids of a batch as a subquery, so no query passes one bind parameter per product (Postgres allows 65,535). */
+export function batchProductIds(db:Db,batchId:string) {
+  return db.select({id:catalogBatchProducts.productId}).from(catalogBatchProducts).where(eq(catalogBatchProducts.batchId,batchId));
+}
+/** Groups rows by a key in one pass (the report's per-product lookups, instead of a filter over every row per product). */
+export function groupBy<T,K>(rows:readonly T[],key:(row:T)=>K):Map<K,T[]> {
+  const out=new Map<K,T[]>();
+  for(const row of rows) { const list=out.get(key(row)); if(list) list.push(row); else out.set(key(row),[row]); }
+  return out;
+}
 export async function notRefreshedChannels(db:Db,batchId:string):Promise<NotRefreshedChannel[]> {
-  const [batch] = await db.select().from(catalogBatches).where(eq(catalogBatches.id,batchId));
+  const [batch] = await db.select({channels:catalogBatches.channels}).from(catalogBatches).where(eq(catalogBatches.id,batchId));
   if(!batch) return [];
-  const ids = db.select({id:catalogBatchProducts.productId}).from(catalogBatchProducts).where(eq(catalogBatchProducts.batchId,batchId));
-  const rows = await db.select({output:catalogOutputs,batch:catalogBatches}).from(catalogOutputs).innerJoin(catalogBatches,eq(catalogBatches.id,catalogOutputs.batchId)).where(and(inArray(catalogOutputs.productId,ids),eq(catalogOutputs.isLive,true)));
-  return CHANNEL_IDS.filter(c=>!batch.channels.includes(c)).flatMap(c=> {
-    const latest = rows.filter(r=>r.output.channel===c).sort((a,b)=>+(b.output.publishedAt ?? b.output.createdAt)-+(a.output.publishedAt ?? a.output.createdAt))[0];
-    return latest ? [{channel:c,lastBatchId:latest.batch.id,lastBatchName:latest.batch.name}]:[];
-  });
+  const others = CHANNEL_IDS.filter(c=>!batch.channels.includes(c));
+  if(!others.length) return [];
+  // The newest live output per channel the batch does not make, read in the database (one row per channel).
+  const latest = await db.selectDistinctOn([catalogOutputs.channel],{channel:catalogOutputs.channel,lastBatchId:catalogBatches.id,lastBatchName:catalogBatches.name}).from(catalogOutputs).innerJoin(catalogBatches,eq(catalogBatches.id,catalogOutputs.batchId))
+    .where(and(inArray(catalogOutputs.productId,batchProductIds(db,batchId)),eq(catalogOutputs.isLive,true),inArray(catalogOutputs.channel,others)))
+    .orderBy(catalogOutputs.channel,desc(sql`coalesce(${catalogOutputs.publishedAt},${catalogOutputs.createdAt})`),asc(catalogOutputs.id));
+  const byChannel=new Map(latest.map(r=>[r.channel,r]));
+  return others.flatMap(c=>{ const r=byChannel.get(c); return r ? [{channel:c,lastBatchId:r.lastBatchId,lastBatchName:r.lastBatchName}]:[]; });
 }
 export interface ExportPaths { xlsx:string; csv:string; report:string; filledProductList:{xlsx:string;csv:string[]}|null; exportsMatch:boolean }
 export interface IngestReport { unsupportedFiles:unknown[];duplicates:unknown[];linkFailures?:unknown[];sourceOrigins?:Record<string,{origin:string;sourceUrl?:string;relativePath?:string}> }
@@ -147,40 +159,50 @@ export function splitRecheck(recheck: RecheckResult, carried: readonly string[])
 export async function buildReport(db:Db,batchId:string,extra:{recheck:RecheckResult;exports:ExportPaths;ingest?:IngestReport}):Promise<{sheet:SheetSpec;report:Record<string,unknown>;batch:CatalogBatch;carriedLinks:string[]}> {
   const [batch] = await db.select().from(catalogBatches).where(eq(catalogBatches.id,batchId));
   if(!batch) throw new Error("Batch not found.");
-  const pairs = await db.select({product:catalogProducts,pair:catalogBatchProducts}).from(catalogBatchProducts).innerJoin(catalogProducts,eq(catalogProducts.id,catalogBatchProducts.productId)).where(eq(catalogBatchProducts.batchId,batchId));
-  const ids = pairs.map(p=>p.product.id);
-  const outputs = ids.length ? await db.select().from(catalogOutputs).where(inArray(catalogOutputs.productId,ids)):[];
-  const sources = await db.select().from(catalogSourceImages).where(eq(catalogSourceImages.batchId,batchId));
-  const uploads = await db.select().from(catalogUploads).where(and(eq(catalogUploads.batchId,batchId),ne(catalogUploads.status,"removed")));
-  const events = await db.select().from(catalogProductEvents).where(eq(catalogProductEvents.batchId,batchId));
-  const chunks = await db.select().from(catalogChunks).where(eq(catalogChunks.batchId,batchId));
+  // Every read below is in a fixed order, so the builds of one finalize (and of its resumed parts, whose snapshot hash
+  // is compared) are equal at any size: without ORDER BY a large scan can start mid-table, and a write that changes no
+  // value moves a row to the end.
+  const pairs = await db.select({product:catalogProducts,pair:catalogBatchProducts}).from(catalogBatchProducts).innerJoin(catalogProducts,eq(catalogProducts.id,catalogBatchProducts.productId)).where(eq(catalogBatchProducts.batchId,batchId)).orderBy(asc(catalogProducts.identifier),asc(catalogProducts.id));
+  // Every output of the batch's products (this batch's and the live ones of earlier batches).
+  const outputs = await db.select().from(catalogOutputs).where(inArray(catalogOutputs.productId,batchProductIds(db,batchId))).orderBy(asc(catalogOutputs.createdAt),asc(catalogOutputs.id));
+  const sources = await db.select().from(catalogSourceImages).where(eq(catalogSourceImages.batchId,batchId)).orderBy(asc(catalogSourceImages.productId),asc(catalogSourceImages.n),asc(catalogSourceImages.id));
+  const uploads = await db.select().from(catalogUploads).where(and(eq(catalogUploads.batchId,batchId),ne(catalogUploads.status,"removed"))).orderBy(asc(catalogUploads.createdAt),asc(catalogUploads.id));
+  const events = await db.select().from(catalogProductEvents).where(eq(catalogProductEvents.batchId,batchId)).orderBy(asc(catalogProductEvents.at),asc(catalogProductEvents.id));
+  const chunks = await db.select().from(catalogChunks).where(eq(catalogChunks.batchId,batchId)).orderBy(asc(catalogChunks.index),asc(catalogChunks.id));
+  // One pass each: per-product lookups never scan every output, photo or product again (25k products, 225k outputs).
+  const outputsOf = groupBy(outputs,o=>o.productId), selected = outputs.filter(o=>o.batchId===batchId), selectedOf = groupBy(selected,o=>o.productId);
+  const sourcesOf = groupBy(sources,s=>s.productId), uploadById = new Map(uploads.map(u=>[u.id,u]));
+  const identifierOf = new Map(pairs.map(p=>[p.product.id,p.product.identifier]));
   const rows:SheetSpec["rows"] = pairs.map(({product,pair})=> {
-    const live = outputs.filter(o=>o.productId===product.id && o.isLive && batch.channels.includes(o.channel));
-    const problems = outputs.filter(o=>o.productId===product.id && o.batchId===batchId && o.reason && (["skipped","failed","needs_attention"].includes(o.status) || o.decision === "use_as_is" || autoActionOf(o) === "note" || hasCutBandNote(o.reason))).map(outputNote);
+    const all = outputsOf.get(product.id) ?? [], mine = selectedOf.get(product.id) ?? [];
+    const live = all.filter(o=>o.isLive && batch.channels.includes(o.channel));
+    const problems = mine.filter(o=>o.reason && (["skipped","failed","needs_attention"].includes(o.status) || o.decision === "use_as_is" || autoActionOf(o) === "note" || hasCutBandNote(o.reason))).map(outputNote);
     const links:SheetSpec["rows"][number]["links"] = {};
     for (const output of live) { links[output.channel] ??= []; links[output.channel]![output.n-1]=output.publicUrl; }
     const times = live.flatMap(o=>o.publishedAt ? [+o.publishedAt]:[]);
-    return {brand:batch.brandName,identifier:product.identifier,optionIdStyleColor:product.optionIdStyleColor ?? "",opptraSkuIds:product.opptraSkuIds,links,status:batchSheetStatus(pair),notes:mergeNotes(pair.notes,[typeUnknownNote(outputs.filter(o=>o.productId===product.id && o.batchId===batchId)),...problems,cutInSourceNote(outputs.filter(o=>o.productId===product.id && o.batchId===batchId)),...upscaledNotes(outputs.filter(o=>o.productId===product.id && o.batchId===batchId))]),change:pair.change,changedAt:times.length ? new Date(Math.max(...times)):null};
+    return {brand:batch.brandName,identifier:product.identifier,optionIdStyleColor:product.optionIdStyleColor ?? "",opptraSkuIds:product.opptraSkuIds,links,status:batchSheetStatus(pair),notes:mergeNotes(pair.notes,[typeUnknownNote(mine),...problems,cutInSourceNote(mine),...upscaledNotes(mine)]),change:pair.change,changedAt:times.length ? new Date(Math.max(...times)):null};
   });
-  const selected = outputs.filter(o=>o.batchId===batchId), unchanged = pairs.reduce((n,{product})=>n+Math.max(0,sources.filter(s=>s.productId===product.id).length*batch.channels.length-selected.filter(o=>o.productId===product.id).length),0);
+  const rowByIdentifier = new Map<string,SheetSpec["rows"][number]>();
+  for (const row of rows) if (!rowByIdentifier.has(row.identifier)) rowByIdentifier.set(row.identifier,row);
+  const unchanged = pairs.reduce((n,{product})=>n+Math.max(0,(sourcesOf.get(product.id)?.length ?? 0)*batch.channels.length-(selectedOf.get(product.id)?.length ?? 0)),0);
   const qaCap=selected.some(output=>output.flags.includes("qa_cap"));
   const delivery=deliveredLinks({batchId,channels:batch.channels,heldProductIds:new Set(pairs.filter(p=>p.pair.change==="pending_attention").map(p=>p.product.id)),outputs});
   const split=splitRecheck(extra.recheck,delivery.carried);
   // qaCapped is a jsonb-only key (not in BatchCounts) read by deriveBatchState for the 07 4.5 banner.
   const counts = {...batch.counts,qaCapped:qaCap,verified:selected.filter(o=>o.status==="verified" && o.isLive).length+unchanged,needsAttention:selected.filter(o=>o.status==="needs_attention").length,attentionProducts:pairs.filter(p=>p.pair.change==="pending_attention").length,failed:selected.filter(o=>o.status==="failed").length,skipped:selected.filter(o=>o.status==="skipped").length,unchanged,heldLinks:delivery.held,recheckOk:split.ok,recheckTotal:split.total,recheckCarriedOk:split.carriedOk,recheckCarriedTotal:split.carriedTotal};
-  const line=costLine({cost:batch.cost,products:pairs.map(({pair,product})=>({change:pair.change,outputs:selected.filter(output=>output.productId===product.id && output.decision!=="replaced")}))});
+  const line=costLine({cost:batch.cost,products:pairs.map(({pair,product})=>({change:pair.change,outputs:(selectedOf.get(product.id) ?? []).filter(output=>output.decision!=="replaced")}))});
   const cost={...batch.cost,identifiers:line.identifiers,usdPerIdentifier:line.usdPerIdentifier,inrPerIdentifier:line.inrPerIdentifier};
   const judged = selected.filter(o=>o.qaScores), autoActions = Object.fromEntries(["none","note","drop","hold"].map(a=>[a,judged.filter(o=>(autoActionOf(o) ?? "none")===a).length]));
   const qa = {judgedOutputs:judged.length,autoActions,productsHeld:counts.attentionProducts,products:pairs.length,attentionRate:attentionRate(counts.attentionProducts,pairs.length)};
   const uploadRejects=uploads.flatMap(u=>Array.isArray(u.detected?.rejected) ? u.detected.rejected as {reason?:unknown}[]:[]);
   const isLink=(r:{reason?:unknown})=>typeof r.reason==="string" && isLinkReject(r.reason);
   const report = {batchId,brand:batch.brandName,channels:batch.channels,summary:{linksPlanned:counts.outputs-counts.skipped-delivery.held,linksVerified:counts.verified,linksSkipped:counts.skipped,linksHeld:delivery.held,linksCarriedOver:delivery.carried.length,productsHeld:counts.attentionProducts},counts,cost,qa,...(qaCap ? {banner:QA_CAP_BANNER}:{}),
-    products:pairs.map(({product,pair})=>({identifier:product.identifier,pathKey:product.pathKey,linkStatus:batchSheetStatus(pair),change:pair.change,changedAt:rows.find(r=>r.identifier===product.identifier)?.changedAt,optionIdStyleColor:product.optionIdStyleColor,opptraSkuIds:product.opptraSkuIds,sources:sources.filter(s=>s.productId===product.id).map(s=>({n:s.n,originalName:s.originalName,...(extra.ingest?.sourceOrigins?.[s.rawUri] ?? {origin:uploads.find(u=>u.id===s.uploadId)?.kind ?? "image",relativePath:s.originalName}),mime:s.mime,width:s.width,height:s.height,sha256:s.sha256,rawUri:s.rawUri,status:s.status,flags:s.flags})),outputs:outputs.filter(o=>o.productId===product.id && (o.batchId===batchId || o.isLive)).map(o=>({channel:o.channel,n:o.n,status:o.status,url:o.isLive ? o.publicUrl:null,generation:o.generation,flags:o.flags,reason:o.reason,qa:qaReportEntry(o),autoActions:autoActionsOf(o.compliance)}))})),
+    products:pairs.map(({product,pair})=>({identifier:product.identifier,pathKey:product.pathKey,linkStatus:batchSheetStatus(pair),change:pair.change,changedAt:rowByIdentifier.get(product.identifier)?.changedAt,optionIdStyleColor:product.optionIdStyleColor,opptraSkuIds:product.opptraSkuIds,sources:(sourcesOf.get(product.id) ?? []).map(s=>({n:s.n,originalName:s.originalName,...(extra.ingest?.sourceOrigins?.[s.rawUri] ?? {origin:(s.uploadId ? uploadById.get(s.uploadId)?.kind:undefined) ?? "image",relativePath:s.originalName}),mime:s.mime,width:s.width,height:s.height,sha256:s.sha256,rawUri:s.rawUri,status:s.status,flags:s.flags})),outputs:(outputsOf.get(product.id) ?? []).filter(o=>o.batchId===batchId || o.isLive).map(o=>({channel:o.channel,n:o.n,status:o.status,url:o.isLive ? o.publicUrl:null,generation:o.generation,flags:o.flags,reason:o.reason,qa:qaReportEntry(o),autoActions:autoActionsOf(o.compliance)}))})),
     overwrites:events.filter(e=>["overwritten","shots_removed","reordered","channel_added"].includes(e.kind)).flatMap((e):Record<string,unknown>[]=> {
-      const identifier=pairs.find(p=>p.product.id===e.productId)?.product.identifier;
+      const identifier=identifierOf.get(e.productId);
       const changes=Array.isArray(e.details.changes) ? e.details.changes as Record<string,unknown>[]:[];
       return changes.length ? changes.map(c=>({identifier,kind:e.kind,channels:[c.channel],shots:[c.n],oldGeneration:c.oldGeneration,newGeneration:c.newGeneration,sha256:c.sha256})):[{identifier,kind:e.kind,channels:e.details.channels,shots:e.details.shots,oldGeneration:null,newGeneration:null,sha256:null}];
-    }),notRefreshedChannels:await notRefreshedChannels(db,batchId),removedLinks:events.flatMap(e=>e.kind==="shots_removed" && Array.isArray(e.details.removedLinks) ? e.details.removedLinks.map((r:unknown)=>({identifier:pairs.find(p=>p.product.id===e.productId)?.product.identifier,...r as Record<string,unknown>})):[]),recheck:extra.recheck,exports:extra.exports,
+    }),notRefreshedChannels:await notRefreshedChannels(db,batchId),removedLinks:events.flatMap(e=>e.kind==="shots_removed" && Array.isArray(e.details.removedLinks) ? e.details.removedLinks.map((r:unknown)=>({identifier:identifierOf.get(e.productId),...r as Record<string,unknown>})):[]),recheck:extra.recheck,exports:extra.exports,
     unsupportedFiles:extra.ingest?.unsupportedFiles ?? uploadRejects.filter(r=>!isLink(r)),linkFailures:extra.ingest?.linkFailures ?? uploadRejects.filter(isLink),duplicates:extra.ingest?.duplicates ?? pairs.filter(p=>p.pair.flags.includes("duplicate_shot")).map(p=>({identifier:p.product.identifier,reason:p.pair.notes})),unresolvedIdentifiers:pairs.filter(p=>!p.product.opptraSkuIds.length).map(p=>p.product.identifier),chunks:chunks.map(c=>({index:c.index,stage:c.stage,status:c.status,attempt:c.attempt,error:c.error}))};
   return {sheet:{channels:CHANNEL_ORDER.filter(c=>batch.channels.includes(c)),rows},report,batch:{...batch,counts,cost},carriedLinks:delivery.carried};
 }

@@ -1,0 +1,40 @@
+{
+  "displayName": "Catalog: a worker task ran out of time",
+  "documentation": {
+    "content": "A worker task other than a chunk (for example collecting or grouping a batch, finalize or publish) ran past its time limit and was cut off (Cloud Run answered 504 on /tasks/catalog/...). Postgres may keep running its last query after the request is gone, so check the ila-pg CPU first. Open Logs Explorer for the catalog-worker service, filter on httpRequest.status=504 to see which route it was, then search for \"ingest\" (or the route's own line) for that batch and read its ms and outcome fields. Each such step is meant to stop on a time budget and hand on to a new task well before the limit.",
+    "mimeType": "text/markdown",
+    "subject": "Catalog: a worker task ran out of time"
+  },
+  "userLabels": {
+    "app": "catalog"
+  },
+  "conditions": [
+    {
+      "displayName": "worker task answered 504, more than 0 in 15 minutes",
+      "conditionThreshold": {
+        "filter": "metric.type=\"logging.googleapis.com/user/catalog/task_timeout\" AND resource.type=\"cloud_run_revision\"",
+        "aggregations": [
+          {
+            "alignmentPeriod": "900s",
+            "perSeriesAligner": "ALIGN_SUM",
+            "crossSeriesReducer": "REDUCE_SUM"
+          }
+        ],
+        "comparison": "COMPARISON_GT",
+        "thresholdValue": 0,
+        "duration": "0s",
+        "trigger": {
+          "count": 1
+        }
+      }
+    }
+  ],
+  "combiner": "OR",
+  "enabled": true,
+  "notificationChannels": [
+    "__CATALOG_EMAIL_CHANNEL__"
+  ],
+  "alertStrategy": {
+    "autoClose": "3600s"
+  }
+}

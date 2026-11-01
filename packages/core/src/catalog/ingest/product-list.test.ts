@@ -126,3 +126,21 @@ describe("productListDetected", () => {
     expect(chosen.sheetNames).toEqual(["Notes", "Items", "Valid values"]);
   });
 });
+
+describe("matchProductList at 25,000 rows", () => {
+  it("matches 25,000 composite style+colour rows against 25,000 file stems by token in well under a second per thousand", async () => {
+    const { matchProductList } = await import("./product-list");
+    const n = 25_000;
+    // Stems hold the style and colour as segments with extra ones around them; no exact or size match, so every row
+    // goes to the token rule, the one that used to compare each row with every identifier.
+    const identifiers = Array.from({ length: n }, (_, i) => `BR_${i}_X_C${i % 97}_SHOT`);
+    const list = Array.from({ length: n }, (_, i) => ({ identifier: `${i}_C${i % 97}`, ean: null, raw: {}, composite: { style: String(i), colour: `C${i % 97}` } }));
+    const t0 = performance.now();
+    const m = matchProductList(list, identifiers);
+    const ms = performance.now() - t0;
+    expect(m.renamed.size).toBe(n);
+    expect(m.renamed.get("BR_123_X_C26_SHOT")).toBe("123_C26");
+    expect(m.unmatchedRows).toEqual([]);
+    expect(ms).toBeLessThan(10_000);
+  }, 120_000);
+});

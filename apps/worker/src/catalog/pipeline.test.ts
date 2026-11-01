@@ -10,7 +10,8 @@ import { createTestDb } from "@catalog/core/db/testing";
 import { brandMaster,catalogBatches,catalogBatchProducts,catalogChunks,catalogOutputs,catalogProductAliases,catalogProducts,catalogProductEvents,catalogSourceImages,catalogUploads,DEFAULT_BATCH_OPTIONS,EMPTY_BATCH_COUNTS,spendDays } from "@catalog/core/db/schema";
 import * as storage from "@catalog/core/storage";
 import { catalogCostEvents } from "@catalog/core/db/schema";
-import { enqueueFinalize,workerCatalogDeps,type CatalogDeps } from "./deps";
+import { enqueueFinalize,FINALIZE_ENQUEUE_LEASE_MS,PROGRESS_THROTTLE_MIN_OUTPUTS,workerCatalogDeps,type CatalogDeps } from "./deps";
+import { CHUNK_MAX_STALLS } from "@catalog/core/catalog/pipeline/dispatch";
 import { UnsupportedSourceError } from "@catalog/core/catalog/render";
 import { handleSweep } from "./sweep";
 import { currentChunkTask, handleChunkTask } from "./chunk";
@@ -213,6 +214,79 @@ it("performs finalization network work after releasing the database transaction"
   try {expect((await handleFinalizeTask(w.deps,{batchId:s.batch.id})).outcome).toBe("done");expect(networkInTransaction).toBe(false);}finally{spy.mockRestore();}
 },60_000);
 
+// Large-batch fix (2026-11-01): the re-check of a 25k-product sheet (about 225k links) does not fit one request. It
+// runs up to the request's budget, saves its part and hands on to a named finalize task; the next one goes on.
+it("re-checks in budgeted parts: saves each part, hands on with a named task, reads every link once, then writes done",async()=>{
+  const w=world(),s=await seed(w,"finalize-in-parts",{shots:["a","b","c"]});await run(w,s);
+  // A spent budget: every part still reads one link (the clock is fixed in this world).
+  w.deps.finalizeTimeBudgetMs=0;
+  const fetch=vi.mocked(w.deps.fetch);fetch.mockClear();vi.mocked(w.deps.enqueue).mockClear();
+  const outcomes:string[]=[];
+  for(let i=0;i<5 && outcomes.at(-1)!=="done";i++) outcomes.push((await handleFinalizeTask(w.deps,{batchId:s.batch.id})).outcome!);
+  expect(outcomes).toEqual(["rechecking","rechecking","done"]);
+  expect(new Set(fetch.mock.calls.map(([url])=>String(url))).size).toBe(3);expect(fetch).toHaveBeenCalledTimes(3);
+  const handoffs=vi.mocked(w.deps.enqueue).mock.calls.filter(([route])=>route==="/tasks/catalog/finalize");
+  expect(handoffs).toHaveLength(2);expect(handoffs[0]![2]).toEqual({taskId:expect.stringMatching(new RegExp(`^finalize-${s.batch.id}-[0-9a-f-]+-1$`))});
+  const [batch]=await db.select().from(catalogBatches).where(eq(catalogBatches.id,s.batch.id));
+  expect(batch!.counts).toMatchObject({latestExport:1,recheckOk:3,recheckTotal:3,verified:3,finalizePending:false});
+  expect(batch!.counts).not.toHaveProperty("finalizeResume");
+  // One sheet: every part used the first part's files.
+  expect([...w.objects.keys()].filter(uri=>uri.endsWith("links-v1.xlsx"))).toHaveLength(1);
+},60_000);
+it("drops a saved re-check part when the batch changed meanwhile, and writes the sheet afresh",async()=>{
+  const w=world(),s=await seed(w,"finalize-part-changed",{shots:["a","b"]});await run(w,s);
+  w.deps.finalizeTimeBudgetMs=0;
+  expect((await handleFinalizeTask(w.deps,{batchId:s.batch.id})).outcome).toBe("rechecking");
+  await db.update(catalogBatchProducts).set({notes:"Changed between parts"}).where(eq(catalogBatchProducts.batchId,s.batch.id));
+  expect(await handleFinalizeTask(w.deps,{batchId:s.batch.id})).toEqual({httpStatus:503,outcome:"snapshot_changed"});
+  expect((await db.select().from(catalogBatches).where(eq(catalogBatches.id,s.batch.id)))[0]!.counts).not.toHaveProperty("finalizeResume");
+  delete w.deps.finalizeTimeBudgetMs;
+  expect((await handleFinalizeTask(w.deps,{batchId:s.batch.id})).outcome).toBe("done");
+  const [done]=await db.select().from(catalogBatches).where(eq(catalogBatches.id,s.batch.id));
+  expect(done!.counts).toMatchObject({recheckOk:2,recheckTotal:2});
+  expect(JSON.parse(w.objects.get(done!.reportUri!)!.buf.toString()).products[0].identifier).toBe(s.product.identifier);
+  expect([...w.objects.keys()].filter(uri=>uri.endsWith("links-v1.xlsx"))).toHaveLength(2);
+},60_000);
+it("resumes a saved re-check part when only the stored row order changed",async()=>{
+  const w=world(),s=await seed(w,"finalize-part-order",{shots:["a","b"]});await run(w,s);
+  // Every list the report reads holds two rows: a second product without photos, two uploads, two overwrite events, a second finished chunk.
+  const [other]=await db.insert(catalogProducts).values({brandSlug:"anta",isTest:true,productKey:"finalize-part-order-2",pathKey:"finalize-part-order-2",identifier:"finalize-part-order-2"}).returning();
+  await db.insert(catalogBatchProducts).values({batchId:s.batch.id,productId:other!.id,change:"unchanged",linkStatus:"missing_images"});
+  await db.insert(catalogUploads).values([{batchId:s.batch.id,kind:"image",name:"one",status:"collected"},{batchId:s.batch.id,kind:"image",name:"two",status:"collected"}]);
+  await db.insert(catalogProductEvents).values([{productId:s.product.id,batchId:s.batch.id,kind:"overwritten",actor:"test",details:{channels:["noon"],shots:[1]}},{productId:other!.id,batchId:s.batch.id,kind:"overwritten",actor:"test",details:{channels:["noon"],shots:[2]}}]);
+  await db.insert(catalogChunks).values({batchId:s.batch.id,index:1,stage:"qa",productIds:[other!.id],status:"done"});
+  w.deps.finalizeTimeBudgetMs=0;
+  expect((await handleFinalizeTask(w.deps,{batchId:s.batch.id})).outcome).toBe("rechecking");
+  // Writes that change no value move the first rows behind the others in their tables (a new row version).
+  await db.update(catalogBatchProducts).set({notes:sql`${catalogBatchProducts.notes}`}).where(and(eq(catalogBatchProducts.batchId,s.batch.id),eq(catalogBatchProducts.productId,s.product.id)));
+  await db.update(catalogUploads).set({name:sql`${catalogUploads.name}`}).where(and(eq(catalogUploads.batchId,s.batch.id),eq(catalogUploads.name,"one")));
+  await db.update(catalogProductEvents).set({actor:sql`${catalogProductEvents.actor}`}).where(eq(catalogProductEvents.productId,s.product.id));
+  await db.update(catalogChunks).set({error:sql`${catalogChunks.error}`}).where(eq(catalogChunks.id,s.chunk.id));
+  const outcomes:string[]=[];
+  for(let i=0;i<5 && outcomes.at(-1)!=="done";i++) outcomes.push((await handleFinalizeTask(w.deps,{batchId:s.batch.id})).outcome!);
+  expect(outcomes).toEqual(["done"]);
+},60_000);
+it("a finalize part that hands on renews the enqueue time, so the sweep queues no second chain meanwhile",async()=>{
+  const w=world(),s=await seed(w,"finalize-part-enqueued",{shots:["a","b"]});await run(w,s);
+  // The request was queued long before this part ran (its enqueue lease has run out).
+  await db.update(catalogBatches).set({counts:sql`${catalogBatches.counts} || ${JSON.stringify({finalizePending:true,finalizeEnqueuedAt:+w.deps.now()-FINALIZE_ENQUEUE_LEASE_MS*5})}::jsonb`}).where(eq(catalogBatches.id,s.batch.id));
+  w.deps.finalizeTimeBudgetMs=0;
+  expect((await handleFinalizeTask(w.deps,{batchId:s.batch.id})).outcome).toBe("rechecking");
+  expect((await db.select().from(catalogBatches).where(eq(catalogBatches.id,s.batch.id)))[0]!.counts).toMatchObject({finalizeEnqueuedAt:+w.deps.now()});
+  vi.mocked(w.deps.enqueue).mockClear();
+  await enqueueFinalize(w.deps,s.batch.id);
+  expect(vi.mocked(w.deps.enqueue).mock.calls.filter(([route])=>route==="/tasks/catalog/finalize")).toEqual([]);
+},60_000);
+it("counts a large batch exactly when a chunk fails, though a count ran moments before",async()=>{
+  const w=world(),s=await seed(w,"fail-counts-exact");
+  // The cut-out step makes the pending output; the render step then stalls on its third delivery in a row.
+  expect((await handleChunkTask(w.deps,await currentChunkTask(db,s.chunk.id))).httpStatus).toBe(200);
+  await db.update(catalogChunks).set({stalls:CHUNK_MAX_STALLS-1,startedAt:new Date(+w.deps.now()-60_000),progressAt:new Date(+w.deps.now()-120_000)}).where(eq(catalogChunks.id,s.chunk.id));
+  // A large batch counted a moment ago: an ordinary refresh now waits for the next interval.
+  await db.update(catalogBatches).set({counts:sql`${catalogBatches.counts} || ${JSON.stringify({outputs:PROGRESS_THROTTLE_MIN_OUTPUTS,progressRefreshedAt:w.deps.now().toISOString()})}::jsonb`}).where(eq(catalogBatches.id,s.batch.id));
+  expect((await handleChunkTask(w.deps,await currentChunkTask(db,s.chunk.id))).outcome).toBe("failed");
+  expect((await db.select().from(catalogBatches).where(eq(catalogBatches.id,s.batch.id)))[0]!.counts).toMatchObject({failed:1});
+},60_000);
 it("recovers a committed finalize intent whose enqueue never happened",async()=>{
   const w=world(),s=await seed(w,"enqueue-process-death");
   await db.update(catalogBatches).set({status:"publishing",counts:sql`${catalogBatches.counts} || jsonb_build_object('finalizePending',true,'finalizeEnqueuedAt',${+w.deps.now()-180_000}::numeric)`}).where(eq(catalogBatches.id,s.batch.id));

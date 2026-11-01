@@ -140,7 +140,7 @@ export async function buildDetectedStep2(
   db: Db,
   batchId: string,
   deps: Pick<IngestDeps, "storage">,
-  extra: { sign?: (gsUri: string) => Promise<string> } = {},
+  extra: { sign?: (gsUri: string) => Promise<string>; linkFailures?: Awaited<ReturnType<typeof linkFailuresOf>> } = {},
 ): Promise<DetectedStep2> {
   const sign = extra.sign ?? ((u: string) => signedUrl(u, EXAMPLE_THUMB_TTL_SEC));
   const [batch] = await db.select().from(catalogBatches).where(eq(catalogBatches.id, batchId));
@@ -184,7 +184,11 @@ export async function buildDetectedStep2(
 
   // Examples: the first three products of the batch, in identifier order.
   const byProduct = new Map<string, typeof sources>();
-  for (const s of sources) byProduct.set(s.productId, [...(byProduct.get(s.productId) ?? []), s]);
+  for (const s of sources) {
+    const rows = byProduct.get(s.productId);
+    if (rows) rows.push(s);
+    else byProduct.set(s.productId, [s]);
+  }
   const picked = [...byProduct.values()]
     .map((rows) => rows.sort((a, b) => a.n - b.n))
     .sort((a, b) => collator.compare(a[0]!.identifier, b[0]!.identifier))
@@ -279,8 +283,9 @@ export async function buildDetectedStep2(
   }
 
   return {
-    // The manifests are read only when the last collection counted failed links (step 2 polls this).
-    linkFailures: linkFailuresBlock(batch.counts.linkFailures ? await linkFailuresOf(db, batchId, deps) : { links: 0, rows: [] }),
+    // The manifests are read only when the last collection counted failed links (step 2 polls this), and not
+    // again when the caller already read them (`extra.linkFailures`).
+    linkFailures: linkFailuresBlock(extra.linkFailures ?? (batch.counts.linkFailures ? await linkFailuresOf(db, batchId, deps) : { links: 0, rows: [] })),
     identifierMode: { detected: detectedMode, options: modeOptions, examples },
     groupedBy,
     precedence: { shown: kinds.some((k) => FILE_KINDS.includes(k)) && kinds.some((k) => LINK_KINDS.includes(k)), default: "uploads_then_links" },

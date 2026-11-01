@@ -194,6 +194,20 @@ describe("web counts writes and the instant step 2 Continue (spec 14c F6 and F7 
     expect((await ingest(request("POST"), ctx(id))).status).toBe(200);
     expect((await batchRow(id)).counts).toMatchObject({ phase: "placing", placingClaim: null });
   });
+  it("Try again on a stalled-looking batch keeps a lease its run renewed recently, so no second grouping starts", async () => {
+    const id = await newBatch(); const file = await addRow(id, "image");
+    await db.update(catalogUploads).set({ status: "collected" }).where(eq(catalogUploads.id, file.id));
+    // Renewed a minute ago (until = renewal + 20 min), though the row's updated_at is 11 minutes old.
+    const renewed = { token: "run-1:upload-1", until: new Date(Date.now() + 19 * 60_000).toISOString(), attempt: "a1", group: 2000 };
+    await setStatus(id, { status: "ingesting", updatedAt: new Date(Date.now() - 11 * 60_000), counts: { ...(await batchRow(id)).counts, phase: "grouping", placingClaim: renewed } });
+    expect((await ingest(request("POST"), ctx(id))).status).toBe(200);
+    expect((await batchRow(id)).counts).toMatchObject({ phase: "grouping", placingClaim: renewed });
+    // Not renewed for 12 minutes: the run stopped, Try again clears its lease.
+    const lost = { ...renewed, until: new Date(Date.now() + 8 * 60_000).toISOString() };
+    await setStatus(id, { status: "ingesting", updatedAt: new Date(Date.now() - 12 * 60_000), counts: { ...(await batchRow(id)).counts, placingClaim: lost } });
+    expect((await ingest(request("POST"), ctx(id))).status).toBe(200);
+    expect((await batchRow(id)).counts).toMatchObject({ placingClaim: null });
+  });
 });
 describe("the paged hand-off (spec 14d F11 part 2)", () => {
   it("1,200 uploads: the request hands 500 and queues one ingest-more task for the rest", async () => {

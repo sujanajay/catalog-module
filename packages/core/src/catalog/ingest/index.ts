@@ -10,8 +10,13 @@
 //   our bucket are never fetched again.
 // - `<prefix>/derived/_ingest/<uploadId>/<sha256>.<ext>`: the bytes of zip entries and fetched links
 //   (uploaded files already sit under uploads/ and are read from there).
-// - `<prefix>/derived/_ingest/place-state.json`: the shot list groupBatch planned, for the placing
+// - `<prefix>/derived/_ingest/group-state-<lease>.json`: the grouping, matches and overwrite preview groupBatch
+//   decided, for the deliveries that find or create the products in chunks; `group-products-<lease>-<n>.json`:
+//   what those chunks decided before product n.
+// - `<prefix>/derived/_ingest/place-state-<lease>.json`: the shot list groupBatch planned, for the placing
 //   deliveries (spec 14d F7 part 2).
+//   `<lease>` names the placing lease they were written under (leaseFileKey), so a frozen delivery of an earlier
+//   run that saves late never overwrites a newer run's files.
 // - `<prefix>/derived/_ingest/preview-state.json`: the grouping the batch-wide step decided, for
 //   buildPreview.
 // Version rows point at `rawPath(prefix, path_key, n, ext)`, written by the batch-wide step.
@@ -35,7 +40,7 @@ import { log } from "../../log";
 import { mergeCounts, placingClaim, placingLeaseFree, placingLeaseHeld, placingLeaseResumable, placingToken, progressCounts, RATE_SAMPLE_GAP_MS, type DoneKey } from "../counts";
 import { batchPrefix, normalizeKey, rawPath, sanitizeSegment } from "../naming";
 import { findOrCreateProduct } from "../products";
-import { resolveSkus, type ResolveResult } from "../sku-mapping";
+import { loadSkuResolver, type ResolveResult, type SkuResolver } from "../sku-mapping";
 import type { BatchCounts, BatchOptions, ChangeKind, ChannelId, IntakePhase, LinkStatus, OutputFlag, PlacingClaim, UploadKind } from "../types";
 import { driveFolderAdapter } from "./drive-folder";
 import { googleSheetAdapter, sheetCopyUri } from "./google-sheet";
@@ -363,7 +368,12 @@ async function collectPhaseOf(db: Db, batchId: string): Promise<IntakePhase> {
  * cursor into the shot list, and the rest of the body is that of the delivery that claimed the lease,
  * so deliveryToken gives the same token.
  */
-export interface DeliveryBody { batchId: string; uploadId: string; cursor?: string; run?: string; place?: string }
+export interface DeliveryBody { batchId: string; uploadId: string; cursor?: string; run?: string; place?: string; group?: string }
+
+/** The body of a continuation of `body`: the claiming delivery's own keys (so the same token) plus `extra`. */
+function handOnBody(body: DeliveryBody, extra: { place: string } | { group: string }): Record<string, string> {
+  return { batchId: body.batchId, uploadId: body.uploadId, ...(body.cursor !== undefined ? { cursor: body.cursor } : {}), ...(body.run !== undefined ? { run: body.run } : {}), ...extra };
+}
 
 /**
  * The placing token of a delivery (spec 14c F6): its run (the hand-off's `run` when the body carries
@@ -401,14 +411,22 @@ export async function runIngest(
   // A cancelled batch is never collected or placed again (spec 14c F4 part 2). A placing continuation
   // that finds it cancelled between two chunks removes the rows grouping wrote, as the placing would.
   if (batch.status === "cancelled") {
-    if (body.place !== undefined) await removeDraftRows(db, batch.id);
+    if (body.place !== undefined || body.group !== undefined) await removeDraftRows(db, batch.id);
     return noop("the batch is cancelled");
   }
   // A placing continuation (spec 14d F7 part 2) places the next chunk under its lease, whatever the upload's status.
   if (body.place !== undefined) {
     if (batch.status !== "ingesting") return noop(`the batch is ${batch.status}`);
     const cursor = Number(body.place);
-    return (await resumeAttempt(db, deps, batch.id, token, body, cursor, (attempt) => placeBatch(db, deps, batch.id, token, attempt, cursor, body)))
+    return (await resumeAttempt(db, deps, batch.id, token, body, { kind: "place", cursor }, (attempt) => placeBatch(db, deps, batch.id, token, attempt, cursor, body)))
+      ?? noop("another delivery holds the placing lease");
+  }
+  // A grouping continuation finds or creates the next chunk of products under its lease.
+  if (body.group !== undefined) {
+    if (batch.status !== "ingesting") return noop(`the batch is ${batch.status}`);
+    const cursor = Number(body.group);
+    const startedAt = clock().getTime();
+    return (await resumeAttempt(db, deps, batch.id, token, body, { kind: "products", cursor }, (attempt) => groupProducts(db, deps, batch.id, token, attempt, cursor, body, startedAt)))
       ?? noop("another delivery holds the placing lease");
   }
   if (upload.status === "collected" || upload.status === "failed" || upload.status === "removed") {
@@ -542,16 +560,17 @@ async function finishIfLast(db: Db, deps: PlaceDeps, batchId: string, token: str
   const ingesting = and(eq(catalogBatches.id, batchId), eq(catalogBatches.status, "ingesting"));
   const claimed = await db
     .update(catalogBatches)
-    .set({ counts: progressCounts({ placingClaim: placingClaim(token, now, attempt), placed: 0, placeTotal: null }, { phase: "placing", done: 0, at: now }) })
+    .set({ counts: progressCounts({ placingClaim: placingClaim(token, now, attempt), placed: 0, placeTotal: null, grouped: 0, groupTotal: null }, { phase: "grouping", done: 0, at: now }) })
     .where(and(ingesting, placingLeaseFree(now), sql`NOT ${UPLOADS_LEFT(batchId)}`))
     .returning({ id: catalogBatches.id });
   // Grouping is not run again once placing went on to a later chunk (spec 14d F7 part 2): the retry
   // of this delivery after that only queues the continuation again.
-  if (!claimed.length) return resumeAttempt(db, deps, batchId, token, body, null, (a) => groupBatch(db, deps, batchId, token, a, body));
+  if (!claimed.length) return resumeAttempt(db, deps, batchId, token, body, { kind: "group" }, (a) => groupBatch(db, deps, batchId, token, a, body));
   return runAttempt(db, deps, batchId, token, attempt, () => groupBatch(db, deps, batchId, token, attempt, body));
 }
 
 const claimNextSql = sql`${catalogBatches.counts}->'placingClaim'->'next'`;
+const claimGroupSql = sql`${catalogBatches.counts}->'placingClaim'->'group'`;
 /** The counts with `claim`'s keys merged into the stored placing claim (its `next` kept). */
 const mergeClaim = (claim: PlacingClaim) => sql`${catalogBatches.counts} || jsonb_build_object('placingClaim', (${catalogBatches.counts}->'placingClaim') || ${JSON.stringify(claim)}::jsonb)`;
 
@@ -572,20 +591,28 @@ async function runAttempt(db: Db, deps: IngestDeps, batchId: string, token: stri
 }
 
 /**
- * Takes back the live, released lease `token` for one attempt (spec 14c F6) when placing stands at
- * `cursor` (null: grouping, before any chunk was handed on; a number: the chunk a placing continuation
- * carries, spec 14d F7 part 2), and runs `step` under it. When placing already went past `cursor`
- * under this token (a retried or duplicate delivery whose hand-off happened), the continuation is
- * queued again (named, so Cloud Tasks drops a copy) and nothing else runs. Otherwise null.
+ * Where the batch-wide step of one lease stands: grouping (the claiming delivery), a chunk of products
+ * handed on at `cursor`, or a chunk of placing handed on at `cursor`. They run in that order.
+ */
+type Stage = { kind: "group" } | { kind: "products"; cursor: number } | { kind: "place"; cursor: number };
+
+/**
+ * Takes back the live, released lease `token` for one attempt (spec 14c F6) when the step stands at
+ * `stage` (grouping, before any chunk was handed on; a products chunk; a placing chunk, spec 14d F7 part 2),
+ * and runs `step` under it. When the step already went past `stage` under this token (a retried or
+ * duplicate delivery whose hand-off happened), the continuation it handed to is queued again (named, so
+ * Cloud Tasks drops a copy) and nothing else runs. Otherwise null.
  */
 async function resumeAttempt(
-  db: Db, deps: PlaceDeps, batchId: string, token: string, body: DeliveryBody, cursor: number | null,
+  db: Db, deps: PlaceDeps, batchId: string, token: string, body: DeliveryBody, stage: Stage,
   step: (attempt: string) => Promise<StepResult>,
 ): Promise<StepResult | null> {
   const now = deps.now?.() ?? new Date();
   const attempt = randomUUID();
   const ingesting = and(eq(catalogBatches.id, batchId), eq(catalogBatches.status, "ingesting"));
-  const at = cursor === null ? sql`${claimNextSql} IS NULL` : sql`(${claimNextSql})::int = ${cursor}`;
+  const at = stage.kind === "group" ? sql`${claimNextSql} IS NULL AND ${claimGroupSql} IS NULL`
+    : stage.kind === "products" ? sql`${claimNextSql} IS NULL AND (${claimGroupSql})::int = ${stage.cursor}`
+    : sql`(${claimNextSql})::int = ${stage.cursor}`;
   const resumed = await db
     .update(catalogBatches)
     .set({ counts: mergeClaim(placingClaim(token, now, attempt)) })
@@ -594,9 +621,14 @@ async function resumeAttempt(
   if (resumed.length) return runAttempt(db, deps, batchId, token, attempt, () => step(attempt));
   const [b] = await db.select({ status: catalogBatches.status, counts: catalogBatches.counts }).from(catalogBatches).where(eq(catalogBatches.id, batchId));
   const claim = b?.status === "ingesting" ? b.counts.placingClaim : null;
-  if (claim?.token === token && typeof claim.next === "number" && claim.next > (cursor ?? -1)) {
-    await deps.enqueue(INGEST_ROUTE, { ...body, place: String(claim.next) }, { taskId: placeTaskId(batchId, token, claim.next) });
+  if (claim?.token !== token) return null;
+  if (typeof claim.next === "number" && (stage.kind !== "place" || claim.next > stage.cursor)) {
+    await deps.enqueue(INGEST_ROUTE, handOnBody(body, { place: String(claim.next) }), { taskId: placeTaskId(batchId, token, claim.next) });
     return { progress: { done: claim.next, total: null, phase: "copying" }, outcome: `placing already at ${claim.next}; continuation queued again` };
+  }
+  if (typeof claim.next !== "number" && typeof claim.group === "number" && (stage.kind === "group" || (stage.kind === "products" && claim.group > stage.cursor))) {
+    await deps.enqueue(INGEST_ROUTE, handOnBody(body, { group: String(claim.group) }), { taskId: groupTaskId(batchId, token, claim.group) });
+    return { progress: { done: claim.group, total: null, phase: "grouping" }, outcome: `grouping already at ${claim.group}; continuation queued again` };
   }
   return null;
 }
@@ -865,7 +897,7 @@ interface PlannedShot {
 }
 
 /**
- * `derived/_ingest/place-state.json` (spec 14d F7 part 2): what groupBatch decided, for the placing
+ * `derived/_ingest/place-state-<lease>.json` (spec 14d F7 part 2): what groupBatch decided, for the placing
  * deliveries that follow. `token` is the lease it was written under: a delivery with another token
  * never places from it.
  */
@@ -883,13 +915,22 @@ interface PlaceState {
   waitingForColumn: boolean;
 }
 
-const placeStatePath = (prefix: string) => `${workPrefix(prefix)}/place-state.json`;
+/**
+ * The part of a working file's name that names the lease `token` it was written under (a hash: the token holds
+ * the run and upload ids). Every run of the batch-wide step writes its own files, so a frozen delivery of an
+ * earlier run that saves after a newer run claimed the lease never overwrites the newer run's (at-least-once
+ * delivery, Try again).
+ */
+const leaseFileKey = (token: string) => createHash("sha256").update(token).digest("hex").slice(0, 16);
+const placeStatePath = (prefix: string, token: string) => `${workPrefix(prefix)}/place-state-${leaseFileKey(token)}.json`;
 
 /** A named continuation per (batch, lease, cursor), so a retried delivery never queues the next chunk twice (Cloud Tasks deduplicates task names). */
 const placeTaskId = (batchId: string, token: string, cursor: number) => hashedTaskId("place", batchId, token, cursor);
+/** The same for the grouping chunks (products from `cursor`). */
+const groupTaskId = (batchId: string, token: string, cursor: number) => hashedTaskId("group", batchId, token, cursor);
 
 type StepResult = { progress: IngestProgress; outcome: string };
-type PlaceDeps = IngestDeps & { enqueue: typeof enqueueTask; placeBudgetItems?: number };
+type PlaceDeps = IngestDeps & { enqueue: typeof enqueueTask; placeBudgetItems?: number; productBudgetItems?: number };
 
 /**
  * The batch's writes under the placing lease `token` (spec 14c F6): each applies only while the batch
@@ -898,12 +939,29 @@ type PlaceDeps = IngestDeps & { enqueue: typeof enqueueTask; placeBudgetItems?: 
  * step stops; if the batch was cancelled, the rows it wrote are removed again, so a cancelled batch
  * keeps no version rows.
  */
-function leaseWrites(db: Db, deps: IngestDeps, batchId: string, token: string, attempt: string, next?: number) {
+function leaseWrites(db: Db, deps: IngestDeps, batchId: string, token: string, attempt: string, mark: { next?: number; group?: number } = {}) {
   const clock = () => deps.now?.() ?? new Date();
   const held = and(eq(catalogBatches.id, batchId), eq(catalogBatches.status, "ingesting"), placingLeaseHeld(token, attempt));
-  const claim = (at: Date) => ({ ...placingClaim(token, at, attempt), ...(next !== undefined ? { next } : {}) });
+  // The stage marks the claim carries, kept on every renewal so a retry of this delivery resumes it.
+  const claim = (at: Date) => ({ ...placingClaim(token, at, attempt), ...(mark.next !== undefined ? { next: mark.next } : {}), ...(mark.group !== undefined ? { group: mark.group } : {}) });
   return {
     clock,
+    /** Grouping progress: `grouped` (and `patch`) written, the lease renewed. False when refused. */
+    grouping: async (patch: Partial<BatchCounts>, done: number): Promise<boolean> => {
+      const at = clock();
+      const rows = await db.update(catalogBatches)
+        .set({ counts: progressCounts({ ...patch, grouped: done, placingClaim: claim(at) }, { phase: "grouping", done, at }) })
+        .where(held).returning({ id: catalogBatches.id });
+      return rows.length > 0;
+    },
+    /** Hands grouping on at product `end`: `grouped` and the claim's `group` written, this attempt released for the continuation. */
+    continueGroup: async (end: number): Promise<boolean> => {
+      const at = clock();
+      const rows = await db.update(catalogBatches)
+        .set({ counts: progressCounts({ grouped: end, placingClaim: { ...placingClaim(token, at, null), group: end } }, { phase: "grouping", done: end, at }) })
+        .where(held).returning({ id: catalogBatches.id });
+      return rows.length > 0;
+    },
     placing: async (patch: Partial<BatchCounts>, done: number): Promise<boolean> => {
       const at = clock();
       const rows = await db.update(catalogBatches)
@@ -937,16 +995,80 @@ function leaseWrites(db: Db, deps: IngestDeps, batchId: string, token: string, a
 }
 
 /**
- * The first half of the batch-wide step (spec 14d F7 part 2), run by the holder of the placing lease:
- * removes what an earlier run wrote, assembles, matches and finds or creates the products, then saves
- * the planned shot list with everything the closing write needs to `place-state.json` and starts
- * placing at the first chunk.
+ * Builder constant: products one grouping delivery finds or creates. A product is about 20 statements
+ * (findOrCreateProduct's transaction, its aliases and the batch_products row) with no sku_map query, about
+ * 50 ms on Cloud SQL, so 1,000 take about a minute, well inside the 900 s deadline.
+ */
+export const PRODUCT_BUDGET_ITEMS = 1000;
+/**
+ * Builder constant: after this long a grouping delivery starts no new product, saves what it decided and
+ * hands on, so a slow database cannot push it past the request deadline. Well under the 10 minute stall
+ * banner, so a live run never looks stopped.
+ */
+export const GROUP_TIME_BUDGET_MS = 180_000;
+
+/** One grouped or rejected item with the result it was read with (null: not read). */
+interface GroupItem { item: SourceItem; result: OkResult | null }
+
+/**
+ * `derived/_ingest/group-state-<lease>.json`: what the grouping delivery decided (the grouping after the overwrite
+ * preview, the product list's facts, the inputs), for the chunks that find or create the products. `token`
+ * is the lease it was written under: a delivery with another token never groups from it.
+ */
+interface GroupState {
+  version: 1;
+  token: string;
+  products: { identifier: string; items: GroupItem[] }[];
+  rejected: { item: GroupItem; reason: string }[];
+  warnings: string[];
+  /** The identifiers to find or create, in order: the grouped ones, then the product list rows without photos. */
+  work: string[];
+  eans: [string, string][];
+  listSkuIds: [string, string[]][];
+  statuses: [string, LinkStatus][];
+  missing: string[];
+  list: ProductListRow[] | null;
+  byMatchColumn: boolean;
+  duplicates: OverwritePreview["duplicates"];
+  existing: { identifier: string; shotsToRemove: number }[];
+  uploadIds: string[];
+  topLevelFolders: string[];
+  waitingForColumn: boolean;
+  uploadErrors: string[];
+  links: number;
+  linkSource: string;
+}
+
+interface ProductEntry { id: string; pathKey: string; isNew: boolean; skuIds: string[]; resolved: boolean }
+
+/** `derived/_ingest/group-products-<lease>-<n>.json`: what the chunks decided before product n (Maps as entries, in order). */
+interface GroupProgress {
+  version: 1;
+  token: string;
+  productOf: [string, ProductEntry][];
+  used: [string, string][];
+  givenUp: string[];
+  /** Identifiers left out, with their sentence, in the order they were left out. */
+  refused: [string, string][];
+  /** Same-product pairs the chunks found (the overwrite preview's own are in GroupState). */
+  duplicates: OverwritePreview["duplicates"];
+}
+
+const groupStatePath = (prefix: string, token: string) => `${workPrefix(prefix)}/group-state-${leaseFileKey(token)}.json`;
+const groupProgressPath = (prefix: string, token: string, cursor: number) => `${workPrefix(prefix)}/group-products-${leaseFileKey(token)}-${cursor}.json`;
+
+/**
+ * The first part of the batch-wide step, run by the holder of the placing lease: removes what an earlier
+ * run wrote, assembles, matches (one sku_map read for the whole batch) and builds the overwrite preview,
+ * saves that to its `group-state-<lease>.json`, then finds or creates the products in budgeted chunks (groupProducts),
+ * the first in this delivery.
  */
 async function groupBatch(db: Db, deps: PlaceDeps, batchId: string, token: string, attempt: string, body: DeliveryBody): Promise<StepResult> {
+  const lease = leaseWrites(db, deps, batchId, token, attempt);
+  const startedAt = lease.clock().getTime();
   const [batch] = await db.select().from(catalogBatches).where(eq(catalogBatches.id, batchId));
   if (!batch) throw new Error(`Batch ${batchId} does not exist.`);
   const prefix = batchPrefix(batch.brandSlug, batch.id, batch.isTest);
-  const lease = leaseWrites(db, deps, batchId, token, attempt);
   if (batch.status !== "ingesting") return lease.stopped();
   // A removed upload (spec 14b F3) is not an input: its photos, sheets and errors are left out.
   const uploads = await db.select().from(catalogUploads).where(and(eq(catalogUploads.batchId, batchId), ne(catalogUploads.status, "removed")));
@@ -962,25 +1084,110 @@ async function groupBatch(db: Db, deps: PlaceDeps, batchId: string, token: strin
   const a = assemble([...manifests.values()], lists, batch.options);
   const { grouped } = a;
 
-  // Matching and the overwrite preview come first: duplicate spellings leave the grouping here.
+  // Matching and the overwrite preview come first: duplicate spellings leave the grouping here. Every
+  // product's SKUs come from one read of the brand's sku_map rows.
+  const resolver = await loadSkuResolver(db, batch.brandSlug);
   const ids = [...grouped.products.keys()];
-  const matches = await matchProducts(db, batch, ids, a.eans);
+  const matches = await matchProducts(db, batch, ids, a.eans, resolver);
   const overwrite = await buildOverwritePreview(db, batch, grouped, matches, a.sha256ByItem, { otherBatches: false });
-  const duplicates = [...overwrite.duplicates];
+
+  const withResult = (item: SourceItem): GroupItem => ({ item, result: a.resultOf(item) ?? null });
+  const linkUploads = uploads.filter((u) => manifests.get(u.id)?.items.some((i) => i.bytes.kind === "url"));
+  const state: GroupState = {
+    version: 1, token,
+    products: [...grouped.products].map(([identifier, items]) => ({ identifier, items: items.map(withResult) })),
+    rejected: grouped.rejected.map((r) => ({ item: withResult(r.item), reason: r.reason })),
+    warnings: grouped.warnings,
+    work: [...grouped.products.keys(), ...a.missing],
+    eans: [...a.eans], listSkuIds: [...a.listSkuIds], statuses: [...a.statuses], missing: a.missing,
+    list: a.list, byMatchColumn: a.byMatchColumn, duplicates: [...overwrite.duplicates],
+    existing: overwrite.existingProducts.map((p) => ({ identifier: p.identifier, shotsToRemove: p.shotsToRemove.length })),
+    uploadIds: uploads.map((u) => u.id),
+    topLevelFolders: [...new Set(uploads.flatMap((u) => ((u.detected as Detected | null)?.topLevelFolders ?? [])))].sort(byText),
+    waitingForColumn: uploads.some((u) => (u.detected as Detected | null)?.cannotRead),
+    uploadErrors: uploads.filter((u) => u.status === "failed" && u.error).map((u) => u.error!),
+    links: linkUploads.reduce((n, u) => n + manifests.get(u.id)!.items.filter((i) => i.bytes.kind === "url").length, 0),
+    linkSource: linkSourceWords(linkUploads),
+  };
+  await saveJson(deps, groupStatePath(prefix, token), state);
+  if (!(await lease.grouping({ groupTotal: state.work.length }, 0))) return lease.stopped();
+  return groupProducts(db, deps, batchId, token, attempt, 0, body, startedAt, { state, resolver });
+}
+
+/**
+ * The products part of the batch-wide step: finds or creates the products of its `group-state-<lease>.json` from
+ * `cursor`, at most PRODUCT_BUDGET_ITEMS (deps.productBudgetItems overrides it) and for at most
+ * GROUP_TIME_BUDGET_MS from `startedAt`, writing `grouped` about every RATE_SAMPLE_GAP_MS (each write
+ * renews the lease and stops the chunk when the batch was cancelled or the lease lost). While products
+ * remain it saves what it decided to `group-products-<lease>-<end>.json` and hands on with a named task; the chunk
+ * that finds the last one plans the shot list and starts placing. A retried chunk starts again from the
+ * same saved state, and every product write is idempotent (findOrCreateProduct, onConflictDoNothing).
+ * `inline` is the grouping delivery's own state, so its first chunk reads nothing back.
+ */
+async function groupProducts(
+  db: Db, deps: PlaceDeps, batchId: string, token: string, attempt: string, cursor: number, body: DeliveryBody, startedAt: number,
+  inline?: { state: GroupState; resolver: SkuResolver },
+): Promise<StepResult> {
+  const [batch] = await db.select().from(catalogBatches).where(eq(catalogBatches.id, batchId));
+  if (!batch) throw new Error(`Batch ${batchId} does not exist.`);
+  const prefix = batchPrefix(batch.brandSlug, batch.id, batch.isTest);
+  // The grouping delivery's claim has no `group`; a continuation's carries its own cursor.
+  const lease = leaseWrites(db, deps, batchId, token, attempt, inline ? {} : { group: cursor });
+  if (batch.status !== "ingesting") return lease.stopped();
+  const state = inline?.state ?? (await loadJson<GroupState>(deps, groupStatePath(prefix, token)));
+  // A later run regrouped the batch under another lease: its own deliveries go on from its state.
+  if (!state || state.token !== token) return lease.stopped();
+  const saved = cursor > 0 ? await loadJson<GroupProgress>(deps, groupProgressPath(prefix, token, cursor)) : null;
+  if (cursor > 0 && (!saved || saved.token !== token)) throw new Error(`The grouping of batch ${batchId} has no saved state at product ${cursor}.`);
+  const resolver = inline?.resolver ?? (await loadSkuResolver(db, batch.brandSlug));
+
+  // The grouping as the grouping delivery left it, with the identifiers earlier chunks left out applied.
+  const resultOf = new Map<SourceItem, OkResult | null>();
+  const restore = (g: GroupItem) => {
+    resultOf.set(g.item, g.result);
+    return g.item;
+  };
+  const grouped: GroupingResult = {
+    products: new Map(state.products.map((p) => [p.identifier, p.items.map(restore)])),
+    rejected: state.rejected.map((r) => ({ item: restore(r.item), reason: r.reason })),
+    warnings: state.warnings,
+  };
+  const productOf = new Map<string, ProductEntry>(saved?.productOf ?? []);
+  const used = new Map<string, string>(saved?.used ?? []);
+  const givenUp = new Set<string>(saved?.givenUp ?? []);
+  const refused: [string, string][] = [...(saved?.refused ?? [])];
+  const found2: OverwritePreview["duplicates"] = [...(saved?.duplicates ?? [])];
+  const leaveOut = (id: string, reason: string) => {
+    for (const item of grouped.products.get(id) ?? []) grouped.rejected.push({ item, reason });
+    grouped.products.delete(id);
+  };
+  for (const [id, reason] of refused) leaveOut(id, reason);
+  const refuse = (id: string, reason: string) => {
+    leaveOut(id, reason);
+    refused.push([id, reason]);
+  };
+  const eans = new Map(state.eans);
+  const listSkuIds = new Map(state.listSkuIds);
+  const statuses = new Map(state.statuses);
+  // A retried chunk finds the products its first try created as existing: the batch's own `new` rows say
+  // which were. The grouping delivery's first chunk starts right after removeDraftRows, so it has none.
+  const createdHere = inline
+    ? new Set<string>()
+    : new Set((await db.select({ productId: catalogBatchProducts.productId }).from(catalogBatchProducts).where(and(eq(catalogBatchProducts.batchId, batch.id), eq(catalogBatchProducts.change, "new")))).map((r) => r.productId));
 
   // Products for what is left, then for the product list rows without photos. Each product's
   // catalog_batch_products row is written as soon as the product is found or created, so a retry
   // after a failure part-way through still knows (removeDraftRows) which products this batch created.
-  const productOf = new Map<string, { id: string; pathKey: string; isNew: boolean; skuIds: string[]; resolved: boolean }>();
-  const used = new Map<string, string>();
-  const givenUp = new Set<string>();
-  const refuse = (id: string, reason: string) => {
-    for (const item of grouped.products.get(id) ?? []) grouped.rejected.push({ item, reason });
-    grouped.products.delete(id);
-  };
-  for (const id of [...grouped.products.keys(), ...a.missing]) {
-    const ean = a.eans.get(id) ?? null;
-    const skus = mergeSkus(await resolveSkus(db, { brandSlug: batch.brandSlug, identifier: id, ean }), a.listSkuIds.get(id));
+  const total = state.work.length;
+  const budget = Math.max(1, deps.productBudgetItems ?? PRODUCT_BUDGET_ITEMS);
+  const overTime = () => lease.clock().getTime() - startedAt >= GROUP_TIME_BUDGET_MS;
+  let lastWrite = lease.clock().getTime();
+  const start = Math.min(Math.max(0, Math.floor(cursor) || 0), total);
+  let end = start;
+  while (end < total && end - start < budget && !(end > start && overTime())) {
+    const id = state.work[end]!;
+    end++;
+    const skus = mergeSkus(resolver.resolve({ identifier: id, ean: eans.get(id) ?? null }), listSkuIds.get(id));
     let found: Awaited<ReturnType<typeof findOrCreateProduct>>;
     try {
       found = await findOrCreateProduct(db, { brandSlug: batch.brandSlug, isTest: batch.isTest, identifier: id, skus, productType: batch.productType, actor: batch.createdBy });
@@ -989,6 +1196,7 @@ async function groupBatch(db: Db, deps: PlaceDeps, batchId: string, token: strin
       refuse(id, (err as Error).message);
       continue;
     }
+    const isNew = found.isNew || createdHere.has(found.product.id);
     const hasPhotos = grouped.products.has(id);
     const other = used.get(found.product.id);
     // A product list row that names a product already in the batch under another spelling adds nothing.
@@ -997,32 +1205,52 @@ async function groupBatch(db: Db, deps: PlaceDeps, batchId: string, token: strin
       // Two identifiers that only became one product here (for example through the same option id):
       // both are left out, as buildOverwritePreview leaves out the ones it finds.
       const [x, y] = [other, id].sort(byText);
-      duplicates.push({ a: x!, b: y! });
+      found2.push({ a: x!, b: y! });
       const sentence = sameProductMessage([x!, y!]);
       refuse(id, sentence);
       const first = productOf.get(other);
       if (first) {
         refuse(other, sentence);
         productOf.delete(other);
-        await db.delete(catalogBatchProducts).where(and(eq(catalogBatchProducts.batchId, batch.id), eq(catalogBatchProducts.productId, first.id)));
+        // A product this run created keeps its `new` row until the last chunk removes it with the product, so a
+        // retry of a chunk that crashed after this point still knows the run created it (removeDraftRows, createdHere).
         if (first.isNew) givenUp.add(first.id);
+        else await db.delete(catalogBatchProducts).where(and(eq(catalogBatchProducts.batchId, batch.id), eq(catalogBatchProducts.productId, first.id)));
       }
       continue;
     }
     used.set(found.product.id, id);
     productOf.set(id, {
-      id: found.product.id, pathKey: found.product.pathKey, isNew: found.isNew,
+      id: found.product.id, pathKey: found.product.pathKey, isNew,
       skuIds: found.product.opptraSkuIds ?? [], resolved: skus.method !== "unresolved",
     });
-    const linkStatus: LinkStatus = hasPhotos ? (a.statuses.get(id) ?? "ok") : "missing_images";
-    const change: ChangeKind = found.isNew ? "new" : hasPhotos ? "updated" : "unchanged";
+    const linkStatus: LinkStatus = hasPhotos ? (statuses.get(id) ?? "ok") : "missing_images";
+    const change: ChangeKind = isNew ? "new" : hasPhotos ? "updated" : "unchanged";
     await db.insert(catalogBatchProducts).values({ batchId: batch.id, productId: found.product.id, linkStatus, change }).onConflictDoNothing();
+    // Progress and the lease about every RATE_SAMPLE_GAP_MS; a refused write (cancelled, or the lease lost) stops here.
+    if (lease.clock().getTime() - lastWrite >= RATE_SAMPLE_GAP_MS) {
+      lastWrite = lease.clock().getTime();
+      if (!(await lease.grouping({}, end))) return lease.stopped();
+    }
   }
-  // A product this run created for a spelling it then left out is removed again.
+
+  if (end < total) {
+    const progress: GroupProgress = { version: 1, token, productOf: [...productOf], used: [...used], givenUp: [...givenUp], refused, duplicates: found2 };
+    await saveJson(deps, groupProgressPath(prefix, token, end), progress);
+    if (!(await lease.continueGroup(end))) return lease.stopped();
+    await deps.enqueue(INGEST_ROUTE, handOnBody(body, { group: String(end) }), { taskId: groupTaskId(batchId, token, end) });
+    return { progress: { done: end, total, phase: "grouping" }, outcome: `grouped ${end} of ${total} products; continuing at ${end}` };
+  }
+
+  // A product this run created for a spelling it then left out is removed again, with its batch row.
+  for (let i = 0; i < givenUp.size; i += 1000) {
+    const part = [...givenUp].slice(i, i + 1000);
+    await db.delete(catalogBatchProducts).where(and(eq(catalogBatchProducts.batchId, batch.id), inArray(catalogBatchProducts.productId, part)));
+  }
   await deleteUnusedProducts(db, [...givenUp]);
 
   const withPhotos = [...grouped.products.keys()].filter((id) => productOf.has(id));
-  const missing = a.missing.filter((id) => productOf.has(id) && !grouped.products.has(id));
+  const missing = state.missing.filter((id) => productOf.has(id) && !grouped.products.has(id));
 
   // The shot list: one per (product, n). Raw URIs are known before copying (placeRaw writes `target`).
   const bucket = getBucketName();
@@ -1031,7 +1259,7 @@ async function groupBatch(db: Db, deps: PlaceDeps, batchId: string, token: strin
   for (const id of withPhotos) {
     const product = productOf.get(id)!;
     for (const [i, item] of grouped.products.get(id)!.entries()) {
-      const r = a.resultOf(item);
+      const r = resultOf.get(item);
       if (!r) continue;
       const n = item.n ?? i + 1;
       const target = rawPath(prefix, product.pathKey, n, r.ext);
@@ -1047,63 +1275,67 @@ async function groupBatch(db: Db, deps: PlaceDeps, batchId: string, token: strin
 
   // The preview state buildPreview reads, and the counts, written by the last placing delivery.
   const stored = (item: SourceItem): StoredItem => {
-    const r = a.resultOf(item);
+    const r = resultOf.get(item);
     return { item, sha256: r?.sha256 ?? null, width: r?.width ?? null, height: r?.height ?? null, rawUri: rawUriOf.get(item) ?? null };
   };
-  const topLevelFolders = [...new Set(uploads.flatMap((u) => ((u.detected as Detected | null)?.topLevelFolders ?? [])))].sort(byText);
   const skus = [...withPhotos, ...missing].map((id) => [id, productOf.get(id)!.skuIds] as [string, string[]]);
   const preview: PreviewState = {
     version: 1,
     products: withPhotos.map((id) => ({ identifier: id, productId: productOf.get(id)!.id, items: grouped.products.get(id)!.map(stored) })),
     rejected: grouped.rejected.map((r) => ({ item: stored(r.item), reason: r.reason })),
-    warnings: grouped.warnings, missing, list: a.list, byMatchColumn: a.byMatchColumn, duplicates, skus, topLevelFolders,
+    warnings: grouped.warnings, missing, list: state.list, byMatchColumn: state.byMatchColumn,
+    duplicates: [...state.duplicates, ...found2], skus, topLevelFolders: state.topLevelFolders,
   };
   const newCount = withPhotos.filter((id) => productOf.get(id)!.isNew).length;
-  const existing = overwrite.existingProducts.filter((p) => productOf.has(p.identifier));
+  const existing = state.existing.filter((p) => productOf.has(p.identifier));
   const rejects = grouped.rejected.filter((r) => !isSameProductReject(r.reason));
   // Links that could not be downloaded are counted on their own, not as unsupported files (spec 14b F5).
   const linkRejects = rejects.filter((r) => isLinkReject(r.reason));
   const counts: Partial<BatchCounts> = {
     products: withPhotos.length, sources: shots.length,
     skuResolved: [...withPhotos, ...missing].filter((id) => productOf.get(id)!.resolved || productOf.get(id)!.skuIds.length > 0).length,
-    missingImages: missing.length, notInSheet: withPhotos.filter((id) => a.statuses.get(id) === "not_in_sheet").length,
+    missingImages: missing.length, notInSheet: withPhotos.filter((id) => statuses.get(id) === "not_in_sheet").length,
     unsupportedFiles: rejects.filter((r) => !isDuplicateReject(r.reason) && !isLinkReject(r.reason)).length,
     linkFailures: linkRejects.length,
     duplicateFiles: rejects.filter((r) => isDuplicateReject(r.reason)).length,
     newProducts: newCount, existingProducts: withPhotos.length - newCount,
-    shotsToRemove: existing.reduce((s, p) => s + p.shotsToRemove.length, 0),
+    shotsToRemove: existing.reduce((s, p) => s + p.shotsToRemove, 0),
     previewReady: true, failReason: null,
   };
-  const waitingForColumn = uploads.some((u) => (u.detected as Detected | null)?.cannotRead);
   let failReason: string | null = null;
-  if (!shots.length && !waitingForColumn) {
-    const uploadErrors = uploads.filter((u) => u.status === "failed" && u.error).map((u) => u.error!);
-    const linkUploads = uploads.filter((u) => manifests.get(u.id)?.items.some((i) => i.bytes.kind === "url"));
-    const links = linkUploads.reduce((n, u) => n + manifests.get(u.id)!.items.filter((i) => i.bytes.kind === "url").length, 0);
-    failReason = noPhotosReason(grouped.rejected, uploadErrors, links ? { links, source: linkSourceWords(linkUploads) } : undefined);
+  if (!shots.length && !state.waitingForColumn) {
+    failReason = noPhotosReason(grouped.rejected, state.uploadErrors, state.links ? { links: state.links, source: state.linkSource } : undefined);
   }
-  const state: PlaceState = { version: 1, token, shots, preview, counts, uploadIds: uploads.map((u) => u.id), failReason, waitingForColumn };
-  await saveJson(deps, placeStatePath(prefix), state);
+  const place: PlaceState = { version: 1, token, shots, preview, counts, uploadIds: state.uploadIds, failReason, waitingForColumn: state.waitingForColumn };
+  await saveJson(deps, placeStatePath(prefix, token), place);
+  // Out of time: placing starts in its own delivery, so this one ends well inside its deadline.
+  if (overTime()) {
+    if (!(await lease.grouping({ placeTotal: shots.length, placed: 0 }, end))) return lease.stopped();
+    if (!(await lease.continueAt(0))) return lease.stopped();
+    await deps.enqueue(INGEST_ROUTE, handOnBody(body, { place: "0" }), { taskId: placeTaskId(batchId, token, 0) });
+    return { progress: { done: 0, total: shots.length, phase: "copying" }, outcome: `grouped ${total} products; placing continues at 0` };
+  }
   if (!(await lease.placing({ placeTotal: shots.length, placed: 0 }, 0))) return lease.stopped();
-  return placeBatch(db, deps, batchId, token, attempt, 0, body, state);
+  return placeBatch(db, deps, batchId, token, attempt, 0, body, place, inline ? undefined : cursor);
 }
 
 /**
  * The second half of the batch-wide step (spec 14d F7 part 2): copies the next PLACE_BUDGET_ITEMS
- * photos of `place-state.json` from `cursor` with the sha256 skip of placeRaw, writing `placed` (at
+ * photos of its `place-state-<lease>.json` from `cursor` with the sha256 skip of placeRaw, writing `placed` (at
  * most every RATE_SAMPLE_GAP_MS during the chunk and once after it, each renewing the lease), then
  * re-enqueues itself with the next cursor under the same lease token. The delivery that places the
  * last chunk inserts the version rows, writes `preview-state.json` and makes the closing write.
  * `deps.placeBudgetItems` (optional) overrides the chunk size.
  */
-async function placeBatch(db: Db, deps: PlaceDeps, batchId: string, token: string, attempt: string, cursor: number, body: DeliveryBody, planned?: PlaceState): Promise<StepResult> {
+async function placeBatch(db: Db, deps: PlaceDeps, batchId: string, token: string, attempt: string, cursor: number, body: DeliveryBody, planned?: PlaceState, groupMark?: number): Promise<StepResult> {
   const [batch] = await db.select().from(catalogBatches).where(eq(catalogBatches.id, batchId));
   if (!batch) throw new Error(`Batch ${batchId} does not exist.`);
   const prefix = batchPrefix(batch.brandSlug, batch.id, batch.isTest);
-  // The first chunk runs in the grouping delivery, whose claim has no `next` yet.
-  const lease = leaseWrites(db, deps, batchId, token, attempt, planned ? undefined : cursor);
+  // The first chunk runs in the delivery that found the last product, whose claim has no `next` yet (and
+  // keeps that delivery's `group`, so its retry resumes it).
+  const lease = leaseWrites(db, deps, batchId, token, attempt, planned ? (groupMark !== undefined ? { group: groupMark } : {}) : { next: cursor });
   if (batch.status !== "ingesting") return lease.stopped();
-  const state = planned ?? (await loadJson<PlaceState>(deps, placeStatePath(prefix)));
+  const state = planned ?? (await loadJson<PlaceState>(deps, placeStatePath(prefix, token)));
   // A later run regrouped the batch under another lease: its own deliveries place from its state.
   if (!state || state.token !== token) return lease.stopped();
 
@@ -1132,7 +1364,7 @@ async function placeBatch(db: Db, deps: PlaceDeps, batchId: string, token: strin
   if (refused) return lease.stopped();
   if (end < total) {
     if (!(await lease.continueAt(end))) return lease.stopped();
-    await deps.enqueue(INGEST_ROUTE, { ...body, place: String(end) }, { taskId: placeTaskId(batchId, token, end) });
+    await deps.enqueue(INGEST_ROUTE, handOnBody(body, { place: String(end) }), { taskId: placeTaskId(batchId, token, end) });
     return { progress: { done: end, total, phase: "copying" }, outcome: `placed ${end} of ${total}; continuing at ${end}` };
   }
 
@@ -1178,6 +1410,31 @@ async function placeBatch(db: Db, deps: PlaceDeps, batchId: string, token: strin
     progress: { done: versions.length, total: versions.length, phase: "done" },
     outcome: `preview ready: ${state.preview.products.length} products, ${versions.length} photos`,
   };
+}
+
+/** counts.failReason when an ingest task used its last attempt (the batch then shows "Fix and continue"). */
+export const INGEST_STOPPED_TEXT = "Collecting stopped part way after several tries. Press Fix and continue, then Continue to try again.";
+
+/**
+ * Marks a collecting batch failed with INGEST_STOPPED_TEXT, for an ingest task that failed on its last
+ * attempt: Cloud Tasks drops it, so nothing else would move the batch on. The lease and phase are cleared;
+ * rows an unfinished grouping wrote are removed by the next run's groupBatch. Only an `ingesting` batch
+ * changes (a cancelled one stays cancelled), and only for a task of the current run: the delivery holds the
+ * placing lease (its token), or no lease is held yet and its run is the newest hand-off's (`ingestRun`; a batch
+ * handed off before that key existed has none, and any task counts). A task of an earlier run that still retries
+ * after Try again started another changes nothing. True when it changed.
+ */
+export async function failStoppedIngest(db: Db, batchId: string, delivery: Pick<DeliveryBody, "uploadId" | "cursor" | "run">): Promise<boolean> {
+  const claim = sql`${catalogBatches.counts}->'placingClaim'`;
+  const newest = sql`${catalogBatches.counts}->>'ingestRun'`;
+  const ofRun = delivery.run !== undefined ? sql`(${newest} IS NULL OR ${newest} = ${delivery.run}::text)` : sql`${newest} IS NULL`;
+  const current = sql`((${claim}->>'token') = ${deliveryToken(delivery)}::text OR (COALESCE(jsonb_typeof(${claim}), 'null') = 'null' AND ${ofRun}))`;
+  const rows = await db
+    .update(catalogBatches)
+    .set({ status: "failed", counts: mergeCounts({ failReason: INGEST_STOPPED_TEXT, placingClaim: null, phase: null, rate: [], previewReady: false }) })
+    .where(and(eq(catalogBatches.id, batchId), eq(catalogBatches.status, "ingesting"), current))
+    .returning({ id: catalogBatches.id });
+  return rows.length > 0;
 }
 
 // --- Step 4 -----------------------------------------------------------------------------------

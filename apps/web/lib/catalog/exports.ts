@@ -42,16 +42,23 @@ export async function batchReport(id: string, conn: Db = db(), read = downloadBu
   return withoutModelNames(JSON.parse((await read(batch.reportUri)).buf.toString()));
 }
 
-export async function liveSheet(productIds: string[], channels: ChannelId[], conn: Db = db()): Promise<SheetSpec> {
-  if (!productIds.length) return { channels, rows: [] };
-  const [products, outputs] = await Promise.all([
-    conn.select().from(catalogProducts).where(inArray(catalogProducts.id, productIds)),
-    conn.select({ productId: catalogOutputs.productId, channel: catalogOutputs.channel, n: catalogOutputs.n, publicUrl: catalogOutputs.publicUrl, publishedAt: catalogOutputs.publishedAt }).from(catalogOutputs).where(and(inArray(catalogOutputs.productId, productIds), eq(catalogOutputs.isLive, true))),
-  ]);
-  const rows: SheetRow[] = products.map(p => {
+/** Ids per IN (...) list for a selection of products, well below Postgres's 65,535 bind parameters per query. */
+const IN_LIST_MAX = 1000;
+function slices<T>(values: T[]): T[][] {
+  const out: T[][] = [];
+  for (let i = 0; i < values.length; i += IN_LIST_MAX) out.push(values.slice(i, i + IN_LIST_MAX));
+  return out;
+}
+type LiveOutput = { productId: string; channel: ChannelId; n: number; publicUrl: string; publishedAt: Date | null };
+const liveOutputColumns = { productId: catalogOutputs.productId, channel: catalogOutputs.channel, n: catalogOutputs.n, publicUrl: catalogOutputs.publicUrl, publishedAt: catalogOutputs.publishedAt };
+/** One sheet row per product with its live links; the outputs are grouped once, not filtered per product. */
+function liveRows(products: (typeof catalogProducts.$inferSelect)[], outputs: LiveOutput[], channels: ChannelId[]): SheetRow[] {
+  const byProduct = new Map<string, LiveOutput[]>();
+  for (const o of outputs) if (channels.includes(o.channel)) { const list = byProduct.get(o.productId); if (list) list.push(o); else byProduct.set(o.productId, [o]); }
+  return products.map(p => {
     const links: SheetRow["links"] = {};
     let changedAt: Date | null = null;
-    for (const o of outputs.filter(o => o.productId === p.id && channels.includes(o.channel))) {
+    for (const o of byProduct.get(p.id) ?? []) {
       const list = links[o.channel] ?? [];
       while (list.length < o.n) list.push(null);
       list[o.n - 1] = o.publicUrl;
@@ -60,7 +67,18 @@ export async function liveSheet(productIds: string[], channels: ChannelId[], con
     }
     return { brand: p.brandSlug, identifier: p.identifier, optionIdStyleColor: p.optionIdStyleColor ?? "", opptraSkuIds: p.opptraSkuIds, links, status: "ok", notes: "", change: "unchanged", changedAt };
   });
-  rows.sort((a,b) => a.identifier.localeCompare(b.identifier, "en", { numeric: true }));
+}
+const byIdentifier = (a: SheetRow, b: SheetRow) => a.identifier.localeCompare(b.identifier, "en", { numeric: true });
+
+export async function liveSheet(productIds: string[], channels: ChannelId[], conn: Db = db()): Promise<SheetSpec> {
+  const ids = [...new Set(productIds)];
+  if (!ids.length) return { channels, rows: [] };
+  const parts = await Promise.all(slices(ids).map(slice => Promise.all([
+    conn.select().from(catalogProducts).where(inArray(catalogProducts.id, slice)),
+    conn.select(liveOutputColumns).from(catalogOutputs).where(and(inArray(catalogOutputs.productId, slice), eq(catalogOutputs.isLive, true))),
+  ])));
+  const rows = liveRows(parts.flatMap(([products]) => products), parts.flatMap(([, outputs]) => outputs), channels);
+  rows.sort(byIdentifier);
   return { channels, rows };
 }
 
@@ -86,26 +104,26 @@ export async function batchSheet(id: string, conn: Db = db(), read = downloadBuf
   const [batch] = await conn.select().from(catalogBatches).where(eq(catalogBatches.id, id));
   if (!batch) throw new HttpError(404, "This batch was not found. Return to All batches.");
   if (batch.sheetXlsxUri) return savedSheet(batch.sheetXlsxUri, read);
-  const members = await conn.select().from(catalogBatchProducts).where(eq(catalogBatchProducts.batchId, id));
-  const sheet = await liveSheet(members.map(m => m.productId), CHANNEL_IDS.filter(c => batch.channels.includes(c)), conn);
-  const products = members.length ? await conn.select({ id: catalogProducts.id, identifier: catalogProducts.identifier }).from(catalogProducts).where(inArray(catalogProducts.id, members.map(m=>m.productId))) : [];
-  for (const row of sheet.rows) {
-    row.brand = batch.brandName;
-    const p = products.find(p => p.identifier === row.identifier)!;
-    const member = members.find(m => m.productId === p.id)!;
-    row.change = member.change;
-    row.notes = member.notes;
-    row.status = batchSheetStatus(member);
-    if (row.status === "missing_images") row.links = {};
-  }
-  return sheet;
+  // The batch's products and live outputs through the batch (no bind parameter per product), each row with its own member.
+  const members = conn.select({ id: catalogBatchProducts.productId }).from(catalogBatchProducts).where(eq(catalogBatchProducts.batchId, id));
+  const channels = CHANNEL_IDS.filter(c => batch.channels.includes(c));
+  const [pairs, outputs] = await Promise.all([
+    conn.select({ product: catalogProducts, member: catalogBatchProducts }).from(catalogBatchProducts).innerJoin(catalogProducts, eq(catalogProducts.id, catalogBatchProducts.productId)).where(eq(catalogBatchProducts.batchId, id)),
+    conn.select(liveOutputColumns).from(catalogOutputs).where(and(inArray(catalogOutputs.productId, members), eq(catalogOutputs.isLive, true))),
+  ]);
+  const rows = liveRows(pairs.map(p => p.product), outputs, channels).map((row, i) => {
+    const member = pairs[i]!.member, status = batchSheetStatus(member);
+    return { ...row, brand: batch.brandName, change: member.change, notes: member.notes, status, ...(status === "missing_images" ? { links: {} } : {}) };
+  });
+  rows.sort(byIdentifier);
+  return { channels, rows };
 }
 
 export async function exportBrand(slug: string, productIds: string[], conn: Db = db(), storage = { uploadBuffer, signedUrl }, now = new Date()) {
   const brand = await getBrand(slug, conn);
   const ids = [...new Set(productIds)];
   if (!ids.length) throw new HttpError(400, "Select at least one product to download.");
-  const products = await conn.select({ id: catalogProducts.id, isTest: catalogProducts.isTest }).from(catalogProducts).where(and(eq(catalogProducts.brandSlug, slug), inArray(catalogProducts.id, ids)));
+  const products = (await Promise.all(slices(ids).map(slice => conn.select({ id: catalogProducts.id, isTest: catalogProducts.isTest }).from(catalogProducts).where(and(eq(catalogProducts.brandSlug, slug), inArray(catalogProducts.id, slice)))))).flat();
   if (products.length !== ids.length || products.some(p=>p.isTest !== products[0]!.isTest)) throw new HttpError(400, "Select products from one brand and the same test namespace.");
   const sheet = await liveSheet(ids, [...CHANNEL_IDS], conn);
   for (const row of sheet.rows) row.brand = brand.name;

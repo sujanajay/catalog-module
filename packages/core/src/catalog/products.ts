@@ -216,33 +216,46 @@ class LockBusy extends Error {
  * as locked. If any product is held by another batch the transaction rolls back (no row changes)
  * and the result lists the busy products with the batch that holds them.
  */
+/** Product ids per statement in lockProducts. */
+export const LOCK_SLICE = 10_000;
 export async function lockProducts(db: Db, batchId: string, productIds: string[]): Promise<LockResult> {
-  const ids = [...new Set(productIds)];
+  // Sorted, so two batches locking overlapping products take the row locks in the same order.
+  const ids = [...new Set(productIds)].sort();
   if (!ids.length) return { ok: true };
+  // In slices of LOCK_SLICE ids, inside one transaction: one IN list per product stops at Postgres's 65,535 bind parameters.
+  const slices: string[][] = [];
+  for (let i = 0; i < ids.length; i += LOCK_SLICE) slices.push(ids.slice(i, i + LOCK_SLICE));
   try {
     await db.transaction(async (tx) => {
-      const locked = await tx
-        .update(catalogProducts)
-        .set({ lockBatchId: batchId })
-        .where(
-          and(
-            inArray(catalogProducts.id, ids),
-            sql`(${catalogProducts.lockBatchId} IS NULL OR ${catalogProducts.lockBatchId} = ${batchId})`,
-          ),
-        )
-        .returning({ id: catalogProducts.id });
-      if (locked.length === ids.length) return;
-      const busy = await tx
-        .select({
-          productId: catalogProducts.id,
-          identifier: catalogProducts.identifier,
-          batchId: catalogBatches.id,
-          batchName: catalogBatches.name,
-        })
-        .from(catalogProducts)
-        .innerJoin(catalogBatches, eq(catalogBatches.id, catalogProducts.lockBatchId))
-        .where(and(inArray(catalogProducts.id, ids), ne(catalogProducts.lockBatchId, batchId)))
-        .orderBy(catalogProducts.identifier);
+      let locked = 0;
+      for (const slice of slices) {
+        locked += (await tx
+          .update(catalogProducts)
+          .set({ lockBatchId: batchId })
+          .where(
+            and(
+              inArray(catalogProducts.id, slice),
+              sql`(${catalogProducts.lockBatchId} IS NULL OR ${catalogProducts.lockBatchId} = ${batchId})`,
+            ),
+          )
+          .returning({ id: catalogProducts.id })).length;
+      }
+      if (locked === ids.length) return;
+      const busy = [];
+      for (const slice of slices) {
+        busy.push(...await tx
+          .select({
+            productId: catalogProducts.id,
+            identifier: catalogProducts.identifier,
+            batchId: catalogBatches.id,
+            batchName: catalogBatches.name,
+          })
+          .from(catalogProducts)
+          .innerJoin(catalogBatches, eq(catalogBatches.id, catalogProducts.lockBatchId))
+          .where(and(inArray(catalogProducts.id, slice), ne(catalogProducts.lockBatchId, batchId)))
+          .orderBy(catalogProducts.identifier));
+      }
+      if (slices.length > 1) busy.sort((a, b) => (a.identifier < b.identifier ? -1 : a.identifier > b.identifier ? 1 : 0));
       if (!busy.length) throw new Error("Some products to lock no longer exist. Reload the batch and try again.");
       throw new LockBusy(busy);
     });

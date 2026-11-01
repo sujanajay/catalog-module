@@ -1,0 +1,39 @@
+{
+  "displayName": "Catalog: database CPU high",
+  "documentation": {
+    "content": "The shared ila-pg database has used more than 90 % of its CPU for 10 minutes. Every catalog page and batch slows down, and the earlier app on the same instance too. First check whether a load test, an eval job or a very large batch is running, and whether a worker request was cut off (the \"a worker task ran out of time\" alert): a query can keep running after its request is gone. In Cloud SQL Query insights, find the query that uses the CPU. A worker statement is cancelled after 5 minutes (WORKER_STATEMENT_TIMEOUT_MS); if the load stays, roll the catalog-worker to a fresh revision so its old sessions end.",
+    "mimeType": "text/markdown",
+    "subject": "Catalog: database CPU high"
+  },
+  "userLabels": {
+    "app": "catalog"
+  },
+  "conditions": [
+    {
+      "displayName": "ila-pg CPU above 90 % for 10 minutes",
+      "conditionThreshold": {
+        "filter": "metric.type=\"cloudsql.googleapis.com/database/cpu/utilization\" AND resource.type=\"cloudsql_database\" AND resource.labels.database_id=\"image-links-agent:ila-pg\"",
+        "aggregations": [
+          {
+            "alignmentPeriod": "60s",
+            "perSeriesAligner": "ALIGN_MEAN"
+          }
+        ],
+        "comparison": "COMPARISON_GT",
+        "thresholdValue": 0.9,
+        "duration": "600s",
+        "trigger": {
+          "count": 1
+        }
+      }
+    }
+  ],
+  "combiner": "OR",
+  "enabled": true,
+  "notificationChannels": [
+    "__CATALOG_EMAIL_CHANNEL__"
+  ],
+  "alertStrategy": {
+    "autoClose": "3600s"
+  }
+}
