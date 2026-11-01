@@ -122,6 +122,11 @@ export interface BatchCounts {
   prepared?: number;
   progressAt?: string | null;
   processingRate?: { at: string; made: number }[];
+  /**
+   * When refreshBatchProgress last counted a large batch (ISO time): such a batch is counted at most every
+   * PROGRESS_REFRESH_INTERVAL_MS, and exactly by finalize. Bookkeeping only; finalize leaves it out of the done counts.
+   */
+  progressRefreshedAt?: string;
   // Intake progress (spec 14c F6). Optional and not in EMPTY_BATCH_COUNTS (a new default would need a
   // migration): a row written before release C reads phase and placingClaim as null, placed as 0.
   /** What intake is doing now; the worker writes it with every counts update and clears `rate` when it changes. */

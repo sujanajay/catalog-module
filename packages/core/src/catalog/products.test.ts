@@ -1,4 +1,4 @@
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { Db } from "../db/client";
 import { catalogBatches, catalogProductAliases, catalogProductEvents, catalogProducts } from "../db/schema";
@@ -159,4 +159,20 @@ describe("lockProducts and releaseLocks", () => {
     expect(await lockProducts(db, batch2, [p3, p4, p5, p6])).toEqual({ ok: true });
     expect(await releaseLocks(db, batch2)).toBe(4);
   });
+
+  // Large-batch fix (2026-11-01): one IN list per product stopped at Postgres's 65,535 bind parameters (~25k products
+  // per size column could reach it). Locking 70,000 products works, in slices, and a clash still rolls back all of them.
+  it("locks more products than Postgres allows bind parameters in one statement, and still rolls back a clash", async () => {
+    const batch = await newBatch("Seventy thousand"), other = await newBatch("Holder");
+    await db.execute(sql`INSERT INTO catalog_products (brand_slug, is_test, product_key, path_key, identifier) SELECT 'bulk', true, 'k' || i, 'p' || i, 'BULK-' || i FROM generate_series(1, 70000) AS i`);
+    const ids = (await db.select({ id: catalogProducts.id }).from(catalogProducts).where(eq(catalogProducts.brandSlug, "bulk"))).map((r) => r.id);
+    expect(ids).toHaveLength(70_000);
+    const [last] = await db.select({ id: catalogProducts.id }).from(catalogProducts).where(eq(catalogProducts.identifier, "BULK-70000"));
+    await db.update(catalogProducts).set({ lockBatchId: other }).where(eq(catalogProducts.id, last!.id));
+    expect(await lockProducts(db, batch, ids)).toEqual({ ok: false, busy: [{ productId: last!.id, identifier: "BULK-70000", batchId: other, batchName: "Holder" }] });
+    expect(await releaseLocks(db, batch)).toBe(0);
+    await db.update(catalogProducts).set({ lockBatchId: null }).where(eq(catalogProducts.id, last!.id));
+    expect(await lockProducts(db, batch, ids)).toEqual({ ok: true });
+    expect(await releaseLocks(db, batch)).toBe(70_000);
+  }, 120_000);
 });

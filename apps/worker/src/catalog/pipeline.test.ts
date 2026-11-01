@@ -213,6 +213,39 @@ it("performs finalization network work after releasing the database transaction"
   try {expect((await handleFinalizeTask(w.deps,{batchId:s.batch.id})).outcome).toBe("done");expect(networkInTransaction).toBe(false);}finally{spy.mockRestore();}
 },60_000);
 
+// Large-batch fix (2026-11-01): the re-check of a 25k-product sheet (about 225k links) does not fit one request. It
+// runs up to the request's budget, saves its part and hands on to a named finalize task; the next one goes on.
+it("re-checks in budgeted parts: saves each part, hands on with a named task, reads every link once, then writes done",async()=>{
+  const w=world(),s=await seed(w,"finalize-in-parts",{shots:["a","b","c"]});await run(w,s);
+  // A spent budget: every part still reads one link (the clock is fixed in this world).
+  w.deps.finalizeTimeBudgetMs=0;
+  const fetch=vi.mocked(w.deps.fetch);fetch.mockClear();vi.mocked(w.deps.enqueue).mockClear();
+  const outcomes:string[]=[];
+  for(let i=0;i<5 && outcomes.at(-1)!=="done";i++) outcomes.push((await handleFinalizeTask(w.deps,{batchId:s.batch.id})).outcome!);
+  expect(outcomes).toEqual(["rechecking","rechecking","done"]);
+  expect(new Set(fetch.mock.calls.map(([url])=>String(url))).size).toBe(3);expect(fetch).toHaveBeenCalledTimes(3);
+  const handoffs=vi.mocked(w.deps.enqueue).mock.calls.filter(([route])=>route==="/tasks/catalog/finalize");
+  expect(handoffs).toHaveLength(2);expect(handoffs[0]![2]).toEqual({taskId:expect.stringMatching(new RegExp(`^finalize-${s.batch.id}-[0-9a-f-]+-1$`))});
+  const [batch]=await db.select().from(catalogBatches).where(eq(catalogBatches.id,s.batch.id));
+  expect(batch!.counts).toMatchObject({latestExport:1,recheckOk:3,recheckTotal:3,verified:3,finalizePending:false});
+  expect(batch!.counts).not.toHaveProperty("finalizeResume");
+  // One sheet: every part used the first part's files.
+  expect([...w.objects.keys()].filter(uri=>uri.endsWith("links-v1.xlsx"))).toHaveLength(1);
+},60_000);
+it("drops a saved re-check part when the batch changed meanwhile, and writes the sheet afresh",async()=>{
+  const w=world(),s=await seed(w,"finalize-part-changed",{shots:["a","b"]});await run(w,s);
+  w.deps.finalizeTimeBudgetMs=0;
+  expect((await handleFinalizeTask(w.deps,{batchId:s.batch.id})).outcome).toBe("rechecking");
+  await db.update(catalogBatchProducts).set({notes:"Changed between parts"}).where(eq(catalogBatchProducts.batchId,s.batch.id));
+  expect(await handleFinalizeTask(w.deps,{batchId:s.batch.id})).toEqual({httpStatus:503,outcome:"snapshot_changed"});
+  expect((await db.select().from(catalogBatches).where(eq(catalogBatches.id,s.batch.id)))[0]!.counts).not.toHaveProperty("finalizeResume");
+  delete w.deps.finalizeTimeBudgetMs;
+  expect((await handleFinalizeTask(w.deps,{batchId:s.batch.id})).outcome).toBe("done");
+  const [done]=await db.select().from(catalogBatches).where(eq(catalogBatches.id,s.batch.id));
+  expect(done!.counts).toMatchObject({recheckOk:2,recheckTotal:2});
+  expect(JSON.parse(w.objects.get(done!.reportUri!)!.buf.toString()).products[0].identifier).toBe(s.product.identifier);
+  expect([...w.objects.keys()].filter(uri=>uri.endsWith("links-v1.xlsx"))).toHaveLength(2);
+},60_000);
 it("recovers a committed finalize intent whose enqueue never happened",async()=>{
   const w=world(),s=await seed(w,"enqueue-process-death");
   await db.update(catalogBatches).set({status:"publishing",counts:sql`${catalogBatches.counts} || jsonb_build_object('finalizePending',true,'finalizeEnqueuedAt',${+w.deps.now()-180_000}::numeric)`}).where(eq(catalogBatches.id,s.batch.id));

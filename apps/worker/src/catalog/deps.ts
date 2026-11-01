@@ -38,6 +38,8 @@ export interface CatalogDeps {
   heartbeat?: (renew: () => Promise<boolean>) => () => void;
   /** Spec 15 E1: the delivery's time budget; absent reads CATALOG_CHUNK_TIME_BUDGET_MS (default 480 s). */
   chunkTimeBudgetMs?: number;
+  /** How long one finalize request re-checks links before it hands on; absent reads CATALOG_FINALIZE_TIME_BUDGET_MS (default 420 s). */
+  finalizeTimeBudgetMs?: number;
   /** Spec 15 E5: the per-batch window for every batch; absent uses the batch class's (spec 16: operator or bulk). */
   chunkWindow?: number;
   /** Spec 16: photos worked on at once inside one delivery; absent reads CATALOG_PHOTO_CONCURRENCY (default 1). */
@@ -105,7 +107,31 @@ export function topUpWindow(deps: Pick<CatalogDeps, "db" | "enqueue" | "now" | "
 }
 /** Spec 15 E7: the newest samples of the images made that the batch page's measured time is read from. */
 export const PROCESSING_RATE_SAMPLES = 5;
-export async function refreshBatchProgress(db:Db,batchId:string,now:Date=new Date()):Promise<void> {
+/**
+ * A batch with at least this many planned outputs is counted at most every PROGRESS_REFRESH_INTERVAL_MS. Every count
+ * reads the whole batch, and it is asked for after every chunk delivery, product publish and enlargement, so at 25k
+ * products (about 225k outputs) counting on every call grew with the square of the batch size.
+ */
+export const PROGRESS_THROTTLE_MIN_OUTPUTS = 2_000;
+export const PROGRESS_REFRESH_INTERVAL_MS = 15_000;
+/**
+ * Writes the batch page's progress counts. A large batch is counted once per interval: the first call of an interval
+ * takes it (a compare-and-set on `progressRefreshedAt`), the others return at once. The counts stay exact where they
+ * are read as final: finalize counts with `force` before it builds the sheet and the report rebuilds the outcome
+ * counts itself. Meanwhile the work of a skipped call shows with the next counted one, one interval later while the
+ * batch keeps moving (the stall line waits 20 minutes, the measured rate spans 60 s). Unchanged counts are not written.
+ */
+export async function refreshBatchProgress(db:Db,batchId:string,now:Date=new Date(),options:{force?:boolean}={}):Promise<void> {
+  if(!options.force) {
+    const [row]=await db.select({status:catalogBatches.status,outputs:sql<number|null>`(${catalogBatches.counts}->>'outputs')::int`,at:sql<string|null>`${catalogBatches.counts}->>'progressRefreshedAt'`}).from(catalogBatches).where(eq(catalogBatches.id,batchId));
+    if(!row || row.status==="done") return;
+    if((row.outputs ?? 0)>=PROGRESS_THROTTLE_MIN_OUTPUTS) {
+      if(row.at && +now-Date.parse(row.at)<PROGRESS_REFRESH_INTERVAL_MS) return;
+      const stamp=row.at===null ? sql`${catalogBatches.counts}->>'progressRefreshedAt' IS NULL`:sql`${catalogBatches.counts}->>'progressRefreshedAt' = ${row.at}`;
+      const won=await db.update(catalogBatches).set({updatedAt:sql`${catalogBatches.updatedAt}`,counts:sql`${catalogBatches.counts} || jsonb_build_object('progressRefreshedAt',${now.toISOString()}::text)`}).where(and(eq(catalogBatches.id,batchId),stamp)).returning({id:catalogBatches.id});
+      if(!won.length) return;
+    }
+  }
   const groups=await db.select({status:catalogOutputs.status,n:count()}).from(catalogOutputs).where(eq(catalogOutputs.batchId,batchId)).groupBy(catalogOutputs.status);
   const [held]=await db.select({n:count()}).from(catalogBatchProducts).where(and(eq(catalogBatchProducts.batchId,batchId),eq(catalogBatchProducts.change,"pending_attention")));
   // Spec 15 E7: photos prepared (cut out, failed, or left out as a size chart) and the last finished photo. A photo
@@ -130,6 +156,8 @@ export async function refreshBatchProgress(db:Db,batchId:string,now:Date=new Dat
     if(!row) return;
     const samples=row.counts.processingRate ?? [];
     const processingRate=samples.at(-1)?.made===made ? samples:[...samples,{at:now.toISOString(),made}].slice(-PROCESSING_RATE_SAMPLES);
+    const stored=row.counts as unknown as Record<string,unknown>;
+    if(processingRate===samples && Object.entries(patch).every(([key,value])=>JSON.stringify(stored[key] ?? null)===JSON.stringify(value ?? null))) return;
     await tx.update(catalogBatches).set({counts:sql`${catalogBatches.counts} || ${JSON.stringify({...patch,processingRate})}::jsonb`}).where(eq(catalogBatches.id,batchId));
   });
 }

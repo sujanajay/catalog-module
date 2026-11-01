@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import sharp from "sharp";
-import { and, eq, inArray, isNull, notInArray, or, sql } from "drizzle-orm";
+import { and, eq, inArray, isNull, ne, notInArray, or, sql } from "drizzle-orm";
 import { catalogBatches, catalogChunks, catalogOutputs, catalogProducts, catalogSourceImages } from "@catalog/core/db/schema";
 import { CHANNELS } from "@catalog/core/catalog/channels";
 import { batchPrefix, derivedPath, publicObjectPath, publicUrl, stagingPath } from "@catalog/core/catalog/naming";
@@ -554,9 +554,10 @@ export async function handleChunkTask(rawDeps: CatalogDeps, body: Record<string,
       if (!advanced) return answer(200,"lost");
       if (chunk.stage === "matte") await deps.db.update(catalogBatches).set({status:"rendering"}).where(and(eq(catalogBatches.id,batch.id),eq(catalogBatches.status,"matting")));
       else {
-        const remaining=await deps.db.select().from(catalogChunks).where(eq(catalogChunks.batchId,batch.id));
+        // One row at most: a chunk still before qa and not finished (reading every chunk row per delivery grew with chunks squared).
+        const [before]=await deps.db.select({id:catalogChunks.id}).from(catalogChunks).where(and(eq(catalogChunks.batchId,batch.id),ne(catalogChunks.stage,"qa"),notInArray(catalogChunks.status,["done","failed"]))).limit(1);
         // Spec 18 H4: a late delivery never moves a finished (done or failed) batch back to qa.
-        if(remaining.every(row=>row.stage==="qa" || row.status==="done" || row.status==="failed")) await deps.db.update(catalogBatches).set({status:"qa"}).where(and(eq(catalogBatches.id,batch.id),notInArray(catalogBatches.status,["done","failed"])));
+        if(!before) await deps.db.update(catalogBatches).set({status:"qa"}).where(and(eq(catalogBatches.id,batch.id),notInArray(catalogBatches.status,["done","failed"])));
       }
       if (advanced.taskName === ENLARGING_TASK) {
         // Its slot is free for the batch's next chunk; the enlarge task that settles its last photo queues it again.
@@ -651,8 +652,8 @@ export async function handleChunkTask(rawDeps: CatalogDeps, body: Record<string,
   async function finish() {
     // Spec 18 lifecycle F39: one publish per chunk (a Try again or replacement chunk of the same product publishes again).
     for (const productId of chunk!.productIds) await deps.enqueue("/tasks/catalog/publish",{batchId:chunk!.batchId,productId},{taskId:`publish-${chunk!.batchId}-${productId}-chunk-${chunk!.id}`,...(bulk() ? {bulk:true}:{})});
-    const chunks = await deps.db.select().from(catalogChunks).where(eq(catalogChunks.batchId,chunk!.batchId));
-    if (chunks.every(c=>c.status==="done" || c.status==="failed")) { await deps.db.update(catalogBatches).set({status:"publishing"}).where(and(eq(catalogBatches.id,chunk!.batchId),inArray(catalogBatches.status,["matting","rendering","qa"]))); await enqueueFinalize(deps,chunk!.batchId); }
+    const [open] = await deps.db.select({id:catalogChunks.id}).from(catalogChunks).where(and(eq(catalogChunks.batchId,chunk!.batchId),notInArray(catalogChunks.status,["done","failed"]))).limit(1);
+    if (!open) { await deps.db.update(catalogBatches).set({status:"publishing"}).where(and(eq(catalogBatches.id,chunk!.batchId),inArray(catalogBatches.status,["matting","rendering","qa"]))); await enqueueFinalize(deps,chunk!.batchId); }
     // Spec 15 E5: a finished chunk frees a slot in the batch's window. Spec 17 G4: a dropped task is re-sent first.
     else {
       await resendUnstarted();

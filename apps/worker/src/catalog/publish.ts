@@ -15,7 +15,7 @@ export async function handlePublishTask(deps:CatalogDeps,body:Record<string,unkn
       // Spec 18 H4: a done batch is re-opened (one fresh links sheet) only by an operator's decision or a delivery
       // that changed this product's content (`changed`: not unchanged, not failed); a repeated, unchanged or failed
       // pipeline delivery queues no finalize for a done batch.
-      await refreshBatchProgress(deps.db,batchId); await enqueueFinalize(deps,batchId,undefined,{reopen:typeof body.trigger==="string" || changed===true});
+      await refreshBatchProgress(deps.db,batchId,deps.now()); await enqueueFinalize(deps,batchId,undefined,{reopen:typeof body.trigger==="string" || changed===true});
       // outcome: published, held, failed (some outputs did not publish) or not_found.
       deps.log("product published",{batchId,productId,outcome:result.outcome,durationMs:+deps.now()-started});
     }
