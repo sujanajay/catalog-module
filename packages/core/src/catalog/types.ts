@@ -130,6 +130,10 @@ export interface BatchCounts {
   placed?: number;
   /** Photos to place, set when placing is claimed. */
   placeTotal?: number | null;
+  /** Products found or created so far while grouping (written about every 10 s and at each hand-on). */
+  grouped?: number;
+  /** Products to find or create, set when grouping has matched them. */
+  groupTotal?: number | null;
   /** The last RATE_SAMPLES progress samples, all of the current phase (`done` is `placed` while placing). */
   rate?: RateSample[];
   /** The placing lease: the batch stays `ingesting` while a delivery holds it. */
@@ -152,8 +156,8 @@ export interface BatchCounts {
   enlargeDone?: number;
   enlargeFailed?: number;
 }
-/** Intake phases (spec 14c F6). The first five are collecting, `placing` follows, the last two end intake. */
-export const INTAKE_PHASES = ["uploading", "downloading", "reading", "unpacking", "checking", "placing", "ready", "needs_input"] as const;
+/** Intake phases (spec 14c F6). The first five are collecting, `grouping` (products found or created) and `placing` follow, the last two end intake. */
+export const INTAKE_PHASES = ["uploading", "downloading", "reading", "unpacking", "checking", "grouping", "placing", "ready", "needs_input"] as const;
 export type IntakePhase = (typeof INTAKE_PHASES)[number];
 /** One progress sample: ISO time, the phase it was taken in, and the phase's done count then. */
 export interface RateSample { at: string; phase: IntakePhase; done: number }
@@ -161,9 +165,10 @@ export interface RateSample { at: string; phase: IntakePhase; done: number }
  * A placing lease: `token` names the claiming delivery (run and upload id), `until` is an ISO expiry,
  * `attempt` the run of the step working under it (null once that run stopped on an error), `next`
  * (spec 14d F7 part 2) the first photo of the chunk placing handed on to its continuation (absent while
- * grouping or the first chunk runs).
+ * grouping or the first chunk runs), `group` the first product of the grouping chunk handed on (absent while the
+ * grouping delivery itself runs).
  */
-export interface PlacingClaim { token: string; until: string; attempt?: string | null; next?: number }
+export interface PlacingClaim { token: string; until: string; attempt?: string | null; next?: number; group?: number }
 export interface BatchCost {
   computeVcpuSeconds: number; mattingMs: number; renderMs: number; computeUsd: number;
   qaUsd: number; qaCalls: number; identifiers: number;

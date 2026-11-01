@@ -218,8 +218,8 @@ try {
     const files = [...metricFiles.map((f) => path.join(monDir, 'metrics', f)), ...policyFiles.map((f) => path.join(monDir, 'policies', f)),
       path.join(monDir, 'dashboard.json'), path.join(infra, 'monitoring.sh'), path.join(infra, 'deploy.sh')];
     for (const f of files) assert.ok(!fs.readFileSync(f, 'utf8').includes(String.fromCharCode(0x2014)), 'em dash in ' + f);
-    assert.equal(policies.length, 12, 'twelve alert policies');
-    assert.equal(new Set(policies.map((p) => p.displayName)).size, 12, 'policy display names are unique');
+    assert.equal(policies.length, 14, 'fourteen alert policies');
+    assert.equal(new Set(policies.map((p) => p.displayName)).size, 14, 'policy display names are unique');
     for (const p of policies) {
       assert.ok(p.displayName && p.documentation?.content?.length > 80, p.displayName + ' documentation');
       assert.equal(p.documentation.mimeType, 'text/markdown');

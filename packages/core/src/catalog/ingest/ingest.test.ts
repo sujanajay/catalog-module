@@ -23,7 +23,7 @@ import { findOrCreateProduct } from "../products";
 import type { ChannelId, IdentifierMode, UploadKind } from "../types";
 import { buildZip } from "../../../test-fixtures/catalog/ingest-a/builders";
 import { mergeCounts, PLACING_LEASE_MS } from "../counts";
-import { buildPreview, deliveryToken, INGEST_TIME_BUDGET_MS, LINK_MAX_ATTEMPTS, LINK_RETRY_ATTEMPTS, PLACE_BUDGET_ITEMS, runIngest } from "./index";
+import { buildPreview, deliveryToken, failStoppedIngest, GROUP_TIME_BUDGET_MS, INGEST_STOPPED_TEXT, INGEST_TIME_BUDGET_MS, LINK_MAX_ATTEMPTS, LINK_RETRY_ATTEMPTS, PLACE_BUDGET_ITEMS, runIngest } from "./index";
 import { linkFailuresBlock } from "./detect-step";
 import { linkFailuresOf } from "./link-failures";
 import { manifestPath, type UploadManifest } from "./manifest";
@@ -507,8 +507,8 @@ describe("an input removed while the batch-wide step runs (spec 14b F3)", () => 
     const storage: IngestDeps["storage"] = {
       ...w.storage,
       downloadBuffer: async (gsUri: string) => {
-        // The batch-wide step runs while the batch is placing (spec 14c F6: it stays `ingesting`).
-        if (gsUri === keptManifest && !removedOnce && (await batchRow(batch.id)).counts.phase === "placing") {
+        // The batch-wide step runs while the batch is grouping (spec 14c F6: it stays `ingesting`).
+        if (gsUri === keptManifest && !removedOnce && (await batchRow(batch.id)).counts.phase === "grouping") {
           removedOnce = true;
           await db.update(catalogUploads).set({ status: "removed" }).where(eq(catalogUploads.id, gone));
         }
@@ -1074,7 +1074,8 @@ describe("placing in resumable chunks (spec 14d F7 part 2)", () => {
         return w.storage.uploadBuffer(path, buf, mime, opts);
       },
     };
-    const r = await runIngest(db, { ...deps(w), storage }, w.enqueued.at(-1)!.body as PlaceBody);
+    // One products chunk for all of them, so the delivery groups everything and places the first chunk.
+    const r = await runIngest(db, { ...deps(w), storage, productBudgetItems: N }, w.enqueued.at(-1)!.body as PlaceBody);
     expect(r.outcome).toBe(`placed ${PLACE_BUDGET_ITEMS} of ${N}; continuing at ${PLACE_BUDGET_ITEMS}`);
     const groupMs = Math.round(planSaved - manifestSaved);
     // PGlite in one process is slower than Cloud SQL, so this bound is loose.
@@ -1082,6 +1083,177 @@ describe("placing in resumable chunks (spec 14d F7 part 2)", () => {
     expect(groupMs).toBeGreaterThan(0);
     expect(groupMs).toBeLessThan(300_000);
   }, 600_000);
+});
+
+type GroupBody = PlaceBody & { group?: string };
+
+describe("grouping in resumable chunks (large batches)", () => {
+  /** A batch of `n` one-photo products, all collected, and the body of its last delivery not yet run. */
+  async function grouped(name: string, n: number, seed: number) {
+    const w = fakeWorld();
+    const batch = await newBatch(name);
+    const files: Record<string, Buffer> = {};
+    for (let i = 0; i < n; i++) files[`${name.replace(/\W/g, "").slice(0, 6).toUpperCase()}${i}_1.jpg`] = await tinyJpeg(seed + i);
+    const uploadId = await folderUpload(w, batch, files);
+    return { w, batch, uploadId, body: { batchId: batch.id, uploadId, run: name } as GroupBody };
+  }
+
+  it("7 products with PRODUCT_BUDGET_ITEMS 2: four grouping deliveries renew the lease and write progress, then placing", async () => {
+    const { w, batch, body } = await grouped("seven products", 7, 6000);
+    const T0 = Date.parse("2026-11-01T08:00:00Z");
+    let t = T0;
+    const d = { ...deps(w), productBudgetItems: 2, now: () => new Date(t) };
+    const first = await runIngest(db, d, body);
+    expect(first.outcome).toBe("grouped 2 of 7 products; continuing at 2");
+    const progress: [number | undefined, string | undefined][] = [];
+    let row = await batchRow(batch.id);
+    progress.push([row.counts.grouped, row.counts.placingClaim?.until]);
+    expect(row).toMatchObject({ status: "ingesting", counts: { phase: "grouping", grouped: 2, groupTotal: 7, placingClaim: { token: deliveryToken(body), group: 2, attempt: null } } });
+    expect(await sourcesOf(batch.id)).toEqual([]);
+    expect(w.enqueued.at(-1)!.body).toEqual({ ...body, group: "2" });
+    let deliveries = 1;
+    for (let next = w.enqueued.at(-1)!.body as GroupBody; next.group !== undefined; next = w.enqueued.at(-1)!.body as GroupBody) {
+      t += 60_000;
+      const from = w.enqueued.length;
+      const r = await runIngest(db, d, next);
+      deliveries++;
+      row = await batchRow(batch.id);
+      progress.push([row.counts.grouped, row.counts.placingClaim?.until]);
+      if (w.enqueued.length === from) {
+        expect(r.outcome).toBe("preview ready: 7 products, 7 photos");
+        break;
+      }
+    }
+    expect(deliveries).toBe(4);
+    // Each chunk renewed the lease (a later `until`) and moved `grouped` on; the last one cleared both.
+    expect(progress.slice(0, 3)).toEqual([2, 4, 6].map((g, i) => [g, new Date(T0 + i * 60_000 + PLACING_LEASE_MS).toISOString()]));
+    expect(row).toMatchObject({ status: "draft", counts: { phase: "ready", previewReady: true, products: 7, sources: 7, newProducts: 7, placingClaim: null } });
+    const rows = await db.select().from(catalogBatchProducts).where(eq(catalogBatchProducts.batchId, batch.id));
+    expect(rows.map((r) => r.change)).toEqual(Array(7).fill("new"));
+    expect(await sourcesOf(batch.id)).toHaveLength(7);
+    expect(w.enqueued.filter((e) => e.body.group).map((e) => e.body.group)).toEqual(["2", "4", "6"]);
+  });
+
+  it("a duplicate delivery of a grouping chunk while its first copy runs does nothing; a redelivery after its hand-off only queues the next chunk", async () => {
+    const { w, batch, body } = await grouped("dup group chunk", 6, 6100);
+    const d = { ...deps(w), productBudgetItems: 2 };
+    await runIngest(db, d, body);
+    const second = w.enqueued.at(-1)!.body as GroupBody;
+    // The first copy of chunk 2 took the attempt and is still running.
+    await db.update(catalogBatches).set({ counts: sql`jsonb_set(${catalogBatches.counts}, '{placingClaim,attempt}', '"running"'::jsonb)` }).where(eq(catalogBatches.id, batch.id));
+    const calls = vi.mocked(findOrCreateProduct).mock.calls.length;
+    expect((await runIngest(db, d, second)).outcome).toBe("noop: another delivery holds the placing lease");
+    expect(vi.mocked(findOrCreateProduct).mock.calls.length).toBe(calls);
+    // It finishes and hands on to chunk 4; the same task delivered again only queues chunk 4 again.
+    await db.update(catalogBatches).set({ counts: sql`jsonb_set(${catalogBatches.counts}, '{placingClaim,attempt}', 'null'::jsonb)` }).where(eq(catalogBatches.id, batch.id));
+    expect((await runIngest(db, d, second)).outcome).toBe("grouped 4 of 6 products; continuing at 4");
+    const from = w.enqueued.length;
+    expect((await runIngest(db, d, second)).outcome).toBe("grouping already at 4; continuation queued again");
+    expect((await runIngest(db, d, body)).outcome).toBe("grouping already at 4; continuation queued again");
+    expect(w.enqueued.slice(from).map((e) => e.body.group)).toEqual(["4", "4"]);
+    expect(vi.mocked(findOrCreateProduct).mock.calls.length).toBe(calls + 2);
+    expect(await db.select().from(catalogBatchProducts).where(eq(catalogBatchProducts.batchId, batch.id))).toHaveLength(4);
+  });
+
+  it("a chunk that throws part-way is retried from its saved state: no product is counted twice and the created ones stay new", async () => {
+    const { w, batch, body } = await grouped("retry group chunk", 6, 6200);
+    const d = { ...deps(w), productBudgetItems: 3 };
+    await runIngest(db, d, body);
+    const second = w.enqueued.at(-1)!.body as GroupBody;
+    expect(second.group).toBe("3");
+    // The fifth product's write fails after the fourth was created.
+    vi.mocked(findOrCreateProduct).mockImplementationOnce(async (...args) => (await vi.importActual<typeof import("../products")>("../products")).findOrCreateProduct(...args));
+    vi.mocked(findOrCreateProduct).mockRejectedValueOnce(new Error("connection reset"));
+    await expect(runIngest(db, d, second)).rejects.toThrow("connection reset");
+    expect((await batchRow(batch.id)).counts.placingClaim).toMatchObject({ token: deliveryToken(body), group: 3, attempt: null });
+    expect(await db.select().from(catalogBatchProducts).where(eq(catalogBatchProducts.batchId, batch.id))).toHaveLength(4);
+    // Cloud Tasks retries the same task.
+    expect((await runIngest(db, d, second)).outcome).toBe("preview ready: 6 products, 6 photos");
+    const rows = await db.select().from(catalogBatchProducts).where(eq(catalogBatchProducts.batchId, batch.id));
+    expect(rows.map((r) => r.change)).toEqual(Array(6).fill("new"));
+    expect((await batchRow(batch.id)).counts).toMatchObject({ products: 6, newProducts: 6, existingProducts: 0 });
+  });
+
+  it("a cancel between two grouping chunks stops the next one and removes the products already created", async () => {
+    const { w, batch, body } = await grouped("cancel group chunk", 6, 6300);
+    const d = { ...deps(w), productBudgetItems: 2 };
+    await runIngest(db, d, body);
+    const next = w.enqueued.at(-1)!.body as GroupBody;
+    const created = (await db.select().from(catalogBatchProducts).where(eq(catalogBatchProducts.batchId, batch.id))).map((p) => p.productId);
+    expect(created).toHaveLength(2);
+    await db.update(catalogBatches).set({ status: "cancelled" }).where(eq(catalogBatches.id, batch.id));
+    const calls = vi.mocked(findOrCreateProduct).mock.calls.length;
+    expect((await runIngest(db, d, next)).outcome).toBe("noop: the batch is cancelled");
+    expect(vi.mocked(findOrCreateProduct).mock.calls.length).toBe(calls);
+    expect(await db.select().from(catalogBatchProducts).where(eq(catalogBatchProducts.batchId, batch.id))).toEqual([]);
+    expect(await db.select().from(catalogProducts).where(inArray(catalogProducts.id, created))).toEqual([]);
+  });
+
+  it("a cancel during a grouping chunk stops it at its next progress write", async () => {
+    const { w, batch, body } = await grouped("cancel in chunk", 5, 6400);
+    let t = Date.parse("2026-11-01T09:00:00Z");
+    const d = { ...deps(w), now: () => new Date(t) };
+    const real = await vi.importActual<typeof import("../products")>("../products");
+    let n = 0;
+    vi.mocked(findOrCreateProduct).mockImplementation(async (...args) => {
+      // Each product takes 11 s; after the second the operator cancels.
+      t += 11_000;
+      if (++n === 2) await db.update(catalogBatches).set({ status: "cancelled" }).where(eq(catalogBatches.id, batch.id));
+      return real.findOrCreateProduct(...args);
+    });
+    try {
+      expect((await runIngest(db, d, body)).outcome).toBe("stopped: the batch was cancelled");
+    } finally {
+      vi.mocked(findOrCreateProduct).mockImplementation(real.findOrCreateProduct);
+    }
+    expect(n).toBe(2);
+    expect(await db.select().from(catalogBatchProducts).where(eq(catalogBatchProducts.batchId, batch.id))).toEqual([]);
+    expect(await sourcesOf(batch.id)).toEqual([]);
+  });
+
+  it("a chunk stops on GROUP_TIME_BUDGET_MS and the delivery that finds the last product hands placing on when out of time", async () => {
+    const { w, batch, body } = await grouped("time budget", 4, 6500);
+    let t = Date.parse("2026-11-01T10:00:00Z");
+    const real = await vi.importActual<typeof import("../products")>("../products");
+    vi.mocked(findOrCreateProduct).mockImplementation(async (...args) => {
+      t += GROUP_TIME_BUDGET_MS / 2;
+      return real.findOrCreateProduct(...args);
+    });
+    const d = { ...deps(w), now: () => new Date(t) };
+    const outcomes: string[] = [];
+    try {
+      outcomes.push((await runIngest(db, d, body)).outcome);
+      for (let next = w.enqueued.at(-1)!.body as GroupBody; next.group !== undefined; next = w.enqueued.at(-1)!.body as GroupBody) outcomes.push((await runIngest(db, d, next)).outcome);
+    } finally {
+      vi.mocked(findOrCreateProduct).mockImplementation(real.findOrCreateProduct);
+    }
+    expect(outcomes).toEqual(["grouped 2 of 4 products; continuing at 2", "grouped 4 products; placing continues at 0"]);
+    expect(await batchRow(batch.id)).toMatchObject({ status: "ingesting", counts: { phase: "placing", placed: 0, placeTotal: 4, placingClaim: { next: 0, attempt: null } } });
+    expect((await runIngest(db, d, w.enqueued.at(-1)!.body as GroupBody)).outcome).toBe("preview ready: 4 products, 4 photos");
+  });
+
+  it("an ingest task out of attempts fails a collecting batch with the operator sentence; a cancelled one stays cancelled", async () => {
+    const { w, batch, body } = await grouped("out of attempts", 4, 6700);
+    await runIngest(db, { ...deps(w), productBudgetItems: 2 }, body);
+    expect(await failStoppedIngest(db, batch.id)).toBe(true);
+    expect(await batchRow(batch.id)).toMatchObject({ status: "failed", counts: { failReason: INGEST_STOPPED_TEXT, placingClaim: null, phase: null, previewReady: false } });
+    const other = await newBatch("cancelled out of attempts");
+    await db.update(catalogBatches).set({ status: "cancelled" }).where(eq(catalogBatches.id, other.id));
+    expect(await failStoppedIngest(db, other.id)).toBe(false);
+    expect((await batchRow(other.id)).status).toBe("cancelled");
+  });
+
+  it("a grouping continuation under an older lease does nothing once a later run regrouped the batch", async () => {
+    const { w, batch, uploadId, body } = await grouped("stale group", 4, 6600);
+    const d = { ...deps(w), productBudgetItems: 2 };
+    await runIngest(db, d, body);
+    const stale = w.enqueued.at(-1)!.body as GroupBody;
+    await db.update(catalogBatches).set({ counts: mergeCounts({ placingClaim: null }) }).where(eq(catalogBatches.id, batch.id));
+    await runIngest(db, d, { batchId: batch.id, uploadId, run: "newer" });
+    const calls = vi.mocked(findOrCreateProduct).mock.calls.length;
+    expect((await runIngest(db, d, stale)).outcome).toBe("noop: another delivery holds the placing lease");
+    expect(vi.mocked(findOrCreateProduct).mock.calls.length).toBe(calls);
+  });
 });
 
 describe("automatic retry of transient link failures (spec 14d F5 part 2)", () => {

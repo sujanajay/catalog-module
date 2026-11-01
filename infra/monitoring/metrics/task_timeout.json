@@ -1,0 +1,5 @@
+{
+  "name": "catalog/task_timeout",
+  "description": "A worker task request other than a chunk (ingest, finalize, publish, enlarge, sweep) ran past its deadline and Cloud Run answered 504. Every batch-wide step is meant to stop on a time budget and hand on, so any 504 here means a step grew with the batch and was not split.",
+  "filter": "resource.type=\"cloud_run_revision\" AND resource.labels.service_name=~\"^catalog-\" AND resource.labels.service_name=\"catalog-worker\" AND logName=\"projects/image-links-agent/logs/run.googleapis.com%2Frequests\" AND httpRequest.status=504 AND httpRequest.requestUrl:\"/tasks/catalog/\" AND NOT httpRequest.requestUrl:\"/tasks/catalog/chunk\""
+}

@@ -3,7 +3,7 @@
 // continuation, so this handler answers 200 on progress or completion and 500 on an unexpected error
 // (Cloud Tasks retries, 5 attempts). `/tasks/catalog/ingest-more` (spec 14d F11 part 2): hands the
 // next page of a batch's `uploaded` uploads to collection. A body without the ids is refused with 400.
-import { runIngest } from "@catalog/core/catalog/ingest/index";
+import { failStoppedIngest, runIngest } from "@catalog/core/catalog/ingest/index";
 import { handOff, uploadedPage } from "@catalog/core/catalog/ingest/hand-off";
 import type { IngestDeps } from "@catalog/core/catalog/ingest/types";
 import type { Db } from "@catalog/core/db/client";
@@ -13,13 +13,22 @@ import * as storage from "@catalog/core/storage";
 import { enqueueTask } from "@catalog/core/tasks";
 import { log } from "@catalog/core/log";
 import { eq } from "drizzle-orm";
-import type { HandleResult } from "../server";
+import type { HandleOptions, HandleResult } from "../server";
+
+/**
+ * Attempts the ingest queue gives a task (infra/lib/queues.sh INGEST_QUEUE_RETRY --max-attempts=5). The
+ * X-CloudTasks-TaskRetryCount of the last one is INGEST_MAX_ATTEMPTS - 1 (it counts every earlier attempt,
+ * including those that never reached this handler).
+ */
+export const INGEST_MAX_ATTEMPTS = 5;
 
 export interface IngestTaskDeps {
   db: Db;
   ingest: IngestDeps & { enqueue: typeof enqueueTask };
   /** Defaults to runIngest; tests pass a fake. */
   run?: typeof runIngest;
+  /** Tests: stands in for failStoppedIngest. */
+  failStopped?: typeof failStoppedIngest;
   /** Milliseconds now, for the per-delivery log line; tests pass a fake. */
   clock?: () => number;
 }
@@ -36,9 +45,9 @@ export function workerIngestDeps(): IngestTaskDeps["ingest"] {
 const isId = (v: unknown): v is string => typeof v === "string" && v.length > 0;
 const isOptionalText = (v: unknown) => v === undefined || typeof v === "string";
 
-export async function handleIngestTask(deps: IngestTaskDeps, body: Record<string, unknown>): Promise<HandleResult> {
-  const { batchId, uploadId, cursor, run, place } = body;
-  if (!isId(batchId) || !isId(uploadId) || !isOptionalText(cursor) || !isOptionalText(run) || !isOptionalText(place)) {
+export async function handleIngestTask(deps: IngestTaskDeps, body: Record<string, unknown>, opts: HandleOptions = {}): Promise<HandleResult> {
+  const { batchId, uploadId, cursor, run, place, group } = body;
+  if (!isId(batchId) || !isId(uploadId) || !isOptionalText(cursor) || !isOptionalText(run) || !isOptionalText(place) || !isOptionalText(group)) {
     return { httpStatus: 400, outcome: "invalid body: batchId and uploadId are required" };
   }
   const clock = deps.clock ?? Date.now;
@@ -46,15 +55,23 @@ export async function handleIngestTask(deps: IngestTaskDeps, body: Record<string
   try {
     // `run` (optional, spec 14c F6): the hand-off's run id, part of the placing token. Bodies without it
     // (an earlier web tier) still work: the token is then the upload id and the cursor. `place` (spec
-    // 14d F7 part 2) marks a placing continuation.
+    // 14d F7 part 2) marks a placing continuation, `group` a grouping one.
     const { progress, outcome } = await (deps.run ?? runIngest)(deps.db, deps.ingest, {
-      batchId, uploadId, ...(cursor ? { cursor } : {}), ...(run ? { run } : {}), ...(typeof place === "string" ? { place } : {}),
+      batchId, uploadId, ...(cursor ? { cursor } : {}), ...(run ? { run } : {}), ...(typeof place === "string" ? { place } : {}), ...(typeof group === "string" ? { group } : {}),
     });
     // One INFO line per delivery (spec 14d F12): what it did, how far the upload or placing is, how long it took.
     log("INFO", "ingest", { event: "ingest", batchId, uploadId, phase: progress.phase, done: progress.done, total: progress.total, ms: clock() - started, outcome });
     return { httpStatus: 200, outcome };
   } catch (err) {
-    log("ERROR", "ingest task failed", { batchId, uploadId, ms: clock() - started, error: err instanceof Error ? err : String(err) });
+    log("ERROR", "ingest task failed", { batchId, uploadId, ms: clock() - started, retryCount: opts.retryCount ?? null, error: err instanceof Error ? err : String(err) });
+    // The last attempt: Cloud Tasks drops the task after this answer, so the batch would wait forever.
+    if ((opts.retryCount ?? 0) >= INGEST_MAX_ATTEMPTS - 1) {
+      try {
+        if (await (deps.failStopped ?? failStoppedIngest)(deps.db, batchId)) log("WARNING", "batch failed", { batchId, uploadId, cause: "ingest_out_of_attempts" });
+      } catch (markErr) {
+        log("ERROR", "ingest out of attempts: the batch could not be marked failed", { batchId, error: markErr instanceof Error ? markErr : String(markErr) });
+      }
+    }
     return { httpStatus: 500, outcome: "error" };
   }
 }

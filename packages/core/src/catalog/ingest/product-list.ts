@@ -129,11 +129,19 @@ const segmentsOf = (s: string) => s.split("_").map(normalizeKey).filter(Boolean)
 export function matchProductList(list: ProductListRow[], identifiers: string[], opts: { byMatchColumn?: boolean } = {}): ProductListMatch {
   const exact = new Map<string, string[]>();
   const shapes = new Map<string, string[]>();
-  const push = (m: Map<string, string[]>, k: string, v: string) => m.set(k, [...(m.get(k) ?? []), v]);
-  for (const id of identifiers) {
+  const push = <V>(m: Map<string, V[]>, k: string, v: V) => {
+    const list = m.get(k);
+    if (list) list.push(v);
+    else m.set(k, [v]);
+  };
+  // Identifier positions by each "_" segment they hold, so the token rule looks at the identifiers that
+  // can match a row instead of every identifier (rows x identifiers at 25k is minutes).
+  const bySegment = new Map<string, number[]>();
+  identifiers.forEach((id, i) => {
     push(exact, normalizeKey(id), id);
     if (SHAPE.test(id)) push(shapes, normalizeKey(id.replace(SHAPE, "")), id);
-  }
+    for (const seg of new Set(segmentsOf(id))) push(bySegment, seg, i);
+  });
   const lookup = (key: string) => [...new Set([...(exact.get(normalizeKey(key)) ?? []), ...(shapes.get(normalizeKey(key)) ?? [])])];
 
   const byIdentifier = new Map<string, ProductListRow[]>();
@@ -156,7 +164,13 @@ export function matchProductList(list: ProductListRow[], identifiers: string[], 
     if (!row.composite) return [];
     const style = segmentsOf(row.composite.style);
     const colour = segmentsOf(row.composite.colour);
-    return identifiers.filter((id) => !renamed.has(id) && hasRun(segmentsOf(id), style) && hasRun(segmentsOf(id), colour));
+    if (!style.length || !colour.length) return [];
+    // Only identifiers holding the first style and the first colour segment can match; in identifier order.
+    const a = bySegment.get(style[0]!) ?? [];
+    const b = bySegment.get(colour[0]!) ?? [];
+    const [few, other] = a.length <= b.length ? [a, new Set(b)] : [b, new Set(a)];
+    return few.filter((i) => other.has(i)).map((i) => identifiers[i]!)
+      .filter((id) => !renamed.has(id) && hasRun(segmentsOf(id), style) && hasRun(segmentsOf(id), colour));
   };
   const matchColumnRule: Rule = (row) => (SHOT_SUFFIX.test(row.identifier) ? lookup(row.identifier.replace(SHOT_SUFFIX, "")) : []);
   const rules: [string, Rule][] = opts.byMatchColumn
@@ -186,7 +200,7 @@ export function matchProductList(list: ProductListRow[], identifiers: string[], 
       hit.ids.forEach((id) => renamed.set(id, row.identifier));
       targets = [row.identifier];
     }
-    for (const id of targets) byIdentifier.set(id, [...(byIdentifier.get(id) ?? []), row]);
+    for (const id of targets) push(byIdentifier, id, row);
   }
 
   const skuIds = new Map<string, string[]>();

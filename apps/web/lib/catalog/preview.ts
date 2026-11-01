@@ -76,11 +76,14 @@ type LiveOutput = { productId: string; n: number; channel: ChannelId; sha256: st
  */
 export function plannedImages(sources: readonly PlannedSource[], channels: readonly ChannelId[], live: readonly LiveOutput[], upscaleModel: string | readonly string[] | null = configuredUpscalerIds()): { outputs: number; sourcesToMake: number } {
   const current = (o: LiveOutput) => o.workerMatteModel !== null && renderKeys({ sourceSha256: o.sha256, channel: o.channel, n: o.n, policyKey: `default|${o.workerMatteModel}` }, upscaleModel).includes(o.renderKey);
+  // The live outputs the worker keeps, by (product, n, channel, sha256): one lookup per pair instead of a scan of every live output.
+  const pairKey = (productId: string, n: number, channel: string, sha256: string) => `${productId}|${n}|${channel}|${sha256}`;
+  const kept = new Set(live.filter(current).map((o) => pairKey(o.productId, o.n, o.channel, o.sha256)));
   let outputs = 0, sourcesToMake = 0;
   for (const source of sources) {
     let made = 0;
     for (const channel of channels) {
-      if (live.some((o) => o.productId === source.productId && o.n === source.n && o.channel === channel && o.sha256 === source.sha256 && current(o))) continue;
+      if (kept.has(pairKey(source.productId, source.n, channel, source.sha256))) continue;
       made++;
     }
     outputs += made;
@@ -110,19 +113,39 @@ export async function batchLinkFailures(id: string) {
   return { linkFailures: linkFailuresBlock(found), linkFailureRows: found.rows.map(({ url, where, reason }) => ({ url, where, reason })) };
 }
 /** The manifests are read only when the last collection counted failed links; step 4 polls this every 2.5 s. */
-function linkFailuresIfAny(batch: { id: string; counts: { linkFailures?: number } }) {
-  return batch.counts.linkFailures ? batchLinkFailures(batch.id) : { linkFailures: linkFailuresBlock({ links: 0, rows: [] }), linkFailureRows: [] };
+async function linkFailuresIfAny(batch: { id: string; counts: { linkFailures?: number } }) {
+  if (!batch.counts.linkFailures) return { found: null, block: { linkFailures: linkFailuresBlock({ links: 0, rows: [] }), linkFailureRows: [] } };
+  const found = await linkFailuresOf(db(), batch.id, { storage });
+  return { found, block: { linkFailures: linkFailuresBlock(found), linkFailureRows: found.rows.map(({ url, where, reason }) => ({ url, where, reason })) } };
+}
+/** Ids per IN (...) list, well below Postgres' 65,535 bind parameters per query. */
+const IN_LIST_MAX = 1000;
+async function inChunks<T>(ids: string[], read: (part: string[]) => Promise<T[]>): Promise<T[]> {
+  const out: T[] = [];
+  for (let i = 0; i < ids.length; i += IN_LIST_MAX) out.push(...(await read(ids.slice(i, i + IN_LIST_MAX))));
+  return out;
 }
 export async function previewBatch(id: string) {
   const batch = await queryBatch(id);
-  const base = { otherBatchProcessing: await anotherBatchProcessing(id), ready: batch.counts.previewReady, previewAt: batch.updatedAt.toISOString(), counts: {...batch.counts, photos: batch.counts.sources, channels: batch.channels.length}, collected: batch.counts.collected, collectTotal: batch.counts.collectTotal, estimate: null as CostEstimate | null, ...await linkFailuresIfAny(batch) };
+  const failures = await linkFailuresIfAny(batch);
+  const base = { otherBatchProcessing: await anotherBatchProcessing(id), ready: batch.counts.previewReady, previewAt: batch.updatedAt.toISOString(), counts: {...batch.counts, photos: batch.counts.sources, channels: batch.channels.length}, collected: batch.counts.collected, collectTotal: batch.counts.collectTotal, estimate: null as CostEstimate | null, ...failures.block };
   if (!base.ready) return { ...base, groupedBy: "", warnings: [], groups: [], totalRows: 0, overwrite: { newProducts: 0, existingProducts: [], renameHints: [], sameProductPairs: [], sameBatches: [], duplicatePhotos: [] }, busy: [] };
-  const [preview, detected] = await Promise.all([buildPreview(db(), id, { storage }, { limit: 50 }), buildDetectedStep2(db(), id, { storage })]);
+  // The link failures read above are handed on, so the manifests are read once per poll.
+  const [preview, detected] = await Promise.all([buildPreview(db(), id, { storage }, { limit: 50 }), buildDetectedStep2(db(), id, { storage }, failures.found ? { linkFailures: failures.found } : {})]);
   const sources = await db().select().from(catalogSourceImages).where(eq(catalogSourceImages.batchId, id));
   const productIds = [...new Set(sources.map((s) => s.productId))];
-  const products = productIds.length ? await db().select({ id: catalogProducts.id, productType: catalogProducts.productType }).from(catalogProducts).where(inArray(catalogProducts.id, productIds)) : [];
-  const liveRows = productIds.length ? await db().select({ productId: catalogOutputs.productId, n: catalogOutputs.n, channel: catalogOutputs.channel, sha256: catalogSourceImages.sha256, renderKey: catalogOutputs.renderKey }).from(catalogOutputs).innerJoin(catalogSourceImages, eq(catalogSourceImages.id, catalogOutputs.sourceImageId)).where(and(inArray(catalogOutputs.productId, productIds), eq(catalogOutputs.isLive, true))) : [];
-  const models = new Map(await Promise.all([...new Set(liveRows.map((o) => o.productId))].map(async (productId) => [productId, await matteModelFor(products.find((p) => p.id === productId) ?? { productType: null }, batch, sources.some((s) => s.productId === productId && s.flags.includes("transparent")))] as const)));
+  const products = await inChunks(productIds, (part) => db().select({ id: catalogProducts.id, productType: catalogProducts.productType }).from(catalogProducts).where(inArray(catalogProducts.id, part)));
+  const liveRows = await inChunks(productIds, (part) => db().select({ productId: catalogOutputs.productId, n: catalogOutputs.n, channel: catalogOutputs.channel, sha256: catalogSourceImages.sha256, renderKey: catalogOutputs.renderKey }).from(catalogOutputs).innerJoin(catalogSourceImages, eq(catalogSourceImages.id, catalogOutputs.sourceImageId)).where(and(inArray(catalogOutputs.productId, part), eq(catalogOutputs.isLive, true))));
+  // One policy read per product type (not one per product), and the product facts by id.
+  const typeOf = new Map(products.map((p) => [p.id, p.productType]));
+  const transparent = new Set(sources.filter((s) => s.flags.includes("transparent")).map((s) => s.productId));
+  const policies = new Map<string, ReturnType<typeof resolvePolicy>>();
+  const resolveOnce = (brandSlug: string, type: Parameters<typeof resolvePolicy>[2]) => {
+    let p = policies.get(type);
+    if (!p) policies.set(type, (p = resolvePolicy(db(), brandSlug, type)));
+    return p;
+  };
+  const models = new Map(await Promise.all([...new Set(liveRows.map((o) => o.productId))].map(async (productId) => [productId, await matteModelFor({ productType: typeOf.get(productId) ?? null }, batch, transparent.has(productId), resolveOnce)] as const)));
   const live = liveRows.map((o) => ({ ...o, workerMatteModel: models.get(o.productId) ?? null }));
   const { outputs, sourcesToMake } = plannedImages(sources, batch.channels, live);
   // One classifier call per product without a type when the batch type is "auto" (spec 07 4.3, 4.11).

@@ -23,14 +23,42 @@ export function poolMaxFromEnv(env: NodeJS.ProcessEnv = process.env): number {
   return Number.isInteger(n) && n > 0 ? n : DEFAULT_DB_POOL_MAX;
 }
 
+/**
+ * The worker's session timeouts (its server sets them with workerDbTimeoutDefaults): a statement that runs
+ * longer than WORKER_STATEMENT_TIMEOUT_MS is cancelled by Postgres and its task fails and is retried, and a
+ * session left idle inside a transaction for WORKER_IDLE_TX_TIMEOUT_MS is ended. So a runaway query cannot
+ * keep the shared instance busy for hours after its request is gone. Both are far above the slowest
+ * legitimate query and transaction of the worker (seconds).
+ */
+export const WORKER_STATEMENT_TIMEOUT_MS = 300_000;
+export const WORKER_IDLE_TX_TIMEOUT_MS = 600_000;
+
+/** Sets DB_STATEMENT_TIMEOUT_MS and DB_IDLE_TX_TIMEOUT_MS to the worker defaults where they are not set. Call before getDb. */
+export function workerDbTimeoutDefaults(env: NodeJS.ProcessEnv = process.env): void {
+  env.DB_STATEMENT_TIMEOUT_MS ??= String(WORKER_STATEMENT_TIMEOUT_MS);
+  env.DB_IDLE_TX_TIMEOUT_MS ??= String(WORKER_IDLE_TX_TIMEOUT_MS);
+}
+
+/** statement_timeout and idle_in_transaction_session_timeout from DB_STATEMENT_TIMEOUT_MS and DB_IDLE_TX_TIMEOUT_MS (unset or 0: none). */
+function sessionTimeouts(env: NodeJS.ProcessEnv): Pick<pg.PoolConfig, "statement_timeout" | "idle_in_transaction_session_timeout"> {
+  const ms = (v: string | undefined) => {
+    const n = Number(v);
+    return Number.isInteger(n) && n > 0 ? n : undefined;
+  };
+  const statement = ms(env.DB_STATEMENT_TIMEOUT_MS);
+  const idleTx = ms(env.DB_IDLE_TX_TIMEOUT_MS);
+  return { ...(statement ? { statement_timeout: statement } : {}), ...(idleTx ? { idle_in_transaction_session_timeout: idleTx } : {}) };
+}
+
 export function poolConfigFromEnv(env: NodeJS.ProcessEnv = process.env): pg.PoolConfig {
   const max = poolMaxFromEnv(env);
-  if (env.DATABASE_URL) return { connectionString: env.DATABASE_URL, max };
+  const timeouts = sessionTimeouts(env);
+  if (env.DATABASE_URL) return { connectionString: env.DATABASE_URL, max, ...timeouts };
   const { DB_HOST, DB_NAME, DB_USER, DB_PASSWORD } = env;
   if (!DB_HOST || !DB_NAME || !DB_USER) {
     throw new Error("Database not configured: set DATABASE_URL or DB_HOST, DB_NAME, DB_USER, DB_PASSWORD");
   }
-  return { host: DB_HOST, database: DB_NAME, user: DB_USER, password: DB_PASSWORD, port: 5432, max };
+  return { host: DB_HOST, database: DB_NAME, user: DB_USER, password: DB_PASSWORD, port: 5432, max, ...timeouts };
 }
 
 /** Postgres SQLSTATE 53300 too_many_connections, also used for "remaining connection slots are reserved". */

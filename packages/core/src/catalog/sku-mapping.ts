@@ -3,7 +3,7 @@
 // Order, stopping at the first hit, all on normalizeKey values and restricted to the batch's brand:
 // option_key -> ean -> channel id -> product_code (trailing size segment removed) -> manual map ->
 // unresolved. A hit returns every per-size opptra_sku of the matched option, sorted.
-import { and, asc, eq, sql, type SQL } from "drizzle-orm";
+import { asc, eq, sql, type SQL } from "drizzle-orm";
 import type { Db } from "../db/client";
 import { skuMap } from "../db/schema";
 import { normalizeKey } from "./naming";
@@ -45,82 +45,140 @@ function unique(values: string[]): string[] {
   return [...new Set(values)];
 }
 
-/** The option_key of the first matching row (by opptra_sku), or null. */
-async function firstOptionKey(db: Db, brandSlug: string, where: SQL): Promise<string | null> {
-  const [row] = await db
-    .select({ optionKey: skuMap.optionKey })
-    .from(skuMap)
-    .where(and(eq(skuMap.brandSlug, brandSlug), where))
-    .orderBy(asc(skuMap.opptraSku))
-    .limit(1);
-  return row?.optionKey ?? null;
+/** One sku_map row as the resolver holds it; the normalised forms are computed by Postgres, as the per-query version compared them. */
+interface ResolverRow {
+  opptraSku: string;
+  optionKey: string;
+  optionIdStyleColor: string | null;
+  ean: string | null;
+  /** normalised(opptra_sku with its size segment removed by SIZE_SEGMENT_RE). */
+  strippedCode: string;
+  /** normalised(opptra_sku). */
+  fullCode: string;
+  /** normalised values of the RESOLVE_CHANNEL_KEYS entries of channel_ids. */
+  channelValues: string[];
 }
 
-async function optionResult(db: Db, brandSlug: string, optionKey: string, method: SkuMethod): Promise<ResolveResult> {
-  const rows = await db
-    .select({ opptraSku: skuMap.opptraSku, optionIdStyleColor: skuMap.optionIdStyleColor })
+/** Resolves SKUs for one brand from rows read once (loadSkuResolver). */
+export interface SkuResolver {
+  brandSlug: string;
+  /** How many sku_map rows were read. */
+  rows: number;
+  resolve(input: Omit<ResolveInput, "brandSlug"> & { brandSlug?: string }): ResolveResult;
+}
+
+/** Keeps the first row seen per key: rows are visited in opptra_sku order, so that is the first hit by opptra_sku. */
+function firstBy(map: Map<string, number>, key: string | null | undefined, rank: number): void {
+  if (key !== null && key !== undefined && !map.has(key)) map.set(key, rank);
+}
+
+/**
+ * Reads the brand's sku_map rows once and returns a resolver with exactly resolveSkus' order and results
+ * (spec 02, "SKU resolution"), so a batch resolves every product with one query instead of up to four per
+ * product, two of them full scans of the brand's rows. Rows come back in Postgres' own `ORDER BY opptra_sku`
+ * (its collation decides "first", as before), and the stored values are normalised by the same SQL
+ * expressions the per-query version used; the input side uses normalizeKey and stripSizeSegment as before.
+ */
+export async function loadSkuResolver(db: Db, brandSlug: string): Promise<SkuResolver> {
+  const channelKeys = sql.join(RESOLVE_CHANNEL_KEYS.map((k) => sql`${k}`), sql`, `);
+  const rows = (await db
+    .select({
+      opptraSku: skuMap.opptraSku,
+      optionKey: skuMap.optionKey,
+      optionIdStyleColor: skuMap.optionIdStyleColor,
+      ean: skuMap.ean,
+      strippedCode: sql<string>`${normalizedSql(sql`regexp_replace(${skuMap.opptraSku}, ${SIZE_SEGMENT_RE}, '')`)}`,
+      fullCode: sql<string>`${normalizedSql(sql`${skuMap.opptraSku}`)}`,
+      channelValues: sql<string[]>`ARRAY(SELECT ${normalizedSql(sql`e.value`)} FROM jsonb_each_text(${skuMap.channelIds}) AS e(key, value) WHERE e.key IN (${channelKeys}))`,
+    })
     .from(skuMap)
-    .where(and(eq(skuMap.brandSlug, brandSlug), eq(skuMap.optionKey, optionKey)))
-    .orderBy(asc(skuMap.opptraSku));
+    .where(eq(skuMap.brandSlug, brandSlug))
+    .orderBy(asc(skuMap.opptraSku))) as ResolverRow[];
+
+  const byOptionKey = new Map<string, number>();
+  const byEan = new Map<string, number>();
+  const byChannel = new Map<string, number>();
+  const byStripped = new Map<string, number>();
+  const byFull = new Map<string, number>();
+  const ranksOfOption = new Map<string, number[]>();
+  rows.forEach((r, rank) => {
+    firstBy(byOptionKey, r.optionKey, rank);
+    firstBy(byEan, r.ean, rank);
+    for (const v of r.channelValues ?? []) firstBy(byChannel, v, rank);
+    firstBy(byStripped, r.strippedCode, rank);
+    firstBy(byFull, r.fullCode, rank);
+    const list = ranksOfOption.get(r.optionKey);
+    if (list) list.push(rank);
+    else ranksOfOption.set(r.optionKey, [rank]);
+  });
+
+  /** The first row (lowest rank) any of `keys` finds in `map`, or null. */
+  const first = (map: Map<string, number>, keys: string[]): number | null => {
+    let best: number | null = null;
+    for (const k of keys) {
+      const r = map.get(k);
+      if (r !== undefined && (best === null || r < best)) best = r;
+    }
+    return best;
+  };
+  const optionResult = (rank: number, method: SkuMethod): ResolveResult => {
+    const option = (ranksOfOption.get(rows[rank]!.optionKey) ?? []).map((i) => rows[i]!);
+    return {
+      optionIdStyleColor: option.find((r) => r.optionIdStyleColor)?.optionIdStyleColor ?? null,
+      opptraSkuIds: option.map((r) => r.opptraSku),
+      method,
+    };
+  };
+
   return {
-    optionIdStyleColor: rows.find((r) => r.optionIdStyleColor)?.optionIdStyleColor ?? null,
-    opptraSkuIds: rows.map((r) => r.opptraSku),
-    method,
+    brandSlug,
+    rows: rows.length,
+    resolve(input) {
+      if (input.brandSlug !== undefined && input.brandSlug !== brandSlug) {
+        throw new Error(`This SKU resolver holds ${brandSlug}, not ${input.brandSlug}.`);
+      }
+      const idKey = normalizeKey(input.identifier.trim());
+      const hit = (rank: number | null, method: SkuMethod) => (rank === null ? null : optionResult(rank, method));
+
+      // 1. option_key (style+colour).
+      if (idKey) {
+        const r = hit(first(byOptionKey, [idKey]), "option_key");
+        if (r) return r;
+      }
+      // 2. EAN: the explicit ean, else the identifier itself (barcode-named files).
+      const eans = unique([input.ean ? normalizeKey(input.ean.trim()) : "", idKey].filter(Boolean));
+      if (eans.length) {
+        const r = hit(first(byEan, eans), "ean");
+        if (r) return r;
+      }
+      // 3. Marketplace ids: the given channel ids plus the identifier.
+      const ids = unique([...(input.channelIds ?? []).map((c) => normalizeKey(c.trim())), idKey].filter(Boolean));
+      if (ids.length) {
+        const r = hit(first(byChannel, ids), "channel_id");
+        if (r) return r;
+      }
+      // 4. Per-size product code: the identifier with its size segment removed matches a product code
+      //    with its size segment removed (or the full code matches exactly).
+      if (idKey) {
+        const strippedKey = normalizeKey(stripSizeSegment(input.identifier));
+        const a = first(byStripped, [strippedKey]);
+        const b = first(byFull, [idKey]);
+        const r = hit(a === null ? b : b === null ? a : Math.min(a, b), "product_code");
+        if (r) return r;
+      }
+      // 5. Manual mapping sheet (07): keys are normalised identifiers.
+      const manual = input.manual?.get(idKey);
+      if (manual && manual.length) {
+        return { optionIdStyleColor: null, opptraSkuIds: unique(manual).sort(), method: "manual" };
+      }
+      return { optionIdStyleColor: null, opptraSkuIds: [], method: "unresolved" };
+    },
   };
 }
 
-function inValues(values: string[]): SQL {
-  return sql.join(values.map((v) => sql`${v}`), sql`, `);
-}
-
+/** One product's SKUs (one query). A batch resolves many products with one loadSkuResolver instead. */
 export async function resolveSkus(db: Db, input: ResolveInput): Promise<ResolveResult> {
-  const { brandSlug } = input;
-  const idKey = normalizeKey(input.identifier.trim());
-  const tryKey = async (where: SQL, method: SkuMethod): Promise<ResolveResult | null> => {
-    const key = await firstOptionKey(db, brandSlug, where);
-    return key === null ? null : optionResult(db, brandSlug, key, method);
-  };
-
-  if (idKey) {
-    // 1. option_key (style+colour).
-    const hit = await tryKey(eq(skuMap.optionKey, idKey), "option_key");
-    if (hit) return hit;
-  }
-
-  // 2. EAN: the explicit ean, else the identifier itself (barcode-named files).
-  const eans = unique([input.ean ? normalizeKey(input.ean.trim()) : "", idKey].filter(Boolean));
-  if (eans.length) {
-    const hit = await tryKey(sql`${skuMap.ean} IN (${inValues(eans)})`, "ean");
-    if (hit) return hit;
-  }
-
-  // 3. Marketplace ids: the given channel ids plus the identifier.
-  const ids = unique([...(input.channelIds ?? []).map((c) => normalizeKey(c.trim())), idKey].filter(Boolean));
-  if (ids.length) {
-    const where = sql`EXISTS (SELECT 1 FROM jsonb_each_text(${skuMap.channelIds}) AS e(key, value)
-      WHERE e.key IN (${inValues([...RESOLVE_CHANNEL_KEYS])})
-      AND ${normalizedSql(sql`e.value`)} IN (${inValues(ids)}))`;
-    const hit = await tryKey(where, "channel_id");
-    if (hit) return hit;
-  }
-
-  // 4. Per-size product code: the identifier with its size segment removed matches a product code
-  //    with its size segment removed (or the full code matches exactly).
-  if (idKey) {
-    const strippedKey = normalizeKey(stripSizeSegment(input.identifier));
-    const where = sql`(${normalizedSql(sql`regexp_replace(${skuMap.opptraSku}, ${SIZE_SEGMENT_RE}, '')`)} = ${strippedKey}
-      OR ${normalizedSql(sql`${skuMap.opptraSku}`)} = ${idKey})`;
-    const hit = await tryKey(where, "product_code");
-    if (hit) return hit;
-  }
-
-  // 5. Manual mapping sheet (07): keys are normalised identifiers.
-  const manual = input.manual?.get(idKey);
-  if (manual && manual.length) {
-    return { optionIdStyleColor: null, opptraSkuIds: unique(manual).sort(), method: "manual" };
-  }
-
-  return { optionIdStyleColor: null, opptraSkuIds: [], method: "unresolved" };
+  return (await loadSkuResolver(db, input.brandSlug)).resolve(input);
 }
 
 /**
