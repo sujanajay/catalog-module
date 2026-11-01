@@ -57,6 +57,30 @@ describe("handleIngestTask", () => {
     errors.mockRestore();
   });
 
+  it("passes a grouping continuation's `group` on", async () => {
+    const run = vi.fn(async () => ({ progress: { done: 2000, total: 2200, phase: "grouping" as const }, outcome: "grouped 2000 of 2200 products; continuing at 2000" }));
+    await handleIngestTask({ db, ingest, run }, { batchId: "b1", uploadId: "u1", run: "r1", group: "1000" });
+    expect(run).toHaveBeenLastCalledWith(db, ingest, { batchId: "b1", uploadId: "u1", run: "r1", group: "1000" });
+    expect((await handleIngestTask({ db, ingest, run }, { batchId: "b1", uploadId: "u1", group: 3 })).httpStatus).toBe(400);
+  });
+
+  it("marks the batch failed when the last attempt fails, and only then", async () => {
+    const errors = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const warnings = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const run = vi.fn(async () => {
+      throw new Error("deadline");
+    });
+    const failStopped = vi.fn(async () => true);
+    for (const retryCount of [undefined, 0, 1, 2, 3]) {
+      expect(await handleIngestTask({ db, ingest, run, failStopped }, { batchId: "b1", uploadId: "u1" }, retryCount === undefined ? {} : { retryCount })).toEqual({ httpStatus: 500, outcome: "error" });
+    }
+    expect(failStopped).not.toHaveBeenCalled();
+    expect(await handleIngestTask({ db, ingest, run, failStopped }, { batchId: "b1", uploadId: "u1" }, { retryCount: 4 })).toEqual({ httpStatus: 500, outcome: "error" });
+    expect(failStopped).toHaveBeenCalledWith(db, "b1");
+    errors.mockRestore();
+    warnings.mockRestore();
+  });
+
   it("refuses a body without the batch and upload ids", async () => {
     const run = vi.fn();
     for (const body of [{}, { batchId: "b1" }, { batchId: "b1", uploadId: 7 }, { batchId: "b1", uploadId: "u1", cursor: 3 }, { batchId: "b1", uploadId: "u1", run: 7 }, { batchId: "b1", uploadId: "u1", place: 3 }]) {

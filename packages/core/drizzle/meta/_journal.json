@@ -57,6 +57,13 @@
       "when": 1793321810612,
       "tag": "0007_enlargement_call_start",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1793478683459,
+      "tag": "0008_batch_indexes",
+      "breakpoints": true
     }
   ]
 }

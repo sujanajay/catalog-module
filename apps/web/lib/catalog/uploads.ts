@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { and, eq, inArray, ne } from "drizzle-orm";
+import { and, eq, inArray, ne, sql } from "drizzle-orm";
 import { catalogBatches, catalogUploads } from "@catalog/core/db/schema";
 import { detectUploadKind } from "@catalog/core/catalog/ingest/detect";
 import { planSignedUploads, mapLimit } from "@catalog/core/catalog/ingest/local-files";
@@ -7,7 +7,8 @@ import { batchPrefix } from "@catalog/core/catalog/naming";
 import * as storage from "@catalog/core/storage";
 import { enqueueTask } from "@catalog/core/tasks";
 import { isTransientError } from "@catalog/core/retry";
-import { isCollectStalled } from "@catalog/core/catalog/pipeline/status";
+import { COLLECT_STALL_MS, isCollectStalled } from "@catalog/core/catalog/pipeline/status";
+import { placingClaimRenewedWithin } from "@catalog/core/catalog/counts";
 import { db } from "../db";
 import { badRequest, HttpError } from "../errors";
 import { dropLinkRejects, linkFailuresOf } from "@catalog/core/catalog/ingest/link-failures";
@@ -103,10 +104,14 @@ export async function ingestBatch(id: string) {
   if (!targets.length) throw badRequest("No files are ready. Check access to your links and try again.");
   // Conditional and merge-only (spec 14c F4 part 2 and F6): a Cancel that landed meanwhile is never
   // revived, and the worker's counts keys (phase, rate) are kept. "Try again" on a stalled batch clears
-  // the placing lease its lost holder left, so the next delivery can claim it (spec 14c section 3.2).
+  // the placing lease its lost holder left, so the next delivery can claim it (spec 14c section 3.2), but
+  // only a lease nobody renewed for COLLECT_STALL_MS: a run that still works renews it every few seconds,
+  // and clearing it would start a second batch-wide step next to it. Checked in the same UPDATE.
   // The reason a reopened batch could not start is shown until this hand-off (spec 14c F8).
-  const stalled = batch.status === "ingesting" && isCollectStalled(batch.updatedAt, new Date());
-  const [handing] = await db().update(catalogBatches).set({ status: "ingesting", counts: mergeCounts({ previewReady: false, fixReason: null, ...(stalled ? { placingClaim: null } : {}) }), updatedAt: new Date() })
+  const now = new Date();
+  const stalled = batch.status === "ingesting" && isCollectStalled(batch.updatedAt, now);
+  const clearLost = stalled ? sql` || CASE WHEN ${placingClaimRenewedWithin(now, COLLECT_STALL_MS)} THEN '{}'::jsonb ELSE '{"placingClaim": null}'::jsonb END` : sql``;
+  const [handing] = await db().update(catalogBatches).set({ status: "ingesting", counts: sql`${mergeCounts({ previewReady: false, fixReason: null })}${clearLost}`, updatedAt: new Date() })
     .where(and(eq(catalogBatches.id, id), inArray(catalogBatches.status, ["draft", "ingesting"]))).returning({ id: catalogBatches.id });
   if (!handing) throw new HttpError(409, notDraftText(await queryBatch(id)));
   const run = randomUUID();

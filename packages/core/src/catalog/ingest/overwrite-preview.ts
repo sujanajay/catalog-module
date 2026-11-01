@@ -17,7 +17,7 @@ import {
 } from "../../db/schema";
 import { normalizeKey, sanitizeSegment } from "../naming";
 import { deriveBatchState } from "../pipeline/status";
-import { resolveSkus } from "../sku-mapping";
+import { loadSkuResolver, type SkuResolver } from "../sku-mapping";
 import { baseName, sameProductMessage } from "./group";
 import type { GroupingResult, OverwritePreview, SourceItem } from "./types";
 
@@ -70,19 +70,21 @@ async function productsByAliasKeys(
  * existing; else new (productId null). Never writes. One match per identifier, in input order.
  * A new product's pathKey is the one findOrCreateProduct would give it (sanitizeSegment).
  * `eans` (optional, after the contract's parameters): identifier -> the product list's EAN, passed
- * to resolveSkus exactly as the ingest's real findOrCreateProduct call gets it.
+ * to resolveSkus exactly as the ingest's real findOrCreateProduct call gets it. `resolver` (optional): the
+ * batch's SKU resolver, loaded here once when not given, so no identifier costs a sku_map query.
  */
-export async function matchProducts(db: Db, batch: CatalogBatch, identifiers: string[], eans?: Map<string, string>): Promise<ProductMatch[]> {
+export async function matchProducts(db: Db, batch: CatalogBatch, identifiers: string[], eans?: Map<string, string>, resolver?: SkuResolver): Promise<ProductMatch[]> {
   const { brandSlug, isTest } = batch;
   const trimmed = identifiers.map((id) => id.trim());
   const byKey = await productsByAliasKeys(db, brandSlug, isTest, trimmed.map((id) => normalizeKey(id)));
 
   // (2) Identifiers without an alias hit: the option id resolveSkus finds, normalised, may be one.
   const optionKeyOf = new Map<string, string>();
+  const skusOf = resolver ?? (await loadSkuResolver(db, brandSlug));
   for (const id of new Set(trimmed)) {
     const key = normalizeKey(id);
     if (!key || byKey.has(key)) continue;
-    const skus = await resolveSkus(db, { brandSlug, identifier: id, ean: eans?.get(id) ?? null });
+    const skus = skusOf.resolve({ brandSlug, identifier: id, ean: eans?.get(id) ?? null });
     if (skus.optionIdStyleColor) optionKeyOf.set(id, normalizeKey(skus.optionIdStyleColor));
   }
   const byOption = await productsByAliasKeys(db, brandSlug, isTest, [...optionKeyOf.values()]);

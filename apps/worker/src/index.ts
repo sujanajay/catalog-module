@@ -2,7 +2,7 @@
 import { OAuth2Client } from "google-auth-library";
 import { createBigQuery, type BigQueryLike } from "@catalog/core/catalog/master-sync";
 import { releaseLocks } from "@catalog/core/catalog/products";
-import { closeDb, getDb } from "@catalog/core/db/client";
+import { closeDb, getDb, workerDbTimeoutDefaults } from "@catalog/core/db/client";
 import { authConfigFromEnv } from "./auth";
 import { handleIngestMoreTask, handleIngestTask, workerIngestDeps } from "./catalog/ingest";
 import { workerCatalogDeps } from "./catalog/deps";
@@ -20,6 +20,8 @@ import { createServer, type ServerDeps } from "./server";
 defaultMigrationsDir();
 // Spec 18 H4: a warning flood (MaxListenersExceededWarning) names its emitter with a stack in the logs.
 installWarningLog(log);
+// A runaway statement is cancelled instead of keeping the shared Cloud SQL instance busy after its request is gone.
+workerDbTimeoutDefaults(process.env);
 
 const port = Number(process.env.PORT) || 8080;
 const auth = authConfigFromEnv(new OAuth2Client());
@@ -51,7 +53,7 @@ const routes: ServerDeps["routes"] = {
   // The DB handle is taken lazily inside each handler so /health works before the DB is reachable.
   "/tasks/catalog/sync-master": (body) => handleSyncMaster({ db: getDb(), bq: lazyBigQuery, env: process.env }, body),
   "/tasks/catalog/sweep": (body) => handleSweep({ db: getDb(), releaseLocks, draftExpiryDays: draftExpiryDaysFromEnv(process.env), enlargementOff: !upscaleConfigFromEnv().model }, body),
-  "/tasks/catalog/ingest": (body) => handleIngestTask({ db: getDb(), ingest: ingestDeps }, body),
+  "/tasks/catalog/ingest": (body, opts) => handleIngestTask({ db: getDb(), ingest: ingestDeps }, body, opts),
   "/tasks/catalog/ingest-more": (body) => handleIngestMoreTask({ db: getDb(), ingest: ingestDeps }, body),
   "/tasks/catalog/chunk": (body, opts) => handleChunkTask(workerCatalogDeps(getDb()), body, opts),
   "/tasks/catalog/enlarge": (body, opts) => handleEnlargeTask(workerCatalogDeps(getDb()), body, opts),

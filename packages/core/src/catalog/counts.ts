@@ -81,6 +81,14 @@ export function placingLeaseResumable(token: string, now: Date): SQL {
   return sql`((${claimSql}->>'token') = ${token}::text AND (${claimSql}->>'attempt') IS NULL AND (${claimSql}->>'until')::timestamptz >= ${now.toISOString()}::timestamptz)`;
 }
 /**
+ * Condition: a claim is stored and was renewed less than `ms` before `now` (every write that renews it sets
+ * `until` to PLACING_LEASE_MS after the write). A run that is still working renews its claim about every
+ * 10 s (placing and grouping), so a claim not renewed for minutes belongs to a run that stopped.
+ */
+export function placingClaimRenewedWithin(now: Date, ms: number): SQL {
+  return sql`(jsonb_typeof(${claimSql}) = 'object' AND (${claimSql}->>'until')::timestamptz > ${new Date(now.getTime() + PLACING_LEASE_MS - ms).toISOString()}::timestamptz)`;
+}
+/**
  * WHERE condition: the stored claim carries `token` and `attempt`, whether or not it ran out (a
  * delivery that took over a lapsed lease, or a resumed retry, has its own). Guards the worker's writes
  * during placing (spec 14c F4 part 2).
