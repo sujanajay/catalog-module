@@ -210,9 +210,9 @@ press one button to decide, and the system stops silently picking.
   - C06: keep the minimum image size already in code; no new intake bar.
   - C07: keep the aspect ratios and canvases already in code; do not change them.
   - C11, C20, C24: the recommendation.
-  - C14: on-model required for all softline, including footwear, accessories, lingerie, swimwear and kids. A missing
+  - C14: on-model required for all adult softline, including footwear, accessories, lingerie and swimwear. A missing
     on-model photo is a gap (shown in the digest and filled by M3 generation where allowed), not a reason to hold the
-    product. Kids on-model only from real brand photos.
+    product. Kids never need a person (flat lay).
   - C16: the recommendation for units (store cm, show per market, no mixed units), plus: never create a size chart
     without a brand size chart.
   The register shows 17 open, of which 1 is high (C19 Noon infographics; the owner says Arabic text is allowed, the

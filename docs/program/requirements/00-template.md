@@ -49,8 +49,8 @@ later the builder agents.
   still need the M7 gate and, for people, the per-brand likeness flag.
 - Image rules the business already set in code stay as they are: the minimum image size (C06) and aspect ratios and
   canvases (C07). Namshi image rules are the ones live in the product today.
-- On-model photos are required for all softline, including footwear, accessories, lingerie, swimwear and kids (C14,
-  owner 2026-11-03). Kids on-model comes only from real brand photos; no synthetic children.
+- On-model photos are required for all adult softline, including footwear, accessories, lingerie and swimwear (C14,
+  owner 2026-11-03). Kids never need a person: flat lay only, and no synthetic children.
 - Never invent content without source data: no size chart without a brand size chart (C16 follow-up, owner
   2026-11-03).
 - Noon allows Arabic text on infographic images (owner, 2026-11-03); limits per
