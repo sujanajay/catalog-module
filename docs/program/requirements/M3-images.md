@@ -286,7 +286,9 @@ follows the channel without code.
 - **M3-F4-R1** The policy rows live in M5 (seed tables from old initiatives 01 and 02). Namshi and Noon default row:
   image 1 FM or FL, then BH, FC, HS (Noon count and order confirmed; Namshi assumed). Bottoms: image 1 FW or FL, then BW,
   FC, DT. Lingerie and swimwear: on-model required (C14, owner 2026-11-03); when the brand has no on-model photo, flat,
-  FB, FC fill the set and the gap is counted. Kids: flat, FB, FC on every channel; no person needed (owner 2026-11-03). Multipack: PK then the first three shots of the single-piece row. Footwear, bags, accessories: flat or
+  FB, FC fill the set and the gap is counted. Kids: flat, FB, FC on every channel; no person needed. A real brand photo of a child may fill
+  slots after the flat where the channel allows it (Noon, Namshi, Styli, Centrepoint; Amazon slots 2+, image 1 flat);
+  never kids underwear or swimwear on a child (owner 2026-11-03). Multipack: PK then the first three shots of the single-piece row. Footwear, bags, accessories: flat or
   side first. Amazon: image 1 FM or FL on model, then FC, BH, head-cut rule `amazon_nose_lip`.
 - **M3-F4-R2** Publish order per channel: the required roles in order, each filled by the first usable photo of that
   role (brand before crop, then lowest number), then every other photo by number, duplicates last. Position 1 is never a

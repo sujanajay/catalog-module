@@ -50,7 +50,8 @@ later the builder agents.
 - Image rules the business already set in code stay as they are: the minimum image size (C06) and aspect ratios and
   canvases (C07). Namshi image rules are the ones live in the product today.
 - On-model photos are required for all adult softline, including footwear, accessories, lingerie and swimwear (C14,
-  owner 2026-11-03). Kids never need a person: flat lay only, and no synthetic children.
+  owner 2026-11-03). Kids: see the kids rule below.
+- Kids: a person is never required. Real brand photos of a child wearing the product may be used where the channel allows it: Noon (it recommends flat lays but does not ban child models), Namshi, Styli, Centrepoint, and Amazon slots 2 and later. Amazon image 1 for kids is flat with no child. Kids underwear and swimwear are never shown on a child. No synthetic children. Evidence: `C:/Users/Sujan Ajay/Desktop/catalog-module/.runs/2026-11-03-kids-on-model.md`.
 - Never invent content without source data: no size chart without a brand size chart (C16 follow-up, owner
   2026-11-03).
 - Infographics (C19, owner 2026-11-03): assumed accepted in the Noon gallery (a channel setting, easy to change),

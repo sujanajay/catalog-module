@@ -212,7 +212,8 @@ press one button to decide, and the system stops silently picking.
   - C11, C20, C24: the recommendation.
   - C14: on-model required for all adult softline, including footwear, accessories, lingerie and swimwear. A missing
     on-model photo is a gap (shown in the digest and filled by M3 generation where allowed), not a reason to hold the
-    product. Kids never need a person (flat lay).
+    product. Kids: no person required; real brand photos of a child allowed per channel (Amazon image 1 flat, never kids
+    underwear or swimwear on a child; owner 2026-11-03).
   - C16: the recommendation for units (store cm, show per market, no mixed units), plus: never create a size chart
     without a brand size chart.
   - C19: infographics assumed accepted in the Noon gallery (channel setting, changeable), following the image rules in

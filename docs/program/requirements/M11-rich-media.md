@@ -228,7 +228,7 @@ stored (owner decision Q18), so no legal route for biometric data is needed.
   rates (1 in 4 for kids, 1 in 10 for adults; M7). A failed attempt is "not made"; nobody is asked to rescue it.
 - **The person steps are per brand and per model, never per product:** the owner sets the flags, an admin approves model
   packs, and the sampled audit checks results.
-- **Kids:** never on Noon or Amazon; kids underwear, lingerie and swimwear never on a child; no crop or logo cut from a
+- **Kids:** never generated; real brand photos of a child follow the channel rule in M3-F4-R1 (Amazon image 1 flat); kids underwear, lingerie and swimwear never on a child; no crop or logo cut from a
   photo that shows a child; one child, no adult in the frame.
 - **Deletion** at three levels: one photo, one model ("Delete this model's data", typed confirmation), one brand
   ("Delete this brand's data", typed confirmation). It removes model photos and packs. Counts are recorded, never
