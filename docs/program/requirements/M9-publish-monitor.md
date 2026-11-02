@@ -407,3 +407,32 @@ Key copy for failure moments:
 | D5 | Open questions answered: scraper fields are built where the scraper lives today, with M9 owning the new fields and the verification job in this repo (the data team owner is asked in `../owner-questions.md`); try plain fetches for Saudi pages first | Technical defaults |
 | D6 | Kept for the owner: legal review of scraping our own listings, a small Saudi proxy budget if plain fetches are blocked, the data team's help (scraper, stale Noon not-live feed), who clicks "I uploaded this file", Trendyol API credentials (`../owner-questions.md`) | Legal, money, people, marketplace relationships |
 | D7 | Owner answers: legal OK to scrape our own listings (Q2); no vendor demos, the website teardown plus our prototype decide M9-F2 (Q4); the data team default applies (Q3); India out of scope (Q17) | Owner decisions recorded in `../owner-questions.md` |
+
+## 10. Scraping plan (2026-11-03)
+
+Evidence: `C:/Users/Sujan Ajay/Desktop/catalog-module/.runs/2026-11-03-scraping-tools.md` and
+`2026-11-03-traffic-sources.md`. Own listings only, under 1 request a second, daily.
+
+**Needs:** live gallery (count, URLs, order, change detection), live title and attributes, price and deal badges,
+demand proxies (sold recently, favourites, Best Sellers Rank, bought in past month, ratings and reviews), keyword rank,
+stock per size and seller shown, missing or suppressed pages.
+
+**What exists: Scout** (`opptra/opptra-scrapers`), daily on Amazon, Noon and Namshi, UAE and KSA, writing
+`opptra_core.listing_observation` (current to 2 Nov): price, coupon or deal, stock, seller, rating and review count,
+Amazon Best Sellers Rank, page missing. Gaps: about 280 to 820 listings per site per country (not all ~4,000 options); no
+gallery images for Noon or Namshi (Amazon images opt-in, not daily); no sold recently, favourites, bought in past month
+or GCC keyword rank; no Trendyol, Styli, Centrepoint or 6th Street.
+
+**Plan (buy commodity, one fallback each):**
+
+| Need | Source | Fallback | About per month |
+|---|---|---|---|
+| Noon and Namshi gallery, sold recently, full coverage of our options | Extend Scout on the Decodo residential proxy (HTML only) | Zyte API | within USD 100 |
+| Amazon keyword rank, bought in past month | ScraperAPI structured Amazon | Scout extension | USD 49-299 |
+| Trendyol incl. favourite count | Apify actor | Zyte API | USD 150-500 |
+| Styli, Centrepoint, 6th Street | Zyte API or Decodo scraping API | the other | USD 250-450 |
+| Rejected or suppressed listings | Seller-portal reports (M9-F3) | Scout page-missing | 0 |
+
+Full coverage costs about USD 600-1,300 a month (versus about USD 2,300-2,800 to buy all of it from Bright Data). Default
+until the owner decides (Q5): stay within USD 100 a month by extending Scout for Noon and Namshi, which covers the R2
+holdout channels; the other rows wait for the owner's approval of the higher budget, expected when R2 needs them.

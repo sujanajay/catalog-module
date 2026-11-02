@@ -410,3 +410,39 @@ Week 0 (by 17 Nov): panel, pool, assignment, pre-registration approved, guards o
 | D5 | Estimators and the pooled model run as a Python Cloud Run job in `services/measurement` (new runtime, chosen on purpose) | statsmodels, linearmodels, csdid and PyMC have no TypeScript equivalent; the job reads BigQuery and writes back, so it does not touch the web or worker code |
 | D6 | Open questions answered: Poisson FE as primary only if its re-simulated MDE is at or below ANCOVA's, both reported; UAE and KSA as one unit pending M9's shared-content check; no footwear in experiment 1; 80% of controls released after week 12, 20% kept 12 months; units by `ordered_date`; revenue as stored (excl. VAT); pair on units; registry in Postgres with daily export | Method defaults the requirements already justify |
 | D7 | Kept for the owner: approving the pre-registration (gate), who holds the full arm list, the channel team's upload week, and the letter asking agencies to keep bids unchanged (`../owner-questions.md`) | People and marketplace relationships |
+
+## 10. Data findings (2026-11-03)
+
+Evidence: `C:/Users/Sujan Ajay/Desktop/catalog-module/.runs/2026-11-03-{data-inventory,performance-marketing,promo-calendar,traffic-sources}.md`.
+Owner rule: use what the warehouse already has; a missing feed lowers sensitivity and never blocks a release.
+
+- **Present in `opptra-datawarehouse`:** daily per-SKU sales and returns (Noon, Namshi, Amazon, Trendyol, Styli) in
+  `fact_gcc.unified_sales_tertiary_v2`; ads per SKU per day (Noon UAE and KSA, Namshi, Amazon) in
+  `gcc_marketing.ads_daily`, plus hourly Amazon `raw_amazon_adservice.product_daily` and Noon
+  `raw_noon_admanager.campaign_snapshot`; stock; liveness for 8 channel-countries from 17 Oct
+  (`fact_gcc.catalog_liveness_daily`); list and sale price per SKU from the channel catalog reports.
+- **Promotion covariates (M4-F1):** two inputs, no channel sheet needed.
+  1. Per SKU per day discount depth = 1 - sale_price / list price, from the Noon, Namshi, Trendyol and Amazon catalog
+     reports (the "on promotion" flag and its depth).
+  2. Market and channel events from `image-links-agent:catalog_os.promo_calendar` (143 events, sourced) and the view
+     `catalog_os.promo_calendar_daily` (one row per event per day, with run-up days), dataset in asia-south1 so it joins
+     with the warehouse. 36 rows are low confidence (projected dates); no dated source exists for Styli, 6th Street,
+     Centrepoint or Trendyol events. The seed CSV is
+     `C:/Users/Sujan Ajay/Desktop/catalog-module/.runs/2026-11-03-gcc-promo-calendar.csv`; R2 turns its refresh into a
+     job. Channel-team calendars, when they arrive, add rows.
+  - Use: a promo and event term in the outcome model; no experiment launch or readout window starts inside a mega-sale
+    or its run-up; season split later (Ramadan versus normal weeks).
+  - "Advertised today" per SKU (Noon, Amazon) from the ad tables is a separate covariate.
+- **Traffic (M4-F7 secondary signal):**
+  - Amazon: Sales and Traffic report, current in the warehouse.
+  - Noon: Vantage Analytics has views and add-to-cart, but CSV export is a paid feature; the feed stopped 4 Feb (UAE)
+    and 26 Jan (KSA). Likely a lapsed subscription; the owner asks the Noon account owner.
+  - Namshi, Styli, Centrepoint, 6th Street: no documented traffic export, so treated as none (owner rule).
+  - Trendyol: no official export; an unofficial Turkish-panel product performance file may exist (ask the account
+    manager).
+  - Where no traffic exists, scraped demand proxies stand in (M9-F1 scraping plan): Trendyol favourite count change,
+    Noon and Namshi "sold recently", Amazon Best Sellers Rank and "bought in past month", keyword position, stock per
+    size. Proxies are secondary signals only; the primary outcome stays units sold.
+- **Data quality to fix (asked of the data team):** Centrepoint sales stop 17 Oct, 6th Street 22 Sep, Trendyol ads
+  5 Jun, Datavio 16 Feb; Amazon 3P `style_id` filled for only 16 to 26% of rows; Amazon KSA traffic missing from the
+  unified table.

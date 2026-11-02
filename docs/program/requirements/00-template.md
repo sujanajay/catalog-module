@@ -64,6 +64,8 @@ later the builder agents.
 - Outcome data: use what `opptra-datawarehouse` already has (sales, returns, ads, stock, price, liveness); the gaps
   are in `C:/Users/Sujan Ajay/Desktop/catalog-module/.runs/2026-11-03-data-inventory.md` and are asked of the teams.
   Missing data lowers sensitivity; it never blocks a release.
+- Promotions: per-SKU discount from catalog reports plus `image-links-agent:catalog_os.promo_calendar`; traffic and
+  scraping findings in M4 section 10 and M9 section 10.
 - All 30 rule conflicts are decided (M5-F2-R4). Trendyol API: later, not now.
 - Check Streamoid and Rubick before building text and listing files: by a website teardown plus our own prototype, not
   vendor demos (owner answer Q4).
