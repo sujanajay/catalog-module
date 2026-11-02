@@ -191,7 +191,8 @@ attempts of USD 0.10 to 0.14), capped at USD 0.81 per product.
 - Still-life product pixels are proved identical to the brand's cut-out. Every generated file carries the AI-generated
   tag and the M0 `ai_generated` flag.
 - A real brand lifestyle photo, when it arrives, retires the generated scene on the next publish.
-- Generated scenes do not go to Noon or Namshi until their AI-image stance is known (gate-1 decision: crops only there).
+- Noon and Namshi accept AI-made images (owner 2026-11-03); generated scenes go there once the M7 gate passes. Styli and
+  Centrepoint: no crops; generated images there wait for their own `generated_allowed` row.
 
 **Gate to promote.** Rights on file for the brand with a lifestyle scope (M12-F3), M7 fidelity check live, a scene-versus-
 none experiment pre-registered. The cheapest fast signal is ad conversion on sponsored US Polo pages (USD 55,280 of ads

@@ -159,14 +159,14 @@ Build (keep the spec 12 design). Nobody sells crops to marketplace shot sets; ge
 #### 4.1.9 Acceptance tests
 1. Run a real Vero Moda or French Connection apparel batch to Namshi and Noon. Every missing HS, BH and FM that a parent
    can give is filled by a crop; no crop cuts a head, a logo or text (checked on the 10% audit sample); the Styli and
-   Centrepoint outputs contain no crop.
+   Centrepoint outputs contain no crop (owner 2026-11-03: those channels never accept crops).
 2. A unit suite over random plans proves: a cut photo is retired only by the publish that copies its replacement after
    verification; a slot never ends with fewer live photos; `not_made` never touches the old photo; a control option
    never gets a crop.
 3. Re-running the same batch produces the same crop bytes and no duplicate outputs.
 
 #### 4.1.10 Open questions
-1. Styli and Centrepoint written position on crops: default off until recorded (gate-1 decision).
+1. Styli and Centrepoint crops: answered, never (owner 2026-11-03).
 2. HS crops of an approved kids model: default never.
 3. Noon and Namshi crop size bar of 482 px: default keep; raise to 1,000 px if the audit shows soft crops.
 
@@ -285,8 +285,8 @@ follows the channel without code.
 #### 4.4.2 Functional requirements
 - **M3-F4-R1** The policy rows live in M5 (seed tables from old initiatives 01 and 02). Namshi and Noon default row:
   image 1 FM or FL, then BH, FC, HS (Noon count and order confirmed; Namshi assumed). Bottoms: image 1 FW or FL, then BW,
-  FC, DT. Lingerie and swimwear: flat, FB, FC, person never on Noon. Kids: flat, FB, FC on every channel, person never on
-  Noon or Amazon. Multipack: PK then the first three shots of the single-piece row. Footwear, bags, accessories: flat or
+  FC, DT. Lingerie, swimwear and kids: on-model required (C14, owner 2026-11-03); when the brand has no on-model photo,
+  flat, FB, FC fill the set and the gap is counted. Kids on-model only from real brand photos. Multipack: PK then the first three shots of the single-piece row. Footwear, bags, accessories: flat or
   side first. Amazon: image 1 FM or FL on model, then FC, BH, head-cut rule `amazon_nose_lip`.
 - **M3-F4-R2** Publish order per channel: the required roles in order, each filled by the first usable photo of that
   role (brand before crop, then lowest number), then every other photo by number, duplicates last. Position 1 is never a

@@ -205,8 +205,18 @@ press one button to decide, and the system stops silently picking.
   severity, and its result message names the conflict ("Noon and Namshi disagree on bullet length; conflict C04 is open").
 - M5-F2-R3. Deciding a conflict records option, decider, date and a reason; the chosen rules become active with
   `confirmedBy` set; the losing rules become `superseded` with the decision as reason. It publishes a new ruleset version.
-- M5-F2-R4. C02, C10 and C27 are recorded as decided on 2 Nov 2026 (gate 1). The register shows 27 open, of which 11 are high
-  (C01, C03, C04, C06, C07, C11, C14, C16, C19, C20, C24).
+- M5-F2-R4. C02, C10 and C27 are recorded as decided on 2 Nov 2026 (gate 1). C01, C03 and C04 are decided with the
+  recommendation (owner Q11). Decided by the owner on 3 Nov 2026:
+  - C06: keep the minimum image size already in code; no new intake bar.
+  - C07: keep the aspect ratios and canvases already in code; do not change them.
+  - C11, C20, C24: the recommendation.
+  - C14: on-model required for all softline, including footwear, accessories, lingerie, swimwear and kids. A missing
+    on-model photo is a gap (shown in the digest and filled by M3 generation where allowed), not a reason to hold the
+    product. Kids on-model only from real brand photos.
+  - C16: the recommendation for units (store cm, show per market, no mixed units), plus: never create a size chart
+    without a brand size chart.
+  The register shows 17 open, of which 1 is high (C19 Noon infographics; the owner says Arabic text is allowed, the
+  limits wait for research).
 - M5-F2-R5. Text work (M8) cannot start generating for a channel while a high conflict on a text component of that channel is
   open (C01 title formula, C03 bullet count, C04 bullet length). The register shows "Blocks M8 text" on those cards.
 - M5-F2-R6. A conflict can be reopened only by the owner role with a reason; reopening returns its rules to `warn`.

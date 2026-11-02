@@ -233,8 +233,8 @@ fidelity checks gate it, and any new vendor or model is scored and promoted with
 
 **Depends on.** R1 (`M7-S2` interface, M6 cost meter and caps, `M12-S1`), R2 (`M7-S1`, `M7-S3`, `M7-S4` golden set,
 scoring and audit; `M3-S3` slot planner; M2 analyzer). Owner inputs: Q13 (bake-off budget, no-training clause; default
-applies), Q14 (channel AI-image stance; until answered, generated images go only to channels whose `generated_allowed`
-is on, and Noon and Namshi stay crops only), Q15 (answered: likeness rights held; per-brand flag).
+applies), Q14 (answered 2026-11-03: Noon and Namshi accept AI-made images, so their `generated_allowed` is on; Styli and
+Centrepoint never take crops), Q15 (answered: likeness rights held; per-brand flag).
 
 **Exit outcome (measured).**
 1. On the M7 generation golden set the chosen route catches every planted defect with zero product-truth false passes.

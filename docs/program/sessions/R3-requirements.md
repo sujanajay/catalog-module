@@ -63,8 +63,8 @@ No timelines anywhere: no dates, weeks, durations or "by X". Durations that desc
 - No biometric data (Q18): no face embeddings, biometric templates, face clusters or identity vectors stored anywhere.
   Identity consistency comes from model reference photos as inputs, a visual similarity check computed in memory and
   discarded (only pass or fail and the score kept), and the sampled human audit.
-- `generated_allowed` per channel is off by default; Noon and Namshi stay crops only until the channel managers answer
-  (Q14 default). Generated images publish only after the cell (brand x category x capability) passes the bake-off and
+- `generated_allowed` per channel is off by default, and on for Noon and Namshi (owner 2026-11-03). Styli and
+  Centrepoint never take crops. Generated images publish only after the cell (brand x category x capability) passes the bake-off and
   its first 20 audited images; the cell waits, never a product.
 - Every generated image carries the IPTC "trained algorithmic media" tag and the M0 `generated` source; a missing tag
   blocks the output.

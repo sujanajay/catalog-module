@@ -44,7 +44,17 @@ later the builder agents.
 - Holdout test: about 700 vs 700 Namshi and Noon options, launched in release R2, with readouts at the points M4
   pre-registers.
 - Use the draft title lengths and a format-only check on HSN (tax) codes.
-- Crops only on Namshi and Noon until their AI-image stance is known.
+- Crops (a new shot cut from a bigger brand photo, for example head and shoulders from a full-length photo) are never
+  used on Styli or Centrepoint (owner, 2026-11-03). Noon and Namshi accept crops and AI-made images; generated images
+  still need the M7 gate and, for people, the per-brand likeness flag.
+- Image rules the business already set in code stay as they are: the minimum image size (C06) and aspect ratios and
+  canvases (C07). Namshi image rules are the ones live in the product today.
+- On-model photos are required for all softline, including footwear, accessories, lingerie, swimwear and kids (C14,
+  owner 2026-11-03). Kids on-model comes only from real brand photos; no synthetic children.
+- Never invent content without source data: no size chart without a brand size chart (C16 follow-up, owner
+  2026-11-03).
+- Noon allows Arabic text on infographic images (owner, 2026-11-03); limits per
+  `C:/Users/Sujan Ajay/Desktop/catalog-module/.runs/2026-11-03-proxy-noon-video.md` and M5-F8.
 - Check Streamoid and Rubick before building text and listing files: by a website teardown plus our own prototype, not
   vendor demos (owner answer Q4).
 - Scrape our own listings now (legal OK, Q2); buy market data later.
