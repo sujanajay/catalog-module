@@ -1,48 +1,379 @@
 {
-  "about": "Every intent Sujan has stated for the Catalog OS program. status starts 'failing'; it becomes 'done' only when its end-state test passes. Source: Sujan's messages of 2026-11-02 unless noted.",
-  "statuses": ["failing", "in_progress", "done", "dropped"],
-  "intents": [
-    {"id": "I001", "area": "strategy", "quote": "rethink every single thing ... from first principles", "intent": "Question every requirement, ground rule, and the operating model against evidence", "test": "Plan v3 lists each assumption with an evidence verdict", "status": "done"},
-    {"id": "I002", "area": "strategy", "quote": "if something already exists today, we can just directly go ahead and reuse it", "intent": "Buy commodity capabilities (generation, bg removal, upscaling, try-on); build pipeline, eval, learning", "test": "Each capability has a buy/build verdict backed by a bake-off", "status": "failing"},
-    {"id": "I003", "area": "reliability", "quote": "we should always have a lot of fallbacks", "intent": "Every bought capability has 2-3 ranked vendor fallbacks behind one interface", "test": "Killing the primary vendor in staging still completes a batch", "status": "failing"},
-    {"id": "I004", "area": "eval", "quote": "how do we say that this is a great product that actually converts", "intent": "Measure conversion impact of content changes, pooled and causal, controlling for price, ads, promotions, stock, season", "test": "First pooled experiment reports lift or no-lift with confidence bounds", "status": "failing"},
-    {"id": "I005", "area": "ops", "quote": "you will be acting as more of a manager and delegator", "intent": "Main session coordinates; subagents do the work; Fable only for critical tasks", "test": "Every work item has a subagent report in MAIN/.runs", "status": "in_progress"},
-    {"id": "I006", "area": "ops", "quote": "hundreds and thousands of intents ... captured and we get back to it", "intent": "Keep this ledger complete and current", "test": "Every Sujan message is parsed into this file", "status": "in_progress"},
-    {"id": "I007", "area": "comms", "quote": "it has to be very clear: Why ... What's the problem ... tech ... product vision", "intent": "One-page briefs with Problem / Why / Tech / Product vision; ask only critical questions", "test": "Gate-1 brief fits one page with those four headings", "status": "failing"},
-    {"id": "I008", "area": "ux", "quote": "At no point should the user or the operator have cognitive load", "intent": "World-class design; simple, intuitive, zero babysitting", "test": "Operator uploads a real batch and walks away; zero required clicks until links are ready", "status": "failing"},
-    {"id": "I009", "area": "ux", "quote": "after each step, the person has to wait ... click Next and confirm", "intent": "Wizard advances by itself; no waiting on steps", "test": "Batch reaches processing with no Next/confirm after upload", "status": "failing"},
-    {"id": "I010", "area": "planning", "quote": "the way of building should not be dependent on another component", "intent": "Independent modules built in order of business value", "test": "Module map shows each module shippable alone", "status": "failing"},
-    {"id": "I011", "area": "planning", "quote": "This particular product should be launched in a week", "intent": "Ship the critical value slice fast (GCC fashion first, chosen 2026-11-02)", "test": "First slice live on a real GCC batch", "status": "failing"},
-    {"id": "I012", "area": "learning", "quote": "self-learning and self-evolving ... new models come in", "intent": "Benchmark harness: new model/vendor scored on our golden sets and promoted automatically if it wins", "test": "Plugging in a new vendor produces a scored comparison without code changes", "status": "failing"},
-    {"id": "I013", "area": "strategy", "quote": "take a lot of inspiration from open source as well as close source", "intent": "Use open source where licence allows; learn from and later beat closed-source leaders", "test": "Vendor/competitor teardown with licence checks exists", "status": "failing"},
-    {"id": "I014", "area": "hitl", "quote": "fundamentally think about human in the loop and without the loop", "intent": "Progress toward no human in the loop; keep only audits, product truth, modesty, likeness rights, threshold changes", "test": "HITL map documented; no per-SKU review queue in product", "status": "failing"},
-    {"id": "I015", "area": "reliability", "quote": "reliability is one of the most critical things", "intent": "Product is reliable end to end", "test": "Batch success rate and incident count tracked; target set in gate-1 brief", "status": "failing"},
-    {"id": "I016", "area": "research", "quote": "watch @harvey_approach/How-Harvey-Built-SnapYT.App.mp4", "intent": "Extract Harvey's first-principles method and what applies to us", "test": "Report in MAIN/.runs on the video", "status": "in_progress"},
-    {"id": "I017", "area": "statuses", "quote": "an operator who is doing 2,000 SKUs ... do not even have the time to look at all of these", "intent": "System resolves issues by rules instead of surfacing per-product attention", "test": "Batch of 2,000 SKUs produces one digest, not per-SKU cards", "status": "failing"},
-    {"id": "I018", "area": "analyzer", "quote": "such a good image analyzer that it is able to understand every single thing", "intent": "Universal image analyzer (product, category, shot type, missing shots, colours, attributes, defects); measured per attribute", "test": "Per-attribute accuracy on golden set reported", "status": "failing"},
-    {"id": "I019", "area": "data", "quote": "all the brands that are there in the GCC today", "intent": "Census of GCC brands, categories and product types beyond our own data", "test": "Market census report with taxonomy coverage", "status": "failing"},
-    {"id": "I020", "area": "data", "quote": "we have access to Supabase ... history of all of the products, brands, images", "intent": "Analyse our full history of brands, products, images, categories", "test": "Data census report in MAIN/.runs", "status": "failing"},
-    {"id": "I021", "area": "config", "quote": "everything should be configurable in the settings", "intent": "Non-technical admin can change channel rules, categories, brands, vendors, thresholds", "test": "Admin changes a channel rule in the UI and the next batch follows it", "status": "failing"},
-    {"id": "I022", "area": "scope", "quote": "this part of the process should be fundamentally focused only on ... analyzing", "intent": "Analysis module separated from acting modules", "test": "Module map shows analysis as its own module", "status": "failing"},
-    {"id": "I023", "area": "robustness", "quote": "able to deal with and anticipate any kind of ambiguity", "intent": "Pipeline handles ambiguous or bad input without stalling", "test": "Messy real batch completes without operator help", "status": "failing"},
-    {"id": "I024", "area": "north-star", "quote": "our organic conversions boost significantly ... across all of the channels", "intent": "North star: organic conversion lift per channel; track per SKU and channel over time", "test": "Outcome dashboard per channel live", "status": "failing"},
-    {"id": "I025", "area": "metrics", "quote": "secondary metric ... pricing, the cost, and the time", "intent": "Track true cost per SKU (vendor + GCP) and generation time", "test": "Cost meter matches GCP billing within 10%", "status": "failing"},
-    {"id": "I026", "area": "vision", "quote": "go to agencies ... sign up other e-commerce brands ... all over the world", "intent": "Self-serve product for external brands and agencies; onboarding hook for Opptra distribution", "test": "Vision covered in gate-1 brief", "status": "failing"},
-    {"id": "I027", "area": "comms", "quote": "be a little bit more cognizant of the type of questions that you ask me", "intent": "Ask only questions that truly need a human", "test": "Ongoing", "status": "in_progress"},
-    {"id": "I028", "area": "roi", "quote": "all of our products ... very much ROI-focused", "intent": "Every module tied to a measured outcome", "test": "Each module in map has its outcome metric", "status": "failing"},
-    {"id": "I029", "area": "live-tool", "quote": "revisit the product that is currently live ... look at the logs", "intent": "Deep audit of live tool, logs, recent batches, broken things", "test": "Live audit report (done 2026-11-02, first pass)", "status": "in_progress"},
-    {"id": "I030", "area": "live-tool", "quote": "when somebody uploads two or three folders", "intent": "Multi-folder and multi-file upload works intuitively", "test": "Drop 3 folders at once; all grouped correctly", "status": "failing"},
-    {"id": "I031", "area": "live-tool", "quote": "that IAM link, by default, you should just be providing it", "intent": "Show the sheet-sharing email up front, before paste", "test": "Email visible with copy button before any paste", "status": "failing"},
-    {"id": "I032", "area": "live-tool", "quote": "I have to review around 308 products", "intent": "No bulk review; system auto-decides", "test": "Real batch needs zero reviews outside the audit sample", "status": "failing"},
-    {"id": "I033", "area": "live-tool", "quote": "at least generate some image link and give it to me", "intent": "Give links for held images immediately; improve later", "test": "Every product has links when the batch finishes", "status": "failing"},
-    {"id": "I034", "area": "scale", "quote": "what additional quota I should be asking for", "intent": "GCP scaling and quota advice", "test": "Cost and quota report with exact asks", "status": "failing"},
-    {"id": "I035", "area": "dev-speed", "quote": "you go ahead and take a very long time doing the testing", "intent": "Faster change cycle with tiered tests", "test": "Typical change verified in under 15 minutes", "status": "failing"},
-    {"id": "I036", "area": "deploy", "quote": "Every time there's a deployment, there's probably certain downtime", "intent": "Zero-downtime deploys; batches run during deploys", "test": "A batch started during a deploy finishes cleanly", "status": "failing"},
-    {"id": "I037", "area": "scope", "quote": "images are just one part of it ... keywords, the title, the description, A+ content ... videos", "intent": "Catalog as a whole: images first, then text, keywords, A+, video, attributes, listing files", "test": "Module map covers every catalog component", "status": "failing"},
-    {"id": "I038", "area": "learning", "quote": "keep learning what's working and what's not working", "intent": "Learning loop specific to channel x category x product, controlling for price, marketing, ads", "test": "Learning engine produces pooled estimates per change type", "status": "failing"},
-    {"id": "I039", "area": "learning", "quote": "cross-pollination ... keyword that works well ... include that in our infographic", "intent": "Winning signals propagate across content types", "test": "A winning keyword updates title, backend terms and infographic in one change set", "status": "failing"},
-    {"id": "I040", "area": "vision", "quote": "its own independent tech-enabled service that's self-serve", "intent": "Catalog OS as a standalone self-serve service; later expand to marketing", "test": "Vision covered in gate-1 brief", "status": "failing"},
-    {"id": "I041", "area": "research", "quote": "additional_documents ... two other documents", "intent": "Fold Catalog v2 (Cortina India pilot) and the Cataloging Playbook into the plan", "test": "Playbook converted to rules data with a conflict list", "status": "in_progress"},
-    {"id": "I042", "area": "planning", "quote": "Our priority is the P2 market", "intent": "First slice serves GCC fashion; India Cortina next on the same core", "test": "Confirmed by Sujan 2026-11-02", "status": "done"}
-  ]
+ "about": "Every intent Sujan has stated for the Catalog OS program. status starts 'failing'; it becomes 'done' only when its end-state test passes. Source: Sujan's messages of 2026-11-02 unless noted.",
+ "statuses": [
+  "failing",
+  "in_progress",
+  "done",
+  "dropped"
+ ],
+ "intents": [
+  {
+   "id": "I001",
+   "area": "strategy",
+   "quote": "rethink every single thing ... from first principles",
+   "intent": "Question every requirement, ground rule, and the operating model against evidence",
+   "test": "Plan v3 lists each assumption with an evidence verdict",
+   "status": "done"
+  },
+  {
+   "id": "I002",
+   "area": "strategy",
+   "quote": "if something already exists today, we can just directly go ahead and reuse it",
+   "intent": "Buy commodity capabilities (generation, bg removal, upscaling, try-on); build pipeline, eval, learning",
+   "test": "Each capability has a buy/build verdict backed by a bake-off",
+   "status": "failing"
+  },
+  {
+   "id": "I003",
+   "area": "reliability",
+   "quote": "we should always have a lot of fallbacks",
+   "intent": "Every bought capability has 2-3 ranked vendor fallbacks behind one interface",
+   "test": "Killing the primary vendor in staging still completes a batch",
+   "status": "failing"
+  },
+  {
+   "id": "I004",
+   "area": "eval",
+   "quote": "how do we say that this is a great product that actually converts",
+   "intent": "Measure conversion impact of content changes, pooled and causal, controlling for price, ads, promotions, stock, season",
+   "test": "First pooled experiment reports lift or no-lift with confidence bounds",
+   "status": "failing"
+  },
+  {
+   "id": "I005",
+   "area": "ops",
+   "quote": "you will be acting as more of a manager and delegator",
+   "intent": "Main session coordinates; subagents do the work; Fable only for critical tasks",
+   "test": "Every work item has a subagent report in MAIN/.runs",
+   "status": "in_progress"
+  },
+  {
+   "id": "I006",
+   "area": "ops",
+   "quote": "hundreds and thousands of intents ... captured and we get back to it",
+   "intent": "Keep this ledger complete and current",
+   "test": "Every Sujan message is parsed into this file",
+   "status": "in_progress"
+  },
+  {
+   "id": "I007",
+   "area": "comms",
+   "quote": "it has to be very clear: Why ... What's the problem ... tech ... product vision",
+   "intent": "One-page briefs with Problem / Why / Tech / Product vision; ask only critical questions",
+   "test": "Gate-1 brief fits one page with those four headings",
+   "status": "failing"
+  },
+  {
+   "id": "I008",
+   "area": "ux",
+   "quote": "At no point should the user or the operator have cognitive load",
+   "intent": "World-class design; simple, intuitive, zero babysitting",
+   "test": "Operator uploads a real batch and walks away; zero required clicks until links are ready",
+   "status": "failing"
+  },
+  {
+   "id": "I009",
+   "area": "ux",
+   "quote": "after each step, the person has to wait ... click Next and confirm",
+   "intent": "Wizard advances by itself; no waiting on steps",
+   "test": "Batch reaches processing with no Next/confirm after upload",
+   "status": "failing"
+  },
+  {
+   "id": "I010",
+   "area": "planning",
+   "quote": "the way of building should not be dependent on another component",
+   "intent": "Independent modules built in order of business value",
+   "test": "Module map shows each module shippable alone",
+   "status": "failing"
+  },
+  {
+   "id": "I011",
+   "area": "planning",
+   "quote": "This particular product should be launched in a week",
+   "intent": "Ship the critical value slice fast (GCC fashion first, chosen 2026-11-02)",
+   "test": "First slice live on a real GCC batch",
+   "status": "failing"
+  },
+  {
+   "id": "I012",
+   "area": "learning",
+   "quote": "self-learning and self-evolving ... new models come in",
+   "intent": "Benchmark harness: new model/vendor scored on our golden sets and promoted automatically if it wins",
+   "test": "Plugging in a new vendor produces a scored comparison without code changes",
+   "status": "failing"
+  },
+  {
+   "id": "I013",
+   "area": "strategy",
+   "quote": "take a lot of inspiration from open source as well as close source",
+   "intent": "Use open source where licence allows; learn from and later beat closed-source leaders",
+   "test": "Vendor/competitor teardown with licence checks exists",
+   "status": "failing"
+  },
+  {
+   "id": "I014",
+   "area": "hitl",
+   "quote": "fundamentally think about human in the loop and without the loop",
+   "intent": "Progress toward no human in the loop; keep only audits, product truth, modesty, likeness rights, threshold changes",
+   "test": "HITL map documented; no per-SKU review queue in product",
+   "status": "failing"
+  },
+  {
+   "id": "I015",
+   "area": "reliability",
+   "quote": "reliability is one of the most critical things",
+   "intent": "Product is reliable end to end",
+   "test": "Batch success rate and incident count tracked; target set in gate-1 brief",
+   "status": "failing"
+  },
+  {
+   "id": "I016",
+   "area": "research",
+   "quote": "watch @harvey_approach/How-Harvey-Built-SnapYT.App.mp4",
+   "intent": "Extract Harvey's first-principles method and what applies to us",
+   "test": "Report in MAIN/.runs on the video",
+   "status": "in_progress"
+  },
+  {
+   "id": "I017",
+   "area": "statuses",
+   "quote": "an operator who is doing 2,000 SKUs ... do not even have the time to look at all of these",
+   "intent": "System resolves issues by rules instead of surfacing per-product attention",
+   "test": "Batch of 2,000 SKUs produces one digest, not per-SKU cards",
+   "status": "failing"
+  },
+  {
+   "id": "I018",
+   "area": "analyzer",
+   "quote": "such a good image analyzer that it is able to understand every single thing",
+   "intent": "Universal image analyzer (product, category, shot type, missing shots, colours, attributes, defects); measured per attribute",
+   "test": "Per-attribute accuracy on golden set reported",
+   "status": "failing"
+  },
+  {
+   "id": "I019",
+   "area": "data",
+   "quote": "all the brands that are there in the GCC today",
+   "intent": "Census of GCC brands, categories and product types beyond our own data",
+   "test": "Market census report with taxonomy coverage",
+   "status": "failing"
+  },
+  {
+   "id": "I020",
+   "area": "data",
+   "quote": "we have access to Supabase ... history of all of the products, brands, images",
+   "intent": "Analyse our full history of brands, products, images, categories",
+   "test": "Data census report in MAIN/.runs",
+   "status": "failing"
+  },
+  {
+   "id": "I021",
+   "area": "config",
+   "quote": "everything should be configurable in the settings",
+   "intent": "Non-technical admin can change channel rules, categories, brands, vendors, thresholds",
+   "test": "Admin changes a channel rule in the UI and the next batch follows it",
+   "status": "failing"
+  },
+  {
+   "id": "I022",
+   "area": "scope",
+   "quote": "this part of the process should be fundamentally focused only on ... analyzing",
+   "intent": "Analysis module separated from acting modules",
+   "test": "Module map shows analysis as its own module",
+   "status": "failing"
+  },
+  {
+   "id": "I023",
+   "area": "robustness",
+   "quote": "able to deal with and anticipate any kind of ambiguity",
+   "intent": "Pipeline handles ambiguous or bad input without stalling",
+   "test": "Messy real batch completes without operator help",
+   "status": "failing"
+  },
+  {
+   "id": "I024",
+   "area": "north-star",
+   "quote": "our organic conversions boost significantly ... across all of the channels",
+   "intent": "North star: organic conversion lift per channel; track per SKU and channel over time",
+   "test": "Outcome dashboard per channel live",
+   "status": "failing"
+  },
+  {
+   "id": "I025",
+   "area": "metrics",
+   "quote": "secondary metric ... pricing, the cost, and the time",
+   "intent": "Track true cost per SKU (vendor + GCP) and generation time",
+   "test": "Cost meter matches GCP billing within 10%",
+   "status": "failing"
+  },
+  {
+   "id": "I026",
+   "area": "vision",
+   "quote": "go to agencies ... sign up other e-commerce brands ... all over the world",
+   "intent": "Self-serve product for external brands and agencies; onboarding hook for Opptra distribution",
+   "test": "Vision covered in gate-1 brief",
+   "status": "failing"
+  },
+  {
+   "id": "I027",
+   "area": "comms",
+   "quote": "be a little bit more cognizant of the type of questions that you ask me",
+   "intent": "Ask only questions that truly need a human",
+   "test": "Ongoing",
+   "status": "in_progress"
+  },
+  {
+   "id": "I028",
+   "area": "roi",
+   "quote": "all of our products ... very much ROI-focused",
+   "intent": "Every module tied to a measured outcome",
+   "test": "Each module in map has its outcome metric",
+   "status": "failing"
+  },
+  {
+   "id": "I029",
+   "area": "live-tool",
+   "quote": "revisit the product that is currently live ... look at the logs",
+   "intent": "Deep audit of live tool, logs, recent batches, broken things",
+   "test": "Live audit report (done 2026-11-02, first pass)",
+   "status": "in_progress"
+  },
+  {
+   "id": "I030",
+   "area": "live-tool",
+   "quote": "when somebody uploads two or three folders",
+   "intent": "Multi-folder and multi-file upload works intuitively",
+   "test": "Drop 3 folders at once; all grouped correctly",
+   "status": "failing"
+  },
+  {
+   "id": "I031",
+   "area": "live-tool",
+   "quote": "that IAM link, by default, you should just be providing it",
+   "intent": "Show the sheet-sharing email up front, before paste",
+   "test": "Email visible with copy button before any paste",
+   "status": "failing"
+  },
+  {
+   "id": "I032",
+   "area": "live-tool",
+   "quote": "I have to review around 308 products",
+   "intent": "No bulk review; system auto-decides",
+   "test": "Real batch needs zero reviews outside the audit sample",
+   "status": "failing"
+  },
+  {
+   "id": "I033",
+   "area": "live-tool",
+   "quote": "at least generate some image link and give it to me",
+   "intent": "Give links for held images immediately; improve later",
+   "test": "Every product has links when the batch finishes",
+   "status": "failing"
+  },
+  {
+   "id": "I034",
+   "area": "scale",
+   "quote": "what additional quota I should be asking for",
+   "intent": "GCP scaling and quota advice",
+   "test": "Cost and quota report with exact asks",
+   "status": "failing"
+  },
+  {
+   "id": "I035",
+   "area": "dev-speed",
+   "quote": "you go ahead and take a very long time doing the testing",
+   "intent": "Faster change cycle with tiered tests",
+   "test": "Typical change verified in under 15 minutes",
+   "status": "failing"
+  },
+  {
+   "id": "I036",
+   "area": "deploy",
+   "quote": "Every time there's a deployment, there's probably certain downtime",
+   "intent": "Zero-downtime deploys; batches run during deploys",
+   "test": "A batch started during a deploy finishes cleanly",
+   "status": "failing"
+  },
+  {
+   "id": "I037",
+   "area": "scope",
+   "quote": "images are just one part of it ... keywords, the title, the description, A+ content ... videos",
+   "intent": "Catalog as a whole: images first, then text, keywords, A+, video, attributes, listing files",
+   "test": "Module map covers every catalog component",
+   "status": "failing"
+  },
+  {
+   "id": "I038",
+   "area": "learning",
+   "quote": "keep learning what's working and what's not working",
+   "intent": "Learning loop specific to channel x category x product, controlling for price, marketing, ads",
+   "test": "Learning engine produces pooled estimates per change type",
+   "status": "failing"
+  },
+  {
+   "id": "I039",
+   "area": "learning",
+   "quote": "cross-pollination ... keyword that works well ... include that in our infographic",
+   "intent": "Winning signals propagate across content types",
+   "test": "A winning keyword updates title, backend terms and infographic in one change set",
+   "status": "failing"
+  },
+  {
+   "id": "I040",
+   "area": "vision",
+   "quote": "its own independent tech-enabled service that's self-serve",
+   "intent": "Catalog OS as a standalone self-serve service; later expand to marketing",
+   "test": "Vision covered in gate-1 brief",
+   "status": "failing"
+  },
+  {
+   "id": "I041",
+   "area": "research",
+   "quote": "additional_documents ... two other documents",
+   "intent": "Fold Catalog v2 (Cortina India pilot) and the Cataloging Playbook into the plan",
+   "test": "Playbook converted to rules data with a conflict list",
+   "status": "in_progress"
+  },
+  {
+   "id": "I042",
+   "area": "planning",
+   "quote": "Our priority is the P2 market",
+   "intent": "First slice serves GCC fashion; India Cortina next on the same core",
+   "test": "Confirmed by Sujan 2026-11-02",
+   "status": "done"
+  },
+  {
+   "id": "I043",
+   "area": "planning",
+   "quote": "segment them into what kind of modules, and within that, features. For each feature, we go into the requirements",
+   "intent": "Plan structure: modules, then features, then requirements per feature, defined top-down",
+   "test": "Module-feature tree approved, then a requirements doc per feature",
+   "status": "in_progress"
+  },
+  {
+   "id": "I044",
+   "area": "research",
+   "quote": "Have we done a complete analysis and a complete competitor study?",
+   "intent": "Complete competitor and market study (visual, listing/PIM, measurement, buyers) before going deep",
+   "test": "Three competitor reports plus a synthesized feature universe",
+   "status": "in_progress"
+  },
+  {
+   "id": "I045",
+   "area": "data",
+   "quote": "Assume that right now we don't actually have it ... take an estimate or whatever is publicly available",
+   "intent": "No Amazon seller data API for now; use our BigQuery data plus public data; add SP-API later",
+   "test": "Measurement design works without SP-API",
+   "status": "in_progress"
+  },
+  {
+   "id": "I046",
+   "area": "cost",
+   "quote": "Sure, go ahead (billing export)",
+   "intent": "Enable GCP billing export to BigQuery for exact cost per product",
+   "test": "Billing export table exists and the cost meter reads it",
+   "status": "failing"
+  }
+ ]
 }
