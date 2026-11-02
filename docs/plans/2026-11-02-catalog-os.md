@@ -113,6 +113,6 @@ self-serve service and an onboarding hook for Opptra distribution.
 - [ ] Phase 0: intent ledger seeded, Harvey video watched, access confirmed (Supabase, Photoroom, BigQuery, SP-API, Ads API, Noon Vantage).
 - [x] Phase 1: evidence reports in MAIN/.runs (data census, outcome baseline, cost and quota, channel rules, Harvey method, vendor bake-off).
 - [x] Phase 2: one-page brief approved (gate 1), 2026-11-02, all 7 decisions yes.
-- [ ] Phase 2b: requirements per module and feature, plus build roadmap (planning only).
+- [x] Phase 2b: requirements for 13 modules + UX, integrated roadmap (docs/program/roadmap.md) and owner questions (docs/program/owner-questions.md), 2026-11-02.
 - [ ] Phase 3: GCC fashion slice live.
 - [ ] Phase 4: learning engine, then text, keywords, A+ and video.
