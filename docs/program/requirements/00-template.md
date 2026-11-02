@@ -30,20 +30,28 @@ later the builder agents.
 7. **Build slices**: small pieces of work, each one worker in one worktree, with order, dependencies and an acceptance test.
 8. **Risks and open questions.**
 
-## Settled decisions (gate 1, 2026-11-02; do not reopen)
-- First market is GCC fashion. India Cortina comes next on the same core, then self-serve for outside brands.
+## Settled decisions (gate 1 and owner answers; do not reopen)
+- First market is GCC fashion, then self-serve for outside brands. India (Cortina, Amazon.in, Flipkart, Myntra) is out
+  of scope for now (owner answer Q17; `../roadmap.md` section 15).
+- No timelines in requirements or plans: no dates, weeks, durations or "by X". Order by value and true dependency, by
+  release (`../roadmap.md`). Experiment readouts are expressed as "after N weeks of data" only inside M4. Durations that
+  describe product behaviour (for example "detected within 7 days") are requirements and are allowed.
 - Buy generation, image understanding and text models, each with a fallback vendor. Keep our own GPUs for cleanup
   (background removal, upscaling).
 - No Amazon seller API for now. Outcomes come from BigQuery (`opptra-datawarehouse`: sales, stock, price, ads where
   available) plus scraped public pages.
 - Background colour 240+ grey; white for Amazon image 1.
-- Holdout test starts 10-17 Nov: about 700 vs 700 Namshi and Noon options, with readouts at 8 and 12 weeks.
+- Holdout test: about 700 vs 700 Namshi and Noon options, launched in release R2, with readouts at the points M4
+  pre-registers.
 - Use the draft title lengths and a format-only check on HSN (tax) codes.
 - Crops only on Namshi and Noon until their AI-image stance is known.
-- Demo Streamoid and Rubick before building text and listing files.
-- Scrape our own listings now; buy market data later.
+- Check Streamoid and Rubick before building text and listing files: by a website teardown plus our own prototype, not
+  vendor demos (owner answer Q4).
+- Scrape our own listings now (legal OK, Q2); buy market data later.
 - No per-SKU review queues. Auto-decide by default, with a permanent 2-5% sampled audit. A person still checks product
   truth (colour, logo, shape), modesty, likeness rights and threshold changes.
+- Likeness: Opptra holds likeness rights for brand models; the owner sets a per-brand likeness flag (Q15). No face
+  embeddings or biometric templates are stored anywhere (Q18).
 - Business settings (rules, channels, vendors, thresholds, prompts) are admin-editable. Structure is not, until a second
   customer needs it.
 - Zero-downtime deploys. Batches must survive a deploy.

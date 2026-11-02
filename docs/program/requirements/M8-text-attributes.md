@@ -1,9 +1,10 @@
-# M8 Text, attributes and Arabic - requirements (draft, 2026-11-02)
+# M8 Text, attributes and Arabic - requirements (draft)
 
 Planning only. Follows `00-template.md`. Feature ids follow the row order of the M8 table in `../module-map.md` (M8-F1 is
-the first row). M8 has no P0 feature: nothing here is in the one-week slice. Gate 1 settled that Streamoid and Rubick are
-demoed within two weeks **before** any text is built, so every P1 feature below states what the demo must answer and the
-buy or build rule. Words defined once: **text** means the title, bullets, description and backend keywords of one listing;
+the first row). M8 has no P0 feature: nothing here is in the first slice; M8 ships in release R4 (`../roadmap.md`). Gate 1
+said Streamoid and Rubick are checked **before** any text is built. Owner answer Q4 replaced the vendor demos with a
+website teardown of both vendors (report: `C:\Users\Sujan Ajay\Desktop\catalog-module\.runs\2026-11-03-streamoid-rubick.md`) plus our own prototype (M8-S0), so every P1
+feature below states what the teardown and prototype must answer and the buy or build rule. Words defined once: **text** means the title, bullets, description and backend keywords of one listing;
 **grounded** means every claim in the text comes from a fact we hold; **machine-literal** Arabic is Arabic produced by
 translating the English sentence word by word, which gate 1 rules out; **search term** is what a shopper typed (we only have
 paid-ad search terms, see M8-F3).
@@ -18,7 +19,7 @@ I039, I042, I014, I017, I041.
 
 ## 2. Scope
 
-**In (P1, after the demo):**
+**In (P1, after the buy or build decision):**
 - Titles, bullets, descriptions and backend keywords per channel for Noon, Namshi, Trendyol and Amazon.ae, then Styli and
   Centrepoint once M5 has their content rules.
 - Native Arabic for Noon and Namshi (and Amazon.ae where the file has Arabic fields), written from facts, not translated.
@@ -39,6 +40,8 @@ I039, I042, I014, I017, I041.
 - A+ text blocks for Amazon.in (the Cortina pilot asks for titles, bullets and A+; A+ modules are M11, which will take its
   text from M8).
 - India channels next (Amazon.in, Flipkart, Myntra) in English: same generator, new M5 rules; planned as M8-S6.
+- India is out of scope for now (owner answer Q17): every India item in this file waits and is in no release
+  (`../roadmap.md` section 15).
 
 ## 3. Contracts
 
@@ -191,33 +194,40 @@ count fact is trusted). Kids products (no body or fit language; kids word list i
 brand name plus product type (keep brand and type, drop the rest, warn).
 
 **Buy or build.** Buy the language model (two ranked vendors plus a fallback through M7). Build the rules, grounding,
-templates and checks. Decision on buying a whole text product (Streamoid or Rubick) waits for the demo below.
+templates and checks. Decision on buying a whole text product (Streamoid or Rubick) waits for the teardown and prototype
+below.
 
-**The Streamoid and Rubick demo (due by 16 Nov 2026; decides M8 and M9).** Protocol: give both vendors the same 30-product
-pack from the golden set (18 GCC apparel across at least 6 brands, 4 footwear, 2 bags, 2 lingerie, 2 kids, 2 Cortina
-curtains) with photos, master rows and Trendyol text. Ask for Noon English plus Arabic, Namshi and Amazon.ae text, and a
-filled Noon file. Build our own throwaway prototype on the same pack (M8-S0) so there is a fair comparison. Native Arabic
-speakers rate all three blind.
+**The Streamoid and Rubick teardown plus our prototype (decides M8 and M9; no vendor demos, owner answer Q4).** Inputs:
+(1) the website teardown of Streamoid and Rubick (public product pages, documentation, case studies, pricing and terms;
+report at `C:\Users\Sujan Ajay\Desktop\catalog-module\.runs\2026-11-03-streamoid-rubick.md`); (2) our own throwaway prototype (M8-S0) on a 30-product pack from the
+golden set (20 GCC apparel across at least 6 brands, 4 footwear, 2 bags, 2 lingerie, 2 kids; the 2 Cortina curtains of
+the earlier pack are dropped while India is out of scope) with photos, master rows and Trendyol text, producing Noon
+English plus Arabic, Namshi and Amazon.ae text and a filled Noon file. Native Arabic speakers rate the prototype blind
+against the existing live text. Anything the teardown cannot show from public sources counts as "not shown".
 
-What the demo must answer for text:
-1. Do you generate Arabic natively from attributes, or translate the English? Show both for 5 products.
-2. Which Arabic register do you write (Modern Standard, Saudi, Emirati)? Can it be set per channel?
-3. How do you stop invented facts? Show how a claim traces back to an input field.
-4. Can we load our own rules (limits, formulas, banned words, brand spellings) as data, and can a non-engineer change them?
-5. Which GCC and India channels have per-channel limits built in today (Noon, Namshi, Styli, Centrepoint, Amazon.ae, Amazon.in,
-   Flipkart, Myntra)? Show a real output for each.
+What the teardown and prototype must answer for text:
+1. Does the vendor generate Arabic natively from attributes, or translate the English? (Prototype: show both for 5
+   products.)
+2. Which Arabic register (Modern Standard, Saudi, Emirati)? Can it be set per channel?
+3. How are invented facts stopped? Can a claim be traced back to an input field?
+4. Can our own rules (limits, formulas, banned words, brand spellings) be loaded as data and changed by a non-engineer?
+5. Which GCC channels have per-channel limits built in today (Noon, Namshi, Styli, Centrepoint, Amazon.ae)? Is there a
+   public example output for each?
 6. Where does keyword data come from for Noon and Amazon.ae, and in Arabic? Can we push our own terms in?
-7. Per-attribute accuracy of your attribute tagging on our 30 products, measured by us.
-8. Can it run 2,000 products with no per-item accept step, and what is the turnaround?
-9. API and export: does every output come back with our ids so we can version it, and can we send rejections back in?
-10. Price per product per channel and language; who owns outputs; is our data used for training.
+7. Is per-attribute accuracy published, or measurable by us?
+8. Can it run 2,000 products with no per-item accept step?
+9. API and export: does every output come back with our ids, and can rejections be sent back in?
+10. Price per product per channel and language; who owns outputs; is customer data used for training.
 
-**Decision rule (buy or build).** Buy or partner for text only if all hold on the 30-pack: (a) Arabic blind rating mean of
-4.0 or more out of 5 from at least two native raters, and at least 0.3 above our prototype; (b) at most 1 invented fact in
-all outputs; (c) outputs pass our M5 checks for Noon and Namshi with no edits other than commercial fields; (d) an API that
-returns every text with our ids and accepts our rules and keyword winners; (e) runs without per-item acceptance; (f) price
-within the owner's ceiling (default USD 0.25 per product for all slice channels and both languages, judgement). Otherwise
-build on bought models, and consider a partner only for what they do better (for example India channel files, M9).
+**Decision rule (buy or build).** Build on bought models (two ranked vendors plus a fallback through M7) unless the
+teardown shows public evidence for all of: (a) native Arabic from attributes with a register that can be set per channel;
+(b) claims traced to inputs; (c) our rules loadable as data; (d) an API that returns every text with our ids and accepts
+our rules and keyword winners; (e) no per-item acceptance; (f) a price within the owner's ceiling (USD 0.25 per product
+for all slice channels and both languages, owner answer Q12) and no training on our data. If all six are shown, Sujan may
+approve a paid trial (gate G4) on the same 30-product pack, scored against our prototype with these bars: Arabic blind
+rating mean of 4.0 or more out of 5 from at least two native raters and at least 0.3 above our prototype; at most 1
+invented fact in all outputs; outputs pass our M5 checks for Noon and Namshi with no edits other than commercial fields.
+Buy or partner only if the trial clears every bar. Consider a partner only for what they clearly do better.
 
 **Acceptance test (as an operator).** Run a real 200-product Vero Moda and French Connection batch with Noon, Namshi,
 Trendyol and Amazon ticked: every product with a known product type gets text per channel that passes M5; zero per-product
@@ -254,7 +264,7 @@ consistency check catches a planted Arabic colour that differs from the English.
 
 **Buy or build.** Buy the model, build the glossary, templates and checks. Candidates for the bake-off (M7-F7): the general
 models already behind OpenRouter, plus Arabic-first models such as Jais and ALLaM (named from memory, not verified in this
-study; verify availability and terms before the bake-off). The Streamoid and Rubick demo questions 1, 2 and 7 decide whether
+study; verify availability and terms before the bake-off). The teardown and prototype questions 1, 2 and 7 decide whether
 a vendor's Arabic beats ours. Agencies (Proxima) are the fallback for the calibration set only, not for production.
 
 **Open questions.** Who are the native raters? Default: two Arabic-native Opptra staff from the Noon and Namshi teams for the
@@ -358,38 +368,38 @@ Key copy:
 | Arabic native rating (calibration and sample) | none | mean 4.2 or more | auditor scores |
 | Cost per product (text, all channels and languages) | none | under owner ceiling; default USD 0.25 | M6 cost meter |
 | Top converting search terms present in titles (Amazon.ae) | unmeasured | 70% of products in categories with search-term data | M8-F3 job + content versions |
-| Lift on orders from text (pre-registered experiment through M4) | none | readout at 12 weeks; expected small, MDE about 18% | M4 |
-| India: IDQ on Amazon.in for Cortina | 64% (Catalog v2) | 90% (Catalog v2 target) | the Amazon.in report the Cortina team uses (IDQ has no published formula; open question) |
+| Lift on orders from text (pre-registered experiment through M4) | none | readout at the point M4 pre-registers; expected small, MDE about 18% | M4 |
+| India (out of scope for now): IDQ on Amazon.in for Cortina | 64% (Catalog v2) | 90% (Catalog v2 target) | the Amazon.in report the Cortina team uses (IDQ has no published formula; open question) |
 
 ## 7. Build slices
 
-All slices after the demo decision, except M8-S0.
+All slices after the buy or build decision, except M8-S0. Release R4 (`../roadmap.md`).
 
 | Slice | What | Depends on | Acceptance test |
 |---|---|---|---|
-| M8-S0 | Throwaway prototype on the 30-product demo pack (English plus Arabic, Noon, Namshi, Amazon.ae), the blind rating sheet and the buy or build memo | golden set rows (M7-F1), demo scheduled | Memo with scores for Streamoid, Rubick and our prototype against the decision rule in M8-F1; owner decides |
+| M8-S0 | Throwaway prototype on the 30-product pack (English plus Arabic, Noon, Namshi, Amazon.ae), the blind rating sheet and the buy or build memo that applies the M8-F1 decision rule to the teardown report and the prototype scores | golden set rows (M7-F1), the Streamoid and Rubick teardown report | Memo with the teardown evidence per question, our prototype scores and the decision rule outcome; owner decides |
 | M8-S1 | English generator for Noon, Namshi, Trendyol, Amazon.ae: request shape, grounding, M5 checks, regeneration, versions in M0, cost logged | M0-F2, M2-F3 trusted facts, M5-S2, C01, C03, C04 decided, M7 vendor interface | M8-F1 acceptance test |
 | M8-S2 | Arabic: glossary data and editor, Arabic templates, normalisation, direction tests, calibration run, sample audit view | M8-S1, M5-F8 seed rules, M7-F9 | M8-F2 acceptance test |
 | M8-S3 | Search term job and keyword placement; `learning.keyword_winner` receiver and answer | M8-S1, M0 change sets, M4 control flags | M8-F3 acceptance test |
 | M8-S4 | Size chart data, conversions and chart image | M5 size chart rules, a brand chart file | M8-F4 acceptance test |
 | M8-S5 | Text sheet download, digest block, product page section, text settings screen | M8-S1 | An operator finds every text of a batch in one sheet without help |
-| M8-S6 | India English text: Amazon.in, Flipkart, Myntra rules in M5; Cortina curtains (single front image, home textile facts) | M5 India rules, M5 curtain category, M2 non-fashion facts | Cortina 50-product run: titles and bullets pass Amazon.in and Myntra rules |
+| M8-S6 (out of scope for now: India) | India English text: Amazon.in, Flipkart, Myntra rules in M5; Cortina curtains (single front image, home textile facts) | M5 India rules, M5 curtain category, M2 non-fashion facts | Cortina 50-product run: titles and bullets pass Amazon.in and Myntra rules |
 
 ## 8. Risks and open questions
 
 | Risk or question | Effect | Mitigation or recommended default |
 |---|---|---|
 | Few trusted facts (M2-F3 bars not yet met) | Thin text: brand, gender and type only | Text quality scales with trusted facts; digest shows "no facts" counts per brand; brand sheets fill material, care, fit |
-| Text conflicts C01, C03, C04 undecided | M8 cannot start | They are on the M5 conflict register with "Blocks M8 text"; ask the owner to decide before the demo ends |
+| Text conflicts C01, C03, C04 undecided | M8 cannot start | They are on the M5 conflict register with "Blocks M8 text"; answered by the owner: the recommended answers apply (Q11) |
 | Arabic quality judged by too few people | False confidence | Two blind raters plus a third to settle; planted literal translation as a control |
-| Vendor Arabic beats ours | Building wasted | The demo comes first; the decision rule is written before the demo |
+| Vendor Arabic beats ours | Building wasted | The teardown and prototype come first; the decision rule is written before the teardown report is read |
 | Noon and Namshi Arabic limits and required fields unknown | Rejections | Warn-only rules until the Noon manager answers (M5-F5); M9 rejection learning adds rules |
 | Search terms are paid only and small in volume | Weak keyword signal | Pool by category; keep source numbers on every term; M10 tests winners |
 | A keyword winner changes a control listing | Biased experiment | Control flag check (M8-C-R2) with a test |
 | IDQ formula is not published | India target cannot be checked by us | Default: use the IDQ number the Cortina team reads in Amazon.in; ask the Amazon India account team for the definition |
 | Cost of two languages times many channels | Cost per product rises | Generate facts-to-text once per language and derive channel lengths from it where rules allow; cost ceiling setting |
 
-## 9. Integration decisions (2026-11-02)
+## 9. Integration decisions
 
 | # | Decision | Why |
 |---|---|---|
@@ -398,6 +408,7 @@ All slices after the demo decision, except M8-S0.
 | D3 | M8-S3 owns the one search-term job and writes `catalog_os.search_terms_daily`; M10 reads it | M8-F3 and M10 B.3 both read the paid search-term tables |
 | D4 | The text audit view is a mode of M7's auditor screen | One auditor screen |
 | D5 | The `learning.keyword_winner` topic stays a worker task queue between M10 and M8 (the existing Cloud Tasks pattern); it is not part of M0 | M0's no-queue rule covers the change log only |
-| D6 | M8-S0 (the throwaway prototype on the 30-product pack) is allowed before the demo; it is a comparison, not the build that gate 1 deferred | Gate 1: demo before building text |
+| D6 | M8-S0 (the throwaway prototype on the 30-product pack) is allowed before the buy or build decision; it is a comparison, not the build that gate 1 deferred | Gate 1: check the vendors before building text |
 | D7 | Open questions answered: Noon Arabic title limit = English limit as a warn until the channel answers; IDQ for Cortina = the number the Cortina team reads in Amazon.in | Defaults that need no owner input |
-| D8 | Kept for the owner (`../owner-questions.md`): C01, C03 and C04; the text cost ceiling; native Arabic raters; booking the Streamoid and Rubick demos | Content rules, money, people, vendor relationship |
+| D8 | Kept for the owner (`../owner-questions.md`): C01, C03 and C04; the text cost ceiling; native Arabic raters; how to check Streamoid and Rubick | Content rules, money, people, vendor relationship |
+| D9 | Owner answers: no vendor demos, the website teardown plus M8-S0 decide (Q4); C01, C03, C04 recommended answers (Q11); USD 0.25 per product text ceiling (Q12); two native Arabic readers (Q9); India out of scope (Q17), so M8-S6, M8-F6 and the India metric row wait | Owner decisions recorded in `../owner-questions.md` |

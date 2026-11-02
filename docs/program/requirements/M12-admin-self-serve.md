@@ -1,4 +1,4 @@
-# M12 Admin, brands and self-serve - requirements (draft for review, 2026-11-02)
+# M12 Admin, brands and self-serve - requirements (draft for review)
 
 Follows `00-template.md`. Plain words; jargon is defined the first time it appears. The screens and copy follow
 `UX-design-system.md`.
@@ -80,7 +80,7 @@ event setting.changed { area, key, scope, from, to, by, reason, version, effecti
 - A settings version set id stamped on every content version (M0 `settings_snapshot_id`); change events reach it
   through their version and batch.
 - Read access to the last 30 days of decisions and inputs, so the preview can replay them under a proposed value.
-- An `org_id` (organisation) column on every new table from day one, default `opptra` (decided, Q1). Existing tables
+- An `org_id` (organisation) column on every new table from the start, default `opptra` (decided, Q1). Existing tables
   get it with M12-F5.
 
 ## 4. Features
@@ -97,7 +97,7 @@ it in one click.
   "background").
 - M12-F1-R2. Every setting has a schema (type, allowed range or list, default, scope, owner role, risk class) and shows a
   plain label, one help sentence, its current value, where the value comes from ("Noon's published rule", "Opptra
-  playbook", "set by Sujan on 4 Nov"), and the evidence grade from M5.
+  playbook", "set by Sujan on <date>"), and the evidence grade from M5.
 - M12-F1-R3. Inputs match the type: switches for yes/no, a stepper with limits for numbers, pick lists for fixed values,
   colour pickers with a contrast check, file drops for logos and fonts. No raw JSON, code or regular expressions are
   ever shown to a non-technical admin.
@@ -162,29 +162,38 @@ photos and website, so that I only confirm what is right and the brand looks and
 
 **Key requirements.**
 - M12-F3-R1. One page per brand with sections: Look, Logos and marks, Voice, Infographic look, Scenes, Models (only when
-  rights include likeness), Rights, Channels, Delete. A summary strip at the top: "Look: version 2 approved. Logos: 3
-  approved. Rights: valid until 30 Jun 2027."
+  the brand's likeness flag is on), Rights, Channels, Delete. A summary strip at the top: "Look: version 2 approved. Logos: 3
+  approved. Rights: valid until <end date>."
 - M12-F3-R2. **Fills itself.** Background colour, crop lines and lighting are measured from the brand's photos; logos are
-  suggested from photos and the brand's website (only with permission on record); colours are suggested from the logo;
+  suggested from photos and the brand's website (only with permission on record); when the brand's likeness flag is on,
+  model reference photos may be taken from the brand's website for the model packs (R7); colours are suggested from the logo;
   voice words from existing titles. Everything arrives as a suggestion. **Nothing is used until a person approves it.**
 - M12-F3-R3. **Versions.** An approved version is never edited; a change makes a new version, used from the next batch.
   Nothing already made is re-made when a version is approved unless the admin chooses "Apply to live products", which
   goes through the normal change-set path.
 - M12-F3-R4. **Voice.** Keyword family (up to 12 words), banned words, approved claims and disclaimers, tone (one of a
   short list: plain, sporty, premium, playful), formal or Gulf Arabic, and per-language examples. Used by M8 and M11.
-- M12-F3-R5. **Rights record** (the person step Sujan asked for). Fields: who granted it, a document reference (never the
-  document text), sites covered, "may use model photos as reference" yes or no, "may generate the model's likeness" yes
-  or no, lifestyle scope (none, still life only, worn or carried), kids allowed yes or no, valid from and to, recorded by.
-  Only an owner can save it. A record counts only between its dates.
+- M12-F3-R5. **Likeness flag and rights record** (the person step Sujan asked for).
+  - **Likeness flag.** One per brand, yes or no: "Opptra holds likeness rights for this brand's models". Opptra has
+    complete rights to brand models' likeness (owner answer Q15), so the flag records the owner's decision per brand; it
+    needs no document. Only an owner can set it. When it is on, M3 and M11 may generate people from the brand's own model
+    photos (the exact model or a lookalike; never a child lookalike). When it is off, no generated people for that brand.
+    It is a setting in the M12-S1 store (owner only, versioned, in the batch snapshot), used from release R3.
+  - **Kids flag.** One per brand, off by default, owner only: allows the brand's own kids model in M11-F3.
+  - **Rights record** (release R6, for scenes and expiry): who granted it, a document reference when one exists (never
+    the document text), sites covered, lifestyle scope (none, still life only, worn or carried), valid from and to,
+    recorded by. Only an owner can save it. A record counts only between its dates.
 - M12-F3-R6. **Expiry.** 30 days and 7 days before a rights record ends, the owner gets one notification. On expiry, new
   generated scenes, faces and on-model photos for the brand stop the same day; existing images stay unless the record
   says they must be removed, in which case M11 retires them on the next publish.
-- M12-F3-R7. **Models and likeness.** Person groups and model packs as in `M11-rich-media.md` F3: confirmed and approved
-  by a person, adults and kids apart, never compared across brands, face data never shown or exported.
+- M12-F3-R7. **Models and likeness.** Model packs as in `M11-rich-media.md` F3: photos chosen and approved by a
+  person, adults and kids apart, never shared across brands. No face embeddings, biometric templates or face groupings
+  are stored anywhere (owner decision Q18); identity consistency comes from the packs as generation inputs, an in-memory
+  similarity check discarded after each attempt, and the sampled audit.
 - M12-F3-R8. **Channels.** Which channels the brand sells on, and the brand master versus channel overlay (which fields
   the brand owns, which Opptra may change per channel; M0 feature).
-- M12-F3-R9. **Delete.** "Delete this brand's data" removes face data, person groups, model packs, model photos, logo
-  crops and layout photos after a typed confirmation (`DELETE <BRAND>`); records counts only; published product images
+- M12-F3-R9. **Delete.** "Delete this brand's data" removes model packs, model photos, logo crops and layout photos
+  (there is no face data to remove, because none is stored) after a typed confirmation (`DELETE <BRAND>`); records counts only; published product images
   stay.
 - M12-F3-R10. **New brand in under 10 minutes.** "Add a brand": name, drop a logo, pick channels; the system suggests
   colours, look and voice from the logo and the first batch; the admin approves; done.
@@ -245,7 +254,7 @@ Detailed screens, components and copy are in `UX-design-system.md`. The key mome
   preview with "Apply" and "Decline".
 - **Brand DNA:** suggestions show as soft cards with "Use this" and "Not right"; approved items show a quiet tick and
   version.
-- **Rights:** a short form; the save button is only for owners; the page header shows "Valid until 30 Jun 2027" in green,
+- **Rights:** a short form; the save button is only for owners; the page header shows "Valid until <end date>" in green,
   or "Ends in 7 days" in amber.
 - **Ops:** the one-sentence top line, then compact panels; nothing blinks; nothing is red unless it needs a person now.
 
@@ -271,7 +280,7 @@ Detailed screens, components and copy are in `UX-design-system.md`. The key mome
 | M12-S3 | Preview by replay over the last 30 days | M12-S1, M0 decision history | Preview count matches a hand count on 3 sample changes |
 | M12-S4 | Owner approvals for risky settings, with notifications | M12-S2, owner role | A threshold change waits until the owner applies it |
 | M12-S5 | Brand DNA page: sections, suggestions, versions, add-a-brand flow | M12-S1, M2 analysis | The section 4 F3 acceptance test |
-| M12-S6 | Rights record, expiry notifications, ceiling enforcement in M11 | M12-S5 | An expired record stops new scenes the same day in staging |
+| M12-S6 | Rights record (lifestyle scope, dates), expiry notifications, ceiling enforcement in M11 (release R6; the likeness and kids flags are M12-S1 settings) | M12-S5 | An expired record stops new scenes the same day in staging |
 | M12-S7 | Ops page additions, incident rules, service status | M6 meter, M7 audits | The section 4 F2 acceptance test |
 | M12-S8 | Extend M5's add-channel and add-category flow (M5-S5 owns it) with the listing-file template mapping and the brand channel list | M12-S2, M5-S5, M9 templates | A test channel copied from Noon receives a listing file without code |
 | M12-S9 | Owner role and per-brand operator scope | M12-S2 | A scoped operator cannot change another brand's setting |
@@ -283,12 +292,12 @@ Detailed screens, components and copy are in `UX-design-system.md`. The key mome
 | R1 | Too many settings become their own cognitive load | Show only the settings that differ from the default first ("3 changes from the usual"); hide the rest under "All settings" |
 | R2 | The preview replay is wrong and misleads | Label it "Estimate from the last 30 days"; track 24-hour reverts as the warning sign |
 | R3 | Rights recorded wrongly (wrong dates, wrong scope) | Owner-only save; the document reference is required; expiry reminders |
-| R4 | Self-serve later needs data residency in KSA or India | Keep storage region a per-organisation setting from the start; check KSA and India rules before the first outside customer |
+| R4 | Self-serve later needs data residency in UAE or KSA | Keep storage region a per-organisation setting from the start; data lives in the region of the customer's main market (Q19); India is out of scope for now |
 | R5 | Vendor names leaking into operator copy | A copy check in CI that refuses vendor and model names outside the Services and Ops pages |
 | Q1 | Add `org_id` to every table now, before a second customer? | Yes: cheap now, very expensive later |
 | Q2 | Who is "owner" besides Sujan? | Sujan only at first; a second owner when the team grows |
 | Q3 | Should risky changes need a second person, or the owner's confirmation alone? | Owner's confirmation alone while the team is small |
-| Q4 | Self-serve pricing unit: per product, per listing that passes, or per brand per month? | Per listing that passes, with a monthly minimum; test with 5 brands first (`competitors-measurement` section 7) |
+| Q4 | Self-serve pricing unit: per product, per listing that passes, or per brand per month? | Answered by the owner (Q19): per product processed |
 | Q5 | Sign-in for outside users | A bought identity service behind one interface; choose at M12-F5 time after checking current docs |
 
 ## Sources
@@ -297,11 +306,11 @@ Detailed screens, components and copy are in `UX-design-system.md`. The key mome
 - `C:\Users\Sujan Ajay\Desktop\catalog-module\.runs\2026-11-02-competitors-listing.md` (PIM pricing and roles),
   `-competitors-measurement.md` (go-to-market, price anchors), `-competitors-visual.md` (Photoroom pay-for-pass).
 - `C:\Users\Sujan Ajay\Desktop\catalog-module-wt\initiative-requirements\05-brand-faces.md` (Brand DNA page, rights,
-  deletion, biometric handling), `04-scene-images.md` (scene profile), `07-infographics.md` (brand voice).
+  deletion; its biometric handling is superseded by owner decision Q18), `04-scene-images.md` (scene profile), `07-infographics.md` (brand voice).
 - Current code: `apps/web/app/catalog/ops/page.tsx`, `apps/web/app/catalog/brands/[slug]/page.tsx`,
   `apps/web/components/PeopleModal.tsx`, `apps/web/lib/user.ts`, `packages/core/src/people.ts`.
 
-## 9. Integration decisions (2026-11-02)
+## 9. Integration decisions
 
 | # | Decision | Why |
 |---|---|---|
@@ -311,4 +320,5 @@ Detailed screens, components and copy are in `UX-design-system.md`. The key mome
 | D4 | Add channel and category belong to M5-S5; M12-S8 extends that flow | Duplicate flows |
 | D5 | Slice ids renamed `S12.n` to `M12-Sn` | One naming scheme |
 | D6 | Open questions answered: Q1 `org_id` on every new table now (yes); Q2 Sujan is the only owner at first; Q3 the owner's confirmation alone is enough while the team is small; R1 show only settings that differ from the default first | Technical or process defaults |
-| D7 | Kept for the owner: Q4 self-serve pricing and R4 data residency, before the first outside customer (`../owner-questions.md`); Q5 sign-in vendor is chosen at M12-F5 time | Business and legal |
+| D7 | Answered by the owner (Q19): pricing per product processed; data in the region of the customer's main market. Q5 sign-in vendor is chosen at M12-F5 time | Business and legal |
+| D8 | Owner answers: Opptra holds likeness rights for brand models, recorded as a per-brand likeness flag set by the owner (Q15); no stored face embeddings, biometric templates or face groupings (Q18) | Owner decisions recorded in `../owner-questions.md` |

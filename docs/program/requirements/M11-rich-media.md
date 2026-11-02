@@ -1,4 +1,4 @@
-# M11 Rich media - requirements (draft for review, 2026-11-02)
+# M11 Rich media - requirements (draft for review)
 
 Follows `00-template.md`. Plain words; jargon is defined the first time it appears. Sources are listed at the end.
 
@@ -25,8 +25,10 @@ Follows `00-template.md`. Plain words; jargon is defined the first time it appea
   M0 (product facts from M2, keywords and text from M8, winners from M10).
 - Lifestyle scenes for shoes and bags, still life first (the brand's own product pixels pasted into a generated
   background, no person).
-- Brand faces and kids on-model, only with written rights and approved model packs.
-- Amazon A+ modules, drawn by code first (India first), and listing video, made from approved stills first.
+- Brand faces and kids on-model, only when the owner has turned on the brand's likeness flag (owner answer Q15) and a
+  model pack is approved; no biometric data is stored (owner decision Q18).
+- Amazon A+ modules, drawn by code first (Amazon.ae and Amazon.sa by download pack; India is out of scope for now), and
+  listing video, made from approved stills first.
 - One policy per brand x channel x category that decides who gets which asset, so no person ticks products.
 
 **Out:**
@@ -37,7 +39,7 @@ Follows `00-template.md`. Plain words; jargon is defined the first time it appea
 - A synthetic (AI-invented) child, ever.
 
 **Later (beyond this file's features):** callout pointers to detected product parts; an infographic drawn on a scene
-frame; Hindi and regional infographics (India); generated video from a bought image-to-video model; 360 spins.
+frame; Hindi and regional infographics (India, out of scope for now); generated video from a bought image-to-video model; 360 spins.
 
 ## 3. Contracts
 
@@ -201,49 +203,49 @@ weak on fidelity. Build the checks, policy and placement.
 
 ### M11-F3 Brand faces and kids (Later; I014, I037)
 
-**Brief.** Garments that arrive as flat lays only are shown on the brand's own approved model; kids clothes appear on a
-child only on the brand's approved kids model, only where the channel allows it, never a synthetic child. Every face
-needs a written likeness right on file and a person-approved model pack. Face data is sensitive personal data.
+**Brief.** Garments that arrive as flat lays only are shown on the brand's own model: the exact model or a lookalike,
+made from the brand's model reference photos. Kids clothes appear on a child only as the brand's own kids model, only
+where the channel allows it; never a synthetic child and never a lookalike child. Opptra holds likeness rights for brand
+models (owner answer Q15); the owner turns generated people on per brand with the likeness flag. No biometric data is
+stored (owner decision Q18), so no legal route for biometric data is needed.
 
-**Rules carried forward (from initiative 05, simplified).**
-- Rights are one record per brand (M12-F3): who granted it, a document reference (never the text), the sites covered,
-  "may use model photos as reference" yes or no, "may generate the model's likeness" yes or no, valid from and to. Flat lay
-  to on-model needs both yes answers. An expired record stops new faces the same day.
-- Models: the system groups the brand's own model photos into people (within one brand only); a person confirms each
-  group ("Same person", "Split", "Not usable") and approves a model pack of four standard photos. An approved pack is never
-  edited; a change is a new version. Adults and kids are kept apart.
-- **The person is permanent here** (Sujan's ask: "brand rights and likeness need a person"). A person records every rights
-  record and approves every model pack. That is per brand and per model, not per product.
-- **Simplified from the old design:** the old design asked one person to approve an "anchor" photo for every product.
-  The new rule removes that per-product step: until a licensed face-identity check (one that measures whether the face is
-  the approved model) exists and passes on the golden set, **face-showing shots are not made at all**. Once it exists,
-  they are checked automatically and audited at a higher rate (1 in 4 for kids, 1 in 10 for adults; M7).
-- Kids: never on Noon or Amazon; kids underwear, lingerie and swimwear never on a child; no crop or logo cut from a photo
-  that shows a child; one child, no adult in the frame.
-- Biometric handling: face measurements only for the brand's own models, never operators, shoppers or passers-by; never
-  compared across brands; never in any page, export, log or report; stored only in private storage; seen only by admins.
-  UAE and KSA data protection laws treat biometric data as sensitive; get legal confirmation before go-live (open
-  question Q4).
-- Deletion at three levels: one photo, one model ("Delete this model's data", typed confirmation), one brand ("Delete this
-  brand's data", typed confirmation). Counts are recorded, never images. Published product images stay.
+**Rules.**
+- **Gate per brand.** The likeness flag (M12-F3-R5) is set only by the owner. Flag off: no face-showing output for that
+  brand. Flag on: on-model faces may be made. Kids also need the brand's kids flag, off by default.
+- **Model references.** The brand's own model photos, from the brand's photo folders or the brand's website. An admin
+  builds a model pack of four standard photos per model by choosing photos, not by any automatic face matching or
+  grouping. Adults and kids are kept apart; packs are never shared or compared across brands; an approved pack is never
+  edited, a change is a new version.
+- **No biometric data, anywhere.** No face embeddings, face templates, face clusters or identity vectors are stored in
+  the database, files, logs, caches, exports or reports. Nothing groups photos into people by face.
+- **Identity consistency without stored biometrics.** (a) The model pack photos are generation inputs; (b) a visual
+  similarity check compares each output with its pack, computed in memory for that attempt and discarded, keeping only
+  the pass or fail and the score number with the attempt (M7 fidelity record); (c) the sampled human audit at the people
+  rates (1 in 4 for kids, 1 in 10 for adults; M7). A failed attempt is "not made"; nobody is asked to rescue it.
+- **The person steps are per brand and per model, never per product:** the owner sets the flags, an admin approves model
+  packs, and the sampled audit checks results.
+- **Kids:** never on Noon or Amazon; kids underwear, lingerie and swimwear never on a child; no crop or logo cut from a
+  photo that shows a child; one child, no adult in the frame.
+- **Deletion** at three levels: one photo, one model ("Delete this model's data", typed confirmation), one brand
+  ("Delete this brand's data", typed confirmation). It removes model photos and packs. Counts are recorded, never
+  images. Published product images stay.
 
-**Gate to promote.** Legal confirmation on biometric and child data in UAE and KSA; a commercially licensed face-identity
-model; at least one brand's rights record with likeness; a pre-registered experiment.
+**Gate to promote.** The likeness flag on for at least one brand; an approved model pack; the M7 fidelity check and the
+in-memory similarity check passing on the golden set; a pre-registered experiment.
 
 **Buy or build.** Buy on-model generation (FASHN, which does not charge for failed outputs; Botika at about USD 0.75 per
-photo; Caimera; Modelia). Build rights, model packs, checks and data handling.
+photo; Caimera; Modelia). Build the flag checks, model packs, similarity check and data handling.
 
 ### M11-F4 A+ content (Later; I037)
 
-**Brief.** Amazon A+ modules (image and text blocks under the listing) for brands with Brand Registry, India first
-(Cortina targets A+ coverage above 90%, `channel-rules`), GCC Amazon later because it is small (about 140 softline units a
-week). Modules are drawn by code from approved photos and M8 text, in English and, where Amazon.sa or .ae accepts it,
+**Brief.** Amazon A+ modules (image and text blocks under the listing) for brands with Brand Registry on Amazon.ae and
+Amazon.sa. GCC Amazon is small (about 140 softline units a week), so A+ is measured before it is scaled. India (Amazon.in)
+is out of scope for now. Modules are drawn by code from approved photos and M8 text, in English and, where Amazon.sa or .ae accepts it,
 Arabic, using the same composer and checks as M11-F1.
 
 **Key rules.** A fixed set of module templates per category (comparison chart, feature grid with up to four images,
 brand story); no claims outside M5's approved list; module sizes and counts from M5 data (Amazon's specs are a gap today,
-`channel-rules` gap list); upload through the SP-API A+ content endpoints only where a token exists (India), otherwise a
-download pack for Seller Central. Amazon's own free A+ AI drafting (US English) is used as a benchmark only.
+`channel-rules` gap list); a download pack for Seller Central (there is no seller API for GCC). Amazon's own free A+ AI drafting (US English) is used as a benchmark only.
 
 **Buy or build.** Build the composer (shared with infographics); verify the A+ upload route per marketplace (open question
 Q5).
@@ -283,16 +285,17 @@ photographic set is live. It never delays links.
   from your product facts", "Generated background, product unchanged", "Generated, checked automatically". A "Remove"
   action writes a retirement version (undo for 10 seconds).
 - **Settings (M12):** Brand page sections "Infographic look" (colours, font, logo corner, layout, with a live preview in
-  English and Arabic), "Scenes" (on or off, still life or worn, allowed hints), "Faces" (only shown when rights include
-  likeness). Policy table per channel: "Off", "Top 20% by revenue", "All eligible".
-- **The only person moments in M11:** recording a brand's rights, approving a model pack, approving a Brand DNA version
+  English and Arabic), "Scenes" (on or off, still life or worn, allowed hints), "Faces" (only shown when the brand's
+  likeness flag is on). Policy table per channel: "Off", "Top 20% by revenue", "All eligible".
+- **The only person moments in M11:** the owner setting a brand's likeness and kids flags and rights record, approving a
+  model pack, approving a Brand DNA version
   (look, voice, scene sentences), and the sampled audit (M7). All are per brand or sampled, never per product.
 
 **Copy for key moments.**
 - Not made (infographic): "No infographic: the highlights are too long to fit at a readable size on Noon. They will be
   shortened when the text is next updated."
 - Not made (rights): "No scene: this brand's written permission for generated images is not on record."
-- Rights about to expire (to admins, 30 days ahead): "Vero Moda's image permission ends on 30 Nov. After that, no new
+- Rights about to expire (to admins, 30 days ahead): "Vero Moda's image permission ends on <end date>. After that, no new
   scenes or on-model photos are made. Existing images stay."
 - Channel refused: "Noon refused 3 infographics this week. Infographics on Noon are paused until you choose what to do."
   Buttons: "Keep paused" and "Try again".
@@ -302,10 +305,11 @@ photographic set is live. It never delays links.
 | Metric | Baseline | Target | Data source |
 |---|---|---|---|
 | Acceptance rate per asset type x channel | Unknown; one Cardio Bunny infographic live on Trendyol with clipped text (`07-infographics`) | 98% or more accepted | M9 rejection feed |
-| Lift per asset type (pre-registered, pooled) | Unproven; "up to" vendor figures (A+ +8-20%, video +9.7%) are not evidence (`catalog-os` plan) | A bounded estimate within 12 weeks | M4 estimators |
+| Lift per asset type (pre-registered, pooled) | Unproven; "up to" vendor figures (A+ +8-20%, video +9.7%) are not evidence (`catalog-os` plan) | A bounded estimate at the readout point M4 pre-registers | M4 estimators |
 | Ad conversion on sponsored pages with a scene vs without | Not measured | Detect a 15% change (ad signals have a smaller MDE than organic sales) | Ads tables in BigQuery |
 | Words drawn that differ from the stored text | n/a | 0 | Check T3 results |
-| Faces made without a valid rights record | n/a | 0 (hard block) | M0 + M12 join |
+| Faces made for a brand whose likeness flag is off | n/a | 0 (hard block) | M0 + M12 join |
+| Stored face embeddings or biometric templates | n/a | 0 | Inspection of storage, logs, caches and exports |
 | Cost per accepted asset | Infographic about USD 0.00004 (judged); scene about USD 0.20 | Within 10% of billing | M6 cost meter |
 | Winning keywords reaching the infographic in the same change set | n/a | 100% of promoted winners where an infographic exists | M0 change sets |
 | Person minutes per 1,000 products | Initiative 04 assumed a spot check on 1 in 10 products | Under 5 minutes (audits only) | M7 audit log |
@@ -325,8 +329,8 @@ effect) of the first holdout. Pool across brands (M10) and use ad signals for sc
 | M11-S6 | Experiment registration for infographics (and later scenes) | M4 registry | Experiment pre-registered with its MDE before the first treated publish |
 | M11-S7 | Still-life scenes (composite, no person), with the vendor interface and caps | M7 vendor interface and fidelity, M12 rights | 100 still lifes; product pixels proved identical; zero published without the AI tag |
 | M11-S8 | Worn footwear, then carried bags | M11-S7 | Per initiative 04's check list; cost per accepted within 20% of USD 0.20 |
-| M11-S9 | Stills-to-motion video and A+ modules from the shared composer | M11-S2, M5 video and A+ specs | Files pass each channel's spec checks; upload pack downloads in one click |
-| M11-S10 | Faces and kids | Legal confirmation, licensed identity check, rights with likeness | Zero face outputs while any gate is missing (tested by removing each gate in staging) |
+| M11-S9 | Stills-to-motion video and A+ modules (Amazon.ae, Amazon.sa download pack) from the shared composer | M11-S2, M5 video and A+ specs | Files pass each channel's spec checks; upload pack downloads in one click |
+| M11-S10 | Faces and kids: flag checks, model packs, in-memory similarity check, people audit rates | Likeness and kids flags (M12-F3-R5), model packs (M12-F3-R7), M3-F5 identity rule, M7 fidelity and audit | Zero face outputs while any gate is missing (tested by removing each gate in staging); zero face embeddings or biometric templates found in storage, logs, caches or exports |
 
 ## 8. Risks and open questions
 
@@ -336,13 +340,13 @@ effect) of the first holdout. Pool across brands (M10) and use ad signals for sc
 | R2 | Marketplaces may strip the AI tag from files | Keep the M0 flag as our record; disclosure follows each channel's rule in M5 |
 | R3 | Lift is unproven and probably small | Pre-register every asset type; scale only after a readout; report "below X%" honestly |
 | R4 | Every added image may need a manual re-upload on portals with no API | Add rich media in the same listing file as the next planned update, not as its own submission |
-| R5 | Children's biometric data | No face work until legal confirmation; kids default stays off-figure |
+| R5 | Children's images | No biometric data is stored for anyone (Q18); kids only as the brand's own kids model; the kids flag is off by default and only the owner sets it |
 | R6 | Arabic shaping bugs are invisible to non-Arabic readers | Shaping check in code plus a one-off review by two Arabic readers per font and layout |
 | Q1 | Can Canva or Adobe render Arabic templates via API well enough to buy? | Check in the M11-S3 bake-off; build if neither passes the words-exact check |
 | Q2 | One image per language, or one bilingual band? | One per language, unless M5 says the channel shows one gallery for both |
 | Q3 | Which digits on Arabic images (Western or Arabic-Indic)? | Western digits by default; a channel setting |
-| Q4 | Legal confirmation route for biometric data (UAE PDPL, KSA PDPL) | Ask Opptra legal before M11-S10 is scheduled |
-| Q5 | A+ upload route: SP-API A+ endpoints for India tokens; GCC by download pack | Confirm token scopes; download pack as fallback |
+| Q4 | Legal route for biometric data (UAE PDPL, KSA PDPL) | Resolved by design: no biometric data is stored (owner decision Q18) |
+| Q5 | A+ upload route | GCC by download pack for Seller Central; India (SP-API) out of scope for now |
 | Q6 | Do Noon, Namshi and Trendyol accept listing video? | Ask through the M5 channel gaps workflow; build video only after two channels say yes |
 | Q7 | Should infographics wait for M8 text, or start from facts alone? | Start from trusted facts (M11-S4) so infographics do not wait on M8; M8 text replaces them when ready |
 
@@ -355,7 +359,7 @@ effect) of the first holdout. Pool across brands (M10) and use ad signals for sc
 - `C:\Users\Sujan Ajay\Desktop\catalog-module-wt\initiative-requirements\04-scene-images.md`, `05-brand-faces.md`,
   `07-infographics.md`.
 
-## 9. Integration decisions (2026-11-02)
+## 9. Integration decisions
 
 | # | Decision | Why |
 |---|---|---|
@@ -364,4 +368,5 @@ effect) of the first holdout. Pool across brands (M10) and use ad signals for sc
 | D3 | Slice ids renamed `S11.n` to `M11-Sn` | One naming scheme across modules |
 | D4 | The rich-media roles, sources and `renders_text_ids` M11 needs from M0 come in an additive M0 migration when M11 starts (listed in M0 section 2, Later) | M0 P0 role enum is structure; it grows by migration |
 | D5 | Open questions answered: one image per language unless M5 says one gallery serves both; Western digits by default; infographics start from trusted facts; accept the template deviation in depth (it saves re-reading old initiatives) | Design defaults |
-| D6 | Kept for the owner: the biometric and child-data legal route before any face work, and the channel managers' answers on overlays (C19) and video (`../owner-questions.md`) | Legal and marketplace relationships |
+| D6 | Kept for the owner: the channel managers' answers on overlays (C19) and video (`../owner-questions.md`, Q14). The biometric legal route is no longer needed (D7) | Marketplace relationships |
+| D7 | Owner answers: Opptra holds likeness rights for brand models; the owner sets a per-brand likeness flag; the exact model or a lookalike may be generated, never for kids (Q15). No stored face embeddings or biometric templates; identity from model pack inputs, an in-memory similarity check discarded after each attempt, and the sampled audit (Q18, resolved by design). A+ is GCC download pack only; India out of scope (Q17) | Owner decisions recorded in `../owner-questions.md` |

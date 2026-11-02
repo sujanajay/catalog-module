@@ -1,4 +1,4 @@
-# M3 Images - requirements (draft for review, 2026-11-02)
+# M3 Images - requirements (draft for review)
 
 Follows `00-template.md`. Feature ids `M3-F1` to `M3-F11` are the rows of the M3 table in `../module-map.md`, in table
 order. Reuses the still-valid detail of old initiatives 02 (crops), 03 (made photos), 04 (scenes), 05 (faces) and 07
@@ -13,7 +13,7 @@ by the M7 sampled audit.
   else works, with bought generation.
 - **Outcome metric:** apparel options on Namshi and Noon meeting the channel shot set (baseline about 2%, target above
   80%), at a cost per product the M6 meter confirms.
-- **Intents:** I011 (ship in a week), I002 (reuse what exists), I003 (fallbacks everywhere), I025 (cost and time),
+- **Intents:** I011 (ship the critical slice first), I002 (reuse what exists), I003 (fallbacks everywhere), I025 (cost and time),
   I021 (settings), I014 (human only where needed), I037 (images are one part of content).
 
 ## 2. Scope
@@ -39,7 +39,8 @@ Later). Skipped: shopper try-on widgets (M3-F10) and digital twins or 3D (M3-F11
   limits, required roles in order, head-cut rule, crop size bars, crops allowed, generated images allowed.
 - **M7:** routing for `image.matte`, `image.upscale`, `image.make.*`; the verdict on every generated image; the audit
   sample's results (a failed audit pulls an image).
-- **M12:** brand switches (generation on, hosted services allowed, kids on model, intimates on model) and rights rows.
+- **M12:** brand switches (generation on, hosted services allowed, kids on model, intimates on model) and the
+  per-brand likeness flag (owner only, Q15).
 
 ### 3.2 Writes (to M0)
 - Every output as a content version: role, source kind (`brand`, `crop`, `upscaled`, `generated`, `vendor`), parent
@@ -333,14 +334,23 @@ Build (nobody has GCC shot policies as data).
     (Kontext-class editing) > Photoroom (hosted, last, only when the brand allows hosted services); `tryon` and
     `model_swap` Vertex virtual try-on > FASHN (failed outputs not charged) > Photoroom virtual try-on; `ghost_to_model`
     Photoroom Plus > FASHN > Gemini image; `background` and `scene` (M11, Later) Photoroom > Gemini image > FLUX.
-  - Runs only when all hold: brand generation on (off by default), the brand's rights record (M12-F3-R5) is valid and
-    says "may generate the model's likeness" (mode A redraws the brand's own model, so it is a likeness use; gate 1
-    keeps likeness rights with a person), the channel's `generated_allowed` on (seed off on
+  - Runs only when all hold: brand generation on (off by default), the brand's **likeness flag** (M12-F3-R5) is on
+    (mode A redraws the brand's own model, so it is a likeness use; Opptra holds likeness rights for brand models (owner
+    answer Q15), and the owner sets the flag per brand, so the person step is per brand, never per product), the
+    channel's `generated_allowed` on (seed off on
     every channel until its AI stance is recorded; Noon's "only photographs are permitted" rule is open), the role is
     required and no crop can fill it, at least one usable photo shows that view, not kids, not `unknown` taxonomy, and
     the caps allow it.
   - References: every usable photo of the product (no size charts, collages, made photos or Brand DNA logos), full
-    resolution, in the order on-model fronts, backs, sides, details, fabric, flat front, flat back, pack.
+    resolution, in the order on-model fronts, backs, sides, details, fabric, flat front, flat back, pack. When the
+    likeness flag is on, the references may also include the brand's model reference photos (the model pack, M12-F3-R7),
+    taken from the brand's own photos or the brand's website. The output may show the exact model or a lookalike of the
+    brand's model; never a child lookalike (kids only as the brand's own kids model, M11).
+  - Identity consistency without biometric data (owner decision Q18): no face embeddings or biometric templates are
+    stored anywhere (database, files, logs, caches or exports). Consistency comes from (a) the brand's model reference
+    photos as generation inputs, (b) a visual similarity check between the output and the reference, computed in memory
+    for that attempt and discarded (only the pass or fail and the score number are kept with the attempt), and (c) the
+    M7 sampled human audit at the higher rate for people (1 in 10 adults).
   - Prompts are code-owned sentences only (old initiative 03): same person, same lighting, plain background in the
     channel's grey; forbid adding, moving or restyling any logo, label, print, embellishment or text; no more skin than
     the references; nothing added the references do not show. Text inside a photo is never an instruction. Operator
@@ -370,13 +380,14 @@ Build (nobody has GCC shot policies as data).
 
 ### M3-F7 Ghost mannequin and flat lay to on-model (P2)
 Turns mannequin or flat photos into on-model shots for brands that send only flats (Cardio Bunny one photo per colour,
-Anta flat apparel). Buy through `image.make` `ghost_to_model` (Photoroom Plus, FASHN, Gemini image); needs brand rights
-for model use and the M7 fidelity check. Measured by fidelity pass rate and acceptance.
+Anta flat apparel). Buy through `image.make` `ghost_to_model` (Photoroom Plus, FASHN, Gemini image); needs the brand's
+likeness flag on (Q15) and the M7 fidelity check. Release R3 in `../roadmap.md`. Measured by fidelity pass rate and acceptance.
 
 ### M3-F8 Try-on and model swap (P2)
-Puts the garment on a licensed model (Vertex virtual try-on, FASHN, Photoroom). Gated by a rights row with "may
-generate the model's likeness"; measured face identity needs a commercially licensed face model (InsightFace weights
-are non-commercial as published). Human approval for likeness rights per brand (settled HITL rule).
+Puts the garment on the brand's own model, the exact model or a lookalike (Vertex virtual try-on, FASHN, Photoroom).
+Gated by the brand's likeness flag, set by the owner (Q15). No face identity model and no stored face data: identity
+consistency follows the M3-F5 rule (reference photos as inputs, in-memory similarity check discarded after the
+attempt, sampled audit; Q18). Human step: the owner sets the flag per brand (settled HITL rule). Release R3.
 
 ### M3-F9 Colour variants from one shot (Later)
 Makes other colourways from one photo (Photoroom colour replace). Needs the M7 colour check (Delta E against the brand's
@@ -439,13 +450,14 @@ Needs brand programmes and rights we do not have.
 
 Open questions are listed per feature, each with a default.
 
-## 9. Integration decisions (2026-11-02)
+## 9. Integration decisions
 
 | # | Decision | Why |
 |---|---|---|
 | D1 | No output is ever held: when matting or upscaling fails, the slot follows M1-F3's rule table (provisional render, improved later); edited 4.2.9 test 1 | M3 and M7 said "output held", which contradicts gate 1 (no per-SKU queue) and M1-F3 |
-| D2 | Mode A generation also needs a valid rights record with "may generate the model's likeness" | It redraws the brand's own model; gate 1 keeps likeness rights with a person |
+| D2 | Mode A generation also needs the brand's likeness flag on (replaces "a valid rights record with may generate the model's likeness") | It redraws the brand's own model; the owner holds likeness rights (Q15) and sets the flag per brand |
 | D3 | Made-photo numbering (101 upward) and slot rows are M3's own tables, not M0 fields; M0 stores the position per version | Keeps M0's contract small |
 | D4 | The holdout treatment (experiment 1) is M3-F1 crops on Namshi and Noon only, rendered with the 240 grey; slices M3-S1 to M3-S4 are on the holdout critical path | Gate 1 and M4-F2-R7 |
 | D5 | Open questions answered: Styli and Centrepoint crops off until recorded; never HS crops of a kids model; keep the 482 px bar, raise to 1,000 px if audits show soft crops; Shein image 1 white stays an `assumed` M5 row (not a gate-1 rule); grey `#F0F0F0`; Namshi order copies Noon until confirmed; no overflow contract in P0 | Technical defaults or already settled |
 | D6 | Kept for the owner: channel managers' written stance on crops (Styli, Centrepoint) and on generated images (all channels), and paid generation and overflow vendor contracts (`../owner-questions.md`) | Marketplace relationships and money |
+| D7 | Owner answers: Q15 likeness rights held by Opptra, per-brand flag set by the owner, exact model or lookalike allowed (never for kids); Q18 no stored face embeddings or biometric templates, identity from reference inputs plus an in-memory similarity check and the sampled audit | Owner decisions recorded in `../owner-questions.md` |

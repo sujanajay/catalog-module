@@ -1,4 +1,4 @@
-# M9 Publish and monitor - requirements (draft, 2026-11-02)
+# M9 Publish and monitor - requirements (draft)
 
 Planning only. Follows `00-template.md`. Feature ids follow the row order of the M9 table in `../module-map.md` (M9-F1 is
 the first row). Words defined once: a **listing file** is a marketplace's own bulk spreadsheet for creating products (Noon
@@ -33,7 +33,8 @@ rule so it does not repeat. Outcome metrics: share of published content verified
 
 **Later:**
 - India channels next (Amazon.in, Flipkart, Myntra): their templates use the generic parser; Myntra and Flipkart have
-  downloadable error reports that plug into M9-F3.
+  downloadable error reports that plug into M9-F3. India is out of scope for now (owner answer Q17; `../roadmap.md`
+  section 15).
 - Marketplace APIs where allowed (Trendyol first), re-enrichment after go-live (both P2).
 
 ## 3. Contracts
@@ -191,7 +192,7 @@ buy Noon tracking from 42Signals or proxy capacity from Bright Data if blocks pe
 - Where does the scraper code live and who owns it? Default: extend it where it lives today (data team), with M9 owning the
   new fields and the verification job in this repo.
 
-### M9-F2 Listing files per channel (P1, after the Streamoid and Rubick demo)
+### M9-F2 Listing files per channel (P1, after the buy or build decision; release R4)
 
 **Story.** As Naaz, next to the links sheet I download each channel's own listing file already filled with identifiers,
 image links, attributes, English and Arabic text, with only the cells the system truly cannot know shaded and listed, and I
@@ -239,24 +240,27 @@ products: zero wrong cells; coverage of non-commercial cells at or above the own
 of each is accepted, or its exact rejection is recorded and fixed; a forced fill failure leaves the batch done with its links
 sheet unchanged.
 
-**Buy or build.** Build after the demo, unless the demo shows a vendor already produces accepted Noon and Namshi files.
-What the demo must answer for files and publishing:
-1. Do you produce a filled Noon NIS file in English plus Arabic and a Namshi upload file today? Show one that a portal
-   accepted, with the date.
-2. Styli, Centrepoint, 6th Street: what do you deliver for managed channels?
-3. Amazon.in, Flipkart, Myntra: which templates do you fill, and how do you keep them current when the channel changes them?
-4. Do you push by API to any GCC channel? Through whose account and credentials?
-5. Do you read rejection or error reports (Noon Imports, Myntra and Flipkart error reports) and fix them automatically? Do
-   fixes become rules so the error does not repeat?
-6. Do you check what is live after upload?
-7. Can you fill from our data (we send products, facts, text and links; you return the file) without becoming our system of
-   record?
+**Buy or build.** Build after the buy or build decision, unless it shows a vendor already produces accepted Noon and
+Namshi files. There are no vendor demos (owner answer Q4): the decision rests on the website teardown of Streamoid and
+Rubick (report: `C:\Users\Sujan Ajay\Desktop\catalog-module\.runs\2026-11-03-streamoid-rubick.md`) plus our own prototype fill of a Noon file (M8-S0). Anything the
+teardown cannot show from public sources counts as "not shown".
+What the teardown must answer for files and publishing:
+1. Is there public evidence of a filled Noon NIS file in English plus Arabic, or a Namshi upload file, accepted by a
+   portal?
+2. Styli, Centrepoint, 6th Street: what do they deliver for managed channels?
+3. How do they keep channel templates current when a channel changes them?
+4. Do they push by API to any GCC channel? Through whose account and credentials?
+5. Do they read rejection or error reports (Noon Imports) and fix them automatically? Do fixes become rules so the error
+   does not repeat?
+6. Do they check what is live after upload?
+7. Can they fill from our data (we send products, facts, text and links; they return the file) without becoming our
+   system of record?
 8. Price per file or per product, and turnaround for 2,000 products.
 
-**Decision rule.** Buy or partner for files only if on the 30-product pack: zero wrong cells against our golden fill;
-coverage at or above ours; Noon and Namshi files accepted on a real upload; they take our data and return files with our ids
-(we stay the system of record); and price within the owner's ceiling. A partner may be right for India channel files even if
-we build GCC files.
+**Decision rule.** Build unless the teardown shows public evidence for 1, 5 and 7 and a price within the owner's ceiling.
+If it does, Sujan may approve a paid trial (gate G4) on the 30-product pack; buy or partner for files only if the trial
+gives zero wrong cells against our golden fill, coverage at or above ours, Noon and Namshi files accepted on a real
+upload, files returned with our ids (we stay the system of record), and the price within the ceiling.
 
 ### M9-F3 Liveness and rejection feedback (P1)
 
@@ -372,7 +376,7 @@ Key copy for failure moments:
 |---|---|---|---|
 | M9-S1 (P0, part of S7) | Scraper fields for Noon and Namshi galleries (UAE, KSA): image URLs, count, titles EN and AR, pHash; Trendyol and Amazon feeds mapped; BigQuery table; gallery count per option for the holdout pool | channel keys in M0 (M0-F1); legal OK for own-listing scrape | M9-F1 acceptance test 4, then 3 |
 | M9-S2 (P0) | Gallery-level states from M0's `verified_live` and `observed_other` events, contamination alert (from M0's incident), coverage line, Ops "Live check" block | M9-S1, M0-S6 matcher | M9-F1 acceptance tests 1 and 2 |
-| M9-S3 (P1, after demo) | Template registry, parsers (Noon NIS, generic Excel, CSV), bindings, three-step admin flow | M5 channel registry, demo decision | An admin adds a Noon and a Namshi template without a deploy and confirms every binding |
+| M9-S3 (P1, after the buy or build decision) | Template registry, parsers (Noon NIS, generic Excel, CSV), bindings, three-step admin flow | M5 channel registry, buy or build decision (M8-S0 memo) | An admin adds a Noon and a Namshi template without a deploy and confirms every binding |
 | M9-S4 (P1) | Fill inside finalize with links, facts, M8 text and Arabic; shading; "Needs you"; re-read; "I uploaded this file"; golden fill compare tool | M9-S3, M2 facts contract, M8-S1 (and M8-S2 for Arabic) | M9-F2 acceptance test |
 | M9-S5 (P1) | Rejection sources connected (error file drop, liveness reasons, Noon policy violations), reason taxonomy, `Rejection` rows | M0 listing state; data team for the stale Noon feed | M9-F3 acceptance test |
 | M9-S6 (P1) | Rejection learning: fix requests, rule proposals, unmapped grouping, proactive sweep, weekly digest | M9-S5, M5-S5 editor, M3 and M8 fix entry points | M9-F4 acceptance test |
@@ -383,16 +387,16 @@ Key copy for failure moments:
 |---|---|---|
 | Scraping blocked, or against a site's terms; Saudi pages may need a Saudi network exit | Live verification and the holdout start date break | Own listings only, low rate, legal review first; fallback Trendyol counts (3,628 options matched) and bought tracking (42Signals) |
 | Marketplaces re-compress or crop our images | False drift | pHash with a tuned threshold; tune on the first 200 verified pairs |
-| The holdout treatment is a bulk upload by the channel team in week one (no API) | `submittedAt` unknown | Channel team clicks "I uploaded this file" or tells the M4 owner the date; live watch gives `liveFrom` anyway |
+| The holdout treatment is a bulk upload by the channel team (no API) | `submittedAt` unknown | Channel team clicks "I uploaded this file" or tells the M4 owner the date; live watch gives `liveFrom` anyway |
 | Noon not-live feed stale since 21 Aug | Reason coverage target missed | Ask the data team to restore it (owner: data team); error file drop as a bridge |
 | Portals may refuse a file with an extra tab or shading | First upload rejected | Side file fallback; first upload per channel is a checked step (initiative 9) |
 | Managed channels (Styli, Centrepoint, 6th Street) send no template | No files for them | Push method `managed_by_channel`; send the links sheet; ask the account teams through M5-F5 |
 | Amazon flat files are `.xlsm` (macros) | ExcelJS cannot write them | Ask for `.xlsx`; else Amazon waits for M9-F5 |
 | Rejection reasons are generic (reported for Flipkart) or missing | Learning has little to learn from | Group and map once; count `unknown` and push channels for better reasons |
-| A vendor in the demo already does Noon files and Arabic well | Building M9-F2 is waste | The decision rule above is written before the demo |
+| A vendor already does Noon files and Arabic well | Building M9-F2 is waste | The decision rule above is written before the teardown report is read |
 | Who clicks "I uploaded this file" when the channel team uploads | Missing submit dates | Default: whoever uploads; the M4 owner checks it for the holdout |
 
-## 9. Integration decisions (2026-11-02)
+## 9. Integration decisions
 
 | # | Decision | Why |
 |---|---|---|
@@ -402,3 +406,4 @@ Key copy for failure moments:
 | D4 | Holdout listings are scraped daily for the whole window | M4 had weekly after week 3 |
 | D5 | Open questions answered: scraper fields are built where the scraper lives today, with M9 owning the new fields and the verification job in this repo (the data team owner is asked in `../owner-questions.md`); try plain fetches for Saudi pages first | Technical defaults |
 | D6 | Kept for the owner: legal review of scraping our own listings, a small Saudi proxy budget if plain fetches are blocked, the data team's help (scraper, stale Noon not-live feed), who clicks "I uploaded this file", Trendyol API credentials (`../owner-questions.md`) | Legal, money, people, marketplace relationships |
+| D7 | Owner answers: legal OK to scrape our own listings (Q2); no vendor demos, the website teardown plus our prototype decide M9-F2 (Q4); the data team default applies (Q3); India out of scope (Q17) | Owner decisions recorded in `../owner-questions.md` |
