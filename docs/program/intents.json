@@ -374,6 +374,22 @@
    "intent": "Enable GCP billing export to BigQuery for exact cost per product",
    "test": "Billing export table exists and the cost meter reads it",
    "status": "failing"
+  },
+  {
+   "id": "I047",
+   "area": "decisions",
+   "quote": "all the decisions that you need from me are yes",
+   "intent": "Gate 1 approved 2026-11-02: all 7 brief decisions yes (bg 240+/white Amazon img1; holdout 10-17 Nov; Supabase, ila-pg read, billing export; draft title lengths + HSN format check; crops only on Namshi/Noon until AI stance known; demo Streamoid and Rubick; scrape own listings now)",
+   "test": "Decisions reflected in requirements docs",
+   "status": "done"
+  },
+  {
+   "id": "I048",
+   "area": "planning",
+   "quote": "Right now, just do the end-to-end planning. For the execution part, I will tell you",
+   "intent": "Produce full end-to-end plan (requirements per module and feature, build roadmap); execute nothing until Sujan says what to execute",
+   "test": "Requirements docs for all 13 modules plus roadmap committed",
+   "status": "in_progress"
   }
  ]
 }
