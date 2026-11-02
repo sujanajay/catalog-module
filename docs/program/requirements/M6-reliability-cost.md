@@ -1,0 +1,470 @@
+# M6 Cost, capacity and reliability - requirements (2026-11-02)
+
+Status: draft for Sujan's review. Planning only; no code changed, nothing run against production. Follows
+`00-template.md`. Feature ids and priorities come from `../module-map.md` section M6 and slices S4 and S5. Two of
+Sujan's explicit asks (quota asks, tiered tests) are P1 in the map; they are written closer to full depth here because
+he asked for them by name.
+
+Words used here (defined once):
+- **Billing export**: Google Cloud's daily copy of the bill into a BigQuery table, line by line, with labels. Being
+  enabled now (intent I046).
+- **Billable instance time**: the seconds Cloud Run charges for, including start-up, waiting and the idle tail after
+  the last request (about 15 minutes on instance-billed GPU services). This is what the bill counts, not the seconds a
+  model was busy.
+- **Ledger**: our own per-event cost table, `catalog_cost_events`.
+- **Idle pool**: billed cost that no batch event explains (start-ups, idle tails, waiting).
+- **Reconciliation**: comparing the ledger with the bill every day and showing the gap.
+- **Revision**: one deployed version of a Cloud Run service. **Traffic shift**: moving requests from the old revision
+  to the new one. **Drain**: letting the old revision finish what it is doing before it stops.
+- **Expand and contract migration**: change the database in two steps, first add (old and new code both work), and
+  only a release later remove what the old code needed.
+- **Incident**: anything that stopped or slowed a batch without the operator causing it (a stall, a dropped task, a
+  timeout, an outage).
+- **Tiered tests**: fast checks first, slower and costlier checks only when the change needs them.
+
+## 1. Purpose
+
+- **Why:** the cost ledger says USD 0.004 per product against USD 0.08-0.15 measured on the GPU default (about 60x
+  low; 67x on load 5), a deploy took about 2.5 hours (31 Oct, 01:49 to 04:15 UTC) and batches are kept away from
+  deploys, quotas cap throughput, a load test once took the live site down (20 Oct), and changes take hours to verify.
+- **Outcome metrics:** cost per product within 10% of the GCP bill; zero batches failed by a deploy; 99% of batches
+  reach "links ready" with no person; a typical change verified in under 15 minutes.
+- **Intents:** I015, I025, I029 (live-tool audit findings), I034, I035, I036, I046.
+
+## 2. Scope
+
+**In (first slice):** the true cost meter (every attempt logged, daily reconciliation with monitoring now and the
+billing export when it exists, idle as its own line), batches that survive deploys (and shorter deploys), batch success
+and incident tracking.
+
+**In (P1, inside the 12 weeks):** idle control, retry and checkpoint as a rule, quota and machine sizes, separate
+load-test capacity, tiered tests.
+
+**Out:** product features, pricing to customers (M12), vendor contracts (M7 bake-offs pick vendors; M6 meters them).
+
+**Later:** full blue-green across GPU services (module map disagreement 7: not a week-one item), multi-region
+failover, per-customer billing.
+
+## 3. Contracts
+
+**Reads from M0:** batch, option and content version ids (to price cost per version and per option); the change log
+cursor is not needed.
+
+**Writes for others:** `catalog_cost_events` rows (extended), daily cost tables, batch outcomes and incidents. M1 shows
+the batch's true cost and success in its digest; M12's Ops page shows the rest; M0 contamination incidents (an outside
+change on an experiment listing) are written to the same incident table.
+
+**API and table shapes.**
+- `recordCost(event)` in `packages/core/src/catalog/cost.ts` (exists as the ledger writer) gains `content_version_id`,
+  `attempt_outcome` covering every failure, and `component` (the Cloud Run service or job name).
+- New tables (section 7.1): `catalog_cost_days`, `catalog_cost_allocations`, `catalog_vendor_invoices`,
+  `catalog_batch_outcomes`, `catalog_incidents`.
+- `GET /api/catalog/ops/cost?from&to` and `GET /api/catalog/ops/reliability?from&to` for the Ops page.
+- Labels on every Cloud Run service and job: `app=catalog`, `component=<name>`, `env=live|preview|test` (services are
+  labelled today; jobs are not).
+
+**Contract needs from M0:** `content_version_id` on outputs (M0-F2) so cost per version is a join, and option ids on
+products (M0-F1) so cost per option is a join. Nothing else.
+
+## 4. Features
+
+### M6-F1 True cost meter (P0)
+
+**User story.** As Sujan, I want one number for what a product really costs (GCP plus vendors, including idle and
+failures), that matches the Google bill, per batch, per brand and per day.
+
+**What exists.** `catalog_cost_events` records priced events (judge calls, matte and upscale calls, render compute)
+with `outcome`, `estimated` and `attempt`; `catalog_batches.cost` and `spend_days` hold totals; `cost-report.ts` feeds
+the Ops page. The cost report (2026-11-02) lists why it is low: it prices service-reported inference seconds, not
+billable time; failed calls are missing; worker waiting is not counted; jobs, web, Cloud SQL, storage and egress are
+not metered; rates are list prices.
+
+**Functional requirements.**
+- M6-F1-R1: Every paid attempt writes a ledger row, including failures, 429 and 5xx retries, timeouts, duplicate
+  deliveries, fallbacks and calls whose delivery was killed (the enlargement `call_started_at` pattern of spec 18 3.10
+  is applied to every paid call).
+- M6-F1-R2: The worker records its own request wall time per delivery as `kind = compute`, `stage` of the work, so
+  waiting on matting or upscaling is in the ledger (load 5: ledger 24,945 vCPU-s against 181,000 billable worker
+  seconds).
+- M6-F1-R3: Jobs (load, invariants, recheck, evals, smoke, cleanup, backfill, export) write one ledger row per run
+  with their billable seconds, `batch_id` when they belong to one, else `component` only.
+- M6-F1-R4: A daily reconciliation job (`catalog-cost-reconcile`, Cloud Run job) computes per day and per component:
+  - **billed** cost: from the billing export when it exists (rows with `labels app=catalog`, grouped by `component`
+    label, net of credits); before that from Cloud Monitoring `billable_instance_time` times the list price per
+    component, marked `source = monitoring`, `estimated = true` (the method of the cost report);
+  - **attributed** cost: the ledger's rows for that component and day;
+  - **idle pool** = billed minus attributed (never negative; a negative gap is an alert, it means the ledger
+    over-counts).
+- M6-F1-R5: The idle pool is spread over the day's batches in proportion to their attributed busy seconds on that
+  component, written to `catalog_cost_allocations`. A day with billed cost and no batch shows the whole amount as
+  "idle, no batch" (for example a GPU idle tail after a test).
+- M6-F1-R6: Shared costs not labelled by service: Cloud SQL `ila-pg` is split by an admin-set share (default: the
+  catalog's share of the connection budget, 104 of 393); GCS storage and egress by bucket labels; Artifact Registry and
+  Cloud Build as "platform" lines. Each appears as its own line, not hidden in per-product cost.
+- M6-F1-R7: Vendors off the GCP bill (OpenRouter today; Photoroom, FASHN and others later) use the vendor's reported
+  cost per call; an admin enters the monthly invoice total in `catalog_vendor_invoices` and the gap is shown like the
+  GCP gap.
+- M6-F1-R8: The billing export lands with a delay. The reconciliation runs for day D at D+1 06:00 UTC (provisional)
+  and re-runs at D+3 (final); the Ops page marks provisional days.
+- M6-F1-R9: True cost per product for a batch = (attributed + allocated idle + its share of shared lines) divided by
+  products with links; shown next to the marginal cost (attributed only). The M1 digest and the batch page show the
+  true number.
+- M6-F1-R10: A daily check: ledger plus idle plus shared lines equals billed within 1% (arithmetic check), and the
+  monitoring estimate is within 10% of the export once both exist (method check). Either failing raises an alert.
+- M6-F1-R11: Rates in code (`DEFAULT_PRICE_*` in `cost.ts`, `COMPUTE_USD_PER_VCPU_SECOND` in `deploy.sh`) stay only
+  for the live estimate and the wizard estimate; reported cost comes from reconciliation. When the export shows a
+  different effective rate (discounts, credits), the estimate rates are updated from it monthly (admin setting, not a
+  deploy).
+
+**Non-functional.** Reconciliation job under 10 minutes a day, 1 database connection, BigQuery query cost under USD 1 a
+month. Ledger writes add under 2 ms per call. Accuracy target: true cost within 10% of billing per day and per month
+(I025); arithmetic closure within 1%.
+
+**Admin configuration.** Shared-cost split rules (Cloud SQL share, platform lines), reconciliation schedule, alert
+thresholds, vendor invoice entry, estimate rates.
+
+**Inputs and outputs.** In: ledger, billing export (`gcp_billing_export_resource_v1_<account>` style detailed table;
+the exact name and columns are confirmed against Google's documentation when the export exists), Cloud Monitoring
+`billable_instance_time`, vendor invoices. Out: `catalog_cost_days`, `catalog_cost_allocations`, true cost per batch,
+product and brand, the Ops cost card.
+
+**Human in the loop.** A billing admin enables the export once (asked in gate 1, decision 3). An admin enters vendor
+invoices monthly until vendors offer a usage API. Nothing per batch.
+
+**Edge cases and failure modes.**
+- Export not enabled yet: monitoring method, labelled estimated (about plus or minus 30% per the cost report until the
+  per-product counts come from the database).
+- A service without labels: its billed cost shows as "unlabelled" and raises an alert; `deploy.sh` refuses to deploy a
+  service or job without `app` and `component` labels.
+- Preview and load-test stacks: labelled `env=preview` or `env=test` and reported apart, never in operator cost.
+- Credits or refunds arrive late: the D+3 re-run picks them up; later corrections show as a month-level line.
+- The shared `ila-pg` changes tier: the share setting is reviewed (alert when the instance's billed cost changes by more
+  than 20%).
+
+**Buy or build.** Build. Nobody gives one cost across vendors and own GPUs; FinOps tools (for example Google's own cost
+reports) show cost by service, not by batch or product. Google's billing export is the bought part (free).
+
+**Acceptance tests.**
+1. For one real batch day after the export exists: the Ops page's billed total for `app=catalog` equals a hand query
+   of the billing export for that day within 1%, and the batch's true cost per product is within 10% of (that day's
+   billed catalog cost divided by products made that day) when only that batch ran.
+2. Kill the upscaler mid-batch: the failed calls appear in the ledger with `outcome = failed`, and the day's idle line
+   is shown separately.
+3. Before the export exists: the same page shows the monitoring estimate marked "estimated", within 10% of a hand
+   calculation from `billable_instance_time` (the cost report method).
+
+**Open questions.**
+- Q: How to split `ila-pg`? Default: by connection budget share (catalog 104 of 393), reviewed when the tier changes.
+- Q: Show INR as well? Default: yes, at the admin-set rate (`INR_PER_USD` exists).
+
+### M6-F2 Batches survive deploys (P0)
+
+**User story.** As an operator, I want to start or keep running a batch at any time, including while a deploy runs,
+and never lose it or see the site go down. As the team, we want a typical deploy to take minutes, not hours.
+
+**What exists.** Every service deploys through `deploy_service` (`infra/lib/gate.sh`, spec 17): a no-traffic candidate,
+a probe on its tag URL, then a traffic shift to exactly that revision; a failing probe leaves traffic where it was;
+rollback in seconds; unchanged services SKIP. Queues never lose slots before the new worker is live
+(`infra/lib/queues.sh`). Chunk queues retry 429 and 503 for 30 minutes, enlarge lanes retry without limit, chunk leases
+recover lost work in minutes (spec 15, spec 17 G4). The connection budget is checked in `deploy.sh`. Gaps: the ingest
+queue still gives up after 5 attempts (7bdee361 was left "ingesting"), the deploy runs the long CPU-upscale and GPU
+probes even when only web or worker code changed (31 Oct: the CPU upscale gate alone took about 35 minutes), the
+migration step has no written rule that it must work with the previous release's code, the worker has no defined
+behaviour on shutdown, the protocol keeps heavy runs and deploys apart by people, and logins expired twice
+mid-deploy.
+
+**Functional requirements.**
+- M6-F2-R1 (database): every migration is additive and works with both the live code and the new code (expand and
+  contract). A CI check fails any migration that drops, renames or retypes a column or table, adds `NOT NULL` without a
+  default, or adds a CHECK that existing rows may break, unless the file is marked `-- contract: <release>` and the
+  previous release no longer reads the object.
+- M6-F2-R2 (tasks): every task body carries a version number; the worker accepts the current and the previous
+  version, and ignores fields it does not know. A test runs the previous release's task bodies against the new
+  handlers.
+- M6-F2-R3 (shutdown): on SIGTERM the worker stops claiming new chunks, finishes or checkpoints the photo in hand,
+  releases or lets lapse its leases, and returns before the shutdown grace ends. A delivery cut off by shutdown is
+  re-sent by the queue and resumed from the checkpoint; it never counts as a failed attempt.
+- M6-F2-R4 (queues): no queue drops a task because of a deploy. The ingest queue moves to the same rule as the enlarge
+  lanes: unlimited attempts with the handler deciding when a row is terminal (it counts real failures on the upload
+  row), backoff 10 s to 15 min. The sweep re-sends an intake task when an upload has been `ingesting` with no progress
+  for 30 minutes.
+- M6-F2-R5 (overlap budget): during a traffic shift the old and new worker revisions can both hold connections. The
+  connection budget in `deploy.sh` counts the candidate's probe instances and the old revision's instances together,
+  and refuses a shape that does not fit.
+- M6-F2-R6 (web): the web keeps serving through a deploy (traffic shift is atomic); the new web works with the old
+  worker and the old web with the new worker (one release apart), which the gate already orders (web before worker).
+  Browser polls that hit a moved route get a JSON error the wizard retries, never a crash page.
+- M6-F2-R7 (shorter deploys): a probe runs only for a service whose image digest or deploy flags changed (extend the
+  existing SKIP to the probe step); the matting, upscale and GPU probes run in parallel when more than one changed; the
+  worker smoke runs on the new worker against the live matting services when those did not change. Target: a web or
+  worker-only change deploys in under 30 minutes end to end; a full deploy with GPU changes under 75 minutes.
+- M6-F2-R8 (pre-flight): `deploy.sh` checks the gcloud login has at least 3 hours left (and the Cloud Build and job
+  identities work) before building, and stops with the login command otherwise (two deploys stopped on an expired
+  login, 30 and 31 Oct).
+- M6-F2-R9 (pinned source): deploys run from a pinned worktree at the merged commit (retrospective c1.2), and every
+  script takes the image tag once (c3.5); `deploy.sh` refuses a dirty tree (exists).
+- M6-F2-R10 (no human quiet window): the rule "do not deploy while a batch runs" is retired once R1-R5 pass their
+  acceptance test; the deploy prints the batches in flight and proceeds.
+- M6-F2-R11 (mid-batch shape changes): a deploy never lowers max instances or queue slots below what in-flight batches
+  were dispatched against until those batches finish; a lower shape is applied when the stack is idle (the deploy
+  waits up to 30 minutes, then applies with a warning).
+
+**Non-functional.** Zero failed or duplicated outputs caused by a deploy; batch delay from a deploy under 5 minutes; no
+user-visible error page during a deploy; rollback under 1 minute per service (exists).
+
+**Admin configuration.** None at runtime; deploy shape stays in `infra/lib/shape.sh` (structure, not business
+settings). The "wait for idle before lowering shape" timeout is an env value.
+
+**Inputs and outputs.** In: commits on main. Out: live revisions, a deploy report with duration per step, in-flight
+batches before and after.
+
+**Human in the loop.** Sujan approves production deploys (manager rules). Nobody watches batches during a deploy.
+
+**Edge cases and failure modes.**
+- A migration that cannot be made additive (rare): two releases, expand first, contract later; the CI check forces it.
+- A GPU service change during a batch: the candidate is probed with no traffic; the old revision keeps serving; the
+  worker's matting client already retries busy answers.
+- Cold start of a new GPU revision after the shift: the enlarge lanes answer 503 without counting (spec 18 3.8), so
+  tasks wait instead of failing.
+- A deploy fails half way: earlier services are live, later ones untouched (exists); in-flight batches continue on the
+  mix because of the one-release compatibility rule.
+- Old instances killed before finishing (Cloud Run's shutdown grace is short): R3 checkpoints and leases cover it.
+
+**Buy or build.** Build (our scripts). Cloud Run gives revisions, tags and traffic shifts; no product is needed.
+
+**Acceptance tests.**
+1. On the preview stack, start a 200-product batch, then deploy a worker-only change and a web change while it runs.
+   The batch finishes with the same output count and hashes as a run without a deploy, no output failed or duplicated,
+   no task dropped, its success record says `deploy_overlap = true`, and the web never returned an error page to a
+   Playwright session polling the batch page.
+2. Repeat with a matting GPU change: same result.
+3. A worker-only change deploys to live in under 30 minutes, measured from `deploy.sh` start to `DEPLOY_OK`.
+4. CI rejects a test migration that drops a column without the contract marker.
+
+**Open questions.**
+- Q: Keep the human quiet-window rule until the test passes on live? Default: yes; retire it after one live deploy with a
+  real batch in flight passes acceptance test 1's checks.
+
+### M6-F3 Batch success tracking (P0)
+
+**User story.** As Sujan, I want every batch to record whether it reached "links ready" without a person and without an
+incident, so reliability is a number, not a feeling.
+
+**Functional requirements.**
+- M6-F3-R1: At finalize, each batch writes one `catalog_batch_outcomes` row: `success` (links ready, no operator touch
+  after upload, no incident), `links_ready_at`, `first_links_at`, `duration`, `touches` (count of operator writes after
+  upload: decisions, retries, Fix and continue, reopen, cancel), `incidents` (count), `deploy_overlap` (bool),
+  `products`, `products_with_links`, `true_cost_usd` (from F1, filled when reconciled).
+- M6-F3-R2: Incidents are written to `catalog_incidents` by the code that sees them: the sweep (no progress, failed
+  batch), invariants (any ERROR), queue give-ups, Cloud Run 5xx bursts linked to a batch window, deploy refusals,
+  contamination from M0, and alerts from `infra/monitoring.sh`. Each has `kind`, `severity`, `batch_id` (if any),
+  `started_at`, `resolved_at`, `cause` (free text plus a code), `repeat_of` (the earlier incident of the same kind).
+- M6-F3-R3: Touches are counted by the API layer (every operator POST on a batch or output after the batch's first
+  upload), not by guessing from logs.
+- M6-F3-R4: Test and load batches are recorded with `is_test` and excluded from the success rate.
+- M6-F3-R5: The Ops page shows the 7-day and 30-day success rate, incidents by kind, repeat incidents, and the slowest
+  batches. A success rate under target for a day raises an alert.
+- M6-F3-R6: Worker ingest and chunk deliveries log one INFO line per outcome with batch and upload ids (the 574f2025
+  investigation found successful ingest logged nothing).
+
+**Non-functional.** Under 50 ms added to finalize; incidents written within 5 minutes of detection.
+
+**Admin configuration.** Success target (default 99%), which incident kinds count against success.
+
+**Human in the loop.** None; the manager reads the weekly number.
+
+**Edge cases.** A batch cancelled by the operator: recorded, `success = false`, cause `cancelled`, excluded from the
+rate only when cancelled within 10 minutes of start (a mistake, not a failure). A batch extended by a follow-up: each
+batch has its own row; the parent links to the child.
+
+**Buy or build.** Build (internal).
+
+**Acceptance tests.**
+1. Run three real batches: one clean, one where the operator presses Try again once, one where the upscaler is stopped
+   for 20 minutes. The Ops page shows success, touches 1, and one incident with cause and resolution time.
+2. The 7-day success rate on the Ops page equals a hand count from `catalog_batch_outcomes`.
+
+**Open questions.**
+- Q: Does a provisional link count against success? Default: no (it is by design); an exception (no link at all) does
+  not either, but both are shown.
+
+### M6-F4 Idle control (P1)
+
+**Story.** As the cost owner, I want GPU warm windows shared by many products, because idle is the biggest cost (about
+60% of GPU matting seconds; each cold cycle costs about USD 0.31 on L4 and USD 0.96 on RTX PRO 6000).
+**Key requirements.** Batches dispatched in bursts per lane so one warm window covers them; an optional min-instances
+of 1 only during a batch window, and only when gaps are under 15 minutes; no CPU upscaler fallback by default (GPU
+default since 31 Oct; the CPU lane stays for rollback); test whether a smaller RTX shape fits the model (CPU and memory
+are 59% of its per-second price). Metric: idle share of GPU seconds (baseline about 60%; target under 30%).
+**Acceptance test.** Two 200-product batches started 10 minutes apart show one warm window per GPU service, and the
+reconciled idle line for the day is under 30% of GPU cost.
+**Buy or build.** Build (dispatch and shape settings).
+
+### M6-F5 Retry and checkpoint as a rule (P1)
+
+**Story.** As the team, we want every network and database call retried and every long job resumable, so the same kind
+of incident never comes back in a new place (retrospective b3, b4).
+**Key requirements.** Every network and database call that is safe to repeat goes through `retryTransient`
+(`packages/core/src/retry.ts`); `isTransientError` covers Postgres `53300`, `57P01`, `08006`, `ECONNREFUSED`, GCS 429
+and 503; a lint rule flags direct calls to the storage, database and HTTP clients outside the wrappers; every job or
+delivery that can run over 10 minutes writes progress and resumes (the 30-minute grouping timeout of 7bdee361 was this
+class). Metric: repeat incidents of the same kind (from F3).
+**Acceptance test.** The fault proxy (`apps/worker/src/fault-proxy.ts`) injecting 5% resets on storage and database
+calls during a 200-product preview batch leaves the batch successful.
+**Buy or build.** Build.
+
+### M6-F6 Quota and machine sizes (P1, explicit ask)
+
+**Story.** As Sujan, I want the exact quota requests to file so 2,000 SKUs an hour is possible, and to know which one
+matters first.
+
+**Key requirements.** File these asks (from the 2026-11-02 cost and quota report; sizing per product: 9.35
+enlargements, 4.7 photos, about 42 outputs, about 125 worker vCPU-seconds):
+
+| Quota | Region | Now | Ask | Why |
+|---|---|---|---|---|
+| Cloud Run memory allocation | asia-south2 | 400 GiB | 800 GiB | 8 RTX instances x 80 GiB; today only 5 fit |
+| RTX PRO 6000 GPU (no zonal redundancy) | asia-south2 | shown as "6000" (unit to confirm) | 8 GPUs | 5.2 enlargements per second at 2,000 SKUs/h needs 6 |
+| NVIDIA L4 (no zonal redundancy) | asia-southeast1 | 3 | 8 | 2.6 cut-outs per second needs about 4, plus warm-up |
+| Cloud Run CPU allocation | asia-south1 | 400 vCPU | 600 vCPU | worker 32 x 4 plus fallbacks, preview and the ila and npd apps; deploys were refused at 374 of 376 |
+| Instances per project | project | 100 | 200 | the sum of service max in asia-south1 is already about 106 |
+| Cloud Run CPU allocation | asia-south2 | 200 vCPU | keep (240 for 10 instances) | 8 x 20 = 160 |
+| OpenRouter account | n/a | unknown | confirm paid key and no daily cap | about 3.9 judge calls per second at 2,000 SKUs/h |
+
+After grants: raise the GPU upscaler max from 4 to 8, the `catalog-enlarge-bulk` queue to 7 per second and 32
+concurrent (the `shape.sh` rule), and the L4 matting max to 8, through a normal gated deploy. Order of value: RTX plus
+asia-south2 memory first (enlargement is the limiting stage), then L4, then asia-south1 CPU and instances. The script
+`infra/request-gpu-upscale-quota.sh` exists and has not been run (31 Oct report).
+**Metric.** Throughput at 2,000 SKUs per hour (baseline: 28.9 source photos per minute steady on 29 Oct, before the GPU
+upscaler).
+**Acceptance test.** A load run in a separate capacity window (F7) reaches 2,000 SKUs per hour for 30 minutes with no
+quota refusal and no 429 burst above the queue's retry budget.
+**Buy or build.** Process (quota requests) plus shape changes.
+**Human in the loop.** A project owner files the requests (Sujan or the GCP admin); the manager prepares the text.
+
+### M6-F7 Separate load-test capacity (P1)
+
+**Story.** As an operator, I never want a test to slow or break the live site (20 Oct outage, about 10 minutes, from a
+load test on the shared database).
+**Key requirements.** Load tests, fault injection and long evals never run on the shared stack while anyone uses it;
+they run on the preview stack (`infra/deploy-preview.sh`) with its own database capacity (a temporary Cloud SQL
+instance created and stopped by an idempotent `infra/` script, owner-approved for cost) or, failing that, in an
+announced quiet window under the connection budget; the load driver refuses to start when a non-test batch is in
+progress. Metric: outages caused by tests (baseline 1; target 0).
+**Acceptance test.** Starting the load driver while a real batch runs is refused with a clear message; the same load on
+the preview stack leaves live latency unchanged.
+**Buy or build.** Process plus a small script.
+
+### M6-F8 Tiered tests (P1, explicit ask)
+
+**Story.** As Sujan, I want a typical change verified in under 15 minutes instead of hours, without losing the checks
+that matter.
+
+**Key requirements.** Five tiers, each with a time budget, and a rule for which tiers a change needs:
+
+| Tier | What | When | Budget |
+|---|---|---|---|
+| T0 | Lint, typecheck, unit tests related to changed files (`vitest related`), on the builder's machine | every change, before a commit | under 3 minutes |
+| T1 | CI: lint, typecheck, all unit tests in 4 parallel shards, infra and matting tests, intake browser scenarios (`.github/workflows/ci.yml` today) | every PR | under 10 minutes wall |
+| T2 | Real-photo regression set in CI (about 30 real sources with stored mattes, `packages/core/test/regression/`, retrospective c2.1) | PRs touching render, matte, shadow, crop, QA | under 5 minutes, parallel with T1 |
+| T3 | Preview-stack batch: a 20-product golden subset on the built images (spec 10 checkers) | PRs touching the pipeline, before deploy | under 15 minutes |
+| T4 | Deploy gates and the per-brand smoke (exists) | every deploy, only for changed services (F2-R7) | under 30 minutes for web or worker |
+| T5 | Full evals, the 300-product golden set (M7), load tests | nightly or before a release, on separate capacity (F7) | spend cap per run |
+
+Path rules in one file (for example `docs/specs/test-tiers.json`) say which paths need T2 and T3; CI reads it to
+skip what a change cannot affect, and always runs T1. A PR template line states the tiers run. Retire nothing without
+naming what replaces it (retrospective c1.7). Metric: typical change verified in under 15 minutes (median PR from push
+to green T1 and any needed T2), measured from CI run times.
+**Acceptance test.** A copy-only web change is green in under 10 minutes; a render change runs T1 and T2 in under 15
+minutes and T3 on preview in under 15 more.
+**Buy or build.** Build (CI configuration and the regression set). Vitest sharding and `related` are already available
+in the tool we use.
+**Open question.** Current T1 wall time is not recorded in the evidence; the first slice measures it (default target
+stays 10 minutes).
+
+## 5. Operator experience
+
+Operators see M6 only through calm screens:
+- **During a deploy:** nothing. No banner, no pause. The batch page keeps updating.
+- **Batch page and digest:** "Cost: USD 0.11 per product (true cost, matched to the Google bill on 4 Nov)" or, before
+  reconciliation, "Cost so far: about USD 0.11 per product (estimate)".
+- **If something stalls:** the batch recovers by itself; the operator sees "Taking longer than usual; it will carry on
+  by itself" only after 10 minutes without progress, never a button they must press.
+
+**Ops page (`/catalog/ops`, admins):** three cards.
+- **Cost:** billed, attributed, idle and shared lines per day and component; true cost per product per batch and brand;
+  the gap check (green within 10%); vendor invoice gaps.
+- **Reliability:** 7 and 30-day batch success rate, incidents by kind and repeats, deploys with batches in flight and
+  their result.
+- **Capacity:** quota use per region against limits, throughput of the last batches, idle share of GPU seconds.
+
+## 6. Measurement
+
+| Metric | Baseline | Target | Data source |
+|---|---|---|---|
+| Gap between our cost and the bill | about 60x low (67x on load 5; ledger USD 0.0042 vs about USD 0.28 per product) | within 10% per day and month | `catalog_cost_days` vs billing export |
+| True cost per product (GPU default) | estimated USD 0.08-0.15 | measured, then reduced by idle control | reconciliation |
+| Batches failed by a deploy | batches kept away from deploys by people | 0 | `catalog_batch_outcomes.deploy_overlap` with `success` |
+| Deploy duration, web or worker change | about 2.5 h for the 31 Oct full release | under 30 min | deploy report |
+| Batch success rate (links ready, no person, no incident) | not tracked | 99% | `catalog_batch_outcomes` |
+| Repeat incidents of the same kind | not tracked | falling month on month | `catalog_incidents.repeat_of` |
+| Idle share of GPU seconds | about 60% | under 30% | reconciliation |
+| Throughput | 28.9 source photos per minute steady (29 Oct, CPU upscaler) | 2,000 SKUs per hour | load run on separate capacity |
+| Typical change verified | hours | under 15 min | CI run times |
+| Outages caused by tests | 1 (20 Oct) | 0 | incidents |
+
+## 7. Build slices
+
+| # | Slice | Depends on | Acceptance test |
+|---|---|---|---|
+| M6-S1 | Ledger completeness: every attempt, worker wall time, job rows, labels on jobs, `deploy.sh` label refusal | none | F1 test 2 |
+| M6-S2 | Reconciliation v1 from Cloud Monitoring, idle and shared lines, allocations, Ops cost card | M6-S1 | F1 test 3 (module map S5 first half) |
+| M6-S3 | Reconciliation from the billing export (switch source, D+1 and D+3 runs, vendor invoices) | M6-S2; billing export enabled | F1 test 1 |
+| M6-S4 | Deploy safety: migration lint in CI, task body versions, worker SIGTERM drain, ingest queue unlimited attempts and sweep re-send, overlap budget, login pre-flight | none | F2 tests 1, 2 and 4 on preview |
+| M6-S5 | Shorter deploys: probe SKIP per changed service, parallel probes, smoke on live matting when unchanged, mid-batch shape rule | M6-S4 | F2 test 3 |
+| M6-S6 | Batch outcomes, incidents, touch counter, ingest INFO lines, Ops reliability card | none (M1 digest reads it later) | F3 tests 1-2 |
+| M6-S7 | P1: idle control, retry sweep, quota requests and shape raise, separate load capacity, tiered tests | S1-S6 as listed per feature | the P1 acceptance tests |
+
+S1, S4 and S6 can start in parallel. S3 waits only for the billing export.
+
+### 7.1 Database migrations (additive only)
+
+One migration after M0's `0009` and M1's, for example `0011_cost_reliability.sql`, with the `lock_timeout` and
+`IF NOT EXISTS` pattern of `0008_batch_indexes.sql`:
+
+| Change | Kind | Notes |
+|---|---|---|
+| `ALTER TABLE catalog_cost_events ADD COLUMN component text`, `content_version_id uuid`, `billable_ms integer` | additive, nullable | old rows stay valid |
+| Extend `COST_KINDS` with `job` and `wait`, `COST_OUTCOMES` with `timeout`, `killed`, `duplicate` | CHECK constraint replaced by a wider one | widening only: drop and re-add the CHECK with a superset in one transaction; old code never writes the new values |
+| `CREATE TABLE catalog_cost_days` | new | day, component, region, env, source (billing, monitoring), billed_usd, credits_usd, attributed_usd, idle_usd, shared_usd, provisional, computed_at; unique `(day, component, env, source)` |
+| `CREATE TABLE catalog_cost_allocations` | new | day, batch_id, component, attributed_usd, idle_usd, shared_usd; unique `(day, batch_id, component)` |
+| `CREATE TABLE catalog_vendor_invoices` | new | vendor, month, amount_usd, entered_by, entered_at |
+| `CREATE TABLE catalog_batch_outcomes` | new | primary key `batch_id`; fields in F3-R1 |
+| `CREATE TABLE catalog_incidents` | new | fields in F3-R2; indexes on `(kind, started_at)`, `batch_id` |
+
+Reused unchanged: `spend_days`, `catalog_batches.cost` (they stay for the live estimate and the cost line until the
+reconciled number replaces the display), the invariants job, the sweep.
+
+## 8. Risks and open questions
+
+| Risk or question | Effect | Mitigation or default |
+|---|---|---|
+| Billing export delayed or not granted | Cost stays an estimate (about plus or minus 30%) | Monitoring reconciliation now (S2); S3 switches when the export lands |
+| Export naming and columns differ from what we expect | S3 rework | Confirm against Google's documentation and the real table before S3 starts |
+| Shared `ila-pg` cost split is a judgement | Per-product cost moves with the rule | Show it as its own line; admin setting |
+| Cloud Run shutdown grace is short | Lost work on shift | Checkpoints and leases already recover; R3 makes it clean, acceptance test proves it |
+| Quota requests refused or slow | 2,000 SKUs per hour not reached | Order asks by value; CPU matting overflow in asia-south1; bought cut-outs only as overflow |
+| asia-south1 vCPU at 374 of 376 | Deploy refusals | 600 vCPU ask; lower CPU upscaler max now that GPU is default |
+| Retiring the quiet-window rule too early | A deploy hurts a real batch | Retire only after acceptance test 1 passes on live with a real batch |
+| Tiered tests skip a needed check | A defect reaches the live site | T1 always runs; path rules reviewed when a defect slips; the regression set grows with every finding |
+| Open: CI wall time today | | Measure in the first slice |
+| Open: smaller RTX shape | | Test in M6-F4 before raising the GPU max |
+
+## 9. Integration decisions (2026-11-02)
+
+| # | Decision | Why |
+|---|---|---|
+| D1 | Build order inside M6 (one writer per module): S4 deploy safety first (it protects every other slice's deploys), then S1, S6, S2, S5, S3 | Batches must survive deploys before many workers start deploying |
+| D2 | M6 owns cost and incidents; vendor routes and their ranking belong to M7 (M12 writes them through M7) | M12 said M6 holds the service ranking; M7-F2 owns the route table |
+| D3 | Open questions answered: `ila-pg` split by connection budget share; show INR as well; keep the human quiet window until one live deploy with a real batch passes F2 test 1; provisional links do not count against batch success; measure CI wall time in S4 | Technical defaults |
+| D4 | Kept for the owner: filing the quota requests, confirming the OpenRouter paid key, the billing export, and approving a temporary Cloud SQL instance for load tests (`../owner-questions.md`) | Money and project-owner actions |
