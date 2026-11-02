@@ -53,16 +53,16 @@ M10 turns M4's readouts into a growing, honest body of knowledge about what cont
 ### API and queue shapes
 
 - `POST /change-types` and `GET /change-types`: admin edits the taxonomy; versions are kept.
-- `POST /classify`: `{content_version_before, content_version_after}` -> change types with confidence. Called by M0 on every publish so the treatment log is classified at write time.
+- `classify(before, after)`: `{content_version_before, content_version_after}` -> change types with confidence. A library call plus a job that reads M0's change log by cursor and writes `change_classification`; M0 does not call it (M0 has no outbound calls). At write time the producing module stamps the `change_type_id` it already knows (M3 knows a crop fills a shot set), so M0-F3-R9 is met from day one; the classifier checks and refines it later (integration decision D2).
 - `GET /effects?scope=...`: the current posterior for a scope, with the plain-words label.
 - `POST /hypotheses`, `GET /hypotheses?status=queued&order=value`.
 - `POST /recommendations/{id}/approve|reject` (owner); `promotion.created`, `promotion.revoked` events consumed by M3, M8, M9.
-- Consumed events: `experiment.readout_ready` (refit), `content.published` (classify), `warehouse.panel_ready` (leading indicators refresh).
+- Consumed: `experiment.readout_ready` (refit), M0 change log by cursor (classify), `warehouse.panel_ready` (leading indicators refresh), M8's search-term table `catalog_os.search_terms_daily` (written once by M8-S3; M10 does not run a second search-term job).
 
 ### Contract needs from M0
 
 1. `change_type_id` on every `treatment_event` from day one (M10 supplies taxonomy v0 in week one: about ten rows, enough for images and the first text changes).
-2. A content diff between two versions in a machine-readable form (which image roles added, removed, reordered; title before and after; attributes changed), so classification is a rule, not a guess.
+2. Both versions of every change (`from_version_id`, `to_version_id`) with role, position, source and text. M10 computes the diff itself (which roles added, removed, reordered; title before and after); M0 stores no diff.
 3. `change_reason = learning` with the `recommendation_id` and `promotion_id` on every change M10 caused, so a promotion is itself measurable as a staggered rollout.
 4. Enough history (M0's backfill) that the first classification run can label the changes already made by the live tool since October.
 
@@ -138,7 +138,8 @@ M10 has no operator in the batch sense; its readers are the owner and admins, an
 
 | # | Slice | Depends on | Acceptance test |
 |---|---|---|---|
-| M10-S1 | Change-type taxonomy v0 as data plus the `POST /classify` rule classifier; M0 calls it on publish; backfill of October outputs (F1) | M0 content versions and diffs | 95% of backfilled diffs classified; 48 of 50 agree with a hand check |
+| M10-S1a (P0) | Change-type table v0 as data (the F1-R1 list), seeded, read by every producer to stamp `change_type_id` | none (merges before M0-S3 starts writing events) | Every type in F1-R1 exists with component, action and cost class; M0-S3's publish test writes `img_shotset_crops` |
+| M10-S1b (P1) | Rule classifier over the M0 change log by cursor; backfill classification of October outputs (F1) | M10-S1a, M0-S3, M0-S5 backfill | 95% of backfilled diffs classified; 48 of 50 agree with a hand check |
 | M10-S2 | Priority score, measurability gate and the first quarterly plan (F2) | M4 panel and MDE harness; M6 cost classes | Plan ranks as in the F2 acceptance test with inputs visible |
 | M10-S3 | Leading indicators job and hypothesis queue (Appendix B.4): ad click rate screens, search-rank from M9 where scraped, winning-term detection | warehouse ads tables; M9 | Queue shows hypotheses with source badges and ranges; none appears in the grid |
 | M10-S4 | Predictive traits model v1 (Appendix B.4): image and text traits -> units, within brand x channel x price band, labelled association | M2 analyzer outputs on live listings | Hold-out fit reported; top 10 trait hypotheses added to the queue with ranges |
@@ -146,7 +147,7 @@ M10 has no operator in the batch sense; its readers are the owner and admins, an
 | M10-S6 | Decision rules and recommendations with promotion and permanent holdout (Appendix B.2, F5) | M10-S5; M4 registry | A "Scale" card creates a promotion with a 10% holdout registered in M4; M3 applies the default on the next batch |
 | M10-S7 | Cross-pollination change set (Appendix B.3, F4) | M8 titles and backend terms; M5 rules; M11 infographics where accepted | A winning term on Noon becomes one change set across title and backend terms, logged with its parent signal and measured as a change type |
 
-Order: S1 in the first slice week (it is the only M10 piece M4 needs on day one); S2 and S3 inside the 12-week window; S4 when M2 covers live listings; S5 and S6 after the week-8 readout; S7 after M8 ships text.
+Order: S1a in the first slice week (it is the only M10 piece M4 needs on day one), S1b inside the 12-week window; S2 and S3 inside the 12-week window; S4 when M2 covers live listings; S5 and S6 after the week-8 readout; S7 after M8 ships text.
 
 ## 8. Risks and open questions
 
@@ -242,3 +243,14 @@ Order: S1 in the first slice week (it is the only M10 piece M4 needs on day one)
 ### B.5 ROI line
 
 Every M10 action is tied to money through the same arithmetic: yearly value = revenue touched in the scope x posterior lift (as a range), minus yearly cost of applying (M6). Recommendations show the range, never the mean alone. The module's own ROI is the sum of promoted changes' value measured on their permanent holdouts, plus the spend stopped by "Likely not" and "Harmful" findings, both reported as ranges on the Coverage page.
+
+## 9. Integration decisions (2026-11-02)
+
+| # | Decision | Why |
+|---|---|---|
+| D1 | M10-S1 split: S1a (taxonomy v0 table, P0, tiny) and S1b (classifier and backfill, P1). Only S1a is in the first slice | M4's P0 treatment log needs `change_type_id`; M10-F1 is P1 in the module map, so a P0 feature depended on a P1 one |
+| D2 | Producers stamp `change_type_id` at write time; the classifier reads M0's change log by cursor and refines | M0 makes no outbound calls on publish |
+| D3 | One search-term job (M8-S3) writes `catalog_os.search_terms_daily`; M10-S3 reads it for winning terms | M8-F3 and M10 B.3 each read the same paid search-term tables |
+| D4 | The pooled model runs in the same Python service as M4's estimators (`services/measurement`) | One new runtime, not two |
+| D5 | Open questions answered: sceptical Normal(0, 0.10) prior, shifted by at most a quarter of the predictive model; 0.9 for "Proven", 0.8 "Likely" applied by default only for negligible cost classes after one owner approval of the class; 10% permanent holdout on promotions, re-drawn yearly; no brand cells before wave 2 | Method defaults the requirements already justify |
+| D6 | Kept with the owner as gates (not questions): approving the first three promotions of any change type, and any promotion above USD 500 a year or touching brand-truth content | Settled human checks |

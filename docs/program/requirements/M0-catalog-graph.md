@@ -46,8 +46,10 @@ Words used here (defined once):
 M4's), scraping marketplaces (M9), deciding experiments (M4), channel rules (M5).
 
 **Later:** change reasons as a required field (P1), variants and size runs (P1), brand master with channel overlays
-(P1), hardline and India options (same tables, loaded when those lines start), multi-tenant ids (M12, when a second
-customer exists).
+(P1), hardline and India options (same tables, loaded when those lines start), multi-tenant isolation (M12, when a
+second customer exists; the `org_id` column itself ships in P0 on every new table), the rich-media roles and sources
+M11 needs (`infographic`, `scene`, `aplus_module`, `video`; `code_drawn`, `composite`; `renders_text_ids`), added by an
+additive migration when M11 starts.
 
 ## 3. Contracts
 
@@ -62,12 +64,12 @@ Reuse first. Five existing tables already hold part of the graph and stay the so
 | Tool product | `catalog_products` | reused, one new column | `id` | The image tool's product (one identifier per brand); links to an option through `option_id` (new, nullable) |
 | Source photo | `catalog_source_images` | reused | `id`, `sha256` | Brand photos the tool received, per batch, with `is_current`, `replaces_id` |
 | Rendered image | `catalog_outputs` | reused, one new column | `id` | One image per product x channel x position, with public URL, `is_live`, `published_at`, `superseded_at`; links to its content version through `content_version_id` (new, nullable) |
-| **Option** | `catalog_options` | **new** | `id`; unique `(brand_slug, option_key)` | One row per style-colour. `option_key` = the warehouse option id (`sku_map.option_id_style_color`, else `gcc_marketing.sku_option.option_id` for the SKU, else `sku:<opptra_sku>` for the 935 SKUs with neither). Holds brand, line, product type, department, audience, `key_source` (master, sku_option, sku_fallback) |
+| **Option** | `catalog_options` | **new** | `id`; unique `(brand_slug, option_key)` | One row per style-colour. `option_key` = the warehouse option id (`sku_map.option_id_style_color`, else `gcc_marketing.sku_option.option_id` for the SKU, else `sku:<opptra_sku>` for the 935 SKUs with neither). Holds brand, line, product type, department, audience, `key_source` (master, sku_option, sku_fallback), and the style key: `style_key`, `style_key_source` (brand_style_code, name_colour_rule, own_cluster), `style_key_confidence` (0-1) (F1-R8) |
 | **Channel listing** | `catalog_channel_listings` | **new** | `id`; unique `(option_id, channel, market)` | One row per option x channel x country. `channel` uses the existing `CHANNEL_IDS`; `market` is `ae` or `sa` (or `ae_sa` where a channel has one key for both, such as `styli_ae_ksa`). Holds `status` (unknown, live, not_live, not_listed), `first_seen_live_at`, `last_verified_at` |
 | **Listing key** | `catalog_listing_keys` | **new** | unique `(channel, market, key_kind, key_value)` | Every key a listing is known by, at SKU level: `opptra_sku`, `key_kind` (zsku, child_zsku, partner_sku, barcode, asin, seller_sku, style_id), `key_value`, `source` (master, sales, scrape, manual), `first_seen_at` |
 | **Asset** | `catalog_assets` | **new** | `sha256` (primary) | One row per distinct binary (image or later video): `uri` (gs://), `mime`, `width`, `height`, `bytes`, `phash` (64-bit perceptual hash), `first_seen_at` |
-| **Content version** | `catalog_content_versions` | **new** | `id`; unique `(option_id, scope, component, content_hash, producer, producer_ref)` | Immutable. `component` (image, title, bullet, description, attribute, size_chart, keyword; video later). `scope` (master, or a channel id). `role` for images (front, back, side, detail, head_shoulders, full_length, flat, packshot, size_chart, unknown). `position` (1-based, the slot it was made for). `source` (brand, scraped_live, crop, cleanup, upscaled, generated, vendor, operator). `ai_generated` (bool, never null). `producer` (module id M1-M11 or `backfill`) and `producer_ref` (for example an output id). `asset_sha256` for binaries or `text_value` / `json_value` for text and attributes. `content_hash` = sha256 of bytes or of the normalized text. `parent_version_ids` (lineage). `public_url` (the tool link, if any). `batch_id`, `is_test`, `created_by`, `created_at` |
-| **Change event** | `catalog_change_events` | **new** | `seq` (bigserial, the read cursor); unique `idempotency_key` | Append-only. `listing_id`, `slot` (component + position, for example `image:3`, `title`), `from_version_id`, `to_version_id` (null = slot emptied), `kind` (see 3.2), `at` (when it happened, not when it was written), `recorded_at`, `evidence` (channel_field, scrape, tool_publish, channel_upload_record, operator, backfill), `evidence_ref` (table and row, scrape id, file), `actor`, `reason_kind` (rule, experiment, operator, learning, outside_change, backfill, auto_decide; nullable until P1), `reason_ref`, `batch_id`, `experiment_id` |
+| **Content version** | `catalog_content_versions` | **new** | `id`; unique `(option_id, scope, component, content_hash, producer, producer_ref)` | Immutable. `component` (image, title, bullet, description, attribute, size_chart, keyword; video later). `scope` (master, or a channel id). `role` for images (front, back, side, detail, head_shoulders, full_length, flat, packshot, size_chart, unknown). `position` (1-based, the slot it was made for). `source` (brand, scraped_live, crop, cleanup, upscaled, generated, vendor, operator). `ai_generated` (bool, never null). `producer` (module id M1-M11 or `backfill`) and `producer_ref` (for example an output id). `asset_sha256` for binaries or `text_value` / `json_value` for text and attributes. `content_hash` = sha256 of bytes or of the normalized text. `parent_version_ids` (lineage). `public_url` (the tool link, if any). `language` (`en`, `ar` or null for images), `market` (null when the version serves every market of the channel), `route_id` (the M7 route that made it, null for brand photos and code-only renders; never shown to operators), `prompt_version` (null unless a model wrote it), `settings_snapshot_id` (the M12 settings version set the batch used), `org_id` (default `opptra`), `batch_id`, `is_test`, `created_by`, `created_at` |
+| **Change event** | `catalog_change_events` | **new** | `seq` (bigserial, the read cursor); unique `idempotency_key` | Append-only. `listing_id`, `slot` (component + position, for example `image:3`, `title`), `from_version_id`, `to_version_id` (null = slot emptied), `kind` (see 3.2), `at` (when it happened, not when it was written), `recorded_at`, `evidence` (channel_field, scrape, tool_publish, channel_upload_record, operator, backfill), `evidence_ref` (table and row, scrape id, file), `actor`, `reason_kind` (rule, experiment, operator, learning, outside_change, backfill, auto_decide, rejection_fix, new_content; **required on every new event from P0**, see F3-R9), `reason_ref` (rule id, experiment id, winner or promotion id, rejection id), `change_type_id` (from the M10 change-type table v0; null only for `observed_other` and backfill rows the classifier has not reached), `change_set_id` (groups events across listings and slots that one decision made, for example one keyword winner or one treatment upload), `batch_id`, `experiment_id`, `org_id` |
 | **Live interval** | `catalog_live_intervals` | **new, derived** | unique `(listing_id, slot, valid_from)` | Rebuilt from change events: which version held a slot from when to when, and whether that is `verified` (seen on the channel) or `assumed` (delivered but not yet seen). This is the table that answers "what was live where and when" |
 | **Treatment assignment** | `catalog_treatment_assignments` | **new** | unique `(experiment_id, listing_id)` | Written by M4 only. `arm` (treatment, control, excluded), `pair_id`, `assigned_at`, `frozen_at`, `do_not_touch` (bool), `released_at` |
 | **Outcome link** | view `catalog_outcome_keys` (and its BigQuery copy) | **new, derived** | `(listing_id, key_kind, key_value)` | The join from a listing to `fact_gcc.unified_sales_tertiary_v2` (mapped SKU, EAN, channel SKU, `style_id`), `gcc_marketing.ads_daily` (channel SKU), `catalog_live_noon_3p_*` (partner SKU), Trendyol (barcode), Amazon (seller SKU, ASIN) |
@@ -97,15 +99,15 @@ The one small contract from the module map: **content version in, outcome join k
 | Module | Writes to M0 | Reads from M0 |
 |---|---|---|
 | M1 Intake | `planned` and `links_delivered` events (through publish), reason `auto_decide` for provisional picks | Option and listing resolution for an identifier; brand and channel history for defaults; last live versions per slot |
-| M2 Analyze | Facts about versions (role, framing) as attribute versions, scope master | Versions and assets to analyze |
+| M2 Analyze | Readings, taxonomy and gap reports in M2's own tables keyed by asset sha256, version id and option id; trusted listing attributes (P1) as attribute versions, scope master | Versions and assets to analyze |
 | M3 Images | Image versions with role, source (crop, cleanup, upscaled, generated), lineage, `ai_generated` | Source versions; frozen flag before making anything |
 | M4 Measurement | Treatment assignments, freezes, releases | Live intervals, outcome keys, change events per listing (BigQuery export) |
-| M5 Rules | nothing | Listing channel and market, slot roles (to check a set) |
+| M5 Rules | Rule results in M5's own `catalog_rule_results` table keyed by content version id; `reason_kind = rule` with rule id and ruleset version on changes a rule caused | Listing channel and market, slot roles (to check a set) |
 | M6 Cost | nothing (cost rows carry `content_version_id` where known) | Version and batch ids to price cost per version and per option |
 | M7 Quality | Audit results as version annotations (P1) | Versions and lineage (to compare a generated image with its source) |
 | M8 Text | Text and attribute versions | Master versions, channel overlays (P1) |
-| M9 Publish and monitor | `submitted` events; scrape observations through `recordObservation` | Live intervals, listing keys |
-| M10 Learning | `reason_kind = learning` on its changes | Change events with change types, live intervals, outcome keys |
+| M9 Publish and monitor | `submitted` events; scrape observations through `recordObservation` (M0's verifier does the matching for every source, F3); gallery-level verification states (partial, reverted, not_found) in M9's own table | Live intervals, listing keys, change events by cursor |
+| M10 Learning | `reason_kind = learning` with recommendation or promotion id on its changes; the change-type table v0 that every producer stamps on its events | Change events by cursor (it classifies from `from_version_id` and `to_version_id`; M0 stores no diff), live intervals, outcome keys |
 
 ### 3.4 API shape
 
@@ -116,6 +118,7 @@ All modules live in one repo and one database, so the contract is a TypeScript m
 // Resolution
 resolveOption(input: { brandSlug: string; identifier?: string; opptraSku?: string; optionId?: string; ean?: string }): Promise<OptionRef | null>
 resolveListing(input: { channel: ChannelId; market: Market; keyKind?: KeyKind; keyValue?: string; optionId?: string }): Promise<ListingRef | null>
+resolveOptions(inputs: ResolveInput[]): Promise<(OptionRef | null)[]>   // bulk, up to 2,000 per call (M1 grouping)
 
 // Versions (content in)
 recordVersion(v: NewContentVersion): Promise<{ versionId: string; created: boolean }>   // dedupes on the unique key
@@ -128,7 +131,9 @@ readChanges(afterSeq: bigint, limit: number, filter?: { kinds?: ChangeKind[]; li
 liveAt(listingId: string, at: Date): Promise<Record<SlotKey, { versionId: string; state: "verified" | "assumed" } | null>>
 
 // Guards (experiments)
-isWritable(listingId: string): Promise<{ ok: true } | { ok: false; reason: "frozen_control" | "frozen_treatment"; experimentId: string }>
+isWritable(listingId: string, ctx?: { experimentId?: string }): Promise<{ ok: true } | { ok: false; reason: "frozen_control" | "frozen_treatment"; experimentId: string }>
+// frozen_treatment: a treated listing accepts only changes that carry its own experiment id (the registered treatment)
+isWritableMany(listingIds: string[], ctx?: { experimentId?: string }): Promise<Map<string, WritableResult>>   // bulk
 assign(a: NewAssignment): Promise<void>   // M4 only; refused for any other producer
 
 // Outcome link (key out)
@@ -144,9 +149,19 @@ consumer stores its last `seq`).
 
 ### 3.5 Contract needs from M0 (summary for the other module docs)
 
-M0 provides: option and listing resolution from any key; immutable versions with hash and lineage; an idempotent
-change log with a cursor; `liveAt`; `isWritable` (frozen controls); outcome keys; the daily BigQuery export. M0 does
-not provide: rules, scores, scraping, sales numbers.
+M0 provides: option and listing resolution from any key (single and bulk); a style key per option with its source and
+confidence (the M4 randomization unit); immutable versions with hash, perceptual hash, lineage, language, market and the
+route that made them; an idempotent change log with a cursor, a required reason, a change type and a change set id;
+`liveAt`; `isWritable` (frozen controls, and treated listings open only to their registered treatment); outcome keys;
+the one live-verification matcher for every evidence source; the daily BigQuery export.
+
+M0 does not provide, and the owning module keeps in its own tables keyed by M0 ids: the taxonomy, attribute definitions,
+readings and gap reports (M2); rules, rule results and image policies (M5); experiments, registry and readouts (M4);
+audit items, golden cases, routes and `pulled` marks (M7); gallery verification states, rejections and listing files
+(M9); change types and classifications (M10); settings versions (M12). M0 does not scrape, score or hold sales numbers.
+
+Consumers read the change log by cursor (`readChanges`). No module calls another module's API from inside an M0 write
+(for example M0 does not call M4 or M10 on publish); M4 and M10 read the log.
 
 ## 4. Features
 
@@ -176,6 +191,13 @@ which listing a product in a batch is.
   `option_id_style_color` resolve to exactly one option. Products that do not resolve stay null and are counted.
 - M0-F1-R7: Listing `status` is updated from the liveness data the tool already reads (`catalog-liveness-job` output
   and channel live exports) at most daily; it never blocks a batch.
+- M0-F1-R8 (style key, P0 because M4 randomizes by style): every option gets a `style_key` that groups the colour
+  siblings of one design. Order: the brand sheet's style code where present; else a name-and-colour rule (the option
+  name with the colour token removed, within one brand and department), with a confidence; an option the rule cannot
+  place with confidence of at least 0.8 (admin setting) becomes its own cluster (`own_cluster`). The warehouse has no
+  style id (`unified_sales_tertiary_v2.style_id` equals the option, checked 2026-11-02). M4 reads the key; the channel
+  team may confirm sibling groups for the top 200 styles (M4 risk table), stored as `brand_style_code` rows. Parent-group
+  keys per channel and size runs stay P1 (F7).
 
 **Non-functional.** Full rebuild of options, listings and keys for 16,358 SKUs in under 5 minutes; incremental sync
 under 1 minute. Uses at most 1 database connection (the job budget in `infra/deploy.sh`). Cost under USD 0.10 a day.
@@ -207,6 +229,8 @@ our sales; a PIM would add a second source of truth and a sync. Fallback: none n
 2. For a Vero Moda SKU with no option id, the option exists with `key_source = sku_fallback`; after the master gains an
    option id and the sync re-runs, the option carries the new key and the old key resolves to it.
 3. A key planted on two listings appears in the conflict list and is not written.
+4. Every softline option has a `style_key`; U.S. Polo options group into styles at about 1.9 options per style (the
+   2026-11-02 heuristic), and every option under the confidence bar is its own cluster.
 
 **Open questions.**
 - Q: Should Trendyol be split by market when the master has one key? Default: yes, from the sales rows' country; else
@@ -297,8 +321,15 @@ confirmed by the channel's own data or a scrape, so that an experiment's pre-per
 - M0-F3-R7: `isWritable` returns `frozen_control` for any listing with a `do_not_touch` assignment; `recordChange`
   refuses `planned` and `links_delivered` events for such listings (the write fails with that reason), so a control
   option can never be published to. M3 and M1 check `isWritable` before making content, so no money is spent on it.
+  A treated listing in a running experiment returns `frozen_treatment` for any change that does not carry that
+  experiment's id, so the arm stays one nameable change (M4-F2-R5).
 - M0-F3-R8: A `observed_other` on a listing in an active experiment raises a contamination incident (written to M6's
-  incident table and shown to M4) the same day.
+  incident table and shown to M4) the same day. M0 detects; M9 sends the alert (M9-F1-R7); M4 accounts for it.
+- M0-F3-R9: Every new change event names `reason_kind` and `change_type_id` (M10's taxonomy v0 seeds the ids in the
+  first slice); the write fails without them, except `observed_other` (no type yet) and backfill rows. Rule and
+  experiment ids go in `reason_ref`. P1 (F6) adds not-live reasons and full `reason_ref` coverage, not the field itself.
+- M0-F3-R10: The perceptual hash match distance is one setting used by every verifier path, including M9's scrape
+  observations (default 6 of 64 bits; distances from 7 to 12 are "uncertain" and stay `assumed`).
 
 **Non-functional.** Verifier runs in under 30 minutes a day for about 30,000 listings; downloads only images whose
 channel URL changed since the last run (Trendyol showed 69 of 17,544 barcodes changing in two weeks). Cost under USD 1
@@ -328,7 +359,8 @@ for Noon, Profitero, DataWeave) sell scraped content data and are the fallback e
 (M9 decides).
 
 **Acceptance tests.**
-1. Publish a crop to a Trendyol listing in a real batch; within 2 days of the channel showing it in
+1. Publish a changed render (for example the new 240 grey background; crops are not published on Trendyol, gate 1) to a
+   Trendyol listing in a real batch; within 2 days of the channel showing it in
    `product_list_trendyol_3p`, `catalog_live_intervals` shows that version `verified` from that day, and the BigQuery
    export has the same row.
 2. Assign a listing to control in a test experiment; a batch that includes its product completes, the product's other
@@ -420,8 +452,9 @@ only (same rule as migrations, M6).
 
 **Story.** As a learner (M10) and an auditor, I want every change to say why it was made (rule id, experiment arm,
 operator, learning engine, outside change), not only who made it.
-**Key requirements.** `reason_kind` becomes required for `planned`, `links_delivered` and `reverted` events; M1, M3,
-M5 and M10 pass the rule id or experiment id; not-live reasons from M9 are attached to listings. Metric: share of
+**Key requirements.** `reason_kind` is already required from P0 (F3-R9, because M4 needs it on day one); P1 makes
+`reason_ref` complete: M1, M3, M5 and M10 pass the rule id or experiment id on every event; not-live reasons from M9
+are attached to listings. Metric: share of
 changes with a reason (baseline for not-live reasons 38%).
 **Acceptance test.** Every change event of a real batch has a non-null reason that names a rule, experiment, operator
 or `auto_decide`.
@@ -431,7 +464,7 @@ or `auto_decide`.
 
 **Story.** As a publisher (M9), I want parent-child groups (style, colour, size) in each channel's form, such as
 Noon's Parent Group Key, so listing files group correctly.
-**Key requirements.** A `catalog_option_groups` table (style level) linking options; size runs from `sku_map.size`;
+**Key requirements.** Builds on the P0 `style_key` (F1-R8): a `catalog_option_groups` table (style level) linking options; size runs from `sku_map.size`;
 per-channel parent keys as listing keys of kind `parent_group`. Metric: listings with broken parent-child groups.
 **Acceptance test.** A Noon listing file for one style with 3 colours and 6 sizes groups correctly on first upload.
 **Buy or build.** Build inside the graph.
@@ -478,14 +511,15 @@ Each slice is one worker in one worktree. S1 in the module map is split into the
 | # | Slice | Depends on | Acceptance test |
 |---|---|---|---|
 | M0-S1 | Migration `0009_catalog_graph.sql` (all new tables, two new nullable columns) and `packages/core/src/graph/` with `recordVersion`, `recordAsset`, `recordChange`, `readChanges`, `liveAt`, `isWritable`, unit tests on a real Postgres | none | Migration applies on a copy of the live schema and re-runs harmlessly; contract tests pass, including idempotency and the control refusal |
-| M0-S2 | Option, listing and key sync from `sku_map` plus sales and channel keys; key conflicts | S1 | Acceptance test 1 of F1 on real BigQuery data (read-only) |
+| M0-S2 | Option, listing and key sync from `sku_map` plus sales and channel keys; key conflicts; style key (F1-R8) | S1 | Acceptance tests 1 and 4 of F1 on real BigQuery data (read-only) |
 | M0-S3 | Write path: ingest records source versions, render records output versions with sha256 and perceptual hash, publish writes `links_delivered` and `removed`; nightly invariant | S1 (S2 for `option_id` on products) | F2 acceptance tests on the preview stack |
 | M0-S4 | BigQuery export job and dataset (`infra/` script, idempotent), alert on freshness | S1 | F5 acceptance tests |
 | M0-S5 | Backfill job (outputs, Trendyol and Amazon history; Supabase when access exists) | S1, S3 | F4 acceptance test |
 | M0-S6 | Live verifier (Trendyol, Amazon, Noon ad key), `recordObservation` for M9, "Uploaded on" action, product history section | S1, S3, S4 | F3 acceptance tests 1 and 3 |
 | M0-S7 | Treatment assignment write path for M4 and the guard wired into M1 and M3 | S1, S3 | F3 acceptance test 2 |
 
-S1 must merge first; S2, S3 and S4 can then run in parallel.
+S1 must merge first. Build order (one writer per module at a time, see `../roadmap.md`): S1, S2, S7, S3, S6, S5; S4
+only adds new files (a job and an `infra/` script) and may run beside S2 to S7 as the roadmap's named exception.
 
 ### 7.1 Database migrations (additive only)
 
@@ -507,6 +541,7 @@ One migration, `packages/core/drizzle/0009_catalog_graph.sql`, generated from `s
 | `CREATE VIEW catalog_outcome_keys` | new | over listings and keys |
 | `ALTER TABLE catalog_outputs ADD COLUMN content_version_id uuid` | additive, nullable | no default, no rewrite; index added in the same migration |
 | `ALTER TABLE catalog_products ADD COLUMN option_id uuid` | additive, nullable | index |
+| Columns named in 3.1 on the new tables: `style_key`, `style_key_source`, `style_key_confidence` (options); `language`, `market`, `route_id`, `prompt_version`, `settings_snapshot_id` (versions); `reason_kind` NOT NULL with a CHECK that allows null only for `observed_other` and backfill, `change_type_id`, `change_set_id` (events); `org_id text NOT NULL DEFAULT 'opptra'` on every new table | part of the new tables | new tables, so no rewrite; `org_id` is added now because it is cheap now and expensive later (M12 Q1) |
 
 No existing column is renamed, dropped or retyped. Foreign keys from new tables to `catalog_batches` use
 `ON DELETE SET NULL` (test cleanup deletes batches) except where a version belongs to a test batch, which cascades.
@@ -528,3 +563,18 @@ tool's product audit trail; the change log is per listing slot and is not a copy
 | Graph grows into a PIM | Scope creep | Out of scope list above; attribute editing stays out until M8 needs it |
 | Open: market for Trendyol keys | | Default: from sales rows, else `ae_sa` |
 | Open: Supabase folder to option mapping where one product sits in 2-3 folders | | Default: all folders load as versions of one option; M2 picks the best set |
+
+## 9. Integration decisions (2026-11-02)
+
+Recorded by the integration pass (`../roadmap.md`, `../owner-questions.md`). They change the sections above where noted.
+
+| # | Decision | Why |
+|---|---|---|
+| D1 | Style key moved into P0 (F1-R8, M0-S2) | M4's P0 holdout randomizes by style; the P1 variants feature was too late |
+| D2 | `reason_kind` and `change_type_id` required on new events from P0 (F3-R9); `change_set_id` added | M4 and M10 need them on the first treatment; M8 and M11 need change sets |
+| D3 | Versions carry `language`, `market`, `route_id`, `prompt_version`, `settings_snapshot_id`; every new table has `org_id` | Contract needs of M7, M8, M12; `org_id` is cheap now |
+| D4 | Treated listings accept only their registered treatment (`frozen_treatment`) | M4-F2-R5 single nameable change per arm |
+| D5 | M0 owns the one live-verification matcher and the pHash setting (default 6, uncertain 7-12); M9 collects observations and owns alerts and gallery states | M0-F3 and M9-F1 both specified matching with different thresholds (6 vs 10) |
+| D6 | No outbound calls from M0 writes; M4 and M10 read the log by cursor | M4 (`POST /treatments`) and M10 (`POST /classify`) assumed M0 would call them, which M0's contract rules out |
+| D7 | Trendyol acceptance test uses a changed render, not a crop | Gate 1: crops only on Namshi and Noon |
+| D8 | Open questions answered: Trendyol market split from sales rows (default kept); fallback SKUs not grouped by name in P0; text in Postgres up to 16 KB; `catalog_os` in `image-links-agent` (default kept); Amazon AE main image verification counts; Supabase as a second backfill pass | Technical defaults, no owner input needed |

@@ -133,12 +133,14 @@ written in code.
 
 ### 3.4 Contract needs from M0
 
-1. Content version roles `title`, `bullets`, `description`, `backend_keywords`, `size_chart`, keyed by product x channel x
-   market x language.
-2. Change sets: several versions across listings and roles grouped under one id with one reason (needed by C-R5).
+1. Content versions with M0 components `title`, `bullet` (one per position), `description`, `keyword` (backend terms),
+   `size_chart`, keyed by option x channel scope x `market` x `language` (M0 3.1).
+2. Change sets: M0's `change_set_id` on change events groups versions across listings and roles under one id with one
+   reason (needed by C-R5). Reason kinds map to M0's list: `new_text` = `new_content`, `rule_change` = `rule`,
+   `keyword_winner` = `learning` (winner id in `reason_ref`), `rejection_fix` = `rejection_fix`.
 3. The control flag and experiment arm readable per listing.
 4. Fact ids stable across versions so `claims` stay traceable.
-5. A field for vendor, model, prompt version and cost on each generated version (M6 cost meter, M7 bake-offs).
+5. `route_id` and `prompt_version` on each generated version (M0 3.1); cost joins from M6's ledger by version id.
 
 ## 4. Features
 
@@ -180,7 +182,8 @@ deploy (M6-F2) by resuming from the last saved product.
 vendor ranking (M7), cost ceiling per product.
 
 **Human in the loop.** None per product. The sampled audit is permanent (2-5%). A person checks any claim about product
-truth only through the audit; a category whose audit fails twice in a row goes back to "audit 20%" until it passes again.
+truth only through the audit; a failing cell follows M7's one audit rule (back to 10% until 100 clean answers; two fails
+of the same cause in 7 days pause text generation in that cell).
 
 **Edge cases.** Product type unknown (no text; digest: "product type unknown"). No trusted facts at all (title from brand,
 gender and product type only; no bullets; digest counts it). Multipacks and sets (title states pack count only when the pack
@@ -385,3 +388,16 @@ All slices after the demo decision, except M8-S0.
 | A keyword winner changes a control listing | Biased experiment | Control flag check (M8-C-R2) with a test |
 | IDQ formula is not published | India target cannot be checked by us | Default: use the IDQ number the Cortina team reads in Amazon.in; ask the Amazon India account team for the definition |
 | Cost of two languages times many channels | Cost per product rises | Generate facts-to-text once per language and derive channel lengths from it where rules allow; cost ceiling setting |
+
+## 9. Integration decisions (2026-11-02)
+
+| # | Decision | Why |
+|---|---|---|
+| D1 | Audit relapse follows M7's single rule (10% until 100 clean answers), not "audit 20%" | M8 and M7 disagreed |
+| D2 | M8's content roles and reason kinds map onto M0's enums (3.4 items 1-2); change sets are M0's `change_set_id` | Two vocabularies for the same fields |
+| D3 | M8-S3 owns the one search-term job and writes `catalog_os.search_terms_daily`; M10 reads it | M8-F3 and M10 B.3 both read the paid search-term tables |
+| D4 | The text audit view is a mode of M7's auditor screen | One auditor screen |
+| D5 | The `learning.keyword_winner` topic stays a worker task queue between M10 and M8 (the existing Cloud Tasks pattern); it is not part of M0 | M0's no-queue rule covers the change log only |
+| D6 | M8-S0 (the throwaway prototype on the 30-product pack) is allowed before the demo; it is a comparison, not the build that gate 1 deferred | Gate 1: demo before building text |
+| D7 | Open questions answered: Noon Arabic title limit = English limit as a warn until the channel answers; IDQ for Cortina = the number the Cortina team reads in Amazon.in | Defaults that need no owner input |
+| D8 | Kept for the owner (`../owner-questions.md`): C01, C03 and C04; the text cost ceiling; native Arabic raters; booking the Streamoid and Rubick demos | Content rules, money, people, vendor relationship |

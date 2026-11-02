@@ -24,8 +24,9 @@ channel (measured through M9 rejections), plus "the next batch follows an admin 
 - An admin editor: change a value, add a rule, add a channel, category or brand scope, see history, preview impact, publish.
 - One pure check function every module calls; effective severity worked out from declared severity, evidence and conflicts.
 - The image set policy per channel x category (M3-F4 is stored here) and channel render specs (canvas, margins, background).
-- Settled decisions applied: background 240+ grey (C10), white for Amazon and Shein image 1; draft title lengths (C02);
-  HSN format-only check (C27).
+- Settled decisions applied: background 240+ grey (C10), white for Amazon image 1; draft title lengths (C02);
+  HSN format-only check (C27). (Shein image 1 white is kept as today's code does, as an `assumed` rule, not as a gate-1
+  decision.)
 
 **Out:**
 - Generating or fixing content (M3, M8 do that); judging taste or truth (M7 does judgement rules); publishing (M9).
@@ -118,10 +119,10 @@ from 01/02, Layer B add-on slots such as size chart and video).
 
 ### 3.4 Contract needs from M0
 
-1. A stable `categoryPath` and `garmentGroup` on every product (from M2 when known, else from the master), so rules can be
-   scoped. Unknown category must be an explicit value, not blank.
-2. A `RuleResult` table keyed by content version id, with ruleset version, so a later readout can say which rules a live
-   listing passed.
+1. A stable `categoryPath` and `garmentGroup` on every product: from M2's `ProductReading` taxonomy node (joined by
+   option id; M0 does not copy it), else from the master. Unknown category must be an explicit value, not blank.
+2. (Owned by M5, not M0.) A `catalog_rule_results` table in M5's own migration, keyed by M0 content version id, with
+   ruleset version, so a later readout can say which rules a live listing passed.
 3. A `ChangeReason` kind `rule` that carries rule id and ruleset version.
 4. A brand record with the exact brand spelling (for the "&" exception in C23 and brand-scoped rules).
 5. The control flag from M4 ("do not touch") readable by any module that acts on a rule change.
@@ -144,14 +145,16 @@ how sure we are, so I never have to read code or the playbook to know what the s
   parity test proves the seeded records equal today's constants before any decision is applied.
 - M5-F1-R4. The settled decisions are applied as ruleset version 2, each with `confirmedBy` set to the gate-1 decision id:
   - C10: background grey at RGB 240 or more (default `#F0F0F0`) for every channel image; image 1 pure white `#FFFFFF` on
-    Amazon and Shein. `channels.ts` `GREY = "#E0E0E0"` stops being the source.
+    Amazon. `channels.ts` `GREY = "#E0E0E0"` stops being the source. Shein image 1 white (today's code) is loaded as a
+    separate rule with evidence `assumed` and `confirmedBy = null`, because gate 1 named only Amazon.
   - C02: Noon title 150 (block); Namshi 200 (block) and 150 (warn); Trendyol 100; Amazon 150 (the "1509" read as a typo);
     Myntra block above 90, warn above 60; the 60 minimum is a warn only where the channel maximum is 100 or more.
   - C27: HSN check is format only (digits, 4 to 8 long; chapter 61 or 62 for apparel, 64 for footwear). The playbook's HSN
     lists are stored as `retired` with reason "finance has not supplied a table".
-- M5-F1-R5. The category tree is data: department, garment group (the six groups of `08-product-facts.md` section 4.2) and
-  garment type, plus `kids`, `multipack` and `unknown`. Non-fashion nodes (home textile: curtains, bedsheets; toys; cookware;
-  small appliances) exist as nodes with no rules, so the gap is visible.
+- M5-F1-R5. Rules scope by the one taxonomy table that M2 owns (M2-F1-R1, created in M2-S1): department, garment group
+  (the six groups of `08-product-facts.md` section 4.2) and garment type, plus `kids`, `multipack` and `unknown`, all seeded
+  there. M5 keeps no second category tree; `categoryScope` is an M2 node id. Non-fashion nodes (home textile: curtains,
+  bedsheets; toys; cookware; small appliances) exist as nodes with no rules, so the gap is visible.
 - M5-F1-R6. Every rule shows a plain sentence generated from its fields, for example "Noon, all categories: title at most
   150 characters. Blocks. Source: playbook, confirmed by owner on 2 Nov 2026."
 - M5-F1-R7. Each operator in the dataset (equals, in_set, between, lte, gte, lt, matches_regex, not_matches_regex, present,
@@ -492,7 +495,7 @@ Each slice is one worker in one worktree. Together M5-S1 to M5-S3 plus M5-S5 tes
 
 | Slice | What | Depends on | Acceptance test |
 |---|---|---|---|
-| M5-S1 | Tables (rules, versions, conflicts, decisions, snapshots, channels, categories, image policies), seed job, gate-1 decisions as v2, BigQuery export | none (M0 export job for the daily copy) | Seed twice: 555 rules, 30 conflicts, v1 and v2; parity test with `channels.ts` passes for v1 |
+| M5-S1 | Tables (rules, versions, conflicts, decisions, snapshots, channels, image policies, rule results; categories are M2's taxonomy), seed job, gate-1 decisions as v2, BigQuery export | M2-S1 taxonomy node ids (M0 export job for the daily copy) | Seed twice: 555 rules, 30 conflicts, v1 and v2; parity test with `channels.ts` passes for v1 |
 | M5-S2 | `evaluate()` library with every operator, effective severity, Unicode counting, judge routing stub | M5-S1 | Unit tests per operator; planted cases (163-character Noon title, open-conflict rule warns, playbook block warns) pass |
 | M5-S3 | Pipelines read the snapshot: batch pins version at start; `channels.ts` and `compliance.ts` numbers come from the snapshot; C10 applied | M5-S1, M5-S2; M6-F2 for deploy survival | Real test batch: Noon, Namshi, Trendyol backgrounds at 240+, Amazon image 1 white; a batch started before a publish keeps its version |
 | M5-S4 | Conflicts screen, decide and reopen, conflict detection on publish, "Blocks M8 text" flag | M5-S1 | Acceptance tests of M5-F2 |
@@ -512,3 +515,16 @@ Each slice is one worker in one worktree. Together M5-S1 to M5-S3 plus M5-S5 tes
 | Non-fashion (Cortina curtains) needs attribute schemas that do not exist | Pilot slips | Category nodes exist with "No attribute list"; the schema ask goes to the Cortina team through M5-F5 |
 | Who decides conflicts per channel | Slow decisions | Default: the owner; medium and low auto-accept after 14 days |
 | Arabic rules have no source anywhere | We write them ourselves | Evidence `assumed`, written by a native speaker, confirmed by the Noon manager through M5-F5 |
+
+## 9. Integration decisions (2026-11-02)
+
+| # | Decision | Why |
+|---|---|---|
+| D1 | No second category tree: M5 scopes rules by M2's taxonomy node ids (F1-R5, M5-S1 depends on M2-S1); "Add a category" (F3-R5) writes into M2's table | M2-F1-R1 and M5-F1-R5 both defined a tree |
+| D2 | Shein image 1 white is an `assumed` rule, not confirmed by gate 1 | Gate 1 named only Amazon; marking Shein as confirmed overstated the decision |
+| D3 | `catalog_rule_results` is M5's own table keyed by M0 version ids | M0 holds no module scores |
+| D4 | Add channel and add category are M5's (M5-S5); M12-S8 only adds the listing-file template mapping and Brand DNA parts to the same flow | M5-F3-R4/R5 and M12-F1-R9 duplicated the flow |
+| D5 | In the first slice, `needs_judge` results are recorded and counted in the digest only; no judge call runs for them until M7's judges cover the rule (P1) | M7 P0 has no generic judgement-rule runner |
+| D6 | The owner role (conflict decisions, typed confirmations) is an allow-list setting in M12-S1 holding Sujan's account until M12-F4 roles exist | M12-F4 is P2; P0 needs an owner check |
+| D7 | Open questions answered: grey `#F0F0F0`; no runtime fallback to `channels.ts` (seed and fixture only); playbook-only blocks warn until confirmed; adding a standard channel needs no code; preview window 7 days, 30 on request; `ChannelId` becomes a validated string from the registry, mapped by M5-S3's worker first | Technical defaults |
+| D8 | Kept for the owner (`../owner-questions.md`): C01, C03, C04 (they block M8 text), the image-side high conflicts as a group, auto-accepting medium and low conflicts after 14 days, and the channel-manager asks | Marketplace-facing content decisions |

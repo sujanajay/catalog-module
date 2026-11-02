@@ -66,7 +66,9 @@ Route { capability, rank, adapter, model, params_version, price, rate_limit, reg
 
 ### 3.4 Contract needs from M0
 1. Fingerprints for every output and parent, so a golden case or audit item points at exact bytes.
-2. A way to mark a live image `pulled` so M3's next publish removes it (and M9 verifies the removal).
+2. (Owned by M7, not M0.) The `pulled` mark lives on M7's `AuditItem`; M3 reads it at the next publish and the removal
+   reaches M0 as a normal `removed` change event with reason `operator` (audit) and the audit item id, which M9's watch
+   then verifies.
 3. The source kind and route id on every output version (which vendor and model made it), kept out of operator text.
 
 ## 4. Features
@@ -178,8 +180,8 @@ because of someone else's outage.
 | `vision.read` (M2) | Gemini Flash-Lite class via OpenRouter | Claude Haiku class via OpenRouter | OpenAI vision or Qwen3-VL via OpenRouter; transport fallback Gemini direct on Vertex | fields `unknown`, reading degraded, product continues |
 | `judge.render` (render QA today) | Gemini Flash-Lite class | Claude Haiku class | third provider | existing triage rules |
 | `judge.fidelity` (P1) | two judges of different providers, both must answer | third provider replaces a missing one | none | check unavailable = fail, image not made |
-| `image.matte` | own GPU model 1 (`birefnet-general`) | own GPU model 2 | Photoroom Basic (off by default) | output held, batch continues |
-| `image.upscale` | own GPU SwinIR x2 or x4 | CPU upscaler (admin switch only) | vendor upscale (off by default) | `enlargement_failed`, output held |
+| `image.matte` | own GPU model 1 (`birefnet-general`) | own GPU model 2 | Photoroom Basic (off by default) | slot delivered provisional by M1-F3's rule table (pass-through render), improved later; batch continues |
+| `image.upscale` | own GPU SwinIR x2 or x4 | CPU upscaler (admin switch only) | vendor upscale (off by default) | `enlargement_failed`: plain render delivered provisional where the channel minimum allows (M1-F3), else slot empty with a reason |
 | `ocr.read`, `people.detect` | own model on worker or GPU | second own model | vision model answer, field set `shadow` | field `unknown` |
 | `image.make.reference_edit` (P1) | Gemini image on Vertex | OpenAI image | FLUX, then Photoroom (hosted, brand switch) | slot `not_made` |
 | `image.make.tryon`, `model_swap` (P2) | Vertex virtual try-on | FASHN | Photoroom | slot `not_made` |
@@ -188,7 +190,10 @@ because of someone else's outage.
   45 s with jitter, or Retry-After); a circuit breaker per route (opens after 5 failures in 2 minutes, probes again after
   60 s); then the next route. A refusal (moderation) moves to the next route for that item only. A route that returns
   the wrong size or no image counts as a failure.
-- **M7-F2-R4** For checks (judges, fidelity, OCR used as a gate), "check unavailable" is always a fail, never a pass.
+- **M7-F2-R4** For checks (judges, fidelity, OCR used as a gate), "check unavailable" is never a pass. For checks on
+  new pixels (generated images, `judge.fidelity`) it is a fail: the image is not made. For `judge.render` on renders of
+  the brand's own photos it means "unchecked": the render is delivered provisional, the check is queued for later, and
+  the audit sample is doubled for that batch (M1-F3-R1 `unchecked` row). No output waits for a person either way.
 - **M7-F2-R5** Kill-the-primary: an admin switch per capability turns route 1 off. CI runs the full pipeline on a test
   batch with every route 1 off; a monthly drill does it on a real test batch.
 - **M7-F2-R6** Every call is recorded with route, cost, seconds and outcome for M6 and the harness. Route ids and model
@@ -224,7 +229,8 @@ them.
 
 #### 4.2.9 Acceptance tests
 1. With `vision.read` route 1 killed, a 50-product test batch completes and every reading names route 2 (slice S8).
-2. With the matting GPU stopped, the batch completes on model 2 or holds only the affected outputs and resumes.
+2. With the matting GPU stopped, the batch completes on model 2, or delivers the affected slots provisional and improves
+   them when the service returns; no product is held.
 3. No source file outside the adapters imports a vendor SDK (lint rule).
 
 #### 4.2.10 Open questions
@@ -427,3 +433,16 @@ Build (nobody samples; vendors review every item or none).
 | Eval spend | Unplanned cost | `EVAL_BUDGET_USD` per run; cached replays nightly; live runs only on change |
 
 Open questions are listed per feature, each with a default.
+
+## 9. Integration decisions (2026-11-02)
+
+| # | Decision | Why |
+|---|---|---|
+| D1 | "All routes failed" never holds an output: renders of brand photos are delivered provisional (M1-F3); only new pixels fail closed (F2 table, F2-R4) | M7's "output held" and "check unavailable = fail" contradicted M1-F3-R1 and gate 1 |
+| D2 | The `pulled` mark lives in M7; removal reaches M0 as a `removed` event | M0 does not hold module states |
+| D3 | M7 owns the route table for every capability, including the ranking M12's Services page edits; M6 only meters cost | M12 wrote rankings to M6; M11 named "the M6 vendor interface" |
+| D4 | One audit rule everywhere: standing 3%, new cell 10% for 200 items, relapse to 10% until 100 clean answers, floor 2%. M8's "audit 20%" relapse is replaced by this rule | M8-F1 used 20%, M7 used 10% |
+| D5 | The text auditor view of M8 is a mode of the M7 auditor screen ("Today's check"), not a second screen | Both modules specified an auditor screen |
+| D6 | "One admin approval" means the owner role until M12 roles exist | Same rule in M2, M5, M7, M12 |
+| D7 | Open questions answered: route 3 for `vision.read` is whichever of OpenAI vision and Qwen3-VL scores better on wave 1; Vertex calls use the existing project billing, no new contract in P0; standing audit rate 3% | Technical defaults |
+| D8 | Kept for the owner: who labels and audits (people), the bake-off budget and no-training terms before any paid generation call (`../owner-questions.md`) | People and money |

@@ -39,7 +39,7 @@ M4 turns "we believe better content sells" into evidence: it runs and reads out 
 | Warehouse `fact_gcc.brep_lost_sales_daily`, `cut_size_option_daily`, `catalog_liveness_daily` | size x channel-country x day | day | stocked size-days, broken size runs, live state |
 | Warehouse `raw_gcc_table_cleaned.catalog_live_noon_3p_*`, `gcc_channel_reports.catalog_live_namshi_3p_*`, `opptra_core.listing_observation` | partner SKU x day | day | active price, discount, deal tag |
 | Warehouse `gcc_marketing.sku_option`, `raw_gcc_dimensions.master_sl` | SKU to option | - | keys; `master_sl` has no style id (checked 2026-11-02) |
-| M0 catalog graph | `listing` (option x channel x country with channel keys), `content_version`, `treatment_event`, `style` | event | which content was live where, from when |
+| M0 catalog graph | `catalog_channel_listings` (option x channel x country with channel keys), `catalog_content_versions`, `catalog_change_events` (the treatment log; read by cursor), `catalog_live_intervals`, `catalog_options.style_key` | event | which content was live where, from when |
 | M9 live content watch | `live_observation` (gallery count, image hashes, title hash per listing per scrape) | scrape | verifying a treatment went live; catching outside edits |
 | M5 rules | event calendar is admin data here, not in M5 | - | - |
 
@@ -52,16 +52,16 @@ M4 turns "we believe better content sells" into evidence: it runs and reads out 
 | Postgres (module db) + BigQuery export `catalog_os.experiment` | one row per experiment with the frozen pre-registration | - | M10, dashboard, audit |
 | `catalog_os.experiment_assignment` | style x experiment: arm, stratum, pair id, assignment hash | - | M0 (control flag), M3, M9, M10 |
 | `catalog_os.experiment_readout` | experiment x readout date x metric: estimate, interval, p-value, n, compliance | - | M10, dashboard |
-| M0 `listing.guard` | do-not-touch flag with experiment id and until-date | - | M1, M3, M8, M9, M10 (all must refuse to publish to a guarded listing) |
+| M0 `catalog_treatment_assignments` through `assign()` (the "guard": `do_not_touch` with experiment id; `released_at` is the until-date) | do-not-touch flag with experiment id and until-date | - | M1, M3, M8, M9, M10 (all check `isWritable`; M0 refuses the write) |
 
 ### API and queue shapes
 
 - `POST /experiments` registers a draft: `{name, hypothesis, change_type_id, channels[], unit:"style", primary_metric, pre_weeks, post_weeks, readout_dates[], eligibility{}, strata[], alpha, power}`. Returns `experiment_id`, status `draft`.
 - `POST /experiments/{id}/assign` runs eligibility and randomization, writes assignments, returns pool sizes, balance table and the simulated MDE. Status `assigned`.
 - `POST /experiments/{id}/freeze` locks the pre-registration (hash of the registry row plus the analysis code commit), writes guards into M0, exports the blind lists. Status `running`. No field except `notes` may change after freeze.
-- `POST /treatments` (called by M0 on publish): `{experiment_id?, listing_id, style_id, change_type_id, content_version_before, content_version_after, intended_live_at, actor, reason}`. M4 does not accept a treatment on a guarded listing; it returns 409 with the guard.
-- Queue events consumed: `content.published`, `content.verified_live` (from M9 scrape), `listing.changed_externally` (from M9 scrape; the main contamination alarm), `warehouse.panel_ready` (daily).
-- Queue events produced: `experiment.frozen`, `experiment.safety_check`, `experiment.readout_ready`, `experiment.contamination`.
+- Treatments are not posted to M4. M4 reads M0's change log by cursor (`readChanges`, and the daily `catalog_os.change_events` export): `links_delivered` and `submitted` events with `experiment_id` and `change_type_id` are the treatment log; `verified_live` (M0's matcher, fed by M9's scrape) gives the live date; `observed_other` plus M0's contamination incident is the contamination alarm (called `listing.changed_externally` below). Guarded writes are refused by M0 itself (`isWritable`), so M4 needs no 409 path. Integration decision D1.
+- Inputs consumed: M0 change log by cursor, M6 incidents of kind contamination, `warehouse.panel_ready` (daily, M4's own panel job).
+- Events produced (for the dashboard, M10 and notifications): `experiment.frozen`, `experiment.safety_check`, `experiment.readout_ready`, `experiment.contamination`.
 
 ### Contract needs from M0
 
@@ -169,7 +169,7 @@ M4 turns "we believe better content sells" into evidence: it runs and reads out 
 **Functional requirements.**
 - M4-F4-R1 (blind arms): the agencies and the channel team receive only the treated list they need to upload; nobody outside the measurement owner receives the control list or the pairs. The dashboard hides arm labels on per-listing views until readout.
 - M4-F4-R2 (ad and price change log): weekly, the panel compares ad spend, ad clicks and active price between arms within strata; a standardized difference above 0.2 in post-period ad spend or price raises `experiment.contamination` with the affected brands, and the readout reports it. We cannot freeze bids (the agencies run them) but we can see and report any tilt.
-- M4-F4-R3 (change watch): M9's scrape of our own Namshi and Noon listings runs at least weekly on every listing in a running experiment (daily for the first 3 weeks); any change in gallery count, image hashes or title on a control listing, or an unregistered change on a treated one, becomes `listing.changed_externally`, marks the style `contaminated` and is listed on the dashboard.
+- M4-F4-R3 (change watch): M9's scrape of our own Namshi and Noon listings runs daily on every listing in a running experiment (M9-F1-R4; about 1,400 options, well inside the polite rate); any change in gallery count, image hashes or title on a control listing, or an unregistered change on a treated one, becomes `listing.changed_externally`, marks the style `contaminated` and is listed on the dashboard.
 - M4-F4-R4 (event calendar): events are entered before the window starts; a readout that includes event weeks shows the effect with and without them.
 - M4-F4-R5 (stock and liveness guardrails): the week-2 and week-4 safety checks compare liveness rate and content rejections between arms; a treated-arm drop in liveness of more than 3 points versus control pauses new uploads of that treatment type and tells the owner (the experiment itself continues).
 - M4-F4-R6 (data settle): a readout runs only on data whose `as_of` is at least 7 days after the last week in the window, so restatements have landed.
@@ -189,7 +189,7 @@ M4 turns "we believe better content sells" into evidence: it runs and reads out 
 
 **Acceptance tests.** (1) Edit a control listing's title on Namshi by hand (one listing, with the channel team); within 7 days it appears as contaminated. (2) Raise Noon bids on 20 treated options in a staging copy of the ads table; the weekly check flags the brand. (3) The agencies' blind-list email contains no control option.
 
-**Open questions.** (a) Daily or weekly scrape after week 3? Default: weekly, daily during any upload week.
+**Open questions.** (a) Daily or weekly scrape after week 3? Decided: daily for holdout listings for the whole window (M9-F1-R4), weekly for the rest; contamination must be seen within 24 hours.
 
 ### M4-F5 Estimators (P1)
 
@@ -239,7 +239,7 @@ M4 turns "we believe better content sells" into evidence: it runs and reads out 
 
 **Story.** As the owner, I want one page that shows what is running, what we learned and what we cannot know yet, with uncertainty on every number, that I can read in two minutes.
 
-**Key requirements.** See section 5 for the screens. R1: every effect is shown as a range first and a best guess second, never the other way round. R2: every tile shows n, the MDE and the pre-registered date. R3: exploratory and observational results are visually separated and labelled. R4: per-channel organic units and ad metrics over time with the experiment windows and events marked.
+**Key requirements.** See section 5 for the screens. R0: a single experiment's answer uses the fixed words of `UX-design-system.md` 5.6 ("Too early", "No clear effect", "Worked", "Hurt"); the pooled "What we know" grid in M10 uses its own five-word scale, and the two never share a screen without their headings. R1: every effect is shown as a range first and a best guess second, never the other way round. R2: every tile shows n, the MDE and the pre-registered date. R3: exploratory and observational results are visually separated and labelled. R4: per-channel organic units and ad metrics over time with the experiment windows and events marked.
 
 **Acceptance test.** A person who has not seen the project reads the readout page and correctly answers: what was tested, what the answer is, how sure we are, and what is still unknown.
 
@@ -398,3 +398,15 @@ When the readout says "we cannot rule out zero, and we can rule out anything abo
 ### A.7 What a 12-week timeline looks like
 
 Week 0 (by 17 Nov): panel, pool, assignment, pre-registration approved, guards on, blind lists out, upload starts. Weeks 1-3: daily scrape for live verification; week-2 safety check (compliance, balance drift, guardrail harms). Week 4: safety check. Week 8: first readout (MDE about 20%). Week 12: second readout (MDE about 18%), release 80% of controls as wave 2, keep 20% for 12 months. Week 13-14: M10 updates priors; next experiment registered (footwear views, or text on Noon).
+
+## 9. Integration decisions (2026-11-02)
+
+| # | Decision | Why |
+|---|---|---|
+| D1 | M4 reads M0's change log by cursor instead of receiving `POST /treatments` or queue events; the guard is M0's `catalog_treatment_assignments` written through `assign()` | M0's contract has no outbound calls and no queue |
+| D2 | All five "Contract needs from M0" are now in M0 P0: style key (M0-F1-R8), `change_type_id` on events (M0-F3-R9, ids from M10-S1a), the guard (M0-F3-R7, treated listings open only to their treatment), a required reason (M0-F3-R9), the export (M0-F5) | Three of them were P1 in M0 or M10, so a P0 feature depended on P1 |
+| D3 | Holdout listings are scraped daily for the whole window (M9-F1-R4) | M4 said weekly after week 3, M9 said daily; daily costs little and catches contamination within 24 hours |
+| D4 | Fixed readout dates, counted from a treatment clock start of Tue 17 Nov 2026 (moved once, before any outcome is seen, to the median verified-live date if the upload slips): week-8 data ends 12 Jan 2027, readout run 19 Jan after the 7-day settle; week-12 data ends 9 Feb 2027, readout run 16 Feb | The settled 8- and 12-week readouts need dates the registry can freeze |
+| D5 | Estimators and the pooled model run as a Python Cloud Run job in `services/measurement` (new runtime, chosen on purpose) | statsmodels, linearmodels, csdid and PyMC have no TypeScript equivalent; the job reads BigQuery and writes back, so it does not touch the web or worker code |
+| D6 | Open questions answered: Poisson FE as primary only if its re-simulated MDE is at or below ANCOVA's, both reported; UAE and KSA as one unit pending M9's shared-content check; no footwear in experiment 1; 80% of controls released after week 12, 20% kept 12 months; units by `ordered_date`; revenue as stored (excl. VAT); pair on units; registry in Postgres with daily export | Method defaults the requirements already justify |
+| D7 | Kept for the owner: approving the pre-registration (gate), who holds the full arm list, the channel team's upload week, and the letter asking agencies to keep bids unchanged (`../owner-questions.md`) | People and marketplace relationships |

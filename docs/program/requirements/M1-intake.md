@@ -25,7 +25,7 @@ Words used here (defined once):
   fixed in #141 and #142). The goal is "upload and walk away".
 - **Outcome metric:** real batches that reach "links ready" with zero operator actions after the upload, with links
   for 100% of products (baseline: 4 Continue or Start clicks plus channel ticks every batch; 82 of 200 products held).
-- **Intents:** I008, I009, I014, I015, I017, I023, I030, I031, I032, I033.
+- **Intents:** I008, I009, I014, I015, I017, I023, I029 (live-tool audit findings), I030, I031, I032, I033.
 
 ## 2. Scope
 
@@ -157,9 +157,10 @@ when the text matches a Google URL) and again in step 2.
   it cannot be inferred (R3).
 - M1-F2-R3: Brand is inferred when at least 90% of resolved identifiers (through M0) belong to one brand; otherwise the
   brand list is the one question asked, shown above the drop zone.
-- M1-F2-R4: Channels default, in order: the channels of the brand's previous started batch, else the channels where
-  the brand's options have listings in M0, else the five slice channels (Namshi, Noon, Trendyol, Styli, Centrepoint).
-  The default is shown ticked and editable while collecting.
+- M1-F2-R4: Channels default, in order: the brand's channel setting (M12-F3-R8, once it exists), else the channels
+  where the brand's options have listings in M0, else the five slice channels (Namshi, Noon, Trendyol, Styli,
+  Centrepoint). Never the last batch someone else typed (UX 5.2: no surprises). The default is shown ticked and editable
+  while collecting.
 - M1-F2-R5: Product type stays "Detect automatically" (the existing default); the field is moved under "More options".
 - M1-F2-R6: The batch starts by itself when collection and grouping are done and none of the start blockers in R7
   remain, after a visible 10-second countdown: "Starting in 10 s. Change anything above, or Wait." "Wait" calls
@@ -202,8 +203,8 @@ Wait. This replaces the four Continue clicks and Start.
 **Acceptance tests.**
 1. Open "New batch": the sharing email and Copy button are visible before anything is pasted; Copy puts the email on
    the clipboard.
-2. Drop a Vero Moda folder (brand inferable from option ids): the batch starts with no click, with Vero Moda's
-   previous channels ticked, and the batch page opens.
+2. Drop a Vero Moda folder (brand inferable from option ids): the batch starts with no click, with the channels where
+   Vero Moda is listed ticked, and the batch page opens.
 3. Drop a folder of unknown names: one question (brand) is asked; after choosing, no other click is needed.
 4. During the countdown press Wait: the batch stays a draft with one Start button.
 
@@ -421,7 +422,7 @@ Target: zero cognitive load and no babysitting.
 - Drop zone: "Drop folders, files, zips or sheets here. Several at once is fine."
 - Below it, as data arrives: "Found 1,284 photos for 312 products. Folder `USPA_AW26` grouped by folder name, sheet
   `links.xlsx` by column E (Option Id)."
-- "Going to: Namshi, Noon, Trendyol, Styli, Centrepoint (as last time). Change"
+- "Going to: Namshi, Noon, Trendyol, Styli, Centrepoint (where this brand is listed). Change"
 - Countdown: "Starting in 10 s. [Wait]"
 - If the brand cannot be inferred, the only question, above the drop zone: "Which brand is this?"
 
@@ -481,3 +482,13 @@ migration is needed for it).
 | Auto-start on a huge accidental drop | Cost | M6 per-batch cost estimate shown in the countdown line; admin cap on products per auto-start batch (default 30,000) |
 | Open: email digest | | Default P1 |
 | Open: Supabase links format (public vs signed) | | Default: accept both, read-only |
+
+## 9. Integration decisions (2026-11-02)
+
+| # | Decision | Why |
+|---|---|---|
+| D1 | Default channels come from the brand's setting, then M0 listings, then the five slice channels; not from the previous batch (F2-R4) | UX 5.2 and M1 disagreed; UX's "no surprises" rule wins |
+| D2 | Admin settings named here (countdown, inference threshold, auto-decide rule table, improvement window) live in the M12 settings store, which moves into the first slice as M12-S1 | The P1 settings surface was a hidden dependency of P0 configuration |
+| D3 | Migration number is assigned at merge time (next free number after rebase), not reserved; `0010` above is indicative | Several slices add migrations in parallel; see the roadmap's migration rule |
+| D4 | Open questions answered: one brand per batch (default kept); 10 s countdown, set to 0 after two weeks without a Wait press; provisional images are not withheld on Noon (they are renders of real photos); digest email is P1; accept public and signed Supabase links | Technical or UX defaults, no owner input needed |
+| D5 | Kept for the owner: who re-uploads improved images to channels before M9 (channel team task, see `../owner-questions.md`) | People decision |

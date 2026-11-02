@@ -213,8 +213,9 @@ chosen by bake-off; `image.upscale` a vendor upscale API (Photoroom or Claid, ch
 enters only after a bake-off on the existing matting golden set (`packages/core/test-fixtures/catalog/evals`).
 
 #### 4.2.9 Acceptance tests
-1. Stop the GPU matting service during a 50-product test batch with overflow off: the batch uses model 2 or holds only
-   the affected outputs, records the reason, and resumes when the service returns.
+1. Stop the GPU matting service during a 50-product test batch with overflow off: the batch uses model 2, or delivers
+   the affected slots as provisional pass-through renders under M1's auto-decide rules (never a held product), records
+   the reason, and improves them at the same URL when the service returns.
 2. With overflow on (test account, capped at USD 1), the same stop completes the batch through the vendor and the cost
    meter shows the overflow line.
 3. The matting regression set shows no new defects against the last release.
@@ -332,7 +333,9 @@ Build (nobody has GCC shot policies as data).
     (Kontext-class editing) > Photoroom (hosted, last, only when the brand allows hosted services); `tryon` and
     `model_swap` Vertex virtual try-on > FASHN (failed outputs not charged) > Photoroom virtual try-on; `ghost_to_model`
     Photoroom Plus > FASHN > Gemini image; `background` and `scene` (M11, Later) Photoroom > Gemini image > FLUX.
-  - Runs only when all hold: brand generation on (off by default), the channel's `generated_allowed` on (seed off on
+  - Runs only when all hold: brand generation on (off by default), the brand's rights record (M12-F3-R5) is valid and
+    says "may generate the model's likeness" (mode A redraws the brand's own model, so it is a likeness use; gate 1
+    keeps likeness rights with a person), the channel's `generated_allowed` on (seed off on
     every channel until its AI stance is recorded; Noon's "only photographs are permitted" rule is open), the role is
     required and no crop can fill it, at least one usable photo shows that view, not kids, not `unknown` taxonomy, and
     the caps allow it.
@@ -435,3 +438,14 @@ Needs brand programmes and rights we do not have.
 | AI stance unknown on every channel | Generated images may never publish | Default off per channel; ask channel managers (M5 channel gaps workflow) |
 
 Open questions are listed per feature, each with a default.
+
+## 9. Integration decisions (2026-11-02)
+
+| # | Decision | Why |
+|---|---|---|
+| D1 | No output is ever held: when matting or upscaling fails, the slot follows M1-F3's rule table (provisional render, improved later); edited 4.2.9 test 1 | M3 and M7 said "output held", which contradicts gate 1 (no per-SKU queue) and M1-F3 |
+| D2 | Mode A generation also needs a valid rights record with "may generate the model's likeness" | It redraws the brand's own model; gate 1 keeps likeness rights with a person |
+| D3 | Made-photo numbering (101 upward) and slot rows are M3's own tables, not M0 fields; M0 stores the position per version | Keeps M0's contract small |
+| D4 | The holdout treatment (experiment 1) is M3-F1 crops on Namshi and Noon only, rendered with the 240 grey; slices M3-S1 to M3-S4 are on the holdout critical path | Gate 1 and M4-F2-R7 |
+| D5 | Open questions answered: Styli and Centrepoint crops off until recorded; never HS crops of a kids model; keep the 482 px bar, raise to 1,000 px if audits show soft crops; Shein image 1 white stays an `assumed` M5 row (not a gate-1 rule); grey `#F0F0F0`; Namshi order copies Noon until confirmed; no overflow contract in P0 | Technical defaults or already settled |
+| D6 | Kept for the owner: channel managers' written stance on crops (Styli, Centrepoint) and on generated images (all channels), and paid generation and overflow vendor contracts (`../owner-questions.md`) | Marketplace relationships and money |

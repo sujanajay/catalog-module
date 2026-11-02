@@ -45,7 +45,7 @@ MCP access (MCP, the Model Context Protocol, lets AI assistants call a product's
 | Writes | M5 | Rule edits go through M5's rule store; M12 is the screen, M5 owns the data and its checks |
 | Writes | M3, M8, M11 | `brand_dna_version` (look, logos, voice, infographic look, scene profile); `rights_record`; `model_pack` |
 | Writes | M7 | Audit rates and quality thresholds (risky settings, owner-confirmed) |
-| Writes | M6 | Service ranking per capability (primary, second, fallback) and spend caps |
+| Writes | M7, M6 | Service ranking per capability (primary, second, fallback) through M7's route table (M7-F2; M7 owns it and logs the change); spend caps through M6 |
 | Reads | M6 | Cost meter, idle share, throughput, batch success, incidents |
 | Reads | M7 | Audit results per category, check failure rates, vendor bake-off scores |
 | Reads | M4, M10 | Experiment registry and readouts; recommendations |
@@ -77,9 +77,11 @@ event setting.changed { area, key, scope, from, to, by, reason, version, effecti
 
 ### 3.4 Contract needs from M0
 
-- A `setting_version_set` id stamped on every `content_version` and every `change_reason`.
+- A settings version set id stamped on every content version (M0 `settings_snapshot_id`); change events reach it
+  through their version and batch.
 - Read access to the last 30 days of decisions and inputs, so the preview can replay them under a proposed value.
-- An `org_id` (organisation) column on every table from day one, set to "Opptra" for now (see M12-F5; open question Q1).
+- An `org_id` (organisation) column on every new table from day one, default `opptra` (decided, Q1). Existing tables
+  get it with M12-F5.
 
 ## 4. Features
 
@@ -264,15 +266,15 @@ Detailed screens, components and copy are in `UX-design-system.md`. The key mome
 
 | # | Slice (one worker, one worktree) | Depends on | Acceptance test |
 |---|---|---|---|
-| S12.1 | Settings store: schema per setting, versions, snapshot at batch start, `setting.changed` event, environment switches moved to settings | M0 | A setting changed mid-batch does not affect that batch; the next batch uses it; every output records its version set |
-| S12.2 | Settings UI: home, search, section pages, typed inputs, inheritance display, history, revert, undo toast | S12.1 | The section 4 F1 acceptance test |
-| S12.3 | Preview by replay over the last 30 days | S12.1, M0 decision history | Preview count matches a hand count on 3 sample changes |
-| S12.4 | Owner approvals for risky settings, with notifications | S12.2, owner role | A threshold change waits until the owner applies it |
-| S12.5 | Brand DNA page: sections, suggestions, versions, add-a-brand flow | S12.1, M2 analysis | The section 4 F3 acceptance test |
-| S12.6 | Rights record, expiry notifications, ceiling enforcement in M11 | S12.5 | An expired record stops new scenes the same day in staging |
-| S12.7 | Ops page additions, incident rules, service status | M6 meter, M7 audits | The section 4 F2 acceptance test |
-| S12.8 | Add channel and category from a copy | S12.2, M5 rules, M9 templates | A test channel copied from Noon receives a listing file without code |
-| S12.9 | Owner role and per-brand operator scope | S12.2 | A scoped operator cannot change another brand's setting |
+| M12-S1 (moved to the first slice) | Settings store: schema per setting, versions, snapshot at batch start, `setting.changed` event, environment switches moved to settings, the owner allow-list (Sujan's account), and a plain admin list page to edit the P0 settings of M0, M1, M3, M7 and M9 until M12-S2 | none (M0 only for the `settings_snapshot_id` stamp, added when M0-S3 lands) | A setting changed mid-batch does not affect that batch; the next batch uses it; every output records its version set |
+| M12-S2 | Settings UI: home, search, section pages, typed inputs, inheritance display, history, revert, undo toast | M12-S1 | The section 4 F1 acceptance test |
+| M12-S3 | Preview by replay over the last 30 days | M12-S1, M0 decision history | Preview count matches a hand count on 3 sample changes |
+| M12-S4 | Owner approvals for risky settings, with notifications | M12-S2, owner role | A threshold change waits until the owner applies it |
+| M12-S5 | Brand DNA page: sections, suggestions, versions, add-a-brand flow | M12-S1, M2 analysis | The section 4 F3 acceptance test |
+| M12-S6 | Rights record, expiry notifications, ceiling enforcement in M11 | M12-S5 | An expired record stops new scenes the same day in staging |
+| M12-S7 | Ops page additions, incident rules, service status | M6 meter, M7 audits | The section 4 F2 acceptance test |
+| M12-S8 | Extend M5's add-channel and add-category flow (M5-S5 owns it) with the listing-file template mapping and the brand channel list | M12-S2, M5-S5, M9 templates | A test channel copied from Noon receives a listing file without code |
+| M12-S9 | Owner role and per-brand operator scope | M12-S2 | A scoped operator cannot change another brand's setting |
 
 ## 8. Risks and open questions
 
@@ -298,3 +300,15 @@ Detailed screens, components and copy are in `UX-design-system.md`. The key mome
   deletion, biometric handling), `04-scene-images.md` (scene profile), `07-infographics.md` (brand voice).
 - Current code: `apps/web/app/catalog/ops/page.tsx`, `apps/web/app/catalog/brands/[slug]/page.tsx`,
   `apps/web/components/PeopleModal.tsx`, `apps/web/lib/user.ts`, `packages/core/src/people.ts`.
+
+## 9. Integration decisions (2026-11-02)
+
+| # | Decision | Why |
+|---|---|---|
+| D1 | M12-S1 (settings store, snapshot at batch start, owner allow-list, plain admin list page) moves into the first slice | Every P0 module names admin-editable settings; without a store the P0 features depended on this P1 feature |
+| D2 | The owner role is an allow-list setting (Sujan) until M12-F4; every "admin approval" for a threshold in M2, M5, M7 means this owner role | M12-F4 is P2 but P0 needs owner checks |
+| D3 | Service rankings are written to M7's route table, not M6 | M7-F2 owns routes |
+| D4 | Add channel and category belong to M5-S5; M12-S8 extends that flow | Duplicate flows |
+| D5 | Slice ids renamed `S12.n` to `M12-Sn` | One naming scheme |
+| D6 | Open questions answered: Q1 `org_id` on every new table now (yes); Q2 Sujan is the only owner at first; Q3 the owner's confirmation alone is enough while the team is small; R1 show only settings that differ from the default first | Technical or process defaults |
+| D7 | Kept for the owner: Q4 self-serve pricing and R4 data residency, before the first outside customer (`../owner-questions.md`); Q5 sign-in vendor is chosen at M12-F5 time | Business and legal |

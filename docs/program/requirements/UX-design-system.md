@@ -516,7 +516,7 @@ felt effort.
 | UX3 | DropZone page replacing the four-step wizard | M1 self-advancing wizard | T1 and T2 budgets met by the Playwright guard |
 | UX4 | Digest tab and digest email | M1 one digest | T3 five-second test passes with 5 people |
 | UX5 | NeedsYouCard and "make it a rule" | M1, M12-F1 | T4 passes |
-| UX6 | Settings components (SettingRow, ImpactPreview, VersionHistory, ProposalCard) | M12 S12.1 to S12.3 | T6 and T10 pass |
+| UX6 | Settings components (SettingRow, ImpactPreview, VersionHistory, ProposalCard) | M12-S1 to M12-S3 | T6 and T10 pass |
 | UX7 | Product page: ChannelGallery, BilingualText, ChannelPreview, ImageCompare | M0, M8 | T5 and T9 pass |
 | UX8 | Results page: ExperimentCard, EstimateBar, TrendLine | M4 | T7 passes |
 | UX9 | Notification centre, email templates, quiet hours | M12 notifications settings | No notification sent for a self-fixed event in a test batch |
@@ -543,3 +543,12 @@ felt effort.
   sentences, Brand DNA page, the "Needs me" pattern being cut).
 - Current app: `apps/web/app/layout.tsx`, `app/globals.css`, `app/fonts.ts`, `components/` (inventory above),
   `lib/catalog/copy.ts`; prototype `docs/prototype/catalog-prototype.html` and `docs/prototype/README.md`.
+
+## 17. Integration decisions (2026-11-02)
+
+| # | Decision | Why |
+|---|---|---|
+| D1 | Default channels come from the brand's setting, then M0 listings (M1-F2-R4 changed to match 5.2) | M1 used "the brand's previous batch" |
+| D2 | The four answer words in 5.6 are for one experiment's readout (M4-F8); M10's "What we know" grid keeps its five-word scale, always under its own heading | Two vocabularies for results |
+| D3 | The 10-second start countdown (M1-F2-R6) is not a required action and fits the 0-actions-after-drop budget | Checked against 5.1 |
+| D4 | Open questions answered: U1 move body text to IBM Plex Sans and Plex Sans Arabic (yes; Raleway has no Arabic); U2 rename "Catalog images" to "Catalog" (yes); U3 Arabic content previews now, full Arabic UI with self-serve; U4 48 hours before a "needs you" item keeps its safe default; U5 email until the team names its chat tool; U6 the catalog lead runs the monthly usability round; U7 brand drive links accepted as pasted links | Design and process defaults with no business, legal or money stake |

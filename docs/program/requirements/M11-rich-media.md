@@ -57,7 +57,7 @@ frame; Hindi and regional infographics (India); generated video from a bought im
 | M8 | Titles, bullets, Arabic text, keywords from paid search terms | Highlights and A+ copy |
 | M10 | Budget and priority list; winners per change type | Who gets rich media first; what propagates |
 | M12 | Brand DNA: colours, fonts, logos, voice, scene profile, rights record, model packs | Styling, permissions, likeness |
-| M6 | Vendor interface, cost meter, spend caps | Every paid call |
+| M7, M6 | Vendor interface and routes (M7-F2); cost meter and spend caps (M6) | Every paid call |
 
 ### 3.2 Writes
 
@@ -150,7 +150,7 @@ call is made (about USD 0.00004 of compute per image, judged).
   revenue | all eligible". Default "off" until the gate below passes; then "top 20% by revenue" (the top 10% of options earn
   86% of revenue, `outcome-baseline`).
 
-**Gate to promote to P1.** (a) M8 text exists for the target products; (b) at least one channel's text-overlay stance is
+**Gate to promote to P1.** (a) trusted facts (M2-F3) or M8 text exist for the target products (Q7: infographics start from trusted facts); (b) at least one channel's text-overlay stance is
 confirmed in M5 (ask Noon's channel manager; seed: Amazon and Trendyol branded, Noon and Namshi plain band); (c) a
 20-product pilot per channel shows no rejection; (d) an M4 experiment is pre-registered.
 
@@ -195,7 +195,7 @@ attempts of USD 0.10 to 0.14), capped at USD 0.81 per product.
 none experiment pre-registered. The cheapest fast signal is ad conversion on sponsored US Polo pages (USD 55,280 of ads
 land on packshot-only pages, initiative 04).
 
-**Buy or build.** Buy generation behind the M6 vendor interface: Photoroom Plus (USD 0.10 per image; negotiate the
+**Buy or build.** Buy generation behind the M7 vendor interface: Photoroom Plus (USD 0.10 per image; negotiate the
 pay-only-for-passing-images Guarantee), Claid as second, a router such as fal.ai as fallback. Pebblely, Booth and Flair are
 weak on fidelity. Build the checks, policy and placement.
 
@@ -258,7 +258,7 @@ almost nothing and carries no fidelity risk. Generated video comes later.
 **Key rules.** No music with unclear licence; captions from M8 text; no faces beyond those already approved; spec checks
 (length, size, format, aspect) from M5 data.
 
-**Buy or build.** Build the stills-to-motion step; buy image-to-video later (Photoroom enterprise, Caimera) behind the M6
+**Buy or build.** Build the stills-to-motion step; buy image-to-video later (Photoroom enterprise, Caimera) behind the M7
 interface, gated by an experiment, because the market's video tools are made for ads, not marketplace spec.
 
 ### M11-F6 Ad-creative and avatar video (Skip)
@@ -317,16 +317,16 @@ effect) of the first holdout. Pool across brands (M10) and use ad signals for sc
 
 | # | Slice (one worker, one worktree) | Depends on | Acceptance test |
 |---|---|---|---|
-| S11.1 | Add-on slot layer: policy table (brand x channel x category x asset type) as M5 data, placement after the photographic set, retirement events | M0 roles, M5 rules as data | A policy change in the admin UI changes which products the next batch plans; nothing is planned for control listings |
-| S11.2 | English infographic composer and checks (layouts, text fitting, plain band, branded style, product-clear and words-exact checks) | S11.1, Brand DNA look (M12-F3) | 200 golden products drawn; zero failed checks published; planted defects (clipped text, covered product, banned word) all caught |
-| S11.3 | Arabic RTL composer: shaping, mirrored layouts, Arabic fonts, digit setting, bilingual check hook | S11.2, M8 Arabic text, M7 bilingual check | 50 Arabic infographics reviewed once by two Arabic readers: zero broken joins or reversed words; checks catch planted mistakes |
-| S11.4 | Highlight picker from trusted facts and winning keywords, plus the change-set hook from M10 | S11.2, M2 facts, M10 winners | A promoted test keyword updates title, backend terms and infographic in one change set |
-| S11.5 | Channel acceptance pilot: 20 products per channel on Amazon.ae, Trendyol, Noon, Namshi; record outcomes in M5 | S11.2, channel managers | Each channel's text-overlay rule moves from "assumed" to "documented" or "refused" |
-| S11.6 | Experiment registration for infographics (and later scenes) | M4 registry | Experiment pre-registered with its MDE before the first treated publish |
-| S11.7 | Still-life scenes (composite, no person), with the vendor interface and caps | M6 vendor interface, M7 fidelity, M12 rights | 100 still lifes; product pixels proved identical; zero published without the AI tag |
-| S11.8 | Worn footwear, then carried bags | S11.7 | Per initiative 04's check list; cost per accepted within 20% of USD 0.20 |
-| S11.9 | Stills-to-motion video and A+ modules from the shared composer | S11.2, M5 video and A+ specs | Files pass each channel's spec checks; upload pack downloads in one click |
-| S11.10 | Faces and kids | Legal confirmation, licensed identity check, rights with likeness | Zero face outputs while any gate is missing (tested by removing each gate in staging) |
+| M11-S1 | Add-on slot layer: policy table (brand x channel x category x asset type) as M5 data, placement after the photographic set, retirement events | M0 roles, M5 rules as data | A policy change in the admin UI changes which products the next batch plans; nothing is planned for control listings |
+| M11-S2 | English infographic composer and checks (layouts, text fitting, plain band, branded style, product-clear and words-exact checks) | M11-S1, Brand DNA look (M12-F3) | 200 golden products drawn; zero failed checks published; planted defects (clipped text, covered product, banned word) all caught |
+| M11-S3 | Arabic RTL composer: shaping, mirrored layouts, Arabic fonts, digit setting, bilingual check hook | M11-S2, M8 Arabic text, M7 bilingual check | 50 Arabic infographics reviewed once by two Arabic readers: zero broken joins or reversed words; checks catch planted mistakes |
+| M11-S4 | Highlight picker from trusted facts and winning keywords, plus the change-set hook from M10 | M11-S2, M2 facts, M10 winners | A promoted test keyword updates title, backend terms and infographic in one change set |
+| M11-S5 | Channel acceptance pilot: 20 products per channel on Amazon.ae, Trendyol, Noon, Namshi; record outcomes in M5 | M11-S2, channel managers | Each channel's text-overlay rule moves from "assumed" to "documented" or "refused" |
+| M11-S6 | Experiment registration for infographics (and later scenes) | M4 registry | Experiment pre-registered with its MDE before the first treated publish |
+| M11-S7 | Still-life scenes (composite, no person), with the vendor interface and caps | M7 vendor interface and fidelity, M12 rights | 100 still lifes; product pixels proved identical; zero published without the AI tag |
+| M11-S8 | Worn footwear, then carried bags | M11-S7 | Per initiative 04's check list; cost per accepted within 20% of USD 0.20 |
+| M11-S9 | Stills-to-motion video and A+ modules from the shared composer | M11-S2, M5 video and A+ specs | Files pass each channel's spec checks; upload pack downloads in one click |
+| M11-S10 | Faces and kids | Legal confirmation, licensed identity check, rights with likeness | Zero face outputs while any gate is missing (tested by removing each gate in staging) |
 
 ## 8. Risks and open questions
 
@@ -338,13 +338,13 @@ effect) of the first holdout. Pool across brands (M10) and use ad signals for sc
 | R4 | Every added image may need a manual re-upload on portals with no API | Add rich media in the same listing file as the next planned update, not as its own submission |
 | R5 | Children's biometric data | No face work until legal confirmation; kids default stays off-figure |
 | R6 | Arabic shaping bugs are invisible to non-Arabic readers | Shaping check in code plus a one-off review by two Arabic readers per font and layout |
-| Q1 | Can Canva or Adobe render Arabic templates via API well enough to buy? | Check in the S11.3 bake-off; build if neither passes the words-exact check |
+| Q1 | Can Canva or Adobe render Arabic templates via API well enough to buy? | Check in the M11-S3 bake-off; build if neither passes the words-exact check |
 | Q2 | One image per language, or one bilingual band? | One per language, unless M5 says the channel shows one gallery for both |
 | Q3 | Which digits on Arabic images (Western or Arabic-Indic)? | Western digits by default; a channel setting |
-| Q4 | Legal confirmation route for biometric data (UAE PDPL, KSA PDPL) | Ask Opptra legal before S11.10 is scheduled |
+| Q4 | Legal confirmation route for biometric data (UAE PDPL, KSA PDPL) | Ask Opptra legal before M11-S10 is scheduled |
 | Q5 | A+ upload route: SP-API A+ endpoints for India tokens; GCC by download pack | Confirm token scopes; download pack as fallback |
 | Q6 | Do Noon, Namshi and Trendyol accept listing video? | Ask through the M5 channel gaps workflow; build video only after two channels say yes |
-| Q7 | Should infographics wait for M8 text, or start from facts alone? | Start from trusted facts (S11.4) so infographics do not wait on M8; M8 text replaces them when ready |
+| Q7 | Should infographics wait for M8 text, or start from facts alone? | Start from trusted facts (M11-S4) so infographics do not wait on M8; M8 text replaces them when ready |
 
 ## Sources
 
@@ -354,3 +354,14 @@ effect) of the first holdout. Pool across brands (M10) and use ad signals for sc
   `-channel-rules.md` (C11, C19, gaps), `-outcome-baseline.md`, `-data-census.md`.
 - `C:\Users\Sujan Ajay\Desktop\catalog-module-wt\initiative-requirements\04-scene-images.md`, `05-brand-faces.md`,
   `07-infographics.md`.
+
+## 9. Integration decisions (2026-11-02)
+
+| # | Decision | Why |
+|---|---|---|
+| D1 | The vendor interface is M7's (M7-F2); M6 only meters cost and caps spend | M11 named "the M6 vendor interface" |
+| D2 | Gate (a) relaxed to "trusted facts or M8 text", matching Q7 | The gate and Q7 contradicted each other; drawn words come byte-for-byte from trusted versions either way |
+| D3 | Slice ids renamed `S11.n` to `M11-Sn` | One naming scheme across modules |
+| D4 | The rich-media roles, sources and `renders_text_ids` M11 needs from M0 come in an additive M0 migration when M11 starts (listed in M0 section 2, Later) | M0 P0 role enum is structure; it grows by migration |
+| D5 | Open questions answered: one image per language unless M5 says one gallery serves both; Western digits by default; infographics start from trusted facts; accept the template deviation in depth (it saves re-reading old initiatives) | Design defaults |
+| D6 | Kept for the owner: the biometric and child-data legal route before any face work, and the channel managers' answers on overlays (C19) and video (`../owner-questions.md`) | Legal and marketplace relationships |

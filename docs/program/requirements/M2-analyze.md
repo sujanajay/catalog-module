@@ -81,8 +81,12 @@ fields (all photos at once, as old initiative 01 designed) plus code measurement
 
 ### 3.4 Contract needs from M0
 1. A stable photo fingerprint (sha256 of bytes) as the cache key, and a `content_version` row per photo.
-2. A taxonomy table (see 4.1.2 R1) and an attribute definition table, both data, both versioned.
-3. A place for `PhotoReading`, `ProductReading`, `AttributeValue`, `GapReport` with the analyzer version.
+2. (Owned by M2, not M0.) The taxonomy table (4.1.2 R1) and the attribute definition table, both data, both
+   versioned, live in M2's own migration. They are the **only** category tree in the system: M5 rules scope by these
+   node ids and M5's "Add a category" writes here (integration decision D1).
+3. (Owned by M2, not M0.) `PhotoReading`, `ProductReading`, `AttributeValue` and `GapReport` live in M2 tables keyed by
+   M0's asset sha256, content version id and option id, with the analyzer version. Trusted listing attributes (P1) are
+   also written to M0 as attribute versions so M8 can cite them.
 4. The brand master fields joined to the product (census: category is unreliable on most fashion rows; M2 treats it
    as a weak hint, not truth).
 5. The holdout control flag (M4), so M2 never triggers a change for a control option. Analysis itself is allowed on
@@ -402,7 +406,7 @@ after the first readout.
 
 | # | Slice | Depends on | Acceptance test |
 |---|---|---|---|
-| M2-S1 | Taxonomy, attribute and shot-role tables as data, seeded for fashion; empty seeds for home, toys, beauty, hardline | M0-S1 tables | A new node and attribute are added in settings and read by a test without code change |
+| M2-S1 | Taxonomy, attribute and shot-role tables as data, seeded for fashion (including M5's garment groups, `kids`, `multipack`, `unknown`); empty seeds for home (curtains, bedsheets), toys, beauty, hardline | none (first M2 merge; M5-S1 references its node ids) | A new node and attribute are added in settings and read by a test without code change |
 | M2-S2 | Code measurements (R4-R8): size, background class and lightness, perceptual hash duplicates, OCR text share, primary colours, blur | M2-S1 | On the 300-row golden sample photos, every measured field is filled; duplicates found match a person's list |
 | M2-S3 | People detector on the GPU service for head state and head-cut position (R9) | none (service work) | Head-cut test photos (forehead cut = cut; shoulder cut = none; nose-lip = cut) all pass |
 | M2-S4 | One vision call per product (R10-R12) behind the M7 `vision.read` interface, replacing `qa/classify.ts`, with the caching key | M2-S1, M7-S2 | A batch makes one call per product; a rerun makes zero calls |
@@ -422,3 +426,13 @@ after the first readout.
 | Non-commercial licences (`bria-rmbg` is CC BY-NC 4.0) | Not usable once outside brands self-serve | Record licences; replace before M12 self-serve (raised for M3) |
 
 Open questions are listed per feature above, each with a default.
+
+## 9. Integration decisions (2026-11-02)
+
+| # | Decision | Why |
+|---|---|---|
+| D1 | One taxonomy, owned by M2 (M2-S1). M5's category tree (M5-F1-R5) is the same table, not a second one; M5 and M12 edit it through M2's store | M2-F1-R1 and M5-F1-R5 each defined a category tree |
+| D2 | M2-S1 has no dependency and merges first among M2 and M5 slices | It blocked M5-S1, M7-S1 and every M2 slice |
+| D3 | M2-S3 (people detector) lives in `services/matting` and may run beside other M2 slices (the roadmap's named exception to one writer per module) | It shares no files with the other M2 slices and is on the holdout's critical path |
+| D4 | "One admin approval" for a floor change means the owner role until M12 roles exist | Same rule in M2, M5, M7, M12 |
+| D5 | Open questions answered: floors 0.7 and 0.8 before calibration; trust a specific master category but still read the image and flag disagreement; sibling rule off until 95% on the golden set; model input size set by the bake-off; P0 gap report covers shots only; gaps counted per option | Technical defaults |

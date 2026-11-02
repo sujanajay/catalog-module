@@ -29,7 +29,7 @@ Words used here (defined once):
   deploys, quotas cap throughput, a load test once took the live site down (20 Oct), and changes take hours to verify.
 - **Outcome metrics:** cost per product within 10% of the GCP bill; zero batches failed by a deploy; 99% of batches
   reach "links ready" with no person; a typical change verified in under 15 minutes.
-- **Intents:** I015, I025, I034, I035, I036, I046.
+- **Intents:** I015, I025, I029 (live-tool audit findings), I034, I035, I036, I046.
 
 ## 2. Scope
 
@@ -459,3 +459,12 @@ reconciled number replaces the display), the invariants job, the sweep.
 | Tiered tests skip a needed check | A defect reaches the live site | T1 always runs; path rules reviewed when a defect slips; the regression set grows with every finding |
 | Open: CI wall time today | | Measure in the first slice |
 | Open: smaller RTX shape | | Test in M6-F4 before raising the GPU max |
+
+## 9. Integration decisions (2026-11-02)
+
+| # | Decision | Why |
+|---|---|---|
+| D1 | Build order inside M6 (one writer per module): S4 deploy safety first (it protects every other slice's deploys), then S1, S6, S2, S5, S3 | Batches must survive deploys before many workers start deploying |
+| D2 | M6 owns cost and incidents; vendor routes and their ranking belong to M7 (M12 writes them through M7) | M12 said M6 holds the service ranking; M7-F2 owns the route table |
+| D3 | Open questions answered: `ila-pg` split by connection budget share; show INR as well; keep the human quiet window until one live deploy with a real batch passes F2 test 1; provisional links do not count against batch success; measure CI wall time in S4 | Technical defaults |
+| D4 | Kept for the owner: filing the quota requests, confirming the OpenRouter paid key, the billing export, and approving a temporary Cloud SQL instance for load tests (`../owner-questions.md`) | Money and project-owner actions |

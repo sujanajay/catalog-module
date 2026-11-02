@@ -104,7 +104,9 @@ interface Rejection {
    renaming it) on every published image version, not only a byte hash.
 3. Listing keys per channel and market, with a "no key" state that is explicit.
 4. Change reason kinds `outside_change` (drift) and `rejection_fix`.
-5. A listing state field that M9 can set: submitted, live verified, rejected, drift, not found.
+5. (Owned by M9, not M0.) The gallery verification state (verified_live, partial, not_yet_live, drift, reverted,
+   not_found, unobserved) lives in M9's own `catalog_listing_verification` table keyed by M0 listing id; M0's listing
+   `status` stays the liveness status from the liveness feed. `submitted` and `verified_live` are M0 change events.
 
 ## 4. Features
 
@@ -124,9 +126,10 @@ every holdout listing, and I am told when anyone outside the system changes a tr
   title; `active_listings_amazon_3p_*` main image and title), mapped into the same `ListingObservation` shape with no scrape.
 - M9-F1-R4. Schedule (admin settings): holdout listings (treated and control, about 1,400 options on Namshi and Noon, each in
   up to two markets) daily; every other live listing of the slice channels weekly (about 3,179 live options).
-- M9-F1-R5. **Verification.** For each observation, compare the live gallery with the latest published content version for
-  that listing in M0, image by image in order, by pHash distance (match when the distance is at most the admin threshold,
-  default 10 of 64 bits) and the title by text. Set the state:
+- M9-F1-R5. **Verification.** Every observation goes to M0 through `recordObservation`; M0's matcher (M0-F3) compares it
+  with the published versions slot by slot, using M0's one pHash setting (default 6 of 64 bits, 7-12 uncertain;
+  M0-F3-R10), and writes `verified_live` or `observed_other`. M9 then sets the gallery-level state in its own table from
+  those events, comparing image order and the title by text:
   - `verified_live`: every published image is present in the published order (and the title matches when we published one);
   - `partial`: some published images are present, others missing or out of order;
   - `not_yet_live`: the page still shows the previous version;
@@ -144,8 +147,10 @@ every holdout listing, and I am told when anyone outside the system changes a tr
   pages fetched through a Saudi network exit only if plain fetches are blocked (open question).
 - M9-F1-R9. A daily coverage line: share of scheduled listings observed with `fetch = ok`. Below 90% for the holdout set
   raises an alert.
-- M9-F1-R10. First-slice item S7 also needs the Noon and Namshi gallery count per option before the holdout starts (to pick
-  candidates with fewer than 5 images, as the outcome baseline requires); the first full run delivers it as a BigQuery table.
+- M9-F1-R10. First-slice item S7 also needs the Noon and Namshi gallery count and roles per option before the holdout
+  starts (to apply M4-F2-R2's eligibility rule: the gallery is below the channel's shot-set rule, so the crops-first
+  treatment changes something; not the older "fewer than 5 images" filter, which would halve the pool); the first full run
+  delivers it as a BigQuery table.
 
 **Non-functional.** Freshness under 24 hours for holdout listings. Scale: about 6,000 page fetches a day at the start (holdout
 across two channels and two markets, plus the weekly share of the rest), comfortably below one request per 2 seconds per
@@ -366,7 +371,7 @@ Key copy for failure moments:
 | Slice | What | Depends on | Acceptance test |
 |---|---|---|---|
 | M9-S1 (P0, part of S7) | Scraper fields for Noon and Namshi galleries (UAE, KSA): image URLs, count, titles EN and AR, pHash; Trendyol and Amazon feeds mapped; BigQuery table; gallery count per option for the holdout pool | channel keys in M0 (M0-F1); legal OK for own-listing scrape | M9-F1 acceptance test 4, then 3 |
-| M9-S2 (P0) | Verification states against the treatment log, `liveFrom`, drift and contamination alert, Ops "Live check" block | M9-S1, M0 treatment log with pHash | M9-F1 acceptance tests 1 and 2 |
+| M9-S2 (P0) | Gallery-level states from M0's `verified_live` and `observed_other` events, contamination alert (from M0's incident), coverage line, Ops "Live check" block | M9-S1, M0-S6 matcher | M9-F1 acceptance tests 1 and 2 |
 | M9-S3 (P1, after demo) | Template registry, parsers (Noon NIS, generic Excel, CSV), bindings, three-step admin flow | M5 channel registry, demo decision | An admin adds a Noon and a Namshi template without a deploy and confirms every binding |
 | M9-S4 (P1) | Fill inside finalize with links, facts, M8 text and Arabic; shading; "Needs you"; re-read; "I uploaded this file"; golden fill compare tool | M9-S3, M2 facts contract, M8-S1 (and M8-S2 for Arabic) | M9-F2 acceptance test |
 | M9-S5 (P1) | Rejection sources connected (error file drop, liveness reasons, Noon policy violations), reason taxonomy, `Rejection` rows | M0 listing state; data team for the stale Noon feed | M9-F3 acceptance test |
@@ -386,3 +391,14 @@ Key copy for failure moments:
 | Rejection reasons are generic (reported for Flipkart) or missing | Learning has little to learn from | Group and map once; count `unknown` and push channels for better reasons |
 | A vendor in the demo already does Noon files and Arabic well | Building M9-F2 is waste | The decision rule above is written before the demo |
 | Who clicks "I uploaded this file" when the channel team uploads | Missing submit dates | Default: whoever uploads; the M4 owner checks it for the holdout |
+
+## 9. Integration decisions (2026-11-02)
+
+| # | Decision | Why |
+|---|---|---|
+| D1 | One matcher: M0-F3 matches every observation (scrape, Trendyol feed, Amazon feed) with one pHash setting (default 6, uncertain 7-12). M9 collects the scrape and owns gallery states, alerts and coverage | M0 and M9 both specified verification, with thresholds 6 and 10 |
+| D2 | The pre-holdout gallery table applies M4's eligibility rule (below the channel shot-set rule), not "fewer than 5 images" | The module map's treatment definition keeps the whole apparel pool; the under-5 filter would halve it |
+| D3 | Contamination: M0 detects and writes the incident, M9 sends the one alert, M4 accounts for it | Three modules each claimed the alarm |
+| D4 | Holdout listings are scraped daily for the whole window | M4 had weekly after week 3 |
+| D5 | Open questions answered: scraper fields are built where the scraper lives today, with M9 owning the new fields and the verification job in this repo (the data team owner is asked in `../owner-questions.md`); try plain fetches for Saudi pages first | Technical defaults |
+| D6 | Kept for the owner: legal review of scraping our own listings, a small Saudi proxy budget if plain fetches are blocked, the data team's help (scraper, stale Noon not-live feed), who clicks "I uploaded this file", Trendyol API credentials (`../owner-questions.md`) | Legal, money, people, marketplace relationships |
