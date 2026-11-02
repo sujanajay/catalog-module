@@ -337,8 +337,8 @@ Build (nobody has GCC shot policies as data).
   - Runs only when all hold: brand generation on (off by default), the brand's **likeness flag** (M12-F3-R5) is on
     (mode A redraws the brand's own model, so it is a likeness use; Opptra holds likeness rights for brand models (owner
     answer Q15), and the owner sets the flag per brand, so the person step is per brand, never per product), the
-    channel's `generated_allowed` on (seed off on
-    every channel until its AI stance is recorded; Noon's "only photographs are permitted" rule is open), the role is
+    channel's `generated_allowed` on (seed on for Noon and Namshi, which accept AI-made images (owner 2026-11-03);
+    off elsewhere until recorded), the role is
     required and no crop can fill it, at least one usable photo shows that view, not kids, not `unknown` taxonomy, and
     the caps allow it.
   - References: every usable photo of the product (no size charts, collages, made photos or Brand DNA logos), full
@@ -383,11 +383,25 @@ Turns mannequin or flat photos into on-model shots for brands that send only fla
 Anta flat apparel). Buy through `image.make` `ghost_to_model` (Photoroom Plus, FASHN, Gemini image); needs the brand's
 likeness flag on (Q15) and the M7 fidelity check. Release R3 in `../roadmap.md`. Measured by fidelity pass rate and acceptance.
 
-### M3-F8 Try-on and model swap (P2)
+### M3-F8 Try-on and model swap: 2D garment to on-model (P2)
 Puts the garment on the brand's own model, the exact model or a lookalike (Vertex virtual try-on, FASHN, Photoroom).
-Gated by the brand's likeness flag, set by the owner (Q15). No face identity model and no stored face data: identity
-consistency follows the M3-F5 rule (reference photos as inputs, in-memory similarity check discarded after the
-attempt, sampled audit; Q18). Human step: the owner sets the flag per brand (settled HITL rule). Release R3.
+Gated by the brand's likeness flag, set by the owner (Q15). Human step: the owner sets the flag per brand (settled HITL
+rule). Release R3. How one on-model image is made (owner asked this be a requirement, 2026-11-03):
+- M3-F8-R1. Inputs: the garment photo (flat, ghost or packshot; cut out by our GPUs) and 2 to 4 photos from the brand's
+  model pack (M12-F3-R7): front face and full body, taken from the brand's own photos or website. The model pack photos
+  are stored as ordinary brand assets, deletable per model and per brand (M11 deletion rules).
+- M3-F8-R2. The `image.make` capability `tryon` or `model_swap` receives garment plus pack photos and the code-owned
+  prompt (M3-F5 prompt rules); the vendor chain follows M3-F5.
+- M3-F8-R3. M7 checks every output: product fidelity against the garment photo (colour, logo, print, shape), the
+  channel rules, modesty, and identity (a visual similarity score between the output and the pack, computed in memory
+  for that attempt; only pass or fail and the score are kept). Fail means the next attempt; after the last, `not_made`.
+- M3-F8-R4. A person audits a sample (1 in 10 adults, M7). Kids are never generated (M3-F5).
+- M3-F8-R5. No face embeddings or identity vectors are stored (Q18). If the R3 bake-off shows that reference photos alone
+  cannot hold the same face across a brand's images (identity pass rate below the M7 bar), the R3 requirements session
+  proposes the stronger option, a per-model custom model ("digital twin", trained on the pack), for the owner to decide.
+  The owner has said the data law is not a blocker (2026-11-03).
+- **Acceptance test:** for one brand with a model pack, 20 flat garments produce on-model images where every published
+  image passes fidelity and identity, the audit sample agrees, and no face vector exists in any table, file or log.
 
 ### M3-F9 Colour variants from one shot (Later)
 Makes other colourways from one photo (Photoroom colour replace). Needs the M7 colour check (Delta E against the brand's

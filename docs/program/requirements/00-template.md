@@ -53,8 +53,17 @@ later the builder agents.
   owner 2026-11-03). Kids never need a person: flat lay only, and no synthetic children.
 - Never invent content without source data: no size chart without a brand size chart (C16 follow-up, owner
   2026-11-03).
-- Noon allows Arabic text on infographic images (owner, 2026-11-03); limits per
-  `C:/Users/Sujan Ajay/Desktop/catalog-module/.runs/2026-11-03-proxy-noon-video.md` and M5-F8.
+- Infographics (C19, owner 2026-11-03): assumed accepted in the Noon gallery (a channel setting, easy to change),
+  following the image rules already in code; never image 1. No Arabic text on images for now (English only);
+  Arabic on images is a later scope item.
+- Video: only for channels that accept it (Noon for eligible sellers, Amazon.ae and .sa, Trendyol); later scope, not
+  urgent. Research: `C:/Users/Sujan Ajay/Desktop/catalog-module/.runs/2026-11-03-proxy-noon-video.md`.
+- Scraping proxy: Decodo residential, HTML only (no full browser loads), primary; Zyte API (pay on success) as the
+  backup. Both start on a trial that proves Saudi and UAE pages load. Ceiling USD 100 a month (Q5).
+- Outcome data: use what `opptra-datawarehouse` already has (sales, returns, ads, stock, price, liveness); the gaps
+  are in `C:/Users/Sujan Ajay/Desktop/catalog-module/.runs/2026-11-03-data-inventory.md` and are asked of the teams.
+  Missing data lowers sensitivity; it never blocks a release.
+- All 30 rule conflicts are decided (M5-F2-R4). Trendyol API: later, not now.
 - Check Streamoid and Rubick before building text and listing files: by a website teardown plus our own prototype, not
   vendor demos (owner answer Q4).
 - Scrape our own listings now (legal OK, Q2); buy market data later.

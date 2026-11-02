@@ -106,6 +106,9 @@ forward** (simplified) and the **gate to promote it**, so nobody needs to re-rea
 
 ### M11-F1 Infographics, Arabic and English (P2; I037, I039)
 
+Owner 2026-11-03: English infographics first, following the image rules in code; Arabic on images is later scope (the
+Arabic requirements below stay for that later step). Noon gallery assumed to accept infographics (C19).
+
 **Brief.** One extra image per product: the brand's own product photo (cut out) beside a solid text panel with up to
 three short highlight lines, in the brand's colours and font. All words are drawn by our code, never by an image model,
 so the text is exact. Arabic versions are drawn right to left with an Arabic font. Placed last, never image 1. No paid

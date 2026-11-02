@@ -215,8 +215,10 @@ press one button to decide, and the system stops silently picking.
     product. Kids never need a person (flat lay).
   - C16: the recommendation for units (store cm, show per market, no mixed units), plus: never create a size chart
     without a brand size chart.
-  The register shows 17 open, of which 1 is high (C19 Noon infographics; the owner says Arabic text is allowed, the
-  limits wait for research).
+  - C19: infographics assumed accepted in the Noon gallery (channel setting, changeable), following the image rules in
+    code; never image 1; English only for now.
+  - C05, C08, C09, C12, C13, C15, C17, C18, C21, C22, C23, C25, C26, C28, C29, C30: the recommendation.
+  The register shows 0 open. New conflicts from admin edits still follow M5-F2-R7.
 - M5-F2-R5. Text work (M8) cannot start generating for a channel while a high conflict on a text component of that channel is
   open (C01 title formula, C03 bullet count, C04 bullet length). The register shows "Blocks M8 text" on those cards.
 - M5-F2-R6. A conflict can be reopened only by the owner role with a reason; reopening returns its rules to `warn`.
