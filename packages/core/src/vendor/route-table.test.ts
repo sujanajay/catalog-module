@@ -1,11 +1,11 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { asc, eq, sql } from "drizzle-orm";
+import { and, asc, eq, sql } from "drizzle-orm";
 import { createTestDb } from "../db/testing";
 import type { Db } from "../db/client";
 import { vendorRouteChanges, vendorRoutes } from "../db/schema";
 import { ensureSeedRoutes, killPrimary, loadRoutes, resetRouting, RouteChangeError, routerFor, setRoute } from "./route-table";
 import { planRoutes } from "./router";
-import { NO_TRAINING_PENDING, SEED_ROUTES } from "./routes";
+import { NO_TRAINING_PENDING, OPENROUTER_NO_TRAINING_POSITION, SEED_ROUTES } from "./routes";
 
 let db: Db, close: () => Promise<void>;
 beforeAll(async () => { ({db, close} = await createTestDb()); }, 120_000);
@@ -29,20 +29,28 @@ describe("M7-F2 route table", () => {
     const seeded = await db.select().from(vendorRouteChanges).where(eq(vendorRouteChanges.changedBy, "seed"));
     expect(seeded).toHaveLength(SEED_ROUTES.length);
   });
-  it("seeds every route registered with a pending position; nothing serves until the owner records one (R7)", async () => {
+  it("seeds every OpenRouter route serving with the owner's recorded no-training position (R7, decision 2026-11-03)", async () => {
     await ensureSeedRoutes(db);
-    expect((await loadRoutes(db)).every(r => r.state === "registered" && r.noTrainingTerms === NO_TRAINING_PENDING)).toBe(true);
-    expect(await killPrimary(db, "judge.render", ADMIN, "drill")).toBeNull();
-    expect(planRoutes(await routerFor(db), "judge.render", ["google/gemini-2.5-flash-lite"])).toEqual([]);
-    // Pending or blank is refused as serving by setRoute and by the database itself.
-    await expect(setRoute(db, SEED_ROUTES[0]!.id, {state: "serving", changedBy: ADMIN, reason: "on"})).rejects.toBeInstanceOf(RouteChangeError);
-    await expect(setRoute(db, SEED_ROUTES[0]!.id, {state: "serving", noTrainingTerms: "Pending legal", changedBy: ADMIN, reason: "on"})).rejects.toBeInstanceOf(RouteChangeError);
-    await expect(db.execute(sql`update vendor_routes set state = 'serving' where id = ${SEED_ROUTES[0]!.id}`)).rejects.toThrow();
+    expect((await loadRoutes(db)).every(r => r.state === "serving" && r.noTrainingTerms === OPENROUTER_NO_TRAINING_POSITION)).toBe(true);
+    expect(planRoutes(await routerFor(db), "judge.render", ["google/gemini-2.5-flash-lite"]).map(r => r.rank)).toEqual([1, 2, 3]);
+    expect(planRoutes(await routerFor(db), "vision.read", []).map(r => r.rank)).toEqual([1, 2, 3]);
+  });
+  it("R7 stays enforced: a pending or blank position is refused as serving by setRoute and by the database itself", async () => {
+    await ensureSeedRoutes(db);
+    const id = SEED_ROUTES[0]!.id;
+    await setRoute(db, id, {state: "registered", noTrainingTerms: NO_TRAINING_PENDING, changedBy: ADMIN, reason: "position withdrawn"});
+    expect(planRoutes(await routerFor(db, {ttlMs: 0}), "judge.render", []).map(r => r.rank)).toEqual([2, 3]);
+    await expect(setRoute(db, id, {state: "serving", changedBy: ADMIN, reason: "on"})).rejects.toBeInstanceOf(RouteChangeError);
+    await expect(setRoute(db, id, {state: "serving", noTrainingTerms: "Pending legal", changedBy: ADMIN, reason: "on"})).rejects.toBeInstanceOf(RouteChangeError);
+    await expect(db.execute(sql`update vendor_routes set state = 'serving' where id = ${id}`)).rejects.toThrow();
+    await expect(db.execute(sql`update vendor_routes set no_training_terms = ' ' where id = ${SEED_ROUTES[1]!.id}`)).rejects.toThrow();
   });
   it("recording the owner's position is a data change that switches the route on, logged with the position", async () => {
+    await ensureSeedRoutes(db);
+    for (const seed of SEED_ROUTES) await setRoute(db, seed.id, {state: "registered", noTrainingTerms: NO_TRAINING_PENDING, changedBy: ADMIN, reason: "awaiting decision"});
     await recordPositions();
     expect((await loadRoutes(db)).every(r => r.state === "serving" && r.noTrainingTerms!.startsWith("test:"))).toBe(true);
-    const [change] = await db.select().from(vendorRouteChanges).where(eq(vendorRouteChanges.toState, "serving")).limit(1);
+    const [change] = await db.select().from(vendorRouteChanges).where(and(eq(vendorRouteChanges.toState, "serving"), eq(vendorRouteChanges.reason, "owner decision (no-training position recorded: test: vendor terms section 4 (2026-11-03))"))).limit(1);
     expect(change).toMatchObject({fromState: "registered", changedBy: ADMIN});
     expect(change!.reason).toMatch(/no-training position recorded: test: vendor terms/);
   });

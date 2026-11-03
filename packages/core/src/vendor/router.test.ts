@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { CircuitBreakers } from "./circuit";
 import { callRoutes, createRouter, planRoutes, type PlannedRoute, type RouteAttempt } from "./router";
-import { NO_TRAINING_PENDING, SEED_ROUTES, routeId, type RouteDef } from "./routes";
+import { NO_TRAINING_PENDING, OPENROUTER_NO_TRAINING_POSITION, SEED_ROUTES, hasNoTrainingPosition, routeId, type RouteDef } from "./routes";
 
 /** The seeds as they are once the owner has recorded a no-training position and switched them on. */
 const SERVING = SEED_ROUTES.map(r => ({...r, state: "serving" as const, noTrainingTerms: "test: written position on file"}));
@@ -17,10 +17,14 @@ describe("M7-F2 route plan", () => {
       expect(rows.map(r => r.rank)).toEqual([1, 2, 3]);
       expect(new Set(rows.map(r => r.model.split("/")[0])).size).toBe(3);
       expect(rows.every(r => r.id === routeId(capability, r.adapter, r.model))).toBe(true);
-      // R7: no written no-training position is on file, so the seeds wait for the owner (registered, never called).
-      expect(rows.every(r => r.state === "registered" && r.noTrainingTerms === NO_TRAINING_PENDING)).toBe(true);
-      expect(planRoutes(createRouter(SEED_ROUTES), capability, [rows[0]!.model])).toEqual([]);
+      // R7: the owner's recorded position (OpenRouter's provider data policy, 2026-11-03) is on file, so the seeds serve.
+      expect(rows.every(r => r.state === "serving" && r.noTrainingTerms === OPENROUTER_NO_TRAINING_POSITION)).toBe(true);
+      expect(models(planRoutes(createRouter(SEED_ROUTES), capability, [rows[0]!.model]))).toEqual(rows.map(r => r.model));
     }
+  });
+  it("R7: the recorded OpenRouter position is a written one: it names the owner decision and links the provider data policy", () => {
+    expect(hasNoTrainingPosition(OPENROUTER_NO_TRAINING_POSITION)).toBe(true);
+    expect(OPENROUTER_NO_TRAINING_POSITION).toMatch(/^OpenRouter provider data policy .*https:\/\/openrouter\.ai\/docs\/guides\/privacy\/data-collection.*; owner decision 2026-11-03$/);
   });
   it("R7: a serving route without a written no-training position is never planned for a brand-photo capability", () => {
     const pending = judgeRoutes().map(r => r.rank === 1 ? {...r, noTrainingTerms: NO_TRAINING_PENDING} : r.rank === 2 ? {...r, noTrainingTerms: null} : r);

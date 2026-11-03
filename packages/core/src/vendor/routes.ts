@@ -51,6 +51,13 @@ export const hasNoTrainingPosition = (terms: string | null | undefined): boolean
 export const routeCallable = (route: Pick<RouteDef, "capability" | "state" | "noTrainingTerms">): boolean =>
   route.state === "serving" && (!BRAND_PHOTO_CAPABILITIES.includes(route.capability) || hasNoTrainingPosition(route.noTrainingTerms));
 
+/**
+ * The owner's written no-training position for the OpenRouter routes (M7-F2-R7), recorded by Sujan on 2026-11-03:
+ * OpenRouter's provider data policy covers it (it does not route to providers that train on or log prompts unless
+ * the account opts in). A future route without a decision is seeded with NO_TRAINING_PENDING instead.
+ */
+export const OPENROUTER_NO_TRAINING_POSITION = "OpenRouter provider data policy (https://openrouter.ai/docs/guides/privacy/data-collection); owner decision 2026-11-03";
+
 export const routeId = (capability: Capability, adapter: RouteAdapter, model: string) => `${capability}:${adapter}:${model}`;
 
 /**
@@ -68,7 +75,5 @@ const OPENROUTER_MODELS = [
 export const SEED_ROUTES: readonly RouteDef[] = (["judge.render", "vision.read"] as const).flatMap(capability => OPENROUTER_MODELS.map(({rank, model}) => ({
   id: routeId(capability, "openrouter", model), capability, rank, adapter: "openrouter" as const, model, paramsVersion: "1",
   priceUsd: 0.0004, rateLimitPerMin: null, region: "openrouter", licence: "OpenRouter terms of service",
-  // No written no-training position is on file for these routes (R7): the owner records it, and only then are they
-  // switched to serving. Until then they are registered and never called.
-  noTrainingTerms: NO_TRAINING_PENDING, state: "registered" as const,
+  noTrainingTerms: OPENROUTER_NO_TRAINING_POSITION, state: "serving" as const,
 })));
