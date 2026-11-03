@@ -27,6 +27,8 @@ import { deriveBatchState, QA_CAP_BANNER } from "@catalog/core/catalog/pipeline/
 import { strictestChannel } from "@catalog/core/catalog/qa/policy";
 import { findOrCreateProduct } from "@catalog/core/catalog/products";
 import { cannedQa } from "./qa-mock";
+import { ensureSeedRoutes, killPrimary, resetRouting, routerFor } from "@catalog/core/vendor/route-table";
+import { SEED_ROUTES } from "@catalog/core/vendor/routes";
 import type { RepairOwnDefects } from "@catalog/core/catalog/qa/triage";
 vi.mock(import("@catalog/core/catalog/sheet"),async original=>{const module=await original();return {...module,compareXlsxCsv:vi.fn(module.compareXlsxCsv)};});
 let db:Db,close:()=>Promise<void>;
@@ -48,7 +50,8 @@ function world() {
   const remove=vi.fn(async(path:string)=>objects.delete(`gs://public/${path}`));
   const fetch=vi.fn<typeof globalThis.fetch>(async(url)=>{const path=new URL(String(url)).pathname.replace(/^\/public\//,"");const obj=objects.get(`gs://public/${path}`);return obj ? new Response(new Uint8Array(obj.buf),{headers:{"content-type":obj.mime,"content-length":String(obj.buf.length),"x-goog-generation":obj.generation}}):new Response(null,{status:404});});
   const base=workerCatalogDeps(db);
-  const deps:CatalogDeps={...base,sleep:async()=>{},fetch,now:()=>new Date("2026-01-01T00:00:00Z"),log:()=>{},enqueue:vi.fn(async()=>"task"),resolvePolicy:vi.fn<CatalogDeps["resolvePolicy"]>(async()=>({matteModel:"fixture",qaModel:"",threshold:75,floor:60,qaMode:"per_source",qaSampleRate:1,source:"default"})),
+  // The route table (M7-F2) is switched on per test; without it the judge asks the policy's models only.
+  const deps:CatalogDeps={...base,routes:undefined,sleep:async()=>{},fetch,now:()=>new Date("2026-01-01T00:00:00Z"),log:()=>{},enqueue:vi.fn(async()=>"task"),resolvePolicy:vi.fn<CatalogDeps["resolvePolicy"]>(async()=>({matteModel:"fixture",qaModel:"",threshold:75,floor:60,qaMode:"per_source",qaSampleRate:1,source:"default"})),
     storage:{...storage,getBucketName:()=>"assets",getPublicBucketName:()=>"public",uploadBuffer:upload,downloadBuffer:async uri=>{const o=objects.get(uri);if(!o)throw new Error(`No object ${uri}`);return {buf:o.buf,mime:o.mime};},headObject:async uri=>{const o=objects.get(uri);return o ? {exists:true,size:o.buf.length,contentType:o.mime,generation:o.generation,crc32c:o.crc32c}:{exists:false,size:null,contentType:null,generation:null,crc32c:null};},stageCopyToPublic:copy,deletePublicObject:remove,setCustomTime:vi.fn(async()=>{})},
     judgeOutput:vi.fn<CatalogDeps["judgeOutput"]>(async(input)=>({scores:{complete_product:95,same_product:95,edge_quality:95,background_clean:95,no_text_or_watermark:95,orientation_ok:95,product_intact:95,placement_ok:95,overall:95},verdict:"pass",reasons:[],isCollage:false,costUsd:0,calls:0,usage:{},model:input.model,flags:[]})),
     classifyProductType:vi.fn<CatalogDeps["classifyProductType"]>(async()=>({type:"footwear",confidence:1,costUsd:0,calls:0,usage:{},flags:[]})),
@@ -784,6 +787,45 @@ describe("spec07 the classifier backs off on rate limits and then asks the secon
   expect(r.batch.cost).toMatchObject({qaCalls:5});
  },60_000);
 });
+it("M7-S2 acceptance (4.2.9 tests 1 and 3): with route 1 of the judge and the reader killed, the batch completes on route 2",async()=>{
+ const w=world(),s=await seed(w,"kill-primary",{shots:["a","b","c"],channels:["noon","amazon"]}),log=vi.fn();
+ const [FIRST,SECOND]=SEED_ROUTES.filter(r=>r.capability==="judge.render").map(r=>r.model) as [string,string];
+ resetRouting(db);await ensureSeedRoutes(db);
+ expect(await killPrimary(db,"judge.render","test@opptra.com","CI kill-the-primary")).toMatchObject({model:FIRST});
+ expect(await killPrimary(db,"vision.read","test@opptra.com","CI kill-the-primary")).toMatchObject({model:FIRST});
+ w.deps.routes=()=>routerFor(db);
+ vi.mocked(w.deps.resolvePolicy).mockResolvedValue({matteModel:"fixture",qaModel:FIRST,qaModelSecond:SECOND,threshold:75,floor:60,qaMode:"per_source",qaSampleRate:1,source:"default"});
+ const real=await sharp({create:{width:64,height:64,channels:3,background:"white"}}).jpeg().toBuffer();
+ // Real JPEGs for the reader (the source photos) and the judge (the rendered outputs).
+ for(const [uri,obj] of w.objects) if(uri.includes(s.batch.id)) w.objects.set(uri,{...obj,buf:real,crc32c:real.toString("base64")});
+ const render=w.deps.renderAllChannels;
+ w.deps.renderAllChannels=(async(...args:Parameters<typeof render>)=>Object.fromEntries(Object.entries(await render(...args)).map(([channel,out])=>[channel,{...out,jpeg:real,bytes:real.length}]))) as typeof render;
+ const publicFetch=w.deps.fetch,models:string[]=[];
+ // Route 1 answers with a server error if it is ever asked; every other route answers for both the reader and the judge.
+ const answer=JSON.stringify({type:"footwear",confidence:.9,...JSON.parse(passScores),view:"front",wrong_item:false,evidence:{}});
+ const llm=vi.fn(async(init?:RequestInit)=>{const model=String((JSON.parse(String(init?.body)) as {model:string}).model);models.push(model);return model===FIRST ? new Response("upstream error",{status:500}):new Response(JSON.stringify(openRouterReply(answer)));});
+ w.deps.fetch=vi.fn<typeof globalThis.fetch>(async(url,init)=>String(url).startsWith("https://openrouter.ai/")?llm(init):publicFetch(url,init));
+ w.deps.judgeOutput=judgeOutput;w.deps.classifyProductType=classifyProductType;w.deps.log=log;
+ vi.stubEnv("OPENROUTER_API_KEY","test-key");
+ try {
+  for(let i=0;i<3;i++) expect((await handleChunkTask(w.deps,await currentChunkTask(db,s.chunk.id))).httpStatus).toBe(200);
+  expect((await handlePublishTask(w.deps,{batchId:s.batch.id,productId:s.product.id})).outcome).toBe("published");
+  expect((await handleFinalizeTask(w.deps,{batchId:s.batch.id})).outcome).toBe("done");
+ } finally { vi.unstubAllEnvs(); resetRouting(db); }
+ expect(models.length).toBeGreaterThan(0);
+ expect(models).not.toContain(FIRST);
+ const [product]=await db.select().from(catalogProducts).where(eq(catalogProducts.id,s.product.id));
+ expect(product!.productType).toBe("footwear");
+ const outputs=await db.select().from(catalogOutputs).where(eq(catalogOutputs.batchId,s.batch.id));
+ expect(outputs).toHaveLength(6);
+ expect(outputs.every(o=>o.isLive && !o.flags.includes("qa_unavailable"))).toBe(true);
+ // Every judgement names route 2 (M7-F2-R6), stored for the harness; the operator never sees it.
+ const judgements=outputs.flatMap(o=>((o.qaScores as {judgements?:{route:string|null;model:string}[]} | null)?.judgements ?? []));
+ expect(judgements.length).toBeGreaterThan(0);
+ expect(judgements.every(j=>j.route===`judge.render:openrouter:${SECOND}` && j.model===SECOND)).toBe(true);
+ const [batch]=await db.select().from(catalogBatches).where(eq(catalogBatches.id,s.batch.id));
+ expect(deriveBatchState(batch!).state).toBe("ready");
+},120_000);
 describe("spec07 caps count the recorded judge spend",()=>{
  const url="https://openrouter.ai/api/v1/chat/completions";
  async function capWorld(name:string,options:Record<string,unknown>,day:string) {

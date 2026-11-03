@@ -4,6 +4,8 @@ import { judgeOutput, sheetNames, sheetNumbered, normalizeScores, verdictFor, di
 import { classifyProductType } from "./classify";
 import { CATALOG_QA_TEMPLATE, renderTemplate } from "./templates";
 import { QA_USD_PER_CHECK_FALLBACK } from "../cost";
+import { createRouter } from "../../vendor/router";
+import { SEED_ROUTES } from "../../vendor/routes";
 /** A non-streaming OpenRouter chat completion as it arrives in production (usage is always present). */
 const openRouterReply = (content: string) => ({id:"gen-1760900000-abc",provider:"Google",model:"test",object:"chat.completion",created:1760900000,
  choices:[{logprobs:null,finish_reason:"stop",native_finish_reason:"STOP",index:0,message:{role:"assistant",content,refusal:null,reasoning:null}}],
@@ -99,8 +101,14 @@ describe("catalog judge v2", () => {
  });
  it("retries invalid JSON once then returns qa_unavailable, retaining both request costs", async () => {
   const fetcher = vi.fn(async()=>response("not JSON",.002));
-  const result = await judgeOutput(await input({n:1,shotOne:undefined}),{apiKey:"fake",fetch:fetcher});
+  const result = await judgeOutput(await input({n:1,shotOne:undefined,secondModel:undefined}),{apiKey:"fake",fetch:fetcher});
   expect(fetcher).toHaveBeenCalledTimes(2);expect(result).toMatchObject({verdict:"flag",flags:["qa_unavailable"],costUsd:.004,calls:2});
+ });
+ it("M7-F2-R3: invalid JSON after its retry moves to the second judge before qa_unavailable, every request cost kept", async () => {
+  const fetcher = vi.fn<typeof fetch>(async()=>response("not JSON",.002));
+  const result = await judgeOutput(await input({n:1,shotOne:undefined}),{apiKey:"fake",fetch:fetcher,log:()=>{}});
+  expect(fetcher.mock.calls.map(([, init]) => requestModel(init))).toEqual(["first/judge","first/judge","second/judge","second/judge"]);
+  expect(result).toMatchObject({verdict:"flag",flags:["qa_unavailable"],costUsd:.008,calls:4,route:null});
  });
  it("asks again for missing scores instead of reading them as failed checks, and logs absent cost",async()=>{
   const bytes=await image(), log=vi.fn();
@@ -433,5 +441,45 @@ describe("classifier back-off on rate limits and the second model (gate 3h)", ()
   expect(result.flags).toEqual(["type_unknown"]);
   expect(clock.waits).toEqual([5_000, 5_000]);
   expect(backoff.remainingMs).toBe(0);
+ });
+});
+
+describe("M7-F2 the judge and classifier call through the route table", () => {
+ const routes = (killRank?: number) => createRouter(SEED_ROUTES.map(r => r.rank === killRank ? {...r, state: "off" as const} : r));
+ const [FIRST, SECOND, THIRD] = SEED_ROUTES.filter(r => r.capability === "judge.render").map(r => r.model) as [string, string, string];
+ const fast = {sleep: async () => {}, random: () => .5, log: () => {}};
+ const asked = (fetcher: ReturnType<typeof byModel>) => fetcher.mock.calls.map(([, init]) => requestModel(init));
+ it("route 1 switched off: route 2 gives the verdict and route 1 is never asked; the result names the route", async () => {
+  const fetcher = byModel({[SECOND]: reply()});
+  const result = await judgeOutput(await input({n:1,shotOne:undefined,model:FIRST,secondModel:SECOND}),{apiKey:"fake",fetch:fetcher,router:routes(1),...fast});
+  expect(result).toMatchObject({verdict:"pass",flags:[],model:SECOND,route:`judge.render:openrouter:${SECOND}`,calls:1});
+  expect(asked(fetcher)).toEqual([SECOND]);
+ });
+ it("route 1 switched off: the second opinion on a different item comes from route 3, so two models still agree", async () => {
+  const fetcher = byModel({[SECOND]: reply({wrong_item:true}), [THIRD]: reply({wrong_item:true})});
+  const result = await judgeOutput(await input({model:FIRST,secondModel:SECOND}),{apiKey:"fake",fetch:fetcher,router:routes(1),...fast});
+  expect(result.wrongItem).toMatchObject({first:true,second:true,confirmed:true,secondModel:THIRD});
+  expect(asked(fetcher)).toEqual([SECOND, THIRD]);
+ });
+ it("a refusal (empty reply) moves to the next route for this item instead of holding the photo", async () => {
+  const refused = () => new Response(JSON.stringify(openRouterReply("")));
+  const fetcher = vi.fn<typeof fetch>(async (_url, init) => requestModel(init) === FIRST ? refused() : response(reply(), .001, requestModel(init)));
+  const log = vi.fn();
+  const result = await judgeOutput(await input({n:1,shotOne:undefined,model:FIRST,secondModel:SECOND}),{apiKey:"fake",fetch:fetcher,router:routes(),...fast,log});
+  expect(result).toMatchObject({verdict:"pass",flags:[],model:SECOND,route:`judge.render:openrouter:${SECOND}`});
+  expect(log).toHaveBeenCalledWith("catalog_qa: first judge unavailable; the second judge gave the verdict", expect.objectContaining({model:FIRST,fallbackModel:SECOND,kind:"empty_reply"}));
+ });
+ it("routes 1 and 2 down: the fallback route gives the verdict; only all routes down holds the photo as unchecked", async () => {
+  const down = () => new Response("upstream error",{status:503});
+  const third = vi.fn<typeof fetch>(async (_url, init) => requestModel(init) === THIRD ? response(reply(), .001, THIRD) : down());
+  expect(await judgeOutput(await input({n:1,shotOne:undefined,model:FIRST,secondModel:SECOND}),{apiKey:"fake",fetch:third,router:routes(),...fast})).toMatchObject({verdict:"pass",model:THIRD,route:`judge.render:openrouter:${THIRD}`});
+  const none = await judgeOutput(await input({n:1,shotOne:undefined,model:FIRST,secondModel:SECOND}),{apiKey:"fake",fetch:vi.fn<typeof fetch>(async () => down()),router:routes(),...fast});
+  expect(none).toMatchObject({flags:["qa_unavailable"],route:null,model:FIRST});
+ });
+ it("the classifier reads with vision.read: route 1 switched off, route 2 gives the type and the result names it", async () => {
+  const fetcher = byModel({[SECOND]: {type:"footwear",confidence:.8}});
+  const result = await classifyProductType(await image(),{apiKey:"fake",model:FIRST,secondModel:SECOND,fetch:fetcher,router:routes(1),...fast});
+  expect(result).toMatchObject({type:"footwear",flags:[],model:SECOND,route:`vision.read:openrouter:${SECOND}`});
+  expect(asked(fetcher)).toEqual([SECOND]);
  });
 });

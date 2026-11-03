@@ -34,6 +34,7 @@ const TABLES = [
   "users", // 0001_users.sql (spec 03)
   "catalog_cost_events", // 0002_cost_events.sql (observability plan, part A)
   "catalog_enlargements", // 0006_enlargements.sql (spec 18 lifecycle)
+  "vendor_routes", "vendor_route_changes", // 0010_vendor_routes.sql (M7-S2)
 ];
 
 const INDEXES = [
@@ -47,6 +48,7 @@ const INDEXES = [
   "catalog_eval_judgements_output_model_uq", "brand_master_slug_unique",
   "catalog_cost_events_batch_id_idx", "catalog_cost_events_brand_slug_at_idx", "catalog_cost_events_output_id_idx",
   "catalog_cost_events_at_idx",
+  "vendor_routes_capability_adapter_model_uq", "vendor_routes_capability_rank_idx", "vendor_route_changes_route_id_at_idx",
 ];
 
 describe("generated migrations", () => {

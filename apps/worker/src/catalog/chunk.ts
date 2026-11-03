@@ -290,8 +290,9 @@ export async function handleChunkTask(rawDeps: CatalogDeps, body: Record<string,
         try {
          const cap=await checkCatalogCaps(deps.db,{batchId:batch.id,now:deps.now()});if(!cap.ok) throw spendCapHit(deps,batch.id,cap.reason);
          const lowest=allSources.find(source=>!replaced.has(source.id))!;
-         // A rate-limited classifier backs off (the delivery's shared budget) and then asks the judge's second model once.
-         const llmFor=(sourceImageId:string)=>({...catalogLlmDeps(deps,batch,underClaim,{stage:"classify",productId,sourceImageId,chunkId:chunk!.id}),...(policy.qaModelSecond ? {secondModel:policy.qaModelSecond}:{})});
+         // A rate-limited classifier backs off (the delivery's shared budget), then asks the judge's second model and the other vision.read routes once (M7-F2).
+         const router=deps.routes ? await deps.routes():undefined;
+         const llmFor=(sourceImageId:string)=>({...catalogLlmDeps(deps,batch,underClaim,{stage:"classify",productId,sourceImageId,chunkId:chunk!.id},router),...(policy.qaModelSecond ? {secondModel:policy.qaModelSecond}:{})});
          const llm=llmFor(lowest.id);
          let result=await deps.classifyProductType((await deps.storage.downloadBuffer(lowest.rawUri)).buf,llm);
          llm.assertAvailable();
