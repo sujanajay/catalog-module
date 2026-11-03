@@ -1,6 +1,6 @@
 import { and, eq, gt, inArray, notInArray, sql } from "drizzle-orm";
 import type { Db } from "../db/client";
-import { catalogBatches, catalogBatchProducts, catalogChunks, catalogOutputs, catalogProducts, catalogSourceImages, catalogUploads, spendDays } from "../db/schema";
+import { catalogBatches, catalogBatchProducts, catalogChunks, catalogContentVersions, catalogOutputs, catalogProducts, catalogSourceImages, catalogUploads, spendDays } from "../db/schema";
 import { utcDay } from "../spend";
 import { assertTestPrefix, batchPrefix, productPrefix } from "./naming";
 import * as storage from "../storage";
@@ -48,6 +48,8 @@ export async function cleanupTestBatches(db:Db,deps:Pick<typeof storage,"deleteT
     kept=spentToday.map(r=>r.batchId);
     const removed=wanted.filter(id=>!kept.includes(id));
     await tx.delete(catalogOutputs).where(inArray(catalogOutputs.batchId,wanted));
+    // M0 graph: test versions go with their batch (F2-R5); their change events and live intervals cascade.
+    await tx.delete(catalogContentVersions).where(and(inArray(catalogContentVersions.batchId,wanted),eq(catalogContentVersions.isTest,true)));
     await tx.delete(catalogSourceImages).where(inArray(catalogSourceImages.batchId,wanted));
     if(ids.length) await tx.delete(catalogProducts).where(inArray(catalogProducts.id,ids));
     if(kept.length) {
