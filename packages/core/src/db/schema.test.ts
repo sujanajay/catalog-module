@@ -34,6 +34,10 @@ const TABLES = [
   "users", // 0001_users.sql (spec 03)
   "catalog_cost_events", // 0002_cost_events.sql (observability plan, part A)
   "catalog_enlargements", // 0006_enlargements.sql (spec 18 lifecycle)
+  // 0009_catalog_graph.sql (M0-S1), the outcome-keys view included
+  "catalog_options", "catalog_channel_listings", "catalog_listing_keys", "catalog_key_mappings", "catalog_assets",
+  "catalog_content_versions", "catalog_change_events", "catalog_live_intervals", "catalog_treatment_assignments",
+  "catalog_backfill_runs", "catalog_graph_export_runs", "catalog_outcome_keys",
 ];
 
 const INDEXES = [
