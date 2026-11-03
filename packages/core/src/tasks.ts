@@ -66,7 +66,9 @@ export interface EnlargeTaskBody { batchId: string; productId: string; enlargeme
  * not know; a body without the field is version 1 (every body before M6-S4, and the Cloud Scheduler bodies). A body
  * newer than the worker (a new web or worker enqueued it while this older revision still takes traffic) is answered
  * 503, so the queue retries it until the new revision serves. Raise TASK_BODY_VERSION only with a body change the
- * previous worker cannot read, and keep the handlers reading version TASK_BODY_VERSION - 1 for one release.
+ * previous worker cannot read, and keep the handlers reading version TASK_BODY_VERSION - 1 for one release. A worker
+ * rollback after a bump answers the new bodies 503: chunk tasks give up after 30 min and the sweep and leases recover
+ * them; prefer rolling back the web first.
  */
 export const TASK_BODY_VERSION = 2;
 export const TASK_VERSION_FIELD = "taskVersion";

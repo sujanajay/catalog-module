@@ -2,7 +2,7 @@
 // for SWEEP_STALE_MS is marked failed and its product locks are released, and a draft nobody wrote to
 // for DRAFT_EXPIRY_DAYS is cancelled as expired (spec 14d F12). Idempotent: a second run finds
 // nothing, because the swept batches are no longer in an active status.
-import { and, eq, inArray, isNull, lt, or, sql } from "drizzle-orm";
+import { and, eq, gt, inArray, isNull, lt, or, sql } from "drizzle-orm";
 import type { BatchStatus } from "@catalog/core/catalog/types";
 import type { Db } from "@catalog/core/db/client";
 import type { HandleResult } from "../server";
@@ -158,6 +158,8 @@ export async function resendStalledIngest(db: Db, enqueue: typeof enqueueTask, n
     .where(and(eq(catalogBatches.status, "ingesting"), lt(catalogBatches.updatedAt, new Date(+now - INGEST_RESEND_MS))));
   const run = ingestResendRun(now);
   for (const { id: batchId } of stalled) {
+    // A new run starts this batch's failure counts at 0, as the web's hand-off does (M6-F2-R4).
+    await db.update(catalogUploads).set({ ingestFailures: 0 }).where(and(eq(catalogUploads.batchId, batchId), gt(catalogUploads.ingestFailures, 0)));
     const page = await uploadedPage(db, batchId, null);
     if (page.ids.length) await handOff(enqueue, batchId, run, page);
     else {

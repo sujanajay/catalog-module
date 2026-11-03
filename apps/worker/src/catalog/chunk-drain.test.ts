@@ -5,7 +5,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { eq } from "drizzle-orm";
 import type { Db } from "@catalog/core/db/client";
 import { createTestDb } from "@catalog/core/db/testing";
-import { catalogCostEvents } from "@catalog/core/db/schema";
+import { catalogChunks, catalogCostEvents } from "@catalog/core/db/schema";
 import { fakeWorld, seedBatch } from "../../test/catalog-fakes";
 import { isDraining, resetDrain, startDrain } from "../drain";
 import { currentChunkTask, handleChunkTask } from "./chunk";
@@ -41,5 +41,23 @@ describe("chunk delivery on shutdown", () => {
     const rows = compute.filter((c) => c.kind === "compute" && c.stage === "matte");
     expect(rows.length).toBeGreaterThanOrEqual(2);
     for (const r of rows) expect(r.billableMs).not.toBeNull();
+  }, 120_000);
+
+  it("a delivery cut off by a deploy before its first photo is never counted as a stall (review 2026-11-03)", async () => {
+    const w = fakeWorld(db);
+    const { chunks } = await seedBatch(db, w, "drain-stall", [[2]]);
+    await startDrain();
+    expect((await handleChunkTask(w.deps, await currentChunkTask(db, chunks[0]!.id))).httpStatus).toBe(200);
+    expect(w.deliveries().at(-1)).toMatchObject({ outcome: "handed_off", photos: 0 });
+    resetDrain();
+    // Three deploys in a row on the same chunk would fail it (CHUNK_MAX_STALLS) if each counted.
+    let claimedStalls: number | null = null;
+    const matte = w.deps.matteFor;
+    w.deps.matteFor = (async (...args: Parameters<typeof matte>) => {
+      claimedStalls ??= (await db.select({ stalls: catalogChunks.stalls }).from(catalogChunks).where(eq(catalogChunks.id, chunks[0]!.id)))[0]!.stalls;
+      return matte(...args);
+    }) as typeof matte;
+    await handleChunkTask(w.deps, await currentChunkTask(db, chunks[0]!.id));
+    expect(claimedStalls).toBe(0);
   }, 120_000);
 });

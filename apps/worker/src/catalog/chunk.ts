@@ -27,7 +27,7 @@ import { detectTextImage, GUARD_PAD_FRACTION, heldInHand, resolveMatte } from "@
 import { DISPATCH_DEADLINE_SEC } from "@catalog/core/tasks";
 import { resolvePhoto } from "./auto-resolve";
 import { recordCost } from "@catalog/core/spend";
-import { isDraining } from "../drain";
+import { isDraining, onDrain } from "../drain";
 import type { HandleOptions, HandleResult } from "../server";
 import { enqueueFinalize, photoConcurrency, refreshBatchProgress, topUpWindow, type CatalogDeps } from "./deps";
 
@@ -241,7 +241,14 @@ export async function handleChunkTask(rawDeps: CatalogDeps, body: Record<string,
     return answer(200,"failed");
   }
   const stopHeartbeat = (deps.heartbeat ?? defaultHeartbeat)(renew);
+  // M6-F2-R3 (review 2026-11-03): a delivery cut off by a deploy's shutdown is not a stall. On SIGTERM the chunk's
+  // progress time is set (under the claim), so the next claim does not count this delivery among the
+  // CHUNK_MAX_STALLS that fail a chunk, also when the process exits mid-photo.
+  const stopDrainHook = onDrain(async () => { await deps.db.update(catalogChunks).set({progressAt:deps.now()}).where(ownsClaim()); });
   /** This delivery's wall time as one compute row, priced like the success path's (spend_days is not touched). */
+  // True once the success path's compute row committed (with spend_days), so a step after it that throws (the stage
+  // advance, the dispatch, finish, the progress refresh) never writes the same wall time again in the catch.
+  let computeWritten = false;
   const deliveryCompute = (outcome:CostOutcome):CostEventInput => {
     const ms = Math.max(0,+deps.now()-+started), usd = ms/1000*computeVcpuPerSecond()*Number(process.env.COMPUTE_USD_PER_VCPU_SECOND ?? 0);
     return {batchId:batch.id,brandSlug:batch.brandSlug,isTest:batch.isTest,chunkId:chunk!.id,stage:chunk!.stage,kind:"compute",engine:"worker",ms,billableMs:ms,usd,attempt:chunk!.attempt,outcome,at:deps.now()};
@@ -526,6 +533,7 @@ export async function handleChunkTask(rawDeps: CatalogDeps, body: Record<string,
     // a failing ledger write is logged and the delivery carries on.
     await recordCostEvents(tx,[...ledger.splice(0),{batchId:batch.id,brandSlug:batch.brandSlug,isTest:batch.isTest,chunkId:chunk!.id,stage:chunk!.stage,kind:"compute",engine:"worker",ms:+deps.now()-+started,billableMs:+deps.now()-+started,usd,attempt:chunk!.attempt,at:deps.now()}],deps.log);
     });
+    computeWritten = true;
     const release = {status:"queued" as const,taskName:null,leaseUntil:null,step:sql`${catalogChunks.step}+1`,dispatchedAt:deps.now()};
     let outcome = "done";
     if (stopAt !== null) {
@@ -584,7 +592,8 @@ export async function handleChunkTask(rawDeps: CatalogDeps, body: Record<string,
     // M6-F1-R1/R2 (M6-S1): a delivery that ends here still paid for its calls and its own wall time. Its unflushed
     // ledger rows and one compute row are written (a lost claim's work is a duplicate of the delivery that holds it).
     const transient = error instanceof EnlargementNotReadyError && error.transient;
-    await recordCostEvents(deps.db,[...ledger.splice(0),deliveryCompute(lost || reason === OWNERSHIP_CHANGED ? "duplicate":transient ? "ok":"failed")],deps.log);
+    const rows = [...ledger.splice(0),...(computeWritten ? []:[deliveryCompute(lost || reason === OWNERSHIP_CHANGED ? "duplicate":transient ? "ok":"failed")])];
+    if (rows.length) await recordCostEvents(deps.db,rows,deps.log);
     // Another delivery holds the chunk now: this copy's work is saved photo by photo, and retrying it is pointless.
     if (lost || reason === OWNERSHIP_CHANGED) return answer(200,"lost");
     // Spec 18 lifecycle F23: an enlargement not readable yet (a storage hiccup while priming) is a dependency wait,
@@ -609,6 +618,7 @@ export async function handleChunkTask(rawDeps: CatalogDeps, body: Record<string,
     return answer(503,"retry","failed");
   } finally {
     stopHeartbeat();
+    stopDrainHook();
   }
   /**
    * Spec 18 lifecycle 3.5 step 1: every shot of the product this delivery plans with (the chunk's photos with a matte):

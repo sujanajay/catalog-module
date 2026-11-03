@@ -1,11 +1,11 @@
 // M6-F2 acceptance test 4: CI rejects a test migration that drops a column without the contract marker. The rules run
 // on statements (lintMigration) and through the CI command (scripts/check-migrations.mjs) on a folder of files.
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { lintMigration, lintMigrations, migrationStatements } from "./migration-lint";
+import { lintJournal, lintMigration, lintMigrations, migrationStatements, type JournalEntry } from "./migration-lint";
 import { resolveMigrationsFolder } from "./migrate";
 
 const rules = (sql: string) => lintMigration("0099_test.sql", sql).map((f) => f.rule);
@@ -22,6 +22,14 @@ describe("migration lint (M6-F2-R1)", () => {
     expect(rules(`ALTER TABLE "a" ADD COLUMN "b" integer NOT NULL;`)).toEqual(["adds a NOT NULL column without a default"]);
     expect(rules(`ALTER TABLE "a" ADD CONSTRAINT "a_b_check" CHECK ("a"."b" IN ('x'));`)).toEqual(["adds a CHECK or foreign key that existing rows may break (add it NOT VALID)"]);
     expect(rules(`ALTER TABLE "a" ADD CONSTRAINT "a_b_fk" FOREIGN KEY ("b") REFERENCES "c"("id");`)).toHaveLength(1);
+    // Review 2026-11-03: per clause, and the other ways to break the previous release's code.
+    expect(rules(`ALTER TABLE "a" ADD COLUMN "b" integer NOT NULL, ADD COLUMN "c" integer DEFAULT 0;`)).toEqual(["adds a NOT NULL column without a default"]);
+    expect(rules(`ALTER TABLE "a" ALTER COLUMN "b" DROP DEFAULT;`)).toEqual(["drops a column default (old code inserting without the column fails)"]);
+    expect(rules(`CREATE UNIQUE INDEX "a_b" ON "a" ("b");`)).toEqual(["adds a unique index or constraint that existing rows may break"]);
+    expect(rules(`ALTER TABLE "a" ADD CONSTRAINT "a_b_unique" UNIQUE("b");`)).toEqual(["adds a unique index or constraint that existing rows may break"]);
+    expect(rules(`DROP INDEX IF EXISTS "a_b_idx";`)).toEqual(["drops an index, type or view"]);
+    expect(rules(`DELETE FROM "a";`)).toEqual(["deletes rows"]);
+    expect(rules(`TRUNCATE "a";`)).toEqual(["deletes rows"]);
   });
 
   it("allows additive changes: new tables, nullable or defaulted columns, dropped NOT NULL, NOT VALID checks, indexes", () => {
@@ -62,6 +70,45 @@ describe("migration lint (M6-F2-R1)", () => {
       writeFileSync(path.join(dir, "0011_drop_flags.sql"), `-- contract: R2\nALTER TABLE "catalog_outputs" DROP COLUMN "flags";`);
       expect(spawnSync(process.execPath, [script, dir], { encoding: "utf8" }).status).toBe(0);
       expect(spawnSync(process.execPath, [script], { encoding: "utf8" }).status).toBe(0);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses a journal whose \"when\" does not increase with idx (drizzle would skip that migration silently)", () => {
+    const entry = (idx: number, when: number, tag: string): JournalEntry => ({ idx, when, tag });
+    expect(lintJournal({ entries: [entry(0, 1, "0000_a"), entry(1, 2, "0001_b")] })).toEqual([]);
+    // A branch generated before another branch's 0009 merged: its later migration carries an earlier timestamp.
+    const skipped = lintJournal({ entries: [entry(0, 1, "0000_a"), entry(1, 30, "0009_graph"), entry(2, 20, "0010_ledger")] });
+    expect(skipped.map((f) => f.rule)).toEqual([expect.stringContaining('journal "when" must be later than 0009_graph')]);
+    expect(lintJournal({ entries: [entry(0, 1, "0000_a"), entry(2, 2, "0001_b")] }).map((f) => f.rule)).toEqual(["journal idx must run 0..n-1 (expected 1)"]);
+    expect(lintJournal({ entries: [entry(0, 1, "0001_a"), entry(1, 2, "0001_b")] }).map((f) => f.rule)).toEqual(["migration number must be above 0001_a"]);
+    expect(lintJournal({ entries: [entry(0, 1, "0000_a")] }, { "0000_a.sql": "", "0001_b.sql": "" }).map((f) => f.rule)).toEqual(["migration file is not in meta/_journal.json, so it never runs"]);
+  });
+
+  it("the repo's journal is in run order, and this branch's 0010 sorts after M0-S1's 0009 (1793695201651)", () => {
+    const folder = resolveMigrationsFolder();
+    const journal = JSON.parse(readFileSync(path.join(folder, "meta", "_journal.json"), "utf8")) as { entries: JournalEntry[] };
+    const files = Object.fromEntries(readdirSync(folder).filter((n) => n.endsWith(".sql")).map((n) => [n, ""]));
+    expect(lintJournal(journal, files)).toEqual([]);
+    // Merged with feat/m0-s1-graph-tables (0009_catalog_graph, idx 9): 0010 after it must still run.
+    const ours = journal.entries.filter((e) => e.tag !== "0010_deploy_safe_cost_ledger");
+    const mine = journal.entries.find((e) => e.tag === "0010_deploy_safe_cost_ledger")!;
+    const merged = { entries: [...ours, { idx: ours.length, when: 1793695201651, tag: "0009_catalog_graph" }, { ...mine, idx: ours.length + 1 }] };
+    expect(lintJournal(merged)).toEqual([]);
+  });
+
+  it("the CI command fails on a journal out of run order", () => {
+    const script = path.resolve(import.meta.dirname, "../../scripts/check-migrations.mjs");
+    const dir = mkdtempSync(path.join(tmpdir(), "catalog-migration-journal-"));
+    try {
+      mkdirSync(path.join(dir, "meta"));
+      writeFileSync(path.join(dir, "0009_graph.sql"), `CREATE TABLE "g" ("id" uuid);`);
+      writeFileSync(path.join(dir, "0010_ledger.sql"), `ALTER TABLE "a" ADD COLUMN "b" text;`);
+      writeFileSync(path.join(dir, "meta", "_journal.json"), JSON.stringify({ entries: [{ idx: 0, when: 30, tag: "0009_graph" }, { idx: 1, when: 20, tag: "0010_ledger" }] }));
+      const failed = spawnSync(process.execPath, [script, dir], { encoding: "utf8" });
+      expect(failed.status).toBe(1);
+      expect(failed.stderr).toContain('journal "when" must be later than 0009_graph');
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

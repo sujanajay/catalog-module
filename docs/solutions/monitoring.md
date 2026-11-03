@@ -131,8 +131,10 @@ Before it, these calls were priced at the catalog-matting rate (USD 0.000136, 4 
 Ledger rows written before the change keep the old price.
 
 ## Cloud Run labels
-`deploy.sh` adds `app=catalog,component=worker|web|matte|matte-gpu|job` to every service and job
-(`component=job` on the job scripts), so
+Every service and job carries `app=catalog,component=<its Cloud Run name>,env=live|preview|test`
+(M6-S1, infra/lib/labels.sh; before it the components were `worker|web|matte|matte-gpu|job`, so billing history
+splits at that deploy). `deploy.sh` and the job scripts refuse a deploy without them, and the cost ledger's
+`component` column uses the same names, so
 Google's billing page can show the catalog's share by component. Labels count from the next
 revision only: billing before the first labelled deploy is not split. If the ledger's numbers ever
 look wrong, the labelled billing page is the check.

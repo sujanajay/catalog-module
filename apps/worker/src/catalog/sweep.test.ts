@@ -276,6 +276,17 @@ describe("ingest re-send (M6-F2-R4)", () => {
     for (const body of sent) expect(body).toMatchObject({ batchId: stalled, run });
   });
 
+  it("starts the re-sent run's failure counts at 0 for that batch only", async () => {
+    const stalled = await ingesting(35), moving = await ingesting(5);
+    const a = await upload(stalled, "uploaded"), b = await upload(moving, "uploaded");
+    await db.execute(sql`UPDATE catalog_uploads SET ingest_failures = 4 WHERE id IN (${a}, ${b})`);
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    await resendStalledIngest(db, vi.fn(async () => "task") as never, NOW);
+    const failures = async (id: string) => Number((await rows(db, sql`SELECT ingest_failures FROM catalog_uploads WHERE id = ${id}`))[0]!.ingest_failures);
+    expect(await failures(a)).toBe(0);
+    expect(await failures(b)).toBe(4);
+  });
+
   it("re-sends one collected upload when nothing is left to collect, so the placing lease is taken over", async () => {
     const stalled = await ingesting(45);
     const collected = await upload(stalled, "collected");

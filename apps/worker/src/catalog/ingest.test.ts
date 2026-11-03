@@ -97,7 +97,8 @@ describe("handleIngestTask", () => {
     }
     expect(counted.state.failures).toBe(INGEST_MAX_FAILURES - 1);
     expect(failStopped).not.toHaveBeenCalled();
-    expect(await handleIngestTask({ db: counted, ingest, run, failStopped }, { batchId: "b1", uploadId: "u1", run: "r2", group: "4" }, { retryCount: 4 })).toEqual({ httpStatus: 500, outcome: "error" });
+    // The handler stopped the batch: acknowledged (200), so the unlimited queue does not send it again.
+    expect(await handleIngestTask({ db: counted, ingest, run, failStopped }, { batchId: "b1", uploadId: "u1", run: "r2", group: "4" }, { retryCount: 4 })).toEqual({ httpStatus: 200, outcome: "stopped: out of attempts" });
     expect(failStopped).toHaveBeenCalledWith(counted, "b1", { uploadId: "u1", run: "r2" });
     // A task of an earlier run (Try again started another) leaves the batch alone and is acknowledged.
     failStopped.mockResolvedValueOnce(false);
@@ -109,6 +110,14 @@ describe("handleIngestTask", () => {
     expect(counted.state.failures).toBe(0);
     errors.mockRestore();
     warnings.mockRestore();
+  });
+
+  it("M6-F2-R4: a delivery whose work succeeded is never counted as a failure when the count reset cannot be written", async () => {
+    const errors = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const failing = { update: () => ({ set: () => ({ where: () => ({ then: (_: unknown, reject?: (e: unknown) => unknown) => Promise.reject(new Error("db blip")).then(undefined, reject), returning: async () => [{ failures: 1 }] }) }) }) } as unknown as Db;
+    const ok = vi.fn(async () => ({ progress: { done: 1, total: 2, phase: "copying" as const }, outcome: "collected 1 of 2" }));
+    expect(await handleIngestTask({ db: failing, ingest, run: ok }, { batchId: "b1", uploadId: "u1" })).toEqual({ httpStatus: 200, outcome: "collected 1 of 2" });
+    errors.mockRestore();
   });
 
   it("refuses a body without the batch and upload ids", async () => {

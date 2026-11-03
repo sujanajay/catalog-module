@@ -25,8 +25,13 @@ const RULES: { rule: string; test: (s: string) => boolean }[] = [
   { rule: "sets NOT NULL on an existing column", test: (s) => /\bALTER\s+COLUMN\s+("[^"]+"|\w+)\s+SET\s+NOT\s+NULL\b/.test(s) },
   {
     rule: "adds a NOT NULL column without a default",
-    test: (s) => /\bADD\s+COLUMN\b/.test(s) && /\bNOT\s+NULL\b/.test(s) && !/\bDEFAULT\b/.test(s),
+    // Per ADD COLUMN clause, so `ADD COLUMN a int NOT NULL, ADD COLUMN b int DEFAULT 0` is caught.
+    test: (s) => s.split(/,\s*(?=ADD\s+COLUMN\b)/).some((c) => /\bADD\s+COLUMN\b/.test(c) && /\bNOT\s+NULL\b/.test(c) && !/\bDEFAULT\b/.test(c)),
   },
+  { rule: "drops a column default (old code inserting without the column fails)", test: (s) => /\bALTER\s+COLUMN\s+("[^"]+"|\w+)\s+DROP\s+DEFAULT\b/.test(s) },
+  { rule: "adds a unique index or constraint that existing rows may break", test: (s) => /\bCREATE\s+UNIQUE\s+INDEX\b/.test(s) || (/\bADD\s+CONSTRAINT\b/.test(s) && /\bUNIQUE\b/.test(s)) },
+  { rule: "drops an index, type or view", test: (s) => /\bDROP\s+(INDEX|TYPE|VIEW|MATERIALIZED\s+VIEW)\b/.test(s) },
+  { rule: "deletes rows", test: (s) => /^(TRUNCATE|DELETE\s+FROM)\b/.test(s) },
   {
     rule: "adds a CHECK or foreign key that existing rows may break (add it NOT VALID)",
     test: (s) => /\bALTER\s+TABLE\b/.test(s) && /\bADD\s+CONSTRAINT\b/.test(s) && /\b(CHECK|FOREIGN\s+KEY)\b/.test(s) && !/\bNOT\s+VALID\b/.test(s),
@@ -66,4 +71,37 @@ export function lintMigrations(files: Record<string, string>, from = MIGRATION_L
     .filter((name) => (migrationNumber(name) ?? -1) >= from)
     .sort()
     .flatMap((name) => lintMigration(name, files[name]!));
+}
+
+export interface JournalEntry { idx: number; when: number; tag: string }
+
+/**
+ * Checks drizzle's meta/_journal.json. The pg migrator applies a migration only when its `when` is later than the
+ * newest applied one, so an entry whose `when` sorts before an earlier entry's is skipped, with no error, on a database
+ * that already has that earlier entry (a branch generated before another branch's migration merged). Entries must run
+ * idx 0..n-1, `when` must strictly increase with idx, migration numbers must increase, and each entry needs its .sql
+ * file (and each .sql file its entry) when `files` is given. Applies to every entry, also those before
+ * MIGRATION_LINT_FROM.
+ */
+export function lintJournal(journal: { entries: JournalEntry[] }, files?: Record<string, string>): MigrationFinding[] {
+  const findings: MigrationFinding[] = [];
+  const entries = [...journal.entries].sort((a, b) => a.idx - b.idx);
+  entries.forEach((e, i) => {
+    const file = `meta/_journal.json ${e.tag}`;
+    const prev = entries[i - 1];
+    if (e.idx !== i) findings.push({ file, statement: `idx ${e.idx}`, rule: `journal idx must run 0..n-1 (expected ${i})` });
+    if (prev && !(e.when > prev.when)) {
+      findings.push({ file, statement: `when ${e.when}`, rule: `journal "when" must be later than ${prev.tag} (${prev.when}), or drizzle skips this migration; regenerate it after the earlier one merged` });
+    }
+    const n = migrationNumber(`${e.tag}.sql`), p = prev ? migrationNumber(`${prev.tag}.sql`) : null;
+    if (n === null) findings.push({ file, statement: e.tag, rule: "journal tag is not a migration file name" });
+    else if (p !== null && n <= p) findings.push({ file, statement: e.tag, rule: `migration number must be above ${prev!.tag}` });
+    if (files && !(`${e.tag}.sql` in files)) findings.push({ file, statement: e.tag, rule: "journal entry has no .sql file" });
+  });
+  if (files) {
+    for (const name of Object.keys(files)) {
+      if (migrationNumber(name) !== null && !entries.some((e) => `${e.tag}.sql` === name)) findings.push({ file: name, statement: name, rule: "migration file is not in meta/_journal.json, so it never runs" });
+    }
+  }
+  return findings;
 }

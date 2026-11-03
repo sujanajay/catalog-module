@@ -533,8 +533,11 @@ export async function handleEnlargeTask(deps: CatalogDeps, body: Record<string, 
     // M6-F2-R3 (M6-S4): SIGTERM while the call runs. The call's count is given back and the claim released at once (one
     // settle, with a `killed` cost row for the time it ran), so the queue's re-send makes it again and this cut-off
     // delivery is never a counted failure. Whatever the call answers after that is ignored.
+    // Set once the call answered: a hook that runs after that (startDrain schedules hooks on a microtask) leaves the
+    // answer to the delivery, so the same call never gets both an ok row and a killed row (review 2026-11-03).
+    let answered = false;
     const unhook = onDrain(async () => {
-      if (!pending) return;
+      if (!pending || answered) return;
       drained = true;
       ledger.push(costRow(+deps.now() - t0, "killed", tile));
       await settle({ ...refund(), ...unclaim(), updatedAt: deps.now() }, false);
@@ -543,7 +546,9 @@ export async function handleEnlargeTask(deps: CatalogDeps, body: Record<string, 
     let result: EnlargeResult;
     try {
       result = await call(jpeg, trace, { deadlineAt, upscaler: row!.upscaler });
+      answered = !drained;
     } catch (error) {
+      answered = !drained;
       const ms = +deps.now() - t0;
       if (drained) return { lost: true };
       // M6-S1: every paid attempt is a ledger row, a refused one too; a timeout is its own outcome.

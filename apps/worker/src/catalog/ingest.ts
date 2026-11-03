@@ -63,8 +63,13 @@ export async function handleIngestTask(deps: IngestTaskDeps, body: Record<string
     });
     // One INFO line per delivery (spec 14d F12): what it did, how far the upload or placing is, how long it took.
     log("INFO", "ingest", { event: "ingest", batchId, uploadId, phase: progress.phase, done: progress.done, total: progress.total, ms: clock() - started, outcome });
-    // M6-F2-R4: the failures in a row start again (a write only when there were some).
-    await deps.db.update(catalogUploads).set({ ingestFailures: 0 }).where(and(eq(catalogUploads.id, uploadId), gt(catalogUploads.ingestFailures, 0)));
+    // M6-F2-R4: the failures in a row start again (a write only when there were some). The work succeeded, so a reset
+    // that cannot be written is logged and never counted as a failure.
+    try {
+      await deps.db.update(catalogUploads).set({ ingestFailures: 0 }).where(and(eq(catalogUploads.id, uploadId), gt(catalogUploads.ingestFailures, 0)));
+    } catch (resetErr) {
+      log("WARNING", "ingest failure count not reset", { batchId, uploadId, error: resetErr instanceof Error ? resetErr.message : String(resetErr) });
+    }
     return { httpStatus: 200, outcome };
   } catch (err) {
     // M6-F2-R4: one more failure on the upload row. A count that cannot be written (the database is down too) is not
@@ -78,8 +83,11 @@ export async function handleIngestTask(deps: IngestTaskDeps, body: Record<string
     if (failures !== null && failures >= INGEST_MAX_FAILURES) {
       try {
         const delivery = { uploadId, ...(cursor ? { cursor } : {}), ...(run ? { run } : {}) };
-        if (await (deps.failStopped ?? failStoppedIngest)(deps.db, batchId, delivery)) log("WARNING", "batch failed", { batchId, uploadId, cause: "ingest_out_of_attempts" });
-        else return { httpStatus: 200, outcome: "dropped: out of attempts, and the batch was not this task's to stop" };
+        if (await (deps.failStopped ?? failStoppedIngest)(deps.db, batchId, delivery)) {
+          log("WARNING", "batch failed", { batchId, uploadId, cause: "ingest_out_of_attempts" });
+          // Stopped: acknowledged, so the unlimited queue does not send it again.
+          return { httpStatus: 200, outcome: "stopped: out of attempts" };
+        } else return { httpStatus: 200, outcome: "dropped: out of attempts, and the batch was not this task's to stop" };
       } catch (markErr) {
         log("ERROR", "ingest out of attempts: the batch could not be marked failed", { batchId, error: markErr instanceof Error ? markErr : String(markErr) });
       }
