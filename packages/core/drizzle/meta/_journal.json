@@ -64,6 +64,13 @@
       "when": 1793478683459,
       "tag": "0008_batch_indexes",
       "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1793685281274,
+      "tag": "0009_taxonomy",
+      "breakpoints": true
     }
   ]
 }

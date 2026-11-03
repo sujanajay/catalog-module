@@ -34,6 +34,8 @@ const TABLES = [
   "users", // 0001_users.sql (spec 03)
   "catalog_cost_events", // 0002_cost_events.sql (observability plan, part A)
   "catalog_enlargements", // 0006_enlargements.sql (spec 18 lifecycle)
+  // 0009_taxonomy.sql (M2-S1 taxonomy store)
+  "catalog_taxonomy_nodes", "catalog_attribute_defs", "catalog_shot_roles", "catalog_taxonomy_changes",
 ];
 
 const INDEXES = [
