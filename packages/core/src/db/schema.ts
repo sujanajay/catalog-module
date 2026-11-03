@@ -816,6 +816,8 @@ export const catalogShotRoles = pgTable(
 /**
  * Append-only log of every taxonomy write, with the full row after the write. The highest id is the taxonomy
  * revision: a batch that records it can later tell exactly which definitions it ran with (M12-S1 version sets).
+ * That holds because every write holds one advisory lock to its commit (analyze/taxonomy.ts writeTransaction), so
+ * ids are handed out in commit order. Any new writer to these tables must use writeTransaction too.
  * `entity_id` is the node or attribute id, or `<node_id>/<key>` for a shot role.
  */
 export const catalogTaxonomyChanges = pgTable(

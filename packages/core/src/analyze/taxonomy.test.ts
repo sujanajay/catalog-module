@@ -1,11 +1,17 @@
 // Tier 2 (PGlite): the M2-S1 taxonomy store. The first test is the slice's acceptance test (R1-build section 7,
 // M2-F1-R2): a new taxonomy node and a new attribute are added through the settings store and read back by the
 // analyzer's read path, with no code change.
+import { PGlite } from "@electric-sql/pglite";
 import { sql } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { Db } from "../db/client";
-import { createTestDb } from "../db/testing";
+import { runMigrations } from "../db/migrate";
+import { createDbFromPglite, createTestDb } from "../db/testing";
 import {
+  CHILD_LEVELS,
+  garmentGroupOf,
+  TAXONOMY_WRITE_LOCK,
+  writeTransaction,
   addAttribute,
   addShotRole,
   addTaxonomyNode,
@@ -85,6 +91,35 @@ describe("seed", () => {
     expect(attributesFor(snap, "toys")).toEqual([]);
   });
 
+  it("gives every seeded node a level its parent allows: product types are always `type`", async () => {
+    const snap = await loadTaxonomy(db);
+    for (const n of SEED_NODES) {
+      const parent = n.parentId ? snap.nodes.get(n.parentId)! : null;
+      expect(CHILD_LEVELS[parent ? parent.level : "root"], n.id).toContain(n.level);
+    }
+    const level = (id: string) => snap.nodes.get(id)?.level;
+    for (const id of ["fashion.footwear.shoes", "fashion.footwear.sandals_slides", "fashion.footwear.boots", "fashion.footwear.slippers", "fashion.footwear.unknown",
+      "fashion.apparel.upper.top", "fashion.apparel.full.dress_jumpsuit", "fashion.apparel.lower.bottom", "fashion.apparel.intimates_swim.swimwear",
+      "home.textile.curtains", "home.textile.bedsheets", "home.fragrance.candles", "home.fragrance.diffusers"]) expect(level(id), id).toBe("type");
+    expect(SEED_NODES.filter((n) => n.level === "group").map((n) => n.id).sort()).toEqual([
+      "fashion.apparel.full", "fashion.apparel.intimates_swim", "fashion.apparel.kids", "fashion.apparel.lower",
+      "fashion.apparel.multipack", "fashion.apparel.unknown", "fashion.apparel.upper",
+    ]);
+    for (const id of ["fashion.apparel", "fashion.footwear", "fashion.bags", "fashion.accessories", "home.textile"]) expect(level(id), id).toBe("department");
+  });
+
+  it("maps every product type to one of M5's six garment groups", async () => {
+    const snap = await loadTaxonomy(db);
+    const group = (id: string) => garmentGroupOf(snap, id)?.id;
+    expect(group("fashion.apparel.upper.sports_top")).toBe("fashion.apparel.upper");
+    expect(group("fashion.apparel.full.dress_jumpsuit")).toBe("fashion.apparel.full");
+    expect(group("fashion.apparel.lower.sports_bottom")).toBe("fashion.apparel.lower");
+    expect(group("fashion.apparel.intimates_swim.lingerie_underwear")).toBe("fashion.apparel.intimates_swim");
+    expect(group("fashion.footwear.boots")).toBe("fashion.footwear");
+    expect(group("fashion.bags")).toBe("fashion.bags");
+    expect(group("fashion")).toBeUndefined();
+  });
+
   it("every seeded word (key, name, alias) of a known node finds that node only", async () => {
     const snap = await loadTaxonomy(db);
     for (const n of SEED_NODES.filter((s) => !s.id.endsWith("unknown"))) {
@@ -138,6 +173,37 @@ describe("versions and the change log", () => {
   });
 });
 
+describe("serialized writes (the revision follows commit order)", () => {
+  it("every write takes the taxonomy write lock first and holds it to the commit", async () => {
+    const queries: string[] = [];
+    const { db: logged, client } = createDbFromPglite(new PGlite(), { logger: { logQuery: (q) => queries.push(q) } });
+    try {
+      await runMigrations(logged);
+      const firstAfter = async (write: () => Promise<unknown>) => {
+        const start = queries.length;
+        await write();
+        return queries.slice(start).find((q) => !/^(begin|commit)/i.test(q.trim()));
+      };
+      const lock = /pg_advisory_xact_lock/;
+      expect(await firstAfter(() => seedTaxonomy(logged))).toMatch(lock);
+      expect(await firstAfter(() => addTaxonomyNode(logged, { id: "toys.dolls", parentId: "toys", level: "department", name: "Dolls" }, admin))).toMatch(lock);
+      expect(await firstAfter(() => updateTaxonomyNode(logged, "toys.dolls", { name: "Dolls and figures" }, admin))).toMatch(lock);
+      expect(await firstAfter(() => addAttribute(logged, { id: "age_band", name: "Age band", valueType: "text", nodeIds: ["toys"], tier: "listing", sourcePrecedence: ["sheet"] }, admin))).toMatch(lock);
+      expect(await firstAfter(() => updateAttribute(logged, "age_band", { name: "Age range" }, admin))).toMatch(lock);
+      expect(await firstAfter(() => addShotRole(logged, { nodeId: "toys", key: "box", name: "Box", definition: "The box." }, admin))).toMatch(lock);
+      expect(await firstAfter(() => updateShotRole(logged, "toys", "box", { name: "Boxed" }, admin))).toMatch(lock);
+
+      // The lock is a real transaction-level advisory lock on the fixed key, released at commit.
+      const held = async (q: Db) =>
+        ((await q.execute(sql`select count(*)::int as n from pg_locks where locktype = 'advisory' and objid = ${TAXONOMY_WRITE_LOCK}`)) as unknown as { rows: { n: number }[] }).rows[0]!.n;
+      expect(await writeTransaction(logged, (tx) => held(tx as unknown as Db))).toBe(1);
+      expect(await held(logged)).toBe(0);
+    } finally {
+      await client.close();
+    }
+  });
+});
+
 describe("refusals", () => {
   const refuse = (p: Promise<unknown>, msg: RegExp) => expect(p).rejects.toThrow(msg);
 
@@ -145,10 +211,22 @@ describe("refusals", () => {
     await refuse(addTaxonomyNode(db, { id: "home.textile.curtains", parentId: "home.textile", level: "type", name: "Curtains" }, admin), /already exists/);
     await refuse(addTaxonomyNode(db, { id: "home.rugs", parentId: "home.textile", level: "type", name: "Rugs" }, admin), /parent's id plus one/);
     await refuse(addTaxonomyNode(db, { id: "home.textile.rugs", parentId: "home.textile", level: "department", name: "Rugs" }, admin), /cannot sit under/);
+    await refuse(addTaxonomyNode(db, { id: "home.rugs", parentId: "home", level: "type", name: "Rugs" }, admin), /cannot sit under a vertical \(allowed: department\)/);
+    await refuse(addTaxonomyNode(db, { id: "fashion.apparel.upper.extra", parentId: "fashion.apparel.upper", level: "group", name: "Extra" }, admin), /cannot sit under a group/);
+    await refuse(addTaxonomyNode(db, { id: "fashion.footwear.boots.chelsea", parentId: "fashion.footwear.boots", level: "type", name: "Chelsea" }, admin), /cannot sit under a type\./);
+    await refuse(addTaxonomyNode(db, { id: "pets", parentId: null, level: "department", name: "Pets" }, admin), /Only a vertical/);
+    await refuse(addTaxonomyNode(db, { id: "home.rugs", parentId: "home", level: "aisle" as never, name: "Rugs" }, admin), /Unknown category level aisle/);
+    // A type may sit directly under a department (no finer group), as footwear types do.
+    expect((await addTaxonomyNode(db, { id: "fashion.footwear.clogs", parentId: "fashion.footwear", level: "type", name: "Clogs" }, admin)).level).toBe("type");
     await refuse(addTaxonomyNode(db, { id: "nope.rugs", parentId: "nope", level: "type", name: "Rugs" }, admin), /does not exist/);
     await refuse(addTaxonomyNode(db, { id: "Pets", parentId: null, level: "vertical", name: "Pets" }, admin), /lower-case/);
     await refuse(updateTaxonomyNode(db, "home.textile", { status: "retired" }, admin), /Retire the categories under/);
     await refuse(updateTaxonomyNode(db, "missing", { name: "x" }, admin), /Unknown taxonomy node/);
+    await addTaxonomyNode(db, { id: "beauty.old", parentId: "beauty", level: "department", name: "Old" }, admin);
+    await addTaxonomyNode(db, { id: "beauty.old.kit", parentId: "beauty.old", level: "group", name: "Kit" }, admin);
+    await updateTaxonomyNode(db, "beauty.old.kit", { status: "retired" }, admin);
+    await updateTaxonomyNode(db, "beauty.old", { status: "retired" }, admin);
+    await refuse(updateTaxonomyNode(db, "beauty.old.kit", { status: "released" }, admin), /Bring back the category above/);
   });
 
   it("keeps attribute definitions valid", async () => {

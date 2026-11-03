@@ -6,15 +6,21 @@
 //   Write (settings; M5 "Add a category" and M12 settings call these):
 //     addTaxonomyNode, updateTaxonomyNode, addAttribute, updateAttribute, addShotRole, updateShotRole
 //   Read (the analyzer, M5 rules, M3 plans):
-//     loadTaxonomy -> TaxonomySnapshot, then the pure helpers nodePath, attributesFor, shotRolesFor, findNodes
+//     loadTaxonomy -> TaxonomySnapshot, then the pure helpers nodePath, childrenOf, garmentGroupOf, attributesFor,
+//     shotRolesFor, findNodes
 //
 // Rules of the store:
 // - Nothing is deleted. A definition is retired (status `retired`), so readings made with it still resolve.
 // - Node ids are dotted paths from the root (`fashion.apparel.upper.top`); a node never moves and its id never changes.
 //   M5 rules and M2 readings store these ids.
+// - Levels follow CHILD_LEVELS: a vertical holds departments, a department holds groups or types (footwear and bags
+//   have no finer group), a group holds types, a type holds nothing. A product type is always level `type`.
 // - Every write bumps the row's `version` and appends the full row to catalog_taxonomy_changes in the same
 //   transaction. The highest change id is the taxonomy revision (TaxonomySnapshot.revision); M12-S1 records it in a
 //   batch's version set.
+// - Writes are serialized: every write transaction (here and in the seed) first takes one transaction-level advisory
+//   lock (TAXONOMY_WRITE_LOCK). So a write cannot start before the previous one has committed, change ids are handed
+//   out in commit order, and a reader that sees revision N sees every change up to N and none after it.
 // - Attributes apply to a node and all its descendants. A node's shot roles are those of the nearest node on its path
 //   (itself first) that has active roles.
 import { desc, eq, and, sql } from "drizzle-orm";
@@ -98,7 +104,7 @@ export type ShotRole = ShotRoleRow;
 
 /** Everything in the store at one revision, retired rows included (old readings still resolve). */
 export interface TaxonomySnapshot {
-  /** Highest change id; 0 for an empty store. */
+  /** Highest change id; 0 for an empty store. Safe to record: writes are serialized, so ids follow commit order. */
   revision: number;
   nodes: Map<string, TaxonomyNode>;
   attributes: Map<string, AttributeDef>;
@@ -107,6 +113,26 @@ export interface TaxonomySnapshot {
 }
 
 type Tx = Parameters<Parameters<Db["transaction"]>[0]>[0];
+
+/** The levels a child may have, by its parent's level (`root` = no parent). */
+export const CHILD_LEVELS: Record<TaxonomyLevel | "root", readonly TaxonomyLevel[]> = {
+  root: ["vertical"],
+  vertical: ["department"],
+  department: ["group", "type"],
+  group: ["type"],
+  type: [],
+};
+
+/** Key of the advisory lock every taxonomy write holds until it commits (an arbitrary fixed number, unique in this repo). */
+export const TAXONOMY_WRITE_LOCK = 920_260_001;
+
+/** A transaction that holds TAXONOMY_WRITE_LOCK. Every write to the four taxonomy tables goes through this. */
+export async function writeTransaction<T>(db: Db, fn: (tx: Tx) => Promise<T>): Promise<T> {
+  return db.transaction(async (tx) => {
+    await tx.execute(sql`select pg_advisory_xact_lock(${TAXONOMY_WRITE_LOCK})`);
+    return fn(tx);
+  });
+}
 
 const NODE_ID = /^[a-z0-9_]+(\.[a-z0-9_]+)*$/;
 const ATTRIBUTE_ID = /^[a-z0-9_]+$/;
@@ -153,6 +179,15 @@ export function childrenOf(snap: TaxonomySnapshot, nodeId: string | null): Taxon
   return [...snap.nodes.values()].filter((n) => n.parentId === nodeId && n.status !== "retired");
 }
 
+/**
+ * The garment group a node belongs to, as M5 scopes rules (M5-F1-R5): the nearest node on its path at level `group`,
+ * else its department (footwear, bags and accessories have no finer group). Null for a vertical.
+ */
+export function garmentGroupOf(snap: TaxonomySnapshot, nodeId: string): TaxonomyNode | null {
+  const path = nodePath(snap, nodeId);
+  return path.find((n) => n.level === "group") ?? path.find((n) => n.level === "department") ?? null;
+}
+
 /** Active attributes that apply to a node: those defined on it or on any of its ancestors. Optionally one tier. */
 export function attributesFor(snap: TaxonomySnapshot, nodeId: string, tier?: AttributeTier): AttributeDef[] {
   const onPath = new Set(nodePath(snap, nodeId).map((n) => n.id));
@@ -190,7 +225,7 @@ function normalizeWord(s: string): string {
 // ---------------------------------------------------------------------------
 
 export async function addTaxonomyNode(db: Db, input: TaxonomyNodeInput, meta: ChangeMeta): Promise<TaxonomyNode> {
-  return db.transaction(async (tx) => {
+  return writeTransaction(db, async (tx) => {
     const parent = await validateNode(tx, input);
     // A new node under a vertical that is not released yet is not released either, unless the admin says so.
     const status = input.status ?? (parent?.status === "not_released" ? "not_released" : "released");
@@ -206,7 +241,7 @@ export async function addTaxonomyNode(db: Db, input: TaxonomyNodeInput, meta: Ch
 }
 
 export async function updateTaxonomyNode(db: Db, id: string, patch: TaxonomyNodePatch, meta: ChangeMeta): Promise<TaxonomyNode> {
-  return db.transaction(async (tx) => {
+  return writeTransaction(db, async (tx) => {
     if (patch.name !== undefined && !patch.name.trim()) throw new TaxonomyError("A category needs a name.");
     if (patch.status && !TAXONOMY_NODE_STATUSES.includes(patch.status)) throw new TaxonomyError(`Unknown category status ${patch.status}.`);
     if (patch.status === "retired") {
@@ -216,6 +251,11 @@ export async function updateTaxonomyNode(db: Db, id: string, patch: TaxonomyNode
         .where(and(eq(catalogTaxonomyNodes.parentId, id), sql`${catalogTaxonomyNodes.status} <> 'retired'`))
         .limit(1);
       if (child) throw new TaxonomyError(`Retire the categories under ${id} first (${child.id}).`);
+    } else if (patch.status && id.includes(".")) {
+      // The id is the path, so the parent's id is the id without its last part.
+      const parentId = id.slice(0, id.lastIndexOf("."));
+      const [parent] = await tx.select({ status: catalogTaxonomyNodes.status }).from(catalogTaxonomyNodes).where(eq(catalogTaxonomyNodes.id, parentId));
+      if (parent?.status === "retired") throw new TaxonomyError(`Bring back the category above ${id} first.`);
     }
     const [row] = await tx
       .update(catalogTaxonomyNodes)
@@ -235,7 +275,7 @@ export async function updateTaxonomyNode(db: Db, id: string, patch: TaxonomyNode
 }
 
 export async function addAttribute(db: Db, input: AttributeInput, meta: ChangeMeta): Promise<AttributeDef> {
-  return db.transaction(async (tx) => {
+  return writeTransaction(db, async (tx) => {
     const values = normalizeAttribute(input);
     await requireNodes(tx, values.nodeIds);
     const [row] = await tx.insert(catalogAttributeDefs).values(values).onConflictDoNothing().returning();
@@ -247,7 +287,7 @@ export async function addAttribute(db: Db, input: AttributeInput, meta: ChangeMe
 
 /** The value type never changes (a value stored as a number must stay a number): retire it and add a new id. */
 export async function updateAttribute(db: Db, id: string, patch: AttributePatch, meta: ChangeMeta): Promise<AttributeDef> {
-  return db.transaction(async (tx) => {
+  return writeTransaction(db, async (tx) => {
     const [current] = await tx.select().from(catalogAttributeDefs).where(eq(catalogAttributeDefs.id, id)).for("update");
     if (!current) throw new TaxonomyError(`Unknown attribute ${id}.`);
     const merged = normalizeAttribute({
@@ -276,7 +316,7 @@ export async function updateAttribute(db: Db, id: string, patch: AttributePatch,
 }
 
 export async function addShotRole(db: Db, input: ShotRoleInput, meta: ChangeMeta): Promise<ShotRole> {
-  return db.transaction(async (tx) => {
+  return writeTransaction(db, async (tx) => {
     if (!ROLE_KEY.test(input.key)) throw new TaxonomyError(`Shot role key ${input.key} may use only letters, digits and _.`);
     if (!input.name.trim() || !input.definition.trim()) throw new TaxonomyError("A shot role needs a name and a definition.");
     await requireNodes(tx, [input.nodeId]);
@@ -292,7 +332,7 @@ export async function addShotRole(db: Db, input: ShotRoleInput, meta: ChangeMeta
 }
 
 export async function updateShotRole(db: Db, nodeId: string, key: string, patch: ShotRolePatch, meta: ChangeMeta): Promise<ShotRole> {
-  return db.transaction(async (tx) => {
+  return writeTransaction(db, async (tx) => {
     if ((patch.name !== undefined && !patch.name.trim()) || (patch.definition !== undefined && !patch.definition.trim()))
       throw new TaxonomyError("A shot role needs a name and a definition.");
     if (patch.status && !TAXONOMY_DEF_STATUSES.includes(patch.status)) throw new TaxonomyError(`Unknown status ${patch.status}.`);
@@ -325,15 +365,15 @@ async function validateNode(tx: Tx, input: TaxonomyNodeInput): Promise<TaxonomyN
   if (!input.name.trim()) throw new TaxonomyError("A category needs a name.");
   if (input.parentId === null) {
     if (input.id.includes(".")) throw new TaxonomyError(`Category ${input.id} needs a parent.`);
-    if (input.level !== "vertical") throw new TaxonomyError("Only a vertical can sit at the top of the tree.");
+    if (!CHILD_LEVELS.root.includes(input.level)) throw new TaxonomyError("Only a vertical can sit at the top of the tree.");
     return null;
   }
   if (!input.id.startsWith(`${input.parentId}.`) || input.id.slice(input.parentId.length + 1).includes("."))
     throw new TaxonomyError(`Category id ${input.id} must be its parent's id plus one more part.`);
   const [parent] = await tx.select().from(catalogTaxonomyNodes).where(eq(catalogTaxonomyNodes.id, input.parentId));
   if (!parent || parent.status === "retired") throw new TaxonomyError(`Parent category ${input.parentId} does not exist.`);
-  if (TAXONOMY_LEVELS.indexOf(input.level) <= TAXONOMY_LEVELS.indexOf(parent.level))
-    throw new TaxonomyError(`A ${input.level} cannot sit under a ${parent.level}.`);
+  if (!CHILD_LEVELS[parent.level].includes(input.level))
+    throw new TaxonomyError(`A ${input.level} cannot sit under a ${parent.level}${CHILD_LEVELS[parent.level].length ? ` (allowed: ${CHILD_LEVELS[parent.level].join(", ")})` : ""}.`);
   return parent;
 }
 

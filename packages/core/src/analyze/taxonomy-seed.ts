@@ -3,8 +3,9 @@
 // survives every later deploy. Changing a seeded definition is a settings change (analyze/taxonomy.ts), not an edit
 // here; this file only decides what an empty store starts with.
 //
-// Tree shape: vertical > department > group > type. Every node with children has an `unknown` child (one unknown per
-// level). Fashion carries the six garment groups of M5 (apparel upper, full, lower, intimates and swim; footwear and
+// Tree shape: vertical > department > group > type, by CHILD_LEVELS (taxonomy.ts). A department's children are groups
+// unless it says `childLevel: "type"` (footwear, home textiles: no finer group). Every node with children has an
+// `unknown` child at the level of its siblings (one unknown per level). Fashion carries the six garment groups of M5 (apparel upper, full, lower, intimates and swim; footwear and
 // bags, which are departments with no finer group) plus the plan nodes `kids` and `multipack` under apparel: the
 // analyzer's strictest-plan step (M2-F1-R14) chooses them over the garment's own node. Audience is recorded apart, as
 // the `audience` attribute. Aliases are the words of the channel rules dataset and brand sheets that mean the node.
@@ -12,8 +13,10 @@
 import type { Db } from "../db/client";
 import { catalogAttributeDefs, catalogShotRoles, catalogTaxonomyNodes } from "../db/schema";
 import {
+  CHILD_LEVELS,
   logChange,
   normalizeAttribute,
+  writeTransaction,
   type AttributeInput,
   type ShotRoleInput,
   type TaxonomyLevel,
@@ -23,20 +26,26 @@ import {
 
 const SEED_BY = { by: "seed", note: "M2-S1 seed" };
 
-type NodeSpec = { key: string; name: string; aliases?: string[]; status?: TaxonomyNodeStatus; children?: NodeSpec[] };
-
-const LEVELS: TaxonomyLevel[] = ["vertical", "department", "group", "type"];
+type NodeSpec = {
+  key: string;
+  name: string;
+  aliases?: string[];
+  status?: TaxonomyNodeStatus;
+  /** The level of this node's children; default the first CHILD_LEVELS entry for this node's level. */
+  childLevel?: TaxonomyLevel;
+  children?: NodeSpec[];
+};
 
 type SeedNode = TaxonomyNodeInput & { status: TaxonomyNodeStatus };
 
 /** Builds the node list parent first, adding an `unknown` child to every node that has children. */
-function flatten(specs: NodeSpec[], parentStatus: TaxonomyNodeStatus, parentId: string | null = null, depth = 0, out: SeedNode[] = []): SeedNode[] {
+function flatten(specs: NodeSpec[], level: TaxonomyLevel, parentStatus: TaxonomyNodeStatus, parentId: string | null = null, out: SeedNode[] = []): SeedNode[] {
   const withUnknown: NodeSpec[] = specs.length ? [...specs, { key: "unknown", name: "Not known" }] : specs;
   withUnknown.forEach((spec, i) => {
     const id = parentId ? `${parentId}.${spec.key}` : spec.key;
     const status = spec.status ?? parentStatus;
-    out.push({ id, parentId, level: LEVELS[depth]!, name: spec.name, aliases: spec.aliases ?? [], status, sortOrder: spec.key === "unknown" ? 999 : i });
-    if (spec.children?.length) flatten(spec.children, status, id, depth + 1, out);
+    out.push({ id, parentId, level, name: spec.name, aliases: spec.aliases ?? [], status, sortOrder: spec.key === "unknown" ? 999 : i });
+    if (spec.children?.length) flatten(spec.children, spec.childLevel ?? CHILD_LEVELS[level][0]!, status, id, out);
   });
   return out;
 }
@@ -89,6 +98,7 @@ const FASHION: NodeSpec = {
     {
       key: "footwear",
       name: "Footwear",
+      childLevel: "type",
       children: [
         { key: "shoes", name: "Shoes", aliases: ["sneakers", "trainers"] },
         { key: "sandals_slides", name: "Sandals and slides", aliases: ["sandals", "slides", "flip_flops"] },
@@ -108,8 +118,8 @@ const OTHER_VERTICALS: NodeSpec[] = [
     name: "Home",
     status: "not_released",
     children: [
-      { key: "textile", name: "Home textiles", children: [{ key: "curtains", name: "Curtains" }, { key: "bedsheets", name: "Bedsheets", aliases: ["bed_sheets", "bedding"] }] },
-      { key: "fragrance", name: "Home fragrance", children: [{ key: "candles", name: "Candles" }, { key: "diffusers", name: "Diffusers" }] },
+      { key: "textile", name: "Home textiles", childLevel: "type", children: [{ key: "curtains", name: "Curtains" }, { key: "bedsheets", name: "Bedsheets", aliases: ["bed_sheets", "bedding"] }] },
+      { key: "fragrance", name: "Home fragrance", childLevel: "type", children: [{ key: "candles", name: "Candles" }, { key: "diffusers", name: "Diffusers" }] },
     ],
   },
   { key: "toys", name: "Toys", status: "not_released" },
@@ -118,7 +128,7 @@ const OTHER_VERTICALS: NodeSpec[] = [
 ];
 
 /** Parent first, so every insert finds its parent. The root `unknown` vertical comes from flatten. */
-export const SEED_NODES: SeedNode[] = flatten([FASHION, ...OTHER_VERTICALS], "released");
+export const SEED_NODES: SeedNode[] = flatten([FASHION, ...OTHER_VERTICALS], "vertical", "released");
 
 const values = (...pairs: [string, string, string?][]) => pairs.map(([key, label, definition]) => ({ key, label, ...(definition ? { definition } : {}) }));
 
@@ -222,7 +232,7 @@ export interface SeedTaxonomyResult {
 
 /** Check then insert: adds only the seed rows that are missing, and logs each added row as a `seed` change. */
 export async function seedTaxonomy(db: Db): Promise<SeedTaxonomyResult> {
-  return db.transaction(async (tx) => {
+  return writeTransaction(db, async (tx) => {
     const nodes = await tx.insert(catalogTaxonomyNodes).values(SEED_NODES).onConflictDoNothing().returning();
     for (const row of nodes) await logChange(tx, "node", row.id, row.version, "seed", row, SEED_BY);
 
