@@ -10,10 +10,13 @@ import {
   enlargeTaskId,
   enqueueTask,
   INGEST_TASK_ROUTES,
+  TASK_BODY_VERSION,
   TASK_ROUTES,
+  taskBodyVersion,
   tasksConfigFromEnv,
   type TaskRoute,
   type TasksClientLike,
+  versionedBody,
 } from "./tasks";
 
 const env = {
@@ -75,7 +78,8 @@ describe("buildTaskRequest", () => {
     expect(task.httpRequest.httpMethod).toBe("POST");
     expect(task.httpRequest.url).toBe(`${WORKER}${route}`);
     expect(task.httpRequest.headers["Content-Type"]).toBe("application/json");
-    expect(JSON.parse(Buffer.from(task.httpRequest.body, "base64").toString())).toEqual(body);
+    // M6-F2-R2: every body carries the task body version.
+    expect(JSON.parse(Buffer.from(task.httpRequest.body, "base64").toString())).toEqual({ ...body, taskVersion: TASK_BODY_VERSION });
     expect(task.httpRequest.oidcToken).toEqual({ serviceAccountEmail: env.WORKER_SA_EMAIL, audience: WORKER });
     // An enlargement gets the Cloud Tasks maximum (30 minutes), every other task 900 s.
     expect(task.dispatchDeadline).toEqual({ seconds: ENLARGE_TASK_ROUTES.includes(route) ? ENLARGE_DISPATCH_DEADLINE_SEC : DISPATCH_DEADLINE_SEC });
@@ -174,7 +178,7 @@ describe("enqueueTask", () => {
     const first = (createTask.mock.calls[0]![0] as { task: BuiltTask }).task;
     expect(first.name).toBe("projects/image-links-agent/locations/asia-south1/queues/catalog-enlarge/tasks/enlarge-e1-0");
     expect(first.httpRequest.url).toBe(`${WORKER}/tasks/catalog/enlarge`);
-    expect(JSON.parse(Buffer.from(first.httpRequest.body, "base64").toString())).toEqual(body);
+    expect(JSON.parse(Buffer.from(first.httpRequest.body, "base64").toString())).toEqual({ ...body, taskVersion: TASK_BODY_VERSION });
     expect(enlargeTaskId("11111111-2222-3333-4444-555555555555", 12)).toBe("enlarge-11111111-2222-3333-4444-555555555555-12");
   });
 
@@ -243,8 +247,17 @@ describe("enqueueTask", () => {
     expect(fetchMock).toHaveBeenCalledWith("http://localhost:8081/tasks/catalog/sweep", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ a: 1 }),
+      body: JSON.stringify({ a: 1, taskVersion: TASK_BODY_VERSION }),
     });
+  });
+
+  it("M6-F2-R2: a body without taskVersion is version 1; a whole number is read as is", () => {
+    expect(TASK_BODY_VERSION).toBe(2);
+    expect(taskBodyVersion({ chunkId: "c1" })).toBe(1);
+    expect(taskBodyVersion({ chunkId: "c1", taskVersion: 2 })).toBe(2);
+    expect(taskBodyVersion({ taskVersion: "2" })).toBe(1);
+    expect(taskBodyVersion({ taskVersion: 0 })).toBe(1);
+    expect(versionedBody({ a: 1, taskVersion: 1 })).toEqual({ a: 1, taskVersion: TASK_BODY_VERSION });
   });
 
   it("TASKS_INLINE=1 with delaySec waits before posting", async () => {

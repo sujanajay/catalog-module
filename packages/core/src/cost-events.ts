@@ -4,11 +4,13 @@
 import type { Db } from "./db/client";
 import { catalogCostEvents, type CostKind, type CostOutcome, type CostStage } from "./db/schema";
 import type { ChannelId } from "./catalog/types";
+import { cpuUpscaleOnDedicatedService } from "./catalog/cost";
 import { log } from "./log";
 
 export interface CostEventInput {
-  batchId: string;
-  brandSlug: string;
+  /** M6-S1: null for a row of no batch (a job run, the sweep); then brandSlug is null too. */
+  batchId: string | null;
+  brandSlug: string | null;
   isTest: boolean;
   productId?: string | null;
   sourceImageId?: string | null;
@@ -32,6 +34,39 @@ export interface CostEventInput {
   chunkId?: string | null;
   attempt?: number | null;
   at?: Date;
+  /** M6-S1: the Cloud Run service or job billed for this row (its `component` label); default costComponent. */
+  component?: string | null;
+  /** M6-S1: the M0 content version of the output, once outputs carry one. */
+  contentVersionId?: string | null;
+  /** M6-S1: the billable instance time this row explains (a delivery's wall time, a job's run time). */
+  billableMs?: number | null;
+}
+
+/** Third-party vendors off the GCP bill, as `component` (M6-F1-R7). */
+export const OPENROUTER_COMPONENT = "openrouter";
+
+/** The Cloud Run service or job this process runs as (K_SERVICE, CLOUD_RUN_JOB), or null outside Cloud Run. */
+export function ownComponent(env: NodeJS.ProcessEnv = process.env): string | null {
+  return env.K_SERVICE?.trim() || env.CLOUD_RUN_JOB?.trim() || null;
+}
+
+/**
+ * M6-F1 (M6-S1): the component a row is billed to, the same name as the Cloud Run `component` label so the
+ * reconciliation joins the ledger to the bill. A judge or classifier call is OpenRouter's; a cut-out call is the
+ * matting service that answered (`cpu` catalog-matting, `gpu` catalog-matting-gpu; the worker's own cut-out is the
+ * worker); an upscale call is the service upscale.ts routes it to (catalog-upscale or catalog-upscale-gpu when
+ * configured, else the matting service of its target); compute, render and job rows are this process's own service
+ * or job.
+ */
+export function costComponent(row: Pick<CostEventInput, "kind" | "engine" | "component">, env: NodeJS.ProcessEnv = process.env): string | null {
+  if (row.component) return row.component;
+  if (row.kind === "llm_call") return OPENROUTER_COMPONENT;
+  if (row.kind === "matte_call") return row.engine === "gpu" ? "catalog-matting-gpu" : row.engine === "cpu" ? "catalog-matting" : ownComponent(env);
+  if (row.kind === "upscale_call") {
+    if (row.engine === "cpu") return cpuUpscaleOnDedicatedService(env) ? "catalog-upscale" : "catalog-matting";
+    if (row.engine === "gpu") return env.UPSCALE_GPU_URL?.trim() ? "catalog-upscale-gpu" : "catalog-matting-gpu";
+  }
+  return ownComponent(env);
 }
 
 /** The worker's `deps.log` shape (a `severity` field picks the severity); the default is the shared log helper. */
@@ -43,10 +78,10 @@ const whole = (value: number | undefined | null) => (typeof value === "number" &
 const money = (value: number | undefined) => (typeof value === "number" && Number.isFinite(value) && value > 0 ? value : 0);
 
 /** The insert values for one event; non-finite or negative numbers become 0 so a row never fails on them. */
-export function costEventValues(row: CostEventInput): typeof catalogCostEvents.$inferInsert {
+export function costEventValues(row: CostEventInput, env: NodeJS.ProcessEnv = process.env): typeof catalogCostEvents.$inferInsert {
   return {
     batchId: row.batchId,
-    brandSlug: row.brandSlug,
+    brandSlug: row.batchId ? row.brandSlug : null,
     isTest: row.isTest,
     productId: row.productId ?? null,
     sourceImageId: row.sourceImageId ?? null,
@@ -63,6 +98,9 @@ export function costEventValues(row: CostEventInput): typeof catalogCostEvents.$
     outcome: row.outcome ?? "ok",
     chunkId: row.chunkId ?? null,
     attempt: row.attempt ?? null,
+    component: costComponent(row, env),
+    contentVersionId: row.contentVersionId ?? null,
+    billableMs: row.billableMs === undefined || row.billableMs === null ? null : whole(row.billableMs),
     ...(row.at ? { at: row.at } : {}),
   };
 }
@@ -76,13 +114,14 @@ export async function recordCostEvents(db: Db, rows: readonly CostEventInput[], 
   if (!rows.length) return true;
   try {
     await db.transaction(async (tx) => {
-      await tx.insert(catalogCostEvents).values(rows.map(costEventValues));
+      await tx.insert(catalogCostEvents).values(rows.map((row) => costEventValues(row)));
     });
     return true;
   } catch (error) {
     log(COST_EVENT_WRITE_FAILED, {
       severity: "ERROR",
-      batchId: rows[0]!.batchId,
+      batchId: rows[0]!.batchId ?? null,
+      component: rows[0] ? costComponent(rows[0]) : null,
       rows: rows.length,
       error: error instanceof Error ? error.message : String(error),
     });

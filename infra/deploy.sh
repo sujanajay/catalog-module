@@ -81,9 +81,15 @@ if [ "${CATALOG_PREVIEW:-0}" = 1 ]; then
   QUEUE=catalog-preview
   BUILD_CONFIG=infra/cloudbuild-preview.yaml
 fi
+# M6-F2-R8 (M6-S4): the login works without a prompt and has 3 hours left, and the build and job identities are
+# enabled, before anything is built (infra/lib/preflight.sh).
+# shellcheck source=lib/preflight.sh
+source infra/lib/preflight.sh
+preflight_login_works || exit 1
 PN=$(gcv projects describe "$PROJECT" --format='value(projectNumber)')
 WEB_SA=catalog-web@$PROJECT.iam.gserviceaccount.com
 WORKER_SA=catalog-worker@$PROJECT.iam.gserviceaccount.com
+login_preflight "$PN-compute@developer.gserviceaccount.com" "$WORKER_SA" || exit 1
 MATTING_SA=catalog-matting@$PROJECT.iam.gserviceaccount.com
 # Deterministic Cloud Run URLs; WORKER_URL is both the Cloud Tasks target and the OIDC audience.
 WORKER_URL=https://$WORKER_SERVICE-$PN.$REGION.run.app
@@ -104,6 +110,8 @@ SQL_MAX_FLAG=$(node -e '
 ' <<<"$SQL_FLAGS_JSON")
 # shellcheck source=lib/shape.sh
 source infra/lib/shape.sh
+# shellcheck source=lib/labels.sh
+source infra/lib/labels.sh
 SQL_CONNECTION_LIMIT=${SQL_MAX_FLAG:-$(tier_max_connections "$SQL_TIER_LIVE")}
 [ -n "$SQL_CONNECTION_LIMIT" ] || { echo "ERROR: unknown ila-pg tier '$SQL_TIER_LIVE'; cannot check the connection budget" >&2; exit 1; }
 gcloud secrets describe catalog-db-password >/dev/null 2>&1 || { echo "secret catalog-db-password missing; run infra/bootstrap.sh first" >&2; exit 1; }
@@ -139,7 +147,7 @@ BQ_PROJECT=${BQ_PROJECT:-image-links-agent}
 # stops the deploy here, before anything is changed.
 shape_defaults
 shape_check "$SQL_CONNECTION_LIMIT" || exit 1
-echo "==> connection budget: catalog $CATALOG_DB_TOTAL of $CATALOG_DB_LIMIT (ila-pg $SQL_TIER_LIVE allows $SQL_CONNECTION_LIMIT)"
+echo "==> connection budget: catalog $CATALOG_DB_TOTAL of $CATALOG_DB_LIMIT, $CATALOG_DB_OVERLAP during a deploy's probes (ila-pg $SQL_TIER_LIVE allows $SQL_CONNECTION_LIMIT)"
 echo "==> shape: worker $WORKER_MAX_INSTANCES x ${WORKER_CPU} vCPU/$WORKER_MEMORY; slots $TASKS_MAX_DISPATCHES + bulk $BULK_MAX_DISPATCHES + ingest $INGEST_MAX_DISPATCHES + enlarge $ENLARGE_MAX_DISPATCHES at ${ENLARGE_DISPATCHES_PER_SECOND}/s + $ENLARGE_BULK_MAX_DISPATCHES at ${ENLARGE_BULK_DISPATCHES_PER_SECOND}/s of $SLOTS_CAPACITY; asia-south1 vCPU $CPU_TOTAL of $CPU_QUOTA_LIMIT, memory ${MEMORY_TOTAL_GIB:-?} of $MEMORY_QUOTA_LIMIT_GIB GiB; GPU $GPU_MAX_INSTANCES x ${GPU_CPU} vCPU/$GPU_MEMORY concurrency $GPU_CONCURRENCY, $MAX_RESIDENT_SESSIONS resident; upscale on $UPSCALE_SERVICE"
 if upscale_gpu_deployed; then
   echo "==> shape: catalog-upscale-gpu $UPSCALE_GPU_MAX_INSTANCES x $UPSCALE_GPU_TYPE ($UPSCALE_GPU_CPU vCPU/$UPSCALE_GPU_MEMORY) in $UPSCALE_GPU_REGION, concurrency $UPSCALE_GPU_CONCURRENCY, timeout ${UPSCALE_GPU_TIMEOUT_S} s; new batches enlarge on $UPSCALE_TARGET"
@@ -342,8 +350,10 @@ elif [ "${CATALOG_PREVIEW:-0}" != 1 ]; then
   ' "$AR/worker:$TAG" <<<"$MIGRATION_JOB"; then
     echo "==> migrate: SKIP (this image already migrated successfully)"
   else
+    MIGRATE_LABELS=$(catalog_labels catalog-migrate live)
+    catalog_labels_check catalog-migrate "$MIGRATE_LABELS" || exit 1
     gcloud run jobs deploy catalog-migrate --quiet --image="$AR/worker:$TAG" --command=node --args=dist/migrate.js \
-      --service-account="$WORKER_SA" --max-retries=0 --task-timeout=600 "${NET[@]}" --labels=app=catalog,component=job \
+      --service-account="$WORKER_SA" --max-retries=0 --task-timeout=600 "${NET[@]}" --labels="$MIGRATE_LABELS" \
       --set-secrets="$SECRETS" --set-env-vars="$MIGRATE_ENV"
     gcloud run jobs execute catalog-migrate --region="$REGION" --wait
   fi

@@ -59,6 +59,7 @@ import { startLoadBatch } from "./catalog/load-start";
 import { recheckEvidence, reportThenCleanup, type RecheckEvidence } from "./catalog/load-report";
 import { installWarningLog } from "./runtime";
 import { dataRoot } from "./catalog-real-fixtures";
+import { recordJobRun } from "@catalog/core/job-cost";
 
 /** "kept" (--keep), "pending" (written before the cleanup ran), or what the cleanup did. */
 type CleanupOutcome = "kept" | "pending" | { leftBehind: { batchId: string; status: string | null }[]; cleaned?: string[]; objects?: number; kept?: string[]; ms?: number; error?: string };
@@ -331,6 +332,7 @@ async function main() {
   const sample = Number(values["reupload-sample"] ?? process.env.LOAD_REUPLOAD_SAMPLE ?? reuploadSampleSize(count));
   const timeoutMs = Number(values["timeout-min"] ?? process.env.LOAD_TIMEOUT_MIN ?? 240) * 60_000;
   const keep = values.keep ?? process.env.LOAD_KEEP === "1";
+  const startedAt = Date.now();
   log("connection budget", { budget: budgetPreflight() });
   try { await noOtherRunPreflight(getDb()); } catch (error) { await closeDb(); throw error; }
   const run = `load-${randomUUID()}`, out = path.resolve(process.env.CATALOG_REAL_OUT ?? "var/catalog-test", run);
@@ -433,6 +435,9 @@ async function main() {
     };
     await reportThenCleanup(report, { write: writeReport, ...(!keep && batchIds.length ? { cleanup } : {}) });
     if (!passed) process.exitCode = 1;
+    // M6-F1-R3: this run's billable seconds as one cost ledger row (on Cloud Run only). A load run spans several
+    // batches (cleaned up after it), so the row carries the job only, as a test run.
+    await recordJobRun(getDb(), { startedAt, outcome: passed ? "ok" : "failed", isTest: true });
     await closeDb();
   }
 }

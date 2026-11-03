@@ -112,7 +112,7 @@ test('catalog-upscale: the matting image sized by the UPSCALE_* rows, only the u
   assert.equal(f[8], 'MAX_RESIDENT_SESSIONS=1,UPSCALE_CPU=1,PRELOAD_MATTE=0,ORT_INTRA_OP_THREADS=4,UPSCALE_MAX_PIXELS=5400000,UPSCALE_MAX_PIXELS_X4=4900000');
   assert.equal(f[9], 'bash infra/lib/services.sh probe-upscale 10012 swinir-x2,swinir-x4 800x1200,1600x1600 1 1 1740 5400000 4900000 12 120');
   assert.deepEqual(rest.slice(0, -1), ['--service-account=m', '--cpu=4', '--memory=8Gi', '--concurrency=1', '--min-instances=0',
-    '--max-instances=50', '--timeout=1740', '--labels=app=catalog,component=upscale']);
+    '--max-instances=50', '--timeout=1740', '--labels=app=catalog,component=catalog-upscale,env=live']);
   assert.equal(rest.at(-1), 'TAG=|SKIP=', 'the dedicated service uses the candidate tag');
 });
 
@@ -297,7 +297,7 @@ test('catalog-upscale-gpu: the matting-gpu image in asia-south2 on one RTX PRO 6
   assert.equal(f[8], 'MAX_RESIDENT_SESSIONS=1,PRELOAD_MATTE=0,UPSCALE_MAX_PIXELS=5400000,UPSCALE_MAX_PIXELS_X4=4900000');
   assert.equal(f[9], 'env UPSCALE_DETERMINISM_SECONDS=600 bash infra/lib/services.sh probe-upscale 3292 swinir-x2,swinir-x4 800x1200,1600x1600 4 3 300 5400000 4900000 12 0');
   assert.deepEqual(rest.slice(0, -1), ['--service-account=m', '--gpu=1', '--gpu-type=nvidia-rtx-pro-6000', '--no-gpu-zonal-redundancy', '--no-cpu-throttling',
-    '--cpu=20', '--memory=80Gi', '--concurrency=4', '--min-instances=0', '--max-instances=4', '--timeout=300', '--labels=app=catalog,component=upscale-gpu']);
+    '--cpu=20', '--memory=80Gi', '--concurrency=4', '--min-instances=0', '--max-instances=4', '--timeout=300', '--labels=app=catalog,component=catalog-upscale-gpu,env=live']);
 });
 
 test('catalog-upscale-gpu: a quota refusal only warns while new batches stay on the CPU (UPSCALE_TARGET=cpu); with gpu, the default, it stops', () => {

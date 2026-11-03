@@ -26,6 +26,9 @@ RECHECK_JOB=catalog-recheck
 # Pin this project for every gcloud call without touching global gcloud config.
 export CLOUDSDK_CORE_PROJECT=$PROJECT
 cd "$(dirname "$0")/.."
+# M6-S1: labels app=catalog, component=<job name>, env (infra/lib/labels.sh); a job without them is never deployed.
+# shellcheck source=lib/labels.sh
+source infra/lib/labels.sh
 
 WORKER_SA=catalog-worker@$PROJECT.iam.gserviceaccount.com
 ASSETS_BUCKET=image-links-agent-assets
@@ -39,7 +42,10 @@ job_exists() {
 
 # deploy_job <job> <evidence prefix> <timeout s> <with input: 0|1> <command> <args>
 deploy_job() {
-  local job=$1 evidence=$2 timeout=$3 with_input=$4 command=$5 args=$6
+  local job=$1 evidence=$2 timeout=$3 with_input=$4 command=$5 args=$6 labels
+  # The load job is a test (reported apart from operator cost); the independent re-check runs on live batches.
+  labels=$(catalog_labels "$job" "$([ "$job" = "$LOAD_JOB" ] && echo test || echo live)")
+  catalog_labels_check "$job" "$labels" || exit 1
   # Volumes are added by flag; on an update clear them first so a re-run never duplicates them.
   local volume_flags=()
   if job_exists "$job"; then
@@ -60,7 +66,7 @@ deploy_job() {
   # gcloud launcher itself needs (MSYS_NO_PATHCONV=1 would break it).
   MSYS2_ARG_CONV_EXCL='--command=;--args=;--set-env-vars=;--add-volume=;--add-volume-mount=' \
   gcloud run jobs deploy "$job" --quiet --image="$SCALE_JOB_IMAGE" \
-    --service-account="$WORKER_SA" --labels=app=catalog,component=job --max-retries=0 --task-timeout="$timeout" --cpu=2 --memory=4Gi "${NET[@]}" \
+    --service-account="$WORKER_SA" --labels="$labels" --max-retries=0 --task-timeout="$timeout" --cpu=2 --memory=4Gi "${NET[@]}" \
     "${volume_flags[@]}" --command="$command" --args="$args" \
     --set-secrets="$SCALE_JOB_SECRETS" --set-env-vars="$SCALE_JOB_ENV,CATALOG_REAL_OUT=/catalog-evidence,REAL_DATA_DIR=/tmp/catalog-data,REAL_DATA=1"
 }

@@ -60,6 +60,30 @@ export const ENLARGE_TASK_ROUTES: readonly TaskRoute[] = ["/tasks/catalog/enlarg
  */
 export interface EnlargeTaskBody { batchId: string; productId: string; enlargementId: string }
 
+/**
+ * M6-F2-R2 (M6-S4): every task body carries the version of its shape in `taskVersion`, so a deploy can run one release
+ * of web and worker beside the other. A worker accepts the current and the previous version and ignores fields it does
+ * not know; a body without the field is version 1 (every body before M6-S4, and the Cloud Scheduler bodies). A body
+ * newer than the worker (a new web or worker enqueued it while this older revision still takes traffic) is answered
+ * 503, so the queue retries it until the new revision serves. Raise TASK_BODY_VERSION only with a body change the
+ * previous worker cannot read, and keep the handlers reading version TASK_BODY_VERSION - 1 for one release. A worker
+ * rollback after a bump answers the new bodies 503: chunk tasks give up after 30 min and the sweep and leases recover
+ * them; prefer rolling back the web first.
+ */
+export const TASK_BODY_VERSION = 2;
+export const TASK_VERSION_FIELD = "taskVersion";
+
+/** The version a task body was written in: its `taskVersion` when a positive whole number, else 1. */
+export function taskBodyVersion(body: Record<string, unknown>): number {
+  const v = body[TASK_VERSION_FIELD];
+  return typeof v === "number" && Number.isInteger(v) && v >= 1 ? v : 1;
+}
+
+/** `body` stamped with TASK_BODY_VERSION (what every enqueue sends). */
+export function versionedBody(body: Record<string, unknown>): Record<string, unknown> {
+  return { ...body, [TASK_VERSION_FIELD]: TASK_BODY_VERSION };
+}
+
 /** Minimal surface of `CloudTasksClient` we use - lets tests pass a fake. */
 export type TasksClientLike = Pick<CloudTasksClient, "createTask">;
 
@@ -204,7 +228,7 @@ export function buildTaskRequest(
       httpMethod: "POST",
       url: `${cfg.workerUrl}${route}`,
       headers: { "Content-Type": "application/json" },
-      body: Buffer.from(JSON.stringify(body)).toString("base64"),
+      body: Buffer.from(JSON.stringify(versionedBody(body))).toString("base64"),
       oidcToken: { serviceAccountEmail: cfg.serviceAccountEmail, audience: cloudRunAudience(cfg.workerUrl) },
     },
     dispatchDeadline: { seconds: dispatchDeadlineSec(route) },
@@ -229,7 +253,7 @@ export async function enqueueTask(route: TaskRoute, body: Record<string, unknown
     const url = `${required(env, "WORKER_URL").replace(/\/+$/, "")}${route}`;
     const doFetch = opts.fetch ?? fetch;
     const send = () =>
-      doFetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) })
+      doFetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(versionedBody(body)) })
         .then((res) => {
           if (!res.ok) log("ERROR", `[tasks] inline POST ${url} -> ${res.status}`, { route, status: res.status });
         })

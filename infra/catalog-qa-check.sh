@@ -29,6 +29,10 @@ JOB=catalog-qa-check
 # Pin this project for every gcloud call without touching global gcloud config.
 export CLOUDSDK_CORE_PROJECT=$PROJECT
 cd "$(dirname "$0")/.."
+# M6-S1: labels app=catalog, component=<job name>, env (infra/lib/labels.sh); a job without them is never deployed.
+# shellcheck source=lib/labels.sh
+source infra/lib/labels.sh
+JOB_LABELS=$(catalog_labels "$JOB" test)
 
 WORKER_SA=catalog-worker@$PROJECT.iam.gserviceaccount.com
 INPUT_BUCKET=image-links-agent-assets
@@ -61,9 +65,10 @@ deploy() {
   # MSYS2_ARG_CONV_EXCL: Git Bash rewrites "/..." values inside these flags into Windows paths
   # (see the web deploy in infra/deploy.sh). Excluding only these flags keeps the conversion the
   # gcloud launcher itself needs (MSYS_NO_PATHCONV=1 would break it).
+  catalog_labels_check "$JOB" "$JOB_LABELS" || exit 1
   MSYS2_ARG_CONV_EXCL='--command=;--args=;--set-env-vars=;--add-volume=;--add-volume-mount=' \
   gcloud run jobs deploy "$JOB" --quiet --image="$QA_JOB_IMAGE" \
-    --service-account="$WORKER_SA" --labels=app=catalog,component=job --max-retries=0 --task-timeout=10800 --cpu=2 --memory=4Gi "${NET[@]}" \
+    --service-account="$WORKER_SA" --labels="$JOB_LABELS" --max-retries=0 --task-timeout=10800 --cpu=2 --memory=4Gi "${NET[@]}" \
     "${volume_flags[@]}" \
     --command=/bin/sh \
     --args=-ec,"mkdir -p /tmp/catalog-data; tar -xf /catalog-input/anta.tar -C /tmp/catalog-data; tar -xf /catalog-input/french-connection.tar -C /tmp/catalog-data; exec node dist/catalog-qa-check.js" \

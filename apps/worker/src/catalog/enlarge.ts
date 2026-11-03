@@ -28,6 +28,8 @@ import {
 } from "@catalog/core/catalog/pipeline/enlargement";
 import { isBulkBatch, tryEnqueueChunk } from "@catalog/core/catalog/pipeline/dispatch";
 import { recordCostEvents, type CostEventInput } from "@catalog/core/cost-events";
+import type { CostOutcome } from "@catalog/core/db/schema";
+import { onDrain } from "../drain";
 import { upscaleCallUsd } from "@catalog/core/catalog/cost";
 import type { MattingTrace } from "@catalog/core/catalog/matte";
 import type { HandleOptions, HandleResult } from "../server";
@@ -352,6 +354,8 @@ export async function handleEnlargeTask(deps: CatalogDeps, body: Record<string, 
   let token: string | null = null;
   // True between the write that counted this delivery's call (timeouts + 1, before the call) and its settle.
   let pending = false;
+  // M6-F2-R3: true once SIGTERM gave this delivery's call back (makeOne); the delivery then answers 503.
+  let drained = false;
   const [row] = await deps.db.select().from(catalogEnlargements).where(eq(catalogEnlargements.id, enlargementId));
   const [batch] = await deps.db.select().from(catalogBatches).where(eq(catalogBatches.id, batchId));
   const answer = (httpStatus: number, outcome: string, extra: Record<string, unknown> = {}): HandleResult => {
@@ -420,7 +424,8 @@ export async function handleEnlargeTask(deps: CatalogDeps, body: Record<string, 
   if (claimed.callStartedAt) {
     const lostMs = Math.max(0, Math.min(+now - +claimed.callStartedAt, ENLARGE_DISPATCH_DEADLINE_SEC * 1000));
     // Written at once with the mark cleared (one transaction), so this delivery dying too never loses or repeats it.
-    const lost = costRow(lostMs, "failed");
+    // M6-S1: a call whose delivery was cut off before it settled is `killed` (billed, never answered).
+    const lost = costRow(lostMs, "killed");
     await deps.db.transaction(async (tx) => {
       const [cleared] = await tx.update(catalogEnlargements).set({ callStartedAt: null }).where(and(eq(catalogEnlargements.id, row.id), eq(catalogEnlargements.claimToken, token!))).returning({ id: catalogEnlargements.id });
       if (cleared) await recordCostEvents(tx as unknown as CatalogDeps["db"], [lost], deps.log);
@@ -447,7 +452,7 @@ export async function handleEnlargeTask(deps: CatalogDeps, body: Record<string, 
   try {
     if (shrunkW * shrunkH <= cap) {
       const made = await makeOne(uri, () => upscaleUpload(shrunk, shrunkW, shrunkH), undefined);
-      if ("lost" in made) return answer(200, "settled");
+      if ("lost" in made) return drained ? answer(503, "draining") : answer(200, "settled");
       if ("failure" in made) return await failed(made.failure);
       if (!(await store(key, uri, made.jpeg, enlargedMetadata(row)))) return await count("timeouts", "the made image could not be stored", "upload");
       deps.log("catalog upscale", { batchId, productId, ...fields, photo: `${p.width}x${p.height}`, out: `${row.outW}x${row.outH}`, upscaleMs: made.ms });
@@ -468,7 +473,7 @@ export async function handleEnlargeTask(deps: CatalogDeps, body: Record<string, 
       if (made > 0 && (+deps.now() - started + last >= tileBudget || +deps.now() + last > deadlineAt)) return await moreTiles(tiles.length);
       const t0 = +deps.now();
       const reply = await makeOne(tileUri, () => upscaleUpload(shrunk, shrunkW, shrunkH, { x: tile.x, y: tile.y, w: tile.w, h: tile.h }), tile.index, expect);
-      if ("lost" in reply) return answer(200, "settled");
+      if ("lost" in reply) return drained ? answer(503, "draining") : answer(200, "settled");
       if ("failure" in reply) return await failed({ ...reply.failure, reason: `tile ${tile.index + 1} of ${tiles.length}: ${reply.failure.reason}` });
       if (!(await store(tileKey, tileUri, reply.jpeg, enlargedMetadata(row, tile.index)))) return await count("timeouts", `tile ${tile.index + 1} of ${tiles.length} could not be stored`, "upload");
       tileImages.push(reply.jpeg);
@@ -525,14 +530,34 @@ export async function handleEnlargeTask(deps: CatalogDeps, body: Record<string, 
     pending = true;
     row!.timeouts = counted.timeouts;
     const t0 = +deps.now();
+    // M6-F2-R3 (M6-S4): SIGTERM while the call runs. The call's count is given back and the claim released at once (one
+    // settle, with a `killed` cost row for the time it ran), so the queue's re-send makes it again and this cut-off
+    // delivery is never a counted failure. Whatever the call answers after that is ignored.
+    // Set once the call answered: a hook that runs after that (startDrain schedules hooks on a microtask) leaves the
+    // answer to the delivery, so the same call never gets both an ok row and a killed row (review 2026-11-03).
+    let answered = false;
+    const unhook = onDrain(async () => {
+      if (!pending || answered) return;
+      drained = true;
+      ledger.push(costRow(+deps.now() - t0, "killed", tile));
+      await settle({ ...refund(), ...unclaim(), updatedAt: deps.now() }, false);
+      deps.log("enlargement call given back on shutdown", { severity: "WARNING", batchId, productId, enlargementId, ...fields });
+    });
     let result: EnlargeResult;
     try {
       result = await call(jpeg, trace, { deadlineAt, upscaler: row!.upscaler });
+      answered = !drained;
     } catch (error) {
+      answered = !drained;
       const ms = +deps.now() - t0;
-      if (!(error instanceof EnlargeError) || error.kind !== "rejected") ledger.push(costRow(ms, "failed", tile));
+      if (drained) return { lost: true };
+      // M6-S1: every paid attempt is a ledger row, a refused one too; a timeout is its own outcome.
+      ledger.push(costRow(ms, error instanceof EnlargeError && error.kind === "timeout" ? "timeout" : "failed", tile));
       return { failure: classify(error, ms) };
+    } finally {
+      unhook();
     }
+    if (drained) return { lost: true };
     ledger.push(costRow(result.ms, "ok", tile));
     const verdict = await validateEnlargedObject({ bytes: result.jpeg, metadata: enlargedMetadata(row!, tile) }, row!, expect);
     if (!verdict.ok) return { failure: { kind: "counted", reason: `The upscale service answered ${tile === undefined ? "an image" : `tile ${tile + 1}`} the check refused: ${verdict.reason}.`, errorKind: "invalid_reply", ms: result.ms } };
@@ -594,7 +619,7 @@ export async function handleEnlargeTask(deps: CatalogDeps, body: Record<string, 
       return (await validateEnlargedObject({ bytes, metadata: head.metadata }, row!, tile)).ok ? "valid" : "invalid";
     } catch { return "error"; }
   }
-  function costRow(ms: number, outcome: "ok" | "failed", _tile?: number): CostEventInput {
+  function costRow(ms: number, outcome: CostOutcome, _tile?: number): CostEventInput {
     const target = isCpuUpscalerId(row!.upscaler) ? "cpu" : "gpu";
     return { batchId: batch!.id, brandSlug: batch!.brandSlug, isTest: batch!.isTest, productId: productId as string, sourceImageId: row!.sourceImageId, stage: "upscale", kind: "upscale_call", engine: target, ms, ...upscaleCallUsd(target, ms), attempt: row!.attempts + row!.timeouts + 1, outcome, at: deps.now() };
   }

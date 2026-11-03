@@ -95,12 +95,22 @@ export const CHUNK_STATUSES = ["queued", "running", "done", "failed"] as const;
 export const SPEND_ENGINES = ["catalog_qa", "catalog_compute"] as const;
 /** model_policy.category: a ProductType or "*" (any). */
 export const POLICY_CATEGORIES = [...PRODUCT_TYPES, "*"] as const;
-/** catalog_cost_events.stage: where in the pipeline the money or time went. */
-export const COST_STAGES = ["matte", "render", "upscale", "qa", "classify", "publish", "finalize"] as const;
-/** catalog_cost_events.kind: what was priced or timed. */
-export const COST_KINDS = ["llm_call", "matte_call", "render", "upscale_call", "compute"] as const;
-/** catalog_cost_events.outcome. `fallback`: the simple cut-out stood in for a failed service call. */
-export const COST_OUTCOMES = ["ok", "failed", "rate_limited", "cap", "fallback"] as const;
+/**
+ * catalog_cost_events.stage: where in the pipeline the money or time went. M6-S1: `ingest` (an intake delivery) and
+ * `system` (work of no one batch: the sweep, the master sync, a job run outside a batch).
+ */
+export const COST_STAGES = ["matte", "render", "upscale", "qa", "classify", "publish", "finalize", "ingest", "system"] as const;
+/**
+ * catalog_cost_events.kind: what was priced or timed. M6-S1: `job` (one Cloud Run job run, its billable seconds) and
+ * `wait` (billed time spent waiting on another service, for the reconciliation of M6-S2).
+ */
+export const COST_KINDS = ["llm_call", "matte_call", "render", "upscale_call", "compute", "job", "wait"] as const;
+/**
+ * catalog_cost_events.outcome. `fallback`: the simple cut-out stood in for a failed service call. M6-S1: `timeout` (the
+ * call ran out of time), `killed` (the delivery that made the call was cut off before it settled), `duplicate` (the
+ * work of a delivery that lost its claim to another copy of the same task).
+ */
+export const COST_OUTCOMES = ["ok", "failed", "rate_limited", "cap", "fallback", "timeout", "killed", "duplicate"] as const;
 
 /**
  * M2-S1 taxonomy store (0010, docs/program/requirements/M2-analyze.md M2-F1-R1 to R3). The value lists below are the
@@ -325,6 +335,11 @@ export const catalogUploads = pgTable(
     status: text("status", { enum: UPLOAD_STATUSES }).notNull().default("pending"),
     detected: jsonb("detected").$type<Record<string, unknown>>(),
     error: text("error"),
+    /**
+     * M6-F2-R4: ingest deliveries of this upload that failed in a row (the handler threw). The ingest queue retries
+     * without limit; the handler stops the batch at INGEST_MAX_FAILURES, so a 429 or a deploy never counts.
+     */
+    ingestFailures: integer("ingest_failures").notNull().default(0),
     createdAt: createdAt(),
   },
   (t) => [
@@ -721,16 +736,17 @@ export const spendDays = pgTable(
  * catalog/cost-report.ts. `engine` is `cpu`, `gpu`, `worker` or a model id, never shown in the UI.
  * Only batch_id is a foreign key (test cleanup deletes batches); the other ids are plain references
  * because outputs and source images are deleted while their batch is kept.
+ * M6-S1: a row of no batch (a job run or a delivery outside a batch) has no batch_id and no brand_slug; `component`
+ * is the Cloud Run service or job the cost is billed to (its `component` label), `billable_ms` the instance time the
+ * row explains, and `content_version_id` the M0 content version once outputs carry one.
  */
 export const catalogCostEvents = pgTable(
   "catalog_cost_events",
   {
     id: uuid("id").primaryKey().defaultRandom(),
     at: timestamp("at", { withTimezone: true }).notNull().defaultNow(),
-    batchId: uuid("batch_id")
-      .notNull()
-      .references(() => catalogBatches.id, { onDelete: "cascade" }),
-    brandSlug: text("brand_slug").notNull(),
+    batchId: uuid("batch_id").references(() => catalogBatches.id, { onDelete: "cascade" }),
+    brandSlug: text("brand_slug"),
     isTest: boolean("is_test").notNull().default(false),
     productId: uuid("product_id"),
     sourceImageId: uuid("source_image_id"),
@@ -749,6 +765,9 @@ export const catalogCostEvents = pgTable(
     chunkId: uuid("chunk_id"),
     /** The attempt number of this call: a judge's HTTP attempt, or a photo's n-th cut-out call in a delivery. */
     attempt: integer("attempt"),
+    component: text("component"),
+    contentVersionId: uuid("content_version_id"),
+    billableMs: integer("billable_ms"),
   },
   (t) => [
     index("catalog_cost_events_batch_id_idx").on(t.batchId),

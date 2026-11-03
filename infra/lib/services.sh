@@ -32,6 +32,10 @@
 # Spec 18 GPU upscaler (2026-10-30): catalog-upscale-gpu goes right after catalog-upscale, so the worker env knows both
 # upscalers' URLs before the web and the worker are deployed.
 SERVICES=(catalog-matting catalog-upscale catalog-upscale-gpu catalog-matting-gpu catalog-web catalog-worker)
+# M6-S1: labels app=catalog, component=<service name>, env=live|preview (infra/lib/labels.sh); the gate refuses a
+# service without them.
+# shellcheck source=labels.sh
+source "$(dirname "${BASH_SOURCE[0]}")/labels.sh"
 # The Cloud Run request timeout of the matting services (CPU and GPU). Spec 18 H3: with UPSCALE_SERVICE=cpu or gpu the
 # worker's enlarge task calls /upscale there and learns it as UPSCALE_TIMEOUT_S (infra/deploy.sh).
 MATTING_TIMEOUT_S=300
@@ -66,7 +70,7 @@ service_catalog_matting() {
   SVC_IMAGE=$AR/matting:$TAG
   local concurrency=1
   SVC_ARGS=(--service-account="$MATTING_SA" --cpu=4 --memory=16Gi --concurrency="$concurrency" --min-instances=0
-    --max-instances="$MATTING_CPU_MAX_INSTANCES" --timeout="$MATTING_TIMEOUT_S" --labels=app=catalog,component=matte)
+    --max-instances="$MATTING_CPU_MAX_INSTANCES" --timeout="$MATTING_TIMEOUT_S" --labels="$(catalog_labels catalog-matting live)")
   SVC_MAX=$MATTING_CPU_MAX_INSTANCES
   SVC_ENV="MAX_RESIDENT_SESSIONS=1,UPSCALE_CPU=1"
   # Sized to the service: one CPU cut-out takes 25 to 71 s (measured on a candidate 2026-10-28; the full probe of
@@ -105,7 +109,7 @@ service_catalog_upscale() {
   SVC_REGION=$(service_region "$SVC_NAME")
   SVC_IMAGE=$AR/matting:$TAG
   SVC_ARGS=(--service-account="$MATTING_SA" --cpu="$UPSCALE_CPU_VCPU" --memory="$UPSCALE_MEMORY" --concurrency="$UPSCALE_CONCURRENCY"
-    --min-instances=0 --max-instances="$UPSCALE_MAX_INSTANCES" --timeout="$UPSCALE_TIMEOUT_S" --labels=app=catalog,component=upscale)
+    --min-instances=0 --max-instances="$UPSCALE_MAX_INSTANCES" --timeout="$UPSCALE_TIMEOUT_S" --labels="$(catalog_labels catalog-upscale live)")
   SVC_MAX=$UPSCALE_MAX_INSTANCES
   SVC_ENV="MAX_RESIDENT_SESSIONS=1,UPSCALE_CPU=1,PRELOAD_MATTE=0,ORT_INTRA_OP_THREADS=$UPSCALE_THREADS,UPSCALE_MAX_PIXELS=$UPSCALE_MAX_PIXELS,UPSCALE_MAX_PIXELS_X4=$UPSCALE_MAX_PIXELS_X4"
   SVC_QUOTA_OPTIONAL=0
@@ -177,7 +181,7 @@ service_catalog_upscale_gpu() {
   SVC_IMAGE=$AR/matting-gpu:$TAG
   SVC_ARGS=(--service-account="$MATTING_SA" --gpu=1 --gpu-type="$UPSCALE_GPU_TYPE" --no-gpu-zonal-redundancy --no-cpu-throttling
     --cpu="$UPSCALE_GPU_CPU" --memory="$UPSCALE_GPU_MEMORY" --concurrency="$UPSCALE_GPU_CONCURRENCY" --min-instances=0
-    --max-instances="$UPSCALE_GPU_MAX_INSTANCES" --timeout="$UPSCALE_GPU_TIMEOUT_S" --labels=app=catalog,component=upscale-gpu)
+    --max-instances="$UPSCALE_GPU_MAX_INSTANCES" --timeout="$UPSCALE_GPU_TIMEOUT_S" --labels="$(catalog_labels catalog-upscale-gpu live)")
   SVC_MAX=$UPSCALE_GPU_MAX_INSTANCES
   SVC_ENV="MAX_RESIDENT_SESSIONS=1,PRELOAD_MATTE=0,UPSCALE_MAX_PIXELS=$UPSCALE_MAX_PIXELS,UPSCALE_MAX_PIXELS_X4=$UPSCALE_MAX_PIXELS_X4"
   SVC_SKIP_REASON=""
@@ -223,7 +227,7 @@ service_catalog_matting_gpu() {
   SVC_IMAGE=$AR/matting-gpu:$TAG
   SVC_ARGS=(--service-account="$MATTING_SA" --gpu=1 --gpu-type=nvidia-l4 --no-gpu-zonal-redundancy --no-cpu-throttling
     --cpu="$GPU_CPU" --memory="$GPU_MEMORY" --concurrency="$GPU_CONCURRENCY" --min-instances=0
-    --max-instances="$GPU_MAX_INSTANCES" --timeout="$MATTING_TIMEOUT_S" --labels=app=catalog,component=matte-gpu)
+    --max-instances="$GPU_MAX_INSTANCES" --timeout="$MATTING_TIMEOUT_S" --labels="$(catalog_labels catalog-matting-gpu live)")
   SVC_MAX=$GPU_MAX_INSTANCES
   SVC_ENV="MAX_RESIDENT_SESSIONS=$MAX_RESIDENT_SESSIONS"
   local knob
@@ -253,7 +257,7 @@ service_catalog_worker() {
   SVC_IMAGE=$AR/worker:$TAG
   SVC_ARGS=(--service-account="$WORKER_SA" --cpu="$WORKER_CPU" --memory="$WORKER_MEMORY"
     --concurrency="$WORKER_CONCURRENCY" --min-instances=0 --max-instances="$WORKER_MAX_INSTANCES" --timeout="$WORKER_TIMEOUT_S"
-    "${NET[@]}" --set-secrets="$WORKER_SECRETS" --labels=app=catalog,component=worker)
+    "${NET[@]}" --set-secrets="$WORKER_SECRETS" --labels="$(catalog_labels "$WORKER_SERVICE")")
   SVC_MAX=$WORKER_MAX_INSTANCES
   SVC_ENV=$WORKER_ENV
   # The smoke runs on the matting candidates of this deploy (their tag URLs) and names the worker candidate.
@@ -275,7 +279,7 @@ service_catalog_web() {
   # Google-managed OAuth client: no OAuth client, consent screen or secret of ours.
   SVC_ARGS=(--service-account="$WEB_SA" --iap --cpu=1 --memory=1Gi --min-instances=0
     --max-instances="$WEB_MAX_INSTANCES" --timeout=300 "${NET[@]}" --set-secrets="$SECRETS"
-    --labels=app=catalog,component=web)
+    --labels="$(catalog_labels "$WEB_SERVICE")")
   SVC_MAX=$WEB_MAX_INSTANCES
   SVC_ENV=$WEB_ENV
   # Through IAP as the smoke's identity (the worker's service account, which the catalog-test-smoke job runs as).

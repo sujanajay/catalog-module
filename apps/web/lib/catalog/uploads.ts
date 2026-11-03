@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { and, eq, inArray, ne, sql } from "drizzle-orm";
+import { and, eq, gt, inArray, ne, sql } from "drizzle-orm";
 import { catalogBatches, catalogUploads } from "@catalog/core/db/schema";
 import { detectUploadKind } from "@catalog/core/catalog/ingest/detect";
 import { planSignedUploads, mapLimit } from "@catalog/core/catalog/ingest/local-files";
@@ -117,6 +117,9 @@ export async function ingestBatch(id: string) {
   const [handing] = await db().update(catalogBatches).set({ status: "ingesting", counts: sql`${mergeCounts({ previewReady: false, fixReason: null, ingestRun: run })}${clearLost}`, updatedAt: new Date() })
     .where(and(eq(catalogBatches.id, id), inArray(catalogBatches.status, ["draft", "ingesting"]))).returning({ id: catalogBatches.id });
   if (!handing) throw new HttpError(409, notDraftText(await queryBatch(id)));
+  // M6-F2-R4: the worker stops a batch at the fifth failed ingest delivery of an upload in a row; a new run (Continue,
+  // Try again) starts every upload of this batch at 0, so a retried batch gets its full failure budget again.
+  await db().update(catalogUploads).set({ ingestFailures: 0 }).where(and(eq(catalogUploads.batchId, id), gt(catalogUploads.ingestFailures, 0)));
   let page = { ids: targets.map((u) => u.id), more: false };
   let handed = 0;
   try {

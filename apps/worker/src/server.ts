@@ -1,5 +1,5 @@
 import http from "node:http";
-import type { TaskRoute } from "@catalog/core/tasks";
+import { TASK_BODY_VERSION, taskBodyVersion, type TaskRoute } from "@catalog/core/tasks";
 import { log } from "@catalog/core/log";
 import { authorize, type AuthConfig } from "./auth";
 
@@ -22,6 +22,8 @@ export interface ServerDeps {
   /** K_REVISION or "dev". */
   version: string;
   routes: Partial<Record<TaskRoute, RouteHandler>>;
+  /** M6-F2-R3: true once the worker got SIGTERM (drain.ts); new deliveries are then answered 503. */
+  draining?: () => boolean;
 }
 
 const MAX_BODY_BYTES = 64 * 1024;
@@ -86,6 +88,15 @@ export async function handleRequest(deps: ServerDeps, req: http.IncomingMessage,
   }
   if (typeof body !== "object" || body === null || Array.isArray(body)) {
     return send(res, 400, { error: "body must be a JSON object" });
+  }
+  // M6-F2-R3: a draining worker starts nothing; the queue sends the task again to a live instance (never counted).
+  if (deps.draining?.()) return send(res, 503, { outcome: "draining" });
+  // M6-F2-R2: a body newer than this worker waits (503, the queue retries) until the revision that wrote it serves.
+  // The current and the previous version run here; fields a handler does not know are ignored.
+  const taskVersion = taskBodyVersion(body as Record<string, unknown>);
+  if (taskVersion > TASK_BODY_VERSION) {
+    log("WARNING", "task body newer than this worker", { route: pathname, taskVersion, workerVersion: TASK_BODY_VERSION });
+    return send(res, 503, { outcome: "newer_task_body" });
   }
 
   let result: HandleResult;

@@ -27,6 +27,7 @@ import { runUntilSettled } from "@catalog/core/catalog/retry-chunk";
 import { handlePublishTask } from "./catalog/publish";
 import { cannedQa, liveQaEnabled } from "./catalog/qa-mock";
 import { localFixture, type RealFixture } from "./catalog-real-fixtures";
+import { recordJobRun } from "@catalog/core/job-cost";
 
 const CHANNELS: ChannelId[] = ["noon", "styli"];
 // Per check: three images at 1536 px plus the template (about 6,000 prompt tokens) and a short JSON
@@ -79,7 +80,7 @@ async function main() {
   assert(Number.isInteger(fcLimit) && fcLimit >= 0, "QA_CHECK_FC_LIMIT must be a whole number of photos.");
   assert(antaLimit === Infinity || (Number.isInteger(antaLimit) && antaLimit >= 0), "QA_CHECK_ANTA_LIMIT must be a whole number of photos.");
   await mkdir(out, { recursive: true });
-  const db = getDb(), batchIds: string[] = [];
+  const db = getDb(), batchIds: string[] = [], startedAt = Date.now();
   const base = workerCatalogDeps(db);
   const deps: CatalogDeps = { ...base, ...(live ? {} : cannedQa), enqueue: async () => "qa-check-inline" };
   const summary: Record<string, unknown>[] = [], flagged: string[] = [];
@@ -128,6 +129,8 @@ async function main() {
     console.info(JSON.stringify(result));
   } finally {
     if (batchIds.length) console.info(JSON.stringify({ cleanup: await cleanupTestBatches(db, storage, batchIds) }));
+    // M6-F1-R3: this run's billable seconds as one cost ledger row (on Cloud Run only; a test run, reported apart).
+    await recordJobRun(db, { startedAt, outcome: process.exitCode ? "failed" : "ok", isTest: true });
     await closeDb();
   }
 }

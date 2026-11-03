@@ -22,6 +22,7 @@ import { workerCatalogDeps } from "./catalog/deps";
 import { cannedQa } from "./catalog/qa-mock";
 import { workerEnlargeCall, workerEnlargeProbe } from "./catalog/enlarge";
 import { runEnlargementSmoke } from "./catalog/enlargement-smoke";
+import { recordJobRun } from "@catalog/core/job-cost";
 
 /**
  * Spec 18 lifecycle (plan 7b): the enlargement case, when the upscaler is on. The x4 and x2 fixtures through the
@@ -78,6 +79,7 @@ async function main() {
     return;
   }
   assert(!mode,"Usage: catalog:smoke (or --verify-manifest <file> for a fresh independent reader)");
+  const startedAt=Date.now();
   const db=getDb(),run=`smoke-${randomUUID()}`,out=path.resolve(process.env.CATALOG_REAL_OUT ?? `var/catalog-test/${run}`);
   await mkdir(out,{recursive:true});
   try {
@@ -98,6 +100,10 @@ async function main() {
     await writeFile(path.join(out,"summary.json"),JSON.stringify({run,passed:evidence.map(e=>e.brand),evidence,skipped,enlargement},null,2));
     await writeFile(path.join(out,"report.html"),`<!doctype html><meta charset="utf-8"><title>Per-brand catalog smoke</title><h1>Per-brand catalog smoke</h1><ul>${evidence.map(e=>`<li><a href="${e.slug}/report.html">${e.brand}</a>: passed, ${e.first.verified} verified, ${e.changed} changed, ${e.removed} removed; cleanup ${e.cleanup}; quality check: ${e.qa}</li>`).join("")}</ul><h2>Skipped (no real image set)</h2><ul>${skipped.map(s=>`<li>${s.brand}: skipped</li>`).join("")}</ul>`);
     console.info(JSON.stringify({run,out,passed:evidence.map(e=>e.brand),skipped:skipped.map(s=>s.brand),evidence}));
-  } finally {await closeDb();}
+  } finally {
+    // M6-F1-R3: this run's billable seconds as one cost ledger row (on Cloud Run only; a test run, reported apart).
+    await recordJobRun(db,{startedAt,outcome:process.exitCode ? "failed":"ok",isTest:true});
+    await closeDb();
+  }
 }
 main().catch(error=>{console.error(error instanceof Error ? error.message:String(error));process.exitCode=1;});

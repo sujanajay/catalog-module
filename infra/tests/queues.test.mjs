@@ -3,8 +3,9 @@
 // - a deploy with no env sets every queue to today's live slots (catalog 8, catalog-bulk 36, catalog-ingest 4) and
 //   never issues a queue update below them (2026-10-28: such a run cut catalog-bulk 36 -> 1 before its first gate);
 // - before the services only missing queues are created; existing queues change only after the worker gate;
-// - spec 17 G4: every create and update of the main and bulk queues carries the chunk retry, the ingest queue keeps
-//   5 attempts, and bootstrap.sh creates the main queue with the same retry;
+// - spec 17 G4: every create and update of the main and bulk queues carries the chunk retry, and bootstrap.sh creates
+//   the main queue with the same retry; M6-F2-R4: the ingest queue never drops a task (unlimited attempts, no time
+//   limit, 10 s to 900 s apart; the handler counts failures on the upload row), from deploy.sh and bootstrap.sh;
 // - spec 16 3.2.3: a bulk queue left from a bigger shape keeps 1 slot; the preview stack gets no bulk queue;
 // - spec 18 3.3.1: the enlarge lanes <queue>-enlarge and <queue>-enlarge-bulk, paced by ENLARGE_DISPATCHES_PER_SECOND
 //   and (the bulk lane, 2026-10-30) ENLARGE_BULK_DISPATCHES_PER_SECOND, and never dropping a task (spec 18 lifecycle 3.8, T58: unlimited attempts, no time limit, 30 s to 900 s apart),
@@ -22,7 +23,7 @@ const root = path.resolve(import.meta.dirname, '../..');
 const bash = process.env.CATALOG_BASH || gitBashPath();
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'catalog-queues-'));
 const RETRY = '--max-attempts=-1 --max-retry-duration=1800s --min-backoff=10s --max-backoff=60s --max-doublings=3';
-const INGEST_RETRY = '--max-attempts=5 --min-backoff=10s';
+const INGEST_RETRY = '--max-attempts=-1 --max-retry-duration=0s --min-backoff=10s --max-backoff=900s --max-doublings=7';
 const enlargeRetry = (rate) => `--max-dispatches-per-second=${rate} --max-attempts=-1 --max-retry-duration=0s --min-backoff=30s --max-backoff=900s --max-doublings=5`;
 // Spec 18 GPU upscaler (2026-10-31): the default lanes are sized to catalog-upscale-gpu (2 slots at 0.5/s, bulk 12 at
 // 3/s, 4 GPU instances); UPSCALE_TARGET=cpu, the rollback, restores the CPU lanes (4 at 0.04/s, bulk 44 at 0.42/s).
@@ -153,6 +154,11 @@ test('deploy.sh: every queue change goes through the lib, created before the ser
 test('bootstrap.sh creates the main queue with the chunk retry', () => {
   const text = fs.readFileSync(path.join(root, 'infra/bootstrap.sh'), 'utf8');
   assert.match(text, new RegExp(`gcloud tasks queues create "\\$QUEUE"[^\\n]*\\\\\\r?\\n[^\\n]*--max-concurrent-dispatches=20 ${RETRY.replace(/[-=]/g, (c) => `\\${c}`)} >/dev/null`));
+});
+
+test('bootstrap.sh creates the ingest queue with the unlimited ingest retry (M6-F2-R4)', () => {
+  const text = fs.readFileSync(path.join(root, 'infra/bootstrap.sh'), 'utf8');
+  assert.match(text, new RegExp(`gcloud tasks queues create "\\$INGEST_QUEUE"[^\\n]*\\\\\\r?\\n[^\\n]*--max-concurrent-dispatches=2 ${INGEST_RETRY.replace(/[-=]/g, (c) => `\\${c}`)} >/dev/null`));
 });
 
 try {

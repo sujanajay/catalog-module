@@ -1,26 +1,28 @@
 // Ingest tasks (spec 04 "Ingest run"). `/tasks/catalog/ingest`: one delivery per upload, or per
 // continuation of one (collecting or placing). runIngest does the work and enqueues its own
 // continuation, so this handler answers 200 on progress or completion and 500 on an unexpected error
-// (Cloud Tasks retries, 5 attempts). `/tasks/catalog/ingest-more` (spec 14d F11 part 2): hands the
+// (Cloud Tasks retries without limit; M6-F2-R4: the handler counts failures on the upload row and stops the batch at
+// INGEST_MAX_FAILURES). `/tasks/catalog/ingest-more` (spec 14d F11 part 2): hands the
 // next page of a batch's `uploaded` uploads to collection. A body without the ids is refused with 400.
 import { failStoppedIngest, runIngest } from "@catalog/core/catalog/ingest/index";
 import { handOff, uploadedPage } from "@catalog/core/catalog/ingest/hand-off";
 import type { IngestDeps } from "@catalog/core/catalog/ingest/types";
 import type { Db } from "@catalog/core/db/client";
-import { catalogBatches } from "@catalog/core/db/schema";
+import { catalogBatches, catalogUploads } from "@catalog/core/db/schema";
 import { pinnedFetch } from "@catalog/core/safe-url";
 import * as storage from "@catalog/core/storage";
 import { enqueueTask } from "@catalog/core/tasks";
 import { log } from "@catalog/core/log";
-import { eq } from "drizzle-orm";
+import { and, eq, gt, sql } from "drizzle-orm";
 import type { HandleOptions, HandleResult } from "../server";
 
 /**
- * Attempts the ingest queue gives a task (infra/lib/queues.sh INGEST_QUEUE_RETRY --max-attempts=5). The
- * X-CloudTasks-TaskRetryCount of the last one is INGEST_MAX_ATTEMPTS - 1 (it counts every earlier attempt,
- * including those that never reached this handler).
+ * M6-F2-R4 (M6-S4): failed deliveries of one upload in a row (catalog_uploads.ingest_failures) after which the batch is
+ * stopped. The ingest queue retries without limit (infra/lib/queues.sh INGEST_QUEUE_RETRY), so only a delivery whose
+ * handler threw counts: a 429 or 503 before the handler ran, a deploy's drain or a killed instance never does. A
+ * delivery that succeeds sets the count back to 0.
  */
-export const INGEST_MAX_ATTEMPTS = 5;
+export const INGEST_MAX_FAILURES = 5;
 
 export interface IngestTaskDeps {
   db: Db;
@@ -61,16 +63,31 @@ export async function handleIngestTask(deps: IngestTaskDeps, body: Record<string
     });
     // One INFO line per delivery (spec 14d F12): what it did, how far the upload or placing is, how long it took.
     log("INFO", "ingest", { event: "ingest", batchId, uploadId, phase: progress.phase, done: progress.done, total: progress.total, ms: clock() - started, outcome });
+    // M6-F2-R4: the failures in a row start again (a write only when there were some). The work succeeded, so a reset
+    // that cannot be written is logged and never counted as a failure.
+    try {
+      await deps.db.update(catalogUploads).set({ ingestFailures: 0 }).where(and(eq(catalogUploads.id, uploadId), gt(catalogUploads.ingestFailures, 0)));
+    } catch (resetErr) {
+      log("WARNING", "ingest failure count not reset", { batchId, uploadId, error: resetErr instanceof Error ? resetErr.message : String(resetErr) });
+    }
     return { httpStatus: 200, outcome };
   } catch (err) {
-    log("ERROR", "ingest task failed", { batchId, uploadId, ms: clock() - started, retryCount: opts.retryCount ?? null, error: err instanceof Error ? err : String(err) });
-    // The last attempt: Cloud Tasks drops the task after this answer, so the batch would wait forever. A task of
-    // an earlier run (Try again started a newer one) leaves the batch alone and is acknowledged.
-    if ((opts.retryCount ?? 0) >= INGEST_MAX_ATTEMPTS - 1) {
+    // M6-F2-R4: one more failure on the upload row. A count that cannot be written (the database is down too) is not
+    // terminal: the queue retries.
+    const [counted] = await deps.db.update(catalogUploads).set({ ingestFailures: sql`${catalogUploads.ingestFailures} + 1` })
+      .where(eq(catalogUploads.id, uploadId)).returning({ failures: catalogUploads.ingestFailures }).catch(() => []);
+    const failures = counted?.failures ?? null;
+    log("ERROR", "ingest task failed", { batchId, uploadId, ms: clock() - started, failures, retryCount: opts.retryCount ?? null, error: err instanceof Error ? err : String(err) });
+    // The last failure: the handler stops the batch (Try again starts it again). A task of an earlier run (Try again
+    // started a newer one) leaves the batch alone and is acknowledged.
+    if (failures !== null && failures >= INGEST_MAX_FAILURES) {
       try {
         const delivery = { uploadId, ...(cursor ? { cursor } : {}), ...(run ? { run } : {}) };
-        if (await (deps.failStopped ?? failStoppedIngest)(deps.db, batchId, delivery)) log("WARNING", "batch failed", { batchId, uploadId, cause: "ingest_out_of_attempts" });
-        else return { httpStatus: 200, outcome: "dropped: out of attempts, and the batch was not this task's to stop" };
+        if (await (deps.failStopped ?? failStoppedIngest)(deps.db, batchId, delivery)) {
+          log("WARNING", "batch failed", { batchId, uploadId, cause: "ingest_out_of_attempts" });
+          // Stopped: acknowledged, so the unlimited queue does not send it again.
+          return { httpStatus: 200, outcome: "stopped: out of attempts" };
+        } else return { httpStatus: 200, outcome: "dropped: out of attempts, and the batch was not this task's to stop" };
       } catch (markErr) {
         log("ERROR", "ingest out of attempts: the batch could not be marked failed", { batchId, error: markErr instanceof Error ? markErr : String(markErr) });
       }

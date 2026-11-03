@@ -287,6 +287,17 @@ describe("ingest hand-off failures and stalled collecting",()=>{
     expect(row!.counts.ingestRun).toBe((ingestCalls().at(-1)![1] as {run:string}).run);
     logged.mockRestore();
   });
+  it("M6-F2-R4: a new run (Continue or Try again) starts the batch's upload failure counts at 0, other batches untouched",async()=>{
+    const id=await newBatch();const photo=await addPhoto(id);
+    const other=await newBatch("catalog-test other");const otherPhoto=await addPhoto(other,"OTHER_1.heic");
+    // The earlier run stopped at its fifth failed delivery; another batch has failures of its own.
+    await db.update(catalogUploads).set({ingestFailures:5}).where(eq(catalogUploads.id,photo.id));
+    await db.update(catalogUploads).set({ingestFailures:3}).where(eq(catalogUploads.id,otherPhoto.id));
+    expect((await ingest(request("POST"),ctx(id))).status).toBe(200);
+    const failures=async(uploadId:string)=>(await db.select({n:catalogUploads.ingestFailures}).from(catalogUploads).where(eq(catalogUploads.id,uploadId)))[0]!.n;
+    expect(await failures(photo.id)).toBe(0);
+    expect(await failures(otherPhoto.id)).toBe(3);
+  });
   it("keeps the batch collecting once part of the hand-off reached the queue, and the next /ingest hands over the rest",async()=>{
     const logged=vi.spyOn(console,"error").mockImplementation(()=>{});
     const id=await newBatch();const a=await addPhoto(id,"PART_A_1.heic");const b=await addPhoto(id,"PART_B_1.heic");

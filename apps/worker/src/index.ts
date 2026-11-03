@@ -16,6 +16,8 @@ import { handleSyncMaster } from "./catalog/sync-master";
 import { log } from "@catalog/core/log";
 import { defaultMigrationsDir, installWarningLog } from "./runtime";
 import { createServer, type ServerDeps } from "./server";
+import { DRAIN_GRACE_MS, isDraining, startDrain } from "./drain";
+import { withDeliveryCost } from "./delivery-cost";
 
 defaultMigrationsDir();
 // Spec 18 H4: a warning flood (MaxListenersExceededWarning) names its emitter with a stack in the logs.
@@ -49,28 +51,40 @@ const lazyBigQuery: BigQueryLike = {
 // (fetchSourceUrl) with the DNS-pinned fetch, which checks every hop.
 const ingestDeps = workerIngestDeps();
 
+// M6-F1-R2: every delivery's wall time is a compute row in the cost ledger. The chunk and publish handlers write
+// their own; the other routes are wrapped (delivery-cost.ts).
+const costed = { db: getDb };
 const routes: ServerDeps["routes"] = {
   // The DB handle is taken lazily inside each handler so /health works before the DB is reachable.
-  "/tasks/catalog/sync-master": (body) => handleSyncMaster({ db: getDb(), bq: lazyBigQuery, env: process.env }, body),
-  "/tasks/catalog/sweep": (body) => handleSweep({ db: getDb(), releaseLocks, draftExpiryDays: draftExpiryDaysFromEnv(process.env), enlargementOff: !upscaleConfigFromEnv().model }, body),
-  "/tasks/catalog/ingest": (body, opts) => handleIngestTask({ db: getDb(), ingest: ingestDeps }, body, opts),
-  "/tasks/catalog/ingest-more": (body) => handleIngestMoreTask({ db: getDb(), ingest: ingestDeps }, body),
+  "/tasks/catalog/sync-master": withDeliveryCost(costed, "system", (body) => handleSyncMaster({ db: getDb(), bq: lazyBigQuery, env: process.env }, body)),
+  "/tasks/catalog/sweep": withDeliveryCost(costed, "system", (body) => handleSweep({ db: getDb(), releaseLocks, draftExpiryDays: draftExpiryDaysFromEnv(process.env), enlargementOff: !upscaleConfigFromEnv().model }, body)),
+  "/tasks/catalog/ingest": withDeliveryCost(costed, "ingest", (body, opts) => handleIngestTask({ db: getDb(), ingest: ingestDeps }, body, opts)),
+  "/tasks/catalog/ingest-more": withDeliveryCost(costed, "ingest", (body) => handleIngestMoreTask({ db: getDb(), ingest: ingestDeps }, body)),
   "/tasks/catalog/chunk": (body, opts) => handleChunkTask(workerCatalogDeps(getDb()), body, opts),
-  "/tasks/catalog/enlarge": (body, opts) => handleEnlargeTask(workerCatalogDeps(getDb()), body, opts),
+  "/tasks/catalog/enlarge": withDeliveryCost(costed, "upscale", (body, opts) => handleEnlargeTask(workerCatalogDeps(getDb()), body, opts)),
   "/tasks/catalog/publish": (body) => handlePublishTask(workerCatalogDeps(getDb()), body),
-  "/tasks/catalog/finalize": (body) => handleFinalizeTask(workerCatalogDeps(getDb()), body),
+  "/tasks/catalog/finalize": withDeliveryCost(costed, "finalize", (body) => handleFinalizeTask(workerCatalogDeps(getDb()), body)),
 };
 
-const server = createServer({ auth, version: process.env.K_REVISION || "dev", routes });
+const server = createServer({ auth, version: process.env.K_REVISION || "dev", routes, draining: isDraining });
 server.listen(port, () => console.log(`catalog-worker listening on :${port}`));
 
+// M6-F2-R3: SIGTERM starts the drain (drain.ts): new deliveries get 503, chunk deliveries start no new photo and hand
+// off, enlargement calls in flight give their count back. In-flight requests get DRAIN_GRACE_MS, inside Cloud Run's
+// 10 s grace; whatever is still running then is left to its lease or claim.
 const shutdown = () => {
-  server.close(() => {
-    closeDb()
-      .catch(() => undefined)
-      .finally(() => process.exit(0));
+  if (isDraining()) return;
+  const started = Date.now();
+  setTimeout(() => process.exit(0), DRAIN_GRACE_MS).unref();
+  void startDrain().finally(() => {
+    log("INFO", "worker draining", { event: "drain", revision: process.env.K_REVISION ?? "dev", ms: Date.now() - started });
+    server.close(() => {
+      closeDb()
+        .catch(() => undefined)
+        .finally(() => process.exit(0));
+    });
+    server.closeIdleConnections();
   });
-  setTimeout(() => process.exit(0), 10_000).unref();
 };
 process.on("SIGTERM", shutdown);
 process.on("SIGINT", shutdown);

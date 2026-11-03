@@ -33,6 +33,9 @@
 # Every gcloud call goes through gate_gcloud. Tests define their own gate_gcloud before sourcing this file, so no
 # test reaches gcloud.
 
+# shellcheck source=labels.sh
+source "$(dirname "${BASH_SOURCE[0]}")/labels.sh"
+
 CANDIDATE_TAG=candidate
 PREVIOUS_TAG=previous
 declare -F gate_gcloud >/dev/null || gate_gcloud() { gcloud "$@"; }
@@ -147,6 +150,9 @@ deploy_service() {
     echo "==> $SVC_NAME: not deployed (${SVC_SKIP_REASON:-not used by this deploy})"
     return 0
   fi
+  # M6-F1 (M6-S1): no service is deployed without app, component and env labels (the cost ledger and the billing
+  # export group by them).
+  if [ "$SVC_DEPLOY" = 1 ] && ! catalog_labels_check "$SVC_NAME" "$(catalog_labels_in_args "${SVC_ARGS[@]}")"; then return 1; fi
 
   # Only "not found" means a new service; any other describe failure stops here, so a passing gcloud hiccup never
   # turns into a deploy without --no-traffic.

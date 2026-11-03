@@ -49,7 +49,7 @@ gate_gcloud() {
 # One extra registry entry, as a new service would add it: one function and one probe ($PROBE).
 service_test_svc() {
   SVC_NAME=test-svc; SVC_REGION=asia-south1; SVC_IMAGE=asia-south1-docker.pkg.dev/p/apps/test:abc1234
-  SVC_ARGS=(--service-account=sa@p.iam.gserviceaccount.com --cpu=1 --labels=app=catalog)
+  SVC_ARGS=(--service-account=sa@p.iam.gserviceaccount.com --cpu=1 --labels=app=catalog,component=test-svc,env=live)
   SVC_ENV="A=1,B=two"
   SVC_PROBE=(bash -c "$PROBE" probe)
   SVC_PROBE_TIMEOUT=${PROBE_TIMEOUT:-30}
