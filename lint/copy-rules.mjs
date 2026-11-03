@@ -3,18 +3,22 @@
 // - copy/no-vendor-names: no vendor or model name in operator copy (section 7 rule 2). The admin Ops page is exempt.
 // - copy/word-list: the "Avoid" words of the section 7 word list, with the word to use instead.
 // - copy/reading-grade: copy reads at Flesch-Kincaid grade 8 or lower (section 7 rule 1).
-// "Copy" is JSX text, the copy attributes (title, alt, placeholder, aria-label) and string and template literals,
-// except engineering text: imports, log calls, SQL, object keys, comparisons, tagged templates and other JSX
-// attributes (className, href, ...). Copy that was there before the lint is listed in eslint-suppressions.json and
+// "Copy" is JSX text, JSX attributes and string and template literals, except engineering text: imports, log calls,
+// SQL, object keys, comparisons, tagged templates and the values of code attributes (className, href, ...). Copy that was there before the lint is listed in eslint-suppressions.json and
 // is fixed as each screen is rebuilt; new copy must pass.
 
 const EM_DASH = String.fromCharCode(0x2014);
+/**
+ * The em dash itself, as an HTML entity (named, decimal, hex) or as a JavaScript escape. Built from pieces so this
+ * file does not match itself.
+ */
+const EM_DASH_FORMS = new RegExp([EM_DASH, "&" + "mdash;", "&#0*8212;", "&#x0*2014;", "\\\\" + "u0*2014", "\\\\" + "u\\{0*2014\\}"].join("|"), "gi");
 
 /** Vendor, product and model family names, and model id paths such as "google/gemini-2.5-flash-lite". */
 export const VENDOR_NAME = new RegExp([
-  String.raw`\b(?:open ?router|openai|anthropic|claude|gemini|chatgpt|gpt[-\d]|dall-?e|midjourney|stable diffusion|stability ai|sdxl`,
+  String.raw`\b(?:open ?router|openai|anthropic|claude|gemini|chatgpt|gpt(?:-?[\w.]+)?|dall-?e|midjourney|stable diffusion|stability ai|sdxl`,
   String.raw`black forest labs|flux|replicate|fal\.ai|fal-ai|recraft|ideogram|seedream|seededit|bytedance|qwen|deepseek|mistral|llama`,
-  String.raw`birefnet|rmbg|bria|inspyre|ben_custom|esrgan|swinir|topaz|photoroom|remove\.bg|clipdrop|imagen|nano banana|vertex ai|kling)`,
+  String.raw`birefnet|rmbg|bria|inspyre|ben_custom|esrgan|swinir|topaz|photoroom|remove\.bg|clipdrop|imagen|nano banana|vertex ai|kling)\b`,
   String.raw`\b(?:google|openai|anthropic|meta-llama|qwen|black-forest-labs|bytedance|mistralai|x-ai)\/[\w.:-]+`,
 ].join("|"), "i");
 
@@ -38,7 +42,20 @@ export const MAX_GRADE = 8;
 /** Shorter copy (labels, buttons, short lines) gives no stable grade, so it is not graded. */
 export const MIN_GRADED_WORDS = 10;
 
-const COPY_ATTRIBUTES = new Set(["title", "alt", "placeholder", "aria-label", "aria-description", "label"]);
+/**
+ * JSX attributes whose own value is code, not copy (class names, links, ids, types, SVG geometry). Every other
+ * attribute, custom props such as message= or text= included, is read as copy, and so is any string deeper inside an
+ * attribute's expression, such as the text of a setError(...) call in onClick.
+ */
+const CODE_ATTRIBUTES = new Set(["className", "class", "href", "src", "srcSet", "key", "id", "type", "name", "value", "defaultValue",
+  "style", "role", "rel", "target", "method", "action", "htmlFor", "form", "encType", "accept", "autoComplete", "inputMode", "pattern",
+  "lang", "dir", "d", "viewBox", "fill", "stroke", "width", "height", "xmlns", "sizes", "loading", "decoding", "tabIndex", "colSpan",
+  "rowSpan", "scope", "download", "hrefLang", "media", "as", "crossOrigin", "referrerPolicy", "ref", "cx", "cy", "r", "x", "y",
+  "points", "transform", "focusable"]);
+const COPY_ARIA = new Set(["aria-label", "aria-description", "aria-roledescription", "aria-valuetext", "aria-placeholder"]);
+const isCodeAttribute = (name) => CODE_ATTRIBUTES.has(name) || /^(?:data-|stroke|fill)/.test(name) || (name.startsWith("aria-") && !COPY_ARIA.has(name));
+/** Expressions a code attribute's value passes through and stays code: `className={on ? "a" : `b ${c}`}`. */
+const PASS_THROUGH = new Set(["JSXExpressionContainer", "ConditionalExpression", "LogicalExpression", "TemplateLiteral", "BinaryExpression"]);
 const LOG_OBJECTS = new Set(["console", "logger", "log"]);
 const COMPARISONS = new Set(["===", "!==", "==", "!="]);
 
@@ -85,10 +102,12 @@ function isCodeString(node) {
   if ((parent.type === "Property" || parent.type === "TSPropertySignature" || parent.type === "PropertyDefinition") && parent.key === node) return true;
   if (parent.type === "MemberExpression" && parent.property === node) return true;
   if (parent.type === "BinaryExpression" && COMPARISONS.has(parent.operator)) return true;
+  let direct = true;
   for (let up = parent; up; up = up.parent) {
     if (isCodeCall(up)) return true;
-    if (up.type === "JSXAttribute") return !COPY_ATTRIBUTES.has(attributeName(up));
+    if (up.type === "JSXAttribute") return direct && isCodeAttribute(attributeName(up));
     if (up.type === "JSXElement" || up.type === "Program") return false;
+    if (!PASS_THROUGH.has(up.type)) direct = false;
   }
   return false;
 }
@@ -114,9 +133,9 @@ const noEmDash = {
     return {
       Program() {
         const text = context.sourceCode.text;
-        for (let i = text.indexOf(EM_DASH); i !== -1; i = text.indexOf(EM_DASH, i + 1)) {
-          const start = context.sourceCode.getLocFromIndex(i);
-          context.report({ loc: { start, end: context.sourceCode.getLocFromIndex(i + 1) }, message: "No em dash: use \"-\" or a full stop (UX section 7)." });
+        for (const match of text.matchAll(EM_DASH_FORMS)) {
+          const start = context.sourceCode.getLocFromIndex(match.index);
+          context.report({ loc: { start, end: context.sourceCode.getLocFromIndex(match.index + match[0].length) }, message: "No em dash (also not as an entity or escape): use \"-\" or a full stop (UX section 7)." });
         }
       },
     };

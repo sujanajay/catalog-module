@@ -56,13 +56,20 @@ describe("local times (UX section 7 formats)", () => {
     expect(ui.localTime("2026-09-01T00:00:00Z", "UTC")).toBe("1 Sep 2026, 00:00 UTC");
   });
 
+  it("falls back to UTC for a zone the browser reports but cannot format, instead of crashing", () => {
+    expect(ui.localTime(at, "Etc/Unknown")).toBe("4 Nov 2026, 10:00 UTC");
+    expect(ui.localTime(at, "Not/AZone")).toBe("4 Nov 2026, 10:00 UTC");
+  });
+
   it("names other zones by their offset, and is empty for no date", () => {
+    expect(ui.localTime(at, "Europe/London")).toBe("4 Nov 2026, 10:00 GMT");
+    expect(ui.localTime(new Date("2026-07-01T10:00:00Z"), "Europe/Berlin")).toBe("1 Jul 2026, 12:00 GMT+2");
     expect(ui.localTime(at, "Europe/Istanbul")).toBe("4 Nov 2026, 13:00 GMT+3");
     expect(ui.localTime(null, "UTC")).toBe("");
     expect(ui.localTime("not a date", "UTC")).toBe("");
   });
 
-  it("never prints the old UTC Z stamp", () => {
+  it("the old UTC stamp helper `when` is gone", () => {
     expect("when" in ui).toBe(false);
   });
 

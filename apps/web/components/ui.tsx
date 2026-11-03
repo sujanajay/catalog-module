@@ -31,6 +31,7 @@ export function usd(n: number | string | null | undefined, digits = 2): string {
 
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 /** The zone names operators know (UX section 7: "GST" or "IST"); any other zone shows its offset, such as "GMT+3". */
+const UTC_NAMES = /^(UTC|Etc\/UTC|Etc\/GMT|GMT)$/;
 const ZONE_NAMES: Record<string, string> = { "Asia/Kolkata": "IST", "Asia/Calcutta": "IST", "Asia/Dubai": "GST", "Asia/Muscat": "GST" };
 
 /**
@@ -41,9 +42,16 @@ export function localTime(d: Date | string | null | undefined, timeZone: string)
   if (!d) return "";
   const date = typeof d === "string" ? new Date(d) : d;
   if (Number.isNaN(date.getTime())) return "";
-  const parts = Object.fromEntries(new Intl.DateTimeFormat("en-GB", {
-    timeZone, year: "numeric", month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit", hourCycle: "h23", timeZoneName: "short",
-  }).formatToParts(date).map(p => [p.type, p.value]));
-  const zone = ZONE_NAMES[timeZone] ?? (/^(UTC|Etc\/UTC|Etc\/GMT|GMT)$/.test(timeZone) ? "UTC" : parts.timeZoneName);
+  let format: Intl.DateTimeFormat;
+  try {
+    format = new Intl.DateTimeFormat("en-GB", {
+      timeZone, year: "numeric", month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit", hourCycle: "h23", timeZoneName: "shortOffset",
+    });
+  } catch {
+    // A zone the browser reports but cannot format (such as "Etc/Unknown") shows UTC instead of breaking the page.
+    return timeZone === "UTC" ? "" : localTime(date, "UTC");
+  }
+  const parts = Object.fromEntries(format.formatToParts(date).map(p => [p.type, p.value]));
+  const zone = ZONE_NAMES[timeZone] ?? (UTC_NAMES.test(timeZone) ? "UTC" : parts.timeZoneName);
   return `${Number(parts.day)} ${MONTHS[Number(parts.month) - 1]} ${parts.year}, ${parts.hour}:${parts.minute} ${zone}`;
 }

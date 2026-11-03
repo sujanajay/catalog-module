@@ -1,3 +1,7 @@
+import { spawnSync } from "node:child_process";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { ESLint } from "eslint";
 import { describe, expect, it } from "vitest";
@@ -45,6 +49,33 @@ describe("UX2 acceptance: the copy lint fails on a planted vendor name and an em
     expect(await rules(code, COMPONENT)).toEqual([]);
   }, 60_000);
 
+  it("flags an em dash written as an HTML entity or a string escape", async () => {
+    // Built from pieces so this test file itself carries no em dash in any form.
+    const amp = "&", slash = "\\";
+    for (const dash of [`${amp}mdash;`, `${amp}#8212;`, `${amp}#x2014;`]) {
+      expect(await rules(`export const P = () => <p>Links ready ${dash} every product has links.</p>;\n`, PAGE), dash).toEqual(["copy/no-em-dash"]);
+    }
+    expect(await rules(`export const s = "a ${slash}u2014 b";\n`, COMPONENT)).toEqual(["copy/no-em-dash"]);
+    expect(await rules(`export const s = "a ${slash}u{2014} b";\n`, COMPONENT)).toEqual(["copy/no-em-dash"]);
+  }, 60_000);
+
+  it("reads copy in custom props and in handler calls such as setError and confirm", async () => {
+    for (const code of [
+      "export const P = () => <Banner message=\"Made by OpenRouter today\" />;\n",
+      "export const P = ({ b }: { b: boolean }) => <Banner message={b ? \"Checked by Gemini\" : \"\"} />;\n",
+      "export const P = ({ setError }: { setError: (s: string) => void }) => <button onClick={() => setError(\"Gemini did not answer, try again\")}>Go</button>;\n",
+      "export const P = () => <button onClick={() => confirm(\"Delete every image made by Claude?\")}>Go</button>;\n",
+    ]) expect(await rules(code, COMPONENT), code).toEqual(["copy/no-vendor-names"]);
+    expect(await rules("export const P = () => <Banner text=\"3 products need attention.\" />;\n", COMPONENT)).toEqual(["copy/word-list"]);
+  }, 60_000);
+
+  it("still treats class names, links and other code attributes as code, also in ternaries and templates", async () => {
+    const code = [
+      "export const P = ({ on, id }: { on: boolean; id: string }) => <a className={on ? \"pill on failed\" : \"pill error state\"} href={`/catalog/${id}?tab=review attention`} rel=\"noreferrer\" data-kind=\"openrouter error\">Open</a>;",
+    ].join("\n");
+    expect(await rules(code, COMPONENT)).toEqual([]);
+  }, 60_000);
+
   it("allows vendor names on the admin Ops page, but never an em dash there", async () => {
     expect(await rules("export const P = () => <p>OpenRouter spend today.</p>;\n", "apps/web/app/catalog/ops/page.tsx")).toEqual([]);
     expect(await rules(`export const P = () => <p>Spend ${String.fromCharCode(0x2014)} today.</p>;\n`, "apps/web/app/catalog/ops/page.tsx")).toEqual(["copy/no-em-dash"]);
@@ -79,4 +110,21 @@ describe("UX section 7 word list and reading grade", () => {
     const code = `export const words = ${JSON.stringify(Object.values(STATUS_WORDS).map(w => `${w.word}. ${w.meaning}.`))};\n`;
     expect(await rules(code, COMPONENT)).toEqual([]);
   }, 60_000);
+});
+
+describe("suppressions ratchet", () => {
+  it("a PR that fixes suppressed copy passes `pnpm lint` without pruning eslint-suppressions.json", () => {
+    // The lint script's own arguments, run on one file with that file's word-list count raised above what it has.
+    const script = (JSON.parse(readFileSync(path.join(root, "package.json"), "utf8")) as { scripts: { lint: string } }).scripts.lint;
+    const args = script.split(/\s+/).slice(1).filter(a => a !== ".");
+    const file = "apps/web/app/catalog/ops/page.tsx";
+    const suppressions = JSON.parse(readFileSync(path.join(root, "eslint-suppressions.json"), "utf8")) as Record<string, Record<string, { count: number }>>;
+    suppressions[file]!["copy/word-list"]!.count += 5;
+    const dir = mkdtempSync(path.join(tmpdir(), "ux2-suppressions-")), location = path.join(dir, "suppressions.json");
+    writeFileSync(location, JSON.stringify(suppressions));
+    const run = spawnSync(process.execPath, [path.join(root, "node_modules/eslint/bin/eslint.js"), ...args, "--suppressions-location", location, file], { cwd: root, encoding: "utf8" });
+    rmSync(dir, { recursive: true, force: true });
+    expect(run.stderr + run.stdout).not.toContain("do not occur anymore");
+    expect(run.status).toBe(0);
+  }, 120_000);
 });
