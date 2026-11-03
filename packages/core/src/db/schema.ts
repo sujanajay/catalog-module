@@ -907,6 +907,36 @@ export const catalogKeyMappings = pgTable(
   ],
 );
 
+/** One listing a conflicting key points at (F1-R5). */
+export type KeyConflictCandidate = { listingId: string; optionId: string; opptraSku: string | null; source: string };
+
+/**
+ * Keys that point at two or more listings (F1-R5, migration 0013). Such a key is not written to catalog_listing_keys; it
+ * is listed here with every candidate for the Ops page and the export (`catalog_os.key_conflicts`). Rebuilt by the graph
+ * sync: a conflict seen again keeps its row, one no longer seen gets `resolved_at`. Never deleted.
+ */
+export const catalogKeyConflicts = pgTable(
+  "catalog_key_conflicts",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: orgId(),
+    channel: text("channel", { enum: CHANNEL_IDS }).$type<ChannelId>().notNull(),
+    market: text("market", { enum: MARKETS }).notNull(),
+    keyKind: text("key_kind", { enum: KEY_KINDS }).notNull(),
+    keyValue: text("key_value").notNull(),
+    candidates: jsonb("candidates").$type<KeyConflictCandidate[]>().notNull(),
+    firstSeenAt: timestamp("first_seen_at", { withTimezone: true }).notNull().defaultNow(),
+    lastSeenAt: timestamp("last_seen_at", { withTimezone: true }).notNull().defaultNow(),
+    resolvedAt: tsNull("resolved_at"),
+  },
+  (t) => [
+    unique("catalog_key_conflicts_org_key_uq").on(t.orgId, t.channel, t.market, t.keyKind, t.keyValue),
+    enumCheck("catalog_key_conflicts", "channel", t.channel, CHANNEL_IDS),
+    enumCheck("catalog_key_conflicts", "market", t.market, MARKETS),
+    enumCheck("catalog_key_conflicts", "key_kind", t.keyKind, KEY_KINDS),
+  ],
+);
+
 /** One row per distinct binary. phash: the 64-bit difference hash, stored as a signed bigint (F2-R7). */
 export const catalogAssets = pgTable(
   "catalog_assets",
@@ -1270,6 +1300,7 @@ export type CatalogCostEvent = typeof catalogCostEvents.$inferSelect;
 export type CatalogOption = typeof catalogOptions.$inferSelect;
 export type CatalogChannelListing = typeof catalogChannelListings.$inferSelect;
 export type CatalogListingKey = typeof catalogListingKeys.$inferSelect;
+export type CatalogKeyConflict = typeof catalogKeyConflicts.$inferSelect;
 export type CatalogAsset = typeof catalogAssets.$inferSelect;
 export type CatalogContentVersion = typeof catalogContentVersions.$inferSelect;
 export type CatalogChangeEvent = typeof catalogChangeEvents.$inferSelect;

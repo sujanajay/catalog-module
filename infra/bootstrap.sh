@@ -42,8 +42,8 @@ QUEUE=catalog
 # New-batch setup (ingest) runs on its own queue so it never waits behind batch processing.
 INGEST_QUEUE=catalog-ingest
 BQ_PROJECT=opptra-datawarehouse
-# The datasets the master sync reads (packages/core/src/catalog/master-sync.ts).
-BQ_DATASETS=(raw_gcc_dimensions fact_gcc)
+# The datasets the master sync and the M0 graph sync read (catalog/master-sync.ts, graph/key-sync.ts).
+BQ_DATASETS=(raw_gcc_dimensions fact_gcc gcc_marketing dimensions gcc_channel_reports)
 
 log()    { printf '[bootstrap] %s\n' "$*"; }
 skip()   { printf '[bootstrap] SKIP   %s\n' "$*"; }

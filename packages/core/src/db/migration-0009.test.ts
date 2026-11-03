@@ -86,8 +86,9 @@ describe(`0009_catalog_graph.sql (M0-S1) on ${TEST_PG_URL ? "real Postgres" : "P
     expect(eventCols.get("reason_kind")!.is_nullable).toBe("YES");
     const checks = (await rows<{ conname: string }>(sql`select conname from pg_constraint where contype = 'c' and conrelid = 'catalog_change_events'::regclass`)).map((r) => r.conname);
     expect(checks).toContain("catalog_change_events_reason_check");
-    // catalog_key_mappings ships empty (D10); its key_kind CHECK holds the doc's list.
-    expect(await rows(sql`select count(*)::int as n from catalog_key_mappings`)).toEqual([{ n: 0 }]);
+    // catalog_key_mappings ships empty in 0009 (D10); 0013 (M0-S2) seeds it, so after the whole folder it holds only
+    // 0013's 14 rows. Its key_kind CHECK holds the doc's list.
+    expect(await rows(sql`select count(*)::int as n from catalog_key_mappings`)).toEqual([{ n: 14 }]);
     await expect(db.execute(sql`insert into catalog_key_mappings (sku_column, channel, market, key_kind) values ('noon_ae', 'noon', 'ae', 'gtin')`)).rejects.toThrow();
     for (const name of ["change_type_id", "change_set_id", "experiment_id", "evidence_ref", "reason_ref"]) expect(eventCols.has(name), name).toBe(true);
     const optionCols = await columns("catalog_options");

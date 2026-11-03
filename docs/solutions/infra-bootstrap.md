@@ -136,6 +136,13 @@ an org policy or BigQuery rights in another project).
   reads the mirror. It also grants `catalog-worker@` `roles/bigquery.jobUser` on `image-links-agent`
   (project level) and `roles/bigquery.dataViewer` on the two mirror datasets (GRANT DCL). It prints the
   source and copy row counts and exits 1 if they differ.
+- **M0 graph sync (M0-S2, 2026-11-04).** The mirror also copies `gcc_marketing.sku_option` and key-only
+  copies (`SELECT DISTINCT` of the key columns, no order, customer or money column) of
+  `fact_gcc.unified_sales_tertiary_v2`, `dimensions.sku_master_amazon_ae`/`_sa`, `dimensions.sku_master_noon` and
+  `gcc_channel_reports.product_list_trendyol_3p_uae`/`_ksa`, under the same names, so the graph sync SQL in
+  `packages/core/src/graph/key-sync.ts` reads them unchanged. Key-only copies are checked against the distinct row
+  count of the same columns in the source. `infra/bootstrap.sh` lists `gcc_marketing`, `dimensions` and
+  `gcc_channel_reports` for the warehouse grant too.
 - **Refresh.** `bash infra/bq-mirror.sh`. Datasets and IAM print SKIP on a re-run; tables and UDFs are
   replaced every run (UPDATE).
 - **Limitation.** The worker's data is only as fresh as the last run of `bq-mirror.sh`; the nightly
