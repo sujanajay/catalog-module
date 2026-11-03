@@ -16,6 +16,7 @@ import { flagReason, type ChannelId, type ResolvedPolicy, type OutputFlag } from
 import type { CatalogDeps } from "./deps";
 import { eachLimit } from "@catalog/core/concurrency";
 import type { BackoffBudget } from "@catalog/core/llm/openrouter";
+import type { Router } from "@catalog/core/vendor/router";
 
 type Batch = typeof catalogBatches.$inferSelect;
 type Source = typeof catalogSourceImages.$inferSelect;
@@ -67,13 +68,16 @@ export function limitDeliveryBackoff(batch:Batch,untilMs:number,now:()=>Date):vo
  let left=QA_DELIVERY_BACKOFF_MS;
  deliveryBackoff.set(batch,{get remainingMs(){return Math.max(0,Math.min(left,untilMs-+now()));},set remainingMs(value:number){left=Math.min(left,value);}});
 }
-/** Check the lease and cap before every HTTP attempt, including the JSON helper's retry and each back-off retry. */
-export function catalogLlmDeps(deps:CatalogDeps,batch:Batch,underClaim:UnderClaim,who:LlmAttribution={stage:"qa"}) {
+/**
+ * Check the lease and cap before every HTTP attempt, including the JSON helper's retry and each back-off retry.
+ * `router` (M7-F2, `deps.routes`) is the live route table the judge and classifier call through.
+ */
+export function catalogLlmDeps(deps:CatalogDeps,batch:Batch,underClaim:UnderClaim,who:LlmAttribution={stage:"qa"},router?:Router) {
  let stopped:unknown,attempts=0;
  // One ledger row per HTTP attempt (and one for a cap refusal), beside the spend_days row; a failing
  // ledger write is logged and never fails the call.
  const ledgerRow=(fields:Partial<CostEventInput>,init?:RequestInit):CostEventInput=>({batchId:batch.id,brandSlug:batch.brandSlug,isTest:batch.isTest,productId:who.productId ?? null,sourceImageId:who.sourceImageId ?? null,outputId:who.outputId ?? null,channel:who.channel ?? null,chunkId:who.chunkId ?? null,stage:who.stage,kind:"llm_call",engine:requestModel(init) ?? "unknown",attempt:attempts,...fields});
- return {backoff:backoffFor(batch),...(deps.sleep ? {sleep:deps.sleep}:{}),assertAvailable:()=>{if(stopped) throw stopped;},fetch:async(url:Parameters<typeof fetch>[0],init?:RequestInit)=>{
+ return {backoff:backoffFor(batch),...(router ? {router}:{}),...(deps.sleep ? {sleep:deps.sleep}:{}),assertAvailable:()=>{if(stopped) throw stopped;},fetch:async(url:Parameters<typeof fetch>[0],init?:RequestInit)=>{
   attempts+=1;
   try {
    await underClaim(async()=>{});
@@ -131,6 +135,7 @@ export interface QaStageOptions { shouldStop?: ()=>boolean; onPhoto?: (tx:Catalo
 export async function runQaStage(deps:CatalogDeps,batch:Batch,sources:Source[],policy:ResolvedPolicy,underClaim:UnderClaim,chunkId?:string,options:QaStageOptions={}):Promise<{complete:boolean}> {
  if(!sources.length) return {complete:true};
  const onPhoto=options.onPhoto ?? (async()=>{});
+ const router=deps.routes ? await deps.routes():undefined;
  const candidates=await deps.db.select().from(catalogOutputs).where(and(eq(catalogOutputs.batchId,batch.id),inArray(catalogOutputs.sourceImageId,sources.map(s=>s.id)),inArray(catalogOutputs.status,["staged","needs_attention"]),isNull(catalogOutputs.qaScores),isNull(catalogOutputs.decision)));
  // A needs_attention output from render (small_source) is judged too, so a note never publishes an unseen image.
  const rows=candidates.filter(row=>row.status==="staged" || (!!row.stagingUri && !row.flags.some(flag=>NOT_JUDGED.has(flag))));
@@ -161,7 +166,7 @@ export async function runQaStage(deps:CatalogDeps,batch:Batch,sources:Source[],p
    // re-check of another channel, whose photo checks are not used, so wrong_item asks no one there.
    const judge=async(row:Output,photoChecks:boolean)=>{
     const output=(await deps.storage.downloadBuffer(row.stagingUri!)).buf;
-    const llm=catalogLlmDeps(deps,batch,underClaim,{stage:"qa",productId:product.id,sourceImageId:source.id,outputId:row.id,channel:row.channel,...(chunkId ? {chunkId}:{})});
+    const llm=catalogLlmDeps(deps,batch,underClaim,{stage:"qa",productId:product.id,sourceImageId:source.id,outputId:row.id,channel:row.channel,...(chunkId ? {chunkId}:{})},router);
     const result=await deps.judgeOutput({output,original,...(shotOneBytes ? {shotOne:shotOneBytes}:{}),channel:row.channel,anchor:row.channel==="styli" ? "bottom-centre":"centre",productType:product.productType ?? "other",identifier:product.identifier,n:source.n,model,threshold:policy.threshold,floor:policy.floor,...(secondModel ? {secondModel}:{}),wrongItemCheck:photoChecks},llm);
     llm.assertAvailable();
     return result;
@@ -180,7 +185,7 @@ export async function runQaStage(deps:CatalogDeps,batch:Batch,sources:Source[],p
     const nextStreak=unavailable ? sql`coalesce((${catalogBatches.counts}->>'qaUnavailableStreak')::int,0)+1`:sql`0`;
     await tx.update(catalogBatches).set({counts:sql`${catalogBatches.counts} || jsonb_build_object('qaUnavailableStreak',${nextStreak},'qaUseSecond',coalesce((${catalogBatches.counts}->>'qaUseSecond')::boolean,false) OR ${nextStreak}>=2)`}).where(eq(catalogBatches.id,batch.id));
     const thresholds=dimensionThresholds(policy.threshold,policy.floor);
-    const judgements=[...judged.values()].map(({row,result,role})=>({channel:row.channel,role,model:result.model,view:result.view ?? null,scores:result.scores,flags:result.flags,wrongItem:result.wrongItem ?? null,leftover:result.leftover ?? null,
+    const judgements=[...judged.values()].map(({row,result,role})=>({channel:row.channel,role,model:result.model,route:result.route ?? null,view:result.view ?? null,scores:result.scores,flags:result.flags,wrongItem:result.wrongItem ?? null,leftover:result.leftover ?? null,
      secondOpinion:result.opinions?.[1] ? {model:result.opinions[1].model,wrongItem:result.opinions[1].wrongItem,view:result.opinions[1].view,backgroundClean:result.opinions[1].scores.background_clean}:null}));
     if(unavailable) {
      for(const row of group) await tx.update(catalogOutputs).set({qaScores:{...main.scores,verdict:"flag",reasons:[flagDetails("qa_unavailable").why],thresholds,judgements,autoAction:null},qaModel:main.model,flags:[...new Set<OutputFlag>([...row.flags,"qa_unavailable"])],status:"needs_attention",reason:flagDetails("qa_unavailable").why,updatedAt:deps.now()}).where(eq(catalogOutputs.id,row.id));
@@ -267,7 +272,7 @@ export const repairOwnDefects:RepairOwnDefects<QaRepairContext>=async(candidates
    const state=fresh!.counts as Batch["counts"] & {qaUseSecond?:boolean};
    const originals=await deps.db.select().from(catalogSourceImages).where(and(eq(catalogSourceImages.productId,productId),eq(catalogSourceImages.batchId,batch.id))).orderBy(catalogSourceImages.n);
    const superseded=new Set(originals.flatMap(s=>s.replacesId ? [s.replacesId]:[])),shotOne=originals.find(s=>!superseded.has(s.id));
-   const llm=catalogLlmDeps(deps,batch,underClaim,{stage:"qa",productId,sourceImageId:source.id,outputId:row.id,channel:row.channel});
+   const llm=catalogLlmDeps(deps,batch,underClaim,{stage:"qa",productId,sourceImageId:source.id,outputId:row.id,channel:row.channel},deps.routes ? await deps.routes():undefined);
    // The same two judges as the first judging, so a leftover background still needs both to agree.
    const model=state.qaUseSecond && policy.qaModelSecond ? policy.qaModelSecond:policy.qaModel,secondModel=model===policy.qaModelSecond ? policy.qaModel:policy.qaModelSecond;
    const result=await deps.judgeOutput({output:jpeg,original:(await deps.storage.downloadBuffer(source.rawUri)).buf,...(source.n>1 && shotOne ? {shotOne:(await deps.storage.downloadBuffer(shotOne.rawUri)).buf}:{}),channel:row.channel,anchor:row.channel==="styli" ? "bottom-centre":"centre",productType:product.productType ?? "other",identifier:product.identifier,n:source.n,model,...(secondModel ? {secondModel}:{}),wrongItemCheck:false,threshold:policy.threshold,floor:policy.floor},llm);

@@ -28,6 +28,7 @@ import {
   type AnyPgColumn,
 } from "drizzle-orm/pg-core";
 import type { SkuMethod } from "../catalog/sku-mapping";
+import { BRAND_PHOTO_CAPABILITIES, CAPABILITIES, ROUTE_ADAPTERS, ROUTE_STATES } from "../vendor/routes";
 import {
   ALIAS_KINDS,
   BATCH_STATUSES,
@@ -1259,3 +1260,71 @@ export type TaxonomyNodeRow = typeof catalogTaxonomyNodes.$inferSelect;
 export type AttributeDefRow = typeof catalogAttributeDefs.$inferSelect;
 export type ShotRoleRow = typeof catalogShotRoles.$inferSelect;
 export type TaxonomyChangeRow = typeof catalogTaxonomyChanges.$inferSelect;
+
+// ---------------------------------------------------------------------------
+// M7-F2 vendor routes: the live routing every capability call goes through
+// ---------------------------------------------------------------------------
+
+/**
+ * One route per capability, adapter and model (M7 3.3 `Route`). `state` is the kill switch: only `serving` routes
+ * are called. Seeded check-then-insert by `ensureSeedRoutes` (vendor/route-table.ts); the circuit breaker lives in
+ * the worker process, not here.
+ */
+export const vendorRoutes = pgTable(
+  "vendor_routes",
+  {
+    id: text("id").primaryKey(),
+    capability: text("capability", { enum: CAPABILITIES }).notNull(),
+    rank: integer("rank").notNull(),
+    adapter: text("adapter", { enum: ROUTE_ADAPTERS }).notNull(),
+    model: text("model").notNull(),
+    paramsVersion: text("params_version").notNull().default("1"),
+    priceUsd: money("price_usd"),
+    rateLimitPerMin: integer("rate_limit_per_min"),
+    region: text("region"),
+    licence: text("licence"),
+    noTrainingTerms: text("no_training_terms"),
+    state: text("state", { enum: ROUTE_STATES }).notNull(),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (t) => [
+    uniqueIndex("vendor_routes_capability_adapter_model_uq").on(t.capability, t.adapter, t.model),
+    index("vendor_routes_capability_rank_idx").on(t.capability, t.rank),
+    enumCheck("vendor_routes", "capability", t.capability, CAPABILITIES),
+    enumCheck("vendor_routes", "adapter", t.adapter, ROUTE_ADAPTERS),
+    enumCheck("vendor_routes", "state", t.state, ROUTE_STATES),
+    // M7-F2-R7: a route that sends brand photos is serving only with a written no-training position (not pending).
+    check(
+      "vendor_routes_serving_needs_terms_check",
+      sql`${t.state} <> 'serving' OR NOT (${inList(t.capability, BRAND_PHOTO_CAPABILITIES)}) OR (btrim(coalesce(${t.noTrainingTerms}, '')) <> '' AND lower(btrim(${t.noTrainingTerms})) NOT LIKE 'pending%')`,
+    ),
+  ],
+);
+
+/** `route.changed` (M7 3.2): every change of a route's state or rank, who made it, and the run that justified it. */
+export const vendorRouteChanges = pgTable(
+  "vendor_route_changes",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    routeId: text("route_id").notNull().references(() => vendorRoutes.id),
+    capability: text("capability", { enum: CAPABILITIES }).notNull(),
+    fromState: text("from_state", { enum: ROUTE_STATES }),
+    toState: text("to_state", { enum: ROUTE_STATES }).notNull(),
+    fromRank: integer("from_rank"),
+    toRank: integer("to_rank").notNull(),
+    changedBy: text("changed_by").notNull(),
+    reason: text("reason").notNull(),
+    runId: text("run_id"),
+    at: timestamp("at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index("vendor_route_changes_route_id_at_idx").on(t.routeId, t.at),
+    enumCheck("vendor_route_changes", "capability", t.capability, CAPABILITIES),
+    enumCheck("vendor_route_changes", "from_state", t.fromState, ROUTE_STATES),
+    enumCheck("vendor_route_changes", "to_state", t.toState, ROUTE_STATES),
+  ],
+);
+
+export type VendorRouteRow = typeof vendorRoutes.$inferSelect;
+export type VendorRouteChange = typeof vendorRouteChanges.$inferSelect;
