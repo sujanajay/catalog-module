@@ -73,6 +73,9 @@ const STEP_OF: Record<CostStage, "cut-out" | "images" | "quality checks"> = {
   finalize: "images",
   qa: "quality checks",
   classify: "quality checks",
+  // M6-S1: the worker's intake time and a job run on the batch (a re-check) count with the image work.
+  ingest: "images",
+  system: "images",
 };
 const STEPS = ["cut-out", "images", "quality checks"] as const;
 
@@ -104,6 +107,8 @@ export const COST_STAGE_WORDS: Record<CostStage, string> = {
   classify: "product type check",
   publish: "publishing",
   finalize: "finishing",
+  ingest: "intake",
+  system: "background work",
 };
 
 /** Logs Explorer looks back this far, so a batch from earlier in the week still shows its lines. */

@@ -4,7 +4,10 @@ import { closeDb, getDb } from "@catalog/core/db/client";
 import { resolveMigrationsFolder, runMigrations } from "@catalog/core/db/migrate";
 import { seedAdmin } from "@catalog/core/people";
 import { seedTestBrand } from "@catalog/core/catalog/brands";
+import { recordJobRun } from "@catalog/core/job-cost";
 import { defaultMigrationsDir } from "./runtime";
+
+const startedAt = Date.now();
 
 async function main(): Promise<void> {
   defaultMigrationsDir();
@@ -21,12 +24,15 @@ async function main(): Promise<void> {
 
 main()
   .then(async () => {
+    // M6-F1-R3: this run's billable seconds as one cost ledger row (only on Cloud Run, where CLOUD_RUN_JOB is set).
+    await recordJobRun(getDb(), { startedAt, outcome: "ok" });
     await closeDb();
     process.exit(0);
   })
   .catch(async (err: unknown) => {
     const cause = err instanceof Error && err.cause instanceof Error ? ` (cause: ${err.cause.message})` : "";
     console.error(`migrate: failed: ${err instanceof Error ? err.message : String(err)}${cause}`);
+    await recordJobRun(getDb(), { startedAt, outcome: "failed" });
     await closeDb().catch(() => undefined);
     process.exit(1);
   });

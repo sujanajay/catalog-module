@@ -13,10 +13,12 @@ import { closeDb, getDb } from "@catalog/core/db/client";
 import { runInvariants } from "@catalog/core/catalog/invariants/run";
 import { log } from "@catalog/core/log";
 import { describeError } from "@catalog/core/retry";
+import { recordJobRun } from "@catalog/core/job-cost";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 async function main() {
+  const startedAt = Date.now();
   const { values } = parseArgs({ options: { batch: { type: "string" } } });
   const batchId = values.batch ?? process.env.INVARIANTS_BATCH;
   if (batchId && !UUID.test(batchId)) throw new Error("--batch must be a batch id (a UUID).");
@@ -26,6 +28,8 @@ async function main() {
     log(broken.length ? "ERROR" : "INFO", "invariants summary", { batchId: batchId ?? null, results: results.map(r => ({ id: r.id, violations: r.violations, severity: r.severity, batches: r.batches, batchCount: r.batchCount })) });
     if (broken.length) process.exitCode = 1;
   } finally {
+    // M6-F1-R3: this run's billable seconds as one cost ledger row (only on Cloud Run, where CLOUD_RUN_JOB is set).
+    await recordJobRun(getDb(), { startedAt, outcome: process.exitCode ? "failed" : "ok", batchId: batchId ?? null });
     await closeDb();
   }
 }

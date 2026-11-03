@@ -19,6 +19,10 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm lint
       - run: pnpm typecheck
+      # M6-F2-R1 (M6-S4): new migrations are additive only (expand and contract); a contract step carries a
+      # "-- contract: <release>" line and ships one release after the code stops using what it removes.
+      - name: migrations are additive
+        run: node packages/core/scripts/check-migrations.mjs
 
   test:
     name: unit tests (shard ${{ matrix.shard }}/4)

@@ -1,5 +1,6 @@
 import { publishProduct } from "@catalog/core/catalog/pipeline/publish";
 import { recordCostEvent } from "@catalog/core/cost-events";
+import { deliveryUsd } from "../delivery-cost";
 import type { HandleResult } from "../server";
 import { enqueueFinalize, refreshBatchProgress, type CatalogDeps } from "./deps";
 export async function handlePublishTask(deps:CatalogDeps,body:Record<string,unknown>):Promise<HandleResult> {
@@ -10,7 +11,8 @@ export async function handlePublishTask(deps:CatalogDeps,body:Record<string,unkn
   // recordCostEvent logs a failing write itself and never throws.
   try {
     const {batch,changed,...result} = await publishProduct(deps,batchId,productId);
-    if(batch) await recordCostEvent(deps.db,{batchId,brandSlug:batch.brandSlug,isTest:batch.isTest,productId,stage:"publish",kind:"compute",engine:"worker",ms:+deps.now()-started,usd:0,outcome:"ok",at:deps.now()},deps.log);
+    // M6-F1-R2: the publish delivery's wall time, priced like every other worker delivery.
+    if(batch) { const ms=+deps.now()-started; await recordCostEvent(deps.db,{batchId,brandSlug:batch.brandSlug,isTest:batch.isTest,productId,stage:"publish",kind:"compute",engine:"worker",ms,billableMs:ms,usd:deliveryUsd(ms),outcome:"ok",at:deps.now()},deps.log); }
     if(result.outcome!=="not_locked") {
       // Spec 18 H4: a done batch is re-opened (one fresh links sheet) only by an operator's decision or a delivery
       // that changed this product's content (`changed`: not unchanged, not failed); a repeated, unchanged or failed

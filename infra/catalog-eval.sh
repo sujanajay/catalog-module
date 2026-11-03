@@ -24,6 +24,10 @@ JOB=catalog-eval
 # Pin this project for every gcloud call without touching global gcloud config.
 export CLOUDSDK_CORE_PROJECT=$PROJECT
 cd "$(dirname "$0")/.."
+# M6-S1: labels app=catalog, component=<job name>, env (infra/lib/labels.sh); a job without them is never deployed.
+# shellcheck source=lib/labels.sh
+source infra/lib/labels.sh
+JOB_LABELS=$(catalog_labels "$JOB" test)
 # cli_args: the --args value for "gcloud run jobs execute" (unique tokens, "^|^" separator).
 source infra/lib/cli-args.sh
 
@@ -57,9 +61,10 @@ deploy() {
 
   # The command is the CLI itself, so "gcloud run jobs execute --args=..." passes only the CLI words.
   # MSYS2_ARG_CONV_EXCL: Git Bash would rewrite "/..." values inside these flags into Windows paths.
+  catalog_labels_check "$JOB" "$JOB_LABELS" || exit 1
   MSYS2_ARG_CONV_EXCL='--command=;--args=;--set-env-vars=;--add-volume=;--add-volume-mount=' \
   gcloud run jobs deploy "$JOB" --quiet --image="$EVAL_JOB_IMAGE" \
-    --service-account="$WORKER_SA" --labels=app=catalog,component=job --max-retries=0 --task-timeout=3600 --cpu=2 --memory=4Gi "${NET[@]}" \
+    --service-account="$WORKER_SA" --labels="$JOB_LABELS" --max-retries=0 --task-timeout=3600 --cpu=2 --memory=4Gi "${NET[@]}" \
     "${volume_flags[@]}" \
     --command=node,dist/catalog-eval.js --args=help \
     --set-secrets="$EVAL_JOB_SECRETS" --set-env-vars="$EVAL_JOB_ENV,REAL_DATA_DIR=/tmp/catalog-data,EVAL_INPUT_DIR=/catalog-input"

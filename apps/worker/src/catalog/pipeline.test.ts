@@ -964,7 +964,8 @@ it("cost ledger: one delivery per stage writes attributable rows whose judge and
  expect(+matte[0]!.at).toBeLessThan(+compute[0]!.at);expect(+compute[0]!.at).toBeLessThan(+rows.find(r=>r.kind==="render")!.at);
  expect(compute.every(r=>r.engine==="worker" && r.chunkId===s.chunk.id && r.ms>0 && Number(r.usd)>0)).toBe(true);
  expect(rows.find(r=>r.stage==="publish")).toMatchObject({kind:"compute",engine:"worker",productId:s.product.id,outcome:"ok"});
- expect(Number(rows.find(r=>r.stage==="publish")!.usd)).toBe(0);
+ // M6-S1: the publish delivery's worker time is priced like any other delivery (it was USD 0).
+ expect(Number(rows.find(r=>r.stage==="publish")!.usd)).toBeGreaterThan(0);
  const [batch]=await db.select().from(catalogBatches).where(eq(catalogBatches.id,s.batch.id));
  expect(judge.reduce((sum,r)=>sum+Number(r.usd),0)).toBeCloseTo(Number(batch!.cost.qaUsd),9);
  expect(compute.reduce((sum,r)=>sum+Number(r.usd),0)).toBeCloseTo(Number(batch!.cost.computeUsd),9);
@@ -978,7 +979,8 @@ it("cost ledger: a paid cut-out call is flushed with the photo's matte write, so
  w.deps.storage.uploadBuffer=async(path,...rest)=>{if(/matte/.test(path)) {w.deps.storage.uploadBuffer=upload;throw new Error("bucket hiccup");} return upload(path,...rest);};
  try { expect((await handleChunkTask(w.deps,await currentChunkTask(db,s.chunk.id))).outcome).toBe("retry"); } finally { vi.unstubAllEnvs(); }
  const rows=await ledgerOf(s.batch.id);
- expect(rows.map(r=>r.kind)).toEqual(["matte_call"]);
+ // M6-F1-R2 (M6-S1): the failed delivery's worker time is a compute row too.
+ expect(rows.map(r=>[r.kind,r.outcome])).toEqual([["matte_call","ok"],["compute","failed"]]);
  expect(rows[0]).toMatchObject({engine:"cpu",ms:12,attempt:1,outcome:"ok"});
  expect(Number(rows[0]!.usd)).toBeCloseTo(12/1000*0.5,12);
 },60_000);
@@ -998,12 +1000,14 @@ it("cost ledger: a publish whose finalize enqueue fails keeps its one ok row and
  expect((await publishRows()).map(r=>r.outcome)).toEqual(["ok","ok"]);
  expect((await publishRows()).every(r=>Number(r.usd)===0 && r.productId===s.product.id)).toBe(true);
 },60_000);
-it("cost ledger: a delivery that loses its claim writes no ledger rows",async()=>{
+it("cost ledger: a delivery that loses its claim still writes its paid call and its worker time (duplicate)",async()=>{
  const w=world(),s=await seed(w,"ledger-lost-claim");ticking(w);
  // The cut-out call succeeds, but another worker took the chunk meanwhile: every later write under the claim refuses.
  vi.mocked(w.deps.matteFor).mockImplementationOnce(async()=>{await db.update(catalogChunks).set({taskName:"someone-else"}).where(eq(catalogChunks.id,s.chunk.id));return {alpha:Buffer.alloc(800*800,255),width:800,height:800,model:"fixture",ms:12,source:"model",target:"cpu",sentLongSide:800};});
  expect((await handleChunkTask(w.deps,await currentChunkTask(db,s.chunk.id))).outcome).toBe("lost");
- expect(await ledgerOf(s.batch.id)).toEqual([]);
+ // M6-F1-R1 (M6-S1): the cut-out call was paid and the delivery's worker time was spent, so both are in the ledger;
+ // the delivery's compute row is marked `duplicate` (another worker owns the chunk and does the work again).
+ expect((await ledgerOf(s.batch.id)).map(r=>[r.kind,r.outcome])).toEqual([["matte_call","ok"],["compute","duplicate"]]);
 },60_000);
 it("cost ledger: a failing ledger write is logged as an error and the delivery still completes",async()=>{
  const w=world(),s=await seed(w,"ledger-write-fails"),log=vi.fn();w.deps.log=log;ticking(w);

@@ -9,7 +9,7 @@
 // non-skipped outputs. A judge row without an output (or whose output was skipped) falls back to the
 // source split. A row with nothing to split over (every output skipped) stays in `unattributedUsd`.
 // Outcome `cap` rows (a cap refused a judge attempt mid-check) carry usd 0 and only count as calls.
-import { and, eq, gte, inArray, sql } from "drizzle-orm";
+import { and, eq, gte, inArray, isNotNull, sql } from "drizzle-orm";
 import type { Db } from "../db/client";
 import { catalogChunks, catalogCostEvents, catalogOutputs, catalogProducts, catalogSourceImages, type CostKind, type CostStage } from "../db/schema";
 import type { ChannelId } from "./types";
@@ -20,6 +20,8 @@ export const ENGINE_LABELS = {
   render: "image making",
   upscale_call: "image making",
   compute: "worker",
+  job: "background job",
+  wait: "waiting",
 } as const satisfies Record<CostKind, string>;
 export type EngineLabel = (typeof ENGINE_LABELS)[CostKind];
 /** The operator-facing name of a ledger row's engine; never the model id. */
@@ -180,13 +182,15 @@ export async function batchCostAttribution(db: Db, batchId: string, opts: { top?
  * the money went to and the USD per product and per image. Test batches are left out unless asked for.
  */
 export async function brandCostTotals(db: Db, opts: { since?: Date; includeTest?: boolean } = {}): Promise<BrandCost[]> {
+  // M6-S1: a row of no batch (a job run, the sweep) has no brand; it is not any brand's cost.
   const conditions = [
+    isNotNull(catalogCostEvents.brandSlug),
     ...(opts.since ? [gte(catalogCostEvents.at, opts.since)] : []),
     ...(opts.includeTest ? [] : [eq(catalogCostEvents.isTest, false)]),
   ];
   const rows = await db
     .select({
-      brandSlug: catalogCostEvents.brandSlug,
+      brandSlug: sql<string>`${catalogCostEvents.brandSlug}`,
       usd: sql<string>`coalesce(sum(${catalogCostEvents.usd}), 0)`,
       batches: sql<string>`count(distinct ${catalogCostEvents.batchId})`,
       products: sql<string>`count(distinct ${catalogCostEvents.productId})`,

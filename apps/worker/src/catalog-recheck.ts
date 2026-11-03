@@ -16,6 +16,7 @@ import path from "node:path";
 import { parseArgs } from "node:util";
 import { and, eq } from "drizzle-orm";
 import { closeDb, getDb } from "@catalog/core/db/client";
+import { recordJobRun } from "@catalog/core/job-cost";
 import { catalogOutputs, catalogProducts } from "@catalog/core/db/schema";
 import { recheckCsv, recheckLinks, sheetProblems, summarize, withNoLinks, type LinkResult, type SheetProblem } from "@catalog/core/catalog/recheck/check";
 import { readCsvLinks, readSheetLinks } from "@catalog/core/catalog/recheck/links";
@@ -54,6 +55,8 @@ async function main() {
   if ([sheetFile, batchId, brand].filter(Boolean).length !== 1) throw new Error(USAGE);
   const concurrency = Number(values.concurrency ?? RECHECK_CONCURRENCY);
   if (!Number.isInteger(concurrency) || concurrency < 1) throw new Error("--concurrency must be a positive integer.");
+  const startedAt = Date.now();
+  let outcome: "ok" | "failed" = "failed";
   try {
     const checked = sheetFile ? await sheetMode(sheetFile, values.csv, concurrency) : batchId ? await recheckBatch(getDb(), batchId, { concurrency }) : await brandMode(brand!, concurrency);
     const results = checked.results, problems = withNoLinks(results, checked.problems);
@@ -67,8 +70,13 @@ async function main() {
     console.info(summary.line);
     console.info(`Independent re-check: ${summary.ok} of ${summary.total} OK`);
     if (!summary.passed) process.exitCode = 1;
+    outcome = summary.passed ? "ok" : "failed";
   } finally {
-    if (!sheetFile) await closeDb();
+    if (!sheetFile) {
+      // M6-F1-R3: this run's billable seconds as one cost ledger row (only on Cloud Run, where CLOUD_RUN_JOB is set).
+      await recordJobRun(getDb(), { startedAt, outcome, batchId: batchId ?? null });
+      await closeDb();
+    }
   }
 }
 

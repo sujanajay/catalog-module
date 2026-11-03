@@ -35,7 +35,7 @@ const NAMES = ['DB_MAX_CONNECTIONS', 'WORKER_MAX_INSTANCES', 'WORKER_CPU', 'WORK
   'UPSCALE_CPU_VCPU', 'UPSCALE_MEMORY', 'UPSCALE_CONCURRENCY', 'UPSCALE_MAX_INSTANCES', 'UPSCALE_THREADS', 'UPSCALE_TIMEOUT_S', 'UPSCALE_COLD_START_S',
   'UPSCALE_MAX_PIXELS', 'UPSCALE_MAX_PIXELS_X4', 'ENLARGE_MAX_DISPATCHES', 'ENLARGE_BULK_MAX_DISPATCHES', 'ENLARGE_DISPATCHES_PER_SECOND', 'ENLARGE_BULK_DISPATCHES_PER_SECOND'];
 const PEAKS = ['GPU_MODEL_PEAK_MIB_BIREFNET_GENERAL', 'GPU_MODEL_PEAK_MIB_BIREFNET_GENERAL_LITE', 'GPU_MODEL_PEAK_MIB_BIREFNET_HRSOD', 'GPU_MODEL_PEAK_MIB_BRIA_RMBG'];
-const OUT = [...NAMES, ...PEAKS, 'UPSCALE_TARGET', 'UPSCALE_GPU_SERVICE', 'UPSCALE_GPU_TYPE', 'UPSCALE_GPU_REGION', 'UPSCALE_MEASURE', 'UPSCALE_MEASURED_ON', 'UPSCALE_VCPU_TOTAL', 'UPSCALE_LIVE_VCPU', 'UPSCALE_GIB_TOTAL', 'UPSCALE_LIVE_GIB', 'CATALOG_DB_TOTAL', 'CATALOG_DB_LIMIT', 'SLOTS_TOTAL', 'SLOTS_CAPACITY', 'CPU_TOTAL', 'MEMORY_TOTAL_GIB', 'CPU_QUOTA_LIMIT', 'MEMORY_QUOTA_LIMIT_GIB'];
+const OUT = [...NAMES, ...PEAKS, 'UPSCALE_TARGET', 'UPSCALE_GPU_SERVICE', 'UPSCALE_GPU_TYPE', 'UPSCALE_GPU_REGION', 'UPSCALE_MEASURE', 'UPSCALE_MEASURED_ON', 'UPSCALE_VCPU_TOTAL', 'UPSCALE_LIVE_VCPU', 'UPSCALE_GIB_TOTAL', 'UPSCALE_LIVE_GIB', 'CATALOG_DB_TOTAL', 'CATALOG_DB_OVERLAP', 'CATALOG_DB_LIMIT', 'SLOTS_TOTAL', 'SLOTS_CAPACITY', 'CPU_TOTAL', 'MEMORY_TOTAL_GIB', 'CPU_QUOTA_LIMIT', 'MEMORY_QUOTA_LIMIT_GIB'];
 
 // The usd() helper and the two price defaults, taken from deploy.sh so the test follows the script.
 const deploy = fs.readFileSync(path.join(root, 'infra/deploy.sh'), 'utf8').split(/\r?\n/);
@@ -147,7 +147,7 @@ const cases = [
     label: 'no env resolves to the recorded live shape',
     env: {},
     // Every shape name, so a new name without a recorded live value fails here.
-    expect: {...Object.fromEntries(NAMES.map((n) => [n, RECORDED_LIVE[n]])), ...MEASURED, STATUS: '0', CATALOG_DB_TOTAL: '200', CATALOG_DB_LIMIT: '393', SLOTS_TOTAL: '62', SLOTS_CAPACITY: '96',
+    expect: {...Object.fromEntries(NAMES.map((n) => [n, RECORDED_LIVE[n]])), ...MEASURED, STATUS: '0', CATALOG_DB_TOTAL: '200', CATALOG_DB_OVERLAP: '214', CATALOG_DB_LIMIT: '393', SLOTS_TOTAL: '62', SLOTS_CAPACITY: '96',
       // vCPU 128 + 16 + 200 + 11 + the preview's 19 = 374 of 376; GiB 128 + 64 + 400 + 19 + 19 = 630 of 776.
       CPU_TOTAL: '374', CPU_QUOTA_LIMIT: '376', MEMORY_TOTAL_GIB: '630', MEMORY_QUOTA_LIMIT_GIB: '776', COMPUTE: '0.0000265', GPU_PRICE: '0.00034884',
       UPSCALE_CPU_PRICE: '0.000116',
@@ -164,7 +164,10 @@ const cases = [
     expect: {STATUS: '0', WORKER_MAX_INSTANCES: '4', TASKS_MAX_DISPATCHES: '7', INGEST_MAX_DISPATCHES: '3', BULK_MAX_DISPATCHES: '0'}},
   {label: 'a bigger preview worker no longer fits beside the production stack', env: {CATALOG_PREVIEW: '1', WORKER_MAX_INSTANCES: '6'}, expect: {STATUS: '1'},
     error: /vCPU at max instances 382 exceeds 376 of the 400 vCPU quota, 24 kept for the other apps \(worker 24 \+ catalog-matting 16 \+ catalog-upscale 200 \+ web and jobs 11 \+ the production stack 131\)/},
-  {label: 'the pre-F2 rollback shape fits db-f1-micro', env: PRE_F2, live: '25',
+  // M6-F2-R5: on db-f1-micro the rollback shape only fits with one worker probe instance and no web probe instance.
+  {label: 'the pre-F2 rollback shape with the default probes does not fit db-f1-micro during a deploy', env: PRE_F2, live: '25', expect: {STATUS: '1', CATALOG_DB_TOTAL: '16', CATALOG_DB_OVERLAP: '22'},
+    error: /hold up to 22 connections \(worker 4 \+ 2 probe instances x 2, web 3 \+ 1 x 2, jobs 2 x 1\), above the budget 18/},
+  {label: 'the pre-F2 rollback shape fits db-f1-micro', env: {...PRE_F2, WORKER_PROBE_INSTANCES: '1', WEB_PROBE_INSTANCES: '0'}, live: '25',
     expect: {STATUS: '0', WORKER_DB_POOL_MAX: '2', CATALOG_DB_TOTAL: '16', CATALOG_DB_LIMIT: '18', CPU_TOTAL: '118', SLOTS_TOTAL: '8', GPU_PRICE: '0.00034884'}},
   {
     label: 'F2 run values fit on db-custom-2-7680 (GPU part fitted to the measured table)',
@@ -173,6 +176,9 @@ const cases = [
       CPU_TOTAL: '190', COMPUTE: '0.0000265', GPU_PRICE: '0.00047364'},
   },
   {label: 'the live shape before the tier change', env: {}, live: '25', expect: {STATUS: '1'}, error: /DB_MAX_CONNECTIONS=400 but ila-pg allows 25 now/},
+  // M6-F2-R5 (M6-S4): the old revisions at max plus the candidates' probe instances must fit the connection budget.
+  {label: 'deploy overlap budget: probes beside the old revisions', env: {WORKER_PROBE_INSTANCES: '32'}, expect: {STATUS: '1', CATALOG_DB_TOTAL: '200', CATALOG_DB_OVERLAP: '394'}, error: /during a deploy the old revisions plus the candidates' probes hold up to/},
+  {label: 'deploy overlap budget: probe counts must be numbers', env: {WEB_PROBE_INSTANCES: 'two'}, expect: {STATUS: '1'}, error: /WEB_PROBE_INSTANCES must be a whole number, got 'two'/},
   {label: 'connection budget', env: {...PRE_F2, WORKER_MAX_INSTANCES: '10'}, live: '25', expect: {STATUS: '1'}, error: /catalog connections 28 exceed the budget 18/},
   {label: 'slots', env: {...PRE_F2, TASKS_MAX_DISPATCHES: '8'}, live: '25', expect: {STATUS: '1'}, error: /queue slots 8 \+ 0 \+ 2 \+ enlarge 0 \+ 0 = 10 exceed/},
   {label: 'cpu quota: one catalog-upscale instance more than the 400 vCPU hold', env: {UPSCALE_MAX_INSTANCES: '51'}, expect: {STATUS: '1', CPU_TOTAL: '378', MEMORY_TOTAL_GIB: '638'},

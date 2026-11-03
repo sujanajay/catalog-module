@@ -3,7 +3,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import type { Db } from "./db/client";
 import { catalogBatches, catalogCostEvents } from "./db/schema";
 import { createTestDb } from "./db/testing";
-import { COST_EVENT_WRITE_FAILED, costEventValues, recordCostEvent, recordCostEvents } from "./cost-events";
+import { COST_EVENT_WRITE_FAILED, costComponent, costEventValues, ownComponent, recordCostEvent, recordCostEvents } from "./cost-events";
 
 let db: Db, close: () => Promise<void>;
 beforeAll(async () => { ({ db, close } = await createTestDb()); });
@@ -49,7 +49,7 @@ describe("cost ledger writes", () => {
   it("rejects values outside the stage, kind, outcome and channel lists at the database", async () => {
     const b = await batch("ledger-enums");
     for (const bad of [
-      sql`insert into catalog_cost_events (batch_id, brand_slug, stage, kind, engine) values (${b.id}, 'anta', 'ingest', 'compute', 'worker')`,
+      sql`insert into catalog_cost_events (batch_id, brand_slug, stage, kind, engine) values (${b.id}, 'anta', 'intake', 'compute', 'worker')`,
       sql`insert into catalog_cost_events (batch_id, brand_slug, stage, kind, engine) values (${b.id}, 'anta', 'matte', 'gpu_call', 'gpu')`,
       sql`insert into catalog_cost_events (batch_id, brand_slug, stage, kind, engine, outcome) values (${b.id}, 'anta', 'matte', 'compute', 'worker', 'skipped')`,
       sql`insert into catalog_cost_events (batch_id, brand_slug, stage, kind, engine, channel) values (${b.id}, 'anta', 'render', 'render', 'worker', 'flipkart')`,
@@ -62,5 +62,41 @@ describe("cost ledger writes", () => {
     await recordCostEvent(db, { batchId: b.id, brandSlug: "anta", isTest: true, stage: "publish", kind: "compute", engine: "worker" });
     await db.delete(catalogBatches).where(eq(catalogBatches.id, b.id));
     expect(await db.select().from(catalogCostEvents).where(eq(catalogCostEvents.batchId, b.id))).toHaveLength(0);
+  });
+});
+
+// M6-F1 (M6-S1): every row names the Cloud Run service or job (or the vendor) its money went to, rows of no batch are
+// allowed, and the new stage, kind and outcome values are accepted.
+describe("cost ledger completeness", () => {
+  const MATTING = { MATTING_URL: "https://catalog-matting-x.run.app", MATTING_GPU_URL: "https://catalog-matting-gpu-x.run.app" };
+
+  it("names the component: the vendor for a judge call, the answering service for matte and upscale calls, else itself", () => {
+    const worker = { K_SERVICE: "catalog-worker", ...MATTING };
+    expect(ownComponent({ K_SERVICE: "catalog-worker" })).toBe("catalog-worker");
+    expect(ownComponent({ CLOUD_RUN_JOB: "catalog-migrate" })).toBe("catalog-migrate");
+    expect(ownComponent({})).toBeNull();
+    expect(costComponent({ kind: "llm_call", engine: "m" }, worker)).toBe("openrouter");
+    expect(costComponent({ kind: "matte_call", engine: "gpu" }, worker)).toBe("catalog-matting-gpu");
+    expect(costComponent({ kind: "matte_call", engine: "cpu" }, worker)).toBe("catalog-matting");
+    expect(costComponent({ kind: "upscale_call", engine: "cpu" }, worker)).toBe("catalog-matting");
+    expect(costComponent({ kind: "upscale_call", engine: "cpu" }, { ...worker, UPSCALE_URL: "https://catalog-upscale-x.run.app" })).toBe("catalog-upscale");
+    expect(costComponent({ kind: "upscale_call", engine: "gpu" }, worker)).toBe("catalog-matting-gpu");
+    expect(costComponent({ kind: "upscale_call", engine: "gpu" }, { ...worker, UPSCALE_GPU_URL: "https://catalog-upscale-gpu-x.run.app" })).toBe("catalog-upscale-gpu");
+    expect(costComponent({ kind: "compute", engine: "worker" }, worker)).toBe("catalog-worker");
+    expect(costComponent({ kind: "compute", engine: "worker", component: "catalog-web" }, worker)).toBe("catalog-web");
+  });
+
+  it("writes a row of no batch (no brand either) with its component and billable time", async () => {
+    expect(await recordCostEvent(db, { batchId: null, brandSlug: "ignored", isTest: false, stage: "system", kind: "job", engine: "job", component: "catalog-migrate", ms: 4000, billableMs: 4000, usd: 0.000176, estimated: true })).toBe(true);
+    const [row] = await db.select().from(catalogCostEvents).where(eq(catalogCostEvents.component, "catalog-migrate"));
+    expect(row).toMatchObject({ batchId: null, brandSlug: null, stage: "system", kind: "job", billableMs: 4000, estimated: true, contentVersionId: null });
+  });
+
+  it("accepts the new stages, kinds and outcomes", async () => {
+    const b = await batch("ledger-new-values");
+    for (const [stage, kind, outcome] of [["ingest", "compute", "ok"], ["system", "job", "failed"], ["upscale", "wait", "ok"], ["upscale", "upscale_call", "timeout"], ["upscale", "upscale_call", "killed"], ["matte", "compute", "duplicate"]] as const) {
+      expect(await recordCostEvent(db, { batchId: b.id, brandSlug: "anta", isTest: true, stage, kind, engine: "worker", outcome })).toBe(true);
+    }
+    expect(await db.select().from(catalogCostEvents).where(eq(catalogCostEvents.batchId, b.id))).toHaveLength(6);
   });
 });

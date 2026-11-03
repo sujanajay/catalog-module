@@ -379,7 +379,7 @@ if gcloud tasks queues describe "$INGEST_QUEUE" --location="$REGION" --project="
 else
   create "tasks queue $INGEST_QUEUE"
   gcloud tasks queues create "$INGEST_QUEUE" --project="$PROJECT" --location="$REGION" \
-    --max-concurrent-dispatches=2 --max-attempts=5 --min-backoff=10s >/dev/null
+    --max-concurrent-dispatches=2 --max-attempts=-1 --max-retry-duration=0s --min-backoff=10s --max-backoff=900s --max-doublings=7 >/dev/null
 fi
 
 # --- 7. Service accounts -----------------------------------------------------------------

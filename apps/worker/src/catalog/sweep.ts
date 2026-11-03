@@ -6,7 +6,8 @@ import { and, eq, inArray, isNull, lt, or, sql } from "drizzle-orm";
 import type { BatchStatus } from "@catalog/core/catalog/types";
 import type { Db } from "@catalog/core/db/client";
 import type { HandleResult } from "../server";
-import { catalogBatches, catalogChunks } from "@catalog/core/db/schema";
+import { catalogBatches, catalogChunks, catalogUploads } from "@catalog/core/db/schema";
+import { handOff, INGEST_ROUTE, ingestTaskId, uploadedPage } from "@catalog/core/catalog/ingest/hand-off";
 import { enqueueTask } from "@catalog/core/tasks";
 import { log } from "@catalog/core/log";
 import { recoverBatchChunks } from "@catalog/core/catalog/pipeline/dispatch";
@@ -21,6 +22,15 @@ export const SWEEP_STALE_MS = 2 * 60 * 60 * 1000;
 export const SWEEPABLE_STATUSES = ["ingesting", "matting", "rendering", "qa", "publishing"] as const satisfies readonly BatchStatus[];
 
 export const SWEEP_ERROR = "No progress for 2 hours. Start the batch again.";
+
+/**
+ * M6-F2-R4 (M6-S4): a batch `ingesting` whose row has not moved for this long gets its intake re-sent (an ingest task
+ * lost to a deploy or a queue give-up from before the queue retried without limit).
+ */
+export const INGEST_RESEND_MS = 30 * 60 * 1000;
+
+/** The hand-off run of a re-send: one per INGEST_RESEND_MS window, so a sweep every 10 minutes sends it once. */
+export const ingestResendRun = (now: Date) => `sweep-${Math.floor(+now / INGEST_RESEND_MS)}`;
 
 /** Days without a write after which the sweep cancels a draft (spec 14d F12; owner decision 2026-10-27). */
 export const DEFAULT_DRAFT_EXPIRY_DAYS = 14;
@@ -93,6 +103,13 @@ export async function handleSweep(deps: SweepDeps, _body: Record<string, unknown
   const live=await deps.db.selectDistinct({id:catalogBatches.id}).from(catalogBatches).innerJoin(catalogChunks,eq(catalogChunks.batchId,catalogBatches.id))
     .where(and(sql`${catalogBatches.status} NOT IN ('failed','cancelled','draft')`,inArray(catalogChunks.status,["queued","running"])));
   for(const batch of live) await recoverBatchChunks(deps.db,deps.enqueue ?? enqueueTask,batch.id,{now,...(deps.window ? {window:deps.window}:{}),...(deps.enlargementOff ? {enlargementOff:true}:{})});
+  // M6-F2-R4: re-send the intake of a batch that has been ingesting with no progress for INGEST_RESEND_MS. Its
+  // `uploaded` uploads are handed on again under a new run (the same paged hand-off as the web's Continue; a new run
+  // carries every item already read forward). When none is left to collect, one delivery of a collected upload is
+  // sent, which takes the lapsed placing lease and groups and places again (as Try again does). A failure here never
+  // stops the sweep.
+  try { await resendStalledIngest(deps.db, deps.enqueue ?? enqueueTask, now); }
+  catch (error) { log("ERROR", "ingest re-send failed", { error: error instanceof Error ? error.message : String(error) }); }
   // Spec 17 3.1.3: the invariants, every sweep (10 minutes). A failed check run never stops the sweep.
   // Spec 17 3.1.3: the invariants never stop the sweep, but a failed run is an ERROR (the checks went blind).
   try { await runInvariants(deps.db, log, now); } catch (error) { log("ERROR", "invariants run failed", { error: error instanceof Error ? error.message : String(error) }); }
@@ -133,4 +150,23 @@ export async function handleSweep(deps: SweepDeps, _body: Record<string, unknown
   }
 
   return { httpStatus: 200, outcome: `swept:${swept.length}${expired.length ? `; expired:${expired.length}` : ""}` };
+}
+
+/** M6-F2-R4: see handleSweep. Returns the batches whose intake was re-sent. */
+export async function resendStalledIngest(db: Db, enqueue: typeof enqueueTask, now: Date): Promise<string[]> {
+  const stalled = await db.select({ id: catalogBatches.id }).from(catalogBatches)
+    .where(and(eq(catalogBatches.status, "ingesting"), lt(catalogBatches.updatedAt, new Date(+now - INGEST_RESEND_MS))));
+  const run = ingestResendRun(now);
+  for (const { id: batchId } of stalled) {
+    const page = await uploadedPage(db, batchId, null);
+    if (page.ids.length) await handOff(enqueue, batchId, run, page);
+    else {
+      const [collected] = await db.select({ id: catalogUploads.id }).from(catalogUploads)
+        .where(and(eq(catalogUploads.batchId, batchId), eq(catalogUploads.status, "collected"))).orderBy(catalogUploads.id).limit(1);
+      if (!collected) continue;
+      await enqueue(INGEST_ROUTE, { batchId, uploadId: collected.id, run }, { taskId: ingestTaskId(collected.id, run) });
+    }
+    log("WARNING", "ingest re-sent: no progress for 30 minutes", { batchId, run, uploads: page.ids.length || 1, more: page.more });
+  }
+  return stalled.map((b) => b.id);
 }

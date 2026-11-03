@@ -32,7 +32,7 @@ function fakeRangeStorage(objects: Record<string, Buffer>) {
 function upload(over: Partial<CatalogUpload> = {}): CatalogUpload {
   return {
     id: "u1", batchId: "b1", kind: "zip", name: "photos.zip", relativePath: null, gcsUri: ZIP_URI, sourceUrl: null,
-    sizeBytes: null, mime: "application/zip", status: "uploaded", detected: null, error: null, createdAt: new Date(), ...over,
+    sizeBytes: null, mime: "application/zip", status: "uploaded", detected: null, error: null, ingestFailures: 0, createdAt: new Date(), ...over,
   };
 }
 

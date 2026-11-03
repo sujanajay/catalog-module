@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Db } from "@catalog/core/db/client";
 import { releaseLocks } from "@catalog/core/catalog/products";
 import { createTestDb } from "@catalog/core/db/testing";
-import { DEFAULT_DRAFT_EXPIRY_DAYS, draftExpiryDaysFromEnv, handleSweep, SWEEP_ERROR, type ReleaseLocks } from "./sweep";
+import { DEFAULT_DRAFT_EXPIRY_DAYS, draftExpiryDaysFromEnv, handleSweep, ingestResendRun, resendStalledIngest, SWEEP_ERROR, type ReleaseLocks } from "./sweep";
 import { EMPTY_BATCH_COUNTS } from "@catalog/core/db/schema";
 import type { BatchCounts } from "@catalog/core/catalog/types";
 import { deriveBatchState } from "@catalog/core/catalog/pipeline/status";
@@ -244,5 +244,58 @@ describe("draft expiry (spec 14d F12)", () => {
     const enqueue = vi.fn(async () => { throw new Error("queue unavailable"); });
     await expect(handleSweep({ db, enqueue, releaseLocks, now: () => NOW }, {})).rejects.toThrow("queue unavailable");
     expect((await expiredOf(old)).status).toBe("cancelled");
+  });
+});
+
+// M6-F2-R4 (M6-S4): the ingest queue retries without limit, and the sweep re-sends the intake of a batch that has been
+// ingesting with no progress for 30 minutes (a task lost to a deploy or a queue purge never leaves a batch stuck).
+describe("ingest re-send (M6-F2-R4)", () => {
+  const minutesAgo = (m: number) => new Date(NOW.getTime() - m * 60_000).toISOString();
+  async function ingesting(updatedMinutesAgo: number): Promise<string> {
+    const id = await insertBatch("ingesting", 0);
+    await db.execute(sql`UPDATE catalog_batches SET updated_at = ${minutesAgo(updatedMinutesAgo)}::timestamptz WHERE id = ${id}`);
+    return id;
+  }
+  const upload = async (batchId: string, status: string) => {
+    const id = randomUUID();
+    await db.execute(sql`INSERT INTO catalog_uploads (id, batch_id, kind, name, status) VALUES (${id}, ${batchId}, 'zip', ${`${id}.zip`}, ${status})`);
+    return id;
+  };
+
+  it("hands the uploaded uploads of a stalled batch on again under the sweep's run, and leaves a moving batch alone", async () => {
+    const stalled = await ingesting(31), moving = await ingesting(10);
+    const a = await upload(stalled, "uploaded"), b = await upload(stalled, "uploaded");
+    await upload(stalled, "collected");
+    await upload(moving, "uploaded");
+    const enqueue = vi.fn(async () => "task");
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    expect(await resendStalledIngest(db, enqueue as never, NOW)).toEqual([stalled]);
+    const run = ingestResendRun(NOW);
+    const sent = enqueue.mock.calls.map((c) => (c as unknown[])[1] as Record<string, unknown>);
+    expect(sent.filter((body) => body.uploadId).map((body) => body.uploadId).sort()).toEqual([a, b].sort());
+    for (const body of sent) expect(body).toMatchObject({ batchId: stalled, run });
+  });
+
+  it("re-sends one collected upload when nothing is left to collect, so the placing lease is taken over", async () => {
+    const stalled = await ingesting(45);
+    const collected = await upload(stalled, "collected");
+    const enqueue = vi.fn(async () => "task");
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    await resendStalledIngest(db, enqueue as never, NOW);
+    expect(enqueue).toHaveBeenCalledTimes(1);
+    expect(enqueue.mock.calls[0]).toEqual(["/tasks/catalog/ingest", { batchId: stalled, uploadId: collected, run: ingestResendRun(NOW) }, { taskId: expect.stringContaining(collected) }]);
+  });
+
+  it("runs inside the sweep, once per 30-minute window (the task name holds the window)", async () => {
+    const stalled = await ingesting(40);
+    await upload(stalled, "uploaded");
+    const enqueue = vi.fn(async () => "task");
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    await handleSweep({ db, releaseLocks, now: () => NOW, enqueue } as never, {});
+    const run = ingestResendRun(NOW);
+    expect(enqueue.mock.calls.some((c) => ((c as unknown[])[1] as Record<string, unknown>).run === run && String(((c as unknown[])[2] as { taskId?: string }).taskId).includes(run))).toBe(true);
+    // NOW is on a window edge: ten minutes on is the same window (same task names), thirty minutes on the next one.
+    expect(ingestResendRun(new Date(NOW.getTime() + 10 * 60_000))).toBe(run);
+    expect(ingestResendRun(new Date(NOW.getTime() + 30 * 60_000))).not.toBe(run);
   });
 });

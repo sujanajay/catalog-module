@@ -97,7 +97,7 @@ const normalisedUrl = (url: string | undefined): string => (url ?? "").trim().re
  * neither the CPU cut-out service (MATTING_URL, spec 16 3.1.3) nor a GPU matting service (MATTING_GPU_URLS, else
  * MATTING_GPU_URL), the same rule as upscale.ts upscaleTargetFromEnv and the matting client's dedicatedUpscale.
  */
-function cpuUpscaleOnDedicatedService(env: NodeJS.ProcessEnv): boolean {
+export function cpuUpscaleOnDedicatedService(env: NodeJS.ProcessEnv): boolean {
  const url = normalisedUrl(env.UPSCALE_URL);
  if (!url) return false;
  const gpu = env.MATTING_GPU_URLS?.trim() ? env.MATTING_GPU_URLS.split(",") : [env.MATTING_GPU_URL];

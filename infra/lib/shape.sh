@@ -251,6 +251,10 @@ shape_defaults() {
   WEB_DB_POOL_MAX=2
   MAX_CONCURRENT_JOBS=2
   JOB_DB_POOL_MAX=1
+  # M6-F2-R5 (M6-S4): the no-traffic candidates' instances while their probes run beside the live revisions (the
+  # worker's smoke drives one small batch on the candidate; the web probe is a few page loads). Env may raise them.
+  WORKER_PROBE_INSTANCES=${WORKER_PROBE_INSTANCES:-2}
+  WEB_PROBE_INSTANCES=${WEB_PROBE_INSTANCES:-1}
   # vCPU and GiB kept for the Cloud Run jobs (load, recheck, QA check, evals, migrate, smoke; 2 vCPU / 4Gi each, 4 at
   # once) in the quota checks.
   JOBS_CPU_BUDGET=8
@@ -408,7 +412,7 @@ shape_defaults() {
 }
 
 # shape_check [live_connection_limit]: prints every problem to stderr and returns 1 if there is any. Sets
-# CATALOG_DB_LIMIT, CATALOG_DB_TOTAL, SLOTS_TOTAL, SLOTS_CAPACITY, CPU_TOTAL and MEMORY_TOTAL_GIB for the caller's
+# CATALOG_DB_LIMIT, CATALOG_DB_TOTAL, CATALOG_DB_OVERLAP (M6-F2-R5), SLOTS_TOTAL, SLOTS_CAPACITY, CPU_TOTAL and MEMORY_TOTAL_GIB for the caller's
 # summary lines.
 # live_connection_limit is the max_connections ila-pg allows now (empty skips that check).
 shape_check() {
@@ -420,7 +424,7 @@ shape_check() {
       CATALOG_BULK_WINDOW BULK_BATCH_PRODUCTS GPU_CUDA_OVERHEAD_MIB UPSCALE_CPU_VCPU UPSCALE_CONCURRENCY UPSCALE_MAX_INSTANCES \
       UPSCALE_THREADS UPSCALE_TIMEOUT_S UPSCALE_COLD_START_S UPSCALE_MAX_PIXELS UPSCALE_MAX_PIXELS_X4 UPSCALE_LIVE_VCPU ENLARGE_MAX_DISPATCHES ENLARGE_BULK_MAX_DISPATCHES \
       UPSCALE_GPU_CPU UPSCALE_GPU_MAX_INSTANCES UPSCALE_GPU_CONCURRENCY UPSCALE_GPU_TIMEOUT_S UPSCALE_GPU_COLD_START_S UPSCALE_GPU_QUOTA \
-      UPSCALE_GPU_REGION_CPU_LIMIT UPSCALE_GPU_REGION_MEMORY_GIB_LIMIT; do
+      UPSCALE_GPU_REGION_CPU_LIMIT UPSCALE_GPU_REGION_MEMORY_GIB_LIMIT WORKER_PROBE_INSTANCES WEB_PROBE_INSTANCES; do
     value=${!name}
     if ! [[ "$value" =~ ^[0-9]+$ ]]; then shape_fail "$name must be a whole number, got '$value'"; return 1; fi
   done
@@ -458,6 +462,13 @@ shape_check() {
   CATALOG_DB_TOTAL=$((WORKER_MAX_INSTANCES * WORKER_DB_POOL_MAX + WEB_MAX_INSTANCES * WEB_DB_POOL_MAX + MAX_CONCURRENT_JOBS * JOB_DB_POOL_MAX))
   if [ "$CATALOG_DB_TOTAL" -gt "$CATALOG_DB_LIMIT" ]; then
     shape_fail "catalog connections $CATALOG_DB_TOTAL exceed the budget $CATALOG_DB_LIMIT; see docs/solutions/db-connection-budget.md"
+  fi
+  # M6-F2-R5 (M6-S4): during a deploy the old revisions keep every instance (and pool) while the candidates' probes
+  # run, so the old worker and web at max plus the candidates' probe instances plus the jobs (the smoke is one) must
+  # fit too. After the traffic shift the service-level max (gate.sh) caps the instances that take new work.
+  CATALOG_DB_OVERLAP=$(((WORKER_MAX_INSTANCES + WORKER_PROBE_INSTANCES) * WORKER_DB_POOL_MAX + (WEB_MAX_INSTANCES + WEB_PROBE_INSTANCES) * WEB_DB_POOL_MAX + MAX_CONCURRENT_JOBS * JOB_DB_POOL_MAX))
+  if [ "$CATALOG_DB_OVERLAP" -gt "$CATALOG_DB_LIMIT" ]; then
+    shape_fail "during a deploy the old revisions plus the candidates' probes hold up to $CATALOG_DB_OVERLAP connections (worker $WORKER_MAX_INSTANCES + $WORKER_PROBE_INSTANCES probe instances x $WORKER_DB_POOL_MAX, web $WEB_MAX_INSTANCES + $WEB_PROBE_INSTANCES x $WEB_DB_POOL_MAX, jobs $MAX_CONCURRENT_JOBS x $JOB_DB_POOL_MAX), above the budget $CATALOG_DB_LIMIT; see docs/solutions/db-connection-budget.md"
   fi
   if [ -n "$live" ] && [ "$DB_MAX_CONNECTIONS" -gt "$live" ]; then
     shape_fail "DB_MAX_CONNECTIONS=$DB_MAX_CONNECTIONS but ila-pg allows $live now; change the tier first (infra/sql-tier.sh)"

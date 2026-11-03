@@ -78,7 +78,7 @@ for(const kind of kinds) {
     task.volumes=[volume('input',input,true),volume('evidence',`catalog-test/smoke/linux-${run}/${kind}`,false)];
   }
   const annotations={'run.googleapis.com/execution-environment':'gen2','run.googleapis.com/network-interfaces':JSON.stringify([{network:'ila-vpc',subnetwork:'ila-subnet'}]),'run.googleapis.com/vpc-access-egress':'private-ranges-only'};
-  const desired={apiVersion:'run.googleapis.com/v1',kind:'Job',metadata:{name,labels:{app:'catalog',component:'job'}},spec:{template:{metadata:{annotations},spec:{taskCount:1,parallelism:1,template:{spec:task}}}}};
+  const desired={apiVersion:'run.googleapis.com/v1',kind:'Job',metadata:{name,labels:{app:'catalog',component:name,env:kind==='invariants'?'live':'test'}},spec:{template:{metadata:{annotations},spec:{taskCount:1,parallelism:1,template:{spec:task}}}}};
   fs.writeFileSync(`${dir}/${kind}.json`,JSON.stringify(desired));
 }
 NODE

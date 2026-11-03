@@ -10,10 +10,29 @@ import { handOff, HAND_OFF_PAGE, INGEST_MORE_ROUTE, uploadedPage } from "@catalo
 import { pinnedFetch } from "@catalog/core/safe-url";
 import * as storage from "@catalog/core/storage";
 import { enqueueTask } from "@catalog/core/tasks";
-import { handleIngestMoreTask, handleIngestTask, workerIngestDeps, type IngestTaskDeps } from "./ingest";
+import { handleIngestMoreTask, handleIngestTask, INGEST_MAX_FAILURES, workerIngestDeps, type IngestTaskDeps } from "./ingest";
 
 const ingest = {} as IngestTaskDeps["ingest"];
-const db = {} as Db;
+/**
+ * The handler's only own writes are the upload's failure count (M6-F2-R4): a counter stands in for catalog_uploads
+ * (`update ... returning` counts one more failure; a plain `update ... where` is the reset on success).
+ */
+function countingDb() {
+  const state = { failures: 0, resets: 0 };
+  const db = {
+    update: () => ({
+      set: () => ({
+        // Awaited as is: the reset after a success. With .returning(): the failure count, one more.
+        where: () => ({
+          then: (resolve: (v: unknown) => unknown, reject?: (e: unknown) => unknown) => Promise.resolve().then(() => { state.resets++; state.failures = 0; }).then(resolve, reject),
+          returning: async () => [{ failures: ++state.failures }],
+        }),
+      }),
+    }),
+  } as unknown as Db;
+  return Object.assign(db, { state });
+}
+const db = countingDb();
 
 describe("handleIngestTask", () => {
   it("passes the body to runIngest and answers 200 with its outcome", async () => {
@@ -64,23 +83,30 @@ describe("handleIngestTask", () => {
     expect((await handleIngestTask({ db, ingest, run }, { batchId: "b1", uploadId: "u1", group: 3 })).httpStatus).toBe(400);
   });
 
-  it("marks the batch failed when the last attempt fails, and only then", async () => {
+  it("M6-F2-R4: marks the batch failed at the fifth failed delivery of the upload in a row, whatever the queue's retry count", async () => {
     const errors = vi.spyOn(console, "error").mockImplementation(() => undefined);
     const warnings = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const counted = countingDb();
     const run = vi.fn(async () => {
       throw new Error("deadline");
     });
     const failStopped = vi.fn(async () => true);
-    for (const retryCount of [undefined, 0, 1, 2, 3]) {
-      expect(await handleIngestTask({ db, ingest, run, failStopped }, { batchId: "b1", uploadId: "u1" }, retryCount === undefined ? {} : { retryCount })).toEqual({ httpStatus: 500, outcome: "error" });
+    // The queue's retry count also counts 429s and a deploy's 503s (it can be large); it never decides.
+    for (const retryCount of [undefined, 0, 37, 120]) {
+      expect(await handleIngestTask({ db: counted, ingest, run, failStopped }, { batchId: "b1", uploadId: "u1" }, retryCount === undefined ? {} : { retryCount })).toEqual({ httpStatus: 500, outcome: "error" });
     }
+    expect(counted.state.failures).toBe(INGEST_MAX_FAILURES - 1);
     expect(failStopped).not.toHaveBeenCalled();
-    expect(await handleIngestTask({ db, ingest, run, failStopped }, { batchId: "b1", uploadId: "u1", run: "r2", group: "4" }, { retryCount: 4 })).toEqual({ httpStatus: 500, outcome: "error" });
-    expect(failStopped).toHaveBeenCalledWith(db, "b1", { uploadId: "u1", run: "r2" });
+    expect(await handleIngestTask({ db: counted, ingest, run, failStopped }, { batchId: "b1", uploadId: "u1", run: "r2", group: "4" }, { retryCount: 4 })).toEqual({ httpStatus: 500, outcome: "error" });
+    expect(failStopped).toHaveBeenCalledWith(counted, "b1", { uploadId: "u1", run: "r2" });
     // A task of an earlier run (Try again started another) leaves the batch alone and is acknowledged.
     failStopped.mockResolvedValueOnce(false);
-    expect(await handleIngestTask({ db, ingest, run, failStopped }, { batchId: "b1", uploadId: "u1", run: "r1", cursor: "7" }, { retryCount: 4 })).toEqual({ httpStatus: 200, outcome: "dropped: out of attempts, and the batch was not this task's to stop" });
-    expect(failStopped).toHaveBeenLastCalledWith(db, "b1", { uploadId: "u1", cursor: "7", run: "r1" });
+    expect(await handleIngestTask({ db: counted, ingest, run, failStopped }, { batchId: "b1", uploadId: "u1", run: "r1", cursor: "7" }, {})).toEqual({ httpStatus: 200, outcome: "dropped: out of attempts, and the batch was not this task's to stop" });
+    expect(failStopped).toHaveBeenLastCalledWith(counted, "b1", { uploadId: "u1", cursor: "7", run: "r1" });
+    // A delivery that succeeds starts the count again.
+    const ok = vi.fn(async () => ({ progress: { done: 1, total: 2, phase: "copying" as const }, outcome: "collected 1 of 2" }));
+    expect((await handleIngestTask({ db: counted, ingest, run: ok, failStopped }, { batchId: "b1", uploadId: "u1" })).httpStatus).toBe(200);
+    expect(counted.state.failures).toBe(0);
     errors.mockRestore();
     warnings.mockRestore();
   });

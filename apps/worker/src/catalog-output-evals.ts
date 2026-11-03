@@ -51,6 +51,7 @@ import { handleFinalizeTask } from "./catalog/finalize";
 import { cannedQa, liveQaEnabled } from "./catalog/qa-mock";
 import { changeOnePixel } from "./catalog-real-fixtures";
 import { parseArgs } from "./catalog-output-evals-args";
+import { recordJobRun } from "@catalog/core/job-cost";
 
 const USAGE = `Usage: catalog:output-evals <command>
   build-golden [--build <golden-build.json>] [--out <golden-manifest.json>] [--root name=path ...]
@@ -560,8 +561,13 @@ async function main() {
   if (command === "upload") return uploadCommand(flags);
   if (command === "check-folder") return checkFolderCommand(flags);
   if (command !== "run") { print(USAGE); process.exitCode = 2; return; }
-  const db = getDb();
-  try { await runCommand(db, flags); } finally { await closeDb(); }
+  const db = getDb(), startedAt = Date.now();
+  let outcome: "ok" | "failed" = "failed";
+  try { await runCommand(db, flags); outcome = process.exitCode ? "failed" : "ok"; } finally {
+    // M6-F1-R3: this run's billable seconds as one cost ledger row (on Cloud Run only; a test run, reported apart).
+    await recordJobRun(db, { startedAt, outcome, isTest: true });
+    await closeDb();
+  }
 }
 main().catch(error => { console.error(error instanceof Error ? error.stack ?? error.message : String(error)); process.exitCode = 1; });
 export { sha256 };

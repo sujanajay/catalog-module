@@ -146,7 +146,7 @@ const flags = {
   // 1Gi, not 512Mi: on 2026-10-30 the upscale probe was OOM-killed comparing two 6400x6400 x4 outputs. The comparison
   // now peaks at about 7 bytes per pixel (cloudrun_check.py pixel_difference: 371 MiB measured with the interpreter),
   // but the bodies of each distinct output of a size stay in memory too, and --sizes may ask for larger images.
-  '--cpu': '1', '--memory': '1Gi', '--set-env-vars': variables, '--clear-secrets': true, '--labels': { app: 'catalog', component: 'job' },
+  '--cpu': '1', '--memory': '1Gi', '--set-env-vars': variables, '--clear-secrets': true, '--labels': { app: 'catalog', component: 'catalog-check-matting', env: 'test' },
 };
 fs.writeFileSync(path.join(dir, 'flags.json'), JSON.stringify(flags));
 NODE

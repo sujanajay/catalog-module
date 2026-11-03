@@ -15,10 +15,14 @@
 # instance answers 429 before the app runs). It keeps retrying for 30 minutes, at most a minute apart
 # (10, 20, 40, then every 60 s), whatever the attempt count; the handler is safe under repeats. The main queue also
 # carries publish and finalize, and the bulk queue publish: both idempotent, so they get the same retry (a failure
-# that repeats, such as finalize's exports mismatch, retries for the full 30 minutes). The ingest queue keeps its
-# 5 attempts.
+# that repeats, such as finalize's exports mismatch, retries for the full 30 minutes).
 CHUNK_QUEUE_RETRY=(--max-attempts=-1 --max-retry-duration=1800s --min-backoff=10s --max-backoff=60s --max-doublings=3)
-INGEST_QUEUE_RETRY=(--max-attempts=5 --min-backoff=10s)
+# M6-F2-R4 (M6-S4): the ingest queue never drops a task because of a deploy or a burst of 429. Unlimited attempts and
+# no time limit, 10 s to 15 minutes apart (10, 20, ..., 640, then 900 s); the handler alone decides when an upload is
+# terminal: it counts failed deliveries on the upload row (catalog_uploads.ingest_failures, INGEST_MAX_FAILURES in
+# apps/worker/src/catalog/ingest.ts) and answers 200 once it stopped the batch. The sweep re-sends an intake task when
+# a batch has been ingesting with no progress for 30 minutes (INGEST_RESEND_MS).
+INGEST_QUEUE_RETRY=(--max-attempts=-1 --max-retry-duration=0s --min-backoff=10s --max-backoff=900s --max-doublings=7)
 # Spec 18 lifecycle 3.8: an enlarge lane never drops a task. The handler alone decides when a row is terminal (it
 # counts attempts and timeouts on the row and answers 200 then), and a wait (service down or paused, a tile hand-off,
 # a cold start) answers 503 without counting, for as long as it lasts. So unlimited attempts (-1, the API's

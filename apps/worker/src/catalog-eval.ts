@@ -40,6 +40,7 @@ import { handleFinalizeTask } from "./catalog/finalize";
 import { cannedQa, liveQaEnabled } from "./catalog/qa-mock";
 import { dataRoot } from "./catalog-real-fixtures";
 import { assertBrandInMaster, cleanupEvalSet, parseArgs } from "./catalog-eval-cli";
+import { recordJobRun } from "@catalog/core/job-cost";
 
 const USAGE = `Usage: catalog:eval <command>
   assemble --set <s> --brand <slug> [--folder <path>] [--category <type>] [--sample <n> --seed <k>]
@@ -271,7 +272,8 @@ async function main() {
   const command = words.join(" ");
   if (!command || command === "help") { print(USAGE); return; }
   if (command === "experiment") { print(`not run: the ${String(flags.name ?? "")} experiment is deferred in this build${flags.name === "sr_pass" && !process.env.MATTING_GPU_URL ? " (and it needs MATTING_GPU_URL)" : ""}.`); return; }
-  const db = getDb();
+  const db = getDb(), startedAt = Date.now();
+  let outcome: "ok" | "failed" = "failed";
   try {
     if (command === "assemble") await assemble(db, flags);
     else if (command === "run") await runEval(db, flags);
@@ -287,6 +289,11 @@ async function main() {
     }
     else if (command === "cleanup") print({ cleanup: await cleanupEval(db, list(need(flags, "batches"))) });
     else { print(USAGE); process.exitCode = 2; }
-  } finally { await closeDb(); }
+    outcome = process.exitCode ? "failed" : "ok";
+  } finally {
+    // M6-F1-R3: this run's billable seconds as one cost ledger row (on Cloud Run only; a test run, reported apart).
+    await recordJobRun(db, { startedAt, outcome, isTest: true });
+    await closeDb();
+  }
 }
 main().catch(error => { console.error(error instanceof Error ? error.message : String(error)); process.exitCode = 1; });

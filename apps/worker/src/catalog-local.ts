@@ -109,7 +109,7 @@ export function localIngestDeps(storage: IngestDeps["storage"]): IngestDeps {
 function uploadRow(kind: UploadKind, name: string, gcsUri: string | null, sourceUrl: string | null = null): CatalogUpload {
   return {
     id: randomUUID(), batchId: "local", kind, name, relativePath: null, gcsUri, sourceUrl, sizeBytes: null, mime: null,
-    status: "uploaded", detected: null, error: null, createdAt: new Date(),
+    status: "uploaded", detected: null, error: null, ingestFailures: 0, createdAt: new Date(),
   };
 }
 

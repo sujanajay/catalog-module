@@ -28,7 +28,7 @@ function fakeBucket(objects: Record<string, { size: number; contentType: string 
 function upload(over: Partial<CatalogUpload>): CatalogUpload {
   return {
     id: "u1", batchId: "b1", kind: "image", name: "files", relativePath: null, gcsUri: null, sourceUrl: null,
-    sizeBytes: null, mime: null, status: "uploaded", detected: null, error: null, createdAt: new Date(), ...over,
+    sizeBytes: null, mime: null, status: "uploaded", detected: null, error: null, ingestFailures: 0, createdAt: new Date(), ...over,
   };
 }
 
