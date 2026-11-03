@@ -4,6 +4,7 @@ import CatalogWizard, { type WizardInitialBatch } from "../../../components/cata
 import { BATCH_NOT_FOUND, getBatch } from "../../../lib/catalog/batches";
 import { canContinueSettingUp } from "../../../lib/catalog/copy";
 import { isUuid } from "../../../lib/catalog/uuid";
+import { supabaseClient } from "../../../lib/catalog/supabase";
 import { db } from "../../../lib/db";
 import { HttpError } from "../../../lib/errors";
 import { requireRole } from "../../../lib/user";
@@ -32,11 +33,13 @@ export default async function NewBatchPage({ searchParams }: { searchParams: Pro
   await requireRole("operator");
   const [brands, query] = await Promise.all([listBrandOptions(db()), searchParams]);
   const shareEmail = process.env.SHARE_SA_EMAIL ?? "";
+  // Supabase folder links are offered only while the read client is configured (M1-F1-R4).
+  const supabasePaste = supabaseClient() !== null;
   if (query.batch !== undefined) {
     const initialBatch = await resumeBatch(query.batch);
     if (!initialBatch) return <main><p role="alert">{BATCH_NOT_FOUND}</p><p><a className="btn ghost" href="/catalog">All batches</a></p></main>;
-    return <main><CatalogWizard brands={brands} initialBatch={initialBatch} shareEmail={shareEmail}/></main>;
+    return <main><CatalogWizard brands={brands} initialBatch={initialBatch} shareEmail={shareEmail} supabasePaste={supabasePaste}/></main>;
   }
   const initialBrand = brands.some((brand) => brand.slug === query.brand) ? query.brand : undefined;
-  return <main><CatalogWizard brands={brands} initialBrand={initialBrand} shareEmail={shareEmail}/></main>;
+  return <main><CatalogWizard brands={brands} initialBrand={initialBrand} shareEmail={shareEmail} supabasePaste={supabasePaste}/></main>;
 }

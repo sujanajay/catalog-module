@@ -76,6 +76,15 @@ describe("M1-S1: the sharing line up front and per-root grouping", () => {
     expect(html).toContain("Choose folders");
     expect(html).toContain("Drop folders, files, zips or sheets here. Several at once is fine.");
   });
+  it("the paste hint names Supabase folders only while that paste kind is on (review #5)", () => {
+    const step1 = (supabasePaste?: boolean) => renderToStaticMarkup(createElement(WizardStep1, {
+      brands: [], brandSlug: "", name: "", productType: "auto", locked: false, email: "reader@example.com", setBrand: () => {}, setName: () => {}, setProductType: () => {},
+      ensureBatch: async () => "x", onUploadsBusy: () => {}, onLinksBusy: () => {}, onAdded: () => {}, ...(supabasePaste === undefined ? {} : { supabasePaste }),
+    }));
+    expect(step1()).toContain(`placeholder="A Google Sheet link, a Google Drive folder link, or image links one per line"`);
+    expect(step1(false)).not.toContain("Supabase");
+    expect(step1(true)).toContain(`placeholder="A Google Sheet link, a Google Drive folder link, a Supabase folder link, or image links one per line"`);
+  });
   it("step 2 offers each input on its own first, with the grouping sentence when the batch is grouped per root (M1-F1-R2)", () => {
     const value = { ...detected([]), grouping: { perRoot: true, sentence: "Folder A grouped by folder name, sheet b.xlsx by column E (Option Id)." } } as WizardDetected;
     const html = renderToStaticMarkup(createElement(WizardStep2, {

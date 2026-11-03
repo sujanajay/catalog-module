@@ -3,12 +3,15 @@
 // pending check: its answer is never shown, and a text that is still waiting its turn is not sent at
 // all. Writes stay one at a time, in order, so an older paste can never land after a newer one on
 // the server (the browser cannot stop a request the server is already handling).
+import { isSupabaseFolderCell } from "@catalog/core/catalog/ingest/supabase-link";
 
 /** One answer of `POST /links` (apps/web/lib/catalog/links.ts addLinks). */
 export interface PasteResult {
   kind: string; access: string; summary: string; count?: number;
   /** The readback pill and the notes under it, for a list of image links. */
   pill?: string; notes?: string[];
+  /** The other inputs one text added (several Supabase folder links, then the image links beside them). */
+  others?: PasteResult[];
 }
 
 export interface PasteView { checking: boolean; results: PasteResult[]; error: string }
@@ -76,17 +79,14 @@ export function createPasteChecker(opts: PasteCheckerOptions) {
 }
 
 const GOOGLE = /https?:\/\/(docs\.google\.com\/spreadsheets|drive\.google\.com\/.*folders)/i;
-/** A Supabase Storage folder link (M1-F1-R4): an object path that does not end in an image name. */
-const SUPABASE_FOLDER = /^https:\/\/[^\s/]+\.supabase\.co\/storage\/v1\/object\/(public|sign|authenticated)\/[^\s?#]*?(?<!\.(jpe?g|png|webp|gif|tiff?|heic|heif|avif))\/?(?:[?#]\S*)?$/i;
-/** A line sent on its own: a Google link or a Supabase folder link. */
-const alone = (line: string) => GOOGLE.test(line) || SUPABASE_FOLDER.test(line);
-
 /**
- * The texts one paste sends: each Google or Supabase folder link on its own, and the image links as one text. The
- * image text keeps its lines and cells as pasted (a Google line becomes an empty line), so row
- * numbers and empty cells in the readback match what the operator pasted.
+ * The texts one paste sends: each Google link (and, while Supabase folder pastes are on, each line that
+ * is a whole Supabase folder link) on its own, and the image links as one text. The image text keeps
+ * its lines and cells as pasted (a Google line becomes an empty line), so row numbers and empty cells
+ * in the readback match what the operator pasted.
  */
-export function pasteEntries(value: string): string[] {
+export function pasteEntries(value: string, supabaseFolders = false): string[] {
+  const alone = (line: string) => GOOGLE.test(line) || (supabaseFolders && isSupabaseFolderCell(line));
   const lines = value.split(/\r?\n/);
   const google = lines.map((s) => s.trim()).filter(alone);
   const images = lines.map((s) => (alone(s.trim()) ? "" : s)).join("\n");

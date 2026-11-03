@@ -9,7 +9,7 @@ import { parseShotName } from "../naming";
 import { errorReason, LINK_REASON, statusReason } from "./link-reasons";
 import { urlFileName } from "./links-sheet";
 import { fetchableUrl, parsePastedLinks, type PastedTable } from "./url-list";
-import { SUPABASE_OFF, supabaseFolderLinks } from "./supabase-folder";
+import { supabaseFolderLinks } from "./supabase-link";
 import type { Detected, IngestDeps } from "./types";
 
 export const DRIVE_FOLDER_OK = "Drive folder found. We will copy its files when you start.";
@@ -60,15 +60,16 @@ const FOLDER_LINK = /https?:\/\/drive\.google\.com\/[^\s]*folders\/[^\s]+/gi;
 
 /**
  * docs.google.com/spreadsheets -> google_sheet; drive.google.com/drive/folders or /folders/ -> drive_folder;
- * a Supabase Storage folder link -> supabase_folder (M1-F1-R4; the ids are the links); one or more
- * http(s) lines -> url_list; else null.
+ * a cell that is a whole Supabase Storage folder link -> supabase_folder (M1-F1-R4; the ids are the
+ * canonical links), only when `supabaseFolders` is on (else such a link is an image link, as before);
+ * one or more http(s) lines -> url_list; else null.
  */
-export function detectPastedText(text: string): { kind: "google_sheet" | "drive_folder" | "supabase_folder" | "url_list"; ids: string[] } | null {
+export function detectPastedText(text: string, opts: { supabaseFolders: boolean } = { supabaseFolders: false }): { kind: "google_sheet" | "drive_folder" | "supabase_folder" | "url_list"; ids: string[] } | null {
   const sheets = [...text.matchAll(SHEET_LINK)].map((m) => parseSpreadsheetId(m[0])).filter((id): id is string => !!id);
   if (sheets.length) return { kind: "google_sheet", ids: [...new Set(sheets)] };
   const folders = [...text.matchAll(FOLDER_LINK)].map((m) => parseFolderId(m[0])).filter((id): id is string => !!id);
   if (folders.length) return { kind: "drive_folder", ids: [...new Set(folders)] };
-  const supabase = supabaseFolderLinks(text);
+  const supabase = opts.supabaseFolders ? supabaseFolderLinks(text) : [];
   if (supabase.length) return { kind: "supabase_folder", ids: supabase };
   const urls = parsePastedLinks(text).rows.flatMap((r) => r.urls);
   if (urls.length) return { kind: "url_list", ids: urls };
@@ -188,8 +189,6 @@ export function accessStatus(result: Detected | { kind: UploadKind; error: strin
 export async function checkLinkAccess(text: string, deps: Pick<IngestDeps, "sheets" | "drive" | "fetch" | "lookup">): Promise<Detected | { kind: UploadKind; error: string }> {
   const found = detectPastedText(text);
   if (!found) return { kind: "url_list", error: NOTHING_TO_CHECK };
-  // A Supabase folder is listed by the web tier's own client (readSupabaseFolder), not here.
-  if (found.kind === "supabase_folder") return { kind: "url_list", error: SUPABASE_OFF };
 
   if (found.kind === "url_list") {
     const table = parsePastedLinks(text);

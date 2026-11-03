@@ -6,6 +6,11 @@ import { createPasteChecker, EMPTY_PASTE_VIEW, pasteEntries, type PasteResult, t
 /** The pill shown while the readback runs (spec 14b F2). */
 export const PASTE_WAITING = "Checking your links...";
 
+/** The paste field hint; Supabase folders are named only while that paste kind is on. */
+export function pastePlaceholder(supabase: boolean): string {
+  return "A Google Sheet link, a Google Drive folder link, " + (supabase ? "a Supabase folder link, " : "") + "or image links one per line";
+}
+
 function pillOf(r: PasteResult): string {
   if (r.access !== "ok") return "No access yet";
   if (r.kind === "url_list") return r.pill ?? `${r.count ?? 0} image links`;
@@ -27,18 +32,21 @@ export function PasteStatus({ view }: { view: PasteView }) {
  * `removed` counts the pasted inputs removed through the input list: each change clears the box and its
  * readback and forgets what was saved, so pasting the same text again adds it again (spec 14b F3).
  */
-export default function PasteBox({ ensureBatch, onBusy, onAdded, removed = 0 }: { ensureBatch(): Promise<string>; onBusy(busy: boolean): void; onAdded(): void; removed?: number }) {
+export default function PasteBox({ ensureBatch, onBusy, onAdded, removed = 0, supabase = false }: { ensureBatch(): Promise<string>; onBusy(busy: boolean): void; onAdded(): void; removed?: number; supabase?: boolean }) {
   const [text, setText] = useState("");
   const [view, setView] = useState<PasteView>(EMPTY_PASTE_VIEW);
   // The latest callbacks, so the checker made once on the first render always calls the current ones.
-  const props = useRef({ ensureBatch, onBusy, onAdded });
-  props.current = { ensureBatch, onBusy, onAdded };
+  const props = useRef({ ensureBatch, onBusy, onAdded, supabase });
+  props.current = { ensureBatch, onBusy, onAdded, supabase };
   const checker = useRef<ReturnType<typeof createPasteChecker> | null>(null);
   checker.current ??= createPasteChecker({
     async save(value) {
       const id = await props.current.ensureBatch();
       const got: PasteResult[] = [];
-      for (const entry of pasteEntries(value)) got.push(await wizardApi<PasteResult>(batchUrl(id, "/links"), "POST", { text: entry }));
+      for (const entry of pasteEntries(value, props.current.supabase)) {
+        const answer = await wizardApi<PasteResult>(batchUrl(id, "/links"), "POST", { text: entry });
+        got.push(answer, ...(answer.others ?? []));
+      }
       return got;
     },
     onView: setView,
@@ -51,7 +59,7 @@ export default function PasteBox({ ensureBatch, onBusy, onAdded, removed = 0 }: 
     setText("");
     checker.current!.forget();
   }, [removed]);
-  return <div><label htmlFor="source-links">Or paste a link</label><textarea id="source-links" rows={3} value={text} placeholder="A Google Sheet link, a Google Drive folder link, a Supabase folder link, or image links one per line" onChange={(e) => setText(e.target.value)} onPaste={(e) => { const field = e.currentTarget; const value = text.slice(0, field.selectionStart) + e.clipboardData.getData("text") + text.slice(field.selectionEnd); setTimeout(() => check(value), 0); }} onBlur={() => check(text)} />
+  return <div><label htmlFor="source-links">Or paste a link</label><textarea id="source-links" rows={3} value={text} placeholder={pastePlaceholder(supabase)} onChange={(e) => setText(e.target.value)} onPaste={(e) => { const field = e.currentTarget; const value = text.slice(0, field.selectionStart) + e.clipboardData.getData("text") + text.slice(field.selectionEnd); setTimeout(() => check(value), 0); }} onBlur={() => check(text)} />
     <PasteStatus view={view} />
   </div>;
 }

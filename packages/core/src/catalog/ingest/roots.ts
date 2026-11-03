@@ -41,28 +41,43 @@ function stripWrappers(dirs: string[][]): string[][] {
   return out;
 }
 
+/** True when every directory list is empty or holds only shape folders (`Square`, `Rectangle`). */
+export const onlyShapeFolders = (dirs: string[][]) => dirs.every((d) => d.every(isShapeFolder));
+
+/** A product-code stem (a file-name stem with a digit, such as `ABC123`); `front` or `IMG` is not one. */
+const codeOf = (item: SourceItem) => {
+  const stem = normalizeKey(item.identifier);
+  return /\d/.test(stem) ? stem : "";
+};
+
 /**
- * The mode of one root of files (M1-F1-R2): `folder` when every photo sits in a sub-folder of the
- * root (shape folders such as `Square` do not count), each product folder holds FOLDER_PHOTOS_MIN to
- * FOLDER_PHOTOS_MAX photos, and no product-code stem (a file-name stem with a digit, such as
- * `ABC123`) appears in two product folders; else `filename`.
+ * The mode of one root of files (M1-F1-R2). `folder` when all of these hold, else `filename`:
+ * - every photo sits in a product folder below the root (shape folders such as `Square` do not count);
+ * - each product folder holds FOLDER_PHOTOS_MIN to FOLDER_PHOTOS_MAX photos;
+ * - not every photo is already named `<code>_<n>` (then the file names say it all);
+ * - no product folder holds two numbered product codes (a category folder such as `Men`);
+ * - no product code appears in two product folders (folders by view such as `Front`, `Back`).
  * `productOf` gives an item's product folder (the folder-mode identifier).
  */
 export function fileRootMode(items: SourceItem[], dirs: string[][], productOf: (item: SourceItem) => string): IdentifierMode {
   if (!items.length) return "filename";
   const below = stripWrappers(dirs);
   if (below.some((d) => !d.some((seg) => !isShapeFolder(seg)))) return "filename";
+  if (items.every((item) => codeOf(item) && item.n !== null)) return "filename";
   const photos = new Map<string, number>();
   const stems = new Map<string, Set<string>>();
+  const numberedCodes = new Map<string, Set<string>>();
   for (const item of items) {
     const product = productOf(item);
     if (!product) return "filename";
     photos.set(product, (photos.get(product) ?? 0) + 1);
-    // Only a stem with a digit looks like a product code; `front.jpg` in every product folder is a view name.
-    const stem = normalizeKey(item.identifier);
-    if (/\d/.test(stem)) stems.set(stem, (stems.get(stem) ?? new Set()).add(product));
+    const code = codeOf(item);
+    if (!code) continue;
+    stems.set(code, (stems.get(code) ?? new Set()).add(product));
+    if (item.n !== null) numberedCodes.set(product, (numberedCodes.get(product) ?? new Set()).add(code));
   }
   if ([...photos.values()].some((n) => n < FOLDER_PHOTOS_MIN || n > FOLDER_PHOTOS_MAX)) return "filename";
+  if ([...numberedCodes.values()].some((codes) => codes.size > 1)) return "filename";
   if ([...stems.values()].some((s) => s.size > 1)) return "filename";
   return "folder";
 }
@@ -88,6 +103,9 @@ export function detectRoots(items: SourceItem[], productOf: (item: SourceItem) =
     let mode: IdentifierMode;
     if (root.kind === "sheet") mode = rootItems.some((i) => i.sheetIdentifier) ? "sheet_column" : "filename";
     else if (root.kind === "links") mode = "filename";
+    // A folder dropped with its photos directly inside (shape folders aside) may itself be the product
+    // (`ZSKU100/front.jpg`): it is judged as the product folder of its own root.
+    else if (root.kind === "folder" && onlyShapeFolders(dirs)) mode = fileRootMode(rootItems, dirs.map((d) => [root.folder!, ...d]), productOf);
     else mode = fileRootMode(rootItems, dirs, productOf);
     modes.set(key, mode);
     roots.push({ key, kind: root.kind, uploadId: root.uploadId, folder: root.folder, mode });

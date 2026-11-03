@@ -25,6 +25,7 @@ import { buildZip } from "../../../test-fixtures/catalog/ingest-a/builders";
 import { mergeCounts, PLACING_LEASE_MS } from "../counts";
 import { buildPreview, deliveryToken, failStoppedIngest, GROUP_TIME_BUDGET_MS, INGEST_STOPPED_TEXT, INGEST_TIME_BUDGET_MS, LINK_MAX_ATTEMPTS, LINK_RETRY_ATTEMPTS, PLACE_BUDGET_ITEMS, runIngest } from "./index";
 import { linkFailuresBlock } from "./detect-step";
+import { groupingSentence } from "./roots";
 import { linkFailuresOf } from "./link-failures";
 import { manifestPath, type UploadManifest } from "./manifest";
 import type { IngestDeps } from "./types";
@@ -556,6 +557,45 @@ describe("a pasted grid of links (spec 14b F2)", () => {
     expect(rows).toHaveLength(27);
     expect(rows.filter((r) => r.originalName.startsWith("BHSS2620Z-WHITE NAVY_")).map((r) => r.originalName).sort()).toEqual([1, 2, 3, 4, 5].map((n) => `BHSS2620Z-WHITE NAVY_${n}.JPG`));
     expect(w.calls.fetches.filter((f) => f.includes("BHSS2620Z")).every((f) => f.includes("WHITE%20NAVY"))).toBe(true);
+  });
+});
+
+describe("a Supabase folder paste through the worker (M1-F1-R4, review #10)", () => {
+  it("collects the listed folder as image links, groups it by folder name per root and names it in the sentence", async () => {
+    const w = fakeWorld();
+    const folder = "https://projref.supabase.co/storage/v1/object/public/softlines/anta";
+    // The row addLinks saves for a listed folder: `<product folder>\t<url>` lines and detected.supabaseFolder.
+    const links = ["ZSKU1/back.jpg", "ZSKU1/front.jpg", "ZSKU2/front.jpg"].map((p) => [p.split("/")[0]!, `${folder}/${p}`] as const);
+    for (const [, url] of links) w.web.set(url, await jpeg());
+    const [b] = await db.insert(catalogBatches).values({
+      brandSlug: "test_brand", brandName: "Test Brand", name: "supabase folder", isTest: true, createdBy: "op@opptra.com", channels: [],
+      options: { identifierMode: "filename", precedence: "uploads_then_links", sheetColumns: null, perRoot: true },
+    }).returning();
+    const name = "Supabase folder softlines/anta";
+    const [u] = await db.insert(catalogUploads).values({
+      batchId: b!.id, kind: "url_list", name, sourceUrl: links.map(([id, url]) => `${id}\t${url}`).join("\n"), gcsUri: null, status: "uploaded",
+      detected: { kind: "url_list", fileCount: 3, title: name, message: `${name}: 3 photos in 2 folders, grouped by folder name.`, supabaseFolder: { url: folder, mode: "folder" } },
+    }).returning();
+    // A dropped folder of view-named photos beside it: its own root, also by folder name.
+    await folderUpload(w, b!, { "USPA_AW26/ZSKU100/front.jpg": await jpeg(), "USPA_AW26/ZSKU100/back.jpg": await jpeg() });
+    const lookup = async () => ["93.184.215.14"];
+    for (const row of await db.select().from(catalogUploads).where(eq(catalogUploads.batchId, b!.id))) {
+      let body: { batchId: string; uploadId: string; cursor?: string } | null = { batchId: b!.id, uploadId: row.id };
+      while (body) {
+        const from = w.enqueued.length;
+        await runIngest(db, { ...deps(w), lookup }, body);
+        body = (w.enqueued[from]?.body as typeof body) ?? null;
+      }
+    }
+
+    const batch = await batchRow(b!.id);
+    expect(batch.counts).toMatchObject({ products: 3, sources: 5, previewReady: true, failReason: null });
+    expect(Object.keys(await linkStatusesOf(b!.id)).sort()).toEqual(["ZSKU1", "ZSKU100", "ZSKU2"]);
+    const [upload] = await db.select().from(catalogUploads).where(eq(catalogUploads.id, u!.id));
+    expect(upload!.detected?.rejected ?? []).toEqual([]);
+    expect(upload!.detected).toMatchObject({ supabaseFolder: { url: folder, mode: "folder" } });
+    expect(batch.counts.roots).toEqual(expect.arrayContaining([{ kind: "links", name, mode: "folder" }, expect.objectContaining({ kind: "folder", name: "USPA_AW26", mode: "folder" })]));
+    expect(groupingSentence(batch.counts.roots!)).toContain(`${name} by folder name`);
   });
 });
 

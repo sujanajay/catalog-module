@@ -136,13 +136,19 @@ describe("pasteEntries", () => {
     ]);
     expect(pasteEntries(sheet)).toEqual([sheet]);
   });
+  it("with Supabase folder pastes off, a Supabase folder link stays in the image links, as before (review #1)", () => {
+    const folder = "https://ref.supabase.co/storage/v1/object/public/softlines/anta";
+    expect(pasteEntries(`${folder}
+https://example.com/a_1.jpg`)).toEqual([`${folder}
+https://example.com/a_1.jpg`]);
+  });
   it("sends a Supabase folder link alone (M1-F1-R4); a Supabase photo link stays an image link", () => {
     const folder = "https://ref.supabase.co/storage/v1/object/public/softlines/anta";
     const signed = "https://ref.supabase.co/storage/v1/object/sign/softlines/anta?token=abc";
     const photo = "https://ref.supabase.co/storage/v1/object/public/softlines/anta/A_1.jpg";
     expect(pasteEntries(`${folder}
 ${photo}
-${signed}`)).toEqual([folder, signed, `
+${signed}`, true)).toEqual([folder, signed, `
 ${photo}
 `]);
   });

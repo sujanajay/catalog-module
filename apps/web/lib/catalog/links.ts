@@ -4,7 +4,8 @@ import { catalogBatches, catalogUploads, type CatalogBatch, type CatalogUpload }
 import { accessStatus, checkLinkAccess, detectPastedText, NOTHING_TO_CHECK, pasteReadback } from "@catalog/core/catalog/ingest/detect";
 import { collectGoogleSheetOnWeb, googleClients } from "@catalog/core/catalog/ingest/google-sheet";
 import { collectDriveFolderOnWeb } from "@catalog/core/catalog/ingest/drive-folder";
-import { readSupabaseFolder } from "@catalog/core/catalog/ingest/supabase-folder";
+import { readSupabaseFolder, type SupabaseStorageLike } from "@catalog/core/catalog/ingest/supabase-folder";
+import { withoutSupabaseFolders } from "@catalog/core/catalog/ingest/supabase-link";
 import { batchPrefix } from "@catalog/core/catalog/naming";
 import { pinnedFetch } from "@catalog/core/safe-url";
 import * as storage from "@catalog/core/storage";
@@ -17,10 +18,14 @@ export async function addLinks(id: string, value: unknown, target?: string) {
   await assertDraft(id);
   const text = (value as { text?: unknown })?.text;
   if (typeof text !== "string") throw badRequest(NOTHING_TO_CHECK);
-  const detected = detectPastedText(text);
+  // Supabase folder links are a paste kind only while the client is on; off, such a link is an image link as before.
+  const client = supabaseClient();
+  const detected = detectPastedText(text, { supabaseFolders: client !== null });
   if (!detected) throw badRequest(NOTHING_TO_CHECK);
-  if (detected.kind === "supabase_folder") return addSupabaseFolder(id, detected.ids[0]!, target);
-  const kind = detected.kind;
+  if (detected.kind === "supabase_folder") return addSupabaseFolders(id, client!, text, detected.ids, target);
+  return addPastedText(id, text, detected.kind, target);
+}
+async function addPastedText(id: string, text: string, kind: "google_sheet" | "drive_folder" | "url_list", target?: string) {
   const deps = kind === "url_list" ? { fetch: pinnedFetch } : { ...await googleClients(), fetch: pinnedFetch };
   const result = await checkLinkAccess(text, deps);
   const access = accessStatus(result);
@@ -47,15 +52,31 @@ async function saveLinkRow(id: string, values: LinkRowValues, ok: boolean, rowFo
   });
 }
 /**
+ * Every Supabase folder link in a paste, each as its own input, then the rest of the text (image
+ * links next to the folders) through the normal path. The first answer is returned, with the others
+ * under `others`. Replacing one input (`target`) takes the first folder only.
+ */
+async function addSupabaseFolders(id: string, client: SupabaseStorageLike, text: string, links: string[], target?: string) {
+  if (target) return addSupabaseFolder(id, client, links[0]!, target);
+  const answers: Record<string, unknown>[] = [];
+  for (const link of links) answers.push(await addSupabaseFolder(id, client, link));
+  const rest = withoutSupabaseFolders(text);
+  // With folder detection off, the rest is never a folder paste again.
+  const restKind = detectPastedText(rest, { supabaseFolders: false })?.kind;
+  if (restKind && restKind !== "supabase_folder") answers.push(await addPastedText(id, rest, restKind));
+  const [first, ...others] = answers;
+  return others.length ? { ...first, others } : first!;
+}
+/**
  * A pasted Supabase folder link (M1-F1-R4): listed read-only on the web tier and saved as its own
  * `url_list` row of image links (product folder names kept as the rows' names when the folder is one
- * folder per product). `detected.supabaseFolder` holds the link, so pasting it again updates that row
- * and the plain image-links row stays apart.
+ * folder per product). `detected.supabaseFolder` holds the canonical link (no token), so pasting the
+ * same folder again in any spelling updates that row and the plain image-links row stays apart.
  */
-async function addSupabaseFolder(id: string, link: string, target?: string) {
-  const read = await readSupabaseFolder(supabaseClient(), link);
+async function addSupabaseFolder(id: string, client: SupabaseStorageLike, link: string, target?: string) {
+  const read = await readSupabaseFolder(client, link);
   const values: LinkRowValues = read.ok
-    ? { kind: "url_list", name: read.title, sourceUrl: read.text, status: "uploaded", error: null, detected: { kind: "url_list", fileCount: read.photos, title: read.title, message: read.message, supabaseFolder: { url: link, mode: read.mode } } }
+    ? { kind: "url_list", name: read.title, sourceUrl: read.text, status: "uploaded", error: null, detected: { kind: "url_list", fileCount: read.photos, title: read.title, message: read.message, supabaseFolder: { url: read.url, mode: read.mode } } }
     : { kind: "url_list", name: "Supabase folder", sourceUrl: link, status: "failed", error: read.error, detected: { kind: "url_list", message: read.error, supabaseFolder: { url: link, mode: "filename" } } };
   const uploadId = await saveLinkRow(id, values, read.ok, async (tx) => {
     if (target) return linkRowFor(tx, id, "url_list", link, target);

@@ -102,6 +102,32 @@ describe("per-root grouping (M1-F1-R2)", () => {
     expect(rootOf(zip("Images/ABC1/a.jpg"))).toMatchObject({ key: "upload:zip1", kind: "zip" });
   });
 
+  it("category sub-folders with no product code shared between them are grouped by file name (review #2)", () => {
+    const g = groupItems(["Brand/Men/GHI301_1.jpg", "Brand/Men/GHI303_1.jpg", "Brand/Men/GHI303_2.jpg", "Brand/Women/GHI302_1.jpg"].map((p) => file(p)), perRoot);
+    expect(g.rejected).toEqual([]);
+    expect(shape(g)).toEqual({ GHI301: ["Brand/Men/GHI301_1.jpg"], GHI302: ["Brand/Women/GHI302_1.jpg"], GHI303: ["Brand/Men/GHI303_1.jpg", "Brand/Men/GHI303_2.jpg"] });
+    expect(g.roots?.map((r) => r.mode)).toEqual(["filename"]);
+    // Men/{GHI300_1, GHI301_1} + Women/{GHI302_1}: the same, one code per file.
+    expect(shape(groupItems(["B/Men/GHI300_1.jpg", "B/Men/GHI301_1.jpg", "B/Women/GHI302_1.jpg"].map((p) => file(p)), perRoot))).toEqual({
+      GHI300: ["B/Men/GHI300_1.jpg"], GHI301: ["B/Men/GHI301_1.jpg"], GHI302: ["B/Women/GHI302_1.jpg"],
+    });
+  });
+
+  it("product folders dropped directly, with view-named files, are each one product (review #3)", () => {
+    const g = groupItems(["ZSKU100/front.jpg", "ZSKU100/back.jpg", "ZSKU101/front.jpg", "ZSKU101/back.jpg", "ZSKU101/Square/front.jpg"].map((p) => file(p)), perRoot);
+    expect(g.rejected).toEqual([]);
+    expect(shape(g)).toEqual({
+      ZSKU100: ["ZSKU100/back.jpg", "ZSKU100/front.jpg"],
+      ZSKU101: ["ZSKU101/back.jpg", "ZSKU101/front.jpg"],
+      ZSKU101_square: ["ZSKU101/Square/front.jpg"],
+    });
+    expect(g.roots?.map((r) => [r.key, r.mode])).toEqual([["folder:ZSKU100", "folder"], ["folder:ZSKU101", "folder"]]);
+    // One product folder alone is that product, not a product called "front".
+    expect(shape(groupItems(["ZSKU200/front.jpg", "ZSKU200/back.jpg"].map((p) => file(p)), perRoot))).toEqual({ ZSKU200: ["ZSKU200/back.jpg", "ZSKU200/front.jpg"] });
+    // A flat folder dropped directly still goes by its file names.
+    expect(shape(groupItems(["Flat2/DEF200_1.jpg", "Flat2/DEF200_2.jpg"].map((p) => file(p)), perRoot))).toEqual({ DEF200: ["Flat2/DEF200_1.jpg", "Flat2/DEF200_2.jpg"] });
+  });
+
   it("a product in two roots under one name is one product (uploads first, then links)", () => {
     const g = groupItems([file("Flat/YZA1_1.jpg"), sheetLink("YZA1", 1), sheetLink("YZA1", 2)], perRoot);
     expect(shape(g)).toEqual({ YZA1: ["Flat/YZA1_1.jpg", "YZA1-2.jpg"] });

@@ -13,11 +13,15 @@ import { POST as create } from "../app/api/catalog/batches/route";
 import { POST as addLinks } from "../app/api/catalog/batches/[id]/links/route";
 import { PATCH as patchDetected } from "../app/api/catalog/batches/[id]/detected/route";
 import { pasteEntries } from "../components/catalog/paste-check";
-import { supabaseClient } from "../lib/catalog/supabase";
 import { setDbForTests, type Db } from "../lib/db";
 import { resetUserDeps, setUserDeps } from "../lib/user";
 
 vi.mock(import("@catalog/core/tasks"), async (original) => ({ ...await original(), enqueueTask: vi.fn(async () => "test-task") }));
+// Image links are sampled at paste time: a fake host answers each with the first bytes of a jpeg.
+vi.mock("@catalog/core/safe-url", async (original) => ({
+  ...await original<typeof import("@catalog/core/safe-url")>(),
+  pinnedFetch: vi.fn(async () => new Response(new Uint8Array([0xff, 0xd8, 0xff, 0xe0]), { status: 206, headers: { "content-type": "image/jpeg" } })),
+}));
 vi.mock("../lib/catalog/uploads", async (original) => ({ ...await original<typeof import("../lib/catalog/uploads")>(), regroupBatch: vi.fn(async () => undefined) }));
 
 const SUPA = "https://projref.supabase.co";
@@ -43,7 +47,8 @@ const fakeSupabase: SupabaseStorageLike = {
   origin: SUPA,
   async isPublic() { return true; },
   async list(_bucket, prefix) {
-    if (prefix === "anta") return [{ name: "ZSKU1", id: null, metadata: null }, { name: "ZSKU2", id: null, metadata: null }];
+    const code = { anta: "ZSKU", uspa: "USKU" }[prefix];
+    if (code) return [1, 2].map((n) => ({ name: `${code}${n}`, id: null, metadata: null }));
     return ["front.jpg", "back.jpg"].map((name) => ({ name, id: `${prefix}/${name}`, metadata: { size: 80_000 } }));
   },
 };
@@ -76,7 +81,7 @@ async function newBatch() {
 }
 async function paste(id: string, text: string) {
   const answers: Record<string, unknown>[] = [];
-  for (const entry of pasteEntries(text)) {
+  for (const entry of pasteEntries(text, supabaseOn)) {
     const r = await addLinks(request("POST", { text: entry }), ctx(id));
     expect(r.status).toBe(200);
     answers.push(await r.json() as Record<string, unknown>);
@@ -128,12 +133,49 @@ describe("Supabase folder paste (M1-F1-R4) and M1-F1 acceptance test 2", () => {
     expect(rows[0]!.detected).toMatchObject({ supabaseFolder: { url: FOLDER } });
   });
 
-  it("when the paste kind is off, the row says so and nothing is listed", async () => {
+  it("pasting the same folder in another spelling (slash, query, signed) still updates its one row (review #7)", async () => {
+    const id = await newBatch();
+    await paste(id, FOLDER);
+    await paste(id, `${FOLDER}/?x=1`);
+    await paste(id, `${SUPA}/storage/v1/object/sign/softlines/anta?token=abc.def`);
+    const rows = (await uploadsOf(id)).filter((u) => u.kind === "url_list");
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.detected).toMatchObject({ supabaseFolder: { url: FOLDER } });
+    expect(JSON.stringify(rows[0]!.detected)).not.toContain("token");
+  });
+
+  it("every folder link in one text is read, and the image links beside them are kept (review #4)", async () => {
+    const id = await newBatch();
+    const r = await addLinks(request("POST", { text: `${FOLDER}
+${SUPA}/storage/v1/object/public/softlines/uspa
+https://img.example.com/ABC1_1.jpg` }), ctx(id));
+    expect(r.status).toBe(200);
+    const answer = await r.json() as { kind: string; others?: { kind: string; access: string }[] };
+    expect([answer.kind, ...(answer.others ?? []).map((o) => o.kind)]).toEqual(["supabase_folder", "supabase_folder", "url_list"]);
+    const rows = await uploadsOf(id);
+    expect(rows.map((u) => u.name).sort()).toEqual(["Image links", "Supabase folder softlines/anta", "Supabase folder softlines/uspa"]);
+    expect(rows.find((u) => u.name === "Image links")!.sourceUrl!.trim()).toBe("https://img.example.com/ABC1_1.jpg");
+  });
+
+  it("with the paste kind off, Supabase links are image links exactly as before: no failed row (review #1)", async () => {
     supabaseOn = false;
     const id = await newBatch();
-    const [answer] = await paste(id, FOLDER);
-    expect(answer).toMatchObject({ kind: "supabase_folder", access: "no_access", summary: SUPABASE_OFF });
-    expect((await uploadsOf(id))[0]).toMatchObject({ status: "failed", error: SUPABASE_OFF });
+    const spaced = `${FOLDER}/My Photo 1.jpg`;
+    const answers = await paste(id, `${spaced}
+${FOLDER}/ABC1_1.jpg
+${FOLDER}/noext`);
+    expect(answers.map((a) => [a.kind, a.access])).toEqual([["url_list", "ok"]]);
+    const rows = await uploadsOf(id);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ kind: "url_list", name: "Image links", status: "uploaded", error: null });
+    expect(rows.some((u) => u.error === SUPABASE_OFF)).toBe(false);
+  });
+
+  it("with the paste kind on, a Supabase photo link with a space stays an image link (review #1)", async () => {
+    const id = await newBatch();
+    const answers = await paste(id, `${FOLDER}/My Photo 1.jpg`);
+    expect(answers.map((a) => a.kind)).toEqual(["url_list"]);
+    expect((await uploadsOf(id))[0]).toMatchObject({ kind: "url_list", name: "Image links", status: "uploaded" });
   });
 });
 
@@ -144,6 +186,5 @@ describe("supabaseClient (the admin switch)", () => {
     expect(real(env({}))).toBeNull();
     expect(real(env({ SUPABASE_URL: SUPA, SUPABASE_SERVICE_KEY: "k", SUPABASE_FOLDER_PASTE: "off" }))).toBeNull();
     expect(real(env({ SUPABASE_URL: SUPA, SUPABASE_SERVICE_KEY: "k" }))?.origin).toBe(SUPA);
-    expect(vi.isMockFunction(supabaseClient)).toBe(true);
   });
 });
