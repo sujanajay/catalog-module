@@ -43,6 +43,20 @@ describe("migration lint (M6-F2-R1)", () => {
     expect(rules(`-- we never DROP COLUMN here\nALTER TABLE "drop_column_log" ADD COLUMN "rename" text;`)).toEqual([]);
   });
 
+  it("allows a foreign key, CHECK or unique index on a table the same file creates (it has no rows yet), never on an existing one", () => {
+    const created = `CREATE TABLE IF NOT EXISTS "t" ("id" uuid PRIMARY KEY, "b" uuid, "k" text);--> statement-breakpoint
+DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 't_b_fk') THEN ALTER TABLE "t" ADD CONSTRAINT "t_b_fk" FOREIGN KEY ("b") REFERENCES "public"."a"("id"); END IF; END $$;--> statement-breakpoint
+ALTER TABLE "public"."t" ADD CONSTRAINT "t_k_check" CHECK ("t"."k" <> '');--> statement-breakpoint
+CREATE UNIQUE INDEX IF NOT EXISTS "t_k_uq" ON "t" USING btree ("k");`;
+    expect(rules(created)).toEqual([]);
+    // The same statements on a table the file does not create are still refused.
+    expect(rules(created.replace(`CREATE TABLE IF NOT EXISTS "t"`, `CREATE TABLE IF NOT EXISTS "other"`))).toEqual([
+      "adds a CHECK or foreign key that existing rows may break (add it NOT VALID)",
+      "adds a CHECK or foreign key that existing rows may break (add it NOT VALID)",
+      "adds a unique index or constraint that existing rows may break",
+    ]);
+  });
+
   it("lets a contract step through only with the marker", () => {
     const drop = `ALTER TABLE "catalog_outputs" DROP COLUMN "legacy";`;
     expect(rules(drop)).toHaveLength(1);
@@ -86,16 +100,12 @@ describe("migration lint (M6-F2-R1)", () => {
     expect(lintJournal({ entries: [entry(0, 1, "0000_a")] }, { "0000_a.sql": "", "0001_b.sql": "" }).map((f) => f.rule)).toEqual(["migration file is not in meta/_journal.json, so it never runs"]);
   });
 
-  it("the repo's journal is in run order, and this branch's 0010 sorts after M0-S1's 0009 (1793695201651)", () => {
+  it("the repo's journal is in run order, with this branch's 0012 after main's 0011", () => {
     const folder = resolveMigrationsFolder();
     const journal = JSON.parse(readFileSync(path.join(folder, "meta", "_journal.json"), "utf8")) as { entries: JournalEntry[] };
     const files = Object.fromEntries(readdirSync(folder).filter((n) => n.endsWith(".sql")).map((n) => [n, ""]));
     expect(lintJournal(journal, files)).toEqual([]);
-    // Merged with feat/m0-s1-graph-tables (0009_catalog_graph, idx 9): 0010 after it must still run.
-    const ours = journal.entries.filter((e) => e.tag !== "0010_deploy_safe_cost_ledger");
-    const mine = journal.entries.find((e) => e.tag === "0010_deploy_safe_cost_ledger")!;
-    const merged = { entries: [...ours, { idx: ours.length, when: 1793695201651, tag: "0009_catalog_graph" }, { ...mine, idx: ours.length + 1 }] };
-    expect(lintJournal(merged)).toEqual([]);
+    expect(journal.entries.slice(-2).map((e) => e.tag)).toEqual(["0011_vendor_routes", "0012_deploy_safe_cost_ledger"]);
   });
 
   it("the CI command fails on a journal out of run order", () => {

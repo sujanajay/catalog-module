@@ -17,7 +17,8 @@ export interface MigrationFinding {
   rule: string;
 }
 
-const RULES: { rule: string; test: (s: string) => boolean }[] = [
+/** `existingRows`: the rule is about rows already in the table, so it cannot fire on a table the same file creates. */
+const RULES: { rule: string; test: (s: string) => boolean; existingRows?: true }[] = [
   { rule: "drops a table", test: (s) => /\bDROP\s+TABLE\b/.test(s) },
   { rule: "drops a column", test: (s) => /\bDROP\s+COLUMN\b/.test(s) },
   { rule: "renames a table or column", test: (s) => /\bRENAME\b/.test(s) },
@@ -29,12 +30,13 @@ const RULES: { rule: string; test: (s: string) => boolean }[] = [
     test: (s) => s.split(/,\s*(?=ADD\s+COLUMN\b)/).some((c) => /\bADD\s+COLUMN\b/.test(c) && /\bNOT\s+NULL\b/.test(c) && !/\bDEFAULT\b/.test(c)),
   },
   { rule: "drops a column default (old code inserting without the column fails)", test: (s) => /\bALTER\s+COLUMN\s+("[^"]+"|\w+)\s+DROP\s+DEFAULT\b/.test(s) },
-  { rule: "adds a unique index or constraint that existing rows may break", test: (s) => /\bCREATE\s+UNIQUE\s+INDEX\b/.test(s) || (/\bADD\s+CONSTRAINT\b/.test(s) && /\bUNIQUE\b/.test(s)) },
+  { rule: "adds a unique index or constraint that existing rows may break", test: (s) => /\bCREATE\s+UNIQUE\s+INDEX\b/.test(s) || (/\bADD\s+CONSTRAINT\b/.test(s) && /\bUNIQUE\b/.test(s)), existingRows: true },
   { rule: "drops an index, type or view", test: (s) => /\bDROP\s+(INDEX|TYPE|VIEW|MATERIALIZED\s+VIEW)\b/.test(s) },
   { rule: "deletes rows", test: (s) => /^(TRUNCATE|DELETE\s+FROM)\b/.test(s) },
   {
     rule: "adds a CHECK or foreign key that existing rows may break (add it NOT VALID)",
     test: (s) => /\bALTER\s+TABLE\b/.test(s) && /\bADD\s+CONSTRAINT\b/.test(s) && /\b(CHECK|FOREIGN\s+KEY)\b/.test(s) && !/\bNOT\s+VALID\b/.test(s),
+    existingRows: true,
   },
 ];
 
@@ -53,10 +55,24 @@ export function migrationStatements(sql: string): string[] {
 export function lintMigration(file: string, sql: string): MigrationFinding[] {
   if (CONTRACT_MARKER.test(sql)) return [];
   const findings: MigrationFinding[] = [];
-  for (const statement of migrationStatements(sql)) {
-    for (const { rule, test } of RULES) if (test(statement)) findings.push({ file, statement, rule });
+  const statements = migrationStatements(sql);
+  // A table this file creates has no rows yet, so a CHECK, foreign key or unique index on it cannot break any.
+  const created = new Set(statements.flatMap((s) => tableName(/^CREATE TABLE (?:IF NOT EXISTS )?(\S+)/.exec(s)?.[1])));
+  for (const statement of statements) {
+    const target = tableName(/\bALTER TABLE (?:ONLY )?(?:IF EXISTS )?(\S+)/.exec(statement)?.[1] ?? /\bCREATE UNIQUE INDEX .*? ON (?:ONLY )?(\S+)/.exec(statement)?.[1]);
+    for (const { rule, test, existingRows } of RULES) {
+      if (existingRows && target.some((t) => created.has(t))) continue;
+      if (test(statement)) findings.push({ file, statement, rule });
+    }
   }
   return findings;
+}
+
+/** A table name as a statement writes it, without quotes or the `public.` schema; [] when there is none. */
+function tableName(raw: string | undefined): string[] {
+  if (!raw) return [];
+  const name = raw.replace(/"/g, "").toLowerCase();
+  return [name.startsWith("public.") ? name.slice("public.".length) : name];
 }
 
 /** The number of a migration file name (`0010_x.sql` is 10), or null for any other file. */

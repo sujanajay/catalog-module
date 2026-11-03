@@ -68,8 +68,29 @@
     {
       "idx": 9,
       "version": "7",
-      "when": 1793696362698,
-      "tag": "0010_deploy_safe_cost_ledger",
+      "when": 1793695201651,
+      "tag": "0009_catalog_graph",
+      "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1793710699535,
+      "tag": "0010_taxonomy",
+      "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "7",
+      "when": 1793711719417,
+      "tag": "0011_vendor_routes",
+      "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "7",
+      "when": 1793712444653,
+      "tag": "0012_deploy_safe_cost_ledger",
       "breakpoints": true
     }
   ]

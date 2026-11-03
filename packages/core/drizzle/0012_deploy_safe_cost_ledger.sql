@@ -1,4 +1,4 @@
--- M6-S4 and M6-S1 (2026-11-03). Additive only (M6-F2-R1), so the live code and the new code both work on this schema.
+-- M6-S4 and M6-S1 (2026-11-03; numbered 0012 after M0-S1 0009, M2-S1 0010 and M7-S2 0011). Additive only (M6-F2-R1), so the live code and the new code both work on this schema.
 -- catalog_cost_events: three nullable columns (component, content_version_id, billable_ms); batch_id and brand_slug
 -- become nullable for rows of no batch (a job run, the sweep); stage, kind and outcome take a superset of their values
 -- (the old CHECK dropped and a wider one added in the same transaction; NOT VALID, so Postgres does not re-read every

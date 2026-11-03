@@ -2,6 +2,7 @@
 // and the ingest runner use these; nothing here is redefined elsewhere.
 import type { Readable } from "node:stream";
 import type { CatalogUpload } from "../../db/schema";
+import type { InputRoot } from "./roots";
 import type { BatchOptions, ChannelId, IdentifierMode, Precedence, UploadKind } from "../types";
 
 export type BytesRef =
@@ -86,6 +87,8 @@ export interface Detected {                          // stored in catalog_upload
   ignoredCells?: number;
   sample?: { tried: number; ok: number; webPages: number; failures: { url: string; reason: string }[] };
   rejected?: { name: string; reason: string }[];     // per-upload rejects with their sentences
+  /** M1-F1-R4: a paste of image links listed from this Supabase folder link, and the mode its lines name products by. */
+  supabaseFolder?: { url: string; mode: "folder" | "filename" };
   message: string;                                   // the one-line text for the wizard
 }
 
@@ -100,11 +103,14 @@ export interface GroupingResult {
   products: Map<string, SourceItem[]>;               // identifier -> items sorted by n
   rejected: { item: SourceItem; reason: string }[];  // unsupported, corrupt, duplicate, no identifier
   warnings: string[];                                // batch-level sentences for the step 4 warning list
+  roots?: InputRoot[];                               // per-root grouping (M1-F1-R2): each input root and its mode
 }
 
 export interface DetectedStep2 {
   identifierMode: { detected: IdentifierMode; options: IdentifierMode[]; examples: { identifier: string; label: string; thumbs: string[] }[] };
   groupedBy: string;                                 // the announcement line, see detect-step.ts
+  /** M1-F1-R2: whether the batch is grouped per input root, and the one sentence naming each root's mode (null until grouped). */
+  grouping: { perRoot: boolean; sentence: string | null };
   precedence: { shown: boolean; default: Precedence };
   formats: { jpg: number; png: number; heic: number; other: number; sentence: string };
   sheetColumns: { identifier: number; images: number[]; sentence: string; choices: { identifier: { column: number; header: string }[]; images: { columns: number[]; header: string }[] } } | null;

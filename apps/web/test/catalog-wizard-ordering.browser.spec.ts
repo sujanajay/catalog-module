@@ -8,7 +8,7 @@ import { expect, test, type Page, type Route } from "@playwright/test";
 const loadModule = createRequire(path.resolve("package.json"));
 const { build, stop } = createRequire(loadModule.resolve("tsx"))("esbuild");
 let server: Server, origin: string;
-const detected = { identifierMode: { detected: "filename", options: ["filename"], examples: [] }, precedence: { shown: false, default: "uploads_then_links" }, sheets: [], totalProducts: 1, formats: { sentence: "One JPEG" }, unreadable: [], googleAccess: [] };
+const detected = { identifierMode: { detected: "filename", options: ["filename"], examples: [] }, grouping: { perRoot: false, sentence: null }, precedence: { shown: false, default: "uploads_then_links" }, sheets: [], totalProducts: 1, formats: { sentence: "One JPEG" }, unreadable: [], googleAccess: [] };
 const preview = { ready: true, previewAt: "2026-10-19T00:00:00Z", counts: { products: 1, sources: 1, channels: 1, outputs: 1 }, collected: 1, collectTotal: 1, warnings: [], groups: [], totalRows: 0, overwrite: { newProducts: 1, existingProducts: [], renameHints: [], sameProductPairs: [], sameBatches: [], duplicatePhotos: [] }, busy: [] };
 const answer = (route: Route, json: unknown, status = 200) => route.fulfill({ status, contentType: "application/json", body: JSON.stringify(json) });
 const releases: (() => void)[] = [];

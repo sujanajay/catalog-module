@@ -27,6 +27,10 @@ import { deriveBatchState, QA_CAP_BANNER } from "@catalog/core/catalog/pipeline/
 import { strictestChannel } from "@catalog/core/catalog/qa/policy";
 import { findOrCreateProduct } from "@catalog/core/catalog/products";
 import { cannedQa } from "./qa-mock";
+import { ensureSeedRoutes, killPrimary, resetRouting, routerFor, setRoute } from "@catalog/core/vendor/route-table";
+import { createRouter } from "@catalog/core/vendor/router";
+import { CircuitBreakers } from "@catalog/core/vendor/circuit";
+import { SEED_ROUTES } from "@catalog/core/vendor/routes";
 import type { RepairOwnDefects } from "@catalog/core/catalog/qa/triage";
 vi.mock(import("@catalog/core/catalog/sheet"),async original=>{const module=await original();return {...module,compareXlsxCsv:vi.fn(module.compareXlsxCsv)};});
 let db:Db,close:()=>Promise<void>;
@@ -48,7 +52,8 @@ function world() {
   const remove=vi.fn(async(path:string)=>objects.delete(`gs://public/${path}`));
   const fetch=vi.fn<typeof globalThis.fetch>(async(url)=>{const path=new URL(String(url)).pathname.replace(/^\/public\//,"");const obj=objects.get(`gs://public/${path}`);return obj ? new Response(new Uint8Array(obj.buf),{headers:{"content-type":obj.mime,"content-length":String(obj.buf.length),"x-goog-generation":obj.generation}}):new Response(null,{status:404});});
   const base=workerCatalogDeps(db);
-  const deps:CatalogDeps={...base,sleep:async()=>{},fetch,now:()=>new Date("2026-01-01T00:00:00Z"),log:()=>{},enqueue:vi.fn(async()=>"task"),resolvePolicy:vi.fn<CatalogDeps["resolvePolicy"]>(async()=>({matteModel:"fixture",qaModel:"",threshold:75,floor:60,qaMode:"per_source",qaSampleRate:1,source:"default"})),
+  // The route table (M7-F2) is switched on per test; without it the judge asks the policy's models only.
+  const deps:CatalogDeps={...base,routes:undefined,sleep:async()=>{},fetch,now:()=>new Date("2026-01-01T00:00:00Z"),log:()=>{},enqueue:vi.fn(async()=>"task"),resolvePolicy:vi.fn<CatalogDeps["resolvePolicy"]>(async()=>({matteModel:"fixture",qaModel:"",threshold:75,floor:60,qaMode:"per_source",qaSampleRate:1,source:"default"})),
     storage:{...storage,getBucketName:()=>"assets",getPublicBucketName:()=>"public",uploadBuffer:upload,downloadBuffer:async uri=>{const o=objects.get(uri);if(!o)throw new Error(`No object ${uri}`);return {buf:o.buf,mime:o.mime};},headObject:async uri=>{const o=objects.get(uri);return o ? {exists:true,size:o.buf.length,contentType:o.mime,generation:o.generation,crc32c:o.crc32c}:{exists:false,size:null,contentType:null,generation:null,crc32c:null};},stageCopyToPublic:copy,deletePublicObject:remove,setCustomTime:vi.fn(async()=>{})},
     judgeOutput:vi.fn<CatalogDeps["judgeOutput"]>(async(input)=>({scores:{complete_product:95,same_product:95,edge_quality:95,background_clean:95,no_text_or_watermark:95,orientation_ok:95,product_intact:95,placement_ok:95,overall:95},verdict:"pass",reasons:[],isCollage:false,costUsd:0,calls:0,usage:{},model:input.model,flags:[]})),
     classifyProductType:vi.fn<CatalogDeps["classifyProductType"]>(async()=>({type:"footwear",confidence:1,costUsd:0,calls:0,usage:{},flags:[]})),
@@ -784,6 +789,70 @@ describe("spec07 the classifier backs off on rate limits and then asks the secon
   expect(r.batch.cost).toMatchObject({qaCalls:5});
  },60_000);
 });
+describe("M7-S2 acceptance (4.2.9 tests 1 and 3): route 1 of the judge and the reader is killed or dead, and the batch completes",()=>{
+ const [FIRST,SECOND]=SEED_ROUTES.filter(r=>r.capability==="judge.render").map(r=>r.model) as [string,string];
+ /**
+  * One product, 3 photos on 2 channels (CI size; 4.2.9 test 1 names a 50-product batch, run as the monthly drill).
+  * The owner's no-training positions are recorded first (data), as they must be before any route serves (R7).
+  * `route1` is "killed" (the admin switch) or "down" (still serving, answering 503 every time).
+  */
+ async function routedBatch(name:string,route1:"killed"|"down") {
+  const w=world(),s=await seed(w,name,{shots:["a","b","c"],channels:["noon","amazon"]}),log=vi.fn();
+  resetRouting(db);await ensureSeedRoutes(db);
+  for(const route of SEED_ROUTES) await setRoute(db,route.id,{noTrainingTerms:"test: written position on file",state:"serving",changedBy:"test@opptra.com",reason:"CI"});
+  if(route1==="killed") {
+   expect(await killPrimary(db,"judge.render","test@opptra.com","CI kill-the-primary")).toMatchObject({model:FIRST});
+   expect(await killPrimary(db,"vision.read","test@opptra.com","CI kill-the-primary")).toMatchObject({model:FIRST});
+  }
+  w.deps.routes=()=>routerFor(db);
+  vi.mocked(w.deps.resolvePolicy).mockResolvedValue({matteModel:"fixture",qaModel:FIRST,qaModelSecond:SECOND,threshold:75,floor:60,qaMode:"per_source",qaSampleRate:1,source:"default"});
+  const real=await sharp({create:{width:64,height:64,channels:3,background:"white"}}).jpeg().toBuffer();
+  // Real JPEGs for the reader (the source photos) and the judge (the rendered outputs).
+  for(const [uri,obj] of w.objects) if(uri.includes(s.batch.id)) w.objects.set(uri,{...obj,buf:real,crc32c:real.toString("base64")});
+  const render=w.deps.renderAllChannels;
+  w.deps.renderAllChannels=(async(...args:Parameters<typeof render>)=>Object.fromEntries(Object.entries(await render(...args)).map(([channel,out])=>[channel,{...out,jpeg:real,bytes:real.length}]))) as typeof render;
+  const publicFetch=w.deps.fetch,models:string[]=[];
+  // Route 1 answers 503 whenever it is asked; every other route answers for both the reader and the judge.
+  const answer=JSON.stringify({type:"footwear",confidence:.9,...JSON.parse(passScores),view:"front",wrong_item:false,evidence:{}});
+  const llm=vi.fn(async(init?:RequestInit)=>{const model=String((JSON.parse(String(init?.body)) as {model:string}).model);models.push(model);return model===FIRST ? new Response("upstream error",{status:503}):new Response(JSON.stringify(openRouterReply(answer)));});
+  w.deps.fetch=vi.fn<typeof globalThis.fetch>(async(url,init)=>String(url).startsWith("https://openrouter.ai/")?llm(init):publicFetch(url,init));
+  w.deps.judgeOutput=judgeOutput;w.deps.classifyProductType=classifyProductType;w.deps.log=log;
+  vi.stubEnv("OPENROUTER_API_KEY","test-key");
+  try {
+   for(let i=0;i<3;i++) expect((await handleChunkTask(w.deps,await currentChunkTask(db,s.chunk.id))).httpStatus).toBe(200);
+   expect((await handlePublishTask(w.deps,{batchId:s.batch.id,productId:s.product.id})).outcome).toBe("published");
+   expect((await handleFinalizeTask(w.deps,{batchId:s.batch.id})).outcome).toBe("done");
+  } finally { vi.unstubAllEnvs(); resetRouting(db); }
+  const [product]=await db.select().from(catalogProducts).where(eq(catalogProducts.id,s.product.id));
+  const outputs=await db.select().from(catalogOutputs).where(eq(catalogOutputs.batchId,s.batch.id));
+  const [batch]=await db.select().from(catalogBatches).where(eq(catalogBatches.id,s.batch.id));
+  const judgements=outputs.flatMap(o=>((o.qaScores as {judgements?:{route:string|null;model:string}[]} | null)?.judgements ?? []));
+  const readings=log.mock.calls.filter(([message])=>message==="catalog_classify: product type").map(([,fields])=>fields as {route:string|null;type:string});
+  return {models,product:product!,outputs,batch:batch!,judgements,readings};
+ }
+ const completedOnRoute2=(r:Awaited<ReturnType<typeof routedBatch>>)=>{
+  expect(r.product.productType).toBe("footwear");
+  expect(r.outputs).toHaveLength(6);
+  expect(r.outputs.every(o=>o.isLive && !o.flags.includes("qa_unavailable"))).toBe(true);
+  // Every reading and every judgement names route 2 (M7-F2-R6), for the harness; the operator never sees it.
+  expect(r.readings).toEqual([expect.objectContaining({type:"footwear",route:`vision.read:openrouter:${SECOND}`})]);
+  expect(r.judgements.length).toBeGreaterThan(0);
+  expect(r.judgements.every(j=>j.route===`judge.render:openrouter:${SECOND}` && j.model===SECOND)).toBe(true);
+  expect(deriveBatchState(r.batch).state).toBe("ready");
+ };
+ it("route 1 switched off: it is never asked, and the batch completes on route 2",async()=>{
+  const r=await routedBatch("kill-primary","killed");
+  expect(r.models.length).toBeGreaterThan(0);expect(r.models).not.toContain(FIRST);
+  completedOnRoute2(r);
+ },120_000);
+ it("route 1 still serving but down (503 every time): the batch completes on route 2, and route 1's circuit stops further calls",async()=>{
+  const r=await routedBatch("dead-primary","down");
+  expect(r.models).toContain(FIRST);
+  // 4 attempts per call (5, 15, 45 s back-off) until the circuit opens after 5 failed calls; then route 1 is skipped.
+  expect(r.models.filter(m=>m===FIRST).length).toBeLessThanOrEqual(5*4);
+  completedOnRoute2(r);
+ },120_000);
+});
 describe("spec07 caps count the recorded judge spend",()=>{
  const url="https://openrouter.ai/api/v1/chat/completions";
  async function capWorld(name:string,options:Record<string,unknown>,day:string) {
@@ -802,6 +871,54 @@ describe("spec07 caps count the recorded judge spend",()=>{
   expect(await recorded(batch.id)).toBeCloseTo(0.000278,9);
   await expect(llm.fetch(url,{method:"POST"})).rejects.toBeInstanceOf(CatalogQaCapError);
   expect(upstream).toHaveBeenCalledTimes(2);expect(()=>llm.assertAvailable()).toThrow(/Batch QA spend cap reached/);
+ });
+ it("M7-S2: a cap hit mid-judging stops the judging with one cap row; no other route is asked and no circuit opens",async()=>{
+  const {llm,upstream,batch}=await capWorld("qa-cap-routes",{qaCapUsd:0.00025},"2031-05-07T10:00:00Z");
+  await llm.fetch(url,{method:"POST"});await llm.fetch(url,{method:"POST"});
+  const circuits=new CircuitBreakers({now:()=>0});
+  const router=createRouter(SEED_ROUTES.map(r=>({...r,noTrainingTerms:"test: position on file",state:"serving" as const})),circuits);
+  const routed=catalogLlmDeps(world().deps,batch,(async(write:(conn:Db)=>Promise<unknown>)=>write(db)) as UnderClaim,{stage:"qa"},router);
+  const [FIRST,SECOND]=SEED_ROUTES.filter(r=>r.capability==="judge.render").map(r=>r.model) as [string,string];
+  const bytes=await sharp({create:{width:64,height:64,channels:3,background:"white"}}).jpeg().toBuffer();
+  vi.stubEnv("OPENROUTER_API_KEY","test-key");
+  try {
+   await expect(judgeOutput({output:bytes,original:bytes,n:1,identifier:"CAP-1",channel:"noon",anchor:"centre",productType:"footwear",model:FIRST,secondModel:SECOND,threshold:75,floor:60},{...routed,fetch:routed.fetch})).rejects.toBeInstanceOf(CatalogQaCapError);
+  } finally { vi.unstubAllEnvs(); }
+  expect(upstream).toHaveBeenCalledTimes(2);
+  const caps=(await db.select().from(catalogCostEvents).where(eq(catalogCostEvents.batchId,batch.id))).filter(row=>row.outcome==="cap");
+  expect(caps).toHaveLength(1);
+  expect(SEED_ROUTES.filter(r=>r.capability==="judge.render").every(r=>circuits.state(r.id)==="closed")).toBe(true);
+ });
+ it("M6-S1 with M7-S2: a judging that fails over from route 1 to route 2 writes exactly one ledger row per actual call",async()=>{
+  const w=world();w.deps.now=()=>new Date("2031-05-08T10:00:00Z");
+  const [FIRST,SECOND]=SEED_ROUTES.filter(r=>r.capability==="judge.render").map(r=>r.model) as [string,string];
+  const asked:string[]=[];
+  // Route 1 answers 503 every time (through its back-off); route 2 answers.
+  w.deps.fetch=vi.fn<typeof globalThis.fetch>(async(_url,init)=>{
+   const model=String((JSON.parse(String(init?.body)) as {model:string}).model);asked.push(model);
+   return model===FIRST ? new Response("upstream error",{status:503}):new Response(JSON.stringify(openRouterReply(passScores)));
+  });
+  const [batch]=await db.insert(catalogBatches).values({brandSlug:"anta",brandName:"Anta",name:"ledger-failover",isTest:true,createdBy:"test@opptra.com",options:DEFAULT_BATCH_OPTIONS}).returning();
+  const router=createRouter(SEED_ROUTES.map(r=>({...r,noTrainingTerms:"test: position on file",state:"serving" as const})),new CircuitBreakers({now:()=>0}));
+  const llm=catalogLlmDeps(w.deps,batch!,(async(write:(conn:Db)=>Promise<unknown>)=>write(db)) as UnderClaim,{stage:"qa"},router);
+  const bytes=await sharp({create:{width:64,height:64,channels:3,background:"white"}}).jpeg().toBuffer();
+  vi.stubEnv("OPENROUTER_API_KEY","test-key");
+  let result;
+  try {
+   result=await judgeOutput({output:bytes,original:bytes,n:1,identifier:"FAILOVER-1",channel:"noon",anchor:"centre",productType:"footwear",model:FIRST,secondModel:SECOND,threshold:75,floor:60},llm);
+  } finally { vi.unstubAllEnvs(); }
+  expect(result.route).toBe(`judge.render:openrouter:${SECOND}`);
+  expect(result.flags).not.toContain("qa_unavailable");
+  expect(asked.filter(m=>m===FIRST).length).toBeGreaterThan(1);
+  expect(asked.filter(m=>m===SECOND)).toHaveLength(1);
+  const rows=(await ledgerOf(batch!.id)).filter(r=>r.kind==="llm_call").sort((a,b)=>a.attempt-b.attempt);
+  // One row per HTTP call, in order, on whichever route made it; only route 2's answer is billed.
+  expect(rows).toHaveLength(asked.length);
+  expect(rows.map(r=>r.engine)).toEqual(asked);
+  expect(rows.map(r=>r.attempt)).toEqual(asked.map((_,i)=>i+1));
+  expect(rows.map(r=>r.outcome)).toEqual(asked.map(m=>m===FIRST ? "failed":"ok"));
+  expect(rows.filter(r=>Number(r.usd)>0)).toHaveLength(1);
+  expect(Number(rows.find(r=>r.engine===SECOND)!.usd)).toBeCloseTo(result.costUsd,9);
  });
  it("the daily cap refuses the call after the day's recorded spend reaches DAILY_SPEND_CAP_USD",async()=>{
   const {llm,upstream}=await capWorld("qa-daily-recorded",{},"2031-06-06T10:00:00Z");

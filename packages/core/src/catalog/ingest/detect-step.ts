@@ -8,6 +8,7 @@ import { signedUrl } from "../../storage";
 import { IDENTIFIER_MODES, type IdentifierMode, type UploadKind } from "../types";
 import { linkFailuresOf, type LinkFailureRow } from "./link-failures";
 import { groupLinkRejects, type LinkReasonPhrase } from "./link-reasons";
+import { groupingSentence } from "./roots";
 import type { Detected, DetectedStep2, IngestDeps, LinkFailuresBlock } from "./types";
 
 export const CANNOT_READ_IDENTIFIER = "Could not tell which column holds the identifier.";
@@ -198,6 +199,8 @@ export async function buildDetectedStep2(
       const id = rows[0]!.identifier;
       const k = rows.length;
       const thumbs = await Promise.all(rows.slice(0, EXAMPLE_THUMBS).map((r) => sign(r.rawUri)));
+      // Per-root batches mix modes, so an example names only its photo count.
+      if (options.perRoot) return { identifier: id, label: `${fmt(k)} ${k === 1 ? "photo" : "photos"}`, thumbs };
       if (options.identifierMode === "folder") return { identifier: `${id}/`, label: `${fmt(k)} files in the folder`, thumbs };
       if (options.identifierMode === "sheet_column") {
         const col = sheetIdColumn >= 0 ? `column ${columnLetter(sheetIdColumn)}, ` : "";
@@ -210,7 +213,10 @@ export async function buildDetectedStep2(
   // The announcement line above the grouping table.
   let groupedBy: string;
   const tokenList = productLists.find((u) => detectedOf(u)?.styleColumn != null && detectedOf(u)?.colourColumn != null);
-  if (options.identifierMode === "sheet_column") {
+  const rootSentence = options.perRoot ? groupingSentence(batch.counts.roots ?? []) : null;
+  if (rootSentence) {
+    groupedBy = rootSentence;
+  } else if (options.identifierMode === "sheet_column") {
     groupedBy = composite
       ? `Grouped by style and colour code (${headers[sd!.styleColumn!] ?? ""} + ${headers[sd!.colourColumn!] ?? ""})`
       : `Grouped by the sheet column ${sheetIdHeader ?? ""}`;
@@ -287,6 +293,7 @@ export async function buildDetectedStep2(
     // again when the caller already read them (`extra.linkFailures`).
     linkFailures: linkFailuresBlock(extra.linkFailures ?? (batch.counts.linkFailures ? await linkFailuresOf(db, batchId, deps) : { links: 0, rows: [] })),
     identifierMode: { detected: detectedMode, options: modeOptions, examples },
+    grouping: { perRoot: options.perRoot === true, sentence: rootSentence },
     groupedBy,
     precedence: { shown: kinds.some((k) => FILE_KINDS.includes(k)) && kinds.some((k) => LINK_KINDS.includes(k)), default: "uploads_then_links" },
     formats: { ...formats, sentence: formatsSentence(formats) },

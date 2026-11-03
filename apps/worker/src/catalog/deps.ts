@@ -4,6 +4,8 @@ import { catalogBatches, catalogBatchProducts, catalogChunks, catalogEnlargement
 import { ensureDefaultPolicies, resolvePolicy } from "@catalog/core/catalog/qa/policy";
 import { judgeOutput } from "@catalog/core/catalog/qa/judge";
 import { classifyProductType } from "@catalog/core/catalog/qa/classify";
+import { routerFor } from "@catalog/core/vendor/route-table";
+import type { Router } from "@catalog/core/vendor/router";
 import type { RepairOwnDefects } from "@catalog/core/catalog/qa/triage";
 import { repairOwnDefects, type QaRepairContext } from "./qa-stage";
 import type { ProductType } from "@catalog/core/catalog/types";
@@ -26,6 +28,11 @@ export interface CatalogDeps {
   fetch: typeof fetch; now: () => Date; log: (message: string, fields?: Record<string,unknown>) => void;
   resolvePolicy: (brandSlug:string,category:string) => Promise<ResolvedPolicy>;
   judgeOutput: typeof judgeOutput; classifyProductType: typeof classifyProductType;
+  /**
+   * M7-F2: the live route table (kill switch per route) and the process's circuit breakers the judge and classifier
+   * call through. Absent: the policy's two models only.
+   */
+  routes?: () => Promise<Router>;
   prepare: typeof prepare; matteFor: typeof matteFor; renderAllChannels: typeof renderAllChannels;
   /** Waits between cut-out retries (07 auto-resolve) and enlargement upload tries; absent uses a timer. Tests pass an instant one. */
   sleep?: (ms: number) => Promise<void>;
@@ -84,7 +91,7 @@ export function workerCatalogDeps(db: Db): CatalogDeps {
   // Spec 18 quality: the x4 model above 2.0x (UPSCALE_MODEL_X4), stored and primed like the x2 one.
   const upscalerX4 = upscaler && config.x4Model ? storedUpscaler(upscalerId(config.x4Model, matting.upscaleTarget), config.minScale) : null;
   const render: typeof renderAllChannels = upscaler ? (p,m,channels,ctx)=>renderAllChannels(p,m,channels,{upscaler,upscalerX4,...ctx}) : renderAllChannels;
-  return {db,storage,matting,enqueue:enqueueTask,fetch,now:()=>new Date(),log:catalogLog,prepare,matteFor,renderAllChannels:render,judgeOutput,classifyProductType,repairOwnDefects,
+  return {db,storage,matting,enqueue:enqueueTask,fetch,now:()=>new Date(),log:catalogLog,prepare,matteFor,renderAllChannels:render,judgeOutput,classifyProductType,repairOwnDefects,routes:()=>routerFor(db),
     upscaler,upscalerX4,...(config.model ? {enlarge:workerEnlargeCall(),enlargeProbe:workerEnlargeProbe()}:{}),
     resolvePolicy:async(brandSlug,category)=> {
       if (!defaultsEnsured) {

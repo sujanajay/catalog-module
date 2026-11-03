@@ -112,9 +112,9 @@ export default function Uploader({ensureBatch,onBusy,onAdded,onRows}: {ensureBat
   }
   const fromFiles = (files: FileList | null) => files ? add(Array.from(files).map((file) => ({file,relativePath:file.webkitRelativePath || file.name}))) : undefined;
   return <><div className="drop" onDragOver={(e) => e.preventDefault()} onDrop={async (e) => { e.preventDefault(); const items = Array.from(e.dataTransfer.items); const entries = items.map((i) => i.webkitGetAsEntry() as unknown as Entry | null).filter((i): i is Entry => !!i); try { if(entries.length) await add((await Promise.all(entries.map((entry) => walk(entry)))).flat()); else await fromFiles(e.dataTransfer.files); } catch {setError("This folder could not be read. Choose it again.");} }}>
-    <button type="button" className="drop-select" onClick={() => fileInput.current?.click()}><strong>Drop images, folders, zips or a links sheet here</strong><span className="help" style={{display:"block"}}>Or click to choose. Photos should be named like ABC123_1.jpg, ABC123_2.jpg so we know which shots belong together.</span></button>
+    <button type="button" className="drop-select" onClick={() => fileInput.current?.click()}><strong>Drop folders, files, zips or sheets here. Several at once is fine.</strong><span className="help" style={{display:"block"}}>Or click to choose files. Name photos like ABC123_1.jpg, ABC123_2.jpg, or put each product in a folder named after it.</span></button>
     <input ref={fileInput} hidden aria-label="Choose files" type="file" multiple onChange={(e) => {void fromFiles(e.target.files); e.target.value = "";}}/>
-    <label>Choose a folder<input aria-label="Choose a folder" type="file" multiple {...{webkitdirectory:""}} onChange={(e) => {void fromFiles(e.target.files); e.target.value = "";}}/></label>
+    <label>Choose folders<input aria-label="Choose folders" type="file" multiple {...{webkitdirectory:""}} onChange={(e) => {void fromFiles(e.target.files); e.target.value = "";}}/></label>
     </div>
     <UploadErrorLine error={error}/>
   </>;

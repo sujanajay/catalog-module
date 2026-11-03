@@ -59,6 +59,8 @@ import { buildOverwritePreview, matchProducts } from "./overwrite-preview";
 import { linkStatuses, matchProductList, missingIdentifier, productListDetected, readProductList, sizeBases, type ProductListRow } from "./product-list";
 import type { Adapter, CollectInput, Detected, GroupingResult, IngestDeps, OverwritePreview, Preview, SourceItem } from "./types";
 import { fetchSourceUrl, urlListAdapter } from "./url-list";
+import { columnLetter } from "./detect-step";
+import type { InputRoot, StoredRoot } from "./roots";
 import { collectRejectReason, openZipReader, tooLargeMessage, zipAdapter, ZIP_ENTRY_MAX_BYTES } from "./zip";
 
 /** A product list collects no items; it is read in the batch-wide step. */
@@ -291,6 +293,8 @@ async function listUpload(input: CollectInput): Promise<Omit<UploadManifest, "ve
   const items = await ADAPTERS[upload.kind].collect(input);
   const detected: Detected = { kind: upload.kind, title: upload.name, fileCount: items.length, message: prior?.message ?? `${fmt(items.length)} files found.` };
   if (upload.kind === "url_list") detected.rows = items.length;
+  // A Supabase folder paste keeps its link and naming mode (M1-F1-R4) for the grouping sentence.
+  if (prior?.supabaseFolder) detected.supabaseFolder = prior.supabaseFolder;
   return { items, warnings: [], productList: false, detected };
 }
 
@@ -1037,6 +1041,27 @@ interface GroupState {
   uploadErrors: string[];
   links: number;
   linkSource: string;
+  /** M1-F1-R2: the roots of a per-root batch with their modes (absent otherwise, and on states saved before it). */
+  roots?: StoredRoot[];
+}
+
+/**
+ * The stored roots (BatchCounts.roots) of a per-root grouping: a folder by its name, an upload by its
+ * name, a sheet with the column its identifier came from (`column E (Option Id)`).
+ */
+export function storedRoots(roots: InputRoot[], uploads: CatalogUpload[], options: BatchOptions): StoredRoot[] {
+  const sheetCount = uploads.filter((u) => u.kind === "sheet" || u.kind === "google_sheet").length;
+  return roots.map((r) => {
+    const upload = r.uploadId ? uploads.find((u) => u.id === r.uploadId) : undefined;
+    const d = (upload?.detected as Detected | null | undefined) ?? null;
+    const name = r.folder ?? d?.title ?? upload?.name ?? "";
+    // A Supabase folder paste names its products by folder or file name, as it was listed (supabase-folder.ts).
+    if (d?.supabaseFolder) return { kind: r.kind, name, mode: d.supabaseFolder.mode };
+    if (r.mode !== "sheet_column") return { kind: r.kind, name, mode: r.mode };
+    const column = options.sheetColumns && sheetCount === 1 ? options.sheetColumns.identifier : d?.identifierColumn ?? -1;
+    const header = column >= 0 ? (d?.columns?.[column] ?? "").trim() : "";
+    return { kind: r.kind, name, mode: r.mode, column: column >= 0 ? `column ${columnLetter(column)}${header ? ` (${header})` : ""}` : null };
+  });
 }
 
 interface ProductEntry { id: string; pathKey: string; isNew: boolean; skuIds: string[]; resolved: boolean }
@@ -1108,6 +1133,7 @@ async function groupBatch(db: Db, deps: PlaceDeps, batchId: string, token: strin
     uploadErrors: uploads.filter((u) => u.status === "failed" && u.error).map((u) => u.error!),
     links: linkUploads.reduce((n, u) => n + manifests.get(u.id)!.items.filter((i) => i.bytes.kind === "url").length, 0),
     linkSource: linkSourceWords(linkUploads),
+    ...(grouped.roots ? { roots: storedRoots(grouped.roots, uploads, batch.options) } : {}),
   };
   await saveJson(deps, groupStatePath(prefix, token), state);
   if (!(await lease.grouping({ groupTotal: state.work.length }, 0))) return lease.stopped();
@@ -1301,6 +1327,7 @@ async function groupProducts(
     newProducts: newCount, existingProducts: withPhotos.length - newCount,
     shotsToRemove: existing.reduce((s, p) => s + p.shotsToRemove, 0),
     previewReady: true, failReason: null,
+    ...(state.roots ? { roots: state.roots } : {}),
   };
   let failReason: string | null = null;
   if (!shots.length && !state.waitingForColumn) {
