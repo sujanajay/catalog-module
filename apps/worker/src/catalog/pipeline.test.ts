@@ -911,7 +911,7 @@ describe("spec07 caps count the recorded judge spend",()=>{
   expect(result.flags).not.toContain("qa_unavailable");
   expect(asked.filter(m=>m===FIRST).length).toBeGreaterThan(1);
   expect(asked.filter(m=>m===SECOND)).toHaveLength(1);
-  const rows=(await ledgerOf(batch!.id)).filter(r=>r.kind==="llm_call").sort((a,b)=>a.attempt-b.attempt);
+  const rows=(await ledgerOf(batch!.id)).filter(r=>r.kind==="llm_call").sort((a,b)=>(a.attempt ?? 0)-(b.attempt ?? 0));
   // One row per HTTP call, in order, on whichever route made it; only route 2's answer is billed.
   expect(rows).toHaveLength(asked.length);
   expect(rows.map(r=>r.engine)).toEqual(asked);
