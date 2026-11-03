@@ -22,7 +22,7 @@ async function resumeBatch(id: string): Promise<WizardInitialBatch | null> {
   if (!canContinueSettingUp(batch)) redirect(`/catalog/${batch.id}`);
   return {
     id: batch.id, brandSlug: batch.brandSlug, name: batch.name, productType: batch.productType, channels: batch.channels,
-    options: { identifierMode: batch.options.identifierMode, precedence: batch.options.precedence },
+    options: { identifierMode: batch.options.identifierMode, precedence: batch.options.precedence, perRoot: batch.options.perRoot === true },
     uploads: uploads.map((u) => ({ status: u.status })), counts: batch.counts, status: batch.status, state,
   };
 }

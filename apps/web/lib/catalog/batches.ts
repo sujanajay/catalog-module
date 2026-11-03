@@ -1,5 +1,5 @@
 import { and, desc, eq, gt, inArray, isNull, ne, sql } from "drizzle-orm";
-import { brandMaster, catalogBatches, catalogUploads, type CatalogBatch } from "@catalog/core/db/schema";
+import { brandMaster, catalogBatches, catalogUploads, DEFAULT_BATCH_OPTIONS, type CatalogBatch } from "@catalog/core/db/schema";
 import { CHANNEL_IDS, IDENTIFIER_MODES, PRECEDENCES, PRODUCT_TYPES, PASTE_INPUT_KINDS, type BatchOptions, type BatchStatus, type ChannelId, type ProductType } from "@catalog/core/catalog/types";
 import { mergeCounts } from "@catalog/core/catalog/counts";
 import { db, type Db } from "../db";
@@ -163,17 +163,22 @@ export async function createBatch(value: unknown, actor: string) {
   const [brand] = await db().select().from(brandMaster).where(eq(brandMaster.slug, input.brandSlug));
   if (!brand) throw badRequest("Choose a brand from the list. Email sujan@opptra.com if it is missing.");
   const name = (input.name as string | undefined)?.trim() || `${brand.name} photos`;
-  const [batch] = await db().insert(catalogBatches).values({ brandSlug: brand.slug, brandName: brand.name, name, productType: input.productType as ProductType, createdBy: actor, isTest: isTestBatch(brand.slug, name), channels: [] }).returning({ id: catalogBatches.id });
+  // New batches group each input root on its own (M1-F1-R2); step 2 can still force one mode.
+  const [batch] = await db().insert(catalogBatches).values({ brandSlug: brand.slug, brandName: brand.name, name, productType: input.productType as ProductType, createdBy: actor, isTest: isTestBatch(brand.slug, name), channels: [], options: { ...DEFAULT_BATCH_OPTIONS, perRoot: true } }).returning({ id: catalogBatches.id });
   return batch!;
 }
 export function parseOptions(value: unknown, existing: BatchOptions): BatchOptions {
   const input = record(value);
-  if (Object.keys(input).some((k) => !["identifierMode", "precedence", "sheetColumns"].includes(k))) throw badRequest("Choose the grouping controls shown on this page and try again.");
+  if (Object.keys(input).some((k) => !["identifierMode", "precedence", "sheetColumns", "perRoot"].includes(k))) throw badRequest("Choose the grouping controls shown on this page and try again.");
   const options = { ...existing };
+  if (input.perRoot !== undefined && typeof input.perRoot !== "boolean") throw badRequest("Choose how to tell products apart.");
   if (input.identifierMode !== undefined) {
     if (!IDENTIFIER_MODES.includes(input.identifierMode as BatchOptions["identifierMode"])) throw badRequest("Choose how to tell products apart.");
     options.identifierMode = input.identifierMode as BatchOptions["identifierMode"];
   }
+  // One mode chosen for the whole batch turns per-root grouping off, unless perRoot says otherwise (M1-F1-R2).
+  if (input.perRoot !== undefined) options.perRoot = input.perRoot as boolean;
+  else if (input.identifierMode !== undefined) options.perRoot = false;
   if (input.precedence !== undefined) {
     if (!PRECEDENCES.includes(input.precedence as BatchOptions["precedence"])) throw badRequest("Choose which photos should win.");
     options.precedence = input.precedence as BatchOptions["precedence"];

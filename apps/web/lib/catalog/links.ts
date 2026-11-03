@@ -4,12 +4,14 @@ import { catalogBatches, catalogUploads, type CatalogBatch, type CatalogUpload }
 import { accessStatus, checkLinkAccess, detectPastedText, NOTHING_TO_CHECK, pasteReadback } from "@catalog/core/catalog/ingest/detect";
 import { collectGoogleSheetOnWeb, googleClients } from "@catalog/core/catalog/ingest/google-sheet";
 import { collectDriveFolderOnWeb } from "@catalog/core/catalog/ingest/drive-folder";
+import { readSupabaseFolder } from "@catalog/core/catalog/ingest/supabase-folder";
 import { batchPrefix } from "@catalog/core/catalog/naming";
 import { pinnedFetch } from "@catalog/core/safe-url";
 import * as storage from "@catalog/core/storage";
 import { db } from "../db";
 import { badRequest, HttpError } from "../errors";
 import { assertDraft, draftForUpdate, INPUT_NOT_FOUND, LINK_KINDS, mergeCounts } from "./batches";
+import { supabaseClient } from "./supabase";
 
 export async function addLinks(id: string, value: unknown, target?: string) {
   await assertDraft(id);
@@ -17,27 +19,53 @@ export async function addLinks(id: string, value: unknown, target?: string) {
   if (typeof text !== "string") throw badRequest(NOTHING_TO_CHECK);
   const detected = detectPastedText(text);
   if (!detected) throw badRequest(NOTHING_TO_CHECK);
+  if (detected.kind === "supabase_folder") return addSupabaseFolder(id, detected.ids[0]!, target);
   const kind = detected.kind;
   const deps = kind === "url_list" ? { fetch: pinnedFetch } : { ...await googleClients(), fetch: pinnedFetch };
   const result = await checkLinkAccess(text, deps);
   const access = accessStatus(result);
   const summary = "error" in result ? result.error : result.message;
   const values = { kind, name: "title" in result && result.title ? result.title : kind === "url_list" ? "Image links" : text.trim(), sourceUrl: kind === "url_list" ? text : text.trim(), status: access === "ok" ? "uploaded" as const : "failed" as const, error: access === "ok" ? null : summary, detected: { ...result, message: summary } };
-  const uploadId = await db().transaction(async (tx) => {
-    await draftForUpdate(tx, id);
-    const prior = await linkRowFor(tx, id, kind, text.trim(), target);
-    if (prior) await tx.update(catalogUploads).set({ ...values, ...(access === "ok" ? {gcsUri:null} : {}) }).where(eq(catalogUploads.id, prior.id));
-    const rowId = prior?.id ?? (await tx.insert(catalogUploads).values({ ...values, batchId: id }).returning({ id: catalogUploads.id }))[0]!.id;
-    // Changing an input invalidates the preview (spec 14b F3), as a merge-only counts write.
-    if (access === "ok" || prior) await tx.update(catalogBatches).set({ counts: mergeCounts({ previewReady: false }), updatedAt: new Date() }).where(eq(catalogBatches.id, id));
-    else await tx.update(catalogBatches).set({ updatedAt: new Date() }).where(eq(catalogBatches.id, id));
-    return rowId;
-  });
+  const uploadId = await saveLinkRow(id, values, access === "ok", (tx) => linkRowFor(tx, id, kind, text.trim(), target));
   // A list of image links answers with its readback pill and notes (spec 14b F2).
   const readback = kind === "url_list" && !("error" in result) ? pasteReadback(result) : null;
   return { kind, access, summary, count: "fileCount" in result ? result.fileCount : undefined, uploadId, ...(readback ? { pill: readback.pill, notes: readback.notes } : {}) };
 }
 type Tx = Parameters<Parameters<ReturnType<typeof db>["transaction"]>[0]>[0];
+type LinkRowValues = Omit<typeof catalogUploads.$inferInsert, "batchId">;
+/** Writes a paste's row (the prior one found by `rowFor`, else a new one) and invalidates the preview when it changed an input. */
+async function saveLinkRow(id: string, values: LinkRowValues, ok: boolean, rowFor: (tx: Tx) => Promise<CatalogUpload | null>): Promise<string> {
+  return db().transaction(async (tx) => {
+    await draftForUpdate(tx, id);
+    const prior = await rowFor(tx);
+    if (prior) await tx.update(catalogUploads).set({ ...values, ...(ok ? {gcsUri:null} : {}) }).where(eq(catalogUploads.id, prior.id));
+    const rowId = prior?.id ?? (await tx.insert(catalogUploads).values({ ...values, batchId: id }).returning({ id: catalogUploads.id }))[0]!.id;
+    // Changing an input invalidates the preview (spec 14b F3), as a merge-only counts write.
+    if (ok || prior) await tx.update(catalogBatches).set({ counts: mergeCounts({ previewReady: false }), updatedAt: new Date() }).where(eq(catalogBatches.id, id));
+    else await tx.update(catalogBatches).set({ updatedAt: new Date() }).where(eq(catalogBatches.id, id));
+    return rowId;
+  });
+}
+/**
+ * A pasted Supabase folder link (M1-F1-R4): listed read-only on the web tier and saved as its own
+ * `url_list` row of image links (product folder names kept as the rows' names when the folder is one
+ * folder per product). `detected.supabaseFolder` holds the link, so pasting it again updates that row
+ * and the plain image-links row stays apart.
+ */
+async function addSupabaseFolder(id: string, link: string, target?: string) {
+  const read = await readSupabaseFolder(supabaseClient(), link);
+  const values: LinkRowValues = read.ok
+    ? { kind: "url_list", name: read.title, sourceUrl: read.text, status: "uploaded", error: null, detected: { kind: "url_list", fileCount: read.photos, title: read.title, message: read.message, supabaseFolder: { url: link, mode: read.mode } } }
+    : { kind: "url_list", name: "Supabase folder", sourceUrl: link, status: "failed", error: read.error, detected: { kind: "url_list", message: read.error, supabaseFolder: { url: link, mode: "filename" } } };
+  const uploadId = await saveLinkRow(id, values, read.ok, async (tx) => {
+    if (target) return linkRowFor(tx, id, "url_list", link, target);
+    const [row] = await tx.select().from(catalogUploads).where(and(eq(catalogUploads.batchId, id), eq(catalogUploads.kind, "url_list"), sql`${catalogUploads.detected}->'supabaseFolder'->>'url' = ${link}`)).limit(1).for("update");
+    return row ?? null;
+  });
+  return read.ok
+    ? { kind: "supabase_folder", access: "ok", summary: read.message, count: read.photos, uploadId, pill: `${read.photos.toLocaleString("en-US")} ${read.photos === 1 ? "photo" : "photos"}` }
+    : { kind: "supabase_folder", access: "no_access", summary: read.error, uploadId };
+}
 /**
  * The row a paste writes to (spec 14b F3): the row named by `PATCH /links/[uploadId]`; else, for image
  * links, the batch's one `url_list` row (even a removed one, so pasting again brings it back as one
@@ -50,7 +78,8 @@ async function linkRowFor(tx: Tx, id: string, kind: UploadKind, text: string, ta
     return row;
   }
   const [row] = kind === "url_list"
-    ? await tx.select().from(catalogUploads).where(and(eq(catalogUploads.batchId, id), eq(catalogUploads.kind, "url_list"))).orderBy(sql`${catalogUploads.status} = 'removed'`, desc(catalogUploads.createdAt)).limit(1).for("update")
+    // A Supabase folder's row is its own input, never the pasted image links row.
+    ? await tx.select().from(catalogUploads).where(and(eq(catalogUploads.batchId, id), eq(catalogUploads.kind, "url_list"), sql`${catalogUploads.detected}->'supabaseFolder' IS NULL`)).orderBy(sql`${catalogUploads.status} = 'removed'`, desc(catalogUploads.createdAt)).limit(1).for("update")
     : await tx.select().from(catalogUploads).where(and(eq(catalogUploads.batchId, id), eq(catalogUploads.sourceUrl, text))).limit(1).for("update");
   return row ?? null;
 }

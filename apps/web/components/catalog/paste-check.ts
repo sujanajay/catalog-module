@@ -76,15 +76,19 @@ export function createPasteChecker(opts: PasteCheckerOptions) {
 }
 
 const GOOGLE = /https?:\/\/(docs\.google\.com\/spreadsheets|drive\.google\.com\/.*folders)/i;
+/** A Supabase Storage folder link (M1-F1-R4): an object path that does not end in an image name. */
+const SUPABASE_FOLDER = /^https:\/\/[^\s/]+\.supabase\.co\/storage\/v1\/object\/(public|sign|authenticated)\/[^\s?#]*?(?<!\.(jpe?g|png|webp|gif|tiff?|heic|heif|avif))\/?(?:[?#]\S*)?$/i;
+/** A line sent on its own: a Google link or a Supabase folder link. */
+const alone = (line: string) => GOOGLE.test(line) || SUPABASE_FOLDER.test(line);
 
 /**
- * The texts one paste sends: each Google link on its own, and the image links as one text. The
+ * The texts one paste sends: each Google or Supabase folder link on its own, and the image links as one text. The
  * image text keeps its lines and cells as pasted (a Google line becomes an empty line), so row
  * numbers and empty cells in the readback match what the operator pasted.
  */
 export function pasteEntries(value: string): string[] {
   const lines = value.split(/\r?\n/);
-  const google = lines.map((s) => s.trim()).filter((s) => GOOGLE.test(s));
-  const images = lines.map((s) => (GOOGLE.test(s.trim()) ? "" : s)).join("\n");
+  const google = lines.map((s) => s.trim()).filter(alone);
+  const images = lines.map((s) => (alone(s.trim()) ? "" : s)).join("\n");
   return [...google, ...(images.trim() ? [images] : [])];
 }

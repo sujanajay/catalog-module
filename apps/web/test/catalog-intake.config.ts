@@ -13,7 +13,7 @@ const origin = `http://127.0.0.1:${port}`;
 
 export default defineConfig({
   testDir: ".",
-  testMatch: "catalog-intake.browser.spec.ts",
+  testMatch: ["catalog-intake.browser.spec.ts", "catalog-m1-intake.browser.spec.ts"],
   workers: 1,
   fullyParallel: false,
   retries: 0,

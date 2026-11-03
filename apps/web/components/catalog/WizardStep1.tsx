@@ -4,6 +4,7 @@ import { PASTE_INPUT_KINDS, type ProductType } from "@catalog/core/catalog/types
 import { useCallback, useState } from "react";
 import Uploader, { type LocalUpload } from "./Uploader";
 import PasteBox from "./PasteBox";
+import ShareBox from "./ShareBox";
 import InputList, { type ServerInput } from "./InputList";
 /** Inputs the paste box adds (pasted links and Google links). */
 const PASTE_KINDS: readonly string[] = PASTE_INPUT_KINDS;
@@ -22,7 +23,7 @@ export default function WizardStep1({brands,brandSlug,name,productType,locked,em
  return <div className="grid2"><section className="card"><label className="f" htmlFor="brand">Which brand?</label><select id="brand" value={brandSlug} disabled={locked} onChange={(e)=>setBrand(e.target.value)}><option value="">Choose a brand</option>{(["softline","hardline"] as const).map((line)=><optgroup key={line} label={line==="softline"?"Softline":"Hardline"}>{brands.filter((b)=>b.line===line).map((b)=><option key={b.slug} value={b.slug}>{b.name}</option>)}</optgroup>)}</select><p className="help">Brand not in the list? Email <a href="mailto:sujan@opptra.com">sujan@opptra.com</a>.</p>
  <label htmlFor="batch-name">Batch name (optional)</label><input type="text" id="batch-name" value={name} onChange={(e)=>setName(e.target.value)} placeholder="USPA kids sneakers, Oct lot"/>
  <label htmlFor="product-type">What kind of products?</label><select id="product-type" value={productType} disabled={locked} onChange={(e)=>setProductType(e.target.value as ProductType)}>{[["auto","Detect automatically (recommended)"],["footwear","Footwear"],["apparel_model","Apparel on a model"],["apparel_flat","Apparel laid flat"],["bag_accessory","Bags and accessories"],["other","Other"]].map(([value,label])=><option key={value} value={value}>{label}</option>)}</select><p className="help">A folder can mix footwear, apparel and accessories; we detect each product separately.</p></section>
- <section className="card"><p className="f" style={{marginTop:0}}>What do you have?</p><Uploader ensureBatch={ensureBatch} onBusy={onUploadsBusy} onAdded={added} onRows={setLocal}/><PasteBox email={email} ensureBatch={ensureBatch} onBusy={onLinksBusy} onAdded={added} removed={pasteRemoved}/>
+ <section className="card"><ShareBox email={email}/><p className="f">What do you have?</p><Uploader ensureBatch={ensureBatch} onBusy={onUploadsBusy} onAdded={added} onRows={setLocal}/><PasteBox ensureBatch={ensureBatch} onBusy={onLinksBusy} onAdded={added} removed={pasteRemoved}/>
  {fixReason?<p role="alert" className="fix-reason">{fixReason}</p>:null}
  <InputList batchId={batchId ?? null} version={version} local={local} onCount={(count)=>onInputCount?.(count)} onRemoved={removed}/></section></div>;
 }
