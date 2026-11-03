@@ -1,5 +1,5 @@
 import { CircuitBreakers } from "./circuit";
-import { routeId, type Capability, type RouteAdapter, type RouteDef } from "./routes";
+import { routeCallable, routeId, type Capability, type RouteAdapter, type RouteDef } from "./routes";
 
 /** A route the call will try: a table row, or the policy's own model when the table has no row for it. */
 export interface PlannedRoute { id: string; capability: Capability; rank: number; adapter: RouteAdapter; model: string; fromTable: boolean }
@@ -17,10 +17,11 @@ export function createRouter(routes: readonly RouteDef[], circuits = new Circuit
 
 /**
  * The call order for one item (M7-F2-R2): the policy's preferred models first (the per-brand and per-category choice
- * of the eval suite, `model_policy`), then every other serving route of the capability by rank. A model whose route
- * is not `serving` (switched off by an admin, retired) is never called, even when the policy prefers it; a preferred
- * model without any row is called on the OpenRouter adapter, as before the route table existed. Routes whose circuit
- * is open are left out. Without a router the plan is the preferred models alone (callers and tests without a table).
+ * of the eval suite, `model_policy`), then every other callable route of the capability by rank. A route is callable
+ * only when it is `serving` and, for a capability that sends brand photos, has a written no-training position (R7,
+ * `routeCallable`): a switched-off, retired or pending route is never called, even when the policy prefers its model,
+ * and with a router a preferred model without a row is not called either. Routes whose circuit is open are left out.
+ * Without a router the plan is the preferred models alone (unit tests and the eval job, which have no table).
  */
 export function planRoutes(router: Router | undefined, capability: Capability, preferred: readonly (string | null | undefined)[]): PlannedRoute[] {
   const rows = router?.routes.filter(r => r.capability === capability) ?? [];
@@ -29,10 +30,10 @@ export function planRoutes(router: Router | undefined, capability: Capability, p
   for (const model of preferred) {
     if (!model) continue;
     const modelRows = rows.filter(r => r.model === model);
-    if (!modelRows.length) add({id: routeId(capability, "openrouter", model), capability, rank: 0, adapter: "openrouter", model, fromTable: false});
-    for (const row of modelRows) if (row.state === "serving") add({...pick(row), fromTable: true});
+    if (!router) add({id: routeId(capability, "openrouter", model), capability, rank: 0, adapter: "openrouter", model, fromTable: false});
+    for (const row of modelRows) if (routeCallable(row)) add({...pick(row), fromTable: true});
   }
-  for (const row of rows) if (row.state === "serving") add({...pick(row), fromTable: true});
+  for (const row of rows) if (routeCallable(row)) add({...pick(row), fromTable: true});
   return router ? planned.filter(route => router.circuits.canCall(route.id)) : planned;
 }
 const pick = ({id, capability, rank, adapter, model}: RouteDef) => ({id, capability, rank, adapter, model});
@@ -51,13 +52,14 @@ export interface CapabilityResult<T> {
 }
 /**
  * Failures after which the next route is asked (M7-F2-R3): a rate limit or server error that outlasted its back-off,
- * no response (timeout, network), a reply that is still invalid after the JSON retry, and a refusal or empty reply
+ * no response (timeout, network), a reply that is still invalid after the JSON retry, the model gone at the vendor
+ * (HTTP 404, `model_unavailable`), and a refusal or empty reply
  * (which moves to the next route for this item only). An auth or request error is not: every OpenRouter route shares
  * the key, so the next one would fail the same way.
  */
-export const NEXT_ROUTE_KINDS = new Set(["rate_limit", "server", "no_response", "invalid_json", "empty_reply", "refusal"]);
+export const NEXT_ROUTE_KINDS = new Set(["rate_limit", "server", "no_response", "invalid_json", "model_unavailable", "empty_reply", "refusal"]);
 /** Failures that count against a route's circuit. A refusal is about the item, not the route, so it does not. */
-export const CIRCUIT_KINDS = new Set(["rate_limit", "server", "no_response", "invalid_json"]);
+export const CIRCUIT_KINDS = new Set(["rate_limit", "server", "no_response", "invalid_json", "model_unavailable"]);
 
 /**
  * Ask the planned routes in order until one answers (M7-F2-R1 and R3). `attempt` is the adapter call for one route;

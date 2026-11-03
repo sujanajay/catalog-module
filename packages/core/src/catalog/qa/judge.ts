@@ -3,7 +3,7 @@ import { imageParts, textPart, LlmJsonError } from "../../llm/llm";
 import type { BackoffBudget, RetryPolicy } from "../../llm/openrouter";
 import { sumUsage } from "../../llm/util";
 import { callCatalogJson, type OpenRouterCallDeps } from "../../vendor/adapters/openrouter";
-import { callRoutes, fallbackLogFields, planRoutes, type PlannedRoute, type RouteFailure, type Router } from "../../vendor/router";
+import { callRoutes, fallbackLogFields, planRoutes, type RouteFailure, type Router } from "../../vendor/router";
 import { CHANNELS } from "../channels";
 import type { ChannelId, OutputFlag, ProductType } from "../types";
 import { CATALOG_QA_TEMPLATE, PRODUCT_TYPE_WORDS, renderTemplate } from "./templates";
@@ -243,10 +243,12 @@ export async function judgeOutput(input: JudgeInput, deps: CatalogLlmDeps = {}):
     return {scores:normalizeScores({}).scores,verdict:"flag",reasons:[flagDetails("qa_unavailable").why],isCollage:false,usage,costUsd,calls,model:plan[0]?.model ?? input.model,flags:["qa_unavailable"],thresholds,opinions:[],route:null};
   }
   const judgeModel = judgeRoute.model;
-  // The second opinion comes from another route of the plan, the earliest first, so two models still have to agree on
-  // a different item or a leftover (after a fallback the policy's first judge gives it, as before).
-  const otherRoute: PlannedRoute | undefined = plan.find(route => route.model !== judgeModel);
-  const otherModel = otherRoute?.model;
+  // The second opinion comes from the healthy routes of the plan other than the judge's: a route that failed in this
+  // judging is not asked again, so a dead route 1 never stands in for the second model (M7-F2-R4).
+  const failedIds = new Set(answer.tried.filter(t => t.failure).map(t => t.route.id));
+  const secondPlan = plan.filter(route => route.model !== judgeModel && !failedIds.has(route.id));
+  /** True when the plan had a second judge at all (configured), healthy or not. */
+  const secondConfigured = plan.some(route => route.model !== judgeModel);
   const opinion = readOpinion(first.value, judgeModel, hasReference, names);
   const opinions: JudgeOpinion[] = [opinion];
   // A size chart or text-only image is left out with a note: no product check applies to it.
@@ -259,13 +261,23 @@ export async function judgeOutput(input: JudgeInput, deps: CatalogLlmDeps = {}):
   const leftoverFirst = opinion.scores.background_clean < thresholds.background_clean;
   const located = leftoverFirst && namesPlace(opinion.evidence.background_clean);
   const usages = [first.usage];
-  let costUsd = first.costUsd, calls = first.calls, other: JudgeOpinion | null = null;
+  let costUsd = first.costUsd, calls = first.calls, other: JudgeOpinion | null = null, otherModel: string | undefined;
   // A different item holds the product and a leftover background re-makes or drops the photo, so a
-  // second model must agree before either counts (07 4.2 v2). One second call answers both.
-  if ((wrongFirst || located) && otherModel) {
-    const reply = await askJudge(input, otherModel, withRetry(otherModel));
-    usages.push(reply.usage); costUsd += reply.costUsd; calls += reply.calls;
-    if (reply.value) { other = readOpinion(reply.value, otherModel, hasReference, names); opinions.push(other); }
+  // second model must agree before either counts (07 4.2 v2). One second call answers both; it goes through the
+  // routes like the verdict (first one with its back-off, the next ones once).
+  const needSecond = wrongFirst || located;
+  if (needSecond && secondPlan.length) {
+    const reply = await callRoutes(secondPlan, (route, index) => askJudge(input, route.model, withRetry(route.model, index === 0 ? undefined : [])), deps.router ? {router:deps.router} : {});
+    usages.push(...reply.usages); costUsd += reply.costUsd; calls += reply.calls;
+    if (reply.output && reply.route) { otherModel = reply.route.model; other = readOpinion(reply.output, otherModel, hasReference, names); opinions.push(other); }
+    else otherModel = secondPlan[0]!.model;
+  }
+  // A second judge was configured but none could answer: the check is unavailable, which is never a pass (M7-F2-R4).
+  // Without any second judge (a one-model plan, as in the eval job) neither check counts, as before.
+  if (needSecond && secondConfigured && !other) {
+    (deps.log ?? console.warn)("catalog_qa: no second judge could answer; the photo is held as unchecked", {severity:"WARNING", model:judgeModel, route:judgeRoute.id, wrongItem:wrongFirst, leftover:located, calls});
+    return {scores:opinion.scores,verdict:"flag",reasons:[flagDetails("qa_unavailable").why],isCollage:opinion.isCollage,usage:sumUsage(usages),costUsd,calls,model:judgeModel,route:judgeRoute.id,flags:["qa_unavailable"],view:opinion.view,thresholds,
+      wrongItem:{first:wrongFirst,second:null,secondModel:otherModel ?? null,confirmed:false},leftover:{first:leftoverFirst,second:null,secondModel:otherModel ?? null,confirmed:false,located},opinions};
   }
   const secondWrong = wrongFirst && other ? other.wrongItem : null;
   const confirmed = wrongFirst && secondWrong === true;
@@ -284,7 +296,7 @@ export async function judgeOutput(input: JudgeInput, deps: CatalogLlmDeps = {}):
   if (opinion.isCollage) evidence.collage = opinion.evidence.is_collage ?? flagDetails("collage").why;
   const legacy = legacyReasons(first.value, names);
   const reasons = [...(legacy.length ? legacy : flags.map(flag => evidence[flag]!)), ...opinion.missing];
-  const secondModel = otherModel ?? null;
+  const secondModel = otherModel ?? secondPlan[0]?.model ?? null;
   return {scores,verdict:flags.length ? "flag" : "pass",reasons,isCollage:opinion.isCollage,usage:sumUsage(usages),costUsd,calls,model:judgeModel,route:judgeRoute.id,flags,view:opinion.view,thresholds,evidence,
     wrongItem:{first:wrongFirst,second:secondWrong,secondModel:wrongFirst ? secondModel : null,confirmed},
     leftover:{first:leftoverFirst,second:secondLeftover,secondModel:located ? secondModel : null,confirmed:leftoverConfirmed,located},opinions};

@@ -19,7 +19,8 @@ CREATE TABLE IF NOT EXISTS "vendor_routes" (
 	"updated_at" timestamp with time zone DEFAULT now() NOT NULL,
 	CONSTRAINT "vendor_routes_capability_check" CHECK ("vendor_routes"."capability" IN ('vision.read', 'judge.render', 'image.matte', 'image.upscale', 'ocr.read', 'people.detect')),
 	CONSTRAINT "vendor_routes_adapter_check" CHECK ("vendor_routes"."adapter" IN ('openrouter', 'matting-gpu', 'matting-cpu', 'upscale-gpu', 'upscale-cpu', 'photoroom')),
-	CONSTRAINT "vendor_routes_state_check" CHECK ("vendor_routes"."state" IN ('registered', 'benchmarked', 'shadow', 'canary', 'serving', 'retired', 'off'))
+	CONSTRAINT "vendor_routes_state_check" CHECK ("vendor_routes"."state" IN ('registered', 'benchmarked', 'shadow', 'canary', 'serving', 'retired', 'off')),
+	CONSTRAINT "vendor_routes_serving_needs_terms_check" CHECK ("vendor_routes"."state" <> 'serving' OR NOT ("vendor_routes"."capability" IN ('vision.read', 'judge.render', 'image.matte', 'image.upscale', 'ocr.read', 'people.detect')) OR (btrim(coalesce("vendor_routes"."no_training_terms", '')) <> '' AND lower(btrim("vendor_routes"."no_training_terms")) NOT LIKE 'pending%'))
 );
 --> statement-breakpoint
 CREATE TABLE IF NOT EXISTS "vendor_route_changes" (

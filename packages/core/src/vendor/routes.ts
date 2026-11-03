@@ -38,6 +38,19 @@ export interface RouteDef {
   state: RouteState;
 }
 
+/**
+ * The seeded no-training position of a route nobody has decided on yet (M7-F2-R7). A route whose position is missing
+ * or still this value is never called for a capability that sends brand photos, and the database refuses it as
+ * `serving` (CHECK `vendor_routes_serving_needs_terms_check`). Recording the owner's decision is a data change:
+ * `setRoute(db, id, {noTrainingTerms, state: "serving", changedBy, reason})`.
+ */
+export const NO_TRAINING_PENDING = "pending: owner decision";
+/** True when a written no-training position is on file (not missing, blank or pending). */
+export const hasNoTrainingPosition = (terms: string | null | undefined): boolean => !!terms?.trim() && !terms.trim().toLowerCase().startsWith("pending");
+/** M7-F2-R7: a route may be called only when it is `serving` and, for a brand-photo capability, has a position on file. */
+export const routeCallable = (route: Pick<RouteDef, "capability" | "state" | "noTrainingTerms">): boolean =>
+  route.state === "serving" && (!BRAND_PHOTO_CAPABILITIES.includes(route.capability) || hasNoTrainingPosition(route.noTrainingTerms));
+
 export const routeId = (capability: Capability, adapter: RouteAdapter, model: string) => `${capability}:${adapter}:${model}`;
 
 /**
@@ -54,8 +67,8 @@ const OPENROUTER_MODELS = [
 ] as const;
 export const SEED_ROUTES: readonly RouteDef[] = (["judge.render", "vision.read"] as const).flatMap(capability => OPENROUTER_MODELS.map(({rank, model}) => ({
   id: routeId(capability, "openrouter", model), capability, rank, adapter: "openrouter" as const, model, paramsVersion: "1",
-  priceUsd: 0.0004, rateLimitPerMin: null, region: "openrouter", licence: "OpenRouter terms of service", noTrainingTerms: null,
-  // Live today (the policy's judges, and the measured third candidate): seeded as serving. No written no-training
-  // position is on file yet; R7 blocks any new promotion to serving until one is recorded.
-  state: "serving" as const,
+  priceUsd: 0.0004, rateLimitPerMin: null, region: "openrouter", licence: "OpenRouter terms of service",
+  // No written no-training position is on file for these routes (R7): the owner records it, and only then are they
+  // switched to serving. Until then they are registered and never called.
+  noTrainingTerms: NO_TRAINING_PENDING, state: "registered" as const,
 })));

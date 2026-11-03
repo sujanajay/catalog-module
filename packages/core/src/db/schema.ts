@@ -24,7 +24,7 @@ import {
   type AnyPgColumn,
 } from "drizzle-orm/pg-core";
 import type { SkuMethod } from "../catalog/sku-mapping";
-import { CAPABILITIES, ROUTE_ADAPTERS, ROUTE_STATES } from "../vendor/routes";
+import { BRAND_PHOTO_CAPABILITIES, CAPABILITIES, ROUTE_ADAPTERS, ROUTE_STATES } from "../vendor/routes";
 import {
   ALIAS_KINDS,
   BATCH_STATUSES,
@@ -743,6 +743,11 @@ export const vendorRoutes = pgTable(
     enumCheck("vendor_routes", "capability", t.capability, CAPABILITIES),
     enumCheck("vendor_routes", "adapter", t.adapter, ROUTE_ADAPTERS),
     enumCheck("vendor_routes", "state", t.state, ROUTE_STATES),
+    // M7-F2-R7: a route that sends brand photos is serving only with a written no-training position (not pending).
+    check(
+      "vendor_routes_serving_needs_terms_check",
+      sql`${t.state} <> 'serving' OR NOT (${inList(t.capability, BRAND_PHOTO_CAPABILITIES)}) OR (btrim(coalesce(${t.noTrainingTerms}, '')) <> '' AND lower(btrim(${t.noTrainingTerms})) NOT LIKE 'pending%')`,
+    ),
   ],
 );
 

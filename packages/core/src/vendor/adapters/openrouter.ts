@@ -11,6 +11,12 @@ import type { RouteAttempt, RouteFailure } from "../router";
 
 export interface OpenRouterCallDeps extends OpenRouterDeps {
   log?: (message: string, fields?: Record<string, unknown>) => void;
+  /**
+   * Throws when the caller has stopped (a spend cap refused the call, the lease was lost, the caller aborted); the
+   * worker's `catalogLlmDeps` provides it. Asked when a call fails: such a stop is the caller's, not the route's, so
+   * it is rethrown instead of being read as a route failure (no next route, no circuit failure).
+   */
+  assertAvailable?: () => void;
 }
 /** One route attempt's answer, with its usage summed over every HTTP attempt (the JSON retry and each back-off retry). */
 export type OpenRouterAttempt<T> = RouteAttempt<T> & {usage: Record<string, unknown>};
@@ -18,7 +24,7 @@ export type OpenRouterAttempt<T> = RouteAttempt<T> & {usage: Record<string, unkn
 /** The failure kind of an OpenRouter or JSON error; `empty_reply` (no content, often a moderation refusal) is a refusal. */
 export function failureOf(error: LlmResponseError | LlmJsonError | OpenRouterError): RouteFailure {
   const status = error instanceof OpenRouterError ? error.status : null;
-  const kind = error instanceof OpenRouterError ? (status === 401 || status === 403 ? "auth" : status === 0 ? (/API_KEY is not set/.test(error.message) ? "no_key" : "no_response") : status === 429 ? "rate_limit" : (status ?? 0) >= 500 ? "server" : "http") : error instanceof LlmJsonError ? "invalid_json" : "empty_reply";
+  const kind = error instanceof OpenRouterError ? (status === 401 || status === 403 ? "auth" : status === 0 ? (/API_KEY is not set/.test(error.message) ? "no_key" : "no_response") : status === 429 ? "rate_limit" : status === 404 ? "model_unavailable" : (status ?? 0) >= 500 ? "server" : "http") : error instanceof LlmJsonError ? "invalid_json" : "empty_reply";
   return {status, kind, ...(kind === "empty_reply" ? {refusal: true} : {})};
 }
 
@@ -46,6 +52,8 @@ export async function callCatalogJson<T>(messages: LlmMessage[], validate: (obj:
     value = (await callLlmJson(messages, validate, {temperature:0,maxTokens:LLM_MAX_TOKENS,model}, {...deps,fetch:tracked})).value;
   } catch (error) {
     if (!(error instanceof LlmResponseError || error instanceof LlmJsonError || error instanceof OpenRouterError)) throw error;
+    // The transport wraps whatever the fetch threw as "no response"; a stop of the caller's own is not a route fault.
+    deps.assertAvailable?.();
     // Warn before the caller maps this to qa_unavailable, so a bad key, an auth failure or a timeout
     // is visible in the logs. The OpenRouter message is already redacted; prompts are never logged.
     failure = failureOf(error);
