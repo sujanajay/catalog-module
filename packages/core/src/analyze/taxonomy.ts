@@ -1,7 +1,7 @@
 // M2-S1 taxonomy store (docs/program/requirements/M2-analyze.md M2-F1-R1 to R3, integration decision D1).
 //
 // The one category tree of the system, the attribute definitions and the shot roles are data in four tables
-// (db/schema.ts, migration 0009). This module is the only way to change them, so every write is validated and logged:
+// (db/schema.ts, migration 0010). This module is the only way to change them, so every write is validated and logged:
 //
 //   Write (settings; M5 "Add a category" and M12 settings call these):
 //     addTaxonomyNode, updateTaxonomyNode, addAttribute, updateAttribute, addShotRole, updateShotRole
