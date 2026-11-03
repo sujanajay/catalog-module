@@ -63,6 +63,11 @@ describe("local times (UX section 7 formats)", () => {
 
   it("names other zones by their offset, and is empty for no date", () => {
     expect(ui.localTime(at, "Europe/London")).toBe("4 Nov 2026, 10:00 GMT");
+    // ICU versions differ ("GMT" vs "GMT+0", "UTC+3" vs "GMT+3"); the label is the same on every runtime.
+    for (const [raw, label] of [["GMT", "GMT"], ["GMT+0", "GMT"], ["UTC+0", "GMT"], ["GMT-00:00", "GMT"], ["UTC", "GMT"],
+      ["UTC+3", "GMT+3"], ["GMT+03:00", "GMT+3"], ["GMT+5:30", "GMT+5:30"], ["UTC-04:00", "GMT-4"], ["GMT+05:45", "GMT+5:45"]]) {
+      expect(ui.offsetLabel(raw!), raw).toBe(label);
+    }
     expect(ui.localTime(new Date("2026-07-01T10:00:00Z"), "Europe/Berlin")).toBe("1 Jul 2026, 12:00 GMT+2");
     expect(ui.localTime(at, "Europe/Istanbul")).toBe("4 Nov 2026, 13:00 GMT+3");
     expect(ui.localTime(null, "UTC")).toBe("");

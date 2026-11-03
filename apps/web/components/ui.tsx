@@ -35,6 +35,20 @@ const UTC_NAMES = /^(UTC|Etc\/UTC|Etc\/GMT|GMT)$/;
 const ZONE_NAMES: Record<string, string> = { "Asia/Kolkata": "IST", "Asia/Calcutta": "IST", "Asia/Dubai": "GST", "Asia/Muscat": "GST" };
 
 /**
+ * One label for an ICU offset name, whatever the runtime's ICU prints: "GMT" for a zero offset ("GMT", "GMT+0",
+ * "UTC+0", "GMT-00:00"), else "GMT" plus hours and any minutes ("UTC+3" and "GMT+03:00" read "GMT+3", "GMT+5:30").
+ * Anything else is returned as it is.
+ */
+export function offsetLabel(raw: string): string {
+  const m = /^(?:GMT|UTC)(?:([+-])(\d{1,2})(?::?(\d{2}))?)?$/.exec(raw.trim());
+  if (!m) return raw;
+  const [, sign, hours, minutes] = m;
+  const h = Number(hours ?? 0), min = Number(minutes ?? 0);
+  if (h === 0 && min === 0) return "GMT";
+  return `GMT${sign}${h}${min ? `:${String(min).padStart(2, "0")}` : ""}`;
+}
+
+/**
  * A date and time in the given time zone, as UX section 7 writes it: "4 Nov 2026, 15:30 IST" (day month year, 24-hour
  * time, zone name). Empty for a missing or unreadable date. Pages show it through LocalTime, which picks the person's zone.
  */
@@ -52,6 +66,6 @@ export function localTime(d: Date | string | null | undefined, timeZone: string)
     return timeZone === "UTC" ? "" : localTime(date, "UTC");
   }
   const parts = Object.fromEntries(format.formatToParts(date).map(p => [p.type, p.value]));
-  const zone = ZONE_NAMES[timeZone] ?? (UTC_NAMES.test(timeZone) ? "UTC" : parts.timeZoneName);
+  const zone = ZONE_NAMES[timeZone] ?? (UTC_NAMES.test(timeZone) ? "UTC" : offsetLabel(parts.timeZoneName ?? ""));
   return `${Number(parts.day)} ${MONTHS[Number(parts.month) - 1]} ${parts.year}, ${parts.hour}:${parts.minute} ${zone}`;
 }
