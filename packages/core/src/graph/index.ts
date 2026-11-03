@@ -267,10 +267,10 @@ export type NewChangeEvent = {
   evidence: EvidenceKind;
   evidenceRef?: string | null;
   actor: string;
-  /** Required on every event (F3-R9). */
-  reasonKind: ReasonKind;
+  /** Required except on observed_other events and backfill rows (F3-R9, D9). */
+  reasonKind?: ReasonKind | null;
   reasonRef?: string | null;
-  /** Required except on observed_other and backfill rows (F3-R9). */
+  /** Required except on observed_other events and backfill rows (F3-R9, D9). */
   changeTypeId?: string | null;
   changeSetId?: string | null;
   batchId?: string | null;
@@ -318,10 +318,9 @@ function sameEvent(row: CatalogChangeEvent, e: NewChangeEvent): boolean {
  */
 export async function recordChange(db: GraphDb, e: NewChangeEvent): Promise<{ seq: bigint; created: boolean }> {
   if (!e.idempotencyKey?.trim()) throw new Error("recordChange: idempotencyKey is required");
-  if (!e.reasonKind) throw new Error("recordChange: reasonKind is required");
-  if (!e.changeTypeId && e.kind !== "observed_other" && e.reasonKind !== "backfill") {
-    throw new Error("recordChange: changeTypeId is required except on observed_other and backfill events");
-  }
+  const exempt = e.kind === "observed_other" || e.evidence === "backfill" || e.reasonKind === "backfill";
+  if (!exempt && !e.reasonKind) throw new Error("recordChange: reasonKind is required except on observed_other events and backfill rows");
+  if (!exempt && !e.changeTypeId) throw new Error("recordChange: changeTypeId is required except on observed_other events and backfill rows");
   const existing = async (tx: GraphDb) =>
     (await tx.select().from(catalogChangeEvents).where(eq(catalogChangeEvents.idempotencyKey, e.idempotencyKey)).limit(1))[0];
   const settle = (row: CatalogChangeEvent) => {
@@ -352,7 +351,7 @@ export async function recordChange(db: GraphDb, e: NewChangeEvent): Promise<{ se
         evidence: e.evidence,
         evidenceRef: e.evidenceRef ?? null,
         actor: e.actor,
-        reasonKind: e.reasonKind,
+        reasonKind: e.reasonKind ?? null,
         reasonRef: e.reasonRef ?? null,
         changeTypeId: e.changeTypeId ?? null,
         changeSetId: e.changeSetId ?? null,

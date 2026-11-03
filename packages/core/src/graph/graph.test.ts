@@ -121,16 +121,20 @@ describe(`M0 graph contract on ${TEST_PG_URL ? "real Postgres" : "PGlite"}`, () 
     await expect(recordChange(db, { ...e, slot: "image:2" })).rejects.toBeInstanceOf(IdempotencyConflictError);
   });
 
-  it("recordChange requires a reason on every event and a change type except on observed_other and backfill", async () => {
+  it("recordChange requires a reason and a change type, except on observed_other events and backfill rows", async () => {
     const { optionId, listingId } = await listing();
     const v = await imageVersion(optionId, "r-1");
     await expect(recordChange(db, event(listingId, v.versionId, { changeTypeId: null }))).rejects.toThrow(/changeTypeId/);
-    await expect(recordChange(db, event(listingId, v.versionId, { reasonKind: undefined as never }))).rejects.toThrow(/reasonKind/);
-    // The database refuses the same rows when a writer skips this module.
-    await expect(db.execute(sql`insert into catalog_change_events (idempotency_key, listing_id, slot, to_version_id, kind, at, evidence, actor) values ('raw-1', ${listingId}, 'image:1', ${v.versionId}, 'planned', now(), 'operator', 't')`)).rejects.toThrow();
+    // A normal event without a reason is refused, by the contract and by the database.
+    await expect(recordChange(db, event(listingId, v.versionId, { reasonKind: null }))).rejects.toThrow(/reasonKind/);
+    await expect(db.execute(sql`insert into catalog_change_events (idempotency_key, listing_id, slot, to_version_id, kind, at, evidence, actor, change_type_id) values ('raw-1', ${listingId}, 'image:1', ${v.versionId}, 'planned', now(), 'operator', 't', 'image.background')`)).rejects.toThrow();
     await expect(db.execute(sql`insert into catalog_change_events (idempotency_key, listing_id, slot, to_version_id, kind, at, evidence, actor, reason_kind) values ('raw-2', ${listingId}, 'image:1', ${v.versionId}, 'planned', now(), 'operator', 't', 'operator')`)).rejects.toThrow();
-    expect((await recordChange(db, event(listingId, v.versionId, { kind: "observed_other", evidence: "scrape", reasonKind: "outside_change", changeTypeId: null }))).created).toBe(true);
-    expect((await recordChange(db, event(listingId, v.versionId, { kind: "verified_live", evidence: "backfill", reasonKind: "backfill", changeTypeId: null }))).created).toBe(true);
+    // observed_other and backfill rows are accepted without a reason or a change type.
+    expect((await recordChange(db, event(listingId, v.versionId, { kind: "observed_other", evidence: "scrape", reasonKind: null, changeTypeId: null }))).created).toBe(true);
+    expect((await recordChange(db, event(listingId, v.versionId, { kind: "links_delivered", evidence: "backfill", reasonKind: null, changeTypeId: null, idempotencyKey: "bf-1" }))).created).toBe(true);
+    expect((await recordChange(db, event(listingId, v.versionId, { kind: "verified_live", evidence: "channel_field", reasonKind: "backfill", changeTypeId: null }))).created).toBe(true);
+    await db.execute(sql`insert into catalog_change_events (idempotency_key, listing_id, slot, to_version_id, kind, at, evidence, actor) values ('raw-3', ${listingId}, 'image:1', ${v.versionId}, 'observed_other', now(), 'scrape', 't')`);
+    await db.execute(sql`insert into catalog_change_events (idempotency_key, listing_id, slot, to_version_id, kind, at, evidence, actor) values ('raw-4', ${listingId}, 'image:1', ${v.versionId}, 'links_delivered', now(), 'backfill', 't')`);
     // A removal empties the slot; nothing else may.
     expect((await recordChange(db, event(listingId, null, { kind: "removed" }))).created).toBe(true);
     await expect(recordChange(db, event(listingId, null, { kind: "planned" }))).rejects.toThrow();

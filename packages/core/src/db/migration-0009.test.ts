@@ -82,7 +82,13 @@ describe(`0009_catalog_graph.sql (M0-S1) on ${TEST_PG_URL ? "real Postgres" : "P
     for (const name of ["language", "market", "route_id", "prompt_version", "settings_snapshot_id", "parent_version_ids", "ai_generated", "hash_kind"]) expect(versionCols.has(name), name).toBe(true);
     expect(versionCols.get("ai_generated")!.is_nullable).toBe("NO");
     const eventCols = await columns("catalog_change_events");
-    expect(eventCols.get("reason_kind")!.is_nullable).toBe("NO");
+    // Nullable, with catalog_change_events_reason_check requiring it except on observed_other and backfill rows (D9).
+    expect(eventCols.get("reason_kind")!.is_nullable).toBe("YES");
+    const checks = (await rows<{ conname: string }>(sql`select conname from pg_constraint where contype = 'c' and conrelid = 'catalog_change_events'::regclass`)).map((r) => r.conname);
+    expect(checks).toContain("catalog_change_events_reason_check");
+    // catalog_key_mappings ships empty (D10); its key_kind CHECK holds the doc's list.
+    expect(await rows(sql`select count(*)::int as n from catalog_key_mappings`)).toEqual([{ n: 0 }]);
+    await expect(db.execute(sql`insert into catalog_key_mappings (sku_column, channel, market, key_kind) values ('noon_ae', 'noon', 'ae', 'gtin')`)).rejects.toThrow();
     for (const name of ["change_type_id", "change_set_id", "experiment_id", "evidence_ref", "reason_ref"]) expect(eventCols.has(name), name).toBe(true);
     const optionCols = await columns("catalog_options");
     for (const name of ["style_key", "style_key_source", "style_key_confidence", "key_source", "in_master"]) expect(optionCols.has(name), name).toBe(true);

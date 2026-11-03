@@ -949,8 +949,9 @@ export const catalogContentVersions = pgTable(
 );
 
 /**
- * The change log (F3, 3.2): append-only, read by cursor (`seq`). Every event names a reason (F3-R9); the change type
- * may be missing only on observed_other and backfill rows. to_version_id is null exactly when a slot was emptied.
+ * The change log (F3, 3.2): append-only, read by cursor (`seq`). Every event names a reason and a change type (F3-R9),
+ * except observed_other events and backfill rows (evidence or reason `backfill`), which may lack either (decision D9).
+ * to_version_id is null exactly when a slot was emptied.
  */
 export const catalogChangeEvents = pgTable(
   "catalog_change_events",
@@ -971,7 +972,7 @@ export const catalogChangeEvents = pgTable(
     evidence: text("evidence", { enum: EVIDENCE_KINDS }).notNull(),
     evidenceRef: text("evidence_ref"),
     actor: text("actor").notNull(),
-    reasonKind: text("reason_kind", { enum: REASON_KINDS }).notNull(),
+    reasonKind: text("reason_kind", { enum: REASON_KINDS }),
     reasonRef: text("reason_ref"),
     /** M10's change-type id (its table lands in M10-S1a, so no foreign key here). */
     changeTypeId: text("change_type_id"),
@@ -990,9 +991,10 @@ export const catalogChangeEvents = pgTable(
     enumCheck("catalog_change_events", "kind", t.kind, CHANGE_EVENT_KINDS),
     enumCheck("catalog_change_events", "evidence", t.evidence, EVIDENCE_KINDS),
     enumCheck("catalog_change_events", "reason_kind", t.reasonKind, REASON_KINDS),
+    // IS NOT DISTINCT FROM: a null reason_kind must make this operand false, not null (a null CHECK passes).
     check(
-      "catalog_change_events_change_type_check",
-      sql`${t.changeTypeId} IS NOT NULL OR ${t.kind} = 'observed_other' OR ${t.reasonKind} = 'backfill'`,
+      "catalog_change_events_reason_check",
+      sql`(${t.reasonKind} IS NOT NULL AND ${t.changeTypeId} IS NOT NULL) OR ${t.kind} = 'observed_other' OR ${t.evidence} = 'backfill' OR ${t.reasonKind} IS NOT DISTINCT FROM 'backfill'`,
     ),
     check("catalog_change_events_to_version_check", sql`(${t.toVersionId} IS NULL) = (${t.kind} = 'removed')`),
   ],

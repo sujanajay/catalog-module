@@ -46,7 +46,7 @@ CREATE TABLE IF NOT EXISTS "catalog_change_events" (
 	"evidence" text NOT NULL,
 	"evidence_ref" text,
 	"actor" text NOT NULL,
-	"reason_kind" text NOT NULL,
+	"reason_kind" text,
 	"reason_ref" text,
 	"change_type_id" text,
 	"change_set_id" uuid,
@@ -57,7 +57,7 @@ CREATE TABLE IF NOT EXISTS "catalog_change_events" (
 	CONSTRAINT "catalog_change_events_kind_check" CHECK ("catalog_change_events"."kind" IN ('planned', 'links_delivered', 'submitted', 'verified_live', 'observed_other', 'removed', 'reverted')),
 	CONSTRAINT "catalog_change_events_evidence_check" CHECK ("catalog_change_events"."evidence" IN ('channel_field', 'scrape', 'tool_publish', 'channel_upload_record', 'operator', 'backfill')),
 	CONSTRAINT "catalog_change_events_reason_kind_check" CHECK ("catalog_change_events"."reason_kind" IN ('rule', 'experiment', 'operator', 'learning', 'outside_change', 'backfill', 'auto_decide', 'rejection_fix', 'new_content')),
-	CONSTRAINT "catalog_change_events_change_type_check" CHECK ("catalog_change_events"."change_type_id" IS NOT NULL OR "catalog_change_events"."kind" = 'observed_other' OR "catalog_change_events"."reason_kind" = 'backfill'),
+	CONSTRAINT "catalog_change_events_reason_check" CHECK (("catalog_change_events"."reason_kind" IS NOT NULL AND "catalog_change_events"."change_type_id" IS NOT NULL) OR "catalog_change_events"."kind" = 'observed_other' OR "catalog_change_events"."evidence" = 'backfill' OR "catalog_change_events"."reason_kind" IS NOT DISTINCT FROM 'backfill'),
 	CONSTRAINT "catalog_change_events_to_version_check" CHECK (("catalog_change_events"."to_version_id" IS NULL) = ("catalog_change_events"."kind" = 'removed'))
 );
 --> statement-breakpoint

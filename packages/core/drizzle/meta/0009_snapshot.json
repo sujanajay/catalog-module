@@ -1,5 +1,5 @@
 {
-  "id": "d8eeff20-6abd-41e5-9b4b-1515b4816726",
+  "id": "99222866-c49a-431a-b799-283c2ded9d42",
   "prevId": "839874cb-aa7d-456f-bd92-f6e18cf9704b",
   "version": "7",
   "dialect": "postgresql",
@@ -593,7 +593,7 @@
           "name": "reason_kind",
           "type": "text",
           "primaryKey": false,
-          "notNull": true
+          "notNull": false
         },
         "reason_ref": {
           "name": "reason_ref",
@@ -752,9 +752,9 @@
           "name": "catalog_change_events_reason_kind_check",
           "value": "\"catalog_change_events\".\"reason_kind\" IN ('rule', 'experiment', 'operator', 'learning', 'outside_change', 'backfill', 'auto_decide', 'rejection_fix', 'new_content')"
         },
-        "catalog_change_events_change_type_check": {
-          "name": "catalog_change_events_change_type_check",
-          "value": "\"catalog_change_events\".\"change_type_id\" IS NOT NULL OR \"catalog_change_events\".\"kind\" = 'observed_other' OR \"catalog_change_events\".\"reason_kind\" = 'backfill'"
+        "catalog_change_events_reason_check": {
+          "name": "catalog_change_events_reason_check",
+          "value": "(\"catalog_change_events\".\"reason_kind\" IS NOT NULL AND \"catalog_change_events\".\"change_type_id\" IS NOT NULL) OR \"catalog_change_events\".\"kind\" = 'observed_other' OR \"catalog_change_events\".\"evidence\" = 'backfill' OR \"catalog_change_events\".\"reason_kind\" IS NOT DISTINCT FROM 'backfill'"
         },
         "catalog_change_events_to_version_check": {
           "name": "catalog_change_events_to_version_check",
