@@ -38,6 +38,8 @@ const TABLES = [
   "catalog_options", "catalog_channel_listings", "catalog_listing_keys", "catalog_key_mappings", "catalog_assets",
   "catalog_content_versions", "catalog_change_events", "catalog_live_intervals", "catalog_treatment_assignments",
   "catalog_backfill_runs", "catalog_graph_export_runs", "catalog_outcome_keys",
+  // 0010_taxonomy.sql (M2-S1 taxonomy store)
+  "catalog_taxonomy_nodes", "catalog_attribute_defs", "catalog_shot_roles", "catalog_taxonomy_changes",
 ];
 
 const INDEXES = [

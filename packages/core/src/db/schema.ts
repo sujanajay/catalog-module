@@ -101,6 +101,24 @@ export const COST_KINDS = ["llm_call", "matte_call", "render", "upscale_call", "
 /** catalog_cost_events.outcome. `fallback`: the simple cut-out stood in for a failed service call. */
 export const COST_OUTCOMES = ["ok", "failed", "rate_limited", "cap", "fallback"] as const;
 
+/**
+ * M2-S1 taxonomy store (0010, docs/program/requirements/M2-analyze.md M2-F1-R1 to R3). The value lists below are the
+ * table structure; the nodes, attributes and shot roles themselves are data (analyze/taxonomy.ts).
+ * TAXONOMY_LEVELS is ordered from the root down: a node's level is always below its parent's.
+ */
+export const TAXONOMY_LEVELS = ["vertical", "department", "group", "type"] as const;
+/** `not_released`: the node exists (so a gap is visible) but nothing is labelled or ruled for it yet. */
+export const TAXONOMY_NODE_STATUSES = ["released", "not_released", "retired"] as const;
+/** Nothing is ever deleted from the taxonomy: a definition is retired instead, so old readings still resolve. */
+export const TAXONOMY_DEF_STATUSES = ["active", "retired"] as const;
+export const ATTRIBUTE_VALUE_TYPES = ["enum", "number", "text", "colour"] as const;
+/** `decision`: drives plans and gaps (M2-F1). `listing`: words for listing files (M2-F3). */
+export const ATTRIBUTE_TIERS = ["decision", "listing"] as const;
+/** Where an attribute value may come from (M2 3.2 AttributeValue.source), listed in precedence order per attribute. */
+export const ATTRIBUTE_SOURCES = ["sheet", "listing_text", "image", "rule", "web"] as const;
+export const TAXONOMY_ENTITIES = ["node", "attribute", "shot_role"] as const;
+export const TAXONOMY_CHANGE_ACTIONS = ["seed", "create", "update"] as const;
+
 export type BrandLine = (typeof BRAND_LINES)[number];
 export type MasterSource = (typeof MASTER_SOURCES)[number];
 export type SpendEngine = (typeof SPEND_ENGINES)[number];
@@ -1095,6 +1113,119 @@ export const catalogOutcomeKeys = pgView("catalog_outcome_keys").as((qb) =>
 );
 
 // ---------------------------------------------------------------------------
+// M2 taxonomy store (M2-S1). Read and written only through analyze/taxonomy.ts, which keeps the change log.
+// ---------------------------------------------------------------------------
+
+/** One allowed value of an enum attribute. `key` is the stored word; it never changes meaning (retire and add). */
+export type AttributeAllowedValue = { key: string; label: string; definition?: string };
+
+/**
+ * The one category tree of the system (M2-F1-R1, integration decision D1): M5 rules scope by these ids. `id` is the
+ * dotted path from the root (`fashion.apparel.upper.top`), so it is stable and readable in rule data; a node never
+ * moves. `aliases` are other words for the node (brand sheet categories, rule dataset scopes), used to map words to a
+ * node, never shown as its name.
+ */
+export const catalogTaxonomyNodes = pgTable(
+  "catalog_taxonomy_nodes",
+  {
+    id: text("id").primaryKey(),
+    parentId: text("parent_id").references((): AnyPgColumn => catalogTaxonomyNodes.id),
+    level: text("level", { enum: TAXONOMY_LEVELS }).notNull(),
+    name: text("name").notNull(),
+    aliases: jsonb("aliases").$type<string[]>().notNull().default([]),
+    status: text("status", { enum: TAXONOMY_NODE_STATUSES }).notNull(),
+    sortOrder: integer("sort_order").notNull().default(0),
+    version: integer("version").notNull().default(1),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (t) => [
+    index("catalog_taxonomy_nodes_parent_id_idx").on(t.parentId),
+    enumCheck("catalog_taxonomy_nodes", "level", t.level, TAXONOMY_LEVELS),
+    enumCheck("catalog_taxonomy_nodes", "status", t.status, TAXONOMY_NODE_STATUSES),
+  ],
+);
+
+/**
+ * Attribute definitions as data (M2-F1-R2). `node_ids`: the nodes it applies to, each with all its descendants.
+ * `allowed_values` only for `enum`; `unit` only for `number`. `source_precedence`: the sources allowed, best first.
+ */
+export const catalogAttributeDefs = pgTable(
+  "catalog_attribute_defs",
+  {
+    id: text("id").primaryKey(),
+    name: text("name").notNull(),
+    valueType: text("value_type", { enum: ATTRIBUTE_VALUE_TYPES }).notNull(),
+    allowedValues: jsonb("allowed_values").$type<AttributeAllowedValue[]>(),
+    unit: text("unit"),
+    nodeIds: jsonb("node_ids").$type<string[]>().notNull(),
+    tier: text("tier", { enum: ATTRIBUTE_TIERS }).notNull(),
+    sourcePrecedence: jsonb("source_precedence").$type<(typeof ATTRIBUTE_SOURCES)[number][]>().notNull(),
+    status: text("status", { enum: TAXONOMY_DEF_STATUSES }).notNull().default("active"),
+    version: integer("version").notNull().default(1),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (t) => [
+    enumCheck("catalog_attribute_defs", "value_type", t.valueType, ATTRIBUTE_VALUE_TYPES),
+    enumCheck("catalog_attribute_defs", "tier", t.tier, ATTRIBUTE_TIERS),
+    enumCheck("catalog_attribute_defs", "status", t.status, TAXONOMY_DEF_STATUSES),
+  ],
+);
+
+/**
+ * Shot roles as data per taxonomy node (M2-F1-R3). A node uses the roles of the nearest node on its path (itself
+ * first) that has any, so `fashion.apparel` roles serve every apparel type until a type gets its own set.
+ */
+export const catalogShotRoles = pgTable(
+  "catalog_shot_roles",
+  {
+    nodeId: text("node_id")
+      .notNull()
+      .references(() => catalogTaxonomyNodes.id),
+    key: text("key").notNull(),
+    name: text("name").notNull(),
+    definition: text("definition").notNull(),
+    sortOrder: integer("sort_order").notNull().default(0),
+    status: text("status", { enum: TAXONOMY_DEF_STATUSES }).notNull().default("active"),
+    version: integer("version").notNull().default(1),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.nodeId, t.key] }),
+    enumCheck("catalog_shot_roles", "status", t.status, TAXONOMY_DEF_STATUSES),
+  ],
+);
+
+/**
+ * Append-only log of every taxonomy write, with the full row after the write. The highest id is the taxonomy
+ * revision: a batch that records it can later tell exactly which definitions it ran with (M12-S1 version sets).
+ * That holds because every write holds one advisory lock to its commit (analyze/taxonomy.ts writeTransaction), so
+ * ids are handed out in commit order. Any new writer to these tables must use writeTransaction too.
+ * `entity_id` is the node or attribute id, or `<node_id>/<key>` for a shot role.
+ */
+export const catalogTaxonomyChanges = pgTable(
+  "catalog_taxonomy_changes",
+  {
+    id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
+    entity: text("entity", { enum: TAXONOMY_ENTITIES }).notNull(),
+    entityId: text("entity_id").notNull(),
+    version: integer("version").notNull(),
+    action: text("action", { enum: TAXONOMY_CHANGE_ACTIONS }).notNull(),
+    data: jsonb("data").$type<Record<string, unknown>>().notNull(),
+    changedBy: text("changed_by").notNull(),
+    note: text("note"),
+    createdAt: createdAt(),
+  },
+  (t) => [
+    index("catalog_taxonomy_changes_entity_idx").on(t.entity, t.entityId),
+    enumCheck("catalog_taxonomy_changes", "entity", t.entity, TAXONOMY_ENTITIES),
+    enumCheck("catalog_taxonomy_changes", "action", t.action, TAXONOMY_CHANGE_ACTIONS),
+  ],
+);
+
+// ---------------------------------------------------------------------------
 // Row types
 // ---------------------------------------------------------------------------
 
@@ -1124,3 +1255,7 @@ export type CatalogContentVersion = typeof catalogContentVersions.$inferSelect;
 export type CatalogChangeEvent = typeof catalogChangeEvents.$inferSelect;
 export type CatalogLiveInterval = typeof catalogLiveIntervals.$inferSelect;
 export type CatalogTreatmentAssignment = typeof catalogTreatmentAssignments.$inferSelect;
+export type TaxonomyNodeRow = typeof catalogTaxonomyNodes.$inferSelect;
+export type AttributeDefRow = typeof catalogAttributeDefs.$inferSelect;
+export type ShotRoleRow = typeof catalogShotRoles.$inferSelect;
+export type TaxonomyChangeRow = typeof catalogTaxonomyChanges.$inferSelect;
