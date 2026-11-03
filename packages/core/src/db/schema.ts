@@ -7,17 +7,21 @@
 import { sql, type SQL } from "drizzle-orm";
 import {
   bigint,
+  bigserial,
   boolean,
   check,
   date,
+  foreignKey,
   index,
   integer,
   jsonb,
   numeric,
   pgTable,
   primaryKey,
+  pgView,
   real,
   text,
+  unique,
   timestamp,
   uniqueIndex,
   uuid,
@@ -48,6 +52,28 @@ import {
   type ProductType,
   type Role,
 } from "../catalog/types";
+import {
+  ARMS,
+  CHANGE_EVENT_KINDS,
+  COMPONENTS,
+  DEFAULT_ORG_ID,
+  EVIDENCE_KINDS,
+  HASH_KINDS,
+  IMAGE_ROLES,
+  KEY_KINDS,
+  KEY_SOURCES,
+  LANGUAGES,
+  LISTING_STATUSES,
+  LIVE_STATES,
+  MARKETS,
+  OPTION_KEY_SOURCES,
+  PRODUCER_PATTERN,
+  REASON_KINDS,
+  STYLE_KEY_SOURCES,
+  VERSION_SOURCES,
+  type Slot,
+  type VersionScope,
+} from "../graph/types";
 
 // ---------------------------------------------------------------------------
 // Value lists that exist only in the database contract
@@ -75,6 +101,24 @@ export const COST_STAGES = ["matte", "render", "upscale", "qa", "classify", "pub
 export const COST_KINDS = ["llm_call", "matte_call", "render", "upscale_call", "compute"] as const;
 /** catalog_cost_events.outcome. `fallback`: the simple cut-out stood in for a failed service call. */
 export const COST_OUTCOMES = ["ok", "failed", "rate_limited", "cap", "fallback"] as const;
+
+/**
+ * M2-S1 taxonomy store (0010, docs/program/requirements/M2-analyze.md M2-F1-R1 to R3). The value lists below are the
+ * table structure; the nodes, attributes and shot roles themselves are data (analyze/taxonomy.ts).
+ * TAXONOMY_LEVELS is ordered from the root down: a node's level is always below its parent's.
+ */
+export const TAXONOMY_LEVELS = ["vertical", "department", "group", "type"] as const;
+/** `not_released`: the node exists (so a gap is visible) but nothing is labelled or ruled for it yet. */
+export const TAXONOMY_NODE_STATUSES = ["released", "not_released", "retired"] as const;
+/** Nothing is ever deleted from the taxonomy: a definition is retired instead, so old readings still resolve. */
+export const TAXONOMY_DEF_STATUSES = ["active", "retired"] as const;
+export const ATTRIBUTE_VALUE_TYPES = ["enum", "number", "text", "colour"] as const;
+/** `decision`: drives plans and gaps (M2-F1). `listing`: words for listing files (M2-F3). */
+export const ATTRIBUTE_TIERS = ["decision", "listing"] as const;
+/** Where an attribute value may come from (M2 3.2 AttributeValue.source), listed in precedence order per attribute. */
+export const ATTRIBUTE_SOURCES = ["sheet", "listing_text", "image", "rule", "web"] as const;
+export const TAXONOMY_ENTITIES = ["node", "attribute", "shot_role"] as const;
+export const TAXONOMY_CHANGE_ACTIONS = ["seed", "create", "update"] as const;
 
 export type BrandLine = (typeof BRAND_LINES)[number];
 export type MasterSource = (typeof MASTER_SOURCES)[number];
@@ -305,6 +349,8 @@ export const catalogProducts = pgTable(
     productType: text("product_type").$type<ProductType>(),
     lockBatchId: uuid("lock_batch_id").references(() => catalogBatches.id, { onDelete: "set null" }),
     lastBatchId: uuid("last_batch_id").references(() => catalogBatches.id, { onDelete: "set null" }),
+    /** M0 (0009): the option this product is, when its keys resolve to exactly one (F1-R6); null until then. */
+    optionId: uuid("option_id").references((): AnyPgColumn => catalogOptions.id, { onDelete: "set null" }),
     createdAt: createdAt(),
     updatedAt: updatedAt(),
   },
@@ -313,6 +359,8 @@ export const catalogProducts = pgTable(
     // Two products never share public paths (path_key is the public path segment).
     uniqueIndex("catalog_products_brand_test_path_uq").on(t.brandSlug, t.isTest, t.pathKey),
     index("catalog_products_lock_batch_id_idx").on(t.lockBatchId),
+    // Partial: the column is null on every existing row, so the build writes almost nothing (lookups are by equality).
+    index("catalog_products_option_id_idx").on(t.optionId).where(sql`${t.optionId} IS NOT NULL`),
   ],
 );
 
@@ -475,11 +523,16 @@ export const catalogOutputs = pgTable(
     }),
     attempt: integer("attempt").notNull().default(1),
     error: text("error"),
+    /** M0 (0009): the content version this render is (F2-R2); null on rows written before M0-S3. */
+    contentVersionId: uuid("content_version_id"),
     createdAt: createdAt(),
     updatedAt: updatedAt(),
   },
   (t) => [
     index("catalog_outputs_batch_id_idx").on(t.batchId),
+    index("catalog_outputs_content_version_id_idx").on(t.contentVersionId).where(sql`${t.contentVersionId} IS NOT NULL`),
+    // Named: the generated name is longer than Postgres's 63-character limit.
+    foreignKey({ name: "catalog_outputs_content_version_id_fk", columns: [t.contentVersionId], foreignColumns: [catalogContentVersions.id] }).onDelete("set null"),
     index("catalog_outputs_product_id_idx").on(t.productId),
     // Exactly one live row per (product, channel, n).
     uniqueIndex("catalog_outputs_live_uq").on(t.productId, t.channel, t.n).where(sql`${t.isLive}`),
@@ -711,6 +764,504 @@ export const catalogCostEvents = pgTable(
 );
 
 // ---------------------------------------------------------------------------
+// M0 catalog graph (migration 0009; docs/program/requirements/M0-catalog-graph.md 3.1 and 7.1). Written only through
+// packages/core/src/graph/. Every table has org_id (M12 Q1). Versions and change events are append-only.
+// ---------------------------------------------------------------------------
+
+const orgId = () => text("org_id").notNull().default(DEFAULT_ORG_ID);
+/** `split_part(slot, ':', 1)` is a component and the rest, if any, a 1-based position. */
+const slotCheck = (table: string, col: AnyPgColumn) =>
+  check(
+    `${table}_slot_check`,
+    sql`${col} ~ ${sql.raw(`'^(${COMPONENTS.join("|")})(:[1-9][0-9]*)?$'`)}`,
+  );
+
+/** One row per style-colour (F1). option_key: master option id, else sku_option id, else `sku:<opptra_sku>` (F1-R2). */
+export const catalogOptions = pgTable(
+  "catalog_options",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: orgId(),
+    brandSlug: text("brand_slug").notNull(),
+    optionKey: text("option_key").notNull(),
+    keySource: text("key_source", { enum: OPTION_KEY_SOURCES }).notNull(),
+    line: text("line", { enum: BRAND_LINES }),
+    productType: text("product_type"),
+    department: text("department"),
+    audience: text("audience"),
+    /** False once every SKU of the option left the master; the row is never deleted (F1-R1). */
+    inMaster: boolean("in_master").notNull().default(true),
+    styleKey: text("style_key"),
+    styleKeySource: text("style_key_source", { enum: STYLE_KEY_SOURCES }),
+    styleKeyConfidence: real("style_key_confidence"),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (t) => [
+    unique("catalog_options_brand_option_key_uq").on(t.brandSlug, t.optionKey),
+    index("catalog_options_option_key_idx").on(t.optionKey),
+    index("catalog_options_style_key_idx").on(t.styleKey),
+    enumCheck("catalog_options", "key_source", t.keySource, OPTION_KEY_SOURCES),
+    enumCheck("catalog_options", "line", t.line, BRAND_LINES),
+    enumCheck("catalog_options", "style_key_source", t.styleKeySource, STYLE_KEY_SOURCES),
+    check("catalog_options_style_key_confidence_check", sql`${t.styleKeyConfidence} BETWEEN 0 AND 1`),
+  ],
+);
+
+/** One row per option x channel x country. */
+export const catalogChannelListings = pgTable(
+  "catalog_channel_listings",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: orgId(),
+    optionId: uuid("option_id")
+      .notNull()
+      .references(() => catalogOptions.id),
+    channel: text("channel", { enum: CHANNEL_IDS }).$type<ChannelId>().notNull(),
+    market: text("market", { enum: MARKETS }).notNull(),
+    status: text("status", { enum: LISTING_STATUSES }).notNull().default("unknown"),
+    firstSeenLiveAt: tsNull("first_seen_live_at"),
+    lastVerifiedAt: tsNull("last_verified_at"),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (t) => [
+    unique("catalog_channel_listings_option_channel_market_uq").on(t.optionId, t.channel, t.market),
+    enumCheck("catalog_channel_listings", "channel", t.channel, CHANNEL_IDS),
+    enumCheck("catalog_channel_listings", "market", t.market, MARKETS),
+    enumCheck("catalog_channel_listings", "status", t.status, LISTING_STATUSES),
+  ],
+);
+
+/** Every key a listing is known by, at SKU level. A key never points at two listings (F1-R5). */
+export const catalogListingKeys = pgTable(
+  "catalog_listing_keys",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: orgId(),
+    listingId: uuid("listing_id")
+      .notNull()
+      .references(() => catalogChannelListings.id),
+    opptraSku: text("opptra_sku"),
+    channel: text("channel", { enum: CHANNEL_IDS }).$type<ChannelId>().notNull(),
+    market: text("market", { enum: MARKETS }).notNull(),
+    keyKind: text("key_kind", { enum: KEY_KINDS }).notNull(),
+    keyValue: text("key_value").notNull(),
+    source: text("source", { enum: KEY_SOURCES }).notNull(),
+    firstSeenAt: timestamp("first_seen_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    unique("catalog_listing_keys_channel_market_kind_value_uq").on(t.channel, t.market, t.keyKind, t.keyValue),
+    index("catalog_listing_keys_opptra_sku_idx").on(t.opptraSku),
+    index("catalog_listing_keys_listing_id_idx").on(t.listingId),
+    enumCheck("catalog_listing_keys", "channel", t.channel, CHANNEL_IDS),
+    enumCheck("catalog_listing_keys", "market", t.market, MARKETS),
+    enumCheck("catalog_listing_keys", "key_kind", t.keyKind, KEY_KINDS),
+    enumCheck("catalog_listing_keys", "source", t.source, KEY_SOURCES),
+    // The literal "0" and blank values are not keys (F1 edge cases).
+    check("catalog_listing_keys_key_value_check", sql`btrim(${t.keyValue}) <> '' AND ${t.keyValue} <> '0'`),
+  ],
+);
+
+/**
+ * Which sku_map.channel_ids column maps to which channel, market and key kind (F1-R3, admin data, no code change for a
+ * new column). channel null: the key belongs to every listing of the SKU (child_zsku). Rows are written by M0-S2.
+ */
+export const catalogKeyMappings = pgTable(
+  "catalog_key_mappings",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: orgId(),
+    skuColumn: text("sku_column", { enum: SKU_CHANNEL_KEYS }).notNull(),
+    channel: text("channel", { enum: CHANNEL_IDS }).$type<ChannelId>(),
+    market: text("market", { enum: MARKETS }),
+    keyKind: text("key_kind", { enum: KEY_KINDS }).notNull(),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (t) => [
+    unique("catalog_key_mappings_org_column_uq").on(t.orgId, t.skuColumn),
+    enumCheck("catalog_key_mappings", "sku_column", t.skuColumn, SKU_CHANNEL_KEYS),
+    enumCheck("catalog_key_mappings", "channel", t.channel, CHANNEL_IDS),
+    enumCheck("catalog_key_mappings", "market", t.market, MARKETS),
+    enumCheck("catalog_key_mappings", "key_kind", t.keyKind, KEY_KINDS),
+  ],
+);
+
+/** One row per distinct binary. phash: the 64-bit difference hash, stored as a signed bigint (F2-R7). */
+export const catalogAssets = pgTable(
+  "catalog_assets",
+  {
+    sha256: text("sha256").primaryKey(),
+    orgId: orgId(),
+    uri: text("uri").notNull(),
+    mime: text("mime").notNull(),
+    width: integer("width"),
+    height: integer("height"),
+    bytes: bigint("bytes", { mode: "number" }),
+    phash: bigint("phash", { mode: "bigint" }),
+    firstSeenAt: timestamp("first_seen_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [check("catalog_assets_sha256_check", sql`${t.sha256} ~ '^[0-9a-f]{64}$'`)],
+);
+
+/**
+ * One immutable piece of content (F2). Deduped on (option, scope, component, hash, producer, producer_ref), nulls
+ * equal, so recording the same content twice returns the first row (F2-R6). Never updated; only test versions are
+ * deleted, by test cleanup (F2-R5).
+ */
+export const catalogContentVersions = pgTable(
+  "catalog_content_versions",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: orgId(),
+    optionId: uuid("option_id").references(() => catalogOptions.id),
+    scope: text("scope").$type<VersionScope>().notNull(),
+    component: text("component", { enum: COMPONENTS }).notNull(),
+    role: text("role", { enum: IMAGE_ROLES }),
+    position: integer("position"),
+    source: text("source", { enum: VERSION_SOURCES }).notNull(),
+    aiGenerated: boolean("ai_generated").notNull(),
+    producer: text("producer").notNull(),
+    producerRef: text("producer_ref"),
+    assetSha256: text("asset_sha256").references(() => catalogAssets.sha256),
+    textValue: text("text_value"),
+    jsonValue: jsonb("json_value").$type<unknown>(),
+    contentHash: text("content_hash").notNull(),
+    hashKind: text("hash_kind", { enum: HASH_KINDS }).notNull().default("sha256"),
+    parentVersionIds: uuid("parent_version_ids").array().notNull().default(sql`'{}'::uuid[]`),
+    publicUrl: text("public_url"),
+    language: text("language", { enum: LANGUAGES }),
+    market: text("market", { enum: MARKETS }),
+    /** The M7 route that made it; never shown to operators. */
+    routeId: text("route_id"),
+    promptVersion: text("prompt_version"),
+    settingsSnapshotId: text("settings_snapshot_id"),
+    batchId: uuid("batch_id").references(() => catalogBatches.id, { onDelete: "set null" }),
+    isTest: boolean("is_test").notNull().default(false),
+    createdBy: text("created_by").notNull(),
+    createdAt: createdAt(),
+  },
+  (t) => [
+    unique("catalog_content_versions_identity_uq")
+      .on(t.optionId, t.scope, t.component, t.contentHash, t.producer, t.producerRef)
+      .nullsNotDistinct(),
+    index("catalog_content_versions_option_id_idx").on(t.optionId),
+    index("catalog_content_versions_asset_sha256_idx").on(t.assetSha256),
+    index("catalog_content_versions_batch_id_idx").on(t.batchId),
+    check("catalog_content_versions_scope_check", inList(t.scope, ["master", ...CHANNEL_IDS])),
+    enumCheck("catalog_content_versions", "component", t.component, COMPONENTS),
+    enumCheck("catalog_content_versions", "role", t.role, IMAGE_ROLES),
+    enumCheck("catalog_content_versions", "source", t.source, VERSION_SOURCES),
+    enumCheck("catalog_content_versions", "hash_kind", t.hashKind, HASH_KINDS),
+    enumCheck("catalog_content_versions", "language", t.language, LANGUAGES),
+    enumCheck("catalog_content_versions", "market", t.market, MARKETS),
+    check("catalog_content_versions_producer_check", sql`${t.producer} ~ ${sql.raw(`'${PRODUCER_PATTERN}'`)}`),
+    check("catalog_content_versions_position_check", sql`${t.position} >= 1`),
+    // F2-R4: a generated image is always flagged as AI-made.
+    check("catalog_content_versions_ai_generated_check", sql`${t.source} <> 'generated' OR ${t.aiGenerated}`),
+    // At most one payload; none only for a crc32c backfill row whose object is gone (F4-R2).
+    check(
+      "catalog_content_versions_payload_check",
+      sql`num_nonnulls(${t.assetSha256}, ${t.textValue}, ${t.jsonValue}) = 1 OR (num_nonnulls(${t.assetSha256}, ${t.textValue}, ${t.jsonValue}) = 0 AND ${t.hashKind} = 'crc32c')`,
+    ),
+  ],
+);
+
+/**
+ * The change log (F3, 3.2): append-only, read by cursor (`seq`). Every event names a reason and a change type (F3-R9),
+ * except observed_other events and backfill rows (evidence or reason `backfill`), which may lack either (decision D9).
+ * to_version_id is null exactly when a slot was emptied.
+ */
+export const catalogChangeEvents = pgTable(
+  "catalog_change_events",
+  {
+    seq: bigserial("seq", { mode: "bigint" }).primaryKey(),
+    orgId: orgId(),
+    idempotencyKey: text("idempotency_key").notNull(),
+    listingId: uuid("listing_id")
+      .notNull()
+      .references(() => catalogChannelListings.id),
+    slot: text("slot").$type<Slot>().notNull(),
+    fromVersionId: uuid("from_version_id"),
+    toVersionId: uuid("to_version_id"),
+    kind: text("kind", { enum: CHANGE_EVENT_KINDS }).notNull(),
+    at: timestamp("at", { withTimezone: true }).notNull(),
+    recordedAt: timestamp("recorded_at", { withTimezone: true }).notNull().defaultNow(),
+    evidence: text("evidence", { enum: EVIDENCE_KINDS }).notNull(),
+    evidenceRef: text("evidence_ref"),
+    actor: text("actor").notNull(),
+    reasonKind: text("reason_kind", { enum: REASON_KINDS }),
+    reasonRef: text("reason_ref"),
+    /** M10's change-type id (its table lands in M10-S1a, so no foreign key here). */
+    changeTypeId: text("change_type_id"),
+    changeSetId: uuid("change_set_id"),
+    batchId: uuid("batch_id").references(() => catalogBatches.id, { onDelete: "set null" }),
+    experimentId: text("experiment_id"),
+  },
+  (t) => [
+    unique("catalog_change_events_idempotency_key_uq").on(t.idempotencyKey),
+    // Named foreign keys: the generated names pass Postgres's 63-character limit.
+    // RESTRICT: deleting a version never erases the log; test cleanup deletes test events explicitly first (D13).
+    foreignKey({ name: "catalog_change_events_from_version_id_fk", columns: [t.fromVersionId], foreignColumns: [catalogContentVersions.id] }).onDelete("restrict"),
+    foreignKey({ name: "catalog_change_events_to_version_id_fk", columns: [t.toVersionId], foreignColumns: [catalogContentVersions.id] }).onDelete("restrict"),
+    index("catalog_change_events_from_version_id_idx").on(t.fromVersionId),
+    index("catalog_change_events_to_version_id_idx").on(t.toVersionId),
+    index("catalog_change_events_batch_id_idx").on(t.batchId),
+    index("catalog_change_events_listing_slot_at_idx").on(t.listingId, t.slot, t.at),
+    index("catalog_change_events_experiment_id_idx").on(t.experimentId),
+    slotCheck("catalog_change_events", t.slot),
+    enumCheck("catalog_change_events", "kind", t.kind, CHANGE_EVENT_KINDS),
+    enumCheck("catalog_change_events", "evidence", t.evidence, EVIDENCE_KINDS),
+    enumCheck("catalog_change_events", "reason_kind", t.reasonKind, REASON_KINDS),
+    // IS NOT DISTINCT FROM: a null reason_kind must make this operand false, not null (a null CHECK passes).
+    check(
+      "catalog_change_events_reason_check",
+      sql`(${t.reasonKind} IS NOT NULL AND ${t.changeTypeId} IS NOT NULL) OR ${t.kind} = 'observed_other' OR ${t.evidence} = 'backfill' OR ${t.reasonKind} IS NOT DISTINCT FROM 'backfill'`,
+    ),
+    check("catalog_change_events_to_version_check", sql`(${t.toVersionId} IS NULL) = (${t.kind} = 'removed')`),
+  ],
+);
+
+/** Derived from change events (F3-R6): which version held a slot from when to when. version_id null: slot empty. */
+export const catalogLiveIntervals = pgTable(
+  "catalog_live_intervals",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: orgId(),
+    listingId: uuid("listing_id").notNull(),
+    slot: text("slot").$type<Slot>().notNull(),
+    versionId: uuid("version_id"),
+    validFrom: timestamp("valid_from", { withTimezone: true }).notNull(),
+    validTo: tsNull("valid_to"),
+    state: text("state", { enum: LIVE_STATES }).notNull(),
+    updatedAt: updatedAt(),
+  },
+  (t) => [
+    unique("catalog_live_intervals_listing_slot_from_uq").on(t.listingId, t.slot, t.validFrom),
+    foreignKey({ name: "catalog_live_intervals_listing_id_fk", columns: [t.listingId], foreignColumns: [catalogChannelListings.id] }),
+    foreignKey({ name: "catalog_live_intervals_version_id_fk", columns: [t.versionId], foreignColumns: [catalogContentVersions.id] }).onDelete("restrict"),
+    index("catalog_live_intervals_version_id_idx").on(t.versionId),
+    slotCheck("catalog_live_intervals", t.slot),
+    enumCheck("catalog_live_intervals", "state", t.state, LIVE_STATES),
+    check("catalog_live_intervals_range_check", sql`${t.validTo} IS NULL OR ${t.validTo} > ${t.validFrom}`),
+  ],
+);
+
+/** Written by M4 only. A do_not_touch row that is not released freezes the listing (F3-R7). */
+export const catalogTreatmentAssignments = pgTable(
+  "catalog_treatment_assignments",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: orgId(),
+    experimentId: text("experiment_id").notNull(),
+    listingId: uuid("listing_id").notNull(),
+    arm: text("arm", { enum: ARMS }).notNull(),
+    pairId: text("pair_id"),
+    assignedAt: timestamp("assigned_at", { withTimezone: true }).notNull().defaultNow(),
+    frozenAt: tsNull("frozen_at"),
+    doNotTouch: boolean("do_not_touch").notNull().default(false),
+    releasedAt: tsNull("released_at"),
+  },
+  (t) => [
+    unique("catalog_treatment_assignments_experiment_listing_uq").on(t.experimentId, t.listingId),
+    foreignKey({ name: "catalog_treatment_assignments_listing_id_fk", columns: [t.listingId], foreignColumns: [catalogChannelListings.id] }),
+    // The guard's read: a listing's assignments that still hold (control or frozen treatment).
+    index("catalog_treatment_assignments_active_idx").on(t.listingId).where(sql`${t.releasedAt} IS NULL`),
+    enumCheck("catalog_treatment_assignments", "arm", t.arm, ARMS),
+  ],
+);
+
+/** Checkpoints of the resumable backfill job (F4-R6). */
+export const catalogBackfillRuns = pgTable("catalog_backfill_runs", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  orgId: orgId(),
+  job: text("job").notNull(),
+  cursor: jsonb("cursor").$type<Record<string, unknown>>().notNull().default({}),
+  counts: jsonb("counts").$type<Record<string, number>>().notNull().default({}),
+  startedAt: timestamp("started_at", { withTimezone: true }).notNull().defaultNow(),
+  finishedAt: tsNull("finished_at"),
+  error: text("error"),
+  updatedAt: updatedAt(),
+});
+
+/** One row per BigQuery export run (F5-R4). */
+export const catalogGraphExportRuns = pgTable("catalog_graph_export_runs", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  orgId: orgId(),
+  startedAt: timestamp("started_at", { withTimezone: true }).notNull().defaultNow(),
+  finishedAt: tsNull("finished_at"),
+  rowsPerTable: jsonb("rows_per_table").$type<Record<string, number>>().notNull().default({}),
+  maxSeq: bigint("max_seq", { mode: "bigint" }),
+  error: text("error"),
+});
+
+/** The outcome link (3.1): every key of every listing, the join to sales, ads, stock and price rows in BigQuery. */
+export const catalogOutcomeKeys = pgView("catalog_outcome_keys").as((qb) =>
+  qb
+    .select({
+      listingId: catalogListingKeys.listingId,
+      optionId: catalogChannelListings.optionId,
+      channel: catalogChannelListings.channel,
+      market: catalogChannelListings.market,
+      keyKind: catalogListingKeys.keyKind,
+      keyValue: catalogListingKeys.keyValue,
+      opptraSku: catalogListingKeys.opptraSku,
+      orgId: catalogListingKeys.orgId,
+    })
+    .from(catalogListingKeys)
+    .innerJoin(catalogChannelListings, sql`${catalogChannelListings.id} = ${catalogListingKeys.listingId}`),
+);
+
+// ---------------------------------------------------------------------------
+// M2 taxonomy store (M2-S1). Read and written only through analyze/taxonomy.ts, which keeps the change log.
+// ---------------------------------------------------------------------------
+
+/** One allowed value of an enum attribute. `key` is the stored word; it never changes meaning (retire and add). */
+export type AttributeAllowedValue = { key: string; label: string; definition?: string };
+
+/**
+ * The one category tree of the system (M2-F1-R1, integration decision D1): M5 rules scope by these ids. `id` is the
+ * dotted path from the root (`fashion.apparel.upper.top`), so it is stable and readable in rule data; a node never
+ * moves. `aliases` are other words for the node (brand sheet categories, rule dataset scopes), used to map words to a
+ * node, never shown as its name.
+ */
+export const catalogTaxonomyNodes = pgTable(
+  "catalog_taxonomy_nodes",
+  {
+    id: text("id").primaryKey(),
+    parentId: text("parent_id").references((): AnyPgColumn => catalogTaxonomyNodes.id),
+    level: text("level", { enum: TAXONOMY_LEVELS }).notNull(),
+    name: text("name").notNull(),
+    aliases: jsonb("aliases").$type<string[]>().notNull().default([]),
+    status: text("status", { enum: TAXONOMY_NODE_STATUSES }).notNull(),
+    sortOrder: integer("sort_order").notNull().default(0),
+    version: integer("version").notNull().default(1),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (t) => [
+    index("catalog_taxonomy_nodes_parent_id_idx").on(t.parentId),
+    enumCheck("catalog_taxonomy_nodes", "level", t.level, TAXONOMY_LEVELS),
+    enumCheck("catalog_taxonomy_nodes", "status", t.status, TAXONOMY_NODE_STATUSES),
+  ],
+);
+
+/**
+ * Attribute definitions as data (M2-F1-R2). `node_ids`: the nodes it applies to, each with all its descendants.
+ * `allowed_values` only for `enum`; `unit` only for `number`. `source_precedence`: the sources allowed, best first.
+ */
+export const catalogAttributeDefs = pgTable(
+  "catalog_attribute_defs",
+  {
+    id: text("id").primaryKey(),
+    name: text("name").notNull(),
+    valueType: text("value_type", { enum: ATTRIBUTE_VALUE_TYPES }).notNull(),
+    allowedValues: jsonb("allowed_values").$type<AttributeAllowedValue[]>(),
+    unit: text("unit"),
+    nodeIds: jsonb("node_ids").$type<string[]>().notNull(),
+    tier: text("tier", { enum: ATTRIBUTE_TIERS }).notNull(),
+    sourcePrecedence: jsonb("source_precedence").$type<(typeof ATTRIBUTE_SOURCES)[number][]>().notNull(),
+    status: text("status", { enum: TAXONOMY_DEF_STATUSES }).notNull().default("active"),
+    version: integer("version").notNull().default(1),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (t) => [
+    enumCheck("catalog_attribute_defs", "value_type", t.valueType, ATTRIBUTE_VALUE_TYPES),
+    enumCheck("catalog_attribute_defs", "tier", t.tier, ATTRIBUTE_TIERS),
+    enumCheck("catalog_attribute_defs", "status", t.status, TAXONOMY_DEF_STATUSES),
+  ],
+);
+
+/**
+ * Shot roles as data per taxonomy node (M2-F1-R3). A node uses the roles of the nearest node on its path (itself
+ * first) that has any, so `fashion.apparel` roles serve every apparel type until a type gets its own set.
+ */
+export const catalogShotRoles = pgTable(
+  "catalog_shot_roles",
+  {
+    nodeId: text("node_id")
+      .notNull()
+      .references(() => catalogTaxonomyNodes.id),
+    key: text("key").notNull(),
+    name: text("name").notNull(),
+    definition: text("definition").notNull(),
+    sortOrder: integer("sort_order").notNull().default(0),
+    status: text("status", { enum: TAXONOMY_DEF_STATUSES }).notNull().default("active"),
+    version: integer("version").notNull().default(1),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.nodeId, t.key] }),
+    enumCheck("catalog_shot_roles", "status", t.status, TAXONOMY_DEF_STATUSES),
+  ],
+);
+
+/**
+ * Append-only log of every taxonomy write, with the full row after the write. The highest id is the taxonomy
+ * revision: a batch that records it can later tell exactly which definitions it ran with (M12-S1 version sets).
+ * That holds because every write holds one advisory lock to its commit (analyze/taxonomy.ts writeTransaction), so
+ * ids are handed out in commit order. Any new writer to these tables must use writeTransaction too.
+ * `entity_id` is the node or attribute id, or `<node_id>/<key>` for a shot role.
+ */
+export const catalogTaxonomyChanges = pgTable(
+  "catalog_taxonomy_changes",
+  {
+    id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
+    entity: text("entity", { enum: TAXONOMY_ENTITIES }).notNull(),
+    entityId: text("entity_id").notNull(),
+    version: integer("version").notNull(),
+    action: text("action", { enum: TAXONOMY_CHANGE_ACTIONS }).notNull(),
+    data: jsonb("data").$type<Record<string, unknown>>().notNull(),
+    changedBy: text("changed_by").notNull(),
+    note: text("note"),
+    createdAt: createdAt(),
+  },
+  (t) => [
+    index("catalog_taxonomy_changes_entity_idx").on(t.entity, t.entityId),
+    enumCheck("catalog_taxonomy_changes", "entity", t.entity, TAXONOMY_ENTITIES),
+    enumCheck("catalog_taxonomy_changes", "action", t.action, TAXONOMY_CHANGE_ACTIONS),
+  ],
+);
+
+// ---------------------------------------------------------------------------
+// Row types
+// ---------------------------------------------------------------------------
+
+export type UserRow = typeof users.$inferSelect;
+export type BrandMasterRow = typeof brandMaster.$inferSelect;
+export type SkuMapRow = typeof skuMap.$inferSelect;
+export type ModelPolicyRow = typeof modelPolicy.$inferSelect;
+export type CatalogBatch = typeof catalogBatches.$inferSelect;
+export type CatalogUpload = typeof catalogUploads.$inferSelect;
+export type CatalogProduct = typeof catalogProducts.$inferSelect;
+export type CatalogBatchProduct = typeof catalogBatchProducts.$inferSelect;
+export type CatalogProductAlias = typeof catalogProductAliases.$inferSelect;
+export type CatalogProductEvent = typeof catalogProductEvents.$inferSelect;
+export type CatalogSourceImage = typeof catalogSourceImages.$inferSelect;
+export type CatalogOutput = typeof catalogOutputs.$inferSelect;
+export type CatalogChunk = typeof catalogChunks.$inferSelect;
+export type CatalogEnlargement = typeof catalogEnlargements.$inferSelect;
+export type CatalogEvalLabel = typeof catalogEvalLabels.$inferSelect;
+export type CatalogEvalJudgement = typeof catalogEvalJudgements.$inferSelect;
+export type SpendDay = typeof spendDays.$inferSelect;
+export type CatalogCostEvent = typeof catalogCostEvents.$inferSelect;
+export type CatalogOption = typeof catalogOptions.$inferSelect;
+export type CatalogChannelListing = typeof catalogChannelListings.$inferSelect;
+export type CatalogListingKey = typeof catalogListingKeys.$inferSelect;
+export type CatalogAsset = typeof catalogAssets.$inferSelect;
+export type CatalogContentVersion = typeof catalogContentVersions.$inferSelect;
+export type CatalogChangeEvent = typeof catalogChangeEvents.$inferSelect;
+export type CatalogLiveInterval = typeof catalogLiveIntervals.$inferSelect;
+export type CatalogTreatmentAssignment = typeof catalogTreatmentAssignments.$inferSelect;
+export type TaxonomyNodeRow = typeof catalogTaxonomyNodes.$inferSelect;
+export type AttributeDefRow = typeof catalogAttributeDefs.$inferSelect;
+export type ShotRoleRow = typeof catalogShotRoles.$inferSelect;
+export type TaxonomyChangeRow = typeof catalogTaxonomyChanges.$inferSelect;
+
+// ---------------------------------------------------------------------------
 // M7-F2 vendor routes: the live routing every capability call goes through
 // ---------------------------------------------------------------------------
 
@@ -775,27 +1326,5 @@ export const vendorRouteChanges = pgTable(
   ],
 );
 
-// ---------------------------------------------------------------------------
-// Row types
-// ---------------------------------------------------------------------------
-
-export type UserRow = typeof users.$inferSelect;
-export type BrandMasterRow = typeof brandMaster.$inferSelect;
-export type SkuMapRow = typeof skuMap.$inferSelect;
-export type ModelPolicyRow = typeof modelPolicy.$inferSelect;
-export type CatalogBatch = typeof catalogBatches.$inferSelect;
-export type CatalogUpload = typeof catalogUploads.$inferSelect;
-export type CatalogProduct = typeof catalogProducts.$inferSelect;
-export type CatalogBatchProduct = typeof catalogBatchProducts.$inferSelect;
-export type CatalogProductAlias = typeof catalogProductAliases.$inferSelect;
-export type CatalogProductEvent = typeof catalogProductEvents.$inferSelect;
-export type CatalogSourceImage = typeof catalogSourceImages.$inferSelect;
-export type CatalogOutput = typeof catalogOutputs.$inferSelect;
-export type CatalogChunk = typeof catalogChunks.$inferSelect;
-export type CatalogEnlargement = typeof catalogEnlargements.$inferSelect;
-export type CatalogEvalLabel = typeof catalogEvalLabels.$inferSelect;
-export type CatalogEvalJudgement = typeof catalogEvalJudgements.$inferSelect;
-export type SpendDay = typeof spendDays.$inferSelect;
-export type CatalogCostEvent = typeof catalogCostEvents.$inferSelect;
 export type VendorRouteRow = typeof vendorRoutes.$inferSelect;
 export type VendorRouteChange = typeof vendorRouteChanges.$inferSelect;

@@ -1,5 +1,5 @@
 {
-  "id": "98991132-42c8-43b8-812d-4e4914a8b9ce",
+  "id": "1b3185b2-fb39-46fe-a7b1-95eb5bcca800",
   "prevId": "dd4b6e6d-c571-42ca-a312-eb6e6d884493",
   "version": "7",
   "dialect": "postgresql",
@@ -148,6 +148,108 @@
         "catalog_assets_sha256_check": {
           "name": "catalog_assets_sha256_check",
           "value": "\"catalog_assets\".\"sha256\" ~ '^[0-9a-f]{64}$'"
+        }
+      },
+      "isRLSEnabled": false
+    },
+    "public.catalog_attribute_defs": {
+      "name": "catalog_attribute_defs",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "name": {
+          "name": "name",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "value_type": {
+          "name": "value_type",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "allowed_values": {
+          "name": "allowed_values",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "unit": {
+          "name": "unit",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "node_ids": {
+          "name": "node_ids",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "tier": {
+          "name": "tier",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "source_precedence": {
+          "name": "source_precedence",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "status": {
+          "name": "status",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'active'"
+        },
+        "version": {
+          "name": "version",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 1
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {
+        "catalog_attribute_defs_value_type_check": {
+          "name": "catalog_attribute_defs_value_type_check",
+          "value": "\"catalog_attribute_defs\".\"value_type\" IN ('enum', 'number', 'text', 'colour')"
+        },
+        "catalog_attribute_defs_tier_check": {
+          "name": "catalog_attribute_defs_tier_check",
+          "value": "\"catalog_attribute_defs\".\"tier\" IN ('decision', 'listing')"
+        },
+        "catalog_attribute_defs_status_check": {
+          "name": "catalog_attribute_defs_status_check",
+          "value": "\"catalog_attribute_defs\".\"status\" IN ('active', 'retired')"
         }
       },
       "isRLSEnabled": false
@@ -3746,6 +3848,105 @@
       "checkConstraints": {},
       "isRLSEnabled": false
     },
+    "public.catalog_shot_roles": {
+      "name": "catalog_shot_roles",
+      "schema": "",
+      "columns": {
+        "node_id": {
+          "name": "node_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "key": {
+          "name": "key",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "name": {
+          "name": "name",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "definition": {
+          "name": "definition",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "sort_order": {
+          "name": "sort_order",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "status": {
+          "name": "status",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'active'"
+        },
+        "version": {
+          "name": "version",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 1
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {
+        "catalog_shot_roles_node_id_catalog_taxonomy_nodes_id_fk": {
+          "name": "catalog_shot_roles_node_id_catalog_taxonomy_nodes_id_fk",
+          "tableFrom": "catalog_shot_roles",
+          "tableTo": "catalog_taxonomy_nodes",
+          "columnsFrom": [
+            "node_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {
+        "catalog_shot_roles_node_id_key_pk": {
+          "name": "catalog_shot_roles_node_id_key_pk",
+          "columns": [
+            "node_id",
+            "key"
+          ]
+        }
+      },
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {
+        "catalog_shot_roles_status_check": {
+          "name": "catalog_shot_roles_status_check",
+          "value": "\"catalog_shot_roles\".\"status\" IN ('active', 'retired')"
+        }
+      },
+      "isRLSEnabled": false
+    },
     "public.catalog_source_images": {
       "name": "catalog_source_images",
       "schema": "",
@@ -4060,6 +4261,233 @@
         "catalog_source_images_status_check": {
           "name": "catalog_source_images_status_check",
           "value": "\"catalog_source_images\".\"status\" IN ('pending', 'prepared', 'matted', 'failed', 'unsupported')"
+        }
+      },
+      "isRLSEnabled": false
+    },
+    "public.catalog_taxonomy_changes": {
+      "name": "catalog_taxonomy_changes",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "bigint",
+          "primaryKey": true,
+          "notNull": true,
+          "identity": {
+            "type": "always",
+            "name": "catalog_taxonomy_changes_id_seq",
+            "schema": "public",
+            "increment": "1",
+            "startWith": "1",
+            "minValue": "1",
+            "maxValue": "9223372036854775807",
+            "cache": "1",
+            "cycle": false
+          }
+        },
+        "entity": {
+          "name": "entity",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "entity_id": {
+          "name": "entity_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "version": {
+          "name": "version",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "action": {
+          "name": "action",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "data": {
+          "name": "data",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "changed_by": {
+          "name": "changed_by",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "note": {
+          "name": "note",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "catalog_taxonomy_changes_entity_idx": {
+          "name": "catalog_taxonomy_changes_entity_idx",
+          "columns": [
+            {
+              "expression": "entity",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "entity_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {
+        "catalog_taxonomy_changes_entity_check": {
+          "name": "catalog_taxonomy_changes_entity_check",
+          "value": "\"catalog_taxonomy_changes\".\"entity\" IN ('node', 'attribute', 'shot_role')"
+        },
+        "catalog_taxonomy_changes_action_check": {
+          "name": "catalog_taxonomy_changes_action_check",
+          "value": "\"catalog_taxonomy_changes\".\"action\" IN ('seed', 'create', 'update')"
+        }
+      },
+      "isRLSEnabled": false
+    },
+    "public.catalog_taxonomy_nodes": {
+      "name": "catalog_taxonomy_nodes",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "parent_id": {
+          "name": "parent_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "level": {
+          "name": "level",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "name": {
+          "name": "name",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "aliases": {
+          "name": "aliases",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'[]'::jsonb"
+        },
+        "status": {
+          "name": "status",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "sort_order": {
+          "name": "sort_order",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "version": {
+          "name": "version",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 1
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "catalog_taxonomy_nodes_parent_id_idx": {
+          "name": "catalog_taxonomy_nodes_parent_id_idx",
+          "columns": [
+            {
+              "expression": "parent_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "catalog_taxonomy_nodes_parent_id_catalog_taxonomy_nodes_id_fk": {
+          "name": "catalog_taxonomy_nodes_parent_id_catalog_taxonomy_nodes_id_fk",
+          "tableFrom": "catalog_taxonomy_nodes",
+          "tableTo": "catalog_taxonomy_nodes",
+          "columnsFrom": [
+            "parent_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {
+        "catalog_taxonomy_nodes_level_check": {
+          "name": "catalog_taxonomy_nodes_level_check",
+          "value": "\"catalog_taxonomy_nodes\".\"level\" IN ('vertical', 'department', 'group', 'type')"
+        },
+        "catalog_taxonomy_nodes_status_check": {
+          "name": "catalog_taxonomy_nodes_status_check",
+          "value": "\"catalog_taxonomy_nodes\".\"status\" IN ('released', 'not_released', 'retired')"
         }
       },
       "isRLSEnabled": false
@@ -4778,302 +5206,6 @@
         "users_role_check": {
           "name": "users_role_check",
           "value": "\"users\".\"role\" IN ('admin', 'operator', 'viewer')"
-        }
-      },
-      "isRLSEnabled": false
-    },
-    "public.vendor_route_changes": {
-      "name": "vendor_route_changes",
-      "schema": "",
-      "columns": {
-        "id": {
-          "name": "id",
-          "type": "uuid",
-          "primaryKey": true,
-          "notNull": true,
-          "default": "gen_random_uuid()"
-        },
-        "route_id": {
-          "name": "route_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "capability": {
-          "name": "capability",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "from_state": {
-          "name": "from_state",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "to_state": {
-          "name": "to_state",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "from_rank": {
-          "name": "from_rank",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "to_rank": {
-          "name": "to_rank",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "changed_by": {
-          "name": "changed_by",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "reason": {
-          "name": "reason",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "run_id": {
-          "name": "run_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "at": {
-          "name": "at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "now()"
-        }
-      },
-      "indexes": {
-        "vendor_route_changes_route_id_at_idx": {
-          "name": "vendor_route_changes_route_id_at_idx",
-          "columns": [
-            {
-              "expression": "route_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "at",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        }
-      },
-      "foreignKeys": {
-        "vendor_route_changes_route_id_vendor_routes_id_fk": {
-          "name": "vendor_route_changes_route_id_vendor_routes_id_fk",
-          "tableFrom": "vendor_route_changes",
-          "tableTo": "vendor_routes",
-          "columnsFrom": [
-            "route_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "no action",
-          "onUpdate": "no action"
-        }
-      },
-      "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
-      "policies": {},
-      "checkConstraints": {
-        "vendor_route_changes_capability_check": {
-          "name": "vendor_route_changes_capability_check",
-          "value": "\"vendor_route_changes\".\"capability\" IN ('vision.read', 'judge.render', 'image.matte', 'image.upscale', 'ocr.read', 'people.detect')"
-        },
-        "vendor_route_changes_from_state_check": {
-          "name": "vendor_route_changes_from_state_check",
-          "value": "\"vendor_route_changes\".\"from_state\" IN ('registered', 'benchmarked', 'shadow', 'canary', 'serving', 'retired', 'off')"
-        },
-        "vendor_route_changes_to_state_check": {
-          "name": "vendor_route_changes_to_state_check",
-          "value": "\"vendor_route_changes\".\"to_state\" IN ('registered', 'benchmarked', 'shadow', 'canary', 'serving', 'retired', 'off')"
-        }
-      },
-      "isRLSEnabled": false
-    },
-    "public.vendor_routes": {
-      "name": "vendor_routes",
-      "schema": "",
-      "columns": {
-        "id": {
-          "name": "id",
-          "type": "text",
-          "primaryKey": true,
-          "notNull": true
-        },
-        "capability": {
-          "name": "capability",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "rank": {
-          "name": "rank",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "adapter": {
-          "name": "adapter",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "model": {
-          "name": "model",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "params_version": {
-          "name": "params_version",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "'1'"
-        },
-        "price_usd": {
-          "name": "price_usd",
-          "type": "numeric(12, 6)",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "rate_limit_per_min": {
-          "name": "rate_limit_per_min",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "region": {
-          "name": "region",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "licence": {
-          "name": "licence",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "no_training_terms": {
-          "name": "no_training_terms",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "state": {
-          "name": "state",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "created_at": {
-          "name": "created_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "now()"
-        },
-        "updated_at": {
-          "name": "updated_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "now()"
-        }
-      },
-      "indexes": {
-        "vendor_routes_capability_adapter_model_uq": {
-          "name": "vendor_routes_capability_adapter_model_uq",
-          "columns": [
-            {
-              "expression": "capability",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "adapter",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "model",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": true,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        },
-        "vendor_routes_capability_rank_idx": {
-          "name": "vendor_routes_capability_rank_idx",
-          "columns": [
-            {
-              "expression": "capability",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "rank",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        }
-      },
-      "foreignKeys": {},
-      "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
-      "policies": {},
-      "checkConstraints": {
-        "vendor_routes_capability_check": {
-          "name": "vendor_routes_capability_check",
-          "value": "\"vendor_routes\".\"capability\" IN ('vision.read', 'judge.render', 'image.matte', 'image.upscale', 'ocr.read', 'people.detect')"
-        },
-        "vendor_routes_adapter_check": {
-          "name": "vendor_routes_adapter_check",
-          "value": "\"vendor_routes\".\"adapter\" IN ('openrouter', 'matting-gpu', 'matting-cpu', 'upscale-gpu', 'upscale-cpu', 'photoroom')"
-        },
-        "vendor_routes_state_check": {
-          "name": "vendor_routes_state_check",
-          "value": "\"vendor_routes\".\"state\" IN ('registered', 'benchmarked', 'shadow', 'canary', 'serving', 'retired', 'off')"
-        },
-        "vendor_routes_serving_needs_terms_check": {
-          "name": "vendor_routes_serving_needs_terms_check",
-          "value": "\"vendor_routes\".\"state\" <> 'serving' OR NOT (\"vendor_routes\".\"capability\" IN ('vision.read', 'judge.render', 'image.matte', 'image.upscale', 'ocr.read', 'people.detect')) OR (btrim(coalesce(\"vendor_routes\".\"no_training_terms\", '')) <> '' AND lower(btrim(\"vendor_routes\".\"no_training_terms\")) NOT LIKE 'pending%')"
         }
       },
       "isRLSEnabled": false

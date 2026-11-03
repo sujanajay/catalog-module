@@ -1,9 +1,10 @@
 // Cloud Run job entry (catalog-migrate): apply migrations, seed the first admin (spec 03) and the
-// test brand test_brand with its manual SKUs (owner decision 2026-10-19), then exit.
+// test brand test_brand with its manual SKUs (owner decision 2026-10-19) and the M2 taxonomy (M2-S1), then exit.
 import { closeDb, getDb } from "@catalog/core/db/client";
 import { resolveMigrationsFolder, runMigrations } from "@catalog/core/db/migrate";
 import { seedAdmin } from "@catalog/core/people";
 import { seedTestBrand } from "@catalog/core/catalog/brands";
+import { seedTaxonomy } from "@catalog/core/analyze/taxonomy-seed";
 import { defaultMigrationsDir } from "./runtime";
 
 async function main(): Promise<void> {
@@ -17,6 +18,8 @@ async function main(): Promise<void> {
   console.log(`migrate: admin ${adminEmail.toLowerCase()} ${inserted ? "seeded" : "already present (left unchanged)"}`);
   const test = await seedTestBrand(getDb());
   console.log(`migrate: test brand ${test.brand.slug} present (${test.brand.source}); ${test.skusAdded} manual SKUs added`);
+  const taxonomy = await seedTaxonomy(getDb());
+  console.log(`migrate: taxonomy seeded (${taxonomy.nodesAdded} categories, ${taxonomy.attributesAdded} attributes, ${taxonomy.shotRolesAdded} shot roles added)`);
 }
 
 main()

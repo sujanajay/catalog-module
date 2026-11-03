@@ -66,10 +66,24 @@
       "breakpoints": true
     },
     {
+      "idx": 9,
+      "version": "7",
+      "when": 1793695201651,
+      "tag": "0009_catalog_graph",
+      "breakpoints": true
+    },
+    {
       "idx": 10,
       "version": "7",
-      "when": 1793695920416,
-      "tag": "0010_vendor_routes",
+      "when": 1793710699535,
+      "tag": "0010_taxonomy",
+      "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "7",
+      "when": 1793711719417,
+      "tag": "0011_vendor_routes",
       "breakpoints": true
     }
   ]
