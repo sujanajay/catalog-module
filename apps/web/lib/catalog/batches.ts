@@ -176,9 +176,10 @@ export function parseOptions(value: unknown, existing: BatchOptions): BatchOptio
     if (!IDENTIFIER_MODES.includes(input.identifierMode as BatchOptions["identifierMode"])) throw badRequest("Choose how to tell products apart.");
     options.identifierMode = input.identifierMode as BatchOptions["identifierMode"];
   }
-  // One mode chosen for the whole batch turns per-root grouping off, unless perRoot says otherwise (M1-F1-R2).
+  // A different single mode chosen for the whole batch turns per-root grouping off, unless perRoot says
+  // otherwise (M1-F1-R2); re-sending the stored mode changes nothing (spec 14c F7 part 1).
   if (input.perRoot !== undefined) options.perRoot = input.perRoot as boolean;
-  else if (input.identifierMode !== undefined) options.perRoot = false;
+  else if (input.identifierMode !== undefined && input.identifierMode !== existing.identifierMode) options.perRoot = false;
   if (input.precedence !== undefined) {
     if (!PRECEDENCES.includes(input.precedence as BatchOptions["precedence"])) throw badRequest("Choose which photos should win.");
     options.precedence = input.precedence as BatchOptions["precedence"];

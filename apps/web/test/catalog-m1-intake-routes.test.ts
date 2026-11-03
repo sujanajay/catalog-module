@@ -92,7 +92,7 @@ describe("per-root grouping options (M1-F1-R2)", () => {
     expect((await batchOf(id)).options).toMatchObject({ identifierMode: "folder", perRoot: false });
     expect((await patchDetected(request("PATCH", { perRoot: true, precedence: "uploads_then_links", sheets: [] }), ctx(id))).status).toBe(200);
     expect((await batchOf(id)).options).toMatchObject({ perRoot: true });
-    // An API caller that sends one mode without perRoot (as before M1) gets that mode for the whole batch.
+    // An API caller that sends a different mode without perRoot (as before M1) gets that mode for the whole batch.
     expect((await patchDetected(request("PATCH", { identifierMode: "filename" }), ctx(id))).status).toBe(200);
     expect((await batchOf(id)).options.perRoot).toBe(false);
     expect((await patchDetected(request("PATCH", { perRoot: "yes" }), ctx(id))).status).toBe(400);
