@@ -8,7 +8,7 @@ import { canRetryLinks, continueSettingUpHref, STEP2_COLLECTING_TEXT, STEP3_COLL
 import type { WizardDetected, WizardPreview } from "../../lib/catalog/preview";
 import { useToast } from "../Toast";
 import WizardStep1 from "./WizardStep1";
-import WizardStep2, { mergeSheetChoices, type SheetChoice } from "./WizardStep2";
+import WizardStep2, { mergeSheetChoices, type GroupingChoice, type SheetChoice } from "./WizardStep2";
 import WizardStep3 from "./WizardStep3";
 import WizardStep4 from "./WizardStep4";
 import RetryCollectButton from "./RetryCollectButton";
@@ -20,23 +20,25 @@ import "./wizard.css";
 /** An existing draft or collecting batch the wizard reopens at (spec 14a F4 part 1, `/catalog/new?batch=<id>`). */
 export interface WizardInitialBatch {
   id: string; brandSlug: string; name: string; productType: ProductType; channels: ChannelId[];
-  options: { identifierMode: IdentifierMode; precedence: Precedence };
+  options: { identifierMode: IdentifierMode; precedence: Precedence; perRoot?: boolean };
   uploads: { status: string }[]; counts: BatchCounts; status: BatchStatus; state: BatchState;
 }
 /**
  * The grouping answers a resumed batch opens with. A batch resumed at step 4 has passed step 2, and saved options
  * that differ from the creation defaults can only come from the operator's step 2 Continue, so in both cases the
  * saved options win and the first poll must not replace them with the detected defaults (`chosen`).
+ * A per-root batch (M1-F1-R2) opens on "per_root"; one that step 2 switched to a single mode opens on that mode.
  */
-export function resumedGrouping(initialBatch: WizardInitialBatch | undefined, initialStep: number): { mode: IdentifierMode; precedence: Precedence; chosen: boolean } {
-  if (!initialBatch) return { mode: "filename", precedence: "uploads_then_links", chosen: false };
-  const { identifierMode: mode, precedence } = initialBatch.options;
-  return { mode, precedence, chosen: initialStep === 4 || mode !== "filename" || precedence !== "uploads_then_links" };
+export function resumedGrouping(initialBatch: WizardInitialBatch | undefined, initialStep: number): { mode: GroupingChoice; precedence: Precedence; chosen: boolean } {
+  if (!initialBatch) return { mode: "per_root", precedence: "uploads_then_links", chosen: false };
+  const { identifierMode, precedence, perRoot } = initialBatch.options;
+  const mode: GroupingChoice = perRoot ? "per_root" : identifierMode;
+  return { mode, precedence, chosen: initialStep === 4 || (!perRoot && identifierMode !== "filename") || precedence !== "uploads_then_links" };
 }
 type PolledBatch = { counts: { previewReady: boolean; failReason: string | null; collectTotal?: number | null }; state?: BatchState };
 
 const STEPS = ["Brand and files", "Check what we found", "Where will these images go?", "Start"];
-export default function CatalogWizard({ brands, shareEmail, initialBrand = "", initialBatch }: { brands: BrandOption[]; shareEmail: string; initialBrand?: string; initialBatch?: WizardInitialBatch }) {
+export default function CatalogWizard({ brands, shareEmail, supabasePaste = false, initialBrand = "", initialBatch }: { brands: BrandOption[]; shareEmail: string; supabasePaste?: boolean; initialBrand?: string; initialBatch?: WizardInitialBatch }) {
   const router = useRouter();
   const toast = useToast();
   // The step is derived once, on mount; later re-renders of the page (router.replace) do not reset the wizard.
@@ -51,7 +53,7 @@ export default function CatalogWizard({ brands, shareEmail, initialBrand = "", i
   const detectedRequest = useRef(0);
   const [channels, setChannels] = useState<ChannelId[]>(initialBatch?.channels ?? []);
   const [resumed] = useState(() => resumedGrouping(initialBatch, initialStep));
-  const [mode, setMode] = useState<IdentifierMode>(resumed.mode);
+  const [mode, setMode] = useState<GroupingChoice>(resumed.mode);
   const [precedence, setPrecedence] = useState<Precedence>(resumed.precedence);
   const [sheets, setSheets] = useState<SheetChoice[]>([]);
   const [detected, setDetected] = useState<WizardDetected | null>(null);
@@ -111,7 +113,7 @@ export default function CatalogWizard({ brands, shareEmail, initialBrand = "", i
     setDetected(value);
     if (batch.counts.previewReady && !detectedInitialised.current) {
       detectedInitialised.current = true;
-      setMode(value.identifierMode.detected);
+      setMode(value.grouping.perRoot ? "per_root" : value.identifierMode.detected);
       setPrecedence(value.precedence.default);
     }
     // On every response, not only once the preview is ready: a sheet read later gets its choice then.
@@ -164,7 +166,7 @@ export default function CatalogWizard({ brands, shareEmail, initialBrand = "", i
         setStep(2);
       } else if(step === 2) {
         // Nothing changed: the server keeps the grouping it has and answers collecting false (spec 14c F7 part 1).
-        const patched = await wizardApi<{collecting:boolean}>(batchUrl(batchId,"/detected"),"PATCH",{identifierMode:mode,precedence,sheets});
+        const patched = await wizardApi<{collecting:boolean}>(batchUrl(batchId,"/detected"),"PATCH",{...(mode==="per_root"?{perRoot:true}:{identifierMode:mode,perRoot:false}),precedence,sheets});
         setCollecting(patched.collecting !== false);setPreview(null);setStep(3);
       } else if(step === 3) {
         await wizardApi(batchUrl(batchId),"PATCH",{channels});
@@ -179,7 +181,7 @@ export default function CatalogWizard({ brands, shareEmail, initialBrand = "", i
   }
   const disabled = working || !!failReason || (step===1 && (!brandSlug || !(hasInputs || linksBusy) || uploadsBusy)) || (step===2 && (collecting || !detected || sheets.some((s)=>s.identifierColumn<0))) || (step===3 && (!channels.length || collecting)) || (step===4 && (!preview?.ready || !channels.length || !!preview.busy.length || !!preview.overwrite.sameProductPairs.length));
   return <div className="catalog-wizard"><h1>New batch</h1><ol className="steps" aria-label="Batch steps">{STEPS.map((title,i)=><li key={title} className={step===i+1?"on":step>i+1?"done":""} aria-current={step===i+1?"step":undefined}>{title}</li>)}</ol>
-    <div hidden={step!==1}><WizardStep1 brands={brands} brandSlug={brandSlug} name={name} productType={productType} locked={!!id || isCreating} email={shareEmail} setBrand={(value)=>{if(!id && !creating.current)setBrand(value);}} setName={setName} setProductType={(value)=>{if(!id && !creating.current)setProductType(value);}} ensureBatch={ensureBatch} onUploadsBusy={setUploadsBusy} onLinksBusy={onLinksBusy} onAdded={onAdded} batchId={id} onInputCount={onInputCount} onRemoved={onInputRemoved} fixReason={fixReason}/></div>
+    <div hidden={step!==1}><WizardStep1 brands={brands} brandSlug={brandSlug} name={name} productType={productType} locked={!!id || isCreating} email={shareEmail} supabasePaste={supabasePaste} setBrand={(value)=>{if(!id && !creating.current)setBrand(value);}} setName={setName} setProductType={(value)=>{if(!id && !creating.current)setProductType(value);}} ensureBatch={ensureBatch} onUploadsBusy={setUploadsBusy} onLinksBusy={onLinksBusy} onAdded={onAdded} batchId={id} onInputCount={onInputCount} onRemoved={onInputRemoved} fixReason={fixReason}/></div>
     {step===2 && id ? <>{detected?<WizardStep2 detected={detected} collecting={collecting} mode={mode} precedence={precedence} sheets={sheets} setMode={setMode} setPrecedence={setPrecedence} setSheets={setSheets} email={shareEmail} id={id} onError={setError} onAccessChecked={async()=>{await loadDetected(id);}} onLinksRetried={onLinksRetried}/>:<h2>Check what we found</h2>}{collecting?<p role="status">{wizardCollectingText(batchState,collectTotal,STEP2_COLLECTING_TEXT)}</p>:null}</>:null}
     {(step===2 || step===3) && stalled && id ? <p role="alert">{COLLECT_STALLED_TEXT} <RetryCollectButton batchId={id} onDone={()=>setStalled(false)}/></p>:null}
     {step===3?<><WizardStep3 channels={channels} onChange={setChannels}/>{collecting?<p role="status">{wizardCollectingText(batchState,collectTotal,STEP3_COLLECTING_TEXT)}</p>:null}</>:null}

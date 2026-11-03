@@ -9,6 +9,7 @@ import { parseShotName } from "../naming";
 import { errorReason, LINK_REASON, statusReason } from "./link-reasons";
 import { urlFileName } from "./links-sheet";
 import { fetchableUrl, parsePastedLinks, type PastedTable } from "./url-list";
+import { supabaseFolderLinks } from "./supabase-link";
 import type { Detected, IngestDeps } from "./types";
 
 export const DRIVE_FOLDER_OK = "Drive folder found. We will copy its files when you start.";
@@ -57,12 +58,19 @@ export function detectUploadKind(name: string, head: Buffer): UploadKind | "unkn
 const SHEET_LINK = /https?:\/\/docs\.google\.com\/spreadsheets\/[^\s]+/gi;
 const FOLDER_LINK = /https?:\/\/drive\.google\.com\/[^\s]*folders\/[^\s]+/gi;
 
-/** docs.google.com/spreadsheets -> google_sheet; drive.google.com/drive/folders or /folders/ -> drive_folder; one or more http(s) lines -> url_list; else null. */
-export function detectPastedText(text: string): { kind: "google_sheet" | "drive_folder" | "url_list"; ids: string[] } | null {
+/**
+ * docs.google.com/spreadsheets -> google_sheet; drive.google.com/drive/folders or /folders/ -> drive_folder;
+ * a cell that is a whole Supabase Storage folder link -> supabase_folder (M1-F1-R4; the ids are the
+ * canonical links), only when `supabaseFolders` is on (else such a link is an image link, as before);
+ * one or more http(s) lines -> url_list; else null.
+ */
+export function detectPastedText(text: string, opts: { supabaseFolders: boolean } = { supabaseFolders: false }): { kind: "google_sheet" | "drive_folder" | "supabase_folder" | "url_list"; ids: string[] } | null {
   const sheets = [...text.matchAll(SHEET_LINK)].map((m) => parseSpreadsheetId(m[0])).filter((id): id is string => !!id);
   if (sheets.length) return { kind: "google_sheet", ids: [...new Set(sheets)] };
   const folders = [...text.matchAll(FOLDER_LINK)].map((m) => parseFolderId(m[0])).filter((id): id is string => !!id);
   if (folders.length) return { kind: "drive_folder", ids: [...new Set(folders)] };
+  const supabase = opts.supabaseFolders ? supabaseFolderLinks(text) : [];
+  if (supabase.length) return { kind: "supabase_folder", ids: supabase };
   const urls = parsePastedLinks(text).rows.flatMap((r) => r.urls);
   if (urls.length) return { kind: "url_list", ids: urls };
   return null;

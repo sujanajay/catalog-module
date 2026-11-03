@@ -8,6 +8,7 @@ import { classifyLinkReject } from "./link-reasons";
 import { matchProductList, missingIdentifier, type ProductListRow } from "./product-list";
 import type { GroupingResult, PreviewRow, SourceItem } from "./types";
 import { collectRejectReason } from "./zip";
+import { detectRoots } from "./roots";
 
 export type { ProductListRow };
 
@@ -108,6 +109,11 @@ function identifierOf(item: SourceItem, mode: IdentifierMode): string {
   return base + (item.suffix || shape);
 }
 
+/** The product an item belongs to by its folder (`ABC123/Square/1.jpg` gives `ABC123_square`), "" when it has none. */
+export function folderIdentifier(item: SourceItem): string {
+  return identifierOf(item, "folder");
+}
+
 // --- Grouping --------------------------------------------------------------------
 
 /** Grouped and rejected items are copies; this leads back to the collected item (dimension lookups). */
@@ -124,7 +130,7 @@ export function originalOf(item: SourceItem): SourceItem {
   return originals.get(item) ?? item;
 }
 
-interface Entry { item: SourceItem; id: string; raw: number | null; link: boolean }
+interface Entry { item: SourceItem; id: string; raw: number | null; link: boolean; mode: IdentifierMode }
 
 const byNameThenUpload = (a: Entry, b: Entry) => byText(a.item.originalName, b.item.originalName) || byText(a.item.uploadId, b.item.uploadId);
 
@@ -147,23 +153,30 @@ const byNameThenUpload = (a: Entry, b: Entry) => byText(a.item.originalName, b.i
  * `unreadable` (optional, after the contract's parameters): items that failed `checkImage`, with
  * their reject sentence. They are rejected under their product's identifier instead of grouped.
  * Items carrying a zip reject sentence (`collectRejectReason`) are rejected the same way.
+ *
+ * `options.perRoot` (M1-F1-R2): the mode is decided per input root by detectRoots instead of
+ * `options.identifierMode`, and links always take the uploaded files' spelling. The roots and their
+ * modes come back in `roots`.
  */
 export function groupItems(items: SourceItem[], options: BatchOptions, unreadable?: Map<SourceItem, string>): GroupingResult {
-  const mode = options.identifierMode;
+  const perRoot = options.perRoot === true;
+  const detected = perRoot ? detectRoots(items, folderIdentifier) : null;
+  const modeOf = detected ? detected.modeOf : () => options.identifierMode;
   const rejected: GroupingResult["rejected"] = [];
   let entries: Entry[] = [];
 
   for (const item of items) {
+    const mode = modeOf(item);
     const id = identifierOf(item, mode);
     const reason = unreadable?.get(item) ?? collectRejectReason(item);
     if (reason) rejected.push({ item: copyOf(item, id, item.n), reason });
     else if (!id) rejected.push({ item: copyOf(item, id, item.n), reason: noIdentifierMessage(baseName(item)) });
-    else entries.push({ item, id, raw: item.n, link: item.bytes.kind === "url" });
+    else entries.push({ item, id, raw: item.n, link: item.bytes.kind === "url", mode });
   }
 
   // Join the two kinds of the same product when the other kind has exactly one spelling of it:
   // files take the sheet's spelling in sheet_column mode, links take the files' spelling otherwise.
-  const linksJoinFiles = mode !== "sheet_column";
+  const linksJoinFiles = perRoot || options.identifierMode !== "sheet_column";
   const spellings = new Map<string, Set<string>>();
   for (const e of entries) {
     if (e.link === linksJoinFiles) continue;
@@ -212,7 +225,7 @@ export function groupItems(items: SourceItem[], options: BatchOptions, unreadabl
     const unnumbered = list.filter((e) => e.raw === null).sort(byNameThenUpload);
     let placedLast = unnumbered;
     if (!numbered.length) {
-      if (mode === "folder" || list.length === 1) {
+      if (list.some((e) => e.mode === "folder") || list.length === 1) {
         // Name order gives the positions; a single unnumbered file is shot 1 without a warning.
         numbered = unnumbered.map((e, i) => ({ ...e, raw: i + 1 }));
         placedLast = [];
@@ -231,7 +244,7 @@ export function groupItems(items: SourceItem[], options: BatchOptions, unreadabl
   }
 
   rejected.sort((a, b) => byText(a.item.identifier, b.item.identifier) || byText(a.item.originalName, b.item.originalName));
-  return { products, rejected, warnings: [] };
+  return { products, rejected, warnings: [], ...(detected ? { roots: detected.roots } : {}) };
 }
 
 // --- Preview rows ----------------------------------------------------------------

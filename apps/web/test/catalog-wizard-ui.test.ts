@@ -6,7 +6,8 @@ import { deriveBatchState } from "@catalog/core/catalog/pipeline/status";
 import CatalogWizard, { resumedGrouping, type WizardInitialBatch } from "../components/catalog/CatalogWizard";
 import ChannelPicker from "../components/catalog/ChannelPicker";
 import OverwritePreview from "../components/catalog/OverwritePreview";
-import WizardStep2, { mergeSheetChoices } from "../components/catalog/WizardStep2";
+import WizardStep2, { mergeSheetChoices, PER_ROOT_LABEL } from "../components/catalog/WizardStep2";
+import WizardStep1 from "../components/catalog/WizardStep1";
 import WizardStep4, { step4CollectingLine } from "../components/catalog/WizardStep4";
 import { ToastProvider } from "../components/Toast";
 import { collectingBannerText, LEAVING_LINE, SHEET_READING_TEXT, STEP2_COLLECTING_TEXT, STEP3_COLLECTING_TEXT, wizardCollectingText } from "../lib/catalog/copy";
@@ -55,6 +56,7 @@ const SHEET_ID = "0b6f3a52-6f0e-4c1e-9d1a-2f6f1b1c9e01";
 const sheetEntry = (extra: Partial<WizardDetected["sheets"][number]> = {}) => ({ uploadId: SHEET_ID, name: "grid.xlsx", identifierColumn: -1, identifierHeader: null, imageColumns: [], kind: "sheet" as const, reading: true, cannotRead: null, columns: [], ...extra });
 const detected = (sheets: WizardDetected["sheets"]) => ({
   identifierMode: { detected: "sheet_column", options: ["filename", "sheet_column"], examples: [] },
+  grouping: { perRoot: false, sentence: null },
   precedence: { shown: false, default: "uploads_then_links" }, formats: { sentence: "All photos are JPEG." },
   unreadable: [], googleAccess: [], totalProducts: 0, sheets,
 }) as unknown as WizardDetected;
@@ -62,6 +64,39 @@ const step2 = (value: WizardDetected, sheets: Parameters<typeof WizardStep2>[0][
   detected: value, collecting, mode: "sheet_column", precedence: "uploads_then_links", sheets, setMode: () => {}, setPrecedence: () => {}, setSheets: () => {},
   email: "share@example.com", id: SHEET_ID, onError: () => {}, onAccessChecked: async () => {},
 }));
+describe("M1-S1: the sharing line up front and per-root grouping", () => {
+  it("step 1 shows the sharing email with Copy before anything is pasted (M1-F2-R1)", () => {
+    const html = renderToStaticMarkup(createElement(WizardStep1, {
+      brands: [], brandSlug: "", name: "", productType: "auto", locked: false, email: "reader@example.com", setBrand: () => {}, setName: () => {}, setProductType: () => {},
+      ensureBatch: async () => "x", onUploadsBusy: () => {}, onLinksBusy: () => {}, onAdded: () => {},
+    }));
+    expect(html).toContain("To use a Google Sheet or Drive folder, share it with <code>reader@example.com</code> as Viewer.");
+    expect(html).toContain(">Copy</button>");
+    expect(html.indexOf("share it with")).toBeLessThan(html.indexOf("Or paste a link"));
+    expect(html).toContain("Choose folders");
+    expect(html).toContain("Drop folders, files, zips or sheets here. Several at once is fine.");
+  });
+  it("the paste hint names Supabase folders only while that paste kind is on (review #5)", () => {
+    const step1 = (supabasePaste?: boolean) => renderToStaticMarkup(createElement(WizardStep1, {
+      brands: [], brandSlug: "", name: "", productType: "auto", locked: false, email: "reader@example.com", setBrand: () => {}, setName: () => {}, setProductType: () => {},
+      ensureBatch: async () => "x", onUploadsBusy: () => {}, onLinksBusy: () => {}, onAdded: () => {}, ...(supabasePaste === undefined ? {} : { supabasePaste }),
+    }));
+    expect(step1()).toContain(`placeholder="A Google Sheet link, a Google Drive folder link, or image links one per line"`);
+    expect(step1(false)).not.toContain("Supabase");
+    expect(step1(true)).toContain(`placeholder="A Google Sheet link, a Google Drive folder link, a Supabase folder link, or image links one per line"`);
+  });
+  it("step 2 offers each input on its own first, with the grouping sentence when the batch is grouped per root (M1-F1-R2)", () => {
+    const value = { ...detected([]), grouping: { perRoot: true, sentence: "Folder A grouped by folder name, sheet b.xlsx by column E (Option Id)." } } as WizardDetected;
+    const html = renderToStaticMarkup(createElement(WizardStep2, {
+      detected: value, collecting: false, mode: "per_root", precedence: "uploads_then_links", sheets: [], setMode: () => {}, setPrecedence: () => {}, setSheets: () => {},
+      email: "share@example.com", id: SHEET_ID, onError: () => {}, onAccessChecked: async () => {},
+    }));
+    expect(html).toContain(PER_ROOT_LABEL);
+    expect(html).toContain("Recommended. Folder A grouped by folder name, sheet b.xlsx by column E (Option Id).");
+    expect(html.indexOf(PER_ROOT_LABEL)).toBeLessThan(html.indexOf("By file name before the last _number"));
+    expect(html).toContain(`checked="" value="per_root"`);
+  });
+});
 describe("wizard step 2 with a sheet (F1)", () => {
   it("renders a sheet entry with sheets: [] without throwing and shows the reading sentence", () => {
     const html = step2(detected([sheetEntry()]), []);
@@ -111,11 +146,13 @@ describe("wizard steps 2 and 3 while collecting (F6 release A)", () => {
   });
   it("a resumed batch keeps the grouping answers saved at step 2; untouched defaults let detection decide", () => {
     const ready = { ...resumed, status: "draft" as const, counts: { ...counts, previewReady: true } };
-    expect(resumedGrouping(undefined, 1)).toEqual({ mode: "filename", precedence: "uploads_then_links", chosen: false });
+    expect(resumedGrouping(undefined, 1)).toEqual({ mode: "per_root", precedence: "uploads_then_links", chosen: false });
     expect(resumedGrouping(ready, 2)).toEqual({ mode: "filename", precedence: "uploads_then_links", chosen: false });
     expect(resumedGrouping({ ...ready, options: { identifierMode: "folder", precedence: "uploads_then_links" } }, 2)).toEqual({ mode: "folder", precedence: "uploads_then_links", chosen: true });
     expect(resumedGrouping({ ...ready, options: { identifierMode: "filename", precedence: "links_only" } }, 2)).toEqual({ mode: "filename", precedence: "links_only", chosen: true });
     expect(resumedGrouping(ready, 4).chosen).toBe(true);
+    // M1-F1-R2: a per-root batch opens on "per_root"; a per-root batch is not a choice the first poll must keep.
+    expect(resumedGrouping({ ...ready, options: { identifierMode: "filename", precedence: "uploads_then_links", perRoot: true } }, 2)).toEqual({ mode: "per_root", precedence: "uploads_then_links", chosen: false });
   });
   it("a collecting batch whose files are not listed yet shows the fixed sentence, never 0 of 0", () => {
     const listing = deriveBatchState({ status: "ingesting", counts: { ...EMPTY_BATCH_COUNTS, collected: 0, collectTotal: 0 }, source: "links" });

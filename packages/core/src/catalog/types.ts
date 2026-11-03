@@ -1,6 +1,8 @@
 // Shared enums, option shapes and operator sentences for the catalog module (spec 02, "Types and enums").
 // The arrays are the single source for the database text enums (schema.ts) and for every type below.
 
+import type { StoredRoot } from "./ingest/roots";
+
 export const CHANNEL_IDS = ["noon","namshi","trendyol","styli","centrepoint","sixthstreet","vogacloset","amazon","shein"] as const;
 export const BATCH_STATUSES = ["draft","ingesting","matting","rendering","qa","publishing","done","failed","cancelled"] as const;
 export const UPLOAD_KINDS = ["zip","image","sheet","product_list","google_sheet","drive_folder","url_list"] as const;
@@ -76,6 +78,12 @@ export interface BatchOptions {
   identifierMode: IdentifierMode;          // step 2; default "filename"
   precedence: Precedence;                  // step 2; default "uploads_then_links"; only meaningful when both kinds exist
   sheetColumns: { identifier: number; images: number[] } | null;   // step 2; null when no sheet
+  /**
+   * M1-F1-R2: the grouping mode is detected for each input root (folder, zip, sheet, paste) and
+   * `identifierMode` is not used for grouping. Set on batches the wizard creates; absent (false) on
+   * older batches and whenever step 2's "Change" forces one mode for the whole batch.
+   */
+  perRoot?: boolean;
   policy?: ResolvedPolicy;                 // set at start (07); absent on draft
   qaCapUsd?: number | null;                // per-batch QA cap (07)
   evalSet?: string | null;                 // eval batches (08)
@@ -95,6 +103,11 @@ export interface BatchOptions {
 }
 
 export interface BatchCounts {
+  /**
+   * M1-F1-R2: the input roots of a per-root batch and the mode each was grouped by, written with the
+   * grouping. Optional and not in EMPTY_BATCH_COUNTS (a new default would need a migration).
+   */
+  roots?: StoredRoot[];
   products: number; sources: number; outputs: number; verified: number; needsAttention: number;
   attentionProducts: number; failed: number; skipped: number; unchanged: number; skuResolved: number;
   missingImages: number; notInSheet: number; unsupportedFiles: number; duplicateFiles: number;
