@@ -340,7 +340,8 @@ export const catalogProducts = pgTable(
     // Two products never share public paths (path_key is the public path segment).
     uniqueIndex("catalog_products_brand_test_path_uq").on(t.brandSlug, t.isTest, t.pathKey),
     index("catalog_products_lock_batch_id_idx").on(t.lockBatchId),
-    index("catalog_products_option_id_idx").on(t.optionId),
+    // Partial: the column is null on every existing row, so the build writes almost nothing (lookups are by equality).
+    index("catalog_products_option_id_idx").on(t.optionId).where(sql`${t.optionId} IS NOT NULL`),
   ],
 );
 
@@ -510,7 +511,7 @@ export const catalogOutputs = pgTable(
   },
   (t) => [
     index("catalog_outputs_batch_id_idx").on(t.batchId),
-    index("catalog_outputs_content_version_id_idx").on(t.contentVersionId),
+    index("catalog_outputs_content_version_id_idx").on(t.contentVersionId).where(sql`${t.contentVersionId} IS NOT NULL`),
     // Named: the generated name is longer than Postgres's 63-character limit.
     foreignKey({ name: "catalog_outputs_content_version_id_fk", columns: [t.contentVersionId], foreignColumns: [catalogContentVersions.id] }).onDelete("set null"),
     index("catalog_outputs_product_id_idx").on(t.productId),
@@ -963,7 +964,6 @@ export const catalogChangeEvents = pgTable(
       .notNull()
       .references(() => catalogChannelListings.id),
     slot: text("slot").$type<Slot>().notNull(),
-    // Only test versions are ever deleted; their events go with them.
     fromVersionId: uuid("from_version_id"),
     toVersionId: uuid("to_version_id"),
     kind: text("kind", { enum: CHANGE_EVENT_KINDS }).notNull(),
@@ -983,8 +983,12 @@ export const catalogChangeEvents = pgTable(
   (t) => [
     unique("catalog_change_events_idempotency_key_uq").on(t.idempotencyKey),
     // Named foreign keys: the generated names pass Postgres's 63-character limit.
-    foreignKey({ name: "catalog_change_events_from_version_id_fk", columns: [t.fromVersionId], foreignColumns: [catalogContentVersions.id] }).onDelete("cascade"),
-    foreignKey({ name: "catalog_change_events_to_version_id_fk", columns: [t.toVersionId], foreignColumns: [catalogContentVersions.id] }).onDelete("cascade"),
+    // RESTRICT: deleting a version never erases the log; test cleanup deletes test events explicitly first (D13).
+    foreignKey({ name: "catalog_change_events_from_version_id_fk", columns: [t.fromVersionId], foreignColumns: [catalogContentVersions.id] }).onDelete("restrict"),
+    foreignKey({ name: "catalog_change_events_to_version_id_fk", columns: [t.toVersionId], foreignColumns: [catalogContentVersions.id] }).onDelete("restrict"),
+    index("catalog_change_events_from_version_id_idx").on(t.fromVersionId),
+    index("catalog_change_events_to_version_id_idx").on(t.toVersionId),
+    index("catalog_change_events_batch_id_idx").on(t.batchId),
     index("catalog_change_events_listing_slot_at_idx").on(t.listingId, t.slot, t.at),
     index("catalog_change_events_experiment_id_idx").on(t.experimentId),
     slotCheck("catalog_change_events", t.slot),
@@ -1017,7 +1021,8 @@ export const catalogLiveIntervals = pgTable(
   (t) => [
     unique("catalog_live_intervals_listing_slot_from_uq").on(t.listingId, t.slot, t.validFrom),
     foreignKey({ name: "catalog_live_intervals_listing_id_fk", columns: [t.listingId], foreignColumns: [catalogChannelListings.id] }),
-    foreignKey({ name: "catalog_live_intervals_version_id_fk", columns: [t.versionId], foreignColumns: [catalogContentVersions.id] }).onDelete("cascade"),
+    foreignKey({ name: "catalog_live_intervals_version_id_fk", columns: [t.versionId], foreignColumns: [catalogContentVersions.id] }).onDelete("restrict"),
+    index("catalog_live_intervals_version_id_idx").on(t.versionId),
     slotCheck("catalog_live_intervals", t.slot),
     enumCheck("catalog_live_intervals", "state", t.state, LIVE_STATES),
     check("catalog_live_intervals_range_check", sql`${t.validTo} IS NULL OR ${t.validTo} > ${t.validFrom}`),

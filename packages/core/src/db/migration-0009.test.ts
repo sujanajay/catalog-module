@@ -44,7 +44,7 @@ beforeAll(async () => {
   } finally {
     await rm(upTo0008, { recursive: true, force: true });
   }
-});
+}, 120_000);
 
 afterAll(async () => {
   await close?.();
@@ -100,6 +100,15 @@ describe(`0009_catalog_graph.sql (M0-S1) on ${TEST_PG_URL ? "real Postgres" : "P
       "catalog_content_versions_batch_id_idx", "catalog_change_events_listing_slot_at_idx", "catalog_change_events_experiment_id_idx",
       "catalog_treatment_assignments_active_idx",
     ]));
+    // Cheap on the existing tables: the two foreign keys skip the scan (NOT VALID) and the two indexes are partial.
+    expect(await rows(sql`select conname, convalidated from pg_constraint where conname in ('catalog_outputs_content_version_id_fk', 'catalog_products_option_id_catalog_options_id_fk') order by conname`)).toEqual([
+      { conname: "catalog_outputs_content_version_id_fk", convalidated: false },
+      { conname: "catalog_products_option_id_catalog_options_id_fk", convalidated: false },
+    ]);
+    const partial = await rows<{ indexdef: string }>(sql`select indexdef from pg_indexes where indexname in ('catalog_outputs_content_version_id_idx', 'catalog_products_option_id_idx')`);
+    expect(partial).toHaveLength(2);
+    for (const p of partial) expect(p.indexdef).toMatch(/WHERE \(\w+ IS NOT NULL\)/);
+    expect(await rows(sql`select tgname from pg_trigger where tgname = 'catalog_treatment_assignments_lock_listing'`)).toHaveLength(1);
     const fks = (await rows<{ conname: string }>(sql`select conname from pg_constraint where contype = 'f' and conrelid::regclass::text like 'catalog_%'`)).map((r) => r.conname);
     for (const name of fks) expect(name.length, name).toBeLessThanOrEqual(63);
 

@@ -3,9 +3,11 @@
 -- assignments, the backfill and export run tables, the outcome-keys view, and two nullable columns on existing tables
 -- (catalog_products.option_id, catalog_outputs.content_version_id). Additive only: no existing column is renamed,
 -- dropped or retyped, and old code ignores the new columns. Re-runnable: IF NOT EXISTS everywhere, foreign keys added
--- only when missing, the view replaced. The two new columns on existing tables are all null, so their foreign key checks
--- and indexes take seconds. A short lock timeout makes the migrate job fail and stay re-runnable instead of queueing
--- behind a long transaction.
+-- only when missing, the view and trigger replaced. On the two existing tables every statement is cheap whatever their
+-- size: ADD COLUMN of a nullable column with no default is a catalog-only change (no rewrite); the two foreign keys are
+-- added NOT VALID (no scan of existing rows, which are all null; new rows are checked); the two indexes are partial
+-- (WHERE ... IS NOT NULL), so they read the table once and write no entries. A short lock timeout makes the migrate
+-- job fail and stay re-runnable instead of queueing behind a long transaction.
 SET LOCAL lock_timeout = '10s';--> statement-breakpoint
 CREATE TABLE IF NOT EXISTS "catalog_assets" (
 	"sha256" text PRIMARY KEY NOT NULL,
@@ -233,12 +235,12 @@ DO $$ BEGIN
 END $$;--> statement-breakpoint
 DO $$ BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'catalog_change_events_from_version_id_fk') THEN
-    ALTER TABLE "catalog_change_events" ADD CONSTRAINT "catalog_change_events_from_version_id_fk" FOREIGN KEY ("from_version_id") REFERENCES "public"."catalog_content_versions"("id") ON DELETE cascade ON UPDATE no action;
+    ALTER TABLE "catalog_change_events" ADD CONSTRAINT "catalog_change_events_from_version_id_fk" FOREIGN KEY ("from_version_id") REFERENCES "public"."catalog_content_versions"("id") ON DELETE restrict ON UPDATE no action;
   END IF;
 END $$;--> statement-breakpoint
 DO $$ BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'catalog_change_events_to_version_id_fk') THEN
-    ALTER TABLE "catalog_change_events" ADD CONSTRAINT "catalog_change_events_to_version_id_fk" FOREIGN KEY ("to_version_id") REFERENCES "public"."catalog_content_versions"("id") ON DELETE cascade ON UPDATE no action;
+    ALTER TABLE "catalog_change_events" ADD CONSTRAINT "catalog_change_events_to_version_id_fk" FOREIGN KEY ("to_version_id") REFERENCES "public"."catalog_content_versions"("id") ON DELETE restrict ON UPDATE no action;
   END IF;
 END $$;--> statement-breakpoint
 DO $$ BEGIN
@@ -273,7 +275,7 @@ DO $$ BEGIN
 END $$;--> statement-breakpoint
 DO $$ BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'catalog_live_intervals_version_id_fk') THEN
-    ALTER TABLE "catalog_live_intervals" ADD CONSTRAINT "catalog_live_intervals_version_id_fk" FOREIGN KEY ("version_id") REFERENCES "public"."catalog_content_versions"("id") ON DELETE cascade ON UPDATE no action;
+    ALTER TABLE "catalog_live_intervals" ADD CONSTRAINT "catalog_live_intervals_version_id_fk" FOREIGN KEY ("version_id") REFERENCES "public"."catalog_content_versions"("id") ON DELETE restrict ON UPDATE no action;
   END IF;
 END $$;--> statement-breakpoint
 DO $$ BEGIN
@@ -281,6 +283,9 @@ DO $$ BEGIN
     ALTER TABLE "catalog_treatment_assignments" ADD CONSTRAINT "catalog_treatment_assignments_listing_id_fk" FOREIGN KEY ("listing_id") REFERENCES "public"."catalog_channel_listings"("id") ON DELETE no action ON UPDATE no action;
   END IF;
 END $$;--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "catalog_change_events_from_version_id_idx" ON "catalog_change_events" USING btree ("from_version_id");--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "catalog_change_events_to_version_id_idx" ON "catalog_change_events" USING btree ("to_version_id");--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "catalog_change_events_batch_id_idx" ON "catalog_change_events" USING btree ("batch_id");--> statement-breakpoint
 CREATE INDEX IF NOT EXISTS "catalog_change_events_listing_slot_at_idx" ON "catalog_change_events" USING btree ("listing_id","slot","at");--> statement-breakpoint
 CREATE INDEX IF NOT EXISTS "catalog_change_events_experiment_id_idx" ON "catalog_change_events" USING btree ("experiment_id");--> statement-breakpoint
 CREATE INDEX IF NOT EXISTS "catalog_content_versions_option_id_idx" ON "catalog_content_versions" USING btree ("option_id");--> statement-breakpoint
@@ -288,19 +293,28 @@ CREATE INDEX IF NOT EXISTS "catalog_content_versions_asset_sha256_idx" ON "catal
 CREATE INDEX IF NOT EXISTS "catalog_content_versions_batch_id_idx" ON "catalog_content_versions" USING btree ("batch_id");--> statement-breakpoint
 CREATE INDEX IF NOT EXISTS "catalog_listing_keys_opptra_sku_idx" ON "catalog_listing_keys" USING btree ("opptra_sku");--> statement-breakpoint
 CREATE INDEX IF NOT EXISTS "catalog_listing_keys_listing_id_idx" ON "catalog_listing_keys" USING btree ("listing_id");--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "catalog_live_intervals_version_id_idx" ON "catalog_live_intervals" USING btree ("version_id");--> statement-breakpoint
 CREATE INDEX IF NOT EXISTS "catalog_options_option_key_idx" ON "catalog_options" USING btree ("option_key");--> statement-breakpoint
 CREATE INDEX IF NOT EXISTS "catalog_options_style_key_idx" ON "catalog_options" USING btree ("style_key");--> statement-breakpoint
 CREATE INDEX IF NOT EXISTS "catalog_treatment_assignments_active_idx" ON "catalog_treatment_assignments" USING btree ("listing_id") WHERE "catalog_treatment_assignments"."released_at" IS NULL;--> statement-breakpoint
 DO $$ BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'catalog_outputs_content_version_id_fk') THEN
-    ALTER TABLE "catalog_outputs" ADD CONSTRAINT "catalog_outputs_content_version_id_fk" FOREIGN KEY ("content_version_id") REFERENCES "public"."catalog_content_versions"("id") ON DELETE set null ON UPDATE no action;
+    ALTER TABLE "catalog_outputs" ADD CONSTRAINT "catalog_outputs_content_version_id_fk" FOREIGN KEY ("content_version_id") REFERENCES "public"."catalog_content_versions"("id") ON DELETE set null ON UPDATE no action NOT VALID;
   END IF;
 END $$;--> statement-breakpoint
 DO $$ BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'catalog_products_option_id_catalog_options_id_fk') THEN
-    ALTER TABLE "catalog_products" ADD CONSTRAINT "catalog_products_option_id_catalog_options_id_fk" FOREIGN KEY ("option_id") REFERENCES "public"."catalog_options"("id") ON DELETE set null ON UPDATE no action;
+    ALTER TABLE "catalog_products" ADD CONSTRAINT "catalog_products_option_id_catalog_options_id_fk" FOREIGN KEY ("option_id") REFERENCES "public"."catalog_options"("id") ON DELETE set null ON UPDATE no action NOT VALID;
   END IF;
 END $$;--> statement-breakpoint
-CREATE INDEX IF NOT EXISTS "catalog_outputs_content_version_id_idx" ON "catalog_outputs" USING btree ("content_version_id");--> statement-breakpoint
-CREATE INDEX IF NOT EXISTS "catalog_products_option_id_idx" ON "catalog_products" USING btree ("option_id");--> statement-breakpoint
-CREATE OR REPLACE VIEW "public"."catalog_outcome_keys" AS (select "catalog_listing_keys"."listing_id", "catalog_channel_listings"."option_id", "catalog_channel_listings"."channel", "catalog_channel_listings"."market", "catalog_listing_keys"."key_kind", "catalog_listing_keys"."key_value", "catalog_listing_keys"."opptra_sku", "catalog_listing_keys"."org_id" from "catalog_listing_keys" inner join "catalog_channel_listings" on "catalog_channel_listings"."id" = "catalog_listing_keys"."listing_id");
+CREATE INDEX IF NOT EXISTS "catalog_outputs_content_version_id_idx" ON "catalog_outputs" USING btree ("content_version_id") WHERE "catalog_outputs"."content_version_id" IS NOT NULL;--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "catalog_products_option_id_idx" ON "catalog_products" USING btree ("option_id") WHERE "catalog_products"."option_id" IS NOT NULL;--> statement-breakpoint
+CREATE OR REPLACE VIEW "public"."catalog_outcome_keys" AS (select "catalog_listing_keys"."listing_id", "catalog_channel_listings"."option_id", "catalog_channel_listings"."channel", "catalog_channel_listings"."market", "catalog_listing_keys"."key_kind", "catalog_listing_keys"."key_value", "catalog_listing_keys"."opptra_sku", "catalog_listing_keys"."org_id" from "catalog_listing_keys" inner join "catalog_channel_listings" on "catalog_channel_listings"."id" = "catalog_listing_keys"."listing_id");--> statement-breakpoint
+-- D13: every assignment insert or update locks its listing row FOR NO KEY UPDATE, which conflicts with the FOR SHARE that
+-- recordChange takes before its guard check, so a control freeze and a publish to the same listing never interleave.
+CREATE OR REPLACE FUNCTION "catalog_treatment_assignments_lock_listing"() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  PERFORM 1 FROM "catalog_channel_listings" WHERE "id" = NEW."listing_id" FOR NO KEY UPDATE;
+  RETURN NEW;
+END $$;--> statement-breakpoint
+CREATE OR REPLACE TRIGGER "catalog_treatment_assignments_lock_listing" BEFORE INSERT OR UPDATE ON "catalog_treatment_assignments" FOR EACH ROW EXECUTE FUNCTION "catalog_treatment_assignments_lock_listing"();

@@ -237,14 +237,14 @@ export type WritableResult = { ok: true } | { ok: false; reason: "frozen_control
 export async function isWritable(db: GraphDb, listingId: string, ctx: { experimentId?: string } = {}): Promise<WritableResult> {
   const t = catalogTreatmentAssignments;
   const rows = await db
-    .select({ experimentId: t.experimentId, arm: t.arm, doNotTouch: t.doNotTouch, frozenAt: t.frozenAt })
+    // The freeze boundary uses the database clock, not this process's.
+    .select({ experimentId: t.experimentId, arm: t.arm, doNotTouch: t.doNotTouch, frozen: sql<boolean>`coalesce(${t.frozenAt} <= now(), false)` })
     .from(t)
     .where(and(eq(t.listingId, listingId), isNull(t.releasedAt)))
     .orderBy(asc(t.assignedAt), asc(t.experimentId));
   const control = rows.find((r) => r.doNotTouch);
   if (control) return { ok: false, reason: "frozen_control", experimentId: control.experimentId };
-  const now = Date.now();
-  const treated = rows.find((r) => r.arm === "treatment" && r.frozenAt != null && r.frozenAt.getTime() <= now && r.experimentId !== ctx.experimentId);
+  const treated = rows.find((r) => r.arm === "treatment" && r.frozen && r.experimentId !== ctx.experimentId);
   if (treated) return { ok: false, reason: "frozen_treatment", experimentId: treated.experimentId };
   return { ok: true };
 }
@@ -303,6 +303,8 @@ async function holdCursorFloor(tx: GraphDb): Promise<void> {
   // last_value is not transactional: every seq drawn after this read is above it.
   const [last] = await rowsOf<{ last_value: string | number }>(tx, sql.raw(`select last_value from catalog_change_events_seq_seq`));
   const floor = Number(last?.last_value ?? 1);
+  // Ceiling: the two-int4 advisory key holds seq values up to 2^31 - 1 (about 2.1 billion events); past it every
+  // writer stops with this error until the key is widened (for example the single bigint form with a namespaced key).
   if (!Number.isSafeInteger(floor) || floor > INT4_MAX) throw new Error("Change-log seq passed the cursor lock range; widen CHANGE_CURSOR_LOCK_NS keys");
   await tx.execute(sql`select pg_advisory_xact_lock_shared(${CHANGE_CURSOR_LOCK_NS}::int, ${floor}::int)`);
 }
@@ -332,8 +334,9 @@ export async function recordChange(db: GraphDb, e: NewChangeEvent): Promise<{ se
     const before = await existing(tx);
     if (before) return settle(before);
     if ((GUARDED_KINDS as readonly string[]).includes(e.kind)) {
-      // Holds the listing against a concurrent assignment change until this event commits.
-      await tx.select({ id: catalogChannelListings.id }).from(catalogChannelListings).where(eq(catalogChannelListings.id, e.listingId)).for("key share");
+      // FOR SHARE conflicts with the FOR NO KEY UPDATE that the 0009 trigger takes on the listing for every assignment
+      // insert or update, so an assignment and this check cannot interleave: whichever locks first commits first.
+      await tx.select({ id: catalogChannelListings.id }).from(catalogChannelListings).where(eq(catalogChannelListings.id, e.listingId)).for("share");
       const w = await isWritable(tx, e.listingId, { experimentId: e.experimentId ?? undefined });
       if (!w.ok) throw new ListingFrozenError(e.listingId, w.reason, w.experimentId);
     }
@@ -368,22 +371,36 @@ export async function recordChange(db: GraphDb, e: NewChangeEvent): Promise<{ se
   });
 }
 
+/** Test seam: runs between the floor read and the event select (used to reproduce a writer starting in between). */
+export type ReadChangesHooks = { afterFloorRead?: () => Promise<void> };
+
 /**
- * Change events after `afterSeq`, oldest first, at most `limit` (1 to 5,000). Stops below the seq of any transaction
- * still writing events, so storing the last returned seq as the cursor never skips one.
+ * Change events after `afterSeq`, oldest first, at most `limit` (1 to 5,000), safe to use as a stored cursor (D12):
+ * 1. cap = the last seq drawn so far (read first);
+ * 2. floor = the lowest cursor lock still held by a writer in this database;
+ * 3. events with afterSeq < seq <= cap and seq < floor.
+ * Every seq up to the cap was drawn before step 1, after its writer took its floor lock; at step 2 that writer either
+ * still held the lock (so the floor excludes the seq) or had finished (so step 3 sees its commit, or it rolled back).
+ * A writer that starts after step 1 draws above the cap. So no event below a returned seq can appear later.
  */
 export async function readChanges(
   db: GraphDb,
   afterSeq: bigint,
   limit: number,
   filter: { kinds?: ChangeKind[]; listingIds?: string[] } = {},
+  hooks: ReadChangesHooks = {},
 ): Promise<ChangeEvent[]> {
   if (!Number.isInteger(limit) || limit < 1 || limit > 5000) throw new Error("readChanges: limit must be an integer from 1 to 5000");
+  const [cap] = await rowsOf<{ cap: string | number }>(
+    db,
+    sql.raw(`select case when is_called then last_value else last_value - 1 end as cap from catalog_change_events_seq_seq`),
+  );
   const [floor] = await rowsOf<{ floor: string | number | null }>(
     db,
-    sql`select min(objid::bigint) as floor from pg_locks where locktype = 'advisory' and classid = ${CHANGE_CURSOR_LOCK_NS} and objsubid = 2 and pid <> pg_backend_pid()`,
+    sql`select min(objid::bigint) as floor from pg_locks where locktype = 'advisory' and classid = ${CHANGE_CURSOR_LOCK_NS} and objsubid = 2 and pid <> pg_backend_pid() and database = (select oid from pg_database where datname = current_database())`,
   );
-  const conditions: SQL[] = [gt(catalogChangeEvents.seq, afterSeq)];
+  await hooks.afterFloorRead?.();
+  const conditions: SQL[] = [gt(catalogChangeEvents.seq, afterSeq), lte(catalogChangeEvents.seq, BigInt(cap!.cap))];
   if (floor?.floor != null) conditions.push(sql`${catalogChangeEvents.seq} < ${BigInt(floor.floor)}`);
   if (filter.kinds?.length) conditions.push(inArray(catalogChangeEvents.kind, filter.kinds));
   if (filter.listingIds?.length) conditions.push(inArray(catalogChangeEvents.listingId, filter.listingIds));

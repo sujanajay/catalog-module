@@ -240,6 +240,62 @@ describe(`M0 graph contract on ${TEST_PG_URL ? "real Postgres" : "PGlite"}`, () 
     expect((await readChanges(db, start, 100)).map((e) => e.seq)).toEqual([slowSeq, fast.seq]);
   });
 
+  it.skipIf(!TEST_PG_URL)("readChanges never skips a writer that starts between its floor read and its select (real Postgres)", async () => {
+    const { optionId, listingId } = await listing();
+    const v1 = await imageVersion(optionId, "rz-1");
+    const v2 = await imageVersion(optionId, "rz-2");
+    const start = BigInt(((await db.execute(sql`select coalesce(max(seq), 0)::text as m from catalog_change_events`)) as unknown as { rows: { m: string }[] }).rows[0]!.m);
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    let slowSeq = 0n;
+    let fastSeq = 0n;
+    let slow: Promise<void> = Promise.resolve();
+    // The reader has read the floor (no writer yet). Now writer A draws the lower seq and stays open, and writer B
+    // draws a higher seq and commits, all before the reader's select.
+    const page = await readChanges(db, start, 100, {}, {
+      afterFloorRead: async () => {
+        const recorded = vi.fn();
+        slow = db.transaction(async (tx) => {
+          slowSeq = (await recordChange(tx, event(listingId, v1.versionId, { idempotencyKey: "rz-slow" }))).seq;
+          recorded();
+          await gate;
+        });
+        await vi.waitFor(() => expect(recorded).toHaveBeenCalled(), { timeout: 10_000 });
+        fastSeq = (await recordChange(db, event(listingId, v2.versionId, { idempotencyKey: "rz-fast" }))).seq;
+      },
+    });
+    expect(fastSeq).toBeGreaterThan(slowSeq);
+    // Returning B would move a stored cursor past A forever.
+    expect(page.map((e) => e.seq)).toEqual([]);
+    release();
+    await slow;
+    expect((await readChanges(db, start, 100)).map((e) => e.seq)).toEqual([slowSeq, fastSeq]);
+  });
+
+  it.skipIf(!TEST_PG_URL)("a control assignment committed during a publish check is never missed (real Postgres)", async () => {
+    const { optionId, listingId } = await listing("namshi");
+    const v = await imageVersion(optionId, "cc-1");
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const inserted = vi.fn();
+    // M4 inserts a control assignment; the 0009 trigger locks the listing until this transaction commits.
+    const assign = db.transaction(async (tx) => {
+      await tx.insert(catalogTreatmentAssignments).values({ experimentId: "exp-cc", listingId, arm: "control", doNotTouch: true, frozenAt: new Date() });
+      inserted();
+      await gate;
+    });
+    await vi.waitFor(() => expect(inserted).toHaveBeenCalled(), { timeout: 10_000 });
+    const settled = vi.fn();
+    const publish = recordChange(db, event(listingId, v.versionId, { idempotencyKey: "cc-publish" })).finally(settled);
+    await new Promise((r) => setTimeout(r, 500));
+    // The publish waits on the listing lock instead of reading "no assignment" and writing.
+    expect(settled).not.toHaveBeenCalled();
+    release();
+    await assign;
+    await expect(publish).rejects.toMatchObject({ reason: "frozen_control", experimentId: "exp-cc" });
+    expect(await db.select().from(catalogChangeEvents).where(eq(catalogChangeEvents.idempotencyKey, "cc-publish"))).toHaveLength(0);
+  });
+
   it("liveAt returns what each slot held at a time, verified or assumed, null for an emptied slot", async () => {
     const { optionId, listingId } = await listing();
     const a = await imageVersion(optionId, "la-a");
@@ -266,5 +322,16 @@ describe(`M0 graph contract on ${TEST_PG_URL ? "real Postgres" : "PGlite"}`, () 
     expect(await db.select().from(catalogContentVersions).where(eq(catalogContentVersions.id, testV.versionId))).toHaveLength(0);
     expect(await db.select().from(catalogChangeEvents).where(eq(catalogChangeEvents.idempotencyKey, "tc-1"))).toHaveLength(0);
     expect(await db.select().from(catalogContentVersions).where(eq(catalogContentVersions.id, keptV.versionId))).toHaveLength(1);
+  });
+
+  it("deleting a version that the change log or a live interval names is refused, so the log stays append-only", async () => {
+    const { optionId, listingId } = await listing();
+    const v = await imageVersion(optionId, "ro-1");
+    const w = await imageVersion(optionId, "ro-2");
+    await recordChange(db, event(listingId, v.versionId, { idempotencyKey: "ro-1" }));
+    await db.insert(catalogLiveIntervals).values({ listingId, slot: "image:1", versionId: w.versionId, validFrom: new Date(), state: "assumed" });
+    await expect(db.delete(catalogContentVersions).where(eq(catalogContentVersions.id, v.versionId))).rejects.toThrow();
+    await expect(db.delete(catalogContentVersions).where(eq(catalogContentVersions.id, w.versionId))).rejects.toThrow();
+    expect(await db.select().from(catalogChangeEvents).where(eq(catalogChangeEvents.idempotencyKey, "ro-1"))).toHaveLength(1);
   });
 });

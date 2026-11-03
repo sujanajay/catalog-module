@@ -1,5 +1,5 @@
 {
-  "id": "99222866-c49a-431a-b799-283c2ded9d42",
+  "id": "dd4b6e6d-c571-42ca-a312-eb6e6d884493",
   "prevId": "839874cb-aa7d-456f-bd92-f6e18cf9704b",
   "version": "7",
   "dialect": "postgresql",
@@ -627,6 +627,51 @@
         }
       },
       "indexes": {
+        "catalog_change_events_from_version_id_idx": {
+          "name": "catalog_change_events_from_version_id_idx",
+          "columns": [
+            {
+              "expression": "from_version_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "catalog_change_events_to_version_id_idx": {
+          "name": "catalog_change_events_to_version_id_idx",
+          "columns": [
+            {
+              "expression": "to_version_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "catalog_change_events_batch_id_idx": {
+          "name": "catalog_change_events_batch_id_idx",
+          "columns": [
+            {
+              "expression": "batch_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
         "catalog_change_events_listing_slot_at_idx": {
           "name": "catalog_change_events_listing_slot_at_idx",
           "columns": [
@@ -707,7 +752,7 @@
           "columnsTo": [
             "id"
           ],
-          "onDelete": "cascade",
+          "onDelete": "restrict",
           "onUpdate": "no action"
         },
         "catalog_change_events_to_version_id_fk": {
@@ -720,7 +765,7 @@
           "columnsTo": [
             "id"
           ],
-          "onDelete": "cascade",
+          "onDelete": "restrict",
           "onUpdate": "no action"
         }
       },
@@ -2600,7 +2645,23 @@
           "default": "now()"
         }
       },
-      "indexes": {},
+      "indexes": {
+        "catalog_live_intervals_version_id_idx": {
+          "name": "catalog_live_intervals_version_id_idx",
+          "columns": [
+            {
+              "expression": "version_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
       "foreignKeys": {
         "catalog_live_intervals_listing_id_fk": {
           "name": "catalog_live_intervals_listing_id_fk",
@@ -2625,7 +2686,7 @@
           "columnsTo": [
             "id"
           ],
-          "onDelete": "cascade",
+          "onDelete": "restrict",
           "onUpdate": "no action"
         }
       },
@@ -3090,6 +3151,7 @@
             }
           ],
           "isUnique": false,
+          "where": "\"catalog_outputs\".\"content_version_id\" IS NOT NULL",
           "concurrently": false,
           "method": "btree",
           "with": {}
@@ -3631,6 +3693,7 @@
             }
           ],
           "isUnique": false,
+          "where": "\"catalog_products\".\"option_id\" IS NOT NULL",
           "concurrently": false,
           "method": "btree",
           "with": {}
