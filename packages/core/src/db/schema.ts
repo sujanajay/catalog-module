@@ -31,12 +31,15 @@ import type { SkuMethod } from "../catalog/sku-mapping";
 import { BRAND_PHOTO_CAPABILITIES, CAPABILITIES, ROUTE_ADAPTERS, ROUTE_STATES } from "../vendor/routes";
 import {
   ALIAS_KINDS,
+  AUTO_DECIDE_ACTIONS,
+  AUTO_DECIDE_CHANNELS,
   BATCH_STATUSES,
   CHANGE_KINDS,
   CHANNEL_IDS,
   DECISIONS,
   EVAL_LABELS,
   EVENT_KINDS,
+  HOLD_CAUSES,
   LINK_STATUSES,
   OUTPUT_STATUSES,
   POLICY_SOURCES,
@@ -1347,3 +1350,34 @@ export const vendorRouteChanges = pgTable(
 
 export type VendorRouteRow = typeof vendorRoutes.$inferSelect;
 export type VendorRouteChange = typeof vendorRouteChanges.$inferSelect;
+
+// ---------------------------------------------------------------------------
+// M1 intake and auto-decide (M1-S3, migration 0013)
+// ---------------------------------------------------------------------------
+
+/**
+ * M1-F3-R1: the auto-decide rule table. Each hold cause the QA triage finds maps to an automatic action, for one
+ * channel or for every channel (`*`); a channel row wins over the `*` row. The id is `<cause>:<channel>`, recorded on
+ * every output a rule decided. Seeded by migration 0013 with the M1-F3-R1 defaults. Start copies the enabled rules
+ * into the batch (`options.autoDecide`), so a change applies to the next batch, never to one already running.
+ */
+export const catalogAutoDecideRules = pgTable(
+  "catalog_auto_decide_rules",
+  {
+    id: text("id").primaryKey(),
+    cause: text("cause", { enum: HOLD_CAUSES }).notNull(),
+    channel: text("channel", { enum: AUTO_DECIDE_CHANNELS }).notNull(),
+    action: text("action", { enum: AUTO_DECIDE_ACTIONS }).notNull(),
+    enabled: boolean("enabled").notNull().default(true),
+    updatedBy: text("updated_by").notNull(),
+    updatedAt: updatedAt(),
+  },
+  (t) => [
+    uniqueIndex("catalog_auto_decide_rules_cause_channel_uq").on(t.cause, t.channel),
+    enumCheck("catalog_auto_decide_rules", "cause", t.cause, HOLD_CAUSES),
+    enumCheck("catalog_auto_decide_rules", "channel", t.channel, AUTO_DECIDE_CHANNELS),
+    enumCheck("catalog_auto_decide_rules", "action", t.action, AUTO_DECIDE_ACTIONS),
+  ],
+);
+
+export type AutoDecideRuleRow = typeof catalogAutoDecideRules.$inferSelect;

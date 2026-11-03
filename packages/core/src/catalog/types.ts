@@ -21,7 +21,19 @@ export const OUTPUT_FLAGS = [
   "qa_unavailable","qa_cap","qa_sampled_out","type_unknown",
   "shadow_synthesised","transparent","upscaled","cut_in_source","auto_dropped",
   "product_removed","chart_image","matte_passthrough","enlargement_failed",
+  // M1-F3 (M1-S3): delivered now by an auto-decide rule with the best image we have; may be improved later at the same URL.
+  "provisional",
 ] as const;
+/** Why the QA triage would hold an output for a person (qa/triage.ts `HoldCause`). */
+export const HOLD_CAUSES = ["wrong_item","collage","unusable","corrupt","unchecked","photo_one","every_photo","not_publishable","code_fault","not_enlarged"] as const;
+/**
+ * M1-F3-R1: what an auto-decide rule does with an output the triage would hold. `deliver`: the staged image is
+ * published now, flagged `provisional` (only when it exists and passes the channel's hard rules; otherwise the slot is
+ * dropped). `drop`: the photo gets no link on that channel and the rest of the set is delivered. Nothing waits for a person.
+ */
+export const AUTO_DECIDE_ACTIONS = ["deliver","drop"] as const;
+/** `catalog_auto_decide_rules.channel`: one channel, or `*` for every channel. */
+export const AUTO_DECIDE_CHANNELS = ["*",...CHANNEL_IDS] as const;
 export const DECISIONS = ["use_as_is","remove","replaced"] as const;
 export const QA_MODES = ["per_source","per_output"] as const;
 export const POLICY_SOURCES = ["bakeoff","default","pending","manual"] as const;
@@ -47,6 +59,9 @@ export type ProductType = (typeof PRODUCT_TYPES)[number];
 export type IdentifierMode = (typeof IDENTIFIER_MODES)[number];
 export type Precedence = (typeof PRECEDENCES)[number];
 export type OutputFlag = (typeof OUTPUT_FLAGS)[number];
+export type HoldCause = (typeof HOLD_CAUSES)[number];
+export type AutoDecideAction = (typeof AUTO_DECIDE_ACTIONS)[number];
+export type AutoDecideChannel = (typeof AUTO_DECIDE_CHANNELS)[number];
 /** Spec 11: the sheet note and reason of the `upscaled` information flag (the colour was enlarged by the GPU upscaler). Model-free. */
 export const UPSCALED_SENTENCE = "Enlarged with a quality pass to meet this marketplace's size.";
 /**
@@ -56,6 +71,8 @@ export const UPSCALED_SENTENCE = "Enlarged with a quality pass to meet this mark
  */
 export const ENLARGEMENT_FAILED_WHY = "This photo could not be enlarged to this marketplace's size.";
 export const ENLARGEMENT_FAILED_WHAT = "Try again, use it as it is after the warning, replace the photo, or ask the brand for a larger one.";
+/** M1-F3: the sheet note of a `provisional` output (delivered now by an auto-decide rule). Model-free. */
+export const PROVISIONAL_SENTENCE = "Delivered now with the best image we have; it may be improved later at the same link. Nothing to do.";
 export const ENLARGEMENT_FAILED_SENTENCE = `${ENLARGEMENT_FAILED_WHY} ${ENLARGEMENT_FAILED_WHAT}`;
 /** What to do when "Try again" cannot run (a size refusal, or a batch that has stopped): the card offers no Try again. */
 export const ENLARGEMENT_FAILED_WHAT_NO_RETRY = "Use it as it is after the warning, replace the photo, or ask the brand for a different one.";
@@ -100,6 +117,12 @@ export interface BatchOptions {
    * mixes CPU and GPU images.
    */
   enlargement?: { model: string; x4Model?: string; minScale?: number; target?: "gpu" } | null;
+  /**
+   * M1-F3 (M1-S3): written at Start. The auto-decide rules (`catalog_auto_decide_rules`) as they were when the batch
+   * started, so a rule changed mid-batch does not affect it. Present means the batch auto-decides: no output waits for
+   * a person and no product becomes `pending_attention`. Absent on batches started before M1-S3 (they keep the holds).
+   */
+  autoDecide?: { rules: { id: string; cause: HoldCause; channel: AutoDecideChannel; action: AutoDecideAction }[] } | null;
 }
 
 export interface BatchCounts {
@@ -123,6 +146,8 @@ export interface BatchCounts {
   linkFailures?: number;
   /** Links of this batch held for a decision (held products); not delivered, so outside both Details counts. */
   heldLinks?: number;
+  /** M1-F3: delivered links of this batch an auto-decide rule chose (flagged `provisional`); written by the report. */
+  provisional?: number;
   /** Earlier batches' live links the sheet keeps for held products, re-checked separately. */
   recheckCarriedOk?: number | null; recheckCarriedTotal?: number | null;
   /**
@@ -261,6 +286,7 @@ const REASONS: Partial<Record<OutputFlag, (ctx?: Ctx) => string>> = {
     "This photo was left out automatically: it could not be made cleanly and this product has enough other good photos. Nothing to do.",
   upscaled: () => `${UPSCALED_SENTENCE} Nothing to do.`,
   enlargement_failed: () => ENLARGEMENT_FAILED_SENTENCE,
+  provisional: () => PROVISIONAL_SENTENCE,
 };
 
 /** Used for flags whose sentences arrive with 07 (QA). */

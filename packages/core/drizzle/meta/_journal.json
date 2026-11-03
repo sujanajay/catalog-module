@@ -92,6 +92,13 @@
       "when": 1793712444653,
       "tag": "0012_deploy_safe_cost_ledger",
       "breakpoints": true
+    },
+    {
+      "idx": 13,
+      "version": "7",
+      "when": 1793743227765,
+      "tag": "0013_auto_decide_rules",
+      "breakpoints": true
     }
   ]
 }

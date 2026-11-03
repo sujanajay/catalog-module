@@ -15,6 +15,7 @@ import { qaCallCost } from "@catalog/core/catalog/cost";
 import { flagReason, type ChannelId, type ResolvedPolicy, type OutputFlag } from "@catalog/core/catalog/types";
 import type { CatalogDeps } from "./deps";
 import { eachLimit } from "@catalog/core/concurrency";
+import { autoDecide, autoDecideNote, autoDecideOf, autoDecideRecord } from "@catalog/core/catalog/auto-decide";
 import type { BackoffBudget } from "@catalog/core/llm/openrouter";
 import type { Router } from "@catalog/core/vendor/router";
 
@@ -312,10 +313,14 @@ export async function applyTriage(deps:CatalogDeps,batch:Batch,productId:string,
  const keptLive=live.filter(l=>shots.has(l.n) && !outputs.some(o=>o.channel===l.channel && o.n===l.n && o.decision!=="replaced"));
  const current=outputs.filter(o=>!replaced.has(o.sourceImageId));
  const decisions=triageProduct(current,keptLive);
+ // M1-F3: a batch started with auto-decide rules turns every hold into deliver (provisional) or drop; none waits.
+ const auto=autoDecideOf(batch.options);
  await underClaim(async tx=>{
   for(const o of current) {
    const decision=decisions.get(o.id),scores=o.qaScores;
-   if(!decision || o.status==="failed") continue;
+   if(!decision) continue;
+   const cause=auto && decision.action==="hold" ? decision.cause:undefined;
+   if(o.status==="failed" && !cause) continue;
    // The rule in plain words (never its code) and, for our own defect still there after the repair loop, what was tried (07 4.6a).
    const lead=leadFlag(o.flags),ctx={channel:CHANNELS[o.channel].label,n:o.n,k:batch.channels.length,busy:busyBackgroundHold(o.compliance),failures:plainFailures(failuresOf(o.compliance),CHANNELS[o.channel].label)};
    const tried=lead && OWN_DEFECT_FLAGS.has(lead) && !ctx.busy ? triedSentence(actionsOn(o.compliance,o.channel).filter(a=>a.result!=="skipped").map(a=>a.step)):"";
@@ -324,6 +329,18 @@ export async function applyTriage(deps:CatalogDeps,batch:Batch,productId:string,
    const ordered=[...new Set([...o.flags.filter(flag=>HARD_HOLD_FLAGS.has(flag)),...bySeverity(o.flags)])];
    const leftOut=o.flags.some(flag=>LEFT_OUT_FLAGS.has(flag));
    let patch:Partial<Output>;
+   if(auto && cause) {
+    const d=autoDecide(auto,cause,o);
+    // A failed source has no flag to name it; its read error is the reason.
+    const problem=why ?? (o.status==="failed" ? o.reason:null);
+    patch=d.action==="deliver"
+     ? {status:"staged",flags:[...new Set<OutputFlag>([...ordered,"provisional"])],reason:autoDecideNote("deliver",problem)}
+     : {status:"skipped",flags:[...new Set<OutputFlag>([...ordered,"auto_dropped"])],reason:autoDecideNote("drop",problem)};
+    patch.compliance={...(o.compliance ?? {}),auto_decide:autoDecideRecord(cause,d)};
+    if(scores) patch.qaScores={...scores,autoAction:d.action==="deliver" ? "note":"drop",holdCause:cause,autoDecideRule:d.rule.id,finalStatus:patch.status};
+    await tx.update(catalogOutputs).set({...patch,updatedAt:deps.now()}).where(eq(catalogOutputs.id,o.id));
+    continue;
+   }
    if(decision.action==="hold") {
     if(!decision.cause || decision.cause==="unchecked") continue;
     // The render's band notes stay with the hold's reason, as plain sentences after the card sentence: "Use as is" publishes
