@@ -421,6 +421,10 @@ for SA in "$WEB" "$WORKER"; do
   secret_binding "$DB_SECRET" "serviceAccount:$SA" roles/secretmanager.secretAccessor
 done
 secret_binding "$OPENROUTER_SECRET" "serviceAccount:$WORKER" roles/secretmanager.secretAccessor
+# M1-F1-R4: catalog-web mounts the Supabase project URL and read key for the folder paste (infra/deploy.sh WEB_SECRETS).
+for SUPABASE_SECRET in supabase-url supabase-service-key; do
+  secret_binding "$SUPABASE_SECRET" "serviceAccount:$WEB" roles/secretmanager.secretAccessor
+done
 # Spec 18 H2: project level, so this one grant also lets the worker (and the probe job catalog-check-matting, which
 # runs as catalog-worker@) invoke catalog-upscale, including its candidate tag URLs, without a resource-level binding
 # on a service that does not exist yet when bootstrap runs (resource-level IAM on Cloud Run may be denied, AGENTS.md;
