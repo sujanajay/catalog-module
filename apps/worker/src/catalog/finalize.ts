@@ -4,6 +4,7 @@ import { catalogBatches, catalogBatchProducts, catalogChunks, catalogProducts, c
 import { batchPrefix, exportPath, sanitizeSegment } from "@catalog/core/catalog/naming";
 import { batchProductIds, buildReport, readIngestReport, splitRecheck, workbookCsvSheets, type ExportPaths } from "@catalog/core/catalog/pipeline/report";
 import { releaseLocks } from "@catalog/core/catalog/pipeline/publish";
+import { autoDecideOf } from "@catalog/core/catalog/auto-decide";
 import { ENLARGING_TASK } from "@catalog/core/catalog/pipeline/enlargement";
 import { recheckSheetPart, type RecheckProgress } from "@catalog/core/catalog/recheck/index";
 import { compareXlsxCsv, fillProductListWorkbook, writeLinksCsv, writeLinksXlsx } from "@catalog/core/catalog/sheet";
@@ -170,7 +171,8 @@ export async function handleFinalizeTask(deps:CatalogDeps,body:Record<string,unk
       const reopened=batch.status==="done";
       const written=await tx.update(catalogBatches).set({counts,cost:initial.batch.cost,status:"done",finishedAt:deps.now(),sheetXlsxUri:paths.xlsx,sheetCsvUri:paths.csv,reportUri:paths.report,error:null}).where(reopened ? claimWhere:and(claimWhere,ne(catalogBatches.status,"done"))).returning({id:catalogBatches.id});
       if(!written.length) return "snapshot_changed";
-      await releaseLocks(tx as unknown as CatalogDeps["db"],batchId);
+      // M1-F3-R7: an auto-decide batch releases every product it locked, so none blocks the next batch.
+      await releaseLocks(tx as unknown as CatalogDeps["db"],batchId,{everyProduct:autoDecideOf(batch.options)!==null});
       return "done";
     });
     if(outcome==="done") {

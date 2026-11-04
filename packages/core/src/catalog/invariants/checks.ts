@@ -88,6 +88,10 @@ export const CHECKS: readonly InvariantCheck[] = [
     id: "enlarged_without_upscaler",
     sentence: "In a batch made with the enlargement stage, no verified output is enlarged past the batch's upscaler threshold (1.0x since spec 18 quality, 1.5x before) without the upscaler (a plain resize never stands in).",
     severity: "ERROR",
+    // M1-F3-R1: an auto-decide rule may deliver the plain render of a failed enlargement, flagged provisional (the
+    // improvement task re-tries the enlargement later); like an operator "Use as is", that is not a silent fallback.
+    // IS NOT DISTINCT FROM: with a null decision `=` gives null and NOT null drops the row, which hid every undecided
+    // plain render (found in M1-S3).
     // Spec 18: batches started before the stage (no options.enlargement) kept the old silent fallback and are left as they are.
     // Spec 18 quality: the threshold is the one the batch was started with (options.enlargement.minScale, 1.0 since the
     // change); a batch from before it has none and keeps 1.5. The 1e-6 slack covers the real column's rounding.
@@ -96,7 +100,8 @@ export const CHECKS: readonly InvariantCheck[] = [
         AND o.scale > (CASE WHEN jsonb_typeof(b.options->'enlargement'->'minScale') = 'number'
           THEN (b.options->'enlargement'->>'minScale')::real ELSE ${LEGACY_UPSCALE_MIN_SCALE}::real END) + 1e-6
         AND NOT (o.flags @> '["upscaled"]'::jsonb)
-        AND NOT (o.decision = 'use_as_is' AND o.flags @> '["enlargement_failed"]'::jsonb)`,
+        AND NOT (o.decision IS NOT DISTINCT FROM 'use_as_is' AND o.flags @> '["enlargement_failed"]'::jsonb)
+        AND NOT (o.flags @> '["provisional", "enlargement_failed"]'::jsonb)`,
   },
   {
     id: "plain_accepted_outputs",

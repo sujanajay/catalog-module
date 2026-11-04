@@ -176,6 +176,16 @@ describe("invariant checks", () => {
     expect([r.counts.parked_chunk_quiet, r.counts.enlargement_waiting_long]).toEqual([0, 0]);
   });
 
+  it("M1-F3-R1: a plain render of a failed enlargement that an auto-decide rule delivered (provisional) is not a silent fallback", async () => {
+    const b = await batch("done");
+    await db.update(catalogBatches).set({ options: { ...b.options, enlargement: { model: "swinir-x2", minScale: 1 } } }).where(eq(catalogBatches.id, b.id));
+    const p = await product(b.id, "new");
+    const provisional = await output(b.id, p, "verified"), silent = await output(b.id, p, "verified");
+    await db.update(catalogOutputs).set({ scale: 2, flags: ["enlargement_failed", "provisional"] }).where(eq(catalogOutputs.id, provisional.id));
+    await db.update(catalogOutputs).set({ scale: 2, flags: ["enlargement_failed"] }).where(eq(catalogOutputs.id, silent.id));
+    expect((await run()).results.find(x => x.id === "enlarged_without_upscaler")!.sample).toEqual([silent.id]);
+  });
+
   it("T57: parked_chunk_quiet fires on a parked chunk quiet for 2 h of a live batch; enlargement_waiting_long on a wanted queued row older than 20 h", async () => {
     const b = await batch("rendering"), p = await product(b.id, "new"), cancelled = await batch("cancelled");
     const [quiet] = await db.insert(catalogChunks).values({ batchId: b.id, index: ++seq, stage: "render", status: "queued", productIds: [p.id], taskName: ENLARGING_TASK, dispatchedAt: ago(200), progressAt: ago(121) }).returning();
