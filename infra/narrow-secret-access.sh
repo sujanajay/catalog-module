@@ -9,15 +9,23 @@
 #   bash infra/narrow-secret-access.sh             applies the plan (runs with a deploy approval, never by itself)
 #
 # What "needed" means, per account:
-#   - the fixed list below (the secrets infra/deploy.sh mounts: catalog-db-password on both, openrouter-api-key on the
-#     worker; supabase-url and supabase-service-key on the web once PR #152 mounts them, bound when they exist), plus
+#   - every pair in infra/secret-access.manifest (the same list infra/bootstrap.sh binds and infra/deploy.sh checks its
+#     mounts against; "optional" pairs such as the Supabase ones are bound once the secret exists), plus
 #   - every secret that a Cloud Run service or job running as that account mounts today (env or volume), read from the
-#     live definitions in NARROW_REGIONS. The jobs that run as catalog-worker (migrate, eval, qa-check, load, recheck,
-#     invariants, test jobs) are found this way, and so is any service of another name that uses these accounts.
+#     live definitions in every region (region-less list). The jobs that run as catalog-worker (migrate, eval, qa-check,
+#     load, recheck, invariants, test jobs) are found this way, and so is any service of another name that uses these
+#     accounts. Only each resource's current template is read; the tagged rollback revisions mounted the same secrets
+#     on 2026-11-04 (review), so check them by hand if a rollback revision ever mounts something extra.
 # The project-level removal is refused (exit 1) when any needed binding is missing or cannot be checked, when a needed
 # secret does not exist, or when a definition cannot be read. Other principals' bindings (ila-web, ila-worker and the
 # rest) are never touched; the script only names them. Secret values are never read: only names and IAM policies.
 # Idempotent: a second run finds every binding in place and no project-level binding left, and changes nothing.
+#
+# Rollback (an instance start or job run fails with "Permission denied on secret" after this ran): give the account
+# its project-level grant back; the per-secret bindings can stay. One line per account:
+#   gcloud projects add-iam-policy-binding image-links-agent --member=serviceAccount:catalog-web@image-links-agent.iam.gserviceaccount.com --role=roles/secretmanager.secretAccessor --condition=None
+#   gcloud projects add-iam-policy-binding image-links-agent --member=serviceAccount:catalog-worker@image-links-agent.iam.gserviceaccount.com --role=roles/secretmanager.secretAccessor --condition=None
+# Then add the missing pair to infra/secret-access.manifest, run infra/bootstrap.sh, and run this script again.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -26,27 +34,17 @@ export CLOUDSDK_CORE_PROJECT=$PROJECT
 ROLE=roles/secretmanager.secretAccessor
 WEB_SA=catalog-web@$PROJECT.iam.gserviceaccount.com
 WORKER_SA=catalog-worker@$PROJECT.iam.gserviceaccount.com
-NARROW_REGIONS=${NARROW_REGIONS:-"asia-south1 asia-south2 asia-southeast1"}
-# Seconds to wait after adding per-secret bindings before the project binding goes (IAM changes take a moment).
-NARROW_PROPAGATION_S=${NARROW_PROPAGATION_S:-60}
-
-# "<account> <secret>": always needed.
-REQUIRED_PAIRS=(
-  "$WEB_SA catalog-db-password"
-  "$WORKER_SA catalog-db-password"
-  "$WORKER_SA openrouter-api-key"
-)
-# "<account> <secret>": needed once mounted (PR #152, the Supabase folder paste); bound ahead when the secret exists.
-OPTIONAL_PAIRS=(
-  "$WEB_SA supabase-url"
-  "$WEB_SA supabase-service-key"
-)
+# Seconds to wait after adding per-secret bindings before the project binding goes. Google documents IAM propagation
+# as typically about 2 minutes, sometimes 7 or more; a cold start in that gap would fail, so run it at a quiet time.
+NARROW_PROPAGATION_S=${NARROW_PROPAGATION_S:-180}
+# shellcheck source=lib/secret-manifest.sh
+source infra/lib/secret-manifest.sh
 
 DRY_RUN=0
 for arg in "$@"; do
   case "$arg" in
     --dry-run) DRY_RUN=1 ;;
-    -h|--help) sed -n '2,20p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,29p' "$0"; exit 0 ;;
     *) echo "unknown argument: $arg (use --dry-run or nothing)" >&2; exit 2 ;;
   esac
 done
@@ -60,37 +58,46 @@ say() { echo "$*"; }
 
 # --- 1. what the services and jobs mount ---------------------------------------------------------------------------
 # Prints "<account> <secret> <kind>/<region>/<name>" for every secret a resource running as one of our accounts mounts,
-# and a NOTE line for a resource of another name that runs as one of them.
-mounts_of() { # kind region < list json
+# a NOTE line for a resource of another name that runs as one of them, and a CROSS line for a secret in another project
+# (a full projects/<p>/secrets/<name> reference, which this script cannot bind).
+mounts_of() { # kind < list json (every region)
   node -e '
-    const [kind, region, ...accounts] = process.argv.slice(1);
+    const [kind, project, ...accounts] = process.argv.slice(1);
     const items = JSON.parse(require("fs").readFileSync(0, "utf8") || "[]");
     for (const it of items) {
       const spec = kind === "service" ? it.spec?.template?.spec : it.spec?.template?.spec?.template?.spec;
       const name = it.metadata?.name ?? "?";
+      const region = it.metadata?.labels?.["cloud.googleapis.com/location"] ?? "?";
       const sa = spec?.serviceAccountName ?? "";
       if (!accounts.includes(sa)) continue;
       if (!name.startsWith("catalog-")) console.log(`NOTE ${sa} ${kind}/${region}/${name}`);
       const secrets = new Set();
       for (const c of spec.containers ?? []) for (const e of c.env ?? []) if (e.valueFrom?.secretKeyRef?.name) secrets.add(e.valueFrom.secretKeyRef.name);
       for (const v of spec.volumes ?? []) if (v.secret?.secretName) secrets.add(v.secret.secretName);
-      for (const s of secrets) console.log(`${sa} ${s.split("/").pop()} ${kind}/${region}/${name}`);
-    }' "$1" "$2" "$WEB_SA" "$WORKER_SA"
+      for (const s of secrets) {
+        const m = /^projects\/([^/]+)\/secrets\/([^/]+)/.exec(s);
+        if (m && m[1] !== project) console.log(`CROSS ${sa} ${s} ${kind}/${region}/${name}`);
+        else console.log(`${sa} ${m ? m[2] : s} ${kind}/${region}/${name}`);
+      }
+    }' "$1" "$PROJECT" "$WEB_SA" "$WORKER_SA"
 }
 
 : > "$TMP/mounted"
-for region in $NARROW_REGIONS; do
-  for kind in service job; do
-    noun=services; [ "$kind" = job ] && noun=jobs
-    if ! gcloud run "$noun" list --region="$region" --format=json > "$TMP/list.json" 2> "$TMP/err"; then
-      block "cannot read the Cloud Run $noun in $region ($(head -c 200 "$TMP/err" | tr '\n' ' '))"
-      continue
-    fi
-    mounts_of "$kind" "$region" < "$TMP/list.json" >> "$TMP/mounted" || block "cannot parse the Cloud Run $noun in $region"
-  done
+for kind in service job; do
+  noun=services; [ "$kind" = job ] && noun=jobs
+  # No --region: the list covers every region, so a service or job in a region nobody named is not missed.
+  if ! gcloud run "$noun" list --format=json > "$TMP/list.json" 2> "$TMP/err"; then
+    block "cannot read the Cloud Run $noun ($(head -c 200 "$TMP/err" | tr '\n' ' '))"
+    continue
+  fi
+  mounts_of "$kind" < "$TMP/list.json" >> "$TMP/mounted" || block "cannot parse the Cloud Run $noun"
 done
 grep '^NOTE ' "$TMP/mounted" | while read -r _ sa where; do say "note: $where runs as $sa (not a catalog-* name); its secrets are kept"; done || true
-grep -v '^NOTE ' "$TMP/mounted" > "$TMP/mounts" || true
+grep '^CROSS ' "$TMP/mounted" > "$TMP/cross" || true
+while read -r _ sa ref where; do
+  block "$where (as $sa) mounts $ref from another project; grant it there by hand, then run this again"
+done < "$TMP/cross"
+grep -v -e '^NOTE ' -e '^CROSS ' "$TMP/mounted" > "$TMP/mounts" || true
 
 say ""
 say "==> secrets mounted today, by account"
@@ -102,8 +109,7 @@ done
 
 # --- 2. the needed pairs --------------------------------------------------------------------------------------------
 : > "$TMP/pairs" # "<account> <secret> required|optional"
-for p in "${REQUIRED_PAIRS[@]}"; do echo "$p required" >> "$TMP/pairs"; done
-for p in "${OPTIONAL_PAIRS[@]}"; do echo "$p optional" >> "$TMP/pairs"; done
+secret_manifest_pairs >> "$TMP/pairs" || block "infra/secret-access.manifest is malformed"
 awk '{ print $1, $2, "required" }' "$TMP/mounts" >> "$TMP/pairs"
 # One line per pair; "required" wins over "optional" (a mounted optional secret is required).
 sort -k1,1 -k2,2 -k3,3r "$TMP/pairs" | awk '!seen[$1 FS $2]++' > "$TMP/needed"
@@ -118,16 +124,24 @@ has_binding() {
     process.exit((p.bindings ?? []).some(b => b.role === role && !b.condition && (b.members ?? []).includes(member)) ? 0 : 1);
   ' "$ROLE" "serviceAccount:$2" < "$TMP/policy.json"
 }
-secret_exists() { gcloud secrets describe "$1" --format='value(name)' > /dev/null 2>&1; }
+# secret_exists <secret>: 0 when it exists, 1 when Secret Manager answers NOT_FOUND, 2 when the check itself fails (then
+# even an optional secret blocks: a passing error must not look like "nothing to bind").
+secret_exists() {
+  gcloud secrets describe "$1" --format='value(name)' > /dev/null 2> "$TMP/describe-err" && return 0
+  grep -q 'NOT_FOUND' "$TMP/describe-err" && return 1
+  return 2
+}
 
 say ""
 say "==> per-secret bindings ($ROLE)"
 : > "$TMP/to-add"
 : > "$TMP/to-check"
 while read -r sa secret need; do
-  if ! secret_exists "$secret"; then
+  set +e; secret_exists "$secret"; rc=$?; set -e
+  if [ "$rc" = 2 ]; then block "cannot check whether $secret exists ($(head -c 200 "$TMP/describe-err" | tr '\n' ' '))"; continue; fi
+  if [ "$rc" = 1 ]; then
     if [ "$need" = optional ]; then say "skip: $secret does not exist yet (nothing mounts it), no binding for $sa"; continue; fi
-    block "$secret is needed by $sa but does not exist (or cannot be read)"; continue
+    block "$secret is needed by $sa but does not exist"; continue
   fi
   echo "$sa $secret" >> "$TMP/to-check"
   set +e; has_binding "$secret" "$sa"; rc=$?; set -e

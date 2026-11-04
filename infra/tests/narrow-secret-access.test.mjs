@@ -30,11 +30,15 @@ const fail = (m) => { process.stderr.write(m + '\\n'); process.exit(1); };
 const cmd = args.filter(a => !a.startsWith('--')).join(' ');
 if (cmd.includes('versions access')) { log('READ SECRET VALUE'); fail('never'); }
 if (/^run (services|jobs) list$/.test(cmd)) {
-  const region = flag('region'), kind = args[1];
-  if ((s.failList || []).includes(region)) fail('PERMISSION_DENIED');
-  process.stdout.write(JSON.stringify((s[kind][region]) || []));
+  // Region-less list: every region at once, each item labelled with its location (as Cloud Run does).
+  const kind = args[1];
+  if (flag('region')) fail('the script must list every region (no --region)');
+  if ((s.failList || []).includes(kind)) fail('PERMISSION_DENIED');
+  const all = Object.entries(s[kind]).flatMap(([region, items]) => items.map(it => ({...it, metadata: {...it.metadata, labels: {'cloud.googleapis.com/location': region}}})));
+  process.stdout.write(JSON.stringify(all));
 } else if (args[0] === 'secrets' && args[1] === 'describe') {
-  if (!s.secrets[args[2]]) fail('NOT_FOUND'); process.stdout.write('projects/1/secrets/' + args[2] + '\\n');
+  if ((s.failDescribe || []).includes(args[2])) fail('ERROR: (gcloud.secrets.describe) UNAVAILABLE: try again');
+  if (!s.secrets[args[2]]) fail('ERROR: (gcloud.secrets.describe) NOT_FOUND: Secret [' + args[2] + '] not found'); process.stdout.write('projects/1/secrets/' + args[2] + '\\n');
 } else if (args[0] === 'secrets' && args[1] === 'get-iam-policy') {
   if (!s.secrets[args[2]] || (s.failPolicy || []).includes(args[2])) fail('denied');
   process.stdout.write(JSON.stringify(s.secrets[args[2]]));
@@ -82,12 +86,12 @@ fs.writeFileSync(path.join(dir, 'fake-gcloud.cjs'), FAKE);
 fs.writeFileSync(path.join(bin, 'gcloud'), `#!/usr/bin/env bash\nexec node "$FAKE_GCLOUD_JS" "$@"\n`, {mode: 0o755});
 const statePath = path.join(dir, 'state.json');
 
-function run(state, args = []) {
+function run(state, args = [], extraEnv = {}) {
   if (state) fs.writeFileSync(statePath, JSON.stringify(state));
   const binUnix = spawnSync(bash, ['-c', 'cygpath -u "$1" 2>/dev/null || printf %s "$1"', '_', bin], {encoding: 'utf8'}).stdout.trim();
   const r = spawnSync(bash, ['-c', `export PATH="${binUnix}:$PATH"; bash infra/narrow-secret-access.sh "$@"`, '_', ...args], {
     cwd: root, encoding: 'utf8', timeout: 120000,
-    env: {...process.env, FAKE_GCLOUD_STATE: statePath, FAKE_GCLOUD_JS: path.join(dir, 'fake-gcloud.cjs'), NARROW_REGIONS: 'asia-south1', NARROW_PROPAGATION_S: '0'},
+    env: {...process.env, FAKE_GCLOUD_STATE: statePath, FAKE_GCLOUD_JS: path.join(dir, 'fake-gcloud.cjs'), NARROW_PROPAGATION_S: '0', ...extraEnv},
   });
   if (r.error) throw r.error;
   return {...r, state: JSON.parse(fs.readFileSync(statePath, 'utf8'))};
@@ -142,7 +146,9 @@ check('a needed secret that does not exist, an unreadable policy or an unreadabl
   for (const [label, change, err] of [
     ['missing secret', s => { delete s.secrets['openrouter-api-key']; return s; }, /openrouter-api-key is needed by catalog-worker@.* does not exist/],
     ['unreadable policy', s => ({...s, failPolicy: ['catalog-db-password']}), /cannot read the IAM policy of catalog-db-password/],
-    ['unreadable region', s => ({...s, failList: ['asia-south1']}), /cannot read the Cloud Run services in asia-south1/],
+    ['unreadable list', s => ({...s, failList: ['jobs']}), /cannot read the Cloud Run jobs/],
+    ['optional secret that cannot be checked', s => ({...s, failDescribe: ['supabase-url']}), /cannot check whether supabase-url exists/],
+    ['secret from another project', s => { s.jobs['asia-south1'].push(job('catalog-x', WORKER, ['projects/other-proj/secrets/their-key'])); return s; }, /catalog-x \(as catalog-worker@.*\) mounts projects\/other-proj\/secrets\/their-key from another project/],
   ]) {
     for (const args of [['--dry-run'], []]) {
       const r = run(world(change), args);
@@ -169,6 +175,31 @@ check('every secret a job or service of these accounts mounts is kept, also unde
   assert.deepEqual(secretMembers(r.state, 'legacy-key'), [`serviceAccount:${WEB}`]);
   assert.deepEqual(secretMembers(r.state, 'supabase-url'), [`serviceAccount:${WEB}`]);
   assert.deepEqual(secretMembers(r.state, 'supabase-service-key'), [`serviceAccount:${WEB}`]);
+});
+
+check('a service in a region nobody named, and a full same-project secret reference, are still found', () => {
+  const r = run(world(s => {
+    s.services['europe-west1'] = [service('catalog-web-eu', WEB, [`projects/${P}/secrets/catalog-eu-key`])];
+    s.secrets['catalog-eu-key'] = {bindings: []};
+    return s;
+  }), ['--dry-run']);
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /catalog-eu-key \(service\/europe-west1\/catalog-web-eu\)/);
+  assert.match(r.stdout, /would add: catalog-eu-key -> catalog-web@/);
+});
+
+check('the needed list comes from infra/secret-access.manifest: a pair added there is bound, a malformed line blocks', () => {
+  const manifest = path.join(dir, 'secret-access.manifest');
+  fs.writeFileSync(manifest, fs.readFileSync(path.join(root, 'infra/secret-access.manifest'), 'utf8') + 'worker photoroom-api-key required\n');
+  const env = {SECRET_MANIFEST: manifest.split(path.sep).join('/')};
+  const r = run(world(s => { s.secrets['photoroom-api-key'] = {bindings: []}; return s; }), ['--dry-run'], env);
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /would add: photoroom-api-key -> catalog-worker@/);
+  fs.appendFileSync(manifest, 'worker photoroom-api-key sometimes\n');
+  const bad = run(world(), ['--dry-run'], env);
+  assert.equal(bad.status, 1);
+  assert.match(bad.stderr, /secret-access\.manifest line \d+ is not/);
+  assert.match(bad.stderr, /BLOCKED: infra\/secret-access\.manifest is malformed/);
 });
 
 check('an unknown argument is refused', () => {
