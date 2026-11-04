@@ -483,6 +483,8 @@ describe("POST /retry-links re-fetches only the failed links (spec 14b F5 part 1
 
   it("on a links batch that failed before Start reopens it (reason cleared), re-fetches only the rejects and ends draft ready when the host now answers",async()=>{
     const id=await pastedBatch(text,()=>503);
+    // Every one of the 4 links is retried twice before the batch fails (the links are fetched in parallel, so the order varies).
+    expect([...waits].sort((a,b)=>a-b)).toEqual([2_000,2_000,2_000,2_000,8_000,8_000,8_000,8_000]);
     const failed=await batchOf(id);
     expect(failed.status).toBe("failed");expect(failed.startedAt).toBeNull();
     expect(failed.counts.failReason).toBe(`No photos could be downloaded from the 4 links you pasted. 4 could not be reached, for example ${H}/AAA_1.heic (row 1, column 1). Some of these may work on a second try. Press Try the failed links again.`);
@@ -499,6 +501,7 @@ describe("POST /retry-links re-fetches only the failed links (spec 14b F5 part 1
 
   it("is refused for a started or collecting batch (409), for a viewer (403), and when no link failed (400)",async()=>{
     const id=await pastedBatch(text,(url)=>url.endsWith("AAA_2.heic")?503:200);
+    expect(waits).toEqual([2_000,8_000]);
     await db.update(catalogBatches).set({status:"failed",startedAt:new Date()}).where(eq(catalogBatches.id,id));
     const started=await retryLinks(request("POST"),ctx(id));
     expect(started.status).toBe(409);expect(await started.json()).toEqual({error:"This batch has already started. Make a new batch to add more photos."});
