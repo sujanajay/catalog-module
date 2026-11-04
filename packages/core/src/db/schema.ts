@@ -114,11 +114,11 @@ export const COST_OUTCOMES = ["ok", "failed", "rate_limited", "cap", "fallback",
 
 /**
  * M6-S6 (M6-F3-R2) catalog_incidents.kind: anything that stopped or slowed a batch without the operator causing it.
- * Written today: `stall` (no progress), `batch_failed`, `chunk_gave_up`, `invariant` (an ERROR check). Reserved for
- * their writers: `http_5xx` (a 5xx burst in a batch window), `deploy_refused`, `contamination` (M0), `alert`
- * (infra/monitoring.sh).
+ * Written today: `batch_failed`, `chunk_gave_up`, `invariant` (an ERROR check). Reserved for their writers: `http_5xx`
+ * (a 5xx burst in a batch window), `deploy_refused`, `contamination` (M0), `alert` (infra/monitoring.sh). Stall and
+ * outage incidents are left to the M1-S4b outage slice and its health ledger (M6 decision S6-20).
  */
-export const INCIDENT_KINDS = ["stall", "batch_failed", "chunk_gave_up", "invariant", "http_5xx", "deploy_refused", "contamination", "alert"] as const;
+export const INCIDENT_KINDS = ["batch_failed", "chunk_gave_up", "invariant", "http_5xx", "deploy_refused", "contamination", "alert"] as const;
 export const INCIDENT_SEVERITIES = ["warning", "error"] as const;
 /**
  * M6-S6 (M6-F3-R3) catalog_batch_touches.action: the operator writes on a batch or its photos after its upload that
@@ -844,7 +844,7 @@ export const catalogBatchOutcomes = pgTable(
 );
 
 /**
- * M6-F3-R2. `dedupe_key` names one incident: a state incident (a stall, an invariant) is keyed by what it is about
+ * M6-F3-R2. `dedupe_key` names one incident: a state incident (an invariant) is keyed by what it is about
  * while it is open and gets its id appended when it is resolved, so the next one can open; a one-off event (a failed
  * batch, a chunk that gave up) is keyed by the event and written already resolved. Every writer inserts with
  * ON CONFLICT DO NOTHING, so a repeated sweep never writes a second row. `repeat_of`: the latest earlier incident of

@@ -2856,7 +2856,7 @@
       "checkConstraints": {
         "catalog_incidents_kind_check": {
           "name": "catalog_incidents_kind_check",
-          "value": "\"catalog_incidents\".\"kind\" IN ('stall', 'batch_failed', 'chunk_gave_up', 'invariant', 'http_5xx', 'deploy_refused', 'contamination', 'alert')"
+          "value": "\"catalog_incidents\".\"kind\" IN ('batch_failed', 'chunk_gave_up', 'invariant', 'http_5xx', 'deploy_refused', 'contamination', 'alert')"
         },
         "catalog_incidents_severity_check": {
           "name": "catalog_incidents_severity_check",

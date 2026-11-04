@@ -189,7 +189,6 @@ export function healthLines(h: HealthSummary, gpuCandidate: string | null | unde
 export const RELIABILITY_TITLE = "Reliability";
 export const RELIABILITY_HELP = "A batch succeeds when its links are ready with no person stepping in and nothing going wrong on our side. Test batches, and batches cancelled within 10 minutes of starting, are left out.";
 export const INCIDENT_KIND_WORDS: Record<IncidentKind, string> = {
-  stall: "No progress",
   batch_failed: "Batch stopped",
   chunk_gave_up: "Photos gave up after retries",
   invariant: "Check found a problem",

@@ -5,11 +5,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { Db } from "../db/client";
 import { createTestDb } from "../db/testing";
 import type { InvariantResult } from "./invariants/run";
-import { ENLARGING_TASK } from "./pipeline/enlargement";
-import {
-  INGEST_STALL_INCIDENT_MS, recordBatchOutcome, recordTouch, refreshOutcomes, registerRevision, reliabilitySummary,
-  STALL_INCIDENT_MS, successRate, syncIncidents,
-} from "./reliability";
+import { recordBatchOutcome, recordTouch, refreshOutcomes, registerRevision, reliabilitySummary, successRate, syncIncidents } from "./reliability";
 
 type Row = Record<string, unknown>;
 let db: Db;
@@ -50,13 +46,6 @@ async function chunk(batchId: string, fields: { status: string; taskName?: strin
   return id;
 }
 
-async function enlargement(batchId: string, ids: { productId: string; sourceId: string }, status: string, updatedAt: Date, createdAt: Date = updatedAt): Promise<string> {
-  const id = randomUUID();
-  await db.execute(sql`INSERT INTO catalog_enlargements (id, batch_id, product_id, source_image_id, upscaler, factor, scale, out_w, out_h, route, pixel_hash, identity_hash, status, created_at, updated_at)
-    VALUES (${id}, ${batchId}, ${ids.productId}, ${ids.sourceId}, 'u', 2, 2, 10, 10, 'direct', 'p', ${id}, ${status}, ${createdAt.toISOString()}::timestamptz, ${updatedAt.toISOString()}::timestamptz)`);
-  return id;
-}
-
 const incidents = (batchId?: string) => rows(batchId
   ? sql`SELECT * FROM catalog_incidents WHERE batch_id = ${batchId} ORDER BY started_at`
   : sql`SELECT * FROM catalog_incidents ORDER BY started_at`);
@@ -64,8 +53,10 @@ const incidents = (batchId?: string) => rows(batchId
 beforeEach(async () => { ({ db, close } = await createTestDb()); });
 afterEach(async () => { await close(); });
 
-describe("M6-F3 acceptance test 1: a clean batch, one Try again, and an upscaler stopped for 20 minutes", () => {
-  it("records success, touches 1 and one stall incident with its cause and resolution time", async () => {
+// The stall part of acceptance test 1 (an upscaler stopped for 20 minutes) moved to the M1-S4b outage slice with stall
+// detection (M6 decision S6-20); here a group of photos that gave up after its retries is the incident.
+describe("M6-F3 acceptance test 1: a clean batch, one Try again, and one with an incident", () => {
+  it("records success, touches 1 and one incident with its cause and time", async () => {
     // Clean: done at +30, nothing touched.
     const clean = await batch({ status: "done", startedAt: T0, finishedAt: at(30) });
     await output(clean, at(20));
@@ -73,29 +64,17 @@ describe("M6-F3 acceptance test 1: a clean batch, one Try again, and an upscaler
     const retried = await batch({ status: "done", startedAt: T0, finishedAt: at(40) });
     const r = await output(retried, at(35));
     expect(await recordTouch(db, { action: "retry_photo", outputId: r.outputId }, at(25))).toBe(true);
-    // The upscaler stops at +5: the batch's only chunk is parked on an enlargement and nothing settles.
-    const stopped = await batch({ status: "rendering", startedAt: T0, updatedAt: at(5) });
-    const s = await output(stopped, null);
-    const parked = await chunk(stopped, { status: "queued", taskName: ENLARGING_TASK, startedAt: at(1), progressAt: at(5) });
-    // Asked for at +5 when the chunk parked; retries since then touched the row (updated_at +24), which is not progress.
-    const e = await enlargement(stopped, s, "queued", at(24), at(5));
-
-    // Sweeps at +10 (5 minutes quiet: nothing) and +20 (15 minutes quiet: one stall), +30 (still one).
-    expect((await syncIncidents(db, at(10))).opened).toBe(0);
-    expect((await syncIncidents(db, at(20))).opened).toBe(1);
-    expect((await syncIncidents(db, at(30))).opened).toBe(0);
-    let [stall] = await incidents(stopped);
-    expect(stall).toMatchObject({ kind: "stall", severity: "warning", cause_code: "enlarge_wait", resolved_at: null });
-    expect(new Date(String(stall!.started_at)).toISOString()).toBe(at(5).toISOString());
-
-    // The upscaler is back at +25: the enlargement settles, the chunk finishes, the batch is done at +45.
-    await db.execute(sql`UPDATE catalog_enlargements SET status = 'done', updated_at = ${at(32).toISOString()}::timestamptz WHERE id = ${e}`);
-    await db.execute(sql`UPDATE catalog_chunks SET status = 'done', finished_at = ${at(40).toISOString()}::timestamptz WHERE id = ${parked}`);
-    expect((await syncIncidents(db, at(40))).resolved).toBe(1);
+    // A group of photos gives up after its retries at +20; the batch still finishes at +45.
+    const stopped = await batch({ status: "rendering", startedAt: T0, updatedAt: at(20) });
+    await output(stopped, null);
+    await chunk(stopped, { status: "failed", startedAt: at(1), finishedAt: at(20), attempt: 3, error: "The photo service failed 3 times." });
+    expect((await syncIncidents(db, at(30))).opened).toBe(1);
+    expect((await syncIncidents(db, at(40))).opened).toBe(0);
     await db.execute(sql`UPDATE catalog_outputs SET published_at = ${at(42).toISOString()}::timestamptz WHERE batch_id = ${stopped}`);
     await db.execute(sql`UPDATE catalog_batches SET status = 'done', finished_at = ${at(45).toISOString()}::timestamptz, updated_at = ${at(45).toISOString()}::timestamptz WHERE id = ${stopped}`);
-    [stall] = await incidents(stopped);
-    expect(new Date(String(stall!.resolved_at)).toISOString()).toBe(at(40).toISOString());
+    const [gaveUp] = await incidents(stopped);
+    expect(gaveUp).toMatchObject({ kind: "chunk_gave_up", severity: "error", cause_code: "render" });
+    expect(new Date(String(gaveUp!.resolved_at)).toISOString()).toBe(at(20).toISOString());
 
     const outcomes = { clean: await recordBatchOutcome(db, clean, at(50)), retried: await recordBatchOutcome(db, retried, at(50)), stopped: await recordBatchOutcome(db, stopped, at(50)) };
     expect(outcomes.clean).toMatchObject({ status: "done", success: true, cause: null, touches: 0, incidents: 0, products: 1, productsWithLinks: 1, durationMs: 30 * 60_000 });
@@ -106,9 +85,9 @@ describe("M6-F3 acceptance test 1: a clean batch, one Try again, and an upscaler
 
     const summary = await reliabilitySummary(db, at(60));
     expect(summary.rates.map((r) => [r.days, r.successes, r.counted])).toEqual([[7, 1, 3], [30, 1, 3]]);
-    expect(summary.byKind).toEqual([{ kind: "stall", incidents: 1, repeats: 0, open: 0 }]);
-    expect(summary.recent[0]).toMatchObject({ kind: "stall", causeCode: "enlarge_wait", batchId: stopped, repeat: false });
-    expect(summary.recent[0]!.resolvedAt!.toISOString()).toBe(at(40).toISOString());
+    expect(summary.byKind).toEqual([{ kind: "chunk_gave_up", incidents: 1, repeats: 0, open: 0 }]);
+    expect(summary.recent[0]).toMatchObject({ kind: "chunk_gave_up", causeCode: "render", batchId: stopped, repeat: false });
+    expect(summary.recent[0]!.resolvedAt!.toISOString()).toBe(at(20).toISOString());
   });
 });
 
@@ -138,7 +117,7 @@ describe("M6-F3 acceptance test 2: the 7-day rate equals a hand count of catalog
 });
 
 describe("incidents", () => {
-  it("writes each failed batch and chunk once, already resolved, and a later stall of the same cause as a repeat", async () => {
+  it("writes each failed batch and chunk once, already resolved, a later one of the same cause as a repeat, and no stall", async () => {
     const failed = await batch({ status: "failed", startedAt: T0, updatedAt: at(30), error: "No progress for 2 hours. Start the batch again." });
     const gaveUp = await batch({ status: "rendering", startedAt: T0, updatedAt: at(55) });
     await chunk(gaveUp, { status: "failed", finishedAt: at(50), attempt: 3, error: "The photo service failed 3 times." });
@@ -150,40 +129,17 @@ describe("incidents", () => {
     expect(f!.resolved_at).not.toBeNull();
     expect(c).toMatchObject({ kind: "chunk_gave_up", cause_code: "render", cause: "The photo service failed 3 times." });
 
-    // Two stalls of one batch, apart: the second is a repeat of the first and opens only after the first resolved.
-    const slow = await batch({ status: "rendering", startedAt: T0, updatedAt: at(0) });
-    await syncIncidents(db, new Date(+at(0) + STALL_INCIDENT_MS));
-    // Work again at +20 (a chunk starts); a write to the batch row alone is not progress after Start (review 2 P1-R).
-    await chunk(slow, { status: "running", startedAt: at(20) });
-    await syncIncidents(db, at(21));
-    await syncIncidents(db, new Date(+at(20) + STALL_INCIDENT_MS + 60_000));
-    const stalls = await incidents(slow);
-    expect(stalls).toHaveLength(2);
-    expect(stalls[0]!.resolved_at).not.toBeNull();
-    expect(stalls[1]).toMatchObject({ cause_code: "no_progress", repeat_of: stalls[0]!.id, resolved_at: null });
-  });
+    // A second chunk of the same stage gives up later: a repeat of the first.
+    await chunk(gaveUp, { status: "failed", finishedAt: at(70), attempt: 3, index: 2 });
+    await syncIncidents(db, at(75));
+    const both = await incidents(gaveUp);
+    expect(both).toHaveLength(2);
+    expect(both[1]).toMatchObject({ kind: "chunk_gave_up", repeat_of: both[0]!.id });
 
-  it("raises no stall while a long finalize works: a live claim or a re-check part handed on (review P2-2)", async () => {
-    // Every chunk done at +0; the batch publishes while the finalize re-checks links for 40 minutes.
-    const claimed = await batch({ status: "publishing", startedAt: at(-60), updatedAt: at(0), counts: { finalizeClaimUntil: +at(45) } });
-    await chunk(claimed, { status: "done", startedAt: at(-30), finishedAt: at(0) });
-    const handedOn = await batch({ status: "publishing", startedAt: at(-60), updatedAt: at(0), counts: { finalizeEnqueuedAt: +at(35) } });
-    await chunk(handedOn, { status: "done", startedAt: at(-30), finishedAt: at(0) });
-    const quiet = await batch({ status: "publishing", startedAt: at(-60), updatedAt: at(0), counts: { finalizeClaimUntil: +at(20) } });
-    await chunk(quiet, { status: "done", startedAt: at(-30), finishedAt: at(0) });
-    await syncIncidents(db, at(40));
-    expect(await incidents(claimed)).toEqual([]);
-    expect(await incidents(handedOn)).toEqual([]);
-    // A finalize whose claim lapsed 20 minutes ago with nothing since is a stall.
-    expect(await incidents(quiet)).toMatchObject([{ kind: "stall", cause_code: "no_progress" }]);
-  });
-
-  it("gives a collecting batch 30 minutes before a stall", async () => {
-    const collecting = await batch({ status: "ingesting", startedAt: null, updatedAt: T0 });
-    await syncIncidents(db, new Date(+T0 + STALL_INCIDENT_MS + 60_000));
-    expect(await incidents(collecting)).toHaveLength(0);
-    await syncIncidents(db, new Date(+T0 + INGEST_STALL_INCIDENT_MS));
-    expect(await incidents(collecting)).toMatchObject([{ kind: "stall", cause_code: "ingest_stalled" }]);
+    // Stalls are not detected here any more (M6 decision S6-20, M1-S4b): a batch quiet for 2 hours opens nothing.
+    const quiet = await batch({ status: "rendering", startedAt: T0, updatedAt: at(0) });
+    await syncIncidents(db, at(120));
+    expect(await incidents(quiet)).toEqual([]);
   });
 
   it("opens an incident per ERROR invariant and batch while violated and resolves it on the first clean run", async () => {

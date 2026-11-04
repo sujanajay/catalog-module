@@ -36,11 +36,11 @@ afterEach(() => { resetUserDeps(); setCloudRunReadForTests(undefined); vi.unstub
 
 const render = async (page: Promise<ReactElement>) => renderToStaticMarkup(createElement(ViewerPreviewProvider, null, createElement(ToastProvider, null, await page)));
 
-/** Two done batches, one clean and one with a stall resolved after 20 minutes. */
+/** Two done batches, one clean and one with an ERROR check resolved after 20 minutes. */
 async function world() {
   const done = async (name: string, minutes: number) => (await db.insert(catalogBatches).values({ name, brandSlug: "uspa", brandName: "USPA", createdBy: "a@opptra.com", status: "done", startedAt: ago(minutes + 30), finishedAt: ago(minutes) }).returning())[0]!;
   const clean = await done("Clean drop", 100), slow = await done("Slow drop", 60);
-  await openIncident(db, { kind: "stall", severity: "warning", batchId: slow.id, causeCode: "enlarge_wait", cause: "No progress: photos are waiting for the enlargement service.", startedAt: ago(85), resolvedAt: ago(65), dedupeKey: `stall:${slow.id}:x` });
+  await openIncident(db, { kind: "invariant", severity: "error", batchId: slow.id, causeCode: "silent_outputs", cause: "Check silent_outputs found 2 problems.", startedAt: ago(85), resolvedAt: ago(65), dedupeKey: `invariant:silent_outputs:${slow.id}:x` });
   await recordBatchOutcome(db, clean.id, NOW);
   await recordBatchOutcome(db, slow.id, NOW);
   return { clean, slow };
@@ -53,8 +53,9 @@ describe("Ops reliability card (M6-F3-R5)", () => {
     expect(html).toContain("Reliability");
     expect(html).toContain("Last 7 days: 50% (1 of 2 batches), under the 99% target");
     expect(html).toContain("Last 30 days: 50% (1 of 2 batches)");
-    expect(html).toContain("<td>No progress</td><td>1</td><td>0</td><td>0</td>");
-    expect(html).toContain("No progress: photos are waiting for the enlargement service. (resolved after 20 min)");
+    expect(html).toContain("<td>Check found a problem</td><td>1</td><td>0</td><td>0</td>");
+    expect(html).not.toContain("No progress");
+    expect(html).toContain("Check silent_outputs found 2 problems. (resolved after 20 min)");
     expect(html).toContain(`href="/catalog/${slow.id}"`);
     expect(html).toContain("<td>30 min</td>");
   });
@@ -65,7 +66,7 @@ describe("Ops reliability card (M6-F3-R5)", () => {
     expect(res.status).toBe(200);
     const body = await res.json() as { rates: { days: number; successes: number; counted: number }[]; byKind: { kind: string; incidents: number }[] };
     expect(body.rates.map((r) => [r.days, r.successes, r.counted])).toEqual([[7, 1, 2], [30, 1, 2]]);
-    expect(body.byKind).toEqual([expect.objectContaining({ kind: "stall", incidents: 1 })]);
+    expect(body.byKind).toEqual([expect.objectContaining({ kind: "invariant", incidents: 1 })]);
     expect((await GET(new Request("http://localhost/api/catalog/ops/reliability?from=nope"))).status).toBe(400);
     expect((await GET(new Request(`http://localhost/api/catalog/ops/reliability?from=${NOW.toISOString()}&to=${ago(60).toISOString()}`))).status).toBe(400);
     role = "operator";

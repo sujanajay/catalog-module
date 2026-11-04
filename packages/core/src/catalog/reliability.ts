@@ -1,9 +1,10 @@
 // M6-S6 batch success tracking (docs/program/requirements/M6-reliability-cost.md M6-F3). The only writer of
 // catalog_batch_outcomes, catalog_incidents, catalog_batch_touches and catalog_revisions, and the reads of the Ops
 // reliability card.
-// - Incidents (F3-R2) are found by the sweep every 10 minutes (syncIncidents): a batch with no progress (a stall, the
-//   one incident with a resolution time), a failed batch, a chunk that gave up after its retries, an ERROR invariant.
-//   Writes are keyed (dedupe_key), so a repeated sweep writes nothing twice.
+// - Incidents (F3-R2) are found by the sweep every 10 minutes (syncIncidents): a failed batch, a chunk that gave up
+//   after its retries, an ERROR invariant (open until a clean run). Writes are keyed (dedupe_key), so a repeated sweep
+//   writes nothing twice. Stall and outage incidents are not here: they move to the M1-S4b outage slice, built on one
+//   health ledger (M6 decision S6-20).
 // - Touches (F3-R3) are written by the web API layer after an operator write that counts (TOUCH_ACTIONS) succeeded.
 // - Outcomes (F3-R1) are written at finalize and refreshed by the sweep for batches that ended in the last 24 hours,
 //   so a failed or cancelled batch, and an incident or touch that lands after finalize, are counted.
@@ -24,15 +25,8 @@ import {
   type IncidentSeverity,
   type TouchAction,
 } from "../db/schema";
-import { isBulkBatch } from "./pipeline/dispatch";
-import { ENLARGING_TASK } from "./pipeline/enlargement";
-import { CPU_UPSCALER_SUFFIX } from "./upscale";
 import type { InvariantResult } from "./invariants/run";
 
-/** A processing batch with no progress for this long has a stall incident (the M6 section 5 "taking longer" point). */
-export const STALL_INCIDENT_MS = 10 * 60_000;
-/** A collecting batch gets longer: grouping a large intake can run for minutes without a row moving (the re-send point). */
-export const INGEST_STALL_INCIDENT_MS = 30 * 60_000;
 /** A cancel this soon after start is a mistake, not a failure: recorded and left out of the rate (M6-F3 edge cases). */
 export const QUICK_CANCEL_MS = 10 * 60_000;
 /** How far back the sweep looks for failed batches and chunks, and for outcomes to refresh. */
@@ -45,8 +39,6 @@ export const SUCCESS_TARGET = 0.99;
 export const RATE_WINDOWS_DAYS = [7, 30] as const;
 /** How many recent batch outcomes the card lists, with their touches and incidents (M6-F3 acceptance test 1). */
 export const RECENT_OUTCOMES = 15;
-/** The batch statuses the stall check looks at (the sweep's SWEEPABLE_STATUSES). */
-export const STALL_STATUSES = ["ingesting", "matting", "rendering", "qa", "publishing"] as const;
 const DAY_MS = 86_400_000;
 const CAUSE_MAX = 500;
 
@@ -96,7 +88,6 @@ export async function resolveIncidents(db: Db, ids: readonly string[], now: Date
   return done.length;
 }
 
-export const stallKey = (batchId: string) => `stall:${batchId}`;
 export const batchFailedKey = (batchId: string, run: string) => `batch_failed:${batchId}:${run}`;
 /** Keyed by the finish time: a chunk retried after an attempt reset that gives up again is a second event. */
 export const chunkGaveUpKey = (chunkId: string, finishedAt: Date) => `chunk_gave_up:${chunkId}:${+finishedAt}`;
@@ -107,77 +98,6 @@ export function failedRun(batch: { startedAt: Date | null; counts: unknown }): s
   if (batch.startedAt) return "started";
   const run = (batch.counts as { ingestRun?: unknown } | null)?.ingestRun;
   return typeof run === "string" && run ? run : "intake";
-}
-
-const STALL_SENTENCES: Record<string, string> = {
-  enlarge_wait: "No progress: photos are waiting for the enlargement service.",
-  ingest_stalled: "No progress while collecting the files.",
-  no_progress: "No progress on any photo.",
-};
-
-/**
- * The open stall incidents of batches that moved again (or ended) are resolved; batches with none open get one.
- *
- * Progress is completed work, never a retry (review P1-1): the batch's start, its chunks' start and finish, the photo
- * progress stamp of a chunk that is not parked on an enlargement (enlarge.ts refreshLaneProgress stamps parked chunks on
- * every delivery, also one that fails because the upscaler is down), its enlargements asked for (a photo reached the
- * enlarge step) and settled, and its finalize
- * (a re-check part hands on with a new `finalizeEnqueuedAt`; a live finalize claim is progress now). The batch row's
- * `updated_at` counts only while collecting, where the intake writes are the only signal; after Start, writes such as
- * the progress counts move it without any work done (review 2 P1-R). A parked batch queued behind other batches'
- * enlargements that settle is waiting its turn, not stalled: the latest settled enlargement on the same lane (operator
- * or bulk, isBulkBatch) and the same upscaler service (CPU or GPU) as one of its waiting rows counts as its progress,
- * so a GPU outage is not hidden by CPU rows or the other lane moving (review 2 P2-A).
- */
-async function syncStalls(db: Db, now: Date): Promise<{ opened: number; resolved: number }> {
-  const statuses = sql.join(STALL_STATUSES.map((s) => sql`${s}`), sql`, `);
-  const ms = (key: string) => sql`CASE WHEN coalesce(b.counts->>${key}, '') ~ '^[0-9]+$' THEN (b.counts->>${key})::numeric END`;
-  const batches = rowsOf(await db.execute(sql`
-    SELECT b.id, b.status, b.is_test, b.name, b.counts,
-      -- No work signal at all (a row with no start, chunk or photo): its own updated_at, so it still stalls.
-      COALESCE(GREATEST(CASE WHEN b.status = 'ingesting' THEN b.updated_at END, b.started_at,
-        (SELECT max(GREATEST(c.started_at, c.finished_at,
-            CASE WHEN c.status = 'queued' AND c.task_name = ${ENLARGING_TASK} THEN NULL ELSE c.progress_at END))
-          FROM catalog_chunks AS c WHERE c.batch_id = b.id),
-        (SELECT max(GREATEST(e.created_at, CASE WHEN e.status IN ('done', 'failed') THEN e.updated_at END)) FROM catalog_enlargements AS e WHERE e.batch_id = b.id),
-        to_timestamp(${ms("finalizeEnqueuedAt")} / 1000.0)
-      ), b.updated_at) AS progress_at,
-      coalesce(${ms("finalizeClaimUntil")} > ${+now}, false) AS finalizing,
-      EXISTS (SELECT 1 FROM catalog_chunks AS c WHERE c.batch_id = b.id AND c.status = 'queued' AND c.task_name = ${ENLARGING_TASK}) AS parked
-    FROM catalog_batches AS b WHERE b.status IN (${statuses})`));
-  // Per batch and upscaler service (CPU ids end in "+cpu"): its latest settled row, and whether a row still waits.
-  const cpu = sql`(e.upscaler LIKE ${`%${CPU_UPSCALER_SUFFIX}`})`;
-  const services = rowsOf(await db.execute(sql`
-    SELECT e.batch_id, ${cpu} AS cpu, max(e.updated_at) FILTER (WHERE e.status IN ('done', 'failed')) AS settled_at,
-      bool_or(e.status NOT IN ('done', 'failed')) AS waiting
-    FROM catalog_enlargements AS e INNER JOIN catalog_batches AS b ON b.id = e.batch_id
-    WHERE b.status IN (${statuses}) GROUP BY 1, 2`));
-  type ClassFields = Parameters<typeof isBulkBatch>[0];
-  const bulk = new Map(batches.map((b) => [String(b.id), isBulkBatch({ isTest: b.is_test === true, name: String(b.name ?? ""), counts: (b.counts ?? null) as ClassFields["counts"] })]));
-  const laneOf = (batchId: string, isCpu: unknown) => `${bulk.get(batchId) ? "bulk" : "operator"}:${isCpu === true ? "cpu" : "gpu"}`;
-  const laneSettled = new Map<string, number>();
-  for (const s of services) {
-    const at = dateOf(s.settled_at ?? null), lane = laneOf(String(s.batch_id), s.cpu);
-    if (at && +at > (laneSettled.get(lane) ?? 0)) laneSettled.set(lane, +at);
-  }
-  const stalled = new Set<string>();
-  let opened = 0;
-  for (const b of batches) {
-    const id = String(b.id), ownProgress = dateOf(b.progress_at);
-    if (!ownProgress || b.finalizing === true) continue;
-    const parked = b.parked === true;
-    const lanes = parked ? services.filter((s) => String(s.batch_id) === id && s.waiting === true).map((s) => laneSettled.get(laneOf(id, s.cpu)) ?? 0) : [];
-    const progressAt = new Date(Math.max(+ownProgress, ...lanes));
-    const ingesting = b.status === "ingesting";
-    if (+now - +progressAt < (ingesting ? INGEST_STALL_INCIDENT_MS : STALL_INCIDENT_MS)) continue;
-    stalled.add(id);
-    const code = parked ? "enlarge_wait" : ingesting ? "ingest_stalled" : "no_progress";
-    if (await openIncident(db, { kind: "stall", severity: "warning", batchId: id, causeCode: code, cause: STALL_SENTENCES[code]!, startedAt: ownProgress, dedupeKey: stallKey(id), detail: { status: b.status } })) opened++;
-  }
-  const open = await db.select({ id: catalogIncidents.id, batchId: catalogIncidents.batchId }).from(catalogIncidents)
-    .where(and(eq(catalogIncidents.kind, "stall"), isNull(catalogIncidents.resolvedAt)));
-  const resolved = await resolveIncidents(db, open.filter((o) => !o.batchId || !stalled.has(o.batchId)).map((o) => o.id), now);
-  return { opened, resolved };
 }
 
 /** One open incident per ERROR check and batch while it is violated; resolved on the first run that finds it clean. */
@@ -222,13 +142,12 @@ async function recordFailures(db: Db, now: Date): Promise<number> {
 export interface IncidentSync { opened: number; resolved: number }
 
 /**
- * The sweep's incident pass (M6-F3-R2): stalls, failed batches and chunks, and (when the run's results are given) the
+ * The sweep's incident pass (M6-F3-R2): failed batches and chunks, and (when the run's results are given) the
  * ERROR invariants. Each part is independent; a part that throws is reported in `errors` and the rest still run.
  */
 export async function syncIncidents(db: Db, now: Date, options: { invariants?: readonly InvariantResult[] } = {}): Promise<IncidentSync & { errors: string[] }> {
   const out = { opened: 0, resolved: 0, errors: [] as string[] };
   const parts: [string, () => Promise<Partial<IncidentSync> | number>][] = [
-    ["stalls", () => syncStalls(db, now)],
     ["failures", () => recordFailures(db, now)],
     ...(options.invariants ? [["invariants", () => syncInvariants(db, options.invariants!, now)] as [string, () => Promise<IncidentSync>]] : []),
   ];

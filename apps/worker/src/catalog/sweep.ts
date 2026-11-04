@@ -151,7 +151,7 @@ export async function handleSweep(deps: SweepDeps, _body: Record<string, unknown
     log("ERROR", "batch failed", { batchId: s.batchId, reason: SWEEP_ERROR, cause: "swept" });
   }
 
-  // M6-S6 (M6-F3): incidents (stalls, failed batches and chunks, ERROR invariants) and the outcomes of batches that ended
+  // M6-S6 (M6-F3): incidents (failed batches and chunks, ERROR invariants) and the outcomes of batches that ended
   // in the last 24 hours, after this run's own failures so they are counted. Neither ever stops the sweep.
   await recordReliability(deps.db, now, invariants);
 

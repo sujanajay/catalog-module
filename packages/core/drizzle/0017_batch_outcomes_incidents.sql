@@ -48,7 +48,7 @@ CREATE TABLE IF NOT EXISTS "catalog_incidents" (
 	"dedupe_key" text NOT NULL,
 	"detail" jsonb,
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
-	CONSTRAINT "catalog_incidents_kind_check" CHECK ("catalog_incidents"."kind" IN ('stall', 'batch_failed', 'chunk_gave_up', 'invariant', 'http_5xx', 'deploy_refused', 'contamination', 'alert')),
+	CONSTRAINT "catalog_incidents_kind_check" CHECK ("catalog_incidents"."kind" IN ('batch_failed', 'chunk_gave_up', 'invariant', 'http_5xx', 'deploy_refused', 'contamination', 'alert')),
 	CONSTRAINT "catalog_incidents_severity_check" CHECK ("catalog_incidents"."severity" IN ('warning', 'error'))
 );
 --> statement-breakpoint
