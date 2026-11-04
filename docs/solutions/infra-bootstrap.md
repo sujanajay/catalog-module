@@ -85,6 +85,27 @@ an org policy or BigQuery rights in another project).
   Both can therefore read every secret in the project, including `openrouter-api-key` and the earlier
   app's secrets (the worker's `openrouter-api-key` binding is SKIP for that reason). To narrow it, an
   admin with Secret Manager IAM rights grants the role per secret and removes the project binding.
+- **Narrowing (owner approved 2026-11-04).** `bash infra/narrow-secret-access.sh --dry-run` prints the plan;
+  without `--dry-run` it adds per-secret `secretAccessor` for exactly what the two accounts need (the pairs in
+  `infra/secret-access.manifest` plus every secret a Cloud Run service or job running as them mounts today, in
+  any region), verifies each binding,
+  and only then removes `catalog-web@` and `catalog-worker@` from the project-level binding. It refuses
+  the removal when any needed binding is missing or unreadable. The ila-*, work-os-agent and other
+  principals' bindings are left alone. On 2026-11-04 the operator account had
+  `secretmanager.secrets.setIamPolicy` on the catalog secrets (checked with testIamPermissions), and
+  no per-secret binding existed yet for either account. Run it with a deploy approval, not by itself, at a
+  quiet time (it waits 180 s for IAM to propagate; a cold start in that gap could fail).
+- **A new secret mount needs a manifest line first.** After the narrowing nothing grants project-wide secret
+  access, so a new `--set-secrets` mount (for example `PHOTOROOM_API_KEY=photoroom-api-key:latest` on the
+  worker for M3-S5) needs a line `worker photoroom-api-key required` in `infra/secret-access.manifest`, the
+  secret created in Secret Manager, and `infra/bootstrap.sh` run to add the binding. `infra/deploy.sh`
+  refuses a mount with no line before it builds, and `infra/tests/secret-access-manifest.test.mjs` fails CI
+  on one (and on any infra script that grants a Secret Manager role at project level).
+- **Rollback of the narrowing.** The sign is an instance start or job run failing with "Permission denied on
+  secret" after the change. Give the account its project-level grant back (the per-secret bindings can stay):
+  `gcloud projects add-iam-policy-binding image-links-agent --member=serviceAccount:catalog-web@image-links-agent.iam.gserviceaccount.com --role=roles/secretmanager.secretAccessor --condition=None`
+  and the same line with `catalog-worker@` for the worker. Then add the missing pair to the manifest, run
+  `infra/bootstrap.sh`, and run the narrowing again.
 - Bucket bindings are never widened to project level: that would give `catalog-web@` write access to
   the public bucket. A denial prints the exact command and the script exits 2.
 - `catalog-worker@` gets `roles/storage.objectUser` on the public bucket (overwrite and scoped delete
@@ -136,6 +157,23 @@ an org policy or BigQuery rights in another project).
   reads the mirror. It also grants `catalog-worker@` `roles/bigquery.jobUser` on `image-links-agent`
   (project level) and `roles/bigquery.dataViewer` on the two mirror datasets (GRANT DCL). It prints the
   source and copy row counts and exits 1 if they differ.
+<<<<<<< ours
+- **M0 graph export (M0-S4, 2026-11-04).** `bash infra/catalog-graph-export.sh` (operator, once) creates the BigQuery
+  dataset `image-links-agent.catalog_os` in asia-south1, grants catalog-worker@ `roles/bigquery.dataEditor` on it (GRANT
+  statement) and `roles/bigquery.jobUser` plus `roles/run.invoker` on the project, the Cloud Run job `catalog-graph-export`
+  (copied from the live catalog-worker like `catalog-test-jobs.sh` does) and the Cloud Scheduler job at 02:30 UTC that
+  calls the Run Admin API `jobs:run` with an OAuth token, then runs the first export and waits (until the job has one
+  successful execution; `GRAPH_EXPORT_SKIP_FIRST_RUN=1` skips it). `DATA_TEAM_MEMBER=group:...` adds the data team's read access.
+  `deploy.sh` step 8 runs `... job`, which only moves an existing job to the new worker image. Run once by hand:
+  `bash infra/catalog-graph-export.sh run`.
+>>>>>>> theirs
+- **M0 graph sync (M0-S2, 2026-11-04).** The mirror also makes key-only copies (`SELECT DISTINCT` of the listed
+  columns; no order, customer or money column, only `ordered_date` for the sales window) of `gcc_marketing.sku_option`,
+  `fact_gcc.unified_sales_tertiary_v2`, `dimensions.sku_master_amazon_ae`/`_sa`, `dimensions.sku_master_noon` and
+  `gcc_channel_reports.product_list_trendyol_3p_uae`/`_ksa`, under the same names, so the graph sync SQL in
+  `packages/core/src/graph/key-sync.ts` reads them unchanged. Each copy and its row-count check read the source as of
+  one snapshot time (`FOR SYSTEM_TIME AS OF`), so a sales load during the run cannot cause a false mismatch. `infra/bootstrap.sh` lists `gcc_marketing`, `dimensions` and
+  `gcc_channel_reports` for the warehouse grant too.
 - **Refresh.** `bash infra/bq-mirror.sh`. Datasets and IAM print SKIP on a re-run; tables and UDFs are
   replaced every run (UPDATE).
 - **Limitation.** The worker's data is only as fresh as the last run of `bq-mirror.sh`; the nightly

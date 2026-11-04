@@ -368,6 +368,21 @@ table {
   border: 1px solid var(--line);
 }
 
+/* ---- status words (UX section 4): icon, colour and word; components/ui.tsx StatusWord ---- */
+.status-word {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--fg);
+}
+.status-word svg { flex: none; }
+.status-word.run { color: var(--run); }
+.status-word.ok { color: var(--ok); }
+.status-word.warn { color: var(--warn); }
+.status-word.bad { color: var(--bad); }
+
 /* ---- modal and the People modal ---- */
 .modal {
   position: fixed;

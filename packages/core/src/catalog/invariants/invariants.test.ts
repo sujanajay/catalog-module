@@ -1,13 +1,13 @@
 // Spec 17 3.1.3: every invariant with a PGlite fixture that violates it and one that satisfies it, the
 // log line contract, the batch scope and the counts kept on catalog_batches.counts.
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { eq } from "drizzle-orm";
+import { eq, isNull } from "drizzle-orm";
 import type { Db } from "../../db/client";
 import { createTestDb } from "../../db/testing";
-import { catalogBatches, catalogBatchProducts, catalogChunks, catalogEnlargements, catalogOutputs, catalogProducts, catalogSourceImages } from "../../db/schema";
+import { catalogBatches, catalogBatchProducts, catalogChunks, catalogEnlargements, catalogGraphExportRuns, catalogOutputs, catalogProducts, catalogSourceImages } from "../../db/schema";
 import { ENLARGING_TASK } from "../pipeline/enlargement";
 import type { BatchStatus, ChangeKind, OutputStatus } from "../types";
-import { CHECKS } from "./checks";
+import { CHECKS, EXPORT_STALE_HOURS } from "./checks";
 import { BATCH_LIST_SIZE, runInvariants } from "./run";
 import { classifyOutputs } from "../load/classify";
 
@@ -45,9 +45,9 @@ async function chunk(batchId: string, v: { status: "queued" | "running" | "done"
 const run = (batchId?: string) => runInvariants(db, vi.fn(), NOW, batchId ? { batchId } : {});
 
 describe("invariant checks", () => {
-  it("the table has the five checks of spec 17, spec 18's enlargement check and the lifecycle's three, with their severities", () => {
+  it("the table has the five checks of spec 17, spec 18's enlargement check, the lifecycle's three and M0-S4's export freshness, with their severities", () => {
     expect(CHECKS.map(c => [c.id, c.severity])).toEqual([["silent_outputs", "ERROR"], ["held_without_reason", "ERROR"], ["stale_running_chunk", "WARNING"], ["slow_chunk", "WARNING"], ["done_batch_with_open_chunk", "ERROR"], ["enlarged_without_upscaler", "ERROR"],
-      ["plain_accepted_outputs", "INFO"], ["parked_chunk_quiet", "WARNING"], ["enlargement_waiting_long", "INFO"]]);
+      ["plain_accepted_outputs", "INFO"], ["parked_chunk_quiet", "WARNING"], ["enlargement_waiting_long", "INFO"], ["graph_export_stale", "WARNING"]]);
     for (const c of CHECKS) expect(c.sentence.length).toBeGreaterThan(20);
   });
 
@@ -218,6 +218,32 @@ describe("invariant checks", () => {
     const r = await run();
     expect(r.counts.enlarged_without_upscaler).toBe(1);
     expect(r.results.find(x => x.id === "enlarged_without_upscaler")!.sample).toEqual([plain.id]);
+  });
+
+  it("M0-S4: graph_export_stale fires when no export finished cleanly in the last 26 hours, once a run is older than that; never before the first run", async () => {
+    await db.delete(catalogGraphExportRuns);
+    const h = (hours: number) => ago(hours * 60);
+    const stale = async () => (await run()).counts.graph_export_stale;
+    expect(EXPORT_STALE_HOURS).toBe(26);
+    // No export has ever run (the job is not set up yet): nothing to report.
+    expect(await stale()).toBe(0);
+    // A first run that is still going, or failed, within the window: not stale yet.
+    const [first] = await db.insert(catalogGraphExportRuns).values({ startedAt: h(2), error: "BigQuery said no" }).returning();
+    expect(await stale()).toBe(0);
+    // Its window has passed with no clean finish: stale, reported on the latest run.
+    await db.update(catalogGraphExportRuns).set({ startedAt: h(27) });
+    expect(await stale()).toBe(1);
+    // Not a batch's problem: the log line names no batch id (review P3-2).
+    expect((await run()).results.find((x) => x.id === "graph_export_stale")!.batches).toEqual([{ batchId: null, test: false, violations: 1 }]);
+    // A clean run 25 hours ago keeps it fresh (a daily run plus its own time).
+    await db.insert(catalogGraphExportRuns).values({ startedAt: h(25.2), finishedAt: h(25) });
+    expect(await stale()).toBe(0);
+    // That run is now 27 hours old and the newer run failed: stale again, whichever run is latest.
+    await db.update(catalogGraphExportRuns).set({ startedAt: h(27.2), finishedAt: h(27) }).where(isNull(catalogGraphExportRuns.error));
+    await db.delete(catalogGraphExportRuns).where(eq(catalogGraphExportRuns.id, first!.id));
+    await db.insert(catalogGraphExportRuns).values({ startedAt: h(3), error: "BigQuery said no" });
+    expect(await stale()).toBe(1);
+    await db.delete(catalogGraphExportRuns);
   });
 });
 

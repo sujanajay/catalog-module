@@ -81,8 +81,6 @@ export const HOW_THIS_WORKS_DRAFT = "This batch has not started. Continue settin
 export function notStartedText(photos: number, products: number): string {
   return `This batch has not started. ${count(photos)} ${plural(photos, "photo", "photos")} found for ${count(products)} ${plural(products, "product", "products")}; nothing has been made yet.`;
 }
-/** The batch header's time for a batch that has not started ("started" would be false). */
-export const createdText = (time: string, email: string) => `created ${time} by ${email}`;
 /** The brand page when no product is shown: the query is named only when there is one. */
 export function brandEmptyText(brand: string, query: string): string {
   const q = query.trim();

@@ -11,7 +11,7 @@ export type AutoDecideSnapshot = NonNullable<BatchOptions["autoDecide"]>;
 export type AutoDecideRule = AutoDecideSnapshot["rules"][number];
 
 /**
- * The M1-F3-R1 defaults (and migration 0013's seed rows). Deliver: our own defect after the repair loop, a busy
+ * The M1-F3-R1 defaults (and migration 0014's seed rows). Deliver: our own defect after the repair loop, a busy
  * background, an image 1 problem, every photo of a channel with a problem, no verdict (judge down or capped), an encoder
  * fault, a failed enlargement. Drop: a corrupt source, a different item (product truth), a collage (several photos in
  * one is not a product photo for a marketplace; integration decision D7).

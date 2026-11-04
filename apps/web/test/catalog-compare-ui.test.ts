@@ -34,7 +34,7 @@ describe("Compare images tab", () => {
     expect(html).toContain("name=\"tab\" value=\"compare\"");
     expect(html).toContain("Page 1 of 2");
     expect(html).toContain("href=\"?tab=compare&amp;cpage=1\"");
-    expect(html).not.toMatch(/\u2014/);
+    expect(html).not.toContain(String.fromCharCode(0x2014));
   });
   it("says a draft with photos has not started, in one line and without a table (spec 14a F9)", () => {
     const line = notStartedText(1240, 312);
