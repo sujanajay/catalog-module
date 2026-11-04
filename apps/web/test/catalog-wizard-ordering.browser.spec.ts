@@ -11,7 +11,7 @@ let server: Server, origin: string;
 const detected = { identifierMode: { detected: "filename", options: ["filename"], examples: [] }, grouping: { perRoot: false, sentence: null }, precedence: { shown: false, default: "uploads_then_links" }, sheets: [], totalProducts: 1, formats: { sentence: "One JPEG" }, unreadable: [], googleAccess: [] };
 const preview = { ready: true, previewAt: "2026-10-19T00:00:00Z", counts: { products: 1, sources: 1, channels: 1, outputs: 1 }, collected: 1, collectTotal: 1, warnings: [], groups: [], totalRows: 0, overwrite: { newProducts: 1, existingProducts: [], renameHints: [], sameProductPairs: [], sameBatches: [], duplicatePhotos: [] }, busy: [] };
 /** GET /api/catalog/batches/<id>: a draft with one pasted input, collected (previewReady) or not, with no countdown. */
-const polledBatch = (previewReady: boolean, startedAt: string | null = null) => ({ batch: { status: startedAt ? "matting" : "draft", startedAt, options: { autoStart: false } }, counts: { previewReady, failReason: null, collectTotal: 1, autoStartAt: null }, state: null, uploads: [{ id: "u1", kind: "url_list", name: "Pasted links", relativePath: null, sizeBytes: null, status: "collected", error: null }] });
+const polledBatch = (previewReady: boolean, startedAt: string | null = null, autoStartAt: string | null = null) => ({ batch: { status: startedAt ? "matting" : "draft", startedAt, options: { autoStart: !!autoStartAt } }, counts: { previewReady, failReason: null, collectTotal: 1, autoStartAt }, state: null, uploads: [{ id: "u1", kind: "url_list", name: "Pasted links", relativePath: null, sizeBytes: null, status: "collected", error: null }] });
 const answer = (route: Route, json: unknown, status = 200) => route.fulfill({ status, contentType: "application/json", body: JSON.stringify(json) });
 const releases: (() => void)[] = [];
 test.afterEach(() => { releases.splice(0).forEach(release => release()); });
@@ -29,7 +29,7 @@ async function paste(page: Page, value: string) {
 }
 
 /** The one-page New batch (UX3) with mocked routes; `brand` preselects it as /catalog/new?brand= does. */
-async function setup(page: Page, { brand = "anta", previewReady = false, startedAt = null }: { brand?: string; previewReady?: boolean; startedAt?: string | null } = {}) {
+async function setup(page: Page, { brand = "anta", previewReady = false, startedAt = null, autoStartAt }: { brand?: string; previewReady?: boolean; startedAt?: string | null; autoStartAt?: () => string | null } = {}) {
   await page.route("**/api/catalog/**", route => {
     const url = new URL(route.request().url());
     const method = route.request().method();
@@ -39,7 +39,7 @@ async function setup(page: Page, { brand = "anta", previewReady = false, started
     if (url.pathname.endsWith("/links")) return answer(route, { kind: "url_list", access: "ok", summary: "Added", count: 1 });
     if (url.pathname.endsWith("/ingest")) return answer(route, { ok: true });
     if (url.pathname === "/api/catalog/batches") return answer(route, { id: "batch" });
-    if (url.pathname === "/api/catalog/batches/batch" && method === "GET") return answer(route, polledBatch(previewReady, startedAt));
+    if (url.pathname === "/api/catalog/batches/batch" && method === "GET") return answer(route, polledBatch(previewReady, startedAt, autoStartAt ? autoStartAt() : null));
     return answer(route, { ok: true });
   });
   await page.goto(brand ? `${origin}/?brand=${brand}` : origin);
@@ -173,4 +173,21 @@ test("M1 D15: the brand can be changed on a draft before Start; the channels fol
   await expect.poll(() => sent).toEqual([{ brandSlug: "uspa" }]);
   await expect(page.getByText("Brand:")).toContainText("USPA");
   await expect(page.getByRole("region", { name: "Where it goes" })).toContainText("Amazon");
+});
+
+test("review 2: opening Change brand holds the countdown on the server first, and choosing a brand turns it back on", async ({ page }) => {
+  // The server's countdown: 60 s away until hold-start clears it.
+  let countdown: string | null = new Date(Date.now() + 60_000).toISOString();
+  const calls: string[] = [];
+  await setup(page, { previewReady: true, autoStartAt: () => countdown });
+  await page.route("**/hold-start", async route => { calls.push("hold-start"); countdown = null; await answer(route, { id: "batch", status: "draft" }); });
+  await page.route("**/brand", async route => { calls.push(`brand ${JSON.stringify(route.request().postDataJSON())}`); await answer(route, { brandSlug: "uspa", brandName: "USPA", channels: ["amazon"], channelSource: "slice", collecting: true }); });
+  await paste(page, "https://example.test/first.jpg");
+  await expect(page.getByText(/^Starting in \d+ s\./)).toBeVisible({ timeout: 10_000 });
+  await page.getByRole("button", { name: "Change brand" }).click();
+  await expect(page.getByLabel("Which brand is this?")).toBeVisible();
+  expect(calls).toEqual(["hold-start"]);
+  await expect(page.getByText(/^Starting in/)).toHaveCount(0);
+  await page.getByLabel("Which brand is this?").selectOption("uspa");
+  await expect.poll(() => calls).toEqual(["hold-start", 'brand {"brandSlug":"uspa","autoStart":true}']);
 });

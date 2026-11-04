@@ -83,6 +83,8 @@ export default function CatalogWizard({ brands, shareEmail, supabasePaste = fals
   const [channelSource, setChannelSource] = useState<Defaults["channelSource"]>(null);
   const [changingChannels, setChangingChannels] = useState(false);
   const [changingBrand, setChangingBrand] = useState(false);
+  /** Auto-start was on when the brand list opened (and was held for it). */
+  const resumeAuto = useRef(false);
   const [uploadsBusy, setUploadsBusy] = useState(false);
   const [linksBusy, setLinksBusy] = useState(false);
   const [hasInputs, setHasInputs] = useState(() => !!initialBatch?.uploads.some((u) => u.status !== "removed"));
@@ -206,12 +208,32 @@ export default function CatalogWizard({ brands, shareEmail, supabasePaste = fals
   }, [autoStartAt]);
 
   /** M1 D15: a different brand before Start: its default channels, and the files grouped again under it. */
-  async function changeBrand(slug: string) {
-    if (!id || !slug || slug === brandSlug) { setChangingBrand(false); return; }
+  /**
+   * Opening the brand list holds the countdown first (on the server, as Wait does), so the batch cannot start on the
+   * old brand while the operator looks for the right one. Choosing a brand, the same one included, turns it back on.
+   */
+  async function openBrandPicker() {
+    if (!id) return;
+    const auto = polled ? polled.batch.options.autoStart === true : true;
     setWorking(true); setError("");
     try {
-      const next = await wizardApi<Defaults & { collecting: boolean }>(batchUrl(id, "/brand"), "POST", { brandSlug: slug });
-      setBrandSlug(next.brandSlug!); setChannels(next.channels); setChannelSource(next.channelSource); setChangingBrand(false);
+      if (auto) {
+        await wizardApi(batchUrl(id, "/hold-start"), "POST");
+        pollRequest.current++;
+        setPolled((p) => p ? { ...p, batch: { ...p.batch, options: { ...p.batch.options, autoStart: false } }, counts: { ...p.counts, autoStartAt: null } } : p);
+      }
+      resumeAuto.current = auto;
+      setChangingBrand(true);
+    } catch (err) { setError(err instanceof Error ? err.message : "This did not finish. Try again."); }
+    finally { setWorking(false); }
+  }
+  async function changeBrand(slug: string) {
+    if (!id || !slug) return;
+    setWorking(true); setError("");
+    try {
+      // The same brand is sent too: it turns auto-start back on, and retries a hand-off that failed.
+      const next = await wizardApi<Defaults & { collecting: boolean }>(batchUrl(id, "/brand"), "POST", { brandSlug: slug, ...(resumeAuto.current ? { autoStart: true } : {}) });
+      setBrandSlug(next.brandSlug!); setChannels(next.channels); if (next.channelSource) setChannelSource(next.channelSource); setChangingBrand(false);
       pollRequest.current++; setPreview(null);
       setPolled((p) => p ? { ...p, counts: { ...p.counts, previewReady: !next.collecting && p.counts.previewReady, autoStartAt: null } } : p);
     } catch (err) { setError(err instanceof Error ? err.message : "This did not finish. Try again."); }
@@ -264,7 +286,7 @@ export default function CatalogWizard({ brands, shareEmail, supabasePaste = fals
     <section className="card stack">
       <ShareBox email={shareEmail}/>
       {(askBrand && !id) || changingBrand ? <div><label className="f" htmlFor="brand">{BRAND_QUESTION}</label><select id="brand" value={changingBrand ? "" : brandSlug} disabled={working} onChange={(e) => changingBrand ? void changeBrand(e.target.value) : chooseBrand(e.target.value)}><option value="">Choose a brand</option>{(["softline", "hardline"] as const).map((line) => <optgroup key={line} label={line === "softline" ? "Softline" : "Hardline"}>{brands.filter((b) => b.line === line).map((b) => <option key={b.slug} value={b.slug}>{b.name}</option>)}</optgroup>)}</select><p className="help">Brand not in the list? Email <a href="mailto:sujan@opptra.com">sujan@opptra.com</a>.</p></div> : null}
-      {brandName && (id || brandLocked) && !changingBrand ? <p>Brand: <b>{brandName}</b>{id && status === "draft" && !collecting ? <> <button type="button" className="btn ghost sm" disabled={working} onClick={() => setChangingBrand(true)}>Change brand</button></> : null}</p> : null}
+      {brandName && (id || brandLocked) && !changingBrand ? <p>Brand: <b>{brandName}</b>{id && status === "draft" && !collecting ? <> <button type="button" className="btn ghost sm" disabled={working} onClick={() => void openBrandPicker()}>Change brand</button></> : null}</p> : null}
       <Uploader ensureBatch={ensureBatch} onBusy={setUploadsBusy} onAdded={onAdded} onRows={setLocal}/>
       <PasteBox ensureBatch={() => ensureBatch()} onBusy={setLinksBusy} onAdded={onAdded} removed={pasteRemoved} supabase={supabasePaste}/>
       {fixReason ? <p role="alert" className="fix-reason">{fixReason}</p> : null}

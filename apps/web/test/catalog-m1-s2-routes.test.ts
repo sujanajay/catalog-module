@@ -162,3 +162,36 @@ describe("changing the brand before Start (M1 D15)", () => {
     expect((await batchOf(realId)).brandSlug).toBe("other-brand");
   });
 });
+
+describe("brand change recovery and the held countdown (M1 D15, review 2)", () => {
+  const change = (id: string, value: unknown) => brandChange(request(value), ctx(id));
+  it("a failed hand-off after a brand change is retried by picking the brand again, never stuck", async () => {
+    const { body } = await newBatch({ autoStart: true });
+    await db.insert(catalogUploads).values({ batchId: body.id, kind: "image", name: "a.jpg", relativePath: "a.jpg", status: "collected" });
+    vi.mocked(enqueueTask).mockRejectedValueOnce(new Error("queue down"));
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    const failed = await change(body.id, { brandSlug: "other-brand", autoStart: true });
+    error.mockRestore();
+    expect(failed.status).toBe(503);
+    expect((await failed.json() as { error: string }).error).toBe("We could not sort your files under this brand yet. Choose the brand again to try once more.");
+    expect(await batchOf(body.id)).toMatchObject({ status: "draft", brandSlug: "other-brand", counts: { previewReady: false } });
+    // The same brand again hands the files over.
+    const retried = await change(body.id, { brandSlug: "other-brand", autoStart: true });
+    expect(retried.status).toBe(200);
+    expect(await retried.json()).toMatchObject({ brandSlug: "other-brand", collecting: true });
+    expect((await batchOf(body.id)).status).toBe("ingesting");
+  });
+
+  it("autoStart: true after the list held the countdown turns it back on and arms a ready draft again", async () => {
+    const { body } = await newBatch({ autoStart: true });
+    await db.update(catalogBatches).set({ counts: { ...(await batchOf(body.id)).counts, previewReady: true } }).where(eq(catalogBatches.id, body.id));
+    expect((await holdStart(request(), ctx(body.id))).status).toBe(200);
+    expect((await batchOf(body.id)).options.autoStart).toBe(false);
+    const r = await change(body.id, { brandSlug: "test-brand", autoStart: true });
+    expect(r.status).toBe(200);
+    const batch = await batchOf(body.id);
+    expect(batch.options.autoStart).toBe(true);
+    expect(typeof batch.counts.autoStartAt).toBe("string");
+    expect((await change(body.id, { brandSlug: "test-brand", autoStart: "yes" })).status).toBe(400);
+  });
+});
