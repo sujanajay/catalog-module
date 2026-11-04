@@ -8,6 +8,7 @@ import { enqueueTask } from "@catalog/core/tasks";
 import { chunkImages, dispatchChunks, recoverBatchChunks } from "@catalog/core/catalog/pipeline/dispatch";
 import { startedBatchOptions } from "@catalog/core/catalog/pipeline/enlargement";
 import { takeSettingsSnapshot } from "@catalog/core/settings/store";
+import { autoDecideSnapshot } from "@catalog/core/catalog/auto-decide";
 import { log } from "@catalog/core/log";
 import { db } from "../db";
 import { badRequest, HttpError } from "../errors";
@@ -68,7 +69,9 @@ export async function startBatch(id: string, value: unknown, actor: string) {
     // M12-S1: the settings as they are now stay with the batch to the end; a change applies from the next batch.
     const settings = await takeSettingsSnapshot(tx, { batchId: id, by: actor });
     // Spec 18: a batch started with the upscaler on is made with the enlargement stage (the invariant's scope).
-    await tx.update(catalogBatches).set({status:"matting",startedAt:new Date(),updatedAt:new Date(),settingsSnapshotId:settings.id,options:startedBatchOptions(current.options,process.env,settings),counts:{...current.counts,products:products.length,sources:sources.length,outputs:sources.length*batch.channels.length,newProducts:preview.overwrite.newProducts,existingProducts:preview.overwrite.existingProducts.length,shotsToRemove:preview.overwrite.existingProducts.reduce((n,p)=>n+p.shotsToRemove.length,0)}}).where(eq(catalogBatches.id,id));
+    // M1-F3: the auto-decide rules as they are now stay with the batch; a later change applies to the next batch only.
+    const autoDecide = await autoDecideSnapshot(tx as unknown as ReturnType<typeof db>);
+    await tx.update(catalogBatches).set({status:"matting",startedAt:new Date(),updatedAt:new Date(),settingsSnapshotId:settings.id,options:{...startedBatchOptions(current.options,process.env,settings),autoDecide},counts:{...current.counts,products:products.length,sources:sources.length,outputs:sources.length*batch.channels.length,newProducts:preview.overwrite.newProducts,existingProducts:preview.overwrite.existingProducts.length,shotsToRemove:preview.overwrite.existingProducts.reduce((n,p)=>n+p.shotsToRemove.length,0)}}).where(eq(catalogBatches.id,id));
     return rows;
   });
   // Spec 15 E5: only the batch's window of chunks is queued now; each finished chunk queues the next.

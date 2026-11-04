@@ -9,6 +9,7 @@ import { enlargementOptionFromEnv } from "@catalog/core/catalog/pipeline/enlarge
 import { changeSetting, loadSettingsSnapshot } from "@catalog/core/settings/store";
 import { settingFrom } from "@catalog/core/settings/snapshot";
 import { DEFAULT_OWNERS, UPSCALE_MIN_SCALE_KEY } from "@catalog/core/settings/registry";
+import { autoDecideOf, autoDecideSnapshot } from "@catalog/core/catalog/auto-decide";
 import { startLoadBatch } from "./load-start";
 
 let db: Db, close: () => Promise<void>;
@@ -42,6 +43,14 @@ describe("catalog-load Start", () => {
     expect(after.counts).toMatchObject({ products: 2, sources: 4, outputs: 8 });
     expect(started).toEqual({ chunks: (await db.select().from(catalogChunks).where(eq(catalogChunks.batchId, batch.id))).length, sources: 4 });
     expect(enqueue).toHaveBeenCalled();
+  });
+
+  it("copies the auto-decide rules into the batch as the web's Start does (M1-S3), so a load batch never waits for a person", async () => {
+    const batch = await draftBatch("load-auto");
+    await startLoadBatch(db, batch.id, { enqueue: (async () => "task") as never, env: {} as NodeJS.ProcessEnv });
+    const options = (await read(batch.id)).options;
+    expect(autoDecideOf(options)).toEqual(await autoDecideSnapshot(db));
+    expect(options.autoDecide!.rules.length).toBeGreaterThan(0);
   });
 
   it("leaves enlargement out when the upscaler is off (the rollback switch), as the web's Start does", async () => {

@@ -41,7 +41,10 @@ const TABLES = [
   // 0010_taxonomy.sql (M2-S1 taxonomy store)
   "catalog_taxonomy_nodes", "catalog_attribute_defs", "catalog_shot_roles", "catalog_taxonomy_changes",
   "vendor_routes", "vendor_route_changes", // 0011_vendor_routes.sql (M7-S2)
-  "catalog_setting_versions", "catalog_settings_snapshots", // 0014_settings_store.sql (M12-S1)
+  "catalog_key_conflicts", // 0013_graph_key_sync.sql (M0-S2)
+  "catalog_auto_decide_rules", // 0014_auto_decide_rules.sql (M1-S3)
+  "catalog_improvements", // 0015_improvements.sql (M1-S4)
+  "catalog_setting_versions", "catalog_settings_snapshots", // 0016_settings_store.sql (M12-S1)
 ];
 
 const INDEXES = [
@@ -56,6 +59,9 @@ const INDEXES = [
   "catalog_cost_events_batch_id_idx", "catalog_cost_events_brand_slug_at_idx", "catalog_cost_events_output_id_idx",
   "catalog_cost_events_at_idx",
   "vendor_routes_capability_adapter_model_uq", "vendor_routes_capability_rank_idx", "vendor_route_changes_route_id_at_idx",
+  "catalog_auto_decide_rules_cause_channel_uq",
+  "catalog_improvements_batch_photo_uq",
+  "catalog_outputs_provisional_plain_idx",
   "catalog_setting_versions_org_key_scope_version_uq", "catalog_settings_snapshots_batch_id_idx",
 ];
 

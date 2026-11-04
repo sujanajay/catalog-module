@@ -10,6 +10,7 @@ import { chunkImages, dispatchChunks } from "@catalog/core/catalog/pipeline/disp
 import { startedBatchOptions } from "@catalog/core/catalog/pipeline/enlargement";
 import { takeSettingsSnapshot } from "@catalog/core/settings/store";
 import { enqueueTask } from "@catalog/core/tasks";
+import { autoDecideSnapshot } from "@catalog/core/catalog/auto-decide";
 
 export interface LoadStartDeps { enqueue?: typeof enqueueTask; env?: NodeJS.ProcessEnv }
 
@@ -31,7 +32,9 @@ export async function startLoadBatch(db: Db, batchId: string, deps: LoadStartDep
     // M12-S1: the batch's settings snapshot, taken as the web's Start takes it.
     const settings = await takeSettingsSnapshot(tx as unknown as Db, { batchId, by: "catalog-load" });
     // Spec 18: pinned exactly as the web's Start pins it, so a load batch has the enlargement stage when the upscaler is on.
-    await tx.update(catalogBatches).set({ status: "matting", startedAt: new Date(), updatedAt: new Date(), settingsSnapshotId: settings.id, options: startedBatchOptions(batch.options, deps.env, settings), counts: { ...batch.counts, products: productIds.length, sources: sources.length, outputs: sources.length * batch.channels.length } }).where(eq(catalogBatches.id, batchId));
+    // M1-S3: the auto-decide rules are copied in the same way, so a load batch decides its holds by itself too.
+    const autoDecide = await autoDecideSnapshot(tx as unknown as Db);
+    await tx.update(catalogBatches).set({ status: "matting", startedAt: new Date(), updatedAt: new Date(), settingsSnapshotId: settings.id, options: { ...startedBatchOptions(batch.options, deps.env, settings), autoDecide }, counts: { ...batch.counts, products: productIds.length, sources: sources.length, outputs: sources.length * batch.channels.length } }).where(eq(catalogBatches.id, batchId));
     return rows;
   });
   // Spec 15 E5: the window queues the first chunks; each finished chunk queues the next.

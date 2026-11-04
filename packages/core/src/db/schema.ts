@@ -33,12 +33,16 @@ import type { SettingsSnapshotData } from "../settings/snapshot";
 import { BRAND_PHOTO_CAPABILITIES, CAPABILITIES, ROUTE_ADAPTERS, ROUTE_STATES } from "../vendor/routes";
 import {
   ALIAS_KINDS,
+  AUTO_DECIDE_ACTIONS,
+  AUTO_DECIDE_CHANNELS,
   BATCH_STATUSES,
   CHANGE_KINDS,
   CHANNEL_IDS,
   DECISIONS,
   EVAL_LABELS,
   EVENT_KINDS,
+  HOLD_CAUSES,
+  IMPROVEMENT_END_REASONS,
   LINK_STATUSES,
   OUTPUT_STATUSES,
   POLICY_SOURCES,
@@ -312,7 +316,7 @@ export const catalogBatches = pgTable(
     startedAt: tsNull("started_at"),
     finishedAt: tsNull("finished_at"),
     updatedAt: updatedAt(),
-    /** M12-S1 (0014): the settings this batch read once at Start and keeps to the end; null before Start and on older batches. */
+    /** M12-S1 (0016): the settings this batch read once at Start and keeps to the end; null before Start and on older batches. */
     settingsSnapshotId: text("settings_snapshot_id"),
   },
   (t) => [
@@ -546,7 +550,7 @@ export const catalogOutputs = pgTable(
     error: text("error"),
     /** M0 (0009): the content version this render is (F2-R2); null on rows written before M0-S3. */
     contentVersionId: uuid("content_version_id"),
-    /** M12-S1 (0014): the settings snapshot of the batch that made it (its version set); null on rows from before. */
+    /** M12-S1 (0016): the settings snapshot of the batch that made it (its version set); null on rows from before. */
     settingsSnapshotId: text("settings_snapshot_id"),
     createdAt: createdAt(),
     updatedAt: updatedAt(),
@@ -560,6 +564,8 @@ export const catalogOutputs = pgTable(
     index("catalog_outputs_product_id_idx").on(t.productId),
     // Exactly one live row per (product, channel, n).
     uniqueIndex("catalog_outputs_live_uq").on(t.productId, t.channel, t.n).where(sql`${t.isLive}`),
+    // M1-S4 (0015): the improvement sweep's candidates, the live provisional plain renders, by first delivery.
+    index("catalog_outputs_provisional_plain_idx").on(t.publishedAt).where(sql`${t.isLive} AND ${t.status} = 'verified' AND ${t.flags} @> '["provisional", "enlargement_failed"]'::jsonb`),
     enumCheck("catalog_outputs", "channel", t.channel, CHANNEL_IDS),
     enumCheck("catalog_outputs", "status", t.status, OUTPUT_STATUSES),
     enumCheck("catalog_outputs", "decision", t.decision, DECISIONS),
@@ -913,6 +919,36 @@ export const catalogKeyMappings = pgTable(
     enumCheck("catalog_key_mappings", "channel", t.channel, CHANNEL_IDS),
     enumCheck("catalog_key_mappings", "market", t.market, MARKETS),
     enumCheck("catalog_key_mappings", "key_kind", t.keyKind, KEY_KINDS),
+  ],
+);
+
+/** One listing a conflicting key points at (F1-R5). */
+export type KeyConflictCandidate = { listingId: string; optionId: string; opptraSku: string | null; source: string };
+
+/**
+ * Keys that point at two or more listings (F1-R5, migration 0013). Such a key is not written to catalog_listing_keys; it
+ * is listed here with every candidate for the Ops page and the export (`catalog_os.key_conflicts`). Rebuilt by the graph
+ * sync: a conflict seen again keeps its row, one no longer seen gets `resolved_at`. Never deleted.
+ */
+export const catalogKeyConflicts = pgTable(
+  "catalog_key_conflicts",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: orgId(),
+    channel: text("channel", { enum: CHANNEL_IDS }).$type<ChannelId>().notNull(),
+    market: text("market", { enum: MARKETS }).notNull(),
+    keyKind: text("key_kind", { enum: KEY_KINDS }).notNull(),
+    keyValue: text("key_value").notNull(),
+    candidates: jsonb("candidates").$type<KeyConflictCandidate[]>().notNull(),
+    firstSeenAt: timestamp("first_seen_at", { withTimezone: true }).notNull().defaultNow(),
+    lastSeenAt: timestamp("last_seen_at", { withTimezone: true }).notNull().defaultNow(),
+    resolvedAt: tsNull("resolved_at"),
+  },
+  (t) => [
+    unique("catalog_key_conflicts_org_key_uq").on(t.orgId, t.channel, t.market, t.keyKind, t.keyValue),
+    enumCheck("catalog_key_conflicts", "channel", t.channel, CHANNEL_IDS),
+    enumCheck("catalog_key_conflicts", "market", t.market, MARKETS),
+    enumCheck("catalog_key_conflicts", "key_kind", t.keyKind, KEY_KINDS),
   ],
 );
 
@@ -1279,6 +1315,7 @@ export type CatalogCostEvent = typeof catalogCostEvents.$inferSelect;
 export type CatalogOption = typeof catalogOptions.$inferSelect;
 export type CatalogChannelListing = typeof catalogChannelListings.$inferSelect;
 export type CatalogListingKey = typeof catalogListingKeys.$inferSelect;
+export type CatalogKeyConflict = typeof catalogKeyConflicts.$inferSelect;
 export type CatalogAsset = typeof catalogAssets.$inferSelect;
 export type CatalogContentVersion = typeof catalogContentVersions.$inferSelect;
 export type CatalogChangeEvent = typeof catalogChangeEvents.$inferSelect;
@@ -1358,7 +1395,76 @@ export type VendorRouteRow = typeof vendorRoutes.$inferSelect;
 export type VendorRouteChange = typeof vendorRouteChanges.$inferSelect;
 
 // ---------------------------------------------------------------------------
-// M12-S1 settings store (migration 0014). Written only through settings/store.ts; the structure of each setting is
+// M1 intake and auto-decide (M1-S3, migration 0014)
+// ---------------------------------------------------------------------------
+
+/**
+ * M1-F3-R1: the auto-decide rule table. Each hold cause the QA triage finds maps to an automatic action, for one
+ * channel or for every channel (`*`); a channel row wins over the `*` row. The id is `<cause>:<channel>`, recorded on
+ * every output a rule decided. Seeded by migration 0014 with the M1-F3-R1 defaults. Start copies the enabled rules
+ * into the batch (`options.autoDecide`), so a change applies to the next batch, never to one already running.
+ */
+export const catalogAutoDecideRules = pgTable(
+  "catalog_auto_decide_rules",
+  {
+    id: text("id").primaryKey(),
+    cause: text("cause", { enum: HOLD_CAUSES }).notNull(),
+    channel: text("channel", { enum: AUTO_DECIDE_CHANNELS }).notNull(),
+    action: text("action", { enum: AUTO_DECIDE_ACTIONS }).notNull(),
+    enabled: boolean("enabled").notNull().default(true),
+    updatedBy: text("updated_by").notNull(),
+    updatedAt: updatedAt(),
+  },
+  (t) => [
+    uniqueIndex("catalog_auto_decide_rules_cause_channel_uq").on(t.cause, t.channel),
+    enumCheck("catalog_auto_decide_rules", "cause", t.cause, HOLD_CAUSES),
+    enumCheck("catalog_auto_decide_rules", "channel", t.channel, AUTO_DECIDE_CHANNELS),
+    enumCheck("catalog_auto_decide_rules", "action", t.action, AUTO_DECIDE_ACTIONS),
+  ],
+);
+
+export type AutoDecideRuleRow = typeof catalogAutoDecideRules.$inferSelect;
+
+/**
+ * M1-S4 (M1-F3-R4, R5): the improvement of one photo whose plain render a batch delivered `provisional` because the
+ * upscaler could not enlarge it. One row per batch and photo: how many tries were made (bounded by IMPROVE_MAX_TRIES
+ * within IMPROVE_WINDOW_MS, catalog/improve.ts), when the last one started, and when the photo's slots were found no
+ * longer provisional (`improved_at`, the "improved within 72 h" measure). Kept apart from the output's `compliance`,
+ * which every render rewrites.
+ */
+export const catalogImprovements = pgTable(
+  "catalog_improvements",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    batchId: uuid("batch_id")
+      .notNull()
+      .references(() => catalogBatches.id, { onDelete: "cascade" }),
+    productId: uuid("product_id").notNull(),
+    sourceImageId: uuid("source_image_id").notNull(),
+    tries: integer("tries").notNull().default(0),
+    lastTriedAt: tsNull("last_tried_at"),
+    improvedAt: tsNull("improved_at"),
+    /**
+     * The photo's outputs as they were delivered (rows of catalog_outputs as JSON), kept while a try runs: a re-made slot
+     * that does not pass is put back from it, so a failed try never downgrades a delivered link (null between tries).
+     */
+    previous: jsonb("previous").$type<Record<string, unknown>[]>(),
+    /** When the photo stopped being a candidate without being improved, and why (IMPROVEMENT_END_REASONS). */
+    endedAt: tsNull("ended_at"),
+    endReason: text("end_reason", { enum: IMPROVEMENT_END_REASONS }),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (t) => [
+    uniqueIndex("catalog_improvements_batch_photo_uq").on(t.batchId, t.sourceImageId),
+    enumCheck("catalog_improvements", "end_reason", t.endReason, IMPROVEMENT_END_REASONS),
+  ],
+);
+
+export type CatalogImprovement = typeof catalogImprovements.$inferSelect;
+
+// ---------------------------------------------------------------------------
+// M12-S1 settings store (migration 0016). Written only through settings/store.ts; the structure of each setting is
 // code (settings/registry.ts), the values are rows here.
 // ---------------------------------------------------------------------------
 

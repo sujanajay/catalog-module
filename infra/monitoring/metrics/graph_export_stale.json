@@ -1,0 +1,5 @@
+{
+  "name": "catalog/graph_export_stale",
+  "description": "The invariants run (sweep, every 10 minutes) found no clean catalog graph export to BigQuery in the last 26 hours (M0 F5-R4).",
+  "filter": "resource.type=\"cloud_run_revision\" AND resource.labels.service_name=~\"^catalog-\" AND jsonPayload.message=\"invariant\" AND jsonPayload.id=\"graph_export_stale\" AND jsonPayload.violations>0"
+}

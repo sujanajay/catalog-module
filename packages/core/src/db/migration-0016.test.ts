@@ -1,4 +1,4 @@
-// Tier 2 (PGlite): 0014_settings_store.sql applied over a database at the migration before it that holds a batch and
+// Tier 2 (PGlite): 0016_settings_store.sql applied over a database at the migration before it that holds a batch and
 // an output: the rows are kept with a null settings snapshot, the previous release's inserts still work, a snapshot
 // and versions can be written, and a second run of the file changes nothing.
 import { copyFile, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
@@ -11,7 +11,7 @@ import type { Db } from "./client";
 import { resolveMigrationsFolder, runMigrations } from "./migrate";
 import { createDbFromPglite } from "./testing";
 
-const FILE = "0014_settings_store";
+const FILE = "0016_settings_store";
 let db: Db;
 let client: PGlite;
 
@@ -21,7 +21,7 @@ async function rows<T>(q: ReturnType<typeof sql>): Promise<T[]> {
 
 beforeAll(async () => {
   const real = resolveMigrationsFolder();
-  const before = await mkdtemp(path.join(tmpdir(), "catalog-pre0014-"));
+  const before = await mkdtemp(path.join(tmpdir(), "catalog-pre0016-"));
   try {
     await mkdir(path.join(before, "meta"));
     const journal = JSON.parse(await readFile(path.join(real, "meta", "_journal.json"), "utf8")) as { entries: { idx: number; tag: string }[] };

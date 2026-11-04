@@ -5,8 +5,8 @@
 -- retyped, and old code ignores the new columns. Re-runnable: IF NOT EXISTS everywhere, foreign keys added only when
 -- missing. On the two existing tables every statement is cheap whatever their size: ADD COLUMN of a nullable column
 -- with no default is a catalog-only change, and the two foreign keys are added NOT VALID (no scan of existing rows,
--- which are all null; new rows are checked). Numbered 0014 because 0013 is claimed by two open PRs (M0-S2, M1-S3);
--- renumber at merge time if needed (roadmap 3.2). No seed rows: an unset setting reads its registry default.
+-- which are all null; new rows are checked). Numbered 0016 at merge, after M0-S2 0013, M1-S3 0014 and M1-S4 0015.
+-- (roadmap 3.2). No seed rows: an unset setting reads its registry default.
 SET LOCAL lock_timeout = '10s';--> statement-breakpoint
 CREATE TABLE IF NOT EXISTS "catalog_setting_versions" (
 	"id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
