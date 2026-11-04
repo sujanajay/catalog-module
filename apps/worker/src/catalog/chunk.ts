@@ -388,10 +388,17 @@ export async function handleChunkTask(rawDeps: CatalogDeps, body: Record<string,
               return;
             }
             await underClaim(async()=>{});
-            let matte = await deps.matteFor(p,deps.matting,productPolicy.matteModel,{},trace); mattingMs += matte.ms;
-            // Ledger: the photo's n-th cut-out call in this delivery (1 first, 2 the retry, then the guard ladder).
+            // M3-S5: the first cut-out goes through the image.matte routes (GPU, then the overflow vendor when an admin
+            // switched it on, then the CPU service); without a route table, the policy's model as before.
+            const router = deps.routes ? await deps.routes():undefined;
+            const first = router ? await deps.matteFor(p,deps.matting,productPolicy.matteModel,{},trace,{router,preferred:[productPolicy.matteModel,productPolicy.matteModelSecond],overflow:deps.overflow,vendor:{fetch:deps.fetch},log:deps.log})
+              : await deps.matteFor(p,deps.matting,productPolicy.matteModel,{},trace);
+            let matte:Matte = first; mattingMs += matte.ms;
+            // Ledger: the photo's n-th cut-out call in this delivery (1 first, 2 the retry, then the guard ladder). An
+            // overflow call is its own line: engine = the vendor adapter, with the call's cost (M3-F2-R4, M6 meter).
             let matteCalls = 1;
-            note(matteRow(productId,source.id,matte,matteCalls,matte.source === "floodfill" ? "fallback":"ok"));
+            const overflow = first.route?.overflow;
+            note(overflow ? {productId,sourceImageId:source.id,stage:"matte",kind:"matte_call",engine:overflow.engine,ms:matte.ms,usd:overflow.usd,estimated:overflow.estimated,attempt:matteCalls,outcome:"ok"}:matteRow(productId,source.id,matte,matteCalls,matte.source === "floodfill" ? "fallback":"ok"));
             // 07 auto-resolve: the cut-out service was down. Retry once it responds, within this delivery's time budget, before holding.
             let retry: AutoAction | null = null;
             if (matte.source === "floodfill") {

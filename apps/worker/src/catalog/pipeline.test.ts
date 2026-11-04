@@ -30,7 +30,11 @@ import { cannedQa } from "./qa-mock";
 import { ensureSeedRoutes, killPrimary, resetRouting, routerFor, setRoute } from "@catalog/core/vendor/route-table";
 import { createRouter } from "@catalog/core/vendor/router";
 import { CircuitBreakers } from "@catalog/core/vendor/circuit";
-import { SEED_ROUTES } from "@catalog/core/vendor/routes";
+import { PHOTOROOM_MATTE_MODEL, routeId, SEED_ROUTES } from "@catalog/core/vendor/routes";
+import { ledgerOverflowGate } from "@catalog/core/vendor/overflow";
+import { routedMatteFor } from "@catalog/core/catalog/matte-routing";
+import { fakeMatting } from "@catalog/core/catalog/matting-fake";
+import { batchCostByEngine } from "@catalog/core/catalog/cost-report";
 import type { RepairOwnDefects } from "@catalog/core/catalog/qa/triage";
 vi.mock(import("@catalog/core/catalog/sheet"),async original=>{const module=await original();return {...module,compareXlsxCsv:vi.fn(module.compareXlsxCsv)};});
 let db:Db,close:()=>Promise<void>;
@@ -851,6 +855,78 @@ describe("M7-S2 acceptance (4.2.9 tests 1 and 3): route 1 of the judge and the r
   // 4 attempts per call (5, 15, 45 s back-off) until the circuit opens after 5 failed calls; then route 1 is skipped.
   expect(r.models.filter(m=>m===FIRST).length).toBeLessThanOrEqual(5*4);
   completedOnRoute2(r);
+ },120_000);
+});
+describe("M3-S5 acceptance (M3 4.2.9 tests 1 and 2): the GPU cut-out service stops during a batch",()=>{
+ const [M1,M2]=["birefnet-general","birefnet-general-lite"];
+ const VENDOR=routeId("image.matte","photoroom",PHOTOROOM_MATTE_MODEL);
+ /**
+  * One product, 3 photos on 2 channels (CI size; 4.2.9 names a 50-product batch, run as the monthly drill on preview).
+  * The real routed cut-out runs through the real matting client and Photoroom adapter over an in-memory fetch, with the
+  * GPU service stopped from the first call. `overflow` switches the vendor on as an admin would: the position on file,
+  * serving, and a USD 1 daily cap (test account).
+  */
+ async function stoppedGpuBatch(name:string,overflow:boolean,spentTodayUsd=0) {
+  const w=world(),s=await seed(w,name,{shots:["a","b","c"],channels:["noon","amazon"]}),log=vi.fn(),fake=fakeMatting();
+  resetRouting(db);await ensureSeedRoutes(db);
+  await db.delete(catalogCostEvents).where(eq(catalogCostEvents.engine,"photoroom"));
+  if(spentTodayUsd) await db.insert(catalogCostEvents).values({stage:"matte",kind:"matte_call",engine:"photoroom",usd:spentTodayUsd,at:new Date("2026-01-01T00:00:00Z"),isTest:true});
+  if(overflow) await setRoute(db,VENDOR,{state:"serving",noTrainingTerms:"test: vendor terms on file",dailyCapUsd:1,changedBy:"test@opptra.com",reason:"CI overflow on"});
+  else await setRoute(db,VENDOR,{state:"off",dailyCapUsd:null,changedBy:"test@opptra.com",reason:"CI overflow off"});
+  fake.state.down.gpu=true;
+  const publicFetch=w.deps.fetch;
+  w.deps.fetch=vi.fn<typeof globalThis.fetch>(async(url,init)=>String(url).startsWith("https://sdk.photoroom.com/")?fake.fetch(url,init):publicFetch(url,init));
+  Object.assign(w.deps,{routes:()=>routerFor(db),matting:fake.client,matteFor:routedMatteFor,overflow:ledgerOverflowGate(db,{now:()=>new Date("2026-01-01T00:00:00Z")}),log});
+  vi.mocked(w.deps.resolvePolicy).mockResolvedValue({matteModel:M1,matteModelSecond:M2,qaModel:"",threshold:75,floor:60,qaMode:"per_source",qaSampleRate:1,source:"default"});
+  vi.stubEnv("PHOTOROOM_API_KEY","test-key");
+  try {
+   for(let i=0;i<3;i++) expect((await handleChunkTask(w.deps,await currentChunkTask(db,s.chunk.id))).httpStatus).toBe(200);
+   expect((await handlePublishTask(w.deps,{batchId:s.batch.id,productId:s.product.id})).outcome).toBe("published");
+   expect((await handleFinalizeTask(w.deps,{batchId:s.batch.id})).outcome).toBe("done");
+  } finally { vi.unstubAllEnvs(); resetRouting(db); }
+  const outputs=await db.select().from(catalogOutputs).where(eq(catalogOutputs.batchId,s.batch.id));
+  const sources=await db.select().from(catalogSourceImages).where(eq(catalogSourceImages.batchId,s.batch.id));
+  const ledger=(await db.select().from(catalogCostEvents).where(eq(catalogCostEvents.batchId,s.batch.id))).filter(r=>r.kind==="matte_call");
+  const [batch]=await db.select().from(catalogBatches).where(eq(catalogBatches.id,s.batch.id));
+  return {fake,outputs,sources,ledger,batch:batch!,log,engines:await batchCostByEngine(db,s.batch.id)};
+ }
+ const completed=(r:Awaited<ReturnType<typeof stoppedGpuBatch>>)=>{
+  expect(r.outputs).toHaveLength(6);
+  // Never a held product and never the simple method: every output is live with a model cut-out.
+  expect(r.outputs.every(o=>o.isLive && !o.flags.includes("fallback_matte"))).toBe(true);
+  expect(deriveBatchState(r.batch).state).toBe("ready");
+  // The reason is recorded: the GPU route failed, per photo, in the route fallback line (M7-F2-R6, logs only).
+  const fallbacks=r.log.mock.calls.filter(([message])=>message==="catalog matte route fallback").map(([,fields])=>fields as {routes:{route:string;kind:string}[]});
+  expect(fallbacks).toHaveLength(3);
+  expect(fallbacks.every(f=>f.routes[0]!.route===routeId("image.matte","matting-gpu",M1) && f.routes[0]!.kind!=="ok")).toBe(true);
+ };
+ it("test 1, overflow off: the batch completes on our own CPU route with model 1; the vendor is never asked and costs nothing",async()=>{
+  const r=await stoppedGpuBatch("m3s5-overflow-off",false);
+  completed(r);
+  expect(r.fake.state.calls).not.toContain("vendor");
+  expect(r.sources.every(source=>source.matteModel===M1)).toBe(true);
+  expect(r.ledger.map(row=>row.engine)).toEqual(["cpu","cpu","cpu"]);
+  expect(r.engines.map(e=>e.engine)).not.toContain("cut-out overflow");
+ },120_000);
+ it("test 2, overflow on (capped at USD 1): the batch completes through the vendor, and the cost meter shows the overflow line",async()=>{
+  const r=await stoppedGpuBatch("m3s5-overflow-on",true);
+  completed(r);
+  expect(r.fake.state.calls.filter(call=>call==="vendor")).toHaveLength(3);
+  expect(r.fake.state.calls.some(call=>call.startsWith("cpu:"))).toBe(false);
+  expect(r.ledger.map(row=>[row.engine,row.usd,row.estimated])).toEqual([["photoroom",0.02,true],["photoroom",0.02,true],["photoroom",0.02,true]]);
+  expect(r.engines).toContainEqual(expect.objectContaining({engine:"cut-out overflow",calls:3,usd:expect.closeTo(0.06,6)}));
+  // Every overflow call is logged with its cost and reason (M3-F2-R4); the key never is.
+  const calls=r.log.mock.calls.filter(([message])=>message==="catalog matte overflow");
+  expect(calls).toHaveLength(3);
+  expect(calls.every(([,fields])=>(fields as {usd:number;reason:string}).usd===0.02 && /^own routes unavailable/.test((fields as {reason:string}).reason))).toBe(true);
+  expect(JSON.stringify(r.log.mock.calls)).not.toContain("test-key");
+ },120_000);
+ it("overflow on but the day's cap is spent: the vendor is refused and the CPU route completes the batch",async()=>{
+  const r=await stoppedGpuBatch("m3s5-overflow-capped",true,0.99);
+  completed(r);
+  expect(r.fake.state.calls).not.toContain("vendor");
+  expect(r.ledger.map(row=>row.engine)).toEqual(["cpu","cpu","cpu"]);
+  expect(r.log.mock.calls.filter(([message])=>message==="catalog matte overflow refused")).toHaveLength(3);
  },120_000);
 });
 describe("spec07 caps count the recorded judge spend",()=>{
