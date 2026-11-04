@@ -218,8 +218,8 @@ try {
     const files = [...metricFiles.map((f) => path.join(monDir, 'metrics', f)), ...policyFiles.map((f) => path.join(monDir, 'policies', f)),
       path.join(monDir, 'dashboard.json'), path.join(infra, 'monitoring.sh'), path.join(infra, 'deploy.sh')];
     for (const f of files) assert.ok(!fs.readFileSync(f, 'utf8').includes(String.fromCharCode(0x2014)), 'em dash in ' + f);
-    assert.equal(policies.length, 14, 'fourteen alert policies');
-    assert.equal(new Set(policies.map((p) => p.displayName)).size, 14, 'policy display names are unique');
+    assert.equal(policies.length, 15, 'fifteen alert policies');
+    assert.equal(new Set(policies.map((p) => p.displayName)).size, 15, 'policy display names are unique');
     for (const p of policies) {
       assert.ok(p.displayName && p.documentation?.content?.length > 80, p.displayName + ' documentation');
       assert.equal(p.documentation.mimeType, 'text/markdown');
@@ -269,8 +269,9 @@ try {
     const ranOut = policies.find((p) => p.displayName === 'Catalog: a chunk task ran out of time').conditions[0].conditionThreshold;
     assert.match(ranOut.filter, /user\/catalog\/chunk_timeout"/);
     assert.deepEqual([ranOut.aggregations[0].alignmentPeriod, ranOut.thresholdValue, ranOut.comparison], ['900s', 0, 'COMPARISON_GT']);
-    // Spec 17 3.1.3: policies 11 and 12 fire on the invariants run's log line for their check, only when violated.
-    for (const [title, id] of [['Some images were left half-finished (silent outputs)', 'silent_outputs'], ['One chunk is far slower than the rest', 'slow_chunk']]) {
+    // Spec 17 3.1.3: policies 11 and 12 fire on the invariants run's log line for their check, only when violated;
+    // M0-S4: policy 15 on the graph export freshness check (M0 F5-R4).
+    for (const [title, id] of [['Some images were left half-finished (silent outputs)', 'silent_outputs'], ['One chunk is far slower than the rest', 'slow_chunk'], ['Catalog: the BigQuery graph export is out of date', 'graph_export_stale']]) {
       const p = policies.find((x) => x.displayName === title);
       assert.ok(p, title);
       assert.match(p.conditions[0].conditionThreshold.filter, new RegExp(`user/catalog/${id}"`));

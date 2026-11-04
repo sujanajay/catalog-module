@@ -3,12 +3,15 @@
 #
 # What: copies, under the SAME dataset names and in the same location (asia-south1),
 #   - tables opptra-datawarehouse.raw_gcc_dimensions.master_sl and .sku_master_sheet_hl
-#     (CREATE OR REPLACE TABLE ... AS SELECT *), and
+#     (CREATE OR REPLACE TABLE ... AS SELECT *),
+#   - key-only copies (SELECT DISTINCT of the listed columns, all read as of one snapshot time) of
+#     gcc_marketing.sku_option, fact_gcc.unified_sales_tertiary_v2 and the Amazon, Noon and Trendyol channel-report
+#     tables the M0-S2 graph sync reads (MIRROR_KEY_TABLES), and
 #   - the SQL UDFs opptra-datawarehouse.fact_gcc.alias_gcc_brand and .family_of_gcc_brand
 #     (recreated from their definitions with CREATE OR REPLACE FUNCTION),
-#   into image-links-agent:raw_gcc_dimensions and image-links-agent:fact_gcc, and grants
+#   into the same-named datasets of image-links-agent, and grants
 #   catalog-worker@ roles/bigquery.jobUser on image-links-agent (project level) and
-#   roles/bigquery.dataViewer on the two mirror datasets. The sync SQL (master-sync.ts) uses
+#   roles/bigquery.dataViewer on the mirror datasets. The sync SQL (master-sync.ts) uses
 #   unqualified names that resolve against the job's project, so with BQ_PROJECT=image-links-agent
 #   (the default in infra/deploy.sh while this mirror is in use) it reads the copies unchanged.
 #
@@ -42,10 +45,23 @@ export CLOUDSDK_CORE_PROJECT=$PROJECT
 
 cd "$(dirname "$0")/.."
 
-# Exactly the objects packages/core/src/catalog/master-sync.ts reads (MASTER_SL_SQL, MASTER_HL_SQL).
-MIRROR_DATASETS=(raw_gcc_dimensions fact_gcc)
+# Exactly the objects packages/core/src/catalog/master-sync.ts reads (MASTER_SL_SQL, MASTER_HL_SQL), plus what the
+# M0-S2 graph sync reads (packages/core/src/graph/key-sync.ts: GRAPH_*_SQL).
+MIRROR_DATASETS=(raw_gcc_dimensions fact_gcc gcc_marketing dimensions gcc_channel_reports)
 MIRROR_TABLES=(raw_gcc_dimensions.master_sl raw_gcc_dimensions.sku_master_sheet_hl)
 MIRROR_ROUTINES=(fact_gcc.alias_gcc_brand fact_gcc.family_of_gcc_brand)
+# Key-only copies for the graph sync: the same table names, only the listed columns, distinct rows. The sales copy
+# carries no order, customer or money column (ordered_date only, for the sync's window); the channel-report copies
+# carry only their key columns. A column added to a source later is never copied.
+MIRROR_KEY_TABLES=(
+  "gcc_marketing.sku_option|sku_key, option_id"
+  "fact_gcc.unified_sales_tertiary_v2|mapped_opptra_sku, channel, country, channel_sku, style_id, ordered_date"
+  "dimensions.sku_master_amazon_ae|seller_sku, asin1"
+  "dimensions.sku_master_amazon_sa|seller_sku, asin1"
+  "dimensions.sku_master_noon|partner_sku, sku_child"
+  "gcc_channel_reports.product_list_trendyol_3p_uae|barcode, supplier_stock_code"
+  "gcc_channel_reports.product_list_trendyol_3p_ksa|barcode, supplier_stock_code"
+)
 
 log()    { printf '[bq-mirror] %s\n' "$*"; }
 skip()   { printf '[bq-mirror] SKIP   %s\n' "$*"; }
@@ -126,6 +142,27 @@ for t in "${MIRROR_TABLES[@]}"; do
   fi
   printf 'CREATE OR REPLACE TABLE `%s.%s` AS SELECT * FROM `%s.%s`' "$PROJECT" "$t" "$SOURCE_PROJECT" "$t" \
     | bq_exec "copy of $t"
+done
+
+# --- 2b. Key-only copies (always refreshed) ----------------------------------------------------------
+# Every copy and its row-count check (section 5) read the source as of one snapshot time (BigQuery time travel), so a
+# load into a source table during the run cannot make the counts differ.
+SNAP_TS=$(printf "SELECT FORMAT_TIMESTAMP('%%Y-%%m-%%d %%H:%%M:%%E6S UTC', CURRENT_TIMESTAMP()) AS ts" \
+  | bq_sql --format=csv | tr -d '\r' | tail -1)
+[[ "$SNAP_TS" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}\ [0-9:.]+\ UTC$ ]] || die "could not read the snapshot time (got '$SNAP_TS')"
+log "key-only copies as of $SNAP_TS"
+# FROM clause of a key-only source, as of the snapshot.
+key_source() { printf "\`%s.%s\` FOR SYSTEM_TIME AS OF TIMESTAMP '%s'" "$SOURCE_PROJECT" "$1" "$SNAP_TS"; }
+for spec in "${MIRROR_KEY_TABLES[@]}"; do
+  t=${spec%%|*}
+  cols=${spec#*|}
+  if bqv show --format=none "$PROJECT:$t" >/dev/null 2>&1; then
+    update "table $PROJECT.$t (fresh key-only copy: $cols)"
+  else
+    create "table $PROJECT.$t (key-only copy: $cols)"
+  fi
+  printf 'CREATE OR REPLACE TABLE `%s.%s` AS SELECT DISTINCT %s FROM %s' "$PROJECT" "$t" "$cols" "$(key_source "$t")" \
+    | bq_exec "key-only copy of $t"
 done
 
 # --- 3. SQL UDFs (always recreated from the source definition) --------------------------------
@@ -222,6 +259,21 @@ for t in "${MIRROR_TABLES[@]}"; do
     log "rows $t: source $src, copy $dst (match)"
   else
     warn "rows $t: source $src, copy $dst (MISMATCH)"
+    MISMATCH=1
+  fi
+done
+for spec in "${MIRROR_KEY_TABLES[@]}"; do
+  t=${spec%%|*}
+  cols=${spec#*|}
+  counts=$(printf 'SELECT (SELECT COUNT(*) FROM (SELECT DISTINCT %s FROM %s)) AS source_rows, (SELECT COUNT(*) FROM `%s.%s`) AS copy_rows' \
+      "$cols" "$(key_source "$t")" "$PROJECT" "$t" | bq_sql --format=csv | tr -d '\r' | tail -1)
+  src=${counts%%,*}
+  dst=${counts##*,}
+  [[ "$src" =~ ^[0-9]+$ && "$dst" =~ ^[0-9]+$ ]] || die "could not read row counts for $t (got '$counts')"
+  if [ "$src" = "$dst" ]; then
+    log "rows $t (key-only): source $src, copy $dst (match)"
+  else
+    warn "rows $t (key-only): source $src, copy $dst (MISMATCH)"
     MISMATCH=1
   fi
 done

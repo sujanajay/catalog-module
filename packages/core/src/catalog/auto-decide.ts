@@ -1,0 +1,82 @@
+// M1-F3 auto-decide (M1-S3, docs/program/requirements/M1-intake.md): what happens to an output the QA triage would
+// hold for a person. Each hold cause maps to `deliver` (published now, flagged `provisional`) or `drop` (no link for
+// that photo on that channel; the rest of the set is delivered), read from `catalog_auto_decide_rules` at Start and
+// kept on the batch (options.autoDecide), so nothing waits for a person and no product becomes `pending_attention`.
+import { asc, eq } from "drizzle-orm";
+import type { Db } from "../db/client";
+import { catalogAutoDecideRules } from "../db/schema";
+import { HOLD_CAUSES, PROVISIONAL_SENTENCE, type AutoDecideAction, type BatchOptions, type ChannelId, type HoldCause, type OutputFlag, type OutputStatus } from "./types";
+
+export type AutoDecideSnapshot = NonNullable<BatchOptions["autoDecide"]>;
+export type AutoDecideRule = AutoDecideSnapshot["rules"][number];
+
+/**
+ * The M1-F3-R1 defaults (and migration 0014's seed rows). Deliver: our own defect after the repair loop, a busy
+ * background, an image 1 problem, every photo of a channel with a problem, no verdict (judge down or capped), an encoder
+ * fault, a failed enlargement. Drop: a corrupt source, a different item (product truth), a collage (several photos in
+ * one is not a product photo for a marketplace; integration decision D7).
+ */
+export const DEFAULT_AUTO_DECIDE_ACTIONS: Readonly<Record<HoldCause, AutoDecideAction>> = {
+  not_publishable: "deliver", unusable: "deliver", photo_one: "deliver", every_photo: "deliver", unchecked: "deliver",
+  code_fault: "deliver", not_enlarged: "deliver", corrupt: "drop", wrong_item: "drop", collage: "drop",
+};
+export const DEFAULT_AUTO_DECIDE_RULES: readonly AutoDecideRule[] = HOLD_CAUSES.map(cause => ({ id: `${cause}:*`, cause, channel: "*", action: DEFAULT_AUTO_DECIDE_ACTIONS[cause] }));
+
+/** The enabled rules now, for Start to keep on the batch (a later change never affects a running batch). */
+export async function autoDecideSnapshot(db: Db): Promise<AutoDecideSnapshot> {
+  const rows = await db.select().from(catalogAutoDecideRules).where(eq(catalogAutoDecideRules.enabled, true)).orderBy(asc(catalogAutoDecideRules.id));
+  return { rules: rows.map(({ id, cause, channel, action }) => ({ id, cause, channel, action })) };
+}
+
+/** The batch's rules, or null for a batch started before M1-S3 (it keeps the holds for a person). */
+export function autoDecideOf(options: Pick<BatchOptions, "autoDecide"> | null | undefined): AutoDecideSnapshot | null {
+  const value = options?.autoDecide;
+  return value && typeof value === "object" && Array.isArray(value.rules) ? value : null;
+}
+
+/** The channel's own rule, else the `*` rule, else the built-in default (a rule missing from the table never holds). */
+export function ruleFor(snapshot: AutoDecideSnapshot, cause: HoldCause, channel: ChannelId): AutoDecideRule {
+  return snapshot.rules.find(r => r.cause === cause && r.channel === channel)
+    ?? snapshot.rules.find(r => r.cause === cause && r.channel === "*")
+    ?? DEFAULT_AUTO_DECIDE_RULES.find(r => r.cause === cause)!;
+}
+
+export interface AutoDecideTarget { status: OutputStatus; stagingUri: string | null; bytes: number | null; flags: readonly OutputFlag[] }
+/**
+ * The staged image can be delivered: it was made (staged bytes exist) and it passes the channel's hard rules
+ * (`failed_compliance` is a broken channel rule, including an encoder fault and a size the channel refuses). A failed
+ * source never has one.
+ */
+export function deliverable(o: AutoDecideTarget): boolean {
+  return (o.status === "staged" || o.status === "needs_attention") && !!o.stagingUri && o.bytes !== null && !o.flags.includes("failed_compliance");
+}
+
+export interface AutoDecision {
+  action: AutoDecideAction;
+  rule: AutoDecideRule;
+  /** The rule said deliver but there is nothing deliverable, so the slot is dropped with its reason. */
+  fellBack: boolean;
+}
+export function autoDecide(snapshot: AutoDecideSnapshot, cause: HoldCause, o: AutoDecideTarget & { channel: ChannelId }): AutoDecision {
+  const rule = ruleFor(snapshot, cause, o.channel);
+  if (rule.action === "deliver" && !deliverable(o)) return { action: "drop", rule, fellBack: true };
+  return { action: rule.action, rule, fellBack: false };
+}
+
+/** The record kept on the output (`compliance.auto_decide`): which rule decided, for which cause, and what it did. */
+export interface AutoDecideRecord { rule: string; cause: HoldCause; action: AutoDecideAction; fellBack?: true }
+export function autoDecideRecord(cause: HoldCause, d: AutoDecision): AutoDecideRecord {
+  return { rule: d.rule.id, cause, action: d.action, ...(d.fellBack ? { fellBack: true as const } : {}) };
+}
+export function autoDecideRecordOf(compliance: unknown): AutoDecideRecord | null {
+  const r = (compliance as { auto_decide?: unknown } | null | undefined)?.auto_decide;
+  return r && typeof r === "object" && typeof (r as AutoDecideRecord).rule === "string" ? r as AutoDecideRecord : null;
+}
+
+/** The operator sentence of an auto decision: the problem first (when known), then what was done. Model-free. */
+export function autoDecideNote(action: AutoDecideAction, why: string | null): string {
+  const lead = why ? `${why.trim()}${/[.!?]$/.test(why.trim()) ? "" : "."} ` : "";
+  return action === "deliver"
+    ? `${lead}${PROVISIONAL_SENTENCE}`
+    : `${lead}Left out automatically; this photo gets no link here and the product's other photos are delivered.`;
+}

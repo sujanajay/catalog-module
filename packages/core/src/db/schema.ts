@@ -10,6 +10,7 @@ import {
   bigserial,
   boolean,
   check,
+  customType,
   date,
   foreignKey,
   index,
@@ -28,15 +29,21 @@ import {
   type AnyPgColumn,
 } from "drizzle-orm/pg-core";
 import type { SkuMethod } from "../catalog/sku-mapping";
+import type { SettingScope, SettingValue } from "../settings/registry";
+import type { SettingsSnapshotData } from "../settings/snapshot";
 import { BRAND_PHOTO_CAPABILITIES, CAPABILITIES, ROUTE_ADAPTERS, ROUTE_STATES } from "../vendor/routes";
 import {
   ALIAS_KINDS,
+  AUTO_DECIDE_ACTIONS,
+  AUTO_DECIDE_CHANNELS,
   BATCH_STATUSES,
   CHANGE_KINDS,
   CHANNEL_IDS,
   DECISIONS,
   EVAL_LABELS,
   EVENT_KINDS,
+  HOLD_CAUSES,
+  IMPROVEMENT_END_REASONS,
   LINK_STATUSES,
   OUTPUT_STATUSES,
   POLICY_SOURCES,
@@ -74,6 +81,25 @@ import {
   type Slot,
   type VersionScope,
 } from "../graph/types";
+import {
+  CHANNEL_STATUSES,
+  CONFLICT_SEVERITIES,
+  CONFLICT_STATUSES,
+  EVIDENCE_GRADES,
+  IMAGE_POLICY_STATUSES,
+  PUSH_METHODS,
+  RULE_COMPONENTS,
+  RULE_LANGUAGES,
+  RULE_MARKETS,
+  RULE_OUTCOMES,
+  RULE_SEVERITIES,
+  RULE_STATUSES,
+  RULESET_STATUSES,
+  type ChannelMargins,
+  type RuleAudience,
+  type RulesetSnapshot,
+  type Size,
+} from "../catalog/rules/types";
 
 // ---------------------------------------------------------------------------
 // Value lists that exist only in the database contract
@@ -180,6 +206,15 @@ const updatedAt = () =>
   timestamp("updated_at", { withTimezone: true }).notNull().defaultNow().$onUpdate(() => new Date());
 const tsNull = (name: string) => timestamp(name, { withTimezone: true });
 const money = (name: string) => numeric(name, { precision: 12, scale: 6, mode: "number" });
+/**
+ * jsonb for any JSON value, string scalars included. Drizzle's `jsonb` parses the value the driver hands back a second
+ * time, but pg and PGlite already parse jsonb, so a stored string "482" reads back as the number 482. This keeps the
+ * driver's value as it is. Same SQL type, so migrations do not change.
+ */
+const jsonExact = customType<{ data: unknown; driverData: string }>({
+  dataType: () => "jsonb",
+  toDriver: (value) => JSON.stringify(value),
+});
 
 /** `"col" IN ('a', 'b', ...)` for a CHECK constraint. Values are fixed literals from this repo. */
 function inList(col: AnyPgColumn, values: readonly string[]): SQL {
@@ -310,9 +345,13 @@ export const catalogBatches = pgTable(
     startedAt: tsNull("started_at"),
     finishedAt: tsNull("finished_at"),
     updatedAt: updatedAt(),
+    /** M12-S1 (0016): the settings this batch read once at Start and keeps to the end; null before Start and on older batches. */
+    settingsSnapshotId: text("settings_snapshot_id"),
   },
   (t) => [
     index("catalog_batches_brand_slug_idx").on(t.brandSlug),
+    // Named: the generated name is longer than Postgres's 63-character limit.
+    foreignKey({ name: "catalog_batches_settings_snapshot_id_fk", columns: [t.settingsSnapshotId], foreignColumns: [catalogSettingsSnapshots.id] }),
     enumCheck("catalog_batches", "status", t.status, BATCH_STATUSES),
     enumCheck("catalog_batches", "product_type", t.productType, PRODUCT_TYPES),
   ],
@@ -540,6 +579,8 @@ export const catalogOutputs = pgTable(
     error: text("error"),
     /** M0 (0009): the content version this render is (F2-R2); null on rows written before M0-S3. */
     contentVersionId: uuid("content_version_id"),
+    /** M12-S1 (0016): the settings snapshot of the batch that made it (its version set); null on rows from before. */
+    settingsSnapshotId: text("settings_snapshot_id"),
     createdAt: createdAt(),
     updatedAt: updatedAt(),
   },
@@ -548,9 +589,12 @@ export const catalogOutputs = pgTable(
     index("catalog_outputs_content_version_id_idx").on(t.contentVersionId).where(sql`${t.contentVersionId} IS NOT NULL`),
     // Named: the generated name is longer than Postgres's 63-character limit.
     foreignKey({ name: "catalog_outputs_content_version_id_fk", columns: [t.contentVersionId], foreignColumns: [catalogContentVersions.id] }).onDelete("set null"),
+    foreignKey({ name: "catalog_outputs_settings_snapshot_id_fk", columns: [t.settingsSnapshotId], foreignColumns: [catalogSettingsSnapshots.id] }),
     index("catalog_outputs_product_id_idx").on(t.productId),
     // Exactly one live row per (product, channel, n).
     uniqueIndex("catalog_outputs_live_uq").on(t.productId, t.channel, t.n).where(sql`${t.isLive}`),
+    // M1-S4 (0015): the improvement sweep's candidates, the live provisional plain renders, by first delivery.
+    index("catalog_outputs_provisional_plain_idx").on(t.publishedAt).where(sql`${t.isLive} AND ${t.status} = 'verified' AND ${t.flags} @> '["provisional", "enlargement_failed"]'::jsonb`),
     enumCheck("catalog_outputs", "channel", t.channel, CHANNEL_IDS),
     enumCheck("catalog_outputs", "status", t.status, OUTPUT_STATUSES),
     enumCheck("catalog_outputs", "decision", t.decision, DECISIONS),
@@ -904,6 +948,36 @@ export const catalogKeyMappings = pgTable(
     enumCheck("catalog_key_mappings", "channel", t.channel, CHANNEL_IDS),
     enumCheck("catalog_key_mappings", "market", t.market, MARKETS),
     enumCheck("catalog_key_mappings", "key_kind", t.keyKind, KEY_KINDS),
+  ],
+);
+
+/** One listing a conflicting key points at (F1-R5). */
+export type KeyConflictCandidate = { listingId: string; optionId: string; opptraSku: string | null; source: string };
+
+/**
+ * Keys that point at two or more listings (F1-R5, migration 0013). Such a key is not written to catalog_listing_keys; it
+ * is listed here with every candidate for the Ops page and the export (`catalog_os.key_conflicts`). Rebuilt by the graph
+ * sync: a conflict seen again keeps its row, one no longer seen gets `resolved_at`. Never deleted.
+ */
+export const catalogKeyConflicts = pgTable(
+  "catalog_key_conflicts",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: orgId(),
+    channel: text("channel", { enum: CHANNEL_IDS }).$type<ChannelId>().notNull(),
+    market: text("market", { enum: MARKETS }).notNull(),
+    keyKind: text("key_kind", { enum: KEY_KINDS }).notNull(),
+    keyValue: text("key_value").notNull(),
+    candidates: jsonb("candidates").$type<KeyConflictCandidate[]>().notNull(),
+    firstSeenAt: timestamp("first_seen_at", { withTimezone: true }).notNull().defaultNow(),
+    lastSeenAt: timestamp("last_seen_at", { withTimezone: true }).notNull().defaultNow(),
+    resolvedAt: tsNull("resolved_at"),
+  },
+  (t) => [
+    unique("catalog_key_conflicts_org_key_uq").on(t.orgId, t.channel, t.market, t.keyKind, t.keyValue),
+    enumCheck("catalog_key_conflicts", "channel", t.channel, CHANNEL_IDS),
+    enumCheck("catalog_key_conflicts", "market", t.market, MARKETS),
+    enumCheck("catalog_key_conflicts", "key_kind", t.keyKind, KEY_KINDS),
   ],
 );
 
@@ -1270,6 +1344,7 @@ export type CatalogCostEvent = typeof catalogCostEvents.$inferSelect;
 export type CatalogOption = typeof catalogOptions.$inferSelect;
 export type CatalogChannelListing = typeof catalogChannelListings.$inferSelect;
 export type CatalogListingKey = typeof catalogListingKeys.$inferSelect;
+export type CatalogKeyConflict = typeof catalogKeyConflicts.$inferSelect;
 export type CatalogAsset = typeof catalogAssets.$inferSelect;
 export type CatalogContentVersion = typeof catalogContentVersions.$inferSelect;
 export type CatalogChangeEvent = typeof catalogChangeEvents.$inferSelect;
@@ -1349,3 +1424,368 @@ export const vendorRouteChanges = pgTable(
 
 export type VendorRouteRow = typeof vendorRoutes.$inferSelect;
 export type VendorRouteChange = typeof vendorRouteChanges.$inferSelect;
+
+// ---------------------------------------------------------------------------
+// M1 intake and auto-decide (M1-S3, migration 0014)
+// ---------------------------------------------------------------------------
+
+/**
+ * M1-F3-R1: the auto-decide rule table. Each hold cause the QA triage finds maps to an automatic action, for one
+ * channel or for every channel (`*`); a channel row wins over the `*` row. The id is `<cause>:<channel>`, recorded on
+ * every output a rule decided. Seeded by migration 0014 with the M1-F3-R1 defaults. Start copies the enabled rules
+ * into the batch (`options.autoDecide`), so a change applies to the next batch, never to one already running.
+ */
+export const catalogAutoDecideRules = pgTable(
+  "catalog_auto_decide_rules",
+  {
+    id: text("id").primaryKey(),
+    cause: text("cause", { enum: HOLD_CAUSES }).notNull(),
+    channel: text("channel", { enum: AUTO_DECIDE_CHANNELS }).notNull(),
+    action: text("action", { enum: AUTO_DECIDE_ACTIONS }).notNull(),
+    enabled: boolean("enabled").notNull().default(true),
+    updatedBy: text("updated_by").notNull(),
+    updatedAt: updatedAt(),
+  },
+  (t) => [
+    uniqueIndex("catalog_auto_decide_rules_cause_channel_uq").on(t.cause, t.channel),
+    enumCheck("catalog_auto_decide_rules", "cause", t.cause, HOLD_CAUSES),
+    enumCheck("catalog_auto_decide_rules", "channel", t.channel, AUTO_DECIDE_CHANNELS),
+    enumCheck("catalog_auto_decide_rules", "action", t.action, AUTO_DECIDE_ACTIONS),
+  ],
+);
+
+export type AutoDecideRuleRow = typeof catalogAutoDecideRules.$inferSelect;
+
+/**
+ * M1-S4 (M1-F3-R4, R5): the improvement of one photo whose plain render a batch delivered `provisional` because the
+ * upscaler could not enlarge it. One row per batch and photo: how many tries were made (bounded by IMPROVE_MAX_TRIES
+ * within IMPROVE_WINDOW_MS, catalog/improve.ts), when the last one started, and when the photo's slots were found no
+ * longer provisional (`improved_at`, the "improved within 72 h" measure). Kept apart from the output's `compliance`,
+ * which every render rewrites.
+ */
+export const catalogImprovements = pgTable(
+  "catalog_improvements",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    batchId: uuid("batch_id")
+      .notNull()
+      .references(() => catalogBatches.id, { onDelete: "cascade" }),
+    productId: uuid("product_id").notNull(),
+    sourceImageId: uuid("source_image_id").notNull(),
+    tries: integer("tries").notNull().default(0),
+    lastTriedAt: tsNull("last_tried_at"),
+    improvedAt: tsNull("improved_at"),
+    /**
+     * The photo's outputs as they were delivered (rows of catalog_outputs as JSON), kept while a try runs: a re-made slot
+     * that does not pass is put back from it, so a failed try never downgrades a delivered link (null between tries).
+     */
+    previous: jsonb("previous").$type<Record<string, unknown>[]>(),
+    /** When the photo stopped being a candidate without being improved, and why (IMPROVEMENT_END_REASONS). */
+    endedAt: tsNull("ended_at"),
+    endReason: text("end_reason", { enum: IMPROVEMENT_END_REASONS }),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (t) => [
+    uniqueIndex("catalog_improvements_batch_photo_uq").on(t.batchId, t.sourceImageId),
+    enumCheck("catalog_improvements", "end_reason", t.endReason, IMPROVEMENT_END_REASONS),
+  ],
+);
+
+export type CatalogImprovement = typeof catalogImprovements.$inferSelect;
+
+// ---------------------------------------------------------------------------
+// M12-S1 settings store (migration 0016). Written only through settings/store.ts; the structure of each setting is
+// code (settings/registry.ts), the values are rows here.
+// ---------------------------------------------------------------------------
+
+/**
+ * Every value a setting has had, append-only: `setting.changed` (M12 3.2) is this row. The current value at one level
+ * (`scope_key`) is the highest `version` there. `value` null means no value at this level, so the level above applies
+ * (a revert of a first override writes it). `scope_key` is the canonical form of `scope`: '' for the programme
+ * default, else `channel=noon;category=fashion.footwear;brand=campus` with only the levels set, in that order.
+ */
+export const catalogSettingVersions = pgTable(
+  "catalog_setting_versions",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: orgId(),
+    key: text("key").notNull(),
+    scopeKey: text("scope_key").notNull().default(""),
+    scope: jsonb("scope").$type<SettingScope>().notNull().default({}),
+    version: integer("version").notNull(),
+    value: jsonb("value").$type<SettingValue | null>(),
+    schemaVersion: integer("schema_version").notNull(),
+    changedBy: text("changed_by").notNull(),
+    reason: text("reason"),
+    /** Set on a revert: the version whose change this one undoes. */
+    revertsVersionId: uuid("reverts_version_id"),
+    createdAt: createdAt(),
+  },
+  (t) => [
+    uniqueIndex("catalog_setting_versions_org_key_scope_version_uq").on(t.orgId, t.key, t.scopeKey, t.version),
+    foreignKey({ name: "catalog_setting_versions_reverts_version_id_fk", columns: [t.revertsVersionId], foreignColumns: [t.id] }),
+    check("catalog_setting_versions_version_check", sql`${t.version} >= 1`),
+  ],
+);
+
+/**
+ * The version set one batch runs with (M12 3.3 rules 1 and 2): every current setting version at Start, the registry
+ * defaults then in force and the taxonomy revision. Immutable. Batches and outputs point here; M0 content versions
+ * carry the same id in `settings_snapshot_id`. Text id (a UUID string) to match that column.
+ */
+export const catalogSettingsSnapshots = pgTable(
+  "catalog_settings_snapshots",
+  {
+    id: text("id").primaryKey(),
+    orgId: orgId(),
+    batchId: uuid("batch_id").references((): AnyPgColumn => catalogBatches.id, { onDelete: "set null" }),
+    data: jsonb("data").$type<SettingsSnapshotData>().notNull(),
+    createdBy: text("created_by").notNull(),
+    createdAt: createdAt(),
+  },
+  (t) => [index("catalog_settings_snapshots_batch_id_idx").on(t.batchId)],
+);
+
+export type SettingVersionRow = typeof catalogSettingVersions.$inferSelect;
+export type SettingsSnapshotRow = typeof catalogSettingsSnapshots.$inferSelect;
+
+// ---------------------------------------------------------------------------
+// M5 channel rules (M5-S1). Rules, channel records and image policies are append-only versions: an edit inserts a new
+// version row tagged with the ruleset version it takes effect in, so every ruleset version can be rebuilt and the
+// history is the table itself. Written only through catalog/rules/store.ts, which holds one advisory lock per write.
+// ---------------------------------------------------------------------------
+
+const PRIORITY_GROUPS = ["P1", "P2"] as const;
+const ANCHORS = ["centre", "bottom-centre"] as const;
+
+/** One ruleset version. Draft while its rows are written; published with a frozen snapshot. */
+export const catalogRulesets = pgTable(
+  "catalog_rulesets",
+  {
+    version: integer("version").primaryKey(),
+    status: text("status", { enum: RULESET_STATUSES }).notNull(),
+    reason: text("reason").notNull(),
+    changedRuleIds: jsonb("changed_rule_ids").$type<string[]>().notNull().default([]),
+    createdBy: text("created_by").notNull(),
+    createdAt: createdAt(),
+    publishedBy: text("published_by"),
+    publishedAt: tsNull("published_at"),
+  },
+  (t) => [
+    enumCheck("catalog_rulesets", "status", t.status, RULESET_STATUSES),
+    check("catalog_rulesets_version_check", sql`${t.version} >= 1`),
+  ],
+);
+
+/** The frozen snapshot of a published ruleset version (M5 3.3): a batch pins one and uses it from start to end. */
+export const catalogRulesetSnapshots = pgTable("catalog_ruleset_snapshots", {
+  version: integer("version")
+    .primaryKey()
+    .references(() => catalogRulesets.version),
+  hash: text("hash").notNull(),
+  body: jsonb("body").$type<RulesetSnapshot>().notNull(),
+  createdAt: createdAt(),
+});
+
+/** Every version of every rule (M5 3.2 `Rule`). Never updated: an edit is a new (rule_id, version) row. */
+export const catalogRules = pgTable(
+  "catalog_rules",
+  {
+    ruleId: text("rule_id").notNull(),
+    version: integer("version").notNull(),
+    rulesetVersion: integer("ruleset_version")
+      .notNull()
+      .references(() => catalogRulesets.version),
+    channel: text("channel").notNull(),
+    market: text("market", { enum: RULE_MARKETS }),
+    /** M2 taxonomy node ids, or ["all"]. */
+    categoryScope: jsonb("category_scope").$type<string[]>().notNull(),
+    /** The dataset's own scope word or list, kept exactly (M5-F1-R2). */
+    datasetScope: jsonExact("dataset_scope"),
+    audience: jsonb("audience").$type<RuleAudience[]>(),
+    brandScope: text("brand_scope").notNull().default("all"),
+    language: text("language", { enum: RULE_LANGUAGES }).notNull(),
+    component: text("component", { enum: RULE_COMPONENTS }).notNull(),
+    field: text("field").notNull(),
+    operator: text("operator").notNull(),
+    value: jsonExact("value"),
+    text: text("text"),
+    declaredSeverity: text("declared_severity", { enum: RULE_SEVERITIES }).notNull(),
+    evidence: text("evidence", { enum: EVIDENCE_GRADES }).notNull(),
+    confirmedBy: text("confirmed_by"),
+    source: text("source").notNull(),
+    conflictsWith: jsonb("conflicts_with").$type<string[]>().notNull().default([]),
+    checkable: boolean("checkable").notNull(),
+    judgeMethod: text("judge_method"),
+    status: text("status", { enum: RULE_STATUSES }).notNull(),
+    reason: text("reason").notNull(),
+    createdBy: text("created_by").notNull(),
+    createdAt: createdAt(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.ruleId, t.version] }),
+    index("catalog_rules_ruleset_version_idx").on(t.rulesetVersion),
+    enumCheck("catalog_rules", "market", t.market, RULE_MARKETS),
+    enumCheck("catalog_rules", "language", t.language, RULE_LANGUAGES),
+    enumCheck("catalog_rules", "component", t.component, RULE_COMPONENTS),
+    enumCheck("catalog_rules", "declared_severity", t.declaredSeverity, RULE_SEVERITIES),
+    enumCheck("catalog_rules", "evidence", t.evidence, EVIDENCE_GRADES),
+    enumCheck("catalog_rules", "status", t.status, RULE_STATUSES),
+    check("catalog_rules_reason_check", sql`btrim(${t.reason}) <> ''`),
+  ],
+);
+
+/** The conflict register (M5-F2): sets of rules that cannot all hold, with options and a recommendation. */
+export const catalogRuleConflicts = pgTable(
+  "catalog_rule_conflicts",
+  {
+    id: text("id").primaryKey(),
+    topic: text("topic").notNull(),
+    severity: text("severity", { enum: CONFLICT_SEVERITIES }).notNull(),
+    ruleIds: jsonb("rule_ids").$type<string[]>().notNull(),
+    options: jsonb("options").$type<string[]>().notNull(),
+    recommendation: text("recommendation").notNull(),
+    reasoning: text("reasoning").notNull(),
+    status: text("status", { enum: CONFLICT_STATUSES }).notNull(),
+    /** The decision in force; null while open. */
+    decisionId: text("decision_id").references((): AnyPgColumn => catalogRuleDecisions.id),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (t) => [
+    enumCheck("catalog_rule_conflicts", "severity", t.severity, CONFLICT_SEVERITIES),
+    enumCheck("catalog_rule_conflicts", "status", t.status, CONFLICT_STATUSES),
+  ],
+);
+
+/** Every conflict decision ever made (append-only), with who, when, why and the ruleset version it published. */
+export const catalogRuleDecisions = pgTable(
+  "catalog_rule_decisions",
+  {
+    id: text("id").primaryKey(),
+    conflictId: text("conflict_id")
+      .notNull()
+      .references(() => catalogRuleConflicts.id),
+    option: text("option").notNull(),
+    reason: text("reason").notNull(),
+    decidedBy: text("decided_by").notNull(),
+    decidedAt: timestamp("decided_at", { withTimezone: true }).notNull(),
+    rulesetVersion: integer("ruleset_version")
+      .notNull()
+      .references(() => catalogRulesets.version),
+    createdAt: createdAt(),
+  },
+  (t) => [index("catalog_rule_decisions_conflict_id_idx").on(t.conflictId)],
+);
+
+/** The channel registry (M5-F1-R3): every version of every channel record. Replaces the constants in channels.ts. */
+export const catalogChannelRecords = pgTable(
+  "catalog_channel_records",
+  {
+    channelId: text("channel_id").notNull(),
+    version: integer("version").notNull(),
+    rulesetVersion: integer("ruleset_version")
+      .notNull()
+      .references(() => catalogRulesets.version),
+    label: text("label").notNull(),
+    group: text("group", { enum: PRIORITY_GROUPS }).notNull(),
+    minCanvas: jsonb("min_canvas").$type<Size>().notNull(),
+    targetCanvas: jsonb("target_canvas").$type<Size>().notNull(),
+    margins: jsonb("margins").$type<ChannelMargins>().notNull(),
+    anchor: text("anchor", { enum: ANCHORS }).notNull(),
+    background: text("background").notNull(),
+    firstImageBackground: text("first_image_background"),
+    dpi: integer("dpi").notNull(),
+    fixedCanvas: boolean("fixed_canvas").notNull(),
+    uniformScaleDefault: boolean("uniform_scale_default").notNull(),
+    sheetText: text("sheet_text").notNull(),
+    notes: text("notes"),
+    markets: jsonb("markets").$type<string[]>().notNull().default([]),
+    languages: jsonb("languages").$type<string[]>().notNull().default([]),
+    status: text("status", { enum: CHANNEL_STATUSES }).notNull(),
+    pushMethod: text("push_method", { enum: PUSH_METHODS }),
+    fileKind: text("file_kind"),
+    owner: text("owner"),
+    reason: text("reason").notNull(),
+    createdBy: text("created_by").notNull(),
+    createdAt: createdAt(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.channelId, t.version] }),
+    enumCheck("catalog_channel_records", "group", t.group, PRIORITY_GROUPS),
+    enumCheck("catalog_channel_records", "anchor", t.anchor, ANCHORS),
+    enumCheck("catalog_channel_records", "status", t.status, CHANNEL_STATUSES),
+    enumCheck("catalog_channel_records", "push_method", t.pushMethod, PUSH_METHODS),
+  ],
+);
+
+/** The image set policy per channel x taxonomy node (M3-F4, stored in M5), every version. */
+export const catalogImagePolicies = pgTable(
+  "catalog_image_policies",
+  {
+    channelId: text("channel_id").notNull(),
+    nodeId: text("node_id")
+      .notNull()
+      .references(() => catalogTaxonomyNodes.id),
+    version: integer("version").notNull(),
+    rulesetVersion: integer("ruleset_version")
+      .notNull()
+      .references(() => catalogRulesets.version),
+    roles: jsonb("roles").$type<string[]>().notNull(),
+    addOns: jsonb("add_ons").$type<string[]>().notNull().default([]),
+    minCount: integer("min_count"),
+    maxCount: integer("max_count"),
+    evidence: text("evidence", { enum: EVIDENCE_GRADES }).notNull(),
+    source: text("source").notNull(),
+    status: text("status", { enum: IMAGE_POLICY_STATUSES }).notNull(),
+    reason: text("reason").notNull(),
+    createdBy: text("created_by").notNull(),
+    createdAt: createdAt(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.channelId, t.nodeId, t.version] }),
+    enumCheck("catalog_image_policies", "evidence", t.evidence, EVIDENCE_GRADES),
+    enumCheck("catalog_image_policies", "status", t.status, IMAGE_POLICY_STATUSES),
+  ],
+);
+
+/**
+ * One result per rule checked for one M0 content version on one channel under one ruleset version (M5 3.4 need 2,
+ * decision D3), so a later readout can say which rules a live listing passed. Writing the same check twice keeps the
+ * first row.
+ */
+export const catalogRuleResults = pgTable(
+  "catalog_rule_results",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    contentVersionId: uuid("content_version_id")
+      .notNull()
+      .references(() => catalogContentVersions.id),
+    rulesetVersion: integer("ruleset_version")
+      .notNull()
+      .references(() => catalogRulesets.version),
+    channel: text("channel").notNull(),
+    ruleId: text("rule_id").notNull(),
+    ruleVersion: integer("rule_version").notNull(),
+    outcome: text("outcome", { enum: RULE_OUTCOMES }).notNull(),
+    effectiveSeverity: text("effective_severity", { enum: RULE_SEVERITIES }).notNull(),
+    measured: jsonExact("measured"),
+    message: text("message").notNull(),
+    createdAt: createdAt(),
+  },
+  (t) => [
+    uniqueIndex("catalog_rule_results_version_rule_uq").on(t.contentVersionId, t.rulesetVersion, t.channel, t.ruleId),
+    index("catalog_rule_results_ruleset_version_idx").on(t.rulesetVersion),
+    enumCheck("catalog_rule_results", "outcome", t.outcome, RULE_OUTCOMES),
+    enumCheck("catalog_rule_results", "effective_severity", t.effectiveSeverity, RULE_SEVERITIES),
+  ],
+);
+
+export type RulesetRow = typeof catalogRulesets.$inferSelect;
+export type RuleRow = typeof catalogRules.$inferSelect;
+export type RuleConflictRow = typeof catalogRuleConflicts.$inferSelect;
+export type RuleDecisionRow = typeof catalogRuleDecisions.$inferSelect;
+export type ChannelRecordRow = typeof catalogChannelRecords.$inferSelect;
+export type ImagePolicyRow = typeof catalogImagePolicies.$inferSelect;
+export type RuleResultRow = typeof catalogRuleResults.$inferSelect;

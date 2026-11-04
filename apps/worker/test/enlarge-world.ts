@@ -21,6 +21,7 @@ import { handleEnlargeTask, type EnlargeCall, type EnlargeProbe } from "../src/c
 import { handlePublishTask } from "../src/catalog/publish";
 import { handleFinalizeTask } from "../src/catalog/finalize";
 import { handleSweep } from "../src/catalog/sweep";
+import { handleImproveTask, IMPROVE_ROUTE } from "../src/catalog/improve";
 import { repairOwnDefects } from "../src/catalog/qa-stage";
 import { fakeWorld, seedBatch, type FakeWorld, type QueuedTask } from "./catalog-fakes";
 
@@ -195,6 +196,7 @@ export async function deliver(w: FakeWorld, task: QueuedTask): Promise<HandleRes
     case "/tasks/catalog/enlarge": return handleEnlargeTask(w.deps, task.body);
     case "/tasks/catalog/publish": return handlePublishTask(w.deps, task.body);
     case "/tasks/catalog/finalize": return handleFinalizeTask(w.deps, task.body);
+    case IMPROVE_ROUTE: return handleImproveTask(w.deps, task.body);
     default: return { httpStatus: 200, outcome: "ignored" };
   }
 }
