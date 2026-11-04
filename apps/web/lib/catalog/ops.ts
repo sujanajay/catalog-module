@@ -13,6 +13,7 @@ import { catalogBatches, catalogChunks, catalogEnlargements, catalogOutputs } fr
 import { enlargementFailed, enlargementQueued } from "@catalog/core/catalog/pipeline/enlargement";
 import { ENLARGEMENT_WAITING_LONG_MS } from "@catalog/core/catalog/invariants/checks";
 import type { BatchStatus } from "@catalog/core/catalog/types";
+import { reliabilitySummary } from "@catalog/core/catalog/reliability";
 import { batchCostAttribution, batchCostByEngine, batchCostByStage, brandCostTotals, dayCostTotals, BRAND_REPORT_DAYS } from "@catalog/core/catalog/cost-report";
 import { db, type Db } from "../db";
 import { log } from "@catalog/core/log";
@@ -201,6 +202,15 @@ export function batchCostDetail(batchId: string, conn: Db = db(), now: Date = ne
     const attribution = await batchCostAttribution(tx, batchId, { top: 10 });
     return { batch, stages, engines, attribution, readAt: now };
   })));
+}
+
+/**
+ * M6-S6 (M6-F3-R5): the reliability card's numbers for [from, to) (default the 30 days to `now`), kept for COST_TTL_MS
+ * per window; a read that fails shows a plain sentence. The outcome and incident tables are small (one row per batch).
+ */
+export function reliability(conn: Db = db(), now: Date = new Date(), from?: Date) {
+  const key = `reliability:${from ? +from : "30d"}:${from ? +now : ""}`;
+  return report("reliability", () => rememberCost(key, +now, COST_TTL_MS, () => reportRead(conn, (tx) => reliabilitySummary(tx, now, from))));
 }
 
 // Spec 17 3.1.5: the health lines. The invariants run (sweep, every 10 minutes) keeps silentOutputs,

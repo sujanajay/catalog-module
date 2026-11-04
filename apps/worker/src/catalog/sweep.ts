@@ -12,7 +12,8 @@ import { enqueueTask } from "@catalog/core/tasks";
 import { log } from "@catalog/core/log";
 import { recoverBatchChunks } from "@catalog/core/catalog/pipeline/dispatch";
 import { ENLARGING_TASK } from "@catalog/core/catalog/pipeline/enlargement";
-import { runInvariants } from "@catalog/core/catalog/invariants/run";
+import { runInvariants, type InvariantResult } from "@catalog/core/catalog/invariants/run";
+import { refreshOutcomes, syncIncidents } from "@catalog/core/catalog/reliability";
 import { enqueueFinalize, finalizeEnqueueExpired, finalizePendingFlag } from "./deps";
 
 /** No progress for this long fails the batch (2 hours, from the plan). */
@@ -112,7 +113,8 @@ export async function handleSweep(deps: SweepDeps, _body: Record<string, unknown
   catch (error) { log("ERROR", "ingest re-send failed", { error: error instanceof Error ? error.message : String(error) }); }
   // Spec 17 3.1.3: the invariants, every sweep (10 minutes). A failed check run never stops the sweep.
   // Spec 17 3.1.3: the invariants never stop the sweep, but a failed run is an ERROR (the checks went blind).
-  try { await runInvariants(deps.db, log, now); } catch (error) { log("ERROR", "invariants run failed", { error: error instanceof Error ? error.message : String(error) }); }
+  let invariants: InvariantResult[] | undefined;
+  try { invariants = (await runInvariants(deps.db, log, now)).results; } catch (error) { log("ERROR", "invariants run failed", { error: error instanceof Error ? error.message : String(error) }); }
   const cutoff = new Date(now.getTime() - SWEEP_STALE_MS).toISOString();
   const statuses = sql.join(
     SWEEPABLE_STATUSES.map((s) => sql`${s}`),
@@ -149,7 +151,22 @@ export async function handleSweep(deps: SweepDeps, _body: Record<string, unknown
     log("ERROR", "batch failed", { batchId: s.batchId, reason: SWEEP_ERROR, cause: "swept" });
   }
 
+  // M6-S6 (M6-F3): incidents (stalls, failed batches and chunks, ERROR invariants) and the outcomes of batches that ended
+  // in the last 24 hours, after this run's own failures so they are counted. Neither ever stops the sweep.
+  await recordReliability(deps.db, now, invariants);
+
   return { httpStatus: 200, outcome: `swept:${swept.length}${expired.length ? `; expired:${expired.length}` : ""}` };
+}
+
+/** M6-S6: the sweep's incident and outcome passes; a failure is logged as an ERROR and never thrown. */
+export async function recordReliability(db: Db, now: Date, invariants?: InvariantResult[]): Promise<void> {
+  try {
+    const sync = await syncIncidents(db, now, invariants ? { invariants } : {});
+    if (sync.errors.length) log("ERROR", "incident pass failed", { errors: sync.errors });
+    if (sync.opened || sync.resolved) log("INFO", "incidents", { event: "incidents", opened: sync.opened, resolved: sync.resolved });
+  } catch (error) { log("ERROR", "incident pass failed", { error: error instanceof Error ? error.message : String(error) }); }
+  try { await refreshOutcomes(db, now); }
+  catch (error) { log("ERROR", "batch outcome pass failed", { error: error instanceof Error ? error.message : String(error) }); }
 }
 
 /** M6-F2-R4: see handleSweep. Returns the batches whose intake was re-sent. */

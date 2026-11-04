@@ -41,6 +41,8 @@ const TABLES = [
   // 0010_taxonomy.sql (M2-S1 taxonomy store)
   "catalog_taxonomy_nodes", "catalog_attribute_defs", "catalog_shot_roles", "catalog_taxonomy_changes",
   "vendor_routes", "vendor_route_changes", // 0011_vendor_routes.sql (M7-S2)
+  // 0017_batch_outcomes_incidents.sql (M6-S6)
+  "catalog_batch_outcomes", "catalog_incidents", "catalog_batch_touches", "catalog_revisions",
 ];
 
 const INDEXES = [
@@ -55,6 +57,8 @@ const INDEXES = [
   "catalog_cost_events_batch_id_idx", "catalog_cost_events_brand_slug_at_idx", "catalog_cost_events_output_id_idx",
   "catalog_cost_events_at_idx",
   "vendor_routes_capability_adapter_model_uq", "vendor_routes_capability_rank_idx", "vendor_route_changes_route_id_at_idx",
+  "catalog_batch_outcomes_ended_at_idx", "catalog_incidents_kind_started_at_idx", "catalog_incidents_batch_id_idx",
+  "catalog_incidents_dedupe_key_uq", "catalog_batch_touches_batch_id_idx", "catalog_revisions_first_seen_at_idx",
 ];
 
 describe("generated migrations", () => {

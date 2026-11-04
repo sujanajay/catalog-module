@@ -125,7 +125,8 @@ async function enlargeInProcess(deps:CatalogDeps,chunkId:string):Promise<boolean
 export async function handleChunkTask(rawDeps: CatalogDeps, body: Record<string,unknown>, opts: HandleOptions = {}): Promise<HandleResult> {
   if (typeof body.chunkId !== "string") return {httpStatus:400,outcome:"chunkId is required"};
   let [chunk] = await rawDeps.db.select().from(catalogChunks).where(eq(catalogChunks.id,body.chunkId));
-  if (!chunk) return {httpStatus:200,outcome:"not_found"};
+  // M6-F3-R6: one INFO line per delivery outcome, the early ones included.
+  if (!chunk) { rawDeps.log("chunk delivery",{chunkId:body.chunkId,outcome:"not_found"}); return {httpStatus:200,outcome:"not_found"}; }
   const steps:DeliverySteps = {download:0,prepare:0,matte:0,guard:0,render:0,upscale:0,judge:0,write:0};
   const deps = timedDeps(rawDeps,steps);
   const started = deps.now(), claim = randomUUID(); let mattingMs = 0, renderMs = 0;
@@ -212,8 +213,8 @@ export async function handleChunkTask(rawDeps: CatalogDeps, body: Record<string,
     return {matte,action:action("passed",matte.model),call:matte};
   }
   const [batch] = await deps.db.select().from(catalogBatches).where(eq(catalogBatches.id,chunk.batchId));
-  if (!batch || batch.status === "failed") return {httpStatus:200,outcome:"stopped"};
-  if (chunk.status === "done" || chunk.status === "failed") { await finish(); return {httpStatus:200,outcome:chunk.status}; }
+  if (!batch || batch.status === "failed") return answer(200,"stopped");
+  if (chunk.status === "done" || chunk.status === "failed") { await finish(); return answer(200,chunk.status); }
   // Spec 15 E3: only the chunk's current task may claim it. A legacy task (from before 0004, no step) may adopt
   // a row from before 0004, or one queued by old code that no window ever dispatched.
   if (bodyStep !== undefined ? body.stage !== chunk.stage || bodyStep !== chunk.step : chunk.stepKnown && chunk.dispatchedAt !== null) return answer(200,"stale");

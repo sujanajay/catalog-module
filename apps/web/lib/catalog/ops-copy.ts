@@ -2,7 +2,7 @@
 // and no database here, so vitest covers it in the node environment. Engines and steps are named by what
 // they do ("cut-out", "image making", "quality check"), never by a model id.
 import { inrAmount, usdAmount } from "@catalog/core/catalog/cost";
-import type { CostStage } from "@catalog/core/db/schema";
+import type { CostStage, IncidentKind } from "@catalog/core/db/schema";
 import type { BatchStatus } from "@catalog/core/catalog/types";
 import type { StageCost } from "@catalog/core/catalog/cost-report";
 import { plural } from "./copy";
@@ -183,4 +183,38 @@ export function healthLines(h: HealthSummary, gpuCandidate: string | null | unde
     ...(h.plainAccepted ? [`${HEALTH_WORDS.plainAccepted}: ${h.plainAccepted}`] : []),
     ...(h.startedBeforeEnlargement ? [`${HEALTH_WORDS.startedBeforeEnlargement}: ${h.startedBeforeEnlargement}`] : []),
   ];
+}
+
+/** M6-S6 (M6-F3-R5): the reliability card. Kinds and causes in plain words; the raw codes stay in the database. */
+export const RELIABILITY_TITLE = "Reliability";
+export const RELIABILITY_HELP = "A batch succeeds when its links are ready with no person stepping in and nothing going wrong on our side. Test batches, and batches cancelled within 10 minutes of starting, are left out.";
+export const INCIDENT_KIND_WORDS: Record<IncidentKind, string> = {
+  stall: "No progress",
+  batch_failed: "Batch stopped",
+  chunk_gave_up: "Photos gave up after retries",
+  invariant: "Check found a problem",
+  http_5xx: "Server problems",
+  deploy_refused: "Release refused",
+  contamination: "Listing changed outside the tool",
+  alert: "Alert",
+};
+/** "96% (24 of 25 batches)", or "No batches finished" when none counted. */
+export function successRateText(r: { successes: number; counted: number; rate: number | null }): string {
+  if (r.rate === null) return "No batches finished";
+  return `${Math.floor(r.rate * 1000) / 10}% (${r.successes} of ${r.counted} ${plural(r.counted, "batch", "batches")})`;
+}
+/** "Last 7 days: 96% (24 of 25 batches), under the 99% target". */
+export function successRateLine(r: { days: number; successes: number; counted: number; rate: number | null }, target: number): string {
+  const under = r.rate !== null && r.rate < target ? `, under the ${Math.round(target * 100)}% target` : "";
+  return `Last ${r.days} days: ${successRateText(r)}${under}`;
+}
+/** "12 min", "3 h 5 min". */
+export function durationText(ms: number): string {
+  const minutes = Math.round(ms / 60_000);
+  return minutes < 60 ? `${minutes} min` : `${Math.floor(minutes / 60)} h ${minutes % 60} min`;
+}
+/** How long an incident lasted, or that it is still open. */
+export function incidentDurationText(i: { startedAt: Date; resolvedAt: Date | null }): string {
+  if (!i.resolvedAt) return "still open";
+  return +i.resolvedAt === +i.startedAt ? "one-off" : `resolved after ${durationText(+i.resolvedAt - +i.startedAt)}`;
 }

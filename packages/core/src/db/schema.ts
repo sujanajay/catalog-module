@@ -113,6 +113,23 @@ export const COST_KINDS = ["llm_call", "matte_call", "render", "upscale_call", "
 export const COST_OUTCOMES = ["ok", "failed", "rate_limited", "cap", "fallback", "timeout", "killed", "duplicate"] as const;
 
 /**
+ * M6-S6 (M6-F3-R2) catalog_incidents.kind: anything that stopped or slowed a batch without the operator causing it.
+ * Written today: `stall` (no progress), `batch_failed`, `chunk_gave_up`, `invariant` (an ERROR check). Reserved for
+ * their writers: `http_5xx` (a 5xx burst in a batch window), `deploy_refused`, `contamination` (M0), `alert`
+ * (infra/monitoring.sh).
+ */
+export const INCIDENT_KINDS = ["stall", "batch_failed", "chunk_gave_up", "invariant", "http_5xx", "deploy_refused", "contamination", "alert"] as const;
+export const INCIDENT_SEVERITIES = ["warning", "error"] as const;
+/**
+ * M6-S6 (M6-F3-R3) catalog_batch_touches.action: the operator writes on a batch or its photos after its upload that
+ * count against "no person" (a decision, a retry, Fix and continue, a cancel). The wizard's own path (create, add
+ * inputs, Continue, review, Start) is not a touch.
+ */
+export const TOUCH_ACTIONS = ["decision", "retry_photo", "replace_photo", "retry_collect", "retry_links", "fix_and_continue", "cancel", "add_sku_ids"] as const;
+/** M6-S6 (M6-F3-R1) catalog_batch_outcomes.status: the batch status the outcome was recorded at. */
+export const BATCH_OUTCOME_STATUSES = ["done", "failed", "cancelled"] as const;
+
+/**
  * M2-S1 taxonomy store (0010, docs/program/requirements/M2-analyze.md M2-F1-R1 to R3). The value lists below are the
  * table structure; the nodes, attributes and shot roles themselves are data (analyze/taxonomy.ts).
  * TAXONOMY_LEVELS is ordered from the root down: a node's level is always below its parent's.
@@ -136,6 +153,10 @@ export type SpendEngine = (typeof SPEND_ENGINES)[number];
 export type CostStage = (typeof COST_STAGES)[number];
 export type CostKind = (typeof COST_KINDS)[number];
 export type CostOutcome = (typeof COST_OUTCOMES)[number];
+export type IncidentKind = (typeof INCIDENT_KINDS)[number];
+export type IncidentSeverity = (typeof INCIDENT_SEVERITIES)[number];
+export type TouchAction = (typeof TOUCH_ACTIONS)[number];
+export type BatchOutcomeStatus = (typeof BATCH_OUTCOME_STATUSES)[number];
 
 /**
  * sku_map.channel_ids keys. Softline columns keep their warehouse names (6th_street_* becomes
@@ -780,6 +801,108 @@ export const catalogCostEvents = pgTable(
     enumCheck("catalog_cost_events", "kind", t.kind, COST_KINDS),
     enumCheck("catalog_cost_events", "outcome", t.outcome, COST_OUTCOMES),
   ],
+);
+
+// ---------------------------------------------------------------------------
+// M6-S6 batch success tracking (migration 0017; docs/program/requirements/M6-reliability-cost.md M6-F3). Written only
+// through packages/core/src/catalog/reliability.ts.
+// ---------------------------------------------------------------------------
+
+/**
+ * One row per batch that reached an end (done, failed, cancelled), rewritten while it can still change (a re-opened
+ * finalize, the sweep's 24-hour refresh). `success`: links ready, no operator touch after upload, no incident.
+ * `excluded`: left out of the success rate (a cancel within 10 minutes of start is a mistake, not a failure).
+ * `true_cost_usd` is filled by the reconciliation (M6-F1, later slices).
+ */
+export const catalogBatchOutcomes = pgTable(
+  "catalog_batch_outcomes",
+  {
+    batchId: uuid("batch_id").primaryKey().references(() => catalogBatches.id, { onDelete: "cascade" }),
+    status: text("status", { enum: BATCH_OUTCOME_STATUSES }).notNull(),
+    success: boolean("success").notNull(),
+    /** Why it is not a success: touched, incident, failed, cancelled. Null on a success. */
+    cause: text("cause"),
+    isTest: boolean("is_test").notNull().default(false),
+    excluded: boolean("excluded").notNull().default(false),
+    startedAt: tsNull("started_at"),
+    firstLinksAt: tsNull("first_links_at"),
+    linksReadyAt: tsNull("links_ready_at"),
+    endedAt: timestamp("ended_at", { withTimezone: true }).notNull(),
+    durationMs: bigint("duration_ms", { mode: "number" }),
+    touches: integer("touches").notNull().default(0),
+    incidents: integer("incidents").notNull().default(0),
+    deployOverlap: boolean("deploy_overlap").notNull().default(false),
+    products: integer("products").notNull().default(0),
+    productsWithLinks: integer("products_with_links").notNull().default(0),
+    trueCostUsd: money("true_cost_usd"),
+    recordedAt: timestamp("recorded_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index("catalog_batch_outcomes_ended_at_idx").on(t.endedAt),
+    enumCheck("catalog_batch_outcomes", "status", t.status, BATCH_OUTCOME_STATUSES),
+  ],
+);
+
+/**
+ * M6-F3-R2. `dedupe_key` names one incident: a state incident (a stall, an invariant) is keyed by what it is about
+ * while it is open and gets its id appended when it is resolved, so the next one can open; a one-off event (a failed
+ * batch, a chunk that gave up) is keyed by the event and written already resolved. Every writer inserts with
+ * ON CONFLICT DO NOTHING, so a repeated sweep never writes a second row. `repeat_of`: the latest earlier incident of
+ * the same kind and cause code.
+ */
+export const catalogIncidents = pgTable(
+  "catalog_incidents",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    kind: text("kind", { enum: INCIDENT_KINDS }).notNull(),
+    severity: text("severity", { enum: INCIDENT_SEVERITIES }).notNull(),
+    batchId: uuid("batch_id").references(() => catalogBatches.id, { onDelete: "cascade" }),
+    causeCode: text("cause_code").notNull(),
+    cause: text("cause").notNull(),
+    startedAt: timestamp("started_at", { withTimezone: true }).notNull(),
+    resolvedAt: tsNull("resolved_at"),
+    repeatOf: uuid("repeat_of"),
+    dedupeKey: text("dedupe_key").notNull(),
+    detail: jsonb("detail").$type<Record<string, unknown>>(),
+    createdAt: createdAt(),
+  },
+  (t) => [
+    index("catalog_incidents_kind_started_at_idx").on(t.kind, t.startedAt),
+    index("catalog_incidents_batch_id_idx").on(t.batchId),
+    uniqueIndex("catalog_incidents_dedupe_key_uq").on(t.dedupeKey),
+    enumCheck("catalog_incidents", "kind", t.kind, INCIDENT_KINDS),
+    enumCheck("catalog_incidents", "severity", t.severity, INCIDENT_SEVERITIES),
+  ],
+);
+
+/** M6-F3-R3: one row per operator write that counts as a touch (TOUCH_ACTIONS), written by the web API layer. */
+export const catalogBatchTouches = pgTable(
+  "catalog_batch_touches",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    batchId: uuid("batch_id").notNull().references(() => catalogBatches.id, { onDelete: "cascade" }),
+    outputId: uuid("output_id"),
+    action: text("action", { enum: TOUCH_ACTIONS }).notNull(),
+    at: timestamp("at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index("catalog_batch_touches_batch_id_idx").on(t.batchId),
+    enumCheck("catalog_batch_touches", "action", t.action, TOUCH_ACTIONS),
+  ],
+);
+
+/**
+ * M6-F3-R1 `deploy_overlap`: every deployed revision of a service registers itself once, when its first instance
+ * starts (a deploy's probe starts it). A revision first seen inside a batch's run means a deploy overlapped the batch.
+ */
+export const catalogRevisions = pgTable(
+  "catalog_revisions",
+  {
+    revision: text("revision").primaryKey(),
+    service: text("service").notNull(),
+    firstSeenAt: timestamp("first_seen_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index("catalog_revisions_first_seen_at_idx").on(t.firstSeenAt)],
 );
 
 // ---------------------------------------------------------------------------
