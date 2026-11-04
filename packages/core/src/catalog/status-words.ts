@@ -36,3 +36,23 @@ export const STATUS_WORDS: Record<StatusKey, StatusWordSpec> = {
 export function statusTone(key: StatusKey, options: { blocking?: boolean } = {}): StatusTone {
   return key === "needs_you" && options.blocking ? "bad" : STATUS_WORDS[key].tone;
 }
+
+/** The states a batch page and the batch list derive (pipeline/status.ts `BatchState["state"]`). */
+export type BatchStateName = "draft" | "collecting" | "processing" | "attention" | "ready" | "recheck_failed" | "failed" | "cancelled";
+
+/**
+ * The status word a batch shows on the batch list and banner (owner decision, Sujan 2026-11-04, UX D11): draft and
+ * collecting read "Getting ready" (the intake words are the detail), processing "Working", done "Done", needs attention
+ * and a failed re-check "Needs you" in amber, could not start "Needs you" in red. A cancelled batch shows the plain word
+ * "Cancelled", outside the vocabulary, so it returns null.
+ */
+export function batchStatusWord(state: BatchStateName): { status: StatusKey; blocking?: boolean } | null {
+  switch (state) {
+    case "draft": case "collecting": return { status: "getting_ready" };
+    case "processing": return { status: "working" };
+    case "ready": return { status: "done" };
+    case "attention": case "recheck_failed": return { status: "needs_you", blocking: false };
+    case "failed": return { status: "needs_you", blocking: true };
+    case "cancelled": return null;
+  }
+}

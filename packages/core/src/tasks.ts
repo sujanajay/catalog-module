@@ -41,6 +41,7 @@ export const TASK_ROUTES = [
   "/tasks/catalog/publish",
   "/tasks/catalog/finalize",
   "/tasks/catalog/enlarge",
+  "/tasks/catalog/auto-start",
   // M1-S4: one try to improve a provisional plain render (apps/worker/src/catalog/improve.ts), sent by the sweep.
   "/tasks/catalog/improve",
 ] as const;

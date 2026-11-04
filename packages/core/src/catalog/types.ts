@@ -125,6 +125,17 @@ export interface BatchOptions {
    */
   enlargement?: { model: string; x4Model?: string; minScale?: number; target?: "gpu" } | null;
   /**
+   * M1-F2-R6 (M1-S2): the batch starts by itself after the countdown once collection and grouping end. Set by the
+   * one-page New batch; absent (false) for API and load-driver batches unless asked (R9). "Wait" sets it false.
+   */
+  autoStart?: boolean;
+  /**
+   * M1-F2-R7: two identifiers that are one product, from different uploads: only the newest upload's photos are used
+   * and the other spelling is left out. Absent means on; false (the operator's "Use only the newest photo of each
+   * product" unticked) leaves both out, as before M1-S2. Spellings from one upload have no newest and are both left out.
+   */
+  newestSameProduct?: boolean;
+  /**
    * M1-F3 (M1-S3): written at Start. The auto-decide rules (`catalog_auto_decide_rules`) as they were when the batch
    * started, so a rule changed mid-batch does not affect it. Present means the batch auto-decides: no output waits for
    * a person and no product becomes `pending_attention`. Absent on batches started before M1-S3 (they keep the holds).
@@ -193,6 +204,8 @@ export interface BatchCounts {
    * `failReason` here, step 1 shows it above the inputs, and the next hand-off to collecting clears it.
    */
   fixReason?: string | null;
+  /** M1-F2-R6: when the armed countdown ends and the batch starts (ISO time); null or absent when none runs. */
+  autoStartAt?: string | null;
   /**
    * The run id of the newest collection hand-off (ingestBatch). An ingest task of an earlier run that runs out of
    * attempts does not fail the batch (failStoppedIngest). Optional (no migration): absent, any run counts.

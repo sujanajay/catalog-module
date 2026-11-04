@@ -39,13 +39,28 @@ export function isDuplicateReject(reason: string): boolean {
   return DUPLICATE_REJECT.test(reason) || NO_NUMBERS_REJECT.test(reason);
 }
 
-const SAME_PRODUCT_REJECT = / are the same product\. Keep one\.$/;
+const SAME_PRODUCT_REJECT = / are the same product\. Keep one\.$| is the same product as .+\. Only the newest photos are used\.$/;
 
 /** "<a> and <b> are the same product. Keep one." for identifiers of one product, in the order given. */
 export function sameProductMessage(identifiers: string[]): string {
   return `${identifiers.join(" and ")} are the same product. Keep one.`;
 }
-/** True for the reject of two spellings of one product (see sameProductMessage). */
+/** M1-F2-R7: the spelling left out because another spelling of the product came in a newer upload. */
+export function olderSameProductMessage(older: string, newer: string): string {
+  return `${older} is the same product as ${newer}. Only the newest photos are used.`;
+}
+/**
+ * M1-F2-R7: of identifiers that are one product, the one whose photos came in the newest upload (by upload time), or
+ * null when two share the newest time (for example two spellings in one folder).
+ */
+export function newestIdentifier(ids: readonly string[], itemsOf: (id: string) => readonly { uploadId: string }[], uploadAt: ReadonlyMap<string, number>): string | null {
+  const at = (id: string) => Math.max(-Infinity, ...itemsOf(id).map((i) => uploadAt.get(i.uploadId) ?? -Infinity));
+  const ranked = ids.map((id) => [id, at(id)] as const).sort((x, y) => y[1] - x[1]);
+  const [first, second] = ranked;
+  if (!first || first[1] === -Infinity || (second && second[1] === first[1])) return null;
+  return first[0];
+}
+/** True for the reject of two spellings of one product (see sameProductMessage and olderSameProductMessage). */
 export function isSameProductReject(reason: string): boolean {
   return SAME_PRODUCT_REJECT.test(reason);
 }

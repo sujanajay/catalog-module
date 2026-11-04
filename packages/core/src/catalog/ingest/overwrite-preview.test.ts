@@ -8,6 +8,7 @@ import {
   catalogProductAliases,
   catalogProducts,
   catalogSourceImages,
+  catalogUploads,
   skuMap,
   type CatalogBatch,
 } from "../../db/schema";
@@ -227,6 +228,29 @@ describe("buildOverwritePreview", () => {
     // The rejected spellings are neither new nor overwritten.
     expect(result.newProducts).toBe(1);
     expect(result.existingProducts).toEqual([]);
+  });
+
+  it("M1-F2-R7: two spellings from different uploads keep only the newest upload's photos; the same upload, or the rule off, leaves both out", async () => {
+    const batch = await newBatch("newest");
+    const [older] = await db.insert(catalogUploads).values({ batchId: batch.id, kind: "zip", name: "a.zip", status: "collected", createdAt: new Date("2026-11-04T09:00:00Z") }).returning();
+    const [newer] = await db.insert(catalogUploads).values({ batchId: batch.id, kind: "zip", name: "b.zip", status: "collected", createdAt: new Date("2026-11-04T10:00:00Z") }).returning();
+    const run = async (opts: { newestSameProduct?: boolean } = {}) => {
+      const { grouped, sha256ByItem } = grouping({ "NEW-77": [sha("x1")], NEW77: [sha("x2"), sha("x3")], SOLO1: [sha("s1")] });
+      for (const it of grouped.products.get("NEW-77")!) it.uploadId = older!.id;
+      for (const it of grouped.products.get("NEW77")!) it.uploadId = newer!.id;
+      const b = { ...batch, options: { ...batch.options, ...opts } };
+      const matches = await matchProducts(db, b, [...grouped.products.keys()]);
+      return { result: await buildOverwritePreview(db, b, grouped, matches, sha256ByItem), grouped };
+    };
+    const kept = await run();
+    expect([...kept.grouped.products.keys()].sort()).toEqual(["NEW77", "SOLO1"]);
+    expect(kept.result.duplicates).toEqual([]);
+    expect(kept.grouped.rejected.map((r) => [r.item.identifier, r.reason])).toEqual([["NEW-77", "NEW-77 is the same product as NEW77. Only the newest photos are used."]]);
+    expect(kept.result.newProducts).toBe(2);
+    // The operator turned the rule off: both spellings are left out, as before.
+    const off = await run({ newestSameProduct: false });
+    expect([...off.grouped.products.keys()]).toEqual(["SOLO1"]);
+    expect(off.result.duplicates).toEqual([{ a: "NEW-77", b: "NEW77" }]);
   });
 
   it("busy: a product locked by another batch is listed with that batch's name, as Start refuses it", async () => {
