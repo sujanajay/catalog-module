@@ -8,6 +8,7 @@ import { lockProducts } from "@catalog/core/catalog/products";
 import { planChunks } from "@catalog/core/catalog/pipeline/plan-chunks";
 import { chunkImages, dispatchChunks } from "@catalog/core/catalog/pipeline/dispatch";
 import { startedBatchOptions } from "@catalog/core/catalog/pipeline/enlargement";
+import { takeSettingsSnapshot } from "@catalog/core/settings/store";
 import { enqueueTask } from "@catalog/core/tasks";
 
 export interface LoadStartDeps { enqueue?: typeof enqueueTask; env?: NodeJS.ProcessEnv }
@@ -27,8 +28,10 @@ export async function startLoadBatch(db: Db, batchId: string, deps: LoadStartDep
       const [chunk] = await tx.insert(catalogChunks).values({ batchId, index, stage: "matte", status: "queued", attempt: 0, productIds: plan.productIds, sourceImageIds: sources.filter(s => plan.productIds.includes(s.productId)).map(s => s.id) }).returning();
       rows.push(chunk!);
     }
+    // M12-S1: the batch's settings snapshot, taken as the web's Start takes it.
+    const settings = await takeSettingsSnapshot(tx as unknown as Db, { batchId, by: "catalog-load" });
     // Spec 18: pinned exactly as the web's Start pins it, so a load batch has the enlargement stage when the upscaler is on.
-    await tx.update(catalogBatches).set({ status: "matting", startedAt: new Date(), updatedAt: new Date(), options: startedBatchOptions(batch.options, deps.env), counts: { ...batch.counts, products: productIds.length, sources: sources.length, outputs: sources.length * batch.channels.length } }).where(eq(catalogBatches.id, batchId));
+    await tx.update(catalogBatches).set({ status: "matting", startedAt: new Date(), updatedAt: new Date(), settingsSnapshotId: settings.id, options: startedBatchOptions(batch.options, deps.env, settings), counts: { ...batch.counts, products: productIds.length, sources: sources.length, outputs: sources.length * batch.channels.length } }).where(eq(catalogBatches.id, batchId));
     return rows;
   });
   // Spec 15 E5: the window queues the first chunks; each finished chunk queues the next.

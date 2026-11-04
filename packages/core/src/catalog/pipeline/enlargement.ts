@@ -20,6 +20,8 @@ import { and, asc, eq, inArray, notInArray, sql, type SQL } from "drizzle-orm";
 import type { Db } from "../../db/client";
 import { catalogBatches, catalogChunks, catalogEnlargements, type CatalogEnlargement } from "../../db/schema";
 import { ENLARGE_DISPATCH_DEADLINE_SEC, enlargeTaskId, type EnlargeTaskBody, type enqueueTask } from "../../tasks";
+import { UPSCALE_MIN_SCALE_KEY } from "../../settings/registry";
+import { settingFrom, type SettingsSnapshotData } from "../../settings/snapshot";
 import { LEGACY_UPSCALE_MIN_SCALE, upscaleConfigFromEnv, upscaleMaxPixels, UPSCALE_MODEL_VERSIONS, upscalerModel, type UpscaleFactor } from "../upscale";
 // A cycle with dispatch.ts (which imports this module); PROCESSING_STATUSES is read only inside functions.
 import { PROCESSING_STATUSES } from "./dispatch";
@@ -80,19 +82,20 @@ export function gpuTargetFromEnv(env: NodeJS.ProcessEnv = process.env): boolean 
  * What Start records on the batch (options.enlargement) when the upscaler is on (`UPSCALE_MODEL` set and not "off"):
  * the batch's route for its whole life (I9), which also scopes the enlarged_without_upscaler invariant. Null when off.
  */
-export function enlargementOptionFromEnv(env: NodeJS.ProcessEnv = process.env): EnlargementOption | null {
+export function enlargementOptionFromEnv(env: NodeJS.ProcessEnv = process.env, minScale?: number): EnlargementOption | null {
   const model = env.UPSCALE_MODEL?.trim();
   if (!model || model === "off") return null;
   const config = upscaleConfigFromEnv(env);
-  return { model, ...(config.x4Model ? { x4Model: config.x4Model } : {}), minScale: config.minScale, ...(gpuTargetFromEnv(env) ? { target: "gpu" as const } : {}) };
+  return { model, ...(config.x4Model ? { x4Model: config.x4Model } : {}), minScale: minScale ?? config.minScale, ...(gpuTargetFromEnv(env) ? { target: "gpu" as const } : {}) };
 }
 /**
  * The options Start writes on the batch (web Start, start.ts, and the load driver, catalog/load-start.ts): the
  * enlargement route pinned from the env when the upscaler is on, the options unchanged when it is off. One function so
  * every starter makes its batches the same way (a batch without options.enlargement takes the plain path).
+ * M12-S1: `settings` is the batch's settings snapshot; its `images.upscale_min_scale` replaces UPSCALE_MIN_SCALE.
  */
-export function startedBatchOptions<O extends { enlargement?: EnlargementOption | null }>(options: O, env: NodeJS.ProcessEnv = process.env): O {
-  const enlargement = enlargementOptionFromEnv(env);
+export function startedBatchOptions<O extends { enlargement?: EnlargementOption | null }>(options: O, env: NodeJS.ProcessEnv = process.env, settings?: SettingsSnapshotData): O {
+  const enlargement = enlargementOptionFromEnv(env, settings ? settingFrom<number>(settings, UPSCALE_MIN_SCALE_KEY) : undefined);
   return enlargement ? { ...options, enlargement } : options;
 }
 /** A batch's pinned route (I9): options.enlargement, or null for a batch started before the stage (the plain path). */

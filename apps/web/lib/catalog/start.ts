@@ -7,6 +7,7 @@ import * as storage from "@catalog/core/storage";
 import { enqueueTask } from "@catalog/core/tasks";
 import { chunkImages, dispatchChunks, recoverBatchChunks } from "@catalog/core/catalog/pipeline/dispatch";
 import { startedBatchOptions } from "@catalog/core/catalog/pipeline/enlargement";
+import { takeSettingsSnapshot } from "@catalog/core/settings/store";
 import { log } from "@catalog/core/log";
 import { db } from "../db";
 import { badRequest, HttpError } from "../errors";
@@ -15,7 +16,7 @@ import { mergeCounts, notDraftText, queryBatch } from "./batches";
 /** Chunk rows per insert at Start (7 bind parameters per row, Postgres allows 65,535). */
 const START_INSERT_ROWS = 1000;
 const STALE_PREVIEW = "Files changed since the preview. Open step 4 again.";
-export async function startBatch(id: string, value: unknown, _actor: string) {
+export async function startBatch(id: string, value: unknown, actor: string) {
   const previewAt = (value as { previewAt?: unknown })?.previewAt;
   if (typeof previewAt !== "string" || !Number.isFinite(Date.parse(previewAt))) throw badRequest(STALE_PREVIEW);
   const batch = await queryBatch(id);
@@ -64,8 +65,10 @@ export async function startBatch(id: string, value: unknown, _actor: string) {
     const values = plans.map((plan, index) => ({batchId:id,index,stage:"matte" as const,status:"queued" as const,attempt:0,productIds:plan.productIds,sourceImageIds:plan.productIds.flatMap((p)=>sourceIds.get(p) ?? [])}));
     const rows = [];
     for (let at = 0; at < values.length; at += START_INSERT_ROWS) rows.push(...await tx.insert(catalogChunks).values(values.slice(at, at + START_INSERT_ROWS)).returning());
+    // M12-S1: the settings as they are now stay with the batch to the end; a change applies from the next batch.
+    const settings = await takeSettingsSnapshot(tx, { batchId: id, by: actor });
     // Spec 18: a batch started with the upscaler on is made with the enlargement stage (the invariant's scope).
-    await tx.update(catalogBatches).set({status:"matting",startedAt:new Date(),updatedAt:new Date(),options:startedBatchOptions(current.options),counts:{...current.counts,products:products.length,sources:sources.length,outputs:sources.length*batch.channels.length,newProducts:preview.overwrite.newProducts,existingProducts:preview.overwrite.existingProducts.length,shotsToRemove:preview.overwrite.existingProducts.reduce((n,p)=>n+p.shotsToRemove.length,0)}}).where(eq(catalogBatches.id,id));
+    await tx.update(catalogBatches).set({status:"matting",startedAt:new Date(),updatedAt:new Date(),settingsSnapshotId:settings.id,options:startedBatchOptions(current.options,process.env,settings),counts:{...current.counts,products:products.length,sources:sources.length,outputs:sources.length*batch.channels.length,newProducts:preview.overwrite.newProducts,existingProducts:preview.overwrite.existingProducts.length,shotsToRemove:preview.overwrite.existingProducts.reduce((n,p)=>n+p.shotsToRemove.length,0)}}).where(eq(catalogBatches.id,id));
     return rows;
   });
   // Spec 15 E5: only the batch's window of chunks is queued now; each finished chunk queues the next.
