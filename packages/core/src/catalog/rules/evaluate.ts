@@ -255,7 +255,10 @@ function checkRule(rule: Rule, s: Subject, channel: ChannelRecord, sev: Effectiv
   const who = rule.channel === "all" ? "Every channel" : (channels.get(rule.channel)?.label ?? rule.channel);
   const ctx = { channel, brandName: s.brandName ?? null };
   const m = measure(rule, s);
-  if (m === MISSING && !spec.absenceFails) return result(rule, sev, "not_applicable", null, `Not measured: ${rule.field}.`);
+  // An image fact comes from a detector the caller may not have run, so an unmeasured one is "not measured" even for
+  // presence rules; for content (attributes, size chart, text) a missing value is absent and presence rules fail (D32).
+  if (m === MISSING && (!spec.absenceFails || rule.component === "image"))
+    return result(rule, sev, "not_applicable", null, `Not measured: ${rule.field}.`);
 
   if (m !== MISSING && m.each) {
     const checks = m.values.map((v) => spec.check(v, rule.value, ctx));

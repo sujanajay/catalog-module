@@ -110,7 +110,54 @@ export function isProse(v: unknown): boolean {
   return /[\s/,;()]/u.test(v.trim()) || /\d\s*-\s*\d/u.test(v) || POLICY_WORDS.has(v.trim().toLowerCase());
 }
 
-const POLICY_WORDS = new Set(["not_allowed", "allowed", "required", "optional"]);
+const POLICY_WORDS = new Set(["allowed", "optional"]);
+
+/** Measured words that mean "not there" for the policy values "not_allowed" and "required". */
+const ABSENT_WORDS = new Set(["none", "no", "absent", "false", "not present"]);
+const isAbsent = (m: unknown) => !isPresent(m) || (typeof m === "string" && ABSENT_WORDS.has(normalizeWord(m)));
+
+/**
+ * The policy values "not_allowed" and "required" have one clear check (D29): the measured thing must be absent
+ * (false, "none", nothing) or present. Null for any other value.
+ */
+function policyCheck(m: unknown, v: unknown): Check | null {
+  if (typeof v !== "string") return null;
+  const word = normalizeWord(v);
+  if (word === "not allowed") return ok(isAbsent(m), "does not allow it");
+  if (word === "required") return ok(!isAbsent(m), "needs it present");
+  return null;
+}
+
+const MARGIN_SIDES = ["top", "bottom", "left", "right"] as const;
+const SIDES_FLAG = "sides_only_when_product_wider_than_tall";
+
+/** A safe-margin object: top and bottom, optionally left and right and the "sides only when wide" flag. */
+function isMargins(v: unknown): v is Record<string, unknown> {
+  return (
+    isRecord(v) &&
+    isNum(v.top) &&
+    isNum(v.bottom) &&
+    Object.keys(v).every((k) => (MARGIN_SIDES as readonly string[]).includes(k) || k === SIDES_FLAG)
+  );
+}
+
+/**
+ * Safe margins are minimums per side (a product touches only one pair of the safe box), within half a pixel or 0.001
+ * of a fraction. With the "sides only when wide" flag, left and right count only when the measured value says
+ * `wide: true` (D32).
+ */
+function marginsCheck(m: unknown, v: Record<string, unknown>): Check {
+  if (!isRecord(m)) return fail("value is not a set of margins");
+  const sidesOnlyWide = v[SIDES_FLAG] === true;
+  const sides = MARGIN_SIDES.filter((k) => isNum(v[k]) && !((k === "left" || k === "right") && sidesOnlyWide && m.wide !== true));
+  const missing = sides.filter((k) => !isNum(m[k]));
+  const tolerance = sides.every((k) => (v[k] as number) <= 1) ? 0.001 : 0.5;
+  const crossed = sides.filter((k) => isNum(m[k]) && (m[k] as number) < (v[k] as number) - tolerance);
+  const says = `needs at least ${sides.map((k) => `${k} ${v[k]}`).join(", ")}`;
+  if (crossed.length) return fail(says);
+  if (missing.length) return judge(`needs ${missing.join(", ")} measured as well`);
+  return pass(says);
+}
 
 /** A `{min, target, fixed}` canvas spec, the value shape of the `within` rules. */
 function isCanvasSpec(v: unknown): v is { min: Size; target: Size; fixed?: unknown } {
@@ -193,21 +240,25 @@ export function hasPhrase(text: string, phrase: string): boolean {
  * shorter than 9 digits are not phone numbers. Every run of groups inside a longer run is tried, so "Size 10 050 123
  * 4567" is still found.
  */
-function localPhone(groups: string[], digits: number): boolean {
-  if (digits < 9 || digits > 12 || !groups.every((g) => g.length >= 3)) return false;
-  return groups[0]!.startsWith("0") || (digits === 10 && /^[6-9]/u.test(groups[0]!));
+function localPhone(firstGroup: string, digits: number, shortestGroup: number): boolean {
+  if (digits < 9 || digits > 12 || shortestGroup < 3) return false;
+  return firstGroup.startsWith("0") || (digits === 10 && /^[6-9]/u.test(firstGroup));
 }
 
 export function hasPhone(text: string): boolean {
   for (const run of text.matchAll(/\+?\d[\d\s().-]*\d/gu)) {
     const groups = [...run[0].matchAll(/(\+?)(\d+)/gu)].map((g) => ({ plus: g[1] === "+", digits: g[2]! }));
     for (let i = 0; i < groups.length; i++) {
+      const first = groups[i]!;
+      // A window never holds more than 15 digits, so this is linear in the run (round 2 review, P2-4).
       let digits = 0;
+      let shortest = Infinity;
       for (let j = i; j < groups.length; j++) {
-        digits += groups[j]!.digits.length;
-        const slice = groups.slice(i, j + 1);
-        const first = slice[0]!;
-        if (first.plus ? digits >= 9 && digits <= 15 : localPhone(slice.map((g) => g.digits), digits)) return true;
+        const g = groups[j]!.digits;
+        digits += g.length;
+        if (digits > 15) break;
+        shortest = Math.min(shortest, g.length);
+        if (first.plus ? digits >= 9 : localPhone(first.digits, digits, shortest)) return true;
       }
     }
   }
@@ -231,10 +282,11 @@ const MARKUP_PATTERNS: Record<string, RegExp> = {
 };
 
 /**
- * Words in a not_contains list that name a kind of word a machine cannot list (R028: "competitor brand names",
- * "subjective claims"). A rule with any of them needs a judgement (D29).
+ * Words in a not_contains list that name a kind of word or thing a machine cannot list (R028: "competitor brand
+ * names", "subjective claims"; R171: "unwanted text", "unwanted objects"). A rule with any of them needs a judgement
+ * (D29).
  */
-export const PLACEHOLDER_PHRASES = new Set(["competitor brand names", "subjective claims"]);
+export const PLACEHOLDER_PHRASES = new Set(["competitor brand names", "subjective claims", "unwanted text", "unwanted objects"]);
 
 /** A role list item such as "FM", "FM|FL" or "flat"; anything else in a sequence is prose. */
 const ROLE_ITEM = /^[A-Za-z0-9_]+(\|[A-Za-z0-9_]+)*$/u;
@@ -277,14 +329,19 @@ const judged = (meaning: string): OperatorSpec => ({ meaning, check: () => judge
 export const OPERATORS: Record<string, OperatorSpec> = {
   equals: {
     meaning:
-      "The measured value is the rule's value (text ignores case and spacing). A canvas spec {min, target, fixed} is checked as within; for an object value only its keys are compared. A value written in words cannot be checked.",
+      "The measured value is the rule's value (text ignores case and spacing). A canvas spec {min, target, fixed} is checked as within; safe margins are minimums per side; \"not_allowed\" means absent and \"required\" means present; for another object value only its keys are compared. A value written in words cannot be checked.",
     unusable: proseValue,
     check(m, v, ctx) {
       if (isCanvasSpec(v)) return OPERATORS.within!.check(m, v, ctx);
+      if (isMargins(v)) return marginsCheck(m, v);
+      const policy = policyCheck(m, v);
+      if (policy) return policy;
       if (isRecord(v) && isRecord(m)) {
+        const measured = Object.keys(v).filter((k) => Object.hasOwn(m, k));
+        if (!measured.every((k) => same(m[k], v[k]))) return fail(`needs ${fmt(v)}`);
         const missing = Object.keys(v).filter((k) => !Object.hasOwn(m, k));
         if (missing.length) return judge(`needs ${missing.join(", ")} measured as well`);
-        return ok(Object.keys(v).every((k) => same(m[k], v[k])), `needs ${fmt(v)}`);
+        return pass(`needs ${fmt(v)}`);
       }
       return ok(same(m, v), `needs ${fmt(v)}`);
     },

@@ -60,8 +60,8 @@ describe("value operators", () => {
 describe("machine-checkable values (D29)", () => {
   const unusable = (op: string, v: unknown) => OPERATORS[op]!.unusable?.(v) ?? null;
   it("knows words from values", () => {
-    for (const v of ["White/Light Grey", "1:1 or 4:5", "3:4 portrait", "74-82%", "not_allowed", "required", "Pure White #FFFFFF"]) expect(isProse(v), v).toBe(true);
-    for (const v of ["JPEG", "sRGB", "#FFFFFF", "4:5", "flat_lay", "cm", 72, false]) expect(isProse(v), String(v)).toBe(false);
+    for (const v of ["White/Light Grey", "1:1 or 4:5", "3:4 portrait", "74-82%", "allowed", "Pure White #FFFFFF"]) expect(isProse(v), v).toBe(true);
+    for (const v of ["JPEG", "sRGB", "#FFFFFF", "4:5", "flat_lay", "cm", "not_allowed", "required", 72, false]) expect(isProse(v), String(v)).toBe(false);
   });
   it("flags unusable rule values per operator", () => {
     expect(unusable("equals", "White/Light Grey")).toContain("written in words");
@@ -73,11 +73,35 @@ describe("machine-checkable values (D29)", () => {
     expect(unusable("between", [4, 5])).toBeNull();
     expect(unusable("not_contains", ["competitor brand names", "subjective claims"])).toContain("kinds of words");
     expect(unusable("not_contains", ["watermark", "logo"])).toBeNull();
+    expect(unusable("not_contains", ["logo", "unwanted text", "unwanted objects"])).toContain("kinds of words");
     expect(unusable("within", "big")).not.toBeNull();
     expect(unusable("matches_regex", "([")).not.toBeNull();
     expect(unusable("in_range", "ask finance")).not.toBeNull();
     expect(unusable("equals_ordered", ["Front on model"])).not.toBeNull();
   });
+  it("policy words: not_allowed passes when absent or false, required when present", () => {
+    for (const m of [false, "none", "no", null, "absent"]) expect(run("equals", m, "not_allowed"), String(m)).toBe("pass");
+    for (const m of [true, "present", "yes"]) expect(run("equals", m, "not_allowed"), String(m)).toBe("fail");
+    expect(run("equals", true, "required")).toBe("pass");
+    expect(run("equals", "none", "required")).toBe("fail");
+    expect(run("equals", false, "required")).toBe("fail");
+  });
+
+  it("safe margin objects are per-side minimums with a small tolerance", () => {
+    const v = { top: 0.1, bottom: 0.1, left: 0.05, right: 0.05 };
+    expect(run("equals", { top: 0.2, bottom: 0.1, left: 0.05, right: 0.05 }, v)).toBe("pass");
+    expect(run("equals", { top: 0.0999, bottom: 0.1, left: 0.05, right: 0.05 }, v)).toBe("pass");
+    expect(run("equals", { top: 0.05, bottom: 0.1, left: 0.05, right: 0.05 }, v)).toBe("fail");
+    const sides = { ...v, sides_only_when_product_wider_than_tall: true };
+    expect(run("equals", { top: 0.1, bottom: 0.1, left: 0, right: 0 }, sides)).toBe("pass");
+    expect(run("equals", { top: 0.1, bottom: 0.1, left: 0, right: 0, wide: true }, sides)).toBe("fail");
+    expect(run("equals", { top: 0.1, bottom: 0.1 }, v)).toBe("needs_judge");
+  });
+
+  it("an object compares the measured keys first and fails a wrong one before asking for the rest", () => {
+    expect(run("equals", { w: 1000, h: 1800 }, { w: 1200, h: 1800, dpi: 96 })).toBe("fail");
+  });
+
   it("equals checks a canvas spec as within and compares only the keys an object names", () => {
     const spec = { min: { w: 600, h: 800 }, target: { w: 1200, h: 1800 }, fixed: true };
     expect(run("equals", { w: 1200, h: 1800 }, spec)).toBe("pass");
@@ -269,6 +293,14 @@ describe("text operators", () => {
   it("phone numbers are told apart from sizes, barcodes and years", () => {
     for (const t of ["+971 50 123 4567", "+91 98765 43210", "050 123 4567", "0501234567", "9876543210", "Size 10 050 123 4567"]) expect(hasPhone(t), t).toBe(true);
     for (const t of ["Waist 28 30 32 34", "UK 6 7 8 9 10", "EAN 8901234567890", "Shorts 2024 2025 Collection", "2024 2025 2026", "Pack of 12345678", "Style 123456789"]) expect(hasPhone(t), t).toBe(false);
+    for (const t of ["Sizes 06 08 10 12 14", "+1234567890123456", "0123456789012"]) expect(hasPhone(t), t).toBe(false);
+  });
+
+  it("checks a long run of numbers in linear time (round 2, P2-4)", () => {
+    const table = Array.from({ length: 2000 }, (_, i) => String(20 + (i % 30))).join(" ");
+    const t = performance.now();
+    expect(hasPhone(table)).toBe(false);
+    expect(performance.now() - t).toBeLessThan(100);
   });
 
   it("title case and sentence case, never all capitals", () => {

@@ -10,7 +10,7 @@ import { blocks, effectiveSeverity, evaluate, routeToJudge } from "./evaluate";
 import { seedChannelRules } from "./seed";
 import { loadSnapshot } from "./store";
 import { conflict, rule, snapshot } from "./test-fixtures";
-import type { ChannelRecord, RuleResult, RulesetSnapshot, Subject } from "./types";
+import { RULE_AUDIENCES, type ChannelRecord, type RuleResult, type RulesetSnapshot, type Subject } from "./types";
 
 const subject = (over: Partial<Subject> = {}): Subject => ({
   channel: "noon",
@@ -396,7 +396,59 @@ describe("planted cases on ruleset v2 (M5-S2 acceptance)", () => {
       }
   });
 
-  it("image rules written in words need a judgement instead of failing (R166, R117, R133, R264, R240)", () => {
+  it("the correct-image sweep holds for every category scope, audience and market (round 2, P2-2)", () => {
+    // Blocks with every conflict decided are a superset of blocks with today's conflicts (open conflicts only warn).
+    const decided: RulesetSnapshot = { ...v2, conflicts: v2.conflicts.map((c) => ({ ...c, status: "decided" as const })) };
+    const scopes = [...new Set(v2.rules.flatMap((r) => r.categoryScope).filter((n) => n !== "all"))];
+    const paths = [[], ...scopes.map((n) => [n])];
+    const found: string[] = [];
+    for (const rec of decided.channels) {
+      const value = goodImage(rec);
+      for (const categoryPath of paths)
+        for (const audience of [undefined, ...RULE_AUDIENCES])
+          for (const market of ["AE", "SA", "IN", null]) {
+            const res = evaluate(decided, subject({ channel: rec.id, component: "image", categoryPath, audience, market, value }));
+            for (const r of res.filter(blocks)) found.push(`${rec.id} ${categoryPath.join("") || "-"} ${audience ?? "-"} ${market ?? "-"} ${r.ruleId}`);
+          }
+    }
+    expect([...new Set(found)].slice(0, 10)).toEqual([]);
+  }, 120_000);
+
+  it("an image fact the caller did not measure never fails a presence rule (R187, D32)", () => {
+    const decided: RulesetSnapshot = { ...v2, conflicts: v2.conflicts.map((c) => ({ ...c, status: "decided" as const })) };
+    const res = evaluate(decided, subject({ channel: "amazon", component: "image", audience: "men", value: {} }));
+    expect(byId(res, "R187")).toMatchObject({ outcome: "not_applicable", message: "Not measured: image.on_model." });
+    const missingCare = evaluate(v2, subject({ component: "attributes", value: { colour: "navy" } }));
+    expect(missingCare.filter((r) => r.outcome === "fail").length).toBeGreaterThan(0);
+  });
+
+  it("a Styli head cut blocks; no head cut passes (R240 not_allowed, round 2, P2-1)", () => {
+    const decided: RulesetSnapshot = { ...v2, conflicts: v2.conflicts.map((c) => ({ ...c, status: "decided" as const })) };
+    for (const cut of [true, "present"]) {
+      const res = evaluate(decided, subject({ channel: "styli", component: "image", value: { "image.head_cut": cut } }));
+      expect(byId(res, "R240"), String(cut)).toMatchObject({ outcome: "fail", effectiveSeverity: "block" });
+    }
+    for (const none of [false, "none"]) {
+      const res = evaluate(decided, subject({ channel: "styli", component: "image", value: { "image.head_cut": none } }));
+      expect(byId(res, "R240"), String(none)).toMatchObject({ outcome: "pass" });
+    }
+  });
+
+  it("Styli safe margins are minimums: a wide or tall product that keeps them passes, one that crosses them blocks (R223, round 2, P2-3)", () => {
+    const decided: RulesetSnapshot = { ...v2, conflicts: v2.conflicts.map((c) => ({ ...c, status: "decided" as const })) };
+    const styli = (m: Record<string, number>) => byId(evaluate(decided, subject({ channel: "styli", component: "image", value: { "image.safe_margins_px": m } })), "R223");
+    expect(styli({ top: 900, bottom: 450, left: 150, right: 150 })).toMatchObject({ outcome: "pass" });
+    expect(styli({ top: 450, bottom: 450, left: 600, right: 600 })).toMatchObject({ outcome: "pass" });
+    expect(styli({ top: 449.5, bottom: 450, left: 150, right: 150 })).toMatchObject({ outcome: "pass" });
+    expect(styli({ top: 300, bottom: 450, left: 150, right: 150 })).toMatchObject({ outcome: "fail", effectiveSeverity: "block" });
+  });
+
+  it("R171 names kinds of overlays, so a text overlay needs a judgement instead of passing (round 2, P2-5)", () => {
+    const res = evaluate(v2, subject({ component: "image", value: { "image.overlay": ["text"] } }));
+    expect(byId(res, "R171")).toMatchObject({ outcome: "needs_judge" });
+  });
+
+  it("image rules written in words need a judgement instead of failing (R166, R117, R133, R264)", () => {
     const decided: RulesetSnapshot = { ...v2, conflicts: v2.conflicts.map((c) => ({ ...c, status: "decided" as const })) };
     const noon = evaluate(decided, subject({ component: "image", value: { "image.1.background": "#FFFFFF", "image.head_cut": "none" } }));
     for (const id of ["R166", "R117"]) expect(byId(noon, id), id).toMatchObject({ outcome: "needs_judge" });
@@ -405,8 +457,6 @@ describe("planted cases on ruleset v2 (M5-S2 acceptance)", () => {
     expect(byId(trendyol, "R133")).toMatchObject({ outcome: "needs_judge" });
     const amazon = evaluate(decided, subject({ channel: "amazon", component: "image", value: { "image.head_cut": "none" } }));
     expect(byId(amazon, "R264")).toMatchObject({ outcome: "needs_judge" });
-    const styli = evaluate(decided, subject({ channel: "styli", component: "image", value: { "image.head_cut": "none" } }));
-    expect(byId(styli, "R240")).toMatchObject({ outcome: "needs_judge" });
   });
 
   it("canvas specs in equals rules are checked as within (R207, R209)", () => {
