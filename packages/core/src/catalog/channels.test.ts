@@ -62,7 +62,7 @@ describe("channel table", () => {
     expect(c.margins).toMatchObject({ top: m[0], bottom: m[1], left: m[2], right: m[3], unit: m[4] });
     expect(c.margins.sidesOnlyWhenWide ?? false).toBe(id === "noon");
     expect(c.anchor).toBe(anchor);
-    expect(c.background).toBe("#E0E0E0");
+    expect(c.background).toBe("#F0F0F0");
     expect(c.firstImageBackground).toBe(first);
     expect(c.dpi).toBe(dpi);
     expect(c.fixedCanvas).toBe(fixed);
@@ -74,9 +74,9 @@ describe("channel table", () => {
 
   it("uses a white first image only where the sheet says so", () => {
     expect(backgroundFor("amazon", 1)).toBe("#FFFFFF");
-    expect(backgroundFor("amazon", 2)).toBe("#E0E0E0");
+    expect(backgroundFor("amazon", 2)).toBe("#F0F0F0");
     expect(backgroundFor("shein", 1)).toBe("#FFFFFF");
-    expect(backgroundFor("noon", 1)).toBe("#E0E0E0");
+    expect(backgroundFor("noon", 1)).toBe("#F0F0F0");
   });
 
   it("keeps the constants", () => {

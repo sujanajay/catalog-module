@@ -4,6 +4,7 @@ import type { Db } from "../../db/client";
 import { createTestDb } from "../../db/testing";
 import { catalogBatches, catalogBatchProducts, catalogOutputs, catalogProducts, catalogProductEvents, catalogSourceImages } from "../../db/schema";
 import { GenerationMismatchError } from "../../storage";
+import { FIXTURE_CHANNEL_RULES } from "../channel-rules";
 import { publishProduct, type PublishDeps } from "./publish";
 
 let db: Db, close: () => Promise<void>;
@@ -32,7 +33,7 @@ async function replacement(name: string) {
     return { generation: String(++generation), crc32c: "new-crc" };
   });
   const deps: PublishDeps = {
-    db, now: () => new Date("2026-01-02T00:00:00Z"), sleep: async () => {},
+    db, now: () => new Date("2026-01-02T00:00:00Z"), sleep: async () => {}, channelRules: async () => FIXTURE_CHANNEL_RULES,
     fetch: vi.fn(async () => new Response(null, { status: 404 })),
     storage: {
       getPublicBucketName: () => "public",
@@ -89,7 +90,7 @@ it("gap B: a copy that fails on the second of four outputs leaves one verified, 
   }));
   let copies = 0;
   const deps: PublishDeps = {
-    db, now: () => new Date("2026-01-02T00:00:00Z"), sleep: async () => {},
+    db, now: () => new Date("2026-01-02T00:00:00Z"), sleep: async () => {}, channelRules: async () => FIXTURE_CHANNEL_RULES,
     fetch: vi.fn(async () => new Response(jpeg, { status: 200, headers: { "x-goog-generation": "1", "content-type": "image/jpeg", "content-length": "4" } })),
     storage: {
       getPublicBucketName: () => "public",

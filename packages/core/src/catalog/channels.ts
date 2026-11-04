@@ -45,7 +45,9 @@ export interface ChannelSpec {
   notes?: string;
 }
 
-const GREY = "#E0E0E0";
+// M3-F3-R2 (gate 1, C10): a light grey of 240 or more on every channel. These constants are the fixture and the
+// shape of the M5 registry rows; ruleset version 1 keeps the earlier #E0E0E0 (rules/seed.ts V1_GREY), version 2 is this.
+const GREY = "#F0F0F0";
 const WHITE = "#FFFFFF";
 const NO_MARGINS: Margins = { top: 0, bottom: 0, left: 0, right: 0, unit: "fraction" };
 
@@ -193,10 +195,32 @@ export function channel(id: ChannelId): ChannelSpec {
   return spec;
 }
 
-/** The canvas colour for a shot: `firstImageBackground` for shot 1 where the channel has one. */
-export function backgroundFor(id: ChannelId, shotNumber: number): string {
-  const spec = channel(id);
+/** The canvas colour for a shot of this channel spec: `firstImageBackground` for shot 1 where the channel has one. */
+export function backgroundOf(spec: Pick<ChannelSpec, "background" | "firstImageBackground">, shotNumber: number): string {
   return shotNumber === 1 && spec.firstImageBackground ? spec.firstImageBackground : spec.background;
+}
+
+/** The canvas colour for a shot from the channels.ts fixture (backgroundOf on the constants). */
+export function backgroundFor(id: ChannelId, shotNumber: number): string {
+  return backgroundOf(channel(id), shotNumber);
+}
+
+/** M3-F3-R2: every canvas colour is at least this on each RGB channel. */
+export const LIGHT_BACKGROUND_MIN = 240;
+/** M3-F3-R2 (gate 1, C10, rule R228): Amazon image 1 is pure white. */
+export const AMAZON_FIRST_IMAGE_WHITE = "#FFFFFF";
+
+/**
+ * The background lightness rule for one shot (M3-F3-R2, R4): null when the channel's canvas colour for this shot is
+ * allowed, else the sentence naming the breach. Amazon image 1 must be pure white; every other canvas must read 240 or
+ * more on each of red, green and blue. A colour that is not a #RRGGBB value breaks the rule too.
+ */
+export function backgroundRuleBreach(spec: Pick<ChannelSpec, "id" | "label" | "background" | "firstImageBackground">, shotNumber: number): string | null {
+  const color = backgroundOf(spec, shotNumber);
+  if (spec.id === "amazon" && shotNumber === 1) return color.toUpperCase() === AMAZON_FIRST_IMAGE_WHITE ? null : `${spec.label} image 1 must be pure white (${AMAZON_FIRST_IMAGE_WHITE}), not ${color}.`;
+  if (!/^#[0-9a-f]{6}$/i.test(color)) return `The ${spec.label} background ${color} is not a #RRGGBB colour.`;
+  const rgb = [1, 3, 5].map((start) => parseInt(color.slice(start, start + 2), 16));
+  return rgb.every((v) => v >= LIGHT_BACKGROUND_MIN) ? null : `The ${spec.label} background ${color} is darker than ${LIGHT_BACKGROUND_MIN} on a colour channel.`;
 }
 
 export const JPEG_QUALITY_START = 90;

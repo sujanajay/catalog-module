@@ -1,3 +1,9 @@
+import { channelRulesLoader, FIXTURE_CHANNEL_RULES } from "@catalog/core/catalog/channel-rules";
+import { publishChannelChange } from "@catalog/core/catalog/channel-rules-testing";
+import { seedChannelRules } from "@catalog/core/catalog/rules/seed";
+import { seedTaxonomy } from "@catalog/core/analyze/taxonomy-seed";
+import { analyseBackground } from "@catalog/core/catalog/shadow";
+import { renderAllChannels, UnsupportedSourceError } from "@catalog/core/catalog/render";
 import sharp from "sharp";
 import {startReplacement,completeReplacement,applyDecision,applySkuMap} from "@catalog/core/catalog/decisions";
 import { judgeOutput } from "@catalog/core/catalog/qa/judge";
@@ -7,19 +13,18 @@ import { afterAll,beforeAll,describe,expect,it,vi } from "vitest";
 import { and,eq,sql } from "drizzle-orm";
 import type { Db } from "@catalog/core/db/client";
 import { createTestDb } from "@catalog/core/db/testing";
-import { brandMaster,catalogBatches,catalogBatchProducts,catalogChunks,catalogOutputs,catalogProductAliases,catalogProducts,catalogProductEvents,catalogSourceImages,catalogUploads,DEFAULT_BATCH_OPTIONS,EMPTY_BATCH_COUNTS,spendDays } from "@catalog/core/db/schema";
+import { catalogChannelListings,catalogOptions,catalogTreatmentAssignments,brandMaster,catalogBatches,catalogBatchProducts,catalogChunks,catalogOutputs,catalogProductAliases,catalogProducts,catalogProductEvents,catalogSourceImages,catalogUploads,DEFAULT_BATCH_OPTIONS,EMPTY_BATCH_COUNTS,spendDays } from "@catalog/core/db/schema";
 import * as storage from "@catalog/core/storage";
 import { catalogCostEvents } from "@catalog/core/db/schema";
 import { enqueueFinalize,FINALIZE_ENQUEUE_LEASE_MS,PROGRESS_THROTTLE_MIN_OUTPUTS,workerCatalogDeps,type CatalogDeps } from "./deps";
 import { CHUNK_MAX_STALLS } from "@catalog/core/catalog/pipeline/dispatch";
-import { UnsupportedSourceError } from "@catalog/core/catalog/render";
 import { handleSweep } from "./sweep";
 import { currentChunkTask, handleChunkTask } from "./chunk";
 import { catalogLlmDeps, CatalogQaCapError, type UnderClaim } from "./qa-stage";
 import { QA_USD_PER_CHECK_FALLBACK } from "@catalog/core/catalog/cost";
 import { handlePublishTask } from "./publish";
 import { handleFinalizeTask } from "./finalize";
-import { renderKey, upscaledRenderKey } from "@catalog/core/catalog/pipeline/publish";
+import { HOLDOUT_KEPT_NOTE, renderKey, upscaledRenderKey } from "@catalog/core/catalog/pipeline/publish";
 import { compareXlsxCsv,writeLinksXlsx } from "@catalog/core/catalog/sheet";
 import { workbookCsvSheets } from "@catalog/core/catalog/pipeline/report";
 import { cleanupTestBatch,cleanupTestBatches } from "@catalog/core/catalog/test-cleanup";
@@ -51,7 +56,7 @@ function world() {
   const copy=vi.fn(storage.stageCopyToPublic);
   const remove=vi.fn(async(path:string)=>objects.delete(`gs://public/${path}`));
   const fetch=vi.fn<typeof globalThis.fetch>(async(url)=>{const path=new URL(String(url)).pathname.replace(/^\/public\//,"");const obj=objects.get(`gs://public/${path}`);return obj ? new Response(new Uint8Array(obj.buf),{headers:{"content-type":obj.mime,"content-length":String(obj.buf.length),"x-goog-generation":obj.generation}}):new Response(null,{status:404});});
-  const base=workerCatalogDeps(db);
+  const base=workerCatalogDeps(db,{channelRules:async()=>FIXTURE_CHANNEL_RULES});
   // The route table (M7-F2) is switched on per test; without it the judge asks the policy's models only.
   const deps:CatalogDeps={...base,routes:undefined,sleep:async()=>{},fetch,now:()=>new Date("2026-01-01T00:00:00Z"),log:()=>{},enqueue:vi.fn(async()=>"task"),resolvePolicy:vi.fn<CatalogDeps["resolvePolicy"]>(async()=>({matteModel:"fixture",qaModel:"",threshold:75,floor:60,qaMode:"per_source",qaSampleRate:1,source:"default"})),
     storage:{...storage,getBucketName:()=>"assets",getPublicBucketName:()=>"public",uploadBuffer:upload,downloadBuffer:async uri=>{const o=objects.get(uri);if(!o)throw new Error(`No object ${uri}`);return {buf:o.buf,mime:o.mime};},headObject:async uri=>{const o=objects.get(uri);return o ? {exists:true,size:o.buf.length,contentType:o.mime,generation:o.generation,crc32c:o.crc32c}:{exists:false,size:null,contentType:null,generation:null,crc32c:null};},stageCopyToPublic:copy,deletePublicObject:remove,setCustomTime:vi.fn(async()=>{})},
@@ -1275,4 +1280,114 @@ describe("spec 18 H4: finalize runs once per batch",()=>{
     expect((await handlePublishTask(w.deps,{batchId:broken.batch.id,productId:first.product.id})).outcome).toBe("failed");
     expect(finalizeCalls(w)).toHaveLength(0);
   },60_000);
+});
+describe("M3-S1 acceptance: renders read the M5 channel registry (M3 4.3.9 tests 1 and 2)",()=>{
+  // The real render (M3-F3-R1) on a product taller than wide, so every canvas shows background at its corners.
+  const W=800,H=800;
+  const shot=()=>{const rgb=Buffer.alloc(W*H*3,255),alpha=Buffer.alloc(W*H);for(let y=150;y<650;y++)for(let x=250;x<550;x++){const i=y*W+x;rgb[i*3]=40;rgb[i*3+1]=60;rgb[i*3+2]=150;alpha[i]=255;}return {rgb,alpha};};
+  function m3World() {
+    const w=world(),{rgb,alpha}=shot(),logs:{message:string;fields?:Record<string,unknown>}[]=[];
+    w.deps.channelRules=channelRulesLoader(db);
+    w.deps.renderAllChannels=vi.fn(renderAllChannels);
+    w.deps.log=(message,fields)=>{logs.push({message,...(fields ? {fields}:{})});};
+    w.deps.prepare=vi.fn(async()=>({width:W,height:H,rgb,alphaSource:null,background:analyseBackground(rgb,W,H),flags:[],sourceMime:"image/jpeg"}));
+    w.deps.matteFor=vi.fn<CatalogDeps["matteFor"]>(async()=>({alpha,width:W,height:H,model:"fixture",ms:12,source:"model",target:"cpu",sentLongSide:W}));
+    return {...w,logs};
+  }
+  const live=(productId:string,channel:"noon"|"amazon")=>db.select().from(catalogOutputs).where(and(eq(catalogOutputs.productId,productId),eq(catalogOutputs.channel,channel),eq(catalogOutputs.isLive,true)));
+  /** The published canvas colour at the corner of an output, one value per RGB channel. */
+  const cornerOf=async(w:ReturnType<typeof m3World>,o:typeof catalogOutputs.$inferSelect)=>[...(await sharp(w.objects.get(`gs://public/${o.objectPath}`)!.buf).extract({left:2,top:2,width:1,height:1}).removeAlpha().raw().toBuffer())];
+  beforeAll(async()=>{await seedTaxonomy(db);await seedChannelRules(db);},120_000);
+
+  it("test 1: an admin's Noon background reaches the next batch, which passes compliance; a live product outside it is untouched",async()=>{
+    const w=m3World();
+    const before=await seed(w,"m3s1-outside");
+    expect((await run(w,before)).outcome).toBe("published");
+    const [kept]=await live(before.product.id,"noon");
+    for(const v of await cornerOf(w,kept!)) expect(v).toBeGreaterThanOrEqual(239);
+    const keptBytes=w.objects.get(`gs://public/${kept!.objectPath}`)!;
+
+    await publishChannelChange(db,"noon",{background:"#F5F5F5"});
+    const next=await seed(w,"m3s1-next");
+    expect((await run(w,next)).outcome).toBe("published");
+    const [made]=await live(next.product.id,"noon");
+    expect(made!.batchId).toBe(next.batch.id);
+    expect(made!.compliance).toMatchObject({ok:true,failures:[]});
+    for(const v of await cornerOf(w,made!)) expect(Math.abs(v-245)).toBeLessThanOrEqual(1);
+    // The render key carries the Noon row's version (M3-F3-R3).
+    const rules=await channelRulesLoader(db)();
+    expect(made!.renderKey).toBe(renderKey({sourceSha256:"sha",channel:"noon",n:1,policyKey:"default|fixture",rulesVersion:rules.keyVersion("noon")}));
+
+    // The product outside the batch keeps its live image, row and bytes.
+    const [still]=await live(before.product.id,"noon");
+    expect(still).toMatchObject({id:kept!.id,generation:kept!.generation,renderKey:kept!.renderKey});
+    expect(w.objects.get(`gs://public/${kept!.objectPath}`)).toBe(keptBytes);
+
+    // In its next batch the same photo is made again with the new background (its key changed with the rule).
+    const again=await seed(w,"m3s1-outside-again",{productId:before.product.id});
+    expect((await run(w,again)).outcome).toBe("published");
+    const [remade]=await live(before.product.id,"noon");
+    expect(remade!.batchId).toBe(again.batch.id);
+    for(const v of await cornerOf(w,remade!)) expect(Math.abs(v-245)).toBeLessThanOrEqual(1);
+  },240_000);
+
+  it("test 2: every Amazon image 1 is pure white and every other output reads 240 or more",async()=>{
+    const w=m3World(),s=await seed(w,"m3s1-white",{shots:["w1","w2"],channels:["amazon","noon"]});
+    expect((await run(w,s)).outcome).toBe("published");
+    const outputs=await db.select().from(catalogOutputs).where(eq(catalogOutputs.batchId,s.batch.id));
+    expect(outputs).toHaveLength(4);
+    for(const o of outputs) {
+      expect(o.compliance).toMatchObject({ok:true});
+      const rgb=await cornerOf(w,o);
+      if(o.channel==="amazon" && o.n===1) expect(rgb).toEqual([255,255,255]);
+      else for(const v of rgb) expect(v).toBeGreaterThanOrEqual(239);
+    }
+  },240_000);
+
+  it("an unchanged product is kept under the registry keys, not re-made and not held",async()=>{
+    const w=m3World(),first=await seed(w,"m3s1-unchanged");
+    expect((await run(w,first)).outcome).toBe("published");
+    const next=await seed(w,"m3s1-unchanged-next",{productId:first.product.id});
+    expect((await run(w,next)).outcome).toBe("published");
+    expect(await db.select().from(catalogOutputs).where(eq(catalogOutputs.batchId,next.batch.id))).toEqual([]);
+    const [pair]=await db.select().from(catalogBatchProducts).where(eq(catalogBatchProducts.batchId,next.batch.id));
+    expect(pair!.change).toBe("unchanged");
+    expect(w.deps.renderAllChannels).toHaveBeenCalledTimes(1);
+  },240_000);
+
+  it("a holdout control listing is never planned for a new render; its live image stays and the other channel is made",async()=>{
+    const w=m3World(),first=await seed(w,"m3s1-control",{channels:["noon","amazon"]});
+    expect((await run(w,first)).outcome).toBe("published");
+    const [option]=await db.insert(catalogOptions).values({brandSlug:"anta",optionKey:"M3S1-CONTROL-PIPE",keySource:"master"}).returning();
+    await db.update(catalogProducts).set({optionId:option!.id}).where(eq(catalogProducts.id,first.product.id));
+    const [listing]=await db.insert(catalogChannelListings).values({optionId:option!.id,channel:"noon",market:"ae"}).returning();
+    await db.insert(catalogTreatmentAssignments).values({experimentId:"m3s1-holdout",listingId:listing!.id,arm:"control",doNotTouch:true});
+    const [noonBefore]=await live(first.product.id,"noon"),[amazonBefore]=await live(first.product.id,"amazon");
+
+    const next=await seed(w,"m3s1-control-next",{productId:first.product.id,shots:["changed"],channels:["noon","amazon"]});
+    expect((await run(w,next)).outcome).toBe("published");
+    const made=await db.select().from(catalogOutputs).where(eq(catalogOutputs.batchId,next.batch.id));
+    expect(made.map(o=>o.channel)).toEqual(["amazon"]);
+    expect((await live(first.product.id,"noon"))[0]).toMatchObject({id:noonBefore!.id,generation:noonBefore!.generation});
+    expect((await live(first.product.id,"amazon"))[0]!.id).not.toBe(amazonBefore!.id);
+    expect(w.logs.find(l=>l.message==="catalog holdout listing left as is")?.fields).toMatchObject({productId:first.product.id,channels:["noon"],reasons:["frozen_control"]});
+  },240_000);
+
+  it("a hold that starts after the render is read again at publish: the held channel keeps its live image, the rest publishes",async()=>{
+    const w=m3World(),first=await seed(w,"m3s1-late-hold",{channels:["noon","amazon"]});
+    expect((await run(w,first)).outcome).toBe("published");
+    const [option]=await db.insert(catalogOptions).values({brandSlug:"anta",optionKey:"M3S1-LATE-HOLD",keySource:"master"}).returning();
+    await db.update(catalogProducts).set({optionId:option!.id}).where(eq(catalogProducts.id,first.product.id));
+    const [listing]=await db.insert(catalogChannelListings).values({optionId:option!.id,channel:"noon",market:"sa"}).returning();
+    const [noonBefore]=await live(first.product.id,"noon");
+    const next=await seed(w,"m3s1-late-hold-next",{productId:first.product.id,shots:["changed"],channels:["noon","amazon"]});
+    for(let i=0;i<3;i++) expect((await handleChunkTask(w.deps,await currentChunkTask(db,next.chunk.id))).httpStatus).toBe(200);
+    expect((await db.select().from(catalogOutputs).where(eq(catalogOutputs.batchId,next.batch.id))).map(o=>o.channel).sort()).toEqual(["amazon","noon"]);
+    await db.insert(catalogTreatmentAssignments).values({experimentId:"m3s1-late",listingId:listing!.id,arm:"control",doNotTouch:true});
+    expect((await handlePublishTask(w.deps,{batchId:next.batch.id,productId:next.product.id})).outcome).toBe("published");
+    const made=await db.select().from(catalogOutputs).where(eq(catalogOutputs.batchId,next.batch.id));
+    expect(made.find(o=>o.channel==="noon")).toMatchObject({status:"skipped",isLive:false,reason:HOLDOUT_KEPT_NOTE});
+    expect(made.find(o=>o.channel==="amazon")).toMatchObject({status:"verified",isLive:true});
+    expect((await live(first.product.id,"noon"))[0]).toMatchObject({id:noonBefore!.id,generation:noonBefore!.generation});
+  },240_000);
 });

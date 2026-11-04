@@ -1,3 +1,4 @@
+import { FIXTURE_CHANNEL_RULES } from "@catalog/core/catalog/channel-rules";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { eq } from "drizzle-orm";
 import type { Db } from "@catalog/core/db/client";
@@ -48,7 +49,7 @@ async function seed(channels: ChannelId[]) {
 
 function world(render: (channel: ChannelId, ctx: Ctx) => RenderOutput) {
   const objects = new Map<string, Buffer>();
-  const base = workerCatalogDeps(db);
+  const base = workerCatalogDeps(db,{channelRules:async()=>FIXTURE_CHANNEL_RULES});
   const renderAllChannels = vi.fn<CatalogDeps["renderAllChannels"]>(async (_p, _m, channels, ctx) => Object.fromEntries(channels.map(c => [c, render(c, ctx)])) as Record<ChannelId, RenderOutput>);
   const deps: CatalogDeps = { ...base, now: () => new Date("2026-01-01T00:00:00Z"), log: () => {}, renderAllChannels, matteFor: vi.fn(async () => matte),
     matting: { ...base.matting, health: vi.fn(async () => ({ ok: true, models: [{ id: "first", inputSize: 1024, target: "cpu" }], default: "first", versions: { cpu: null, gpu: null } })) } as unknown as CatalogDeps["matting"],
