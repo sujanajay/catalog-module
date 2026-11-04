@@ -172,6 +172,8 @@ describe("batch copy for the real state of the batch", () => {
     // Live images from before M3-S1 (plain CHANNEL_RULES_VERSION keys) are made again once, under the registry.
     expect(plannedImages(sources, ["noon"], liveUnder("10"), null, noonRow(2))).toEqual({ outputs: 2, sourcesToMake: 2 });
     expect(plannedImages(sources, ["noon"], liveUnder("10+c2"), null, null)).toEqual({ outputs: 2, sourcesToMake: 2 });
+    // A channel with no active row (retired) cannot be keyed: its images are counted, and the page does not fail.
+    expect(plannedImages(sources, ["noon"], liveUnder("10+c2"), null, () => { throw new Error("no active row for noon"); })).toEqual({ outputs: 2, sourcesToMake: 2 });
   });
 });
 

@@ -77,7 +77,9 @@ type LiveOutput = { productId: string; n: number; channel: ChannelId; sha256: st
  * `keyVersion` null (no ruleset could be read) keeps nothing.
  */
 export function plannedImages(sources: readonly PlannedSource[], channels: readonly ChannelId[], live: readonly LiveOutput[], upscaleModel: string | readonly string[] | null = configuredUpscalerIds(), keyVersion?: ((channel: ChannelId) => string) | null): { outputs: number; sourcesToMake: number } {
-  const current = (o: LiveOutput) => o.workerMatteModel !== null && keyVersion !== null && renderKeys({ sourceSha256: o.sha256, channel: o.channel, n: o.n, policyKey: `default|${o.workerMatteModel}`, ...(keyVersion ? { rulesVersion: keyVersion(o.channel) } : {}) }, upscaleModel).includes(o.renderKey);
+  // A channel the rules cannot key (no active row) keeps nothing, like a ruleset that cannot be read.
+  const rulesOf = (channel: ChannelId): { rulesVersion?: string } | null => { if (!keyVersion) return {}; try { return { rulesVersion: keyVersion(channel) }; } catch { return null; } };
+  const current = (o: LiveOutput) => { const rules = o.workerMatteModel !== null && keyVersion !== null ? rulesOf(o.channel) : null; return rules !== null && renderKeys({ sourceSha256: o.sha256, channel: o.channel, n: o.n, policyKey: `default|${o.workerMatteModel}`, ...rules }, upscaleModel).includes(o.renderKey); };
   // The live outputs the worker keeps, by (product, n, channel, sha256): one lookup per pair instead of a scan of every live output.
   const pairKey = (productId: string, n: number, channel: string, sha256: string) => `${productId}|${n}|${channel}|${sha256}`;
   const kept = new Set(live.filter(current).map((o) => pairKey(o.productId, o.n, o.channel, o.sha256)));

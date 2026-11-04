@@ -3,7 +3,8 @@ import { publishChannelChange } from "@catalog/core/catalog/channel-rules-testin
 import { seedChannelRules } from "@catalog/core/catalog/rules/seed";
 import { seedTaxonomy } from "@catalog/core/analyze/taxonomy-seed";
 import { analyseBackground } from "@catalog/core/catalog/shadow";
-import { renderAllChannels, UnsupportedSourceError } from "@catalog/core/catalog/render";
+import { hexColor, renderAllChannels, UnsupportedSourceError } from "@catalog/core/catalog/render";
+import { backgroundOf } from "@catalog/core/catalog/channels";
 import sharp from "sharp";
 import {startReplacement,completeReplacement,applyDecision,applySkuMap} from "@catalog/core/catalog/decisions";
 import { judgeOutput } from "@catalog/core/catalog/qa/judge";
@@ -1349,13 +1350,15 @@ describe("M3-S1 acceptance: renders read the M5 channel registry (M3 4.3.9 tests
   it.each([[255,"a pure-white ready-made JPEG"],[240,"a 240-grey ready-made JPEG"]])("test 2 also holds for %s (%s): a source already at canvas size is passed through only onto its own slot colour",async(background)=>{
     const w=m3World(readyMade(background)),s=await seed(w,`m3s1-ready-${background}`,{shots:["r1","r2"],channels:["amazon","noon"]});
     expect((await run(w,s)).outcome).toBe("published");
-    const outputs=await db.select().from(catalogOutputs).where(eq(catalogOutputs.batchId,s.batch.id));
+    const outputs=await db.select().from(catalogOutputs).where(eq(catalogOutputs.batchId,s.batch.id)),rules=await channelRulesLoader(db)();
     expect(outputs).toHaveLength(4);
     for(const o of outputs) {
       expect(o.compliance).toMatchObject({ok:true});
       const rgb=await cornerOf(w,o);
       if(o.channel==="amazon" && o.n===1) expect(rgb).toEqual([255,255,255]);
-      else for(const v of rgb) expect(Math.abs(v-240)).toBeLessThanOrEqual(1);
+      else for(const v of rgb) expect(v).toBeGreaterThanOrEqual(239);
+      // Each slot's own colour from the published rows (an earlier test may have changed Noon's).
+      hexColor(backgroundOf(rules.spec(o.channel),o.n)).forEach((v,c)=>expect(Math.abs(rgb[c]!-v)).toBeLessThanOrEqual(1));
     }
   },240_000);
 
@@ -1368,6 +1371,51 @@ describe("M3-S1 acceptance: renders read the M5 channel registry (M3 4.3.9 tests
     const [pair]=await db.select().from(catalogBatchProducts).where(eq(catalogBatchProducts.batchId,next.batch.id));
     expect(pair!.change).toBe("unchanged");
     expect(w.deps.renderAllChannels).toHaveBeenCalledTimes(1);
+  },240_000);
+
+  it("a batch planned before the deploy is not held: an unchanged product's live image under the plain rules key counts as kept",async()=>{
+    const w=m3World(),first=await seed(w,"m3s1-legacy");
+    expect((await run(w,first)).outcome).toBe("published");
+    const next=await seed(w,"m3s1-legacy-next",{productId:first.product.id});
+    for(let i=0;i<3;i++) expect((await handleChunkTask(w.deps,await currentChunkTask(db,next.chunk.id))).httpStatus).toBe(200);
+    expect(await db.select().from(catalogOutputs).where(eq(catalogOutputs.batchId,next.batch.id))).toEqual([]);
+    // What a worker before M3-S1 kept: the live image under the plain CHANNEL_RULES_VERSION key, with no output row.
+    const [kept]=await live(first.product.id,"noon");
+    await db.update(catalogOutputs).set({renderKey:renderKey({sourceSha256:"sha",channel:"noon",n:1,policyKey:"default|fixture"})}).where(eq(catalogOutputs.id,kept!.id));
+    expect((await handlePublishTask(w.deps,{batchId:next.batch.id,productId:next.product.id})).outcome).toBe("published");
+    const [pair]=await db.select().from(catalogBatchProducts).where(eq(catalogBatchProducts.batchId,next.batch.id));
+    expect(pair).toMatchObject({change:"unchanged"});
+    expect(pair!.notes ?? "").not.toContain("could not be processed");
+  },240_000);
+
+  it("a product held on every channel of its batch ends unchanged, not held or failed, and keeps its live images",async()=>{
+    const w=m3World(),first=await seed(w,"m3s1-all-held");
+    expect((await run(w,first)).outcome).toBe("published");
+    const [option]=await db.insert(catalogOptions).values({brandSlug:"anta",optionKey:"M3S1-ALL-HELD",keySource:"master"}).returning();
+    await db.update(catalogProducts).set({optionId:option!.id}).where(eq(catalogProducts.id,first.product.id));
+    const [listing]=await db.insert(catalogChannelListings).values({optionId:option!.id,channel:"noon",market:"ae"}).returning();
+    const [noonBefore]=await live(first.product.id,"noon");
+    const next=await seed(w,"m3s1-all-held-next",{productId:first.product.id,shots:["changed"]});
+    for(let i=0;i<3;i++) expect((await handleChunkTask(w.deps,await currentChunkTask(db,next.chunk.id))).httpStatus).toBe(200);
+    await db.insert(catalogTreatmentAssignments).values({experimentId:"m3s1-all-held",listingId:listing!.id,arm:"control",doNotTouch:true});
+    expect(await handlePublishTask(w.deps,{batchId:next.batch.id,productId:next.product.id})).toMatchObject({outcome:"published"});
+    const [pair]=await db.select().from(catalogBatchProducts).where(eq(catalogBatchProducts.batchId,next.batch.id));
+    expect(pair).toMatchObject({change:"unchanged"});
+    expect(pair!.notes).toContain(HOLDOUT_KEPT_NOTE);
+    expect((await db.select().from(catalogOutputs).where(eq(catalogOutputs.batchId,next.batch.id))).map(o=>o.status)).toEqual(["skipped"]);
+    expect((await live(first.product.id,"noon"))[0]).toMatchObject({id:noonBefore!.id,generation:noonBefore!.generation});
+    expect(w.deps.renderAllChannels).toHaveBeenCalledTimes(2);
+  },240_000);
+
+  it("a republish after a hold began keeps an output already verified and live in the batch as it is",async()=>{
+    const w=m3World(),s=await seed(w,"m3s1-republish");
+    expect((await run(w,s)).outcome).toBe("published");
+    const [option]=await db.insert(catalogOptions).values({brandSlug:"anta",optionKey:"M3S1-REPUBLISH",keySource:"master"}).returning();
+    await db.update(catalogProducts).set({optionId:option!.id,lockBatchId:s.batch.id}).where(eq(catalogProducts.id,s.product.id));
+    const [listing]=await db.insert(catalogChannelListings).values({optionId:option!.id,channel:"noon",market:"ae"}).returning();
+    await db.insert(catalogTreatmentAssignments).values({experimentId:"m3s1-republish",listingId:listing!.id,arm:"control",doNotTouch:true});
+    await handlePublishTask(w.deps,{batchId:s.batch.id,productId:s.product.id});
+    expect((await db.select().from(catalogOutputs).where(eq(catalogOutputs.batchId,s.batch.id)))[0]).toMatchObject({status:"verified",isLive:true});
   },240_000);
 
   it("a holdout control listing is never planned for a new render; its live image stays and the other channel is made",async()=>{

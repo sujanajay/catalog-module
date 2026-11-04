@@ -97,14 +97,25 @@ export async function publishProduct(deps: PublishDeps, batchId: string, product
     if (!product || product.lockBatchId !== batchId) return { outcome: "not_locked" };
     const [batch] = await tx.select().from(catalogBatches).where(eq(catalogBatches.id,batchId));
     if (!batch) return { outcome: "not_found" };
-    // M3-F3-R3, M3 3.4 need 2: read again at publish time. A listing held by an experiment takes nothing from this batch
-    // (no copy, no delete); its live image stays. An output planned before the hold began is left out with a note.
-    const held = new Set((await frozenChannels(tx as unknown as Db, product.optionId, batch.channels)).map(f => f.channel));
-    const channels = batch.channels.filter(c => !held.has(c));
-    const heldOutputs = (await tx.select().from(catalogOutputs).where(and(eq(catalogOutputs.batchId,batchId),eq(catalogOutputs.productId,productId)))).filter(o => held.has(o.channel) && o.status !== "skipped");
-    for (const o of heldOutputs) await tx.update(catalogOutputs).set({status:"skipped",reason:HOLDOUT_KEPT_NOTE,updatedAt:deps.now()}).where(eq(catalogOutputs.id,o.id));
     const found = { brandSlug: batch.brandSlug, isTest: batch.isTest };
     const where = and(eq(catalogBatchProducts.batchId,batchId),eq(catalogBatchProducts.productId,productId));
+    // M3-F3-R3, M3 3.4 need 2: read again at publish time. A listing held by an experiment takes nothing from this batch
+    // (no copy, no delete); its live image stays. An output planned before the hold began is left out with a note; one
+    // already verified (a republish after the hold began) keeps its state. This sits after anything that resets the
+    // batch's outputs (M1-S4's restore) and before anything that reads them.
+    const held = new Set((await frozenChannels(tx as unknown as Db, product.optionId, batch.channels)).map(f => f.channel));
+    const channels = batch.channels.filter(c => !held.has(c));
+    const heldOutputs = (await tx.select().from(catalogOutputs).where(and(eq(catalogOutputs.batchId,batchId),eq(catalogOutputs.productId,productId)))).filter(o => held.has(o.channel) && o.status !== "skipped" && o.status !== "verified");
+    for (const o of heldOutputs) await tx.update(catalogOutputs).set({status:"skipped",reason:HOLDOUT_KEPT_NOTE,updatedAt:deps.now()}).where(eq(catalogOutputs.id,o.id));
+    if (held.size && !channels.length) {
+      // Every channel of the batch is held: the product keeps all its live images. It is unchanged, never held for a
+      // person nor failed (an auto-decide batch would otherwise count "nothing delivered" as an exception).
+      const [pair] = await tx.select().from(catalogBatchProducts).where(where);
+      const notes = pair?.notes?.includes(HOLDOUT_KEPT_NOTE) ? pair.notes : [pair?.notes, HOLDOUT_KEPT_NOTE].filter(Boolean).join("; ");
+      await tx.update(catalogBatchProducts).set({ change:"unchanged", notes }).where(where);
+      await tx.update(catalogProducts).set({lastBatchId:batchId}).where(eq(catalogProducts.id,productId));
+      return { outcome:"published", batch:found, changed:false };
+    }
     const outputs = await tx.select().from(catalogOutputs).where(and(eq(catalogOutputs.batchId,batchId),eq(catalogOutputs.productId,productId)));
     const allSources = await tx.select().from(catalogSourceImages).where(and(eq(catalogSourceImages.batchId,batchId),eq(catalogSourceImages.productId,productId)));
     const replacedIds=new Set(allSources.flatMap(source=>source.replacesId ? [source.replacesId]:[]));
@@ -114,7 +125,10 @@ export async function publishProduct(deps: PublishDeps, batchId: string, product
     const [pair] = await tx.select().from(catalogBatchProducts).where(where);
     const missingPairs = sources.some(source=>channels.some(channel=> {
       if(outputs.some(output=>output.sourceImageId===source.id && output.channel===channel)) return false;
-      const keys = batch.options.policy ? renderKeys({sourceSha256:source.sha256,channel,n:source.n,policyKey:`default|${source.matteModel ?? batch.options.policy.matteModel}`,rulesVersion:rules.keyVersion(channel)}):null;
+      // The registry key (M3 D13), and the plain CHANNEL_RULES_VERSION key a worker before M3-S1 planned with: a batch
+      // open across that deploy kept unchanged products' live images under the plain key and made no output for them.
+      const key = batch.options.policy ? {sourceSha256:source.sha256,channel,n:source.n,policyKey:`default|${source.matteModel ?? batch.options.policy.matteModel}`} : null;
+      const keys = key ? [...renderKeys({...key,rulesVersion:rules.keyVersion(channel)}),...renderKeys(key)] : null;
       return !keys || !live.some(output=>output.channel===channel && output.n===source.n && keys.includes(output.renderKey));
     }));
     if (product.lastBatchId === batchId && outputs.every(o=>o.status === "verified" || o.status === "skipped")) {
