@@ -218,3 +218,16 @@ export function incidentDurationText(i: { startedAt: Date; resolvedAt: Date | nu
   if (!i.resolvedAt) return "still open";
   return +i.resolvedAt === +i.startedAt ? "one-off" : `resolved after ${durationText(+i.resolvedAt - +i.startedAt)}`;
 }
+/** Why a batch did not count as a success, in plain words (catalog_batch_outcomes.cause). */
+export const OUTCOME_CAUSE_WORDS: Record<string, string> = {
+  touched: "A person stepped in",
+  incident: "Something went wrong on our side",
+  failed: "Stopped",
+  cancelled: "Cancelled",
+};
+/** The last column of the recent batches table: why it did not count, or that it is left out of the rate. */
+export function outcomeText(o: { success: boolean; cause: string | null; isTest: boolean; excluded: boolean }): string {
+  const why = o.success ? "" : OUTCOME_CAUSE_WORDS[o.cause ?? ""] ?? "";
+  const out = o.isTest ? "test batch, not counted" : o.excluded ? "never started, not counted" : "";
+  return [why, out].filter(Boolean).join("; ");
+}

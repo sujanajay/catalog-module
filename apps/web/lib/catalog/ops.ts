@@ -205,12 +205,16 @@ export function batchCostDetail(batchId: string, conn: Db = db(), now: Date = ne
 }
 
 /**
- * M6-S6 (M6-F3-R5): the reliability card's numbers for [from, to) (default the 30 days to `now`), kept for COST_TTL_MS
- * per window; a read that fails shows a plain sentence. The outcome and incident tables are small (one row per batch).
+ * M6-S6 (M6-F3-R5): the reliability card's numbers for the 30 days to `now`, kept for COST_TTL_MS per web instance; a
+ * read that fails shows a plain sentence. The outcome and incident tables are small (one row per batch).
  */
-export function reliability(conn: Db = db(), now: Date = new Date(), from?: Date) {
-  const key = `reliability:${from ? +from : "30d"}:${from ? +now : ""}`;
-  return report("reliability", () => rememberCost(key, +now, COST_TTL_MS, () => reportRead(conn, (tx) => reliabilitySummary(tx, now, from))));
+export function reliability(conn: Db = db(), now: Date = new Date()) {
+  return report("reliability", () => rememberCost("reliability", +now, COST_TTL_MS, () => reportRead(conn, (tx) => reliabilitySummary(tx, now))));
+}
+
+/** A caller's own window [from, to) (the admin JSON route): read fresh, never kept, so it cannot push the page's reads out. */
+export function reliabilityWindow(from: Date, to: Date, conn: Db = db()) {
+  return report("reliability window", () => reportRead(conn, (tx) => reliabilitySummary(tx, to, from)));
 }
 
 // Spec 17 3.1.5: the health lines. The invariants run (sweep, every 10 minutes) keeps silentOutputs,

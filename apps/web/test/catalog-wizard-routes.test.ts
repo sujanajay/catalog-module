@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { Readable } from "node:stream";
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { brandMaster, catalogBatches, catalogChunks, catalogUploads } from "@catalog/core/db/schema";
 import { createTestDb } from "@catalog/core/db/testing";
@@ -319,6 +319,17 @@ describe("ingest hand-off failures and stalled collecting",()=>{
     expect((await ingest(request("POST"),ctx(id))).status).toBe(200);
     expect(ingestCalls().map(([,body])=>body)).toEqual([{batchId:id,uploadId:photo.id,run:expect.any(String)}]);
     expect((await (await get(request("GET"),ctx(id))).json()).state.stalled).toBeUndefined();
+  });
+  it("M6-S6 review P2-3: Back then Continue while collecting is not a touch; Try again on a stalled run is one",async()=>{
+    const touches=async(id:string)=>((await db.execute(sql`SELECT action FROM catalog_batch_touches WHERE batch_id = ${id}`)) as unknown as {rows:{action:string}[]}).rows.map(r=>r.action);
+    const id=await newBatch();await addPhoto(id);
+    expect((await ingest(request("POST"),ctx(id))).status).toBe(200);
+    // Back to step 1 and Continue again (or Check again on step 2, or a double-submit): the batch is collecting.
+    expect((await ingest(request("POST"),ctx(id))).status).toBe(200);
+    expect(await touches(id)).toEqual([]);
+    await age(id,15);
+    expect((await ingest(request("POST"),ctx(id))).status).toBe(200);
+    expect(await touches(id)).toEqual(["retry_collect"]);
   });
   it("Try again on a stalled batch whose files were all read hands one read upload over, so the grouping step runs",async()=>{
     const id=await newBatch();const photo=await addPhoto(id);await collectBatch(id);

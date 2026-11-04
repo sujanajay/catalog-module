@@ -41,6 +41,8 @@ export const SCAN_LIMIT = 100;
 export const SUCCESS_TARGET = 0.99;
 /** The windows of the success rate (M6-F3-R5). */
 export const RATE_WINDOWS_DAYS = [7, 30] as const;
+/** How many recent batch outcomes the card lists, with their touches and incidents (M6-F3 acceptance test 1). */
+export const RECENT_OUTCOMES = 15;
 /** The batch statuses the stall check looks at (the sweep's SWEEPABLE_STATUSES). */
 export const STALL_STATUSES = ["ingesting", "matting", "rendering", "qa", "publishing"] as const;
 const DAY_MS = 86_400_000;
@@ -94,7 +96,8 @@ export async function resolveIncidents(db: Db, ids: readonly string[], now: Date
 
 export const stallKey = (batchId: string) => `stall:${batchId}`;
 export const batchFailedKey = (batchId: string, run: string) => `batch_failed:${batchId}:${run}`;
-export const chunkGaveUpKey = (chunkId: string, attempt: number) => `chunk_gave_up:${chunkId}:${attempt}`;
+/** Keyed by the finish time: a chunk retried after an attempt reset that gives up again is a second event. */
+export const chunkGaveUpKey = (chunkId: string, finishedAt: Date) => `chunk_gave_up:${chunkId}:${+finishedAt}`;
 export const invariantKey = (checkId: string, batchId: string | null) => `invariant:${checkId}:${batchId ?? "none"}`;
 
 /** The run a failure belongs to: a started batch fails once; before Start each hand-off (Fix and continue) is a new run. */
@@ -110,29 +113,47 @@ const STALL_SENTENCES: Record<string, string> = {
   no_progress: "No progress on any photo.",
 };
 
-/** The open stall incidents of batches that moved again (or ended) are resolved; batches with none open get one. */
+/**
+ * The open stall incidents of batches that moved again (or ended) are resolved; batches with none open get one.
+ *
+ * Progress is completed work, never a retry (review P1-1): the batch row, its chunks' start and finish, the photo
+ * progress stamp of a chunk that is not parked on an enlargement (enlarge.ts refreshLaneProgress stamps parked chunks on
+ * every delivery, also one that fails because the upscaler is down), its enlargements that settled, and its finalize
+ * (a re-check part hands on with a new `finalizeEnqueuedAt`; a live finalize claim is progress now). A parked batch
+ * queued behind another batch's enlargements that settle is waiting its turn, not stalled: the latest settled
+ * enlargement of any running batch counts as progress for every parked batch.
+ */
 async function syncStalls(db: Db, now: Date): Promise<{ opened: number; resolved: number }> {
   const statuses = sql.join(STALL_STATUSES.map((s) => sql`${s}`), sql`, `);
-  // Progress: the batch row, its chunks (a photo finished, a delivery started or ended) and its enlargements that
-  // settled (a queued one retried by a busy upscaler is not progress).
+  const ms = (key: string) => sql`CASE WHEN coalesce(b.counts->>${key}, '') ~ '^[0-9]+$' THEN (b.counts->>${key})::numeric END`;
   const batches = rowsOf(await db.execute(sql`
     SELECT b.id, b.status,
       GREATEST(b.updated_at, b.started_at,
-        (SELECT max(GREATEST(c.started_at, c.finished_at, c.progress_at)) FROM catalog_chunks AS c WHERE c.batch_id = b.id),
-        (SELECT max(e.updated_at) FROM catalog_enlargements AS e WHERE e.batch_id = b.id AND e.status IN ('done', 'failed'))
+        (SELECT max(GREATEST(c.started_at, c.finished_at,
+            CASE WHEN c.status = 'queued' AND c.task_name = ${ENLARGING_TASK} THEN NULL ELSE c.progress_at END))
+          FROM catalog_chunks AS c WHERE c.batch_id = b.id),
+        (SELECT max(e.updated_at) FROM catalog_enlargements AS e WHERE e.batch_id = b.id AND e.status IN ('done', 'failed')),
+        to_timestamp(${ms("finalizeEnqueuedAt")} / 1000.0)
       ) AS progress_at,
+      coalesce(${ms("finalizeClaimUntil")} > ${+now}, false) AS finalizing,
       EXISTS (SELECT 1 FROM catalog_chunks AS c WHERE c.batch_id = b.id AND c.status = 'queued' AND c.task_name = ${ENLARGING_TASK}) AS parked
     FROM catalog_batches AS b WHERE b.status IN (${statuses})`));
+  const [lane] = rowsOf(await db.execute(sql`
+    SELECT max(e.updated_at) AS settled_at FROM catalog_enlargements AS e INNER JOIN catalog_batches AS b ON b.id = e.batch_id
+    WHERE b.status IN (${statuses}) AND e.status IN ('done', 'failed')`));
+  const laneSettledAt = dateOf(lane?.settled_at ?? null);
   const stalled = new Set<string>();
   let opened = 0;
   for (const b of batches) {
-    const id = String(b.id), progressAt = dateOf(b.progress_at);
-    if (!progressAt) continue;
+    const id = String(b.id), ownProgress = dateOf(b.progress_at);
+    if (!ownProgress || b.finalizing === true) continue;
+    const parked = b.parked === true;
+    const progressAt = parked && laneSettledAt && +laneSettledAt > +ownProgress ? laneSettledAt : ownProgress;
     const ingesting = b.status === "ingesting";
     if (+now - +progressAt < (ingesting ? INGEST_STALL_INCIDENT_MS : STALL_INCIDENT_MS)) continue;
     stalled.add(id);
-    const code = b.parked === true ? "enlarge_wait" : ingesting ? "ingest_stalled" : "no_progress";
-    if (await openIncident(db, { kind: "stall", severity: "warning", batchId: id, causeCode: code, cause: STALL_SENTENCES[code]!, startedAt: progressAt, dedupeKey: stallKey(id), detail: { status: b.status } })) opened++;
+    const code = parked ? "enlarge_wait" : ingesting ? "ingest_stalled" : "no_progress";
+    if (await openIncident(db, { kind: "stall", severity: "warning", batchId: id, causeCode: code, cause: STALL_SENTENCES[code]!, startedAt: ownProgress, dedupeKey: stallKey(id), detail: { status: b.status } })) opened++;
   }
   const open = await db.select({ id: catalogIncidents.id, batchId: catalogIncidents.batchId }).from(catalogIncidents)
     .where(and(eq(catalogIncidents.kind, "stall"), isNull(catalogIncidents.resolvedAt)));
@@ -174,7 +195,7 @@ async function recordFailures(db: Db, now: Date): Promise<number> {
     WHERE c.status = 'failed' AND c.finished_at >= ${since.toISOString()}::timestamptz ORDER BY c.finished_at DESC LIMIT ${SCAN_LIMIT}`));
   for (const c of chunks) {
     const at = dateOf(c.finished_at) ?? now;
-    if (await openIncident(db, { kind: "chunk_gave_up", severity: "error", batchId: String(c.batch_id), causeCode: String(c.stage), cause: c.error ? String(c.error) : "A group of photos stopped after repeated errors.", startedAt: at, resolvedAt: at, dedupeKey: chunkGaveUpKey(String(c.id), Number(c.attempt)) })) opened++;
+    if (await openIncident(db, { kind: "chunk_gave_up", severity: "error", batchId: String(c.batch_id), causeCode: String(c.stage), cause: c.error ? String(c.error) : "A group of photos stopped after repeated errors.", startedAt: at, resolvedAt: at, dedupeKey: chunkGaveUpKey(String(c.id), at), detail: { attempt: Number(c.attempt) } })) opened++;
   }
   return opened;
 }
@@ -246,7 +267,8 @@ export async function recordBatchOutcome(db: Db, batchId: string, now: Date = ne
   const [b] = await db.select().from(catalogBatches).where(eq(catalogBatches.id, batchId));
   if (!b || !(BATCH_OUTCOME_STATUSES as readonly string[]).includes(b.status)) return null;
   const status = b.status as BatchOutcomeStatus;
-  if (status === "cancelled" && !b.startedAt && !(b.counts as { ingestRun?: unknown }).ingestRun) return null;
+  // A draft never handed on, and any draft the sweep expired (handed on or not), is not a batch run: no row.
+  if (status === "cancelled" && ((b.options as { expired?: unknown }).expired || (!b.startedAt && !(b.counts as { ingestRun?: unknown }).ingestRun))) return null;
   const [existing] = await db.select({ linksReadyAt: catalogBatchOutcomes.linksReadyAt }).from(catalogBatchOutcomes).where(eq(catalogBatchOutcomes.batchId, batchId));
   const [touches] = await db.select({ n: count() }).from(catalogBatchTouches).where(eq(catalogBatchTouches.batchId, batchId));
   const [incidents] = await db.select({ n: count() }).from(catalogIncidents).where(eq(catalogIncidents.batchId, batchId));
@@ -264,7 +286,9 @@ export async function recordBatchOutcome(db: Db, batchId: string, now: Date = ne
     batchId, status, success,
     cause: success ? null : status !== "done" ? status : touchCount ? "touched" : "incident",
     isTest: b.isTest,
-    excluded: status === "cancelled" && +endedAt - +start <= QUICK_CANCEL_MS,
+    // Out of the rate (review P2-1): a batch that never started (intake failed or cancelled before Start), and a cancel
+    // within QUICK_CANCEL_MS of start.
+    excluded: !b.startedAt || (status === "cancelled" && +endedAt - +start <= QUICK_CANCEL_MS),
     startedAt: b.startedAt, firstLinksAt: dateOf(links?.first ?? null), linksReadyAt, endedAt,
     durationMs: linksReadyAt && b.startedAt ? Math.max(0, +linksReadyAt - +b.startedAt) : null,
     touches: touchCount, incidents: incidentCount, deployOverlap: Number(overlap?.n ?? 0) > 0,
@@ -275,13 +299,22 @@ export async function recordBatchOutcome(db: Db, batchId: string, now: Date = ne
   return written ?? null;
 }
 
-/** The sweep's outcome pass: every batch that ended (or moved) in the scan window is written again. Returns the count. */
+/**
+ * The sweep's outcome pass: a batch that ended (or moved) in the scan window is written again only when it has no row
+ * yet, or the batch, its touches or its incidents changed after the row was recorded (review P3-3: a quiet sweep reads
+ * one query and writes nothing). Returns the count written.
+ */
 export async function refreshOutcomes(db: Db, now: Date): Promise<number> {
-  const ended = await db.select({ id: catalogBatches.id }).from(catalogBatches)
-    .where(and(inArray(catalogBatches.status, [...BATCH_OUTCOME_STATUSES]), gte(catalogBatches.updatedAt, new Date(+now - SCAN_WINDOW_MS))))
-    .orderBy(desc(catalogBatches.updatedAt)).limit(SCAN_LIMIT);
+  const statuses = sql.join(BATCH_OUTCOME_STATUSES.map((s) => sql`${s}`), sql`, `);
+  const ended = rowsOf(await db.execute(sql`
+    SELECT b.id FROM catalog_batches AS b LEFT JOIN catalog_batch_outcomes AS o ON o.batch_id = b.id
+    WHERE b.status IN (${statuses}) AND b.updated_at >= ${new Date(+now - SCAN_WINDOW_MS).toISOString()}::timestamptz
+      AND (o.batch_id IS NULL OR o.status <> b.status OR b.updated_at > o.recorded_at
+        OR EXISTS (SELECT 1 FROM catalog_batch_touches AS t WHERE t.batch_id = b.id AND t.at > o.recorded_at)
+        OR EXISTS (SELECT 1 FROM catalog_incidents AS i WHERE i.batch_id = b.id AND (i.created_at > o.recorded_at OR i.resolved_at > o.recorded_at)))
+    ORDER BY b.updated_at DESC LIMIT ${SCAN_LIMIT}`));
   let written = 0;
-  for (const b of ended) if (await recordBatchOutcome(db, b.id, now)) written++;
+  for (const b of ended) if (await recordBatchOutcome(db, String(b.id), now)) written++;
   return written;
 }
 
@@ -292,9 +325,12 @@ export async function refreshOutcomes(db: Db, now: Date): Promise<number> {
 export interface SuccessRate { days: number; successes: number; counted: number; rate: number | null }
 export interface IncidentKindCount { kind: IncidentKind; incidents: number; repeats: number; open: number }
 export interface IncidentLine { id: string; kind: IncidentKind; causeCode: string; cause: string; batchId: string | null; batchName: string | null; startedAt: Date; resolvedAt: Date | null; repeat: boolean }
+export interface RecentOutcome { batchId: string; name: string; brandName: string; endedAt: Date; success: boolean; cause: string | null; touches: number; incidents: number; isTest: boolean; excluded: boolean }
 export interface SlowBatch { batchId: string; name: string; brandName: string; durationMs: number; endedAt: Date; success: boolean }
 export interface ReliabilitySummary {
   rates: SuccessRate[]; target: number; byKind: IncidentKindCount[]; recent: IncidentLine[]; slowest: SlowBatch[];
+  /** The latest RECENT_OUTCOMES batches that ended in the window, test batches included and marked (review P2-4). */
+  batches: RecentOutcome[];
   deploys: { batches: number; successes: number }; from: Date; to: Date;
 }
 
@@ -322,6 +358,9 @@ export async function reliabilitySummary(db: Db, to: Date = new Date(), from: Da
   const slowest = await db.select({ batchId: catalogBatchOutcomes.batchId, name: catalogBatches.name, brandName: catalogBatches.brandName, durationMs: catalogBatchOutcomes.durationMs, endedAt: catalogBatchOutcomes.endedAt, success: catalogBatchOutcomes.success })
     .from(catalogBatchOutcomes).innerJoin(catalogBatches, eq(catalogBatches.id, catalogBatchOutcomes.batchId))
     .where(and(outcomesInWindow, isNotNull(catalogBatchOutcomes.durationMs))).orderBy(desc(catalogBatchOutcomes.durationMs)).limit(5);
+  const batches = await db.select({ batchId: catalogBatchOutcomes.batchId, name: catalogBatches.name, brandName: catalogBatches.brandName, endedAt: catalogBatchOutcomes.endedAt, success: catalogBatchOutcomes.success, cause: catalogBatchOutcomes.cause, touches: catalogBatchOutcomes.touches, incidents: catalogBatchOutcomes.incidents, isTest: catalogBatchOutcomes.isTest, excluded: catalogBatchOutcomes.excluded })
+    .from(catalogBatchOutcomes).innerJoin(catalogBatches, eq(catalogBatches.id, catalogBatchOutcomes.batchId))
+    .where(and(gte(catalogBatchOutcomes.endedAt, from), sql`${catalogBatchOutcomes.endedAt} < ${to.toISOString()}::timestamptz`)).orderBy(desc(catalogBatchOutcomes.endedAt)).limit(RECENT_OUTCOMES);
   const [deploys] = await db.select({ batches: count(), successes: sql<string>`count(*) FILTER (WHERE ${catalogBatchOutcomes.success})` }).from(catalogBatchOutcomes)
     .where(and(outcomesInWindow, eq(catalogBatchOutcomes.deployOverlap, true)));
   return {
@@ -329,6 +368,7 @@ export async function reliabilitySummary(db: Db, to: Date = new Date(), from: Da
     byKind: kinds.map((k) => ({ kind: k.kind, incidents: Number(k.incidents), repeats: Number(k.repeats), open: Number(k.open) })),
     recent: recent.map(({ repeatOf, ...r }) => ({ ...r, repeat: repeatOf !== null })),
     slowest: slowest.map((s) => ({ ...s, durationMs: Number(s.durationMs) })),
+    batches,
     deploys: { batches: Number(deploys?.batches ?? 0), successes: Number(deploys?.successes ?? 0) },
   };
 }

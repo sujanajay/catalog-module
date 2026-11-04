@@ -9,7 +9,7 @@ import { db } from "@/lib/db";
 import { requireRole } from "@/lib/user";
 import { withoutModelNames } from "@/lib/catalog/redact";
 import { activeBatches, batchCostDetail, costOverview, gpuCandidateRevision, healthSummary, lifetimeBrandCost, recentBatches, recentFailures, reliability, COST_TTL_MS } from "@/lib/catalog/ops";
-import { durationText, incidentDurationText, INCIDENT_KIND_WORDS, RELIABILITY_HELP, RELIABILITY_TITLE, successRateLine } from "@/lib/catalog/ops-copy";
+import { durationText, incidentDurationText, INCIDENT_KIND_WORDS, outcomeText, RELIABILITY_HELP, RELIABILITY_TITLE, successRateLine } from "@/lib/catalog/ops-copy";
 import { REPORT_UNAVAILABLE, AGENCY_REFERENCE, HEALTH_TITLE, healthLines, chunkGaveUpText, chunkProgressText, chunkTotal, COST_STAGE_WORDS, hintText, logsUrl, money, OPS_HREF, OPS_REFRESH_MS, statusWord } from "@/lib/catalog/ops-copy";
 
 export const dynamic = "force-dynamic";
@@ -125,6 +125,15 @@ export default async function OpsPage({ searchParams }: { searchParams: Promise<
           <>
             <ul>{rel.rates.map(r => <li key={r.days}>{successRateLine(r, rel.target)}</li>)}</ul>
             <p>Batches a release overlapped in the last 30 days: {rel.deploys.batches}{rel.deploys.batches ? `, ${rel.deploys.successes} succeeded` : ""}.</p>
+            <h3>Recent batches</h3>
+            {rel.batches.length ? (
+              <div className="tw"><table>
+                <thead><tr>{["Batch", "Brand", "Ended", "Succeeded", "Touches", "Incidents", "Why"].map(c => <th key={c}>{c}</th>)}</tr></thead>
+                <tbody>{rel.batches.map(b => (
+                  <tr key={b.batchId}><td><Link href={`/catalog/${b.batchId}`}>{b.name}</Link></td><td>{b.brandName}</td><td><LocalTime at={b.endedAt} /></td><td>{b.success ? "Yes" : "No"}</td><td>{b.touches}</td><td>{b.incidents}</td><td>{outcomeText(b)}</td></tr>
+                ))}</tbody>
+              </table></div>
+            ) : <p>No batch finished in the last 30 days.</p>}
             <h3>Incidents, last 30 days</h3>
             {rel.byKind.length ? (
               <div className="tw"><table>

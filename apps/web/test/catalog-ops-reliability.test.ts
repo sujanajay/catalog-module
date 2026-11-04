@@ -3,8 +3,8 @@ import { createElement, type ReactElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { createTestDb } from "@catalog/core/db/testing";
-import { catalogBatches, catalogBatchOutcomes, catalogIncidents } from "@catalog/core/db/schema";
-import { openIncident, recordBatchOutcome } from "@catalog/core/catalog/reliability";
+import { catalogBatches, catalogBatchOutcomes, catalogBatchTouches, catalogIncidents } from "@catalog/core/db/schema";
+import { openIncident, recordBatchOutcome, recordTouch } from "@catalog/core/catalog/reliability";
 import type { Role } from "@catalog/core/catalog/types";
 import { setDbForTests, type Db } from "../lib/db";
 import { resetUserDeps, setUserDeps } from "../lib/user";
@@ -30,7 +30,7 @@ beforeEach(async () => {
   vi.stubEnv("DEV_USER_EMAIL", "admin@opptra.com");
   setUserDeps({ roleLookup: async () => role });
   setCloudRunReadForTests(async () => ({ trafficStatuses: [] }));
-  await db.delete(catalogIncidents); await db.delete(catalogBatchOutcomes); await db.delete(catalogBatches);
+  await db.delete(catalogIncidents); await db.delete(catalogBatchTouches); await db.delete(catalogBatchOutcomes); await db.delete(catalogBatches);
 });
 afterEach(() => { resetUserDeps(); setCloudRunReadForTests(undefined); vi.unstubAllEnvs(); });
 
@@ -70,6 +70,35 @@ describe("Ops reliability card (M6-F3-R5)", () => {
     expect((await GET(new Request(`http://localhost/api/catalog/ops/reliability?from=${NOW.toISOString()}&to=${ago(60).toISOString()}`))).status).toBe(400);
     role = "operator";
     expect((await GET(new Request("http://localhost/api/catalog/ops/reliability"))).status).toBe(403);
+  });
+
+  it("lists recent batches with their touches and incidents in plain words (review P2-4)", async () => {
+    const { clean, slow } = await world();
+    const test = (await db.insert(catalogBatches).values({ name: "Test drop", brandSlug: "uspa", brandName: "USPA", createdBy: "a@opptra.com", status: "done", isTest: true, startedAt: ago(50), finishedAt: ago(40) }).returning())[0]!;
+    await recordTouch(db, { action: "decision", batchId: slow.id }, ago(62));
+    await recordTouch(db, { action: "retry_photo", batchId: slow.id }, ago(61));
+    await recordBatchOutcome(db, slow.id, NOW);
+    await recordBatchOutcome(db, test.id, NOW);
+    const html = await render(OpsPage({ searchParams: Promise.resolve({}) }));
+    expect(html).toContain("Recent batches");
+    expect(html).toMatch(new RegExp(`href="/catalog/${slow.id}">Slow drop</a></td><td>USPA</td><td>.*?</td><td>No</td><td>2</td><td>1</td><td>A person stepped in</td>`));
+    expect(html).toMatch(new RegExp(`href="/catalog/${clean.id}">Clean drop</a></td><td>USPA</td><td>.*?</td><td>Yes</td><td>0</td><td>0</td><td></td>`));
+    expect(html).toContain("<td>test batch, not counted</td>");
+  });
+
+  it("never lets a browser or proxy keep the JSON, and reads a custom window fresh (review P2-5)", async () => {
+    const { slow } = await world();
+    const first = await GET(new Request("http://localhost/api/catalog/ops/reliability"));
+    expect(first.headers.get("cache-control")).toBe("no-store");
+    await recordTouch(db, { action: "decision", batchId: slow.id }, ago(1));
+    await recordBatchOutcome(db, slow.id, NOW);
+    const window = `from=${ago(24 * 60).toISOString()}&to=${new Date(+NOW + 60_000).toISOString()}`;
+    const fresh = await GET(new Request(`http://localhost/api/catalog/ops/reliability?${window}`));
+    expect(fresh.headers.get("cache-control")).toBe("no-store");
+    const body = await fresh.json() as { batches: { batchId: string; touches: number }[] };
+    expect(body.batches.find((b) => b.batchId === slow.id)?.touches).toBe(1);
+    const again = await GET(new Request(`http://localhost/api/catalog/ops/reliability?${window}`));
+    expect(((await again.json()) as typeof body).batches.find((b) => b.batchId === slow.id)?.touches).toBe(1);
   });
 
   it("words the rates and durations plainly", () => {

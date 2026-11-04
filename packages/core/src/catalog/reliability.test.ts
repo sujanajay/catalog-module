@@ -160,6 +160,21 @@ describe("incidents", () => {
     expect(stalls[1]).toMatchObject({ cause_code: "no_progress", repeat_of: stalls[0]!.id, resolved_at: null });
   });
 
+  it("raises no stall while a long finalize works: a live claim or a re-check part handed on (review P2-2)", async () => {
+    // Every chunk done at +0; the batch publishes while the finalize re-checks links for 40 minutes.
+    const claimed = await batch({ status: "publishing", startedAt: at(-60), updatedAt: at(0), counts: { finalizeClaimUntil: +at(45) } });
+    await chunk(claimed, { status: "done", startedAt: at(-30), finishedAt: at(0) });
+    const handedOn = await batch({ status: "publishing", startedAt: at(-60), updatedAt: at(0), counts: { finalizeEnqueuedAt: +at(35) } });
+    await chunk(handedOn, { status: "done", startedAt: at(-30), finishedAt: at(0) });
+    const quiet = await batch({ status: "publishing", startedAt: at(-60), updatedAt: at(0), counts: { finalizeClaimUntil: +at(20) } });
+    await chunk(quiet, { status: "done", startedAt: at(-30), finishedAt: at(0) });
+    await syncIncidents(db, at(40));
+    expect(await incidents(claimed)).toEqual([]);
+    expect(await incidents(handedOn)).toEqual([]);
+    // A finalize whose claim lapsed 20 minutes ago with nothing since is a stall.
+    expect(await incidents(quiet)).toMatchObject([{ kind: "stall", cause_code: "no_progress" }]);
+  });
+
   it("gives a collecting batch 30 minutes before a stall", async () => {
     const collecting = await batch({ status: "ingesting", startedAt: null, updatedAt: T0 });
     await syncIncidents(db, new Date(+T0 + STALL_INCIDENT_MS + 60_000));
@@ -203,6 +218,23 @@ describe("outcomes", () => {
     expect(await recordBatchOutcome(db, collecting, at(2))).toBeNull();
   });
 
+  it("leaves batches that never started out of the rate, and writes no row for an expired draft (review P2-1)", async () => {
+    const now = at(60 * 24 * 3);
+    // Collected (Continue ran), then abandoned: the sweep's draft expiry cancels it days later.
+    const expired = await batch({ status: "cancelled", startedAt: null, createdAt: at(0), updatedAt: now, counts: { ingestRun: "r1" } });
+    await db.execute(sql`UPDATE catalog_batches SET options = '{"expired":{"at":"x","days":14}}'::jsonb WHERE id = ${expired}`);
+    expect(await recordBatchOutcome(db, expired, now)).toBeNull();
+    // Collected, then cancelled by the operator an hour later, before Start; and an intake that failed before Start.
+    const cancelled = await batch({ status: "cancelled", startedAt: null, createdAt: at(0), updatedAt: at(60), counts: { ingestRun: "r2" } });
+    const intakeFailed = await batch({ status: "failed", startedAt: null, createdAt: at(0), updatedAt: at(30), counts: { ingestRun: "r3" } });
+    expect(await recordBatchOutcome(db, cancelled, now)).toMatchObject({ success: false, cause: "cancelled", excluded: true });
+    expect(await recordBatchOutcome(db, intakeFailed, now)).toMatchObject({ success: false, cause: "failed", excluded: true });
+    // A started batch that failed still counts.
+    const started = await batch({ status: "failed", startedAt: at(10), updatedAt: at(100) });
+    expect(await recordBatchOutcome(db, started, now)).toMatchObject({ excluded: false });
+    expect(await successRate(db, at(-1), now)).toMatchObject({ successes: 0, counted: 1 });
+  });
+
   it("refreshes every batch that ended in the last 24 hours (a failed batch, an incident after finalize)", async () => {
     const failed = await batch({ status: "failed", startedAt: T0, updatedAt: at(30) });
     const cancelledBeforeStart = await batch({ status: "cancelled", startedAt: null, updatedAt: at(40), counts: { ingestRun: "r1" } });
@@ -211,6 +243,11 @@ describe("outcomes", () => {
     const written = await rows(sql`SELECT batch_id, status, cause FROM catalog_batch_outcomes ORDER BY status`);
     expect(written).toEqual([{ batch_id: cancelledBeforeStart, status: "cancelled", cause: "cancelled" }, { batch_id: failed, status: "failed", cause: "failed" }]);
     expect(written.some((w) => w.batch_id === old)).toBe(false);
+    // Review P3-3: a quiet sweep rewrites nothing; a touch or an incident after the row was recorded rewrites that batch.
+    expect(await refreshOutcomes(db, at(70))).toBe(0);
+    await recordTouch(db, { action: "cancel", batchId: cancelledBeforeStart }, at(75));
+    expect(await refreshOutcomes(db, at(80))).toBe(1);
+    expect(await rows(sql`SELECT touches FROM catalog_batch_outcomes WHERE batch_id = ${cancelledBeforeStart}`)).toEqual([{ touches: 1 }]);
   });
 
   it("records a touch by output id, and none for an unknown output", async () => {
