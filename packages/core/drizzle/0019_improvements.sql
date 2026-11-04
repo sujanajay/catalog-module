@@ -3,6 +3,12 @@
 -- two new indexes; nothing existing changes. IF NOT EXISTS keeps a re-run harmless.
 -- catalog_improvements: one row per batch and photo whose plain render was delivered `provisional`: tries made, the
 -- last try, the delivered outputs kept while a try runs (`previous`), when it was improved or why it ended.
+-- Review round 2: the short lock timeout (as 0004-0012) keeps the migrate job re-runnable instead of queueing live
+-- writes behind it. CONCURRENTLY is not possible: the drizzle migrator runs pending files in one transaction. The
+-- partial index build holds writes on catalog_outputs while it scans the table (estimate: seconds per 100k rows on
+-- db-f1-micro), so migrate while no batch runs; check the size first (pg_class.reltuples for catalog_outputs) and,
+-- above about 500k rows, build the index CONCURRENTLY from an infra script first (this IF NOT EXISTS is then a no-op).
+SET LOCAL lock_timeout = '10s';--> statement-breakpoint
 CREATE TABLE IF NOT EXISTS "catalog_improvements" (
 	"id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
 	"batch_id" uuid NOT NULL,

@@ -8,7 +8,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vites
 import { and, eq } from "drizzle-orm";
 import type { Db } from "@catalog/core/db/client";
 import { createTestDb } from "@catalog/core/db/testing";
-import { catalogBatches, catalogBatchProducts, catalogChunks, catalogOutputs, catalogProducts } from "@catalog/core/db/schema";
+import { catalogBatches, catalogBatchProducts, catalogChunks, catalogEnlargements, catalogOutputs, catalogProducts, catalogSourceImages } from "@catalog/core/db/schema";
 import { DIMENSION_FLAGS } from "@catalog/core/catalog/qa/judge";
 import { retryEnlargement, RETRY_SUPERSEDED } from "@catalog/core/catalog/decisions";
 import { ENLARGE_OUTAGE_DEADLINE_MS } from "@catalog/core/catalog/pipeline/enlargement";
@@ -277,6 +277,8 @@ describe("improvement review fixes (2026-11-04)", () => {
 
   it("F3 test 2 (owner decision 2026-11-04): the upscaler stopped during a batch; after the outage deadline the batch finishes with plain renders delivered provisional, then improved at the same URL", async () => {
     const e = enlargeWorld(db);
+    // Past every other test's clock: the deadline's lane check reads every batch's rows of the upscaler (shared database).
+    e.clock.tick(30 * 24 * 60);
     const s = await seedEnlargeBatch(db, e.w, "improve-outage", [[1]], { channels: ["trendyol"] });
     await db.update(catalogBatches).set({ options: { ...s.batch.options, autoDecide: await autoDecideSnapshot(db) } }).where(eq(catalogBatches.id, s.batch.id));
     e.service.state.mode = "down";
@@ -309,5 +311,87 @@ describe("improvement review fixes (2026-11-04)", () => {
     expect(after!.flags).toContain("upscaled");
     expect(after!.flags).not.toContain("provisional");
     expect(after!.generation).not.toBe(o!.generation);
+  }, 600_000);
+});
+
+/** Batch options with the rule for `not_enlarged` set to drop (a later rule change, for the restore tests). */
+async function dropNotEnlarged(batchId: string) {
+  const batch = await batchOf(db, batchId);
+  const rules = batch.options.autoDecide!.rules.map((r) => (r.cause === "not_enlarged" ? { ...r, action: "drop" as const } : r));
+  await db.update(catalogBatches).set({ options: { ...batch.options, autoDecide: { rules } } }).where(eq(catalogBatches.id, batchId));
+}
+
+describe("improvement review fixes, round 2 (2026-11-04)", () => {
+  it("P1-A: Try again refuses when a batch drafted earlier but started later published the product (start order, not creation order)", async () => {
+    const e = await provisionalBatch("rv2-a", true, ["trendyol", "noon"]);
+    const productId = e.outs[0]!.productId;
+    const second = await seedSecondBatch(db, e.w, e.s, "rv2-a-2");
+    await db.update(catalogSourceImages).set({ sha256: "f".repeat(64) }).where(eq(catalogSourceImages.batchId, second.batch.id));
+    // The later publisher was created (drafted) before the first batch, and started after it.
+    await db.update(catalogBatches).set({ createdAt: new Date(+e.s.batch.createdAt - 60_000), startedAt: new Date(Math.max(Date.now(), +(e.s.batch.startedAt ?? e.s.batch.createdAt)) + 60_000), channels: ["trendyol"] }).where(eq(catalogBatches.id, second.batch.id));
+    await startChunks(db, e.w, second.chunks.map((c) => c.id));
+    await drain(e.w, only(second));
+    expect((await batchOf(db, second.batch.id)).status).toBe("done");
+    expect(await productOf(productId)).toMatchObject({ lastBatchId: second.batch.id, lockBatchId: null });
+    const [trendyol] = await db.select().from(catalogOutputs).where(and(eq(catalogOutputs.productId, productId), eq(catalogOutputs.isLive, true), eq(catalogOutputs.channel, "trendyol")));
+    expect(trendyol!.batchId).toBe(second.batch.id);
+    const noon = (await outputsOf(db, e.s.batch.id)).find((o) => o.channel === "noon")!;
+    await expect(retryEnlargement(db, e.w.deps.enqueue, { outputId: noon.id, actor: "t@opptra.com", now: e.clock.now() })).rejects.toThrow(RETRY_SUPERSEDED);
+    await drain(e.w, only(e.s));
+    expect((await db.select().from(catalogOutputs).where(eq(catalogOutputs.id, trendyol!.id)))[0]).toMatchObject({ isLive: true, generation: trendyol!.generation });
+    expect(await productOf(productId)).toMatchObject({ lastBatchId: second.batch.id, lockBatchId: null });
+    expect((await outputsOf(db, e.s.batch.id)).every((o) => o.status !== "pending")).toBe(true);
+  }, 600_000);
+
+  it("P1-B: a row delayed once early, then not re-delivered while the upscaler is healthy, is not failed at the outage deadline", async () => {
+    const e = enlargeWorld(db);
+    const s = await seedEnlargeBatch(db, e.w, "rv2-b", [[1]], { channels: ["trendyol"] });
+    await db.update(catalogBatches).set({ options: { ...s.batch.options, autoDecide: await autoDecideSnapshot(db) } }).where(eq(catalogBatches.id, s.batch.id));
+    e.service.state.mode = "down";
+    await startChunks(db, e.w, s.chunks.map((c) => c.id));
+    await drain(e.w, { ...only(s), max: 3 });
+    expect((await rowsOf(db, s.batch.id))[0]).toMatchObject({ status: "queued", delayedSince: expect.any(Date) });
+    // A short blip: the upscaler is healthy again at once; the row's retry waits behind a backlog.
+    e.service.state.mode = "ok";
+    e.clock.tick(minutes(ENLARGE_OUTAGE_DEADLINE_MS) + 1);
+    e.w.tasks.splice(0, e.w.tasks.length);
+    await sweep(db, e.w);
+    // Not failed, and the outage clock is reset (health came back), so a later outage starts its own 6 hours.
+    expect((await rowsOf(db, s.batch.id))[0]).toMatchObject({ status: "queued", delayedSince: null });
+  }, 600_000);
+
+  it("P1-B: while the same upscaler finished other enlargements after the row's outage began, the deadline fails nothing", async () => {
+    const e = enlargeWorld(db);
+    const s = await seedEnlargeBatch(db, e.w, "rv2-b2", [[1]], { channels: ["trendyol"] });
+    await db.update(catalogBatches).set({ options: { ...s.batch.options, autoDecide: await autoDecideSnapshot(db) } }).where(eq(catalogBatches.id, s.batch.id));
+    e.service.state.mode = "down";
+    await startChunks(db, e.w, s.chunks.map((c) => c.id));
+    await drain(e.w, { ...only(s), max: 3 });
+    const [row] = await rowsOf(db, s.batch.id);
+    e.clock.tick(minutes(ENLARGE_OUTAGE_DEADLINE_MS) + 1);
+    // Another batch's row of the same upscaler settled done after this row's outage began: the lane works.
+    const ok = await provisionalBatch("rv2-b2-lane");
+    const [lane] = await rowsOf(db, ok.s.batch.id);
+    await db.update(catalogEnlargements).set({ status: "done", upscaler: row!.upscaler, updatedAt: e.clock.now() }).where(eq(catalogEnlargements.id, lane!.id));
+    e.service.state.mode = "down";
+    e.w.tasks.splice(0, e.w.tasks.length);
+    await sweep(db, e.w);
+    expect((await rowsOf(db, s.batch.id))[0]).toMatchObject({ status: "queued", delayedSince: null });
+  }, 600_000);
+
+  it("P2: Try again on an auto-decide provisional slot whose re-made slot a rule drops puts the delivered slot back", async () => {
+    const e = await provisionalBatch("rv2-retry-drop");
+    const [before] = e.outs;
+    const bytes = publicObject(e, before!.objectPath)!;
+    await dropNotEnlarged(e.s.batch.id);
+    e.service.state.mode = "badInput";
+    await retryEnlargement(db, e.w.deps.enqueue, { outputId: before!.id, actor: "t@opptra.com", now: e.clock.now() });
+    await enqueueFinalize(e.w.deps, e.s.batch.id, undefined, { reopen: true });
+    await drain(e.w, only(e.s));
+    const [after] = await outputsOf(db, e.s.batch.id);
+    expect(after).toMatchObject({ id: before!.id, status: "verified", isLive: true, generation: before!.generation });
+    expect(after!.flags).toEqual(before!.flags);
+    expect(publicObject(e, after!.objectPath)!.equals(bytes)).toBe(true);
+    expect(await productOf(before!.productId)).toMatchObject({ lockBatchId: null });
   }, 600_000);
 });

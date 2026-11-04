@@ -11,7 +11,7 @@ import { handOff, INGEST_ROUTE, ingestTaskId, uploadedPage } from "@catalog/core
 import { enqueueTask } from "@catalog/core/tasks";
 import { log } from "@catalog/core/log";
 import { recoverBatchChunks } from "@catalog/core/catalog/pipeline/dispatch";
-import { ENLARGING_TASK } from "@catalog/core/catalog/pipeline/enlargement";
+import { ENLARGING_TASK, type OutageProbe } from "@catalog/core/catalog/pipeline/enlargement";
 import { runInvariants } from "@catalog/core/catalog/invariants/run";
 import { enqueueFinalize, finalizeEnqueueExpired, finalizePendingFlag } from "./deps";
 import { enqueueImprovements } from "./improve";
@@ -57,6 +57,11 @@ export interface SweepDeps {
   draftExpiryDays?: number;
   /** Spec 18 lifecycle F34: the worker's rollback switch (UPSCALE_MODEL=off): queued enlargements released, parked chunks unparked. */
   enlargementOff?: boolean;
+  /**
+   * M1 D13 (review round 2): probes an upscaler's health for the outage deadline. Absent: the deadline fails nothing
+   * (spec 18's wait). The sweep asks each upscaler at most once per run.
+   */
+  outageProbe?: OutageProbe;
 }
 
 function rowsOf(result: unknown): Record<string, unknown>[] {
@@ -103,7 +108,9 @@ export async function handleSweep(deps: SweepDeps, _body: Record<string, unknown
   // processing-only (dispatchChunks checks).
   const live=await deps.db.selectDistinct({id:catalogBatches.id}).from(catalogBatches).innerJoin(catalogChunks,eq(catalogChunks.batchId,catalogBatches.id))
     .where(and(sql`${catalogBatches.status} NOT IN ('failed','cancelled','draft')`,inArray(catalogChunks.status,["queued","running"])));
-  for(const batch of live) await recoverBatchChunks(deps.db,deps.enqueue ?? enqueueTask,batch.id,{now,...(deps.window ? {window:deps.window}:{}),...(deps.enlargementOff ? {enlargementOff:true}:{})});
+  const probed=new Map<string,ReturnType<OutageProbe>>(),probe=deps.outageProbe;
+  const outageProbe:OutageProbe|undefined=probe ? (upscaler)=>{ if(!probed.has(upscaler)) probed.set(upscaler,probe(upscaler)); return probed.get(upscaler)!; }:undefined;
+  for(const batch of live) await recoverBatchChunks(deps.db,deps.enqueue ?? enqueueTask,batch.id,{now,...(deps.window ? {window:deps.window}:{}),...(deps.enlargementOff ? {enlargementOff:true}:{}),...(outageProbe ? {outageProbe}:{})});
   // M6-F2-R4: re-send the intake of a batch that has been ingesting with no progress for INGEST_RESEND_MS. Its
   // `uploaded` uploads are handed on again under a new run (the same paged hand-off as the web's Continue; a new run
   // carries every item already read forward). When none is left to collect, one delivery of a collected upload is

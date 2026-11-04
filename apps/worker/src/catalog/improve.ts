@@ -10,8 +10,17 @@ import { improvementCandidates, improvePhoto, markImproved, noteImprovementWait 
 import type { Db } from "@catalog/core/db/client";
 import type { enqueueTask, TaskRoute } from "@catalog/core/tasks";
 import type { HandleResult } from "../server";
+import type { OutageProbe } from "@catalog/core/catalog/pipeline/enlargement";
 import { enqueueFinalize, type CatalogDeps } from "./deps";
 import { upscaleProbeTimeoutMs } from "./enlarge";
+
+/** The sweep's outage-deadline probe (M1 D13) from the worker's enlarge probe; a probe that throws proves nothing. */
+export function outageProbeOf(probe: NonNullable<CatalogDeps["enlargeProbe"]>): OutageProbe {
+  return async (upscaler) => {
+    try { return (await probe(upscaler, { timeoutMs: upscaleProbeTimeoutMs() })) === "ok" ? "ok" : "down"; }
+    catch { return "unknown"; }
+  };
+}
 
 export const IMPROVE_ROUTE = "/tasks/catalog/improve" satisfies TaskRoute;
 

@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { and, asc, eq, gt, inArray, isNull, ne, sql } from "drizzle-orm";
+import { and, asc, eq, inArray, isNull, ne, sql } from "drizzle-orm";
 import type { Db } from "../db/client";
 import { brandMaster, catalogBatches, catalogBatchProducts, catalogChunks, catalogEnlargements, catalogOutputs, catalogProductAliases, catalogProducts, catalogSourceImages, catalogUploads, skuMap } from "../db/schema";
 import type * as storage from "../storage";
@@ -15,6 +15,8 @@ import { INFORMATION_FLAGS } from "./qa/triage";
 import { ENLARGING_TASK, enqueueEnlargements, lockProductChunks, releaseEnlargements, unparkSettledChunks, type UnparkedChunk } from "./pipeline/enlargement";
 import type { enqueueTask } from "../tasks";
 import { isBulkBatch } from "./pipeline/dispatch";
+import { autoDecideOf } from "./auto-decide";
+import { keepDeliveredOutputs } from "./improve-keep";
 
 type Output = typeof catalogOutputs.$inferSelect;
 type Tx = Parameters<Parameters<Db["transaction"]>[0]>[0];
@@ -50,10 +52,26 @@ async function readOutput(db: Db | Tx, id: string): Promise<Output> {
   if (!output) throw new CatalogDecisionError(404, "This photo no longer exists. Reload the page.");
   return output;
 }
+/**
+ * M1-S4 review P1 (rounds 1 and 2): the batch that published this product after `batchId` did, or null while `batchId`
+ * is still its current publisher (or published nothing that a later batch replaced). Batches take a product's lock at
+ * Start and two never hold it at once, so start order is publish order: the product's `last_batch_id` names a later
+ * publisher exactly when that batch started after this one (creation order is not: a draft can start later). The one
+ * check for every path that re-makes a photo of a batch that may have released its lock: Use as is, Remove, Replace,
+ * Try again (lockProduct) and the M1-S4 improvement.
+ */
+export async function laterPublisher(tx: Pick<Db, "select">, product: Pick<typeof catalogProducts.$inferSelect, "lastBatchId">, batchId: string): Promise<string | null> {
+  if (!product.lastBatchId || product.lastBatchId === batchId) return null;
+  const started = sql<Date>`coalesce(${catalogBatches.startedAt}, ${catalogBatches.createdAt})`;
+  const rows = await tx.select({ id: catalogBatches.id, started }).from(catalogBatches).where(inArray(catalogBatches.id, [product.lastBatchId, batchId]));
+  const last = rows.find(r => r.id === product.lastBatchId), own = rows.find(r => r.id === batchId);
+  return last && own && +new Date(last.started) > +new Date(own.started) ? last.id : null;
+}
 async function lockProduct(tx: Tx, output: Output): Promise<typeof catalogProducts.$inferSelect> {
   const [product] = await tx.select().from(catalogProducts).where(eq(catalogProducts.id, output.productId)).for("update");
   if (!product) throw new CatalogDecisionError(404, "This product no longer exists. Reload the page.");
   if (product.lockBatchId && product.lockBatchId !== output.batchId) throw new CatalogDecisionError(409, "This product is being changed by another batch. Try again when it finishes.");
+  if (await laterPublisher(tx, product, output.batchId)) throw new CatalogDecisionError(409, RETRY_SUPERSEDED);
   return product;
 }
 /**
@@ -165,19 +183,18 @@ export async function retryEnlargement(db: Db, enqueue: typeof enqueueTask, inpu
     const target = await readOutput(tx, input.outputId);
     // Final check 2026-10-30: a stopped batch runs nothing again (its enlarge tasks answer `stopped`, its chunks are
     // never recovered), so a retry there would leave the outputs pending, the chunk parked and the product locked to it.
-    const [owner] = await tx.select({ status: catalogBatches.status, createdAt: catalogBatches.createdAt }).from(catalogBatches).where(eq(catalogBatches.id, target.batchId)).for("share");
+    const [owner] = await tx.select({ status: catalogBatches.status, channels: catalogBatches.channels, options: catalogBatches.options }).from(catalogBatches).where(eq(catalogBatches.id, target.batchId)).for("share");
     if (!owner || owner.status === "failed" || owner.status === "cancelled") throw new CatalogDecisionError(409, RETRY_STOPPED_BATCH);
-    const product = await lockProduct(tx, target);
-    // M1-S4 review P1 (2026-11-04): a later batch published this product (its lock released, as an auto-decide batch
-    // does at finalize), so this batch no longer owns its links; a re-made photo here would publish over them.
-    if (product.lastBatchId && product.lastBatchId !== target.batchId) {
-      const [later] = await tx.select({ id: catalogBatches.id }).from(catalogBatches).where(and(eq(catalogBatches.id, product.lastBatchId), gt(catalogBatches.createdAt, owner.createdAt)));
-      if (later) throw new CatalogDecisionError(409, RETRY_SUPERSEDED);
-    }
+    // lockProduct refuses when a batch that started later published this product (laterPublisher).
+    await lockProduct(tx, target);
     const outputs = (await tx.select().from(catalogOutputs).where(and(eq(catalogOutputs.batchId, target.batchId), eq(catalogOutputs.sourceImageId, target.sourceImageId))).orderBy(catalogOutputs.id).for("update"))
-      .filter(o => o.decision === null && o.flags.includes("enlargement_failed"));
+      .filter(o => o.decision === null && o.flags.includes("enlargement_failed") && owner.channels.includes(o.channel));
     if (!outputs.length) throw new CatalogDecisionError(409, "Nothing to try again.");
-    const reset = await resetPhotoEnlargement(tx, target, outputs, { now, actor: input.actor, dropFlags: ["enlargement_failed"] });
+    // M1-S4 review round 2 (P2): an auto-decide batch's delivered slot is kept as delivered, so a re-made slot that does
+    // not pass is put back by the publish (restoreUnpassedImprovements) instead of dropping the link.
+    const delivered = outputs.filter(o => o.isLive && o.status === "verified");
+    if (autoDecideOf(owner.options) && delivered.length) await keepDeliveredOutputs(tx, target, delivered.map(o => o.id), now);
+    const reset = await resetPhotoEnlargement(tx, target, outputs, { now, actor: input.actor, dropFlags: ["enlargement_failed", "provisional"] });
     if (!reset) throw new CatalogDecisionError(409, "Nothing to try again.");
     return { batchId: target.batchId, productId: target.productId, outputIds: outputs.map(o => o.id), ...reset };
   });

@@ -14,7 +14,8 @@
 import { and, eq, getTableColumns, inArray, isNotNull, sql } from "drizzle-orm";
 import type { Db } from "../db/client";
 import { catalogBatches, catalogChunks, catalogEnlargements, catalogImprovements, catalogOutputs, catalogProducts, type CatalogImprovement } from "../db/schema";
-import { resetPhotoEnlargement, sendEnlargements } from "./decisions";
+import { laterPublisher, resetPhotoEnlargement, sendEnlargements } from "./decisions";
+import { keepDeliveredOutputs } from "./improve-keep";
 import { autoDecideOf } from "./auto-decide";
 import type { enqueueTask } from "../tasks";
 import type { ImprovementEndReason } from "./types";
@@ -100,8 +101,9 @@ export async function improvePhoto(db: Db, enqueue: typeof enqueueTask, input: {
     const [product] = await tx.select().from(catalogProducts).where(eq(catalogProducts.id, first.productId)).for("update");
     if (!product) return { outcome: "nothing_to_improve" as const };
     if (product.lockBatchId && product.lockBatchId !== input.batchId) return { outcome: "busy" as const };
-    // P1 (review 2026-11-04): a later batch published this product, so this batch's outputs are no longer its links.
-    if (product.lastBatchId !== input.batchId) {
+    // P1 (review 2026-11-04): a later batch published this product, so this batch's outputs are no longer its links
+    // (the same check as Use as is, Replace and Try again: decisions.ts laterPublisher).
+    if (await laterPublisher(tx, product, input.batchId)) {
       await endImprovement(tx, { batchId: input.batchId, productId: first.productId, sourceImageId: input.sourceImageId }, "superseded", now);
       return { outcome: "superseded" as const };
     }
@@ -118,7 +120,7 @@ export async function improvePhoto(db: Db, enqueue: typeof enqueueTask, input: {
     if (record!.lastTriedAt && +now - +record!.lastTriedAt < IMPROVE_SPACING_MS) return { outcome: "not_due" as const };
     const tries = record!.tries + 1;
     // The outputs as delivered, kept until the publish has seen the re-made slots (restoreUnpassedImprovements).
-    await tx.execute(sql`UPDATE catalog_improvements SET previous = (SELECT jsonb_agg(to_jsonb(o) ORDER BY o.id) FROM catalog_outputs AS o WHERE ${inArray(sql`o.id`, outputs.map(o => o.id))}) WHERE id = ${record!.id}`);
+    await keepDeliveredOutputs(tx, { batchId: input.batchId, productId: first.productId, sourceImageId: input.sourceImageId }, outputs.map(o => o.id), now);
     const reset = await resetPhotoEnlargement(tx, outputs[0]!, outputs, { now, actor: IMPROVE_ACTOR, dropFlags: ["provisional", "enlargement_failed"], details: { reason: "auto_decide", improvement: tries } });
     if (!reset) {
       await tx.update(catalogImprovements).set({ previous: null }).where(eq(catalogImprovements.id, record!.id));
