@@ -48,7 +48,7 @@ describe("brand inference (M1-F2-R3)", () => {
     expect(await unknown.json()).toMatchObject({ brandSlug: null, resolved: 0, total: 1 });
   });
 
-  it("M1 D15: a drop where under half of the names resolve is asked, however one-sided the few known names are", async () => {
+  it("M1 D22: a drop where under half of the names resolve is asked, however one-sided the few known names are", async () => {
     const paths = ["AW26/TB1000BLACK_1.jpg", "AW26/QQ1_1.jpg", "AW26/QQ2_1.jpg", "AW26/QQ3_1.jpg"];
     expect(await (await infer(request({ paths }))).json()).toMatchObject({ brandSlug: null, resolved: 1, total: 4 });
     // Half resolved is enough.
@@ -122,7 +122,7 @@ describe("channels while collecting (M1-F2-R4)", () => {
   });
 });
 
-describe("changing the brand before Start (M1 D15)", () => {
+describe("changing the brand before Start (M1 D22)", () => {
   const change = (id: string, value: unknown) => brandChange(request(value), ctx(id));
   it("a draft takes the new brand and its default channels; the countdown stops", async () => {
     const { body } = await newBatch({ autoStart: true, channels: ["amazon"] });
@@ -163,7 +163,7 @@ describe("changing the brand before Start (M1 D15)", () => {
   });
 });
 
-describe("brand change recovery and the held countdown (M1 D15, review 2)", () => {
+describe("brand change recovery and the held countdown (M1 D22, review 2)", () => {
   const change = (id: string, value: unknown) => brandChange(request(value), ctx(id));
   it("a failed hand-off after a brand change is retried by picking the brand again, never stuck", async () => {
     const { body } = await newBatch({ autoStart: true });

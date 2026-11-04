@@ -151,7 +151,7 @@ test('secret_binding: an existing binding is SKIP; a new one is added on that se
 test('bootstrap.sh: every secret_binding caller goes through the fail-closed helper; no project-level fallback is left in it', () => {
   assert.ok(!/project_binding/.test(fn('secret_binding')), 'secret_binding never calls project_binding');
   assert.deepEqual(text.split('\n').filter((l) => /^\s*secret_binding "/.test(l)).map((l) => l.trim().split(' ')[1]),
-    ['"$DB_SECRET"', '"$OPENROUTER_SECRET"', '"$SUPABASE_SECRET"']);
+    ['"$SECRET_NAME"'], 'one caller: the loop over infra/secret-access.manifest');
 });
 
 let failed = 0;

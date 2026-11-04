@@ -6,10 +6,11 @@ import { badRequest } from "../errors";
 
 /**
  * The Start button (and an API Start): the shared start (core pipeline/start.ts), which the auto-start task runs too
- * (M1-F2-R6). Its refusals (StartRefused) answer with their own status (errors.ts).
+ * (M1-F2-R6). Its refusals (StartRefused) answer with their own status (errors.ts). `actor` is kept on the batch's
+ * settings snapshot (M12-S1).
  */
-export async function startBatch(id: string, value: unknown, _actor: string) {
+export async function startBatch(id: string, value: unknown, actor: string) {
   const previewAt = (value as { previewAt?: unknown })?.previewAt;
   if (typeof previewAt !== "string" || !Number.isFinite(Date.parse(previewAt))) throw badRequest(STALE_PREVIEW);
-  return startDraftBatch(db(), { storage, enqueue: enqueueTask }, id, previewAt);
+  return startDraftBatch(db(), { storage, enqueue: enqueueTask }, id, previewAt, { by: actor });
 }

@@ -85,8 +85,12 @@ export function parseUpscaleHealth(value: unknown): UpscaleHealth | null {
 function modelSendLongSide(inputSize: ModelInfo["inputSize"], source: Size): number {
   return inputSize === "native" ? Math.max(256, Math.min(2304, Math.round(Math.max(source.w, source.h) / 32) * 32)) : inputSize;
 }
-export interface MatteOptions { padFraction?: number }
-class UnavailableError extends Error { constructor(message: string, readonly status?: number) { super(message); } }
+/**
+ * `targets` limits the call to the services of those targets (M3-S5: each `image.matte` route is one model on one
+ * target); absent asks the GPU services, then the CPU service, as before.
+ */
+export interface MatteOptions { padFraction?: number; targets?: readonly ("cpu" | "gpu")[] }
+export class UnavailableError extends Error { constructor(message: string, readonly status?: number) { super(message); } }
 export class UnknownMatteModelError extends Error {}
 
 export class MattingClient {
@@ -210,9 +214,11 @@ export class MattingClient {
     const h = await this.health();
     const chosen = model ?? this.opts.model ?? h.default;
     if (!chosen) throw new UnavailableError("The CPU background removal service's default model is unavailable.");
-    const candidates = this.states.filter((s) => s.models.some((m) => m.id === chosen)).sort((a, b) => Number(b.target === "gpu") - Number(a.target === "gpu"));
+    const listed = this.states.filter((s) => s.models.some((m) => m.id === chosen));
+    const candidates = listed.filter((s) => !opts.targets || opts.targets.includes(s.target)).sort((a, b) => Number(b.target === "gpu") - Number(a.target === "gpu"));
     if (!candidates.length) {
-      if (!h.ok) throw new UnavailableError("Background removal services are unavailable.");
+      // A model another target lists, or a target whose services are down or absent: that route is unavailable.
+      if (!h.ok || listed.length || opts.targets) throw new UnavailableError("Background removal services are unavailable.");
       throw new UnknownMatteModelError(`Unknown background removal model: ${chosen}.`);
     }
     // Spec 16 3.1.5: the GPU services in turn (round robin), each call within the in-flight limit. A busy answer
@@ -223,7 +229,9 @@ export class MattingClient {
     const start = gpus.length ? this.turn++ % gpus.length : 0;
     const order = [...gpus.slice(start), ...gpus.slice(0, start)];
     const failed = new Set<ServiceState>();
-    let busy = 0, next = 0;
+    // The last answered failure's status (429 busy, 5xx a model or service error); none for a connection failure or an
+    // open breaker. M3-S5 routing reads it: an answered 5xx is a model-level failure, anything else the service's.
+    let busy = 0, next = 0, lastStatus: number | null = null;
     for (;;) {
       const live = order.filter((s) => !failed.has(s) && this.available(s));
       if (!live.length) break;
@@ -231,6 +239,7 @@ export class MattingClient {
       try { return await this.matteOn(s, prepared, chosen, opts, trace); }
       catch (err) {
         if (err instanceof Error && /request rejected/.test(err.message)) throw err;
+        lastStatus = failureStatus(err);
         if (err instanceof UnavailableError && err.status === 429 && ++busy < MATTE_BUSY_TRIES) { await this.sleep(busyWaitMs()); continue; }
         this.failure(s, err, chosen); failed.add(s);
         if (busy >= MATTE_BUSY_TRIES) break;
@@ -241,10 +250,11 @@ export class MattingClient {
       try { return await this.matteOn(s, prepared, chosen, opts, trace); }
       catch (err) {
         if (err instanceof Error && /request rejected/.test(err.message)) throw err;
+        lastStatus = failureStatus(err);
         this.failure(s, err, chosen);
       }
     }
-    throw new UnavailableError("Background removal services are unavailable.");
+    throw new UnavailableError("Background removal services are unavailable.", lastStatus ?? undefined);
   }
   /** One cut-out call on one service; throws on any failure (the caller counts it). */
   private async matteOn(s: ServiceState, prepared: Prepared, chosen: string, opts: MatteOptions, trace: MattingTrace | undefined): Promise<Matte> {

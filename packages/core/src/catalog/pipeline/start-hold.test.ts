@@ -57,6 +57,6 @@ it("a second Start that loses to the first says the batch started, not that file
   hook.during = async () => {};
   const deps = { storage: {} as never, enqueue: vi.fn(async () => "task") };
   const previewAt = new Date(Date.now() + 60_000).toISOString();
-  hook.during = async () => { hook.during = async () => {}; await startDraftBatch(db, deps, b.id, previewAt); };
-  await expect(startDraftBatch(db, deps, b.id, previewAt)).rejects.toMatchObject({ kind: "not_draft", message: "This batch has already started. Open its progress page." });
+  hook.during = async () => { hook.during = async () => {}; await startDraftBatch(db, deps, b.id, previewAt, { by: "test" }); };
+  await expect(startDraftBatch(db, deps, b.id, previewAt, { by: "test" })).rejects.toMatchObject({ kind: "not_draft", message: "This batch has already started. Open its progress page." });
 });

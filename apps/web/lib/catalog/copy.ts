@@ -195,7 +195,7 @@ export function batchListDetail(state: { state: string; intake: string; made: nu
 /** M1-F2-R3: the only question, above the drop zone, when the brand cannot be read from the names. */
 export const BRAND_QUESTION = "Which brand is this?";
 /** M1-F2-R7, manager default (UX D13, owner may revise): two spellings of one product from different uploads. */
-/** M1 D15: the files could not be handed over again after a brand change; picking the brand again retries. */
+/** M1 D22: the files could not be handed over again after a brand change; picking the brand again retries. */
 export const BRAND_REGROUP_FAILED = "We could not sort your files under this brand yet. Choose the brand again to try once more.";
 export const NEWEST_SAME_PRODUCT = "Use only the newest photo of each product";
 /** M1-F2-R8: the page can be closed at any point. */

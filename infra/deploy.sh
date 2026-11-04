@@ -284,9 +284,10 @@ WEB_ENV+=",INR_PER_USD=$INR_PER_USD,COMPUTE_USD_PER_VCPU_SECOND=$COMPUTE_USD_PER
 # on for every channel wherever a photo is enlarged beyond UPSCALE_MIN_SCALE), so a redeploy never switches it off
 # by accident (unset or empty gives swinir-x2). UPSCALE_MODEL=off turns it off, and every render keeps the plain
 # Lanczos path. Spec 18 quality: UPSCALE_MODEL_X4 (default swinir-x4) makes the image of every photo enlarged above
-# 2.0x (one x4 pass, then a Lanczos downscale); off sends those to the x2 model too. UPSCALE_MIN_SCALE is the
-# enlargement above which the upscaler is used (default 1.0: every enlargement; it was 1.5 before spec 18 quality).
-# Engineering config only, never shown to the operator. Override from the shell like INR_PER_USD, e.g.
+# 2.0x (one x4 pass, then a Lanczos downscale); off sends those to the x2 model too. UPSCALE_MIN_SCALE now serves
+# only renders outside a batch: since M12-S1 every batch takes its threshold from the owner-only setting
+# images.upscale_min_scale (Settings page, default 1), pinned at Start. Change the setting, not this variable, to move
+# the threshold for batches. Override from the shell like INR_PER_USD, e.g.
 # UPSCALE_MODEL=off bash infra/deploy.sh. UPSCALE_MODEL and UPSCALE_MODEL_X4 reach the worker (render) and the web
 # (the wizard's Styli size warning and step 4 count), so both use one threshold and one route.
 UPSCALE_MODEL=${UPSCALE_MODEL:-swinir-x2}
@@ -297,8 +298,8 @@ UPSCALE_MIN_SCALE=${UPSCALE_MIN_SCALE:-1}
 case "$UPSCALE_MODEL" in ""|swinir-x2) ;; *) echo "UPSCALE_MODEL must be swinir-x2 or off" >&2; exit 1 ;; esac
 case "$UPSCALE_MODEL_X4" in ""|swinir-x4) ;; *) echo "UPSCALE_MODEL_X4 must be swinir-x4 or off" >&2; exit 1 ;; esac
 [[ "$UPSCALE_MIN_SCALE" =~ ^[0-9]+([.][0-9]+)?$ ]] && awk -v s="$UPSCALE_MIN_SCALE" 'BEGIN{exit !(s>=1)}'   || { echo "UPSCALE_MIN_SCALE must be a number of at least 1, such as 1.5" >&2; exit 1; }
-# 2026-10-29 review P2-6: the web records the threshold on each batch it starts (options.enlargement.minScale, read by
-# the enlarged_without_upscaler invariant), so both get the same value.
+# Both services keep the same value for renders outside a batch. Batches record the setting's threshold at Start
+# (options.enlargement.minScale, read by the enlarged_without_upscaler invariant).
 WORKER_ENV+=",UPSCALE_MIN_SCALE=$UPSCALE_MIN_SCALE"
 WEB_ENV+=",UPSCALE_MIN_SCALE=$UPSCALE_MIN_SCALE"
 # UPSCALE_MODEL itself is added to the worker and the web after the GPU matting step below, and only when that
@@ -325,6 +326,12 @@ WEB_SECRETS=$SECRETS
 if [ "$SUPABASE_FOLDER_PASTE" = on ]; then WEB_SECRETS+=",SUPABASE_URL=supabase-url:latest,SUPABASE_SERVICE_KEY=supabase-service-key:latest"; fi
 WEB_ENV+=",SUPABASE_FOLDER_PASTE=$SUPABASE_FOLDER_PASTE"
 NET=(--region="$REGION" --network=ila-vpc --subnet=ila-subnet --vpc-egress=private-ranges-only)
+# Every mounted secret needs its per-secret grant (infra/secret-access.manifest, bound by infra/bootstrap.sh): there is
+# no project-wide secret access, so an unlisted mount would fail at the revision. Refused here, before the build.
+# shellcheck source=lib/secret-manifest.sh
+source infra/lib/secret-manifest.sh
+secret_manifest_check web "$WEB_SECRETS" || exit 1
+for MOUNTS in "$WORKER_SECRETS" "$JOB_SECRETS" "$SECRETS"; do secret_manifest_check worker "$MOUNTS" || exit 1; done
 
 # --- 3. Build (after every refusal above, so a shape that does not fit never pays for a build) ---
 echo "==> build $TAG"
@@ -594,6 +601,9 @@ if [ "${CATALOG_PREVIEW:-0}" != 1 ]; then
   # MATTING_URL= keeps the script on the live worker's URLs; CATALOG_TEST_RUN is required by the script, unused here.
   CATALOG_TEST_RUN=$(node -e 'console.log(require("crypto").randomUUID())') CATALOG_TEST_JOBS=invariants MATTING_URL= \
     bash infra/catalog-test-jobs.sh
+  # M0-S4: the daily graph export job follows the new catalog-worker image. Only updates a job that
+  # infra/catalog-graph-export.sh already set up (never creates one); never executed here.
+  bash infra/catalog-graph-export.sh job
 else
   echo "==> jobs: SKIP (preview never changes the shared jobs)"
 fi

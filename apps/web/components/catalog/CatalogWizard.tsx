@@ -207,7 +207,7 @@ export default function CatalogWizard({ brands, shareEmail, supabasePaste = fals
     return () => clearInterval(timer);
   }, [autoStartAt]);
 
-  /** M1 D15: a different brand before Start: its default channels, and the files grouped again under it. */
+  /** M1 D22: a different brand before Start: its default channels, and the files grouped again under it. */
   /**
    * Opening the brand list holds the countdown first (on the server, as Wait does), so the batch cannot start on the
    * old brand while the operator looks for the right one. Choosing a brand, the same one included, turns it back on.

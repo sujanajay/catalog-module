@@ -4,7 +4,7 @@ import { createTestDb } from "../db/testing";
 import type { Db } from "../db/client";
 import { catalogBatches, DEFAULT_BATCH_OPTIONS, EMPTY_BATCH_COUNTS } from "../db/schema";
 import { armAutoStart, AUTO_START_BUSY_MAX_SEC, AUTO_START_BUSY_RETRY_SEC, AUTO_START_DELAY_SEC, AUTO_START_ROUTE, busyRetryDelaySec, holdAutoStart } from "./auto-start";
-import { runAutoStart, startDraftBatch, StartRefused } from "./pipeline/start";
+import { AUTO_START_ACTOR, runAutoStart, startDraftBatch, StartRefused } from "./pipeline/start";
 
 // M1-F2-R6, R7 and R9 (M1-S2): the countdown runs on the server; Wait turns it off; start blockers are rules.
 let db: Db; let close: () => Promise<void>;
@@ -72,7 +72,7 @@ describe("the auto-start task", () => {
     const start = vi.fn(async () => ({ id: b.id, status: "matting" }));
     const d = deps();
     expect(await runAutoStart(db, d, { batchId: b.id, at }, start)).toBe("started");
-    expect(start).toHaveBeenCalledWith(db, d, b.id, NOW.toISOString(), { at });
+    expect(start).toHaveBeenCalledWith(db, d, b.id, NOW.toISOString(), { by: AUTO_START_ACTOR, autoStart: { at } });
   });
 
   it("does nothing for an older countdown (more files were dropped) or while collecting", async () => {
@@ -97,7 +97,7 @@ describe("the auto-start task", () => {
     expect(d.enqueue).toHaveBeenCalledWith(AUTO_START_ROUTE, { batchId: b.id, at: next, busyRetries: 1, busySince: NOW.toISOString() }, expect.objectContaining({ delaySec: AUTO_START_BUSY_RETRY_SEC }));
   });
 
-  it("R7 (M1 D14): the busy retry backs off from 60 s, doubling to 15 min, and a wait past an hour is logged", async () => {
+  it("R7 (M1 D21): the busy retry backs off from 60 s, doubling to 15 min, and a wait past an hour is logged", async () => {
     expect([0, 1, 2, 3, 4, 5, 30].map(busyRetryDelaySec)).toEqual([60, 120, 240, 480, 900, 900, 900]);
     expect(AUTO_START_BUSY_MAX_SEC).toBe(900);
     const b = await draft({ autoStart: true });
@@ -140,7 +140,7 @@ describe("Wait against an auto-start in flight (P1, M1-F2-R6)", () => {
     const b = await draft({ autoStart: true });
     await holdAutoStart(db, b.id);
     // It goes past the auto-start guard to the next rule (no photos here).
-    await expect(startDraftBatch(db, deps(), b.id, new Date(Date.now() + 60_000).toISOString())).rejects.toMatchObject({ kind: "no_photos" });
+    await expect(startDraftBatch(db, deps(), b.id, new Date(Date.now() + 60_000).toISOString(), { by: "test" })).rejects.toMatchObject({ kind: "no_photos" });
   });
 });
 
@@ -159,7 +159,7 @@ describe("arming when the queue is down (P2)", () => {
 describe("startDraftBatch refusals", () => {
   it("names a draft with no photos as failed (kind no_photos)", async () => {
     const b = await draft();
-    const err = await startDraftBatch(db, deps(), b.id, new Date(Date.now() + 60_000).toISOString()).catch((e: unknown) => e);
+    const err = await startDraftBatch(db, deps(), b.id, new Date(Date.now() + 60_000).toISOString(), { by: "test" }).catch((e: unknown) => e);
     expect(err).toBeInstanceOf(StartRefused);
     expect(err).toMatchObject({ status: 400, kind: "no_photos" });
     expect((await read(b.id)).status).toBe("failed");
