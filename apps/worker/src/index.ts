@@ -12,6 +12,7 @@ import { upscaleConfigFromEnv } from "@catalog/core/catalog/upscale";
 import { handlePublishTask } from "./catalog/publish";
 import { handleImproveTask } from "./catalog/improve";
 import { handleFinalizeTask } from "./catalog/finalize";
+import { handleAutoStartTask } from "./catalog/auto-start";
 import { draftExpiryDaysFromEnv, handleSweep } from "./catalog/sweep";
 import { handleSyncMaster } from "./catalog/sync-master";
 import { log } from "@catalog/core/log";
@@ -19,6 +20,7 @@ import { defaultMigrationsDir, installWarningLog } from "./runtime";
 import { createServer, type ServerDeps } from "./server";
 import { DRAIN_GRACE_MS, isDraining, startDrain } from "./drain";
 import { withDeliveryCost } from "./delivery-cost";
+import { registerOwnRevision } from "@catalog/core/catalog/reliability";
 
 defaultMigrationsDir();
 // Spec 18 H4: a warning flood (MaxListenersExceededWarning) names its emitter with a stack in the logs.
@@ -66,10 +68,15 @@ const routes: ServerDeps["routes"] = {
   "/tasks/catalog/publish": (body) => handlePublishTask(workerCatalogDeps(getDb()), body),
   "/tasks/catalog/improve": withDeliveryCost(costed, "system", (body) => handleImproveTask(workerCatalogDeps(getDb()), body)),
   "/tasks/catalog/finalize": withDeliveryCost(costed, "finalize", (body) => handleFinalizeTask(workerCatalogDeps(getDb()), body)),
+  "/tasks/catalog/auto-start": withDeliveryCost(costed, "system", (body) => handleAutoStartTask(workerCatalogDeps(getDb()), body)),
 };
 
 const server = createServer({ auth, version: process.env.K_REVISION || "dev", routes, draining: isDraining });
-server.listen(port, () => console.log(`catalog-worker listening on :${port}`));
+server.listen(port, () => {
+  console.log(`catalog-worker listening on :${port}`);
+  // M6-F3-R1 deploy_overlap: this revision registers itself when its first instance starts (a deploy's probe).
+  void registerOwnRevision(getDb, process.env, (error) => log("WARNING", "revision not registered", { revision: process.env.K_REVISION, error: error instanceof Error ? error.message : String(error) }));
+});
 
 // M6-F2-R3: SIGTERM starts the drain (drain.ts): new deliveries get 503, chunk deliveries start no new photo and hand
 // off, enlargement calls in flight give their count back. In-flight requests get DRAIN_GRACE_MS, inside Cloud Run's

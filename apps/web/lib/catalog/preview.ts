@@ -5,6 +5,7 @@ import { linkFailuresOf } from "@catalog/core/catalog/ingest/link-failures";
 import { isLinkReject } from "@catalog/core/catalog/ingest/link-reasons";
 import { buildPreview } from "@catalog/core/catalog/ingest/index";
 import type { Detected } from "@catalog/core/catalog/ingest/types";
+import { channelRulesLoader, ChannelRulesError } from "@catalog/core/catalog/channel-rules";
 import { configuredUpscalerIds, renderKeys } from "@catalog/core/catalog/pipeline/publish";
 import { resolvePolicy } from "@catalog/core/catalog/qa/policy";
 import type { ChannelId } from "@catalog/core/catalog/types";
@@ -27,9 +28,9 @@ export async function detectedBatch(id: string) {
 }
 export async function patchDetected(id: string, value: unknown) {
   const batch = await assertDraft(id);
-  const input = value as { identifierMode?: unknown; precedence?: unknown; sheets?: unknown; perRoot?: unknown };
+  const input = value as { identifierMode?: unknown; precedence?: unknown; sheets?: unknown; perRoot?: unknown; newestSameProduct?: unknown };
   if (!input || typeof input !== "object") throw badRequest("Check the grouping controls and try again.");
-  const options = parseOptions({ ...(input.identifierMode !== undefined ? { identifierMode: input.identifierMode } : {}), ...(input.precedence !== undefined ? { precedence: input.precedence } : {}), ...(input.perRoot !== undefined ? { perRoot: input.perRoot } : {}) }, batch.options);
+  const options = parseOptions({ ...(input.identifierMode !== undefined ? { identifierMode: input.identifierMode } : {}), ...(input.precedence !== undefined ? { precedence: input.precedence } : {}), ...(input.perRoot !== undefined ? { perRoot: input.perRoot } : {}), ...(input.newestSameProduct !== undefined ? { newestSameProduct: input.newestSameProduct } : {}) }, batch.options);
   const uploads = await db().select().from(catalogUploads).where(eq(catalogUploads.batchId, id));
   const sheets = input.sheets ?? [];
   if (!Array.isArray(sheets)) throw badRequest("Choose the sheet columns and try again.");
@@ -48,7 +49,7 @@ export async function patchDetected(id: string, value: unknown) {
   if (patches.length > 1) options.sheetColumns = null;
   // Nothing changed since the grouping was made (same options, every sheet's columns already chosen as
   // sent): step 2 Continue returns at once, with no regroup, no upload change and no hand-off (spec 14c F7 part 1).
-  const sameOptions = options.identifierMode === batch.options.identifierMode && (options.perRoot === true) === (batch.options.perRoot === true) && options.precedence === batch.options.precedence && JSON.stringify(options.sheetColumns ?? null) === JSON.stringify(batch.options.sheetColumns ?? null);
+  const sameOptions = options.identifierMode === batch.options.identifierMode && (options.perRoot === true) === (batch.options.perRoot === true) && options.precedence === batch.options.precedence && JSON.stringify(options.sheetColumns ?? null) === JSON.stringify(batch.options.sheetColumns ?? null) && (options.newestSameProduct !== false) === (batch.options.newestSameProduct !== false);
   const sameSheets = patches.every(({ upload, detected }) => {
     const prior = upload.detected as unknown as (Detected & { columnsChosen?: boolean }) | null;
     return prior?.columnsChosen === true && prior.kind === detected.kind && prior.identifierColumn === detected.identifierColumn && JSON.stringify(prior.urlColumns ?? []) === JSON.stringify(detected.urlColumns);
@@ -71,11 +72,14 @@ type LiveOutput = { productId: string; n: number; channel: ChannelId; sha256: st
 /**
  * Step 4's "images will be made" (spec 06): photos times channels (no channel skips a photo for its size), minus pairs whose live image
  * the worker keeps as it is: its render_key is one the worker accepts for this photo (chunk.ts, renderKeys: same
- * sha256, today's CHANNEL_RULES_VERSION, the cut-out model it will use, plain or upscaled). Anything in doubt is
- * counted, so the count may be higher than what is made but never lower.
+ * sha256, the channel's rules version (M3-S1: `keyVersion`, from the published M5 registry), the cut-out model it will
+ * use, plain or upscaled). Anything in doubt is counted, so the count may be higher than what is made but never lower:
+ * `keyVersion` null (no ruleset could be read) keeps nothing.
  */
-export function plannedImages(sources: readonly PlannedSource[], channels: readonly ChannelId[], live: readonly LiveOutput[], upscaleModel: string | readonly string[] | null = configuredUpscalerIds()): { outputs: number; sourcesToMake: number } {
-  const current = (o: LiveOutput) => o.workerMatteModel !== null && renderKeys({ sourceSha256: o.sha256, channel: o.channel, n: o.n, policyKey: `default|${o.workerMatteModel}` }, upscaleModel).includes(o.renderKey);
+export function plannedImages(sources: readonly PlannedSource[], channels: readonly ChannelId[], live: readonly LiveOutput[], upscaleModel: string | readonly string[] | null = configuredUpscalerIds(), keyVersion?: ((channel: ChannelId) => string) | null): { outputs: number; sourcesToMake: number } {
+  // A channel the rules cannot key (no active row) keeps nothing, like a ruleset that cannot be read.
+  const rulesOf = (channel: ChannelId): { rulesVersion?: string } | null => { if (!keyVersion) return {}; try { return { rulesVersion: keyVersion(channel) }; } catch { return null; } };
+  const current = (o: LiveOutput) => { const rules = o.workerMatteModel !== null && keyVersion !== null ? rulesOf(o.channel) : null; return rules !== null && renderKeys({ sourceSha256: o.sha256, channel: o.channel, n: o.n, policyKey: `default|${o.workerMatteModel}`, ...rules }, upscaleModel).includes(o.renderKey); };
   // The live outputs the worker keeps, by (product, n, channel, sha256): one lookup per pair instead of a scan of every live output.
   const pairKey = (productId: string, n: number, channel: string, sha256: string) => `${productId}|${n}|${channel}|${sha256}`;
   const kept = new Set(live.filter(current).map((o) => pairKey(o.productId, o.n, o.channel, o.sha256)));
@@ -147,7 +151,9 @@ export async function previewBatch(id: string) {
   };
   const models = new Map(await Promise.all([...new Set(liveRows.map((o) => o.productId))].map(async (productId) => [productId, await matteModelFor({ productType: typeOf.get(productId) ?? null }, batch, transparent.has(productId), resolveOnce)] as const)));
   const live = liveRows.map((o) => ({ ...o, workerMatteModel: models.get(o.productId) ?? null }));
-  const { outputs, sourcesToMake } = plannedImages(sources, batch.channels, live);
+  // M3-S1: the worker keys renders by the channel rows of the latest published ruleset; unreadable rules keep nothing.
+  const rules = await channelRulesLoader(db())().catch((error: unknown) => { if (error instanceof ChannelRulesError) return null; throw error; });
+  const { outputs, sourcesToMake } = plannedImages(sources, batch.channels, live, configuredUpscalerIds(), rules ? (channel) => rules.keyVersion(channel) : null);
   // One classifier call per product without a type when the batch type is "auto" (spec 07 4.3, 4.11).
   const untypedProducts = batch.productType !== "auto" ? 0 : products.filter((p) => !p.productType).length;
   const estimate = wizardEstimate({ outputs, sources: sourcesToMake, untypedProducts, qaMode: batch.options.policy?.qaMode ?? "per_source", qaSampleRate: batch.options.policy?.qaSampleRate ?? 1 });

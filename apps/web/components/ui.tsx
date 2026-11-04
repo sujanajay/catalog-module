@@ -1,6 +1,6 @@
 // Small display primitives shared by the catalog pages.
 import type { ReactNode } from "react";
-import { STATUS_WORDS, statusTone, type StatusIcon, type StatusKey } from "@catalog/core/catalog/status-words";
+import { batchStatusWord, STATUS_WORDS, statusTone, type BatchStateName, type StatusIcon, type StatusKey } from "@catalog/core/catalog/status-words";
 
 const ICONS: Record<StatusIcon, ReactNode> = {
   progress: <circle cx="8" cy="8" r="5.5" fill="none" stroke="currentColor" strokeWidth="2" strokeDasharray="17 18" />,
@@ -22,6 +22,12 @@ export function StatusWord({ status, blocking }: { status: StatusKey; blocking?:
       <span>{spec.word}</span>
     </span>
   );
+}
+
+/** The status word of a batch state (owner decision, UX D11); a cancelled batch shows the plain word "Cancelled". */
+export function BatchStatusWord({ state }: { state: BatchStateName }) {
+  const word = batchStatusWord(state);
+  return word ? <StatusWord status={word.status} blocking={word.blocking} /> : <span className="status-word">Cancelled</span>;
 }
 
 export function usd(n: number | string | null | undefined, digits = 2): string {

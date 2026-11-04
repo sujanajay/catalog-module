@@ -1,9 +1,10 @@
 import sharp from "sharp";
 import { fileTypeFromBuffer } from "file-type";
-import { backgroundFor, channel, CUT_BAND_NOTE_START, DETAIL_SHOT_BBOX_FRACTION, JPEG_QUALITY_MIN, JPEG_QUALITY_START, JPEG_QUALITY_STEP, MAX_OUTPUT_BYTES, MAX_UPSCALE, MIN_SOURCE_LONG_SIDE_PX, type ChannelSpec, type Size } from "./channels";
+import { backgroundOf, channel, CUT_BAND_NOTE_START, DETAIL_SHOT_BBOX_FRACTION, JPEG_QUALITY_MIN, JPEG_QUALITY_START, JPEG_QUALITY_STEP, MAX_OUTPUT_BYTES, MAX_UPSCALE, MIN_SOURCE_LONG_SIDE_PX, type ChannelSpec, type Size } from "./channels";
+import type { ChannelRules } from "./channel-rules";
 import { ENLARGEMENT_FAILED_SENTENCE, type ChannelId, type OutputFlag, type ProductType } from "./types";
 import { ALPHA_BBOX_THRESHOLD, analyseBackground, borderPixels, shadowLayer } from "./shadow";
-import { anchorBounds, BG_TOLERANCE, checkOutput, type Measured } from "./compliance";
+import { anchorBounds, checkOutput, type Measured } from "./compliance";
 import { enlargeCutout } from "./enhance";
 import { plainFailures } from "./qa/reasons";
 import { enlargeRegion, enlargementStateOf, EnlargementNotReadyError, shouldUpscale, upscaledRgb, upscaleFactorFor, upscalerKey, upscalersFor, type EnlargeRegion, type UpscaleFactor, type Upscaler } from "./upscale";
@@ -23,7 +24,8 @@ export interface RenderInput { prepared: Prepared; matte: Matte; channel: Channe
   /** The quality loop's floor for this render (the `reencode` repair goes below JPEG_QUALITY_MIN); absent is JPEG_QUALITY_MIN. */ jpegQualityMin?: number;
   /** Spec 11: the (x2) upscaler, used when the plan enlarges beyond its `minScale`; absent or null is the plain Lanczos path. */ upscaler?: Upscaler | null;
   /** Spec 18 quality: the x4 upscaler, used above UPSCALE_X4_MIN_SCALE (upscalersFor); absent or null: the x2 upscaler everywhere. */ upscalerX4?: Upscaler | null;
-  /** Ids for the upscale log lines; never shown to an operator. */ trace?: { batchId?: string; productId?: string } }
+  /** Ids for the upscale log lines; never shown to an operator. */ trace?: { batchId?: string; productId?: string };
+  /** M3-S1: the channel values from the M5 registry (channel-rules.ts); absent renders with the channels.ts fixture (tests and local tools). */ channelRules?: Pick<ChannelRules, "spec"> }
 /**
  * `upscale`: set only when the upscaler made this output's colour (flag `upscaled`); `model` goes into render_key, never
  * into operator copy. `reused`: the photo's one x2 image was made for an earlier output (its `ms` is not a new call).
@@ -110,6 +112,17 @@ export type TrimRoom = Record<Side, number>;
 export interface ShotGeometry { box: BBox; source: Size; cut: CutEdges;
   /** Per side, how deep (source px from the box edge) a cut-fill trim may go before it reaches a logo, text or a buckle (trimRoom); absent without source pixels or a cut on both ends of an axis. */ trimRoom?: TrimRoom;
   /** Cut sides a trim may never touch by rule (trimRules), whatever the source shows: their `trimRoom` is 0. */ trimProtected?: Side[] }
+/**
+ * How far (per RGB channel) a ready-made JPEG's border may be from the slot's background colour for the photo to be
+ * passed through as it is. Only JPEG noise: BG_TOLERANCE (24) is wider than the step between the 240 grey and white, so
+ * with it a white photo shipped white on a grey slot and a 240 photo shipped grey on Amazon image 1 (M3-S1, R228).
+ */
+export const PASSTHROUGH_BORDER_TOLERANCE = 6;
+/**
+ * On a pure-white slot (Amazon image 1, any row whose colour is #FFFFFF) the border must read 254 or more: a pure-white
+ * JPEG decodes to 255, while a studio "white" of 249 to 253 is off-white, which Amazon's main-image rule refuses (R228).
+ */
+export const PASSTHROUGH_WHITE_TOLERANCE = 1;
 /** The model name of the pass-through and whole-photo mattes (matte-guard.ts). */
 export const PASSTHROUGH_MODEL = "passthrough";
 /**
@@ -513,8 +526,8 @@ export interface EnlargementShot { width: number; height: number; rgb: Buffer; a
  * with no product found needs nothing (the render fails it). A render that still needs an image no task made is
  * held with `enlargement_failed`, never silent.
  */
-export function enlargementNeeds(channels: readonly ChannelId[], shots: readonly EnlargementShot[], productType: ProductType | null | undefined, minScale: number): boolean[] {
-  return enlargementFactors(channels, shots, productType, minScale, false).map((factors) => factors.length > 0);
+export function enlargementNeeds(channels: readonly ChannelId[], shots: readonly EnlargementShot[], productType: ProductType | null | undefined, minScale: number, rules?: Pick<ChannelRules, "spec">): boolean[] {
+  return enlargementFactors(channels, shots, productType, minScale, false, rules).map((factors) => factors.length > 0);
 }
 
 /**
@@ -523,8 +536,8 @@ export function enlargementNeeds(channels: readonly ChannelId[], shots: readonly
  * smaller fit) can move a channel from the x4 band into the x2 band; the render then uses the x4 image
  * (upscalersFor), so a photo is never held for that.
  */
-export function enlargementFactors(channels: readonly ChannelId[], shots: readonly EnlargementShot[], productType: ProductType | null | undefined, minScale: number, x4: boolean): UpscaleFactor[][] {
-  return enlargementPlan(channels, shots, productType, minScale, x4).map((needs) => needs.map((n) => n.factor));
+export function enlargementFactors(channels: readonly ChannelId[], shots: readonly EnlargementShot[], productType: ProductType | null | undefined, minScale: number, x4: boolean, rules?: Pick<ChannelRules, "spec">): UpscaleFactor[][] {
+  return enlargementPlan(channels, shots, productType, minScale, x4, rules).map((needs) => needs.map((n) => n.factor));
 }
 /** One model band a shot needs (enlargementPlan): the factor, the largest planned scale in it and the channels that need it. */
 export interface EnlargementNeed { factor: UpscaleFactor; maxScale: number; channels: ChannelId[] }
@@ -533,11 +546,13 @@ export interface EnlargementNeed { factor: UpscaleFactor; maxScale: number; chan
  * band (the route's neededScale before the slack) and the channels that need it (named in a size refusal). The same
  * superset of the render's decision as enlargementFactors, which reads it.
  */
-export function enlargementPlan(channels: readonly ChannelId[], shots: readonly EnlargementShot[], productType: ProductType | null | undefined, minScale: number, x4: boolean): EnlargementNeed[][] {
+/** `rules`: the channel values the render will use (M3-S1); absent is the channels.ts fixture. */
+export function enlargementPlan(channels: readonly ChannelId[], shots: readonly EnlargementShot[], productType: ProductType | null | undefined, minScale: number, x4: boolean, rules?: Pick<ChannelRules, "spec">): EnlargementNeed[][] {
   const geometry = (s: EnlargementShot, judgedCut: boolean) => shotGeometry(s.alpha, s.width, s.height, { rgb: s.rgb, judgedCut, ...trimRules(productType, s) });
   const plain = shots.map((s) => geometry(s, false)), judged = shots.map((s) => geometry(s, true));
   const found = plain.filter((g): g is ShotGeometry => g !== null);
-  const canvases = channels.map((id) => ({ id, spec: channel(id), canvas: found.length ? planProduct(channel(id), found).canvas : undefined }));
+  const specOf = (id: ChannelId) => rules?.spec(id) ?? channel(id);
+  const canvases = channels.map((id) => ({ id, spec: specOf(id), canvas: found.length ? planProduct(specOf(id), found).canvas : undefined }));
   return shots.map((s, i) => {
     const needs = new Map<UpscaleFactor, EnlargementNeed>();
     for (const { id, spec, canvas } of canvases) for (const g of [plain[i], judged[i]]) {
@@ -610,7 +625,7 @@ export async function visibleAnchorShift(cutout: Buffer, product: BBox, safe: BB
 }
 
 export async function renderSource(input: RenderInput): Promise<RenderOutput> {
-  const { prepared: p, matte, shotNumber } = input, spec = channel(input.channel);
+  const { prepared: p, matte, shotNumber } = input, spec = input.channelRules?.spec(input.channel) ?? channel(input.channel);
   if (matte.width !== p.width || matte.height !== p.height) throw new Error("Matte and source dimensions must match");
   const geometry = shotGeometry(matte.alpha, p.width, p.height, { rgb: p.rgb, judgedCut: input.judgedCut, ...trimRules(input.productType, matte) }), box = geometry?.box ?? null, cut = geometry?.cut ?? NO_CUT;
   const plan = planCanvas(spec, box ?? { x: 0, y: 0, w: p.width, h: p.height }, { w: p.width, h: p.height }, { uniformScale: input.uniformScale, canvas: input.canvas, cut, fitScale: input.fitScale, trimRoom: geometry?.trimRoom });
@@ -632,7 +647,7 @@ export async function renderSource(input: RenderInput): Promise<RenderOutput> {
     result.attention = { why, what: "It will upload, but ask the brand for a larger photo if you can. The other marketplaces are fine with it." };
   }
   if (spec.uniformScaleDefault && !plan.detailShot && input.uniformScale !== undefined && input.uniformScale > plan.scale) result.notes.push("Could not keep the same size as the other angles without cutting; fitted instead");
-  const color = backgroundFor(spec.id, shotNumber), product = plan.productBox!;
+  const color = backgroundOf(spec, shotNumber), product = plan.productBox!;
   // The sheet says a cut edge sits flush with the edge of the image; name every cut side where it does not.
   const floating = SIDES.filter(side => cut[side] && (side === "top" ? product.y : side === "bottom" ? plan.h - product.y - product.h : side === "left" ? product.x : plan.w - product.x - product.w) > 1);
   // Only a logo, text or a buckle blocks a trim in the note's words; a side protected by rule (trimRules) gets the plain note.
@@ -640,8 +655,8 @@ export async function renderSource(input: RenderInput): Promise<RenderOutput> {
   if (floating.length) result.notes.push(blocked.length
     ? `${CUT_BAND_NOTE_START}${floating.join(" and ")}, but on ${spec.label} filling ${floating.length > 1 ? "those edges" : "that edge"} would cut through a logo or detail near the ${blocked.join(" and ")} edge, so a band shows there to keep it whole.`
     : `${CUT_BAND_NOTE_START}${floating.join(" and ")}, but on ${spec.label} the product cannot reach that edge of the image without trimming more of it, so a band shows there.`);
-  const rgbColor = hexColor(color);
-  const passthrough = p.sourceMime === "image/jpeg" && !p.alphaSource && !anyCut(cut) && (input.fitScale ?? 1) >= 1 && p.width === plan.w && p.height === plan.h && box.x >= plan.safeBox.x && box.y >= plan.safeBox.y && box.x + box.w <= plan.safeBox.x + plan.safeBox.w && box.y + box.h <= plan.safeBox.y + plan.safeBox.h && borderPixels(p.width, p.height).every(i => rgbColor.every((v, c) => Math.abs(p.rgb[i * 3 + c]! - v) <= BG_TOLERANCE));
+  const rgbColor = hexColor(color), borderTolerance = rgbColor.every(v => v === 255) ? PASSTHROUGH_WHITE_TOLERANCE : PASSTHROUGH_BORDER_TOLERANCE;
+  const passthrough = p.sourceMime === "image/jpeg" && !p.alphaSource && !anyCut(cut) && (input.fitScale ?? 1) >= 1 && p.width === plan.w && p.height === plan.h && box.x >= plan.safeBox.x && box.y >= plan.safeBox.y && box.x + box.w <= plan.safeBox.x + plan.safeBox.w && box.y + box.h <= plan.safeBox.y + plan.safeBox.h && borderPixels(p.width, p.height).every(i => rgbColor.every((v, c) => Math.abs(p.rgb[i * 3 + c]! - v) <= borderTolerance));
   let image: Buffer, shadowKind: ShadowKind = "none";
   const foregroundMask = Buffer.alloc(plan.w * plan.h);
   if (passthrough) {
@@ -719,7 +734,7 @@ export async function renderSource(input: RenderInput): Promise<RenderOutput> {
   result.bytes = jpeg.length;
   const identifier = input.identifier ?? "photo";
   result.foregroundMask = foregroundMask;
-  const checked = await checkOutput({ jpeg, channel: spec.id, shotNumber, plan, identifier, n: shotNumber, publicObjectPath: input.publicObjectPath ?? `${encodeURIComponent(identifier)}_${shotNumber}.jpg`, foregroundMask });
+  const checked = await checkOutput({ jpeg, channel: spec.id, spec, shotNumber, plan, identifier, n: shotNumber, publicObjectPath: input.publicObjectPath ?? `${encodeURIComponent(identifier)}_${shotNumber}.jpg`, foregroundMask });
   result.compliance = { ok: checked.ok, failures: checked.failures, measured: { ...checked.measured, shadow: shadowKind, cut: { ...cut } } };
   // The note (the row's reason) names the rule in plain words; the "code: sentence" strings stay in compliance.failures (07 4.6a).
   if (!result.compliance.ok) { result.flags.push("failed_compliance");

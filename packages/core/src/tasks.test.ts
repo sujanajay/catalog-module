@@ -44,9 +44,9 @@ function fakeClient() {
 afterEach(() => vi.useRealTimers());
 
 describe("TaskRoute", () => {
-  it("TASK_ROUTES lists exactly the nine routes of the type", () => {
+  it("TASK_ROUTES lists exactly the ten routes of the type", () => {
     expectTypeOf<(typeof TASK_ROUTES)[number]>().toEqualTypeOf<TaskRoute>();
-    expect(TASK_ROUTES).toHaveLength(9);
+    expect(TASK_ROUTES).toHaveLength(10);
     expect(ENLARGE_TASK_ROUTES).toEqual(["/tasks/catalog/enlarge"]);
     // Both ingest routes go to the ingest queue (spec 14d F11 part 2).
     expect(INGEST_TASK_ROUTES).toEqual(["/tasks/catalog/ingest", "/tasks/catalog/ingest-more"]);

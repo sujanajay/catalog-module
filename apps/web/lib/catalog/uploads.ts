@@ -88,6 +88,15 @@ export function handOffError(err: unknown): HttpError {
  * `/tasks/catalog/ingest-more` task, and the answer says how many are `remaining`.
  */
 export async function ingestBatch(id: string) {
+  return (await handOffIngest(id)).answer;
+}
+
+/**
+ * ingestBatch with what the hand-off was (M6-S6 review P2-3): `stalledRetry` is true only for "Try again" on a
+ * collecting batch whose run stalled (isCollectStalled), the one case the ingest route counts as an operator touch. A
+ * first Continue, Back then Continue, Check again on step 2 and a double-submit while collecting are not.
+ */
+export async function handOffIngest(id: string): Promise<{ answer: { collecting: boolean; remaining?: number }; stalledRetry: boolean }> {
   const batch = await queryBatch(id);
   if (!["draft", "ingesting"].includes(batch.status)) throw new HttpError(409, notDraftText(batch));
   // A removed input (spec 14b F3) is neither collected nor waited for.
@@ -99,7 +108,7 @@ export async function ingestBatch(id: string) {
   }
   const current = await db().select().from(catalogUploads).where(and(eq(catalogUploads.batchId, id), ne(catalogUploads.status, "removed")));
   const uploads = current.filter((u) => u.status === "uploaded");
-  if (!uploads.length && batch.counts.previewReady) return { collecting: false };
+  if (!uploads.length && batch.counts.previewReady) return { answer: { collecting: false }, stalledRetry: false };
   const targets = uploads.length ? uploads : current.filter((u) => u.status === "collected").slice(0, 1);
   if (!targets.length) throw badRequest("No files are ready. Check access to your links and try again.");
   // Conditional and merge-only (spec 14c F4 part 2 and F6): a Cancel that landed meanwhile is never
@@ -135,7 +144,7 @@ export async function ingestBatch(id: string) {
     throw handOffError(err);
   }
   const remaining = Math.max(0, uploads.length - page.ids.length);
-  return remaining ? { collecting: true, remaining } : { collecting: true };
+  return { answer: remaining ? { collecting: true, remaining } : { collecting: true }, stalledRetry: stalled };
 }
 /** POST /retry-links when the batch holds no link that failed. */
 export const NO_FAILED_LINKS = "No links failed in this batch. Reload this page.";

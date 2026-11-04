@@ -94,17 +94,17 @@ describe("batch copy for the real state of the batch", () => {
     expect(readyText(12, 0)).toBe("All 12 images are live and passed every check. Nothing needs your attention.");
     expect(readyText(12, 1)).toBe("All 12 images are live. 1 photo was kept as is after a decision; everything else passed every check. Nothing needs your attention.");
     const counts = { ...EMPTY_BATCH_COUNTS, outputs: 12, verified: 12, recheckOk: 12, recheckTotal: 12 };
-    expect(text(renderToStaticMarkup(createElement(BatchBanner, { status: "done", counts, keptPhotos: 2 })))).toBe("ReadyAll 12 images are live. 2 photos were kept as is after a decision; everything else passed every check. Nothing needs your attention.");
+    expect(text(renderToStaticMarkup(createElement(BatchBanner, { status: "done", counts, keptPhotos: 2 })))).toBe("DoneAll 12 images are live. 2 photos were kept as is after a decision; everything else passed every check. Nothing needs your attention.");
     expect(text(renderToStaticMarkup(createElement(BatchBanner, { status: "done", counts })))).toContain("passed every check. Nothing needs your attention.");
     const skipped = { ...counts, outputs: 15, skipped: 5, verified: 10, recheckOk: 10, recheckTotal: 10 };
-    expect(text(renderToStaticMarkup(createElement(BatchBanner, { status: "done", counts: skipped })))).toBe("ReadyAll 10 images are live and passed every check. Nothing needs your attention.");
-    expect(text(renderToStaticMarkup(createElement(BatchBanner, { status: "done", counts: skipped, styliSkipped: 5 })))).toBe("ReadyAll 10 images are live and passed every check. 5 Styli images were not made because the photos are too small for Styli even after enlargement (see the notes column).");
+    expect(text(renderToStaticMarkup(createElement(BatchBanner, { status: "done", counts: skipped })))).toBe("DoneAll 10 images are live and passed every check. Nothing needs your attention.");
+    expect(text(renderToStaticMarkup(createElement(BatchBanner, { status: "done", counts: skipped, styliSkipped: 5 })))).toBe("DoneAll 10 images are live and passed every check. 5 Styli images were not made because the photos are too small for Styli even after enlargement (see the notes column).");
     expect(readyText(10, 1, 1)).toBe("All 10 images are live. 1 photo was kept as is after a decision; everything else passed every check. 1 Styli image was not made because the photo is too small for Styli even after enlargement (see the notes column).");
   });
   it("shows the server's time left in the processing banner, the same on every reload", () => {
     const counts = { ...EMPTY_BATCH_COUNTS, outputs: 10 };
     const banner = text(renderToStaticMarkup(createElement(BatchBanner, { status: "matting", counts, startedAt: "2026-10-21T13:36:19.000Z", now: "2026-10-21T13:36:49.000Z" })));
-    expect(banner).toBe("Processing0 of 10 images made · about 1 to 5 min left. You can close this page and come back; nothing stops. Starting the image services. The first pictures usually take a minute or two on the first batch after a quiet spell.");
+    expect(banner).toBe("Working0 of 10 images made · about 1 to 5 min left. You can close this page and come back; nothing stops. Starting the image services. The first pictures usually take a minute or two on the first batch after a quiet spell.");
   });
   it("names the actual source while collecting, never a Drive folder for local uploads", () => {
     expect(batchSource(["image"])).toBe("upload");
@@ -161,6 +161,19 @@ describe("batch copy for the real state of the batch", () => {
     expect(plannedImages(sources, ["noon"], liveUnder().map((o) => ({ ...o, workerMatteModel: "bria-rmbg" })), "swinir-x2")).toEqual({ outputs: 5, sourcesToMake: 5 });
     // When the worker's cut-out model cannot be known before the batch runs, the live image is counted.
     expect(plannedImages(sources, ["noon"], liveUnder().map((o) => ({ ...o, workerMatteModel: null })), "swinir-x2")).toEqual({ outputs: 5, sourcesToMake: 5 });
+  });
+  it("M3-S1: keys live images by the version of each channel row in the published ruleset, and keeps nothing without one", () => {
+    const sources = [1, 2].map((n) => ({ productId: "p", n, sha256: `s${n}`, height: 1200 }));
+    const liveUnder = (rulesVersion: string) => sources.map((s) => ({ productId: "p", n: s.n, channel: "noon" as const, sha256: s.sha256, workerMatteModel: "birefnet", renderKey: renderKey({ sourceSha256: s.sha256, channel: "noon", n: s.n, policyKey: "default|birefnet", rulesVersion }) }));
+    const noonRow = (version: number) => () => `10+c${version}`;
+    expect(plannedImages(sources, ["noon"], liveUnder("10+c2"), null, noonRow(2))).toEqual({ outputs: 0, sourcesToMake: 0 });
+    // An admin changed the Noon row (version 3): the worker makes both again, so both are counted.
+    expect(plannedImages(sources, ["noon"], liveUnder("10+c2"), null, noonRow(3))).toEqual({ outputs: 2, sourcesToMake: 2 });
+    // Live images from before M3-S1 (plain CHANNEL_RULES_VERSION keys) are made again once, under the registry.
+    expect(plannedImages(sources, ["noon"], liveUnder("10"), null, noonRow(2))).toEqual({ outputs: 2, sourcesToMake: 2 });
+    expect(plannedImages(sources, ["noon"], liveUnder("10+c2"), null, null)).toEqual({ outputs: 2, sourcesToMake: 2 });
+    // A channel with no active row (retired) cannot be keyed: its images are counted, and the page does not fail.
+    expect(plannedImages(sources, ["noon"], liveUnder("10+c2"), null, () => { throw new Error("no active row for noon"); })).toEqual({ outputs: 2, sourcesToMake: 2 });
   });
 });
 

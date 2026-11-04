@@ -106,7 +106,11 @@ export async function handleIngestMoreTask(deps: IngestTaskDeps, body: Record<st
   if (!isId(batchId) || !isId(run) || !isOptionalText(after)) return { httpStatus: 400, outcome: "invalid body: batchId and run are required" };
   try {
     const [batch] = await deps.db.select({ status: catalogBatches.status }).from(catalogBatches).where(eq(catalogBatches.id, batchId));
-    if (batch?.status !== "ingesting") return { httpStatus: 200, outcome: `noop: the batch is ${batch?.status ?? "missing"}` };
+    if (batch?.status !== "ingesting") {
+      // M6-F3-R6: one INFO line per delivery outcome, the no-op included.
+      log("INFO", "ingest-more", { event: "ingest-more", batchId, handed: 0, more: false, outcome: "noop", status: batch?.status ?? null });
+      return { httpStatus: 200, outcome: `noop: the batch is ${batch?.status ?? "missing"}` };
+    }
     const page = await uploadedPage(deps.db, batchId, typeof after === "string" && after ? after : null);
     await handOff(deps.ingest.enqueue, batchId, run, page);
     const outcome = `handed ${page.ids.length}${page.more ? "; more follow" : ""}`;

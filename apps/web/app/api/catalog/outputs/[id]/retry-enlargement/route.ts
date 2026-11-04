@@ -1,3 +1,4 @@
+import { countTouch } from "../../../../../../lib/catalog/touches";
 import { retryPhotoEnlargement } from "../../../../../../lib/catalog/decisions";
 import { catalogRoute, outputId, type OutputContext } from "../../../../../../lib/catalog/api";
 
@@ -6,5 +7,10 @@ import { catalogRoute, outputId, type OutputContext } from "../../../../../../li
  * 409 "Nothing to try again." when the photo has no failed enlargement a call can make.
  */
 export function POST(req: Request, context: OutputContext) {
-  return catalogRoute(req, "operator", async (user) => retryPhotoEnlargement(await outputId(context), user.email));
+  return catalogRoute(req, "operator", async (user) => {
+    const id = await outputId(context);
+    const result = await retryPhotoEnlargement(id, user.email);
+    await countTouch("retry_photo", { outputId: id });
+    return result;
+  });
 }

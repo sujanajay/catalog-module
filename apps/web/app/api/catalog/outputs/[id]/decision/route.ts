@@ -1,3 +1,4 @@
+import { countTouch } from "../../../../../../lib/catalog/touches";
 import { z } from "zod";
 import { decidePhoto } from "../../../../../../lib/catalog/decisions";
 import { outputId, type OutputContext } from "../../../../../../lib/catalog/api";
@@ -17,6 +18,7 @@ export function POST(req: Request, context: OutputContext) {
     const id = await outputId(context);
     const body = Body.parse(await readJson(req));
     const result = await decidePhoto(id, body.decision, user.email, body.acceptPlain === true);
+    if (!("warning" in result)) await countTouch("decision", { outputId: id });
     return "warning" in result ? Response.json(result.warning, { status: 409 }) : Response.json(result);
   });
 }

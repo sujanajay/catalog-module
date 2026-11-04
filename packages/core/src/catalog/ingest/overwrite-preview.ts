@@ -13,12 +13,13 @@ import {
   catalogProductAliases,
   catalogProducts,
   catalogSourceImages,
+  catalogUploads,
   type CatalogBatch,
 } from "../../db/schema";
 import { normalizeKey, sanitizeSegment } from "../naming";
 import { deriveBatchState } from "../pipeline/status";
 import { loadSkuResolver, type SkuResolver } from "../sku-mapping";
-import { baseName, sameProductMessage } from "./group";
+import { baseName, newestIdentifier, olderSameProductMessage, sameProductMessage } from "./group";
 import type { GroupingResult, OverwritePreview, SourceItem } from "./types";
 
 export interface ProductMatch { identifier: string; productId: string | null; pathKey: string; isNew: boolean; matchedBy: "alias" | "option_key" | null }
@@ -109,6 +110,11 @@ export async function matchProducts(db: Db, batch: CatalogBatch, identifiers: st
  * `grouped.products` to `grouped.rejected` with the sentence "<a> and <b> are the same product.
  * Keep one."; the rest of the preview leaves them out. This is the only change made to `grouped`.
  */
+/** Upload id to upload time (ms) for a batch's uploads. */
+export async function uploadTimes(db: Db, batchId: string): Promise<Map<string, number>> {
+  const rows = await db.select({ id: catalogUploads.id, createdAt: catalogUploads.createdAt }).from(catalogUploads).where(eq(catalogUploads.batchId, batchId));
+  return new Map(rows.map((r) => [r.id, r.createdAt.getTime()]));
+}
 export async function buildOverwritePreview(
   db: Db,
   batch: CatalogBatch,
@@ -131,8 +137,18 @@ export async function buildOverwritePreview(
     bySameProduct.set(key, [...(bySameProduct.get(key) ?? []), id]);
   }
   const duplicates: OverwritePreview["duplicates"] = [];
+  // M1-F2-R7: spellings from different uploads keep the newest upload's photos (unless the operator turned it off).
+  const uploadAt = batch.options.newestSameProduct !== false && [...bySameProduct.values()].some((ids) => ids.length > 1) ? await uploadTimes(db, batch.id) : null;
   for (const ids of bySameProduct.values()) {
     if (ids.length < 2) continue;
+    const newest = uploadAt ? newestIdentifier(ids, (id) => grouped.products.get(id) ?? [], uploadAt) : null;
+    if (newest) {
+      for (const id of ids.filter((i) => i !== newest).sort(byText)) {
+        for (const item of grouped.products.get(id) ?? []) grouped.rejected.push({ item, reason: olderSameProductMessage(id, newest) });
+        grouped.products.delete(id);
+      }
+      continue;
+    }
     const [first, ...others] = [...ids].sort(byText);
     for (const other of others) duplicates.push({ a: first!, b: other });
     const sentence = sameProductMessage(ids.slice().sort(byText));

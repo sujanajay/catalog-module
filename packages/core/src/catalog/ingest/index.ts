@@ -46,7 +46,7 @@ import { driveFolderAdapter } from "./drive-folder";
 import { googleSheetAdapter, sheetCopyUri } from "./google-sheet";
 import { hashedTaskId, INGEST_ROUTE } from "./hand-off";
 import {
-  baseName, byText, distinct, fmt, groupItems, isDuplicateReject, isSameProductReject, originalOf, previewRows, sameProductMessage, shotFlags,
+  baseName, byText, distinct, fmt, groupItems, isDuplicateReject, isSameProductReject, newestIdentifier, olderSameProductMessage, originalOf, previewRows, sameProductMessage, shotFlags,
   warningSentences, type ItemDimensions,
 } from "./group";
 import { checkImage, classifyImageReject, corruptMessage, imageFlags } from "./image-check";
@@ -55,10 +55,11 @@ import { itemKey, loadJson, manifestPath, saveJson, workPrefix, type ItemResult,
 import { LINK_UPLOAD_KINDS } from "./link-failures";
 import { linksSheetAdapter, readLinksSheetUpload, normalizeHeader } from "./links-sheet";
 import { completeUploads, mapLimit } from "./local-files";
-import { buildOverwritePreview, matchProducts } from "./overwrite-preview";
+import { buildOverwritePreview, matchProducts, uploadTimes } from "./overwrite-preview";
 import { linkStatuses, matchProductList, missingIdentifier, productListDetected, readProductList, sizeBases, type ProductListRow } from "./product-list";
 import type { Adapter, CollectInput, Detected, GroupingResult, IngestDeps, OverwritePreview, Preview, SourceItem } from "./types";
 import { fetchSourceUrl, urlListAdapter } from "./url-list";
+import { armAutoStart } from "../auto-start";
 import { columnLetter } from "./detect-step";
 import type { InputRoot, StoredRoot } from "./roots";
 import { collectRejectReason, openZipReader, tooLargeMessage, zipAdapter, ZIP_ENTRY_MAX_BYTES } from "./zip";
@@ -1194,6 +1195,7 @@ async function groupProducts(
   };
   const eans = new Map(state.eans);
   const listSkuIds = new Map(state.listSkuIds);
+  const uploadAt = batch.options.newestSameProduct !== false ? await uploadTimes(db, batch.id) : null;
   const statuses = new Map(state.statuses);
   // A retried chunk finds the products its first try created as existing: the batch's own `new` rows say
   // which were. The grouping delivery's first chunk starts right after removeDraftRows, so it has none.
@@ -1227,6 +1229,19 @@ async function groupProducts(
     const other = used.get(found.product.id);
     // A product list row that names a product already in the batch under another spelling adds nothing.
     if (other !== undefined && !hasPhotos) continue;
+    if (other !== undefined && uploadAt) {
+      // M1-F2-R7: from different uploads, the newest upload's spelling keeps the product (one product row either way).
+      const newest = newestIdentifier([other, id], (k) => grouped.products.get(k) ?? [], uploadAt);
+      const first = productOf.get(other);
+      if (newest === other) { refuse(id, olderSameProductMessage(id, other)); continue; }
+      if (newest === id && first) {
+        refuse(other, olderSameProductMessage(other, id));
+        productOf.delete(other);
+        used.set(found.product.id, id);
+        productOf.set(id, first);
+        continue;
+      }
+    }
     if (other !== undefined) {
       // Two identifiers that only became one product here (for example through the same option id):
       // both are left out, as buildOverwritePreview leaves out the ones it finds.
@@ -1433,6 +1448,11 @@ async function placeBatch(db: Db, deps: PlaceDeps, batchId: string, token: strin
     return { progress: { done: 0, total: 0, phase: "done" }, outcome: "failed: no photos" };
   }
   if (!(await lease.close({ ...state.counts, phase: state.waitingForColumn ? "needs_input" : "ready", placed: total }, "draft"))) return lease.stopped();
+  // M1-F2-R6: a batch made with autoStart starts by itself after its countdown (a sheet still waiting for its column
+  // does not). The batch is collected either way, so a failure to arm only leaves its Start button.
+  if (!state.waitingForColumn) {
+    await armAutoStart(db, deps.enqueue, batchId).catch((err: unknown) => log("WARNING", "auto-start not armed", { batchId, error: err instanceof Error ? err.message : String(err) }));
+  }
   return {
     progress: { done: versions.length, total: versions.length, phase: "done" },
     outcome: `preview ready: ${state.preview.products.length} products, ${versions.length} photos`,

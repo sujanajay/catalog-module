@@ -3,7 +3,7 @@ import { bbox, planCanvas } from "./render";
 import { CHANNELS } from "./channels";
 import sharp from "sharp";
 import { CHANNEL_IDS } from "./types";
-import { prepare, renderSource, renderKeyInputs, planProduct, safeBoxFor, UnsupportedSourceError, visibleAnchorShift, NO_CUT, type Prepared, type Matte } from "./render";
+import { hexColor, prepare, renderSource, renderKeyInputs, planProduct, safeBoxFor, UnsupportedSourceError, visibleAnchorShift, NO_CUT, type Prepared, type Matte } from "./render";
 import { anchorBounds, checkOutput, BG_TOLERANCE, STYLI_ANCHOR_SENTENCE } from "./compliance";
 import { MAX_REPAIRS_PER_OUTPUT } from "./auto-resolve";
 import { alphaFromPng } from "./matte";
@@ -120,7 +120,8 @@ describe("render and encoded compliance", () => {
   });
   it("catches wrong backgrounds, format, density, paths and dimensions independently", async () => {
     const source = fixture(), plan = planCanvas(CHANNELS.noon, { x: 200, y: 200, w: 400, h: 400 }, { w: 800, h: 800 }, {});
-    const jpeg = await sharp({ create: { width: plan.w, height: plan.h, channels: 3, background: "#FFFFFF" } }).withDensity(96).jpeg({ chromaSubsampling: "4:2:0" }).toBuffer();
+    // A mid grey: pure white is only 15 from the 240 grey, inside BG_TOLERANCE, so the pixel check cannot tell them apart (M3 D18).
+    const jpeg = await sharp({ create: { width: plan.w, height: plan.h, channels: 3, background: "#B4B4B4" } }).withDensity(96).jpeg({ chromaSubsampling: "4:2:0" }).toBuffer();
     const check = await checkOutput({ jpeg, channel: "noon", shotNumber: 1, plan: { ...plan, w: plan.w + 1 }, identifier: "a", n: 1, publicObjectPath: "space here.JPG" });
     for (const code of ["format", "dims", "density", "background", "inside_safe_box", "trendyol_name", "extension"]) expect(check.failures.some(f => f.startsWith(code + ":")), code).toBe(true);
     expect(source.prepared.width).toBe(800);
@@ -151,10 +152,33 @@ describe("render and encoded compliance", () => {
     expect(output.flags).toContain("passthrough"); expect(output.status).toBe("ok"); expect(output.plan.productBox).toEqual({ x: 200, y: 200, w: 600, h: 600 });
     const raw = await sharp(output.jpeg!).raw().toBuffer(); expect(Math.abs(raw[(500 * 1000 + 500) * 3]! - source.prepared.rgb[(500 * 1000 + 500) * 3]!)).toBeLessThanOrEqual(BG_TOLERANCE);
   });
-  it("detects a shifted white product in a required margin and a wrong Styli anchor", async () => {
+  it("passes a ready-made JPEG through only onto its own slot colour: white is re-composed onto a grey slot, 240 grey onto Amazon image 1 (M3-S1)", async () => {
+    const ready = async (background: number) => {
+      const source = fixture(1000, 1000, { x: 350, y: 200, w: 300, h: 600 });
+      for (let i = 0; i < source.matte.alpha.length; i++) if (!source.matte.alpha[i]) source.prepared.rgb.fill(background, i * 3, i * 3 + 3);
+      const jpeg = await sharp(source.prepared.rgb, { raw: { width: 1000, height: 1000, channels: 3 } }).jpeg({ quality: 95, chromaSubsampling: "4:4:4" }).toBuffer();
+      return { ...source, prepared: await prepare(jpeg, "ready.jpg", async b => b) };
+    };
+    const corner = async (jpeg: Buffer) => [...await sharp(jpeg).extract({ left: 2, top: 2, width: 1, height: 1 }).raw().toBuffer()];
+    const white = await ready(255), grey = await ready(240);
+    expect((await renderSource({ ...white, channel: "amazon", shotNumber: 1, productType: "apparel_flat" })).flags).toContain("passthrough");
+    expect((await renderSource({ ...grey, channel: "amazon", shotNumber: 2, productType: "apparel_flat" })).flags).toContain("passthrough");
+    const onGrey = await renderSource({ ...white, channel: "amazon", shotNumber: 2, productType: "apparel_flat" });
+    expect(onGrey.flags).not.toContain("passthrough");
+    for (const v of await corner(onGrey.jpeg!)) expect(Math.abs(v - 240)).toBeLessThanOrEqual(1);
+    const onWhite = await renderSource({ ...grey, channel: "amazon", shotNumber: 1, productType: "apparel_flat" });
+    expect(onWhite.flags).not.toContain("passthrough");
+    expect(await corner(onWhite.jpeg!)).toEqual([255, 255, 255]);
+    // A studio "white" of 252 is not pure white: Amazon image 1 re-composes it onto 255 (R228); a grey slot still re-composes it.
+    const offWhite = await renderSource({ ...await ready(252), channel: "amazon", shotNumber: 1, productType: "apparel_flat" });
+    expect(offWhite.flags).not.toContain("passthrough");
+    expect(await corner(offWhite.jpeg!)).toEqual([255, 255, 255]);
+  });
+  // M3 D18: on the 240 grey a white product is inside BG_TOLERANCE and invisible to these pixel checks; a darker product is used.
+  it("detects a shifted product in a required margin and a wrong Styli anchor", async () => {
     const plan = planCanvas(CHANNELS.styli, { x: 700, y: 200, w: 600, h: 1800 }, { w: 2000, h: 2400 }, {}), box = plan.productBox!;
-    const patch = await sharp({ create: { width: box.w, height: box.h, channels: 3, background: "white" } }).png().toBuffer();
-    const jpeg = await sharp({ create: { width: plan.w, height: plan.h, channels: 3, background: "#E0E0E0" } }).composite([{ input: patch, left: box.x, top: box.y + 10 }]).withDensity(300).withIccProfile("srgb").jpeg({ quality: 90, chromaSubsampling: "4:4:4" }).toBuffer();
+    const patch = await sharp({ create: { width: box.w, height: box.h, channels: 3, background: "#C8C8C8" } }).png().toBuffer();
+    const jpeg = await sharp({ create: { width: plan.w, height: plan.h, channels: 3, background: "#F0F0F0" } }).composite([{ input: patch, left: box.x, top: box.y + 10 }]).withDensity(300).withIccProfile("srgb").jpeg({ quality: 90, chromaSubsampling: "4:4:4" }).toBuffer();
     const check = await checkOutput({ jpeg, channel: "styli", shotNumber: 1, plan, identifier: "white", n: 1, publicObjectPath: "white_1.jpg" });
     for (const code of ["background", "inside_safe_box", "styli_anchor"]) expect(check.failures.some(f => f.startsWith(code + ":"))).toBe(true);
   });
@@ -334,7 +358,7 @@ describe("Styli judged on the upscaled size", () => {
     expect(output.flags).toContain("upscaled"); expect(output.plan.scale).toBeGreaterThan(1.5);
     expect(output.compliance.failures).toEqual([]); expect(output.status).toBe("ok");
     // The compliance check run again on the delivered JPEG agrees.
-    const check = await checkOutput({ jpeg: output.jpeg!, channel: "styli", shotNumber: 2, plan: output.plan, identifier: "coat", n: 2, publicObjectPath: "coat_2.jpg" });
+    const check = await checkOutput({ jpeg: output.jpeg!, channel: "styli", shotNumber: 2, plan: output.plan, identifier: "coat", n: 2, publicObjectPath: "coat_2.jpg", foregroundMask: output.foregroundMask });
     expect(check.failures).toEqual([]);
   });
   it("keeps the same photo on the guide on the plain path when the upscale call fails", async () => {
@@ -465,12 +489,12 @@ describe("Styli judged on the upscaled size", () => {
     // The shadow is really there, to the right of the product on the guide, so the seen pixels alone are off centre ...
     const { data, info } = await sharp(output.jpeg!).raw().toBuffer({ resolveWithObject: true });
     const product = output.plan.productBox!, floor = product.y + product.h - 1;
-    const seen = anchorBounds(data, info.width, info.height, [224, 224, 224], null)!;
+    const seen = anchorBounds(data, info.width, info.height, hexColor(CHANNELS.styli.background), null)!;
     expect(seen.x + seen.w).toBeGreaterThan(product.x + product.w + 100);
     expect(Math.abs((2 * seen.x + seen.w) / 2 - info.width / 2)).toBeGreaterThan(50);
-    expect(data[((floor - 100) * info.width + product.x + product.w + 50) * 3]!).toBeLessThan(224 - BG_TOLERANCE);
+    expect(data[((floor - 100) * info.width + product.x + product.w + 50) * 3]!).toBeLessThan(hexColor(CHANNELS.styli.background)[0] - BG_TOLERANCE);
     // ... and the product itself is on the guide: its box by the render's mask is centred within a pixel, bottom on the guide.
-    const box = anchorBounds(data, info.width, info.height, [224, 224, 224], output.foregroundMask!)!;
+    const box = anchorBounds(data, info.width, info.height, hexColor(CHANNELS.styli.background), output.foregroundMask!)!;
     expect(Math.abs((2 * box.x + box.w) / 2 - info.width / 2)).toBeLessThanOrEqual(1);
     expect(Math.abs(box.y + box.h - (info.height - 450))).toBeLessThanOrEqual(1);
     // The operator's note is a sentence, the code stays in `failures` (checked on a render that fails the guide on purpose).
@@ -495,7 +519,7 @@ describe("Styli judged on the upscaled size", () => {
     expect(output.compliance.failures).toEqual([]); expect(output.status).toBe("ok");
     // Its kept shadow shows to the right of the feet (the light from the left): seen pixels alone are off centre by over a pixel.
     const { data, info } = await sharp(output.jpeg!).raw().toBuffer({ resolveWithObject: true });
-    const seen = anchorBounds(data, info.width, info.height, [224, 224, 224], null)!, box = anchorBounds(data, info.width, info.height, [224, 224, 224], output.foregroundMask!)!;
+    const seen = anchorBounds(data, info.width, info.height, hexColor(CHANNELS.styli.background), null)!, box = anchorBounds(data, info.width, info.height, hexColor(CHANNELS.styli.background), output.foregroundMask!)!;
     expect(seen.x + seen.w).toBeGreaterThan(box.x + box.w + 1);
     expect(Math.abs((2 * seen.x + seen.w) / 2 - info.width / 2)).toBeGreaterThan(1);
     expect(Math.abs((2 * box.x + box.w) / 2 - info.width / 2)).toBeLessThanOrEqual(1);
@@ -531,7 +555,7 @@ describe("Styli judged on the upscaled size", () => {
     const { data, info } = await sharp(output.jpeg!).raw().toBuffer({ resolveWithObject: true }), mask = output.foregroundMask!;
     let x0 = info.width, x1 = -1;
     for (let i = 0; i < mask.length; i++) if (mask[i]! >= 128) { const x = i % info.width; x0 = Math.min(x0, x); x1 = Math.max(x1, x); }
-    const box = anchorBounds(data, info.width, info.height, [224, 224, 224], mask)!;
+    const box = anchorBounds(data, info.width, info.height, hexColor(CHANNELS.styli.background), mask)!;
     expect(box.x + box.w - 1 - x1 + (x0 - box.x)).toBeGreaterThan(1);
     expect(Math.abs((2 * box.x + box.w) / 2 - info.width / 2)).toBeLessThanOrEqual(1);
     expect(Math.abs(box.y + box.h - (info.height - 450))).toBeLessThanOrEqual(1);

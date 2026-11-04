@@ -143,7 +143,7 @@ describe("cut in source", () => {
     const { matte } = cutModel(), shot = shotGeometry(matte.alpha, matte.width, matte.height)!;
     const plan = planCanvas(CHANNELS.noon, shot.box, shot.source, { cut: shot.cut }), box = plan.productBox!;
     const patch = await sharp({ create: { width: box.w, height: box.h, channels: 3, background: "#284682" } }).png().toBuffer();
-    const jpeg = await sharp({ create: { width: plan.w, height: plan.h, channels: 3, background: "#E0E0E0" } }).composite([{ input: patch, left: box.x, top: box.y }]).withDensity(72).withIccProfile("srgb").jpeg({ quality: 90, chromaSubsampling: "4:4:4" }).toBuffer();
+    const jpeg = await sharp({ create: { width: plan.w, height: plan.h, channels: 3, background: "#F0F0F0" } }).composite([{ input: patch, left: box.x, top: box.y }]).withDensity(72).withIccProfile("srgb").jpeg({ quality: 90, chromaSubsampling: "4:4:4" }).toBuffer();
     const args = { jpeg, channel: "noon" as const, shotNumber: 1, identifier: "cut", n: 1, publicObjectPath: "cut_1.jpg" };
     expect((await checkOutput({ ...args, plan })).failures).toEqual([]);
     const uncut = { ...plan, cut: { top: false, bottom: false, left: false, right: false } };

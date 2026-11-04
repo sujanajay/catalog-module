@@ -13,6 +13,7 @@ export function plainFailure(code: string, channel = "this marketplace"): string
     styli_anchor: "the product does not sit on the Styli bottom guide",
     noon_wide: "a wide shot needs 5% side margins on Noon",
     background: `the background around the product is not the exact colour ${channel} requires`,
+    background_light: `the background colour set for ${channel} is darker than the light grey (or white image 1) the rules require`,
   };
   return rules[code] ?? `the file format or size is not what ${channel} accepts`;
 }

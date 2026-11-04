@@ -1,5 +1,6 @@
 // Tier 2 (PGlite + fakes): spec 15, processing resilience. A fake clock in deps.now, slow fake matting, render
 // and judge that advance it, a fake FIFO queue, and a guard that no simulated delivery passes the 900 s deadline.
+import { FIXTURE_CHANNEL_RULES } from "@catalog/core/catalog/channel-rules";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { and, eq } from "drizzle-orm";
 import type { Db } from "@catalog/core/db/client";
@@ -29,7 +30,7 @@ function world() {
   let t = T0;
   const queue: Task[] = [], names = new Set<string>();
   const log = vi.fn<CatalogDeps["log"]>();
-  const base = workerCatalogDeps(db);
+  const base = workerCatalogDeps(db,{channelRules:async()=>FIXTURE_CHANNEL_RULES});
   const enqueue = vi.fn(async (route: string, body: Record<string, unknown>, opts: { taskId?: string } = {}) => {
     if (route !== "/tasks/catalog/chunk") return "other";
     // Cloud Tasks refuses a name that exists or ran recently; enqueueTask treats that as success.

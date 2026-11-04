@@ -15,6 +15,7 @@ import {
   GATE1_NEW_RULES,
   GATE1_RULE_EDITS,
   GREY_240,
+  V1_GREY,
   mapCategoryScope,
   RULES_DATASET,
   seedChannelRules,
@@ -89,11 +90,11 @@ describe("acceptance: seed twice gives 555 rules, 30 conflicts, version 1 and ve
     ]);
   });
 
-  it("parity: the v1 channel registry equals the channels.ts constants, in the same order", () => {
+  it("parity: the v1 channel registry equals the channels.ts constants with the earlier grey, in the same order", () => {
     expect(v1.channels.map((c) => c.id).sort()).toEqual([...CHANNEL_IDS].sort());
     for (const id of CHANNEL_ORDER) {
       const record = v1.channels.find((c) => c.id === id)!;
-      expect(channelSpecOf(record)).toEqual(CHANNELS[id]);
+      expect(channelSpecOf(record)).toEqual({ ...CHANNELS[id], background: V1_GREY });
       expect(record).toMatchObject({ version: 1, rulesetVersion: 1, status: "active", markets: [], languages: [], pushMethod: null, fileKind: null, owner: null });
     }
   });

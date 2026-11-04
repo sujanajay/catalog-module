@@ -1,6 +1,7 @@
 // M6-F2-R2 (M6-S4): the previous release's task bodies (version 1: no taskVersion field, the shapes the code before
 // M6-S4 enqueues) run through the new handlers on PGlite. Each route reads them (never 400), and a body of this release
 // (version 2, with a field the handler does not know) gets the same answer as its version 1 twin.
+import { FIXTURE_CHANNEL_RULES } from "@catalog/core/catalog/channel-rules";
 import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import type { Db } from "@catalog/core/db/client";
@@ -28,7 +29,7 @@ afterAll(async () => { await close(); });
 
 function handlers(): Partial<Record<TaskRoute, (body: Record<string, unknown>) => Promise<HandleResult>>> {
   const enqueue = vi.fn(async () => "task") as unknown as CatalogDeps["enqueue"];
-  const catalog: CatalogDeps = { ...workerCatalogDeps(db), enqueue, log: () => undefined, sleep: async () => undefined, heartbeat: () => () => undefined };
+  const catalog: CatalogDeps = { ...workerCatalogDeps(db,{channelRules:async()=>FIXTURE_CHANNEL_RULES}), enqueue, log: () => undefined, sleep: async () => undefined, heartbeat: () => () => undefined };
   const ingest = { db, ingest: { storage: catalog.storage, fetch: (() => Promise.reject(new Error("offline"))) as unknown as typeof fetch, enqueue }, failStopped: async () => false };
   return {
     "/tasks/catalog/sweep": (body) => handleSweep({ db, enqueue, releaseLocks: async () => 0, draftExpiryDays: 30, enlargementOff: true } as unknown as Parameters<typeof handleSweep>[0], body),
