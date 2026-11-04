@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
-import { and, eq, inArray, ne } from "drizzle-orm";
+import { and, eq, inArray, ne, notInArray, sql } from "drizzle-orm";
 import type { Db } from "../../db/client";
-import { catalogBatches, catalogBatchProducts, catalogOutputs, catalogProductEvents, catalogProducts, catalogSourceImages } from "../../db/schema";
+import { catalogBatches, catalogBatchProducts, catalogChunks, catalogOutputs, catalogProductEvents, catalogProducts, catalogSourceImages } from "../../db/schema";
 import * as storage from "../../storage";
 import { channel, CHANNEL_RULES_VERSION } from "../channels";
 import { assertWithinProduct, productPrefix, publicObjectPath } from "../naming";
@@ -10,6 +10,8 @@ import type { ChannelId, EventKind } from "../types";
 import { verifyPublic } from "./verify";
 import type { ChannelRules } from "../channel-rules";
 import { frozenChannels } from "../holdout";
+import { autoDecideNote, autoDecideOf } from "../auto-decide";
+import { restoreUnpassedImprovements } from "../improve";
 import { otherTargetUpscalerId, upscaleConfigFromEnv, upscalerId, upscalerKey } from "../upscale";
 export { lockProducts };
 export type Output = typeof catalogOutputs.$inferSelect;
@@ -80,11 +82,16 @@ export function planPublish(input: { brandSlug: string; pathKey: string; isTest:
   const kept = selected.filter(o => input.sources.some(s => s.n === o.n) && !input.outputs.some(x => x.channel === o.channel && x.n === o.n));
   return { copies, deletes, kept };
 }
-/** Finalization releases completed products; attention products retain their batch lock. */
-export async function releaseLocks(db: Db, batchId: string): Promise<number> {
-  const completed = db.select({ id: catalogBatchProducts.productId }).from(catalogBatchProducts).where(and(eq(catalogBatchProducts.batchId, batchId), ne(catalogBatchProducts.change, "pending_attention")));
+/**
+ * Finalization releases completed products; attention products retain their batch lock. M1-F3-R7: an auto-decide batch
+ * (`everyProduct`) releases every product it locked, so no product of it ever blocks the next batch.
+ */
+export async function releaseLocks(db: Db, batchId: string, options: { everyProduct?: boolean } = {}): Promise<number> {
+  const completed = db.select({ id: catalogBatchProducts.productId }).from(catalogBatchProducts).where(options.everyProduct ? eq(catalogBatchProducts.batchId, batchId) : and(eq(catalogBatchProducts.batchId, batchId), ne(catalogBatchProducts.change, "pending_attention")));
   return (await db.update(catalogProducts).set({ lockBatchId: null }).where(and(eq(catalogProducts.lockBatchId,batchId), inArray(catalogProducts.id,completed))).returning({ id: catalogProducts.id })).length;
 }
+/** M1-F3-R2: the note of an auto-decide product with no deliverable photo at all (an exception, never a held product). */
+export const NO_DELIVERABLE_PHOTO = "No photo of this product could be delivered in this batch. Links from earlier batches stay as they were.";
 /** `batch` (brand and test flag, for the worker's cost ledger row) is present whenever the batch was read. */
 /**
  * `changed`: this call published a real content change (new, updated, reordered or removed shots). An unchanged
@@ -98,6 +105,9 @@ export async function publishProduct(deps: PublishDeps, batchId: string, product
     const [batch] = await tx.select().from(catalogBatches).where(eq(catalogBatches.id,batchId));
     if (!batch) return { outcome: "not_found" };
     const found = { brandSlug: batch.brandSlug, isTest: batch.isTest };
+    // M1-S4 (review P2-1): an improvement's re-made slot that did not pass goes back to its delivered provisional state
+    // before anything below reads the outputs, so it is neither dropped, failed nor copied over the delivered link.
+    if (autoDecideOf(batch.options)) await restoreUnpassedImprovements(tx, batchId, productId, deps.now());
     const where = and(eq(catalogBatchProducts.batchId,batchId),eq(catalogBatchProducts.productId,productId));
     // M3-F3-R3, M3 3.4 need 2: read again at publish time. A listing held by an experiment takes nothing from this batch
     // (no copy, no delete); its live image stays. An output planned before the hold began is left out with a note; one
@@ -142,8 +152,30 @@ export async function publishProduct(deps: PublishDeps, batchId: string, product
     // 07 section 1 and 5: a staged output counts as decided only after the QA judge passed it (scores,
     // or the information flag qa_sampled_out) or the operator chose "Use as is". A decision-triggered
     // publish that lands while the qa stage is still running must not copy unjudged images.
-    const unjudged = (o: Output) => o.status === "staged" && o.decision === null && o.qaScores === null && !o.flags.includes("qa_sampled_out");
-    if (missingPairs || pair?.flags.includes("duplicate_shot") || outputs.some(o => unjudged(o) || (!["staged","skipped","verified"].includes(o.status) && o.decision !== "use_as_is" && o.decision !== "remove" && o.decision !== "replaced"))) {
+    // M1-F3: an output an auto-decide rule delivered (`provisional`) is decided, judged or not (the judge was down or capped).
+    const unjudged = (o: Output) => o.status === "staged" && o.decision === null && o.qaScores === null && !o.flags.includes("qa_sampled_out") && !o.flags.includes("provisional");
+    const undecided = (o: Output) => !["staged","skipped","verified"].includes(o.status) && o.decision !== "use_as_is" && o.decision !== "remove" && o.decision !== "replaced";
+    // M1-F3-R7: an auto-decide batch never makes a product `pending_attention`. While any chunk holding the product is
+    // open, its publish waits: the chunk's own finish publishes it once the judge and the rules are through (a decision
+    // that lands mid-chunk would otherwise race triage). Once no chunk is open, an output left undecided or unjudged is
+    // dropped with its reason (never published unseen). A pipeline failure (`failed`) is not a rule decision: it stays
+    // failed and counted. A product that cannot be processed at all (two files with the same shot) is an exception.
+    const auto = autoDecideOf(batch.options) !== null;
+    if (auto) {
+      const [open] = await tx.select({ id: catalogChunks.id }).from(catalogChunks).where(and(eq(catalogChunks.batchId,batchId),sql`${catalogChunks.productIds} @> jsonb_build_array(${productId}::text)`,notInArray(catalogChunks.status,["done","failed"]))).limit(1);
+      if (open) return { outcome:"waiting", batch:found };
+      if (pair?.flags.includes("duplicate_shot")) {
+        await tx.update(catalogBatchProducts).set({ change:"failed", notes: pair.notes ?? null }).where(where);
+        return { outcome:"failed", batch:found };
+      }
+      const now = deps.now();
+      for (const o of outputs.filter(o => o.status !== "failed" && (undecided(o) || unjudged(o)))) {
+        const dropped = { status:"skipped" as const, flags:[...new Set([...o.flags,"auto_dropped" as const])], reason:autoDecideNote("drop", o.reason), updatedAt:now };
+        await tx.update(catalogOutputs).set(dropped).where(eq(catalogOutputs.id,o.id));
+        Object.assign(o, dropped);
+      }
+    }
+    if (!auto && (missingPairs || pair?.flags.includes("duplicate_shot") || outputs.some(o => unjudged(o) || undecided(o)))) {
       await tx.update(catalogBatchProducts).set({ change:"pending_attention", notes: [pair?.notes,missingPairs ? "Some photos could not be processed. Start this product again.":"",...outputs.filter(o => o.reason).map(outputNote)].filter(Boolean).join("; ") }).where(where);
       return { outcome:"held", batch:found };
     }
@@ -189,7 +221,9 @@ export async function publishProduct(deps: PublishDeps, batchId: string, product
     const previousSources = await tx.select().from(catalogSourceImages).where(and(eq(catalogSourceImages.productId,productId),eq(catalogSourceImages.isCurrent,true)));
     const reordered = sources.length === previousSources.length && sources.map(s=>s.sha256).sort().join("|") === previousSources.map(s=>s.sha256).sort().join("|") && sources.some(s=> previousSources.find(p=>p.n===s.n)?.sha256 !== s.sha256);
     const wasNew = !all.some(o=>o.batchId !== batchId && (o.publishedAt || o.isLive));
-    const change = failure ? "failed" : removed.length ? "shots_removed" : wasNew ? "new" : reordered ? "reordered" : changes.length ? "updated" : "unchanged";
+    // M1-F3-R2: in an auto-decide batch a product with nothing delivered on any channel is an exception, not a new product.
+    const nothingDelivered = auto && !failure && !changes.length && !plan.kept.length && !outputs.some(o => o.status === "verified");
+    const change = failure || nothingDelivered ? "failed" : removed.length ? "shots_removed" : wasNew ? "new" : reordered ? "reordered" : changes.length ? "updated" : "unchanged";
     const events: EventKind[] = [];
     if (wasNew && changes.length) events.push("created");
     if (changes.some(c=>c.oldGeneration)) events.push("overwritten");
@@ -212,10 +246,10 @@ export async function publishProduct(deps: PublishDeps, batchId: string, product
     }
     const unverified = [...landed.values()].filter(copy => !changes.some(change => change.channel === copy.channel && change.n === copy.n));
     const liveNotes = [changes.length ? `Verified live images: ${changes.map(c=>`${c.channel} ${c.n}`).join(", ")}.` : "", unverified.length ? `Public images replaced but unverified: ${unverified.map(c=>`${c.channel} img ${c.n} generation ${c.generation}`).join(", ")}.` : "", !changes.length && !landed.size ? "No replacements were verified." : ""].filter(Boolean).join(" ");
-    const notes = [failure ? `Some images could not be published: ${failure}. ${liveNotes}` : "", removed.length ? `photos ${removed.map(o=>o.n).join(" and ")} removed in batch ${batch.name}` : "",...outputs.filter(o=>o.decision === "use_as_is" && o.reason).map(outputNote),...outputs.filter(o=>o.status === "skipped" && o.reason).map(outputNote)].filter(Boolean).join("; ");
+    const notes = [nothingDelivered ? NO_DELIVERABLE_PHOTO : "", auto && missingPairs ? "Some photos could not be processed. Start this product again." : "", failure ? `Some images could not be published: ${failure}. ${liveNotes}` : "", removed.length ? `photos ${removed.map(o=>o.n).join(" and ")} removed in batch ${batch.name}` : "",...outputs.filter(o=>o.decision === "use_as_is" && o.reason).map(outputNote),...outputs.filter(o=>o.status === "skipped" && o.reason).map(outputNote),...outputs.filter(o=>o.flags.includes("provisional") && o.status !== "skipped" && o.reason).map(outputNote)].filter(Boolean).join("; ");
     await tx.update(catalogBatchProducts).set({change,notes}).where(where);
     await tx.update(catalogProducts).set({lastBatchId:batchId}).where(eq(catalogProducts.id,productId));
-    return { outcome: failure ? "failed" : "published", batch: found, changed: !failure && change !== "unchanged" };
+    return { outcome: failure || nothingDelivered ? "failed" : "published", batch: found, changed: !failure && !nothingDelivered && change !== "unchanged" };
   });
 }
 /** The upscalerId the worker's env selects (UPSCALE_MODEL on the service UPSCALE_URL names), or null when off. */
