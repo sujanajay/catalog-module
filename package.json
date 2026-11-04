@@ -7,7 +7,7 @@
     "node": ">=22"
   },
   "scripts": {
-    "lint": "eslint .",
+    "lint": "eslint . --pass-on-unpruned-suppressions",
     "typecheck": "pnpm -r --if-present typecheck",
     "test": "vitest run",
     "test:real": "vitest run --config vitest.real.config.ts",

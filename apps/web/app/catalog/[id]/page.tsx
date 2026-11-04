@@ -16,7 +16,7 @@ import { batchChunkSummary, batchStageCost } from "@/lib/catalog/ops";
 import { fullCostText } from "@/lib/catalog/ops-copy";
 import AutoRefresh from "@/components/AutoRefresh";
 import { ActionOnly } from "@/components/ViewerPreview";
-import { when } from "@/components/ui";
+import LocalTime from "@/components/LocalTime";
 import BatchBanner from "@/components/catalog/BatchBanner";
 import BatchKpis from "@/components/catalog/BatchKpis";
 import BatchTabs from "@/components/catalog/BatchTabs";
@@ -29,7 +29,7 @@ import CostLine from "@/components/catalog/CostLine";
 import RetryCollectButton from "@/components/catalog/RetryCollectButton";
 import { canRetryLinks } from "@/lib/catalog/copy";
 import { batchLinkFailures } from "@/lib/catalog/preview";
-import { batchSource, canCancel, canContinueSettingUp, collectingText, continueSettingUpHref, createdText, hasNotStarted, HOW_THIS_WORKS_DRAFT, notStartedText, NOTHING_PROCESSED, plural } from "@/lib/catalog/copy";
+import { batchSource, canCancel, canContinueSettingUp, collectingText, continueSettingUpHref, hasNotStarted, HOW_THIS_WORKS_DRAFT, notStartedText, NOTHING_PROCESSED, plural } from "@/lib/catalog/copy";
 import SkuMapModal from "@/components/catalog/SkuMapModal";
 import { EvalList } from "@/components/catalog/EvalLabelBar";
 
@@ -101,7 +101,7 @@ export default async function BatchPage({ params, searchParams }: { params: Prom
           <Link href="/catalog">← All batches</Link>
           <h1>{batch.name}</h1>
           <p className="lead">
-            <Link href={`/catalog/brands/${batch.brandSlug}`}>{batch.brandName}</Link>{channelLabels.length > 0 && ` · ${channelLabels.join(", ")}`} · {batch.finishedAt ? `finished ${when(batch.finishedAt)} by ${batch.createdBy}` : batch.startedAt ? `started ${when(batch.startedAt)} by ${batch.createdBy}` : createdText(when(batch.createdAt), batch.createdBy)}
+            <Link href={`/catalog/brands/${batch.brandSlug}`}>{batch.brandName}</Link>{channelLabels.length > 0 && ` · ${channelLabels.join(", ")}`} · {batch.finishedAt ? <>finished <LocalTime at={batch.finishedAt} /> by {batch.createdBy}</> : batch.startedAt ? <>started <LocalTime at={batch.startedAt} /> by {batch.createdBy}</> : <>created <LocalTime at={batch.createdAt} /> by {batch.createdBy}</>}
           </p>
         </div>
         {downloads}
