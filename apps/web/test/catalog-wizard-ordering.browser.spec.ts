@@ -161,3 +161,16 @@ test("a started batch opens its page once: the poll stops and does not push agai
   await page.waitForTimeout(7_500);
   expect(await pushes()).toEqual(["/catalog/batch"]);
 });
+
+test("M1 D14: the brand can be changed on a draft before Start; the channels follow the new brand", async ({ page }) => {
+  await setup(page, { previewReady: true });
+  const sent: unknown[] = [];
+  await page.route("**/brand", async route => { sent.push(route.request().postDataJSON()); await answer(route, { brandSlug: "uspa", brandName: "USPA", channels: ["amazon"], channelSource: "slice", collecting: true }); });
+  await paste(page, "https://example.test/first.jpg");
+  await expect(page.getByText("Brand:")).toContainText("Anta");
+  await page.getByRole("button", { name: "Change brand" }).click();
+  await page.getByLabel("Which brand is this?").selectOption("uspa");
+  await expect.poll(() => sent).toEqual([{ brandSlug: "uspa" }]);
+  await expect(page.getByText("Brand:")).toContainText("USPA");
+  await expect(page.getByRole("region", { name: "Where it goes" })).toContainText("Amazon");
+});
