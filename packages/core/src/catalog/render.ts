@@ -118,6 +118,11 @@ export interface ShotGeometry { box: BBox; source: Size; cut: CutEdges;
  * with it a white photo shipped white on a grey slot and a 240 photo shipped grey on Amazon image 1 (M3-S1, R228).
  */
 export const PASSTHROUGH_BORDER_TOLERANCE = 6;
+/**
+ * On a pure-white slot (Amazon image 1, any row whose colour is #FFFFFF) the border must read 254 or more: a pure-white
+ * JPEG decodes to 255, while a studio "white" of 249 to 253 is off-white, which Amazon's main-image rule refuses (R228).
+ */
+export const PASSTHROUGH_WHITE_TOLERANCE = 1;
 /** The model name of the pass-through and whole-photo mattes (matte-guard.ts). */
 export const PASSTHROUGH_MODEL = "passthrough";
 /**
@@ -650,8 +655,8 @@ export async function renderSource(input: RenderInput): Promise<RenderOutput> {
   if (floating.length) result.notes.push(blocked.length
     ? `${CUT_BAND_NOTE_START}${floating.join(" and ")}, but on ${spec.label} filling ${floating.length > 1 ? "those edges" : "that edge"} would cut through a logo or detail near the ${blocked.join(" and ")} edge, so a band shows there to keep it whole.`
     : `${CUT_BAND_NOTE_START}${floating.join(" and ")}, but on ${spec.label} the product cannot reach that edge of the image without trimming more of it, so a band shows there.`);
-  const rgbColor = hexColor(color);
-  const passthrough = p.sourceMime === "image/jpeg" && !p.alphaSource && !anyCut(cut) && (input.fitScale ?? 1) >= 1 && p.width === plan.w && p.height === plan.h && box.x >= plan.safeBox.x && box.y >= plan.safeBox.y && box.x + box.w <= plan.safeBox.x + plan.safeBox.w && box.y + box.h <= plan.safeBox.y + plan.safeBox.h && borderPixels(p.width, p.height).every(i => rgbColor.every((v, c) => Math.abs(p.rgb[i * 3 + c]! - v) <= PASSTHROUGH_BORDER_TOLERANCE));
+  const rgbColor = hexColor(color), borderTolerance = rgbColor.every(v => v === 255) ? PASSTHROUGH_WHITE_TOLERANCE : PASSTHROUGH_BORDER_TOLERANCE;
+  const passthrough = p.sourceMime === "image/jpeg" && !p.alphaSource && !anyCut(cut) && (input.fitScale ?? 1) >= 1 && p.width === plan.w && p.height === plan.h && box.x >= plan.safeBox.x && box.y >= plan.safeBox.y && box.x + box.w <= plan.safeBox.x + plan.safeBox.w && box.y + box.h <= plan.safeBox.y + plan.safeBox.h && borderPixels(p.width, p.height).every(i => rgbColor.every((v, c) => Math.abs(p.rgb[i * 3 + c]! - v) <= borderTolerance));
   let image: Buffer, shadowKind: ShadowKind = "none";
   const foregroundMask = Buffer.alloc(plan.w * plan.h);
   if (passthrough) {

@@ -169,6 +169,10 @@ describe("render and encoded compliance", () => {
     const onWhite = await renderSource({ ...grey, channel: "amazon", shotNumber: 1, productType: "apparel_flat" });
     expect(onWhite.flags).not.toContain("passthrough");
     expect(await corner(onWhite.jpeg!)).toEqual([255, 255, 255]);
+    // A studio "white" of 252 is not pure white: Amazon image 1 re-composes it onto 255 (R228); a grey slot still re-composes it.
+    const offWhite = await renderSource({ ...await ready(252), channel: "amazon", shotNumber: 1, productType: "apparel_flat" });
+    expect(offWhite.flags).not.toContain("passthrough");
+    expect(await corner(offWhite.jpeg!)).toEqual([255, 255, 255]);
   });
   // M3 D18: on the 240 grey a white product is inside BG_TOLERANCE and invisible to these pixel checks; a darker product is used.
   it("detects a shifted product in a required margin and a wrong Styli anchor", async () => {
