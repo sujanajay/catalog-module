@@ -130,7 +130,13 @@ async function main() {
   await app.prepare();
 
   let ready = false;
-  const server = createServer((req, res) => void route(req, res));
+  // keepAliveTimeout 0: the harness never closes an idle keep-alive socket itself; the client does.
+  // With Node's default (5 s) the server drops idle sockets, and Playwright's request context keeps
+  // reusing them (its agent has no idle timeout). This one process also runs next dev, PGlite and
+  // runIngest, so its event loop is often busy for seconds. When it is busy across the 5 s mark, a
+  // request the client already wrote into that socket is still unread when the overdue timer destroys
+  // it, and the client gets "read ECONNRESET" (the CI flake on POST /harness/queue).
+  const server = createServer({ keepAliveTimeout: 0 }, (req, res) => void route(req, res));
   async function route(req: IncomingMessage, res: ServerResponse) {
     const url = new URL(req.url ?? "/", ORIGIN);
     try {
