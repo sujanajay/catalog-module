@@ -1,6 +1,6 @@
 // Tier 2 (PGlite): 0013_graph_key_sync.sql applied over a database at 0012 where an admin already set one key mapping:
 // the conflict table appears, the seed fills the other mappings without overwriting the admin's row, the migration
-// passes the additive-only lint, and running the whole folder again changes nothing.
+// passes the additive-only lint, and executing 0013's statements again changes nothing.
 import { copyFile, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -53,7 +53,11 @@ describe(`${FILE}.sql`, () => {
     await db.execute(sql`insert into catalog_key_mappings (sku_column, channel, market, key_kind) values ('trendyol', 'trendyol', 'ae', 'barcode')`);
 
     await runMigrations(db, resolveMigrationsFolder());
-    await runMigrations(db, resolveMigrationsFolder());
+    // Run 0013's own statements a second time (the journal would skip the file): nothing changes, nothing fails.
+    const text = await readFile(path.join(resolveMigrationsFolder(), `${FILE}.sql`), "utf8");
+    await db.transaction(async (tx) => {
+      for (const statement of text.split("--> statement-breakpoint")) await tx.execute(sql.raw(statement));
+    });
 
     const mappings = await rows<{ sku_column: string; market: string | null }>(sql`select sku_column, market from catalog_key_mappings order by sku_column`);
     expect(mappings).toHaveLength(14);

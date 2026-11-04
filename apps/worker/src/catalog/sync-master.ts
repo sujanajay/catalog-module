@@ -47,8 +47,16 @@ export async function handleSyncMaster(deps: SyncMasterDeps, _body: Record<strin
 async function graphOutcome(db: Db, bq: BigQueryLike, env: NodeJS.ProcessEnv): Promise<string> {
   try {
     const g = await syncGraph(db, bq, env);
+    if (g.skipped) {
+      console.log(JSON.stringify({ severity: "WARNING", message: "catalog graph sync skipped: another sync holds the lock" }));
+      return "graph:locked";
+    }
+    if (g.productsError) {
+      console.error(JSON.stringify({ severity: "ERROR", message: "catalog graph written; linking products to options failed", ...g }));
+      return `graph:${g.options}/${g.listings};products:failed`;
+    }
     console.log(JSON.stringify({ severity: g.conflicts.open ? "WARNING" : "INFO", message: "catalog graph sync done", ...g }));
-    return g.skipped ? "graph:locked" : `graph:${g.options}/${g.listings}`;
+    return `graph:${g.options}/${g.listings}`;
   } catch (err) {
     console.error(JSON.stringify({ severity: "ERROR", message: "catalog graph sync failed; the previous graph is kept", error: err instanceof Error ? err.message : String(err) }));
     return err instanceof BigQuerySyncError ? "graph:bigquery_unavailable" : "graph:failed";

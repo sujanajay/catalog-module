@@ -1,4 +1,4 @@
-// M0-S2 graph sync (docs/program/requirements/M0-catalog-graph.md F1-R1 to F1-R6 and F1-R8; decisions D15 to D19):
+// M0-S2 graph sync (docs/program/requirements/M0-catalog-graph.md F1-R1 to F1-R6 and F1-R8; decisions D15 to D20):
 // builds options, channel listings, listing keys, the key conflict list and the style key from sku_map plus the
 // warehouse's sales and channel-report keys, then links tool products to their option. Runs after each master sync.
 //
@@ -25,17 +25,23 @@ import {
   type SkuChannelKey,
 } from "../db/schema";
 import { colourVocabulary, styleKeyFor, styleKeyMinConfidence } from "./style-key";
-import { DEFAULT_ORG_ID, type KeyKind, type KeySource, type Market, type OptionKeySource, type StyleKeySource } from "./types";
+import { DEFAULT_ORG_ID, KEY_KINDS, type KeyKind, type KeySource, type Market, type OptionKeySource, type StyleKeySource } from "./types";
 
 // ---------------------------------------------------------------------------
 // Warehouse reads (read only). Unqualified names resolve in BQ_PROJECT: the warehouse itself, or the image-links-agent
 // mirror that infra/bq-mirror.sh keeps (same dataset and table names, key columns only).
 // ---------------------------------------------------------------------------
 
-/** Per-SKU attributes the sku_map does not hold: the sheet's style code and the category and gender words. */
-export const GRAPH_MASTER_ATTRS_SQL = `SELECT product_code, description_1, category_name, gender
+/**
+ * Per-SKU attributes the sku_map does not hold: the sheet's style code and the category and gender words. One row per
+ * code (D20): about 257 softline codes appear twice in master_sl, one row with the style code and one blank, so the row
+ * with a style code wins, then the latest sheet row (the one the master sync keeps).
+ */
+export const GRAPH_MASTER_ATTRS_SQL = `SELECT TRIM(product_code) AS product_code, description_1, category_name, gender
 FROM raw_gcc_dimensions.master_sl
-WHERE IFNULL(TRIM(product_code), '') != ''`;
+WHERE IFNULL(TRIM(product_code), '') != ''
+QUALIFY ROW_NUMBER() OVER (PARTITION BY TRIM(product_code)
+  ORDER BY IF(IFNULL(TRIM(description_1), '') = '', 1, 0), source_row_number DESC) = 1`;
 
 /** The marketing option id of each SKU (F1-R2, second choice). sku_key is the upper-case product code. */
 export const GRAPH_SKU_OPTION_SQL = `SELECT sku_key, option_id
@@ -49,11 +55,18 @@ export const SALES_CHANNELS: Record<string, ChannelId> = {
 };
 const SALES_MARKETS: Record<string, Market> = { UAE: "ae", KSA: "sa" };
 
-/** Every channel SKU and style id ever seen on a sale row (F1-R4). Key columns only: no order, customer or money field. */
+/**
+ * How far back sales keys are read (D20): long enough to cover the 12-week join and M4's pre-period, short enough that a
+ * key the channel moved to another SKU stops being proposed for the old one and its conflict resolves.
+ */
+export const SALES_KEY_WINDOW_DAYS = 182;
+
+/** Channel SKUs and style ids seen on sale rows in the window (F1-R4). Key columns only: no order, customer or money field. */
 export const GRAPH_SALES_KEYS_SQL = `SELECT DISTINCT mapped_opptra_sku, channel, country, channel_sku, style_id
 FROM fact_gcc.unified_sales_tertiary_v2
 WHERE channel IN (${Object.keys(SALES_CHANNELS).map((c) => `'${c}'`).join(", ")})
   AND country IN ('UAE', 'KSA')
+  AND ordered_date >= DATE_SUB(CURRENT_DATE(), INTERVAL ${SALES_KEY_WINDOW_DAYS} DAY)
   AND IFNULL(TRIM(mapped_opptra_sku), '') != ''`;
 
 /** The kind of a sales row's channel_sku per channel (checked against the master on 2026-11-04, decision D16). */
@@ -158,6 +171,8 @@ export type GraphPlan = {
   skuOption: Map<string, string>;
   unresolvedSalesRows: number;
   unresolvedReportRows: number;
+  /** Sales and report rows of SKUs that left the master: they propose no key (D20). */
+  departedSkuRows: number;
 };
 
 export const optionRef = (brandSlug: string, optionKey: string) => `${brandSlug}\u0000${optionKey}`;
@@ -177,14 +192,23 @@ const SOURCE_RANK: Record<KeySource, number> = { master: 0, channel_report: 1, s
 /** Sources the sync owns; keys from any other source (scrape, manual) are never changed by it. */
 export const SYNC_KEY_SOURCES: readonly KeySource[] = ["master", "channel_report", "sales"];
 
-/** Builds the whole graph in memory from the inputs. Pure and deterministic. */
+/**
+ * Builds the whole graph in memory from the inputs. Pure and deterministic: SKUs are taken in code order, so the input
+ * order never changes an option's style key or attributes.
+ *
+ * Only SKUs in the current master (`attrs`) propose keys (D20). A SKU that left the master stays in sku_map with its old
+ * channel ids; if it still proposed them, a key the channel moved to another SKU would be a conflict forever. Its
+ * option is kept, out of the master, and the keys written for it earlier stay until another listing claims them.
+ */
 export function planGraph(input: GraphInputs): GraphPlan {
   const vocab = colourVocabulary(input.skus.map((s) => s.color));
   const options = new Map<string, PlannedOption>();
   const skuOption = new Map<string, string>();
+  const skus = [...input.skus].sort((a, b) => (a.opptraSku < b.opptraSku ? -1 : a.opptraSku > b.opptraSku ? 1 : 0));
+  const current = (sku: string) => input.attrs.has(sku);
 
   // Options (F1-R1, F1-R2) and the style key (F1-R8).
-  for (const s of input.skus) {
+  for (const s of skus) {
     const master = s.optionIdStyleColor ? normalizeSpaces(s.optionIdStyleColor) : "";
     const marketing = input.skuOptions.get(s.opptraSku.toUpperCase());
     const [optionKey, keySource]: [string, OptionKeySource] = master
@@ -244,7 +268,8 @@ export function planGraph(input: GraphInputs): GraphPlan {
 
   // Master keys (F1-R3). child_zsku-like mappings (channel null) wait until every listing of the SKU is known.
   const everyListing = input.mappings.filter((m) => m.channel === null);
-  for (const s of input.skus) {
+  for (const s of skus) {
+    if (!current(s.opptraSku)) continue;
     const optRef = skuOption.get(s.opptraSku)!;
     for (const m of input.mappings) {
       if (m.channel === null) continue;
@@ -255,9 +280,13 @@ export function planGraph(input: GraphInputs): GraphPlan {
     }
   }
 
-  // Sales and channel-report keys (F1-R4). A market-specific key uses the option's listing in that market, else its
-  // one-key-for-both listing (ae_sa), else a new listing in that market.
+  // Sales and channel-report keys (F1-R4). On a channel whose master keys are all one-key-for-both (ae_sa: Styli,
+  // Centrepoint, Shein) the key always goes on the ae_sa listing (D16). Elsewhere a market-specific key uses the option's
+  // listing in that market, else its ae_sa listing, else a new listing in that market.
+  const bothMarkets = new Set<ChannelId>();
+  for (const m of input.mappings) if (m.channel && input.mappings.every((x) => x.channel !== m.channel || x.market === "ae_sa")) bothMarkets.add(m.channel);
   const listingFor = (optRef: string, channel: ChannelId, market: Market): string => {
+    if (bothMarkets.has(channel)) return addListing(optRef, channel, "ae_sa");
     const exact = listingRef(optRef, channel, market);
     if (listings.has(exact)) return exact;
     const both = listingRef(optRef, channel, "ae_sa");
@@ -265,9 +294,11 @@ export function planGraph(input: GraphInputs): GraphPlan {
     return addListing(optRef, channel, market);
   };
   let unresolvedSalesRows = 0;
+  let departedSkuRows = 0;
   for (const r of input.sales) {
     const optRef = skuOption.get(r.opptraSku);
     if (!optRef) { unresolvedSalesRows++; continue; }
+    if (!current(r.opptraSku)) { departedSkuRows++; continue; }
     const lRef = listingFor(optRef, r.channel, r.market);
     const v = keyValueOf(r.channelSku);
     if (v) addKey(r.opptraSku, lRef, SALES_KEY_KINDS[r.channel], v, "sales");
@@ -278,6 +309,7 @@ export function planGraph(input: GraphInputs): GraphPlan {
   for (const r of input.reports) {
     const optRef = skuOption.get(r.opptraSku);
     if (!optRef) { unresolvedReportRows++; continue; }
+    if (!current(r.opptraSku)) { departedSkuRows++; continue; }
     const targets = r.market
       ? [listingFor(optRef, r.channel, r.market)]
       : [...(optionListings.get(optRef) ?? [])].filter((ref) => listings.get(ref)!.channel === r.channel);
@@ -287,14 +319,15 @@ export function planGraph(input: GraphInputs): GraphPlan {
 
   // Keys that go on every listing of the SKU (child_zsku).
   for (const m of everyListing) {
-    for (const s of input.skus) {
+    for (const s of skus) {
+      if (!current(s.opptraSku)) continue;
       const v = keyValueOf(s.channelIds[m.skuColumn]);
       if (!v) continue;
       for (const lRef of [...(skuListings.get(s.opptraSku) ?? [])].sort()) addKey(s.opptraSku, lRef, m.keyKind, v, "master");
     }
   }
 
-  return { options, listings, keys, skuOption, unresolvedSalesRows, unresolvedReportRows };
+  return { options, listings, keys, skuOption, unresolvedSalesRows, unresolvedReportRows, departedSkuRows };
 }
 
 function normalizeSpaces(s: string): string {
@@ -355,6 +388,9 @@ export type GraphSyncResult = {
   products: { linked: number; unresolved: number };
   unresolvedSalesRows: number;
   unresolvedReportRows: number;
+  departedSkuRows: number;
+  /** Set when the graph was written but linking products to options failed after the commit (F1-R6). */
+  productsError?: string;
 };
 
 function str(v: unknown): string | null {
@@ -375,7 +411,7 @@ async function readBq(bq: BigQueryLike, query: string, location: string, what: s
 
 const isChannel = (c: string | null): c is ChannelId => c !== null && Object.values(SALES_CHANNELS).includes(c as ChannelId);
 const isMarket = (m: string | null): m is Market => m === "ae" || m === "sa" || m === "ae_sa";
-const KEY_KIND_SET = new Set<string>(["zsku", "child_zsku", "partner_sku", "barcode", "asin", "seller_sku", "style_id"]);
+const KEY_KIND_SET = new Set<string>(KEY_KINDS);
 
 /** Reads every warehouse input. Throws BigQuerySyncError before anything is written. */
 export async function readWarehouseKeys(bq: BigQueryLike, env: NodeJS.ProcessEnv = process.env) {
@@ -392,7 +428,11 @@ export async function readWarehouseKeys(bq: BigQueryLike, env: NodeJS.ProcessEnv
   const attrs = new Map<string, MasterAttrs>();
   for (const r of attrRows) {
     const code = str(r.product_code);
-    if (code) attrs.set(code, { styleCode: str(r.description_1), productType: str(r.category_name), audience: str(r.gender) });
+    if (!code) continue;
+    const row = { styleCode: str(r.description_1), productType: str(r.category_name), audience: str(r.gender) };
+    // The SQL already keeps one row per code; this keeps the same rule if a source returns two (D20).
+    const had = attrs.get(code);
+    if (!had || (!had.styleCode && row.styleCode)) attrs.set(code, row);
   }
   const skuOptions = new Map<string, string>();
   for (const r of optionRows) {
@@ -432,7 +472,8 @@ export async function syncGraph(db: Db, bq: BigQueryLike, env: NodeJS.ProcessEnv
   const skuRows = await db
     .select({ opptraSku: skuMap.opptraSku, brandSlug: skuMap.brandSlug, optionIdStyleColor: skuMap.optionIdStyleColor, color: skuMap.color, channelIds: skuMap.channelIds })
     .from(skuMap)
-    .where(eq(skuMap.line, "softline"));
+    .where(eq(skuMap.line, "softline"))
+    .orderBy(skuMap.opptraSku);
   const mappingRows = await db
     .select({ skuColumn: catalogKeyMappings.skuColumn, channel: catalogKeyMappings.channel, market: catalogKeyMappings.market, keyKind: catalogKeyMappings.keyKind })
     .from(catalogKeyMappings)
@@ -561,15 +602,21 @@ export async function syncGraph(db: Db, bq: BigQueryLike, env: NodeJS.ProcessEnv
     };
   });
 
+  const rowCounts = { unresolvedSalesRows: plan.unresolvedSalesRows, unresolvedReportRows: plan.unresolvedReportRows, departedSkuRows: plan.departedSkuRows };
   if (!result) {
     return {
       skipped: "locked", options: 0, optionsNotInMaster: 0, optionsWithoutSkus: 0, listings: 0,
       keys: { inserted: 0, moved: 0, unchanged: 0, removedForConflict: 0 }, conflicts: { open: 0, resolved: 0 },
-      products: { linked: 0, unresolved: 0 }, unresolvedSalesRows: plan.unresolvedSalesRows, unresolvedReportRows: plan.unresolvedReportRows,
+      products: { linked: 0, unresolved: 0 }, ...rowCounts,
     };
   }
-  const products = await linkProducts(db, plan, result.optionIds);
-  return { ...result.summary, products, unresolvedSalesRows: plan.unresolvedSalesRows, unresolvedReportRows: plan.unresolvedReportRows };
+  // The graph is committed by now: a product-link failure is reported as such, not as a failed graph sync.
+  try {
+    const products = await linkProducts(db, plan, result.optionIds);
+    return { ...result.summary, products, ...rowCounts };
+  } catch (err) {
+    return { ...result.summary, products: { linked: 0, unresolved: 0 }, productsError: err instanceof Error ? err.message : String(err), ...rowCounts };
+  }
 }
 
 function sqlUuidArray(ids: string[]): SQL {

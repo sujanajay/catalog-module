@@ -133,6 +133,39 @@ describe.skipIf(!REAL)("M0-S2 graph sync against the real warehouse (F1 acceptan
     expect(r!.without_listing_key).toBe(0);
   });
 
+  test("1c. without the sales-derived keys, master and channel-report keys alone match the sale rows, on the sale's own option", async () => {
+    // Test 1 can pass on sales keys alone (F1-R4 adds every sale's channel SKU). This one counts only keys the master
+    // or a channel report gave, and checks the matched listing belongs to an option of the row's own SKU.
+    const [sales] = await bq.query({ query: SALE_ROWS_SQL, location: "asia-south1" });
+    const keys = await rows<{ channel: string; market: string; key_value: string; option_id: string; source: string }>(sql`
+      select k.channel, k.market, k.key_value, l.option_id, k.source
+      from catalog_listing_keys k join catalog_channel_listings l on l.id = k.listing_id
+      where k.source in ('master', 'channel_report')`);
+    const byKey = new Map(keys.map((k) => [`${k.channel}|${k.market}|${k.key_value.toUpperCase()}`, k.option_id]));
+    const skuOptions = new Map<string, Set<string>>();
+    for (const r of await rows<{ s: string; option_id: string }>(sql`
+      select distinct upper(k.opptra_sku) as s, l.option_id from catalog_listing_keys k
+      join catalog_channel_listings l on l.id = k.listing_id where k.opptra_sku is not null`)) {
+      if (!skuOptions.has(r.s)) skuOptions.set(r.s, new Set());
+      skuOptions.get(r.s)!.add(r.option_id);
+    }
+    const market: Record<string, string> = { UAE: "ae", KSA: "sa" };
+    let total = 0;
+    let matched = 0;
+    let wrongOption = 0;
+    for (const r of sales) {
+      const n = Number(r.n);
+      total += n;
+      const option = byKey.get(`${String(r.channel).toLowerCase()}|${market[String(r.country)]}|${String(r.channel_sku ?? "").trim().toUpperCase()}`);
+      if (!option) continue;
+      matched += n;
+      if (!skuOptions.get(String(r.mapped_opptra_sku ?? "").toUpperCase())?.has(option)) wrongOption += n;
+    }
+    console.log(JSON.stringify({ test: "F1-1c", total, matchedByMasterOrReport: matched, share: matched / total, wrongOption }));
+    expect(matched / total).toBeGreaterThanOrEqual(0.97);
+    expect(wrongOption / total).toBeLessThan(0.001);
+  });
+
   test("4. every softline option has a style key; U.S. Polo groups at about 1.9 options per style; unsure options are their own cluster", async () => {
     const [all] = await rows<{ options: number; no_style: number; under_bar_not_own: number }>(sql`
       select count(*)::int as options,
@@ -166,13 +199,18 @@ describe.skipIf(!REAL)("M0-S2 graph sync against the real warehouse (F1 acceptan
     expect(sellingRatio).toBeLessThanOrEqual(2.5);
   });
 
-  test("a second run writes nothing new (idempotent) and stays under the 5-minute budget", async () => {
+  test("a second run writes nothing new and keeps every style key and attribute (idempotent; timing logged)", async () => {
+    const snapshot = sql`select id, option_key, style_key, style_key_source, style_key_confidence, product_type, audience, in_master
+      from catalog_options order by id`;
+    const before = await rows(snapshot);
     const t0 = Date.now();
     const again = await syncGraph(db, bq, process.env);
     const ms = Date.now() - t0;
     console.log(JSON.stringify({ test: "rerun", again, ms, firstRunMs: graphMs }));
     expect(again.keys.inserted).toBe(0);
     expect(again.keys.moved).toBe(0);
+    expect(again.keys.removedForConflict).toBe(0);
     expect(graph.options).toBe(again.options);
+    expect(await rows(snapshot)).toEqual(before);
   });
 });

@@ -27,6 +27,7 @@ import {
   mergeKeys,
   optionRef,
   planGraph,
+  readWarehouseKeys,
   syncGraph,
   type GraphInputs,
   type GraphMapping,
@@ -42,11 +43,13 @@ const MAPPINGS: GraphMapping[] = [
   { skuColumn: "styli_sku", channel: "styli", market: "ae_sa", keyKind: "child_zsku" },
 ];
 
+/** Planner inputs; unless a test says otherwise, every SKU given is in the current master (attrs). */
 function inputs(over: Partial<GraphInputs> = {}): GraphInputs {
+  const skus = over.skus ?? [];
   return {
-    skus: [],
+    skus,
     mappings: MAPPINGS,
-    attrs: new Map(),
+    attrs: new Map(skus.map((s) => [s.opptraSku, { styleCode: null, productType: null, audience: null }])),
     skuOptions: new Map(),
     sales: [],
     reports: [],
@@ -140,6 +143,68 @@ describe("planGraph", () => {
   });
 });
 
+describe("determinism and departed SKUs (review P1-1, P1-2, P2-1)", () => {
+  const sku = (opptraSku: string, optionIdStyleColor: string | null, channelIds: SkuChannelIds, color: string | null = "Navy") => ({
+    opptraSku, brandSlug: "fc", optionIdStyleColor, color, channelIds,
+  });
+  const rowsBq = (attrs: Record<string, unknown>[]): BigQueryLike => ({
+    query: async ({ query }) => [query === GRAPH_MASTER_ATTRS_SQL ? attrs : [], {}],
+  });
+
+  it("keeps the master row with a style code when a code appears twice, whatever the row order (P1-1)", async () => {
+    const coded = { product_code: "559B3_NAVY_OD_S", description_1: "559B3", category_name: "Shirt", gender: "Male" };
+    const blank = { product_code: "559B3_NAVY_OD_S", description_1: null, category_name: null, gender: null };
+    const a = await readWarehouseKeys(rowsBq([coded, blank]), {});
+    const b = await readWarehouseKeys(rowsBq([blank, coded]), {});
+    expect(a.attrs.get("559B3_NAVY_OD_S")).toEqual({ styleCode: "559B3", productType: "Shirt", audience: "Male" });
+    expect(b.attrs.get("559B3_NAVY_OD_S")).toEqual(a.attrs.get("559B3_NAVY_OD_S"));
+    // The warehouse read itself picks one row per code: the coded one, then the latest sheet row.
+    expect(GRAPH_MASTER_ATTRS_SQL).toMatch(/QUALIFY ROW_NUMBER\(\) OVER \(PARTITION BY TRIM\(product_code\)/);
+  });
+
+  it("plans the same options and style keys whatever the SKU order (P1-1)", () => {
+    const skus = [
+      sku("X_NAVY_M", "X Navy OD", {}), sku("X_NAVY_L", "X Navy OD", {}), sku("Y_RED_M", null, {}, "Red"),
+    ];
+    const attrs = new Map([
+      ["X_NAVY_M", { styleCode: null, productType: "Polo", audience: null }],
+      ["X_NAVY_L", { styleCode: "X", productType: "Shirt", audience: "Male" }],
+      ["Y_RED_M", { styleCode: null, productType: null, audience: null }],
+    ]);
+    const view = (p: ReturnType<typeof planGraph>) => JSON.stringify([...p.options.values()].sort((x, y) => x.ref.localeCompare(y.ref)));
+    expect(view(planGraph(inputs({ skus, attrs })))).toBe(view(planGraph(inputs({ skus: [...skus].reverse(), attrs }))));
+  });
+
+  it("gives a moved key to the SKU now in the master, not to one that left it (P1-2)", () => {
+    const plan = planGraph(inputs({
+      // A left the master but stays in sku_map with its old Namshi key; B holds the key now.
+      skus: [sku("A_NAVY_M", "A Navy OD", { namshi_ae: "ZK", child_zsku: "ZK-1" }), sku("B_NAVY_M", "B Navy OD", { namshi_ae: "ZK", child_zsku: "ZK-1" })],
+      attrs: new Map([["B_NAVY_M", { styleCode: "B", productType: null, audience: null }]]),
+      sales: [{ opptraSku: "A_NAVY_M", channel: "namshi", market: "ae", channelSku: "ZK-1", styleId: null }],
+    }));
+    const merged = mergeKeys(plan.keys);
+    for (const k of [{ keyKind: "zsku", keyValue: "ZK" }, { keyKind: "child_zsku", keyValue: "ZK-1" }]) {
+      const m = merged.get(keyRef({ channel: "namshi", market: "ae", ...k }))!;
+      expect([...m.candidates.keys()], k.keyValue).toEqual([listingRef(optionRef("fc", "B Navy OD"), "namshi", "ae")]);
+    }
+    // The departed SKU keeps its option (out of the master) but proposes no key.
+    expect(plan.options.get(optionRef("fc", "A Navy OD"))!.inMaster).toBe(false);
+  });
+
+  it("reads sales keys from a bounded window, not the whole history (P1-2)", () => {
+    expect(GRAPH_SALES_KEYS_SQL).toMatch(/ordered_date >= DATE_SUB\(CURRENT_DATE\(\), INTERVAL \d+ DAY\)/);
+  });
+
+  it("puts a sales key of a one-key-for-both channel on the ae_sa listing even without a master key (P2-1)", () => {
+    const plan = planGraph(inputs({
+      skus: [sku("C_NAVY_M", "C Navy OD", {})],
+      attrs: new Map([["C_NAVY_M", { styleCode: "C", productType: null, audience: null }]]),
+      sales: [{ opptraSku: "C_NAVY_M", channel: "styli", market: "sa", channelSku: "70-7002", styleId: null }],
+    }));
+    expect([...plan.listings.values()].map((l) => `${l.channel}/${l.market}`)).toEqual(["styli/ae_sa"]);
+  });
+});
+
 // ---------------------------------------------------------------------------
 // syncGraph against PGlite (or real Postgres) and a fake BigQuery
 // ---------------------------------------------------------------------------
@@ -186,7 +251,14 @@ describe("key mapping seed (0013, D10)", () => {
       "amazon", "amazon_uae_ksa_asin", "centerpoint_ae_ksa", "child_zsku", "namshi_ae", "namshi_sa", "noon_ae", "noon_sa",
       "shein", "sixth_street_ae", "sixth_street_sa", "styli_ae_ksa", "styli_sku", "trendyol",
     ]);
-    expect(rows.find((r) => r.skuColumn === "child_zsku")).toMatchObject({ channel: null, market: null, keyKind: "child_zsku" });
+    // The exact D16 tuples, so a wrong channel, market or kind in the seed fails here.
+    expect(Object.fromEntries(rows.map((r) => [r.skuColumn, `${r.channel}/${r.market}/${r.keyKind}`]))).toEqual({
+      namshi_ae: "namshi/ae/zsku", namshi_sa: "namshi/sa/zsku", child_zsku: "null/null/child_zsku",
+      noon_ae: "noon/ae/partner_sku", noon_sa: "noon/sa/partner_sku", trendyol: "trendyol/null/barcode",
+      centerpoint_ae_ksa: "centrepoint/ae_sa/child_zsku", sixth_street_ae: "sixthstreet/ae/partner_sku",
+      sixth_street_sa: "sixthstreet/sa/partner_sku", styli_ae_ksa: "styli/ae_sa/zsku", styli_sku: "styli/ae_sa/child_zsku",
+      amazon: "amazon/null/asin", amazon_uae_ksa_asin: "amazon/null/asin", shein: "shein/ae_sa/zsku",
+    });
   });
 });
 
@@ -279,10 +351,13 @@ describe("syncGraph", () => {
     await db.insert(catalogListingKeys).values({ listingId: l!.id, channel: "namshi", market: "sa", keyKind: "child_zsku", keyValue: "ZHAND", source: "manual" });
     await putSku("UT_A_NAVY_M", "UT-A Navy OD", { namshi_ae: "ZUTB", child_zsku: "ZUTB-1" });
     fake.sales.push({ mapped_opptra_sku: "UT_A_NAVY_M", channel: "Namshi", country: "KSA", channel_sku: "ZHAND", style_id: null });
-    const r = await syncGraph(db, fakeBq(fake), {});
-    expect(r.conflicts.open).toBe(1);
-    expect((await keysOf("ZHAND")).map((k) => [k.listingId, k.source])).toEqual([[l!.id, "manual"]]);
-    fake.sales.pop();
+    try {
+      const r = await syncGraph(db, fakeBq(fake), {});
+      expect(r.conflicts.open).toBe(1);
+      expect((await keysOf("ZHAND")).map((k) => [k.listingId, k.source])).toEqual([[l!.id, "manual"]]);
+    } finally {
+      fake.sales.pop();
+    }
   });
 
   it("keeps an option whose SKUs left the master, out of the master (F1-R1)", async () => {
@@ -303,5 +378,53 @@ describe("syncGraph", () => {
 
   it("refuses an empty master instead of marking every option gone", async () => {
     await expect(syncGraph(db, fakeBq({ attrs: [], options: [], sales: [], reports: [] }), {})).rejects.toThrow(/no rows/);
+  });
+
+  it("moves a key from a SKU that left the master to the SKU that holds it now, with no conflict (P1-2)", async () => {
+    await putSku("UT_MA_RED_M", "UT-MA Red OD", { namshi_ae: "ZMOVE" });
+    fake.attrs.push({ product_code: "UT_MA_RED_M", description_1: "UT-MA" });
+    await syncGraph(db, fakeBq(fake), {});
+    const [a] = await db.select().from(catalogOptions).where(eq(catalogOptions.optionKey, "UT-MA Red OD"));
+    const onA = await keysOf("ZMOVE");
+    expect(onA).toHaveLength(1);
+
+    // A leaves the master (its sku_map row stays, with the old key); B gets the key.
+    await putSku("UT_MB_RED_M", "UT-MB Red OD", { namshi_ae: "ZMOVE" });
+    fake.attrs = fake.attrs.filter((x) => x.product_code !== "UT_MA_RED_M");
+    fake.attrs.push({ product_code: "UT_MB_RED_M", description_1: "UT-MB" });
+    const r = await syncGraph(db, fakeBq(fake), {});
+    expect(r.keys.moved).toBeGreaterThanOrEqual(1);
+    const [b] = await db.select().from(catalogOptions).where(eq(catalogOptions.optionKey, "UT-MB Red OD"));
+    const [moved] = await keysOf("ZMOVE");
+    const [listing] = await db.select().from(catalogChannelListings).where(eq(catalogChannelListings.id, moved!.listingId));
+    expect(listing!.optionId).toBe(b!.id);
+    expect(moved!.id).toBe(onA[0]!.id);
+    expect(await db.select().from(catalogKeyConflicts).where(and(eq(catalogKeyConflicts.keyValue, "ZMOVE")))).toEqual([]);
+    const [aAfter] = await db.select().from(catalogOptions).where(eq(catalogOptions.id, a!.id));
+    expect(aAfter!.inMaster).toBe(false);
+  });
+
+  it("adds channel-report keys, a market-less Noon key on the option's Noon listings (F1-R4)", async () => {
+    fake.reports = [
+      { opptra_sku: "UT_A_BLACK_M", channel: "noon", market: null, key_kind: "partner_sku", key_value: "NOON-PARTNER-1" },
+      { opptra_sku: "UT_A_BLACK_M", channel: "amazon", market: "ae", key_kind: "seller_sku", key_value: "AMZ-SELLER-1" },
+      { opptra_sku: "UT_A_BLACK_M", channel: "noon", market: null, key_kind: "not_a_kind", key_value: "X" },
+    ];
+    try {
+      await syncGraph(db, fakeBq(fake), {});
+      expect((await keysOf("NOON-PARTNER-1")).map((k) => [k.channel, k.market, k.source])).toEqual([["noon", "ae", "channel_report"]]);
+      expect((await keysOf("AMZ-SELLER-1")).map((k) => [k.channel, k.market, k.keyKind])).toEqual([["amazon", "ae", "seller_sku"]]);
+      expect(await keysOf("X")).toEqual([]);
+    } finally {
+      fake.reports = [];
+    }
+  });
+
+  it("leaves a product unlinked when it names two options, and counts it (F1-R6)", async () => {
+    const [p] = await db.insert(catalogProducts).values({ brandSlug: "uspa_t", identifier: "MIXED", productKey: "mixed", pathKey: "MIXED", opptraSkuIds: ["UT_A_BLACK_M", "UT_A_NAVY_M"] }).returning();
+    const r = await syncGraph(db, fakeBq(fake), {});
+    expect(r.products.unresolved).toBeGreaterThanOrEqual(1);
+    const [after] = await db.select().from(catalogProducts).where(eq(catalogProducts.id, p!.id));
+    expect(after!.optionId).toBeNull();
   });
 });
