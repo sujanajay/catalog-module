@@ -97,7 +97,7 @@ describe("the auto-start task", () => {
     expect(d.enqueue).toHaveBeenCalledWith(AUTO_START_ROUTE, { batchId: b.id, at: next, busyRetries: 1, busySince: NOW.toISOString() }, expect.objectContaining({ delaySec: AUTO_START_BUSY_RETRY_SEC }));
   });
 
-  it("R7 (M1 D13): the busy retry backs off from 60 s, doubling to 15 min, and a wait past an hour is logged", async () => {
+  it("R7 (M1 D14): the busy retry backs off from 60 s, doubling to 15 min, and a wait past an hour is logged", async () => {
     expect([0, 1, 2, 3, 4, 5, 30].map(busyRetryDelaySec)).toEqual([60, 120, 240, 480, 900, 900, 900]);
     expect(AUTO_START_BUSY_MAX_SEC).toBe(900);
     const b = await draft({ autoStart: true });

@@ -27,7 +27,7 @@ export async function inferIntake(value: unknown) {
 }
 
 /**
- * M1-F2 "Human in the loop" (M1 D14): change the brand of a draft before it starts. The channels become the new
+ * M1-F2 "Human in the loop" (M1 D15): change the brand of a draft before it starts. The channels become the new
  * brand's defaults and the countdown stops; the files are collected and grouped again under the new brand (products
  * this draft made under the old brand are removed by the regroup), and a new countdown runs when that ends. Refused
  * while the files are collected (assertDraft), and when it would make a test batch a real one or the other way round.

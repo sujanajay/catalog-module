@@ -12,7 +12,7 @@ import { CHANNEL_IDS, type ChannelId } from "./types";
 /** M1-F2-R3: the share of resolved identifiers one brand must hold (admin setting in M12 once it exists). */
 export const BRAND_INFERENCE_SHARE = 0.9;
 /**
- * M1 D14: the share of all distinct identifiers that must resolve at all before a brand is inferred. Below it the
+ * M1 D15: the share of all distinct identifiers that must resolve at all before a brand is inferred. Below it the
  * brand is asked (an explicit choice), so a drop of hundreds of unknown names with one known name never starts by
  * itself on a guessed brand.
  */

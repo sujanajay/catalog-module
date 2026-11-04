@@ -13,7 +13,7 @@ import { log } from "../log";
 export const AUTO_START_DELAY_SEC = 10;
 /**
  * M1-F2-R7: a batch whose products another running batch holds tries again after this, doubling each time up to
- * AUTO_START_BUSY_MAX_SEC, until the lock frees (M1 D13). The cap keeps a long wait to about 4 tasks an hour.
+ * AUTO_START_BUSY_MAX_SEC, until the lock frees (M1 D14). The cap keeps a long wait to about 4 tasks an hour.
  */
 export const AUTO_START_BUSY_RETRY_SEC = 60;
 export const AUTO_START_BUSY_MAX_SEC = 900;

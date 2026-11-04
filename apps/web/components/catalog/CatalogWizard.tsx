@@ -205,7 +205,7 @@ export default function CatalogWizard({ brands, shareEmail, supabasePaste = fals
     return () => clearInterval(timer);
   }, [autoStartAt]);
 
-  /** M1 D14: a different brand before Start: its default channels, and the files grouped again under it. */
+  /** M1 D15: a different brand before Start: its default channels, and the files grouped again under it. */
   async function changeBrand(slug: string) {
     if (!id || !slug || slug === brandSlug) { setChangingBrand(false); return; }
     setWorking(true); setError("");
