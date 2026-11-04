@@ -9,7 +9,7 @@ import { catalogBatches, catalogChunks, catalogEnlargements } from "../../db/sch
 import { log as structuredLog, toSeverity } from "../../log";
 import { chunkTaskId, DISPATCH_DEADLINE_SEC, type enqueueTask } from "../../tasks";
 import { positiveIntEnv } from "../../concurrency";
-import { enqueueEnlargements, ENLARGE_SEND_SLOW_MS, ENLARGE_SEND_WARN, ENLARGE_STALE_MS, ENLARGING_TASK, queuedEnlargementsOfChunk, releaseEnlargements, unparkSettledChunks } from "./enlargement";
+import { enqueueEnlargements, failOutageOverdue, ENLARGE_SEND_SLOW_MS, ENLARGE_SEND_WARN, ENLARGE_STALE_MS, ENLARGING_TASK, queuedEnlargementsOfChunk, releaseEnlargements, unparkSettledChunks } from "./enlargement";
 
 /** A delivery starts no new photo after this much of its time (the request deadline is 900 s). */
 export const CHUNK_TIME_BUDGET_MS = 480_000;
@@ -199,14 +199,20 @@ export async function recoverBatchChunks(db: Db, enqueue: Enqueue, batchId: stri
  * processing it is enqueued directly). One whose progress_at is older than ENLARGE_STALE_MS (no enlarge delivery of the
  * batch refreshed it: the lane is quiet) has its wanted queued rows sent again with `sends + 1`, a new task id; after
  * ENLARGE_SEND_WARN sends of one row the pace drops to every ENLARGE_SEND_SLOW_MS and each re-send logs ERROR "enlargement
- * task cannot be delivered". The row is never failed for it (re-queue, never fail). `off` (the rollback switch)
- * releases the batch's queued rows first, so every parked chunk unparks to the plain path. Returns the tasks sent.
+ * task cannot be delivered". A re-send never fails a row. `off` (the rollback switch) releases the batch's queued rows
+ * first, so every parked chunk unparks to the plain path. Otherwise an auto-decide batch fails the rows the upscaler has
+ * been unreachable for since ENLARGE_OUTAGE_DEADLINE_MS (failOutageOverdue, owner decision 2026-11-04), so they unpark
+ * too and the photo is delivered as a provisional plain render. Returns the tasks sent.
  */
 export async function resendStaleEnlargements(db: Db, enqueue: Enqueue, batchId: string, options: Pick<DispatchOptions, "now" | "log"> & { bulk?: boolean; off?: boolean } = {}): Promise<number> {
   const now = options.now ?? new Date(), log = options.log ?? defaultLog, bulk = options.bulk ?? false;
   if (options.off) {
     const released = await releaseEnlargements(db, { batchId, onlyQueued: true, errorKind: "off" }, now);
     if (released.length) log("enlargement released", { batchId, rows: released.length, reason: "off" });
+  } else {
+    // Owner decision 2026-11-04 (M1 D13): an auto-decide batch waits for an unreachable upscaler only up to its deadline.
+    const overdue = await failOutageOverdue(db, batchId, now);
+    if (overdue.length) log("enlargement outage deadline", { severity: "WARNING", batchId, rows: overdue.length, reason: "outage_deadline" });
   }
   const unparked = await unparkSettledChunks(db, batchId, null, now);
   for (const chunk of unparked) {

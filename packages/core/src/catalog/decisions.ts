@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { and, asc, eq, inArray, isNull, ne, sql } from "drizzle-orm";
+import { and, asc, eq, gt, inArray, isNull, ne, sql } from "drizzle-orm";
 import type { Db } from "../db/client";
 import { brandMaster, catalogBatches, catalogBatchProducts, catalogChunks, catalogEnlargements, catalogOutputs, catalogProductAliases, catalogProducts, catalogSourceImages, catalogUploads, skuMap } from "../db/schema";
 import type * as storage from "../storage";
@@ -23,6 +23,8 @@ export class CatalogDecisionError extends Error {
 }
 /** "Try again" on a batch that has stopped (failed or cancelled): nothing would run it (final check 2026-10-30). */
 export const RETRY_STOPPED_BATCH = "This batch has stopped, so the enlargement cannot run again here. Use the photo as it is, replace it, remove it, or start a new batch with this product.";
+/** Try again on a photo whose product a later batch has published since (M1-S4 review P1). */
+export const RETRY_SUPERSEDED = "A later batch has changed this product's photos, so this batch cannot change them again. Start a new batch with this product.";
 /** The code of the "Use as is" warning on a photo that could not be enlarged (spec 18 lifecycle 3.6). */
 export const PLAIN_WARNING = "plain_warning";
 /**
@@ -163,9 +165,15 @@ export async function retryEnlargement(db: Db, enqueue: typeof enqueueTask, inpu
     const target = await readOutput(tx, input.outputId);
     // Final check 2026-10-30: a stopped batch runs nothing again (its enlarge tasks answer `stopped`, its chunks are
     // never recovered), so a retry there would leave the outputs pending, the chunk parked and the product locked to it.
-    const [owner] = await tx.select({ status: catalogBatches.status }).from(catalogBatches).where(eq(catalogBatches.id, target.batchId)).for("share");
+    const [owner] = await tx.select({ status: catalogBatches.status, createdAt: catalogBatches.createdAt }).from(catalogBatches).where(eq(catalogBatches.id, target.batchId)).for("share");
     if (!owner || owner.status === "failed" || owner.status === "cancelled") throw new CatalogDecisionError(409, RETRY_STOPPED_BATCH);
-    await lockProduct(tx, target);
+    const product = await lockProduct(tx, target);
+    // M1-S4 review P1 (2026-11-04): a later batch published this product (its lock released, as an auto-decide batch
+    // does at finalize), so this batch no longer owns its links; a re-made photo here would publish over them.
+    if (product.lastBatchId && product.lastBatchId !== target.batchId) {
+      const [later] = await tx.select({ id: catalogBatches.id }).from(catalogBatches).where(and(eq(catalogBatches.id, product.lastBatchId), gt(catalogBatches.createdAt, owner.createdAt)));
+      if (later) throw new CatalogDecisionError(409, RETRY_SUPERSEDED);
+    }
     const outputs = (await tx.select().from(catalogOutputs).where(and(eq(catalogOutputs.batchId, target.batchId), eq(catalogOutputs.sourceImageId, target.sourceImageId))).orderBy(catalogOutputs.id).for("update"))
       .filter(o => o.decision === null && o.flags.includes("enlargement_failed"));
     if (!outputs.length) throw new CatalogDecisionError(409, "Nothing to try again.");
@@ -193,7 +201,7 @@ export async function resetPhotoEnlargement(tx: Tx, target: Pick<Output, "batchI
   await lockProductChunks(tx as unknown as Db, target.batchId, target.productId);
   const failed = await tx.select().from(catalogEnlargements).where(and(eq(catalogEnlargements.batchId, target.batchId), eq(catalogEnlargements.sourceImageId, target.sourceImageId), eq(catalogEnlargements.wanted, true), eq(catalogEnlargements.status, "failed"), ne(catalogEnlargements.route, "none"))).orderBy(asc(catalogEnlargements.id)).for("update");
   if (!failed.length) return null;
-  const rows = await tx.update(catalogEnlargements).set({ status: "queued", attempts: 0, timeouts: 0, probeTimeouts: 0, retries: sql`${catalogEnlargements.retries} + 1`, sends: sql`${catalogEnlargements.sends} + 1`, claimedAt: null, claimToken: null, tilesDone: 0, error: null, errorKind: null, updatedAt: now })
+  const rows = await tx.update(catalogEnlargements).set({ status: "queued", attempts: 0, timeouts: 0, probeTimeouts: 0, retries: sql`${catalogEnlargements.retries} + 1`, sends: sql`${catalogEnlargements.sends} + 1`, delayedSince: null, claimedAt: null, claimToken: null, tilesDone: 0, error: null, errorKind: null, updatedAt: now })
     .where(inArray(catalogEnlargements.id, failed.map(r => r.id))).returning();
   // F59: Try again resets the photo's identity-change count.
   await tx.update(catalogEnlargements).set({ identityReleases: 0 }).where(and(eq(catalogEnlargements.batchId, target.batchId), eq(catalogEnlargements.sourceImageId, target.sourceImageId)));

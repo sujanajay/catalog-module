@@ -34,6 +34,13 @@ export const HOLD_CAUSES = ["wrong_item","collage","unusable","corrupt","uncheck
 export const AUTO_DECIDE_ACTIONS = ["deliver","drop"] as const;
 /** `catalog_auto_decide_rules.channel`: one channel, or `*` for every channel. */
 export const AUTO_DECIDE_CHANNELS = ["*",...CHANNEL_IDS] as const;
+/**
+ * M1-S4 `catalog_improvements.end_reason`: why a photo stopped being a candidate without being improved. `superseded`: a
+ * later batch published the product, so this batch no longer owns its links. `not_passed`: the upscaler enlarged the
+ * photo but the new render did not pass, so the delivered provisional slot was put back and another try cannot help.
+ */
+export const IMPROVEMENT_END_REASONS = ["superseded","not_passed"] as const;
+export type ImprovementEndReason = (typeof IMPROVEMENT_END_REASONS)[number];
 export const DECISIONS = ["use_as_is","remove","replaced"] as const;
 export const QA_MODES = ["per_source","per_output"] as const;
 export const POLICY_SOURCES = ["bakeoff","default","pending","manual"] as const;

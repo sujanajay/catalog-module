@@ -439,8 +439,8 @@ export async function handleEnlargeTask(deps: CatalogDeps, body: Record<string, 
   const forced = claimed.probeTimeouts >= ENLARGE_PROBE_TIMEOUTS_MAX;
   if (!forced) {
     const probe = await probeService(row.upscaler, { timeoutMs: Math.max(ENLARGE_REPROBE_FLOOR_MS, requestEnd - ENLARGE_TASK_MARGIN_MS - +deps.now()) });
-    if (probe === "timeout") return await delay("the health probe timed out", "probe_timeout", { probeTimeout: true });
-    if (probe === "absent" || probe === "no_instance") return await delay(`the upscale service is ${probe === "absent" ? "not available" : "starting no instance"}`, probe === "absent" ? "unavailable" : "busy", { resetProbe: true });
+    if (probe === "timeout") return await delay("the health probe timed out", "probe_timeout", { probeTimeout: true, outage: true });
+    if (probe === "absent" || probe === "no_instance") return await delay(`the upscale service is ${probe === "absent" ? "not available" : "starting no instance"}`, probe === "absent" ? "unavailable" : "busy", { resetProbe: true, outage: true });
   }
   // Step 8: the route, from the row's exact sizes and the caps as they are now (F6: a lowered cap re-routes to tiles).
   const shrunkW = row.outW / f, shrunkH = row.outH / f;
@@ -587,10 +587,10 @@ export async function handleEnlargeTask(deps: CatalogDeps, body: Record<string, 
    */
   async function failed(failure: Failure): Promise<HandleResult> {
     if (failure.kind === "counted") return count("attempts", failure.reason, failure.errorKind);
-    if (failure.kind === "delay") return delay(failure.reason, failure.errorKind);
+    if (failure.kind === "delay") return delay(failure.reason, failure.errorKind, { outage: true });
     const left = requestEnd - ENLARGE_SETTLE_RESERVE_MS - +deps.now();
     const probe: UpscaleProbe = left >= ENLARGE_REPROBE_FLOOR_MS ? await probeService(row!.upscaler, { timeoutMs: left }) : "timeout";
-    if (probe === "absent") return delay(`${failure.reason} (the service is not available)`, "unavailable", { resetProbe: true });
+    if (probe === "absent") return delay(`${failure.reason} (the service is not available)`, "unavailable", { resetProbe: true, outage: true });
     return count("timeouts", `${failure.reason} (the service answered ${probe} after it)`, failure.errorKind === "busy" ? "unexplained" : failure.errorKind, false, probe !== "timeout");
   }
   /**
@@ -648,8 +648,13 @@ export async function handleEnlargeTask(deps: CatalogDeps, body: Record<string, 
     await settle({ delays: sql`${catalogEnlargements.delays} + 1`, probeTimeouts: 0, ...refund(), ...unclaim(), updatedAt: deps.now() });
     return answer(503, "more_tiles", { tiles: total });
   }
-  async function delay(reason: string, kind: string, opts: { probeTimeout?: boolean; resetProbe?: boolean } = {}): Promise<HandleResult> {
-    if (row && row.status === "queued") await settle({ delays: sql`${catalogEnlargements.delays} + 1`, ...(opts.probeTimeout ? { probeTimeouts: sql`LEAST(${catalogEnlargements.probeTimeouts} + 1, ${ENLARGE_PROBE_TIMEOUTS_MAX})` } : opts.resetProbe ? { probeTimeouts: 0 } : {}), ...refund(), ...unclaim(), updatedAt: deps.now() }, false);
+  /**
+   * A delay: nothing counted, the queue retries. `outage`: the upscaler itself could not be reached (a probe that timed
+   * out or found no service, a refused or busy call), which starts the row's outage clock (`delayed_since`, owner
+   * decision 2026-11-04); any other delay (storage, another delivery's claim) leaves the clock as it is.
+   */
+  async function delay(reason: string, kind: string, opts: { probeTimeout?: boolean; resetProbe?: boolean; outage?: boolean } = {}): Promise<HandleResult> {
+    if (row && row.status === "queued") await settle({ delays: sql`${catalogEnlargements.delays} + 1`, delayedSince: opts.outage ? sql`coalesce(${catalogEnlargements.delayedSince}, ${deps.now().toISOString()}::timestamptz)` : sql`${catalogEnlargements.delayedSince}`, ...(opts.probeTimeout ? { probeTimeouts: sql`LEAST(${catalogEnlargements.probeTimeouts} + 1, ${ENLARGE_PROBE_TIMEOUTS_MAX})` } : opts.resetProbe ? { probeTimeouts: 0 } : {}), ...refund(), ...unclaim(), updatedAt: deps.now() }, false);
     return answer(503, kind, { reason });
   }
   /**
@@ -709,7 +714,8 @@ export async function handleEnlargeTask(deps: CatalogDeps, body: Record<string, 
     const { written, unparked } = await deps.db.transaction(async (tx) => {
       const db = tx as unknown as CatalogDeps["db"];
       const chunks = await lockProductChunks(db, batchId as string, productId as string);
-      const [written] = patch && row ? await db.update(catalogEnlargements).set(patch as Partial<CatalogEnlargement>).where(guard()).returning() : [];
+      // Any answer but an outage delay ends the row's outage clock (delay() passes its own `delayedSince`).
+      const [written] = patch && row ? await db.update(catalogEnlargements).set({ delayedSince: null, ...patch } as Partial<CatalogEnlargement>).where(guard()).returning() : [];
       if (ledger.length) await recordCostEvents(db, ledger.splice(0), deps.log);
       return { written: written ?? null, unparked: await unparkSettledChunks(db, batchId as string, chunks, at) };
     });

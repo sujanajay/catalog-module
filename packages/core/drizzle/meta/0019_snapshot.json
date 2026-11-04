@@ -1,5 +1,5 @@
 {
-  "id": "b675cf91-2d85-44e7-86d2-234aa31b4f2d",
+  "id": "139c1717-710d-42f7-9221-46485a63786d",
   "prevId": "24d8a858-e450-4c22-a0eb-e7f09c7d6336",
   "version": "7",
   "dialect": "postgresql",
@@ -2034,6 +2034,12 @@
           "notNull": true,
           "default": 0
         },
+        "delayed_since": {
+          "name": "delayed_since",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
         "claimed_at": {
           "name": "claimed_at",
           "type": "timestamp with time zone",
@@ -2599,6 +2605,24 @@
           "primaryKey": false,
           "notNull": false
         },
+        "previous": {
+          "name": "previous",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "ended_at": {
+          "name": "ended_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "end_reason": {
+          "name": "end_reason",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
         "created_at": {
           "name": "created_at",
           "type": "timestamp with time zone",
@@ -2655,7 +2679,12 @@
       "compositePrimaryKeys": {},
       "uniqueConstraints": {},
       "policies": {},
-      "checkConstraints": {},
+      "checkConstraints": {
+        "catalog_improvements_end_reason_check": {
+          "name": "catalog_improvements_end_reason_check",
+          "value": "\"catalog_improvements\".\"end_reason\" IN ('superseded', 'not_passed')"
+        }
+      },
       "isRLSEnabled": false
     },
     "public.catalog_key_mappings": {
@@ -3514,6 +3543,22 @@
           ],
           "isUnique": true,
           "where": "\"catalog_outputs\".\"is_live\"",
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "catalog_outputs_provisional_plain_idx": {
+          "name": "catalog_outputs_provisional_plain_idx",
+          "columns": [
+            {
+              "expression": "published_at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "where": "\"catalog_outputs\".\"is_live\" AND \"catalog_outputs\".\"status\" = 'verified' AND \"catalog_outputs\".\"flags\" @> '[\"provisional\", \"enlargement_failed\"]'::jsonb",
           "concurrently": false,
           "method": "btree",
           "with": {}

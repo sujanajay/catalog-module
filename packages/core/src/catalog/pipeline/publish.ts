@@ -9,6 +9,7 @@ import { lockProducts } from "../products";
 import type { ChannelId, EventKind } from "../types";
 import { verifyPublic } from "./verify";
 import { autoDecideNote, autoDecideOf } from "../auto-decide";
+import { restoreUnpassedImprovements } from "../improve";
 import { otherTargetUpscalerId, upscaleConfigFromEnv, upscalerId, upscalerKey } from "../upscale";
 export { lockProducts };
 export type Output = typeof catalogOutputs.$inferSelect;
@@ -98,6 +99,9 @@ export async function publishProduct(deps: PublishDeps, batchId: string, product
     const [batch] = await tx.select().from(catalogBatches).where(eq(catalogBatches.id,batchId));
     if (!batch) return { outcome: "not_found" };
     const found = { brandSlug: batch.brandSlug, isTest: batch.isTest };
+    // M1-S4 (review P2-1): an improvement's re-made slot that did not pass goes back to its delivered provisional state
+    // before anything below reads the outputs, so it is neither dropped, failed nor copied over the delivered link.
+    if (autoDecideOf(batch.options)) await restoreUnpassedImprovements(tx, batchId, productId, deps.now());
     const where = and(eq(catalogBatchProducts.batchId,batchId),eq(catalogBatchProducts.productId,productId));
     const outputs = await tx.select().from(catalogOutputs).where(and(eq(catalogOutputs.batchId,batchId),eq(catalogOutputs.productId,productId)));
     const allSources = await tx.select().from(catalogSourceImages).where(and(eq(catalogSourceImages.batchId,batchId),eq(catalogSourceImages.productId,productId)));

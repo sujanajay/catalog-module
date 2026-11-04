@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { and, eq, inArray, ne, sql } from "drizzle-orm";
-import { catalogBatches, catalogBatchProducts, catalogChunks, catalogOutputs, catalogProducts, catalogSourceImages, catalogUploads } from "@catalog/core/db/schema";
+import { catalogBatches, catalogBatchProducts, catalogChunks, catalogImprovements, catalogOutputs, catalogProducts, catalogSourceImages, catalogUploads } from "@catalog/core/db/schema";
 import { batchPrefix, exportPath, sanitizeSegment } from "@catalog/core/catalog/naming";
 import { batchProductIds, buildReport, readIngestReport, splitRecheck, workbookCsvSheets, type ExportPaths } from "@catalog/core/catalog/pipeline/report";
 import { releaseLocks } from "@catalog/core/catalog/pipeline/publish";
@@ -14,6 +14,12 @@ import { CATALOG_TASK_LEASE_MS, enqueueFinalize, refreshBatchProgress, type Cata
 /** Spec 18 lifecycle 3.7: the finalize re-queue while every unfinished chunk waits on an enlargement (10 minutes). */
 export const FINALIZE_PARKED_WAIT_S = 600;
 /**
+ * M1-S4 review P2-3: a done batch waiting only for a re-made product's publish re-queues after 30 s, doubling each time up
+ * to FINALIZE_PARKED_WAIT_S (30, 60, 120, 240, 480, then 600 s), so a lost or stuck publish costs at most one finalize
+ * run every 10 minutes; reaching the cap logs one WARNING.
+ */
+export function finalizeRemadeWait(waits:number):number { return Math.min(30*2**Math.max(0,waits),FINALIZE_PARKED_WAIT_S); }
+/**
  * How long one finalize request re-checks links before it hands the rest to the next request. The dispatch deadline
  * is 900 s; the report builds, the uploads and the final write come on top. A 25k-product batch has about 225k links,
  * which takes several requests at 16 links at once, none near its deadline. CATALOG_FINALIZE_TIME_BUDGET_MS overrides.
@@ -24,7 +30,7 @@ export function finalizeTimeBudgetMs(env: NodeJS.ProcessEnv = process.env): numb
 /** What a finalize request that ran out of time leaves for the next one, in its attempt's folder. */
 interface FinalizeState { attempt:string; k:number; snapshotHash:string; paths:ExportPaths; progress:RecheckProgress }
 const FINALIZE_STATE = "finalize-state.json";
-type FinalizeCounts = typeof catalogBatches.$inferSelect.counts & {finalizeClaim?:string;finalizeClaimUntil?:number;finalizeEnqueuedAt?:number;finalizeResume?:string};
+type FinalizeCounts = typeof catalogBatches.$inferSelect.counts & {finalizeClaim?:string;finalizeClaimUntil?:number;finalizeEnqueuedAt?:number;finalizeResume?:string;finalizeRemadeWaits?:number};
 export async function handleFinalizeTask(deps:CatalogDeps,body:Record<string,unknown>):Promise<HandleResult> {
   if(typeof body.batchId!=="string") return {httpStatus:400,outcome:"batchId is required"};
   const batchId = body.batchId;
@@ -33,7 +39,7 @@ export async function handleFinalizeTask(deps:CatalogDeps,body:Record<string,unk
   // The finalize bookkeeping keys and the progress throttle's stamp are not part of the snapshot or the done counts.
   const cleanCounts=(counts:typeof catalogBatches.$inferSelect.counts)=>{
     const copy={...counts} as FinalizeCounts;
-    delete copy.finalizeClaim;delete copy.finalizeClaimUntil;delete copy.finalizeEnqueuedAt;delete copy.finalizeResume;delete copy.progressRefreshedAt;
+    delete copy.finalizeClaim;delete copy.finalizeClaimUntil;delete copy.finalizeEnqueuedAt;delete copy.finalizeResume;delete copy.finalizeRemadeWaits;delete copy.progressRefreshedAt;
     return copy;
   };
   try {
@@ -57,8 +63,13 @@ export async function handleFinalizeTask(deps:CatalogDeps,body:Record<string,unk
       // request is re-queued every 10 minutes, not every 30 seconds.
       const wait=chunks.filter(c=>c.status!=="done" && c.status!=="failed").every(c=>c.status==="queued" && c.taskName===ENLARGING_TASK) ? FINALIZE_PARKED_WAIT_S:30;
       // A product this batch is re-making (Try again, an M1-S4 improvement: outputs pending or staged again) is not
-      // published yet either, even though its lastBatchId already names this batch.
-      const remade = new Set((await tx.selectDistinct({productId:catalogOutputs.productId}).from(catalogOutputs).where(and(eq(catalogOutputs.batchId,batchId),inArray(catalogOutputs.status,["pending","staged"])))).map(o=>o.productId));
+      // published yet either, even though its lastBatchId already names this batch. An improvement's try stays open
+      // (`previous` kept) until its publish has seen the re-made slots, so a slot a rule dropped still waits for the
+      // publish that puts it back (M1-S4 review P2-1).
+      const remade = new Set([
+        ...(await tx.selectDistinct({productId:catalogOutputs.productId}).from(catalogOutputs).where(and(eq(catalogOutputs.batchId,batchId),inArray(catalogOutputs.status,["pending","staged"])))).map(o=>o.productId),
+        ...(await tx.selectDistinct({productId:catalogImprovements.productId}).from(catalogImprovements).where(and(eq(catalogImprovements.batchId,batchId),sql`${catalogImprovements.previous} IS NOT NULL`))).map(o=>o.productId),
+      ]);
       const unpublished=pairs.filter(({pair,product})=>withSources.has(product.id) && (product.lastBatchId!==batchId || remade.has(product.id)) && pair.change!=="pending_attention" && pair.change!=="failed");
       // A done batch: a product a later batch published (its lastBatchId is another batch and this batch holds no
       // lock on it) keeps its old links in the re-issued sheet, so it does not hold the finalize up.
@@ -69,8 +80,12 @@ export async function handleFinalizeTask(deps:CatalogDeps,body:Record<string,unk
         if(done && (chunksRunning || unpublished.some(({product})=>remade.has(product.id) && product.lockBatchId===batchId))) {
           // A done batch with a running chunk (a replacement photo), or a re-made product whose publish has not landed:
           // the request stays pending and is re-queued (a publish that changes nothing asks for no finalize itself).
-          await tx.update(catalogBatches).set({updatedAt:sql`${catalogBatches.updatedAt}`,counts:sql`${catalogBatches.counts} - 'finalizeClaim' - 'finalizeClaimUntil' - 'finalizeEnqueuedAt'`}).where(eq(catalogBatches.id,batchId));
-          return {outcome:"not_ready",requeue:true,reopen:true,wait:chunksRunning ? wait:30} as const;
+          // Only the publish wait backs off (finalizeRemadeWait); a running chunk keeps the lifecycle's wait.
+          const waits=chunksRunning ? 0:Number(state.finalizeRemadeWaits ?? 0);
+          const next=chunksRunning ? wait:finalizeRemadeWait(waits);
+          if(!chunksRunning && next===FINALIZE_PARKED_WAIT_S && finalizeRemadeWait(waits-1)<FINALIZE_PARKED_WAIT_S) deps.log("finalize keeps waiting for a re-made product's publish",{severity:"WARNING",batchId,waits:waits+1,products:unpublished.filter(({product})=>remade.has(product.id)).map(({product})=>({productId:product.id,identifier:product.identifier}))});
+          await tx.update(catalogBatches).set({updatedAt:sql`${catalogBatches.updatedAt}`,counts:chunksRunning ? sql`${catalogBatches.counts} - 'finalizeClaim' - 'finalizeClaimUntil' - 'finalizeEnqueuedAt'`:sql`(${catalogBatches.counts} - 'finalizeClaim' - 'finalizeClaimUntil' - 'finalizeEnqueuedAt') || jsonb_build_object('finalizeRemadeWaits',${waits+1}::int)`}).where(eq(catalogBatches.id,batchId));
+          return {outcome:"not_ready",requeue:true,reopen:true,wait:next} as const;
         }
         // Not ready. A batch still running hands the request on (re-queued below). A done batch blocked only by a
         // product still being published is not re-queued: that publish asks again when it lands.

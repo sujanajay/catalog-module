@@ -59,6 +59,7 @@ const INDEXES = [
   "vendor_routes_capability_adapter_model_uq", "vendor_routes_capability_rank_idx", "vendor_route_changes_route_id_at_idx",
   "catalog_auto_decide_rules_cause_channel_uq",
   "catalog_improvements_batch_photo_uq",
+  "catalog_outputs_provisional_plain_idx",
 ];
 
 describe("generated migrations", () => {
