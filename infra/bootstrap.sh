@@ -239,8 +239,16 @@ sa_binding() { # target-sa member role [no-fallback] ; falls back to project lev
   fi
 }
 
-secret_binding() { # secret member role ; falls back to project level if denied
+# secret_binding <secret> <member> <role>: one secret only, never project-wide (this project holds other apps' secrets).
+# Fails closed: a secret that does not exist (or cannot be read) is skipped with a warning, and a binding that cannot be
+# added is left to a person (needs_human, exit 2 at the end). It never falls back to a project-level grant, which would
+# give the member every secret in the project (review of 2026-11-04).
+secret_binding() {
   local secret="$1" member="$2" role="$3" policy
+  if ! gcloud secrets describe "$secret" --project="$PROJECT" --format='value(name)' >/dev/null 2>&1; then
+    warn "secret $secret not found; no binding for $member (create the secret, then run bootstrap again)"
+    return 0
+  fi
   policy=$(gcv secrets get-iam-policy "$secret" --project="$PROJECT" \
     --flatten='bindings[].members' \
     --format='csv[no-heading](bindings.role,bindings.members)' 2>/dev/null || true)
@@ -256,8 +264,7 @@ secret_binding() { # secret member role ; falls back to project level if denied
   create "secret binding on $secret: $role -> $member"
   if ! retry gcloud secrets add-iam-policy-binding "$secret" --project="$PROJECT" \
       --member="$member" --role="$role" >/dev/null; then
-    warn "resource-level binding denied; falling back to project level for $role -> $member"
-    project_binding "$member" "$role"
+    needs_human "grant $role on secret $secret to $member by hand (gcloud secrets add-iam-policy-binding $secret --member=$member --role=$role); bootstrap never grants it project-wide"
   fi
 }
 
@@ -421,6 +428,10 @@ for SA in "$WEB" "$WORKER"; do
   secret_binding "$DB_SECRET" "serviceAccount:$SA" roles/secretmanager.secretAccessor
 done
 secret_binding "$OPENROUTER_SECRET" "serviceAccount:$WORKER" roles/secretmanager.secretAccessor
+# M1-F1-R4: catalog-web mounts the Supabase project URL and read key for the folder paste (infra/deploy.sh WEB_SECRETS).
+for SUPABASE_SECRET in supabase-url supabase-service-key; do
+  secret_binding "$SUPABASE_SECRET" "serviceAccount:$WEB" roles/secretmanager.secretAccessor
+done
 # Spec 18 H2: project level, so this one grant also lets the worker (and the probe job catalog-check-matting, which
 # runs as catalog-worker@) invoke catalog-upscale, including its candidate tag URLs, without a resource-level binding
 # on a service that does not exist yet when bootstrap runs (resource-level IAM on Cloud Run may be denied, AGENTS.md;
