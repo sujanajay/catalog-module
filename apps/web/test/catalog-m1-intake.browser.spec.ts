@@ -210,5 +210,6 @@ test("M1-F2 test 4: Wait during the countdown keeps the batch a draft with one S
   expect(batch.batch).toMatchObject({ status: "draft", startedAt: null, options: { autoStart: false } });
   // The one Start button starts it.
   await page.getByRole("button", { name: "Start", exact: true }).click();
-  await page.waitForURL(new RegExp(`/catalog/${id}$`), { timeout: 60_000 });
+  // Start writes the chunk rows and queues the first ones; on the in-process harness this alone can take a minute.
+  await page.waitForURL(new RegExp(`/catalog/${id}$`), { timeout: 150_000 });
 });

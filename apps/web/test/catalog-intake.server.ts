@@ -202,6 +202,8 @@ async function warmUp(verbose: boolean) {
     ["POST", `${api}/links`], ["POST", `${api}/ingest`], ["GET", `${api}/detected`], ["PATCH", `${api}/detected`], ["GET", `${api}/preview`],
     ["PATCH", `${api}/links/${none}`], ["DELETE", `${api}/links/${none}`], ["DELETE", `${api}/uploads/${none}`], ["POST", `${api}/retry-links`],
     ["POST", `${api}/cancel`], ["POST", `${api}/reopen`],
+    // M1-S2: the one page reads the brand from the names and can Wait or Start.
+    ["POST", "/api/catalog/brands/infer"], ["POST", `${api}/hold-start`], ["POST", `${api}/start`],
   ];
   for (const [method, p] of hits) {
     const t0 = Date.now();

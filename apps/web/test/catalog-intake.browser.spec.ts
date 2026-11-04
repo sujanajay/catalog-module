@@ -98,7 +98,7 @@ const currentStep = (page: Page) => page.locator('[aria-current="step"]');
 /** M1-F2-R6: Wait during the countdown, so a scenario about intake looks at a draft that does not start by itself. */
 async function holdStart(page: Page) {
   await page.getByRole("button", { name: "Wait", exact: true }).click({ timeout: 90_000 });
-  await expect(page.getByRole("button", { name: "Start", exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Start", exact: true })).toBeVisible({ timeout: 30_000 });
 }
 /** The batch's card under "Your unfinished batches" on /catalog (spec 14c F4 part 2). */
 const unfinishedRow = (page: Page, name: string) => page.getByRole("region", { name: "Your unfinished batches" }).getByRole("listitem").filter({ hasText: name });
