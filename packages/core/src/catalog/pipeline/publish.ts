@@ -8,13 +8,18 @@ import { assertWithinProduct, productPrefix, publicObjectPath } from "../naming"
 import { lockProducts } from "../products";
 import type { ChannelId, EventKind } from "../types";
 import { verifyPublic } from "./verify";
+import type { ChannelRules } from "../channel-rules";
+import { frozenChannels } from "../holdout";
 import { autoDecideNote, autoDecideOf } from "../auto-decide";
 import { restoreUnpassedImprovements } from "../improve";
 import { otherTargetUpscalerId, upscaleConfigFromEnv, upscalerId, upscalerKey } from "../upscale";
 export { lockProducts };
 export type Output = typeof catalogOutputs.$inferSelect;
 export type Source = typeof catalogSourceImages.$inferSelect;
-export interface PublishDeps { db: Db; storage: Pick<typeof storage, "headObject" | "stageCopyToPublic" | "deletePublicObject" | "setCustomTime" | "getPublicBucketName">; fetch: typeof fetch; now: () => Date; sleep?: (ms:number) => Promise<void> }
+export interface PublishDeps { db: Db; storage: Pick<typeof storage, "headObject" | "stageCopyToPublic" | "deletePublicObject" | "setCustomTime" | "getPublicBucketName">; fetch: typeof fetch; now: () => Date; sleep?: (ms:number) => Promise<void>;
+  /** M3-S1: the render-key versions of the channel rows the worker rendered with (channel-rules.ts). */ channelRules: () => Promise<Pick<ChannelRules, "keyVersion">> }
+/** M3-F3-R3: the note on an output a running experiment's listing kept out of this publish. */
+export const HOLDOUT_KEPT_NOTE = "This listing is part of a running test, so its live image was kept as it is.";
 /**
  * `upscaler` (spec 11): the upscaler model id, only when it made the output. The plain key does not depend on the
  * upscaler, so the path without it keeps its keys (spec 11 A's CHANNEL_RULES_VERSION 8 changes every key once, on
@@ -93,6 +98,7 @@ export const NO_DELIVERABLE_PHOTO = "No photo of this product could be delivered
  * or failed publish is not a change (spec 18 H4: only a change re-opens a done batch).
  */
 export async function publishProduct(deps: PublishDeps, batchId: string, productId: string): Promise<{ outcome: string; batch?: { brandSlug: string; isTest: boolean }; changed?: boolean }> {
+  const rules = await deps.channelRules();
   return deps.db.transaction(async tx => {
     const [product] = await tx.select().from(catalogProducts).where(eq(catalogProducts.id,productId)).for("update");
     if (!product || product.lockBatchId !== batchId) return { outcome: "not_locked" };
@@ -103,6 +109,23 @@ export async function publishProduct(deps: PublishDeps, batchId: string, product
     // before anything below reads the outputs, so it is neither dropped, failed nor copied over the delivered link.
     if (autoDecideOf(batch.options)) await restoreUnpassedImprovements(tx, batchId, productId, deps.now());
     const where = and(eq(catalogBatchProducts.batchId,batchId),eq(catalogBatchProducts.productId,productId));
+    // M3-F3-R3, M3 3.4 need 2: read again at publish time. A listing held by an experiment takes nothing from this batch
+    // (no copy, no delete); its live image stays. An output planned before the hold began is left out with a note; one
+    // already verified (a republish after the hold began) keeps its state. This sits after anything that resets the
+    // batch's outputs (M1-S4's restore) and before anything that reads them.
+    const held = new Set((await frozenChannels(tx as unknown as Db, product.optionId, batch.channels)).map(f => f.channel));
+    const channels = batch.channels.filter(c => !held.has(c));
+    const heldOutputs = (await tx.select().from(catalogOutputs).where(and(eq(catalogOutputs.batchId,batchId),eq(catalogOutputs.productId,productId)))).filter(o => held.has(o.channel) && o.status !== "skipped" && o.status !== "verified");
+    for (const o of heldOutputs) await tx.update(catalogOutputs).set({status:"skipped",reason:HOLDOUT_KEPT_NOTE,updatedAt:deps.now()}).where(eq(catalogOutputs.id,o.id));
+    if (held.size && !channels.length) {
+      // Every channel of the batch is held: the product keeps all its live images. It is unchanged, never held for a
+      // person nor failed (an auto-decide batch would otherwise count "nothing delivered" as an exception).
+      const [pair] = await tx.select().from(catalogBatchProducts).where(where);
+      const notes = pair?.notes?.includes(HOLDOUT_KEPT_NOTE) ? pair.notes : [pair?.notes, HOLDOUT_KEPT_NOTE].filter(Boolean).join("; ");
+      await tx.update(catalogBatchProducts).set({ change:"unchanged", notes }).where(where);
+      await tx.update(catalogProducts).set({lastBatchId:batchId}).where(eq(catalogProducts.id,productId));
+      return { outcome:"published", batch:found, changed:false };
+    }
     const outputs = await tx.select().from(catalogOutputs).where(and(eq(catalogOutputs.batchId,batchId),eq(catalogOutputs.productId,productId)));
     const allSources = await tx.select().from(catalogSourceImages).where(and(eq(catalogSourceImages.batchId,batchId),eq(catalogSourceImages.productId,productId)));
     const replacedIds=new Set(allSources.flatMap(source=>source.replacesId ? [source.replacesId]:[]));
@@ -110,9 +133,12 @@ export async function publishProduct(deps: PublishDeps, batchId: string, product
     const all = await tx.select().from(catalogOutputs).where(eq(catalogOutputs.productId,productId));
     const live = all.filter(o => o.isLive);
     const [pair] = await tx.select().from(catalogBatchProducts).where(where);
-    const missingPairs = sources.some(source=>batch.channels.some(channel=> {
+    const missingPairs = sources.some(source=>channels.some(channel=> {
       if(outputs.some(output=>output.sourceImageId===source.id && output.channel===channel)) return false;
-      const keys = batch.options.policy ? renderKeys({sourceSha256:source.sha256,channel,n:source.n,policyKey:`default|${source.matteModel ?? batch.options.policy.matteModel}`}):null;
+      // The registry key (M3 D13), and the plain CHANNEL_RULES_VERSION key a worker before M3-S1 planned with: a batch
+      // open across that deploy kept unchanged products' live images under the plain key and made no output for them.
+      const key = batch.options.policy ? {sourceSha256:source.sha256,channel,n:source.n,policyKey:`default|${source.matteModel ?? batch.options.policy.matteModel}`} : null;
+      const keys = key ? [...renderKeys({...key,rulesVersion:rules.keyVersion(channel)}),...renderKeys(key)] : null;
       return !keys || !live.some(output=>output.channel===channel && output.n===source.n && keys.includes(output.renderKey));
     }));
     if (product.lastBatchId === batchId && outputs.every(o=>o.status === "verified" || o.status === "skipped")) {
@@ -153,7 +179,7 @@ export async function publishProduct(deps: PublishDeps, batchId: string, product
       await tx.update(catalogBatchProducts).set({ change:"pending_attention", notes: [pair?.notes,missingPairs ? "Some photos could not be processed. Start this product again.":"",...outputs.filter(o => o.reason).map(outputNote)].filter(Boolean).join("; ") }).where(where);
       return { outcome:"held", batch:found };
     }
-    const plan = planPublish({ ...product, channels:batch.channels, sources,outputs,live });
+    const plan = planPublish({ ...product, channels, sources, outputs:outputs.filter(o => !held.has(o.channel)), live });
     const now = deps.now(), actor = batch.createdBy;
     let failure: string | null = null;
     const landed = new Map<string, { channel: ChannelId; n: number; generation: string }>();

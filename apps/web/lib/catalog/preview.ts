@@ -5,6 +5,7 @@ import { linkFailuresOf } from "@catalog/core/catalog/ingest/link-failures";
 import { isLinkReject } from "@catalog/core/catalog/ingest/link-reasons";
 import { buildPreview } from "@catalog/core/catalog/ingest/index";
 import type { Detected } from "@catalog/core/catalog/ingest/types";
+import { channelRulesLoader, ChannelRulesError } from "@catalog/core/catalog/channel-rules";
 import { configuredUpscalerIds, renderKeys } from "@catalog/core/catalog/pipeline/publish";
 import { resolvePolicy } from "@catalog/core/catalog/qa/policy";
 import type { ChannelId } from "@catalog/core/catalog/types";
@@ -71,11 +72,14 @@ type LiveOutput = { productId: string; n: number; channel: ChannelId; sha256: st
 /**
  * Step 4's "images will be made" (spec 06): photos times channels (no channel skips a photo for its size), minus pairs whose live image
  * the worker keeps as it is: its render_key is one the worker accepts for this photo (chunk.ts, renderKeys: same
- * sha256, today's CHANNEL_RULES_VERSION, the cut-out model it will use, plain or upscaled). Anything in doubt is
- * counted, so the count may be higher than what is made but never lower.
+ * sha256, the channel's rules version (M3-S1: `keyVersion`, from the published M5 registry), the cut-out model it will
+ * use, plain or upscaled). Anything in doubt is counted, so the count may be higher than what is made but never lower:
+ * `keyVersion` null (no ruleset could be read) keeps nothing.
  */
-export function plannedImages(sources: readonly PlannedSource[], channels: readonly ChannelId[], live: readonly LiveOutput[], upscaleModel: string | readonly string[] | null = configuredUpscalerIds()): { outputs: number; sourcesToMake: number } {
-  const current = (o: LiveOutput) => o.workerMatteModel !== null && renderKeys({ sourceSha256: o.sha256, channel: o.channel, n: o.n, policyKey: `default|${o.workerMatteModel}` }, upscaleModel).includes(o.renderKey);
+export function plannedImages(sources: readonly PlannedSource[], channels: readonly ChannelId[], live: readonly LiveOutput[], upscaleModel: string | readonly string[] | null = configuredUpscalerIds(), keyVersion?: ((channel: ChannelId) => string) | null): { outputs: number; sourcesToMake: number } {
+  // A channel the rules cannot key (no active row) keeps nothing, like a ruleset that cannot be read.
+  const rulesOf = (channel: ChannelId): { rulesVersion?: string } | null => { if (!keyVersion) return {}; try { return { rulesVersion: keyVersion(channel) }; } catch { return null; } };
+  const current = (o: LiveOutput) => { const rules = o.workerMatteModel !== null && keyVersion !== null ? rulesOf(o.channel) : null; return rules !== null && renderKeys({ sourceSha256: o.sha256, channel: o.channel, n: o.n, policyKey: `default|${o.workerMatteModel}`, ...rules }, upscaleModel).includes(o.renderKey); };
   // The live outputs the worker keeps, by (product, n, channel, sha256): one lookup per pair instead of a scan of every live output.
   const pairKey = (productId: string, n: number, channel: string, sha256: string) => `${productId}|${n}|${channel}|${sha256}`;
   const kept = new Set(live.filter(current).map((o) => pairKey(o.productId, o.n, o.channel, o.sha256)));
@@ -147,7 +151,9 @@ export async function previewBatch(id: string) {
   };
   const models = new Map(await Promise.all([...new Set(liveRows.map((o) => o.productId))].map(async (productId) => [productId, await matteModelFor({ productType: typeOf.get(productId) ?? null }, batch, transparent.has(productId), resolveOnce)] as const)));
   const live = liveRows.map((o) => ({ ...o, workerMatteModel: models.get(o.productId) ?? null }));
-  const { outputs, sourcesToMake } = plannedImages(sources, batch.channels, live);
+  // M3-S1: the worker keys renders by the channel rows of the latest published ruleset; unreadable rules keep nothing.
+  const rules = await channelRulesLoader(db())().catch((error: unknown) => { if (error instanceof ChannelRulesError) return null; throw error; });
+  const { outputs, sourcesToMake } = plannedImages(sources, batch.channels, live, configuredUpscalerIds(), rules ? (channel) => rules.keyVersion(channel) : null);
   // One classifier call per product without a type when the batch type is "auto" (spec 07 4.3, 4.11).
   const untypedProducts = batch.productType !== "auto" ? 0 : products.filter((p) => !p.productType).length;
   const estimate = wizardEstimate({ outputs, sources: sourcesToMake, untypedProducts, qaMode: batch.options.policy?.qaMode ?? "per_source", qaSampleRate: batch.options.policy?.qaSampleRate ?? 1 });

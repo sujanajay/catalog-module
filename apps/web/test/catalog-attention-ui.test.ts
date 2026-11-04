@@ -162,6 +162,19 @@ describe("batch copy for the real state of the batch", () => {
     // When the worker's cut-out model cannot be known before the batch runs, the live image is counted.
     expect(plannedImages(sources, ["noon"], liveUnder().map((o) => ({ ...o, workerMatteModel: null })), "swinir-x2")).toEqual({ outputs: 5, sourcesToMake: 5 });
   });
+  it("M3-S1: keys live images by the version of each channel row in the published ruleset, and keeps nothing without one", () => {
+    const sources = [1, 2].map((n) => ({ productId: "p", n, sha256: `s${n}`, height: 1200 }));
+    const liveUnder = (rulesVersion: string) => sources.map((s) => ({ productId: "p", n: s.n, channel: "noon" as const, sha256: s.sha256, workerMatteModel: "birefnet", renderKey: renderKey({ sourceSha256: s.sha256, channel: "noon", n: s.n, policyKey: "default|birefnet", rulesVersion }) }));
+    const noonRow = (version: number) => () => `10+c${version}`;
+    expect(plannedImages(sources, ["noon"], liveUnder("10+c2"), null, noonRow(2))).toEqual({ outputs: 0, sourcesToMake: 0 });
+    // An admin changed the Noon row (version 3): the worker makes both again, so both are counted.
+    expect(plannedImages(sources, ["noon"], liveUnder("10+c2"), null, noonRow(3))).toEqual({ outputs: 2, sourcesToMake: 2 });
+    // Live images from before M3-S1 (plain CHANNEL_RULES_VERSION keys) are made again once, under the registry.
+    expect(plannedImages(sources, ["noon"], liveUnder("10"), null, noonRow(2))).toEqual({ outputs: 2, sourcesToMake: 2 });
+    expect(plannedImages(sources, ["noon"], liveUnder("10+c2"), null, null)).toEqual({ outputs: 2, sourcesToMake: 2 });
+    // A channel with no active row (retired) cannot be keyed: its images are counted, and the page does not fail.
+    expect(plannedImages(sources, ["noon"], liveUnder("10+c2"), null, () => { throw new Error("no active row for noon"); })).toEqual({ outputs: 2, sourcesToMake: 2 });
+  });
 });
 
 describe("Details tab link counts", () => {

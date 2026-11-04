@@ -1,16 +1,18 @@
 import sharp from "sharp";
-import { backgroundFor, channel, MAX_OUTPUT_BYTES } from "./channels";
+import { backgroundOf, backgroundRuleBreach, channel, MAX_OUTPUT_BYTES, type ChannelSpec } from "./channels";
 import { effectiveMinimum, hexColor, NO_CUT, safeBoxFor, type BBox, type CanvasPlan } from "./render";
 import { borderBand } from "./shadow";
 import type { ChannelId } from "./types";
 
 // Flat quality-70 and high-contrast quality-90 JPEG round trips are tested against this bound.
-// Keep below 31 so white product pixels on the prescribed grey still count as foreground.
+// It was tuned on the 224 grey. On the 240 grey (M3-S1) a white or near-white product pixel is within it and reads as
+// background, so the pixel checks below are blind to it (M3 D18). The pass-through rule uses its own tight bound
+// (render.ts PASSTHROUGH_BORDER_TOLERANCE), so this blindness never decides which background ships.
 export const BG_TOLERANCE = 24;
 /**
  * The Styli guide (styli_anchor) is judged on the product (anchorBounds): where the render's foreground mask (the placed
  * cut-out's alpha) is at least this, the matte's half-alpha silhouette, together with what is seen (more than
- * BG_TOLERANCE off the canvas colour) inside the cut-out. A white or pale grey product is barely seen on the #E0E0E0
+ * BG_TOLERANCE off the canvas colour) inside the cut-out. A white or pale grey product is barely seen on the #F0F0F0
  * canvas (white cotton photographs at 240 to 250), so the seen pixels alone leave out whole parts of it; the soft outer
  * fade below this alpha is left to what is seen. Without a mask (a re-check of a stored JPEG) only what is seen counts.
  */
@@ -64,7 +66,7 @@ function productBlocks(w: number, h: number, isProduct: (x: number, y: number) =
   for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) if (isProduct(x, y)) blocks[blockIndex(w, x, y)] = 1;
   return blocks;
 }
-export interface ComplianceInput { jpeg: Buffer; channel: ChannelId; shotNumber: number; plan: CanvasPlan; identifier: string; n: number; publicObjectPath: string; foregroundMask?: Buffer }
+export interface ComplianceInput { jpeg: Buffer; channel: ChannelId; /** M3-S1: the channel values the render used (M5 registry); absent is the channels.ts fixture. */ spec?: ChannelSpec; shotNumber: number; plan: CanvasPlan; identifier: string; n: number; publicObjectPath: string; foregroundMask?: Buffer }
 /**
  * What the check measured, kept with the failures so a repair can compute its fix from the numbers (07 4.6a):
  * `seen` is the product's box as the check sees it (seen pixels plus the half-alpha silhouette), `outside` how many
@@ -77,17 +79,20 @@ export interface Measured {
   outside: { top: number; bottom: number; left: number; right: number };
   anchorDelta: { dx: number; dy: number } | null; bandBreach: boolean; bytes: number;
 }
-export type ComplianceCode = "magic" | "bytes" | "trendyol_name" | "extension" | "format" | "dims" | "density" | "background" | "inside_safe_box" | "styli_anchor" | "noon_wide";
+export type ComplianceCode = "magic" | "bytes" | "trendyol_name" | "extension" | "format" | "dims" | "density" | "background" | "background_light" | "inside_safe_box" | "styli_anchor" | "noon_wide";
 /** Codes our own encoder settings decide (not the photo): a second identical failure is a code fault, held for the technical team, never dropped (07 4.6a). */
 export const ENCODER_CODES: readonly ComplianceCode[] = ["dims", "density", "format", "magic", "extension", "trendyol_name"];
 /** The rule codes of a `failures` list ("code: sentence"). */
 export const failureCodes = (failures: readonly string[]): ComplianceCode[] => failures.map(f => f.split(":")[0] as ComplianceCode);
 export async function checkOutput(input: ComplianceInput): Promise<{ ok: boolean; failures: string[]; measured: Measured }> {
-  const { jpeg, plan } = input, spec = channel(input.channel), failures: string[] = [];
+  const { jpeg, plan } = input, spec = input.spec ?? channel(input.channel), failures: string[] = [];
   const fail = (code: ComplianceCode, sentence: string) => failures.push(`${code}: ${sentence}`);
   const measured: Measured = { canvas: { w: plan.w, h: plan.h }, safe: plan.safeBox, seen: null, outside: { top: 0, bottom: 0, left: 0, right: 0 }, anchorDelta: null, bandBreach: false, bytes: jpeg.length };
   if (!jpeg.subarray(0, 3).equals(Buffer.from([255, 216, 255]))) fail("magic", "The file is not a JPEG.");
   if (jpeg.length > MAX_OUTPUT_BYTES) fail("bytes", `Could not get ${input.identifier}_${input.n} for ${input.channel} under 2 MB.`);
+  // M3-F3-R2 and R4: the canvas colour itself must be a light grey of 240 or more (Amazon image 1 pure white), whatever the rules row says.
+  const lightness = backgroundRuleBreach(spec, input.shotNumber);
+  if (lightness) fail("background_light", lightness);
   if (input.publicObjectPath.includes(" ")) fail("trendyol_name", "The output path contains spaces.");
   if (!input.publicObjectPath.endsWith(".jpg")) fail("extension", "The output path must end in lowercase .jpg.");
   try {
@@ -99,7 +104,7 @@ export async function checkOutput(input: ComplianceInput): Promise<{ ok: boolean
     const { data } = await sharp(jpeg).removeAlpha().toColourspace("srgb").raw().toBuffer({ resolveWithObject: true });
     const source = plan.sourceBox, wide = source ? source.w > source.h : (plan.productBox?.w ?? 0) > (plan.productBox?.h ?? 0);
     // A side cut in the source sits flush with the canvas edge (margin 0 on that side only).
-    const cut = plan.cut ?? NO_CUT, safe = safeBoxFor(spec, { w, h }, wide, cut), band = borderBand(w, h), color = hexColor(backgroundFor(spec.id, input.shotNumber));
+    const cut = plan.cut ?? NO_CUT, safe = safeBoxFor(spec, { w, h }, wide, cut), band = borderBand(w, h), color = hexColor(backgroundOf(spec, input.shotNumber));
     measured.canvas = { w, h }; measured.safe = safe;
     let backgroundBad = false, outside = false, bandBad = false, x0 = w, x1 = -1, y0 = h, y1 = -1, ax0 = w, ax1 = -1, ay0 = h, ay1 = -1;
     const mask = input.foregroundMask?.length === w * h ? input.foregroundMask : null, product = plan.productBox;

@@ -62,7 +62,8 @@ export async function preparePrimed(deps: CatalogDeps, input: { batch: Batch; so
   return p;
 }
 /** The render context of the batch's pinned route (the plain path when it has none on this worker). */
-const routeContext = (deps: CatalogDeps, batch: Batch): Partial<RenderInput> => { const be = batchEnlargement(deps,batch); return {upscaler:be?.x2 ?? null,upscalerX4:be?.x4 ?? null} as Partial<RenderInput>; };
+/** The batch's render context: its pinned upscalers and (M3-S1) the channel values from the M5 registry. */
+const routeContext = async (deps: CatalogDeps, batch: Batch): Promise<Partial<RenderInput>> => { const be = batchEnlargement(deps,batch); return {upscaler:be?.x2 ?? null,upscalerX4:be?.x4 ?? null,channelRules:await deps.channelRules()} as Partial<RenderInput>; };
 // Spec 18 lifecycle 3.7: an image held for its enlargement is never an answer the ladder can accept.
 const ok = (r: RenderOutput | undefined | null): r is RenderOutput & { jpeg: Buffer } => !!r && r.status === "ok" && r.compliance.ok && !!r.jpeg && !r.flags.includes("enlargement_failed");
 const codes = (r: RenderOutput) => r.compliance.failures.map(f => f.split(":")[0]).join(",") || r.notes.join("; ") || r.status;
@@ -101,7 +102,7 @@ export async function resolvePhoto(deps: CatalogDeps, input: ResolvePhotoInput):
   const p = input.prepared ?? await preparePrimed(deps,{batch:input.batch,source,underClaim},trace);
   const first = input.matte ?? await storedMatte(deps,source,p,input.policy.matteModel);
   if (!first) return {actions:[],fixed:new Set()};
-  const route = routeContext(deps,input.batch);
+  const route = await routeContext(deps,input.batch);
   let second: Matte | null | undefined;
   const secondModel = input.policy.matteModelSecond;
   const secondPossible = !!secondModel && secondModel !== first.model && first.source !== "alpha_source";
@@ -258,7 +259,8 @@ async function writeRender(deps: CatalogDeps, input: Pick<ResolvePhotoInput,"bat
   const judged = o.flags.filter(f=>!RENDER_FLAGS.has(f) && !input.trigger.includes(f));
   const flags = [...new Set<OutputFlag>([...extra.sourceFlags,...r.flags,...judged])], status = input.statusFor(flags);
   // Spec 11: `upscaled` is a render flag, so the re-render decides the key too (the upscaler may win or lose here).
-  const key = rerenderedKey(o,r.upscale?.model,()=>renderKey({sourceSha256:source.sha256,channel:o.channel,n:source.n,policyKey:`default|${input.policy.matteModel}`}));
+  const rules = await deps.channelRules();
+  const key = rerenderedKey(o,r.upscale?.model,()=>renderKey({sourceSha256:source.sha256,channel:o.channel,n:source.n,policyKey:`default|${input.policy.matteModel}`,rulesVersion:rules.keyVersion(o.channel)}));
   // The options this image was made with stay with it (relative to the stored matte), so a later repair starts from them.
   const variant = extra.variant ? {...extra.variant,matte:"first" as const}:undefined;
   await underClaim(async tx=>tx.update(catalogOutputs).set({renderKey:key,canvasW:r.plan.w,canvasH:r.plan.h,scale:r.plan.scale,placedX:r.plan.placedX,placedY:r.plan.placedY,bytes:r.bytes,quality:r.quality,flags,qaScores:extra.qaScores,
@@ -287,14 +289,14 @@ export async function flushCutPhoto(deps: CatalogDeps, input: FlushCutInput): Pr
   const sides = (judgedCut: boolean) => { const cut = shotGeometry(matte.alpha,p.width,p.height,{rgb:p.rgb,judgedCut})?.cut; return cut ? (["top","bottom","left","right"] as const).filter(side=>cut[side]):[]; };
   const before = sides(false), after = sides(true);
   if (!after.some(side=>!before.includes(side))) return done({step:"flush_cut",trigger,result:before.length ? "skipped":"failed",channels,rejudged:false,detail:before.length ? "cut already placed flush":"no cut edge found"});
-  const contextFor = input.contextFor ?? rowContext, renders = new Map<string, RenderOutput>();
+  const contextFor = input.contextFor ?? rowContext, renders = new Map<string, RenderOutput>(), route = await routeContext(deps,input.batch);
   // A product held in a hand does not rest on a floor: no synthesised contact shadow (matte-guard.ts).
   const shadowAllowed = input.shadowAllowed && !heldInHand(p,matte.alpha).held;
   for (const o of input.outputs) {
     await input.underClaim(async()=>{});
     // The output's own repairs so far (a smaller fit, a shadow taken off) stay with it.
     let r: RenderOutput;
-    try { r = (await deps.renderAllChannels(p,matte,[o.channel],{shotNumber:source.n,productType:product.productType ?? "other",identifier:product.identifier,publicObjectPath:o.objectPath,...contextFor(o),...variantOptions(variantOf(o.compliance),shadowAllowed),judgedCut:true,...routeContext(deps,input.batch),trace}))[o.channel]; }
+    try { r = (await deps.renderAllChannels(p,matte,[o.channel],{shotNumber:source.n,productType:product.productType ?? "other",identifier:product.identifier,publicObjectPath:o.objectPath,...contextFor(o),...variantOptions(variantOf(o.compliance),shadowAllowed),judgedCut:true,...route,trace}))[o.channel]; }
     catch (error) {
       // Spec 18 lifecycle F10: not ready is a skip, never a failure of the QA delivery.
       if (error instanceof EnlargementNotReadyError) return done({step:"flush_cut",trigger,result:"skipped",channels,rejudged:false,detail:"enlargement not ready"});

@@ -2,6 +2,7 @@
 // least one deliverable photo, flags what a rule delivered `provisional` with its rule id, drops a planted wrong-item
 // photo while the product's other photos get links, never makes a product `pending_attention`, and releases every lock
 // at finalize. The same input in a batch started before M1-S3 (no options.autoDecide) still holds, as on main.
+import { FIXTURE_CHANNEL_RULES } from "@catalog/core/catalog/channel-rules";
 import { afterAll, beforeAll, expect, it, vi } from "vitest";
 import { and, eq } from "drizzle-orm";
 import type { Db } from "@catalog/core/db/client";
@@ -31,7 +32,7 @@ function world() {
   storage.setStorageClient(client as unknown as storage.StorageLike);
   const copy = vi.fn(storage.stageCopyToPublic);
   const fetch = vi.fn<typeof globalThis.fetch>(async (url) => { const path = new URL(String(url)).pathname.replace(/^\/public\//, ""); const obj = objects.get(`gs://public/${path}`); return obj ? new Response(new Uint8Array(obj.buf), { headers: { "content-type": obj.mime, "content-length": String(obj.buf.length), "x-goog-generation": obj.generation } }) : new Response(null, { status: 404 }); });
-  const base = workerCatalogDeps(db);
+  const base = workerCatalogDeps(db,{channelRules:async()=>FIXTURE_CHANNEL_RULES});
   const deps: CatalogDeps = { ...base, routes: undefined, sleep: async () => {}, fetch, now: () => new Date("2026-01-01T00:00:00Z"), log: () => {}, enqueue: vi.fn(async () => "task"),
     resolvePolicy: vi.fn<CatalogDeps["resolvePolicy"]>(async () => ({ matteModel: "fixture", qaModel: "", threshold: 75, floor: 60, qaMode: "per_source", qaSampleRate: 1, source: "default" })),
     storage: { ...storage, getBucketName: () => "assets", getPublicBucketName: () => "public", uploadBuffer: upload, downloadBuffer: async uri => { const o = objects.get(uri); if (!o) throw new Error(`No object ${uri}`); return { buf: o.buf, mime: o.mime }; }, headObject: async uri => { const o = objects.get(uri); return o ? { exists: true, size: o.buf.length, contentType: o.mime, generation: o.generation, crc32c: o.crc32c } : { exists: false, size: null, contentType: null, generation: null, crc32c: null }; }, stageCopyToPublic: copy, deletePublicObject: vi.fn(async () => true), setCustomTime: vi.fn(async () => {}) },

@@ -1,6 +1,7 @@
 // Test support for spec 16 (throughput.test.ts, scale.test.ts): in-memory storage, fake cut-out, render and
 // judge services with a small real delay (so parallel photos really interleave), two FIFO task queues, and a
 // seeded batch. Never a network call.
+import { FIXTURE_CHANNEL_RULES } from "@catalog/core/catalog/channel-rules";
 import { vi } from "vitest";
 import { eq } from "drizzle-orm";
 import type { Db } from "@catalog/core/db/client";
@@ -29,7 +30,7 @@ export function fakeWorld(db: Db, delayMs = 1, options: { imageScale?: number } 
   const tasks: QueuedTask[] = [], names = new Set<string>();
   const log = vi.fn<CatalogDeps["log"]>();
   let inMatte = 0, peakMatte = 0;
-  const base = workerCatalogDeps(db);
+  const base = workerCatalogDeps(db,{channelRules:async()=>FIXTURE_CHANNEL_RULES});
   const enqueue = vi.fn(async (route: TaskRoute, body: Record<string, unknown>, opts: EnqueueTaskOptions = {}) => {
     // Cloud Tasks refuses a name that exists or ran recently; enqueueTask treats that as success.
     if (opts.taskId && names.has(opts.taskId)) return opts.taskId;

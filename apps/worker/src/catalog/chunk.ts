@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import sharp from "sharp";
 import { and, eq, inArray, isNull, ne, notInArray, or, sql } from "drizzle-orm";
 import { catalogBatches, catalogChunks, catalogOutputs, catalogProducts, catalogSourceImages } from "@catalog/core/db/schema";
-import { CHANNELS } from "@catalog/core/catalog/channels";
+import { frozenChannels } from "@catalog/core/catalog/holdout";
 import { batchPrefix, derivedPath, publicObjectPath, publicUrl, stagingPath } from "@catalog/core/catalog/naming";
 import { planProduct, shotGeometry, trimRules, UnsupportedSourceError, type EnlargementShot, type Matte } from "@catalog/core/catalog/render";
 import { renderKey, renderKeys, rerenderedKey } from "@catalog/core/catalog/pipeline/publish";
@@ -269,6 +269,8 @@ export async function handleChunkTask(rawDeps: CatalogDeps, body: Record<string,
     // switch is on: the plain path), and the render's stored upscalers for it.
     const be = batchEnlargement(deps,batch);
     const renderUpscalers = {upscaler:be?.x2 ?? null,upscalerX4:be?.x4 ?? null};
+    // M3-S1: the channel values (canvas, margins, background, DPI) and render-key versions from the M5 registry.
+    const rules = await deps.channelRules();
     // Spec 18 lifecycle 3.5 step 4 (F63): render-stage products skipped because an enlargement is still queued; the
     // chunk parks at the end of the delivery (or goes on at once when the rows settled meanwhile).
     const waitingProducts:number[] = [];
@@ -357,9 +359,13 @@ export async function handleChunkTask(rawDeps: CatalogDeps, body: Record<string,
         // Spec 18: the shots cut out in this delivery, for the product's enlargement decision once all are cut out.
         const shots = new Map<string,EnlargementShot>();
         const live = await deps.db.select().from(catalogOutputs).where(and(eq(catalogOutputs.productId,productId),eq(catalogOutputs.isLive,true)));
+        // M3-F3-R3: a listing held by an experiment (a holdout control) is never planned for a new render; what is live stays.
+        const frozen = await frozenChannels(deps.db,product.optionId,batch.channels);
+        if (frozen.length) deps.log("catalog holdout listing left as is",{batchId:batch.id,productId,channels:frozen.map(f=>f.channel),reasons:frozen.map(f=>f.reason),experimentIds:[...new Set(frozen.map(f=>f.experimentId))]});
         await eachPhoto(sources,async source=>{
           for (const channel of batch.channels) {
-            const keys = renderKeys({sourceSha256:source.sha256,channel,n:source.n,policyKey:`default|${productPolicy.matteModel}`}), key = keys[0]!;
+            if (frozen.some(f=>f.channel===channel)) continue;
+            const keys = renderKeys({sourceSha256:source.sha256,channel,n:source.n,policyKey:`default|${productPolicy.matteModel}`,rulesVersion:rules.keyVersion(channel)}), key = keys[0]!;
             if (live.some(o=>o.channel===channel && o.n===source.n && keys.includes(o.renderKey))) continue;
             const [exists] = await deps.db.select({id:catalogOutputs.id}).from(catalogOutputs).where(and(eq(catalogOutputs.batchId,batch.id),eq(catalogOutputs.productId,productId),eq(catalogOutputs.sourceImageId,source.id),eq(catalogOutputs.channel,channel)));
             if (exists) continue;
@@ -484,7 +490,7 @@ export async function handleChunkTask(rawDeps: CatalogDeps, body: Record<string,
           if (reconciled.queued || (await primeReadiness(deps,{be,batch,photos:prepared,rows:reconciled.rows,write:underClaim,chunkId:chunk.id})).queued) { waitingProducts.push(index); continue; }
         }
         const geometry = prepared.flatMap(({p,matte})=>{const shot=shotGeometry(matte.alpha,p.width,p.height,{rgb:p.rgb,...trimRules(product.productType,matte)});return shot ? [shot]:[];});
-        const productPlan = (c:keyof typeof CHANNELS) => geometry.length ? planProduct(CHANNELS[c],geometry):undefined;
+        const productPlan = (c:typeof batch.channels[number]) => geometry.length ? planProduct(rules.spec(c),geometry):undefined;
         const uniformScale = productPlan("styli")?.uniformScale;
         await eachPhoto(prepared,async ({source,p,matte})=>{
           const outputs = await deps.db.select().from(catalogOutputs).where(and(eq(catalogOutputs.productId,productId),eq(catalogOutputs.sourceImageId,source.id),eq(catalogOutputs.batchId,batch.id),eq(catalogOutputs.status,"pending")));
@@ -496,7 +502,7 @@ export async function handleChunkTask(rawDeps: CatalogDeps, body: Record<string,
             // Spec 18 lifecycle 3.7: an output held for its enlargement is always rendered again (readiness decides anew, F22).
             if (head.exists && output.bytes !== null && head.size===output.bytes && !output.flags.includes("enlargement_failed")) { await underClaim(async tx=>tx.update(catalogOutputs).set({stagingUri:uri,crc32c:head.crc32c,status:output.flags.some(f=>f==="failed_compliance") || holdsAtRender(output.flags) ? "needs_attention":"staged",updatedAt:deps.now()}).where(eq(catalogOutputs.id,output.id))); continue; }
             const renderStart = +deps.now();
-            const rendered = (await deps.renderAllChannels(p,matte,[output.channel],{shotNumber:source.n,productType:product.productType ?? "other",synthesiseShadow:shadowAllowed,identifier:product.identifier,publicObjectPath:output.objectPath,canvas:productPlan(output.channel)?.canvas,...renderUpscalers,...(output.channel==="styli" ? {uniformScale}:{}),trace:{batchId:batch.id,productId}}))[output.channel];
+            const rendered = (await deps.renderAllChannels(p,matte,[output.channel],{shotNumber:source.n,productType:product.productType ?? "other",synthesiseShadow:shadowAllowed,identifier:product.identifier,publicObjectPath:output.objectPath,canvas:productPlan(output.channel)?.canvas,channelRules:rules,...renderUpscalers,...(output.channel==="styli" ? {uniformScale}:{}),trace:{batchId:batch.id,productId}}))[output.channel];
             renderMs += +deps.now()-renderStart;
             // Ledger: worker time per output (ms only; the per-chunk compute row carries the money) without the
             // photo's one upscale call, which gets its own row priced at the rate of the service that made it (spec 16:
@@ -513,7 +519,7 @@ export async function handleChunkTask(rawDeps: CatalogDeps, body: Record<string,
             // one that fell back to the plain path goes back to the plain key).
             if (rendered.upscale) deps.log("catalog upscale",{batchId:batch.id,productId,sourceImageId:source.id,channel:output.channel,n:source.n,upscaleMs:rendered.upscale.reused ? 0:rendered.upscale.ms,reused:!!rendered.upscale.reused});
             const flags = [...new Set([...source.flags,...rendered.flags])], status = rendered.status==="skipped" ? "skipped":!rendered.compliance.ok || holdsAtRender(flags) ? "needs_attention":rendered.jpeg ? "staged":"failed";
-            const patch = {canvasW:rendered.plan.w,canvasH:rendered.plan.h,scale:rendered.plan.scale,placedX:rendered.plan.placedX,placedY:rendered.plan.placedY,bytes:rendered.bytes,quality:rendered.quality,flags,compliance:{...rendered.compliance,auto_actions:autoActionsOf(output.compliance)},renderKey:rerenderedKey(output,rendered.upscale?.model,()=>renderKey({sourceSha256:source.sha256,channel:output.channel,n:source.n,policyKey:`default|${productPolicy.matteModel}`})),reason:[...(busyBackgroundHold(output.compliance) ? [`${BUSY_BACKGROUND_DETAILS.why} ${BUSY_BACKGROUND_DETAILS.whatToDo}`]:[]),...rendered.notes].join("; ") || (flags.includes("small_source") ? flagReason("small_source"):null),updatedAt:deps.now()};
+            const patch = {canvasW:rendered.plan.w,canvasH:rendered.plan.h,scale:rendered.plan.scale,placedX:rendered.plan.placedX,placedY:rendered.plan.placedY,bytes:rendered.bytes,quality:rendered.quality,flags,compliance:{...rendered.compliance,auto_actions:autoActionsOf(output.compliance)},renderKey:rerenderedKey(output,rendered.upscale?.model,()=>renderKey({sourceSha256:source.sha256,channel:output.channel,n:source.n,policyKey:`default|${productPolicy.matteModel}`,rulesVersion:rules.keyVersion(output.channel)})),reason:[...(busyBackgroundHold(output.compliance) ? [`${BUSY_BACKGROUND_DETAILS.why} ${BUSY_BACKGROUND_DETAILS.whatToDo}`]:[]),...rendered.notes].join("; ") || (flags.includes("small_source") ? flagReason("small_source"):null),updatedAt:deps.now()};
             await underClaim(async tx=>{await tx.update(catalogOutputs).set(patch).where(eq(catalogOutputs.id,output.id));await flush(tx);});
             if (rendered.jpeg) { const jpeg=rendered.jpeg; await underClaim(async()=>deps.storage.uploadBuffer(path,jpeg,"image/jpeg",{cacheControl:deps.storage.PUBLIC_CACHE_CONTROL})); }
             const staged = rendered.jpeg ? await deps.storage.headObject(uri):null;

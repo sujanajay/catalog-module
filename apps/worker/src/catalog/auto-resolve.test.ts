@@ -1,3 +1,4 @@
+import { FIXTURE_CHANNEL_RULES } from "@catalog/core/catalog/channel-rules";
 import sharp from "sharp";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { and, eq } from "drizzle-orm";
@@ -81,7 +82,7 @@ function world(opts: { photoScores?: (n: number) => Record<string, number> } = {
   const objects = new Map<string, Buffer>();
   let generation = 1;
   const upload = async (path: string, buf: Buffer) => { objects.set(`gs://assets/${path}`, buf); generation++; return `gs://assets/${path}`; };
-  const base = workerCatalogDeps(db);
+  const base = workerCatalogDeps(db,{channelRules:async()=>FIXTURE_CHANNEL_RULES});
   const judgeOutput = vi.fn<CatalogDeps["judgeOutput"]>(async input => {
     const seen = await looksAt(input.output);
     const scores = { complete_product: 95, same_product: 100, edge_quality: seen.edge, background_clean: seen.background, no_text_or_watermark: 95, orientation_ok: 95, ...opts.photoScores?.(input.n) };

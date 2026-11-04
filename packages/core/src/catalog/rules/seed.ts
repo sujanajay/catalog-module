@@ -207,6 +207,11 @@ export const GATE1_DECISIONS: Gate1Decision[] = [
 ];
 
 export const GREY_240 = "#F0F0F0";
+/**
+ * The canvas grey of ruleset version 1, the value the render used before gate 1 (dataset rule R227 v1). channels.ts now
+ * holds GREY_240 (M3-S1), so version 1 keeps this value explicitly and stays what was live then (M3 decision D14).
+ */
+export const V1_GREY = "#E0E0E0";
 
 type RuleEdit = { ruleId: string; patch: Partial<RuleInsert>; reason: string };
 
@@ -360,7 +365,7 @@ async function seedVersion1(tx: Tx, data: RulesDataset): Promise<Omit<SeedChanne
         targetCanvas: spec.targetCanvas,
         margins: spec.margins,
         anchor: spec.anchor,
-        background: spec.background,
+        background: V1_GREY,
         firstImageBackground: spec.firstImageBackground ?? null,
         dpi: spec.dpi,
         fixedCanvas: spec.fixedCanvas,
@@ -368,7 +373,7 @@ async function seedVersion1(tx: Tx, data: RulesDataset): Promise<Omit<SeedChanne
         sheetText: spec.sheetText,
         notes: spec.notes ?? null,
         status: "active" as const,
-        reason: "Seeded from channels.ts with the same numbers (M5-F1-R3).",
+        reason: "Seeded from channels.ts with the same numbers (M5-F1-R3); background the earlier #E0E0E0.",
         createdBy: SEED_BY,
       };
     }),

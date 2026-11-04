@@ -51,6 +51,9 @@ describe("shadow failures", () => {
   }, 30_000);
 });
 
+// A blue-grey studio source for the fringe tests: a white source is only 15 from the 240 canvas grey (M3-S1), too close to tell a fringe apart, so the fringe check does not run on it.
+const STUDIO_BG: [number, number, number] = [190, 200, 220];
+
 describe("cut-out failures", () => {
   it("fails pixels_lost and thin_parts when the matte drops the strap or a region", async () => {
     const base = await syntheticSubject("amazon", 2, "footwear");
@@ -72,13 +75,18 @@ describe("cut-out failures", () => {
     expect(failed(checkCutout(await ctxOf(kept)))).toContain("cutout.background_kept");
   });
   it("fails halo for leftover background around the product and fringe for source-coloured edges", async () => {
-    const base = await syntheticSubject("amazon", 2, "footwear");
+    const bg = STUDIO_BG;
+    const base = await syntheticSubject("amazon", 2, "footwear", { bg });
     const p = base.placement;
-    const halo = await editOutput(base, r => { const x = p.placedX - 2, y0 = p.placedY + 100; paintRect(r, x, y0, 2, 150, [255, 255, 255]); });
+    const halo = await editOutput(base, r => { const x = p.placedX - 2, y0 = p.placedY + 100; paintRect(r, x, y0, 2, 150, bg); });
     expect(failed(checkCutout(await ctxOf(halo)))).toContain("cutout.halo");
     const ctx = await ctxOf(base);
-    const fringe = await editOutput(base, r => { for (let i = 0; i < ctx.expectedAlpha.length; i++) if (ctx.expectedAlpha[i]! > 10 && ctx.expectedAlpha[i]! <= 200) { r.rgb[i * 3] = 255; r.rgb[i * 3 + 1] = 255; r.rgb[i * 3 + 2] = 255; } });
+    const fringe = await editOutput(base, r => { for (let i = 0; i < ctx.expectedAlpha.length; i++) if (ctx.expectedAlpha[i]! > 10 && ctx.expectedAlpha[i]! <= 200) { r.rgb[i * 3] = bg[0]; r.rgb[i * 3 + 1] = bg[1]; r.rgb[i * 3 + 2] = bg[2]; } });
     expect(failed(checkCutout(await ctxOf(fringe)))).toContain("cutout.fringe");
+  });
+  it("does not run the fringe check for a white source on the 240 grey canvas (M3-S1: the two are too close to tell apart)", async () => {
+    const results = checkCutout(await ctxOf(await syntheticSubject("amazon", 2, "footwear")));
+    expect(results.find(r => r.id === "cutout.fringe")).toMatchObject({ status: "not_run" });
   });
 });
 

@@ -17,6 +17,7 @@ import { and, eq, inArray, isNull, lt, notInArray, or, sql } from "drizzle-orm";
 import { catalogBatches, catalogChunks, catalogEnlargements, catalogOutputs, catalogProducts, catalogSourceImages, type CatalogEnlargement } from "@catalog/core/db/schema";
 import { enlargedPath, enlargedTilePath, enlargementPrefix } from "@catalog/core/catalog/naming";
 import { CHANNELS } from "@catalog/core/catalog/channels";
+import type { ChannelRules } from "@catalog/core/catalog/channel-rules";
 import { enlargementPlan, UnsupportedSourceError, type EnlargementShot, type Prepared } from "@catalog/core/catalog/render";
 import { EnlargementNotReadyError, gpuUrlsFromEnv, isCpuUpscalerId, upscaleTargetFromEnv, markEnlargementTerminal, markEnlargementUnwanted, primeSourceX2, storedUpscaler, upscaleMaxPixels, upscalerFactor, upscalerId, upscalerModel, upscaleUpload, UPSCALE_MODEL_VERSIONS, type UpscaleFactor, type Upscaler } from "@catalog/core/catalog/upscale";
 import { ENLARGE_TASK_MARGIN_MS, EnlargeError, enlargeTimeoutMs, enlargeViaService, probeUpscaleHealth, type EnlargeDeps, type EnlargeResult, type UpscaleProbe } from "@catalog/core/catalog/enlarge";
@@ -156,9 +157,9 @@ export function noRouteSentence(channels: readonly string[]): string {
  * (x4 above 2.0x when the route has one) and the route's effective scale. Only `wanted` photos get rows (those with
  * an undecided output still to make or judge). A route `none` row is born `failed` with the size sentence (no call).
  */
-export function wantedRows(deps: Pick<CatalogDeps, "exportHashes">, be: BatchEnlargement, batch: Pick<typeof catalogBatches.$inferSelect, "id" | "channels">, product: Pick<typeof catalogProducts.$inferSelect, "id" | "productType">, shots: PhotoShot[], wanted: ReadonlySet<string>, env: NodeJS.ProcessEnv = process.env): NewRow[] {
+export function wantedRows(deps: Pick<CatalogDeps, "exportHashes">, be: BatchEnlargement, batch: Pick<typeof catalogBatches.$inferSelect, "id" | "channels">, product: Pick<typeof catalogProducts.$inferSelect, "id" | "productType">, shots: PhotoShot[], wanted: ReadonlySet<string>, rules: Pick<ChannelRules, "spec">, env: NodeJS.ProcessEnv = process.env): NewRow[] {
   const shapes: EnlargementShot[] = shots.map((s) => ({ width: s.p.width, height: s.p.height, rgb: s.p.rgb, alpha: s.alpha, model: s.matteModel }));
-  const plan = enlargementPlan(batch.channels, shapes, product.productType, be.route.minScale, !!be.x4);
+  const plan = enlargementPlan(batch.channels, shapes, product.productType, be.route.minScale, !!be.x4, rules);
   const rows: NewRow[] = [];
   for (const [i, shot] of shots.entries()) {
     if (!wanted.has(shot.source.id) || shot.source.flags.includes("chart_image") || !plan[i]!.length) continue;
@@ -203,7 +204,8 @@ export interface ReconcileResult { rows: CatalogEnlargement[]; queued: boolean; 
  */
 export async function reconcileEnlargements(deps: CatalogDeps, input: ReconcileInput): Promise<ReconcileResult> {
   const { be, batch, product } = input;
-  const target = wantedRows(deps, be, batch, product, input.shots, input.wanted);
+  // M3-S1: the same channel values the render reads, so the plan stays a superset of what the render needs.
+  const target = wantedRows(deps, be, batch, product, input.shots, input.wanted, await deps.channelRules());
   const now = deps.now();
   let rows: CatalogEnlargement[];
   if (input.mode === "check") {
