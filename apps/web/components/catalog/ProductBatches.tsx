@@ -1,4 +1,4 @@
-import { when } from "@/components/ui";
+import LocalTime from "@/components/LocalTime";
 import type { ChangeKind } from "@catalog/core/catalog/types";
 import type { ProductCompare } from "../../lib/catalog/compare";
 
@@ -8,5 +8,5 @@ export const compareLink = (batchId: string, identifier: string) => `/catalog/${
 
 /** "Batches that touched this product", newest first, each opening that batch's comparison for this product. */
 export default function ProductBatches({ batches, identifier }: { batches: ProductCompare["batches"]; identifier: string }) {
-  return <section><h2>Batches that touched this product</h2>{!batches.length ? <p>None yet.</p> : <ul className="history">{batches.map(b => <li key={b.id}>{when(b.finishedAt ?? b.createdAt)} · <a href={compareLink(b.id, identifier)}>{b.name}</a> · {CHANGE_LABELS[b.change]}</li>)}</ul>}</section>;
+  return <section><h2>Batches that touched this product</h2>{!batches.length ? <p>None yet.</p> : <ul className="history">{batches.map(b => <li key={b.id}><LocalTime at={b.finishedAt ?? b.createdAt} /> · <a href={compareLink(b.id, identifier)}>{b.name}</a> · {CHANGE_LABELS[b.change]}</li>)}</ul>}</section>;
 }

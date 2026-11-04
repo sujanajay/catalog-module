@@ -1,6 +1,6 @@
 {
-  "id": "eb6db9c2-0965-4398-b8e8-f7b2d643fdb9",
-  "prevId": "24d8a858-e450-4c22-a0eb-e7f09c7d6336",
+  "id": "23749088-7ab2-4538-a631-02f42f03a891",
+  "prevId": "25df6381-6ce8-4809-87e2-9a53086f210b",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -2551,8 +2551,8 @@
       "checkConstraints": {},
       "isRLSEnabled": false
     },
-    "public.catalog_improvements": {
-      "name": "catalog_improvements",
+    "public.catalog_key_conflicts": {
+      "name": "catalog_key_conflicts",
       "schema": "",
       "columns": {
         "id": {
@@ -2562,121 +2562,93 @@
           "notNull": true,
           "default": "gen_random_uuid()"
         },
-        "batch_id": {
-          "name": "batch_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "product_id": {
-          "name": "product_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "source_image_id": {
-          "name": "source_image_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "tries": {
-          "name": "tries",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true,
-          "default": 0
-        },
-        "last_tried_at": {
-          "name": "last_tried_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "improved_at": {
-          "name": "improved_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "previous": {
-          "name": "previous",
-          "type": "jsonb",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "ended_at": {
-          "name": "ended_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "end_reason": {
-          "name": "end_reason",
+        "org_id": {
+          "name": "org_id",
           "type": "text",
           "primaryKey": false,
+          "notNull": true,
+          "default": "'opptra'"
+        },
+        "channel": {
+          "name": "channel",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "market": {
+          "name": "market",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "key_kind": {
+          "name": "key_kind",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "key_value": {
+          "name": "key_value",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "candidates": {
+          "name": "candidates",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "first_seen_at": {
+          "name": "first_seen_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "last_seen_at": {
+          "name": "last_seen_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "resolved_at": {
+          "name": "resolved_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
           "notNull": false
-        },
-        "created_at": {
-          "name": "created_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "now()"
-        },
-        "updated_at": {
-          "name": "updated_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "now()"
         }
       },
-      "indexes": {
-        "catalog_improvements_batch_photo_uq": {
-          "name": "catalog_improvements_batch_photo_uq",
-          "columns": [
-            {
-              "expression": "batch_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "source_image_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": true,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        }
-      },
-      "foreignKeys": {
-        "catalog_improvements_batch_id_catalog_batches_id_fk": {
-          "name": "catalog_improvements_batch_id_catalog_batches_id_fk",
-          "tableFrom": "catalog_improvements",
-          "tableTo": "catalog_batches",
-          "columnsFrom": [
-            "batch_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
-        }
-      },
+      "indexes": {},
+      "foreignKeys": {},
       "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
+      "uniqueConstraints": {
+        "catalog_key_conflicts_org_key_uq": {
+          "name": "catalog_key_conflicts_org_key_uq",
+          "nullsNotDistinct": false,
+          "columns": [
+            "org_id",
+            "channel",
+            "market",
+            "key_kind",
+            "key_value"
+          ]
+        }
+      },
       "policies": {},
       "checkConstraints": {
-        "catalog_improvements_end_reason_check": {
-          "name": "catalog_improvements_end_reason_check",
-          "value": "\"catalog_improvements\".\"end_reason\" IN ('superseded', 'not_passed')"
+        "catalog_key_conflicts_channel_check": {
+          "name": "catalog_key_conflicts_channel_check",
+          "value": "\"catalog_key_conflicts\".\"channel\" IN ('noon', 'namshi', 'trendyol', 'styli', 'centrepoint', 'sixthstreet', 'vogacloset', 'amazon', 'shein')"
+        },
+        "catalog_key_conflicts_market_check": {
+          "name": "catalog_key_conflicts_market_check",
+          "value": "\"catalog_key_conflicts\".\"market\" IN ('ae', 'sa', 'ae_sa')"
+        },
+        "catalog_key_conflicts_key_kind_check": {
+          "name": "catalog_key_conflicts_key_kind_check",
+          "value": "\"catalog_key_conflicts\".\"key_kind\" IN ('zsku', 'child_zsku', 'partner_sku', 'barcode', 'asin', 'seller_sku', 'style_id')"
         }
       },
       "isRLSEnabled": false
@@ -3537,22 +3509,6 @@
           ],
           "isUnique": true,
           "where": "\"catalog_outputs\".\"is_live\"",
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        },
-        "catalog_outputs_provisional_plain_idx": {
-          "name": "catalog_outputs_provisional_plain_idx",
-          "columns": [
-            {
-              "expression": "published_at",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "where": "\"catalog_outputs\".\"is_live\" AND \"catalog_outputs\".\"status\" = 'verified' AND \"catalog_outputs\".\"flags\" @> '[\"provisional\", \"enlargement_failed\"]'::jsonb",
           "concurrently": false,
           "method": "btree",
           "with": {}

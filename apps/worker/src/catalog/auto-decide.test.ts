@@ -43,7 +43,7 @@ function world() {
     renderAllChannels: vi.fn<CatalogDeps["renderAllChannels"]>(async (_p, _m, channels) => Object.fromEntries(channels.map(channel => [channel, { jpeg: Buffer.from([255, 216, 255, _p.rgb[0]!]), status: "ok", plan: { w: 800, h: 1000, lowResolution: false, safeBox: { x: 0, y: 0, w: 800, h: 1000 }, scale: 1, placedX: 0, placedY: 0, detailShot: false }, quality: 90, bytes: 4, flags: [], notes: [], attention: null, compliance: { ok: true, failures: [] } }])) as unknown as Awaited<ReturnType<CatalogDeps["renderAllChannels"]>>) };
   return { deps, copy, upload };
 }
-/** `auto`: the batch was started with the auto-decide rules (read from the table migration 0013 seeds, as Start does). */
+/** `auto`: the batch was started with the auto-decide rules (read from the table migration 0014 seeds, as Start does). */
 async function seed(w: ReturnType<typeof world>, name: string, options: { shots: string[]; auto: boolean }) {
   const autoDecide = options.auto ? await autoDecideSnapshot(db) : undefined;
   const [batch] = await db.insert(catalogBatches).values({ brandSlug: "anta", brandName: "Anta", name, isTest: true, createdBy: "test@opptra.com", status: "matting", channels: ["noon"],
@@ -67,7 +67,7 @@ const wrongItemOnTwo = (w: ReturnType<typeof world>) => vi.mocked(w.deps.judgeOu
   ? { scores: { ...PASS, same_product: 10, overall: 80 }, verdict: "flag", reasons: [], isCollage: false, costUsd: 0, calls: 0, usage: {}, model: input.model, flags: ["different_product"] }
   : { scores: PASS, verdict: "pass", reasons: [], isCollage: false, costUsd: 0, calls: 0, usage: {}, model: input.model, flags: [] });
 
-it("migration 0013 seeds exactly the M1-F3-R1 default rules, and Start's snapshot reads them", async () => {
+it("migration 0014 seeds exactly the M1-F3-R1 default rules, and Start's snapshot reads them", async () => {
   const snapshot = await autoDecideSnapshot(db);
   expect([...snapshot.rules].sort((a, b) => a.id.localeCompare(b.id))).toEqual([...DEFAULT_AUTO_DECIDE_RULES].sort((a, b) => a.id.localeCompare(b.id)));
 }, 60_000);

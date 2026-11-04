@@ -1,0 +1,220 @@
+{
+  "apps/web/app/catalog/[id]/page.tsx": {
+    "copy/reading-grade": {
+      "count": 1
+    },
+    "copy/word-list": {
+      "count": 7
+    }
+  },
+  "apps/web/app/catalog/ops/page.tsx": {
+    "copy/word-list": {
+      "count": 2
+    }
+  },
+  "apps/web/app/catalog/page.tsx": {
+    "copy/word-list": {
+      "count": 2
+    }
+  },
+  "apps/web/app/catalog/products/[brand]/[key]/page.tsx": {
+    "copy/word-list": {
+      "count": 1
+    }
+  },
+  "apps/web/app/layout.tsx": {
+    "copy/word-list": {
+      "count": 1
+    }
+  },
+  "apps/web/components/catalog/BatchKpis.tsx": {
+    "copy/word-list": {
+      "count": 2
+    }
+  },
+  "apps/web/components/catalog/BatchTabs.tsx": {
+    "copy/word-list": {
+      "count": 1
+    }
+  },
+  "apps/web/components/catalog/ChannelPicker.tsx": {
+    "copy/reading-grade": {
+      "count": 1
+    }
+  },
+  "apps/web/components/catalog/CompareGrid.tsx": {
+    "copy/word-list": {
+      "count": 1
+    }
+  },
+  "apps/web/components/catalog/CompareTab.tsx": {
+    "copy/word-list": {
+      "count": 2
+    }
+  },
+  "apps/web/components/catalog/DetailsTab.tsx": {
+    "copy/word-list": {
+      "count": 2
+    }
+  },
+  "apps/web/components/catalog/EvalLabelBar.tsx": {
+    "copy/word-list": {
+      "count": 2
+    }
+  },
+  "apps/web/components/catalog/GroupingPreview.tsx": {
+    "copy/word-list": {
+      "count": 1
+    }
+  },
+  "apps/web/components/catalog/ProductBatches.tsx": {
+    "copy/word-list": {
+      "count": 1
+    }
+  },
+  "apps/web/components/catalog/ProductEvents.tsx": {
+    "copy/word-list": {
+      "count": 2
+    }
+  },
+  "apps/web/components/catalog/ProductSearch.tsx": {
+    "copy/reading-grade": {
+      "count": 1
+    },
+    "copy/word-list": {
+      "count": 2
+    }
+  },
+  "apps/web/components/catalog/RemoveProductDialog.tsx": {
+    "copy/word-list": {
+      "count": 2
+    }
+  },
+  "apps/web/components/catalog/ReplaceModal.tsx": {
+    "copy/word-list": {
+      "count": 2
+    }
+  },
+  "apps/web/components/catalog/SheetPreview.tsx": {
+    "copy/word-list": {
+      "count": 1
+    }
+  },
+  "apps/web/components/catalog/SkuMapModal.tsx": {
+    "copy/word-list": {
+      "count": 3
+    }
+  },
+  "apps/web/components/catalog/Uploader.tsx": {
+    "copy/word-list": {
+      "count": 1
+    }
+  },
+  "apps/web/components/catalog/WizardStep1.tsx": {
+    "copy/reading-grade": {
+      "count": 1
+    }
+  },
+  "apps/web/components/catalog/WizardStep3.tsx": {
+    "copy/word-list": {
+      "count": 1
+    }
+  },
+  "apps/web/lib/catalog/batches.ts": {
+    "copy/word-list": {
+      "count": 1
+    }
+  },
+  "apps/web/lib/catalog/compare-copy.ts": {
+    "copy/word-list": {
+      "count": 1
+    }
+  },
+  "apps/web/lib/catalog/copy.ts": {
+    "copy/word-list": {
+      "count": 5
+    }
+  },
+  "apps/web/lib/catalog/ops-copy.ts": {
+    "copy/reading-grade": {
+      "count": 1
+    },
+    "copy/word-list": {
+      "count": 3
+    }
+  },
+  "apps/web/lib/catalog/ops.ts": {
+    "copy/word-list": {
+      "count": 1
+    }
+  },
+  "apps/web/lib/catalog/start.ts": {
+    "copy/word-list": {
+      "count": 1
+    }
+  },
+  "apps/web/lib/catalog/uploads.ts": {
+    "copy/word-list": {
+      "count": 1
+    }
+  },
+  "apps/web/lib/errors.ts": {
+    "copy/word-list": {
+      "count": 1
+    }
+  },
+  "apps/web/lib/people-copy.ts": {
+    "copy/word-list": {
+      "count": 1
+    }
+  },
+  "packages/core/src/catalog/ingest/group.ts": {
+    "copy/word-list": {
+      "count": 1
+    }
+  },
+  "packages/core/src/catalog/ingest/index.ts": {
+    "copy/word-list": {
+      "count": 2
+    }
+  },
+  "packages/core/src/catalog/ingest/link-reasons.ts": {
+    "copy/word-list": {
+      "count": 1
+    }
+  },
+  "packages/core/src/catalog/pipeline/report.ts": {
+    "copy/reading-grade": {
+      "count": 1
+    }
+  },
+  "packages/core/src/catalog/pipeline/status.ts": {
+    "copy/reading-grade": {
+      "count": 1
+    },
+    "copy/word-list": {
+      "count": 3
+    }
+  },
+  "packages/core/src/catalog/qa/reasons.ts": {
+    "copy/reading-grade": {
+      "count": 8
+    },
+    "copy/word-list": {
+      "count": 16
+    }
+  },
+  "packages/core/src/catalog/render.ts": {
+    "copy/reading-grade": {
+      "count": 2
+    },
+    "copy/word-list": {
+      "count": 1
+    }
+  },
+  "packages/core/src/catalog/types.ts": {
+    "copy/word-list": {
+      "count": 8
+    }
+  }
+}

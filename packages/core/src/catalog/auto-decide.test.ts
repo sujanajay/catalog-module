@@ -8,9 +8,9 @@ import { INFORMATION_FLAGS } from "./qa/triage";
 const staged = { status: "needs_attention" as const, stagingUri: "gs://assets/x.jpg", bytes: 10, flags: [] as never[], channel: "noon" as const };
 
 describe("M1-F3-R1 auto-decide rules", () => {
-  it("has one default per hold cause, and migration 0013 seeds exactly those rows", () => {
+  it("has one default per hold cause, and migration 0014 seeds exactly those rows", () => {
     expect(DEFAULT_AUTO_DECIDE_RULES.map(r => r.cause)).toEqual([...HOLD_CAUSES]);
-    const sql = readFileSync(path.join(import.meta.dirname, "..", "..", "drizzle", "0013_auto_decide_rules.sql"), "utf8");
+    const sql = readFileSync(path.join(import.meta.dirname, "..", "..", "drizzle", "0014_auto_decide_rules.sql"), "utf8");
     const seeded = [...sql.matchAll(/\('([a-z_]+):\*', '([a-z_]+)', '\*', '(deliver|drop)', 'seed'\)/g)].map(m => ({ id: `${m[1]}:*`, cause: m[2], channel: "*", action: m[3] }));
     expect(seeded.sort((a, b) => a.id.localeCompare(b.id))).toEqual([...DEFAULT_AUTO_DECIDE_RULES].sort((a, b) => a.id.localeCompare(b.id)));
     // Product truth and unreadable photos are dropped; everything else is delivered provisional.

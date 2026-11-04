@@ -4,7 +4,7 @@ import { channel } from "@catalog/core/catalog/channels";
 import { inrPerUsdFromEnv, RUPEES_NOT_CONFIGURED, usdAmount } from "@catalog/core/catalog/cost";
 import type { BrandCost } from "@catalog/core/catalog/cost-report";
 import AutoRefresh from "@/components/AutoRefresh";
-import { when } from "@/components/ui";
+import LocalTime from "@/components/LocalTime";
 import { db } from "@/lib/db";
 import { requireRole } from "@/lib/user";
 import { activeBatches, batchCostDetail, costOverview, gpuCandidateRevision, healthSummary, lifetimeBrandCost, recentBatches, recentFailures, COST_TTL_MS } from "@/lib/catalog/ops";
@@ -91,7 +91,7 @@ export default async function OpsPage({ searchParams }: { searchParams: Promise<
                 <td>{statusWord(b.status)}</td>
                 <td>{chunkTotal(b.chunks) ? `${chunkTotal(b.chunks)} in total · ${chunkProgressText(b.chunks)}` : "No chunks yet"}</td>
                 <td>{money(b.usd, rate)}</td>
-                <td>{when(b.startedAt ?? b.createdAt)}</td>
+                <td><LocalTime at={b.startedAt ?? b.createdAt} /></td>
                 <td><Link href={opsLink({ batch: b.id })}>Cost detail</Link></td>
               </tr>
             ))}</tbody>
@@ -104,19 +104,19 @@ export default async function OpsPage({ searchParams }: { searchParams: Promise<
         {!failures.batches.length && !failures.chunks.length ? <p>Nothing failed in the last 24 hours.</p> : null}
         {failures.batches.length ? (
           <ul>{failures.batches.map(f => (
-            <li key={f.id}><Link href={`/catalog/${f.id}`}>{f.name}</Link> ({f.brandName}), {f.status === "failed" ? "stopped" : "reported a problem"} {when(f.at)}: {f.reason} <a href={logsUrl(f.id)} target="_blank" rel="noreferrer">Open logs</a></li>
+            <li key={f.id}><Link href={`/catalog/${f.id}`}>{f.name}</Link> ({f.brandName}), {f.status === "failed" ? "stopped" : "reported a problem"} <LocalTime at={f.at} />: {f.reason} <a href={logsUrl(f.id)} target="_blank" rel="noreferrer">Open logs</a></li>
           ))}</ul>
         ) : null}
         {failures.chunks.length ? (
           <ul>{failures.chunks.map(c => (
-            <li key={`${c.batchId}-${c.index}`}><Link href={`/catalog/${c.batchId}`}>{c.batchName}</Link>, {when(c.at)}: {chunkGaveUpText(c)} <a href={logsUrl(c.batchId)} target="_blank" rel="noreferrer">Open logs</a></li>
+            <li key={`${c.batchId}-${c.index}`}><Link href={`/catalog/${c.batchId}`}>{c.batchName}</Link>, <LocalTime at={c.at} />: {chunkGaveUpText(c)} <a href={logsUrl(c.batchId)} target="_blank" rel="noreferrer">Open logs</a></li>
           ))}</ul>
         ) : null}
       </section>
 
       <section>
         <h2>Cost per brand, last 30 days</h2>
-        <p className="help">Test batches are left out. Compare the cost per product with the {AGENCY_REFERENCE}. Cost figures are read at most every {costMinutes} minutes{overview ? `, last at ${when(overview.readAt)}` : ""}.</p>
+        <p className="help">Test batches are left out. Compare the cost per product with the {AGENCY_REFERENCE}. Cost figures are read at most every {costMinutes} minutes{overview ? <>, last at <LocalTime at={overview.readAt} /></> : ""}.</p>
         {overview ? <BrandTable rows={overview.brands} rate={rate} /> : <p>{REPORT_UNAVAILABLE}</p>}
         {lifetimeRead ? (
           <>
@@ -145,7 +145,7 @@ export default async function OpsPage({ searchParams }: { searchParams: Promise<
             <h3><Link href={`/catalog/${detail.batch.id}`}>{detail.batch.name}</Link> ({detail.batch.brandName})</h3>
             {!detail.stages.length ? <p>No cost is recorded for this batch yet.</p> : (
               <>
-                <p>Total {money(detail.attribution.totalUsd, rate)}, read at {when(detail.readAt)}. <a href={logsUrl(detail.batch.id)} target="_blank" rel="noreferrer">Open logs</a></p>
+                <p>Total {money(detail.attribution.totalUsd, rate)}, read at <LocalTime at={detail.readAt} />. <a href={logsUrl(detail.batch.id)} target="_blank" rel="noreferrer">Open logs</a></p>
                 <div className="grid2">
                   <div>
                     <h4>By step</h4>

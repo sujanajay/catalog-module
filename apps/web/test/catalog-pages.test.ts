@@ -274,8 +274,8 @@ async function setBatch(values:Partial<Omit<BatchRow,"counts">>&{counts?:Partial
 it("a ready draft says created, carries Continue setting up and says its tabs have nothing made yet",async()=>{
  await setBatch({channels:[],counts:{previewReady:true,products:6,sources:27}});
  const html=await batchPage();
- expect(html).toMatch(/created \d{4}-\d\d-\d\d \d\d:\d\dZ by admin@opptra\.com/);
- expect(html).not.toMatch(/started \d{4}-/);expect(html).not.toMatch(/·\s*(<!-- -->)?\s*·/);
+ expect(html).toMatch(/created <time dateTime="[^"]+">\d{1,2} [A-Z][a-z]{2} \d{4}, \d\d:\d\d UTC<\/time> by (<!-- -->)?admin@opptra\.com/);
+ expect(html).not.toMatch(/started <time/);expect(html).not.toMatch(/·\s*(<!-- -->)?\s*·/);
  expect(html).toContain(DRAFT_READY_TEXT);
  expect(html).toContain(`<a class="btn primary" href="/catalog/new?batch=${batchId}">${CONTINUE_SETTING_UP}</a>`);
  expect(html).toContain(HOW_THIS_WORKS_DRAFT);
@@ -302,7 +302,7 @@ it("a draft whose grouping is not ready keeps the existing banner text",async()=
 it("a batch that could not start says created, with the not-started tabs and without Continue setting up",async()=>{
  await setBatch({status:"failed",counts:{failReason:"No photos could be downloaded.",products:0,sources:0}});
  const html=await batchPage();
- expect(html).toMatch(/(<!-- -->)?created \d{4}-/);expect(html).not.toMatch(/started \d{4}-/);
+ expect(html).toMatch(/created <time dateTime=/);expect(html).not.toMatch(/started <time/);
  expect(html).not.toContain(CONTINUE_SETTING_UP);expect(html).not.toContain(HOW_THIS_WORKS_DRAFT);
  expect(panel(html,"sheet")).toBe(`<p>${notStartedText(0,0)}</p>`);
  // Fixed in place (spec 14c F8): Fix and continue in the banner replaces Start again; Cancel this batch beside it.
@@ -334,7 +334,7 @@ it("a started batch says started, keeps its sheet and hides Add SKU ids only wit
  vi.stubEnv("DEV_USER_EMAIL","operator@opptra.com");
  await setBatch({status:"rendering",startedAt:new Date("2026-10-27T09:00:00Z"),counts:{products:0}});
  let html=await batchPage();
- expect(html).toContain("started 2026-10-27 09:00Z by admin@opptra.com");expect(html).not.toMatch(/created \d{4}-/);
+ expect(html).toMatch(/started <time dateTime="2026-10-27T09:00:00.000Z">27 Oct 2026, 09:00 UTC<\/time> by (<!-- -->)?admin@opptra\.com/);expect(html).not.toMatch(/created <time/);
  expect(html).not.toContain(CONTINUE_SETTING_UP);expect(html).not.toContain("This batch has not started.");
  expect(html).not.toContain("Add SKU ids");
  await setBatch({counts:{products:1}});

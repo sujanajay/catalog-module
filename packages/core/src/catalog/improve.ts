@@ -4,7 +4,7 @@
 // (decisions.ts resetPhotoEnlargement): the photo's outputs are re-made and published at the same public path with a
 // new object generation, and the `provisional` flag clears because the new render carries no hold. Tries are bounded:
 // IMPROVE_MAX_TRIES within IMPROVE_WINDOW_MS of the first delivery, the first after IMPROVE_FIRST_DELAY_MS, then at
-// least IMPROVE_SPACING_MS apart. The tries live in catalog_improvements (migration 0019), not on the output, because
+// least IMPROVE_SPACING_MS apart. The tries live in catalog_improvements (migration 0015), not on the output, because
 // every render rewrites the output's compliance record.
 // Review 2026-11-04: a try runs only while the batch still owns the product's links (the product's last_batch_id names
 // it; a later batch that published the product retires the candidate as `superseded`), and only on the batch's
@@ -41,7 +41,7 @@ export interface ImprovementCandidate { batchId: string; productId: string; sour
 
 /** A provisional plain render, live: the slot an improvement is for (outputs of auto-decide batches only). */
 const provisionalPlain = sql`${catalogOutputs.flags} @> '["provisional", "enlargement_failed"]'::jsonb AND ${catalogOutputs.isLive} AND ${catalogOutputs.status} = 'verified' AND ${catalogOutputs.decision} IS NULL`;
-/** The same condition on `catalog_outputs AS o` (raw queries); catalog_outputs_provisional_plain_idx (0019) serves it. */
+/** The same condition on `catalog_outputs AS o` (raw queries); catalog_outputs_provisional_plain_idx (0015) serves it. */
 const provisionalPlainO = sql.raw(`o.flags @> '["provisional", "enlargement_failed"]'::jsonb AND o.is_live AND o.status = 'verified' AND o.decision IS NULL`);
 
 /**

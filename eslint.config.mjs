@@ -1,6 +1,7 @@
 import js from "@eslint/js";
 import { defineConfig } from "eslint/config";
 import tseslint from "typescript-eslint";
+import { copyPlugin } from "./lint/copy-rules.mjs";
 
 /** Vendor SDKs and the OpenRouter transport: imported only by `packages/core/src/vendor/adapters/` (and `llm/` itself). */
 export const VENDOR_SDK_PATTERNS = [
@@ -14,6 +15,32 @@ export const VENDOR_SDK_PATTERNS = [
     allowTypeImports: true,
     message: "Call OpenRouter through the vendor interface (packages/core/src/vendor/adapters/openrouter.ts); type imports are fine.",
   },
+];
+
+/**
+ * Operator copy for the copy lint (UX section 7): the web app's pages, components and server copy, and the core files
+ * whose strings reach the operator in pages, emails and sheets (the same core files as test/no-model-names.test.ts).
+ */
+export const OPERATOR_COPY_FILES = [
+  "apps/web/app/**/*.{ts,tsx}",
+  "apps/web/components/**/*.{ts,tsx}",
+  "apps/web/lib/**/*.{ts,tsx}",
+  "packages/core/src/catalog/qa/reasons.ts",
+  "packages/core/src/catalog/pipeline/status.ts",
+  "packages/core/src/catalog/pipeline/dispatch.ts",
+  "packages/core/src/catalog/cost.ts",
+  "packages/core/src/catalog/cost-report.ts",
+  "packages/core/src/catalog/sheet.ts",
+  "packages/core/src/catalog/types.ts",
+  "packages/core/src/catalog/pipeline/report.ts",
+  "packages/core/src/catalog/enhance.ts",
+  "packages/core/src/catalog/render.ts",
+  "packages/core/src/catalog/status-words.ts",
+  "packages/core/src/catalog/ingest/detect.ts",
+  "packages/core/src/catalog/ingest/link-reasons.ts",
+  "packages/core/src/catalog/ingest/group.ts",
+  "packages/core/src/catalog/ingest/index.ts",
+  "packages/core/src/catalog/ingest/url-list.ts",
 ];
 
 export default defineConfig(
@@ -46,5 +73,22 @@ export default defineConfig(
     rules: {
       "no-restricted-imports": ["error", { patterns: VENDOR_SDK_PATTERNS }],
     },
+  },
+  // UX2 (UX sections 7 and 13.4): the copy lint. No em dash in any linted file; in operator copy no vendor or model
+  // name (the admin Ops page may name vendors), the word list and reading grade 8. Copy from before the lint is listed
+  // in eslint-suppressions.json; fix it as each screen is rebuilt and run `pnpm exec eslint . --prune-suppressions`.
+  {
+    files: ["**/*.{ts,tsx,js,mjs,cjs}"],
+    plugins: { copy: copyPlugin },
+    rules: { "copy/no-em-dash": "error" },
+  },
+  {
+    files: OPERATOR_COPY_FILES,
+    ignores: ["**/*.test.{ts,tsx}", "**/*.spec.{ts,tsx}"],
+    rules: { "copy/no-vendor-names": "error", "copy/word-list": "error", "copy/reading-grade": "error" },
+  },
+  {
+    files: ["apps/web/app/catalog/ops/**", "apps/web/lib/catalog/ops.ts", "apps/web/lib/catalog/ops-copy.ts"],
+    rules: { "copy/no-vendor-names": "off" },
   },
 );

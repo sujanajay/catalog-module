@@ -167,7 +167,7 @@ describe("catalog wizard authorization and contracts",()=>{
     const response=await start(request("POST",{previewAt:shown.previewAt}),ctx(id));if(upscaleModel===undefined) delete process.env.UPSCALE_MODEL; else process.env.UPSCALE_MODEL=upscaleModel;expect(response.status).toBe(200);expect(await response.json()).toMatchObject({id,status:"matting"});
     // Spec 18: started with the upscaler on, the batch is made with the enlargement stage.
     expect((await db.select().from(catalogBatches).where(eq(catalogBatches.id,id)))[0]!.options).toMatchObject({enlargement:{model:"swinir-x2"}});
-    // M1-F3: the auto-decide rules (migration 0013 seed) stay with the batch from Start, so it never waits for a person.
+    // M1-F3: the auto-decide rules (migration 0014 seed) stay with the batch from Start, so it never waits for a person.
     expect((await db.select().from(catalogBatches).where(eq(catalogBatches.id,id)))[0]!.options.autoDecide?.rules).toEqual(expect.arrayContaining([{id:"wrong_item:*",cause:"wrong_item",channel:"*",action:"drop"},{id:"unchecked:*",cause:"unchecked",channel:"*",action:"deliver"}]));
     const lines=info.mock.calls.map(([line])=>{try{return JSON.parse(String(line)) as Record<string,unknown>;}catch{return {};}});info.mockRestore();
     expect(lines.filter(l=>l.message==="batch started")).toEqual([expect.objectContaining({severity:"INFO",batchId:id,products:1,sources:1,outputs:2,chunks:1,"logging.googleapis.com/labels":{app:"catalog",batchId:id}})]);

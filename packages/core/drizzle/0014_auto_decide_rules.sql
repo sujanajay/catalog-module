@@ -1,4 +1,4 @@
--- M1-S3 auto-decide (docs/program/requirements/M1-intake.md M1-F3-R1; numbered 0013 after M6-S4's 0012). Additive: one
+-- M1-S3 auto-decide (docs/program/requirements/M1-intake.md M1-F3-R1; numbered 0014 after M0-S2's 0013). Additive: one
 -- new table and its seed rows, nothing existing changes. Each hold cause maps to an automatic action for one channel or
 -- every channel (`*`); the id `<cause>:<channel>` is recorded on every output a rule decided. Start copies the enabled
 -- rules into the batch (options.autoDecide). IF NOT EXISTS and ON CONFLICT DO NOTHING keep a re-run harmless and never

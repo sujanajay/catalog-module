@@ -1,5 +1,5 @@
--- M1-S4 improvement tasks (docs/program/requirements/M1-intake.md M1-F3-R4, R5, D11; numbered 0019 so parallel slices
--- can take the numbers between; renumber at merge if needed). Additive: one new table and two new indexes; nothing
+-- M1-S4 improvement tasks (docs/program/requirements/M1-intake.md M1-F3-R4, R5, D11; numbered 0015 after M1-S3's 0014; parallel slices
+-- renumber at merge). Additive: one new table and two new indexes; nothing
 -- existing changes. IF NOT EXISTS keeps a re-run harmless.
 -- Locks: the short lock timeout (as 0004-0012) keeps the migrate job re-runnable instead of queueing live writes behind
 -- it. CONCURRENTLY is not possible: the drizzle migrator runs pending files in one transaction, so every lock is held
