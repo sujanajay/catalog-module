@@ -7,6 +7,7 @@
 // that ran in a busy shard reads slower than it is, so refresh from a run whose shards were already balanced.
 import fs from "node:fs";
 import path from "node:path";
+import console from "node:console";
 import process from "node:process";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";

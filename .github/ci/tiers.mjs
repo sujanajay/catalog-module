@@ -8,6 +8,7 @@
 // starts with one of their paths. A tier that is not built yet is listed as needed, with the reason, never skipped.
 import fs from "node:fs";
 import path from "node:path";
+import console from "node:console";
 import process from "node:process";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
