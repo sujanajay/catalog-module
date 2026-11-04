@@ -174,7 +174,7 @@ export async function createBatch(value: unknown, actor: string) {
 }
 export function parseOptions(value: unknown, existing: BatchOptions): BatchOptions {
   const input = record(value);
-  if (Object.keys(input).some((k) => !["identifierMode", "precedence", "sheetColumns", "perRoot"].includes(k))) throw badRequest("Choose the grouping controls shown on this page and try again.");
+  if (Object.keys(input).some((k) => !["identifierMode", "precedence", "sheetColumns", "perRoot", "newestSameProduct"].includes(k))) throw badRequest("Choose the grouping controls shown on this page and try again.");
   const options = { ...existing };
   if (input.perRoot !== undefined && typeof input.perRoot !== "boolean") throw badRequest("Choose how to tell products apart.");
   if (input.identifierMode !== undefined) {
@@ -184,6 +184,11 @@ export function parseOptions(value: unknown, existing: BatchOptions): BatchOptio
   // A different single mode chosen for the whole batch turns per-root grouping off, unless perRoot says
   // otherwise (M1-F1-R2); re-sending the stored mode changes nothing (spec 14c F7 part 1).
   if (input.perRoot !== undefined) options.perRoot = input.perRoot as boolean;
+  // M1-F2-R7: "Use only the newest photo of each product" (on unless unticked).
+  if (input.newestSameProduct !== undefined) {
+    if (typeof input.newestSameProduct !== "boolean") throw badRequest("Choose how to tell products apart.");
+    options.newestSameProduct = input.newestSameProduct;
+  }
   else if (input.identifierMode !== undefined && input.identifierMode !== existing.identifierMode) options.perRoot = false;
   if (input.precedence !== undefined) {
     if (!PRECEDENCES.includes(input.precedence as BatchOptions["precedence"])) throw badRequest("Choose which photos should win.");

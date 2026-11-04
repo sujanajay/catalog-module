@@ -105,6 +105,12 @@ export interface BatchOptions {
    * one-page New batch; absent (false) for API and load-driver batches unless asked (R9). "Wait" sets it false.
    */
   autoStart?: boolean;
+  /**
+   * M1-F2-R7: two identifiers that are one product, from different uploads: only the newest upload's photos are used
+   * and the other spelling is left out. Absent means on; false (the operator's "Use only the newest photo of each
+   * product" unticked) leaves both out, as before M1-S2. Spellings from one upload have no newest and are both left out.
+   */
+  newestSameProduct?: boolean;
 }
 
 export interface BatchCounts {

@@ -88,6 +88,8 @@ async function dragOnto(page: Page, roots: string[]) {
 // The auto-start task runs after its own 10 s countdown in these scenarios (catalog-intake's scenarios lengthen it).
 test.beforeEach(async ({ page }) => {
   expect((await page.request.post("/harness/queue", { data: { autoStartDelayMs: null } })).ok()).toBe(true);
+  // Started batches of earlier scenarios (or runs on a reused server) are finished, so their products are free.
+  expect((await page.request.post("/harness/settle")).ok()).toBe(true);
 });
 
 test.afterAll(() => {
@@ -195,6 +197,8 @@ test("M1-F2 test 3 and T1: unknown names ask one question, the brand; after choo
 });
 
 test("M1-F2 test 4: Wait during the countdown keeps the batch a draft with one Start button", async ({ page }) => {
+  // Collection, the 10 s countdown, a 12 s wait past it and a Start: more than the 120 s default on a slow runner.
+  test.setTimeout(240_000);
   await page.goto("/catalog/new");
   const created = page.waitForResponse((r) => r.url().endsWith("/api/catalog/batches") && r.request().method() === "POST");
   await dragOnto(page, ["VM_SS27"]);

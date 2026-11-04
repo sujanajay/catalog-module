@@ -194,6 +194,8 @@ export function batchListDetail(state: { state: string; intake: string; made: nu
 // The one-page New batch (M1-S2, UX3; M1 section 5).
 /** M1-F2-R3: the only question, above the drop zone, when the brand cannot be read from the names. */
 export const BRAND_QUESTION = "Which brand is this?";
+/** M1-F2-R7, manager default (UX D13, owner may revise): two spellings of one product from different uploads. */
+export const NEWEST_SAME_PRODUCT = "Use only the newest photo of each product";
 /** M1-F2-R8: the page can be closed at any point. */
 export const KEEP_GOING_LINE = "You can close this page. We will keep going.";
 /** M1-F2-R6: the countdown line; Wait is the button beside it. */

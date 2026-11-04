@@ -42,6 +42,7 @@ test.beforeEach(async ({ page }) => {
   });
   // The auto-start task waits 2 min here, so these intake scenarios can press Wait (M1-F2-R6 is catalog-m1-intake's).
   await queue(page, { delayMs: 1000, fetchDelayMs: 50, budgetItems: 40, paused: false, autoStartDelayMs: 120_000 });
+  expect((await page.request.post("/harness/settle")).ok()).toBe(true);
 });
 
 /** The fake queue and image host settings (POST /harness/queue). */
@@ -93,8 +94,6 @@ async function finishedPreview(page: Page, id: string) {
 const inputList = (page: Page) => page.getByRole("list", { name: "What this batch holds" }).getByRole("listitem");
 /** UX3: the one page's "What we found" part (was step 2). */
 const stepTwo = (page: Page) => page.getByRole("heading", { name: "What we found" });
-/** The four-step wizard's step marker; only scenario 5 (fixme) still reads it. */
-const currentStep = (page: Page) => page.locator('[aria-current="step"]');
 /** M1-F2-R6: Wait during the countdown, so a scenario about intake looks at a draft that does not start by itself. */
 async function holdStart(page: Page) {
   await page.getByRole("button", { name: "Wait", exact: true }).click({ timeout: 90_000 });
@@ -179,9 +178,10 @@ test("3. grid, all 404, release C form: the no-photos sentence names the links, 
   expect(preview.counts.photos).toBe(27);
 });
 
-// UX3 (2026-11-04): the one page hands inputs to collecting by itself about 1 s after a paste is checked, and a batch
-// being collected refuses input changes (existing rule, BATCH_STILL_COLLECTING), so "paste, clear, paste again" no
-// longer edits a draft. Kept for the review to decide: edits while collecting, or a longer settle time (report).
+// Fixme until M1-S6 (M1 section 8: follow-up batches, F5). The one page hands inputs to collecting by itself about 1 s
+// after a paste is checked, and a batch being collected refuses input changes (BATCH_STILL_COLLECTING), so "paste,
+// clear, paste again" no longer edits the draft in place. M1-S6 decides what a change while collecting does (a
+// follow-up batch or an edit of the draft) and rewrites this scenario to that rule.
 test.fixme("4. correction: paste the grid, clear it, paste the variants; one paste input, the same-name warning, and step 2 holds the second paste only (F3)", async ({ page }) => {
   const id = await pasteOnStep1(page, "Intake 4 correction", GRID);
   await expect(page.getByText("6 rows, 27 links", { exact: true })).toBeVisible({ timeout: 20_000 });
@@ -230,71 +230,66 @@ test("1. xlsx: step 2 renders at once with the reading sentence, then the column
   await expect(page.getByText(READING)).toHaveCount(0);
 });
 
-// UX3 (2026-11-04): this scenario walks the four steps (the step kept on reload, Continue to step 3 and 4). The one
-// page has no steps; the leave-and-return parts it still needs are an open item in the report.
-test.describe.fixme("5. leave and return, release C form (F4, F6)", () => {
+// UX3 (2026-11-04): the one page has no steps, so this checks what leave and return means there: the URL, the moving
+// count, a reload, "Continue setting up" and "Your unfinished batches" all bring back the same page and count.
+test.describe("5. leave and return, release C form (F4, F6)", () => {
   // Its video (the config records every scenario) goes in the release reports.
-  test("the URL carries ?batch=, the count moves, reload keeps step and count, Continue setting up reopens the wizard, and Your unfinished batches leads back to step 4", async ({ page }) => {
+  test("the URL carries ?batch=, the count moves, reload keeps the count, Continue setting up and Your unfinished batches reopen What we found, and a held batch reloads with Start", async ({ page }) => {
+    // Collection of 287 links, a reload, two trips to the list and a Wait: more than the 120 s default on a slow runner.
+    test.setTimeout(300_000);
+    // The countdown must not start the batch while the scenario is away from the page; it is held at the end.
+    await queue(page, { autoStartDelayMs: 600_000 });
     // The attempt 3 stand-in is the csv the web tier writes for a Google Sheet. Google is disabled in
     // the harness, so the csv is added as a file; collection then runs the same sheet path in runIngest.
-    // Pasting the csv text is not possible in release A: the paste box reads one link per line (or
-    // identifier<TAB>link), so comma-separated rows yield no links; pasted grids arrive with release B (F2).
     const name = `Intake 5 large sheet ${Date.now()}`;
     const id = await uploadOnStep1(page, name, LARGE_SHEET);
-    await page.getByRole("button", { name: "Continue", exact: true }).click();
     await expect(page).toHaveURL(new RegExp(`/catalog/new\\?(.*&)?batch=${id}`));
     await expect(stepTwo(page)).toBeVisible({ timeout: 5_000 });
 
-    // The polled count (today's collecting text or, from release C, "Downloading photos <done> of 287").
+    // The polled count ("Downloading photos <done> of 287").
     const count = page.getByRole("status").filter({ hasText: /\b[\d,]+ of 287\b/ }).first();
-    await expect(count).toBeVisible({ timeout: 10_000 });
+    await expect(count).toBeVisible({ timeout: 30_000 });
     const first = await count.innerText();
-    await expect(count).not.toHaveText(first, { timeout: 10_000 });
+    await expect(count).not.toHaveText(first, { timeout: 15_000 });
     await expect(page.getByText(/\b0 of 0 products\b/)).toHaveCount(0);
 
-    // Reload while the queue is held: same step, same count.
+    // Reload while the queue is held: the same page and the same count.
     await queue(page, { paused: true });
     await expect.poll(async () => (await queue(page, {})).running, { timeout: 30_000 }).toBe(0);
-    await page.waitForTimeout(3_500); // one wizard poll (every 2.5 s) shows the last delivery's count
+    await page.waitForTimeout(3_500); // one page poll (every 2.5 s) shows the last delivery's count
     const before = await count.innerText();
     await page.reload();
-    await expect(currentStep(page)).toHaveText("Check what we found");
-    await expect(page.getByRole("status").filter({ hasText: before })).toBeVisible();
+    await expect(stepTwo(page)).toBeVisible({ timeout: 10_000 });
+    await expect(page.getByRole("status").filter({ hasText: before })).toBeVisible({ timeout: 10_000 });
     await queue(page, { paused: false });
 
-    // Open the batch from the list and press Continue setting up: the wizard at the step.
+    // Open the batch from the list and press Continue setting up: the same page.
     await page.goto("/catalog");
     await page.getByRole("table").getByRole("link", { name }).click();
     await expect(page).toHaveURL(new RegExp(`/catalog/${id}$`));
     await page.getByRole("link", { name: "Continue setting up" }).click();
     await expect(page).toHaveURL(new RegExp(`/catalog/new\\?(.*&)?batch=${id}`));
-    // No marketplaces are chosen yet, so the batch reopens at step 2 whether or not collection has finished.
-    await expect(currentStep(page)).toHaveText("Check what we found");
+    await expect(stepTwo(page)).toBeVisible({ timeout: 10_000 });
 
     // Release C: the batch list opens with "Your unfinished batches", the row in state words with its age.
     await page.goto("/catalog");
     const row = unfinishedRow(page, name);
-    await expect(row).toContainText(/Reading your sheet|Downloading photos [\d,]+ of 287|Placing photos [\d,]+ of [\d,]+|Ready to check/);
+    await expect(row).toContainText(/Reading your sheet|Downloading photos [\d,]+ of 287|Placing photos [\d,]+ of [\d,]+|Ready to start/);
     await expect(row).toContainText(/created (just now|\d+ minutes? ago)/);
     await finishedPreview(page, id);
     await page.reload();
-    await expect(row).toContainText("Ready to check");
-    // Continue opens step 2 with the grouping.
+    // The batch has its default channels, so a collected draft reads "Ready to start" (READY_TO_START_TEXT).
+    await expect(row).toContainText("Ready to start");
+    // Continue opens What we found with the grouping.
     await row.getByRole("link", { name: "Continue", exact: true }).click();
     await expect(page).toHaveURL(new RegExp(`/catalog/new\\?(.*&)?batch=${id}`));
-    await expect(currentStep(page)).toHaveText("Check what we found");
-    await expect(page.getByText(/of [\d,]+ products, so you can check the grouping\./)).toBeVisible({ timeout: 10_000 });
-    // Nothing changed on step 2, so its Continue returns at once (spec 14c F7 part 1).
-    await page.getByRole("button", { name: "Continue", exact: true }).click();
-    await expect(page.getByRole("heading", { name: "Where will these images go?" })).toBeVisible({ timeout: 3_000 });
-    await page.getByRole("checkbox", { name: /Namshi/ }).check();
-    await page.getByRole("button", { name: "Continue", exact: true }).click();
-    await expect(currentStep(page)).toHaveText("Start");
-    await expect(page.getByText("images will be made")).toBeVisible({ timeout: 30_000 });
-    // Reload: still step 4.
+    await expect(stepTwo(page)).toBeVisible({ timeout: 10_000 });
+    await expect(page.getByText(/^Found [\d,]+ photos for [\d,]+ products\./)).toBeVisible({ timeout: 30_000 });
+    // Wait during the countdown, then reload: still a draft, with its one Start button.
+    await holdStart(page);
     await page.reload();
-    await expect(currentStep(page)).toHaveText("Start");
-    await expect(page.getByText("images will be made")).toBeVisible({ timeout: 30_000 });
+    await expect(page.getByRole("button", { name: "Start", exact: true })).toBeVisible({ timeout: 30_000 });
+    await expect(page).toHaveURL(new RegExp(`/catalog/new\\?(.*&)?batch=${id}`));
   });
 });
 

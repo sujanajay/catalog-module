@@ -160,6 +160,17 @@ async function main() {
         return send(res, 200, { ...queue, pending: queue.pending.length });
       }
       if (url.pathname === "/harness/log") return send(res, 200, { worker: workerLog });
+      // Between scenarios: the harness never runs chunk tasks, so a started batch would hold its product locks for the
+      // life of the server. Settling finishes every started batch as the worker would (done, locks released), so each
+      // scenario starts from free products whether the server is fresh or reused.
+      if (url.pathname === "/harness/settle" && req.method === "POST") {
+        const { catalogBatches, catalogProducts } = schema;
+        const { inArray, isNotNull } = await import("drizzle-orm");
+        const db = workerDb as unknown as import("@catalog/core/db/client").Db;
+        const released = await db.update(catalogProducts).set({ lockBatchId: null }).where(isNotNull(catalogProducts.lockBatchId)).returning({ id: catalogProducts.id });
+        const finished = await db.update(catalogBatches).set({ status: "done", finishedAt: new Date() }).where(inArray(catalogBatches.status, ["matting", "rendering", "qa", "publishing"])).returning({ id: catalogBatches.id });
+        return send(res, 200, { released: released.length, finished: finished.length });
+      }
       if (url.pathname.startsWith("/harness/worker/") && req.method === "POST") {
         const body = JSON.parse((await bodyOf(req)).toString() || "{}") as Record<string, unknown>;
         if (url.pathname === "/harness/worker/tasks/catalog/ingest") deliver(body);

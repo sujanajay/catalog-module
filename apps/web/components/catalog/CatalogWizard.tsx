@@ -4,7 +4,7 @@ import { useRouter } from "next/navigation";
 import type { BrandOption } from "@catalog/core/catalog/brands";
 import type { BatchCounts, BatchStatus, ChannelId, IdentifierMode, Precedence, ProductType } from "@catalog/core/catalog/types";
 import { ANOTHER_BATCH_RUNNING, COLLECT_STALLED_TEXT, type BatchState } from "@catalog/core/catalog/pipeline/status";
-import { BRAND_QUESTION, canRetryLinks, collectingLine, continueSettingUpHref, countdownText, estimateText, foundText, goingToText, KEEP_GOING_LINE } from "../../lib/catalog/copy";
+import { BRAND_QUESTION, NEWEST_SAME_PRODUCT, canRetryLinks, collectingLine, continueSettingUpHref, countdownText, estimateText, foundText, goingToText, KEEP_GOING_LINE } from "../../lib/catalog/copy";
 import type { WizardDetected, WizardPreview } from "../../lib/catalog/preview";
 import { useToast } from "../Toast";
 import WizardStep2, { mergeSheetChoices, type GroupingChoice, type SheetChoice } from "./WizardStep2";
@@ -41,7 +41,7 @@ export function resumedGrouping(initialBatch: WizardInitialBatch | undefined, in
 }
 /** GET /api/catalog/batches/<id>, the parts this page reads. */
 type PolledBatch = {
-  batch: { status: BatchStatus; startedAt: string | null; options: { autoStart?: boolean } };
+  batch: { status: BatchStatus; startedAt: string | null; options: { autoStart?: boolean; newestSameProduct?: boolean } };
   counts: { previewReady: boolean; failReason: string | null; collectTotal?: number | null; autoStartAt?: string | null; fixReason?: string | null };
   state?: BatchState;
 };
@@ -97,8 +97,17 @@ export default function CatalogWizard({ brands, shareEmail, supabasePaste = fals
   const [mode, setMode] = useState<GroupingChoice>(resumed.mode);
   const [precedence, setPrecedence] = useState<Precedence>(resumed.precedence);
   const [sheets, setSheets] = useState<SheetChoice[]>([]);
+  const [newest, setNewest] = useState<boolean | null>(null);
   const detectedInitialised = useRef(resumed.chosen);
   const pollRequest = useRef(0);
+  /** Set once the batch has started and the page is moving to it: no more polls, and only one router.push. */
+  const leaving = useRef(false);
+  function openStarted(batchId: string) {
+    if (leaving.current) return;
+    leaving.current = true;
+    toast("Batch started. We will show progress here.");
+    router.push(`/catalog/${batchId}`);
+  }
   const [working, setWorking] = useState(false);
   const [error, setError] = useState("");
   const [now, setNow] = useState(() => Date.now());
@@ -157,14 +166,15 @@ export default function CatalogWizard({ brands, shareEmail, supabasePaste = fals
     if (!id) return;
     let active = true; let polling = false;
     const poll = async () => {
-      if (polling) return;
+      // A push repeated every poll restarts the navigation, so a page that takes longer than a poll to render never opens.
+      if (polling || leaving.current) return;
       polling = true;
       const request = ++pollRequest.current;
       try {
         const batch = await wizardApi<PolledBatch>(batchUrl(id));
         if (!active || request !== pollRequest.current) return;
         setPolled(batch);
-        if (batch.batch.startedAt && batch.batch.status !== "cancelled") { toast("Batch started. We will show progress here."); router.push(`/catalog/${id}`); return; }
+        if (batch.batch.startedAt && batch.batch.status !== "cancelled") { openStarted(id); return; }
         const value = await wizardApi<WizardDetected>(batchUrl(id, "/detected"));
         if (!active || request !== pollRequest.current) return;
         setDetected(value);
@@ -212,8 +222,7 @@ export default function CatalogWizard({ brands, shareEmail, supabasePaste = fals
     try {
       const fresh = await wizardApi<WizardPreview>(batchUrl(id, "/preview"));
       await wizardApi(batchUrl(id, "/start"), "POST", { previewAt: fresh.previewAt });
-      toast("Batch started. We will show progress here.");
-      router.push(`/catalog/${id}`);
+      openStarted(id);
     } catch (err) { setError(err instanceof Error ? err.message : "This did not finish. Try again."); }
     finally { setWorking(false); }
   }
@@ -221,7 +230,7 @@ export default function CatalogWizard({ brands, shareEmail, supabasePaste = fals
     if (!id) return;
     setWorking(true); setError("");
     try {
-      await wizardApi(batchUrl(id, "/detected"), "PATCH", { ...(mode === "per_root" ? { perRoot: true } : { identifierMode: mode, perRoot: false }), precedence, sheets });
+      await wizardApi(batchUrl(id, "/detected"), "PATCH", { ...(mode === "per_root" ? { perRoot: true } : { identifierMode: mode, perRoot: false }), precedence, sheets, newestSameProduct: newestOn });
       pollRequest.current++; setPreview(null);
     } catch (err) { setError(err instanceof Error ? err.message : "This did not finish. Try again."); }
     finally { setWorking(false); }
@@ -235,6 +244,7 @@ export default function CatalogWizard({ brands, shareEmail, supabasePaste = fals
   const previewReady = polled ? polled.counts.previewReady : !!initialBatch?.counts.previewReady;
   const collecting = !!id && hasInputs && !failReason && !previewReady;
   const needsColumn = sheets.some((s) => s.identifierColumn < 0);
+  const newestOn = newest ?? polled?.batch.options.newestSameProduct !== false;
   const brandName = brands.find((b) => b.slug === brandSlug)?.name ?? "";
   const brandLocked = !!id || (!!creating.current && !askBrand);
   return <div className="catalog-wizard"><h1>New batch</h1>
@@ -257,7 +267,7 @@ export default function CatalogWizard({ brands, shareEmail, supabasePaste = fals
       {state?.stalled ? <p role="alert">{COLLECT_STALLED_TEXT} <RetryCollectButton batchId={id} onDone={() => { pollRequest.current++; }}/></p> : null}
       {ready && preview ? <FoundSummary preview={preview} sentence={detected?.grouping.sentence ?? null} batchId={id} onLinksRetried={() => { pollRequest.current++; setPreview(null); }}/> : null}
       {!ready && detected?.linkFailures?.total ? <LinkFailures batchId={id} failures={detected.linkFailures} onRetried={() => { pollRequest.current++; setPreview(null); }}/> : null}
-      {detected && (ready || needsColumn) ? <details open={needsColumn}><summary>Change how products are grouped</summary><WizardStep2 detected={detected} collecting={false} mode={mode} precedence={precedence} sheets={sheets} setMode={setMode} setPrecedence={setPrecedence} setSheets={setSheets} email={shareEmail} id={id} onError={setError} onAccessChecked={async () => { pollRequest.current++; }} onLinksRetried={() => { pollRequest.current++; setPreview(null); }}/><p><button type="button" className="btn ghost" disabled={working || needsColumn} onClick={() => void applyGrouping()}>Group again</button></p></details> : null}
+      {detected && (ready || needsColumn) ? <details open={needsColumn}><summary>Change how products are grouped</summary><WizardStep2 detected={detected} collecting={false} mode={mode} precedence={precedence} sheets={sheets} setMode={setMode} setPrecedence={setPrecedence} setSheets={setSheets} email={shareEmail} id={id} onError={setError} onAccessChecked={async () => { pollRequest.current++; }} onLinksRetried={() => { pollRequest.current++; setPreview(null); }}/><label className="opt"><input type="checkbox" checked={newestOn} onChange={(e) => setNewest(e.target.checked)}/><span>{NEWEST_SAME_PRODUCT}</span></label><p><button type="button" className="btn ghost" disabled={working || needsColumn} onClick={() => void applyGrouping()}>Group again</button></p></details> : null}
     </section> : null}
 
     {id || channels.length ? <section className="card stack" aria-label="Where it goes"><h2>Where it goes</h2>

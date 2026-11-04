@@ -102,6 +102,16 @@ describe("per-root grouping options (M1-F1-R2)", () => {
     expect((await batchOf(id)).options.perRoot).toBe(false);
     expect((await patchDetected(request("PATCH", { perRoot: "yes" }), ctx(id))).status).toBe(400);
   });
+
+  it("M1-F2-R7: \"Use only the newest photo of each product\" is on by default and can be turned off and on", async () => {
+    const id = await newBatch();
+    expect((await batchOf(id)).options.newestSameProduct).toBeUndefined();
+    expect((await patchDetected(request("PATCH", { newestSameProduct: false, precedence: "uploads_then_links", sheets: [] }), ctx(id))).status).toBe(200);
+    expect((await batchOf(id)).options.newestSameProduct).toBe(false);
+    expect((await patchDetected(request("PATCH", { newestSameProduct: true }), ctx(id))).status).toBe(200);
+    expect((await batchOf(id)).options.newestSameProduct).toBe(true);
+    expect((await patchDetected(request("PATCH", { newestSameProduct: "no" }), ctx(id))).status).toBe(400);
+  });
 });
 
 describe("Supabase folder paste (M1-F1-R4) and M1-F1 acceptance test 2", () => {
