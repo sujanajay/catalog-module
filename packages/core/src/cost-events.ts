@@ -6,6 +6,7 @@ import { catalogCostEvents, type CostKind, type CostOutcome, type CostStage } fr
 import type { ChannelId } from "./catalog/types";
 import { cpuUpscaleOnDedicatedService } from "./catalog/cost";
 import { log } from "./log";
+import { isOverflowAdapter } from "./vendor/routes";
 
 export interface CostEventInput {
   /** M6-S1: null for a row of no batch (a job run, the sweep); then brandSlug is null too. */
@@ -54,13 +55,15 @@ export function ownComponent(env: NodeJS.ProcessEnv = process.env): string | nul
  * M6-F1 (M6-S1): the component a row is billed to, the same name as the Cloud Run `component` label so the
  * reconciliation joins the ledger to the bill. A judge or classifier call is OpenRouter's; a cut-out call is the
  * matting service that answered (`cpu` catalog-matting, `gpu` catalog-matting-gpu; the worker's own cut-out is the
- * worker); an upscale call is the service upscale.ts routes it to (catalog-upscale or catalog-upscale-gpu when
+ * worker; an overflow vendor's call is that vendor's, its adapter id); an upscale call is the service upscale.ts routes it to (catalog-upscale or catalog-upscale-gpu when
  * configured, else the matting service of its target); compute, render and job rows are this process's own service
  * or job.
  */
 export function costComponent(row: Pick<CostEventInput, "kind" | "engine" | "component">, env: NodeJS.ProcessEnv = process.env): string | null {
   if (row.component) return row.component;
   if (row.kind === "llm_call") return OPENROUTER_COMPONENT;
+  // M3-F2-R4: an overflow vendor's call is billed by that vendor, off the GCP bill (M6-F1-R7), never to the worker.
+  if (isOverflowAdapter(row.engine)) return row.engine;
   if (row.kind === "matte_call") return row.engine === "gpu" ? "catalog-matting-gpu" : row.engine === "cpu" ? "catalog-matting" : ownComponent(env);
   if (row.kind === "upscale_call") {
     if (row.engine === "cpu") return cpuUpscaleOnDedicatedService(env) ? "catalog-upscale" : "catalog-matting";

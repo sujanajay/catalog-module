@@ -1379,6 +1379,8 @@ export const vendorRoutes = pgTable(
     licence: text("licence"),
     noTrainingTerms: text("no_training_terms"),
     state: text("state", { enum: ROUTE_STATES }).notNull(),
+    /** M3-F2-R3: an overflow route's daily spend cap in USD; null on an overflow route means it is never called. */
+    dailyCapUsd: money("daily_cap_usd"),
     createdAt: createdAt(),
     updatedAt: updatedAt(),
   },
