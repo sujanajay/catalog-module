@@ -27,6 +27,13 @@ describe("M3-F2-R3 overflow daily cap", () => {
     // 0.02 recorded + 0.02 reserved + 0.02 would pass 0.05.
     expect(await gate.reserve(vendor)).toMatchObject({ok: false, reason: "over_cap", spentUsd: 0.04, capUsd: 0.05});
   });
+  it("a released reservation no longer counts (its call is in the ledger now)", async () => {
+    const gate = ledgerOverflowGate(db, {now: () => at});
+    const first = await gate.reserve(vendor);
+    expect(first).toMatchObject({ok: true, spentUsd: 0});
+    if (first.ok) first.release();
+    expect(await gate.reserve(vendor)).toMatchObject({ok: true, spentUsd: 0});
+  });
   it("parallel reservations of one process never pass the cap together", async () => {
     const gate = ledgerOverflowGate(db, {now: () => at});
     const results = await Promise.all(Array.from({length: 5}, () => gate.reserve({...vendor, dailyCapUsd: 0.04})));

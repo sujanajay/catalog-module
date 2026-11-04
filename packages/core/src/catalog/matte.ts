@@ -229,7 +229,9 @@ export class MattingClient {
     const start = gpus.length ? this.turn++ % gpus.length : 0;
     const order = [...gpus.slice(start), ...gpus.slice(0, start)];
     const failed = new Set<ServiceState>();
-    let busy = 0, next = 0;
+    // The last answered failure's status (429 busy, 5xx a model or service error); none for a connection failure or an
+    // open breaker. M3-S5 routing reads it: an answered 5xx is a model-level failure, anything else the service's.
+    let busy = 0, next = 0, lastStatus: number | null = null;
     for (;;) {
       const live = order.filter((s) => !failed.has(s) && this.available(s));
       if (!live.length) break;
@@ -237,6 +239,7 @@ export class MattingClient {
       try { return await this.matteOn(s, prepared, chosen, opts, trace); }
       catch (err) {
         if (err instanceof Error && /request rejected/.test(err.message)) throw err;
+        lastStatus = failureStatus(err);
         if (err instanceof UnavailableError && err.status === 429 && ++busy < MATTE_BUSY_TRIES) { await this.sleep(busyWaitMs()); continue; }
         this.failure(s, err, chosen); failed.add(s);
         if (busy >= MATTE_BUSY_TRIES) break;
@@ -247,10 +250,11 @@ export class MattingClient {
       try { return await this.matteOn(s, prepared, chosen, opts, trace); }
       catch (err) {
         if (err instanceof Error && /request rejected/.test(err.message)) throw err;
+        lastStatus = failureStatus(err);
         this.failure(s, err, chosen);
       }
     }
-    throw new UnavailableError("Background removal services are unavailable.");
+    throw new UnavailableError("Background removal services are unavailable.", lastStatus ?? undefined);
   }
   /** One cut-out call on one service; throws on any failure (the caller counts it). */
   private async matteOn(s: ServiceState, prepared: Prepared, chosen: string, opts: MatteOptions, trace: MattingTrace | undefined): Promise<Matte> {

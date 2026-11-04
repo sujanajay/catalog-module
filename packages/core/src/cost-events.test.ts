@@ -78,6 +78,9 @@ describe("cost ledger completeness", () => {
     expect(costComponent({ kind: "llm_call", engine: "m" }, worker)).toBe("openrouter");
     expect(costComponent({ kind: "matte_call", engine: "gpu" }, worker)).toBe("catalog-matting-gpu");
     expect(costComponent({ kind: "matte_call", engine: "cpu" }, worker)).toBe("catalog-matting");
+    // M3-S5 (review P2-3): an overflow vendor's call is billed to that vendor, never to the worker.
+    expect(costComponent({ kind: "matte_call", engine: "photoroom" }, worker)).toBe("photoroom");
+    expect(costComponent({ kind: "upscale_call", engine: "photoroom" }, worker)).toBe("photoroom");
     expect(costComponent({ kind: "upscale_call", engine: "cpu" }, worker)).toBe("catalog-matting");
     expect(costComponent({ kind: "upscale_call", engine: "cpu" }, { ...worker, UPSCALE_URL: "https://catalog-upscale-x.run.app" })).toBe("catalog-upscale");
     expect(costComponent({ kind: "upscale_call", engine: "gpu" }, worker)).toBe("catalog-matting-gpu");

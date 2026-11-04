@@ -913,7 +913,8 @@ describe("M3-S5 acceptance (M3 4.2.9 tests 1 and 2): the GPU cut-out service sto
   completed(r);
   expect(r.fake.state.calls.filter(call=>call==="vendor")).toHaveLength(3);
   expect(r.fake.state.calls.some(call=>call.startsWith("cpu:"))).toBe(false);
-  expect(r.ledger.map(row=>[row.engine,row.usd,row.estimated])).toEqual([["photoroom",0.02,true],["photoroom",0.02,true],["photoroom",0.02,true]]);
+  // Billed to the vendor's own component (M6-F1-R7), never to the worker; written at once, outcome ok.
+  expect(r.ledger.map(row=>[row.engine,row.usd,row.estimated,row.component,row.outcome])).toEqual(Array(3).fill(["photoroom",0.02,true,"photoroom","ok"]));
   expect(r.engines).toContainEqual(expect.objectContaining({engine:"cut-out overflow",calls:3,usd:expect.closeTo(0.06,6)}));
   // Every overflow call is logged with its cost and reason (M3-F2-R4); the key never is.
   const calls=r.log.mock.calls.filter(([message])=>message==="catalog matte overflow");

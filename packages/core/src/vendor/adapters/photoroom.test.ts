@@ -26,7 +26,10 @@ describe("M3-S5 Photoroom overflow adapter (recorded answers; no paid call)", ()
       expect(await photoroomMatte(await png(40, 30), {width: 40, height: 30}, 0.02, {fetch: failing, env: {PHOTOROOM_API_KEY: "k"}})).toMatchObject({value: null, failure: {kind, status}, costUsd: 0});
     }
     const offline = vi.fn<typeof globalThis.fetch>(async () => { throw new TypeError("fetch failed"); });
-    expect(await photoroomMatte(await png(40, 30), {width: 40, height: 30}, 0.02, {fetch: offline, env: {PHOTOROOM_API_KEY: "k"}})).toMatchObject({failure: {kind: "no_response"}});
+    expect(await photoroomMatte(await png(40, 30), {width: 40, height: 30}, 0.02, {fetch: offline, env: {PHOTOROOM_API_KEY: "k"}})).toMatchObject({failure: {kind: "no_response"}, costUsd: 0, calls: 1});
+    // A timeout may have been billed (the vendor can finish after we stop waiting): priced, so the ledger and cap count it.
+    const slow = vi.fn<typeof globalThis.fetch>(async () => { throw new DOMException("timed out", "TimeoutError"); });
+    expect(await photoroomMatte(await png(40, 30), {width: 40, height: 30}, 0.02, {fetch: slow, env: {PHOTOROOM_API_KEY: "k"}})).toMatchObject({value: null, failure: {kind: "timeout"}, costUsd: 0.02, calls: 1});
   });
   it("upscale: asks ai.fast on the original image, checks the 4x answer and brings a 2x request to exactly 2x", async () => {
     const fetch = vi.fn<typeof globalThis.fetch>(async () => answer(await png(160, 120)));

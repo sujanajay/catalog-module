@@ -29,6 +29,9 @@ export interface VendorMask { alpha: Buffer; width: number; height: number; ms: 
 /** One upscaled image (PNG bytes as the vendor answered, checked for size). */
 export interface VendorUpscale { image: Buffer; width: number; height: number; ms: number }
 
+/** A request with no answer: no key (no call), a refused connection (free) or a timeout (priced: it may be billed). */
+const unanswered = <T>(failure: RouteFailure, priceUsd: number): RouteAttempt<T> =>
+  ({value: null, failure, costUsd: failure.kind === "timeout" ? priceUsd : 0, calls: failure.kind === "no_key" ? 0 : 1});
 /** The failure kind of an HTTP status: 402 is the account out of credit (not the next route's fault, but no answer). */
 export function photoroomFailure(status: number): RouteFailure {
   const kind = status === 401 || status === 403 ? "auth" : status === 402 ? "payment_required" : status === 429 ? "rate_limit" : status >= 500 ? "server" : "http";
@@ -42,9 +45,11 @@ async function post(url: string, form: FormData, deps: PhotoroomDeps): Promise<{
   try {
     const response = await (deps.fetch ?? fetch)(url, {method: "POST", headers: {"x-api-key": key}, body: form, signal: AbortSignal.timeout(deps.timeoutMs ?? PHOTOROOM_TIMEOUT_MS)});
     return {response, ms: Date.now() - started};
-  } catch {
-    // Network error or timeout: the message may carry the request, so it is not kept.
-    return {failure: {kind: "no_response", status: 0}};
+  } catch (error) {
+    // The message may carry the request, so it is not kept. A timeout may have been billed (the vendor can finish the
+    // image after we stop waiting), so it is priced; a refused connection never reached the vendor.
+    const timedOut = error instanceof Error && (error.name === "TimeoutError" || error.name === "AbortError");
+    return {failure: {kind: timedOut ? "timeout" : "no_response", status: 0}};
   }
 }
 
@@ -60,7 +65,7 @@ export async function photoroomMatte(png: Buffer, size: {width: number; height: 
   form.set("format", "png");
   form.set("size", "full");
   const sent = await post(PHOTOROOM_SEGMENT_URL, form, deps);
-  if ("failure" in sent) return {value: null, failure: sent.failure, costUsd: 0, calls: sent.failure.kind === "no_key" ? 0 : 1};
+  if ("failure" in sent) return unanswered(sent.failure, priceUsd);
   if (!sent.response.ok) return {value: null, failure: photoroomFailure(sent.response.status), costUsd: 0, calls: 1};
   const bytes = Buffer.from(await sent.response.arrayBuffer());
   if (!bytes.length) return {value: null, failure: {kind: "empty_reply", status: sent.response.status}, costUsd: 0, calls: 1};
@@ -87,7 +92,7 @@ export async function photoroomUpscale(image: Buffer, factor: 2 | 4, priceUsd: n
   form.set("removeBackground", "false");
   form.set("upscale.mode", "ai.fast");
   const sent = await post(PHOTOROOM_EDIT_URL, form, deps);
-  if ("failure" in sent) return {value: null, failure: sent.failure, costUsd: 0, calls: sent.failure.kind === "no_key" ? 0 : 1};
+  if ("failure" in sent) return unanswered(sent.failure, priceUsd);
   if (!sent.response.ok) return {value: null, failure: photoroomFailure(sent.response.status), costUsd: 0, calls: 1};
   const bytes = Buffer.from(await sent.response.arrayBuffer());
   if (!bytes.length) return {value: null, failure: {kind: "empty_reply", status: sent.response.status}, costUsd: 0, calls: 1};
