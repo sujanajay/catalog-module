@@ -3,19 +3,28 @@ on:
   pull_request:
   push:
     branches: [main]
-# Independent jobs run in parallel: lint and typecheck, the unit tests in shards, the offline infra and matting tests,
-# and the intake browser scenarios. A run takes as long as its slowest job instead of the sum of every step.
+# T1 of the tiered tests (M6-F8, docs/specs/test-tiers.json): independent jobs run in parallel: lint and typecheck
+# (with the tiers this change needs in the run summary), the unit tests in shards balanced by file time, the
+# real-Postgres tests, the offline infra and matting tests, and the intake browser scenarios. A run takes as long as its
+# slowest job instead of the sum of every step; the budget is 10 minutes.
 jobs:
   lint:
     name: lint and typecheck
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # The base commit too, so the tiers step can list what this PR changed.
+          fetch-depth: 0
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: pnpm
+      # M6-F8: the tiers this change needs (T1 always; T2 and T3 by path), written to the run summary.
+      - name: Test tiers this change needs
+        if: github.event_name == 'pull_request'
+        run: node .github/ci/tiers.mjs "${{ github.event.pull_request.base.sha }}" | tee -a "$GITHUB_STEP_SUMMARY"
       - run: pnpm install --frozen-lockfile
       - run: pnpm lint
       - run: pnpm typecheck
@@ -25,13 +34,13 @@ jobs:
         run: node packages/core/scripts/check-migrations.mjs
 
   test:
-    name: unit tests (shard ${{ matrix.shard }}/4)
+    name: unit tests (shard ${{ matrix.shard }}/6)
     runs-on: ubuntu-latest
     strategy:
       # Every shard reports its own failures; one failing shard does not cancel the others.
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4]
+        shard: [1, 2, 3, 4, 5, 6]
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -40,10 +49,51 @@ jobs:
           node-version: 22
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      # `pnpm test` (vitest run), one shard of it: vitest splits the test files over the shards (a stable hash of each
-      # path), so together they run every file. T40's 200 sequences are 8 files (enlarge.model.t40-<n>.test.ts) so
-      # they spread over the shards. pnpm would read --shard as its own option, hence `pnpm exec vitest run`.
-      - run: pnpm exec vitest run --shard=${{ matrix.shard }}/4
+      # `pnpm test` (vitest run), one shard of it. M6-S7a: the shards are balanced by each file's measured seconds
+      # (.github/ci/shards.mjs, .github/ci/test-timings.json), not by vitest's --shard (an equal count of files), which
+      # put the heaviest files together and made one shard the critical path. Every file vitest lists goes to exactly
+      # one shard, a new file included. T40's 200 sequences are 8 files (enlarge.model.t40-<n>.test.ts) so they spread.
+      - name: Unit tests
+        run: |
+          pnpm exec vitest list --filesOnly > "$RUNNER_TEMP/test-files.txt"
+          node .github/ci/shards.mjs ${{ matrix.shard }} 6 < "$RUNNER_TEMP/test-files.txt" > "$RUNNER_TEMP/shard-files.txt"
+          xargs -r -a "$RUNNER_TEMP/shard-files.txt" pnpm exec vitest run
+
+  # M0 decision D11 (M6-S7a): the contract tests that need real Postgres (TEST_PG_URL; on PGlite they skip or run a
+  # weaker form) run against a throwaway Postgres 16, the version of ila-pg. Each test file creates and drops its own
+  # database (packages/core/src/db/testing.ts createRealTestDb). Every test file that reads TEST_PG_URL runs here; the
+  # unit shards run the same files on PGlite.
+  postgres:
+    name: real Postgres tests
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+        ports:
+          - 5432:5432
+    env:
+      TEST_PG_URL: postgres://postgres:postgres@localhost:5432/postgres
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Real Postgres tests
+        run: |
+          grep -rl --include='*.test.ts' --include='*.test.tsx' --exclude='*.real.test.ts' --exclude-dir=node_modules TEST_PG_URL apps packages | sort > "$RUNNER_TEMP/pg-files.txt"
+          cat "$RUNNER_TEMP/pg-files.txt"
+          test -s "$RUNNER_TEMP/pg-files.txt" || { echo "no test file reads TEST_PG_URL"; exit 1; }
+          xargs -r -a "$RUNNER_TEMP/pg-files.txt" pnpm exec vitest run
 
   infra-matting:
     name: infra and matting tests

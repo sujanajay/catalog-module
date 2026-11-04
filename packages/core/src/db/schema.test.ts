@@ -48,6 +48,7 @@ const TABLES = [
   // 0017_channel_rules.sql (M5-S1 channel rules store)
   "catalog_rulesets", "catalog_ruleset_snapshots", "catalog_rules", "catalog_rule_conflicts", "catalog_rule_decisions",
   "catalog_channel_records", "catalog_image_policies", "catalog_rule_results",
+  "catalog_change_types", // 0019_change_types.sql (M10-S1a)
 ];
 
 const INDEXES = [

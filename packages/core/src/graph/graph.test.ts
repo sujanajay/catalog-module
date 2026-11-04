@@ -5,6 +5,7 @@
 import { eq, sql } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { cleanupTestBatches } from "../catalog/test-cleanup";
+import { CHANGE_TYPE } from "../learning/change-types";
 import type { Db } from "../db/client";
 import {
   catalogBatches,
@@ -65,10 +66,21 @@ async function imageVersion(optionId: string, label: string, extra: Partial<NewC
 const event = (listingId: string, toVersionId: string | null, extra: Partial<NewChangeEvent> = {}): NewChangeEvent => ({
   idempotencyKey: `k-${listingId}-${toVersionId}-${extra.kind ?? "links_delivered"}`,
   listingId, slot: "image:1", toVersionId, kind: "links_delivered", at: new Date("2026-11-03T10:00:00Z"),
-  evidence: "tool_publish", actor: "test", reasonKind: "new_content", changeTypeId: "image.background", ...extra,
+  evidence: "tool_publish", actor: "test", reasonKind: "new_content", changeTypeId: "img_background_fixed", ...extra,
 });
 
 describe(`M0 graph contract on ${TEST_PG_URL ? "real Postgres" : "PGlite"}`, () => {
+  it("M10-S1a: a publish event stamps a v0 change type (img_shotset_crops); an unknown change type is refused", async () => {
+    const { optionId, listingId } = await listing();
+    const v = await imageVersion(optionId, "m10-crops");
+    const crops = event(listingId, v.versionId, { idempotencyKey: "publish:m10-crops", changeTypeId: CHANGE_TYPE.img_shotset_crops });
+    expect((await recordChange(db, crops)).created).toBe(true);
+    const [row] = await db.select().from(catalogChangeEvents).where(eq(catalogChangeEvents.idempotencyKey, "publish:m10-crops"));
+    expect(row!.changeTypeId).toBe("img_shotset_crops");
+    const w = await imageVersion(optionId, "m10-unknown");
+    await expect(recordChange(db, event(listingId, w.versionId, { idempotencyKey: "publish:m10-unknown", changeTypeId: "image.crops" }))).rejects.toThrow();
+  });
+
   it("recordAsset is idempotent on sha256, refuses a bad hash and keeps a 64-bit perceptual hash exactly", async () => {
     const hash = sha("asset-1");
     const phash = 0xfedcba9876543210n; // top bit set: stored as a negative signed bigint
@@ -127,7 +139,7 @@ describe(`M0 graph contract on ${TEST_PG_URL ? "real Postgres" : "PGlite"}`, () 
     await expect(recordChange(db, event(listingId, v.versionId, { changeTypeId: null }))).rejects.toThrow(/changeTypeId/);
     // A normal event without a reason is refused, by the contract and by the database.
     await expect(recordChange(db, event(listingId, v.versionId, { reasonKind: null }))).rejects.toThrow(/reasonKind/);
-    await expect(db.execute(sql`insert into catalog_change_events (idempotency_key, listing_id, slot, to_version_id, kind, at, evidence, actor, change_type_id) values ('raw-1', ${listingId}, 'image:1', ${v.versionId}, 'planned', now(), 'operator', 't', 'image.background')`)).rejects.toThrow();
+    await expect(db.execute(sql`insert into catalog_change_events (idempotency_key, listing_id, slot, to_version_id, kind, at, evidence, actor, change_type_id) values ('raw-1', ${listingId}, 'image:1', ${v.versionId}, 'planned', now(), 'operator', 't', 'img_background_fixed')`)).rejects.toMatchObject({ cause: { constraint: "catalog_change_events_reason_check" } });
     await expect(db.execute(sql`insert into catalog_change_events (idempotency_key, listing_id, slot, to_version_id, kind, at, evidence, actor, reason_kind) values ('raw-2', ${listingId}, 'image:1', ${v.versionId}, 'planned', now(), 'operator', 't', 'operator')`)).rejects.toThrow();
     // observed_other and backfill rows are accepted without a reason or a change type.
     expect((await recordChange(db, event(listingId, v.versionId, { kind: "observed_other", evidence: "scrape", reasonKind: null, changeTypeId: null }))).created).toBe(true);
