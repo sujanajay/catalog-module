@@ -1,6 +1,6 @@
 // M10-S1a change-type library v0 (docs/program/requirements/M10-learning.md M10-F1-R1, slice M10-S1a).
 //
-// The taxonomy is data: rows in `catalog_change_types`, seeded by migration 0021 with the list below. Every producer
+// The taxonomy is data: rows in `catalog_change_types`, seeded by migration 0019 with the list below. Every producer
 // that writes an M0 change event stamps one of these ids in `change_type_id` (M0-F3-R9, M10 decision D2); the column
 // has a foreign key to the table, so an unknown id is refused by Postgres, never stored. This file holds the v0 seed
 // as typed constants so producers name ids without typos; a test checks it equals the migration's seed rows. Types an

@@ -4,7 +4,7 @@
 -- unknown type is refused. Additive only: one new table and one constraint; nothing existing is renamed, dropped or
 -- retyped. Re-runnable: IF NOT EXISTS, ON CONFLICT DO NOTHING (never undoes a later admin edit), the foreign key added
 -- only when missing. The foreign key is NOT VALID, so existing events are not scanned (every new event is checked).
--- Numbered 0021 by the R1 build plan; renumber at merge time if needed (roadmap 3.2).
+-- Numbered 0019 at merge, after 0013-0018 (roadmap 3.2).
 SET LOCAL lock_timeout = '10s';--> statement-breakpoint
 CREATE TABLE IF NOT EXISTS "catalog_change_types" (
 	"id" text PRIMARY KEY NOT NULL,

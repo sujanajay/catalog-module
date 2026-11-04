@@ -13,6 +13,7 @@ import { and, eq, gte, inArray, isNotNull, sql } from "drizzle-orm";
 import type { Db } from "../db/client";
 import { catalogChunks, catalogCostEvents, catalogOutputs, catalogProducts, catalogSourceImages, type CostKind, type CostStage } from "../db/schema";
 import type { ChannelId } from "./types";
+import { OVERFLOW_ADAPTERS } from "../vendor/routes";
 
 export const ENGINE_LABELS = {
   llm_call: "quality check",
@@ -23,7 +24,12 @@ export const ENGINE_LABELS = {
   job: "background job",
   wait: "waiting",
 } as const satisfies Record<CostKind, string>;
-export type EngineLabel = (typeof ENGINE_LABELS)[CostKind];
+/**
+ * M3-F2-R4: calls the overflow vendor made (ledger engine = an overflow adapter) are their own line on the cost meter,
+ * so the admin sees what overflow cost. Never the vendor's name.
+ */
+export const OVERFLOW_ENGINE_LABELS = { matte_call: "cut-out overflow", upscale_call: "enlargement overflow" } as const;
+export type EngineLabel = (typeof ENGINE_LABELS)[CostKind] | (typeof OVERFLOW_ENGINE_LABELS)[keyof typeof OVERFLOW_ENGINE_LABELS];
 /** The operator-facing name of a ledger row's engine; never the model id. */
 export function engineLabel(kind: CostKind): EngineLabel {
   return ENGINE_LABELS[kind];
@@ -66,16 +72,21 @@ export async function batchCostByStage(db: Db, batchId: string): Promise<StageCo
   return rows.map((r) => ({ stage: r.stage, usd: num(r.usd), estimatedUsd: num(r.estimatedUsd), ms: num(r.ms), calls: num(r.calls) })).sort((a, b) => b.usd - a.usd);
 }
 
-/** USD, time and call count per engine label of one batch (render and upscale rows share "image making"). */
+/**
+ * USD, time and call count per engine label of one batch (render and upscale rows share "image making"; overflow vendor
+ * calls have their own line).
+ */
 export async function batchCostByEngine(db: Db, batchId: string): Promise<EngineCost[]> {
+  // Literals (fixed adapter ids from this repo), not parameters, so GROUP BY sees the same expression as SELECT.
+  const overflow = sql<boolean>`(${catalogCostEvents.engine} in (${sql.raw(OVERFLOW_ADAPTERS.map((a) => `'${a}'`).join(", "))}))`;
   const rows = await db
-    .select({ kind: catalogCostEvents.kind, usd: sql<string>`coalesce(sum(${catalogCostEvents.usd}), 0)`, ms: sql<string>`coalesce(sum(${catalogCostEvents.ms}), 0)`, calls: sql<string>`count(*)` })
+    .select({ kind: catalogCostEvents.kind, overflow, usd: sql<string>`coalesce(sum(${catalogCostEvents.usd}), 0)`, ms: sql<string>`coalesce(sum(${catalogCostEvents.ms}), 0)`, calls: sql<string>`count(*)` })
     .from(catalogCostEvents)
     .where(eq(catalogCostEvents.batchId, batchId))
-    .groupBy(catalogCostEvents.kind);
+    .groupBy(catalogCostEvents.kind, overflow);
   const byLabel = new Map<EngineLabel, EngineCost>();
   for (const r of rows) {
-    const engine = engineLabel(r.kind);
+    const engine: EngineLabel = r.overflow && (r.kind === "matte_call" || r.kind === "upscale_call") ? OVERFLOW_ENGINE_LABELS[r.kind] : engineLabel(r.kind);
     const entry = byLabel.get(engine) ?? { engine, usd: 0, ms: 0, calls: 0 };
     entry.usd += num(r.usd); entry.ms += num(r.ms); entry.calls += num(r.calls);
     byLabel.set(engine, entry);

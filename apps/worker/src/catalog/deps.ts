@@ -9,7 +9,9 @@ import type { Router } from "@catalog/core/vendor/router";
 import type { RepairOwnDefects } from "@catalog/core/catalog/qa/triage";
 import { repairOwnDefects, type QaRepairContext } from "./qa-stage";
 import type { ProductType } from "@catalog/core/catalog/types";
-import { MattingClient, mattingClientFromEnv, matteFor } from "@catalog/core/catalog/matte";
+import { MattingClient, mattingClientFromEnv } from "@catalog/core/catalog/matte";
+import { routedMatteFor } from "@catalog/core/catalog/matte-routing";
+import { ledgerOverflowGate, type OverflowGate } from "@catalog/core/vendor/overflow";
 import { prepare, renderAllChannels } from "@catalog/core/catalog/render";
 import { storedUpscaler, upscaleConfigFromEnv, upscalerId, type Upscaler } from "@catalog/core/catalog/upscale";
 import { dispatchChunks } from "@catalog/core/catalog/pipeline/dispatch";
@@ -33,7 +35,10 @@ export interface CatalogDeps {
    * call through. Absent: the policy's two models only.
    */
   routes?: () => Promise<Router>;
-  prepare: typeof prepare; matteFor: typeof matteFor; renderAllChannels: typeof renderAllChannels;
+  /** The cut-out; with routing (M3-S5) through the `image.matte` routes, without it the policy's model as before. */
+  prepare: typeof prepare; matteFor: typeof routedMatteFor; renderAllChannels: typeof renderAllChannels;
+  /** M3-F2-R3: the overflow routes' daily caps. Absent: no overflow route is ever called. */
+  overflow?: OverflowGate;
   /** Waits between cut-out retries (07 auto-resolve) and enlargement upload tries; absent uses a timer. Tests pass an instant one. */
   sleep?: (ms: number) => Promise<void>;
   /** The re-render-and-re-judge loop run before triage (qa/triage.ts); absent repairs nothing. */
@@ -91,7 +96,7 @@ export function workerCatalogDeps(db: Db): CatalogDeps {
   // Spec 18 quality: the x4 model above 2.0x (UPSCALE_MODEL_X4), stored and primed like the x2 one.
   const upscalerX4 = upscaler && config.x4Model ? storedUpscaler(upscalerId(config.x4Model, matting.upscaleTarget), config.minScale) : null;
   const render: typeof renderAllChannels = upscaler ? (p,m,channels,ctx)=>renderAllChannels(p,m,channels,{upscaler,upscalerX4,...ctx}) : renderAllChannels;
-  return {db,storage,matting,enqueue:enqueueTask,fetch,now:()=>new Date(),log:catalogLog,prepare,matteFor,renderAllChannels:render,judgeOutput,classifyProductType,repairOwnDefects,routes:()=>routerFor(db),
+  return {db,storage,matting,enqueue:enqueueTask,fetch,now:()=>new Date(),log:catalogLog,prepare,matteFor:routedMatteFor,overflow:ledgerOverflowGate(db),renderAllChannels:render,judgeOutput,classifyProductType,repairOwnDefects,routes:()=>routerFor(db),
     upscaler,upscalerX4,...(config.model ? {enlarge:workerEnlargeCall(),enlargeProbe:workerEnlargeProbe()}:{}),
     resolvePolicy:async(brandSlug,category)=> {
       if (!defaultsEnsured) {

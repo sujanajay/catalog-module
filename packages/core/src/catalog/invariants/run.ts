@@ -8,8 +8,11 @@ import type { LogFields, Severity } from "../../log";
 import { CHECKS, type InvariantSeverity } from "./checks";
 
 export type InvariantLog = (severity: Severity, message: string, fields?: LogFields) => void;
-/** One batch's share of a check's violations; `test` is catalog_batches.is_test (a test batch, not delivered work). */
-export interface InvariantBatch { batchId: string; test: boolean; violations: number }
+/**
+ * One batch's share of a check's violations; `test` is catalog_batches.is_test (a test batch, not delivered work). batchId
+ * null: rows that belong to no batch (the graph export freshness check).
+ */
+export interface InvariantBatch { batchId: string | null; test: boolean; violations: number }
 /**
  * `sample` is up to SAMPLE_SIZE row ids (outputs or chunks, whatever the check counts), taken from the batches with
  * the most violations first, so it can all come from one batch; `batches` names the violating
@@ -49,20 +52,20 @@ export async function runInvariants(db: Db, log: InvariantLog, now: Date, option
   const byBatch = async (query: SQL) => rowsOf(await db.execute(sql`SELECT s.batch_id, coalesce(b.is_test, false) AS is_test, count(*)::int AS n, (array_agg(s.id::text ORDER BY s.id))[1:${SAMPLE_SIZE}::int] AS sample
     FROM (${query}) AS s LEFT JOIN catalog_batches AS b ON b.id = s.batch_id
     WHERE ${batchId}::uuid IS NULL OR s.batch_id = ${batchId}::uuid GROUP BY s.batch_id, b.is_test ORDER BY count(*) DESC, s.batch_id`))
-    .map(r => ({ batchId: String(r.batch_id), test: r.is_test === true, n: Number(r.n), sample: ((r.sample as string[] | null) ?? []).map(String) }));
+    .map(r => ({ batchId: r.batch_id == null ? null : String(r.batch_id), test: r.is_test === true, n: Number(r.n), sample: ((r.sample as string[] | null) ?? []).map(String) }));
   const counts: Record<string, number> = {}, results: InvariantResult[] = [];
   const per = new Map<string, Record<CountKey, number>>();
   const put = (id: string, key: CountKey, n: number) => { const v = per.get(id) ?? { silentOutputs: 0, heldSiblings: 0, slowestChunkMs: 0 }; v[key] = n; per.set(id, v); };
   for (const check of CHECKS) {
     const rows = await byBatch(check.sql(now));
     const violations = rows.reduce((sum, r) => sum + r.n, 0), sample = rows.flatMap(r => r.sample).slice(0, SAMPLE_SIZE);
-    if (check.id === "silent_outputs") for (const r of rows) put(r.batchId, "silentOutputs", r.n);
+    if (check.id === "silent_outputs") for (const r of rows) if (r.batchId) put(r.batchId, "silentOutputs", r.n);
     counts[check.id] = violations;
     const batches = rows.slice(0, BATCH_LIST_SIZE).map(r => ({ batchId: r.batchId, test: r.test, violations: r.n })), batchCount = rows.length;
     results.push({ id: check.id, severity: check.severity, violations, sample, batches, batchCount });
     log(violations ? check.severity : "INFO", "invariant", { id: check.id, violations, sample, batches, batchCount, severity: check.severity });
   }
-  for (const r of await byBatch(heldSiblingsSql())) put(r.batchId, "heldSiblings", r.n);
+  for (const r of await byBatch(heldSiblingsSql())) if (r.batchId) put(r.batchId, "heldSiblings", r.n);
   const slowest = sql`SELECT s.batch_id, max(s.ms)::bigint AS ms FROM (
       SELECT c.batch_id, (extract(epoch FROM ${now.toISOString()}::timestamptz - c.started_at) * 1000)::bigint AS ms FROM catalog_chunks AS c WHERE c.status = 'running' AND c.started_at IS NOT NULL
     ) AS s WHERE ${batchId}::uuid IS NULL OR s.batch_id = ${batchId}::uuid GROUP BY s.batch_id`;

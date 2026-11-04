@@ -11,7 +11,7 @@ export const SEED_ACTOR = "seed";
 export const ROUTE_TABLE_TTL_MS = 30_000;
 
 const toDef = (row: VendorRouteRow): RouteDef => ({id: row.id, capability: row.capability, rank: row.rank, adapter: row.adapter, model: row.model, paramsVersion: row.paramsVersion,
-  priceUsd: row.priceUsd, rateLimitPerMin: row.rateLimitPerMin, region: row.region, licence: row.licence, noTrainingTerms: row.noTrainingTerms, state: row.state});
+  priceUsd: row.priceUsd, rateLimitPerMin: row.rateLimitPerMin, region: row.region, licence: row.licence, noTrainingTerms: row.noTrainingTerms, state: row.state, dailyCapUsd: row.dailyCapUsd});
 
 /** Check-then-insert the seed routes (SEED_ROUTES); an existing row is never overwritten, so an admin's switch stays. */
 export async function ensureSeedRoutes(db: Db, seeds: readonly RouteDef[] = SEED_ROUTES): Promise<void> {
@@ -54,10 +54,12 @@ export interface RouteChange {
   state?: RouteState; rank?: number;
   /** The written no-training position to record (document and date), as the owner decided it (M7-F2-R7). */
   noTrainingTerms?: string;
+  /** M3-F2-R3: an overflow route's daily cap in USD (null removes it, so the route is never called again). */
+  dailyCapUsd?: number | null;
   changedBy: string; reason: string; runId?: string | null;
 }
 /**
- * Change one route's state, rank or no-training position and log it as `route.changed` (M7 3.2) in one transaction.
+ * Change one route's state, rank, no-training position or overflow daily cap and log it as `route.changed` (M7 3.2) in one transaction.
  * A route that sends brand photos cannot be `serving` without a written no-training position (M7-F2-R7); with one on
  * file a switched-off route can be switched back on (the kill-switch drill's restore). Workers see the change within
  * ROUTE_TABLE_TTL_MS.
@@ -68,10 +70,13 @@ export async function setRoute(db: Db, id: string, change: RouteChange): Promise
     const [row] = await tx.select().from(vendorRoutes).where(eq(vendorRoutes.id, id)).for("update");
     if (!row) throw new RouteChangeError(`No route ${id}.`);
     const state = change.state ?? row.state, rank = change.rank ?? row.rank, noTrainingTerms = change.noTrainingTerms?.trim() || row.noTrainingTerms;
+    const dailyCapUsd = change.dailyCapUsd === undefined ? row.dailyCapUsd : change.dailyCapUsd;
+    if (dailyCapUsd !== null && !(Number.isFinite(dailyCapUsd) && dailyCapUsd >= 0)) throw new RouteChangeError(`Route ${id}: the daily cap must be a number of USD, 0 or more.`);
     if (state === "serving" && BRAND_PHOTO_CAPABILITIES.includes(row.capability) && !hasNoTrainingPosition(noTrainingTerms))
       throw new RouteChangeError(`Route ${id} has no written no-training position, so it cannot serve a capability that sends brand photos.`);
-    const [updated] = await tx.update(vendorRoutes).set({state, rank, noTrainingTerms}).where(eq(vendorRoutes.id, id)).returning();
-    const reason = noTrainingTerms !== row.noTrainingTerms ? `${change.reason} (no-training position recorded: ${noTrainingTerms})` : change.reason;
+    const [updated] = await tx.update(vendorRoutes).set({state, rank, noTrainingTerms, dailyCapUsd}).where(eq(vendorRoutes.id, id)).returning();
+    const notes = [...(noTrainingTerms !== row.noTrainingTerms ? [`no-training position recorded: ${noTrainingTerms}`] : []), ...(dailyCapUsd !== row.dailyCapUsd ? [`daily cap USD ${dailyCapUsd ?? "none"}`] : [])];
+    const reason = notes.length ? `${change.reason} (${notes.join("; ")})` : change.reason;
     await tx.insert(vendorRouteChanges).values({routeId: id, capability: row.capability, fromState: row.state, toState: state, fromRank: row.rank, toRank: rank, changedBy: change.changedBy, reason, runId: change.runId ?? null});
     return toDef(updated!);
   });

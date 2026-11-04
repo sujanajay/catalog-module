@@ -11,6 +11,7 @@ import { workerCatalogDeps, type CatalogDeps } from "./catalog/deps";
 import { handleChunkTask } from "./catalog/chunk";
 import { handleEnlargeTask } from "./catalog/enlarge";
 import { handleFinalizeTask } from "./catalog/finalize";
+import { handleImproveTask } from "./catalog/improve";
 import { handleIngestMoreTask, handleIngestTask } from "./catalog/ingest";
 import { handlePublishTask } from "./catalog/publish";
 import { handleSweep } from "./catalog/sweep";
@@ -37,6 +38,7 @@ function handlers(): Partial<Record<TaskRoute, (body: Record<string, unknown>) =
     "/tasks/catalog/publish": (body) => handlePublishTask(catalog, body),
     "/tasks/catalog/finalize": (body) => handleFinalizeTask(catalog, body),
     "/tasks/catalog/enlarge": (body) => handleEnlargeTask(catalog, body),
+    "/tasks/catalog/improve": (body) => handleImproveTask(catalog, body),
   };
 }
 
@@ -55,6 +57,8 @@ function previousRelease(): [TaskRoute, Record<string, unknown>][] {
     ["/tasks/catalog/publish", { batchId, productId, trigger: "decision" }],
     ["/tasks/catalog/finalize", { batchId }],
     ["/tasks/catalog/enlarge", { batchId, productId, enlargementId }],
+    // New in M1-S4 (no earlier body exists); listed so a later release keeps reading this one.
+    ["/tasks/catalog/improve", { batchId, sourceImageId: randomUUID() }],
   ];
 }
 
@@ -71,6 +75,6 @@ describe("previous release task bodies on the new handlers", () => {
       seen.add(route);
     }
     // sync-master ignores its body (a BigQuery read); every other route is covered.
-    expect([...seen].sort()).toEqual(["/tasks/catalog/chunk", "/tasks/catalog/enlarge", "/tasks/catalog/finalize", "/tasks/catalog/ingest", "/tasks/catalog/ingest-more", "/tasks/catalog/publish", "/tasks/catalog/sweep"]);
+    expect([...seen].sort()).toEqual(["/tasks/catalog/chunk", "/tasks/catalog/enlarge", "/tasks/catalog/finalize", "/tasks/catalog/improve", "/tasks/catalog/ingest", "/tasks/catalog/ingest-more", "/tasks/catalog/publish", "/tasks/catalog/sweep"]);
   }, 300_000);
 });

@@ -1,4 +1,4 @@
-// Tier 2 (PGlite): 0021_change_types.sql applied over a database at the migration before it that already holds a
+// Tier 2 (PGlite): 0019_change_types.sql applied over a database at the migration before it that already holds a
 // change event with a change type no table defines: the event is kept (the foreign key is NOT VALID), the seed rows
 // arrive, a new event with an unknown type is refused, and a second run of the file changes nothing (an admin's edit
 // to a seeded row survives).
@@ -12,7 +12,7 @@ import type { Db } from "./client";
 import { resolveMigrationsFolder, runMigrations } from "./migrate";
 import { createDbFromPglite } from "./testing";
 
-const FILE = "0021_change_types";
+const FILE = "0019_change_types";
 let db: Db;
 let client: PGlite;
 
@@ -22,7 +22,7 @@ async function rows<T>(q: ReturnType<typeof sql>): Promise<T[]> {
 
 beforeAll(async () => {
   const real = resolveMigrationsFolder();
-  const before = await mkdtemp(path.join(tmpdir(), "catalog-pre0021-"));
+  const before = await mkdtemp(path.join(tmpdir(), "catalog-pre0019-"));
   try {
     await mkdir(path.join(before, "meta"));
     const journal = JSON.parse(await readFile(path.join(real, "meta", "_journal.json"), "utf8")) as { entries: { idx: number; tag: string }[] };
