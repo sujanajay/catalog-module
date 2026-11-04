@@ -33,11 +33,11 @@ const ALL = CHANNEL_IDS;
 
 /** The M10-F1-R1 list. Ids are stable: a type is retired, never renamed or deleted (events keep pointing at it). */
 export const CHANGE_TYPE_SEED = [
-  { id: "img_shotset_crops", name: "Missing photo roles filled by crops", component: "image", action: "add", costClass: "negligible", channels: ALL },
+  { id: "img_shotset_crops", name: "Missing photo roles filled by crops", component: "image", action: "add", costClass: "compute", channels: ALL },
   { id: "img_shotset_generated", name: "Missing photo roles filled by generated images", component: "image", action: "add", costClass: "generation", channels: ALL },
-  { id: "img_main_replaced", name: "Main image replaced", component: "image", action: "replace", costClass: "negligible", channels: ALL },
+  { id: "img_main_replaced", name: "Main image replaced", component: "image", action: "replace", costClass: "compute", channels: ALL },
   { id: "img_reordered", name: "Gallery re-ordered", component: "image", action: "reorder", costClass: "negligible", channels: ALL },
-  { id: "img_background_fixed", name: "Background fixed to the channel rule", component: "image", action: "replace", costClass: "negligible", channels: ALL },
+  { id: "img_background_fixed", name: "Background fixed to the channel rule", component: "image", action: "replace", costClass: "compute", channels: ALL },
   { id: "img_upscaled", name: "Image enlarged with the quality pass", component: "image", action: "replace", costClass: "compute", channels: ALL },
   { id: "img_footwear_views_added", name: "Footwear views added", component: "image", action: "add", costClass: "generation", channels: ALL },
   { id: "title_rewritten_en", name: "English title rewritten", component: "title", action: "replace", costClass: "model_call", channels: ALL },

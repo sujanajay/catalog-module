@@ -4,6 +4,7 @@
 import { createHash } from "node:crypto";
 import { and, asc, desc, eq, gt, inArray, isNull, lte, or, sql, type SQL } from "drizzle-orm";
 import type { Db } from "../db/client";
+import type { ChangeTypeId } from "../learning/change-types";
 import {
   catalogAssets,
   catalogChangeEvents,
@@ -270,8 +271,11 @@ export type NewChangeEvent = {
   /** Required except on observed_other events and backfill rows (F3-R9, D9). */
   reasonKind?: ReasonKind | null;
   reasonRef?: string | null;
-  /** Required except on observed_other events and backfill rows (F3-R9, D9). */
-  changeTypeId?: string | null;
+  /**
+   * Required except on observed_other events and backfill rows (F3-R9, D9). A row of catalog_change_types (M10-S1a);
+   * producers name v0 types with CHANGE_TYPE (learning/change-types.ts). Admin-added types are plain strings.
+   */
+  changeTypeId?: ChangeTypeId | (string & {}) | null;
   changeSetId?: string | null;
   batchId?: string | null;
   experimentId?: string | null;

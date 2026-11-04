@@ -139,7 +139,7 @@ describe(`M0 graph contract on ${TEST_PG_URL ? "real Postgres" : "PGlite"}`, () 
     await expect(recordChange(db, event(listingId, v.versionId, { changeTypeId: null }))).rejects.toThrow(/changeTypeId/);
     // A normal event without a reason is refused, by the contract and by the database.
     await expect(recordChange(db, event(listingId, v.versionId, { reasonKind: null }))).rejects.toThrow(/reasonKind/);
-    await expect(db.execute(sql`insert into catalog_change_events (idempotency_key, listing_id, slot, to_version_id, kind, at, evidence, actor, change_type_id) values ('raw-1', ${listingId}, 'image:1', ${v.versionId}, 'planned', now(), 'operator', 't', 'image.background')`)).rejects.toThrow();
+    await expect(db.execute(sql`insert into catalog_change_events (idempotency_key, listing_id, slot, to_version_id, kind, at, evidence, actor, change_type_id) values ('raw-1', ${listingId}, 'image:1', ${v.versionId}, 'planned', now(), 'operator', 't', 'img_background_fixed')`)).rejects.toMatchObject({ cause: { constraint: "catalog_change_events_reason_check" } });
     await expect(db.execute(sql`insert into catalog_change_events (idempotency_key, listing_id, slot, to_version_id, kind, at, evidence, actor, reason_kind) values ('raw-2', ${listingId}, 'image:1', ${v.versionId}, 'planned', now(), 'operator', 't', 'operator')`)).rejects.toThrow();
     // observed_other and backfill rows are accepted without a reason or a change type.
     expect((await recordChange(db, event(listingId, v.versionId, { kind: "observed_other", evidence: "scrape", reasonKind: null, changeTypeId: null }))).created).toBe(true);

@@ -43,6 +43,13 @@ describe("change-type library v0", () => {
     expect(await changeTypeById(db, "nope")).toBeNull();
   });
 
+  it("gives each type the class of the paid resource it uses (D7): GPU image work is compute, never negligible", async () => {
+    const byId = new Map((await loadChangeTypes(db)).map((r) => [r.id, r.costClass]));
+    for (const id of ["img_shotset_crops", "img_main_replaced", "img_background_fixed", "img_upscaled"]) expect(byId.get(id)).toBe("compute");
+    expect(byId.get("attributes_completed")).toBe("model_call");
+    expect([...byId].filter(([, c]) => c === "negligible").map(([id]) => id).sort()).toEqual(["img_reordered", "size_chart_added"]);
+  });
+
   it("refuses a bad id, component, action or cost class; retired types are hidden by default", async () => {
     const base = { id: "x_type", name: "X", component: "image" as const, action: "add" as const, costClass: "negligible" as const, channels: ["noon" as const], sinceVersion: 2 };
     await expect(db.insert(catalogChangeTypes).values({ ...base, id: "Bad.Id" })).rejects.toThrow();

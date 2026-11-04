@@ -26,11 +26,11 @@ CREATE TABLE IF NOT EXISTS "catalog_change_types" (
 );
 --> statement-breakpoint
 INSERT INTO "catalog_change_types" ("id", "name", "component", "action", "cost_class", "channels", "since_version") VALUES
-	('img_shotset_crops', 'Missing photo roles filled by crops', 'image', 'add', 'negligible', '["noon", "namshi", "trendyol", "styli", "centrepoint", "sixthstreet", "vogacloset", "amazon", "shein"]'::jsonb, 1),
+	('img_shotset_crops', 'Missing photo roles filled by crops', 'image', 'add', 'compute', '["noon", "namshi", "trendyol", "styli", "centrepoint", "sixthstreet", "vogacloset", "amazon", "shein"]'::jsonb, 1),
 	('img_shotset_generated', 'Missing photo roles filled by generated images', 'image', 'add', 'generation', '["noon", "namshi", "trendyol", "styli", "centrepoint", "sixthstreet", "vogacloset", "amazon", "shein"]'::jsonb, 1),
-	('img_main_replaced', 'Main image replaced', 'image', 'replace', 'negligible', '["noon", "namshi", "trendyol", "styli", "centrepoint", "sixthstreet", "vogacloset", "amazon", "shein"]'::jsonb, 1),
+	('img_main_replaced', 'Main image replaced', 'image', 'replace', 'compute', '["noon", "namshi", "trendyol", "styli", "centrepoint", "sixthstreet", "vogacloset", "amazon", "shein"]'::jsonb, 1),
 	('img_reordered', 'Gallery re-ordered', 'image', 'reorder', 'negligible', '["noon", "namshi", "trendyol", "styli", "centrepoint", "sixthstreet", "vogacloset", "amazon", "shein"]'::jsonb, 1),
-	('img_background_fixed', 'Background fixed to the channel rule', 'image', 'replace', 'negligible', '["noon", "namshi", "trendyol", "styli", "centrepoint", "sixthstreet", "vogacloset", "amazon", "shein"]'::jsonb, 1),
+	('img_background_fixed', 'Background fixed to the channel rule', 'image', 'replace', 'compute', '["noon", "namshi", "trendyol", "styli", "centrepoint", "sixthstreet", "vogacloset", "amazon", "shein"]'::jsonb, 1),
 	('img_upscaled', 'Image enlarged with the quality pass', 'image', 'replace', 'compute', '["noon", "namshi", "trendyol", "styli", "centrepoint", "sixthstreet", "vogacloset", "amazon", "shein"]'::jsonb, 1),
 	('img_footwear_views_added', 'Footwear views added', 'image', 'add', 'generation', '["noon", "namshi", "trendyol", "styli", "centrepoint", "sixthstreet", "vogacloset", "amazon", "shein"]'::jsonb, 1),
 	('title_rewritten_en', 'English title rewritten', 'title', 'replace', 'model_call', '["noon", "namshi", "trendyol", "styli", "centrepoint", "sixthstreet", "vogacloset", "amazon", "shein"]'::jsonb, 1),

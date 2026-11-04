@@ -6,10 +6,11 @@ export const CHANGE_ACTIONS = ["add", "replace", "reorder", "remove"] as const;
 export type ChangeAction = (typeof CHANGE_ACTIONS)[number];
 
 /**
- * What applying the change costs, by what pays for it (integration decision D7). M6 attaches prices per class; the
- * names carry no amounts. `negligible`: no paid call (our own render of photos we already have, a re-order, data we
- * already hold). `compute`: our own GPU or CPU time. `model_call`: a paid text or vision model call. `generation`: a
- * paid image generation.
+ * The paid resource that applying the change mainly uses (integration decision D7). Resource use only: M6 prices the
+ * classes, and what a class permits by default is an owner decision (M10-S2). `negligible`: no paid resource (a
+ * re-order of images already made, a chart from data we hold). `compute`: our own GPU or CPU time to make a new
+ * image (cut-out, render, upscale); every new image also passes the paid quality check. `model_call`: a paid text
+ * or vision model call. `generation`: a paid image generation.
  */
 export const COST_CLASSES = ["negligible", "compute", "model_call", "generation"] as const;
 export type CostClass = (typeof COST_CLASSES)[number];
