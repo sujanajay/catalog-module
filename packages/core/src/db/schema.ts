@@ -28,6 +28,7 @@ import {
   type AnyPgColumn,
 } from "drizzle-orm/pg-core";
 import type { SkuMethod } from "../catalog/sku-mapping";
+import { CHANGE_ACTIONS, CHANGE_TYPE_STATUSES, COST_CLASSES } from "../learning/types";
 import { BRAND_PHOTO_CAPABILITIES, CAPABILITIES, ROUTE_ADAPTERS, ROUTE_STATES } from "../vendor/routes";
 import {
   ALIAS_KINDS,
@@ -1012,7 +1013,7 @@ export const catalogChangeEvents = pgTable(
     actor: text("actor").notNull(),
     reasonKind: text("reason_kind", { enum: REASON_KINDS }),
     reasonRef: text("reason_ref"),
-    /** M10's change-type id (its table lands in M10-S1a, so no foreign key here). */
+    /** M10's change-type id: a row of catalog_change_types (M10-S1a, migration 0021). */
     changeTypeId: text("change_type_id"),
     changeSetId: uuid("change_set_id"),
     batchId: uuid("batch_id").references(() => catalogBatches.id, { onDelete: "set null" }),
@@ -1024,6 +1025,8 @@ export const catalogChangeEvents = pgTable(
     // RESTRICT: deleting a version never erases the log; test cleanup deletes test events explicitly first (D13).
     foreignKey({ name: "catalog_change_events_from_version_id_fk", columns: [t.fromVersionId], foreignColumns: [catalogContentVersions.id] }).onDelete("restrict"),
     foreignKey({ name: "catalog_change_events_to_version_id_fk", columns: [t.toVersionId], foreignColumns: [catalogContentVersions.id] }).onDelete("restrict"),
+    // M10-S1a: an unknown change type is refused, never stored (types are retired, never deleted).
+    foreignKey({ name: "catalog_change_events_change_type_id_fk", columns: [t.changeTypeId], foreignColumns: [catalogChangeTypes.id] }).onDelete("restrict"),
     index("catalog_change_events_from_version_id_idx").on(t.fromVersionId),
     index("catalog_change_events_to_version_id_idx").on(t.toVersionId),
     index("catalog_change_events_batch_id_idx").on(t.batchId),
@@ -1347,3 +1350,38 @@ export const vendorRouteChanges = pgTable(
 
 export type VendorRouteRow = typeof vendorRoutes.$inferSelect;
 export type VendorRouteChange = typeof vendorRouteChanges.$inferSelect;
+
+// ---------------------------------------------------------------------------
+// M10-S1a change-type library (migration 0021). Seeded by the migration with taxonomy v0 (learning/change-types.ts).
+// ---------------------------------------------------------------------------
+
+/**
+ * The change types every M0 change event names (M10-F1-R1, M0-F3-R9). `component` uses M0's component list; `channels`
+ * are where the change can be made; `cost_class` is what pays for it (M6 prices the classes). A type is retired, never
+ * deleted or renamed, so old events keep resolving. `since_version` is the taxonomy version that added it (v0 = 1).
+ */
+export const catalogChangeTypes = pgTable(
+  "catalog_change_types",
+  {
+    id: text("id").primaryKey(),
+    orgId: orgId(),
+    name: text("name").notNull(),
+    component: text("component", { enum: COMPONENTS }).notNull(),
+    action: text("action", { enum: CHANGE_ACTIONS }).notNull(),
+    costClass: text("cost_class", { enum: COST_CLASSES }).notNull(),
+    channels: jsonb("channels").$type<ChannelId[]>().notNull(),
+    status: text("status", { enum: CHANGE_TYPE_STATUSES }).notNull().default("active"),
+    sinceVersion: integer("since_version").notNull(),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (t) => [
+    check("catalog_change_types_id_check", sql`${t.id} ~ '^[a-z][a-z0-9_]*$'`),
+    enumCheck("catalog_change_types", "component", t.component, COMPONENTS),
+    enumCheck("catalog_change_types", "action", t.action, CHANGE_ACTIONS),
+    enumCheck("catalog_change_types", "cost_class", t.costClass, COST_CLASSES),
+    enumCheck("catalog_change_types", "status", t.status, CHANGE_TYPE_STATUSES),
+  ],
+);
+
+export type ChangeTypeRow = typeof catalogChangeTypes.$inferSelect;

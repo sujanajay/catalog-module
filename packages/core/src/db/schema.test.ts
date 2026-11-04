@@ -41,6 +41,7 @@ const TABLES = [
   // 0010_taxonomy.sql (M2-S1 taxonomy store)
   "catalog_taxonomy_nodes", "catalog_attribute_defs", "catalog_shot_roles", "catalog_taxonomy_changes",
   "vendor_routes", "vendor_route_changes", // 0011_vendor_routes.sql (M7-S2)
+  "catalog_change_types", // 0021_change_types.sql (M10-S1a)
 ];
 
 const INDEXES = [
