@@ -1,4 +1,5 @@
 import { PeopleError } from "@catalog/core/people";
+import { SettingsError } from "@catalog/core/settings/store";
 import { ZodError } from "zod";
 import { log } from "@catalog/core/log";
 
@@ -33,6 +34,8 @@ export function errorResponse(err: unknown): Response {
   if (err instanceof HttpError) return Response.json({ error: err.message }, { status: err.status });
   // packages/core cannot import HttpError; its people rules throw PeopleError (status 400) instead.
   if (err instanceof PeopleError) return Response.json({ error: err.message }, { status: err.status });
+  // The settings store (M12-S1) refuses with its own status and sentence.
+  if (err instanceof SettingsError) return Response.json({ error: err.message }, { status: err.status });
   if (err instanceof ZodError) {
     const msg = err.issues.map((i) => `${i.path.join(".") || "body"}: ${i.message}`).join("; ");
     return Response.json({ error: msg, issues: err.issues }, { status: 400 });
