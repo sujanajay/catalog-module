@@ -65,7 +65,8 @@ export async function laterPublisher(tx: Pick<Db, "select">, product: Pick<typeo
   const started = sql<Date>`coalesce(${catalogBatches.startedAt}, ${catalogBatches.createdAt})`;
   const rows = await tx.select({ id: catalogBatches.id, started }).from(catalogBatches).where(inArray(catalogBatches.id, [product.lastBatchId, batchId]));
   const last = rows.find(r => r.id === product.lastBatchId), own = rows.find(r => r.id === batchId);
-  return last && own && +new Date(last.started) > +new Date(own.started) ? last.id : null;
+  // An equal instant cannot happen (Start takes the lock); it counts as later, the safe side (review round 3 P3-1).
+  return last && own && +new Date(last.started) >= +new Date(own.started) ? last.id : null;
 }
 async function lockProduct(tx: Tx, output: Output): Promise<typeof catalogProducts.$inferSelect> {
   const [product] = await tx.select().from(catalogProducts).where(eq(catalogProducts.id, output.productId)).for("update");
@@ -218,7 +219,7 @@ export async function resetPhotoEnlargement(tx: Tx, target: Pick<Output, "batchI
   await lockProductChunks(tx as unknown as Db, target.batchId, target.productId);
   const failed = await tx.select().from(catalogEnlargements).where(and(eq(catalogEnlargements.batchId, target.batchId), eq(catalogEnlargements.sourceImageId, target.sourceImageId), eq(catalogEnlargements.wanted, true), eq(catalogEnlargements.status, "failed"), ne(catalogEnlargements.route, "none"))).orderBy(asc(catalogEnlargements.id)).for("update");
   if (!failed.length) return null;
-  const rows = await tx.update(catalogEnlargements).set({ status: "queued", attempts: 0, timeouts: 0, probeTimeouts: 0, retries: sql`${catalogEnlargements.retries} + 1`, sends: sql`${catalogEnlargements.sends} + 1`, delayedSince: null, claimedAt: null, claimToken: null, tilesDone: 0, error: null, errorKind: null, updatedAt: now })
+  const rows = await tx.update(catalogEnlargements).set({ status: "queued", attempts: 0, timeouts: 0, probeTimeouts: 0, retries: sql`${catalogEnlargements.retries} + 1`, sends: sql`${catalogEnlargements.sends} + 1`, claimedAt: null, claimToken: null, tilesDone: 0, error: null, errorKind: null, updatedAt: now })
     .where(inArray(catalogEnlargements.id, failed.map(r => r.id))).returning();
   // F59: Try again resets the photo's identity-change count.
   await tx.update(catalogEnlargements).set({ identityReleases: 0 }).where(and(eq(catalogEnlargements.batchId, target.batchId), eq(catalogEnlargements.sourceImageId, target.sourceImageId)));

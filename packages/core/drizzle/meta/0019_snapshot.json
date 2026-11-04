@@ -1,5 +1,5 @@
 {
-  "id": "139c1717-710d-42f7-9221-46485a63786d",
+  "id": "eb6db9c2-0965-4398-b8e8-f7b2d643fdb9",
   "prevId": "24d8a858-e450-4c22-a0eb-e7f09c7d6336",
   "version": "7",
   "dialect": "postgresql",
@@ -2033,12 +2033,6 @@
           "primaryKey": false,
           "notNull": true,
           "default": 0
-        },
-        "delayed_since": {
-          "name": "delayed_since",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": false
         },
         "claimed_at": {
           "name": "claimed_at",

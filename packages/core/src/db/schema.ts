@@ -636,12 +636,6 @@ export const catalogEnlargements = pgTable(
     identityReleases: integer("identity_releases").notNull().default(0),
     sends: integer("sends").notNull().default(0),
     retries: integer("retries").notNull().default(0),
-    /**
-     * Owner decision 2026-11-04 (M1 D13, 0019): since when every delivery of this queued row found the upscaler
-     * unreachable (set by the first such delay, cleared by any other answer). An auto-decide batch fails the row after
-     * ENLARGE_OUTAGE_DEADLINE_MS of it, so the photo is delivered as a provisional plain render.
-     */
-    delayedSince: tsNull("delayed_since"),
     claimedAt: tsNull("claimed_at"),
     claimToken: text("claim_token"),
     tilesDone: integer("tiles_done").notNull().default(0),

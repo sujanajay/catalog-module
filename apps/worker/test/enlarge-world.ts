@@ -21,7 +21,7 @@ import { handleEnlargeTask, type EnlargeCall, type EnlargeProbe } from "../src/c
 import { handlePublishTask } from "../src/catalog/publish";
 import { handleFinalizeTask } from "../src/catalog/finalize";
 import { handleSweep } from "../src/catalog/sweep";
-import { handleImproveTask, IMPROVE_ROUTE, outageProbeOf } from "../src/catalog/improve";
+import { handleImproveTask, IMPROVE_ROUTE } from "../src/catalog/improve";
 import { repairOwnDefects } from "../src/catalog/qa-stage";
 import { fakeWorld, seedBatch, type FakeWorld, type QueuedTask } from "./catalog-fakes";
 
@@ -235,7 +235,7 @@ export async function deliverChunk(db: Db, w: FakeWorld, chunkId: string): Promi
 }
 /** The sweep at the clock's time. */
 export function sweep(db: Db, w: FakeWorld, extra: { enlargementOff?: boolean } = {}): Promise<HandleResult> {
-  return handleSweep({ db, releaseLocks, now: w.deps.now, enqueue: w.deps.enqueue, ...(w.deps.enlargeProbe ? { outageProbe: outageProbeOf(w.deps.enlargeProbe) } : {}), ...extra }, {});
+  return handleSweep({ db, releaseLocks, now: w.deps.now, enqueue: w.deps.enqueue, ...extra }, {});
 }
 
 export const rowsOf = (db: Db, batchId: string) => db.select().from(catalogEnlargements).where(eq(catalogEnlargements.batchId, batchId)).orderBy(catalogEnlargements.createdAt, catalogEnlargements.id);

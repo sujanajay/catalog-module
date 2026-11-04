@@ -8,8 +8,7 @@
 // always covers the whole prepared photo, so a matte change never changes it. Row states: queued, done, failed;
 // `wanted` false is a released row (I7). Two counted budgets end an identity (I6): attempts (ENLARGE_TASK_MAX_ATTEMPTS)
 // and unexplained failures while the service is up (ENLARGE_MAX_TIMEOUTS); delays never count and time is never a
-// limit (I8), with one exception the owner decided on 2026-11-04 (M1 D13): an auto-decide batch waits for an
-// unreachable upscaler at most ENLARGE_OUTAGE_DEADLINE_MS (failOutageOverdue).
+// limit (I8).
 //
 // The park: a chunk with a wanted queued row of its photos waits at the render stage (status queued, task_name
 // ENLARGING_TASK, dispatched_at set so the window and every older dispatch skip it). The settle that leaves no wanted
@@ -312,52 +311,4 @@ export async function releaseEnlargements(tx: Pick<Db, "update">, scope: { batch
       scope.keepIds?.length ? notInArray(catalogEnlargements.id, scope.keepIds) : undefined,
       scope.onlyQueued ? eq(catalogEnlargements.status, "queued") : undefined))
     .returning({ id: catalogEnlargements.id, sourceImageId: catalogEnlargements.sourceImageId });
-}
-
-/**
- * Owner decision 2026-11-04 ("Wait, then deliver flagged", M1 D13): during an upscaler outage an auto-decide batch's
- * enlargements wait at most this long, measured from the first delivery that found the upscaler unreachable
- * (`delayed_since`). A constant: no settings store exists on this stack yet (M12-S1); move it there when one does.
- */
-export const ENLARGE_OUTAGE_DEADLINE_MS = 6 * 60 * 60_000;
-/** The sentence of a row failed at the outage deadline; model-free. */
-export const OUTAGE_DEADLINE_SENTENCE = "The enlargement service could not be reached for 6 hours, so this photo was delivered without enlargement.";
-
-/** Whether an upscaler answers its health probe right now: `unknown` (the probe itself failed) proves nothing. */
-export type OutageProbe = (upscaler: string) => Promise<"ok" | "down" | "unknown">;
-
-/**
- * Fails the wanted queued rows of an auto-decide batch whose upscaler has been unreachable for
- * ENLARGE_OUTAGE_DEADLINE_MS (`outage_deadline`, terminal), so the parked chunks unpark (the caller's unparkSettledChunks)
- * and the render delivers the plain render `provisional`; the M1-S4 improvement re-enlarges it once the upscaler is
- * back. Review round 2 (P1-B): the deadline counts only time the upscaler was really unavailable. A row's clock
- * (`delayed_since`) only says its own deliveries found it down; a row waiting in a backlog is not re-delivered. So an
- * overdue row is failed only when (1) no row of the same upscaler (any batch) settled `done` after the row's outage
- * began and (2) the upscaler does not answer its probe now. Either proof of health resets the row's clock (null), so a
- * later outage counts its own 6 hours. Without a probe nothing is failed (spec 18's wait). A row a delivery holds a
- * live claim on is left to that delivery. A batch started before M1-S3 keeps spec 18's wait. Returns the failed rows.
- */
-export async function failOutageOverdue(db: Pick<Db, "select" | "update">, batchId: string, now: Date, probe?: OutageProbe): Promise<Pick<CatalogEnlargement, "id" | "sourceImageId">[]> {
-  const [batch] = await db.select({ options: catalogBatches.options }).from(catalogBatches).where(eq(catalogBatches.id, batchId));
-  const auto = batch?.options?.autoDecide;
-  if (!auto || typeof auto !== "object" || !Array.isArray(auto.rules)) return [];
-  const overdue = () => and(eq(catalogEnlargements.batchId, batchId), eq(catalogEnlargements.wanted, true), eq(catalogEnlargements.status, "queued"),
-    sql`${catalogEnlargements.delayedSince} <= ${new Date(+now - ENLARGE_OUTAGE_DEADLINE_MS).toISOString()}::timestamptz`,
-    sql`(${catalogEnlargements.claimedAt} IS NULL OR ${catalogEnlargements.claimedAt} < ${new Date(+now - ENLARGE_CLAIM_MS).toISOString()}::timestamptz)`);
-  // (1) The lane worked after the row's outage began: the clock was a blip, not an outage.
-  await db.update(catalogEnlargements).set({ delayedSince: null })
-    .where(and(overdue(), sql`EXISTS (SELECT 1 FROM catalog_enlargements AS d WHERE d.upscaler = ${catalogEnlargements.upscaler} AND d.status = 'done' AND d.updated_at > ${catalogEnlargements.delayedSince})`));
-  const rows = await db.select({ upscaler: catalogEnlargements.upscaler }).from(catalogEnlargements).where(overdue());
-  if (!rows.length || !probe) return [];
-  const failed: Pick<CatalogEnlargement, "id" | "sourceImageId">[] = [];
-  for (const upscaler of new Set(rows.map((r) => r.upscaler))) {
-    // (2) The upscaler answers now: health is back, the clock resets.
-    const answer = await probe(upscaler);
-    if (answer === "unknown") continue;
-    const of = and(overdue(), eq(catalogEnlargements.upscaler, upscaler));
-    if (answer === "ok") { await db.update(catalogEnlargements).set({ delayedSince: null }).where(of); continue; }
-    failed.push(...await db.update(catalogEnlargements).set({ status: "failed", error: OUTAGE_DEADLINE_SENTENCE, errorKind: "outage_deadline", updatedAt: now })
-      .where(of).returning({ id: catalogEnlargements.id, sourceImageId: catalogEnlargements.sourceImageId }));
-  }
-  return failed;
 }

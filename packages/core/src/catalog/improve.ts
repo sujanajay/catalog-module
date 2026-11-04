@@ -11,7 +11,7 @@
 // channels. A re-made slot that does not pass (held, dropped, failed, never judged) is put back as it was delivered
 // (restoreUnpassedImprovements, called by the publish before it plans), so a failed try never downgrades a delivered
 // link and the photo stays tracked.
-import { and, eq, getTableColumns, inArray, isNotNull, sql } from "drizzle-orm";
+import { and, eq, getTableColumns, inArray, isNotNull, sql, type SQL } from "drizzle-orm";
 import type { Db } from "../db/client";
 import { catalogBatches, catalogChunks, catalogEnlargements, catalogImprovements, catalogOutputs, catalogProducts, type CatalogImprovement } from "../db/schema";
 import { laterPublisher, resetPhotoEnlargement, sendEnlargements } from "./decisions";
@@ -45,10 +45,19 @@ const provisionalPlain = sql`${catalogOutputs.flags} @> '["provisional", "enlarg
 const provisionalPlainO = sql.raw(`o.flags @> '["provisional", "enlargement_failed"]'::jsonb AND o.is_live AND o.status = 'verified' AND o.decision IS NULL`);
 
 /**
+ * Review round 3 (P2-1): a product in a draft batch whose preview is ready (the operator is about to Start it) is not
+ * improved, so a background try never makes Start refuse the operator's batch with the product's lock.
+ */
+function awaitingStart(productId: SQL) {
+  return sql`EXISTS (SELECT 1 FROM catalog_batch_products AS bp JOIN catalog_batches AS d ON d.id = bp.batch_id
+    WHERE bp.product_id = ${productId} AND d.status = 'draft' AND coalesce((d.counts->>'previewReady')::boolean, false))`;
+}
+
+/**
  * The photos whose provisional plain render is due a try at `now`: in a done auto-decide batch, first delivered between
  * IMPROVE_WINDOW_MS and IMPROVE_FIRST_DELAY_MS ago, with fewer than IMPROVE_MAX_TRIES tries, the last at least
  * IMPROVE_SPACING_MS ago, no try running and not ended, a failed enlargement a call can make, the product's links still
- * this batch's (last_batch_id) and the product free or locked to this batch. The photos looked at least recently come
+ * this batch's (last_batch_id), the product free or locked to this batch, and no draft batch with it waiting for Start. The photos looked at least recently come
  * first (a try that waits for the upscaler touches its row, so the same photos never keep the head of the LIMIT), then
  * by first delivery.
  */
@@ -68,6 +77,7 @@ export async function improvementCandidates(db: Db, now: Date, limit = IMPROVE_S
       AND coalesce(i.tries, 0) < ${IMPROVE_MAX_TRIES}
       AND (i.last_tried_at IS NULL OR i.last_tried_at <= ${new Date(t - IMPROVE_SPACING_MS).toISOString()}::timestamptz)
       AND i.ended_at IS NULL AND i.previous IS NULL
+      AND NOT ${awaitingStart(sql.raw("o.product_id"))}
       AND EXISTS (SELECT 1 FROM catalog_enlargements AS e WHERE e.batch_id = o.batch_id AND e.source_image_id = o.source_image_id
         AND e.wanted AND e.status = 'failed' AND e.route <> 'none')
     ORDER BY touched_at NULLS FIRST, first_at, o.source_image_id
@@ -101,6 +111,8 @@ export async function improvePhoto(db: Db, enqueue: typeof enqueueTask, input: {
     const [product] = await tx.select().from(catalogProducts).where(eq(catalogProducts.id, first.productId)).for("update");
     if (!product) return { outcome: "nothing_to_improve" as const };
     if (product.lockBatchId && product.lockBatchId !== input.batchId) return { outcome: "busy" as const };
+    const [waiting] = rowsOf(await tx.execute(sql`SELECT ${awaitingStart(sql`${product.id}::uuid`)} AS w`));
+    if (waiting?.w === true) return { outcome: "busy" as const };
     // P1 (review 2026-11-04): a later batch published this product, so this batch's outputs are no longer its links
     // (the same check as Use as is, Replace and Try again: decisions.ts laterPublisher).
     if (await laterPublisher(tx, product, input.batchId)) {

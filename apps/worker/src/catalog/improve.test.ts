@@ -8,10 +8,9 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vites
 import { and, eq } from "drizzle-orm";
 import type { Db } from "@catalog/core/db/client";
 import { createTestDb } from "@catalog/core/db/testing";
-import { catalogBatches, catalogBatchProducts, catalogChunks, catalogEnlargements, catalogOutputs, catalogProducts, catalogSourceImages } from "@catalog/core/db/schema";
+import { catalogBatches, catalogBatchProducts, catalogChunks, catalogOutputs, catalogProducts, catalogSourceImages } from "@catalog/core/db/schema";
 import { DIMENSION_FLAGS } from "@catalog/core/catalog/qa/judge";
 import { retryEnlargement, RETRY_SUPERSEDED } from "@catalog/core/catalog/decisions";
-import { ENLARGE_OUTAGE_DEADLINE_MS } from "@catalog/core/catalog/pipeline/enlargement";
 import { autoDecideSnapshot } from "@catalog/core/catalog/auto-decide";
 import { IMPROVE_FIRST_DELAY_MS, IMPROVE_MAX_TRIES, IMPROVE_SPACING_MS, IMPROVE_WINDOW_MS, improvementOf } from "@catalog/core/catalog/improve";
 import { runInvariants } from "@catalog/core/catalog/invariants/run";
@@ -275,43 +274,6 @@ describe("improvement review fixes (2026-11-04)", () => {
     }, 300_000);
   }
 
-  it("F3 test 2 (owner decision 2026-11-04): the upscaler stopped during a batch; after the outage deadline the batch finishes with plain renders delivered provisional, then improved at the same URL", async () => {
-    const e = enlargeWorld(db);
-    // Past every other test's clock: the deadline's lane check reads every batch's rows of the upscaler (shared database).
-    e.clock.tick(30 * 24 * 60);
-    const s = await seedEnlargeBatch(db, e.w, "improve-outage", [[1]], { channels: ["trendyol"] });
-    await db.update(catalogBatches).set({ options: { ...s.batch.options, autoDecide: await autoDecideSnapshot(db) } }).where(eq(catalogBatches.id, s.batch.id));
-    e.service.state.mode = "down";
-    await startChunks(db, e.w, s.chunks.map((c) => c.id));
-    await drain(e.w, { ...only(s), max: 60 });
-    expect((await batchOf(db, s.batch.id)).status).not.toBe("done");
-    expect((await rowsOf(db, s.batch.id))[0]).toMatchObject({ status: "queued", delayedSince: expect.any(Date) });
-    // Before the deadline the batch waits, as spec 18 says.
-    e.clock.tick(minutes(ENLARGE_OUTAGE_DEADLINE_MS) - 30);
-    await sweep(db, e.w);
-    await drain(e.w, { ...only(s), max: 20 });
-    expect((await rowsOf(db, s.batch.id))[0]).toMatchObject({ status: "queued" });
-    expect((await batchOf(db, s.batch.id)).status).not.toBe("done");
-    // After it, the photo is delivered as a provisional plain render and the batch finishes.
-    e.clock.tick(31);
-    await sweep(db, e.w);
-    await drain(e.w, only(s));
-    expect((await rowsOf(db, s.batch.id))[0]).toMatchObject({ status: "failed", errorKind: "outage_deadline" });
-    expect((await batchOf(db, s.batch.id)).status).toBe("done");
-    const [o] = await outputsOf(db, s.batch.id);
-    expect(o).toMatchObject({ status: "verified", isLive: true });
-    expect(o!.flags).toEqual(expect.arrayContaining(["provisional", "enlargement_failed"]));
-    // The upscaler is back: the improvement re-enlarges the photo and republishes it at the same URL.
-    e.service.state.mode = "ok";
-    await sweepAfter(e, IMPROVE_FIRST_DELAY_MS);
-    expect(improveTasks(e, s.batch.id)).toHaveLength(1);
-    await drain(e.w, only(s));
-    const [after] = await outputsOf(db, s.batch.id);
-    expect(after).toMatchObject({ id: o!.id, status: "verified", isLive: true, objectPath: o!.objectPath, publicUrl: o!.publicUrl });
-    expect(after!.flags).toContain("upscaled");
-    expect(after!.flags).not.toContain("provisional");
-    expect(after!.generation).not.toBe(o!.generation);
-  }, 600_000);
 });
 
 /** Batch options with the rule for `not_enlarged` set to drop (a later rule change, for the restore tests). */
@@ -343,42 +305,6 @@ describe("improvement review fixes, round 2 (2026-11-04)", () => {
     expect((await outputsOf(db, e.s.batch.id)).every((o) => o.status !== "pending")).toBe(true);
   }, 600_000);
 
-  it("P1-B: a row delayed once early, then not re-delivered while the upscaler is healthy, is not failed at the outage deadline", async () => {
-    const e = enlargeWorld(db);
-    const s = await seedEnlargeBatch(db, e.w, "rv2-b", [[1]], { channels: ["trendyol"] });
-    await db.update(catalogBatches).set({ options: { ...s.batch.options, autoDecide: await autoDecideSnapshot(db) } }).where(eq(catalogBatches.id, s.batch.id));
-    e.service.state.mode = "down";
-    await startChunks(db, e.w, s.chunks.map((c) => c.id));
-    await drain(e.w, { ...only(s), max: 3 });
-    expect((await rowsOf(db, s.batch.id))[0]).toMatchObject({ status: "queued", delayedSince: expect.any(Date) });
-    // A short blip: the upscaler is healthy again at once; the row's retry waits behind a backlog.
-    e.service.state.mode = "ok";
-    e.clock.tick(minutes(ENLARGE_OUTAGE_DEADLINE_MS) + 1);
-    e.w.tasks.splice(0, e.w.tasks.length);
-    await sweep(db, e.w);
-    // Not failed, and the outage clock is reset (health came back), so a later outage starts its own 6 hours.
-    expect((await rowsOf(db, s.batch.id))[0]).toMatchObject({ status: "queued", delayedSince: null });
-  }, 600_000);
-
-  it("P1-B: while the same upscaler finished other enlargements after the row's outage began, the deadline fails nothing", async () => {
-    const e = enlargeWorld(db);
-    const s = await seedEnlargeBatch(db, e.w, "rv2-b2", [[1]], { channels: ["trendyol"] });
-    await db.update(catalogBatches).set({ options: { ...s.batch.options, autoDecide: await autoDecideSnapshot(db) } }).where(eq(catalogBatches.id, s.batch.id));
-    e.service.state.mode = "down";
-    await startChunks(db, e.w, s.chunks.map((c) => c.id));
-    await drain(e.w, { ...only(s), max: 3 });
-    const [row] = await rowsOf(db, s.batch.id);
-    e.clock.tick(minutes(ENLARGE_OUTAGE_DEADLINE_MS) + 1);
-    // Another batch's row of the same upscaler settled done after this row's outage began: the lane works.
-    const ok = await provisionalBatch("rv2-b2-lane");
-    const [lane] = await rowsOf(db, ok.s.batch.id);
-    await db.update(catalogEnlargements).set({ status: "done", upscaler: row!.upscaler, updatedAt: e.clock.now() }).where(eq(catalogEnlargements.id, lane!.id));
-    e.service.state.mode = "down";
-    e.w.tasks.splice(0, e.w.tasks.length);
-    await sweep(db, e.w);
-    expect((await rowsOf(db, s.batch.id))[0]).toMatchObject({ status: "queued", delayedSince: null });
-  }, 600_000);
-
   it("P2: Try again on an auto-decide provisional slot whose re-made slot a rule drops puts the delivered slot back", async () => {
     const e = await provisionalBatch("rv2-retry-drop");
     const [before] = e.outs;
@@ -394,4 +320,21 @@ describe("improvement review fixes, round 2 (2026-11-04)", () => {
     expect(publicObject(e, after!.objectPath)!.equals(bytes)).toBe(true);
     expect(await productOf(before!.productId)).toMatchObject({ lockBatchId: null });
   }, 600_000);
+});
+
+describe("improvement review fixes, round 3 (2026-11-04)", () => {
+  it("P2-1: a product in a draft batch waiting for Start is not improved, so the try never blocks the operator's Start", async () => {
+    const e = await provisionalBatch("rv3-draft");
+    const [o] = e.outs;
+    const [draft] = await db.insert(catalogBatches).values({ brandSlug: e.s.batch.brandSlug, brandName: "Draft", name: "rv3-draft-next", isTest: true, createdBy: "t@opptra.com", status: "draft", channels: ["trendyol"], counts: { ...e.s.batch.counts, previewReady: true } }).returning();
+    await db.insert(catalogBatchProducts).values({ batchId: draft!.id, productId: o!.productId, change: "updated" });
+    await sweepAfter(e, IMPROVE_FIRST_DELAY_MS);
+    expect(improveTasks(e, e.s.batch.id)).toHaveLength(0);
+    expect(await handleImproveTask(e.w.deps, { batchId: e.s.batch.id, sourceImageId: o!.sourceImageId })).toMatchObject({ outcome: "busy" });
+    expect(await productOf(o!.productId)).toMatchObject({ lockBatchId: null });
+    // The draft is started or dropped: the photo is a candidate again.
+    await db.update(catalogBatches).set({ status: "cancelled" }).where(eq(catalogBatches.id, draft!.id));
+    await sweepAfter(e, 10 * 60_000);
+    expect(improveTasks(e, e.s.batch.id)).toHaveLength(1);
+  }, 300_000);
 });
