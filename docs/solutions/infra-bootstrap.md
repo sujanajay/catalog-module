@@ -136,6 +136,13 @@ an org policy or BigQuery rights in another project).
   reads the mirror. It also grants `catalog-worker@` `roles/bigquery.jobUser` on `image-links-agent`
   (project level) and `roles/bigquery.dataViewer` on the two mirror datasets (GRANT DCL). It prints the
   source and copy row counts and exits 1 if they differ.
+- **M0 graph export (M0-S4, 2026-11-04).** `bash infra/catalog-graph-export.sh` (operator, once) creates the BigQuery
+  dataset `image-links-agent.catalog_os` in asia-south1, grants catalog-worker@ `roles/bigquery.dataEditor` on it (GRANT
+  statement) and `roles/bigquery.jobUser` plus `roles/run.invoker` on the project, the Cloud Run job `catalog-graph-export`
+  (copied from the live catalog-worker like `catalog-test-jobs.sh` does) and the Cloud Scheduler job at 02:30 UTC that
+  calls the Run Admin API `jobs:run` with an OAuth token. `DATA_TEAM_MEMBER=group:...` adds the data team's read access.
+  `deploy.sh` step 8 runs `... job`, which only moves an existing job to the new worker image. Run once by hand:
+  `bash infra/catalog-graph-export.sh run`.
 - **M0 graph sync (M0-S2, 2026-11-04).** The mirror also makes key-only copies (`SELECT DISTINCT` of the listed
   columns; no order, customer or money column, only `ordered_date` for the sales window) of `gcc_marketing.sku_option`,
   `fact_gcc.unified_sales_tertiary_v2`, `dimensions.sku_master_amazon_ae`/`_sa`, `dimensions.sku_master_noon` and
