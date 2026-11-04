@@ -104,6 +104,9 @@ check('timings: reads seconds per file from coloured reporter lines; paths are m
   const log = 'job\tstep\t2026-11-04T03:37:33Z \x1b[32m✓\x1b[39m packages/core/src/a.test.ts \x1b[2m(\x1b[22m\x1b[2m52 tests\x1b[22m\x1b[2m)\x1b[22m\x1b[33m 38630\x1b[2mms\x1b[22m\x1b[39m\n'
     + ' ✓ apps/web/test/b.test.ts (1 test) 5ms\n   ✓ a nested test name 2052ms\n ❯ apps/worker/src/c.test.ts (3 tests | 1 failed) 1200ms\n';
   assert.deepEqual(parseLog(log), {'packages/core/src/a.test.ts': 38.6, 'apps/web/test/b.test.ts': 0, 'apps/worker/src/c.test.ts': 1.2});
+  // `gh run view --log` prints each escape as the two characters ^[ rather than the ESC byte.
+  const ghLog = 'unit tests (shard 6/6)\tUNKNOWN STEP\t2026-11-04T12:05:30Z  ^[[32m✓^[[39m packages/core/src/d.test.ts ^[[2m(^[[22m^[[2m14 tests^[[22m^[[2m)^[[22m^[[33m 1349^[[2mms^[[22m^[[39m\n';
+  assert.deepEqual(parseLog(ghLog), {'packages/core/src/d.test.ts': 1.3});
   assert.equal(normalise('C:\\repo\\packages\\x.test.ts', 'C:\\repo'), 'packages/x.test.ts');
   assert.equal(normalise('/home/runner/work/r/r/apps/y.test.ts', '/home/runner/work/r/r'), 'apps/y.test.ts');
   assert.equal(normalise('apps/y.test.ts', '/home/runner/work/r/r'), 'apps/y.test.ts');

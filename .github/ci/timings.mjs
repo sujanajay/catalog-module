@@ -14,10 +14,13 @@ import { fileURLToPath } from "node:url";
 
 const FILE_LINE = /\s[✓❯×↓]\s+((?:apps|packages)\/\S+\.test\.tsx?)\s+\((\d+) tests?[^)]*\)\s*(?:(\d+)ms)?/;
 
-/** Seconds per file from reporter output (ANSI colours stripped); the larger value wins when a file appears twice. */
+/**
+ * Seconds per file from reporter output (ANSI colours stripped, whether the ESC byte or the two characters "^[" that
+ * `gh run view --log` prints); the larger value wins when a file appears twice.
+ */
 export function parseLog(text, into = {}) {
   // eslint-disable-next-line no-control-regex
-  const plain = text.replace(/\x1b\[[0-9;]*m/g, "");
+  const plain = text.replace(/(?:\x1b|\^\[)\[[0-9;]*m/g, "");
   for (const line of plain.split("\n")) {
     const m = FILE_LINE.exec(line);
     if (!m) continue;
