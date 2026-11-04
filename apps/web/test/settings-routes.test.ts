@@ -95,6 +95,19 @@ describe("POST /api/settings/changes and revert", () => {
   });
 });
 
+describe("Undo on an older change", () => {
+  it("is offered only on the latest change, and the API refuses an older one so newer values are kept", async () => {
+    as(ADMIN);
+    const first = (await (await change(post(changes, { key: "intake.improve_tries", value: 5 }))).json()) as { change_id: string };
+    expect((await change(post(changes, { key: "intake.improve_tries", value: 6 }))).status).toBe(200);
+    const old = await revert(post(`http://localhost/api/settings/versions/${first.change_id}/revert`, {}), revertCtx(first.change_id));
+    expect(old.status).toBe(409);
+    expect(await currentValue(db, "intake.improve_tries")).toBe(6);
+    const html = renderToStaticMarkup(await SettingsPage());
+    expect(html.match(/>Undo</g)).toHaveLength(1);
+  });
+});
+
 describe("the Settings page", () => {
   it("shows each setting in plain words, marks owner-only and not-yet-used ones, and is admin only", async () => {
     as(OWNER);

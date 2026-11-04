@@ -61,6 +61,7 @@ describe("changeSetting", () => {
   it("refuses values outside the type or range, unknown settings, levels it cannot be set at and unchanged values", async () => {
     expect((await refused(changeSetting(db, { key: "intake.start_countdown_seconds", value: 61 }, ADMIN))).message).toBe("Countdown before a batch starts: enter a number from 0 to 60.");
     expect((await refused(changeSetting(db, { key: "intake.start_countdown_seconds", value: 2.5 }, ADMIN))).status).toBe(400);
+    expect((await refused(changeSetting(db, { key: UPSCALE_MIN_SCALE_KEY, value: 1.25 }, ADMIN))).message).toBe("Enlarge with the quality pass above: use steps of 0.1.");
     expect((await refused(changeSetting(db, { key: "intake.auto_start", value: "yes" }, ADMIN))).status).toBe(400);
     expect((await refused(changeSetting(db, { key: "intake.auto_decide.corrupt", value: "hold" }, ADMIN))).status).toBe(400);
     expect((await refused(changeSetting(db, { key: "nothing.here", value: 1 }, ADMIN))).status).toBe(404);
@@ -117,10 +118,28 @@ describe("revertSetting", () => {
     expect(undo.version).toMatchObject({ version: 3, value: 5, revertsVersionId: v2.version.id, reason: "Undo of version 2." });
     expect(await currentValue(db, key)).toBe(5);
     expect((await refused(revertSetting(db, v2.version.id, ADMIN))).status).toBe(409);
-    const back = await revertSetting(db, v1.version.id, ADMIN);
-    expect(back.version).toMatchObject({ version: 4, value: null });
-    expect(await currentValue(db, key)).toBe(3);
+    // Undoing the undo brings the newer value back.
+    expect((await revertSetting(db, undo.version.id, ADMIN)).version).toMatchObject({ version: 4, value: 7 });
+    expect(v1.version.version).toBe(1);
+    const only = await changeSetting(db, { key: "intake.improve_window_hours", value: 12 }, ADMIN);
+    const back = await revertSetting(db, only.version.id, ADMIN);
+    expect(back.version).toMatchObject({ version: 2, value: null });
+    expect(await currentValue(db, "intake.improve_window_hours")).toBe(72);
     expect((await refused(revertSetting(db, "00000000-0000-0000-0000-000000000000", ADMIN))).status).toBe(404);
+  });
+
+  it("undoes only the latest change at a level: an older change is refused, so newer values are never thrown away", async () => {
+    const key = "intake.improve_window_hours";
+    const v1 = await changeSetting(db, { key, value: 24 }, ADMIN);
+    await changeSetting(db, { key, value: 48 }, ADMIN);
+    const err = await refused(revertSetting(db, v1.version.id, ADMIN));
+    expect(err.status).toBe(409);
+    expect(err.message).toBe("Only the latest change can be undone. Set the value you want instead.");
+    expect(await currentValue(db, key)).toBe(48);
+    // Other levels have their own latest change.
+    const noon = await changeSetting(db, { key: "intake.auto_decide.corrupt", scope: { channel: "noon" }, value: "deliver" }, ADMIN);
+    await changeSetting(db, { key: "intake.auto_decide.corrupt", value: "deliver" }, ADMIN);
+    expect((await revertSetting(db, noon.version.id, ADMIN)).version.value).toBeNull();
   });
 
   it("keeps owner-only settings owner-only on revert", async () => {

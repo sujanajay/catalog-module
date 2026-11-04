@@ -57,6 +57,9 @@ export function parseSettingValue(def: SettingDef, raw: unknown, allowedDomain: 
         throw new SettingsError(400, `${def.label}: enter a ${t.kind === "whole" ? "whole number" : "number"}.`);
       }
       if (n < t.min || n > t.max) throw new SettingsError(400, `${def.label}: enter a number from ${t.min} to ${t.max}.`);
+      if (t.kind === "decimal" && Math.abs((n - t.min) / t.step - Math.round((n - t.min) / t.step)) > 1e-9) {
+        throw new SettingsError(400, `${def.label}: use steps of ${t.step}.`);
+      }
       return t.kind === "decimal" ? Math.round(n * 10_000) / 10_000 : n;
     }
     case "choice":
@@ -107,10 +110,11 @@ export async function currentVersions(db: Conn, org: string = DEFAULT_ORG_ID): P
 }
 
 /** Every version of one setting, newest first, at every level. */
-export async function settingHistory(db: Conn, key: string, org: string = DEFAULT_ORG_ID): Promise<SettingVersionRow[]> {
-  return db.select().from(catalogSettingVersions)
+export async function settingHistory(db: Conn, key: string, org: string = DEFAULT_ORG_ID, limit?: number): Promise<SettingVersionRow[]> {
+  const q = db.select().from(catalogSettingVersions)
     .where(and(eq(catalogSettingVersions.orgId, org), eq(catalogSettingVersions.key, key)))
     .orderBy(desc(catalogSettingVersions.createdAt), desc(catalogSettingVersions.version));
+  return limit ? q.limit(limit) : q;
 }
 
 const toSnapshotVersion = (r: SettingVersionRow): SnapshotVersion => ({ id: r.id, key: r.key, scope: cleanScope(r.scope), version: r.version, value: r.value });
@@ -193,14 +197,20 @@ export async function changeSetting(db: Db, input: SettingChangeInput, by: strin
 }
 
 /**
- * M12-F1-R7: undoes one change by writing the value it replaced as a new version. Undoing the first value at a level
- * writes "no value here", so the level above (or the default) applies again.
+ * M12-F1-R7: undoes the latest change at one level by writing the value it replaced as a new version. Undoing the
+ * first value at a level writes "no value here", so the level above (or the default) applies again. An older change is
+ * refused (409): undoing it would throw away the newer values.
  */
 export async function revertSetting(db: Db, versionId: string, by: string, reason: string | null = null, org: string = DEFAULT_ORG_ID): Promise<SettingChangeResult> {
   return writeTransaction(db, async (tx) => {
     const [target] = await tx.select().from(catalogSettingVersions).where(and(eq(catalogSettingVersions.id, versionId), eq(catalogSettingVersions.orgId, org)));
     if (!target) throw new SettingsError(404, "That change was not found.");
     const def = defOf(target.key);
+    const [latest] = await tx.select({ id: catalogSettingVersions.id }).from(catalogSettingVersions)
+      .where(and(eq(catalogSettingVersions.orgId, org), eq(catalogSettingVersions.key, target.key), eq(catalogSettingVersions.scopeKey, target.scopeKey)))
+      .orderBy(desc(catalogSettingVersions.version)).limit(1);
+    // Undoing an older change would throw away every newer value at this level, so only the latest is undone.
+    if (latest?.id !== target.id) throw new SettingsError(409, "Only the latest change can be undone. Set the value you want instead.");
     const [before] = await tx.select().from(catalogSettingVersions)
       .where(and(eq(catalogSettingVersions.orgId, org), eq(catalogSettingVersions.key, target.key), eq(catalogSettingVersions.scopeKey, target.scopeKey), eq(catalogSettingVersions.version, target.version - 1)));
     const value = before?.value ?? null;
@@ -208,10 +218,7 @@ export async function revertSetting(db: Db, versionId: string, by: string, reaso
     if (value !== null) {
       try { parseSettingValue(def, value); } catch { throw new SettingsError(409, `${def.label}: the earlier value no longer fits the allowed range.`); }
     }
-    const [latest] = await tx.select({ value: catalogSettingVersions.value }).from(catalogSettingVersions)
-      .where(and(eq(catalogSettingVersions.orgId, org), eq(catalogSettingVersions.key, target.key), eq(catalogSettingVersions.scopeKey, target.scopeKey)))
-      .orderBy(desc(catalogSettingVersions.version)).limit(1);
-    if (same(latest?.value ?? null, value)) throw new SettingsError(409, `${def.label} already has the earlier value.`);
+    if (same(target.value, value)) throw new SettingsError(409, `${def.label} already has the earlier value.`);
     return writeVersion(tx, def, cleanScope(target.scope), value, by, reason ?? `Undo of version ${target.version}.`, org, target.id);
   });
 }

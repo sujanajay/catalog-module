@@ -25,6 +25,8 @@ export interface SettingLevelView {
   reason: string | null;
   /** True for a revert: the change it undid is named in `reason`. */
   undo: boolean;
+  /** The current value at its level: the only change Undo is offered on (an older undo would drop newer values). */
+  latest: boolean;
 }
 
 export interface SettingView {
@@ -69,11 +71,11 @@ export function whereText(scope: SettingScope): string {
   return ch ? `${parts.join(", ")} on ${ch}` : parts.join(", ");
 }
 
-function levelView(def: SettingDef, r: SettingVersionRow): SettingLevelView {
+function levelView(def: SettingDef, r: SettingVersionRow, latest: boolean): SettingLevelView {
   const scope = cleanScope(r.scope);
   return {
     versionId: r.id, version: r.version, scope, where: whereText(scope), value: r.value, shown: shownValue(def, r.value),
-    by: r.changedBy, at: r.createdAt.toISOString(), reason: r.reason, undo: r.revertsVersionId !== null,
+    by: r.changedBy, at: r.createdAt.toISOString(), reason: r.reason, undo: r.revertsVersionId !== null, latest,
   };
 }
 
@@ -86,8 +88,9 @@ export async function settingsView(db: Db, email: string, area?: SettingArea): P
     if (!defs.length) continue;
     const settings: SettingView[] = [];
     for (const def of defs) {
-      const levels = current.filter((r) => r.key === def.key && r.value !== null).sort((x, y) => x.scopeKey.localeCompare(y.scopeKey)).map((r) => levelView(def, r));
-      const history = (await settingHistory(db, def.key)).slice(0, HISTORY_SHOWN).map((r) => levelView(def, r));
+      const latestIds = new Set(current.filter((r) => r.key === def.key).map((r) => r.id));
+      const levels = current.filter((r) => r.key === def.key && r.value !== null).sort((x, y) => x.scopeKey.localeCompare(y.scopeKey)).map((r) => levelView(def, r, true));
+      const history = (await settingHistory(db, def.key, undefined, HISTORY_SHOWN)).map((r) => levelView(def, r, latestIds.has(r.id)));
       settings.push({
         key: def.key, label: def.label, help: def.help, type: def.type, default: def.default, defaultShown: shownValue(def, def.default),
         scopes: def.scopes, ownerOnly: def.risk === "needs_owner", inUse: def.inUse, levels, history,

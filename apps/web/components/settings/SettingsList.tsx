@@ -126,7 +126,7 @@ function SettingCard({ setting, owner, channels }: { setting: SettingView; owner
             {setting.history.map((h) => (
               <li key={h.versionId}>
                 {h.where}: {h.shown}. {h.by} on {h.at.slice(0, 10)}.{h.reason ? ` ${h.reason}` : ""}{" "}
-                {locked ? null : <button type="button" className="btn sm ghost" disabled={busy} onClick={() => void run(`/api/settings/versions/${h.versionId}/revert`, {})}>Undo</button>}
+                {locked || !h.latest ? null : <button type="button" className="btn sm ghost" disabled={busy} onClick={() => void run(`/api/settings/versions/${h.versionId}/revert`, {})}>Undo</button>}
               </li>
             ))}
           </ul>
