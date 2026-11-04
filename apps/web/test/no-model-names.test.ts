@@ -31,6 +31,8 @@ const CORE_COPY_FILES = [
   "packages/core/src/catalog/ingest/group.ts",
   "packages/core/src/catalog/ingest/index.ts",
   "packages/core/src/catalog/ingest/url-list.ts",
+  // M12-S1: setting labels and help sentences shown on the Settings page.
+  "packages/core/src/settings/registry.ts",
 ];
 
 // Every candidate id the policy defines, plus provider and family names (spec 07 section 8).

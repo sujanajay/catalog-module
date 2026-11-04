@@ -44,6 +44,7 @@ const TABLES = [
   "catalog_key_conflicts", // 0013_graph_key_sync.sql (M0-S2)
   "catalog_auto_decide_rules", // 0014_auto_decide_rules.sql (M1-S3)
   "catalog_improvements", // 0015_improvements.sql (M1-S4)
+  "catalog_setting_versions", "catalog_settings_snapshots", // 0016_settings_store.sql (M12-S1)
 ];
 
 const INDEXES = [
@@ -61,6 +62,7 @@ const INDEXES = [
   "catalog_auto_decide_rules_cause_channel_uq",
   "catalog_improvements_batch_photo_uq",
   "catalog_outputs_provisional_plain_idx",
+  "catalog_setting_versions_org_key_scope_version_uq", "catalog_settings_snapshots_batch_id_idx",
 ];
 
 describe("generated migrations", () => {

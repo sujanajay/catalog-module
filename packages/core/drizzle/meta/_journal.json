@@ -113,6 +113,13 @@
       "when": 1793798512884,
       "tag": "0015_improvements",
       "breakpoints": true
+    },
+    {
+      "idx": 16,
+      "version": "7",
+      "when": 1793799725444,
+      "tag": "0016_settings_store",
+      "breakpoints": true
     }
   ]
 }

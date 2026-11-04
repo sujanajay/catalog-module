@@ -28,6 +28,8 @@ import {
   type AnyPgColumn,
 } from "drizzle-orm/pg-core";
 import type { SkuMethod } from "../catalog/sku-mapping";
+import type { SettingScope, SettingValue } from "../settings/registry";
+import type { SettingsSnapshotData } from "../settings/snapshot";
 import { BRAND_PHOTO_CAPABILITIES, CAPABILITIES, ROUTE_ADAPTERS, ROUTE_STATES } from "../vendor/routes";
 import {
   ALIAS_KINDS,
@@ -314,9 +316,13 @@ export const catalogBatches = pgTable(
     startedAt: tsNull("started_at"),
     finishedAt: tsNull("finished_at"),
     updatedAt: updatedAt(),
+    /** M12-S1 (0016): the settings this batch read once at Start and keeps to the end; null before Start and on older batches. */
+    settingsSnapshotId: text("settings_snapshot_id"),
   },
   (t) => [
     index("catalog_batches_brand_slug_idx").on(t.brandSlug),
+    // Named: the generated name is longer than Postgres's 63-character limit.
+    foreignKey({ name: "catalog_batches_settings_snapshot_id_fk", columns: [t.settingsSnapshotId], foreignColumns: [catalogSettingsSnapshots.id] }),
     enumCheck("catalog_batches", "status", t.status, BATCH_STATUSES),
     enumCheck("catalog_batches", "product_type", t.productType, PRODUCT_TYPES),
   ],
@@ -544,6 +550,8 @@ export const catalogOutputs = pgTable(
     error: text("error"),
     /** M0 (0009): the content version this render is (F2-R2); null on rows written before M0-S3. */
     contentVersionId: uuid("content_version_id"),
+    /** M12-S1 (0016): the settings snapshot of the batch that made it (its version set); null on rows from before. */
+    settingsSnapshotId: text("settings_snapshot_id"),
     createdAt: createdAt(),
     updatedAt: updatedAt(),
   },
@@ -552,6 +560,7 @@ export const catalogOutputs = pgTable(
     index("catalog_outputs_content_version_id_idx").on(t.contentVersionId).where(sql`${t.contentVersionId} IS NOT NULL`),
     // Named: the generated name is longer than Postgres's 63-character limit.
     foreignKey({ name: "catalog_outputs_content_version_id_fk", columns: [t.contentVersionId], foreignColumns: [catalogContentVersions.id] }).onDelete("set null"),
+    foreignKey({ name: "catalog_outputs_settings_snapshot_id_fk", columns: [t.settingsSnapshotId], foreignColumns: [catalogSettingsSnapshots.id] }),
     index("catalog_outputs_product_id_idx").on(t.productId),
     // Exactly one live row per (product, channel, n).
     uniqueIndex("catalog_outputs_live_uq").on(t.productId, t.channel, t.n).where(sql`${t.isLive}`),
@@ -1453,3 +1462,59 @@ export const catalogImprovements = pgTable(
 );
 
 export type CatalogImprovement = typeof catalogImprovements.$inferSelect;
+
+// ---------------------------------------------------------------------------
+// M12-S1 settings store (migration 0016). Written only through settings/store.ts; the structure of each setting is
+// code (settings/registry.ts), the values are rows here.
+// ---------------------------------------------------------------------------
+
+/**
+ * Every value a setting has had, append-only: `setting.changed` (M12 3.2) is this row. The current value at one level
+ * (`scope_key`) is the highest `version` there. `value` null means no value at this level, so the level above applies
+ * (a revert of a first override writes it). `scope_key` is the canonical form of `scope`: '' for the programme
+ * default, else `channel=noon;category=fashion.footwear;brand=campus` with only the levels set, in that order.
+ */
+export const catalogSettingVersions = pgTable(
+  "catalog_setting_versions",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: orgId(),
+    key: text("key").notNull(),
+    scopeKey: text("scope_key").notNull().default(""),
+    scope: jsonb("scope").$type<SettingScope>().notNull().default({}),
+    version: integer("version").notNull(),
+    value: jsonb("value").$type<SettingValue | null>(),
+    schemaVersion: integer("schema_version").notNull(),
+    changedBy: text("changed_by").notNull(),
+    reason: text("reason"),
+    /** Set on a revert: the version whose change this one undoes. */
+    revertsVersionId: uuid("reverts_version_id"),
+    createdAt: createdAt(),
+  },
+  (t) => [
+    uniqueIndex("catalog_setting_versions_org_key_scope_version_uq").on(t.orgId, t.key, t.scopeKey, t.version),
+    foreignKey({ name: "catalog_setting_versions_reverts_version_id_fk", columns: [t.revertsVersionId], foreignColumns: [t.id] }),
+    check("catalog_setting_versions_version_check", sql`${t.version} >= 1`),
+  ],
+);
+
+/**
+ * The version set one batch runs with (M12 3.3 rules 1 and 2): every current setting version at Start, the registry
+ * defaults then in force and the taxonomy revision. Immutable. Batches and outputs point here; M0 content versions
+ * carry the same id in `settings_snapshot_id`. Text id (a UUID string) to match that column.
+ */
+export const catalogSettingsSnapshots = pgTable(
+  "catalog_settings_snapshots",
+  {
+    id: text("id").primaryKey(),
+    orgId: orgId(),
+    batchId: uuid("batch_id").references((): AnyPgColumn => catalogBatches.id, { onDelete: "set null" }),
+    data: jsonb("data").$type<SettingsSnapshotData>().notNull(),
+    createdBy: text("created_by").notNull(),
+    createdAt: createdAt(),
+  },
+  (t) => [index("catalog_settings_snapshots_batch_id_idx").on(t.batchId)],
+);
+
+export type SettingVersionRow = typeof catalogSettingVersions.$inferSelect;
+export type SettingsSnapshotRow = typeof catalogSettingsSnapshots.$inferSelect;
