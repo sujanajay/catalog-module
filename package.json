@@ -11,6 +11,7 @@
     "typecheck": "pnpm -r --if-present typecheck",
     "test": "vitest run",
     "test:real": "vitest run --config vitest.real.config.ts",
+    "t0": "node .github/ci/t0.mjs",
     "build": "pnpm -r --if-present build",
     "catalog:smoke": "node -e \"if(!require('fs').existsSync('apps/worker/dist/catalog-smoke.js')){console.error('catalog-smoke: not built yet');process.exit(1)}\" && node apps/worker/dist/catalog-smoke.js",
     "catalog:eval": "node -e \"if(!require('fs').existsSync('apps/worker/dist/catalog-eval.js')){console.error('catalog-eval: not built yet');process.exit(1)}\" && node apps/worker/dist/catalog-eval.js",

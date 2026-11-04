@@ -365,7 +365,7 @@ that matter.
 | Tier | What | When | Budget |
 |---|---|---|---|
 | T0 | Lint, typecheck, unit tests related to changed files (`vitest related`), on the builder's machine | every change, before a commit | under 3 minutes |
-| T1 | CI: lint, typecheck, all unit tests in 4 parallel shards, infra and matting tests, intake browser scenarios (`.github/workflows/ci.yml` today) | every PR | under 10 minutes wall |
+| T1 | CI: lint, typecheck, all unit tests in parallel shards balanced by file time (6 since S7a-1), the real-Postgres tests (S7a-3), infra and matting tests, intake browser scenarios (`.github/workflows/ci.yml` today) | every PR | under 10 minutes wall |
 | T2 | Real-photo regression set in CI (about 30 real sources with stored mattes, `packages/core/test/regression/`, retrospective c2.1) | PRs touching render, matte, shadow, crop, QA | under 5 minutes, parallel with T1 |
 | T3 | Preview-stack batch: a 20-product golden subset on the built images (spec 10 checkers) | PRs touching the pipeline, before deploy | under 15 minutes |
 | T4 | Deploy gates and the per-brand smoke (exists) | every deploy, only for changed services (F2-R7) | under 30 minutes for web or worker |
@@ -468,3 +468,16 @@ reconciled number replaces the display), the invariants job, the sweep.
 | D2 | M6 owns cost and incidents; vendor routes and their ranking belong to M7 (M12 writes them through M7) | M12 said M6 holds the service ranking; M7-F2 owns the route table |
 | D3 | Open questions answered: `ila-pg` split by connection budget share; show INR as well; keep the human quiet window until one live deploy with a real batch passes F2 test 1; provisional links do not count against batch success; measure CI wall time in S4 | Technical defaults |
 | D4 | Kept for the owner: filing the quota requests, confirming the OpenRouter paid key, the billing export, and approving a temporary Cloud SQL instance for load tests (`../owner-questions.md`) | Money and project-owner actions |
+
+## 11. M6-S7a build decisions (2026-11-04)
+
+Section 10 is M6-S6's (PR #159); this section is numbered 11 so the two merge in either order.
+
+| # | Decision | Why |
+|---|---|---|
+| S7a-1 | T1 runs the unit tests in 6 shards, balanced by each file's measured seconds (`.github/ci/shards.mjs` with `.github/ci/test-timings.json`; refresh with `node .github/ci/timings.mjs <run-id>`), instead of 4 shards from vitest's `--shard` (an equal count of files per shard). Every file `vitest list --filesOnly` prints goes to exactly one shard, a new file included (it counts as the median) | On 2026-11-03/04 the shards took 3.0 to 7.7 min because the heaviest files landed together; the planner puts the slowest shard at about 6 min of tests at worst on the measured (busy-shard) seconds. The repository is public, so the two extra runners cost no Actions minutes |
+| S7a-2 | `image-checks.test.ts` (59 tests, 6.5 min in one shard) is three files by describe group; the tests are unchanged | One file runs in one worker, so it was the floor of any shard plan |
+| S7a-3 | M0 decision D11: a "real Postgres tests" job runs every test file that reads `TEST_PG_URL` against a `postgres:16` service (the ila-pg version); the unit shards run the same files on PGlite. The job fails when it finds no such file | Picks up the files M0-S2 and M10-S1a add without another ci.yml edit |
+| S7a-4 | T2 (real-photo regression set) and T3 (preview batch) are named in `docs/specs/test-tiers.json` with their paths and marked not built. CI lists the tiers a PR needs in the run summary; the PR template asks which ran | T2 needs about 30 real brand photos and their mattes, which cannot live in this public repository, and CI has no GCP access to read them from a bucket: where they live and whether CI gets a read-only GCP identity is the owner's call. T3 deploys to preview, which waits for a typed approval per deploy. Until then a render PR names the unit tests it ran and T3 runs by hand |
+| S7a-5 | T0 is `pnpm t0`: eslint on the changed files, the typecheck, and `vitest related --run` for the changed source files | The F8 T0 row; one command a builder runs before a commit |
+| S7a-6 | The intake flake (scenario 5 "leave and return", the `/harness/queue` call after `page.reload()`) is left to PR #137 (`keepAliveTimeout: 0` in the test harness, root-caused there) | One file outside ci.yml; folding it in would duplicate a reviewed fix |
