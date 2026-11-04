@@ -18,9 +18,10 @@ async function main() {
   const startedAt = Date.now();
   const projectId = process.env.GCP_PROJECT?.trim() || "image-links-agent";
   const dataset = process.env.GRAPH_EXPORT_DATASET?.trim() || DEFAULT_EXPORT_DATASET;
-  if (!DATASET.test(dataset)) throw new Error("GRAPH_EXPORT_DATASET must be a BigQuery dataset name.");
   const db = getDb();
   try {
+    // Inside the try, so a bad setting still writes the run's cost row and closes the pool (review P3-3).
+    if (!DATASET.test(dataset)) throw new Error("GRAPH_EXPORT_DATASET must be a BigQuery dataset name.");
     const sink = createBigQueryExportSink({ projectId, dataset, location: EXPORT_LOCATION });
     const result = await runGraphExport(db, sink);
     log("INFO", "graph export finished", { runId: result.runId, dataset: `${projectId}.${dataset}`, rowsPerTable: result.rowsPerTable, maxSeq: result.maxSeq?.toString() ?? null, ms: Date.now() - startedAt });

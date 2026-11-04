@@ -1,8 +1,10 @@
 // Tier 2 (PGlite), M0-S4: the daily graph export (docs/program/requirements/M0-catalog-graph.md F5) against an
-// in-memory sink that behaves like BigQuery for what the export relies on: a load replaces a staging table, a copy
-// replaces the final table in one step, the change-event merge adds only seq values not there yet.
+// in-memory sink that behaves like BigQuery for what the export relies on: a load replaces a staging table, and one
+// commit replaces every snapshot table, merges the new change events on seq and appends the run row, all or nothing.
 // F5 acceptance 2 is "kill the job half way; the next run completes and no reader saw a partial table": the sink
-// throws at a chosen step, the final tables keep the previous snapshot, and the next run completes.
+// throws at a chosen step, the final tables keep the previous set, and the next run completes. The BigQuery sink is
+// tested against a fake client: the empty-table path, the commit script (schema steps, one transaction, explicit
+// column lists) and the JSON value forms BigQuery's load reads. No BigQuery dataset or table is touched.
 import { readFile } from "node:fs/promises";
 import { eq } from "drizzle-orm";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
@@ -22,16 +24,18 @@ import {
 import { createTestDb } from "../db/testing";
 import {
   EXPORT_TABLES,
+  commitScript,
   createBigQueryExportSink,
   runGraphExport,
   type BqClientLike,
   type ExportRunRecord,
   type ExportSink,
+  type ExportTable,
   type Row,
 } from "./export";
 import { recordChange, recordVersion } from "./index";
 
-type Step = "maxEventSeq" | "stage" | "publish" | "mergeEvents" | "recordRun";
+type Step = "maxEventSeq" | "stage" | "commit";
 
 /** In-memory stand-in for the catalog_os dataset. `failAt` throws on the n-th call of a step (1-based). */
 class MemorySink implements ExportSink {
@@ -55,23 +59,26 @@ class MemorySink implements ExportSink {
     if (!events) return null;
     return events.reduce<bigint | null>((m, r) => (m === null || BigInt(r.seq as string) > m ? BigInt(r.seq as string) : m), null);
   }
-  async stage(table: string, _columns: unknown, file: string) {
+  async stage(table: string, _columns: unknown, file: string, rows: number) {
     this.tick("stage", table);
     const text = await readFile(file, "utf8");
-    this.staging.set(table, text.split("\n").filter(Boolean).map((l) => JSON.parse(l) as Row));
+    const parsed = text.split("\n").filter(Boolean).map((l) => JSON.parse(l) as Row);
+    expect(parsed).toHaveLength(rows);
+    this.staging.set(table, parsed);
   }
-  async publish(table: string) {
-    this.tick("publish", table);
-    this.tables.set(table, [...(this.staging.get(table) ?? [])]);
-  }
-  async mergeEvents() {
-    this.tick("mergeEvents");
-    const have = this.tables.get("change_events") ?? [];
-    const seqs = new Set(have.map((r) => r.seq));
-    this.tables.set("change_events", [...have, ...(this.staging.get("change_events") ?? []).filter((r) => !seqs.has(r.seq))]);
-  }
-  async recordRun(run: ExportRunRecord) {
-    this.tick("recordRun");
+  async commit(tables: readonly ExportTable[], run: ExportRunRecord) {
+    this.tick("commit");
+    // Built aside and swapped at the end: a commit either lands whole or not at all.
+    const next = new Map(this.tables);
+    for (const t of tables) {
+      const staged = this.staging.get(t.name) ?? [];
+      if (t.incremental) {
+        const have = next.get(t.name) ?? [];
+        const seqs = new Set(have.map((r) => r.seq));
+        next.set(t.name, [...have, ...staged.filter((r) => !seqs.has(r.seq))]);
+      } else next.set(t.name, [...staged]);
+    }
+    this.tables = next;
     this.runs.push(run);
   }
   resetCounters() {
@@ -176,9 +183,9 @@ describe("runGraphExport (M0-F5)", () => {
     expect(run!.maxSeq).toBe(BigInt(rows("change_events")[0]!.seq as string));
     expect(sink.runs).toEqual([expect.objectContaining({ runId: run!.id, rowsPerTable: run!.rowsPerTable, maxSeq: run!.maxSeq })]);
     expect(result).toMatchObject({ runId: run!.id, rowsPerTable: run!.rowsPerTable });
-    // Every table is staged before any is published (a kill while staging leaves every final table as it was).
-    const firstPublish = sink.calls.findIndex((c) => c.startsWith("publish"));
-    expect(sink.calls.slice(firstPublish).some((c) => c.startsWith("stage"))).toBe(false);
+    // Every table is staged, then one commit replaces the whole set.
+    expect(sink.calls.filter((c) => c.startsWith("stage"))).toHaveLength(EXPORT_TABLES.length);
+    expect(sink.calls.at(-1)).toBe("commit");
   });
 
   it("is idempotent: a second run leaves every table the same and adds no change event twice", async () => {
@@ -214,14 +221,12 @@ describe("runGraphExport (M0-F5)", () => {
     const failed = (await db.select().from(catalogGraphExportRuns)).find((r) => r.error);
     expect(failed).toMatchObject({ finishedAt: null, error: expect.stringContaining("killed at stage 5") });
 
-    // Killed between two table swaps: each final table is either the old or the new snapshot, never a part of one.
+    // Killed at the commit: still the whole previous set, no table from tonight next to one from last night.
     sink.resetCounters();
-    sink.failAt = { step: "publish", n: 2 };
-    await expect(runGraphExport(db, sink, PAGE)).rejects.toThrow("killed at publish 2");
-    for (const [k, v] of sink.tables) {
-      const staged = JSON.stringify(sink.staging.get(k));
-      expect([before.get(k), staged], k).toContain(JSON.stringify(v));
-    }
+    sink.failAt = { step: "commit", n: 1 };
+    await expect(runGraphExport(db, sink, PAGE)).rejects.toThrow("killed at commit 1");
+    for (const [k, v] of before) expect(JSON.stringify(sink.tables.get(k)), k).toBe(v);
+    expect(sink.runs).toHaveLength(1);
 
     sink.resetCounters();
     await runGraphExport(db, sink, PAGE);
@@ -249,11 +254,9 @@ describe("runGraphExport (M0-F5)", () => {
 
 describe("createBigQueryExportSink", () => {
   function fakeClient(opts: { eventsTable?: boolean; maxSeq?: string | null } = {}) {
-    const calls: { op: string; table?: string; dest?: string; meta?: Record<string, unknown>; query?: string; params?: unknown }[] = [];
+    const calls: { op: string; table?: string; meta?: Record<string, unknown>; query?: string; params?: unknown }[] = [];
     const table = (id: string) => ({
-      id,
       load: async (_file: string, meta: Record<string, unknown>) => { calls.push({ op: "load", table: id, meta }); return [{}]; },
-      copy: async (dest: { id?: string }, meta: Record<string, unknown>) => { calls.push({ op: "copy", table: id, dest: dest.id, meta }); return [{}]; },
       exists: async () => [id === "change_events" ? Boolean(opts.eventsTable) : true] as [boolean],
     });
     const client: BqClientLike = {
@@ -263,18 +266,28 @@ describe("createBigQueryExportSink", () => {
     return { client, calls };
   }
   const where = { projectId: "image-links-agent", dataset: "catalog_os", location: "asia-south1" };
+  const ref = (t: string) => `\`image-links-agent.catalog_os.${t}\``;
+  const table = (name: string) => EXPORT_TABLES.find((t) => t.name === name)!;
 
-  it("stages with a load that replaces the staging table, then publishes with a copy that replaces the final table", async () => {
+  it("stages rows with a load that replaces the staging table and carries the BigQuery schema", async () => {
     const { client, calls } = fakeClient();
-    const sink = createBigQueryExportSink(where, client);
-    const options = EXPORT_TABLES.find((t) => t.name === "options")!;
-    await sink.stage("options", options.columns, "/tmp/options.ndjson");
-    await sink.publish("options");
+    await createBigQueryExportSink(where, client).stage("options", table("options").columns, "/tmp/options.ndjson", 2);
+    expect(calls).toHaveLength(1);
     expect(calls[0]).toMatchObject({ op: "load", table: "_staging_options", meta: { sourceFormat: "NEWLINE_DELIMITED_JSON", writeDisposition: "WRITE_TRUNCATE", createDisposition: "CREATE_IF_NEEDED" } });
     const fields = (calls[0]!.meta!.schema as { fields: { name: string; type: string; mode: string }[] }).fields;
     expect(fields.find((f) => f.name === "id")).toEqual({ name: "id", type: "STRING", mode: "NULLABLE" });
     expect(fields.find((f) => f.name === "style_key_confidence")).toMatchObject({ type: "FLOAT64" });
-    expect(calls[1]).toMatchObject({ op: "copy", table: "_staging_options", dest: "options", meta: { writeDisposition: "WRITE_TRUNCATE", createDisposition: "CREATE_IF_NEEDED" } });
+    expect(fields.find((f) => f.name === "created_at")).toMatchObject({ type: "TIMESTAMP" });
+  });
+
+  it("an empty table is never loaded: its staging table is created empty from the schema (review P2-2)", async () => {
+    const { client, calls } = fakeClient();
+    await createBigQueryExportSink(where, client).stage("content_versions", table("content_versions").columns, "/tmp/empty.ndjson", 0);
+    expect(calls.map((c) => c.op)).toEqual(["query"]);
+    expect(calls[0]!.query).toMatch(/^CREATE OR REPLACE TABLE `image-links-agent\.catalog_os\._staging_content_versions` \(`id` STRING, /);
+    expect(calls[0]!.query).toContain("`position` INT64");
+    expect(calls[0]!.query).toContain("`parent_version_ids` ARRAY<STRING>");
+    expect(calls[0]!.query).toContain("`created_at` TIMESTAMP");
   });
 
   it("reads the event cursor from catalog_os.change_events, null before the table exists", async () => {
@@ -283,15 +296,63 @@ describe("createBigQueryExportSink", () => {
     expect(await createBigQueryExportSink(where, fakeClient({ eventsTable: true, maxSeq: null }).client).maxEventSeq()).toBeNull();
   });
 
-  it("merges staged events by seq in one statement and appends the run row", async () => {
+  it("commits in one query: schema steps first, then one transaction that swaps every table, merges events and adds the run row", async () => {
     const { client, calls } = fakeClient();
-    const sink = createBigQueryExportSink(where, client);
-    await sink.mergeEvents(EXPORT_TABLES.find((t) => t.name === "change_events")!.columns);
-    expect(calls[0]!.query).toContain("CREATE TABLE IF NOT EXISTS `image-links-agent.catalog_os.change_events` LIKE `image-links-agent.catalog_os._staging_change_events`");
-    expect(calls[0]!.query).toMatch(/MERGE `image-links-agent\.catalog_os\.change_events` AS t\s+USING `image-links-agent\.catalog_os\._staging_change_events` AS s\s+ON t\.seq = s\.seq\s+WHEN NOT MATCHED THEN INSERT/);
-    await sink.recordRun({ runId: "r1", startedAt: new Date("2026-11-04T02:30:00Z"), finishedAt: new Date("2026-11-04T02:41:00Z"), rowsPerTable: { options: 2 }, maxSeq: 7n });
-    expect(calls[1]!.query).toContain("CREATE TABLE IF NOT EXISTS `image-links-agent.catalog_os.export_runs`");
-    expect(calls[1]!.query).toContain("INSERT INTO `image-links-agent.catalog_os.export_runs`");
-    expect(calls[1]!.params).toEqual({ runId: "r1", startedAt: "2026-11-04T02:30:00.000Z", finishedAt: "2026-11-04T02:41:00.000Z", rowsPerTable: '{"options":2}', maxSeq: "7" });
+    await createBigQueryExportSink(where, client).commit(EXPORT_TABLES, { runId: "r1", startedAt: new Date("2026-11-04T02:30:00Z"), finishedAt: new Date("2026-11-04T02:41:00Z"), rowsPerTable: { options: 2 }, maxSeq: 7n });
+    expect(calls).toHaveLength(1);
+    const q = calls[0]!.query!;
+    expect(calls[0]!.params).toEqual({ runId: "r1", startedAt: "2026-11-04T02:30:00.000Z", finishedAt: "2026-11-04T02:41:00.000Z", rowsPerTable: '{"options":2}', maxSeq: "7" });
+    const begin = q.indexOf("BEGIN TRANSACTION;"), commit = q.indexOf("COMMIT TRANSACTION;");
+    expect(begin).toBeGreaterThan(0);
+    expect(commit).toBe(q.length - "COMMIT TRANSACTION;".length);
+    // No DDL on permanent tables inside the transaction (BigQuery refuses it).
+    expect(q.slice(begin)).not.toMatch(/CREATE TABLE|ALTER TABLE/);
+    for (const t of EXPORT_TABLES) {
+      const names = t.columns.map((c) => `\`${c.name}\``).join(", ");
+      expect(q.slice(0, begin)).toContain(`CREATE TABLE IF NOT EXISTS ${ref(t.name)} (`);
+      if (t.incremental) {
+        expect(q.slice(begin)).toContain(`MERGE ${ref(t.name)} AS t USING ${ref(`_staging_${t.name}`)} AS s ON t.seq = s.seq\nWHEN NOT MATCHED THEN INSERT (${names}) VALUES (${names});`);
+      } else {
+        expect(q.slice(begin)).toContain(`TRUNCATE TABLE ${ref(t.name)};\nINSERT INTO ${ref(t.name)} (${names}) SELECT ${names} FROM ${ref(`_staging_${t.name}`)};`);
+      }
+    }
+    expect(q.slice(0, begin)).toContain(`CREATE TABLE IF NOT EXISTS ${ref("export_runs")} (run_id STRING, started_at TIMESTAMP, finished_at TIMESTAMP, rows_per_table STRING, max_seq INT64);`);
+    expect(q.slice(begin)).toContain(`INSERT INTO ${ref("export_runs")} (run_id, started_at, finished_at, rows_per_table, max_seq)`);
+  });
+
+  it("a column added to change_events reaches the existing table: every column is added if missing before the merge (review P2-4)", () => {
+    const events = table("change_events");
+    const grown: ExportTable = { ...events, columns: [...events.columns, { name: "new_field", type: "STRING", expr: "null" }] };
+    const q = commitScript([grown], ref);
+    expect(q).toContain(`ALTER TABLE ${ref("change_events")} ADD COLUMN IF NOT EXISTS \`seq\` INT64, `);
+    expect(q).toContain("ADD COLUMN IF NOT EXISTS `new_field` STRING;");
+    expect(q.indexOf("ADD COLUMN IF NOT EXISTS `new_field`")).toBeLessThan(q.indexOf("BEGIN TRANSACTION;"));
+    expect(q).toMatch(/INSERT \(`seq`, .*`new_field`\) VALUES \(`seq`, .*`new_field`\);/);
+  });
+});
+
+describe("exported values (the JSON forms BigQuery's load reads)", () => {
+  beforeEach(seed);
+
+  it("TIMESTAMP as ISO 8601 UTC with microseconds, INT64 as decimal text, FLOAT64 and BOOL as JSON numbers and booleans, arrays as arrays", async () => {
+    const sink = new MemorySink();
+    await runGraphExport(db, sink, PAGE);
+    const TS = /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{6}Z$/;
+    for (const t of EXPORT_TABLES) {
+      for (const row of sink.tables.get(t.name)!) {
+        for (const c of t.columns) {
+          const v = row[c.name];
+          if (v === null) continue;
+          if (c.repeated) expect(Array.isArray(v), `${t.name}.${c.name}`).toBe(true);
+          else if (c.type === "TIMESTAMP") expect(v, `${t.name}.${c.name}`).toMatch(TS);
+          else if (c.type === "INT64") expect(String(v), `${t.name}.${c.name}`).toMatch(/^-?\d+$/);
+          else if (c.type === "FLOAT64") expect(typeof v, `${t.name}.${c.name}`).toBe("number");
+          else if (c.type === "BOOL") expect(typeof v, `${t.name}.${c.name}`).toBe("boolean");
+          else expect(typeof v, `${t.name}.${c.name}`).toBe("string");
+        }
+      }
+    }
+    // The live interval's valid_from is exactly the stored instant.
+    expect(sink.tables.get("live_intervals")![0]!.valid_from).toBe("2026-11-01T00:00:00.000000Z");
   });
 });

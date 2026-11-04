@@ -8,10 +8,15 @@
 //    skipped;
 // 3. reads every table in one read-only, repeatable-read transaction (one snapshot), in keyset pages of at most
 //    5,000 rows, into one newline-delimited JSON file per table (F5-R5);
-// 4. loads each file into a staging table, then replaces each final table with its staging copy in one copy job,
-//    and adds the staged change events not yet exported with one MERGE on seq (F5-R2). A run killed at any step
-//    leaves every final table whole: the old snapshot, or (after its own copy) the new one;
-// 5. appends its row to catalog_os.export_runs and marks its Postgres row finished.
+// 4. loads each file into a staging table (an empty table is created from its schema instead of loaded);
+// 5. commits the whole set in ONE BigQuery multi-statement transaction: every snapshot table is emptied and refilled
+//    from its staging table, the staged change events not exported yet are merged on seq (F5-R2), and the run's row
+//    is appended to catalog_os.export_runs. Readers see last night's set or tonight's, never a mix of the two, and a
+//    run killed at any step changes nothing in the final tables (review of M0-S4, P2-1);
+// 6. marks its Postgres row finished.
+// Before the transaction (DDL cannot run inside one) each final table is created when missing and given every column
+// it lacks (ALTER TABLE ... ADD COLUMN IF NOT EXISTS), and every INSERT names its columns, so adding a column to
+// EXPORT_TABLES needs no manual step; renaming or retyping one is not supported (additive only, as for migrations).
 // Test content (is_test versions, their events and live intervals, events of test batches) is left out (F5-R3).
 import { mkdtemp, open, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -176,14 +181,13 @@ export interface ExportRunRecord {
 export interface ExportSink {
   /** The highest seq already exported to change_events; null before that table exists. */
   maxEventSeq(): Promise<bigint | null>;
-  /** Replaces the table's staging copy with the rows of `file` (newline-delimited JSON). */
-  stage(table: string, columns: readonly ExportColumn[], file: string): Promise<void>;
-  /** Replaces the final table with its staging copy in one step. */
-  publish(table: string): Promise<void>;
-  /** Adds the staged change events whose seq is not in change_events yet, in one statement. */
-  mergeEvents(columns: readonly ExportColumn[]): Promise<void>;
-  /** Appends the run's row to export_runs. */
-  recordRun(run: ExportRunRecord): Promise<void>;
+  /** Replaces the table's staging copy with the `rows` rows of `file` (newline-delimited JSON; empty when rows is 0). */
+  stage(table: string, columns: readonly ExportColumn[], file: string, rows: number): Promise<void>;
+  /**
+   * In one transaction: replaces every snapshot table with its staging copy, adds the staged change events whose seq
+   * is not exported yet, and appends the run's row to export_runs. All or nothing.
+   */
+  commit(tables: readonly ExportTable[], run: ExportRunRecord): Promise<void>;
 }
 
 export interface ExportResult { runId: string; rowsPerTable: Record<string, number>; maxSeq: bigint | null }
@@ -265,12 +269,9 @@ export async function runGraphExport(db: Db, sink: ExportSink, options: ExportOp
       },
       { isolationLevel: "repeatable read", accessMode: "read only" },
     );
-    // Stage everything before replacing anything.
-    for (const table of EXPORT_TABLES) await sink.stage(table.name, table.columns, files.get(table.name)!);
-    for (const table of EXPORT_TABLES) if (!table.incremental) await sink.publish(table.name);
-    for (const table of EXPORT_TABLES) if (table.incremental) await sink.mergeEvents(table.columns);
+    for (const table of EXPORT_TABLES) await sink.stage(table.name, table.columns, files.get(table.name)!, rowsPerTable[table.name]!);
     const finishedAt = new Date();
-    await sink.recordRun({ runId, startedAt: run!.startedAt, finishedAt, rowsPerTable, maxSeq });
+    await sink.commit(EXPORT_TABLES, { runId, startedAt: run!.startedAt, finishedAt, rowsPerTable, maxSeq });
     await db.update(catalogGraphExportRuns).set({ finishedAt, rowsPerTable, maxSeq }).where(eq(catalogGraphExportRuns.id, runId));
     return { runId, rowsPerTable, maxSeq };
   } catch (error) {
@@ -288,9 +289,7 @@ export async function runGraphExport(db: Db, sink: ExportSink, options: ExportOp
 
 /** The part of @google-cloud/bigquery the sink uses (a fake in tests). */
 export interface BqTableLike {
-  id?: string;
   load(file: string, metadata: Record<string, unknown>): Promise<unknown>;
-  copy(destination: BqTableLike, metadata: Record<string, unknown>): Promise<unknown>;
   exists(): Promise<[boolean]>;
 }
 export interface BqClientLike {
@@ -301,6 +300,40 @@ export interface BqClientLike {
 export interface ExportTarget { projectId: string; dataset: string; location: string }
 
 const STAGING = (table: string) => `_staging_${table}`;
+/** A column's type in BigQuery DDL. */
+const ddlType = (c: ExportColumn) => (c.repeated ? `ARRAY<${c.type}>` : c.type);
+const EXPORT_RUNS_COLUMNS = "run_id STRING, started_at TIMESTAMP, finished_at TIMESTAMP, rows_per_table STRING, max_seq INT64";
+
+/**
+ * The commit script (see the file header): schema steps first, then one transaction. `ref` names a table in the
+ * dataset. Exported for its tests.
+ */
+export function commitScript(tables: readonly ExportTable[], ref: (table: string) => string): string {
+  const out: string[] = [];
+  for (const t of tables) {
+    out.push(`CREATE TABLE IF NOT EXISTS ${ref(t.name)} (${t.columns.map((c) => `\`${c.name}\` ${ddlType(c)}`).join(", ")});`);
+    out.push(`ALTER TABLE ${ref(t.name)} ${t.columns.map((c) => `ADD COLUMN IF NOT EXISTS \`${c.name}\` ${ddlType(c)}`).join(", ")};`);
+  }
+  out.push(`CREATE TABLE IF NOT EXISTS ${ref("export_runs")} (${EXPORT_RUNS_COLUMNS});`);
+  out.push("BEGIN TRANSACTION;");
+  for (const t of tables) {
+    const names = t.columns.map((c) => `\`${c.name}\``).join(", ");
+    if (t.incremental) {
+      out.push(
+        `MERGE ${ref(t.name)} AS t USING ${ref(STAGING(t.name))} AS s ON t.seq = s.seq`,
+        `WHEN NOT MATCHED THEN INSERT (${names}) VALUES (${names});`,
+      );
+    } else {
+      out.push(`TRUNCATE TABLE ${ref(t.name)};`, `INSERT INTO ${ref(t.name)} (${names}) SELECT ${names} FROM ${ref(STAGING(t.name))};`);
+    }
+  }
+  out.push(
+    `INSERT INTO ${ref("export_runs")} (run_id, started_at, finished_at, rows_per_table, max_seq)`,
+    `VALUES (@runId, TIMESTAMP(@startedAt), TIMESTAMP(@finishedAt), @rowsPerTable, SAFE_CAST(NULLIF(@maxSeq, '') AS INT64));`,
+    "COMMIT TRANSACTION;",
+  );
+  return out.join("\n");
+}
 
 /** catalog_os in BigQuery. Builds a client for `target.projectId` with ADC unless one is given. */
 export function createBigQueryExportSink(target: ExportTarget, client?: BqClientLike): ExportSink {
@@ -318,7 +351,13 @@ export function createBigQueryExportSink(target: ExportTarget, client?: BqClient
       const m = rows[0]?.m;
       return m == null ? null : BigInt(String(m));
     },
-    async stage(table, columns, file) {
+    async stage(table, columns, file, rows) {
+      if (rows === 0) {
+        // No load of an empty file: the staging table is made empty from its schema (review of M0-S4, P2-2).
+        const cols = columns.map((c) => `\`${c.name}\` ${ddlType(c)}`).join(", ");
+        await (await get()).query({ query: `CREATE OR REPLACE TABLE ${ref(STAGING(table))} (${cols});`, location });
+        return;
+      }
       const fields = columns.map((c) => ({ name: c.name, type: c.type, mode: c.repeated ? "REPEATED" : "NULLABLE" }));
       await (await ds()).table(STAGING(table)).load(file, {
         sourceFormat: "NEWLINE_DELIMITED_JSON",
@@ -327,29 +366,9 @@ export function createBigQueryExportSink(target: ExportTarget, client?: BqClient
         createDisposition: "CREATE_IF_NEEDED",
       });
     },
-    async publish(table) {
-      const d = await ds();
-      await d.table(STAGING(table)).copy(d.table(table), { writeDisposition: "WRITE_TRUNCATE", createDisposition: "CREATE_IF_NEEDED" });
-    },
-    async mergeEvents(columns) {
-      const names = columns.map((c) => `\`${c.name}\``).join(", ");
-      const query = [
-        `CREATE TABLE IF NOT EXISTS ${ref("change_events")} LIKE ${ref(STAGING("change_events"))};`,
-        `MERGE ${ref("change_events")} AS t`,
-        `USING ${ref(STAGING("change_events"))} AS s`,
-        `ON t.seq = s.seq`,
-        `WHEN NOT MATCHED THEN INSERT (${names}) VALUES (${names});`,
-      ].join("\n");
-      await (await get()).query({ query, location });
-    },
-    async recordRun(run) {
-      const query = [
-        `CREATE TABLE IF NOT EXISTS ${ref("export_runs")} (run_id STRING, started_at TIMESTAMP, finished_at TIMESTAMP, rows_per_table STRING, max_seq INT64);`,
-        `INSERT INTO ${ref("export_runs")} (run_id, started_at, finished_at, rows_per_table, max_seq)`,
-        `VALUES (@runId, TIMESTAMP(@startedAt), TIMESTAMP(@finishedAt), @rowsPerTable, SAFE_CAST(NULLIF(@maxSeq, '') AS INT64));`,
-      ].join("\n");
+    async commit(tables, run) {
       await (await get()).query({
-        query,
+        query: commitScript(tables, ref),
         location,
         params: {
           runId: run.runId,

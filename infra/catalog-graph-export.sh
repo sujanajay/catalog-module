@@ -16,11 +16,15 @@
 #             component=catalog-graph-export, env=live.
 #   schedule  Cloud Scheduler job catalog-graph-export: every day at 02:30 UTC (F5-R5: after 02:00 UTC), a POST to the
 #             Cloud Run Admin API's jobs:run with an OAuth token of catalog-worker@.
+#   first run until the job has one successful execution, setup runs it once and waits, so a run row exists from the
+#             day of setup and a schedule that never fires is reported by the freshness alert 26 hours later (review of
+#             M0-S4, P2-3). A failed first run stops setup with the command to read its logs.
+#             GRAPH_EXPORT_SKIP_FIRST_RUN=1 skips it (then run "... run" yourself, or the alert stays silent).
 # The freshness alert is policy 15 in infra/monitoring/ (infra/monitoring.sh), fed by the sweep's graph_export_stale
 # invariant (packages/core/src/catalog/invariants/checks.ts).
 #
 # Usage (Git Bash, from the repo root):
-#   bash infra/catalog-graph-export.sh          # setup: dataset, grants, job, schedule
+#   bash infra/catalog-graph-export.sh          # setup: dataset, grants, job, schedule, first run
 #   bash infra/catalog-graph-export.sh job      # only the job, to the current catalog-worker (infra/deploy.sh step 8);
 #                                               # leaves a job that was never set up alone
 #   bash infra/catalog-graph-export.sh run      # execute the job once and wait (writes to catalog_os)
@@ -195,6 +199,20 @@ ensure_schedule() {
   fi
 }
 
+# --- first run ---------------------------------------------------------------------------------
+ensure_first_run() {
+  local ok
+  ok=$(gcv run jobs executions list --job="$JOB" --region="$REGION" --format='value(metadata.name,status.succeededCount)'     | awk '$2 >= 1 { print $1; exit }')
+  if [ -n "$ok" ]; then
+    skip "first run of $JOB (execution $ok succeeded)"
+  elif [ "${GRAPH_EXPORT_SKIP_FIRST_RUN:-0}" = 1 ]; then
+    log "NEXT STEP: no successful run of $JOB yet; run bash infra/catalog-graph-export.sh run (the freshness alert stays silent until a run exists)"
+  else
+    create "first run of $JOB (executes now and waits)"
+    gcloud run jobs execute "$JOB" --region="$REGION" --wait       || die "the first run of $JOB failed; read its logs: gcloud run jobs executions list --job=$JOB --region=$REGION"
+  fi
+}
+
 setup() {
   command -v node >/dev/null || die "node is required"
   command -v bq >/dev/null || die "bq is required (Cloud SDK)"
@@ -210,6 +228,7 @@ setup() {
   ensure_project_role roles/run.invoker "serviceAccount:$WORKER"
   ensure_job
   ensure_schedule
+  ensure_first_run
   log "done"
 }
 

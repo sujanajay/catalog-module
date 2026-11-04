@@ -39,6 +39,8 @@ case "$*" in
   "run services describe catalog-worker "*) cat "$S/worker.json" ;;
   "run jobs list"*) if [ -f "$S/job.json" ]; then printf '[%s]\\r\\n' "$(cat "$S/job.json")"; else echo '[]'; fi ;;
   "run jobs replace "*) cp "$4" "$S/job.json" ;;
+  "run jobs executions list"*) cat "$S/executions.txt" 2>/dev/null || true ;;
+  "run jobs execute "*) [ "\${FAIL_EXECUTE:-0}" = 1 ] && exit 1; printf 'exec-1\\t1\\r\\n' > "$S/executions.txt" ;;
   "projects get-iam-policy"*) cat "$S/policy.csv" 2>/dev/null || true ;;
   "projects add-iam-policy-binding"*) ;;
   "scheduler jobs describe"*) [ -f "$S/schedule.txt" ] || { echo 'NOT_FOUND' >&2; exit 1; }; printf '%s\\r\\n' "$(cat "$S/schedule.txt")" ;;
@@ -106,8 +108,9 @@ try {
   const sched = r.calls.find((x) => x.includes('scheduler jobs create http catalog-graph-export'));
   assert.ok(sched, 'schedule not created');
   for (const part of ['--schedule=30 2 * * *', '--time-zone=Etc/UTC', `--uri=${URI}`, '--http-method=POST', `--oauth-service-account-email=${WORKER}`]) assert.ok(sched.includes(part), 'schedule lacks ' + part);
-  assert.equal(lines(r, 'CREATE').length, 6, r.stdout);
-  console.log('PASS first run creates dataset, grant, two roles, job and schedule');
+  assert.ok(r.calls.some((x) => x.endsWith('gcloud run jobs execute catalog-graph-export --region=asia-south1 --wait')), 'first export not run');
+  assert.equal(lines(r, 'CREATE').length, 7, r.stdout);
+  console.log('PASS first run creates dataset, grant, two roles, job and schedule, then runs the first export');
   cases++;
 
   // 2. Second run against that state: nothing created or updated.
@@ -117,8 +120,8 @@ try {
   r = run();
   assert.equal(r.status, 0, r.stderr + r.stdout);
   assert.deepEqual([lines(r, 'CREATE'), lines(r, 'UPDATE')], [[], []], r.stdout);
-  assert.equal(lines(r, 'SKIP').length, 6, r.stdout);
-  assert.ok(!r.calls.some((x) => /jobs replace|add-iam-policy-binding|scheduler jobs (create|update)| mk /.test(x)), 'a write on a re-run');
+  assert.equal(lines(r, 'SKIP').length, 7, r.stdout);
+  assert.ok(!r.calls.some((x) => /jobs replace|jobs execute|add-iam-policy-binding|scheduler jobs (create|update)| mk /.test(x)), 'a write on a re-run');
   assert.equal(r.sql, '');
   console.log('PASS re-run is all SKIP');
   cases++;
@@ -141,6 +144,18 @@ try {
   assert.notEqual(r.status, 0);
   assert.deepEqual(r.calls, []);
   console.log('PASS data team reader');
+  cases++;
+
+  // 4b. No successful execution yet: setup runs one; a failed first run stops setup; the opt-out only prints the step.
+  fs.writeFileSync(path.join(dir, 'state', 'executions.txt'), 'exec-0\t0\r\n');
+  r = run([], {FAIL_EXECUTE: '1'});
+  assert.notEqual(r.status, 0);
+  assert.match(r.stderr, /the first run of catalog-graph-export failed; read its logs/);
+  r = run([], {GRAPH_EXPORT_SKIP_FIRST_RUN: '1'});
+  assert.equal(r.status, 0, r.stderr + r.stdout);
+  assert.match(r.stdout, /NEXT STEP: no successful run of catalog-graph-export yet/);
+  assert.ok(!r.calls.some((x) => x.includes('jobs execute')), 'the opt-out executed the job');
+  console.log('PASS first run: failure stops setup, opt-out prints the next step');
   cases++;
 
   // 5. A dataset in another location stops the script before anything else.

@@ -223,6 +223,8 @@ describe("invariant checks", () => {
     // Its window has passed with no clean finish: stale, reported on the latest run.
     await db.update(catalogGraphExportRuns).set({ startedAt: h(27) });
     expect(await stale()).toBe(1);
+    // Not a batch's problem: the log line names no batch id (review P3-2).
+    expect((await run()).results.find((x) => x.id === "graph_export_stale")!.batches).toEqual([{ batchId: null, test: false, violations: 1 }]);
     // A clean run 25 hours ago keeps it fresh (a daily run plus its own time).
     await db.insert(catalogGraphExportRuns).values({ startedAt: h(25.2), finishedAt: h(25) });
     expect(await stale()).toBe(0);
