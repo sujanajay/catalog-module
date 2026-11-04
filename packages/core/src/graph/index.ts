@@ -30,6 +30,7 @@ import {
 } from "./types";
 
 export * from "./types";
+export * from "./resolve";
 
 type Tx = Parameters<Parameters<Db["transaction"]>[0]>[0];
 /** A database handle or an open transaction; writes join the transaction when one is given. */
