@@ -120,6 +120,13 @@
       "when": 1793799725444,
       "tag": "0016_settings_store",
       "breakpoints": true
+    },
+    {
+      "idx": 17,
+      "version": "7",
+      "when": 1793800618647,
+      "tag": "0017_channel_rules",
+      "breakpoints": true
     }
   ]
 }
