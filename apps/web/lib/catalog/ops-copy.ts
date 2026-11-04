@@ -226,8 +226,8 @@ export const OUTCOME_CAUSE_WORDS: Record<string, string> = {
   cancelled: "Cancelled",
 };
 /** The last column of the recent batches table: why it did not count, or that it is left out of the rate. */
-export function outcomeText(o: { success: boolean; cause: string | null; isTest: boolean; excluded: boolean }): string {
+export function outcomeText(o: { success: boolean; cause: string | null; isTest: boolean; excluded: boolean; started?: boolean }): string {
   const why = o.success ? "" : OUTCOME_CAUSE_WORDS[o.cause ?? ""] ?? "";
-  const out = o.isTest ? "test batch, not counted" : o.excluded ? "never started, not counted" : "";
+  const out = o.isTest ? "test batch, not counted" : o.excluded ? (o.started ? "cancelled right after Start, not counted" : "never started, not counted") : "";
   return [why, out].filter(Boolean).join("; ");
 }

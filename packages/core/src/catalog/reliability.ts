@@ -24,7 +24,9 @@ import {
   type IncidentSeverity,
   type TouchAction,
 } from "../db/schema";
+import { isBulkBatch } from "./pipeline/dispatch";
 import { ENLARGING_TASK } from "./pipeline/enlargement";
+import { CPU_UPSCALER_SUFFIX } from "./upscale";
 import type { InvariantResult } from "./invariants/run";
 
 /** A processing batch with no progress for this long has a stall incident (the M6 section 5 "taking longer" point). */
@@ -116,39 +118,56 @@ const STALL_SENTENCES: Record<string, string> = {
 /**
  * The open stall incidents of batches that moved again (or ended) are resolved; batches with none open get one.
  *
- * Progress is completed work, never a retry (review P1-1): the batch row, its chunks' start and finish, the photo
+ * Progress is completed work, never a retry (review P1-1): the batch's start, its chunks' start and finish, the photo
  * progress stamp of a chunk that is not parked on an enlargement (enlarge.ts refreshLaneProgress stamps parked chunks on
- * every delivery, also one that fails because the upscaler is down), its enlargements that settled, and its finalize
- * (a re-check part hands on with a new `finalizeEnqueuedAt`; a live finalize claim is progress now). A parked batch
- * queued behind another batch's enlargements that settle is waiting its turn, not stalled: the latest settled
- * enlargement of any running batch counts as progress for every parked batch.
+ * every delivery, also one that fails because the upscaler is down), its enlargements asked for (a photo reached the
+ * enlarge step) and settled, and its finalize
+ * (a re-check part hands on with a new `finalizeEnqueuedAt`; a live finalize claim is progress now). The batch row's
+ * `updated_at` counts only while collecting, where the intake writes are the only signal; after Start, writes such as
+ * the progress counts move it without any work done (review 2 P1-R). A parked batch queued behind other batches'
+ * enlargements that settle is waiting its turn, not stalled: the latest settled enlargement on the same lane (operator
+ * or bulk, isBulkBatch) and the same upscaler service (CPU or GPU) as one of its waiting rows counts as its progress,
+ * so a GPU outage is not hidden by CPU rows or the other lane moving (review 2 P2-A).
  */
 async function syncStalls(db: Db, now: Date): Promise<{ opened: number; resolved: number }> {
   const statuses = sql.join(STALL_STATUSES.map((s) => sql`${s}`), sql`, `);
   const ms = (key: string) => sql`CASE WHEN coalesce(b.counts->>${key}, '') ~ '^[0-9]+$' THEN (b.counts->>${key})::numeric END`;
   const batches = rowsOf(await db.execute(sql`
-    SELECT b.id, b.status,
-      GREATEST(b.updated_at, b.started_at,
+    SELECT b.id, b.status, b.is_test, b.name, b.counts,
+      -- No work signal at all (a row with no start, chunk or photo): its own updated_at, so it still stalls.
+      COALESCE(GREATEST(CASE WHEN b.status = 'ingesting' THEN b.updated_at END, b.started_at,
         (SELECT max(GREATEST(c.started_at, c.finished_at,
             CASE WHEN c.status = 'queued' AND c.task_name = ${ENLARGING_TASK} THEN NULL ELSE c.progress_at END))
           FROM catalog_chunks AS c WHERE c.batch_id = b.id),
-        (SELECT max(e.updated_at) FROM catalog_enlargements AS e WHERE e.batch_id = b.id AND e.status IN ('done', 'failed')),
+        (SELECT max(GREATEST(e.created_at, CASE WHEN e.status IN ('done', 'failed') THEN e.updated_at END)) FROM catalog_enlargements AS e WHERE e.batch_id = b.id),
         to_timestamp(${ms("finalizeEnqueuedAt")} / 1000.0)
-      ) AS progress_at,
+      ), b.updated_at) AS progress_at,
       coalesce(${ms("finalizeClaimUntil")} > ${+now}, false) AS finalizing,
       EXISTS (SELECT 1 FROM catalog_chunks AS c WHERE c.batch_id = b.id AND c.status = 'queued' AND c.task_name = ${ENLARGING_TASK}) AS parked
     FROM catalog_batches AS b WHERE b.status IN (${statuses})`));
-  const [lane] = rowsOf(await db.execute(sql`
-    SELECT max(e.updated_at) AS settled_at FROM catalog_enlargements AS e INNER JOIN catalog_batches AS b ON b.id = e.batch_id
-    WHERE b.status IN (${statuses}) AND e.status IN ('done', 'failed')`));
-  const laneSettledAt = dateOf(lane?.settled_at ?? null);
+  // Per batch and upscaler service (CPU ids end in "+cpu"): its latest settled row, and whether a row still waits.
+  const cpu = sql`(e.upscaler LIKE ${`%${CPU_UPSCALER_SUFFIX}`})`;
+  const services = rowsOf(await db.execute(sql`
+    SELECT e.batch_id, ${cpu} AS cpu, max(e.updated_at) FILTER (WHERE e.status IN ('done', 'failed')) AS settled_at,
+      bool_or(e.status NOT IN ('done', 'failed')) AS waiting
+    FROM catalog_enlargements AS e INNER JOIN catalog_batches AS b ON b.id = e.batch_id
+    WHERE b.status IN (${statuses}) GROUP BY 1, 2`));
+  type ClassFields = Parameters<typeof isBulkBatch>[0];
+  const bulk = new Map(batches.map((b) => [String(b.id), isBulkBatch({ isTest: b.is_test === true, name: String(b.name ?? ""), counts: (b.counts ?? null) as ClassFields["counts"] })]));
+  const laneOf = (batchId: string, isCpu: unknown) => `${bulk.get(batchId) ? "bulk" : "operator"}:${isCpu === true ? "cpu" : "gpu"}`;
+  const laneSettled = new Map<string, number>();
+  for (const s of services) {
+    const at = dateOf(s.settled_at ?? null), lane = laneOf(String(s.batch_id), s.cpu);
+    if (at && +at > (laneSettled.get(lane) ?? 0)) laneSettled.set(lane, +at);
+  }
   const stalled = new Set<string>();
   let opened = 0;
   for (const b of batches) {
     const id = String(b.id), ownProgress = dateOf(b.progress_at);
     if (!ownProgress || b.finalizing === true) continue;
     const parked = b.parked === true;
-    const progressAt = parked && laneSettledAt && +laneSettledAt > +ownProgress ? laneSettledAt : ownProgress;
+    const lanes = parked ? services.filter((s) => String(s.batch_id) === id && s.waiting === true).map((s) => laneSettled.get(laneOf(id, s.cpu)) ?? 0) : [];
+    const progressAt = new Date(Math.max(+ownProgress, ...lanes));
     const ingesting = b.status === "ingesting";
     if (+now - +progressAt < (ingesting ? INGEST_STALL_INCIDENT_MS : STALL_INCIDENT_MS)) continue;
     stalled.add(id);
@@ -325,7 +344,7 @@ export async function refreshOutcomes(db: Db, now: Date): Promise<number> {
 export interface SuccessRate { days: number; successes: number; counted: number; rate: number | null }
 export interface IncidentKindCount { kind: IncidentKind; incidents: number; repeats: number; open: number }
 export interface IncidentLine { id: string; kind: IncidentKind; causeCode: string; cause: string; batchId: string | null; batchName: string | null; startedAt: Date; resolvedAt: Date | null; repeat: boolean }
-export interface RecentOutcome { batchId: string; name: string; brandName: string; endedAt: Date; success: boolean; cause: string | null; touches: number; incidents: number; isTest: boolean; excluded: boolean }
+export interface RecentOutcome { batchId: string; name: string; brandName: string; endedAt: Date; success: boolean; cause: string | null; touches: number; incidents: number; isTest: boolean; excluded: boolean; started: boolean }
 export interface SlowBatch { batchId: string; name: string; brandName: string; durationMs: number; endedAt: Date; success: boolean }
 export interface ReliabilitySummary {
   rates: SuccessRate[]; target: number; byKind: IncidentKindCount[]; recent: IncidentLine[]; slowest: SlowBatch[];
@@ -358,11 +377,11 @@ export async function reliabilitySummary(db: Db, to: Date = new Date(), from: Da
   const slowest = await db.select({ batchId: catalogBatchOutcomes.batchId, name: catalogBatches.name, brandName: catalogBatches.brandName, durationMs: catalogBatchOutcomes.durationMs, endedAt: catalogBatchOutcomes.endedAt, success: catalogBatchOutcomes.success })
     .from(catalogBatchOutcomes).innerJoin(catalogBatches, eq(catalogBatches.id, catalogBatchOutcomes.batchId))
     .where(and(outcomesInWindow, isNotNull(catalogBatchOutcomes.durationMs))).orderBy(desc(catalogBatchOutcomes.durationMs)).limit(5);
-  const batches = await db.select({ batchId: catalogBatchOutcomes.batchId, name: catalogBatches.name, brandName: catalogBatches.brandName, endedAt: catalogBatchOutcomes.endedAt, success: catalogBatchOutcomes.success, cause: catalogBatchOutcomes.cause, touches: catalogBatchOutcomes.touches, incidents: catalogBatchOutcomes.incidents, isTest: catalogBatchOutcomes.isTest, excluded: catalogBatchOutcomes.excluded })
+  const batches = await db.select({ batchId: catalogBatchOutcomes.batchId, name: catalogBatches.name, brandName: catalogBatches.brandName, endedAt: catalogBatchOutcomes.endedAt, success: catalogBatchOutcomes.success, cause: catalogBatchOutcomes.cause, touches: catalogBatchOutcomes.touches, incidents: catalogBatchOutcomes.incidents, isTest: catalogBatchOutcomes.isTest, excluded: catalogBatchOutcomes.excluded, started: sql<boolean>`${catalogBatches.startedAt} IS NOT NULL` })
     .from(catalogBatchOutcomes).innerJoin(catalogBatches, eq(catalogBatches.id, catalogBatchOutcomes.batchId))
     .where(and(gte(catalogBatchOutcomes.endedAt, from), sql`${catalogBatchOutcomes.endedAt} < ${to.toISOString()}::timestamptz`)).orderBy(desc(catalogBatchOutcomes.endedAt)).limit(RECENT_OUTCOMES);
   const [deploys] = await db.select({ batches: count(), successes: sql<string>`count(*) FILTER (WHERE ${catalogBatchOutcomes.success})` }).from(catalogBatchOutcomes)
-    .where(and(outcomesInWindow, eq(catalogBatchOutcomes.deployOverlap, true)));
+    .where(and(outcomesInWindow, eq(catalogBatchOutcomes.excluded, false), eq(catalogBatchOutcomes.deployOverlap, true)));
   return {
     rates, target: SUCCESS_TARGET, from, to,
     byKind: kinds.map((k) => ({ kind: k.kind, incidents: Number(k.incidents), repeats: Number(k.repeats), open: Number(k.open) })),

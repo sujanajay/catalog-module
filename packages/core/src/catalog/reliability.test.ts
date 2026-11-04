@@ -42,18 +42,18 @@ async function output(batchId: string, publishedAt: Date | null): Promise<{ prod
   return { productId, sourceId, outputId };
 }
 
-async function chunk(batchId: string, fields: { status: string; taskName?: string | null; progressAt?: Date | null; startedAt?: Date | null; finishedAt?: Date | null; attempt?: number; error?: string | null }): Promise<string> {
+async function chunk(batchId: string, fields: { status: string; taskName?: string | null; progressAt?: Date | null; startedAt?: Date | null; finishedAt?: Date | null; attempt?: number; error?: string | null; index?: number }): Promise<string> {
   const id = randomUUID();
   await db.execute(sql`INSERT INTO catalog_chunks (id, batch_id, "index", stage, product_ids, status, task_name, started_at, finished_at, progress_at, attempt, error)
-    VALUES (${id}, ${batchId}, 0, 'render', '[]'::jsonb, ${fields.status}, ${fields.taskName ?? null}, ${fields.startedAt?.toISOString() ?? null}::timestamptz,
+    VALUES (${id}, ${batchId}, ${fields.index ?? 0}, 'render', '[]'::jsonb, ${fields.status}, ${fields.taskName ?? null}, ${fields.startedAt?.toISOString() ?? null}::timestamptz,
       ${fields.finishedAt?.toISOString() ?? null}::timestamptz, ${fields.progressAt?.toISOString() ?? null}::timestamptz, ${fields.attempt ?? 1}, ${fields.error ?? null})`);
   return id;
 }
 
-async function enlargement(batchId: string, ids: { productId: string; sourceId: string }, status: string, updatedAt: Date): Promise<string> {
+async function enlargement(batchId: string, ids: { productId: string; sourceId: string }, status: string, updatedAt: Date, createdAt: Date = updatedAt): Promise<string> {
   const id = randomUUID();
-  await db.execute(sql`INSERT INTO catalog_enlargements (id, batch_id, product_id, source_image_id, upscaler, factor, scale, out_w, out_h, route, pixel_hash, identity_hash, status, updated_at)
-    VALUES (${id}, ${batchId}, ${ids.productId}, ${ids.sourceId}, 'u', 2, 2, 10, 10, 'direct', 'p', ${id}, ${status}, ${updatedAt.toISOString()}::timestamptz)`);
+  await db.execute(sql`INSERT INTO catalog_enlargements (id, batch_id, product_id, source_image_id, upscaler, factor, scale, out_w, out_h, route, pixel_hash, identity_hash, status, created_at, updated_at)
+    VALUES (${id}, ${batchId}, ${ids.productId}, ${ids.sourceId}, 'u', 2, 2, 10, 10, 'direct', 'p', ${id}, ${status}, ${createdAt.toISOString()}::timestamptz, ${updatedAt.toISOString()}::timestamptz)`);
   return id;
 }
 
@@ -77,7 +77,8 @@ describe("M6-F3 acceptance test 1: a clean batch, one Try again, and an upscaler
     const stopped = await batch({ status: "rendering", startedAt: T0, updatedAt: at(5) });
     const s = await output(stopped, null);
     const parked = await chunk(stopped, { status: "queued", taskName: ENLARGING_TASK, startedAt: at(1), progressAt: at(5) });
-    const e = await enlargement(stopped, s, "queued", at(24));
+    // Asked for at +5 when the chunk parked; retries since then touched the row (updated_at +24), which is not progress.
+    const e = await enlargement(stopped, s, "queued", at(24), at(5));
 
     // Sweeps at +10 (5 minutes quiet: nothing) and +20 (15 minutes quiet: one stall), +30 (still one).
     expect((await syncIncidents(db, at(10))).opened).toBe(0);
@@ -141,6 +142,7 @@ describe("incidents", () => {
     const failed = await batch({ status: "failed", startedAt: T0, updatedAt: at(30), error: "No progress for 2 hours. Start the batch again." });
     const gaveUp = await batch({ status: "rendering", startedAt: T0, updatedAt: at(55) });
     await chunk(gaveUp, { status: "failed", finishedAt: at(50), attempt: 3, error: "The photo service failed 3 times." });
+    await chunk(gaveUp, { status: "running", startedAt: at(55), index: 1 });
     expect((await syncIncidents(db, at(60))).opened).toBe(2);
     expect((await syncIncidents(db, at(61))).opened).toBe(0);
     const [f] = await incidents(failed), [c] = await incidents(gaveUp);
@@ -151,7 +153,8 @@ describe("incidents", () => {
     // Two stalls of one batch, apart: the second is a repeat of the first and opens only after the first resolved.
     const slow = await batch({ status: "rendering", startedAt: T0, updatedAt: at(0) });
     await syncIncidents(db, new Date(+at(0) + STALL_INCIDENT_MS));
-    await db.execute(sql`UPDATE catalog_batches SET updated_at = ${at(20).toISOString()}::timestamptz WHERE id = ${slow}`);
+    // Work again at +20 (a chunk starts); a write to the batch row alone is not progress after Start (review 2 P1-R).
+    await chunk(slow, { status: "running", startedAt: at(20) });
     await syncIncidents(db, at(21));
     await syncIncidents(db, new Date(+at(20) + STALL_INCIDENT_MS + 60_000));
     const stalls = await incidents(slow);
@@ -211,6 +214,13 @@ describe("outcomes", () => {
     // Re-opened and finalized again later: links were ready at the first finish.
     await db.execute(sql`UPDATE catalog_batches SET finished_at = ${at(90).toISOString()}::timestamptz WHERE id = ${b}`);
     expect((await recordBatchOutcome(db, b, at(91)))!.linksReadyAt!.toISOString()).toBe(at(30).toISOString());
+
+    // Review 2 P3-B: a quick cancel the same release overlapped is not in the release-overlap line; it is marked as one.
+    const quick = await batch({ status: "cancelled", startedAt: at(5), finishedAt: at(13), updatedAt: at(13) });
+    expect(await recordBatchOutcome(db, quick, at(14))).toMatchObject({ deployOverlap: true, excluded: true });
+    const summary = await reliabilitySummary(db, at(120));
+    expect(summary.deploys).toEqual({ batches: 1, successes: 1 });
+    expect(summary.batches.find((o) => o.batchId === quick)).toMatchObject({ excluded: true, started: true });
 
     const expired = await batch({ status: "cancelled", startedAt: null, updatedAt: at(1) });
     expect(await recordBatchOutcome(db, expired, at(2))).toBeNull();

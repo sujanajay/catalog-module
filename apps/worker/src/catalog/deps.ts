@@ -157,7 +157,10 @@ export async function refreshBatchProgress(db:Db,batchId:string,now:Date=new Dat
   const patch={verified:total("verified"),needsAttention:total("needs_attention"),failed:total("failed"),skipped:total("skipped"),staged:total("staged"),attentionProducts:held?.n ?? 0,prepared:prepared?.n ?? 0,progressAt:last?.at ? new Date(last.at).toISOString():null,
     ...(x2?.total ? {enlargeTotal:x2.total,enlargeDone:x2.done,enlargeFailed:x2.failed}:{})};
   const made=patch.verified+patch.needsAttention+patch.failed+patch.skipped+patch.staged;
-  // The samples are read and written under the row lock, so two deliveries ending together both count.
+  // The samples are read and written under the row lock, so two deliveries ending together both count. The counts are
+  // figures derived from the chunks and photos, not progress, so the write keeps updated_at (as finalize.ts does): a
+  // counted failure of a hung upscaler refreshes them on every delivery and must not look like a moving batch (M6-S6
+  // review 2 P1-R; the stall incident and the sweep read progress from the chunks and photos themselves).
   await db.transaction(async tx=>{
     const [row]=await tx.select({counts:catalogBatches.counts}).from(catalogBatches).where(and(eq(catalogBatches.id,batchId),sql`${catalogBatches.status} <> 'done'`)).for("update");
     if(!row) return;
@@ -165,6 +168,6 @@ export async function refreshBatchProgress(db:Db,batchId:string,now:Date=new Dat
     const processingRate=samples.at(-1)?.made===made ? samples:[...samples,{at:now.toISOString(),made}].slice(-PROCESSING_RATE_SAMPLES);
     const stored=row.counts as unknown as Record<string,unknown>;
     if(processingRate===samples && Object.entries(patch).every(([key,value])=>JSON.stringify(stored[key] ?? null)===JSON.stringify(value ?? null))) return;
-    await tx.update(catalogBatches).set({counts:sql`${catalogBatches.counts} || ${JSON.stringify({...patch,processingRate})}::jsonb`}).where(eq(catalogBatches.id,batchId));
+    await tx.update(catalogBatches).set({counts:sql`${catalogBatches.counts} || ${JSON.stringify({...patch,processingRate})}::jsonb`,updatedAt:sql`${catalogBatches.updatedAt}`}).where(eq(catalogBatches.id,batchId));
   });
 }
