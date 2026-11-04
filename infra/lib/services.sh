@@ -278,7 +278,7 @@ service_catalog_web() {
   # Private (only IAP's service agent may invoke it; never --allow-unauthenticated) and behind IAP with the
   # Google-managed OAuth client: no OAuth client, consent screen or secret of ours.
   SVC_ARGS=(--service-account="$WEB_SA" --iap --cpu=1 --memory=1Gi --min-instances=0
-    --max-instances="$WEB_MAX_INSTANCES" --timeout=300 "${NET[@]}" --set-secrets="$SECRETS"
+    --max-instances="$WEB_MAX_INSTANCES" --timeout=300 "${NET[@]}" --set-secrets="$WEB_SECRETS"
     --labels="$(catalog_labels "$WEB_SERVICE")")
   SVC_MAX=$WEB_MAX_INSTANCES
   SVC_ENV=$WEB_ENV

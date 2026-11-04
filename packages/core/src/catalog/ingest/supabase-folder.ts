@@ -141,6 +141,8 @@ export function supabaseStorageClient(origin: string, key: string, fetchImpl: ty
 
 /** The only Supabase requests this module sends: list a folder (a search, POST by API design) and read a bucket's settings. */
 export function isReadCall(method: string, path: string): boolean {
+  // A "." or ".." segment (also percent-encoded) would be resolved away by the URL parser before the request is sent.
+  if (/^(\.|%2e){1,2}$/i.test(path.split("/").pop() ?? "")) return false;
   if (method === "POST") return /^\/storage\/v1\/object\/list\/[^/]+$/.test(path);
   if (method === "GET") return /^\/storage\/v1\/bucket\/[^/]+$/.test(path);
   return false;

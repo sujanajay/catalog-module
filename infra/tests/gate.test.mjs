@@ -55,7 +55,7 @@ test('registry lists the six services in order, each with a registry function; t
 const vars = `AR=ar; TAG=t; MATTING_SA=m; WORKER_SA=w; WEB_SA=web; MATTING_CPU_MAX_INSTANCES=20; GPU_CPU=4; GPU_MEMORY=16Gi
 GPU_CONCURRENCY=2; GPU_MAX_INSTANCES=3; MAX_RESIDENT_SESSIONS=1; GPU_MEM_LIMIT_BYTES=; WORKER_SERVICE=catalog-worker
 WEB_SERVICE=catalog-web; WORKER_CPU=2; WORKER_MEMORY=2Gi; WORKER_CONCURRENCY=2; WORKER_MAX_INSTANCES=4; WEB_MAX_INSTANCES=3
-NET=(--region=asia-south1 --network=ila-vpc); WORKER_SECRETS=s; SECRETS=s; WORKER_ENV=W=1; WEB_ENV=X=1
+NET=(--region=asia-south1 --network=ila-vpc); WORKER_SECRETS=s; SECRETS=s; WEB_SECRETS=ws; WORKER_ENV=W=1; WEB_ENV=X=1
 source infra/lib/shape.sh; shape_defaults
 show() { "service_\${1//-/_}"; echo "$1|$SVC_NAME|$SVC_REGION|$SVC_IMAGE|$SVC_PROBE_TIMEOUT|$SVC_DEPLOY|$SVC_SHIFT|$SVC_QUOTA_OPTIONAL|$SVC_ENV|\${SVC_PROBE[*]}"; }`;
 
@@ -652,6 +652,23 @@ test('a failed service-level update fails the gate with the command to run by ha
   assert.equal(r.status, 1);
   assert.ok(r.err.includes('ERROR: test-svc: could not set the service max instances to 16 (now 4)'), r.err);
   assert.ok(lines(r.err).includes('Set it by hand: gcloud run services update test-svc --region=asia-south1 --max=16'), r.err);
+});
+
+// M1-F1-R4 (M1-S1 shipped the Supabase folder paste switched off): catalog-web, and only catalog-web, mounts the two
+// Supabase secrets while the paste is on; the sticky on/off switch itself is tested in web-secrets.test.mjs.
+test('deploy.sh: catalog-web mounts the Supabase secrets; the worker and the jobs never do', () => {
+  const r = run('web-secrets', `${vars}\nservice_catalog_web; printf '%s\\n' "\${SVC_ARGS[@]}"`);
+  assert.equal(r.status, 0, r.err);
+  assert.ok(lines(r.out).includes('--set-secrets=ws'), 'the web deploys with WEB_SECRETS');
+  const deploy = fs.readFileSync(path.join(root, 'infra/deploy.sh'), 'utf8').replace(/\r/g, '');
+  const ref = (name) => (deploy.match(new RegExp(`^${name}=(.*)$`, 'm')) ?? [])[1] ?? '';
+  assert.equal(ref('WEB_SECRETS'), '$SECRETS');
+  assert.match(deploy, /^if \[ "\$SUPABASE_FOLDER_PASTE" = on \]; then WEB_SECRETS\+=",SUPABASE_URL=supabase-url:latest,SUPABASE_SERVICE_KEY=supabase-service-key:latest"; fi$/m);
+  for (const name of ['SECRETS', 'WORKER_SECRETS', 'JOB_SECRETS']) assert.doesNotMatch(ref(name), /supabase/i, `${name} has no Supabase mount`);
+  assert.doesNotMatch(ref('WEB_SECRETS'), /OPENROUTER/, 'never the OpenRouter key on the web');
+  assert.match(deploy, /for secret in supabase-url supabase-service-key; do\n\s+gcloud secrets describe "\$secret"/, 'checked by name before the build');
+  assert.match(deploy, /^WEB_ENV\+=",SUPABASE_FOLDER_PASTE=\$SUPABASE_FOLDER_PASTE"$/m);
+  assert.ok(!/versions access/.test(deploy.replace(/^\s*#.*$/gm, '')), 'secret values are never read');
 });
 
 let failed = 0;

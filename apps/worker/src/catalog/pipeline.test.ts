@@ -27,6 +27,8 @@ import { deriveBatchState, QA_CAP_BANNER } from "@catalog/core/catalog/pipeline/
 import { strictestChannel } from "@catalog/core/catalog/qa/policy";
 import { findOrCreateProduct } from "@catalog/core/catalog/products";
 import { cannedQa } from "./qa-mock";
+import { changeSetting, loadSettingsSnapshot, takeSettingsSnapshot } from "@catalog/core/settings/store";
+import { settingFrom } from "@catalog/core/settings/snapshot";
 import { ensureSeedRoutes, killPrimary, resetRouting, routerFor, setRoute } from "@catalog/core/vendor/route-table";
 import { createRouter } from "@catalog/core/vendor/router";
 import { CircuitBreakers } from "@catalog/core/vendor/circuit";
@@ -74,6 +76,26 @@ async function seed(w:ReturnType<typeof world>,name:string,options:{productId?:s
 }
 async function run(w:ReturnType<typeof world>,s:Awaited<ReturnType<typeof seed>>) {expect((await handleChunkTask(w.deps,await currentChunkTask(db,s.chunk.id))).httpStatus).toBe(200);expect((await handleChunkTask(w.deps,await currentChunkTask(db,s.chunk.id))).httpStatus).toBe(200);expect((await handleChunkTask(w.deps,await currentChunkTask(db,s.chunk.id))).httpStatus).toBe(200);return handlePublishTask(w.deps,{batchId:s.batch.id,productId:s.product.id});}
 it("does not finalize initial new rows, publishes, checks exports, then increments export versions",async()=>{const w=world(),s=await seed(w,"first");expect((await handleFinalizeTask(w.deps,{batchId:s.batch.id})).outcome).toBe("not_ready");expect((await run(w,s)).outcome).toBe("published");expect((await handleFinalizeTask(w.deps,{batchId:s.batch.id})).outcome).toBe("done");const [batch]=await db.select().from(catalogBatches).where(eq(catalogBatches.id,s.batch.id));expect(batch!.counts).toMatchObject({latestExport:1,recheckOk:1,recheckTotal:1,verified:1});expect(deriveBatchState(batch!).state).toBe("ready");expect((await handleFinalizeTask(w.deps,{batchId:s.batch.id})).outcome).toBe("already_done");await enqueueFinalize(w.deps,s.batch.id,undefined,{reopen:true});expect((await handleFinalizeTask(w.deps,{batchId:s.batch.id})).outcome).toBe("done");const [again]=await db.select().from(catalogBatches).where(eq(catalogBatches.id,s.batch.id));expect(again!.sheetXlsxUri).toContain("links-v2.xlsx");expect(w.copy).toHaveBeenCalledTimes(1);},60_000);
+it("M12-S1: every image a batch makes records the batch's settings version set, also after a mid-batch change",async()=>{
+  const w=world(),key="intake.auto_decide.unusable";
+  const a=await seed(w,"settings-a",{channels:["noon","amazon"]});
+  const snapA=await takeSettingsSnapshot(db,{batchId:a.batch.id,by:"test@opptra.com"});
+  await db.update(catalogBatches).set({settingsSnapshotId:snapA.id}).where(eq(catalogBatches.id,a.batch.id));
+  // Changed while batch A runs: A keeps its snapshot, batch B gets the new value.
+  await changeSetting(db,{key,scope:{channel:"noon"},value:"drop"},"admin@opptra.com");
+  expect((await run(w,a)).outcome).toBe("published");
+  const b=await seed(w,"settings-b");
+  const snapB=await takeSettingsSnapshot(db,{batchId:b.batch.id,by:"test@opptra.com"});
+  await db.update(catalogBatches).set({settingsSnapshotId:snapB.id}).where(eq(catalogBatches.id,b.batch.id));
+  expect((await run(w,b)).outcome).toBe("published");
+  const outputsA=await db.select().from(catalogOutputs).where(eq(catalogOutputs.batchId,a.batch.id));
+  const outputsB=await db.select().from(catalogOutputs).where(eq(catalogOutputs.batchId,b.batch.id));
+  expect(outputsA.length).toBe(2);expect(outputsB.length).toBe(1);
+  expect(outputsA.map(o=>o.settingsSnapshotId)).toEqual([snapA.id,snapA.id]);
+  expect(outputsB.map(o=>o.settingsSnapshotId)).toEqual([snapB.id]);
+  expect(settingFrom((await loadSettingsSnapshot(db,outputsA[0]!.settingsSnapshotId!))!,key,{channel:"noon"})).toBe("deliver");
+  expect(settingFrom((await loadSettingsSnapshot(db,outputsB[0]!.settingsSnapshotId!))!,key,{channel:"noon"})).toBe("drop");
+},60_000);
 it("redelivery repeats no finished matte, render or copy; identical reupload keeps generations",async()=>{const w=world(),s=await seed(w,"repeat");await run(w,s);await handleChunkTask(w.deps,await currentChunkTask(db,s.chunk.id));await handlePublishTask(w.deps,{batchId:s.batch.id,productId:s.product.id});expect(w.deps.matteFor).toHaveBeenCalledTimes(1);expect(w.deps.renderAllChannels).toHaveBeenCalledTimes(1);expect(w.copy).toHaveBeenCalledTimes(1);const next=await seed(w,"repeat2",{productId:s.product.id});await run(w,next);expect(w.deps.matteFor).toHaveBeenCalledTimes(1);expect(w.deps.renderAllChannels).toHaveBeenCalledTimes(1);expect(w.copy).toHaveBeenCalledTimes(1);const [pair]=await db.select().from(catalogBatchProducts).where(eq(catalogBatchProducts.batchId,next.batch.id));expect(pair!.change).toBe("unchanged");},60_000);
 it("replaces a changed source even when its rendered JPEG bytes match the live image",async()=>{
   const w=world(),first=await seed(w,"same-jpeg",{shots:["source-one"]});
