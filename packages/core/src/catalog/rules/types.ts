@@ -178,12 +178,20 @@ export interface RulesetSnapshot {
   conflicts: ConflictRecord[];
 }
 
-/** What is being checked (M5 3.2). Used by evaluate() from M5-S2. */
+/**
+ * What is being checked (M5 3.2), the input of evaluate() (M5-S2). `categoryPath` holds M2 node ids (a leaf alone is
+ * enough: its parents follow from the dotted id). `value` is the content itself for text (a string; a list of strings
+ * for bullets) or a record of measured facts keyed by field name ("image.background.rgb_min" or "background.rgb_min");
+ * a text record may carry the text under `text`. `audience` and `brandName` are optional: rules that need them return
+ * not_applicable or needs_judge without them (decision D24).
+ */
 export interface Subject {
   channel: string;
   market: string | null;
   brandId: string;
+  brandName?: string | null;
   categoryPath: string[];
+  audience?: RuleAudience | null;
   language: "en" | "ar";
   component: RuleComponent;
   contentVersionId: string | null;
