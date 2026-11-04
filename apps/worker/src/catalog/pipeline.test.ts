@@ -1,6 +1,7 @@
 import { channelRulesLoader, FIXTURE_CHANNEL_RULES } from "@catalog/core/catalog/channel-rules";
 import { publishChannelChange } from "@catalog/core/catalog/channel-rules-testing";
 import { seedChannelRules } from "@catalog/core/catalog/rules/seed";
+import { autoDecideSnapshot } from "@catalog/core/catalog/auto-decide";
 import { seedTaxonomy } from "@catalog/core/analyze/taxonomy-seed";
 import { analyseBackground } from "@catalog/core/catalog/shadow";
 import { hexColor, renderAllChannels, UnsupportedSourceError } from "@catalog/core/catalog/render";
@@ -1504,6 +1505,27 @@ describe("M3-S1 acceptance: renders read the M5 channel registry (M3 4.3.9 tests
     expect((await db.select().from(catalogOutputs).where(eq(catalogOutputs.batchId,next.batch.id))).map(o=>o.status)).toEqual(["skipped"]);
     expect((await live(first.product.id,"noon"))[0]).toMatchObject({id:noonBefore!.id,generation:noonBefore!.generation});
     expect(w.deps.renderAllChannels).toHaveBeenCalledTimes(2);
+  },240_000);
+
+  it("review P2-2: in an auto-decide batch a product held on every channel also ends unchanged, never failed for nothing delivered",async()=>{
+    const w=m3World(),first=await seed(w,"m3s1-all-held-auto");
+    expect((await run(w,first)).outcome).toBe("published");
+    const [option]=await db.insert(catalogOptions).values({brandSlug:"anta",optionKey:"M3S1-ALL-HELD-AUTO",keySource:"master"}).returning();
+    await db.update(catalogProducts).set({optionId:option!.id}).where(eq(catalogProducts.id,first.product.id));
+    const [listing]=await db.insert(catalogChannelListings).values({optionId:option!.id,channel:"noon",market:"ae"}).returning();
+    const [noonBefore]=await live(first.product.id,"noon");
+    const next=await seed(w,"m3s1-all-held-auto-next",{productId:first.product.id,shots:["changed"]});
+    for(let i=0;i<3;i++) expect((await handleChunkTask(w.deps,await currentChunkTask(db,next.chunk.id))).httpStatus).toBe(200);
+    // The batch decides by its rules (M1-S3), and the hold begins after its outputs were planned.
+    await db.update(catalogBatches).set({options:{...next.batch.options,autoDecide:await autoDecideSnapshot(db)}}).where(eq(catalogBatches.id,next.batch.id));
+    await db.insert(catalogTreatmentAssignments).values({experimentId:"m3s1-all-held-auto",listingId:listing!.id,arm:"control",doNotTouch:true});
+    expect(await handlePublishTask(w.deps,{batchId:next.batch.id,productId:next.product.id})).toMatchObject({outcome:"published"});
+    const [pair]=await db.select().from(catalogBatchProducts).where(eq(catalogBatchProducts.batchId,next.batch.id));
+    expect(pair).toMatchObject({change:"unchanged"});
+    expect(pair!.notes).toContain(HOLDOUT_KEPT_NOTE);
+    expect(pair!.notes ?? "").not.toContain("could be delivered");
+    expect((await db.select().from(catalogOutputs).where(eq(catalogOutputs.batchId,next.batch.id))).map(o=>o.status)).toEqual(["skipped"]);
+    expect((await live(first.product.id,"noon"))[0]).toMatchObject({id:noonBefore!.id,generation:noonBefore!.generation});
   },240_000);
 
   it("a republish after a hold began keeps an output already verified and live in the batch as it is",async()=>{
