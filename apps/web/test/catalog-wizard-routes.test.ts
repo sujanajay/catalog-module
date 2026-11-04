@@ -438,9 +438,13 @@ describe("POST /retry-links re-fetches only the failed links (spec 14b F5 part 1
     const fetch=vi.fn(async(input:RequestInfo|URL)=>{const url=String(input);calls.push(url);const s=answer(url);return s===200?new Response(new Uint8Array(heicFixture(1200,1600)),{headers:{"content-type":"image/heic"}}):new Response("no",{status:s,headers:{"content-type":"text/plain"}});});
     return {fetch:fetch as unknown as typeof globalThis.fetch,calls};
   }
+  /** The retry waits a temporary failure (503) asks for, recorded instead of slept: real waits cost 10 s per test and time out under load. */
+  const waits:number[]=[];
+  const sleep=async(ms:number)=>{waits.push(ms);};
+  beforeEach(()=>{waits.length=0;});
   /** Runs every `uploaded` upload of the batch once, as the worker does for the hand-off. */
   async function runUploaded(id:string,fetch:typeof globalThis.fetch){
-    for(const u of (await db.select().from(catalogUploads)).filter((u)=>u.batchId===id && u.status==="uploaded"))await runIngest(db,{storage,fetch,enqueue:enqueueTask},{batchId:id,uploadId:u.id});
+    for(const u of (await db.select().from(catalogUploads)).filter((u)=>u.batchId===id && u.status==="uploaded"))await runIngest(db,{storage,fetch,enqueue:enqueueTask,sleep},{batchId:id,uploadId:u.id});
   }
   async function pastedBatch(text:string,answer:(url:string)=>number){
     const id=await newBatch();
@@ -453,6 +457,7 @@ describe("POST /retry-links re-fetches only the failed links (spec 14b F5 part 1
 
   it("on a draft re-fetches only the rejects (fake fetch count equals the reject count) and the batch ends ready",async()=>{
     const id=await pastedBatch(text,(url)=>url.endsWith("AAA_2.heic")?503:url.endsWith("BBB_2.heic")?404:200);
+    expect(waits).toEqual([2_000,8_000]);
     expect((await batchOf(id)).status).toBe("draft");
     expect((await batchOf(id)).counts).toMatchObject({previewReady:true,linkFailures:2,sources:2,unsupportedFiles:0});
     const step2=await (await detected(request("GET"),ctx(id))).json();
