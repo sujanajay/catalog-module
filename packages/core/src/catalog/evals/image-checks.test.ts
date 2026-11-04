@@ -130,6 +130,9 @@ describe("shadow failures", () => {
   }, 30_000);
 });
 
+// A blue-grey studio source for the fringe tests: a white source is only 15 from the 240 canvas grey (M3-S1), too close to tell a fringe apart, so the fringe check does not run on it.
+const STUDIO_BG: [number, number, number] = [190, 200, 220];
+
 describe("cut-out failures", () => {
   it("fails pixels_lost and thin_parts when the matte drops the strap or a region", async () => {
     const base = await syntheticSubject("amazon", 2, "footwear");
@@ -151,8 +154,7 @@ describe("cut-out failures", () => {
     expect(failed(checkCutout(await ctxOf(kept)))).toContain("cutout.background_kept");
   });
   it("fails halo for leftover background around the product and fringe for source-coloured edges", async () => {
-    // A blue-grey studio source: a white source is only 15 from the 240 canvas grey (M3-S1), too close to tell a fringe apart.
-    const bg: [number, number, number] = [190, 200, 220];
+    const bg = STUDIO_BG;
     const base = await syntheticSubject("amazon", 2, "footwear", { bg });
     const p = base.placement;
     const halo = await editOutput(base, r => { const x = p.placedX - 2, y0 = p.placedY + 100; paintRect(r, x, y0, 2, 150, bg); });
@@ -669,18 +671,18 @@ describe("run 3 calibration 2 (penti.apparel_model, vero_moda and the small sets
     expect(keptShadowCanvasMask(await ctxOf({ ...subject, flags: [...subject.flags, "no_shadow_source" as const] }))).toBeNull();
   }, 60_000);
   it("leaves hair and straps (the matte's thin structures) out of the fringe count (vero_moda: 14 fails of 8 to 13.6% on amazon and shein on hair and sheer tights) and does not run it on a source tagged transparent", async () => {
-    const base = await syntheticSubject("amazon", 2, "footwear"), ctx = await ctxOf(base), p = base.placement, strapBottom = p.placedY + Math.round(60 * p.scale);
-    // The soft edge along the 3 px strap painted in the source's white: thin structure, left out; the body's edge is clean.
-    const strap = await editOutput(base, r => { for (let i = 0; i < ctx.expectedAlpha.length; i++) { const a = ctx.expectedAlpha[i]!; if (Math.floor(i / r.w) < strapBottom && a > 10 && a <= 200) { r.rgb[i * 3] = 255; r.rgb[i * 3 + 1] = 255; r.rgb[i * 3 + 2] = 255; } } });
+    const base = await syntheticSubject("amazon", 2, "footwear", { bg: STUDIO_BG }), ctx = await ctxOf(base), p = base.placement, strapBottom = p.placedY + Math.round(60 * p.scale);
+    // The soft edge along the 3 px strap painted in the source's colour: thin structure, left out; the body's edge is clean.
+    const strap = await editOutput(base, r => { for (let i = 0; i < ctx.expectedAlpha.length; i++) { const a = ctx.expectedAlpha[i]!; if (Math.floor(i / r.w) < strapBottom && a > 10 && a <= 200) { r.rgb[i * 3] = STUDIO_BG[0]; r.rgb[i * 3 + 1] = STUDIO_BG[1]; r.rgb[i * 3 + 2] = STUDIO_BG[2]; } } });
     const fringe = ids(checkCutout(await ctxOf(strap)), "cutout.fringe")[0];
     expect(fringe?.ok).toBe(true);
     const counts = /(\d+) thin-structure pixels of hair, straps or sheer fabric left out of (\d+)/.exec(fringe?.detail ?? "");
     expect(counts).not.toBeNull();
-    // Counted as edge, the strap's white pixels alone would be over the 1% bar.
+    // Counted as edge, the strap's source-coloured pixels alone would be over the 1% bar.
     expect(Number(counts![1]) / Number(counts![2])).toBeGreaterThan(0.01);
     expect(ids(checkCutout(await ctxOf({ ...base, tags: ["transparent"] })), "cutout.fringe")[0]?.status).toBe("not_run");
     // The body's soft edge in the source colour still fails (the existing fringe case, with the strap left out).
-    const body = await editOutput(base, r => { for (let i = 0; i < ctx.expectedAlpha.length; i++) { const a = ctx.expectedAlpha[i]!; if (a > 10 && a <= 200) { r.rgb[i * 3] = 255; r.rgb[i * 3 + 1] = 255; r.rgb[i * 3 + 2] = 255; } } });
+    const body = await editOutput(base, r => { for (let i = 0; i < ctx.expectedAlpha.length; i++) { const a = ctx.expectedAlpha[i]!; if (a > 10 && a <= 200) { r.rgb[i * 3] = STUDIO_BG[0]; r.rgb[i * 3 + 1] = STUDIO_BG[1]; r.rgb[i * 3 + 2] = STUDIO_BG[2]; } } });
     expect(failed(checkCutout(await ctxOf(body)))).toContain("cutout.fringe");
   }, 30_000);
   it("records a missing synthesised shadow on a bag or hardline product standing on a contact line as information, never a failure (the standing clutch Z02B2EE44E3A08044B816Z n=7/8, the candles), and does not run it on apparel, a cut source, a hanging product or a drawn shadow", async () => {
@@ -786,8 +788,8 @@ describe("live run calibration 3 (session 5, live judge, build 13fe10d)", () => 
     expect(ids(checkMatte({ ...darkInput, alpha: dropped }).results, "cutout.pixels_lost")[0]?.ok).toBe(false);
   }, 60_000);
   it("leaves the soft edge of a textured source (hair) out of the fringe count and still fails a smooth garment edge carrying the background colour", async () => {
-    const base = await syntheticSubject("amazon", 2, "footwear"), ctx = await ctxOf(base), sw = base.source.w;
-    const fringeOn = (subject: OutputSubject) => editOutput(subject, r => { for (let i = 0; i < ctx.expectedAlpha.length; i++) if (ctx.expectedAlpha[i]! > 10 && ctx.expectedAlpha[i]! <= 200) { r.rgb[i * 3] = 255; r.rgb[i * 3 + 1] = 255; r.rgb[i * 3 + 2] = 255; } });
+    const base = await syntheticSubject("amazon", 2, "footwear", { bg: STUDIO_BG }), ctx = await ctxOf(base), sw = base.source.w;
+    const fringeOn = (subject: OutputSubject) => editOutput(subject, r => { for (let i = 0; i < ctx.expectedAlpha.length; i++) if (ctx.expectedAlpha[i]! > 10 && ctx.expectedAlpha[i]! <= 200) { r.rgb[i * 3] = STUDIO_BG[0]; r.rgb[i * 3 + 1] = STUDIO_BG[1]; r.rgb[i * 3 + 2] = STUDIO_BG[2]; } });
     const smooth = ids(checkCutout(await ctxOf(await fringeOn(base))), "cutout.fringe")[0]!;
     expect(smooth.ok).toBe(false);
     // Hair along the whole outline: a 6 px outer soft band (alpha 60) whose source pixels alternate dark strands and background.
@@ -796,7 +798,7 @@ describe("live run calibration 3 (session 5, live judge, build 13fe10d)", () => 
     for (let i = 0; i < band.length; i++) if (band[i] && !matted[i]) { hair.alpha[i] = 60; const x = i % sw, y = (i - x) / sw; if ((x + y) % 2 === 0) { hair.source.rgb[i * 3] = 40; hair.source.rgb[i * 3 + 1] = 30; hair.source.rgb[i * 3 + 2] = 20; } }
     expect(texturedSourceEdge(hair.source, hair.alpha, 300, 247)).toBe(true);
     expect(texturedSourceEdge(base.source, base.alpha, 300, 247)).toBe(false);
-    const hairCtx = await ctxOf(hair), textured = ids(checkCutout(await ctxOf(await editOutput(hair, r => { for (let i = 0; i < hairCtx.expectedAlpha.length; i++) if (hairCtx.expectedAlpha[i]! > 10 && hairCtx.expectedAlpha[i]! <= 200) { r.rgb[i * 3] = 255; r.rgb[i * 3 + 1] = 255; r.rgb[i * 3 + 2] = 255; } }))), "cutout.fringe")[0]!;
+    const hairCtx = await ctxOf(hair), textured = ids(checkCutout(await ctxOf(await editOutput(hair, r => { for (let i = 0; i < hairCtx.expectedAlpha.length; i++) if (hairCtx.expectedAlpha[i]! > 10 && hairCtx.expectedAlpha[i]! <= 200) { r.rgb[i * 3] = STUDIO_BG[0]; r.rgb[i * 3 + 1] = STUDIO_BG[1]; r.rgb[i * 3 + 2] = STUDIO_BG[2]; } }))), "cutout.fringe")[0]!;
     expect(textured.detail).toContain("textured source edge (hair)");
     expect(Number(/(\d+) pixels on a textured source edge/.exec(textured.detail)?.[1] ?? 0)).toBeGreaterThan(1000);
   }, 60_000);
