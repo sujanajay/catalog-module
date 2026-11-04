@@ -19,6 +19,11 @@ export interface InvariantCheck {
   sql: (now: Date) => SQL;
 }
 
+/**
+ * M0-S4 (M0 F5-R4, decision D21): the graph export is stale when no run finished cleanly for this long. The export runs
+ * once a day, so a fresh export is up to 24 hours old just before the next run; the 2 extra hours cover that run itself.
+ */
+export const EXPORT_STALE_HOURS = 26;
 /** A running chunk whose lease ended more than this long ago should have been recovered by the sweep. */
 export const STALE_LEASE_MS = 5 * 60_000;
 /** A running chunk is slow when it ran longer than SLOW_CHUNK_FACTOR x its batch's median finished chunk and SLOW_CHUNK_MIN_MS. */
@@ -77,12 +82,19 @@ export const CHECKS: readonly InvariantCheck[] = [
     sentence: "A done batch has every chunk done or failed.",
     severity: "ERROR",
     sql: () => sql`SELECT c.id, c.batch_id FROM catalog_chunks AS c JOIN catalog_batches AS b ON b.id = c.batch_id
-      WHERE b.status = 'done' AND c.status NOT IN ('done', 'failed')`,
+      WHERE b.status = 'done' AND c.status NOT IN ('done', 'failed')
+        -- Work re-opened after the batch finished (Try again, an M1-S4 improvement) is expected; a stuck one shows in
+        -- parked_chunk_quiet and enlargement_waiting_long.
+        AND NOT (b.finished_at IS NOT NULL AND GREATEST(c.created_at, c.dispatched_at) > b.finished_at)`,
   },
   {
     id: "enlarged_without_upscaler",
     sentence: "In a batch made with the enlargement stage, no verified output is enlarged past the batch's upscaler threshold (1.0x since spec 18 quality, 1.5x before) without the upscaler (a plain resize never stands in).",
     severity: "ERROR",
+    // M1-F3-R1: an auto-decide rule may deliver the plain render of a failed enlargement, flagged provisional (the
+    // improvement task re-tries the enlargement later); like an operator "Use as is", that is not a silent fallback.
+    // IS NOT DISTINCT FROM: with a null decision `=` gives null and NOT null drops the row, which hid every undecided
+    // plain render (found in M1-S3).
     // Spec 18: batches started before the stage (no options.enlargement) kept the old silent fallback and are left as they are.
     // Spec 18 quality: the threshold is the one the batch was started with (options.enlargement.minScale, 1.0 since the
     // change); a batch from before it has none and keeps 1.5. The 1e-6 slack covers the real column's rounding.
@@ -91,7 +103,8 @@ export const CHECKS: readonly InvariantCheck[] = [
         AND o.scale > (CASE WHEN jsonb_typeof(b.options->'enlargement'->'minScale') = 'number'
           THEN (b.options->'enlargement'->>'minScale')::real ELSE ${LEGACY_UPSCALE_MIN_SCALE}::real END) + 1e-6
         AND NOT (o.flags @> '["upscaled"]'::jsonb)
-        AND NOT (o.decision = 'use_as_is' AND o.flags @> '["enlargement_failed"]'::jsonb)`,
+        AND NOT (o.decision IS NOT DISTINCT FROM 'use_as_is' AND o.flags @> '["enlargement_failed"]'::jsonb)
+        AND NOT (o.flags @> '["provisional", "enlargement_failed"]'::jsonb)`,
   },
   {
     id: "plain_accepted_outputs",
@@ -116,5 +129,18 @@ export const CHECKS: readonly InvariantCheck[] = [
     sql: (now) => sql`SELECT e.id, e.batch_id FROM catalog_enlargements AS e JOIN catalog_batches AS b ON b.id = e.batch_id
       WHERE b.status NOT IN ('failed', 'cancelled') AND e.wanted AND e.status = 'queued'
         AND e.created_at < ${at(now)} - ${ENLARGEMENT_WAITING_LONG_MS / 1000}::int * interval '1 second'`,
+  },
+  {
+    id: "graph_export_stale",
+    sentence: "The catalog graph export to BigQuery (catalog_os) finished cleanly in the last 26 hours, once it has run at all.",
+    severity: "WARNING",
+    // One row (the latest run) when no run finished without an error inside the window and some run started before it,
+    // so a first run gets its window and a job that was never set up is not reported. Not a batch's problem: batch_id null.
+    sql: (now) => sql`SELECT r.id, NULL::uuid AS batch_id FROM (
+        SELECT id FROM catalog_graph_export_runs ORDER BY started_at DESC, id DESC LIMIT 1
+      ) AS r
+      WHERE NOT EXISTS (SELECT 1 FROM catalog_graph_export_runs AS f
+          WHERE f.finished_at IS NOT NULL AND f.error IS NULL AND f.finished_at > ${at(now)} - ${EXPORT_STALE_HOURS}::int * interval '1 hour')
+        AND EXISTS (SELECT 1 FROM catalog_graph_export_runs AS o WHERE o.started_at <= ${at(now)} - ${EXPORT_STALE_HOURS}::int * interval '1 hour')`,
   },
 ];
