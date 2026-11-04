@@ -3,7 +3,7 @@ import path from "node:path";
 import { Readable } from "node:stream";
 import { eq, sql } from "drizzle-orm";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { brandMaster, catalogBatches, catalogChunks, catalogUploads } from "@catalog/core/db/schema";
+import { brandMaster, catalogBatches, catalogChunks, catalogSettingsSnapshots, catalogUploads } from "@catalog/core/db/schema";
 import { createTestDb } from "@catalog/core/db/testing";
 import { runIngest } from "@catalog/core/catalog/ingest/index";
 import { googleClients } from "@catalog/core/catalog/ingest/google-sheet";
@@ -166,7 +166,13 @@ describe("catalog wizard authorization and contracts",()=>{
     const upscaleModel=process.env.UPSCALE_MODEL;process.env.UPSCALE_MODEL="swinir-x2";
     const response=await start(request("POST",{previewAt:shown.previewAt}),ctx(id));if(upscaleModel===undefined) delete process.env.UPSCALE_MODEL; else process.env.UPSCALE_MODEL=upscaleModel;expect(response.status).toBe(200);expect(await response.json()).toMatchObject({id,status:"matting"});
     // Spec 18: started with the upscaler on, the batch is made with the enlargement stage.
-    expect((await db.select().from(catalogBatches).where(eq(catalogBatches.id,id)))[0]!.options).toMatchObject({enlargement:{model:"swinir-x2"}});
+    const started=(await db.select().from(catalogBatches).where(eq(catalogBatches.id,id)))[0]!;
+    expect(started.options).toMatchObject({enlargement:{model:"swinir-x2",minScale:1}});
+    // M12-S1: Start records the settings snapshot the batch keeps to the end, taken by the person who started it.
+    const [snapshot]=await db.select().from(catalogSettingsSnapshots).where(eq(catalogSettingsSnapshots.batchId,id));
+    expect(snapshot).toMatchObject({id:started.settingsSnapshotId,createdBy:expect.stringContaining("@")});
+    // M1-F3: the auto-decide rules (migration 0014 seed) stay with the batch from Start, so it never waits for a person.
+    expect(started.options.autoDecide?.rules).toEqual(expect.arrayContaining([{id:"wrong_item:*",cause:"wrong_item",channel:"*",action:"drop"},{id:"unchecked:*",cause:"unchecked",channel:"*",action:"deliver"}]));
     const lines=info.mock.calls.map(([line])=>{try{return JSON.parse(String(line)) as Record<string,unknown>;}catch{return {};}});info.mockRestore();
     expect(lines.filter(l=>l.message==="batch started")).toEqual([expect.objectContaining({severity:"INFO",batchId:id,products:1,sources:1,outputs:2,chunks:1,"logging.googleapis.com/labels":{app:"catalog",batchId:id}})]);
     const chunks=(await db.select().from(catalogChunks)).filter((c)=>c.batchId===id);expect(chunks).toHaveLength(1);expect(chunks[0]).toMatchObject({stage:"matte",status:"queued"});expect(chunks[0]!.dispatchedAt).not.toBeNull();expect(enqueueTask).toHaveBeenCalledWith("/tasks/catalog/chunk",{chunkId:chunks[0]!.id,stage:"matte",step:0},{taskId:`chunk-${chunks[0]!.id}-matte-0`});

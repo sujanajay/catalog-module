@@ -1,4 +1,4 @@
-import type { ChannelId, OutputFlag } from "../types";
+import type { ChannelId, HoldCause, OutputFlag } from "../types";
 import { busyBackgroundHold, encoderFault, OWN_DEFECT_FLAGS } from "../auto-resolve";
 
 /**
@@ -11,7 +11,7 @@ import { busyBackgroundHold, encoderFault, OWN_DEFECT_FLAGS } from "../auto-reso
 export const INFORMATION_FLAGS: ReadonlySet<OutputFlag> = new Set<OutputFlag>([
   "low_resolution", "no_shadow_source", "shadow_synthesised", "passthrough", "alpha_source", "qa_sampled_out",
   "numbering_gap", "type_unknown", "cut_in_source", "complete_product", "transparent", "auto_dropped",
-  "matte_passthrough", "upscaled",
+  "matte_passthrough", "upscaled", "provisional",
 ]);
 /** Always held for the operator: a different item confirmed by two judges, or several photos in one. */
 export const HARD_HOLD_FLAGS: ReadonlySet<OutputFlag> = new Set<OutputFlag>(["different_product", "collage"]);
@@ -34,7 +34,7 @@ export const UNCHECKED_FLAGS: ReadonlySet<OutputFlag> = new Set<OutputFlag>(["qa
 export const problemFlags = (flags: readonly OutputFlag[]) => flags.filter(flag => !INFORMATION_FLAGS.has(flag));
 
 export type AutoAction = "none" | "note" | "drop" | "hold";
-export type HoldCause = "wrong_item" | "collage" | "unusable" | "corrupt" | "unchecked" | "photo_one" | "every_photo" | "not_publishable" | "code_fault" | "not_enlarged";
+export type { HoldCause };
 export interface TriageOutput {
   id: string; n: number; channel: ChannelId; status: string; flags: readonly OutputFlag[];
   decision: string | null; stagingUri: string | null;

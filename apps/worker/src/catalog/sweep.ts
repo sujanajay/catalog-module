@@ -15,6 +15,7 @@ import { ENLARGING_TASK } from "@catalog/core/catalog/pipeline/enlargement";
 import { runInvariants, type InvariantResult } from "@catalog/core/catalog/invariants/run";
 import { refreshOutcomes, syncIncidents } from "@catalog/core/catalog/reliability";
 import { enqueueFinalize, finalizeEnqueueExpired, finalizePendingFlag } from "./deps";
+import { enqueueImprovements } from "./improve";
 
 /** No progress for this long fails the batch (2 hours, from the plan). */
 export const SWEEP_STALE_MS = 2 * 60 * 60 * 1000;
@@ -111,6 +112,9 @@ export async function handleSweep(deps: SweepDeps, _body: Record<string, unknown
   // stops the sweep.
   try { await resendStalledIngest(deps.db, deps.enqueue ?? enqueueTask, now); }
   catch (error) { log("ERROR", "ingest re-send failed", { error: error instanceof Error ? error.message : String(error) }); }
+  // M1-S4 (M1-F3-R4): improvement tasks for the provisional plain renders due a try. A failure here never stops the sweep.
+  try { await enqueueImprovements(deps.db, deps.enqueue ?? enqueueTask, now, deps.enlargementOff ? { enlargementOff: true } : {}); }
+  catch (error) { log("ERROR", "improvement enqueue failed", { error: error instanceof Error ? error.message : String(error) }); }
   // Spec 17 3.1.3: the invariants, every sweep (10 minutes). A failed check run never stops the sweep.
   // Spec 17 3.1.3: the invariants never stop the sweep, but a failed run is an ERROR (the checks went blind).
   let invariants: InvariantResult[] | undefined;

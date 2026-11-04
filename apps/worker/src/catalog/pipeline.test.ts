@@ -27,10 +27,16 @@ import { deriveBatchState, QA_CAP_BANNER } from "@catalog/core/catalog/pipeline/
 import { strictestChannel } from "@catalog/core/catalog/qa/policy";
 import { findOrCreateProduct } from "@catalog/core/catalog/products";
 import { cannedQa } from "./qa-mock";
+import { changeSetting, loadSettingsSnapshot, takeSettingsSnapshot } from "@catalog/core/settings/store";
+import { settingFrom } from "@catalog/core/settings/snapshot";
 import { ensureSeedRoutes, killPrimary, resetRouting, routerFor, setRoute } from "@catalog/core/vendor/route-table";
 import { createRouter } from "@catalog/core/vendor/router";
 import { CircuitBreakers } from "@catalog/core/vendor/circuit";
-import { SEED_ROUTES } from "@catalog/core/vendor/routes";
+import { PHOTOROOM_MATTE_MODEL, routeId, SEED_ROUTES } from "@catalog/core/vendor/routes";
+import { ledgerOverflowGate } from "@catalog/core/vendor/overflow";
+import { routedMatteFor } from "@catalog/core/catalog/matte-routing";
+import { fakeMatting } from "@catalog/core/catalog/matting-fake";
+import { batchCostByEngine } from "@catalog/core/catalog/cost-report";
 import type { RepairOwnDefects } from "@catalog/core/catalog/qa/triage";
 vi.mock(import("@catalog/core/catalog/sheet"),async original=>{const module=await original();return {...module,compareXlsxCsv:vi.fn(module.compareXlsxCsv)};});
 let db:Db,close:()=>Promise<void>;
@@ -74,6 +80,26 @@ async function seed(w:ReturnType<typeof world>,name:string,options:{productId?:s
 }
 async function run(w:ReturnType<typeof world>,s:Awaited<ReturnType<typeof seed>>) {expect((await handleChunkTask(w.deps,await currentChunkTask(db,s.chunk.id))).httpStatus).toBe(200);expect((await handleChunkTask(w.deps,await currentChunkTask(db,s.chunk.id))).httpStatus).toBe(200);expect((await handleChunkTask(w.deps,await currentChunkTask(db,s.chunk.id))).httpStatus).toBe(200);return handlePublishTask(w.deps,{batchId:s.batch.id,productId:s.product.id});}
 it("does not finalize initial new rows, publishes, checks exports, then increments export versions",async()=>{const w=world(),s=await seed(w,"first");expect((await handleFinalizeTask(w.deps,{batchId:s.batch.id})).outcome).toBe("not_ready");expect((await run(w,s)).outcome).toBe("published");expect((await handleFinalizeTask(w.deps,{batchId:s.batch.id})).outcome).toBe("done");const [batch]=await db.select().from(catalogBatches).where(eq(catalogBatches.id,s.batch.id));expect(batch!.counts).toMatchObject({latestExport:1,recheckOk:1,recheckTotal:1,verified:1});expect(deriveBatchState(batch!).state).toBe("ready");expect((await handleFinalizeTask(w.deps,{batchId:s.batch.id})).outcome).toBe("already_done");await enqueueFinalize(w.deps,s.batch.id,undefined,{reopen:true});expect((await handleFinalizeTask(w.deps,{batchId:s.batch.id})).outcome).toBe("done");const [again]=await db.select().from(catalogBatches).where(eq(catalogBatches.id,s.batch.id));expect(again!.sheetXlsxUri).toContain("links-v2.xlsx");expect(w.copy).toHaveBeenCalledTimes(1);},60_000);
+it("M12-S1: every image a batch makes records the batch's settings version set, also after a mid-batch change",async()=>{
+  const w=world(),key="intake.auto_decide.unusable";
+  const a=await seed(w,"settings-a",{channels:["noon","amazon"]});
+  const snapA=await takeSettingsSnapshot(db,{batchId:a.batch.id,by:"test@opptra.com"});
+  await db.update(catalogBatches).set({settingsSnapshotId:snapA.id}).where(eq(catalogBatches.id,a.batch.id));
+  // Changed while batch A runs: A keeps its snapshot, batch B gets the new value.
+  await changeSetting(db,{key,scope:{channel:"noon"},value:"drop"},"admin@opptra.com");
+  expect((await run(w,a)).outcome).toBe("published");
+  const b=await seed(w,"settings-b");
+  const snapB=await takeSettingsSnapshot(db,{batchId:b.batch.id,by:"test@opptra.com"});
+  await db.update(catalogBatches).set({settingsSnapshotId:snapB.id}).where(eq(catalogBatches.id,b.batch.id));
+  expect((await run(w,b)).outcome).toBe("published");
+  const outputsA=await db.select().from(catalogOutputs).where(eq(catalogOutputs.batchId,a.batch.id));
+  const outputsB=await db.select().from(catalogOutputs).where(eq(catalogOutputs.batchId,b.batch.id));
+  expect(outputsA.length).toBe(2);expect(outputsB.length).toBe(1);
+  expect(outputsA.map(o=>o.settingsSnapshotId)).toEqual([snapA.id,snapA.id]);
+  expect(outputsB.map(o=>o.settingsSnapshotId)).toEqual([snapB.id]);
+  expect(settingFrom((await loadSettingsSnapshot(db,outputsA[0]!.settingsSnapshotId!))!,key,{channel:"noon"})).toBe("deliver");
+  expect(settingFrom((await loadSettingsSnapshot(db,outputsB[0]!.settingsSnapshotId!))!,key,{channel:"noon"})).toBe("drop");
+},60_000);
 it("M6-S6: a finalized batch writes its outcome row: success with no touch or incident, then touched after a decision and a re-finalize",async()=>{const w=world(),s=await seed(w,"outcome");await run(w,s);expect((await handleFinalizeTask(w.deps,{batchId:s.batch.id})).outcome).toBe("done");const first=(await db.execute(sql`SELECT status,success,cause,touches,incidents,products,products_with_links,links_ready_at FROM catalog_batch_outcomes WHERE batch_id=${s.batch.id}`) as unknown as {rows:Record<string,unknown>[]}).rows;expect(first).toMatchObject([{status:"done",success:true,cause:null,touches:0,incidents:0,products:1,products_with_links:1}]);await db.execute(sql`INSERT INTO catalog_batch_touches (batch_id, action) VALUES (${s.batch.id}, 'decision')`);await enqueueFinalize(w.deps,s.batch.id,undefined,{reopen:true});expect((await handleFinalizeTask(w.deps,{batchId:s.batch.id})).outcome).toBe("done");const again=(await db.execute(sql`SELECT success,cause,touches,links_ready_at FROM catalog_batch_outcomes WHERE batch_id=${s.batch.id}`) as unknown as {rows:Record<string,unknown>[]}).rows;expect(again).toMatchObject([{success:false,cause:"touched",touches:1}]);expect(String(again[0]!.links_ready_at)).toBe(String(first[0]!.links_ready_at));},60_000);
 it("redelivery repeats no finished matte, render or copy; identical reupload keeps generations",async()=>{const w=world(),s=await seed(w,"repeat");await run(w,s);await handleChunkTask(w.deps,await currentChunkTask(db,s.chunk.id));await handlePublishTask(w.deps,{batchId:s.batch.id,productId:s.product.id});expect(w.deps.matteFor).toHaveBeenCalledTimes(1);expect(w.deps.renderAllChannels).toHaveBeenCalledTimes(1);expect(w.copy).toHaveBeenCalledTimes(1);const next=await seed(w,"repeat2",{productId:s.product.id});await run(w,next);expect(w.deps.matteFor).toHaveBeenCalledTimes(1);expect(w.deps.renderAllChannels).toHaveBeenCalledTimes(1);expect(w.copy).toHaveBeenCalledTimes(1);const [pair]=await db.select().from(catalogBatchProducts).where(eq(catalogBatchProducts.batchId,next.batch.id));expect(pair!.change).toBe("unchanged");},60_000);
 it("replaces a changed source even when its rendered JPEG bytes match the live image",async()=>{
@@ -852,6 +878,79 @@ describe("M7-S2 acceptance (4.2.9 tests 1 and 3): route 1 of the judge and the r
   // 4 attempts per call (5, 15, 45 s back-off) until the circuit opens after 5 failed calls; then route 1 is skipped.
   expect(r.models.filter(m=>m===FIRST).length).toBeLessThanOrEqual(5*4);
   completedOnRoute2(r);
+ },120_000);
+});
+describe("M3-S5 acceptance (M3 4.2.9 tests 1 and 2): the GPU cut-out service stops during a batch",()=>{
+ const [M1,M2]=["birefnet-general","birefnet-general-lite"];
+ const VENDOR=routeId("image.matte","photoroom",PHOTOROOM_MATTE_MODEL);
+ /**
+  * One product, 3 photos on 2 channels (CI size; 4.2.9 names a 50-product batch, run as the monthly drill on preview).
+  * The real routed cut-out runs through the real matting client and Photoroom adapter over an in-memory fetch, with the
+  * GPU service stopped from the first call. `overflow` switches the vendor on as an admin would: the position on file,
+  * serving, and a USD 1 daily cap (test account).
+  */
+ async function stoppedGpuBatch(name:string,overflow:boolean,spentTodayUsd=0) {
+  const w=world(),s=await seed(w,name,{shots:["a","b","c"],channels:["noon","amazon"]}),log=vi.fn(),fake=fakeMatting();
+  resetRouting(db);await ensureSeedRoutes(db);
+  await db.delete(catalogCostEvents).where(eq(catalogCostEvents.engine,"photoroom"));
+  if(spentTodayUsd) await db.insert(catalogCostEvents).values({stage:"matte",kind:"matte_call",engine:"photoroom",usd:spentTodayUsd,at:new Date("2026-01-01T00:00:00Z"),isTest:true});
+  if(overflow) await setRoute(db,VENDOR,{state:"serving",noTrainingTerms:"test: vendor terms on file",dailyCapUsd:1,changedBy:"test@opptra.com",reason:"CI overflow on"});
+  else await setRoute(db,VENDOR,{state:"off",dailyCapUsd:null,changedBy:"test@opptra.com",reason:"CI overflow off"});
+  fake.state.down.gpu=true;
+  const publicFetch=w.deps.fetch;
+  w.deps.fetch=vi.fn<typeof globalThis.fetch>(async(url,init)=>String(url).startsWith("https://sdk.photoroom.com/")?fake.fetch(url,init):publicFetch(url,init));
+  Object.assign(w.deps,{routes:()=>routerFor(db),matting:fake.client,matteFor:routedMatteFor,overflow:ledgerOverflowGate(db,{now:()=>new Date("2026-01-01T00:00:00Z")}),log});
+  vi.mocked(w.deps.resolvePolicy).mockResolvedValue({matteModel:M1,matteModelSecond:M2,qaModel:"",threshold:75,floor:60,qaMode:"per_source",qaSampleRate:1,source:"default"});
+  vi.stubEnv("PHOTOROOM_API_KEY","test-key");
+  try {
+   for(let i=0;i<3;i++) expect((await handleChunkTask(w.deps,await currentChunkTask(db,s.chunk.id))).httpStatus).toBe(200);
+   expect((await handlePublishTask(w.deps,{batchId:s.batch.id,productId:s.product.id})).outcome).toBe("published");
+   expect((await handleFinalizeTask(w.deps,{batchId:s.batch.id})).outcome).toBe("done");
+  } finally { vi.unstubAllEnvs(); resetRouting(db); }
+  const outputs=await db.select().from(catalogOutputs).where(eq(catalogOutputs.batchId,s.batch.id));
+  const sources=await db.select().from(catalogSourceImages).where(eq(catalogSourceImages.batchId,s.batch.id));
+  const ledger=(await db.select().from(catalogCostEvents).where(eq(catalogCostEvents.batchId,s.batch.id))).filter(r=>r.kind==="matte_call");
+  const [batch]=await db.select().from(catalogBatches).where(eq(catalogBatches.id,s.batch.id));
+  return {fake,outputs,sources,ledger,batch:batch!,log,engines:await batchCostByEngine(db,s.batch.id)};
+ }
+ const completed=(r:Awaited<ReturnType<typeof stoppedGpuBatch>>)=>{
+  expect(r.outputs).toHaveLength(6);
+  // Never a held product and never the simple method: every output is live with a model cut-out.
+  expect(r.outputs.every(o=>o.isLive && !o.flags.includes("fallback_matte"))).toBe(true);
+  expect(deriveBatchState(r.batch).state).toBe("ready");
+  // The reason is recorded: the GPU route failed, per photo, in the route fallback line (M7-F2-R6, logs only).
+  const fallbacks=r.log.mock.calls.filter(([message])=>message==="catalog matte route fallback").map(([,fields])=>fields as {routes:{route:string;kind:string}[]});
+  expect(fallbacks).toHaveLength(3);
+  expect(fallbacks.every(f=>f.routes[0]!.route===routeId("image.matte","matting-gpu",M1) && f.routes[0]!.kind!=="ok")).toBe(true);
+ };
+ it("test 1, overflow off: the batch completes on our own CPU route with model 1; the vendor is never asked and costs nothing",async()=>{
+  const r=await stoppedGpuBatch("m3s5-overflow-off",false);
+  completed(r);
+  expect(r.fake.state.calls).not.toContain("vendor");
+  expect(r.sources.every(source=>source.matteModel===M1)).toBe(true);
+  expect(r.ledger.map(row=>row.engine)).toEqual(["cpu","cpu","cpu"]);
+  expect(r.engines.map(e=>e.engine)).not.toContain("cut-out overflow");
+ },120_000);
+ it("test 2, overflow on (capped at USD 1): the batch completes through the vendor, and the cost meter shows the overflow line",async()=>{
+  const r=await stoppedGpuBatch("m3s5-overflow-on",true);
+  completed(r);
+  expect(r.fake.state.calls.filter(call=>call==="vendor")).toHaveLength(3);
+  expect(r.fake.state.calls.some(call=>call.startsWith("cpu:"))).toBe(false);
+  // Billed to the vendor's own component (M6-F1-R7), never to the worker; written at once, outcome ok.
+  expect(r.ledger.map(row=>[row.engine,row.usd,row.estimated,row.component,row.outcome])).toEqual(Array(3).fill(["photoroom",0.02,true,"photoroom","ok"]));
+  expect(r.engines).toContainEqual(expect.objectContaining({engine:"cut-out overflow",calls:3,usd:expect.closeTo(0.06,6)}));
+  // Every overflow call is logged with its cost and reason (M3-F2-R4); the key never is.
+  const calls=r.log.mock.calls.filter(([message])=>message==="catalog matte overflow");
+  expect(calls).toHaveLength(3);
+  expect(calls.every(([,fields])=>(fields as {usd:number;reason:string}).usd===0.02 && /^own routes unavailable/.test((fields as {reason:string}).reason))).toBe(true);
+  expect(JSON.stringify(r.log.mock.calls)).not.toContain("test-key");
+ },120_000);
+ it("overflow on but the day's cap is spent: the vendor is refused and the CPU route completes the batch",async()=>{
+  const r=await stoppedGpuBatch("m3s5-overflow-capped",true,0.99);
+  completed(r);
+  expect(r.fake.state.calls).not.toContain("vendor");
+  expect(r.ledger.map(row=>row.engine)).toEqual(["cpu","cpu","cpu"]);
+  expect(r.log.mock.calls.filter(([message])=>message==="catalog matte overflow refused")).toHaveLength(3);
  },120_000);
 });
 describe("spec07 caps count the recorded judge spend",()=>{

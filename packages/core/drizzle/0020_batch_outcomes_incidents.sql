@@ -1,4 +1,4 @@
--- M6-S6 (2026-11-04; numbered 0017 to leave room for the R1 slices in review, renumber at merge if needed). Batch
+-- M6-S6 (2026-11-04; numbered 0020 at merge, after the R1 slices 0013-0019). Batch
 -- success tracking (docs/program/requirements/M6-reliability-cost.md M6-F3): batch outcomes, incidents, operator
 -- touches and the revision registry behind deploy_overlap. New tables only (M6-F2-R1 additive), so the live code and
 -- the new code both work on this schema. Foreign keys are written inside CREATE TABLE IF NOT EXISTS and every index

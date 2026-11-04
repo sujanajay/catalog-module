@@ -53,21 +53,26 @@ export interface CapabilityResult<T> {
 /**
  * Failures after which the next route is asked (M7-F2-R3): a rate limit or server error that outlasted its back-off,
  * no response (timeout, network), a reply that is still invalid after the JSON retry, the model gone at the vendor
- * (HTTP 404, `model_unavailable`), and a refusal or empty reply
+ * (HTTP 404, `model_unavailable`), an image of the wrong size (M7-F2-R3, `wrong_size`), an overflow route over its
+ * daily cap (`over_cap`), and a refusal or empty reply
  * (which moves to the next route for this item only). An auth or request error is not: every OpenRouter route shares
  * the key, so the next one would fail the same way.
  */
-export const NEXT_ROUTE_KINDS = new Set(["rate_limit", "server", "no_response", "invalid_json", "model_unavailable", "empty_reply", "refusal"]);
-/** Failures that count against a route's circuit. A refusal is about the item, not the route, so it does not. */
-export const CIRCUIT_KINDS = new Set(["rate_limit", "server", "no_response", "invalid_json", "model_unavailable"]);
+export const NEXT_ROUTE_KINDS = new Set(["rate_limit", "server", "no_response", "invalid_json", "model_unavailable", "empty_reply", "refusal", "wrong_size", "over_cap"]);
+/**
+ * Failures that count against a route's circuit. A refusal is about the item, not the route, so it does not; nor does
+ * `over_cap` (an overflow route's daily cap is spent: the next route is asked, M3-F2-R3).
+ */
+export const CIRCUIT_KINDS = new Set(["rate_limit", "server", "no_response", "invalid_json", "model_unavailable", "wrong_size"]);
 
 /**
  * Ask the planned routes in order until one answers (M7-F2-R1 and R3). `attempt` is the adapter call for one route;
  * `index` is 0 for the first route asked, so the caller can give only that one its full back-off and ask the later
- * ones once (fallback adds little time when a route fails fast).
+ * ones once (fallback adds little time when a route fails fast). `continueOn` replaces NEXT_ROUTE_KINDS for
+ * capabilities whose routes share no credential (the cut-out: own services and a vendor each with its own).
  */
 export async function callRoutes<T>(plan: readonly PlannedRoute[], attempt: (route: PlannedRoute, index: number) => Promise<RouteAttempt<T>>,
-  options: {router?: Router; now?: () => number} = {}): Promise<CapabilityResult<T>> {
+  options: {router?: Router; now?: () => number; continueOn?: (failure: RouteFailure) => boolean} = {}): Promise<CapabilityResult<T>> {
   const now = options.now ?? Date.now, started = now();
   const tried: CapabilityResult<T>["tried"] = [], usages: Record<string, unknown>[] = [];
   let costUsd = 0, calls = 0;
@@ -83,7 +88,7 @@ export async function callRoutes<T>(plan: readonly PlannedRoute[], attempt: (rou
     const failure = result.failure ?? {kind: "empty_reply", status: null};
     tried.push({route, failure});
     if (CIRCUIT_KINDS.has(failure.kind)) options.router?.circuits.failure(route.id);
-    if (!NEXT_ROUTE_KINDS.has(failure.kind)) break;
+    if (!(options.continueOn ?? (f => NEXT_ROUTE_KINDS.has(f.kind)))(failure)) break;
   }
   const last = tried.at(-1)?.failure ?? null;
   return {ok: false, output: null, route: null, routeId: null, costUsd, calls, seconds: (now() - started) / 1000,

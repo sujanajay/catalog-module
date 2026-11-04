@@ -41,7 +41,15 @@ const TABLES = [
   // 0010_taxonomy.sql (M2-S1 taxonomy store)
   "catalog_taxonomy_nodes", "catalog_attribute_defs", "catalog_shot_roles", "catalog_taxonomy_changes",
   "vendor_routes", "vendor_route_changes", // 0011_vendor_routes.sql (M7-S2)
-  // 0017_batch_outcomes_incidents.sql (M6-S6)
+  "catalog_key_conflicts", // 0013_graph_key_sync.sql (M0-S2)
+  "catalog_auto_decide_rules", // 0014_auto_decide_rules.sql (M1-S3)
+  "catalog_improvements", // 0015_improvements.sql (M1-S4)
+  "catalog_setting_versions", "catalog_settings_snapshots", // 0016_settings_store.sql (M12-S1)
+  // 0017_channel_rules.sql (M5-S1 channel rules store)
+  "catalog_rulesets", "catalog_ruleset_snapshots", "catalog_rules", "catalog_rule_conflicts", "catalog_rule_decisions",
+  "catalog_channel_records", "catalog_image_policies", "catalog_rule_results",
+  "catalog_change_types", // 0019_change_types.sql (M10-S1a)
+  // 0020_batch_outcomes_incidents.sql (M6-S6)
   "catalog_batch_outcomes", "catalog_incidents", "catalog_batch_touches", "catalog_revisions",
 ];
 
@@ -57,6 +65,12 @@ const INDEXES = [
   "catalog_cost_events_batch_id_idx", "catalog_cost_events_brand_slug_at_idx", "catalog_cost_events_output_id_idx",
   "catalog_cost_events_at_idx",
   "vendor_routes_capability_adapter_model_uq", "vendor_routes_capability_rank_idx", "vendor_route_changes_route_id_at_idx",
+  "catalog_auto_decide_rules_cause_channel_uq",
+  "catalog_improvements_batch_photo_uq",
+  "catalog_outputs_provisional_plain_idx",
+  "catalog_setting_versions_org_key_scope_version_uq", "catalog_settings_snapshots_batch_id_idx",
+  "catalog_rules_ruleset_version_idx", "catalog_rule_decisions_conflict_id_idx", "catalog_rule_results_version_rule_uq",
+  "catalog_rule_results_ruleset_version_idx",
   "catalog_batch_outcomes_ended_at_idx", "catalog_incidents_kind_started_at_idx", "catalog_incidents_batch_id_idx",
   "catalog_incidents_dedupe_key_uq", "catalog_batch_touches_batch_id_idx", "catalog_revisions_first_seen_at_idx",
 ];
