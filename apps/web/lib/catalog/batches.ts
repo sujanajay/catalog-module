@@ -1,10 +1,10 @@
 import { and, desc, eq, gt, inArray, isNull, ne, sql } from "drizzle-orm";
 import { brandMaster, catalogBatches, catalogUploads, DEFAULT_BATCH_OPTIONS, type CatalogBatch } from "@catalog/core/db/schema";
-import { CHANNEL_IDS, IDENTIFIER_MODES, PRECEDENCES, PRODUCT_TYPES, PASTE_INPUT_KINDS, type BatchOptions, type BatchStatus, type ChannelId, type ProductType } from "@catalog/core/catalog/types";
+import { CHANNEL_IDS, IDENTIFIER_MODES, PRECEDENCES, PRODUCT_TYPES, PASTE_INPUT_KINDS, type BatchOptions, type ChannelId, type ProductType } from "@catalog/core/catalog/types";
 import { mergeCounts } from "@catalog/core/catalog/counts";
 import { db, type Db } from "../db";
 import type { CurrentUser } from "../user";
-import { ageText, deriveBatchState, failedBeforeStart } from "@catalog/core/catalog/pipeline/status";
+import { ageText, deriveBatchState } from "@catalog/core/catalog/pipeline/status";
 import { TEST_BRAND } from "@catalog/core/catalog/brands";
 import { notRefreshedChannels } from "@catalog/core/catalog/pipeline/report";
 import { badRequest, HttpError } from "../errors";
@@ -162,7 +162,7 @@ export async function createBatch(value: unknown, actor: string) {
   if (!brand) throw badRequest("Choose a brand from the list. Email sujan@opptra.com if it is missing.");
   const name = (input.name as string | undefined)?.trim() || `${brand.name} photos`;
   if (input.autoStart !== undefined && typeof input.autoStart !== "boolean") throw badRequest("Choose whether the batch starts by itself and try again.");
-  if (input.channels !== undefined && (!Array.isArray(input.channels) || !input.channels.every((c) => CHANNEL_IDS.includes(c as ChannelId)))) throw badRequest("Choose marketplaces from the list and try again.");
+  if (input.channels !== undefined && (!Array.isArray(input.channels) || !input.channels.every((c) => CHANNEL_IDS.includes(c as ChannelId)))) throw badRequest("Choose channels from the list and try again.");
   // M1-F2-R6 and R9: only a batch asked for with autoStart starts by itself (the one-page New batch asks); API and
   // load-driver batches keep their explicit Start. M1-F2-R4: such a batch gets the brand's default channels unless
   // channels are given.
@@ -201,7 +201,10 @@ export function parseOptions(value: unknown, existing: BatchOptions): BatchOptio
 }
 export async function patchBatch(id: string, value: unknown) {
   const input = record(value);
-  const batch = await assertDraft(id);
+  // M1-F2-R4: the channels stay editable while the files are collected (the worker never writes them).
+  const channelsOnly = Object.keys(input).length > 0 && Object.keys(input).every((k) => k === "channels");
+  const settingUp = channelsOnly ? await queryBatch(id) : null;
+  const batch = settingUp && settingUp.status === "ingesting" ? settingUp : await assertDraft(id);
   const patch: Omit<Partial<typeof catalogBatches.$inferInsert>, "counts"> & { counts?: ReturnType<typeof mergeCounts> } = { updatedAt: new Date() };
   if (input.name !== undefined) {
     if (typeof input.name !== "string" || !input.name.trim()) throw badRequest("Enter a batch name and try again.");
@@ -216,7 +219,7 @@ export async function patchBatch(id: string, value: unknown) {
     patch.options = parseOptions(input.options, batch.options);
     patch.counts = mergeCounts({ previewReady: false });
   }
-  const [updated] = await db().update(catalogBatches).set(patch).where(and(eq(catalogBatches.id, id), eq(catalogBatches.status, "draft"))).returning();
+  const [updated] = await db().update(catalogBatches).set(patch).where(and(eq(catalogBatches.id, id), inArray(catalogBatches.status, channelsOnly ? ["draft", "ingesting"] : ["draft"]))).returning();
   if (!updated) throw new HttpError(409, "This batch has already started. Open its progress page.");
   return publicBatch(updated);
 }

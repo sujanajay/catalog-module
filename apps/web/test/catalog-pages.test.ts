@@ -437,17 +437,15 @@ it("the error page without a batch shows the heading, All batches and the button
 const newPage=(query:Record<string,string>)=>NewBatchPage({searchParams:Promise.resolve(query)});
 const redirectTo=(target:string)=>expect.objectContaining({digest:expect.stringContaining(`;${target};`)});
 async function addUpload(status:"pending"|"uploaded"|"collected"="collected"){await db.insert(catalogUploads).values({batchId,kind:"zip",name:"photos.zip",status});}
-it("GET /catalog/new?batch= of a draft renders the wizard at its step",async()=>{
+it("GET /catalog/new?batch= of a draft reopens the one-page New batch (UX3)",async()=>{
  await addUpload();await setBatch({counts:{previewReady:true}});
  let html=await render(newPage({batch:batchId}));
- expect(html).toContain('aria-current="step">Start</li>');expect(html).toContain('value="uspa" selected=""');
- await setBatch({channels:[]});
- html=await render(newPage({batch:batchId}));expect(html).toContain('aria-current="step">Check what we found</li>');
+ // One page, no steps: the brand is fixed, what we found waits for its first poll, and no Continue.
+ expect(html).toContain("Brand: <b>USPA</b>");expect(html).toContain("<h2>What we found</h2>");expect(html).toContain("<h2>Where it goes</h2>");
+ expect(html).not.toContain('aria-current="step"');expect(html).not.toContain("Collecting files.");expect(html).not.toContain(">Continue<");
  await setBatch({status:"ingesting",updatedAt:new Date(),counts:{previewReady:false,collected:40,collectTotal:287}});
  html=await render(newPage({batch:batchId}));
- expect(html).toContain('aria-current="step">Check what we found</li>');expect(html).toContain("Unpacking your zip 40 of 287.");expect(html).not.toContain("0 of 0 products");
- await addUpload("pending");
- expect(await render(newPage({batch:batchId}))).toContain('aria-current="step">Brand and files</li>');
+ expect(html).toContain("Unpacking your zip 40 of 287.");expect(html).not.toContain("0 of 0 products");
 });
 it("GET /catalog/new?batch= of a cancelled batch redirects to the batch page",async()=>{
  await setBatch({status:"cancelled"});

@@ -2,7 +2,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createTestDb } from "../db/testing";
 import type { Db } from "../db/client";
 import { brandMaster, catalogChannelListings, catalogOptions, catalogProducts, skuMap } from "../db/schema";
-import { candidateKeys, defaultChannels, inferBrand, SLICE_CHANNELS } from "./intake-defaults";
+import { candidateKeys, channelDefaults, defaultChannels, inferBrand, SLICE_CHANNELS } from "./intake-defaults";
 
 // M1-F2-R3 and R4 (M1-S2): the brand is inferred from the dropped names when at least 90% of the identifiers we can
 // resolve belong to one brand; the default channels come from where the brand is listed, else the five slice channels.
@@ -59,9 +59,11 @@ describe("brand inference (M1-F2-R3)", () => {
 describe("default channels (M1-F2-R4)", () => {
   it("are the channels where the brand's options are listed", async () => {
     expect(await defaultChannels(db, "vero-moda")).toEqual(["noon", "namshi"]);
+    expect(await channelDefaults(db, "vero-moda")).toEqual({ channels: ["noon", "namshi"], source: "listed" });
   });
   it("are the five slice channels for a brand with no listings", async () => {
     expect(SLICE_CHANNELS).toEqual(["namshi", "noon", "trendyol", "styli", "centrepoint"]);
     expect(await defaultChannels(db, "uspa")).toEqual(SLICE_CHANNELS);
+    expect((await channelDefaults(db, "uspa")).source).toBe("slice");
   });
 });

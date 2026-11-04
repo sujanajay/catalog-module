@@ -72,7 +72,7 @@ function directPut(file: File, plan: Plan, progress: (value: number) => void): P
  * batch's server rows; a failed row has Retry and Remove. Busy (Continue disabled) while a row is queued,
  * uploading or failed: every one of those the operator can act on (wait, Retry or Remove).
  */
-export default function Uploader({ensureBatch,onBusy,onAdded,onRows}: {ensureBatch(): Promise<string>; onBusy(busy: boolean): void; onAdded(): void; onRows(rows: LocalUpload[]): void}) {
+export default function Uploader({ensureBatch,onBusy,onAdded,onRows}: {/** The dropped names come with the first add, so the brand can be read from them (M1-F2-R3). */ensureBatch(paths?: string[]): Promise<string>; onBusy(busy: boolean): void; onAdded(): void; onRows(rows: LocalUpload[]): void}) {
   const [rows,setRows] = useState<UploadRow[]>([]);
   const [error,setErrorLine] = useState<UploadFailure | null>(null);
   const setError = (message: string) => setErrorLine(message ? {message,batchStarted:false} : null);
@@ -104,7 +104,7 @@ export default function Uploader({ensureBatch,onBusy,onAdded,onRows}: {ensureBat
     if (!files.length) return;
     setError("");
     try {
-      const id = await ensureBatch();
+      const id = await ensureBatch(files.map((f) => f.relativePath));
       const added = files.map((f): UploadRow => ({...f,key:crypto.randomUUID(),progress:0,status:"queued"})); setRows((old) => [...old,...added]);
       let next = 0;
       await Promise.all(Array.from({length:Math.min(4,added.length)},async () => { while(next < added.length) await upload(added[next++]!,id); }));

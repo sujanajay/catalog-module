@@ -139,18 +139,6 @@ export function batchSource(kinds: readonly string[]): BatchSource {
 export const SHEET_READING_TEXT = "Reading your sheet. The columns will appear here when it has been read.";
 /** The leaving line from release C (steps 2 to 4 while collecting, batch page overview): nothing starts by itself. */
 export const LEAVING_LINE = "You can close this page. Find this batch under Your unfinished batches and press Continue when it is ready.";
-/** The fixed sentences of steps 2 and 3 while collecting, shown until the poll has a live count. */
-export const STEP2_COLLECTING_TEXT = "Collecting files. The grouping will appear here when the files are ready.";
-export const STEP3_COLLECTING_TEXT = "Collecting files. Continue when the grouping is ready.";
-/**
- * Wizard steps 2 and 3 while collecting: the polled batch state's live count and time ("Downloading photos
- * 612 of 1,400, about 7 min left", spec 14c F6), or the step's fixed sentence before a count exists (no files listed yet, so never "0 of 0")
- * or once stalled (the stall alert says that), then the leaving line. Never a product count.
- */
-export function wizardCollectingText(state: { state: string; text: string; stalled?: boolean } | null | undefined, collectTotal: number | null | undefined, fallback: string): string {
-  const live = state && state.state === "collecting" && !state.stalled && (collectTotal ?? 0) > 0 ? `${state.text.replace(/\.$/, "")}.` : fallback;
-  return `${live} ${LEAVING_LINE}`;
-}
 
 /**
  * Where a collecting or placing batch is (spec 14c F6): the phase words, "<done> of <total>" once the
@@ -201,4 +189,26 @@ export function batchListDetail(state: { state: string; intake: string; made: nu
   if (state.state === "draft" || state.state === "collecting") return state.intake;
   if (state.state === "processing") return `${state.made.toLocaleString("en-US")} of ${state.total.toLocaleString("en-US")} images made`;
   return "";
+}
+
+// The one-page New batch (M1-S2, UX3; M1 section 5).
+/** M1-F2-R3: the only question, above the drop zone, when the brand cannot be read from the names. */
+export const BRAND_QUESTION = "Which brand is this?";
+/** M1-F2-R8: the page can be closed at any point. */
+export const KEEP_GOING_LINE = "You can close this page. We will keep going.";
+/** M1-F2-R6: the countdown line; Wait is the button beside it. */
+export function countdownText(seconds: number): string {
+  return `Starting in ${Math.max(1, Math.ceil(seconds))} s. Change anything above, or Wait.`;
+}
+/** M1-F2-R4: where the batch goes, from the brand's listings or the usual five. */
+export function goingToText(names: readonly string[], listed: boolean): string {
+  return `Going to: ${names.join(", ")}${listed ? " (where this brand is listed)" : ""}.`;
+}
+/** "What we found" once the files are grouped. */
+export function foundText(photos: number, products: number): string {
+  return `Found ${count(photos)} photos for ${count(products)} products.`;
+}
+/** "What we found" while the files are read: the live words when there are some. */
+export function collectingLine(state: { state: string; text: string; stalled?: boolean } | null | undefined, collectTotal: number | null | undefined): string {
+  return state && state.state === "collecting" && !state.stalled && (collectTotal ?? 0) > 0 ? `${state.text.replace(/\.$/, "")}.` : "Collecting files.";
 }

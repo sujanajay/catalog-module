@@ -48,7 +48,9 @@ for (const key of ["GOOGLE_APPLICATION_CREDENTIALS", "DB_HOST", "TASKS_INGEST_QU
  * The fake queue and image host settings; the tests change them through POST /harness/queue, which
  * answers with them plus `pending` (held deliveries) and `running` (deliveries in progress).
  */
-const queue = { delayMs: 1000, fetchDelayMs: 50, budgetItems: 40, paused: false, running: 0, pending: [] as Record<string, unknown>[] };
+// autoStartDelayMs: when set, the auto-start task runs this long after it is queued instead of its own delay, so a
+// scenario about intake has time to press Wait on a slow machine (the countdown itself still reads 10 s).
+const queue = { delayMs: 1000, fetchDelayMs: 50, budgetItems: 40, paused: false, autoStartDelayMs: null as number | null, running: 0, pending: [] as Record<string, unknown>[] };
 const workerLog: string[] = [];
 /** A worker line: kept for GET /harness/log and printed with the server output. */
 const note = (line: string) => {
@@ -66,6 +68,12 @@ async function main() {
   await seedAdmin(seedDb, ADMIN);
   await upsertPerson(seedDb, { email: OPERATOR, role: "operator", addedBy: ADMIN });
   await seedDb.insert(brandMaster).values({ slug: "test_brand", name: "Test Brand", line: "softline", source: "manual" });
+  // M1-S2: a brand the dropped names identify (its option ids in the SKU master) and lists on Noon and Namshi (M0).
+  const { skuMap, catalogOptions, catalogChannelListings } = await import("@catalog/core/db/schema");
+  await seedDb.insert(brandMaster).values({ slug: "vero_moda", name: "Vero Moda", line: "softline", source: "manual" });
+  await seedDb.insert(skuMap).values(["VM10001BLACK", "VM10002WHITE", "VM10003NAVY"].map((optionKey, i) => ({ opptraSku: `VMSKU${i + 1}`, brand: "Vero Moda", brandSlug: "vero_moda", line: "softline", optionKey, optionIdStyleColor: optionKey, ean: null, source: "manual" })) as never);
+  const [vmOption] = await seedDb.insert(catalogOptions).values({ brandSlug: "vero_moda", optionKey: "VM10001BLACK", keySource: "master" } as never).returning();
+  await seedDb.insert(catalogChannelListings).values([{ optionId: vmOption!.id, channel: "noon", market: "ae", status: "live" }, { optionId: vmOption!.id, channel: "namshi", market: "ae", status: "live" }] as never);
 
   // 2. Swap the external pg Pool and the Storage client the app's server bundle loads (both are
   //    serverExternalPackages, so Next requires the same module instances as this process).
@@ -87,6 +95,9 @@ async function main() {
   const schema = await import("@catalog/core/db/schema");
   const workerDb = drizzle(new HarnessPool() as never, { schema }) as never;
   const { runIngest } = await import("@catalog/core/catalog/ingest/index");
+  // M1-F2-R6: the auto-start task, run after its countdown as the worker would; the chunk tasks it queues are dropped.
+  const { runAutoStart } = await import("@catalog/core/catalog/pipeline/start");
+  const { AUTO_START_ROUTE } = await import("@catalog/core/catalog/auto-start");
   // The fixture links: every link of the large sheet (the xlsx links are its first 6 rows) and of the
   // two pasted fixtures.
   const fixture = (name: string) => readFileSync(path.join(FIXTURES, name), "utf8").trim().split(/\r?\n/);
@@ -113,7 +124,13 @@ async function main() {
     const t0 = Date.now();
     queue.running++;
     try {
-      const enqueue = async (_route: string, next: Record<string, unknown>) => (deliver(next), "harness-task");
+      const enqueue = async (route: string, next: Record<string, unknown>, opts?: { delaySec?: number }) => {
+        if (route !== AUTO_START_ROUTE) return (deliver(next), "harness-task");
+        setTimeout(() => void runAutoStart(workerDb, { storage, enqueue: (async () => "harness-dropped") as never }, next as { batchId: string; at: string })
+          .then((outcome) => note(`auto-start ${String(next.batchId).slice(0, 8)}: ${outcome}`))
+          .catch((err: unknown) => note(`auto-start ERROR ${err instanceof Error ? err.message : String(err)}`)), queue.autoStartDelayMs ?? (opts?.delaySec ?? 0) * 1000);
+        return "harness-task";
+      };
       const r = await runIngest(workerDb, { storage, fetch: imageFetch, lookup: fakeLookup, enqueue: enqueue as never, budgetItems: queue.budgetItems }, body as { batchId: string; uploadId: string; cursor?: string });
       note(`ingest ${String(body.uploadId).slice(0, 8)} ${Date.now() - t0} ms: ${r.outcome}`);
     } catch (err) {
@@ -138,7 +155,7 @@ async function main() {
       if (url.pathname === "/harness/health") return send(res, ready ? 200 : 503, { ready });
       if (url.pathname === "/harness/queue" && req.method === "POST") {
         const patch = JSON.parse((await bodyOf(req)).toString() || "{}") as Partial<typeof queue>;
-        for (const key of ["delayMs", "fetchDelayMs", "budgetItems", "paused"] as const) if (patch[key] !== undefined) Object.assign(queue, { [key]: patch[key] });
+        for (const key of ["delayMs", "fetchDelayMs", "budgetItems", "paused", "autoStartDelayMs"] as const) if (patch[key] !== undefined) Object.assign(queue, { [key]: patch[key] });
         if (!queue.paused) queue.pending.splice(0).forEach(deliver);
         return send(res, 200, { ...queue, pending: queue.pending.length });
       }

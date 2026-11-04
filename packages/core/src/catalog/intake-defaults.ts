@@ -82,10 +82,15 @@ export async function inferBrand(db: Db, relativePaths: readonly string[]): Prom
  * M0 (any status except "not listed"), in the usual channel order, else SLICE_CHANNELS.
  */
 export async function defaultChannels(db: Db, brandSlug: string): Promise<ChannelId[]> {
+  return (await channelDefaults(db, brandSlug)).channels;
+}
+
+/** defaultChannels with where they came from: "listed" (M0 listings) or "slice" (the five slice channels). */
+export async function channelDefaults(db: Db, brandSlug: string): Promise<{ channels: ChannelId[]; source: "listed" | "slice" }> {
   const rows = await db.selectDistinct({ channel: catalogChannelListings.channel }).from(catalogChannelListings)
     .innerJoin(catalogOptions, eq(catalogOptions.id, catalogChannelListings.optionId))
     .where(and(eq(catalogOptions.brandSlug, brandSlug), ne(catalogChannelListings.status, "not_listed")));
   const listed = new Set(rows.map((r) => r.channel));
   const channels = CHANNEL_IDS.filter((c) => listed.has(c));
-  return channels.length ? channels : [...SLICE_CHANNELS];
+  return channels.length ? { channels, source: "listed" } : { channels: [...SLICE_CHANNELS], source: "slice" };
 }

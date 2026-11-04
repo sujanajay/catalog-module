@@ -8,6 +8,7 @@ import { SLICE_CHANNELS } from "@catalog/core/catalog/intake-defaults";
 import { POST as create } from "../app/api/catalog/batches/route";
 import { POST as infer } from "../app/api/catalog/brands/infer/route";
 import { POST as holdStart } from "../app/api/catalog/batches/[id]/hold-start/route";
+import { PATCH as patchBatch } from "../app/api/catalog/batches/[id]/route";
 import { setDbForTests, type Db } from "../lib/db";
 import { resetUserDeps, setUserDeps } from "../lib/user";
 
@@ -38,7 +39,7 @@ describe("brand inference (M1-F2-R3)", () => {
   it("answers the brand of dropped names, or null when it must be asked", async () => {
     const known = await infer(request({ paths: ["AW26/TB1-000-BLACK_1.jpg", "AW26/TB2000BLACK_1.jpg", "AW26/TB3000BLACK_2.jpg"] }));
     expect(known.status).toBe(200);
-    expect(await known.json()).toEqual({ brandSlug: "test-brand", brandName: "Test Brand", resolved: 3, total: 3, channels: [...SLICE_CHANNELS] });
+    expect(await known.json()).toEqual({ brandSlug: "test-brand", brandName: "Test Brand", resolved: 3, total: 3, channels: [...SLICE_CHANNELS], channelSource: "slice" });
     const unknown = await infer(request({ paths: ["IMG_0001.jpg"] }));
     expect(await unknown.json()).toMatchObject({ brandSlug: null, resolved: 0, total: 1 });
   });
@@ -90,5 +91,18 @@ describe("Wait (hold-start, M1-F2-R6)", () => {
     const r = await holdStart(request(), ctx(body.id));
     expect(r.status).toBe(409);
     expect((await r.json() as { error: string }).error).toBe("This batch has already started. Make a new batch to add more photos.");
+  });
+});
+
+describe("channels while collecting (M1-F2-R4)", () => {
+  it("stay editable while the files are collected; other changes still need a draft", async () => {
+    const { body } = await newBatch({ autoStart: true });
+    await db.update(catalogBatches).set({ status: "ingesting" }).where(eq(catalogBatches.id, body.id));
+    const patch = (value: unknown) => patchBatch(new Request("http://localhost/api/catalog", { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify(value) }), ctx(body.id));
+    expect((await patch({ channels: ["noon"] })).status).toBe(200);
+    expect((await batchOf(body.id)).channels).toEqual(["noon"]);
+    expect((await patch({ channels: ["noon"], name: "catalog-test other" })).status).toBe(409);
+    await db.update(catalogBatches).set({ status: "matting", startedAt: new Date() }).where(eq(catalogBatches.id, body.id));
+    expect((await patch({ channels: ["namshi"] })).status).toBe(409);
   });
 });
