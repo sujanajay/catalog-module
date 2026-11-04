@@ -3,7 +3,7 @@
 //   resolve belong to one brand; otherwise the brand is the one question asked (UX 5.1 step 3).
 // - The channels default to where the brand's options are listed (M0), else the five slice channels; never the last
 //   batch someone else typed (UX 5.2, M1 D1). The brand's channel setting (M12-F3-R8) comes first once it exists.
-import { and, eq, inArray, ne } from "drizzle-orm";
+import { and, eq, inArray, ne, sql } from "drizzle-orm";
 import type { Db } from "../db/client";
 import { brandMaster, catalogChannelListings, catalogOptions, catalogProducts, skuMap } from "../db/schema";
 import { normalizeKey, parseShotName } from "./naming";
@@ -11,6 +11,12 @@ import { CHANNEL_IDS, type ChannelId } from "./types";
 
 /** M1-F2-R3: the share of resolved identifiers one brand must hold (admin setting in M12 once it exists). */
 export const BRAND_INFERENCE_SHARE = 0.9;
+/**
+ * M1 D14: the share of all distinct identifiers that must resolve at all before a brand is inferred. Below it the
+ * brand is asked (an explicit choice), so a drop of hundreds of unknown names with one known name never starts by
+ * itself on a guessed brand.
+ */
+export const BRAND_MIN_COVERAGE = 0.5;
 /** M1-F2-R4: the default when the brand has no listings: Namshi, Noon, Trendyol, Styli, Centrepoint. */
 export const SLICE_CHANNELS: readonly ChannelId[] = ["namshi", "noon", "trendyol", "styli", "centrepoint"];
 /** At most this many distinct names are looked up; a big drop is judged on a sample of its first names. */
@@ -36,7 +42,8 @@ async function brandsOfKeys(db: Db, keys: string[]): Promise<Map<string, Set<str
     const part = keys.slice(at, at + LOOKUP_CHUNK);
     for (const r of await db.select({ key: skuMap.optionKey, brand: skuMap.brandSlug }).from(skuMap).where(inArray(skuMap.optionKey, part))) add(r.key, r.brand);
     for (const r of await db.select({ key: skuMap.ean, brand: skuMap.brandSlug }).from(skuMap).where(inArray(skuMap.ean, part))) if (r.key) add(r.key, r.brand);
-    for (const r of await db.select({ key: skuMap.opptraSku, brand: skuMap.brandSlug }).from(skuMap).where(inArray(skuMap.opptraSku, part))) add(normalizeKey(r.key), r.brand);
+    // Opptra SKUs are stored as written ("VM-1001_a"); the keys are normalised, so compare normalised forms.
+    for (const r of await db.select({ key: skuMap.opptraSku, brand: skuMap.brandSlug }).from(skuMap).where(inArray(sql`upper(regexp_replace(${skuMap.opptraSku}, '[[:space:]_-]', '', 'g'))`, part))) add(normalizeKey(r.key), r.brand);
     for (const r of await db.select({ key: catalogOptions.optionKey, brand: catalogOptions.brandSlug }).from(catalogOptions).where(inArray(catalogOptions.optionKey, part))) add(r.key, r.brand);
     for (const r of await db.select({ key: catalogProducts.productKey, brand: catalogProducts.brandSlug }).from(catalogProducts).where(and(inArray(catalogProducts.productKey, part), eq(catalogProducts.isTest, false)))) add(r.key, r.brand);
   }
@@ -53,7 +60,8 @@ export interface BrandInference {
 /**
  * M1-F2-R3: the brand of a drop, from its relative paths. Each path counts once per distinct identifier: the first of
  * its candidate keys that resolves to exactly one brand, else its file-name identifier (unresolved). The brand is
- * inferred when one brand holds at least BRAND_INFERENCE_SHARE of the resolved identifiers and is in the brand list.
+ * inferred when one brand holds at least BRAND_INFERENCE_SHARE of the resolved identifiers, at least BRAND_MIN_COVERAGE
+ * of all identifiers resolved, and the brand is in the brand list.
  */
 export async function inferBrand(db: Db, relativePaths: readonly string[]): Promise<BrandInference> {
   const candidates = [...new Set(relativePaths)].map(candidateKeys).filter((keys) => keys.length > 0);
@@ -70,7 +78,7 @@ export async function inferBrand(db: Db, relativePaths: readonly string[]): Prom
   const resolved = [...counts.values()].reduce((a, b) => a + b, 0);
   const [top] = [...counts.entries()].sort((a, b) => b[1] - a[1]);
   let brandSlug: string | null = null;
-  if (top && top[1] / resolved >= BRAND_INFERENCE_SHARE) {
+  if (top && top[1] / resolved >= BRAND_INFERENCE_SHARE && resolved / units.size >= BRAND_MIN_COVERAGE) {
     const [known] = await db.select({ slug: brandMaster.slug }).from(brandMaster).where(eq(brandMaster.slug, top[0]));
     brandSlug = known ? known.slug : null;
   }

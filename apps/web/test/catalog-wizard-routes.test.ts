@@ -177,7 +177,7 @@ describe("catalog wizard authorization and contracts",()=>{
     const id=await newBatch();await addPhoto(id);await collectBatch(id);await patch(request("PATCH",{channels:["noon"]}),ctx(id));
     const shown=await (await preview(request("GET"),ctx(id))).json();
     await upload(request("POST",{files:[{name:"ABC123_2.heic",relativePath:"ABC123_2.heic",size:100,mime:"image/heic"}]}),ctx(id));
-    const response=await start(request("POST",{previewAt:shown.previewAt}),ctx(id));expect(response.status).toBe(409);expect(await response.json()).toEqual({error:"Files changed since the preview. Open step 4 again."});
+    const response=await start(request("POST",{previewAt:shown.previewAt}),ctx(id));expect(response.status).toBe(409);expect(await response.json()).toEqual({error:"Files changed since you last looked. Check what we found again, then press Start."});
   });
   it("retains independent column choices for two sheets through actual regroup without downloading links again",async()=>{
     const id=await newBatch();

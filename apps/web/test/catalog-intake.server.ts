@@ -120,15 +120,18 @@ async function main() {
     // A delivery whose wait ends while the queue is held waits with the others.
     setTimeout(() => (queue.paused ? void queue.pending.push(body) : void runTask(body)), queue.delayMs);
   };
+  /** Pending auto-start tasks: settle cancels them, so a countdown armed in one scenario never fires in the next. */
+  const autoStartTimers = new Set<ReturnType<typeof setTimeout>>();
   async function runTask(body: Record<string, unknown>) {
     const t0 = Date.now();
     queue.running++;
     try {
       const enqueue = async (route: string, next: Record<string, unknown>, opts?: { delaySec?: number }) => {
         if (route !== AUTO_START_ROUTE) return (deliver(next), "harness-task");
-        setTimeout(() => void runAutoStart(workerDb, { storage, enqueue: (async () => "harness-dropped") as never }, next as { batchId: string; at: string })
+        const timer = setTimeout(() => { autoStartTimers.delete(timer); void runAutoStart(workerDb, { storage, enqueue: (async () => "harness-dropped") as never }, next as { batchId: string; at: string })
           .then((outcome) => note(`auto-start ${String(next.batchId).slice(0, 8)}: ${outcome}`))
-          .catch((err: unknown) => note(`auto-start ERROR ${err instanceof Error ? err.message : String(err)}`)), queue.autoStartDelayMs ?? (opts?.delaySec ?? 0) * 1000);
+          .catch((err: unknown) => note(`auto-start ERROR ${err instanceof Error ? err.message : String(err)}`)); }, queue.autoStartDelayMs ?? (opts?.delaySec ?? 0) * 1000);
+        autoStartTimers.add(timer);
         return "harness-task";
       };
       const r = await runIngest(workerDb, { storage, fetch: imageFetch, lookup: fakeLookup, enqueue: enqueue as never, budgetItems: queue.budgetItems }, body as { batchId: string; uploadId: string; cursor?: string });
@@ -169,7 +172,10 @@ async function main() {
         const db = workerDb as unknown as import("@catalog/core/db/client").Db;
         const released = await db.update(catalogProducts).set({ lockBatchId: null }).where(isNotNull(catalogProducts.lockBatchId)).returning({ id: catalogProducts.id });
         const finished = await db.update(catalogBatches).set({ status: "done", finishedAt: new Date() }).where(inArray(catalogBatches.status, ["matting", "rendering", "qa", "publishing"])).returning({ id: catalogBatches.id });
-        return send(res, 200, { released: released.length, finished: finished.length });
+        const cancelled = autoStartTimers.size;
+        for (const timer of autoStartTimers) clearTimeout(timer);
+        autoStartTimers.clear();
+        return send(res, 200, { released: released.length, finished: finished.length, cancelledAutoStarts: cancelled });
       }
       if (url.pathname.startsWith("/harness/worker/") && req.method === "POST") {
         const body = JSON.parse((await bodyOf(req)).toString() || "{}") as Record<string, unknown>;

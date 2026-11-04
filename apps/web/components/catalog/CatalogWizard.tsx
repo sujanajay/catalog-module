@@ -82,6 +82,7 @@ export default function CatalogWizard({ brands, shareEmail, supabasePaste = fals
   const [channels, setChannels] = useState<ChannelId[]>(initialBatch?.channels ?? []);
   const [channelSource, setChannelSource] = useState<Defaults["channelSource"]>(null);
   const [changingChannels, setChangingChannels] = useState(false);
+  const [changingBrand, setChangingBrand] = useState(false);
   const [uploadsBusy, setUploadsBusy] = useState(false);
   const [linksBusy, setLinksBusy] = useState(false);
   const [hasInputs, setHasInputs] = useState(() => !!initialBatch?.uploads.some((u) => u.status !== "removed"));
@@ -204,6 +205,18 @@ export default function CatalogWizard({ brands, shareEmail, supabasePaste = fals
     return () => clearInterval(timer);
   }, [autoStartAt]);
 
+  /** M1 D14: a different brand before Start: its default channels, and the files grouped again under it. */
+  async function changeBrand(slug: string) {
+    if (!id || !slug || slug === brandSlug) { setChangingBrand(false); return; }
+    setWorking(true); setError("");
+    try {
+      const next = await wizardApi<Defaults & { collecting: boolean }>(batchUrl(id, "/brand"), "POST", { brandSlug: slug });
+      setBrandSlug(next.brandSlug!); setChannels(next.channels); setChannelSource(next.channelSource); setChangingBrand(false);
+      pollRequest.current++; setPreview(null);
+      setPolled((p) => p ? { ...p, counts: { ...p.counts, previewReady: !next.collecting && p.counts.previewReady, autoStartAt: null } } : p);
+    } catch (err) { setError(err instanceof Error ? err.message : "This did not finish. Try again."); }
+    finally { setWorking(false); }
+  }
   async function saveChannels(next: ChannelId[]) {
     setChannels(next);
     if (!id) return;
@@ -250,8 +263,8 @@ export default function CatalogWizard({ brands, shareEmail, supabasePaste = fals
   return <div className="catalog-wizard"><h1>New batch</h1>
     <section className="card stack">
       <ShareBox email={shareEmail}/>
-      {askBrand && !id ? <div><label className="f" htmlFor="brand">{BRAND_QUESTION}</label><select id="brand" value={brandSlug} onChange={(e) => chooseBrand(e.target.value)}><option value="">Choose a brand</option>{(["softline", "hardline"] as const).map((line) => <optgroup key={line} label={line === "softline" ? "Softline" : "Hardline"}>{brands.filter((b) => b.line === line).map((b) => <option key={b.slug} value={b.slug}>{b.name}</option>)}</optgroup>)}</select><p className="help">Brand not in the list? Email <a href="mailto:sujan@opptra.com">sujan@opptra.com</a>.</p></div> : null}
-      {brandName && (id || brandLocked) ? <p>Brand: <b>{brandName}</b></p> : null}
+      {(askBrand && !id) || changingBrand ? <div><label className="f" htmlFor="brand">{BRAND_QUESTION}</label><select id="brand" value={changingBrand ? "" : brandSlug} disabled={working} onChange={(e) => changingBrand ? void changeBrand(e.target.value) : chooseBrand(e.target.value)}><option value="">Choose a brand</option>{(["softline", "hardline"] as const).map((line) => <optgroup key={line} label={line === "softline" ? "Softline" : "Hardline"}>{brands.filter((b) => b.line === line).map((b) => <option key={b.slug} value={b.slug}>{b.name}</option>)}</optgroup>)}</select><p className="help">Brand not in the list? Email <a href="mailto:sujan@opptra.com">sujan@opptra.com</a>.</p></div> : null}
+      {brandName && (id || brandLocked) && !changingBrand ? <p>Brand: <b>{brandName}</b>{id && status === "draft" && !collecting ? <> <button type="button" className="btn ghost sm" disabled={working} onClick={() => setChangingBrand(true)}>Change brand</button></> : null}</p> : null}
       <Uploader ensureBatch={ensureBatch} onBusy={setUploadsBusy} onAdded={onAdded} onRows={setLocal}/>
       <PasteBox ensureBatch={() => ensureBatch()} onBusy={setLinksBusy} onAdded={onAdded} removed={pasteRemoved} supabase={supabasePaste}/>
       {fixReason ? <p role="alert" className="fix-reason">{fixReason}</p> : null}

@@ -14,17 +14,20 @@ import { failedBeforeStart } from "./status";
 import { mergeCounts } from "../counts";
 import { log } from "../../log";
 import type { BatchStatus } from "../types";
-import { armAutoStart, AUTO_START_BUSY_RETRY_SEC, type AutoStartBody } from "../auto-start";
+import { armAutoStart, AUTO_START_BUSY_WARN_MS, busyRetryDelaySec, type AutoStartBody } from "../auto-start";
 
 /** A refusal with the HTTP status the web answers with; the worker's auto-start reads `kind`. */
 export class StartRefused extends Error {
-  constructor(public status: number, message: string, public kind: "stale" | "busy" | "not_draft" | "no_photos" | "invalid" = "invalid") {
+  constructor(public status: number, message: string, public kind: "stale" | "busy" | "not_draft" | "no_photos" | "held" | "invalid" = "invalid") {
     super(message);
     this.name = "StartRefused";
   }
 }
 
-export const STALE_PREVIEW = "Files changed since the preview. Open step 4 again.";
+export const STALE_PREVIEW = "Files changed since you last looked. Check what we found again, then press Start.";
+export const STARTED_TEXT = "This batch has already started. Open its progress page.";
+/** The auto-start task's refusal when Wait came first (M1-F2-R6); the page then shows its Start button. */
+export const AUTO_START_HELD = "Auto-start was turned off with Wait. Press Start when you are ready.";
 // The refusals of a change that needs a draft, by status (spec 14c F8; parent copy register "assertDraft").
 export const BATCH_STARTED = "This batch has already started. Make a new batch to add more photos.";
 export const BATCH_COULD_NOT_START = "This batch could not start. Press Fix and continue to change its photos or links.";
@@ -55,10 +58,14 @@ export interface StartDeps {
  * Start the draft `id` as it was at `previewAt` (ISO): refuses (StartRefused) a batch that is not a draft, has no
  * channels, changed after `previewAt`, has no photos (and marks it failed) or whose products another running batch
  * holds. A batch already running gets the sweep's recovery instead (spec 15 E4).
+ * `autoStart`: the auto-start task's countdown. The batch then starts only while auto-start is still on and that
+ * countdown is still the batch's, checked first and again under the batch row lock (Wait takes the same lock).
  */
-export async function startDraftBatch(db: Db, deps: StartDeps, id: string, previewAt: string): Promise<{ id: string; status: string }> {
+export async function startDraftBatch(db: Db, deps: StartDeps, id: string, previewAt: string, autoStart?: { at: string }): Promise<{ id: string; status: string }> {
   const [batch] = await db.select().from(catalogBatches).where(eq(catalogBatches.id, id));
   if (!batch) throw new StartRefused(404, "This batch does not exist. Open the batch list and choose another.", "not_draft");
+  const held = (b: CatalogBatch) => !!autoStart && b.status === "draft" && (b.options.autoStart !== true || b.counts.autoStartAt !== autoStart.at);
+  if (held(batch)) throw new StartRefused(409, AUTO_START_HELD, "held");
   if (batch.status === "failed" && batch.counts.failReason?.startsWith("No photos were found")) throw new StartRefused(400, batch.counts.failReason, "no_photos");
   if (["matting", "rendering", "publishing"].includes(batch.status)) {
     // Spec 15 E4: a second press runs the sweep's rules for this batch (recover dead chunks, top up the window)
@@ -67,7 +74,7 @@ export async function startDraftBatch(db: Db, deps: StartDeps, id: string, previ
     return { id, status: batch.status };
   }
   // A collecting, cancelled or failed-before-Start batch gets its own sentence (spec 14c F8).
-  if (batch.status !== "draft") throw new StartRefused(409, batch.startedAt ? "This batch has already started. Open its progress page." : notDraftText(batch), "not_draft");
+  if (batch.status !== "draft") throw new StartRefused(409, batch.startedAt ? STARTED_TEXT : notDraftText(batch), "not_draft");
   if (!batch.channels.length) throw new StartRefused(400, "Choose at least one marketplace before starting.");
   if (!batch.counts.previewReady || batch.updatedAt.getTime() > Date.parse(previewAt)) throw new StartRefused(409, STALE_PREVIEW, "stale");
   const uploads = await db.select().from(catalogUploads).where(and(eq(catalogUploads.batchId, id), ne(catalogUploads.status, "removed")));
@@ -89,7 +96,11 @@ export async function startDraftBatch(db: Db, deps: StartDeps, id: string, previ
   const plans = planChunks(products.filter((p) => sourceIds.has(p.id)).map((p) => ({ productId: p.id, identifier: p.identifier, sourceCount: sourceIds.get(p.id)!.length })), chunkImages());
   const chunks = await db.transaction(async (tx) => {
     const [current] = await tx.select().from(catalogBatches).where(eq(catalogBatches.id, id)).for("update");
-    if (!current || current.status !== "draft" || !current.counts.previewReady || current.updatedAt.getTime() !== batch.updatedAt.getTime()) throw new StartRefused(409, STALE_PREVIEW, "stale");
+    if (!current) throw new StartRefused(404, "This batch does not exist. Open the batch list and choose another.", "not_draft");
+    // A Start that lost to another Start (or to the auto-start) says the batch started, not that files changed.
+    if (current.status !== "draft") throw new StartRefused(409, current.startedAt ? STARTED_TEXT : notDraftText(current), "not_draft");
+    if (held(current)) throw new StartRefused(409, AUTO_START_HELD, "held");
+    if (!current.counts.previewReady || current.updatedAt.getTime() !== batch.updatedAt.getTime()) throw new StartRefused(409, STALE_PREVIEW, "stale");
     const locked = await lockProducts(tx as unknown as Db, id, products.map((p) => p.id));
     if (!locked.ok) throw new StartRefused(409, busyText(locked.busy), "busy");
     // Spec 16: chunk rows in a few big inserts, so a 7,000-product Start stays well inside the web request limit.
@@ -115,10 +126,10 @@ function startedCounts(batch: CatalogBatch): CatalogBatch["counts"] {
 /**
  * M1-F2-R6 and R7: the auto-start task. Starts the draft when it is still the one armed at `body.at` (auto-start on,
  * collection done, same countdown); otherwise does nothing. The start blockers are rules (R7): products another
- * running batch holds make it try again every AUTO_START_BUSY_RETRY_SEC until the lock frees; a changed draft waits for
- * its own new countdown; anything else leaves the draft with its Start button and the reason logged.
+ * running batch holds make it try again (busyRetryDelaySec: 60 s doubling to 15 min) until the lock frees; a changed
+ * draft waits for its own new countdown; anything else leaves the draft with its Start button and the reason logged.
  */
-export async function runAutoStart(db: Db, deps: StartDeps & { now?: () => Date }, body: AutoStartBody, start = startDraftBatch): Promise<string> {
+export async function runAutoStart(db: Db, deps: StartDeps & { now?: () => Date }, body: AutoStartBody, start: (db: Db, deps: StartDeps, id: string, previewAt: string, autoStart?: { at: string }) => Promise<unknown> = startDraftBatch): Promise<string> {
   const [batch] = await db.select().from(catalogBatches).where(eq(catalogBatches.id, body.batchId));
   if (!batch) return "noop: the batch does not exist";
   if (batch.status !== "draft") return `noop: the batch is ${batch.status}`;
@@ -127,13 +138,17 @@ export async function runAutoStart(db: Db, deps: StartDeps & { now?: () => Date 
   if (batch.counts.autoStartAt !== body.at) return "noop: a newer countdown runs";
   const now = deps.now?.() ?? new Date();
   try {
-    await start(db, deps, batch.id, now.toISOString());
+    await start(db, deps, batch.id, now.toISOString(), { at: body.at });
     log("INFO", "auto-start started the batch", { batchId: batch.id, brandSlug: batch.brandSlug });
     return "started";
   } catch (err) {
     if (!(err instanceof StartRefused)) throw err;
+    if (err.kind === "held") return `noop: ${err.message}`;
     if (err.kind === "busy") {
-      await armAutoStart(db, deps.enqueue, batch.id, AUTO_START_BUSY_RETRY_SEC, now);
+      const retries = body.busyRetries ?? 0;
+      const busySince = body.busySince ?? now.toISOString();
+      if (now.getTime() - Date.parse(busySince) >= AUTO_START_BUSY_WARN_MS) log("WARNING", "auto-start still waiting for locked products", { batchId: batch.id, brandSlug: batch.brandSlug, busySince, retries, reason: err.message });
+      await armAutoStart(db, deps.enqueue, batch.id, busyRetryDelaySec(retries), now, { busyRetries: retries + 1, busySince });
       return `waiting: ${err.message}`;
     }
     // A changed draft, no marketplace chosen, or nothing usable: this countdown ends and the Start button shows. A

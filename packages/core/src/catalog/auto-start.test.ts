@@ -3,7 +3,7 @@ import { eq } from "drizzle-orm";
 import { createTestDb } from "../db/testing";
 import type { Db } from "../db/client";
 import { catalogBatches, DEFAULT_BATCH_OPTIONS, EMPTY_BATCH_COUNTS } from "../db/schema";
-import { armAutoStart, AUTO_START_BUSY_RETRY_SEC, AUTO_START_DELAY_SEC, AUTO_START_ROUTE, holdAutoStart } from "./auto-start";
+import { armAutoStart, AUTO_START_BUSY_MAX_SEC, AUTO_START_BUSY_RETRY_SEC, AUTO_START_DELAY_SEC, AUTO_START_ROUTE, busyRetryDelaySec, holdAutoStart } from "./auto-start";
 import { runAutoStart, startDraftBatch, StartRefused } from "./pipeline/start";
 
 // M1-F2-R6, R7 and R9 (M1-S2): the countdown runs on the server; Wait turns it off; start blockers are rules.
@@ -72,7 +72,7 @@ describe("the auto-start task", () => {
     const start = vi.fn(async () => ({ id: b.id, status: "matting" }));
     const d = deps();
     expect(await runAutoStart(db, d, { batchId: b.id, at }, start)).toBe("started");
-    expect(start).toHaveBeenCalledWith(db, d, b.id, NOW.toISOString());
+    expect(start).toHaveBeenCalledWith(db, d, b.id, NOW.toISOString(), { at });
   });
 
   it("does nothing for an older countdown (more files were dropped) or while collecting", async () => {
@@ -94,7 +94,24 @@ describe("the auto-start task", () => {
     expect(await runAutoStart(db, d, { batchId: b.id, at }, start)).toMatch(/^waiting/);
     const next = new Date(NOW.getTime() + AUTO_START_BUSY_RETRY_SEC * 1000).toISOString();
     expect((await read(b.id)).counts.autoStartAt).toBe(next);
-    expect(d.enqueue).toHaveBeenCalledWith(AUTO_START_ROUTE, { batchId: b.id, at: next }, expect.objectContaining({ delaySec: AUTO_START_BUSY_RETRY_SEC }));
+    expect(d.enqueue).toHaveBeenCalledWith(AUTO_START_ROUTE, { batchId: b.id, at: next, busyRetries: 1, busySince: NOW.toISOString() }, expect.objectContaining({ delaySec: AUTO_START_BUSY_RETRY_SEC }));
+  });
+
+  it("R7 (M1 D13): the busy retry backs off from 60 s, doubling to 15 min, and a wait past an hour is logged", async () => {
+    expect([0, 1, 2, 3, 4, 5, 30].map(busyRetryDelaySec)).toEqual([60, 120, 240, 480, 900, 900, 900]);
+    expect(AUTO_START_BUSY_MAX_SEC).toBe(900);
+    const b = await draft({ autoStart: true });
+    const at = (await armAutoStart(db, vi.fn(async () => "t"), b.id, 10, NOW))!;
+    const since = new Date(NOW.getTime() - 61 * 60 * 1000).toISOString();
+    const d = deps();
+    const start = vi.fn(async () => { throw new StartRefused(409, "X is still being processed in batch Y.", "busy"); });
+    const write = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      expect(await runAutoStart(db, d, { batchId: b.id, at, busyRetries: 4, busySince: since }, start)).toMatch(/^waiting/);
+      expect(write.mock.calls.map((c) => String(c[0])).some((line) => line.includes("auto-start still waiting for locked products"))).toBe(true);
+    } finally { write.mockRestore(); }
+    const next = new Date(NOW.getTime() + 900 * 1000).toISOString();
+    expect(d.enqueue).toHaveBeenCalledWith(AUTO_START_ROUTE, { batchId: b.id, at: next, busyRetries: 5, busySince: since }, expect.objectContaining({ delaySec: 900 }));
   });
 
   it("any other refusal ends this countdown and leaves the Start button (the draft stays)", async () => {
@@ -104,6 +121,38 @@ describe("the auto-start task", () => {
     const after = await read(b.id);
     expect(after.status).toBe("draft");
     expect(after.counts.autoStartAt).toBeNull();
+  });
+});
+
+describe("Wait against an auto-start in flight (P1, M1-F2-R6)", () => {
+  it("Wait after the task's own checks but before Start: the batch is not started or failed, and the task is a no-op", async () => {
+    // A draft with no photos: without the guard, Start would go on and mark it failed (no_photos) after Wait.
+    const b = await draft({ autoStart: true });
+    const at = (await armAutoStart(db, vi.fn(async () => "t"), b.id, 10, NOW))!;
+    const start = async (...args: Parameters<typeof startDraftBatch>) => { expect(await holdAutoStart(db, b.id)).toBe(true); return startDraftBatch(...args); };
+    expect(await runAutoStart(db, deps(), { batchId: b.id, at }, start)).toMatch(/^noop: Auto-start was turned off with Wait/);
+    const after = await read(b.id);
+    expect(after).toMatchObject({ status: "draft", startedAt: null });
+    expect(after.options.autoStart).toBe(false);
+  });
+
+  it("a manual Start (no countdown) still starts a held draft", async () => {
+    const b = await draft({ autoStart: true });
+    await holdAutoStart(db, b.id);
+    // It goes past the auto-start guard to the next rule (no photos here).
+    await expect(startDraftBatch(db, deps(), b.id, new Date(Date.now() + 60_000).toISOString())).rejects.toMatchObject({ kind: "no_photos" });
+  });
+});
+
+describe("arming when the queue is down (P2)", () => {
+  it("clears the countdown when the task cannot be queued, so the page shows Start, not a countdown stuck at 1 s", async () => {
+    const b = await draft({ autoStart: true });
+    const write = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      await expect(armAutoStart(db, vi.fn(async () => { throw new Error("queue down"); }), b.id, 10, NOW)).rejects.toThrow("queue down");
+    } finally { write.mockRestore(); }
+    expect((await read(b.id)).counts.autoStartAt).toBeNull();
+    expect((await read(b.id)).options.autoStart).toBe(true);
   });
 });
 
