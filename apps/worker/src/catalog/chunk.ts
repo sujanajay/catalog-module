@@ -15,6 +15,7 @@ import { eachLimit, positiveIntEnv, serialLock } from "@catalog/core/concurrency
 import { EnlargementNotReadyError, isCpuUpscalerId } from "@catalog/core/catalog/upscale";
 import { recordCostEvents, type CostEventInput } from "@catalog/core/cost-events";
 import { matteCallUsd, upscaleCallUsd } from "@catalog/core/catalog/cost";
+import type { VendorCall } from "@catalog/core/catalog/matte-routing";
 import type { CostOutcome } from "@catalog/core/db/schema";
 import { checkCatalogCaps } from "@catalog/core/catalog/qa/caps";
 import { shadowSynthesisAllowed } from "@catalog/core/catalog/qa/policy";
@@ -388,10 +389,19 @@ export async function handleChunkTask(rawDeps: CatalogDeps, body: Record<string,
               return;
             }
             await underClaim(async()=>{});
-            let matte = await deps.matteFor(p,deps.matting,productPolicy.matteModel,{},trace); mattingMs += matte.ms;
-            // Ledger: the photo's n-th cut-out call in this delivery (1 first, 2 the retry, then the guard ladder).
+            // M3-S5: the first cut-out goes through the image.matte routes (GPU, then the overflow vendor when an admin
+            // switched it on, then the CPU service); without a route table, the policy's model as before. Every vendor
+            // call is written to the ledger at once (its own row, engine and component = the vendor), outside the claim, so
+            // a paid call is recorded even when this delivery later fails or loses its claim (M3-F2-R4, M6-F1).
+            const router = deps.routes ? await deps.routes():undefined;
+            const record = async (call:VendorCall) => recordCostEvents(deps.db,[{batchId:batch.id,brandSlug:batch.brandSlug,isTest:batch.isTest,chunkId:chunk!.id,productId,sourceImageId:source.id,stage:"matte",kind:"matte_call",engine:call.engine,ms:call.ms,usd:call.usd,estimated:call.estimated,outcome:call.outcome,at:deps.now()}],deps.log);
+            const first = router ? await deps.matteFor(p,deps.matting,productPolicy.matteModel,{},trace,{router,preferred:[productPolicy.matteModel,productPolicy.matteModelSecond],overflow:deps.overflow,record,vendor:{fetch:deps.fetch},log:deps.log})
+              : await deps.matteFor(p,deps.matting,productPolicy.matteModel,{},trace);
+            let matte:Matte = first; mattingMs += matte.ms;
+            // Ledger: the photo's n-th cut-out call in this delivery (1 first, 2 the retry, then the guard ladder). A vendor
+            // cut-out is already recorded above.
             let matteCalls = 1;
-            note(matteRow(productId,source.id,matte,matteCalls,matte.source === "floodfill" ? "fallback":"ok"));
+            if (!first.route?.overflow) note(matteRow(productId,source.id,matte,matteCalls,matte.source === "floodfill" ? "fallback":"ok"));
             // 07 auto-resolve: the cut-out service was down. Retry once it responds, within this delivery's time budget, before holding.
             let retry: AutoAction | null = null;
             if (matte.source === "floodfill") {
