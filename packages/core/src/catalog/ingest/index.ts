@@ -59,6 +59,7 @@ import { buildOverwritePreview, matchProducts } from "./overwrite-preview";
 import { linkStatuses, matchProductList, missingIdentifier, productListDetected, readProductList, sizeBases, type ProductListRow } from "./product-list";
 import type { Adapter, CollectInput, Detected, GroupingResult, IngestDeps, OverwritePreview, Preview, SourceItem } from "./types";
 import { fetchSourceUrl, urlListAdapter } from "./url-list";
+import { armAutoStart } from "../auto-start";
 import { columnLetter } from "./detect-step";
 import type { InputRoot, StoredRoot } from "./roots";
 import { collectRejectReason, openZipReader, tooLargeMessage, zipAdapter, ZIP_ENTRY_MAX_BYTES } from "./zip";
@@ -1433,6 +1434,11 @@ async function placeBatch(db: Db, deps: PlaceDeps, batchId: string, token: strin
     return { progress: { done: 0, total: 0, phase: "done" }, outcome: "failed: no photos" };
   }
   if (!(await lease.close({ ...state.counts, phase: state.waitingForColumn ? "needs_input" : "ready", placed: total }, "draft"))) return lease.stopped();
+  // M1-F2-R6: a batch made with autoStart starts by itself after its countdown (a sheet still waiting for its column
+  // does not). The batch is collected either way, so a failure to arm only leaves its Start button.
+  if (!state.waitingForColumn) {
+    await armAutoStart(db, deps.enqueue, batchId).catch((err: unknown) => log("WARNING", "auto-start not armed", { batchId, error: err instanceof Error ? err.message : String(err) }));
+  }
   return {
     progress: { done: versions.length, total: versions.length, phase: "done" },
     outcome: `preview ready: ${state.preview.products.length} products, ${versions.length} photos`,

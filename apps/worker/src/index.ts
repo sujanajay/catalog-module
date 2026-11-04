@@ -11,6 +11,7 @@ import { handleEnlargeTask } from "./catalog/enlarge";
 import { upscaleConfigFromEnv } from "@catalog/core/catalog/upscale";
 import { handlePublishTask } from "./catalog/publish";
 import { handleFinalizeTask } from "./catalog/finalize";
+import { handleAutoStartTask } from "./catalog/auto-start";
 import { draftExpiryDaysFromEnv, handleSweep } from "./catalog/sweep";
 import { handleSyncMaster } from "./catalog/sync-master";
 import { log } from "@catalog/core/log";
@@ -64,6 +65,7 @@ const routes: ServerDeps["routes"] = {
   "/tasks/catalog/enlarge": withDeliveryCost(costed, "upscale", (body, opts) => handleEnlargeTask(workerCatalogDeps(getDb()), body, opts)),
   "/tasks/catalog/publish": (body) => handlePublishTask(workerCatalogDeps(getDb()), body),
   "/tasks/catalog/finalize": withDeliveryCost(costed, "finalize", (body) => handleFinalizeTask(workerCatalogDeps(getDb()), body)),
+  "/tasks/catalog/auto-start": withDeliveryCost(costed, "system", (body) => handleAutoStartTask(workerCatalogDeps(getDb()), body)),
 };
 
 const server = createServer({ auth, version: process.env.K_REVISION || "dev", routes, draining: isDraining });

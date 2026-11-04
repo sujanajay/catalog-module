@@ -9,6 +9,9 @@ import { TEST_BRAND } from "@catalog/core/catalog/brands";
 import { notRefreshedChannels } from "@catalog/core/catalog/pipeline/report";
 import { badRequest, HttpError } from "../errors";
 import { batchSource } from "./copy";
+import { defaultChannels } from "@catalog/core/catalog/intake-defaults";
+import { holdAutoStart } from "@catalog/core/catalog/auto-start";
+import { BATCH_STARTED, notDraftText } from "@catalog/core/catalog/pipeline/start";
 
 /** The 404 sentence for a batch id that does not exist (API routes and `/catalog/new?batch=`). */
 export const BATCH_NOT_FOUND = "This batch does not exist. Open the batch list and choose another.";
@@ -17,18 +20,8 @@ export async function queryBatch(id: string): Promise<CatalogBatch> {
   if (!batch) throw new HttpError(404, BATCH_NOT_FOUND);
   return batch;
 }
-// The refusals of a change that needs a draft, by status (spec 14c F8; parent copy register "assertDraft").
-export const BATCH_STARTED = "This batch has already started. Make a new batch to add more photos.";
-export const BATCH_COULD_NOT_START = "This batch could not start. Press Fix and continue to change its photos or links.";
-export const BATCH_STILL_COLLECTING = "This batch is still collecting. Wait for it to finish, or press Try again if nothing has moved for 10 minutes.";
-export const BATCH_CANCELLED = "This batch was cancelled. Make a new batch.";
-/** The sentence for a batch that is not a draft: what happened to it and what to do now. */
-export function notDraftText(batch: { status: BatchStatus; startedAt: Date | string | null }): string {
-  if (failedBeforeStart(batch)) return BATCH_COULD_NOT_START;
-  if (batch.status === "ingesting") return BATCH_STILL_COLLECTING;
-  if (batch.status === "cancelled") return BATCH_CANCELLED;
-  return BATCH_STARTED;
-}
+// The refusals of a change that needs a draft live with the shared Start (core pipeline/start.ts).
+export { BATCH_CANCELLED, BATCH_COULD_NOT_START, BATCH_STARTED, BATCH_STILL_COLLECTING, notDraftText } from "@catalog/core/catalog/pipeline/start";
 export async function assertDraft(id: string): Promise<CatalogBatch> {
   const batch = await queryBatch(id);
   if (batch.status !== "draft") throw new HttpError(409, notDraftText(batch));
@@ -74,6 +67,11 @@ export async function reopenBatch(id: string): Promise<CatalogBatch> {
  * so nothing is released; the worker's own guards stop a collection in flight. Cancelling twice answers
  * the same; a started batch is refused.
  */
+/** M1-F2-R6 "Wait": the draft does not start by itself; its one Start button starts it. 409 once it is no draft. */
+export async function holdStart(id: string): Promise<{ id: string; status: "draft" }> {
+  if (!(await holdAutoStart(db(), id))) throw new HttpError(409, notDraftText(await queryBatch(id)));
+  return { id, status: "draft" };
+}
 export async function cancelBatch(id: string): Promise<{ id: string; status: "cancelled" }> {
   const [cancelled] = await db().update(catalogBatches).set({ status: "cancelled", updatedAt: new Date() })
     .where(and(eq(catalogBatches.id, id), isNull(catalogBatches.startedAt), inArray(catalogBatches.status, ["draft", "ingesting", "failed"])))
@@ -163,8 +161,15 @@ export async function createBatch(value: unknown, actor: string) {
   const [brand] = await db().select().from(brandMaster).where(eq(brandMaster.slug, input.brandSlug));
   if (!brand) throw badRequest("Choose a brand from the list. Email sujan@opptra.com if it is missing.");
   const name = (input.name as string | undefined)?.trim() || `${brand.name} photos`;
+  if (input.autoStart !== undefined && typeof input.autoStart !== "boolean") throw badRequest("Choose whether the batch starts by itself and try again.");
+  if (input.channels !== undefined && (!Array.isArray(input.channels) || !input.channels.every((c) => CHANNEL_IDS.includes(c as ChannelId)))) throw badRequest("Choose marketplaces from the list and try again.");
+  // M1-F2-R6 and R9: only a batch asked for with autoStart starts by itself (the one-page New batch asks); API and
+  // load-driver batches keep their explicit Start. M1-F2-R4: such a batch gets the brand's default channels unless
+  // channels are given.
+  const autoStart = input.autoStart === true;
+  const channels = input.channels !== undefined ? [...new Set(input.channels as ChannelId[])] : autoStart ? await defaultChannels(db(), brand.slug) : [];
   // New batches group each input root on its own (M1-F1-R2); step 2 can still force one mode.
-  const [batch] = await db().insert(catalogBatches).values({ brandSlug: brand.slug, brandName: brand.name, name, productType: input.productType as ProductType, createdBy: actor, isTest: isTestBatch(brand.slug, name), channels: [], options: { ...DEFAULT_BATCH_OPTIONS, perRoot: true } }).returning({ id: catalogBatches.id });
+  const [batch] = await db().insert(catalogBatches).values({ brandSlug: brand.slug, brandName: brand.name, name, productType: input.productType as ProductType, createdBy: actor, isTest: isTestBatch(brand.slug, name), channels, options: { ...DEFAULT_BATCH_OPTIONS, perRoot: true, ...(autoStart ? { autoStart: true } : {}) } }).returning({ id: catalogBatches.id });
   return batch!;
 }
 export function parseOptions(value: unknown, existing: BatchOptions): BatchOptions {

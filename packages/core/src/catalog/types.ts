@@ -100,6 +100,11 @@ export interface BatchOptions {
    * mixes CPU and GPU images.
    */
   enlargement?: { model: string; x4Model?: string; minScale?: number; target?: "gpu" } | null;
+  /**
+   * M1-F2-R6 (M1-S2): the batch starts by itself after the countdown once collection and grouping end. Set by the
+   * one-page New batch; absent (false) for API and load-driver batches unless asked (R9). "Wait" sets it false.
+   */
+  autoStart?: boolean;
 }
 
 export interface BatchCounts {
@@ -161,6 +166,8 @@ export interface BatchCounts {
    * `failReason` here, step 1 shows it above the inputs, and the next hand-off to collecting clears it.
    */
   fixReason?: string | null;
+  /** M1-F2-R6: when the armed countdown ends and the batch starts (ISO time); null or absent when none runs. */
+  autoStartAt?: string | null;
   /**
    * The run id of the newest collection hand-off (ingestBatch). An ingest task of an earlier run that runs out of
    * attempts does not fail the batch (failStoppedIngest). Optional (no migration): absent, any run counts.

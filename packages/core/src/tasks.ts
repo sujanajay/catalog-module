@@ -41,6 +41,7 @@ export const TASK_ROUTES = [
   "/tasks/catalog/publish",
   "/tasks/catalog/finalize",
   "/tasks/catalog/enlarge",
+  "/tasks/catalog/auto-start",
 ] as const;
 
 export type TaskRoute = (typeof TASK_ROUTES)[number];
