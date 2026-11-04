@@ -7,7 +7,9 @@ import AutoRefresh from "@/components/AutoRefresh";
 import LocalTime from "@/components/LocalTime";
 import { db } from "@/lib/db";
 import { requireRole } from "@/lib/user";
-import { activeBatches, batchCostDetail, costOverview, gpuCandidateRevision, healthSummary, lifetimeBrandCost, recentBatches, recentFailures, COST_TTL_MS } from "@/lib/catalog/ops";
+import { withoutModelNames } from "@/lib/catalog/redact";
+import { activeBatches, batchCostDetail, costOverview, gpuCandidateRevision, healthSummary, lifetimeBrandCost, recentBatches, recentFailures, reliability, COST_TTL_MS } from "@/lib/catalog/ops";
+import { durationText, incidentDurationText, INCIDENT_KIND_WORDS, outcomeText, RELIABILITY_HELP, RELIABILITY_TITLE, successRateLine } from "@/lib/catalog/ops-copy";
 import { REPORT_UNAVAILABLE, AGENCY_REFERENCE, HEALTH_TITLE, healthLines, chunkGaveUpText, chunkProgressText, chunkTotal, COST_STAGE_WORDS, hintText, logsUrl, money, OPS_HREF, OPS_REFRESH_MS, statusWord } from "@/lib/catalog/ops-copy";
 
 export const dynamic = "force-dynamic";
@@ -55,6 +57,8 @@ export default async function OpsPage({ searchParams }: { searchParams: Promise<
   const active = await activeBatches(conn, now);
   const health = healthLines(await healthSummary(conn), await gpuCandidateRevision(now));
   const failures = await recentFailures(conn, now);
+  const reliabilityRead = await reliability(conn, now);
+  const rel = reliabilityRead.ok ? reliabilityRead.value : null;
   const overviewRead = await costOverview(conn, now);
   const overview = overviewRead.ok ? overviewRead.value : null;
   const lifetimeRead = lifetime ? await lifetimeBrandCost(conn, now) : null;
@@ -69,7 +73,7 @@ export default async function OpsPage({ searchParams }: { searchParams: Promise<
         <div>
           <Link href="/catalog">← All batches</Link>
           <h1>Ops</h1>
-          <p className="lead">Batches running now, failures in the last 24 hours, and what batches and brands cost. Read only.{rate === null ? ` ${RUPEES_NOT_CONFIGURED}.` : ""}</p>
+          <p className="lead">Batches running now, failures in the last 24 hours, how reliably batches finish, and what batches and brands cost. Read only.{rate === null ? ` ${RUPEES_NOT_CONFIGURED}.` : ""}</p>
         </div>
       </div>
       <AutoRefresh active={!lifetime} ms={OPS_REFRESH_MS} />
@@ -112,6 +116,49 @@ export default async function OpsPage({ searchParams }: { searchParams: Promise<
             <li key={`${c.batchId}-${c.index}`}><Link href={`/catalog/${c.batchId}`}>{c.batchName}</Link>, <LocalTime at={c.at} />: {chunkGaveUpText(c)} <a href={logsUrl(c.batchId)} target="_blank" rel="noreferrer">Open logs</a></li>
           ))}</ul>
         ) : null}
+      </section>
+
+      <section>
+        <h2>{RELIABILITY_TITLE}</h2>
+        <p className="help">{RELIABILITY_HELP} Read at most every {costMinutes} minutes.</p>
+        {!rel ? <p>{REPORT_UNAVAILABLE}</p> : (
+          <>
+            <ul>{rel.rates.map(r => <li key={r.days}>{successRateLine(r, rel.target)}</li>)}</ul>
+            <p>Batches a release overlapped in the last 30 days: {rel.deploys.batches}{rel.deploys.batches ? `, ${rel.deploys.successes} succeeded` : ""}.</p>
+            <h3>Recent batches</h3>
+            {rel.batches.length ? (
+              <div className="tw"><table>
+                <thead><tr>{["Batch", "Brand", "Ended", "Succeeded", "Touches", "Incidents", "Why"].map(c => <th key={c}>{c}</th>)}</tr></thead>
+                <tbody>{rel.batches.map(b => (
+                  <tr key={b.batchId}><td><Link href={`/catalog/${b.batchId}`}>{b.name}</Link></td><td>{b.brandName}</td><td><LocalTime at={b.endedAt} /></td><td>{b.success ? "Yes" : "No"}</td><td>{b.touches}</td><td>{b.incidents}</td><td>{outcomeText(b)}</td></tr>
+                ))}</tbody>
+              </table></div>
+            ) : <p>No batch finished in the last 30 days.</p>}
+            <h3>Incidents, last 30 days</h3>
+            {rel.byKind.length ? (
+              <div className="tw"><table>
+                <thead><tr>{["Kind", "Incidents", "Repeats", "Still open"].map(c => <th key={c}>{c}</th>)}</tr></thead>
+                <tbody>{rel.byKind.map(k => (
+                  <tr key={k.kind}><td>{INCIDENT_KIND_WORDS[k.kind]}</td><td>{k.incidents}</td><td>{k.repeats}</td><td>{k.open}</td></tr>
+                ))}</tbody>
+              </table></div>
+            ) : <p>No incidents in the last 30 days.</p>}
+            {rel.recent.length ? (
+              <ul>{rel.recent.map(i => (
+                <li key={i.id}>{INCIDENT_KIND_WORDS[i.kind]}{i.batchId ? <>, <Link href={`/catalog/${i.batchId}`}>{i.batchName ?? "a batch"}</Link></> : null}, <LocalTime at={i.startedAt} />: {withoutModelNames(i.cause)} ({incidentDurationText(i)}{i.repeat ? ", a repeat" : ""})</li>
+              ))}</ul>
+            ) : null}
+            <h3>Slowest batches, last 30 days</h3>
+            {rel.slowest.length ? (
+              <div className="tw"><table>
+                <thead><tr>{["Batch", "Brand", "Start to links ready", "Succeeded"].map(c => <th key={c}>{c}</th>)}</tr></thead>
+                <tbody>{rel.slowest.map(b => (
+                  <tr key={b.batchId}><td><Link href={`/catalog/${b.batchId}`}>{b.name}</Link></td><td>{b.brandName}</td><td>{durationText(b.durationMs)}</td><td>{b.success ? "Yes" : "No"}</td></tr>
+                ))}</tbody>
+              </table></div>
+            ) : <p>No batch finished in the last 30 days.</p>}
+          </>
+        )}
       </section>
 
       <section>

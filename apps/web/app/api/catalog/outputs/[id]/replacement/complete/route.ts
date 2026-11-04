@@ -1,3 +1,4 @@
+import { countTouch } from "../../../../../../../lib/catalog/touches";
 import { z } from "zod";
 import { finishReplacement } from "../../../../../../../lib/catalog/decisions";
 import { catalogRoute, outputId, type OutputContext } from "../../../../../../../lib/catalog/api";
@@ -9,6 +10,8 @@ const Body = z.object({ uploadId: z.string().uuid() });
 export function POST(req: Request, context: OutputContext) {
   return catalogRoute(req, "operator", async (user) => {
     const id = await outputId(context);
-    return finishReplacement(id, Body.parse(await readJson(req)).uploadId, user.email);
+    const result = await finishReplacement(id, Body.parse(await readJson(req)).uploadId, user.email);
+    await countTouch("replace_photo", { outputId: id });
+    return result;
   });
 }
