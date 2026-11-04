@@ -5,7 +5,9 @@ import { borderBand } from "./shadow";
 import type { ChannelId } from "./types";
 
 // Flat quality-70 and high-contrast quality-90 JPEG round trips are tested against this bound.
-// Keep below 31 so white product pixels on the prescribed grey still count as foreground.
+// It was tuned on the 224 grey. On the 240 grey (M3-S1) a white or near-white product pixel is within it and reads as
+// background, so the pixel checks below are blind to it (M3 D18). The pass-through rule uses its own tight bound
+// (render.ts PASSTHROUGH_BORDER_TOLERANCE), so this blindness never decides which background ships.
 export const BG_TOLERANCE = 24;
 /**
  * The Styli guide (styli_anchor) is judged on the product (anchorBounds): where the render's foreground mask (the placed

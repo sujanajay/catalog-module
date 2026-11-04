@@ -4,7 +4,7 @@ import { backgroundOf, channel, CUT_BAND_NOTE_START, DETAIL_SHOT_BBOX_FRACTION, 
 import type { ChannelRules } from "./channel-rules";
 import { ENLARGEMENT_FAILED_SENTENCE, type ChannelId, type OutputFlag, type ProductType } from "./types";
 import { ALPHA_BBOX_THRESHOLD, analyseBackground, borderPixels, shadowLayer } from "./shadow";
-import { anchorBounds, BG_TOLERANCE, checkOutput, type Measured } from "./compliance";
+import { anchorBounds, checkOutput, type Measured } from "./compliance";
 import { enlargeCutout } from "./enhance";
 import { plainFailures } from "./qa/reasons";
 import { enlargeRegion, enlargementStateOf, EnlargementNotReadyError, shouldUpscale, upscaledRgb, upscaleFactorFor, upscalerKey, upscalersFor, type EnlargeRegion, type UpscaleFactor, type Upscaler } from "./upscale";
@@ -112,6 +112,12 @@ export type TrimRoom = Record<Side, number>;
 export interface ShotGeometry { box: BBox; source: Size; cut: CutEdges;
   /** Per side, how deep (source px from the box edge) a cut-fill trim may go before it reaches a logo, text or a buckle (trimRoom); absent without source pixels or a cut on both ends of an axis. */ trimRoom?: TrimRoom;
   /** Cut sides a trim may never touch by rule (trimRules), whatever the source shows: their `trimRoom` is 0. */ trimProtected?: Side[] }
+/**
+ * How far (per RGB channel) a ready-made JPEG's border may be from the slot's background colour for the photo to be
+ * passed through as it is. Only JPEG noise: BG_TOLERANCE (24) is wider than the step between the 240 grey and white, so
+ * with it a white photo shipped white on a grey slot and a 240 photo shipped grey on Amazon image 1 (M3-S1, R228).
+ */
+export const PASSTHROUGH_BORDER_TOLERANCE = 6;
 /** The model name of the pass-through and whole-photo mattes (matte-guard.ts). */
 export const PASSTHROUGH_MODEL = "passthrough";
 /**
@@ -645,7 +651,7 @@ export async function renderSource(input: RenderInput): Promise<RenderOutput> {
     ? `${CUT_BAND_NOTE_START}${floating.join(" and ")}, but on ${spec.label} filling ${floating.length > 1 ? "those edges" : "that edge"} would cut through a logo or detail near the ${blocked.join(" and ")} edge, so a band shows there to keep it whole.`
     : `${CUT_BAND_NOTE_START}${floating.join(" and ")}, but on ${spec.label} the product cannot reach that edge of the image without trimming more of it, so a band shows there.`);
   const rgbColor = hexColor(color);
-  const passthrough = p.sourceMime === "image/jpeg" && !p.alphaSource && !anyCut(cut) && (input.fitScale ?? 1) >= 1 && p.width === plan.w && p.height === plan.h && box.x >= plan.safeBox.x && box.y >= plan.safeBox.y && box.x + box.w <= plan.safeBox.x + plan.safeBox.w && box.y + box.h <= plan.safeBox.y + plan.safeBox.h && borderPixels(p.width, p.height).every(i => rgbColor.every((v, c) => Math.abs(p.rgb[i * 3 + c]! - v) <= BG_TOLERANCE));
+  const passthrough = p.sourceMime === "image/jpeg" && !p.alphaSource && !anyCut(cut) && (input.fitScale ?? 1) >= 1 && p.width === plan.w && p.height === plan.h && box.x >= plan.safeBox.x && box.y >= plan.safeBox.y && box.x + box.w <= plan.safeBox.x + plan.safeBox.w && box.y + box.h <= plan.safeBox.y + plan.safeBox.h && borderPixels(p.width, p.height).every(i => rgbColor.every((v, c) => Math.abs(p.rgb[i * 3 + c]! - v) <= PASSTHROUGH_BORDER_TOLERANCE));
   let image: Buffer, shadowKind: ShadowKind = "none";
   const foregroundMask = Buffer.alloc(plan.w * plan.h);
   if (passthrough) {

@@ -152,6 +152,24 @@ describe("render and encoded compliance", () => {
     expect(output.flags).toContain("passthrough"); expect(output.status).toBe("ok"); expect(output.plan.productBox).toEqual({ x: 200, y: 200, w: 600, h: 600 });
     const raw = await sharp(output.jpeg!).raw().toBuffer(); expect(Math.abs(raw[(500 * 1000 + 500) * 3]! - source.prepared.rgb[(500 * 1000 + 500) * 3]!)).toBeLessThanOrEqual(BG_TOLERANCE);
   });
+  it("passes a ready-made JPEG through only onto its own slot colour: white is re-composed onto a grey slot, 240 grey onto Amazon image 1 (M3-S1)", async () => {
+    const ready = async (background: number) => {
+      const source = fixture(1000, 1000, { x: 350, y: 200, w: 300, h: 600 });
+      for (let i = 0; i < source.matte.alpha.length; i++) if (!source.matte.alpha[i]) source.prepared.rgb.fill(background, i * 3, i * 3 + 3);
+      const jpeg = await sharp(source.prepared.rgb, { raw: { width: 1000, height: 1000, channels: 3 } }).jpeg({ quality: 95, chromaSubsampling: "4:4:4" }).toBuffer();
+      return { ...source, prepared: await prepare(jpeg, "ready.jpg", async b => b) };
+    };
+    const corner = async (jpeg: Buffer) => [...await sharp(jpeg).extract({ left: 2, top: 2, width: 1, height: 1 }).raw().toBuffer()];
+    const white = await ready(255), grey = await ready(240);
+    expect((await renderSource({ ...white, channel: "amazon", shotNumber: 1, productType: "apparel_flat" })).flags).toContain("passthrough");
+    expect((await renderSource({ ...grey, channel: "amazon", shotNumber: 2, productType: "apparel_flat" })).flags).toContain("passthrough");
+    const onGrey = await renderSource({ ...white, channel: "amazon", shotNumber: 2, productType: "apparel_flat" });
+    expect(onGrey.flags).not.toContain("passthrough");
+    for (const v of await corner(onGrey.jpeg!)) expect(Math.abs(v - 240)).toBeLessThanOrEqual(1);
+    const onWhite = await renderSource({ ...grey, channel: "amazon", shotNumber: 1, productType: "apparel_flat" });
+    expect(onWhite.flags).not.toContain("passthrough");
+    expect(await corner(onWhite.jpeg!)).toEqual([255, 255, 255]);
+  });
   // M3 D18: on the 240 grey a white product is inside BG_TOLERANCE and invisible to these pixel checks; a darker product is used.
   it("detects a shifted product in a required margin and a wrong Styli anchor", async () => {
     const plan = planCanvas(CHANNELS.styli, { x: 700, y: 200, w: 600, h: 1800 }, { w: 2000, h: 2400 }, {}), box = plan.productBox!;

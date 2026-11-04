@@ -1285,8 +1285,10 @@ describe("M3-S1 acceptance: renders read the M5 channel registry (M3 4.3.9 tests
   // The real render (M3-F3-R1) on a product taller than wide, so every canvas shows background at its corners.
   const W=800,H=800;
   const shot=()=>{const rgb=Buffer.alloc(W*H*3,255),alpha=Buffer.alloc(W*H);for(let y=150;y<650;y++)for(let x=250;x<550;x++){const i=y*W+x;rgb[i*3]=40;rgb[i*3+1]=60;rgb[i*3+2]=150;alpha[i]=255;}return {rgb,alpha};};
-  function m3World() {
-    const w=world(),{rgb,alpha}=shot(),logs:{message:string;fields?:Record<string,unknown>}[]=[];
+  /** A ready-made marketplace JPEG: exactly Amazon's 1000 x 1000 canvas, a product taller than wide inside the safe box (so every canvas shows background at its corners), on a flat background. */
+  const readyMade=(background:number)=>{const S=1000,rgb=Buffer.alloc(S*S*3,background),alpha=Buffer.alloc(S*S);for(let y=200;y<800;y++)for(let x=350;x<650;x++){const i=y*S+x;rgb[i*3]=160;rgb[i*3+1]=30;rgb[i*3+2]=50;alpha[i]=255;}return {rgb,alpha,W:S,H:S};};
+  function m3World(source?:ReturnType<typeof readyMade>) {
+    const w=world(),{rgb,alpha,W,H}=source ?? {...shot(),W:800,H:800},logs:{message:string;fields?:Record<string,unknown>}[]=[];
     w.deps.channelRules=channelRulesLoader(db);
     w.deps.renderAllChannels=vi.fn(renderAllChannels);
     w.deps.log=(message,fields)=>{logs.push({message,...(fields ? {fields}:{})});};
@@ -1341,6 +1343,19 @@ describe("M3-S1 acceptance: renders read the M5 channel registry (M3 4.3.9 tests
       const rgb=await cornerOf(w,o);
       if(o.channel==="amazon" && o.n===1) expect(rgb).toEqual([255,255,255]);
       else for(const v of rgb) expect(v).toBeGreaterThanOrEqual(239);
+    }
+  },240_000);
+
+  it.each([[255,"a pure-white ready-made JPEG"],[240,"a 240-grey ready-made JPEG"]])("test 2 also holds for %s (%s): a source already at canvas size is passed through only onto its own slot colour",async(background)=>{
+    const w=m3World(readyMade(background)),s=await seed(w,`m3s1-ready-${background}`,{shots:["r1","r2"],channels:["amazon","noon"]});
+    expect((await run(w,s)).outcome).toBe("published");
+    const outputs=await db.select().from(catalogOutputs).where(eq(catalogOutputs.batchId,s.batch.id));
+    expect(outputs).toHaveLength(4);
+    for(const o of outputs) {
+      expect(o.compliance).toMatchObject({ok:true});
+      const rgb=await cornerOf(w,o);
+      if(o.channel==="amazon" && o.n===1) expect(rgb).toEqual([255,255,255]);
+      else for(const v of rgb) expect(Math.abs(v-240)).toBeLessThanOrEqual(1);
     }
   },240_000);
 
