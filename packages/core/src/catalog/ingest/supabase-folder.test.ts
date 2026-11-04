@@ -146,6 +146,7 @@ describe("Supabase folder links (M1-F1-R4)", () => {
       ["POST", "/storage/v1/object/move"], ["POST", "/storage/v1/object/copy"], ["POST", "/storage/v1/object/sign/softlines/anta"],
       ["POST", "/storage/v1/bucket"], ["PUT", "/storage/v1/bucket/softlines"], ["DELETE", "/storage/v1/bucket/softlines"],
       ["POST", "/storage/v1/object/list/softlines/../x"], ["GET", "/storage/v1/object/list/softlines"],
+      ["POST", "/storage/v1/object/list/.."], ["POST", "/storage/v1/object/list/."], ["GET", "/storage/v1/bucket/%2E%2e"],
     ]) expect(isReadCall(method!, path!), `${method} ${path}`).toBe(false);
     // A bucket name cannot smuggle another path in: it is encoded into one segment.
     await client.list("softlines/../../bucket", "", 0, 1);

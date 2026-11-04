@@ -19,6 +19,8 @@ export CLOUDSDK_CORE_PROJECT=$PROJECT
 # launcher. No argument below starts with "/", so MSYS path conversion is harmless.
 
 cd "$(dirname "$0")/.."
+# shellcheck source=lib/secret-manifest.sh
+source infra/lib/secret-manifest.sh
 
 # --- Builder constants -------------------------------------------------------
 SCHEDULER_TZ=Asia/Kolkata
@@ -239,8 +241,16 @@ sa_binding() { # target-sa member role [no-fallback] ; falls back to project lev
   fi
 }
 
-secret_binding() { # secret member role ; falls back to project level if denied
+# secret_binding <secret> <member> <role>: one secret only, never project-wide (this project holds other apps' secrets).
+# Fails closed: a secret that does not exist (or cannot be read) is skipped with a warning, and a binding that cannot be
+# added is left to a person (needs_human, exit 2 at the end). It never falls back to a project-level grant, which would
+# give the member every secret in the project (review of 2026-11-04).
+secret_binding() {
   local secret="$1" member="$2" role="$3" policy
+  if ! gcloud secrets describe "$secret" --project="$PROJECT" --format='value(name)' >/dev/null 2>&1; then
+    warn "secret $secret not found; no binding for $member (create the secret, then run bootstrap again)"
+    return 0
+  fi
   policy=$(gcv secrets get-iam-policy "$secret" --project="$PROJECT" \
     --flatten='bindings[].members' \
     --format='csv[no-heading](bindings.role,bindings.members)' 2>/dev/null || true)
@@ -256,8 +266,7 @@ secret_binding() { # secret member role ; falls back to project level if denied
   create "secret binding on $secret: $role -> $member"
   if ! retry gcloud secrets add-iam-policy-binding "$secret" --project="$PROJECT" \
       --member="$member" --role="$role" >/dev/null; then
-    warn "resource-level binding denied; falling back to project level for $role -> $member"
-    project_binding "$member" "$role"
+    needs_human "grant $role on secret $secret to $member by hand (gcloud secrets add-iam-policy-binding $secret --member=$member --role=$role); bootstrap never grants it project-wide"
   fi
 }
 
@@ -417,10 +426,14 @@ bucket_binding "$ASSETS_BUCKET" "serviceAccount:$WORKER" roles/storage.objectAdm
 for SA in "$WEB" "$WORKER"; do
   project_binding "serviceAccount:$SA" roles/cloudsql.client
   project_binding "serviceAccount:$SA" roles/cloudtasks.enqueuer
-  # Secret access per secret, not project-wide: this project holds other apps' secrets.
-  secret_binding "$DB_SECRET" "serviceAccount:$SA" roles/secretmanager.secretAccessor
 done
-secret_binding "$OPENROUTER_SECRET" "serviceAccount:$WORKER" roles/secretmanager.secretAccessor
+# Secret access per secret, not project-wide (this project holds other apps' secrets): one binding per line of
+# infra/secret-access.manifest, the same list infra/deploy.sh checks its mounts against. A secret that does not exist
+# yet (an optional one, such as the Supabase pair before the folder paste) is skipped with a warning.
+SECRET_PAIRS=$(secret_manifest_pairs) || die "infra/secret-access.manifest is malformed"
+while read -r SECRET_SA SECRET_NAME _; do
+  secret_binding "$SECRET_NAME" "serviceAccount:$SECRET_SA" roles/secretmanager.secretAccessor
+done <<<"$SECRET_PAIRS"
 # Spec 18 H2: project level, so this one grant also lets the worker (and the probe job catalog-check-matting, which
 # runs as catalog-worker@) invoke catalog-upscale, including its candidate tag URLs, without a resource-level binding
 # on a service that does not exist yet when bootstrap runs (resource-level IAM on Cloud Run may be denied, AGENTS.md;
