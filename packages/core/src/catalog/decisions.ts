@@ -169,28 +169,49 @@ export async function retryEnlargement(db: Db, enqueue: typeof enqueueTask, inpu
     const outputs = (await tx.select().from(catalogOutputs).where(and(eq(catalogOutputs.batchId, target.batchId), eq(catalogOutputs.sourceImageId, target.sourceImageId))).orderBy(catalogOutputs.id).for("update"))
       .filter(o => o.decision === null && o.flags.includes("enlargement_failed"));
     if (!outputs.length) throw new CatalogDecisionError(409, "Nothing to try again.");
-    // Lock order: the product row, its chunks by id, then the rows.
-    await lockProductChunks(tx as unknown as Db, target.batchId, target.productId);
-    const failed = await tx.select().from(catalogEnlargements).where(and(eq(catalogEnlargements.batchId, target.batchId), eq(catalogEnlargements.sourceImageId, target.sourceImageId), eq(catalogEnlargements.wanted, true), eq(catalogEnlargements.status, "failed"), ne(catalogEnlargements.route, "none"))).orderBy(asc(catalogEnlargements.id)).for("update");
-    if (!failed.length) throw new CatalogDecisionError(409, "Nothing to try again.");
-    const rows = await tx.update(catalogEnlargements).set({ status: "queued", attempts: 0, timeouts: 0, probeTimeouts: 0, retries: sql`${catalogEnlargements.retries} + 1`, sends: sql`${catalogEnlargements.sends} + 1`, claimedAt: null, claimToken: null, tilesDone: 0, error: null, errorKind: null, updatedAt: now })
-      .where(inArray(catalogEnlargements.id, failed.map(r => r.id))).returning();
-    // F59: Try again resets the photo's identity-change count.
-    await tx.update(catalogEnlargements).set({ identityReleases: 0 }).where(and(eq(catalogEnlargements.batchId, target.batchId), eq(catalogEnlargements.sourceImageId, target.sourceImageId)));
-    for (const o of outputs) {
-      await tx.update(catalogOutputs).set({ status: "pending", qaScores: null, compliance: { ok: true, failures: [], ...(o.compliance?.auto_actions ? { auto_actions: o.compliance.auto_actions } : {}) } as Output["compliance"], flags: o.flags.filter(f => f !== "enlargement_failed"), reason: null, error: null, stagingUri: null, bytes: null, updatedAt: now }).where(eq(catalogOutputs.id, o.id));
-    }
-    await tx.update(catalogProducts).set({ lockBatchId: target.batchId, updatedAt: now }).where(eq(catalogProducts.id, target.productId));
-    const [index] = await tx.select({ value: sql<number>`coalesce(max(${catalogChunks.index}), -1) + 1` }).from(catalogChunks).where(eq(catalogChunks.batchId, target.batchId));
-    const [chunk] = await tx.insert(catalogChunks).values({ batchId: target.batchId, index: Number(index!.value), stage: "render", productIds: [target.productId], sourceImageIds: [target.sourceImageId], status: "queued", attempt: 0, step: 0, stepKnown: true, taskName: ENLARGING_TASK, dispatchedAt: now, progressAt: now }).returning();
-    const retries = Math.max(...rows.map(r => r.retries));
-    await recordEvent(tx, { productId: target.productId, batchId: target.batchId, kind: "enlargement_retried", actor: input.actor, details: { n: target.n, retries, channels: [...new Set(outputs.map(o => o.channel))] } });
-    return { batchId: target.batchId, productId: target.productId, chunkId: chunk!.id, outputIds: outputs.map(o => o.id), rows, retries };
+    const reset = await resetPhotoEnlargement(tx, target, outputs, { now, actor: input.actor, dropFlags: ["enlargement_failed"] });
+    if (!reset) throw new CatalogDecisionError(409, "Nothing to try again.");
+    return { batchId: target.batchId, productId: target.productId, outputIds: outputs.map(o => o.id), ...reset };
   });
-  const [batch] = await db.select().from(catalogBatches).where(eq(catalogBatches.id, result.batchId));
-  const bulk = !!batch && isBulkBatch(batch);
-  await enqueueEnlargements(enqueue, result.rows, { log, chunkId: result.chunkId, ...(bulk ? { bulk: true } : {}) });
+  await sendEnlargements(db, enqueue, result, log);
   return { batchId: result.batchId, productId: result.productId, chunkId: result.chunkId, outputIds: result.outputIds, rows: result.rows.length, retries: result.retries };
+}
+
+/** The photo's reset rows and the one-photo render chunk parked on them (resetPhotoEnlargement). */
+export interface PhotoEnlargementReset { chunkId: string; rows: (typeof catalogEnlargements.$inferSelect)[]; retries: number }
+/**
+ * Spec 18 lifecycle 3.6, the reset behind "Try again" and the M1-S4 improvement task, inside the caller's transaction
+ * (the product row already locked): the photo's failed wanted rows a call can make are queued again (counters 0, the
+ * identity releases 0, `retries+1`), `outputs` go back to `pending` (judge scores cleared, the auto-action record kept,
+ * `dropFlags` and the reason dropped), the product is locked to the batch, a one-photo render chunk is parked on the
+ * rows and the event recorded. Null (nothing changed) when the photo has no such row. The caller sends the rows' tasks
+ * after the commit (sendEnlargements).
+ */
+export async function resetPhotoEnlargement(tx: Tx, target: Pick<Output, "batchId" | "productId" | "sourceImageId" | "n">, outputs: readonly Output[], opts: { now: Date; actor: string; dropFlags: readonly OutputFlag[]; details?: Record<string, unknown> }): Promise<PhotoEnlargementReset | null> {
+  const { now } = opts;
+  // Lock order: the product row, its chunks by id, then the rows.
+  await lockProductChunks(tx as unknown as Db, target.batchId, target.productId);
+  const failed = await tx.select().from(catalogEnlargements).where(and(eq(catalogEnlargements.batchId, target.batchId), eq(catalogEnlargements.sourceImageId, target.sourceImageId), eq(catalogEnlargements.wanted, true), eq(catalogEnlargements.status, "failed"), ne(catalogEnlargements.route, "none"))).orderBy(asc(catalogEnlargements.id)).for("update");
+  if (!failed.length) return null;
+  const rows = await tx.update(catalogEnlargements).set({ status: "queued", attempts: 0, timeouts: 0, probeTimeouts: 0, retries: sql`${catalogEnlargements.retries} + 1`, sends: sql`${catalogEnlargements.sends} + 1`, claimedAt: null, claimToken: null, tilesDone: 0, error: null, errorKind: null, updatedAt: now })
+    .where(inArray(catalogEnlargements.id, failed.map(r => r.id))).returning();
+  // F59: Try again resets the photo's identity-change count.
+  await tx.update(catalogEnlargements).set({ identityReleases: 0 }).where(and(eq(catalogEnlargements.batchId, target.batchId), eq(catalogEnlargements.sourceImageId, target.sourceImageId)));
+  for (const o of outputs) {
+    await tx.update(catalogOutputs).set({ status: "pending", qaScores: null, compliance: { ok: true, failures: [], ...(o.compliance?.auto_actions ? { auto_actions: o.compliance.auto_actions } : {}) } as Output["compliance"], flags: o.flags.filter(f => !opts.dropFlags.includes(f)), reason: null, error: null, stagingUri: null, bytes: null, updatedAt: now }).where(eq(catalogOutputs.id, o.id));
+  }
+  await tx.update(catalogProducts).set({ lockBatchId: target.batchId, updatedAt: now }).where(eq(catalogProducts.id, target.productId));
+  const [index] = await tx.select({ value: sql<number>`coalesce(max(${catalogChunks.index}), -1) + 1` }).from(catalogChunks).where(eq(catalogChunks.batchId, target.batchId));
+  const [chunk] = await tx.insert(catalogChunks).values({ batchId: target.batchId, index: Number(index!.value), stage: "render", productIds: [target.productId], sourceImageIds: [target.sourceImageId], status: "queued", attempt: 0, step: 0, stepKnown: true, taskName: ENLARGING_TASK, dispatchedAt: now, progressAt: now }).returning();
+  const retries = Math.max(...rows.map(r => r.retries));
+  await recordEvent(tx, { productId: target.productId, batchId: target.batchId, kind: "enlargement_retried", actor: opts.actor, details: { n: target.n, retries, channels: [...new Set(outputs.map(o => o.channel))], ...opts.details } });
+  return { chunkId: chunk!.id, rows, retries };
+}
+/** After resetPhotoEnlargement's commit: the reset rows' enlarge tasks (on the bulk queue for a bulk batch). */
+export async function sendEnlargements(db: Db, enqueue: typeof enqueueTask, reset: PhotoEnlargementReset & { batchId: string }, log: (message: string, fields?: Record<string, unknown>) => void = () => {}): Promise<void> {
+  const [batch] = await db.select().from(catalogBatches).where(eq(catalogBatches.id, reset.batchId));
+  const bulk = !!batch && isBulkBatch(batch);
+  await enqueueEnlargements(enqueue, reset.rows, { log, chunkId: reset.chunkId, ...(bulk ? { bulk: true } : {}) });
 }
 
 /** Accept the supported sheet headings, then reuse the normalised manual-map parser. */

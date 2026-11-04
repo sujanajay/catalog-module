@@ -105,7 +105,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS "t_k_uq" ON "t" USING btree ("k");`;
     const journal = JSON.parse(readFileSync(path.join(folder, "meta", "_journal.json"), "utf8")) as { entries: JournalEntry[] };
     const files = Object.fromEntries(readdirSync(folder).filter((n) => n.endsWith(".sql")).map((n) => [n, ""]));
     expect(lintJournal(journal, files)).toEqual([]);
-    expect(journal.entries.slice(-3).map((e) => e.tag)).toEqual(["0011_vendor_routes", "0012_deploy_safe_cost_ledger", "0013_auto_decide_rules"]);
+    expect(journal.entries.slice(-3).map((e) => e.tag)).toEqual(["0012_deploy_safe_cost_ledger", "0013_auto_decide_rules", "0019_improvements"]);
   });
 
   it("the CI command fails on a journal out of run order", () => {

@@ -1381,3 +1381,30 @@ export const catalogAutoDecideRules = pgTable(
 );
 
 export type AutoDecideRuleRow = typeof catalogAutoDecideRules.$inferSelect;
+
+/**
+ * M1-S4 (M1-F3-R4, R5): the improvement of one photo whose plain render a batch delivered `provisional` because the
+ * upscaler could not enlarge it. One row per batch and photo: how many tries were made (bounded by IMPROVE_MAX_TRIES
+ * within IMPROVE_WINDOW_MS, catalog/improve.ts), when the last one started, and when the photo's slots were found no
+ * longer provisional (`improved_at`, the "improved within 72 h" measure). Kept apart from the output's `compliance`,
+ * which every render rewrites.
+ */
+export const catalogImprovements = pgTable(
+  "catalog_improvements",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    batchId: uuid("batch_id")
+      .notNull()
+      .references(() => catalogBatches.id, { onDelete: "cascade" }),
+    productId: uuid("product_id").notNull(),
+    sourceImageId: uuid("source_image_id").notNull(),
+    tries: integer("tries").notNull().default(0),
+    lastTriedAt: tsNull("last_tried_at"),
+    improvedAt: tsNull("improved_at"),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (t) => [uniqueIndex("catalog_improvements_batch_photo_uq").on(t.batchId, t.sourceImageId)],
+);
+
+export type CatalogImprovement = typeof catalogImprovements.$inferSelect;

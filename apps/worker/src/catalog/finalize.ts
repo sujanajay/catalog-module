@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { and, eq, inArray, ne, sql } from "drizzle-orm";
-import { catalogBatches, catalogBatchProducts, catalogChunks, catalogProducts, catalogSourceImages, catalogUploads } from "@catalog/core/db/schema";
+import { catalogBatches, catalogBatchProducts, catalogChunks, catalogOutputs, catalogProducts, catalogSourceImages, catalogUploads } from "@catalog/core/db/schema";
 import { batchPrefix, exportPath, sanitizeSegment } from "@catalog/core/catalog/naming";
 import { batchProductIds, buildReport, readIngestReport, splitRecheck, workbookCsvSheets, type ExportPaths } from "@catalog/core/catalog/pipeline/report";
 import { releaseLocks } from "@catalog/core/catalog/pipeline/publish";
@@ -56,17 +56,21 @@ export async function handleFinalizeTask(deps:CatalogDeps,body:Record<string,unk
       // Spec 18 lifecycle 3.7: while every unfinished chunk is parked on an enlargement (hours, not seconds) the
       // request is re-queued every 10 minutes, not every 30 seconds.
       const wait=chunks.filter(c=>c.status!=="done" && c.status!=="failed").every(c=>c.status==="queued" && c.taskName===ENLARGING_TASK) ? FINALIZE_PARKED_WAIT_S:30;
-      const unpublished=pairs.filter(({pair,product})=>withSources.has(product.id) && product.lastBatchId!==batchId && pair.change!=="pending_attention" && pair.change!=="failed");
+      // A product this batch is re-making (Try again, an M1-S4 improvement: outputs pending or staged again) is not
+      // published yet either, even though its lastBatchId already names this batch.
+      const remade = new Set((await tx.selectDistinct({productId:catalogOutputs.productId}).from(catalogOutputs).where(and(eq(catalogOutputs.batchId,batchId),inArray(catalogOutputs.status,["pending","staged"])))).map(o=>o.productId));
+      const unpublished=pairs.filter(({pair,product})=>withSources.has(product.id) && (product.lastBatchId!==batchId || remade.has(product.id)) && pair.change!=="pending_attention" && pair.change!=="failed");
       // A done batch: a product a later batch published (its lastBatchId is another batch and this batch holds no
       // lock on it) keeps its old links in the re-issued sheet, so it does not hold the finalize up.
       const moved=done ? unpublished.filter(({product})=>product.lockBatchId!==batchId):[];
       const pairsPending=unpublished.length>moved.length;
       if(moved.length) deps.log("finalize keeps earlier links of products a later batch published",{severity:"WARNING",batchId,products:moved.map(({product})=>({productId:product.id,identifier:product.identifier,lastBatchId:product.lastBatchId}))});
       if(chunksRunning || pairsPending) {
-        if(done && chunksRunning) {
-          // A done batch with a running chunk (a replacement photo): the request stays pending and is re-queued.
+        if(done && (chunksRunning || unpublished.some(({product})=>remade.has(product.id) && product.lockBatchId===batchId))) {
+          // A done batch with a running chunk (a replacement photo), or a re-made product whose publish has not landed:
+          // the request stays pending and is re-queued (a publish that changes nothing asks for no finalize itself).
           await tx.update(catalogBatches).set({updatedAt:sql`${catalogBatches.updatedAt}`,counts:sql`${catalogBatches.counts} - 'finalizeClaim' - 'finalizeClaimUntil' - 'finalizeEnqueuedAt'`}).where(eq(catalogBatches.id,batchId));
-          return {outcome:"not_ready",requeue:true,reopen:true,wait} as const;
+          return {outcome:"not_ready",requeue:true,reopen:true,wait:chunksRunning ? wait:30} as const;
         }
         // Not ready. A batch still running hands the request on (re-queued below). A done batch blocked only by a
         // product still being published is not re-queued: that publish asks again when it lands.
