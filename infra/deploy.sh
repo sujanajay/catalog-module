@@ -115,10 +115,19 @@ source infra/lib/labels.sh
 SQL_CONNECTION_LIMIT=${SQL_MAX_FLAG:-$(tier_max_connections "$SQL_TIER_LIVE")}
 [ -n "$SQL_CONNECTION_LIMIT" ] || { echo "ERROR: unknown ila-pg tier '$SQL_TIER_LIVE'; cannot check the connection budget" >&2; exit 1; }
 gcloud secrets describe catalog-db-password >/dev/null 2>&1 || { echo "secret catalog-db-password missing; run infra/bootstrap.sh first" >&2; exit 1; }
-# M1-F1-R4: the Supabase folder paste on catalog-web needs both Supabase secrets (names only; values are never read here).
-for secret in supabase-url supabase-service-key; do
-  gcloud secrets describe "$secret" >/dev/null 2>&1 || { echo "secret $secret missing; add it to Secret Manager before deploying catalog-web" >&2; exit 1; }
-done
+# M1-F1-R4: the Supabase folder paste switch on catalog-web. SUPABASE_FOLDER_PASTE=on|off chooses; unset keeps the value
+# the live web service runs with, so an "off" sticks across later plain deploys (infra/lib/supabase-paste.sh).
+# shellcheck source=lib/supabase-paste.sh
+source infra/lib/supabase-paste.sh
+SUPABASE_FOLDER_PASTE=$(supabase_folder_paste "$WEB_SERVICE" "$REGION") || exit 1
+echo "==> Supabase folder paste on $WEB_SERVICE: $SUPABASE_FOLDER_PASTE"
+# On, the paste needs both Supabase secrets (names only; values are never read here). Off, they are not mounted or
+# checked, so a missing or disabled key never blocks a deploy.
+if [ "$SUPABASE_FOLDER_PASTE" = on ]; then
+  for secret in supabase-url supabase-service-key; do
+    gcloud secrets describe "$secret" >/dev/null 2>&1 || { echo "secret $secret missing; add it to Secret Manager, or deploy with SUPABASE_FOLDER_PASTE=off" >&2; exit 1; }
+  done
+fi
 if [ -n "$(git status --porcelain)" ]; then
   echo "ERROR: commit source changes before deploying; image tag $TAG must identify the source being built" >&2
   exit 1
@@ -309,11 +318,11 @@ WORKER_SECRETS="$SECRETS,$OPENROUTER_SECRET_REF"
 JOB_SECRETS="$SECRETS,$OPENROUTER_SECRET_REF"
 # M1-F1-R4 (M1-S1): catalog-web lists Supabase Storage folder links read only. SUPABASE_URL and SUPABASE_SERVICE_KEY
 # are mounted from Secret Manager on catalog-web only (never the worker or the jobs); their values are never read or
-# printed here. The paste kind switches on by itself once both are mounted (apps/web/lib/catalog/supabase.ts); the admin
-# switch SUPABASE_FOLDER_PASTE=off at deploy time turns it off again without unmounting anything.
-WEB_SECRETS="$SECRETS,SUPABASE_URL=supabase-url:latest,SUPABASE_SERVICE_KEY=supabase-service-key:latest"
-SUPABASE_FOLDER_PASTE=${SUPABASE_FOLDER_PASTE:-on}
-case "$SUPABASE_FOLDER_PASTE" in on|off) ;; *) echo "SUPABASE_FOLDER_PASTE must be on or off" >&2; exit 1 ;; esac
+# printed here. The paste kind switches on by itself once both are mounted (apps/web/lib/catalog/supabase.ts). The admin
+# switch (chosen above) is also written to the web's env, which is where the next plain deploy reads it back from; off
+# mounts neither secret.
+WEB_SECRETS=$SECRETS
+if [ "$SUPABASE_FOLDER_PASTE" = on ]; then WEB_SECRETS+=",SUPABASE_URL=supabase-url:latest,SUPABASE_SERVICE_KEY=supabase-service-key:latest"; fi
 WEB_ENV+=",SUPABASE_FOLDER_PASTE=$SUPABASE_FOLDER_PASTE"
 NET=(--region="$REGION" --network=ila-vpc --subnet=ila-subnet --vpc-egress=private-ranges-only)
 

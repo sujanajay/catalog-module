@@ -655,18 +655,18 @@ test('a failed service-level update fails the gate with the command to run by ha
 });
 
 // M1-F1-R4 (M1-S1 shipped the Supabase folder paste switched off): catalog-web, and only catalog-web, mounts the two
-// Supabase secrets; the paste turns on by itself once both are present, and SUPABASE_FOLDER_PASTE=off turns it off.
+// Supabase secrets while the paste is on; the sticky on/off switch itself is tested in web-secrets.test.mjs.
 test('deploy.sh: catalog-web mounts the Supabase secrets; the worker and the jobs never do', () => {
   const r = run('web-secrets', `${vars}\nservice_catalog_web; printf '%s\\n' "\${SVC_ARGS[@]}"`);
   assert.equal(r.status, 0, r.err);
   assert.ok(lines(r.out).includes('--set-secrets=ws'), 'the web deploys with WEB_SECRETS');
   const deploy = fs.readFileSync(path.join(root, 'infra/deploy.sh'), 'utf8').replace(/\r/g, '');
   const ref = (name) => (deploy.match(new RegExp(`^${name}=(.*)$`, 'm')) ?? [])[1] ?? '';
-  assert.equal(ref('WEB_SECRETS'), '"$SECRETS,SUPABASE_URL=supabase-url:latest,SUPABASE_SERVICE_KEY=supabase-service-key:latest"');
+  assert.equal(ref('WEB_SECRETS'), '$SECRETS');
+  assert.match(deploy, /^if \[ "\$SUPABASE_FOLDER_PASTE" = on \]; then WEB_SECRETS\+=",SUPABASE_URL=supabase-url:latest,SUPABASE_SERVICE_KEY=supabase-service-key:latest"; fi$/m);
   for (const name of ['SECRETS', 'WORKER_SECRETS', 'JOB_SECRETS']) assert.doesNotMatch(ref(name), /supabase/i, `${name} has no Supabase mount`);
   assert.doesNotMatch(ref('WEB_SECRETS'), /OPENROUTER/, 'never the OpenRouter key on the web');
   assert.match(deploy, /for secret in supabase-url supabase-service-key; do\n\s+gcloud secrets describe "\$secret"/, 'checked by name before the build');
-  assert.match(deploy, /case "\$SUPABASE_FOLDER_PASTE" in on\|off\) ;; \*\) echo "SUPABASE_FOLDER_PASTE must be on or off"/);
   assert.match(deploy, /^WEB_ENV\+=",SUPABASE_FOLDER_PASTE=\$SUPABASE_FOLDER_PASTE"$/m);
   assert.ok(!/versions access/.test(deploy.replace(/^\s*#.*$/gm, '')), 'secret values are never read');
 });
