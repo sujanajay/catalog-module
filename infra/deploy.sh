@@ -325,6 +325,12 @@ WEB_SECRETS=$SECRETS
 if [ "$SUPABASE_FOLDER_PASTE" = on ]; then WEB_SECRETS+=",SUPABASE_URL=supabase-url:latest,SUPABASE_SERVICE_KEY=supabase-service-key:latest"; fi
 WEB_ENV+=",SUPABASE_FOLDER_PASTE=$SUPABASE_FOLDER_PASTE"
 NET=(--region="$REGION" --network=ila-vpc --subnet=ila-subnet --vpc-egress=private-ranges-only)
+# Every mounted secret needs its per-secret grant (infra/secret-access.manifest, bound by infra/bootstrap.sh): there is
+# no project-wide secret access, so an unlisted mount would fail at the revision. Refused here, before the build.
+# shellcheck source=lib/secret-manifest.sh
+source infra/lib/secret-manifest.sh
+secret_manifest_check web "$WEB_SECRETS" || exit 1
+for MOUNTS in "$WORKER_SECRETS" "$JOB_SECRETS" "$SECRETS"; do secret_manifest_check worker "$MOUNTS" || exit 1; done
 
 # --- 3. Build (after every refusal above, so a shape that does not fit never pays for a build) ---
 echo "==> build $TAG"
