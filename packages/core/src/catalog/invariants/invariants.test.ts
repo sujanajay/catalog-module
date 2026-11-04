@@ -138,6 +138,18 @@ describe("invariant checks", () => {
     expect((await run()).counts.done_batch_with_open_chunk).toBe(1);
   });
 
+  it("done_batch_with_open_chunk: work re-opened after the batch finished (Try again, an M1-S4 improvement) is not a violation; an older open chunk still is", async () => {
+    const b = await batch("done");
+    await db.update(catalogBatches).set({ finishedAt: ago(60) }).where(eq(catalogBatches.id, b.id));
+    const reopened = await chunk(b.id, { status: "queued" });
+    await db.update(catalogChunks).set({ dispatchedAt: ago(5) }).where(eq(catalogChunks.id, reopened.id));
+    await db.update(catalogChunks).set({ createdAt: ago(90) }).where(eq(catalogChunks.id, reopened.id));
+    expect((await run(b.id)).counts.done_batch_with_open_chunk).toBe(0);
+    const stuck = await chunk(b.id, { status: "running" });
+    await db.update(catalogChunks).set({ createdAt: ago(120), dispatchedAt: ago(120) }).where(eq(catalogChunks.id, stuck.id));
+    expect((await run(b.id)).counts.done_batch_with_open_chunk).toBe(1);
+  });
+
   it("enlarged_without_upscaler: a verified output enlarged past 1.5x without `upscaled` in a batch with the stage violates; upscaled, held, small and older batches do not", async () => {
     const withStage = await batch("done");
     await db.update(catalogBatches).set({ options: { ...withStage.options, enlargement: { model: "swinir-x2" } } }).where(eq(catalogBatches.id, withStage.id));

@@ -40,6 +40,7 @@ import {
   EVAL_LABELS,
   EVENT_KINDS,
   HOLD_CAUSES,
+  IMPROVEMENT_END_REASONS,
   LINK_STATUSES,
   OUTPUT_STATUSES,
   POLICY_SOURCES,
@@ -554,6 +555,8 @@ export const catalogOutputs = pgTable(
     index("catalog_outputs_product_id_idx").on(t.productId),
     // Exactly one live row per (product, channel, n).
     uniqueIndex("catalog_outputs_live_uq").on(t.productId, t.channel, t.n).where(sql`${t.isLive}`),
+    // M1-S4 (0015): the improvement sweep's candidates, the live provisional plain renders, by first delivery.
+    index("catalog_outputs_provisional_plain_idx").on(t.publishedAt).where(sql`${t.isLive} AND ${t.status} = 'verified' AND ${t.flags} @> '["provisional", "enlargement_failed"]'::jsonb`),
     enumCheck("catalog_outputs", "channel", t.channel, CHANNEL_IDS),
     enumCheck("catalog_outputs", "status", t.status, OUTPUT_STATUSES),
     enumCheck("catalog_outputs", "decision", t.decision, DECISIONS),
@@ -1412,3 +1415,41 @@ export const catalogAutoDecideRules = pgTable(
 );
 
 export type AutoDecideRuleRow = typeof catalogAutoDecideRules.$inferSelect;
+
+/**
+ * M1-S4 (M1-F3-R4, R5): the improvement of one photo whose plain render a batch delivered `provisional` because the
+ * upscaler could not enlarge it. One row per batch and photo: how many tries were made (bounded by IMPROVE_MAX_TRIES
+ * within IMPROVE_WINDOW_MS, catalog/improve.ts), when the last one started, and when the photo's slots were found no
+ * longer provisional (`improved_at`, the "improved within 72 h" measure). Kept apart from the output's `compliance`,
+ * which every render rewrites.
+ */
+export const catalogImprovements = pgTable(
+  "catalog_improvements",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    batchId: uuid("batch_id")
+      .notNull()
+      .references(() => catalogBatches.id, { onDelete: "cascade" }),
+    productId: uuid("product_id").notNull(),
+    sourceImageId: uuid("source_image_id").notNull(),
+    tries: integer("tries").notNull().default(0),
+    lastTriedAt: tsNull("last_tried_at"),
+    improvedAt: tsNull("improved_at"),
+    /**
+     * The photo's outputs as they were delivered (rows of catalog_outputs as JSON), kept while a try runs: a re-made slot
+     * that does not pass is put back from it, so a failed try never downgrades a delivered link (null between tries).
+     */
+    previous: jsonb("previous").$type<Record<string, unknown>[]>(),
+    /** When the photo stopped being a candidate without being improved, and why (IMPROVEMENT_END_REASONS). */
+    endedAt: tsNull("ended_at"),
+    endReason: text("end_reason", { enum: IMPROVEMENT_END_REASONS }),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (t) => [
+    uniqueIndex("catalog_improvements_batch_photo_uq").on(t.batchId, t.sourceImageId),
+    enumCheck("catalog_improvements", "end_reason", t.endReason, IMPROVEMENT_END_REASONS),
+  ],
+);
+
+export type CatalogImprovement = typeof catalogImprovements.$inferSelect;

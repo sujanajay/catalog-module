@@ -82,7 +82,10 @@ export const CHECKS: readonly InvariantCheck[] = [
     sentence: "A done batch has every chunk done or failed.",
     severity: "ERROR",
     sql: () => sql`SELECT c.id, c.batch_id FROM catalog_chunks AS c JOIN catalog_batches AS b ON b.id = c.batch_id
-      WHERE b.status = 'done' AND c.status NOT IN ('done', 'failed')`,
+      WHERE b.status = 'done' AND c.status NOT IN ('done', 'failed')
+        -- Work re-opened after the batch finished (Try again, an M1-S4 improvement) is expected; a stuck one shows in
+        -- parked_chunk_quiet and enlargement_waiting_long.
+        AND NOT (b.finished_at IS NOT NULL AND GREATEST(c.created_at, c.dispatched_at) > b.finished_at)`,
   },
   {
     id: "enlarged_without_upscaler",
