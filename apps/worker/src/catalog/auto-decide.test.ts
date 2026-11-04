@@ -144,6 +144,59 @@ it("F3-R7: a product whose chunk stopped before its photos were made is an excep
   expect(await lockOf(s.product.id)).toBeNull();
 }, 120_000);
 
+it("review P2-2: a pipeline failure in an auto batch stays failed and counted; only rule decisions are drops", async () => {
+  const w = world(), s = await seed(w, "auto-failed", { shots: ["a", "b"], auto: true });
+  await stages(w, s);
+  // Photo 2 failed in the pipeline (as failChunk or a stage fault leaves it), not by an auto-decide rule.
+  const failure = "The matting service did not answer. Start this product again.";
+  const [, second] = await outputsOf(s.batch.id);
+  await db.update(catalogOutputs).set({ status: "failed", reason: failure }).where(eq(catalogOutputs.id, second!.id));
+  expect((await handlePublishTask(w.deps, { batchId: s.batch.id, productId: s.product.id })).outcome).toBe("published");
+  const [one, two] = await outputsOf(s.batch.id);
+  expect(one).toMatchObject({ status: "verified", isLive: true });
+  expect(two).toMatchObject({ status: "failed", reason: failure, isLive: false });
+  expect(two!.flags).not.toContain("auto_dropped");
+  expect((await handleFinalizeTask(w.deps, { batchId: s.batch.id })).outcome).toBe("done");
+  const [batch] = await db.select().from(catalogBatches).where(eq(catalogBatches.id, s.batch.id));
+  expect(batch!.counts).toMatchObject({ verified: 1, failed: 1, skipped: 0, attentionProducts: 0 });
+}, 120_000);
+
+it("review P2-2: an auto batch whose only photo failed in the pipeline is an exception with the failure kept", async () => {
+  const w = world(), s = await seed(w, "auto-all-failed", { shots: ["a"], auto: true });
+  await stages(w, s);
+  await db.update(catalogOutputs).set({ status: "failed", reason: "Render failed." }).where(eq(catalogOutputs.batchId, s.batch.id));
+  await handlePublishTask(w.deps, { batchId: s.batch.id, productId: s.product.id });
+  expect((await outputsOf(s.batch.id)).map(o => [o.status, o.flags.includes("auto_dropped")])).toEqual([["failed", false]]);
+  expect((await pairOf(s.batch.id)).change).toBe("failed");
+  expect((await handleFinalizeTask(w.deps, { batchId: s.batch.id })).outcome).toBe("done");
+  const [batch] = await db.select().from(catalogBatches).where(eq(catalogBatches.id, s.batch.id));
+  expect(batch!.counts).toMatchObject({ failed: 1, skipped: 0 });
+}, 120_000);
+
+it("review P3-1: while the product's chunk is open, a publish waits even when the judge scored a photo triage has not decided yet", async () => {
+  const w = world(), s = await seed(w, "auto-race", { shots: ["a"], auto: true });
+  await handleChunkTask(w.deps, await currentChunkTask(db, s.chunk.id));
+  await handleChunkTask(w.deps, await currentChunkTask(db, s.chunk.id));
+  // Judged, not yet triaged (an operator's decision on the product can trigger a publish in this gap).
+  await db.update(catalogOutputs).set({ status: "needs_attention", qaScores: PASS }).where(eq(catalogOutputs.batchId, s.batch.id));
+  expect((await handlePublishTask(w.deps, { batchId: s.batch.id, productId: s.product.id })).outcome).toBe("waiting");
+  const [output] = await outputsOf(s.batch.id);
+  expect(output).toMatchObject({ status: "needs_attention" });
+  expect(output!.flags).not.toContain("auto_dropped");
+}, 120_000);
+
+it("review P3-2: a hold with no cause is decided by the not_publishable rule, with its rule id", async () => {
+  const w = world(), s = await seed(w, "auto-no-cause", { shots: ["a"], auto: true });
+  await handleChunkTask(w.deps, await currentChunkTask(db, s.chunk.id));
+  await handleChunkTask(w.deps, await currentChunkTask(db, s.chunk.id));
+  // A render held with no problem flag (the triage gives a hold without a cause).
+  await db.update(catalogOutputs).set({ status: "needs_attention", flags: [] }).where(eq(catalogOutputs.batchId, s.batch.id));
+  await handleChunkTask(w.deps, await currentChunkTask(db, s.chunk.id));
+  const [output] = await outputsOf(s.batch.id);
+  expect(autoDecideRecordOf(output!.compliance)).toEqual({ rule: "not_publishable:*", cause: "not_publishable", action: "deliver" });
+  expect(output!.status).not.toBe("needs_attention");
+}, 120_000);
+
 it("F3-R2: a product whose only photo is a different item is an exception (failed with a reason), never held; the batch finishes", async () => {
   const w = world(), s = await seed(w, "auto-nothing", { shots: ["w"], auto: true });
   vi.mocked(w.deps.judgeOutput).mockImplementation(async input => ({ scores: { ...PASS, same_product: 10, overall: 80 }, verdict: "flag", reasons: [], isCollage: false, costUsd: 0, calls: 0, usage: {}, model: input.model, flags: ["different_product"] }));

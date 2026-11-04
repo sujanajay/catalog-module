@@ -85,7 +85,7 @@ export async function releaseLocks(db: Db, batchId: string, options: { everyProd
   return (await db.update(catalogProducts).set({ lockBatchId: null }).where(and(eq(catalogProducts.lockBatchId,batchId), inArray(catalogProducts.id,completed))).returning({ id: catalogProducts.id })).length;
 }
 /** M1-F3-R2: the note of an auto-decide product with no deliverable photo at all (an exception, never a held product). */
-export const NO_DELIVERABLE_PHOTO = "No photo of this product could be delivered, so it has no links in this batch.";
+export const NO_DELIVERABLE_PHOTO = "No photo of this product could be delivered in this batch. Links from earlier batches stay as they were.";
 /** `batch` (brand and test flag, for the worker's cost ledger row) is present whenever the batch was read. */
 /**
  * `changed`: this call published a real content change (new, updated, reordered or removed shots). An unchanged
@@ -125,22 +125,21 @@ export async function publishProduct(deps: PublishDeps, batchId: string, product
     // M1-F3: an output an auto-decide rule delivered (`provisional`) is decided, judged or not (the judge was down or capped).
     const unjudged = (o: Output) => o.status === "staged" && o.decision === null && o.qaScores === null && !o.flags.includes("qa_sampled_out") && !o.flags.includes("provisional");
     const undecided = (o: Output) => !["staged","skipped","verified"].includes(o.status) && o.decision !== "use_as_is" && o.decision !== "remove" && o.decision !== "replaced";
-    // M1-F3-R7: an auto-decide batch never makes a product `pending_attention`. A product not yet through the pipeline
-    // (an unjudged or pending output) waits for its own publish while its chunk is open; once the chunk has stopped, an
-    // output left undecided or unjudged is dropped with its reason (never published unseen); a product that cannot be
-    // processed at all (two files with the same shot) is an exception (`failed`).
+    // M1-F3-R7: an auto-decide batch never makes a product `pending_attention`. While any chunk holding the product is
+    // open, its publish waits: the chunk's own finish publishes it once the judge and the rules are through (a decision
+    // that lands mid-chunk would otherwise race triage). Once no chunk is open, an output left undecided or unjudged is
+    // dropped with its reason (never published unseen). A pipeline failure (`failed`) is not a rule decision: it stays
+    // failed and counted. A product that cannot be processed at all (two files with the same shot) is an exception.
     const auto = autoDecideOf(batch.options) !== null;
     if (auto) {
-      if (outputs.some(o => unjudged(o) || (o.status === "pending" && o.decision === null))) {
-        const [open] = await tx.select({ id: catalogChunks.id }).from(catalogChunks).where(and(eq(catalogChunks.batchId,batchId),sql`${catalogChunks.productIds} @> jsonb_build_array(${productId}::text)`,notInArray(catalogChunks.status,["done","failed"]))).limit(1);
-        if (open) return { outcome:"waiting", batch:found };
-      }
+      const [open] = await tx.select({ id: catalogChunks.id }).from(catalogChunks).where(and(eq(catalogChunks.batchId,batchId),sql`${catalogChunks.productIds} @> jsonb_build_array(${productId}::text)`,notInArray(catalogChunks.status,["done","failed"]))).limit(1);
+      if (open) return { outcome:"waiting", batch:found };
       if (pair?.flags.includes("duplicate_shot")) {
         await tx.update(catalogBatchProducts).set({ change:"failed", notes: pair.notes ?? null }).where(where);
         return { outcome:"failed", batch:found };
       }
       const now = deps.now();
-      for (const o of outputs.filter(o => undecided(o) || unjudged(o))) {
+      for (const o of outputs.filter(o => o.status !== "failed" && (undecided(o) || unjudged(o)))) {
         const dropped = { status:"skipped" as const, flags:[...new Set([...o.flags,"auto_dropped" as const])], reason:autoDecideNote("drop", o.reason), updatedAt:now };
         await tx.update(catalogOutputs).set(dropped).where(eq(catalogOutputs.id,o.id));
         Object.assign(o, dropped);

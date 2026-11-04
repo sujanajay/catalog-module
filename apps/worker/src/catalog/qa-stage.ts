@@ -319,7 +319,9 @@ export async function applyTriage(deps:CatalogDeps,batch:Batch,productId:string,
   for(const o of current) {
    const decision=decisions.get(o.id),scores=o.qaScores;
    if(!decision) continue;
-   const cause=auto && decision.action==="hold" ? decision.cause:undefined;
+   // A hold with no cause (rare: a held render with no problem flag) is decided as not publishable, so every auto
+   // decision carries a rule id (D10). A pipeline failure without a cause is not a rule decision and stays failed.
+   const cause=auto && decision.action==="hold" ? decision.cause ?? (o.status==="failed" ? undefined:"not_publishable"):undefined;
    if(o.status==="failed" && !cause) continue;
    // The rule in plain words (never its code) and, for our own defect still there after the repair loop, what was tried (07 4.6a).
    const lead=leadFlag(o.flags),ctx={channel:CHANNELS[o.channel].label,n:o.n,k:batch.channels.length,busy:busyBackgroundHold(o.compliance),failures:plainFailures(failuresOf(o.compliance),CHANNELS[o.channel].label)};
