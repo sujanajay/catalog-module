@@ -10,6 +10,7 @@ import {
   bigserial,
   boolean,
   check,
+  customType,
   date,
   foreignKey,
   index,
@@ -74,6 +75,25 @@ import {
   type Slot,
   type VersionScope,
 } from "../graph/types";
+import {
+  CHANNEL_STATUSES,
+  CONFLICT_SEVERITIES,
+  CONFLICT_STATUSES,
+  EVIDENCE_GRADES,
+  IMAGE_POLICY_STATUSES,
+  PUSH_METHODS,
+  RULE_COMPONENTS,
+  RULE_LANGUAGES,
+  RULE_MARKETS,
+  RULE_OUTCOMES,
+  RULE_SEVERITIES,
+  RULE_STATUSES,
+  RULESET_STATUSES,
+  type ChannelMargins,
+  type RuleAudience,
+  type RulesetSnapshot,
+  type Size,
+} from "../catalog/rules/types";
 
 // ---------------------------------------------------------------------------
 // Value lists that exist only in the database contract
@@ -180,6 +200,15 @@ const updatedAt = () =>
   timestamp("updated_at", { withTimezone: true }).notNull().defaultNow().$onUpdate(() => new Date());
 const tsNull = (name: string) => timestamp(name, { withTimezone: true });
 const money = (name: string) => numeric(name, { precision: 12, scale: 6, mode: "number" });
+/**
+ * jsonb for any JSON value, string scalars included. Drizzle's `jsonb` parses the value the driver hands back a second
+ * time, but pg and PGlite already parse jsonb, so a stored string "482" reads back as the number 482. This keeps the
+ * driver's value as it is. Same SQL type, so migrations do not change.
+ */
+const jsonExact = customType<{ data: unknown; driverData: string }>({
+  dataType: () => "jsonb",
+  toDriver: (value) => JSON.stringify(value),
+});
 
 /** `"col" IN ('a', 'b', ...)` for a CHECK constraint. Values are fixed literals from this repo. */
 function inList(col: AnyPgColumn, values: readonly string[]): SQL {
@@ -1347,3 +1376,243 @@ export const vendorRouteChanges = pgTable(
 
 export type VendorRouteRow = typeof vendorRoutes.$inferSelect;
 export type VendorRouteChange = typeof vendorRouteChanges.$inferSelect;
+
+// ---------------------------------------------------------------------------
+// M5 channel rules (M5-S1). Rules, channel records and image policies are append-only versions: an edit inserts a new
+// version row tagged with the ruleset version it takes effect in, so every ruleset version can be rebuilt and the
+// history is the table itself. Written only through catalog/rules/store.ts, which holds one advisory lock per write.
+// ---------------------------------------------------------------------------
+
+const PRIORITY_GROUPS = ["P1", "P2"] as const;
+const ANCHORS = ["centre", "bottom-centre"] as const;
+
+/** One ruleset version. Draft while its rows are written; published with a frozen snapshot. */
+export const catalogRulesets = pgTable(
+  "catalog_rulesets",
+  {
+    version: integer("version").primaryKey(),
+    status: text("status", { enum: RULESET_STATUSES }).notNull(),
+    reason: text("reason").notNull(),
+    changedRuleIds: jsonb("changed_rule_ids").$type<string[]>().notNull().default([]),
+    createdBy: text("created_by").notNull(),
+    createdAt: createdAt(),
+    publishedBy: text("published_by"),
+    publishedAt: tsNull("published_at"),
+  },
+  (t) => [
+    enumCheck("catalog_rulesets", "status", t.status, RULESET_STATUSES),
+    check("catalog_rulesets_version_check", sql`${t.version} >= 1`),
+  ],
+);
+
+/** The frozen snapshot of a published ruleset version (M5 3.3): a batch pins one and uses it from start to end. */
+export const catalogRulesetSnapshots = pgTable("catalog_ruleset_snapshots", {
+  version: integer("version")
+    .primaryKey()
+    .references(() => catalogRulesets.version),
+  hash: text("hash").notNull(),
+  body: jsonb("body").$type<RulesetSnapshot>().notNull(),
+  createdAt: createdAt(),
+});
+
+/** Every version of every rule (M5 3.2 `Rule`). Never updated: an edit is a new (rule_id, version) row. */
+export const catalogRules = pgTable(
+  "catalog_rules",
+  {
+    ruleId: text("rule_id").notNull(),
+    version: integer("version").notNull(),
+    rulesetVersion: integer("ruleset_version")
+      .notNull()
+      .references(() => catalogRulesets.version),
+    channel: text("channel").notNull(),
+    market: text("market", { enum: RULE_MARKETS }),
+    /** M2 taxonomy node ids, or ["all"]. */
+    categoryScope: jsonb("category_scope").$type<string[]>().notNull(),
+    /** The dataset's own scope word or list, kept exactly (M5-F1-R2). */
+    datasetScope: jsonExact("dataset_scope"),
+    audience: jsonb("audience").$type<RuleAudience[]>(),
+    brandScope: text("brand_scope").notNull().default("all"),
+    language: text("language", { enum: RULE_LANGUAGES }).notNull(),
+    component: text("component", { enum: RULE_COMPONENTS }).notNull(),
+    field: text("field").notNull(),
+    operator: text("operator").notNull(),
+    value: jsonExact("value"),
+    text: text("text"),
+    declaredSeverity: text("declared_severity", { enum: RULE_SEVERITIES }).notNull(),
+    evidence: text("evidence", { enum: EVIDENCE_GRADES }).notNull(),
+    confirmedBy: text("confirmed_by"),
+    source: text("source").notNull(),
+    conflictsWith: jsonb("conflicts_with").$type<string[]>().notNull().default([]),
+    checkable: boolean("checkable").notNull(),
+    judgeMethod: text("judge_method"),
+    status: text("status", { enum: RULE_STATUSES }).notNull(),
+    reason: text("reason").notNull(),
+    createdBy: text("created_by").notNull(),
+    createdAt: createdAt(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.ruleId, t.version] }),
+    index("catalog_rules_ruleset_version_idx").on(t.rulesetVersion),
+    enumCheck("catalog_rules", "market", t.market, RULE_MARKETS),
+    enumCheck("catalog_rules", "language", t.language, RULE_LANGUAGES),
+    enumCheck("catalog_rules", "component", t.component, RULE_COMPONENTS),
+    enumCheck("catalog_rules", "declared_severity", t.declaredSeverity, RULE_SEVERITIES),
+    enumCheck("catalog_rules", "evidence", t.evidence, EVIDENCE_GRADES),
+    enumCheck("catalog_rules", "status", t.status, RULE_STATUSES),
+    check("catalog_rules_reason_check", sql`btrim(${t.reason}) <> ''`),
+  ],
+);
+
+/** The conflict register (M5-F2): sets of rules that cannot all hold, with options and a recommendation. */
+export const catalogRuleConflicts = pgTable(
+  "catalog_rule_conflicts",
+  {
+    id: text("id").primaryKey(),
+    topic: text("topic").notNull(),
+    severity: text("severity", { enum: CONFLICT_SEVERITIES }).notNull(),
+    ruleIds: jsonb("rule_ids").$type<string[]>().notNull(),
+    options: jsonb("options").$type<string[]>().notNull(),
+    recommendation: text("recommendation").notNull(),
+    reasoning: text("reasoning").notNull(),
+    status: text("status", { enum: CONFLICT_STATUSES }).notNull(),
+    /** The decision in force; null while open. */
+    decisionId: text("decision_id"),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (t) => [
+    enumCheck("catalog_rule_conflicts", "severity", t.severity, CONFLICT_SEVERITIES),
+    enumCheck("catalog_rule_conflicts", "status", t.status, CONFLICT_STATUSES),
+  ],
+);
+
+/** Every conflict decision ever made (append-only), with who, when, why and the ruleset version it published. */
+export const catalogRuleDecisions = pgTable(
+  "catalog_rule_decisions",
+  {
+    id: text("id").primaryKey(),
+    conflictId: text("conflict_id")
+      .notNull()
+      .references(() => catalogRuleConflicts.id),
+    option: text("option").notNull(),
+    reason: text("reason").notNull(),
+    decidedBy: text("decided_by").notNull(),
+    decidedAt: timestamp("decided_at", { withTimezone: true }).notNull(),
+    rulesetVersion: integer("ruleset_version")
+      .notNull()
+      .references(() => catalogRulesets.version),
+    createdAt: createdAt(),
+  },
+  (t) => [index("catalog_rule_decisions_conflict_id_idx").on(t.conflictId)],
+);
+
+/** The channel registry (M5-F1-R3): every version of every channel record. Replaces the constants in channels.ts. */
+export const catalogChannelRecords = pgTable(
+  "catalog_channel_records",
+  {
+    channelId: text("channel_id").notNull(),
+    version: integer("version").notNull(),
+    rulesetVersion: integer("ruleset_version")
+      .notNull()
+      .references(() => catalogRulesets.version),
+    label: text("label").notNull(),
+    group: text("group", { enum: PRIORITY_GROUPS }).notNull(),
+    minCanvas: jsonb("min_canvas").$type<Size>().notNull(),
+    targetCanvas: jsonb("target_canvas").$type<Size>().notNull(),
+    margins: jsonb("margins").$type<ChannelMargins>().notNull(),
+    anchor: text("anchor", { enum: ANCHORS }).notNull(),
+    background: text("background").notNull(),
+    firstImageBackground: text("first_image_background"),
+    dpi: integer("dpi").notNull(),
+    fixedCanvas: boolean("fixed_canvas").notNull(),
+    uniformScaleDefault: boolean("uniform_scale_default").notNull(),
+    sheetText: text("sheet_text").notNull(),
+    notes: text("notes"),
+    markets: jsonb("markets").$type<string[]>().notNull().default([]),
+    languages: jsonb("languages").$type<string[]>().notNull().default([]),
+    status: text("status", { enum: CHANNEL_STATUSES }).notNull(),
+    pushMethod: text("push_method", { enum: PUSH_METHODS }),
+    fileKind: text("file_kind"),
+    owner: text("owner"),
+    reason: text("reason").notNull(),
+    createdBy: text("created_by").notNull(),
+    createdAt: createdAt(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.channelId, t.version] }),
+    enumCheck("catalog_channel_records", "group", t.group, PRIORITY_GROUPS),
+    enumCheck("catalog_channel_records", "anchor", t.anchor, ANCHORS),
+    enumCheck("catalog_channel_records", "status", t.status, CHANNEL_STATUSES),
+    enumCheck("catalog_channel_records", "push_method", t.pushMethod, PUSH_METHODS),
+  ],
+);
+
+/** The image set policy per channel x taxonomy node (M3-F4, stored in M5), every version. */
+export const catalogImagePolicies = pgTable(
+  "catalog_image_policies",
+  {
+    channelId: text("channel_id").notNull(),
+    nodeId: text("node_id")
+      .notNull()
+      .references(() => catalogTaxonomyNodes.id),
+    version: integer("version").notNull(),
+    rulesetVersion: integer("ruleset_version")
+      .notNull()
+      .references(() => catalogRulesets.version),
+    roles: jsonb("roles").$type<string[]>().notNull(),
+    addOns: jsonb("add_ons").$type<string[]>().notNull().default([]),
+    minCount: integer("min_count"),
+    maxCount: integer("max_count"),
+    evidence: text("evidence", { enum: EVIDENCE_GRADES }).notNull(),
+    source: text("source").notNull(),
+    status: text("status", { enum: IMAGE_POLICY_STATUSES }).notNull(),
+    reason: text("reason").notNull(),
+    createdBy: text("created_by").notNull(),
+    createdAt: createdAt(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.channelId, t.nodeId, t.version] }),
+    enumCheck("catalog_image_policies", "evidence", t.evidence, EVIDENCE_GRADES),
+    enumCheck("catalog_image_policies", "status", t.status, IMAGE_POLICY_STATUSES),
+  ],
+);
+
+/**
+ * One result per rule checked for one M0 content version on one channel under one ruleset version (M5 3.4 need 2,
+ * decision D3), so a later readout can say which rules a live listing passed. Writing the same check twice keeps the
+ * first row.
+ */
+export const catalogRuleResults = pgTable(
+  "catalog_rule_results",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    contentVersionId: uuid("content_version_id")
+      .notNull()
+      .references(() => catalogContentVersions.id),
+    rulesetVersion: integer("ruleset_version")
+      .notNull()
+      .references(() => catalogRulesets.version),
+    channel: text("channel").notNull(),
+    ruleId: text("rule_id").notNull(),
+    ruleVersion: integer("rule_version").notNull(),
+    outcome: text("outcome", { enum: RULE_OUTCOMES }).notNull(),
+    effectiveSeverity: text("effective_severity", { enum: RULE_SEVERITIES }).notNull(),
+    measured: jsonExact("measured"),
+    message: text("message").notNull(),
+    createdAt: createdAt(),
+  },
+  (t) => [
+    uniqueIndex("catalog_rule_results_version_rule_uq").on(t.contentVersionId, t.rulesetVersion, t.channel, t.ruleId),
+    index("catalog_rule_results_ruleset_version_idx").on(t.rulesetVersion),
+    enumCheck("catalog_rule_results", "outcome", t.outcome, RULE_OUTCOMES),
+    enumCheck("catalog_rule_results", "effective_severity", t.effectiveSeverity, RULE_SEVERITIES),
+  ],
+);
+
+export type RulesetRow = typeof catalogRulesets.$inferSelect;
+export type RuleRow = typeof catalogRules.$inferSelect;
+export type RuleConflictRow = typeof catalogRuleConflicts.$inferSelect;
+export type RuleDecisionRow = typeof catalogRuleDecisions.$inferSelect;
+export type ChannelRecordRow = typeof catalogChannelRecords.$inferSelect;
+export type ImagePolicyRow = typeof catalogImagePolicies.$inferSelect;
+export type RuleResultRow = typeof catalogRuleResults.$inferSelect;
