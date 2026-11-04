@@ -27,6 +27,11 @@ export interface OperatorSpec {
    * results only for those.
    */
   absenceFails?: boolean;
+  /**
+   * Why the rule's own value cannot be checked by a machine (prose, a null limit, placeholder words), or null when it
+   * can. Such a rule gives needs_judge, never blocks, and never wins "most specific" over a usable rule (D29).
+   */
+  unusable?(value: unknown): string | null;
   check(measured: unknown, value: unknown, ctx: CheckContext): Check;
 }
 
@@ -43,7 +48,7 @@ const ok = (cond: boolean, says: string): Check => (cond ? pass(says) : fail(say
 export function fmt(v: unknown): string {
   if (v === null || v === undefined) return "nothing";
   if (typeof v === "string") return `"${v}"`;
-  if (isSize(v)) return `${v.w}x${v.h}`;
+  if (isSize(v) && Object.keys(v).length === 2) return `${v.w}x${v.h}`;
   if (Array.isArray(v)) return v.map(fmt).join(", ");
   if (typeof v === "object") return JSON.stringify(v);
   return String(v);
@@ -54,6 +59,7 @@ function isSize(v: unknown): v is Size {
   return !!v && typeof v === "object" && typeof (v as Size).w === "number" && typeof (v as Size).h === "number";
 }
 
+const isRecord = (v: unknown): v is Record<string, unknown> => !!v && typeof v === "object" && !Array.isArray(v);
 const isNum = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v);
 const NOT_A_NUMBER = "value is not a number";
 
@@ -94,10 +100,30 @@ function compare(m: unknown, v: unknown, test: (a: number, b: number) => boolean
   return null;
 }
 
+/**
+ * A rule value written as words rather than a value a measurement can equal: "White/Light Grey", "1:1 or 4:5",
+ * "62-72% of silhouette height", or a policy word such as "not_allowed" or "required" that states what is wanted
+ * instead of what is measured. Tokens such as "JPEG", "sRGB", "#FFFFFF", "4:5", "flat_lay" and "cm" are values.
+ */
+export function isProse(v: unknown): boolean {
+  if (typeof v !== "string") return false;
+  return /[\s/,;()]/u.test(v.trim()) || /\d\s*-\s*\d/u.test(v) || POLICY_WORDS.has(v.trim().toLowerCase());
+}
+
+const POLICY_WORDS = new Set(["not_allowed", "allowed", "required", "optional"]);
+
+/** A `{min, target, fixed}` canvas spec, the value shape of the `within` rules. */
+function isCanvasSpec(v: unknown): v is { min: Size; target: Size; fixed?: unknown } {
+  return !!v && typeof v === "object" && isSize((v as { min?: unknown }).min) && isSize((v as { target?: unknown }).target);
+}
+
+const proseValue = (v: unknown) => (isProse(v) ? `has a value written in words (${fmt(v)})` : null);
+
 /** A numeric comparison operator: needs_judge when the rule's own value is not a number or size. */
 function numeric(words: string, test: (a: number, b: number) => boolean): OperatorSpec {
   return {
     meaning: `The measured number (or width and height) ${words} the rule's value.`,
+    unusable: (v) => (isNum(v) || isSize(v) ? null : `has a limit that is not a number (${fmt(v)})`),
     check(m, v) {
       if (!isNum(v) && !isSize(v)) return judge(`has a limit that is not a number (${fmt(v)})`);
       const r = compare(m, v, test);
@@ -106,8 +132,15 @@ function numeric(words: string, test: (a: number, b: number) => boolean): Operat
   };
 }
 
+function rangeProblem(v: unknown): string | null {
+  if (!Array.isArray(v) || v.length !== 2 || !v.every((b) => b === null || isNum(b)) || v.every((b) => b === null))
+    return `has a range that is not two numbers (${fmt(v)})`;
+  return null;
+}
+
 function range(m: unknown, v: unknown): Check {
-  if (!Array.isArray(v) || v.length !== 2 || !v.every((b) => b === null || isNum(b))) return judge(`has a range that is not two numbers (${fmt(v)})`);
+  const problem = rangeProblem(v);
+  if (problem) return judge(problem);
   const [lo, hi] = v as [number | null, number | null];
   const says = lo === null ? `allows at most ${hi}` : hi === null ? `needs at least ${lo}` : `allows ${lo} to ${hi}`;
   if (!isNum(m)) return fail(NOT_A_NUMBER);
@@ -122,6 +155,11 @@ export function ruleRegex(pattern: string): RegExp | null {
   } catch {
     return null;
   }
+}
+
+function regexProblem(v: unknown): string | null {
+  if (typeof v !== "string") return "has a pattern that is not text";
+  return ruleRegex(v) ? null : "has a pattern that does not compile";
 }
 
 function regexCheck(m: unknown, v: unknown, mustMatch: boolean): Check {
@@ -149,12 +187,54 @@ export function hasPhrase(text: string, phrase: string): boolean {
   return new RegExp(`${before}${escaped}${after}`, "iu").test(text);
 }
 
+/**
+ * A phone number: with a leading "+", 9 to 15 digits; without one, 9 to 12 digits in groups of at least 3 that
+ * start with 0 ("050 123 4567") or are 10 digits starting 6 to 9 (an Indian mobile). Runs of sizes ("28 30 32 34", "UK 6 7 8 9 10"), 13-digit barcodes and year lists
+ * shorter than 9 digits are not phone numbers. Every run of groups inside a longer run is tried, so "Size 10 050 123
+ * 4567" is still found.
+ */
+function localPhone(groups: string[], digits: number): boolean {
+  if (digits < 9 || digits > 12 || !groups.every((g) => g.length >= 3)) return false;
+  return groups[0]!.startsWith("0") || (digits === 10 && /^[6-9]/u.test(groups[0]!));
+}
+
+export function hasPhone(text: string): boolean {
+  for (const run of text.matchAll(/\+?\d[\d\s().-]*\d/gu)) {
+    const groups = [...run[0].matchAll(/(\+?)(\d+)/gu)].map((g) => ({ plus: g[1] === "+", digits: g[2]! }));
+    for (let i = 0; i < groups.length; i++) {
+      let digits = 0;
+      for (let j = i; j < groups.length; j++) {
+        digits += groups[j]!.digits.length;
+        const slice = groups.slice(i, j + 1);
+        const first = slice[0]!;
+        if (first.plus ? digits >= 9 && digits <= 15 : localPhone(slice.map((g) => g.digits), digits)) return true;
+      }
+    }
+  }
+  return false;
+}
+
 /** Built-in patterns for not_contains_pattern. */
-export const CONTACT_PATTERNS: Record<string, RegExp> = {
-  url: /\b(?:https?:\/\/|www\.)\S+|\b[\w-]+\.(?:com|net|org|ae|sa|in|co|shop|store)\b/iu,
-  email: /[\w.+-]+@[\w-]+\.[\w.]+/u,
-  phone: /(?:\+?\d[\d\s().-]{7,}\d)/u,
+export const CONTACT_PATTERNS: Record<string, (text: string) => boolean> = {
+  url: (t) => /\b(?:https?:\/\/|www\.)\S+|\b[\w-]+\.(?:com|net|org|ae|sa|in|co|shop|store)\b/iu.test(t),
+  email: (t) => /[\w.+-]+@[\w-]+\.[\w.]+/u.test(t),
+  phone: hasPhone,
 };
+
+/**
+ * Words in a not_contains list that name markup rather than spell it: "html" means any HTML tag, "markdown" means
+ * Markdown emphasis, headings, list marks or links (R045, R059).
+ */
+const MARKUP_PATTERNS: Record<string, RegExp> = {
+  html: /<\/?[a-z][^>]*>|&[a-z]+;/iu,
+  markdown: /\*\*[^*]+\*\*|__[^_]+__|^\s{0,3}#{1,6}\s|^\s*[-*+]\s|\[[^\]]+\]\([^)]+\)/mu,
+};
+
+/**
+ * Words in a not_contains list that name a kind of word a machine cannot list (R028: "competitor brand names",
+ * "subjective claims"). A rule with any of them needs a judgement (D29).
+ */
+export const PLACEHOLDER_PHRASES = new Set(["competitor brand names", "subjective claims"]);
 
 /** A role list item such as "FM", "FM|FL" or "flat"; anything else in a sequence is prose. */
 const ROLE_ITEM = /^[A-Za-z0-9_]+(\|[A-Za-z0-9_]+)*$/u;
@@ -171,6 +251,10 @@ function codeSpans(text: string): [number, number][] {
   const spans: [number, number][] = [];
   for (const m of text.matchAll(/(\d{4})(?:\s*-\s*(\d{4}))?/gu)) spans.push([Number(m[1]), Number(m[2] ?? m[1])]);
   return spans;
+}
+
+function codeProblem(v: unknown): string | null {
+  return typeof v === "string" && codeSpans(v).length ? null : "has no code list";
 }
 
 function inCodeSpans(m: unknown, v: unknown): Check {
@@ -192,15 +276,27 @@ const judged = (meaning: string): OperatorSpec => ({ meaning, check: () => judge
 
 export const OPERATORS: Record<string, OperatorSpec> = {
   equals: {
-    meaning: "The measured value is the rule's value (text ignores case and spacing).",
-    check: (m, v) => ok(same(m, v), `needs ${fmt(v)}`),
+    meaning:
+      "The measured value is the rule's value (text ignores case and spacing). A canvas spec {min, target, fixed} is checked as within; for an object value only its keys are compared. A value written in words cannot be checked.",
+    unusable: proseValue,
+    check(m, v, ctx) {
+      if (isCanvasSpec(v)) return OPERATORS.within!.check(m, v, ctx);
+      if (isRecord(v) && isRecord(m)) {
+        const missing = Object.keys(v).filter((k) => !Object.hasOwn(m, k));
+        if (missing.length) return judge(`needs ${missing.join(", ")} measured as well`);
+        return ok(Object.keys(v).every((k) => same(m[k], v[k])), `needs ${fmt(v)}`);
+      }
+      return ok(same(m, v), `needs ${fmt(v)}`);
+    },
   },
   not_equals: {
-    meaning: "The measured value is not the rule's value.",
+    meaning: "The measured value is not the rule's value. A value written in words cannot be checked.",
+    unusable: proseValue,
     check: (m, v) => ok(!same(m, v), `does not allow ${fmt(v)}`),
   },
   equals_rgb: {
     meaning: "The measured colour (hex or [r, g, b]) is exactly the rule's colour.",
+    unusable: (v) => (rgbOf(v) ? null : "has a colour that is not RGB"),
     check(m, v) {
       const want = rgbOf(v);
       if (!want) return judge("has a colour that is not RGB");
@@ -210,6 +306,7 @@ export const OPERATORS: Record<string, OperatorSpec> = {
   },
   in_set: {
     meaning: "The measured value (or every measured value of a list) is one of the rule's values.",
+    unusable: (v) => (Array.isArray(v) ? null : "has no list of allowed values"),
     check(m, v) {
       if (!Array.isArray(v)) return judge("has no list of allowed values");
       return ok(asList(m).every((x) => contains(v, x)), `allows only ${fmt(v)}`);
@@ -217,10 +314,12 @@ export const OPERATORS: Record<string, OperatorSpec> = {
   },
   allowed_values: {
     meaning: "Same as in_set: the measured value is one of the listed values.",
+    unusable: (v) => (Array.isArray(v) ? null : "has no list of allowed values"),
     check: (m, v, ctx) => OPERATORS.in_set!.check(m, v, ctx),
   },
   not_in: {
     meaning: "No measured value is one of the rule's values.",
+    unusable: (v) => (Array.isArray(v) ? null : "has no list of values"),
     check(m, v) {
       if (!Array.isArray(v)) return judge("has no list of values");
       return ok(!asList(m).some((x) => contains(v, x)), `does not allow ${fmt(v)}`);
@@ -229,15 +328,16 @@ export const OPERATORS: Record<string, OperatorSpec> = {
   gte: numeric("needs at least", (a, b) => a >= b),
   lte: numeric("allows at most", (a, b) => a <= b),
   lt: numeric("allows less than", (a, b) => a < b),
-  between: { meaning: "The measured number is within [min, max]; a null bound is open.", check: range },
-  between_max: { meaning: "Same as between; written with an open minimum ([null, max]).", check: range },
+  between: { meaning: "The measured number is within [min, max]; a null bound is open.", unusable: rangeProblem, check: range },
+  between_max: { meaning: "Same as between; written with an open minimum ([null, max]).", unusable: rangeProblem, check: range },
   within: {
     meaning: "The measured canvas is at least the rule's minimum, and exactly its target when the rule says fixed.",
+    unusable: (v) => (isCanvasSpec(v) ? null : "has no canvas sizes"),
     check(m, v) {
       const spec = v as { min?: unknown; target?: unknown; fixed?: unknown } | null;
       if (!spec || !isSize(spec.min) || !isSize(spec.target)) return judge("has no canvas sizes");
       if (!isSize(m)) return fail("value is not a size");
-      if (spec.fixed === true) return ok(same(m, spec.target), `needs exactly ${fmt(spec.target)}`);
+      if (spec.fixed === true) return ok(m.w === spec.target.w && m.h === spec.target.h, `needs exactly ${fmt(spec.target)}`);
       return ok(m.w >= spec.min.w && m.h >= spec.min.h, `needs at least ${fmt(spec.min)}`);
     },
   },
@@ -293,6 +393,7 @@ export const OPERATORS: Record<string, OperatorSpec> = {
   equals_ordered: {
     meaning:
       'The measured sequence starts with the rule\'s items in that order; "A|B" means either. A sequence written as prose cannot be checked and needs a judgement.',
+    unusable: (v) => (Array.isArray(v) && v.every((x) => typeof x === "string" && ROLE_ITEM.test(x)) ? null : "has an order written as prose"),
     check(m, v) {
       if (!Array.isArray(v) || !v.every((x) => typeof x === "string" && ROLE_ITEM.test(x))) return judge("has an order written as prose");
       if (!Array.isArray(m)) return fail("value is not a sequence");
@@ -302,37 +403,53 @@ export const OPERATORS: Record<string, OperatorSpec> = {
   },
   matches_regex: {
     meaning: 'The measured text (every item of a list) contains a match of the pattern; "(?i)" means any case.',
+    unusable: regexProblem,
     check: (m, v) => regexCheck(m, v, true),
   },
   not_matches_regex: {
     meaning: "No measured text contains a match of the pattern.",
+    unusable: regexProblem,
     check: (m, v) => regexCheck(m, v, false),
   },
   not_contains: {
-    meaning: "The measured text, or list of words, has none of the listed words or phrases (whole words, any case).",
+    meaning:
+      'The measured text, or list of words, has none of the listed words or phrases (whole words, any case). "html" and "markdown" mean any such markup. Names of kinds of words ("competitor brand names") cannot be checked.',
+    unusable(v) {
+      if (!Array.isArray(v)) return "has no list of words";
+      const kinds = v.filter((p) => typeof p === "string" && PLACEHOLDER_PHRASES.has(normalizeWord(p)));
+      return kinds.length ? `names kinds of words, not words (${fmt(kinds)})` : null;
+    },
     check(m, v) {
       if (!Array.isArray(v)) return judge("has no list of words");
       const texts = Array.isArray(m) ? m : [m];
-      const found = (v as unknown[]).filter((p) => typeof p === "string" && texts.some((t) => (typeof t === "string" ? hasPhrase(t, p) : same(t, p))));
+      const hit = (t: unknown, p: string) => {
+        if (typeof t !== "string") return same(t, p);
+        const markup = MARKUP_PATTERNS[normalizeWord(p)];
+        return markup ? markup.test(t) : hasPhrase(t, p);
+      };
+      const found = (v as unknown[]).filter((p) => typeof p === "string" && texts.some((t) => hit(t, p)));
       return ok(found.length === 0, found.length ? `does not allow ${fmt(found)}` : `does not allow ${fmt(v)}`);
     },
   },
   not_contains_pattern: {
     meaning: "The measured text has no web address, phone number or email address (the kinds the rule lists).",
+    unusable: (v) => (Array.isArray(v) && v.every((k) => typeof k === "string" && k in CONTACT_PATTERNS) ? null : "names a pattern kind the check does not know"),
     check(m, v) {
       if (!Array.isArray(v) || !v.every((k) => typeof k === "string" && k in CONTACT_PATTERNS)) return judge("names a pattern kind the check does not know");
       const texts = Array.isArray(m) ? m : [m];
       if (!texts.every((t) => typeof t === "string")) return fail("value is not text");
-      const found = (v as string[]).filter((k) => (texts as string[]).some((t) => CONTACT_PATTERNS[k]!.test(t)));
+      const found = (v as string[]).filter((k) => (texts as string[]).some((t) => CONTACT_PATTERNS[k]!(t)));
       return ok(found.length === 0, found.length ? `does not allow a ${found.join(" or ")}` : `does not allow a ${(v as string[]).join(", ")}`);
     },
   },
   in_set_prefix: {
     meaning: "The measured code's first four digits fall in one of the codes or ranges the rule lists in prose.",
+    unusable: codeProblem,
     check: inCodeSpans,
   },
   in_range: {
     meaning: 'The measured code\'s first four digits fall in the range "aaaa-bbbb".',
+    unusable: codeProblem,
     check: inCodeSpans,
   },
   is_title_case_not_all_caps: {
@@ -369,6 +486,7 @@ export const OPERATORS: Record<string, OperatorSpec> = {
   },
   classify: {
     meaning: "The measured {class, value} has its value inside the band the rule gives for that class.",
+    unusable: (v) => (isRecord(v) ? null : "has no bands"),
     check(m, v) {
       const bands = v as Record<string, unknown> | null;
       if (!bands || typeof bands !== "object") return judge("has no bands");

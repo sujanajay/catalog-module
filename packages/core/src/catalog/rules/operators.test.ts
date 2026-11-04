@@ -2,7 +2,7 @@
 // count what a person sees (M5-F4-R7). Pure, no database.
 import { describe, expect, it } from "vitest";
 import { CHANNELS } from "../channels";
-import { CONTACT_PATTERNS, hasPhrase, OPERATORS, ruleRegex, type CheckContext, type CheckOutcome } from "./operators";
+import { CONTACT_PATTERNS, fmt, hasPhone, hasPhrase, isProse, OPERATORS, ruleRegex, same, type CheckContext, type CheckOutcome } from "./operators";
 import { RULES_DATASET } from "./seed";
 import { recordFor } from "./test-fixtures";
 import { byteCount, charCount, isAllCaps, isSentenceCase, isTitleCase, keywordTerms, sentenceCount } from "./text";
@@ -53,10 +53,68 @@ describe("value operators", () => {
     expect(run("not_in", "black", ["black", "patterned"])).toBe("fail");
     expect(run("not_in", "white", ["black", "patterned"])).toBe("pass");
     expect(run("in_set", "x", "JPEG or PNG")).toBe("needs_judge");
+    expect(run("in_set", ["JPEG", "TIFF"], ["JPEG", "PNG"])).toBe("fail");
+  });
+});
+
+describe("machine-checkable values (D29)", () => {
+  const unusable = (op: string, v: unknown) => OPERATORS[op]!.unusable?.(v) ?? null;
+  it("knows words from values", () => {
+    for (const v of ["White/Light Grey", "1:1 or 4:5", "3:4 portrait", "74-82%", "not_allowed", "required", "Pure White #FFFFFF"]) expect(isProse(v), v).toBe(true);
+    for (const v of ["JPEG", "sRGB", "#FFFFFF", "4:5", "flat_lay", "cm", 72, false]) expect(isProse(v), String(v)).toBe(false);
+  });
+  it("flags unusable rule values per operator", () => {
+    expect(unusable("equals", "White/Light Grey")).toContain("written in words");
+    expect(unusable("equals", "sRGB")).toBeNull();
+    expect(unusable("not_equals", "allowed only between nose and lip")).not.toBeNull();
+    expect(unusable("lte", null)).not.toBeNull();
+    expect(unusable("lte", 150)).toBeNull();
+    expect(unusable("between", [null, null])).not.toBeNull();
+    expect(unusable("between", [4, 5])).toBeNull();
+    expect(unusable("not_contains", ["competitor brand names", "subjective claims"])).toContain("kinds of words");
+    expect(unusable("not_contains", ["watermark", "logo"])).toBeNull();
+    expect(unusable("within", "big")).not.toBeNull();
+    expect(unusable("matches_regex", "([")).not.toBeNull();
+    expect(unusable("in_range", "ask finance")).not.toBeNull();
+    expect(unusable("equals_ordered", ["Front on model"])).not.toBeNull();
+  });
+  it("equals checks a canvas spec as within and compares only the keys an object names", () => {
+    const spec = { min: { w: 600, h: 800 }, target: { w: 1200, h: 1800 }, fixed: true };
+    expect(run("equals", { w: 1200, h: 1800 }, spec)).toBe("pass");
+    expect(run("equals", { w: 1200, h: 1600 }, spec)).toBe("fail");
+    expect(run("equals", { w: 1200, h: 1800, dpi: 96, format: "JPEG" }, { w: 1200, h: 1800, dpi: 96 })).toBe("pass");
+    expect(run("equals", { w: 1200, h: 1800 }, { w: 1200, h: 1800, dpi: 96 })).toBe("needs_judge");
+    expect(fmt({ w: 1200, h: 1800, dpi: 96 })).toBe('{"w":1200,"h":1800,"dpi":96}');
+    expect(fmt({ w: 1200, h: 1800 })).toBe("1200x1800");
+  });
+  it("same() compares object keys both ways", () => {
+    expect(same({ a: 1 }, { a: 1, b: 2 })).toBe(false);
+    expect(same({ a: 1, b: 2 }, { b: 2, a: 1 })).toBe(true);
   });
 });
 
 describe("number operators", () => {
+  it("compares sizes on height as well as width, and fails a number against a size limit", () => {
+    expect(run("gte", { w: 1200, h: 900 }, { w: 1000, h: 1000 })).toBe("fail");
+    expect(run("gte", 2000, { w: 1000, h: 1000 })).toBe("fail");
+    const spec = { min: { w: 660, h: 900 }, target: { w: 1100, h: 1500 } };
+    expect(run("within", { w: 700, h: 800 }, spec)).toBe("fail");
+    expect(run("within", { w: 1100, h: 1400 }, { ...spec, fixed: true })).toBe("fail");
+  });
+
+  it("between includes both bounds", () => {
+    expect(run("between", 5, [4, 5])).toBe("pass");
+    expect(run("between", 4, [4, 5])).toBe("pass");
+    expect(run("between", 5.01, [4, 5])).toBe("fail");
+    expect(run("between", 5, [null, null])).toBe("needs_judge");
+  });
+
+  it("matches_channel allows 1% off the channel ratio, not more", () => {
+    const t = noon.targetCanvas;
+    expect(run("matches_channel", { w: Math.round(t.w * 1.005), h: t.h }, true)).toBe("pass");
+    expect(run("matches_channel", { w: Math.round(t.w * 1.05), h: t.h }, true)).toBe("fail");
+  });
+
   it("gte, lte and lt compare numbers and say the limit", () => {
     expect(OPERATORS.lte!.check(163, 150, ctx)).toEqual({ outcome: "fail", says: "allows at most 150" });
     expect(run("lte", 150, 150)).toBe("pass");
@@ -182,6 +240,10 @@ describe("text operators", () => {
     expect(run("not_contains", "Slim fit FREE SHIPPING tee", ["free shipping"])).toBe("fail");
     expect(run("not_contains", "Freestyle tee", ["free"])).toBe("pass");
     expect(run("not_contains", ["<b>Soft</b>", "Cool"], ["<b>"])).toBe("fail");
+    expect(run("not_contains", ["<b>Soft</b> cotton"], ["html"])).toBe("fail");
+    expect(run("not_contains", ["Made for html lovers"], ["html"])).toBe("pass");
+    expect(run("not_contains", ["**Soft** cotton"], ["markdown"])).toBe("fail");
+    expect(run("not_contains", ["Soft cotton"], ["markdown"])).toBe("pass");
     expect(hasPhrase("Sale ends soon", "sale")).toBe(true);
     expect(hasPhrase("Wholesale pack", "sale")).toBe(false);
   });
@@ -194,6 +256,19 @@ describe("text operators", () => {
     expect(run("not_contains_pattern", "Men's Slim Fit Cotton Polo Shirt, Navy, Size M", kinds)).toBe("pass");
     expect(run("not_contains_pattern", "x", ["fax"])).toBe("needs_judge");
     expect(Object.keys(CONTACT_PATTERNS).sort()).toEqual(["email", "phone", "url"]);
+  });
+
+  it("each contact kind finds its own pattern alone", () => {
+    expect(run("not_contains_pattern", "Write to care@brandmail.xyz", ["email"])).toBe("fail");
+    expect(run("not_contains_pattern", "Write to care@brandmail.xyz", ["url"])).toBe("pass");
+    expect(run("not_contains_pattern", "Shop at brand.com today", ["url"])).toBe("fail");
+    expect(run("not_contains_pattern", "Visit https://x.example/p", ["url"])).toBe("fail");
+    expect(run("not_contains_pattern", "Pack of 3 tees", ["phone"])).toBe("pass");
+  });
+
+  it("phone numbers are told apart from sizes, barcodes and years", () => {
+    for (const t of ["+971 50 123 4567", "+91 98765 43210", "050 123 4567", "0501234567", "9876543210", "Size 10 050 123 4567"]) expect(hasPhone(t), t).toBe(true);
+    for (const t of ["Waist 28 30 32 34", "UK 6 7 8 9 10", "EAN 8901234567890", "Shorts 2024 2025 Collection", "2024 2025 2026", "Pack of 12345678", "Style 123456789"]) expect(hasPhone(t), t).toBe(false);
   });
 
   it("title case and sentence case, never all capitals", () => {

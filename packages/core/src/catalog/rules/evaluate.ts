@@ -32,7 +32,7 @@ export function effectiveSeverity(rule: Rule, conflicts: ConflictRecord[]): Effe
     const which = open.length === 1 ? `conflict ${open[0]} is` : `conflicts ${open.join(", ")} are`;
     return { severity: "warn", judge, note: `Warn only while ${which} open.` };
   }
-  if (judge) return { severity: "warn", judge, note: "Needs a judgement; never blocks." };
+  if (judge) return { severity: "warn", judge, note: null };
   if (rule.declaredSeverity === "block") {
     if (rule.evidence === "documented" || rule.evidence === "reported" || rule.confirmedBy) return { severity: "block", judge, note: null };
     return { severity: "warn", judge, note: `Warn only until a channel confirms it (source: ${rule.evidence}).` };
@@ -50,6 +50,8 @@ export function blocks(result: RuleResult): boolean {
 // ---------------------------------------------------------------------------
 
 type Scope = { kind: "applies"; rank: number[] } | { kind: "unknown"; message: string } | { kind: "skip" };
+
+const LANGUAGE_NAMES: Record<string, string> = { ar: "Arabic", en: "English" };
 
 const GCC_MARKETS = new Set(["GCC", "AE", "SA", "KW", "QA", "BH", "OM"]);
 
@@ -86,7 +88,6 @@ function scopeOf(rule: Rule, s: Subject, ss: SubjectScope): Scope {
   if (rule.status !== "active" || rule.component !== s.component) return { kind: "skip" };
   if (rule.channel !== "all" && rule.channel !== s.channel) return { kind: "skip" };
   if (rule.brandScope !== ALL_SCOPE && rule.brandScope !== s.brandId) return { kind: "skip" };
-  if (rule.language !== "any" && rule.language !== s.language) return { kind: "skip" };
   if (rule.market && s.market && !marketMatches(rule.market, s.market)) return { kind: "skip" };
   if (rule.audience && s.audience && !rule.audience.includes(s.audience)) return { kind: "skip" };
 
@@ -100,6 +101,12 @@ function scopeOf(rule: Rule, s: Subject, ss: SubjectScope): Scope {
       if (!couldApply) return { kind: "skip" };
       return { kind: "unknown", message: `Category unknown: rule ${rule.id} applies to some categories only.` };
     }
+  }
+  if (rule.language !== "any" && rule.language !== s.language) {
+    // English rules are the base set; until M5-S6 adds Arabic rules, Arabic content shows each English rule as not
+    // checked instead of an empty list that reads as "all clear" (D30).
+    if (rule.language !== "en") return { kind: "skip" };
+    return { kind: "unknown", message: `Not checked: rule ${rule.id} has no ${LANGUAGE_NAMES[s.language] ?? s.language} version yet (M5-S6).` };
   }
   if (rule.market && !s.market) return { kind: "unknown", message: `Market unknown: rule ${rule.id} applies to some markets only.` };
   if (rule.audience && !s.audience) return { kind: "unknown", message: `Audience unknown: rule ${rule.id} applies to some audiences only.` };
@@ -117,6 +124,13 @@ function scopeOf(rule: Rule, s: Subject, ss: SubjectScope): Scope {
  * (decision D22).
  */
 const LIMIT_OPERATORS = new Set(["between", "between_max", "lte", "lt", "gte", "gt", "equals", "equals_rgb", "in_set", "allowed_values", "within", "matches_channel", "equals_ordered"]);
+
+/** A limit rule whose value a machine can check; only these replace each other (D22, D29). */
+function competes(rule: Rule): boolean {
+  if (!LIMIT_OPERATORS.has(rule.operator)) return false;
+  const spec = OPERATORS[rule.operator];
+  return !!spec && !spec.unusable?.(rule.value);
+}
 
 function compareRank(a: number[], b: number[]): number {
   for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return a[i]! - b[i]!;
@@ -235,6 +249,8 @@ function checkRule(rule: Rule, s: Subject, channel: ChannelRecord, sev: Effectiv
     return result(rule, sev, "not_applicable", null, `${label}: rule ${rule.id} is the render default, not a check (decision D21).`);
   const spec = OPERATORS[rule.operator];
   if (!spec) return result(rule, sev, "needs_judge", null, `${label}: rule ${rule.id} needs a judgement (no check for ${rule.operator}).`);
+  const problem = spec.unusable?.(rule.value);
+  if (problem) return result(rule, sev, "needs_judge", null, `${label}: rule ${rule.id} ${problem}, so it needs a judgement (decision D29).`);
 
   const who = rule.channel === "all" ? "Every channel" : (channels.get(rule.channel)?.label ?? rule.channel);
   const ctx = { channel, brandName: s.brandName ?? null };
@@ -272,7 +288,7 @@ export function evaluate(snapshot: RulesetSnapshot, subject: Subject): RuleResul
   // The most specific rank of the limit rules of each field (D22).
   const best = new Map<string, number[]>();
   for (const { rule, scope } of scoped) {
-    if (scope.kind !== "applies" || !LIMIT_OPERATORS.has(rule.operator)) continue;
+    if (scope.kind !== "applies" || !competes(rule)) continue;
     const key = rule.field;
     const prev = best.get(key);
     if (!prev || compareRank(scope.rank, prev) > 0) best.set(key, scope.rank);
@@ -286,7 +302,8 @@ export function evaluate(snapshot: RulesetSnapshot, subject: Subject): RuleResul
       continue;
     }
     if (scope.kind !== "applies") continue;
-    if (LIMIT_OPERATORS.has(rule.operator) && compareRank(scope.rank, best.get(rule.field)!) < 0) continue;
+    const top = competes(rule) ? best.get(rule.field) : undefined;
+    if (top && compareRank(scope.rank, top) < 0) continue;
     try {
       out.push(checkRule(rule, subject, channel, sev, channels));
     } catch {
