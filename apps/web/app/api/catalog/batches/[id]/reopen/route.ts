@@ -1,3 +1,4 @@
+import { countTouch } from "../../../../../../lib/catalog/touches";
 import { reopenBatch } from "../../../../../../lib/catalog/batches";
 import { batchId, catalogRoute, type BatchContext } from "../../../../../../lib/catalog/api";
 /**
@@ -8,6 +9,7 @@ import { batchId, catalogRoute, type BatchContext } from "../../../../../../lib/
 export function POST(req: Request, context: BatchContext) {
   return catalogRoute(req, "operator", async () => {
     const batch = await reopenBatch(await batchId(context));
+    await countTouch("fix_and_continue", { batchId: batch.id });
     return { id: batch.id, status: batch.status, failReason: batch.counts.fixReason ?? null };
   });
 }

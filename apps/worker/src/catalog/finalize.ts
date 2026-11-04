@@ -5,6 +5,7 @@ import { batchPrefix, exportPath, sanitizeSegment } from "@catalog/core/catalog/
 import { batchProductIds, buildReport, readIngestReport, splitRecheck, workbookCsvSheets, type ExportPaths } from "@catalog/core/catalog/pipeline/report";
 import { releaseLocks } from "@catalog/core/catalog/pipeline/publish";
 import { autoDecideOf } from "@catalog/core/catalog/auto-decide";
+import { recordBatchOutcome } from "@catalog/core/catalog/reliability";
 import { ENLARGING_TASK } from "@catalog/core/catalog/pipeline/enlargement";
 import { recheckSheetPart, type RecheckProgress } from "@catalog/core/catalog/recheck/index";
 import { compareXlsxCsv, fillProductListWorkbook, writeLinksCsv, writeLinksXlsx } from "@catalog/core/catalog/sheet";
@@ -199,6 +200,9 @@ export async function handleFinalizeTask(deps:CatalogDeps,body:Record<string,unk
       deps.log("batch finalized",{batchId,brandSlug:batch.brandSlug,durationMs:+deps.now()-started,batchMs:batch.startedAt ? +deps.now()-+batch.startedAt:null,
         counts:{products:c.products,outputs:c.outputs,verified:c.verified,needsAttention:c.needsAttention,attentionProducts:c.attentionProducts,failed:c.failed,skipped:c.skipped,recheckOk:c.recheckOk,recheckTotal:c.recheckTotal},
         cost:{qaUsd:cost.qaUsd,qaCalls:cost.qaCalls,computeUsd:cost.computeUsd,computeVcpuSeconds:cost.computeVcpuSeconds,mattingMs:cost.mattingMs,renderMs:cost.renderMs}});
+      // M6-S6 (M6-F3-R1): the batch's outcome row. A failed write never fails the finalize; the sweep writes it again.
+      try { const o=await recordBatchOutcome(deps.db,batchId,deps.now()); if(o) deps.log("batch outcome",{batchId,success:o.success,cause:o.cause,touches:o.touches,incidents:o.incidents,deployOverlap:o.deployOverlap}); }
+      catch(error) { deps.log("batch outcome not written",{severity:"WARNING",batchId,error:error instanceof Error ? error.message:String(error)}); }
     }
     return {httpStatus:outcome==="snapshot_changed" ? 503:200,outcome};
   } catch(error) { deps.log("finalize failed",{severity:"WARNING",batchId,error:error instanceof Error ? error.message:String(error)}); return {httpStatus:503,outcome:"retry"}; }
