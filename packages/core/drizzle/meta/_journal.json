@@ -134,6 +134,13 @@
       "when": 1793802066184,
       "tag": "0018_overflow_daily_cap",
       "breakpoints": true
+    },
+    {
+      "idx": 19,
+      "version": "7",
+      "when": 1793802743334,
+      "tag": "0019_change_types",
+      "breakpoints": true
     }
   ]
 }

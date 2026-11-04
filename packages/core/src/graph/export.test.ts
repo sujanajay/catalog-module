@@ -135,7 +135,7 @@ async function event(listingId: string, toVersionId: string, batchId: string | n
     evidence: "tool_publish",
     actor: "worker",
     reasonKind: "new_content",
-    changeTypeId: "title_rewrite",
+    changeTypeId: "title_rewritten_en",
     batchId,
   });
 }
