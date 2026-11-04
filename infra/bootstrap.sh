@@ -19,6 +19,8 @@ export CLOUDSDK_CORE_PROJECT=$PROJECT
 # launcher. No argument below starts with "/", so MSYS path conversion is harmless.
 
 cd "$(dirname "$0")/.."
+# shellcheck source=lib/secret-manifest.sh
+source infra/lib/secret-manifest.sh
 
 # --- Builder constants -------------------------------------------------------
 SCHEDULER_TZ=Asia/Kolkata
@@ -424,14 +426,14 @@ bucket_binding "$ASSETS_BUCKET" "serviceAccount:$WORKER" roles/storage.objectAdm
 for SA in "$WEB" "$WORKER"; do
   project_binding "serviceAccount:$SA" roles/cloudsql.client
   project_binding "serviceAccount:$SA" roles/cloudtasks.enqueuer
-  # Secret access per secret, not project-wide: this project holds other apps' secrets.
-  secret_binding "$DB_SECRET" "serviceAccount:$SA" roles/secretmanager.secretAccessor
 done
-secret_binding "$OPENROUTER_SECRET" "serviceAccount:$WORKER" roles/secretmanager.secretAccessor
-# M1-F1-R4: catalog-web mounts the Supabase project URL and read key for the folder paste (infra/deploy.sh WEB_SECRETS).
-for SUPABASE_SECRET in supabase-url supabase-service-key; do
-  secret_binding "$SUPABASE_SECRET" "serviceAccount:$WEB" roles/secretmanager.secretAccessor
-done
+# Secret access per secret, not project-wide (this project holds other apps' secrets): one binding per line of
+# infra/secret-access.manifest, the same list infra/deploy.sh checks its mounts against. A secret that does not exist
+# yet (an optional one, such as the Supabase pair before the folder paste) is skipped with a warning.
+SECRET_PAIRS=$(secret_manifest_pairs) || die "infra/secret-access.manifest is malformed"
+while read -r SECRET_SA SECRET_NAME _; do
+  secret_binding "$SECRET_NAME" "serviceAccount:$SECRET_SA" roles/secretmanager.secretAccessor
+done <<<"$SECRET_PAIRS"
 # Spec 18 H2: project level, so this one grant also lets the worker (and the probe job catalog-check-matting, which
 # runs as catalog-worker@) invoke catalog-upscale, including its candidate tag URLs, without a resource-level binding
 # on a service that does not exist yet when bootstrap runs (resource-level IAM on Cloud Run may be denied, AGENTS.md;
