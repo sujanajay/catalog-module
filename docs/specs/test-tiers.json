@@ -1,0 +1,61 @@
+{
+  "about": "M6-F8 tiered tests (docs/program/requirements/M6-reliability-cost.md). Which tiers a change needs. T1 runs on every PR; T2 and T3 are needed when a changed file starts with one of their paths. CI reads this file (.github/ci/tiers.mjs) and writes the tiers a PR needs to the run summary; the PR template asks which ones ran.",
+  "tiers": {
+    "T0": {
+      "what": "lint, typecheck and the unit tests related to the changed files, on the builder's machine",
+      "when": "every change, before a commit",
+      "budgetMinutes": 3,
+      "run": "pnpm t0"
+    },
+    "T1": {
+      "what": "CI: lint and typecheck, the unit tests in 6 shards balanced by file time, the real-Postgres tests, the infra and matting tests, the intake browser scenarios",
+      "when": "every PR",
+      "budgetMinutes": 10,
+      "run": ".github/workflows/ci.yml"
+    },
+    "T2": {
+      "what": "the real-photo regression set (about 30 real sources with stored mattes)",
+      "when": "PRs touching render, matte, shadow, crop or QA",
+      "budgetMinutes": 5,
+      "built": false,
+      "notBuiltBecause": "M6-S7a decision S7a-4: the set needs real brand photos and their mattes, which cannot live in the public repository, and CI has no GCP access to read them from a bucket. Until it is built, a PR that needs T2 runs the render, matte and image-check unit tests in T1 and says so in the PR.",
+      "paths": [
+        "packages/core/src/catalog/render",
+        "packages/core/src/catalog/matte",
+        "packages/core/src/catalog/shadow",
+        "packages/core/src/catalog/enhance",
+        "packages/core/src/catalog/upscale",
+        "packages/core/src/catalog/evals/",
+        "packages/core/src/catalog/qa/",
+        "apps/worker/src/catalog/qa-stage.ts",
+        "services/matting/"
+      ]
+    },
+    "T3": {
+      "what": "a 20-product golden batch on the preview stack with the built images (spec 10 checkers)",
+      "when": "PRs touching the pipeline, before deploy",
+      "budgetMinutes": 15,
+      "built": false,
+      "notBuiltBecause": "M6-S7a decision S7a-4: it deploys to preview, which waits for the owner's typed approval per deploy; it is run by hand with infra/deploy-preview.sh until a later slice automates it.",
+      "paths": [
+        "packages/core/src/catalog/pipeline/",
+        "packages/core/src/catalog/ingest/",
+        "apps/worker/src/catalog/",
+        "packages/core/drizzle/",
+        "infra/deploy.sh",
+        "infra/deploy-preview.sh"
+      ]
+    },
+    "T4": {
+      "what": "deploy gates and the per-brand smoke",
+      "when": "every deploy, only for changed services",
+      "budgetMinutes": 30,
+      "run": "infra/deploy.sh"
+    },
+    "T5": {
+      "what": "full evals, the 300-product golden set, load tests",
+      "when": "nightly or before a release, on separate capacity",
+      "run": "the catalog-eval, catalog-output-evals and catalog-load jobs"
+    }
+  }
+}
