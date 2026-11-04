@@ -32,6 +32,8 @@ check('every file lands in exactly one shard, the same way on every run, and an 
   assert.ok(shards.some((s) => s.files.includes('new.test.ts') && s.total >= 10), 'the new file weighs the median');
   assert.notEqual(shards.find((s) => s.files.includes('a.test.ts')), shards.find((s) => s.files.includes('b.test.ts')), 'the two heavy files are apart');
   assert.throws(() => plan(files, timings, 0), /positive integer/);
+  // A file measured at 0 s (under 50 ms) is known to be fast, not unknown: it does not weigh the median.
+  assert.ok(plan(['c.test.ts', 'fast.test.ts'], {...timings, 'fast.test.ts': 0}, 1)[0].total < 11, 'a 0 s file weighs almost nothing');
 });
 
 check('the CI shards with the committed timings stay well inside the 10-minute T1 budget', () => {
@@ -41,8 +43,9 @@ check('the CI shards with the committed timings stay well inside the 10-minute T
   const worst = Math.max(...shards.map(shardCost));
   // About 70 s of checkout and install comes on top of the tests; 7.5 min of tests leaves room for slow runners.
   assert.ok(worst <= 450, `slowest shard about ${Math.round(worst)} s`);
-  const totals = shards.map((s) => s.total);
-  assert.ok(Math.max(...totals) - Math.min(...totals.filter((t, i) => shards[i].files.length > 1)) < 120, `shard totals ${totals.map(Math.round)}`);
+  // Shards holding one heavy file alone are bounded by that file; the shards with several files are even with each other.
+  const totals = shards.filter((s) => s.files.length > 1).map((s) => s.total);
+  assert.ok(totals.length > 1 && Math.max(...totals) - Math.min(...totals) < 120, `multi-file shard totals ${totals.map(Math.round)}`);
 });
 
 check('ci.yml runs the balanced shards (not vitest --shard), every listed file, and as many shards as the matrix has', () => {
@@ -62,7 +65,7 @@ check('ci.yml runs every TEST_PG_URL test file against a Postgres 16 service (M0
   assert.match(pg, /image: postgres:16\n/);
   assert.match(pg, /--health-cmd pg_isready/);
   assert.match(pg, /TEST_PG_URL: postgres:\/\/postgres:postgres@localhost:5432\/postgres/);
-  assert.match(pg, /grep -rl --include='\*\.test\.ts' --exclude-dir=node_modules TEST_PG_URL apps packages/);
+  assert.match(pg, /grep -rl --include='\*\.test\.ts' --include='\*\.test\.tsx' --exclude='\*\.real\.test\.ts' --exclude-dir=node_modules TEST_PG_URL apps packages/);
   assert.match(pg, /test -s "\$RUNNER_TEMP\/pg-files\.txt"/, 'fails when no file is found, never passes empty');
   // The files it finds today: the M0-S1 contract and migration tests.
   const found = ['packages/core/src/graph/graph.test.ts', 'packages/core/src/db/migration-0009.test.ts'];

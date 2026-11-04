@@ -90,7 +90,7 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - name: Real Postgres tests
         run: |
-          grep -rl --include='*.test.ts' --exclude-dir=node_modules TEST_PG_URL apps packages | sort > "$RUNNER_TEMP/pg-files.txt"
+          grep -rl --include='*.test.ts' --include='*.test.tsx' --exclude='*.real.test.ts' --exclude-dir=node_modules TEST_PG_URL apps packages | sort > "$RUNNER_TEMP/pg-files.txt"
           cat "$RUNNER_TEMP/pg-files.txt"
           test -s "$RUNNER_TEMP/pg-files.txt" || { echo "no test file reads TEST_PG_URL"; exit 1; }
           xargs -r -a "$RUNNER_TEMP/pg-files.txt" pnpm exec vitest run

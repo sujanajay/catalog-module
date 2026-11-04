@@ -6,7 +6,8 @@
 //   pnpm t0               against origin/main
 //   pnpm t0 <base-ref>    against another base
 //
-// T1 (CI) still runs everything on the PR; T0 is the fast first answer.
+// T1 (CI) still runs everything on the PR; T0 is the fast first answer. T0 does not run infra/tests/*.test.mjs; run
+// those by hand (node infra/tests/<name>.test.mjs) when a script under .github/ci or infra changes.
 import path from "node:path";
 import console from "node:console";
 import process from "node:process";

@@ -10,7 +10,7 @@
 // files.txt is `vitest list --filesOnly` output (absolute or relative paths, one per line). Every listed file goes to
 // exactly one shard, so the shards together always run every file, also a new one. Durations come from
 // test-timings.json next to this script (seconds per file, measured on CI); a file it does not know counts as the
-// median. Refresh the timings with `node .github/ci/timings.mjs <run-id>` when the shards drift apart.
+// median; a file recorded as 0 s (under 50 ms) counts as 0.05 s. Refresh the timings with `node .github/ci/timings.mjs <run-id>` when the shards drift apart.
 import fs from "node:fs";
 import path from "node:path";
 import console from "node:console";
@@ -45,7 +45,7 @@ export function plan(files, timings, count) {
   const known = Object.values(timings).filter((v) => typeof v === "number" && v > 0).sort((a, b) => a - b);
   const median = known.length ? known[Math.floor(known.length / 2)] : 1;
   const unique = [...new Set(files)].sort();
-  const weighted = unique.map((f) => ({ file: f, seconds: timings[f] > 0 ? timings[f] : median }));
+  const weighted = unique.map((f) => ({ file: f, seconds: typeof timings[f] === "number" ? Math.max(timings[f], 0.05) : median }));
   weighted.sort((a, b) => b.seconds - a.seconds || a.file.localeCompare(b.file));
   const shards = Array.from({ length: count }, () => ({ files: [], total: 0, longest: 0 }));
   for (const w of weighted) {
