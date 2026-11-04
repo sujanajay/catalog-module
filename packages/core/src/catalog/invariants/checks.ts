@@ -19,6 +19,11 @@ export interface InvariantCheck {
   sql: (now: Date) => SQL;
 }
 
+/**
+ * M0-S4 (M0 F5-R4, decision D21): the graph export is stale when no run finished cleanly for this long. The export runs
+ * once a day, so a fresh export is up to 24 hours old just before the next run; the 2 extra hours cover that run itself.
+ */
+export const EXPORT_STALE_HOURS = 26;
 /** A running chunk whose lease ended more than this long ago should have been recovered by the sweep. */
 export const STALE_LEASE_MS = 5 * 60_000;
 /** A running chunk is slow when it ran longer than SLOW_CHUNK_FACTOR x its batch's median finished chunk and SLOW_CHUNK_MIN_MS. */
@@ -116,5 +121,18 @@ export const CHECKS: readonly InvariantCheck[] = [
     sql: (now) => sql`SELECT e.id, e.batch_id FROM catalog_enlargements AS e JOIN catalog_batches AS b ON b.id = e.batch_id
       WHERE b.status NOT IN ('failed', 'cancelled') AND e.wanted AND e.status = 'queued'
         AND e.created_at < ${at(now)} - ${ENLARGEMENT_WAITING_LONG_MS / 1000}::int * interval '1 second'`,
+  },
+  {
+    id: "graph_export_stale",
+    sentence: "The catalog graph export to BigQuery (catalog_os) finished cleanly in the last 26 hours, once it has run at all.",
+    severity: "WARNING",
+    // One row (the latest run) when no run finished without an error inside the window and some run started before it,
+    // so a first run gets its window and a job that was never set up is not reported. Not a batch's problem: batch_id null.
+    sql: (now) => sql`SELECT r.id, NULL::uuid AS batch_id FROM (
+        SELECT id FROM catalog_graph_export_runs ORDER BY started_at DESC, id DESC LIMIT 1
+      ) AS r
+      WHERE NOT EXISTS (SELECT 1 FROM catalog_graph_export_runs AS f
+          WHERE f.finished_at IS NOT NULL AND f.error IS NULL AND f.finished_at > ${at(now)} - ${EXPORT_STALE_HOURS}::int * interval '1 hour')
+        AND EXISTS (SELECT 1 FROM catalog_graph_export_runs AS o WHERE o.started_at <= ${at(now)} - ${EXPORT_STALE_HOURS}::int * interval '1 hour')`,
   },
 ];

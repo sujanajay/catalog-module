@@ -372,6 +372,22 @@ export async function recordChange(db: GraphDb, e: NewChangeEvent): Promise<{ se
   });
 }
 
+/**
+ * Steps 1 and 2 of readChanges: the last seq drawn so far (`cap`, read first) and the lowest cursor lock still held by
+ * another writer (`floor`, null when none). Every event with seq <= cap and seq < floor is committed or rolled back.
+ */
+export async function changeLogBounds(db: GraphDb): Promise<{ cap: bigint; floor: bigint | null }> {
+  const [cap] = await rowsOf<{ cap: string | number }>(
+    db,
+    sql.raw(`select case when is_called then last_value else last_value - 1 end as cap from catalog_change_events_seq_seq`),
+  );
+  const [floor] = await rowsOf<{ floor: string | number | null }>(
+    db,
+    sql`select min(objid::bigint) as floor from pg_locks where locktype = 'advisory' and classid = ${CHANGE_CURSOR_LOCK_NS} and objsubid = 2 and pid <> pg_backend_pid() and database = (select oid from pg_database where datname = current_database())`,
+  );
+  return { cap: BigInt(cap!.cap), floor: floor?.floor == null ? null : BigInt(floor.floor) };
+}
+
 /** Test seam: runs between the floor read and the event select (used to reproduce a writer starting in between). */
 export type ReadChangesHooks = { afterFloorRead?: () => Promise<void> };
 
@@ -392,17 +408,10 @@ export async function readChanges(
   hooks: ReadChangesHooks = {},
 ): Promise<ChangeEvent[]> {
   if (!Number.isInteger(limit) || limit < 1 || limit > 5000) throw new Error("readChanges: limit must be an integer from 1 to 5000");
-  const [cap] = await rowsOf<{ cap: string | number }>(
-    db,
-    sql.raw(`select case when is_called then last_value else last_value - 1 end as cap from catalog_change_events_seq_seq`),
-  );
-  const [floor] = await rowsOf<{ floor: string | number | null }>(
-    db,
-    sql`select min(objid::bigint) as floor from pg_locks where locktype = 'advisory' and classid = ${CHANGE_CURSOR_LOCK_NS} and objsubid = 2 and pid <> pg_backend_pid() and database = (select oid from pg_database where datname = current_database())`,
-  );
+  const { cap, floor } = await changeLogBounds(db);
   await hooks.afterFloorRead?.();
-  const conditions: SQL[] = [gt(catalogChangeEvents.seq, afterSeq), lte(catalogChangeEvents.seq, BigInt(cap!.cap))];
-  if (floor?.floor != null) conditions.push(sql`${catalogChangeEvents.seq} < ${BigInt(floor.floor)}`);
+  const conditions: SQL[] = [gt(catalogChangeEvents.seq, afterSeq), lte(catalogChangeEvents.seq, cap)];
+  if (floor != null) conditions.push(sql`${catalogChangeEvents.seq} < ${floor}`);
   if (filter.kinds?.length) conditions.push(inArray(catalogChangeEvents.kind, filter.kinds));
   if (filter.listingIds?.length) conditions.push(inArray(catalogChangeEvents.listingId, filter.listingIds));
   return db
