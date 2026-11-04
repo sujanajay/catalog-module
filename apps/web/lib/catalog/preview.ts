@@ -28,9 +28,9 @@ export async function detectedBatch(id: string) {
 }
 export async function patchDetected(id: string, value: unknown) {
   const batch = await assertDraft(id);
-  const input = value as { identifierMode?: unknown; precedence?: unknown; sheets?: unknown; perRoot?: unknown };
+  const input = value as { identifierMode?: unknown; precedence?: unknown; sheets?: unknown; perRoot?: unknown; newestSameProduct?: unknown };
   if (!input || typeof input !== "object") throw badRequest("Check the grouping controls and try again.");
-  const options = parseOptions({ ...(input.identifierMode !== undefined ? { identifierMode: input.identifierMode } : {}), ...(input.precedence !== undefined ? { precedence: input.precedence } : {}), ...(input.perRoot !== undefined ? { perRoot: input.perRoot } : {}) }, batch.options);
+  const options = parseOptions({ ...(input.identifierMode !== undefined ? { identifierMode: input.identifierMode } : {}), ...(input.precedence !== undefined ? { precedence: input.precedence } : {}), ...(input.perRoot !== undefined ? { perRoot: input.perRoot } : {}), ...(input.newestSameProduct !== undefined ? { newestSameProduct: input.newestSameProduct } : {}) }, batch.options);
   const uploads = await db().select().from(catalogUploads).where(eq(catalogUploads.batchId, id));
   const sheets = input.sheets ?? [];
   if (!Array.isArray(sheets)) throw badRequest("Choose the sheet columns and try again.");
@@ -49,7 +49,7 @@ export async function patchDetected(id: string, value: unknown) {
   if (patches.length > 1) options.sheetColumns = null;
   // Nothing changed since the grouping was made (same options, every sheet's columns already chosen as
   // sent): step 2 Continue returns at once, with no regroup, no upload change and no hand-off (spec 14c F7 part 1).
-  const sameOptions = options.identifierMode === batch.options.identifierMode && (options.perRoot === true) === (batch.options.perRoot === true) && options.precedence === batch.options.precedence && JSON.stringify(options.sheetColumns ?? null) === JSON.stringify(batch.options.sheetColumns ?? null);
+  const sameOptions = options.identifierMode === batch.options.identifierMode && (options.perRoot === true) === (batch.options.perRoot === true) && options.precedence === batch.options.precedence && JSON.stringify(options.sheetColumns ?? null) === JSON.stringify(batch.options.sheetColumns ?? null) && (options.newestSameProduct !== false) === (batch.options.newestSameProduct !== false);
   const sameSheets = patches.every(({ upload, detected }) => {
     const prior = upload.detected as unknown as (Detected & { columnsChosen?: boolean }) | null;
     return prior?.columnsChosen === true && prior.kind === detected.kind && prior.identifierColumn === detected.identifierColumn && JSON.stringify(prior.urlColumns ?? []) === JSON.stringify(detected.urlColumns);

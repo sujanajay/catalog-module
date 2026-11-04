@@ -110,16 +110,6 @@
       "count": 1
     }
   },
-  "apps/web/components/catalog/WizardStep1.tsx": {
-    "copy/reading-grade": {
-      "count": 1
-    }
-  },
-  "apps/web/components/catalog/WizardStep3.tsx": {
-    "copy/word-list": {
-      "count": 1
-    }
-  },
   "apps/web/lib/catalog/batches.ts": {
     "copy/word-list": {
       "count": 1
@@ -144,11 +134,6 @@
     }
   },
   "apps/web/lib/catalog/ops.ts": {
-    "copy/word-list": {
-      "count": 1
-    }
-  },
-  "apps/web/lib/catalog/start.ts": {
     "copy/word-list": {
       "count": 1
     }

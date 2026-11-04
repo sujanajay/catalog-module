@@ -1,9 +1,12 @@
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
-import { STATUS_KEYS, STATUS_WORDS, statusTone } from "@catalog/core/catalog/status-words";
+import { batchStatusWord, STATUS_KEYS, STATUS_WORDS, statusTone } from "@catalog/core/catalog/status-words";
+import { EMPTY_BATCH_COUNTS } from "@catalog/core/db/schema";
+import BatchBanner from "@/components/catalog/BatchBanner";
 import * as ui from "@/components/ui";
 import LocalTime from "@/components/LocalTime";
+import { batchListDetail } from "@/lib/catalog/copy";
 
 // UX2: the status vocabulary of UX section 4, the StatusWord that replaces Badge, and local times (UX section 7).
 describe("status vocabulary (UX section 4)", () => {
@@ -82,5 +85,45 @@ describe("local times (UX section 7 formats)", () => {
     const html = renderToStaticMarkup(createElement(LocalTime, { at }));
     expect(html).toBe('<time dateTime="2026-11-04T10:00:00.000Z">4 Nov 2026, 10:00 UTC</time>');
     expect(renderToStaticMarkup(createElement(LocalTime, { at: null }))).toBe("");
+  });
+});
+
+// Owner decision (Sujan, 2026-11-04, "Use proposed"): which status word each batch state shows on the list and banner.
+describe("batch states show the section 4 status words", () => {
+  it("maps every batch state", () => {
+    expect(batchStatusWord("draft")).toEqual({ status: "getting_ready" });
+    expect(batchStatusWord("collecting")).toEqual({ status: "getting_ready" });
+    expect(batchStatusWord("processing")).toEqual({ status: "working" });
+    expect(batchStatusWord("ready")).toEqual({ status: "done" });
+    expect(batchStatusWord("attention")).toEqual({ status: "needs_you", blocking: false });
+    expect(batchStatusWord("recheck_failed")).toEqual({ status: "needs_you", blocking: false });
+    expect(batchStatusWord("failed")).toEqual({ status: "needs_you", blocking: true });
+    expect(batchStatusWord("cancelled")).toBeNull();
+  });
+
+  it("renders Needs you red for a batch that could not start and the plain word for a cancelled one", () => {
+    expect(renderToStaticMarkup(createElement(ui.BatchStatusWord, { state: "failed" }))).toContain('class="status-word bad"');
+    expect(renderToStaticMarkup(createElement(ui.BatchStatusWord, { state: "attention" }))).toContain('class="status-word warn"');
+    const cancelled = renderToStaticMarkup(createElement(ui.BatchStatusWord, { state: "cancelled" }));
+    expect(cancelled).toBe('<span class="status-word">Cancelled</span>');
+  });
+
+  it("the banner shows the status word, not the old pill", () => {
+    const counts = { ...EMPTY_BATCH_COUNTS, outputs: 10, verified: 10, recheckOk: 10, recheckTotal: 10 };
+    const html = renderToStaticMarkup(createElement(BatchBanner, { status: "done", counts, now: "2026-11-04T10:00:00Z" }));
+    expect(html).toContain(">Done</span>");
+    expect(html).not.toContain('class="pill');
+    const failed = renderToStaticMarkup(createElement(BatchBanner, { status: "failed", counts: { ...EMPTY_BATCH_COUNTS, failReason: "No photos were found." }, now: "2026-11-04T10:00:00Z" }));
+    expect(failed).toContain('class="status-word bad"');
+    expect(failed).toContain(">Needs you</span>");
+  });
+});
+
+describe("batch list detail under the status word", () => {
+  it("shows the intake words while getting ready and the made count while working", () => {
+    expect(batchListDetail({ state: "collecting", intake: "Placing photos 30 of 140", made: 0, total: 0 })).toBe("Placing photos 30 of 140");
+    expect(batchListDetail({ state: "draft", intake: "Ready to start", made: 0, total: 0 })).toBe("Ready to start");
+    expect(batchListDetail({ state: "processing", intake: "", made: 1964, total: 2000 })).toBe("1,964 of 2,000 images made");
+    expect(batchListDetail({ state: "ready", intake: "", made: 10, total: 10 })).toBe("");
   });
 });

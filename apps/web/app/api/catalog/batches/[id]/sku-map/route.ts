@@ -1,3 +1,4 @@
+import { countTouch } from "../../../../../../lib/catalog/touches";
 import { addSkuMap, SKU_MAP_MAX_BYTES, SKU_MAP_TOO_LARGE } from "../../../../../../lib/catalog/sku-map";
 import { batchId, catalogRoute, type BatchContext } from "../../../../../../lib/catalog/api";
 import { badRequest } from "../../../../../../lib/errors";
@@ -10,6 +11,8 @@ export function POST(req: Request, context: BatchContext) {
     if (Number(req.headers.get("content-length") ?? 0) > SKU_MAP_MAX_BYTES + 64 * 1024) throw badRequest(SKU_MAP_TOO_LARGE);
     const file = (await req.formData().catch(() => null))?.get("file");
     if (!(file instanceof File)) throw badRequest("Choose an xlsx or csv mapping sheet.");
-    return addSkuMap(id, file, user.email);
+    const result = await addSkuMap(id, file, user.email);
+    await countTouch("add_sku_ids", { batchId: id });
+    return result;
   });
 }

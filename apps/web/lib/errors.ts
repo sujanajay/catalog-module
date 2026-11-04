@@ -1,4 +1,5 @@
 import { PeopleError } from "@catalog/core/people";
+import { StartRefused } from "@catalog/core/catalog/pipeline/start";
 import { SettingsError } from "@catalog/core/settings/store";
 import { ZodError } from "zod";
 import { log } from "@catalog/core/log";
@@ -34,6 +35,8 @@ export function errorResponse(err: unknown): Response {
   if (err instanceof HttpError) return Response.json({ error: err.message }, { status: err.status });
   // packages/core cannot import HttpError; its people rules throw PeopleError (status 400) instead.
   if (err instanceof PeopleError) return Response.json({ error: err.message }, { status: err.status });
+  // The shared Start (M1-S2) refuses with the status the Start button answers with.
+  if (err instanceof StartRefused) return Response.json({ error: err.message }, { status: err.status });
   // The settings store (M12-S1) refuses with its own status and sentence.
   if (err instanceof SettingsError) return Response.json({ error: err.message }, { status: err.status });
   if (err instanceof ZodError) {

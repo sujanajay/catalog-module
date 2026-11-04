@@ -157,6 +157,34 @@ describe("handleSweep (PGlite)", () => {
     expect(warn).toHaveBeenCalledTimes(1);
   });
 
+  it("M6-S6: records the swept batch as an incident and a failed outcome once, and no incident for a quiet batch (stalls: M1-S4b)", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    vi.spyOn(console, "log").mockImplementation(() => undefined);
+    const stale = await insertBatch("rendering", 5);
+    await insertBatch("rendering", 0.5);
+    for (let i = 0; i < 2; i++) await handleSweep({ db, enqueue: vi.fn(async () => "task"), releaseLocks, now: () => NOW }, {});
+    const incidents = await rows(db, sql`SELECT batch_id, kind, cause_code, cause, resolved_at IS NULL AS open FROM catalog_incidents ORDER BY kind`);
+    expect(incidents).toEqual([
+      { batch_id: stale, kind: "batch_failed", cause_code: "failed_before_start", cause: SWEEP_ERROR, open: false },
+    ]);
+    expect(await rows(db, sql`SELECT batch_id, status, success, cause, incidents FROM catalog_batch_outcomes`)).toEqual([
+      { batch_id: stale, status: "failed", success: false, cause: "failed", incidents: 1 },
+    ]);
+  });
+
+  it("M6-S6: a failed incident pass is an ERROR line and never stops the sweep", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    vi.spyOn(console, "log").mockImplementation(() => undefined);
+    const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    await db.execute(sql`DROP TABLE catalog_incidents CASCADE`);
+    const stale = await insertBatch("rendering", 5);
+    expect(await handleSweep({ db, enqueue: vi.fn(async () => "task"), releaseLocks, now: () => NOW }, {})).toEqual({ httpStatus: 200, outcome: "swept:1" });
+    expect(await batch(stale)).toMatchObject({ status: "failed" });
+    const lines = error.mock.calls.map(([l]) => JSON.parse(String(l)) as Row);
+    expect(lines.some((l) => l.message === "incident pass failed")).toBe(true);
+  });
+
   it("uses the batch's own updated_at when it has no chunks", async () => {
     vi.spyOn(console, "warn").mockImplementation(() => undefined);
     const old = await insertBatch("ingesting", 3);
