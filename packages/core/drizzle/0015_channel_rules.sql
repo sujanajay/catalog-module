@@ -168,6 +168,8 @@ CREATE TABLE IF NOT EXISTS "catalog_rule_results" (
 	CONSTRAINT "catalog_rule_results_ruleset_version_catalog_rulesets_version_fk" FOREIGN KEY ("ruleset_version") REFERENCES "public"."catalog_rulesets"("version") ON DELETE no action ON UPDATE no action
 );
 --> statement-breakpoint
+DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'catalog_rule_conflicts_decision_id_catalog_rule_decisions_id_fk') THEN ALTER TABLE "catalog_rule_conflicts" ADD CONSTRAINT "catalog_rule_conflicts_decision_id_catalog_rule_decisions_id_fk" FOREIGN KEY ("decision_id") REFERENCES "public"."catalog_rule_decisions"("id") ON DELETE no action ON UPDATE no action; END IF; END $$;
+--> statement-breakpoint
 CREATE INDEX IF NOT EXISTS "catalog_rule_decisions_conflict_id_idx" ON "catalog_rule_decisions" USING btree ("conflict_id");
 --> statement-breakpoint
 CREATE UNIQUE INDEX IF NOT EXISTS "catalog_rule_results_version_rule_uq" ON "catalog_rule_results" USING btree ("content_version_id","ruleset_version","channel","rule_id");

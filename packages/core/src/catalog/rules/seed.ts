@@ -216,6 +216,8 @@ const setStatus = (status: "superseded" | "retired", ids: string[], reason: stri
 const C02 = "C02 decided at gate 1 (2 Nov 2026).";
 const C10 = "C10 decided at gate 1 (2 Nov 2026): grey RGB 240 or more for every channel image, Amazon image 1 white.";
 const C27 = "C27 decided at gate 1 (2 Nov 2026): HSN check is format only.";
+/** Owner decision (Sujan, 2026-11-04, "Warn only"): the HSN format and chapter checks warn, they never block. */
+const HSN_WARN_ONLY = "Owner decision 2026-11-04: warn only.";
 
 /** Edits to existing rules in ruleset version 2. Rules of the three conflicts not listed here keep version 1. */
 export const GATE1_RULE_EDITS: RuleEdit[] = [
@@ -223,7 +225,13 @@ export const GATE1_RULE_EDITS: RuleEdit[] = [
   { ruleId: "R015", patch: { declaredSeverity: "warn", confirmedBy: "gate1-C02" }, reason: `${C02} Namshi 150 is a warning; 200 blocks.` },
   { ruleId: "R020", patch: { declaredSeverity: "warn", confirmedBy: "gate1-C02" }, reason: `${C02} Myntra warns above 60 and blocks above 90.` },
   ...setStatus("superseded", ["R018"], `${C02} Amazon "1509" is read as a typo of 150 (R017).`),
-  ...setStatus("superseded", ["R011"], `${C02} The 60 minimum is a warning only where the channel maximum is 100 or more (R556 to R559); the 200 maximum is per channel.`),
+  // Manager decision D19: R011 stays the fallback for every channel without its own title length rule (Styli,
+  // Centrepoint, 6th Street, VogaCloset, Shein), so no channel loses a check; a channel rule wins where one exists.
+  {
+    ruleId: "R011",
+    patch: {},
+    reason: `${C02} Kept as the fallback for channels with no title length rule of their own; R556 to R559 and the channel maximums win where they exist (decision D19).`,
+  },
   ...confirm("gate1-C10", ["R086", "R117", "R125", "R133", "R149", "R166", "R228"], C10),
   {
     ruleId: "R227",
@@ -232,7 +240,7 @@ export const GATE1_RULE_EDITS: RuleEdit[] = [
   },
   ...setStatus("superseded", ["R154", "R155"], `${C10} Image 1 on Namshi and Trendyol is the light grey, not white.`),
   // R527 is the dataset's own format check (digits, 4 to 8 long); R535 is a playbook HSN range outside the conflict list.
-  ...confirm("gate1-C27", ["R527"], C27),
+  { ruleId: "R527", patch: { declaredSeverity: "warn", confirmedBy: "gate1-C27" }, reason: `${C27} ${HSN_WARN_ONLY}` },
   ...setStatus("retired", ["R528", "R529", "R530", "R531", "R532", "R533", "R534", "R535"], `${C27} Finance has not supplied a table.`),
 ];
 
@@ -266,7 +274,7 @@ const titleMin = (ruleId: string, channel: string) =>
     confirmedBy: "gate1-C02",
     source: "R011; decision gate1-C02",
     checkable: true,
-    reason: `${C02} Replaces the universal 60 minimum of R011 on a channel whose maximum is 100 or more.`,
+    reason: `${C02} The 60 minimum warns only where the channel maximum is 100 or more; on this channel it wins over the fallback R011.`,
   });
 
 const hsn = (ruleId: string, categoryScope: string[], pattern: string, text: string) =>
@@ -280,40 +288,25 @@ const hsn = (ruleId: string, categoryScope: string[], pattern: string, text: str
     operator: "matches_regex",
     value: pattern,
     text,
-    // The same grade and severity as the dataset's format check R527, which the decision confirms.
-    declaredSeverity: "block",
+    declaredSeverity: "warn",
     evidence: "assumed",
     confirmedBy: "gate1-C27",
     source: "decision gate1-C27",
     checkable: true,
-    reason: `${C27} The chapter part of the format check; replaces the playbook HSN lists.`,
+    reason: `${C27} The chapter part of the format check; replaces the playbook HSN lists. ${HSN_WARN_ONLY}`,
   });
 
-/** New rules in ruleset version 2. Ids continue after the dataset's last id (R555). */
+/**
+ * New rules in ruleset version 2. Ids continue after the dataset's last id (R555). Shein image 1 white needs no new rule:
+ * the dataset's R229 already holds it as an assumed, unconfirmed rule (decision D2), and it stays at version 1.
+ */
 export const GATE1_NEW_RULES: RuleInsert[] = [
   titleMin("R556", "noon"),
   titleMin("R557", "namshi"),
   titleMin("R558", "trendyol"),
   titleMin("R559", "amazon"),
-  newRule({
-    ruleId: "R560",
-    channel: "shein",
-    categoryScope: [ALL_SCOPE],
-    language: "any",
-    component: "image",
-    field: "image.1.background_hex",
-    operator: "equals",
-    value: "#FFFFFF",
-    text: "Image 1 on Shein is pure white #FFFFFF (today's code; not confirmed by a channel or the owner)",
-    declaredSeverity: "block",
-    evidence: "assumed",
-    confirmedBy: null,
-    source: "packages/core/src/catalog/channels.ts (shein firstImageBackground); M5 decision D2",
-    checkable: true,
-    reason: "Kept from today's code as an assumed rule; gate 1 named only Amazon (M5-F1-R4, decision D2).",
-  }),
-  hsn("R561", ["fashion.apparel"], "^6[12]", "HSN code for apparel starts with chapter 61 or 62"),
-  hsn("R562", ["fashion.footwear"], "^64", "HSN code for footwear starts with chapter 64"),
+  hsn("R560", ["fashion.apparel"], "^6[12]", "HSN code for apparel starts with chapter 61 or 62"),
+  hsn("R561", ["fashion.footwear"], "^64", "HSN code for footwear starts with chapter 64"),
 ];
 
 const V2_CHANNEL_REASON = `${C10} Background ${GREY_240}.`;

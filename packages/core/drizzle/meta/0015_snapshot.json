@@ -4289,7 +4289,21 @@
         }
       },
       "indexes": {},
-      "foreignKeys": {},
+      "foreignKeys": {
+        "catalog_rule_conflicts_decision_id_catalog_rule_decisions_id_fk": {
+          "name": "catalog_rule_conflicts_decision_id_catalog_rule_decisions_id_fk",
+          "tableFrom": "catalog_rule_conflicts",
+          "tableTo": "catalog_rule_decisions",
+          "columnsFrom": [
+            "decision_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        }
+      },
       "compositePrimaryKeys": {},
       "uniqueConstraints": {},
       "policies": {},

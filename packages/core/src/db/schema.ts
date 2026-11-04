@@ -1476,7 +1476,7 @@ export const catalogRuleConflicts = pgTable(
     reasoning: text("reasoning").notNull(),
     status: text("status", { enum: CONFLICT_STATUSES }).notNull(),
     /** The decision in force; null while open. */
-    decisionId: text("decision_id"),
+    decisionId: text("decision_id").references((): AnyPgColumn => catalogRuleDecisions.id),
     createdAt: createdAt(),
     updatedAt: updatedAt(),
   },

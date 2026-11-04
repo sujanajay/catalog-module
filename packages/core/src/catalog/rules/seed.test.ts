@@ -157,7 +157,7 @@ describe("version 1 is the dataset as it is (M5-F1-R2)", () => {
 });
 
 describe("version 2 applies the gate-1 decisions (M5-F1-R4, M5-F2-R4)", () => {
-  it("C02: per-channel title lengths, confirmed; Namshi 150 and Myntra 60 warn; the 1509 typo and the universal minimum go", () => {
+  it("C02: per-channel title lengths, confirmed; Namshi 150 and Myntra 60 warn; the 1509 typo goes", () => {
     for (const id of ["R013", "R014", "R016", "R017", "R019"]) expect(rule(v2, id)).toMatchObject({ version: 2, declaredSeverity: "block", confirmedBy: "gate1-C02", status: "active" });
     expect(rule(v2, "R013").value).toBe(150);
     expect(rule(v2, "R014").value).toBe(200);
@@ -166,12 +166,25 @@ describe("version 2 applies the gate-1 decisions (M5-F1-R4, M5-F2-R4)", () => {
     expect(rule(v2, "R015")).toMatchObject({ value: 150, declaredSeverity: "warn", confirmedBy: "gate1-C02" });
     expect(rule(v2, "R020")).toMatchObject({ value: 60, declaredSeverity: "warn", confirmedBy: "gate1-C02" });
     expect(rule(v2, "R018").status).toBe("superseded");
-    expect(rule(v2, "R011").status).toBe("superseded");
     const minimums = v2.rules.filter((r) => r.field === "title.length" && r.operator === "gte" && r.status === "active");
     expect(minimums.map((r) => r.channel).sort()).toEqual(["amazon", "namshi", "noon", "trendyol"]);
     for (const r of minimums) expect(r).toMatchObject({ value: 60, declaredSeverity: "warn", confirmedBy: "gate1-C02" });
     // Version 1 is untouched.
     expect(rule(v1, "R015")).toMatchObject({ declaredSeverity: "block", confirmedBy: null });
+  });
+
+  it("C02: R011 (60 to 200, warn) stays the fallback, so no channel loses its title length check (decision D19)", () => {
+    expect(rule(v2, "R011")).toMatchObject({ version: 2, channel: "all", operator: "between", value: [60, 200], declaredSeverity: "warn", status: "active" });
+    expect(rule(v2, "R011").reason).toMatch(/fallback/);
+    const lengthRules = (channel: string) =>
+      v2.rules.filter((r) => r.field === "title.length" && r.status === "active" && r.channel === channel).map((r) => r.id);
+    // Channels with no title rule of their own are checked by R011 alone.
+    for (const id of ["styli", "centrepoint", "sixthstreet", "vogacloset", "shein"]) expect(lengthRules(id)).toEqual([]);
+    expect(lengthRules("all")).toContain("R011");
+    // The four channels with a maximum of 100 or more have their own minimum, which wins over R011 (M5-F1-R8).
+    for (const id of ["noon", "namshi", "trendyol", "amazon"]) {
+      expect(v2.rules.some((r) => r.channel === id && r.field === "title.length" && r.operator === "gte" && r.status === "active")).toBe(true);
+    }
   });
 
   it("C10: grey #F0F0F0 (240) on every channel, Amazon image 1 white confirmed, Shein image 1 white kept as an unconfirmed assumed rule", () => {
@@ -181,7 +194,11 @@ describe("version 2 applies the gate-1 decisions (M5-F1-R4, M5-F2-R4)", () => {
     expect(rule(v2, "R228")).toMatchObject({ value: "#FFFFFF", channel: "amazon", confirmedBy: "gate1-C10" });
     expect(rule(v2, "R154").status).toBe("superseded");
     expect(rule(v2, "R155").status).toBe("superseded");
-    expect(rule(v2, "R560")).toMatchObject({ channel: "shein", field: "image.1.background_hex", value: "#FFFFFF", evidence: "assumed", confirmedBy: null, status: "active" });
+    // Shein image 1 white is the dataset's own R229, kept as it is (assumed, unconfirmed); no second rule for it.
+    const shein = v2.rules.filter((r) => r.channel === "shein" && r.field === "image.1.background_hex" && r.status === "active");
+    expect(shein.map((r) => r.id)).toEqual(["R229"]);
+    expect(rule(v2, "R229")).toEqual(rule(v1, "R229"));
+    expect(rule(v2, "R229")).toMatchObject({ value: "#FFFFFF", evidence: "assumed", confirmedBy: null, version: 1 });
 
     for (const c of v1.channels) expect(c.background).toBe("#E0E0E0");
     for (const c of v2.channels) {
@@ -193,17 +210,18 @@ describe("version 2 applies the gate-1 decisions (M5-F1-R4, M5-F2-R4)", () => {
     expect(v2.channels.find((c) => c.id === "amazon")!.firstImageBackground).toBe("#FFFFFF");
   });
 
-  it("C27: HSN lists retired with the reason, a format-only check takes their place", () => {
+  it("C27: HSN lists retired with the reason, a format-only check takes their place, warn only (owner 2026-11-04)", () => {
     for (const id of ["R528", "R529", "R530", "R531", "R532", "R533", "R534", "R535"]) {
       expect(rule(v2, id).status).toBe("retired");
       expect(rule(v2, id).reason).toMatch(/Finance has not supplied a table/);
     }
     const format = v2.rules.filter((r) => r.field === "hsn.code" && r.status === "active");
-    expect(format.map((r) => [r.id, r.categoryScope, r.operator, r.value, r.confirmedBy])).toEqual([
-      ["R527", ["all"], "matches_regex", "^\\d{4,8}$", "gate1-C27"],
-      ["R561", ["fashion.apparel"], "matches_regex", "^6[12]", "gate1-C27"],
-      ["R562", ["fashion.footwear"], "matches_regex", "^64", "gate1-C27"],
+    expect(format.map((r) => [r.id, r.categoryScope, r.operator, r.value, r.declaredSeverity, r.confirmedBy])).toEqual([
+      ["R527", ["all"], "matches_regex", "^\\d{4,8}$", "warn", "gate1-C27"],
+      ["R560", ["fashion.apparel"], "matches_regex", "^6[12]", "warn", "gate1-C27"],
+      ["R561", ["fashion.footwear"], "matches_regex", "^64", "warn", "gate1-C27"],
     ]);
+    for (const r of format) expect(r.reason).toMatch(/Owner decision 2026-11-04: warn only/);
     const [digits, apparel, footwear] = format.map((r) => new RegExp(String(r.value)));
     expect(digits!.test("61091000")).toBe(true);
     expect(digits!.test("61A9")).toBe(false);
@@ -260,6 +278,12 @@ describe("the seed refuses bad input", () => {
     expect(() => validateDataset(bad)).toThrow(/Duplicate rule ids in the dataset: R001/);
   });
 
+  it("a conflict cannot point at a decision that does not exist", async () => {
+    const insert = sql`insert into catalog_rule_conflicts (id, topic, severity, rule_ids, options, recommendation, reasoning, status, decision_id)
+      values ('C99', 't', 'low', '[]', '[]', 'r', 'r', 'decided', 'no-such-decision')`;
+    await expect(db.execute(insert)).rejects.toMatchObject({ cause: expect.objectContaining({ message: expect.stringMatching(/catalog_rule_conflicts_decision_id/) }) });
+  });
+
   it("fails without the M2 taxonomy and writes nothing", async () => {
     const fresh = await createTestDb();
     try {
@@ -275,13 +299,28 @@ describe("the seed refuses bad input", () => {
 describe("BigQuery export rows (M5 3.3, decision D13)", () => {
   const read = (table: string) => RULES_EXPORT_TABLES.find((t) => t.table === table)!;
 
-  it("exports every rule version and every conflict with its decision, in pages", async () => {
-    const page1 = await read("rules").read(db, { offset: 0, limit: 500 });
-    const page2 = await read("rules").read(db, { offset: 500, limit: 500 });
-    expect(page1).toHaveLength(500);
-    expect(page1.length + page2.length).toBe((await counts()).rules);
-    for (const row of page1.slice(0, 5)) for (const field of read("rules").schema) if (field.mode === "REQUIRED") expect(row[field.name]).not.toBeNull();
-    const conflicts = await read("conflicts").read(db, { offset: 0, limit: 100 });
+  /** Every row of a table, page after page, each page starting after the previous page's cursor (keyset paging). */
+  const readAll = async (table: string, limit: number) => {
+    const all: Record<string, unknown>[] = [];
+    let after: string | null = null;
+    for (let pages = 0; pages < 100; pages++) {
+      const page = await read(table).read(db, { after, limit });
+      all.push(...page.rows);
+      if (page.next === null) return { rows: all, pages: pages + 1 };
+      after = page.next;
+    }
+    throw new Error("export paging did not end");
+  };
+
+  it("exports every rule version and every conflict with its decision, in keyset pages", async () => {
+    const first = await read("rules").read(db, { after: null, limit: 500 });
+    expect(first.rows).toHaveLength(500);
+    expect(first.next).not.toBeNull();
+    const rules = await readAll("rules", 200);
+    expect(rules.rows).toHaveLength((await counts()).rules!);
+    expect(new Set(rules.rows.map((r) => `${String(r.rule_id)}/${String(r.version)}`)).size).toBe(rules.rows.length);
+    for (const row of first.rows.slice(0, 5)) for (const field of read("rules").schema) if (field.mode === "REQUIRED") expect(row[field.name]).not.toBeNull();
+    const conflicts = (await readAll("conflicts", 7)).rows;
     expect(conflicts).toHaveLength(30);
     expect(conflicts.find((c) => c.conflict_id === "C10")).toMatchObject({ status: "decided", decision_id: "gate1-C10", decided_by: "owner (gate 1)" });
     expect(Object.keys(conflicts[0]!).sort()).toEqual(read("conflicts").schema.map((f) => f.name).sort());
@@ -314,7 +353,7 @@ describe("BigQuery export rows (M5 3.3, decision D13)", () => {
     });
     await db.insert(catalogRuleResults).values([result(real!.id), result(test!.id)]);
     await db.insert(catalogRuleResults).values(result(real!.id)).onConflictDoNothing();
-    const exported = await read("rule_results").read(db, { offset: 0, limit: 100 });
+    const exported = (await readAll("rule_results", 100)).rows;
     expect(exported).toEqual([expect.objectContaining({ content_version_id: real!.id, rule_id: "R013", measured: "163", outcome: "fail" })]);
   });
 });

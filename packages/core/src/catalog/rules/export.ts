@@ -1,8 +1,10 @@
 // M5 3.3: the daily BigQuery copy of `rules`, `conflicts` and `rule_results` into `catalog_os.*`, with the M0 export.
 // M5 owns what is exported (the rows and their BigQuery schema); the M0 export job (M0-F5, M0-S4) owns the run: the
 // schedule, the staging-table swap, the export_runs row and the freshness alert (decision D13). Each table is read in
-// pages in a stable order, as M0-F5-R5 asks, and rule results of test content are left out (M0-F5-R3).
-import { asc, eq, sql } from "drizzle-orm";
+// keyset pages (each page starts after the last key of the previous one, so a page costs the same at any depth), as
+// M0-F5-R5 asks, and rule results of test content are left out (M0-F5-R3). The export job reads every page inside one
+// read-only transaction, so rows written during the export are not half-seen.
+import { and, asc, eq, gt, sql } from "drizzle-orm";
 import type { Db } from "../../db/client";
 import { catalogContentVersions, catalogRuleConflicts, catalogRuleDecisions, catalogRuleResults, catalogRules } from "../../db/schema";
 
@@ -19,8 +21,20 @@ export interface RulesExportTable {
   /** The table name inside the `catalog_os` dataset. */
   table: "rules" | "conflicts" | "rule_results";
   schema: ExportField[];
-  /** One page of rows in a stable order; an empty page means the end. */
-  read(db: Db, page: { offset: number; limit: number }): Promise<ExportRow[]>;
+  /** One page of rows in key order, starting after `after` (null: from the start). `next` is null on the last page. */
+  read(db: Db, page: { after: string | null; limit: number }): Promise<ExportPage>;
+}
+
+export interface ExportPage {
+  rows: ExportRow[];
+  /** The cursor to pass as `after` for the next page; null when this page is the last. */
+  next: string | null;
+}
+
+/** A page from rows fetched with limit + 1: the extra row only tells whether another page exists. */
+function pageOf<T>(fetched: T[], limit: number, key: (row: T) => string, toRow: (row: T) => ExportRow): ExportPage {
+  const rows = fetched.slice(0, limit);
+  return { rows: rows.map(toRow), next: fetched.length > limit && rows.length ? key(rows[rows.length - 1]!) : null };
 }
 
 const f = (name: string, type: ExportField["type"], mode: ExportField["mode"] = "REQUIRED"): ExportField => ({ name, type, mode });
@@ -37,9 +51,16 @@ const rules: RulesExportTable = {
     f("declared_severity", "STRING"), f("evidence", "STRING"), f("confirmed_by", "STRING", "NULLABLE"), f("source", "STRING"),
     f("conflicts_with", "STRING"), f("checkable", "BOOL"), f("status", "STRING"), f("reason", "STRING"), f("created_by", "STRING"), f("created_at", "TIMESTAMP"),
   ],
-  async read(db, { offset, limit }) {
-    const rows = await db.select().from(catalogRules).orderBy(asc(catalogRules.ruleId), asc(catalogRules.version)).limit(limit).offset(offset);
-    return rows.map((r) => ({
+  async read(db, { after, limit }) {
+    // Cursor "<rule_id>/<version>"; rule ids never hold a slash.
+    const [afterId, afterVersion] = after ? [after.slice(0, after.lastIndexOf("/")), Number(after.slice(after.lastIndexOf("/") + 1))] : [null, 0];
+    const fetched = await db
+      .select()
+      .from(catalogRules)
+      .where(afterId === null ? undefined : sql`(${catalogRules.ruleId}, ${catalogRules.version}) > (${afterId}, ${afterVersion})`)
+      .orderBy(asc(catalogRules.ruleId), asc(catalogRules.version))
+      .limit(limit + 1);
+    return pageOf(fetched, limit, (r) => `${r.ruleId}/${r.version}`, (r) => ({
       rule_id: r.ruleId,
       version: r.version,
       ruleset_version: r.rulesetVersion,
@@ -76,15 +97,15 @@ const conflicts: RulesExportTable = {
     f("recommendation", "STRING"), f("decision_id", "STRING", "NULLABLE"), f("decided_option", "STRING", "NULLABLE"),
     f("decided_by", "STRING", "NULLABLE"), f("decided_at", "TIMESTAMP", "NULLABLE"), f("decision_ruleset_version", "INT64", "NULLABLE"),
   ],
-  async read(db, { offset, limit }) {
-    const rows = await db
+  async read(db, { after, limit }) {
+    const fetched = await db
       .select({ c: catalogRuleConflicts, d: catalogRuleDecisions })
       .from(catalogRuleConflicts)
       .leftJoin(catalogRuleDecisions, eq(catalogRuleDecisions.id, catalogRuleConflicts.decisionId))
+      .where(after === null ? undefined : gt(catalogRuleConflicts.id, after))
       .orderBy(asc(catalogRuleConflicts.id))
-      .limit(limit)
-      .offset(offset);
-    return rows.map(({ c, d }) => ({
+      .limit(limit + 1);
+    return pageOf(fetched, limit, ({ c }) => c.id, ({ c, d }) => ({
       conflict_id: c.id,
       topic: c.topic,
       severity: c.severity,
@@ -107,16 +128,15 @@ const ruleResults: RulesExportTable = {
     f("content_version_id", "STRING"), f("ruleset_version", "INT64"), f("channel", "STRING"), f("rule_id", "STRING"), f("rule_version", "INT64"),
     f("outcome", "STRING"), f("effective_severity", "STRING"), f("measured", "STRING", "NULLABLE"), f("message", "STRING"), f("created_at", "TIMESTAMP"),
   ],
-  async read(db, { offset, limit }) {
-    const rows = await db
+  async read(db, { after, limit }) {
+    const fetched = await db
       .select({ r: catalogRuleResults })
       .from(catalogRuleResults)
       .innerJoin(catalogContentVersions, eq(catalogContentVersions.id, catalogRuleResults.contentVersionId))
-      .where(sql`not ${catalogContentVersions.isTest}`)
+      .where(and(sql`not ${catalogContentVersions.isTest}`, after === null ? undefined : gt(catalogRuleResults.id, after)))
       .orderBy(asc(catalogRuleResults.id))
-      .limit(limit)
-      .offset(offset);
-    return rows.map(({ r }) => ({
+      .limit(limit + 1);
+    return pageOf(fetched, limit, ({ r }) => r.id, ({ r }) => ({
       content_version_id: r.contentVersionId,
       ruleset_version: r.rulesetVersion,
       channel: r.channel,
