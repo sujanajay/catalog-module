@@ -193,3 +193,12 @@ export const showAllText = (total: number) => `Show all ${count(total)}`;
 export const canRetryLinks = (failures: { total: number; temporary: number } | null | undefined) => !!failures && failures.total > 0 && failures.temporary > 0;
 /** The toast after the failed links were handed back to collection. */
 export const RETRY_LINKS_STARTED = "Trying the failed links again.";
+/**
+ * The line under a batch's status word on the batch list (UX D11): the intake words while getting ready, the made
+ * count while working, nothing otherwise (the batch page has the detail).
+ */
+export function batchListDetail(state: { state: string; intake: string; made: number; total: number }): string {
+  if (state.state === "draft" || state.state === "collecting") return state.intake;
+  if (state.state === "processing") return `${state.made.toLocaleString("en-US")} of ${state.total.toLocaleString("en-US")} images made`;
+  return "";
+}

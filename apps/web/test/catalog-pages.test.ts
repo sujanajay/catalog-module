@@ -325,7 +325,7 @@ it("a draft and a collecting batch carry Cancel this batch next to Continue sett
 it("a cancelled batch says so, with nothing made and no button to continue or cancel",async()=>{
  await setBatch({status:"cancelled",updatedAt:new Date()});
  const html=await batchPage();
- expect(html).toContain('<span class="pill ">Cancelled</span><span>Cancelled just now</span>');
+ expect(html).toContain('<span class="status-word">Cancelled</span><span>Cancelled just now</span>');
  expect(html).toContain(NOTHING_PROCESSED);
  for(const text of [CONTINUE_SETTING_UP,CANCEL_THIS_BATCH,FIX_AND_CONTINUE,"Start again"])expect(html).not.toContain(text);
  expect(panel(html,"sheet")).toContain("This batch has not started.");
@@ -393,7 +393,7 @@ it("leaves cancelled batches out of the list until Show cancelled, and the secti
  expect(html).not.toContain("First delivery");expect(unfinishedSection(html)).toBe("");
  expect(html).toContain(`<a href="/catalog?cancelled=1">${SHOW_CANCELLED}</a>`);
  html=await listPage({cancelled:"1"});
- expect(html).toContain("First delivery");expect(html).toContain('<span class="pill cancelled">Cancelled</span>');
+ expect(html).toContain("First delivery");expect(html).toContain('<span class="status-word">Cancelled</span>');
  expect(html).toContain('<th>State</th>');
 });
 it("the brand page names the query only when there is one",async()=>{
