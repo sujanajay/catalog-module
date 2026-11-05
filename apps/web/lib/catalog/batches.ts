@@ -11,6 +11,7 @@ import { badRequest, HttpError } from "../errors";
 import { batchSource } from "./copy";
 import { defaultChannels } from "@catalog/core/catalog/intake-defaults";
 import { holdAutoStart } from "@catalog/core/catalog/auto-start";
+import { lockForInputChange } from "@catalog/core/catalog/ingest/input-change";
 import { BATCH_STARTED, notDraftText } from "@catalog/core/catalog/pipeline/start";
 
 /** The 404 sentence for a batch id that does not exist (API routes and `/catalog/new?batch=`). */
@@ -33,6 +34,28 @@ export async function draftForUpdate(tx: Transaction, id: string): Promise<Catal
   if (!batch) throw new HttpError(404, BATCH_NOT_FOUND);
   if (batch.status !== "draft") throw new HttpError(409, notDraftText(batch));
   return batch;
+}
+/**
+ * M1 D24 (M1-S6, closes D20): inputs can change while the files are collected. A collecting batch that never started
+ * takes the change like a draft: it is the batch the input routes check (assertInputsOpen), and the change itself goes
+ * through batchForInputChange.
+ */
+export async function assertInputsOpen(id: string): Promise<CatalogBatch> {
+  const batch = await queryBatch(id);
+  if (batch.status === "draft" || (batch.status === "ingesting" && !batch.startedAt)) return batch;
+  throw new HttpError(409, notDraftText(batch));
+}
+/**
+ * The batch row of an input change, locked (as draftForUpdate). A collecting batch stays collecting: the change only
+ * marks the inputs changed (core lockForInputChange, M1 D24 review P1-1), so a batch-wide step in flight keeps its
+ * lease and, at its close, groups again with the change instead of a second step starting next to it. The countdown
+ * stops; the next finished collection arms a new one (M1-F2 "more files restart it").
+ */
+export async function batchForInputChange(tx: Transaction, id: string): Promise<CatalogBatch> {
+  const locked = await lockForInputChange(tx, id);
+  if (!("refused" in locked)) return locked.batch;
+  if (locked.refused === "missing") throw new HttpError(404, BATCH_NOT_FOUND);
+  throw new HttpError(409, notDraftText(locked.batch));
 }
 /** The answer for an upload id that is not an input of this batch, or not of the route's kind. */
 export const INPUT_NOT_FOUND = "This input is not part of this batch. Reload this page.";

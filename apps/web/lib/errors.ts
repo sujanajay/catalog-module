@@ -1,6 +1,7 @@
 import { PeopleError } from "@catalog/core/people";
 import { StartRefused } from "@catalog/core/catalog/pipeline/start";
 import { SettingsError } from "@catalog/core/settings/store";
+import { FollowUpRefused } from "@catalog/core/catalog/follow-up";
 import { ZodError } from "zod";
 import { log } from "@catalog/core/log";
 
@@ -39,6 +40,8 @@ export function errorResponse(err: unknown): Response {
   if (err instanceof StartRefused) return Response.json({ error: err.message }, { status: err.status });
   // The settings store (M12-S1) refuses with its own status and sentence.
   if (err instanceof SettingsError) return Response.json({ error: err.message }, { status: err.status });
+  // M1-S6: more photos for a batch that has not started (or does not exist) are refused with its own status.
+  if (err instanceof FollowUpRefused) return Response.json({ error: err.message }, { status: err.status });
   if (err instanceof ZodError) {
     const msg = err.issues.map((i) => `${i.path.join(".") || "body"}: ${i.message}`).join("; ");
     return Response.json({ error: msg, issues: err.issues }, { status: 400 });

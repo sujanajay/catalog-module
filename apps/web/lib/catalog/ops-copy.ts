@@ -190,6 +190,10 @@ export function healthLines(h: HealthSummary, gpuCandidate: string | null | unde
 
 /** M6-S6 (M6-F3-R5): the reliability card. Kinds and causes in plain words; the raw codes stay in the database. */
 export const RELIABILITY_TITLE = "Reliability";
+/** M1-F5-R5 (M1-S6): the Ops section of drafts that never started. */
+export const ORPHAN_DRAFTS_TITLE = "Drafts that did not start";
+export const ORPHAN_DRAFTS_HELP = "Drafts older than a day with files or links that never started, and why. Test batches are left out. The goal is none.";
+export const ORPHAN_DRAFTS_NONE = "Every draft with files started.";
 export const RELIABILITY_HELP = "A batch succeeds when its links are ready with no person stepping in and nothing going wrong on our side. Test batches, and batches cancelled within 10 minutes of starting, are left out.";
 export const INCIDENT_KIND_WORDS: Record<IncidentKind, string> = {
   batch_failed: "Batch stopped",

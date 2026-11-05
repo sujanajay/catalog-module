@@ -23,6 +23,8 @@ export const OUTPUT_FLAGS = [
   "product_removed","chart_image","matte_passthrough","enlargement_failed",
   // M1-F3 (M1-S3): delivered now by an auto-decide rule with the best image we have; may be improved later at the same URL.
   "provisional",
+  // M1 D30 (M1-S6): a follow-up photo that was not added (another batch's live photo has its place, or over the channel limit).
+  "not_added",
 ] as const;
 /** Why the QA triage would hold an output for a person (qa/triage.ts `HoldCause`). */
 export const HOLD_CAUSES = ["wrong_item","collage","unusable","corrupt","unchecked","photo_one","every_photo","not_publishable","code_fault","not_enlarged"] as const;
@@ -130,6 +132,12 @@ export interface BatchOptions {
    */
   autoStart?: boolean;
   /**
+   * M1 D30 (M1-S6): a follow-up batch ("Add more photos") only adds photos. Its shots of a product that already has
+   * photos are numbered after that product's highest shot, and its publish never replaces, removes or retires a live
+   * photo; a photo over its channel's image limit (ingest/append.ts) is skipped with a note. Absent on other batches.
+   */
+  append?: boolean;
+  /**
    * M1-F2-R7: two identifiers that are one product, from different uploads: only the newest upload's photos are used
    * and the other spelling is left out. Absent means on; false (the operator's "Use only the newest photo of each
    * product" unticked) leaves both out, as before M1-S2. Spellings from one upload have no newest and are both left out.
@@ -212,6 +220,24 @@ export interface BatchCounts {
    */
   ingestRun?: string | null;
   /**
+   * M1-S6 (M1-F5-R1, R4): how many times the sweep moved this batch on by itself: `sweepHandOffs` hand-offs of a draft
+   * whose tab closed before collecting, `sweepRearms` countdowns armed again after their task was lost, and
+   * `ingestResends` re-sends of an intake that gave up. Each is capped, so a draft that keeps failing waits for a
+   * person and is listed on the Ops page. Optional (no migration).
+   */
+  sweepHandOffs?: number;
+  sweepRearms?: number;
+  ingestResends?: number;
+  /**
+   * M1 D24 (review P1-1): a new id written by every input change while the batch is collecting. The batch-wide step
+   * records the value it grouped with in `groupedChange` at its claim; when they differ at its closing write it does
+   * not close but groups again. Optional (no migration).
+   */
+  inputsChangedAt?: string | null;
+  groupedChange?: string | null;
+  /** M1 review P2-4: the auto-start task ended this countdown on purpose (a refusal that is not busy); the sweep does not arm it again. */
+  autoStartEnded?: boolean | null;
+  /**
    * Spec 17 G4: real errors each chunk's current task (stage, step) threw, keyed by chunk id and counted by the
    * worker. The chunk fails at CHUNK_MAX_ERRORS; a new step starts again at 1. Optional (no migration).
    */
@@ -287,6 +313,8 @@ const REASONS: Partial<Record<OutputFlag, (ctx?: Ctx) => string>> = {
     "Background was removed with the simple method because the cut-out service was unavailable. Check the edges.",
   duplicate_shot: (ctx) =>
     `Two files in the upload have the same identifier and shot number${has(ctx, "n") ? ` (${ctx?.n})` : ""}, so this product was not processed. Remove or rename one of them and add the product again.`,
+  not_added: () =>
+    "This photo from Add more photos was not added, so the photos already live stay as they are. The technical team will look at it.",
   numbering_gap: (ctx) =>
     has(ctx, "list")
       ? `Shot numbers ${ctx?.list} are missing in the upload; images shifted left in this row.`

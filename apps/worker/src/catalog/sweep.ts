@@ -17,6 +17,7 @@ import { refreshOutcomes, syncIncidents } from "@catalog/core/catalog/reliabilit
 import { applyOutageDeadline, assessUpscalerOutages, syncOutageIncidents, type OutageProbe } from "@catalog/core/catalog/upscaler-health";
 import { enqueueFinalize, finalizeEnqueueExpired, finalizePendingFlag } from "./deps";
 import { enqueueImprovements } from "./improve";
+import { handOffIdleDrafts, logOrphanCount, rearmLostCountdowns, resendGivenUpIntake } from "@catalog/core/catalog/drafts";
 
 /** No progress for this long fails the batch (2 hours, from the plan). */
 export const SWEEP_STALE_MS = 2 * 60 * 60 * 1000;
@@ -126,6 +127,19 @@ export async function handleSweep(deps: SweepDeps, _body: Record<string, unknown
   // stops the sweep.
   try { await resendStalledIngest(deps.db, deps.enqueue ?? enqueueTask, now); }
   catch (error) { log("ERROR", "ingest re-send failed", { error: error instanceof Error ? error.message : String(error) }); }
+  // M1-S6 (M1-F5-R1, R4, R5): drafts carry on by themselves when the tab closed (hand-off, a lost countdown), an intake
+  // that gave up is re-sent, and once a day the drafts that still did not start are counted. Each is capped per batch
+  // (core catalog/drafts.ts) and a failure in one never stops the sweep.
+  const draftSteps: [string, () => Promise<unknown>][] = [
+    ["sweep hand-off of idle drafts", () => handOffIdleDrafts(deps.db, deps.enqueue ?? enqueueTask, now)],
+    ["sweep re-arm of lost countdowns", () => rearmLostCountdowns(deps.db, deps.enqueue ?? enqueueTask, now)],
+    ["re-send of given-up intakes", () => resendGivenUpIntake(deps.db, deps.enqueue ?? enqueueTask, now)],
+    ["orphan draft count", () => logOrphanCount(deps.db, now)],
+  ];
+  for (const [name, step] of draftSteps) {
+    try { await step(); }
+    catch (error) { log("ERROR", `${name} failed`, { error: error instanceof Error ? error.message : String(error) }); }
+  }
   // M1-S4 (M1-F3-R4): improvement tasks for the provisional plain renders due a try. A failure here never stops the sweep.
   try { await enqueueImprovements(deps.db, deps.enqueue ?? enqueueTask, now, deps.enlargementOff ? { enlargementOff: true } : {}); }
   catch (error) { log("ERROR", "improvement enqueue failed", { error: error instanceof Error ? error.message : String(error) }); }
