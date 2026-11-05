@@ -20,7 +20,7 @@ import { CHANNELS } from "@catalog/core/catalog/channels";
 import type { ChannelRules } from "@catalog/core/catalog/channel-rules";
 import { enlargementPlan, UnsupportedSourceError, type EnlargementShot, type Prepared } from "@catalog/core/catalog/render";
 import { EnlargementNotReadyError, gpuUrlsFromEnv, isCpuUpscalerId, upscaleTargetFromEnv, markEnlargementTerminal, markEnlargementUnwanted, primeSourceX2, storedUpscaler, upscaleMaxPixels, upscalerFactor, upscalerId, upscalerModel, upscaleUpload, UPSCALE_MODEL_VERSIONS, type UpscaleFactor, type Upscaler } from "@catalog/core/catalog/upscale";
-import { ENLARGE_TASK_MARGIN_MS, EnlargeError, enlargeTimeoutMs, enlargeViaService, probeUpscaleHealth, type EnlargeDeps, type EnlargeResult, type UpscaleProbe } from "@catalog/core/catalog/enlarge";
+import { ENLARGE_TASK_MARGIN_MS, EnlargeBusyError, EnlargeError, enlargeTimeoutMs, enlargeViaService, probeUpscaleHealth, type EnlargeDeps, type EnlargeResult, type UpscaleProbe } from "@catalog/core/catalog/enlarge";
 import { ENLARGE_DISPATCH_DEADLINE_SEC } from "@catalog/core/tasks";
 import {
   ENLARGE_CLAIM_MS, ENLARGE_MAX_IDENTITY_CHANGES, ENLARGE_MAX_TIMEOUTS, ENLARGE_NEED_SLACK, ENLARGE_PROBE_TIMEOUTS_MAX, ENLARGE_TASK_MAX_ATTEMPTS, ENLARGING_TASK,
@@ -29,6 +29,7 @@ import {
 } from "@catalog/core/catalog/pipeline/enlargement";
 import { isBulkBatch, tryEnqueueChunk } from "@catalog/core/catalog/pipeline/dispatch";
 import { recordCostEvents, type CostEventInput } from "@catalog/core/cost-events";
+import { recordUpscalerObservation, serviceOf, type UpscalerObservation } from "@catalog/core/catalog/upscaler-health";
 import type { CostOutcome } from "@catalog/core/db/schema";
 import { onDrain } from "../drain";
 import { upscaleCallUsd } from "@catalog/core/catalog/cost";
@@ -89,6 +90,15 @@ export function workerEnlargeProbe(env: NodeJS.ProcessEnv = process.env, deps: E
     const route = upscaleRouteFor(upscaler, env);
     return route.url ? probeUpscaleHealth({ url: route.url, model: upscalerModel(upscaler), timeoutMs: Math.min(upscaleProbeTimeoutMs(route.env), opts.timeoutMs ?? Infinity) }, deps) : "absent";
   };
+}
+
+/**
+ * M1-S4b: one observation of the upscaler service's health (catalog/upscaler-health.ts), stamped `at`, the moment its
+ * request was sent. A failed write is one WARNING and never changes or delays the delivery.
+ */
+export async function observeUpscaler(deps: Pick<CatalogDeps, "db" | "log" | "now">, upscaler: string, kind: UpscalerObservation, at: Date): Promise<void> {
+  try { await recordUpscalerObservation(deps.db, { service: serviceOf(upscaler), kind, at, upscaler }, deps.now()); }
+  catch (error) { deps.log("upscaler health not recorded", { severity: "WARNING", upscaler, kind, error: error instanceof Error ? error.message : String(error) }); }
 }
 
 /**
@@ -178,7 +188,7 @@ export function wantedRows(deps: Pick<CatalogDeps, "exportHashes">, be: BatchEnl
 
 export interface ReconcileInput {
   be: BatchEnlargement;
-  batch: Pick<typeof catalogBatches.$inferSelect, "id" | "channels" | "brandSlug" | "isTest" | "counts" | "name">;
+  batch: Pick<typeof catalogBatches.$inferSelect, "id" | "channels" | "brandSlug" | "isTest" | "counts" | "name" | "rulesetVersion">;
   product: Pick<typeof catalogProducts.$inferSelect, "id" | "productType">;
   /** Every photo of the product with a matte this delivery can read (the plan's superset). */
   shots: PhotoShot[];
@@ -205,7 +215,7 @@ export interface ReconcileResult { rows: CatalogEnlargement[]; queued: boolean; 
 export async function reconcileEnlargements(deps: CatalogDeps, input: ReconcileInput): Promise<ReconcileResult> {
   const { be, batch, product } = input;
   // M3-S1: the same channel values the render reads, so the plan stays a superset of what the render needs.
-  const target = wantedRows(deps, be, batch, product, input.shots, input.wanted, await deps.channelRules());
+  const target = wantedRows(deps, be, batch, product, input.shots, input.wanted, await deps.channelRules(batch.rulesetVersion));
   const now = deps.now();
   let rows: CatalogEnlargement[];
   if (input.mode === "check") {
@@ -440,7 +450,9 @@ export async function handleEnlargeTask(deps: CatalogDeps, body: Record<string, 
   // Any other answer resets the count (3.4 step 7: consecutive timeouts).
   const forced = claimed.probeTimeouts >= ENLARGE_PROBE_TIMEOUTS_MAX;
   if (!forced) {
+    const probeAt = deps.now();
     const probe = await probeService(row.upscaler, { timeoutMs: Math.max(ENLARGE_REPROBE_FLOOR_MS, requestEnd - ENLARGE_TASK_MARGIN_MS - +deps.now()) });
+    await observeUpscaler(deps, row.upscaler, probe, probeAt);
     if (probe === "timeout") return await delay("the health probe timed out", "probe_timeout", { probeTimeout: true });
     if (probe === "absent" || probe === "no_instance") return await delay(`the upscale service is ${probe === "absent" ? "not available" : "starting no instance"}`, probe === "absent" ? "unavailable" : "busy", { resetProbe: true });
   }
@@ -553,6 +565,8 @@ export async function handleEnlargeTask(deps: CatalogDeps, body: Record<string, 
       answered = !drained;
       const ms = +deps.now() - t0;
       if (drained) return { lost: true };
+      // M1-S4b: a 429 from Cloud Run's frontend means every instance is working: a proof that the service is up.
+      if (error instanceof EnlargeBusyError && error.status === 429) await observeUpscaler(deps, row!.upscaler, "call_busy", new Date(t0));
       // M6-S1: every paid attempt is a ledger row, a refused one too; a timeout is its own outcome.
       ledger.push(costRow(ms, error instanceof EnlargeError && error.kind === "timeout" ? "timeout" : "failed", tile));
       return { failure: classify(error, ms) };
@@ -560,6 +574,8 @@ export async function handleEnlargeTask(deps: CatalogDeps, body: Record<string, 
       unhook();
     }
     if (drained) return { lost: true };
+    // M1-S4b: the service answered (a reply the check refuses too): a proof of health, stamped at the call's start.
+    await observeUpscaler(deps, row!.upscaler, "call_ok", new Date(t0));
     ledger.push(costRow(result.ms, "ok", tile));
     const verdict = await validateEnlargedObject({ bytes: result.jpeg, metadata: enlargedMetadata(row!, tile) }, row!, expect);
     if (!verdict.ok) return { failure: { kind: "counted", reason: `The upscale service answered ${tile === undefined ? "an image" : `tile ${tile + 1}`} the check refused: ${verdict.reason}.`, errorKind: "invalid_reply", ms: result.ms } };
@@ -591,7 +607,9 @@ export async function handleEnlargeTask(deps: CatalogDeps, body: Record<string, 
     if (failure.kind === "counted") return count("attempts", failure.reason, failure.errorKind);
     if (failure.kind === "delay") return delay(failure.reason, failure.errorKind);
     const left = requestEnd - ENLARGE_SETTLE_RESERVE_MS - +deps.now();
+    const reprobeAt = deps.now();
     const probe: UpscaleProbe = left >= ENLARGE_REPROBE_FLOOR_MS ? await probeService(row!.upscaler, { timeoutMs: left }) : "timeout";
+    if (left >= ENLARGE_REPROBE_FLOOR_MS) await observeUpscaler(deps, row!.upscaler, probe, reprobeAt);
     if (probe === "absent") return delay(`${failure.reason} (the service is not available)`, "unavailable", { resetProbe: true });
     return count("timeouts", `${failure.reason} (the service answered ${probe} after it)`, failure.errorKind === "busy" ? "unexplained" : failure.errorKind, false, probe !== "timeout");
   }

@@ -7,7 +7,7 @@ import { authConfigFromEnv } from "./auth";
 import { handleIngestMoreTask, handleIngestTask, workerIngestDeps } from "./catalog/ingest";
 import { workerCatalogDeps } from "./catalog/deps";
 import { handleChunkTask } from "./catalog/chunk";
-import { handleEnlargeTask } from "./catalog/enlarge";
+import { handleEnlargeTask, workerEnlargeProbe } from "./catalog/enlarge";
 import { upscaleConfigFromEnv } from "@catalog/core/catalog/upscale";
 import { handlePublishTask } from "./catalog/publish";
 import { handleImproveTask } from "./catalog/improve";
@@ -60,7 +60,7 @@ const costed = { db: getDb };
 const routes: ServerDeps["routes"] = {
   // The DB handle is taken lazily inside each handler so /health works before the DB is reachable.
   "/tasks/catalog/sync-master": withDeliveryCost(costed, "system", (body) => handleSyncMaster({ db: getDb(), bq: lazyBigQuery, env: process.env }, body)),
-  "/tasks/catalog/sweep": withDeliveryCost(costed, "system", (body) => handleSweep({ db: getDb(), releaseLocks, draftExpiryDays: draftExpiryDaysFromEnv(process.env), enlargementOff: !upscaleConfigFromEnv().model }, body)),
+  "/tasks/catalog/sweep": withDeliveryCost(costed, "system", (body) => handleSweep({ db: getDb(), releaseLocks, draftExpiryDays: draftExpiryDaysFromEnv(process.env), enlargementOff: !upscaleConfigFromEnv().model, ...(upscaleConfigFromEnv().model ? { outageProbe: workerEnlargeProbe() } : {}) }, body)),
   "/tasks/catalog/ingest": withDeliveryCost(costed, "ingest", (body, opts) => handleIngestTask({ db: getDb(), ingest: ingestDeps }, body, opts)),
   "/tasks/catalog/ingest-more": withDeliveryCost(costed, "ingest", (body) => handleIngestMoreTask({ db: getDb(), ingest: ingestDeps }, body)),
   "/tasks/catalog/chunk": (body, opts) => handleChunkTask(workerCatalogDeps(getDb()), body, opts),

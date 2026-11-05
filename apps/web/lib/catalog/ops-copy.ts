@@ -199,6 +199,7 @@ export const INCIDENT_KIND_WORDS: Record<IncidentKind, string> = {
   deploy_refused: "Release refused",
   contamination: "Listing changed outside the tool",
   alert: "Daily check",
+  upscaler_outage: "Image enlarging service down",
 };
 /** "96% (24 of 25 batches)", or "No batches finished" when none counted. */
 export function successRateText(r: { successes: number; counted: number; rate: number | null }): string {

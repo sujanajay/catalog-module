@@ -269,8 +269,9 @@ export async function handleChunkTask(rawDeps: CatalogDeps, body: Record<string,
     // switch is on: the plain path), and the render's stored upscalers for it.
     const be = batchEnlargement(deps,batch);
     const renderUpscalers = {upscaler:be?.x2 ?? null,upscalerX4:be?.x4 ?? null};
-    // M3-S1: the channel values (canvas, margins, background, DPI) and render-key versions from the M5 registry.
-    const rules = await deps.channelRules();
+    // M3-S1: the channel values (canvas, margins, background, DPI) and render-key versions from the M5 registry;
+    // M5-S3: of the ruleset version the batch pinned at Start.
+    const rules = await deps.channelRules(batch.rulesetVersion);
     // Spec 18 lifecycle 3.5 step 4 (F63): render-stage products skipped because an enlargement is still queued; the
     // chunk parks at the end of the delivery (or goes on at once when the rows settled meanwhile).
     const waitingProducts:number[] = [];
