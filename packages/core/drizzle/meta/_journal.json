@@ -155,6 +155,20 @@
       "when": 1793854167012,
       "tag": "0021_batch_ruleset_version",
       "breakpoints": true
+    },
+    {
+      "idx": 22,
+      "version": "7",
+      "when": 1793860570402,
+      "tag": "0022_upscaler_health",
+      "breakpoints": true
+    },
+    {
+      "idx": 23,
+      "version": "7",
+      "when": 1793862067347,
+      "tag": "0023_cost_reconciliation",
+      "breakpoints": true
     }
   ]
 }
