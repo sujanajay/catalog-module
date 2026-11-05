@@ -93,11 +93,11 @@ describe("input routes (spec 14b F3)", () => {
   });
 });
 
-// M1 D23 (M1-S6, closes D20): an input change while the files are collected edits the draft. The collection in
-// flight is set aside (lease and run cleared, back to draft, countdown stopped) and the change's own hand-off collects
-// again under a new run.
+// M1 D23 (M1-S6, closes D20, review P1-1): an input change while the files are collected edits the collecting batch
+// in place. It never clears or takes the placing lease of a step in flight: it marks the inputs changed (that step then
+// groups again at its close), clears previewReady and stops the countdown; the change's own hand-off names a new run.
 describe("input changes while collecting (M1 D23)", () => {
-  it("removes and replaces inputs of a collecting batch: back to draft, lease, run and countdown cleared, then collected again", async () => {
+  it("removes and replaces inputs of a collecting batch: the step's lease and run are kept, the change is marked, then collected again", async () => {
     const id = await newBatch(); const file = await addRow(id, "image"); const paste = await addRow(id, "url_list"); await addRow(id, "image");
     const claim = { token: "old-run", at: new Date().toISOString(), attempt: "a1" };
     await db.update(catalogBatches).set({ status: "ingesting", counts: { ...(await batchRow(id)).counts, phase: "placing", placingClaim: claim, ingestRun: "old-run", autoStartAt: null } as never }).where(eq(catalogBatches.id, id));
@@ -105,12 +105,16 @@ describe("input changes while collecting (M1 D23)", () => {
     expect(removed.status).toBe(200);
     expect(await statusOf(file.id)).toBe("removed");
     const after = await batchRow(id);
-    expect(after.status).toBe("draft");
-    expect(after.counts).toMatchObject({ previewReady: false, placingClaim: null, ingestRun: null, autoStartAt: null, phase: null });
-    // A paste corrected while collecting changes in place too.
-    await db.update(catalogBatches).set({ status: "ingesting" }).where(eq(catalogBatches.id, id));
+    expect(after.status).toBe("ingesting");
+    expect(after.counts).toMatchObject({ previewReady: false, placingClaim: claim, ingestRun: "old-run", autoStartAt: null, phase: "placing" });
+    expect(after.counts.inputsChangedAt).toBeTruthy();
+    // A paste corrected while collecting changes in place too, with a new change marker.
     expect((await patchLinks(request("PATCH", { text: "https://8.8.8.8/B_1.jpg" }), ctx(id, paste.id))).status).toBe(200);
-    expect((await batchRow(id)).status).toBe("draft");
+    const corrected = await batchRow(id);
+    expect(corrected.status).toBe("ingesting");
+    expect(corrected.counts.placingClaim).toEqual(claim);
+    expect(corrected.counts.inputsChangedAt).toBeTruthy();
+    expect(corrected.counts.inputsChangedAt).not.toBe(after.counts.inputsChangedAt);
     // The page's hand-off then collects again under a new run.
     vi.mocked(enqueueTask).mockClear();
     expect((await ingest(request("POST"), ctx(id))).status).toBe(200);

@@ -1,5 +1,5 @@
 // Tier 2 (PGlite + fake storage, fake fetch, fake enqueue): the ingest run (spec 04, "Ingest run").
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { Readable } from "node:stream";
 import { and, eq, inArray, sql } from "drizzle-orm";
@@ -25,6 +25,7 @@ import { buildZip } from "../../../test-fixtures/catalog/ingest-a/builders";
 import { mergeCounts, PLACING_LEASE_MS } from "../counts";
 import { buildPreview, deliveryToken, failStoppedIngest, GROUP_TIME_BUDGET_MS, INGEST_STOPPED_TEXT, INGEST_TIME_BUDGET_MS, LINK_MAX_ATTEMPTS, LINK_RETRY_ATTEMPTS, PLACE_BUDGET_ITEMS, runIngest } from "./index";
 import { linkFailuresBlock } from "./detect-step";
+import { lockForInputChange } from "./input-change";
 import { groupingSentence } from "./roots";
 import { linkFailuresOf } from "./link-failures";
 import { manifestPath, type UploadManifest } from "./manifest";
@@ -516,16 +517,140 @@ describe("an input removed while the batch-wide step runs (spec 14b F3)", () => 
         return w.storage.downloadBuffer(gsUri);
       },
     };
+    const from = w.enqueued.length;
     await runIngest(db, { ...deps(w), storage }, { batchId: batch.id, uploadId: gone });
     expect(removedOnce).toBe(true);
-    expect((await batchRow(batch.id))).toMatchObject({ status: "draft", counts: { previewReady: false, failReason: null } });
+    // M1 D23: the step does not close with the removed input; it releases its lease and queues a regroup of a read upload.
+    expect((await batchRow(batch.id))).toMatchObject({ status: "ingesting", counts: { previewReady: false, failReason: null, placingClaim: null } });
+    const regroup = w.enqueued.slice(from).map((e) => e.body);
+    expect(regroup).toEqual([expect.objectContaining({ batchId: batch.id, uploadId: kept })]);
 
-    // Continue hands one read upload again (ingestBatch marks the batch collecting first): the step runs
-    // again without the removed input.
-    await db.update(catalogBatches).set({ status: "ingesting" }).where(eq(catalogBatches.id, batch.id));
-    await runIngest(db, deps(w), { batchId: batch.id, uploadId: kept });
+    // The regroup runs the step again without the removed input.
+    await runIngest(db, deps(w), regroup[0] as never);
     expect((await batchRow(batch.id)).counts).toMatchObject({ previewReady: true, products: 1, sources: 1 });
     expect((await sourcesOf(batch.id)).map((s) => s.uploadId)).toEqual([kept]);
+  });
+});
+
+describe("an input change while the batch-wide step runs, with the page's hand-off running next to it (M1 D23, review P1-1)", () => {
+  /** The page's hand-off after an input change (web handOffIngest): a new run named on the batch, still collecting. */
+  async function handOffNewRun(batchId: string): Promise<string> {
+    const run = `run-${Math.random().toString(36).slice(2)}`;
+    await db.update(catalogBatches).set({ status: "ingesting", counts: mergeCounts({ previewReady: false, ingestRun: run }) }).where(eq(catalogBatches.id, batchId));
+    return run;
+  }
+  /** Runs every queued task from `from` on, following what they queue, until the queue is empty. */
+  async function drain(w: World, from: number): Promise<void> {
+    for (let i = from; i < w.enqueued.length; i++) await runIngest(db, deps(w), w.enqueued[i]!.body as never);
+  }
+
+  /**
+   * A db for the running step whose first write of version rows waits for `hook` first: the moment after the step's
+   * last lease write, when nothing it does is checked again until its close.
+   */
+  function pausedAtVersionRows(hook: () => Promise<void>): Db {
+    let fired = false;
+    const gate = (b: object): object => new Proxy(b, {
+      get(t, p) {
+        const v = Reflect.get(t, p, t) as unknown;
+        if (p === "then") {
+          const then = v as (res: unknown, rej: unknown) => unknown;
+          return (res: unknown, rej: unknown) => (fired ? Promise.resolve() : ((fired = true), hook())).then(() => then.call(t, res, rej));
+        }
+        return typeof v === "function" ? (...args: unknown[]) => gate((v as (...a: unknown[]) => object).apply(t, args)) : v;
+      },
+    });
+    return new Proxy(db, {
+      get(t, p) {
+        const v = Reflect.get(t, p, t) as unknown;
+        if (p === "insert") return (table: unknown) => (table === catalogSourceImages ? gate(t.insert(table as never)) : t.insert(table as never));
+        return typeof v === "function" ? (v as (...a: unknown[]) => unknown).bind(t) : v;
+      },
+    });
+  }
+
+  for (const landing of ["while it reads the manifests", "after its last lease write, as it writes the version rows"] as const) {
+    it(`a removal ${landing} never lets the removed input's photos into the batch, and only one step groups at a time`, async () => {
+      const w = fakeWorld();
+      const batch = await newBatch(`remove during step, concurrent hand-off, ${landing}`);
+      const kept = await folderUpload(w, batch, { "CK_1.jpg": await jpeg(), "CK_2.jpg": await jpeg() });
+      const gone = await folderUpload(w, batch, { "CG_1.jpg": await jpeg() });
+      await runIngest(db, deps(w), { batchId: batch.id, uploadId: kept });
+      let edited = false;
+      let second: { outcome: string } | null = null;
+      const edit = async () => {
+        edited = true;
+        // The operator removes an input (web removeInput: the batch row lock, then the upload row) ...
+        await db.transaction(async (tx) => {
+          const locked = await lockForInputChange(tx, batch.id);
+          expect("refused" in locked).toBe(false);
+          await tx.update(catalogUploads).set({ status: "removed" }).where(eq(catalogUploads.id, gone));
+        });
+        // ... and the page hands the batch on at once: a new run's delivery runs while the step is mid-way.
+        const run = await handOffNewRun(batch.id);
+        second = await runIngest(db, deps(w), { batchId: batch.id, uploadId: kept, run });
+      };
+      const keptManifest = `gs://${BUCKET}/${manifestPath(prefixOf(batch), kept)}`;
+      const storage: IngestDeps["storage"] = {
+        ...w.storage,
+        downloadBuffer: async (gsUri: string) => {
+          if (landing === "while it reads the manifests" && gsUri === keptManifest && !edited && (await batchRow(batch.id)).counts.phase === "grouping") await edit();
+          return w.storage.downloadBuffer(gsUri);
+        },
+      };
+      const stepDb = landing === "while it reads the manifests" ? db : pausedAtVersionRows(edit);
+      const from = w.enqueued.length;
+      await runIngest(stepDb, { ...deps(w), storage }, { batchId: batch.id, uploadId: gone });
+      expect(edited).toBe(true);
+      // The new run's delivery did not start a second step next to the running one.
+      expect(second!.outcome).toMatch(/^noop/);
+      await drain(w, from);
+
+      const done = await batchRow(batch.id);
+      expect(done).toMatchObject({ status: "draft", counts: { previewReady: true, products: 1, sources: 2, placingClaim: null } });
+      expect((await sourcesOf(batch.id)).map((r) => r.uploadId)).toEqual([kept, kept]);
+      expect(Object.keys(await linkStatusesOf(batch.id))).toEqual(["CK"]);
+    });
+  }
+
+  it("an input added while the step runs is grouped: the step does not close ready without it", async () => {
+    const w = fakeWorld();
+    const batch = await newBatch("add during step, concurrent hand-off");
+    const first = await folderUpload(w, batch, { "CA_1.jpg": await jpeg() });
+    const last = await folderUpload(w, batch, { "CB_1.jpg": await jpeg() });
+    await runIngest(db, deps(w), { batchId: batch.id, uploadId: first });
+    const firstManifest = `gs://${BUCKET}/${manifestPath(prefixOf(batch), first)}`;
+    let added: string | null = null;
+    let second: { outcome: string } | null = null;
+    const storage: IngestDeps["storage"] = {
+      ...w.storage,
+      downloadBuffer: async (gsUri: string) => {
+        if (gsUri === firstManifest && !added && (await batchRow(batch.id)).counts.phase === "grouping") {
+          // The operator drops one more folder (web planUploads and completeUpload) ...
+          const id = randomUUID();
+          const base = `${prefixOf(batch)}/uploads/${id}/`;
+          w.put(`${base}CC_1.jpg`, await jpeg());
+          await db.transaction(async (tx) => {
+            const locked = await lockForInputChange(tx, batch.id);
+            expect("refused" in locked).toBe(false);
+            await tx.insert(catalogUploads).values({ id, batchId: batch.id, kind: "image", name: "folder", gcsUri: `gs://${BUCKET}/${base}`, status: "uploaded" });
+          });
+          added = id;
+          // ... and the page hands it on: its delivery reads it while this step is mid-way.
+          const run = await handOffNewRun(batch.id);
+          second = await runIngest(db, deps(w), { batchId: batch.id, uploadId: id, run });
+        }
+        return w.storage.downloadBuffer(gsUri);
+      },
+    };
+    const from = w.enqueued.length;
+    await runIngest(db, { ...deps(w), storage }, { batchId: batch.id, uploadId: last });
+    expect(added).not.toBeNull();
+    expect(second!.outcome).not.toMatch(/^preview ready/);
+    await drain(w, from);
+
+    expect(await batchRow(batch.id)).toMatchObject({ status: "draft", counts: { previewReady: true, products: 3, sources: 3, placingClaim: null } });
+    expect(new Set((await sourcesOf(batch.id)).map((r) => r.uploadId))).toEqual(new Set([first, last, added]));
   });
 });
 

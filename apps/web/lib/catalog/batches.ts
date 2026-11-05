@@ -11,7 +11,7 @@ import { badRequest, HttpError } from "../errors";
 import { batchSource } from "./copy";
 import { defaultChannels } from "@catalog/core/catalog/intake-defaults";
 import { holdAutoStart } from "@catalog/core/catalog/auto-start";
-import { log } from "@catalog/core/log";
+import { lockForInputChange } from "@catalog/core/catalog/ingest/input-change";
 import { BATCH_STARTED, notDraftText } from "@catalog/core/catalog/pipeline/start";
 
 /** The 404 sentence for a batch id that does not exist (API routes and `/catalog/new?batch=`). */
@@ -38,7 +38,7 @@ export async function draftForUpdate(tx: Transaction, id: string): Promise<Catal
 /**
  * M1 D23 (M1-S6, closes D20): inputs can change while the files are collected. A collecting batch that never started
  * takes the change like a draft: it is the batch the input routes check (assertInputsOpen), and the change itself goes
- * through draftForChange.
+ * through batchForInputChange.
  */
 export async function assertInputsOpen(id: string): Promise<CatalogBatch> {
   const batch = await queryBatch(id);
@@ -46,21 +46,16 @@ export async function assertInputsOpen(id: string): Promise<CatalogBatch> {
   throw new HttpError(409, notDraftText(batch));
 }
 /**
- * The batch row of an input change, locked (as draftForUpdate). A collecting batch goes back to draft first: the
- * collection in flight is set aside (its placing lease and run are cleared, so its deliveries stop at their next
- * conditional write) and the change's own hand-off collects again, with what was already read kept by the upload
- * manifests. The countdown stops; the next collection arms a new one (M1-F2 "more files restart it").
+ * The batch row of an input change, locked (as draftForUpdate). A collecting batch stays collecting: the change only
+ * marks the inputs changed (core lockForInputChange, M1 D23 review P1-1), so a batch-wide step in flight keeps its
+ * lease and, at its close, groups again with the change instead of a second step starting next to it. The countdown
+ * stops; the next finished collection arms a new one (M1-F2 "more files restart it").
  */
-export async function draftForChange(tx: Transaction, id: string): Promise<CatalogBatch> {
-  const [batch] = await tx.select().from(catalogBatches).where(eq(catalogBatches.id, id)).for("update");
-  if (!batch) throw new HttpError(404, BATCH_NOT_FOUND);
-  if (batch.status === "draft") return batch;
-  if (batch.status !== "ingesting" || batch.startedAt) throw new HttpError(409, notDraftText(batch));
-  const [reopened] = await tx.update(catalogBatches)
-    .set({ status: "draft", counts: mergeCounts({ previewReady: false, placingClaim: null, ingestRun: null, autoStartAt: null, phase: null, rate: [] }), updatedAt: new Date() })
-    .where(eq(catalogBatches.id, id)).returning();
-  log("INFO", "input changed while collecting: collecting again", { batchId: id });
-  return reopened!;
+export async function batchForInputChange(tx: Transaction, id: string): Promise<CatalogBatch> {
+  const locked = await lockForInputChange(tx, id);
+  if (!("refused" in locked)) return locked.batch;
+  if (locked.refused === "missing") throw new HttpError(404, BATCH_NOT_FOUND);
+  throw new HttpError(409, notDraftText(locked.batch));
 }
 /** The answer for an upload id that is not an input of this batch, or not of the route's kind. */
 export const INPUT_NOT_FOUND = "This input is not part of this batch. Reload this page.";

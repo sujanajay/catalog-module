@@ -221,6 +221,15 @@ export interface BatchCounts {
   sweepRearms?: number;
   ingestResends?: number;
   /**
+   * M1 D23 (review P1-1): a new id written by every input change while the batch is collecting. The batch-wide step
+   * records the value it grouped with in `groupedChange` at its claim; when they differ at its closing write it does
+   * not close but groups again. Optional (no migration).
+   */
+  inputsChangedAt?: string | null;
+  groupedChange?: string | null;
+  /** M1 review P2-4: the auto-start task ended this countdown on purpose (a refusal that is not busy); the sweep does not arm it again. */
+  autoStartEnded?: boolean | null;
+  /**
    * Spec 17 G4: real errors each chunk's current task (stage, step) threw, keyed by chunk id and counted by the
    * worker. The chunk fails at CHUNK_MAX_ERRORS; a new step starts again at 1. Optional (no migration).
    */

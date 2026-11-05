@@ -62,13 +62,14 @@ describe("POST /extend (M1-F5-R2)", () => {
 });
 
 describe("files dropped while collecting (M1 D23)", () => {
-  it("adds them to the collecting batch, which goes back to draft for its new hand-off", async () => {
+  it("adds them to the collecting batch, which stays collecting with the change marked for its new hand-off", async () => {
     const id = await newBatch();
     await db.update(catalogBatches).set({ status: "ingesting", counts: { ...(await batchOf(id)).counts, ingestRun: "first" } }).where(eq(catalogBatches.id, id));
     const response = await planUploads(request({ files: [{ name: "B_1.jpg", size: 10, mime: "image/jpeg", relativePath: "second/B_1.jpg" }] }), ctx(id));
     expect(response.status).toBe(200);
     const batch = await batchOf(id);
-    expect(batch.status).toBe("draft");
-    expect(batch.counts).toMatchObject({ previewReady: false, ingestRun: null });
+    expect(batch.status).toBe("ingesting");
+    expect(batch.counts).toMatchObject({ previewReady: false, ingestRun: "first" });
+    expect(batch.counts.inputsChangedAt).toBeTruthy();
   });
 });
