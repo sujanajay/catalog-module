@@ -6,7 +6,8 @@
 //   billed      Cloud Monitoring run.googleapis.com/container/billable_instance_time of the Cloud Run service or job
 //               times the list price of its current shape (source `monitoring`, always `estimated`): the cost report's
 //               method (.runs/2026-11-02-cost-and-quota.md). M6-S3 switches the source to the billing export.
-//   attributed  the cost ledger's rows of that component and day (catalog_cost_events).
+//   attributed  the cost ledger's rows of that component and day (catalog_cost_events), by the part of each row that
+//               ran in the day and capped at one instance where rows overlap (dayLedger).
 //   idle        billed minus attributed, never negative; a ledger above the bill by more than 1% is an alert (R10).
 // Shared lines (R6): the shared Cloud SQL instance ila-pg at an admin-set cost per day and catalog share (settings
 // cost.database_usd_per_day, cost.database_catalog_share_percent). Vendors off the GCP bill (OpenRouter, an overflow
@@ -201,7 +202,7 @@ export function samplesFrom(series: readonly MonitoringSeries[]): BillableSample
 // The day's lines
 // ---------------------------------------------------------------------------------------------------------------------
 
-export type CostAlertCode = "ledger_over" | "unlabelled" | "unpriced" | "success_under_target";
+export type CostAlertCode = "ledger_over" | "unlabelled" | "unpriced" | "success_under_target" | "run_failed";
 export interface CostAlert { code: CostAlertCode; day: string; component: string | null; text: string; detail?: Record<string, unknown> }
 
 export interface CostLine {
@@ -257,14 +258,83 @@ const ledgerComponent = sql<string>`coalesce(component, CASE
   WHEN kind = 'upscale_call' AND engine = 'cpu' THEN 'catalog-upscale'
   ELSE 'catalog-worker' END)`;
 
-interface LedgerRow { component: string; batchId: string | null; busyMs: number; usd: number; estimated: boolean }
+/** One ledger row as the reconciliation reads it: it ended at `endMs` (the row's `at`) after `busyMs` of work. */
+export interface LedgerEvent { component: string; batchId: string | null; endMs: number; busyMs: number; usd: number; estimated: boolean }
+/** The day's ledger per component and batch: busy ms inside the day, and USD after the instance cap. */
+export interface LedgerRow { component: string; batchId: string | null; busyMs: number; usd: number; estimated: boolean }
 
-async function ledgerOfDay(db: Db, from: Date, to: Date): Promise<LedgerRow[]> {
-  const rows = (await db.execute(sql`SELECT ${ledgerComponent} AS component, batch_id, sum(coalesce(billable_ms, ms))::bigint AS busy_ms,
-      sum(usd)::float8 AS usd, bool_or(estimated) AS estimated
-    FROM catalog_cost_events WHERE at >= ${from.toISOString()}::timestamptz AND at < ${to.toISOString()}::timestamptz
-    GROUP BY 1, 2`)) as unknown as { rows: Record<string, unknown>[] };
-  return rows.rows.map((r) => ({ component: String(r.component), batchId: (r.batch_id as string | null) ?? null, busyMs: Number(r.busy_ms ?? 0), usd: Number(r.usd ?? 0), estimated: r.estimated === true }));
+/** Ledger rows that can touch [from, to): ending in it, or ending up to a day later (work that crossed midnight UTC). */
+async function ledgerEvents(db: Db, from: Date, to: Date): Promise<LedgerEvent[]> {
+  const rows = (await db.execute(sql`SELECT ${ledgerComponent} AS component, batch_id, (extract(epoch FROM at) * 1000)::float8 AS end_ms,
+      coalesce(billable_ms, ms)::bigint AS busy_ms, usd::float8 AS usd, estimated
+    FROM catalog_cost_events WHERE at >= ${from.toISOString()}::timestamptz AND at < ${new Date(+to + DAY_MS).toISOString()}::timestamptz`)) as unknown as { rows: Record<string, unknown>[] };
+  return rows.rows.map((r) => ({ component: String(r.component), batchId: (r.batch_id as string | null) ?? null, endMs: Number(r.end_ms), busyMs: Number(r.busy_ms ?? 0), usd: Number(r.usd ?? 0), estimated: r.estimated === true }));
+}
+
+/** The list price per ms of one instance of each catalog component (by its `component` label, else its name). */
+export function instanceUsdPerMs(resources: readonly RunResource[]): Map<string, number> {
+  const out = new Map<string, number>();
+  for (const r of resources) {
+    if (!isCatalog(r)) continue;
+    const price = instancePrice(r);
+    if (!price) continue;
+    const component = labelled(r) ? r.labels.component! : r.name;
+    out.set(component, Math.max(out.get(component) ?? 0, price.usdPerSecond / 1000));
+  }
+  return out;
+}
+
+/**
+ * The day [fromMs, toMs) of the ledger, per component and batch (review fixes of PR #173):
+ * - Midnight: a row covers [endMs - busyMs, endMs] and counts only the part inside the day, at its own rate (usd / busy
+ *   ms). Monitoring splits instance time by the minute, so work that crosses midnight UTC is split the same way.
+ * - Instance cap: rows of one component that run at the same time (the GPU upscaler serves 4 calls at once, each priced
+ *   at the full instance rate) cannot together cost more than one instance at that moment. In each stretch of time
+ *   where their summed rate is above the component's instance price, each row is scaled down in proportion. Rows priced
+ *   at a part of an instance (the worker's per-chunk rows) keep their cost while they fit in one instance. With more
+ *   than one instance running this under-counts, which shows as idle, never as a false ledger_over alert.
+ * Vendor rows and rows without busy time count whole on the day they ended.
+ */
+export function dayLedger(events: readonly LedgerEvent[], fromMs: number, toMs: number, instancePerMs: ReadonlyMap<string, number>): LedgerRow[] {
+  const out = new Map<string, LedgerRow>();
+  const add = (e: LedgerEvent, busyMs: number, usd: number) => {
+    const key = `${e.component}|${e.batchId ?? ""}`;
+    const row = out.get(key) ?? { component: e.component, batchId: e.batchId, busyMs: 0, usd: 0, estimated: false };
+    row.busyMs += busyMs; row.usd += usd; row.estimated ||= e.estimated;
+    out.set(key, row);
+  };
+  interface Span { start: number; end: number; rate: number; usd: number; e: LedgerEvent }
+  const timed = new Map<string, Span[]>();
+  for (const e of events) {
+    if (VENDOR_COMPONENTS.includes(e.component) || !(e.busyMs > 0)) {
+      if (e.endMs >= fromMs && e.endMs < toMs) add(e, Math.max(0, e.busyMs), e.usd);
+      continue;
+    }
+    const start = Math.max(fromMs, e.endMs - e.busyMs), end = Math.min(toMs, e.endMs);
+    if (end <= start) continue;
+    const spans = timed.get(e.component) ?? [];
+    spans.push({ start, end, rate: e.usd / e.busyMs, usd: 0, e });
+    timed.set(e.component, spans);
+  }
+  for (const [component, spans] of timed) {
+    const cap = instancePerMs.get(component);
+    const points = spans.flatMap((s, i) => [{ t: s.start, i, on: true }, { t: s.end, i, on: false }]).sort((a, b) => a.t - b.t);
+    const active = new Set<number>();
+    let prev = points[0]?.t ?? 0;
+    for (const p of points) {
+      if (p.t > prev && active.size) {
+        const length = p.t - prev;
+        let sum = 0;
+        for (const i of active) sum += spans[i]!.rate;
+        const scale = cap !== undefined && sum > cap ? cap / sum : 1;
+        for (const i of active) spans[i]!.usd += spans[i]!.rate * length * scale;
+      }
+      prev = p.t;
+      if (p.on) active.add(p.i); else active.delete(p.i);
+    }
+    for (const s of spans) add(s.e, s.end - s.start, s.usd);
+  }
+  return [...out.values()];
 }
 
 export interface DayResult { day: string; lines: CostLine[]; allocations: number; alerts: CostAlert[]; batches: string[] }
@@ -275,14 +345,14 @@ function spread(amount: number, weights: readonly number[]): number[] {
   return weights.map((w) => (total > 0 ? (amount * w) / total : amount / weights.length));
 }
 
-/**
- * Computes one UTC day (`YYYY-MM-DD`) and replaces its monitoring rows and allocations in one transaction, then
- * rewrites the true cost of every batch that has allocations that day.
- */
-export async function reconcileDay(db: Db, day: string, input: { samples: readonly BillableSample[]; resources: readonly RunResource[]; provisional: boolean; now: Date }): Promise<DayResult> {
+interface Allocation { component: string; batchId: string; busyMs: number; attributedUsd: number; idleUsd: number; sharedUsd: number }
+interface DayPlan { result: DayResult; provisional: boolean; allocations: Allocation[] }
+
+/** Computes one UTC day (`YYYY-MM-DD`) without writing it. */
+async function planDay(db: Db, day: string, input: { samples: readonly BillableSample[]; resources: readonly RunResource[]; provisional: boolean }): Promise<DayPlan> {
   const from = new Date(`${day}T00:00:00Z`), to = new Date(+from + DAY_MS);
   const { lines: billed, alerts } = billedLines(day, input.samples, input.resources);
-  const ledger = await ledgerOfDay(db, from, to);
+  const ledger = dayLedger(await ledgerEvents(db, from, to), +from, +to, instanceUsdPerMs(input.resources));
   const lines = new Map(billed.map((l) => [l.component, l]));
   // Attributed per component (summed over its env lines: a component name is one env in practice).
   const attributed = new Map<string, { usd: number; estimated: boolean }>();
@@ -311,7 +381,7 @@ export async function reconcileDay(db: Db, day: string, input: { samples: readon
   const all = [...lines.values(), shared];
 
   // Allocations (R5): idle by busy seconds per component, shared by attributed cost over all the day's batches.
-  const perBatch = new Map<string, { component: string; batchId: string; busyMs: number; attributedUsd: number; idleUsd: number; sharedUsd: number }>();
+  const perBatch = new Map<string, Allocation>();
   const batchRows = ledger.filter((r) => r.batchId !== null);
   for (const r of batchRows) perBatch.set(`${r.batchId}|${r.component}`, { component: r.component, batchId: r.batchId!, busyMs: r.busyMs, attributedUsd: r.usd, idleUsd: 0, sharedUsd: 0 });
   for (const line of lines.values()) {
@@ -327,27 +397,43 @@ export async function reconcileDay(db: Db, day: string, input: { samples: readon
     spread(shared.sharedUsd, weights).forEach((usd, i) => perBatch.set(`${batchIds[i]}|${DATABASE_COMPONENT}`, { component: DATABASE_COMPONENT, batchId: batchIds[i]!, busyMs: 0, attributedUsd: 0, idleUsd: 0, sharedUsd: usd }));
   }
 
-  await db.transaction(async (tx) => {
-    await tx.delete(catalogCostDays).where(and(eq(catalogCostDays.day, day), eq(catalogCostDays.source, "monitoring")));
-    await tx.delete(catalogCostAllocations).where(eq(catalogCostAllocations.day, day));
-    if (all.length) {
-      await tx.insert(catalogCostDays).values(all.map((l) => ({
+  return { result: { day, lines: all, allocations: perBatch.size, alerts, batches: batchIds }, provisional: input.provisional, allocations: [...perBatch.values()] };
+}
+
+/**
+ * Replaces the planned days' monitoring rows and allocations, then rewrites the true cost of every batch that has (or
+ * had, before this write) allocations on those days. Runs inside the caller's transaction.
+ */
+async function writeDays(tx: Db, plans: readonly DayPlan[], now: Date): Promise<void> {
+  const days = plans.map((p) => p.result.day);
+  if (!days.length) return;
+  const before = await tx.selectDistinct({ batchId: catalogCostAllocations.batchId }).from(catalogCostAllocations).where(inArray(catalogCostAllocations.day, days));
+  await tx.delete(catalogCostDays).where(and(inArray(catalogCostDays.day, days), eq(catalogCostDays.source, "monitoring")));
+  await tx.delete(catalogCostAllocations).where(inArray(catalogCostAllocations.day, days));
+  for (const { result: { day, lines }, provisional, allocations } of plans) {
+    if (lines.length) {
+      await tx.insert(catalogCostDays).values(lines.map((l) => ({
         day, component: l.component, kind: l.kind, region: l.region, env: l.env, source: "monitoring" as const, billableSeconds: l.billableSeconds,
         billedUsd: l.billedUsd, creditsUsd: 0, attributedUsd: l.attributedUsd, idleUsd: l.idleUsd, sharedUsd: l.sharedUsd,
-        estimated: l.estimated, provisional: input.provisional, detail: l.detail, computedAt: input.now,
+        estimated: l.estimated, provisional, detail: l.detail, computedAt: now,
       })));
     }
-    if (perBatch.size) {
-      await tx.insert(catalogCostAllocations).values([...perBatch.values()].map((a) => ({ day, source: "monitoring" as const, ...a, computedAt: input.now })));
-    }
-    if (batchIds.length) {
-      // M6-F1-R9: the batch's true cost so far, every reconciled day summed (attributed + idle + shared).
-      await tx.update(catalogBatchOutcomes).set({
-        trueCostUsd: sql`(SELECT coalesce(sum(a.attributed_usd + a.idle_usd + a.shared_usd), 0) FROM catalog_cost_allocations AS a WHERE a.batch_id = ${catalogBatchOutcomes.batchId})`,
-      }).where(inArray(catalogBatchOutcomes.batchId, batchIds));
-    }
-  });
-  return { day, lines: all, allocations: perBatch.size, alerts, batches: batchIds };
+    if (allocations.length) await tx.insert(catalogCostAllocations).values(allocations.map((a) => ({ day, source: "monitoring" as const, ...a, computedAt: now })));
+  }
+  const batchIds = [...new Set([...before.map((r) => r.batchId), ...plans.flatMap((p) => p.result.batches)])];
+  if (batchIds.length) {
+    // M6-F1-R9: the batch's true cost so far, every reconciled day summed (attributed + idle + shared).
+    await tx.update(catalogBatchOutcomes).set({
+      trueCostUsd: sql`(SELECT coalesce(sum(a.attributed_usd + a.idle_usd + a.shared_usd), 0) FROM catalog_cost_allocations AS a WHERE a.batch_id = ${catalogBatchOutcomes.batchId})`,
+    }).where(inArray(catalogBatchOutcomes.batchId, batchIds));
+  }
+}
+
+/** Computes one UTC day and replaces its monitoring rows and allocations in one transaction. */
+export async function reconcileDay(db: Db, day: string, input: { samples: readonly BillableSample[]; resources: readonly RunResource[]; provisional: boolean; now: Date }): Promise<DayResult> {
+  const plan = await planDay(db, day, input);
+  await db.transaction(async (tx) => writeDays(tx as unknown as Db, [plan], input.now));
+  return plan.result;
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -362,37 +448,55 @@ export function utcDay(now: Date, n: number): string {
 
 export interface RunResult { days: DayResult[]; alerts: CostAlert[]; newAlerts: CostAlert[] }
 
+/** Writes an alert once as an `alert` incident (keyed by code, day and component); true when this call wrote it. */
+async function writeAlert(db: Db, a: CostAlert, now: Date): Promise<boolean> {
+  const id = await openIncident(db, {
+    kind: "alert", severity: "warning", batchId: null, causeCode: a.code, cause: a.text, startedAt: now, resolvedAt: now,
+    dedupeKey: `alert:${a.code}:${a.day}:${a.component ?? "none"}`, detail: { day: a.day, component: a.component, ...a.detail },
+  });
+  return id !== null;
+}
+
 /**
  * Re-computes the last `days` complete UTC days (D-1 first), D-1 and D-2 provisional. Each alert is written once as an
  * `alert` incident (keyed by code, day and component, so a re-run of the same day writes nothing new); `newAlerts`
  * are the ones written by this run, which the job logs. Also the daily success-rate check (M6
  * decision S6-8): the 7-day batch success rate under the target is an alert once a day.
+ *
+ * All or nothing (review fix of PR #173): every day, allocation and alert is written in one transaction at the end, so
+ * the newest computed_at is always a run that finished (the sweep's cost_reconcile_stale check reads it). A run that
+ * fails part-way writes no rows, records a `run_failed` alert (once per UTC day; emailed through daily_check_alert)
+ * when the database still answers, and throws.
  */
 export async function runCostReconcile(db: Db, readers: CostReaders, options: { now?: Date; days?: number } = {}): Promise<RunResult> {
   const now = options.now ?? new Date();
   const count = Math.min(MAX_RECONCILE_DAYS, Math.max(1, Math.floor(options.days ?? RECONCILE_DAYS)));
-  const resources = await readers.resources();
-  const days: DayResult[] = [];
-  for (let n = 1; n <= count; n++) {
-    const day = utcDay(now, n);
-    const from = new Date(`${day}T00:00:00Z`);
-    const samples = await readers.billableSeconds(from, new Date(+from + DAY_MS));
-    days.push(await reconcileDay(db, day, { samples, resources, provisional: n <= 2, now }));
-  }
-  const alerts = days.flatMap((d) => d.alerts);
-  const rate = await successRate(db, new Date(+now - 7 * DAY_MS), now);
-  if (rate.rate !== null && rate.rate < SUCCESS_TARGET) {
-    alerts.push({ code: "success_under_target", day: utcDay(now, 0), component: null, text: `${rate.successes} of ${rate.counted} batches in the last 7 days finished with links and no person stepping in, under the ${Math.round(SUCCESS_TARGET * 100)}% target.`, detail: rate });
-  }
-  const newAlerts: CostAlert[] = [];
-  for (const a of alerts) {
-    const id = await openIncident(db, {
-      kind: "alert", severity: "warning", batchId: null, causeCode: a.code, cause: a.text, startedAt: now, resolvedAt: now,
-      dedupeKey: `alert:${a.code}:${a.day}:${a.component ?? "none"}`, detail: { day: a.day, component: a.component, ...a.detail },
+  try {
+    const resources = await readers.resources();
+    const plans: DayPlan[] = [];
+    for (let n = 1; n <= count; n++) {
+      const day = utcDay(now, n);
+      const from = new Date(`${day}T00:00:00Z`);
+      const samples = await readers.billableSeconds(from, new Date(+from + DAY_MS));
+      plans.push(await planDay(db, day, { samples, resources, provisional: n <= 2 }));
+    }
+    const days = plans.map((p) => p.result);
+    const alerts = days.flatMap((d) => d.alerts);
+    const rate = await successRate(db, new Date(+now - 7 * DAY_MS), now);
+    if (rate.rate !== null && rate.rate < SUCCESS_TARGET) {
+      alerts.push({ code: "success_under_target", day: utcDay(now, 0), component: null, text: `${rate.successes} of ${rate.counted} batches in the last 7 days finished with links and no person stepping in, under the ${Math.round(SUCCESS_TARGET * 100)}% target.`, detail: rate });
+    }
+    const newAlerts: CostAlert[] = [];
+    await db.transaction(async (tx) => {
+      await writeDays(tx as unknown as Db, plans, now);
+      for (const a of alerts) if (await writeAlert(tx as unknown as Db, a, now)) newAlerts.push(a);
     });
-    if (id) newAlerts.push(a);
+    return { days, alerts, newAlerts };
+  } catch (error) {
+    const failed: CostAlert = { code: "run_failed", day: utcDay(now, 0), component: null, text: `The daily cost check failed and wrote nothing: ${error instanceof Error ? error.message : String(error)}`.slice(0, 500) };
+    try { await writeAlert(db, failed, now); } catch { /* the database is the failure: cost_reconcile_stale reports it */ }
+    throw error;
   }
-  return { days, alerts, newAlerts };
 }
 
 /**

@@ -6,8 +6,8 @@
 // Runs by hand with: bash infra/catalog-cost-reconcile.sh run
 //
 // Env: GCP_PROJECT (default image-links-agent), COST_RECONCILE_DAYS (default 3, at most 42, for a backfill), and the
-// worker's DB_* settings. Exits non-zero when the run fails; each day is written in its own transaction, so the days
-// before a failure keep their new rows and the rest keep their previous ones.
+// worker's DB_* settings. Exits non-zero when the run fails. A run writes all its days in one transaction at the end, so
+// a failed run changes no day; it records a run_failed alert (emailed through the sweep's daily_check_alert, policy 16).
 import { GoogleAuth } from "google-auth-library";
 import { googleCostReaders, logRun, MAX_RECONCILE_DAYS, RECONCILE_DAYS, runCostReconcile } from "@catalog/core/catalog/cost-reconcile";
 import { closeDb, getDb } from "@catalog/core/db/client";
@@ -31,7 +31,8 @@ async function main() {
     logRun(result);
     log("INFO", "cost reconcile finished", { days: result.days.map((d) => d.day), alerts: result.alerts.length, newAlerts: result.newAlerts.length, ms: Date.now() - startedAt });
   } catch (error) {
-    // A failed run writes no rows, so the sweep's cost_reconcile_stale check emails 30 hours on (policy 17).
+    // A failed run writes no rows and a run_failed alert (policy 16); if the database itself failed, the sweep's
+    // cost_reconcile_stale check emails 30 hours on (policy 17).
     log("ERROR", "daily check failed", { check: "run_failed", error: describeError(error), ms: Date.now() - startedAt });
     process.exitCode = 1;
   } finally {

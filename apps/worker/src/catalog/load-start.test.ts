@@ -10,6 +10,9 @@ import { changeSetting, loadSettingsSnapshot } from "@catalog/core/settings/stor
 import { settingFrom } from "@catalog/core/settings/snapshot";
 import { DEFAULT_OWNERS, UPSCALE_MIN_SCALE_KEY } from "@catalog/core/settings/registry";
 import { autoDecideOf, autoDecideSnapshot } from "@catalog/core/catalog/auto-decide";
+import { seedTaxonomy } from "@catalog/core/analyze/taxonomy-seed";
+import { seedChannelRules } from "@catalog/core/catalog/rules/seed";
+import { publishChannelChange } from "@catalog/core/catalog/channel-rules-testing";
 import { startLoadBatch } from "./load-start";
 
 let db: Db, close: () => Promise<void>;
@@ -85,4 +88,21 @@ describe("catalog-load Start", () => {
     expect(settingFrom(snapB, UPSCALE_MIN_SCALE_KEY)).toBe(1.5);
     expect(snapB.versions.map((v) => v.key)).toEqual([UPSCALE_MIN_SCALE_KEY]);
   });
+
+  // Last in the file: once rules are published, a Start without a storage fake would reach for the real bucket.
+  it("M5-S3: pins the ruleset version as the web's Start does; a publish mid-batch reaches only the next batch", async () => {
+    const files = new Map<string, Buffer>(), enqueue = (async () => "task") as never, env = {} as NodeJS.ProcessEnv;
+    const fake = { getBucketName: () => "assets", headObject: async (uri: string) => ({ exists: files.has(uri) }), uploadBuffer: async (path: string, buf: Buffer) => { files.set(`gs://assets/${path}`, buf); return `gs://assets/${path}`; } } as never;
+    await seedTaxonomy(db);
+    await seedChannelRules(db);
+    const a = await draftBatch("rules-a");
+    await startLoadBatch(db, a.id, { enqueue, env, storage: fake });
+    expect((await read(a.id)).rulesetVersion).toBe(2);
+    expect([...files.keys()]).toEqual(["gs://assets/rules/snapshots/v2.json"]);
+    const published = await publishChannelChange(db, "noon", { background: "#F5F5F5" });
+    expect((await read(a.id)).rulesetVersion).toBe(2);
+    const b = await draftBatch("rules-b");
+    await startLoadBatch(db, b.id, { enqueue, env, storage: fake });
+    expect((await read(b.id)).rulesetVersion).toBe(published);
+  }, 180_000);
 });

@@ -5,6 +5,7 @@ import { inrPerUsdFromEnv, RUPEES_NOT_CONFIGURED, usdAmount } from "@catalog/cor
 import type { BrandCost } from "@catalog/core/catalog/cost-report";
 import AutoRefresh from "@/components/AutoRefresh";
 import LocalTime from "@/components/LocalTime";
+import { BackArrow } from "@/components/ui";
 import { db } from "@/lib/db";
 import { requireRole } from "@/lib/user";
 import { withoutModelNames } from "@/lib/catalog/redact";
@@ -73,7 +74,7 @@ export default async function OpsPage({ searchParams }: { searchParams: Promise<
     <main>
       <div className="hdr">
         <div>
-          <Link href="/catalog">← All batches</Link>
+          <Link href="/catalog"><BackArrow /> All batches</Link>
           <h1>Ops</h1>
           <p className="lead">Batches running now, failures in the last 24 hours, how reliably batches finish, what batches and brands cost, and how that matches what Google Cloud billed. Read only.{rate === null ? ` ${RUPEES_NOT_CONFIGURED}.` : ""}</p>
         </div>

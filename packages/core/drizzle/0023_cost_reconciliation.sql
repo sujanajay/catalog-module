@@ -1,4 +1,4 @@
--- M6-S2 (2026-11-05; renumber at merge if another migration lands first). Cost reconciliation
+-- M6-S2 (2026-11-05; renumbered 0021 -> 0023 at the merge with main). Cost reconciliation
 -- (docs/program/requirements/M6-reliability-cost.md M6-F1-R4 to R6, section 7.1): the daily billed, attributed, idle and
 -- shared cost per component, and its allocation to batches. New tables only (M6-F2-R1 additive), so the live code and
 -- the new code both work on this schema. Foreign keys are written inside CREATE TABLE IF NOT EXISTS and every index has

@@ -258,10 +258,16 @@ describe("invariant checks", () => {
     await db.delete(catalogGraphExportRuns);
   });
 
-  it("M6-S2: cost_reconcile_stale fires when the newest cost row is older than 30 hours; never before the first run", async () => {
+  it("M6-S2: cost_reconcile_stale fires when the newest cost row is older than 30 hours, or no run finished while the ledger is older than that", async () => {
     const stale = async () => (await run()).counts.cost_reconcile_stale;
     expect(COST_RECONCILE_STALE_HOURS).toBe(30);
     expect(await stale()).toBe(0);
+    // Review fix: no successful run recorded at all. A ledger younger than 30 hours is not yet late; an older one is.
+    const ledger = (hours: number) => db.execute(sql`INSERT INTO catalog_cost_events (stage, kind, engine, at) VALUES ('system', 'job', 'job', ${ago(hours * 60).toISOString()}::timestamptz)`);
+    await ledger(29);
+    expect(await stale()).toBe(0);
+    await ledger(31);
+    expect(await stale()).toBe(1);
     const row = (hours: number, day: string) => ({ day, component: "ila-pg", kind: "shared" as const, env: "live" as const, source: "monitoring" as const, computedAt: ago(hours * 60) });
     await db.insert(catalogCostDays).values(row(31, "2026-10-01"));
     expect(await stale()).toBe(1);
@@ -269,6 +275,7 @@ describe("invariant checks", () => {
     await db.insert(catalogCostDays).values(row(29, "2026-10-02"));
     expect(await stale()).toBe(0);
     await db.delete(catalogCostDays);
+    await db.execute(sql`DELETE FROM catalog_cost_events`);
   });
 
   it("M6-S2: daily_check_alert counts the alerts the daily job wrote in the last 24 hours", async () => {

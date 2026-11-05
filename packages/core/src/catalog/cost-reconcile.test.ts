@@ -9,7 +9,7 @@ import { createTestDb } from "../db/testing";
 import { changeSetting } from "../settings/store";
 import { COST_DATABASE_SHARE_KEY, COST_DATABASE_USD_PER_DAY_KEY, DEFAULT_DATABASE_SHARE_PERCENT, DEFAULT_DATABASE_USD_PER_DAY } from "../settings/registry";
 import {
-  billedLines, costCard, cpuQuantity, googleCostReaders, instancePrice, memoryGiB, reconcileDay, runCostReconcile, runResourceFrom, samplesFrom, utcDay,
+  billedLines, costCard, cpuQuantity, dayLedger, googleCostReaders, instancePrice, instanceUsdPerMs, memoryGiB, reconcileDay, runCostReconcile, runResourceFrom, samplesFrom, utcDay,
   type BillableSample, type CostReaders, type RunResource, type V2Item,
 } from "./cost-reconcile";
 
@@ -195,9 +195,9 @@ describe("reconcileDay", () => {
     const a = await batch("A", { productsWithLinks: 10 });
     const b = await batch("B", { productsWithLinks: 5 });
     // Batch A: 300 s of upscale calls, 60 s of them failed (the upscaler was killed mid-batch); batch B: 100 s.
-    await ledger({ batchId: a, component: "catalog-upscale-gpu", ms: 240_000, usd: 240 * 0.00106226 });
-    await ledger({ batchId: a, component: "catalog-upscale-gpu", ms: 60_000, usd: 60 * 0.00106226, outcome: "failed" });
-    await ledger({ batchId: b, component: "catalog-upscale-gpu", ms: 100_000, usd: 100 * 0.00106226 });
+    await ledger({ batchId: a, component: "catalog-upscale-gpu", ms: 240_000, usd: 240 * 0.00106226, at: at(8) });
+    await ledger({ batchId: a, component: "catalog-upscale-gpu", ms: 60_000, usd: 60 * 0.00106226, outcome: "failed", at: at(9) });
+    await ledger({ batchId: b, component: "catalog-upscale-gpu", ms: 100_000, usd: 100 * 0.00106226, at: at(10) });
     // Billed: 1000 s of instance time (start-ups, idle tails); the ledger explains 400 s.
     const result = await reconcileDay(db, DAY, { samples: [sample("catalog-upscale-gpu", 1000)], resources: [upscaleGpu], provisional: true, now: NOW });
 
@@ -280,6 +280,77 @@ describe("reconcileDay", () => {
       .reduce((s, c) => s + SAMPLES_2026_11_03.find((x) => x.name === c)!.seconds * HAND_USD_PER_SECOND[c]!, 0);
     expect(card.days[0]!.billedUsd).toBeCloseTo(live, 5);
     expect(card.apart.map((x) => x.env).sort()).toEqual(["preview", "test", "unlabelled"]);
+  });
+});
+
+describe("review fixes of PR #173", () => {
+  it("P2-1: four upscaler calls at once on one GPU instance cost one instance's time, shared by the calls", async () => {
+    const rate = instancePrice(upscaleGpu)!.usdPerSecond;
+    const a = await batch("A"), b = await batch("B");
+    // The upscaler serves 4 requests at once. Four 4 s calls (3 for A, 1 for B, one of A's failed) each priced at the full
+    // instance rate, over the same 4 s: 16 ledger-seconds against 4 s of instance time.
+    for (const [id, outcome] of [[a, "ok"], [a, "ok"], [a, "failed"], [b, "ok"]] as const) {
+      await ledger({ batchId: id, component: "catalog-upscale-gpu", ms: 4000, usd: 4 * rate, outcome, at: at(10) });
+    }
+    const result = await reconcileDay(db, DAY, { samples: [sample("catalog-upscale-gpu", 10)], resources: [upscaleGpu], provisional: true, now: NOW });
+    const line = result.lines.find((l) => l.component === "catalog-upscale-gpu")!;
+    expect(line.attributedUsd).toBeCloseTo(4 * rate, 9);
+    expect(line.idleUsd).toBeCloseTo(6 * rate, 9);
+    expect(result.alerts).toEqual([]);
+    const alloc = await rows(sql`SELECT batch_id, busy_ms::int AS busy, attributed_usd::float8 AS attributed FROM catalog_cost_allocations WHERE day = ${DAY} AND component = 'catalog-upscale-gpu'`);
+    const of = (id: string) => alloc.find((r) => r.batch_id === id)!;
+    expect(of(a).attributed as number).toBeCloseTo(3 * rate, 6);
+    expect(of(b).attributed as number).toBeCloseTo(rate, 6);
+    expect([of(a).busy, of(b).busy]).toEqual([12_000, 4000]);
+  });
+
+  it("P2-1: rows priced at a part of an instance keep their cost while they fit in one; a partial overlap is shared only where it overlaps", () => {
+    const cap = new Map([["c", 1]]); // USD per ms of one instance
+    const e = (batchId: string, endMs: number, busyMs: number, usdPerMs: number) => ({ component: "c", batchId, endMs, busyMs, usd: busyMs * usdPerMs, estimated: false });
+    // Two quarter-instance rows at once: under the cap, unchanged.
+    expect(dayLedger([e("a", 100, 100, 0.25), e("b", 100, 100, 0.25)], 0, 1000, cap).map((r) => r.usd)).toEqual([25, 25]);
+    // Two full-instance rows overlapping for 50 ms of their 100: the overlap is split, the rest stays whole.
+    const [x, y] = dayLedger([e("a", 100, 100, 1), e("b", 150, 100, 1)], 0, 1000, cap);
+    expect([x!.usd, y!.usd]).toEqual([75, 75]);
+    // No known instance price (an unpriced shape): no cap.
+    expect(dayLedger([e("a", 100, 100, 1), e("b", 100, 100, 1)], 0, 1000, new Map()).map((r) => r.usd)).toEqual([100, 100]);
+    expect(instanceUsdPerMs([upscaleGpu]).get("catalog-upscale-gpu")).toBeCloseTo(instancePrice(upscaleGpu)!.usdPerSecond / 1000, 15);
+  });
+
+  it("P2-3: work that crosses midnight UTC counts on each day by the part that ran in it, so neither day raises a false alert", async () => {
+    const loadJob = runResourceFrom("job", "asia-south1", job("catalog-recheck", L("catalog-recheck"), { cpu: "2", memory: "4Gi" }));
+    const rate = instancePrice(loadJob)!.usdPerSecond;
+    const a = await batch("A");
+    // A 30-minute job run from 23:45 to 00:15 UTC, recorded when it ended (on the next day).
+    await ledger({ batchId: a, component: "catalog-recheck", kind: "job", engine: "job", ms: 1_800_000, billableMs: 1_800_000, usd: 1800 * rate, at: new Date("2026-11-04T00:15:00Z") });
+    const billed = (seconds: number): BillableSample[] => [{ name: "catalog-recheck", kind: "job", region: "asia-south1", seconds }];
+    const d = await reconcileDay(db, DAY, { samples: billed(900), resources: [loadJob], provisional: true, now: NOW });
+    const next = await reconcileDay(db, "2026-11-04", { samples: billed(900), resources: [loadJob], provisional: true, now: NOW });
+    for (const r of [d, next]) {
+      const line = r.lines.find((l) => l.component === "catalog-recheck")!;
+      expect(line.attributedUsd, r.day).toBeCloseTo(900 * rate, 9);
+      expect(line.idleUsd, r.day).toBeCloseTo(0, 9);
+      expect(r.alerts, r.day).toEqual([]);
+    }
+    const busy = await rows(sql`SELECT day::text AS day, busy_ms::int AS busy FROM catalog_cost_allocations WHERE component = 'catalog-recheck' ORDER BY day`);
+    expect(busy).toEqual([{ day: DAY, busy: 900_000 }, { day: "2026-11-04", busy: 900_000 }]);
+  });
+
+  it("P2-2: a run that fails part-way writes no day, records one run_failed alert per UTC day and throws", async () => {
+    let calls = 0;
+    const readers: CostReaders = {
+      resources: async () => RESOURCES,
+      billableSeconds: async () => { if (++calls === 2) throw new Error("Cloud Monitoring timed out"); return [sample("catalog-web", 10)]; },
+    };
+    await expect(runCostReconcile(db, readers, { now: NOW })).rejects.toThrow("Cloud Monitoring timed out");
+    expect(await rows(sql`SELECT count(*)::int AS n FROM catalog_cost_days`)).toEqual([{ n: 0 }]);
+    calls = 0;
+    await expect(runCostReconcile(db, readers, { now: NOW })).rejects.toThrow();
+    expect(await rows(sql`SELECT kind, cause_code, detail->>'day' AS day FROM catalog_incidents`)).toEqual([{ kind: "alert", cause_code: "run_failed", day: "2026-11-04" }]);
+    // A later run that finishes writes every day at once.
+    calls = 10;
+    await runCostReconcile(db, readers, { now: NOW });
+    expect(await rows(sql`SELECT count(DISTINCT day)::int AS n, count(DISTINCT computed_at)::int AS t FROM catalog_cost_days`)).toEqual([{ n: 3, t: 1 }]);
   });
 });
 
