@@ -22,8 +22,11 @@ export interface PasteView { checking: boolean; results: PasteResult[]; error: s
 export const EMPTY_PASTE_VIEW: PasteView = { checking: false, results: [], error: "", progress: [] };
 
 export interface PasteCheckerOptions {
-  /** Sends one text to the server and returns its answers; `progress` shows the answers so far of a long read. */
-  save(value: string, progress: (answers: PasteResult[]) => void): Promise<PasteResult[]>;
+  /**
+   * Sends one text to the server and returns its answers; `progress` shows the answers so far of a long read, and
+   * `cancelled` turns true once a later edit or a Remove replaced this text (a long read then stops sending).
+   */
+  save(value: string, progress: (answers: PasteResult[]) => void, cancelled: () => boolean): Promise<PasteResult[]>;
   onView(view: PasteView): void;
   /** True while any write is outstanding (the wizard waits for it before Continue goes ahead). */
   onBusy(busy: boolean): void;
@@ -53,7 +56,7 @@ export function createPasteChecker(opts: PasteCheckerOptions) {
     chain = chain.then(async () => {
       try {
         if (turn !== latest) return; // replaced by a later edit before it was sent
-        const results = await opts.save(value, (progress) => { if (turn === latest) show({ progress }); });
+        const results = await opts.save(value, (progress) => { if (turn === latest) show({ progress }); }, () => turn !== latest);
         // A later edit or a forget() decides what counts as saved; an answer it replaced does not.
         if (turn === latest) savedText = value;
         opts.onSaved();
@@ -85,14 +88,16 @@ export function createPasteChecker(opts: PasteCheckerOptions) {
  * The answers of one pasted text (the first answer and its `others`), with every Supabase folder that is still
  * being read (`access: "reading"`) sent again by its link until it is read, failed or answered without a link.
  * The server lists a large folder a slice per request and carries on where the last one stopped, so the
- * folder is read over several short requests. `progress` gets the answers so far before each request.
+ * folder is read over several short requests. `progress` gets the answers so far before each request. `resend`
+ * asks the server to carry on (it never brings back a folder removed meanwhile). Once `cancelled` is true (the
+ * paste was removed or replaced) nothing more is sent.
  */
-export async function readFoldersToEnd(first: PasteResult, send: (text: string) => Promise<PasteResult>, progress: (answers: PasteResult[]) => void): Promise<PasteResult[]> {
+export async function readFoldersToEnd(first: PasteResult, resend: (folder: string) => Promise<PasteResult>, progress: (answers: PasteResult[]) => void, cancelled: () => boolean = () => false): Promise<PasteResult[]> {
   const answers = [first, ...(first.others ?? [])];
   for (let i = 0; i < answers.length; i++) {
-    while (answers[i]!.access === "reading" && answers[i]!.folder) {
+    while (answers[i]!.access === "reading" && answers[i]!.folder && !cancelled()) {
       progress([...answers]);
-      answers[i] = await send(answers[i]!.folder!);
+      answers[i] = await resend(answers[i]!.folder!);
     }
   }
   return answers;

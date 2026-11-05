@@ -15,7 +15,7 @@ export const REMOVED = "Removed";
 export const DID_NOT_FINISH = "Upload did not finish. Add the file again or remove it.";
 /** A pending pasted-links row: a Supabase folder read over several requests (apps/web/lib/catalog/links.ts). */
 export const READING_FOLDER = "Reading the folder. If this does not change, paste the folder link again.";
-export const uploadingWord =(progress: number) => `Uploading ${progress}%`;
+export const uploadingWord = (progress: number) => `Uploading ${progress}%`;
 
 /** Pasted links and Google links are removed through `/links`; files through `/uploads` (as `LINK_KINDS` on the server). */
 const LINK_KINDS: readonly string[] = PASTE_INPUT_KINDS;

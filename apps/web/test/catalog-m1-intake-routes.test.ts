@@ -8,12 +8,14 @@ import { brandMaster, catalogBatches, catalogUploads } from "@catalog/core/db/sc
 import { createTestDb } from "@catalog/core/db/testing";
 import type { SheetsLike } from "@catalog/core/catalog/ingest/types";
 import type { SupabaseStorageLike } from "@catalog/core/catalog/ingest/supabase-folder";
-import { SUPABASE_OFF, SUPABASE_STILL_READING } from "@catalog/core/catalog/ingest/supabase-folder";
+import { SUPABASE_OFF, SUPABASE_PAUSED, SUPABASE_STILL_READING, SupabaseHttpError } from "@catalog/core/catalog/ingest/supabase-folder";
 import { POST as create } from "../app/api/catalog/batches/route";
 import { POST as addLinks } from "../app/api/catalog/batches/[id]/links/route";
 import { PATCH as patchDetected } from "../app/api/catalog/batches/[id]/detected/route";
 import { pasteEntries, readFoldersToEnd, type PasteResult } from "../components/catalog/paste-check";
-import { ingestBatch } from "../lib/catalog/uploads";
+import { ingestBatch, removeInput } from "../lib/catalog/uploads";
+import { SUPABASE_FOLDER_REMOVED } from "../lib/catalog/links";
+import { getBatch } from "../lib/catalog/batches";
 import { setDbForTests, type Db } from "../lib/db";
 import { resetUserDeps, setUserDeps } from "../lib/user";
 
@@ -47,12 +49,15 @@ vi.mock("@catalog/core/catalog/ingest/google-sheet", async (original) => ({
 // softlines/big is a brand folder of 40 product folders whose list calls each take one second of the clock, so one
 // request (a 25 s slice) cannot read it all.
 let clock = 0;
+/** A folder whose list calls fail with a 503 every time (Supabase errors), or null. */
+let failPrefix: string | null = null;
 const BIG = `${SUPA}/storage/v1/object/public/softlines/big`;
 const fakeSupabase: SupabaseStorageLike = {
   origin: SUPA,
   async isPublic() { return true; },
   async list(_bucket, prefix, offset) {
     if (prefix === "big" || prefix.startsWith("big/")) {
+      if (prefix === failPrefix) throw new SupabaseHttpError(503, 0);
       clock += 1000;
       if (offset) return [];
       if (prefix === "big") return Array.from({ length: 40 }, (_, i) => ({ name: `B${String(i).padStart(3, "0")}`, id: null, metadata: null }));
@@ -245,6 +250,101 @@ ${FOLDER}/noext`);
       // 40 folders and the root, each listed once over all requests.
       expect(clock).toBe(41_000);
     } finally {
+      now.mockRestore();
+    }
+  });
+
+  it("review P1-1: Remove during a long read stays removed; the paste box's next send does not bring the folder back", async () => {
+    const real = Date.now;
+    const start = real();
+    clock = 0;
+    const now = vi.spyOn(Date, "now").mockImplementation(() => start + clock);
+    try {
+      const id = await newBatch();
+      const post = async (body: Record<string, unknown>) => {
+        const r = await addLinks(request("POST", body), ctx(id));
+        expect(r.status).toBe(200);
+        return await r.json() as PasteResult & { uploadId: string };
+      };
+      const first = await post({ text: BIG });
+      expect(first.access).toBe("reading");
+      await removeInput(id, first.uploadId, "links");
+      const listedBefore = clock;
+      // The paste box was mid-read: its next send carries on the folder. The removed row must win.
+      const progress: PasteResult[][] = [];
+      const answers = await readFoldersToEnd(first, (folder) => post({ text: folder, continue: true }), (a) => progress.push(a));
+      expect(answers).toEqual([expect.objectContaining({ kind: "supabase_folder", access: "removed", summary: SUPABASE_FOLDER_REMOVED })]);
+      expect(clock).toBe(listedBefore); // Supabase was not read again
+      const rows = (await uploadsOf(id)).filter((u) => u.kind === "url_list");
+      expect(rows).toHaveLength(1);
+      expect(rows[0]!.status).toBe("removed");
+      // Continue sees nothing to collect: the folder's products never enter the batch.
+      await expect(ingestBatch(id)).rejects.toThrow("Add photos or a links sheet before continuing.");
+      // Pasting the link again on purpose still adds it back, as for any removed paste.
+      expect((await post({ text: BIG })).access).toBe("reading");
+    } finally {
+      now.mockRestore();
+    }
+  });
+
+  it("review P3-1: a late continuation never moves a finished folder back to reading", async () => {
+    const id = await newBatch();
+    const r = await addLinks(request("POST", { text: FOLDER }), ctx(id));
+    expect((await r.json() as PasteResult).access).toBe("ok");
+    const calls = clock;
+    const late = await addLinks(request("POST", { text: FOLDER, continue: true }), ctx(id));
+    expect(await late.json()).toMatchObject({ kind: "supabase_folder", access: "ok", pill: "4 photos" });
+    expect(clock).toBe(calls);
+    expect((await uploadsOf(id)).filter((u) => u.kind === "url_list").map((u) => u.status)).toEqual(["uploaded"]);
+  });
+
+  it("review P3-2: the batch the page polls leaves out the listing state of a folder being read", async () => {
+    const real = Date.now;
+    const start = real();
+    clock = 0;
+    const now = vi.spyOn(Date, "now").mockImplementation(() => start + clock);
+    try {
+      const id = await newBatch();
+      await addLinks(request("POST", { text: BIG }), ctx(id));
+      const [row] = (await uploadsOf(id)).filter((u) => u.kind === "url_list");
+      expect((row!.detected as { supabaseFolder: { listing?: unknown } }).supabaseFolder.listing).toBeDefined();
+      const page = await getBatch(id);
+      const sent = page.uploads.find((u) => u.id === row!.id)!;
+      expect(sent.status).toBe("pending");
+      expect(sent.detected).toMatchObject({ supabaseFolder: { url: BIG } });
+      expect(JSON.stringify(sent.detected)).not.toContain("listing");
+    } finally {
+      now.mockRestore();
+    }
+  });
+
+  it("review P2-1: a listing that pauses on Supabase errors keeps its progress; pasting again carries on", async () => {
+    const real = Date.now;
+    const start = real();
+    clock = 0;
+    const now = vi.spyOn(Date, "now").mockImplementation(() => start + clock);
+    try {
+      const id = await newBatch();
+      failPrefix = "big/B007";
+      const r = await addLinks(request("POST", { text: BIG }), ctx(id));
+      const answer = await r.json() as PasteResult;
+      expect(answer).toMatchObject({ access: "no_access", summary: SUPABASE_PAUSED });
+      const [failed] = (await uploadsOf(id)).filter((u) => u.kind === "url_list");
+      expect(failed).toMatchObject({ status: "failed", error: SUPABASE_PAUSED });
+      const kept = (failed!.detected as { supabaseFolder: { listing: { files: unknown[]; pending: string[] } } }).supabaseFolder.listing;
+      expect(kept.files.length).toBeGreaterThan(0);
+      expect(kept.pending).toContain("B007");
+      failPrefix = null;
+      const listedBefore = clock;
+      const send = async (body: Record<string, unknown>) => (await addLinks(request("POST", body), ctx(id))).json() as Promise<PasteResult>;
+      const done = await readFoldersToEnd(await send({ text: BIG }), (folder) => send({ text: folder, continue: true }), () => undefined);
+      expect(done).toEqual([expect.objectContaining({ access: "ok", pill: "80 photos" })]);
+      // Only the folders not read before the pause were listed again (not the root, not the finished ones).
+      expect((clock - listedBefore) / 1000).toBe(kept.pending.length);
+      const rows = (await uploadsOf(id)).filter((u) => u.kind === "url_list");
+      expect(new Set(rows[0]!.sourceUrl!.split("\n")).size).toBe(80);
+    } finally {
+      failPrefix = null;
       now.mockRestore();
     }
   });

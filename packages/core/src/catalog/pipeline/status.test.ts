@@ -198,9 +198,13 @@ describe("deriveBatchState intake words (spec 14c F4 part 2)", () => {
     expect(ingesting({ collected: 0, collectTotal: 0 })).toBe("Downloading photos");
   });
   it("words every unfinished draft", () => {
-    const draft = (counts: Partial<BatchCounts>, uploads?: { status: string }[], channels: ChannelId[] = []) => deriveBatchState({ status: "draft", counts: { ...EMPTY_BATCH_COUNTS, ...counts }, uploads, channels, now }).intake;
+    const draft = (counts: Partial<BatchCounts>, uploads?: { status: string; kind?: string }[], channels: ChannelId[] = []) => deriveBatchState({ status: "draft", counts: { ...EMPTY_BATCH_COUNTS, ...counts }, uploads, channels, now }).intake;
     expect(draft({}, [{ status: "uploaded" }, { status: "pending" }, { status: "pending" }])).toBe("2 files did not finish uploading");
     expect(draft({}, [{ status: "pending" }])).toBe("1 file did not finish uploading");
+    // A pending pasted-links row is a Supabase folder still being read (R1 review P2-2), not a file upload.
+    expect(draft({}, [{ status: "pending", kind: "url_list" }])).toBe("A Supabase folder was not finished reading. Open the batch and paste the folder link again");
+    expect(draft({}, [{ status: "pending", kind: "url_list" }, { status: "pending", kind: "url_list" }])).toBe("2 Supabase folders were not finished reading. Open the batch and paste the folder link again");
+    expect(draft({}, [{ status: "pending", kind: "url_list" }, { status: "pending", kind: "image" }])).toBe("1 file did not finish uploading");
     expect(draft({}, [])).toBe("Nothing added yet");
     expect(draft({}, [{ status: "removed" }])).toBe("Nothing added yet");
     expect(draft({ previewReady: true, phase: "needs_input" }, [{ status: "collected" }])).toBe("Needs your input: which column holds the identifier?");

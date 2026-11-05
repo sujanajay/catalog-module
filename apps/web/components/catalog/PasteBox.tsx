@@ -13,6 +13,7 @@ export function pastePlaceholder(supabase: boolean): string {
 
 function pillOf(r: PasteResult): string {
   if (r.access === "reading") return r.pill ?? "Reading folder";
+  if (r.access === "removed") return "Removed";
   if (r.access !== "ok") return "No access yet";
   if (r.kind === "url_list") return r.pill ?? `${r.count ?? 0} image links`;
   if (r.pill) return r.pill;
@@ -45,13 +46,15 @@ export default function PasteBox({ ensureBatch, onBusy, onAdded, removed = 0, su
   props.current = { ensureBatch, onBusy, onAdded, supabase };
   const checker = useRef<ReturnType<typeof createPasteChecker> | null>(null);
   checker.current ??= createPasteChecker({
-    async save(value, progress) {
+    async save(value, progress, cancelled) {
       const id = await props.current.ensureBatch();
       const send = (text: string) => wizardApi<PasteResult>(batchUrl(id, "/links"), "POST", { text });
+      const resend = (folder: string) => wizardApi<PasteResult>(batchUrl(id, "/links"), "POST", { text: folder, continue: true });
       const got: PasteResult[] = [];
       for (const entry of pasteEntries(value, props.current.supabase)) {
+        if (cancelled()) break; // removed or replaced: the rest of this text is not sent
         // A large Supabase folder answers "reading" and is sent again until it is read (R1 exit finding 1).
-        got.push(...await readFoldersToEnd(await send(entry), send, (answers) => progress([...got, ...answers])));
+        got.push(...await readFoldersToEnd(await send(entry), resend, (answers) => progress([...got, ...answers]), cancelled));
       }
       return got;
     },

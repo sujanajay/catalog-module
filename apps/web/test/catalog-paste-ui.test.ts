@@ -113,6 +113,34 @@ describe("a large Supabase folder read over several requests (R1 exit finding 1)
     expect(answers.map((a) => [a.kind, a.access, a.pill])).toEqual([["supabase_folder", "ok", "2,039 photos"], ["google_sheet", "ok", undefined]]);
   });
 
+  it("review P1-1: once the paste is removed (forget) the long read stops sending", async () => {
+    const sent: string[] = [];
+    let release!: () => void;
+    const checker = createPasteChecker({
+      async save(_value, progress, cancelled) {
+        // The first answer of a long read; the paste box keeps sending while not cancelled.
+        return readFoldersToEnd(reading(400), async (folder) => {
+          sent.push(folder);
+          if (sent.length === 1) await new Promise<void>((resolve) => { release = resolve; });
+          return reading(800);
+        }, progress, cancelled);
+      },
+      onView: () => undefined, onBusy: () => undefined, onSaved: () => undefined,
+    });
+    checker.check(FOLDER);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(sent).toEqual([FOLDER]);
+    checker.forget(); // Remove in the input list
+    release();
+    await checker.settled();
+    expect(sent).toEqual([FOLDER]); // nothing sent after Remove
+    expect(checker.view()).toMatchObject({ checking: false, results: [] });
+  });
+
+  it("a removed folder answers a Removed pill", () => {
+    expect(markup({ ...EMPTY_PASTE_VIEW, results: [{ kind: "supabase_folder", access: "removed", summary: "This folder was removed from the batch." }] })).toContain(">Removed</span>");
+  });
+
   it("an answer that is not reading, or reading without a link, is not sent again", async () => {
     const send = async () => { throw new Error("not sent"); };
     expect(await readFoldersToEnd({ kind: "url_list", access: "ok", summary: "x" }, send, () => undefined)).toHaveLength(1);
