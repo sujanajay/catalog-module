@@ -5,7 +5,7 @@
 // new version.
 import { createHash } from "node:crypto";
 import sharp from "sharp";
-import { and, eq, inArray, sql } from "drizzle-orm";
+import { and, eq, inArray, like, sql } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { FIXTURE_CHANNEL_RULES } from "@catalog/core/catalog/channel-rules";
 import type { Db } from "@catalog/core/db/client";
@@ -13,7 +13,7 @@ import { createTestDb } from "@catalog/core/db/testing";
 import { catalogBatches, catalogBatchProducts, catalogChangeEvents, catalogChannelListings, catalogChunks, catalogContentVersions, catalogOptions, catalogOutputs, catalogProducts, catalogSourceImages, EMPTY_BATCH_COUNTS } from "@catalog/core/db/schema";
 import { recordAsset, recordVersion } from "@catalog/core/graph/index";
 import { recordPublishEvents } from "@catalog/core/catalog/pipeline/publish";
-import { sourceProducerRef } from "@catalog/core/graph/write-path";
+import { sourceProducerRefsOf } from "@catalog/core/graph/write-path";
 import { runInvariants } from "@catalog/core/catalog/invariants/run";
 import * as storage from "@catalog/core/storage";
 import { workerCatalogDeps, type CatalogDeps } from "./deps";
@@ -115,11 +115,12 @@ describe("M0-S3 write path through the worker", () => {
     expect(links).toHaveLength(4);
     const versions = await db.select().from(catalogContentVersions).where(inArray(catalogContentVersions.id, links.map((o) => o.contentVersionId!)));
     const sources = await db.select().from(catalogSourceImages).where(eq(catalogSourceImages.batchId, s.batch.id));
-    const brand = await db.select().from(catalogContentVersions).where(eq(catalogContentVersions.producerRef, sourceProducerRef(product.id)));
-    expect(brand.map((v) => [v.source, v.scope, v.position, v.contentHash]).sort()).toEqual(sources.map((p) => ["brand", "master", p.n, p.sha256]).sort());
+    const brand = await db.select().from(catalogContentVersions).where(like(catalogContentVersions.producerRef, sourceProducerRefsOf(product.id)));
+    // R1 exit item 5 (D28): every version carries its role, `main` for slot 1 and `additional` after it.
+    expect(brand.map((v) => [v.source, v.scope, v.position, v.role, v.contentHash]).sort()).toEqual(sources.map((p) => ["brand", "master", p.n, p.n === 1 ? "main" : "additional", p.sha256]).sort());
     for (const o of links) {
       const v = versions.find((x) => x.id === o.contentVersionId)!;
-      expect(v).toMatchObject({ scope: o.channel, component: "image", role: "unknown", position: o.n, source: "cleanup", aiGenerated: false, producer: "M3", producerRef: o.id, optionId, publicUrl: o.publicUrl, batchId: s.batch.id });
+      expect(v).toMatchObject({ scope: o.channel, component: "image", role: o.n === 1 ? "main" : "additional", position: o.n, source: "cleanup", aiGenerated: false, producer: "M3", producerRef: o.id, optionId, publicUrl: o.publicUrl, batchId: s.batch.id });
       expect(o.publishedAt).toBeInstanceOf(Date);
       // F2 test 1: the version's hash is a fresh sha256 of the public object, and its parent is its photo's version.
       expect(v.contentHash).toBe(sha(w.objects.get(`gs://public/${o.objectPath}`)!.buf));
@@ -201,14 +202,69 @@ describe("M0-S3 write path through the worker", () => {
     expect(await eventsOf(s.batch.id)).toHaveLength(1);
   }, 240_000);
 
-  it("a product with no option yet gets versions but no event (it has no listing)", async () => {
+  it("R1 exit item 5 (D23 revised): a product with no option yet gets one event per delivered link, on its product and channel, with reason and change type", async () => {
     const w = world();
     const [product] = await db.insert(catalogProducts).values({ brandSlug: "anta", isTest: true, productKey: "m0s3-nooption", pathKey: "m0s3-nooption", identifier: "m0s3-nooption" }).returning();
-    const s = await seed(w, "m0s3-nooption", product!, [61], ["noon"]);
+    const s = await seed(w, "m0s3-nooption", product!, [61, 62]);
     await runBatch(w, s, product!.id);
+    const links = await db.select().from(catalogOutputs).where(and(eq(catalogOutputs.batchId, s.batch.id), eq(catalogOutputs.isLive, true)));
+    expect(links).toHaveLength(4);
+    const events = await eventsOf(s.batch.id);
+    expect(events).toHaveLength(4);
+    for (const o of links) {
+      expect(o.contentVersionId).toBeTruthy();
+      expect(events.filter((e) => e.toVersionId === o.contentVersionId)).toEqual([expect.objectContaining({
+        listingId: null, productId: product!.id, channel: o.channel, slot: `image:${o.n}`, kind: "links_delivered", fromVersionId: null, evidence: "tool_publish",
+        evidenceRef: `catalog_outputs:${o.id}`, reasonKind: "new_content", changeTypeId: "img_background_fixed", idempotencyKey: `publish:${o.id}:none:product`,
+      })]);
+    }
+    // A repeat publish finds each slot's last event already at its version and writes nothing.
+    await handlePublishTask(w.deps, { batchId: s.batch.id, productId: product!.id });
+    expect(await eventsOf(s.batch.id)).toHaveLength(4);
+  }, 240_000);
+
+  it("review P2-1 of #184: a listing made after a listing-less publish continues from its events: an unchanged slot logs nothing, a re-made one logs once from its old version, a removal once", async () => {
+    const w = world();
+    const [made] = await db.insert(catalogProducts).values({ brandSlug: "anta", isTest: true, productKey: "m0s3-later", pathKey: "m0s3-later", identifier: "m0s3-later" }).returning();
+    const s = await seed(w, "m0s3-later", made!, [64], ["noon"]);
+    await runBatch(w, s, made!.id);
+    expect((await eventsOf(s.batch.id)).map((e) => e.listingId)).toEqual([null]);
+    // The nightly key sync links the product, and its Noon listings appear.
+    const [option] = await db.insert(catalogOptions).values({ brandSlug: "anta", optionKey: "M0S3-LATER", keySource: "master" }).returning();
+    const noon = await db.insert(catalogChannelListings).values([{ optionId: option!.id, channel: "noon", market: "ae" }, { optionId: option!.id, channel: "noon", market: "sa" }]).returning();
+    await db.update(catalogProducts).set({ optionId: option!.id }).where(eq(catalogProducts.id, made!.id));
     const [o] = await db.select().from(catalogOutputs).where(eq(catalogOutputs.batchId, s.batch.id));
-    expect(o!.contentVersionId).toBeTruthy();
-    expect(await eventsOf(s.batch.id)).toHaveLength(0);
+    const [batch] = await db.select().from(catalogBatches).where(eq(catalogBatches.id, s.batch.id));
+    const [p] = await db.select().from(catalogProducts).where(eq(catalogProducts.id, made!.id));
+    const a = o!.contentVersionId!;
+    type Row = NonNullable<typeof o>;
+    const publish = (delivered: Row[], removed: Row[] = []) => recordPublishEvents(db, { batch: batch!, product: p!, channels: ["noon"], live: [o!], delivered, removed, now: new Date(), actor: "t", rulesKeyVersion: () => "1" });
+    // The same slot delivered again unchanged (a redelivered publish): already logged before the listing existed.
+    await publish([o!]);
+    expect(await eventsOf(s.batch.id)).toHaveLength(1);
+    // The row made again in place (an improvement): one event per listing, from the version delivered before.
+    const bytes = await jpegOf(203, "noon");
+    await recordAsset(db, { sha256: sha(bytes), uri: "gs://assets/catalog-test/later-b.jpg", mime: "image/jpeg" });
+    const b = (await recordVersion(db, { optionId: option!.id, scope: "noon", component: "image", source: "upscaled", aiGenerated: false, producer: "M3", producerRef: o!.id, assetSha256: sha(bytes), batchId: s.batch.id, isTest: true, createdBy: "t" })).versionId;
+    await publish([{ ...o!, contentVersionId: b }]);
+    const remade = (await eventsOf(s.batch.id)).filter((e) => e.listingId !== null);
+    expect(remade.map((e) => [e.listingId, e.fromVersionId, e.toVersionId]).sort()).toEqual(noon.map((l) => [l.id, a, b]).sort());
+    // A removal is logged once per listing, and a repeat writes nothing.
+    await publish([], [{ ...o!, contentVersionId: b }]);
+    await publish([], [{ ...o!, contentVersionId: b }]);
+    expect((await eventsOf(s.batch.id)).filter((e) => e.kind === "removed")).toHaveLength(noon.length);
+  }, 240_000);
+
+  it("R1 exit item 5 (D23 revised): an option with a Noon listing and none on Amazon logs Noon on its listings and Amazon on the product", async () => {
+    const w = world();
+    const [option] = await db.insert(catalogOptions).values({ brandSlug: "anta", optionKey: "M0S3-HALF", keySource: "master" }).returning();
+    const [noon] = await db.insert(catalogChannelListings).values({ optionId: option!.id, channel: "noon", market: "ae" }).returning();
+    const [product] = await db.insert(catalogProducts).values({ brandSlug: "anta", isTest: true, productKey: "m0s3-half", pathKey: "m0s3-half", identifier: "m0s3-half", optionId: option!.id }).returning();
+    const s = await seed(w, "m0s3-half", product!, [63]);
+    await runBatch(w, s, product!.id);
+    const events = await eventsOf(s.batch.id);
+    expect(events.map((e) => [e.channel, e.listingId, e.productId, e.slot]).sort()).toEqual([["amazon", null, product!.id, "image:1"], ["noon", noon!.id, product!.id, "image:1"]]);
+    expect(events.every((e) => e.reasonKind && e.changeTypeId)).toBe(true);
   }, 240_000);
   it("review P2-4: a publish rolled back after its copies landed is retried to one event per listing slot, and a repeat writes nothing", async () => {
     const w = world(), { product } = await optionWithListings("M0S3-RETRY");

@@ -130,7 +130,8 @@ export const EXPORT_TABLES: readonly ExportTable[] = [
     key: [{ expr: "e.seq", cast: "bigint" }],
     columns: [
       { name: "seq", type: "INT64", expr: "e.seq::text" },
-      ...col("e", "org_id", "idempotency_key"), id("listing_id", "e"), s("slot", "e.slot"),
+      // listing_id is null for a product with no listing yet; product_id and channel say where (D23).
+      ...col("e", "org_id", "idempotency_key"), id("listing_id", "e"), id("product_id", "e"), s("channel", "e.channel"), s("slot", "e.slot"),
       id("from_version_id", "e"), id("to_version_id", "e"), s("kind", "e.kind"), ts("at", "e"), ts("recorded_at", "e"),
       ...col("e", "evidence", "evidence_ref", "actor", "reason_kind", "reason_ref", "change_type_id"),
       id("change_set_id", "e"), id("batch_id", "e"), s("experiment_id", "e.experiment_id"),

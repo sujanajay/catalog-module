@@ -1349,7 +1349,8 @@ export const catalogContentVersions = pgTable(
 /**
  * The change log (F3, 3.2): append-only, read by cursor (`seq`). Every event names a reason and a change type (F3-R9),
  * except observed_other events and backfill rows (evidence or reason `backfill`), which may lack either (decision D9).
- * to_version_id is null exactly when a slot was emptied.
+ * to_version_id is null exactly when a slot was emptied. An event names its listing, or, for a product with no option
+ * or no listing on the channel yet, its product and channel (D23, migration 0026).
  */
 export const catalogChangeEvents = pgTable(
   "catalog_change_events",
@@ -1357,9 +1358,11 @@ export const catalogChangeEvents = pgTable(
     seq: bigserial("seq", { mode: "bigint" }).primaryKey(),
     orgId: orgId(),
     idempotencyKey: text("idempotency_key").notNull(),
-    listingId: uuid("listing_id")
-      .notNull()
-      .references(() => catalogChannelListings.id),
+    /** Null only while the product has no option, or its option no listing on the channel (D23): product_id and channel say where. */
+    listingId: uuid("listing_id").references(() => catalogChannelListings.id),
+    /** The catalog product a publish event is for (no foreign key: an operator may delete a product, never its log). */
+    productId: uuid("product_id"),
+    channel: text("channel", { enum: CHANNEL_IDS }).$type<ChannelId>(),
     slot: text("slot").$type<Slot>().notNull(),
     fromVersionId: uuid("from_version_id"),
     toVersionId: uuid("to_version_id"),
@@ -1390,8 +1393,12 @@ export const catalogChangeEvents = pgTable(
     index("catalog_change_events_batch_id_idx").on(t.batchId),
     index("catalog_change_events_listing_slot_at_idx").on(t.listingId, t.slot, t.at),
     index("catalog_change_events_experiment_id_idx").on(t.experimentId),
+    // The last listing-less event of a product's channel slot (D23); small: only events without a listing.
+    index("catalog_change_events_product_slot_idx").on(t.productId, t.channel, t.slot).where(sql`${t.listingId} IS NULL`),
     slotCheck("catalog_change_events", t.slot),
     enumCheck("catalog_change_events", "kind", t.kind, CHANGE_EVENT_KINDS),
+    enumCheck("catalog_change_events", "channel", t.channel, CHANNEL_IDS),
+    check("catalog_change_events_target_check", sql`${t.listingId} IS NOT NULL OR (${t.productId} IS NOT NULL AND ${t.channel} IS NOT NULL)`),
     enumCheck("catalog_change_events", "evidence", t.evidence, EVIDENCE_KINDS),
     enumCheck("catalog_change_events", "reason_kind", t.reasonKind, REASON_KINDS),
     // IS NOT DISTINCT FROM: a null reason_kind must make this operand false, not null (a null CHECK passes).

@@ -33,7 +33,7 @@ import {
   type ExportTable,
   type Row,
 } from "./export";
-import { recordChange, recordVersion } from "./index";
+import { recordAsset, recordChange, recordVersion } from "./index";
 
 type Step = "maxEventSeq" | "stage" | "commit";
 
@@ -205,6 +205,23 @@ describe("runGraphExport (M0-F5)", () => {
     await runGraphExport(db, sink, PAGE);
     expect(sink.staging.get("change_events")!.map((r) => r.seq)).toEqual([String(added.seq)]);
     expect(sink.tables.get("change_events")).toHaveLength(2);
+  });
+
+  it("R1 exit item 5: an image version's role and an event without a listing (product and channel) reach BigQuery", async () => {
+    const productId = "00000000-0000-4000-8000-000000000026";
+    const asset = { sha256: "a".repeat(64), uri: "gs://b/x.jpg", mime: "image/jpeg", bytes: 10, phash: null };
+    await recordAsset(db, asset);
+    const image = await recordVersion(db, { optionId: null, scope: "noon", component: "image", role: "main", position: 1, source: "cleanup", aiGenerated: false, producer: "M3", producerRef: "out-1", assetSha256: asset.sha256, createdBy: "worker" });
+    await recordChange(db, { idempotencyKey: "publish:out-1:none:product", listingId: null, productId, channel: "noon", slot: "image:1", toVersionId: image.versionId, kind: "links_delivered",
+      at: new Date("2026-11-05T00:00:00Z"), evidence: "tool_publish", actor: "worker", reasonKind: "new_content", changeTypeId: "img_background_fixed" });
+    await runGraphExport(db, sink, PAGE);
+    expect(sink.tables.get("content_versions")!.find((r) => r.id === image.versionId)).toMatchObject({ role: "main", position: 1, scope: "noon" });
+    expect(sink.tables.get("change_events")!.find((r) => r.to_version_id === image.versionId)).toMatchObject({
+      listing_id: null, product_id: productId, channel: "noon", slot: "image:1", kind: "links_delivered", reason_kind: "new_content", change_type_id: "img_background_fixed",
+    });
+    // The listing events carry the new columns too (null when the writer did not set them), so BigQuery gets them as columns.
+    expect(Object.keys(sink.tables.get("change_events")![0]!)).toEqual(expect.arrayContaining(["product_id", "channel"]));
+    expect(commitScript(EXPORT_TABLES, (t) => t)).toContain("ADD COLUMN IF NOT EXISTS `product_id` STRING, ADD COLUMN IF NOT EXISTS `channel` STRING");
   });
 
   it("a run killed half way leaves the previous snapshot whole, records the error, and the next run completes (F5 test 2)", async () => {
