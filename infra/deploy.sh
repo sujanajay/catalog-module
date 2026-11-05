@@ -22,7 +22,7 @@
 # builds only the worker and web images and the four matting services are SKIP (no candidate, no probe); the worker's
 # smoke then runs against the live matting services. When matting services did change, their candidates and probes run
 # at once (gate_group in infra/lib/gate.sh), and traffic and service max instances change only when all passed; a
-# candidate whose probe passed in an earlier run on the same revision is not probed again. M6-F2-R11: a lower max
+# re-run probes every changed candidate again (docs/solutions/shorter-deploys.md). M6-F2-R11: a lower max
 # instances (matting services before their group, the worker before its gate) or fewer queue slots wait for the stack
 # to be idle (queues_lower_wait in infra/lib/queues.sh). The run ends with the minutes per step and
 # "DEPLOY_OK <tag> in <m>m<s>s" (infra/lib/deploy-steps.sh).
