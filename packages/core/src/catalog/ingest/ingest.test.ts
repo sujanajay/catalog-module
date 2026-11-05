@@ -521,7 +521,7 @@ describe("runIngest", () => {
     const brand = await db.select().from(catalogContentVersions).where(eq(catalogContentVersions.producerRef, sourceProducerRef(rows[0]!.productId)));
     expect(brand).toHaveLength(5);
     expect(new Set(brand.map((v) => v.contentHash))).toEqual(new Set([...firstRows, ...rows].map((r) => r.sha256)));
-    expect(brand.every((v) => v.source === "brand" && v.scope === "master" && v.role === "unknown" && v.isTest && v.assetSha256 === v.contentHash)).toBe(true);
+    expect(brand.every((v) => v.source === "brand" && v.scope === "master" && v.role === (v.position === 1 ? "main" : "additional") && v.isTest && v.assetSha256 === v.contentHash)).toBe(true);
     expect(brand.find((v) => v.contentHash === rows[1]!.sha256)).toMatchObject({ position: 2, batchId: second.id });
     expect(rows[0]!.rawUri).toBe(`gs://${BUCKET}/${rawPath(prefixOf(second), "ABC123", 1, "jpg")}`);
     const after = (await sourcesOf(first.id)).sort((a, b) => a.n - b.n);

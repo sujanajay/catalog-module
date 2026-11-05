@@ -77,6 +77,7 @@ const INDEXES = [
   "catalog_incidents_dedupe_key_uq", "catalog_batch_touches_batch_id_idx", "catalog_revisions_first_seen_at_idx",
   "catalog_cost_days_day_component_env_source_uq", "catalog_cost_allocations_day_batch_component_uq", "catalog_cost_allocations_batch_id_idx",
   "catalog_batches_parent_batch_id_idx", "catalog_shot_numbers_batch_id_idx", // 0024_follow_up_batches.sql (M1-S6)
+  "catalog_change_events_product_slot_idx", // 0026_graph_role_events.sql (R1 exit item 5)
 ];
 
 describe("generated migrations", () => {

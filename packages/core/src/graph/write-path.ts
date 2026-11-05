@@ -8,7 +8,7 @@ import { CHANGE_TYPE, type ChangeTypeId } from "../learning/change-types";
 import { catalogAssets, catalogContentVersions } from "../db/schema";
 import type { ChannelId } from "../catalog/types";
 import { recordAsset, recordVersion, sha256Hex, type GraphDb, type NewAsset } from "./index";
-import type { ReasonKind, VersionSource } from "./types";
+import type { ImageRole, ReasonKind, VersionSource } from "./types";
 
 /** The module that records brand photos (M1 intake) and the one that records channel renders (M3 images). */
 export const SOURCE_PHOTO_PRODUCER = "M1";
@@ -93,15 +93,23 @@ export interface SourcePhoto {
 /** One brand photo version per product and content: re-sending a photo in a later batch reuses it (F2-R6). */
 export const sourceProducerRef = (productId: string) => `product:${productId}`;
 
+/**
+ * D28: the role the pipeline writes until M2 reads each photo's view: the image's place on the listing, `main` for slot 1
+ * (the brand's first photo, the channel's main image) and `additional` for every later slot.
+ */
+export function slotRole(n: number): ImageRole {
+  return n === 1 ? "main" : "additional";
+}
+
 const sourceVersionRow = (p: SourcePhoto, optionId: string | null, isTest: boolean) => ({
-  optionId, scope: "master" as const, component: "image" as const, role: "unknown" as const, position: p.n, source: "brand" as const,
+  optionId, scope: "master" as const, component: "image" as const, role: slotRole(p.n), position: p.n, source: "brand" as const,
   aiGenerated: false, producer: SOURCE_PHOTO_PRODUCER, producerRef: sourceProducerRef(p.productId), assetSha256: p.sha256,
   contentHash: p.sha256, hashKind: "sha256" as const, batchId: p.batchId, isTest, createdBy: PIPELINE_ACTOR,
 });
 
 /**
  * Ingest (F2-R1): every accepted photo as an asset (its existing sha256; no perceptual hash: the photo's bytes are not read
- * here, and live matching compares channel images with the output versions) and a `brand` version, scope master, position n, role unknown until M2 reads it. Bulk,
+ * here, and live matching compares channel images with the output versions) and a `brand` version, scope master, position n, role by slot (D28) until M2 reads it. Bulk,
  * 500 rows a statement, idempotent. A row whose sha256 is not a sha256 (never written by ingest) is left out.
  * Returns the number of versions created.
  */
@@ -164,7 +172,7 @@ export async function recordOutputVersion(db: GraphDb, input: OutputVersionInput
   const parent = await ensureSourceVersion(db, source, { optionId: product.optionId, isTest: batch.isTest });
   const versionSource = outputVersionSource(output.flags);
   const { versionId } = await recordVersion(db, {
-    optionId: product.optionId, scope: output.channel, component: "image", role: "unknown", position: output.n,
+    optionId: product.optionId, scope: output.channel, component: "image", role: slotRole(output.n), position: output.n,
     source: versionSource, aiGenerated: false, producer: OUTPUT_PRODUCER, producerRef: output.id, assetSha256: asset.sha256,
     parentVersionIds: parent ? [parent] : [], publicUrl: output.publicUrl, settingsSnapshotId: batch.settingsSnapshotId,
     batchId: batch.id, isTest: batch.isTest, createdBy: PIPELINE_ACTOR,

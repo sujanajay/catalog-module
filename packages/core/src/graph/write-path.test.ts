@@ -78,8 +78,8 @@ describe("M0-S3 brand photo versions (F2-R1)", () => {
     expect(await recordSourcePhotoVersions(db, photos)).toBe(0);
     const rows = await db.select().from(catalogContentVersions).where(eq(catalogContentVersions.producerRef, sourceProducerRef(f.product.id)));
     expect(rows.map((r) => [r.position, r.source, r.scope, r.role, r.component, r.aiGenerated, r.producer, r.optionId, r.contentHash === r.assetSha256]).sort()).toEqual([
-      [1, "brand", "master", "unknown", "image", false, "M1", f.optionId, true],
-      [2, "brand", "master", "unknown", "image", false, "M1", f.optionId, true],
+      [1, "brand", "master", "main", "image", false, "M1", f.optionId, true],
+      [2, "brand", "master", "additional", "image", false, "M1", f.optionId, true],
     ]);
     const [asset] = await db.select().from(catalogAssets).where(eq(catalogAssets.sha256, photos[0]!.sha256));
     expect(asset).toMatchObject({ uri: photos[0]!.rawUri, width: 800, height: 1000, bytes: 1234 });
@@ -110,7 +110,7 @@ describe("M0-S3 output versions (F2-R2 to R4, R6)", () => {
     expect(await recordOutputVersion(db, input)).toBe(id);
     const [v] = await db.select().from(catalogContentVersions).where(eq(catalogContentVersions.id, id));
     const parent = await ensureSourceVersion(db, source, { optionId: f.optionId, isTest: true });
-    expect(v).toMatchObject({ scope: "noon", component: "image", role: "unknown", position: 1, source: "upscaled", aiGenerated: false, producer: "M3", producerRef: output.id,
+    expect(v).toMatchObject({ scope: "noon", component: "image", role: "main", position: 1, source: "upscaled", aiGenerated: false, producer: "M3", producerRef: output.id,
       assetSha256: sha256Hex(jpeg), contentHash: sha256Hex(jpeg), parentVersionIds: [parent], publicUrl: output.publicUrl, batchId: f.batch.id, isTest: true, optionId: f.optionId });
     const [a] = await db.select().from(catalogAssets).where(eq(catalogAssets.sha256, sha256Hex(jpeg)));
     expect(phashFromDb(a!.phash!)).toBe(asset.phash);

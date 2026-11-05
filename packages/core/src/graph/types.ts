@@ -19,8 +19,12 @@ export const KEY_KINDS = ["zsku", "child_zsku", "partner_sku", "barcode", "asin"
 export const KEY_SOURCES = ["master", "sales", "channel_report", "scrape", "manual"] as const;
 /** catalog_content_versions.component (video later). */
 export const COMPONENTS = ["image", "title", "bullet", "description", "attribute", "size_chart", "keyword"] as const;
-/** catalog_content_versions.role, for images. */
-export const IMAGE_ROLES = ["front", "back", "side", "detail", "head_shoulders", "full_length", "flat", "packshot", "size_chart", "unknown"] as const;
+/**
+ * catalog_content_versions.role, for images. The views (front to size_chart) come from M2's read of the photo; until M2
+ * reads photos, the pipeline writes the image's place on the listing: `main` for slot 1, `additional` for any later slot
+ * (decision D28). `unknown` is left for backfilled rows.
+ */
+export const IMAGE_ROLES = ["front", "back", "side", "detail", "head_shoulders", "full_length", "flat", "packshot", "size_chart", "main", "additional", "unknown"] as const;
 /** catalog_content_versions.source. */
 export const VERSION_SOURCES = ["brand", "scraped_live", "crop", "cleanup", "upscaled", "generated", "vendor", "operator"] as const;
 /** catalog_content_versions.hash_kind: sha256 of the bytes or normalized text; crc32c only for backfilled outputs whose object is gone (F4-R2). */

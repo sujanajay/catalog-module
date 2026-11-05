@@ -133,6 +133,24 @@ describe(`M0 graph contract on ${TEST_PG_URL ? "real Postgres" : "PGlite"}`, () 
     await expect(recordChange(db, { ...e, slot: "image:2" })).rejects.toBeInstanceOf(IdempotencyConflictError);
   });
 
+  it("D23 revised: an event without a listing names its product and channel, is idempotent on its key, and is refused without them", async () => {
+    const v = await imageVersion((await listing()).optionId, "bare-1");
+    const productId = "00000000-0000-4000-8000-0000000000d2";
+    const e = event("", v.versionId, { idempotencyKey: "publish:out-bare-1:none:product", listingId: null, productId, channel: "noon" });
+    const first = await recordChange(db, e);
+    expect(first.created).toBe(true);
+    expect(await recordChange(db, e)).toEqual({ seq: first.seq, created: false });
+    const [row] = await db.select().from(catalogChangeEvents).where(eq(catalogChangeEvents.seq, first.seq));
+    expect(row).toMatchObject({ listingId: null, productId, channel: "noon", kind: "links_delivered", reasonKind: "new_content", changeTypeId: "img_background_fixed" });
+    // The same key for another product or channel is a different event.
+    await expect(recordChange(db, { ...e, channel: "amazon" })).rejects.toBeInstanceOf(IdempotencyConflictError);
+    await expect(recordChange(db, { ...e, idempotencyKey: "bare-2", channel: null })).rejects.toThrow(/needs productId and channel/);
+    await expect(recordChange(db, { ...e, idempotencyKey: "bare-3", productId: null })).rejects.toThrow(/needs productId and channel/);
+    // The database refuses one too (catalog_change_events_target_check).
+    await expect(db.insert(catalogChangeEvents).values({ idempotencyKey: "bare-4", listingId: null, productId, slot: "image:1", toVersionId: v.versionId, kind: "links_delivered", at: new Date(), evidence: "tool_publish", actor: "t", reasonKind: "new_content", changeTypeId: "img_background_fixed" }))
+      .rejects.toMatchObject({ cause: { constraint: "catalog_change_events_target_check" } });
+  });
+
   it("recordChange requires a reason and a change type, except on observed_other events and backfill rows", async () => {
     const { optionId, listingId } = await listing();
     const v = await imageVersion(optionId, "r-1");
