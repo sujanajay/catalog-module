@@ -188,7 +188,7 @@ export function wantedRows(deps: Pick<CatalogDeps, "exportHashes">, be: BatchEnl
 
 export interface ReconcileInput {
   be: BatchEnlargement;
-  batch: Pick<typeof catalogBatches.$inferSelect, "id" | "channels" | "brandSlug" | "isTest" | "counts" | "name">;
+  batch: Pick<typeof catalogBatches.$inferSelect, "id" | "channels" | "brandSlug" | "isTest" | "counts" | "name" | "rulesetVersion">;
   product: Pick<typeof catalogProducts.$inferSelect, "id" | "productType">;
   /** Every photo of the product with a matte this delivery can read (the plan's superset). */
   shots: PhotoShot[];
@@ -215,7 +215,7 @@ export interface ReconcileResult { rows: CatalogEnlargement[]; queued: boolean; 
 export async function reconcileEnlargements(deps: CatalogDeps, input: ReconcileInput): Promise<ReconcileResult> {
   const { be, batch, product } = input;
   // M3-S1: the same channel values the render reads, so the plan stays a superset of what the render needs.
-  const target = wantedRows(deps, be, batch, product, input.shots, input.wanted, await deps.channelRules());
+  const target = wantedRows(deps, be, batch, product, input.shots, input.wanted, await deps.channelRules(batch.rulesetVersion));
   const now = deps.now();
   let rows: CatalogEnlargement[];
   if (input.mode === "check") {

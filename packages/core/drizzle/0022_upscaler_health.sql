@@ -1,4 +1,4 @@
--- M1-S4b (2026-11-05; renumber at merge if another slice takes 0021). The upscaler outage deadline
+-- M1-S4b (2026-11-05; renumbered from 0021 to 0022 after 0021_batch_ruleset_version merged). The upscaler outage deadline
 -- (docs/program/requirements/M1-intake.md D13): one health ledger row per upscaler service (GPU, CPU), and the incident
 -- kind `upscaler_outage` for the outage and deadline incidents. Additive: a new table, and the incidents kind check
 -- replaced by a wider one (added NOT VALID, then validated: a small table). Every statement is re-runnable; the short lock timeout

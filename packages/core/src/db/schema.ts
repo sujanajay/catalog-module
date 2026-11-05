@@ -373,6 +373,13 @@ export const catalogBatches = pgTable(
     updatedAt: updatedAt(),
     /** M12-S1 (0016): the settings this batch read once at Start and keeps to the end; null before Start and on older batches. */
     settingsSnapshotId: text("settings_snapshot_id"),
+    /**
+     * M5-S3 (0021, M5 3.3): the channel ruleset version this batch read once at Start; every chunk, retry, repair and
+     * publish of the batch uses that snapshot, so a later publish never reaches it. Null before Start, on older batches
+     * and when nothing was published at Start (those read the latest published version). No foreign key: a version
+     * read from the snapshot file (M5-F4-R8) is pinned the same way.
+     */
+    rulesetVersion: integer("ruleset_version"),
   },
   (t) => [
     index("catalog_batches_brand_slug_idx").on(t.brandSlug),

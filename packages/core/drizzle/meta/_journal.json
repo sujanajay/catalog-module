@@ -152,8 +152,15 @@
     {
       "idx": 21,
       "version": "7",
-      "when": 1793857945368,
-      "tag": "0021_upscaler_health",
+      "when": 1793854167012,
+      "tag": "0021_batch_ruleset_version",
+      "breakpoints": true
+    },
+    {
+      "idx": 22,
+      "version": "7",
+      "when": 1793860570402,
+      "tag": "0022_upscaler_health",
       "breakpoints": true
     }
   ]

@@ -11,14 +11,18 @@ import { startedBatchOptions } from "@catalog/core/catalog/pipeline/enlargement"
 import { takeSettingsSnapshot } from "@catalog/core/settings/store";
 import { enqueueTask } from "@catalog/core/tasks";
 import { autoDecideSnapshot } from "@catalog/core/catalog/auto-decide";
+import { pinRuleset } from "@catalog/core/catalog/channel-rules";
+import * as storage from "@catalog/core/storage";
 
-export interface LoadStartDeps { enqueue?: typeof enqueueTask; env?: NodeJS.ProcessEnv }
+export interface LoadStartDeps { enqueue?: typeof enqueueTask; env?: NodeJS.ProcessEnv; storage?: typeof storage }
 
 export async function startLoadBatch(db: Db, batchId: string, deps: LoadStartDeps = {}): Promise<{ chunks: number; sources: number }> {
   const sources = await db.select({ id: catalogSourceImages.id, productId: catalogSourceImages.productId }).from(catalogSourceImages).where(eq(catalogSourceImages.batchId, batchId));
   const productIds = (await db.select({ id: catalogBatchProducts.productId }).from(catalogBatchProducts).where(eq(catalogBatchProducts.batchId, batchId))).map(p => p.id);
   const withPhotos = productIds.filter(id => sources.some(s => s.productId === id));
   const plans = planChunks(withPhotos.map(productId => ({ productId, sourceCount: sources.filter(s => s.productId === productId).length })), chunkImages());
+  // M5-S3: the channel ruleset version the batch keeps to the end, pinned as the web's Start pins it.
+  const ruleset = await pinRuleset(db, { storage: deps.storage ?? storage });
   const chunks = await db.transaction(async tx => {
     const [batch] = await tx.select().from(catalogBatches).where(eq(catalogBatches.id, batchId)).for("update");
     if (!batch) throw new Error(`Batch ${batchId} not found.`);
@@ -34,7 +38,7 @@ export async function startLoadBatch(db: Db, batchId: string, deps: LoadStartDep
     // Spec 18: pinned exactly as the web's Start pins it, so a load batch has the enlargement stage when the upscaler is on.
     // M1-S3: the auto-decide rules are copied in the same way, so a load batch decides its holds by itself too.
     const autoDecide = await autoDecideSnapshot(tx as unknown as Db);
-    await tx.update(catalogBatches).set({ status: "matting", startedAt: new Date(), updatedAt: new Date(), settingsSnapshotId: settings.id, options: { ...startedBatchOptions(batch.options, deps.env, settings), autoDecide }, counts: { ...batch.counts, products: productIds.length, sources: sources.length, outputs: sources.length * batch.channels.length } }).where(eq(catalogBatches.id, batchId));
+    await tx.update(catalogBatches).set({ status: "matting", startedAt: new Date(), updatedAt: new Date(), settingsSnapshotId: settings.id, rulesetVersion: ruleset?.version ?? null, options: { ...startedBatchOptions(batch.options, deps.env, settings), autoDecide }, counts: { ...batch.counts, products: productIds.length, sources: sources.length, outputs: sources.length * batch.channels.length } }).where(eq(catalogBatches.id, batchId));
     return rows;
   });
   // Spec 15 E5: the window queues the first chunks; each finished chunk queues the next.

@@ -63,7 +63,7 @@ export async function preparePrimed(deps: CatalogDeps, input: { batch: Batch; so
 }
 /** The render context of the batch's pinned route (the plain path when it has none on this worker). */
 /** The batch's render context: its pinned upscalers and (M3-S1) the channel values from the M5 registry. */
-const routeContext = async (deps: CatalogDeps, batch: Batch): Promise<Partial<RenderInput>> => { const be = batchEnlargement(deps,batch); return {upscaler:be?.x2 ?? null,upscalerX4:be?.x4 ?? null,channelRules:await deps.channelRules()} as Partial<RenderInput>; };
+const routeContext = async (deps: CatalogDeps, batch: Batch): Promise<Partial<RenderInput>> => { const be = batchEnlargement(deps,batch); return {upscaler:be?.x2 ?? null,upscalerX4:be?.x4 ?? null,channelRules:await deps.channelRules(batch.rulesetVersion)} as Partial<RenderInput>; };
 // Spec 18 lifecycle 3.7: an image held for its enlargement is never an answer the ladder can accept.
 const ok = (r: RenderOutput | undefined | null): r is RenderOutput & { jpeg: Buffer } => !!r && r.status === "ok" && r.compliance.ok && !!r.jpeg && !r.flags.includes("enlargement_failed");
 const codes = (r: RenderOutput) => r.compliance.failures.map(f => f.split(":")[0]).join(",") || r.notes.join("; ") || r.status;
@@ -259,7 +259,7 @@ async function writeRender(deps: CatalogDeps, input: Pick<ResolvePhotoInput,"bat
   const judged = o.flags.filter(f=>!RENDER_FLAGS.has(f) && !input.trigger.includes(f));
   const flags = [...new Set<OutputFlag>([...extra.sourceFlags,...r.flags,...judged])], status = input.statusFor(flags);
   // Spec 11: `upscaled` is a render flag, so the re-render decides the key too (the upscaler may win or lose here).
-  const rules = await deps.channelRules();
+  const rules = await deps.channelRules(batch.rulesetVersion);
   const key = rerenderedKey(o,r.upscale?.model,()=>renderKey({sourceSha256:source.sha256,channel:o.channel,n:source.n,policyKey:`default|${input.policy.matteModel}`,rulesVersion:rules.keyVersion(o.channel)}));
   // The options this image was made with stay with it (relative to the stored matte), so a later repair starts from them.
   const variant = extra.variant ? {...extra.variant,matte:"first" as const}:undefined;

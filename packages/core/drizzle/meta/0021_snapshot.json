@@ -1,5 +1,5 @@
 {
-  "id": "a5a1d807-3c38-4972-99c9-bc727057bc1d",
+  "id": "6e025e9a-984b-42fd-b3d8-040f55f6c71d",
   "prevId": "eb707a28-2e7f-424d-b37e-592f2591bfac",
   "version": "7",
   "dialect": "postgresql",
@@ -912,6 +912,12 @@
         "settings_snapshot_id": {
           "name": "settings_snapshot_id",
           "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "ruleset_version": {
+          "name": "ruleset_version",
+          "type": "integer",
           "primaryKey": false,
           "notNull": false
         }
@@ -3564,7 +3570,7 @@
       "checkConstraints": {
         "catalog_incidents_kind_check": {
           "name": "catalog_incidents_kind_check",
-          "value": "\"catalog_incidents\".\"kind\" IN ('batch_failed', 'chunk_gave_up', 'invariant', 'http_5xx', 'deploy_refused', 'contamination', 'alert', 'upscaler_outage')"
+          "value": "\"catalog_incidents\".\"kind\" IN ('batch_failed', 'chunk_gave_up', 'invariant', 'http_5xx', 'deploy_refused', 'contamination', 'alert')"
         },
         "catalog_incidents_severity_check": {
           "name": "catalog_incidents_severity_check",
@@ -7029,79 +7035,6 @@
         "catalog_uploads_status_check": {
           "name": "catalog_uploads_status_check",
           "value": "\"catalog_uploads\".\"status\" IN ('pending', 'uploaded', 'collected', 'failed', 'removed')"
-        }
-      },
-      "isRLSEnabled": false
-    },
-    "public.catalog_upscaler_health": {
-      "name": "catalog_upscaler_health",
-      "schema": "",
-      "columns": {
-        "service": {
-          "name": "service",
-          "type": "text",
-          "primaryKey": true,
-          "notNull": true
-        },
-        "healthy_at": {
-          "name": "healthy_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "unhealthy_since": {
-          "name": "unhealthy_since",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "last_probe": {
-          "name": "last_probe",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "last_probe_at": {
-          "name": "last_probe_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "last_source": {
-          "name": "last_source",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "last_symptom_at": {
-          "name": "last_symptom_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "last_upscaler": {
-          "name": "last_upscaler",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "updated_at": {
-          "name": "updated_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "now()"
-        }
-      },
-      "indexes": {},
-      "foreignKeys": {},
-      "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
-      "policies": {},
-      "checkConstraints": {
-        "catalog_upscaler_health_service_check": {
-          "name": "catalog_upscaler_health_service_check",
-          "value": "\"catalog_upscaler_health\".\"service\" IN ('cpu', 'gpu')"
         }
       },
       "isRLSEnabled": false
