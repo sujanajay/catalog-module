@@ -136,9 +136,11 @@ if [ "${CATALOG_PREVIEW:-0}" = 1 ]; then
   BUILD_CONFIG=infra/cloudbuild-preview.yaml
 fi
 # M6-F2-R8 (M6-S4): the login works without a prompt and has 3 hours left, and the build and job identities are
-# enabled, before anything is built (infra/lib/preflight.sh).
+# enabled, before anything is built (infra/lib/preflight.sh). First the laptop disk: the temp folder and the repo drive
+# need DEPLOY_MIN_FREE_GB (8) free (2026-11-05, a full C: stopped the deploy of 9b9abfc).
 # shellcheck source=lib/preflight.sh
 source infra/lib/preflight.sh
+disk_preflight || exit 1
 preflight_login_works || exit 1
 PN=$(gcv projects describe "$PROJECT" --format='value(projectNumber)')
 WEB_SA=catalog-web@$PROJECT.iam.gserviceaccount.com

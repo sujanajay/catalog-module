@@ -22,6 +22,7 @@ gcloud() {
         busy) echo "ERROR: (gcloud.run.jobs.executions.describe) UNAVAILABLE: The service is currently unavailable." >&2; return 1 ;;
         dns) dns ;;
         denied) echo "ERROR: (gcloud.run.jobs.executions.describe) PERMISSION_DENIED: no" >&2; return 1 ;;
+        nospace) echo "ERROR: gcloud failed to load: [Errno 28] No space left on device" >&2; return 1 ;;
       esac ;;
     "run jobs executions cancel "*) echo "cancelled" ;;
     "logging read "*) printf '| model | size |\nprobe passed\n' ;;

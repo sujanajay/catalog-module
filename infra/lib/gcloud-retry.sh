@@ -23,7 +23,8 @@
 #       execution's log is printed (best effort; it never changes the verdict). TERM or INT (the gate's hard timeout)
 #       cancels the execution, so a probe the gate gave up on stops running on the candidate (0 for a job that must
 #       never stop half-way, such as catalog-migrate). A Run API 429 or 503 while polling (GCLOUD_API_BUSY_RE) is waited
-#       out like a network error. Success needs Completed True and no failed task.
+#       out like a network error. A local failure to judge the state (a full disk, no temp file) returns unknown (1) at
+#       once with a "local disk/temp error" line. Success needs Completed True and no failed task.
 # Tests set the variables below to 0 and put a fake gcloud first on PATH (or define gcloud as a function).
 
 GCLOUD_RETRY_ATTEMPTS=${GCLOUD_RETRY_ATTEMPTS:-5}
@@ -34,10 +35,12 @@ GCLOUD_POLL_OUTAGE_S=${GCLOUD_POLL_OUTAGE_S:-900}
 # refresh that cannot reach oauth2.googleapis.com says "Failed to resolve" too). An expired login ("Reauthentication
 # failed") and API answers (NOT_FOUND, PERMISSION_DENIED, INVALID_ARGUMENT) do not match.
 GCLOUD_TRANSPORT_RE='gcloud crashed \((ConnectionError|SSLError|Timeout|ReadTimeout|ConnectTimeout|TransportError|ConnectionResetError|RemoteDisconnected|ProtocolError|ChunkedEncodingError|MaxRetryError|NewConnectionError)\)|NameResolutionError|getaddrinfo failed|Failed to resolve|Temporary failure in name resolution|Name or service not known|Connection reset by peer|Connection aborted|Connection refused|Max retries exceeded|Read timed out|Connection timed out'
-# The subset where the request certainly never reached Google (no name, no connection): safe to repeat even for a call
-# that is not idempotent, such as starting a job execution.
 # A Run API that is briefly overloaded: during polling waited out like a network error (the request itself is a read).
 GCLOUD_API_BUSY_RE='RESOURCE_EXHAUSTED|UNAVAILABLE|HTTPError 503|HTTPError 429|code=503|code=429|Service Unavailable|Too Many Requests'
+# A local failure on the laptop (full disk, no temp file), not an answer from GCP: an unknown result at once.
+GCLOUD_LOCAL_DISK_RE='No space left on device|ENOSPC|Errno 28|cannot create temp file|Disk quota exceeded'
+# The subset where the request certainly never reached Google (no name, no connection): safe to repeat even for a call
+# that is not idempotent, such as starting a job execution.
 GCLOUD_UNSENT_RE='NameResolutionError|getaddrinfo failed|Failed to resolve|Temporary failure in name resolution|Name or service not known|Connection refused|ConnectTimeout|NewConnectionError'
 
 # The first network-error phrase in a gcloud error file, for the retry line.
@@ -118,7 +121,10 @@ gcloud_job_logs() {
 
 gcloud_job_run() {
   local job=$1 region=$2 cancel=${3:-1} execution="" err status json state="" outage_since="" attempt=1 delay=$GCLOUD_RETRY_DELAY_S
-  err=$(mktemp)
+  if ! err=$(mktemp); then
+    echo "ERROR: $job: local disk/temp error: cannot create a temp file in ${TMPDIR:-/tmp} (is the disk full?); nothing was started, so this does not pass" >&2
+    return 1
+  fi
   while :; do
     status=0
     execution=$(gcloud run jobs execute "$job" --region="$region" --async --format='value(metadata.name)' 2>"$err") || status=$?
@@ -152,7 +158,11 @@ gcloud_job_run() {
     if [ "$status" != 0 ]; then
       if ! grep -qE "$GCLOUD_TRANSPORT_RE|$GCLOUD_API_BUSY_RE" "$err"; then
         cat "$err" >&2
-        state="unknown: cannot read execution $execution"
+        if grep -qE "$GCLOUD_LOCAL_DISK_RE" "$err"; then
+          state="unknown: local disk/temp error on this laptop while reading execution $execution (is the disk full?). It may still be running: gcloud run jobs executions describe $execution --region=$region"
+        else
+          state="unknown: cannot read execution $execution"
+        fi
         break
       fi
       [ -n "$outage_since" ] || outage_since=$SECONDS
@@ -166,7 +176,15 @@ gcloud_job_run() {
       continue
     fi
     outage_since=""
-    state=$(gcloud_job_state <<<"$json")
+    # Piped, not a here-string: bash may write a here-string to a temp file, and on a full disk that failed and the
+    # probe never read a state (2026-11-05, deploy of 9b9abfc). A local failure to judge the state is an unknown result
+    # at once, never a pass and never another wait.
+    status=0
+    state=$(printf "%s" "$json" | gcloud_job_state) || status=$?
+    if [ "$status" != 0 ] || [ -z "$state" ]; then
+      state="unknown: local disk/temp error on this laptop: could not judge the state of execution $execution (exit $status; is the disk full?). It may still be running: gcloud run jobs executions describe $execution --region=$region"
+      break
+    fi
     [ "$state" = running ] || break
     sleep "$GCLOUD_POLL_S"
   done

@@ -4,7 +4,7 @@
 // The fake answers each kind of call from a comma list (the last item repeats):
 //   READ_SEQ   for "run services describe" (and any other read):  ok | dns | reset | notfound | denied | reauth
 //   EXEC_SEQ   for "run jobs execute":                            ok | dns | reset | denied
-//   POLL_SEQ   for "run jobs executions describe":                running | succeeded | failed | partial | busy | dns | denied | garbage
+//   POLL_SEQ   for "run jobs executions describe":                running | succeeded | failed | partial | busy | dns | denied | garbage | nospace
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -99,6 +99,48 @@ test('gcloud_job_run: a read error that is not the network, or an unreadable sta
     assert.equal(count(r.calls, 'run jobs executions describe'), 1, seq);
     assert.match(r.err, /this does not pass/);
   }
+});
+
+// 2026-11-05 (deploy of 9b9abfc): C: reached 0 bytes and `gcloud_job_state <<<"$json"` could not create its temp file,
+// so the probe never read a state and its gate timed out. A local failure to judge the state is unknown at once.
+test('gcloud_job_run: a local failure to judge the state (full disk) is an unknown result at once, never a pass', () => {
+  for (const judge of [
+    'gcloud_job_state() { cat > /dev/null; echo "bash: cannot create temp file for here-document: No space left on device" >&2; return 1; }',
+    'gcloud_job_state() { cat > /dev/null; }',
+  ]) {
+    const r = run(`${judge}\ngcloud_job_run probe-job asia-south1`, {POLL_SEQ: 'succeeded'});
+    assert.equal(r.status, 1, judge);
+    assert.equal(count(r.calls, 'run jobs executions describe'), 1, 'no further polling');
+    assert.match(r.err, /local disk\/temp error on this laptop: could not judge the state of execution probe-job-ab12c/);
+    assert.match(r.err, /this does not pass/);
+    assert.ok(!/succeeded/.test(r.out), r.out);
+  }
+});
+
+test('gcloud_job_run: the state is piped into node, never a here-string (a full disk cannot make its temp file)', () => {
+  const s = fs.readFileSync(path.join(root, 'infra/lib/gcloud-retry.sh'), 'utf8').replace(/^\s*#.*$/gm, '');
+  assert.ok(!/gcloud_job_state\s*<<</.test(s), 'no here-string into gcloud_job_state');
+  assert.match(s, /state=\$\(printf "%s" "\$json" \| gcloud_job_state\) \|\| status=\$\?/);
+  // A large execution JSON still judges correctly through the pipe.
+  const big = JSON.stringify({status: {conditions: [{type: 'Completed', status: 'True'}]}, pad: 'x'.repeat(300000)});
+  const state = path.join(dir, 'big');
+  fs.mkdirSync(state);
+  fs.writeFileSync(path.join(state, 'big.json'), big);
+  const r2 = spawnSync(bash, ['-c', 'set -euo pipefail\ncd "$ROOT"\nsource infra/lib/gcloud-retry.sh\njson=$(cat "$STATE/big.json")\nprintf "%s" "$json" | gcloud_job_state'], {
+    env: {...process.env, ROOT: root, STATE: state}, encoding: 'utf8', timeout: 60000,
+  });
+  assert.equal(r2.stdout.trim(), 'succeeded', r2.stderr);
+});
+
+test('gcloud_job_run: gcloud itself out of disk while polling, or no temp file at the start, is unknown at once', () => {
+  let r = run('gcloud_job_run probe-job asia-south1', {POLL_SEQ: 'running,nospace,succeeded'});
+  assert.equal(r.status, 1);
+  assert.equal(count(r.calls, 'run jobs executions describe'), 2);
+  assert.match(r.err, /local disk\/temp error on this laptop while reading execution probe-job-ab12c/);
+  r = run('mktemp() { echo "mktemp: failed to create file via template: No space left on device" >&2; return 1; }\ngcloud_job_run probe-job asia-south1');
+  assert.equal(r.status, 1);
+  assert.equal(count(r.calls, 'run jobs execute'), 0, 'nothing is started');
+  assert.match(r.err, /local disk\/temp error: cannot create a temp file/);
 });
 
 test('gcloud_job_run: the start is retried only when the request never left (DNS); a reset start is not repeated', () => {
