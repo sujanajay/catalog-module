@@ -26,7 +26,6 @@ import {
   type TouchAction,
 } from "../db/schema";
 import type { InvariantResult } from "./invariants/run";
-import { batchRecordedUsd } from "./cost-report";
 
 /** A cancel this soon after start is a mistake, not a failure: recorded and left out of the rate (M6-F3 edge cases). */
 export const QUICK_CANCEL_MS = 10 * 60_000;
@@ -231,9 +230,7 @@ export async function recordBatchOutcome(db: Db, batchId: string, now: Date = ne
     startedAt: b.startedAt, firstLinksAt: dateOf(links?.first ?? null), linksReadyAt, endedAt,
     durationMs: linksReadyAt && b.startedAt ? Math.max(0, +linksReadyAt - +b.startedAt) : null,
     touches: touchCount, incidents: incidentCount, deployOverlap: Number(overlap?.n ?? 0) > 0,
-    products: Number(products?.n ?? 0), productsWithLinks: Number(links?.n ?? 0),
-    // R1 exit item 4: the full ledger of the batch, the digest's figure; true_cost_usd adds idle and shared lines later.
-    recordedCostUsd: await batchRecordedUsd(db, batchId), recordedAt: now,
+    products: Number(products?.n ?? 0), productsWithLinks: Number(links?.n ?? 0), recordedAt: now,
   };
   const { batchId: _key, ...update } = row;
   const [written] = await db.insert(catalogBatchOutcomes).values(row).onConflictDoUpdate({ target: catalogBatchOutcomes.batchId, set: update }).returning();

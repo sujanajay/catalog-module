@@ -9,9 +9,9 @@ import { recordBatchOutcome } from "@catalog/core/catalog/reliability";
 import { ENLARGING_TASK } from "@catalog/core/catalog/pipeline/enlargement";
 import { recheckSheetPart, type RecheckProgress } from "@catalog/core/catalog/recheck/index";
 import { compareXlsxCsv, fillProductListWorkbook, writeExceptionsCsv, writeLinksCsv, writeLinksXlsx, writeNotesCsv } from "@catalog/core/catalog/sheet";
-import { digestFrom, readImprovements, type BatchDigest } from "@catalog/core/catalog/digest";
+import { digestCost, digestFrom, readImprovements, type BatchDigest } from "@catalog/core/catalog/digest";
 import { inrPerUsdFromEnv } from "@catalog/core/catalog/cost";
-import { batchRecordedUsd } from "@catalog/core/catalog/cost-report";
+import { batchCostFigure } from "@catalog/core/catalog/cost-report";
 import { positiveIntEnv } from "@catalog/core/concurrency";
 import type { HandleResult } from "../server";
 import { CATALOG_TASK_LEASE_MS, enqueueFinalize, refreshBatchProgress, type CatalogDeps } from "./deps";
@@ -131,11 +131,12 @@ export async function handleFinalizeTask(deps:CatalogDeps,body:Record<string,unk
       const {rows,...built}=await buildReport(db,batchId,extra);built.batch.counts=cleanCounts(built.batch.counts);built.report.counts=built.batch.counts;
       // M1-S5 (M1-F4-R1): the digest and its two sheets from the same snapshot as the links sheet, so their numbers agree.
       // R1 exit item 4: the digest cost is every cost ledger row of the batch (cut-out and enlarging calls, every compute
-      // row, failed attempts), not batch.cost (judge and chunk compute only). The daily cost check adds idle time later.
-      const identifiers=built.batch.cost.identifiers,usd=await batchRecordedUsd(db,batchId),rate=inrPerUsdFromEnv(),usdPerProduct=identifiers>0 ? usd/identifiers:null;
+      // row, failed attempts) per product with links, not batch.cost (judge and chunk compute only). The page shows the
+      // live figure (digestWithCost); the daily cost check adds idle time later.
+      const cost=digestCost(await batchCostFigure(db,batchId),inrPerUsdFromEnv());
       // M1-S5 review P2-4: buildReport's rows are reused, so the outputs are read once per build; only improvements are new.
       const digest=digestFrom({batch:built.batch,sheet:built.sheet,files:[...(built.report.unsupportedFiles as unknown[]),...(built.report.linkFailures as unknown[])],
-        cost:{usd,inr:rate===null ? null:usd*rate,usdPerProduct,inrPerProduct:usdPerProduct===null || rate===null ? null:usdPerProduct*rate,basis:"recorded"},
+        cost,
         pairs:rows.pairs.map(r=>({productId:r.pair.productId,identifier:r.product.identifier,change:r.pair.change,notes:r.pair.notes})),outputs:rows.outputs,improvements:await readImprovements(db,batchId)});
       return {...built,digest};
     };

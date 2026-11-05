@@ -170,9 +170,10 @@ describe("batch page and Details", () => {
     expect(fullCostText([], 85)).toBeNull();
     // R1 exit item 4: the cost line reads every ledger row of the batch (the cut-out calls too), not batch.cost (0.0016).
     const line = await batchCostLine(costed!, db);
+    expect(line.basis).toBe("recorded");
     expect(line.usd).toBeCloseTo(0.0056, 12);
     expect(line.usd).toBeCloseTo(usd, 12);
-    const costLine = renderToStaticMarkup(createElement(CostLine, { line: { usdPerIdentifier: line.usdPerIdentifier, inrPerIdentifier: line.inrPerIdentifier, usd: line.usd, inr: line.inr } }));
+    const costLine = renderToStaticMarkup(createElement(CostLine, { line: { usdPerIdentifier: line.usdPerIdentifier, inrPerIdentifier: line.inrPerIdentifier, usd: line.usd, inr: line.inr, basis: line.basis } }));
     const html = await render(BatchPage({ params: Promise.resolve({ id: batch.id }), searchParams: Promise.resolve({}) }));
     expect(html).toContain("Cost so far");
     expect(html).toContain(costLine);

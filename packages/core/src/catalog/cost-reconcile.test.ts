@@ -9,7 +9,7 @@ import { createTestDb } from "../db/testing";
 import { changeSetting } from "../settings/store";
 import { COST_DATABASE_SHARE_KEY, COST_DATABASE_USD_PER_DAY_KEY, DEFAULT_DATABASE_SHARE_PERCENT, DEFAULT_DATABASE_USD_PER_DAY } from "../settings/registry";
 import {
-  allocateIdle, billedLines, costCard, cpuQuantity, dayLedger, googleCostReaders, IDLE_LEAD_MS, IDLE_TAIL_MS, instancePrice, instanceUsdPerMs, memoryGiB, reconcileDay, runCostReconcile, runResourceFrom, samplesFrom, utcDay,
+  allocateIdle, billedLines, costCard, cpuQuantity, dayLedger, googleCostReaders, IDLE_LEAD_MS, IDLE_TAIL_MS, instancePrice, ledgerDay, instanceUsdPerMs, memoryGiB, reconcileDay, runCostReconcile, runResourceFrom, samplesFrom, utcDay,
   type BillableSample, type CostReaders, type RunResource, type V2Item,
 } from "./cost-reconcile";
 
@@ -389,7 +389,9 @@ const billedMinutes = (from: string, to: string, usdPerMinute: number) => {
   for (let m = t(from); m < t(to); m += MIN) out.push({ endMs: m + MIN, seconds: usdPerMinute });
   return out;
 };
-const seg = (batchId: string | null, from: string, to: string, usd: number) => ({ component: "c", batchId, start: t(from), end: t(to), usd });
+const seg = (batchId: string | null, from: string, to: string, usd: number) => ({ component: "c", batchId, endMs: t(to), busyMs: t(to) - t(from), usd, estimated: false });
+/** The work of `events` by the minute, as planDay hands it to allocateIdle (no instance cap). */
+const work = (events: ReturnType<typeof seg>[]) => ledgerDay(events, t("00:00"), t("00:00") + 86_400_000, new Map()).minutes.get("c");
 
 describe("R1 exit item 4: idle by the minute (decision C1)", () => {
   it("keeps Cloud Monitoring's minutes on each sample", () => {
@@ -407,7 +409,7 @@ describe("R1 exit item 4: idle by the minute (decision C1)", () => {
     const billed = [...billedMinutes("08:00", "08:30", 1), ...billedMinutes("09:58", "10:20", 1), ...billedMinutes("11:30", "12:05", 1)];
     const segments = [seg("A", "10:00", "10:10", 4), seg("B", "12:00", "12:05", 1)];
     const idle = (30 + 22 + 35) - 5;
-    const out = allocateIdle(idle, billed, segments, t("00:00"), t("00:00") + 86_400_000)!;
+    const out = allocateIdle(idle, billed, work(segments), t("00:00"), t("00:00") + 86_400_000)!;
     // A: its 10 work minutes (1 - 0.4 each), the 2 start-up minutes and the 10-minute tail = 6 + 2 + 10.
     expect(out.get("A")).toBeCloseTo(18, 9);
     // B: its 5 work minutes (1 - 0.2 each) and the 5 minutes before them (11:55-12:00); 11:30-11:55 has no work within 5 min.
@@ -420,14 +422,14 @@ describe("R1 exit item 4: idle by the minute (decision C1)", () => {
     const billed = billedMinutes("10:00", "10:10", 1);
     // A works 10:00-10:04 (4 min), B 10:04-10:05 (1 min), a sweep with no batch 10:05-10:06; each row recorded at 0.
     const segments = [seg("A", "10:00", "10:04", 0), seg("B", "10:04", "10:05", 0), seg(null, "10:05", "10:06", 0)];
-    const out = allocateIdle(5, billed, segments, t("00:00"), t("00:00") + 86_400_000)!;
+    const out = allocateIdle(5, billed, work(segments), t("00:00"), t("00:00") + 86_400_000)!;
     // Every minute's window holds all the work (4 : 1 : 1); 10 minutes of idle scaled to the day line's 5.
     expect(out.get("A")).toBeCloseTo(5 * 4 / 6, 9);
     expect(out.get("B")).toBeCloseTo(5 * 1 / 6, 9);
     expect(out.has("")).toBe(false);
     // No minutes (a sample from a reader without them), or nothing idle: the caller spreads over the day.
-    expect(allocateIdle(5, [], segments, t("00:00"), t("00:00") + 86_400_000)).toBeNull();
-    expect(allocateIdle(0, billed, segments, t("00:00"), t("00:00") + 86_400_000)).toBeNull();
+    expect(allocateIdle(5, [], work(segments), t("00:00"), t("00:00") + 86_400_000)).toBeNull();
+    expect(allocateIdle(0, billed, work(segments), t("00:00"), t("00:00") + 86_400_000)).toBeNull();
   });
 
   it("the 216e5b7d shape: a morning deploy probe on the GPU upscaler is not charged to the afternoon batches; the outcome keeps the recorded and true cost", async () => {
@@ -449,9 +451,8 @@ describe("R1 exit item 4: idle by the minute (decision C1)", () => {
     // The two batches carry the afternoon window's instance time, never the probe: the day rule gave them both.
     expect(both).toBeCloseTo(batchWindowUsd, 4); // the table keeps 6 decimals per row
     expect(of(a).idle as number).toBeGreaterThan(10 * (of(b).idle as number));
-    // The outcome: true cost = attributed + idle + shared; recorded cost = every ledger row of the batch.
-    const [o] = await rows(sql`SELECT true_cost_usd::float8 AS t, recorded_cost_usd::float8 AS r FROM catalog_batch_outcomes WHERE batch_id = ${a}`);
-    expect(o!.r as number).toBeCloseTo(300 * 3 * rate, 5);
+    // The outcome: true cost = attributed + idle + shared.
+    const [o] = await rows(sql`SELECT true_cost_usd::float8 AS t FROM catalog_batch_outcomes WHERE batch_id = ${a}`);
     const shared = await rows(sql`SELECT shared_usd::float8 AS s FROM catalog_cost_allocations WHERE day = ${DAY} AND batch_id = ${a} AND component = 'ila-pg'`);
     expect(o!.t as number).toBeCloseTo((of(a).attributed as number) + (of(a).idle as number) + (shared[0]!.s as number), 5);
   });

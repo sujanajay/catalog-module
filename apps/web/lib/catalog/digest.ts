@@ -3,7 +3,7 @@
 import { eq } from "drizzle-orm";
 import { catalogBatches } from "@catalog/core/db/schema";
 import type { BatchDigest } from "@catalog/core/catalog/digest-types";
-import { digestWithTrueCost } from "@catalog/core/catalog/digest";
+import { digestWithCost } from "@catalog/core/catalog/digest";
 import { inrPerUsdFromEnv } from "@catalog/core/catalog/cost";
 import { db, type Db } from "../db";
 import { HttpError } from "../errors";
@@ -14,6 +14,6 @@ export async function batchDigest(id: string, conn: Db = db()): Promise<{ id: st
   // The page block holds storage paths: it stays on the server.
   if (!row.digest) return row;
   const { page: _page, ...digest } = row.digest;
-  // R1 exit item 4: the true cost (idle time and shared lines) once the daily cost check has it.
-  return { ...row, digest: await digestWithTrueCost(conn, id, digest, inrPerUsdFromEnv()) };
+  // R1 exit item 4: the live cost figure, the same as the batch page (batchCostFigure).
+  return { ...row, digest: await digestWithCost(conn, id, digest, inrPerUsdFromEnv()) };
 }

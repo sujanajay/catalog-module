@@ -1,7 +1,8 @@
-import { inrAmount, RUPEES_NOT_CONFIGURED, usdAmount } from "@catalog/core/catalog/cost";
+import { inrAmount, perStyleWords, RUPEES_NOT_CONFIGURED, usdAmount } from "@catalog/core/catalog/cost";
+import type { CostBasis } from "@catalog/core/catalog/digest-types";
 
 /** Only the figures of 07's costLine; no policy or model data reaches the page. */
-export interface CostLineData { usdPerIdentifier: number | null; inrPerIdentifier: number | null; usd: number; inr: number | null }
+export interface CostLineData { usdPerIdentifier: number | null; inrPerIdentifier: number | null; usd: number; inr: number | null; basis?: CostBasis }
 
 const REFERENCE = "agency reference INR 60 per style";
 
@@ -11,11 +12,12 @@ const REFERENCE = "agency reference INR 60 per style";
  * spend stays visible in USD while INR reads against the agency reference.
  */
 export default function CostLine({ line }: { line: CostLineData }) {
+  const per = perStyleWords(line.basis ?? "recorded");
   if (line.usdPerIdentifier !== null && line.inrPerIdentifier !== null && line.inr !== null) {
-    return <p className="cost-line"><strong className="cost-fig">USD {usdAmount(line.usdPerIdentifier)} (INR {inrAmount(line.inrPerIdentifier)})</strong> per style so far · USD {usdAmount(line.usd)} (INR {inrAmount(line.inr)}) for this batch · {REFERENCE}</p>;
+    return <p className="cost-line"><strong className="cost-fig">USD {usdAmount(line.usdPerIdentifier)} (INR {inrAmount(line.inrPerIdentifier)})</strong> {per} · USD {usdAmount(line.usd)} (INR {inrAmount(line.inr)}) for this batch · {REFERENCE}</p>;
   }
   if (line.usdPerIdentifier !== null) {
-    return <p className="cost-line"><strong className="cost-fig">USD {usdAmount(line.usdPerIdentifier)}</strong> per style so far · USD {usdAmount(line.usd)} for this batch · {RUPEES_NOT_CONFIGURED} · {REFERENCE}</p>;
+    return <p className="cost-line"><strong className="cost-fig">USD {usdAmount(line.usdPerIdentifier)}</strong> {per} · USD {usdAmount(line.usd)} for this batch · {RUPEES_NOT_CONFIGURED} · {REFERENCE}</p>;
   }
   return <p className="cost-line">Cost per style is not available yet · {REFERENCE}</p>;
 }

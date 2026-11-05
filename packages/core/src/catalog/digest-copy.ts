@@ -73,8 +73,11 @@ export function digestTimeLine(d: BatchDigest): string | null {
  */
 export function digestCostLine(d: BatchDigest): string | null {
   const c = d.cost;
-  const lead = c.basis === "recorded" ? "Cost so far" : "Cost";
-  const after = c.basis === "recorded" ? " Idle machine time is added by the daily cost check." : c.basis === "true" ? " This includes idle machine time and the shared database." : "";
+  // R1 exit item 4: only a final figure reads as the batch's cost; before that it says it is not final.
+  const lead = c.basis === "recorded" ? "Cost so far (not final)" : c.basis === "provisional" ? "Cost (not final)" : "Cost";
+  const after = c.basis === "recorded" ? " Idle machine time is added by the daily cost check."
+    : c.basis === "provisional" ? " This includes idle machine time and the shared database, and can still change for two days."
+    : c.basis === "true" ? " This includes idle machine time and the shared database." : "";
   if (c.inrPerProduct !== null && c.inr !== null) return `${lead}: INR ${inrAmount(c.inrPerProduct)} per product (INR ${inrAmount(c.inr)} for this batch).${after}`;
   if (c.usdPerProduct !== null) return `${lead}: USD ${usdAmount(c.usdPerProduct)} per product (USD ${usdAmount(c.usd)} for this batch).${after}`;
   return null;

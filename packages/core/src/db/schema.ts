@@ -912,7 +912,7 @@ export const catalogCostEvents = pgTable(
  * One row per batch that reached an end (done, failed, cancelled), rewritten while it can still change (a re-opened
  * finalize, the sweep's 24-hour refresh). `success`: links ready, no operator touch after upload, no incident.
  * `excluded`: left out of the success rate (a cancel within 10 minutes of start is a mistake, not a failure).
- * `true_cost_usd` is filled by the reconciliation (M6-F1); `recorded_cost_usd` is the batch's cost ledger total.
+ * `true_cost_usd` is filled by the reconciliation (M6-F1, later slices).
  */
 export const catalogBatchOutcomes = pgTable(
   "catalog_batch_outcomes",
@@ -935,8 +935,6 @@ export const catalogBatchOutcomes = pgTable(
     products: integer("products").notNull().default(0),
     productsWithLinks: integer("products_with_links").notNull().default(0),
     trueCostUsd: money("true_cost_usd"),
-    /** Every cost ledger row of the batch (catalog_cost_events), written with the outcome: its digest cost, before idle. */
-    recordedCostUsd: money("recorded_cost_usd"),
     recordedAt: timestamp("recorded_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [
