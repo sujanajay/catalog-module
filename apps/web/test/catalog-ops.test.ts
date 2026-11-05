@@ -157,7 +157,7 @@ describe("admin Ops page", () => {
 });
 
 describe("batch page and Details", () => {
-  it("keeps the cost line as it is and adds a full-cost line whose parts add up to its own total", async () => {
+  it("shows the whole cost ledger as the cost line (R1 exit item 4) and a full-cost line whose parts add up to the same total", async () => {
     const { batch } = await world();
     const [costed] = await db.update(catalogBatches).set({ cost: { ...batch.cost, qaUsd: 0.001, computeUsd: 0.0006 } }).where(eq(catalogBatches.id, batch.id)).returning();
     const stages = await batchCostByStage(db, batch.id);
@@ -168,10 +168,12 @@ describe("batch page and Details", () => {
     expect(full).toBe(`Full cost including the cut-out service: INR ${inrAmount(0.0056 * 85)} (cut-out INR ${inrAmount(0.004 * 85)}, images INR ${inrAmount(0.0006 * 85)}, quality checks INR ${inrAmount(0.001 * 85)})`);
     expect(fullCostText(stages, null)).toBe(`Full cost including the cut-out service: USD ${usdAmount(0.0056)} (cut-out USD ${usdAmount(0.004)}, images USD ${usdAmount(0.0006)}, quality checks USD ${usdAmount(0.001)})`);
     expect(fullCostText([], 85)).toBeNull();
-    // The existing cost line (quality checks and worker time per style, against INR 60) is unchanged.
+    // R1 exit item 4: the cost line reads every ledger row of the batch (the cut-out calls too), not batch.cost (0.0016).
     const line = await batchCostLine(costed!, db);
-    expect(line.usd).toBeCloseTo(0.0016, 12);
-    const costLine = renderToStaticMarkup(createElement(CostLine, { line: { usdPerIdentifier: line.usdPerIdentifier, inrPerIdentifier: line.inrPerIdentifier, usd: line.usd, inr: line.inr } }));
+    expect(line.basis).toBe("recorded");
+    expect(line.usd).toBeCloseTo(0.0056, 12);
+    expect(line.usd).toBeCloseTo(usd, 12);
+    const costLine = renderToStaticMarkup(createElement(CostLine, { line: { usdPerIdentifier: line.usdPerIdentifier, inrPerIdentifier: line.inrPerIdentifier, usd: line.usd, inr: line.inr, basis: line.basis } }));
     const html = await render(BatchPage({ params: Promise.resolve({ id: batch.id }), searchParams: Promise.resolve({}) }));
     expect(html).toContain("Cost so far");
     expect(html).toContain(costLine);

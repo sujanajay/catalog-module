@@ -14,6 +14,8 @@ import type { Db } from "../db/client";
 import { catalogChunks, catalogCostEvents, catalogOutputs, catalogProducts, catalogSourceImages, type CostKind, type CostStage } from "../db/schema";
 import type { ChannelId } from "./types";
 import { OVERFLOW_ADAPTERS } from "../vendor/routes";
+import { IDLE_TAIL_MS } from "./cost-reconcile";
+import type { CostBasis } from "./digest-types";
 
 export const ENGINE_LABELS = {
   llm_call: "quality check",
@@ -70,6 +72,43 @@ export async function batchCostByStage(db: Db, batchId: string): Promise<StageCo
     .where(eq(catalogCostEvents.batchId, batchId))
     .groupBy(catalogCostEvents.stage);
   return rows.map((r) => ({ stage: r.stage, usd: num(r.usd), estimatedUsd: num(r.estimatedUsd), ms: num(r.ms), calls: num(r.calls) })).sort((a, b) => b.usd - a.usd);
+}
+
+/**
+ * R1 exit item 4: a batch's cost as every operator surface shows it (the digest, the digest API, the batch page cost line
+ * and the report.json download), so they never disagree.
+ * - `products`: products with at least one published link (catalog_batch_outcomes.products_with_links, the Ops cost
+ *   card's and the R1 measure's denominator). A digest passes its own count (`productsWithLinks`, the same products), so
+ *   the digest page never reads the outputs (M1-S5 review P2-3).
+ * - `recorded`: every cost ledger row of the batch (judge, cut-out and enlarging calls, every compute row, failed
+ *   attempts), before idle time. Shown while the batch runs and until the daily cost check has covered it.
+ * - `provisional` / `true`: the daily check's allocations (attributed + idle + shared), once the batch has ended and the
+ *   check has a day row for the day its idle tail ends (its last ledger row plus IDLE_TAIL_MS, so a failed batch whose
+ *   end time moved later still gets it). `provisional` while any of those days can still change (the D-1 and D-2 reruns),
+ *   `true` once every one is final.
+ */
+export interface BatchCostFigure { usd: number; products: number; usdPerProduct: number | null; basis: CostBasis }
+
+export async function batchCostFigure(db: Db, batchId: string, knownProducts?: number): Promise<BatchCostFigure> {
+  const linked = knownProducts !== undefined ? sql`${knownProducts}::int`
+    : sql`(SELECT count(DISTINCT o.product_id)::int FROM catalog_outputs AS o WHERE o.batch_id = ${batchId}::uuid AND o.published_at IS NOT NULL)`;
+  const result = (await db.execute(sql`
+    WITH led AS (SELECT coalesce(sum(usd), 0)::float8 AS usd, ((max(at) + ${IDLE_TAIL_MS} * interval '1 millisecond') AT TIME ZONE 'UTC')::date AS tail_day
+        FROM catalog_cost_events WHERE batch_id = ${batchId}::uuid),
+      alloc AS (SELECT coalesce(sum(attributed_usd + idle_usd + shared_usd), 0)::float8 AS usd, min(day) AS first_day, count(*)::int AS n
+        FROM catalog_cost_allocations WHERE batch_id = ${batchId}::uuid AND source = 'monitoring')
+    SELECT led.usd AS recorded, alloc.usd AS allocated,
+      ${linked} AS products,
+      (alloc.n > 0 AND EXISTS (SELECT 1 FROM catalog_batch_outcomes AS b WHERE b.batch_id = ${batchId}::uuid)
+        AND EXISTS (SELECT 1 FROM catalog_cost_days AS d WHERE d.source = 'monitoring' AND d.day = led.tail_day)) AS reconciled,
+      EXISTS (SELECT 1 FROM catalog_cost_days AS d WHERE d.source = 'monitoring' AND d.provisional
+        AND d.day BETWEEN least(alloc.first_day, led.tail_day) AND led.tail_day) AS provisional
+    FROM led, alloc`)) as unknown as { rows: { recorded: number; allocated: number; products: number; reconciled: boolean; provisional: boolean }[] };
+  const r = result.rows[0]!;
+  const products = Number(r.products ?? 0);
+  const basis: CostBasis = r.reconciled !== true ? "recorded" : r.provisional === true ? "provisional" : "true";
+  const usd = num(basis === "recorded" ? r.recorded : r.allocated);
+  return { usd, products, usdPerProduct: products > 0 ? usd / products : null, basis };
 }
 
 /**

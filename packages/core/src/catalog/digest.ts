@@ -8,7 +8,8 @@ import type { Db } from "../db/client";
 import { catalogBatchProducts, catalogImprovements, catalogOutputs, catalogProducts } from "../db/schema";
 import { autoDecideRecordOf } from "./auto-decide";
 import { CHANNEL_ORDER, CHANNELS } from "./channels";
-import type { BatchDigest, DigestReason } from "./digest-types";
+import { batchCostFigure, type BatchCostFigure } from "./cost-report";
+import type { BatchDigest, DigestCost, DigestReason } from "./digest-types";
 import { STYLI_SKIP_NOTE } from "./evals/completeness";
 import { IMPROVE_MAX_TRIES } from "./improve";
 import { APPEND_TAKEN_NOTE, HOLDOUT_KEPT_NOTE, NO_DELIVERABLE_PHOTO } from "./pipeline/publish";
@@ -98,7 +99,7 @@ export interface DigestInput {
   sheet: SheetSpec;
   /** Files that never became a photo of a product (buildReport's unsupportedFiles and linkFailures). */
   files: readonly unknown[];
-  cost: { usd: number; inr: number | null; usdPerProduct: number | null; inrPerProduct: number | null };
+  cost: DigestCost;
 }
 
 export interface DigestParts { digest: BatchDigest; exceptions: ExceptionRow[]; notes: NoteRow[]; kept: { keptPhotos: number; styliSkipped: number } }
@@ -244,6 +245,21 @@ export function digestFrom(input: DigestInput & { pairs: readonly DigestPair[]; 
     if (o.channel === "styli" && o.status === "skipped" && o.reason?.includes(STYLI_SKIP_NOTE)) styliSkipped++;
   }
   return { digest, exceptions, notes, kept: { keptPhotos: keptSources.size, styliSkipped } };
+}
+
+/** A cost figure as the digest stores and shows it, with INR when a rate is set. */
+export function digestCost(figure: BatchCostFigure, inrPerUsd: number | null): DigestCost {
+  const { usd, usdPerProduct, basis } = figure;
+  return { usd, inr: inrPerUsd === null ? null : usd * inrPerUsd, usdPerProduct, inrPerProduct: usdPerProduct === null || inrPerUsd === null ? null : usdPerProduct * inrPerUsd, basis };
+}
+
+/**
+ * R1 exit item 4 (M6-F1-R9): the digest with the batch's live cost figure (batchCostFigure) in place of the one stored at
+ * finalize, so the digest tab, the digest API and the batch page show one figure: the ledger so far, then the daily cost
+ * check's (not final for two days, then final). Older digests get it too.
+ */
+export async function digestWithCost<T extends BatchDigest>(db: Db, batchId: string, digest: T, inrPerUsd: number | null): Promise<T> {
+  return { ...digest, cost: digestCost(await batchCostFigure(db, batchId, digest.productsWithLinks), inrPerUsd) };
 }
 
 /** Reads what the digest needs and builds it (tests and callers without buildReport's rows). */

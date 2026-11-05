@@ -7,10 +7,11 @@ import type { Db } from "../db/client";
 import { catalogBatches, catalogOutputs, catalogProducts } from "../db/schema";
 import { parseCsv } from "../csv";
 import { seedLargeBatch } from "./pipeline/large-batch-fixture";
+import { batchCostFigure } from "./cost-report";
 import { buildReport } from "./pipeline/report";
 import { APPEND_TAKEN_NOTE, HOLDOUT_KEPT_NOTE, overLimitNote } from "./pipeline/publish";
-import { buildDigest, digestFrom, groupReasons, readImprovements, type BatchDigest, type DigestOutput } from "./digest";
-import { digestEmail, digestHeadline, digestReasonLines, digestTiles, digestTimeLine, duration } from "./digest-copy";
+import { buildDigest, digestFrom, digestWithCost, groupReasons, readImprovements, type BatchDigest, type DigestOutput } from "./digest";
+import { digestCostLine, digestEmail, digestHeadline, digestReasonLines, digestTiles, digestTimeLine, duration } from "./digest-copy";
 import { compareXlsxCsv, EXCEPTIONS_SHEET, NO_EXCEPTIONS, NOTES_SHEET, writeExceptionsCsv, writeLinksCsv, writeLinksXlsx } from "./sheet";
 
 let db: Db, close: () => Promise<void>, batchId = "";
@@ -190,4 +191,53 @@ it("the stored digest column round-trips through the batch row", async () => {
   await db.update(catalogBatches).set({ digest: d }).where(eq(catalogBatches.id, batchId));
   const [row] = await db.select({ digest: catalogBatches.digest }).from(catalogBatches).where(eq(catalogBatches.id, batchId));
   expect(row!.digest).toEqual(d);
+});
+
+describe("R1 exit item 4: the digest cost", () => {
+  it("says the cost is not final until the daily cost check's final run, and older digests read as before", () => {
+    const usd = { usd: 2.8796, inr: null, usdPerProduct: 0.0204, inrPerProduct: null };
+    expect(digestCostLine(digest({ cost: usd }))).toBe("Cost: USD 0.0204 per product (USD 2.8796 for this batch).");
+    expect(digestCostLine(digest({ cost: { ...usd, basis: "recorded" } }))).toBe("Cost so far (not final): USD 0.0204 per product (USD 2.8796 for this batch). Idle machine time is added by the daily cost check.");
+    const inr = { usd: 7, inr: 588, usdPerProduct: 0.05, inrPerProduct: 4.2 };
+    expect(digestCostLine(digest({ cost: { ...inr, basis: "provisional" } })))
+      .toBe("Cost (not final): INR 4.20 per product (INR 588.00 for this batch). This includes idle machine time and the shared database, and can still change for two days.");
+    expect(digestCostLine(digest({ cost: { ...inr, basis: "true" } }))).toBe("Cost: INR 4.20 per product (INR 588.00 for this batch). This includes idle machine time and the shared database.");
+  });
+
+  it("shows one live figure per product with links: the ledger, then the daily check's (not final, then final), also for a batch that ended on a later day", async () => {
+    const [linked] = (await db.execute(sql`SELECT count(DISTINCT product_id)::int AS n FROM catalog_outputs WHERE batch_id = ${batchId}::uuid AND published_at IS NOT NULL`) as unknown as { rows: { n: number }[] }).rows;
+    const n = Number(linked!.n);
+    expect(n).toBeGreaterThan(0);
+    // The digest's own count of products with links: the same products, so the digest page never reads the outputs.
+    const d = digest({ productsWithLinks: n, cost: { usd: 99, inr: null, usdPerProduct: 99, inrPerProduct: null, basis: "recorded" } });
+    await db.execute(sql`INSERT INTO catalog_cost_events (batch_id, brand_slug, stage, kind, engine, ms, usd, outcome, at) VALUES
+      (${batchId}, 'uspa', 'upscale', 'upscale_call', 'gpu', 1000, 0.25, 'ok', '2026-11-05T23:40:00Z'),
+      (${batchId}, 'uspa', 'upscale', 'upscale_call', 'gpu', 1000, 0.05, 'failed', '2026-11-05T23:50:00Z')`);
+    const ledger = Number(((await db.execute(sql`SELECT sum(usd)::float8 AS u FROM catalog_cost_events WHERE batch_id = ${batchId}::uuid`)) as unknown as { rows: { u: number }[] }).rows[0]!.u);
+    // Running (no outcome) and before any check: the whole ledger, per product with links, not final.
+    expect((await digestWithCost(db, batchId, d, 84)).cost).toEqual({ usd: ledger, inr: ledger * 84, usdPerProduct: ledger / n, inrPerProduct: (ledger / n) * 84, basis: "recorded" });
+    // Ended later than its work (a failed batch the sweep touched on 2026-11-08), checked for 2026-11-05 only: the idle
+    // tail of the 23:50 row runs into 2026-11-06, so the figure waits for that day.
+    await db.execute(sql`INSERT INTO catalog_batch_outcomes (batch_id, status, success, ended_at, products, products_with_links)
+      VALUES (${batchId}, 'failed', false, '2026-11-08T10:00:00Z', 9, ${n}) ON CONFLICT (batch_id) DO UPDATE SET ended_at = '2026-11-08T10:00:00Z'`);
+    const day = (on: string, provisional: boolean) => db.execute(sql`INSERT INTO catalog_cost_days (day, component, kind, env, source, billed_usd, provisional)
+      VALUES (${on}, 'catalog-upscale-gpu', 'service', 'live', 'monitoring', 1, ${provisional})
+      ON CONFLICT (day, component, env, source) DO UPDATE SET provisional = ${provisional}`);
+    const alloc = (on: string, attributed: number, idle: number) => db.execute(sql`INSERT INTO catalog_cost_allocations (day, source, batch_id, component, busy_ms, attributed_usd, idle_usd, shared_usd)
+      VALUES (${on}, 'monitoring', ${batchId}, 'catalog-upscale-gpu', 0, ${attributed}, ${idle}, 0)`);
+    await day("2026-11-05", true);
+    await alloc("2026-11-05", 0.3, 0.6);
+    expect((await digestWithCost(db, batchId, d, null)).cost.basis).toBe("recorded");
+    await day("2026-11-06", true);
+    await alloc("2026-11-06", 0, 0.1);
+    expect((await digestWithCost(db, batchId, d, null)).cost).toEqual({ usd: 1, inr: null, usdPerProduct: 1 / n, inrPerProduct: null, basis: "provisional" });
+    await day("2026-11-05", false);
+    expect((await digestWithCost(db, batchId, d, null)).cost.basis).toBe("provisional");
+    await day("2026-11-06", false);
+    const shown = await digestWithCost(db, batchId, d, null);
+    expect(shown.cost).toEqual({ usd: 1, inr: null, usdPerProduct: 1 / n, inrPerProduct: null, basis: "true" });
+    expect({ ...shown, cost: d.cost }).toEqual(d);
+    // The batch page line and report.json use the same figure (batchCostFigure).
+    expect(await batchCostFigure(db, batchId)).toEqual({ usd: 1, products: n, usdPerProduct: 1 / n, basis: "true" });
+  });
 });

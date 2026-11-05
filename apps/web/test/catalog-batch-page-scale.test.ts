@@ -3,11 +3,10 @@
 // product in a loop (that is quadratic: the cost line took minutes this way). SCALE_PRODUCTS sets another size.
 import { afterAll, beforeAll, expect, it } from "vitest";
 import { performance } from "node:perf_hooks";
-import { eq, sql } from "drizzle-orm";
+import { sql } from "drizzle-orm";
 import { createDbFromPglite } from "@catalog/core/db/testing";
 import { runMigrations } from "@catalog/core/db/migrate";
 import { seedLargeBatch } from "@catalog/core/catalog/pipeline/large-batch-fixture";
-import { catalogBatches } from "@catalog/core/db/schema";
 import type { Db } from "../lib/db";
 import { batchCostLine } from "../lib/catalog/cost";
 import { listAttention } from "@catalog/core/catalog/attention";
@@ -28,13 +27,16 @@ beforeAll(async () => {
 afterAll(async () => { await close(); });
 
 it(`gives the cost line of a ${PRODUCTS.toLocaleString("en")}-product batch within 2 s`, async () => {
-  const [batch] = await db.select().from(catalogBatches).where(eq(catalogBatches.id, batchId));
+  // R1 exit item 4: the line is the whole cost ledger per product with a published link (the same figure as the digest).
+  await db.execute(sql`INSERT INTO catalog_cost_events (batch_id, brand_slug, stage, kind, engine, ms, usd, outcome) VALUES (${batchId}::uuid, 'scale', 'render', 'compute', 'worker', 1000, 5, 'ok')`);
+  const linked = Number(((await db.execute(sql`SELECT count(DISTINCT product_id)::int AS n FROM catalog_outputs WHERE batch_id = ${batchId}::uuid AND published_at IS NOT NULL`)) as unknown as { rows: { n: number }[] }).rows[0]!.n);
+  expect(linked).toBeGreaterThan(0);
   const t = performance.now();
-  const line = await batchCostLine({ id: batchId, cost: { ...batch!.cost, qaUsd: 3, computeUsd: 2 } }, db, {} as NodeJS.ProcessEnv);
+  const line = await batchCostLine({ id: batchId }, db, {} as NodeJS.ProcessEnv);
   const ms = performance.now() - t;
   console.log(`batchCostLine: ${Math.round(ms)} ms`);
-  expect(line.identifiers).toBe(PRODUCTS - 15);
-  expect(line.usdPerIdentifier).toBeCloseTo(5 / (PRODUCTS - 15));
+  expect(line.identifiers).toBe(linked);
+  expect(line.usdPerIdentifier).toBeCloseTo(5 / linked);
   expect(ms).toBeLessThan(2000);
 }, 600_000);
 

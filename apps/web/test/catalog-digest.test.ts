@@ -67,7 +67,10 @@ describe("GET /api/catalog/batches/:id/digest (M1-F4-R1)", () => {
     const done = await newBatch({ digest: { ...digest, page: { exceptionsCsv: "gs://private/e.csv", notesCsv: null, filled: false, notRefreshedChannels: [], keptPhotos: 0, styliSkipped: 0 } } }), draft = await newBatch({ status: "draft" });
     const res = await digestGet(new Request(`http://localhost/api/catalog/batches/${done.id}/digest`), ctx(done.id));
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ id: done.id, name: "Campus Oct lot", status: "done", digest });
+    const body = await res.json();
+    expect({ ...body, digest: { ...body.digest, cost: digest.cost } }).toEqual({ id: done.id, name: "Campus Oct lot", status: "done", digest });
+    // R1 exit item 4: the live cost figure (no ledger rows here), not the stored one.
+    expect(body.digest.cost).toMatchObject({ usd: 0, usdPerProduct: 0, basis: "recorded" });
     expect(await (await digestGet(new Request("http://localhost/x"), ctx(draft.id))).json()).toMatchObject({ digest: null });
     expect((await digestGet(new Request("http://localhost/x"), ctx("00000000-0000-4000-8000-000000000000"))).status).toBe(404);
   });

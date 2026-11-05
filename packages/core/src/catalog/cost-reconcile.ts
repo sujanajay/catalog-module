@@ -12,8 +12,10 @@
 // Shared lines (R6): the shared Cloud SQL instance ila-pg at an admin-set cost per day and catalog share (settings
 // cost.database_usd_per_day, cost.database_catalog_share_percent). Vendors off the GCP bill (OpenRouter, an overflow
 // vendor) are billed as the ledger recorded them until vendor invoices arrive (M6-S3).
-// Allocations (R5): each component's idle spread over that day's batches by their busy seconds on it, the shared lines
-// by their attributed cost; idle no batch explains is "idle, no batch". The batch outcome's true_cost_usd is the sum.
+// Allocations (R5): each component's idle, minute by minute, to the batches whose work ran from 15 minutes before to 5
+// minutes after that minute (allocateIdle, M6 decision C1; by busy seconds over the day when a sample has no minutes),
+// the shared lines by their attributed cost; idle no batch explains is "idle, no batch". The batch outcome's
+// true_cost_usd is the sum.
 import { and, eq, inArray, sql } from "drizzle-orm";
 import type { Db } from "../db/client";
 import { catalogBatchOutcomes, catalogCostAllocations, catalogCostDays, type CostEnv, type CostLineKind } from "../db/schema";
@@ -131,8 +133,13 @@ export function runResourceFrom(kind: "service" | "job", region: string, item: V
 // Readers (Cloud Run Admin API and Cloud Monitoring, read only)
 // ---------------------------------------------------------------------------------------------------------------------
 
-/** Billable instance seconds of one service or job over a day. */
-export interface BillableSample { name: string; kind: "service" | "job"; region: string; seconds: number }
+/** One minute of billable instance time: the minute ending at `endMs`. */
+export interface BillablePoint { endMs: number; seconds: number }
+/**
+ * Billable instance seconds of one service or job over a day, and (from Cloud Monitoring) the same time per minute, so
+ * idle time can be given to the batches that ran around it (allocateIdle, M6 decision C1).
+ */
+export interface BillableSample { name: string; kind: "service" | "job"; region: string; seconds: number; points?: readonly BillablePoint[] }
 
 export interface CostReaders {
   resources(): Promise<RunResource[]>;
@@ -167,7 +174,7 @@ export function googleCostReaders(get: GoogleGet, project: string): CostReaders 
         const q = new URLSearchParams({
           filter: `metric.type="${BILLABLE_METRIC}"`,
           "interval.startTime": from.toISOString(), "interval.endTime": to.toISOString(),
-          "aggregation.alignmentPeriod": `${Math.round((+to - +from) / 1000)}s`,
+          "aggregation.alignmentPeriod": `${IDLE_BUCKET_MS / 1000}s`,
           "aggregation.perSeriesAligner": "ALIGN_SUM", "aggregation.crossSeriesReducer": "REDUCE_SUM",
         });
         for (const g of ["resource.type", "resource.label.service_name", "resource.label.job_name", "resource.label.location"]) q.append("aggregation.groupByFields", g);
@@ -183,18 +190,20 @@ export function googleCostReaders(get: GoogleGet, project: string): CostReaders 
 
 export interface MonitoringSeries {
   resource: { type: string; labels: Record<string, string> };
-  points?: { value: { doubleValue?: number; int64Value?: string } }[];
+  points?: { interval?: { endTime?: string }; value: { doubleValue?: number; int64Value?: string } }[];
 }
 
-/** One sample per Cloud Run revision group or job, the points of the window summed. */
+/** One sample per Cloud Run revision group or job: the points of the window summed, and kept per minute. */
 export function samplesFrom(series: readonly MonitoringSeries[]): BillableSample[] {
   const out: BillableSample[] = [];
   for (const s of series) {
     const kind = s.resource.type === "cloud_run_job" ? "job" : s.resource.type === "cloud_run_revision" ? "service" : null;
     const name = kind === "job" ? s.resource.labels.job_name : s.resource.labels.service_name;
     if (!kind || !name) continue;
-    const seconds = (s.points ?? []).reduce((sum, p) => sum + Number(p.value.doubleValue ?? p.value.int64Value ?? 0), 0);
-    out.push({ name, kind, region: s.resource.labels.location ?? "", seconds });
+    const value = (p: NonNullable<MonitoringSeries["points"]>[number]) => Number(p.value.doubleValue ?? p.value.int64Value ?? 0);
+    const seconds = (s.points ?? []).reduce((sum, p) => sum + value(p), 0);
+    const points = (s.points ?? []).flatMap((p) => (p.interval?.endTime && value(p) > 0 ? [{ endMs: Date.parse(p.interval.endTime), seconds: value(p) }] : []));
+    out.push({ name, kind, region: s.resource.labels.location ?? "", seconds, ...(points.length ? { points } : {}) });
   }
   return out;
 }
@@ -221,9 +230,11 @@ const labelled = (r: RunResource) => r.labels.app === "catalog" && !!r.labels.co
  * or job (by its `component` label, else its name), other apps in the project left out. An unlabelled catalog
  * resource is reported as env `unlabelled`; a sample whose shape has no price (or whose resource is gone) is billed 0.
  */
-export function billedLines(day: string, samples: readonly BillableSample[], resources: readonly RunResource[]): { lines: CostLine[]; alerts: CostAlert[] } {
+export function billedLines(day: string, samples: readonly BillableSample[], resources: readonly RunResource[]): { lines: CostLine[]; alerts: CostAlert[]; minutes: Map<string, BillablePoint[]> } {
   const byKey = new Map(resources.map((r) => [`${r.kind}|${r.region}|${r.name}`, r]));
   const lines = new Map<string, CostLine>();
+  /** Per component, billed USD per minute (each point's `seconds` holds USD here). */
+  const minutes = new Map<string, BillablePoint[]>();
   const alerts: CostAlert[] = [];
   for (const s of samples) {
     const r = byKey.get(`${s.kind}|${s.region}|${s.name}`);
@@ -240,8 +251,9 @@ export function billedLines(day: string, samples: readonly BillableSample[], res
     line.billedUsd += price ? s.seconds * price.usdPerSecond : 0;
     line.detail = { ...line.detail, [s.name]: { seconds: s.seconds, ...(price ? { usdPerSecond: price.usdPerSecond, ...price.rates } : { unpriced: true }) } };
     lines.set(key, line);
+    if (price && s.points) pushAll(minutes.get(key) ?? minutes.set(key, []).get(key)!, s.points.map((p) => ({ endMs: p.endMs, seconds: p.seconds * price.usdPerSecond })));
   }
-  return { lines: [...lines.values()], alerts };
+  return { lines: [...lines.values()], alerts, minutes };
 }
 
 /** Vendor components off the GCP bill (M6-F1-R7): OpenRouter and the overflow adapters. */
@@ -264,11 +276,14 @@ export interface LedgerEvent { component: string; batchId: string | null; endMs:
 /** The day's ledger per component and batch: busy ms inside the day, and USD after the instance cap. */
 export interface LedgerRow { component: string; batchId: string | null; busyMs: number; usd: number; estimated: boolean }
 
-/** Ledger rows that can touch [from, to): ending in it, or ending up to a day later (work that crossed midnight UTC). */
+/**
+ * Ledger rows that can touch [from, to): ending in it, ending up to a day later (work that crossed midnight UTC), or
+ * ending in the IDLE_TAIL_MS before it (busy time that explains idle just after midnight).
+ */
 async function ledgerEvents(db: Db, from: Date, to: Date): Promise<LedgerEvent[]> {
   const rows = (await db.execute(sql`SELECT ${ledgerComponent} AS component, batch_id, (extract(epoch FROM at) * 1000)::float8 AS end_ms,
       coalesce(billable_ms, ms)::bigint AS busy_ms, usd::float8 AS usd, estimated
-    FROM catalog_cost_events WHERE at >= ${from.toISOString()}::timestamptz AND at < ${new Date(+to + DAY_MS).toISOString()}::timestamptz`)) as unknown as { rows: Record<string, unknown>[] };
+    FROM catalog_cost_events WHERE at >= ${new Date(+from - IDLE_TAIL_MS).toISOString()}::timestamptz AND at < ${new Date(+to + DAY_MS).toISOString()}::timestamptz`)) as unknown as { rows: Record<string, unknown>[] };
   return rows.rows.map((r) => ({ component: String(r.component), batchId: (r.batch_id as string | null) ?? null, endMs: Number(r.end_ms), busyMs: Number(r.busy_ms ?? 0), usd: Number(r.usd ?? 0), estimated: r.estimated === true }));
 }
 
@@ -285,6 +300,27 @@ export function instanceUsdPerMs(resources: readonly RunResource[]): Map<string,
   return out;
 }
 
+/** Monitoring is read per minute; idle is placed on these minutes. */
+export const IDLE_BUCKET_MS = 60_000;
+/**
+ * Idle in a minute belongs to the work around it. Cloud Run keeps an instance idle up to 15 minutes after its last
+ * request (10 for GPU services) and bills an instance-based service for all of it, and an instance starts before its
+ * first request is served (a GPU model loads for a minute or more). So a minute's idle goes to the work that ran from
+ * IDLE_TAIL_MS before the minute to IDLE_LEAD_MS after it, across midnight UTC too (review P3-3 of PR #185).
+ */
+export const IDLE_TAIL_MS = 15 * 60_000;
+export const IDLE_LEAD_MS = 5 * 60_000;
+const TAIL_MINUTES = IDLE_TAIL_MS / IDLE_BUCKET_MS, LEAD_MINUTES = IDLE_LEAD_MS / IDLE_BUCKET_MS;
+
+/**
+ * One component's work per minute (review P2-2 of PR #185: fixed-size arrays, never one object per stretch of work, so a
+ * day of hundreds of thousands of calls fits in the job's memory). `workUsd[i]` is the recorded work (after the
+ * instance cap) in minute i of the day. `busyMs` holds, per batch ("" = work with no batch), the busy ms per minute over
+ * the day widened by IDLE_TAIL_MS before and IDLE_LEAD_MS after it: index j is the minute starting at
+ * `fromMs - IDLE_TAIL_MS + j * IDLE_BUCKET_MS`.
+ */
+export interface MinuteLedger { workUsd: Float64Array; busyMs: Map<string, Float64Array> }
+
 /**
  * The day [fromMs, toMs) of the ledger, per component and batch (review fixes of PR #173):
  * - Midnight: a row covers [endMs - busyMs, endMs] and counts only the part inside the day, at its own rate (usd / busy
@@ -297,6 +333,15 @@ export function instanceUsdPerMs(resources: readonly RunResource[]): Map<string,
  * Vendor rows and rows without busy time count whole on the day they ended.
  */
 export function dayLedger(events: readonly LedgerEvent[], fromMs: number, toMs: number, instancePerMs: ReadonlyMap<string, number>): LedgerRow[] {
+  return ledgerDay(events, fromMs, toMs, instancePerMs).rows;
+}
+
+/**
+ * dayLedger's rows, plus each component's work by the minute (MinuteLedger) for the idle allocation. Work in the
+ * IDLE_TAIL_MS before the day and the IDLE_LEAD_MS after it counts only as busy time there (it explains idle inside the
+ * day), never as the day's cost.
+ */
+export function ledgerDay(events: readonly LedgerEvent[], fromMs: number, toMs: number, instancePerMs: ReadonlyMap<string, number>): { rows: LedgerRow[]; minutes: Map<string, MinuteLedger> } {
   const out = new Map<string, LedgerRow>();
   const add = (e: LedgerEvent, busyMs: number, usd: number) => {
     const key = `${e.component}|${e.batchId ?? ""}`;
@@ -304,38 +349,105 @@ export function dayLedger(events: readonly LedgerEvent[], fromMs: number, toMs: 
     row.busyMs += busyMs; row.usd += usd; row.estimated ||= e.estimated;
     out.set(key, row);
   };
-  interface Span { start: number; end: number; rate: number; usd: number; e: LedgerEvent }
+  const wideFrom = fromMs - IDLE_TAIL_MS, wideTo = toMs + IDLE_LEAD_MS;
+  const dayMinutes = Math.ceil((toMs - fromMs) / IDLE_BUCKET_MS), wideMinutes = dayMinutes + TAIL_MINUTES + LEAD_MINUTES;
+  interface Span { start: number; end: number; rate: number; usd: number; busy: number; e: LedgerEvent }
   const timed = new Map<string, Span[]>();
   for (const e of events) {
     if (VENDOR_COMPONENTS.includes(e.component) || !(e.busyMs > 0)) {
       if (e.endMs >= fromMs && e.endMs < toMs) add(e, Math.max(0, e.busyMs), e.usd);
       continue;
     }
-    const start = Math.max(fromMs, e.endMs - e.busyMs), end = Math.min(toMs, e.endMs);
+    const start = Math.max(wideFrom, e.endMs - e.busyMs), end = Math.min(wideTo, e.endMs);
     if (end <= start) continue;
-    const spans = timed.get(e.component) ?? [];
-    spans.push({ start, end, rate: e.usd / e.busyMs, usd: 0, e });
-    timed.set(e.component, spans);
+    const spans = timed.get(e.component) ?? timed.set(e.component, []).get(e.component)!;
+    spans.push({ start, end, rate: e.usd / e.busyMs, usd: 0, busy: 0, e });
   }
+  const minutes = new Map<string, MinuteLedger>();
   for (const [component, spans] of timed) {
     const cap = instancePerMs.get(component);
+    const ledger: MinuteLedger = { workUsd: new Float64Array(dayMinutes), busyMs: new Map() };
+    minutes.set(component, ledger);
+    const busyOf = (key: string) => ledger.busyMs.get(key) ?? ledger.busyMs.set(key, new Float64Array(wideMinutes)).get(key)!;
+    // Adds `ms` of busy time for `key` and (inside the day) `usdPerMs` of work over [a, b), minute by minute.
+    const place = (key: string, a: number, b: number, usdPerMs: number) => {
+      const busy = busyOf(key);
+      for (let t = a; t < b;) {
+        const j = Math.floor((t - wideFrom) / IDLE_BUCKET_MS), next = Math.min(b, wideFrom + (j + 1) * IDLE_BUCKET_MS);
+        busy[j]! += next - t;
+        const i = j - TAIL_MINUTES;
+        if (i >= 0 && i < dayMinutes) ledger.workUsd[i]! += usdPerMs * (next - t);
+        t = next;
+      }
+    };
     const points = spans.flatMap((s, i) => [{ t: s.start, i, on: true }, { t: s.end, i, on: false }]).sort((a, b) => a.t - b.t);
     const active = new Set<number>();
     let prev = points[0]?.t ?? 0;
     for (const p of points) {
       if (p.t > prev && active.size) {
-        const length = p.t - prev;
         let sum = 0;
         for (const i of active) sum += spans[i]!.rate;
         const scale = cap !== undefined && sum > cap ? cap / sum : 1;
-        for (const i of active) spans[i]!.usd += spans[i]!.rate * length * scale;
+        // The part of the stretch inside the day is the day's cost; all of it is busy time for the idle windows.
+        const inDay = Math.max(0, Math.min(p.t, toMs) - Math.max(prev, fromMs));
+        for (const i of active) {
+          const s = spans[i]!;
+          s.usd += s.rate * scale * inDay;
+          s.busy += inDay;
+          place(s.e.batchId ?? "", prev, p.t, s.rate * scale);
+        }
       }
       prev = p.t;
       if (p.on) active.add(p.i); else active.delete(p.i);
     }
-    for (const s of spans) add(s.e, s.end - s.start, s.usd);
+    for (const s of spans) if (s.busy > 0) add(s.e, s.busy, s.usd);
   }
-  return [...out.values()];
+  return { rows: [...out.values()], minutes };
+}
+
+/**
+ * Splits one component's idle over the batches whose work explains it (M6 decision C1). Per minute of the day: idle =
+ * billed minus recorded work (never negative), shared by the busy ms of each batch (and of work with no batch) in
+ * [minute start - IDLE_TAIL_MS, minute end + IDLE_LEAD_MS], including work just before or after the day; a minute with
+ * no work in that window is idle with no batch. The minutes are then scaled so they add up to the day line's idle, so
+ * the day still closes. Returns USD per batch id, or null when there are no minutes to place idle by (the caller then
+ * spreads it over the day by busy seconds). Memory is a few arrays of one value per minute per batch.
+ */
+export function allocateIdle(idleUsd: number, billed: readonly BillablePoint[], work: MinuteLedger | undefined, fromMs: number, toMs: number): Map<string, number> | null {
+  const n = Math.ceil((toMs - fromMs) / IDLE_BUCKET_MS);
+  if (!(idleUsd > 0) || !billed.length || n <= 0) return null;
+  const billedUsd = new Float64Array(n);
+  for (const p of billed) {
+    const i = Math.floor((p.endMs - 1 - fromMs) / IDLE_BUCKET_MS);
+    if (i >= 0 && i < n) billedUsd[i]! += p.seconds;
+  }
+  // Prefix sums of each batch's busy ms over the widened day.
+  const prefix: [string, Float64Array][] = [];
+  for (const [key, row] of work?.busyMs ?? []) {
+    const p = new Float64Array(row.length + 1);
+    for (let j = 0; j < row.length; j++) p[j + 1] = p[j]! + row[j]!;
+    prefix.push([key, p]);
+  }
+  const out = new Map<string, number>();
+  let placed = 0;
+  for (let i = 0; i < n; i++) {
+    const idle = billedUsd[i]! - (work?.workUsd[i] ?? 0);
+    if (!(idle > 0)) continue;
+    placed += idle;
+    // Day minute i is widened minute i + TAIL_MINUTES; its window runs TAIL_MINUTES back and LEAD_MINUTES on.
+    const lo = i, hi = i + TAIL_MINUTES + LEAD_MINUTES + 1;
+    let total = 0;
+    for (const [, p] of prefix) total += p[hi]! - p[lo]!;
+    if (!(total > 0)) continue; // idle with no batch
+    for (const [key, p] of prefix) {
+      const w = p[hi]! - p[lo]!;
+      if (key && w > 0) out.set(key, (out.get(key) ?? 0) + (idle * w) / total);
+    }
+  }
+  if (!(placed > 0)) return null;
+  const scale = idleUsd / placed;
+  for (const [key, usd] of out) out.set(key, usd * scale);
+  return out;
 }
 
 export interface DayResult { day: string; lines: CostLine[]; allocations: number; alerts: CostAlert[]; batches: string[] }
@@ -352,8 +464,8 @@ interface DayPlan { result: DayResult; provisional: boolean; allocations: Alloca
 /** Computes one UTC day (`YYYY-MM-DD`) without writing it. */
 async function planDay(db: Db, day: string, input: { samples: readonly BillableSample[]; resources: readonly RunResource[]; provisional: boolean }): Promise<DayPlan> {
   const from = new Date(`${day}T00:00:00Z`), to = new Date(+from + DAY_MS);
-  const { lines: billed, alerts } = billedLines(day, input.samples, input.resources);
-  const ledger = dayLedger(await ledgerEvents(db, from, to), +from, +to, instanceUsdPerMs(input.resources));
+  const { lines: billed, alerts, minutes } = billedLines(day, input.samples, input.resources);
+  const { rows: ledger, minutes: work } = ledgerDay(await ledgerEvents(db, from, to), +from, +to, instanceUsdPerMs(input.resources));
   const lines = new Map(billed.map((l) => [l.component, l]));
   // Attributed per component (summed over its env lines: a component name is one env in practice).
   const attributed = new Map<string, { usd: number; estimated: boolean }>();
@@ -381,22 +493,36 @@ async function planDay(db: Db, day: string, input: { samples: readonly BillableS
   const shared: CostLine = { component: DATABASE_COMPONENT, kind: "shared", region: "asia-south1", env: "live", billableSeconds: null, billedUsd: dbUsd, attributedUsd: 0, idleUsd: 0, sharedUsd: dbUsd * share, estimated: true, detail: { usdPerDay: dbUsd, sharePercent: share * 100, rule: "admin setting" } };
   const all = [...lines.values(), shared];
 
-  // Allocations (R5): idle by busy seconds per component, shared by attributed cost over all the day's batches.
+  // Allocations (R5): idle by the minute to the batches working around it (decision C1), or by busy seconds over the
+  // day when there is no per-minute time; shared by attributed cost over all the day's batches.
   const perBatch = new Map<string, Allocation>();
   const batchRows = ledger.filter((r) => r.batchId !== null);
   for (const r of batchRows) perBatch.set(`${r.batchId}|${r.component}`, { component: r.component, batchId: r.batchId!, busyMs: r.busyMs, attributedUsd: r.usd, idleUsd: 0, sharedUsd: 0 });
   for (const line of lines.values()) {
     if (line.idleUsd <= 0) continue;
+    const byMinute = allocateIdle(line.idleUsd, minutes.get(line.component) ?? [], work.get(line.component), +from, +to);
+    if (byMinute) {
+      for (const [batchId, usd] of byMinute) {
+        // A batch whose work ended just before midnight (or starts just after) gets this day's idle tail too.
+        const key = `${batchId}|${line.component}`;
+        const a = perBatch.get(key) ?? perBatch.set(key, { component: line.component, batchId, busyMs: 0, attributedUsd: 0, idleUsd: 0, sharedUsd: 0 }).get(key)!;
+        a.idleUsd = usd;
+      }
+      continue;
+    }
     const rows = [...perBatch.values()].filter((a) => a.component === line.component);
     if (!rows.length) continue; // idle, no batch
     const busy = rows.map((a) => a.busyMs);
     spread(line.idleUsd, busy.some((b) => b > 0) ? busy : rows.map((a) => a.attributedUsd)).forEach((usd, i) => { rows[i]!.idleUsd = usd; });
   }
-  const batchIds = [...new Set(batchRows.map((r) => r.batchId!))];
-  if (batchIds.length && shared.sharedUsd > 0) {
-    const weights = batchIds.map((id) => batchRows.filter((r) => r.batchId === id).reduce((s, r) => s + r.usd, 0));
-    spread(shared.sharedUsd, weights).forEach((usd, i) => perBatch.set(`${batchIds[i]}|${DATABASE_COMPONENT}`, { component: DATABASE_COMPONENT, batchId: batchIds[i]!, busyMs: 0, attributedUsd: 0, idleUsd: 0, sharedUsd: usd }));
+  // The shared line goes to the batches that worked this day; a batch with only an idle tail here (its work ended
+  // before midnight) shares the database on its working day.
+  const working = [...new Set(batchRows.map((r) => r.batchId!))];
+  if (working.length && shared.sharedUsd > 0) {
+    const weights = working.map((id) => batchRows.filter((r) => r.batchId === id).reduce((s, r) => s + r.usd, 0));
+    spread(shared.sharedUsd, weights).forEach((usd, i) => perBatch.set(`${working[i]}|${DATABASE_COMPONENT}`, { component: DATABASE_COMPONENT, batchId: working[i]!, busyMs: 0, attributedUsd: 0, idleUsd: 0, sharedUsd: usd }));
   }
+  const batchIds = [...new Set([...perBatch.values()].map((a) => a.batchId))];
 
   return { result: { day, lines: all, allocations: perBatch.size, alerts, batches: batchIds }, provisional: input.provisional, allocations: [...perBatch.values()] };
 }

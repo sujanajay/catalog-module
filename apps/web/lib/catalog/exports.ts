@@ -13,6 +13,9 @@ import { readSheetTable } from "@catalog/core/catalog/ingest/links-sheet";
 import { firstSheetOnly } from "@catalog/core/first-sheet";
 import { batchSheetStatus, notRefreshedChannels as readNotRefreshedChannels } from "@catalog/core/catalog/pipeline/report";
 import { withoutModelNames } from "./redact";
+import { batchCostFigure } from "@catalog/core/catalog/cost-report";
+import { inrPerUsdFromEnv } from "@catalog/core/catalog/cost";
+import { digestCost } from "@catalog/core/catalog/digest";
 import { STYLI_SKIP_NOTE } from "@catalog/core/catalog/evals/completeness";
 
 export async function batchExportUrl(id: string, format: string, conn: Db = db(), storage = { signedUrl, downloadBuffer }) {
@@ -40,13 +43,16 @@ export async function batchExportUrl(id: string, format: string, conn: Db = db()
 
 /**
  * The batch report as the operator downloads it (Details, report.json). It is served through the
- * app rather than a signed link so model ids, which the stored report keeps for evals, are removed.
+ * app rather than a signed link so model ids, which the stored report keeps for evals, are removed. R1 exit item 4: its
+ * `cost` is the live batchCostFigure (the figure the page and the digest show), not the stored judge and chunk compute.
  */
 export async function batchReport(id: string, conn: Db = db(), read = downloadBuffer): Promise<unknown> {
   const [batch] = await conn.select({ reportUri: catalogBatches.reportUri }).from(catalogBatches).where(eq(catalogBatches.id, id));
   if (!batch) throw new HttpError(404, "This batch was not found. Return to All batches.");
   if (!batch.reportUri) throw new HttpError(404, "The sheet is not ready yet. Wait for processing to finish.");
-  return withoutModelNames(JSON.parse((await read(batch.reportUri)).buf.toString()));
+  const report = withoutModelNames(JSON.parse((await read(batch.reportUri)).buf.toString())) as Record<string, unknown>;
+  const figure = await batchCostFigure(conn, id);
+  return { ...report, cost: { ...digestCost(figure, inrPerUsdFromEnv()), products: figure.products } };
 }
 
 /** Ids per IN (...) list for a selection of products, well below Postgres's 65,535 bind parameters per query. */

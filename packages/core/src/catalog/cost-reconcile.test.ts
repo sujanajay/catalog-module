@@ -9,7 +9,7 @@ import { createTestDb } from "../db/testing";
 import { changeSetting } from "../settings/store";
 import { COST_DATABASE_SHARE_KEY, COST_DATABASE_USD_PER_DAY_KEY, DEFAULT_DATABASE_SHARE_PERCENT, DEFAULT_DATABASE_USD_PER_DAY } from "../settings/registry";
 import {
-  billedLines, costCard, cpuQuantity, dayLedger, googleCostReaders, instancePrice, instanceUsdPerMs, memoryGiB, reconcileDay, runCostReconcile, runResourceFrom, samplesFrom, utcDay,
+  allocateIdle, billedLines, costCard, cpuQuantity, dayLedger, googleCostReaders, IDLE_LEAD_MS, IDLE_TAIL_MS, instancePrice, ledgerDay, instanceUsdPerMs, memoryGiB, reconcileDay, runCostReconcile, runResourceFrom, samplesFrom, utcDay,
   type BillableSample, type CostReaders, type RunResource, type V2Item,
 } from "./cost-reconcile";
 
@@ -98,7 +98,7 @@ describe("pricing (pure)", () => {
     ])).toEqual([{ name: "catalog-web", kind: "service", region: "asia-south1", seconds: 5.5 }, { name: "catalog-load", kind: "job", region: "asia-south1", seconds: 7 }]);
   });
 
-  it("reads every page of the Admin API and Cloud Monitoring, one day aligned as one point per resource", async () => {
+  it("reads every page of the Admin API and Cloud Monitoring, the day aligned per minute", async () => {
     const urls: string[] = [];
     const get = async (url: string) => {
       urls.push(url);
@@ -118,7 +118,8 @@ describe("pricing (pure)", () => {
     expect(await readers.billableSeconds(from, new Date(+from + 86_400_000))).toEqual([{ name: "catalog-load", kind: "job", region: "asia-south1", seconds: 1 }]);
     const m = new URL(urls.find((u) => u.includes("monitoring"))!);
     expect(m.searchParams.get("filter")).toBe('metric.type="run.googleapis.com/container/billable_instance_time"');
-    expect(m.searchParams.get("aggregation.alignmentPeriod")).toBe("86400s");
+    // Per minute (M6 decision C1): idle is placed on the minute it was billed in.
+    expect(m.searchParams.get("aggregation.alignmentPeriod")).toBe("60s");
     expect(m.searchParams.getAll("aggregation.groupByFields")).toEqual(["resource.type", "resource.label.service_name", "resource.label.job_name", "resource.label.location"]);
   });
 });
@@ -373,5 +374,86 @@ describe("runCostReconcile", () => {
     const first = await runCostReconcile(db, readers, { now: NOW, days: 1 });
     expect(first.newAlerts.map((a) => a.code)).toEqual(["success_under_target"]);
     expect((await runCostReconcile(db, readers, { now: NOW, days: 1 })).newAlerts).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------------------------------------------------
+// R1 exit item 4 (M6 decision C1): idle by the minute, to the batches working around it
+// ---------------------------------------------------------------------------------------------------------------------
+
+const MIN = 60_000;
+const t = (hhmm: string) => Date.parse(`${DAY}T${hhmm}:00Z`);
+/** Billed points (USD per minute in `seconds`, as billedLines hands them to allocateIdle), one per minute in [from, to). */
+const billedMinutes = (from: string, to: string, usdPerMinute: number) => {
+  const out = [];
+  for (let m = t(from); m < t(to); m += MIN) out.push({ endMs: m + MIN, seconds: usdPerMinute });
+  return out;
+};
+const seg = (batchId: string | null, from: string, to: string, usd: number) => ({ component: "c", batchId, endMs: t(to), busyMs: t(to) - t(from), usd, estimated: false });
+/** The work of `events` by the minute, as planDay hands it to allocateIdle (no instance cap). */
+const work = (events: ReturnType<typeof seg>[]) => ledgerDay(events, t("00:00"), t("00:00") + 86_400_000, new Map()).minutes.get("c");
+
+describe("R1 exit item 4: idle by the minute (decision C1)", () => {
+  it("keeps Cloud Monitoring's minutes on each sample", () => {
+    const [s] = samplesFrom([{ resource: { type: "cloud_run_revision", labels: { service_name: "catalog-upscale-gpu", location: "asia-south2" } },
+      points: [{ interval: { endTime: "2026-11-03T10:01:00Z" }, value: { doubleValue: 50 } }, { interval: { endTime: "2026-11-03T10:02:00Z" }, value: { doubleValue: 0 } }, { interval: { endTime: "2026-11-03T10:03:00Z" }, value: { doubleValue: 120 } }] }]);
+    expect(s).toEqual({ name: "catalog-upscale-gpu", kind: "service", region: "asia-south2", seconds: 170,
+      points: [{ endMs: Date.parse("2026-11-03T10:01:00Z"), seconds: 50 }, { endMs: Date.parse("2026-11-03T10:03:00Z"), seconds: 120 }] });
+  });
+
+  it("gives an idle tail (up to 15 min) and a start-up (up to 5 min) to the batch whose work they surround; idle far from any work has no batch", () => {
+    expect([IDLE_TAIL_MS, IDLE_LEAD_MS]).toEqual([15 * MIN, 5 * MIN]);
+    // One instance at USD 1 a minute. A deploy probe kept it up 08:00-08:30 (no ledger rows). Batch A's calls ran
+    // 10:00-10:10 (USD 4 recorded); the instance started at 09:58 and stayed up until 10:20. Batch B's calls ran
+    // 12:00-12:05 (USD 1); the instance was up from 11:30 (a slow start) to 12:05.
+    const billed = [...billedMinutes("08:00", "08:30", 1), ...billedMinutes("09:58", "10:20", 1), ...billedMinutes("11:30", "12:05", 1)];
+    const segments = [seg("A", "10:00", "10:10", 4), seg("B", "12:00", "12:05", 1)];
+    const idle = (30 + 22 + 35) - 5;
+    const out = allocateIdle(idle, billed, work(segments), t("00:00"), t("00:00") + 86_400_000)!;
+    // A: its 10 work minutes (1 - 0.4 each), the 2 start-up minutes and the 10-minute tail = 6 + 2 + 10.
+    expect(out.get("A")).toBeCloseTo(18, 9);
+    // B: its 5 work minutes (1 - 0.2 each) and the 5 minutes before them (11:55-12:00); 11:30-11:55 has no work within 5 min.
+    expect(out.get("B")).toBeCloseTo(4 + 5, 9);
+    // The probe (30) and B's early start (25) stay idle with no batch.
+    expect(idle - out.get("A")! - out.get("B")!).toBeCloseTo(55, 9);
+  });
+
+  it("shares a minute by the busy ms in its window, counts work with no batch, and scales the minutes to the day's idle", () => {
+    const billed = billedMinutes("10:00", "10:10", 1);
+    // A works 10:00-10:04 (4 min), B 10:04-10:05 (1 min), a sweep with no batch 10:05-10:06; each row recorded at 0.
+    const segments = [seg("A", "10:00", "10:04", 0), seg("B", "10:04", "10:05", 0), seg(null, "10:05", "10:06", 0)];
+    const out = allocateIdle(5, billed, work(segments), t("00:00"), t("00:00") + 86_400_000)!;
+    // Every minute's window holds all the work (4 : 1 : 1); 10 minutes of idle scaled to the day line's 5.
+    expect(out.get("A")).toBeCloseTo(5 * 4 / 6, 9);
+    expect(out.get("B")).toBeCloseTo(5 * 1 / 6, 9);
+    expect(out.has("")).toBe(false);
+    // No minutes (a sample from a reader without them), or nothing idle: the caller spreads over the day.
+    expect(allocateIdle(5, [], work(segments), t("00:00"), t("00:00") + 86_400_000)).toBeNull();
+    expect(allocateIdle(0, billed, work(segments), t("00:00"), t("00:00") + 86_400_000)).toBeNull();
+  });
+
+  it("the 216e5b7d shape: a morning deploy probe on the GPU upscaler is not charged to the afternoon batches; the outcome keeps the recorded and true cost", async () => {
+    const rate = instancePrice(upscaleGpu)!.usdPerSecond;
+    const a = await batch("A", { productsWithLinks: 141 }), b = await batch("B", { productsWithLinks: 5 });
+    // A: 300 calls of 3 s from 15:34 to 15:50 (one instance, USD at the full instance rate). B: 30 calls 15:40-15:44.
+    for (let i = 0; i < 300; i++) await ledger({ batchId: a, component: "catalog-upscale-gpu", ms: 3000, usd: 3 * rate, at: new Date(t("15:34") + i * 3200) });
+    for (let i = 0; i < 30; i++) await ledger({ batchId: b, component: "catalog-upscale-gpu", ms: 2000, usd: 2 * rate, at: new Date(t("15:40") + i * 8000) });
+    // Billed: the probe 13:00-14:57 at one instance, then the batches 15:31-16:01 at two instances (the 10-minute tail).
+    const minutes = [...billedMinutes("13:00", "14:57", 60), ...billedMinutes("15:31", "16:01", 120)];
+    const sampled: BillableSample = { ...sample("catalog-upscale-gpu", minutes.reduce((s, p) => s + p.seconds, 0)), points: minutes };
+    const result = await reconcileDay(db, DAY, { samples: [sampled], resources: [upscaleGpu], provisional: true, now: NOW });
+    const line = result.lines.find((l) => l.component === "catalog-upscale-gpu")!;
+    const probeUsd = 117 * 60 * rate, batchWindowUsd = 30 * 120 * rate;
+    expect(line.billedUsd).toBeCloseTo(probeUsd + batchWindowUsd, 6);
+    const alloc = await rows(sql`SELECT batch_id, attributed_usd::float8 AS attributed, idle_usd::float8 AS idle FROM catalog_cost_allocations WHERE day = ${DAY} AND component = 'catalog-upscale-gpu'`);
+    const of = (id: string) => alloc.find((r) => r.batch_id === id)!;
+    const both = (of(a).attributed as number) + (of(a).idle as number) + (of(b).attributed as number) + (of(b).idle as number);
+    // The two batches carry the afternoon window's instance time, never the probe: the day rule gave them both.
+    expect(both).toBeCloseTo(batchWindowUsd, 4); // the table keeps 6 decimals per row
+    expect(of(a).idle as number).toBeGreaterThan(10 * (of(b).idle as number));
+    // The outcome: true cost = attributed + idle + shared.
+    const [o] = await rows(sql`SELECT true_cost_usd::float8 AS t FROM catalog_batch_outcomes WHERE batch_id = ${a}`);
+    const shared = await rows(sql`SELECT shared_usd::float8 AS s FROM catalog_cost_allocations WHERE day = ${DAY} AND batch_id = ${a} AND component = 'ila-pg'`);
+    expect(o!.t as number).toBeCloseTo((of(a).attributed as number) + (of(a).idle as number) + (shared[0]!.s as number), 5);
   });
 });

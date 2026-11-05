@@ -106,9 +106,14 @@ export async function cancelBatch(id: string): Promise<{ id: string; status: "ca
   if (batch.status === "cancelled") return { id, status: "cancelled" };
   throw new HttpError(409, BATCH_STARTED);
 }
+/**
+ * The batch as the API and the pages send it: no policy, and no `cost` column (R1 exit item 4: it holds only the judge and
+ * chunk compute; operators see batchCostFigure's figure through the cost line, the digest and report.json).
+ */
 export function publicBatch(batch: CatalogBatch) {
   const { policy: _policy, ...options } = batch.options;
-  return { ...batch, options };
+  const { cost: _cost, ...rest } = batch;
+  return { ...rest, options };
 }
 /** The batch's state; with `uploads` (any status) the unfinished words also name pending and missing inputs. */
 export function batchState(batch: CatalogBatch, source?: string, now?: Date, uploads?: readonly { status: string; kind?: string }[]) {
@@ -168,7 +173,7 @@ export async function getBatch(id: string) {
   const uploads = await db().select().from(catalogUploads).where(eq(catalogUploads.batchId, id));
   // Removed inputs stay in `uploads` (the step 1 input list shows them) but say nothing about the source.
   const source = batchSource(uploads.filter((u) => u.status !== "removed").map((u) => u.kind));
-  return { batch: publicBatch(batch), counts: batch.counts, cost: batch.cost, state: batchState(batch, source), uploads: uploads.map(withoutListing), notRefreshedChannels: await notRefreshedChannels(db(), id) };
+  return { batch: publicBatch(batch), counts: batch.counts, state: batchState(batch, source), uploads: uploads.map(withoutListing), notRefreshedChannels: await notRefreshedChannels(db(), id) };
 }
 /**
  * An upload as the page gets it: a Supabase folder still being read (or paused) leaves out where its listing got to

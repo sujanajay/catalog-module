@@ -1,3 +1,4 @@
+import type { CostBasis } from "./digest-types";
 import type { BatchCost, QaMode } from "./types";
 /**
  * Wizard step 4 estimate of one quality check or classifier call: measured USD 0.00014 per check on
@@ -158,14 +159,22 @@ interface CostBatch {
  products?: readonly {change:string;outputs:readonly {status:string}[]}[];
 }
 export function costLine(batch:CostBatch,env:NodeJS.ProcessEnv=process.env) {
- const usd = batch.cost.qaUsd+batch.cost.computeUsd;
  const identifiers = batch.products ? batch.products.filter(p => p.change !== "unchanged" && p.outputs.some(o => o.status !== "skipped")).length : batch.cost.identifiers;
+ return costLineFor(batch.cost.qaUsd+batch.cost.computeUsd,identifiers,env);
+}
+/** The words after a per-style figure: only a final figure reads as the cost per style (R1 exit item 4). */
+export function perStyleWords(basis:CostBasis):string {
+ return basis === "recorded" ? "per style so far" : basis === "provisional" ? "per style (not final)" : "per style";
+}
+/** The cost line for `usd` spent over `identifiers` styles (the batch page passes batchCostFigure's figure and basis). */
+export function costLineFor(usd:number,identifiers:number,env:NodeJS.ProcessEnv=process.env,basis:CostBasis="recorded") {
  const usdPerIdentifier = identifiers > 0 ? usd/identifiers : null;
  const rate = positive(env.INR_PER_USD);
  const inrPerIdentifier = usdPerIdentifier !== null && rate !== null ? usdPerIdentifier*rate : null;
  const inr = rate !== null ? usd*rate : null;
- const text = usdPerIdentifier === null ? "Cost per style is not available yet" : inrPerIdentifier === null || inr === null ? `USD ${usdAmount(usdPerIdentifier)} per style so far · USD ${usdAmount(usd)} for this batch · ${RUPEES_NOT_CONFIGURED}` : `INR ${inrAmount(inrPerIdentifier)} per style so far · INR ${inrAmount(inr)} for this batch`;
- return {usd,inr,identifiers,usdPerIdentifier,inrPerIdentifier,text:`${text} · agency reference INR 60 per style`};
+ const per = perStyleWords(basis);
+ const text = usdPerIdentifier === null ? "Cost per style is not available yet" : inrPerIdentifier === null || inr === null ? `USD ${usdAmount(usdPerIdentifier)} ${per} · USD ${usdAmount(usd)} for this batch · ${RUPEES_NOT_CONFIGURED}` : `INR ${inrAmount(inrPerIdentifier)} ${per} · INR ${inrAmount(inr)} for this batch`;
+ return {usd,inr,identifiers,usdPerIdentifier,inrPerIdentifier,basis,text:`${text} · agency reference INR 60 per style`};
 }
 export interface EstimateCounts {
  outputs:number;sources:number;untypedProducts?:number;qaMode?:QaMode;qaSampleRate?:number;styliSkips?:number;unchangedPairs?:number;
