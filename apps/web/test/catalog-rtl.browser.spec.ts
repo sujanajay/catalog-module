@@ -25,18 +25,18 @@ test.beforeEach(async ({ page }) => {
 test.afterEach(async ({ page }) => asUser(page, "operator"));
 
 /** Today's pages: Home (batch list), New batch, a batch, a brand, a product, Settings and Ops (both admin only). */
-async function pages(page: Page): Promise<{ name: string; url: string; admin?: boolean }[]> {
+async function pages(page: Page): Promise<{ name: string; url: string; admin?: boolean; arrow?: boolean }[]> {
   const created = await page.request.post("/api/catalog/batches", { data: { brandSlug: "test_brand", productType: "auto", name: "catalog-test rtl" } });
   expect(created.status()).toBe(201);
   const { id } = (await created.json()) as { id: string };
   return [
     { name: "home", url: "/catalog" },
     { name: "new-batch", url: "/catalog/new" },
-    { name: "batch", url: `/catalog/${id}` },
-    { name: "brand", url: "/catalog/brands/test_brand" },
-    { name: "product", url: "/catalog/products/test_brand/RTL-SAMPLE-1" },
+    { name: "batch", url: `/catalog/${id}`, arrow: true },
+    { name: "brand", url: "/catalog/brands/test_brand", arrow: true },
+    { name: "product", url: "/catalog/products/test_brand/RTL-SAMPLE-1", arrow: true },
     { name: "settings", url: "/catalog/settings", admin: true },
-    { name: "ops", url: "/catalog/ops", admin: true },
+    { name: "ops", url: "/catalog/ops", admin: true, arrow: true },
   ];
 }
 
@@ -55,6 +55,8 @@ test("today's pages mirror cleanly right to left", async ({ page }, testInfo) =>
       const res = await page.goto(p.url);
       expect(res?.status(), `${p.url} answers`).toBeLessThan(400);
       await expect(page.locator("main h1").first()).toBeVisible();
+      // Measure once the fonts are in: a font swapping in between the two measurements would change the logo's width.
+      await page.evaluate(() => document.fonts.ready.then(() => undefined));
       const ltrLogo = await box(page, ".top .logo");
       const ltrUser = await box(page, ".top .ub");
       expect(ltrLogo.x).toBeLessThan(ltrUser.x);
@@ -83,9 +85,9 @@ test("today's pages mirror cleanly right to left", async ({ page }, testInfo) =>
         return s.textAlign === "left" || s.textAlign === "right" || s.float === "left" || s.float === "right";
       }).map((el) => `${el.tagName.toLowerCase()}.${el.className}`));
       expect(physical, "elements aligned to a physical side").toEqual([]);
-      for (const transform of await page.locator(".mirror").evaluateAll((els) => els.map((el) => getComputedStyle(el).transform))) {
-        expect(transform).toBe("matrix(-1, 0, 0, 1, 0, 0)");
-      }
+      const transforms = await page.locator(".mirror").evaluateAll((els) => els.map((el) => getComputedStyle(el).transform));
+      if (p.arrow) expect(transforms.length, "the page has its back arrow").toBeGreaterThan(0);
+      for (const transform of transforms) expect(transform).toBe("matrix(-1, 0, 0, 1, 0, 0)");
       // Times, codes and links keep their own order ("5 Nov 2026", not "Nov 2026 5").
       const flipped = await page.locator("main time, main .mono, main code").evaluateAll((els) => els.filter((el) => {
         const text = el.firstChild;
@@ -127,6 +129,21 @@ test("the focus ring is 2 px in the focus colour, and Arabic text uses IBM Plex 
   expect(ring.width).toBe("2px");
   const rgb = (hex: string) => `rgb(${parseInt(hex.slice(1, 3), 16)}, ${parseInt(hex.slice(3, 5), 16)}, ${parseInt(hex.slice(5, 7), 16)})`;
   expect(ring.color).toBe(rgb(focus));
+
+  // The user menu opens inside the navy bar on a card, so its items keep the page's ring (review P2-1); the user
+  // button itself sits on navy and gets the lighter one.
+  const userButton = page.locator(".top .ub");
+  await userButton.focus();
+  await page.keyboard.press("Enter");
+  const item = page.locator(".top .menu [role^=menuitem]").first();
+  await expect(item).toBeVisible();
+  await item.focus();
+  await page.keyboard.press("Shift+Tab");
+  await page.keyboard.press("Tab");
+  await expect(item).toBeFocused();
+  expect(await item.evaluate((el) => getComputedStyle(el).outlineColor)).toBe(rgb(focus));
+  expect(await userButton.evaluate((el) => getComputedStyle(el).getPropertyValue("--focus").trim())).toBe("#93b4ff");
+  await page.keyboard.press("Escape");
 
   // An Arabic content line, as a channel preview would show it.
   const arabic = await page.evaluate(async () => {

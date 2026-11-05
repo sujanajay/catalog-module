@@ -77,9 +77,19 @@ describe("UX1 colour tokens", () => {
     expect([darkMedia["--well"], darkMedia["--focus"], darkMedia["--selected"]]).toEqual(["#1e1e20", "#93b4ff", "#2a1c14"]);
     expect(darkForced).toEqual(darkMedia);
   });
-  it("gives the navy top bar a focus ring that shows on navy", () => {
-    expect(contrast(top["--focus"]!, light["--navy"]!)).toBeGreaterThanOrEqual(3);
+  it("gives the parts that sit on the navy top bar a focus ring that shows on navy", () => {
+    const onNavy = tokens(block(css, ".top .logo,\n.top .nav a,\n.top .ub"));
+    expect(contrast(onNavy["--focus"]!, light["--navy"]!)).toBeGreaterThanOrEqual(3);
   });
+  // Review P2-1 (2026-11-05): the user menu opens inside the top bar on a --card surface, so it must keep the page's
+  // ring, not the light ring meant for navy (#93b4ff on white is 2.1 to 1).
+  for (const [name, set] of [["light", light], ["dark (system)", darkMedia], ["dark (forced)", darkForced]] as const) {
+    it(`${name}: the user menu inside the top bar keeps a ring that shows on its card`, () => {
+      const menu = { ...top, ...tokens(block(css, ".menu")) };
+      const ring = menu["--focus"] ?? set["--focus"]!;
+      expect(contrast(ring, set["--card"]!)).toBeGreaterThanOrEqual(3);
+    });
+  }
   it("draws every focus ring 2 px in --focus", () => {
     const outlines = [...`${css}\n${pagesCss}\n${wizardCss}`.matchAll(/outline:\s*([^;}]+)/g)].map((m) => m[1]!.trim());
     for (const o of outlines.filter((o) => o !== "none")) expect(o).toBe("2px solid var(--focus)");

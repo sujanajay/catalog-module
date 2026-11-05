@@ -169,9 +169,14 @@ a {
 }
 
 /* ---- top bar ---- */
-.top {
-  /* The ring must show on navy too. */
+/* Only the parts that sit on navy get the light ring; the user menu (a --card surface inside the bar) keeps the
+   page ring, which shows on its card in either theme. */
+.top .logo,
+.top .nav a,
+.top .ub {
   --focus: #93b4ff;
+}
+.top {
   background: var(--navy);
   color: #fff;
   position: sticky;
