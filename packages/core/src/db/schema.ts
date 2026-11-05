@@ -154,7 +154,7 @@ export const INCIDENT_SEVERITIES = ["warning", "error"] as const;
  * inputs, Continue, review, Start) is not a touch.
  */
 /**
- * M6-F3-R3 operator touches. `hold_start` (M1-S5, 0021): "Wait" on the start countdown is a person stepping in
+ * M6-F3-R3 operator touches. `hold_start` (M1-S5, 0022): "Wait" on the start countdown is a person stepping in
  * (manager decision 2026-11-05), so it counts against the zero-touch target.
  */
 export const TOUCH_ACTIONS = ["decision", "retry_photo", "replace_photo", "retry_collect", "retry_links", "fix_and_continue", "cancel", "add_sku_ids", "hold_start"] as const;
@@ -375,7 +375,14 @@ export const catalogBatches = pgTable(
     /** M12-S1 (0016): the settings this batch read once at Start and keeps to the end; null before Start and on older batches. */
     settingsSnapshotId: text("settings_snapshot_id"),
     /**
-     * M1-S5 (M1-F4-R1, 0021): the batch digest, written by finalize from the same snapshot as the sheet, so the batch
+     * M5-S3 (0021, M5 3.3): the channel ruleset version this batch read once at Start; every chunk, retry, repair and
+     * publish of the batch uses that snapshot, so a later publish never reaches it. Null before Start, on older batches
+     * and when nothing was published at Start (those read the latest published version). No foreign key: a version
+     * read from the snapshot file (M5-F4-R8) is pinned the same way.
+     */
+    rulesetVersion: integer("ruleset_version"),
+    /**
+     * M1-S5 (M1-F4-R1, 0022): the batch digest, written by finalize from the same snapshot as the sheet, so the batch
      * page reads one row, not the outputs. Null before the first finalize and on batches finished before M1-S5.
      */
     digest: jsonb("digest").$type<BatchDigest>(),

@@ -24,6 +24,13 @@ export interface InvariantCheck {
  * once a day, so a fresh export is up to 24 hours old just before the next run; the 2 extra hours cover that run itself.
  */
 export const EXPORT_STALE_HOURS = 26;
+/**
+ * M0-S3 output_without_version: batches created in the last 14 days are checked (a batch stages new images within days;
+ * an M1-S4 improvement runs within 72 hours of delivery), and an output counts from 30 minutes after its batch's first
+ * output version (a rolling deploy's old revision may still stage a few without one).
+ */
+export const OUTPUT_VERSION_WINDOW_DAYS = 14;
+export const OUTPUT_VERSION_GRACE_MIN = 30;
 /** A running chunk whose lease ended more than this long ago should have been recovered by the sweep. */
 export const STALE_LEASE_MS = 5 * 60_000;
 /** A running chunk is slow when it ran longer than SLOW_CHUNK_FACTOR x its batch's median finished chunk and SLOW_CHUNK_MIN_MS. */
@@ -147,11 +154,15 @@ export const CHECKS: readonly InvariantCheck[] = [
     id: "output_without_version",
     sentence: "Every image staged or delivered since the graph write path shipped names its content version (M0-F2-R8).",
     severity: "ERROR",
-    // "Since it shipped" per batch: the output row was made after its batch's first output version (M0-S3's render
-    // writes one with every staged image), so outputs staged by a worker from before M0-S3 are not counted. Uses the
-    // batch_id index of catalog_content_versions.
-    sql: () => sql`SELECT o.id, o.batch_id FROM catalog_outputs AS o
-      WHERE o.content_version_id IS NULL AND o.staging_uri IS NOT NULL AND o.status IN ('staged', 'needs_attention', 'verified')
-        AND EXISTS (SELECT 1 FROM catalog_content_versions AS v WHERE v.batch_id = o.batch_id AND v.producer = 'M3' AND v.created_at <= o.created_at)`,
+    // "Since it shipped" per batch: the output row was made at least OUTPUT_VERSION_GRACE_MIN after its batch's first M3
+    // version, so outputs a pre-M0-S3 revision staged (also during a rolling deploy) are not counted. Bounded for the
+    // 10-minute sweep (review P2-3): only batches created in the last OUTPUT_VERSION_WINDOW_DAYS (catalog_batches is
+    // small); per batch, one min() over its versions and one pass over its outputs, both through their batch_id index.
+    sql: (now) => sql`SELECT o.id, o.batch_id FROM catalog_batches AS b
+      CROSS JOIN LATERAL (SELECT min(v.created_at) AS first_at FROM catalog_content_versions AS v WHERE v.batch_id = b.id AND v.producer = 'M3') AS f
+      JOIN catalog_outputs AS o ON o.batch_id = b.id
+      WHERE b.created_at > ${at(now)} - ${OUTPUT_VERSION_WINDOW_DAYS}::int * interval '1 day' AND f.first_at IS NOT NULL
+        AND o.created_at >= f.first_at + ${OUTPUT_VERSION_GRACE_MIN}::int * interval '1 minute'
+        AND o.content_version_id IS NULL AND o.staging_uri IS NOT NULL AND o.status IN ('staged', 'needs_attention', 'verified')`,
   },
 ];

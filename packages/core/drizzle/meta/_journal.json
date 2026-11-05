@@ -152,8 +152,15 @@
     {
       "idx": 21,
       "version": "7",
-      "when": 1793857655062,
-      "tag": "0021_batch_digest",
+      "when": 1793854167012,
+      "tag": "0021_batch_ruleset_version",
+      "breakpoints": true
+    },
+    {
+      "idx": 22,
+      "version": "7",
+      "when": 1793861298977,
+      "tag": "0022_batch_digest",
       "breakpoints": true
     }
   ]

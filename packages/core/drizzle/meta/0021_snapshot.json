@@ -1,5 +1,5 @@
 {
-  "id": "87e9c250-219c-4fad-b07b-d7e0eaf2f981",
+  "id": "6e025e9a-984b-42fd-b3d8-040f55f6c71d",
   "prevId": "eb707a28-2e7f-424d-b37e-592f2591bfac",
   "version": "7",
   "dialect": "postgresql",
@@ -770,7 +770,7 @@
       "checkConstraints": {
         "catalog_batch_touches_action_check": {
           "name": "catalog_batch_touches_action_check",
-          "value": "\"catalog_batch_touches\".\"action\" IN ('decision', 'retry_photo', 'replace_photo', 'retry_collect', 'retry_links', 'fix_and_continue', 'cancel', 'add_sku_ids', 'hold_start')"
+          "value": "\"catalog_batch_touches\".\"action\" IN ('decision', 'retry_photo', 'replace_photo', 'retry_collect', 'retry_links', 'fix_and_continue', 'cancel', 'add_sku_ids')"
         }
       },
       "isRLSEnabled": false
@@ -915,9 +915,9 @@
           "primaryKey": false,
           "notNull": false
         },
-        "digest": {
-          "name": "digest",
-          "type": "jsonb",
+        "ruleset_version": {
+          "name": "ruleset_version",
+          "type": "integer",
           "primaryKey": false,
           "notNull": false
         }

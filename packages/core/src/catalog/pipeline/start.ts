@@ -15,6 +15,7 @@ import { mergeCounts } from "../counts";
 import { log } from "../../log";
 import { takeSettingsSnapshot } from "../../settings/store";
 import { autoDecideSnapshot } from "../auto-decide";
+import { pinRuleset } from "../channel-rules";
 import type { BatchStatus } from "../types";
 import { armAutoStart, AUTO_START_BUSY_WARN_MS, busyRetryDelaySec, type AutoStartBody } from "../auto-start";
 
@@ -100,6 +101,9 @@ export async function startDraftBatch(db: Db, deps: StartDeps, id: string, previ
   // Source ids by product, built once (a 7,000-product batch has about 28,000 photos).
   const sourceIds = new Map<string, string[]>();
   for (const s of sources) { const ids = sourceIds.get(s.productId); if (ids) ids.push(s.id); else sourceIds.set(s.productId, [s.id]); }
+  // M5-S3 (M5 3.3, F4-R8): the channel ruleset this batch keeps to the end, read once now (its snapshot file written
+  // when missing; the newest file stands in when the snapshot table cannot be read).
+  const ruleset = await pinRuleset(db, { storage: deps.storage });
   const plans = planChunks(products.filter((p) => sourceIds.has(p.id)).map((p) => ({ productId: p.id, identifier: p.identifier, sourceCount: sourceIds.get(p.id)!.length })), chunkImages());
   const chunks = await db.transaction(async (tx) => {
     const [current] = await tx.select().from(catalogBatches).where(eq(catalogBatches.id, id)).for("update");
@@ -120,12 +124,12 @@ export async function startDraftBatch(db: Db, deps: StartDeps, id: string, previ
     // Spec 18: a batch started with the upscaler on is made with the enlargement stage (the invariant's scope).
     // M1-F3: the auto-decide rules as they are now stay with the batch; a later change applies to the next batch only.
     const autoDecide = await autoDecideSnapshot(tx as unknown as Db);
-    await tx.update(catalogBatches).set({ status: "matting", startedAt: new Date(), updatedAt: new Date(), settingsSnapshotId: settings.id, options: { ...startedBatchOptions(current.options, process.env, settings), autoDecide }, counts: { ...startedCounts(current), products: products.length, sources: sources.length, outputs: sources.length * batch.channels.length, newProducts: preview.overwrite.newProducts, existingProducts: preview.overwrite.existingProducts.length, shotsToRemove: preview.overwrite.existingProducts.reduce((n, p) => n + p.shotsToRemove.length, 0) } }).where(eq(catalogBatches.id, id));
+    await tx.update(catalogBatches).set({ status: "matting", startedAt: new Date(), updatedAt: new Date(), settingsSnapshotId: settings.id, rulesetVersion: ruleset?.version ?? null, options: { ...startedBatchOptions(current.options, process.env, settings), autoDecide }, counts: { ...startedCounts(current), products: products.length, sources: sources.length, outputs: sources.length * batch.channels.length, newProducts: preview.overwrite.newProducts, existingProducts: preview.overwrite.existingProducts.length, shotsToRemove: preview.overwrite.existingProducts.reduce((n, p) => n + p.shotsToRemove.length, 0) } }).where(eq(catalogBatches.id, id));
     return rows;
   });
   // Spec 15 E5: only the batch's window of chunks is queued now; each finished chunk queues the next.
   await dispatchChunks(db, deps.enqueue, id);
-  log("INFO", "batch started", { batchId: id, brandSlug: batch.brandSlug, products: products.length, sources: sources.length, outputs: sources.length * batch.channels.length, chunks: chunks.length, channels: batch.channels });
+  log("INFO", "batch started", { batchId: id, brandSlug: batch.brandSlug, products: products.length, sources: sources.length, outputs: sources.length * batch.channels.length, chunks: chunks.length, channels: batch.channels, rulesetVersion: ruleset?.version ?? null });
   return { id, status: "matting" };
 }
 

@@ -5,7 +5,7 @@
 // new version.
 import { createHash } from "node:crypto";
 import sharp from "sharp";
-import { and, eq, inArray } from "drizzle-orm";
+import { and, eq, inArray, sql } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { FIXTURE_CHANNEL_RULES } from "@catalog/core/catalog/channel-rules";
 import type { Db } from "@catalog/core/db/client";
@@ -51,7 +51,8 @@ function world() {
     return obj ? new Response(new Uint8Array(obj.buf), { headers: { "content-type": obj.mime, "content-length": String(obj.buf.length), "x-goog-generation": obj.generation } }) : new Response(null, { status: 404 });
   });
   const base = workerCatalogDeps(db, { channelRules: async () => FIXTURE_CHANNEL_RULES });
-  const deps: CatalogDeps = { ...base, routes: undefined, sleep: async () => {}, fetch, now: () => new Date("2026-11-05T09:00:00Z"), log: () => {}, enqueue: vi.fn(async () => "task"),
+  const logs: { message: string; fields: Record<string, unknown> }[] = [];
+  const deps: CatalogDeps = { ...base, routes: undefined, sleep: async () => {}, fetch, now: () => new Date("2026-11-05T09:00:00Z"), log: (message: string, fields: Record<string, unknown> = {}) => { logs.push({ message, fields }); }, enqueue: vi.fn(async () => "task"),
     resolvePolicy: vi.fn<CatalogDeps["resolvePolicy"]>(async () => ({ matteModel: "fixture", qaModel: "", threshold: 75, floor: 60, qaMode: "per_source", qaSampleRate: 1, source: "default" })),
     storage: { ...storage, getBucketName: () => "assets", getPublicBucketName: () => "public", uploadBuffer: upload,
       downloadBuffer: async (uri) => { const o = objects.get(uri); if (!o) throw new Error(`No object ${uri}`); return { buf: o.buf, mime: o.mime }; },
@@ -66,7 +67,7 @@ function world() {
       const jpeg = await jpegOf(p.rgb[0]!, channel);
       return [channel, { jpeg, status: "ok", plan: { w: 80, h: 100, lowResolution: false, safeBox: { x: 0, y: 0, w: 80, h: 100 }, scale: 1, placedX: 0, placedY: 0, detailShot: false }, quality: 90, bytes: jpeg.length, flags: [], notes: [], attention: null, compliance: { ok: true, failures: [] } }];
     }))) as unknown as Awaited<ReturnType<CatalogDeps["renderAllChannels"]>>) };
-  return { deps, objects };
+  return { deps, objects, logs };
 }
 type World = ReturnType<typeof world>;
 
@@ -133,7 +134,7 @@ describe("M0-S3 write path through the worker", () => {
       const o = links.find((x) => x.contentVersionId === e.toVersionId)!;
       const listing = listings.find((l) => l.id === e.listingId)!;
       expect(listing.channel).toBe(o.channel);
-      expect(e).toMatchObject({ kind: "links_delivered", slot: `image:${o.n}`, fromVersionId: null, evidence: "tool_publish", evidenceRef: `catalog_outputs:${o.id}`, reasonKind: "new_content", changeTypeId: "img_background_fixed", actor: "test@opptra.com", idempotencyKey: `publish:${o.id}:${listing.id}` });
+      expect(e).toMatchObject({ kind: "links_delivered", slot: `image:${o.n}`, fromVersionId: null, evidence: "tool_publish", evidenceRef: `catalog_outputs:${o.id}`, reasonKind: "new_content", changeTypeId: "img_background_fixed", actor: "test@opptra.com", idempotencyKey: `publish:${o.id}:none:${o.contentVersionId}:${listing.id}` });
     }
     expect(new Set(events.map((e) => e.changeSetId)).size).toBe(1);
     // The nightly invariant finds nothing missing.
@@ -208,4 +209,57 @@ describe("M0-S3 write path through the worker", () => {
     expect(o!.contentVersionId).toBeTruthy();
     expect(await eventsOf(s.batch.id)).toHaveLength(0);
   }, 240_000);
+  it("review P2-4: a publish rolled back after its copies landed is retried to one event per listing slot, and a repeat writes nothing", async () => {
+    const w = world(), { product } = await optionWithListings("M0S3-RETRY");
+    const first = await seed(w, "m0s3-retry", product, [71], ["noon"]);
+    await runBatch(w, first, product.id);
+    const next = await seed(w, "m0s3-retry-next", product, [72], ["noon"]);
+    await runChunks(w, next);
+    // The first attempt copies the new image, writes its events, then fails (the old photo's custom time) and rolls back.
+    vi.mocked(w.deps.storage.setCustomTime).mockRejectedValueOnce(new Error("storage hiccup"));
+    expect((await handlePublishTask(w.deps, { batchId: next.batch.id, productId: product.id })).httpStatus).toBe(503);
+    expect(await eventsOf(next.batch.id)).toHaveLength(0);
+    expect((await handlePublishTask(w.deps, { batchId: next.batch.id, productId: product.id })).outcome).toBe("published");
+    const events = await eventsOf(next.batch.id);
+    expect(events).toHaveLength(2);
+    expect(events.every((e) => e.reasonKind === "new_content" && e.changeTypeId === "img_main_replaced")).toBe(true);
+    // Repeats (a duplicate task, a re-opened finalize) write nothing more.
+    await handlePublishTask(w.deps, { batchId: next.batch.id, productId: product.id });
+    expect(await eventsOf(next.batch.id)).toHaveLength(2);
+  }, 240_000);
+
+  it("review P2-1 (D26): a change log that cannot be written never fails or rolls back the delivery; it is logged at ERROR", async () => {
+    const w = world(), { product } = await optionWithListings("M0S3-LOGFAIL");
+    const s = await seed(w, "m0s3-logfail", product, [81], ["noon"]);
+    await runChunks(w, s);
+    await db.execute(sql`CREATE OR REPLACE FUNCTION m0s3_refuse() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'change log down'; END $$`);
+    await db.execute(sql`CREATE TRIGGER m0s3_refuse BEFORE INSERT ON catalog_change_events FOR EACH ROW EXECUTE FUNCTION m0s3_refuse()`);
+    try {
+      expect((await handlePublishTask(w.deps, { batchId: s.batch.id, productId: product.id })).outcome).toBe("published");
+    } finally {
+      await db.execute(sql`DROP TRIGGER m0s3_refuse ON catalog_change_events`);
+    }
+    const [o] = await db.select().from(catalogOutputs).where(eq(catalogOutputs.batchId, s.batch.id));
+    expect(o).toMatchObject({ status: "verified", isLive: true });
+    expect(await eventsOf(s.batch.id)).toHaveLength(0);
+    expect(w.logs.find((l) => l.message === "change log not written")?.fields).toMatchObject({ severity: "ERROR", batchId: s.batch.id, productId: product.id });
+  }, 240_000);
+
+  it("review P2-4: a redelivered render that finds its staged image (the row write was lost) records that image's version", async () => {
+    const w = world(), { product } = await optionWithListings("M0S3-REDELIVER");
+    const s = await seed(w, "m0s3-redeliver", product, [91], ["noon"]);
+    for (let i = 0; i < 2; i++) expect((await handleChunkTask(w.deps, await currentChunkTask(db, s.chunk.id))).httpStatus).toBe(200);
+    const [staged] = await db.select().from(catalogOutputs).where(eq(catalogOutputs.batchId, s.batch.id));
+    expect(staged!.contentVersionId).toBeTruthy();
+    // The delivery died after the upload: the row is pending again with its bytes, and the chunk is back at render.
+    await db.update(catalogOutputs).set({ status: "pending", contentVersionId: null }).where(eq(catalogOutputs.id, staged!.id));
+    const [chunk] = await db.select().from(catalogChunks).where(eq(catalogChunks.id, s.chunk.id));
+    await db.update(catalogChunks).set({ stage: "render", status: "queued" }).where(eq(catalogChunks.id, s.chunk.id));
+    const renders = vi.mocked(w.deps.renderAllChannels).mock.calls.length;
+    expect((await handleChunkTask(w.deps, { chunkId: s.chunk.id, stage: "render", step: chunk!.step })).httpStatus).toBe(200);
+    expect(vi.mocked(w.deps.renderAllChannels).mock.calls.length).toBe(renders);
+    const [again] = await db.select().from(catalogOutputs).where(eq(catalogOutputs.id, staged!.id));
+    expect(again).toMatchObject({ status: "staged", contentVersionId: staged!.contentVersionId });
+  }, 240_000);
 });
+

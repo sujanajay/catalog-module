@@ -275,10 +275,18 @@ describe("invariant checks", () => {
     const hash = sha256Hex(new TextEncoder().encode("inv-version"));
     await recordAsset(db, { sha256: hash, uri: "gs://assets/s/v.jpg", mime: "image/jpeg" });
     const v = await recordVersion(db, { optionId: null, scope: "noon", component: "image", source: "cleanup", aiGenerated: false, producer: "M3", producerRef: "inv-out", assetSha256: hash, batchId: b.id, isTest: true, createdBy: "t" });
+    // Within the grace after the first version (a rolling deploy's old revision): not counted yet.
     const after = await staged(b.id, p, new Date(Date.now() + 60_000));
+    expect(await count()).toBe(0);
+    await db.update(catalogOutputs).set({ createdAt: new Date(Date.now() + 31 * 60_000) }).where(eq(catalogOutputs.id, after.id));
     const r = await run();
     expect(r.counts.output_without_version).toBe(1);
     expect(r.results.find((x) => x.id === "output_without_version")!.sample).toEqual([after.id]);
+    // A batch older than the window is not scanned.
+    await db.update(catalogBatches).set({ createdAt: new Date(+NOW - 15 * 86_400_000) }).where(eq(catalogBatches.id, b.id));
+    expect(await count()).toBe(0);
+    await db.update(catalogBatches).set({ createdAt: NOW }).where(eq(catalogBatches.id, b.id));
+    expect(await count()).toBe(1);
     await db.update(catalogOutputs).set({ contentVersionId: v.versionId }).where(eq(catalogOutputs.id, after.id));
     expect(await count()).toBe(0);
     expect(before.id).not.toBe(after.id);
