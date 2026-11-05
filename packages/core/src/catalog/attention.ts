@@ -16,7 +16,8 @@ const local = (flag:OutputFlag)=>flag==="placement" || flag==="failed_compliance
 export async function listAttention(db:Db,batchId:string,sign:(uri:string)=>Promise<string>):Promise<AttentionProduct[]> {
  const [batch]=await db.select().from(catalogBatches).where(eq(catalogBatches.id,batchId));
  if(!batch) return [];
- const rows=await db.select({output:catalogOutputs,source:catalogSourceImages,identifier:catalogProducts.identifier}).from(catalogOutputs).innerJoin(catalogSourceImages,eq(catalogOutputs.sourceImageId,catalogSourceImages.id)).innerJoin(catalogProducts,eq(catalogOutputs.productId,catalogProducts.id)).where(and(eq(catalogOutputs.batchId,batchId),isNull(catalogOutputs.decision),inArray(catalogOutputs.status,["needs_attention","failed"]))).orderBy(asc(catalogProducts.identifier),asc(catalogOutputs.n),asc(catalogOutputs.channel));
+  // Only the columns the cards use: a batch with many held photos reads thousands of rows here.
+ const rows=await db.select({output:{id:catalogOutputs.id,productId:catalogOutputs.productId,sourceImageId:catalogOutputs.sourceImageId,channel:catalogOutputs.channel,n:catalogOutputs.n,status:catalogOutputs.status,flags:catalogOutputs.flags,compliance:catalogOutputs.compliance,error:catalogOutputs.error,stagingUri:catalogOutputs.stagingUri},source:{rawUri:catalogSourceImages.rawUri,width:catalogSourceImages.width,height:catalogSourceImages.height},identifier:catalogProducts.identifier}).from(catalogOutputs).innerJoin(catalogSourceImages,eq(catalogOutputs.sourceImageId,catalogSourceImages.id)).innerJoin(catalogProducts,eq(catalogOutputs.productId,catalogProducts.id)).where(and(eq(catalogOutputs.batchId,batchId),isNull(catalogOutputs.decision),inArray(catalogOutputs.status,["needs_attention","failed"]))).orderBy(asc(catalogProducts.identifier),asc(catalogOutputs.n),asc(catalogOutputs.channel));
  if(!rows.length)return [];
  const ids=[...new Set(rows.map(r=>r.output.productId))];
  const [live,sources,enlargements]=await Promise.all([
@@ -26,13 +27,17 @@ export async function listAttention(db:Db,batchId:string,sign:(uri:string)=>Prom
  db.select({sourceImageId:catalogEnlargements.sourceImageId,route:catalogEnlargements.route,error:catalogEnlargements.error,errorKind:catalogEnlargements.errorKind}).from(catalogEnlargements).where(and(eq(catalogEnlargements.batchId,batchId),inArray(catalogEnlargements.productId,ids),eq(catalogEnlargements.wanted,true),eq(catalogEnlargements.status,"failed")))
  ]);
  const stopped=batch.status==="failed"||batch.status==="cancelled";
+ // Indexed once, so each held photo looks up its own rows instead of scanning every row (a batch with many held
+ // products was quadratic, M1-S5 review follow-up).
+ const index=<T,>(list:readonly T[],key:(t:T)=>string)=>{const m=new Map<string,T[]>();for(const t of list){const k=key(t),l=m.get(k);if(l)l.push(t);else m.set(k,[t]);}return m;};
+ const liveOf=index(live,l=>l.productId),sourcesOf=index(sources,s=>s.productId),enlargementsOf=index(enlargements,e=>e.sourceImageId);
  const groups=new Map<string,typeof rows>();
  for(const row of rows){
   // Every held output stays listed, even one carrying only information flags (a row held before a
   // flag became note-only), so no product can be held without a way to resolve it (R20).
   const shared=row.output.status==="failed"||!row.output.flags.length||row.output.flags.some(f=>!local(f)&&!information.has(f));
   const key=row.output.productId+":"+row.output.sourceImageId+(shared?"":":"+row.output.channel);
-  groups.set(key,[...(groups.get(key)??[]),row]);
+  const group=groups.get(key);if(group)group.push(row);else groups.set(key,[row]);
  }
  const products=new Map<string,AttentionProduct>();
  for(const siblings of groups.values()){
@@ -49,15 +54,15 @@ export async function listAttention(db:Db,batchId:string,sign:(uri:string)=>Prom
   // Our own defect, still there after the repair loop: the card says what was tried (07 4.6a), in plain words.
   const tried=OWN_DEFECT_FLAGS.has(flag as OutputFlag)&&!context.busy?triedSentence(actionsOn(o.compliance,o.channel).filter(a=>a.result!=="skipped").map(a=>a.step)):"";
   const main=flagDetails(flag,context),others=[...problemFlags.filter(f=>f!==flag).slice(0,MAX_REASONS_PER_PHOTO-1),...flags.filter(f=>information.has(f))].map(f=>flagDetails(f,context));
-  const liveChannels=[...new Set(live.filter(l=>l.productId===o.productId&&l.n===o.n&&(siblings.length>1||!flags.every(local)||l.channel===o.channel)).map(l=>l.channel))];
+  const liveChannels=[...new Set((liveOf.get(o.productId)??[]).filter(l=>l.n===o.n&&(siblings.length>1||!flags.every(local)||l.channel===o.channel)).map(l=>l.channel))];
   // A photo held for its enlargement: a size refusal (route none) or an unstable prepare says so in its own words, and
   // Try again is offered only when a call can make one of its failed identities and the batch still runs.
-  const failedRows=flags.includes("enlargement_failed")?enlargements.filter(e=>e.sourceImageId===o.sourceImageId):[];
+  const failedRows=flags.includes("enlargement_failed")?(enlargementsOf.get(o.sourceImageId)??[]):[];
   const canRetry=!stopped&&failedRows.some(e=>e.route!=="none");
   const own=flag==="enlargement_failed"?(failedRows.find(e=>e.route==="none")??failedRows.find(e=>e.errorKind==="identity_unstable")):undefined;
   const leadWhy=own?.error??main.why,leadWhat=flag==="enlargement_failed"&&!canRetry?ENLARGEMENT_FAILED_WHAT_NO_RETRY:main.whatToDo;
   const photo:AttentionPhoto={n:o.n,channel:o.channel,outputId:o.id,outputIds:siblings.map(r=>r.output.id),originalUrl:await sign(row.source.rawUri),outputUrl:o.stagingUri?await sign(o.stagingUri):null,why:[leadWhy,tried,...others.map(d=>d.why)].filter(Boolean).join(" "),whatToDo:leadWhat,liveObjectExists:liveChannels.length>0,liveChannels,failed:siblings.some(r=>r.output.status==="failed"),flags,canRetry};
-  const product=products.get(o.productId)??{productId:o.productId,identifier:row.identifier,totalShots:new Set(sources.filter(s=>s.productId===o.productId).map(s=>s.n)).size,problemLine:"",photos:[]};
+  const product=products.get(o.productId)??{productId:o.productId,identifier:row.identifier,totalShots:new Set((sourcesOf.get(o.productId)??[]).map(s=>s.n)).size,problemLine:"",photos:[]};
   product.photos.push(photo);products.set(o.productId,product);
  }
  // The worst photo first, then by photo number, so the card's line opens with the main problem.
