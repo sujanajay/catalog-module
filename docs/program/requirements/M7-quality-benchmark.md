@@ -239,13 +239,17 @@ them.
 3. Operator surface for the kill switch (M7-S2 left it as core functions only; R1 exit item 3). Resolved 2026-11-05:
    the Cloud Run job `catalog-route-switch` (`infra/catalog-route-switch.sh`, logic in
    `apps/worker/src/route-switch.ts`). `set <route id> off|serving "<reason>"` changes one route and writes a
-   `vendor_route_changes` row with the reason and the operator's gcloud account; `drill <capability> <minutes>
-   "<reason>" [batch id]` turns route 1 off and restores it when the batch finishes or the minutes run out (1 to 360).
-   The drill's expiry is stored on the route (`vendor_routes.restore_state`, `restore_at`, migration 0026): the
-   router reads an expired drill as restored and writes the restore (`drill-expiry` in the change log), so a stopped
-   job never leaves route 1 off past its expiry. A drill is refused while another runs on the capability or when no
-   other serving route would be left; a manual `set` during a drill ends it. `show [capability]` prints the table.
-   Every command prints the routes before and after. An admin page stays with M12.
+   `vendor_route_changes` row with the reason and the operator's gcloud account; turning off the last serving route
+   of a capability needs `--force`. `drill <capability> <minutes> "<reason>" [batch id] [--route=<id>]` turns off
+   the route the batch asks first (its pinned policy judge for `judge.render`, the classifier model for
+   `vision.read`), prints it and the route serving instead, and restores it when the batch finishes or the minutes
+   run out (1 to 360). The drill is recorded on the route (`vendor_routes.drill_id`, `restore_state`, `restore_at`,
+   migration 0026): the router reads an expired drill as restored and writes the restore (`drill-expiry` in the
+   change log), so a stopped job never leaves the route off past its expiry. Only that drill or its expiry ends it:
+   a late job never ends a newer drill, a rank, cap or position change keeps it, a manual state change ends it, and
+   an expired drill nobody restored is restored before the next drill starts. A drill is refused while another runs
+   on the capability or when no other serving route would be left. `show [capability]` prints the table. Every
+   command prints the routes before and after. An admin page stays with M12.
 
 ### M7-F3 Audit sampling (P0)
 

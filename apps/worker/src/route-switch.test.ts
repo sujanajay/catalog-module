@@ -4,7 +4,8 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { asc, eq } from "drizzle-orm";
 import { createTestDb } from "@catalog/core/db/testing";
 import type { Db } from "@catalog/core/db/client";
-import { catalogBatches, EMPTY_BATCH_COUNTS, vendorRouteChanges, vendorRoutes } from "@catalog/core/db/schema";
+import { catalogBatches, DEFAULT_BATCH_OPTIONS, EMPTY_BATCH_COUNTS, vendorRouteChanges, vendorRoutes } from "@catalog/core/db/schema";
+import { DEFAULT_POLICIES } from "@catalog/core/catalog/qa/policy";
 import { ensureSeedRoutes, loadRouteRows, RouteChangeError, resetRouting } from "@catalog/core/vendor/route-table";
 import { SEED_ROUTES } from "@catalog/core/vendor/routes";
 import { parseRouteSwitchEnv, runRouteSwitch, type RouteSwitchDeps } from "./route-switch";
@@ -27,8 +28,9 @@ function harness(onSleep: (sleeps: number) => Promise<void> | void = () => {}) {
     sleep: async ms => { now += ms; sleeps += 1; await onSleep(sleeps); } };
   return { deps, lines, sleeps: () => sleeps };
 }
-async function batch(status: "qa" | "done" = "qa") {
-  const [row] = await db.insert(catalogBatches).values({ brandSlug: "anta", brandName: "Anta", name: "drill", isTest: true, createdBy: "test@opptra.com", status, channels: ["noon"], counts: { ...EMPTY_BATCH_COUNTS } }).returning();
+async function batch(status: "qa" | "done" = "qa", qaModel?: string) {
+  const options = { ...DEFAULT_BATCH_OPTIONS, ...(qaModel ? { policy: { ...DEFAULT_POLICIES.footwear, qaModel, source: "bakeoff" as const } } : {}) };
+  const [row] = await db.insert(catalogBatches).values({ brandSlug: "anta", brandName: "Anta", name: "drill", isTest: true, createdBy: "test@opptra.com", status, channels: ["noon"], options, counts: { ...EMPTY_BATCH_COUNTS } }).returning();
   return row!.id;
 }
 
@@ -58,7 +60,7 @@ describe("catalog-route-switch", () => {
     expect(offDuringDrill).toBe(true);
     expect(sleeps()).toBe(3);
     expect(await judge1()).toMatchObject({ state: "serving", restoreAt: null });
-    expect(await lastChange()).toMatchObject({ fromState: "off", toState: "serving", changedBy: ADMIN, reason: `kill-switch drill ended: batch ${batchId} is done` });
+    expect(await lastChange()).toMatchObject({ fromState: "off", toState: "serving", changedBy: ADMIN, reason: expect.stringMatching(new RegExp(`^kill-switch drill [0-9a-f-]{36} ended: batch ${batchId} is done$`)) });
     expect(lines.some(l => l.startsWith(`Drill ended (batch ${batchId} is done)`))).toBe(true);
   });
 
@@ -69,7 +71,7 @@ describe("catalog-route-switch", () => {
     expect(sleeps()).toBeGreaterThanOrEqual(4);
     expect(sleeps()).toBeLessThanOrEqual(5);
     expect(await judge1()).toMatchObject({ state: "serving", restoreAt: null });
-    expect((await lastChange()).reason).toBe("kill-switch drill ended: drill time is up");
+    expect((await lastChange()).reason).toMatch(/^kill-switch drill [0-9a-f-]{36} ended: drill time is up$/);
   });
 
   it("drill: a stop signal restores route 1 at once", async () => {
@@ -77,7 +79,7 @@ describe("catalog-route-switch", () => {
     const { deps } = harness(n => { if (n === 1) stop.abort(); });
     await runRouteSwitch({ command: "drill", capability: "judge.render", minutes: 60, reason: "stopped drill", actor: ADMIN }, { ...deps, signal: stop.signal });
     expect(await judge1()).toMatchObject({ state: "serving", restoreAt: null });
-    expect((await lastChange()).reason).toBe("kill-switch drill ended: the drill job was stopped");
+    expect((await lastChange()).reason).toMatch(/^kill-switch drill [0-9a-f-]{36} ended: the drill job was stopped$/);
   });
 
   it("drill: refuses an unknown or finished batch without touching the routes", async () => {
@@ -87,7 +89,44 @@ describe("catalog-route-switch", () => {
     expect(await judge1()).toMatchObject({ state: "serving", restoreAt: null });
   });
 
+  it("drill: turns off the batch's own policy judge, not table rank 1, and says what serves instead (review P2-1)", async () => {
+    const haiku = SEED_ROUTES.find(r => r.capability === "judge.render" && r.rank === 2)!;
+    const batchId = await batch("qa", haiku.model);
+    let offDuring: string[] = [];
+    const { deps, lines } = harness(async n => {
+      if (n === 1) offDuring = (await loadRouteRows(db, "judge.render")).filter(r => r.state === "off").map(r => r.id);
+      if (n === 1) await db.update(catalogBatches).set({ status: "done" }).where(eq(catalogBatches.id, batchId));
+    });
+    await runRouteSwitch({ command: "drill", capability: "judge.render", minutes: 30, batchId, reason: "batch judge drill", actor: ADMIN }, deps);
+    expect(offDuring).toEqual([haiku.id]);
+    expect(lines).toContain(`Drill target: ${haiku.id}, the route asked first for batch ${batchId}'s pinned policy judge.`);
+    expect(lines).toContain(`Serving instead: ${JUDGE_1}, then ${SEED_ROUTES.find(r => r.capability === "judge.render" && r.rank === 3)!.id}.`);
+    expect((await loadRouteRows(db, "judge.render")).every(r => r.state === "serving" && !r.drillId)).toBe(true);
+  });
+
+  it("drill: a route named in DRILL_ROUTE is drilled, with a note when the batch asks another route first", async () => {
+    const third = SEED_ROUTES.find(r => r.capability === "judge.render" && r.rank === 3)!.id;
+    const stop = new AbortController();
+    const { deps, lines } = harness(() => stop.abort());
+    await runRouteSwitch({ command: "drill", capability: "judge.render", minutes: 30, routeId: third, reason: "named", actor: ADMIN }, { ...deps, signal: stop.signal });
+    expect(lines.some(l => l.startsWith(`Drill target: ${third} (named in DRILL_ROUTE). Asked first for the built-in first model: ${JUDGE_1} (a different route).`))).toBe(true);
+    expect((await db.select().from(vendorRouteChanges).where(eq(vendorRouteChanges.routeId, third))).map(c => c.toState)).toEqual(["serving", "off", "serving"]);
+  });
+
+  it("set: refuses to turn off the last serving route of a capability unless forced", async () => {
+    const { deps, lines } = harness();
+    const judges = SEED_ROUTES.filter(r => r.capability === "judge.render");
+    for (const r of judges.slice(1)) await runRouteSwitch({ command: "set", routeId: r.id, state: "off", reason: "outage", actor: ADMIN }, deps);
+    await expect(runRouteSwitch({ command: "set", routeId: JUDGE_1, state: "off", reason: "outage", actor: ADMIN }, deps)).rejects.toThrow(/last serving judge.render route/);
+    expect(await judge1()).toMatchObject({ state: "serving" });
+    await runRouteSwitch({ command: "set", routeId: JUDGE_1, state: "off", reason: "outage", actor: ADMIN, force: true }, deps);
+    expect(await judge1()).toMatchObject({ state: "off" });
+    expect(lines.some(l => l.startsWith("WARNING: judge.render has no other serving route"))).toBe(true);
+  });
+
   it("parses the job's environment and refuses a change without who and why", () => {
+    expect(parseRouteSwitchEnv({ ROUTE_COMMAND: "set", ROUTE_ID: JUDGE_1, ROUTE_STATE: "off", ROUTE_REASON: "r", ROUTE_ACTOR: ADMIN, ROUTE_FORCE: "1" })).toMatchObject({ force: true });
+    expect(parseRouteSwitchEnv({ ROUTE_COMMAND: "drill", DRILL_CAPABILITY: "judge.render", DRILL_MINUTES: "5", DRILL_ROUTE: JUDGE_1, ROUTE_REASON: "r", ROUTE_ACTOR: ADMIN })).toMatchObject({ routeId: JUDGE_1 });
     expect(parseRouteSwitchEnv({})).toEqual({ command: "show" });
     expect(parseRouteSwitchEnv({ ROUTE_COMMAND: "set", ROUTE_ID: JUDGE_1, ROUTE_STATE: "off", ROUTE_REASON: " outage ", ROUTE_ACTOR: ADMIN }))
       .toEqual({ command: "set", routeId: JUDGE_1, state: "off", reason: "outage", actor: ADMIN });

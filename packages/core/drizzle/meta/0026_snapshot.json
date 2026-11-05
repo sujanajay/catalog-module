@@ -1,5 +1,5 @@
 {
-  "id": "4240d572-4a82-42f8-86ec-bffc2809bb6b",
+  "id": "dae727b0-856f-4cd8-97f5-9eec40d82002",
   "prevId": "1904fc6a-ebe9-49e5-b954-c1c0dad25314",
   "version": "7",
   "dialect": "postgresql",
@@ -8260,6 +8260,12 @@
           "primaryKey": false,
           "notNull": false
         },
+        "drill_id": {
+          "name": "drill_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
         "created_at": {
           "name": "created_at",
           "type": "timestamp with time zone",
@@ -8346,9 +8352,9 @@
           "name": "vendor_routes_restore_state_check",
           "value": "\"vendor_routes\".\"restore_state\" IN ('registered', 'benchmarked', 'shadow', 'canary', 'serving', 'retired', 'off')"
         },
-        "vendor_routes_restore_pair_check": {
-          "name": "vendor_routes_restore_pair_check",
-          "value": "(\"vendor_routes\".\"restore_state\" IS NULL) = (\"vendor_routes\".\"restore_at\" IS NULL)"
+        "vendor_routes_drill_fields_check": {
+          "name": "vendor_routes_drill_fields_check",
+          "value": "(\"vendor_routes\".\"restore_state\" IS NULL) = (\"vendor_routes\".\"restore_at\" IS NULL) AND (\"vendor_routes\".\"restore_at\" IS NULL) = (\"vendor_routes\".\"drill_id\" IS NULL)"
         },
         "vendor_routes_serving_needs_terms_check": {
           "name": "vendor_routes_serving_needs_terms_check",
