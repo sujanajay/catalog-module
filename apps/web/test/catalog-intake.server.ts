@@ -74,6 +74,9 @@ async function main() {
   await seedDb.insert(skuMap).values(["VM10001BLACK", "VM10002WHITE", "VM10003NAVY"].map((optionKey, i) => ({ opptraSku: `VMSKU${i + 1}`, brand: "Vero Moda", brandSlug: "vero_moda", line: "softline", optionKey, optionIdStyleColor: optionKey, ean: null, source: "manual" })) as never);
   const [vmOption] = await seedDb.insert(catalogOptions).values({ brandSlug: "vero_moda", optionKey: "VM10001BLACK", keySource: "master" } as never).returning();
   await seedDb.insert(catalogChannelListings).values([{ optionId: vmOption!.id, channel: "noon", market: "ae", status: "live" }, { optionId: vmOption!.id, channel: "namshi", market: "ae", status: "live" }] as never);
+  // UX1 RTL screenshots: one product, so the product page has something to show. Its key is in no intake fixture.
+  const { catalogProducts: seedProducts } = await import("@catalog/core/db/schema");
+  await seedDb.insert(seedProducts).values({ brandSlug: "test_brand", productKey: "RTL-SAMPLE-1", pathKey: "RTL-SAMPLE-1", identifier: "RTL-SAMPLE-1" } as never);
 
   // 2. Swap the external pg Pool and the Storage client the app's server bundle loads (both are
   //    serverExternalPackages, so Next requires the same module instances as this process).
@@ -169,6 +172,13 @@ async function main() {
         return send(res, 200, { ...queue, pending: queue.pending.length });
       }
       if (url.pathname === "/harness/log") return send(res, 200, { worker: workerLog });
+      // UX1 RTL screenshots: the admin pages (Ops, Settings) need the admin. The app reads DEV_USER_EMAIL per request.
+      // { role: "admin" } signs in the admin; anything else the operator again.
+      if (url.pathname === "/harness/user" && req.method === "POST") {
+        const { role } = JSON.parse((await bodyOf(req)).toString() || "{}") as { role?: string };
+        process.env.DEV_USER_EMAIL = role === "admin" ? ADMIN : OPERATOR;
+        return send(res, 200, { email: process.env.DEV_USER_EMAIL });
+      }
       // Between scenarios: the harness never runs chunk tasks, so a started batch would hold its product locks for the
       // life of the server. Settling finishes every started batch as the worker would (done, locks released), so each
       // scenario starts from free products whether the server is fresh or reused.
