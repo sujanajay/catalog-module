@@ -4,9 +4,11 @@
 set -euo pipefail
 export CLOUDSDK_CORE_PROJECT=image-links-agent
 cd "$(dirname "$0")/.."
+# shellcheck source=lib/gcloud-retry.sh
+source infra/lib/gcloud-retry.sh
 TAG=$(git rev-parse --short HEAD)
 [ -z "$(git status --porcelain)" ] || { echo "Commit source changes before preparing or running commit-tagged verification jobs." >&2; exit 1; }
-job=$(gcloud run jobs describe catalog-test-smoke --region=asia-south1 --format=json)
+job=$(gcloud_retry gcloud run jobs describe catalog-test-smoke --region=asia-south1 --format=json)
 node --input-type=commonjs - "$TAG" "$job" <<'NODE'
 const assert=require('node:assert/strict');
 const [tag,json]=process.argv.slice(2),job=JSON.parse(json),spec=job.spec.template.spec,task=spec.template.spec;
@@ -17,4 +19,6 @@ assert.equal(task.serviceAccountName,'catalog-worker@image-links-agent.iam.gserv
 assert.deepEqual(task.containers[0].command,['/bin/sh']);
 assert.deepEqual(task.containers[0].args,['-ec','mkdir -p /tmp/catalog-data; tar -xf /catalog-input/anta.tar -C /tmp/catalog-data; tar -xf /catalog-input/french-connection.tar -C /tmp/catalog-data; exec node dist/catalog-smoke.js'],'The job must run the actual smoke entry.');
 NODE
-gcloud run jobs execute catalog-test-smoke --region=asia-south1 --quiet --wait
+# Judged from the execution state on GCP; a laptop DNS miss while waiting no longer fails the worker gate (2026-10-31:
+# the smoke passed on GCP while the laptop counted it as failed).
+gcloud_job_run catalog-test-smoke asia-south1

@@ -33,6 +33,8 @@ case "$*" in
   *"services describe catalog-worker "*) cat "$FAKE_DIR/worker.json" ;;
   *"services describe catalog-matting-gpu "*) cat "$FAKE_DIR/gpu.json" ;;
   *"services describe catalog-matting "*) cat "$FAKE_DIR/cpu.json" ;;
+  *"jobs execute"*) echo "$4-x1y2z" ;;
+  *"executions describe"*) echo '{"status":{"conditions":[{"type":"Completed","status":"True"}]}}' ;;
   *"jobs deploy"*) for a in "$@"; do case "$a" in --flags-file=*) cp "\${a#--flags-file=}" "$FAKE_DIR/flags.json" ;; esac; done ;;
 esac
 `, {mode: 0o755});
@@ -57,7 +59,8 @@ try {
   assert.equal(probe.flags['--task-timeout'], '3600s');
   assert.equal(probe.flags['--image'], `${ar}matting:abc1234`);
   assert.match(probe.calls, /run jobs deploy catalog-check-matting/);
-  assert.match(probe.calls, /run jobs execute catalog-check-matting --region=asia-south1 --wait/);
+  assert.match(probe.calls, /run jobs execute catalog-check-matting --region=asia-south1 --async --format=value\(metadata\.name\)/);
+  assert.match(probe.calls, /run jobs executions describe catalog-check-matting-x1y2z --region=asia-south1 --format=json/);
   console.log('PASS --probe runs the probe as catalog-check-matting');
 
   // Run by the deploy gate: the job ends when the gate gives up, so it never runs on after a gate timeout.
@@ -188,7 +191,7 @@ try {
     const own = run(['--probe-upscale', upscaleUrl]);
     assert.equal(own.status, 0, own.stderr);
     assert.match(own.calls, /run jobs deploy catalog-check-upscale-gpu --quiet/);
-    assert.match(own.calls, /run jobs execute catalog-check-upscale-gpu --region=asia-south1 --wait/);
+    assert.match(own.calls, /run jobs execute catalog-check-upscale-gpu --region=asia-south1 --async /);
     assert.ok(!/catalog-check-matting/.test(own.calls));
     assert.deepEqual(own.flags['--labels'], {app: 'catalog', component: 'catalog-check-upscale-gpu', env: 'test'});
     process.env.PROBE_JOB = 'other-job';

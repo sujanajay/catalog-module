@@ -165,6 +165,22 @@ service's own error body, a timeout after connecting, and the measured /matte an
 there can be an instance that crashed under the measured load, which the gate must catch). `probe_get` used to pass
 `--retry 5 --retry-all-errors` to curl, which silently retried 500, 502 and 504 too; that is gone.
 
+### Laptop network blips while a gate waits (2026-11-05)
+
+Two gates failed because the laptop lost DNS while `gcloud run jobs execute --wait` was waiting, although the job
+on GCP ran on (the 10-31 worker smoke passed there), and one deploy stopped on a single DNS miss in the image check
+(.runs/2026-11-05-deploy-failure-root-cause.md, stops #11, #12, #15). infra/lib/gcloud-retry.sh now gives:
+- `gcloud_retry` for reads and whole-definition deploys (pre-flight, the image check, the gate's describes, the
+  probe scripts' describes and job deploys). It retries only on network errors (DNS, refused, reset, timeout, gcloud
+  crashing on a ConnectionError), 5 attempts with doubling waits, and logs each retry. NOT_FOUND, PERMISSION_DENIED and
+  an expired login go back to the caller at once.
+- `gcloud_job_run` for the probe and smoke jobs. It starts the execution with `--async`, and retries the start only
+  when the request never left the laptop, so it can never start a second execution. Then it reads
+  `executions describe` every 20 s and judges only the execution's Completed condition. Network errors while
+  polling are waited out for up to 15 minutes. Past that, or on any other read error, the result counts as unknown
+  and the gate keeps the old traffic. Afterwards it prints the execution's log. On the gate's timeout (TERM) it
+  cancels the execution; `timeout --kill-after` is now 60 s, which leaves room for that call.
+
 ## Rollback
 One service, seconds, no build and no smoke: `bash infra/deploy.sh --rollback <service> [revision]`
 moves all traffic to the given revision, by default the one the gate tagged `previous` when it last
