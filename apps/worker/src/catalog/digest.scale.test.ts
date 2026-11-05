@@ -80,6 +80,8 @@ describe(`the digest of a ${PRODUCTS.toLocaleString("en")}-product batch`, () =>
     expect(d.completeEveryChannel).toBe(PRODUCTS - 160 - 50 - 10 - 45);
     expect(d.linksReadyAt).toBe(batch.finishedAt!.toISOString());
     expect(d.firstLinksAt).not.toBeNull();
+    // What the page needs besides the numbers (review P2-3): the csv paths, so neither the page nor a download reads the report.
+    expect(d.page).toMatchObject({ exceptionsCsv: expect.stringMatching(/exceptions-v[0-9]+[.]csv$/), notesCsv: expect.stringMatching(/delivered-with-a-note-v[0-9]+[.]csv$/), filled: false, keptPhotos: 0, styliSkipped: 0 });
 
     // The workbook: Links first and unchanged, then the two digest sheets with one row per digest item.
     const sheets = await workbookCsvSheets((await w().deps.storage.downloadBuffer(batch.sheetXlsxUri!)).buf);
@@ -118,6 +120,10 @@ describe(`the digest of a ${PRODUCTS.toLocaleString("en")}-product batch`, () =>
     expect(await finalize(w())).toBe("done");
     const after = await batchRow();
     expect(after.finishedAt!.toISOString()).toBe(later.toISOString());
-    expect(after.digest).toEqual(before);
+    // The same digest; only the csv paths move to the new attempt's files.
+    const { page: pageAfter, ...restAfter } = after.digest!, { page: pageBefore, ...restBefore } = before;
+    expect(restAfter).toEqual(restBefore);
+    expect({ ...pageAfter, exceptionsCsv: null, notesCsv: null }).toEqual({ ...pageBefore, exceptionsCsv: null, notesCsv: null });
+    expect(pageAfter!.exceptionsCsv).toMatch(/exceptions-v[0-9]+[.]csv$/);
   }, 600_000);
 });

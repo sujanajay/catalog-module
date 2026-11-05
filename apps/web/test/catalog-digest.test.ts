@@ -43,7 +43,7 @@ const newBatch = async (values: Partial<typeof catalogBatches.$inferInsert> = {}
 describe("the Digest tab (UX 5.3)", () => {
   it("shows the headline, four tiles, at most ten reason lines and the downloads, and no product", () => {
     const html = renderToStaticMarkup(createElement(DigestTab, { id: "b1", digest, sheets: { xlsx: true, exceptions: true, notes: true } }));
-    expect(html).toContain("1,990 of 2,000 products have links. 10 need photos.");
+    expect(html).toContain("1,990 of 2,000 products have links. 10 do not; the Exceptions sheet says why.");
     for (const label of ["Products with links", "Complete for every channel", "Improving by itself", "Need you"]) expect(html).toContain(label);
     expect(html.match(/<li>/g)).toHaveLength(10);
     expect(html).toContain("More reasons are in the Exceptions sheet.");
@@ -64,7 +64,7 @@ describe("the Digest tab (UX 5.3)", () => {
 
 describe("GET /api/catalog/batches/:id/digest (M1-F4-R1)", () => {
   it("returns the stored digest to a viewer, null before the first finalize, and 404 for no batch", async () => {
-    const done = await newBatch({ digest }), draft = await newBatch({ status: "draft" });
+    const done = await newBatch({ digest: { ...digest, page: { exceptionsCsv: "gs://private/e.csv", notesCsv: null, filled: false, notRefreshedChannels: [], keptPhotos: 0, styliSkipped: 0 } } }), draft = await newBatch({ status: "draft" });
     const res = await digestGet(new Request(`http://localhost/api/catalog/batches/${done.id}/digest`), ctx(done.id));
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ id: done.id, name: "Campus Oct lot", status: "done", digest });
@@ -74,15 +74,16 @@ describe("GET /api/catalog/batches/:id/digest (M1-F4-R1)", () => {
 });
 
 describe("digest downloads and the quick batch read", () => {
-  it("signs the Exceptions and Delivered with a note csv files, and says when a batch finished before them", async () => {
-    const batch = await newBatch({ digest, reportUri: "gs://private/report-v1.json", sheetXlsxUri: "gs://private/links-v1.xlsx" });
-    const report = { exports: { exceptionsCsv: "gs://private/exceptions-v1.csv", notesCsv: "gs://private/delivered-with-a-note-v1.csv" } };
+  it("signs the Exceptions and Delivered with a note csv files from the digest, and says when a batch finished before them", async () => {
+    const page = { exceptionsCsv: "gs://private/exceptions-v1.csv", notesCsv: "gs://private/delivered-with-a-note-v1.csv", filled: false, notRefreshedChannels: [], keptPhotos: 0, styliSkipped: 0 };
+    const batch = await newBatch({ digest: { ...digest, page }, reportUri: "gs://private/report-v1.json", sheetXlsxUri: "gs://private/links-v1.xlsx" });
     const signedUrl = vi.fn(async (uri: string) => `https://signed/${uri.split("/").pop()}`);
-    const downloadBuffer = vi.fn(async () => ({ buf: Buffer.from(JSON.stringify(report)), mime: "application/json" }));
+    const downloadBuffer = vi.fn(async () => ({ buf: Buffer.from("{}"), mime: "application/json" }));
     expect(await batchExportUrl(batch.id, "exceptions", db, { signedUrl, downloadBuffer })).toBe("https://signed/exceptions-v1.csv");
     expect(await batchExportUrl(batch.id, "notes", db, { signedUrl, downloadBuffer })).toBe("https://signed/delivered-with-a-note-v1.csv");
-    const old = vi.fn(async () => ({ buf: Buffer.from("{}"), mime: "application/json" }));
-    await expect(batchExportUrl(batch.id, "exceptions", db, { signedUrl, downloadBuffer: old })).rejects.toMatchObject({ status: 404, message: "This batch finished before these sheets were made. Download the links sheet instead." });
+    expect(downloadBuffer).not.toHaveBeenCalled();
+    await db.update(catalogBatches).set({ digest }).where(eq(catalogBatches.id, batch.id));
+    await expect(batchExportUrl(batch.id, "exceptions", db, { signedUrl, downloadBuffer })).rejects.toMatchObject({ status: 404, message: "This batch finished before these sheets were made. Download the links sheet instead." });
   });
 
   it("skips reading the links sheet for a batch with a digest unless the sheet tab asks for it", async () => {

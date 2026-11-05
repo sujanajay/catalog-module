@@ -75,8 +75,9 @@ export default async function BatchPage({ params, searchParams }: { params: Prom
   const [attention, evalPage, cost, stageCost, chunks, comparePage, links] = await Promise.all([
     evalMode || (digest && !batch.counts.attentionProducts) ? Promise.resolve([]) : batchAttention(id),
     evalMode ? evalOutputs(id, { page: Number(query.page ?? 0) || 0, ...evalFilters }) : Promise.resolve(null),
-    batchCostLine(batch),
-    // The overview's cost split and the Details tab's parts: not read while the digest stands in for them.
+    // The overview's cost line and split (they read every output) and the Details tab's parts: not read while the
+    // digest stands in for them, so the page reads the same few rows at any batch size (M1-S5 review P2-3).
+    digest ? Promise.resolve(null) : batchCostLine(batch),
     digest ? Promise.resolve(null) : batchStageCost(id),
     detailsLoaded ? batchChunkSummary(id) : Promise.resolve(null),
     tab === "compare" && !notStarted ? batchCompare(id, { page: Number(query.cpage ?? 0) || 0, ...compareFilters }) : Promise.resolve(null),
@@ -155,7 +156,7 @@ export default async function BatchPage({ params, searchParams }: { params: Prom
             </div>
             <div className="card">
               <h2>Cost so far</h2>
-              <CostLine line={{ usdPerIdentifier: cost.usdPerIdentifier, inrPerIdentifier: cost.inrPerIdentifier, usd: cost.usd, inr: cost.inr }} />
+              {cost && <CostLine line={{ usdPerIdentifier: cost.usdPerIdentifier, inrPerIdentifier: cost.inrPerIdentifier, usd: cost.usd, inr: cost.inr }} />}
               {fullCost && <p className="cost-split">{fullCost}</p>}
             </div>
           </div>

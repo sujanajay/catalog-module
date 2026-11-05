@@ -1,15 +1,15 @@
 // M1-S5 (M1-F4): the digest builder, its words, the digest email and the two new sheets.
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { eq, sql } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import ExcelJS from "exceljs";
 import { createTestDb } from "../db/testing";
 import type { Db } from "../db/client";
-import { catalogBatches } from "../db/schema";
+import { catalogBatches, catalogOutputs, catalogProducts } from "../db/schema";
 import { parseCsv } from "../csv";
 import { seedLargeBatch } from "./pipeline/large-batch-fixture";
 import { buildReport } from "./pipeline/report";
-import { HOLDOUT_KEPT_NOTE } from "./pipeline/publish";
-import { buildDigest, groupReasons, type BatchDigest } from "./digest";
+import { APPEND_TAKEN_NOTE, HOLDOUT_KEPT_NOTE, overLimitNote } from "./pipeline/publish";
+import { buildDigest, digestFrom, groupReasons, readImprovements, type BatchDigest, type DigestOutput } from "./digest";
 import { digestEmail, digestHeadline, digestReasonLines, digestTiles, digestTimeLine, duration } from "./digest-copy";
 import { compareXlsxCsv, EXCEPTIONS_SHEET, NO_EXCEPTIONS, NOTES_SHEET, writeExceptionsCsv, writeLinksCsv, writeLinksXlsx } from "./sheet";
 
@@ -36,21 +36,28 @@ beforeAll(async () => {
 }, 120_000);
 afterAll(async () => { await close(); });
 
+/** As finalize builds it: from buildReport's rows (the outputs read once), checked against the reader that reads its own. */
 async function parts(files: unknown[] = []) {
   const built = await buildReport(db, batchId, { recheck: { ok: 0, total: 0, failures: [] }, exports: { xlsx: "x", csv: "c", report: "r", filledProductList: null, exportsMatch: true } });
-  return { built, ...(await buildDigest(db, { batch: built.batch, sheet: built.sheet, files, cost })) };
+  const input = { batch: built.batch, sheet: built.sheet, files, cost };
+  const fromRows = digestFrom({ ...input, pairs: built.rows.pairs.map(r => ({ productId: r.pair.productId, identifier: r.product.identifier, change: r.pair.change, notes: r.pair.notes })),
+    outputs: built.rows.outputs, improvements: await readImprovements(db, batchId) });
+  expect(fromRows).toEqual(await buildDigest(db, input));
+  return { built, ...fromRows };
 }
 
 describe("buildDigest (M1-F4-R1 to R4)", () => {
   it("counts each kind once: links, notes, left-out photos, controls, held products and unreadable files", async () => {
     const { digest, exceptions, notes } = await parts([{ name: "IMG_77.heic", reason: "This file type is not supported." }]);
-    expect(digest).toMatchObject({ products: 6, productsWithLinks: 5, completeEveryChannel: 2, provisionalLinks: 1, improving: 1, stayedAsSent: 0, needsYou: 1, controlsSkipped: 1, photosLeftOut: 2, exceptions: 3 });
+    expect(digest).toMatchObject({ products: 6, productsWithLinks: 5, completeEveryChannel: 2, provisionalLinks: 1, improving: 1, stayedAsSent: 0, needsYou: 1, controlsSkipped: 1, photosLeftOut: 2, exceptions: 4 });
     expect(digest.provisionalReasons).toEqual([{ text: "not enlarged yet", count: 1 }]);
     expect(digest.leftOutReasons).toEqual([{ text: "a different product in the photo", count: 1 }, { text: "this file type is not supported", count: 1 }]);
-    expect(exceptions.map(e => [e.identifier, e.channel, e.image])).toEqual([["IMG_77.heic", null, null], [id(3), "noon", 2], [id(3), "namshi", 2]]);
+    expect(exceptions.map(e => [e.identifier, e.channel, e.image])).toEqual([["IMG_77.heic", null, null], [id(3), "noon", 2], [id(3), "namshi", 2], [id(5), null, null]]);
     expect(exceptions[1]!.fix).toBe("Send a photo of this product in a new batch.");
+    // A product held for a person is in the Exceptions sheet with what to do (review P2-6).
+    expect(exceptions[3]!.fix).toBe("Decide on the Needs you tab.");
     expect(notes).toEqual([expect.objectContaining({ identifier: id(2), channel: "noon", image: 2, rule: "not_enlarged:*", improves: true })]);
-    expect(digest.exceptionReasons.map(r => r.text)).toEqual(["File not used: this file type is not supported", "Namshi image 2 missing: a different product in the photo", "Noon image 2 missing: a different product in the photo"]);
+    expect(digest.exceptionReasons.map(r => r.text)).toEqual(["File not used: this file type is not supported", "Namshi image 2 missing: a different product in the photo", "Noon image 2 missing: a different product in the photo", "Waiting for you: held for you to decide before the photos are sent"]);
     expect(digest.linksPerChannel).toEqual([{ channel: "noon", links: 7 }, { channel: "namshi", links: 8 }]);
   });
 
@@ -66,6 +73,42 @@ describe("buildDigest (M1-F4-R1 to R4)", () => {
       expect(notes[0]).toMatchObject({ improves: false, better: "We could not enlarge it. Send a larger photo in a new batch." });
     } finally { await db.execute(sql`UPDATE catalog_improvements SET tries = 1 WHERE batch_id = ${batchId}::uuid`); }
   });
+
+  it("lists photos a follow-up did not add, even where another batch's photo holds the place (M1-S6 D30, review P2-1)", async () => {
+    const where = (n: number, channel: "noon" | "namshi") => and(eq(catalogOutputs.batchId, batchId), eq(catalogOutputs.n, n), eq(catalogOutputs.channel, channel),
+      sql`${catalogOutputs.productId} = (SELECT id FROM ${catalogProducts} WHERE identifier = ${id(1)})`);
+    const [taken] = await db.select().from(catalogOutputs).where(where(2, "noon"));
+    const [earlier] = await db.insert(catalogBatches).values({ name: "earlier", brandSlug: "vero-moda", brandName: "Vero Moda", createdBy: "op@opptra.com", status: "done" }).returning();
+    await db.update(catalogOutputs).set({ status: "skipped", isLive: false, flags: ["not_added"], reason: APPEND_TAKEN_NOTE }).where(where(2, "noon"));
+    // The earlier batch's live photo keeps the place, so the sheet still shows a link there.
+    const [other] = await db.insert(catalogOutputs).values({ ...taken!, id: undefined as never, batchId: earlier!.id }).returning();
+    await db.update(catalogOutputs).set({ status: "skipped", isLive: false, flags: ["not_added"], reason: overLimitNote("namshi", 1) }).where(where(2, "namshi"));
+    try {
+      const { built, exceptions, digest } = await parts();
+      expect(built.sheet.rows.find(r => r.identifier === id(1))!.links.noon?.[1]).toBeTruthy();
+      expect(exceptions.filter(e => e.identifier === id(1))).toEqual([
+        expect.objectContaining({ channel: "noon", image: 2, reason: APPEND_TAKEN_NOTE, fix: "Nothing to do. The earlier photo keeps its place, and the technical team looks at it.", group: "Noon image 2 not added: another batch's photo already has this place" }),
+        expect.objectContaining({ channel: "namshi", image: 2, fix: "Nothing to do. The photos already live are kept.", group: "Namshi image 2 not added: the channel takes no more images of this product" }),
+      ]);
+      expect(digest.completeEveryChannel).toBe(1);
+    } finally {
+      await db.delete(catalogOutputs).where(eq(catalogOutputs.id, other!.id));
+      await db.update(catalogOutputs).set({ status: taken!.status, isLive: taken!.isLive, flags: taken!.flags, reason: taken!.reason }).where(where(2, "noon"));
+      await db.update(catalogOutputs).set({ status: taken!.status, isLive: taken!.isLive, flags: taken!.flags, reason: taken!.reason }).where(where(2, "namshi"));
+      await db.delete(catalogBatches).where(eq(catalogBatches.id, earlier!.id));
+    }
+  });
+
+  it("builds from 210k outputs without overflowing the stack (review P1: no spread of a list that grows with the batch)", () => {
+    const products = 70_000, at = Date.UTC(2026, 10, 5);
+    const pairs = Array.from({ length: products }, (_, i) => ({ productId: `p${i}`, identifier: id(i), change: "new", notes: null }));
+    const outputs: DigestOutput[] = pairs.flatMap((pair, i) => [1, 2, 3].map(n => ({ id: `o${i}-${n}`, batchId: "b", productId: pair.productId, sourceImageId: `s${i}-${n}`, channel: "noon" as const, n,
+      status: "verified", isLive: true, flags: [], reason: null, decision: null, compliance: null, publicUrl: `https://x/${i}/${n}`, publishedAt: new Date(at + ((i * 3 + n) % 1000) * 1000) })));
+    const sheet = { channels: ["noon" as const], rows: pairs.map((p, i) => ({ brand: "b", identifier: p.identifier, optionIdStyleColor: "", opptraSkuIds: [], links: { noon: [1, 2, 3].map(n => `https://x/${i}/${n}`) }, status: "ok" as const, notes: "", change: "new" as const, changedAt: null })) };
+    expect(outputs.length).toBeGreaterThan(200_000);
+    const { digest: d } = digestFrom({ batch: { id: "b", channels: ["noon"], status: "done", startedAt: null, updatedAt: new Date(at) }, sheet, files: [], cost, pairs, outputs, improvements: [] });
+    expect(d).toMatchObject({ products, productsWithLinks: products, completeEveryChannel: products, exceptions: 0, firstLinksAt: new Date(at).toISOString() });
+  }, 60_000);
 
   it("groups reasons most common first, then by text", () => {
     expect(groupReasons(["b", "a", "b", "c", "a", "b"])).toEqual([{ text: "b", count: 3 }, { text: "a", count: 2 }, { text: "c", count: 1 }]);
@@ -106,8 +149,8 @@ const digest = (over: Partial<BatchDigest> = {}): BatchDigest => ({
 describe("the digest words (UX 5.3, M1 section 5 screen 3)", () => {
   it("says in one sentence whether every product has links", () => {
     expect(digestHeadline(digest())).toBe("All 312 products have links.");
-    expect(digestHeadline(digest({ products: 2000, productsWithLinks: 1992 }))).toBe("1,992 of 2,000 products have links. 8 need photos.");
-    expect(digestHeadline(digest({ products: 2000, productsWithLinks: 1990, needsYou: 3 }))).toBe("1,990 of 2,000 products have links. 7 need photos. 3 need you.");
+    expect(digestHeadline(digest({ products: 2000, productsWithLinks: 1992 }))).toBe("1,992 of 2,000 products have links. 8 do not; the Exceptions sheet says why.");
+    expect(digestHeadline(digest({ products: 2000, productsWithLinks: 1990, needsYou: 3 }))).toBe("1,990 of 2,000 products have links. 7 do not; the Exceptions sheet says why. 3 need you.");
     expect(digestHeadline(digest({ products: 1, productsWithLinks: 1 }))).toBe("The product has links.");
   });
 

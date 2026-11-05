@@ -12,7 +12,7 @@ export function digestHeadline(d: BatchDigest): string {
   if (d.products === 0) return "This batch had no products.";
   if (d.productsWithLinks === d.products) return d.products === 1 ? "The product has links." : `All ${n(d.products)} products have links.`;
   const parts = [`${n(d.productsWithLinks)} of ${n(d.products)} products have links.`];
-  if (without) parts.push(`${n(without)} ${plural(without, "needs photos", "need photos")}.`);
+  if (without) parts.push(`${n(without)} ${plural(without, "does not", "do not")}; the Exceptions sheet says why.`);
   if (d.needsYou) parts.push(`${n(d.needsYou)} ${plural(d.needsYou, "needs you", "need you")}.`);
   return parts.join(" ");
 }
