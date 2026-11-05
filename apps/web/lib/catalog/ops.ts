@@ -14,6 +14,7 @@ import { enlargementFailed, enlargementQueued } from "@catalog/core/catalog/pipe
 import { ENLARGEMENT_WAITING_LONG_MS } from "@catalog/core/catalog/invariants/checks";
 import type { BatchStatus } from "@catalog/core/catalog/types";
 import { reliabilitySummary } from "@catalog/core/catalog/reliability";
+import { costCard, utcDay } from "@catalog/core/catalog/cost-reconcile";
 import { batchCostAttribution, batchCostByEngine, batchCostByStage, brandCostTotals, dayCostTotals, BRAND_REPORT_DAYS } from "@catalog/core/catalog/cost-report";
 import { db, type Db } from "../db";
 import { log } from "@catalog/core/log";
@@ -215,6 +216,20 @@ export function reliability(conn: Db = db(), now: Date = new Date()) {
 /** A caller's own window [from, to) (the admin JSON route): read fresh, never kept, so it cannot push the page's reads out. */
 export function reliabilityWindow(from: Date, to: Date, conn: Db = db()) {
   return report("reliability window", () => reportRead(conn, (tx) => reliabilitySummary(tx, to, from)));
+}
+
+/** M6-S2: the days of the cost card. */
+export const COST_CARD_DAYS = 30;
+/**
+ * M6-S2 (M6-F1-R4 to R6): the cost card for the last COST_CARD_DAYS UTC days and today, kept for COST_TTL_MS per web
+ * instance (the reconciliation writes once a day). Small tables: one row per day and component, per batch and component.
+ */
+export function costReconciled(conn: Db = db(), now: Date = new Date()) {
+  return report("cost card", () => rememberCost("cost-card", +now, COST_TTL_MS, () => reportRead(conn, (tx) => costCard(tx, utcDay(now, COST_CARD_DAYS), utcDay(now, -1)))));
+}
+/** The admin JSON route's own UTC days [from, to): read fresh, never kept. */
+export function costReconciledWindow(from: string, to: string, conn: Db = db()) {
+  return report("cost card window", () => reportRead(conn, (tx) => costCard(tx, from, to)));
 }
 
 // Spec 17 3.1.5: the health lines. The invariants run (sweep, every 10 minutes) keeps silentOutputs,

@@ -6,6 +6,9 @@ import type { CostStage, IncidentKind } from "@catalog/core/db/schema";
 import type { BatchStatus } from "@catalog/core/catalog/types";
 import type { StageCost } from "@catalog/core/catalog/cost-report";
 import { plural } from "./copy";
+import { OVERFLOW_ADAPTERS } from "@catalog/core/vendor/routes";
+
+const OVERFLOW_ADAPTER_IDS: readonly string[] = OVERFLOW_ADAPTERS;
 
 export const OPS_TITLE = "Ops";
 export const OPS_HREF = "/catalog/ops";
@@ -195,7 +198,7 @@ export const INCIDENT_KIND_WORDS: Record<IncidentKind, string> = {
   http_5xx: "Server problems",
   deploy_refused: "Release refused",
   contamination: "Listing changed outside the tool",
-  alert: "Alert",
+  alert: "Daily check",
 };
 /** "96% (24 of 25 batches)", or "No batches finished" when none counted. */
 export function successRateText(r: { successes: number; counted: number; rate: number | null }): string {
@@ -229,4 +232,41 @@ export function outcomeText(o: { success: boolean; cause: string | null; isTest:
   const why = o.success ? "" : OUTCOME_CAUSE_WORDS[o.cause ?? ""] ?? "";
   const out = o.isTest ? "test batch, not counted" : o.excluded ? (o.started ? "cancelled right after Start, not counted" : "never started, not counted") : "";
   return [why, out].filter(Boolean).join("; ");
+}
+
+/**
+ * M6-S2 (M6-F1-R4 to R6): the cost card. Service and job names become plain words; a vendor is never named (the
+ * quality checks are bought outside Google Cloud, an overflow cut-out is "cut-out overflow"), and no model id appears.
+ */
+export const COST_CARD_TITLE = "Cost matched to Google Cloud";
+export const COST_CARD_HELP = "Every morning the system reads how long each catalog service and job was billed for, prices it at Google's list prices and compares it with the cost the batches recorded. The difference is idle time: machines starting, waiting, and running on after the last photo. The shared database counts at the catalog's share. Days are UTC. These are estimates until the cost is read from the Google bill.";
+export const COST_NOT_RUN = "The daily cost check has not run yet.";
+const PART_WORDS: Record<string, string> = {
+  "catalog-worker": "worker",
+  "catalog-web": "website",
+  "catalog-matting": "cut-out (CPU)",
+  "catalog-matting-gpu": "cut-out (GPU)",
+  "catalog-upscale": "enlargement (CPU)",
+  "catalog-upscale-gpu": "enlargement (GPU)",
+  "ila-pg": "shared database (catalog share)",
+  openrouter: "quality checks (outside Google Cloud)",
+};
+/** "worker", "worker (preview)", "background job: load"; an overflow vendor as "cut-out overflow". */
+export function costPartWords(component: string, kind: string): string {
+  if (OVERFLOW_ADAPTER_IDS.includes(component)) return "cut-out overflow";
+  const preview = component.endsWith("-preview");
+  const base = preview ? component.slice(0, -"-preview".length) : component;
+  const words = PART_WORDS[base] ?? (kind === "job" ? `background job: ${base.replace(/^catalog-/, "").replaceAll("-", " ")}` : base.replace(/^catalog-/, "").replaceAll("-", " "));
+  return preview ? `${words} (preview)` : words;
+}
+export const COST_ENV_WORDS: Record<string, string> = { preview: "preview stack", test: "tests and load runs", unlabelled: "services without labels" };
+export const COST_ALERT_WORDS: Record<string, string> = {
+  ledger_over: "the cost record counts more than was billed",
+  unlabelled: "a service or job is missing its labels",
+  unpriced: "a service has no price yet",
+  success_under_target: "batch success under target",
+};
+/** The day's check: the record plus idle adds up to the billed time on every live part (no over-count). */
+export function costCheckText(d: { closes: boolean; provisional: boolean }): string {
+  return `${d.closes ? "Adds up" : "Record above the bill"}${d.provisional ? ", may still change" : ""}`;
 }

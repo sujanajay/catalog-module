@@ -1,0 +1,40 @@
+{
+  "displayName": "Catalog: a daily check needs a look",
+  "documentation": {
+    "content": "The daily cost check (Cloud Run job catalog-cost-reconcile, 06:00 UTC) wrote an alert in the last 24 hours. Open the Ops page (/catalog/ops): the Reliability card lists it under incidents (kind \"daily check\") with its cause, and the Cost card shows the day. The alerts: the cost ledger holds more for a service than Cloud Run billed (the ledger over-counts; check the per-call prices in catalog/cost.ts against the service shape), a catalog service or job without the app, component and env labels (redeploy it through infra/deploy.sh or its infra script, which add them), a service shape with no list price in the rate card (packages/core/src/catalog/cost-reconcile.ts CPU_MEMORY_RATES and GPU_RATES), or the 7-day batch success rate under 99%. Each alert is written once per day and component; the alert closes by itself after 24 hours.",
+    "mimeType": "text/markdown",
+    "subject": "Catalog: a daily check needs a look"
+  },
+  "userLabels": {
+    "app": "catalog"
+  },
+  "conditions": [
+    {
+      "displayName": "daily check alert, more than 0 in 15 minutes",
+      "conditionThreshold": {
+        "filter": "metric.type=\"logging.googleapis.com/user/catalog/daily_check_alert\" AND resource.type=\"cloud_run_revision\"",
+        "aggregations": [
+          {
+            "alignmentPeriod": "900s",
+            "perSeriesAligner": "ALIGN_SUM",
+            "crossSeriesReducer": "REDUCE_SUM"
+          }
+        ],
+        "comparison": "COMPARISON_GT",
+        "thresholdValue": 0,
+        "duration": "0s",
+        "trigger": {
+          "count": 1
+        }
+      }
+    }
+  ],
+  "combiner": "OR",
+  "enabled": true,
+  "notificationChannels": [
+    "__CATALOG_EMAIL_CHANNEL__"
+  ],
+  "alertStrategy": {
+    "autoClose": "3600s"
+  }
+}
