@@ -60,6 +60,7 @@ import { recheckEvidence, reportThenCleanup, type RecheckEvidence } from "./cata
 import { installWarningLog } from "./runtime";
 import { dataRoot } from "./catalog-real-fixtures";
 import { recordJobRun } from "@catalog/core/job-cost";
+import { maxOf, minOf, pushAll } from "@catalog/core/arrays";
 
 /** "kept" (--keep), "pending" (written before the cleanup ran), or what the cleanup did. */
 type CleanupOutcome = "kept" | "pending" | { leftBehind: { batchId: string; status: string | null }[]; cleaned?: string[]; objects?: number; kept?: string[]; ms?: number; error?: string };
@@ -84,7 +85,7 @@ async function walk(dir: string, rel = ""): Promise<string[]> {
   const found: string[] = [];
   for (const entry of await readdir(path.join(dir, rel), { withFileTypes: true })) {
     const next = path.join(rel, entry.name);
-    if (entry.isDirectory()) found.push(...await walk(dir, next));
+    if (entry.isDirectory()) pushAll(found, await walk(dir, next));
     else if (/\.(jpe?g|png|webp)$/i.test(entry.name)) found.push(next);
   }
   return found;
@@ -187,7 +188,7 @@ async function metrics(db: Db, batchId: string, samples: ChunkSample[], collectM
   const chunkRows = await db.select({ id: catalogChunks.id, startedAt: catalogChunks.startedAt, finishedAt: catalogChunks.finishedAt, status: catalogChunks.status }).from(catalogChunks).where(eq(catalogChunks.batchId, batchId));
   const spend = await db.select({ engine: spendDays.engine, costUsd: sql<number>`sum(${spendDays.costUsd})`, calls: sql<number>`sum(${spendDays.calls})` }).from(spendDays).where(eq(spendDays.batchId, batchId)).groupBy(spendDays.engine);
   const published = outputs.filter(o => o.publishedAt).map(o => ({ at: o.publishedAt!.getTime(), productId: o.productId }));
-  const publishStart = published.length ? Math.min(...published.map(p => p.at)) : null, publishEnd = published.length ? Math.max(...published.map(p => p.at)) : null;
+  const publishStart = minOf(published.map(p => p.at)), publishEnd = maxOf(published.map(p => p.at));
   const publishMs = publishStart !== null && publishEnd !== null ? publishEnd - publishStart : 0;
   const end = b!.finishedAt ?? new Date();
   const total = b!.startedAt ? againstTarget(b!.startedAt, end) : null;
@@ -213,7 +214,7 @@ async function metrics(db: Db, batchId: string, samples: ChunkSample[], collectM
     productsPublishedPerMinute: perMinute(new Set(published.map(p => p.productId)).size, publishMs),
     spend: spend.map(r => ({ engine: r.engine, usd: Number(r.costUsd), calls: Number(r.calls) })),
     usdPerPaidProduct: paidProducts ? spendUsd / paidProducts : null,
-    chunkMs: { count: chunkMs.length, p50: percentile(chunkMs, 50), p95: percentile(chunkMs, 95), max: chunkMs.length ? Math.max(...chunkMs) : null },
+    chunkMs: { count: chunkMs.length, p50: percentile(chunkMs, 50), p95: percentile(chunkMs, 95), max: maxOf(chunkMs) },
     outputsByStatus: classified.byStatus, errorsByReason: classified.errorsByReason, failed: classified.failed, heldSiblings: classified.heldSiblings, silent: classified.silent, changes, invariants, invariantsError,
   };
 }

@@ -1,10 +1,11 @@
 // Reads the `notes` column of a links workbook per identifier (the sheet writer's layout: two header
 // rows, "identifier" and "notes" in the first). Used by the completeness check for skipped cells.
 import ExcelJS from "exceljs";
+import { firstSheetOnly } from "../../first-sheet";
 
 export async function sheetNotes(xlsx: Buffer): Promise<Map<string, string>> {
   const wb = new ExcelJS.Workbook();
-  await wb.xlsx.load(Buffer.from(xlsx) as unknown as Parameters<typeof wb.xlsx.load>[0]);
+  await wb.xlsx.load(await firstSheetOnly(Buffer.from(xlsx)) as unknown as Parameters<typeof wb.xlsx.load>[0]);
   const ws = wb.worksheets[0], notes = new Map<string, string>();
   if (!ws) return notes;
   let idCol = 0, notesCol = 0;

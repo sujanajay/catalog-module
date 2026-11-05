@@ -23,6 +23,7 @@ import { readCsvLinks, readSheetLinks } from "@catalog/core/catalog/recheck/link
 import { RECHECK_CONCURRENCY } from "@catalog/core/catalog/recheck/index";
 import { compareXlsxCsv } from "@catalog/core/catalog/sheet";
 import { recheckBatch } from "./catalog/recheck-batch";
+import { pushAll } from "@catalog/core/arrays";
 
 const USAGE = "Usage: catalog:recheck --sheet <path.xlsx|.csv> [--csv <path.csv>] | --batch <id> | --brand <slug> [--out <report.csv>] [--concurrency <n>]";
 
@@ -34,7 +35,7 @@ async function sheetMode(file: string, csvFile: string | undefined, concurrency:
   const problems = [...sheet.problems, ...sheetProblems(sheet.identifiers)];
   if (csvFile) {
     if (isCsv) throw new Error("--csv compares an xlsx sheet with its csv; pass the xlsx as --sheet.");
-    problems.push(...(await compareXlsxCsv(bytes, await readFile(csvFile, "utf8"))).differences.map(detail => ({ problem: "xlsx_csv_mismatch", detail })));
+    pushAll(problems, (await compareXlsxCsv(bytes, await readFile(csvFile, "utf8"))).differences.map(detail => ({ problem: "xlsx_csv_mismatch", detail })));
   }
   const results = await recheckLinks(sheet.links.map(l => ({ url: l.url, identifier: l.identifier, channel: l.channel, n: l.n, hyperlinkOk: l.hyperlinkOk })), { concurrency });
   return { results, problems };

@@ -23,6 +23,7 @@ import { COST_DATABASE_SHARE_KEY, COST_DATABASE_USD_PER_DAY_KEY } from "../setti
 import { currentValue } from "../settings/store";
 import { OVERFLOW_ADAPTERS } from "../vendor/routes";
 import { openIncident, SUCCESS_TARGET, successRate } from "./reliability";
+import { pushAll } from "../arrays";
 
 const DAY_MS = 86_400_000;
 const GIB = 1024 ** 3;
@@ -172,7 +173,7 @@ export function googleCostReaders(get: GoogleGet, project: string): CostReaders 
         for (const g of ["resource.type", "resource.label.service_name", "resource.label.job_name", "resource.label.location"]) q.append("aggregation.groupByFields", g);
         if (pageToken) q.set("pageToken", pageToken);
         const body = (await get(`https://monitoring.googleapis.com/v3/projects/${project}/timeSeries?${q}`)) as { timeSeries?: MonitoringSeries[]; nextPageToken?: string };
-        out.push(...samplesFrom(body.timeSeries ?? []));
+        pushAll(out, samplesFrom(body.timeSeries ?? []));
         pageToken = body.nextPageToken ?? "";
       } while (pageToken);
       return out;

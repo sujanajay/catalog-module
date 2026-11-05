@@ -91,7 +91,8 @@ export async function notRefreshedChannels(db:Db,batchId:string):Promise<NotRefr
   const byChannel=new Map(latest.map(r=>[r.channel,r]));
   return others.flatMap(c=>{ const r=byChannel.get(c); return r ? [{channel:c,lastBatchId:r.lastBatchId,lastBatchName:r.lastBatchName}]:[]; });
 }
-export interface ExportPaths { xlsx:string; csv:string; report:string; filledProductList:{xlsx:string;csv:string[]}|null; exportsMatch:boolean }
+/** The batch exports; `exceptionsCsv` and `notesCsv` (M1-S5) are the digest sheets as csv, absent on older batches. */
+export interface ExportPaths { xlsx:string; csv:string; report:string; filledProductList:{xlsx:string;csv:string[]}|null; exportsMatch:boolean; exceptionsCsv?:string; notesCsv?:string }
 export interface IngestReport { unsupportedFiles:unknown[];duplicates:unknown[];linkFailures?:unknown[];sourceOrigins?:Record<string,{origin:string;sourceUrl?:string;relativePath?:string}> }
 /** The reject ledger written by ingest includes files that have no product/source DB row. */
 export async function readIngestReport(store:Pick<typeof storage,"headObject"|"downloadBuffer"|"getBucketName">,prefix:string):Promise<IngestReport|undefined> {
@@ -156,7 +157,9 @@ export function splitRecheck(recheck: RecheckResult, carried: readonly string[])
   const failed = new Set(recheck.failures.map(f => f.url)), carriedTotal = carried.length, carriedOk = carried.filter(url => !failed.has(url)).length;
   return { ok: recheck.ok - carriedOk, total: recheck.total - carriedTotal, carriedOk, carriedTotal };
 }
-export async function buildReport(db:Db,batchId:string,extra:{recheck:RecheckResult;exports:ExportPaths;ingest?:IngestReport}):Promise<{sheet:SheetSpec;report:Record<string,unknown>;batch:CatalogBatch;carriedLinks:string[]}> {
+/** The rows buildReport read, for the digest (M1-S5 review P2-4: the outputs are read once per build, not twice). */
+export interface ReportRows { pairs: { product: typeof catalogProducts.$inferSelect; pair: typeof catalogBatchProducts.$inferSelect }[]; outputs: Output[] }
+export async function buildReport(db:Db,batchId:string,extra:{recheck:RecheckResult;exports:ExportPaths;ingest?:IngestReport}):Promise<{sheet:SheetSpec;report:Record<string,unknown>;batch:CatalogBatch;carriedLinks:string[];rows:ReportRows}> {
   const [batch] = await db.select().from(catalogBatches).where(eq(catalogBatches.id,batchId));
   if(!batch) throw new Error("Batch not found.");
   // Every read below is in a fixed order, so the builds of one finalize (and of its resumed parts, whose snapshot hash
@@ -204,5 +207,5 @@ export async function buildReport(db:Db,batchId:string,extra:{recheck:RecheckRes
       return changes.length ? changes.map(c=>({identifier,kind:e.kind,channels:[c.channel],shots:[c.n],oldGeneration:c.oldGeneration,newGeneration:c.newGeneration,sha256:c.sha256})):[{identifier,kind:e.kind,channels:e.details.channels,shots:e.details.shots,oldGeneration:null,newGeneration:null,sha256:null}];
     }),notRefreshedChannels:await notRefreshedChannels(db,batchId),removedLinks:events.flatMap(e=>e.kind==="shots_removed" && Array.isArray(e.details.removedLinks) ? e.details.removedLinks.map((r:unknown)=>({identifier:identifierOf.get(e.productId),...r as Record<string,unknown>})):[]),recheck:extra.recheck,exports:extra.exports,
     unsupportedFiles:extra.ingest?.unsupportedFiles ?? uploadRejects.filter(r=>!isLink(r)),linkFailures:extra.ingest?.linkFailures ?? uploadRejects.filter(isLink),duplicates:extra.ingest?.duplicates ?? pairs.filter(p=>p.pair.flags.includes("duplicate_shot")).map(p=>({identifier:p.product.identifier,reason:p.pair.notes})),unresolvedIdentifiers:pairs.filter(p=>!p.product.opptraSkuIds.length).map(p=>p.product.identifier),chunks:chunks.map(c=>({index:c.index,stage:c.stage,status:c.status,attempt:c.attempt,error:c.error}))};
-  return {sheet:{channels:CHANNEL_ORDER.filter(c=>batch.channels.includes(c)),rows},report,batch:{...batch,counts,cost},carriedLinks:delivery.carried};
+  return {sheet:{channels:CHANNEL_ORDER.filter(c=>batch.channels.includes(c)),rows},report,batch:{...batch,counts,cost},carriedLinks:delivery.carried,rows:{pairs,outputs}};
 }

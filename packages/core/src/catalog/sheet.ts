@@ -1,11 +1,14 @@
 // Links sheet writers (spec 02, "Links sheet"). One grid is built once and written both as xlsx
 // (two header rows, a merged channel label over "Image 1..N") and as csv (flat "<Channel> Image n"
 // header), so the two files always carry the same cells; compareXlsxCsv checks that.
+import { Writable } from "node:stream";
 import ExcelJS from "exceljs";
 import { buildCsv, parseCsv } from "../csv";
+import { firstSheetOnly } from "../first-sheet";
 import { channel } from "./channels";
 import { normalizeKey } from "./naming";
 import { CHANNEL_IDS, type ChangeKind, type ChannelId, type SheetStatus } from "./types";
+import type { ExceptionRow, NoteRow } from "./digest";
 
 export interface SheetRow {
   brand: string;
@@ -106,8 +109,7 @@ function buildGrid(spec: SheetSpec): Grid {
   return { columns, channelSpans, rows };
 }
 
-function columnWidth(values: string[], link: boolean): number {
-  const longest = values.reduce((most, v) => Math.max(most, v.length), 0);
+function columnWidth(longest: number, link: boolean): number {
   return Math.min(MAX_WIDTH, link ? Math.max(MIN_LINK_WIDTH, longest) : longest);
 }
 
@@ -115,12 +117,96 @@ function toBuffer(data: ArrayBuffer | Uint8Array | Buffer): Buffer {
   return Buffer.isBuffer(data) ? data : Buffer.from(data as ArrayBuffer);
 }
 
-/** The links workbook: one sheet, two bold header rows, frozen below them, hyperlinked link cells. */
-export async function writeLinksXlsx(spec: SheetSpec): Promise<Buffer> {
-  const grid = buildGrid(spec);
-  const wb = new ExcelJS.Workbook();
-  const ws = wb.addWorksheet("Links");
+/** M1-F4-R4: the names of the two digest sheets after Links. */
+export const EXCEPTIONS_SHEET = "Exceptions";
+export const NOTES_SHEET = "Delivered with a note";
+export const NO_EXCEPTIONS = "No exceptions.";
+export const NO_NOTES = "Every image was sent without a note.";
 
+/** A table whose rows are built one at a time, so a 225k-row sheet is never held as one array of cells. */
+export interface Table { header: string[]; rows: Iterable<string[]> }
+
+function lazyTable<T>(header: string[], items: readonly T[], cells: (item: T) => string[], empty: string): Table {
+  const none = [empty, ...header.slice(1).map(() => "")];
+  return { header, rows: { *[Symbol.iterator]() { if (!items.length) yield none; for (const item of items) yield cells(item); } } };
+}
+
+/**
+ * The Exceptions table (M1-F4-R4): one row per product or photo with no link. A batch with none has the header and one
+ * line "No exceptions." (M1-F4 edge case).
+ */
+export const exceptionsTable = (rows: readonly ExceptionRow[]): Table => lazyTable(["identifier", "channel", "image", "reason", "what_would_fix_it"], rows,
+  r => [r.identifier, r.channel ? channel(r.channel).label : "", r.image ? String(r.image) : "", r.reason, r.fix], NO_EXCEPTIONS);
+
+/** The "Delivered with a note" table (M1-F4-R4 "Provisional"): one row per image sent now with the best image we have. */
+export const notesTable = (rows: readonly NoteRow[]): Table => lazyTable(["identifier", "channel", "image", "link", "reason", "rule", "improves_by_itself", "what_would_make_it_better"], rows,
+  r => [r.identifier, channel(r.channel).label, String(r.image), r.link, r.reason, r.rule, r.improves ? "yes" : "no", r.better], NO_NOTES);
+
+export const writeExceptionsCsv = (rows: readonly ExceptionRow[]): string => { const t = exceptionsTable(rows); return buildCsv(t.header, [...t.rows]); };
+export const writeNotesCsv = (rows: readonly NoteRow[]): string => { const t = notesTable(rows); return buildCsv(t.header, [...t.rows]); };
+
+type StreamWorkbook = InstanceType<typeof ExcelJS.stream.xlsx.WorkbookWriter>;
+
+/**
+ * Committed rows wait in the sheet's stream until the zip reads them, which happens on the event loop; giving it a turn
+ * every YIELD_ROWS rows keeps that backlog (and so the writer's memory) at a few thousand rows whatever the sheet's size.
+ */
+const YIELD_ROWS = 2_000;
+const drain = () => new Promise<void>(resolve => setImmediate(resolve));
+
+/**
+ * One digest sheet of the streamed workbook. The column widths come from a first pass over the rows (the streaming writer
+ * writes the columns before the first row), then each row is committed as soon as it is written, so it leaves memory
+ * before the next one is built.
+ */
+async function addTableSheet(wb: StreamWorkbook, name: string, table: Table, linkColumn: number | null): Promise<void> {
+  const longest = table.header.map(h => h.length);
+  for (const cells of table.rows) cells.forEach((v, c) => { if (v.length > (longest[c] ?? 0)) longest[c] = v.length; });
+  const ws = wb.addWorksheet(name, { views: [{ state: "frozen", ySplit: 1 }] });
+  longest.forEach((w, c) => { ws.getColumn(c + 1).width = columnWidth(w, c === linkColumn); });
+  const head = ws.getRow(1);
+  table.header.forEach((h, c) => { const cell = head.getCell(c + 1); cell.value = h; cell.font = { bold: true }; });
+  head.commit();
+  let r = 2;
+  for (const cells of table.rows) {
+    const row = ws.getRow(r++);
+    cells.forEach((value, c) => {
+      const cell = row.getCell(c + 1);
+      if (c === linkColumn && value) { cell.value = { text: value, hyperlink: value }; cell.font = LINK_FONT; }
+      else { cell.value = value; cell.numFmt = "@"; }
+    });
+    row.commit();
+    if (r % YIELD_ROWS === 0) await drain();
+  }
+  ws.commit();
+}
+
+/** A writable that keeps the zipped bytes (a few MB); the cell model, which is what grew with the rows, is never built. */
+function bufferSink(): { stream: Writable; bytes: () => Buffer } {
+  const chunks: Buffer[] = [];
+  const stream = new Writable({ write(chunk: Buffer, _encoding, next) { chunks.push(chunk); next(); } });
+  return { stream, bytes: () => Buffer.concat(chunks) };
+}
+
+/**
+ * The links workbook: the Links sheet first (two bold header rows, frozen below them, hyperlinked link cells), unchanged
+ * so channel teams' habits do not change; with `digest` (M1-S5) the Exceptions and "Delivered with a note" sheets after it.
+ * Every reader of the links (re-check, Add SKU ids, the batch page) reads the first sheet only.
+ *
+ * Written with ExcelJS's streaming WorkbookWriter, each row committed as it is written (review P1: the in-memory workbook
+ * of a 225k-note batch peaked near the worker's 4 GiB), so the writer's memory does not grow with the row count.
+ */
+export async function writeLinksXlsx(spec: SheetSpec, digest?: { exceptions: readonly ExceptionRow[]; notes: readonly NoteRow[] }): Promise<Buffer> {
+  const grid = buildGrid(spec);
+  const sink = bufferSink();
+  const wb = new ExcelJS.stream.xlsx.WorkbookWriter({ stream: sink.stream, useStyles: true, useSharedStrings: false });
+  const ws = wb.addWorksheet("Links", { views: [{ state: "frozen", ySplit: 2 }] });
+
+  grid.columns.forEach((col, j) => {
+    let longest = (col.link ? col.sub : col.top).length;
+    for (const r of grid.rows) if (r.cells[j]!.length > longest) longest = r.cells[j]!.length;
+    ws.getColumn(j + 1).width = columnWidth(longest, col.link);
+  });
   grid.columns.forEach((col, i) => {
     const c = i + 1;
     if (col.link) {
@@ -136,13 +222,15 @@ export async function writeLinksXlsx(spec: SheetSpec): Promise<Buffer> {
   }
   for (let r = 1; r <= 2; r++) {
     for (let c = 1; c <= grid.columns.length; c++) ws.getCell(r, c).font = { bold: true };
+    ws.getRow(r).commit();
   }
 
-  grid.rows.forEach(({ cells }, i) => {
-    const r = i + 3;
+  for (let i = 0; i < grid.rows.length; i++) {
+    const { cells } = grid.rows[i]!;
+    const row = ws.getRow(i + 3);
     cells.forEach((value, j) => {
       const col = grid.columns[j]!;
-      const cell = ws.getCell(r, j + 1);
+      const cell = row.getCell(j + 1);
       if (col.link) {
         if (value) {
           cell.value = { text: value, hyperlink: value };
@@ -153,14 +241,16 @@ export async function writeLinksXlsx(spec: SheetSpec): Promise<Buffer> {
         if (col.text) cell.numFmt = "@";
       }
     });
-  });
-
-  grid.columns.forEach((col, j) => {
-    const values = [col.link ? col.sub : col.top, ...grid.rows.map((r) => r.cells[j]!)];
-    ws.getColumn(j + 1).width = columnWidth(values, col.link);
-  });
-  ws.views = [{ state: "frozen", ySplit: 2 }];
-  return toBuffer(await wb.xlsx.writeBuffer());
+    row.commit();
+    if ((i + 1) % YIELD_ROWS === 0) await drain();
+  }
+  ws.commit();
+  if (digest) {
+    await addTableSheet(wb, EXCEPTIONS_SHEET, exceptionsTable(digest.exceptions), null);
+    await addTableSheet(wb, NOTES_SHEET, notesTable(digest.notes), 3);
+  }
+  await wb.commit();
+  return sink.bytes();
 }
 
 /** The links csv: flat header `<Channel> Image n`, same cells as the xlsx, CRLF and BOM. */
@@ -303,10 +393,10 @@ export async function fillProductListWorkbook(original: Buffer, spec: SheetSpec,
   return toBuffer(await wb.xlsx.writeBuffer());
 }
 
-/** Flatten the first sheet of a links workbook into one header row plus data rows. */
+/** Flatten the first sheet of a links workbook into one header row plus data rows (the digest sheets are not parsed). */
 async function flattenXlsx(xlsx: Buffer): Promise<string[][]> {
   const wb = new ExcelJS.Workbook();
-  await wb.xlsx.load(Buffer.from(xlsx) as unknown as Parameters<typeof wb.xlsx.load>[0]);
+  await wb.xlsx.load(await firstSheetOnly(Buffer.from(xlsx)) as unknown as Parameters<typeof wb.xlsx.load>[0]);
   const ws = wb.worksheets[0];
   if (!ws) return [];
   const width = ws.columnCount;

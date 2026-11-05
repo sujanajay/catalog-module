@@ -91,9 +91,11 @@ export async function reopenBatch(id: string): Promise<CatalogBatch> {
  * the same; a started batch is refused.
  */
 /** M1-F2-R6 "Wait": the draft does not start by itself; its one Start button starts it. 409 once it is no draft. */
-export async function holdStart(id: string): Promise<{ id: string; status: "draft" }> {
-  if (!(await holdAutoStart(db(), id))) throw new HttpError(409, notDraftText(await queryBatch(id)));
-  return { id, status: "draft" };
+/** `stopped`: this Wait stopped a countdown (the route counts a touch only then, M1 D35). */
+export async function holdStart(id: string): Promise<{ id: string; status: "draft"; stopped: boolean }> {
+  const { held, stopped } = await holdAutoStart(db(), id);
+  if (!held) throw new HttpError(409, notDraftText(await queryBatch(id)));
+  return { id, status: "draft", stopped };
 }
 export async function cancelBatch(id: string): Promise<{ id: string; status: "cancelled" }> {
   const [cancelled] = await db().update(catalogBatches).set({ status: "cancelled", updatedAt: new Date() })

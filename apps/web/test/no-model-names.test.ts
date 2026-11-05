@@ -33,6 +33,9 @@ const CORE_COPY_FILES = [
   "packages/core/src/catalog/ingest/url-list.ts",
   // M12-S1: setting labels and help sentences shown on the Settings page.
   "packages/core/src/settings/registry.ts",
+  // M1-S5 and UX4: the digest reasons, its sheets and the digest email.
+  "packages/core/src/catalog/digest.ts",
+  "packages/core/src/catalog/digest-copy.ts",
 ];
 
 // Every candidate id the policy defines, plus provider and family names (spec 07 section 8).

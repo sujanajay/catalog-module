@@ -8,6 +8,7 @@ import { safeFetch, type SafeFetchOptions } from "../../safe-url";
 import { normalizeKey, parseShotName } from "../naming";
 import { extOf, isLinkToken, splitCell, urlFileName, type SheetSourceItem } from "./links-sheet";
 import type { Adapter, IngestDeps, SourceItem } from "./types";
+import { maxOf, minOf } from "../../arrays";
 
 /**
  * One pasted row with at least one link. `row` is its 1-based line number in the paste; `columns[i]`
@@ -71,7 +72,7 @@ export function parsePastedLinks(text: string): PastedTable {
   const shape = rows.some((r) => r.identifier !== null) ? "id_and_links" : counts.some((n) => n >= 2) ? "links_grid" : "one_per_line";
   return {
     rows, links: counts.reduce((a, b) => a + b, 0),
-    linksPerRow: { min: counts.length ? Math.min(...counts) : 0, max: counts.length ? Math.max(...counts) : 0 },
+    linksPerRow: { min: minOf(counts) ?? 0, max: maxOf(counts) ?? 0 },
     shape, ignoredCells, collisions,
   };
 }

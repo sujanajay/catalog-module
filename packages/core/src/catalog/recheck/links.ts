@@ -3,6 +3,7 @@
 // "<Channel> Image n" header. Both give the same list of link cells.
 import ExcelJS from "exceljs";
 import { parseCsv } from "../../csv";
+import { firstSheetOnly } from "../../first-sheet";
 import { CHANNELS } from "../channels";
 import type { ChannelId } from "../types";
 
@@ -19,7 +20,7 @@ export function channelOfLabel(label: string): ChannelId | null {
 /** Every link cell of a links workbook, with the channel read through the merged header. */
 export async function readSheetLinks(xlsx: Buffer): Promise<SheetLinks> {
   const wb = new ExcelJS.Workbook();
-  await wb.xlsx.load(Buffer.from(xlsx) as unknown as Parameters<typeof wb.xlsx.load>[0]);
+  await wb.xlsx.load(await firstSheetOnly(Buffer.from(xlsx)) as unknown as Parameters<typeof wb.xlsx.load>[0]);
   const out: SheetLinks = { identifiers: [], links: [], problems: [] };
   const ws = wb.worksheets[0];
   if (!ws) { out.problems.push({ problem: "no_sheet", detail: "The workbook has no links sheet." }); return out; }

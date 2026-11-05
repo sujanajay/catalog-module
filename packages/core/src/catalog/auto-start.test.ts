@@ -49,7 +49,7 @@ describe("Wait (hold-start)", () => {
   it("turns auto-start off and clears the countdown; the armed task then does nothing", async () => {
     const b = await draft({ autoStart: true });
     const at = (await armAutoStart(db, vi.fn(async () => "t"), b.id, 10, NOW))!;
-    expect(await holdAutoStart(db, b.id)).toBe(true);
+    expect((await holdAutoStart(db, b.id)).held).toBe(true);
     const held = await read(b.id);
     expect(held.options.autoStart).toBe(false);
     expect(held.counts.autoStartAt).toBeNull();
@@ -59,9 +59,18 @@ describe("Wait (hold-start)", () => {
     expect(start).not.toHaveBeenCalled();
   });
 
+  it("says it stopped a countdown only once, and never for a draft that was not counting down (M1 D35)", async () => {
+    const b = await draft({ autoStart: true });
+    await armAutoStart(db, vi.fn(async () => "t"), b.id, 10, NOW);
+    expect(await holdAutoStart(db, b.id)).toEqual({ held: true, stopped: true });
+    expect(await holdAutoStart(db, b.id)).toEqual({ held: true, stopped: false });
+    const plain = await draft({ autoStart: false });
+    expect(await holdAutoStart(db, plain.id)).toEqual({ held: true, stopped: false });
+  });
+
   it("is refused for a batch that is not a draft", async () => {
     const b = await draft({ autoStart: true, status: "ingesting" });
-    expect(await holdAutoStart(db, b.id)).toBe(false);
+    expect((await holdAutoStart(db, b.id)).held).toBe(false);
   });
 });
 
@@ -134,7 +143,7 @@ describe("Wait against an auto-start in flight (P1, M1-F2-R6)", () => {
     // A draft with no photos: without the guard, Start would go on and mark it failed (no_photos) after Wait.
     const b = await draft({ autoStart: true });
     const at = (await armAutoStart(db, vi.fn(async () => "t"), b.id, 10, NOW))!;
-    const start = async (...args: Parameters<typeof startDraftBatch>) => { expect(await holdAutoStart(db, b.id)).toBe(true); return startDraftBatch(...args); };
+    const start = async (...args: Parameters<typeof startDraftBatch>) => { expect((await holdAutoStart(db, b.id)).held).toBe(true); return startDraftBatch(...args); };
     expect(await runAutoStart(db, deps(), { batchId: b.id, at }, start)).toMatch(/^noop: Auto-start was turned off with Wait/);
     const after = await read(b.id);
     expect(after).toMatchObject({ status: "draft", startedAt: null });
