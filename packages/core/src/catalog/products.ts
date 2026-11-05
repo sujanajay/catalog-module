@@ -15,6 +15,7 @@ import {
 import { normalizeKey, sanitizeSegment } from "./naming";
 import type { ResolveResult } from "./sku-mapping";
 import type { AliasKind, EventKind, ProductType } from "./types";
+import { pushAll } from "../arrays";
 
 export type { CatalogProduct };
 
@@ -243,7 +244,7 @@ export async function lockProducts(db: Db, batchId: string, productIds: string[]
       if (locked === ids.length) return;
       const busy = [];
       for (const slice of slices) {
-        busy.push(...await tx
+        pushAll(busy, await tx
           .select({
             productId: catalogProducts.id,
             identifier: catalogProducts.identifier,

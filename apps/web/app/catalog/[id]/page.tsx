@@ -5,7 +5,7 @@ import { channel } from "@catalog/core/catalog/channels";
 import { batchState } from "@/lib/catalog/batches";
 import { requireRole } from "@/lib/user";
 import { HttpError } from "@/lib/errors";
-import { batchDetails } from "@/lib/catalog/exports";
+import { batchDetails, showsDigest } from "@/lib/catalog/exports";
 import { batchAttention } from "@/lib/catalog/products";
 import { evalOutputs } from "@/lib/catalog/eval";
 import { batchCompare } from "@/lib/catalog/compare";
@@ -44,8 +44,9 @@ export default async function BatchPage({ params, searchParams }: { params: Prom
   const { id } = await params;
   let data;
   try {
-    // A batch with a digest shows it from its own row; the links sheet loads on its tab (M1-F4-R6).
-    data = await batchDetails(id, undefined, undefined, { sheet: (await searchParams).tab === "sheet" ? "always" : "unless-digest" });
+    // A batch with a digest shows it from its own row; the links sheet and the details load on their tabs (M1-F4-R6).
+    const asked = (await searchParams).tab;
+    data = await batchDetails(id, undefined, undefined, { sheet: asked === "sheet" ? "always" : "unless-digest", details: asked === "details" });
   } catch (err) {
     if (err instanceof HttpError && err.status === 404) notFound();
     throw err;
@@ -64,18 +65,20 @@ export default async function BatchPage({ params, searchParams }: { params: Prom
   const settingUp = canContinueSettingUp(batch);
   // M1-S5 (M1-F4-R5): a finished batch with a digest shows it in place of the overview and the product cards. A batch
   // with products held for a person (one started before auto-decide) keeps its cards under their own tab.
-  const digest = !evalMode && batch.status === "done" ? batch.digest : null;
+  const digest = showsDigest(batch) ? batch.digest : null;
   const sheetLoaded = !digest || tab === "sheet";
+  const detailsLoaded = !digest || tab === "details";
   // The comparison signs a page of images, so it loads only when its tab is asked for (?tab=compare).
   const [attention, evalPage, cost, stageCost, chunks, comparePage] = await Promise.all([
     evalMode || (digest && !batch.counts.attentionProducts) ? Promise.resolve([]) : batchAttention(id),
     evalMode ? evalOutputs(id, { page: Number(query.page ?? 0) || 0, ...evalFilters }) : Promise.resolve(null),
     batchCostLine(batch),
-    batchStageCost(id),
-    batchChunkSummary(id),
+    // The overview's cost split and the Details tab's parts: not read while the digest stands in for them.
+    digest ? Promise.resolve(null) : batchStageCost(id),
+    detailsLoaded ? batchChunkSummary(id) : Promise.resolve(null),
     tab === "compare" && !notStarted ? batchCompare(id, { page: Number(query.cpage ?? 0) || 0, ...compareFilters }) : Promise.resolve(null),
   ]);
-  const fullCost = fullCostText(stageCost, inrPerUsdFromEnv());
+  const fullCost = stageCost ? fullCostText(stageCost, inrPerUsdFromEnv()) : null;
   const channelLabels = batch.channels.map(c => channel(c).label);
   const missingSkus = data.sheet.rows.filter(r => !r.opptraSkuIds.length).length;
   const source = batchSource(data.uploads.map(u => u.kind));
@@ -130,8 +133,9 @@ export default async function BatchPage({ params, searchParams }: { params: Prom
         compareHref={comparePage || notStarted ? undefined : compareHref(compareFilters)}
         overviewLabel={digest ? "Digest" : undefined}
         sheetHref={sheetLoaded || notStarted ? undefined : "?tab=sheet"}
+        detailsHref={detailsLoaded ? undefined : "?tab=details"}
         overview={digest ? (
-          <DigestTab id={id} digest={digest} sheets={{ xlsx: !!batch.sheetXlsxUri, exceptions: !!batch.reportUri, notes: !!batch.reportUri }} onNeedsYou={attention.length ? "?tab=attention" : undefined} />
+          <DigestTab id={id} digest={digest} sheets={{ xlsx: !!batch.sheetXlsxUri, exceptions: !!digest.page?.exceptionsCsv, notes: !!digest.page?.notesCsv }} onNeedsYou={attention.length ? "?tab=attention" : undefined} />
         ) : (
           <div className="grid2">
             <div className="card">
@@ -163,12 +167,12 @@ export default async function BatchPage({ params, searchParams }: { params: Prom
             <p className="help">Opptra SKU ids are filled in automatically when they exist.</p>
           </>
         )}
-        details={
+        details={!detailsLoaded || !chunks ? <p className="muted">Loading the details.</p> : (
           <DetailsTab id={id} brand={batch.brandSlug} isTest={batch.isTest} counts={batch.counts}
             failures={data.failures} recheckFailures={data.recheckFailures}
             notRefreshedChannels={data.notRefreshedChannels} hasReport={!!batch.reportUri}
             chunks={chunks.counts} lastFailedChunk={chunks.lastFailed} batchError={batch.error} />
-        }
+        )}
       />
     </main>
   );

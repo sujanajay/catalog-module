@@ -14,6 +14,7 @@ import { IMPROVE_MAX_TRIES } from "./improve";
 import { HOLDOUT_KEPT_NOTE, NO_DELIVERABLE_PHOTO } from "./pipeline/publish";
 import type { SheetRow, SheetSpec } from "./sheet";
 import type { ChannelId, HoldCause } from "./types";
+import { minOf } from "../arrays";
 
 export type { BatchDigest, DigestReason } from "./digest-types";
 
@@ -66,6 +67,14 @@ const FIX_NOT_MADE = "Run this product again in a new batch.";
 const FIX_PRODUCT = "Send usable photos of this product in a new batch.";
 const FIX_FILE = "Send the file again in a new batch, as a photo or a working link.";
 const NOT_MADE = "the image could not be made";
+const HELD_REASON = "Held for you to decide before the photos are sent.";
+const FIX_HELD = "Decide on the Needs you tab.";
+/** The start of M1-S6's APPEND_TAKEN_NOTE (publish.ts), matched by text until that note is in this branch's base. */
+const NOT_ADDED_TAKEN = "Not added: another batch's live photo already has this place";
+const NOT_ADDED_TAKEN_GROUP = "another batch's photo already has this place";
+const NOT_ADDED_LIMIT = "the channel takes no more images of this product";
+const FIX_TAKEN = "Nothing to do. The earlier photo keeps its place, and the technical team looks at it.";
+const FIX_LIMIT = "Nothing to do. The photos already live are kept.";
 const TOO_SMALL = "the photo is smaller than this channel needs";
 
 /** The sentence's first clause, short enough for one reason line. */
@@ -94,22 +103,31 @@ export interface DigestInput {
   cost: { usd: number; inr: number | null; usdPerProduct: number | null; inrPerProduct: number | null };
 }
 
-export interface DigestParts { digest: BatchDigest; exceptions: ExceptionRow[]; notes: NoteRow[] }
+export interface DigestParts { digest: BatchDigest; exceptions: ExceptionRow[]; notes: NoteRow[]; kept: { keptPhotos: number; styliSkipped: number } }
+
+/** The output columns the digest reads (buildReport's rows carry them). */
+export type DigestOutput = { id: string; batchId: string; productId: string; sourceImageId: string; channel: ChannelId; n: number; status: string; isLive: boolean; flags: readonly string[]; reason: string | null; decision: string | null; compliance: unknown; publicUrl: string; publishedAt: Date | null };
+export type DigestPair = { productId: string; identifier: string; change: string; notes: string | null };
+export type DigestImprovement = { sourceImageId: string; improvedAt: Date | null; tries: number; endReason: string | null };
+
+/** The batch's improvements (M1-S4), in a fixed order. */
+export async function readImprovements(db: Db, batchId: string): Promise<DigestImprovement[]> {
+  return db.select({ sourceImageId: catalogImprovements.sourceImageId, improvedAt: catalogImprovements.improvedAt, tries: catalogImprovements.tries, endReason: catalogImprovements.endReason })
+    .from(catalogImprovements).where(eq(catalogImprovements.batchId, batchId)).orderBy(asc(catalogImprovements.sourceImageId));
+}
 
 /**
- * The digest and its two sheets for one batch, read in a fixed order (finalize builds it twice and compares). `linksReadyAt`
- * is left null here: finalize sets it in its done write, keeping the first one.
+ * The digest and its two sheets for one batch from rows already read (finalize passes buildReport's rows, so the
+ * outputs are read once per build). `outputs` may hold other batches' outputs of the same products; only this batch's
+ * count. `linksReadyAt` is left null: finalize sets it in its done write, keeping the first one.
  */
-export async function buildDigest(db: Db, input: DigestInput): Promise<DigestParts> {
-  const batchId = input.batch.id, channels = input.batch.channels;
-  const pairs = await db.select({ productId: catalogBatchProducts.productId, change: catalogBatchProducts.change, notes: catalogBatchProducts.notes, identifier: catalogProducts.identifier })
-    .from(catalogBatchProducts).innerJoin(catalogProducts, eq(catalogProducts.id, catalogBatchProducts.productId)).where(eq(catalogBatchProducts.batchId, batchId))
-    .orderBy(asc(catalogProducts.identifier), asc(catalogProducts.id));
-  const outputs = await db.select({ productId: catalogOutputs.productId, sourceImageId: catalogOutputs.sourceImageId, channel: catalogOutputs.channel, n: catalogOutputs.n, status: catalogOutputs.status, isLive: catalogOutputs.isLive,
-    flags: catalogOutputs.flags, reason: catalogOutputs.reason, decision: catalogOutputs.decision, compliance: catalogOutputs.compliance, publicUrl: catalogOutputs.publicUrl, publishedAt: catalogOutputs.publishedAt })
-    .from(catalogOutputs).where(eq(catalogOutputs.batchId, batchId)).orderBy(asc(catalogOutputs.productId), asc(catalogOutputs.channel), asc(catalogOutputs.n), asc(catalogOutputs.id));
-  const improvements = await db.select({ sourceImageId: catalogImprovements.sourceImageId, improvedAt: catalogImprovements.improvedAt, tries: catalogImprovements.tries, endReason: catalogImprovements.endReason })
-    .from(catalogImprovements).where(eq(catalogImprovements.batchId, batchId)).orderBy(asc(catalogImprovements.sourceImageId));
+export function digestFrom(input: DigestInput & { pairs: readonly DigestPair[]; outputs: readonly DigestOutput[]; improvements: readonly DigestImprovement[] }): DigestParts {
+  const batchId = input.batch.id, channels = input.batch.channels, improvements = input.improvements;
+  const byText = (x: string, y: string) => (x < y ? -1 : x > y ? 1 : 0);
+  const pairs = [...input.pairs].sort((x, y) => collator.compare(x.identifier, y.identifier) || byText(x.productId, y.productId));
+  const outputs = input.outputs.filter(o => o.batchId === batchId)
+    .sort((x, y) => byText(x.productId, y.productId) || byText(x.channel, y.channel) || x.n - y.n || byText(x.id, y.id));
+
   const improvementOf = new Map(improvements.map(i => [i.sourceImageId, i]));
   const rowOf = new Map<string, SheetRow>();
   for (const row of input.sheet.rows) if (!rowOf.has(row.identifier)) rowOf.set(row.identifier, row);
@@ -125,8 +143,13 @@ export async function buildDigest(db: Db, input: DigestInput): Promise<DigestPar
     const withLinks = hasLink(pair.identifier);
     if (withLinks) productsWithLinks++;
     if (mine.some(o => o.reason?.includes(HOLDOUT_KEPT_NOTE))) controlsSkipped++;
-    // A product held for a person (a batch started before auto-decide) is counted under "Needs you", not as exceptions.
-    if (pair.change === "pending_attention") { needsYou++; continue; }
+    // A product held for a person (a batch started before auto-decide): counted under "Needs you" and listed in the
+    // Exceptions sheet, so every product without a link is in a sheet (M1 D30).
+    if (pair.change === "pending_attention") {
+      needsYou++;
+      exceptions.push({ identifier: pair.identifier, channel: null, image: null, reason: HELD_REASON, fix: FIX_HELD, group: `Waiting for you: ${HELD_REASON.charAt(0).toLowerCase()}${HELD_REASON.slice(1, -1)}` });
+      continue;
+    }
     if (pair.change === "unchanged") unchanged++;
     let productExceptions = 0, productNotes = 0;
     if (pair.change === "failed" || (!withLinks && pair.change !== "unchanged")) {
@@ -151,6 +174,15 @@ export async function buildDigest(db: Db, input: DigestInput): Promise<DigestPar
         continue;
       }
       if (o.status !== "skipped" && o.status !== "failed" && o.status !== "needs_attention") continue;
+      // M1-S6 (M1 D30): a follow-up photo that was not added. Checked before the link check: its place may show another
+      // batch's live photo, which is not this photo's link.
+      if (o.status === "skipped" && o.flags.includes("not_added")) {
+        const taken = o.reason?.startsWith(NOT_ADDED_TAKEN) ?? false;
+        exceptions.push({ identifier: pair.identifier, channel: o.channel, image: o.n, reason: o.reason ?? NOT_ADDED_LIMIT, fix: taken ? FIX_TAKEN : FIX_LIMIT,
+          group: `${CHANNELS[o.channel].label} image ${o.n} not added: ${taken ? NOT_ADDED_TAKEN_GROUP : NOT_ADDED_LIMIT}` });
+        productExceptions++;
+        continue;
+      }
       // Left out on purpose, or replaced by a later image of the same slot: not an exception.
       if (o.decision === "remove" || o.decision === "replaced" || o.reason?.includes(HOLDOUT_KEPT_NOTE) || o.reason?.startsWith("Removed in batch")) continue;
       if (linkAt(pair.identifier, o.channel, o.n)) continue;
@@ -179,7 +211,8 @@ export async function buildDigest(db: Db, input: DigestInput): Promise<DigestPar
   for (const l of leftOut) if (!photoReasons.has(l.key)) photoReasons.set(l.key, l.reason);
   const grouped = groupReasons(exceptions.map(e => e.group));
   const stored = grouped.slice(0, DIGEST_STORED_GROUPS);
-  const firstLinks = outputs.flatMap(o => o.publishedAt ? [+o.publishedAt] : []);
+  // minOf, not Math.min(...list): spreading a list that grows with the batch overflows the call stack (about 125k).
+  const firstLink = minOf(outputs.flatMap(o => o.publishedAt ? [+o.publishedAt] : []));
   const linksPerChannel = CHANNEL_ORDER.filter(c => channels.includes(c)).map(channel => ({ channel, links: input.sheet.rows.reduce((n, r) => n + (r.status === "missing_images" ? 0 : (r.links[channel] ?? []).filter(Boolean).length), 0) }));
   const digest: BatchDigest = {
     version: 1,
@@ -200,12 +233,31 @@ export async function buildDigest(db: Db, input: DigestInput): Promise<DigestPar
     unchanged,
     needsYou,
     startedAt: input.batch.startedAt ? input.batch.startedAt.toISOString() : null,
-    firstLinksAt: firstLinks.length ? new Date(Math.min(...firstLinks)).toISOString() : null,
+    firstLinksAt: firstLink === null ? null : new Date(firstLink).toISOString(),
     linksReadyAt: null,
     cancelledAt: input.batch.status === "cancelled" ? input.batch.updatedAt.toISOString() : null,
     cost: input.cost,
   };
-  return { digest, exceptions, notes };
+  // The Ready line's two counts, as batchDetails counts them, so the page reads them from the digest.
+  const keptSources = new Set<string>();
+  let styliSkipped = 0;
+  for (const o of outputs) {
+    if (o.decision === "use_as_is") keptSources.add(o.sourceImageId);
+    if (o.channel === "styli" && o.status === "skipped" && o.reason?.includes(STYLI_SKIP_NOTE)) styliSkipped++;
+  }
+  return { digest, exceptions, notes, kept: { keptPhotos: keptSources.size, styliSkipped } };
+}
+
+/** Reads what the digest needs and builds it (tests and callers without buildReport's rows). */
+export async function buildDigest(db: Db, input: DigestInput): Promise<DigestParts> {
+  const batchId = input.batch.id;
+  const pairs = await db.select({ productId: catalogBatchProducts.productId, change: catalogBatchProducts.change, notes: catalogBatchProducts.notes, identifier: catalogProducts.identifier })
+    .from(catalogBatchProducts).innerJoin(catalogProducts, eq(catalogProducts.id, catalogBatchProducts.productId)).where(eq(catalogBatchProducts.batchId, batchId))
+    .orderBy(asc(catalogProducts.identifier), asc(catalogProducts.id));
+  const outputs = await db.select({ id: catalogOutputs.id, batchId: catalogOutputs.batchId, productId: catalogOutputs.productId, sourceImageId: catalogOutputs.sourceImageId, channel: catalogOutputs.channel, n: catalogOutputs.n, status: catalogOutputs.status, isLive: catalogOutputs.isLive,
+    flags: catalogOutputs.flags, reason: catalogOutputs.reason, decision: catalogOutputs.decision, compliance: catalogOutputs.compliance, publicUrl: catalogOutputs.publicUrl, publishedAt: catalogOutputs.publishedAt })
+    .from(catalogOutputs).where(eq(catalogOutputs.batchId, batchId)).orderBy(asc(catalogOutputs.createdAt), asc(catalogOutputs.id));
+  return digestFrom({ ...input, pairs, outputs, improvements: await readImprovements(db, batchId) });
 }
 
 function leftOutReason(o: { compliance: unknown; reason: string | null }): string {

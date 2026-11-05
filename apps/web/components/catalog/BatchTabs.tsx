@@ -39,11 +39,13 @@ type TabsProps = {
   /** Set while the links sheet is not loaded on this render (a batch with a digest loads it only when asked, M1-F4-R6). */
   sheetHref?: string;
   details: ReactNode;
+  /** Set while the Details tab is not loaded on this render (a batch with a digest loads it only when asked, M1-S5). */
+  detailsHref?: string;
   /** The first tab's label: "Digest" for a finished batch with a digest (M1-S5, UX 9), else "Overview". */
   overviewLabel?: string;
 };
 
-export default function BatchTabs({ attentionCount, evalLabel, initialTab, overview, attention, compare, compareHref, sheet, sheetHref, details, overviewLabel = "Overview" }: TabsProps) {
+export default function BatchTabs({ attentionCount, evalLabel, initialTab, overview, attention, compare, compareHref, sheet, sheetHref, details, detailsHref, overviewLabel = "Overview" }: TabsProps) {
   const [active, setActive] = useState(initialTab ?? "overview");
   const [remaining, setRemaining] = useState<number | null>(null);
   // Once the batch had something to decide, the attention panel stays mounted (hidden when its tab is
@@ -79,6 +81,7 @@ export default function BatchTabs({ attentionCount, evalLabel, initialTab, overv
     setActive(id);
     if (id === "compare" && compareHref) window.location.assign(compareHref);
     if (id === "sheet" && sheetHref) window.location.assign(sheetHref);
+    if (id === "details" && detailsHref) window.location.assign(detailsHref);
   }
 
   return (

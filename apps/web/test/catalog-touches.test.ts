@@ -4,7 +4,7 @@ import path from "node:path";
 import { sql } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { createTestDb } from "@catalog/core/db/testing";
-import { catalogBatches, catalogBatchTouches } from "@catalog/core/db/schema";
+import { catalogBatches, catalogBatchTouches, DEFAULT_BATCH_OPTIONS, EMPTY_BATCH_COUNTS } from "@catalog/core/db/schema";
 import type { Role } from "@catalog/core/catalog/types";
 import { setDbForTests, type Db } from "../lib/db";
 import { resetUserDeps, setUserDeps } from "../lib/user";
@@ -23,7 +23,7 @@ const TOUCH_ROUTES = [
  * Operator write routes of the wizard's own path, or a step of a touch counted elsewhere: not touches. The replacement's
  * signed upload URL is the first half of replace_photo (counted on complete); eval labels mark a test batch for the
  * model bake-off and never change it. The one-page New batch's brand inference and a draft's brand change act on a draft
- * before Start, so they are the wizard's own path too. "Wait" (hold-start) is a touch (M1 D33): it stops the countdown.
+ * before Start, so they are the wizard's own path too. "Wait" (hold-start) is a touch (M1 D33) when it stops a countdown.
  */
 const NOT_TOUCH_ROUTES = [
   "batches", "batches/[id]", "batches/[id]/detected", "batches/[id]/links", "batches/[id]/links/[uploadId]", "batches/[id]/start",
@@ -78,11 +78,16 @@ describe("operator touches (M6-F3-R3)", () => {
     expect(await touches()).toEqual([{ batch_id: collecting!.id, action: "cancel" }]);
   });
 
-  it("counts each Wait on a draft's countdown as a touch and none for a batch already started (M1 D33)", async () => {
-    const [draft] = await db.insert(catalogBatches).values({ name: "a", brandSlug: "uspa", brandName: "USPA", createdBy: "op@opptra.com", status: "draft" }).returning();
+  it("counts one touch for the Wait that stops a countdown: none for a second Wait, a draft not counting down or a started batch (M1 D33)", async () => {
+    const counting = { ...DEFAULT_BATCH_OPTIONS, autoStart: true };
+    const [draft] = await db.insert(catalogBatches).values({ name: "a", brandSlug: "uspa", brandName: "USPA", createdBy: "op@opptra.com", status: "draft", options: counting, counts: { ...EMPTY_BATCH_COUNTS, autoStartAt: new Date().toISOString() } }).returning();
+    const [plain] = await db.insert(catalogBatches).values({ name: "c", brandSlug: "uspa", brandName: "USPA", createdBy: "op@opptra.com", status: "draft", options: { ...DEFAULT_BATCH_OPTIONS, autoStart: false } }).returning();
     const [started] = await db.insert(catalogBatches).values({ name: "b", brandSlug: "uspa", brandName: "USPA", createdBy: "op@opptra.com", status: "rendering", startedAt: new Date() }).returning();
-    expect((await holdStart(req(`/api/catalog/batches/${draft!.id}/hold-start`), ctx(draft!.id))).status).toBe(200);
-    expect((await holdStart(req(`/api/catalog/batches/${started!.id}/hold-start`), ctx(started!.id))).status).toBe(409);
+    const wait = async (id: string) => (await holdStart(req(`/api/catalog/batches/${id}/hold-start`), ctx(id))).status;
+    expect(await wait(draft!.id)).toBe(200);
+    expect(await wait(draft!.id)).toBe(200);
+    expect(await wait(plain!.id)).toBe(200);
+    expect(await wait(started!.id)).toBe(409);
     expect(await touches()).toEqual([{ batch_id: draft!.id, action: "hold_start" }]);
   });
 

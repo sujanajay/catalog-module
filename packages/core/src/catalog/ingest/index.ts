@@ -64,6 +64,7 @@ import { armAutoStart } from "../auto-start";
 import { columnLetter } from "./detect-step";
 import type { InputRoot, StoredRoot } from "./roots";
 import { collectRejectReason, openZipReader, tooLargeMessage, zipAdapter, ZIP_ENTRY_MAX_BYTES } from "./zip";
+import { pushAll } from "../../arrays";
 
 /** A product list collects no items; it is read in the batch-wide step. */
 const productListAdapter: Adapter = { kind: "product_list", collect: async () => [] };
@@ -689,7 +690,7 @@ function assemble(manifests: UploadManifest[], lists: ListInput[], options: Batc
     else if (!r.ok) unreadable.set(item, r.reason);
   }
   const grouped = groupItems(items, options, unreadable);
-  for (const m of manifests) grouped.warnings.push(...m.warnings);
+  for (const m of manifests) pushAll(grouped.warnings, m.warnings);
 
   const list = lists.length ? lists.flatMap((l) => l.rows) : null;
   const byMatchColumn = lists.some((l) => l.picked);
@@ -1585,7 +1586,7 @@ export async function collectOffline(input: {
       m.results[itemKey(item)] = await readItem(item, deps, { prefix, uploadId: upload.id, zips, staged });
       input.onProgress?.(++done, distinct.length);
     });
-    rejected.push(...(listing.detected.rejected ?? []));
+    pushAll(rejected, listing.detected.rejected ?? []);
     manifests.set(upload.id, m);
   }
   const lists = await readLists(uploads, manifests, deps, prefix, options);

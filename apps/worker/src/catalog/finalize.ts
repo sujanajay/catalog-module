@@ -9,7 +9,7 @@ import { recordBatchOutcome } from "@catalog/core/catalog/reliability";
 import { ENLARGING_TASK } from "@catalog/core/catalog/pipeline/enlargement";
 import { recheckSheetPart, type RecheckProgress } from "@catalog/core/catalog/recheck/index";
 import { compareXlsxCsv, fillProductListWorkbook, writeExceptionsCsv, writeLinksCsv, writeLinksXlsx, writeNotesCsv } from "@catalog/core/catalog/sheet";
-import { buildDigest } from "@catalog/core/catalog/digest";
+import { digestFrom, readImprovements, type BatchDigest } from "@catalog/core/catalog/digest";
 import { inrPerUsdFromEnv } from "@catalog/core/catalog/cost";
 import { positiveIntEnv } from "@catalog/core/concurrency";
 import type { HandleResult } from "../server";
@@ -127,11 +127,13 @@ export async function handleFinalizeTask(deps:CatalogDeps,body:Record<string,unk
     const ingest=await readIngestReport(deps.storage,prefix);
     const extra={recheck:{ok:0,total:0,failures:[]},exports:paths,ingest};
     const build=async(db:CatalogDeps["db"])=>{
-      const built=await buildReport(db,batchId,extra);built.batch.counts=cleanCounts(built.batch.counts);built.report.counts=built.batch.counts;
+      const {rows,...built}=await buildReport(db,batchId,extra);built.batch.counts=cleanCounts(built.batch.counts);built.report.counts=built.batch.counts;
       // M1-S5 (M1-F4-R1): the digest and its two sheets from the same snapshot as the links sheet, so their numbers agree.
       const c=built.batch.cost as typeof built.batch.cost & {usdPerIdentifier?:number|null;inrPerIdentifier?:number|null},usd=c.qaUsd+c.computeUsd,rate=inrPerUsdFromEnv();
-      const digest=await buildDigest(db,{batch:built.batch,sheet:built.sheet,files:[...(built.report.unsupportedFiles as unknown[]),...(built.report.linkFailures as unknown[])],
-        cost:{usd,inr:rate===null ? null:usd*rate,usdPerProduct:c.usdPerIdentifier ?? null,inrPerProduct:c.inrPerIdentifier ?? null}});
+      // M1-S5 review P2-4: buildReport's rows are reused, so the outputs are read once per build; only improvements are new.
+      const digest=digestFrom({batch:built.batch,sheet:built.sheet,files:[...(built.report.unsupportedFiles as unknown[]),...(built.report.linkFailures as unknown[])],
+        cost:{usd,inr:rate===null ? null:usd*rate,usdPerProduct:c.usdPerIdentifier ?? null,inrPerProduct:c.inrPerIdentifier ?? null},
+        pairs:rows.pairs.map(r=>({productId:r.pair.productId,identifier:r.product.identifier,change:r.pair.change,notes:r.pair.notes})),outputs:rows.outputs,improvements:await readImprovements(db,batchId)});
       return {...built,digest};
     };
     const initial=await deps.db.transaction(tx=>build(tx as unknown as CatalogDeps["db"]),{isolationLevel:"repeatable read"});
@@ -202,7 +204,13 @@ export async function handleFinalizeTask(deps:CatalogDeps,body:Record<string,unk
       // A first finalize writes done only while the batch is not done yet (the claim guards a re-opened done batch).
       const reopened=batch.status==="done";
       // M1-F4-R1: the digest is written with done. Its "links ready" time is the first done, kept by every later finalize.
-      const doneAt=deps.now(),digest={...initial.digest.digest,linksReadyAt:fresh.digest?.linksReadyAt ?? doneAt.toISOString()};
+      // The first links time and the links-ready time stay the first ones across a Try again; a batch finished before M1-S5
+      // keeps its finish time as links-ready. The digest also holds its two csv files, so the page and the downloads read
+      // only the digest (M1-S5 review P2-3).
+      const doneAt=deps.now(),built=initial.digest.digest,before=fresh.digest?.firstLinksAt ?? null;
+      const digest={...built,firstLinksAt:before && (!built.firstLinksAt || before<built.firstLinksAt) ? before:built.firstLinksAt,
+        linksReadyAt:fresh.digest?.linksReadyAt ?? fresh.finishedAt?.toISOString() ?? doneAt.toISOString(),page:{exceptionsCsv:paths.exceptionsCsv ?? null,notesCsv:paths.notesCsv ?? null,filled:!!paths.filledProductList,
+        notRefreshedChannels:(initial.report.notRefreshedChannels ?? []) as NonNullable<BatchDigest["page"]>["notRefreshedChannels"],...initial.digest.kept}};
       const written=await tx.update(catalogBatches).set({counts,cost:initial.batch.cost,digest,status:"done",finishedAt:doneAt,sheetXlsxUri:paths.xlsx,sheetCsvUri:paths.csv,reportUri:paths.report,error:null}).where(reopened ? claimWhere:and(claimWhere,ne(catalogBatches.status,"done"))).returning({id:catalogBatches.id});
       if(!written.length) return "snapshot_changed";
       // M1-F3-R7: an auto-decide batch releases every product it locked, so none blocks the next batch.

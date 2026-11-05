@@ -9,5 +9,8 @@ import { HttpError } from "../errors";
 export async function batchDigest(id: string, conn: Db = db()): Promise<{ id: string; name: string; status: string; digest: BatchDigest | null }> {
   const [row] = await conn.select({ id: catalogBatches.id, name: catalogBatches.name, status: catalogBatches.status, digest: catalogBatches.digest }).from(catalogBatches).where(eq(catalogBatches.id, id));
   if (!row) throw new HttpError(404, "This batch was not found. Return to All batches.");
-  return row;
+  // The page block holds storage paths: it stays on the server.
+  if (!row.digest) return row;
+  const { page: _page, ...digest } = row.digest;
+  return { ...row, digest };
 }

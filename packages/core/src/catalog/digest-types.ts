@@ -50,4 +50,22 @@ export interface BatchDigest {
   cancelledAt: string | null;
   /** Cost in total and per product, as the batch cost line counts it (INR is null when no rate is set). */
   cost: { usd: number; inr: number | null; usdPerProduct: number | null; inrPerProduct: number | null };
+  /**
+   * What the batch page and its downloads need besides the numbers, so a page with a digest reads this row only, never
+   * the report or the outputs (M1-S5 review P2-3). Internal: storage paths, never sent to the browser.
+   */
+  page?: DigestPage;
+}
+
+export interface DigestPage {
+  /** The two digest sheets as csv (storage paths), null when not written. */
+  exceptionsCsv: string | null;
+  notesCsv: string | null;
+  /** A filled copy of the uploaded product list exists. */
+  filled: boolean;
+  /** Channels this batch does not make whose links come from an earlier batch. */
+  notRefreshedChannels: { channel: ChannelId; lastBatchId: string; lastBatchName: string }[];
+  /** Photos kept with "Use as is", and Styli images left out as too small (the Ready line). */
+  keptPhotos: number;
+  styliSkipped: number;
 }

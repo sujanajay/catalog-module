@@ -12,6 +12,7 @@ import { readSheetLinks } from "@catalog/core/catalog/recheck/links";
 import { compareXlsxCsv } from "@catalog/core/catalog/sheet";
 import { deliveredLinks } from "@catalog/core/catalog/pipeline/report";
 import * as storage from "@catalog/core/storage";
+import { pushAll } from "@catalog/core/arrays";
 
 export interface BatchRecheck { results: LinkResult[]; problems: SheetProblem[]; summary: RecheckSummary }
 
@@ -32,10 +33,10 @@ export async function recheckBatch(db: Db, batchId: string, options: { fetch?: t
   const problems: SheetProblem[] = [...sheet.problems, ...sheetProblems(sheet.identifiers, batch.counts.products)];
   if (batch.sheetCsvUri) {
     const cmp = await compareXlsxCsv(xlsx, (await store.downloadBuffer(batch.sheetCsvUri)).buf.toString("utf8"));
-    problems.push(...cmp.differences.map(detail => ({ problem: "xlsx_csv_mismatch", detail })));
+    pushAll(problems, cmp.differences.map(detail => ({ problem: "xlsx_csv_mismatch", detail })));
   }
   const results = await recheckLinks(sheet.links.map(l => ({ url: l.url, identifier: l.identifier, channel: l.channel, n: l.n, hyperlinkOk: l.hyperlinkOk, expectedGeneration: expected.get(l.url) ?? null })), options);
-  problems.push(...withNoLinks(results, problems).slice(problems.length));
+  pushAll(problems, withNoLinks(results, problems).slice(problems.length));
   const summary = summarize(results, problems);
   const carriedTotal = results.filter(r => carried.has(r.url)).length, carriedOk = results.filter(r => carried.has(r.url) && r.status === "ok").length;
   // Only the re-check numbers change; updatedAt stays, as in finalize.
