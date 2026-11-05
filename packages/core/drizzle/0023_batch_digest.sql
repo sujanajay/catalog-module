@@ -1,4 +1,4 @@
--- M1-S5 (2026-11-05; numbered 0022 after M5-S3's 0021; the number is taken at merge time, M1 D3). The batch digest (M1-F4-R1) as one nullable jsonb
+-- M1-S5 (2026-11-05; numbered 0023 after M1-S4b's 0022; the number is taken at merge time, M1 D3). The batch digest (M1-F4-R1) as one nullable jsonb
 -- column on catalog_batches, and the "Wait" touch (hold_start) on catalog_batch_touches. Additive only: the column is
 -- nullable and the CHECK only widens, so the live code and the new code both work on this schema. Every statement can
 -- run again harmlessly; the short lock timeout keeps the migrate job re-runnable.

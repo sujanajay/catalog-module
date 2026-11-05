@@ -191,7 +191,9 @@ The smallest set of rules that, always true, make every owner requirement hold.
   it within `ENLARGE_STALE_MS` of the lane going quiet; when the last wanted `queued` row of a chunk settles, the chunk
   is unparked in that transaction and, on a batch that is not processing, enqueued directly. No sweep, timer or
   deadline fails, holds or re-routes a batch, chunk or output because an enlargement is waiting; a legitimate wait of
-  20 hours or more is normal.
+  20 hours or more is normal. Amended by M1 decision D13 (M1-S4b): in an auto-decide batch only, a row waiting on an
+  upscaler service that has given no proof of health for the batch's outage deadline (default 6 h) fails as
+  `outage_deadline`, so its photo is delivered plain and `provisional` and improved later.
 - I9 Pinned route. A batch uses the route recorded at Start for its whole life (`options.enlargement`: model, x4Model,
   minScale). The worker's env route applies to new batches only. The only override is the rollback switch
   `UPSCALE_MODEL=off`.
@@ -528,6 +530,8 @@ answers 5xx; the queue is paused); each costs no service call, is paced by the b
 dependency returns. Anything short of proof (a probe timeout, a 429, Cloud Run's "no instance") is not absence: a
 paid call that failed under it counts. That is the owner's rule: outages delay, they never count, and time is never
 a limit; it is also what keeps the rule sound, because "absent" can only be true while the service is in fact down.
+M1 decision D13 (M1-S4b) adds one more way for a wanted queued row to end, for auto-decide batches only: the sweep's
+outage deadline, after the service has given no proof of health for the deadline (`catalog_upscaler_health`).
 
 | Repeating path | Why it ends |
 |---|---|
