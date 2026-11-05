@@ -4,6 +4,7 @@
 import { createHash } from "node:crypto";
 import { and, asc, desc, eq, gt, inArray, isNull, lte, or, sql, type SQL } from "drizzle-orm";
 import type { Db } from "../db/client";
+import type { ChannelId } from "../catalog/types";
 import type { ChangeTypeId } from "../learning/change-types";
 import {
   catalogAssets,
@@ -258,7 +259,10 @@ export async function isWritable(db: GraphDb, listingId: string, ctx: { experime
 export type NewChangeEvent = {
   /** Required: a retry with the same key returns the first event (for example `publish:<output_id>`). */
   idempotencyKey: string;
-  listingId: string;
+  /** Null for a product with no option, or no listing on the channel, yet (D23): then productId and channel are required. */
+  listingId: string | null;
+  productId?: string | null;
+  channel?: ChannelId | null;
   slot: Slot;
   fromVersionId?: string | null;
   /** Null only for `removed` (the slot was emptied). */
@@ -315,19 +319,22 @@ async function holdCursorFloor(tx: GraphDb): Promise<void> {
 }
 
 function sameEvent(row: CatalogChangeEvent, e: NewChangeEvent): boolean {
-  return row.listingId === e.listingId && row.slot === e.slot && row.kind === e.kind && (row.toVersionId ?? null) === (e.toVersionId ?? null);
+  const sameTarget = e.listingId !== null ? row.listingId === e.listingId : row.listingId === null && row.productId === (e.productId ?? null) && row.channel === (e.channel ?? null);
+  return sameTarget && row.slot === e.slot && row.kind === e.kind && (row.toVersionId ?? null) === (e.toVersionId ?? null);
 }
 
 /**
  * Appends one change event, idempotent on `idempotencyKey`: a retry returns the first event (`created: false`); the
  * same key with a different listing, slot, kind or version throws IdempotencyConflictError. A planned or
- * links_delivered event on a frozen listing throws ListingFrozenError and writes nothing (F3-R7).
+ * links_delivered event on a frozen listing throws ListingFrozenError and writes nothing (F3-R7). An event without a
+ * listing (D23) names its product and channel; no experiment can hold it (assignments are per listing), so no guard.
  */
 export async function recordChange(db: GraphDb, e: NewChangeEvent): Promise<{ seq: bigint; created: boolean }> {
   if (!e.idempotencyKey?.trim()) throw new Error("recordChange: idempotencyKey is required");
   const exempt = e.kind === "observed_other" || e.evidence === "backfill" || e.reasonKind === "backfill";
   if (!exempt && !e.reasonKind) throw new Error("recordChange: reasonKind is required except on observed_other events and backfill rows");
   if (!exempt && !e.changeTypeId) throw new Error("recordChange: changeTypeId is required except on observed_other events and backfill rows");
+  if (e.listingId === null && (!e.productId || !e.channel)) throw new Error("recordChange: an event without a listing needs productId and channel");
   const existing = async (tx: GraphDb) =>
     (await tx.select().from(catalogChangeEvents).where(eq(catalogChangeEvents.idempotencyKey, e.idempotencyKey)).limit(1))[0];
   const settle = (row: CatalogChangeEvent) => {
@@ -338,12 +345,13 @@ export async function recordChange(db: GraphDb, e: NewChangeEvent): Promise<{ se
   return db.transaction(async (tx) => {
     const before = await existing(tx);
     if (before) return settle(before);
-    if ((GUARDED_KINDS as readonly string[]).includes(e.kind)) {
+    if (e.listingId !== null && (GUARDED_KINDS as readonly string[]).includes(e.kind)) {
       // FOR SHARE conflicts with the FOR NO KEY UPDATE that the 0009 trigger takes on the listing for every assignment
       // insert or update, so an assignment and this check cannot interleave: whichever locks first commits first.
-      await tx.select({ id: catalogChannelListings.id }).from(catalogChannelListings).where(eq(catalogChannelListings.id, e.listingId)).for("share");
-      const w = await isWritable(tx, e.listingId, { experimentId: e.experimentId ?? undefined });
-      if (!w.ok) throw new ListingFrozenError(e.listingId, w.reason, w.experimentId);
+      const listingId = e.listingId;
+      await tx.select({ id: catalogChannelListings.id }).from(catalogChannelListings).where(eq(catalogChannelListings.id, listingId)).for("share");
+      const w = await isWritable(tx, listingId, { experimentId: e.experimentId ?? undefined });
+      if (!w.ok) throw new ListingFrozenError(listingId, w.reason, w.experimentId);
     }
     await holdCursorFloor(tx);
     const inserted = await tx
@@ -351,6 +359,8 @@ export async function recordChange(db: GraphDb, e: NewChangeEvent): Promise<{ se
       .values({
         idempotencyKey: e.idempotencyKey,
         listingId: e.listingId,
+        productId: e.productId ?? null,
+        channel: e.channel ?? null,
         slot: e.slot,
         fromVersionId: e.fromVersionId ?? null,
         toVersionId: e.toVersionId,

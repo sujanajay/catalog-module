@@ -381,8 +381,9 @@ async function recordStagedVersions(deps: PublishDeps, batchId: string, productI
  * version), so an output row re-made in place (an M1-S4 improvement, Try again) is logged as the change it is. The key
  * names the output, the slot's last event (its seq) and the listing (D27): a retry of the same publish finds the last
  * event already at this version and writes nothing, a retry after a rollback rebuilds the same key, and a re-made row
- * gets a new event even when its versions repeat (A, B, A, B). Exported for the write-path tests. A product with no option yet (M0-S2
- * has not linked it) has no listing, so no event.
+ * gets a new event even when its versions repeat (A, B, A, B). Exported for the write-path tests. A product with no option
+ * yet (M0-S2 has not linked it), or with no listing on a channel, still gets one event per changed slot of that channel:
+ * on the product and channel instead of a listing (D23), keyed `publish:<output id>:<last seq>:product`.
  */
 export async function recordPublishEvents(db: GraphDb, input: { batch: typeof catalogBatches.$inferSelect; product: typeof catalogProducts.$inferSelect; channels: ChannelId[]; live: Output[]; delivered: Output[]; removed: Output[]; now: Date; actor: string; rulesKeyVersion: (c: ChannelId) => string; log?: PublishDeps["log"] }): Promise<void> {
   const { batch, product, live, delivered, removed, now, actor } = input;
@@ -392,17 +393,30 @@ export async function recordPublishEvents(db: GraphDb, input: { batch: typeof ca
   const write = async (e: Parameters<typeof recordChange>[1], outputId: string) => {
     if (!(await recordChange(db, e)).created) log("change event already recorded", { severity: "ERROR", batchId: batch.id, productId: product.id, outputId, listingId: e.listingId, slot: e.slot, idempotencyKey: e.idempotencyKey });
   };
-  if (!product.optionId || (!delivered.length && !removed.length)) return;
+  if (!delivered.length && !removed.length) return;
   const touched = [...new Set([...delivered, ...removed].map(o => o.channel))].filter(c => input.channels.includes(c));
   if (!touched.length) return;
-  const listings = await db.select({ id: catalogChannelListings.id, channel: catalogChannelListings.channel }).from(catalogChannelListings)
-    .where(and(eq(catalogChannelListings.optionId, product.optionId), inArray(catalogChannelListings.channel, touched)));
-  if (!listings.length) return;
-  // The last event on each listing slot (index on listing_id, slot, at).
-  const lastRows = await db.select({ listingId: catalogChangeEvents.listingId, slot: catalogChangeEvents.slot, kind: catalogChangeEvents.kind, toVersionId: catalogChangeEvents.toVersionId, seq: catalogChangeEvents.seq })
-    .from(catalogChangeEvents).where(and(inArray(catalogChangeEvents.listingId, listings.map(l => l.id)), inArray(catalogChangeEvents.slot, [...new Set([...delivered, ...removed].map(o => `image:${o.n}` as const))]))).orderBy(desc(catalogChangeEvents.seq));
+  const listings = product.optionId ? await db.select({ id: catalogChannelListings.id, channel: catalogChannelListings.channel }).from(catalogChannelListings)
+    .where(and(eq(catalogChannelListings.optionId, product.optionId), inArray(catalogChannelListings.channel, touched))) : [];
+  // D23: a channel where the product has no listing yet (no option, or none on that channel) logs on the product and
+  // channel instead, so every delivered link has its event.
+  const bare = touched.filter(c => !listings.some(l => l.channel === c));
+  const targets: { id: string | null; channel: ChannelId }[] = [...listings, ...bare.map(c => ({ id: null, channel: c }))];
+  const targetKey = (listingId: string | null, c: ChannelId | null) => listingId ?? `product|${c}`;
+  const slots = [...new Set([...delivered, ...removed].map(o => `image:${o.n}` as const))];
+  // The last event on each target slot (indexes on listing_id, slot, at and on the listing-less product_id, channel, slot).
+  const lastCols = { listingId: catalogChangeEvents.listingId, channel: catalogChangeEvents.channel, slot: catalogChangeEvents.slot, kind: catalogChangeEvents.kind, toVersionId: catalogChangeEvents.toVersionId, seq: catalogChangeEvents.seq };
+  const lastRows = [
+    ...(listings.length ? await db.select(lastCols).from(catalogChangeEvents).where(and(inArray(catalogChangeEvents.listingId, listings.map(l => l.id)), inArray(catalogChangeEvents.slot, slots))).orderBy(desc(catalogChangeEvents.seq)) : []),
+    // Every touched channel, listed or not: a listing made after a listing-less publish continues from that history.
+    ...await db.select(lastCols).from(catalogChangeEvents).where(and(isNull(catalogChangeEvents.listingId), eq(catalogChangeEvents.productId, product.id), inArray(catalogChangeEvents.channel, touched), inArray(catalogChangeEvents.slot, slots))).orderBy(desc(catalogChangeEvents.seq)),
+  ];
   const last = new Map<string, (typeof lastRows)[number]>();
-  for (const r of lastRows) if (!last.has(`${r.listingId}|${r.slot}`)) last.set(`${r.listingId}|${r.slot}`, r);
+  for (const r of lastRows) if (!last.has(`${targetKey(r.listingId, r.channel)}|${r.slot}`)) last.set(`${targetKey(r.listingId, r.channel)}|${r.slot}`, r);
+  // A listing slot with no event of its own continues from the product's last listing-less event on that channel slot
+  // (D23): the delivery logged before the listing existed is not logged again, and a later change starts from it.
+  const lastOf = (target: { id: string | null; channel: ChannelId }, n: number) =>
+    last.get(`${targetKey(target.id, target.channel)}|image:${n}`) ?? (target.id ? last.get(`${targetKey(null, target.channel)}|image:${n}`) : undefined);
   // The photos behind the images live before this publish, and the version source of each delivered image.
   const photoIds = [...new Set([...live, ...delivered].map(o => o.sourceImageId))];
   const photoSha = new Map((await db.select({ id: catalogSourceImages.id, sha256: catalogSourceImages.sha256 }).from(catalogSourceImages).where(inArray(catalogSourceImages.id, photoIds))).map(p => [p.id, p.sha256]));
@@ -412,7 +426,7 @@ export async function recordPublishEvents(db: GraphDb, input: { batch: typeof ca
   const retried = delivered.some(o => o.publishedAt) ? await db.select({ id: catalogProductEvents.id, actor: catalogProductEvents.actor, details: catalogProductEvents.details }).from(catalogProductEvents)
     .where(and(eq(catalogProductEvents.productId, product.id), eq(catalogProductEvents.batchId, batch.id), eq(catalogProductEvents.kind, "enlargement_retried"))).orderBy(desc(catalogProductEvents.at)) : [];
   const changeSetId = publishChangeSetId(batch.id, product.id);
-  const common = { at: now, evidence: "tool_publish" as const, actor, changeSetId, batchId: batch.id };
+  const common = { at: now, evidence: "tool_publish" as const, actor, changeSetId, batchId: batch.id, productId: product.id };
   for (const o of delivered) {
     const other = live.find(l => l.channel === o.channel && l.n === o.n && l.id !== o.id) ?? null;
     // Delivered before and now made again in place (the same row, so the same photo).
@@ -427,19 +441,19 @@ export async function recordPublishEvents(db: GraphDb, input: { batch: typeof ca
       remade: remade ? { by: remadeBy?.actor === IMPROVE_ACTOR ? "improvement" : "operator", ref: remadeBy ? `catalog_product_events:${remadeBy.id}` : null } : null,
     };
     const reason = publishReason(slot, input.rulesKeyVersion(o.channel));
-    for (const listing of listings.filter(l => l.channel === o.channel)) {
-      const before = last.get(`${listing.id}|image:${o.n}`);
+    for (const target of targets.filter(t => t.channel === o.channel)) {
+      const before = lastOf(target, o.n);
       if (before?.toVersionId === o.contentVersionId) continue;
       const fromVersionId = before ? before.toVersionId : other?.contentVersionId ?? null;
-      await write({ ...common, idempotencyKey: `publish:${o.id}:${before ? before.seq : "none"}:${listing.id}`, listingId: listing.id, slot: `image:${o.n}`, fromVersionId,
+      await write({ ...common, idempotencyKey: `publish:${o.id}:${before ? before.seq : "none"}:${target.id ?? "product"}`, listingId: target.id, channel: target.channel, slot: `image:${o.n}`, fromVersionId,
         toVersionId: o.contentVersionId!, kind: "links_delivered", evidenceRef: `catalog_outputs:${o.id}`, ...reason, changeTypeId: publishChangeType(slot) }, o.id);
     }
   }
   for (const o of removed) {
-    for (const listing of listings.filter(l => l.channel === o.channel)) {
-      const before = last.get(`${listing.id}|image:${o.n}`);
+    for (const target of targets.filter(t => t.channel === o.channel)) {
+      const before = lastOf(target, o.n);
       if (before?.kind === "removed") continue;
-      await write({ ...common, idempotencyKey: `removed:${o.id}:${before ? before.seq : "none"}:${listing.id}`, listingId: listing.id, slot: `image:${o.n}`, fromVersionId: before ? before.toVersionId : o.contentVersionId ?? null,
+      await write({ ...common, idempotencyKey: `removed:${o.id}:${before ? before.seq : "none"}:${target.id ?? "product"}`, listingId: target.id, channel: target.channel, slot: `image:${o.n}`, fromVersionId: before ? before.toVersionId : o.contentVersionId ?? null,
         toVersionId: null, kind: "removed", evidenceRef: `catalog_outputs:${o.id}`, reasonKind: "new_content", reasonRef: null, changeTypeId: REMOVED_CHANGE_TYPE }, o.id);
     }
   }

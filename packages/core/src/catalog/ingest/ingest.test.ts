@@ -2,7 +2,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { Readable } from "node:stream";
-import { and, eq, inArray, sql } from "drizzle-orm";
+import { and, eq, inArray, like, sql } from "drizzle-orm";
 import sharp from "sharp";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import type { Db } from "../../db/client";
@@ -27,7 +27,7 @@ import { mergeCounts, PLACING_LEASE_MS } from "../counts";
 import { buildPreview, deliveryToken, failStoppedIngest, GROUP_TIME_BUDGET_MS, INGEST_STOPPED_TEXT, INGEST_TIME_BUDGET_MS, LINK_MAX_ATTEMPTS, LINK_RETRY_ATTEMPTS, PLACE_BUDGET_ITEMS, runIngest } from "./index";
 import { linkFailuresBlock } from "./detect-step";
 import { lockForInputChange } from "./input-change";
-import { sourceProducerRef } from "../../graph/write-path";
+import { sourceProducerRefsOf } from "../../graph/write-path";
 import { groupingSentence } from "./roots";
 import { linkFailuresOf } from "./link-failures";
 import { manifestPath, type UploadManifest } from "./manifest";
@@ -518,10 +518,10 @@ describe("runIngest", () => {
     expect(rows[0]!.sha256).toBe(firstRows[0]!.sha256);
     expect(rows[1]!.sha256).not.toBe(firstRows[1]!.sha256);
     // M0-F2-R1: each accepted photo is a brand version of the product, once: the two photos sent again reuse theirs.
-    const brand = await db.select().from(catalogContentVersions).where(eq(catalogContentVersions.producerRef, sourceProducerRef(rows[0]!.productId)));
+    const brand = await db.select().from(catalogContentVersions).where(like(catalogContentVersions.producerRef, sourceProducerRefsOf(rows[0]!.productId)));
     expect(brand).toHaveLength(5);
     expect(new Set(brand.map((v) => v.contentHash))).toEqual(new Set([...firstRows, ...rows].map((r) => r.sha256)));
-    expect(brand.every((v) => v.source === "brand" && v.scope === "master" && v.role === "unknown" && v.isTest && v.assetSha256 === v.contentHash)).toBe(true);
+    expect(brand.every((v) => v.source === "brand" && v.scope === "master" && v.role === (v.position === 1 ? "main" : "additional") && v.isTest && v.assetSha256 === v.contentHash)).toBe(true);
     expect(brand.find((v) => v.contentHash === rows[1]!.sha256)).toMatchObject({ position: 2, batchId: second.id });
     expect(rows[0]!.rawUri).toBe(`gs://${BUCKET}/${rawPath(prefixOf(second), "ABC123", 1, "jpg")}`);
     const after = (await sourcesOf(first.id)).sort((a, b) => a.n - b.n);

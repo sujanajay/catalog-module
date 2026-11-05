@@ -18,6 +18,7 @@ import { mergeCounts } from "./counts";
 import { log } from "../log";
 import { handOff, INGEST_ROUTE, ingestTaskId, uploadedPage } from "./ingest/hand-off";
 import { INGEST_STOPPED_TEXT } from "./ingest/index";
+import { readingFoldersText } from "./pipeline/status";
 import { armAutoStart, AUTO_START_DELAY_SEC } from "./auto-start";
 
 /** A draft nobody wrote to for this long is moved on by the sweep (the page itself hands on within a second). */
@@ -48,7 +49,8 @@ async function handOnUploads(db: Db, enqueue: typeof enqueueTask, batchId: strin
 }
 
 /** What the movers and the Ops list need to know of a batch's live (not removed) uploads, counted in the database. */
-export interface UploadSummary { pending: number; webOnly: boolean; uploaded: boolean; collected: string | null }
+/** `pending` counts file uploads that did not finish; `readingFolders` counts Supabase folders still being read (pending url_list rows). */
+export interface UploadSummary { pending: number; readingFolders: number; webOnly: boolean; uploaded: boolean; collected: string | null }
 
 /**
  * The upload summary of some batches, by batch id (a batch with no live upload is absent). One aggregate row per batch
@@ -60,12 +62,13 @@ async function uploadSummaries(db: Db, ids: string[]): Promise<Map<string, Uploa
   for (let i = 0; i < ids.length; i += 1000) {
     const rows = await db.select({
       batchId: catalogUploads.batchId,
-      pending: sql<number>`(count(*) FILTER (WHERE ${catalogUploads.status} = 'pending'))::int`,
+      pending: sql<number>`(count(*) FILTER (WHERE ${catalogUploads.status} = 'pending' AND ${catalogUploads.kind} <> 'url_list'))::int`,
+      readingFolders: sql<number>`(count(*) FILTER (WHERE ${catalogUploads.status} = 'pending' AND ${catalogUploads.kind} = 'url_list'))::int`,
       webOnly: sql<boolean>`coalesce(bool_or(${catalogUploads.kind} IN ('google_sheet', 'drive_folder') AND ${catalogUploads.status} = 'uploaded' AND ${catalogUploads.gcsUri} IS NULL), false)`,
       uploaded: sql<boolean>`coalesce(bool_or(${catalogUploads.status} = 'uploaded'), false)`,
       collected: sql<string | null>`min(${catalogUploads.id}::text) FILTER (WHERE ${catalogUploads.status} = 'collected')`,
     }).from(catalogUploads).where(and(inArray(catalogUploads.batchId, ids.slice(i, i + 1000)), ne(catalogUploads.status, "removed"))).groupBy(catalogUploads.batchId);
-    for (const r of rows) by.set(r.batchId, { pending: Number(r.pending), webOnly: r.webOnly === true, uploaded: r.uploaded === true, collected: r.collected ?? null });
+    for (const r of rows) by.set(r.batchId, { pending: Number(r.pending), readingFolders: Number(r.readingFolders), webOnly: r.webOnly === true, uploaded: r.uploaded === true, collected: r.collected ?? null });
   }
   return by;
 }
@@ -85,7 +88,7 @@ export async function handOffIdleDrafts(db: Db, enqueue: typeof enqueueTask, now
   for (const draft of drafts) {
     const live = uploads.get(draft.id);
     // Files still uploading (or abandoned part way) and links only the page can read wait for a person (F5-R5 lists them).
-    if (!live || live.pending || live.webOnly) continue;
+    if (!live || live.pending || live.readingFolders || live.webOnly) continue;
     const collected = live.collected;
     if (!live.uploaded && !collected) continue;
     const run = randomUUID();
@@ -171,9 +174,10 @@ export async function resendGivenUpIntake(db: Db, enqueue: typeof enqueueTask, n
 export interface OrphanDraft { id: string; name: string; brandName: string; createdBy: string; createdAt: Date; reason: string }
 
 /** Why a draft with inputs has not started, in the Ops page's words (F5-R5). */
-export function orphanReason(draft: Pick<CatalogBatch, "channels" | "options" | "counts">, uploads: Pick<UploadSummary, "pending" | "webOnly">): string {
+export function orphanReason(draft: Pick<CatalogBatch, "channels" | "options" | "counts">, uploads: Pick<UploadSummary, "pending" | "webOnly"> & Partial<Pick<UploadSummary, "readingFolders">>): string {
   const pending = uploads.pending;
   if (pending) return `${pending} ${pending === 1 ? "file" : "files"} did not finish uploading.`;
+  if (uploads.readingFolders) return `${readingFoldersText(uploads.readingFolders)}.`;
   if (!draft.counts.previewReady) return uploads.webOnly ?"Its Google links were never collected. Open it and wait for the links to be read." : "Its files were never collected.";
   if (draft.counts.phase === "needs_input") return "Waiting for the photo column of its sheet.";
   if (!draft.channels.length) return "No channel was chosen.";
