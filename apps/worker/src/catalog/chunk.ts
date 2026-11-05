@@ -3,6 +3,7 @@ import sharp from "sharp";
 import { and, eq, inArray, isNull, ne, notInArray, or, sql } from "drizzle-orm";
 import { catalogBatches, catalogChunks, catalogOutputs, catalogProducts, catalogSourceImages } from "@catalog/core/db/schema";
 import { frozenChannels } from "@catalog/core/catalog/holdout";
+import { imageAsset, recordOutputVersion } from "@catalog/core/graph/write-path";
 import { batchPrefix, derivedPath, publicObjectPath, publicUrl, stagingPath } from "@catalog/core/catalog/naming";
 import { planProduct, shotGeometry, trimRules, UnsupportedSourceError, type EnlargementShot, type Matte } from "@catalog/core/catalog/render";
 import { renderKey, renderKeys, rerenderedKey } from "@catalog/core/catalog/pipeline/publish";
@@ -501,7 +502,12 @@ export async function handleChunkTask(rawDeps: CatalogDeps, body: Record<string,
           for (const output of outputs) try {
             const path = stagingPath(prefix,product.pathKey,output.channel,source.n), uri = deps.storage.toGsUri(deps.storage.getBucketName(),path), head = await deps.storage.headObject(uri);
             // Spec 18 lifecycle 3.7: an output held for its enlargement is always rendered again (readiness decides anew, F22).
-            if (head.exists && output.bytes !== null && head.size===output.bytes && !output.flags.includes("enlargement_failed")) { await underClaim(async tx=>tx.update(catalogOutputs).set({stagingUri:uri,crc32c:head.crc32c,status:output.flags.some(f=>f==="failed_compliance") || holdsAtRender(output.flags) ? "needs_attention":"staged",updatedAt:deps.now()}).where(eq(catalogOutputs.id,output.id))); continue; }
+            if (head.exists && output.bytes !== null && head.size===output.bytes && !output.flags.includes("enlargement_failed")) {
+              // M0-F2-R2: the staged image of an earlier delivery that stopped before its row was written; its bytes are
+              // read back once to record its version (this path only runs on a redelivery).
+              const asset = await imageAsset((await deps.storage.downloadBuffer(uri)).buf,uri,"image/jpeg");
+              await underClaim(async tx=>tx.update(catalogOutputs).set({contentVersionId:await recordOutputVersion(tx,{output,source,product,batch,asset}),stagingUri:uri,crc32c:head.crc32c,status:output.flags.some(f=>f==="failed_compliance") || holdsAtRender(output.flags) ? "needs_attention":"staged",updatedAt:deps.now()}).where(eq(catalogOutputs.id,output.id))); continue;
+            }
             const renderStart = +deps.now();
             const rendered = (await deps.renderAllChannels(p,matte,[output.channel],{shotNumber:source.n,productType:product.productType ?? "other",synthesiseShadow:shadowAllowed,identifier:product.identifier,publicObjectPath:output.objectPath,canvas:productPlan(output.channel)?.canvas,channelRules:rules,...renderUpscalers,...(output.channel==="styli" ? {uniformScale}:{}),trace:{batchId:batch.id,productId}}))[output.channel];
             renderMs += +deps.now()-renderStart;
@@ -524,7 +530,9 @@ export async function handleChunkTask(rawDeps: CatalogDeps, body: Record<string,
             await underClaim(async tx=>{await tx.update(catalogOutputs).set(patch).where(eq(catalogOutputs.id,output.id));await flush(tx);});
             if (rendered.jpeg) { const jpeg=rendered.jpeg; await underClaim(async()=>deps.storage.uploadBuffer(path,jpeg,"image/jpeg",{cacheControl:deps.storage.PUBLIC_CACHE_CONTROL})); }
             const staged = rendered.jpeg ? await deps.storage.headObject(uri):null;
-            await underClaim(async tx=>tx.update(catalogOutputs).set({status,stagingUri:rendered.jpeg ? uri:null,crc32c:staged?.crc32c ?? null,updatedAt:deps.now()}).where(eq(catalogOutputs.id,output.id)));
+            // M0-F2-R2, R3: the staged bytes, hashed while in memory, become the output's version in the same write.
+            const asset = rendered.jpeg ? await imageAsset(rendered.jpeg,uri,"image/jpeg"):null;
+            await underClaim(async tx=>tx.update(catalogOutputs).set({status,stagingUri:rendered.jpeg ? uri:null,crc32c:staged?.crc32c ?? null,contentVersionId:asset ? await recordOutputVersion(tx,{output:{...output,flags},source,product,batch,asset}):null,updatedAt:deps.now()}).where(eq(catalogOutputs.id,output.id)));
           } catch(error) { if (error instanceof EnlargementNotReadyError) throw error; const reason = error instanceof Error ? error.message:String(error); await underClaim(async tx=>{await tx.update(catalogOutputs).set({status:"failed",error:reason,reason,updatedAt:deps.now()}).where(eq(catalogOutputs.id,output.id));await flush(tx);}); }
           // 07 4.6a: a channel rule we broke (the Styli guide, margins, the band colour, the file size) is re-made
           // before anything is held, with the fix the measured failure asks for, on the failing channel only.

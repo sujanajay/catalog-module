@@ -37,6 +37,8 @@ async function replacement(name: string) {
     fetch: vi.fn(async () => new Response(null, { status: 404 })),
     storage: {
       getPublicBucketName: () => "public",
+      // M0-S3: an output staged without a version is hashed from its staged bytes at publish.
+      downloadBuffer: async () => ({ buf: Buffer.from([255, 216, 255, 0]), mime: "image/jpeg" }),
       headObject: async () => ({ exists: true, size: 4, contentType: "image/jpeg", generation: String(generation), crc32c: generation === 20 ? "old-crc" : "new-crc" }),
       stageCopyToPublic: copy, deletePublicObject: vi.fn(async () => true), setCustomTime: vi.fn(async () => {}),
     },
@@ -94,6 +96,8 @@ it("gap B: a copy that fails on the second of four outputs leaves one verified, 
     fetch: vi.fn(async () => new Response(jpeg, { status: 200, headers: { "x-goog-generation": "1", "content-type": "image/jpeg", "content-length": "4" } })),
     storage: {
       getPublicBucketName: () => "public",
+      // M0-S3: an output staged without a version is hashed from its staged bytes at publish.
+      downloadBuffer: async () => ({ buf: Buffer.from([255, 216, 255, 0]), mime: "image/jpeg" }),
       headObject: async () => ({ exists: false, size: null, contentType: null, generation: null, crc32c: null }),
       stageCopyToPublic: vi.fn(async () => { if (++copies === 2) throw new Error("Storage refused the copy"); return { generation: "1", crc32c: "crc" }; }),
       deletePublicObject: vi.fn(async () => true), setCustomTime: vi.fn(async () => {}),

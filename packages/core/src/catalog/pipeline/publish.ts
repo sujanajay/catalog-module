@@ -1,7 +1,10 @@
 import { createHash } from "node:crypto";
-import { and, eq, inArray, ne, notInArray, sql } from "drizzle-orm";
+import { and, desc, eq, inArray, isNotNull, isNull, ne, notInArray, sql } from "drizzle-orm";
 import type { Db } from "../../db/client";
-import { catalogBatches, catalogBatchProducts, catalogChunks, catalogOutputs, catalogProductEvents, catalogProducts, catalogSourceImages } from "../../db/schema";
+import { catalogBatches, catalogBatchProducts, catalogChangeEvents, catalogChannelListings, catalogChunks, catalogContentVersions, catalogOutputs, catalogProductEvents, catalogProducts, catalogSourceImages } from "../../db/schema";
+import { recordChange, type GraphDb } from "../../graph";
+import { imageAsset, publishChangeSetId, publishChangeType, publishReason, recordOutputVersion, REMOVED_CHANGE_TYPE, type PublishedSlot } from "../../graph/write-path";
+import { IMPROVE_ACTOR } from "../improve";
 import * as storage from "../../storage";
 import { channel, CHANNEL_RULES_VERSION } from "../channels";
 import { assertWithinProduct, productPrefix, publicObjectPath } from "../naming";
@@ -16,8 +19,9 @@ import { otherTargetUpscalerId, upscaleConfigFromEnv, upscalerId, upscalerKey } 
 export { lockProducts };
 export type Output = typeof catalogOutputs.$inferSelect;
 export type Source = typeof catalogSourceImages.$inferSelect;
-export interface PublishDeps { db: Db; storage: Pick<typeof storage, "headObject" | "stageCopyToPublic" | "deletePublicObject" | "setCustomTime" | "getPublicBucketName">; fetch: typeof fetch; now: () => Date; sleep?: (ms:number) => Promise<void>;
-  /** M3-S1: the render-key versions of the channel rows the worker rendered with (channel-rules.ts); M5-S3: of the batch's pinned ruleset version (null: the latest). */ channelRules: (version?: number | null) => Promise<Pick<ChannelRules, "keyVersion">> }
+export interface PublishDeps { db: Db; storage: Pick<typeof storage, "headObject" | "downloadBuffer" | "stageCopyToPublic" | "deletePublicObject" | "setCustomTime" | "getPublicBucketName">; fetch: typeof fetch; now: () => Date; sleep?: (ms:number) => Promise<void>;
+  /** M3-S1: the render-key versions of the channel rows the worker rendered with (channel-rules.ts); M5-S3: of the batch's pinned ruleset version (null: the latest). */ channelRules: (version?: number | null) => Promise<Pick<ChannelRules, "keyVersion">>;
+  /** M0-S3: a version or change-log write that failed is logged here (ERROR) and never fails the delivery (decision D26). */ log?: (message: string, fields?: Record<string, unknown>) => void }
 /** M3-F3-R3: the note on an output a running experiment's listing kept out of this publish. */
 export const HOLDOUT_KEPT_NOTE = "This listing is part of a running test, so its live image was kept as it is.";
 /**
@@ -101,6 +105,10 @@ export async function publishProduct(deps: PublishDeps, batchId: string, product
   // M5-S3: the ruleset version the batch pinned at Start, read before the transaction (the rules read is its own query).
   const [pin] = await deps.db.select({ rulesetVersion: catalogBatches.rulesetVersion }).from(catalogBatches).where(eq(catalogBatches.id,batchId));
   const rules = await deps.channelRules(pin?.rulesetVersion ?? null);
+  // M0-S3 (D26): outputs staged by a worker from before the write path get their version first, outside the publish
+  // transaction (a download and a hash each), so the delivery below never waits on it or fails for it.
+  await recordStagedVersions(deps, batchId, productId);
+  const log = deps.log ?? (() => {});
   return deps.db.transaction(async tx => {
     const [product] = await tx.select().from(catalogProducts).where(eq(catalogProducts.id,productId)).for("update");
     if (!product || product.lockBatchId !== batchId) return { outcome: "not_locked" };
@@ -186,6 +194,7 @@ export async function publishProduct(deps: PublishDeps, batchId: string, product
     let failure: string | null = null;
     const landed = new Map<string, { channel: ChannelId; n: number; generation: string }>();
     const changes: { channel: ChannelId; n:number; oldGeneration:number|null; newGeneration:number; sha256:string }[] = [];
+    const delivered: Output[] = [];
     for (const copy of plan.copies) {
       const o = copy.output;
       try {
@@ -202,6 +211,10 @@ export async function publishProduct(deps: PublishDeps, batchId: string, product
           verified = await verifyPublic(o.publicUrl,{size:o.bytes,generation:written.generation,fetch:deps.fetch,sleep:deps.sleep,pinnedFallback:true});
         }
         if (!verified.ok) throw new Error("Uploaded file could not be read back from the public link");
+        // M0-F2-R8: the version came with the staged image (or from recordStagedVersions); a missing one never stops
+        // the delivery: it is logged here and reported by the output_without_version invariant.
+        if (!o.contentVersionId) log("content version missing at publish",{severity:"ERROR",batchId,productId,outputId:o.id});
+        delivered.push(o);
         await tx.update(catalogOutputs).set({isLive:false,supersededAt:now,supersededByOutputId:o.id,updatedAt:now}).where(and(eq(catalogOutputs.productId,productId),eq(catalogOutputs.channel,o.channel),eq(catalogOutputs.n,o.n),ne(catalogOutputs.id,o.id),eq(catalogOutputs.isLive,true)));
         await tx.update(catalogOutputs).set({isLive:true,status:"verified",generation:Number(written.generation),crc32c:written.crc32c,publishedAt:o.publishedAt ?? now,publishedBy:o.decidedBy ?? actor,updatedAt:now}).where(eq(catalogOutputs.id,o.id));
         changes.push({channel:o.channel,n:o.n,oldGeneration:copy.ifGenerationMatch || null,newGeneration:Number(written.generation),sha256:sources.find(s => s.id === o.sourceImageId)?.sha256 ?? ""});
@@ -220,6 +233,11 @@ export async function publishProduct(deps: PublishDeps, batchId: string, product
       await tx.update(catalogOutputs).set({isLive:false,status:"skipped",supersededAt:now,reason:`Removed in batch ${batch.name}`,updatedAt:now}).where(eq(catalogOutputs.id,target.output.id));
       removed.push(target.output);
     }
+    // M0-F3-R1, R2: the change log, in this transaction (one event per changed slot of each listing), inside a savepoint:
+    // the public links already changed, so a failed log write is rolled back alone, logged at ERROR and never fails or
+    // rolls back the delivery (decision D26).
+    try { await tx.transaction(sp => recordPublishEvents(sp,{batch,product,channels,live,delivered:delivered.filter(o => o.contentVersionId),removed,now,actor,rulesKeyVersion:c => rules.keyVersion(c),log})); }
+    catch (error) { log("change log not written",{severity:"ERROR",batchId,productId,error:error instanceof Error ? error.message : String(error)}); }
     const previousSources = await tx.select().from(catalogSourceImages).where(and(eq(catalogSourceImages.productId,productId),eq(catalogSourceImages.isCurrent,true)));
     const reordered = sources.length === previousSources.length && sources.map(s=>s.sha256).sort().join("|") === previousSources.map(s=>s.sha256).sort().join("|") && sources.some(s=> previousSources.find(p=>p.n===s.n)?.sha256 !== s.sha256);
     const wasNew = !all.some(o=>o.batchId !== batchId && (o.publishedAt || o.isLive));
@@ -263,4 +281,104 @@ export function configuredUpscalerId(env: NodeJS.ProcessEnv = process.env): stri
 export function configuredUpscalerIds(env: NodeJS.ProcessEnv = process.env): string[] {
   const config = upscaleConfigFromEnv(env);
   return config.model ? [config.model, ...(config.x4Model ? [config.x4Model] : [])].map((model) => upscalerId(model, config.target)) : [];
+}
+
+
+/**
+ * M0-F2-R8 for outputs staged by a worker from before M0-S3 (D22, D26): their staged bytes are read and hashed outside
+ * any transaction, then each version is written in its own short transaction, only while the row still holds those
+ * staged bytes (same staging_uri and crc32c, no version yet). A failure is logged and left to the invariant; the
+ * publish goes on without it.
+ */
+async function recordStagedVersions(deps: PublishDeps, batchId: string, productId: string): Promise<void> {
+  const log = deps.log ?? (() => {});
+  const rows = await deps.db.select().from(catalogOutputs).where(and(eq(catalogOutputs.batchId, batchId), eq(catalogOutputs.productId, productId), isNull(catalogOutputs.contentVersionId), isNotNull(catalogOutputs.stagingUri), inArray(catalogOutputs.status, ["staged", "needs_attention"])));
+  if (!rows.length) return;
+  const [product] = await deps.db.select().from(catalogProducts).where(eq(catalogProducts.id, productId));
+  const [batch] = await deps.db.select().from(catalogBatches).where(eq(catalogBatches.id, batchId));
+  if (!product || !batch) return;
+  for (const output of rows) {
+    try {
+      const [source] = await deps.db.select().from(catalogSourceImages).where(eq(catalogSourceImages.id, output.sourceImageId));
+      if (!source) continue;
+      const asset = await imageAsset((await deps.storage.downloadBuffer(output.stagingUri!)).buf, output.stagingUri!, "image/jpeg");
+      await deps.db.transaction(async tx => {
+        const contentVersionId = await recordOutputVersion(tx, { output, source, product, batch, asset });
+        await tx.update(catalogOutputs).set({ contentVersionId }).where(and(eq(catalogOutputs.id, output.id), isNull(catalogOutputs.contentVersionId), eq(catalogOutputs.stagingUri, output.stagingUri!), output.crc32c ? eq(catalogOutputs.crc32c, output.crc32c) : isNull(catalogOutputs.crc32c)));
+      });
+    } catch (error) {
+      log("content version not recorded", { severity: "ERROR", batchId, productId, outputId: output.id, error: error instanceof Error ? error.message : String(error) });
+    }
+  }
+}
+
+/**
+ * M0-F3-R1, R2, R9: one `links_delivered` event per delivered slot and one `removed` event per emptied slot, on every
+ * listing of the option on that channel (both markets when the channel keeps one image set), each with its reason and
+ * M10 change type. The slot's previous version is the last event on that listing slot (else the other live output's
+ * version), so an output row re-made in place (an M1-S4 improvement, Try again) is logged as the change it is. The key
+ * names the output, the slot's last event (its seq) and the listing (D27): a retry of the same publish finds the last
+ * event already at this version and writes nothing, a retry after a rollback rebuilds the same key, and a re-made row
+ * gets a new event even when its versions repeat (A, B, A, B). Exported for the write-path tests. A product with no option yet (M0-S2
+ * has not linked it) has no listing, so no event.
+ */
+export async function recordPublishEvents(db: GraphDb, input: { batch: typeof catalogBatches.$inferSelect; product: typeof catalogProducts.$inferSelect; channels: ChannelId[]; live: Output[]; delivered: Output[]; removed: Output[]; now: Date; actor: string; rulesKeyVersion: (c: ChannelId) => string; log?: PublishDeps["log"] }): Promise<void> {
+  const { batch, product, live, delivered, removed, now, actor } = input;
+  const log = input.log ?? (() => {});
+  // A key that already names an equal event writes nothing; with keys on the slot's last event that only happens if
+  // the log was read wrong, so it is reported, never dropped in silence (review 2 P2-2).
+  const write = async (e: Parameters<typeof recordChange>[1], outputId: string) => {
+    if (!(await recordChange(db, e)).created) log("change event already recorded", { severity: "ERROR", batchId: batch.id, productId: product.id, outputId, listingId: e.listingId, slot: e.slot, idempotencyKey: e.idempotencyKey });
+  };
+  if (!product.optionId || (!delivered.length && !removed.length)) return;
+  const touched = [...new Set([...delivered, ...removed].map(o => o.channel))].filter(c => input.channels.includes(c));
+  if (!touched.length) return;
+  const listings = await db.select({ id: catalogChannelListings.id, channel: catalogChannelListings.channel }).from(catalogChannelListings)
+    .where(and(eq(catalogChannelListings.optionId, product.optionId), inArray(catalogChannelListings.channel, touched)));
+  if (!listings.length) return;
+  // The last event on each listing slot (index on listing_id, slot, at).
+  const lastRows = await db.select({ listingId: catalogChangeEvents.listingId, slot: catalogChangeEvents.slot, kind: catalogChangeEvents.kind, toVersionId: catalogChangeEvents.toVersionId, seq: catalogChangeEvents.seq })
+    .from(catalogChangeEvents).where(and(inArray(catalogChangeEvents.listingId, listings.map(l => l.id)), inArray(catalogChangeEvents.slot, [...new Set([...delivered, ...removed].map(o => `image:${o.n}` as const))]))).orderBy(desc(catalogChangeEvents.seq));
+  const last = new Map<string, (typeof lastRows)[number]>();
+  for (const r of lastRows) if (!last.has(`${r.listingId}|${r.slot}`)) last.set(`${r.listingId}|${r.slot}`, r);
+  // The photos behind the images live before this publish, and the version source of each delivered image.
+  const photoIds = [...new Set([...live, ...delivered].map(o => o.sourceImageId))];
+  const photoSha = new Map((await db.select({ id: catalogSourceImages.id, sha256: catalogSourceImages.sha256 }).from(catalogSourceImages).where(inArray(catalogSourceImages.id, photoIds))).map(p => [p.id, p.sha256]));
+  const versionIds = delivered.map(o => o.contentVersionId!);
+  const versionSource = new Map(versionIds.length ? (await db.select({ id: catalogContentVersions.id, source: catalogContentVersions.source }).from(catalogContentVersions).where(inArray(catalogContentVersions.id, versionIds))).map(v => [v.id, v.source]) : []);
+  // Who re-made a delivered row in place: the latest "enlargement_retried" product event of the batch for that shot.
+  const retried = delivered.some(o => o.publishedAt) ? await db.select({ id: catalogProductEvents.id, actor: catalogProductEvents.actor, details: catalogProductEvents.details }).from(catalogProductEvents)
+    .where(and(eq(catalogProductEvents.productId, product.id), eq(catalogProductEvents.batchId, batch.id), eq(catalogProductEvents.kind, "enlargement_retried"))).orderBy(desc(catalogProductEvents.at)) : [];
+  const changeSetId = publishChangeSetId(batch.id, product.id);
+  const common = { at: now, evidence: "tool_publish" as const, actor, changeSetId, batchId: batch.id };
+  for (const o of delivered) {
+    const other = live.find(l => l.channel === o.channel && l.n === o.n && l.id !== o.id) ?? null;
+    // Delivered before and now made again in place (the same row, so the same photo).
+    const remade = !other && !!o.publishedAt;
+    const remadeBy = remade ? retried.find(e => Number(e.details.n) === o.n) ?? null : null;
+    const sourceSha256 = photoSha.get(o.sourceImageId) ?? "";
+    const slot: PublishedSlot = {
+      versionSource: versionSource.get(o.contentVersionId!) ?? "cleanup", n: o.n, sourceSha256,
+      previousSourceSha256: remade ? sourceSha256 : other ? photoSha.get(other.sourceImageId) ?? null : null,
+      movedFromOtherSlot: live.some(l => l.channel === o.channel && l.n !== o.n && photoSha.get(l.sourceImageId) === sourceSha256),
+      flags: o.flags, decision: o.decision,
+      remade: remade ? { by: remadeBy?.actor === IMPROVE_ACTOR ? "improvement" : "operator", ref: remadeBy ? `catalog_product_events:${remadeBy.id}` : null } : null,
+    };
+    const reason = publishReason(slot, input.rulesKeyVersion(o.channel));
+    for (const listing of listings.filter(l => l.channel === o.channel)) {
+      const before = last.get(`${listing.id}|image:${o.n}`);
+      if (before?.toVersionId === o.contentVersionId) continue;
+      const fromVersionId = before ? before.toVersionId : other?.contentVersionId ?? null;
+      await write({ ...common, idempotencyKey: `publish:${o.id}:${before ? before.seq : "none"}:${listing.id}`, listingId: listing.id, slot: `image:${o.n}`, fromVersionId,
+        toVersionId: o.contentVersionId!, kind: "links_delivered", evidenceRef: `catalog_outputs:${o.id}`, ...reason, changeTypeId: publishChangeType(slot) }, o.id);
+    }
+  }
+  for (const o of removed) {
+    for (const listing of listings.filter(l => l.channel === o.channel)) {
+      const before = last.get(`${listing.id}|image:${o.n}`);
+      if (before?.kind === "removed") continue;
+      await write({ ...common, idempotencyKey: `removed:${o.id}:${before ? before.seq : "none"}:${listing.id}`, listingId: listing.id, slot: `image:${o.n}`, fromVersionId: before ? before.toVersionId : o.contentVersionId ?? null,
+        toVersionId: null, kind: "removed", evidenceRef: `catalog_outputs:${o.id}`, reasonKind: "new_content", reasonRef: null, changeTypeId: REMOVED_CHANGE_TYPE }, o.id);
+    }
+  }
 }
