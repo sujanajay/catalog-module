@@ -78,4 +78,59 @@ assert.ok(works > 0 && works < firstRead, 'deploy.sh checks the login before its
 assert.ok(full > firstRead && full < build, 'deploy.sh runs the pre-flight before the build');
 console.log('PASS deploy.sh runs the pre-flight before reading or building');
 
+// Disk pre-flight (2026-11-05, deploy of 9b9abfc: C: reached 0 bytes mid-deploy). preflight_df is faked: the temp
+// folder (TMPDIR, a path with catalog-preflight- in it) answers TEMP_FS/TEMP_KB, the repo REPO_FS/REPO_KB; DF=fail
+// makes df fail. REAL_DF=1 keeps the real df.
+const GB = 1024 * 1024;
+function runDisk(env) {
+  const script = `set -euo pipefail
+cd "$ROOT"
+source infra/lib/preflight.sh
+if [ "\${REAL_DF:-0}" != 1 ]; then
+  preflight_df() {
+    [ "\${DF:-ok}" = ok ] || { echo "df: cannot read" >&2; return 1; }
+    echo "Filesystem 1024-blocks Used Available Capacity Mounted on"
+    if [[ "$1" == *catalog-preflight-* ]]; then echo "$TEMP_FS 100000000 1 $TEMP_KB 99% /t"; else echo "$REPO_FS 100000000 1 $REPO_KB 99% /r"; fi
+  }
+fi
+disk_preflight`;
+  const r = spawnSync(bash, ['-c', script], {
+    env: {...process.env, ROOT: root, TMPDIR: dir, TEMP_FS: 'C:', REPO_FS: 'C:', TEMP_KB: String(20 * GB), REPO_KB: String(20 * GB), ...env},
+    encoding: 'utf8',
+    timeout: 60000,
+  });
+  if (r.error) throw r.error;
+  return r;
+}
+
+const HINT = /Free space \(Windows Settings > System > Storage, or remove merged worktrees: git worktree list\), then re-run/;
+const diskCases = [
+  {label: 'disk: enough free space passes with one line per drive', env: {}, status: 0, out: /^==> pre-flight: 20\.0 GB free on C: \(the temp folder; a deploy needs 8 GB\)\n$/},
+  {label: 'disk: exactly 8 GB passes', env: {TEMP_KB: String(8 * GB), REPO_KB: String(8 * GB)}, status: 0},
+  {label: 'disk: a full temp drive (0 bytes) stops with the measured space and the hint', env: {TEMP_FS: 'D:', TEMP_KB: '0'}, status: 1,
+    err: /only 0\.0 GB free on D: \(the temp folder, [^)]*catalog-preflight-[^)]*\); a deploy needs 8 GB \(DEPLOY_MIN_FREE_GB\)/, hint: true, out: /20\.0 GB free on C: \(the repo/},
+  {label: 'disk: the repo drive under 8 GB stops', env: {REPO_FS: 'E:', REPO_KB: String(8 * GB - 1)}, status: 1, err: /only 7\.9 GB free on E: \(the repo, /, hint: true},
+  {label: 'disk: the temp folder and the repo on one low drive give one error', env: {TEMP_KB: String(4 * GB), REPO_KB: String(4 * GB)}, status: 1,
+    err: /^ERROR: pre-flight: only 4\.0 GB free on C: \(the temp folder, [^\n]*\n$/, hint: true},
+  {label: 'disk: DEPLOY_MIN_FREE_GB moves the limit', env: {TEMP_KB: String(4 * GB), REPO_KB: String(4 * GB), DEPLOY_MIN_FREE_GB: '2'}, status: 0, out: /4\.0 GB free on C: \(the temp folder; a deploy needs 2 GB\)/},
+  {label: 'disk: a df that cannot measure stops', env: {DF: 'fail'}, status: 1, err: /cannot measure the free space for the temp folder/},
+  {label: 'disk: a DEPLOY_MIN_FREE_GB that is not a number stops', env: {DEPLOY_MIN_FREE_GB: 'eight'}, status: 1, err: /DEPLOY_MIN_FREE_GB must be a whole number/},
+  {label: 'disk: the real df -Pk is read on this machine', env: {REAL_DF: '1', TMPDIR: os.tmpdir(), DEPLOY_MIN_FREE_GB: '0'}, status: 0, out: /^==> pre-flight: \d+\.\d GB free on \S+ \(the temp folder; a deploy needs 0 GB\)/},
+];
+for (const c of diskCases) {
+  const r = runDisk(c.env);
+  const out = r.stdout.replace(/\r/g, '');
+  const err = r.stderr.replace(/\r/g, '');
+  assert.equal(r.status, c.status, `${c.label}: status (stderr: ${err})`);
+  if (c.out) assert.match(out, c.out, c.label);
+  if (c.err) assert.match(err, c.err, c.label);
+  if (c.hint) assert.match(err, HINT, `${c.label}: hint`);
+  console.log(`PASS ${c.label}`);
+}
+
+// deploy.sh: the disk check runs first, before the login check and anything that writes a temp file or a tarball.
+const disk = deploy.indexOf('\ndisk_preflight || exit 1\n');
+assert.ok(disk > 0 && disk < works, 'deploy.sh checks the disk before the login');
+console.log('PASS deploy.sh checks the disk first');
+
 fs.rmSync(dir, {recursive: true, force: true});
