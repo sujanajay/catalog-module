@@ -265,6 +265,7 @@ export const COST_ALERT_WORDS: Record<string, string> = {
   unlabelled: "a service or job is missing its labels",
   unpriced: "a service has no price yet",
   success_under_target: "batch success under target",
+  run_failed: "the daily cost check did not finish",
 };
 /** The day's check: the record plus idle adds up to the billed time on every live part (no over-count). */
 export function costCheckText(d: { closes: boolean; provisional: boolean }): string {

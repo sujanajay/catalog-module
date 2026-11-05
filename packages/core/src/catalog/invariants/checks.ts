@@ -152,14 +152,22 @@ export const CHECKS: readonly InvariantCheck[] = [
   },
   {
     id: "cost_reconcile_stale",
-    sentence: "The daily cost check (catalog-cost-reconcile) wrote its cost rows in the last 30 hours, once it has run at all.",
+    sentence: "The daily cost check (catalog-cost-reconcile) finished a run in the last 30 hours, or the cost ledger is younger than that.",
     severity: "WARNING",
-    // Every run writes rows (the shared database line at least), so the newest computed_at is the last good run. One row
-    // (the newest) when it is too old; nothing before the first run. Not a batch's problem: batch_id null.
-    sql: (now) => sql`SELECT d.id, NULL::uuid AS batch_id FROM (
+    // A run writes all its rows in one transaction at the end (the shared database line at least), so the newest
+    // computed_at is the last run that finished; a run that fails part-way writes nothing. One row (the newest) when it
+    // is too old. Before any run: one row (the oldest ledger row) once the ledger is older than 30 hours, so a job that
+    // never ran or never finished is reported too. Not a batch's problem: batch_id null.
+    sql: (now) => sql`SELECT d.id::text AS id, NULL::uuid AS batch_id FROM (
         SELECT id, computed_at FROM catalog_cost_days ORDER BY computed_at DESC, id DESC LIMIT 1
       ) AS d
-      WHERE d.computed_at < ${at(now)} - ${COST_RECONCILE_STALE_HOURS}::int * interval '1 hour'`,
+      WHERE d.computed_at < ${at(now)} - ${COST_RECONCILE_STALE_HOURS}::int * interval '1 hour'
+      UNION ALL
+      SELECT e.id::text AS id, NULL::uuid AS batch_id FROM (
+        SELECT id, at FROM catalog_cost_events ORDER BY at ASC, id ASC LIMIT 1
+      ) AS e
+      WHERE NOT EXISTS (SELECT 1 FROM catalog_cost_days)
+        AND e.at < ${at(now)} - ${COST_RECONCILE_STALE_HOURS}::int * interval '1 hour'`,
   },
   {
     id: "daily_check_alert",
