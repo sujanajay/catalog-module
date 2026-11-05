@@ -32,6 +32,10 @@
 # Spec 18 GPU upscaler (2026-10-30): catalog-upscale-gpu goes right after catalog-upscale, so the worker env knows both
 # upscalers' URLs before the web and the worker are deployed.
 SERVICES=(catalog-matting catalog-upscale catalog-upscale-gpu catalog-matting-gpu catalog-web catalog-worker)
+# M6-F2-R7 (M6-S5): the cut-out and enlargement services go through the gate together (gate_group in infra/lib/gate.sh):
+# candidates and probes at once, traffic only when all passed. None of them reads the URL or result of another; the web
+# and the worker read theirs, so those two follow one at a time.
+PARALLEL_SERVICES=(catalog-matting catalog-upscale catalog-upscale-gpu catalog-matting-gpu)
 # M6-S1: labels app=catalog, component=<service name>, env=live|preview (infra/lib/labels.sh); the gate refuses a
 # service without them.
 # shellcheck source=labels.sh
@@ -67,7 +71,7 @@ service_catalog_matting() {
   # the preview stack and the fidelity gate, so serving it costs nothing otherwise.
   SVC_NAME=catalog-matting
   SVC_REGION=$(service_region "$SVC_NAME")
-  SVC_IMAGE=$AR/matting:$TAG
+  SVC_IMAGE=$AR/matting:${MATTING_TAG:-$TAG}
   local concurrency=1
   SVC_ARGS=(--service-account="$MATTING_SA" --cpu=4 --memory=16Gi --concurrency="$concurrency" --min-instances=0
     --max-instances="$MATTING_CPU_MAX_INSTANCES" --timeout="$MATTING_TIMEOUT_S" --labels="$(catalog_labels catalog-matting live)")
@@ -107,7 +111,7 @@ service_catalog_upscale() {
   # count), sized by the UPSCALE_* rows of infra/lib/shape.sh, which refuse a shape that has not been measured.
   SVC_NAME=catalog-upscale
   SVC_REGION=$(service_region "$SVC_NAME")
-  SVC_IMAGE=$AR/matting:$TAG
+  SVC_IMAGE=$AR/matting:${MATTING_TAG:-$TAG}
   SVC_ARGS=(--service-account="$MATTING_SA" --cpu="$UPSCALE_CPU_VCPU" --memory="$UPSCALE_MEMORY" --concurrency="$UPSCALE_CONCURRENCY"
     --min-instances=0 --max-instances="$UPSCALE_MAX_INSTANCES" --timeout="$UPSCALE_TIMEOUT_S" --labels="$(catalog_labels catalog-upscale live)")
   SVC_MAX=$UPSCALE_MAX_INSTANCES
@@ -178,7 +182,7 @@ service_catalog_upscale_gpu() {
   # project-level run.invoker grant (infra/bootstrap.sh), which covers every region.
   SVC_NAME=catalog-upscale-gpu
   SVC_REGION=$(service_region "$SVC_NAME")
-  SVC_IMAGE=$AR/matting-gpu:$TAG
+  SVC_IMAGE=$AR/matting-gpu:${MATTING_TAG:-$TAG}
   SVC_ARGS=(--service-account="$MATTING_SA" --gpu=1 --gpu-type="$UPSCALE_GPU_TYPE" --no-gpu-zonal-redundancy --no-cpu-throttling
     --cpu="$UPSCALE_GPU_CPU" --memory="$UPSCALE_GPU_MEMORY" --concurrency="$UPSCALE_GPU_CONCURRENCY" --min-instances=0
     --max-instances="$UPSCALE_GPU_MAX_INSTANCES" --timeout="$UPSCALE_GPU_TIMEOUT_S" --labels="$(catalog_labels catalog-upscale-gpu live)")
@@ -224,7 +228,7 @@ service_catalog_matting_gpu() {
   # knobs reach the service only when set, so one knob moves per candidate.
   SVC_NAME=catalog-matting-gpu
   SVC_REGION=$(service_region "$SVC_NAME")
-  SVC_IMAGE=$AR/matting-gpu:$TAG
+  SVC_IMAGE=$AR/matting-gpu:${MATTING_TAG:-$TAG}
   SVC_ARGS=(--service-account="$MATTING_SA" --gpu=1 --gpu-type=nvidia-l4 --no-gpu-zonal-redundancy --no-cpu-throttling
     --cpu="$GPU_CPU" --memory="$GPU_MEMORY" --concurrency="$GPU_CONCURRENCY" --min-instances=0
     --max-instances="$GPU_MAX_INSTANCES" --timeout="$MATTING_TIMEOUT_S" --labels="$(catalog_labels catalog-matting-gpu live)")
@@ -362,9 +366,14 @@ iap_token() {
 # Spec 17 3.3.1 (G3): the matting probe measures the candidate with the models, concurrency and rounds its registry
 # row gives (sized per service). The probe job's task timeout is the gate's timeout, so a probe the gate gave up on
 # never keeps running (and billing) on the candidate (2026-10-28: it ran on for 20 minutes).
+# M6-F2-R7 (M6-S5): each matting service probes through its own job, catalog-check-<service without "catalog-">
+# (catalog-check-matting, -upscale, -upscale-gpu, -matting-gpu), because gate_group runs their probes at once and a probe
+# job carries its arguments in the job itself. GATE_SERVICE comes from the gate; by hand it is catalog-matting.
+probe_job_name() { local service=${GATE_SERVICE:-catalog-matting}; echo "catalog-check-${service#catalog-}"; }
+
 probe_matting() {
   local timeout=$1 models=$2 concurrency=$3 rounds=$4 url=$5
-  PROBE_TASK_TIMEOUT=$timeout bash infra/check-matting.sh --probe "$url" --models="$models" --concurrency="$concurrency" --rounds="$rounds"
+  PROBE_JOB=$(probe_job_name) PROBE_TASK_TIMEOUT=$timeout bash infra/check-matting.sh --probe "$url" --models="$models" --concurrency="$concurrency" --rounds="$rounds"
 }
 
 # Spec 18 H1: the upscale probe (cloudrun_check.py --probe-upscale through infra/check-matting.sh) with the sizes,
@@ -379,7 +388,7 @@ probe_upscale() {
   # their arguments).
   [ "${UPSCALE_DETERMINISM_SECONDS:-0}" = 0 ] || gate+=(--determinism-seconds="$UPSCALE_DETERMINISM_SECONDS")
   [ "$cold_start_max" = 0 ] || gate+=(--cold-start-max="$cold_start_max")
-  PROBE_TASK_TIMEOUT=$timeout bash infra/check-matting.sh --probe-upscale "$url" --model="$model" --sizes="$sizes" \
+  PROBE_JOB=$(probe_job_name) PROBE_TASK_TIMEOUT=$timeout bash infra/check-matting.sh --probe-upscale "$url" --model="$model" --sizes="$sizes" \
     --concurrency="$concurrency" --rounds="$rounds" --timeout="$call_timeout" --x2-max-pixels="$x2_max_pixels" --x4-max-pixels="$x4_max_pixels" ${gate[@]+"${gate[@]}"}
 }
 

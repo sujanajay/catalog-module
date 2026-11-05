@@ -181,6 +181,27 @@ try {
   assert.equal(mismatch.flags, null);
   console.log('PASS the runtime check still compares versions');
 
+  // M6-F2-R7 (M6-S5): the gate runs the matting probes at once, each as its own job named by PROBE_JOB (services.sh
+  // probe_job_name), so one probe never executes another one's arguments; the job carries the labels of its name.
+  process.env.PROBE_JOB = 'catalog-check-upscale-gpu';
+  try {
+    const own = run(['--probe-upscale', upscaleUrl]);
+    assert.equal(own.status, 0, own.stderr);
+    assert.match(own.calls, /run jobs deploy catalog-check-upscale-gpu --quiet/);
+    assert.match(own.calls, /run jobs execute catalog-check-upscale-gpu --region=asia-south1 --wait/);
+    assert.ok(!/catalog-check-matting/.test(own.calls));
+    assert.deepEqual(own.flags['--labels'], {app: 'catalog', component: 'catalog-check-upscale-gpu', env: 'test'});
+    process.env.PROBE_JOB = 'other-job';
+    const bad = run(['--probe-upscale', upscaleUrl]);
+    assert.equal(bad.status, 2);
+    assert.match(bad.stderr, /PROBE_JOB must look like catalog-check-<name>/);
+    assert.equal(bad.calls, '');
+  } finally {
+    delete process.env.PROBE_JOB;
+  }
+  assert.deepEqual(run(['--probe-upscale', upscaleUrl]).flags['--labels'], {app: 'catalog', component: 'catalog-check-matting', env: 'test'});
+  console.log('PASS PROBE_JOB runs a probe as its own catalog-check-<name> job; by default catalog-check-matting');
+
   const usage = run(['--probe']);
   assert.equal(usage.status, 2);
   assert.match(usage.stderr, /usage: .* --probe <url>/);
