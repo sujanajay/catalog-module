@@ -1,4 +1,4 @@
-import { channelRulesLoader, FIXTURE_CHANNEL_RULES } from "@catalog/core/catalog/channel-rules";
+import { channelRulesLoader, FIXTURE_CHANNEL_RULES, pinRuleset } from "@catalog/core/catalog/channel-rules";
 import { publishChannelChange } from "@catalog/core/catalog/channel-rules-testing";
 import { seedChannelRules } from "@catalog/core/catalog/rules/seed";
 import { autoDecideSnapshot } from "@catalog/core/catalog/auto-decide";
@@ -76,7 +76,7 @@ function world() {
     renderAllChannels:vi.fn<CatalogDeps["renderAllChannels"]>(async(_p,_m,channels)=>Object.fromEntries(channels.map(channel=>[channel,{jpeg:Buffer.from([255,216,255,_p.rgb[0]!]),status:"ok",plan:{w:800,h:1000,lowResolution:false,safeBox:{x:0,y:0,w:800,h:1000},scale:1,placedX:0,placedY:0,detailShot:false},quality:90,bytes:4,flags:[],notes:[],attention:null,compliance:{ok:true,failures:[]}}])) as unknown as Awaited<ReturnType<CatalogDeps["renderAllChannels"]>>)};
   return {deps,objects,copy,remove,upload};
 }
-async function seed(w:ReturnType<typeof world>,name:string,options:{productId?:string;shots?:string[];channels?: ("noon"|"amazon"|"styli")[]}={}) {
+async function seed(w:ReturnType<typeof world>,name:string,options:{productId?:string;shots?:string[];channels?: ("noon"|"amazon"|"styli"|"namshi"|"trendyol")[]}={}) {
   const [batch]=await db.insert(catalogBatches).values({brandSlug:"anta",brandName:"Anta",name,isTest:true,createdBy:"test@opptra.com",status:"matting",channels:options.channels ?? ["noon"],counts:{...EMPTY_BATCH_COUNTS,products:1,sources:(options.shots ?? ["sha"]).length,outputs:(options.shots ?? ["sha"]).length*(options.channels ?? ["noon"]).length}}).returning();
   const product=options.productId ? (await db.select().from(catalogProducts).where(eq(catalogProducts.id,options.productId)))[0]!:(await db.insert(catalogProducts).values({brandSlug:"anta",isTest:true,productKey:name,pathKey:name,identifier:name}).returning())[0]!;
   await db.update(catalogProducts).set({lockBatchId:batch!.id}).where(eq(catalogProducts.id,product.id));
@@ -1574,5 +1574,65 @@ describe("M3-S1 acceptance: renders read the M5 channel registry (M3 4.3.9 tests
     expect(made.find(o=>o.channel==="noon")).toMatchObject({status:"skipped",isLive:false,reason:HOLDOUT_KEPT_NOTE});
     expect(made.find(o=>o.channel==="amazon")).toMatchObject({status:"verified",isLive:true});
     expect((await live(first.product.id,"noon"))[0]).toMatchObject({id:noonBefore!.id,generation:noonBefore!.generation});
+  },240_000);
+});
+describe("M5-S3 acceptance, offline form: Noon, Namshi, Trendyol at 240+, Amazon image 1 white; a batch started before a publish keeps its version",()=>{
+  // The real render on a product taller than wide, so every canvas shows background at its corners (as in M3-S1 above).
+  const W=800,H=800;
+  const shot=()=>{const rgb=Buffer.alloc(W*H*3,255),alpha=Buffer.alloc(W*H);for(let y=150;y<650;y++)for(let x=250;x<550;x++){const i=y*W+x;rgb[i*3]=40;rgb[i*3+1]=60;rgb[i*3+2]=150;alpha[i]=255;}return {rgb,alpha};};
+  function m5World() {
+    const w=world(),{rgb,alpha}=shot();
+    w.deps.channelRules=channelRulesLoader(db,{storage:w.deps.storage});
+    w.deps.renderAllChannels=vi.fn(renderAllChannels);
+    w.deps.prepare=vi.fn(async()=>({width:W,height:H,rgb,alphaSource:null,background:analyseBackground(rgb,W,H),flags:[],sourceMime:"image/jpeg"}));
+    w.deps.matteFor=vi.fn<CatalogDeps["matteFor"]>(async()=>({alpha,width:W,height:H,model:"fixture",ms:12,source:"model",target:"cpu",sentLongSide:W}));
+    return w;
+  }
+  /** What Start does (M5 3.3): pin the latest published version on the batch, its snapshot file written when missing. */
+  const start=async(w:ReturnType<typeof m5World>,s:Awaited<ReturnType<typeof seed>>)=>{const pin=await pinRuleset(db,{storage:w.deps.storage,log:()=>{}});await db.update(catalogBatches).set({rulesetVersion:pin!.version}).where(eq(catalogBatches.id,s.batch.id));return pin!.version;};
+  /** The canvas colour at a corner of a published output, measured on the output pixels. */
+  const cornerOf=async(w:ReturnType<typeof m5World>,o:typeof catalogOutputs.$inferSelect)=>[...(await sharp(w.objects.get(`gs://public/${o.objectPath}`)!.buf).extract({left:2,top:2,width:1,height:1}).removeAlpha().raw().toBuffer())];
+  beforeAll(async()=>{await seedTaxonomy(db);await seedChannelRules(db);},120_000);
+
+  it("Noon, Namshi and Trendyol backgrounds read 240 or more and Amazon image 1 reads pure white, rendered from the batch's pinned version",async()=>{
+    const w=m5World(),s=await seed(w,"m5s3-c10",{shots:["c1","c2"],channels:["noon","namshi","trendyol","amazon"]});
+    const version=await start(w,s);
+    expect(w.objects.has(`gs://assets/rules/snapshots/v${version}.json`)).toBe(true);
+    expect((await run(w,s)).outcome).toBe("published");
+    const outputs=await db.select().from(catalogOutputs).where(eq(catalogOutputs.batchId,s.batch.id)),rules=await channelRulesLoader(db)(version);
+    expect(outputs).toHaveLength(8);
+    for(const o of outputs) {
+      expect(o.compliance,`${o.channel} ${o.n}`).toMatchObject({ok:true,failures:[]});
+      const rgb=await cornerOf(w,o);
+      if(o.channel==="amazon" && o.n===1) expect(rgb).toEqual([255,255,255]);
+      else {
+        for(const v of rgb) expect(v,`${o.channel} ${o.n}`).toBeGreaterThanOrEqual(240);
+        hexColor(backgroundOf(rules.spec(o.channel),o.n)).forEach((v,c)=>expect(Math.abs(rgb[c]!-v)).toBeLessThanOrEqual(1));
+      }
+      expect(o.renderKey).toBe(renderKey({sourceSha256:o.n===1 ? "c1":"c2",channel:o.channel,n:o.n,policyKey:"default|fixture",rulesVersion:rules.keyVersion(o.channel)}));
+    }
+  },240_000);
+
+  it("a batch started before a publish keeps its version through every chunk delivery and the publish; the next batch uses the new one",async()=>{
+    const w=m5World(),before=await seed(w,"m5s3-before");
+    const pinned=await start(w,before),old=await channelRulesLoader(db)(pinned);
+    const oldGrey=hexColor(old.spec("noon").background);
+    // An admin publishes a new Noon background while the batch is running (before its first chunk delivery).
+    const published=await publishChannelChange(db,"noon",{background:"#FAFAFA"});
+    expect(published).toBeGreaterThan(pinned);
+    expect((await run(w,before)).outcome).toBe("published");
+    const [kept]=await db.select().from(catalogOutputs).where(and(eq(catalogOutputs.batchId,before.batch.id),eq(catalogOutputs.channel,"noon")));
+    expect(kept!.compliance).toMatchObject({ok:true});
+    (await cornerOf(w,kept!)).forEach((v,c)=>expect(Math.abs(v-oldGrey[c]!)).toBeLessThanOrEqual(1));
+    expect(kept!.renderKey).toBe(renderKey({sourceSha256:"sha",channel:"noon",n:1,policyKey:"default|fixture",rulesVersion:old.keyVersion("noon")}));
+    expect((await db.select().from(catalogBatches).where(eq(catalogBatches.id,before.batch.id)))[0]!.rulesetVersion).toBe(pinned);
+
+    const after=await seed(w,"m5s3-after");
+    expect(await start(w,after)).toBe(published);
+    expect((await run(w,after)).outcome).toBe("published");
+    const [made]=await db.select().from(catalogOutputs).where(and(eq(catalogOutputs.batchId,after.batch.id),eq(catalogOutputs.channel,"noon")));
+    expect(made!.compliance).toMatchObject({ok:true});
+    for(const v of await cornerOf(w,made!)) expect(Math.abs(v-250)).toBeLessThanOrEqual(1);
+    expect(made!.renderKey).toBe(renderKey({sourceSha256:"sha",channel:"noon",n:1,policyKey:"default|fixture",rulesVersion:(await channelRulesLoader(db)(published)).keyVersion("noon")}));
   },240_000);
 });

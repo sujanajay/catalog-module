@@ -6,6 +6,9 @@ import { createTestDb } from "../../db/testing";
 import type { Db } from "../../db/client";
 import { catalogBatches, catalogBatchProducts, catalogChunks, catalogProducts, catalogSourceImages, DEFAULT_BATCH_OPTIONS, EMPTY_BATCH_COUNTS } from "../../db/schema";
 import { armAutoStart, holdAutoStart } from "../auto-start";
+import { seedTaxonomy } from "../../analyze/taxonomy-seed";
+import { seedChannelRules } from "../rules/seed";
+import { publishChannelChange } from "../channel-rules-testing";
 
 const hook = vi.hoisted(() => ({ during: async () => {} }));
 vi.mock(import("../ingest/index"), async (original) => ({
@@ -60,3 +63,28 @@ it("a second Start that loses to the first says the batch started, not that file
   hook.during = async () => { hook.during = async () => {}; await startDraftBatch(db, deps, b.id, previewAt, { by: "test" }); };
   await expect(startDraftBatch(db, deps, b.id, previewAt, { by: "test" })).rejects.toMatchObject({ kind: "not_draft", message: "This batch has already started. Open its progress page." });
 });
+
+it("M5-S3: Start pins the ruleset version published at that moment and writes its snapshot file; a later publish leaves the batch on it", async () => {
+  const before = await startableDraft();
+  hook.during = async () => {};
+  const files = new Map<string, Buffer>();
+  const storage = {
+    getBucketName: () => "assets",
+    headObject: async (uri: string) => ({ exists: files.has(uri) }),
+    uploadBuffer: async (path: string, buf: Buffer) => { files.set(`gs://assets/${path}`, buf); return `gs://assets/${path}`; },
+  };
+  // Nothing published yet: the batch pins nothing and reads the latest as it goes, as before M5-S3.
+  await startDraftBatch(db, { storage: storage as never, enqueue: vi.fn(async () => "task") }, before.id, new Date(Date.now() + 60_000).toISOString(), { by: "test" });
+  expect((await read(before.id)).rulesetVersion).toBeNull();
+  await seedTaxonomy(db);
+  await seedChannelRules(db);
+  const b = await startableDraft();
+  await startDraftBatch(db, { storage: storage as never, enqueue: vi.fn(async () => "task") }, b.id, new Date(Date.now() + 60_000).toISOString(), { by: "test" });
+  expect((await read(b.id)).rulesetVersion).toBe(2);
+  expect([...files.keys()]).toEqual(["gs://assets/rules/snapshots/v2.json"]);
+  const published = await publishChannelChange(db, "noon", { background: "#F5F5F5" });
+  expect((await read(b.id)).rulesetVersion).toBe(2);
+  const next = await startableDraft();
+  await startDraftBatch(db, { storage: storage as never, enqueue: vi.fn(async () => "task") }, next.id, new Date(Date.now() + 60_000).toISOString(), { by: "test" });
+  expect((await read(next.id)).rulesetVersion).toBe(published);
+}, 180_000);
