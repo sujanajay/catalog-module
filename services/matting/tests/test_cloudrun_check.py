@@ -582,6 +582,22 @@ def test_x2_cap_check_on_the_slowest_x2_gate_call_and_the_old_cap():
         "x2 timeout check: no x2 call was timed, so UPSCALE_MAX_PIXELS=5400000 is not shown to fit the 1740 s timeout"]
 
 
+def test_x2_cap_check_on_the_slow_host_mix_of_the_failed_gates():
+    # The x2 server seconds at 800x1200 of the two CPU gates that failed (1 round call + 12 determinism calls, mostly on
+    # fresh instances): catalog-check-matting-bksfn (2026-11-05, 4 calls at about 160 s on slow hosts) and
+    # catalog-check-matting-qkpvh (2026-10-31). Both fail the 5.4 MP cap of 2026-10-31 to 2026-11-05 (which passes at
+    # most 161.1 s per MP) and pass the 4.4 MP cap of infra/lib/shape.sh (at most 197.7 s per MP).
+    bksfn = [105.8, 110.4, 110.5, 112.2, 117.0, 117.8, 118.0, 126.6, 126.8, 160.2, 160.2, 160.5, 160.8]
+    qkpvh = [149.6, 102.9, 109.5, 109.8, 110.2, 110.2, 123.2, 124.8, 154.3, 154.9, 155.3, 156.3, 156.7]
+    for timings, second_slowest in ((bksfn, 160.5), (qkpvh, 156.3)):
+        s_per_mp = second_slowest / 0.96
+        [failure] = probe.cap_timeout_check({"swinir-x2": {SMALL: timings}}, {2: 5_400_000}, 1740)[1]
+        assert failure.startswith("swinir-x2: UPSCALE_MAX_PIXELS=5400000 needs 2 x ")
+        entry, failures = probe.cap_timeout_check({"swinir-x2": {SMALL: timings}}, {2: 4_400_000}, 1740)
+        [model] = entry["models"]
+        assert failures == [] and model["sPerMp"] == pytest.approx(s_per_mp, abs=0.01) and model["needS"] < 1740
+
+
 def test_upscale_probe_checks_both_caps_the_gate_passes(fake_upscale, capsys):
     fake = fake_upscale(instances=("up01", "up02"), work_ms=lambda path, count: 1200 if "x4" in path else 600)
     code, reports = run_upscale_probe(fake.url, "--model=swinir-x2,swinir-x4", "--sizes", "64x96", "--rounds", "1", "--timeout=60",

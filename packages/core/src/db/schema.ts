@@ -157,7 +157,7 @@ export const INCIDENT_SEVERITIES = ["warning", "error"] as const;
  * inputs, Continue, review, Start) is not a touch.
  */
 /**
- * M6-F3-R3 operator touches. `hold_start` (M1-S5, 0023): "Wait" on the start countdown is a person stepping in
+ * M6-F3-R3 operator touches. `hold_start` (M1-S5, 0025): "Wait" on the start countdown is a person stepping in
  * (manager decision 2026-11-05), so it counts against the zero-touch target.
  */
 export const TOUCH_ACTIONS = ["decision", "retry_photo", "replace_photo", "retry_collect", "retry_links", "fix_and_continue", "cancel", "add_sku_ids", "hold_start"] as const;
@@ -386,7 +386,7 @@ export const catalogBatches = pgTable(
      */
     rulesetVersion: integer("ruleset_version"),
     /**
-     * M1-S5 (M1-F4-R1, 0023): the batch digest, written by finalize from the same snapshot as the sheet, so the batch
+     * M1-S5 (M1-F4-R1, 0025): the batch digest, written by finalize from the same snapshot as the sheet, so the batch
      * page reads one row, not the outputs. Null before the first finalize and on batches finished before M1-S5.
      */
     digest: jsonb("digest").$type<BatchDigest>(),
@@ -994,6 +994,87 @@ export const catalogRevisions = pgTable(
     firstSeenAt: timestamp("first_seen_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [index("catalog_revisions_first_seen_at_idx").on(t.firstSeenAt)],
+);
+
+// ---------------------------------------------------------------------------
+// M6-S2 cost reconciliation (docs/program/requirements/M6-reliability-cost.md M6-F1-R4 to R6, section 7.1). Written
+// only by packages/core/src/catalog/cost-reconcile.ts (the daily catalog-cost-reconcile job).
+// ---------------------------------------------------------------------------
+
+/** Where a day's billed cost came from: Cloud Monitoring instance time at list prices (M6-S2), or the bill (M6-S3). */
+export const COST_SOURCES = ["monitoring", "billing"] as const;
+/** A Cloud Run service or job, a shared resource split by a rule (Cloud SQL), or a vendor off the GCP bill. */
+export const COST_LINE_KINDS = ["service", "job", "shared", "vendor"] as const;
+/** The `env` label; `unlabelled` for a catalog resource without the app and component labels (an alert). */
+export const COST_ENVS = ["live", "preview", "test", "unlabelled"] as const;
+export type CostSource = (typeof COST_SOURCES)[number];
+export type CostLineKind = (typeof COST_LINE_KINDS)[number];
+export type CostEnv = (typeof COST_ENVS)[number];
+
+/**
+ * One row per UTC day, component, env and source (M6-F1-R4). For a service or job: `billed_usd` what it was billed,
+ * `attributed_usd` the ledger's rows for it that day, `idle_usd` = billed minus attributed, never negative (a ledger
+ * that over-counts is an alert). For a shared line (M6-F1-R6): `billed_usd` the whole resource, `shared_usd` the
+ * catalog's share of it. A vendor line (OpenRouter) is billed as the ledger recorded it until invoices (M6-S3).
+ * Re-computing a day replaces its rows of that source.
+ */
+export const catalogCostDays = pgTable(
+  "catalog_cost_days",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    day: date("day").notNull(), // 'YYYY-MM-DD' (UTC)
+    component: text("component").notNull(),
+    kind: text("kind", { enum: COST_LINE_KINDS }).notNull(),
+    region: text("region"),
+    env: text("env", { enum: COST_ENVS }).notNull(),
+    source: text("source", { enum: COST_SOURCES }).notNull(),
+    /** Billable instance seconds (monitoring source); null for shared and vendor lines. */
+    billableSeconds: numeric("billable_seconds", { precision: 14, scale: 3, mode: "number" }),
+    billedUsd: money("billed_usd").notNull().default(0),
+    creditsUsd: money("credits_usd").notNull().default(0),
+    attributedUsd: money("attributed_usd").notNull().default(0),
+    idleUsd: money("idle_usd").notNull().default(0),
+    sharedUsd: money("shared_usd").notNull().default(0),
+    /** List prices or an admin-set figure rather than the bill. */
+    estimated: boolean("estimated").notNull().default(true),
+    /** The day may still change (a later run re-computes it). */
+    provisional: boolean("provisional").notNull().default(false),
+    /** How the line was priced (shape, rates, share), for a person checking it by hand. */
+    detail: jsonb("detail").$type<Record<string, unknown>>(),
+    computedAt: timestamp("computed_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("catalog_cost_days_day_component_env_source_uq").on(t.day, t.component, t.env, t.source),
+    enumCheck("catalog_cost_days", "kind", t.kind, COST_LINE_KINDS),
+    enumCheck("catalog_cost_days", "env", t.env, COST_ENVS),
+    enumCheck("catalog_cost_days", "source", t.source, COST_SOURCES),
+  ],
+);
+
+/**
+ * M6-F1-R5: a day's cost per batch and component. `attributed_usd` the batch's ledger rows, `idle_usd` its share of
+ * the component's idle pool (by busy seconds), `shared_usd` its share of a shared line (by attributed cost). Idle with
+ * no batch that day is the day row's idle minus the allocations. Re-computing a day replaces its allocations.
+ */
+export const catalogCostAllocations = pgTable(
+  "catalog_cost_allocations",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    day: date("day").notNull(),
+    batchId: uuid("batch_id").notNull().references(() => catalogBatches.id, { onDelete: "cascade" }),
+    component: text("component").notNull(),
+    source: text("source", { enum: COST_SOURCES }).notNull(),
+    busyMs: bigint("busy_ms", { mode: "number" }).notNull().default(0),
+    attributedUsd: money("attributed_usd").notNull().default(0),
+    idleUsd: money("idle_usd").notNull().default(0),
+    sharedUsd: money("shared_usd").notNull().default(0),
+    computedAt: timestamp("computed_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("catalog_cost_allocations_day_batch_component_uq").on(t.day, t.batchId, t.component),
+    index("catalog_cost_allocations_batch_id_idx").on(t.batchId),
+    enumCheck("catalog_cost_allocations", "source", t.source, COST_SOURCES),
+  ],
 );
 
 // ---------------------------------------------------------------------------

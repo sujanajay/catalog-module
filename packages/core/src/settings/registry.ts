@@ -89,6 +89,16 @@ export const OWNERS_KEY = "people.owners";
 export const DEFAULT_OWNERS: readonly string[] = ["sujan@opptra.com"];
 /** The upscaler threshold, moved from the UPSCALE_MIN_SCALE environment variable (integration decision D10). */
 export const UPSCALE_MIN_SCALE_KEY = "images.upscale_min_scale";
+/**
+ * M6-F1-R6 (M6-S2): the shared Cloud SQL instance ila-pg's whole cost per day and the catalog's share of it, for the
+ * monitoring-based reconciliation (Cloud Monitoring carries no price for Cloud SQL). Default day cost: the billing
+ * export's full day 2026-11-03 for ila-pg (zonal, Mumbai): vCPU INR 226.724 + RAM INR 143.988 + storage INR 6.467 =
+ * INR 377.179 at the export's 95.23 INR per USD = USD 3.96. Default share: 104 of the 393 connections (decision D3).
+ */
+export const COST_DATABASE_USD_PER_DAY_KEY = "cost.database_usd_per_day";
+export const DEFAULT_DATABASE_USD_PER_DAY = 3.96;
+export const COST_DATABASE_SHARE_KEY = "cost.database_catalog_share_percent";
+export const DEFAULT_DATABASE_SHARE_PERCENT = 26.5;
 
 export const SETTING_DEFS: readonly SettingDef[] = [
   // M12: the owner allow-list.
@@ -161,6 +171,17 @@ export const SETTING_DEFS: readonly SettingDef[] = [
     key: "graph.photo_match_unsure_max", area: "quality", module: "M0", label: "Live photo is unsure up to",
     help: "Past the match distance and up to this, a live photo is kept as unsure.",
     type: { kind: "whole", min: 0, max: 64, unit: "of 64" }, default: 12, scopes: [], risk: "needs_owner", inUse: false, schemaVersion: 1,
+  },
+  // M6-F1-R6: the shared database line of the daily cost check (M6 decision S2-5).
+  {
+    key: COST_DATABASE_USD_PER_DAY_KEY, area: "services", module: "M6", label: "Shared database cost per day",
+    help: "What the whole shared database costs a day, in US dollars, until the cost is read from the Google bill.",
+    type: { kind: "decimal", min: 0, max: 1000, step: 0.01, unit: "USD" }, default: DEFAULT_DATABASE_USD_PER_DAY, scopes: [], risk: "normal", inUse: true, schemaVersion: 1,
+  },
+  {
+    key: COST_DATABASE_SHARE_KEY, area: "services", module: "M6", label: "Catalog share of the shared database",
+    help: "The part of the shared database's cost counted as catalog cost. The default is the catalog's share of the database connections.",
+    type: { kind: "decimal", min: 0, max: 100, step: 0.1, unit: "percent" }, default: DEFAULT_DATABASE_SHARE_PERCENT, scopes: [], risk: "normal", inUse: true, schemaVersion: 1,
   },
   // M9-F1: checking our live listings politely.
   {

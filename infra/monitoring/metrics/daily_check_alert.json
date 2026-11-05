@@ -1,0 +1,5 @@
+{
+  "name": "catalog/daily_check_alert",
+  "description": "The invariants run (sweep, every 10 minutes) found an alert the daily cost check wrote in the last 24 hours: a ledger above the bill, an unlabelled or unpriced resource, or a 7-day batch success rate under target (M6-F1-R10, M6 decision S6-8).",
+  "filter": "resource.type=\"cloud_run_revision\" AND resource.labels.service_name=~\"^catalog-\" AND jsonPayload.message=\"invariant\" AND jsonPayload.id=\"daily_check_alert\" AND jsonPayload.violations>0"
+}

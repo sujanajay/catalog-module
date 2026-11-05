@@ -432,8 +432,8 @@ bash infra/check-matting.sh --probe-upscale <candidate URL> --model=swinir-x2 --
 
 Spec 18 quality: the probe now takes `--model=swinir-x2,swinir-x4` (the deploy gate always passes both), times each
 model in turn and requires each model's answers to be its exact scale and byte-identical on a rerun. The p95 rows
-are of swinir-x2; `UPSCALE_X4_TIME_RATIO` (1.7 since 2026-10-31: Cloud Run gate probes timed x4 at up to 1.45 x the
-x2 rows' time per MP) scales them for x4 when shape.sh sizes the x4 cap, and the gate checks that cap on the measured
+are of swinir-x2; `UPSCALE_X4_TIME_RATIO` (1.87 since 2026-11-05: Cloud Run gate probes timed x4 at up to 1.593 x
+the x2 rows' time per MP, plus 17%) scales them for x4 when shape.sh sizes the x4 cap, and the gate checks that cap on the measured
 x4 calls.
 
 `UPSCALE_SERVICE=dedicated` (the worker's enlargements on `catalog-upscale`) needs a worker image with the spec 18 H3
@@ -474,21 +474,32 @@ per call, so the next probe change should log both. `infra/lib/shape.sh` therefo
 runs, not proven deterministic on every host.
 
 The shape chosen (spec 18 section 8, spec 18 quality): 16 x 4 vCPU, 16 GiB, 4 threads, concurrency 1,
-`UPSCALE_TIMEOUT_S=1740`, and one pixel cap per model (2026-10-29 review): `UPSCALE_MAX_PIXELS=5400000` for x2 and
-`UPSCALE_MAX_PIXELS_X4=4900000` for x4 (8 MP and 6.4 MP until 2026-10-31, when Cloud Run gate times showed x2 at up
-to 158 s per MP and x4 at up to 151 s per MP, so 2 x 8 x 158 = 2533 s and 2 x 6.4 x 151 = 1936 s did not fit). A
-region above its model's cap is made in tiles under the cap by the worker, never held for its size.
+`UPSCALE_TIMEOUT_S=1740`, and one pixel cap per model (2026-10-29 review): `UPSCALE_MAX_PIXELS=4400000` for x2 and
+`UPSCALE_MAX_PIXELS_X4=4400000` for x4 (8 MP and 6.4 MP until 2026-10-31, when Cloud Run gate times showed x2 at up
+to 158 s per MP and x4 at up to 151 s per MP, so 2 x 8 x 158 = 2533 s and 2 x 6.4 x 151 = 1936 s did not fit; 5.4 MP
+and 4.9 MP until 2026-11-05, when a gate whose determinism round landed 4 of 12 x2 calls on slow Cloud Run hosts
+measured 167.18 s per MP and 2 x 5.4 x 167.18 = 1805.5 s did not fit, see below). A region above its model's cap is
+made in tiles under the cap by the worker, never held for its size.
 
 | rule (infra/lib/shape.sh upscale_check) | arithmetic | result |
 |---|---|---|
-| timeout covers the largest x2 image | 2 x ceil(5.4 MP x 104.17 s per MP x 1.52) = 2 x 856 s | 1712 s <= 1740 s |
-| the same on the measured x2 calls (deploy gate) | 2 x 5.4 MP x the x2 p95 per MP (158.33 s on 2026-10-30) = 1710 s | at most 161.1 s per MP |
-| timeout covers the largest x4 image | 2 x ceil(4.9 MP x 104.17 s per MP x 1.7) = 2 x 868 s | 1736 s <= 1740 s |
-| the same on the measured x4 calls (deploy gate) | 2 x 4.9 MP x the x4 p95 per MP (151.25 s on 2026-10-30) = 1482 s | at most 177.5 s per MP |
-| x4 at an 8 MP cap | 2 x ceil(8 MP x 104.17 x 1.7) = 2 x 1417 s | 2834 s, refused |
-| x4 memory of the largest image under 80% of 8 GiB (16 GiB until 2026-10-30) | 4096 MiB resident + 4.9 MP x 160 B | 4844 MiB <= 6553 MiB |
-| x4 output size (sharp's default input limit 268,402,689 px) | 4.9 MP x 16 | 78.4 MP |
-| deploy probe budget, both models, both sizes | 300 + 4 x (100 + 130) + 4 x (216 + 281) | 3208 s |
+| timeout covers the largest x2 image | 2 x ceil(4.4 MP x 104.17 s per MP x 1.88) = 2 x 862 s | 1724 s <= 1740 s |
+| the same on the measured x2 calls (deploy gate) | 2 x 4.4 MP x the x2 p95 per MP (167.18 s on 2026-11-05) = 1471 s | at most 197.7 s per MP |
+| timeout covers the largest x4 image | 2 x ceil(4.4 MP x 104.17 s per MP x 1.87) = 2 x 858 s | 1716 s <= 1740 s |
+| the same on the measured x4 calls (deploy gate) | 2 x 4.4 MP x the x4 p95 per MP (165.96 s on 2026-11-01) = 1460 s | at most 197.7 s per MP |
+| x4 at an 8 MP cap | 2 x ceil(8 MP x 104.17 x 1.87) = 2 x 1559 s | 3118 s, refused |
+| x4 memory of the largest image under 80% of 8 GiB (16 GiB until 2026-10-30) | 4096 MiB resident + 4.4 MP x 160 B | 4768 MiB <= 6553 MiB |
+| x4 output size (sharp's default input limit 268,402,689 px) | 4.4 MP x 16 | 70.4 MP |
+| deploy probe budget, both models, both sizes | 300 + 4 x (100 + 187) + 4 x (216 + 404) | 3928 s |
+
+The CPU gate times on Cloud Run (2026-10-31 to 2026-11-05, nine candidates, server seconds of x2 at 800x1200) spread from
+about 97 to 161 s by host, with a cluster of slow hosts at 154 to 161 s (about 1.45x the fastest). The software did not change between those candidates (11-03 at 4ff1e82 and 11-05 at ca4ce17 built the same
+upscaler source); which group answers is the host Cloud Run picks for each fresh instance. The determinism round
+starts about 11 fresh instances per model, so the gate's trimmed p95 (the second slowest of 13 calls) is a slow host
+whenever two or more of them land on one. The caps are sized so that the gate passes a slow-host p95 with about 18% to
+spare. The real calls have more room than the gate shows: the 800x1200 rate includes the most tile padding per pixel
+(1600x1600 runs at 80 to 101 s per MP on the fast hosts), and even at the slow hosts' 167 s per MP a 4.4 MP region
+takes about 735 s of the 1740 s timeout.
 
 The timeout must cover the largest image the service takes, not only the probe sizes: SwinIR is tiled, so time grows
 with pixels, and the slowest measured p95 per pixel (100 s for 0.96 MP, 104.2 s per MP) is scaled by

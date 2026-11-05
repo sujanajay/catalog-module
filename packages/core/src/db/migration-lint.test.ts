@@ -100,7 +100,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS "t_k_uq" ON "t" USING btree ("k");`;
     expect(lintJournal({ entries: [entry(0, 1, "0000_a")] }, { "0000_a.sql": "", "0001_b.sql": "" }).map((f) => f.rule)).toEqual(["migration file is not in meta/_journal.json, so it never runs"]);
   });
 
-  it("the repo's journal is in run order, with M1-S5's 0023 after M1-S4b's 0022", () => {
+  it("the repo's journal is in run order, with M1-S5's 0025 after M6-S2's 0023", () => {
     const folder = resolveMigrationsFolder();
     const journal = JSON.parse(readFileSync(path.join(folder, "meta", "_journal.json"), "utf8")) as { entries: JournalEntry[] };
     const files = Object.fromEntries(readdirSync(folder).filter((n) => n.endsWith(".sql")).map((n) => [n, ""]));
@@ -116,7 +116,25 @@ CREATE UNIQUE INDEX IF NOT EXISTS "t_k_uq" ON "t" USING btree ("k");`;
     expect(tags.indexOf("0020_batch_outcomes_incidents")).toBe(tags.indexOf("0019_change_types") + 1);
     expect(tags.indexOf("0021_batch_ruleset_version")).toBe(tags.indexOf("0020_batch_outcomes_incidents") + 1);
     expect(tags.indexOf("0022_upscaler_health")).toBe(tags.indexOf("0021_batch_ruleset_version") + 1);
-    expect(tags.indexOf("0023_batch_digest")).toBe(tags.indexOf("0022_upscaler_health") + 1);
+    expect(tags.indexOf("0023_cost_reconciliation")).toBe(tags.indexOf("0022_upscaler_health") + 1);
+    // 0024 is taken by M1-S6 (#169); until it merges, M1-S5's 0025 follows 0023 directly.
+    expect(tags.indexOf("0025_batch_digest")).toBe(tags.indexOf("0023_cost_reconciliation") + 1);
+  });
+
+  // R1 merge trains (2026-11-04): parallel PRs claimed the same migration number and were renumbered at merge. A
+  // renumber that keeps the branch's snapshot leaves two snapshots with the same parent, and the next drizzle-kit
+  // generate diffs against the wrong schema. Steps: docs/solutions/migration-renumbering.md.
+  it("every journal entry has a snapshot whose prevId is the previous entry's snapshot id (one unbroken chain)", () => {
+    const folder = resolveMigrationsFolder();
+    const journal = JSON.parse(readFileSync(path.join(folder, "meta", "_journal.json"), "utf8")) as { entries: JournalEntry[] };
+    const entries = [...journal.entries].sort((a, b) => a.idx - b.idx);
+    let prevId = "00000000-0000-0000-0000-000000000000";
+    for (const e of entries) {
+      const name = `${e.tag.slice(0, 4)}_snapshot.json`;
+      const snapshot = JSON.parse(readFileSync(path.join(folder, "meta", name), "utf8")) as { id: string; prevId: string };
+      expect({ snapshot: name, prevId: snapshot.prevId }).toEqual({ snapshot: name, prevId });
+      prevId = snapshot.id;
+    }
   });
 
   it("the CI command fails on a journal out of run order", () => {

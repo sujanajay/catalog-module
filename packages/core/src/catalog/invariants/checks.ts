@@ -25,8 +25,15 @@ export interface InvariantCheck {
  */
 export const EXPORT_STALE_HOURS = 26;
 /**
+ * M6-S2 (M6-F1-R4): the daily cost reconciliation (catalog-cost-reconcile, 06:00 UTC) is stale when its newest
+ * catalog_cost_days row is older than this: a day between runs plus 6 hours for a slow or retried run.
+ */
+export const COST_RECONCILE_STALE_HOURS = 30;
+/** M6-S2 (M6-F1-R10, M6 decision S6-8): an alert of the daily checks stays reported for this long after it was written. */
+export const DAILY_ALERT_HOURS = 24;
+/**
  * M0-S3 output_without_version: batches created in the last 14 days are checked (a batch stages new images within days;
- * an M1-S4 improvement runs within 72 hours of delivery), and an output counts from 30 minutes after its batch's first
+ * an M1-S4 improvement runs within 72 hours of delivery), and outputs count from 30 minutes after the write path's first
  * output version (a rolling deploy's old revision may still stage a few without one).
  */
 export const OUTPUT_VERSION_WINDOW_DAYS = 14;
@@ -151,18 +158,56 @@ export const CHECKS: readonly InvariantCheck[] = [
         AND EXISTS (SELECT 1 FROM catalog_graph_export_runs AS o WHERE o.started_at <= ${at(now)} - ${EXPORT_STALE_HOURS}::int * interval '1 hour')`,
   },
   {
+    id: "cost_reconcile_stale",
+    sentence: "The daily cost check (catalog-cost-reconcile) finished a run in the last 30 hours, or the cost ledger is younger than that.",
+    severity: "WARNING",
+    // A run writes all its rows in one transaction at the end (the shared database line at least), so the newest
+    // computed_at is the last run that finished; a run that fails part-way writes nothing. One row (the newest) when it
+    // is too old. Before any run: one row (the oldest ledger row) once the ledger is older than 30 hours, so a job that
+    // never ran or never finished is reported too. Not a batch's problem: batch_id null.
+    sql: (now) => sql`SELECT d.id::text AS id, NULL::uuid AS batch_id FROM (
+        SELECT id, computed_at FROM catalog_cost_days ORDER BY computed_at DESC, id DESC LIMIT 1
+      ) AS d
+      WHERE d.computed_at < ${at(now)} - ${COST_RECONCILE_STALE_HOURS}::int * interval '1 hour'
+      UNION ALL
+      SELECT e.id::text AS id, NULL::uuid AS batch_id FROM (
+        SELECT id, at FROM catalog_cost_events ORDER BY at ASC, id ASC LIMIT 1
+      ) AS e
+      WHERE NOT EXISTS (SELECT 1 FROM catalog_cost_days)
+        AND e.at < ${at(now)} - ${COST_RECONCILE_STALE_HOURS}::int * interval '1 hour'`,
+  },
+  {
+    id: "daily_check_alert",
+    sentence: "The daily checks (cost against the bill, labels and prices, the 7-day batch success rate) raised no alert in the last 24 hours.",
+    severity: "WARNING",
+    // The catalog-cost-reconcile job writes each alert once as an `alert` incident; this line carries them to email
+    // (policy 16), because log alerts read Cloud Run services only, never jobs (infra/monitoring.sh).
+    sql: (now) => sql`SELECT i.id, NULL::uuid AS batch_id FROM catalog_incidents AS i
+      WHERE i.kind = 'alert' AND i.created_at > ${at(now)} - ${DAILY_ALERT_HOURS}::int * interval '1 hour'`,
+  },
+  {
     id: "output_without_version",
     sentence: "Every image staged or delivered since the graph write path shipped names its content version (M0-F2-R8).",
     severity: "ERROR",
-    // "Since it shipped" per batch: the output row was made at least OUTPUT_VERSION_GRACE_MIN after its batch's first M3
-    // version, so outputs a pre-M0-S3 revision staged (also during a rolling deploy) are not counted. Bounded for the
-    // 10-minute sweep (review P2-3): only batches created in the last OUTPUT_VERSION_WINDOW_DAYS (catalog_batches is
-    // small); per batch, one min() over its versions and one pass over its outputs, both through their batch_id index.
-    sql: (now) => sql`SELECT o.id, o.batch_id FROM catalog_batches AS b
-      CROSS JOIN LATERAL (SELECT min(v.created_at) AS first_at FROM catalog_content_versions AS v WHERE v.batch_id = b.id AND v.producer = 'M3') AS f
+    // "Since it shipped" (review 2 P2-1): the write path shipped at the first M3 version of the first batch it ran on.
+    // Every output of a batch created at least OUTPUT_VERSION_GRACE_MIN after that is counted, whenever its row was made
+    // (the matte stage makes the rows before any render writes a version), and in older batches every output row made
+    // after it. Outputs a pre-M0-S3 revision staged (also during a rolling deploy) are not counted. Bounded for the
+    // 10-minute sweep (review P2-3): the first batch is found by index probes over the small catalog_batches table (one
+    // EXISTS per batch made before it), its first version by the batch_id index, and only outputs of batches created in
+    // the last OUTPUT_VERSION_WINDOW_DAYS are read, through their batch_id index.
+    sql: (now) => sql`WITH first_batch AS (
+        SELECT b.id FROM catalog_batches AS b
+        WHERE EXISTS (SELECT 1 FROM catalog_content_versions AS v WHERE v.batch_id = b.id AND v.producer = 'M3')
+        ORDER BY b.created_at, b.id LIMIT 1
+      ), shipped AS (
+        SELECT min(v.created_at) + ${OUTPUT_VERSION_GRACE_MIN}::int * interval '1 minute' AS at
+        FROM catalog_content_versions AS v JOIN first_batch AS f ON v.batch_id = f.id WHERE v.producer = 'M3'
+      )
+      SELECT o.id, o.batch_id FROM shipped AS s
+      JOIN catalog_batches AS b ON b.created_at > ${at(now)} - ${OUTPUT_VERSION_WINDOW_DAYS}::int * interval '1 day'
       JOIN catalog_outputs AS o ON o.batch_id = b.id
-      WHERE b.created_at > ${at(now)} - ${OUTPUT_VERSION_WINDOW_DAYS}::int * interval '1 day' AND f.first_at IS NOT NULL
-        AND o.created_at >= f.first_at + ${OUTPUT_VERSION_GRACE_MIN}::int * interval '1 minute'
+      WHERE s.at IS NOT NULL AND (b.created_at >= s.at OR o.created_at >= s.at)
         AND o.content_version_id IS NULL AND o.staging_uri IS NOT NULL AND o.status IN ('staged', 'needs_attention', 'verified')`,
   },
 ];

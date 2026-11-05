@@ -1,5 +1,5 @@
 {
-  "id": "55c1a645-af7e-48e2-9063-b46bc5bf2cd7",
+  "id": "8eca4745-35c7-42f0-ad31-03142d4a7adc",
   "prevId": "ef47e775-81bb-4014-9bc7-71117ce25a74",
   "version": "7",
   "dialect": "postgresql",
@@ -770,7 +770,7 @@
       "checkConstraints": {
         "catalog_batch_touches_action_check": {
           "name": "catalog_batch_touches_action_check",
-          "value": "\"catalog_batch_touches\".\"action\" IN ('decision', 'retry_photo', 'replace_photo', 'retry_collect', 'retry_links', 'fix_and_continue', 'cancel', 'add_sku_ids', 'hold_start')"
+          "value": "\"catalog_batch_touches\".\"action\" IN ('decision', 'retry_photo', 'replace_photo', 'retry_collect', 'retry_links', 'fix_and_continue', 'cancel', 'add_sku_ids')"
         }
       },
       "isRLSEnabled": false
@@ -918,12 +918,6 @@
         "ruleset_version": {
           "name": "ruleset_version",
           "type": "integer",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "digest": {
-          "name": "digest",
-          "type": "jsonb",
           "primaryKey": false,
           "notNull": false
         }
@@ -2230,6 +2224,318 @@
         "catalog_content_versions_payload_check": {
           "name": "catalog_content_versions_payload_check",
           "value": "num_nonnulls(\"catalog_content_versions\".\"asset_sha256\", \"catalog_content_versions\".\"text_value\", \"catalog_content_versions\".\"json_value\") = 1 OR (num_nonnulls(\"catalog_content_versions\".\"asset_sha256\", \"catalog_content_versions\".\"text_value\", \"catalog_content_versions\".\"json_value\") = 0 AND \"catalog_content_versions\".\"hash_kind\" = 'crc32c')"
+        }
+      },
+      "isRLSEnabled": false
+    },
+    "public.catalog_cost_allocations": {
+      "name": "catalog_cost_allocations",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "day": {
+          "name": "day",
+          "type": "date",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "batch_id": {
+          "name": "batch_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "component": {
+          "name": "component",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "source": {
+          "name": "source",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "busy_ms": {
+          "name": "busy_ms",
+          "type": "bigint",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "attributed_usd": {
+          "name": "attributed_usd",
+          "type": "numeric(12, 6)",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "idle_usd": {
+          "name": "idle_usd",
+          "type": "numeric(12, 6)",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "shared_usd": {
+          "name": "shared_usd",
+          "type": "numeric(12, 6)",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "computed_at": {
+          "name": "computed_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "catalog_cost_allocations_day_batch_component_uq": {
+          "name": "catalog_cost_allocations_day_batch_component_uq",
+          "columns": [
+            {
+              "expression": "day",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "batch_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "component",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "catalog_cost_allocations_batch_id_idx": {
+          "name": "catalog_cost_allocations_batch_id_idx",
+          "columns": [
+            {
+              "expression": "batch_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "catalog_cost_allocations_batch_id_catalog_batches_id_fk": {
+          "name": "catalog_cost_allocations_batch_id_catalog_batches_id_fk",
+          "tableFrom": "catalog_cost_allocations",
+          "tableTo": "catalog_batches",
+          "columnsFrom": [
+            "batch_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {
+        "catalog_cost_allocations_source_check": {
+          "name": "catalog_cost_allocations_source_check",
+          "value": "\"catalog_cost_allocations\".\"source\" IN ('monitoring', 'billing')"
+        }
+      },
+      "isRLSEnabled": false
+    },
+    "public.catalog_cost_days": {
+      "name": "catalog_cost_days",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "day": {
+          "name": "day",
+          "type": "date",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "component": {
+          "name": "component",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "kind": {
+          "name": "kind",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "region": {
+          "name": "region",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "env": {
+          "name": "env",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "source": {
+          "name": "source",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "billable_seconds": {
+          "name": "billable_seconds",
+          "type": "numeric(14, 3)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "billed_usd": {
+          "name": "billed_usd",
+          "type": "numeric(12, 6)",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "credits_usd": {
+          "name": "credits_usd",
+          "type": "numeric(12, 6)",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "attributed_usd": {
+          "name": "attributed_usd",
+          "type": "numeric(12, 6)",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "idle_usd": {
+          "name": "idle_usd",
+          "type": "numeric(12, 6)",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "shared_usd": {
+          "name": "shared_usd",
+          "type": "numeric(12, 6)",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "estimated": {
+          "name": "estimated",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true,
+          "default": true
+        },
+        "provisional": {
+          "name": "provisional",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true,
+          "default": false
+        },
+        "detail": {
+          "name": "detail",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "computed_at": {
+          "name": "computed_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "catalog_cost_days_day_component_env_source_uq": {
+          "name": "catalog_cost_days_day_component_env_source_uq",
+          "columns": [
+            {
+              "expression": "day",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "component",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "env",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "source",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {
+        "catalog_cost_days_kind_check": {
+          "name": "catalog_cost_days_kind_check",
+          "value": "\"catalog_cost_days\".\"kind\" IN ('service', 'job', 'shared', 'vendor')"
+        },
+        "catalog_cost_days_env_check": {
+          "name": "catalog_cost_days_env_check",
+          "value": "\"catalog_cost_days\".\"env\" IN ('live', 'preview', 'test', 'unlabelled')"
+        },
+        "catalog_cost_days_source_check": {
+          "name": "catalog_cost_days_source_check",
+          "value": "\"catalog_cost_days\".\"source\" IN ('monitoring', 'billing')"
         }
       },
       "isRLSEnabled": false

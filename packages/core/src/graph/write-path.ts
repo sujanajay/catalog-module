@@ -45,15 +45,32 @@ export function phashDistance(a: bigint, b: bigint): number {
 /**
  * The asset row of image bytes, computed outside any transaction (hashing is CPU work). An image the decoder cannot
  * read keeps a null perceptual hash: the version is still recorded (its sha256 is exact), only live matching skips it.
+ * Bytes that are not a whole JPEG, PNG or WebP never reach the decoder: on Windows, sharp 0.35 kills the process
+ * (0xC0000409) after a few hundred truncated JPEGs, so a run of bad objects must not take the worker down with it.
  */
 export async function imageAsset(bytes: Uint8Array, uri: string, mime: string): Promise<NewAsset> {
   const sha256 = sha256Hex(bytes);
+  if (!looksWhole(bytes)) return { sha256, uri, mime, bytes: bytes.length, phash: null };
   try {
     const [phash, meta] = await Promise.all([dhash64(bytes), sharp(bytes).metadata()]);
     return { sha256, uri, mime, bytes: bytes.length, phash, width: meta.width ?? null, height: meta.height ?? null };
   } catch {
     return { sha256, uri, mime, bytes: bytes.length, phash: null };
   }
+}
+
+/** A JPEG from its start marker to an end marker near its tail, a PNG through its IEND chunk, or a WebP of its full RIFF size. */
+function looksWhole(b: Uint8Array): boolean {
+  const n = b.length;
+  if (n < 32) return false;
+  if (b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff) {
+    for (let i = n - 2; i >= Math.max(2, n - 64); i--) if (b[i] === 0xff && b[i + 1] === 0xd9) return true;
+    return false;
+  }
+  const ascii = (at: number, s: string) => [...s].every((c, i) => b[at + i] === c.charCodeAt(0));
+  if (b[0] === 0x89 && ascii(1, "PNG")) return ascii(n - 8, "IEND");
+  if (ascii(0, "RIFF") && ascii(8, "WEBP")) return ((b[4]! | (b[5]! << 8) | (b[6]! << 16)) + b[7]! * 2 ** 24) + 8 <= n;
+  return false;
 }
 
 // ---------------------------------------------------------------------------

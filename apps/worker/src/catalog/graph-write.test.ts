@@ -11,7 +11,8 @@ import { FIXTURE_CHANNEL_RULES } from "@catalog/core/catalog/channel-rules";
 import type { Db } from "@catalog/core/db/client";
 import { createTestDb } from "@catalog/core/db/testing";
 import { catalogBatches, catalogBatchProducts, catalogChangeEvents, catalogChannelListings, catalogChunks, catalogContentVersions, catalogOptions, catalogOutputs, catalogProducts, catalogSourceImages, EMPTY_BATCH_COUNTS } from "@catalog/core/db/schema";
-import { recordVersion } from "@catalog/core/graph/index";
+import { recordAsset, recordVersion } from "@catalog/core/graph/index";
+import { recordPublishEvents } from "@catalog/core/catalog/pipeline/publish";
 import { sourceProducerRef } from "@catalog/core/graph/write-path";
 import { runInvariants } from "@catalog/core/catalog/invariants/run";
 import * as storage from "@catalog/core/storage";
@@ -134,7 +135,7 @@ describe("M0-S3 write path through the worker", () => {
       const o = links.find((x) => x.contentVersionId === e.toVersionId)!;
       const listing = listings.find((l) => l.id === e.listingId)!;
       expect(listing.channel).toBe(o.channel);
-      expect(e).toMatchObject({ kind: "links_delivered", slot: `image:${o.n}`, fromVersionId: null, evidence: "tool_publish", evidenceRef: `catalog_outputs:${o.id}`, reasonKind: "new_content", changeTypeId: "img_background_fixed", actor: "test@opptra.com", idempotencyKey: `publish:${o.id}:none:${o.contentVersionId}:${listing.id}` });
+      expect(e).toMatchObject({ kind: "links_delivered", slot: `image:${o.n}`, fromVersionId: null, evidence: "tool_publish", evidenceRef: `catalog_outputs:${o.id}`, reasonKind: "new_content", changeTypeId: "img_background_fixed", actor: "test@opptra.com", idempotencyKey: `publish:${o.id}:none:${listing.id}` });
     }
     expect(new Set(events.map((e) => e.changeSetId)).size).toBe(1);
     // The nightly invariant finds nothing missing.
@@ -261,5 +262,58 @@ describe("M0-S3 write path through the worker", () => {
     const [again] = await db.select().from(catalogOutputs).where(eq(catalogOutputs.id, staged!.id));
     expect(again).toMatchObject({ status: "staged", contentVersionId: staged!.contentVersionId });
   }, 240_000);
+
+  it("review 2 P2-2: a slot whose versions go A->B->A->B gets one event per publish, and a key that is already taken is logged, never dropped", async () => {
+    const w = world(), { product, listings } = await optionWithListings("M0S3-ABAB");
+    const s = await seed(w, "m0s3-abab", product, [101], ["noon"]);
+    await runBatch(w, s, product.id);
+    const [o] = await db.select().from(catalogOutputs).where(eq(catalogOutputs.batchId, s.batch.id));
+    const [batch] = await db.select().from(catalogBatches).where(eq(catalogBatches.id, s.batch.id));
+    const [p] = await db.select().from(catalogProducts).where(eq(catalogProducts.id, product.id));
+    const a = o!.contentVersionId!;
+    const bytes = await jpegOf(202, "noon");
+    await recordAsset(db, { sha256: sha(bytes), uri: "gs://assets/catalog-test/abab-b.jpg", mime: "image/jpeg" });
+    const b = (await recordVersion(db, { optionId: product.optionId, scope: "noon", component: "image", source: "upscaled", aiGenerated: false, producer: "M3", producerRef: o!.id, assetSha256: sha(bytes), batchId: s.batch.id, isTest: true, createdBy: "t" })).versionId;
+    const noon = listings.filter((l) => l.channel === "noon");
+    const logs: { message: string; fields: Record<string, unknown> }[] = [];
+    // The same output row made again in place each time (an improvement, then a Try again, then another improvement).
+    const publish = async (from: string, to: string) => {
+      const before = (await eventsOf(s.batch.id)).length;
+      await recordPublishEvents(db, { batch: batch!, product: p!, channels: ["noon"], live: [{ ...o!, contentVersionId: from }], delivered: [{ ...o!, contentVersionId: to }], removed: [], now: new Date(), actor: "t", rulesKeyVersion: () => "1", log: (message, fields = {}) => { logs.push({ message, fields }); } });
+      const events = await eventsOf(s.batch.id);
+      // Every publish writes one event per listing slot or logs why it did not: nothing is dropped silently.
+      expect(events.length - before + logs.filter((l) => l.fields.severity === "ERROR").length).toBe(noon.length);
+      return events;
+    };
+    await publish(a, b);
+    await publish(b, a);
+    const events = await publish(a, b);
+    expect(logs).toEqual([]);
+    for (const l of noon) {
+      const slot = events.filter((e) => e.listingId === l.id).sort((x, y) => Number(x.seq - y.seq));
+      expect(slot.map((e) => [e.fromVersionId, e.toVersionId])).toEqual([[null, a], [a, b], [b, a], [a, b]]);
+    }
+    // A key already taken by an equal event (one the slot's last event does not show) is reported at ERROR.
+    const last = events.filter((e) => e.listingId === noon[0]!.id).sort((x, y) => Number(y.seq - x.seq))[0]!;
+    const { seq: _seq, recordedAt: _r, ...copy } = last;
+    await db.insert(catalogChangeEvents).values({ ...copy, seq: 0n, idempotencyKey: `publish:${o!.id}:${last.seq}:${noon[0]!.id}`, fromVersionId: b, toVersionId: a });
+    await publish(b, a);
+    expect(logs.map((l) => [l.message, l.fields.severity, l.fields.listingId])).toEqual([["change event already recorded", "ERROR", noon[0]!.id]]);
+  }, 240_000);
+
+  it("review 2 P2-1: output_without_version covers every output of a normal batch run after the write path shipped", async () => {
+    // The write path shipped well before this batch: its first versions are 2 hours old.
+    await db.execute(sql`UPDATE catalog_content_versions SET created_at = now() - interval '2 hours' WHERE producer = 'M3'`);
+    const w = world(), { product } = await optionWithListings("M0S3-COVERED");
+    const s = await seed(w, "m0s3-covered", product, [111, 112], ["noon"]);
+    await runBatch(w, s, product.id);
+    const count = async () => (await runInvariants(db, vi.fn(), new Date(), { batchId: s.batch.id })).counts.output_without_version;
+    expect(await count()).toBe(0);
+    // A regression that drops one image's version is reported, although the row was made at the matte stage.
+    const [o] = await db.select().from(catalogOutputs).where(eq(catalogOutputs.batchId, s.batch.id));
+    await db.update(catalogOutputs).set({ contentVersionId: null }).where(eq(catalogOutputs.id, o!.id));
+    expect(await count()).toBe(1);
+  }, 240_000);
 });
+
 

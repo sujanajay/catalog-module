@@ -236,7 +236,7 @@ export async function publishProduct(deps: PublishDeps, batchId: string, product
     // M0-F3-R1, R2: the change log, in this transaction (one event per changed slot of each listing), inside a savepoint:
     // the public links already changed, so a failed log write is rolled back alone, logged at ERROR and never fails or
     // rolls back the delivery (decision D26).
-    try { await tx.transaction(sp => recordPublishEvents(sp,{batch,product,channels,live,delivered:delivered.filter(o => o.contentVersionId),removed,now,actor,rulesKeyVersion:c => rules.keyVersion(c)})); }
+    try { await tx.transaction(sp => recordPublishEvents(sp,{batch,product,channels,live,delivered:delivered.filter(o => o.contentVersionId),removed,now,actor,rulesKeyVersion:c => rules.keyVersion(c),log})); }
     catch (error) { log("change log not written",{severity:"ERROR",batchId,productId,error:error instanceof Error ? error.message : String(error)}); }
     const previousSources = await tx.select().from(catalogSourceImages).where(and(eq(catalogSourceImages.productId,productId),eq(catalogSourceImages.isCurrent,true)));
     const reordered = sources.length === previousSources.length && sources.map(s=>s.sha256).sort().join("|") === previousSources.map(s=>s.sha256).sort().join("|") && sources.some(s=> previousSources.find(p=>p.n===s.n)?.sha256 !== s.sha256);
@@ -317,12 +317,19 @@ async function recordStagedVersions(deps: PublishDeps, batchId: string, productI
  * listing of the option on that channel (both markets when the channel keeps one image set), each with its reason and
  * M10 change type. The slot's previous version is the last event on that listing slot (else the other live output's
  * version), so an output row re-made in place (an M1-S4 improvement, Try again) is logged as the change it is. The key
- * names the output, the previous and the new version and the listing (D27): a retry of the same publish finds the last
- * event already at this version and writes nothing; a re-made row gets a new event. A product with no option yet (M0-S2
+ * names the output, the slot's last event (its seq) and the listing (D27): a retry of the same publish finds the last
+ * event already at this version and writes nothing, a retry after a rollback rebuilds the same key, and a re-made row
+ * gets a new event even when its versions repeat (A, B, A, B). Exported for the write-path tests. A product with no option yet (M0-S2
  * has not linked it) has no listing, so no event.
  */
-async function recordPublishEvents(db: GraphDb, input: { batch: typeof catalogBatches.$inferSelect; product: typeof catalogProducts.$inferSelect; channels: ChannelId[]; live: Output[]; delivered: Output[]; removed: Output[]; now: Date; actor: string; rulesKeyVersion: (c: ChannelId) => string }): Promise<void> {
+export async function recordPublishEvents(db: GraphDb, input: { batch: typeof catalogBatches.$inferSelect; product: typeof catalogProducts.$inferSelect; channels: ChannelId[]; live: Output[]; delivered: Output[]; removed: Output[]; now: Date; actor: string; rulesKeyVersion: (c: ChannelId) => string; log?: PublishDeps["log"] }): Promise<void> {
   const { batch, product, live, delivered, removed, now, actor } = input;
+  const log = input.log ?? (() => {});
+  // A key that already names an equal event writes nothing; with keys on the slot's last event that only happens if
+  // the log was read wrong, so it is reported, never dropped in silence (review 2 P2-2).
+  const write = async (e: Parameters<typeof recordChange>[1], outputId: string) => {
+    if (!(await recordChange(db, e)).created) log("change event already recorded", { severity: "ERROR", batchId: batch.id, productId: product.id, outputId, listingId: e.listingId, slot: e.slot, idempotencyKey: e.idempotencyKey });
+  };
   if (!product.optionId || (!delivered.length && !removed.length)) return;
   const touched = [...new Set([...delivered, ...removed].map(o => o.channel))].filter(c => input.channels.includes(c));
   if (!touched.length) return;
@@ -362,16 +369,16 @@ async function recordPublishEvents(db: GraphDb, input: { batch: typeof catalogBa
       const before = last.get(`${listing.id}|image:${o.n}`);
       if (before?.toVersionId === o.contentVersionId) continue;
       const fromVersionId = before ? before.toVersionId : other?.contentVersionId ?? null;
-      await recordChange(db, { ...common, idempotencyKey: `publish:${o.id}:${fromVersionId ?? "none"}:${o.contentVersionId}:${listing.id}`, listingId: listing.id, slot: `image:${o.n}`, fromVersionId,
-        toVersionId: o.contentVersionId!, kind: "links_delivered", evidenceRef: `catalog_outputs:${o.id}`, ...reason, changeTypeId: publishChangeType(slot) });
+      await write({ ...common, idempotencyKey: `publish:${o.id}:${before ? before.seq : "none"}:${listing.id}`, listingId: listing.id, slot: `image:${o.n}`, fromVersionId,
+        toVersionId: o.contentVersionId!, kind: "links_delivered", evidenceRef: `catalog_outputs:${o.id}`, ...reason, changeTypeId: publishChangeType(slot) }, o.id);
     }
   }
   for (const o of removed) {
     for (const listing of listings.filter(l => l.channel === o.channel)) {
       const before = last.get(`${listing.id}|image:${o.n}`);
       if (before?.kind === "removed") continue;
-      await recordChange(db, { ...common, idempotencyKey: `removed:${o.id}:${listing.id}`, listingId: listing.id, slot: `image:${o.n}`, fromVersionId: before ? before.toVersionId : o.contentVersionId ?? null,
-        toVersionId: null, kind: "removed", evidenceRef: `catalog_outputs:${o.id}`, reasonKind: "new_content", reasonRef: null, changeTypeId: REMOVED_CHANGE_TYPE });
+      await write({ ...common, idempotencyKey: `removed:${o.id}:${before ? before.seq : "none"}:${listing.id}`, listingId: listing.id, slot: `image:${o.n}`, fromVersionId: before ? before.toVersionId : o.contentVersionId ?? null,
+        toVersionId: null, kind: "removed", evidenceRef: `catalog_outputs:${o.id}`, reasonKind: "new_content", reasonRef: null, changeTypeId: REMOVED_CHANGE_TYPE }, o.id);
     }
   }
 }

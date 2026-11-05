@@ -1,14 +1,14 @@
 // Spec 17 3.1.3: every invariant with a PGlite fixture that violates it and one that satisfies it, the
 // log line contract, the batch scope and the counts kept on catalog_batches.counts.
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { eq, isNull } from "drizzle-orm";
+import { eq, inArray, isNull, sql } from "drizzle-orm";
 import type { Db } from "../../db/client";
 import { createTestDb } from "../../db/testing";
-import { catalogBatches, catalogBatchProducts, catalogChunks, catalogEnlargements, catalogGraphExportRuns, catalogOutputs, catalogProducts, catalogSourceImages } from "../../db/schema";
+import { catalogBatches, catalogBatchProducts, catalogChunks, catalogCostDays, catalogEnlargements, catalogGraphExportRuns, catalogOutputs, catalogProducts, catalogSourceImages } from "../../db/schema";
 import { recordAsset, recordVersion, sha256Hex } from "../../graph";
 import { ENLARGING_TASK } from "../pipeline/enlargement";
 import type { BatchStatus, ChangeKind, OutputStatus } from "../types";
-import { CHECKS, EXPORT_STALE_HOURS } from "./checks";
+import { CHECKS, COST_RECONCILE_STALE_HOURS, DAILY_ALERT_HOURS, EXPORT_STALE_HOURS } from "./checks";
 import { BATCH_LIST_SIZE, runInvariants } from "./run";
 import { classifyOutputs } from "../load/classify";
 
@@ -46,9 +46,9 @@ async function chunk(batchId: string, v: { status: "queued" | "running" | "done"
 const run = (batchId?: string) => runInvariants(db, vi.fn(), NOW, batchId ? { batchId } : {});
 
 describe("invariant checks", () => {
-  it("the table has the five checks of spec 17, spec 18's enlargement check, the lifecycle's three, M0-S4's export freshness and M0-S3's output versions, with their severities", () => {
+  it("the table has the five checks of spec 17, spec 18's enlargement check, the lifecycle's three , M0-S4's export freshness, M6-S2's cost check freshness and daily alerts and M0-S3's output versions, with their severities", () => {
     expect(CHECKS.map(c => [c.id, c.severity])).toEqual([["silent_outputs", "ERROR"], ["held_without_reason", "ERROR"], ["stale_running_chunk", "WARNING"], ["slow_chunk", "WARNING"], ["done_batch_with_open_chunk", "ERROR"], ["enlarged_without_upscaler", "ERROR"],
-      ["plain_accepted_outputs", "INFO"], ["parked_chunk_quiet", "WARNING"], ["enlargement_waiting_long", "INFO"], ["graph_export_stale", "WARNING"], ["output_without_version", "ERROR"]]);
+      ["plain_accepted_outputs", "INFO"], ["parked_chunk_quiet", "WARNING"], ["enlargement_waiting_long", "INFO"], ["graph_export_stale", "WARNING"], ["cost_reconcile_stale", "WARNING"], ["daily_check_alert", "WARNING"], ["output_without_version", "ERROR"]]);
     for (const c of CHECKS) expect(c.sentence.length).toBeGreaterThan(20);
   });
 
@@ -259,7 +259,7 @@ describe("invariant checks", () => {
     await db.delete(catalogGraphExportRuns);
   });
 
-  it("M0-S3: output_without_version fires on a staged or delivered image with no version in a batch the write path ran on; older outputs and other batches do not", async () => {
+  it("M0-S3: output_without_version fires on a staged or delivered image with no version made after the write path shipped; older outputs do not", async () => {
     const count = async () => (await run()).counts.output_without_version;
     const b = await batch("done"), old = await batch("done");
     const p = await product(b.id, "new"), q = await product(old.id, "new");
@@ -270,26 +270,68 @@ describe("invariant checks", () => {
     };
     const before = await staged(b.id, p, ago(120));
     await staged(old.id, q, ago(60));
-    // No output version in either batch yet: an older worker made them.
+    // No output version anywhere yet: an older worker made them.
     expect(await count()).toBe(0);
     const hash = sha256Hex(new TextEncoder().encode("inv-version"));
     await recordAsset(db, { sha256: hash, uri: "gs://assets/s/v.jpg", mime: "image/jpeg" });
+    // The write path ships: the first M3 version of the first batch it ran on.
     const v = await recordVersion(db, { optionId: null, scope: "noon", component: "image", source: "cleanup", aiGenerated: false, producer: "M3", producerRef: "inv-out", assetSha256: hash, batchId: b.id, isTest: true, createdBy: "t" });
-    // Within the grace after the first version (a rolling deploy's old revision): not counted yet.
-    const after = await staged(b.id, p, new Date(Date.now() + 60_000));
+    const minutes = (n: number) => new Date(Date.now() + n * 60_000);
+    // Within the grace after it shipped (a rolling deploy's old revision): not counted yet.
+    const after = await staged(b.id, p, minutes(1));
     expect(await count()).toBe(0);
-    await db.update(catalogOutputs).set({ createdAt: new Date(Date.now() + 31 * 60_000) }).where(eq(catalogOutputs.id, after.id));
+    await db.update(catalogOutputs).set({ createdAt: minutes(31) }).where(eq(catalogOutputs.id, after.id));
     const r = await run();
     expect(r.counts.output_without_version).toBe(1);
     expect(r.results.find((x) => x.id === "output_without_version")!.sample).toEqual([after.id]);
+    // Review 2 P2-1: a batch created after the grace counts every output, whenever its row was made (the matte stage
+    // makes the rows before the first render writes a version), and needs no version of its own.
+    const c = await batch("done");
+    await db.update(catalogBatches).set({ createdAt: minutes(31) }).where(eq(catalogBatches.id, c.id));
+    const fresh = await staged(c.id, await product(c.id, "new"), minutes(2));
+    expect(await count()).toBe(2);
     // A batch older than the window is not scanned.
     await db.update(catalogBatches).set({ createdAt: new Date(+NOW - 15 * 86_400_000) }).where(eq(catalogBatches.id, b.id));
-    expect(await count()).toBe(0);
-    await db.update(catalogBatches).set({ createdAt: NOW }).where(eq(catalogBatches.id, b.id));
     expect(await count()).toBe(1);
-    await db.update(catalogOutputs).set({ contentVersionId: v.versionId }).where(eq(catalogOutputs.id, after.id));
+    await db.update(catalogBatches).set({ createdAt: NOW }).where(eq(catalogBatches.id, b.id));
+    expect(await count()).toBe(2);
+    await db.update(catalogOutputs).set({ contentVersionId: v.versionId }).where(inArray(catalogOutputs.id, [after.id, fresh.id]));
     expect(await count()).toBe(0);
     expect(before.id).not.toBe(after.id);
+    await db.delete(catalogOutputs).where(eq(catalogOutputs.batchId, c.id));
+  });
+
+  it("M6-S2: cost_reconcile_stale fires when the newest cost row is older than 30 hours, or no run finished while the ledger is older than that", async () => {
+    const stale = async () => (await run()).counts.cost_reconcile_stale;
+    expect(COST_RECONCILE_STALE_HOURS).toBe(30);
+    expect(await stale()).toBe(0);
+    // Review fix: no successful run recorded at all. A ledger younger than 30 hours is not yet late; an older one is.
+    const ledger = (hours: number) => db.execute(sql`INSERT INTO catalog_cost_events (stage, kind, engine, at) VALUES ('system', 'job', 'job', ${ago(hours * 60).toISOString()}::timestamptz)`);
+    await ledger(29);
+    expect(await stale()).toBe(0);
+    await ledger(31);
+    expect(await stale()).toBe(1);
+    const row = (hours: number, day: string) => ({ day, component: "ila-pg", kind: "shared" as const, env: "live" as const, source: "monitoring" as const, computedAt: ago(hours * 60) });
+    await db.insert(catalogCostDays).values(row(31, "2026-10-01"));
+    expect(await stale()).toBe(1);
+    expect((await run()).results.find((x) => x.id === "cost_reconcile_stale")!.batches).toEqual([{ batchId: null, test: false, violations: 1 }]);
+    await db.insert(catalogCostDays).values(row(29, "2026-10-02"));
+    expect(await stale()).toBe(0);
+    await db.delete(catalogCostDays);
+    await db.execute(sql`DELETE FROM catalog_cost_events`);
+  });
+
+  it("M6-S2: daily_check_alert counts the alerts the daily job wrote in the last 24 hours", async () => {
+    const alerts = async () => (await run()).counts.daily_check_alert;
+    expect(DAILY_ALERT_HOURS).toBe(24);
+    expect(await alerts()).toBe(0);
+    const incident = (hours: number, key: string) => db.execute(sql`INSERT INTO catalog_incidents (kind, severity, cause_code, cause, started_at, resolved_at, dedupe_key, created_at)
+      VALUES ('alert', 'warning', 'ledger_over', 'over', ${ago(hours * 60).toISOString()}::timestamptz, ${ago(hours * 60).toISOString()}::timestamptz, ${key}, ${ago(hours * 60).toISOString()}::timestamptz)`);
+    await incident(25, "alert:old");
+    expect(await alerts()).toBe(0);
+    await incident(2, "alert:new");
+    expect(await alerts()).toBe(1);
+    await db.execute(sql`DELETE FROM catalog_incidents`);
   });
 });
 
