@@ -244,7 +244,7 @@ them.
    the route the batch asks first (its pinned policy judge for `judge.render`, the classifier model for
    `vision.read`), prints it and the route serving instead, and restores it when the batch finishes or the minutes
    run out (1 to 360). The drill is recorded on the route (`vendor_routes.drill_id`, `restore_state`, `restore_at`,
-   migration 0026): the router reads an expired drill as restored and writes the restore (`drill-expiry` in the
+   migration 0027): the router reads an expired drill as restored and writes the restore (`drill-expiry` in the
    change log), so a stopped job never leaves the route off past its expiry. Only that drill or its expiry ends it:
    a late job never ends a newer drill, a rank, cap or position change keeps it, a manual state change ends it, and
    an expired drill nobody restored is restored before the next drill starts. A drill is refused while another runs

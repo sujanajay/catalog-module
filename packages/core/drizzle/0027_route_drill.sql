@@ -1,6 +1,6 @@
--- M7-S2 follow-up (2026-11-05, R1 exit item 3): the kill-switch drill's record on vendor_routes. A drill turns one
--- route off with restore_state (the state to go back to), restore_at (when) and drill_id (which drill, so only that
--- drill or its expiry ends it); the router honours an expired drill and writes the restore. Additive only: three
+-- M7-S2 follow-up (2026-11-05, R1 exit item 3; numbered 0027 after R1 item 5's 0026 at merge time): the kill-switch
+-- drill's record on vendor_routes. A drill turns one route off with restore_state (the state to go back to), restore_at
+-- (when) and drill_id (which drill, so only that drill or its expiry ends it); the router honours an expired drill and writes the restore. Additive only: three
 -- nullable columns and two CHECKs added NOT VALID, then validated (every existing row has all three null). Every
 -- statement can run again harmlessly; the short lock timeout keeps the migrate job re-runnable.
 SET LOCAL lock_timeout = '10s';--> statement-breakpoint

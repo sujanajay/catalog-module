@@ -1676,7 +1676,7 @@ export const vendorRoutes = pgTable(
     /** M3-F2-R3: an overflow route's daily spend cap in USD; null on an overflow route means it is never called. */
     dailyCapUsd: money("daily_cap_usd"),
     /**
-     * M7-F2-R5 kill-switch drill (migration 0026): the state the route goes back to at `restoreAt`. Both null when no
+     * M7-F2-R5 kill-switch drill (migration 0027): the state the route goes back to at `restoreAt`. Both null when no
      * drill runs (with `drillId`). The router reads a route whose `restoreAt` has passed as `restoreState` and writes the restore, so a
      * drill's "off" never outlives its expiry, even when the drill job is stopped.
      */
