@@ -26,7 +26,14 @@ export async function batchExportUrl(id: string, format: string, conn: Db = db()
     const report = JSON.parse(buf.toString()) as { exports?: { filledProductList?: { xlsx?: string } | null } };
     uri = report.exports?.filledProductList?.xlsx ?? null;
     if (!uri) throw new HttpError(404, "No product list was uploaded in this batch.");
-  } else throw new HttpError(400, "Choose xlsx, csv, report or filled to download.");
+  } else if (format === "exceptions" || format === "notes") {
+    // M1-S5: the digest sheets as csv (the xlsx carries them as its second and third sheets).
+    if (!batch.reportUri) throw new HttpError(404, "The sheet is not ready yet. Wait for processing to finish.");
+    const { buf } = await storage.downloadBuffer(batch.reportUri);
+    const report = JSON.parse(buf.toString()) as { exports?: { exceptionsCsv?: string; notesCsv?: string } };
+    uri = (format === "exceptions" ? report.exports?.exceptionsCsv : report.exports?.notesCsv) ?? null;
+    if (!uri) throw new HttpError(404, "This batch finished before these sheets were made. Download the links sheet instead.");
+  } else throw new HttpError(400, "Choose xlsx, csv, report, filled, exceptions or notes to download.");
   if (!uri) throw new HttpError(404, "The sheet is not ready yet. Wait for processing to finish.");
   return storage.signedUrl(uri, 7 * 86400);
 }
@@ -136,13 +143,17 @@ export async function exportBrand(slug: string, productIds: string[], conn: Db =
   return { url: await storage.signedUrl(uri) };
 }
 
-export async function batchDetails(id: string, conn: Db = db(), read = downloadBuffer) {
+/**
+ * `sheet: "unless-digest"` skips reading the links sheet when the batch has a digest: the batch page then shows the
+ * digest from one row and loads the sheet only on its own tab (M1-F4-R6).
+ */
+export async function batchDetails(id: string, conn: Db = db(), read = downloadBuffer, options: { sheet?: "always" | "unless-digest" } = {}) {
   const [batch] = await conn.select().from(catalogBatches).where(eq(catalogBatches.id, id));
   if (!batch) throw new HttpError(404, "This batch was not found. Return to All batches.");
   const [uploads, failures, sheet, kept, styliSkips] = await Promise.all([
     conn.select({ kind: catalogUploads.kind, detected: catalogUploads.detected }).from(catalogUploads).where(and(eq(catalogUploads.batchId, id), ne(catalogUploads.status, "removed"))),
     conn.select({ n: catalogOutputs.n, originalName: catalogSourceImages.originalName, channel: catalogOutputs.channel, reason: catalogOutputs.reason, error: catalogOutputs.error }).from(catalogOutputs).innerJoin(catalogSourceImages, eq(catalogSourceImages.id,catalogOutputs.sourceImageId)).where(and(eq(catalogOutputs.batchId, id), eq(catalogOutputs.status, "failed"))),
-    batchSheet(id, conn, read),
+    options.sheet === "unless-digest" && batch.digest ? Promise.resolve<SheetSpec>({ channels: [], rows: [] }) : batchSheet(id, conn, read),
     conn.select({ sourceImageId: catalogOutputs.sourceImageId }).from(catalogOutputs).where(and(eq(catalogOutputs.batchId, id), eq(catalogOutputs.decision, "use_as_is"))),
     // Styli outputs left out as too small, for the Ready line; counts.skipped also holds removed, replaced and chart skips.
     // The render can join other notes onto the skip note, so it is matched anywhere in the reason.

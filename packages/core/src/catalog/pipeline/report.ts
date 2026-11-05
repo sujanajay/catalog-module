@@ -91,7 +91,8 @@ export async function notRefreshedChannels(db:Db,batchId:string):Promise<NotRefr
   const byChannel=new Map(latest.map(r=>[r.channel,r]));
   return others.flatMap(c=>{ const r=byChannel.get(c); return r ? [{channel:c,lastBatchId:r.lastBatchId,lastBatchName:r.lastBatchName}]:[]; });
 }
-export interface ExportPaths { xlsx:string; csv:string; report:string; filledProductList:{xlsx:string;csv:string[]}|null; exportsMatch:boolean }
+/** The batch exports; `exceptionsCsv` and `notesCsv` (M1-S5) are the digest sheets as csv, absent on older batches. */
+export interface ExportPaths { xlsx:string; csv:string; report:string; filledProductList:{xlsx:string;csv:string[]}|null; exportsMatch:boolean; exceptionsCsv?:string; notesCsv?:string }
 export interface IngestReport { unsupportedFiles:unknown[];duplicates:unknown[];linkFailures?:unknown[];sourceOrigins?:Record<string,{origin:string;sourceUrl?:string;relativePath?:string}> }
 /** The reject ledger written by ingest includes files that have no product/source DB row. */
 export async function readIngestReport(store:Pick<typeof storage,"headObject"|"downloadBuffer"|"getBucketName">,prefix:string):Promise<IngestReport|undefined> {

@@ -42,6 +42,8 @@ export const OPERATOR_COPY_FILES = [
   "packages/core/src/catalog/ingest/index.ts",
   "packages/core/src/catalog/ingest/url-list.ts",
   "packages/core/src/settings/registry.ts",
+  "packages/core/src/catalog/digest.ts",
+  "packages/core/src/catalog/digest-copy.ts",
 ];
 
 export default defineConfig(

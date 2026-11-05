@@ -148,6 +148,13 @@
       "when": 1793804551507,
       "tag": "0020_batch_outcomes_incidents",
       "breakpoints": true
+    },
+    {
+      "idx": 21,
+      "version": "7",
+      "when": 1793857655062,
+      "tag": "0021_batch_digest",
+      "breakpoints": true
     }
   ]
 }

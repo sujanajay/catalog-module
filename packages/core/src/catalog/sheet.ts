@@ -6,6 +6,7 @@ import { buildCsv, parseCsv } from "../csv";
 import { channel } from "./channels";
 import { normalizeKey } from "./naming";
 import { CHANNEL_IDS, type ChangeKind, type ChannelId, type SheetStatus } from "./types";
+import type { ExceptionRow, NoteRow } from "./digest";
 
 export interface SheetRow {
   brand: string;
@@ -115,8 +116,48 @@ function toBuffer(data: ArrayBuffer | Uint8Array | Buffer): Buffer {
   return Buffer.isBuffer(data) ? data : Buffer.from(data as ArrayBuffer);
 }
 
-/** The links workbook: one sheet, two bold header rows, frozen below them, hyperlinked link cells. */
-export async function writeLinksXlsx(spec: SheetSpec): Promise<Buffer> {
+/** M1-F4-R4: the names of the two digest sheets after Links. */
+export const EXCEPTIONS_SHEET = "Exceptions";
+export const NOTES_SHEET = "Delivered with a note";
+export const NO_EXCEPTIONS = "No exceptions.";
+export const NO_NOTES = "Every image was sent without a note.";
+
+/**
+ * The Exceptions table (M1-F4-R4): one row per product or photo with no link. A batch with none has the header and one
+ * line "No exceptions." (M1-F4 edge case).
+ */
+export function exceptionsTable(rows: readonly ExceptionRow[]): { header: string[]; rows: string[][] } {
+  const header = ["identifier", "channel", "image", "reason", "what_would_fix_it"];
+  return { header, rows: rows.length ? rows.map(r => [r.identifier, r.channel ? channel(r.channel).label : "", r.image ? String(r.image) : "", r.reason, r.fix]) : [[NO_EXCEPTIONS, "", "", "", ""]] };
+}
+
+/** The "Delivered with a note" table (M1-F4-R4 "Provisional"): one row per image sent now with the best image we have. */
+export function notesTable(rows: readonly NoteRow[]): { header: string[]; rows: string[][] } {
+  const header = ["identifier", "channel", "image", "link", "reason", "rule", "improves_by_itself", "what_would_make_it_better"];
+  return { header, rows: rows.length ? rows.map(r => [r.identifier, channel(r.channel).label, String(r.image), r.link, r.reason, r.rule, r.improves ? "yes" : "no", r.better]) : [[NO_NOTES, "", "", "", "", "", "", ""]] };
+}
+
+export const writeExceptionsCsv = (rows: readonly ExceptionRow[]): string => { const t = exceptionsTable(rows); return buildCsv(t.header, t.rows); };
+export const writeNotesCsv = (rows: readonly NoteRow[]): string => { const t = notesTable(rows); return buildCsv(t.header, t.rows); };
+
+function addTableSheet(wb: ExcelJS.Workbook, name: string, table: { header: string[]; rows: string[][] }, linkColumn: number | null): void {
+  const ws = wb.addWorksheet(name);
+  table.header.forEach((h, c) => { const cell = ws.getCell(1, c + 1); cell.value = h; cell.font = { bold: true }; });
+  table.rows.forEach((cells, r) => cells.forEach((value, c) => {
+    const cell = ws.getCell(r + 2, c + 1);
+    if (c === linkColumn && value) { cell.value = { text: value, hyperlink: value }; cell.font = LINK_FONT; }
+    else { cell.value = value; cell.numFmt = "@"; }
+  }));
+  table.header.forEach((h, c) => { ws.getColumn(c + 1).width = columnWidth([h, ...table.rows.map(r => r[c] ?? "")], c === linkColumn); });
+  ws.views = [{ state: "frozen", ySplit: 1 }];
+}
+
+/**
+ * The links workbook: the Links sheet first (two bold header rows, frozen below them, hyperlinked link cells), unchanged
+ * so channel teams' habits do not change; with `digest` (M1-S5) the Exceptions and "Delivered with a note" sheets after it.
+ * Every reader of the links (re-check, Add SKU ids, the batch page) reads the first sheet only.
+ */
+export async function writeLinksXlsx(spec: SheetSpec, digest?: { exceptions: readonly ExceptionRow[]; notes: readonly NoteRow[] }): Promise<Buffer> {
   const grid = buildGrid(spec);
   const wb = new ExcelJS.Workbook();
   const ws = wb.addWorksheet("Links");
@@ -160,6 +201,10 @@ export async function writeLinksXlsx(spec: SheetSpec): Promise<Buffer> {
     ws.getColumn(j + 1).width = columnWidth(values, col.link);
   });
   ws.views = [{ state: "frozen", ySplit: 2 }];
+  if (digest) {
+    addTableSheet(wb, EXCEPTIONS_SHEET, exceptionsTable(digest.exceptions), null);
+    addTableSheet(wb, NOTES_SHEET, notesTable(digest.notes), 3);
+  }
   return toBuffer(await wb.xlsx.writeBuffer());
 }
 

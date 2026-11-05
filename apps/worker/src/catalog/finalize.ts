@@ -8,7 +8,9 @@ import { autoDecideOf } from "@catalog/core/catalog/auto-decide";
 import { recordBatchOutcome } from "@catalog/core/catalog/reliability";
 import { ENLARGING_TASK } from "@catalog/core/catalog/pipeline/enlargement";
 import { recheckSheetPart, type RecheckProgress } from "@catalog/core/catalog/recheck/index";
-import { compareXlsxCsv, fillProductListWorkbook, writeLinksCsv, writeLinksXlsx } from "@catalog/core/catalog/sheet";
+import { compareXlsxCsv, fillProductListWorkbook, writeExceptionsCsv, writeLinksCsv, writeLinksXlsx, writeNotesCsv } from "@catalog/core/catalog/sheet";
+import { buildDigest } from "@catalog/core/catalog/digest";
+import { inrPerUsdFromEnv } from "@catalog/core/catalog/cost";
 import { positiveIntEnv } from "@catalog/core/concurrency";
 import type { HandleResult } from "../server";
 import { CATALOG_TASK_LEASE_MS, enqueueFinalize, refreshBatchProgress, type CatalogDeps } from "./deps";
@@ -120,10 +122,18 @@ export async function handleFinalizeTask(deps:CatalogDeps,body:Record<string,unk
     // Unique paths keep an expired uploader from overwriting a newer attempt's checked files.
     const attempt=state?.attempt ?? claim;
     const attemptPath=(name:string)=>exportPath(prefix,`${attempt}/${name}`);
-    const paths:ExportPaths=state?.paths ?? {xlsx:bucketUri(attemptPath(`links-v${k}.xlsx`)),csv:bucketUri(attemptPath(`links-v${k}.csv`)),report:bucketUri(attemptPath(`report-v${k}.json`)),filledProductList:null,exportsMatch:false};
+    const paths:ExportPaths=state?.paths ?? {xlsx:bucketUri(attemptPath(`links-v${k}.xlsx`)),csv:bucketUri(attemptPath(`links-v${k}.csv`)),report:bucketUri(attemptPath(`report-v${k}.json`)),filledProductList:null,exportsMatch:false,
+      exceptionsCsv:bucketUri(attemptPath(`exceptions-v${k}.csv`)),notesCsv:bucketUri(attemptPath(`delivered-with-a-note-v${k}.csv`))};
     const ingest=await readIngestReport(deps.storage,prefix);
     const extra={recheck:{ok:0,total:0,failures:[]},exports:paths,ingest};
-    const build=async(db:CatalogDeps["db"])=>{const built=await buildReport(db,batchId,extra);built.batch.counts=cleanCounts(built.batch.counts);built.report.counts=built.batch.counts;return built;};
+    const build=async(db:CatalogDeps["db"])=>{
+      const built=await buildReport(db,batchId,extra);built.batch.counts=cleanCounts(built.batch.counts);built.report.counts=built.batch.counts;
+      // M1-S5 (M1-F4-R1): the digest and its two sheets from the same snapshot as the links sheet, so their numbers agree.
+      const c=built.batch.cost as typeof built.batch.cost & {usdPerIdentifier?:number|null;inrPerIdentifier?:number|null},usd=c.qaUsd+c.computeUsd,rate=inrPerUsdFromEnv();
+      const digest=await buildDigest(db,{batch:built.batch,sheet:built.sheet,files:[...(built.report.unsupportedFiles as unknown[]),...(built.report.linkFailures as unknown[])],
+        cost:{usd,inr:rate===null ? null:usd*rate,usdPerProduct:c.usdPerIdentifier ?? null,inrPerProduct:c.inrPerIdentifier ?? null}});
+      return {...built,digest};
+    };
     const initial=await deps.db.transaction(tx=>build(tx as unknown as CatalogDeps["db"]),{isolationLevel:"repeatable read"});
     const snapshotOf=(built:typeof initial)=>JSON.stringify({...built,report:{...built.report,exports:undefined,recheck:undefined}});
     const snapshot=snapshotOf(initial),snapshotHash=createHash("sha256").update(snapshot).digest("hex");
@@ -137,11 +147,13 @@ export async function handleFinalizeTask(deps:CatalogDeps,body:Record<string,unk
       }
       resume=state.progress;
     } else {
-      const xlsx=await writeLinksXlsx(initial.sheet),csv=writeLinksCsv(initial.sheet),comparison=await compareXlsxCsv(xlsx,csv);
+      const xlsx=await writeLinksXlsx(initial.sheet,initial.digest),csv=writeLinksCsv(initial.sheet),comparison=await compareXlsxCsv(xlsx,csv);
       if(!comparison.equal) { await deps.db.update(catalogBatches).set({error:`Links xlsx and csv differ: ${comparison.differences.join("; ")}`}).where(claimWhere); return {httpStatus:500,outcome:"exports_mismatch"}; }
       paths.exportsMatch=true;
       await deps.storage.uploadBuffer(deps.storage.parseGsUri(paths.xlsx).path,xlsx,"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
       await deps.storage.uploadBuffer(deps.storage.parseGsUri(paths.csv).path,Buffer.from(csv),"text/csv");
+      if(paths.exceptionsCsv) await deps.storage.uploadBuffer(deps.storage.parseGsUri(paths.exceptionsCsv).path,Buffer.from(writeExceptionsCsv(initial.digest.exceptions)),"text/csv");
+      if(paths.notesCsv) await deps.storage.uploadBuffer(deps.storage.parseGsUri(paths.notesCsv).path,Buffer.from(writeNotesCsv(initial.digest.notes)),"text/csv");
       const uploads=await deps.db.select().from(catalogUploads).where(and(eq(catalogUploads.batchId,batchId),eq(catalogUploads.kind,"product_list")));
       for(const upload of uploads.filter(u=>u.gcsUri && /\.xlsx$/i.test(u.name))) {
         const filled=await fillProductListWorkbook((await deps.storage.downloadBuffer(upload.gcsUri!)).buf,initial.sheet,Number(upload.detected?.matchColumn ?? upload.detected?.identifierColumn ?? 0));
@@ -189,7 +201,9 @@ export async function handleFinalizeTask(deps:CatalogDeps,body:Record<string,unk
       if(snapshotOf(current)!==snapshot) return "snapshot_changed";
       // A first finalize writes done only while the batch is not done yet (the claim guards a re-opened done batch).
       const reopened=batch.status==="done";
-      const written=await tx.update(catalogBatches).set({counts,cost:initial.batch.cost,status:"done",finishedAt:deps.now(),sheetXlsxUri:paths.xlsx,sheetCsvUri:paths.csv,reportUri:paths.report,error:null}).where(reopened ? claimWhere:and(claimWhere,ne(catalogBatches.status,"done"))).returning({id:catalogBatches.id});
+      // M1-F4-R1: the digest is written with done. Its "links ready" time is the first done, kept by every later finalize.
+      const doneAt=deps.now(),digest={...initial.digest.digest,linksReadyAt:fresh.digest?.linksReadyAt ?? doneAt.toISOString()};
+      const written=await tx.update(catalogBatches).set({counts,cost:initial.batch.cost,digest,status:"done",finishedAt:doneAt,sheetXlsxUri:paths.xlsx,sheetCsvUri:paths.csv,reportUri:paths.report,error:null}).where(reopened ? claimWhere:and(claimWhere,ne(catalogBatches.status,"done"))).returning({id:catalogBatches.id});
       if(!written.length) return "snapshot_changed";
       // M1-F3-R7: an auto-decide batch releases every product it locked, so none blocks the next batch.
       await releaseLocks(tx as unknown as CatalogDeps["db"],batchId,{everyProduct:autoDecideOf(batch.options)!==null});

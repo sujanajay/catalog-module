@@ -19,6 +19,7 @@ import { ActionOnly } from "@/components/ViewerPreview";
 import LocalTime from "@/components/LocalTime";
 import BatchBanner from "@/components/catalog/BatchBanner";
 import BatchKpis from "@/components/catalog/BatchKpis";
+import DigestTab from "@/components/catalog/DigestTab";
 import BatchTabs from "@/components/catalog/BatchTabs";
 import CompareTab, { compareHref } from "@/components/catalog/CompareTab";
 import AttentionList from "@/components/catalog/AttentionList";
@@ -42,7 +43,8 @@ export default async function BatchPage({ params, searchParams }: { params: Prom
   const { id } = await params;
   let data;
   try {
-    data = await batchDetails(id);
+    // A batch with a digest shows it from its own row; the links sheet loads on its tab (M1-F4-R6).
+    data = await batchDetails(id, undefined, undefined, { sheet: (await searchParams).tab === "sheet" ? "always" : "unless-digest" });
   } catch (err) {
     if (err instanceof HttpError && err.status === 404) notFound();
     throw err;
@@ -59,9 +61,13 @@ export default async function BatchPage({ params, searchParams }: { params: Prom
   // A cancelled batch never started (a started one cannot be cancelled, spec 14c F4 part 2).
   const notStarted = hasNotStarted(batch) || batch.status === "cancelled";
   const settingUp = canContinueSettingUp(batch);
+  // M1-S5 (M1-F4-R5): a finished batch with a digest shows it in place of the overview and the product cards. A batch
+  // with products held for a person (one started before auto-decide) keeps its cards under their own tab.
+  const digest = !evalMode && batch.status === "done" ? batch.digest : null;
+  const sheetLoaded = !digest || tab === "sheet";
   // The comparison signs a page of images, so it loads only when its tab is asked for (?tab=compare).
   const [attention, evalPage, cost, stageCost, chunks, comparePage] = await Promise.all([
-    evalMode ? Promise.resolve([]) : batchAttention(id),
+    evalMode || (digest && !batch.counts.attentionProducts) ? Promise.resolve([]) : batchAttention(id),
     evalMode ? evalOutputs(id, { page: Number(query.page ?? 0) || 0, ...evalFilters }) : Promise.resolve(null),
     batchCostLine(batch),
     batchStageCost(id),
@@ -113,7 +119,7 @@ export default async function BatchPage({ params, searchParams }: { params: Prom
       </div>
       <BatchBanner key={id} status={batch.status} counts={batch.counts} source={source} updatedAt={new Date(batch.updatedAt).toISOString()} startedAt={batch.startedAt ? new Date(batch.startedAt).toISOString() : null} now={now.toISOString()} keptPhotos={data.keptPhotos} styliSkipped={data.styliSkipped} continueHref={canAct && settingUp ? continueSettingUpHref(id) : undefined} fixId={canAct && state.fixable ? id : undefined} retryLinksId={linksRetryable ? id : undefined} cancel={canAct && canCancel(batch) ? { id, name: batch.name } : undefined} />
       <NotRefreshedLine items={data.notRefreshedChannels} />
-      <BatchKpis counts={batch.counts} />
+      {!digest && <BatchKpis counts={batch.counts} />}
       <AutoRefresh active={state.state === "collecting" || state.state === "processing"} />
       <BatchTabs
         attentionCount={attention.length}
@@ -121,7 +127,11 @@ export default async function BatchPage({ params, searchParams }: { params: Prom
         initialTab={tab ?? (evalMode && (query.page || query.channel || query.verdict) ? "attention" : undefined)}
         compare={notStarted ? notStartedLine : comparePage ? <CompareTab data={comparePage} channels={batch.channels} filters={compareFilters} /> : <p className="muted">Loading the comparison.</p>}
         compareHref={comparePage || notStarted ? undefined : compareHref(compareFilters)}
-        overview={
+        overviewLabel={digest ? "Digest" : undefined}
+        sheetHref={sheetLoaded || notStarted ? undefined : "?tab=sheet"}
+        overview={digest ? (
+          <DigestTab id={id} digest={digest} sheets={{ xlsx: !!batch.sheetXlsxUri, exceptions: !!batch.reportUri, notes: !!batch.reportUri }} onNeedsYou={attention.length ? "?tab=attention" : undefined} />
+        ) : (
           <div className="grid2">
             <div className="card">
               <h2>How this works</h2>
@@ -136,11 +146,11 @@ export default async function BatchPage({ params, searchParams }: { params: Prom
               {fullCost && <p className="cost-split">{fullCost}</p>}
             </div>
           </div>
-        }
+        )}
         attention={evalPage
           ? <EvalList batchId={id} data={evalPage} channels={batch.channels} filters={evalFilters} canAct={canAct} />
           : <AttentionList items={attention} canAct={canAct} channels={channelLabels} />}
-        sheet={notStarted ? notStartedLine : (
+        sheet={notStarted ? notStartedLine : !sheetLoaded ? <p className="muted">Loading the links sheet.</p> : (
           <>
             <SheetPreview sheet={data.sheet} />
             {downloads}

@@ -10,25 +10,26 @@ import { setDbForTests, type Db } from "../lib/db";
 import { resetUserDeps, setUserDeps } from "../lib/user";
 import { countTouch } from "../lib/catalog/touches";
 import { POST as cancel } from "../app/api/catalog/batches/[id]/cancel/route";
+import { POST as holdStart } from "../app/api/catalog/batches/[id]/hold-start/route";
 
 const API = path.resolve(import.meta.dirname, "../app/api/catalog");
 
 /** Operator write routes whose write is a person stepping in: each calls countTouch after it succeeded. */
 const TOUCH_ROUTES = [
-  "batches/[id]/cancel", "batches/[id]/ingest", "batches/[id]/reopen", "batches/[id]/retry-links", "batches/[id]/sku-map",
+  "batches/[id]/cancel", "batches/[id]/hold-start", "batches/[id]/ingest", "batches/[id]/reopen", "batches/[id]/retry-links", "batches/[id]/sku-map",
   "outputs/[id]/decision", "outputs/[id]/replacement/complete", "outputs/[id]/retry-enlargement",
 ];
 /**
  * Operator write routes of the wizard's own path, or a step of a touch counted elsewhere: not touches. The replacement's
  * signed upload URL is the first half of replace_photo (counted on complete); eval labels mark a test batch for the
- * model bake-off and never change it. The one-page New batch's brand inference, a draft's brand change and its "Wait"
- * (hold-start) all act on a draft before Start, so they are the wizard's own path too.
+ * model bake-off and never change it. The one-page New batch's brand inference and a draft's brand change act on a draft
+ * before Start, so they are the wizard's own path too. "Wait" (hold-start) is a touch (M1 D23): it stops the countdown.
  */
 const NOT_TOUCH_ROUTES = [
   "batches", "batches/[id]", "batches/[id]/detected", "batches/[id]/links", "batches/[id]/links/[uploadId]", "batches/[id]/start",
   "batches/[id]/uploads", "batches/[id]/uploads/[uploadId]", "batches/[id]/uploads/[uploadId]/complete", "batches/[id]/eval-labels",
   "outputs/[id]/replacement", "brands/[slug]/export", "products/[id]", "products/[id]/aliases",
-  "brands/infer", "batches/[id]/brand", "batches/[id]/hold-start",
+  "brands/infer", "batches/[id]/brand",
 ];
 
 function routeFiles(dir: string): string[] {
@@ -75,6 +76,14 @@ describe("operator touches (M6-F3-R3)", () => {
     expect((await cancel(req(`/api/catalog/batches/${collecting!.id}/cancel`), ctx(collecting!.id))).status).toBe(200);
     expect((await cancel(req(`/api/catalog/batches/${started!.id}/cancel`), ctx(started!.id))).status).toBe(409);
     expect(await touches()).toEqual([{ batch_id: collecting!.id, action: "cancel" }]);
+  });
+
+  it("counts each Wait on a draft's countdown as a touch and none for a batch already started (M1 D23)", async () => {
+    const [draft] = await db.insert(catalogBatches).values({ name: "a", brandSlug: "uspa", brandName: "USPA", createdBy: "op@opptra.com", status: "draft" }).returning();
+    const [started] = await db.insert(catalogBatches).values({ name: "b", brandSlug: "uspa", brandName: "USPA", createdBy: "op@opptra.com", status: "rendering", startedAt: new Date() }).returning();
+    expect((await holdStart(req(`/api/catalog/batches/${draft!.id}/hold-start`), ctx(draft!.id))).status).toBe(200);
+    expect((await holdStart(req(`/api/catalog/batches/${started!.id}/hold-start`), ctx(started!.id))).status).toBe(409);
+    expect(await touches()).toEqual([{ batch_id: draft!.id, action: "hold_start" }]);
   });
 
   it("never fails the operator's request when the touch cannot be written", async () => {
