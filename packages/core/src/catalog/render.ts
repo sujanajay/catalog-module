@@ -25,7 +25,7 @@ export interface RenderInput { prepared: Prepared; matte: Matte; channel: Channe
   /** Spec 11: the (x2) upscaler, used when the plan enlarges beyond its `minScale`; absent or null is the plain Lanczos path. */ upscaler?: Upscaler | null;
   /** Spec 18 quality: the x4 upscaler, used above UPSCALE_X4_MIN_SCALE (upscalersFor); absent or null: the x2 upscaler everywhere. */ upscalerX4?: Upscaler | null;
   /** Ids for the upscale log lines; never shown to an operator. */ trace?: { batchId?: string; productId?: string };
-  /** M3-S1: the channel values from the M5 registry (channel-rules.ts); absent renders with the channels.ts fixture (tests and local tools). */ channelRules?: Pick<ChannelRules, "spec"> }
+  /** M3-S1: the channel values from the M5 registry (channel-rules.ts); absent renders with the channels.ts fixture (tests and local tools). M5-S3: the batch's pinned snapshot, whose background rules the compliance check reads. */ channelRules?: Pick<ChannelRules, "spec" | "backgroundBreach"> }
 /**
  * `upscale`: set only when the upscaler made this output's colour (flag `upscaled`); `model` goes into render_key, never
  * into operator copy. `reused`: the photo's one x2 image was made for an earlier output (its `ms` is not a new call).
@@ -734,7 +734,7 @@ export async function renderSource(input: RenderInput): Promise<RenderOutput> {
   result.bytes = jpeg.length;
   const identifier = input.identifier ?? "photo";
   result.foregroundMask = foregroundMask;
-  const checked = await checkOutput({ jpeg, channel: spec.id, spec, shotNumber, plan, identifier, n: shotNumber, publicObjectPath: input.publicObjectPath ?? `${encodeURIComponent(identifier)}_${shotNumber}.jpg`, foregroundMask });
+  const checked = await checkOutput({ jpeg, channel: spec.id, spec, ...(input.channelRules ? { rules: input.channelRules } : {}), shotNumber, plan, identifier, n: shotNumber, publicObjectPath: input.publicObjectPath ?? `${encodeURIComponent(identifier)}_${shotNumber}.jpg`, foregroundMask });
   result.compliance = { ok: checked.ok, failures: checked.failures, measured: { ...checked.measured, shadow: shadowKind, cut: { ...cut } } };
   // The note (the row's reason) names the rule in plain words; the "code: sentence" strings stay in compliance.failures (07 4.6a).
   if (!result.compliance.ok) { result.flags.push("failed_compliance");

@@ -1,5 +1,6 @@
 import sharp from "sharp";
-import { backgroundOf, backgroundRuleBreach, channel, MAX_OUTPUT_BYTES, type ChannelSpec } from "./channels";
+import { backgroundOf, backgroundRuleBreach, channel, MAX_OUTPUT_BYTES, type ChannelSpec, type Margins } from "./channels";
+import type { ChannelRules } from "./channel-rules";
 import { effectiveMinimum, hexColor, NO_CUT, safeBoxFor, type BBox, type CanvasPlan } from "./render";
 import { borderBand } from "./shadow";
 import type { ChannelId } from "./types";
@@ -66,7 +67,16 @@ function productBlocks(w: number, h: number, isProduct: (x: number, y: number) =
   for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) if (isProduct(x, y)) blocks[blockIndex(w, x, y)] = 1;
   return blocks;
 }
-export interface ComplianceInput { jpeg: Buffer; channel: ChannelId; /** M3-S1: the channel values the render used (M5 registry); absent is the channels.ts fixture. */ spec?: ChannelSpec; shotNumber: number; plan: CanvasPlan; identifier: string; n: number; publicObjectPath: string; foregroundMask?: Buffer }
+/** One side's margin in px on a canvas side of `size` px (a fraction of it, or px as written). */
+function marginPx(margins: Margins, side: "top" | "bottom" | "left" | "right", size: number): number {
+  return margins.unit === "fraction" ? size * margins[side] : margins[side];
+}
+/** "5%" or "150 px": the smaller side margin as an operator reads it. */
+function sideMarginWords(margins: Margins): string {
+  const least = Math.min(margins.left, margins.right);
+  return margins.unit === "fraction" ? `${Math.round(least * 1000) / 10}%` : `${least} px`;
+}
+export interface ComplianceInput { jpeg: Buffer; channel: ChannelId; /** M3-S1: the channel values the render used (M5 registry); absent is the channels.ts fixture. */ spec?: ChannelSpec; /** M5-S3 (F4-R4): the background rules of the batch's ruleset snapshot; absent is the channels.ts rule (fixture). */ rules?: Pick<ChannelRules, "backgroundBreach">; shotNumber: number; plan: CanvasPlan; identifier: string; n: number; publicObjectPath: string; foregroundMask?: Buffer }
 /**
  * What the check measured, kept with the failures so a repair can compute its fix from the numbers (07 4.6a):
  * `seen` is the product's box as the check sees it (seen pixels plus the half-alpha silhouette), `outside` how many
@@ -91,7 +101,7 @@ export async function checkOutput(input: ComplianceInput): Promise<{ ok: boolean
   if (!jpeg.subarray(0, 3).equals(Buffer.from([255, 216, 255]))) fail("magic", "The file is not a JPEG.");
   if (jpeg.length > MAX_OUTPUT_BYTES) fail("bytes", `Could not get ${input.identifier}_${input.n} for ${input.channel} under 2 MB.`);
   // M3-F3-R2 and R4: the canvas colour itself must be a light grey of 240 or more (Amazon image 1 pure white), whatever the rules row says.
-  const lightness = backgroundRuleBreach(spec, input.shotNumber);
+  const lightness = input.rules ? input.rules.backgroundBreach(spec.id, input.shotNumber) : backgroundRuleBreach(spec, input.shotNumber);
   if (lightness) fail("background_light", lightness);
   if (input.publicObjectPath.includes(" ")) fail("trendyol_name", "The output path contains spaces.");
   if (!input.publicObjectPath.endsWith(".jpg")) fail("extension", "The output path must end in lowercase .jpg.");
@@ -136,17 +146,23 @@ export async function checkOutput(input: ComplianceInput): Promise<{ ok: boolean
       measured.seen = { x: sx0, y: sy0, w: sx1 - sx0 + 1, h: sy1 - sy0 + 1 };
       measured.outside = { top: Math.max(0, safe.y - sy0), bottom: Math.max(0, sy1 + 1 - safe.y - safe.h), left: Math.max(0, safe.x - sx0), right: Math.max(0, sx1 + 1 - safe.x - safe.w) };
     }
-    if (spec.id === "styli") {
+    if (spec.anchor === "bottom-centre") {
       // The product's box for the guide is the same box the placement used (anchorBounds): never the shadow.
       const box = anchorBounds(data, w, h, color, mask);
       const px0 = box?.x ?? w, px1 = box ? box.x + box.w - 1 : -1, py0 = box?.y ?? h, py1 = box ? box.y + box.h - 1 : -1;
       // The move onto the guide (the `reshift` repair), measured on that same box: only an axis with no cut side can move.
-      if (box) measured.anchorDelta = { dx: cut.left || cut.right ? 0 : Math.round(w / 2 - (px0 + px1 + 1) / 2), dy: cut.top || cut.bottom ? 0 : (h - 450) - (py1 + 1) };
-      const styliVertical = cut.bottom ? Math.abs(py1 + 1 - h) <= 1 : cut.top ? py0 <= 1 : Math.abs(py1 + 1 - (h - 450)) <= 1;
+      // M5-S3 (F4-R4): the guide is the channel row's bottom margin (Styli: 450 px), not a number in code.
+      const guide = h - marginPx(spec.margins, "bottom", h);
+      if (box) measured.anchorDelta = { dx: cut.left || cut.right ? 0 : Math.round(w / 2 - (px0 + px1 + 1) / 2), dy: cut.top || cut.bottom ? 0 : guide - (py1 + 1) };
+      const styliVertical = cut.bottom ? Math.abs(py1 + 1 - h) <= 1 : cut.top ? py0 <= 1 : Math.abs(py1 + 1 - guide) <= 1;
       const styliHorizontal = cut.left && !cut.right ? px0 <= 1 : cut.right && !cut.left ? px1 + 1 >= w - 1 : Math.abs((px0 + px1 + 1) / 2 - w / 2) <= 1;
       if (!box || !styliVertical || !styliHorizontal) fail("styli_anchor", STYLI_ANCHOR_SENTENCE);
     }
-    if (spec.id === "noon" && wide && ((!cut.left && x0 < Math.ceil(w * 0.05)) || (!cut.right && x1 + 1 > Math.floor(w * 0.95)))) fail("noon_wide", "Wide Noon shots need at least 5% side margins.");
+    // M5-S3 (F4-R4): the side margins of a wide shot are the channel row's (Noon: 5% each side, sidesOnlyWhenWide).
+    if (spec.margins.sidesOnlyWhenWide && wide) {
+      const left = marginPx(spec.margins, "left", w), right = marginPx(spec.margins, "right", w);
+      if ((!cut.left && x0 < Math.ceil(left)) || (!cut.right && x1 + 1 > Math.floor(w - right))) fail("noon_wide", `Wide ${spec.label} shots need at least ${sideMarginWords(spec.margins)} side margins.`);
+    }
   } catch { fail("format", "The encoded image cannot be decoded."); }
   return { ok: failures.length === 0, failures, measured };
 }
