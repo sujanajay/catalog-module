@@ -19,13 +19,13 @@ A permission allow rule matches only the command as written. `cd <dir> && gh pr 
 standalone, in the shape the rule names, and set the folder with the tool's working directory instead of `cd`.
 
 ## gcloud login opens only in Chrome Profile 34
-The default browser profile on this laptop is a personal account. Every `gcloud auth login` must open in Chrome
-"Profile 34" (the opptra.com profile), which Python's `webbrowser` picks up from the `BROWSER` variable. From
-PowerShell, in any folder, run in the background:
+Every `gcloud auth login` must open in the opptra.com Chrome profile ("Profile 34") and sign in with the operator's
+opptra.com account. Python's `webbrowser` picks the profile up from the `BROWSER` variable. From PowerShell, in any
+folder, run in the background:
 
 ```powershell
 $env:BROWSER = '"C:/Program Files/Google/Chrome/Application/chrome.exe" --profile-directory="Profile 34" %s'
-& "$env:LOCALAPPDATA\Google\Cloud SDK\google-cloud-sdk\bin\gcloud.cmd" auth login sujan@opptra.com --update-adc
+& "$env:LOCALAPPDATA\Google\Cloud SDK\google-cloud-sdk\bin\gcloud.cmd" auth login <operator account> --update-adc
 ```
 
 The owner clicks through the sign-in in the tab that this command opened. A tab left from an older attempt fails with
