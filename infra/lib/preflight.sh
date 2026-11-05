@@ -9,15 +9,64 @@
 # kept below "roughly a day") is that length, counted from the last `gcloud auth login`, which rewrites credentials.db
 # in the gcloud config folder (token refreshes do not). A reboot also ends the login; check 1 catches that.
 # Tests replace preflight_gcloud with a fake and set PREFLIGHT_CREDENTIALS_FILE and PREFLIGHT_NOW.
+#
+# disk_preflight runs first: the drive holding the temp folder and the repo's drive each need DEPLOY_MIN_FREE_GB (8)
+# free. On 2026-11-05 (deploy of 9b9abfc) C: reached 0 bytes mid-deploy (the build tarball, gcloud temp files and the
+# logs all write there; free space swung between 0 and 4 GB), a here-string could not get its temp file and a probe
+# gate timed out. Tests replace preflight_df with a fake.
 
 PREFLIGHT_MIN_HOURS=${PREFLIGHT_MIN_HOURS:-3}
 GCLOUD_SESSION_HOURS=${GCLOUD_SESSION_HOURS:-20}
 PREFLIGHT_LOGIN_COMMAND=${PREFLIGHT_LOGIN_COMMAND:-gcloud auth login --update-adc}
+DEPLOY_MIN_FREE_GB=${DEPLOY_MIN_FREE_GB:-8}
 
 # shellcheck source=gcloud-retry.sh
 source "$(dirname "${BASH_SOURCE[0]}")/gcloud-retry.sh"
 # Every pre-flight call is a read; a network blip is retried (2026-11-05 stop #15), an expired login is not.
 preflight_gcloud() { gcloud_retry gcloud "$@"; }
+
+# POSIX df in KiB (Git Bash on Windows and Linux both accept it); line 2 is: filesystem, size, used, available, ...
+preflight_df() { df -Pk "$1"; }
+
+# The temp folder (TMPDIR, else TEMP on Windows, else /tmp), as a path this shell can pass to df.
+preflight_temp_dir() {
+  local tmp=${TMPDIR:-${TEMP:-/tmp}}
+  if command -v cygpath > /dev/null 2>&1; then tmp=$(cygpath -u "$tmp"); fi
+  printf '%s' "$tmp"
+}
+
+# disk_preflight: 0 when every drive a deploy writes to has DEPLOY_MIN_FREE_GB free, else the measured free space and
+# a hint on stderr and 1. Pipes only (no here-string or process substitution), so it still answers on a full disk.
+disk_preflight() {
+  local min_kb ok=0 entry label dir line fs avail gb seen=$'\n' repo
+  if ! [[ "$DEPLOY_MIN_FREE_GB" =~ ^[0-9]+$ ]]; then
+    echo "ERROR: pre-flight: DEPLOY_MIN_FREE_GB must be a whole number of GB ('$DEPLOY_MIN_FREE_GB')" >&2
+    return 1
+  fi
+  min_kb=$((DEPLOY_MIN_FREE_GB * 1024 * 1024))
+  repo=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
+  for entry in "temp folder|$(preflight_temp_dir)" "repo|$repo"; do
+    label=${entry%%|*}; dir=${entry#*|}
+    line=$(preflight_df "$dir" 2>/dev/null | awk 'NR == 2') || line=""
+    fs=$(printf '%s' "$line" | awk '{print $1}')
+    avail=$(printf '%s' "$line" | awk '{print $4}')
+    if ! [[ "$avail" =~ ^[0-9]+$ ]]; then
+      echo "ERROR: pre-flight: cannot measure the free space for the $label ($dir) with df -Pk, so it cannot promise the ${DEPLOY_MIN_FREE_GB} GB a deploy needs" >&2
+      ok=1; continue
+    fi
+    # One line per drive: the temp folder and the repo are usually both on C:.
+    [[ "$seen" == *$'\n'"$fs"$'\n'* ]] && continue
+    seen+="$fs"$'\n'
+    gb=$(awk -v k="$avail" 'BEGIN { printf "%.1f", int(k * 10 / 1048576) / 10 }') # rounded down
+    if [ "$avail" -lt "$min_kb" ]; then
+      echo "ERROR: pre-flight: only $gb GB free on $fs (the $label, $dir); a deploy needs ${DEPLOY_MIN_FREE_GB} GB (DEPLOY_MIN_FREE_GB) because the build tarball, gcloud temp files and the logs all write there. Free space (Windows Settings > System > Storage, or remove merged worktrees: git worktree list), then re-run" >&2
+      ok=1
+    else
+      echo "==> pre-flight: $gb GB free on $fs (the $label; a deploy needs ${DEPLOY_MIN_FREE_GB} GB)"
+    fi
+  done
+  return "$ok"
+}
 
 # The credentials.db of the active gcloud config folder (CLOUDSDK_CONFIG wins), as a path this shell can stat.
 preflight_credentials_file() {
