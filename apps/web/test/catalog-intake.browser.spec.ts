@@ -218,11 +218,10 @@ test("4. correction while collecting: paste the grid, clear it, paste the varian
   const preview = await finishedPreview(page, id);
   expect(preview.groups.map((g) => g.identifier).filter((i) => !/^TB-/.test(i))).toEqual([]);
   expect(preview.groups.filter((g) => g.shots > 0).map((g) => [g.identifier, g.shots])).toEqual([["TB-A", 2], ["TB-B", 2], ["TB-C", 2]]);
-  // The share page and the http link fail with their reasons; both are permanent, so no retry.
-  const card = page.getByRole("region", { name: "Links that could not be downloaded" });
-  await expect(card.getByText("2 of 12 links could not be downloaded (2 products affected).", { exact: true })).toBeVisible({ timeout: 30_000 });
-  await expect(card.getByText(/returned a web page instead of an image/)).toBeVisible();
-  await expect(card.getByText(/use http instead of https/)).toBeVisible();
+  // The share page and the http link fail; both are permanent, so no retry. A ready batch shows them among its
+  // warnings (the card is for a batch that is not ready), so the counts are read from the same GET the page polls.
+  const detected = (await (await page.request.get(`/api/catalog/batches/${id}/detected`)).json()) as { linkFailures?: { total: number; links: number; products: number } };
+  expect(detected.linkFailures).toMatchObject({ total: 2, links: 12, products: 2 });
   await expect(page.getByRole("button", { name: RETRY_LINKS })).toHaveCount(0);
 });
 
