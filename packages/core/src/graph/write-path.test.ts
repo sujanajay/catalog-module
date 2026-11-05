@@ -53,6 +53,21 @@ describe("M0-S3 perceptual hash (F2-R7)", () => {
     const broken = await imageAsset(Buffer.from([255, 216, 255, 1]), "gs://assets/x.jpg", "image/jpeg");
     expect(broken).toMatchObject({ sha256: sha256Hex(Buffer.from([255, 216, 255, 1])), phash: null, bytes: 4 });
   });
+
+  it("bytes that are not a whole image never reach the decoder (sharp crashed a Windows process after a few hundred truncated JPEGs)", async () => {
+    const jpeg = await gradient();
+    const cut = jpeg.subarray(0, jpeg.length - 200);
+    expect((await imageAsset(cut, "gs://assets/cut.jpg", "image/jpeg")).phash).toBeNull();
+    const png = await sharp({ create: { width: 16, height: 16, channels: 3, background: "#808080" } }).png().toBuffer();
+    expect(typeof (await imageAsset(png, "gs://assets/p.png", "image/png")).phash).toBe("bigint");
+    expect((await imageAsset(png.subarray(0, png.length - 12), "gs://assets/p.png", "image/png")).phash).toBeNull();
+    const webp = await sharp({ create: { width: 16, height: 16, channels: 3, background: "#808080" } }).webp().toBuffer();
+    expect(typeof (await imageAsset(webp, "gs://assets/w.webp", "image/webp")).phash).toBe("bigint");
+    for (let r = 0; r < 2000; r += 50) {
+      const assets = await Promise.all(Array.from({ length: 50 }, (_, i) => imageAsset(Buffer.from([255, 216, 255, (r + i) % 251]), "gs://assets/x.jpg", "image/jpeg")));
+      expect(assets.every((a) => a.phash === null)).toBe(true);
+    }
+  });
 });
 
 describe("M0-S3 brand photo versions (F2-R1)", () => {
