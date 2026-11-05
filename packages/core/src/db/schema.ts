@@ -440,6 +440,12 @@ export const catalogProducts = pgTable(
     productType: text("product_type").$type<ProductType>(),
     lockBatchId: uuid("lock_batch_id").references(() => catalogBatches.id, { onDelete: "set null" }),
     lastBatchId: uuid("last_batch_id").references(() => catalogBatches.id, { onDelete: "set null" }),
+    /**
+     * M1 D30 (re-review 3 P2-1, migration 0024): the last batch that published this product and was not a follow-up
+     * ("Add more photos"). A follow-up only adds photos, so it moves last_batch_id but not this; decisions.ts
+     * laterPublisher reads this one when last_batch_id is a follow-up. Null for a product no full batch published yet.
+     */
+    lastFullBatchId: uuid("last_full_batch_id").references((): AnyPgColumn => catalogBatches.id, { onDelete: "set null" }),
     /** M0 (0009): the option this product is, when its keys resolve to exactly one (F1-R6); null until then. */
     optionId: uuid("option_id").references((): AnyPgColumn => catalogOptions.id, { onDelete: "set null" }),
     createdAt: createdAt(),

@@ -13,6 +13,9 @@ import type { ChannelId } from "../types";
  * Per channel, the most images a product may have when a follow-up adds photos. Empty: SPEC sets no cap per product
  * or channel. A follow-up photo whose shot number is above its channel's limit is not added and is flagged
  * (`not_added`), never published over another photo, so a limit set here later can only hold photos back.
+ * Before setting one (M1 D30, re-review 3 P2-2): shot numbers can skip (held numbers are never freed and highestShots
+ * counts every photo a product ever had), so compare the limit with the count of live photos plus this batch's
+ * additions, not with the shot number, and free unused held numbers first.
  */
 export const CHANNEL_IMAGE_LIMITS: Partial<Record<ChannelId, number>> = {};
 

@@ -1,5 +1,5 @@
 {
-  "id": "d5640ec7-0a66-4bbb-b6ee-860ffef08637",
+  "id": "60a9f961-45d2-45d1-b00b-cd7b1d23c6c9",
   "prevId": "8eca4745-35c7-42f0-ad31-03142d4a7adc",
   "version": "7",
   "dialect": "postgresql",
@@ -5314,6 +5314,12 @@
           "primaryKey": false,
           "notNull": false
         },
+        "last_full_batch_id": {
+          "name": "last_full_batch_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
         "option_id": {
           "name": "option_id",
           "type": "uuid",
@@ -5442,6 +5448,19 @@
           "tableTo": "catalog_batches",
           "columnsFrom": [
             "last_batch_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "set null",
+          "onUpdate": "no action"
+        },
+        "catalog_products_last_full_batch_id_catalog_batches_id_fk": {
+          "name": "catalog_products_last_full_batch_id_catalog_batches_id_fk",
+          "tableFrom": "catalog_products",
+          "tableTo": "catalog_batches",
+          "columnsFrom": [
+            "last_full_batch_id"
           ],
           "columnsTo": [
             "id"

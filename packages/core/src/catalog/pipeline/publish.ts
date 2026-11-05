@@ -161,7 +161,7 @@ export async function publishProduct(deps: PublishDeps, batchId: string, product
       const [pair] = await tx.select().from(catalogBatchProducts).where(where);
       const notes = pair?.notes?.includes(HOLDOUT_KEPT_NOTE) ? pair.notes : [pair?.notes, HOLDOUT_KEPT_NOTE].filter(Boolean).join("; ");
       await tx.update(catalogBatchProducts).set({ change:"unchanged", notes }).where(where);
-      await tx.update(catalogProducts).set({lastBatchId:batchId}).where(eq(catalogProducts.id,productId));
+      await tx.update(catalogProducts).set(publisherOf(batchId, batch.options.append === true)).where(eq(catalogProducts.id,productId));
       return { outcome:"published", batch:found, changed:false };
     }
     const outputs = await tx.select().from(catalogOutputs).where(and(eq(catalogOutputs.batchId,batchId),eq(catalogOutputs.productId,productId)));
@@ -303,9 +303,19 @@ export async function publishProduct(deps: PublishDeps, batchId: string, product
     const liveNotes = [changes.length ? `Verified live images: ${changes.map(c=>`${c.channel} ${c.n}`).join(", ")}.` : "", unverified.length ? `Public images replaced but unverified: ${unverified.map(c=>`${c.channel} img ${c.n} generation ${c.generation}`).join(", ")}.` : "", !changes.length && !landed.size ? "No replacements were verified." : ""].filter(Boolean).join(" ");
     const notes = [nothingDelivered ? NO_DELIVERABLE_PHOTO : "", auto && missingPairs ? "Some photos could not be processed. Start this product again." : "", failure ? `Some images could not be published: ${failure}. ${liveNotes}` : "", removed.length ? `photos ${removed.map(o=>o.n).join(" and ")} removed in batch ${batch.name}` : "",...outputs.filter(o=>o.decision === "use_as_is" && o.reason).map(outputNote),...outputs.filter(o=>o.status === "skipped" && o.reason).map(outputNote),...outputs.filter(o=>o.flags.includes("provisional") && o.status !== "skipped" && o.reason).map(outputNote)].filter(Boolean).join("; ");
     await tx.update(catalogBatchProducts).set({change,notes}).where(where);
-    await tx.update(catalogProducts).set({lastBatchId:batchId}).where(eq(catalogProducts.id,productId));
+    await tx.update(catalogProducts).set(publisherOf(batchId, append)).where(eq(catalogProducts.id,productId));
     return { outcome: failure || nothingDelivered ? "failed" : "published", batch: found, changed: !failure && !nothingDelivered && change !== "unchanged" };
   });
+}
+/**
+ * M1 D30 (re-review 3 P2-1): what a publish writes on the product. Every batch becomes last_batch_id; a full batch also
+ * becomes last_full_batch_id. A follow-up only adds photos, so it keeps last_full_batch_id, filling it (when a product
+ * published before migration 0024 has none) with the previous publisher if that one was a full batch. Postgres reads the
+ * old row in SET, so the subquery sees the previous last_batch_id.
+ */
+export function publisherOf(batchId: string, append: boolean) {
+  if (!append) return { lastBatchId: batchId, lastFullBatchId: batchId };
+  return { lastBatchId: batchId, lastFullBatchId: sql<string | null>`coalesce(${catalogProducts.lastFullBatchId}, (SELECT b.id FROM ${catalogBatches} b WHERE b.id = ${catalogProducts.lastBatchId} AND coalesce((b.options->>'append')::boolean, false) = false))` };
 }
 /** The upscalerId the worker's env selects (UPSCALE_MODEL on the service UPSCALE_URL names), or null when off. */
 export function configuredUpscalerId(env: NodeJS.ProcessEnv = process.env): string | null {

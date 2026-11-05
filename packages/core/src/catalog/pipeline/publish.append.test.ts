@@ -3,7 +3,8 @@ import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { and, eq } from "drizzle-orm";
 import type { Db } from "../../db/client";
 import { createTestDb } from "../../db/testing";
-import { catalogBatches, catalogBatchProducts, catalogOutputs, catalogProducts, catalogSourceImages, DEFAULT_BATCH_OPTIONS } from "../../db/schema";
+import { catalogBatches, catalogBatchProducts, catalogOutputs, catalogProducts, catalogShotNumbers, catalogSourceImages, DEFAULT_BATCH_OPTIONS } from "../../db/schema";
+import { laterPublisher } from "../decisions";
 import { FIXTURE_CHANNEL_RULES } from "../channel-rules";
 import { APPEND_TAKEN_NOTE, assertOwnedByBatch, NOT_OWN_OBJECT, overLimitNote, planPublish, publishProduct, type Output, type PublishDeps } from "./publish";
 
@@ -80,6 +81,34 @@ describe("a follow-up batch's publish (append, M1 D30)", () => {
     expect((await s.outputsOf(s.parent.id)).map((o) => [o.n, o.isLive, o.status, o.generation, o.supersededAt])).toEqual([[1, true, "verified", 20, null], [2, true, "verified", 20, null], [3, true, "verified", 20, null]]);
     expect((await s.sourcesOf(s.parent.id)).every((r) => r.isCurrent)).toBe(true);
     expect((await s.outputsOf(s.more.id)).find((o) => o.n === 4)).toMatchObject({ isLive: true, status: "verified" });
+  });
+
+  it("leaves the parent the publisher of its own shots, so its improvements and decisions are not superseded (re-review 3 P2-1)", async () => {
+    const s = await followUp("append-not-superseded", [4, 5]);
+    await db.insert(catalogShotNumbers).values([4, 5].map((n) => ({ productId: s.product.id, n, batchId: s.more.id })));
+    expect(await publishProduct(s.deps, s.more.id, s.product.id)).toMatchObject({ outcome: "published" });
+    const read = async () => (await db.select().from(catalogProducts).where(eq(catalogProducts.id, s.product.id)))[0]!;
+    // The follow-up is the last publisher; the parent stays the last full one (filled from the previous publisher).
+    expect(await read()).toMatchObject({ lastBatchId: s.more.id, lastFullBatchId: s.parent.id });
+    // The parent's photos 1-3 (improvePhoto, Use as is, Replace, Try again all ask laterPublisher) are still its own.
+    for (const n of [1, 2, 3]) expect(await laterPublisher(db, await read(), s.parent.id, n)).toBeNull();
+    // A full batch that publishes after both supersedes the parent's shots, and the follow-up's too.
+    const [full] = await db.insert(catalogBatches).values({ brandSlug: "anta", brandName: "Anta", name: "append-not-superseded full", isTest: true, createdBy: "test@opptra.com", channels: ["noon"], status: "done", startedAt: new Date(Date.now() + 60_000) }).returning();
+    await db.update(catalogProducts).set({ lastBatchId: full!.id, lastFullBatchId: full!.id }).where(eq(catalogProducts.id, s.product.id));
+    expect(await laterPublisher(db, await read(), s.parent.id, 1)).toBe(full!.id);
+    expect(await laterPublisher(db, await read(), s.more.id, 4)).toBe(full!.id);
+  });
+
+  it("a second follow-up supersedes only the shots it holds: the first follow-up's own shot it re-made, never the parent's", async () => {
+    const s = await followUp("append-second", [4]);
+    await db.insert(catalogShotNumbers).values({ productId: s.product.id, n: 4, batchId: s.more.id });
+    const [second] = await db.insert(catalogBatches).values({ brandSlug: "anta", brandName: "Anta", name: "append-second again", isTest: true, createdBy: "test@opptra.com", channels: ["noon"], status: "done", startedAt: new Date(Date.now() + 60_000), parentBatchId: s.parent.id, options: { ...DEFAULT_BATCH_OPTIONS, append: true } }).returning();
+    await db.insert(catalogShotNumbers).values({ productId: s.product.id, n: 5, batchId: second!.id });
+    await db.update(catalogProducts).set({ lastBatchId: second!.id, lastFullBatchId: s.parent.id }).where(eq(catalogProducts.id, s.product.id));
+    const [p] = await db.select().from(catalogProducts).where(eq(catalogProducts.id, s.product.id));
+    expect(await laterPublisher(db, p!, s.parent.id, 1)).toBeNull();
+    expect(await laterPublisher(db, p!, s.more.id, 4)).toBeNull();
+    expect(await laterPublisher(db, p!, s.more.id, 5)).toBe(second!.id);
   });
 });
 
