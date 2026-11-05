@@ -37,7 +37,7 @@ export interface AutoStartBody { batchId: string; at: string; busyRetries?: numb
 export async function armAutoStart(db: Db, enqueue: typeof enqueueTask, batchId: string, delaySec = AUTO_START_DELAY_SEC, now = new Date(), busy?: { busyRetries: number; busySince: string }): Promise<string | null> {
   const at = new Date(now.getTime() + delaySec * 1000).toISOString();
   const rows = await db.update(catalogBatches)
-    .set({ counts: mergeCounts({ autoStartAt: at }) })
+    .set({ counts: mergeCounts({ autoStartAt: at, autoStartEnded: null }) })
     .where(and(
       eq(catalogBatches.id, batchId), eq(catalogBatches.status, "draft"),
       sql`(${catalogBatches.options}->>'autoStart')::boolean is true`,

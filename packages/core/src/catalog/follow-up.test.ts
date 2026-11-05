@@ -1,10 +1,12 @@
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { eq } from "drizzle-orm";
 import { createTestDb } from "../db/testing";
 import type { Db } from "../db/client";
-import { catalogBatches, DEFAULT_BATCH_OPTIONS } from "../db/schema";
+import { catalogBatches, catalogProducts, DEFAULT_BATCH_OPTIONS } from "../db/schema";
 import { batchLinks, FOLLOW_UP_CANCELLED, FOLLOW_UP_NOT_STARTED, followUpBatch, FollowUpRefused, followUpName } from "./follow-up";
-import { armAutoStart } from "./auto-start";
+import { armAutoStart, AUTO_START_ROUTE } from "./auto-start";
+import { lockProducts } from "./products";
+import { runAutoStart, StartRefused } from "./pipeline/start";
 
 // M1-F5-R2 (M1-S6): adding photos to a started batch makes a linked follow-up batch that starts by itself.
 let db: Db; let close: () => Promise<void>;
@@ -31,7 +33,7 @@ describe("followUpBatch", () => {
     expect(f).toMatchObject({ parentBatchId: parent.id, status: "draft", startedAt: null, brandSlug: "vero-moda", brandName: "Vero Moda", productType: "footwear", isTest: false, name: followUpName("AW26"), createdBy: "op@example.com" });
     expect(f.channels).toEqual(["noon", "namshi"]);
     // The parent's grouping choices, not its sheet columns or what Start wrote (auto-decide rules).
-    expect(f.options).toEqual({ ...DEFAULT_BATCH_OPTIONS, identifierMode: "folder", perRoot: false, newestSameProduct: false, autoStart: true });
+    expect(f.options).toEqual({ ...DEFAULT_BATCH_OPTIONS, identifierMode: "folder", perRoot: false, newestSameProduct: false, autoStart: true, append: true });
     // Once collected, it arms its own countdown like any one-page batch (M1-F2-R6).
     await db.update(catalogBatches).set({ counts: { ...f.counts, previewReady: true } }).where(eq(catalogBatches.id, f.id));
     expect(await armAutoStart(db, async () => "t", f.id, 10, new Date())).not.toBeNull();
@@ -68,13 +70,16 @@ describe("followUpBatch", () => {
     expect(f.name.startsWith("catalog-test")).toBe(true);
   });
 
-  it("refuses a batch that has not started, one cancelled before it started, and one that does not exist", async () => {
+  it("refuses a batch that has not started, one cancelled before or after it started, and one that does not exist", async () => {
     for (const status of ["draft", "ingesting"] as const) {
       const p = await batch({ status, startedAt: null });
       await expect(followUpBatch(db, p.id, "op@example.com")).rejects.toMatchObject({ status: 409, message: FOLLOW_UP_NOT_STARTED });
     }
     const cancelled = await batch({ status: "cancelled", startedAt: null });
     await expect(followUpBatch(db, cancelled.id, "op@example.com")).rejects.toMatchObject({ status: 409, message: FOLLOW_UP_CANCELLED });
+    // Review P2-5: cancelled after Start (startedAt kept) is refused too.
+    const stopped = await batch({ status: "cancelled", startedAt: new Date() });
+    await expect(followUpBatch(db, stopped.id, "op@example.com")).rejects.toMatchObject({ status: 409, message: FOLLOW_UP_CANCELLED });
     await expect(followUpBatch(db, "00000000-0000-4000-8000-000000000000", "op@example.com")).rejects.toBeInstanceOf(FollowUpRefused);
   });
 });
@@ -96,5 +101,36 @@ describe("batchLinks", () => {
     const f = await followUpBatch(db, parent.id, "op@example.com");
     await db.delete(catalogBatches).where(eq(catalogBatches.id, parent.id));
     expect((await read(f.id)).parentBatchId).toBeNull();
+  });
+});
+
+describe("a follow-up's auto-start while the parent still holds its products (F5 test 3, review P2-3)", () => {
+  it("waits with the busy back-off while the parent holds the product, then starts by itself once it is released", async () => {
+    const parent = await batch();
+    const [product] = await db.insert(catalogProducts).values({ brandSlug: "vero-moda", isTest: false, productKey: "fu-auto", pathKey: "FU-AUTO", identifier: "FU-AUTO", lockBatchId: parent.id }).returning();
+    const made = await followUpBatch(db, parent.id, "op@example.com");
+    const f = await read(made.id);
+    await db.update(catalogBatches).set({ counts: { ...f.counts, previewReady: true } }).where(eq(catalogBatches.id, f.id));
+    // Start as far as the product locks go: the real lockProducts against the parent's lock (startDraftBatch's busy refusal).
+    const start = async (d: Db, _deps: unknown, id: string) => {
+      const locked = await lockProducts(d, id, [product!.id]);
+      if (!locked.ok) throw new StartRefused(409, `${locked.busy[0]!.identifier} is still being processed in batch ${locked.busy[0]!.batchName}.`, "busy");
+      await d.update(catalogBatches).set({ status: "matting", startedAt: new Date() }).where(eq(catalogBatches.id, id));
+    };
+    const now = new Date("2026-11-05T10:00:00.000Z");
+    const enqueue = vi.fn(async (_route: string, _body: Record<string, unknown>, _opts?: unknown) => "task");
+    const at = (await armAutoStart(db, enqueue, f.id, 10, now))!;
+    expect(at).toBeTruthy();
+    const deps = { storage: {} as never, enqueue, now: () => now };
+    expect(await runAutoStart(db, deps, { batchId: f.id, at }, start as never)).toMatch(/^waiting: FU-AUTO is still being processed/);
+    const retry = enqueue.mock.calls.at(-1)!;
+    expect(retry[0]).toBe(AUTO_START_ROUTE);
+    expect(retry[1]).toMatchObject({ batchId: f.id, busyRetries: 1 });
+    expect((await read(f.id))).toMatchObject({ status: "draft", counts: { autoStartAt: retry[1].at } });
+    // The parent finishes and releases its products: the queued retry starts the follow-up.
+    await db.update(catalogProducts).set({ lockBatchId: null }).where(eq(catalogProducts.id, product!.id));
+    expect(await runAutoStart(db, deps, retry[1] as never, start as never)).toBe("started");
+    expect((await read(f.id)).status).toBe("matting");
+    expect((await db.select().from(catalogProducts).where(eq(catalogProducts.id, product!.id)))[0]!.lockBatchId).toBe(f.id);
   });
 });

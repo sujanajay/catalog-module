@@ -130,6 +130,12 @@ export interface BatchOptions {
    */
   autoStart?: boolean;
   /**
+   * M1 D29 (M1-S6): a follow-up batch ("Add more photos") only adds photos. Its shots of a product that already has
+   * photos are numbered after that product's highest shot, and its publish never replaces, removes or retires a live
+   * photo; a photo over its channel's image limit (ingest/append.ts) is skipped with a note. Absent on other batches.
+   */
+  append?: boolean;
+  /**
    * M1-F2-R7: two identifiers that are one product, from different uploads: only the newest upload's photos are used
    * and the other spelling is left out. Absent means on; false (the operator's "Use only the newest photo of each
    * product" unticked) leaves both out, as before M1-S2. Spellings from one upload have no newest and are both left out.

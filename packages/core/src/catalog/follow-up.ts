@@ -1,7 +1,8 @@
 // M1-F5-R2 (M1-S6): photos added to a batch that has already started go into a linked follow-up batch. The follow-up
 // is a normal draft with the parent's brand, channels, product type and grouping choices, `parent_batch_id` naming the
-// parent, and auto-start on, so once its files are collected it starts by itself (M1-F2-R6). Products the parent still
-// holds make its auto-start wait for the lock and then start (M1-F2-R7, auto-start.ts), so nothing is refused.
+// parent, and auto-start on, so once its files are collected it starts by itself (M1-F2-R6). It only adds photos
+// (`append`, M1 D29): its shots follow each product's highest one, so its auto-start never replaces a live photo.
+// Products the parent still holds make its auto-start wait for the lock and then start (M1-F2-R7, auto-start.ts).
 import { and, desc, eq, inArray, isNull, sql } from "drizzle-orm";
 import type { Db } from "../db/client";
 import { catalogBatches, DEFAULT_BATCH_OPTIONS, type CatalogBatch } from "../db/schema";
@@ -38,6 +39,8 @@ export function followUpOptions(parent: BatchOptions): BatchOptions {
     perRoot: parent.perRoot ?? true,
     ...(parent.newestSameProduct !== undefined ? { newestSameProduct: parent.newestSameProduct } : {}),
     autoStart: FOLLOW_UP_AUTO_START,
+    // M1 D29: it only adds photos after each product's highest shot; nothing of the parent is replaced or removed.
+    append: true,
   };
 }
 
@@ -51,7 +54,9 @@ export async function followUpBatch(db: Db, parentId: string, actor: string): Pr
   return db.transaction(async (tx) => {
     const [parent] = await tx.select().from(catalogBatches).where(eq(catalogBatches.id, parentId)).for("update");
     if (!parent) throw new FollowUpRefused(404, FOLLOW_UP_NOT_FOUND);
-    if (!parent.startedAt) throw new FollowUpRefused(409, parent.status === "cancelled" ? FOLLOW_UP_CANCELLED : FOLLOW_UP_NOT_STARTED);
+    // Review P2-5: a cancelled batch takes no follow-up, whether it was cancelled before or after Start.
+    if (parent.status === "cancelled") throw new FollowUpRefused(409, FOLLOW_UP_CANCELLED);
+    if (!parent.startedAt) throw new FollowUpRefused(409, FOLLOW_UP_NOT_STARTED);
     const [open] = await tx.select({ id: catalogBatches.id }).from(catalogBatches)
       .where(and(eq(catalogBatches.parentBatchId, parentId), isNull(catalogBatches.startedAt), inArray(catalogBatches.status, ["draft", "ingesting"]), sql`lower(${catalogBatches.createdBy}) = ${actor.toLowerCase()}`))
       .orderBy(desc(catalogBatches.createdAt)).limit(1);

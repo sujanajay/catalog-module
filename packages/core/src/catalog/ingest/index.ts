@@ -44,6 +44,7 @@ import { loadSkuResolver, type ResolveResult, type SkuResolver } from "../sku-ma
 import type { BatchCounts, BatchOptions, ChangeKind, ChannelId, IntakePhase, LinkStatus, OutputFlag, PlacingClaim, UploadKind } from "../types";
 import { driveFolderAdapter } from "./drive-folder";
 import { googleSheetAdapter, sheetCopyUri } from "./google-sheet";
+import { highestShots, shotNumbers } from "./append";
 import { hashedTaskId, INGEST_ROUTE } from "./hand-off";
 import {
   baseName, byText, distinct, fmt, groupItems, isDuplicateReject, isSameProductReject, newestIdentifier, olderSameProductMessage, originalOf, previewRows, sameProductMessage, shotFlags,
@@ -1319,12 +1320,16 @@ async function groupProducts(
   const bucket = getBucketName();
   const rawUriOf = new Map<SourceItem, string>();
   const shots: PlannedShot[] = [];
+  // M1 D29: a follow-up batch adds photos: a product that already has photos gets shots after its highest one.
+  const highest = batch.options.append ? await highestShots(db, withPhotos.filter((id) => !productOf.get(id)!.isNew).map((id) => productOf.get(id)!.id)) : null;
   for (const id of withPhotos) {
     const product = productOf.get(id)!;
-    for (const [i, item] of grouped.products.get(id)!.entries()) {
+    const items = grouped.products.get(id)!;
+    const numberOf = shotNumbers(items, highest ? (highest.get(product.id) ?? 0) : null);
+    for (const item of items) {
       const r = resultOf.get(item);
       if (!r) continue;
-      const n = item.n ?? i + 1;
+      const n = numberOf.get(item)!;
       const target = rawPath(prefix, product.pathKey, n, r.ext);
       const rawUri = toGsUri(bucket, target);
       rawUriOf.set(item, rawUri);

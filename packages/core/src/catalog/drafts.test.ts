@@ -69,7 +69,6 @@ describe("handOffIdleDrafts (F5-R1: the tab closed before the files were handed 
     await reset();
     const kept = [
       await draft({ idleMs: DRAFT_IDLE_MS - 60_000 }), // written to a minute ago (the page is open)
-      await draft({ autoStart: false }), // Wait was pressed, or an API batch (explicit Start, M1-F2-R9)
       await draft({ counts: { previewReady: true } }), // already collected (rearmLostCountdowns' job)
       await draft({ uploads: [{ status: "uploaded" }, { status: "pending" }] }), // a file did not finish uploading
       await draft({ uploads: [{ status: "uploaded", kind: "google_sheet", gcsUri: null }] }), // a Google link only the web reads
@@ -82,6 +81,17 @@ describe("handOffIdleDrafts (F5-R1: the tab closed before the files were handed 
     expect(await handOffIdleDrafts(db, enqueue, NOW)).toEqual([]);
     expect(enqueue).not.toHaveBeenCalled();
     for (const b of kept) expect((await read(b.id)).status).toBe(b.status);
+  });
+
+  it("hands on a draft with Wait pressed too (review P2-1); it is collected and then waits for its Start button", async () => {
+    await reset();
+    const b = await draft({ autoStart: false });
+    const enqueue = enqueueMock();
+    expect(await handOffIdleDrafts(db, enqueue, NOW)).toEqual([b.id]);
+    const after = await read(b.id);
+    expect(after.status).toBe("ingesting");
+    expect(after.options.autoStart).not.toBe(true);
+    expect(enqueue).toHaveBeenCalledTimes(1);
   });
 
   it("puts the draft back when nothing could be queued", async () => {
@@ -116,9 +126,23 @@ describe("rearmLostCountdowns (F5-R1: collected, but the countdown never ran)", 
     await draft({ counts: { previewReady: true }, autoStart: false });
     await draft({ counts: { previewReady: true, sweepRearms: SWEEP_MOVES_MAX } });
     await draft({ counts: { previewReady: true }, idleMs: 60_000 });
+    // Review P2-4: a countdown the auto-start task ended on purpose (nothing usable): its Start button shows instead.
+    await draft({ counts: { previewReady: true, autoStartAt: null, autoStartEnded: true } });
     const enqueue = enqueueMock();
     expect(await rearmLostCountdowns(db, enqueue, NOW)).toEqual([]);
     expect(enqueue).not.toHaveBeenCalled();
+  });
+
+  it("arms the other drafts when the queue refuses one (review P3)", async () => {
+    await reset();
+    const first = await draft({ counts: { previewReady: true, autoStartAt: null } });
+    const second = await draft({ counts: { previewReady: true, autoStartAt: null } });
+    let calls = 0;
+    const enqueue = vi.fn(async () => { if (++calls === 1) throw new Error("queue down"); return "task"; });
+    const armed = await rearmLostCountdowns(db, enqueue, NOW);
+    expect(armed).toHaveLength(1);
+    expect([first.id, second.id]).toContain(armed[0]);
+    expect(enqueue).toHaveBeenCalledTimes(2);
   });
 });
 

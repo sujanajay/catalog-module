@@ -416,6 +416,34 @@ describe("runIngest", () => {
     expect(preview.rows.map((r) => [r.identifier, r.status, r.shots])).toEqual([["inner", "unreadable", 0], ["X1", "ok", 1], ["X2", "unreadable", 0], ["Z1", "ok", 2]]);
   });
 
+  it("a follow-up batch (append, M1 D29) numbers a known product's photos after its highest shot and removes none", async () => {
+    const w = fakeWorld();
+    const parent = await newBatch("append parent");
+    await folderUpload(w, parent, { "APP1_1.jpg": await jpeg(), "APP1_2.jpg": await jpeg(), "APP1_3.jpg": await jpeg() });
+    await ingestAll(w, parent);
+    await db.update(catalogSourceImages).set({ isCurrent: true }).where(eq(catalogSourceImages.batchId, parent.id));
+    await db.update(catalogBatches).set({ status: "done" }).where(eq(catalogBatches.id, parent.id));
+    const parentRows = (await sourcesOf(parent.id)).sort((a, b) => a.n - b.n);
+    await db.insert(catalogOutputs).values(parentRows.map((r) => ({
+      batchId: parent.id, productId: r.productId, sourceImageId: r.id, channel: "noon" as const, n: r.n, canvasW: 1080, canvasH: 1480, scale: 1,
+      placedX: 0, placedY: 0, renderKey: `ap-${r.n}`, objectPath: `catalog-test/uspa/APP1/noon/APP1_${r.n}.jpg`,
+      publicUrl: `https://storage.googleapis.com/x/catalog-test/uspa/APP1/noon/APP1_${r.n}.jpg`, isLive: true, status: "verified" as const,
+    })));
+
+    const created = await newBatch("append follow-up", { channels: ["noon"] });
+    const [more] = await db.update(catalogBatches).set({ options: { ...created.options, append: true } }).where(eq(catalogBatches.id, created.id)).returning();
+    await folderUpload(w, more!, { "APP1_1.jpg": await jpeg(), "APP1_2.jpg": await jpeg() });
+    await ingestAll(w, more!);
+
+    const rows = (await sourcesOf(more!.id)).sort((a, b) => a.n - b.n);
+    expect(rows.map((r) => [r.n, r.replacesId, r.productId])).toEqual([[4, null, parentRows[0]!.productId], [5, null, parentRows[0]!.productId]]);
+    expect(rows[0]!.rawUri).toBe(`gs://${BUCKET}/${rawPath(prefixOf(more!), "APP1", 4, "jpg")}`);
+    expect(await sourcesOf(parent.id)).toEqual(expect.arrayContaining(parentRows));
+    expect((await batchRow(more!.id)).counts).toMatchObject({ existingProducts: 1, shotsToRemove: 0 });
+    const preview = await buildPreview(db, more!.id, { storage: w.storage });
+    expect(preview.overwrite).toMatchObject({ existingProducts: [{ identifier: "APP1", liveShots: [1, 2, 3], uploadShots: [4, 5], shotsToRemove: [], channels: ["noon"] }] });
+  });
+
   it("a re-upload of a known product adds not-current versions that replace the current ones, touching nothing else", async () => {
     const w = fakeWorld();
     const first = await newBatch("first delivery");
