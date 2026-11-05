@@ -369,9 +369,13 @@ export const catalogBatches = pgTable(
     updatedAt: updatedAt(),
     /** M12-S1 (0016): the settings this batch read once at Start and keeps to the end; null before Start and on older batches. */
     settingsSnapshotId: text("settings_snapshot_id"),
+    /** M1-S6 (M1-F5-R2): the started batch this follow-up batch adds inputs to; null for every other batch. */
+    parentBatchId: uuid("parent_batch_id"),
   },
   (t) => [
     index("catalog_batches_brand_slug_idx").on(t.brandSlug),
+    index("catalog_batches_parent_batch_id_idx").on(t.parentBatchId),
+    foreignKey({ name: "catalog_batches_parent_batch_id_fk", columns: [t.parentBatchId], foreignColumns: [t.id] }).onDelete("set null"),
     // Named: the generated name is longer than Postgres's 63-character limit.
     foreignKey({ name: "catalog_batches_settings_snapshot_id_fk", columns: [t.settingsSnapshotId], foreignColumns: [catalogSettingsSnapshots.id] }),
     enumCheck("catalog_batches", "status", t.status, BATCH_STATUSES),

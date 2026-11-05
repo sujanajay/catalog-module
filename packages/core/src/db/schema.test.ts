@@ -73,6 +73,7 @@ const INDEXES = [
   "catalog_rule_results_ruleset_version_idx",
   "catalog_batch_outcomes_ended_at_idx", "catalog_incidents_kind_started_at_idx", "catalog_incidents_batch_id_idx",
   "catalog_incidents_dedupe_key_uq", "catalog_batch_touches_batch_id_idx", "catalog_revisions_first_seen_at_idx",
+  "catalog_batches_parent_batch_id_idx", // 0021_follow_up_batches.sql (M1-S6)
 ];
 
 describe("generated migrations", () => {

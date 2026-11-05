@@ -81,14 +81,52 @@ describe("input routes (spec 14b F3)", () => {
     }
     expect(await statusOf(cut.id)).toBe("removed");
   });
-  it("refuses removing or replacing while the batch is collecting or started, with the sentence for its status", async () => {
-    for (const [status, sentence] of [["ingesting", BATCH_STILL_COLLECTING], ["matting", STARTED]] as const) {
+  it("refuses removing or replacing once the batch has started, with the sentence for its status", async () => {
+    for (const [status, sentence] of [["matting", STARTED]] as const) {
       const id = await newBatch(); const file = await addRow(id, "image"); const paste = await addRow(id, "url_list");
       await db.update(catalogBatches).set({ status, ...(status === "matting" ? { startedAt: new Date() } : {}) }).where(eq(catalogBatches.id, id));
       for (const response of [await removeUpload(request("DELETE"), ctx(id, file.id)), await removeLinks(request("DELETE"), ctx(id, paste.id)), await patchLinks(request("PATCH", { text: "https://8.8.8.8/A_1.jpg" }), ctx(id, paste.id))]) {
         expect(response.status).toBe(409); expect(await response.json()).toEqual({ error: sentence });
       }
       expect(await statusOf(file.id)).toBe("uploaded"); expect(await statusOf(paste.id)).toBe("uploaded");
+    }
+  });
+});
+
+// M1 D23 (M1-S6, closes D20): an input change while the files are collected edits the draft. The collection in
+// flight is set aside (lease and run cleared, back to draft, countdown stopped) and the change's own hand-off collects
+// again under a new run.
+describe("input changes while collecting (M1 D23)", () => {
+  it("removes and replaces inputs of a collecting batch: back to draft, lease, run and countdown cleared, then collected again", async () => {
+    const id = await newBatch(); const file = await addRow(id, "image"); const paste = await addRow(id, "url_list"); await addRow(id, "image");
+    const claim = { token: "old-run", at: new Date().toISOString(), attempt: "a1" };
+    await db.update(catalogBatches).set({ status: "ingesting", counts: { ...(await batchRow(id)).counts, phase: "placing", placingClaim: claim, ingestRun: "old-run", autoStartAt: null } as never }).where(eq(catalogBatches.id, id));
+    const removed = await removeUpload(request("DELETE"), ctx(id, file.id));
+    expect(removed.status).toBe(200);
+    expect(await statusOf(file.id)).toBe("removed");
+    const after = await batchRow(id);
+    expect(after.status).toBe("draft");
+    expect(after.counts).toMatchObject({ previewReady: false, placingClaim: null, ingestRun: null, autoStartAt: null, phase: null });
+    // A paste corrected while collecting changes in place too.
+    await db.update(catalogBatches).set({ status: "ingesting" }).where(eq(catalogBatches.id, id));
+    expect((await patchLinks(request("PATCH", { text: "https://8.8.8.8/B_1.jpg" }), ctx(id, paste.id))).status).toBe(200);
+    expect((await batchRow(id)).status).toBe("draft");
+    // The page's hand-off then collects again under a new run.
+    vi.mocked(enqueueTask).mockClear();
+    expect((await ingest(request("POST"), ctx(id))).status).toBe(200);
+    const again = await batchRow(id);
+    expect(again.status).toBe("ingesting");
+    expect(again.counts.ingestRun).toBeTruthy();
+    expect(again.counts.ingestRun).not.toBe("old-run");
+    expect(vi.mocked(enqueueTask).mock.calls.length).toBeGreaterThan(0);
+  });
+  it("still refuses an input change on a batch that started, failed before Start or was cancelled", async () => {
+    for (const values of [{ status: "matting" as const, startedAt: new Date() }, { status: "failed" as const }, { status: "cancelled" as const }]) {
+      const id = await newBatch(); const file = await addRow(id, "image");
+      await setStatus(id, values);
+      expect((await removeUpload(request("DELETE"), ctx(id, file.id))).status).toBe(409);
+      expect(await statusOf(file.id)).toBe("uploaded");
+      expect((await batchRow(id)).status).toBe(values.status);
     }
   });
 });
@@ -264,9 +302,10 @@ describe("reopen and the assertDraft sentences (spec 14c F8)", () => {
     ] as const;
     expect(cases.map(([, s]) => s)).toEqual([BATCH_COULD_NOT_START, BATCH_STILL_COLLECTING, STARTED, BATCH_CANCELLED]);
     for (const [values, sentence] of cases) {
-      const id = await newBatch(); const file = await addRow(id, "image");
+      const id = await newBatch(); await addRow(id, "image");
       await setStatus(id, values);
-      const response = await removeUpload(request("DELETE"), ctx(id, file.id));
+      // Grouping changes need a draft; inputs can change while collecting (M1 D23).
+      const response = await patchDetected(request("PATCH", { precedence: "uploads_then_links" }), ctx(id));
       expect(response.status).toBe(409); expect(await response.json()).toEqual({ error: sentence });
     }
   });

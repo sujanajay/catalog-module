@@ -11,11 +11,11 @@ import { pinnedFetch } from "@catalog/core/safe-url";
 import * as storage from "@catalog/core/storage";
 import { db } from "../db";
 import { badRequest, HttpError } from "../errors";
-import { assertDraft, draftForUpdate, INPUT_NOT_FOUND, LINK_KINDS, mergeCounts } from "./batches";
+import { assertInputsOpen, draftForChange, INPUT_NOT_FOUND, LINK_KINDS, mergeCounts } from "./batches";
 import { supabaseClient } from "./supabase";
 
 export async function addLinks(id: string, value: unknown, target?: string) {
-  await assertDraft(id);
+  await assertInputsOpen(id);
   const text = (value as { text?: unknown })?.text;
   if (typeof text !== "string") throw badRequest(NOTHING_TO_CHECK);
   // Supabase folder links are a paste kind only while the client is on; off, such a link is an image link as before.
@@ -41,7 +41,7 @@ type LinkRowValues = Omit<typeof catalogUploads.$inferInsert, "batchId">;
 /** Writes a paste's row (the prior one found by `rowFor`, else a new one) and invalidates the preview when it changed an input. */
 async function saveLinkRow(id: string, values: LinkRowValues, ok: boolean, rowFor: (tx: Tx) => Promise<CatalogUpload | null>): Promise<string> {
   return db().transaction(async (tx) => {
-    await draftForUpdate(tx, id);
+    await draftForChange(tx, id);
     const prior = await rowFor(tx);
     if (prior) await tx.update(catalogUploads).set({ ...values, ...(ok ? {gcsUri:null} : {}) }).where(eq(catalogUploads.id, prior.id));
     const rowId = prior?.id ?? (await tx.insert(catalogUploads).values({ ...values, batchId: id }).returning({ id: catalogUploads.id }))[0]!.id;

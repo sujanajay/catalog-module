@@ -4,6 +4,8 @@ import { channel } from "@catalog/core/catalog/channels";
 import { inrPerUsdFromEnv, RUPEES_NOT_CONFIGURED, usdAmount } from "@catalog/core/catalog/cost";
 import type { BrandCost } from "@catalog/core/catalog/cost-report";
 import AutoRefresh from "@/components/AutoRefresh";
+import OrphanDrafts from "@/components/catalog/OrphanDrafts";
+import { orphanDrafts } from "@catalog/core/catalog/drafts";
 import LocalTime from "@/components/LocalTime";
 import { db } from "@/lib/db";
 import { requireRole } from "@/lib/user";
@@ -57,6 +59,7 @@ export default async function OpsPage({ searchParams }: { searchParams: Promise<
   const active = await activeBatches(conn, now);
   const health = healthLines(await healthSummary(conn), await gpuCandidateRevision(now));
   const failures = await recentFailures(conn, now);
+  const orphans = await orphanDrafts(conn, now);
   const reliabilityRead = await reliability(conn, now);
   const rel = reliabilityRead.ok ? reliabilityRead.value : null;
   const overviewRead = await costOverview(conn, now);
@@ -117,6 +120,8 @@ export default async function OpsPage({ searchParams }: { searchParams: Promise<
           ))}</ul>
         ) : null}
       </section>
+
+      <OrphanDrafts rows={orphans} />
 
       <section>
         <h2>{RELIABILITY_TITLE}</h2>

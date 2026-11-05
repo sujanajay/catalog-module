@@ -13,12 +13,12 @@ import { db } from "../db";
 import { badRequest, HttpError } from "../errors";
 import { dropLinkRejects, linkFailuresOf } from "@catalog/core/catalog/ingest/link-failures";
 import { handOff, uploadedPage } from "@catalog/core/catalog/ingest/hand-off";
-import { assertDraft, draftForUpdate, INPUT_NOT_FOUND, LINK_KINDS, mergeCounts, notDraftText, queryBatch, reopenBatch } from "./batches";
+import { assertDraft, assertInputsOpen, draftForChange, draftForUpdate, INPUT_NOT_FOUND, LINK_KINDS, mergeCounts, notDraftText, queryBatch, reopenBatch } from "./batches";
 import { HAND_OFF_FAILED, HAND_OFF_RETRY } from "./copy";
 import { collectGoogleLink } from "./links";
 
 export async function planUploads(id: string, value: unknown) {
-  const batch = await assertDraft(id);
+  const batch = await assertInputsOpen(id);
   const files = (value as { files?: unknown })?.files;
   if (!Array.isArray(files) || !files.length) throw badRequest("Choose at least one file to upload.");
   const prefix = batchPrefix(batch.brandSlug, id, batch.isTest);
@@ -29,7 +29,7 @@ export async function planUploads(id: string, value: unknown) {
     const [plan] = await planSignedUploads({ prefix, uploadId, files: [{ relativePath: f.relativePath, size: Number(f.size), type: f.mime }] }, storage.signedPutUrl);
     const kind = /\.zip$/i.test(f.name) ? "zip" : /\.(csv|xls[xm])$/i.test(f.name) ? "sheet" : "image";
     await db().transaction(async (tx) => {
-      await draftForUpdate(tx, id);
+      await draftForChange(tx, id);
       await tx.insert(catalogUploads).values({ id: uploadId, batchId: id, name: f.name as string, relativePath: f.relativePath as string, kind, sizeBytes: Number(f.size), mime: plan!.contentType, gcsUri: storage.toGsUri(storage.getBucketName(), plan!.objectPath) });
       await tx.update(catalogBatches).set({ counts: mergeCounts({ previewReady: false }), updatedAt: new Date() }).where(eq(catalogBatches.id, id));
     });
@@ -37,7 +37,7 @@ export async function planUploads(id: string, value: unknown) {
   });
 }
 export async function completeUpload(id: string, uploadId: string) {
-  await assertDraft(id);
+  await assertInputsOpen(id);
   const [upload] = await db().select().from(catalogUploads).where(and(eq(catalogUploads.id, uploadId), eq(catalogUploads.batchId, id)));
   if (!upload?.gcsUri) throw new HttpError(404, "This upload does not exist. Choose the file again.");
   if (upload.status === "removed") throw new HttpError(410, UPLOAD_REMOVED);
@@ -47,7 +47,7 @@ export async function completeUpload(id: string, uploadId: string) {
   const bytes = head.size ? await storage.readRange(upload.gcsUri, 0, Math.min(4099, head.size - 1)) : Buffer.alloc(0);
   const kind = detectUploadKind(upload.name, bytes);
   await db().transaction(async (tx) => {
-    await draftForUpdate(tx, id);
+    await draftForChange(tx, id);
     // Conditional: a Remove that landed while the bytes were checked wins (the row stays removed).
     const [done] = await tx.update(catalogUploads).set({ status: "uploaded", kind: kind === "unknown" ? "image" : kind, error: null, detected: { ...upload.detected, completedAt: new Date().toISOString() } }).where(and(eq(catalogUploads.id, uploadId), ne(catalogUploads.status, "removed"))).returning({ id: catalogUploads.id });
     if (!done) throw new HttpError(410, UPLOAD_REMOVED);
@@ -65,7 +65,7 @@ export const UPLOAD_REMOVED = "This file was removed. Add it again to use it.";
  */
 export async function removeInput(id: string, uploadId: string, route: "uploads" | "links") {
   await db().transaction(async (tx) => {
-    await draftForUpdate(tx, id);
+    await draftForChange(tx, id);
     const [upload] = await tx.select().from(catalogUploads).where(and(eq(catalogUploads.id, uploadId), eq(catalogUploads.batchId, id))).for("update");
     if (!upload || LINK_KINDS.includes(upload.kind) !== (route === "links")) throw new HttpError(404, INPUT_NOT_FOUND);
     if (upload.status === "removed") return;

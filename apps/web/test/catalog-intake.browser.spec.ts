@@ -191,14 +191,15 @@ test("3. grid, all 404, release C form: the no-photos sentence names the links, 
   expect(preview.counts.photos).toBe(27);
 });
 
-// Fixme until M1-S6 (M1 section 8: follow-up batches, F5). The one page hands inputs to collecting by itself about 1 s
-// after a paste is checked, and a batch being collected refuses input changes (BATCH_STILL_COLLECTING), so "paste,
-// clear, paste again" no longer edits the draft in place. M1-S6 decides what a change while collecting does (a
-// follow-up batch or an edit of the draft) and rewrites this scenario to that rule.
-test.fixme("4. correction: paste the grid, clear it, paste the variants; one paste input, the same-name warning, and step 2 holds the second paste only (F3)", async ({ page }) => {
+// M1 D23 (M1-S6): an input change while the files are collected edits the draft. The one page hands the first paste to
+// collecting by itself; the queue is held so the correction lands while it is collected, and the batch is collected
+// again with the second paste only.
+test("4. correction while collecting: paste the grid, clear it, paste the variants; one paste input, collected again with the second paste only (F3, M1 D23)", async ({ page }) => {
+  await queue(page, { paused: true });
   const id = await pasteOnStep1(page, "Intake 4 correction", GRID);
   await expect(page.getByText("6 rows, 27 links", { exact: true })).toBeVisible({ timeout: 20_000 });
   await expect(inputList(page)).toHaveCount(1);
+  await expect.poll(async () => ((await (await page.request.get(`/api/catalog/batches/${id}`)).json()) as { batch: { status: string } }).batch.status, { timeout: 30_000 }).toBe("ingesting");
 
   await pasteText(page, "");
   await pasteText(page, VARIANTS);
@@ -210,23 +211,19 @@ test.fixme("4. correction: paste the grid, clear it, paste the variants; one pas
   await expect(inputList(page)).toHaveCount(1);
   await expect(inputList(page).first()).toContainText("Pasted links");
 
-  await page.getByRole("button", { name: "Continue", exact: true }).click();
-  await expect(stepTwo(page)).toBeVisible({ timeout: 5_000 });
-  // Rows 6 and 7 both become TB-F with shots 1 and 2 (the readback warned about them), so TB-F holds two
-  // files per shot and is not among the products with photos; the examples are the second paste's.
-  await expect(page.getByText(/^3 of 3 products, so you can check the grouping\.$/)).toBeVisible({ timeout: 60_000 });
-  for (const id of ["TB-A", "TB-B", "TB-C"]) await expect(page.locator("code", { hasText: id })).toBeVisible();
-  await expect(page.getByText(/BH-46|BHSS2620Z/)).toHaveCount(0);
-  // The share page and the http link fail with their reasons; both are permanent, so no retry.
-  const card = page.getByRole("region", { name: "Links that could not be downloaded" });
-  await expect(card.getByText("2 of 12 links could not be downloaded (2 products affected).", { exact: true })).toBeVisible();
-  await expect(card.getByText(/returned a web page instead of an image/)).toBeVisible();
-  await expect(card.getByText(/use http instead of https/)).toBeVisible();
-  await expect(page.getByRole("button", { name: RETRY_LINKS })).toHaveCount(0);
-
+  await queue(page, { paused: false });
+  await holdStart(page);
+  // Rows 6 and 7 both become TB-F with shots 1 and 2 (the readback warned about them), so TB-F holds two files per
+  // shot and is not among the products with photos; nothing of the first paste is left.
   const preview = await finishedPreview(page, id);
   expect(preview.groups.map((g) => g.identifier).filter((i) => !/^TB-/.test(i))).toEqual([]);
   expect(preview.groups.filter((g) => g.shots > 0).map((g) => [g.identifier, g.shots])).toEqual([["TB-A", 2], ["TB-B", 2], ["TB-C", 2]]);
+  // The share page and the http link fail with their reasons; both are permanent, so no retry.
+  const card = page.getByRole("region", { name: "Links that could not be downloaded" });
+  await expect(card.getByText("2 of 12 links could not be downloaded (2 products affected).", { exact: true })).toBeVisible({ timeout: 30_000 });
+  await expect(card.getByText(/returned a web page instead of an image/)).toBeVisible();
+  await expect(card.getByText(/use http instead of https/)).toBeVisible();
+  await expect(page.getByRole("button", { name: RETRY_LINKS })).toHaveCount(0);
 });
 
 test("1. xlsx: step 2 renders at once with the reading sentence, then the columns and 6 products (F1)", async ({ page }) => {

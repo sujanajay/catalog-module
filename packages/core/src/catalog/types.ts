@@ -212,6 +212,15 @@ export interface BatchCounts {
    */
   ingestRun?: string | null;
   /**
+   * M1-S6 (M1-F5-R1, R4): how many times the sweep moved this batch on by itself: `sweepHandOffs` hand-offs of a draft
+   * whose tab closed before collecting, `sweepRearms` countdowns armed again after their task was lost, and
+   * `ingestResends` re-sends of an intake that gave up. Each is capped, so a draft that keeps failing waits for a
+   * person and is listed on the Ops page. Optional (no migration).
+   */
+  sweepHandOffs?: number;
+  sweepRearms?: number;
+  ingestResends?: number;
+  /**
    * Spec 17 G4: real errors each chunk's current task (stage, step) threw, keyed by chunk id and counted by the
    * worker. The chunk fails at CHUNK_MAX_ERRORS; a new step starts again at 1. Optional (no migration).
    */
