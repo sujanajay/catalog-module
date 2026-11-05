@@ -17,12 +17,14 @@
 #        bash infra/deploy.sh --rollback <service> [revision]   all traffic back to the previous revision, seconds
 #        bash infra/deploy.sh --build-command   prints the Cloud Build command this commit needs (or that none is
 #                                               needed) and changes nothing; for a build from an uploaded tarball
-# M6-F2-R7 (M6-S5), shorter deploys: the matting images are tagged with the last commit that changed their source
-# (infra/lib/build.sh), so a commit that leaves services/matting alone builds only the worker and web images and the
-# four matting services are SKIP (no candidate, no probe); the worker's smoke then runs against the live matting
-# services. When matting services did change, their candidates and probes run at once (gate_group in infra/lib/gate.sh)
-# and traffic moves only when all passed. M6-F2-R11: before the worker gate a lower worker max or queue slots wait for
-# the stack to be idle (queues_lower_wait in infra/lib/queues.sh). The run ends with the minutes per step and
+# M6-F2-R7 (M6-S5), shorter deploys: the matting images are tagged with a hash of their source (infra/lib/build.sh;
+# the build fails unless the source it was given hashes to the tag), so a commit that leaves services/matting alone
+# builds only the worker and web images and the four matting services are SKIP (no candidate, no probe); the worker's
+# smoke then runs against the live matting services. When matting services did change, their candidates and probes run
+# at once (gate_group in infra/lib/gate.sh), and traffic and service max instances change only when all passed; a
+# candidate whose probe passed in an earlier run on the same revision is not probed again. M6-F2-R11: a lower max
+# instances (matting services before their group, the worker before its gate) or fewer queue slots wait for the stack
+# to be idle (queues_lower_wait in infra/lib/queues.sh). The run ends with the minutes per step and
 # "DEPLOY_OK <tag> in <m>m<s>s" (infra/lib/deploy-steps.sh).
 # Spec 16: the service shape (instances, CPU, queue slots, connection budget, GPU service, which service upscales)
 # is env with today's live shape as defaults (SHAPE_DEFAULTS in infra/lib/shape.sh), so a run with no env changes no
@@ -77,17 +79,27 @@ if [ "${1:-}" = --build-command ]; then BUILD_COMMAND_ONLY=1; shift; fi
 
 TAG=$(git rev-parse --short HEAD)
 AR=$REGION-docker.pkg.dev/$PROJECT/apps
-# M6-F2-R7 (M6-S5): the matting images' tag, the last commit that changed their source (infra/lib/build.sh).
+# M6-F2-R7 (M6-S5): the matting images' tag, a hash of their committed source (infra/lib/build.sh).
 # shellcheck source=lib/build.sh
 source infra/lib/build.sh
 MATTING_TAG=$(matting_source_tag)
-[[ "$MATTING_TAG" =~ ^[0-9a-f]{7,40}$ ]] || { echo "ERROR: cannot name the matting images' source commit (got '$MATTING_TAG')" >&2; exit 1; }
+[[ "$MATTING_TAG" =~ ^[0-9a-f]{12}$ ]] || { echo "ERROR: cannot hash the matting images' source (got '$MATTING_TAG')" >&2; exit 1; }
 # The images a normal deploy needs: the preview reuses the live CPU matting service, so it never needs that image.
 deploy_images() { if [ "${CATALOG_PREVIEW:-0}" = 1 ]; then echo worker web matting-gpu; else echo worker web matting-gpu matting; fi; }
 if [ "$BUILD_COMMAND_ONLY" = 1 ]; then
+  # The tags name the committed source, so a build is only ever made from a clean tree (the deploy refuses one too).
+  if [ -n "$(git status --porcelain)" ]; then
+    echo "ERROR: commit or remove local changes first; the build must come from the committed tree of $TAG" >&2
+    exit 1
+  fi
   # shellcheck disable=SC2046
   build_plan "$AR" "$TAG" "$MATTING_TAG" $(deploy_images) || exit 1
-  if [ "$BUILD_NEEDED" = 1 ]; then build_command; echo; else echo "no build needed: the images for $TAG (matting $MATTING_TAG) exist"; fi
+  if [ "$BUILD_NEEDED" = 1 ]; then
+    echo "# From this checkout ($TAG, clean). Cloud Build refuses a source whose matting files do not hash to $MATTING_TAG."
+    build_tarball_commands "$TAG"
+  else
+    echo "no build needed: the images for $TAG (matting $MATTING_TAG) exist"
+  fi
   exit 0
 fi
 WEB_SERVICE=catalog-web
@@ -442,6 +454,8 @@ GROUP=()
 if [ "$MEASURE_ONLY" != 1 ]; then GROUP=("${PARALLEL_SERVICES[@]}"); fi
 if [ ${#GROUP[@]} -gt 0 ]; then
   deploy_step "${GROUP[*]}"
+  # M6-F2-R11: a lower max on any of them waits for the stack to be idle first.
+  queues_lower_wait "${GROUP[@]}"
   if ! gate_group "${GROUP[@]}"; then
     echo "ERROR: deploy stopped at ${GROUP[*]}; catalog-web and catalog-worker were not changed" >&2
     if [ ${#GATE_GROUP_SHIFTED[@]} -gt 0 ]; then
@@ -458,8 +472,8 @@ for SERVICE in "${SERVICES[@]}"; do
     gate_group_load "$SERVICE"
   else
     deploy_step "$SERVICE"
-    # M6-F2-R11 (M6-S5): a lower worker max or fewer queue slots wait for the stack to be idle (at most SHAPE_LOWER_WAIT_S).
-    if [ "$SERVICE" = catalog-worker ]; then queues_lower_wait; fi
+    # M6-F2-R11 (M6-S5): a lower worker max or fewer queue slots (or a live value that cannot be read) wait for the stack to be idle (at most SHAPE_LOWER_WAIT_S).
+    if [ "$SERVICE" = catalog-worker ]; then queues_lower_wait --queues catalog-worker; fi
     deploy_service "$SERVICE" || GATE_STATUS=$?
   fi
   if [ "$SERVICE" = catalog-matting-gpu ] && [ "$GATE_STATUS" = 75 ]; then

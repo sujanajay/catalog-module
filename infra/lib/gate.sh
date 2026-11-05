@@ -160,7 +160,7 @@ gate_prepare() {
   SVC_TAG=""; SVC_MAX=""
   "$fn"
   GATE_URL=""; GATE_TAG_URL=""; GATE_REVISION=""; GATE_PREVIOUS=""; GATE_CHANGED=0
-  GATE_PROBE_NEEDED=0; GATE_NEEDS_SHIFT=0; GATE_PREVIOUS_MEASURE=0
+  GATE_PROBE_NEEDED=0; GATE_NEEDS_SHIFT=0; GATE_NEEDS_MAX=0; GATE_PREVIOUS_MEASURE=0
   tag=${SVC_TAG:-$CANDIDATE_TAG}
   if [ "$SVC_DEPLOY" = skip ]; then
     echo "==> $SVC_NAME: not deployed (${SVC_SKIP_REASON:-not used by this deploy})"
@@ -203,7 +203,11 @@ gate_prepare() {
     GATE_TAG_URL=$GATE_URL; GATE_REVISION=$previous
     echo "==> $SVC_NAME: SKIP (live revision $previous already runs this image and env)"
     # A no-shift candidate (the preview GPU) that finds the live revision unchanged never sets the live service max.
-    if [ "$SVC_SHIFT" = 1 ]; then gate_service_max "$service_json" || return 1; fi
+    # In a group (GATE_DEFER_MAX=1) the max waits for gate_promote, which runs only when every probe of the group
+    # passed (2026-11-05 review P2-1).
+    if [ "$SVC_SHIFT" = 1 ]; then
+      if [ "${GATE_DEFER_MAX:-0}" = 1 ]; then GATE_NEEDS_MAX=1; else gate_service_max "$service_json" || return 1; fi
+    fi
     return 0
   fi
 
@@ -268,10 +272,19 @@ gate_probe() {
 }
 
 # gate_promote: step 4, the traffic shift to exactly the probed revision. Nothing when gate_probe left
-# GATE_NEEDS_SHIFT=0 (SKIP, reuse, a no-shift candidate).
+# GATE_NEEDS_SHIFT=0 (SKIP, reuse, a no-shift candidate), except the service max a SKIP in a group deferred to here
+# (GATE_NEEDS_MAX=1).
 gate_promote() {
   local service_json
-  [ "$GATE_NEEDS_SHIFT" = 1 ] || return 0
+  if [ "$GATE_NEEDS_SHIFT" != 1 ]; then
+    [ "${GATE_NEEDS_MAX:-0}" = 1 ] || return 0
+    service_json=$(gate_describe run services describe "$SVC_NAME" --region="$SVC_REGION") || {
+      echo "ERROR: $SVC_NAME: cannot read the service to set its max instances; traffic was not changed" >&2
+      return 1
+    }
+    gate_service_max "$service_json" || return 1
+    return 0
+  fi
   # The revision serving now is what deploy.sh --rollback returns to, never a candidate that failed its probe, and
   # never a measure rung (it served only because the service was new).
   if [ "$GATE_PREVIOUS_MEASURE" = 1 ]; then
@@ -307,7 +320,8 @@ gate_promote() {
 #      whose newest revision is not ready yet);
 #   2. gate_probe of every candidate at once, each under its own timeout;
 #   3. only when every service passed (or was SKIP, reused, not deployed, or a soft quota refusal, status 75): the
-#      traffic shifts, one at a time in the order given.
+#      traffic shifts, one at a time in the order given, and the service max instances of each SKIP member (deferred
+#      from round 1 with GATE_DEFER_MAX, so a failed group changes no service's shape either).
 # One failure in round 1 or 2: no service of the group moves traffic (each keeps its live revision; its candidate stays
 # without traffic), every failure is printed with its rollback line, and it returns 1. A shift that fails in round 3
 # returns 1 with the services already shifted in GATE_GROUP_SHIFTED. Each service's output is printed in the order
@@ -320,7 +334,7 @@ GATE_GROUP_SHIFTED=()
 # The GATE_* values of the current service as shell assignments (round 1 and 2 run in subshells).
 gate_state() {
   local v
-  for v in GATE_URL GATE_TAG_URL GATE_REVISION GATE_PREVIOUS GATE_CHANGED GATE_PROBE_NEEDED GATE_NEEDS_SHIFT GATE_PREVIOUS_MEASURE GATE_STATUS; do
+  for v in GATE_URL GATE_TAG_URL GATE_REVISION GATE_PREVIOUS GATE_CHANGED GATE_PROBE_NEEDED GATE_NEEDS_SHIFT GATE_NEEDS_MAX GATE_PREVIOUS_MEASURE GATE_STATUS; do
     printf '%s=%q\n' "$v" "${!v}"
   done
 }
@@ -343,7 +357,7 @@ gate_group_round() {
     (
       GATE_STATUS=0
       if [ "$step" = prepare ]; then
-        gate_prepare "$name" || GATE_STATUS=$?
+        GATE_DEFER_MAX=1 gate_prepare "$name" || GATE_STATUS=$?
       else
         gate_group_load "$name"
         if [ "$GATE_PROBE_NEEDED" = 1 ]; then gate_probe || GATE_STATUS=$?; fi

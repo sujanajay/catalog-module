@@ -1,11 +1,13 @@
 // Run with node infra/tests/shorter-deploys.test.mjs. Offline: gcloud is a fake bash function, no GCP call.
 // M6-F2-R7 and R11 (M6-S5), shorter deploys:
-// - the matting images are tagged with the last commit that changed their source, so a commit that leaves
-//   services/matting alone builds only the worker and web images and the four matting services are SKIP (no probe);
+// - the matting images are tagged with a hash of their source, and Cloud Build refuses a source that does not hash to
+//   the tag, so a commit that leaves services/matting alone builds only the worker and web images, the four matting
+//   services are SKIP (no probe), and an image under a tag is always built from exactly that source;
 // - the worker's smoke then runs against the live matting services;
 // - when several matting services changed, their candidates deploy at once, then their probes run at once, and traffic
-//   moves only when every one passed; one failure moves none;
-// - a lower worker max or fewer queue slots wait for the stack to be idle (at most SHAPE_LOWER_WAIT_S), then apply;
+//   moves only when every one passed; one failure moves no traffic and changes no service max;
+// - a lower max instances (any matting service or the worker), fewer queue slots, or a live value gcloud cannot read
+//   wait for the stack to be idle (at most SHAPE_LOWER_WAIT_S), then apply;
 // - the deploy ends with the minutes per step and DEPLOY_OK.
 import fs from 'node:fs';
 import os from 'node:os';
@@ -40,27 +42,71 @@ const test = (name, fn) => tests.push([name, fn]);
 
 // ---- The matting images' tag and the build plan (infra/lib/build.sh) ----
 
-test('the matting images are tagged with the last commit that changed services/matting or cloudbuild.yaml', () => {
-  const repo = path.join(dir, 'repo');
+// A throwaway repo with matting source, a build config and worker code; build.sh sourced.
+const gitRepo = (name) => {
+  const repo = path.join(dir, name);
   fs.mkdirSync(repo, {recursive: true});
-  const r = sh('source-tag', `cd "${posix(repo)}"
-git init -q; git config user.email t@example.com; git config user.name t; git config commit.gpgsign false
-mkdir -p services/matting apps/worker
-echo a > services/matting/app.py; echo b > cloudbuild.yaml; echo c > apps/worker/x.ts
-git add -A; git commit -qm one; ONE=$(git rev-parse --short HEAD)
-echo d > apps/worker/x.ts; git commit -qam two
-source "$ROOT/infra/lib/build.sh"
-echo "after a worker change: $(matting_source_tag) one=$ONE"
-echo e > cloudbuild.yaml; git commit -qam three; THREE=$(git rev-parse --short HEAD)
-echo "after a build-config change: $(matting_source_tag) three=$THREE"
-echo f > services/matting/app.py; git commit -qam four; FOUR=$(git rev-parse --short HEAD)
-echo g > apps/worker/x.ts; git commit -qam five
-echo "after a matting change: $(matting_source_tag) four=$FOUR"`);
+  return [repo, `cd "${posix(repo)}"
+git init -q; git config user.email t@example.com; git config user.name t; git config commit.gpgsign false; git config core.autocrlf false
+mkdir -p services/matting/app apps/worker
+echo a > services/matting/app/main.py; echo FROM > services/matting/Dockerfile; echo b > cloudbuild.yaml; echo c > apps/worker/x.ts
+git add -A; git commit -qm one
+source "$ROOT/infra/lib/build.sh"`];
+};
+
+test('the matting images are tagged with a hash of services/matting and cloudbuild.yaml, not with a commit', () => {
+  const [, setup] = gitRepo('source-tag');
+  const r = sh('source-tag', `${setup}
+echo "one $(matting_source_tag)"
+echo d > apps/worker/x.ts; git commit -qam two; echo "worker change $(matting_source_tag)"
+git revert --no-edit HEAD >/dev/null; echo "a later commit, same source $(matting_source_tag)"
+echo e > cloudbuild.yaml; git commit -qam three; echo "build config change $(matting_source_tag)"
+git checkout -q HEAD~1 -- cloudbuild.yaml; git commit -qam back; echo "build config back $(matting_source_tag)"
+echo f > services/matting/app/main.py; git commit -qam four; echo "matting change $(matting_source_tag)"
+echo x > services/matting/app/main.py; echo "uncommitted edit $(matting_source_tag)"`);
   assert.equal(r.status, 0, r.err);
-  for (const line of lines(r.out)) {
-    const [, tag, expected] = line.match(/: (\w+) \w+=(\w+)$/);
-    assert.equal(tag, expected, line);
-  }
+  const tag = Object.fromEntries(lines(r.out).map((l) => [l.slice(0, l.lastIndexOf(' ')), l.slice(l.lastIndexOf(' ') + 1)]));
+  assert.match(tag.one, /^[0-9a-f]{12}$/);
+  assert.equal(tag['worker change'], tag.one);
+  assert.equal(tag['a later commit, same source'], tag.one);
+  assert.notEqual(tag['build config change'], tag.one);
+  assert.equal(tag['build config back'], tag.one, 'the same content gives the same tag on any commit');
+  assert.notEqual(tag['matting change'], tag.one);
+  assert.equal(tag['uncommitted edit'], tag['matting change'], 'the tag names the committed tree');
+});
+
+test('Cloud Build check: the source given to the build must hash to _MATTING_TAG (git archive passes, any other copy fails)', () => {
+  const [repo, setup] = gitRepo('source-verify');
+  const r = sh('source-verify', `${setup}
+TAG=$(matting_source_tag)
+mkdir -p "$STATE/src"; git archive HEAD | tar -x -C "$STATE/src"
+echo "files $(matting_source_tag_of_files "$STATE/src") git $TAG"
+cd "$STATE/src"
+bash "$ROOT/infra/lib/build.sh" verify-matting-source "$TAG" && echo "archive ok"
+echo extra > services/matting/app/main.py
+bash "$ROOT/infra/lib/build.sh" verify-matting-source "$TAG" || echo "edited exit $?"
+git -C "${posix(repo)}" show HEAD:services/matting/app/main.py > services/matting/app/main.py
+echo stray > services/matting/app/new.py
+bash "$ROOT/infra/lib/build.sh" verify-matting-source "$TAG" || echo "added exit $?"
+rm services/matting/app/new.py
+bash "$ROOT/infra/lib/build.sh" verify-matting-source "$TAG" && echo "restored ok"
+bash "$ROOT/infra/lib/build.sh" verify-matting-source "" || echo "empty exit $?"
+bash "$ROOT/infra/lib/build.sh" verify-matting-source abc1234 || echo "commit-like exit $?"`);
+  assert.equal(r.status, 0, r.err);
+  const [, files, git] = r.out.match(/^files (\w+) git (\w+)$/m);
+  assert.equal(files, git, 'the hash of the files on disk is the hash of the committed tree');
+  for (const want of ['archive ok', 'edited exit 1', 'added exit 1', 'restored ok', 'empty exit 2', 'commit-like exit 2']) assert.ok(r.out.includes(want), want + '\n' + r.out);
+  assert.match(r.err, /hashes to [0-9a-f]{12}, not _MATTING_TAG=[0-9a-f]{12}[\s\S]*No image was pushed/);
+});
+
+test('the matting tag of this repo: the committed tree and a git archive of it agree', () => {
+  const r = sh('source-self', `source infra/lib/build.sh
+mkdir -p "$STATE/src"; git archive HEAD -- services/matting cloudbuild.yaml | tar -x -C "$STATE/src"
+echo "$(matting_source_tag) $(matting_source_tag_of_files "$STATE/src")"`);
+  assert.equal(r.status, 0, r.err);
+  const [a, b] = r.out.trim().split(' ');
+  assert.match(a, /^[0-9a-f]{12}$/);
+  assert.equal(a, b);
 });
 
 const fakeAr = `build_gcloud() {
@@ -89,6 +135,14 @@ test('build plan: a missing matting image builds all four with cloudbuild.yaml a
   assert.equal(r.out.trim(), 'NEEDED=1|cloudbuild.yaml|_AR=ar,_TAG=t,_MATTING_TAG=m1|gcloud builds submit --config cloudbuild.yaml --substitutions=_AR=ar,_TAG=t,_MATTING_TAG=m1 .');
 });
 
+test('the by-hand build: a git archive of HEAD, uploaded, built with the plan\'s config and substitutions', () => {
+  const r = sh('plan-tarball', `${fakeAr}\nbuild_plan ar t m1 worker web matting-gpu matting\nbuild_tarball_commands t`, {MISSING: 'matting:m1'});
+  assert.equal(r.status, 0, r.err);
+  assert.deepEqual(lines(r.out), ['git archive --format=tar.gz -o "$TEMP/catalog-src-t.tgz" HEAD',
+    'gcloud storage cp "$TEMP/catalog-src-t.tgz" gs://image-links-agent_cloudbuild/source/catalog-src-t.tgz',
+    'gcloud builds submit gs://image-links-agent_cloudbuild/source/catalog-src-t.tgz --config cloudbuild.yaml --substitutions=_AR=ar,_TAG=t,_MATTING_TAG=m1 --async']);
+});
+
 test('build plan: an image check that fails for another reason stops before a paid build', () => {
   const r = sh('plan-error', `${fakeAr}\nbuild_plan ar t m1 worker web || echo "PLAN FAILED"`, {MISSING: '', AR_ERROR: '1'});
   assert.equal(r.status, 0, r.err);
@@ -102,8 +156,15 @@ test('the build configs: cloudbuild.yaml tags and versions the matting images by
     assert.ok(full.includes(`"-t", "\${_AR}/${image}:\${_MATTING_TAG}"`), image);
     assert.ok(full.includes(`- "\${_AR}/${image}:\${_MATTING_TAG}"`), `${image} in images`);
   }
-  assert.equal((full.match(/GIT_SHA=\$\{_MATTING_TAG\}/g) ?? []).length, 2, '/health reports the source commit');
+  assert.equal((full.match(/GIT_SHA=\$\{_MATTING_TAG\}/g) ?? []).length, 2, '/health reports the source hash');
   assert.ok(!/matting(-gpu)?:\$\{_TAG\}/.test(full));
+  // The first step checks the source against the tag; the matting builds wait for it, and Cloud Build pushes the
+  // images (the images: list) only when every step passed.
+  assert.match(full, /steps:\n(?: {2}#.*\n)* {2}- id: verify-matting-source\n {4}name: ubuntu\n {4}entrypoint: bash\n {4}args: \["infra\/lib\/build\.sh", "verify-matting-source", "\$\{_MATTING_TAG\}"\]\n/);
+  assert.match(full, /- id: matting\n(?: {4}.*\n)*? {4}waitFor: \["verify-matting-source"\]/);
+  assert.match(full, /- id: matting-gpu\n(?: {4}.*\n)*? {4}waitFor: \["matting"\]/);
+  assert.match(full, /^images:/m);
+  assert.ok(!/^ {2}- name: .*\n(?: {4}.*\n)*? {4}args: \[[^\]]*"push"/m.test(full), 'no step pushes an image itself');
   // Cloud Build refuses a substitution the config does not use, so build_plan passes _MATTING_TAG only to the full one.
   assert.ok(!read('infra/cloudbuild-preview.yaml').includes('_MATTING_TAG'));
 });
@@ -118,6 +179,10 @@ test('deploy.sh: the build goes through build_plan; --build-command prints the p
   assert.match(only, /exit 0\nfi/);
   assert.ok(!/gcloud (builds|run|tasks)/.test(only), 'prints only');
   assert.ok(deploy.indexOf('BUILD_COMMAND_ONLY" = 1') < deploy.indexOf('preflight_login_works'), 'needs no deploy pre-flight');
+  // The tags name the committed tree, so the by-hand build refuses a dirty tree and builds a git archive of HEAD.
+  assert.ok(only.includes('git status --porcelain') && only.indexOf('git status --porcelain') < only.indexOf('build_plan'), 'clean tree first');
+  assert.match(only, /build_tarball_commands "\$TAG"/);
+  assert.ok(deploy.includes('[[ "$MATTING_TAG" =~ ^[0-9a-f]{12}$ ]]'));
 });
 
 const vars = `AR=ar; TAG=t; MATTING_SA=m; WORKER_SA=w; WEB_SA=web; WORKER_SERVICE=catalog-worker; WEB_SERVICE=catalog-web
@@ -234,6 +299,23 @@ gate_group_load catalog-upscale; echo "UPSCALE=$GATE_STATUS|$GATE_CHANGED|$GATE_
   assert.ok(r.out.includes('UPSCALE=0|1|https://candidate---catalog-upscale.run.app|catalog-upscale-new|catalog-upscale'), r.out);
 });
 
+test('gate_group: a SKIP member changes its service max only after every probe passed, never when the group fails', () => {
+  let r = sh('group-max-fail', `${group}
+if gate_group "\${PARALLEL_SERVICES[@]}"; then echo GROUP-OK; else echo GROUP-FAILED; fi`,
+  {UNCHANGED: 'catalog-matting catalog-matting-gpu', FAIL_PROBE: 'catalog-upscale'});
+  assert.equal(r.status, 0, r.err);
+  assert.ok(r.out.includes('GROUP-FAILED') && r.out.includes('==> catalog-matting: SKIP'), r.out);
+  assert.ok(!r.calls.some((c) => c.startsWith('run services update ') || c.includes('update-traffic')), 'no max, no tag, no shift:\n' + r.calls.join('\n'));
+  r = sh('group-max-pass', `${group}
+gate_group "\${PARALLEL_SERVICES[@]}"`, {UNCHANGED: 'catalog-matting catalog-matting-gpu', PROBE_SLEEP: '1'});
+  assert.equal(r.status, 0, r.err + r.out);
+  const lastProbe = r.calls.length - 1 - [...r.calls].reverse().findIndex((c) => c.startsWith('probe-end'));
+  for (const s of ['catalog-matting', 'catalog-matting-gpu']) {
+    const max = r.calls.findIndex((c) => c.startsWith(`run services update ${s} `) && c.includes('--max='));
+    assert.ok(max > lastProbe, `${s}: its max is set after the last probe:\n${r.calls.join('\n')}`);
+  }
+});
+
 // ---- The deploy.sh service loop (the slice deploy.sh runs, with the fake gcloud and fake probes) ----
 
 function loop(label, env) {
@@ -298,13 +380,23 @@ test('a no-shift candidate (the preview GPU) that matches the live revision neve
 
 // ---- M6-F2-R11: lower shapes wait for an idle stack ----
 
-function lower(label, {live, worker = '32', busy = 0, env = {}}) {
+// live: "<queue> <slots>" lines; maxes: "<service>": live max (ERR: describe fails, NF: not found, "": no max set);
+// env QUEUES_FAIL=1: the queue list fails. args: what deploy.sh passes to queues_lower_wait.
+function lower(label, {live, maxes = {}, busy = 0, args = '--queues catalog-worker', env = {}}) {
+  const max = Object.entries({'catalog-worker': '32', ...maxes}).map(([k, v]) => `${k}=${v}`).join(' ');
   return sh(label, `gcloud() {
   echo "$*" >> "$LOG"
   case "$*" in
+    "tasks queues list"*) [ "\${QUEUES_FAIL:-0}" = 1 ] && { echo "ERROR: UNAVAILABLE" >&2; return 1; } ;;
+  esac
+  case "$*" in
     "tasks queues list"*rateLimits*) printf '%s\\n' ${live.map((l) => `'${l}'`).join(' ')} ;;
     "tasks queues list"*) printf '%s\\n' ${live.map((l) => `'${l.split(' ')[0]}'`).join(' ')} ;;
-    "run services describe"*) echo "${worker}" ;;
+    "run services describe"*)
+      local m="" kv; for kv in ${max}; do [ "\${kv%%=*}" = "$4" ] && m=\${kv#*=}; done
+      case "$m" in ERR) echo "ERROR: (gcloud.run.services.describe) UNAVAILABLE" >&2; return 1 ;;
+        NF) echo "ERROR: (gcloud.run.services.describe) NOT_FOUND: Cannot find service [$4]" >&2; return 1 ;; esac
+      echo "$m" ;;
     "tasks list"*)
       n=$(cat "$STATE/busy")
       if [ "$n" = unreadable ]; then echo "ERROR: denied" >&2; return 1; fi
@@ -313,28 +405,76 @@ function lower(label, {live, worker = '32', busy = 0, env = {}}) {
 }
 gcv() { gcloud "$@" | tr -d '\\r'; }
 echo "${busy}" > "$STATE/busy"
-source infra/lib/shape.sh
-shape_defaults
-REGION=asia-south1 QUEUE=catalog BULK_QUEUE=catalog-bulk WORKER_SERVICE=catalog-worker
+source infra/lib/services.sh
+${vars}
+MATTING_TAG=m1; UPSCALE_SERVICE=dedicated; UPSCALE_GPU_SERVICE=\${UPSCALE_GPU_SERVICE:-1}
+REGION=asia-south1 QUEUE=catalog BULK_QUEUE=catalog-bulk
 source infra/lib/queues.sh
-queues_lower_wait; echo "RETURNED"`, {SHAPE_LOWER_POLL_S: '0', ...env});
+queues_lower_wait ${args}; echo "RETURNED"`, {SHAPE_LOWER_POLL_S: '0', ...env});
 }
 const LIVE = ['catalog 8', 'catalog-bulk 36', 'catalog-ingest 4', 'catalog-enlarge 2', 'catalog-enlarge-bulk 12'];
+const GROUP_ARGS = 'catalog-matting catalog-upscale catalog-upscale-gpu catalog-matting-gpu';
+// The shape defaults' max instances, so these read as "the same as live".
+const SAME = {'catalog-matting': '4', 'catalog-upscale': '50', 'catalog-upscale-gpu': '4', 'catalog-matting-gpu': '3'};
+const HEAD = 'lowers (or cannot read the live value of):\n';
 
 test('R11: the same or a higher shape never waits and never lists tasks', () => {
-  const r = lower('lower-none', {live: LIVE});
+  let r = lower('lower-none', {live: LIVE});
   assert.equal(r.status, 0, r.err);
   assert.ok(r.out.includes('RETURNED') && !r.out.includes('lowers'), r.out);
   assert.ok(!r.calls.some((c) => c.startsWith('tasks list')));
+  r = lower('lower-none-group', {live: LIVE, maxes: {...SAME, 'catalog-upscale': '20'}, args: GROUP_ARGS});
+  assert.equal(r.status, 0, r.err);
+  assert.ok(r.out.includes('RETURNED') && !r.out.includes('lowers'), r.out);
+  assert.ok(!r.calls.some((c) => c.startsWith('tasks ')), 'the group checks only the service maxes');
+  assert.deepEqual(r.calls.filter((c) => c.startsWith('run services describe')).map((c) => c.split(' ')[3]), GROUP_ARGS.split(' '));
 });
 
 test('R11: fewer queue slots or a lower worker max wait while a queue holds tasks, then apply when idle', () => {
-  const r = lower('lower-busy', {live: ['catalog 20', ...LIVE.slice(1)], worker: '40', busy: 2});
+  const r = lower('lower-busy', {live: ['catalog 20', ...LIVE.slice(1)], maxes: {'catalog-worker': '40'}, busy: 2});
   assert.equal(r.status, 0, r.err);
-  assert.match(r.out, /this deploy lowers:\n {4}tasks queue catalog slots 20 -> 8\n {4}catalog-worker max instances 40 -> 32/);
+  assert.ok(r.out.includes(`${HEAD}    tasks queue catalog slots 20 -> 8\n    catalog-worker max instances 40 -> 32\n`), r.out);
   assert.equal((r.out.match(/a batch is in flight \(catalog holds tasks\)/g) ?? []).length, 2, r.out);
   assert.match(r.out, /no batch in flight; applying the lower shape\nRETURNED/);
   assert.ok(!r.err.includes('WARN'));
+});
+
+test('R11: a lower max on catalog-matting, the CPU upscaler, the GPU upscaler or GPU matting waits too', () => {
+  for (const [s, live, want] of [['catalog-matting', '9', 4], ['catalog-upscale', '80', 50], ['catalog-upscale-gpu', '6', 4], ['catalog-matting-gpu', '5', 3]]) {
+    const r = lower(`lower-${s}`, {live: LIVE, maxes: {...SAME, [s]: live}, args: GROUP_ARGS, busy: 1});
+    assert.equal(r.status, 0, r.err);
+    assert.ok(r.out.includes(`${HEAD}    ${s} max instances ${live} -> ${want}\n==> shape: a batch is in flight (catalog holds tasks)`), r.out);
+    assert.match(r.out, /no batch in flight; applying the lower shape\nRETURNED/);
+  }
+});
+
+test('R11 fails closed: a live value gcloud cannot read counts as lowered, so the deploy waits for an idle stack', () => {
+  let r = lower('lower-queues-unreadable', {live: LIVE, env: {QUEUES_FAIL: '1', SHAPE_LOWER_WAIT_S: '0'}});
+  assert.equal(r.status, 0, r.err);
+  assert.ok(r.out.includes(`${HEAD}    tasks queues: live slots unreadable\n`), r.out);
+  assert.match(r.err, /WARN: a batch is still in flight \(tasks queues \(unreadable\) holds tasks\)/, 'an unreadable queue list counts as busy');
+  r = lower('lower-worker-unreadable', {live: LIVE, maxes: {'catalog-worker': 'ERR'}, busy: 1});
+  assert.equal(r.status, 0, r.err);
+  assert.ok(r.out.includes(`${HEAD}    catalog-worker max instances unreadable -> 32\n==> shape: a batch is in flight (catalog holds tasks)`), r.out);
+  r = lower('lower-gpu-unreadable', {live: LIVE, maxes: {...SAME, 'catalog-upscale-gpu': 'ERR'}, args: GROUP_ARGS});
+  assert.equal(r.status, 0, r.err);
+  assert.ok(r.out.includes(`${HEAD}    catalog-upscale-gpu max instances unreadable -> 4\n`), r.out);
+  r = lower('lower-unset', {live: LIVE, maxes: {...SAME, 'catalog-matting': ''}, args: GROUP_ARGS});
+  assert.equal(r.status, 0, r.err);
+  assert.ok(r.out.includes(`${HEAD}    catalog-matting max instances unset -> 4\n`), r.out);
+  r = lower('lower-slot-missing', {live: ['catalog', ...LIVE.slice(1)]});
+  assert.equal(r.status, 0, r.err);
+  assert.ok(r.out.includes(`${HEAD}    tasks queue catalog slots unreadable -> 8\n`), r.out);
+});
+
+test('R11: a service that does not exist yet has nothing to lower; one this deploy does not change is not read', () => {
+  let r = lower('lower-new-service', {live: LIVE, maxes: {...SAME, 'catalog-upscale-gpu': 'NF'}, args: GROUP_ARGS});
+  assert.equal(r.status, 0, r.err);
+  assert.ok(r.out.includes('RETURNED') && !r.out.includes('lowers'), r.out);
+  r = lower('lower-not-deployed', {live: LIVE, maxes: {...SAME, 'catalog-upscale-gpu': 'ERR'}, args: GROUP_ARGS, env: {UPSCALE_GPU_SERVICE: '0'}});
+  assert.equal(r.status, 0, r.err);
+  assert.ok(r.out.includes('RETURNED') && !r.out.includes('lowers'), r.out);
+  assert.ok(!r.calls.some((c) => c.startsWith('run services describe catalog-upscale-gpu')), r.calls.join('\n'));
 });
 
 test('R11: after SHAPE_LOWER_WAIT_S the lower shape applies with a warning; an unreadable queue counts as busy', () => {
@@ -345,6 +485,13 @@ test('R11: after SHAPE_LOWER_WAIT_S the lower shape applies with a warning; an u
   r = lower('lower-unreadable', {live: ['catalog 20', ...LIVE.slice(1)], busy: 'unreadable', env: {SHAPE_LOWER_WAIT_S: '0'}});
   assert.equal(r.status, 0, r.err);
   assert.match(r.err, /catalog \(unreadable\) holds tasks/);
+});
+
+test('R11: deploy.sh checks the group\'s maxes before the group, and the queues and the worker max before the worker gate', () => {
+  const deploy = read('infra/deploy.sh');
+  const at = deploy.indexOf('queues_lower_wait "${GROUP[@]}"');
+  assert.ok(at >= 0 && at < deploy.indexOf('if ! gate_group'), 'before the group');
+  assert.ok(deploy.includes('if [ "$SERVICE" = catalog-worker ]; then queues_lower_wait --queues catalog-worker; fi'));
 });
 
 test('R11: the default wait is 30 minutes, set by env', () => {

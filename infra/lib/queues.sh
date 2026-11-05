@@ -90,38 +90,69 @@ queues_apply_shape() {
   done
 }
 
-# M6-F2-R11 (M6-S5): a deploy never lowers the worker's max instances or a queue's slots under batches in flight. Run
-# right before the worker gate (which applies the worker's max at its traffic shift; queues_apply_shape follows it):
-# when the new shape is lower than the live one somewhere, it waits until no queue of the stack holds a task (no batch
-# in flight), checking every SHAPE_LOWER_POLL_S seconds, for at most SHAPE_LOWER_WAIT_S (default 1800, 30 minutes);
-# then it applies the lower shape with a warning. Equal or higher shapes never wait. A queue that cannot be read counts
-# as busy, so a gcloud hiccup only makes the deploy wait. Needs WORKER_SERVICE and WORKER_MAX_INSTANCES (deploy.sh).
+# M6-F2-R11 (M6-S5): a deploy never lowers a service's max instances or a queue's slots under batches in flight.
+# queues_lower_wait [--queues] <service>...: run right before the gate of those services (the matting group, then the
+# worker with --queues, since queues_apply_shape follows the worker gate). When the new shape is lower than the live
+# one somewhere (the max instances of any named service: catalog-matting, catalog-upscale, catalog-upscale-gpu,
+# catalog-matting-gpu, catalog-worker; with --queues also every queue's slots), it waits until no queue of the stack
+# holds a task (no batch in flight), checking every SHAPE_LOWER_POLL_S seconds, for at most SHAPE_LOWER_WAIT_S (default
+# 1800, 30 minutes); then it applies the lower shape with a warning. Equal or higher shapes never wait.
+# Fail closed (2026-11-05 review P2-4): a live value that cannot be read counts as lowered, and a queue that cannot be
+# read counts as busy, so a gcloud hiccup only makes the deploy wait, never lowers under a batch. Only a service that
+# does not exist yet (NOT_FOUND) has nothing to lower.
 SHAPE_LOWER_WAIT_S=${SHAPE_LOWER_WAIT_S:-1800}
 SHAPE_LOWER_POLL_S=${SHAPE_LOWER_POLL_S:-60}
 
-# What the new shape lowers, one "<what> <live> -> <new>" line each; nothing when nothing is lowered.
+# What the new queue slots lower, one "tasks queue <name> slots <live> -> <new>" line each.
 queues_lowering() {
-  local live line name slots kind live_slots worker_live
+  local live line name slots kind live_slots
   local -a plan
-  queues_read_existing
-  live=$(gcv tasks queues list --location="$REGION" --format='value(name.basename(),rateLimits.maxConcurrentDispatches)') || live=""
+  if ! queues_read_existing || ! live=$(gcv tasks queues list --location="$REGION" --format='value(name.basename(),rateLimits.maxConcurrentDispatches)'); then
+    echo "tasks queues: live slots unreadable"
+    return 0
+  fi
   mapfile -t plan < <(queues_shape)
   for line in "${plan[@]}"; do
     read -r name slots kind <<<"$line"
+    queue_exists "$name" || continue
     live_slots=$(awk -v q="$name" '$1 == q { print $2 }' <<<"$live")
-    if [[ "$live_slots" =~ ^[0-9]+$ ]] && [ "$slots" -lt "$live_slots" ]; then echo "tasks queue $name slots $live_slots -> $slots"; fi
+    if ! [[ "$live_slots" =~ ^[0-9]+$ ]]; then echo "tasks queue $name slots unreadable -> $slots"
+    elif [ "$slots" -lt "$live_slots" ]; then echo "tasks queue $name slots $live_slots -> $slots"
+    fi
   done
-  worker_live=$(gcv run services describe "$WORKER_SERVICE" --region="$REGION" \
-    --format='value(metadata.annotations."run.googleapis.com/maxScale")' 2>/dev/null) || worker_live=""
-  if [[ "$worker_live" =~ ^[0-9]+$ ]] && [ "$WORKER_MAX_INSTANCES" -lt "$worker_live" ]; then
-    echo "$WORKER_SERVICE max instances $worker_live -> $WORKER_MAX_INSTANCES"
-  fi
+}
+
+# services_lowering <service>...: what the new max instances lower, one "<service> max instances <live> -> <new>" line
+# each. Uses the registry (infra/lib/services.sh): only a service this deploy changes (SVC_DEPLOY=1) and moves traffic
+# to (SVC_SHIFT=1) gets its SVC_MAX applied by the gate.
+services_lowering() {
+  local name
+  for name in "$@"; do
+    (
+      fn=service_${name//-/_}
+      declare -F "$fn" >/dev/null || { echo "$name max instances unreadable (not in the registry)"; exit 0; }
+      SVC_TAG=""; SVC_MAX=""
+      "$fn" >/dev/null
+      [ "$SVC_DEPLOY" = 1 ] && [ "$SVC_SHIFT" = 1 ] && [ -n "$SVC_MAX" ] || exit 0
+      if ! out=$(gcv run services describe "$SVC_NAME" --region="$SVC_REGION" \
+          --format='value(metadata.annotations."run.googleapis.com/maxScale")' 2>&1); then
+        grep -qiE 'NOT_FOUND|could not be found|cannot find' <<<"$out" && exit 0
+        echo "$SVC_NAME max instances unreadable -> $SVC_MAX"; exit 0
+      fi
+      # No annotation: no service-level max set, so any max lowers it.
+      [ -n "$out" ] || { echo "$SVC_NAME max instances unset -> $SVC_MAX"; exit 0; }
+      if ! [[ "$out" =~ ^[0-9]+$ ]]; then echo "$SVC_NAME max instances unreadable -> $SVC_MAX"
+      elif [ "$SVC_MAX" -lt "$out" ]; then echo "$SVC_NAME max instances $out -> $SVC_MAX"
+      fi
+    )
+  done
 }
 
 # Prints the first queue of the stack that holds a task and returns 0; returns 1 when every queue is empty.
 queues_busy() {
   local line name slots kind out
   local -a plan
+  queues_read_existing || { echo "tasks queues (unreadable)"; return 0; }
   mapfile -t plan < <(queues_shape)
   for line in "${plan[@]}"; do
     read -r name slots kind <<<"$line"
@@ -133,12 +164,12 @@ queues_busy() {
 }
 
 queues_lower_wait() {
-  local lowering busy waited=0
-  lowering=$(queues_lowering)
+  local lowering="" busy waited=0
+  if [ "${1:-}" = --queues ]; then shift; lowering=$(queues_lowering); fi
+  lowering+=$'\n'$(services_lowering "$@")
+  lowering=$(sed '/^$/d' <<<"$lowering")
   [ -n "$lowering" ] || return 0
-  # queues_lowering ran in a subshell; queues_busy needs the queue names here.
-  queues_read_existing
-  echo "==> shape: this deploy lowers:"
+  echo "==> shape: this deploy lowers (or cannot read the live value of):"
   sed 's/^/    /' <<<"$lowering"
   while busy=$(queues_busy); do
     if [ "$waited" -ge "$SHAPE_LOWER_WAIT_S" ]; then
