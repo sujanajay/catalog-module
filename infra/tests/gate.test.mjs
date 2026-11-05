@@ -248,6 +248,7 @@ test('deploy.sh service loop with UPSCALE_MEASURE=1 while the live worker uses c
   const live = 'W=1,MATTING_URL=https://catalog-matting-abc-el.a.run.app,UPSCALE_URL=https://catalog-upscale-abc-el.a.run.app,UPSCALE_TIMEOUT_S=700';
   const r = run('measure-loop', `${vars}\nUPSCALE_MEASURE=1; MEASURE_ONLY=1; WORKER_ENV='${live}'; WEB_ENV=X=1
 ${fakeUpscaleProbe}
+source infra/lib/deploy-steps.sh
 queues_apply_shape() { echo "QUEUES CHANGED"; }
 trap 'echo "WORKER_ENV_AT_EXIT=$WORKER_ENV|WEB_ENV_AT_EXIT=$WEB_ENV"' EXIT
 source "${loopFile.replaceAll('\\', '/')}"
@@ -514,7 +515,7 @@ test('rollback returns to the revision tagged previous, or a named one, never a 
 test('deploy.sh: gate loop after migrate and queues, before jobs and monitoring; no smoke before the services', () => {
   const deploy = fs.readFileSync(path.join(root, 'infra/deploy.sh'), 'utf8');
   const at = (s) => { const i = deploy.indexOf(s); assert.ok(i >= 0, `${s} not in deploy.sh`); return i; };
-  const order = ['shape_check "$SQL_CONNECTION_LIMIT"', 'echo "==> build $TAG"', 'echo "==> migrate"',
+  const order = ['shape_check "$SQL_CONNECTION_LIMIT"', 'echo "==> build $TAG (matting images $MATTING_TAG)"', 'echo "==> migrate"',
     '\n  queues_create_missing', 'deploy_service "$SERVICE"', 'echo "==> jobs"', 'echo "==> monitoring"'].map(at);
   assert.deepEqual(order, [...order].sort((a, b) => a - b));
   assert.ok(!deploy.includes('gcloud run deploy'), 'every service deploy goes through the gate');

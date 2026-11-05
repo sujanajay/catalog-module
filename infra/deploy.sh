@@ -15,6 +15,15 @@
 #
 # Usage (Git Bash, from the repo root): bash infra/deploy.sh
 #        bash infra/deploy.sh --rollback <service> [revision]   all traffic back to the previous revision, seconds
+#        bash infra/deploy.sh --build-command   prints the Cloud Build command this commit needs (or that none is
+#                                               needed) and changes nothing; for a build from an uploaded tarball
+# M6-F2-R7 (M6-S5), shorter deploys: the matting images are tagged with the last commit that changed their source
+# (infra/lib/build.sh), so a commit that leaves services/matting alone builds only the worker and web images and the
+# four matting services are SKIP (no candidate, no probe); the worker's smoke then runs against the live matting
+# services. When matting services did change, their candidates and probes run at once (gate_group in infra/lib/gate.sh)
+# and traffic moves only when all passed. M6-F2-R11: before the worker gate a lower worker max or queue slots wait for
+# the stack to be idle (queues_lower_wait in infra/lib/queues.sh). The run ends with the minutes per step and
+# "DEPLOY_OK <tag> in <m>m<s>s" (infra/lib/deploy-steps.sh).
 # Spec 16: the service shape (instances, CPU, queue slots, connection budget, GPU service, which service upscales)
 # is env with today's live shape as defaults (SHAPE_DEFAULTS in infra/lib/shape.sh), so a run with no env changes no
 # capacity; a shape change is a change to that table.
@@ -46,6 +55,9 @@ GPU_REGION=asia-southeast1
 # Pin this project for every gcloud call without touching global gcloud config.
 export CLOUDSDK_CORE_PROJECT=$PROJECT
 cd "$(dirname "$0")/.."
+# shellcheck source=lib/deploy-steps.sh
+source infra/lib/deploy-steps.sh
+deploy_step pre-flight
 
 gcv() { gcloud "$@" | tr -d '\r'; }
 
@@ -59,10 +71,25 @@ if [ "${1:-}" = --rollback ]; then
   rollback_service "$2" "${3:-}"
   exit
 fi
-[ $# -eq 0 ] || { echo "usage: bash infra/deploy.sh | bash infra/deploy.sh --rollback <service> [revision]" >&2; exit 2; }
+BUILD_COMMAND_ONLY=0
+if [ "${1:-}" = --build-command ]; then BUILD_COMMAND_ONLY=1; shift; fi
+[ $# -eq 0 ] || { echo "usage: bash infra/deploy.sh | bash infra/deploy.sh --rollback <service> [revision] | bash infra/deploy.sh --build-command" >&2; exit 2; }
 
 TAG=$(git rev-parse --short HEAD)
 AR=$REGION-docker.pkg.dev/$PROJECT/apps
+# M6-F2-R7 (M6-S5): the matting images' tag, the last commit that changed their source (infra/lib/build.sh).
+# shellcheck source=lib/build.sh
+source infra/lib/build.sh
+MATTING_TAG=$(matting_source_tag)
+[[ "$MATTING_TAG" =~ ^[0-9a-f]{7,40}$ ]] || { echo "ERROR: cannot name the matting images' source commit (got '$MATTING_TAG')" >&2; exit 1; }
+# The images a normal deploy needs: the preview reuses the live CPU matting service, so it never needs that image.
+deploy_images() { if [ "${CATALOG_PREVIEW:-0}" = 1 ]; then echo worker web matting-gpu; else echo worker web matting-gpu matting; fi; }
+if [ "$BUILD_COMMAND_ONLY" = 1 ]; then
+  # shellcheck disable=SC2046
+  build_plan "$AR" "$TAG" "$MATTING_TAG" $(deploy_images) || exit 1
+  if [ "$BUILD_NEEDED" = 1 ]; then build_command; echo; else echo "no build needed: the images for $TAG (matting $MATTING_TAG) exist"; fi
+  exit 0
+fi
 WEB_SERVICE=catalog-web
 WORKER_SERVICE=catalog-worker
 QUEUE=catalog
@@ -334,37 +361,29 @@ secret_manifest_check web "$WEB_SECRETS" || exit 1
 for MOUNTS in "$WORKER_SECRETS" "$JOB_SECRETS" "$SECRETS"; do secret_manifest_check worker "$MOUNTS" || exit 1; done
 
 # --- 3. Build (after every refusal above, so a shape that does not fit never pays for a build) ---
-echo "==> build $TAG"
+deploy_step build
+echo "==> build $TAG (matting images $MATTING_TAG)"
 if [ "${SKIP_BUILD:-0}" != 1 ]; then
   # The preview builds the GPU image too (spec 17 3.2.5: its GPU candidate); the CPU matting service is reused.
-  IMAGES=(worker web matting-gpu)
-  if [ "${CATALOG_PREVIEW:-0}" != 1 ]; then IMAGES+=(matting); fi
+  # shellcheck disable=SC2207
+  IMAGES=($(deploy_images))
   # A measure run deploys only catalog-upscale, the matting image.
   if [ "$MEASURE_ONLY" = 1 ]; then IMAGES=(matting); fi
-  BUILD_NEEDED=0
-  for image in "${IMAGES[@]}"; do
-    if IMAGE_CHECK=$(gcloud artifacts docker images describe "$AR/$image:$TAG" 2>&1); then
-      :
-    elif grep -qiE 'NOT_FOUND|not found|does not exist' <<<"$IMAGE_CHECK"; then
-      BUILD_NEEDED=1
-      # infra/cloudbuild-preview.yaml builds only worker and web; the full build makes the GPU image as well.
-      if [ "$image" = matting-gpu ]; then BUILD_CONFIG=cloudbuild.yaml; fi
-    else
-      printf '%s\n' "$IMAGE_CHECK" >&2
-      echo "ERROR: cannot check existing images; stopping before a paid build" >&2
-      exit 1
-    fi
-  done
+  # M6-F2-R7 (M6-S5): worker and web only (infra/cloudbuild-preview.yaml, about 3 minutes) unless a matting image of
+  # this source is missing (cloudbuild.yaml, all four, about 17 minutes).
+  build_plan "$AR" "$TAG" "$MATTING_TAG" "${IMAGES[@]}" || exit 1
   if [ "$BUILD_NEEDED" = 1 ]; then
-    gcloud builds submit --config "$BUILD_CONFIG" --substitutions="_AR=$AR,_TAG=$TAG" .
+    echo "==> build: $(build_command)"
+    gcloud builds submit --config "$BUILD_CONFIG" --substitutions="$BUILD_SUBSTITUTIONS" .
   else
-    echo "==> build: SKIP (images for $TAG already exist)"
+    echo "==> build: SKIP (images for $TAG and matting $MATTING_TAG already exist)"
   fi
 else
-  echo "SKIP_BUILD=1: reusing worker, web, matting and matting-gpu images tagged $TAG"
+  echo "SKIP_BUILD=1: reusing worker and web images tagged $TAG and matting images tagged $MATTING_TAG"
 fi
 
 # --- 4. Migrations -------------------------------------------------------------------
+deploy_step migrate
 echo "==> migrate"
 if [ "$MEASURE_ONLY" = 1 ]; then
   echo "==> migrate: SKIP (UPSCALE_MEASURE=1 changes only catalog-upscale)"
@@ -395,11 +414,12 @@ fi
 # that does not exist. The slots of existing queues change only once the new worker is live (section 6).
 # shellcheck source=lib/queues.sh
 source infra/lib/queues.sh
+deploy_step queues
 if [ "$MEASURE_ONLY" = 1 ]; then echo "==> queues: SKIP (UPSCALE_MEASURE=1 changes only catalog-upscale)"; else
   queues_create_missing
 fi
 
-# --- 6. Services, one at a time behind the deploy gate (spec 17 3.2) ---------------------
+# --- 6. Services behind the deploy gate (spec 17 3.2; the matting services together, M6-S5) ---------
 # Each service in the registry (infra/lib/services.sh) goes up as a no-traffic candidate, its probe runs against the
 # candidate's tag URL, and only a passing candidate takes traffic. A failure stops here: that service keeps its
 # live revision and later services are not touched; services this run already moved are listed with their rollback
@@ -415,9 +435,33 @@ source infra/lib/gate.sh
 MATTING_URL=""; MATTING_GPU_URL=""; MATTING_PROBE_URL=""; MATTING_GPU_PROBE_URL=""; UPSCALE_SERVICE_URL=""; UPSCALE_GPU_SERVICE_URL=""
 MATTING_REVISION=""
 SHIFTED=()
+# M6-F2-R7 (M6-S5): the cut-out and enlargement services (PARALLEL_SERVICES) first, candidates and probes at once; a
+# failure there moves no traffic and stops before the web and the worker. A measure run keeps the one-at-a-time loop
+# (it stops after catalog-upscale and never reads the others).
+GROUP=()
+if [ "$MEASURE_ONLY" != 1 ]; then GROUP=("${PARALLEL_SERVICES[@]}"); fi
+if [ ${#GROUP[@]} -gt 0 ]; then
+  deploy_step "${GROUP[*]}"
+  if ! gate_group "${GROUP[@]}"; then
+    echo "ERROR: deploy stopped at ${GROUP[*]}; catalog-web and catalog-worker were not changed" >&2
+    if [ ${#GATE_GROUP_SHIFTED[@]} -gt 0 ]; then
+      echo "Already live from this run (each passed its own probe); to undo one:" >&2
+      for S in "${GATE_GROUP_SHIFTED[@]}"; do echo "  bash infra/deploy.sh --rollback $S" >&2; done
+    fi
+    exit 1
+  fi
+fi
+in_group() { local s; for s in "${GROUP[@]}"; do [ "$s" = "$1" ] && return 0; done; return 1; }
 for SERVICE in "${SERVICES[@]}"; do
   GATE_STATUS=0
-  deploy_service "$SERVICE" || GATE_STATUS=$?
+  if in_group "$SERVICE"; then
+    gate_group_load "$SERVICE"
+  else
+    deploy_step "$SERVICE"
+    # M6-F2-R11 (M6-S5): a lower worker max or fewer queue slots wait for the stack to be idle (at most SHAPE_LOWER_WAIT_S).
+    if [ "$SERVICE" = catalog-worker ]; then queues_lower_wait; fi
+    deploy_service "$SERVICE" || GATE_STATUS=$?
+  fi
   if [ "$SERVICE" = catalog-matting-gpu ] && [ "$GATE_STATUS" = 75 ]; then
     echo "WARN: GPU quota refused; worker will use CPU. Request NVIDIA L4 (no zonal redundancy) quota in $GPU_REGION for project $PROJECT at https://console.cloud.google.com/iam-admin/quotas?project=$PROJECT" >&2
   elif [ "$SERVICE" = catalog-upscale-gpu ] && [ "$GATE_STATUS" = 75 ]; then
@@ -504,8 +548,10 @@ for SERVICE in "${SERVICES[@]}"; do
       ;;
   esac
 done
+if [ -n "$GATE_GROUP_DIR" ]; then rm -rf "$GATE_GROUP_DIR"; fi
 
 # --- Web access: IAP and CORS --------------------------------------------------------
+deploy_step "IAP and CORS"
 
 IAP_ENABLED=$(gcv run services describe "$WEB_SERVICE" --region="$REGION" \
   --format='value(metadata.annotations."run.googleapis.com/iap-enabled")')
@@ -580,6 +626,7 @@ fi
 # --- 8. Jobs -------------------------------------------------------------------------
 # 07: the tier 3 live QA job. Deployed (check-then-create/update) but never executed here; run it
 # with "bash infra/catalog-qa-check.sh run" (sets LIVE_SMOKE=1 for that execution only).
+deploy_step jobs
 echo "==> jobs"
 if [ "${CATALOG_PREVIEW:-0}" != 1 ]; then
   QA_JOB_IMAGE="$AR/worker:$TAG" QA_JOB_ENV="$(job_env)" QA_JOB_SECRETS="$JOB_SECRETS" \
@@ -624,6 +671,7 @@ echo "UPSCALE_GPU_URL=${UPSCALE_GPU_SERVICE_URL:-not configured}; new batches en
 # create). The services are already live here, so a monitoring failure only warns and never fails
 # the deploy; re-run "bash infra/monitoring.sh" on its own after fixing the cause. The preview stack
 # shares the prod alerts (they match every catalog-* service), so it skips this step.
+deploy_step monitoring
 echo "==> monitoring"
 if [ "${CATALOG_PREVIEW:-0}" = 1 ]; then
   echo "==> monitoring: SKIP (preview uses the prod alerts)"
@@ -632,3 +680,6 @@ elif bash infra/monitoring.sh; then
 else
   echo "WARN: infra/monitoring.sh failed; the deploy itself succeeded. Re-run bash infra/monitoring.sh after fixing the cause." >&2
 fi
+
+# --- 11. The deploy report (M6-F2: minutes per step; F2 acceptance test 3 ends at DEPLOY_OK) -------------------------
+deploy_report "$TAG"

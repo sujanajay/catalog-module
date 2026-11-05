@@ -24,9 +24,12 @@
 # SVC_MAX when it differs (gcloud run services update --max: no new revision, traffic unchanged). A candidate that
 # does not take traffic (SVC_SHIFT=0: measure rungs, the preview GPU) and a reused service never change it.
 #
+# M6-F2-R7 (M6-S5): steps 1 and 2 are gate_prepare, step 3 gate_probe, step 4 gate_promote; gate_group runs them for
+# several services with the candidates and the probes at once (below). A service whose image digest, env and flags
+# match its live revision is SKIP and never probed.
 # After a call: GATE_URL (the service URL), GATE_TAG_URL (the candidate URL, or the service URL on SKIP or when
 # reused), GATE_REVISION (the revision the gate deployed or found live), GATE_PREVIOUS (the revision that served
-# before), GATE_CHANGED (1 when a new revision was deployed).
+# before), GATE_CHANGED (1 when a new revision was deployed), GATE_NEEDS_SHIFT (1 when a probed candidate takes traffic).
 # Return codes: 0 passed, SKIP or reused; 1 failed; 75 quota refused on first creation of a SVC_QUOTA_OPTIONAL
 # service (the caller warns and continues without it).
 #
@@ -137,14 +140,27 @@ gate_matches_live() {
   ' "$digest" "$env" <<<"$revision_json"
 }
 
+# deploy_service <name>: the whole gate for one service: gate_prepare (SKIP, reuse or the no-traffic candidate), then
+# gate_probe on the candidate's tag URL, then gate_promote (the traffic shift). M6-F2-R7 (M6-S5): gate_group runs the
+# same three steps for several services, the first two at once.
 deploy_service() {
-  local name=$1 fn exists=0 service_json previous fingerprint env deploy_out status started tag describe_err
+  gate_prepare "$1" || return $?
+  [ "$GATE_PROBE_NEEDED" = 1 ] || return 0
+  gate_probe || return $?
+  gate_promote
+}
+
+# gate_prepare <name>: calls the registry function, then SKIP, reuse or the candidate deploy (steps 1 and 2 of the header).
+# Sets GATE_PROBE_NEEDED=1 only when a candidate was deployed and still needs its probe.
+gate_prepare() {
+  local name=$1 fn exists=0 service_json previous fingerprint env deploy_out tag describe_err
   local -a args
   fn=service_${name//-/_}
   declare -F "$fn" >/dev/null || { echo "ERROR: $name is not in the service registry (infra/lib/services.sh)" >&2; return 1; }
   SVC_TAG=""; SVC_MAX=""
   "$fn"
   GATE_URL=""; GATE_TAG_URL=""; GATE_REVISION=""; GATE_PREVIOUS=""; GATE_CHANGED=0
+  GATE_PROBE_NEEDED=0; GATE_NEEDS_SHIFT=0; GATE_PREVIOUS_MEASURE=0
   tag=${SVC_TAG:-$CANDIDATE_TAG}
   if [ "$SVC_DEPLOY" = skip ]; then
     echo "==> $SVC_NAME: not deployed (${SVC_SKIP_REASON:-not used by this deploy})"
@@ -178,16 +194,16 @@ deploy_service() {
 
   fingerprint=$(gate_fingerprint)
   env="$SVC_ENV,DEPLOY_ARGS_SHA=$fingerprint"
-  local previous_measure=0
   if gate_measure_tagged "$previous" <<<"$service_json"; then
-    previous_measure=1
+    GATE_PREVIOUS_MEASURE=1
     echo "==> $SVC_NAME: the live revision $previous is a measure rung; deploying and probing, never SKIP"
   fi
-  if [ -n "$previous" ] && [ "$previous_measure" = 0 ] && [ "${GATE_FORCE:-0}" != 1 ] && gate_matches_live "$previous" "$env"; then
+  if [ -n "$previous" ] && [ "$GATE_PREVIOUS_MEASURE" = 0 ] && [ "${GATE_FORCE:-0}" != 1 ] && gate_matches_live "$previous" "$env"; then
     GATE_URL=$(gate_json 'j?.status?.url' <<<"$service_json")
     GATE_TAG_URL=$GATE_URL; GATE_REVISION=$previous
     echo "==> $SVC_NAME: SKIP (live revision $previous already runs this image and env)"
-    gate_service_max "$service_json" || return 1
+    # A no-shift candidate (the preview GPU) that finds the live revision unchanged never sets the live service max.
+    if [ "$SVC_SHIFT" = 1 ]; then gate_service_max "$service_json" || return 1; fi
     return 0
   fi
 
@@ -218,35 +234,51 @@ deploy_service() {
     gate_fail "no traffic entry tagged $tag after the deploy"
     return 1
   fi
+  GATE_PROBE_NEEDED=1
+}
 
+# gate_probe: step 3, the probe of the candidate gate_prepare deployed (SVC_* and GATE_* as it left them). On a pass
+# sets GATE_NEEDS_SHIFT=1 when the registry moves traffic (SVC_SHIFT=1).
+gate_probe() {
+  local status started
   echo "==> $SVC_NAME: probe $GATE_REVISION at $GATE_TAG_URL (at most ${SVC_PROBE_TIMEOUT} s)"
   started=$SECONDS
   status=0
   # The probe's output streams as it runs (the worker's smoke takes minutes) and stays above the verdict.
   # pipefail (restored on return by `local -`) so the probe's exit status, not sed's, decides.
   local -; set -o pipefail
-  timeout --kill-after=10 "$SVC_PROBE_TIMEOUT" "${SVC_PROBE[@]}" "$GATE_TAG_URL" 2>&1 | sed 's/^/    probe | /' || status=${PIPESTATUS[0]}
+  # GATE_SERVICE names the service to the probe (the matting probes run as their own job, catalog-check-<service>,
+  # so probes that run at once never share a job).
+  GATE_SERVICE="$SVC_NAME" timeout --kill-after=10 "$SVC_PROBE_TIMEOUT" "${SVC_PROBE[@]}" "$GATE_TAG_URL" 2>&1 | sed 's/^/    probe | /' || status=${PIPESTATUS[0]}
   if [ "$status" != 0 ]; then
     if [ "$status" = 124 ] || [ "$status" = 137 ]; then
       echo "ERROR: $SVC_NAME: probe of $GATE_REVISION timed out after ${SVC_PROBE_TIMEOUT} s; traffic was not changed" >&2
     else
       echo "ERROR: $SVC_NAME: probe of $GATE_REVISION failed (exit $status) after $((SECONDS - started)) s; traffic was not changed" >&2
     fi
-    gate_rollback_line "$SVC_NAME" "$previous" "$SVC_REGION"
+    gate_rollback_line "$SVC_NAME" "$GATE_PREVIOUS" "$SVC_REGION"
     return 1
   fi
-
+  echo "==> $SVC_NAME: probe passed after $((SECONDS - started)) s"
   if [ "$SVC_SHIFT" != 1 ]; then
     echo "==> $SVC_NAME: candidate ($GATE_REVISION) passed; traffic not shifted"
     return 0
   fi
+  GATE_NEEDS_SHIFT=1
+}
+
+# gate_promote: step 4, the traffic shift to exactly the probed revision. Nothing when gate_probe left
+# GATE_NEEDS_SHIFT=0 (SKIP, reuse, a no-shift candidate).
+gate_promote() {
+  local service_json
+  [ "$GATE_NEEDS_SHIFT" = 1 ] || return 0
   # The revision serving now is what deploy.sh --rollback returns to, never a candidate that failed its probe, and
   # never a measure rung (it served only because the service was new).
-  if [ "$previous_measure" = 1 ]; then
-    echo "==> $SVC_NAME: $previous is a measure rung; not tagged $PREVIOUS_TAG"
-  elif [ -n "$previous" ] && [ "$previous" != "$GATE_REVISION" ]; then
-    gate_gcloud run services update-traffic "$SVC_NAME" --region="$SVC_REGION" --update-tags="$PREVIOUS_TAG=$previous" --quiet >/dev/null || {
-      gate_fail "could not tag $previous as $PREVIOUS_TAG; traffic was not changed"
+  if [ "$GATE_PREVIOUS_MEASURE" = 1 ]; then
+    echo "==> $SVC_NAME: $GATE_PREVIOUS is a measure rung; not tagged $PREVIOUS_TAG"
+  elif [ -n "$GATE_PREVIOUS" ] && [ "$GATE_PREVIOUS" != "$GATE_REVISION" ]; then
+    gate_gcloud run services update-traffic "$SVC_NAME" --region="$SVC_REGION" --update-tags="$PREVIOUS_TAG=$GATE_PREVIOUS" --quiet >/dev/null || {
+      gate_fail "could not tag $GATE_PREVIOUS as $PREVIOUS_TAG; traffic was not changed"
       return 1
     }
   fi
@@ -266,6 +298,93 @@ deploy_service() {
   fi
   gate_service_max "$service_json" || return 1
   return 0
+}
+
+# ---- M6-F2-R7 (M6-S5): several services through the gate at once ----
+# gate_group <name>...: the same gate as deploy_service for each service, in three rounds:
+#   1. gate_prepare of every service at once (SKIP checks and no-traffic candidate deploys), then wait for all, so
+#      every candidate is ready before any probe starts (the probe job reads catalog-matting and refuses a service
+#      whose newest revision is not ready yet);
+#   2. gate_probe of every candidate at once, each under its own timeout;
+#   3. only when every service passed (or was SKIP, reused, not deployed, or a soft quota refusal, status 75): the
+#      traffic shifts, one at a time in the order given.
+# One failure in round 1 or 2: no service of the group moves traffic (each keeps its live revision; its candidate stays
+# without traffic), every failure is printed with its rollback line, and it returns 1. A shift that fails in round 3
+# returns 1 with the services already shifted in GATE_GROUP_SHIFTED. Each service's output is printed in the order
+# given once its round ends, never interleaved. Afterwards gate_group_load <name> restores what deploy_service would have
+# left: SVC_* (the registry function), GATE_* and GATE_STATUS. Only services that read nothing from each other go in
+# one group (PARALLEL_SERVICES in infra/lib/services.sh).
+GATE_GROUP_DIR=""
+GATE_GROUP_SHIFTED=()
+
+# The GATE_* values of the current service as shell assignments (round 1 and 2 run in subshells).
+gate_state() {
+  local v
+  for v in GATE_URL GATE_TAG_URL GATE_REVISION GATE_PREVIOUS GATE_CHANGED GATE_PROBE_NEEDED GATE_NEEDS_SHIFT GATE_PREVIOUS_MEASURE GATE_STATUS; do
+    printf '%s=%q\n' "$v" "${!v}"
+  done
+}
+
+gate_group_load() {
+  local fn=service_${1//-/_}
+  SVC_TAG=""; SVC_MAX=""
+  "$fn"
+  # shellcheck source=/dev/null
+  source "$GATE_GROUP_DIR/$1.state"
+}
+
+# gate_group_round <prepare|probe> <name>...: runs that step for every service at once, prints each one's output in
+# order, and returns 1 when any failed (75, the soft quota refusal, is not a failure).
+gate_group_round() {
+  local step=$1 name i status failed=0
+  shift
+  local -a pids=()
+  for name in "$@"; do
+    (
+      GATE_STATUS=0
+      if [ "$step" = prepare ]; then
+        gate_prepare "$name" || GATE_STATUS=$?
+      else
+        gate_group_load "$name"
+        if [ "$GATE_PROBE_NEEDED" = 1 ]; then gate_probe || GATE_STATUS=$?; fi
+      fi
+      gate_state > "$GATE_GROUP_DIR/$name.state.new"
+      mv "$GATE_GROUP_DIR/$name.state.new" "$GATE_GROUP_DIR/$name.state"
+      exit "$GATE_STATUS"
+    ) >"$GATE_GROUP_DIR/$name.$step.out" 2>"$GATE_GROUP_DIR/$name.$step.err" &
+    pids+=($!)
+  done
+  i=0
+  for name in "$@"; do
+    status=0
+    wait "${pids[$i]}" || status=$?
+    i=$((i + 1))
+    cat "$GATE_GROUP_DIR/$name.$step.out"
+    cat "$GATE_GROUP_DIR/$name.$step.err" >&2
+    if [ ! -f "$GATE_GROUP_DIR/$name.state" ]; then
+      echo "ERROR: $name: the $step step ended without a result (exit $status)" >&2
+      failed=1
+    elif [ "$status" != 0 ] && [ "$status" != 75 ]; then
+      failed=1
+    fi
+  done
+  return "$failed"
+}
+
+gate_group() {
+  local name
+  GATE_GROUP_SHIFTED=()
+  GATE_GROUP_DIR=$(mktemp -d)
+  echo "==> $*: candidates and probes at once; traffic moves only when every one passed"
+  if ! gate_group_round prepare "$@" || ! gate_group_round probe "$@"; then
+    echo "ERROR: a candidate or probe of $* failed; none of them moved traffic (each keeps its live revision)" >&2
+    return 1
+  fi
+  for name in "$@"; do
+    gate_group_load "$name"
+    gate_promote || return 1
+    if [ "$GATE_NEEDS_SHIFT" = 1 ]; then GATE_GROUP_SHIFTED+=("$name"); fi
+  done
 }
 
 # deploy.sh --rollback <name> [revision]: all traffic back to <revision>, by default the revision the gate tagged

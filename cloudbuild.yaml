@@ -1,5 +1,8 @@
 # Builds the images from the repo root. Invoked by infra/deploy.sh:
-#   gcloud builds submit --config cloudbuild.yaml --substitutions=_AR=...,_TAG=... .
+#   gcloud builds submit --config cloudbuild.yaml --substitutions=_AR=...,_TAG=...,_MATTING_TAG=... .
+# M6-F2-R7 (M6-S5): the matting images carry _MATTING_TAG, the last commit that changed services/matting or this file
+# (infra/lib/build.sh), so a commit that leaves them alone reuses them. When they exist, deploy.sh builds only worker
+# and web with infra/cloudbuild-preview.yaml. bash infra/deploy.sh --build-command prints the command to run.
 steps:
   - id: worker
     name: gcr.io/cloud-builders/docker
@@ -14,18 +17,18 @@ steps:
   - id: matting
     name: gcr.io/cloud-builders/docker
     env: ["DOCKER_BUILDKIT=1"]
-    args: ["build", "--target", "cpu", "--build-arg", "GIT_SHA=${_TAG}", "-f", "services/matting/Dockerfile", "-t", "${_AR}/matting:${_TAG}", "services/matting"]
+    args: ["build", "--target", "cpu", "--build-arg", "GIT_SHA=${_MATTING_TAG}", "-f", "services/matting/Dockerfile", "-t", "${_AR}/matting:${_MATTING_TAG}", "services/matting"]
     waitFor: ["-"]
   - id: matting-gpu
     name: gcr.io/cloud-builders/docker
     env: ["DOCKER_BUILDKIT=1"]
-    args: ["build", "--target", "gpu", "--build-arg", "GIT_SHA=${_TAG}", "-f", "services/matting/Dockerfile", "-t", "${_AR}/matting-gpu:${_TAG}", "services/matting"]
+    args: ["build", "--target", "gpu", "--build-arg", "GIT_SHA=${_MATTING_TAG}", "-f", "services/matting/Dockerfile", "-t", "${_AR}/matting-gpu:${_MATTING_TAG}", "services/matting"]
     waitFor: ["matting"]
 images:
   - "${_AR}/worker:${_TAG}"
   - "${_AR}/web:${_TAG}"
-  - "${_AR}/matting:${_TAG}"
-  - "${_AR}/matting-gpu:${_TAG}"
+  - "${_AR}/matting:${_MATTING_TAG}"
+  - "${_AR}/matting-gpu:${_MATTING_TAG}"
 options:
   machineType: E2_HIGHCPU_8
   logging: CLOUD_LOGGING_ONLY

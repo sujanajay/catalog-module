@@ -89,3 +89,65 @@ queues_apply_shape() {
     echo "==> tasks queue $name: max-concurrent-dispatches $slots"
   done
 }
+
+# M6-F2-R11 (M6-S5): a deploy never lowers the worker's max instances or a queue's slots under batches in flight. Run
+# right before the worker gate (which applies the worker's max at its traffic shift; queues_apply_shape follows it):
+# when the new shape is lower than the live one somewhere, it waits until no queue of the stack holds a task (no batch
+# in flight), checking every SHAPE_LOWER_POLL_S seconds, for at most SHAPE_LOWER_WAIT_S (default 1800, 30 minutes);
+# then it applies the lower shape with a warning. Equal or higher shapes never wait. A queue that cannot be read counts
+# as busy, so a gcloud hiccup only makes the deploy wait. Needs WORKER_SERVICE and WORKER_MAX_INSTANCES (deploy.sh).
+SHAPE_LOWER_WAIT_S=${SHAPE_LOWER_WAIT_S:-1800}
+SHAPE_LOWER_POLL_S=${SHAPE_LOWER_POLL_S:-60}
+
+# What the new shape lowers, one "<what> <live> -> <new>" line each; nothing when nothing is lowered.
+queues_lowering() {
+  local live line name slots kind live_slots worker_live
+  local -a plan
+  queues_read_existing
+  live=$(gcv tasks queues list --location="$REGION" --format='value(name.basename(),rateLimits.maxConcurrentDispatches)') || live=""
+  mapfile -t plan < <(queues_shape)
+  for line in "${plan[@]}"; do
+    read -r name slots kind <<<"$line"
+    live_slots=$(awk -v q="$name" '$1 == q { print $2 }' <<<"$live")
+    if [[ "$live_slots" =~ ^[0-9]+$ ]] && [ "$slots" -lt "$live_slots" ]; then echo "tasks queue $name slots $live_slots -> $slots"; fi
+  done
+  worker_live=$(gcv run services describe "$WORKER_SERVICE" --region="$REGION" \
+    --format='value(metadata.annotations."run.googleapis.com/maxScale")' 2>/dev/null) || worker_live=""
+  if [[ "$worker_live" =~ ^[0-9]+$ ]] && [ "$WORKER_MAX_INSTANCES" -lt "$worker_live" ]; then
+    echo "$WORKER_SERVICE max instances $worker_live -> $WORKER_MAX_INSTANCES"
+  fi
+}
+
+# Prints the first queue of the stack that holds a task and returns 0; returns 1 when every queue is empty.
+queues_busy() {
+  local line name slots kind out
+  local -a plan
+  mapfile -t plan < <(queues_shape)
+  for line in "${plan[@]}"; do
+    read -r name slots kind <<<"$line"
+    queue_exists "$name" || continue
+    out=$(gcv tasks list --queue="$name" --location="$REGION" --limit=1 --format='value(name)') || { echo "$name (unreadable)"; return 0; }
+    if [ -n "$out" ]; then echo "$name"; return 0; fi
+  done
+  return 1
+}
+
+queues_lower_wait() {
+  local lowering busy waited=0
+  lowering=$(queues_lowering)
+  [ -n "$lowering" ] || return 0
+  # queues_lowering ran in a subshell; queues_busy needs the queue names here.
+  queues_read_existing
+  echo "==> shape: this deploy lowers:"
+  sed 's/^/    /' <<<"$lowering"
+  while busy=$(queues_busy); do
+    if [ "$waited" -ge "$SHAPE_LOWER_WAIT_S" ]; then
+      echo "WARN: a batch is still in flight ($busy holds tasks) after ${SHAPE_LOWER_WAIT_S} s; applying the lower shape now (SHAPE_LOWER_WAIT_S)" >&2
+      return 0
+    fi
+    echo "==> shape: a batch is in flight ($busy holds tasks); waiting for the stack to be idle before lowering (${waited} of ${SHAPE_LOWER_WAIT_S} s)"
+    sleep "$SHAPE_LOWER_POLL_S"
+    waited=$((waited + SHAPE_LOWER_POLL_S))
+  done
+  echo "==> shape: no batch in flight; applying the lower shape"
+}

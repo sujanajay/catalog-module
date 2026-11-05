@@ -70,7 +70,7 @@ test('every service in the registry and every job script labels with its own nam
   }
   for (const f of ['catalog-eval.sh', 'catalog-output-evals.sh', 'catalog-qa-check.sh', 'catalog-scale-jobs.sh', 'deploy.sh']) assert.match(read(f), /catalog_labels_check /, f);
   assert.match(read('catalog-test-jobs.sh'), /labels:\{app:'catalog',component:name,env:/);
-  assert.match(read('check-matting.sh'), /'--labels': \{ app: 'catalog', component: 'catalog-check-matting', env: 'test' \}/);
+  assert.match(read('check-matting.sh'), /'--labels': \{ app: 'catalog', component: process\.env\.PROBE_JOB, env: 'test' \}/);
 });
 
 let failed = 0;
