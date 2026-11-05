@@ -51,6 +51,7 @@ const TABLES = [
   "catalog_change_types", // 0019_change_types.sql (M10-S1a)
   // 0020_batch_outcomes_incidents.sql (M6-S6)
   "catalog_batch_outcomes", "catalog_incidents", "catalog_batch_touches", "catalog_revisions",
+  "catalog_upscaler_health", // 0021_upscaler_health.sql (M1-S4b)
 ];
 
 const INDEXES = [

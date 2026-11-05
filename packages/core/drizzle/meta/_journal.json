@@ -148,6 +148,13 @@
       "when": 1793804551507,
       "tag": "0020_batch_outcomes_incidents",
       "breakpoints": true
+    },
+    {
+      "idx": 21,
+      "version": "7",
+      "when": 1793854110816,
+      "tag": "0021_upscaler_health",
+      "breakpoints": true
     }
   ]
 }

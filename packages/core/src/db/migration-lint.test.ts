@@ -114,6 +114,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS "t_k_uq" ON "t" USING btree ("k");`;
     expect(tags.indexOf("0018_overflow_daily_cap")).toBe(tags.indexOf("0017_channel_rules") + 1);
     expect(tags.indexOf("0019_change_types")).toBe(tags.indexOf("0018_overflow_daily_cap") + 1);
     expect(tags.indexOf("0020_batch_outcomes_incidents")).toBe(tags.indexOf("0019_change_types") + 1);
+    expect(tags.indexOf("0021_upscaler_health")).toBe(tags.indexOf("0020_batch_outcomes_incidents") + 1);
   });
 
   it("the CI command fails on a journal out of run order", () => {
