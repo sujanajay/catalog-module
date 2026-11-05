@@ -13,6 +13,8 @@ needs a browser sign-in, which only the owner can complete.
 - At the start of every session and after any reboot, check the login before anything touches GCP:
   `gcloud auth print-access-token > /dev/null && echo ok`. Never print the token itself.
 - If it fails, the manager launches `gcloud auth login` and the owner completes it in the browser.
+  The login must open in Chrome Profile 34 through the `BROWSER` variable; the exact command is in
+  `agent-operations.md`.
   No subagent and no script tries to log in on its own.
 - gcloud is not on PATH on this machine. In every Git Bash call prepend the SDK and set the project
   for that call only:
