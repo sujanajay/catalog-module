@@ -29,6 +29,8 @@ reports named per item. Each item ends with the check or guard that now covers i
 - Rule: run owner-approved production steps (deploys, shared-resource changes) from the session where the owner
   approved them, or have the owner run them. A subagent that is refused stops and reports; it never works around
   the refusal. Evidence: `.runs/2026-10-30-18-cpu-scale.md`, `.runs/2026-10-30-18-deploy.md`.
+- Update (R1, 2026-11-04): a subagent's merge or deploy goes through when its brief quotes the owner's typed
+  approval word for word. Details: `docs/solutions/agent-operations.md`.
 
 ## 4. A gate on one x4 call against one x2 call is too noisy
 - The deploy gate compared a single x4 p95 with a single x2 p95 (`UPSCALE_X4_TIME_RATIO` 1.3). One fast x2 call

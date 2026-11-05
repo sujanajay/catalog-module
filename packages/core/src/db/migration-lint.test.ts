@@ -119,6 +119,22 @@ CREATE UNIQUE INDEX IF NOT EXISTS "t_k_uq" ON "t" USING btree ("k");`;
     expect(tags.indexOf("0023_cost_reconciliation")).toBe(tags.indexOf("0022_upscaler_health") + 1);
   });
 
+  // R1 merge trains (2026-11-04): parallel PRs claimed the same migration number and were renumbered at merge. A
+  // renumber that keeps the branch's snapshot leaves two snapshots with the same parent, and the next drizzle-kit
+  // generate diffs against the wrong schema. Steps: docs/solutions/migration-renumbering.md.
+  it("every journal entry has a snapshot whose prevId is the previous entry's snapshot id (one unbroken chain)", () => {
+    const folder = resolveMigrationsFolder();
+    const journal = JSON.parse(readFileSync(path.join(folder, "meta", "_journal.json"), "utf8")) as { entries: JournalEntry[] };
+    const entries = [...journal.entries].sort((a, b) => a.idx - b.idx);
+    let prevId = "00000000-0000-0000-0000-000000000000";
+    for (const e of entries) {
+      const name = `${e.tag.slice(0, 4)}_snapshot.json`;
+      const snapshot = JSON.parse(readFileSync(path.join(folder, "meta", name), "utf8")) as { id: string; prevId: string };
+      expect({ snapshot: name, prevId: snapshot.prevId }).toEqual({ snapshot: name, prevId });
+      prevId = snapshot.id;
+    }
+  });
+
   it("the CI command fails on a journal out of run order", () => {
     const script = path.resolve(import.meta.dirname, "../../scripts/check-migrations.mjs");
     const dir = mkdtempSync(path.join(tmpdir(), "catalog-migration-journal-"));
