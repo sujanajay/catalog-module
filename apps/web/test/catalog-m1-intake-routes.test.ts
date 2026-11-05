@@ -8,7 +8,7 @@ import { brandMaster, catalogBatches, catalogUploads } from "@catalog/core/db/sc
 import { createTestDb } from "@catalog/core/db/testing";
 import type { SheetsLike } from "@catalog/core/catalog/ingest/types";
 import type { SupabaseStorageLike } from "@catalog/core/catalog/ingest/supabase-folder";
-import { SUPABASE_OFF, SUPABASE_PAUSED, SUPABASE_STILL_READING, SupabaseHttpError } from "@catalog/core/catalog/ingest/supabase-folder";
+import { SUPABASE_OFF, SUPABASE_PAUSED, SUPABASE_PAUSED_CONTINUE, SUPABASE_STILL_READING, SupabaseHttpError } from "@catalog/core/catalog/ingest/supabase-folder";
 import { POST as create } from "../app/api/catalog/batches/route";
 import { POST as addLinks } from "../app/api/catalog/batches/[id]/links/route";
 import { PATCH as patchDetected } from "../app/api/catalog/batches/[id]/detected/route";
@@ -328,7 +328,7 @@ ${FOLDER}/noext`);
       failPrefix = "big/B007";
       const r = await addLinks(request("POST", { text: BIG }), ctx(id));
       const answer = await r.json() as PasteResult;
-      expect(answer).toMatchObject({ access: "no_access", summary: SUPABASE_PAUSED });
+      expect(answer).toMatchObject({ access: "paused", pill: "Paused", summary: SUPABASE_PAUSED, folder: BIG });
       const [failed] = (await uploadsOf(id)).filter((u) => u.kind === "url_list");
       expect(failed).toMatchObject({ status: "failed", error: SUPABASE_PAUSED });
       const kept = (failed!.detected as { supabaseFolder: { listing: { files: unknown[]; pending: string[] } } }).supabaseFolder.listing;
@@ -345,6 +345,46 @@ ${FOLDER}/noext`);
       expect(new Set(rows[0]!.sourceUrl!.split("\n")).size).toBe(80);
     } finally {
       failPrefix = null;
+      now.mockRestore();
+    }
+  });
+
+  it("review 2 P3-4: a paused folder holds Continue and the page is told it can carry on (Try again)", async () => {
+    const real = Date.now;
+    const start = real();
+    clock = 0;
+    const now = vi.spyOn(Date, "now").mockImplementation(() => start + clock);
+    try {
+      const id = await newBatch();
+      failPrefix = "big/B003";
+      expect(((await (await addLinks(request("POST", { text: BIG }), ctx(id))).json()) as PasteResult).access).toBe("paused");
+      await expect(ingestBatch(id)).rejects.toThrow(SUPABASE_PAUSED_CONTINUE);
+      const sent = (await getBatch(id)).uploads.find((u) => u.kind === "url_list")!;
+      expect(sent).toMatchObject({ status: "failed", error: SUPABASE_PAUSED, detected: { supabaseFolder: { url: BIG, resumable: true } } });
+      expect(JSON.stringify(sent.detected)).not.toContain("listing");
+    } finally {
+      failPrefix = null;
+      now.mockRestore();
+    }
+  });
+
+  it("review 2 P3-3: a plain re-paste never writes a read behind over a finished folder", async () => {
+    const real = Date.now;
+    const start = real();
+    clock = 0;
+    const now = vi.spyOn(Date, "now").mockImplementation(() => start + clock);
+    try {
+      const id = await newBatch();
+      const send = async (body: Record<string, unknown>) => (await addLinks(request("POST", body), ctx(id))).json() as Promise<PasteResult>;
+      const done = await readFoldersToEnd(await send({ text: BIG }), (folder) => send({ text: folder, continue: true }), () => undefined);
+      expect(done[0]).toMatchObject({ access: "ok", pill: "80 photos" });
+      // Pasted again (another tab, a late request): it starts over and gets only part way within one request.
+      const again = await send({ text: BIG });
+      expect(again).toMatchObject({ access: "ok", pill: "80 photos" });
+      const rows = (await uploadsOf(id)).filter((u) => u.kind === "url_list");
+      expect(rows.map((u) => u.status)).toEqual(["uploaded"]);
+      expect(rows[0]!.sourceUrl!.split("\n")).toHaveLength(80);
+    } finally {
       now.mockRestore();
     }
   });

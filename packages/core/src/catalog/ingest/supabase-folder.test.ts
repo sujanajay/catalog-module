@@ -5,7 +5,7 @@ import { DEFAULT_BATCH_OPTIONS } from "../../db/schema";
 import { detectPastedText } from "./detect";
 import { groupItems } from "./group";
 import {
-  isReadCall, listSupabaseFolder, parseSupabaseFolderLink, readSupabaseFolder, SUPABASE_EMPTY, SUPABASE_GLOBAL_CONCURRENCY, SUPABASE_LIST_ATTEMPTS, SUPABASE_LIST_CONCURRENCY, SUPABASE_PAUSED, retryAfterMs, SupabaseHttpError, SUPABASE_MAX_FOLDERS, SUPABASE_SLICE_MS,
+  isReadCall, listSupabaseFolder, parseSupabaseFolderLink, readSupabaseFolder, SUPABASE_CALL_TIMEOUT_MS, SUPABASE_EMPTY, SUPABASE_GLOBAL_CONCURRENCY, SUPABASE_MAX_PAUSES, supabaseFolderFailsMessage, SUPABASE_LIST_ATTEMPTS, SUPABASE_LIST_CONCURRENCY, SUPABASE_PAUSED, retryAfterMs, SupabaseHttpError, SUPABASE_MAX_FOLDERS, SUPABASE_SLICE_MS,
   SUPABASE_OFF, SUPABASE_OTHER_PROJECT, SUPABASE_PRIVATE, SUPABASE_TOO_LARGE, SUPABASE_UNREADABLE, supabaseFolderLinks, supabaseFolderText,
   supabaseStorageClient, type SupabaseListState, type SupabaseStorageLike,
 } from "./supabase-folder";
@@ -289,7 +289,8 @@ describe("Supabase errors and the instance-wide cap (review P2-1)", () => {
   it("a 503 and a dropped connection are retried with backoff, and the listing ends read", async () => {
     const waits: number[] = [];
     const { client, calls } = flaky((prefix, n) => (prefix === "brand/P03" && n === 1 ? new SupabaseHttpError(503, null) : prefix === "brand/P04" && n < 3 ? new TypeError("fetch failed") : null));
-    const listed = await listSupabaseFolder(client, link, { sleep: async (ms) => { waits.push(ms); } });
+    // random 0.5 is the middle of the jitter: the plain backoff.
+    const listed = await listSupabaseFolder(client, link, { sleep: async (ms) => { waits.push(ms); }, random: () => 0.5 });
     if (!listed.done) throw new Error("not done");
     expect(listed.files).toHaveLength(30);
     expect(new Set(listed.files.map((f) => f.path)).size).toBe(30);
@@ -301,13 +302,14 @@ describe("Supabase errors and the instance-wide cap (review P2-1)", () => {
   it("a 429 waits as long as its Retry-After says (capped), and a 404 is not retried", async () => {
     const waits: number[] = [];
     const limited = flaky((prefix, n) => (prefix === "brand/P01" && n === 1 ? new SupabaseHttpError(429, 3000) : prefix === "brand/P02" && n === 1 ? new SupabaseHttpError(429, 60_000) : null));
-    expect((await listSupabaseFolder(limited.client, link, { sleep: async (ms) => { waits.push(ms); } })).done).toBe(true);
+    expect((await listSupabaseFolder(limited.client, link, { sleep: async (ms) => { waits.push(ms); }, random: () => 0 })).done).toBe(true);
     expect(waits.sort((a, b) => a - b)).toEqual([3000, 10_000]);
     expect(retryAfterMs("3")).toBe(3000);
     expect(retryAfterMs(new Date(Date.now() + 5000).toUTCString(), Date.now())).toBeGreaterThan(3000);
     expect(retryAfterMs(null)).toBeNull();
     const missing = flaky((prefix) => (prefix === "brand/P05" ? new SupabaseHttpError(404, null) : null));
-    expect(await readSupabaseFolder(missing.client, LINK, { sleep: async () => undefined })).toMatchObject({ ok: false, error: SUPABASE_PAUSED });
+    // A 404 will not get better: the read fails at once instead of pausing (review 2 P3-2).
+    expect(await readSupabaseFolder(missing.client, LINK, { sleep: async () => undefined })).toEqual({ ok: false, error: SUPABASE_UNREADABLE });
     expect(missing.calls.get("brand/P05")).toBe(1);
   });
 
@@ -363,5 +365,75 @@ describe("Supabase errors and the instance-wide cap (review P2-1)", () => {
     const fakeFetch = (async () => new Response("slow down", { status: 429, headers: { "retry-after": "2" } })) as unknown as typeof fetch;
     const client = supabaseStorageClient(ORIGIN, "test-key", fakeFetch);
     await expect(client.list("softlines", "anta", 0, 1)).rejects.toMatchObject({ status: 429, retryAfterMs: 2000 });
+  });
+});
+
+// Re-review of PR #182 (review 2): retries are jittered, a hung call times out and is retried, a folder that keeps
+// failing ends the read instead of pausing for ever, and an error that asking again cannot fix fails at once.
+describe("bounded, jittered Supabase retries (review 2)", () => {
+  const LINK = `${ORIGIN}/storage/v1/object/public/softlines/brand`;
+  const link = parseSupabaseFolderLink(LINK)!;
+  function folders(fail: (prefix: string, call: number) => Error | null) {
+    const calls = new Map<string, number>();
+    const client: SupabaseStorageLike = {
+      origin: ORIGIN,
+      async isPublic() { return true; },
+      async list(_bucket, prefix, offset) {
+        const n = (calls.get(prefix) ?? 0) + 1;
+        calls.set(prefix, n);
+        const err = fail(prefix, n);
+        if (err) throw err;
+        if (offset) return [];
+        if (prefix === "brand") return Array.from({ length: 10 }, (_, i) => ({ name: `P${i}`, id: null, metadata: null }));
+        return [{ name: "front.jpg", id: `${prefix}/f`, metadata: { size: 9e4 } }];
+      },
+    };
+    return { client, calls };
+  }
+
+  it("calls that fail together come back at different times (jitter), within half to one and a half of the backoff", async () => {
+    const waits: number[] = [];
+    let r = 0;
+    const randoms = [0, 0.99, 0.25, 0.75];
+    const { client } = folders((prefix, n) => (n === 1 && (prefix === "brand/P1" || prefix === "brand/P2") ? new SupabaseHttpError(503, null) : null));
+    await listSupabaseFolder(client, link, { sleep: async (ms) => { waits.push(ms); }, random: () => randoms[r++ % randoms.length]! });
+    expect(waits).toHaveLength(2);
+    expect(new Set(waits).size).toBe(2);
+    for (const ms of waits) { expect(ms).toBeGreaterThanOrEqual(250); expect(ms).toBeLessThan(750); }
+  });
+
+  it("a timed-out call is retried like a dropped connection", async () => {
+    const timeout = () => Object.assign(new Error("The operation was aborted due to timeout"), { name: "TimeoutError" });
+    const { client, calls } = folders((prefix, n) => (prefix === "brand/P3" && n === 1 ? timeout() : null));
+    expect(await readSupabaseFolder(client, LINK, { sleep: async () => undefined })).toMatchObject({ ok: true, photos: 10 });
+    expect(calls.get("brand/P3")).toBe(2);
+  });
+
+  it("the real client gives every call a timeout signal", async () => {
+    const signals: unknown[] = [];
+    const fakeFetch = (async (_url: string, init: RequestInit = {}) => { signals.push(init.signal); return Response.json([]); }) as unknown as typeof fetch;
+    await supabaseStorageClient(ORIGIN, "test-key", fakeFetch).list("softlines", "anta", 0, 1);
+    expect(signals[0]).toBeInstanceOf(AbortSignal);
+    expect(SUPABASE_CALL_TIMEOUT_MS).toBeLessThan(SUPABASE_SLICE_MS);
+  });
+
+  it("a folder that keeps failing pauses at most SUPABASE_MAX_PAUSES times, then the read fails naming it", async () => {
+    const { client } = folders((prefix) => (prefix === "brand/P4" ? new SupabaseHttpError(502, null) : null));
+    let state: SupabaseListState | undefined;
+    const answers: string[] = [];
+    for (let i = 0; i < SUPABASE_MAX_PAUSES + 2; i++) {
+      const read = await readSupabaseFolder(client, LINK, { state, sleep: async () => undefined });
+      if (read.ok) throw new Error("read");
+      answers.push(read.reading ? "reading" : read.error);
+      if (read.reading || !read.state) { if (!read.reading) break; state = read.state; continue; }
+      state = JSON.parse(JSON.stringify(read.state)) as SupabaseListState;
+    }
+    expect(answers).toEqual([...Array(SUPABASE_MAX_PAUSES - 1).fill(SUPABASE_PAUSED), supabaseFolderFailsMessage("brand/P4")]);
+  });
+
+  it("an error asking again cannot fix (a refused call, an unreadable answer) is not retried and fails the read", async () => {
+    const { client, calls } = folders((prefix) => (prefix === "brand/P5" ? new SyntaxError("Unexpected token < in JSON") : null));
+    expect(await readSupabaseFolder(client, LINK, { sleep: async () => undefined })).toEqual({ ok: false, error: SUPABASE_UNREADABLE });
+    expect(calls.get("brand/P5")).toBe(1);
   });
 });

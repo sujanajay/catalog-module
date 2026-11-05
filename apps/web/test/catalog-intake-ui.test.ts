@@ -2,7 +2,7 @@
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
-import { DID_NOT_FINISH, inputRows, InputListView, READING_FOLDER, type ServerInput } from "../components/catalog/InputList";
+import { DID_NOT_FINISH, inputRows, InputListView, READING_FOLDER, TRY_AGAIN, type ServerInput } from "../components/catalog/InputList";
 import type { LocalUpload } from "../components/catalog/Uploader";
 import { LinkFailuresView, type LinkFailureRow } from "../components/catalog/LinkFailures";
 import { canRetryLinks } from "../lib/catalog/copy";
@@ -25,6 +25,21 @@ const render = (rows: ReturnType<typeof inputRows>) => renderToStaticMarkup(crea
 const none = new Set<string>();
 
 describe("input list (spec 14b F3)", () => {
+  it("review 2 P2-1: a paused Supabase folder keeps its sentence and offers Try again, which carries it on", () => {
+    const tryAgain = vi.fn();
+    const paused = server("SUPA", "failed", { kind: "url_list", name: "Supabase folder softlines/vero-moda", relativePath: null, sizeBytes: null, error: "Supabase stopped answering while this folder was being read.", detected: { supabaseFolder: { url: "https://p.supabase.co/storage/v1/object/public/softlines/vero-moda", resumable: true } } });
+    const rows = inputRows([paused], [], none, vi.fn(), tryAgain);
+    expect(rows[0]!.state).toBe("Supabase stopped answering while this folder was being read.");
+    const html = render(rows);
+    expect(html).toContain(`>${TRY_AGAIN}</button>`);
+    expect(html).toContain(">Remove</button>");
+    rows[0]!.tryAgain!();
+    expect(tryAgain).toHaveBeenCalledWith(expect.objectContaining({ id: "SUPA" }));
+    // A failed folder that cannot carry on (private, unreadable) has no Try again.
+    const plain = inputRows([{ ...paused, detected: { supabaseFolder: { url: "x" } } }], [], none, vi.fn(), tryAgain);
+    expect(render(plain)).not.toContain(TRY_AGAIN);
+  });
+
   it("a pending pasted-links row is a Supabase folder still being read, not a cut-off upload (R1 exit finding 1)", () => {
     const rows = inputRows([server("SUPA", "pending", { kind: "url_list", name: "Supabase folder softlines/vero-moda", relativePath: null, sizeBytes: null })], [], none, vi.fn());
     expect(rows[0]!.state).toBe(READING_FOLDER);

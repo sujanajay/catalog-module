@@ -14,6 +14,7 @@ export function pastePlaceholder(supabase: boolean): string {
 function pillOf(r: PasteResult): string {
   if (r.access === "reading") return r.pill ?? "Reading folder";
   if (r.access === "removed") return "Removed";
+  if (r.access === "paused") return r.pill ?? "Paused";
   if (r.access !== "ok") return "No access yet";
   if (r.kind === "url_list") return r.pill ?? `${r.count ?? 0} image links`;
   if (r.pill) return r.pill;

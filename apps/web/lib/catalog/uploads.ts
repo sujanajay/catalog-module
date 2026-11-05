@@ -3,7 +3,7 @@ import { and, eq, gt, inArray, ne, sql } from "drizzle-orm";
 import { catalogBatches, catalogUploads } from "@catalog/core/db/schema";
 import { detectUploadKind } from "@catalog/core/catalog/ingest/detect";
 import { planSignedUploads, mapLimit } from "@catalog/core/catalog/ingest/local-files";
-import { SUPABASE_STILL_READING } from "@catalog/core/catalog/ingest/supabase-folder";
+import { isPausedFolder, SUPABASE_PAUSED_CONTINUE, SUPABASE_STILL_READING } from "@catalog/core/catalog/ingest/supabase-folder";
 import { batchPrefix } from "@catalog/core/catalog/naming";
 import * as storage from "@catalog/core/storage";
 import { enqueueTask } from "@catalog/core/tasks";
@@ -105,6 +105,8 @@ export async function handOffIngest(id: string): Promise<{ answer: { collecting:
   if (!all.length) throw badRequest("Add photos or a links sheet before continuing.");
   // A pending pasted-links row is a Supabase folder still being read over several requests (links.ts).
   if (all.some((u) => u.status === "pending" && u.kind === "url_list")) throw badRequest(SUPABASE_STILL_READING);
+  // A folder whose listing paused part way would start the batch with part of the brand missing (review 2 P3-4).
+  if (all.some(isPausedFolder)) throw badRequest(SUPABASE_PAUSED_CONTINUE);
   if (all.some((u) => u.status === "pending")) throw badRequest("Wait for every file to finish uploading, then continue.");
   for (const upload of all) {
     if ((upload.kind === "google_sheet" || upload.kind === "drive_folder") && upload.status === "uploaded" && !upload.gcsUri) await collectGoogleLink(batch, upload);

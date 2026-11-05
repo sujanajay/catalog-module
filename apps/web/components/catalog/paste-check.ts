@@ -34,6 +34,9 @@ export interface PasteCheckerOptions {
   onSaved(): void;
 }
 
+/** An answer the same paste should be able to send again: a paused Supabase folder, or one removed meanwhile. */
+const sendAgain = (r: PasteResult) => r.kind === "supabase_folder" && (r.access === "paused" || r.access === "removed");
+
 export function createPasteChecker(opts: PasteCheckerOptions) {
   let latest = 0;
   let pending = 0;
@@ -58,7 +61,8 @@ export function createPasteChecker(opts: PasteCheckerOptions) {
         if (turn !== latest) return; // replaced by a later edit before it was sent
         const results = await opts.save(value, (progress) => { if (turn === latest) show({ progress }); }, () => turn !== latest);
         // A later edit or a forget() decides what counts as saved; an answer it replaced does not.
-        if (turn === latest) savedText = value;
+        // A folder that paused or was removed elsewhere is not "saved": pasting the same link again sends it again.
+        if (turn === latest) savedText = results.some(sendAgain) ? "" : value;
         opts.onSaved();
         if (turn === latest) show({ checking: false, results, progress: [] });
       } catch (err) {

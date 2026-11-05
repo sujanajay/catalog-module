@@ -110,6 +110,9 @@ async function addSupabaseFolder(id: string, client: SupabaseStorageLike, link: 
         ? [await linkRowFor(tx, id, "url_list", link, target)]
         : await tx.select().from(catalogUploads).where(folderRowOf(id, key, link)).limit(1).for("update");
       if (resume && !(row?.status === "pending" && (listingOf(row, key)?.folders ?? 0) <= reached)) throw new Superseded(row ?? undefined);
+      // A plain paste keeps the further of two reads of the same folder: a finished folder is not set back to
+      // reading or paused, and a read further along is not overwritten by one behind it (review 2 P3-3).
+      if (!resume && !target && row && progressOf(row, key) > reached) throw new Superseded(row);
       return row ?? null;
     });
   } catch (err) {
@@ -118,8 +121,18 @@ async function addSupabaseFolder(id: string, client: SupabaseStorageLike, link: 
   }
   if (read.ok) return { kind: "supabase_folder", access: "ok", summary: read.message, count: read.photos, uploadId, pill: photosPill(read.photos) };
   if (read.reading) return { kind: "supabase_folder", access: "reading", summary: read.message, count: read.photos, uploadId, pill: SUPABASE_READING_PILL, folder: read.url };
+  // A listing that paused on Supabase errors: Try again (or the same paste) carries on from where it stopped.
+  if (read.state) return { kind: "supabase_folder", access: "paused", summary: read.error, uploadId, pill: SUPABASE_PAUSED_PILL, folder: read.url };
   return { kind: "supabase_folder", access: "no_access", summary: read.error, uploadId };
 }
+/** How far a folder row has got, in folders listed: finished is all the way, a fresh or failed row is nowhere. */
+function progressOf(row: CatalogUpload, key: string): number {
+  const url = (row.detected as { supabaseFolder?: { url?: string } } | null)?.supabaseFolder?.url;
+  if ((row.status === "uploaded" || row.status === "collected") && url === key) return Infinity;
+  return listingOf(row, key)?.folders ?? -Infinity;
+}
+/** The pill of a Supabase folder whose listing paused on Supabase errors. */
+export const SUPABASE_PAUSED_PILL = "Paused";
 /** A continuation found its row changed under it (removed, finished, or further along): nothing is written. */
 class Superseded extends Error {
   readonly row: CatalogUpload | undefined;
@@ -139,6 +152,7 @@ function folderAnswer(row: CatalogUpload | undefined) {
   if (!row || row.status === "removed") return { kind: "supabase_folder", access: "removed", summary: SUPABASE_FOLDER_REMOVED, uploadId: row?.id };
   if (row.status === "uploaded" || row.status === "collected") return { kind: "supabase_folder", access: "ok", summary: detected.message ?? "", count: detected.fileCount, uploadId: row.id, pill: photosPill(detected.fileCount ?? 0) };
   if (row.status === "pending") return { kind: "supabase_folder", access: "reading", summary: detected.message ?? "", uploadId: row.id, pill: SUPABASE_READING_PILL, folder: detected.supabaseFolder?.url };
+  if (row.status === "failed" && listingOf(row, detected.supabaseFolder?.url ?? "")) return { kind: "supabase_folder", access: "paused", summary: row.error ?? "", uploadId: row.id, pill: SUPABASE_PAUSED_PILL, folder: detected.supabaseFolder?.url };
   return { kind: "supabase_folder", access: "no_access", summary: row.error ?? detected.message ?? "", uploadId: row.id };
 }
 /** The batch's row of one Supabase folder link (stored canonical; a failed paste keeps the link as pasted). */

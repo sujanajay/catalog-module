@@ -1,14 +1,20 @@
 "use client";
 import { useEffect, useRef, useState } from "react";
 import { batchUrl, wizardApi } from "./wizard-client";
+import { readFoldersToEnd, type PasteResult } from "./paste-check";
 import { PASTE_INPUT_KINDS } from "@catalog/core/catalog/types";
 import { FailedUploadStatus, NewBatchLink, UPLOAD_FAILED, uploadFailureOf, type LocalUpload, type UploadFailure } from "./Uploader";
 
 /** A batch input as `GET /api/catalog/batches/[id]` returns it (one catalog_uploads row). */
-export type ServerInput = { id: string; kind: string; name: string; relativePath: string | null; sizeBytes: number | null; status: string; error: string | null };
+export type ServerInput = {
+  id: string; kind: string; name: string; relativePath: string | null; sizeBytes: number | null; status: string; error: string | null;
+  /** A Supabase folder's link, and whether its listing can carry on (paused or still reading; see batches.ts getBatch). */
+  detected?: { supabaseFolder?: { url?: string; resumable?: boolean } } | null;
+};
 
 // Copy (spec 14b F3, parent copy register "Input list").
 export const REMOVE = "Remove";
+export const TRY_AGAIN = "Try again";
 export const UPLOADED = "Uploaded";
 export const CHECKED = "Checked";
 export const REMOVED = "Removed";
@@ -23,14 +29,14 @@ const KIND_WORDS: Record<string, string> = { image: "Photo", zip: "Zip", sheet: 
 const kindOfName = (name: string) => /\.zip$/i.test(name) ? "zip" : /\.(csv|xls[xm])$/i.test(name) ? "sheet" : "image";
 
 /** One line of the input list. `state` is the state word; `failure` (a failed upload in this session) replaces it with Retry and Remove. */
-export interface InputRow { key: string; kind: string; name: string; size: number | null; state: string; failure?: UploadFailure; retry?(): void; remove?(): void }
+export interface InputRow { key: string; kind: string; name: string; size: number | null; state: string; failure?: UploadFailure; retry?(): void; remove?(): void; tryAgain?(): void }
 
 /**
  * The step 1 list: every server row of the batch, in the order added, merged with this session's uploads.
  * A server row still `pending` that this session is not uploading was cut off (a closed tab, spec 14b F3).
  * A removed row is shown as "Removed" only when it was removed here (`removedHere`); older ones are hidden.
  */
-export function inputRows(server: ServerInput[], local: LocalUpload[], removedHere: ReadonlySet<string>, removeServer: (input: ServerInput) => void): InputRow[] {
+export function inputRows(server: ServerInput[], local: LocalUpload[], removedHere: ReadonlySet<string>, removeServer: (input: ServerInput) => void, tryAgain?: (input: ServerInput) => void): InputRow[] {
   const byUpload = new Map(local.filter((l) => l.uploadId).map((l) => [l.uploadId!, l]));
   const fromLocal = (l: LocalUpload, kind: string): InputRow => {
     const base = { key: l.key, kind, name: l.relativePath, size: l.size };
@@ -48,6 +54,8 @@ export function inputRows(server: ServerInput[], local: LocalUpload[], removedHe
     else if (s.status === "pending") rows.push({ ...base, state: s.kind === "url_list" ? READING_FOLDER : DID_NOT_FINISH, remove });
     else if (s.status === "uploaded") rows.push({ ...base, state: UPLOADED, remove });
     else if (s.status === "collected") rows.push({ ...base, state: CHECKED, remove });
+    // A Supabase folder that paused part way keeps its sentence and offers Try again (it carries on, review 2 P2-1).
+    else if (s.kind === "url_list" && s.detected?.supabaseFolder?.resumable && tryAgain) rows.push({ ...base, state: s.error ?? UPLOAD_FAILED, remove, tryAgain: () => tryAgain(s) });
     // A link that failed its access check keeps its own sentence (the paste box's); a file says it failed.
     else rows.push({ ...base, state: LINK_KINDS.includes(s.kind) && s.error ? s.error : UPLOAD_FAILED, remove });
   }
@@ -62,7 +70,7 @@ export function InputListView({ rows }: { rows: InputRow[] }) {
   if (!rows.length) return null;
   return <ul className="upload-list" aria-label="What this batch holds">{rows.map((row) => <li key={row.key}>
     <span className="pill">{KIND_WORDS[row.kind] ?? row.kind}</span> {row.name} {sizeText(row.size) ? <small>{sizeText(row.size)}</small> : null}{" "}
-    {row.failure ? <FailedUploadStatus failure={row.failure} onRetry={row.retry ?? (() => undefined)} onRemove={row.remove}/> : <>{row.state}{row.remove ? <> <button type="button" className="btn ghost sm" onClick={row.remove}>{REMOVE}</button></> : null}</>}
+    {row.failure ? <FailedUploadStatus failure={row.failure} onRetry={row.retry ?? (() => undefined)} onRemove={row.remove}/> : <>{row.state}{row.tryAgain ? <> <button type="button" className="btn ghost sm" onClick={row.tryAgain}>{TRY_AGAIN}</button></> : null}{row.remove ? <> <button type="button" className="btn ghost sm" onClick={row.remove}>{REMOVE}</button></> : null}</>}
   </li>)}</ul>;
 }
 
@@ -100,8 +108,19 @@ export default function InputList({ batchId, version, local, onCount, onRemoved 
     } catch (err) { setError(uploadFailureOf(err)); }
     setRefresh((n) => n + 1);
   }
+  /** Try again on a paused Supabase folder: carries the read on from where it stopped, refreshing as it goes. */
+  async function tryAgain(input: ServerInput) {
+    const folder = input.detected?.supabaseFolder?.url;
+    if (!batchId || !folder) return;
+    setError(null);
+    const send = (body: Record<string, unknown>) => wizardApi<PasteResult>(batchUrl(batchId, "/links"), "POST", body);
+    try {
+      await readFoldersToEnd(await send({ text: folder }), (link) => send({ text: link, continue: true }), () => setRefresh((n) => n + 1));
+    } catch (err) { setError(uploadFailureOf(err)); }
+    setRefresh((n) => n + 1);
+  }
   return <>
-    <InputListView rows={inputRows(server, local, removedHere, (input) => void removeServer(input))}/>
+    <InputListView rows={inputRows(server, local, removedHere, (input) => void removeServer(input), (input) => void tryAgain(input))}/>
     {error ? <p role="alert">{error.message}{error.batchStarted ? <> <NewBatchLink/></> : null}</p> : null}
   </>;
 }

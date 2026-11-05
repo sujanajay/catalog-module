@@ -137,6 +137,27 @@ describe("a large Supabase folder read over several requests (R1 exit finding 1)
     expect(checker.view()).toMatchObject({ checking: false, results: [] });
   });
 
+  it("review 2 P2-1: after a pause, pasting the same link again sends it again (no reload needed), with a Paused pill", async () => {
+    const sent: string[] = [];
+    const paused: PasteResult = { kind: "supabase_folder", access: "paused", summary: "Supabase stopped answering while this folder was being read.", pill: "Paused", folder: FOLDER };
+    const checker = createPasteChecker({
+      async save(value) { sent.push(value); return [sent.length === 1 ? paused : { kind: "supabase_folder", access: "ok", summary: "done", pill: "2,039 photos" }]; },
+      onView: () => undefined, onBusy: () => undefined, onSaved: () => undefined,
+    });
+    checker.check(FOLDER);
+    await checker.settled();
+    expect(markup(checker.view())).toContain(">Paused</span>");
+    expect(markup(checker.view())).not.toContain("No access yet");
+    checker.check(FOLDER);
+    await checker.settled();
+    expect(sent).toEqual([FOLDER, FOLDER]);
+    expect(checker.view().results[0]).toMatchObject({ access: "ok" });
+    // A text whose answers are fine is still not sent twice.
+    checker.check(FOLDER);
+    await checker.settled();
+    expect(sent).toHaveLength(2);
+  });
+
   it("a removed folder answers a Removed pill", () => {
     expect(markup({ ...EMPTY_PASTE_VIEW, results: [{ kind: "supabase_folder", access: "removed", summary: "This folder was removed from the batch." }] })).toContain(">Removed</span>");
   });

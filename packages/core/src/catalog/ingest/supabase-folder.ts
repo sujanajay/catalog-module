@@ -33,7 +33,13 @@ export const SUPABASE_PRIVATE = "This Supabase folder is private, so its photos 
 export const SUPABASE_EMPTY = "This Supabase folder has no photos. Check the link, then paste again.";
 export const SUPABASE_UNREADABLE = "This Supabase folder could not be read. Check the link, then paste again.";
 export const SUPABASE_TOO_LARGE = "This Supabase folder is too large to read by link. Paste a smaller folder inside it, or download the photos and drop them here.";
-export const SUPABASE_PAUSED = "Supabase stopped answering while this folder was being read. Paste the link again to carry on from where it stopped.";
+export const SUPABASE_PAUSED = "Supabase stopped answering while this folder was being read. Press Try again, or paste the link again, to carry on from where it stopped.";
+export const SUPABASE_PAUSED_CONTINUE = "A Supabase folder stopped part way. Press Try again on it, or remove it, then continue.";
+
+/** A folder row whose listing paused on Supabase errors: failed, but holding where it got to (links.ts). */
+export function isPausedFolder(upload: { status: string; kind: string; detected: unknown }): boolean {
+  return upload.status === "failed" && upload.kind === "url_list" && !!(upload.detected as { supabaseFolder?: { listing?: unknown } } | null)?.supabaseFolder?.listing;
+}
 export const SUPABASE_STILL_READING = "A Supabase folder is still being read. Keep this page open until it shows its photos, or paste its link again, then continue.";
 
 /** Files read from one folder at most (M1-F1-R7: 30,000 photos per batch). */
@@ -55,12 +61,16 @@ export const SUPABASE_LIST_CONCURRENCY = 16;
  */
 export const SUPABASE_SLICE_MS = 25_000;
 /**
- * List calls in flight at once across every folder read in this web instance, so two operators reading brands at
- * the same time still put at most this many requests on the shared Supabase project (review P2-1).
+ * List calls in flight at once across every folder read in one catalog-web instance (review P2-1). The cap is per
+ * instance: with N instances up, the shared Supabase project can see up to N times this many.
  */
 export const SUPABASE_GLOBAL_CONCURRENCY = 24;
-/** Tries per list call: a 429, a 5xx or a dropped connection is retried with backoff before the listing pauses. */
+/** Tries per list call: a 429, a 5xx, a timeout or a dropped connection is retried with jittered backoff before the listing pauses. */
 export const SUPABASE_LIST_ATTEMPTS = 4;
+/** Times one folder may pause a listing (over all requests) before the read fails with that folder named. */
+export const SUPABASE_MAX_PAUSES = 3;
+/** Longest one list call may take before it is given up and retried (a hung connection would hold a slot). */
+export const SUPABASE_CALL_TIMEOUT_MS = 20_000;
 const BACKOFF_MS = 500;
 const MAX_WAIT_MS = 10_000;
 
@@ -86,10 +96,29 @@ class ListPaused extends Error {
   }
 }
 
-/** Worth trying again: rate limited, a server error, a timeout, or no HTTP answer at all (a dropped connection). */
+/**
+ * Worth trying again: rate limited, a server error, a timed-out call, or no HTTP answer at all (fetch throws a
+ * TypeError when the connection drops). Anything else (a 400, 403 or 404, a refused call, an unreadable answer)
+ * will not get better by asking again.
+ */
 function transient(err: unknown): boolean {
   if (err instanceof SupabaseHttpError) return err.status === 429 || err.status === 408 || err.status >= 500;
-  return !(err instanceof TooLarge);
+  const name = (err as { name?: unknown } | null)?.name;
+  return err instanceof TypeError || name === "TimeoutError" || name === "AbortError";
+}
+
+/** One folder kept failing over SUPABASE_MAX_PAUSES requests: the read fails, naming it. */
+class FolderKeepsFailing extends Error {
+  readonly folder: string;
+  constructor(folder: string) {
+    super("Supabase folder keeps failing");
+    this.folder = folder;
+  }
+}
+
+/** The sentence for a sub-folder Supabase kept failing on. */
+export function supabaseFolderFailsMessage(folder: string): string {
+  return `Supabase kept failing on the folder ${folder}, so this folder was not read. Check that folder in Supabase, or paste the folders beside it one by one.`;
 }
 
 const slots = { used: 0, waiting: [] as (() => void)[] };
@@ -108,7 +137,11 @@ async function withListSlot<T>(call: () => Promise<T>): Promise<T> {
 }
 
 /** Where a folder listing got to: folders still to list (paths below the folder link), files found, counts. */
-export interface SupabaseListState { pending: string[]; files: SupabaseFile[]; skipped: number; folders: number }
+export interface SupabaseListState {
+  pending: string[]; files: SupabaseFile[]; skipped: number; folders: number;
+  /** How many times each folder paused the listing so far (absent: never). */
+  pauses?: Record<string, number>;
+}
 
 export type SupabaseListing =
   | { done: true; files: SupabaseFile[]; skipped: number; truncated: boolean }
@@ -122,6 +155,8 @@ export interface SupabaseListOptions {
   concurrency?: number;
   /** Waits between tries of a list call (tests pass a fake). */
   sleep?: (ms: number) => Promise<void>;
+  /** Jitter source in [0, 1) (tests pass a fixed one). */
+  random?: () => number;
 }
 
 /**
@@ -137,6 +172,7 @@ export interface SupabaseListOptions {
 export async function listSupabaseFolder(client: SupabaseStorageLike, link: SupabaseFolderLink, opts: SupabaseListOptions = {}): Promise<SupabaseListing> {
   const now = opts.now ?? (() => Date.now());
   const sleep = opts.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+  const random = opts.random ?? Math.random;
   const stopAt = now() + (opts.sliceMs ?? SUPABASE_SLICE_MS);
   const concurrency = Math.max(1, opts.concurrency ?? SUPABASE_LIST_CONCURRENCY);
   const pending = [...(opts.state?.pending ?? [""])];
@@ -154,8 +190,10 @@ export async function listSupabaseFolder(client: SupabaseStorageLike, link: Supa
         return await withListSlot(() => client.list(link.bucket, prefix, offset, PAGE));
       } catch (err) {
         if (attempt >= SUPABASE_LIST_ATTEMPTS || !transient(err)) throw err;
+        // Jittered, so calls that failed together do not all come back together.
         const hinted = err instanceof SupabaseHttpError ? err.retryAfterMs : null;
-        await sleep(Math.min(MAX_WAIT_MS, hinted ?? BACKOFF_MS * 2 ** (attempt - 1)));
+        const wait = hinted !== null ? hinted * (1 + random() / 2) : BACKOFF_MS * 2 ** (attempt - 1) * (0.5 + random());
+        await sleep(Math.min(MAX_WAIT_MS, Math.round(wait)));
       }
     }
   };
@@ -215,11 +253,19 @@ export async function listSupabaseFolder(client: SupabaseStorageLike, link: Supa
     await Promise.race(inFlight);
   }
   if (failure instanceof TooLarge) throw failure;
+  // An error that asking again will not fix fails the read at once.
+  if (failure !== null && !transient(failure)) throw failure;
   if (failure !== null) {
-    // The folders that failed are listed again next time; everything read before and beside them is kept.
-    throw new ListPaused({ pending: [...failed, ...pending], files, skipped, folders: folders - failed.length });
+    // The folders that failed are listed again next time; everything read before and beside them is kept. One that
+    // keeps failing ends the read, so it never pauses for ever.
+    const pauses = { ...(opts.state?.pauses ?? {}) };
+    for (const rel of failed) pauses[rel] = (pauses[rel] ?? 0) + 1;
+    const stuck = failed.find((rel) => pauses[rel]! >= SUPABASE_MAX_PAUSES);
+    if (stuck !== undefined) throw new FolderKeepsFailing(stuck);
+    throw new ListPaused({ pending: [...failed, ...pending], files, skipped, folders: folders - failed.length, pauses });
   }
-  if (!truncated && pending.length) return { done: false, state: { pending, files, skipped, folders } };
+  const pauses = opts.state?.pauses;
+  if (!truncated && pending.length) return { done: false, state: { pending, files, skipped, folders, ...(pauses ? { pauses } : {}) } };
   return { done: true, files: files.sort((a, b) => byText(a.path, b.path)), skipped, truncated };
 }
 
@@ -263,7 +309,8 @@ export function supabaseStorageClient(origin: string, key: string, fetchImpl: ty
   const headers = { apikey: key, authorization: `Bearer ${key}`, "content-type": "application/json" };
   const send = async (method: "GET" | "POST", path: string, body?: unknown): Promise<unknown> => {
     if (!isReadCall(method, path)) throw new Error(`Supabase call refused: ${method} ${path}`);
-    const r = await fetchImpl(`${base}${path}`, { method, headers, redirect: "error", ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
+    // A per-call timeout: a hung connection becomes a TimeoutError, which the listing retries.
+    const r = await fetchImpl(`${base}${path}`, { method, headers, redirect: "error", signal: AbortSignal.timeout(SUPABASE_CALL_TIMEOUT_MS), ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
     if (!r.ok) throw new SupabaseHttpError(r.status, retryAfterMs(r.headers.get("retry-after")));
     return r.json();
   };
@@ -341,6 +388,10 @@ export async function readSupabaseFolder(client: SupabaseStorageLike | null, lin
   } catch (err) {
     // A listing that paused on Supabase errors keeps where it got to, so pasting the link again carries on.
     // Nothing read at all (the folder link itself failed) is unreadable, as before.
+    if (err instanceof FolderKeepsFailing) {
+      const named = [parsed.prefix, err.folder].filter(Boolean).join("/");
+      return { ok: false, error: supabaseFolderFailsMessage(named) };
+    }
     if (err instanceof ListPaused && err.state.folders > 0) return { ok: false, error: SUPABASE_PAUSED, url: canonicalFolderUrl(parsed), title, state: err.state };
     return { ok: false, error: err instanceof TooLarge ? SUPABASE_TOO_LARGE : SUPABASE_UNREADABLE };
   }
