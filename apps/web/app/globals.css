@@ -1,6 +1,8 @@
 /* Visual tokens and the global frame from spec 01 ("Global frame"), lifted from the approved prototype
-   (docs/prototype/catalog-prototype.html). Light and dark themes: dark follows the system preference
-   and either theme can be forced with data-theme on <html>. */
+   (docs/prototype/catalog-prototype.html), with the UX design system's additions (section 8.1, UX1). Light and dark
+   themes: dark follows the system preference and either theme can be forced with data-theme on <html>.
+   Contrast (section 10): text 4.5 and interface parts 3 against every surface, checked by test/design-tokens.test.ts.
+   Layout uses logical properties only (section 11), so a dir="rtl" page mirrors by itself (test/rtl-css.test.ts). */
 
 :root {
   --navy: #131a48;
@@ -8,7 +10,8 @@
   --orange-h: #ff8c4f;
   --yellow: #fffce8;
   --grey: #5a5a5a;
-  --grey-l: #cecece;
+  /* Input and ghost button borders: 3 to 1 against the page (UX decision D14). */
+  --grey-l: #8a8a8a;
   --bg: #ffffff;
   --fg: #1b1b1f;
   --muted: #5a5a5a;
@@ -16,13 +19,21 @@
   --card: #ffffff;
   --soft: #f6f5f0;
   --ok: #1f7a3f;
-  --warn: #b86e00;
+  --warn: #9a5a00;
   --bad: #b3261e;
   --run: #1d2a7a;
-  /* next/font sets --font-spectral and --font-raleway on <html> (app/fonts.ts); the fallbacks keep the
-     stack valid if they are missing. */
+  /* UX1: the neutral surround behind every product image, the focus ring, selected rows and chips. */
+  --well: #f2f2f2;
+  --focus: #1d4ed8;
+  --selected: #fff1e8;
+  /* Orange as text (links) and the label on an orange fill (UX decision D14): #ff5800 on white is 3.2 to 1. */
+  --orange-text: #c2410c;
+  --on-orange: #131a48;
+  /* next/font sets --font-spectral, --font-plex-sans and --font-plex-arabic on <html> (app/fonts.ts); the fallbacks
+     keep the stack valid if they are missing. Arabic text falls through to Plex Sans Arabic by its glyphs. */
   --font-h: var(--font-spectral, "Spectral"), Georgia, serif;
-  --font-b: var(--font-raleway, "Raleway"), "Segoe UI", sans-serif;
+  --font-b: var(--font-plex-sans, "IBM Plex Sans"), var(--font-plex-arabic, "IBM Plex Sans Arabic"), "Segoe UI", sans-serif;
+  --font-ar: var(--font-plex-arabic, "IBM Plex Sans Arabic"), var(--font-plex-sans, "IBM Plex Sans"), "Segoe UI", sans-serif;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -34,11 +45,15 @@
     --card: #171c3f;
     --soft: #141839;
     --yellow: #2a2a1a;
-    --grey-l: #3a3f66;
+    --grey-l: #6b7199;
     --ok: #6fd49a;
     --warn: #f0b35a;
     --bad: #ff8a80;
     --run: #c9d0ff;
+    --well: #1e1e20;
+    --focus: #93b4ff;
+    --selected: #2a1c14;
+    --orange-text: #ff8c4f;
     color-scheme: dark;
   }
 }
@@ -51,11 +66,15 @@
   --card: #171c3f;
   --soft: #141839;
   --yellow: #2a2a1a;
-  --grey-l: #3a3f66;
+  --grey-l: #6b7199;
   --ok: #6fd49a;
   --warn: #f0b35a;
   --bad: #ff8a80;
   --run: #c9d0ff;
+  --well: #1e1e20;
+  --focus: #93b4ff;
+  --selected: #2a1c14;
+  --orange-text: #ff8c4f;
   color-scheme: dark;
 }
 
@@ -70,6 +89,58 @@ body {
   font-size: 15px;
   line-height: 1.5;
   margin: 0;
+  /* Every number in lining, tabular figures, so columns of counts and money line up. */
+  font-variant-numeric: lining-nums tabular-nums;
+}
+
+/* Arabic (section 8.2 and 11): its own font, a taller line, no letter spacing, no italics; headings in Plex Sans
+   Arabic SemiBold, not Spectral. Small text one step larger. */
+:lang(ar) {
+  font-family: var(--font-ar);
+  line-height: 1.7;
+  letter-spacing: 0;
+  font-style: normal;
+}
+:lang(ar) h1,
+:lang(ar) h2,
+:lang(ar) h3 {
+  font-family: var(--font-ar);
+  font-weight: 600;
+  letter-spacing: 0;
+}
+:lang(ar) .small,
+:lang(ar) .help {
+  font-size: 14px;
+}
+
+/* One focus ring everywhere: 2 px in --focus, never removed (section 8.1). */
+:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+/* Times, codes and links read left to right inside a right-to-left page ("5 Nov 2026, 10:39 IST", "USPA-123",
+   a URL ending in "/"), section 11. A time or code inline is isolated and takes its direction from its own first
+   letter. A .mono code or URL may be a whole block (the product page heading), so in a right-to-left page it is
+   set left to right and still sits at the line's end, where the mirrored layout puts it. */
+time,
+code {
+  unicode-bidi: plaintext;
+}
+.mono {
+  unicode-bidi: isolate;
+}
+:dir(rtl) .mono {
+  direction: ltr;
+  text-align: end;
+}
+
+/* Arrows that point back or forward turn round in a right-to-left page; images, numbers and codes do not. */
+.mirror {
+  display: inline-block;
+}
+:dir(rtl) .mirror {
+  transform: scaleX(-1);
 }
 
 h1,
@@ -94,11 +165,13 @@ h3 {
 }
 
 a {
-  color: var(--orange);
+  color: var(--orange-text);
 }
 
 /* ---- top bar ---- */
 .top {
+  /* The ring must show on navy too. */
+  --focus: #93b4ff;
   background: var(--navy);
   color: #fff;
   position: sticky;
@@ -110,8 +183,8 @@ a {
   align-items: center;
   gap: 18px;
   padding-block: 12px;
-  padding-left: max(16px, env(safe-area-inset-left, 0px));
-  padding-right: max(16px, env(safe-area-inset-right, 0px));
+  /* Both sides clear a notch on either side, in either direction. */
+  padding-inline: max(16px, env(safe-area-inset-left, 0px), env(safe-area-inset-right, 0px));
   max-width: 1080px;
   margin: 0 auto;
   flex-wrap: wrap;
@@ -128,7 +201,7 @@ a {
   color: #fff;
   text-decoration: none;
   opacity: 0.8;
-  margin-right: 16px;
+  margin-inline-end: 16px;
   font-weight: 500;
 }
 .nav a.on {
@@ -139,7 +212,7 @@ a {
 
 /* ---- user button and menu ---- */
 .user {
-  margin-left: auto;
+  margin-inline-start: auto;
   position: relative;
   display: flex;
   align-items: center;
@@ -158,18 +231,14 @@ a {
   cursor: pointer;
   max-width: 100%;
   overflow-wrap: anywhere;
-  text-align: left;
+  text-align: start;
 }
 .ub:hover {
   border-color: #fff;
 }
-.ub:focus-visible {
-  outline: 3px solid var(--orange-h);
-  outline-offset: 2px;
-}
 .menu {
   position: absolute;
-  right: 0;
+  inset-inline-end: 0;
   top: calc(100% + 6px);
   background: var(--card);
   color: var(--fg);
@@ -184,7 +253,7 @@ a {
 .menu a {
   display: block;
   width: 100%;
-  text-align: left;
+  text-align: start;
   font: inherit;
   background: none;
   border: 0;
@@ -209,8 +278,7 @@ main {
   max-width: 1080px;
   margin: 0 auto;
   padding-block: 28px 60px;
-  padding-left: max(16px, env(safe-area-inset-left, 0px));
-  padding-right: max(16px, env(safe-area-inset-right, 0px));
+  padding-inline: max(16px, env(safe-area-inset-left, 0px), env(safe-area-inset-right, 0px));
 }
 
 /* ---- buttons, inputs, text ---- */
@@ -228,6 +296,7 @@ main {
 .btn.primary {
   background: var(--orange);
   border-color: var(--orange);
+  color: var(--on-orange);
 }
 .btn.primary:hover {
   background: var(--orange-h);
@@ -242,11 +311,6 @@ main {
   padding: 6px 12px;
   font-size: 13px;
 }
-.btn:focus-visible,
-.link:focus-visible {
-  outline: 3px solid var(--orange-h);
-  outline-offset: 2px;
-}
 .btn[disabled] {
   opacity: 0.45;
   cursor: not-allowed;
@@ -256,7 +320,7 @@ main {
   background: none;
   border: 0;
   padding: 0;
-  color: var(--orange);
+  color: var(--orange-text);
   cursor: pointer;
   text-decoration: underline;
 }
@@ -472,9 +536,11 @@ table {
 /* ---- toast ---- */
 .toast {
   position: fixed;
-  left: 50%;
+  /* Centred in either direction: both inline insets set, the width fits the content, auto margins share the rest. */
+  inset-inline: 16px;
+  margin-inline: auto;
+  width: fit-content;
   bottom: calc(24px + env(safe-area-inset-bottom, 0px));
-  transform: translateX(-50%);
   background: var(--navy);
   color: #fff;
   padding: 10px 18px;
@@ -490,7 +556,7 @@ table {
 .toast button {
   font: inherit;
   font-weight: 600;
-  color: #fff;
+  color: var(--on-orange);
   background: var(--orange);
   border: 0;
   border-radius: 6px;
