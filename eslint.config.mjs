@@ -92,4 +92,27 @@ export default defineConfig(
     files: ["apps/web/app/catalog/ops/**", "apps/web/lib/catalog/ops.ts", "apps/web/lib/catalog/ops-copy.ts"],
     rules: { "copy/no-vendor-names": "off" },
   },
+  // CI reliability (2026-11-05): a fixed sleep is a guess, not a sync point; on a loaded runner the guess is wrong and
+  // the test flakes (intake scenario 5 waited 3.5 s for a page poll). Wait for the real condition instead: a web-first
+  // assertion, expect.poll, a response or the page clock. Older negative checks ("nothing happens for N ms", which can
+  // only pass falsely, never fail falsely) are listed in eslint-suppressions.json.
+  {
+    files: ["**/*.spec.{ts,tsx}"],
+    rules: {
+      "no-restricted-syntax": ["error", {
+        selector: "CallExpression[callee.property.name='waitForTimeout']",
+        message: "No fixed sleeps in browser specs: wait for the condition (a web-first expect, expect.poll, waitForResponse, page.clock).",
+      }],
+    },
+  },
+  // Unit tests: no real sleep over 50 ms (new Promise((r) => setTimeout(r, 500))). Short polling ticks are fine.
+  {
+    files: ["**/*.test.{ts,tsx}"],
+    rules: {
+      "no-restricted-syntax": ["error", {
+        selector: "NewExpression[callee.name='Promise'] CallExpression[callee.name='setTimeout'][arguments.0.type='Identifier'][arguments.1.value>50]",
+        message: "No real sleeps over 50 ms in unit tests: pass a sleep seam, use vi.useFakeTimers, or wait for the condition.",
+      }],
+    },
+  },
 );
