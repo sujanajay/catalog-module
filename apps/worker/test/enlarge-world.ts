@@ -233,9 +233,10 @@ export async function startChunks(db: Db, w: FakeWorld, chunkIds: string[]): Pro
 export async function deliverChunk(db: Db, w: FakeWorld, chunkId: string): Promise<HandleResult> {
   return handleChunkTask(w.deps, await currentChunkTask(db, chunkId));
 }
-/** The sweep at the clock's time. */
+/** The sweep at the clock's time (with the world's probe for the M1-S4b outage pass). */
 export function sweep(db: Db, w: FakeWorld, extra: { enlargementOff?: boolean } = {}): Promise<HandleResult> {
-  return handleSweep({ db, releaseLocks, now: w.deps.now, enqueue: w.deps.enqueue, ...extra }, {});
+  // M1-S4b: the sweep probes the upscale service as the worker's does (the world's fake probe), unless switched off.
+  return handleSweep({ db, releaseLocks, now: w.deps.now, enqueue: w.deps.enqueue, ...(w.deps.enlargeProbe && !extra.enlargementOff ? { outageProbe: w.deps.enlargeProbe } : {}), ...extra }, {});
 }
 
 export const rowsOf = (db: Db, batchId: string) => db.select().from(catalogEnlargements).where(eq(catalogEnlargements.batchId, batchId)).orderBy(catalogEnlargements.createdAt, catalogEnlargements.id);

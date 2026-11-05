@@ -1,7 +1,7 @@
 // M1-F5-R2 (M1-S6): photos added to a batch that has already started go into a linked follow-up batch. The follow-up
 // is a normal draft with the parent's brand, channels, product type and grouping choices, `parent_batch_id` naming the
 // parent, and auto-start on, so once its files are collected it starts by itself (M1-F2-R6). It only adds photos
-// (`append`, M1 D29): its shots follow each product's highest one, so its auto-start never replaces a live photo.
+// (`append`, M1 D30): its shots follow each product's highest one, so its auto-start never replaces a live photo.
 // Products the parent still holds make its auto-start wait for the lock and then start (M1-F2-R7, auto-start.ts).
 import { and, desc, eq, inArray, isNull, sql } from "drizzle-orm";
 import type { Db } from "../db/client";
@@ -21,7 +21,7 @@ export class FollowUpRefused extends Error {
 }
 
 export const FOLLOW_UP_NOT_FOUND = "This batch does not exist. Open the batch list and choose another.";
-/** A batch that has not started takes more photos itself (M1 D23: a change while collecting edits the draft). */
+/** A batch that has not started takes more photos itself (M1 D24: a change while collecting edits the draft). */
 export const FOLLOW_UP_NOT_STARTED = "This batch has not started yet. Add the photos to it on its New batch page.";
 export const FOLLOW_UP_CANCELLED = "This batch was cancelled. Make a new batch.";
 
@@ -39,7 +39,7 @@ export function followUpOptions(parent: BatchOptions): BatchOptions {
     perRoot: parent.perRoot ?? true,
     ...(parent.newestSameProduct !== undefined ? { newestSameProduct: parent.newestSameProduct } : {}),
     autoStart: FOLLOW_UP_AUTO_START,
-    // M1 D29: it only adds photos after each product's highest shot; nothing of the parent is replaced or removed.
+    // M1 D30: it only adds photos after each product's highest shot; nothing of the parent is replaced or removed.
     append: true,
   };
 }

@@ -1,11 +1,11 @@
-// Tier 2 (PGlite): a follow-up batch's publish only adds photos (M1 D29, review P1-2 of PR #169).
+// Tier 2 (PGlite): a follow-up batch's publish only adds photos (M1 D30, review P1-2 of PR #169).
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { and, eq } from "drizzle-orm";
 import type { Db } from "../../db/client";
 import { createTestDb } from "../../db/testing";
 import { catalogBatches, catalogBatchProducts, catalogOutputs, catalogProducts, catalogSourceImages, DEFAULT_BATCH_OPTIONS } from "../../db/schema";
 import { FIXTURE_CHANNEL_RULES } from "../channel-rules";
-import { APPEND_TAKEN_NOTE, overLimitNote, publishProduct, type PublishDeps } from "./publish";
+import { APPEND_TAKEN_NOTE, assertOwnedByBatch, NOT_OWN_OBJECT, overLimitNote, planPublish, publishProduct, type Output, type PublishDeps } from "./publish";
 
 let db: Db, close: () => Promise<void>;
 beforeAll(async () => { ({ db, close } = await createTestDb()); }, 60_000);
@@ -40,7 +40,7 @@ async function followUp(name: string, shots: number[]) {
   return { deps, parent: parent!, more: more!, product: product!, outputsOf, sourcesOf, pair };
 }
 
-describe("a follow-up batch's publish (append, M1 D29)", () => {
+describe("a follow-up batch's publish (append, M1 D30)", () => {
   it("adds shots 4 and 5 and keeps the parent's live shots 1-3 and their photos current", async () => {
     const s = await followUp("append-adds", [4, 5]);
     expect(await publishProduct(s.deps, s.more.id, s.product.id)).toMatchObject({ outcome: "published", changed: true });
@@ -53,7 +53,7 @@ describe("a follow-up batch's publish (append, M1 D29)", () => {
     expect((await s.pair()).change).toBe("updated");
   });
 
-  it("skips a photo over its channel's image limit with a note, and never replaces a live photo in its place", async () => {
+  it("flags (not_added) a photo over its channel's image limit, and one whose place holds another batch's live photo, never replacing it", async () => {
     const s = await followUp("append-limit", [3, 4, 5]);
     expect(await publishProduct({ ...s.deps, imageLimits: { noon: 4 } }, s.more.id, s.product.id)).toMatchObject({ outcome: "published" });
     expect(s.deps.storage.deletePublicObject).not.toHaveBeenCalled();
@@ -65,6 +65,38 @@ describe("a follow-up batch's publish (append, M1 D29)", () => {
       [5, false, "skipped", overLimitNote("noon", 4)],
     ]);
     expect((await s.pair()).notes).toContain(overLimitNote("noon", 4));
+    expect((await s.pair()).flags).toContain("not_added");
+    expect((await s.outputsOf(s.more.id)).filter((o) => o.status === "skipped").every((o) => o.flags.includes("not_added"))).toBe(true);
     expect((await s.sourcesOf(s.parent.id)).every((r) => r.isCurrent)).toBe(true);
   });
+
+  it("a remove decision in a follow-up leaves every parent photo untouched (re-review P1-A)", async () => {
+    // The follow-up's photo 1 sits at the place of the parent's live photo 1 (a collision), and a person chose Remove on it.
+    const s = await followUp("append-remove", [1, 4]);
+    const [own1] = (await s.outputsOf(s.more.id)).filter((o) => o.n === 1);
+    await db.update(catalogOutputs).set({ decision: "remove", status: "needs_attention" }).where(eq(catalogOutputs.id, own1!.id));
+    expect(await publishProduct(s.deps, s.more.id, s.product.id)).toMatchObject({ outcome: "published" });
+    expect(s.deps.storage.deletePublicObject).not.toHaveBeenCalled();
+    expect((await s.outputsOf(s.parent.id)).map((o) => [o.n, o.isLive, o.status, o.generation, o.supersededAt])).toEqual([[1, true, "verified", 20, null], [2, true, "verified", 20, null], [3, true, "verified", 20, null]]);
+    expect((await s.sourcesOf(s.parent.id)).every((r) => r.isCurrent)).toBe(true);
+    expect((await s.outputsOf(s.more.id)).find((o) => o.n === 4)).toMatchObject({ isLive: true, status: "verified" });
+  });
 });
+
+describe("planPublish in append mode (M1 D30)", () => {
+  const out = (patch: Partial<Output>): Output => ({ id: "x", batchId: "parent", channel: "noon", n: 1, objectPath: "catalog/anta/A/noon/A_1.jpg", generation: 20, status: "verified", decision: null, isLive: true, flags: [], ...patch }) as Output;
+  const base = { brandSlug: "anta", pathKey: "A", isTest: false, channels: ["noon" as const], sources: [{ n: 1 }], append: true, batchId: "more" };
+  it("deletes only the batch's own live output of a removed shot, never the parent's at that place", () => {
+    const parent1 = out({ id: "p1" });
+    const own1 = out({ id: "m1", batchId: "more", isLive: false, status: "needs_attention", decision: "remove" });
+    expect(planPublish({ ...base, outputs: [own1], live: [parent1] }).deletes).toEqual([]);
+    const ownLive = out({ id: "m2", batchId: "more", n: 2, objectPath: "catalog/anta/A/noon/A_2.jpg", decision: "remove" });
+    expect(planPublish({ ...base, sources: [{ n: 2 }], outputs: [ownLive], live: [parent1, ownLive] }).deletes.map((d) => d.output.id)).toEqual(["m2"]);
+  });
+  it("refuses to delete or overwrite another batch's object", () => {
+    expect(() => assertOwnedByBatch(out({ batchId: "parent" }), "more", 1)).toThrow(NOT_OWN_OBJECT);
+    expect(() => assertOwnedByBatch(out({ batchId: "more", n: 2 }), "more", 1)).toThrow(NOT_OWN_OBJECT);
+    expect(() => assertOwnedByBatch(out({ batchId: "more" }), "more", 1)).not.toThrow();
+  });
+});
+

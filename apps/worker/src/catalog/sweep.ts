@@ -9,11 +9,12 @@ import type { HandleResult } from "../server";
 import { catalogBatches, catalogChunks, catalogUploads } from "@catalog/core/db/schema";
 import { handOff, INGEST_ROUTE, ingestTaskId, uploadedPage } from "@catalog/core/catalog/ingest/hand-off";
 import { enqueueTask } from "@catalog/core/tasks";
-import { log } from "@catalog/core/log";
+import { log, toSeverity } from "@catalog/core/log";
 import { recoverBatchChunks } from "@catalog/core/catalog/pipeline/dispatch";
 import { ENLARGING_TASK } from "@catalog/core/catalog/pipeline/enlargement";
 import { runInvariants, type InvariantResult } from "@catalog/core/catalog/invariants/run";
 import { refreshOutcomes, syncIncidents } from "@catalog/core/catalog/reliability";
+import { applyOutageDeadline, assessUpscalerOutages, syncOutageIncidents, type OutageProbe } from "@catalog/core/catalog/upscaler-health";
 import { enqueueFinalize, finalizeEnqueueExpired, finalizePendingFlag } from "./deps";
 import { enqueueImprovements } from "./improve";
 import { handOffIdleDrafts, logOrphanCount, rearmLostCountdowns, resendGivenUpIntake } from "@catalog/core/catalog/drafts";
@@ -59,6 +60,11 @@ export interface SweepDeps {
   draftExpiryDays?: number;
   /** Spec 18 lifecycle F34: the worker's rollback switch (UPSCALE_MODEL=off): queued enlargements released, parked chunks unparked. */
   enlargementOff?: boolean;
+  /**
+   * M1-S4b: the worker's /health probe of the upscale services (workerEnlargeProbe). Absent (the upscaler switched
+   * off, or a caller with no upscaler): no outage pass.
+   */
+  outageProbe?: OutageProbe;
 }
 
 function rowsOf(result: unknown): Record<string, unknown>[] {
@@ -98,6 +104,14 @@ export async function handleSweep(deps: SweepDeps, _body: Record<string, unknown
         THEN (${catalogBatches.counts}->>'finalizeClaimUntil')::numeric <= ${+now} ELSE true END`),
   ));
   for(const batch of pending) await enqueueFinalize({db:deps.db,enqueue:deps.enqueue ?? enqueueTask,now:()=>now},batch.id);
+  // M1-S4b (M1 D13): the upscaler outage pass, before the recovery below so the chunks the deadline unparks are picked
+  // up by this sweep's window top-up. A failure here never stops the sweep.
+  if (deps.outageProbe && !deps.enlargementOff) await outagePass(deps.db, deps.outageProbe, deps.enqueue ?? enqueueTask, now, deps.now ?? (() => new Date()));
+  // Review P3-4: with the upscaler switched off nothing is probed, and nothing waits: open outage incidents resolve.
+  else {
+    try { await syncOutageIncidents(deps.db, { services: [], at: now }, now); }
+    catch (error) { log("ERROR", "upscaler outage pass failed", { step: "incidents", error: error instanceof Error ? error.message : String(error) }); }
+  }
   // Spec 15 E4: recover only dead chunks (a lapsed lease, or a task lost for 30 minutes) and top up each
   // processing batch's window. A live lease and a recently queued task are never touched. Spec 18 lifecycle 3.8:
   // every live batch (not failed or cancelled, done included: an operator retry or a replacement) with a queued or
@@ -174,6 +188,24 @@ export async function handleSweep(deps: SweepDeps, _body: Record<string, unknown
   await recordReliability(deps.db, now, invariants);
 
   return { httpStatus: 200, outcome: `swept:${swept.length}${expired.length ? `; expired:${expired.length}` : ""}` };
+}
+
+/**
+ * M1-S4b: probe the upscale services photos wait on and record the answers (assessUpscalerOutages), apply the outage
+ * deadline to auto-decide batches (applyOutageDeadline) and keep the upscaler_outage incidents in step
+ * (syncOutageIncidents). Each step is logged and never thrown.
+ */
+export async function outagePass(db: Db, probe: OutageProbe, enqueue: typeof enqueueTask, now: Date, clock: () => Date): Promise<void> {
+  const say = (message: string, f: Record<string, unknown> = {}) => log(toSeverity(f.severity) ?? "INFO", message, f);
+  let assessment;
+  try { assessment = await assessUpscalerOutages(db, probe, clock, say); }
+  catch (error) { log("ERROR", "upscaler outage pass failed", { step: "assess", error: error instanceof Error ? error.message : String(error) }); return; }
+  try { await applyOutageDeadline(db, enqueue, assessment, now, say); }
+  catch (error) { log("ERROR", "upscaler outage pass failed", { step: "deadline", error: error instanceof Error ? error.message : String(error) }); }
+  try {
+    const sync = await syncOutageIncidents(db, assessment, now);
+    if (sync.opened || sync.resolved) log("INFO", "incidents", { event: "upscaler_outage", opened: sync.opened, resolved: sync.resolved });
+  } catch (error) { log("ERROR", "upscaler outage pass failed", { step: "incidents", error: error instanceof Error ? error.message : String(error) }); }
 }
 
 /** M6-S6: the sweep's incident and outcome passes; a failure is logged as an ERROR and never thrown. */

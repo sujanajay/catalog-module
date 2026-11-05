@@ -1,5 +1,5 @@
 // Tier 2 (PGlite), M1-S6: more photos for a started batch make a linked follow-up batch (M1-F5-R2, POST /extend), and
-// files dropped while a batch is collected are added to it (M1 D23). Cloud Tasks and storage signing are fakes.
+// files dropped while a batch is collected are added to it (M1 D24). Cloud Tasks and storage signing are fakes.
 import { eq } from "drizzle-orm";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { brandMaster, catalogBatches } from "@catalog/core/db/schema";
@@ -61,7 +61,7 @@ describe("POST /extend (M1-F5-R2)", () => {
   });
 });
 
-describe("files dropped while collecting (M1 D23)", () => {
+describe("files dropped while collecting (M1 D24)", () => {
   it("adds them to the collecting batch, which stays collecting with the change marked for its new hand-off", async () => {
     const id = await newBatch();
     await db.update(catalogBatches).set({ status: "ingesting", counts: { ...(await batchOf(id)).counts, ingestRun: "first" } }).where(eq(catalogBatches.id, id));

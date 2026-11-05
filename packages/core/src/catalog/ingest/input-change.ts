@@ -11,7 +11,7 @@ type Tx = Parameters<Parameters<Db["transaction"]>[0]>[0];
 export type InputChangeRefused = { refused: "missing" } | { refused: "closed"; batch: CatalogBatch };
 
 /**
- * M1 D23 (M1-S6, review P1-1): the batch row of an input change (add, complete, correct or remove an input), locked
+ * M1 D24 (M1-S6, review P1-1): the batch row of an input change (add, complete, correct or remove an input), locked
  * for the rest of the transaction. A draft or a collecting batch that never started takes the change; anything else
  * is refused.
  *

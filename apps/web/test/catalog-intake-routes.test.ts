@@ -93,10 +93,10 @@ describe("input routes (spec 14b F3)", () => {
   });
 });
 
-// M1 D23 (M1-S6, closes D20, review P1-1): an input change while the files are collected edits the collecting batch
+// M1 D24 (M1-S6, closes D20, review P1-1): an input change while the files are collected edits the collecting batch
 // in place. It never clears or takes the placing lease of a step in flight: it marks the inputs changed (that step then
 // groups again at its close), clears previewReady and stops the countdown; the change's own hand-off names a new run.
-describe("input changes while collecting (M1 D23)", () => {
+describe("input changes while collecting (M1 D24)", () => {
   it("removes and replaces inputs of a collecting batch: the step's lease and run are kept, the change is marked, then collected again", async () => {
     const id = await newBatch(); const file = await addRow(id, "image"); const paste = await addRow(id, "url_list"); await addRow(id, "image");
     const claim = { token: "old-run", at: new Date().toISOString(), attempt: "a1" };
@@ -308,7 +308,7 @@ describe("reopen and the assertDraft sentences (spec 14c F8)", () => {
     for (const [values, sentence] of cases) {
       const id = await newBatch(); await addRow(id, "image");
       await setStatus(id, values);
-      // Grouping changes need a draft; inputs can change while collecting (M1 D23).
+      // Grouping changes need a draft; inputs can change while collecting (M1 D24).
       const response = await patchDetected(request("PATCH", { precedence: "uploads_then_links" }), ctx(id));
       expect(response.status).toBe(409); expect(await response.json()).toEqual({ error: sentence });
     }

@@ -8,10 +8,11 @@ import { and, eq, sql } from "drizzle-orm";
 import { catalogEnlargements } from "@catalog/core/db/schema";
 import { improvementCandidates, improvePhoto, markImproved, noteImprovementWait } from "@catalog/core/catalog/improve";
 import type { Db } from "@catalog/core/db/client";
+import type { UpscaleProbe } from "@catalog/core/catalog/enlarge";
 import type { enqueueTask, TaskRoute } from "@catalog/core/tasks";
 import type { HandleResult } from "../server";
 import { enqueueFinalize, type CatalogDeps } from "./deps";
-import { upscaleProbeTimeoutMs } from "./enlarge";
+import { observeUpscaler, upscaleProbeTimeoutMs } from "./enlarge";
 
 export const IMPROVE_ROUTE = "/tasks/catalog/improve" satisfies TaskRoute;
 
@@ -26,7 +27,7 @@ export const IMPROVE_RESEND_MS = 60 * 60_000;
  * long, so the tasks of one sweep wave share one probe instead of each waking the GPU service.
  */
 export const IMPROVE_PROBE_CACHE_MS = 10 * 60_000;
-const unavailable = new Map<string, { until: number; probe: string }>();
+const unavailable = new Map<string, { until: number; probe: UpscaleProbe }>();
 /** Tests: forget the probe answers this instance remembers. */
 export function clearImproveProbeCache(): void { unavailable.clear(); }
 
@@ -52,6 +53,8 @@ export async function handleImproveTask(deps: CatalogDeps, body: Record<string, 
       const remembered = unavailable.get(upscaler);
       const fresh = !remembered || remembered.until <= +now;
       const probe = fresh ? await deps.enlargeProbe(upscaler, { timeoutMs: upscaleProbeTimeoutMs() }) : remembered.probe;
+      // M1-S4b: a fresh answer feeds the upscaler health ledger (a remembered one was recorded when it was fresh).
+      if (fresh) await observeUpscaler(deps, upscaler, probe, now);
       if (probe !== "ok") {
         if (fresh) unavailable.set(upscaler, { until: +now + IMPROVE_PROBE_CACHE_MS, probe });
         await noteImprovementWait(deps.db, { batchId, productId: failed[0]!.productId, sourceImageId }, now);

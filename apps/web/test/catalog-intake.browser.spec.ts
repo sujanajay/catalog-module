@@ -191,10 +191,10 @@ test("3. grid, all 404, release C form: the no-photos sentence names the links, 
   expect(preview.counts.photos).toBe(27);
 });
 
-// M1 D23 (M1-S6): an input change while the files are collected edits the batch in place. The one page hands the first paste to
+// M1 D24 (M1-S6): an input change while the files are collected edits the batch in place. The one page hands the first paste to
 // collecting by itself; the queue is held so the correction lands while it is collected, and the batch is collected
 // again with the second paste only.
-test("4. correction while collecting: paste the grid, clear it, paste the variants; one paste input, collected again with the second paste only (F3, M1 D23)", async ({ page }) => {
+test("4. correction while collecting: paste the grid, clear it, paste the variants; one paste input, collected again with the second paste only (F3, M1 D24)", async ({ page }) => {
   await queue(page, { paused: true });
   const id = await pasteOnStep1(page, "Intake 4 correction", GRID);
   await expect(page.getByText("6 rows, 27 links", { exact: true })).toBeVisible({ timeout: 20_000 });

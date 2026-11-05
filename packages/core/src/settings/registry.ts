@@ -140,6 +140,12 @@ export const SETTING_DEFS: readonly SettingDef[] = [
     help: "After this time the image stays as it is.",
     type: { kind: "whole", min: 1, max: 720, unit: "hours" }, default: 72, scopes: [], risk: "normal", inUse: false, schemaVersion: 1,
   },
+  // M1-S4b (M1 D13): read per batch from its snapshot by the sweep's outage deadline (catalog/upscaler-health.ts).
+  {
+    key: "intake.outage_deadline_hours", area: "rules", module: "M1", label: "Hours to wait for the enlargement service",
+    help: "When the enlargement service is down, photos wait this long, then the batch sends plain images and improves them later. 0 means wait without limit.",
+    type: { kind: "whole", min: 0, max: 72, unit: "hours" }, default: 6, scopes: [], risk: "normal", inUse: true, schemaVersion: 1,
+  },
   // M0-F1 and M0-F3: style grouping and live photo matching (decision D5 of the M0 doc: one match distance).
   {
     key: "graph.style_group_min_confidence", area: "quality", module: "M0", label: "Sure enough to group colours of a style",

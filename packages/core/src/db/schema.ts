@@ -141,11 +141,14 @@ export const COST_OUTCOMES = ["ok", "failed", "rate_limited", "cap", "fallback",
 
 /**
  * M6-S6 (M6-F3-R2) catalog_incidents.kind: anything that stopped or slowed a batch without the operator causing it.
- * Written today: `batch_failed`, `chunk_gave_up`, `invariant` (an ERROR check). Reserved for their writers: `http_5xx`
- * (a 5xx burst in a batch window), `deploy_refused`, `contamination` (M0), `alert` (infra/monitoring.sh). Stall and
- * outage incidents are left to the M1-S4b outage slice and its health ledger (M6 decision S6-20).
+ * Written today: `batch_failed`, `chunk_gave_up`, `invariant` (an ERROR check), and `upscaler_outage` (M1-S4b, from
+ * the upscaler health ledger catalog_upscaler_health: cause codes `service_down`, `enlarge_wait` and `outage_deadline`).
+ * Reserved for their writers: `http_5xx` (a 5xx burst in a batch window), `deploy_refused`, `contamination` (M0),
+ * `alert` (infra/monitoring.sh).
  */
-export const INCIDENT_KINDS = ["batch_failed", "chunk_gave_up", "invariant", "http_5xx", "deploy_refused", "contamination", "alert"] as const;
+export const INCIDENT_KINDS = ["batch_failed", "chunk_gave_up", "invariant", "http_5xx", "deploy_refused", "contamination", "alert", "upscaler_outage"] as const;
+/** M1-S4b: the upscaler services the health ledger tracks (a `+cpu` upscaler id is `cpu`, any other `gpu`). */
+export const UPSCALER_SERVICES = ["cpu", "gpu"] as const;
 export const INCIDENT_SEVERITIES = ["warning", "error"] as const;
 /**
  * M6-S6 (M6-F3-R3) catalog_batch_touches.action: the operator writes on a batch or its photos after its upload that
@@ -181,6 +184,7 @@ export type CostStage = (typeof COST_STAGES)[number];
 export type CostKind = (typeof COST_KINDS)[number];
 export type CostOutcome = (typeof COST_OUTCOMES)[number];
 export type IncidentKind = (typeof INCIDENT_KINDS)[number];
+export type UpscalerService = (typeof UPSCALER_SERVICES)[number];
 export type IncidentSeverity = (typeof INCIDENT_SEVERITIES)[number];
 export type TouchAction = (typeof TOUCH_ACTIONS)[number];
 export type BatchOutcomeStatus = (typeof BATCH_OUTCOME_STATUSES)[number];
@@ -470,6 +474,30 @@ export const catalogBatchProducts = pgTable(
     index("catalog_batch_products_product_id_idx").on(t.productId),
     enumCheck("catalog_batch_products", "link_status", t.linkStatus, LINK_STATUSES),
     enumCheck("catalog_batch_products", "change", t.change, CHANGE_KINDS),
+  ],
+);
+
+/**
+ * M1-S6 (M1 D30, re-review P1-A): the shot numbers a follow-up batch ("Add more photos") holds for a product. They are
+ * given out in one place (ingest/append.ts allocateShots) under the product row lock, after every shot the product
+ * has or is about to have, and the primary key makes two batches holding one number impossible. A batch keeps its
+ * numbers when it groups again; deleting the batch or the product frees them.
+ */
+export const catalogShotNumbers = pgTable(
+  "catalog_shot_numbers",
+  {
+    productId: uuid("product_id")
+      .notNull()
+      .references(() => catalogProducts.id, { onDelete: "cascade" }),
+    n: integer("n").notNull(),
+    batchId: uuid("batch_id")
+      .notNull()
+      .references(() => catalogBatches.id, { onDelete: "cascade" }),
+    createdAt: createdAt(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.productId, t.n] }),
+    index("catalog_shot_numbers_batch_id_idx").on(t.batchId),
   ],
 );
 
@@ -929,6 +957,31 @@ export const catalogIncidents = pgTable(
     enumCheck("catalog_incidents", "kind", t.kind, INCIDENT_KINDS),
     enumCheck("catalog_incidents", "severity", t.severity, INCIDENT_SEVERITIES),
   ],
+);
+
+/**
+ * M1-S4b upscaler health ledger (catalog/upscaler-health.ts): one row per upscaler service. `healthy_at` is the
+ * request start of the latest proof that the service works (a probe answering ok or busy, a call it answered);
+ * `unhealthy_since` is the request start of the first symptom after that proof (a probe answering absent, timeout,
+ * no_instance or anything else), null while healthy. Written by the enlarge handler, the improvement task and the
+ * sweep; read by the sweep for the outage deadline and the upscaler_outage incidents.
+ */
+export const catalogUpscalerHealth = pgTable(
+  "catalog_upscaler_health",
+  {
+    service: text("service", { enum: UPSCALER_SERVICES }).primaryKey(),
+    healthyAt: tsNull("healthy_at"),
+    unhealthySince: tsNull("unhealthy_since"),
+    lastProbe: text("last_probe"),
+    lastProbeAt: tsNull("last_probe_at"),
+    lastSource: text("last_source"),
+    /** The request start of the newest symptom: what a proof that ends one outage hands on when a newer symptom exists. */
+    lastSymptomAt: tsNull("last_symptom_at"),
+    /** The upscaler id of the latest observation (for logs and Ops). */
+    lastUpscaler: text("last_upscaler"),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [enumCheck("catalog_upscaler_health", "service", t.service, UPSCALER_SERVICES)],
 );
 
 /** M6-F3-R3: one row per operator write that counts as a touch (TOUCH_ACTIONS), written by the web API layer. */

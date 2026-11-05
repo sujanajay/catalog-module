@@ -44,7 +44,7 @@ import { loadSkuResolver, type ResolveResult, type SkuResolver } from "../sku-ma
 import type { BatchCounts, BatchOptions, ChangeKind, ChannelId, IntakePhase, LinkStatus, OutputFlag, PlacingClaim, UploadKind } from "../types";
 import { driveFolderAdapter } from "./drive-folder";
 import { googleSheetAdapter, sheetCopyUri } from "./google-sheet";
-import { highestShots, shotNumbers } from "./append";
+import { allocateShots, shotNumbers, shotRanks } from "./append";
 import { hashedTaskId, INGEST_ROUTE } from "./hand-off";
 import {
   baseName, byText, distinct, fmt, groupItems, isDuplicateReject, isSameProductReject, newestIdentifier, olderSameProductMessage, originalOf, previewRows, sameProductMessage, shotFlags,
@@ -449,7 +449,7 @@ export async function runIngest(
       .update(catalogBatches)
       .set({
         status: "ingesting",
-        // M1 D23: a lease that ran out is cleared (its grouping is out of date); a live one is left to its step, which
+        // M1 D24: a lease that ran out is cleared (its grouping is out of date); a live one is left to its step, which
         // sees the input change at its close and groups again (inputsChanged) instead of two steps running at once.
         counts: sql`${progressCounts({ previewReady: false, failReason: null }, { phase: upload.kind === "sheet" || upload.kind === "google_sheet" ? "reading" : phase, done: "collected", at: clock() })} || (CASE WHEN ${placingLeaseFree(clock())} THEN '{"placingClaim": null}'::jsonb ELSE '{}'::jsonb END)`,
       })
@@ -566,7 +566,7 @@ async function finishIfLast(db: Db, deps: PlaceDeps, batchId: string, token: str
   const now = deps.now?.() ?? new Date();
   const attempt = randomUUID();
   const ingesting = and(eq(catalogBatches.id, batchId), eq(catalogBatches.status, "ingesting"));
-  // M1 D23: the claim takes the batch row lock first (an input change holds it while it writes its upload rows and the
+  // M1 D24: the claim takes the batch row lock first (an input change holds it while it writes its upload rows and the
   // change marker), so the uploads check reads every change committed before it, and the step records the marker it
   // groups with (groupedChange); a change after this is caught at the closing write.
   const claimed = await db.transaction(async (tx) => {
@@ -994,7 +994,7 @@ function leaseWrites(db: Db, deps: IngestDeps, batchId: string, token: string, a
       return rows.length > 0;
     },
     close: async (patch: Partial<BatchCounts>, status: "draft" | "failed"): Promise<boolean> => {
-      // M1 D23: not when an input changed since the claim (the marker is on this row, so a change that commits while
+      // M1 D24: not when an input changed since the claim (the marker is on this row, so a change that commits while
       // this write waits for the row lock is seen); the step then groups again (inputsChanged).
       const rows = await db.update(catalogBatches)
         .set({ status, counts: mergeCounts({ ...patch, placingClaim: null, rate: [] }) })
@@ -1002,7 +1002,7 @@ function leaseWrites(db: Db, deps: IngestDeps, batchId: string, token: string, a
       return rows.length > 0;
     },
     /**
-     * M1 D23: an input changed since the claim: the lease is released and the preview stays not ready. The batch stays
+     * M1 D24: an input changed since the claim: the lease is released and the preview stays not ready. The batch stays
      * collecting for a regroup, or goes back to draft when no input is left to group.
      */
     restart: async (status: "ingesting" | "draft"): Promise<boolean> => {
@@ -1320,12 +1320,15 @@ async function groupProducts(
   const bucket = getBucketName();
   const rawUriOf = new Map<SourceItem, string>();
   const shots: PlannedShot[] = [];
-  // M1 D29: a follow-up batch adds photos: a product that already has photos gets shots after its highest one.
-  const highest = batch.options.append ? await highestShots(db, withPhotos.filter((id) => !productOf.get(id)!.isNew).map((id) => productOf.get(id)!.id)) : null;
+  // M1 D30: a follow-up batch only adds photos: its shot numbers are given out by allocateShots (after every shot the
+  // product has or another batch holds, under the product row lock), for new products too (two follow-ups can make one).
+  const allocated = batch.options.append
+    ? await allocateShots(db, batch.id, withPhotos.map((id) => ({ productId: productOf.get(id)!.id, count: shotRanks(grouped.products.get(id)!) })))
+    : null;
   for (const id of withPhotos) {
     const product = productOf.get(id)!;
     const items = grouped.products.get(id)!;
-    const numberOf = shotNumbers(items, highest ? (highest.get(product.id) ?? 0) : null);
+    const numberOf = shotNumbers(items, allocated ? allocated.get(product.id)! : null);
     for (const item of items) {
       const r = resultOf.get(item);
       if (!r) continue;
@@ -1460,7 +1463,7 @@ async function placeBatch(db: Db, deps: PlaceDeps, batchId: string, token: strin
   }
   await saveJson(deps, statePath(prefix), state.preview);
 
-  // An input removed or changed while this ran (spec 14b F3, M1 D23) makes this result out of date: the step groups
+  // An input removed or changed while this ran (spec 14b F3, M1 D24) makes this result out of date: the step groups
   // again with the inputs as they are now (inputsChanged), never two steps at once and never with a removed input.
   const removedSince = state.uploadIds.length ? await db.select({ id: catalogUploads.id }).from(catalogUploads).where(and(inArray(catalogUploads.id, state.uploadIds), eq(catalogUploads.status, "removed"))) : [];
   if (removedSince.length) return inputsChanged(db, deps, batchId, lease, body);
@@ -1482,14 +1485,14 @@ async function placeBatch(db: Db, deps: PlaceDeps, batchId: string, token: strin
   };
 }
 
-/** M1 D23: the lease `token` is still this batch's and an input changed since its claim (the closing write was refused for it). */
+/** M1 D24: the lease `token` is still this batch's and an input changed since its claim (the closing write was refused for it). */
 async function changedSinceClaim(db: Db, batchId: string, token: string): Promise<boolean> {
   const [b] = await db.select({ status: catalogBatches.status, counts: catalogBatches.counts }).from(catalogBatches).where(eq(catalogBatches.id, batchId));
   return b?.status === "ingesting" && b.counts.placingClaim?.token === token && (b.counts.inputsChangedAt ?? null) !== (b.counts.groupedChange ?? null);
 }
 
 /**
- * M1 D23 (review P1-1): an input was removed, added or corrected while the batch-wide step ran. Its result is out of
+ * M1 D24 (review P1-1): an input was removed, added or corrected while the batch-wide step ran. Its result is out of
  * date, so it is not closed: the lease is released and one delivery of a read upload is queued under the batch's
  * current run, whose claim groups again from scratch (groupBatch first removes the rows this step wrote). While an
  * upload is still being read, that claim is refused (uploads left) and the upload's own last delivery claims instead.

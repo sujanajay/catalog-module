@@ -36,7 +36,7 @@ export async function draftForUpdate(tx: Transaction, id: string): Promise<Catal
   return batch;
 }
 /**
- * M1 D23 (M1-S6, closes D20): inputs can change while the files are collected. A collecting batch that never started
+ * M1 D24 (M1-S6, closes D20): inputs can change while the files are collected. A collecting batch that never started
  * takes the change like a draft: it is the batch the input routes check (assertInputsOpen), and the change itself goes
  * through batchForInputChange.
  */
@@ -47,7 +47,7 @@ export async function assertInputsOpen(id: string): Promise<CatalogBatch> {
 }
 /**
  * The batch row of an input change, locked (as draftForUpdate). A collecting batch stays collecting: the change only
- * marks the inputs changed (core lockForInputChange, M1 D23 review P1-1), so a batch-wide step in flight keeps its
+ * marks the inputs changed (core lockForInputChange, M1 D24 review P1-1), so a batch-wide step in flight keeps its
  * lease and, at its close, groups again with the change instead of a second step starting next to it. The countdown
  * stops; the next finished collection arms a new one (M1-F2 "more files restart it").
  */
