@@ -141,11 +141,14 @@ export const COST_OUTCOMES = ["ok", "failed", "rate_limited", "cap", "fallback",
 
 /**
  * M6-S6 (M6-F3-R2) catalog_incidents.kind: anything that stopped or slowed a batch without the operator causing it.
- * Written today: `batch_failed`, `chunk_gave_up`, `invariant` (an ERROR check). Reserved for their writers: `http_5xx`
- * (a 5xx burst in a batch window), `deploy_refused`, `contamination` (M0), `alert` (infra/monitoring.sh). Stall and
- * outage incidents are left to the M1-S4b outage slice and its health ledger (M6 decision S6-20).
+ * Written today: `batch_failed`, `chunk_gave_up`, `invariant` (an ERROR check), and `upscaler_outage` (M1-S4b, from
+ * the upscaler health ledger catalog_upscaler_health: cause codes `service_down`, `enlarge_wait` and `outage_deadline`).
+ * Reserved for their writers: `http_5xx` (a 5xx burst in a batch window), `deploy_refused`, `contamination` (M0),
+ * `alert` (infra/monitoring.sh).
  */
-export const INCIDENT_KINDS = ["batch_failed", "chunk_gave_up", "invariant", "http_5xx", "deploy_refused", "contamination", "alert"] as const;
+export const INCIDENT_KINDS = ["batch_failed", "chunk_gave_up", "invariant", "http_5xx", "deploy_refused", "contamination", "alert", "upscaler_outage"] as const;
+/** M1-S4b: the upscaler services the health ledger tracks (a `+cpu` upscaler id is `cpu`, any other `gpu`). */
+export const UPSCALER_SERVICES = ["cpu", "gpu"] as const;
 export const INCIDENT_SEVERITIES = ["warning", "error"] as const;
 /**
  * M6-S6 (M6-F3-R3) catalog_batch_touches.action: the operator writes on a batch or its photos after its upload that
@@ -181,6 +184,7 @@ export type CostStage = (typeof COST_STAGES)[number];
 export type CostKind = (typeof COST_KINDS)[number];
 export type CostOutcome = (typeof COST_OUTCOMES)[number];
 export type IncidentKind = (typeof INCIDENT_KINDS)[number];
+export type UpscalerService = (typeof UPSCALER_SERVICES)[number];
 export type IncidentSeverity = (typeof INCIDENT_SEVERITIES)[number];
 export type TouchAction = (typeof TOUCH_ACTIONS)[number];
 export type BatchOutcomeStatus = (typeof BATCH_OUTCOME_STATUSES)[number];
@@ -927,6 +931,31 @@ export const catalogIncidents = pgTable(
   ],
 );
 
+/**
+ * M1-S4b upscaler health ledger (catalog/upscaler-health.ts): one row per upscaler service. `healthy_at` is the
+ * request start of the latest proof that the service works (a probe answering ok or busy, a call it answered);
+ * `unhealthy_since` is the request start of the first symptom after that proof (a probe answering absent, timeout,
+ * no_instance or anything else), null while healthy. Written by the enlarge handler, the improvement task and the
+ * sweep; read by the sweep for the outage deadline and the upscaler_outage incidents.
+ */
+export const catalogUpscalerHealth = pgTable(
+  "catalog_upscaler_health",
+  {
+    service: text("service", { enum: UPSCALER_SERVICES }).primaryKey(),
+    healthyAt: tsNull("healthy_at"),
+    unhealthySince: tsNull("unhealthy_since"),
+    lastProbe: text("last_probe"),
+    lastProbeAt: tsNull("last_probe_at"),
+    lastSource: text("last_source"),
+    /** The request start of the newest symptom: what a proof that ends one outage hands on when a newer symptom exists. */
+    lastSymptomAt: tsNull("last_symptom_at"),
+    /** The upscaler id of the latest observation (for logs and Ops). */
+    lastUpscaler: text("last_upscaler"),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [enumCheck("catalog_upscaler_health", "service", t.service, UPSCALER_SERVICES)],
+);
+
 /** M6-F3-R3: one row per operator write that counts as a touch (TOUCH_ACTIONS), written by the web API layer. */
 export const catalogBatchTouches = pgTable(
   "catalog_batch_touches",
@@ -955,6 +984,87 @@ export const catalogRevisions = pgTable(
     firstSeenAt: timestamp("first_seen_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [index("catalog_revisions_first_seen_at_idx").on(t.firstSeenAt)],
+);
+
+// ---------------------------------------------------------------------------
+// M6-S2 cost reconciliation (docs/program/requirements/M6-reliability-cost.md M6-F1-R4 to R6, section 7.1). Written
+// only by packages/core/src/catalog/cost-reconcile.ts (the daily catalog-cost-reconcile job).
+// ---------------------------------------------------------------------------
+
+/** Where a day's billed cost came from: Cloud Monitoring instance time at list prices (M6-S2), or the bill (M6-S3). */
+export const COST_SOURCES = ["monitoring", "billing"] as const;
+/** A Cloud Run service or job, a shared resource split by a rule (Cloud SQL), or a vendor off the GCP bill. */
+export const COST_LINE_KINDS = ["service", "job", "shared", "vendor"] as const;
+/** The `env` label; `unlabelled` for a catalog resource without the app and component labels (an alert). */
+export const COST_ENVS = ["live", "preview", "test", "unlabelled"] as const;
+export type CostSource = (typeof COST_SOURCES)[number];
+export type CostLineKind = (typeof COST_LINE_KINDS)[number];
+export type CostEnv = (typeof COST_ENVS)[number];
+
+/**
+ * One row per UTC day, component, env and source (M6-F1-R4). For a service or job: `billed_usd` what it was billed,
+ * `attributed_usd` the ledger's rows for it that day, `idle_usd` = billed minus attributed, never negative (a ledger
+ * that over-counts is an alert). For a shared line (M6-F1-R6): `billed_usd` the whole resource, `shared_usd` the
+ * catalog's share of it. A vendor line (OpenRouter) is billed as the ledger recorded it until invoices (M6-S3).
+ * Re-computing a day replaces its rows of that source.
+ */
+export const catalogCostDays = pgTable(
+  "catalog_cost_days",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    day: date("day").notNull(), // 'YYYY-MM-DD' (UTC)
+    component: text("component").notNull(),
+    kind: text("kind", { enum: COST_LINE_KINDS }).notNull(),
+    region: text("region"),
+    env: text("env", { enum: COST_ENVS }).notNull(),
+    source: text("source", { enum: COST_SOURCES }).notNull(),
+    /** Billable instance seconds (monitoring source); null for shared and vendor lines. */
+    billableSeconds: numeric("billable_seconds", { precision: 14, scale: 3, mode: "number" }),
+    billedUsd: money("billed_usd").notNull().default(0),
+    creditsUsd: money("credits_usd").notNull().default(0),
+    attributedUsd: money("attributed_usd").notNull().default(0),
+    idleUsd: money("idle_usd").notNull().default(0),
+    sharedUsd: money("shared_usd").notNull().default(0),
+    /** List prices or an admin-set figure rather than the bill. */
+    estimated: boolean("estimated").notNull().default(true),
+    /** The day may still change (a later run re-computes it). */
+    provisional: boolean("provisional").notNull().default(false),
+    /** How the line was priced (shape, rates, share), for a person checking it by hand. */
+    detail: jsonb("detail").$type<Record<string, unknown>>(),
+    computedAt: timestamp("computed_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("catalog_cost_days_day_component_env_source_uq").on(t.day, t.component, t.env, t.source),
+    enumCheck("catalog_cost_days", "kind", t.kind, COST_LINE_KINDS),
+    enumCheck("catalog_cost_days", "env", t.env, COST_ENVS),
+    enumCheck("catalog_cost_days", "source", t.source, COST_SOURCES),
+  ],
+);
+
+/**
+ * M6-F1-R5: a day's cost per batch and component. `attributed_usd` the batch's ledger rows, `idle_usd` its share of
+ * the component's idle pool (by busy seconds), `shared_usd` its share of a shared line (by attributed cost). Idle with
+ * no batch that day is the day row's idle minus the allocations. Re-computing a day replaces its allocations.
+ */
+export const catalogCostAllocations = pgTable(
+  "catalog_cost_allocations",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    day: date("day").notNull(),
+    batchId: uuid("batch_id").notNull().references(() => catalogBatches.id, { onDelete: "cascade" }),
+    component: text("component").notNull(),
+    source: text("source", { enum: COST_SOURCES }).notNull(),
+    busyMs: bigint("busy_ms", { mode: "number" }).notNull().default(0),
+    attributedUsd: money("attributed_usd").notNull().default(0),
+    idleUsd: money("idle_usd").notNull().default(0),
+    sharedUsd: money("shared_usd").notNull().default(0),
+    computedAt: timestamp("computed_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("catalog_cost_allocations_day_batch_component_uq").on(t.day, t.batchId, t.component),
+    index("catalog_cost_allocations_batch_id_idx").on(t.batchId),
+    enumCheck("catalog_cost_allocations", "source", t.source, COST_SOURCES),
+  ],
 );
 
 // ---------------------------------------------------------------------------
