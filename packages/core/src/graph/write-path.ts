@@ -171,6 +171,8 @@ export interface PublishedSlot {
   movedFromOtherSlot: boolean;
   flags: readonly string[];
   decision: string | null;
+  /** The slot's own delivered row made again in place: by an M1-S4 improvement or the operator's Try again (with its product event). */
+  remade?: { by: "improvement" | "operator"; ref: string | null } | null;
 }
 
 /**
@@ -192,13 +194,15 @@ export function publishChangeType(s: PublishedSlot): ChangeTypeId {
 export const REMOVED_CHANGE_TYPE: ChangeTypeId = CHANGE_TYPE.img_reordered;
 
 /**
- * Why a slot changed: an auto-decide rule's provisional pick (`auto_decide`), the operator's "Use as is" (`operator`),
+ * Why a slot changed: an auto-decide rule's provisional pick (`auto_decide`), the operator's "Use as is" (`operator`), a
+ * delivered row made again in place by an M1-S4 improvement (`auto_decide`) or the operator's Try again (`operator`),
  * the same photo made again under changed channel rules or pipeline (`rule`, with the channel's rules key version), else
  * new content from the brand (`new_content`).
  */
 export function publishReason(s: PublishedSlot, rulesKeyVersion: string): { reasonKind: ReasonKind; reasonRef: string | null } {
   if (s.flags.includes("provisional")) return { reasonKind: "auto_decide", reasonRef: null };
   if (s.decision === "use_as_is") return { reasonKind: "operator", reasonRef: null };
+  if (s.remade) return { reasonKind: s.remade.by === "improvement" ? "auto_decide" : "operator", reasonRef: s.remade.ref };
   if (s.previousSourceSha256 !== null && s.previousSourceSha256 === s.sourceSha256) return { reasonKind: "rule", reasonRef: `channel-rules:${rulesKeyVersion}` };
   return { reasonKind: "new_content", reasonRef: null };
 }
