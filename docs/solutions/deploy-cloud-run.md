@@ -161,9 +161,23 @@ time cap, and prints each retry: `read_with_retry` in services/matting/tests/clo
 upscale probe jobs; the report lists them under `retries`) and `probe_get` in infra/lib/services.sh (worker and web).
 Passing means a 429 or 503 whose body is not a JSON object (the services answer their own errors as JSON, the front
 end with HTML or text), a refused or reset connection, or a connect timeout. Never retried: any other status, the
-service's own error body, a timeout after connecting, and the measured /matte and /upscale calls (a front-end 503
-there can be an instance that crashed under the measured load, which the gate must catch). `probe_get` used to pass
-`--retry 5 --retry-all-errors` to curl, which silently retried 500, 502 and 504 too; that is gone.
+service's own error body and a timeout after connecting. The measured /matte and /upscale calls follow the narrower
+rule below. `probe_get` used to pass `--retry 5 --retry-all-errors` to curl, which silently retried 500, 502 and 504
+too; that is gone.
+
+### Platform rejections of measured probe calls (2026-11-05)
+
+The prod deploy of 9b9abfc stopped at the same gate on the same mechanism one step later: one x4 determinism
+`/upscale` call got a Cloud Run 503 in 0.5 ms, routed to an idle GPU instance that scale-down retired 0.24 s later
+(it had served no request); the other 11 answers were byte-identical across 2 instances, and the line read
+"1 distinct outputs (byte-identical): FAILED" because it did not say why (.runs/2026-11-05-gpu-determinism.md).
+Now every measured /matte and /upscale call (rounds, warm calls, the determinism round) is tried again up to 2 times
+after a platform rejection only: a 429 or 503 whose body is not a JSON object AND that came back within 2 s (an
+instance that crashes during inference fails the call after its run time, and that stays a failure). Only the
+answered attempt is timed. Each retry is printed and listed under `retries`, the report counts `platformRetries` per
+row, call and determinism entry, and a round fails when Cloud Run turned away more than 2 of its attempts (a capacity
+problem). Every non-200 failure and every FAILED determinism line now names its reason (for example
+"1 non-200: platform 503 after 2 retries" or "1 non-200: HTTP 503").
 
 ### Laptop network blips while a gate waits (2026-11-05)
 

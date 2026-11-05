@@ -102,8 +102,10 @@ PEAKS = {"birefnet-general": 5000, "birefnet-general-lite": 3000, "birefnet-hrso
 class FakeMatting:
     """One instance with `resident` cut-out slots (least recently used out), per-model VRAM and optional failures."""
 
-    def __init__(self, resident=1, fail_model=None, advertised=None, health_extra=None, target="gpu", health_answers=()):
+    def __init__(self, resident=1, fail_model=None, advertised=None, health_extra=None, target="gpu", health_answers=(), platform_calls=()):
         self.resident, self.fail_model, self.advertised, self.target = resident, fail_model, advertised or resident, target
+        # POST numbers (from 1) that Cloud Run's front end turns away (PLATFORM_503) before the service sees them.
+        self.platform_calls, self.posts = set(platform_calls), 0
         self.health_extra = health_extra or {}
         self.health_answers = list(health_answers)
         self.sessions, self.loads, self.calls, self.health_queries = ["birefnet-general"], {"birefnet-general": 1}, [], []
@@ -136,6 +138,11 @@ class FakeMatting:
             def do_POST(self):
                 self.rfile.read(int(self.headers["Content-Length"]))
                 model = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)["model"][0]
+                with fake.lock:
+                    fake.posts += 1
+                    rejected = fake.posts in fake.platform_calls
+                if rejected:
+                    return self.reply(503, PLATFORM_503, "text/html")
                 with fake.lock:
                     fake.calls.append(model)
                     if model in fake.sessions:
@@ -213,7 +220,7 @@ def test_probe_fails_on_a_reload_and_on_non_200(fake_matting):
                                   "birefnet-general-lite: 2 loads on one instance", "birefnet-hrsod: 2 loads on one instance"]
     code, report = run_probe(fake_matting(resident=4, fail_model="bria-rmbg").url, "--models", "birefnet-general,bria-rmbg", "--rounds", "2")
     assert code == 1
-    assert report["failures"] == ["bria-rmbg: 4 non-200"]
+    assert report["failures"] == ["bria-rmbg: 4 non-200: HTTP 500"]
     rows = {r["model"]: r for r in report["rows"]}
     assert rows["bria-rmbg"]["p50Ms"] is None and rows["birefnet-general"]["non200"] == 0
 
@@ -225,7 +232,7 @@ def test_probe_counts_an_unreachable_service_as_non_200(fake_matting):
     fake.server.server_close()
     code, report = run_probe(url, "--models", "birefnet-hrsod", "--rounds", "1")
     assert code == 1 and report["rows"][0]["non200"] == 2 and report["rows"][0]["peakVramUsedMiB"] is None
-    assert report["failures"] == ["birefnet-hrsod: 2 non-200", "health unreadable after baseline", "health unreadable after warm", "health unreadable after round 1"]
+    assert report["failures"] == ["birefnet-hrsod: 2 non-200: no answer (transport failure or timeout)", "health unreadable after baseline", "health unreadable after warm", "health unreadable after round 1"]
 
 
 @pytest.mark.parametrize(("extra", "target", "failure"), [({"loadsByModel": None}, "gpu", "health after baseline has no instanceId or loadsByModel (a revision before spec 17?)"),
@@ -283,8 +290,11 @@ class FakeUpscale:
     threads, the tile once a call has loaded the model, and `uptime` (seconds since the instance started). `work_ms(path,
     count)`, when given, is the X-Upscale-Ms header of each answer (the service's inference time; None leaves it out)."""
 
-    def __init__(self, mode="ok", instances=("up01",), busy_calls=(), uptime=1000.0, health_delay=0.0, work_ms=None, health_answers=()):
+    def __init__(self, mode="ok", instances=("up01",), busy_calls=(), uptime=1000.0, health_delay=0.0, work_ms=None, health_answers=(),
+                 platform_calls=(), own_503_calls=()):
         self.mode, self.calls, self.loaded, self.work_ms = mode, [], False, work_ms
+        # Call numbers (from 1) answered 503 by Cloud Run's front end (HTML, no instance) or by the service itself (JSON).
+        self.platform_calls, self.own_503_calls = set(platform_calls), set(own_503_calls)
         self.health_answers = list(health_answers)
         self.instances, self.busy_calls, self.uptime, self.health_delay = list(instances), set(busy_calls), uptime, health_delay
         self.health_calls = 0
@@ -327,6 +337,10 @@ class FakeUpscale:
                 instance = fake.instances[(count - 1) % len(fake.instances)]
                 if count in fake.busy_calls:
                     return self.reply(429, b'{"error": "no instance free"}', "application/json")
+                if count in fake.platform_calls:
+                    return self.reply(503, PLATFORM_503, "text/html")
+                if count in fake.own_503_calls:
+                    return self.reply(503, b'{"error": "upscale failed"}', "application/json")
                 if fake.mode == "busy":
                     return self.reply(503, b'{"error": "upscale model swinir-x2 unavailable"}', "application/json")
                 if fake.mode == "platform-503":
@@ -407,7 +421,8 @@ def test_upscale_probe_output_sha_is_stable_across_runs(fake_upscale):
 
 
 @pytest.mark.parametrize(("mode", "failure"), [("noisy", "swinir-x2 64x96: instance up01 gave 3 different outputs for the same input"),
-                                                ("wrong-size", "swinir-x2 64x96: 3 non-200"), ("busy", "swinir-x2 64x96: 3 non-200")])
+                                                ("wrong-size", "swinir-x2 64x96: 3 non-200: not an image of the expected type and size"),
+                                                ("busy", "swinir-x2 64x96: 3 non-200: HTTP 503")])
 def test_upscale_probe_fails_on_differing_output_wrong_size_or_non_200(fake_upscale, mode, failure):
     code, reports = run_upscale_probe(fake_upscale(mode=mode).url, "--sizes", "64x96", "--rounds", "2", *BUCKET)
     assert code == 1 and failure in reports[0][1]["failures"]
@@ -425,7 +440,7 @@ def test_upscale_probe_counts_an_unreachable_service(fake_upscale):
     fake.server.server_close()
     code, reports = run_upscale_probe(fake.url, "--sizes", "64x96", "--rounds", "1", *BUCKET)
     assert code == 1
-    assert reports[0][1]["failures"] == ["swinir-x2 64x96: 2 non-200", "swinir-x2: health unreadable after baseline",
+    assert reports[0][1]["failures"] == ["swinir-x2 64x96: 2 non-200: no answer (transport failure or timeout)", "swinir-x2: health unreadable after baseline",
                                          "swinir-x2: health unreadable after warm 64x96"]
 
 
@@ -979,13 +994,26 @@ def test_upscale_probe_never_retries_the_services_own_error(fake_upscale, answer
     assert fake.health_calls == 2 and reports[0][1]["retries"] == []
 
 
-@pytest.mark.parametrize("mode", ["platform-503", "busy", "wrong-size"])
-def test_upscale_probe_never_retries_a_measured_call(fake_upscale, mode):
-    # A measured call that fails is the candidate's failure (a 503 there may be an instance that crashed under load).
+@pytest.mark.parametrize("mode", ["busy", "wrong-size"])
+def test_upscale_probe_never_retries_a_measured_call_the_service_answered(fake_upscale, mode):
+    # The service's own error (a JSON body) or a wrong answer is the candidate's failure and is never tried again.
     fake = fake_upscale(mode=mode)
     code, reports = run_upscale_probe(fake.url, "--sizes", "64x96", "--rounds", "2", *BUCKET)
-    assert code == 1 and "swinir-x2 64x96: 3 non-200" in reports[0][1]["failures"]
+    assert code == 1 and any(f.startswith("swinir-x2 64x96: 3 non-200: ") for f in reports[0][1]["failures"])
     assert len(fake.calls) == 3 and reports[0][1]["retries"] == []
+
+
+def test_upscale_probe_fails_measured_calls_cloud_run_keeps_turning_away(fake_upscale):
+    # Every attempt rejected by the platform: each call is tried PLATFORM_RETRIES more times, then fails, and each round
+    # (1 call, 3 rejected attempts) is over the per-round cap.
+    fake = fake_upscale(mode="platform-503")
+    code, reports = run_upscale_probe(fake.url, "--sizes", "64x96", "--rounds", "2", *BUCKET)
+    failures = reports[0][1]["failures"]
+    assert code == 1 and len(fake.calls) == 3 * (1 + probe.PLATFORM_RETRIES)
+    assert failures[0] == "swinir-x2 64x96: 3 non-200: platform 503 after 2 retries"
+    assert ("swinir-x2: 64x96 round: Cloud Run turned away 3 attempts in one round of 1 calls (at most 2); a capacity problem, "
+            "not a passing rejection") in failures
+    assert len(reports[0][1]["retries"]) == 9 and reports[0][1]["rows"][0]["platformRetries"] == 9
 
 
 def test_upscale_probe_still_fails_a_speed_cap_violation_after_a_retried_health(fake_upscale):
@@ -1048,3 +1076,100 @@ def test_read_with_retry_stops_at_the_time_cap(monkeypatch):
         probe.read_with_retry("/health", "https://x.run.app/health", None, slept.append, log, clock=lambda: now[0])
     # 88 s in after the first try: a 5 s wait would pass TRANSIENT_MAX_S (90), so it gives up at once.
     assert slept == [] and [e["nextInS"] for e in log] == [None]
+
+
+# 2026-11-05 catalog-check-upscale-gpu-7g6tv (.runs/2026-11-05-gpu-determinism.md): Cloud Run answered one x4
+# determinism /upscale call 503 in 0.5 ms while scale-down retired an idle instance; the other 11 answers were
+# byte-identical across 2 instances, yet the gate printed "1 distinct outputs (byte-identical): FAILED".
+def run_7g6tv_shape(fake_upscale, capsys, **fake):
+    slept = []
+    fake = fake_upscale(instances=("up01", "up02"), **fake)
+    reports = []
+    code = probe.probe_upscale_main(["--probe-upscale", fake.url, "--model=swinir-x4", "--sizes", "64x96", "--rounds", "1",
+                                     "--determinism-calls=12", "--run", "up-run", *BUCKET],
+                                    report_writer=lambda run, report, file: (reports.append(report), "gs://x")[1], sleep=slept.append)
+    return code, reports[0], fake, slept, capsys.readouterr().out
+
+
+def test_determinism_round_passes_after_one_platform_503_retried(fake_upscale, capsys):
+    # Calls 1 (warm) and 2 (the round) come first; call 8 is one of the 12 determinism calls.
+    code, report, fake, slept, out = run_7g6tv_shape(fake_upscale, capsys, platform_calls={8})
+    [entry] = report["determinism"]
+    assert code == 0 and report["passed"] is True, report["failures"]
+    # 12 answered calls, each a 200 timed on the attempt a container answered; the rejected attempt made one more POST.
+    assert len(entry["calls"]) == 12 and all(c["status"] == 200 for c in entry["calls"]) and len(fake.calls) == 2 + 13
+    assert entry["platformRetries"] == 1 and sorted(c["platformRetries"] for c in entry["calls"]) == [0] * 11 + [1]
+    assert entry["instances"] == 2 and entry["distinctOutputs"] == 1
+    assert report["retries"] == [{"call": "swinir-x4 800x1200 /upscale", "attempt": 1, "of": 3, "status": 503,
+                                  "reason": "HTTP 503 from the platform, not the service", "nextInS": 5}]
+    assert slept == [probe.PLATFORM_RETRY_DELAYS_S[0]]
+    assert "retry: swinir-x4 800x1200 /upscale: HTTP 503 from the platform, not the service (attempt 1 of 3); trying again in 5 s" in out
+    assert ("determinism swinir-x4 800x1200: 12 calls, 1 platform retries, 2 instances, 1 distinct outputs (byte-identical): passed") in out
+
+
+def test_determinism_round_still_fails_the_services_own_503_and_names_it(fake_upscale, capsys):
+    code, report, fake, slept, out = run_7g6tv_shape(fake_upscale, capsys, own_503_calls={8})
+    [entry] = report["determinism"]
+    assert code == 1 and report["failures"] == ["swinir-x4 800x1200 determinism: 1 non-200: HTTP 503"]
+    assert report["retries"] == [] and len(fake.calls) == 2 + 12 and entry["platformRetries"] == 0
+    assert ("determinism swinir-x4 800x1200: 12 calls, 0 platform retries, 2 instances, 1 distinct outputs (byte-identical): "
+            "FAILED (1 non-200: HTTP 503)") in out
+
+
+def test_determinism_round_fails_when_cloud_run_turns_away_more_than_the_cap_in_one_round(fake_upscale, capsys):
+    # Three of the 12 determinism calls rejected (their retries are answered): over PLATFORM_REJECTIONS_PER_ROUND (2).
+    code, report, fake, slept, out = run_7g6tv_shape(fake_upscale, capsys, platform_calls={4, 5, 6})
+    [entry] = report["determinism"]
+    assert code == 1 and all(c["status"] == 200 for c in entry["calls"]) and entry["platformRetries"] == 3
+    reason = ("Cloud Run turned away 3 attempts in one round of 12 calls (at most 2); a capacity problem, not a passing rejection")
+    assert report["failures"] == [f"swinir-x4 800x1200 determinism round 1: {reason}"]
+    assert f"FAILED (swinir-x4 800x1200 determinism round 1: {reason})" in out
+    # Two rejections in one round are still within the cap.
+    code, report, *_ = run_7g6tv_shape(fake_upscale, capsys, platform_calls={4, 5})
+    assert code == 0 and report["determinism"][0]["platformRetries"] == 2
+
+
+def test_served_call_gives_up_on_a_platform_503_after_the_retries_and_names_it_in_the_failure(capsys):
+    slept, log = [], []
+    attempts = iter([probe.UpscaleAnswer(503, 0.1, rejection="HTTP 503 from the platform, not the service") for _ in range(3)])
+    answer = probe.served_call(lambda: next(attempts), "swinir-x4 800x1200 /upscale", slept.append, log, busy_retries=30, busy_sleep_s=10)
+    assert answer.status == 503 and answer.rejections == 3 and slept == [5, 10]
+    assert [e["nextInS"] for e in log] == [5, 10, None]
+    assert "(attempt 3 of 3); giving up" in capsys.readouterr().out
+    assert probe.non200_text([answer, probe.UpscaleAnswer(200, 3.0)]) == "1 non-200: platform 503 after 2 retries"
+    # A 429 waits in the determinism round's queue retry and is not a platform rejection there.
+    attempts = iter([probe.UpscaleAnswer(429, 0.1, rejection="HTTP 429 from the platform, not the service"), probe.UpscaleAnswer(200, 3.0)])
+    slept = []
+    answer = probe.served_call(lambda: next(attempts), "x", slept.append, None, busy_retries=30, busy_sleep_s=10)
+    assert answer.status == 200 and answer.rejections == 0 and slept == [10]
+
+
+def test_measured_round_retries_one_platform_503_and_times_only_the_answered_attempt(fake_upscale, capsys):
+    fake = fake_upscale(platform_calls={2})
+    code, reports = run_upscale_probe(fake.url, "--sizes", "64x96", "--rounds", "2", *BUCKET)
+    row = reports[0][1]["rows"][0]
+    assert code == 0 and row["non200"] == 0 and row["calls"] == 3 and row["platformRetries"] == 1 and len(fake.calls) == 4
+    assert [c["platformRetries"] for c in row["callLog"]] == [0, 1, 0]
+    assert "platform retries swinir-x2 64x96: 1 in 3 calls (not timed; at most 2 per round)" in capsys.readouterr().out
+
+
+def test_platform_rejection_is_a_fast_non_json_429_or_503_only():
+    assert probe.platform_rejection(http_error(503, PLATFORM_503), 0.1) == "HTTP 503 from the platform, not the service"
+    assert probe.platform_rejection(http_error(429, b"Rate exceeded."), 0.1) == "HTTP 429 from the platform, not the service"
+    # Slower than PLATFORM_REJECTION_MAX_S: possibly an instance that crashed during the call; never retried.
+    assert probe.platform_rejection(http_error(503, PLATFORM_503), probe.PLATFORM_REJECTION_MAX_S + 0.1) is None
+    assert probe.platform_rejection(http_error(503, b'{"error": "upscale failed"}'), 0.1) is None
+    assert probe.platform_rejection(http_error(500, PLATFORM_503), 0.1) is None
+    assert probe.platform_rejection(urllib.error.URLError(ConnectionRefusedError()), 0.1) is None
+
+
+def test_matting_probe_retries_a_platform_503_on_a_matte_call_and_still_fails_its_own_error(fake_matting, capsys):
+    fake = fake_matting(resident=4, platform_calls={2})
+    code, report = run_probe(fake.url, "--models", "bria-rmbg", "--rounds", "1")
+    assert code == 0, report["failures"]
+    assert report["rows"][0]["platformRetries"] == 1 and report["rows"][0]["non200"] == 0
+    assert [r["call"] for r in report["retries"]] == ["bria-rmbg /matte"]
+    assert "platform retries bria-rmbg: 1 in 2 calls (not timed; at most 2 per round)" in capsys.readouterr().out
+    fake = fake_matting(resident=4, fail_model="bria-rmbg")
+    code, report = run_probe(fake.url, "--models", "bria-rmbg", "--rounds", "1")
+    assert code == 1 and report["failures"] == ["bria-rmbg: 2 non-200: HTTP 500"] and report["retries"] == []
