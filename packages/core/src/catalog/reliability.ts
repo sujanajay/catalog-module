@@ -3,8 +3,8 @@
 // reliability card.
 // - Incidents (F3-R2) are found by the sweep every 10 minutes (syncIncidents): a failed batch, a chunk that gave up
 //   after its retries, an ERROR invariant (open until a clean run). Writes are keyed (dedupe_key), so a repeated sweep
-//   writes nothing twice. Stall and outage incidents are not here: they move to the M1-S4b outage slice, built on one
-//   health ledger (M6 decision S6-20).
+//   writes nothing twice. Stall and outage incidents (kind upscaler_outage) are written by the M1-S4b outage
+//   pass from the upscaler health ledger (catalog/upscaler-health.ts; M6 decisions S6-20, S6-21).
 // - Touches (F3-R3) are written by the web API layer after an operator write that counts (TOUCH_ACTIONS) succeeded.
 // - Outcomes (F3-R1) are written at finalize and refreshed by the sweep for batches that ended in the last 24 hours,
 //   so a failed or cancelled batch, and an incident or touch that lands after finalize, are counted.

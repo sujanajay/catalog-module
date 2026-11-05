@@ -24,6 +24,13 @@ export interface InvariantCheck {
  * once a day, so a fresh export is up to 24 hours old just before the next run; the 2 extra hours cover that run itself.
  */
 export const EXPORT_STALE_HOURS = 26;
+/**
+ * M6-S2 (M6-F1-R4): the daily cost reconciliation (catalog-cost-reconcile, 06:00 UTC) is stale when its newest
+ * catalog_cost_days row is older than this: a day between runs plus 6 hours for a slow or retried run.
+ */
+export const COST_RECONCILE_STALE_HOURS = 30;
+/** M6-S2 (M6-F1-R10, M6 decision S6-8): an alert of the daily checks stays reported for this long after it was written. */
+export const DAILY_ALERT_HOURS = 24;
 /** A running chunk whose lease ended more than this long ago should have been recovered by the sweep. */
 export const STALE_LEASE_MS = 5 * 60_000;
 /** A running chunk is slow when it ran longer than SLOW_CHUNK_FACTOR x its batch's median finished chunk and SLOW_CHUNK_MIN_MS. */
@@ -142,5 +149,33 @@ export const CHECKS: readonly InvariantCheck[] = [
       WHERE NOT EXISTS (SELECT 1 FROM catalog_graph_export_runs AS f
           WHERE f.finished_at IS NOT NULL AND f.error IS NULL AND f.finished_at > ${at(now)} - ${EXPORT_STALE_HOURS}::int * interval '1 hour')
         AND EXISTS (SELECT 1 FROM catalog_graph_export_runs AS o WHERE o.started_at <= ${at(now)} - ${EXPORT_STALE_HOURS}::int * interval '1 hour')`,
+  },
+  {
+    id: "cost_reconcile_stale",
+    sentence: "The daily cost check (catalog-cost-reconcile) finished a run in the last 30 hours, or the cost ledger is younger than that.",
+    severity: "WARNING",
+    // A run writes all its rows in one transaction at the end (the shared database line at least), so the newest
+    // computed_at is the last run that finished; a run that fails part-way writes nothing. One row (the newest) when it
+    // is too old. Before any run: one row (the oldest ledger row) once the ledger is older than 30 hours, so a job that
+    // never ran or never finished is reported too. Not a batch's problem: batch_id null.
+    sql: (now) => sql`SELECT d.id::text AS id, NULL::uuid AS batch_id FROM (
+        SELECT id, computed_at FROM catalog_cost_days ORDER BY computed_at DESC, id DESC LIMIT 1
+      ) AS d
+      WHERE d.computed_at < ${at(now)} - ${COST_RECONCILE_STALE_HOURS}::int * interval '1 hour'
+      UNION ALL
+      SELECT e.id::text AS id, NULL::uuid AS batch_id FROM (
+        SELECT id, at FROM catalog_cost_events ORDER BY at ASC, id ASC LIMIT 1
+      ) AS e
+      WHERE NOT EXISTS (SELECT 1 FROM catalog_cost_days)
+        AND e.at < ${at(now)} - ${COST_RECONCILE_STALE_HOURS}::int * interval '1 hour'`,
+  },
+  {
+    id: "daily_check_alert",
+    sentence: "The daily checks (cost against the bill, labels and prices, the 7-day batch success rate) raised no alert in the last 24 hours.",
+    severity: "WARNING",
+    // The catalog-cost-reconcile job writes each alert once as an `alert` incident; this line carries them to email
+    // (policy 16), because log alerts read Cloud Run services only, never jobs (infra/monitoring.sh).
+    sql: (now) => sql`SELECT i.id, NULL::uuid AS batch_id FROM catalog_incidents AS i
+      WHERE i.kind = 'alert' AND i.created_at > ${at(now)} - ${DAILY_ALERT_HOURS}::int * interval '1 hour'`,
   },
 ];

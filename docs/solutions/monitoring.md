@@ -82,6 +82,8 @@ only, not jobs, so the smoke, eval and load jobs never send emails.
 | 10 | A chunk task ran out of time | chunk_timeout > 0 in 15 min |
 | 11 | Some images were left half-finished (silent outputs) | silent_outputs > 0 in 15 min (spec 17: the `invariant` line with id `silent_outputs` and violations > 0) |
 | 12 | One chunk is far slower than the rest | slow_chunk > 0 in 15 min (spec 17: the `invariant` line with id `slow_chunk`) |
+| 16 | A daily check needs a look | daily_check_alert > 0 in 15 min (M6-S2: an `alert` incident the daily cost check wrote in the last 24 h) |
+| 17 | The daily cost check has not run | cost_reconcile_stale > 0 in 15 min (M6-S2: no `catalog_cost_days` row newer than 30 h) |
 
 Policy 9's metric excludes the messages of policies 1 to 5 so one failure sends one email, not two. Policy 5
 is a failure-type event (held products result), not a spending warning. 503 is left out of
