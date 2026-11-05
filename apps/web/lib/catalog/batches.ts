@@ -111,7 +111,7 @@ export function publicBatch(batch: CatalogBatch) {
   return { ...batch, options };
 }
 /** The batch's state; with `uploads` (any status) the unfinished words also name pending and missing inputs. */
-export function batchState(batch: CatalogBatch, source?: string, now?: Date, uploads?: readonly { status: string }[]) {
+export function batchState(batch: CatalogBatch, source?: string, now?: Date, uploads?: readonly { status: string; kind?: string }[]) {
   return deriveBatchState({ status: batch.status, counts: batch.counts, source, updatedAt: batch.updatedAt, startedAt: batch.startedAt, now, channels: batch.channels, uploads, expired: batch.options.expired ?? null });
 }
 /**
@@ -168,7 +168,17 @@ export async function getBatch(id: string) {
   const uploads = await db().select().from(catalogUploads).where(eq(catalogUploads.batchId, id));
   // Removed inputs stay in `uploads` (the step 1 input list shows them) but say nothing about the source.
   const source = batchSource(uploads.filter((u) => u.status !== "removed").map((u) => u.kind));
-  return { batch: publicBatch(batch), counts: batch.counts, cost: batch.cost, state: batchState(batch, source), uploads, notRefreshedChannels: await notRefreshedChannels(db(), id) };
+  return { batch: publicBatch(batch), counts: batch.counts, cost: batch.cost, state: batchState(batch, source), uploads: uploads.map(withoutListing), notRefreshedChannels: await notRefreshedChannels(db(), id) };
+}
+/**
+ * An upload as the page gets it: a Supabase folder still being read (or paused) leaves out where its listing got to
+ * (up to a few MB, server-only) and says only that it can carry on (`resumable`), which shows Try again.
+ */
+function withoutListing<T extends { detected: unknown }>(upload: T): T {
+  const detected = upload.detected as { supabaseFolder?: { listing?: unknown } } | null;
+  if (!detected?.supabaseFolder?.listing) return upload;
+  const { listing: _listing, ...folder } = detected.supabaseFolder;
+  return { ...upload, detected: { ...detected, supabaseFolder: { ...folder, resumable: true } } };
 }
 /** A batch is a test batch when its name starts with catalog-test or its brand is the test brand. */
 export function isTestBatch(brandSlug: string, name: string): boolean {

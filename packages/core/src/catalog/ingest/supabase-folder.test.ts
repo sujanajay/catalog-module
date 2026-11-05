@@ -1,13 +1,13 @@
 // M1-F1-R4: Supabase folder links as a paste kind. A fake Storage client stands in for Supabase; the
 // real client is checked against a fake fetch (read-only calls, key sent only to the project origin).
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { DEFAULT_BATCH_OPTIONS } from "../../db/schema";
 import { detectPastedText } from "./detect";
 import { groupItems } from "./group";
 import {
-  isReadCall, listSupabaseFolder, parseSupabaseFolderLink, readSupabaseFolder, SUPABASE_EMPTY, SUPABASE_LIST_DEADLINE_MS, SUPABASE_MAX_FOLDERS,
+  isReadCall, listSupabaseFolder, parseSupabaseFolderLink, readSupabaseFolder, SUPABASE_CALL_TIMEOUT_MS, SUPABASE_EMPTY, SUPABASE_GLOBAL_CONCURRENCY, SUPABASE_MAX_PAUSES, supabaseFolderFailsMessage, SUPABASE_LIST_ATTEMPTS, SUPABASE_LIST_CONCURRENCY, SUPABASE_PAUSED, retryAfterMs, SupabaseHttpError, SUPABASE_MAX_FOLDERS, SUPABASE_SLICE_MS,
   SUPABASE_OFF, SUPABASE_OTHER_PROJECT, SUPABASE_PRIVATE, SUPABASE_TOO_LARGE, SUPABASE_UNREADABLE, supabaseFolderLinks, supabaseFolderText,
-  supabaseStorageClient, type SupabaseStorageLike,
+  supabaseStorageClient, type SupabaseListState, type SupabaseStorageLike,
 } from "./supabase-folder";
 import { parsePastedLinks, urlListItems } from "./url-list";
 
@@ -56,6 +56,7 @@ describe("Supabase folder links (M1-F1-R4)", () => {
     for (let i = 0; i < 1005; i++) paths[`anta/Many/P${String(i).padStart(4, "0")}_1.jpg`] = undefined;
     const { client, calls } = fakeClient(paths);
     const listed = await listSupabaseFolder(client, parseSupabaseFolderLink(PUBLIC)!);
+    if (!listed.done) throw new Error("not listed in one request");
     expect(listed.files).toHaveLength(1008);
     expect(listed.skipped).toBe(1);
     expect(listed.truncated).toBe(false);
@@ -89,8 +90,8 @@ describe("Supabase folder links (M1-F1-R4)", () => {
     expect([...g.products].map(([id, items]) => [id, items.length])).toEqual([["ZSKU100", 2]]);
   });
 
-  it("a folder too large to list in one request answers a sentence instead of timing out", async () => {
-    // The folder holds one sub-folder more than the cap, each with one photo.
+  it("a folder with more sub-folders than the cap answers a sentence instead of reading without end", async () => {
+    // The folder holds as many sub-folders as the cap, plus itself: one folder more than the cap.
     const folders = Array.from({ length: SUPABASE_MAX_FOLDERS }, (_, i) => ({ name: `F${String(i).padStart(5, "0")}`, id: null, metadata: null }));
     const wide: SupabaseStorageLike = {
       origin: ORIGIN,
@@ -99,10 +100,19 @@ describe("Supabase folder links (M1-F1-R4)", () => {
         return prefix === "anta" ? folders.slice(offset, offset + limit) : [{ name: "A_1.jpg", id: "x", metadata: { size: 9e4 } }];
       },
     };
-    expect(await readSupabaseFolder(wide, PUBLIC)).toEqual({ ok: false, error: SUPABASE_TOO_LARGE });
-    let t = 0;
-    const slow = () => (t += SUPABASE_LIST_DEADLINE_MS / 2);
-    await expect(listSupabaseFolder(fakeClient({ "anta/A/B_1.jpg": undefined, "anta/C/D_1.jpg": undefined }).client, parseSupabaseFolderLink(PUBLIC)!, slow)).rejects.toThrow();
+    // One request with all the time it needs, then the same folder carried on over short requests (a clock that ticks per look).
+    expect(await readSupabaseFolder(wide, PUBLIC, { sliceMs: 1e9 })).toEqual({ ok: false, error: SUPABASE_TOO_LARGE });
+    let state: SupabaseListState | undefined;
+    let tick = 0;
+    let requests = 0;
+    for (;;) {
+      requests++;
+      const read = await readSupabaseFolder(wide, PUBLIC, { state, sliceMs: 2000, now: () => tick++ });
+      if (!read.ok && read.reading) { state = read.state; continue; }
+      expect(read).toEqual({ ok: false, error: SUPABASE_TOO_LARGE });
+      expect(requests).toBeGreaterThan(1);
+      break;
+    }
   });
 
   it("answers a plain sentence instead of reading when it cannot or must not", async () => {
@@ -151,5 +161,279 @@ describe("Supabase folder links (M1-F1-R4)", () => {
     // A bucket name cannot smuggle another path in: it is encoded into one segment.
     await client.list("softlines/../../bucket", "", 0, 1);
     expect(seen).toEqual([`POST ${ORIGIN}/storage/v1/object/list/softlines%2F..%2F..%2Fbucket`]);
+  });
+});
+
+// R1 exit finding 1: a whole brand folder (softlines/vero-moda, 477 product folders) did not fit the old serial
+// 45 s listing. A fake Storage client with a fixed delay per list call (about 200 ms was measured against the
+// brand photo store) and fake timers stand in for Supabase, so a minute of listing runs in well under a second.
+describe("large Supabase folders (R1 exit finding 1)", () => {
+  afterEach(() => { vi.useRealTimers(); });
+  const LATENCY_MS = 200;
+
+  /** A brand folder of `count` product folders with two photos each, answering every list call after LATENCY_MS. */
+  function brandFolder(count: number) {
+    const products = Array.from({ length: count }, (_, i) => `P${String(i).padStart(5, "0")}`);
+    let inFlight = 0;
+    let maxInFlight = 0;
+    let calls = 0;
+    const client: SupabaseStorageLike = {
+      origin: ORIGIN,
+      async isPublic() { return true; },
+      async list(_bucket, prefix, offset, limit) {
+        calls++;
+        inFlight++;
+        maxInFlight = Math.max(maxInFlight, inFlight);
+        await new Promise((resolve) => setTimeout(resolve, LATENCY_MS));
+        inFlight--;
+        if (prefix === "brand") return products.slice(offset, offset + limit).map((name) => ({ name, id: null, metadata: null }));
+        return offset ? [] : [{ name: "back.jpg", id: `${prefix}/b`, metadata: { size: 9e4 } }, { name: "front.jpg", id: `${prefix}/f`, metadata: { size: 9e4 } }];
+      },
+    };
+    return { client, products, stats: () => ({ maxInFlight, calls }) };
+  }
+
+  /** Runs one request under fake timers and gives its answer and how long it took in fake time. */
+  async function timed<T>(work: () => Promise<T>): Promise<{ value: T; ms: number }> {
+    const started = Date.now();
+    let value: { v: T } | null = null;
+    let error: unknown = null;
+    work().then((v) => { value = { v }; }, (err: unknown) => { error = err; });
+    while (!value && !error) await vi.advanceTimersByTimeAsync(20);
+    if (error) throw error;
+    return { value: (value as unknown as { v: T }).v, ms: Date.now() - started };
+  }
+
+  const LINK = `${ORIGIN}/storage/v1/object/public/softlines/brand`;
+
+  it("500 product folders are listed in parallel and read in one short request", async () => {
+    vi.useFakeTimers();
+    const { client, stats } = brandFolder(500);
+    const { value: read, ms } = await timed(() => readSupabaseFolder(client, LINK));
+    expect(read).toMatchObject({ ok: true, mode: "folder", photos: 1000 });
+    // Serially, 501 calls of 200 ms take 100 s (the old 45 s deadline failed); 16 at a time take about 7 s.
+    expect(stats()).toEqual({ maxInFlight: SUPABASE_LIST_CONCURRENCY, calls: 501 });
+    expect(ms).toBeLessThan(10_000);
+  });
+
+  it("5,000 product folders are read over several requests, each inside the slice, and every photo comes back once", async () => {
+    vi.useFakeTimers();
+    const { client, products, stats } = brandFolder(5000);
+    let state: SupabaseListState | undefined;
+    const requests: number[] = [];
+    let done: Awaited<ReturnType<typeof readSupabaseFolder>> | null = null;
+    while (!done) {
+      const { value: read, ms } = await timed(() => readSupabaseFolder(client, LINK, { state }));
+      requests.push(ms);
+      expect(read.ok || read.reading, JSON.stringify(read).slice(0, 200)).toBe(true);
+      if (!read.ok && read.reading) {
+        expect(read.message).toMatch(/^Reading Supabase folder softlines\/brand: [\d,]+ photos in [\d,]+ folders so far\.$/);
+        // The state is stored as jsonb between requests.
+        state = JSON.parse(JSON.stringify(read.state)) as SupabaseListState;
+      } else done = read;
+    }
+    // About 63 s of listing at 16 at a time: three requests, none longer than the slice and one call in flight.
+    expect(requests.length).toBeGreaterThanOrEqual(3);
+    for (const ms of requests) expect(ms).toBeLessThanOrEqual(SUPABASE_SLICE_MS + LATENCY_MS * 5);
+    expect(stats().maxInFlight).toBe(SUPABASE_LIST_CONCURRENCY);
+    // One call per product folder, and six root pages (the fifth is full, so a sixth comes back empty).
+    expect(stats().calls).toBe(5000 + 6);
+    if (!done.ok) throw new Error("not read");
+    expect(done.photos).toBe(10_000);
+    const lines = done.text.split("\n");
+    expect(new Set(lines).size).toBe(10_000);
+    expect(new Set(lines.map((line) => line.split("\t")[0]))).toEqual(new Set(products));
+    expect(done.message).toBe("Supabase folder softlines/brand: 10,000 photos in 5,000 folders, grouped by folder name.");
+  });
+
+  it("each request starts at least one folder, so a listing always moves forward", async () => {
+    const { client } = fakeClient({ "anta/A/1.jpg": undefined, "anta/B/1.jpg": undefined });
+    const link = parseSupabaseFolderLink(PUBLIC)!;
+    let listed = await listSupabaseFolder(client, link, { sliceMs: -1 });
+    let requests = 1;
+    while (!listed.done) {
+      listed = await listSupabaseFolder(client, link, { state: listed.state, sliceMs: -1 });
+      requests++;
+    }
+    expect(requests).toBe(3);
+    expect(listed.files.map((f) => f.path)).toEqual(["A/1.jpg", "B/1.jpg"]);
+  });
+});
+
+// Review P2-1: Supabase errors during a long listing are retried with backoff, a listing that still fails keeps its
+// progress, and list calls are capped across concurrent reads in one web instance.
+describe("Supabase errors and the instance-wide cap (review P2-1)", () => {
+  afterEach(() => { vi.useRealTimers(); });
+  const LINK = `${ORIGIN}/storage/v1/object/public/softlines/brand`;
+  const link = parseSupabaseFolderLink(LINK)!;
+
+  /** 30 product folders of one photo; `fail(prefix, call)` may throw for a call. */
+  function flaky(fail: (prefix: string, call: number) => Error | null) {
+    const calls = new Map<string, number>();
+    const client: SupabaseStorageLike = {
+      origin: ORIGIN,
+      async isPublic() { return true; },
+      async list(_bucket, prefix, offset) {
+        const n = (calls.get(prefix) ?? 0) + 1;
+        calls.set(prefix, n);
+        const err = fail(prefix, n);
+        if (err) throw err;
+        if (offset) return [];
+        if (prefix === "brand") return Array.from({ length: 30 }, (_, i) => ({ name: `P${String(i).padStart(2, "0")}`, id: null, metadata: null }));
+        return [{ name: "front.jpg", id: `${prefix}/f`, metadata: { size: 9e4 } }];
+      },
+    };
+    return { client, calls };
+  }
+
+  it("a 503 and a dropped connection are retried with backoff, and the listing ends read", async () => {
+    const waits: number[] = [];
+    const { client, calls } = flaky((prefix, n) => (prefix === "brand/P03" && n === 1 ? new SupabaseHttpError(503, null) : prefix === "brand/P04" && n < 3 ? new TypeError("fetch failed") : null));
+    // random 0.5 is the middle of the jitter: the plain backoff.
+    const listed = await listSupabaseFolder(client, link, { sleep: async (ms) => { waits.push(ms); }, random: () => 0.5 });
+    if (!listed.done) throw new Error("not done");
+    expect(listed.files).toHaveLength(30);
+    expect(new Set(listed.files.map((f) => f.path)).size).toBe(30);
+    expect(calls.get("brand/P03")).toBe(2);
+    expect(calls.get("brand/P04")).toBe(3);
+    expect(waits.sort((a, b) => a - b)).toEqual([500, 500, 1000]);
+  });
+
+  it("a 429 waits as long as its Retry-After says (capped), and a 404 is not retried", async () => {
+    const waits: number[] = [];
+    const limited = flaky((prefix, n) => (prefix === "brand/P01" && n === 1 ? new SupabaseHttpError(429, 3000) : prefix === "brand/P02" && n === 1 ? new SupabaseHttpError(429, 60_000) : null));
+    expect((await listSupabaseFolder(limited.client, link, { sleep: async (ms) => { waits.push(ms); }, random: () => 0 })).done).toBe(true);
+    expect(waits.sort((a, b) => a - b)).toEqual([3000, 10_000]);
+    expect(retryAfterMs("3")).toBe(3000);
+    expect(retryAfterMs(new Date(Date.now() + 5000).toUTCString(), Date.now())).toBeGreaterThan(3000);
+    expect(retryAfterMs(null)).toBeNull();
+    const missing = flaky((prefix) => (prefix === "brand/P05" ? new SupabaseHttpError(404, null) : null));
+    // A 404 will not get better: the read fails at once instead of pausing (review 2 P3-2).
+    expect(await readSupabaseFolder(missing.client, LINK, { sleep: async () => undefined })).toEqual({ ok: false, error: SUPABASE_UNREADABLE });
+    expect(missing.calls.get("brand/P05")).toBe(1);
+  });
+
+  it("a folder that keeps failing pauses the listing with everything read so far; the next read carries on and every photo comes once", async () => {
+    let down = true;
+    const { client, calls } = flaky((prefix) => (down && prefix === "brand/P07" ? new SupabaseHttpError(502, null) : null));
+    const paused = await readSupabaseFolder(client, LINK, { sleep: async () => undefined });
+    if (paused.ok || paused.reading || !paused.state) throw new Error(`not paused: ${JSON.stringify(paused).slice(0, 200)}`);
+    expect(paused.error).toBe(SUPABASE_PAUSED);
+    expect(calls.get("brand/P07")).toBe(SUPABASE_LIST_ATTEMPTS);
+    expect(paused.state.pending).toContain("P07");
+    expect(paused.state.files.some((f) => f.path.startsWith("P07/"))).toBe(false);
+    expect(paused.state.files.length).toBeGreaterThan(0);
+    down = false;
+    const rootCalls = calls.get("brand");
+    const read = await readSupabaseFolder(client, LINK, { state: JSON.parse(JSON.stringify(paused.state)) as SupabaseListState });
+    expect(read).toMatchObject({ ok: true, photos: 30 });
+    expect(calls.get("brand")).toBe(rootCalls); // the root is not listed again
+    for (let i = 0; i < 30; i++) if (i !== 7) expect(calls.get(`brand/P${String(i).padStart(2, "0")}`)).toBe(1);
+  });
+
+  it("two brand folders read at once never have more than SUPABASE_GLOBAL_CONCURRENCY list calls in flight", async () => {
+    const CALL_MS = 200; // fake time (vi.useFakeTimers)
+    vi.useFakeTimers();
+    let inFlight = 0;
+    let max = 0;
+    const slow = (name: string): SupabaseStorageLike => ({
+      origin: ORIGIN,
+      async isPublic() { return true; },
+      async list(_bucket, prefix, offset) {
+        inFlight++;
+        max = Math.max(max, inFlight);
+        await new Promise((resolve) => setTimeout(resolve, CALL_MS));
+        inFlight--;
+        if (offset) return [];
+        if (prefix === name) return Array.from({ length: 200 }, (_, i) => ({ name: `P${i}`, id: null, metadata: null }));
+        return [{ name: "a.jpg", id: `${prefix}/a`, metadata: { size: 9e4 } }];
+      },
+    });
+    let finished = 0;
+    const both = Promise.all([
+      readSupabaseFolder(slow("one"), `${ORIGIN}/storage/v1/object/public/softlines/one`),
+      readSupabaseFolder(slow("two"), `${ORIGIN}/storage/v1/object/public/softlines/two`),
+    ]).then((r) => { finished++; return r; });
+    while (!finished) await vi.advanceTimersByTimeAsync(20);
+    const [one, two] = await both;
+    expect([one.ok, two.ok]).toEqual([true, true]);
+    expect(max).toBe(SUPABASE_GLOBAL_CONCURRENCY);
+    expect(SUPABASE_GLOBAL_CONCURRENCY).toBeLessThan(2 * SUPABASE_LIST_CONCURRENCY);
+  });
+
+  it("the real client turns an HTTP error into SupabaseHttpError with its Retry-After", async () => {
+    const fakeFetch = (async () => new Response("slow down", { status: 429, headers: { "retry-after": "2" } })) as unknown as typeof fetch;
+    const client = supabaseStorageClient(ORIGIN, "test-key", fakeFetch);
+    await expect(client.list("softlines", "anta", 0, 1)).rejects.toMatchObject({ status: 429, retryAfterMs: 2000 });
+  });
+});
+
+// Re-review of PR #182 (review 2): retries are jittered, a hung call times out and is retried, a folder that keeps
+// failing ends the read instead of pausing for ever, and an error that asking again cannot fix fails at once.
+describe("bounded, jittered Supabase retries (review 2)", () => {
+  const LINK = `${ORIGIN}/storage/v1/object/public/softlines/brand`;
+  const link = parseSupabaseFolderLink(LINK)!;
+  function folders(fail: (prefix: string, call: number) => Error | null) {
+    const calls = new Map<string, number>();
+    const client: SupabaseStorageLike = {
+      origin: ORIGIN,
+      async isPublic() { return true; },
+      async list(_bucket, prefix, offset) {
+        const n = (calls.get(prefix) ?? 0) + 1;
+        calls.set(prefix, n);
+        const err = fail(prefix, n);
+        if (err) throw err;
+        if (offset) return [];
+        if (prefix === "brand") return Array.from({ length: 10 }, (_, i) => ({ name: `P${i}`, id: null, metadata: null }));
+        return [{ name: "front.jpg", id: `${prefix}/f`, metadata: { size: 9e4 } }];
+      },
+    };
+    return { client, calls };
+  }
+
+  it("calls that fail together come back at different times (jitter), within half to one and a half of the backoff", async () => {
+    const waits: number[] = [];
+    let r = 0;
+    const randoms = [0, 0.99, 0.25, 0.75];
+    const { client } = folders((prefix, n) => (n === 1 && (prefix === "brand/P1" || prefix === "brand/P2") ? new SupabaseHttpError(503, null) : null));
+    await listSupabaseFolder(client, link, { sleep: async (ms) => { waits.push(ms); }, random: () => randoms[r++ % randoms.length]! });
+    expect(waits).toHaveLength(2);
+    expect(new Set(waits).size).toBe(2);
+    for (const ms of waits) { expect(ms).toBeGreaterThanOrEqual(250); expect(ms).toBeLessThan(750); }
+  });
+
+  it("a timed-out call is retried like a dropped connection", async () => {
+    const timeout = () => Object.assign(new Error("The operation was aborted due to timeout"), { name: "TimeoutError" });
+    const { client, calls } = folders((prefix, n) => (prefix === "brand/P3" && n === 1 ? timeout() : null));
+    expect(await readSupabaseFolder(client, LINK, { sleep: async () => undefined })).toMatchObject({ ok: true, photos: 10 });
+    expect(calls.get("brand/P3")).toBe(2);
+  });
+
+  it("the real client gives every call a timeout signal", async () => {
+    const signals: unknown[] = [];
+    const fakeFetch = (async (_url: string, init: RequestInit = {}) => { signals.push(init.signal); return Response.json([]); }) as unknown as typeof fetch;
+    await supabaseStorageClient(ORIGIN, "test-key", fakeFetch).list("softlines", "anta", 0, 1);
+    expect(signals[0]).toBeInstanceOf(AbortSignal);
+    expect(SUPABASE_CALL_TIMEOUT_MS).toBeLessThan(SUPABASE_SLICE_MS);
+  });
+
+  it("a folder that keeps failing pauses at most SUPABASE_MAX_PAUSES times, then the read fails naming it", async () => {
+    const { client } = folders((prefix) => (prefix === "brand/P4" ? new SupabaseHttpError(502, null) : null));
+    let state: SupabaseListState | undefined;
+    const answers: string[] = [];
+    for (let i = 0; i < SUPABASE_MAX_PAUSES + 2; i++) {
+      const read = await readSupabaseFolder(client, LINK, { state, sleep: async () => undefined });
+      if (read.ok) throw new Error("read");
+      answers.push(read.reading ? "reading" : read.error);
+      if (read.reading || !read.state) { if (!read.reading) break; state = read.state; continue; }
+      state = JSON.parse(JSON.stringify(read.state)) as SupabaseListState;
+    }
+    expect(answers).toEqual([...Array(SUPABASE_MAX_PAUSES - 1).fill(SUPABASE_PAUSED), supabaseFolderFailsMessage("brand/P4")]);
+  });
+
+  it("an error asking again cannot fix (a refused call, an unreadable answer) is not retried and fails the read", async () => {
+    const { client, calls } = folders((prefix) => (prefix === "brand/P5" ? new SyntaxError("Unexpected token < in JSON") : null));
+    expect(await readSupabaseFolder(client, LINK, { sleep: async () => undefined })).toEqual({ ok: false, error: SUPABASE_UNREADABLE });
+    expect(calls.get("brand/P5")).toBe(1);
   });
 });

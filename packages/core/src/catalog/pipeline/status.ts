@@ -30,6 +30,10 @@ export const NEEDS_INPUT_TEXT = "Needs your input: which column holds the identi
 /** A draft with inputs that were never handed to collecting (step 1 Continue not pressed, or its hand-off failed). Not in the parent copy register yet. */
 export const NOT_COLLECTED_TEXT = "Added, not collected yet";
 export const pendingUploadsText = (n: number) => `${num(n)} ${plural(n, "file", "files")} did not finish uploading`;
+/** A pending pasted-links row is a Supabase folder read over several requests (R1 exit finding 1), not a file upload. */
+export const readingFoldersText = (n: number) => `${n === 1 ? "A Supabase folder was" : `${num(n)} Supabase folders were`} not finished reading. Open the batch and paste the folder link again`;
+/** A pending upload that is a Supabase folder still being read (links.ts), not a file. */
+export const isReadingFolder = (u: { status: string; kind?: string }) => u.status === "pending" && u.kind === "url_list";
 export const couldNotStartText = (reason: string | null | undefined) => `Could not start: ${reason ?? "Start the batch again."}`;
 export const cancelledText = (age: string) => `Cancelled ${age}`;
 /** A draft the sweep cancelled after `days` days without a write (spec 14d F12). */
@@ -173,10 +177,12 @@ export function timeLeftText(input: { planned: number; done: number; startedAt: 
   return `about ${Math.max(1, Math.ceil((input.planned - input.done) / perMinute))} min left`;
 }
 /** Draft words: what an operator returning to an unfinished draft must do next (spec 14c F4 part 2). Without `uploads` the input checks are skipped. */
-function draftWords(c: BatchCounts, channels: readonly ChannelId[] | undefined, uploads: readonly { status: string }[] | undefined): string {
+function draftWords(c: BatchCounts, channels: readonly ChannelId[] | undefined, uploads: readonly { status: string; kind?: string }[] | undefined): string {
   const inputs = uploads?.filter((u) => u.status !== "removed");
-  const pending = inputs?.filter((u) => u.status === "pending").length ?? 0;
+  const reading = inputs?.filter(isReadingFolder).length ?? 0;
+  const pending = (inputs?.filter((u) => u.status === "pending").length ?? 0) - reading;
   if (pending > 0) return pendingUploadsText(pending);
+  if (reading > 0) return readingFoldersText(reading);
   if (inputs && !inputs.length) return NOTHING_ADDED_TEXT;
   if (c.phase === "needs_input") return NEEDS_INPUT_TEXT;
   if (!c.previewReady) return NOT_COLLECTED_TEXT;
@@ -192,7 +198,7 @@ export interface BatchStateInput {
   /** Pass the row's value: `null` marks a failed batch as failed before Start (`fixable`); left out, it never is. */ startedAt?: Date | string | null;
   /** Styli outputs skipped as too small; counts.skipped also holds removed and chart skips. */ styliSkipped?: number;
   /** The batch's channels: a ready draft with channels reads "Ready to start". */ channels?: readonly ChannelId[];
-  /** The batch's uploads (any status): pending and missing inputs are named in `intake`; left out, those checks are skipped. */ uploads?: readonly { status: string }[];
+  /** The batch's uploads (any status): pending and missing inputs are named in `intake`; left out, those checks are skipped. */ uploads?: readonly { status: string; kind?: string }[];
   /** `options.expired`: a cancelled batch the sweep expired reads "Expired after <N> days with no activity". */ expired?: { days: number } | null;
 }
 export function deriveBatchState(input: BatchStateInput): BatchState {
