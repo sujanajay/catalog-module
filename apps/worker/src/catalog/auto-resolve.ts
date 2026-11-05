@@ -2,6 +2,7 @@ import sharp from "sharp";
 import { eq } from "drizzle-orm";
 import { catalogBatches, catalogOutputs, catalogProducts, catalogSourceImages } from "@catalog/core/db/schema";
 import { batchPrefix, stagingPath } from "@catalog/core/catalog/naming";
+import { imageAsset, recordOutputVersion } from "@catalog/core/graph/write-path";
 import { shotGeometry, type Matte, type Prepared, type RenderInput, type RenderMeasured, type RenderOutput } from "@catalog/core/catalog/render";
 import { actionsOn, autoActionsOf, diagnoseOutput, failuresOf, LadderStopped, MAX_REJUDGES_PER_PHOTO, MAX_REPAIRS_PER_OUTPUT, measuredOf, ownDefects, RENDER_FLAGS, variantOf, withAutoActions, type AutoAction, type AutoActionKind, type Repair, type RenderVariant } from "@catalog/core/catalog/auto-resolve";
 import { strictestChannel } from "@catalog/core/catalog/qa/policy";
@@ -255,6 +256,8 @@ async function writeRender(deps: CatalogDeps, input: Pick<ResolvePhotoInput,"bat
   const path = stagingPath(batchPrefix(batch.brandSlug,batch.id,batch.isTest),product.pathKey,o.channel,source.n), uri = deps.storage.toGsUri(deps.storage.getBucketName(),path);
   await underClaim(async()=>deps.storage.uploadBuffer(path,jpeg,"image/jpeg",{cacheControl:deps.storage.PUBLIC_CACHE_CONTROL}));
   const head = await deps.storage.headObject(uri);
+  // M0-F2-R2, R3: the re-made bytes are a new version of the output.
+  const asset = await imageAsset(jpeg,uri,"image/jpeg");
   // Judge flags other than the resolved defects stay (a photo problem is not ours to fix); render flags are the new render's.
   const judged = o.flags.filter(f=>!RENDER_FLAGS.has(f) && !input.trigger.includes(f));
   const flags = [...new Set<OutputFlag>([...extra.sourceFlags,...r.flags,...judged])], status = input.statusFor(flags);
@@ -263,7 +266,7 @@ async function writeRender(deps: CatalogDeps, input: Pick<ResolvePhotoInput,"bat
   const key = rerenderedKey(o,r.upscale?.model,()=>renderKey({sourceSha256:source.sha256,channel:o.channel,n:source.n,policyKey:`default|${input.policy.matteModel}`,rulesVersion:rules.keyVersion(o.channel)}));
   // The options this image was made with stay with it (relative to the stored matte), so a later repair starts from them.
   const variant = extra.variant ? {...extra.variant,matte:"first" as const}:undefined;
-  await underClaim(async tx=>tx.update(catalogOutputs).set({renderKey:key,canvasW:r.plan.w,canvasH:r.plan.h,scale:r.plan.scale,placedX:r.plan.placedX,placedY:r.plan.placedY,bytes:r.bytes,quality:r.quality,flags,qaScores:extra.qaScores,
+  await underClaim(async tx=>tx.update(catalogOutputs).set({contentVersionId:await recordOutputVersion(tx,{output:{...o,flags},source,product,batch,asset}),renderKey:key,canvasW:r.plan.w,canvasH:r.plan.h,scale:r.plan.scale,placedX:r.plan.placedX,placedY:r.plan.placedY,bytes:r.bytes,quality:r.quality,flags,qaScores:extra.qaScores,
     compliance:withAutoActions({...r.compliance,...(variant ? {variant}:{}),auto_actions:autoActionsOf(o.compliance)},all),stagingUri:uri,crc32c:head.crc32c ?? null,status,
     reason:r.notes.join("; ") || (status === "needs_attention" ? o.reason:null),updatedAt:deps.now()}).where(eq(catalogOutputs.id,o.id)));
   return status !== "needs_attention";

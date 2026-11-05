@@ -33,6 +33,7 @@ import {
   catalogUploads,
   type CatalogUpload,
 } from "../../db/schema";
+import { recordSourcePhotoVersions } from "../../graph/write-path";
 import { eachLimit } from "../../concurrency";
 import { getBucketName, isRetryableStorageError, toGsUri } from "../../storage";
 import type { enqueueTask } from "../../tasks";
@@ -1461,6 +1462,12 @@ async function placeBatch(db: Db, deps: PlaceDeps, batchId: string, token: strin
   for (let i = 0; i < versions.length; i += 500) {
     await db.insert(catalogSourceImages).values(versions.slice(i, i + 500)).onConflictDoNothing();
   }
+  // M0-F2-R1: every accepted photo is an asset and a brand version of the product's option (null until M0-S2 links it).
+  const optionOf = new Map<string, string | null>();
+  for (let i = 0; i < productIds.length; i += 1000) {
+    for (const p of await db.select({ id: catalogProducts.id, optionId: catalogProducts.optionId }).from(catalogProducts).where(inArray(catalogProducts.id, productIds.slice(i, i + 1000)))) optionOf.set(p.id, p.optionId);
+  }
+  await recordSourcePhotoVersions(db, versions.map((v) => ({ ...v, optionId: optionOf.get(v.productId) ?? null, isTest: batch.isTest })));
   await saveJson(deps, statePath(prefix), state.preview);
 
   // An input removed or changed while this ran (spec 14b F3, M1 D24) makes this result out of date: the step groups

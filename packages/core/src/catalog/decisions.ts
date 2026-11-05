@@ -234,7 +234,7 @@ export async function resetPhotoEnlargement(tx: Tx, target: Pick<Output, "batchI
   // F59: Try again resets the photo's identity-change count.
   await tx.update(catalogEnlargements).set({ identityReleases: 0 }).where(and(eq(catalogEnlargements.batchId, target.batchId), eq(catalogEnlargements.sourceImageId, target.sourceImageId)));
   for (const o of outputs) {
-    await tx.update(catalogOutputs).set({ status: "pending", qaScores: null, compliance: { ok: true, failures: [], ...(o.compliance?.auto_actions ? { auto_actions: o.compliance.auto_actions } : {}) } as Output["compliance"], flags: o.flags.filter(f => !opts.dropFlags.includes(f)), reason: null, error: null, stagingUri: null, bytes: null, updatedAt: now }).where(eq(catalogOutputs.id, o.id));
+    await tx.update(catalogOutputs).set({ status: "pending", qaScores: null, compliance: { ok: true, failures: [], ...(o.compliance?.auto_actions ? { auto_actions: o.compliance.auto_actions } : {}) } as Output["compliance"], flags: o.flags.filter(f => !opts.dropFlags.includes(f)), reason: null, error: null, stagingUri: null, bytes: null, contentVersionId: null, updatedAt: now }).where(eq(catalogOutputs.id, o.id));
   }
   await tx.update(catalogProducts).set({ lockBatchId: target.batchId, updatedAt: now }).where(eq(catalogProducts.id, target.productId));
   const [index] = await tx.select({ value: sql<number>`coalesce(max(${catalogChunks.index}), -1) + 1` }).from(catalogChunks).where(eq(catalogChunks.batchId, target.batchId));

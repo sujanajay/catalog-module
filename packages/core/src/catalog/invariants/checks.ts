@@ -31,6 +31,13 @@ export const EXPORT_STALE_HOURS = 26;
 export const COST_RECONCILE_STALE_HOURS = 30;
 /** M6-S2 (M6-F1-R10, M6 decision S6-8): an alert of the daily checks stays reported for this long after it was written. */
 export const DAILY_ALERT_HOURS = 24;
+/**
+ * M0-S3 output_without_version: batches created in the last 14 days are checked (a batch stages new images within days;
+ * an M1-S4 improvement runs within 72 hours of delivery), and outputs count from 30 minutes after the write path's first
+ * output version (a rolling deploy's old revision may still stage a few without one).
+ */
+export const OUTPUT_VERSION_WINDOW_DAYS = 14;
+export const OUTPUT_VERSION_GRACE_MIN = 30;
 /** A running chunk whose lease ended more than this long ago should have been recovered by the sweep. */
 export const STALE_LEASE_MS = 5 * 60_000;
 /** A running chunk is slow when it ran longer than SLOW_CHUNK_FACTOR x its batch's median finished chunk and SLOW_CHUNK_MIN_MS. */
@@ -177,5 +184,30 @@ export const CHECKS: readonly InvariantCheck[] = [
     // (policy 16), because log alerts read Cloud Run services only, never jobs (infra/monitoring.sh).
     sql: (now) => sql`SELECT i.id, NULL::uuid AS batch_id FROM catalog_incidents AS i
       WHERE i.kind = 'alert' AND i.created_at > ${at(now)} - ${DAILY_ALERT_HOURS}::int * interval '1 hour'`,
+  },
+  {
+    id: "output_without_version",
+    sentence: "Every image staged or delivered since the graph write path shipped names its content version (M0-F2-R8).",
+    severity: "ERROR",
+    // "Since it shipped" (review 2 P2-1): the write path shipped at the first M3 version of the first batch it ran on.
+    // Every output of a batch created at least OUTPUT_VERSION_GRACE_MIN after that is counted, whenever its row was made
+    // (the matte stage makes the rows before any render writes a version), and in older batches every output row made
+    // after it. Outputs a pre-M0-S3 revision staged (also during a rolling deploy) are not counted. Bounded for the
+    // 10-minute sweep (review P2-3): the first batch is found by index probes over the small catalog_batches table (one
+    // EXISTS per batch made before it), its first version by the batch_id index, and only outputs of batches created in
+    // the last OUTPUT_VERSION_WINDOW_DAYS are read, through their batch_id index.
+    sql: (now) => sql`WITH first_batch AS (
+        SELECT b.id FROM catalog_batches AS b
+        WHERE EXISTS (SELECT 1 FROM catalog_content_versions AS v WHERE v.batch_id = b.id AND v.producer = 'M3')
+        ORDER BY b.created_at, b.id LIMIT 1
+      ), shipped AS (
+        SELECT min(v.created_at) + ${OUTPUT_VERSION_GRACE_MIN}::int * interval '1 minute' AS at
+        FROM catalog_content_versions AS v JOIN first_batch AS f ON v.batch_id = f.id WHERE v.producer = 'M3'
+      )
+      SELECT o.id, o.batch_id FROM shipped AS s
+      JOIN catalog_batches AS b ON b.created_at > ${at(now)} - ${OUTPUT_VERSION_WINDOW_DAYS}::int * interval '1 day'
+      JOIN catalog_outputs AS o ON o.batch_id = b.id
+      WHERE s.at IS NOT NULL AND (b.created_at >= s.at OR o.created_at >= s.at)
+        AND o.content_version_id IS NULL AND o.staging_uri IS NOT NULL AND o.status IN ('staged', 'needs_attention', 'verified')`,
   },
 ];

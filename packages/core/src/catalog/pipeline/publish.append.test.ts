@@ -30,6 +30,7 @@ async function followUp(name: string, shots: number[]) {
     fetch: vi.fn(async () => new Response(jpeg, { status: 200, headers: { "x-goog-generation": "1", "content-type": "image/jpeg", "content-length": "4" } })),
     storage: {
       getPublicBucketName: () => "public",
+      downloadBuffer: async () => ({ buf: jpeg, mime: "image/jpeg" }),
       headObject: async () => ({ exists: false, size: null, contentType: null, generation: null, crc32c: null }),
       stageCopyToPublic: vi.fn(async () => ({ generation: "1", crc32c: "crc" })),
       deletePublicObject: vi.fn(async () => true), setCustomTime: vi.fn(async () => {}),
