@@ -20,7 +20,7 @@ export { lockProducts };
 export type Output = typeof catalogOutputs.$inferSelect;
 export type Source = typeof catalogSourceImages.$inferSelect;
 export interface PublishDeps { db: Db; storage: Pick<typeof storage, "headObject" | "downloadBuffer" | "stageCopyToPublic" | "deletePublicObject" | "setCustomTime" | "getPublicBucketName">; fetch: typeof fetch; now: () => Date; sleep?: (ms:number) => Promise<void>;
-  /** M3-S1: the render-key versions of the channel rows the worker rendered with (channel-rules.ts). */ channelRules: () => Promise<Pick<ChannelRules, "keyVersion">>;
+  /** M3-S1: the render-key versions of the channel rows the worker rendered with (channel-rules.ts); M5-S3: of the batch's pinned ruleset version (null: the latest). */ channelRules: (version?: number | null) => Promise<Pick<ChannelRules, "keyVersion">>;
   /** M0-S3: a version or change-log write that failed is logged here (ERROR) and never fails the delivery (decision D26). */ log?: (message: string, fields?: Record<string, unknown>) => void }
 /** M3-F3-R3: the note on an output a running experiment's listing kept out of this publish. */
 export const HOLDOUT_KEPT_NOTE = "This listing is part of a running test, so its live image was kept as it is.";
@@ -102,7 +102,9 @@ export const NO_DELIVERABLE_PHOTO = "No photo of this product could be delivered
  * or failed publish is not a change (spec 18 H4: only a change re-opens a done batch).
  */
 export async function publishProduct(deps: PublishDeps, batchId: string, productId: string): Promise<{ outcome: string; batch?: { brandSlug: string; isTest: boolean }; changed?: boolean }> {
-  const rules = await deps.channelRules();
+  // M5-S3: the ruleset version the batch pinned at Start, read before the transaction (the rules read is its own query).
+  const [pin] = await deps.db.select({ rulesetVersion: catalogBatches.rulesetVersion }).from(catalogBatches).where(eq(catalogBatches.id,batchId));
+  const rules = await deps.channelRules(pin?.rulesetVersion ?? null);
   // M0-S3 (D26): outputs staged by a worker from before the write path get their version first, outside the publish
   // transaction (a download and a hash each), so the delivery below never waits on it or fails for it.
   await recordStagedVersions(deps, batchId, productId);
