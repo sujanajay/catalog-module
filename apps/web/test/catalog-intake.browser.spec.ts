@@ -45,6 +45,19 @@ test.beforeEach(async ({ page }) => {
   expect((await page.request.post("/harness/settle")).ok()).toBe(true);
 });
 
+/**
+ * The collecting count the server reports for a batch ("Downloading photos 120 of 287"), read from the same GET the
+ * page polls. The time left after it is left out: it is worked out at request time, so it moves between reads.
+ */
+async function serverCount(page: Page, id: string): Promise<string> {
+  const r = await page.request.get(`/api/catalog/batches/${id}`);
+  expect(r.ok()).toBe(true);
+  const { state } = (await r.json()) as { state: { text: string } | null };
+  const counted = /^.*?\b[\d,]+ of [\d,]+\b/.exec(state?.text ?? "");
+  expect(counted, `the batch state names a count: ${state?.text}`).not.toBeNull();
+  return counted![0];
+}
+
 /** The fake queue and image host settings (POST /harness/queue). */
 async function queue(page: Page, settings: { delayMs?: number; fetchDelayMs?: number; budgetItems?: number; paused?: boolean; autoStartDelayMs?: number | null }) {
   const r = await page.request.post("/harness/queue", { data: settings });
@@ -256,8 +269,10 @@ test.describe("5. leave and return, release C form (F4, F6)", () => {
     // Reload while the queue is held: the same page and the same count.
     await queue(page, { paused: true });
     await expect.poll(async () => (await queue(page, {})).running, { timeout: 30_000 }).toBe(0);
-    await page.waitForTimeout(3_500); // one page poll (every 2.5 s) shows the last delivery's count
-    const before = await count.innerText();
+    // Nothing collects now, so the server's count is final. Wait for the page's poll to show it (no fixed sleep: a poll
+    // round trip on a loaded runner under next dev can take longer than any guess), then reload and expect the same.
+    const before = await serverCount(page, id);
+    await expect(count).toContainText(before, { timeout: 20_000 });
     await page.reload();
     await expect(stepTwo(page)).toBeVisible({ timeout: 10_000 });
     await expect(page.getByRole("status").filter({ hasText: before })).toBeVisible({ timeout: 10_000 });

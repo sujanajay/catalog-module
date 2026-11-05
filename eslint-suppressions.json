@@ -153,6 +153,11 @@
       "count": 1
     }
   },
+  "apps/web/test/catalog-wizard-ordering.browser.spec.ts": {
+    "no-restricted-syntax": {
+      "count": 6
+    }
+  },
   "packages/core/src/catalog/ingest/group.ts": {
     "copy/word-list": {
       "count": 1
@@ -200,6 +205,11 @@
   "packages/core/src/catalog/types.ts": {
     "copy/word-list": {
       "count": 8
+    }
+  },
+  "packages/core/src/graph/graph.test.ts": {
+    "no-restricted-syntax": {
+      "count": 1
     }
   }
 }

@@ -207,8 +207,11 @@ test("M1-F2 test 4: Wait during the countdown keeps the batch a draft with one S
   await page.getByRole("button", { name: "Wait", exact: true }).click();
   await expect(page.getByRole("button", { name: "Start", exact: true })).toHaveCount(1);
   await expect(page.getByText(/^Starting in/)).toHaveCount(0);
-  // Past the 10 s countdown the batch is still a draft and the page has not moved.
-  await page.waitForTimeout(12_000);
+  // Past the 10 s countdown the batch is still a draft and the page has not moved. Wait for the harness to run the
+  // countdown's task (its log line) instead of a fixed time: the task must have run and found the Wait.
+  const autoStarts = async () => ((await (await page.request.get("/harness/log")).json()) as { worker: string[] }).worker.filter((line) => line.startsWith(`auto-start ${id.slice(0, 8)}:`));
+  await expect.poll(autoStarts, { timeout: 60_000 }).toContain(`auto-start ${id.slice(0, 8)}: noop: auto-start is off (Wait)`);
+  expect((await autoStarts()).filter((line) => !line.includes(": noop: "))).toEqual([]);
   expect(batchIdOf(page.url())).toBeNull();
   const batch = (await (await page.request.get(`/api/catalog/batches/${id}`)).json()) as { batch: { status: string; startedAt: string | null; options: { autoStart?: boolean } } };
   expect(batch.batch).toMatchObject({ status: "draft", startedAt: null, options: { autoStart: false } });

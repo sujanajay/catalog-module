@@ -151,6 +151,12 @@ async function main() {
 
   let ready = false;
   const server = createServer((req, res) => void route(req, res));
+  // Node closes an idle keep-alive socket after 5 s by default. A scenario that pauses longer than that between two
+  // page.request calls (a reload, a 10 s expect) can reuse the socket just as the server closes it, and the request
+  // fails with ECONNRESET (scenario 5, CI run 41850621429). Keep idle sockets far longer than any pause in a scenario;
+  // headersTimeout stays above it, as Node requires.
+  server.keepAliveTimeout = 120_000;
+  server.headersTimeout = 121_000;
   async function route(req: IncomingMessage, res: ServerResponse) {
     const url = new URL(req.url ?? "/", ORIGIN);
     try {

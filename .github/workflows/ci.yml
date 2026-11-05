@@ -3,6 +3,24 @@ on:
   pull_request:
   push:
     branches: [main]
+  # A manual stability check (2026-11-05): run one browser spec many times on a branch, for example
+  #   gh workflow run CI --ref <branch> -f spec=catalog-intake.browser.spec.ts -f grep="5. leave and return" -f repeat=20
+  # Only the "browser repeat" job runs on a manual run; the PR jobs skip.
+  workflow_dispatch:
+    inputs:
+      spec:
+        description: Browser spec file under apps/web/test (the intake harness config)
+        default: catalog-intake.browser.spec.ts
+      grep:
+        description: Only tests whose title matches (playwright --grep)
+        default: "5. leave and return"
+      repeat:
+        description: Runs of each matching test (playwright --repeat-each)
+        default: "20"
+# The same runtime on every runner and laptop: Node from .nvmrc (exact version, so ICU and Intl output do not drift
+# between runs) and UTC, so a test that formats local time reads the same everywhere.
+env:
+  TZ: UTC
 # T1 of the tiered tests (M6-F8, docs/specs/test-tiers.json): independent jobs run in parallel: lint and typecheck
 # (with the tiers this change needs in the run summary), the unit tests in shards balanced by file time, the
 # real-Postgres tests, the offline infra and matting tests, and the intake browser scenarios. A run takes as long as its
@@ -10,6 +28,7 @@ on:
 jobs:
   lint:
     name: lint and typecheck
+    if: github.event_name != 'workflow_dispatch'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -19,7 +38,7 @@ jobs:
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version-file: .nvmrc
           cache: pnpm
       # M6-F8: the tiers this change needs (T1 always; T2 and T3 by path), written to the run summary.
       - name: Test tiers this change needs
@@ -35,6 +54,7 @@ jobs:
 
   test:
     name: unit tests (shard ${{ matrix.shard }}/6)
+    if: github.event_name != 'workflow_dispatch'
     runs-on: ubuntu-latest
     strategy:
       # Every shard reports its own failures; one failing shard does not cancel the others.
@@ -46,7 +66,7 @@ jobs:
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version-file: .nvmrc
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       # `pnpm test` (vitest run), one shard of it. M6-S7a: the shards are balanced by each file's measured seconds
@@ -65,6 +85,7 @@ jobs:
   # unit shards run the same files on PGlite.
   postgres:
     name: real Postgres tests
+    if: github.event_name != 'workflow_dispatch'
     runs-on: ubuntu-latest
     services:
       postgres:
@@ -85,7 +106,7 @@ jobs:
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version-file: .nvmrc
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - name: Real Postgres tests
@@ -97,12 +118,13 @@ jobs:
 
   infra-matting:
     name: infra and matting tests
+    if: github.event_name != 'workflow_dispatch'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version-file: .nvmrc
       # Offline infra tests (fake gcloud, no GCP): the deploy gate, shape refusals, the check-matting probe,
       # monitoring, queue names. Any failing file fails the step. They use node built-ins only (no pnpm install).
       - name: Infra tests
@@ -120,13 +142,14 @@ jobs:
 
   browser:
     name: intake browser scenarios
+    if: github.event_name != 'workflow_dispatch'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version-file: .nvmrc
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       # Intake browser scenarios (spec 14 section 8.3): local harness, no GCP, no deployed service.
@@ -139,5 +162,35 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: catalog-intake-browser
+          path: apps/web/test-results/catalog-intake/
+          if-no-files-found: ignore
+
+  browser-repeat:
+    name: browser repeat
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Install Chromium for the browser tests
+        run: pnpm --filter @catalog/web exec playwright install --with-deps chromium
+      # Inputs go through env, never straight into the script, so a title with quotes cannot break the shell.
+      - name: Repeat the chosen scenario
+        env:
+          SPEC: ${{ inputs.spec }}
+          GREP: ${{ inputs.grep }}
+          REPEAT: ${{ inputs.repeat }}
+        run: pnpm --filter @catalog/web exec playwright test --config test/catalog-intake.config.ts "$SPEC" --grep "$GREP" --repeat-each "$REPEAT"
+      - name: Keep the traces of failed runs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: browser-repeat
           path: apps/web/test-results/catalog-intake/
           if-no-files-found: ignore
