@@ -29,6 +29,8 @@
 set -euo pipefail
 export CLOUDSDK_CORE_PROJECT=image-links-agent
 cd "$(dirname "$0")/.."
+# Every gcloud read and the job run survive a laptop network blip (infra/lib/gcloud-retry.sh).
+source infra/lib/gcloud-retry.sh
 PROBE_JOB=${PROBE_JOB:-catalog-check-matting}
 [[ "$PROBE_JOB" =~ ^catalog-check-[a-z0-9-]+$ ]] || { echo "ERROR: PROBE_JOB must look like catalog-check-<name>, got '$PROBE_JOB'" >&2; exit 2; }
 export PROBE_JOB
@@ -108,11 +110,11 @@ trap 'rm -f "$TEMP_DIR/worker.json" "$TEMP_DIR/cpu.json" "$TEMP_DIR/gpu.json" "$
 native_path() { cygpath -m "$1" 2>/dev/null || printf '%s\n' "$1"; }
 # The probe's arguments as JSON for the job's --args (an empty list for the runtime check).
 node -e 'console.log(JSON.stringify(process.argv.slice(1)))' -- ${PROBE_ARGS[@]+"${PROBE_ARGS[@]}"} > "$TEMP_DIR/probe.json"
-gcloud run services describe catalog-worker --region=asia-south1 --format='json(spec.template.spec.containers[0].env)' > "$TEMP_DIR/worker.json"
-gcloud run services describe catalog-matting --region=asia-south1 --format='json(status.url,status.latestReadyRevisionName,status.latestCreatedRevisionName,spec.template.spec.containers[0].image)' > "$TEMP_DIR/cpu.json"
+gcloud_retry gcloud run services describe catalog-worker --region=asia-south1 --format='json(spec.template.spec.containers[0].env)' > "$TEMP_DIR/worker.json"
+gcloud_retry gcloud run services describe catalog-matting --region=asia-south1 --format='json(status.url,status.latestReadyRevisionName,status.latestCreatedRevisionName,spec.template.spec.containers[0].image)' > "$TEMP_DIR/cpu.json"
 HAS_GPU=$(node -e 'const fs=require("fs"); const v=JSON.parse(fs.readFileSync(process.argv[1],"utf8")); console.log((v.spec?.template?.spec?.containers?.[0]?.env??[]).some(e=>e.name==="MATTING_GPU_URL"&&e.value)?"1":"0")' "$(native_path "$TEMP_DIR/worker.json")")
 if [ "${HAS_GPU//$'\r'/}" = 1 ]; then
-  gcloud run services describe catalog-matting-gpu --region=asia-southeast1 --format='json(status.url,status.latestReadyRevisionName,status.latestCreatedRevisionName,spec.template.spec.containers[0].image)' > "$TEMP_DIR/gpu.json"
+  gcloud_retry gcloud run services describe catalog-matting-gpu --region=asia-southeast1 --format='json(status.url,status.latestReadyRevisionName,status.latestCreatedRevisionName,spec.template.spec.containers[0].image)' > "$TEMP_DIR/gpu.json"
 else
   printf 'null\n' > "$TEMP_DIR/gpu.json"
 fi
@@ -155,5 +157,8 @@ const flags = {
 };
 fs.writeFileSync(path.join(dir, 'flags.json'), JSON.stringify(flags));
 NODE
-gcloud run jobs deploy "$PROBE_JOB" --quiet --flags-file="$(native_path "$TEMP_DIR/flags.json")"
-gcloud run jobs execute "$PROBE_JOB" --region=asia-south1 --wait
+# The whole job definition each time, so a retry after a network error is harmless.
+gcloud_retry gcloud run jobs deploy "$PROBE_JOB" --quiet --flags-file="$(native_path "$TEMP_DIR/flags.json")"
+# Started with --async and judged from the execution state on GCP, so a laptop DNS miss no longer fails the probe while
+# the job runs on (2026-10-31: two gates lost that way).
+gcloud_job_run "$PROBE_JOB" asia-south1

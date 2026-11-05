@@ -310,22 +310,77 @@ upscale_measure_summary() {
 # ---- Probes. Each runs as its own process (bash infra/lib/services.sh probe-<kind> ... <url>), exits non-zero on
 # any failure and never prints a token. ----
 
+# The probes' own gcloud reads (identity and access tokens) survive a laptop network blip.
+# shellcheck source=gcloud-retry.sh
+source "$(dirname "${BASH_SOURCE[0]}")/gcloud-retry.sh"
+
 # GET <url> with a bearer token (default: the operator's identity token, which plain Cloud Run IAM accepts); fails on
 # anything but a final 200 on the same host. Redirects are followed (the web home page redirects to /catalog; curl
 # keeps the token only on the same host), but a final page on another host fails: an IAP 302 to Google's sign-in page
-# would otherwise end in a 200 there. Retries cover a cold start. The header goes to curl on stdin (-K -), so the token
-# is never on a command line.
+# would otherwise end in a 200 there. The header goes to curl on stdin (-K -), so the token is never on a command line.
+# A passing platform error (probe_transient) is tried again, PROBE_GET_ATTEMPTS times in all, PROBE_RETRY_DELAY_S
+# apart and doubling, never past PROBE_RETRY_MAX_S, and every retry is printed; any other answer counts as it came
+# (2026-11-05: one Cloud Run 503 from an instance shutting down failed a gate; see cloudrun_check.py
+# read_with_retry for the probes that run as a job). Before that, curl's --retry 5 --retry-all-errors silently retried
+# every 408, 429, 500, 502, 503 and 504, the service's own answers too.
+PROBE_GET_ATTEMPTS=${PROBE_GET_ATTEMPTS:-3}
+PROBE_RETRY_DELAY_S=${PROBE_RETRY_DELAY_S:-5}
+PROBE_RETRY_MAX_S=${PROBE_RETRY_MAX_S:-120}
+
+# probe_transient <curl exit> <HTTP code> <TLS connect s> <body file>: prints why that answer is a passing platform
+# error, or nothing for a real answer. Passing: a 429 or 503 whose body is not a JSON object (the services answer their
+# own errors as JSON; Cloud Run's front end answers with HTML or text), curl failing to connect (7), the TLS handshake
+# failing (35), the connection closing or resetting without an answer (52, 55, 56), and a timeout before the TLS
+# connection was made (28 with no TLS connect time), and a DNS miss on the laptop (6: no request was sent). Never: any
+# other status, the service's own error body, or a timeout after connecting (a slow candidate).
+probe_transient() {
+  local rc=$1 code=$2 tls=$3 body=$4 first=""
+  case "$code" in
+    429|503)
+      if [ -s "$body" ]; then first=$(head -c 512 "$body"); first=${first#"${first%%[![:space:]]*}"}; first=${first:0:1}; fi
+      [ "$first" = "{" ] || echo "HTTP $code from the platform, not the service"
+      return 0 ;;
+    000) ;;
+    *) return 0 ;;
+  esac
+  case "$rc" in
+    6) echo "could not resolve the host (curl 6)" ;;
+    7) echo "could not connect (curl 7)" ;;
+    35) echo "TLS handshake failed (curl 35)" ;;
+    52|55|56) echo "connection closed or reset without an answer (curl $rc)" ;;
+    28) if [[ "$tls" =~ ^0([.,]0+)?$ ]]; then echo "connect timeout (curl 28)"; fi ;;
+  esac
+  return 0
+}
+
 probe_get() {
-  local url=$1 token=${2:-} out code final host
+  local url=$1 token=${2:-} out code final host rc tls body reason attempt=1 delay=$PROBE_RETRY_DELAY_S started=$SECONDS
   if [ -z "$token" ]; then
-    token=$(gcloud auth print-identity-token | tr -d '\r') || { echo "probe: no identity token (gcloud auth login)" >&2; return 1; }
+    # A network blip during the token refresh is retried (gcloud_retry); an expired login is not.
+    token=$(gcloud_retry gcloud auth print-identity-token | tr -d '\r') || { echo "probe: no identity token (gcloud auth login)" >&2; return 1; }
   fi
   # The token is written into a curl config line, so it must be a plain token (no quote, backslash or space).
   [[ "$token" =~ ^[A-Za-z0-9._~+/=-]+$ ]] || { echo "probe: the token is not a plain bearer token" >&2; return 1; }
-  out=$(printf 'header = "Authorization: Bearer %s"\n' "$token" \
-    | curl -sS -K - -L --max-redirs 5 -o /dev/null -w '%{http_code} %{url_effective}' --max-time 60 --retry 5 --retry-delay 5 --retry-all-errors \
-      "$url") || out=000
-  code=${out%% *}; final=${out#* }
+  body=$(mktemp)
+  while :; do
+    rc=0
+    : > "$body"
+    out=$(printf 'header = "Authorization: Bearer %s"\n' "$token" \
+      | curl -sS -K - -L --max-redirs 5 -o "$body" -w '%{http_code} %{time_appconnect} %{url_effective}' --connect-timeout 20 --max-time 60 \
+        "$url") || rc=$?
+    read -r code tls final <<<"$out"
+    code=${code:-000}
+    reason=$(probe_transient "$rc" "$code" "${tls:-0}" "$body")
+    [ -n "$reason" ] || break
+    if [ "$attempt" -ge "$PROBE_GET_ATTEMPTS" ] || [ $((SECONDS - started + delay)) -gt "$PROBE_RETRY_MAX_S" ]; then
+      echo "probe: GET $url: $reason (attempt $attempt of $PROBE_GET_ATTEMPTS); giving up" >&2
+      break
+    fi
+    echo "probe: GET $url: $reason (attempt $attempt of $PROBE_GET_ATTEMPTS); trying again in $delay s"
+    sleep "$delay"
+    attempt=$((attempt + 1)); delay=$((delay * 2))
+  done
+  rm -f "$body"
   host=${url#https://}; host=${host%%/*}
   echo "probe: GET $url -> $code"
   [ "$code" = 200 ] || return 1
@@ -347,14 +402,27 @@ probe_get() {
 # Both tokens travel on curl's stdin (-K -), never on a command line, and are never printed; on failure only the HTTP
 # status of the IAM Credentials call is shown (403: the Token Creator grant is missing; 401: log in again).
 iap_token() {
-  local sa=$1 caller out token code
-  caller=$(gcloud auth print-access-token | tr -d '\r') || caller=
+  local sa=$1 caller out token code rc attempt=1 delay=$PROBE_RETRY_DELAY_S
+  caller=$(gcloud_retry gcloud auth print-access-token | tr -d '\r') || caller=
   [ -n "$caller" ] || { echo "probe: no access token (gcloud auth login)" >&2; return 1; }
-  out=$(printf 'header = "Authorization: Bearer %s"\nheader = "Content-Type: application/json"\n' "$caller" \
-    | curl -sS -K - -X POST --max-time 30 -w '\n%{http_code}' \
-      --data '{"scope":["openid","https://www.googleapis.com/auth/userinfo.email"],"lifetime":"900s"}' \
-      "https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/$sa:generateAccessToken" 2>/dev/null) || out=$'\n000'
-  code=${out##*$'\n'}
+  # Google's IAM Credentials API, not the candidate: a laptop network error (curl 6, 7, 28, 35, 52, 55, 56) or its
+  # 429, 500 or 503 is tried again, PROBE_GET_ATTEMPTS times in all, each retry on stderr (stdout is the token).
+  while :; do
+    rc=0
+    out=$(printf 'header = "Authorization: Bearer %s"\nheader = "Content-Type: application/json"\n' "$caller" \
+      | curl -sS -K - -X POST --max-time 30 -w '\n%{http_code}' \
+        --data '{"scope":["openid","https://www.googleapis.com/auth/userinfo.email"],"lifetime":"900s"}' \
+        "https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/$sa:generateAccessToken" 2>/dev/null) || { rc=$?; out=$'\n000'; }
+    code=${out##*$'\n'}
+    case "$code:$rc" in
+      429:*|500:*|503:*|000:6|000:7|000:28|000:35|000:52|000:55|000:56) ;;
+      *) break ;;
+    esac
+    [ "$attempt" -lt "$PROBE_GET_ATTEMPTS" ] || break
+    echo "probe: IAM Credentials HTTP $code (curl exit $rc) (attempt $attempt of $PROBE_GET_ATTEMPTS); trying again in $delay s" >&2
+    sleep "$delay"
+    attempt=$((attempt + 1)); delay=$((delay * 2))
+  done
   token=$(printf '%s' "${out%$'\n'*}" | node -e 'let s="";process.stdin.on("data",(d)=>s+=d).on("end",()=>{try{process.stdout.write(JSON.parse(s).accessToken||"")}catch{}})') || token=
   if [ "$code" != 200 ] || [ -z "$token" ]; then
     echo "probe: cannot mint an IAP token as $sa (IAM Credentials HTTP $code; 403 means the operator lacks roles/iam.serviceAccountTokenCreator on it: run bash infra/bootstrap.sh; 401 means gcloud auth login)" >&2

@@ -38,6 +38,8 @@
 
 # shellcheck source=labels.sh
 source "$(dirname "${BASH_SOURCE[0]}")/labels.sh"
+# shellcheck source=gcloud-retry.sh
+source "$(dirname "${BASH_SOURCE[0]}")/gcloud-retry.sh"
 
 CANDIDATE_TAG=candidate
 PREVIOUS_TAG=previous
@@ -109,11 +111,12 @@ gate_deploy_args() {
 }
 
 # gcloud ... --format=json with stderr kept apart, so a warning or update notice never lands in the parsed JSON.
-# Prints the JSON (without CR) on success; on failure passes gcloud's stderr on and returns its status.
+# Prints the JSON (without CR) on success; on failure passes gcloud's stderr on and returns its status. A read, so a
+# network blip is retried (gcloud_retry); NOT_FOUND and every other API answer are not.
 gate_describe() {
   local err out status=0
   err=$(mktemp)
-  out=$(gate_gcloud "$@" --format=json 2>"$err") || status=$?
+  out=$(gcloud_retry gate_gcloud "$@" --format=json 2>"$err") || status=$?
   if [ "$status" = 0 ]; then tr -d '\r' <<<"$out"; else cat "$err" >&2; fi
   rm -f "$err"
   return "$status"
@@ -127,9 +130,9 @@ gate_fingerprint() {
 # 0 when the live revision has the image digest of SVC_IMAGE and exactly the desired plain env values.
 gate_matches_live() {
   local revision=$1 env=$2 digest revision_json
-  digest=$(gate_gcloud artifacts docker images describe "$SVC_IMAGE" --format='value(image_summary.digest)' 2>/dev/null | tr -d '\r') || return 1
+  digest=$(gcloud_retry gate_gcloud artifacts docker images describe "$SVC_IMAGE" --format='value(image_summary.digest)' 2>/dev/null | tr -d '\r') || return 1
   [ -n "$digest" ] || return 1
-  revision_json=$(gate_gcloud run revisions describe "$revision" --region="$SVC_REGION" --format=json | tr -d '\r') || return 1
+  revision_json=$(gcloud_retry gate_gcloud run revisions describe "$revision" --region="$SVC_REGION" --format=json | tr -d '\r') || return 1
   node -e '
     const r = JSON.parse(require("fs").readFileSync(0, "utf8"));
     const [digest, env] = process.argv.slice(1);
@@ -252,8 +255,11 @@ gate_probe() {
   # pipefail (restored on return by `local -`) so the probe's exit status, not sed's, decides.
   local -; set -o pipefail
   # GATE_SERVICE names the service to the probe (the matting probes run as their own job, catalog-check-<service>,
-  # so probes that run at once never share a job).
-  GATE_SERVICE="$SVC_NAME" timeout --kill-after=10 "$SVC_PROBE_TIMEOUT" "${SVC_PROBE[@]}" "$GATE_TAG_URL" 2>&1 | sed 's/^/    probe | /' || status=${PIPESTATUS[0]}
+  # so probes that run at once never share a job). On the timeout every process of the probe gets TERM; timeout
+  # returns 124 as soon as its direct child (bash services.sh) exits, while the nested check-matting.sh runs its TERM
+  # trap and cancels its job execution (gcloud_job_run) on its own, sed keeping the pipe open until it is done. KILL
+  # (60 s later) reaches only a probe that is still the direct child.
+  GATE_SERVICE="$SVC_NAME" timeout --kill-after=60 "$SVC_PROBE_TIMEOUT" "${SVC_PROBE[@]}" "$GATE_TAG_URL" 2>&1 | sed 's/^/    probe | /' || status=${PIPESTATUS[0]}
   if [ "$status" != 0 ]; then
     if [ "$status" = 124 ] || [ "$status" = 137 ]; then
       echo "ERROR: $SVC_NAME: probe of $GATE_REVISION timed out after ${SVC_PROBE_TIMEOUT} s; traffic was not changed" >&2

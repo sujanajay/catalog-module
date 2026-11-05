@@ -29,6 +29,8 @@
 # Every gcloud call goes through build_gcloud; tests define their own before sourcing this file.
 
 declare -F build_gcloud >/dev/null || build_gcloud() { gcloud "$@"; }
+# shellcheck source=gcloud-retry.sh
+source "$(dirname "${BASH_SOURCE[0]}")/gcloud-retry.sh"
 
 BUILD_FULL_CONFIG=cloudbuild.yaml
 BUILD_APP_CONFIG=infra/cloudbuild-preview.yaml
@@ -68,7 +70,8 @@ matting_source_tag_of_files() {
 # (the error is printed), so a gcloud hiccup never turns into a paid build or a deploy of a missing image.
 build_image_missing() {
   local out
-  if out=$(build_gcloud artifacts docker images describe "$1" 2>&1); then return 1; fi
+  # A network blip is retried (2026-11-05 stop #15: one DNS miss here ended a deploy); NOT_FOUND is an answer.
+  if out=$(gcloud_retry build_gcloud artifacts docker images describe "$1" 2>&1); then return 1; fi
   if grep -qiE 'NOT_FOUND|not found|does not exist' <<<"$out"; then return 0; fi
   printf '%s\n' "$out" >&2
   return 2

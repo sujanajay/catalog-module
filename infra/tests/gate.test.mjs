@@ -540,16 +540,21 @@ test('probes follow same-host redirects (the web home page redirects to /catalog
 // Fake gcloud and curl for the probe CLI (exported bash functions; no network). The IAM Credentials call answers
 // with the service account's token only for the right service account and scopes; the probe GETs answer 200 only to
 // that token, so the operator's identity token (which IAP refuses) fails.
-const probeFakes = `gcloud() { case "$*" in "auth print-access-token") echo USER_ACCESS ;; "auth print-identity-token") echo USER_ID ;; *) return 1 ;; esac; }
+// TOKEN_DNS_ONCE=1: the first gcloud token read fails on DNS; IAM_BUSY_ONCE=1: the first IAM Credentials call answers 503.
+const probeFakes = `gcloud() { echo "gcloud $*" >> "$LOG"
+  if [ -n "\${TOKEN_DNS_ONCE:-}" ] && [ ! -f "$STATE/token-dns" ]; then touch "$STATE/token-dns"
+    echo "ERROR: gcloud crashed (ConnectionError): HTTPSConnectionPool(host='oauth2.googleapis.com', port=443): Max retries exceeded (Caused by NameResolutionError: Failed to resolve 'oauth2.googleapis.com')" >&2; return 1; fi
+  case "$*" in "auth print-access-token") echo USER_ACCESS ;; "auth print-identity-token") echo USER_ID ;; *) return 1 ;; esac; }
 curl() { local cfg url="" a; cfg=$(cat); for a in "$@"; do case "$a" in https://*) url=$a ;; esac; done
   echo "curl $url" >> "$LOG"
   case "$url" in
     *iamcredentials.googleapis.com*)
-      if [[ "$cfg" == *"Bearer USER_ACCESS"* && "$url" == */serviceAccounts/w:generateAccessToken && "$*" == *'"openid","https://www.googleapis.com/auth/userinfo.email"'* ]]; then
+      if [ -n "\${IAM_BUSY_ONCE:-}" ] && [ ! -f "$STATE/iam-busy" ]; then touch "$STATE/iam-busy"; printf '{"error":{"code":503}}\\n503'
+      elif [[ "$cfg" == *"Bearer USER_ACCESS"* && "$url" == */serviceAccounts/w:generateAccessToken && "$*" == *'"openid","https://www.googleapis.com/auth/userinfo.email"'* ]]; then
         printf '{"accessToken":"SA_TOKEN","expireTime":"x"}\\n200'
       else printf '{"error":{"code":403}}\\n403'; fi ;;
-    *) if [ -n "\${SIGN_IN_REDIRECT:-}" ]; then printf '200 https://accounts.google.com/v3/signin?x=1'
-       elif [[ "$cfg" == *"Bearer SA_TOKEN"* ]]; then printf '200 %s' "$url"; else printf '401 %s' "$url"; fi ;;
+    *) if [ -n "\${SIGN_IN_REDIRECT:-}" ]; then printf '200 0.1 https://accounts.google.com/v3/signin?x=1'
+       elif [[ "$cfg" == *"Bearer SA_TOKEN"* ]]; then printf '200 0.1 %s' "$url"; else printf '401 0.1 %s' "$url"; fi ;;
   esac; }
 export -f gcloud curl`;
 
@@ -571,6 +576,110 @@ test('the web probe passes IAP as the smoke identity (service account access tok
   r = run('probe-web-sign-in', `${probeFakes}\nSIGN_IN_REDIRECT=1 WEB_PROBE_SA=w bash infra/lib/services.sh probe-web ${TAG_URL}`);
   assert.notEqual(r.status, 0);
   assert.match(r.err, /ended on another host \(https:\/\/accounts\.google\.com\/v3\/signin\)/);
+});
+
+// Review P2-2 (2026-11-05): the probes' own token reads run on the laptop too, so a DNS blip there is retried.
+test('the probe token reads survive a laptop DNS blip: gcloud tokens through gcloud_retry, the IAP mint retries a 503', () => {
+  const env = {GCLOUD_RETRY_DELAY_S: '0', PROBE_RETRY_DELAY_S: '0'};
+  let r = run('probe-web-token-dns', `${probeFakes}\nTOKEN_DNS_ONCE=1 IAM_BUSY_ONCE=1 WEB_PROBE_SA=w bash infra/lib/services.sh probe-web ${TAG_URL}`, env);
+  assert.equal(r.status, 0, r.err + r.out);
+  assert.equal(r.calls.filter((c) => c === 'gcloud auth print-access-token').length, 2, r.calls.join('\n'));
+  assert.equal(r.calls.filter((c) => c.includes('iamcredentials')).length, 2);
+  assert.match(r.err, /WARN: auth print-access-token: .*Failed to resolve/);
+  assert.match(r.err, /probe: IAM Credentials HTTP 503 \(curl exit 0\) \(attempt 1 of 3\); trying again in 0 s/);
+  assert.ok(!/SA_TOKEN|USER_ACCESS|USER_ID/.test(r.out + r.err), 'no token is ever printed');
+  // The operator's identity token (plain Cloud Run IAM, the worker /health): one DNS miss, then the GET.
+  r = run('probe-get-token-dns', `${probeFakes}\nTOKEN_DNS_ONCE=1 probe_get ${TAG_URL}/health`, env);
+  assert.equal(r.calls.filter((c) => c === 'gcloud auth print-identity-token').length, 2, r.calls.join('\n'));
+  assert.ok(r.calls.includes(`curl ${TAG_URL}/health`));
+  // A 403 (no Token Creator grant) is an answer: one call, no retry.
+  r = run('probe-web-403-once', `${probeFakes}\nWEB_PROBE_SA=other bash infra/lib/services.sh probe-web ${TAG_URL}`, env);
+  assert.equal(r.calls.filter((c) => c.includes('iamcredentials')).length, 1);
+});
+
+// 2026-11-05 (.runs/2026-11-05-r1-deploy-457ea28.md): one Cloud Run 503 from an instance shutting down failed a gate.
+// probe_get tries again after a passing platform error only. The fake curl answers the probe's GETs in the order of
+// CURL_SEQ (the last item repeats): 200, 503 (the front end's HTML), 503own (the service's JSON), 500, 429, reset (curl 56),
+// dns (curl 6), refused (curl 7), connect-timeout (curl 28 before TLS) and read-timeout (curl 28 after TLS). It writes the body to -o.
+const seqCurl = `curl() { local url="" out="" prev="" a n step; cat >/dev/null
+  for a in "$@"; do [ "$prev" = -o ] && out=$a; case "$a" in https://*) url=$a ;; esac; prev=$a; done
+  echo "curl $url" >> "$LOG"
+  n=$(( $(cat "$STATE/curl-n" 2>/dev/null || echo 0) + 1 )); echo "$n" > "$STATE/curl-n"
+  IFS=, read -ra seq <<<"$CURL_SEQ"; step=\${seq[n-1]:-\${seq[-1]}}
+  case "$step" in
+    200) printf 'ok' > "$out"; printf '200 0.1 %s' "$url" ;;
+    503) printf '<html><title>503 Service Unavailable</title></html>' > "$out"; printf '503 0.1 %s' "$url" ;;
+    503own) printf '  {"error":"upscale model unavailable"}' > "$out"; printf '503 0.1 %s' "$url" ;;
+    500) printf '{"error":"boom"}' > "$out"; printf '500 0.1 %s' "$url" ;;
+    429) printf 'Rate exceeded.' > "$out"; printf '429 0.1 %s' "$url" ;;
+    reset) printf '000 0.1 '; return 56 ;;
+    dns) printf '000 0.000000 '; return 6 ;;
+    refused) printf '000 0.000000 '; return 7 ;;
+    connect-timeout) printf '000 0.000000 '; return 28 ;;
+    read-timeout) printf '000 0.120000 '; return 28 ;;
+  esac; }
+export -f curl`;
+const probeGet = (label, seq, env = {}) => {
+  const r = run(label, `${seqCurl}\nprobe_get ${TAG_URL}/health TOKEN`, {CURL_SEQ: seq, PROBE_RETRY_DELAY_S: '0', ...env});
+  return {...r, gets: r.calls.filter((c) => c === `curl ${TAG_URL}/health`).length};
+};
+
+test('probe_get: one platform 503, reset, refused or connect timeout, then 200, passes and logs the retry', () => {
+  let r = probeGet('get-503-then-200', '503,200');
+  assert.equal(r.status, 0, r.err + r.out);
+  assert.equal(r.gets, 2);
+  assert.deepEqual(lines(r.out.trim()), [`probe: GET ${TAG_URL}/health: HTTP 503 from the platform, not the service (attempt 1 of 3); trying again in 0 s`,
+    `probe: GET ${TAG_URL}/health -> 200`]);
+  for (const [seq, reason] of [['reset,200', 'connection closed or reset without an answer (curl 56)'], ['dns,200', 'could not resolve the host (curl 6)'], ['refused,200', 'could not connect (curl 7)'],
+    ['connect-timeout,200', 'connect timeout (curl 28)'], ['429,503,200', 'HTTP 429 from the platform, not the service']]) {
+    r = probeGet(`get-${seq.split(',')[0]}`, seq);
+    assert.equal(r.status, 0, seq + r.err + r.out);
+    assert.equal(r.gets, seq.split(',').length, seq);
+    assert.ok(r.out.includes(`/health: ${reason} (attempt 1 of 3)`), r.out);
+  }
+});
+
+test('probe_get: a persistent platform 503 fails after exactly PROBE_GET_ATTEMPTS tries', () => {
+  let r = probeGet('get-503-always', '503');
+  assert.equal(r.status, 1);
+  assert.equal(r.gets, 3);
+  assert.match(r.err, /HTTP 503 from the platform, not the service \(attempt 3 of 3\); giving up/);
+  assert.ok(lines(r.out).includes(`probe: GET ${TAG_URL}/health -> 503`));
+  r = probeGet('get-503-five', '503', {PROBE_GET_ATTEMPTS: '5'});
+  assert.equal(r.status, 1);
+  assert.equal(r.gets, 5);
+  // The time cap: no try starts once the next wait would pass PROBE_RETRY_MAX_S.
+  r = probeGet('get-503-cap', '503', {PROBE_RETRY_DELAY_S: '5', PROBE_RETRY_MAX_S: '4'});
+  assert.equal(r.status, 1);
+  assert.equal(r.gets, 1);
+  assert.match(r.err, /\(attempt 1 of 3\); giving up/);
+});
+
+test('probe_get: the service\'s own error, a 500 and a read timeout are never retried', () => {
+  for (const [seq, code] of [['503own,200', '503'], ['500,200', '500'], ['read-timeout,200', '000']]) {
+    const r = probeGet(`get-real-${seq.split(',')[0]}`, seq);
+    assert.equal(r.status, 1, seq);
+    assert.equal(r.gets, 1, seq);
+    assert.ok(!/attempt|retry/i.test(r.out + r.err), r.out + r.err);
+    assert.ok(lines(r.out).includes(`probe: GET ${TAG_URL}/health -> ${code}`), r.out);
+  }
+});
+
+// The gate's probe as a separate process (as deploy.sh runs it), with the fake curl defined inside it.
+const probeHealth = `source infra/lib/services.sh
+${seqCurl}
+probe_get "$1/health" TOKEN`;
+test('the gate: a candidate whose /health keeps failing still fails and keeps the old traffic; one 503 then 200 moves it', () => {
+  const r = run('gate-health-503', 'deploy_service test-svc', {CURL_SEQ: '503', PROBE_RETRY_DELAY_S: '0', PROBE: probeHealth});
+  assert.equal(r.status, 1, r.out);
+  assert.equal(r.calls.filter((c) => c === `curl ${TAG_URL}/health`).length, 3);
+  assert.ok(!r.calls.some((c) => c.includes('--to-revisions')), 'traffic never moved');
+  assert.ok(r.err.includes(rollbackLine), r.err);
+  // One 503 then 200: the same gate moves traffic to the probed revision.
+  const ok = run('gate-health-503-once', 'deploy_service test-svc', {CURL_SEQ: '503,200', PROBE_RETRY_DELAY_S: '0', PROBE: probeHealth});
+  assert.equal(ok.status, 0, ok.err);
+  assert.ok(ok.calls.includes(`run services update-traffic test-svc --region=asia-south1 --to-revisions=${NEW}=100 --quiet`), ok.calls.join('\n'));
+  assert.match(ok.out, /probe \| probe: GET .*HTTP 503 from the platform, not the service \(attempt 1 of 3\)/);
 });
 
 test('bootstrap grants the web probe its IAP access and the operator Token Creator on catalog-worker only', () => {
@@ -667,7 +776,7 @@ test('deploy.sh: catalog-web mounts the Supabase secrets; the worker and the job
   assert.match(deploy, /^if \[ "\$SUPABASE_FOLDER_PASTE" = on \]; then WEB_SECRETS\+=",SUPABASE_URL=supabase-url:latest,SUPABASE_SERVICE_KEY=supabase-service-key:latest"; fi$/m);
   for (const name of ['SECRETS', 'WORKER_SECRETS', 'JOB_SECRETS']) assert.doesNotMatch(ref(name), /supabase/i, `${name} has no Supabase mount`);
   assert.doesNotMatch(ref('WEB_SECRETS'), /OPENROUTER/, 'never the OpenRouter key on the web');
-  assert.match(deploy, /for secret in supabase-url supabase-service-key; do\n\s+gcloud secrets describe "\$secret"/, 'checked by name before the build');
+  assert.match(deploy, /for secret in supabase-url supabase-service-key; do\n\s+require_secret "\$secret"/, 'checked by name before the build');
   assert.match(deploy, /^WEB_ENV\+=",SUPABASE_FOLDER_PASTE=\$SUPABASE_FOLDER_PASTE"$/m);
   assert.ok(!/versions access/.test(deploy.replace(/^\s*#.*$/gm, '')), 'secret values are never read');
 });

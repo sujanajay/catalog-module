@@ -151,6 +151,47 @@ and `<service>-<hash>-<region code>.a.run.app`; not verified whether Cloud Run a
 (apps/worker/src/auth.ts) compares with the service URL of its own WORKER_URL (number form), so a task enqueued with a hash-form tag WORKER_URL
 could pass Cloud Run and still get the worker's 401. The smoke runs its tasks inline, so it is not affected.
 
+### Passing platform errors in probes (2026-11-05)
+
+The prod deploy of 457ea28 stopped at the catalog-upscale-gpu gate although every speed, determinism and cap check
+passed: one `GET /health` got a Cloud Run 503 in 0.7 ms ("connection to the instance had an error") while Cloud Run
+retired an idle instance, and the probe made one attempt (.runs/2026-11-05-r1-deploy-457ea28.md). Now every gate
+`/health` read tries again after a clearly passing platform error only, 3 attempts in all with growing waits and a
+time cap, and prints each retry: `read_with_retry` in services/matting/tests/cloudrun_check.py (the matting and
+upscale probe jobs; the report lists them under `retries`) and `probe_get` in infra/lib/services.sh (worker and web).
+Passing means a 429 or 503 whose body is not a JSON object (the services answer their own errors as JSON, the front
+end with HTML or text), a refused or reset connection, or a connect timeout. Never retried: any other status, the
+service's own error body, a timeout after connecting, and the measured /matte and /upscale calls (a front-end 503
+there can be an instance that crashed under the measured load, which the gate must catch). `probe_get` used to pass
+`--retry 5 --retry-all-errors` to curl, which silently retried 500, 502 and 504 too; that is gone.
+
+### Laptop network blips while a gate waits (2026-11-05)
+
+Two gates failed because the laptop lost DNS while `gcloud run jobs execute --wait` was waiting, although the job
+on GCP ran on (the 10-31 worker smoke passed there), and one deploy stopped on a single DNS miss in the image check
+(.runs/2026-11-05-deploy-failure-root-cause.md, stops #11, #12, #15). infra/lib/gcloud-retry.sh now gives:
+- `gcloud_retry` for reads and whole-definition deploys (pre-flight, the image check, the gate's describes, the
+  probe scripts' describes and job deploys). It retries only on network errors (DNS, refused, reset, timeout, gcloud
+  crashing on a ConnectionError), 5 attempts with doubling waits, and logs each retry. NOT_FOUND, PERMISSION_DENIED and
+  an expired login go back to the caller at once.
+- `gcloud_job_run` for the probe and smoke jobs. It starts the execution with `--async`, and retries the start only
+  when the request never left the laptop, so it can never start a second execution. Then it reads
+  `executions describe` every 20 s and judges only the execution's Completed condition. Network errors while
+  polling are waited out for up to 15 minutes. Past that, or on any other read error, the result counts as unknown
+  and the gate keeps the old traffic. Afterwards it prints the execution's log. On the gate's timeout every probe
+  process gets TERM. `timeout` returns 124 as soon as its direct child exits. The nested check-matting.sh runs its
+  TERM trap and cancels the execution on its own (review P3, checked by hand on Git Bash). A Run API 429 or 503
+  while polling is waited out like a network error, and success also needs no failed task.
+- The same applies outside the gates (review P2): deploy.sh's `gcv` reads go through `gcloud_retry`. Secrets are
+  checked with `gcloud_exists`, so a DNS blip says "cannot check the secret", not "secret missing". `catalog-migrate`
+  runs through `gcloud_job_run` with cancel-on-TERM off: it is started once, a polling blip only re-reads the same
+  execution, and a migration is never cancelled half-way. In services.sh, `probe_get` also retries curl 6 (DNS). The
+  identity and access token reads use `gcloud_retry`, and the IAP token mint retries network errors and Google's
+  429/500/503.
+- Not changed: other plain `gcloud` calls in deploy.sh (writes such as queue and IAM updates, and the post-gate jobs
+  catalog-cost-reconcile and catalog-graph-export, which still use `--wait`). A blip there can still stop a deploy
+  and need a re-run, but it never moves traffic.
+
 ## Rollback
 One service, seconds, no build and no smoke: `bash infra/deploy.sh --rollback <service> [revision]`
 moves all traffic to the given revision, by default the one the gate tagged `previous` when it last

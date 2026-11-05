@@ -58,8 +58,14 @@ test('deploy.sh: the switch comes from supabase_folder_paste; off neither checks
   const block = deploy.slice(start, deploy.indexOf('\nfi\n', start) + 4);
   const mount = deploy.split('\n').filter((l) => /^WEB_SECRETS=|^if \[ "\$SUPABASE_FOLDER_PASTE" = on \]; then WEB_SECRETS\+=/.test(l)).join('\n');
   assert.ok(start >= 0 && mount.split('\n').length === 2, 'mount and check blocks found');
+  // The check goes through deploy.sh's require_secret (gcloud_exists: NOT_FOUND is "missing", a network failure is not).
+  const rsStart = deploy.indexOf('require_secret() {');
+  const requireSecret = deploy.slice(rsStart, deploy.indexOf('\n}\n', rsStart) + 3);
+  assert.ok(rsStart >= 0, 'require_secret found');
   const run = (value) => sh(`set -euo pipefail
-gcloud() { return 1; }
+source infra/lib/gcloud-retry.sh
+${requireSecret}
+gcloud() { echo "ERROR: (gcloud.secrets.describe) NOT_FOUND: Secret [$3] not found or has no versions." >&2; return 1; }
 SECRETS=DB_PASSWORD=catalog-db-password:latest; SUPABASE_FOLDER_PASTE=${value}
 ${mount}
 echo "$WEB_SECRETS"

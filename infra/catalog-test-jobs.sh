@@ -14,6 +14,8 @@
 set -euo pipefail
 export CLOUDSDK_CORE_PROJECT=image-links-agent
 cd "$(dirname "$0")/.."
+# shellcheck source=lib/gcloud-retry.sh
+source infra/lib/gcloud-retry.sh
 : "${CATALOG_TEST_RUN:?Set CATALOG_TEST_RUN to a new UUID for this verification run}"
 [[ "$CATALOG_TEST_RUN" =~ ^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$ ]] || exit 2
 TAG=$(git rev-parse --short HEAD)
@@ -26,12 +28,12 @@ done
 IMAGES=worker
 if [[ " $JOBS " == *" real "* ]]; then IMAGES="worker catalog-real"; fi
 for image in $IMAGES; do
-  gcloud artifacts docker images describe "$AR/$image:$TAG" --quiet >/dev/null
+  gcloud_retry gcloud artifacts docker images describe "$AR/$image:$TAG" --quiet >/dev/null
 done
 tmp_dir=$(mktemp -d)
 trap 'rm -f -- "$tmp_dir/worker.json" "$tmp_dir/smoke.json" "$tmp_dir/real.json" "$tmp_dir/cleanup.json" "$tmp_dir/invariants.json" "$tmp_dir/existing.json"; rmdir "$tmp_dir"' EXIT
 # Environment references only. Mounted DB credentials are never read locally.
-gcloud run services describe catalog-worker --region=asia-south1 --format=json > "$tmp_dir/worker.json"
+gcloud_retry gcloud run services describe catalog-worker --region=asia-south1 --format=json > "$tmp_dir/worker.json"
 SMOKE_URLS_FROM_ENV=0
 if [ -n "${MATTING_URL:-}" ]; then SMOKE_URLS_FROM_ENV=1; fi
 node --input-type=commonjs - "$tmp_dir" "$TAG" "$CATALOG_TEST_RUN" "$SMOKE_URLS_FROM_ENV" "${MATTING_URL:-}" "${MATTING_GPU_URL:-}" "${WORKER_URL:-}" $JOBS <<'NODE'
@@ -86,7 +88,7 @@ for kind in $JOBS; do
   job=catalog-test-$kind
   if [ "$kind" = invariants ]; then job=catalog-invariants; fi
   # Successful list distinguishes a missing job from an inaccessible API.
-  gcloud run jobs list --region=asia-south1 --filter="metadata.name=$job" --format=json > "$tmp_dir/existing.json"
+  gcloud_retry gcloud run jobs list --region=asia-south1 --filter="metadata.name=$job" --format=json > "$tmp_dir/existing.json"
   if node --input-type=commonjs - "$tmp_dir/existing.json" "$tmp_dir/$kind.json" <<'NODE'
 const fs=require('node:fs');
 const [oldFile,newFile]=process.argv.slice(2),old=JSON.parse(fs.readFileSync(oldFile))[0],desired=JSON.parse(fs.readFileSync(newFile));
@@ -99,7 +101,7 @@ NODE
   then
     echo "$job: SKIP (current image and bounded configuration already match)"
   else
-    gcloud run jobs replace "$tmp_dir/$kind.json" --region=asia-south1 --quiet
+    gcloud_retry gcloud run jobs replace "$tmp_dir/$kind.json" --region=asia-south1 --quiet
   fi
 done
 echo "Evidence: gs://image-links-agent-assets/catalog-test/smoke/linux-$CATALOG_TEST_RUN/"

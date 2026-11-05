@@ -206,7 +206,7 @@ for s in catalog-matting catalog-upscale catalog-upscale-gpu catalog-matting-gpu
   const services = read('infra/lib/services.sh');
   assert.match(services, /PROBE_JOB=\$\(probe_job_name\) PROBE_TASK_TIMEOUT=\$timeout bash infra\/check-matting\.sh --probe "\$url"/);
   assert.match(services, /PROBE_JOB=\$\(probe_job_name\) PROBE_TASK_TIMEOUT=\$timeout bash infra\/check-matting\.sh --probe-upscale/);
-  assert.match(read('infra/lib/gate.sh'), /GATE_SERVICE="\$SVC_NAME" timeout --kill-after=10/);
+  assert.match(read('infra/lib/gate.sh'), /GATE_SERVICE="\$SVC_NAME" timeout --kill-after=60/);
 });
 
 // ---- gate_group: candidates at once, then probes at once, then the shifts ----

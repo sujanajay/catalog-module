@@ -14,7 +14,10 @@ PREFLIGHT_MIN_HOURS=${PREFLIGHT_MIN_HOURS:-3}
 GCLOUD_SESSION_HOURS=${GCLOUD_SESSION_HOURS:-20}
 PREFLIGHT_LOGIN_COMMAND=${PREFLIGHT_LOGIN_COMMAND:-gcloud auth login --update-adc}
 
-preflight_gcloud() { gcloud "$@"; }
+# shellcheck source=gcloud-retry.sh
+source "$(dirname "${BASH_SOURCE[0]}")/gcloud-retry.sh"
+# Every pre-flight call is a read; a network blip is retried (2026-11-05 stop #15), an expired login is not.
+preflight_gcloud() { gcloud_retry gcloud "$@"; }
 
 # The credentials.db of the active gcloud config folder (CLOUDSDK_CONFIG wins), as a path this shell can stat.
 preflight_credentials_file() {
