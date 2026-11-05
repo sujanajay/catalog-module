@@ -27,9 +27,11 @@ export async function lockForInputChange(tx: Tx, id: string): Promise<{ batch: C
   const [batch] = await tx.select().from(catalogBatches).where(eq(catalogBatches.id, id)).for("update");
   if (!batch) return { refused: "missing" };
   if (batch.status !== "draft" && (batch.status !== "ingesting" || batch.startedAt)) return { refused: "closed", batch };
+  // A draft has no step in flight: it is returned as it is, and the route clears previewReady when its change needs it.
+  if (batch.status === "draft") return { batch };
   const [changed] = await tx.update(catalogBatches)
     .set({ counts: mergeCounts({ inputsChangedAt: randomUUID(), previewReady: false, autoStartAt: null }), updatedAt: new Date() })
     .where(eq(catalogBatches.id, id)).returning();
-  if (batch.status === "ingesting") log("INFO", "input changed while collecting: grouping again with the change", { batchId: id });
+  log("INFO", "input changed while collecting: grouping again with the change", { batchId: id });
   return { batch: changed! };
 }
