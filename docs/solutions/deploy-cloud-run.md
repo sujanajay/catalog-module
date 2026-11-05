@@ -151,6 +151,20 @@ and `<service>-<hash>-<region code>.a.run.app`; not verified whether Cloud Run a
 (apps/worker/src/auth.ts) compares with the service URL of its own WORKER_URL (number form), so a task enqueued with a hash-form tag WORKER_URL
 could pass Cloud Run and still get the worker's 401. The smoke runs its tasks inline, so it is not affected.
 
+### Passing platform errors in probes (2026-11-05)
+
+The prod deploy of 457ea28 stopped at the catalog-upscale-gpu gate although every speed, determinism and cap check
+passed: one `GET /health` got a Cloud Run 503 in 0.7 ms ("connection to the instance had an error") while Cloud Run
+retired an idle instance, and the probe made one attempt (.runs/2026-11-05-r1-deploy-457ea28.md). Now every gate
+`/health` read tries again after a clearly passing platform error only, 3 attempts in all with growing waits and a
+time cap, and prints each retry: `read_with_retry` in services/matting/tests/cloudrun_check.py (the matting and
+upscale probe jobs; the report lists them under `retries`) and `probe_get` in infra/lib/services.sh (worker and web).
+Passing means a 429 or 503 whose body is not a JSON object (the services answer their own errors as JSON, the front
+end with HTML or text), a refused or reset connection, or a connect timeout. Never retried: any other status, the
+service's own error body, a timeout after connecting, and the measured /matte and /upscale calls (a front-end 503
+there can be an instance that crashed under the measured load, which the gate must catch). `probe_get` used to pass
+`--retry 5 --retry-all-errors` to curl, which silently retried 500, 502 and 504 too; that is gone.
+
 ## Rollback
 One service, seconds, no build and no smoke: `bash infra/deploy.sh --rollback <service> [revision]`
 moves all traffic to the given revision, by default the one the gate tagged `previous` when it last

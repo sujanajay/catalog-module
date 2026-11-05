@@ -64,9 +64,37 @@ def test_probe_preserves_foreground_and_background(monkeypatch, conversion, matt
 
 
 # Spec 17 3.3.1: probe mode against a fake matting service on localhost.
+import socket
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+# What Cloud Run's front end answers when the instance is gone (2026-11-05: an instance shutting down), unlike the
+# service's own JSON errors.
+PLATFORM_503 = b"<html><head><title>503 Service Unavailable</title></head><body>Service Unavailable</body></html>"
+
+
+def platform_answer(handler, fake):
+    """Answers the next GET from `fake.health_answers` when one is left: "503" or "429" as the platform (HTML), "503-own"
+    as the service's own JSON error, "500" as a service error, "reset" closes the connection without an answer."""
+    with fake.lock:
+        kind = fake.health_answers.pop(0) if fake.health_answers else None
+    if kind is None:
+        return False
+    if kind == "reset":
+        handler.close_connection = True
+        handler.connection.shutdown(socket.SHUT_RDWR)
+        return True
+    status, body, content = {"503": (503, PLATFORM_503, "text/html"), "429": (429, b"Rate exceeded.", "text/plain"),
+                             "503-own": (503, b'{"error": "upscale model swinir-x2 unavailable"}', "application/json"),
+                             "500": (500, b'{"error": "health failed"}', "application/json")}[kind]
+    handler.send_response(status)
+    handler.send_header("Content-Type", content)
+    handler.send_header("Content-Length", str(len(body)))
+    handler.end_headers()
+    handler.wfile.write(body)
+    return True
+
 
 PEAKS = {"birefnet-general": 5000, "birefnet-general-lite": 3000, "birefnet-hrsod": 5200, "bria-rmbg": 9000}
 
@@ -74,9 +102,10 @@ PEAKS = {"birefnet-general": 5000, "birefnet-general-lite": 3000, "birefnet-hrso
 class FakeMatting:
     """One instance with `resident` cut-out slots (least recently used out), per-model VRAM and optional failures."""
 
-    def __init__(self, resident=1, fail_model=None, advertised=None, health_extra=None, target="gpu"):
+    def __init__(self, resident=1, fail_model=None, advertised=None, health_extra=None, target="gpu", health_answers=()):
         self.resident, self.fail_model, self.advertised, self.target = resident, fail_model, advertised or resident, target
         self.health_extra = health_extra or {}
+        self.health_answers = list(health_answers)
         self.sessions, self.loads, self.calls, self.health_queries = ["birefnet-general"], {"birefnet-general": 1}, [], []
         self.lock = threading.Lock()
         fake = self
@@ -94,6 +123,8 @@ class FakeMatting:
 
             def do_GET(self):
                 fake.health_queries.append(self.path)
+                if platform_answer(self, fake):
+                    return
                 with fake.lock:
                     used = 1000 + sum(PEAKS[m] for m in fake.sessions)
                     body = {"ok": True, "instanceId": "fake01", "loadsByModel": dict(fake.loads), "residentModels": list(fake.sessions),
@@ -138,7 +169,8 @@ def fake_matting():
 
 def run_probe(url, *args):
     reports = []
-    code = probe.probe_main(["--probe", *args, "--run", "test-run", url], report_writer=lambda run, report: (reports.append(report), f"gs://bucket/{run}")[1])
+    code = probe.probe_main(["--probe", *args, "--run", "test-run", url], report_writer=lambda run, report: (reports.append(report), f"gs://bucket/{run}")[1],
+                            sleep=lambda seconds: None)
     return code, reports[0]
 
 
@@ -251,8 +283,9 @@ class FakeUpscale:
     threads, the tile once a call has loaded the model, and `uptime` (seconds since the instance started). `work_ms(path,
     count)`, when given, is the X-Upscale-Ms header of each answer (the service's inference time; None leaves it out)."""
 
-    def __init__(self, mode="ok", instances=("up01",), busy_calls=(), uptime=1000.0, health_delay=0.0, work_ms=None):
+    def __init__(self, mode="ok", instances=("up01",), busy_calls=(), uptime=1000.0, health_delay=0.0, work_ms=None, health_answers=()):
         self.mode, self.calls, self.loaded, self.work_ms = mode, [], False, work_ms
+        self.health_answers = list(health_answers)
         self.instances, self.busy_calls, self.uptime, self.health_delay = list(instances), set(busy_calls), uptime, health_delay
         self.health_calls = 0
         self.lock = threading.Lock()
@@ -276,6 +309,8 @@ class FakeUpscale:
             def do_GET(self):
                 with fake.lock:
                     fake.health_calls += 1
+                if platform_answer(self, fake):
+                    return
                 if fake.health_delay:
                     time.sleep(fake.health_delay)
                 body = {"ok": True, "instanceId": "up01", "uptimeS": fake.uptime, "vcpu": 4, "threads": 4, "preloadMatte": False, "candidate": "catalog-upscale-00001-abc",
@@ -294,6 +329,8 @@ class FakeUpscale:
                     return self.reply(429, b'{"error": "no instance free"}', "application/json")
                 if fake.mode == "busy":
                     return self.reply(503, b'{"error": "upscale model swinir-x2 unavailable"}', "application/json")
+                if fake.mode == "platform-503":
+                    return self.reply(503, PLATFORM_503, "text/html")
                 with Image.open(io.BytesIO(data)) as source:
                     factor = 1 if fake.mode == "wrong-size" else int(self.path.rsplit("scale=", 1)[1])
                     out = source.convert("RGB").resize((source.width * factor, source.height * factor), Image.Resampling.NEAREST)
@@ -894,3 +931,120 @@ def test_visual_limit_passes_the_measured_cross_instance_difference_and_fails_a_
     assert probe.visually_identical({"maxAbs": 1, "psnrDb": 97.95}) and probe.visually_identical({"maxAbs": 3, "psnrDb": 93.05})
     assert not probe.visually_identical({"maxAbs": 3, "psnrDb": 38.6}), "a 3-level colour cast on every pixel"
     assert not probe.visually_identical({"maxAbs": 40, "psnrDb": 70.0}), "a local defect such as a seam"
+
+
+# 2026-11-05 (.runs/2026-11-05-r1-deploy-457ea28.md): one GET /health answered 503 by Cloud Run while it retired an
+# idle instance failed the catalog-upscale-gpu gate. A probe's /health read is tried again after a passing platform
+# error only, at most TRANSIENT_ATTEMPTS times; a real answer is never retried.
+def test_upscale_probe_passes_after_one_platform_503_on_health(fake_upscale, capsys):
+    slept = []
+    fake = fake_upscale(health_answers=["503"])
+    reports = []
+    code = probe.probe_upscale_main(["--probe-upscale", fake.url, "--sizes", "64x96", "--rounds", "1", "--run", "up-run", *BUCKET],
+                                    report_writer=lambda run, report, file: (reports.append(report), "gs://x")[1], sleep=slept.append)
+    assert code == 0 and reports[0]["passed"] is True
+    # The baseline read twice (503, then 200), the warm read once; one wait of the first delay.
+    assert fake.health_calls == 3 and slept == [probe.TRANSIENT_DELAYS_S[0]]
+    assert reports[0]["retries"] == [{"read": "swinir-x2 /health after baseline", "attempt": 1, "of": 3,
+                                      "reason": "HTTP 503 from the platform, not the service", "nextInS": 5}]
+    out = capsys.readouterr().out
+    assert "retry: swinir-x2 /health after baseline: HTTP 503 from the platform, not the service (attempt 1 of 3); trying again in 5 s" in out
+
+
+@pytest.mark.parametrize("answers", [["reset"], ["429", "503"]])
+def test_upscale_probe_retries_a_reset_and_a_platform_429(fake_upscale, answers):
+    fake = fake_upscale(health_answers=answers)
+    code, reports = run_upscale_probe(fake.url, "--sizes", "64x96", "--rounds", "1", *BUCKET)
+    assert code == 0 and len(reports[0][1]["retries"]) == len(answers)
+    assert fake.health_calls == 2 + len(answers)
+
+
+def test_upscale_probe_fails_on_a_persistent_platform_503_after_the_bounded_attempts(fake_upscale, capsys):
+    fake = fake_upscale(health_answers=["503"] * 3)
+    code, reports = run_upscale_probe(fake.url, "--sizes", "64x96", "--rounds", "1", *BUCKET)
+    assert code == 1
+    report = reports[0][1]
+    assert report["failures"] == ["swinir-x2: health unreadable after baseline"]
+    # Exactly TRANSIENT_ATTEMPTS reads for the baseline, then one for the warm step.
+    assert fake.health_calls == probe.TRANSIENT_ATTEMPTS + 1
+    assert [r["attempt"] for r in report["retries"]] == [1, 2, 3] and report["retries"][-1]["nextInS"] is None
+    assert "(attempt 3 of 3); giving up" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("answer", ["503-own", "500"])
+def test_upscale_probe_never_retries_the_services_own_error(fake_upscale, answer):
+    fake = fake_upscale(health_answers=[answer])
+    code, reports = run_upscale_probe(fake.url, "--sizes", "64x96", "--rounds", "1", *BUCKET)
+    assert code == 1 and reports[0][1]["failures"] == ["swinir-x2: health unreadable after baseline"]
+    assert fake.health_calls == 2 and reports[0][1]["retries"] == []
+
+
+@pytest.mark.parametrize("mode", ["platform-503", "busy", "wrong-size"])
+def test_upscale_probe_never_retries_a_measured_call(fake_upscale, mode):
+    # A measured call that fails is the candidate's failure (a 503 there may be an instance that crashed under load).
+    fake = fake_upscale(mode=mode)
+    code, reports = run_upscale_probe(fake.url, "--sizes", "64x96", "--rounds", "2", *BUCKET)
+    assert code == 1 and "swinir-x2 64x96: 3 non-200" in reports[0][1]["failures"]
+    assert len(fake.calls) == 3 and reports[0][1]["retries"] == []
+
+
+def test_upscale_probe_still_fails_a_speed_cap_violation_after_a_retried_health(fake_upscale):
+    # A retried /health never hides a real check: the x2 cap at 100 MP cannot fit a 30 s timeout.
+    fake = fake_upscale(health_answers=["503"], work_ms=lambda path, count: 2000)
+    code, reports = run_upscale_probe(fake.url, "--sizes", "64x96", "--rounds", "1", "--timeout", "30", "--x2-max-pixels", "100000000", *BUCKET)
+    assert code == 1 and len(reports[0][1]["retries"]) == 1
+    assert any("UPSCALE_MAX_PIXELS=100000000 needs" in f for f in reports[0][1]["failures"])
+
+
+def test_matting_probe_passes_after_one_platform_503_and_fails_on_a_persistent_one(fake_matting):
+    fake = fake_matting(resident=4, health_answers=["503"])
+    code, report = run_probe(fake.url, "--models", "bria-rmbg", "--rounds", "1")
+    assert code == 0 and [r["read"] for r in report["retries"]] == ["/health after baseline"]
+    fake = fake_matting(resident=4, health_answers=["503"] * 3)
+    code, report = run_probe(fake.url, "--models", "bria-rmbg", "--rounds", "1")
+    assert code == 1 and report["failures"] == ["health unreadable after baseline"]
+    assert len(fake.health_queries) == probe.TRANSIENT_ATTEMPTS + 2
+    fake = fake_matting(resident=4, health_answers=["503-own"])
+    code, report = run_probe(fake.url, "--models", "bria-rmbg", "--rounds", "1")
+    assert code == 1 and report["retries"] == [] and len(fake.health_queries) == 3
+
+
+def http_error(code, body):
+    return urllib.error.HTTPError("https://x.run.app/health", code, "error", email.message.Message(), io.BytesIO(body))
+
+
+def test_transient_reason_names_only_passing_platform_errors():
+    import http.client
+    import socket
+    assert probe.transient_reason(http_error(503, probe_platform_body())) == "HTTP 503 from the platform, not the service"
+    assert probe.transient_reason(http_error(429, b"Rate exceeded.")) == "HTTP 429 from the platform, not the service"
+    assert probe.transient_reason(http_error(503, b"")) is not None
+    assert probe.transient_reason(http_error(503, b'{"error": "upscale model swinir-x4 unavailable"}')) is None
+    for code in (400, 401, 403, 404, 500, 502, 504):
+        assert probe.transient_reason(http_error(code, b"<html></html>")) is None
+    assert probe.transient_reason(urllib.error.URLError(ConnectionRefusedError())) is not None
+    assert probe.transient_reason(urllib.error.URLError(socket.timeout("timed out"))) == "connection failed before the request was sent"
+    assert probe.transient_reason(urllib.error.URLError("unknown url type")) is None
+    assert probe.transient_reason(http.client.RemoteDisconnected("closed")) == "connection reset before the answer"
+    assert probe.transient_reason(ConnectionResetError()) is not None
+    # A timeout waiting for the answer is a slow candidate, and a malformed answer is the candidate's.
+    assert probe.transient_reason(TimeoutError("read timed out")) is None
+    assert probe.transient_reason(json.JSONDecodeError("x", "", 0)) is None
+    assert probe.transient_reason(probe.CheckFailure("response exceeds check limit")) is None
+
+
+def probe_platform_body():
+    return PLATFORM_503
+
+
+def test_read_with_retry_stops_at_the_time_cap(monkeypatch):
+    now, slept, log = [0.0], [], []
+
+    def failing(url, token):
+        now[0] += 88
+        raise http_error(503, PLATFORM_503)
+    monkeypatch.setattr(probe, "request", failing)
+    with pytest.raises(urllib.error.HTTPError):
+        probe.read_with_retry("/health", "https://x.run.app/health", None, slept.append, log, clock=lambda: now[0])
+    # 88 s in after the first try: a 5 s wait would pass TRANSIENT_MAX_S (90), so it gives up at once.
+    assert slept == [] and [e["nextInS"] for e in log] == [None]

@@ -43,6 +43,65 @@ def request(url, token=None, data=None, content_type=None, timeout=TIMEOUT, limi
         return response.headers, body
 
 
+# Gate probes and passing platform errors (2026-11-05, .runs/2026-11-05-r1-deploy-457ea28.md): the catalog-upscale-gpu
+# gate failed on one GET /health that Cloud Run answered 503 in 0.7 ms while it retired an idle instance; every
+# measurement had passed and /health answered 200 again 3 s later. A probe's /health read is therefore tried up to
+# TRANSIENT_ATTEMPTS times, TRANSIENT_DELAYS_S apart and within TRANSIENT_MAX_S, but only after a clearly passing
+# platform error (transient_reason): a 429 or 503 whose body is not the service's own JSON answer (the matting service
+# answers every error of its own as a JSON object, services/matting/app.py), a connection error before the request was
+# sent (refused, reset, connect timeout), or a connection reset before the answer. Every retry is printed. Never retried:
+# any other status, the service's own error body, a read timeout (a slow candidate), a malformed answer, and the measured
+# /matte and /upscale calls (a front-end 503 there may be an instance that crashed under the load being measured, which
+# is exactly what the gate must catch; their only retry stays the 429 queue retry of the determinism round).
+TRANSIENT_ATTEMPTS = 3
+TRANSIENT_DELAYS_S = (5, 10)
+TRANSIENT_MAX_S = 90
+TRANSIENT_STATUSES = (429, 503)
+
+
+def transient_reason(error):
+    """Why `error` (raised by one request) is a passing platform error worth another try, or None for a real answer."""
+    if isinstance(error, urllib.error.HTTPError):
+        if error.code not in TRANSIENT_STATUSES:
+            return None
+        try:
+            own = isinstance(json.loads(error.read(65536) or b""), dict)
+        except Exception:  # noqa: BLE001 - an unreadable or non-JSON body is not the service's own answer
+            own = False
+        return None if own else f"HTTP {error.code} from the platform, not the service"
+    if isinstance(error, urllib.error.URLError) and isinstance(error.reason, (ConnectionError, TimeoutError)):
+        # urllib wraps only the connect and send phase in URLError; a timeout waiting for the answer is raised bare.
+        return "connection failed before the request was sent"
+    if isinstance(error, ConnectionResetError):
+        # Includes http.client.RemoteDisconnected: the connection closed before any answer.
+        return "connection reset before the answer"
+    return None
+
+
+def read_with_retry(label, url, token, sleep=time.sleep, log=None, clock=time.monotonic):
+    """request(url, token), tried again after a passing platform error only (see TRANSIENT_ATTEMPTS). Each retry is
+    printed and appended to `log`; the last error is raised as it came."""
+    began = clock()
+    for attempt in range(1, TRANSIENT_ATTEMPTS + 1):
+        try:
+            return request(url, token)
+        except Exception as error:  # noqa: BLE001 - re-raised unless it is a passing platform error
+            reason = transient_reason(error)
+            delay = TRANSIENT_DELAYS_S[min(attempt, len(TRANSIENT_DELAYS_S)) - 1]
+            if reason is None:
+                raise
+            last = attempt == TRANSIENT_ATTEMPTS or clock() - began + delay > TRANSIENT_MAX_S
+            entry = {"read": label, "attempt": attempt, "of": TRANSIENT_ATTEMPTS, "reason": reason, "nextInS": None if last else delay}
+            if log is not None:
+                log.append(entry)
+            print(f"retry: {label}: {reason} (attempt {attempt} of {TRANSIENT_ATTEMPTS}); "
+                  + ("giving up" if last else f"trying again in {delay} s"), flush=True)
+            if last:
+                raise
+            sleep(delay)
+    raise AssertionError("unreachable")
+
+
 def identity_token(audience):
     query = urllib.parse.urlencode({"audience": audience})
     url = "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/identity?" + query
@@ -159,18 +218,21 @@ def percentile(values, share):
 
 
 class Probe:
-    def __init__(self, url, token, models):
-        self.url, self.token, self.data = url, token, probe_image()
+    def __init__(self, url, token, models, sleep=time.sleep):
+        self.url, self.token, self.data, self.sleep = url, token, probe_image(), sleep
         self.models = {model: {"ms": [], "statuses": [], "peakMiB": None} for model in models}
         self.instances = {}
         self.steps = []
         self.problems = []
+        self.retries = []
 
     def health(self, step, model=None):
         """Reads /health (fresh VRAM) after a step and keeps each instance's newest load counters. The first read of an
-        instance before any call is its baseline, so loads from before the probe do not count."""
+        instance before any call is its baseline, so loads from before the probe do not count. A passing platform error
+        is tried again (read_with_retry)."""
         try:
-            _, body = request(self.url + "/health?fresh=1", self.token)
+            _, body = read_with_retry(f"/health after {step}{' ' + model if model else ''}", self.url + "/health?fresh=1", self.token,
+                                      self.sleep, self.retries)
             health = json.loads(body)
         except Exception:  # noqa: BLE001 - recorded as a probe failure; no detail is printed
             self.steps.append({"step": step, "model": model, "health": None})
@@ -278,19 +340,19 @@ def parse_probe_args(argv):
     return args
 
 
-def probe_main(argv, token_for=None, report_writer=None, now=None):
+def probe_main(argv, token_for=None, report_writer=None, now=None, sleep=time.sleep):
     """Runs the probe and returns the exit code. Tokens never reach stdout."""
     args = parse_probe_args(argv)
     token = None if args.url.startswith("http://") else (token_for or identity_token)(audience_for(args.url))
     started = now or datetime.datetime.now(datetime.timezone.utc)
     run = args.run or os.environ.get("CLOUD_RUN_EXECUTION") or started.strftime("%Y%m%dT%H%M%SZ")
-    probe = Probe(args.url, token, args.models)
+    probe = Probe(args.url, token, args.models, sleep)
     probe.run(args.concurrency, args.rounds)
     rows = probe.rows()
     failures = probe.failures(rows)
     report = {"run": run, "url": args.url, "startedAt": started.isoformat(), "imagePx": PROBE_SIZE, "models": args.models,
               "concurrency": args.concurrency, "rounds": args.rounds, "rows": rows, "reloadsChecked": probe.holds_all(),
-              "instances": probe.instances, "steps": probe.steps, "passed": not failures, "failures": failures}
+              "instances": probe.instances, "steps": probe.steps, "retries": probe.retries, "passed": not failures, "failures": failures}
     print(markdown(rows), flush=True)
     location = (report_writer or write_report)(run, report)
     print(json.dumps({"probe": run, "passed": not failures, "failures": failures, "report": location}), flush=True)
@@ -567,9 +629,10 @@ def current_token(source):
 
 
 class UpscaleProbe:
-    def __init__(self, url, token, model, sizes, timeout):
+    def __init__(self, url, token, model, sizes, timeout, sleep=time.sleep):
         # `token`: None (a local URL), a token, or a callable that returns the current one (RefreshingToken).
-        self.url, self.token_source, self.model, self.timeout = url, token, model, timeout
+        self.url, self.token_source, self.model, self.timeout, self.sleep = url, token, model, timeout, sleep
+        self.retries = []
         self.scale = UPSCALE_PROBE_MODELS.get(model, 2)
         # Per size: the bodies of its distinct outputs (sha256 -> bytes) until it is judged, then its judgement. Only the
         # size being probed holds bodies, so at most one input's distinct outputs are in memory at once.
@@ -586,8 +649,9 @@ class UpscaleProbe:
         return current_token(self.token_source)
 
     def health(self, step):
+        # A passing platform error is tried again (read_with_retry); the 2026-11-05 gate failure was one such 503 here.
         try:
-            _, body = request(self.url + "/health", self.token)
+            _, body = read_with_retry(f"{self.model} /health after {step}", self.url + "/health", self.token, self.sleep, self.retries)
             health = json.loads(body)
         except Exception:  # noqa: BLE001 - recorded as a probe failure; no detail is printed
             self.problems.append(f"health unreadable after {step}")
@@ -846,14 +910,14 @@ def probe_upscale_main(argv, token_for=None, report_writer=None, now=None, sleep
     token = None if args.url.startswith("http://") else RefreshingToken(lambda: (token_for or identity_token)(audience))
     started = now or datetime.datetime.now(datetime.timezone.utc)
     run = args.run or os.environ.get("CLOUD_RUN_EXECUTION") or started.strftime("%Y%m%dT%H%M%SZ")
-    rows, failures, steps, service, determinism, cold_start, timings = [], [], [], {}, [], None, {}
+    rows, failures, steps, service, determinism, cold_start, timings, retries = [], [], [], {}, [], None, {}, []
     # First, before any call warms the candidate (spec 18 gate, plan 7.2).
     if args.cold_start_max:
         cold_start, cold_failures = measure_cold_start(args.url, token, args.models[0], DETERMINISM_SIZE, args.timeout, args.cold_start_max, sleep=sleep)
         failures += cold_failures
     # One model after the other (the service runs one tile at a time; a concurrency 1 shape must never see two models).
     for model in args.models:
-        probe = UpscaleProbe(args.url, token, model, args.sizes, args.timeout)
+        probe = UpscaleProbe(args.url, token, model, args.sizes, args.timeout, sleep)
         probe.run(args.concurrency, args.rounds)
         if args.determinism_calls:
             determinism.append(probe.determinism_round(args.determinism_calls, sleep=sleep, seconds_budget=args.determinism_seconds))
@@ -863,12 +927,13 @@ def probe_upscale_main(argv, token_for=None, report_writer=None, now=None, sleep
         steps += [{"model": model, **step} for step in probe.steps]
         service.update(probe.service)
         timings[model] = probe.work
+        retries += probe.retries
     cap_timeout, cap_failures = cap_timeout_check(timings, {2: args.x2_max_pixels, 4: args.x4_max_pixels}, args.timeout)
     failures += cap_failures
     report = {"run": run, "url": args.url, "startedAt": started.isoformat(), "models": args.models,
               "sizes": [f"{w}x{h}" for w, h in args.sizes], "concurrency": args.concurrency, "rounds": args.rounds,
               "timeoutS": args.timeout, "service": service, "rows": rows, "steps": steps, "determinism": determinism,
-              "coldStart": cold_start, "capTimeout": cap_timeout, "visualLimit": {"maxAbs": VISUAL_MAX_ABS, "minPsnrDb": VISUAL_MIN_PSNR_DB},
+              "coldStart": cold_start, "capTimeout": cap_timeout, "retries": retries, "visualLimit": {"maxAbs": VISUAL_MAX_ABS, "minPsnrDb": VISUAL_MIN_PSNR_DB},
               "passed": not failures, "failures": failures}
     print(upscale_markdown(rows), flush=True)
     for entry in determinism:

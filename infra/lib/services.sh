@@ -313,19 +313,68 @@ upscale_measure_summary() {
 # GET <url> with a bearer token (default: the operator's identity token, which plain Cloud Run IAM accepts); fails on
 # anything but a final 200 on the same host. Redirects are followed (the web home page redirects to /catalog; curl
 # keeps the token only on the same host), but a final page on another host fails: an IAP 302 to Google's sign-in page
-# would otherwise end in a 200 there. Retries cover a cold start. The header goes to curl on stdin (-K -), so the token
-# is never on a command line.
+# would otherwise end in a 200 there. The header goes to curl on stdin (-K -), so the token is never on a command line.
+# A passing platform error (probe_transient) is tried again, PROBE_GET_ATTEMPTS times in all, PROBE_RETRY_DELAY_S
+# apart and doubling, never past PROBE_RETRY_MAX_S, and every retry is printed; any other answer counts as it came
+# (2026-11-05: one Cloud Run 503 from an instance shutting down failed a gate; see cloudrun_check.py
+# read_with_retry for the probes that run as a job). Before that, curl's --retry 5 --retry-all-errors silently retried
+# every 408, 429, 500, 502, 503 and 504, the service's own answers too.
+PROBE_GET_ATTEMPTS=${PROBE_GET_ATTEMPTS:-3}
+PROBE_RETRY_DELAY_S=${PROBE_RETRY_DELAY_S:-5}
+PROBE_RETRY_MAX_S=${PROBE_RETRY_MAX_S:-120}
+
+# probe_transient <curl exit> <HTTP code> <TLS connect s> <body file>: prints why that answer is a passing platform
+# error, or nothing for a real answer. Passing: a 429 or 503 whose body is not a JSON object (the services answer their
+# own errors as JSON; Cloud Run's front end answers with HTML or text), curl failing to connect (7), the TLS handshake
+# failing (35), the connection closing or resetting without an answer (52, 55, 56), and a timeout before the TLS
+# connection was made (28 with no TLS connect time). Never: any other status, the service's own error body, or a timeout
+# after connecting (a slow candidate).
+probe_transient() {
+  local rc=$1 code=$2 tls=$3 body=$4 first=""
+  case "$code" in
+    429|503)
+      if [ -s "$body" ]; then first=$(head -c 512 "$body"); first=${first#"${first%%[![:space:]]*}"}; first=${first:0:1}; fi
+      [ "$first" = "{" ] || echo "HTTP $code from the platform, not the service"
+      return 0 ;;
+    000) ;;
+    *) return 0 ;;
+  esac
+  case "$rc" in
+    7) echo "could not connect (curl 7)" ;;
+    35) echo "TLS handshake failed (curl 35)" ;;
+    52|55|56) echo "connection closed or reset without an answer (curl $rc)" ;;
+    28) if [[ "$tls" =~ ^0([.,]0+)?$ ]]; then echo "connect timeout (curl 28)"; fi ;;
+  esac
+  return 0
+}
+
 probe_get() {
-  local url=$1 token=${2:-} out code final host
+  local url=$1 token=${2:-} out code final host rc tls body reason attempt=1 delay=$PROBE_RETRY_DELAY_S started=$SECONDS
   if [ -z "$token" ]; then
     token=$(gcloud auth print-identity-token | tr -d '\r') || { echo "probe: no identity token (gcloud auth login)" >&2; return 1; }
   fi
   # The token is written into a curl config line, so it must be a plain token (no quote, backslash or space).
   [[ "$token" =~ ^[A-Za-z0-9._~+/=-]+$ ]] || { echo "probe: the token is not a plain bearer token" >&2; return 1; }
-  out=$(printf 'header = "Authorization: Bearer %s"\n' "$token" \
-    | curl -sS -K - -L --max-redirs 5 -o /dev/null -w '%{http_code} %{url_effective}' --max-time 60 --retry 5 --retry-delay 5 --retry-all-errors \
-      "$url") || out=000
-  code=${out%% *}; final=${out#* }
+  body=$(mktemp)
+  while :; do
+    rc=0
+    : > "$body"
+    out=$(printf 'header = "Authorization: Bearer %s"\n' "$token" \
+      | curl -sS -K - -L --max-redirs 5 -o "$body" -w '%{http_code} %{time_appconnect} %{url_effective}' --connect-timeout 20 --max-time 60 \
+        "$url") || rc=$?
+    read -r code tls final <<<"$out"
+    code=${code:-000}
+    reason=$(probe_transient "$rc" "$code" "${tls:-0}" "$body")
+    [ -n "$reason" ] || break
+    if [ "$attempt" -ge "$PROBE_GET_ATTEMPTS" ] || [ $((SECONDS - started + delay)) -gt "$PROBE_RETRY_MAX_S" ]; then
+      echo "probe: GET $url: $reason (attempt $attempt of $PROBE_GET_ATTEMPTS); giving up" >&2
+      break
+    fi
+    echo "probe: GET $url: $reason (attempt $attempt of $PROBE_GET_ATTEMPTS); trying again in $delay s"
+    sleep "$delay"
+    attempt=$((attempt + 1)); delay=$((delay * 2))
+  done
+  rm -f "$body"
   host=${url#https://}; host=${host%%/*}
   echo "probe: GET $url -> $code"
   [ "$code" = 200 ] || return 1
