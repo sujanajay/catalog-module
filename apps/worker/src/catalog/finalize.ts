@@ -11,6 +11,7 @@ import { recheckSheetPart, type RecheckProgress } from "@catalog/core/catalog/re
 import { compareXlsxCsv, fillProductListWorkbook, writeExceptionsCsv, writeLinksCsv, writeLinksXlsx, writeNotesCsv } from "@catalog/core/catalog/sheet";
 import { digestFrom, readImprovements, type BatchDigest } from "@catalog/core/catalog/digest";
 import { inrPerUsdFromEnv } from "@catalog/core/catalog/cost";
+import { batchRecordedUsd } from "@catalog/core/catalog/cost-report";
 import { positiveIntEnv } from "@catalog/core/concurrency";
 import type { HandleResult } from "../server";
 import { CATALOG_TASK_LEASE_MS, enqueueFinalize, refreshBatchProgress, type CatalogDeps } from "./deps";
@@ -129,10 +130,12 @@ export async function handleFinalizeTask(deps:CatalogDeps,body:Record<string,unk
     const build=async(db:CatalogDeps["db"])=>{
       const {rows,...built}=await buildReport(db,batchId,extra);built.batch.counts=cleanCounts(built.batch.counts);built.report.counts=built.batch.counts;
       // M1-S5 (M1-F4-R1): the digest and its two sheets from the same snapshot as the links sheet, so their numbers agree.
-      const c=built.batch.cost as typeof built.batch.cost & {usdPerIdentifier?:number|null;inrPerIdentifier?:number|null},usd=c.qaUsd+c.computeUsd,rate=inrPerUsdFromEnv();
+      // R1 exit item 4: the digest cost is every cost ledger row of the batch (cut-out and enlarging calls, every compute
+      // row, failed attempts), not batch.cost (judge and chunk compute only). The daily cost check adds idle time later.
+      const identifiers=built.batch.cost.identifiers,usd=await batchRecordedUsd(db,batchId),rate=inrPerUsdFromEnv(),usdPerProduct=identifiers>0 ? usd/identifiers:null;
       // M1-S5 review P2-4: buildReport's rows are reused, so the outputs are read once per build; only improvements are new.
       const digest=digestFrom({batch:built.batch,sheet:built.sheet,files:[...(built.report.unsupportedFiles as unknown[]),...(built.report.linkFailures as unknown[])],
-        cost:{usd,inr:rate===null ? null:usd*rate,usdPerProduct:c.usdPerIdentifier ?? null,inrPerProduct:c.inrPerIdentifier ?? null},
+        cost:{usd,inr:rate===null ? null:usd*rate,usdPerProduct,inrPerProduct:usdPerProduct===null || rate===null ? null:usdPerProduct*rate,basis:"recorded"},
         pairs:rows.pairs.map(r=>({productId:r.pair.productId,identifier:r.product.identifier,change:r.pair.change,notes:r.pair.notes})),outputs:rows.outputs,improvements:await readImprovements(db,batchId)});
       return {...built,digest};
     };
@@ -140,7 +143,9 @@ export async function handleFinalizeTask(deps:CatalogDeps,body:Record<string,unk
     // M1-S5 review P2-3: the digest's exceptions and notes rows come from the outputs and improvements the report and the
     // digest numbers already cover, so only the numbers are compared; stringifying up to 225k rows twice (once under the
     // batch row lock) added memory and time and caught nothing more.
-    const snapshotOf=(built:typeof initial)=>JSON.stringify({...built,digest:built.digest.digest,report:{...built.report,exports:undefined,recheck:undefined}});
+    // The digest cost is left out: ledger rows keep landing while the batch finalizes (this request's own compute row),
+    // and the digest keeps the first build's figure.
+    const snapshotOf=(built:typeof initial)=>JSON.stringify({...built,digest:{...built.digest.digest,cost:undefined},report:{...built.report,exports:undefined,recheck:undefined}});
     const snapshot=snapshotOf(initial),snapshotHash=createHash("sha256").update(snapshot).digest("hex");
     let resume:RecheckProgress|undefined;
     if(state) {

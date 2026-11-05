@@ -1,5 +1,6 @@
 import { and, eq, ne, sql } from "drizzle-orm";
-import { costLine, estimateCost, type EstimateCounts } from "@catalog/core/catalog/cost";
+import { costLine, costLineFor, estimateCost, type EstimateCounts } from "@catalog/core/catalog/cost";
+import { batchRecordedUsd } from "@catalog/core/catalog/cost-report";
 import { catalogBatchProducts, catalogOutputs } from "@catalog/core/db/schema";
 import type { BatchCost } from "@catalog/core/catalog/types";
 import { db, type Db } from "../db";
@@ -17,7 +18,9 @@ export async function batchCostLine(batch: { id: string; cost: BatchCost }, conn
     eq(catalogBatchProducts.batchId, batch.id), ne(catalogBatchProducts.change, "unchanged"),
     sql`exists (select 1 from ${catalogOutputs} o where o.batch_id = ${batch.id}::uuid and o.product_id = ${catalogBatchProducts.productId} and o.status <> 'skipped')`,
   ));
-  return costLine({ cost: { ...batch.cost, identifiers: Number(row?.n ?? 0) } }, env);
+  // R1 exit item 4: the whole cost ledger of the batch (cut-out and enlarging calls, every compute row, failed attempts),
+  // the same figure the digest shows, not batch.cost (judge and chunk compute only).
+  return costLineFor(await batchRecordedUsd(conn, batch.id), Number(row?.n ?? 0), env);
 }
 
 /** The wizard step 4 estimate; null when INR_PER_USD is not set. */

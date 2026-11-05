@@ -17,7 +17,7 @@ import type { Db } from "@catalog/core/db/client";
 import { createTestDb } from "@catalog/core/db/testing";
 import { catalogChannelListings,catalogOptions,catalogTreatmentAssignments,brandMaster,catalogBatches,catalogBatchProducts,catalogChunks,catalogOutputs,catalogProductAliases,catalogProducts,catalogProductEvents,catalogSourceImages,catalogUploads,DEFAULT_BATCH_OPTIONS,EMPTY_BATCH_COUNTS,spendDays } from "@catalog/core/db/schema";
 import * as storage from "@catalog/core/storage";
-import { catalogCostEvents } from "@catalog/core/db/schema";
+import { catalogBatchOutcomes,catalogCostEvents } from "@catalog/core/db/schema";
 import { enqueueFinalize,FINALIZE_ENQUEUE_LEASE_MS,PROGRESS_THROTTLE_MIN_OUTPUTS,workerCatalogDeps,type CatalogDeps } from "./deps";
 import { CHUNK_MAX_STALLS } from "@catalog/core/catalog/pipeline/dispatch";
 import { handleSweep } from "./sweep";
@@ -87,6 +87,27 @@ async function seed(w:ReturnType<typeof world>,name:string,options:{productId?:s
   return {batch:batch!,product,chunk:chunk!};
 }
 async function run(w:ReturnType<typeof world>,s:Awaited<ReturnType<typeof seed>>) {expect((await handleChunkTask(w.deps,await currentChunkTask(db,s.chunk.id))).httpStatus).toBe(200);expect((await handleChunkTask(w.deps,await currentChunkTask(db,s.chunk.id))).httpStatus).toBe(200);expect((await handleChunkTask(w.deps,await currentChunkTask(db,s.chunk.id))).httpStatus).toBe(200);return handlePublishTask(w.deps,{batchId:s.batch.id,productId:s.product.id});}
+it("R1 exit item 4: the digest and the outcome carry the whole cost ledger of the batch (GPU calls, failed ones, every compute row), not batch.cost",async()=>{
+  const w=world(),s=await seed(w,"cost-ledger");
+  expect((await run(w,s)).outcome).toBe("published");
+  // The calls batch.cost never holds: a GPU enlarging call, a failed cut-out call and a publish compute row.
+  await db.insert(catalogCostEvents).values([
+    {batchId:s.batch.id,brandSlug:"anta",stage:"upscale",kind:"upscale_call",engine:"gpu",ms:2500,usd:0.0026,outcome:"ok",component:"catalog-upscale-gpu"},
+    {batchId:s.batch.id,brandSlug:"anta",stage:"matte",kind:"matte_call",engine:"gpu",ms:900,usd:0.0003,outcome:"failed",component:"catalog-matting-gpu"},
+    {batchId:s.batch.id,brandSlug:"anta",stage:"publish",kind:"compute",engine:"worker",ms:400,usd:0.00004,outcome:"ok",component:"catalog-worker"},
+  ]);
+  const ledgerUsd=async()=>Number((await db.select({usd:sql<string>`coalesce(sum(${catalogCostEvents.usd}),0)`}).from(catalogCostEvents).where(eq(catalogCostEvents.batchId,s.batch.id)))[0]!.usd);
+  const before=await ledgerUsd();
+  expect((await handleFinalizeTask(w.deps,{batchId:s.batch.id})).outcome).toBe("done");
+  const [batch]=await db.select().from(catalogBatches).where(eq(catalogBatches.id,s.batch.id));
+  const cost=batch!.digest!.cost;
+  expect(cost.basis).toBe("recorded");
+  expect(cost.usd).toBeCloseTo(before,6);
+  expect(cost.usd).toBeGreaterThan(batch!.cost.qaUsd+batch!.cost.computeUsd+0.0029);
+  expect(cost.usdPerProduct).toBeCloseTo(before,6); // one product
+  const [outcome]=await db.select().from(catalogBatchOutcomes).where(eq(catalogBatchOutcomes.batchId,s.batch.id));
+  expect(outcome!.recordedCostUsd).toBeCloseTo(await ledgerUsd(),6);
+});
 it("M1-F5 test 2 (M1-S5, M1 D38): the same photos again the next day give a digest with every product unchanged, no new images and no new public objects",async()=>{
   const w=world(),channels:("noon"|"namshi")[]=["noon","namshi"],first=await seed(w,"rerun-f5",{shots:["a","b"],channels});
   expect((await run(w,first)).outcome).toBe("published");

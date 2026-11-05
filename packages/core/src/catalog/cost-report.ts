@@ -73,6 +73,16 @@ export async function batchCostByStage(db: Db, batchId: string): Promise<StageCo
 }
 
 /**
+ * R1 exit item 4: what a batch's recorded work cost, every ledger row of the batch (judge, cut-out and enlarging calls,
+ * every compute row, failed attempts too). The digest, the batch page and the outcome row show this until the daily
+ * cost check adds the idle time and shared lines (true_cost_usd). `batch.cost` holds only the judge and chunk compute.
+ */
+export async function batchRecordedUsd(db: Db, batchId: string): Promise<number> {
+  const [row] = await db.select({ usd: sql<string>`coalesce(sum(${catalogCostEvents.usd}), 0)` }).from(catalogCostEvents).where(eq(catalogCostEvents.batchId, batchId));
+  return num(row?.usd);
+}
+
+/**
  * USD, time and call count per engine label of one batch (render and upscale rows share "image making"; overflow vendor
  * calls have their own line).
  */

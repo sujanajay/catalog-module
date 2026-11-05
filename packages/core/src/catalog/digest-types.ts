@@ -48,14 +48,21 @@ export interface BatchDigest {
   linksReadyAt: string | null;
   /** A batch cancelled part way: when (the digest covers what was delivered). */
   cancelledAt: string | null;
-  /** Cost in total and per product, as the batch cost line counts it (INR is null when no rate is set). */
-  cost: { usd: number; inr: number | null; usdPerProduct: number | null; inrPerProduct: number | null };
+  /**
+   * Cost in total and per product (INR is null when no rate is set). `basis` (R1 exit item 4): `recorded` is every cost
+   * ledger row of the batch at finalize, before idle time; `true` is the daily cost check's figure with idle time and
+   * shared lines (the page puts it in when the batch outcome has it). Digests written before have no basis: judge and
+   * chunk compute only.
+   */
+  cost: DigestCost;
   /**
    * What the batch page and its downloads need besides the numbers, so a page with a digest reads this row only, never
    * the report or the outputs (M1-S5 review P2-3). Internal: storage paths, never sent to the browser.
    */
   page?: DigestPage;
 }
+
+export interface DigestCost { usd: number; inr: number | null; usdPerProduct: number | null; inrPerProduct: number | null; basis?: "recorded" | "true" }
 
 export interface DigestPage {
   /** The two digest sheets as csv (storage paths), null when not written. */

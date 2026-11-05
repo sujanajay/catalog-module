@@ -67,11 +67,16 @@ export function digestTimeLine(d: BatchDigest): string | null {
   return parts.length ? `Time ${parts.join(", ")}.` : null;
 }
 
-/** "Cost: INR 9.20 per product (INR 18,400.00 for this batch)." with USD when no rupee rate is set. */
+/**
+ * "Cost: INR 9.20 per product (INR 18,400.00 for this batch)." with USD when no rupee rate is set. A recorded cost (R1
+ * exit item 4) says the idle time comes later; the true cost says it holds it.
+ */
 export function digestCostLine(d: BatchDigest): string | null {
   const c = d.cost;
-  if (c.inrPerProduct !== null && c.inr !== null) return `Cost: INR ${inrAmount(c.inrPerProduct)} per product (INR ${inrAmount(c.inr)} for this batch).`;
-  if (c.usdPerProduct !== null) return `Cost: USD ${usdAmount(c.usdPerProduct)} per product (USD ${usdAmount(c.usd)} for this batch).`;
+  const lead = c.basis === "recorded" ? "Cost so far" : "Cost";
+  const after = c.basis === "recorded" ? " Idle machine time is added by the daily cost check." : c.basis === "true" ? " This includes idle machine time and the shared database." : "";
+  if (c.inrPerProduct !== null && c.inr !== null) return `${lead}: INR ${inrAmount(c.inrPerProduct)} per product (INR ${inrAmount(c.inr)} for this batch).${after}`;
+  if (c.usdPerProduct !== null) return `${lead}: USD ${usdAmount(c.usdPerProduct)} per product (USD ${usdAmount(c.usd)} for this batch).${after}`;
   return null;
 }
 

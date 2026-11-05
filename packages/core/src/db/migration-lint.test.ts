@@ -100,7 +100,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS "t_k_uq" ON "t" USING btree ("k");`;
     expect(lintJournal({ entries: [entry(0, 1, "0000_a")] }, { "0000_a.sql": "", "0001_b.sql": "" }).map((f) => f.rule)).toEqual(["migration file is not in meta/_journal.json, so it never runs"]);
   });
 
-  it("the repo's journal is in run order, with M1-S6's 0024 after M6-S2's 0023 and M1-S5's 0025 after it", () => {
+  it("the repo's journal is in run order, with M1-S6's 0024 after M6-S2's 0023, M1-S5's 0025 and the outcome cost column 0026 after it", () => {
     const folder = resolveMigrationsFolder();
     const journal = JSON.parse(readFileSync(path.join(folder, "meta", "_journal.json"), "utf8")) as { entries: JournalEntry[] };
     const files = Object.fromEntries(readdirSync(folder).filter((n) => n.endsWith(".sql")).map((n) => [n, ""]));
@@ -119,6 +119,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS "t_k_uq" ON "t" USING btree ("k");`;
     expect(tags.indexOf("0023_cost_reconciliation")).toBe(tags.indexOf("0022_upscaler_health") + 1);
     expect(tags.indexOf("0024_follow_up_batches")).toBe(tags.indexOf("0023_cost_reconciliation") + 1);
     expect(tags.indexOf("0025_batch_digest")).toBe(tags.indexOf("0024_follow_up_batches") + 1);
+    expect(tags.indexOf("0026_outcome_recorded_cost")).toBe(tags.indexOf("0025_batch_digest") + 1);
   });
 
   // R1 merge trains (2026-11-04): parallel PRs claimed the same migration number and were renumbered at merge. A

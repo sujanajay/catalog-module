@@ -76,11 +76,16 @@ describe("M6-F3 acceptance test 1: a clean batch, one Try again, and one with an
     expect(gaveUp).toMatchObject({ kind: "chunk_gave_up", severity: "error", cause_code: "render" });
     expect(new Date(String(gaveUp!.resolved_at)).toISOString()).toBe(at(20).toISOString());
 
+    // R1 exit item 4: the outcome keeps the batch's whole cost ledger (a GPU call, a failed one and a compute row).
+    for (const [kind, usd, outcome] of [["upscale_call", 0.25, "ok"], ["upscale_call", 0.05, "failed"], ["compute", 0.0125, "ok"]] as const) {
+      await db.execute(sql`INSERT INTO catalog_cost_events (batch_id, brand_slug, stage, kind, engine, ms, usd, outcome) VALUES (${clean}, 'uspa', 'upscale', ${kind}, 'gpu', 1000, ${usd}, ${outcome})`);
+    }
     const outcomes = { clean: await recordBatchOutcome(db, clean, at(50)), retried: await recordBatchOutcome(db, retried, at(50)), stopped: await recordBatchOutcome(db, stopped, at(50)) };
     expect(outcomes.clean).toMatchObject({ status: "done", success: true, cause: null, touches: 0, incidents: 0, products: 1, productsWithLinks: 1, durationMs: 30 * 60_000 });
     expect(outcomes.clean!.firstLinksAt!.toISOString()).toBe(at(20).toISOString());
     expect(outcomes.clean!.linksReadyAt!.toISOString()).toBe(at(30).toISOString());
-    expect(outcomes.retried).toMatchObject({ success: false, cause: "touched", touches: 1, incidents: 0 });
+    expect(outcomes.clean!.recordedCostUsd).toBeCloseTo(0.3125, 6);
+    expect(outcomes.retried).toMatchObject({ success: false, cause: "touched", touches: 1, incidents: 0, recordedCostUsd: 0 });
     expect(outcomes.stopped).toMatchObject({ success: false, cause: "incident", touches: 0, incidents: 1 });
 
     const summary = await reliabilitySummary(db, at(60));

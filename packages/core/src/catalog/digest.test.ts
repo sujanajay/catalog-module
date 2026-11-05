@@ -9,8 +9,8 @@ import { parseCsv } from "../csv";
 import { seedLargeBatch } from "./pipeline/large-batch-fixture";
 import { buildReport } from "./pipeline/report";
 import { APPEND_TAKEN_NOTE, HOLDOUT_KEPT_NOTE, overLimitNote } from "./pipeline/publish";
-import { buildDigest, digestFrom, groupReasons, readImprovements, type BatchDigest, type DigestOutput } from "./digest";
-import { digestEmail, digestHeadline, digestReasonLines, digestTiles, digestTimeLine, duration } from "./digest-copy";
+import { buildDigest, digestFrom, digestWithTrueCost, groupReasons, readImprovements, type BatchDigest, type DigestOutput } from "./digest";
+import { digestCostLine, digestEmail, digestHeadline, digestReasonLines, digestTiles, digestTimeLine, duration } from "./digest-copy";
 import { compareXlsxCsv, EXCEPTIONS_SHEET, NO_EXCEPTIONS, NOTES_SHEET, writeExceptionsCsv, writeLinksCsv, writeLinksXlsx } from "./sheet";
 
 let db: Db, close: () => Promise<void>, batchId = "";
@@ -190,4 +190,31 @@ it("the stored digest column round-trips through the batch row", async () => {
   await db.update(catalogBatches).set({ digest: d }).where(eq(catalogBatches.id, batchId));
   const [row] = await db.select({ digest: catalogBatches.digest }).from(catalogBatches).where(eq(catalogBatches.id, batchId));
   expect(row!.digest).toEqual(d);
+});
+
+describe("R1 exit item 4: the digest cost", () => {
+  it("says a recorded cost is before idle time and a true cost includes it; older digests read as before", () => {
+    const usd = { usd: 2.8796, inr: null, usdPerProduct: 0.0204, inrPerProduct: null };
+    expect(digestCostLine(digest({ cost: usd }))).toBe("Cost: USD 0.0204 per product (USD 2.8796 for this batch).");
+    expect(digestCostLine(digest({ cost: { ...usd, basis: "recorded" } }))).toBe("Cost so far: USD 0.0204 per product (USD 2.8796 for this batch). Idle machine time is added by the daily cost check.");
+    expect(digestCostLine(digest({ cost: { usd: 7.16, inr: 601.44, usdPerProduct: 0.0508, inrPerProduct: 4.2672, basis: "true" } })))
+      .toBe("Cost: INR 4.27 per product (INR 601.44 for this batch). This includes idle machine time and the shared database.");
+  });
+
+  it("shows the true cost once the daily cost check covered the day the batch ended, per product with links", async () => {
+    const d = digest({ productsWithLinks: 6, cost: { usd: 0.5, inr: null, usdPerProduct: 0.1, inrPerProduct: null, basis: "recorded" } });
+    // No outcome row, or no reconciled day yet: as recorded.
+    expect(await digestWithTrueCost(db, batchId, d, 84)).toBe(d);
+    await db.execute(sql`INSERT INTO catalog_batch_outcomes (batch_id, status, success, ended_at, products, products_with_links, true_cost_usd)
+      VALUES (${batchId}, 'done', true, '2026-11-05T15:56:07Z', 6, 4, 1.2) ON CONFLICT (batch_id) DO UPDATE SET true_cost_usd = 1.2, products_with_links = 4, ended_at = '2026-11-05T15:56:07Z'`);
+    // True cost from an earlier day only (a batch that crossed midnight, checked for its first day): still as recorded.
+    await db.execute(sql`INSERT INTO catalog_cost_allocations (day, source, batch_id, component, busy_ms, attributed_usd, idle_usd, shared_usd, computed_at)
+      VALUES ('2026-11-04', 'monitoring', ${batchId}, 'catalog-worker', 0, 0.2, 0.1, 0, now())`);
+    expect(await digestWithTrueCost(db, batchId, d, 84)).toBe(d);
+    await db.execute(sql`INSERT INTO catalog_cost_allocations (day, source, batch_id, component, busy_ms, attributed_usd, idle_usd, shared_usd, computed_at)
+      VALUES ('2026-11-05', 'monitoring', ${batchId}, 'catalog-upscale-gpu', 0, 0.3, 0.6, 0, now())`);
+    const shown = await digestWithTrueCost(db, batchId, d, 84);
+    expect(shown.cost).toEqual({ usd: 1.2, inr: 1.2 * 84, usdPerProduct: 0.3, inrPerProduct: 0.3 * 84, basis: "true" });
+    expect({ ...shown, cost: d.cost }).toEqual(d);
+  });
 });

@@ -158,8 +158,11 @@ interface CostBatch {
  products?: readonly {change:string;outputs:readonly {status:string}[]}[];
 }
 export function costLine(batch:CostBatch,env:NodeJS.ProcessEnv=process.env) {
- const usd = batch.cost.qaUsd+batch.cost.computeUsd;
  const identifiers = batch.products ? batch.products.filter(p => p.change !== "unchanged" && p.outputs.some(o => o.status !== "skipped")).length : batch.cost.identifiers;
+ return costLineFor(batch.cost.qaUsd+batch.cost.computeUsd,identifiers,env);
+}
+/** The cost line for `usd` spent over `identifiers` styles (the batch page reads usd from the whole cost ledger). */
+export function costLineFor(usd:number,identifiers:number,env:NodeJS.ProcessEnv=process.env) {
  const usdPerIdentifier = identifiers > 0 ? usd/identifiers : null;
  const rate = positive(env.INR_PER_USD);
  const inrPerIdentifier = usdPerIdentifier !== null && rate !== null ? usdPerIdentifier*rate : null;

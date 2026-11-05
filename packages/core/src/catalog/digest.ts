@@ -3,12 +3,12 @@
 // snapshot as the links sheet, so the digest's numbers equal the rows of its two new sheets: "Exceptions" (one row per
 // product or photo with no link) and "Delivered with a note" (one row per image sent now with the best image we have).
 // Until M2's gap report ships, the reasons come from the auto-decide causes and flags the pipeline already sets.
-import { asc, eq } from "drizzle-orm";
+import { asc, eq, sql } from "drizzle-orm";
 import type { Db } from "../db/client";
 import { catalogBatchProducts, catalogImprovements, catalogOutputs, catalogProducts } from "../db/schema";
 import { autoDecideRecordOf } from "./auto-decide";
 import { CHANNEL_ORDER, CHANNELS } from "./channels";
-import type { BatchDigest, DigestReason } from "./digest-types";
+import type { BatchDigest, DigestCost, DigestReason } from "./digest-types";
 import { STYLI_SKIP_NOTE } from "./evals/completeness";
 import { IMPROVE_MAX_TRIES } from "./improve";
 import { APPEND_TAKEN_NOTE, HOLDOUT_KEPT_NOTE, NO_DELIVERABLE_PHOTO } from "./pipeline/publish";
@@ -98,7 +98,7 @@ export interface DigestInput {
   sheet: SheetSpec;
   /** Files that never became a photo of a product (buildReport's unsupportedFiles and linkFailures). */
   files: readonly unknown[];
-  cost: { usd: number; inr: number | null; usdPerProduct: number | null; inrPerProduct: number | null };
+  cost: DigestCost;
 }
 
 export interface DigestParts { digest: BatchDigest; exceptions: ExceptionRow[]; notes: NoteRow[]; kept: { keptPhotos: number; styliSkipped: number } }
@@ -244,6 +244,22 @@ export function digestFrom(input: DigestInput & { pairs: readonly DigestPair[]; 
     if (o.channel === "styli" && o.status === "skipped" && o.reason?.includes(STYLI_SKIP_NOTE)) styliSkipped++;
   }
   return { digest, exceptions, notes, kept: { keptPhotos: keptSources.size, styliSkipped } };
+}
+
+/**
+ * R1 exit item 4 (M6-F1-R9): the digest with the batch's true cost in place of the cost recorded at finalize, once the
+ * daily cost check has covered the day the batch ended (attributed + idle + shared lines, catalog_batch_outcomes
+ * true_cost_usd), per product with links. Before that, or for a batch it never covered, the digest is returned as is.
+ */
+export async function digestWithTrueCost<T extends BatchDigest>(db: Db, batchId: string, digest: T, inrPerUsd: number | null): Promise<T> {
+  const result = (await db.execute(sql`SELECT o.true_cost_usd::float8 AS usd, o.products_with_links AS n FROM catalog_batch_outcomes AS o
+    WHERE o.batch_id = ${batchId}::uuid AND o.true_cost_usd > 0
+      AND EXISTS (SELECT 1 FROM catalog_cost_allocations AS a WHERE a.batch_id = o.batch_id AND a.day >= (o.ended_at AT TIME ZONE 'UTC')::date)`)) as unknown as { rows: { usd: number; n: number }[] };
+  const row = result.rows[0];
+  if (!row) return digest;
+  const usd = Number(row.usd), n = Number(row.n) || digest.productsWithLinks;
+  const usdPerProduct = n > 0 ? usd / n : null;
+  return { ...digest, cost: { usd, inr: inrPerUsd === null ? null : usd * inrPerUsd, usdPerProduct, inrPerProduct: usdPerProduct === null || inrPerUsd === null ? null : usdPerProduct * inrPerUsd, basis: "true" } };
 }
 
 /** Reads what the digest needs and builds it (tests and callers without buildReport's rows). */

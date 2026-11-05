@@ -183,6 +183,13 @@
       "when": 1793868640238,
       "tag": "0025_batch_digest",
       "breakpoints": true
+    },
+    {
+      "idx": 26,
+      "version": "7",
+      "when": 1793902729630,
+      "tag": "0026_outcome_recorded_cost",
+      "breakpoints": true
     }
   ]
 }

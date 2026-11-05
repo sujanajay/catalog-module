@@ -31,6 +31,7 @@ import CostLine from "@/components/catalog/CostLine";
 import RetryCollectButton from "@/components/catalog/RetryCollectButton";
 import AddMorePhotosButton from "@/components/catalog/AddMorePhotosButton";
 import { batchLinks } from "@catalog/core/catalog/follow-up";
+import { digestWithTrueCost } from "@catalog/core/catalog/digest";
 import { db } from "@/lib/db";
 import { canRetryLinks, FOLLOW_UP_OF, MORE_PHOTOS_IN } from "@/lib/catalog/copy";
 import { batchLinkFailures } from "@/lib/catalog/preview";
@@ -68,7 +69,8 @@ export default async function BatchPage({ params, searchParams }: { params: Prom
   const settingUp = canContinueSettingUp(batch);
   // M1-S5 (M1-F4-R5): a finished batch with a digest shows it in place of the overview and the product cards. A batch
   // with products held for a person (one started before auto-decide) keeps its cards under their own tab.
-  const digest = showsDigest(batch) ? batch.digest : null;
+  // R1 exit item 4: the digest shows the true cost (idle time and shared lines) once the daily cost check has it.
+  const digest = showsDigest(batch) && batch.digest ? await digestWithTrueCost(db(), id, batch.digest, inrPerUsdFromEnv()) : null;
   const sheetLoaded = !digest || tab === "sheet";
   const detailsLoaded = !digest || tab === "details";
   // The comparison signs a page of images, so it loads only when its tab is asked for (?tab=compare).

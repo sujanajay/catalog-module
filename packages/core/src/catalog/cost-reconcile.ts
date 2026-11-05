@@ -12,8 +12,10 @@
 // Shared lines (R6): the shared Cloud SQL instance ila-pg at an admin-set cost per day and catalog share (settings
 // cost.database_usd_per_day, cost.database_catalog_share_percent). Vendors off the GCP bill (OpenRouter, an overflow
 // vendor) are billed as the ledger recorded them until vendor invoices arrive (M6-S3).
-// Allocations (R5): each component's idle spread over that day's batches by their busy seconds on it, the shared lines
-// by their attributed cost; idle no batch explains is "idle, no batch". The batch outcome's true_cost_usd is the sum.
+// Allocations (R5): each component's idle, minute by minute, to the batches whose work ran from 15 minutes before to 5
+// minutes after that minute (allocateIdle, M6 decision C1; by busy seconds over the day when a sample has no minutes),
+// the shared lines by their attributed cost; idle no batch explains is "idle, no batch". The batch outcome's
+// true_cost_usd is the sum.
 import { and, eq, inArray, sql } from "drizzle-orm";
 import type { Db } from "../db/client";
 import { catalogBatchOutcomes, catalogCostAllocations, catalogCostDays, type CostEnv, type CostLineKind } from "../db/schema";
@@ -131,8 +133,13 @@ export function runResourceFrom(kind: "service" | "job", region: string, item: V
 // Readers (Cloud Run Admin API and Cloud Monitoring, read only)
 // ---------------------------------------------------------------------------------------------------------------------
 
-/** Billable instance seconds of one service or job over a day. */
-export interface BillableSample { name: string; kind: "service" | "job"; region: string; seconds: number }
+/** One minute of billable instance time: the minute ending at `endMs`. */
+export interface BillablePoint { endMs: number; seconds: number }
+/**
+ * Billable instance seconds of one service or job over a day, and (from Cloud Monitoring) the same time per minute, so
+ * idle time can be given to the batches that ran around it (allocateIdle, M6 decision C1).
+ */
+export interface BillableSample { name: string; kind: "service" | "job"; region: string; seconds: number; points?: readonly BillablePoint[] }
 
 export interface CostReaders {
   resources(): Promise<RunResource[]>;
@@ -167,7 +174,7 @@ export function googleCostReaders(get: GoogleGet, project: string): CostReaders 
         const q = new URLSearchParams({
           filter: `metric.type="${BILLABLE_METRIC}"`,
           "interval.startTime": from.toISOString(), "interval.endTime": to.toISOString(),
-          "aggregation.alignmentPeriod": `${Math.round((+to - +from) / 1000)}s`,
+          "aggregation.alignmentPeriod": `${IDLE_BUCKET_MS / 1000}s`,
           "aggregation.perSeriesAligner": "ALIGN_SUM", "aggregation.crossSeriesReducer": "REDUCE_SUM",
         });
         for (const g of ["resource.type", "resource.label.service_name", "resource.label.job_name", "resource.label.location"]) q.append("aggregation.groupByFields", g);
@@ -183,18 +190,20 @@ export function googleCostReaders(get: GoogleGet, project: string): CostReaders 
 
 export interface MonitoringSeries {
   resource: { type: string; labels: Record<string, string> };
-  points?: { value: { doubleValue?: number; int64Value?: string } }[];
+  points?: { interval?: { endTime?: string }; value: { doubleValue?: number; int64Value?: string } }[];
 }
 
-/** One sample per Cloud Run revision group or job, the points of the window summed. */
+/** One sample per Cloud Run revision group or job: the points of the window summed, and kept per minute. */
 export function samplesFrom(series: readonly MonitoringSeries[]): BillableSample[] {
   const out: BillableSample[] = [];
   for (const s of series) {
     const kind = s.resource.type === "cloud_run_job" ? "job" : s.resource.type === "cloud_run_revision" ? "service" : null;
     const name = kind === "job" ? s.resource.labels.job_name : s.resource.labels.service_name;
     if (!kind || !name) continue;
-    const seconds = (s.points ?? []).reduce((sum, p) => sum + Number(p.value.doubleValue ?? p.value.int64Value ?? 0), 0);
-    out.push({ name, kind, region: s.resource.labels.location ?? "", seconds });
+    const value = (p: NonNullable<MonitoringSeries["points"]>[number]) => Number(p.value.doubleValue ?? p.value.int64Value ?? 0);
+    const seconds = (s.points ?? []).reduce((sum, p) => sum + value(p), 0);
+    const points = (s.points ?? []).flatMap((p) => (p.interval?.endTime && value(p) > 0 ? [{ endMs: Date.parse(p.interval.endTime), seconds: value(p) }] : []));
+    out.push({ name, kind, region: s.resource.labels.location ?? "", seconds, ...(points.length ? { points } : {}) });
   }
   return out;
 }
@@ -221,9 +230,11 @@ const labelled = (r: RunResource) => r.labels.app === "catalog" && !!r.labels.co
  * or job (by its `component` label, else its name), other apps in the project left out. An unlabelled catalog
  * resource is reported as env `unlabelled`; a sample whose shape has no price (or whose resource is gone) is billed 0.
  */
-export function billedLines(day: string, samples: readonly BillableSample[], resources: readonly RunResource[]): { lines: CostLine[]; alerts: CostAlert[] } {
+export function billedLines(day: string, samples: readonly BillableSample[], resources: readonly RunResource[]): { lines: CostLine[]; alerts: CostAlert[]; minutes: Map<string, BillablePoint[]> } {
   const byKey = new Map(resources.map((r) => [`${r.kind}|${r.region}|${r.name}`, r]));
   const lines = new Map<string, CostLine>();
+  /** Per component, billed USD per minute (each point's `seconds` holds USD here). */
+  const minutes = new Map<string, BillablePoint[]>();
   const alerts: CostAlert[] = [];
   for (const s of samples) {
     const r = byKey.get(`${s.kind}|${s.region}|${s.name}`);
@@ -240,8 +251,9 @@ export function billedLines(day: string, samples: readonly BillableSample[], res
     line.billedUsd += price ? s.seconds * price.usdPerSecond : 0;
     line.detail = { ...line.detail, [s.name]: { seconds: s.seconds, ...(price ? { usdPerSecond: price.usdPerSecond, ...price.rates } : { unpriced: true }) } };
     lines.set(key, line);
+    if (price && s.points) pushAll(minutes.get(key) ?? minutes.set(key, []).get(key)!, s.points.map((p) => ({ endMs: p.endMs, seconds: p.seconds * price.usdPerSecond })));
   }
-  return { lines: [...lines.values()], alerts };
+  return { lines: [...lines.values()], alerts, minutes };
 }
 
 /** Vendor components off the GCP bill (M6-F1-R7): OpenRouter and the overflow adapters. */
@@ -297,7 +309,16 @@ export function instanceUsdPerMs(resources: readonly RunResource[]): Map<string,
  * Vendor rows and rows without busy time count whole on the day they ended.
  */
 export function dayLedger(events: readonly LedgerEvent[], fromMs: number, toMs: number, instancePerMs: ReadonlyMap<string, number>): LedgerRow[] {
+  return ledgerDay(events, fromMs, toMs, instancePerMs).rows;
+}
+
+/** A stretch of one ledger row's work inside the day, at its cost after the instance cap. */
+export interface LedgerSegment { component: string; batchId: string | null; start: number; end: number; usd: number }
+
+/** dayLedger's rows, plus every timed stretch of work (for the per-minute idle allocation). */
+export function ledgerDay(events: readonly LedgerEvent[], fromMs: number, toMs: number, instancePerMs: ReadonlyMap<string, number>): { rows: LedgerRow[]; segments: LedgerSegment[] } {
   const out = new Map<string, LedgerRow>();
+  const segments: LedgerSegment[] = [];
   const add = (e: LedgerEvent, busyMs: number, usd: number) => {
     const key = `${e.component}|${e.batchId ?? ""}`;
     const row = out.get(key) ?? { component: e.component, batchId: e.batchId, busyMs: 0, usd: 0, estimated: false };
@@ -328,14 +349,89 @@ export function dayLedger(events: readonly LedgerEvent[], fromMs: number, toMs: 
         let sum = 0;
         for (const i of active) sum += spans[i]!.rate;
         const scale = cap !== undefined && sum > cap ? cap / sum : 1;
-        for (const i of active) spans[i]!.usd += spans[i]!.rate * length * scale;
+        for (const i of active) {
+          const usd = spans[i]!.rate * length * scale;
+          spans[i]!.usd += usd;
+          segments.push({ component, batchId: spans[i]!.e.batchId, start: prev, end: p.t, usd });
+        }
       }
       prev = p.t;
       if (p.on) active.add(p.i); else active.delete(p.i);
     }
     for (const s of spans) add(s.e, s.end - s.start, s.usd);
   }
-  return [...out.values()];
+  return { rows: [...out.values()], segments };
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Idle by the minute (M6 decision C1, R1 exit item 4)
+// ---------------------------------------------------------------------------------------------------------------------
+
+/** Monitoring is read per minute; idle is placed on these minutes. */
+export const IDLE_BUCKET_MS = 60_000;
+/**
+ * Idle in a minute belongs to the work around it. Cloud Run keeps an instance idle up to 15 minutes after its last
+ * request (10 for GPU services) and bills an instance-based service for all of it, and an instance starts before its
+ * first request is served (a GPU model loads for a minute or more). So a minute's idle goes to the work that ran from
+ * IDLE_TAIL_MS before the minute to IDLE_LEAD_MS after it.
+ */
+export const IDLE_TAIL_MS = 15 * 60_000;
+export const IDLE_LEAD_MS = 5 * 60_000;
+
+/**
+ * Splits one component's idle over the batches whose work explains it (M6 decision C1). Per minute: idle = billed minus
+ * recorded work (never negative), shared by the busy ms of each batch (and of work with no batch) in [minute start -
+ * IDLE_TAIL_MS, minute end + IDLE_LEAD_MS]; a minute with no work in that window is idle with no batch. The minutes are
+ * then scaled so they add up to the day line's idle, so the day still closes. Returns USD per batch id, or null when
+ * there are no minutes to place idle by (the caller then spreads it over the day by busy seconds).
+ */
+export function allocateIdle(idleUsd: number, billed: readonly BillablePoint[], segments: readonly LedgerSegment[], fromMs: number, toMs: number): Map<string, number> | null {
+  const n = Math.ceil((toMs - fromMs) / IDLE_BUCKET_MS);
+  if (!(idleUsd > 0) || !billed.length || n <= 0) return null;
+  const at = (t: number) => Math.min(n - 1, Math.max(0, Math.floor((t - fromMs) / IDLE_BUCKET_MS)));
+  const billedUsd = new Float64Array(n), workUsd = new Float64Array(n);
+  for (const p of billed) billedUsd[at(p.endMs - 1)]! += p.seconds;
+  // Busy ms per minute per batch ("" = work with no batch), then prefix sums for the windows.
+  const busy = new Map<string, Float64Array>();
+  for (const s of segments) {
+    if (!(s.end > s.start)) continue;
+    const key = s.batchId ?? "";
+    const row = busy.get(key) ?? busy.set(key, new Float64Array(n)).get(key)!;
+    const rate = s.usd / (s.end - s.start);
+    for (let i = at(s.start); i <= at(s.end - 1); i++) {
+      const lo = Math.max(s.start, fromMs + i * IDLE_BUCKET_MS), hi = Math.min(s.end, fromMs + (i + 1) * IDLE_BUCKET_MS);
+      if (hi <= lo) continue;
+      row[i]! += hi - lo;
+      workUsd[i]! += rate * (hi - lo);
+    }
+  }
+  const prefix: [string, Float64Array][] = [];
+  for (const [key, row] of busy) {
+    const p = new Float64Array(n + 1);
+    for (let i = 0; i < n; i++) p[i + 1] = p[i]! + row[i]!;
+    prefix.push([key, p]);
+  }
+  const tail = Math.ceil(IDLE_TAIL_MS / IDLE_BUCKET_MS), lead = Math.ceil(IDLE_LEAD_MS / IDLE_BUCKET_MS);
+  const out = new Map<string, number>();
+  let placed = 0;
+  for (let i = 0; i < n; i++) {
+    const idle = billedUsd[i]! - workUsd[i]!;
+    if (!(idle > 0)) continue;
+    placed += idle;
+    const lo = Math.max(0, i - tail), hi = Math.min(n, i + lead + 1);
+    let total = 0;
+    const weights: [string, number][] = [];
+    for (const [key, p] of prefix) {
+      const w = p[hi]! - p[lo]!;
+      if (w > 0) { weights.push([key, w]); total += w; }
+    }
+    if (!(total > 0)) continue; // idle with no batch
+    for (const [key, w] of weights) if (key) out.set(key, (out.get(key) ?? 0) + (idle * w) / total);
+  }
+  if (!(placed > 0)) return null;
+  const scale = idleUsd / placed;
+  for (const [key, usd] of out) out.set(key, usd * scale);
+  return out;
 }
 
 export interface DayResult { day: string; lines: CostLine[]; allocations: number; alerts: CostAlert[]; batches: string[] }
@@ -352,8 +448,8 @@ interface DayPlan { result: DayResult; provisional: boolean; allocations: Alloca
 /** Computes one UTC day (`YYYY-MM-DD`) without writing it. */
 async function planDay(db: Db, day: string, input: { samples: readonly BillableSample[]; resources: readonly RunResource[]; provisional: boolean }): Promise<DayPlan> {
   const from = new Date(`${day}T00:00:00Z`), to = new Date(+from + DAY_MS);
-  const { lines: billed, alerts } = billedLines(day, input.samples, input.resources);
-  const ledger = dayLedger(await ledgerEvents(db, from, to), +from, +to, instanceUsdPerMs(input.resources));
+  const { lines: billed, alerts, minutes } = billedLines(day, input.samples, input.resources);
+  const { rows: ledger, segments } = ledgerDay(await ledgerEvents(db, from, to), +from, +to, instanceUsdPerMs(input.resources));
   const lines = new Map(billed.map((l) => [l.component, l]));
   // Attributed per component (summed over its env lines: a component name is one env in practice).
   const attributed = new Map<string, { usd: number; estimated: boolean }>();
@@ -381,7 +477,8 @@ async function planDay(db: Db, day: string, input: { samples: readonly BillableS
   const shared: CostLine = { component: DATABASE_COMPONENT, kind: "shared", region: "asia-south1", env: "live", billableSeconds: null, billedUsd: dbUsd, attributedUsd: 0, idleUsd: 0, sharedUsd: dbUsd * share, estimated: true, detail: { usdPerDay: dbUsd, sharePercent: share * 100, rule: "admin setting" } };
   const all = [...lines.values(), shared];
 
-  // Allocations (R5): idle by busy seconds per component, shared by attributed cost over all the day's batches.
+  // Allocations (R5): idle by the minute to the batches working around it (decision C1), or by busy seconds over the
+  // day when there is no per-minute time; shared by attributed cost over all the day's batches.
   const perBatch = new Map<string, Allocation>();
   const batchRows = ledger.filter((r) => r.batchId !== null);
   for (const r of batchRows) perBatch.set(`${r.batchId}|${r.component}`, { component: r.component, batchId: r.batchId!, busyMs: r.busyMs, attributedUsd: r.usd, idleUsd: 0, sharedUsd: 0 });
@@ -389,6 +486,11 @@ async function planDay(db: Db, day: string, input: { samples: readonly BillableS
     if (line.idleUsd <= 0) continue;
     const rows = [...perBatch.values()].filter((a) => a.component === line.component);
     if (!rows.length) continue; // idle, no batch
+    const byMinute = allocateIdle(line.idleUsd, minutes.get(line.component) ?? [], segments.filter((s) => s.component === line.component), +from, +to);
+    if (byMinute) {
+      for (const a of rows) a.idleUsd = byMinute.get(a.batchId) ?? 0;
+      continue;
+    }
     const busy = rows.map((a) => a.busyMs);
     spread(line.idleUsd, busy.some((b) => b > 0) ? busy : rows.map((a) => a.attributedUsd)).forEach((usd, i) => { rows[i]!.idleUsd = usd; });
   }
@@ -426,6 +528,8 @@ async function writeDays(tx: Db, plans: readonly DayPlan[], now: Date): Promise<
     // M6-F1-R9: the batch's true cost so far, every reconciled day summed (attributed + idle + shared).
     await tx.update(catalogBatchOutcomes).set({
       trueCostUsd: sql`(SELECT coalesce(sum(a.attributed_usd + a.idle_usd + a.shared_usd), 0) FROM catalog_cost_allocations AS a WHERE a.batch_id = ${catalogBatchOutcomes.batchId})`,
+      // The ledger total again: rows that landed after the outcome was written (the finalize's own compute row).
+      recordedCostUsd: sql`(SELECT coalesce(sum(e.usd), 0) FROM catalog_cost_events AS e WHERE e.batch_id = ${catalogBatchOutcomes.batchId})`,
     }).where(inArray(catalogBatchOutcomes.batchId, batchIds));
   }
 }
