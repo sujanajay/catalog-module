@@ -42,6 +42,8 @@ export function digestReasonLines(d: BatchDigest, max: number = DIGEST_REASON_LI
   if (d.stayedAsSent) lines.push(`${n(d.stayedAsSent)} could not be made better and stay as sent.`);
   if (d.photosLeftOut) lines.push(`${n(d.photosLeftOut)} ${plural(d.photosLeftOut, "photo was", "photos were")} left out: ${reasonList(d.leftOutReasons)}. See the Exceptions sheet.`);
   if (d.controlsSkipped) lines.push(`${n(d.controlsSkipped)} ${plural(d.controlsSkipped, "product is", "products are")} in a running experiment. Their images on those channels were left unchanged on purpose.`);
+  // M1-F5-R3: the digest says "unchanged: N". Older stored digests have no count.
+  if (d.unchanged) lines.push(`Unchanged: ${n(d.unchanged)} ${plural(d.unchanged, "product was", "products were")} the same as before, so no new image was made and their links stay the same.`);
   const groups = d.exceptionReasons.map(g => `${g.text} - ${n(g.count)}`);
   const room = Math.max(0, max - lines.length);
   const more = Math.max(0, groups.length - room) + (d.exceptionsNotGrouped ? 1 : 0);

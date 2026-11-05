@@ -21,7 +21,7 @@ const digest: BatchDigest = {
   provisionalLinks: 160, provisionalReasons: [{ text: "not enlarged yet", count: 120 }, { text: "busy background in the photo, so the whole photo was used", count: 40 }],
   improving: 100, stayedAsSent: 20, photosLeftOut: 80, leftOutReasons: [{ text: "a different product in the photo", count: 50 }, { text: "several photos in one", count: 30 }],
   exceptions: 155, exceptionReasons: Array.from({ length: 18 }, (_, i) => ({ text: `Noon image 1 missing: not made, cause ${i}`, count: 20 - i })), exceptionsNotGrouped: 0,
-  controlsSkipped: 0, needsYou: 0, startedAt: "2026-11-05T08:00:00.000Z", firstLinksAt: "2026-11-05T08:04:00.000Z", linksReadyAt: "2026-11-05T08:46:00.000Z", cancelledAt: null,
+  controlsSkipped: 0, unchanged: 0, needsYou: 0, startedAt: "2026-11-05T08:00:00.000Z", firstLinksAt: "2026-11-05T08:04:00.000Z", linksReadyAt: "2026-11-05T08:46:00.000Z", cancelledAt: null,
   cost: { usd: 220, inr: 18400, usdPerProduct: 0.11, inrPerProduct: 9.2 },
 };
 

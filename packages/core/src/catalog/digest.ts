@@ -119,7 +119,7 @@ export async function buildDigest(db: Db, input: DigestInput): Promise<DigestPar
   for (const o of outputs) { const list = outputsOf.get(o.productId); if (list) list.push(o); else outputsOf.set(o.productId, [o]); }
 
   const exceptions: ExceptionRow[] = [], notes: NoteRow[] = [], leftOut: { key: string; reason: string }[] = [];
-  let needsYou = 0, controlsSkipped = 0, stayedAsSent = 0, completeEveryChannel = 0, productsWithLinks = 0;
+  let needsYou = 0, unchanged = 0, controlsSkipped = 0, stayedAsSent = 0, completeEveryChannel = 0, productsWithLinks = 0;
   for (const pair of pairs) {
     const mine = (outputsOf.get(pair.productId) ?? []).filter(o => channels.includes(o.channel));
     const withLinks = hasLink(pair.identifier);
@@ -127,6 +127,7 @@ export async function buildDigest(db: Db, input: DigestInput): Promise<DigestPar
     if (mine.some(o => o.reason?.includes(HOLDOUT_KEPT_NOTE))) controlsSkipped++;
     // A product held for a person (a batch started before auto-decide) is counted under "Needs you", not as exceptions.
     if (pair.change === "pending_attention") { needsYou++; continue; }
+    if (pair.change === "unchanged") unchanged++;
     let productExceptions = 0, productNotes = 0;
     if (pair.change === "failed" || (!withLinks && pair.change !== "unchanged")) {
       const reason = pair.notes?.split("; ")[0] || NO_DELIVERABLE_PHOTO;
@@ -196,6 +197,7 @@ export async function buildDigest(db: Db, input: DigestInput): Promise<DigestPar
     exceptionReasons: stored,
     exceptionsNotGrouped: grouped.slice(DIGEST_STORED_GROUPS).reduce((n, g) => n + g.count, 0),
     controlsSkipped,
+    unchanged,
     needsYou,
     startedAt: input.batch.startedAt ? input.batch.startedAt.toISOString() : null,
     firstLinksAt: firstLinks.length ? new Date(Math.min(...firstLinks)).toISOString() : null,

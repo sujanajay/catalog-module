@@ -38,6 +38,8 @@ export interface BatchDigest {
   exceptionsNotGrouped: number;
   /** Products whose images on some channel were left unchanged because a running experiment holds them. */
   controlsSkipped: number;
+  /** M1-F5-R3: products this batch found unchanged (same photos, same images); their links stay as they were. */
+  unchanged: number;
   /** Products held for a person (only batches started before auto-decide have any). */
   needsYou: number;
   startedAt: string | null;

@@ -98,7 +98,7 @@ const digest = (over: Partial<BatchDigest> = {}): BatchDigest => ({
   version: 1, products: 312, productsWithLinks: 312, completeEveryChannel: 271, linksPerChannel: [{ channel: "noon", links: 1200 }], provisionalLinks: 41,
   provisionalReasons: [{ text: "not checked yet; it is checked later", count: 22 }, { text: "not enlarged yet", count: 12 }], improving: 12, stayedAsSent: 0,
   photosLeftOut: 3, leftOutReasons: [{ text: "a different product in the photo", count: 2 }, { text: "the photo file is damaged", count: 1 }], exceptions: 5,
-  exceptionReasons: [{ text: "Noon image 4 missing: a different product in the photo", count: 2 }], exceptionsNotGrouped: 0, controlsSkipped: 12, needsYou: 0,
+  exceptionReasons: [{ text: "Noon image 4 missing: a different product in the photo", count: 2 }], exceptionsNotGrouped: 0, controlsSkipped: 12, unchanged: 0, needsYou: 0,
   startedAt: "2026-11-05T08:00:00.000Z", firstLinksAt: "2026-11-05T08:04:00.000Z", linksReadyAt: "2026-11-05T08:46:00.000Z", cancelledAt: null,
   cost: { usd: 34.32, inr: null, usdPerProduct: 0.11, inrPerProduct: null }, ...over,
 });

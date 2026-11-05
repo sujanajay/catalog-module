@@ -26,6 +26,7 @@ import { catalogLlmDeps, CatalogQaCapError, type UnderClaim } from "./qa-stage";
 import { QA_USD_PER_CHECK_FALLBACK } from "@catalog/core/catalog/cost";
 import { handlePublishTask } from "./publish";
 import { handleFinalizeTask } from "./finalize";
+import { digestReasonLines } from "@catalog/core/catalog/digest-copy";
 import { HOLDOUT_KEPT_NOTE, renderKey, upscaledRenderKey } from "@catalog/core/catalog/pipeline/publish";
 import { compareXlsxCsv,writeLinksXlsx } from "@catalog/core/catalog/sheet";
 import { workbookCsvSheets } from "@catalog/core/catalog/pipeline/report";
@@ -86,6 +87,24 @@ async function seed(w:ReturnType<typeof world>,name:string,options:{productId?:s
   return {batch:batch!,product,chunk:chunk!};
 }
 async function run(w:ReturnType<typeof world>,s:Awaited<ReturnType<typeof seed>>) {expect((await handleChunkTask(w.deps,await currentChunkTask(db,s.chunk.id))).httpStatus).toBe(200);expect((await handleChunkTask(w.deps,await currentChunkTask(db,s.chunk.id))).httpStatus).toBe(200);expect((await handleChunkTask(w.deps,await currentChunkTask(db,s.chunk.id))).httpStatus).toBe(200);return handlePublishTask(w.deps,{batchId:s.batch.id,productId:s.product.id});}
+it("M1-F5 test 2 (M1-S5, M1 D36): the same photos again the next day give a digest with every product unchanged, no new images and no new public objects",async()=>{
+  const w=world(),channels:("noon"|"namshi")[]=["noon","namshi"],first=await seed(w,"rerun-f5",{shots:["a","b"],channels});
+  expect((await run(w,first)).outcome).toBe("published");
+  expect((await handleFinalizeTask(w.deps,{batchId:first.batch.id})).outcome).toBe("done");
+  const publicObjects=()=>new Map([...w.objects].filter(([uri])=>uri.includes("gs://public/")).map(([uri,o])=>[uri,(o as {generation:string}).generation]));
+  const before=publicObjects(),copies=w.copy.mock.calls.length;
+  expect(before.size).toBe(4);
+  const next=await seed(w,"rerun-f5-next",{productId:first.product.id,shots:["a","b"],channels});
+  expect((await run(w,next)).outcome).toBe("published");
+  expect((await handleFinalizeTask(w.deps,{batchId:next.batch.id})).outcome).toBe("done");
+  const [batch]=await db.select().from(catalogBatches).where(eq(catalogBatches.id,next.batch.id));
+  expect(batch!.digest).toMatchObject({products:1,productsWithLinks:1,unchanged:1,exceptions:0,provisionalLinks:0});
+  expect(digestReasonLines(batch!.digest!).lines).toContain("Unchanged: 1 product was the same as before, so no new image was made and their links stay the same.");
+  // No new images for the re-run and no new or rewritten public objects (generations unchanged).
+  expect(await db.select().from(catalogOutputs).where(and(eq(catalogOutputs.batchId,next.batch.id),eq(catalogOutputs.isLive,true)))).toEqual([]);
+  expect(w.copy.mock.calls.length).toBe(copies);
+  expect(publicObjects()).toEqual(before);
+},60_000);
 it("does not finalize initial new rows, publishes, checks exports, then increments export versions",async()=>{const w=world(),s=await seed(w,"first");expect((await handleFinalizeTask(w.deps,{batchId:s.batch.id})).outcome).toBe("not_ready");expect((await run(w,s)).outcome).toBe("published");expect((await handleFinalizeTask(w.deps,{batchId:s.batch.id})).outcome).toBe("done");const [batch]=await db.select().from(catalogBatches).where(eq(catalogBatches.id,s.batch.id));expect(batch!.counts).toMatchObject({latestExport:1,recheckOk:1,recheckTotal:1,verified:1});expect(deriveBatchState(batch!).state).toBe("ready");expect((await handleFinalizeTask(w.deps,{batchId:s.batch.id})).outcome).toBe("already_done");await enqueueFinalize(w.deps,s.batch.id,undefined,{reopen:true});expect((await handleFinalizeTask(w.deps,{batchId:s.batch.id})).outcome).toBe("done");const [again]=await db.select().from(catalogBatches).where(eq(catalogBatches.id,s.batch.id));expect(again!.sheetXlsxUri).toContain("links-v2.xlsx");expect(w.copy).toHaveBeenCalledTimes(1);},60_000);
 it("M12-S1: every image a batch makes records the batch's settings version set, also after a mid-batch change",async()=>{
   const w=world(),key="intake.auto_decide.unusable";
