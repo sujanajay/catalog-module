@@ -151,6 +151,9 @@ MATTING_SA=catalog-matting@$PROJECT.iam.gserviceaccount.com
 WORKER_URL=https://$WORKER_SERVICE-$PN.$REGION.run.app
 WEB_URL=https://$WEB_SERVICE-$PN.$REGION.run.app
 CANONICAL_WEB_URL=https://catalog-web-$PN.$REGION.run.app
+# The hash-based (non-deterministic) URL Cloud Run also gives catalog-web. People still open it, and a folder
+# upload from it is a browser PUT to the assets bucket, so the bucket CORS must allow it too (R1 exit finding 2).
+LEGACY_WEB_URL=${LEGACY_WEB_URL:-https://catalog-web-qtoctgoxqa-el.a.run.app}
 ASSETS_BUCKET=gs://image-links-agent-assets
 # The private IP: services reach it through ila-vpc with --vpc-egress=private-ranges-only.
 DB_HOST=$(gcv sql instances describe ila-pg --format='value(ipAddresses.filter("type:PRIVATE").extract(ipAddress).flatten())')
@@ -639,7 +642,7 @@ if node -e '
   const cur = (JSON.parse(require("fs").readFileSync(0, "utf8").trim() || "null") ?? {}).cors_config ?? [];
   process.exit(cur.length > 0 && cur.every((r) => !r.origin?.includes("*") &&
     process.argv.slice(1).every((origin) => r.origin?.includes(origin))) ? 0 : 1);
-' "$CANONICAL_WEB_URL" "$WEB_URL" <<<"$CURRENT_CORS"; then
+' "$CANONICAL_WEB_URL" "$WEB_URL" "$LEGACY_WEB_URL" <<<"$CURRENT_CORS"; then
   echo "==> CORS on $ASSETS_BUCKET: SKIP (catalog origins are present)"
 else
   echo "==> CORS on $ASSETS_BUCKET: ADD catalog origins, preserving existing sites"
@@ -649,10 +652,10 @@ else
     const fs = require("fs");
     const current = (JSON.parse(fs.readFileSync(0, "utf8")).cors_config ?? []);
     const rules = current.length ? current : JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
-    fs.writeFileSync(process.argv[4], JSON.stringify(rules.map((r) => ({ ...r,
-      origin: [...new Set([...(r.origin ?? []).filter((o) => o !== "*"), process.argv[2], process.argv[3]])]
+    fs.writeFileSync(process.argv.at(-1), JSON.stringify(rules.map((r) => ({ ...r,
+      origin: [...new Set([...(r.origin ?? []).filter((o) => o !== "*"), ...process.argv.slice(2, -1)])]
     }))));
-  ' infra/cors.json "$CANONICAL_WEB_URL" "$WEB_URL" "$(cygpath -m "$CORS_FILE" 2>/dev/null || echo "$CORS_FILE")" <<<"$CURRENT_CORS"
+  ' infra/cors.json "$CANONICAL_WEB_URL" "$WEB_URL" "$LEGACY_WEB_URL" "$(cygpath -m "$CORS_FILE" 2>/dev/null || echo "$CORS_FILE")" <<<"$CURRENT_CORS"
   gcloud storage buckets update "$ASSETS_BUCKET" --cors-file="$(cygpath -m "$CORS_FILE" 2>/dev/null || echo "$CORS_FILE")" >/dev/null
 fi
 
