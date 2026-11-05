@@ -5,6 +5,7 @@ import { eq, isNull } from "drizzle-orm";
 import type { Db } from "../../db/client";
 import { createTestDb } from "../../db/testing";
 import { catalogBatches, catalogBatchProducts, catalogChunks, catalogEnlargements, catalogGraphExportRuns, catalogOutputs, catalogProducts, catalogSourceImages } from "../../db/schema";
+import { recordAsset, recordVersion, sha256Hex } from "../../graph";
 import { ENLARGING_TASK } from "../pipeline/enlargement";
 import type { BatchStatus, ChangeKind, OutputStatus } from "../types";
 import { CHECKS, EXPORT_STALE_HOURS } from "./checks";
@@ -45,9 +46,9 @@ async function chunk(batchId: string, v: { status: "queued" | "running" | "done"
 const run = (batchId?: string) => runInvariants(db, vi.fn(), NOW, batchId ? { batchId } : {});
 
 describe("invariant checks", () => {
-  it("the table has the five checks of spec 17, spec 18's enlargement check, the lifecycle's three and M0-S4's export freshness, with their severities", () => {
+  it("the table has the five checks of spec 17, spec 18's enlargement check, the lifecycle's three, M0-S4's export freshness and M0-S3's output versions, with their severities", () => {
     expect(CHECKS.map(c => [c.id, c.severity])).toEqual([["silent_outputs", "ERROR"], ["held_without_reason", "ERROR"], ["stale_running_chunk", "WARNING"], ["slow_chunk", "WARNING"], ["done_batch_with_open_chunk", "ERROR"], ["enlarged_without_upscaler", "ERROR"],
-      ["plain_accepted_outputs", "INFO"], ["parked_chunk_quiet", "WARNING"], ["enlargement_waiting_long", "INFO"], ["graph_export_stale", "WARNING"]]);
+      ["plain_accepted_outputs", "INFO"], ["parked_chunk_quiet", "WARNING"], ["enlargement_waiting_long", "INFO"], ["graph_export_stale", "WARNING"], ["output_without_version", "ERROR"]]);
     for (const c of CHECKS) expect(c.sentence.length).toBeGreaterThan(20);
   });
 
@@ -256,6 +257,31 @@ describe("invariant checks", () => {
     await db.insert(catalogGraphExportRuns).values({ startedAt: h(3), error: "BigQuery said no" });
     expect(await stale()).toBe(1);
     await db.delete(catalogGraphExportRuns);
+  });
+
+  it("M0-S3: output_without_version fires on a staged or delivered image with no version in a batch the write path ran on; older outputs and other batches do not", async () => {
+    const count = async () => (await run()).counts.output_without_version;
+    const b = await batch("done"), old = await batch("done");
+    const p = await product(b.id, "new"), q = await product(old.id, "new");
+    const staged = async (batchId: string, pr: typeof p, at: Date) => {
+      const o = await output(batchId, pr, "verified");
+      await db.update(catalogOutputs).set({ stagingUri: `gs://assets/s/${o.id}.jpg`, createdAt: at }).where(eq(catalogOutputs.id, o.id));
+      return o;
+    };
+    const before = await staged(b.id, p, ago(120));
+    await staged(old.id, q, ago(60));
+    // No output version in either batch yet: an older worker made them.
+    expect(await count()).toBe(0);
+    const hash = sha256Hex(new TextEncoder().encode("inv-version"));
+    await recordAsset(db, { sha256: hash, uri: "gs://assets/s/v.jpg", mime: "image/jpeg" });
+    const v = await recordVersion(db, { optionId: null, scope: "noon", component: "image", source: "cleanup", aiGenerated: false, producer: "M3", producerRef: "inv-out", assetSha256: hash, batchId: b.id, isTest: true, createdBy: "t" });
+    const after = await staged(b.id, p, new Date(Date.now() + 60_000));
+    const r = await run();
+    expect(r.counts.output_without_version).toBe(1);
+    expect(r.results.find((x) => x.id === "output_without_version")!.sample).toEqual([after.id]);
+    await db.update(catalogOutputs).set({ contentVersionId: v.versionId }).where(eq(catalogOutputs.id, after.id));
+    expect(await count()).toBe(0);
+    expect(before.id).not.toBe(after.id);
   });
 });
 

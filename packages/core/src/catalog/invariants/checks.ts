@@ -143,4 +143,15 @@ export const CHECKS: readonly InvariantCheck[] = [
           WHERE f.finished_at IS NOT NULL AND f.error IS NULL AND f.finished_at > ${at(now)} - ${EXPORT_STALE_HOURS}::int * interval '1 hour')
         AND EXISTS (SELECT 1 FROM catalog_graph_export_runs AS o WHERE o.started_at <= ${at(now)} - ${EXPORT_STALE_HOURS}::int * interval '1 hour')`,
   },
+  {
+    id: "output_without_version",
+    sentence: "Every image staged or delivered since the graph write path shipped names its content version (M0-F2-R8).",
+    severity: "ERROR",
+    // "Since it shipped" per batch: the output row was made after its batch's first output version (M0-S3's render
+    // writes one with every staged image), so outputs staged by a worker from before M0-S3 are not counted. Uses the
+    // batch_id index of catalog_content_versions.
+    sql: () => sql`SELECT o.id, o.batch_id FROM catalog_outputs AS o
+      WHERE o.content_version_id IS NULL AND o.staging_uri IS NOT NULL AND o.status IN ('staged', 'needs_attention', 'verified')
+        AND EXISTS (SELECT 1 FROM catalog_content_versions AS v WHERE v.batch_id = o.batch_id AND v.producer = 'M3' AND v.created_at <= o.created_at)`,
+  },
 ];
