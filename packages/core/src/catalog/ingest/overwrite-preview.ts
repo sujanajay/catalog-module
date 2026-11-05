@@ -19,6 +19,7 @@ import {
 import { normalizeKey, sanitizeSegment } from "../naming";
 import { deriveBatchState } from "../pipeline/status";
 import { loadSkuResolver, type SkuResolver } from "../sku-mapping";
+import { plannedShots, shotNumbers, shotRanks } from "./append";
 import { baseName, newestIdentifier, olderSameProductMessage, sameProductMessage } from "./group";
 import type { GroupingResult, OverwritePreview, SourceItem } from "./types";
 
@@ -179,12 +180,15 @@ export async function buildOverwritePreview(
       }
     }
   }
+  // M1 D30: a follow-up batch adds photos after each product's highest shot and never removes one.
+  const planned = batch.options.append ? await plannedShots(db, batch.id, existing.map((m) => ({ productId: m.productId, count: shotRanks(grouped.products.get(m.identifier) ?? []) }))) : null;
   const existingProducts: OverwritePreview["existingProducts"] = existing
     .map((m) => {
       const items = grouped.products.get(m.identifier) ?? [];
-      const uploadShots = sortedNumbers(items.map((item, i) => item.n ?? i + 1));
+      const numberOf = shotNumbers(items, planned ? planned.get(m.productId)! : null);
+      const uploadShots = sortedNumbers(items.map((item) => numberOf.get(item)!));
       const liveShots = sortedNumbers(liveByProduct.get(m.productId) ?? []);
-      const shotsToRemove = liveShots.filter((n) => !uploadShots.includes(n));
+      const shotsToRemove = planned ? [] : liveShots.filter((n) => !uploadShots.includes(n));
       return { identifier: m.identifier, liveShots, uploadShots, shotsToRemove, channels };
     })
     .sort((x, y) => byText(x.identifier, y.identifier));

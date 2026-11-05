@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { and, asc, eq, inArray, isNull, ne, sql } from "drizzle-orm";
 import type { Db } from "../db/client";
-import { brandMaster, catalogBatches, catalogBatchProducts, catalogChunks, catalogEnlargements, catalogOutputs, catalogProductAliases, catalogProducts, catalogSourceImages, catalogUploads, skuMap } from "../db/schema";
+import { brandMaster, catalogBatches, catalogBatchProducts, catalogChunks, catalogEnlargements, catalogOutputs, catalogProductAliases, catalogProducts, catalogShotNumbers, catalogSourceImages, catalogUploads, skuMap } from "../db/schema";
 import type * as storage from "../storage";
 import { toGsUri } from "../storage";
 import { DEFAULT_MAX_BYTES } from "../safe-url";
@@ -60,19 +60,29 @@ async function readOutput(db: Db | Tx, id: string): Promise<Output> {
  * check for every path that re-makes a photo of a batch that may have released its lock: Use as is, Remove, Replace,
  * Try again (lockProduct) and the M1-S4 improvement.
  */
-export async function laterPublisher(tx: Pick<Db, "select">, product: Pick<typeof catalogProducts.$inferSelect, "lastBatchId">, batchId: string): Promise<string | null> {
+export async function laterPublisher(tx: Pick<Db, "select">, product: Pick<typeof catalogProducts.$inferSelect, "id" | "lastBatchId" | "lastFullBatchId">, batchId: string, n: number | null): Promise<string | null> {
   if (!product.lastBatchId || product.lastBatchId === batchId) return null;
   const started = sql<Date>`coalesce(${catalogBatches.startedAt}, ${catalogBatches.createdAt})`;
-  const rows = await tx.select({ id: catalogBatches.id, started }).from(catalogBatches).where(inArray(catalogBatches.id, [product.lastBatchId, batchId]));
-  const last = rows.find(r => r.id === product.lastBatchId), own = rows.find(r => r.id === batchId);
+  const ids = [...new Set([product.lastBatchId, batchId, product.lastFullBatchId].filter((id): id is string => !!id))];
+  const rows = await tx.select({ id: catalogBatches.id, started, options: catalogBatches.options }).from(catalogBatches).where(inArray(catalogBatches.id, ids));
+  const own = rows.find(r => r.id === batchId);
   // An equal instant cannot happen (Start takes the lock); it counts as later, the safe side (review round 3 P3-1).
-  return last && own && +new Date(last.started) >= +new Date(own.started) ? last.id : null;
+  const later = (id: string | null) => { const r = rows.find(x => x.id === id); return r && own && +new Date(r.started) >= +new Date(own.started) ? r.id : null; };
+  const last = rows.find(r => r.id === product.lastBatchId);
+  if (!last || last.options.append !== true) return later(product.lastBatchId);
+  // M1 D30 (re-review 3 P2-1): the last publisher is a follow-up, which only adds photos. It supersedes only the shots
+  // it holds; for every other shot the publisher that counts is the last full batch.
+  if (n !== null && later(last.id)) {
+    const [held] = await tx.select({ n: catalogShotNumbers.n }).from(catalogShotNumbers).where(and(eq(catalogShotNumbers.productId, product.id), eq(catalogShotNumbers.n, n), eq(catalogShotNumbers.batchId, last.id))).limit(1);
+    if (held) return last.id;
+  }
+  return !product.lastFullBatchId || product.lastFullBatchId === batchId ? null : later(product.lastFullBatchId);
 }
 async function lockProduct(tx: Tx, output: Output): Promise<typeof catalogProducts.$inferSelect> {
   const [product] = await tx.select().from(catalogProducts).where(eq(catalogProducts.id, output.productId)).for("update");
   if (!product) throw new CatalogDecisionError(404, "This product no longer exists. Reload the page.");
   if (product.lockBatchId && product.lockBatchId !== output.batchId) throw new CatalogDecisionError(409, "This product is being changed by another batch. Try again when it finishes.");
-  if (await laterPublisher(tx, product, output.batchId)) throw new CatalogDecisionError(409, RETRY_SUPERSEDED);
+  if (await laterPublisher(tx, product, output.batchId, output.n)) throw new CatalogDecisionError(409, RETRY_SUPERSEDED);
   return product;
 }
 /**

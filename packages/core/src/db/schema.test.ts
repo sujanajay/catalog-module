@@ -29,7 +29,7 @@ async function rows<T>(q: ReturnType<typeof sql>): Promise<T[]> {
 
 const TABLES = [
   "brand_master", "sku_map", "model_policy", "catalog_batches", "catalog_uploads", "catalog_products",
-  "catalog_batch_products", "catalog_product_aliases", "catalog_product_events", "catalog_source_images",
+  "catalog_batch_products", "catalog_shot_numbers", "catalog_product_aliases", "catalog_product_events", "catalog_source_images",
   "catalog_outputs", "catalog_chunks", "catalog_eval_labels", "catalog_eval_judgements", "spend_days",
   "users", // 0001_users.sql (spec 03)
   "catalog_cost_events", // 0002_cost_events.sql (observability plan, part A)
@@ -76,6 +76,7 @@ const INDEXES = [
   "catalog_batch_outcomes_ended_at_idx", "catalog_incidents_kind_started_at_idx", "catalog_incidents_batch_id_idx",
   "catalog_incidents_dedupe_key_uq", "catalog_batch_touches_batch_id_idx", "catalog_revisions_first_seen_at_idx",
   "catalog_cost_days_day_component_env_source_uq", "catalog_cost_allocations_day_batch_component_uq", "catalog_cost_allocations_batch_id_idx",
+  "catalog_batches_parent_batch_id_idx", "catalog_shot_numbers_batch_id_idx", // 0024_follow_up_batches.sql (M1-S6)
 ];
 
 describe("generated migrations", () => {
