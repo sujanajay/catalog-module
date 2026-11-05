@@ -17,6 +17,7 @@ import { fullCostText } from "@/lib/catalog/ops-copy";
 import AutoRefresh from "@/components/AutoRefresh";
 import { ActionOnly } from "@/components/ViewerPreview";
 import LocalTime from "@/components/LocalTime";
+import { BackArrow } from "@/components/ui";
 import BatchBanner from "@/components/catalog/BatchBanner";
 import BatchKpis from "@/components/catalog/BatchKpis";
 import BatchTabs from "@/components/catalog/BatchTabs";
@@ -103,7 +104,7 @@ export default async function BatchPage({ params, searchParams }: { params: Prom
     <main>
       <div className="hdr">
         <div>
-          <Link href="/catalog">← All batches</Link>
+          <Link href="/catalog"><BackArrow /> All batches</Link>
           <h1>{batch.name}</h1>
           <p className="lead">
             <Link href={`/catalog/brands/${batch.brandSlug}`}>{batch.brandName}</Link>{channelLabels.length > 0 && ` · ${channelLabels.join(", ")}`} · {batch.finishedAt ? <>finished <LocalTime at={batch.finishedAt} /> by {batch.createdBy}</> : batch.startedAt ? <>started <LocalTime at={batch.startedAt} /> by {batch.createdBy}</> : <>created <LocalTime at={batch.createdAt} /> by {batch.createdBy}</>}

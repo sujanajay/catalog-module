@@ -1,5 +1,5 @@
 {
-  "id": "e9dc7976-bfa2-4c51-ad0f-7d9e64366e77",
+  "id": "6e025e9a-984b-42fd-b3d8-040f55f6c71d",
   "prevId": "eb707a28-2e7f-424d-b37e-592f2591bfac",
   "version": "7",
   "dialect": "postgresql",
@@ -915,9 +915,9 @@
           "primaryKey": false,
           "notNull": false
         },
-        "parent_batch_id": {
-          "name": "parent_batch_id",
-          "type": "uuid",
+        "ruleset_version": {
+          "name": "ruleset_version",
+          "type": "integer",
           "primaryKey": false,
           "notNull": false
         }
@@ -937,37 +937,9 @@
           "concurrently": false,
           "method": "btree",
           "with": {}
-        },
-        "catalog_batches_parent_batch_id_idx": {
-          "name": "catalog_batches_parent_batch_id_idx",
-          "columns": [
-            {
-              "expression": "parent_batch_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
         }
       },
       "foreignKeys": {
-        "catalog_batches_parent_batch_id_fk": {
-          "name": "catalog_batches_parent_batch_id_fk",
-          "tableFrom": "catalog_batches",
-          "tableTo": "catalog_batches",
-          "columnsFrom": [
-            "parent_batch_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "set null",
-          "onUpdate": "no action"
-        },
         "catalog_batches_settings_snapshot_id_fk": {
           "name": "catalog_batches_settings_snapshot_id_fk",
           "tableFrom": "catalog_batches",

@@ -30,6 +30,11 @@ export function BatchStatusWord({ state }: { state: BatchStateName }) {
   return word ? <StatusWord status={word.status} blocking={word.blocking} /> : <span className="status-word">Cancelled</span>;
 }
 
+/** The back arrow before "All batches" and similar links; it turns round in a right-to-left page (UX section 11). */
+export function BackArrow() {
+  return <span className="mirror" aria-hidden="true">←</span>;
+}
+
 export function usd(n: number | string | null | undefined, digits = 2): string {
   const v = Number(n ?? 0);
   return `$${v.toFixed(v !== 0 && Math.abs(v) < 0.1 ? Math.max(digits, 3) : digits)}`;

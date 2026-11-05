@@ -100,7 +100,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS "t_k_uq" ON "t" USING btree ("k");`;
     expect(lintJournal({ entries: [entry(0, 1, "0000_a")] }, { "0000_a.sql": "", "0001_b.sql": "" }).map((f) => f.rule)).toEqual(["migration file is not in meta/_journal.json, so it never runs"]);
   });
 
-  it("the repo's journal is in run order, with M1-S6's 0021 after M6-S6's 0020", () => {
+  it("the repo's journal is in run order, with M5-S3's 0021 after M6-S6's 0020 and M1-S6's 0022 after it", () => {
     const folder = resolveMigrationsFolder();
     const journal = JSON.parse(readFileSync(path.join(folder, "meta", "_journal.json"), "utf8")) as { entries: JournalEntry[] };
     const files = Object.fromEntries(readdirSync(folder).filter((n) => n.endsWith(".sql")).map((n) => [n, ""]));
@@ -114,7 +114,8 @@ CREATE UNIQUE INDEX IF NOT EXISTS "t_k_uq" ON "t" USING btree ("k");`;
     expect(tags.indexOf("0018_overflow_daily_cap")).toBe(tags.indexOf("0017_channel_rules") + 1);
     expect(tags.indexOf("0019_change_types")).toBe(tags.indexOf("0018_overflow_daily_cap") + 1);
     expect(tags.indexOf("0020_batch_outcomes_incidents")).toBe(tags.indexOf("0019_change_types") + 1);
-    expect(tags.indexOf("0021_follow_up_batches")).toBe(tags.indexOf("0020_batch_outcomes_incidents") + 1);
+    expect(tags.indexOf("0021_batch_ruleset_version")).toBe(tags.indexOf("0020_batch_outcomes_incidents") + 1);
+    expect(tags.indexOf("0022_follow_up_batches")).toBe(tags.indexOf("0021_batch_ruleset_version") + 1);
   });
 
   it("the CI command fails on a journal out of run order", () => {

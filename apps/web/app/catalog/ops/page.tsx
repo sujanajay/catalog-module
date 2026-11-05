@@ -7,6 +7,7 @@ import AutoRefresh from "@/components/AutoRefresh";
 import OrphanDrafts from "@/components/catalog/OrphanDrafts";
 import { orphanDrafts } from "@catalog/core/catalog/drafts";
 import LocalTime from "@/components/LocalTime";
+import { BackArrow } from "@/components/ui";
 import { db } from "@/lib/db";
 import { requireRole } from "@/lib/user";
 import { withoutModelNames } from "@/lib/catalog/redact";
@@ -74,7 +75,7 @@ export default async function OpsPage({ searchParams }: { searchParams: Promise<
     <main>
       <div className="hdr">
         <div>
-          <Link href="/catalog">← All batches</Link>
+          <Link href="/catalog"><BackArrow /> All batches</Link>
           <h1>Ops</h1>
           <p className="lead">Batches running now, failures in the last 24 hours, how reliably batches finish, and what batches and brands cost. Read only.{rate === null ? ` ${RUPEES_NOT_CONFIGURED}.` : ""}</p>
         </div>

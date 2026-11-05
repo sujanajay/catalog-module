@@ -109,7 +109,7 @@ describe("M3-S1 render from the M5 registry (M3-F3-R1, R3)", () => {
   });
 
   it("a snapshot without a channel row (or with it retired) is an error, never a silent default", () => {
-    const rules = channelRulesOf({ version: 9, channels: [] });
+    const rules = channelRulesOf({ id: "ruleset-v9", version: 9, hash: "x", publishedAt: "2026-11-05T00:00:00.000Z", rules: [], channels: [], categories: [], imagePolicies: [], conflicts: [] });
     expect(() => rules.spec("noon")).toThrow(ChannelRulesError);
     expect(() => rules.keyVersion("noon")).toThrow(ChannelRulesError);
   });

@@ -42,9 +42,11 @@ export interface CatalogDeps {
   overflow?: OverflowGate;
   /**
    * M3-S1: the channel values every render, compliance check, enlargement plan and render key of a batch reads, from the
-   * latest published M5 ruleset (channel-rules.ts). Throws when no ruleset is published; tests pass the fixture.
+   * M5 ruleset (channel-rules.ts). M5-S3: called with the batch's pinned `rulesetVersion`, so a batch keeps the
+   * version it started with; null or absent reads the latest published one. Throws when no ruleset is published; tests
+   * pass the fixture.
    */
-  channelRules: () => Promise<ChannelRules>;
+  channelRules: (version?: number | null) => Promise<ChannelRules>;
   /** Waits between cut-out retries (07 auto-resolve) and enlargement upload tries; absent uses a timer. Tests pass an instant one. */
   sleep?: (ms: number) => Promise<void>;
   /** The re-render-and-re-judge loop run before triage (qa/triage.ts); absent repairs nothing. */
@@ -88,11 +90,11 @@ export function photoConcurrency(env: NodeJS.ProcessEnv = process.env): number {
 }
 let sharedMatting: MattingClient | undefined;
 // One channel rules cache per database handle, so the snapshot body is read once per published version, not per delivery.
-const sharedChannelRules = new WeakMap<Db, () => Promise<ChannelRules>>();
+const sharedChannelRules = new WeakMap<Db, (version?: number | null) => Promise<ChannelRules>>();
 // Default rows are check-then-insert; once per process is enough.
 let defaultsEnsured = false;
 /** `options.channelRules`: tests and local tools pass FIXTURE_CHANNEL_RULES; the worker reads the published registry. */
-export function workerCatalogDeps(db: Db, options: { channelRules?: () => Promise<ChannelRules> } = {}): CatalogDeps {
+export function workerCatalogDeps(db: Db, options: { channelRules?: (version?: number | null) => Promise<ChannelRules> } = {}): CatalogDeps {
   // Spec 16: the CPU service, every GPU service of MATTING_GPU_URLS (or MATTING_GPU_URL) and UPSCALE_URL.
   sharedMatting ??= mattingClientFromEnv(process.env);
   const matting = sharedMatting;
@@ -106,7 +108,7 @@ export function workerCatalogDeps(db: Db, options: { channelRules?: () => Promis
   const upscalerX4 = upscaler && config.x4Model ? storedUpscaler(upscalerId(config.x4Model, matting.upscaleTarget), config.minScale) : null;
   const render: typeof renderAllChannels = upscaler ? (p,m,channels,ctx)=>renderAllChannels(p,m,channels,{upscaler,upscalerX4,...ctx}) : renderAllChannels;
   let channelRules = options.channelRules ?? sharedChannelRules.get(db);
-  if (!channelRules) sharedChannelRules.set(db, (channelRules = channelRulesLoader(db)));
+  if (!channelRules) sharedChannelRules.set(db, (channelRules = channelRulesLoader(db, { storage })));
   return {db,storage,matting,enqueue:enqueueTask,fetch,now:()=>new Date(),log:catalogLog,prepare,matteFor:routedMatteFor,overflow:ledgerOverflowGate(db),renderAllChannels:render,channelRules,judgeOutput,classifyProductType,repairOwnDefects,routes:()=>routerFor(db),
     upscaler,upscalerX4,...(config.model ? {enlarge:workerEnlargeCall(),enlargeProbe:workerEnlargeProbe()}:{}),
     resolvePolicy:async(brandSlug,category)=> {
