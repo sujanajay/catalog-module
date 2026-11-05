@@ -1,4 +1,5 @@
 # Review deployments reuse 05's live matting services rather than rebuilding or replacing them.
+# M6-F2-R7 (M6-S5): also the production build when the matting images of this source already exist (infra/lib/build.sh).
 steps:
   - id: worker
     name: gcr.io/cloud-builders/docker

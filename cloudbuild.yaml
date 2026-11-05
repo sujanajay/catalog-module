@@ -1,6 +1,16 @@
 # Builds the images from the repo root. Invoked by infra/deploy.sh:
-#   gcloud builds submit --config cloudbuild.yaml --substitutions=_AR=...,_TAG=... .
+#   gcloud builds submit --config cloudbuild.yaml --substitutions=_AR=...,_TAG=...,_MATTING_TAG=... .
+# M6-F2-R7 (M6-S5): the matting images carry _MATTING_TAG, a hash of services/matting and this file (infra/lib/build.sh),
+# so a commit that leaves them alone reuses them. When they exist, deploy.sh builds only worker and web with
+# infra/cloudbuild-preview.yaml. bash infra/deploy.sh --build-command prints the commands to run.
 steps:
+  # The source this build was given must hash to _MATTING_TAG, or the build fails before any image is pushed: an image
+  # under that tag is reused by every later deploy, so it must be built from exactly that source.
+  - id: verify-matting-source
+    name: ubuntu
+    entrypoint: bash
+    args: ["infra/lib/build.sh", "verify-matting-source", "${_MATTING_TAG}"]
+    waitFor: ["-"]
   - id: worker
     name: gcr.io/cloud-builders/docker
     env: ["DOCKER_BUILDKIT=1"]
@@ -14,18 +24,18 @@ steps:
   - id: matting
     name: gcr.io/cloud-builders/docker
     env: ["DOCKER_BUILDKIT=1"]
-    args: ["build", "--target", "cpu", "--build-arg", "GIT_SHA=${_TAG}", "-f", "services/matting/Dockerfile", "-t", "${_AR}/matting:${_TAG}", "services/matting"]
-    waitFor: ["-"]
+    args: ["build", "--target", "cpu", "--build-arg", "GIT_SHA=${_MATTING_TAG}", "-f", "services/matting/Dockerfile", "-t", "${_AR}/matting:${_MATTING_TAG}", "services/matting"]
+    waitFor: ["verify-matting-source"]
   - id: matting-gpu
     name: gcr.io/cloud-builders/docker
     env: ["DOCKER_BUILDKIT=1"]
-    args: ["build", "--target", "gpu", "--build-arg", "GIT_SHA=${_TAG}", "-f", "services/matting/Dockerfile", "-t", "${_AR}/matting-gpu:${_TAG}", "services/matting"]
+    args: ["build", "--target", "gpu", "--build-arg", "GIT_SHA=${_MATTING_TAG}", "-f", "services/matting/Dockerfile", "-t", "${_AR}/matting-gpu:${_MATTING_TAG}", "services/matting"]
     waitFor: ["matting"]
 images:
   - "${_AR}/worker:${_TAG}"
   - "${_AR}/web:${_TAG}"
-  - "${_AR}/matting:${_TAG}"
-  - "${_AR}/matting-gpu:${_TAG}"
+  - "${_AR}/matting:${_MATTING_TAG}"
+  - "${_AR}/matting-gpu:${_MATTING_TAG}"
 options:
   machineType: E2_HIGHCPU_8
   logging: CLOUD_LOGGING_ONLY

@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 # Runtime check of the deployed matting services, run as the Cloud Run job catalog-check-matting.
+# M6-F2-R7 (M6-S5): PROBE_JOB=catalog-check-<name> runs it as another job of the same kind (the deploy gate gives each
+# matting service its own, so probes that run at once never share a job; services.sh probe_job_name).
 #   bash infra/check-matting.sh
 #       checks the CPU and GPU services the worker uses (OIDC, /health, /convert, /matte).
 #   bash infra/check-matting.sh --probe <url> [--models a,b] [--concurrency n] [--rounds k] [--run name]
@@ -27,6 +29,9 @@
 set -euo pipefail
 export CLOUDSDK_CORE_PROJECT=image-links-agent
 cd "$(dirname "$0")/.."
+PROBE_JOB=${PROBE_JOB:-catalog-check-matting}
+[[ "$PROBE_JOB" =~ ^catalog-check-[a-z0-9-]+$ ]] || { echo "ERROR: PROBE_JOB must look like catalog-check-<name>, got '$PROBE_JOB'" >&2; exit 2; }
+export PROBE_JOB
 # The probe's arguments for the job's --args. gcloud treats --args as a set: it refuses any item that appears twice,
 # also in a --flags-file list (UpdateAction in googlecloudsdk/calliope/arg_parsers.py), so "--concurrency 1 --rounds 1"
 # failed the deploy gate on 2026-10-28 with '"1" cannot be specified multiple times'. Each option therefore travels
@@ -146,9 +151,9 @@ const flags = {
   // 1Gi, not 512Mi: on 2026-10-30 the upscale probe was OOM-killed comparing two 6400x6400 x4 outputs. The comparison
   // now peaks at about 7 bytes per pixel (cloudrun_check.py pixel_difference: 371 MiB measured with the interpreter),
   // but the bodies of each distinct output of a size stay in memory too, and --sizes may ask for larger images.
-  '--cpu': '1', '--memory': '1Gi', '--set-env-vars': variables, '--clear-secrets': true, '--labels': { app: 'catalog', component: 'catalog-check-matting', env: 'test' },
+  '--cpu': '1', '--memory': '1Gi', '--set-env-vars': variables, '--clear-secrets': true, '--labels': { app: 'catalog', component: process.env.PROBE_JOB, env: 'test' },
 };
 fs.writeFileSync(path.join(dir, 'flags.json'), JSON.stringify(flags));
 NODE
-gcloud run jobs deploy catalog-check-matting --quiet --flags-file="$(native_path "$TEMP_DIR/flags.json")"
-gcloud run jobs execute catalog-check-matting --region=asia-south1 --wait
+gcloud run jobs deploy "$PROBE_JOB" --quiet --flags-file="$(native_path "$TEMP_DIR/flags.json")"
+gcloud run jobs execute "$PROBE_JOB" --region=asia-south1 --wait
